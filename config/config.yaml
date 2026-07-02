@@ -1,0 +1,34 @@
+daemon:
+  listen_addr: ":8080"
+  data_dir: "/var/lib/homeagent"
+  heartbeat_interval: 15s
+  check_interval: 30s
+  log_level: "info"
+
+defaults:
+  image: "homeagent/agent-base:latest"
+  llm_endpoints:
+    - "https://api.openai.com/v1"
+  snapshot_policy:
+    interval: 10m
+    max_snapshots: 20
+    pre_action: true
+    post_action: false
+  rollback_policy:
+    max_retries: 3
+    health_threshold: 3
+    cooldown_period: 30s
+    auto_rollback: true
+  resource_limit:
+    cpu: "2"
+    memory: "2g"
+    disk: "10g"
+    network: true
+  openclaw_enabled: true
+
+agents:
+  - id: "default"
+    name: "Default Agent"
+    image: "homeagent/agent-base:latest"
+    llm_endpoints:
+      - "https://api.openai.com/v1"
