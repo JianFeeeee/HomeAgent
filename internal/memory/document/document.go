@@ -216,6 +216,18 @@ func (s *Store) RecentDocs(n int) []*Doc {
 	return list
 }
 
+// Remove 从文档存储中删除指定 ID 的文档
+func (s *Store) Remove(id string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	if _, ok := s.docs[id]; ok {
+		delete(s.docs, id)
+		s.vec.Remove(id)
+		s.dirty = true
+	}
+}
+
 // ——— internal ———
 
 func (s *Store) loadAll() error {

@@ -121,16 +121,6 @@ func main() {
 
 	// === IO Abstraction Layer (唯一输入路径) ===
 	iom := agentIO.NewIOManager()
-	iom.RegisterDevice(agentIO.NewMicrophone("mic", 16000, iom))
-	iom.RegisterDevice(agentIO.NewSpeaker("speaker", iom))
-	// mic 输入 → speaker 输出（语音 I/O 配对）
-	iom.RegisterOutputRoute("mic", "speaker")
-	iom.RegisterOutputRoute("voice", "speaker")
-	iom.RegisterDevice(agentIO.NewCamera("camera", iom))
-	iom.RegisterDevice(agentIO.NewRobotArm("arm", iom))
-	iom.RegisterDevice(agentIO.NewGPIODevice("gpio", []int{2, 3, 4, 17}, iom))
-	iom.StartAll()
-	defer iom.StopAll()
 
 	// 插件绑定 IO 管理器 → 插件自动注册为 IO 设备
 	pluginReg.SetIOManager(iom)
@@ -239,8 +229,26 @@ func main() {
 
 	// === Single Agent Core ===
 	agent := agentCore.New(agentCore.AgentConfig{
-		ID:           "main",
-		SystemPrompt: "你是一个智能家庭管家，持续运行。你有以下工具:\n1. memory_recall — 查询图记忆\n2. memory_commit — 写入图记忆\n3. memory_introspect — 查看记忆统计\n4. knowledge_search — 搜索知识库\n5. doc_query — 查询文档记忆\n6. doc_commit — 写入文档记忆\n\n当用户问及个人信息或历史时，调用 memory_recall 工具来查询。当用户告诉了你新的个人信息时，调用 memory_commit 来记住。需要查询知识时使用 knowledge_search。",
+		ID: "main",
+		SystemPrompt: `你是 HomeAgent，一个持续运行的个人管家。
+你的每次回复会自动发送到当前输出通道（默认=输入源），无需额外工具。
+如需切换回复通道，使用 output_set_channel。
+如需异步发送消息或通知，使用 output_send 指定通道和内容。
+使用 output_list_channels 查看可用通道及其能力。
+
+你有以下核心工具:
+1. memory_recall — 查询图记忆（历史/个人信息）
+2. memory_commit — 写入图记忆（记住新信息）
+3. memory_introspect — 查看记忆统计
+4. knowledge_search — 搜索知识库
+5. doc_query — 查询文档记忆
+6. doc_commit — 写入文档记忆
+7. plgreload — 热重载插件
+
+当用户问及个人信息或历史时，调用 memory_recall。
+当用户告诉了你新的个人信息时，调用 memory_commit。
+需要查询知识时使用 knowledge_search。
+回复你的真实想法，用自然语言与用户交流。`,
 		Provider:     provider,
 		IO:           iom,
 		Memory:       memDB,
@@ -264,7 +272,7 @@ func main() {
 	log.Printf("[homed] main agent started, model=%s base=%s", cfg.LLM.Model, cfg.LLM.BaseURL)
 
 	// === HTTP API ===
-	handler := api.NewHandler(sup, memDB, skMgr, luaVM, cfg, iom, textMem, ks)
+	handler := api.NewHandler(sup, memDB, skMgr, luaVM, cfg, iom, textMem, ks, trk)
 
 	mux := http.NewServeMux()
 	handler.RegisterRoutes(mux)
