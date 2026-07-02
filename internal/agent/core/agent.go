@@ -891,6 +891,7 @@ func (a *Agent) reorgGraph() {
 					continue
 				}
 				log.Printf("[agent] doc→graph: %s → %d entities, %d relations", doc.ID, ec, rc)
+				a.docStore.Remove(doc.ID)
 			}
 		}
 	}

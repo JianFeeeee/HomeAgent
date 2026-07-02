@@ -400,7 +400,7 @@ func (g *GraphDB) Purge(criteria map[string]string, mode string) (int, error) {
 	g.mu.Lock()
 	defer g.mu.Unlock()
 
-	conds := []string{"r.status = 'active'"}
+	conds := []string{"status = 'active'"}
 	args := []interface{}{}
 
 	if v, ok := criteria["subject_contains"]; ok {
@@ -416,7 +416,7 @@ func (g *GraphDB) Purge(criteria map[string]string, mode string) (int, error) {
 			ids = append(ids, id)
 		}
 		if len(ids) > 0 {
-			conds = append(conds, fmt.Sprintf("r.source_id IN (%s)", placeholders(len(ids))))
+			conds = append(conds, fmt.Sprintf("source_id IN (%s)", placeholders(len(ids))))
 			args = append(args, ids...)
 		}
 	}
@@ -434,18 +434,18 @@ func (g *GraphDB) Purge(criteria map[string]string, mode string) (int, error) {
 			ids = append(ids, id)
 		}
 		if len(ids) > 0 {
-			conds = append(conds, fmt.Sprintf("r.target_id IN (%s)", placeholders(len(ids))))
+			conds = append(conds, fmt.Sprintf("target_id IN (%s)", placeholders(len(ids))))
 			args = append(args, ids...)
 		}
 	}
 
 	if v, ok := criteria["relation_type"]; ok {
-		conds = append(conds, "r.relation_type = ?")
+		conds = append(conds, "relation_type = ?")
 		args = append(args, v)
 	}
 
 	if v, ok := criteria["session_id"]; ok {
-		conds = append(conds, "r.session_id = ?")
+		conds = append(conds, "session_id = ?")
 		args = append(args, v)
 	}
 

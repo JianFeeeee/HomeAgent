@@ -105,16 +105,19 @@ func (c *Client) reconnect() {
 
 func (c *Client) readLoop() {
 	defer c.connected.Store(false)
-	defer c.mu.Lock()
-	defer c.mu.Unlock()
-	defer func() {
-		if c.conn != nil {
-			c.conn.Close()
-		}
-	}()
 
 	for {
-		_, message, err := c.conn.ReadMessage()
+		c.mu.Lock()
+		conn := c.conn
+		c.mu.Unlock()
+
+		if conn == nil {
+			log.Printf("[onebot] read loop: not connected")
+			go c.reconnect()
+			return
+		}
+
+		_, message, err := conn.ReadMessage()
 		if err != nil {
 			log.Printf("[onebot] read error: %v", err)
 			go c.reconnect()
@@ -125,7 +128,10 @@ func (c *Client) readLoop() {
 		var resp ActionResponse
 		if err := json.Unmarshal(message, &resp); err == nil && resp.Echo != "" {
 			if ch, ok := c.pending.Load(resp.Echo); ok {
-				ch.(chan *ActionResponse) <- &resp
+				select {
+				case ch.(chan *ActionResponse) <- &resp:
+				default:
+				}
 			}
 			continue
 		}
