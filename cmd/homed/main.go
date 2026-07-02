@@ -251,6 +251,8 @@ func main() {
 		DocStore:     docStore,
 		Knowledge:    ks,
 		Personality:  personality,
+		PluginReg:    pluginReg,
+		PluginDir:    filepath.Join(cfg.Daemon.DataDir, "plugins"),
 	})
 	agent.Start()
 	defer agent.Stop()
@@ -292,12 +294,4 @@ func main() {
 	log.Printf("[homed] stopped")
 }
 
-func countIOPlugins(r *plugin.Registry) int {
-	n := 0
-	for _, p := range r.List() {
-		if p.IOConfig() != nil {
-			n++
-		}
-	}
-	return n
-}
+
