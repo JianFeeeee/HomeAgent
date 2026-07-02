@@ -16,6 +16,7 @@ import (
 	"gitcode.com/JianFeeeee/HomeAgent/internal/memory/text"
 	"gitcode.com/JianFeeeee/HomeAgent/internal/skill"
 	"gitcode.com/JianFeeeee/HomeAgent/internal/supervisor"
+	"gitcode.com/JianFeeeee/HomeAgent/internal/tracker"
 	"gitcode.com/JianFeeeee/HomeAgent/pkg/types"
 )
 
@@ -30,9 +31,10 @@ type Handler struct {
 	iom        *agentIO.IOManager
 	textMem    *text.Memory
 	knowledge  *knowledge.Store
+	tracker    *tracker.Tracker
 }
 
-func NewHandler(sup *supervisor.Daemon, mem *memory.GraphDB, sk *skill.Manager, lua *luaVM.VM, cfg *types.Config, iom *agentIO.IOManager, tm *text.Memory, ks *knowledge.Store) *Handler {
+func NewHandler(sup *supervisor.Daemon, mem *memory.GraphDB, sk *skill.Manager, lua *luaVM.VM, cfg *types.Config, iom *agentIO.IOManager, tm *text.Memory, ks *knowledge.Store, tr *tracker.Tracker) *Handler {
 	var idx *memory.Indexer
 	if mem != nil {
 		idx = memory.NewIndexer(mem)
@@ -48,6 +50,7 @@ func NewHandler(sup *supervisor.Daemon, mem *memory.GraphDB, sk *skill.Manager, 
 		iom:        iom,
 		textMem:    tm,
 		knowledge:  ks,
+		tracker:    tr,
 	}
 }
 
@@ -67,6 +70,8 @@ func (h *Handler) RegisterRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("/api/v1/knowledge/", h.handleKnowledge)
 	mux.HandleFunc("/api/v1/adapters", h.handleAdapters)
 	mux.HandleFunc("/api/v1/adapters/", h.handleAdapterByID)
+	mux.HandleFunc("/api/v1/tracker", h.handleTracker)
+	mux.HandleFunc("/api/v1/tracker/", h.handleTracker)
 	mux.HandleFunc("/v1/chat/completions", h.handleOpenAICompletions)
 	mux.HandleFunc("/", h.handleStatic)
 }
@@ -179,6 +184,10 @@ func (h *Handler) handleAgentAction(w http.ResponseWriter, r *http.Request, agen
 }
 
 func (h *Handler) handleSkills(w http.ResponseWriter, r *http.Request) {
+	if h.skills == nil {
+		writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "skills not available"})
+		return
+	}
 	switch r.Method {
 	case http.MethodGet:
 		writeJSON(w, http.StatusOK, map[string]interface{}{"skills": h.skills.List()})
@@ -554,6 +563,43 @@ func (h *Handler) handleOpenAICompletions(w http.ResponseWriter, r *http.Request
 
 	w.Header().Set("Content-Type", "application/json; charset=utf-8")
 	json.NewEncoder(w).Encode(resp)
+}
+
+func (h *Handler) handleTracker(w http.ResponseWriter, r *http.Request) {
+	if h.tracker == nil {
+		writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "tracker not available"})
+		return
+	}
+	path := strings.TrimPrefix(r.URL.Path, "/api/v1/tracker")
+	path = strings.TrimPrefix(path, "/")
+
+	switch {
+	case path == "changesets" && r.Method == http.MethodGet:
+		writeJSON(w, http.StatusOK, map[string]interface{}{
+			"changesets": h.tracker.ChangeSets(),
+			"count":      len(h.tracker.ChangeSets()),
+		})
+	case path == "rollback" && r.Method == http.MethodPost:
+		if err := h.tracker.Rollback(); err != nil {
+			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]string{"status": "rollback_complete"})
+	case path == "" && r.Method == http.MethodGet:
+		writeJSON(w, http.StatusOK, map[string]interface{}{
+			"stats":       h.tracker.Stats(),
+			"has_changes": h.tracker.HasChanges(),
+			"changesets":  len(h.tracker.ChangeSets()),
+		})
+	case path == "" && r.Method == http.MethodDelete:
+		if err := h.tracker.Rollback(); err != nil {
+			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]string{"status": "cleared"})
+	default:
+		http.Error(w, "not found", http.StatusNotFound)
+	}
 }
 
 func (h *Handler) handleStatic(w http.ResponseWriter, r *http.Request) {

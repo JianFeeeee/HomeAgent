@@ -198,18 +198,9 @@ func (r *Registry) Register(p Plugin) {
 			return // 纯技能插件，无 IO 通道
 		}
 
-		// 自动注册输出路由
 		if cfg := p.IOConfig(); cfg != nil {
 			log.Printf("[plugin] io device %s active (type=%s, caps=%v)",
 				p.Name(), cfg.Type, cfg.OutputCaps)
-			if cfg.InputRoute != "" {
-				outputRoute := cfg.OutputRoute
-				if outputRoute == "" {
-					outputRoute = cfg.InputRoute
-				}
-				r.ioMgr.RegisterOutputRoute(cfg.InputRoute, outputRoute)
-				log.Printf("[plugin] route: %s → %s", cfg.InputRoute, outputRoute)
-			}
 		}
 	}
 }
@@ -300,7 +291,6 @@ func (r *Registry) Reload(dir string) (string, error) {
 
 	// 2. 启动新设备的 IO 通道
 	newDevices := make(map[string]agentIO.Device)
-	newRoutes := make(map[string]string)
 	for _, lp := range loaded {
 		if lp.err != nil {
 			log.Printf("[plugin] skip %s: %v", lp.name, lp.err)
@@ -313,15 +303,6 @@ func (r *Registry) Reload(dir string) (string, error) {
 		if dev != nil {
 			dev.Start() // 新设备预先启动
 			newDevices[lp.name] = dev
-			if cfg := lp.p.IOConfig(); cfg != nil {
-				if cfg.InputRoute != "" {
-					out := cfg.OutputRoute
-					if out == "" {
-						out = cfg.InputRoute
-					}
-					newRoutes[cfg.InputRoute] = out
-				}
-			}
 		}
 	}
 
@@ -330,7 +311,7 @@ func (r *Registry) Reload(dir string) (string, error) {
 	var oldPlugins map[string]Plugin
 	if r.ioMgr != nil {
 		// 获取旧设备并原子替换
-		oldDevices := r.ioMgr.AtomicSwapDevices(newDevices, newRoutes)
+		oldDevices := r.ioMgr.AtomicSwapDevices(newDevices)
 		// 停止旧设备
 		for _, dev := range oldDevices {
 			go dev.Stop()
@@ -672,14 +653,8 @@ func (d *PluginDevice) Description() string       { return d.plugin.Description(
 
 func (d *PluginDevice) Tools() []agentIO.ToolDef {
 	pts := d.plugin.Tools()
-	defs := make([]agentIO.ToolDef, 0, len(pts))
-	for _, t := range pts {
-		defs = append(defs, agentIO.ToolDef{
-			Name:        t.Name,
-			Description: t.Description,
-			Parameters:  t.Parameters,
-		})
-	}
+	defs := make([]agentIO.ToolDef, len(pts))
+	copy(defs, pts)
 	return defs
 }
 
@@ -713,10 +688,21 @@ func extractDescription(content string) string {
 // extractField finds `field: value` pattern in content
 func extractField(content string, field string) string {
 	prefix := field + ":"
+	lowerPrefix := toLower(prefix)
 	for _, line := range splitLines(content) {
 		trimmed := trimSpace(line)
-		if hasPrefix(toLower(trimmed), prefix) {
-			return trimSpace(trimPrefix(trimmed, prefix))
+		if hasPrefix(toLower(trimmed), lowerPrefix) {
+			// 找到冒号位置，提取冒号后的内容
+			colonIdx := -1
+			for i := 0; i < len(trimmed); i++ {
+				if trimmed[i] == ':' {
+					colonIdx = i
+					break
+				}
+			}
+			if colonIdx >= 0 {
+				return trimSpace(trimmed[colonIdx+1:])
+			}
 		}
 	}
 	return ""

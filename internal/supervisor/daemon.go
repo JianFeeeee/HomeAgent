@@ -65,8 +65,8 @@ func (d *Daemon) Shutdown() {
 	log.Println("[homed] shutting down...")
 	d.cancel()
 
-	d.mu.RLock()
-	defer d.mu.RUnlock()
+	d.mu.Lock()
+	defer d.mu.Unlock()
 
 	for id, agent := range d.agents {
 		if agent.state == types.AgentStateRunning {

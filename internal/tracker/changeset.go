@@ -90,6 +90,9 @@ func captureFSState(root string) (*FSState, error) {
 
 func diffStates(before, after *FSState) []FileChange {
 	var changes []FileChange
+	if before == nil || after == nil {
+		return changes
+	}
 	seen := make(map[string]bool)
 
 	for path, afterFile := range after.Files {

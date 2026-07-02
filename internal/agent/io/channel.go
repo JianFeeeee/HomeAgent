@@ -2,6 +2,7 @@ package io
 
 import (
 	"fmt"
+	"log"
 	"sync"
 	"time"
 )
@@ -88,12 +89,11 @@ type OutputEvent struct {
 }
 
 type IOManager struct {
-	mu           sync.RWMutex
-	devices      map[string]Device
-	inputCh      chan *InputEvent
-	outputCh     chan *OutputEvent
-	nextReqID    int64
-	routes       map[string]string // 输入源 → 默认输出通道 e.g. "mic" → "speaker"
+	mu        sync.RWMutex
+	devices   map[string]Device
+	inputCh   chan *InputEvent
+	outputCh  chan *OutputEvent
+	nextReqID int64
 }
 
 func NewIOManager() *IOManager {
@@ -101,26 +101,13 @@ func NewIOManager() *IOManager {
 		devices:  make(map[string]Device),
 		inputCh:  make(chan *InputEvent, 256),
 		outputCh: make(chan *OutputEvent, 256),
-		routes:   make(map[string]string),
 	}
 }
 
-// RegisterOutputRoute 注册输入源 → 默认输出通道映射
-// 例如：mic → speaker，voice_input → speaker
-func (m *IOManager) RegisterOutputRoute(inputSource, outputChannel string) {
+func (m *IOManager) UnregisterDevice(name string) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	m.routes[inputSource] = outputChannel
-}
-
-// DefaultOutput 返回输入源的默认输出通道
-func (m *IOManager) DefaultOutput(source string) string {
-	m.mu.RLock()
-	defer m.mu.RUnlock()
-	if ch, ok := m.routes[source]; ok {
-		return ch
-	}
-	return source // 默认等于输入源
+	delete(m.devices, name)
 }
 
 func (m *IOManager) nextRequestID() string {
@@ -130,29 +117,16 @@ func (m *IOManager) nextRequestID() string {
 	return fmt.Sprintf("req_%d_%d", time.Now().UnixNano(), m.nextReqID)
 }
 
-func (m *IOManager) UnregisterDevice(name string) {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	delete(m.devices, name)
-	for src, dst := range m.routes {
-		if src == name || dst == name {
-			delete(m.routes, src)
-		}
-	}
-}
-
-// AtomicSwapDevices 原子化替换全部 IO 设备与路由表
+// AtomicSwapDevices 原子化替换全部 IO 设备
 // 1. 新设备必须在调用前已完成 Start()
-// 2. 调用后旧设备立即从路由表中摘除，新请求走向新设备
+// 2. 调用后旧设备立即摘除，新请求走向新设备
 // 3. 返回旧设备列表，由调用方负责 Stop()
-func (m *IOManager) AtomicSwapDevices(newDevices map[string]Device, newRoutes map[string]string) map[string]Device {
+func (m *IOManager) AtomicSwapDevices(newDevices map[string]Device) map[string]Device {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
 	oldDevices := m.devices
 	m.devices = newDevices
-
-	m.routes = newRoutes
 
 	return oldDevices
 }
@@ -169,10 +143,15 @@ func (m *IOManager) RegisterDevice(dev Device) error {
 
 func (m *IOManager) StartAll() error {
 	m.mu.RLock()
-	defer m.mu.RUnlock()
-	for name, dev := range m.devices {
+	devices := make([]Device, 0, len(m.devices))
+	for _, dev := range m.devices {
+		devices = append(devices, dev)
+	}
+	m.mu.RUnlock()
+
+	for _, dev := range devices {
 		if err := dev.Start(); err != nil {
-			return fmt.Errorf("start device %s: %w", name, err)
+			return fmt.Errorf("start device %s: %w", dev.Name(), err)
 		}
 	}
 	return nil
@@ -180,9 +159,16 @@ func (m *IOManager) StartAll() error {
 
 func (m *IOManager) StopAll() {
 	m.mu.RLock()
-	defer m.mu.RUnlock()
+	devices := make([]Device, 0, len(m.devices))
 	for _, dev := range m.devices {
-		dev.Stop()
+		devices = append(devices, dev)
+	}
+	m.mu.RUnlock()
+
+	for _, dev := range devices {
+		if err := dev.Stop(); err != nil {
+			log.Printf("[io] stop device %s error: %v", dev.Name(), err)
+		}
 	}
 }
 
@@ -192,7 +178,7 @@ func (m *IOManager) InjectInput(source string, eventType string, payload map[str
 		Source:        source,
 		Type:          eventType,
 		Payload:       payload,
-		OutputChannel: m.DefaultOutput(source),
+		OutputChannel: source,
 	}
 }
 
@@ -204,7 +190,32 @@ func (m *IOManager) InjectInputSync(source string, eventType string, payload map
 		Type:          eventType,
 		Payload:       payload,
 		ResponseCh:    ch,
-		OutputChannel: m.DefaultOutput(source),
+		OutputChannel: source,
+	}
+	return <-ch
+}
+
+// InjectInputTo 注入输入事件并指定输出通道
+func (m *IOManager) InjectInputTo(source, outputChannel, eventType string, payload map[string]interface{}) {
+	m.inputCh <- &InputEvent{
+		RequestID:     m.nextRequestID(),
+		Source:        source,
+		Type:          eventType,
+		Payload:       payload,
+		OutputChannel: outputChannel,
+	}
+}
+
+// InjectInputSyncTo 注入输入事件（同步等待）并指定输出通道
+func (m *IOManager) InjectInputSyncTo(source, outputChannel, eventType string, payload map[string]interface{}) *OutputEvent {
+	ch := make(chan *OutputEvent, 1)
+	m.inputCh <- &InputEvent{
+		RequestID:     m.nextRequestID(),
+		Source:        source,
+		Type:          eventType,
+		Payload:       payload,
+		ResponseCh:    ch,
+		OutputChannel: outputChannel,
 	}
 	return <-ch
 }
@@ -217,6 +228,20 @@ func (m *IOManager) InjectText(source string, text string) {
 
 func (m *IOManager) InjectTextSync(source string, text string) *OutputEvent {
 	return m.InjectInputSync(source, "text", map[string]interface{}{
+		"content": text,
+	})
+}
+
+// InjectTextTo 注入文本输入并指定输出通道
+func (m *IOManager) InjectTextTo(source, outputChannel, text string) {
+	m.InjectInputTo(source, outputChannel, "text", map[string]interface{}{
+		"content": text,
+	})
+}
+
+// InjectTextSyncTo 注入文本输入（同步等待）并指定输出通道
+func (m *IOManager) InjectTextSyncTo(source, outputChannel, text string) *OutputEvent {
+	return m.InjectInputSyncTo(source, outputChannel, "text", map[string]interface{}{
 		"content": text,
 	})
 }
@@ -271,15 +296,25 @@ func (m *IOManager) GetAllTools() []ToolDef {
 
 func (m *IOManager) ExecuteTool(name string, args map[string]interface{}) (interface{}, error) {
 	m.mu.RLock()
-	defer m.mu.RUnlock()
+	type nameDevice struct {
+		name string
+		dev  Device
+	}
+	var candidates []nameDevice
 	for _, dev := range m.devices {
 		for _, t := range dev.Tools() {
 			if t.Name == name {
-				return dev.Execute(name, args)
+				candidates = append(candidates, nameDevice{name: dev.Name(), dev: dev})
+				break
 			}
 		}
 	}
-	return nil, fmt.Errorf("tool %s not found", name)
+	m.mu.RUnlock()
+
+	if len(candidates) == 0 {
+		return nil, fmt.Errorf("tool %s not found", name)
+	}
+	return candidates[0].dev.Execute(name, args)
 }
 
 func (m *IOManager) ListDevices() []Device {

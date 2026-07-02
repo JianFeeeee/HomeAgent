@@ -189,9 +189,7 @@ func (d *Device) handleEvent(evt *Event) {
 			payload["label"] = fmt.Sprintf("private:%d", evt.UserID)
 		}
 
-		d.iom.InjectText(source, text)
-		// 同时注册输出路由：QQ 消息默认回复到 QQ 通道
-		d.iom.RegisterOutputRoute(source, d.name)
+		d.iom.InjectTextTo(source, d.name, text)
 
 	case "notice":
 		log.Printf("[onebot] notice from %s: type=%s", d.name, evt.NoticeType)
