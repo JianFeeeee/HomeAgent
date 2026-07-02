@@ -49,6 +49,7 @@ type Agent struct {
 
 	// 插件注册表（用于 plgreload）
 	pluginReg *plugin.Registry
+	pluginDir string
 
 	// 定期心跳蒸馏
 	distillInterval time.Duration
@@ -108,6 +109,7 @@ func New(cfg AgentConfig) *Agent {
 		knowledge:       cfg.Knowledge,
 		personality:     cfg.Personality,
 		pluginReg:       cfg.PluginReg,
+		pluginDir:       cfg.PluginDir,
 		distillInterval:  cfg.DistillInterval,
 		maxContextSize:   cfg.MaxContextSize,
 	}
@@ -318,6 +320,8 @@ func (a *Agent) executeToolCall(tc agentAPI.ToolCall) string {
 		return a.executeOutputSendTool(tc)
 	case tc.Name == "output_list_channels":
 		return a.executeOutputListChannels()
+	case tc.Name == "plgreload":
+		return a.executePluginReload()
 	}
 
 	if a.tracker != nil {
@@ -690,6 +694,21 @@ func (a *Agent) buildToolDefs() []interface{} {
 		})
 	}
 
+	// 插件重载工具
+	if a.pluginReg != nil && a.pluginDir != "" {
+		tools = append(tools, map[string]interface{}{
+			"type": "function",
+			"function": map[string]interface{}{
+				"name":        "plgreload",
+				"description": "重载 plugins/ 目录的所有插件。扫描目录变更，原子化替换 IO 设备。",
+				"parameters": map[string]interface{}{
+					"type":       "object",
+					"properties": map[string]interface{}{},
+				},
+			},
+		})
+	}
+
 	// 输出通道工具
 	tools = append(tools, map[string]interface{}{
 		"type": "function",
@@ -1043,6 +1062,18 @@ func getString(m map[string]interface{}, key string) string {
 		}
 	}
 	return ""
+}
+
+// executePluginReload — 重载所有插件（原子替换 IO 设备）
+func (a *Agent) executePluginReload() string {
+	if a.pluginReg == nil {
+		return "插件系统未启用"
+	}
+	msg, err := a.pluginReg.Reload(a.pluginDir)
+	if err != nil {
+		return fmt.Sprintf("插件重载失败: %v", err)
+	}
+	return msg
 }
 
 func getFloat(m map[string]interface{}, key string) float64 {
