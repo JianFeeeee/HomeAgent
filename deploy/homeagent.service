@@ -1,0 +1,33 @@
+[Unit]
+Description=HomeAgent - Personal AI Home Assistant
+Documentation=https://github.com/trueagent/HomeAgent
+After=network-online.target docker.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStart=/usr/local/bin/homed -config /etc/homeagent/config.yaml -data /var/lib/homeagent
+Restart=always
+RestartSec=10
+StartLimitBurst=3
+StartLimitInterval=60s
+
+# Security hardening
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+PrivateDevices=false
+DevicePolicy=closed
+# Audio devices
+DeviceAllow=/dev/snd rw
+DeviceAllow=/dev/dsp rw
+
+# Resource limits
+LimitNOFILE=65536
+LimitNPROC=256
+MemoryMax=2G
+CPUQuota=100%
+
+[Install]
+WantedBy=multi-user.target
