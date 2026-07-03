@@ -72,6 +72,12 @@ type ToolDef struct {
 	Parameters  map[string]interface{} `json:"parameters"`
 }
 
+type SettingsAPI interface {
+	Get(key string) (interface{}, error)
+	Set(key string, value interface{}) error
+	List(prefix string) ([]string, error)
+}
+
 type MemoryAPI interface {
 	Recall(query string, topK int) ([]MemItem, error)
 	Commit(triples []map[string]string) error
@@ -98,6 +104,7 @@ type PluginAPI struct {
 	eventBus EventBus
 	memAPI   MemoryAPI
 	knowAPI  KnowledgeAPI
+	settAPI  SettingsAPI
 }
 
 func NewPluginAPI(name, version string, bus EventBus, mem MemoryAPI, know KnowledgeAPI) *PluginAPI {
@@ -153,8 +160,10 @@ func (p *PluginAPI) StageHandlers(stage Stage) []StageHandler {
 	return p.stages[stage]
 }
 
-func (p *PluginAPI) Memory() MemoryAPI    { return p.memAPI }
+func (p *PluginAPI) Memory() MemoryAPI       { return p.memAPI }
 func (p *PluginAPI) Knowledge() KnowledgeAPI { return p.knowAPI }
+func (p *PluginAPI) Settings() SettingsAPI   { return p.settAPI }
+func (p *PluginAPI) SetSettings(s SettingsAPI) { p.settAPI = s }
 
 func AllStages() map[Stage]bool {
 	return map[Stage]bool{
