@@ -2,6 +2,7 @@ package lua
 
 import (
 	"embed"
+	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -53,9 +54,27 @@ func (v *VM) Start() error {
 		return 0
 	}))
 
-	v.state.SetGlobal("json_encode", v.state.NewFunction(func(L *lua.LState) int {
+	jsonTable := v.state.NewTable()
+	v.state.SetGlobal("json", jsonTable)
+	v.state.SetField(jsonTable, "encode", v.state.NewFunction(func(L *lua.LState) int {
 		val := L.CheckAny(1)
-		L.Push(lua.LString(fmt.Sprintf("%v", val)))
+		goVal := luaValueToGo(val)
+		b, err := json.Marshal(goVal)
+		if err != nil {
+			L.Push(lua.LString("null"))
+			return 1
+		}
+		L.Push(lua.LString(string(b)))
+		return 1
+	}))
+	v.state.SetField(jsonTable, "decode", v.state.NewFunction(func(L *lua.LState) int {
+		str := L.CheckString(1)
+		var val interface{}
+		if err := json.Unmarshal([]byte(str), &val); err != nil {
+			L.Push(lua.LNil)
+			return 1
+		}
+		L.Push(goValueToLua(L, val))
 		return 1
 	}))
 
@@ -143,13 +162,13 @@ func (v *VM) LoadAdapter(path string) error {
 	return nil
 }
 
-func (v *VM) CallTransform(name string, input map[string]interface{}) (map[string]interface{}, error) {
+func (v *VM) CallTransformRequest(name, rawJSON string) (string, error) {
 	v.mu.Lock()
 	adapter, ok := v.loaded[name]
 	v.mu.Unlock()
 
 	if !ok {
-		return nil, fmt.Errorf("adapter %s not loaded", name)
+		return "", fmt.Errorf("adapter %s not loaded", name)
 	}
 
 	v.mu.Lock()
@@ -157,35 +176,29 @@ func (v *VM) CallTransform(name string, input map[string]interface{}) (map[strin
 
 	fn := adapter.RawGetString("transform_request")
 	if fn == nil {
-		return nil, fmt.Errorf("adapter %s missing transform_request", name)
+		return "", fmt.Errorf("adapter %s missing transform_request", name)
 	}
 
-	inputTable := mapToTable(v.state, input)
 	v.state.Push(fn)
-	v.state.Push(inputTable)
+	v.state.Push(lua.LString(rawJSON))
 
 	if err := v.state.PCall(1, 1, nil); err != nil {
-		return nil, fmt.Errorf("transform_request: %w", err)
+		return "", fmt.Errorf("transform_request: %w", err)
 	}
 
 	result := v.state.Get(-1)
 	v.state.Pop(1)
 
-	resultTable, ok := result.(*lua.LTable)
-	if !ok {
-		return nil, fmt.Errorf("transform_request must return a table")
-	}
-
-	return tableToMap(resultTable), nil
+	return result.String(), nil
 }
 
-func (v *VM) CallResponseTransform(name string, raw []byte) ([]byte, error) {
+func (v *VM) CallTransformResponse(name, rawJSON string) (string, error) {
 	v.mu.Lock()
 	adapter, ok := v.loaded[name]
 	v.mu.Unlock()
 
 	if !ok {
-		return raw, nil
+		return rawJSON, nil
 	}
 
 	v.mu.Lock()
@@ -193,20 +206,94 @@ func (v *VM) CallResponseTransform(name string, raw []byte) ([]byte, error) {
 
 	fn := adapter.RawGetString("transform_response")
 	if fn == nil {
-		return raw, nil
+		return rawJSON, nil
 	}
 
 	v.state.Push(fn)
-	v.state.Push(lua.LString(string(raw)))
+	v.state.Push(lua.LString(rawJSON))
 
 	if err := v.state.PCall(1, 1, nil); err != nil {
-		return nil, fmt.Errorf("transform_response: %w", err)
+		return "", fmt.Errorf("transform_response: %w", err)
 	}
 
 	result := v.state.Get(-1)
 	v.state.Pop(1)
 
-	return []byte(result.String()), nil
+	return result.String(), nil
+}
+
+func (v *VM) CallTransformStreamChunk(name, rawLine string) (string, error) {
+	v.mu.Lock()
+	adapter, ok := v.loaded[name]
+	v.mu.Unlock()
+
+	if !ok {
+		return rawLine, nil
+	}
+
+	v.mu.Lock()
+	defer v.mu.Unlock()
+
+	fn := adapter.RawGetString("transform_stream_chunk")
+	if fn == nil {
+		return rawLine, nil
+	}
+
+	v.state.Push(fn)
+	v.state.Push(lua.LString(rawLine))
+
+	if err := v.state.PCall(1, 1, nil); err != nil {
+		return "", fmt.Errorf("transform_stream_chunk: %w", err)
+	}
+
+	result := v.state.Get(-1)
+	v.state.Pop(1)
+
+	if result.String() == "" {
+		return "", nil
+	}
+	return result.String(), nil
+}
+
+func (v *VM) GetAdapterEndpoint(name string) string {
+	v.mu.Lock()
+	adapter, ok := v.loaded[name]
+	v.mu.Unlock()
+
+	if !ok {
+		return ""
+	}
+
+	v.mu.Lock()
+	defer v.mu.Unlock()
+
+	if ep := adapter.RawGetString("endpoint"); ep != nil {
+		return ep.String()
+	}
+	return ""
+}
+
+func (v *VM) GetAdapterHeaders(name string) map[string]string {
+	v.mu.Lock()
+	adapter, ok := v.loaded[name]
+	v.mu.Unlock()
+
+	if !ok {
+		return nil
+	}
+
+	v.mu.Lock()
+	defer v.mu.Unlock()
+
+	headers := make(map[string]string)
+	if ht := adapter.RawGetString("headers"); ht != nil {
+		if tbl, ok := ht.(*lua.LTable); ok {
+			tbl.ForEach(func(key, val lua.LValue) {
+				headers[key.String()] = val.String()
+			})
+		}
+	}
+	return headers
 }
 
 func (v *VM) ListAdapters() []APIAdapter {
@@ -237,35 +324,61 @@ func (v *VM) ReloadAll() error {
 	return v.Start()
 }
 
-func mapToTable(L *lua.LState, m map[string]interface{}) *lua.LTable {
-	tbl := L.NewTable()
-	for k, v := range m {
-		switch val := v.(type) {
-		case string:
-			tbl.RawSetString(k, lua.LString(val))
-		case float64:
-			tbl.RawSetString(k, lua.LNumber(val))
-		case int:
-			tbl.RawSetString(k, lua.LNumber(val))
-		case bool:
-			tbl.RawSetString(k, lua.LBool(val))
-		case map[string]interface{}:
-			tbl.RawSetString(k, mapToTable(L, val))
-		case []interface{}:
-			arr := L.NewTable()
-			for i, item := range val {
-				if m, ok := item.(map[string]interface{}); ok {
-					arr.RawSetInt(i+1, mapToTable(L, m))
-				} else {
-					arr.RawSetInt(i+1, lua.LString(fmt.Sprintf("%v", item)))
-				}
-			}
-			tbl.RawSetString(k, arr)
-		default:
-			tbl.RawSetString(k, lua.LString(fmt.Sprintf("%v", v)))
+func luaValueToGo(lv lua.LValue) interface{} {
+	switch v := lv.(type) {
+	case lua.LString:
+		return string(v)
+	case lua.LNumber:
+		return float64(v)
+	case lua.LBool:
+		return bool(v)
+	case *lua.LTable:
+		if v.MaxN() > 0 {
+			arr := make([]interface{}, 0, v.MaxN())
+			v.ForEach(func(_, val lua.LValue) {
+				arr = append(arr, luaValueToGo(val))
+			})
+			return arr
 		}
+		m := make(map[string]interface{})
+		v.ForEach(func(key, val lua.LValue) {
+			m[key.String()] = luaValueToGo(val)
+		})
+		return m
+	default:
+		return nil
 	}
-	return tbl
+}
+
+func goValueToLua(L *lua.LState, val interface{}) lua.LValue {
+	switch v := val.(type) {
+	case string:
+		return lua.LString(v)
+	case float64:
+		return lua.LNumber(v)
+	case int:
+		return lua.LNumber(v)
+	case int64:
+		return lua.LNumber(v)
+	case bool:
+		return lua.LBool(v)
+	case nil:
+		return lua.LNil
+	case []interface{}:
+		tbl := L.NewTable()
+		for i, item := range v {
+			tbl.RawSetInt(i+1, goValueToLua(L, item))
+		}
+		return tbl
+	case map[string]interface{}:
+		tbl := L.NewTable()
+		for k, item := range v {
+			tbl.RawSetString(k, goValueToLua(L, item))
+		}
+		return tbl
+	default:
+		return lua.LNil
+	}
 }
 
 func (v *VM) writeBundledAdapters() error {
@@ -296,32 +409,4 @@ func (v *VM) writeBundledAdapters() error {
 	return nil
 }
 
-func tableToMap(tbl *lua.LTable) map[string]interface{} {
-	result := make(map[string]interface{})
-	tbl.ForEach(func(key lua.LValue, val lua.LValue) {
-		k := key.String()
-		switch v := val.(type) {
-		case lua.LString:
-			result[k] = string(v)
-		case lua.LNumber:
-			result[k] = float64(v)
-		case lua.LBool:
-			result[k] = bool(v)
-		case *lua.LTable:
-			if v.MaxN() == 0 {
-				result[k] = tableToMap(v)
-			} else {
-				var arr []interface{}
-				v.ForEach(func(_, item lua.LValue) {
-					if tbl, ok := item.(*lua.LTable); ok {
-						arr = append(arr, tableToMap(tbl))
-					} else {
-						arr = append(arr, item.String())
-					}
-				})
-				result[k] = arr
-			}
-		}
-	})
-	return result
-}
+
