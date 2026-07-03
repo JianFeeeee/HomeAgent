@@ -558,10 +558,22 @@ func (h *Handler) handleChatEvents(w http.ResponseWriter, r *http.Request) {
 	ticker := time.NewTicker(15 * time.Second)
 	defer ticker.Stop()
 
+	writeCh := make(chan string, 64)
+	defer close(writeCh)
+
+	go func() {
+		for line := range writeCh {
+			fmt.Fprintf(w, "%s\n", line)
+			flusher.Flush()
+		}
+	}()
+
 	unsub := h.eventBus.Subscribe(events.EventAll, func(evt *events.Event) {
 		data, _ := json.Marshal(evt)
-		fmt.Fprintf(w, "event: %s\ndata: %s\n\n", evt.Type, data)
-		flusher.Flush()
+		select {
+		case writeCh <- fmt.Sprintf("event: %s\ndata: %s", evt.Type, string(data)):
+		default:
+		}
 	})
 	defer unsub()
 
@@ -570,8 +582,10 @@ func (h *Handler) handleChatEvents(w http.ResponseWriter, r *http.Request) {
 		case <-done:
 			return
 		case <-ticker.C:
-			fmt.Fprintf(w, ": heartbeat\n\n")
-			flusher.Flush()
+			select {
+			case writeCh <- ": heartbeat":
+			default:
+			}
 		}
 	}
 }
@@ -693,8 +707,8 @@ func (h *Handler) handleOpenAICompletions(w http.ResponseWriter, r *http.Request
 		},
 		"usage": map[string]interface{}{
 			"prompt_tokens":     len(lastMsg.Content) / 2,
-			"completion_tokens": len(response.Payload["content"].(string)) / 2,
-			"total_tokens":      (len(lastMsg.Content) + len(response.Payload["content"].(string))) / 2,
+			"completion_tokens": len(fmt.Sprint(response.Payload["content"])) / 2,
+			"total_tokens":      (len(lastMsg.Content) + len(fmt.Sprint(response.Payload["content"]))) / 2,
 		},
 	}
 

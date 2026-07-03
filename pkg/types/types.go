@@ -94,23 +94,25 @@ type OperationLog struct {
 }
 
 type LLMSource struct {
-	Name        string `json:"name"`
-	BaseURL     string `json:"base_url"`
-	Model       string `json:"model"`
-	APIKey      string `json:"api_key,omitempty"`
-	Adapter     string `json:"adapter"`
-	AdapterPath string `json:"adapter_path,omitempty"`
+	Name            string `json:"name"`
+	BaseURL         string `json:"base_url"`
+	Model           string `json:"model"`
+	APIKey          string `json:"api_key,omitempty"`
+	Adapter         string `json:"adapter"`
+	AdapterPath     string `json:"adapter_path,omitempty"`
+	ThinkingEnabled bool   `json:"thinking_enabled,omitempty"`
 }
 
 type LLMConfig struct {
-	Provider    string      `json:"provider"`
-	Model       string      `json:"model"`
-	BaseURL     string      `json:"base_url"`
-	APIKey      string      `json:"api_key"`
-	Adapter     string      `json:"adapter"`
-	Temperature float64     `json:"temperature"`
-	MaxTokens   int         `json:"max_tokens"`
-	Sources     []LLMSource `json:"sources,omitempty"`
+	Provider        string      `json:"provider"`
+	Model           string      `json:"model"`
+	BaseURL         string      `json:"base_url"`
+	APIKey          string      `json:"api_key"`
+	Adapter         string      `json:"adapter"`
+	Temperature     float64     `json:"temperature"`
+	MaxTokens       int         `json:"max_tokens"`
+	ThinkingEnabled bool        `json:"thinking_enabled"`
+	Sources         []LLMSource `json:"sources,omitempty"`
 }
 
 type Config struct {

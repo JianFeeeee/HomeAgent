@@ -38,8 +38,10 @@ func NewBus() *Bus {
 
 func (b *Bus) Publish(evt *Event) {
 	b.mu.RLock()
-	allHandlers := b.subs[EventAll]
-	typeHandlers := b.subs[evt.Type]
+	allHandlers := make([]Handler, len(b.subs[EventAll]))
+	copy(allHandlers, b.subs[EventAll])
+	typeHandlers := make([]Handler, len(b.subs[evt.Type]))
+	copy(typeHandlers, b.subs[evt.Type])
 	b.mu.RUnlock()
 
 	for _, h := range allHandlers {

@@ -272,11 +272,11 @@ func (g *GraphDB) Recall(keywords []string, seedEntities []string, depth int, se
 		if err != nil {
 			return nil, err
 		}
-		defer rows.Close()
 
 		for rows.Next() {
 			var e Entity
 			if err := rows.Scan(&e.ID, &e.Name, &e.Type, &e.MentionCount, &e.CreatedAt, &e.UpdatedAt); err != nil {
+				rows.Close()
 				return nil, err
 			}
 			if !entityIDs[e.ID] {
@@ -284,6 +284,7 @@ func (g *GraphDB) Recall(keywords []string, seedEntities []string, depth int, se
 				result.Entities = append(result.Entities, e)
 			}
 		}
+		rows.Close()
 	}
 
 	for _, se := range seedEntities {
@@ -336,7 +337,6 @@ func (g *GraphDB) Recall(keywords []string, seedEntities []string, depth int, se
 		if err != nil {
 			return nil, err
 		}
-		defer relRows.Close()
 
 		newIDs := make(map[int64]bool)
 		for relRows.Next() {
@@ -345,6 +345,7 @@ func (g *GraphDB) Recall(keywords []string, seedEntities []string, depth int, se
 				&rel.SourceName, &rel.TargetName, &rel.RelationType,
 				&rel.Confidence, &rel.Status, &rel.SessionID,
 				&rel.TurnID, &rel.CreatedAt, &rel.DateBucket); err != nil {
+				relRows.Close()
 				return nil, err
 			}
 			result.Relations = append(result.Relations, rel)
@@ -356,6 +357,7 @@ func (g *GraphDB) Recall(keywords []string, seedEntities []string, depth int, se
 				newIDs[rel.TargetID] = true
 			}
 		}
+		relRows.Close()
 
 		if len(newIDs) == 0 {
 			break
@@ -375,11 +377,11 @@ func (g *GraphDB) Recall(keywords []string, seedEntities []string, depth int, se
 		if err != nil {
 			return nil, err
 		}
-		defer eRows.Close()
 
 		for eRows.Next() {
 			var e Entity
 			if err := eRows.Scan(&e.ID, &e.Name, &e.Type, &e.MentionCount, &e.CreatedAt, &e.UpdatedAt); err != nil {
+				eRows.Close()
 				return nil, err
 			}
 			if !entityIDs[e.ID] {
@@ -387,6 +389,7 @@ func (g *GraphDB) Recall(keywords []string, seedEntities []string, depth int, se
 				result.Entities = append(result.Entities, e)
 			}
 		}
+		eRows.Close()
 
 		for id := range newIDs {
 			entityIDs[id] = true
@@ -408,13 +411,13 @@ func (g *GraphDB) Purge(criteria map[string]string, mode string) (int, error) {
 		if err != nil {
 			return 0, err
 		}
-		defer rows.Close()
 		var ids []interface{}
 		for rows.Next() {
 			var id int64
 			rows.Scan(&id)
 			ids = append(ids, id)
 		}
+		rows.Close()
 		if len(ids) > 0 {
 			conds = append(conds, fmt.Sprintf("source_id IN (%s)", placeholders(len(ids))))
 			args = append(args, ids...)
@@ -426,13 +429,13 @@ func (g *GraphDB) Purge(criteria map[string]string, mode string) (int, error) {
 		if err != nil {
 			return 0, err
 		}
-		defer rows.Close()
 		var ids []interface{}
 		for rows.Next() {
 			var id int64
 			rows.Scan(&id)
 			ids = append(ids, id)
 		}
+		rows.Close()
 		if len(ids) > 0 {
 			conds = append(conds, fmt.Sprintf("target_id IN (%s)", placeholders(len(ids))))
 			args = append(args, ids...)

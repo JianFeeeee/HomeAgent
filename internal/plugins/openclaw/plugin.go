@@ -17,7 +17,11 @@ func init() {
 	plugin.RegisterFactory("openclaw", func(name string, config map[string]interface{}) (sdk.Plugin, error) {
 		dir := SkillsDir
 		if dir == "" {
-			dir = filepath.Join(config["data_dir"].(string), "skills")
+			dataDir, ok := config["data_dir"].(string)
+			if !ok {
+				return nil, fmt.Errorf("openclaw plugin: config missing 'data_dir' or not a string")
+			}
+			dir = filepath.Join(dataDir, "skills")
 		}
 		return New(name, dir), nil
 	})

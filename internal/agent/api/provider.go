@@ -265,13 +265,17 @@ func (p *OpenAIProvider) ChatStream(ctx context.Context, req *CompletionRequest)
 			}
 
 			if err := decoder.Decode(&line); err != nil {
-				break
+				return
 			}
 
 			if len(line.Choices) > 0 {
-				ch <- StreamChunk{
+				select {
+				case ch <- StreamChunk{
 					Content: line.Choices[0].Delta.Content,
 					Done:    line.Choices[0].FinishReason != nil,
+				}:
+				case <-ctx.Done():
+					return
 				}
 			}
 		}
@@ -498,9 +502,13 @@ func (p *LuaAdaptedProvider) ChatStream(ctx context.Context, req *CompletionRequ
 					continue
 				}
 				if len(raw.Choices) > 0 {
-					ch <- StreamChunk{
+					select {
+					case ch <- StreamChunk{
 						Content: raw.Choices[0].Delta.Content,
 						Done:    raw.Choices[0].FinishReason != nil,
+					}:
+					case <-ctx.Done():
+						return
 					}
 				}
 				continue
@@ -509,7 +517,11 @@ func (p *LuaAdaptedProvider) ChatStream(ctx context.Context, req *CompletionRequ
 			// Lua 返回了变换后的统一格式
 			var chunk StreamChunk
 			if err := json.Unmarshal([]byte(unified), &chunk); err == nil {
-				ch <- chunk
+				select {
+				case ch <- chunk:
+				case <-ctx.Done():
+					return
+				}
 			}
 		}
 	}()

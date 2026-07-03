@@ -186,25 +186,29 @@ func (r *ConfigRegistry) SeedDefaults(dataDir string) {
 	set("core.llm.provider", "deepseek")
 	set("core.llm.model", "deepseek-v4-flash")
 	set("core.llm.base_url", "https://api.deepseek.com")
+	set("core.llm.api_key", "")
 	set("core.llm.adapter", "deepseek")
 	set("core.llm.temperature", "0.7")
 	set("core.llm.max_tokens", "4096")
+	set("core.llm.thinking_enabled", "false")
 
 	// llm sources
 	sources := map[string]map[string]string{
-		"deepseek": {"base_url": "https://api.deepseek.com", "model": "deepseek-v4-flash", "adapter": "deepseek", "adapter_path": "adapters/deepseek.lua"},
-		"openai":   {"base_url": "https://api.openai.com/v1", "model": "gpt-4o", "adapter": "openai", "adapter_path": "adapters/openai.lua"},
-		"anthropic": {"base_url": "https://api.anthropic.com", "model": "claude-sonnet-4-20250514", "adapter": "anthropic", "adapter_path": "adapters/anthropic.lua"},
-		"gemini":   {"base_url": "https://generativelanguage.googleapis.com", "model": "gemini-2.0-flash", "adapter": "gemini", "adapter_path": "adapters/gemini.lua"},
-		"mistral":  {"base_url": "https://api.mistral.ai", "model": "mistral-large-latest", "adapter": "mistral", "adapter_path": "adapters/mistral.lua"},
-		"groq":     {"base_url": "https://api.groq.com", "model": "llama3-70b-8192", "adapter": "groq", "adapter_path": "adapters/groq.lua"},
-		"github":   {"base_url": "https://models.inference.ai.azure.com", "model": "gpt-4o", "adapter": "github", "adapter_path": "adapters/github.lua"},
-		"ollama":   {"base_url": "http://localhost:11434", "model": "llama3", "adapter": "ollama", "adapter_path": "adapters/ollama.lua"},
+		"deepseek": {"base_url": "https://api.deepseek.com", "model": "deepseek-v4-flash", "api_key": "", "thinking_enabled": "false", "adapter": "deepseek", "adapter_path": "adapters/deepseek.lua"},
+		"openai":   {"base_url": "https://api.openai.com/v1", "model": "gpt-4o", "api_key": "", "thinking_enabled": "false", "adapter": "openai", "adapter_path": "adapters/openai.lua"},
+		"anthropic": {"base_url": "https://api.anthropic.com", "model": "claude-sonnet-4-20250514", "api_key": "", "thinking_enabled": "false", "adapter": "anthropic", "adapter_path": "adapters/anthropic.lua"},
+		"gemini":   {"base_url": "https://generativelanguage.googleapis.com", "model": "gemini-2.0-flash", "api_key": "", "thinking_enabled": "false", "adapter": "gemini", "adapter_path": "adapters/gemini.lua"},
+		"mistral":  {"base_url": "https://api.mistral.ai", "model": "mistral-large-latest", "api_key": "", "thinking_enabled": "false", "adapter": "mistral", "adapter_path": "adapters/mistral.lua"},
+		"groq":     {"base_url": "https://api.groq.com", "model": "llama3-70b-8192", "api_key": "", "thinking_enabled": "false", "adapter": "groq", "adapter_path": "adapters/groq.lua"},
+		"github":   {"base_url": "https://models.inference.ai.azure.com", "model": "gpt-4o", "api_key": "", "thinking_enabled": "false", "adapter": "github", "adapter_path": "adapters/github.lua"},
+		"ollama":   {"base_url": "http://localhost:11434", "model": "llama3", "api_key": "", "thinking_enabled": "false", "adapter": "ollama", "adapter_path": "adapters/ollama.lua"},
 	}
 	for name, props := range sources {
 		p := "core.llm.sources." + name
 		set(p+".base_url", props["base_url"])
 		set(p+".model", props["model"])
+		set(p+".api_key", props["api_key"])
+		set(p+".thinking_enabled", props["thinking_enabled"])
 		set(p+".adapter", props["adapter"])
 		set(p+".adapter_path", props["adapter_path"])
 	}
@@ -345,9 +349,11 @@ func (r *ConfigRegistry) ToConfig() *types.Config {
 	cfg.LLM.Provider = read("core.llm.provider", cfg.LLM.Provider)
 	cfg.LLM.Model = read("core.llm.model", cfg.LLM.Model)
 	cfg.LLM.BaseURL = read("core.llm.base_url", cfg.LLM.BaseURL)
+	cfg.LLM.APIKey = read("core.llm.api_key", cfg.LLM.APIKey)
 	cfg.LLM.Adapter = read("core.llm.adapter", cfg.LLM.Adapter)
 	cfg.LLM.Temperature = float64(readInt("core.llm.temperature", int(cfg.LLM.Temperature*100))) / 100
 	cfg.LLM.MaxTokens = readInt("core.llm.max_tokens", cfg.LLM.MaxTokens)
+	cfg.LLM.ThinkingEnabled = readBool("core.llm.thinking_enabled", cfg.LLM.ThinkingEnabled)
 
 	// 重建 sources —— 从 DB 中按前缀扫描，按名称排序保证确定性
 	sourceNames := make([]string, 0)
@@ -362,11 +368,13 @@ func (r *ConfigRegistry) ToConfig() *types.Config {
 	for _, name := range sourceNames {
 		p := "core.llm.sources." + name
 		cfg.LLM.Sources = append(cfg.LLM.Sources, types.LLMSource{
-			Name:        name,
-			BaseURL:     read(p+".base_url", ""),
-			Model:       read(p+".model", ""),
-			Adapter:     read(p+".adapter", ""),
-			AdapterPath: read(p+".adapter_path", ""),
+			Name:            name,
+			BaseURL:         read(p+".base_url", ""),
+			Model:           read(p+".model", ""),
+			APIKey:          read(p+".api_key", ""),
+			Adapter:         read(p+".adapter", ""),
+			AdapterPath:     read(p+".adapter_path", ""),
+			ThinkingEnabled: readBool(p+".thinking_enabled", false),
 		})
 	}
 
