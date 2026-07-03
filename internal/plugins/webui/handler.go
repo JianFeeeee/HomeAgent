@@ -690,6 +690,15 @@ func (h *Handler) handleOpenAICompletions(w http.ResponseWriter, r *http.Request
 		return
 	}
 
+	content, _ := response.Payload["content"].(string)
+	reasoningContent, _ := response.Payload["reasoning_content"].(string)
+	usage, _ := response.Payload["usage"].(map[string]interface{})
+
+	if req.Stream {
+		h.writeOpenAIStream(w, req.Model, content, reasoningContent, usage)
+		return
+	}
+
 	resp := map[string]interface{}{
 		"id":      fmt.Sprintf("chatcmpl-%d", time.Now().UnixNano()),
 		"object":  "chat.completion",
@@ -700,20 +709,102 @@ func (h *Handler) handleOpenAICompletions(w http.ResponseWriter, r *http.Request
 				"index": 0,
 				"message": map[string]interface{}{
 					"role":    "assistant",
-					"content": response.Payload["content"],
+					"content": content,
 				},
 				"finish_reason": "stop",
 			},
 		},
-		"usage": map[string]interface{}{
-			"prompt_tokens":     len(lastMsg.Content) / 2,
-			"completion_tokens": len(fmt.Sprint(response.Payload["content"])) / 2,
-			"total_tokens":      (len(lastMsg.Content) + len(fmt.Sprint(response.Payload["content"]))) / 2,
-		},
+	}
+	if reasoningContent != "" {
+		resp["choices"].([]map[string]interface{})[0]["message"].(map[string]interface{})["reasoning_content"] = reasoningContent
+	}
+	if usage != nil {
+		resp["usage"] = usage
 	}
 
 	w.Header().Set("Content-Type", "application/json; charset=utf-8")
 	json.NewEncoder(w).Encode(resp)
+}
+
+func (h *Handler) writeOpenAIStream(w http.ResponseWriter, model, content, reasoningContent string, usage map[string]interface{}) {
+	flusher, ok := w.(http.Flusher)
+	if !ok {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "streaming not supported"})
+		return
+	}
+
+	w.Header().Set("Content-Type", "text/event-stream")
+	w.Header().Set("Cache-Control", "no-cache")
+	w.Header().Set("Connection", "keep-alive")
+	w.WriteHeader(http.StatusOK)
+	flusher.Flush()
+
+	// 如果有 reasoning_content，先发送一个 reasoning chunk
+	if reasoningContent != "" {
+		reasoningChunk := map[string]interface{}{
+			"id":      fmt.Sprintf("chatcmpl-%d", time.Now().UnixNano()),
+			"object":  "chat.completion.chunk",
+			"created": time.Now().Unix(),
+			"model":   model,
+			"choices": []map[string]interface{}{
+				{
+					"index": 0,
+					"delta": map[string]interface{}{
+						"content":           "",
+						"reasoning_content": reasoningContent,
+					},
+					"finish_reason": nil,
+				},
+			},
+		}
+		data, _ := json.Marshal(reasoningChunk)
+		fmt.Fprintf(w, "data: %s\n\n", data)
+		flusher.Flush()
+	}
+
+	// content chunk
+	contentChunk := map[string]interface{}{
+		"id":      fmt.Sprintf("chatcmpl-%d", time.Now().UnixNano()),
+		"object":  "chat.completion.chunk",
+		"created": time.Now().Unix(),
+		"model":   model,
+		"choices": []map[string]interface{}{
+			{
+				"index": 0,
+				"delta": map[string]interface{}{
+					"content": content,
+				},
+				"finish_reason": nil,
+			},
+		},
+	}
+	data, _ := json.Marshal(contentChunk)
+	fmt.Fprintf(w, "data: %s\n\n", data)
+	flusher.Flush()
+
+	// finish chunk
+	finishChunk := map[string]interface{}{
+		"id":      fmt.Sprintf("chatcmpl-%d", time.Now().UnixNano()),
+		"object":  "chat.completion.chunk",
+		"created": time.Now().Unix(),
+		"model":   model,
+		"choices": []map[string]interface{}{
+			{
+				"index": 0,
+				"delta": map[string]interface{}{},
+				"finish_reason": "stop",
+			},
+		},
+	}
+	if usage != nil {
+		finishChunk["usage"] = usage
+	}
+	data, _ = json.Marshal(finishChunk)
+	fmt.Fprintf(w, "data: %s\n\n", data)
+	flusher.Flush()
+
+	fmt.Fprintf(w, "data: [DONE]\n\n")
+	flusher.Flush()
 }
 
 func (h *Handler) handleTracker(w http.ResponseWriter, r *http.Request) {
