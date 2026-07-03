@@ -7,6 +7,7 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unicode/utf8"
 
 	agentAPI "gitcode.com/JianFeeeee/HomeAgent/internal/agent/api"
 	agentPkg "gitcode.com/JianFeeeee/HomeAgent/internal/agent"
@@ -89,6 +90,9 @@ type Agent struct {
 	// 进行中的 LLM 请求取消函数，interceptLoop 可调用以在请求中打断
 	cancelLLM context.CancelFunc
 	llmMu     sync.Mutex
+
+	// 模型思考模式（thinking/reasoning）
+	thinkingEnabled bool
 }
 
 type AgentConfig struct {
@@ -115,6 +119,7 @@ type AgentConfig struct {
 	ContextSavePath string           // 上下文持久化路径，空则不持久化
 	StageHost     *StageHost
 	EventBus      *events.Bus
+	ThinkingEnabled bool
 }
 
 func New(cfg AgentConfig) *Agent {
@@ -156,6 +161,7 @@ func New(cfg AgentConfig) *Agent {
 		selfInputCh:      make(chan string, 64),
 		childResults:     make(map[string]string),
 		interceptCh:      make(chan string, 64),
+		thinkingEnabled:  cfg.ThinkingEnabled,
 	}
 }
 
@@ -383,6 +389,10 @@ func (a *Agent) process(input string, stageCtx *sdk.StageContext) (response stri
 	a.mu.Lock()
 	defer a.mu.Unlock()
 
+	if a.provider == nil {
+		return "", nil, fmt.Errorf("agent: no LLM provider configured")
+	}
+
 	memContext := a.buildMemoryContext(input)
 	sysPrompt := a.buildSystemPrompt(memContext, input)
 	tools := a.buildToolDefs()
@@ -418,14 +428,16 @@ func (a *Agent) process(input string, stageCtx *sdk.StageContext) (response stri
 			log.Printf("[agent] interrupt injected before LLM call (turn %d)", turn)
 		}
 
+		eb := map[string]interface{}{}
+		if !a.thinkingEnabled {
+			eb["thinking"] = map[string]interface{}{"type": "disabled"}
+		}
 		req := &agentAPI.CompletionRequest{
 			Messages:   msgs,
 			MaxTokens:  4096,
 			Tools:      tools,
 			ToolChoice: "auto",
-			ExtraBody: map[string]interface{}{
-				"thinking": map[string]interface{}{"type": "disabled"},
-			},
+			ExtraBody:  eb,
 		}
 
 		// 可取消的 LLM 调用：interceptLoop 通过 cancelLLM 打断进行中的请求
@@ -1839,6 +1851,10 @@ func (a *Agent) executeSpawnChild(tc agentAPI.ToolCall) string {
 
 // runChildTask 后台运行子 Agent 任务，完成后将结果存储并通过 selfInputCh 通知主 Agent
 func (a *Agent) runChildTask(taskID, task string) {
+	if a.provider == nil {
+		log.Printf("[child] %s failed: no LLM provider configured", taskID)
+		return
+	}
 	log.Printf("[child] %s started: %s", taskID, truncateStr(task, 80))
 
 	sysPrompt := fmt.Sprintf(`你是 HomeAgent 的子任务助手。
@@ -1871,14 +1887,16 @@ func (a *Agent) runChildTask(taskID, task string) {
 
 	var finalResult string
 	for turn := 0; turn < 5; turn++ {
+		eb := map[string]interface{}{}
+		if !a.thinkingEnabled {
+			eb["thinking"] = map[string]interface{}{"type": "disabled"}
+		}
 		req := &agentAPI.CompletionRequest{
 			Messages:   msgs,
 			MaxTokens:  4096,
 			Tools:      childTools,
 			ToolChoice: "auto",
-			ExtraBody: map[string]interface{}{
-				"thinking": map[string]interface{}{"type": "disabled"},
-			},
+			ExtraBody:  eb,
 		}
 
 		resp, err := a.provider.Chat(a.ctx, req)
@@ -2038,10 +2056,17 @@ func getFloat(m map[string]interface{}, key string) float64 {
 }
 
 func truncateStr(s string, max int) string {
-	if len(s) <= max {
+	if utf8.RuneCountInString(s) <= max {
 		return s
 	}
-	return s[:max] + "..."
+	var truncated int
+	for i := range s {
+		if truncated >= max {
+			return s[:i] + "..."
+		}
+		truncated++
+	}
+	return s
 }
 
 // drainInterrupt 非阻塞读取 interceptCh 中的一条打断消息。

@@ -17,9 +17,10 @@ func init() {
 }
 
 type Plugin struct {
-	name string
-	mu   sync.Mutex
-	wg   sync.WaitGroup
+	name   string
+	mu     sync.Mutex
+	wg     sync.WaitGroup
+	stopCh chan struct{}
 }
 
 type timerTask struct {
@@ -31,7 +32,7 @@ type timerTask struct {
 }
 
 func New(name string) *Plugin {
-	return &Plugin{name: name}
+	return &Plugin{name: name, stopCh: make(chan struct{})}
 }
 
 func (p *Plugin) Name() string { return p.name }
@@ -75,9 +76,13 @@ func (p *Plugin) Start(s *sdk.PluginSDK) error {
 
 		go func() {
 			defer p.wg.Done()
-			time.Sleep(dur)
-			log.Printf("[timer] firing: %s (%s later)", message, dur)
-			s.InjectInterruptText("timer", "timer", fmt.Sprintf("timer: %s", message))
+			select {
+			case <-time.After(dur):
+				log.Printf("[timer] firing: %s (%s later)", message, dur)
+				s.InjectInterruptText("timer", "timer", fmt.Sprintf("timer: %s", message))
+			case <-p.stopCh:
+				log.Printf("[timer] cancelled: %s", message)
+			}
 		}()
 
 		doneAt := time.Now().Add(dur)
@@ -93,6 +98,7 @@ func (p *Plugin) Start(s *sdk.PluginSDK) error {
 }
 
 func (p *Plugin) Stop() error {
+	close(p.stopCh)
 	p.wg.Wait()
 	return nil
 }
