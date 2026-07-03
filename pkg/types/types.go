@@ -46,10 +46,12 @@ type Heartbeat struct {
 }
 
 type NetworkCheckResult struct {
-	LLMAPIReachable   bool   `json:"llm_api_reachable"`
-	DNSResolving      bool   `json:"dns_resolving"`
+	LLMAPIReachable   bool          `json:"llm_api_reachable"`
+	DNSResolving      bool          `json:"dns_resolving"`
+	TCPReachable      bool          `json:"tcp_reachable"`
 	Latency           time.Duration `json:"latency_ms"`
-	Error             string `json:"error,omitempty"`
+	LatencyDegraded   bool          `json:"latency_degraded"`
+	Error             string        `json:"error,omitempty"`
 }
 
 type SnapshotPolicy struct {

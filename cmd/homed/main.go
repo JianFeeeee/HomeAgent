@@ -150,7 +150,10 @@ func main() {
 	// 变更追踪（overlayfs）
 	// ========================================================================
 
-	trk := tracker.NewTracker(cfg.Daemon.DataDir, agentWorkDir)
+	trk := tracker.NewTracker(cfg.Daemon.DataDir, agentWorkDir,
+		tracker.WithKeepChangesets(100),
+		tracker.WithMaxChangesetAge(30*24*time.Hour),
+	)
 	if err := trk.Init(); err != nil {
 		log.Printf("[homed] warning: tracker init: %v", err)
 	} else {
