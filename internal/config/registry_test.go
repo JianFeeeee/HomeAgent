@@ -1,9 +1,11 @@
 package config
 
 import (
-	"os"
 	"path/filepath"
 	"testing"
+	"time"
+
+	"gitcode.com/JianFeeeee/HomeAgent/pkg/types"
 )
 
 func TestRegistryBasic(t *testing.T) {
@@ -33,23 +35,25 @@ func TestRegistryBasic(t *testing.T) {
 
 func TestRegistryPersist(t *testing.T) {
 	dir := t.TempDir()
-	path := filepath.Join(dir, "settings.json")
+	path := filepath.Join(dir, "config.db")
 
 	r := NewConfigRegistry(path)
 	r.Register("core.log_level", "debug")
-	r.Set("plugin.test.key", 42)
+	r.Set("plugin.test.key", "42")
 	if err := r.Flush(); err != nil {
 		t.Fatalf("Flush: %v", err)
 	}
+	r.Close()
 
 	r2 := NewConfigRegistry(path)
 	val, err := r2.Get("plugin.test.key")
 	if err != nil {
 		t.Fatalf("Get after reload: %v", err)
 	}
-	if v, _ := val.(float64); v != 42 {
+	if v, _ := val.(string); v != "42" {
 		t.Fatalf("expected 42, got %v", val)
 	}
+	r2.Close()
 }
 
 func TestRegistryDelete(t *testing.T) {
@@ -65,7 +69,7 @@ func TestRegistryDelete(t *testing.T) {
 
 func TestRegistryDump(t *testing.T) {
 	r := NewConfigRegistry("")
-	r.Register("x", 1)
+	r.Register("x", "1")
 	r.Register("y", "two")
 	dump := r.Dump()
 	if len(dump) != 2 {
@@ -83,23 +87,171 @@ func TestRegistryUnknownKey(t *testing.T) {
 
 func TestRegistryFlush(t *testing.T) {
 	dir := t.TempDir()
-	path := filepath.Join(dir, "settings.json")
+	path := filepath.Join(dir, "config.db")
 	r := NewConfigRegistry(path)
 	r.Set("k", "v")
 	if err := r.Flush(); err != nil {
 		t.Fatalf("Flush: %v", err)
 	}
-	data, _ := os.ReadFile(path)
-	if len(data) == 0 {
-		t.Fatal("expected persisted data")
+	r.Close()
+
+	// Reopen and verify persistence
+	r2 := NewConfigRegistry(path)
+	val, err := r2.Get("k")
+	if err != nil {
+		t.Fatalf("Get after flush: %v", err)
 	}
+	if v, _ := val.(string); v != "v" {
+		t.Fatalf("expected v, got %v", val)
+	}
+	r2.Close()
 }
 
 func TestRegistryFlushIdempotent(t *testing.T) {
 	dir := t.TempDir()
-	path := filepath.Join(dir, "settings.json")
+	path := filepath.Join(dir, "config.db")
 	r := NewConfigRegistry(path)
 	r.Set("k", "v")
 	r.Flush()
 	r.Flush() // second flush should not error
+	r.Close()
+}
+
+func TestPluginConfig(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.db")
+	r := NewConfigRegistry(path)
+
+	ps := r.PluginConfig("test_deepseek")
+	if err := ps.Set("api_key", "sk-test123"); err != nil {
+		t.Fatalf("PluginSettings.Set: %v", err)
+	}
+
+	val, err := ps.Get("api_key")
+	if err != nil {
+		t.Fatalf("PluginSettings.Get: %v", err)
+	}
+	if v, _ := val.(string); v != "sk-test123" {
+		t.Fatalf("expected sk-test123, got %v", val)
+	}
+
+	keys, err := ps.List("")
+	if err != nil {
+		t.Fatalf("PluginSettings.List: %v", err)
+	}
+	if len(keys) != 1 || keys[0] != "api_key" {
+		t.Fatalf("expected [api_key], got %v", keys)
+	}
+
+	// Core table should not contain plugin data
+	coreKeys := r.List("")
+	for _, k := range coreKeys {
+		if k == "api_key" {
+			t.Fatal("plugin key leaked into core config table")
+		}
+	}
+
+	r.Close()
+}
+
+func TestSeedFromToConfig(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.db")
+
+	cfg := &types.Config{
+		Daemon: types.DaemonConfig{
+			ListenAddr:        ":9090",
+			DataDir:           "/tmp/test",
+			HeartbeatInterval: 10 * time.Second,
+			CheckInterval:     20 * time.Second,
+			LogLevel:          "debug",
+		},
+		LLM: types.LLMConfig{
+			Provider:    "deepseek",
+			Model:       "deepseek-v4-flash",
+			BaseURL:     "https://api.deepseek.com",
+			Adapter:     "deepseek",
+			Temperature: 0.5,
+			MaxTokens:   2048,
+			Sources: []types.LLMSource{
+				{Name: "deepseek", BaseURL: "https://api.deepseek.com", Model: "deepseek-v4-flash", Adapter: "deepseek", AdapterPath: "adapters/deepseek.lua"},
+				{Name: "openai", BaseURL: "https://api.openai.com/v1", Model: "gpt-4o", Adapter: "openai", AdapterPath: "adapters/openai.lua"},
+			},
+		},
+		Defaults: types.AgentConfig{
+			Image:           "test-image",
+			OpenClawEnabled: true,
+		},
+	}
+
+	r := NewConfigRegistry(path)
+	r.SeedFrom(cfg)
+
+	// Verify DB was seeded
+	if len(r.List("")) == 0 {
+		t.Fatal("SeedFrom produced empty DB")
+	}
+
+	// Reconstruct config from DB
+	cfg2 := r.ToConfig()
+
+	if cfg2.Daemon.ListenAddr != ":9090" {
+		t.Fatalf("expected :9090, got %s", cfg2.Daemon.ListenAddr)
+	}
+	if cfg2.Daemon.LogLevel != "debug" {
+		t.Fatalf("expected debug, got %s", cfg2.Daemon.LogLevel)
+	}
+	if cfg2.LLM.Provider != "deepseek" {
+		t.Fatalf("expected deepseek, got %s", cfg2.LLM.Provider)
+	}
+	if cfg2.LLM.MaxTokens != 2048 {
+		t.Fatalf("expected 2048, got %d", cfg2.LLM.MaxTokens)
+	}
+	if len(cfg2.LLM.Sources) != 2 {
+		t.Fatalf("expected 2 sources, got %d", len(cfg2.LLM.Sources))
+	}
+	if cfg2.LLM.Sources[0].AdapterPath != "adapters/deepseek.lua" {
+		t.Fatalf("expected adapters/deepseek.lua, got %s", cfg2.LLM.Sources[0].AdapterPath)
+	}
+
+	// Second SeedFrom should be no-op (DB already has data)
+	r.SeedFrom(cfg)
+	if len(r.List("")) != len(r.List("")) {
+		t.Fatal("second SeedFrom changed DB count")
+	}
+
+	r.Close()
+}
+
+func TestGetHelpers(t *testing.T) {
+	r := NewConfigRegistry("")
+	r.Set("str_key", "hello")
+	r.Set("int_key", "42")
+	r.Set("dur_key", "5m")
+	r.Set("bool_key", "true")
+
+	if got := r.GetString("str_key", ""); got != "hello" {
+		t.Fatalf("GetString: expected hello, got %s", got)
+	}
+	if got := r.GetString("nonexistent", "fallback"); got != "fallback" {
+		t.Fatalf("GetString fallback: expected fallback, got %s", got)
+	}
+	if got := r.GetInt("int_key", 0); got != 42 {
+		t.Fatalf("GetInt: expected 42, got %d", got)
+	}
+	if got := r.GetInt("nonexistent", 99); got != 99 {
+		t.Fatalf("GetInt fallback: expected 99, got %d", got)
+	}
+	if got := r.GetDuration("dur_key", 0); got != 5*time.Minute {
+		t.Fatalf("GetDuration: expected 5m, got %v", got)
+	}
+	if got := r.GetDuration("nonexistent", 30*time.Second); got != 30*time.Second {
+		t.Fatalf("GetDuration fallback: expected 30s, got %v", got)
+	}
+	if got := r.GetBool("bool_key", false); got != true {
+		t.Fatalf("GetBool: expected true, got %v", got)
+	}
+	if got := r.GetBool("nonexistent", true); got != true {
+		t.Fatalf("GetBool fallback: expected true, got %v", got)
+	}
 }
