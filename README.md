@@ -1,26 +1,29 @@
 # HomeAgent
 
-单二进制 24/7 智能家庭管家。基于 NextAgent 认知解耦架构 + TrulyMEM 自主图记忆。
+单二进制 24/7 智能管家。**核心零 IO**，所有输入输出通过插件，插件通过三通道与核心交互：工具、阶段钩子、事件订阅。
 
 ## 架构
 
 ```
-                    IO 抽象层（唯一输入路径）
-  ┌─────────────────────────────────────────────────────┐
-  │  Microphone  Camera  GPIO  HTTP  OneBot-QQ  Plugins │
-  │  所有外部输入 → InputEvent → inputCh                  │
-  └──────────────────────┬──────────────────────────────┘
-                         │
-  ┌──────────────────────▼──────────────────────────────┐
-  │              Agent Core（编排器）                      │
-  │  三层记忆注入 → Provider.Chat() → 工具执行 → 输出     │
-  └──────────────────────┬──────────────────────────────┘
-                         │
-  ┌──────────────────────▼──────────────────────────────┐
-  │             API 抽象层（唯一输出路径）                  │
-  │   Provider: OpenAI / Ollama / Lua 适配               │
-  │   DeepSeek v4 flash（默认）                          │
-  └─────────────────────────────────────────────────────┘
+  外部（QQ / HTTP / 硬件...）
+    │ 通过插件注册
+    ▼
+  IOManager.InjectInput()
+    │
+    ▼
+  ┌─────────────────────────────────────────────────┐
+  │              Agent Core                          │
+  │                                                  │
+  │  on_input → Context → Memory Recall              │
+  │  → pre_action → [LLM ↔ 工具循环] → before_output │
+  │  → output_send → after_output                   │
+  │                                                  │
+  │  内置：三层记忆 + 知识库 + Child Agent           │
+  └─────────────────────────────────────────────────┘
+    │
+    ├── Stage Pipeline（7 阶段，插件可拦截/改写）
+    ├── Tool System（插件注册工具给 LLM）
+    └── Event Bus（插件订阅系统事件）
 ```
 
 ## 快速开始
@@ -32,62 +35,49 @@ make build
 
 依赖：Go 1.19+、CGo（go-sqlite3）。
 
-## 记忆体系（三层）
+## 阶段管道
 
-| 层 | 存储 | 容量 | 裁剪策略 |
+```
+on_input → pre_action → post_action ↔ before_toolcall/after_toolcall → before_output → after_output
+                                           ↑_______________|
+                                               循环
+```
+
+| 阶段 | 插件可做 |
+|---|---|
+| `on_input` | 鉴权、拉黑、改写、短路 |
+| `pre_action` | 注入 context 消息 |
+| `post_action` | 审查/改写 LLM 输出、增删工具 |
+| `before_toolcall` | 拒绝、改参、审计 |
+| `after_toolcall` | 脱敏、改写结果 |
+| `before_output` | 改写最终文本、加格式 |
+| `after_output` | 记录/统计 |
+
+## 三层记忆
+
+| 层 | 存储 | 容量 | 裁剪 |
 |---|---|---|---|
-| 上下文 | 内存 | 30 条 | TF-IDF 相关性排序，淘汰→文档 |
-| 文档 | JSON + TF-IDF 向量 | 无上限 | 72h 冷访问→图数据库 |
-| 图 | SQLite 三元组 | 无上限 | 定期重整+同义合并 |
+| Context | 内存 TF-IDF | 30 条 | 余弦相似度排序→文档 |
+| Document | JSON + 向量索引 | ∞ | 72h 冷→图 |
+| Graph | SQLite 三元组 | ∞ | 定期重整+同义合并 |
 
-## 插件系统（OpenClaw 兼容）
+## 插件三通道
 
-插件 = 容器，内嵌 IO 通道为组件。`plugins/` 目录热插拔，agent 通过 `plgreload` 工具控制重载。
-
-```
-plugins/
-├── qq/                          # OneBot QQ 通道插件
-│   ├── SKILL.md                 # 技能描述 + IO 端口声明
-│   └── skill.json               # 元数据 + WS 连接配置
-```
-
-### 示例 QQ 插件 `plugins/qq/SKILL.md`
-
-```markdown
-# QQ 通知插件
-io_type: io
-io_input_route: qq
-io_output_route: qq
-io_output_caps: text,file,image
-
-## qq_send_private_msg
-发送 QQ 私聊消息
-- user_id: 目标 QQ 号
-- message: 消息内容（支持 CQ 码）
-```
+| 通道 | 方向 | 用途 |
+|---|---|---|
+| `RegisterTool` | 插件→LLM | Agent 调用插件功能 |
+| `RegisterStage` | 核心→插件 | 干预消息处理流 |
+| `Subscribe/Publish` | 双向 | 审计/日志/通知 |
 
 ## 核心命令
 
 ```bash
-make build        # 编译主二进制
-make run          # 编译并启动（数据 /tmp/homeagent）
-make install      # 安装到系统
-make test         # 运行测试
+make build        # 编译
+make run          # 编译+启动
+make test         # 测试
+make install      # 系统安装
 ```
 
-## 配置
+## 完整文档
 
-`/etc/homeagent/config.yaml`（默认 `config/config.yaml`）：
-
-```yaml
-daemon:
-  listen_addr: ":8080"
-  data_dir: "/var/lib/homeagent"
-llm:
-  model: "deepseek-v4-flash"
-  base_url: "https://api.deepseek.com/v1"
-```
-
-## 许可证
-
-MIT
+详见 [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)。

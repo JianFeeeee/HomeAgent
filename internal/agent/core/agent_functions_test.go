@@ -6,21 +6,21 @@ import (
 	"gitcode.com/JianFeeeee/HomeAgent/internal/memory/document"
 )
 
-func TestIsSimilarName(t *testing.T) {
+func TestEntitySimilarity(t *testing.T) {
 	tests := []struct {
 		a, b string
-		want bool
+		want float64
 	}{
-		{"张三", "张三四", false},
-		{"", "", false},
-		{"a", "b", false},
-		{"张三", "李四", false},
-		{"张三", "张三", false},
+		{"", "", 0},         // empty → 0
+		{"a", "b", 0},       // single char → 0
+		{"张三", "张三", 1.0}, // identical → 1.0
+		{"张三", "李四", 0},  // no common bigrams
+		{"iPhone", "iPhone 15", 0.625}, // partial overlap
 	}
 	for _, tt := range tests {
-		got := isSimilarName(tt.a, tt.b)
+		got := entitySimilarity(tt.a, tt.b)
 		if got != tt.want {
-			t.Errorf("isSimilarName(%q, %q) = %v, want %v", tt.a, tt.b, got, tt.want)
+			t.Errorf("entitySimilarity(%q, %q) = %.3f, want %.3f", tt.a, tt.b, got, tt.want)
 		}
 	}
 }

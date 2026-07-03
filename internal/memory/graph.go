@@ -520,6 +520,98 @@ func (g *GraphDB) Introspect() (map[string]interface{}, error) {
 	}, nil
 }
 
+// MergeEntities 合并两个实体：将 sourceName 的所有信息合并到 targetName
+// 1. sourceName 的所有关系重新指向 targetName
+// 2. targetName 的 mention_count 增加 sourceName 的计数
+// 3. sourceName 标记为 merged
+// 返回 (关系的重定向数, error)
+func (g *GraphDB) MergeEntities(sourceName, targetName string) (int, error) {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+
+	tx, err := g.db.Begin()
+	if err != nil {
+		return 0, err
+	}
+	defer tx.Rollback()
+
+	var sourceID, targetID int64
+	var sourceCount, targetCount int
+
+	err = tx.QueryRow("SELECT id, mention_count FROM entities WHERE name = ?", sourceName).Scan(&sourceID, &sourceCount)
+	if err != nil {
+		return 0, fmt.Errorf("source entity '%s' not found: %w", sourceName, err)
+	}
+	err = tx.QueryRow("SELECT id, mention_count FROM entities WHERE name = ?", targetName).Scan(&targetID, &targetCount)
+	if err != nil {
+		return 0, fmt.Errorf("target entity '%s' not found: %w", targetName, err)
+	}
+
+	if sourceID == targetID {
+		return 0, fmt.Errorf("cannot merge entity with itself")
+	}
+
+	// 重定向 source → target 的关系（作为 source）
+	res, err := tx.Exec(
+		`UPDATE relations SET source_id = ?, updated_at = CURRENT_TIMESTAMP
+		 WHERE source_id = ? AND status = 'active'`,
+		targetID, sourceID,
+	)
+	if err != nil {
+		return 0, err
+	}
+	redirectedSource, _ := res.RowsAffected()
+
+	// 重定向 source → target 的关系（作为 target）
+	res, err = tx.Exec(
+		`UPDATE relations SET target_id = ?, updated_at = CURRENT_TIMESTAMP
+		 WHERE target_id = ? AND status = 'active'`,
+		targetID, sourceID,
+	)
+	if err != nil {
+		return 0, err
+	}
+	redirectedTarget, _ := res.RowsAffected()
+
+	// 删除可能产生的自引用关系
+	_, err = tx.Exec(
+		`DELETE FROM relations
+		 WHERE source_id = target_id AND source_id = ?`,
+		targetID,
+	)
+	if err != nil {
+		return 0, err
+	}
+
+	// 更新 target 的 mention_count
+	_, err = tx.Exec(
+		`UPDATE entities SET mention_count = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?`,
+		targetCount+sourceCount, targetID,
+	)
+	if err != nil {
+		return 0, err
+	}
+
+	// 标记 source 为 merged（改名避免 UNIQUE 冲突）
+	_, err = tx.Exec(
+		`UPDATE entities SET name = ? || '@merged_' || ?,
+			mention_count = 0,
+			updated_at = CURRENT_TIMESTAMP
+		 WHERE id = ?`,
+		sourceName, time.Now().Format("20060102150405"), sourceID,
+	)
+	if err != nil {
+		return 0, err
+	}
+
+	if err := tx.Commit(); err != nil {
+		return 0, err
+	}
+
+	total := int(redirectedSource + redirectedTarget)
+	return total, nil
+}
+
 func (g *GraphDB) Archive(days int) (int, error) {
 	g.mu.Lock()
 	defer g.mu.Unlock()
