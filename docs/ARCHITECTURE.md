@@ -37,6 +37,9 @@
 │  │  RegisterStage(stage, handler) ← 插件挂入消息处理阶段         │ │
 │  │  Subscribe(eventType, handler) ← 插件订阅系统事件             │ │
 │  │  Publish(event)                → 插件发布事件                 │ │
+│  │  Settings().Get/Set/List       ← 读写核心/插件配置            │ │
+│  │  Memory().Recall/Commit        ← 图记忆访问                   │ │
+│  │  Knowledge().Search/Create     ← 知识库访问                   │ │
 │  └──────────────────────────────────────────────────────────────┘ │
 ├──────────────────────────────────────────────────────────────────┤
 │                        插件域 (Plugin Domain)                      │
@@ -371,7 +374,93 @@ spawn_child(task) → 新建轻量 Agent
 
 ---
 
-## 十、SDK API 定义
+## 九、LLM Provider 与 Lua 适配层
+
+LLM 调用全部通过 `Provider` 接口，核心实现是 `LuaAdaptedProvider`：
+
+```
+Agent
+  │
+  ▼
+Provider 接口 (Name / Chat / ChatStream)
+  │
+  ▼
+LuaAdaptedProvider
+  ├── 1. 序列化 CompletionRequest → raw JSON
+  ├── 2. adapter.transform_request(rawJSON) → 协议特定请求体
+  ├── 3. 读取 adapter.endpoint + adapter.headers 发 HTTP
+  ├── 4. adapter.transform_response(rawHTTPBody) → 统一响应格式
+  └── 5. 反序列化为 CompletionResponse
+```
+
+### Lua 适配器契约
+
+每个适配器是一个返回 table 的 Lua 脚本，位于 `data/adapters/*.lua`：
+
+```lua
+adapter.name = "deepseek"
+adapter.version = "2.0.0"
+adapter.endpoint = "/chat/completions"
+adapter.headers = {}  -- 静态头（Go 自动加 Authorization）
+
+-- 请求变换：raw JSON → 协议格式
+function adapter.transform_request(raw_body) return transformed end
+
+-- 响应变换：HTTP body → 统一格式 {content, reasoning_content, finish_reason, token_usage, tool_calls}
+function adapter.transform_response(raw_body) return unified end
+
+-- 流变换（可选）：SSE data line → {content, done}
+function adapter.transform_stream_chunk(raw_line) return chunk end
+```
+
+### Lua VM 能力
+
+- `json.encode(table)` → 使用 Go `json.Marshal` 的 JSON 序列化
+- `json.decode(string)` → 使用 Go `json.Unmarshal` 的 JSON 反序列化
+- 全局函数 `log(level, msg)` / `http_get(url)` / `http_post(url, body)`
+- 适配器内置 3 个：`openai.lua`、`deepseek.lua`、`ollama.lua`
+
+## 十、配置中心 (ConfigRegistry)
+
+配置不再分散在各处——通过 `ConfigRegistry` 统一管理：
+
+```
+Plugin (通过 SDK)
+  │
+  ├─ Settings().Get("core.llm.model")        → 读核心配置
+  ├─ Settings().Set("plugin.qq.token", x)    → 写插件配置
+  ├─ Settings().List("plugin.")              → 列出所有插件键
+  │
+  ▼
+ConfigRegistry (线程安全 KV 存储)
+  ├── 持久化到 data/settings.json
+  ├── 键命名空间: core.* / plugin.<name>.*
+  ├── Register(key, default)  ← 注册默认值（不标记 dirty）
+  ├── Get/Set/List/Delete     ← 运行时读写
+  └── Flush()                 ← 写回磁盘
+```
+
+### WebUI 配置编辑
+
+```
+┌──────────────────────────────────┐
+│  侧边栏         编辑区            │
+│  ┌──────┐  ┌──────────────────┐  │
+│  │ core │  │ core.llm.model   │  │
+│  │plugin│  │ [input field]    │  │
+│  │.qq   │  │ [保存]           │  │
+│  │plugin│  ├──────────────────┤  │
+│  │.webui│  │ core.llm.base_url│  │
+│  └──────┘  │ [input field]    │  │
+│            │ [保存]           │  │
+│            └──────────────────┘  │
+└──────────────────────────────────┘
+```
+
+- `GET /api/v1/settings?prefix=core.` → 列出配置键值 + 插件列表
+- `PUT /api/v1/settings` → `{key, value}` 写入配置
+
+## 十一、SDK API 定义
 
 ### PluginAPI (`internal/plugin/sdk/api.go`)
 
@@ -415,7 +504,7 @@ type StageContext struct {
 
 ---
 
-## 十一、事件系统
+## 十二、事件系统
 
 ### 事件类型
 
@@ -438,7 +527,24 @@ func (b *Bus) Subscribe(eventType EventType, handler Handler) func()
 
 ---
 
-## 十二、数据流全景
+## 十三、自循环输入通道
+
+核心维护一个独立的 `selfInputCh (chan string)`，用于内部任务（记忆消歧、系统维护），不经过 IO 层：
+
+```
+心跳检测 → entitySimilarity() → enqueueConsolidationTask()
+                                         │
+                                    injectSelf(msg)
+                                         │
+                                    selfInputCh ─→ eventLoop ─→ processTextInput
+                                         │
+                                   不经过 IOManager，不经过任何插件
+```
+
+区别于 IOManager.InputChan（外部输入），selfInputCh 是核心自有的纯 Go channel，
+确保即使没有 IO 插件，记忆整理等维护任务也能正常执行。
+
+## 十四、数据流全景
 
 ```
 外部 (QQ/HTTP/硬件)
@@ -474,7 +580,7 @@ Agent.eventLoop() → handleInput → processTextInput
 
 ---
 
-## 十三、代码结构
+## 十五、代码结构
 
 ```
 cmd/homed/main.go                        — 入口：组装所有子系统
@@ -489,9 +595,21 @@ internal/
 │   ├── io/
 │   │   └── channel.go                  — IOManager + Device 接口（过渡期保留）
 │   └── personal.go                     — 人格加载
+├── agent/
+│   ├── core/
+│   │   ├── agent.go                     — Agent 核心：事件循环、工具循环、心跳、selfInputCh
+│   │   ├── context.go                   — RelevanceContext：TF-IDF 上下文管理
+│   │   └── stages.go                    — StageHost：阶段管道编排
+│   ├── api/
+│   │   └── provider.go                 — Provider 接口 + OpenAI/Ollama/LuaAdaptedProvider
+│   ├── io/
+│   │   └── channel.go                  — IOManager + Device 接口（过渡期保留）
+│   └── personal.go                     — 人格加载
 ├── api/
-│   ├── handler.go                      — HTTP API 端点
+│   ├── handler.go                      — HTTP API 端点 + WebUI (内联 HTML/JS/CSS)
 │   └── plugin.go                       — WebUI Device 包装
+├── config/
+│   └── registry.go                     — ConfigRegistry：统一配置中心
 ├── events/
 │   └── bus.go                          — 系统事件总线 (Publish/Subscribe)
 ├── memory/
@@ -504,22 +622,27 @@ internal/
 ├── knowledge/
 │   └── knowledge.go                    — 知识系统
 ├── plugin/
-│   ├── plugin.go                       — 插件注册表 + 旧 Device 兼容层
+│   ├── plugin.go                       — 插件注册表 + ConfigRegistry + SettingsAPI 注入
 │   └── sdk/
-│       ├── api.go                      — PluginAPI 定义
+│       ├── api.go                      — PluginAPI (Tool/Stage/Event/Settings/Memory/Knowledge)
 │       └── bus.go                      — 插件内部 EventBus 接口
 ├── onebot/                             — OneBot V11 QQ 协议实现
 ├── tracker/                            — 变更追踪 (overlayfs)
 ├── supervisor/                         — 守护进程
 ├── skill/                              — 技能管理器
-├── lua/                                — Lua 适配器
+├── lua/
+│   ├── vm.go                           — Lua VM (json.encode/decode, CallTransformRequest/Response)
+│   └── adapters/
+│       ├── openai.lua                  — OpenAI 协议适配
+│       ├── deepseek.lua                — DeepSeek 协议适配 (temperature=0, reasoning)
+│       └── ollama.lua                  — Ollama 协议适配
 ├── network/                            — 网络监控
 ├── container/                          — 容器管理
 ├── snapshot/                           — 快照
 ├── embed/                              — 嵌入
 └── tokenizer/                          — 分词器
-config/
-├── config.go                           — 配置加载
+config/                                 — 顶层配置加载
+├── config.go                           — Config 结构 + 加载/保存
 └── config.yaml
 pkg/types/                              — 类型定义
 docs/
@@ -528,13 +651,16 @@ docs/
 
 ---
 
-## 十四、与旧设计 (v3) 的关键区别
+## 十六、与旧设计 (v3) 的关键区别
 
 | 维度 | v3 | v4 |
 |------|-----|-----|
-| 插件交互 | Device 接口 + IOManager 路由 | 三通道：Tool/Stage/Event |
+| 插件交互 | Device 接口 + IOManager 路由 | 三通道：Tool/Stage/Event/Settings |
 | 消息流编辑 | 无（纯事件推送） | 阶段管道 7 个 hook 点 |
 | Event Bus | 无 | `internal/events/bus.go` |
-| SDK | 无 | `internal/plugin/sdk/` |
+| SDK | 无 | `internal/plugin/sdk/` (含 SettingsAPI) |
+| LLM 适配 | 硬编码 Provider | Lua 脚本 raw JSON 变换 |
+| 配置管理 | 分散在各处 | ConfigRegistry 统一 KV 存储 |
 | 核心 IO | IOManager `EmitOutput` 直出 | 全部走 `output_send` 工具 |
 | 插件工具路由 | IOManager `ExecuteTool` 链 | StageHost + Registry 双层路由 |
+| 内部任务 | 无 | selfInputCh 自循环通道（不经过 IO） |
