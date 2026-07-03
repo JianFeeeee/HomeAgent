@@ -3,6 +3,8 @@ package main
 import (
 	"context"
 	"flag"
+	"fmt"
+	"io"
 	"log"
 	"os"
 	"os/signal"
@@ -45,6 +47,22 @@ func main() {
 	}
 
 	log.SetFlags(log.Ldate | log.Ltime | log.Lshortfile)
+
+	// 文件日志：同时输出到控制台和 data/log/ 目录
+	logDir := filepath.Join(*dataDir, "log")
+	if err := os.MkdirAll(logDir, 0755); err != nil {
+		log.Printf("[homed] warning: cannot create log dir: %v", err)
+	} else {
+		logPath := filepath.Join(logDir, fmt.Sprintf("homed_%s.log", time.Now().Format("2006-01-02_15-04-05")))
+		logFile, err := os.OpenFile(logPath, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0644)
+		if err != nil {
+			log.Printf("[homed] warning: cannot open log file: %v", err)
+		} else {
+			log.SetOutput(io.MultiWriter(os.Stderr, logFile))
+			log.Printf("[homed] logging to %s", logPath)
+		}
+	}
+
 	log.Printf("[homed] starting HomeAgent v0.1.0 (pure kernel)")
 
 	agentWorkDir := filepath.Join(*dataDir, "agentfs")

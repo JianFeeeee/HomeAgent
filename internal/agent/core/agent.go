@@ -1651,6 +1651,65 @@ func (a *Agent) reorgGraph() {
 	} else {
 		log.Printf("[agent] graph reorg: no similar entities found")
 	}
+
+	// 5. 图连接质量评估：由 LLM 判断低质量关系并丢弃
+	a.evaluateGraphQuality()
+}
+
+func (a *Agent) evaluateGraphQuality() {
+	if a.memory == nil {
+		return
+	}
+
+	// 召回近期低 confidence 关系（使用默认 recall 获取最新实体和关系）
+	result, err := a.memory.Recall(nil, nil, 1, "")
+	if err != nil || result == nil || len(result.Relations) == 0 {
+		return
+	}
+
+	// 选出低质量候选：generic 关系（如 distiller 自动生成的泛化关系）
+	var lowQuality []string
+	for _, r := range result.Relations {
+		// 自动蒸馏生成的 (用户, 提及, ...) 和 (AI, 回应, ...) 通常是噪音
+		if (r.SourceName == "用户" || r.SourceName == "AI") &&
+			(r.RelationType == "提及" || r.RelationType == "回应") {
+			lowQuality = append(lowQuality, fmt.Sprintf("「%s」-「%s」→「%s」", r.SourceName, r.RelationType, r.TargetName))
+			continue
+		}
+		// 极低 mention 的实体+generic 关系
+		if r.Confidence < 0.3 && r.RelationType != "" {
+			lowQuality = append(lowQuality, fmt.Sprintf("「%s」-「%s」→「%s」(confidence=%.1f)", r.SourceName, r.RelationType, r.TargetName, r.Confidence))
+		}
+	}
+
+	if len(lowQuality) == 0 {
+		return
+	}
+
+	// 分批发送给 LLM 决策，每批最多 10 条
+	batchSize := 10
+	for i := 0; i < len(lowQuality); i += batchSize {
+		end := i + batchSize
+		if end > len(lowQuality) {
+			end = len(lowQuality)
+		}
+		batch := lowQuality[i:end]
+
+		a.enqueueConsolidationTask(ConsolidationTask{
+			Type: "graph_quality",
+			Reason: fmt.Sprintf(
+				"图数据库中发现 %d 条低质量关系，请逐条判断是否应该删除（保留 = keep，删除 = discard）：\n%s",
+				len(batch),
+				strings.Join(batch, "\n"),
+			),
+			Data: map[string]interface{}{
+				"candidates": batch,
+				"action":     "evaluate_quality",
+			},
+		})
+	}
+
+	log.Printf("[agent] graph quality: %d low-quality connection batches sent for LLM evaluation", (len(lowQuality)+batchSize-1)/batchSize)
 }
 
 // entitySimilarity 计算两个实体名的相似度（字符 bigram Jaccard）
