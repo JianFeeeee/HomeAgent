@@ -6,6 +6,7 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"strconv"
 	"syscall"
 	"time"
 
@@ -15,6 +16,7 @@ import (
 	agentPkg "gitcode.com/JianFeeeee/HomeAgent/internal/agent"
 	"gitcode.com/JianFeeeee/HomeAgent/internal/api"
 	"gitcode.com/JianFeeeee/HomeAgent/config"
+	internalConfig "gitcode.com/JianFeeeee/HomeAgent/internal/config"
 	"gitcode.com/JianFeeeee/HomeAgent/internal/events"
 	"gitcode.com/JianFeeeee/HomeAgent/internal/knowledge"
 	luapkg "gitcode.com/JianFeeeee/HomeAgent/internal/lua"
@@ -104,6 +106,21 @@ func main() {
 		accessToken, _ := config["access_token"].(string)
 		return onebot.NewDevice(name, wsURL, accessToken, iom), nil
 	})
+
+	// === Config Registry (统一配置中心，供插件读写) ===
+	cfgReg := internalConfig.NewConfigRegistry(filepath.Join(cfg.Daemon.DataDir, "settings.json"))
+	cfgReg.Register("core.daemon.listen_addr", cfg.Daemon.ListenAddr)
+	cfgReg.Register("core.daemon.data_dir", cfg.Daemon.DataDir)
+	cfgReg.Register("core.daemon.heartbeat_interval", cfg.Daemon.HeartbeatInterval.String())
+	cfgReg.Register("core.daemon.check_interval", cfg.Daemon.CheckInterval.String())
+	cfgReg.Register("core.daemon.log_level", cfg.Daemon.LogLevel)
+	cfgReg.Register("core.llm.provider", "lua_deepseek")
+	cfgReg.Register("core.llm.model", cfg.LLM.Model)
+	cfgReg.Register("core.llm.base_url", cfg.LLM.BaseURL)
+	cfgReg.Register("core.llm.temperature", strconv.FormatFloat(cfg.LLM.Temperature, 'f', 2, 64))
+	cfgReg.Register("core.llm.max_tokens", strconv.Itoa(cfg.LLM.MaxTokens))
+	pluginReg.SetConfigRegistry(cfgReg)
+	log.Printf("[homed] config registry active with %d keys", len(cfgReg.List("")))
 
 	// === Supervisor ===
 	sup := supervisor.New(cfg)
@@ -299,6 +316,9 @@ func main() {
 	log.Printf("[homed] shutting down...")
 	if trk != nil {
 		trk.Stop()
+	}
+	if err := cfgReg.Flush(); err != nil {
+		log.Printf("[homed] flush config: %v", err)
 	}
 	sup.Shutdown()
 	log.Printf("[homed] stopped")

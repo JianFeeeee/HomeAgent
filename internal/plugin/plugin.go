@@ -12,6 +12,7 @@ import (
 	"time"
 
 	agentIO "gitcode.com/JianFeeeee/HomeAgent/internal/agent/io"
+	internalConfig "gitcode.com/JianFeeeee/HomeAgent/internal/config"
 	sdk "gitcode.com/JianFeeeee/HomeAgent/internal/plugin/sdk"
 )
 
@@ -149,6 +150,14 @@ type Registry struct {
 	ioMgr     *agentIO.IOManager
 	factories map[string]NativeFactory // 名称匹配的插件使用原生实现
 	sdkAPIs   map[string]*sdkAPI       // SDK 插件 API 实例
+	cfgReg    *internalConfig.ConfigRegistry
+}
+
+// SetConfigRegistry 注入全局配置注册表，使 SDK 插件可访问配置
+func (r *Registry) SetConfigRegistry(cr *internalConfig.ConfigRegistry) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.cfgReg = cr
 }
 
 type sdkAPI struct {
@@ -172,6 +181,15 @@ func (r *Registry) RegisterPluginAPI(api *sdk.PluginAPI) error {
 	if _, ok := r.sdkAPIs[api.Name]; ok {
 		return fmt.Errorf("sdk api %s already registered", api.Name)
 	}
+
+	// 注入 SettingsAPI（读取/修改核心与其他插件配置）
+	if r.cfgReg != nil {
+		api.SetSettings(&pluginSettings{
+			reg:  r.cfgReg,
+			name: api.Name,
+		})
+	}
+
 	r.sdkAPIs[api.Name] = &sdkAPI{
 		api:    api,
 		tools:  api.Tools(),
@@ -185,6 +203,24 @@ func (r *Registry) RegisterPluginAPI(api *sdk.PluginAPI) error {
 	log.Printf("[plugin] registered SDK plugin: %s (tools=%d, stages=%d)",
 		api.Name, len(api.Tools()), len(r.sdkAPIs[api.Name].stages))
 	return nil
+}
+
+// pluginSettings 实现 SettingsAPI，以插件名为命名空间
+type pluginSettings struct {
+	reg  *internalConfig.ConfigRegistry
+	name string
+}
+
+func (s *pluginSettings) Get(key string) (interface{}, error) {
+	return s.reg.Get(key)
+}
+
+func (s *pluginSettings) Set(key string, value interface{}) error {
+	return s.reg.Set(key, value)
+}
+
+func (s *pluginSettings) List(prefix string) ([]string, error) {
+	return s.reg.List(prefix), nil
 }
 
 // GetAllSDKToolDefs 收集所有 SDK 插件的工具定义
