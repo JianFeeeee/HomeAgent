@@ -303,7 +303,7 @@ func main() {
 	// === Built-in HTTP API & WebUI Plugin ===
 	webui := api.NewWebUIPlugin(
 		"webui", cfg.Daemon.ListenAddr,
-		sup, memDB, skMgr, luaVM, cfg, iom, textMem, ks, trk,
+		sup, memDB, skMgr, luaVM, cfg, iom, textMem, ks, trk, cfgReg, pluginReg,
 	)
 	iom.RegisterDevice(webui)
 	webui.Start()
