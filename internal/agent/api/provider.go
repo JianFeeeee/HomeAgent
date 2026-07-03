@@ -1,6 +1,7 @@
 package api
 
 import (
+	"bufio"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -81,10 +82,11 @@ func (r *CompletionRequest) MarshalJSON() ([]byte, error) {
 }
 
 type CompletionResponse struct {
-	Content      string     `json:"content"`
-	FinishReason string     `json:"finish_reason,omitempty"`
-	TokenUsage   TokenUsage `json:"token_usage,omitempty"`
-	ToolCalls    []ToolCall `json:"tool_calls,omitempty"`
+	Content          string     `json:"content"`
+	ReasoningContent string     `json:"reasoning_content,omitempty"`
+	FinishReason     string     `json:"finish_reason,omitempty"`
+	TokenUsage       TokenUsage `json:"token_usage,omitempty"`
+	ToolCalls        []ToolCall `json:"tool_calls,omitempty"`
 }
 
 type TokenUsage struct {
@@ -349,67 +351,201 @@ func (p *OllamaProvider) ChatStream(ctx context.Context, req *CompletionRequest)
 	return ch, nil
 }
 
+// LuaAdaptedProvider 使用 Lua 脚本做请求/响应变换，直接发起 HTTP 调用
+// 不再包裹其他 Provider，协议差异全部在 Lua 层处理
 type LuaAdaptedProvider struct {
-	name     string
-	base     Provider
-	vm       *luaVM.VM
-	adapter  string
+	name    string
+	cfg     BaseConfig
+	vm      *luaVM.VM
+	adapter string
+	client  *http.Client
 }
 
-func NewLuaAdaptedProvider(base Provider, vm *luaVM.VM, adapter string) *LuaAdaptedProvider {
+func NewLuaAdaptedProvider(cfg BaseConfig, vm *luaVM.VM, adapter string) *LuaAdaptedProvider {
+	if cfg.Temperature == 0 {
+		cfg.Temperature = 0.7
+	}
+	if cfg.MaxTokens == 0 {
+		cfg.MaxTokens = 4096
+	}
 	return &LuaAdaptedProvider{
 		name:    fmt.Sprintf("lua_%s", adapter),
-		base:    base,
+		cfg:     cfg,
 		vm:      vm,
 		adapter: adapter,
+		client:  &http.Client{Timeout: 120 * time.Second},
 	}
 }
 
 func (p *LuaAdaptedProvider) Name() string { return p.name }
 
 func (p *LuaAdaptedProvider) Chat(ctx context.Context, req *CompletionRequest) (*CompletionResponse, error) {
-	inputMap := map[string]interface{}{
-		"model":     req.Model,
-		"messages":  messagesToMap(req.Messages),
-		"temperature": req.Temperature,
-		"max_tokens":  req.MaxTokens,
-		"stream":     false,
+	if req.Model == "" {
+		req.Model = p.cfg.Model
 	}
 
-	transformed, err := p.vm.CallTransform(p.adapter, inputMap)
+	rawReq, _ := json.Marshal(req)
+
+	transformedBody, err := p.vm.CallTransformRequest(p.adapter, string(rawReq))
 	if err != nil {
-		return nil, fmt.Errorf("lua transform: %w", err)
+		return nil, fmt.Errorf("lua transform_request: %w", err)
 	}
 
-	transformedReq := &CompletionRequest{
-		Model:       getString(transformed, "model"),
-		Temperature: getFloat(transformed, "temperature"),
-		MaxTokens:   int(getFloat(transformed, "max_tokens")),
-		Stream:      false,
+	endpoint := p.vm.GetAdapterEndpoint(p.adapter)
+	if endpoint == "" {
+		endpoint = "/chat/completions"
 	}
+	url := strings.TrimRight(p.cfg.BaseURL, "/") + endpoint
 
-	if msgs, ok := transformed["messages"].([]interface{}); ok {
-		for _, m := range msgs {
-			if mm, ok := m.(map[string]interface{}); ok {
-				transformedReq.Messages = append(transformedReq.Messages, Message{
-					Role:    getString(mm, "role"),
-					Content: getString(mm, "content"),
-				})
-			}
-		}
-	}
-
-	resp, err := p.base.Chat(ctx, transformedReq)
+	httpReq, err := http.NewRequestWithContext(ctx, "POST", url, strings.NewReader(transformedBody))
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("create request: %w", err)
+	}
+	httpReq.Header.Set("Content-Type", "application/json")
+	httpReq.Header.Set("Authorization", "Bearer "+p.cfg.APIKey)
+
+	for k, v := range p.vm.GetAdapterHeaders(p.adapter) {
+		httpReq.Header.Set(k, v)
 	}
 
-	return resp, nil
+	resp, err := p.client.Do(httpReq)
+	if err != nil {
+		return nil, fmt.Errorf("api call: %w", err)
+	}
+	defer resp.Body.Close()
+
+	rawResp, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, fmt.Errorf("read response: %w", err)
+	}
+
+	if resp.StatusCode != 200 {
+		return nil, fmt.Errorf("api error %d: %s", resp.StatusCode, string(rawResp))
+	}
+
+	unifiedJSON, err := p.vm.CallTransformResponse(p.adapter, string(rawResp))
+	if err != nil {
+		return nil, fmt.Errorf("lua transform_response: %w", err)
+	}
+
+	var result CompletionResponse
+	if err := json.Unmarshal([]byte(unifiedJSON), &result); err != nil {
+		return nil, fmt.Errorf("unmarshal unified response: %w (body: %s)", err, unifiedJSON)
+	}
+
+	return &result, nil
 }
 
 func (p *LuaAdaptedProvider) ChatStream(ctx context.Context, req *CompletionRequest) (<-chan StreamChunk, error) {
-	return p.base.ChatStream(ctx, req)
+	if req.Model == "" {
+		req.Model = p.cfg.Model
+	}
+	req.Stream = true
+	rawReq, _ := json.Marshal(req)
+
+	transformedBody, err := p.vm.CallTransformRequest(p.adapter, string(rawReq))
+	if err != nil {
+		return nil, fmt.Errorf("lua transform_request (stream): %w", err)
+	}
+
+	endpoint := p.vm.GetAdapterEndpoint(p.adapter)
+	if endpoint == "" {
+		endpoint = "/chat/completions"
+	}
+	url := strings.TrimRight(p.cfg.BaseURL, "/") + endpoint
+
+	httpReq, err := http.NewRequestWithContext(ctx, "POST", url, strings.NewReader(transformedBody))
+	if err != nil {
+		return nil, fmt.Errorf("create stream request: %w", err)
+	}
+	httpReq.Header.Set("Content-Type", "application/json")
+	httpReq.Header.Set("Authorization", "Bearer "+p.cfg.APIKey)
+
+	for k, v := range p.vm.GetAdapterHeaders(p.adapter) {
+		httpReq.Header.Set(k, v)
+	}
+
+	resp, err := p.client.Do(httpReq)
+	if err != nil {
+		return nil, fmt.Errorf("stream api: %w", err)
+	}
+
+	ch := make(chan StreamChunk, 64)
+	go func() {
+		defer resp.Body.Close()
+		defer close(ch)
+
+		scanner := NewSSEScanner(resp.Body)
+		for scanner.Scan() {
+			line := scanner.Text()
+			if line == "" {
+				continue
+			}
+
+			// 尝试用 Lua 变换流块（如果 adapter 定义了 transform_stream_chunk）
+			unified, err := p.vm.CallTransformStreamChunk(p.adapter, line)
+			if err != nil || unified == line {
+				// 无流变换函数或变换透传，尝试标准 SSE 解析
+				var raw struct {
+					Choices []struct {
+						Delta struct {
+							Content string `json:"content"`
+						} `json:"delta"`
+						FinishReason *string `json:"finish_reason"`
+					} `json:"choices"`
+				}
+				if err := json.Unmarshal([]byte(unified), &raw); err != nil {
+					continue
+				}
+				if len(raw.Choices) > 0 {
+					ch <- StreamChunk{
+						Content: raw.Choices[0].Delta.Content,
+						Done:    raw.Choices[0].FinishReason != nil,
+					}
+				}
+				continue
+			}
+
+			// Lua 返回了变换后的统一格式
+			var chunk StreamChunk
+			if err := json.Unmarshal([]byte(unified), &chunk); err == nil {
+				ch <- chunk
+			}
+		}
+	}()
+
+	return ch, nil
 }
+
+// SSEScanner 读取 SSE 格式的流（data: ...）
+type SSEScanner struct {
+	reader  *bufio.Reader
+	pending string
+}
+
+func NewSSEScanner(r io.Reader) *SSEScanner {
+	return &SSEScanner{reader: bufio.NewReader(r)}
+}
+
+func (s *SSEScanner) Scan() bool {
+	s.pending = ""
+	for {
+		line, err := s.reader.ReadString('\n')
+		if err != nil {
+			return false
+		}
+		line = strings.TrimRight(line, "\r\n")
+		if strings.HasPrefix(line, "data: ") {
+			s.pending = strings.TrimPrefix(line, "data: ")
+			if s.pending == "[DONE]" {
+				return false
+			}
+			return true
+		}
+	}
+}
+
+func (s *SSEScanner) Text() string { return s.pending }
 
 type ProviderManager struct {
 	mu        sync.RWMutex

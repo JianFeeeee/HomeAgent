@@ -1,22 +1,74 @@
 local adapter = {}
 
 adapter.name = "deepseek"
-adapter.version = "1.0.0"
+adapter.version = "2.0.0"
+adapter.endpoint = "/chat/completions"
+adapter.headers = {}
 
-function adapter.transform_request(input)
-    local messages = input.messages or {}
-    local result = {
-        model = input.model or "deepseek-chat",
-        messages = messages,
-        temperature = input.temperature or 0.0,
-        max_tokens = input.max_tokens or 4096,
-        stream = input.stream or false
-    }
-    return result
+-- DeepSeek 格式与 OpenAI 兼容，只需要强制 temperature=0（禁用 thinking）
+function adapter.transform_request(raw_body)
+    local ok, req = pcall(json.decode, raw_body)
+    if not ok then return raw_body end
+    req.model = req.model or "deepseek-chat"
+    req.temperature = 0.0
+    req.stream = req.stream or false
+    return json.encode(req)
 end
 
-function adapter.transform_response(raw)
-    return raw
+function adapter.transform_response(raw_body)
+    local ok, resp = pcall(json.decode, raw_body)
+    if not ok then return raw_body end
+
+    local unified = {
+        content = "",
+        finish_reason = "",
+        token_usage = { prompt = 0, completion = 0, total = 0 }
+    }
+
+    if resp.usage then
+        unified.token_usage.prompt = resp.usage.prompt_tokens or 0
+        unified.token_usage.completion = resp.usage.completion_tokens or 0
+        unified.token_usage.total = resp.usage.total_tokens or 0
+    end
+
+    if resp.choices and #resp.choices > 0 then
+        local ch = resp.choices[1]
+        if ch.message then
+            unified.content = ch.message.content or ""
+            if ch.message.reasoning_content then
+                unified.reasoning_content = ch.message.reasoning_content
+            end
+            if ch.message.tool_calls then
+                local tcs = {}
+                for _, tc in ipairs(ch.message.tool_calls) do
+                    local args_ok, args = pcall(json.decode, tc["function"].arguments)
+                    if not args_ok then args = {} end
+                    table.insert(tcs, {
+                        id = tc.id,
+                        type = tc.type or "function",
+                        name = tc["function"].name,
+                        arguments = args
+                    })
+                end
+                unified.tool_calls = tcs
+            end
+        end
+        unified.finish_reason = ch.finish_reason or ""
+    end
+
+    return json.encode(unified)
+end
+
+function adapter.transform_stream_chunk(raw_chunk)
+    local ok, chunk = pcall(json.decode, raw_chunk)
+    if not ok then return "" end
+    if not chunk.choices or #chunk.choices == 0 then return "" end
+    local delta = chunk.choices[1].delta or {}
+    local fr = chunk.choices[1].finish_reason
+    return json.encode({
+        content = delta.content or "",
+        done = (fr ~= nil)
+    })
 end
 
 return adapter
