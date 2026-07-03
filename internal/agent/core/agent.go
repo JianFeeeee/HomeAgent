@@ -358,17 +358,25 @@ func (a *Agent) emitResponse(evt *agentIO.InputEvent, response string) {
 		ch = evt.Source
 	}
 
-	a.io.EmitOutputTo(evt.Source, ch, "text", map[string]interface{}{
+	payload := map[string]interface{}{
 		"content":    response,
 		"request_id": evt.RequestID,
-	})
+	}
+	if stageCtx.ReasoningContent != "" {
+		payload["reasoning_content"] = stageCtx.ReasoningContent
+	}
+	if stageCtx.TokenUsage != nil {
+		payload["usage"] = stageCtx.TokenUsage
+	}
+
+	a.io.EmitOutputTo(evt.Source, ch, "text", payload)
 
 	if evt.ResponseCh != nil {
 		evt.ResponseCh <- &agentIO.OutputEvent{
 			RequestID:     evt.RequestID,
 			Target:        evt.Source,
 			Type:          "text",
-			Payload:       map[string]interface{}{"content": response},
+			Payload:       payload,
 			Done:          true,
 			OutputChannel: ch,
 		}
@@ -459,6 +467,12 @@ func (a *Agent) process(input string, stageCtx *sdk.StageContext) (response stri
 
 		// === Stage: post_action — LLM 返回，插件可审查/修改 ===
 		stageCtx.LLMText = resp.Content
+		stageCtx.ReasoningContent = resp.ReasoningContent
+		stageCtx.TokenUsage = map[string]int{
+			"prompt_tokens":     resp.TokenUsage.Prompt,
+			"completion_tokens": resp.TokenUsage.Completion,
+			"total_tokens":      resp.TokenUsage.Total,
+		}
 		stageCtx.ToolCalls = convertToolCalls(resp.ToolCalls)
 		if a.runStage(sdk.StagePostAction, stageCtx) {
 			return *stageCtx.Response, toolsUsed, nil
