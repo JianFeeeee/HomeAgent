@@ -65,6 +65,9 @@ type Agent struct {
 	// 阶段管道：插件消息流编辑
 	stageHost *StageHost
 	eventBus  *events.Bus
+
+	// 自循环输入通道：核心内部任务（记忆消歧、系统维护），不经过 IO 层
+	selfInputCh chan string
 }
 
 type AgentConfig struct {
@@ -123,6 +126,7 @@ func New(cfg AgentConfig) *Agent {
 		maxContextSize:   cfg.MaxContextSize,
 		stageHost:        cfg.StageHost,
 		eventBus:         cfg.EventBus,
+		selfInputCh:      make(chan string, 64),
 	}
 }
 
@@ -138,15 +142,42 @@ func (a *Agent) Stop() {
 
 func (a *Agent) ID() types.AgentID { return a.id }
 
+// SelfInputChan 返回自循环输入通道（只读，供内部测试验证）
+func (a *Agent) SelfInputChan() <-chan string {
+	return a.selfInputCh
+}
+
+// injectSelf 向自循环通道发送内部任务（记忆消歧、系统维护）
+// 线程安全，不阻塞发送者（通道缓冲 64）
+func (a *Agent) injectSelf(task string) {
+	select {
+	case a.selfInputCh <- task:
+	default:
+		log.Printf("[agent] self input channel full, dropping task: %s", truncateStr(task, 80))
+	}
+}
+
 func (a *Agent) eventLoop() {
 	for {
 		select {
 		case evt := <-a.io.InputChan():
 			a.handleInput(evt)
+		case task := <-a.selfInputCh:
+			a.handleSelfInput(task)
 		case <-a.ctx.Done():
 			return
 		}
 	}
+}
+
+// handleSelfInput 处理自循环输入（内部任务，不经过 IO 层）
+func (a *Agent) handleSelfInput(task string) {
+	a.processTextInput(&agentIO.InputEvent{
+		Source:        "system",
+		Type:          "text",
+		Payload:       map[string]interface{}{"content": task},
+		OutputChannel: "_consolidation_",
+	}, task)
 }
 
 func (a *Agent) handleInput(evt *agentIO.InputEvent) {
@@ -971,10 +1002,10 @@ type ConsolidationTask struct {
 	Data   interface{} `json:"data"`   // 任务相关数据
 }
 
-// enqueueConsolidationTask 将记忆整理任务注入到 Agent 输入队列
+// enqueueConsolidationTask 将记忆整理任务通过自循环通道注入 Agent（不经过 IO 层）
 func (a *Agent) enqueueConsolidationTask(task ConsolidationTask) {
 	msg := fmt.Sprintf("【记忆整理任务】\n类型: %s\n说明: %s", task.Type, task.Reason)
-	a.io.InjectTextTo("system", "_consolidation_", msg)
+	a.injectSelf(msg)
 	log.Printf("[agent] enqueued consolidation task: %s", task.Reason)
 }
 
