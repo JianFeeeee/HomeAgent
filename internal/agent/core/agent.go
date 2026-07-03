@@ -986,12 +986,10 @@ func (a *Agent) executeDocTool(tc agentAPI.ToolCall) string {
 		if query == "" {
 			return "请输入查询内容"
 		}
-		docs := a.docStore.Query(query, topK)
+		docs := a.docStore.Consume(query, topK)
 		if len(docs) == 0 {
 			return "未找到相关文档记忆"
 		}
-		// 返回内容后从冷层移除，避免后续自动注入重复
-		a.docStore.Consume(query, topK)
 		var parts []string
 		for i, d := range docs {
 			parts = append(parts, fmt.Sprintf("[%d] %s (来源: %s)", i+1, d.Summary, d.Source))
