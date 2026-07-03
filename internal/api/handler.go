@@ -5,15 +5,18 @@ import (
 	"fmt"
 	"net/http"
 	"os"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
 
 	agentIO "gitcode.com/JianFeeeee/HomeAgent/internal/agent/io"
+	internalConfig "gitcode.com/JianFeeeee/HomeAgent/internal/config"
 	"gitcode.com/JianFeeeee/HomeAgent/internal/knowledge"
 	luaVM "gitcode.com/JianFeeeee/HomeAgent/internal/lua"
 	"gitcode.com/JianFeeeee/HomeAgent/internal/memory"
 	"gitcode.com/JianFeeeee/HomeAgent/internal/memory/text"
+	"gitcode.com/JianFeeeee/HomeAgent/internal/plugin"
 	"gitcode.com/JianFeeeee/HomeAgent/internal/skill"
 	"gitcode.com/JianFeeeee/HomeAgent/internal/supervisor"
 	"gitcode.com/JianFeeeee/HomeAgent/internal/tracker"
@@ -32,9 +35,11 @@ type Handler struct {
 	textMem    *text.Memory
 	knowledge  *knowledge.Store
 	tracker    *tracker.Tracker
+	cfgReg     *internalConfig.ConfigRegistry
+	pluginReg  *plugin.Registry
 }
 
-func NewHandler(sup *supervisor.Daemon, mem *memory.GraphDB, sk *skill.Manager, lua *luaVM.VM, cfg *types.Config, iom *agentIO.IOManager, tm *text.Memory, ks *knowledge.Store, tr *tracker.Tracker) *Handler {
+func NewHandler(sup *supervisor.Daemon, mem *memory.GraphDB, sk *skill.Manager, lua *luaVM.VM, cfg *types.Config, iom *agentIO.IOManager, tm *text.Memory, ks *knowledge.Store, tr *tracker.Tracker, cr *internalConfig.ConfigRegistry, pr *plugin.Registry) *Handler {
 	var idx *memory.Indexer
 	if mem != nil {
 		idx = memory.NewIndexer(mem)
@@ -51,6 +56,8 @@ func NewHandler(sup *supervisor.Daemon, mem *memory.GraphDB, sk *skill.Manager, 
 		textMem:    tm,
 		knowledge:  ks,
 		tracker:    tr,
+		cfgReg:     cr,
+		pluginReg:  pr,
 	}
 }
 
@@ -66,6 +73,8 @@ func (h *Handler) RegisterRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("/api/v1/memory/text", h.handleTextMemory)
 	mux.HandleFunc("/api/v1/network", h.handleNetwork)
 	mux.HandleFunc("/api/v1/config", h.handleConfig)
+	mux.HandleFunc("/api/v1/settings", h.handleSettings)
+	mux.HandleFunc("/api/v1/settings/", h.handleSettings)
 	mux.HandleFunc("/api/v1/knowledge", h.handleKnowledge)
 	mux.HandleFunc("/api/v1/knowledge/", h.handleKnowledge)
 	mux.HandleFunc("/api/v1/adapters", h.handleAdapters)
@@ -506,6 +515,51 @@ func (h *Handler) handleConfig(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
+func (h *Handler) handleSettings(w http.ResponseWriter, r *http.Request) {
+	if h.cfgReg == nil {
+		writeJSON(w, http.StatusNotFound, map[string]string{"error": "config registry not available"})
+		return
+	}
+	switch r.Method {
+	case http.MethodGet:
+		prefix := r.URL.Query().Get("prefix")
+		keys := h.cfgReg.List(prefix)
+		values := make(map[string]interface{})
+		for _, k := range keys {
+			v, _ := h.cfgReg.Get(k)
+			values[k] = v
+		}
+		// 返回插件列表供侧边栏分组
+		plugins := []string{"core"}
+		if h.pluginReg != nil {
+			for _, p := range h.pluginReg.List() {
+				plugins = append(plugins, "plugin."+p.Name())
+			}
+		}
+		sort.Strings(plugins)
+		writeJSON(w, http.StatusOK, map[string]interface{}{
+			"settings": values,
+			"plugins":  plugins,
+		})
+	case http.MethodPut:
+		var body struct {
+			Key   string      `json:"key"`
+			Value interface{} `json:"value"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid request"})
+			return
+		}
+		if err := h.cfgReg.Set(body.Key, body.Value); err != nil {
+			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
+	default:
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+	}
+}
+
 // OpenAI 兼容 API — 所有输入走 IO 抽象层（中断）
 func (h *Handler) handleOpenAICompletions(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
@@ -664,6 +718,15 @@ input,textarea,select{background:#0f172a;border:1px solid #334155;border-radius:
 label{display:block;font-size:12px;color:#94a3b8;margin-bottom:4px}
 h3{font-size:14px;font-weight:600;color:#f1f5f9;margin-bottom:8px}
 pre{background:#0f172a;border-radius:6px;padding:12px;font-size:12px;overflow-x:auto;color:#a5b4fc}
+.settings-layout{display:flex;gap:20px;min-height:60vh}
+.settings-sidebar{width:200px;flex-shrink:0;background:#1e293b;border:1px solid #334155;border-radius:12px;padding:12px 0;overflow-y:auto}
+.settings-sidebar a{display:block;padding:10px 16px;color:#94a3b8;font-size:13px;cursor:pointer;text-decoration:none;border-left:3px solid transparent}
+.settings-sidebar a:hover{background:#0f172a;color:#e2e8f0}
+.settings-sidebar a.active{background:#0f172a;color:#38bdf8;border-left-color:#38bdf8}
+.settings-content{flex:1;min-width:0}
+.settings-key{font-family:monospace;font-size:12px;color:#64748b;margin-bottom:2px}
+.save-btn{float:right}
+.toast{position:fixed;bottom:20px;right:20px;background:#166534;color:#86efac;padding:10px 20px;border-radius:8px;font-size:13px;display:none;z-index:100}
 </style>
 </head>
 <body>
@@ -682,17 +745,23 @@ pre{background:#0f172a;border-radius:6px;padding:12px;font-size:12px;overflow-x:
 <div id="tab-network" class="tab-content"></div>
 <div id="tab-config" class="tab-content"></div>
 </div>
+<div id="toast" class="toast"></div>
 <script>
-let state={status:null};
+let state={status:null,settings:null,settingsPlugins:[],selectedSection:'core'};
 async function api(p,o={}){const r=await fetch('/api/v1'+p,{headers:{'Content-Type':'application/json',...o.headers},...o});return r.json()}
 function switchTab(n){document.querySelectorAll('.tab-content').forEach(e=>e.classList.remove('active'));document.getElementById('tab-'+n).classList.add('active');document.querySelectorAll('nav a').forEach(e=>e.classList.remove('active'));document.querySelector('nav a[onclick*="'+n+'"]')?.classList.add('active');renderAll()}
-async function renderAll(){try{state.status=await api('/status')}catch(e){}renderOverview();renderMemory();renderSkills();renderNetwork();renderConfig()}
+function toast(m){const t=document.getElementById('toast');t.textContent=m;t.style.display='block';setTimeout(()=>t.style.display='none',2500)}
+async function renderAll(){try{state.status=await api('/status')}catch(e){}try{var s=await api('/settings');state.settings=s.settings||{};state.settingsPlugins=s.plugins||['core']}catch(e){}renderOverview();renderMemory();renderSkills();renderNetwork();renderConfig();renderConfigSidebar()}
 function renderOverview(){const s=state.status||{};document.getElementById('tab-overview').innerHTML='<div class="grid-3">'+statCard('运行状态',s.status||'unknown')+statCard('运行时间',s.uptime||'-')+statCard('版本',s.version||'-')+'</div>'}
 function statCard(l,v){return '<div class="card"><div class="stat-value">'+v+'</div><div class="stat-label">'+l+'</div></div>'}
 function renderMemory(){document.getElementById('tab-memory').innerHTML='<div class="card"><h2>图记忆</h2><p style="color:#94a3b8">agent 通过 memory_recall / memory_commit 自动管理</p></div>'}
 function renderSkills(){document.getElementById('tab-skills').innerHTML='<div class="card"><h2>技能</h2><p style="color:#94a3b8">SKILL.md 插件通过 IO 层注入</p></div>'}
 function renderNetwork(){document.getElementById('tab-network').innerHTML='<div class="card"><h2>网络</h2><p style="color:#94a3b8">LLM API 连通性监控</p></div>'}
-function renderConfig(){document.getElementById('tab-config').innerHTML='<div class="card"><h2>配置</h2><pre>'+JSON.stringify(state.status,null,2)+'</pre></div>'}
+function renderConfigSidebar(){var el=document.querySelector('.settings-sidebar');if(!el)return;el.innerHTML='';state.settingsPlugins.forEach(function(p){var a=document.createElement('a');a.textContent=p;if(p===state.selectedSection)a.className='active';a.onclick=function(){state.selectedSection=p;renderConfig()};el.appendChild(a)})}
+function renderConfig(){var prefix=state.selectedSection+'.';var filtered=Object.keys(state.settings||{}).filter(function(k){return k===prefix.slice(0,-1)||k.startsWith(prefix)});filtered.sort();var html='<div class="settings-layout"><div class="settings-sidebar" id="settings-sidebar"></div><div class="settings-content">';if(filtered.length===0){html+='<div class="card"><h2>'+state.selectedSection+'</h2><p style="color:#94a3b8">暂无设置项</p></div>'}else{filtered.forEach(function(k){var v=state.settings[k];var sv=typeof v==='object'?JSON.stringify(v):String(v);html+='<div class="card"><div class="save-btn"><button class="btn btn-primary btn-sm" onclick="saveSetting(\''+k+'\')">保存</button></div><div class="settings-key">'+k+'</div><label>值</label><input id="inp-'+k.replace(/\./g,'_')+'" value="'+escHtml(sv)+'" onchange="markDirty(\''+k+'\')"/></div>'})}html+='</div></div>';document.getElementById('tab-config').innerHTML=html;renderConfigSidebar()}
+function escHtml(s){return s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;')}
+function markDirty(k){var inp=document.getElementById('inp-'+k.replace(/\./g,'_'));if(inp)inp.style.borderColor='#eab308'}
+async function saveSetting(k){var inp=document.getElementById('inp-'+k.replace(/\./g,'_'));if(!inp)return;var raw=inp.value;var val;try{val=JSON.parse(raw)}catch(e){val=raw}var r=await api('/settings',{method:'PUT',body:JSON.stringify({key:k,value:val})});if(r.status==='ok'){inp.style.borderColor='';state.settings[k]=val;toast('已保存: '+k)}else{toast('保存失败: '+(r.error||'unknown'))}}
 renderAll();setInterval(renderAll,30000);
 </script>
 </body>

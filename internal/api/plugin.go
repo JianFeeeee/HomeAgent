@@ -5,10 +5,12 @@ import (
 	"net/http"
 
 	agentIO "gitcode.com/JianFeeeee/HomeAgent/internal/agent/io"
+	internalConfig "gitcode.com/JianFeeeee/HomeAgent/internal/config"
 	"gitcode.com/JianFeeeee/HomeAgent/internal/knowledge"
 	luaVM "gitcode.com/JianFeeeee/HomeAgent/internal/lua"
 	"gitcode.com/JianFeeeee/HomeAgent/internal/memory"
 	"gitcode.com/JianFeeeee/HomeAgent/internal/memory/text"
+	"gitcode.com/JianFeeeee/HomeAgent/internal/plugin"
 	"gitcode.com/JianFeeeee/HomeAgent/internal/skill"
 	"gitcode.com/JianFeeeee/HomeAgent/internal/supervisor"
 	"gitcode.com/JianFeeeee/HomeAgent/internal/tracker"
@@ -26,9 +28,10 @@ type Plugin struct {
 }
 
 func NewWebUIPlugin(name, addr string, sup *supervisor.Daemon, mem *memory.GraphDB, sk *skill.Manager,
-	lua *luaVM.VM, cfg *types.Config, iom *agentIO.IOManager, tm *text.Memory, ks *knowledge.Store, tr *tracker.Tracker) *Plugin {
+	lua *luaVM.VM, cfg *types.Config, iom *agentIO.IOManager, tm *text.Memory, ks *knowledge.Store, tr *tracker.Tracker,
+	cr *internalConfig.ConfigRegistry, pr *plugin.Registry) *Plugin {
 
-	h := NewHandler(sup, mem, sk, lua, cfg, iom, tm, ks, tr)
+	h := NewHandler(sup, mem, sk, lua, cfg, iom, tm, ks, tr, cr, pr)
 	mux := http.NewServeMux()
 	h.RegisterRoutes(mux)
 

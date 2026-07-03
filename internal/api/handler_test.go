@@ -25,7 +25,7 @@ func newTestHandler(t *testing.T) (*Handler, *supervisor.Daemon) {
 	sup := supervisor.New(cfg)
 	sup.Start()
 
-	return NewHandler(sup, nil, nil, nil, cfg, nil, nil, nil, nil), sup
+	return NewHandler(sup, nil, nil, nil, cfg, nil, nil, nil, nil, nil, nil), sup
 }
 
 func TestHandleStatus(t *testing.T) {
@@ -129,7 +129,7 @@ func TestHandleKnowledgeSearch(t *testing.T) {
 	sup.Start()
 	defer sup.Shutdown()
 
-	h := NewHandler(sup, nil, nil, nil, cfg, nil, nil, ks, nil)
+	h := NewHandler(sup, nil, nil, nil, cfg, nil, nil, ks, nil, nil, nil)
 
 	req := httptest.NewRequest(http.MethodGet, "/api/v1/knowledge?q=test", nil)
 	w := httptest.NewRecorder()
@@ -161,7 +161,7 @@ func TestHandleKnowledgeCreate(t *testing.T) {
 	sup.Start()
 	defer sup.Shutdown()
 
-	h := NewHandler(sup, nil, nil, nil, cfg, nil, nil, ks, nil)
+	h := NewHandler(sup, nil, nil, nil, cfg, nil, nil, ks, nil, nil, nil)
 
 	body := `{"name":"new_doc","content":"fresh content"}`
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/knowledge", strings.NewReader(body))
@@ -226,7 +226,7 @@ func TestHandleTrackerStats(t *testing.T) {
 	sup.Start()
 	defer sup.Shutdown()
 
-	h := NewHandler(sup, nil, nil, nil, cfg, nil, nil, nil, tr)
+	h := NewHandler(sup, nil, nil, nil, cfg, nil, nil, nil, tr, nil, nil)
 
 	req := httptest.NewRequest(http.MethodGet, "/api/v1/tracker", nil)
 	w := httptest.NewRecorder()
