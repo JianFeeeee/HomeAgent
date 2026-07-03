@@ -18,7 +18,7 @@ import (
 	"gitcode.com/JianFeeeee/HomeAgent/internal/memory/social"
 	"gitcode.com/JianFeeeee/HomeAgent/internal/memory/text"
 	"gitcode.com/JianFeeeee/HomeAgent/internal/plugin"
-	sdk "gitcode.com/JianFeeeee/HomeAgent/internal/plugin/sdk"
+	sdk "gitcode.com/JianFeeeee/HomeAgent/internal/sdk"
 	"gitcode.com/JianFeeeee/HomeAgent/internal/skill"
 	"gitcode.com/JianFeeeee/HomeAgent/internal/tracker"
 	"gitcode.com/JianFeeeee/HomeAgent/pkg/types"
@@ -82,6 +82,13 @@ type Agent struct {
 	childMu      sync.Mutex
 	childNextID  int64
 	childResults map[string]string
+
+	// 高优先级打断通道：interceptLoop 注入，process() 在工具循环轮次间非阻塞读取
+	interceptCh chan string
+
+	// 进行中的 LLM 请求取消函数，interceptLoop 可调用以在请求中打断
+	cancelLLM context.CancelFunc
+	llmMu     sync.Mutex
 }
 
 type AgentConfig struct {
@@ -148,11 +155,13 @@ func New(cfg AgentConfig) *Agent {
 		eventBus:         cfg.EventBus,
 		selfInputCh:      make(chan string, 64),
 		childResults:     make(map[string]string),
+		interceptCh:      make(chan string, 64),
 	}
 }
 
 func (a *Agent) Start() {
 	go a.eventLoop()
+	go a.interceptLoop()
 	go a.distillLoop()
 	log.Printf("[agent] %s started, waiting for IO interrupts", a.id)
 }
@@ -185,6 +194,45 @@ func (a *Agent) eventLoop() {
 			a.handleInput(evt)
 		case task := <-a.selfInputCh:
 			a.handleSelfInput(task)
+		case <-a.ctx.Done():
+			return
+		}
+	}
+}
+
+// interceptLoop 独立 goroutine 监控中断通道。
+// 两种路径投递：
+//   a) 通过 cancelLLM + interceptCh 直接打断进行中的 LLM 请求
+//   b) 通过 a.io.InjectInput() → InputChan → eventLoop（代理空闲时触发新处理循环）
+func (a *Agent) interceptLoop() {
+	for {
+		select {
+		case evt := <-a.io.InputInterruptChan():
+			text, _ := evt.Payload["content"].(string)
+			if text == "" {
+				continue
+			}
+			log.Printf("[agent] interrupt from %s: %s", evt.Source, truncateStr(text, 80))
+
+			// (a) 直接取消进行中的 LLM 请求
+			a.llmMu.Lock()
+			if a.cancelLLM != nil {
+				a.cancelLLM()
+				log.Printf("[agent] LLM request cancelled by interrupt")
+			}
+			a.llmMu.Unlock()
+
+			// 注入拦截通道 — process() 在工具循环中非阻塞读取
+			select {
+			case a.interceptCh <- text:
+			default:
+			}
+
+			// (b) 投递为新输入 — 代理空闲时 eventLoop 会消费
+			a.io.InjectInput("interrupt", "text", map[string]interface{}{
+				"content": fmt.Sprintf("[interrupt] %s: %s", evt.Source, text),
+			})
+
 		case <-a.ctx.Done():
 			return
 		}
@@ -361,6 +409,15 @@ func (a *Agent) process(input string, stageCtx *sdk.StageContext) (response stri
 	}
 
 	for turn := 0; turn < a.maxTurns; turn++ {
+		// === 高优先级打断：每次 LLM 调用前检查拦截通道 ===
+		if text := a.drainInterrupt(); text != "" {
+			msgs = append(msgs, agentAPI.Message{
+				Role:    "system",
+				Content: fmt.Sprintf("[打断消息] 用户发来一条紧急消息，请优先处理:\n%s", text),
+			})
+			log.Printf("[agent] interrupt injected before LLM call (turn %d)", turn)
+		}
+
 		req := &agentAPI.CompletionRequest{
 			Messages:   msgs,
 			MaxTokens:  4096,
@@ -371,7 +428,19 @@ func (a *Agent) process(input string, stageCtx *sdk.StageContext) (response stri
 			},
 		}
 
-		resp, err := a.provider.Chat(a.ctx, req)
+		// 可取消的 LLM 调用：interceptLoop 通过 cancelLLM 打断进行中的请求
+		reqCtx, reqCancel := context.WithCancel(a.ctx)
+		a.llmMu.Lock()
+		a.cancelLLM = reqCancel
+		a.llmMu.Unlock()
+
+		resp, err := a.provider.Chat(reqCtx, req)
+
+		a.llmMu.Lock()
+		a.cancelLLM = nil
+		a.llmMu.Unlock()
+		reqCancel()
+
 		if err != nil {
 			return "", toolsUsed, fmt.Errorf("provider: %w", err)
 		}
@@ -1969,9 +2038,19 @@ func getFloat(m map[string]interface{}, key string) float64 {
 }
 
 func truncateStr(s string, max int) string {
-	runes := []rune(s)
-	if len(runes) > max {
-		return string(runes[:max]) + "..."
+	if len(s) <= max {
+		return s
 	}
-	return s
+	return s[:max] + "..."
+}
+
+// drainInterrupt 非阻塞读取 interceptCh 中的一条打断消息。
+// 若有多条，只取最先到达的一条（丢弃后续）。
+func (a *Agent) drainInterrupt() string {
+	select {
+	case text := <-a.interceptCh:
+		return text
+	default:
+		return ""
+	}
 }

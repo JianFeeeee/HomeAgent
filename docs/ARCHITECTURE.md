@@ -583,70 +583,71 @@ Agent.eventLoop() → handleInput → processTextInput
 ## 十五、代码结构
 
 ```
-cmd/homed/main.go                        — 入口：组装所有子系统
+cmd/homed/main.go                        — 入口：组装所有子系统, 零 IO
+cmd/waiter/main.go                       — CLI 客户端 (Unix socket)
 internal/
 ├── agent/
 │   ├── core/
-│   │   ├── agent.go                     — Agent 核心：事件循环、工具循环、心跳
+│   │   ├── agent.go                     — Agent: eventLoop/interceptLoop/process/distillLoop
 │   │   ├── context.go                   — RelevanceContext：TF-IDF 上下文管理
-│   │   └── stages.go                    — StageHost：阶段管道编排
+│   │   └── stages.go                    — StageHost：阶段管道编排 (并行执行)
 │   ├── api/
-│   │   └── provider.go                 — Provider 接口 + DeepSeek/Ollama 实现
+│   │   └── provider.go                 — Provider 接口 + DeepSeek/Ollama/LuaAdaptedProvider
 │   ├── io/
-│   │   └── channel.go                  — IOManager + Device 接口（过渡期保留）
+│   │   └── channel.go                  — IOManager (排队/中断/输出三通道)
 │   └── personal.go                     — 人格加载
-├── agent/
-│   ├── core/
-│   │   ├── agent.go                     — Agent 核心：事件循环、工具循环、心跳、selfInputCh
-│   │   ├── context.go                   — RelevanceContext：TF-IDF 上下文管理
-│   │   └── stages.go                    — StageHost：阶段管道编排
-│   ├── api/
-│   │   └── provider.go                 — Provider 接口 + OpenAI/Ollama/LuaAdaptedProvider
-│   ├── io/
-│   │   └── channel.go                  — IOManager + Device 接口（过渡期保留）
-│   └── personal.go                     — 人格加载
-├── api/
-│   ├── handler.go                      — HTTP API 端点 + WebUI (内联 HTML/JS/CSS)
-│   └── plugin.go                       — WebUI Device 包装
+├── sdk/                                 ★ PluginSDK: 核心 Go API
+│   ├── plugin.go                       — Plugin 接口 + PluginSDK 结构体
+│   ├── memory.go                       — MemoryAPI (图/文本/文档)
+│   ├── knowledge.go                    — KnowledgeAPI
+│   ├── settings.go                     — SettingsAPI (配置)
+│   └── llm.go                          — LLMAPI (源管理)
 ├── config/
-│   └── registry.go                     — ConfigRegistry：统一配置中心
+│   └── registry.go                     — ConfigRegistry：统一配置中心 (SQLite)
 ├── events/
 │   └── bus.go                          — 系统事件总线 (Publish/Subscribe)
+├── plugin/
+│   ├── registry.go                     — 注册表：生命周期 Load/StopAll/Reload, RegisterFactory
+│   ├── manifest.go                     — PluginManifest (plugin.json 元数据)
+│   ├── dynamic.go                      — .so 动态加载器 (Go plugin.Open)
+│   └── plugin.go                       — SKILL 插件解析 (OpenClaw 兼容)
+├── plugins/
+│   ├── all.go                          — 空白导入触发所有内置插件 init()
+│   ├── timer/plugin.go                 — 定时器 (timer_set 工具 + 中断反馈)
+│   ├── cli/plugin.go                   — CLI 插件 (Unix socket, InjectTextSync)
+│   ├── openclaw/plugin.go              — OpenClaw 兼容 (SKILL.md → SDK 工具注册)
+│   └── webui/                          — WebUI 插件 (HTTP 服务器 + 仪表盘)
+│       ├── plugin.go
+│       └── handler.go
 ├── memory/
 │   ├── graph.go                        — SQLite 图数据库
 │   ├── indexer.go                      — 图索引器
 │   ├── vector/store.go                 — TF-IDF 向量存储
 │   ├── document/doc.go                 — 文档记忆
-│   ├── text/text.go                    — 文本记忆（JSONL）
+│   ├── text/text.go                    — 文本记忆 (JSONL)
 │   └── pipeline/                       — 蒸馏器
 ├── knowledge/
 │   └── knowledge.go                    — 知识系统
-├── plugin/
-│   ├── plugin.go                       — 插件注册表 + ConfigRegistry + SettingsAPI 注入
-│   └── sdk/
-│       ├── api.go                      — PluginAPI (Tool/Stage/Event/Settings/Memory/Knowledge)
-│       └── bus.go                      — 插件内部 EventBus 接口
 ├── onebot/                             — OneBot V11 QQ 协议实现
 ├── tracker/                            — 变更追踪 (overlayfs)
 ├── supervisor/                         — 守护进程
 ├── skill/                              — 技能管理器
 ├── lua/
-│   ├── vm.go                           — Lua VM (json.encode/decode, CallTransformRequest/Response)
-│   └── adapters/
-│       ├── openai.lua                  — OpenAI 协议适配
-│       ├── deepseek.lua                — DeepSeek 协议适配 (temperature=0, reasoning)
-│       └── ollama.lua                  — Ollama 协议适配
+│   ├── vm.go                           — Lua VM (json.encode/decode, transform)
+│   └── adapters/                       — LLM 协议适配器脚本
 ├── network/                            — 网络监控
 ├── container/                          — 容器管理
 ├── snapshot/                           — 快照
 ├── embed/                              — 嵌入
 └── tokenizer/                          — 分词器
 config/                                 — 顶层配置加载
-├── config.go                           — Config 结构 + 加载/保存
+├── config.go                           — Config 结构
 └── config.yaml
 pkg/types/                              — 类型定义
 docs/
-└── ARCHITECTURE.md                     — 本架构文档
+├── ARCHITECTURE.md                     — 本架构文档
+├── ADAPTER.md                          — Lua 适配器文档
+└── PLAN.md                             — 实施计划/概览
 ```
 
 ---
@@ -664,3 +665,109 @@ docs/
 | 核心 IO | IOManager `EmitOutput` 直出 | 全部走 `output_send` 工具 |
 | 插件工具路由 | IOManager `ExecuteTool` 链 | StageHost + Registry 双层路由 |
 | 内部任务 | 无 | selfInputCh 自循环通道（不经过 IO） |
+
+---
+
+## 十七、插件自注册与动态加载
+
+### 自注册机制
+
+内置插件通过 `init()` 自注册，无需 `main.go` 硬编码：
+
+```go
+// internal/plugins/timer/plugin.go
+func init() {
+    plugin.RegisterFactory("timer", func(name string, config map[string]interface{}) (sdk.Plugin, error) {
+        return New(name), nil
+    })
+}
+```
+
+空白导入文件 `internal/plugins/all.go` 触发所有内置插件的 `init()`：
+
+```go
+package plugins
+import (
+    _ "gitcode.com/JianFeeeee/HomeAgent/internal/plugins/cli"
+    _ "gitcode.com/JianFeeeee/HomeAgent/internal/plugins/openclaw"
+    _ "gitcode.com/JianFeeeee/HomeAgent/internal/plugins/timer"
+    _ "gitcode.com/JianFeeeee/HomeAgent/internal/plugins/webui"
+)
+```
+
+`main.go` 不再需要 `RegisterNative` 调用，只需设置包级变量注入运行时依赖：
+
+```go
+cli.DefaultSocket = *cliSocket
+openclaw.SkillsDir = filepath.Join(*dataDir, "skills")
+webui.Configure(httpAddr, sup, memDB, ...)
+pluginReg.Load(plgDir)  // 自动扫描目录 + 使用已注册的工厂
+```
+
+`Load()` 分两步执行：
+1. 扫描 `plugins/` 下已有子目录，匹配已注册工厂加载
+2. 对已注册工厂但尚无目录的，自动创建目录并加载
+
+### 动态 .so 加载
+
+第三方插件编译为 `.so` 文件，放入 `<data>/plugins/<name>/`：
+
+```
+<data>/plugins/myplugin/
+    plugin.json   { "name": "myplugin", "version": "1.0", "entry": "plugin.so" }
+    plugin.so     (Go -buildmode=plugin, 导出 NewPlugin 函数)
+```
+
+加载器 (`internal/plugin/dynamic.go`) 流程：
+
+```go
+tryLoadSO(dir, name, config):
+    1. plugin.Open("plugin.so")
+    2. Lookup("NewPlugin") — 签名 func(name string, config map[string]interface{}) (sdk.Plugin, error)
+    3. 调用 factory, 包装为 dynamicPlugin
+```
+
+内置插件保持 init() 自注册编译进内核，第三方插件以 .so 形式热加载。
+
+---
+
+## 十八、中断打断机制
+
+### 架构
+
+```
+interceptLoop (独立 goroutine)
+    ├── InputInterruptChan() ← 定时器/消息通知等
+    │
+    ├── (a) cancelLLM() → Provider HTTP 请求取消
+    ├── (b) interceptCh < text → process() turn 前 drainInterrupt()
+    └── (c) InjectInput("interrupt", "text", ...) → 空闲时触发新处理
+```
+
+### 三种投递路径
+
+| 路径 | 目标 | 触发时机 |
+|------|------|---------|
+| **(a) cancelLLM** | 取消进行中的 Provider HTTP 请求 | 拦截到 `context.Canceled` |
+| **(b) interceptCh** | process() 工具循环中注入 `[打断消息]` | 每个 LLM call 前 `drainInterrupt()` |
+| **(c) InjectInput** | eventLoop 空闲时启动新处理循环 | 无进行中请求时 |
+
+### process() 内中断注入
+
+```go
+for turn := 0; turn < maxTurns; turn++ {
+    if text := a.drainInterrupt(); text != "" {
+        msgs = append(msgs, agentAPI.Message{
+            Role: "system",
+            Content: fmt.Sprintf("[打断消息] %s", text),
+        })
+    }
+    // LLM call with cancellable context
+    reqCtx, cancel := context.WithCancel(a.ctx)
+    a.cancelLLM = cancel       // interceptLoop 可调用
+    resp, err := provider.Chat(reqCtx, req)
+    a.cancelLLM = nil
+    cancel()
+    // ... tool call loop ...
+}
+```

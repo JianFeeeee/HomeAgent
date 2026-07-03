@@ -227,6 +227,148 @@ func (m *Memory) FileCount() int {
 	return len(files)
 }
 
+// PurgeByFilter 删除所有满足 filter 函数的事件（重写所有 JSONL 文件）
+func (m *Memory) PurgeByFilter(filter func(Event) bool) (int, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	// 关闭当前文件，准备重建
+	if m.current != nil {
+		m.current.Close()
+		m.current = nil
+	}
+
+	files, err := m.listFiles()
+	if err != nil {
+		return 0, err
+	}
+
+	totalRemoved := 0
+	for _, fpath := range files {
+		kept, removed, err := m.purgeFile(fpath, filter)
+		if err != nil {
+			log.Printf("[text memory] purge file %s: %v", fpath, err)
+			continue
+		}
+		totalRemoved += removed
+
+		if len(kept) == 0 {
+			os.Remove(fpath)
+		} else if removed > 0 {
+			m.rewriteFile(fpath, kept)
+		}
+	}
+
+	// 重新打开当前文件
+	m.openCurrent()
+	return totalRemoved, nil
+}
+
+// ReplaceByFilter 替换所有满足 filter 的事件（通过 replace 函数修改），重写文件
+func (m *Memory) ReplaceByFilter(filter func(Event) bool, replace func(Event) Event) (int, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	if m.current != nil {
+		m.current.Close()
+		m.current = nil
+	}
+
+	files, err := m.listFiles()
+	if err != nil {
+		return 0, err
+	}
+
+	totalReplaced := 0
+	for _, fpath := range files {
+		events, replaced, err := m.replaceFile(fpath, filter, replace)
+		if err != nil {
+			log.Printf("[text memory] replace file %s: %v", fpath, err)
+			continue
+		}
+		totalReplaced += replaced
+
+		if len(events) == 0 {
+			os.Remove(fpath)
+		} else if replaced > 0 {
+			m.rewriteFile(fpath, events)
+		}
+	}
+
+	m.openCurrent()
+	return totalReplaced, nil
+}
+
+// ——— internal helpers ———
+
+func (m *Memory) purgeFile(path string, filter func(Event) bool) (kept []Event, removed int, err error) {
+	f, err := os.Open(path)
+	if err != nil {
+		return nil, 0, err
+	}
+	defer f.Close()
+
+	scanner := bufio.NewScanner(f)
+	scanner.Buffer(make([]byte, 1024*1024), 1024*1024)
+	for scanner.Scan() {
+		line := strings.TrimSpace(scanner.Text())
+		if line == "" {
+			continue
+		}
+		var evt Event
+		if err := json.Unmarshal([]byte(line), &evt); err != nil {
+			continue
+		}
+		if filter(evt) {
+			removed++
+		} else {
+			kept = append(kept, evt)
+		}
+	}
+	return kept, removed, scanner.Err()
+}
+
+func (m *Memory) replaceFile(path string, filter func(Event) bool, replace func(Event) Event) (events []Event, replaced int, err error) {
+	f, err := os.Open(path)
+	if err != nil {
+		return nil, 0, err
+	}
+	defer f.Close()
+
+	scanner := bufio.NewScanner(f)
+	scanner.Buffer(make([]byte, 1024*1024), 1024*1024)
+	for scanner.Scan() {
+		line := strings.TrimSpace(scanner.Text())
+		if line == "" {
+			continue
+		}
+		var evt Event
+		if err := json.Unmarshal([]byte(line), &evt); err != nil {
+			continue
+		}
+		if filter(evt) {
+			evt = replace(evt)
+			replaced++
+		}
+		events = append(events, evt)
+	}
+	return events, replaced, scanner.Err()
+}
+
+func (m *Memory) rewriteFile(path string, events []Event) {
+	f, err := os.Create(path)
+	if err != nil {
+		log.Printf("[text memory] rewrite %s: %v", path, err)
+		return
+	}
+	defer f.Close()
+
+	enc := json.NewEncoder(f)
+	for _, evt := range events {
+		enc.Encode(evt)
+	}
+}
+
 func (m *Memory) Stats() map[string]interface{} {
 	m.mu.Lock()
 	defer m.mu.Unlock()

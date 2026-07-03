@@ -1,23 +1,21 @@
 package core
 
 import (
+	"sync"
+	"sync/atomic"
 	"testing"
 
-	sdk "gitcode.com/JianFeeeee/HomeAgent/internal/plugin/sdk"
+	sdk "gitcode.com/JianFeeeee/HomeAgent/internal/sdk"
 )
 
-func TestStageHostRegisterPlugin(t *testing.T) {
+func TestStageHostRegisterTool(t *testing.T) {
 	host := NewStageHost()
-	api := sdk.NewPluginAPI("test", "1.0.0", nil, nil, nil)
 
-	api.RegisterTool("test_tool", func(args map[string]interface{}) (interface{}, error) {
+	err := host.RegisterTool("test_tool", sdk.ToolDef{Name: "test_tool"}, func(args map[string]interface{}) (interface{}, error) {
 		return "ok", nil
 	})
-
-	host.RegisterPlugin(api)
-
-	if host.PluginCount() != 1 {
-		t.Errorf("expected 1 plugin, got %d", host.PluginCount())
+	if err != nil {
+		t.Fatalf("register: %v", err)
 	}
 
 	defs := host.GetToolDefs()
@@ -29,15 +27,21 @@ func TestStageHostRegisterPlugin(t *testing.T) {
 	}
 }
 
+func TestStageHostRegisterToolDuplicate(t *testing.T) {
+	host := NewStageHost()
+	host.RegisterTool("dup", sdk.ToolDef{Name: "dup"}, nil)
+	err := host.RegisterTool("dup", sdk.ToolDef{Name: "dup"}, nil)
+	if err == nil {
+		t.Error("expected error on duplicate tool")
+	}
+}
+
 func TestStageHostExecuteTool(t *testing.T) {
 	host := NewStageHost()
-	api := sdk.NewPluginAPI("test", "1.0.0", nil, nil, nil)
 
-	api.RegisterTool("hello", func(args map[string]interface{}) (interface{}, error) {
+	host.RegisterTool("hello", sdk.ToolDef{Name: "hello"}, func(args map[string]interface{}) (interface{}, error) {
 		return "world", nil
 	})
-
-	host.RegisterPlugin(api)
 
 	result, err := host.ExecuteTool("hello", nil)
 	if err != nil {
@@ -55,15 +59,12 @@ func TestStageHostExecuteTool(t *testing.T) {
 
 func TestStageHostRunStage(t *testing.T) {
 	host := NewStageHost()
-	api := sdk.NewPluginAPI("test", "1.0.0", nil, nil, nil)
 
 	var called bool
-	api.RegisterStage(sdk.StageOnInput, func(ctx *sdk.StageContext) error {
+	host.RegisterStage(sdk.StageOnInput, func(ctx *sdk.StageContext) error {
 		called = true
 		return nil
 	})
-
-	host.RegisterPlugin(api)
 
 	ctx := &sdk.StageContext{RawMessage: "hello"}
 	host.RunStage(sdk.StageOnInput, ctx)
@@ -73,55 +74,77 @@ func TestStageHostRunStage(t *testing.T) {
 	}
 }
 
-func TestStageHostRunStageShortCircuit(t *testing.T) {
+func TestStageHostRunStageParallel(t *testing.T) {
 	host := NewStageHost()
 
-	api1 := sdk.NewPluginAPI("p1", "1.0.0", nil, nil, nil)
-	api1.RegisterStage(sdk.StageOnInput, func(ctx *sdk.StageContext) error {
-		resp := "short-circuited"
-		ctx.Response = &resp
+	// Two handlers that both try to set Response under Lock.
+	// Only the first to acquire Lock actually wins; the second sees IsResponded() and skips.
+	host.RegisterStage(sdk.StageOnInput, func(ctx *sdk.StageContext) error {
+		ctx.Lock()
+		if ctx.Response == nil {
+			resp := "from-first"
+			ctx.Response = &resp
+		}
+		ctx.Unlock()
 		return nil
 	})
-
-	var api2called bool
-	api2 := sdk.NewPluginAPI("p2", "1.0.0", nil, nil, nil)
-	api2.RegisterStage(sdk.StageOnInput, func(ctx *sdk.StageContext) error {
-		api2called = true
+	host.RegisterStage(sdk.StageOnInput, func(ctx *sdk.StageContext) error {
+		ctx.Lock()
+		if ctx.Response == nil {
+			resp := "from-second"
+			ctx.Response = &resp
+		}
+		ctx.Unlock()
 		return nil
 	})
-
-	host.RegisterPlugin(api1)
-	host.RegisterPlugin(api2)
 
 	ctx := &sdk.StageContext{RawMessage: "hello"}
 	host.RunStage(sdk.StageOnInput, ctx)
 
-	if ctx.Response == nil || *ctx.Response != "short-circuited" {
-		t.Errorf("expected short-circuited, got %v", ctx.Response)
+	if ctx.Response == nil {
+		t.Fatal("expected a response to be set")
 	}
-	if api2called {
-		t.Error("api2 should not have been called after short circuit")
+	if *ctx.Response != "from-first" && *ctx.Response != "from-second" {
+		t.Errorf("expected either from-first or from-second, got %s", *ctx.Response)
+	}
+}
+
+func TestStageHostRunStageConcurrency(t *testing.T) {
+	host := NewStageHost()
+
+	var counter int32
+	n := 10
+	for i := 0; i < n; i++ {
+		host.RegisterStage(sdk.StageAfterOutput, func(ctx *sdk.StageContext) error {
+			atomic.AddInt32(&counter, 1)
+			return nil
+		})
+	}
+
+	host.RunStage(sdk.StageAfterOutput, &sdk.StageContext{})
+
+	if int(counter) != n {
+		t.Errorf("expected %d handlers called, got %d", n, counter)
 	}
 }
 
 func TestStageHostRunStageAll(t *testing.T) {
 	host := NewStageHost()
 
+	var mu sync.Mutex
 	count := 0
-	api1 := sdk.NewPluginAPI("p1", "1.0.0", nil, nil, nil)
-	api1.RegisterStage(sdk.StageAfterOutput, func(ctx *sdk.StageContext) error {
+	host.RegisterStage(sdk.StageAfterOutput, func(ctx *sdk.StageContext) error {
+		mu.Lock()
 		count++
+		mu.Unlock()
 		return nil
 	})
-
-	api2 := sdk.NewPluginAPI("p2", "1.0.0", nil, nil, nil)
-	api2.RegisterStage(sdk.StageAfterOutput, func(ctx *sdk.StageContext) error {
+	host.RegisterStage(sdk.StageAfterOutput, func(ctx *sdk.StageContext) error {
+		mu.Lock()
 		count++
+		mu.Unlock()
 		return nil
 	})
-
-	host.RegisterPlugin(api1)
-	host.RegisterPlugin(api2)
 
 	host.RunStageAll(sdk.StageAfterOutput, &sdk.StageContext{})
 
@@ -130,42 +153,11 @@ func TestStageHostRunStageAll(t *testing.T) {
 	}
 }
 
-func TestStageHostMultiplePlugins(t *testing.T) {
-	host := NewStageHost()
-
-	p1 := sdk.NewPluginAPI("p1", "1.0.0", nil, nil, nil)
-	p1.RegisterTool("tool1", func(args map[string]interface{}) (interface{}, error) {
-		return "from_p1", nil
-	})
-
-	p2 := sdk.NewPluginAPI("p2", "1.0.0", nil, nil, nil)
-	p2.RegisterTool("tool2", func(args map[string]interface{}) (interface{}, error) {
-		return "from_p2", nil
-	})
-
-	host.RegisterPlugin(p1)
-	host.RegisterPlugin(p2)
-
-	if host.PluginCount() != 2 {
-		t.Errorf("expected 2 plugins, got %d", host.PluginCount())
-	}
-
-	r1, _ := host.ExecuteTool("tool1", nil)
-	if r1.(string) != "from_p1" {
-		t.Errorf("expected from_p1, got %v", r1)
-	}
-
-	r2, _ := host.ExecuteTool("tool2", nil)
-	if r2.(string) != "from_p2" {
-		t.Errorf("expected from_p2, got %v", r2)
-	}
-}
-
 func TestStageHostEmpty(t *testing.T) {
 	host := NewStageHost()
 
-	if host.PluginCount() != 0 {
-		t.Errorf("expected 0 plugins, got %d", host.PluginCount())
+	if host.ToolCount() != 0 {
+		t.Errorf("expected 0 tools, got %d", host.ToolCount())
 	}
 
 	defs := host.GetToolDefs()
@@ -178,6 +170,30 @@ func TestStageHostEmpty(t *testing.T) {
 		t.Error("expected error on empty host")
 	}
 
-	// RunStage on empty host should not panic
 	host.RunStage(sdk.StageOnInput, &sdk.StageContext{})
+}
+
+func TestStageHostMultipleTools(t *testing.T) {
+	host := NewStageHost()
+
+	host.RegisterTool("tool1", sdk.ToolDef{Name: "tool1"}, func(args map[string]interface{}) (interface{}, error) {
+		return "from_p1", nil
+	})
+	host.RegisterTool("tool2", sdk.ToolDef{Name: "tool2"}, func(args map[string]interface{}) (interface{}, error) {
+		return "from_p2", nil
+	})
+
+	if host.ToolCount() != 2 {
+		t.Errorf("expected 2 tools, got %d", host.ToolCount())
+	}
+
+	r1, _ := host.ExecuteTool("tool1", nil)
+	if r1.(string) != "from_p1" {
+		t.Errorf("expected from_p1, got %v", r1)
+	}
+
+	r2, _ := host.ExecuteTool("tool2", nil)
+	if r2.(string) != "from_p2" {
+		t.Errorf("expected from_p2, got %v", r2)
+	}
 }

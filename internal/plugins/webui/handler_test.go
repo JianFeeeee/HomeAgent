@@ -1,6 +1,7 @@
-package api
+package webui
 
 import (
+	"context"
 	"encoding/json"
 	"io"
 	"net/http"
@@ -9,8 +10,13 @@ import (
 	"testing"
 	"time"
 
+	agentAPI "gitcode.com/JianFeeeee/HomeAgent/internal/agent/api"
+	agentCore "gitcode.com/JianFeeeee/HomeAgent/internal/agent/core"
+	agentIO "gitcode.com/JianFeeeee/HomeAgent/internal/agent/io"
 	internalConfig "gitcode.com/JianFeeeee/HomeAgent/internal/config"
+	"gitcode.com/JianFeeeee/HomeAgent/internal/events"
 	"gitcode.com/JianFeeeee/HomeAgent/internal/knowledge"
+	"gitcode.com/JianFeeeee/HomeAgent/internal/memory"
 	"gitcode.com/JianFeeeee/HomeAgent/internal/plugin"
 	"gitcode.com/JianFeeeee/HomeAgent/internal/supervisor"
 	"gitcode.com/JianFeeeee/HomeAgent/internal/tracker"
@@ -28,7 +34,7 @@ func newTestHandler(t *testing.T) (*Handler, *supervisor.Daemon) {
 	sup := supervisor.New(cfg)
 	sup.Start()
 
-	return NewHandler(sup, nil, nil, nil, cfg, nil, nil, nil, nil, nil, nil), sup
+	return NewHandler(sup, nil, nil, nil, cfg, nil, nil, nil, nil, nil, nil, events.NewBus()), sup
 }
 
 func TestHandleStatus(t *testing.T) {
@@ -132,7 +138,7 @@ func TestHandleKnowledgeSearch(t *testing.T) {
 	sup.Start()
 	defer sup.Shutdown()
 
-	h := NewHandler(sup, nil, nil, nil, cfg, nil, nil, ks, nil, nil, nil)
+	h := NewHandler(sup, nil, nil, nil, cfg, nil, nil, ks, nil, nil, nil, events.NewBus())
 
 	req := httptest.NewRequest(http.MethodGet, "/api/v1/knowledge?q=test", nil)
 	w := httptest.NewRecorder()
@@ -164,7 +170,7 @@ func TestHandleKnowledgeCreate(t *testing.T) {
 	sup.Start()
 	defer sup.Shutdown()
 
-	h := NewHandler(sup, nil, nil, nil, cfg, nil, nil, ks, nil, nil, nil)
+	h := NewHandler(sup, nil, nil, nil, cfg, nil, nil, ks, nil, nil, nil, events.NewBus())
 
 	body := `{"name":"new_doc","content":"fresh content"}`
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/knowledge", strings.NewReader(body))
@@ -229,7 +235,7 @@ func TestHandleTrackerStats(t *testing.T) {
 	sup.Start()
 	defer sup.Shutdown()
 
-	h := NewHandler(sup, nil, nil, nil, cfg, nil, nil, nil, tr, nil, nil)
+	h := NewHandler(sup, nil, nil, nil, cfg, nil, nil, nil, tr, nil, nil, events.NewBus())
 
 	req := httptest.NewRequest(http.MethodGet, "/api/v1/tracker", nil)
 	w := httptest.NewRecorder()
@@ -243,6 +249,8 @@ func TestHandleTrackerStats(t *testing.T) {
 func TestHandleOpenAICompletionsNoMessages(t *testing.T) {
 	h, sup := newTestHandler(t)
 	defer sup.Shutdown()
+	// 给 handler 一个 IOManager，才能通过 nil 检查到达消息校验
+	h.iom = agentIO.NewIOManager()
 
 	body := `{"model":"test"}`
 	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(body))
@@ -258,6 +266,8 @@ func TestHandleOpenAICompletionsNoMessages(t *testing.T) {
 func TestHandleOpenAICompletionsLastMsgNotUser(t *testing.T) {
 	h, sup := newTestHandler(t)
 	defer sup.Shutdown()
+	// 给 handler 一个 IOManager，才能通过 nil 检查到达消息校验
+	h.iom = agentIO.NewIOManager()
 
 	body := `{"messages":[{"role":"assistant","content":"hi"}]}`
 	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(body))
@@ -405,7 +415,7 @@ func TestSettingsAPIFlow(t *testing.T) {
 	defer sup.Shutdown()
 
 	pluginReg := plugin.NewRegistry()
-	h := NewHandler(sup, nil, nil, nil, &types.Config{}, nil, nil, nil, nil, cfgReg, pluginReg)
+	h := NewHandler(sup, nil, nil, nil, &types.Config{}, nil, nil, nil, nil, cfgReg, pluginReg, events.NewBus())
 
 	t.Run("GET_settings_lists_keys_and_plugins", func(t *testing.T) {
 		req := httptest.NewRequest(http.MethodGet, "/api/v1/settings", nil)
@@ -512,7 +522,7 @@ func TestSettingsAPIFlow(t *testing.T) {
 	})
 
 	t.Run("settings_not_available_without_registry", func(t *testing.T) {
-		h2 := NewHandler(sup, nil, nil, nil, &types.Config{}, nil, nil, nil, nil, nil, nil)
+		h2 := NewHandler(sup, nil, nil, nil, &types.Config{}, nil, nil, nil, nil, nil, nil, events.NewBus())
 		req := httptest.NewRequest(http.MethodGet, "/api/v1/settings", nil)
 		w := httptest.NewRecorder()
 		h2.handleSettings(w, req)
@@ -538,7 +548,7 @@ func TestSettingsWithPluginRegistry(t *testing.T) {
 	defer sup.Shutdown()
 
 	pluginReg := plugin.NewRegistry()
-	h := NewHandler(sup, nil, nil, nil, &types.Config{}, nil, nil, nil, nil, cfgReg, pluginReg)
+	h := NewHandler(sup, nil, nil, nil, &types.Config{}, nil, nil, nil, nil, cfgReg, pluginReg, events.NewBus())
 
 	req := httptest.NewRequest(http.MethodGet, "/api/v1/settings", nil)
 	w := httptest.NewRecorder()
@@ -558,4 +568,126 @@ func TestSettingsWithPluginRegistry(t *testing.T) {
 	if !foundCore {
 		t.Fatal("expected 'core' in plugins list")
 	}
+}
+
+// === 端到端测试：Handler + IOManager + Agent + HTTP ===
+
+type echoProvider struct{ name string }
+
+func (p *echoProvider) Name() string { return p.name }
+func (p *echoProvider) Chat(ctx context.Context, req *agentAPI.CompletionRequest) (*agentAPI.CompletionResponse, error) {
+	content := "echo: " + req.Messages[len(req.Messages)-1].Content
+	return &agentAPI.CompletionResponse{Content: content, FinishReason: "stop"}, nil
+}
+func (p *echoProvider) ChatStream(ctx context.Context, req *agentAPI.CompletionRequest) (<-chan agentAPI.StreamChunk, error) {
+	ch := make(chan agentAPI.StreamChunk, 1)
+	ch <- agentAPI.StreamChunk{Content: "mock", Done: true}
+	return ch, nil
+}
+
+func init() {
+	// 避免测试时自动输出
+}
+
+func TestHandleCompletionsEndToEnd(t *testing.T) {
+	iom := agentIO.NewIOManager()
+
+	// 启动一个最小 Agent，使用 echoProvider（不调真实 LLM）
+	memDB, err := memory.NewGraphDB(t.TempDir() + "/graph.db")
+	if err != nil {
+		t.Fatalf("NewGraphDB: %v", err)
+	}
+	defer memDB.Close()
+
+	agent := agentCore.New(agentCore.AgentConfig{
+		ID:            "test",
+		SystemPrompt:  "你是测试助手",
+		Provider:      &echoProvider{name: "echo"},
+		IO:            iom,
+		Memory:        memDB,
+		Indexer:       nil,
+		MaxToolTurns:  0,
+		ContextSavePath: "",
+	})
+	agent.Start()
+	defer agent.Stop()
+
+	// Handler 需要 iom
+	sup := supervisor.New(&types.Config{
+		Daemon: types.DaemonConfig{
+			CheckInterval:     time.Minute,
+			HeartbeatInterval: 30 * time.Second,
+		},
+	})
+	sup.Start()
+	defer sup.Shutdown()
+
+	h := NewHandler(sup, nil, nil, nil, &types.Config{}, iom, nil, nil, nil, nil, nil, events.NewBus())
+
+	t.Run("POST_chat_completions_returns_echo", func(t *testing.T) {
+		body := `{"model":"test","messages":[{"role":"user","content":"你好"}]}`
+		req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(body))
+		req.Header.Set("Content-Type", "application/json")
+		w := httptest.NewRecorder()
+
+		h.handleOpenAICompletions(w, req)
+
+		if w.Code != http.StatusOK {
+			t.Fatalf("expected 200, got %d: %s", w.Code, w.Body.String())
+		}
+
+		var resp map[string]interface{}
+		if err := json.NewDecoder(w.Body).Decode(&resp); err != nil {
+			t.Fatalf("decode: %v", err)
+		}
+
+		choices, ok := resp["choices"].([]interface{})
+		if !ok || len(choices) == 0 {
+			t.Fatal("expected choices")
+		}
+		msg, ok := choices[0].(map[string]interface{})["message"].(map[string]interface{})
+		if !ok {
+			t.Fatal("expected message")
+		}
+		if msg["content"] != "echo: 你好" {
+			t.Fatalf("expected 'echo: 你好', got '%v'", msg["content"])
+		}
+	})
+
+	t.Run("POST_chat_completions_no_iom_returns_503", func(t *testing.T) {
+		h2 := NewHandler(sup, nil, nil, nil, &types.Config{}, nil, nil, nil, nil, nil, nil, events.NewBus())
+		body := `{"messages":[{"role":"user","content":"hi"}]}`
+		req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(body))
+		req.Header.Set("Content-Type", "application/json")
+		w := httptest.NewRecorder()
+		h2.handleOpenAICompletions(w, req)
+
+		if w.Code != http.StatusServiceUnavailable {
+			t.Fatalf("expected 503, got %d", w.Code)
+		}
+	})
+
+	t.Run("POST_chat_completions_400_on_no_messages", func(t *testing.T) {
+		body := `{"model":"test"}`
+		req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(body))
+		req.Header.Set("Content-Type", "application/json")
+		w := httptest.NewRecorder()
+		h.handleOpenAICompletions(w, req)
+
+		if w.Code != http.StatusBadRequest {
+			t.Fatalf("expected 400, got %d", w.Code)
+		}
+	})
+
+	t.Run("POST_chat_completions_400_on_non_user_last_msg", func(t *testing.T) {
+		body := `{"messages":[{"role":"assistant","content":"hi"}]}`
+		req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(body))
+		req.Header.Set("Content-Type", "application/json")
+		w := httptest.NewRecorder()
+		h.handleOpenAICompletions(w, req)
+
+		if w.Code != http.StatusBadRequest {
+			t.Fatalf("expected 400, got %d", w.Code)
+		}
+	})
 }
