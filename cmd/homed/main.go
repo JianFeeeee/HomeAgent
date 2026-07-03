@@ -81,6 +81,7 @@ func main() {
 	}
 
 	memIdx := memory.NewIndexer(memDB)
+	memIdx.Sync() // 启动时立即同步，避免前30分钟空窗
 	socialStore := social.New(memDB)
 
 	distiller := pipeline.NewDistiller(memDB, *dataDir, pipeline.DistillerConfig{
@@ -194,14 +195,14 @@ func main() {
 						if err := textMem.Append(te); err != nil {
 							log.Printf("[homed] text memory append: %v", err)
 						}
-					}
+				}
 
-					if input != "" {
-						distiller.Append("agent", "user", input)
-					}
-					if response != "" {
-						distiller.Append("agent", "assistant", response)
-					}
+				if input != "" && memDB != nil {
+					distiller.Append("agent", "user", input)
+				}
+				if response != "" && memDB != nil {
+					distiller.Append("agent", "assistant", response)
+				}
 				}
 			}
 		}
@@ -323,20 +324,16 @@ func main() {
 如需异步发送消息或通知，使用 output_send 指定通道和内容。
 使用 output_list_channels 查看可用通道及其能力。
 
-你有以下核心工具:
-1. memory_recall — 查询图记忆（历史/个人信息）
-2. memory_commit — 写入图记忆（记住新信息）
-3. memory_introspect — 查看记忆统计
-4. person_query — 查询人物特质与社交关系网
-5. person_set_trait — 记录人物特质（性格/喜好等）
-6. person_relate — 建立人物间社交关系
-7. person_network — 查看社交网络
-8. knowledge_search — 搜索知识库
-9. doc_query — 查询文档记忆
-10. doc_commit — 写入文档记忆
-11. plgreload — 热重载插件
-12. llm_list_sources — 列出所有可用的 LLM 源
-13. llm_set_source — 切换到指定 LLM 源
+可用工具列表会由系统自动传入，按需使用即可。以下是你尤其需要关注的几类工具：
+- memory_* — 图记忆（长期记忆，记录和查询个人信息/事实）
+- knowledge_* — 知识库（查阅预设知识文档）
+- doc_* — 文档记忆（近期对话的存档，查询后自动清除）
+- person_* — 人物特质与社交关系网
+- llm_* — LLM 源管理（列出/切换模型提供商）
+- output_* — 输出通道管理（切换/发送消息）
+- timer_set — 设置定时提醒
+- plgreload — 热重载插件
+- spawn_child — 生成子 Agent 执行独立任务
 
 回复你的真实想法，用自然语言与用户交流。`,
 		Provider:        provider,

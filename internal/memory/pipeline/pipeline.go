@@ -6,6 +6,7 @@ import (
 	"log"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"time"
 
@@ -213,13 +214,177 @@ func (d *Distiller) cleanupRawFiles() {
 
 func extractKeyTriples(userContent, assistantContent string) []memory.Triple {
 	var triples []memory.Triple
-	if len(userContent) > 0 && len(userContent) < 500 {
-		triples = append(triples, memory.Triple{Subject: "用户", Relation: "提及", Object: truncate(userContent, 200)})
+
+	// 提取对话中的关键信息，而不是直接 dump 原文
+	// 规则1: "我的名字是X" / "我叫X" → (用户, 姓名, X)
+	if name := extractName(userContent); name != "" {
+		triples = append(triples, memory.Triple{Subject: "用户", Relation: "姓名", Object: name})
 	}
-	if len(assistantContent) > 0 && len(assistantContent) < 500 {
-		triples = append(triples, memory.Triple{Subject: "AI", Relation: "回应", Object: truncate(assistantContent, 200)})
+	// 规则2: "我住在X" / "我家在X" → (用户, 居住地, X)
+	if loc := extractLocation(userContent); loc != "" {
+		triples = append(triples, memory.Triple{Subject: "用户", Relation: "居住地", Object: loc})
 	}
+	// 规则3: "我喜欢X" / "我爱X" → (用户, 喜好, X)
+	if like := extractLike(userContent); like != "" {
+		triples = append(triples, memory.Triple{Subject: "用户", Relation: "喜好", Object: like})
+	}
+	// 规则4: "我X岁" / "我的年龄是X" → (用户, 年龄, X)
+	if age := extractAge(userContent); age != "" {
+		triples = append(triples, memory.Triple{Subject: "用户", Relation: "年龄", Object: age})
+	}
+	// 规则5: "我的工作是X" / "我在X工作" → (用户, 职业, X)
+	if job := extractJob(userContent); job != "" {
+		triples = append(triples, memory.Triple{Subject: "用户", Relation: "职业", Object: job})
+	}
+
 	return triples
+}
+
+func extractName(s string) string {
+	patterns := []struct {
+		prefix string
+		suffix string
+	}{
+		{"我叫", ""},
+		{"我的名字是", ""},
+		{"我是", ""},
+		{"名字是", ""},
+	}
+	s = strings.TrimSpace(s)
+	for _, p := range patterns {
+		if strings.HasPrefix(s, p.prefix) {
+			candidate := strings.TrimPrefix(s, p.prefix)
+			if p.suffix != "" && strings.Contains(candidate, p.suffix) {
+				candidate = candidate[:strings.Index(candidate, p.suffix)]
+			}
+			candidate = strings.TrimSpace(candidate)
+			// 取第一个空格/逗号/句号前的内容
+			for _, sep := range []string{"，", "。", " ", ","} {
+				if idx := strings.Index(candidate, sep); idx > 0 {
+					candidate = candidate[:idx]
+				}
+			}
+			if len(candidate) > 0 && len(candidate) < 20 {
+				return candidate
+			}
+		}
+	}
+	return ""
+}
+
+func extractLocation(s string) string {
+	s = strings.TrimSpace(s)
+	after := ""
+	switch {
+	case strings.HasPrefix(s, "我住在"):
+		after = strings.TrimPrefix(s, "我住在")
+	case strings.HasPrefix(s, "我家在"):
+		after = strings.TrimPrefix(s, "我家在")
+	case strings.HasPrefix(s, "我居住在"):
+		after = strings.TrimPrefix(s, "我居住在")
+	case strings.HasPrefix(s, "住在"):
+		after = strings.TrimPrefix(s, "住在")
+	default:
+		return ""
+	}
+	for _, sep := range []string{"。", "，", " ", ","} {
+		if idx := strings.Index(after, sep); idx > 0 {
+			after = after[:idx]
+		}
+	}
+	if len(after) > 0 && len(after) < 50 {
+		return strings.TrimSpace(after)
+	}
+	return ""
+}
+
+func extractLike(s string) string {
+	s = strings.TrimSpace(s)
+	after := ""
+	switch {
+	case strings.HasPrefix(s, "我喜欢"):
+		after = strings.TrimPrefix(s, "我喜欢")
+	case strings.HasPrefix(s, "我爱"):
+		after = strings.TrimPrefix(s, "我爱")
+	case strings.HasPrefix(s, "我最喜欢"):
+		after = strings.TrimPrefix(s, "我最喜欢")
+	default:
+		return ""
+	}
+	for _, sep := range []string{"。", "，", " ", ","} {
+		if idx := strings.Index(after, sep); idx > 0 {
+			after = after[:idx]
+		}
+	}
+	if len(after) > 0 && len(after) < 50 {
+		return strings.TrimSpace(after)
+	}
+	return ""
+}
+
+func extractAge(s string) string {
+	s = strings.TrimSpace(s)
+	after := ""
+	switch {
+	case strings.HasPrefix(s, "我"):
+		rest := strings.TrimPrefix(s, "我")
+		if strings.Contains(rest, "岁") {
+			after = rest[:strings.Index(rest, "岁")]
+		} else if strings.HasPrefix(rest, "的年龄是") {
+			after = strings.TrimPrefix(rest, "的年龄是")
+		} else {
+			return ""
+		}
+	default:
+		return ""
+	}
+	for _, sep := range []string{"。", "，", " ", ","} {
+		if idx := strings.Index(after, sep); idx > 0 {
+			after = after[:idx]
+		}
+	}
+	if len(after) > 0 && len(after) < 5 {
+		return strings.TrimSpace(after)
+	}
+	return ""
+}
+
+func extractJob(s string) string {
+	s = strings.TrimSpace(s)
+	after := ""
+	switch {
+	case strings.HasPrefix(s, "我的工作是"):
+		after = strings.TrimPrefix(s, "我的工作是")
+	case strings.HasPrefix(s, "我在"):
+		rest := strings.TrimPrefix(s, "我在")
+		if strings.Contains(rest, "工作") {
+			after = rest[:strings.Index(rest, "工作")]
+		} else {
+			return ""
+		}
+	case strings.HasPrefix(s, "我是"):
+		rest := strings.TrimPrefix(s, "我是")
+		// "我是一个程序员" / "我是老师"
+		for _, keyword := range []string{"一个", "一名", "一位"} {
+			if strings.HasPrefix(rest, keyword) {
+				rest = strings.TrimPrefix(rest, keyword)
+				break
+			}
+		}
+		// 职业通常较短，先看看
+		after = rest
+	default:
+		return ""
+	}
+	for _, sep := range []string{"。", "，", " ", ",", "。"} {
+		if idx := strings.Index(after, sep); idx > 0 {
+			after = after[:idx]
+		}
+	}
+	if len(after) > 0 && len(after) < 20 {
+		return strings.TrimSpace(after)
+	}
+	return ""
 }
 
 func truncate(s string, max int) string {
