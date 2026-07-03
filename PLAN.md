@@ -1,132 +1,246 @@
-# HomeAgent 实施计划
+# HomeAgent 架构与实施
 
-## 已完成
+## 架构概览
 
-### Phase 0 — 核心基础设施 ✅
+```
+┌─────────────────────────────────────────────────────────────────────┐
+│  homed (内核)                                                        │
+│  ┌──────────┐ ┌──────────┐ ┌────────────┐ ┌───────────────────┐    │
+│  │LLM源管理 │ │Agent编排 │ │记忆管理    │ │知识管理 (TF-IDF)   │    │
+│  │Lua适配器 │ │主agent   │ │图/文本/    │ │                    │    │
+│  │(协议转换) │ │子agent   │ │文档三层    │ │                    │    │
+│  └──────────┘ └──────────┘ └────────────┘ └───────────────────┘    │
+│  ┌──────────────────────────────────────────────────────────────┐   │
+│  │ IO通道管理器 (IOManager)                                       │  │
+│  │ 排队通道 (Queue) + 中断通道 (Interrupt)                        │  │
+│  │ 核心回环 _consolidation_ (记忆消歧/系统维护)                    │  │
+│  └──────────────────────────────────────────────────────────────┘   │
+│  ┌──────────────────────────────────────────────────────────────┐   │
+│  │ 阶段管道 (StageHost 7 阶段, 并行执行) + 事件总线 (EventBus)     │  │
+│  └──────────────────────────────────────────────────────────────┘   │
+│  ┌──────────────────────────────────────────────────────────────┐   │
+│  │ PluginSDK — 内核对插件的完整 Go API                              │  │
+│  │ IO/工具/阶段/事件/记忆/知识/LLM/配置                             │  │
+│  └──────────────────────────────────────────────────────────────┘   │
+├─────────────────────────────────────────────────────────────────────┤
+│  内置插件 (编译入内核, init() 自注册)                                 │
+│  internal/plugins/all.go (空白导入触发 init)                        │
+│  ┌──────────┐ ┌──────────┐ ┌────────────┐ ┌──────────────┐        │
+│  │ WebUI    │ │ CLI      │ │ OpenClaw   │ │ Timer        │        │
+│  │ HTTP 服务│ │ Unix socket│ │SKILL.md→SDK│ │ timer_set 工具│        │
+│  └──────────┘ └──────────┘ └────────────┘ └──────────────┘        │
+├─────────────────────────────────────────────────────────────────────┤
+│  动态插件 (<data>/plugins/<name>/ 按需加载)                          │
+│  ┌──────────────────────────────────────────────────────────────┐   │
+│  │ plugin.json 元数据 + plugin.so (Go -buildmode=plugin)         │  │
+│  │ 或 main.lua (Lua 脚本, 预留)                                  │  │
+│  │ Registry.Load() 自动扫描, 无 factory → tryLoadSO → tryLoadLua │  │
+│  └──────────────────────────────────────────────────────────────┘   │
+├─────────────────────────────────────────────────────────────────────┤
+│  waiter (通用客户端)                                                 │
+│  waiter -say "你好" → Unix socket → CLI 插件                        │
+│  waiter (交互模式) → 同上                                            │
+└─────────────────────────────────────────────────────────────────────┘
+```
 
-| 任务 | 文件 | 状态 |
+## 核心原则
+
+1. **核心零 IO** — homed 不监听端口, 不启动 HTTP 服务, 不读 stdin
+2. **一切外界交互都是插件** — 通过 PluginSDK 与核心交互
+3. **插件自注册** — 每个插件的 `init()` 调用 `plugin.RegisterFactory()`, 内核无需硬编码
+4. **动态 .so 加载** — 第三方插件编译为 `.so`, 放入 `plugins/<name>/plugin.so`
+5. **PluginSDK 是内核"系统调用"** — 插件只能通过 SDK 访问核心能力
+6. **Stage 并行执行** — 同阶段所有 handler goroutine 并发, StageContext 内嵌 RWMutex
+7. **中断最高优先级** — 独立 `interceptLoop` 可随时打断进行中的 LLM 请求
+8. **子 agent 是主 agent 的工具** — `spawn_child`/`child_result`, 不是 SDK 部分
+
+## 插件注册体系
+
+### 两种注册路径
+
+| 路径 | 场景 | 实现 |
 |------|------|------|
-| SDK 接口定义 | `internal/plugin/sdk/api.go` | ✅ |
-| PluginAPI（RegisterTool/RegisterStage/Subscribe/Publish） | `internal/plugin/sdk/api.go` | ✅ |
-| 插件内部 EventBus | `internal/plugin/sdk/bus.go` | ✅ |
-| 系统 EventBus | `internal/events/bus.go` | ✅ |
-| StageHost 编排器 | `internal/agent/core/stages.go` | ✅ |
-| Agent 阶段注入（7 个 hook 点） | `internal/agent/core/agent.go` | ✅ |
-| 插件注册表 SDK 支持 | `internal/plugin/plugin.go` | ✅ |
-| main.go 接入 EventBus + StageHost | `cmd/homed/main.go` | ✅ |
-| 架构文档 v4 | `docs/ARCHITECTURE.md` | ✅ |
+| **自注册 (init)** | 内置插件 (timer/cli/openclaw/webui) | 包 `init()` 调 `plugin.RegisterFactory(name, factory)` |
+| **动态加载** | 第三方插件 | 扫描 `<data>/plugins/<name>/`, 读 manifest + .so |
 
----
-
-## 待实施
-
-### Phase 1 — 插件 SDK 迁移（当前）
-
-| # | 任务 | 说明 | 优先级 |
-|---|------|------|--------|
-| 1.1 | SDK 添加 `ToolDef` 参数描述支持 | `RegisterTool` 接受 `ToolDef` 结构体（含 parameters）而非纯 handler | high |
-| 1.2 | StageHost 收集完整 ToolDef | 目前只传 name，需传完整 description + parameters 给 LLM | high |
-| 1.3 | Registry.AddPluginAPI 自动构建 StageHost | 替代手动 `syncFromRegistry` | high |
-| 1.4 | 添加 `before_toolcall` deny 机制的测试 | 确保 `StageContext.Response` 在工具级别生效 | medium |
-| 1.5 | 添加 `on_input` 改写消息的测试 | `stageCtx.RawMessage` 在阶段后被正确使用 | medium |
-
-### Phase 2 — 迁移 WebUI 到 SDK 模式
-
-| # | 任务 | 说明 | 优先级 |
-|---|------|------|--------|
-| 2.1 | WebUI 改为通过 `PluginAPI` 注册 | 不再依赖 `Device` 接口 | high |
-| 2.2 | WebUI 通过 `Subscribe(EventAll)` 获取所有事件 | 取代 OutputChan 监听 | high |
-| 2.3 | WebUI 注册 `output_send` 工具 | 通过 `RegisterTool` 暴露给 LLM | high |
-| 2.4 | 删除 `internal/api/plugin.go` 的 Device 包装 | 不再需要 `Device` 适配器 | medium |
-| 2.5 | Handler 改为通过 EventBus 获取 IOManager 引用 | 减少直接依赖 | low |
-
-### Phase 3 — 迁移 QQ/OneBot 到 SDK 模式
-
-| # | 任务 | 说明 | 优先级 |
-|---|------|------|--------|
-| 3.1 | OneBot 插件改为 `PluginAPI.RegisterTool` | 注册 `qq_send_private_msg` 等工具 | high |
-| 3.2 | OneBot 接管后通过 `Publish(raw_input)` 发布事件 | 取代 IOManager.InjectInput | high |
-| 3.3 | OneBot 注册阶段钩子 | 可接入群聊特定的 `pre_action` 逻辑 | medium |
-| 3.4 | 删除 `internal/onebot/device.go` 的 Device 包装 | SDK 模式原生支持 | medium |
-
-### Phase 4 — 迁移 OutputBus 到 SDK
-
-| # | 任务 | 说明 | 优先级 |
-|---|------|------|--------|
-| 4.1 | 创建 `internal/outputbus/` 插件 | 管理 `output_send`/`output_list_channels` | high |
-| 4.2 | 通过 `RegisterTool` 注册输出工具 | LLM 可直接调用 | high |
-| 4.3 | 通过 `RegisterStage(before_output)` 拦截最终文本 | 渠道适配 | medium |
-| 4.4 | Agent 内置的 output_* 工具改为委托给 outputbus | 解耦核心 | medium |
-
-### Phase 5 — 清理旧组件
-
-| # | 任务 | 说明 | 优先级 |
-|---|------|------|--------|
-| 5.1 | 删除 `Device` 接口定义 | 全部迁移后移除 | high |
-| 5.2 | 删除 `IOManager.ExecuteTool` | 工具路由走 StageHost | high |
-| 5.3 | 删除 `IOManager.EmitOutput`/`EmitOutputTo` | 走 EventBus | medium |
-| 5.4 | 删除 `IOManager.AtomicSwapDevices` | 不再需要设备热替换 | medium |
-| 5.5 | 删除 `PluginDevice` 包装器 | SDK 模式替代 | medium |
-| 5.6 | 删除 `internal/onebot/device.go` | 已迁移到 SDK | high |
-| 5.7 | 删除 `internal/api/plugin.go` | 已迁移到 SDK | medium |
-| 5.8 | 精简 `cmd/homed/main.go` | 移除设备相关初始化 | medium |
-
-### Phase 6 — 进程隔离
-
-| # | 任务 | 说明 | 优先级 |
-|---|------|------|--------|
-| 6.1 | 实现 Unix Socket JSON-RPC 传输层 | 进程隔离模式 | low |
-| 6.2 | `sdk.Run()` 自动检测 in-process/external | 开发 vs 生产 | low |
-| 6.3 | 插件进程管理（启动/停止/健康检查） | Supervisor 扩展 | low |
-
-### Phase 7 — 增强功能
-
-| # | 任务 | 说明 | 优先级 |
-|---|------|------|--------|
-| 7.1 | WebUI D3.js 力导向图记忆星图 | 已有 API `GET /api/v1/memory/star` | low |
-| 7.2 | Model Context Protocol (MCP) 支持 | 标准工具协议 | low |
-| 7.3 | 多 Agent 支持 | 每个 Agent 独立上下文 | low |
-| 7.4 | Python 插件 SDK | 扩展生态 | low |
-
----
-
-## 文件最终结构（Phase 5 完成后）
+### 自注册流程
 
 ```
-HomeAgent/
-├── cmd/homed/main.go          — 入口
-├── internal/
-│   ├── agent/
-│   │   ├── core/
-│   │   │   ├── agent.go       — Agent 核心
-│   │   │   ├── context.go     — 相关性上下文
-│   │   │   └── stages.go      — StageHost
-│   │   └── api/
-│   │       └── provider.go    — LLM Provider
-│   ├── events/
-│   │   └── bus.go             — 系统事件总线
-│   ├── plugin/
-│   │   └── sdk/
-│   │       ├── api.go         — PluginAPI
-│   │       └── bus.go         — 插件 EventBus
-│   ├── memory/                — 三层记忆
-│   ├── knowledge/             — 知识库
-│   ├── tracker/               — 变更追踪
-│   ├── supervisor/            — 守护进程
-│   └── plugins/               — 插件实现
-│       ├── webui/             — HTTP API + 仪表盘
-│       ├── onebot/            — QQ 通道
-│       └── outputbus/         — 输出通道管理
-├── docs/
-│   └── ARCHITECTURE.md        — 架构文档
-├── DESIGN.md
-├── PLAN.md
-└── README.md
+internal/plugins/timer/plugin.go
+  func init() {
+      plugin.RegisterFactory("timer", func(name string, cfg map[string]interface{}) (sdk.Plugin, error) {
+          return New(name), nil
+      })
+  }
+
+internal/plugins/all.go
+  package plugins
+  import ( _ "timer" _ "cli" _ "openclaw" _ "webui" )
+  // 空白导入触发所有 init() → RegisterFactory
+
+cmd/homed/main.go
+  cli.DefaultSocket = *cliSocket               // 注入运行时变量
+  openclaw.SkillsDir = filepath.Join(...)
+  webui.Configure(httpAddr, sup, mem, sk, ...)
+  pluginReg.Load(plgDir)                       // 自动创建目录 + 加载
 ```
 
-## 设计原则
+### 动态 .so 加载
 
-1. **核心零 IO** — Core 不依赖任何插件、设备、通道实现
-2. **三通道标准** — 所有插件通过 Tool/Stage/Event 与核心交互
-3. **增量迁移** — 每阶段保持向后兼容，旧组件与新 SDK 并行运行
-4. **测试覆盖** — 每阶段提交前确保全部测试通过
+插件目录结构:
+```
+<data>/plugins/myplugin/
+    plugin.json    — 元数据 {name, version, description, author, entry}
+    plugin.so      — Go -buildmode=plugin 编译, 导出 NewPlugin(name, config)
+```
+
+动态加载器 `internal/plugin/dynamic.go` 扫描 `.so`:
+```go
+func tryLoadSO(dir, name string, config map[string]interface{}) (sdk.Plugin, error) {
+    p, _ := plugin.Open(filepath.Join(dir, "plugin.so"))
+    sym, _ := p.Lookup("NewPlugin")
+    fn := sym.(func(string, map[string]interface{}) (sdk.Plugin, error))
+    return fn(name, config), nil
+}
+```
+
+内置插件也可剥离为 .so, 当前保持 init 自注册。
+
+## 输入双通道 + 中断打断
+
+### 通道结构
+
+```
+IOManager
+  ├── inputCh     (chan *InputEvent,  256) — 排队通道, 按序处理
+  ├── interruptCh (chan *InputEvent,   64) — 中断通道, 可打断 LLM
+  └── outputCh    (chan *OutputEvent, 256) — 输出通道
+```
+
+### 中断打断机制
+
+```
+timer 插件                          interceptLoop (独立 goroutine)
+  │                                      │
+  ├─ s.InjectInterruptText(...) ─────────┤
+  │                                      │
+  │                           ┌──────────┴──────────┐
+  │                           │ (a) cancelLLM()      │ → 取消进行中的 HTTP 请求
+  │                           │ (b) interceptCh <-   │ → process() 非阻塞读取
+  │                           │ (c) InjectInput(...)  │ → 空闲时 eventLoop 消费
+  │                           └─────────────────────┘
+  │                                      │
+  ▼                                      ▼
+interruptCh                    process() 工具循环
+                                    │
+                         每个 turn 开始前:
+                         drainInterrupt() → 注入 [打断消息] system msg
+```
+
+**三种投递路径 (interceptLoop)**:
+- **(a)** `cancelLLM()` — 直接取消当前 Provider HTTP 请求, 捕获 `context.Canceled`
+- **(b)** `interceptCh <- text` — `process()` 每轮 LLM 调用前 `drainInterrupt()`, 注入 `[打断消息]` 到上下文
+- **(c)** `InjectInput("interrupt", "text", ...)` — `eventLoop` 在空闲时收到新输入, 启动新处理循环
+
+## 阶段管道 (Stage Pipeline)
+
+7 个阶段, **并行执行**:
+
+```
+on_input → pre_action → post_action ↔ before_toolcall/after_toolcall → before_output → after_output
+```
+
+| 阶段 | 时机 | 插件能力 |
+|------|------|---------|
+| `on_input` | 消息到 Agent | 可短路回复 |
+| `pre_action` | LLM 调用前 | 注入 system 消息 |
+| `post_action` | LLM 返回后 | 审查/修改文本和工具调用 |
+| `before_toolcall` | 工具执行前 | 拒绝/改参 |
+| `after_toolcall` | 工具执行后 | 修改结果 |
+| `before_output` | 输出前 | 改写最终文本 |
+| `after_output` | 输出后 | 只读统计 |
+
+并行规则: 所有 handler 用 goroutine 并发, StageContext 内嵌 `sync.RWMutex`, handler 通过 `Lock()/RLock()/IsResponded()` 协防。
+
+## 配置体系 (ConfigRegistry)
+
+全部配置持久化在 SQLite:
+
+| 表 | 用途 | 访问 |
+|----|------|------|
+| `config` | 核心配置 (LLM/daemon/agent) | SettingsAPI.GetCore/SetCore |
+| `config_<plugin>` | 插件独立配置 | SettingsAPI.Get/Set/List |
+| | 跨插件读写 | GetPlugin/SetPlugin/ListPlugin/Dump |
+
+## 内核入口 (cmd/homed/main.go)
+
+初始化顺序:
+
+```
+1. 基础设施 → 记忆/技能/Lua/监督/追踪/IO/事件
+2. 配置中心 (SQLite) + LLM Provider
+3. 阶段管道 StageHost + 插件注册表 Registry
+4. 注入内置插件依赖 (cli.DefaultSocket / openclaw.SkillsDir / webui.Configure)
+5. Registry.Load(plgDir) → 自注册 + 动态加载
+6. Agent 启动 (eventLoop + interceptLoop + distillLoop)
+7. 等待信号 → 关机
+```
+
+## 目录结构
+
+```
+cmd/
+  homed/main.go                — 内核入口 (零 IO)
+  waiter/main.go               — CLI 客户端 (Unix socket)
+internal/
+  sdk/                          ★ PluginSDK (Go API)
+    plugin.go                   — Plugin 接口 + PluginSDK 结构体
+    memory.go / knowledge.go    — 记忆/知识包装
+    settings.go / llm.go        — 配置/LLM 源
+  agent/
+    core/
+      agent.go                  — Agent: eventLoop/interceptLoop/process
+      context.go                — RelevanceContext (TF-IDF)
+      stages.go                 — StageHost (并行阶段管道)
+    api/provider.go             — Provider 接口 + LuaAdaptedProvider
+    io/channel.go               — IOManager (Queue/Interrupt/Output)
+  plugin/
+    registry.go                 — 注册表: 生命周期, Load, RegisterFactory
+    manifest.go                 — PluginManifest (plugin.json)
+    dynamic.go                  — .so 动态加载器
+    plugin.go                   — SKILL 插件解析
+  plugins/
+    all.go                      — 空白导入触发所有内置插件 init()
+    timer/  cli/  openclaw/  webui/   — 内置插件
+  events/bus.go                 — 系统事件总线
+  memory/                        — 三层记忆 (Context→Document→Graph)
+  knowledge/                     — 知识库
+  config/registry.go              — 配置中心
+  tracker/                       — overlayfs 变更追踪
+  supervisor/                    — 守护管理
+  skill/                         — 技能管理
+  lua/vm.go                      — Lua VM (LLM 协议适配)
+pkg/types/                       — 类型定义
+docs/ARCHITECTURE.md             — 完整架构文档
+```
+
+## 与旧架构关键区别
+
+| 维度 | 之前 | 现在 |
+|------|------|------|
+| 插件注册 | main.go 硬编码 RegisterNative | init() 自注册 + .so 动态加载 |
+| 内核入口 | 逐个 import 插件包 | 仅 import all.go (空白导入) |
+| 中断处理 | 无消费者, 消息丢失 | interceptLoop + cancelLLM + drainInterrupt |
+| 插件目录 | 手动硬编码创建 | Load() 自动为每个注册工厂创建 |
+| 依赖注入 | 闭包绑定在 RegisterNative | 包级变量 (cli.DefaultSocket 等) |
+| 阶段执行 | 顺序 | 并行 (goroutine + WaitGroup) |
+
+## 构建与验证
+
+```bash
+make build              # 编译 homed + waiter
+./build/homed -data /tmp/ha   # 启动
+./build/waiter -say "你好"    # 发送消息
+```
+
+要求: Go 1.19+, CGo (go-sqlite3), Linux (Unix socket + overlayfs).

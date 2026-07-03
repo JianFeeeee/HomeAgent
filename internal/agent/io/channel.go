@@ -89,18 +89,20 @@ type OutputEvent struct {
 }
 
 type IOManager struct {
-	mu        sync.RWMutex
-	devices   map[string]Device
-	inputCh   chan *InputEvent
-	outputCh  chan *OutputEvent
-	nextReqID int64
+	mu           sync.RWMutex
+	devices      map[string]Device
+	inputCh      chan *InputEvent
+	interruptCh  chan *InputEvent
+	outputCh     chan *OutputEvent
+	nextReqID    int64
 }
 
 func NewIOManager() *IOManager {
 	return &IOManager{
-		devices:  make(map[string]Device),
-		inputCh:  make(chan *InputEvent, 256),
-		outputCh: make(chan *OutputEvent, 256),
+		devices:     make(map[string]Device),
+		inputCh:     make(chan *InputEvent, 256),
+		interruptCh: make(chan *InputEvent, 64),
+		outputCh:    make(chan *OutputEvent, 256),
 	}
 }
 
@@ -238,6 +240,29 @@ func (m *IOManager) InjectTextTo(source, outputChannel, text string) {
 		"content": text,
 	})
 }
+
+// InjectInterrupt 向中断通道发送输入
+func (m *IOManager) InjectInterrupt(source, channel string, payload map[string]interface{}) {
+	if payload == nil {
+		payload = map[string]interface{}{}
+	}
+	m.interruptCh <- &InputEvent{
+		RequestID:     m.nextRequestID(),
+		Source:        source,
+		Type:          payload["type"].(string),
+		Payload:       payload,
+		OutputChannel: channel,
+	}
+}
+
+func (m *IOManager) InjectInterruptText(source, channel, text string) {
+	m.InjectInterrupt(source, channel, map[string]interface{}{
+		"type":    "text",
+		"content": text,
+	})
+}
+
+func (m *IOManager) InputInterruptChan() <-chan *InputEvent { return m.interruptCh }
 
 // InjectTextSyncTo 注入文本输入（同步等待）并指定输出通道
 func (m *IOManager) InjectTextSyncTo(source, outputChannel, text string) *OutputEvent {

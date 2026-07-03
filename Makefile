@@ -1,17 +1,23 @@
-.PHONY: all build clean install test run
+.PHONY: all build clean install test run build-cli
 
 BINARY=homed
+CLI_BINARY=homecli
 GO=go
 GOCACHE=/tmp/gocache
 GOPATH=$(shell go env GOPATH)
 BUILD_DIR=build
 
-all: build
+all: build build-cli
 
 build:
 	@mkdir -p $(BUILD_DIR)
 	CGO_ENABLED=1 $(GO) build -o $(BUILD_DIR)/$(BINARY) ./cmd/homed/
 	@echo "Built: $(BUILD_DIR)/$(BINARY)"
+
+build-cli:
+	@mkdir -p $(BUILD_DIR)
+	CGO_ENABLED=0 $(GO) build -o $(BUILD_DIR)/$(CLI_BINARY) ./cmd/cli/
+	@echo "Built: $(BUILD_DIR)/$(CLI_BINARY)"
 
 build-static:
 	@mkdir -p $(BUILD_DIR)

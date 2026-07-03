@@ -150,12 +150,11 @@ func (r *ConfigRegistry) Close() error {
 	return r.db.Close()
 }
 
-// SeedFrom 从 *types.Config 批量导入默认值到 config 表（仅空表时写入）
-func (r *ConfigRegistry) SeedFrom(cfg *types.Config) {
+// SeedDefaults 用硬编码默认值填充 config 表（仅空表时写入），不再依赖 YAML
+func (r *ConfigRegistry) SeedDefaults(dataDir string) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
-	// 检查是否已有数据
 	var count int
 	r.db.QueryRow(`SELECT COUNT(*) FROM config`).Scan(&count)
 	if count > 0 {
@@ -177,44 +176,54 @@ func (r *ConfigRegistry) SeedFrom(cfg *types.Config) {
 	set := func(k, v string) { stmt.Exec(k, v) }
 
 	// daemon
-	set("core.daemon.listen_addr", cfg.Daemon.ListenAddr)
-	set("core.daemon.data_dir", cfg.Daemon.DataDir)
-	set("core.daemon.heartbeat_interval", cfg.Daemon.HeartbeatInterval.String())
-	set("core.daemon.check_interval", cfg.Daemon.CheckInterval.String())
-	set("core.daemon.log_level", cfg.Daemon.LogLevel)
+	set("core.daemon.listen_addr", ":8080")
+	set("core.daemon.data_dir", dataDir)
+	set("core.daemon.heartbeat_interval", "15s")
+	set("core.daemon.check_interval", "30s")
+	set("core.daemon.log_level", "info")
 
 	// llm
-	set("core.llm.provider", cfg.LLM.Provider)
-	set("core.llm.model", cfg.LLM.Model)
-	set("core.llm.base_url", cfg.LLM.BaseURL)
-	set("core.llm.adapter", cfg.LLM.Adapter)
-	set("core.llm.temperature", strconv.FormatFloat(cfg.LLM.Temperature, 'f', 2, 64))
-	set("core.llm.max_tokens", strconv.Itoa(cfg.LLM.MaxTokens))
+	set("core.llm.provider", "deepseek")
+	set("core.llm.model", "deepseek-v4-flash")
+	set("core.llm.base_url", "https://api.deepseek.com")
+	set("core.llm.adapter", "deepseek")
+	set("core.llm.temperature", "0.7")
+	set("core.llm.max_tokens", "4096")
 
 	// llm sources
-	for _, src := range cfg.LLM.Sources {
-		p := "core.llm.sources." + src.Name
-		set(p+".base_url", src.BaseURL)
-		set(p+".model", src.Model)
-		set(p+".adapter", src.Adapter)
-		set(p+".adapter_path", src.AdapterPath)
+	sources := map[string]map[string]string{
+		"deepseek": {"base_url": "https://api.deepseek.com", "model": "deepseek-v4-flash", "adapter": "deepseek", "adapter_path": "adapters/deepseek.lua"},
+		"openai":   {"base_url": "https://api.openai.com/v1", "model": "gpt-4o", "adapter": "openai", "adapter_path": "adapters/openai.lua"},
+		"anthropic": {"base_url": "https://api.anthropic.com", "model": "claude-sonnet-4-20250514", "adapter": "anthropic", "adapter_path": "adapters/anthropic.lua"},
+		"gemini":   {"base_url": "https://generativelanguage.googleapis.com", "model": "gemini-2.0-flash", "adapter": "gemini", "adapter_path": "adapters/gemini.lua"},
+		"mistral":  {"base_url": "https://api.mistral.ai", "model": "mistral-large-latest", "adapter": "mistral", "adapter_path": "adapters/mistral.lua"},
+		"groq":     {"base_url": "https://api.groq.com", "model": "llama3-70b-8192", "adapter": "groq", "adapter_path": "adapters/groq.lua"},
+		"github":   {"base_url": "https://models.inference.ai.azure.com", "model": "gpt-4o", "adapter": "github", "adapter_path": "adapters/github.lua"},
+		"ollama":   {"base_url": "http://localhost:11434", "model": "llama3", "adapter": "ollama", "adapter_path": "adapters/ollama.lua"},
+	}
+	for name, props := range sources {
+		p := "core.llm.sources." + name
+		set(p+".base_url", props["base_url"])
+		set(p+".model", props["model"])
+		set(p+".adapter", props["adapter"])
+		set(p+".adapter_path", props["adapter_path"])
 	}
 
 	// defaults
-	set("core.defaults.image", cfg.Defaults.Image)
-	set("core.defaults.openclaw_enabled", strconv.FormatBool(cfg.Defaults.OpenClawEnabled))
-	set("core.defaults.snapshot.interval", cfg.Defaults.SnapshotPolicy.Interval.String())
-	set("core.defaults.snapshot.max_snapshots", strconv.Itoa(cfg.Defaults.SnapshotPolicy.MaxSnapshots))
-	set("core.defaults.snapshot.pre_action", strconv.FormatBool(cfg.Defaults.SnapshotPolicy.PreAction))
-	set("core.defaults.snapshot.post_action", strconv.FormatBool(cfg.Defaults.SnapshotPolicy.PostAction))
-	set("core.defaults.rollback.max_retries", strconv.Itoa(cfg.Defaults.RollbackPolicy.MaxRetries))
-	set("core.defaults.rollback.health_threshold", strconv.Itoa(int(cfg.Defaults.RollbackPolicy.HealthThreshold)))
-	set("core.defaults.rollback.cooldown_period", cfg.Defaults.RollbackPolicy.CooldownPeriod.String())
-	set("core.defaults.rollback.auto_rollback", strconv.FormatBool(cfg.Defaults.RollbackPolicy.AutoRollback))
-	set("core.defaults.resource.cpu", cfg.Defaults.ResourceLimit.CPU)
-	set("core.defaults.resource.memory", cfg.Defaults.ResourceLimit.Memory)
-	set("core.defaults.resource.disk", cfg.Defaults.ResourceLimit.Disk)
-	set("core.defaults.resource.network", strconv.FormatBool(cfg.Defaults.ResourceLimit.Network))
+	set("core.defaults.image", "homeagent/agent-base:latest")
+	set("core.defaults.openclaw_enabled", "true")
+	set("core.defaults.snapshot.interval", "10m")
+	set("core.defaults.snapshot.max_snapshots", "20")
+	set("core.defaults.snapshot.pre_action", "true")
+	set("core.defaults.snapshot.post_action", "false")
+	set("core.defaults.rollback.max_retries", "3")
+	set("core.defaults.rollback.health_threshold", "3")
+	set("core.defaults.rollback.cooldown_period", "30s")
+	set("core.defaults.rollback.auto_rollback", "true")
+	set("core.defaults.resource.cpu", "2")
+	set("core.defaults.resource.memory", "2g")
+	set("core.defaults.resource.disk", "10g")
+	set("core.defaults.resource.network", "true")
 	set("core.agent.max_tool_turns", "10")
 	set("core.agent.max_context_size", "30")
 	set("core.agent.distill_interval", "30m")

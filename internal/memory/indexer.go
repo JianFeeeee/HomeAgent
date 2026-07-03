@@ -14,14 +14,25 @@ type Indexer struct {
 	vec    *vector.Store
 	veczer *vector.TFIDFVectorizer
 	mu     sync.RWMutex
-	trained bool
+	trained     bool
+	recalled    map[string]bool // 已通过工具调用显式召回的实体名，自动注入时跳过
 }
 
 func NewIndexer(db *GraphDB) *Indexer {
 	return &Indexer{
-		db:     db,
-		vec:    vector.NewStore(),
-		veczer: vector.NewTFIDFVectorizer(2),
+		db:      db,
+		vec:     vector.NewStore(),
+		veczer:  vector.NewTFIDFVectorizer(2),
+		recalled: make(map[string]bool),
+	}
+}
+
+// MarkRecalled 标记实体名已被工具调用显式召回，后续自动注入时跳过
+func (idx *Indexer) MarkRecalled(names ...string) {
+	idx.mu.Lock()
+	defer idx.mu.Unlock()
+	for _, name := range names {
+		idx.recalled[name] = true
 	}
 }
 
@@ -100,15 +111,25 @@ func (idx *Indexer) BuildContext(userInput string) *InjectedContext {
 		return &InjectedContext{Summary: ""}
 	}
 
+	// 过滤已被工具调用显式召回的实体，避免重复注入
+	idx.mu.RLock()
+	filtered := result.Entities[:0]
+	for _, e := range result.Entities {
+		if !idx.recalled[e.Name] {
+			filtered = append(filtered, e)
+		}
+	}
+	idx.mu.RUnlock()
+
 	ctx := &InjectedContext{
-		Entities:  result.Entities,
+		Entities:  filtered,
 		Relations: nil,
 	}
 
-	if len(result.Entities) > 0 {
-		summary := buildIndexSummary(result.Entities)
+	if len(filtered) > 0 {
+		summary := buildIndexSummary(filtered)
 		ctx.Summary = summary
-		ctx.TokenEstimate = estimateTokens(summary) + len(result.Entities)*8
+		ctx.TokenEstimate = estimateTokens(summary) + len(filtered)*8
 	} else {
 		ctx.Summary = ""
 	}
