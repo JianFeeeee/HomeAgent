@@ -214,6 +214,95 @@ func TestIntrospectHotspots(t *testing.T) {
 	}
 }
 
+func TestMergeEntities(t *testing.T) {
+	g := newTestGraph(t)
+	defer os.Remove(g.dbPath)
+	defer g.Close()
+
+	g.Commit([]Triple{
+		{Subject: "张三", Relation: "喜欢", Object: "编程"},
+		{Subject: "张三", Relation: "居住", Object: "北京"},
+	}, "session", 0)
+
+	g.Commit([]Triple{
+		{Subject: "张先生", Relation: "工作", Object: "字节跳动"},
+	}, "session", 0)
+
+	// 合并前：两个实体各有关联
+	stats, _ := g.Introspect()
+	if stats["entity_count"].(int) != 5 {
+		t.Fatalf("expected 5 entities (张三, 编程, 北京, 张先生, 字节跳动), got %d", stats["entity_count"])
+	}
+
+	// 先增加张先生的 mention_count
+	g.Commit([]Triple{
+		{Subject: "张先生", Relation: "喜欢", Object: "Go"},
+	}, "session", 0)
+
+	n, err := g.MergeEntities("张先生", "张三")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if n < 2 {
+		t.Errorf("expected at least 2 redirected relations, got %d", n)
+	}
+
+	// source 应被改名
+	result, err := g.Recall(nil, []string{"张先生"}, 1, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(result.Entities) > 0 {
+		t.Error("张先生 should be merged and hidden")
+	}
+
+	// target 的 mention_count 应合并
+	// 验证 target 还存在（seedEntities 精确查找）
+	result2, err := g.Recall([]string{"张三"}, nil, 1, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	found := false
+	for _, e := range result2.Entities {
+		if e.Name == "张三" {
+			found = true
+			if e.MentionCount < 2 {
+				t.Errorf("expected 张三 mention_count >= 2 after merge, got %d", e.MentionCount)
+			}
+			break
+		}
+	}
+	if !found {
+		t.Error("张三 should still exist after merge")
+	}
+}
+
+func TestMergeEntitiesSelf(t *testing.T) {
+	g := newTestGraph(t)
+	defer os.Remove(g.dbPath)
+	defer g.Close()
+
+	g.Commit([]Triple{
+		{Subject: "张三", Relation: "喜欢", Object: "编程"},
+	}, "session", 0)
+
+	_, err := g.MergeEntities("张三", "张三")
+	if err == nil {
+		t.Error("expected error when merging entity with itself")
+	}
+}
+
+func TestMergeEntitiesNonexistent(t *testing.T) {
+	g := newTestGraph(t)
+	defer os.Remove(g.dbPath)
+	defer g.Close()
+
+	_, err := g.MergeEntities("不存在", "张三")
+	if err == nil {
+		t.Error("expected error for nonexistent source")
+	}
+}
+
 func TestPlaceholders(t *testing.T) {
 	if placeholders(0) != "NULL" {
 		t.Errorf("expected NULL for n=0, got %s", placeholders(0))

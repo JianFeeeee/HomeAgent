@@ -1,7 +1,10 @@
 package core
 
 import (
+	"encoding/json"
 	"fmt"
+	"os"
+	"path/filepath"
 	"sort"
 	"strings"
 	"sync"
@@ -13,26 +16,63 @@ import (
 
 // ContextEvent — 单条上下文事件
 type ContextEvent struct {
-	Timestamp  time.Time `json:"timestamp"`
-	Source     string    `json:"source"`
-	Input      string    `json:"input"`
-	Response   string    `json:"response,omitempty"`
-	ToolsUsed  []string  `json:"tools_used,omitempty"`
-	Vector     vector.Vector `json:"-"` // 缓存向量，避免重复计算
+	Timestamp time.Time `json:"timestamp"`
+	Source    string    `json:"source"`
+	Input     string    `json:"input"`
+	Response  string    `json:"response,omitempty"`
+	ToolsUsed []string  `json:"tools_used,omitempty"`
+	Vector    vector.Vector `json:"-"` // 缓存向量，避免重复计算
 }
 
 // RelevanceContext — 基于相关性的上下文管理，非固定阈值
 type RelevanceContext struct {
-	mu      sync.Mutex
-	events  []*ContextEvent
-	veczer  *vector.TFIDFVectorizer
-	trained bool
+	mu       sync.Mutex
+	events   []*ContextEvent
+	veczer   *vector.TFIDFVectorizer
+	trained  bool
+	savePath string // 持久化路径，空则不持久化
 }
 
-func NewRelevanceContext() *RelevanceContext {
-	return &RelevanceContext{
-		veczer: vector.NewTFIDFVectorizer(2),
+func NewRelevanceContext(savePath string) *RelevanceContext {
+	rc := &RelevanceContext{
+		veczer:   vector.NewTFIDFVectorizer(2),
+		savePath: savePath,
 	}
+	if savePath != "" {
+		rc.load()
+	}
+	return rc
+}
+
+// load 从文件恢复上下文事件
+func (c *RelevanceContext) load() {
+	data, err := os.ReadFile(c.savePath)
+	if err != nil {
+		return
+	}
+	var events []*ContextEvent
+	if err := json.Unmarshal(data, &events); err != nil {
+		return
+	}
+	for _, evt := range events {
+		evt.Vector = c.veczer.Vectorize(evt.Input + " " + evt.Response)
+	}
+	c.events = events
+}
+
+// Save 持久化上下文事件到文件
+func (c *RelevanceContext) Save() error {
+	if c.savePath == "" {
+		return nil
+	}
+	if err := os.MkdirAll(filepath.Dir(c.savePath), 0755); err != nil {
+		return err
+	}
+	data, err := json.Marshal(c.events)
+	if err != nil {
+		return err
+	}
+	return os.WriteFile(c.savePath, data, 0644)
 }
 
 func (c *RelevanceContext) Append(evt ContextEvent) {
@@ -44,6 +84,20 @@ func (c *RelevanceContext) Append(evt ContextEvent) {
 
 	// 增量训练向量化器
 	c.trained = false
+
+	c.save()
+}
+
+// save 无锁版本，Append/Prune 内部持有锁时调用
+func (c *RelevanceContext) save() error {
+	if c.savePath == "" {
+		return nil
+	}
+	data, err := json.Marshal(c.events)
+	if err != nil {
+		return err
+	}
+	return os.WriteFile(c.savePath, data, 0644)
 }
 
 // Prune — 基于当前输入计算每条上下文的相关性，归档最不相关的
@@ -113,6 +167,8 @@ func (c *RelevanceContext) Prune(currentInput string, topK int, docStore *docume
 			archived = len(archive)
 		}
 	}
+
+	c.save()
 
 	return archived
 }
