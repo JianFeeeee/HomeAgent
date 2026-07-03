@@ -1,4 +1,4 @@
-package api
+package webui
 
 import (
 	"encoding/json"
@@ -12,6 +12,7 @@ import (
 
 	agentIO "gitcode.com/JianFeeeee/HomeAgent/internal/agent/io"
 	internalConfig "gitcode.com/JianFeeeee/HomeAgent/internal/config"
+	"gitcode.com/JianFeeeee/HomeAgent/internal/events"
 	"gitcode.com/JianFeeeee/HomeAgent/internal/knowledge"
 	luaVM "gitcode.com/JianFeeeee/HomeAgent/internal/lua"
 	"gitcode.com/JianFeeeee/HomeAgent/internal/memory"
@@ -37,9 +38,10 @@ type Handler struct {
 	tracker    *tracker.Tracker
 	cfgReg     *internalConfig.ConfigRegistry
 	pluginReg  *plugin.Registry
+	eventBus   *events.Bus
 }
 
-func NewHandler(sup *supervisor.Daemon, mem *memory.GraphDB, sk *skill.Manager, lua *luaVM.VM, cfg *types.Config, iom *agentIO.IOManager, tm *text.Memory, ks *knowledge.Store, tr *tracker.Tracker, cr *internalConfig.ConfigRegistry, pr *plugin.Registry) *Handler {
+func NewHandler(sup *supervisor.Daemon, mem *memory.GraphDB, sk *skill.Manager, lua *luaVM.VM, cfg *types.Config, iom *agentIO.IOManager, tm *text.Memory, ks *knowledge.Store, tr *tracker.Tracker, cr *internalConfig.ConfigRegistry, pr *plugin.Registry, evBus *events.Bus) *Handler {
 	var idx *memory.Indexer
 	if mem != nil {
 		idx = memory.NewIndexer(mem)
@@ -58,6 +60,7 @@ func NewHandler(sup *supervisor.Daemon, mem *memory.GraphDB, sk *skill.Manager, 
 		tracker:    tr,
 		cfgReg:     cr,
 		pluginReg:  pr,
+		eventBus:   evBus,
 	}
 }
 
@@ -81,6 +84,8 @@ func (h *Handler) RegisterRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("/api/v1/adapters/", h.handleAdapterByID)
 	mux.HandleFunc("/api/v1/tracker", h.handleTracker)
 	mux.HandleFunc("/api/v1/tracker/", h.handleTracker)
+	mux.HandleFunc("/api/v1/chat", h.handleChat)
+	mux.HandleFunc("/api/v1/chat/events", h.handleChatEvents)
 	mux.HandleFunc("/v1/chat/completions", h.handleOpenAICompletions)
 	mux.HandleFunc("/", h.handleStatic)
 }
@@ -416,7 +421,6 @@ func (h *Handler) handleTextMemory(w http.ResponseWriter, r *http.Request) {
 			"recent": recent,
 		})
 	case http.MethodDelete:
-		// future: purge
 		writeJSON(w, http.StatusAccepted, map[string]string{"status": "not_implemented"})
 	default:
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
@@ -498,6 +502,80 @@ func (h *Handler) handleNetwork(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+func (h *Handler) handleChat(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	var body struct {
+		Message string `json:"message"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid json"})
+		return
+	}
+	if body.Message == "" {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "message is required"})
+		return
+	}
+
+	resp := h.iom.InjectTextSync("cli", body.Message)
+	if resp == nil {
+		writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "agent unavailable"})
+		return
+	}
+	content, _ := resp.Payload["content"].(string)
+	writeJSON(w, http.StatusOK, map[string]interface{}{
+		"response": content,
+	})
+}
+
+func (h *Handler) handleChatEvents(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	flusher, ok := w.(http.Flusher)
+	if !ok {
+		http.Error(w, "streaming not supported", http.StatusInternalServerError)
+		return
+	}
+
+	w.Header().Set("Content-Type", "text/event-stream")
+	w.Header().Set("Cache-Control", "no-cache")
+	w.Header().Set("Connection", "keep-alive")
+	w.WriteHeader(http.StatusOK)
+	flusher.Flush()
+
+	done := r.Context().Done()
+	if h.eventBus == nil {
+		fmt.Fprintf(w, "event: error\ndata: {\"msg\":\"event bus unavailable\"}\n\n")
+		flusher.Flush()
+		return
+	}
+
+	ticker := time.NewTicker(15 * time.Second)
+	defer ticker.Stop()
+
+	unsub := h.eventBus.Subscribe(events.EventAll, func(evt *events.Event) {
+		data, _ := json.Marshal(evt)
+		fmt.Fprintf(w, "event: %s\ndata: %s\n\n", evt.Type, data)
+		flusher.Flush()
+	})
+	defer unsub()
+
+	for {
+		select {
+		case <-done:
+			return
+		case <-ticker.C:
+			fmt.Fprintf(w, ": heartbeat\n\n")
+			flusher.Flush()
+		}
+	}
+}
+
 func (h *Handler) handleConfig(w http.ResponseWriter, r *http.Request) {
 	switch r.Method {
 	case http.MethodGet:
@@ -529,11 +607,10 @@ func (h *Handler) handleSettings(w http.ResponseWriter, r *http.Request) {
 			v, _ := h.cfgReg.Get(k)
 			values[k] = v
 		}
-		// 返回插件列表供侧边栏分组
 		plugins := []string{"core"}
 		if h.pluginReg != nil {
 			for _, p := range h.pluginReg.List() {
-				plugins = append(plugins, "plugin."+p.Name())
+				plugins = append(plugins, "plugin."+p)
 			}
 		}
 		sort.Strings(plugins)
@@ -560,10 +637,14 @@ func (h *Handler) handleSettings(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-// OpenAI 兼容 API — 所有输入走 IO 抽象层（中断）
 func (h *Handler) handleOpenAICompletions(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	if h.iom == nil {
+		writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "IO manager not available"})
 		return
 	}
 
@@ -583,15 +664,17 @@ func (h *Handler) handleOpenAICompletions(w http.ResponseWriter, r *http.Request
 		return
 	}
 
-	// 取最后一条 user 消息作为输入
 	lastMsg := req.Messages[len(req.Messages)-1]
 	if lastMsg.Role != "user" {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "last message must be from user"})
 		return
 	}
 
-	// 通过 IO 抽象层同步注入（中断式）
 	response := h.iom.InjectTextSync("http", lastMsg.Content)
+	if response == nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "no response from agent"})
+		return
+	}
 
 	resp := map[string]interface{}{
 		"id":      fmt.Sprintf("chatcmpl-%d", time.Now().UnixNano()),
@@ -731,7 +814,7 @@ pre{background:#0f172a;border-radius:6px;padding:12px;font-size:12px;overflow-x:
 </head>
 <body>
 <nav>
-<h1>🦞 HomeAgent</h1>
+<h1>HomeAgent</h1>
 <a class="active" onclick="switchTab('overview')">概览</a>
 <a onclick="switchTab('memory')">图记忆</a>
 <a onclick="switchTab('skills')">技能</a>

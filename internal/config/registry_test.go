@@ -4,8 +4,6 @@ import (
 	"path/filepath"
 	"testing"
 	"time"
-
-	"gitcode.com/JianFeeeee/HomeAgent/pkg/types"
 )
 
 func TestRegistryBasic(t *testing.T) {
@@ -154,70 +152,36 @@ func TestPluginConfig(t *testing.T) {
 	r.Close()
 }
 
-func TestSeedFromToConfig(t *testing.T) {
+func TestSeedDefaultsToConfig(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "config.db")
 
-	cfg := &types.Config{
-		Daemon: types.DaemonConfig{
-			ListenAddr:        ":9090",
-			DataDir:           "/tmp/test",
-			HeartbeatInterval: 10 * time.Second,
-			CheckInterval:     20 * time.Second,
-			LogLevel:          "debug",
-		},
-		LLM: types.LLMConfig{
-			Provider:    "deepseek",
-			Model:       "deepseek-v4-flash",
-			BaseURL:     "https://api.deepseek.com",
-			Adapter:     "deepseek",
-			Temperature: 0.5,
-			MaxTokens:   2048,
-			Sources: []types.LLMSource{
-				{Name: "deepseek", BaseURL: "https://api.deepseek.com", Model: "deepseek-v4-flash", Adapter: "deepseek", AdapterPath: "adapters/deepseek.lua"},
-				{Name: "openai", BaseURL: "https://api.openai.com/v1", Model: "gpt-4o", Adapter: "openai", AdapterPath: "adapters/openai.lua"},
-			},
-		},
-		Defaults: types.AgentConfig{
-			Image:           "test-image",
-			OpenClawEnabled: true,
-		},
-	}
-
 	r := NewConfigRegistry(path)
-	r.SeedFrom(cfg)
+	r.SeedDefaults(dir)
 
-	// Verify DB was seeded
-	if len(r.List("")) == 0 {
-		t.Fatal("SeedFrom produced empty DB")
+	// Verify DB was seeded with expected number of keys
+	keys := r.List("")
+	if len(keys) == 0 {
+		t.Fatal("SeedDefaults produced empty DB")
 	}
 
 	// Reconstruct config from DB
 	cfg2 := r.ToConfig()
 
-	if cfg2.Daemon.ListenAddr != ":9090" {
-		t.Fatalf("expected :9090, got %s", cfg2.Daemon.ListenAddr)
-	}
-	if cfg2.Daemon.LogLevel != "debug" {
-		t.Fatalf("expected debug, got %s", cfg2.Daemon.LogLevel)
+	if cfg2.Daemon.ListenAddr != ":8080" {
+		t.Fatalf("expected :8080, got %s", cfg2.Daemon.ListenAddr)
 	}
 	if cfg2.LLM.Provider != "deepseek" {
 		t.Fatalf("expected deepseek, got %s", cfg2.LLM.Provider)
 	}
-	if cfg2.LLM.MaxTokens != 2048 {
-		t.Fatalf("expected 2048, got %d", cfg2.LLM.MaxTokens)
-	}
-	if len(cfg2.LLM.Sources) != 2 {
-		t.Fatalf("expected 2 sources, got %d", len(cfg2.LLM.Sources))
-	}
-	if cfg2.LLM.Sources[0].AdapterPath != "adapters/deepseek.lua" {
-		t.Fatalf("expected adapters/deepseek.lua, got %s", cfg2.LLM.Sources[0].AdapterPath)
+	if len(cfg2.LLM.Sources) == 0 {
+		t.Fatal("expected at least 1 LLM source")
 	}
 
-	// Second SeedFrom should be no-op (DB already has data)
-	r.SeedFrom(cfg)
-	if len(r.List("")) != len(r.List("")) {
-		t.Fatal("second SeedFrom changed DB count")
+	// Second SeedDefaults should be no-op (DB already has data)
+	r.SeedDefaults(dir)
+	if len(r.List("")) != len(keys) {
+		t.Fatal("second SeedDefaults changed DB count")
 	}
 
 	r.Close()

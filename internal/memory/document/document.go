@@ -131,6 +131,30 @@ func (s *Store) ContextToDoc(source string, entries []ContextEntry) (*Doc, error
 	return doc, nil
 }
 
+// Consume — 向量相似度查询并移除文档（召回后即从冷存储删除，避免重复记忆）
+func (s *Store) Consume(text string, topK int) []*Doc {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	if topK <= 0 {
+		topK = 5
+	}
+
+	vec := s.veczer.Vectorize(text)
+	results := s.vec.Search(vec, topK)
+
+	var docs []*Doc
+	for _, r := range results {
+		if d, ok := s.docs[r.ID]; ok {
+			delete(s.docs, r.ID)
+			s.vec.Remove(r.ID)
+			s.dirty = true
+			docs = append(docs, d)
+		}
+	}
+	return docs
+}
+
 // Query — 向量相似度查询文档
 func (s *Store) Query(text string, topK int) []*Doc {
 	s.mu.RLock()
