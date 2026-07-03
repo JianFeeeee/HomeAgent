@@ -2,13 +2,16 @@ package api
 
 import (
 	"encoding/json"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
 	"time"
 
+	internalConfig "gitcode.com/JianFeeeee/HomeAgent/internal/config"
 	"gitcode.com/JianFeeeee/HomeAgent/internal/knowledge"
+	"gitcode.com/JianFeeeee/HomeAgent/internal/plugin"
 	"gitcode.com/JianFeeeee/HomeAgent/internal/supervisor"
 	"gitcode.com/JianFeeeee/HomeAgent/internal/tracker"
 	"gitcode.com/JianFeeeee/HomeAgent/pkg/types"
@@ -380,5 +383,179 @@ func TestHandleAdaptersUnavailable(t *testing.T) {
 
 	if w.Code != http.StatusServiceUnavailable {
 		t.Errorf("expected 503, got %d", w.Code)
+	}
+}
+
+// === 全流程集成测试：ConfigRegistry → WebUI → HTTP API ===
+
+func TestSettingsAPIFlow(t *testing.T) {
+	cfgReg := internalConfig.NewConfigRegistry("")
+	cfgReg.Register("core.llm.model", "deepseek-v4-flash")
+	cfgReg.Register("core.llm.base_url", "https://api.deepseek.com")
+	cfgReg.Register("core.daemon.listen_addr", ":8080")
+	cfgReg.Register("plugin.qq.access_token", "secret123")
+
+	sup := supervisor.New(&types.Config{
+		Daemon: types.DaemonConfig{
+			CheckInterval:     time.Minute,
+			HeartbeatInterval: 30 * time.Second,
+		},
+	})
+	sup.Start()
+	defer sup.Shutdown()
+
+	pluginReg := plugin.NewRegistry()
+	h := NewHandler(sup, nil, nil, nil, &types.Config{}, nil, nil, nil, nil, cfgReg, pluginReg)
+
+	t.Run("GET_settings_lists_keys_and_plugins", func(t *testing.T) {
+		req := httptest.NewRequest(http.MethodGet, "/api/v1/settings", nil)
+		w := httptest.NewRecorder()
+		h.handleSettings(w, req)
+
+		if w.Code != http.StatusOK {
+			t.Fatalf("expected 200, got %d: %s", w.Code, w.Body.String())
+		}
+
+		var resp map[string]interface{}
+		if err := json.NewDecoder(w.Body).Decode(&resp); err != nil {
+			t.Fatalf("decode: %v", err)
+		}
+
+		settings, ok := resp["settings"].(map[string]interface{})
+		if !ok {
+			t.Fatal("settings not a map")
+		}
+		if v, _ := settings["core.llm.model"].(string); v != "deepseek-v4-flash" {
+			t.Fatalf("expected deepseek-v4-flash, got %v", settings["core.llm.model"])
+		}
+
+		plugins, ok := resp["plugins"].([]interface{})
+		if !ok || len(plugins) == 0 {
+			t.Fatal("expected plugins list")
+		}
+		if plugins[0] != "core" {
+			t.Fatalf("expected first plugin 'core', got %v", plugins[0])
+		}
+	})
+
+	t.Run("GET_settings_with_prefix", func(t *testing.T) {
+		req := httptest.NewRequest(http.MethodGet, "/api/v1/settings?prefix=core.daemon", nil)
+		w := httptest.NewRecorder()
+		h.handleSettings(w, req)
+
+		var resp map[string]interface{}
+		json.NewDecoder(w.Body).Decode(&resp)
+		settings := resp["settings"].(map[string]interface{})
+
+		if _, ok := settings["core.daemon.listen_addr"]; !ok {
+			t.Fatal("expected core.daemon.listen_addr in filtered results")
+		}
+		if _, ok := settings["core.llm.model"]; ok {
+			t.Fatal("core.llm.model should not be in core.daemon filtered results")
+		}
+	})
+
+	t.Run("PUT_settings_updates_value", func(t *testing.T) {
+		body := `{"key":"core.llm.model","value":"gpt-4"}`
+		req := httptest.NewRequest(http.MethodPut, "/api/v1/settings", strings.NewReader(body))
+		req.Header.Set("Content-Type", "application/json")
+		w := httptest.NewRecorder()
+		h.handleSettings(w, req)
+
+		if w.Code != http.StatusOK {
+			t.Fatalf("expected 200, got %d", w.Code)
+		}
+
+		val, err := cfgReg.Get("core.llm.model")
+		if err != nil {
+			t.Fatalf("Get error: %v", err)
+		}
+		if v, _ := val.(string); v != "gpt-4" {
+			t.Fatalf("expected gpt-4, got %v", val)
+		}
+	})
+
+	t.Run("PUT_settings_invalid_body", func(t *testing.T) {
+		req := httptest.NewRequest(http.MethodPut, "/api/v1/settings", strings.NewReader("not json"))
+		req.Header.Set("Content-Type", "application/json")
+		w := httptest.NewRecorder()
+		h.handleSettings(w, req)
+
+		if w.Code != http.StatusBadRequest {
+			t.Fatalf("expected 400, got %d", w.Code)
+		}
+	})
+
+	t.Run("handleStatic_returns_webui_html", func(t *testing.T) {
+		req := httptest.NewRequest(http.MethodGet, "/", nil)
+		w := httptest.NewRecorder()
+		h.handleStatic(w, req)
+
+		if w.Code != http.StatusOK {
+			t.Fatalf("expected 200, got %d", w.Code)
+		}
+
+		body, _ := io.ReadAll(w.Body)
+		html := string(body)
+		if !strings.Contains(html, "settings-layout") {
+			t.Fatal("HTML should contain settings-layout class")
+		}
+		if !strings.Contains(html, "settings-sidebar") {
+			t.Fatal("HTML should contain settings-sidebar class")
+		}
+		if !strings.Contains(html, "saveSetting") {
+			t.Fatal("HTML should contain saveSetting JS function")
+		}
+		if !strings.Contains(html, "api('/settings'") {
+			t.Fatal("HTML should call api('/settings')")
+		}
+	})
+
+	t.Run("settings_not_available_without_registry", func(t *testing.T) {
+		h2 := NewHandler(sup, nil, nil, nil, &types.Config{}, nil, nil, nil, nil, nil, nil)
+		req := httptest.NewRequest(http.MethodGet, "/api/v1/settings", nil)
+		w := httptest.NewRecorder()
+		h2.handleSettings(w, req)
+
+		if w.Code != http.StatusNotFound {
+			t.Fatalf("expected 404, got %d", w.Code)
+		}
+	})
+}
+
+func TestSettingsWithPluginRegistry(t *testing.T) {
+	cfgReg := internalConfig.NewConfigRegistry("")
+	cfgReg.Register("core.test.key", "value")
+	cfgReg.Register("plugin.testplug.apikey", "abc123")
+
+	sup := supervisor.New(&types.Config{
+		Daemon: types.DaemonConfig{
+			CheckInterval:     time.Minute,
+			HeartbeatInterval: 30 * time.Second,
+		},
+	})
+	sup.Start()
+	defer sup.Shutdown()
+
+	pluginReg := plugin.NewRegistry()
+	h := NewHandler(sup, nil, nil, nil, &types.Config{}, nil, nil, nil, nil, cfgReg, pluginReg)
+
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/settings", nil)
+	w := httptest.NewRecorder()
+	h.handleSettings(w, req)
+
+	var resp map[string]interface{}
+	json.NewDecoder(w.Body).Decode(&resp)
+
+	plugins, _ := resp["plugins"].([]interface{})
+	foundCore := false
+	for _, p := range plugins {
+		if p == "core" {
+			foundCore = true
+			break
+		}
+	}
+	if !foundCore {
+		t.Fatal("expected 'core' in plugins list")
 	}
 }
