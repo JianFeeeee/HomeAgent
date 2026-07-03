@@ -182,12 +182,10 @@ func (r *Registry) RegisterPluginAPI(api *sdk.PluginAPI) error {
 		return fmt.Errorf("sdk api %s already registered", api.Name)
 	}
 
-	// 注入 SettingsAPI（读取/修改核心与其他插件配置）
+	// 注入 SettingsAPI（插件作用域配置表 config_<name>）
 	if r.cfgReg != nil {
-		api.SetSettings(&pluginSettings{
-			reg:  r.cfgReg,
-			name: api.Name,
-		})
+		ps := r.cfgReg.PluginConfig(api.Name)
+		api.SetSettings(ps)
 	}
 
 	r.sdkAPIs[api.Name] = &sdkAPI{
@@ -203,24 +201,6 @@ func (r *Registry) RegisterPluginAPI(api *sdk.PluginAPI) error {
 	log.Printf("[plugin] registered SDK plugin: %s (tools=%d, stages=%d)",
 		api.Name, len(api.Tools()), len(r.sdkAPIs[api.Name].stages))
 	return nil
-}
-
-// pluginSettings 实现 SettingsAPI，以插件名为命名空间
-type pluginSettings struct {
-	reg  *internalConfig.ConfigRegistry
-	name string
-}
-
-func (s *pluginSettings) Get(key string) (interface{}, error) {
-	return s.reg.Get(key)
-}
-
-func (s *pluginSettings) Set(key string, value interface{}) error {
-	return s.reg.Set(key, value)
-}
-
-func (s *pluginSettings) List(prefix string) ([]string, error) {
-	return s.reg.List(prefix), nil
 }
 
 // GetAllSDKToolDefs 收集所有 SDK 插件的工具定义
@@ -246,6 +226,17 @@ func (r *Registry) ExecuteSDKTool(name string, args map[string]interface{}) (int
 		}
 	}
 	return nil, fmt.Errorf("sdk tool %s not found", name)
+}
+
+// GetAllSDKPlugins 获取所有已注册的 SDK 插件 API 实例
+func (r *Registry) GetAllSDKPlugins() []*sdk.PluginAPI {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	apis := make([]*sdk.PluginAPI, 0, len(r.sdkAPIs))
+	for _, sa := range r.sdkAPIs {
+		apis = append(apis, sa.api)
+	}
+	return apis
 }
 
 // GetStageHandlers 获取所有 SDK 插件在指定阶段的处理器

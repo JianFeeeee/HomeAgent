@@ -15,6 +15,8 @@ import (
 	"gitcode.com/JianFeeeee/HomeAgent/internal/knowledge"
 	"gitcode.com/JianFeeeee/HomeAgent/internal/memory"
 	"gitcode.com/JianFeeeee/HomeAgent/internal/memory/document"
+	"gitcode.com/JianFeeeee/HomeAgent/internal/memory/social"
+	"gitcode.com/JianFeeeee/HomeAgent/internal/memory/text"
 	"gitcode.com/JianFeeeee/HomeAgent/internal/plugin"
 	sdk "gitcode.com/JianFeeeee/HomeAgent/internal/plugin/sdk"
 	"gitcode.com/JianFeeeee/HomeAgent/internal/skill"
@@ -29,6 +31,7 @@ type Agent struct {
 	mu           sync.Mutex
 	id           types.AgentID
 	provider     agentAPI.Provider
+	providerManager *agentAPI.ProviderManager
 	io           *agentIO.IOManager
 	memory       *memory.GraphDB
 	indexer      *memory.Indexer
@@ -45,6 +48,12 @@ type Agent struct {
 
 	// 知识库
 	knowledge *knowledge.Store
+
+	// 人物特质与关系网
+	social *social.SocialStore
+
+	// 文本记忆（原始对话日志）
+	textMem *text.Memory
 
 	// 人格设定
 	personality *agentPkg.Personality
@@ -68,12 +77,18 @@ type Agent struct {
 
 	// 自循环输入通道：核心内部任务（记忆消歧、系统维护），不经过 IO 层
 	selfInputCh chan string
+
+	// 子任务异步执行
+	childMu      sync.Mutex
+	childNextID  int64
+	childResults map[string]string
 }
 
 type AgentConfig struct {
 	ID           types.AgentID
 	SystemPrompt string
 	Provider     agentAPI.Provider
+	ProviderManager *agentAPI.ProviderManager
 	IO           *agentIO.IOManager
 	Memory       *memory.GraphDB
 	Indexer      *memory.Indexer
@@ -83,6 +98,8 @@ type AgentConfig struct {
 
 	DocStore        *document.Store
 	Knowledge       *knowledge.Store
+	SocialStore     *social.SocialStore
+	TextMemory      *text.Memory
 	Personality     *agentPkg.Personality
 	PluginReg       *plugin.Registry
 	PluginDir       string
@@ -107,6 +124,7 @@ func New(cfg AgentConfig) *Agent {
 	return &Agent{
 		id:              cfg.ID,
 		provider:        cfg.Provider,
+		providerManager: cfg.ProviderManager,
 		io:              cfg.IO,
 		memory:          cfg.Memory,
 		indexer:         cfg.Indexer,
@@ -119,6 +137,8 @@ func New(cfg AgentConfig) *Agent {
 		maxTurns:        cfg.MaxToolTurns,
 		docStore:        cfg.DocStore,
 		knowledge:       cfg.Knowledge,
+		social:          cfg.SocialStore,
+		textMem:         cfg.TextMemory,
 		personality:     cfg.Personality,
 		pluginReg:       cfg.PluginReg,
 		pluginDir:       cfg.PluginDir,
@@ -127,6 +147,7 @@ func New(cfg AgentConfig) *Agent {
 		stageHost:        cfg.StageHost,
 		eventBus:         cfg.EventBus,
 		selfInputCh:      make(chan string, 64),
+		childResults:     make(map[string]string),
 	}
 }
 
@@ -468,6 +489,8 @@ func (a *Agent) executeToolCall(tc agentAPI.ToolCall) string {
 	switch {
 	case strings.HasPrefix(tc.Name, "memory_"):
 		return a.executeMemoryTool(tc)
+	case strings.HasPrefix(tc.Name, "social_"):
+		return a.executeSocialTool(tc)
 	case strings.HasPrefix(tc.Name, "knowledge_"):
 		return a.executeKnowledgeTool(tc)
 	case strings.HasPrefix(tc.Name, "doc_"):
@@ -482,6 +505,10 @@ func (a *Agent) executeToolCall(tc agentAPI.ToolCall) string {
 		return a.executePluginReload()
 	case tc.Name == "spawn_child":
 		return a.executeSpawnChild(tc)
+	case tc.Name == "child_result":
+		return a.executeChildResultTool(tc)
+	case strings.HasPrefix(tc.Name, "llm_"):
+		return a.executeLLMTool(tc)
 	}
 
 	// 插件工具（通过 SDK RegisterTool 注册）
@@ -530,6 +557,14 @@ func (a *Agent) executeMemoryTool(tc agentAPI.ToolCall) string {
 		}
 		if len(result.Entities) == 0 && len(result.Relations) == 0 {
 			return "未找到相关记忆"
+		}
+		// 标记已显式召回的实体，后续自动注入时跳过，避免重复
+		if a.indexer != nil {
+			names := make([]string, len(result.Entities))
+			for i, e := range result.Entities {
+				names[i] = e.Name
+			}
+			a.indexer.MarkRecalled(names...)
 		}
 		var parts []string
 		parts = append(parts, fmt.Sprintf("找到 %d 个相关实体:", len(result.Entities)))
@@ -595,8 +630,200 @@ func (a *Agent) executeMemoryTool(tc agentAPI.ToolCall) string {
 		}
 		return fmt.Sprintf("已将「%s」合并到「%s」，%d 条关系已重定向", source, target, count)
 
+	case "memory_purge":
+		criteria := make(map[string]string)
+		if v, ok := tc.Arguments["subject_contains"].(string); ok && v != "" {
+			criteria["subject_contains"] = v
+		}
+		if v, ok := tc.Arguments["relation_type"].(string); ok && v != "" {
+			criteria["relation_type"] = v
+		}
+		if v, ok := tc.Arguments["target_contains"].(string); ok && v != "" {
+			criteria["target_contains"] = v
+		}
+		mode, _ := tc.Arguments["mode"].(string)
+		if mode == "" {
+			mode = "soft"
+		}
+		n, err := a.memory.Purge(criteria, mode)
+		if err != nil {
+			return fmt.Sprintf("删除图记忆失败: %v", err)
+		}
+
+		// 也清理文本记忆中匹配源的数据
+		textRemoved := 0
+		if a.textMem != nil {
+			if subj, ok := criteria["subject_contains"]; ok && subj != "" {
+				textRemoved, _ = a.textMem.PurgeByFilter(func(evt text.Event) bool {
+					return strings.Contains(evt.Source, subj) || strings.Contains(evt.Input, subj) || strings.Contains(evt.Response, subj)
+				})
+			}
+		}
+		parts := []string{fmt.Sprintf("已%s删除 %d 条图记忆关系", mode, n)}
+		if textRemoved > 0 {
+			parts = append(parts, fmt.Sprintf("清理 %d 条文本记忆日志", textRemoved))
+		}
+		return strings.Join(parts, "，")
+
+	case "memory_edit":
+		oldSubject, _ := tc.Arguments["old_subject"].(string)
+		oldRelation, _ := tc.Arguments["old_relation"].(string)
+		oldObject, _ := tc.Arguments["old_object"].(string)
+		if oldSubject == "" || oldRelation == "" || oldObject == "" {
+			return "old_subject、old_relation、old_object 不能为空"
+		}
+		newSubject, _ := tc.Arguments["new_subject"].(string)
+		newRelation, _ := tc.Arguments["new_relation"].(string)
+		newObject, _ := tc.Arguments["new_object"].(string)
+		if newSubject == "" && newRelation == "" && newObject == "" {
+			return "至少提供一个新值（new_subject / new_relation / new_object）"
+		}
+		if newSubject == "" {
+			newSubject = oldSubject
+		}
+		if newRelation == "" {
+			newRelation = oldRelation
+		}
+		if newObject == "" {
+			newObject = oldObject
+		}
+		// 先删旧的，再写新的（图记忆）
+		n, err := a.memory.Purge(map[string]string{
+			"subject_contains": oldSubject,
+			"relation_type":    oldRelation,
+			"target_contains":  oldObject,
+		}, "hard")
+		if err != nil {
+			return fmt.Sprintf("编辑图记忆失败（删除旧记录）: %v", err)
+		}
+		triples := []memory.Triple{{
+			Subject:  newSubject,
+			Relation: newRelation,
+			Object:   newObject,
+		}}
+		ec, rc, err := a.memory.Commit(triples, string(a.id), 0)
+		if err != nil {
+			return fmt.Sprintf("编辑图记忆失败（写入新记录）: %v", err)
+		}
+
+		// 也编辑文本记忆中匹配的内容
+		textReplaced := 0
+		if a.textMem != nil && oldSubject != "" {
+			textReplaced, _ = a.textMem.ReplaceByFilter(
+				func(evt text.Event) bool {
+					return strings.Contains(evt.Input, oldSubject) || strings.Contains(evt.Response, oldSubject)
+				},
+				func(evt text.Event) text.Event {
+					evt.Input = strings.ReplaceAll(evt.Input, oldSubject, newSubject)
+					evt.Response = strings.ReplaceAll(evt.Response, oldSubject, newSubject)
+					return evt
+				},
+			)
+		}
+		result := fmt.Sprintf("已编辑记忆：删除 %d 条旧关系，写入 %d 个实体 + %d 条新关系", n, ec, rc)
+		if textReplaced > 0 {
+			result += fmt.Sprintf("，更新 %d 条文本记忆日志", textReplaced)
+		}
+		return result
+
 	default:
 		return fmt.Sprintf("未知的记忆工具: %s", tc.Name)
+	}
+}
+
+func (a *Agent) executeSocialTool(tc agentAPI.ToolCall) string {
+	if a.social == nil {
+		return "人物关系网不可用（social store 未初始化）"
+	}
+	switch tc.Name {
+	case "person_query":
+		name, _ := tc.Arguments["name"].(string)
+		if name == "" {
+			return "请输入人物名称"
+		}
+		profile, err := a.social.GetPerson(name)
+		if err != nil {
+			return fmt.Sprintf("查询人物失败: %v", err)
+		}
+		var parts []string
+		parts = append(parts, fmt.Sprintf("▎%s 的档案", name))
+		if len(profile.Traits) > 0 {
+			parts = append(parts, "【特质】")
+			for k, v := range profile.Traits {
+				parts = append(parts, fmt.Sprintf("  %s: %s", k, v))
+			}
+		}
+		if len(profile.Relations) > 0 {
+			parts = append(parts, "【社交关系】")
+			for _, r := range profile.Relations {
+				parts = append(parts, fmt.Sprintf("  %s —(%s)—→ %s", name, r.Relation, r.Person))
+			}
+		}
+		if len(profile.Traits) == 0 && len(profile.Relations) == 0 {
+			parts = append(parts, "  （尚无记录）")
+		}
+		return strings.Join(parts, "\n")
+
+	case "person_set_trait":
+		name, _ := tc.Arguments["name"].(string)
+		trait, _ := tc.Arguments["trait"].(string)
+		value, _ := tc.Arguments["value"].(string)
+		if name == "" || trait == "" || value == "" {
+			return "name、trait、value 都不能为空"
+		}
+		if err := a.social.SetTrait(name, trait, value); err != nil {
+			return fmt.Sprintf("设置特质失败: %v", err)
+		}
+		return fmt.Sprintf("已记录：%s 的 %s = %s", name, trait, value)
+
+	case "person_relate":
+		personA, _ := tc.Arguments["person_a"].(string)
+		relation, _ := tc.Arguments["relation"].(string)
+		personB, _ := tc.Arguments["person_b"].(string)
+		if personA == "" || relation == "" || personB == "" {
+			return "person_a、relation、person_b 都不能为空"
+		}
+		if err := a.social.AddRelation(personA, relation, personB); err != nil {
+			return fmt.Sprintf("建立关系失败: %v", err)
+		}
+		return fmt.Sprintf("已记录：%s —(%s)—→ %s", personA, relation, personB)
+
+	case "person_network":
+		name, _ := tc.Arguments["name"].(string)
+		depth := int(getFloat(tc.Arguments, "depth"))
+		if depth <= 0 {
+			depth = 2
+		}
+		if name == "" {
+			return "请输入人物名称"
+		}
+		profiles, err := a.social.GetNetwork(name, depth)
+		if err != nil {
+			return fmt.Sprintf("查询社交网络失败: %v", err)
+		}
+		if len(profiles) == 0 {
+			return fmt.Sprintf("未找到 %s 的社交网络", name)
+		}
+		var parts []string
+		parts = append(parts, fmt.Sprintf("▎%s 的社交网络（%d 度）", name, depth))
+		for _, p := range profiles {
+			if p.Name == name {
+				continue
+			}
+			parts = append(parts, fmt.Sprintf("  · %s", p.Name))
+			for k, v := range p.Traits {
+				parts = append(parts, fmt.Sprintf("    %s: %s", k, v))
+			}
+			for _, r := range p.Relations {
+				if r.Person != name {
+					parts = append(parts, fmt.Sprintf("    —(%s)—→ %s", r.Relation, r.Person))
+				}
+			}
+		}
+		return strings.Join(parts, "\n")
+
+	default:
+		return fmt.Sprintf("未知的人物工具: %s", tc.Name)
 	}
 }
 
@@ -668,6 +895,8 @@ func (a *Agent) executeDocTool(tc agentAPI.ToolCall) string {
 		if len(docs) == 0 {
 			return "未找到相关文档记忆"
 		}
+		// 返回内容后从冷层移除，避免后续自动注入重复
+		a.docStore.Consume(query, topK)
 		var parts []string
 		for i, d := range docs {
 			parts = append(parts, fmt.Sprintf("[%d] %s (来源: %s)", i+1, d.Summary, d.Source))
@@ -816,6 +1045,41 @@ func (a *Agent) buildToolDefs() []interface{} {
 				},
 			},
 		})
+		tools = append(tools, map[string]interface{}{
+			"type": "function",
+			"function": map[string]interface{}{
+				"name":        "memory_purge",
+				"description": "删除指定条件的记忆关系。支持按主体、客体、关系类型筛选。谨慎使用。",
+				"parameters": map[string]interface{}{
+					"type": "object",
+					"properties": map[string]interface{}{
+						"subject_contains": map[string]interface{}{"type": "string", "description": "主体名包含的关键词"},
+						"relation_type":    map[string]interface{}{"type": "string", "description": "关系类型"},
+						"target_contains":  map[string]interface{}{"type": "string", "description": "客体名包含的关键词"},
+						"mode":             map[string]interface{}{"type": "string", "description": "soft（标记删除）/ hard（物理删除）", "default": "soft"},
+					},
+				},
+			},
+		})
+		tools = append(tools, map[string]interface{}{
+			"type": "function",
+			"function": map[string]interface{}{
+				"name":        "memory_edit",
+				"description": "编辑记忆：删除旧的 relation 并写入新的。例如修正错误的实体名或关系类型。",
+				"parameters": map[string]interface{}{
+					"type": "object",
+					"properties": map[string]interface{}{
+						"old_subject":  map[string]interface{}{"type": "string", "description": "旧主体名"},
+						"old_relation": map[string]interface{}{"type": "string", "description": "旧关系类型"},
+						"old_object":   map[string]interface{}{"type": "string", "description": "旧客体名"},
+						"new_subject":  map[string]interface{}{"type": "string", "description": "新主体名（不填则不变）"},
+						"new_relation": map[string]interface{}{"type": "string", "description": "新关系类型（不填则不变）"},
+						"new_object":   map[string]interface{}{"type": "string", "description": "新客体名（不填则不变）"},
+					},
+					"required": []string{"old_subject", "old_relation", "old_object"},
+				},
+			},
+		})
 	}
 
 	// 知识库工具
@@ -906,6 +1170,71 @@ func (a *Agent) buildToolDefs() []interface{} {
 		})
 	}
 
+	// 人物特质与关系网工具
+	if a.social != nil {
+		tools = append(tools, map[string]interface{}{
+			"type": "function",
+			"function": map[string]interface{}{
+				"name":        "person_query",
+				"description": "查询指定人物的完整档案（特质+社交关系）。用于了解一个人的性格、喜好、背景和社交圈。",
+				"parameters": map[string]interface{}{
+					"type": "object",
+					"properties": map[string]interface{}{
+						"name": map[string]interface{}{"type": "string", "description": "人物名称"},
+					},
+					"required": []string{"name"},
+				},
+			},
+		})
+		tools = append(tools, map[string]interface{}{
+			"type": "function",
+			"function": map[string]interface{}{
+				"name":        "person_set_trait",
+				"description": "记录/更新一个人的特质（性格、喜好、习惯等）。例如：person_set_trait(name=\"张三\", trait=\"喜欢\", value=\"红色\")。如果该特质已存在则覆盖。",
+				"parameters": map[string]interface{}{
+					"type": "object",
+					"properties": map[string]interface{}{
+						"name":  map[string]interface{}{"type": "string", "description": "人物名称"},
+						"trait": map[string]interface{}{"type": "string", "description": "特质名称，如：喜欢、性格、职业、年龄"},
+						"value": map[string]interface{}{"type": "string", "description": "特质值，如：红色、开朗、工程师、25岁"},
+					},
+					"required": []string{"name", "trait", "value"},
+				},
+			},
+		})
+		tools = append(tools, map[string]interface{}{
+			"type": "function",
+			"function": map[string]interface{}{
+				"name":        "person_relate",
+				"description": "记录两个人之间的社交关系。例如：person_relate(person_a=\"张三\", relation=\"朋友\", person_b=\"李四\")。关系是双向的。",
+				"parameters": map[string]interface{}{
+					"type": "object",
+					"properties": map[string]interface{}{
+						"person_a": map[string]interface{}{"type": "string", "description": "人物A"},
+						"relation": map[string]interface{}{"type": "string", "description": "关系类型，如：朋友、家人、同事、邻居、同学"},
+						"person_b": map[string]interface{}{"type": "string", "description": "人物B"},
+					},
+					"required": []string{"person_a", "relation", "person_b"},
+				},
+			},
+		})
+		tools = append(tools, map[string]interface{}{
+			"type": "function",
+			"function": map[string]interface{}{
+				"name":        "person_network",
+				"description": "查询某人的社交网络（多度关系）。显示该人物周围的相关人物及其关系和特质。",
+				"parameters": map[string]interface{}{
+					"type": "object",
+					"properties": map[string]interface{}{
+						"name":  map[string]interface{}{"type": "string", "description": "人物名称"},
+						"depth": map[string]interface{}{"type": "integer", "description": "关系深度（默认2）", "default": 2},
+					},
+					"required": []string{"name"},
+				},
+			},
+		})
+	}
+
 	// 插件重载工具
 	if a.pluginReg != nil && a.pluginDir != "" {
 		tools = append(tools, map[string]interface{}{
@@ -926,7 +1255,7 @@ func (a *Agent) buildToolDefs() []interface{} {
 		"type": "function",
 		"function": map[string]interface{}{
 			"name":        "spawn_child",
-			"description": "创建一个子 Agent 执行独立任务。子 Agent 使用传统上下文（无持久记忆），任务完成即销毁。适用于需要多步推理但不需要写入长期记忆的场景，例如：计算、分析、生成报告草稿等。",
+			"description": "启动一个异步子 Agent 执行独立任务。子 Agent 后台运行，不阻塞当前对话。完成后系统会自动通知你，届时请调用 child_result 工具查看输出。",
 			"parameters": map[string]interface{}{
 				"type": "object",
 				"properties": map[string]interface{}{
@@ -939,6 +1268,55 @@ func (a *Agent) buildToolDefs() []interface{} {
 			},
 		},
 	})
+	tools = append(tools, map[string]interface{}{
+		"type": "function",
+		"function": map[string]interface{}{
+			"name":        "child_result",
+			"description": "查询异步子 Agent 的执行结果。当收到'子任务已完成'的通知后，调用此工具获取输出。",
+			"parameters": map[string]interface{}{
+				"type": "object",
+				"properties": map[string]interface{}{
+					"task_id": map[string]interface{}{
+						"type":        "string",
+						"description": "spawn_child 返回的任务 ID，如 child_1",
+					},
+				},
+				"required": []string{"task_id"},
+			},
+		},
+	})
+
+	// LLM 源管理工具
+	if a.providerManager != nil {
+		tools = append(tools, map[string]interface{}{
+			"type": "function",
+			"function": map[string]interface{}{
+				"name":        "llm_list_sources",
+				"description": "列出所有可用的 LLM 源（如 deepseek、openai、ollama），每个源有对应的 Lua 适配器和配置。如需切换 LLM 源，请使用 llm_set_source。",
+				"parameters": map[string]interface{}{
+					"type":       "object",
+					"properties": map[string]interface{}{},
+				},
+			},
+		})
+		tools = append(tools, map[string]interface{}{
+			"type": "function",
+			"function": map[string]interface{}{
+				"name":        "llm_set_source",
+				"description": "切换当前 LLM 源到指定名称。变更立即生效，后续对话将使用新的 LLM 源。源名称可通过 llm_list_sources 查看。",
+				"parameters": map[string]interface{}{
+					"type": "object",
+					"properties": map[string]interface{}{
+						"name": map[string]interface{}{
+							"type":        "string",
+							"description": "LLM 源名称（如 deepseek、openai、ollama）",
+						},
+					},
+					"required": []string{"name"},
+				},
+			},
+		})
+	}
 
 	// 输出通道工具
 	tools = append(tools, map[string]interface{}{
@@ -1370,13 +1748,29 @@ func (a *Agent) executePluginReload() string {
 	return msg
 }
 
-// executeSpawnChild 创建子 Agent 执行独立任务
-// 子 Agent 使用传统上下文（单轮对话），无持久记忆，任务完即销毁
+// executeSpawnChild 创建子 Agent 异步执行独立任务
+// 不阻塞主 Agent，子任务完成后通过 selfInputCh 通知主 Agent 查看结果
 func (a *Agent) executeSpawnChild(tc agentAPI.ToolCall) string {
 	task, _ := tc.Arguments["task"].(string)
 	if task == "" {
 		return "请提供 task 参数"
 	}
+
+	// 生成唯一任务 ID
+	a.childMu.Lock()
+	a.childNextID++
+	taskID := fmt.Sprintf("child_%d", a.childNextID)
+	a.childMu.Unlock()
+
+	// 异步启动子 Agent
+	go a.runChildTask(taskID, task)
+
+	return fmt.Sprintf("子任务已启动（ID: %s），完成后会自动通知你，届时请使用 child_result 工具查看输出", taskID)
+}
+
+// runChildTask 后台运行子 Agent 任务，完成后将结果存储并通过 selfInputCh 通知主 Agent
+func (a *Agent) runChildTask(taskID, task string) {
+	log.Printf("[child] %s started: %s", taskID, truncateStr(task, 80))
 
 	sysPrompt := fmt.Sprintf(`你是 HomeAgent 的子任务助手。
 请完成以下任务。完成即可，无需保留记忆或查询历史。
@@ -1387,25 +1781,26 @@ func (a *Agent) executeSpawnChild(tc agentAPI.ToolCall) string {
 		{Role: "user", Content: task},
 	}
 
-	// 子 Agent 无特殊工具，只保留基础 tool 定义（无记忆/知识/文档工具）
-	childTools := []interface{}{
-		map[string]interface{}{
-			"type": "function",
-			"function": map[string]interface{}{
-				"name":        "output_send",
-				"description": "通过指定输出通道发送消息",
-				"parameters": map[string]interface{}{
-					"type": "object",
-					"properties": map[string]interface{}{
-						"channel": map[string]interface{}{"type": "string", "description": "输出通道"},
-						"content": map[string]interface{}{"type": "string", "description": "消息内容"},
-					},
-					"required": []string{"channel", "content"},
-				},
-			},
-		},
+	// 子 Agent 可调用核心以外的全部工具（记忆/知识/文档/社交），但不能调用输出工具
+	allTools := a.buildToolDefs()
+	childTools := make([]interface{}, 0, len(allTools))
+	outputTools := map[string]bool{"output_send": true, "output_set_channel": true, "output_list_channels": true, "spawn_child": true, "plgreload": true}
+	for _, t := range allTools {
+		toolMap, ok := t.(map[string]interface{})
+		if !ok {
+			continue
+		}
+		fn, ok := toolMap["function"].(map[string]interface{})
+		if !ok {
+			continue
+		}
+		name, _ := fn["name"].(string)
+		if !outputTools[name] {
+			childTools = append(childTools, t)
+		}
 	}
 
+	var finalResult string
 	for turn := 0; turn < 5; turn++ {
 		req := &agentAPI.CompletionRequest{
 			Messages:   msgs,
@@ -1419,33 +1814,112 @@ func (a *Agent) executeSpawnChild(tc agentAPI.ToolCall) string {
 
 		resp, err := a.provider.Chat(a.ctx, req)
 		if err != nil {
-			return fmt.Sprintf("子 Agent 执行失败: %v", err)
+			finalResult = fmt.Sprintf("子 Agent 执行失败: %v", err)
+			break
 		}
 
 		if len(resp.ToolCalls) == 0 {
-			return resp.Content
+			finalResult = resp.Content
+			break
 		}
 
 		for _, ct := range resp.ToolCalls {
 			var result string
-			if ct.Name == "output_send" {
-				channel, _ := ct.Arguments["channel"].(string)
-				content, _ := ct.Arguments["content"].(string)
-				if channel != "" && content != "" {
-					a.io.EmitTextTo("child_agent", channel, content)
-					result = fmt.Sprintf("已通过 [%s] 通道发送", channel)
-				} else {
-					result = "channel 和 content 不能为空"
-				}
-			} else {
-				result = fmt.Sprintf("子 Agent 无法调用工具 %s", ct.Name)
+			switch {
+			case ct.Name == "output_send" || ct.Name == "output_set_channel" || ct.Name == "output_list_channels":
+				result = fmt.Sprintf("子 Agent 不允许调用输出工具: %s", ct.Name)
+			case ct.Name == "spawn_child" || ct.Name == "plgreload":
+				result = fmt.Sprintf("子 Agent 不允许调用系统工具: %s", ct.Name)
+			default:
+				result = a.executeToolCall(ct)
 			}
 			msgs = append(msgs, agentAPI.Message{Role: "assistant", Content: resp.Content, ToolCalls: []agentAPI.ToolCall{ct}})
 			msgs = append(msgs, agentAPI.Message{Role: "tool", ToolCallID: ct.ID, Content: result})
 		}
 	}
 
-	return "子 Agent 执行超时（超过 5 轮）"
+	if finalResult == "" {
+		finalResult = "子 Agent 执行超时（超过 5 轮）"
+	}
+
+	// 存储结果
+	a.childMu.Lock()
+	a.childResults[taskID] = finalResult
+	a.childMu.Unlock()
+
+	log.Printf("[child] %s done: %s", taskID, truncateStr(finalResult, 100))
+
+	// 通过自循环通道通知主 Agent
+	notification := fmt.Sprintf("子任务 %s 已完成，请调用 child_result 工具查看输出", taskID)
+	select {
+	case a.selfInputCh <- notification:
+	default:
+		log.Printf("[child] self input channel full, dropping notification for %s", taskID)
+	}
+}
+
+// executeChildResultTool 查询子 Agent 执行结果
+func (a *Agent) executeChildResultTool(tc agentAPI.ToolCall) string {
+	taskID, _ := tc.Arguments["task_id"].(string)
+	if taskID == "" {
+		return "请提供 task_id 参数"
+	}
+
+	a.childMu.Lock()
+	result, ok := a.childResults[taskID]
+	if !ok {
+		a.childMu.Unlock()
+
+		// 可能还在执行中
+		a.childMu.Lock()
+		_, exists := a.childResults[taskID]
+		a.childMu.Unlock()
+		if !exists {
+			return fmt.Sprintf("子任务 %s 不存在或已过期", taskID)
+		}
+	}
+	delete(a.childResults, taskID)
+	a.childMu.Unlock()
+
+	return fmt.Sprintf("【子任务 %s 结果】\n%s", taskID, result)
+}
+
+func (a *Agent) executeLLMTool(tc agentAPI.ToolCall) string {
+	if a.providerManager == nil {
+		return "LLM 源管理器不可用"
+	}
+	switch tc.Name {
+	case "llm_list_sources":
+		sources := a.providerManager.List()
+		if len(sources) == 0 {
+			return "没有可用的 LLM 源"
+		}
+		parts := []string{"可用 LLM 源:"}
+		for _, name := range sources {
+			mark := " "
+			if p := a.providerManager.Get(""); p != nil && p.Name() == name {
+				mark = "→"
+			}
+			parts = append(parts, fmt.Sprintf("  %s %s", mark, name))
+		}
+		return strings.Join(parts, "\n")
+
+	case "llm_set_source":
+		name, _ := tc.Arguments["name"].(string)
+		if name == "" {
+			return "请提供源名称"
+		}
+		if err := a.providerManager.SetDefault(name); err != nil {
+			return fmt.Sprintf("切换失败: %v", err)
+		}
+		a.mu.Lock()
+		a.provider = a.providerManager.Get(name)
+		a.mu.Unlock()
+		return fmt.Sprintf("已切换到 LLM 源: %s", name)
+
+	default:
+		return fmt.Sprintf("未知的 LLM 工具: %s", tc.Name)
+	}
 }
 
 // runStage — 运行阶段管道，若插件 Response 被设置则返回 true（短路）
