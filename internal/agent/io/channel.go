@@ -246,10 +246,11 @@ func (m *IOManager) InjectInterrupt(source, channel string, payload map[string]i
 	if payload == nil {
 		payload = map[string]interface{}{}
 	}
+	evtType, _ := payload["type"].(string)
 	m.interruptCh <- &InputEvent{
 		RequestID:     m.nextRequestID(),
 		Source:        source,
-		Type:          payload["type"].(string),
+		Type:          evtType,
 		Payload:       payload,
 		OutputChannel: channel,
 	}

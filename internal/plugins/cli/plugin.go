@@ -22,7 +22,11 @@ func init() {
 	plugin.RegisterFactory("cli", func(name string, config map[string]interface{}) (sdk.Plugin, error) {
 		sock := DefaultSocket
 		if sock == "" {
-			sock = filepath.Join(config["data_dir"].(string), "cli.sock")
+			dataDir, ok := config["data_dir"].(string)
+			if !ok {
+				return nil, fmt.Errorf("cli plugin: config missing 'data_dir' or not a string")
+			}
+			sock = filepath.Join(dataDir, "cli.sock")
 		}
 		return New(name, sock), nil
 	})

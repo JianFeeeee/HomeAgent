@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"flag"
 	"log"
 	"os"
@@ -162,34 +163,45 @@ func main() {
 		log.Printf("[homed] text memory active at %s", filepath.Join(cfg.Daemon.DataDir, "memory", "text"))
 	}
 
+	ctx, stop := context.WithCancel(context.Background())
+	defer stop()
+
 	go func() {
-		for evt := range iom.OutputChan() {
-			if evt.Target == "memory" && evt.Type == "memory_candidate" {
-				source, _ := evt.Payload["source"].(string)
-				input, _ := evt.Payload["input"].(string)
-				response, _ := evt.Payload["response"].(string)
-				toolsUsed, _ := evt.Payload["tools_used"].([]string)
-				agentID, _ := evt.Payload["agent_id"].(string)
-
-				if input != "" && textMem != nil {
-					te := text.Event{
-						Timestamp: time.Now().Unix(),
-						Source:    source,
-						Input:     input,
-						Response:  response,
-						ToolsUsed: toolsUsed,
-						AgentID:   agentID,
-					}
-					if err := textMem.Append(te); err != nil {
-						log.Printf("[homed] text memory append: %v", err)
-					}
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case evt, ok := <-iom.OutputChan():
+				if !ok {
+					return
 				}
+				if evt.Target == "memory" && evt.Type == "memory_candidate" {
+					source, _ := evt.Payload["source"].(string)
+					input, _ := evt.Payload["input"].(string)
+					response, _ := evt.Payload["response"].(string)
+					toolsUsed, _ := evt.Payload["tools_used"].([]string)
+					agentID, _ := evt.Payload["agent_id"].(string)
 
-				if input != "" {
-					distiller.Append("agent", "user", input)
-				}
-				if response != "" {
-					distiller.Append("agent", "assistant", response)
+					if input != "" && textMem != nil {
+						te := text.Event{
+							Timestamp: time.Now().Unix(),
+							Source:    source,
+							Input:     input,
+							Response:  response,
+							ToolsUsed: toolsUsed,
+							AgentID:   agentID,
+						}
+						if err := textMem.Append(te); err != nil {
+							log.Printf("[homed] text memory append: %v", err)
+						}
+					}
+
+					if input != "" {
+						distiller.Append("agent", "user", input)
+					}
+					if response != "" {
+						distiller.Append("agent", "assistant", response)
+					}
 				}
 			}
 		}
@@ -345,6 +357,7 @@ func main() {
 		ContextSavePath: filepath.Join(cfg.Daemon.DataDir, "memory", "context.json"),
 		StageHost:       stageHost,
 		EventBus:        evBus,
+		ThinkingEnabled: cfg.LLM.ThinkingEnabled,
 	})
 	agent.Start()
 	defer agent.Stop()
