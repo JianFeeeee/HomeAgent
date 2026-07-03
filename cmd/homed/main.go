@@ -3,7 +3,6 @@ package main
 import (
 	"flag"
 	"log"
-	"net/http"
 	"os"
 	"os/signal"
 	"path/filepath"
@@ -16,6 +15,7 @@ import (
 	agentPkg "gitcode.com/JianFeeeee/HomeAgent/internal/agent"
 	"gitcode.com/JianFeeeee/HomeAgent/internal/api"
 	"gitcode.com/JianFeeeee/HomeAgent/config"
+	"gitcode.com/JianFeeeee/HomeAgent/internal/events"
 	"gitcode.com/JianFeeeee/HomeAgent/internal/knowledge"
 	luapkg "gitcode.com/JianFeeeee/HomeAgent/internal/lua"
 	"gitcode.com/JianFeeeee/HomeAgent/internal/memory"
@@ -227,6 +227,15 @@ func main() {
 		log.Printf("[homed] knowledge store active with %d items", len(ks.List()))
 	}
 
+	// === Event Bus (系统事件总线) ===
+	evBus := events.NewBus()
+	log.Printf("[homed] event bus initialized")
+
+	// === Stage Host (阶段管道编排) ===
+	stageHost := agentCore.NewStageHost()
+	stageHost.SyncFromRegistry(pluginReg)
+	log.Printf("[homed] stage host initialized with %d plugin sdks", pluginReg.SDKPluginCount())
+
 	// === Single Agent Core ===
 	agent := agentCore.New(agentCore.AgentConfig{
 		ID: "main",
@@ -259,8 +268,11 @@ func main() {
 		DocStore:     docStore,
 		Knowledge:    ks,
 		Personality:  personality,
-		PluginReg:    pluginReg,
-		PluginDir:    filepath.Join(cfg.Daemon.DataDir, "plugins"),
+		PluginReg:       pluginReg,
+		PluginDir:       filepath.Join(cfg.Daemon.DataDir, "plugins"),
+		ContextSavePath: filepath.Join(cfg.Daemon.DataDir, "memory", "context.json"),
+		StageHost:       stageHost,
+		EventBus:        evBus,
 	})
 	agent.Start()
 	defer agent.Stop()
@@ -271,23 +283,14 @@ func main() {
 
 	log.Printf("[homed] main agent started, model=%s base=%s", cfg.LLM.Model, cfg.LLM.BaseURL)
 
-	// === HTTP API ===
-	handler := api.NewHandler(sup, memDB, skMgr, luaVM, cfg, iom, textMem, ks, trk)
-
-	mux := http.NewServeMux()
-	handler.RegisterRoutes(mux)
-
-	server := &http.Server{
-		Addr:    cfg.Daemon.ListenAddr,
-		Handler: mux,
-	}
-
-	go func() {
-		log.Printf("[homed] HTTP API listening on %s", cfg.Daemon.ListenAddr)
-		if err := server.ListenAndServe(); err != nil && err != http.ErrServerClosed {
-			log.Fatalf("http server: %v", err)
-		}
-	}()
+	// === Built-in HTTP API & WebUI Plugin ===
+	webui := api.NewWebUIPlugin(
+		"webui", cfg.Daemon.ListenAddr,
+		sup, memDB, skMgr, luaVM, cfg, iom, textMem, ks, trk,
+	)
+	iom.RegisterDevice(webui)
+	webui.Start()
+	defer webui.Stop()
 
 	sigCh := make(chan os.Signal, 1)
 	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
@@ -298,7 +301,6 @@ func main() {
 		trk.Stop()
 	}
 	sup.Shutdown()
-	server.Close()
 	log.Printf("[homed] stopped")
 }
 

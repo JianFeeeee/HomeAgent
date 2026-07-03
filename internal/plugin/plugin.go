@@ -12,6 +12,7 @@ import (
 	"time"
 
 	agentIO "gitcode.com/JianFeeeee/HomeAgent/internal/agent/io"
+	sdk "gitcode.com/JianFeeeee/HomeAgent/internal/plugin/sdk"
 )
 
 type PluginType string
@@ -147,13 +148,88 @@ type Registry struct {
 	plugins   map[string]Plugin
 	ioMgr     *agentIO.IOManager
 	factories map[string]NativeFactory // 名称匹配的插件使用原生实现
+	sdkAPIs   map[string]*sdkAPI       // SDK 插件 API 实例
+}
+
+type sdkAPI struct {
+	api    *sdk.PluginAPI
+	tools  map[string]sdk.ToolHandler
+	stages map[sdk.Stage][]sdk.StageHandler
 }
 
 func NewRegistry() *Registry {
 	return &Registry{
 		plugins:   make(map[string]Plugin),
 		factories: make(map[string]NativeFactory),
+		sdkAPIs:   make(map[string]*sdkAPI),
 	}
+}
+
+// RegisterPluginAPI 注册一个 SDK 插件 API 实例
+func (r *Registry) RegisterPluginAPI(api *sdk.PluginAPI) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if _, ok := r.sdkAPIs[api.Name]; ok {
+		return fmt.Errorf("sdk api %s already registered", api.Name)
+	}
+	r.sdkAPIs[api.Name] = &sdkAPI{
+		api:    api,
+		tools:  api.Tools(),
+		stages: make(map[sdk.Stage][]sdk.StageHandler),
+	}
+	for stage := range sdk.AllStages() {
+		if handlers := api.StageHandlers(stage); len(handlers) > 0 {
+			r.sdkAPIs[api.Name].stages[stage] = handlers
+		}
+	}
+	log.Printf("[plugin] registered SDK plugin: %s (tools=%d, stages=%d)",
+		api.Name, len(api.Tools()), len(r.sdkAPIs[api.Name].stages))
+	return nil
+}
+
+// GetAllSDKToolDefs 收集所有 SDK 插件的工具定义
+func (r *Registry) GetAllSDKToolDefs() []sdk.ToolDef {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	var defs []sdk.ToolDef
+	for _, sa := range r.sdkAPIs {
+		for name := range sa.tools {
+			defs = append(defs, sdk.ToolDef{Name: name})
+		}
+	}
+	return defs
+}
+
+// ExecuteSDKTool 执行 SDK 插件工具
+func (r *Registry) ExecuteSDKTool(name string, args map[string]interface{}) (interface{}, error) {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	for _, sa := range r.sdkAPIs {
+		if handler, ok := sa.tools[name]; ok {
+			return handler(args)
+		}
+	}
+	return nil, fmt.Errorf("sdk tool %s not found", name)
+}
+
+// GetStageHandlers 获取所有 SDK 插件在指定阶段的处理器
+func (r *Registry) GetStageHandlers(stage sdk.Stage) []sdk.StageHandler {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	var handlers []sdk.StageHandler
+	for _, sa := range r.sdkAPIs {
+		if h, ok := sa.stages[stage]; ok {
+			handlers = append(handlers, h...)
+		}
+	}
+	return handlers
+}
+
+// SDKPluginCount 返回已注册的 SDK 插件数量
+func (r *Registry) SDKPluginCount() int {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	return len(r.sdkAPIs)
 }
 
 // RegisterNative 注册内置原生插件工厂。当从 plugins/ 加载插件时，

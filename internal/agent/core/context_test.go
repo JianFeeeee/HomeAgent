@@ -6,7 +6,7 @@ import (
 )
 
 func TestContextAppendAndLen(t *testing.T) {
-	ctx := NewRelevanceContext()
+	ctx := NewRelevanceContext("")
 	if ctx.Len() != 0 {
 		t.Errorf("new context should be empty, got %d", ctx.Len())
 	}
@@ -18,7 +18,7 @@ func TestContextAppendAndLen(t *testing.T) {
 }
 
 func TestContextRecent(t *testing.T) {
-	ctx := NewRelevanceContext()
+	ctx := NewRelevanceContext("")
 	ctx.Append(ContextEvent{Timestamp: time.Now(), Source: "user", Input: "a"})
 	ctx.Append(ContextEvent{Timestamp: time.Now(), Source: "user", Input: "b"})
 	ctx.Append(ContextEvent{Timestamp: time.Now(), Source: "user", Input: "c"})
@@ -33,7 +33,7 @@ func TestContextRecent(t *testing.T) {
 }
 
 func TestContextFormat(t *testing.T) {
-	ctx := NewRelevanceContext()
+	ctx := NewRelevanceContext("")
 	f := ctx.Format()
 	if f != "" {
 		t.Errorf("empty context should format to empty string, got %q", f)
@@ -54,7 +54,7 @@ func TestContextFormat(t *testing.T) {
 }
 
 func TestContextPruneKeepsTopK(t *testing.T) {
-	ctx := NewRelevanceContext()
+	ctx := NewRelevanceContext("")
 	for i := 0; i < 10; i++ {
 		ctx.Append(ContextEvent{
 			Timestamp: time.Now(),
@@ -80,7 +80,7 @@ func TestContextPruneKeepsTopK(t *testing.T) {
 }
 
 func TestContextPruneWithDocStore(t *testing.T) {
-	ctx := NewRelevanceContext()
+	ctx := NewRelevanceContext("")
 	for i := 0; i < 15; i++ {
 		ctx.Append(ContextEvent{
 			Timestamp: time.Now(),
@@ -97,7 +97,7 @@ func TestContextPruneWithDocStore(t *testing.T) {
 }
 
 func TestContextAppendAfterPrune(t *testing.T) {
-	ctx := NewRelevanceContext()
+	ctx := NewRelevanceContext("")
 	for i := 0; i < 10; i++ {
 		ctx.Append(ContextEvent{
 			Timestamp: time.Now(),
