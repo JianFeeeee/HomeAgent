@@ -30,19 +30,21 @@ const (
 )
 
 type StageContext struct {
-	mu          sync.RWMutex
-	RawMessage  string
-	UserID      string
-	GroupID     string
-	ContextMsgs []map[string]interface{}
-	LLMText     string
-	ToolCalls   []ToolCall
-	ToolResults []ToolResult
-	FinalText   string
-	Response    *string
-	Phase       Stage
-	Memory      []MemItem
-	Extra       map[string]interface{}
+	mu              sync.RWMutex
+	RawMessage      string
+	UserID          string
+	GroupID         string
+	ContextMsgs     []map[string]interface{}
+	LLMText         string
+	ReasoningContent string
+	TokenUsage      map[string]int
+	ToolCalls       []ToolCall
+	ToolResults     []ToolResult
+	FinalText       string
+	Response        *string
+	Phase           Stage
+	Memory          []MemItem
+	Extra           map[string]interface{}
 }
 
 func (c *StageContext) RLock()           { c.mu.RLock() }
