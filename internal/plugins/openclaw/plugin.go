@@ -2,6 +2,7 @@ package openclaw
 
 import (
 	_ "embed"
+	"encoding/json"
 	"fmt"
 	"log"
 	"os"
@@ -73,12 +74,15 @@ func (p *Plugin) Start(s *sdk.PluginSDK) error {
 
 		hasMainJS := false
 		hasOCManifest := false
+		hasOCPackage := false
 		for _, f := range subs {
 			switch f.Name() {
 			case "main.js":
 				hasMainJS = true
 			case "openclaw.plugin.json":
 				hasOCManifest = true
+			case "package.json":
+				hasOCPackage = hasOCExtensions(filepath.Join(skillPath, "package.json"))
 			}
 		}
 
@@ -87,7 +91,7 @@ func (p *Plugin) Start(s *sdk.PluginSDK) error {
 			if err := p.loadSidecar(s, skillPath, entry.Name()); err != nil {
 				log.Printf("[openclaw] sidecar %s: %v", entry.Name(), err)
 			}
-		case hasOCManifest:
+		case hasOCManifest || hasOCPackage:
 			if err := p.loadOCPlugin(s, skillPath, entry.Name()); err != nil {
 				log.Printf("[openclaw] ocplugin %s: %v", entry.Name(), err)
 			}
@@ -220,4 +224,22 @@ func (p *Plugin) Stop() error {
 	p.sidecars = nil
 	p.skills = nil
 	return nil
+}
+
+// hasOCExtensions 检测 package.json 中是否有 openclaw.extensions 或 openclaw.runtimeExtensions
+func hasOCExtensions(pkgPath string) bool {
+	data, err := os.ReadFile(pkgPath)
+	if err != nil {
+		return false
+	}
+	var pkg struct {
+		OpenClaw *struct {
+			Extensions         interface{} `json:"extensions"`
+			RuntimeExtensions  interface{} `json:"runtimeExtensions"`
+		} `json:"openclaw"`
+	}
+	if err := json.Unmarshal(data, &pkg); err != nil {
+		return false
+	}
+	return pkg.OpenClaw != nil && (pkg.OpenClaw.Extensions != nil || pkg.OpenClaw.RuntimeExtensions != nil)
 }
