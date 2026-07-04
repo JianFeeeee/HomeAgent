@@ -135,9 +135,14 @@ type InputProcessingConfig struct {
 	Audio AudioProcessingConfig `json:"audio" yaml:"audio"`
 }
 
+type PluginDirConfig struct {
+	Dir string `json:"dir"`
+}
+
 type Config struct {
 	Daemon          DaemonConfig          `json:"daemon"`
 	LLM             LLMConfig             `json:"llm"`
+	Plugin          PluginDirConfig       `json:"plugin"`
 	InputProcessing InputProcessingConfig `json:"input_processing"`
 	Defaults        AgentConfig           `json:"defaults"`
 	Agents          []AgentConfig         `json:"agents"`

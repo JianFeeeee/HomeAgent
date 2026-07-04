@@ -7,6 +7,7 @@ import (
 	_ "gitcode.com/JianFeeeee/HomeAgent/internal/plugins/healthcheck"
 	_ "gitcode.com/JianFeeeee/HomeAgent/internal/plugins/mcp"
 	_ "gitcode.com/JianFeeeee/HomeAgent/internal/plugins/openclaw"
+	_ "gitcode.com/JianFeeeee/HomeAgent/internal/plugins/pluginmgr"
 	_ "gitcode.com/JianFeeeee/HomeAgent/internal/plugins/timer"
 	_ "gitcode.com/JianFeeeee/HomeAgent/internal/plugins/webui"
 )

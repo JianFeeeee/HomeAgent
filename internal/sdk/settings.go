@@ -4,6 +4,8 @@ import (
 	internalConfig "gitcode.com/JianFeeeee/HomeAgent/internal/config"
 )
 
+type ConfigDef = internalConfig.ConfigDef
+
 type SettingsAPI interface {
 	// 插件自身配置表 config_<name>
 	Get(key string) (interface{}, error)
@@ -19,6 +21,10 @@ type SettingsAPI interface {
 	GetPlugin(plugin, key string) (interface{}, error)
 	SetPlugin(plugin, key string, value interface{}) error
 	ListPlugin(plugin, prefix string) ([]string, error)
+
+	// 配置定义元信息
+	RegisterDef(def internalConfig.ConfigDef)
+	Defs(prefix string) []*internalConfig.ConfigDef
 
 	// 全局
 	Dump() map[string]interface{}
@@ -74,6 +80,20 @@ func (s *settingsImpl) ListCore(prefix string) ([]string, error) {
 		return nil, nil
 	}
 	return s.reg.List(prefix), nil
+}
+
+func (s *settingsImpl) RegisterDef(def internalConfig.ConfigDef) {
+	if s.reg == nil {
+		return
+	}
+	s.reg.PluginConfig(s.pluginName).RegisterDef(def)
+}
+
+func (s *settingsImpl) Defs(prefix string) []*internalConfig.ConfigDef {
+	if s.reg == nil {
+		return nil
+	}
+	return s.reg.PluginConfig(s.pluginName).ListDefs(prefix)
 }
 
 func (s *settingsImpl) Dump() map[string]interface{} {

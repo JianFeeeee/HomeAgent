@@ -150,17 +150,15 @@ interruptCh                    process() 工具循环
 on_input → pre_action → post_action ↔ before_toolcall/after_toolcall → before_output → after_output
 ```
 
-| 阶段 | 时机 | 插件能力 |
-|------|------|---------|
-| `on_input` | 消息到 Agent | 可短路回复 |
-| `pre_action` | LLM 调用前 | 注入 system 消息 |
-| `post_action` | LLM 返回后 | 审查/修改文本和工具调用 |
-| `before_toolcall` | 工具执行前 | 拒绝/改参 |
-| `after_toolcall` | 工具执行后 | 修改结果 |
-| `before_output` | 输出前 | 改写最终文本 |
-| `after_output` | 输出后 | 只读统计 |
-
-并行规则: 所有 handler 用 goroutine 并发, StageContext 内嵌 `sync.RWMutex`, handler 通过 `Lock()/RLock()/IsResponded()` 协防。
+| 阶段 | 触发时机 | 插件读写权限 | 典型用途 |
+|---|---|---|---|
+| `on_input` | 消息到 Agent，零处理 | 可读写 `raw_message`，可设置 `response` 短路 | 黑名单、限流、自定义指令前缀 |
+| `pre_action` | Memory+Context 就绪，LLM 调用前 | 可读写 `context_messages`（追加/修改） | 注入 RAG 结果、插入时政 context |
+| `post_action` | LLM 返回文本 + 工具调用列表 | 可读写 `llm_text`、`tool_calls`、`context_messages` | 敏感词过滤、强制 redirect 工具 |
+| `before_toolcall` | 单个工具调用执行前 | 可读写 `tool_call.name`、`tool_call.args`，设置 `deny=true` 拒绝 | 审计高危操作、OS 命令白名单 |
+| `after_toolcall` | 单个工具执行完毕 | 可读写 `tool_result` | 脱敏数据库结果、排序搜索结果 |
+| `before_output` | 最终文本就绪，output_send 前 | 可读写 `final_text`，可设置 `skip_output=false` | 添加表情/at 前缀、多平台格式适配 |
+| `after_output` | output_send 已调用 | 只读 `final_text` | 统计日志、触发后续流程 |
 
 ## 配置体系 (ConfigRegistry)
 
@@ -168,25 +166,66 @@ on_input → pre_action → post_action ↔ before_toolcall/after_toolcall → b
 
 | 表 | 用途 | 访问 |
 |----|------|------|
-| `config` | 核心配置 (LLM/daemon/agent) | SettingsAPI.GetCore/SetCore |
+| `config` | 核心配置 (LLM/daemon/agent/paths) | SettingsAPI.GetCore/SetCore |
 | `config_<plugin>` | 插件独立配置 | SettingsAPI.Get/Set/List |
 | | 跨插件读写 | GetPlugin/SetPlugin/ListPlugin/Dump |
+
+### 配置元信息 (ConfigDef)
+
+每个配置项注册时附带元数据（类型、中文描述、分类、选项等），WebUI/CLI 自动发现并渲染。
+
+## 插件包系统
+
+### 包格式 (.hmap)
+
+标准 ZIP 文件，扩展名 `.hmap` (HomeAgent Plugin Package):
+
+```
+myplugin-1.0.0.hmap
+├── plugin.json      必要 — {name, version, entry, description, author, ...}
+├── plugin.so        Go 插件 (entry = "plugin.so")
+├── main.lua         Lua 插件 (entry = "main.lua")
+├── SKILL.md         Skill 插件 (entry = "SKILL.md")
+├── skill.json       可选 — 默认配置
+└── assets/          可选 — 插件资源
+```
+
+### pluginmgr 内置插件
+
+| 工具 | 功能 | 关键参数 |
+|------|------|---------|
+| `plugin_install` | 从 URL 安装 `.hmap` | `{url: string}` |
+| `plugin_list` | 列出已安装外部插件 | `{}` |
+| `plugin_remove` | 卸载 | `{name: string}` |
+| `plugin_info` | 详情（含文件清单） | `{name: string}` |
+
+HTTP API（`127.0.0.1:{随机端口}`，默认无鉴权）：
+
+| 方法 | 路径 | 作用 |
+|------|------|------|
+| `GET` | `/plugins` | 列表 |
+| `GET` | `/plugins/{name}` | 详情 |
+| `POST` | `/plugins` | 安装（JSON `{url}` 或二进制 .hmap 上传） |
+| `DELETE` | `/plugins/{name}` | 卸载 |
 
 ## 内核入口 (cmd/homed/main.go)
 
 初始化顺序:
 
 ```
-1. 基础设施 → 记忆/技能/Lua/监督/追踪/IO/事件
-2. 配置中心 (SQLite) + LLM Provider
-3. 阶段管道 StageHost + 插件注册表 Registry
-4. 注入内置插件依赖 (cli.DefaultSocket / openclaw.SkillsDir / webui.Configure)
-5. Registry.Load(plgDir) → 自注册 + 动态加载
-6. Agent 启动 (eventLoop + interceptLoop + distillLoop)
-7. 等待信号 → 关机
+1. 确定 dataDir (默认 ./data/ ，二进制同级)
+2. 创建目录结构 (plugins/memory/knowledge/...)
+3. 初始化 SQLite ConfigRegistry，SeedDefaults 写入默认路径
+4. 基础设施 → 记忆/技能/Lua/监督/追踪/IO/事件
+5. LLM Provider 管理
+6. 阶段管道 StageHost + 插件注册表 Registry
+7. 注入内置插件依赖 (cli/webui/healthcheck/pluginmgr)
+8. Registry.Load(plgDir) → 自注册 + 动态加载
+9. Agent 启动 (eventLoop + interceptLoop + distillLoop)
+10. 等待信号 → 关机
 ```
 
-## 目录结构
+### 目录结构
 
 ```
 cmd/
@@ -211,7 +250,7 @@ internal/
     plugin.go                   — SKILL 插件解析
   plugins/
     all.go                      — 空白导入触发所有内置插件 init()
-    timer/  cli/  openclaw/  webui/   — 内置插件
+    timer/  cli/  openclaw/  webui/  pluginmgr/   — 内置插件
   events/bus.go                 — 系统事件总线
   memory/                        — 三层记忆 (Context→Document→Graph)
   knowledge/                     — 知识库
@@ -224,16 +263,28 @@ pkg/types/                       — 类型定义
 docs/ARCHITECTURE.md             — 完整架构文档
 ```
 
-## 与旧架构关键区别
+## 目录路径配置化
 
-| 维度 | 之前 | 现在 |
-|------|------|------|
-| 插件注册 | main.go 硬编码 RegisterNative | init() 自注册 + .so 动态加载 |
-| 内核入口 | 逐个 import 插件包 | 仅 import all.go (空白导入) |
-| 中断处理 | 无消费者, 消息丢失 | interceptLoop + cancelLLM + drainInterrupt |
-| 插件目录 | 手动硬编码创建 | Load() 自动为每个注册工厂创建 |
-| 依赖注入 | 闭包绑定在 RegisterNative | 包级变量 (cli.DefaultSocket 等) |
-| 阶段执行 | 顺序 | 并行 (goroutine + WaitGroup) |
+### SeedDefaults 新增路径配置
+
+| Key | 默认值 | 说明 |
+|-----|--------|------|
+| `core.plugin.dir` | `<dataDir>/plugins` | 插件安装目录 |
+| `core.memory.graph` | `<dataDir>/memory/graph.db` | 图数据库 |
+| `core.memory.text` | `<dataDir>/memory/text` | 文本记忆目录 |
+| `core.memory.documents` | `<dataDir>/memory/documents` | 文档记忆目录 |
+| `core.knowledge.path` | `<dataDir>/knowledge` | 知识库目录 |
+| `core.skills.path` | `<dataDir>/skills` | 技能目录 |
+| `core.log.path` | `<dataDir>/log` | 日志目录 |
+
+所有路径配置项均有 `ConfigDef` 元信息 + `password` 类型保护敏感字段。
+
+### 裸二进制启动
+
+- `-data` 默认值从硬编码 `/var/lib/homeagent` 改为 `""`（自动检测）
+- 自动检测：读取 `/proc/self/exe` 确定二进制所在目录 → `filepath.Join(exeDir, "data")`
+- 首次运行自动创建完整目录结构
+- 后续通过调整 ConfigRegistry 的值自定义各存储路径
 
 ## 构建与验证
 

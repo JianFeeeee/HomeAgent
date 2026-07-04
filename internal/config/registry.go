@@ -3,6 +3,7 @@ package config
 import (
 	"database/sql"
 	"fmt"
+	"path/filepath"
 	"sort"
 	"strconv"
 	"strings"
@@ -13,10 +14,23 @@ import (
 	_ "github.com/mattn/go-sqlite3"
 )
 
+type ConfigDef struct {
+	Key         string   `json:"key"`
+	Default     string   `json:"default"`
+	Description string   `json:"description"`
+	Type        string   `json:"type"` // string, int, bool, duration, password, select, text
+	DisplayName string   `json:"display_name"`
+	Placeholder string   `json:"placeholder,omitempty"`
+	Options     []string `json:"options,omitempty"`
+	Hidden      bool     `json:"hidden,omitempty"`
+	Category    string   `json:"category,omitempty"`
+}
+
 type ConfigRegistry struct {
 	mu     sync.RWMutex
 	db     *sql.DB
 	dbPath string
+	defs   map[string]*ConfigDef
 }
 
 func NewConfigRegistry(dbPath string) *ConfigRegistry {
@@ -27,9 +41,8 @@ func NewConfigRegistry(dbPath string) *ConfigRegistry {
 	if err != nil {
 		panic(fmt.Sprintf("open config db: %v", err))
 	}
-	// WAL 模式提升并发
 	db.Exec("PRAGMA journal_mode=WAL")
-	r := &ConfigRegistry{db: db, dbPath: dbPath}
+	r := &ConfigRegistry{db: db, dbPath: dbPath, defs: make(map[string]*ConfigDef)}
 	r.initCoreTable()
 	return r
 }
@@ -67,6 +80,32 @@ func (r *ConfigRegistry) Register(key string, value interface{}) {
 
 func (r *ConfigRegistry) RegisterDefault(key string, value interface{}) {
 	r.Register(key, value)
+}
+
+func (r *ConfigRegistry) RegisterDef(def ConfigDef) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.defs[def.Key] = &def
+	r.db.Exec(`INSERT OR IGNORE INTO config (key, value) VALUES (?, ?)`, def.Key, def.Default)
+}
+
+func (r *ConfigRegistry) GetDef(key string) *ConfigDef {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	return r.defs[key]
+}
+
+func (r *ConfigRegistry) ListDefs(prefix string) []*ConfigDef {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	var result []*ConfigDef
+	for _, def := range r.defs {
+		if strings.HasPrefix(def.Key, prefix) {
+			result = append(result, def)
+		}
+	}
+	sort.Slice(result, func(i, j int) bool { return result[i].Key < result[j].Key })
+	return result
 }
 
 func (r *ConfigRegistry) Get(key string) (interface{}, error) {
@@ -139,7 +178,6 @@ func (r *ConfigRegistry) Flush() error {
 	if r.dbPath == "" || r.dbPath == ":memory:" {
 		return nil
 	}
-	// SQLite 自动持久化；显式 checkpoint 确保一致性
 	r.mu.RLock()
 	_, err := r.db.Exec("PRAGMA wal_checkpoint(TRUNCATE)")
 	r.mu.RUnlock()
@@ -150,11 +188,14 @@ func (r *ConfigRegistry) Close() error {
 	return r.db.Close()
 }
 
-// SeedDefaults 用硬编码默认值填充 config 表（仅空表时写入），不再依赖 YAML
 func (r *ConfigRegistry) SeedDefaults(dataDir string) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
+	r.seedDBValues(dataDir)
+	r.seedCoreDefs(dataDir)
+}
 
+func (r *ConfigRegistry) seedDBValues(dataDir string) {
 	var count int
 	r.db.QueryRow(`SELECT COUNT(*) FROM config`).Scan(&count)
 	if count > 0 {
@@ -175,14 +216,11 @@ func (r *ConfigRegistry) SeedDefaults(dataDir string) {
 
 	set := func(k, v string) { stmt.Exec(k, v) }
 
-	// daemon
 	set("core.daemon.listen_addr", ":8080")
 	set("core.daemon.data_dir", dataDir)
 	set("core.daemon.heartbeat_interval", "15s")
 	set("core.daemon.check_interval", "30s")
 	set("core.daemon.log_level", "info")
-
-	// llm
 	set("core.llm.provider", "deepseek")
 	set("core.llm.model", "deepseek-v4-flash")
 	set("core.llm.base_url", "https://api.deepseek.com")
@@ -192,7 +230,6 @@ func (r *ConfigRegistry) SeedDefaults(dataDir string) {
 	set("core.llm.max_tokens", "4096")
 	set("core.llm.thinking_enabled", "false")
 
-	// llm sources
 	sources := map[string]map[string]string{
 		"deepseek": {"base_url": "https://api.deepseek.com", "model": "deepseek-v4-flash", "api_key": "", "thinking_enabled": "false", "adapter": "deepseek", "adapter_path": "adapters/deepseek.lua"},
 		"openai":   {"base_url": "https://api.openai.com/v1", "model": "gpt-4o", "api_key": "", "thinking_enabled": "false", "adapter": "openai", "adapter_path": "adapters/openai.lua"},
@@ -213,7 +250,6 @@ func (r *ConfigRegistry) SeedDefaults(dataDir string) {
 		set(p+".adapter_path", props["adapter_path"])
 	}
 
-	// defaults
 	set("core.defaults.image", "homeagent/agent-base:latest")
 	set("core.defaults.openclaw_enabled", "true")
 	set("core.defaults.snapshot.interval", "10m")
@@ -228,14 +264,105 @@ func (r *ConfigRegistry) SeedDefaults(dataDir string) {
 	set("core.defaults.resource.memory", "2g")
 	set("core.defaults.resource.disk", "10g")
 	set("core.defaults.resource.network", "true")
+	set("core.plugin.dir", filepath.Join(dataDir, "plugins"))
+	set("core.memory.graph", filepath.Join(dataDir, "memory", "graph.db"))
+	set("core.memory.text", filepath.Join(dataDir, "memory", "text"))
+	set("core.memory.documents", filepath.Join(dataDir, "memory", "documents"))
+	set("core.knowledge.path", filepath.Join(dataDir, "knowledge"))
+	set("core.skills.path", filepath.Join(dataDir, "skills"))
+	set("core.log.path", filepath.Join(dataDir, "log"))
+
 	set("core.agent.max_tool_turns", "10")
 	set("core.agent.max_context_size", "30")
 	set("core.agent.distill_interval", "30m")
 
+	set("core.input_processing.image.fallback_provider", "")
+	set("core.input_processing.image.fallback_model", "")
+	set("core.input_processing.image.describe_prompt", "请详细描述这张图片的内容")
+	set("core.input_processing.image.ocr_enabled", "true")
+	set("core.input_processing.audio.fallback_provider", "")
+	set("core.input_processing.audio.fallback_model", "")
+	set("core.input_processing.audio.describe_prompt", "请描述这段音频的内容")
+
 	tx.Commit()
 }
 
-// helpers  — 所有值存为 TEXT，解析时自动转换
+func (r *ConfigRegistry) seedCoreDefs(dataDir string) {
+	reg := func(d ConfigDef) { r.defs[d.Key] = &d }
+
+	reg(ConfigDef{Key: "core.daemon.listen_addr", Default: ":8080", Type: "string", DisplayName: "监听地址", Description: "WebUI HTTP 监听地址", Category: "daemon"})
+	reg(ConfigDef{Key: "core.daemon.data_dir", Default: dataDir, Type: "string", DisplayName: "数据目录", Description: "数据存储根目录", Category: "daemon"})
+	reg(ConfigDef{Key: "core.daemon.heartbeat_interval", Default: "15s", Type: "duration", DisplayName: "心跳间隔", Description: "Agent 心跳检查间隔", Category: "daemon"})
+	reg(ConfigDef{Key: "core.daemon.check_interval", Default: "30s", Type: "duration", DisplayName: "检查间隔", Description: "网络状态检查间隔", Category: "daemon"})
+	reg(ConfigDef{Key: "core.daemon.log_level", Default: "info", Type: "select", DisplayName: "日志级别", Description: "日志输出级别", Options: []string{"debug", "info", "warn", "error"}, Category: "daemon"})
+
+	reg(ConfigDef{Key: "core.llm.provider", Default: "deepseek", Type: "string", DisplayName: "默认提供商", Description: "默认 LLM 提供商名称，需匹配 sources 中的定义", Category: "llm"})
+	reg(ConfigDef{Key: "core.llm.model", Default: "deepseek-v4-flash", Type: "string", DisplayName: "默认模型", Description: "默认 LLM 模型名称", Category: "llm"})
+	reg(ConfigDef{Key: "core.llm.base_url", Default: "https://api.deepseek.com", Type: "string", DisplayName: "默认 API 地址", Description: "默认 LLM API 基础地址", Category: "llm"})
+	reg(ConfigDef{Key: "core.llm.api_key", Default: "", Type: "password", DisplayName: "默认 API 密钥", Description: "默认 LLM API 密钥（空则从环境变量读取）", Placeholder: "留空则使用 DEEPSEEK_API_KEY", Category: "llm"})
+	reg(ConfigDef{Key: "core.llm.adapter", Default: "deepseek", Type: "string", DisplayName: "默认适配器", Description: "协议适配器名称（对应 adapters/ 下的 Lua 脚本）", Category: "llm"})
+	reg(ConfigDef{Key: "core.llm.temperature", Default: "0.7", Type: "string", DisplayName: "生成温度", Description: "LLM 生成温度 (0.0-2.0)", Category: "llm"})
+	reg(ConfigDef{Key: "core.llm.max_tokens", Default: "4096", Type: "int", DisplayName: "最大 Token", Description: "每次生成的最大 Token 数", Category: "llm"})
+	reg(ConfigDef{Key: "core.llm.thinking_enabled", Default: "false", Type: "bool", DisplayName: "深度思考", Description: "启用深度思考模式（如 DeepSeek R1 的思维链输出）", Category: "llm"})
+
+	sources := map[string]map[string]string{
+		"deepseek": {"base_url": "https://api.deepseek.com", "model": "deepseek-v4-flash", "api_key": "", "thinking_enabled": "false", "adapter": "deepseek", "adapter_path": "adapters/deepseek.lua"},
+		"openai":   {"base_url": "https://api.openai.com/v1", "model": "gpt-4o", "api_key": "", "thinking_enabled": "false", "adapter": "openai", "adapter_path": "adapters/openai.lua"},
+		"anthropic": {"base_url": "https://api.anthropic.com", "model": "claude-sonnet-4-20250514", "api_key": "", "thinking_enabled": "false", "adapter": "anthropic", "adapter_path": "adapters/anthropic.lua"},
+		"gemini":   {"base_url": "https://generativelanguage.googleapis.com", "model": "gemini-2.0-flash", "api_key": "", "thinking_enabled": "false", "adapter": "gemini", "adapter_path": "adapters/gemini.lua"},
+		"mistral":  {"base_url": "https://api.mistral.ai", "model": "mistral-large-latest", "api_key": "", "thinking_enabled": "false", "adapter": "mistral", "adapter_path": "adapters/mistral.lua"},
+		"groq":     {"base_url": "https://api.groq.com", "model": "llama3-70b-8192", "api_key": "", "thinking_enabled": "false", "adapter": "groq", "adapter_path": "adapters/groq.lua"},
+		"github":   {"base_url": "https://models.inference.ai.azure.com", "model": "gpt-4o", "api_key": "", "thinking_enabled": "false", "adapter": "github", "adapter_path": "adapters/github.lua"},
+		"ollama":   {"base_url": "http://localhost:11434", "model": "llama3", "api_key": "", "thinking_enabled": "false", "adapter": "ollama", "adapter_path": "adapters/ollama.lua"},
+	}
+	for name := range sources {
+		p := "core.llm.sources." + name
+		reg(ConfigDef{Key: p + ".base_url", Default: sources[name]["base_url"], Type: "string", DisplayName: name + " API 地址", Description: name + " LLM API 基础地址", Category: "sources"})
+		reg(ConfigDef{Key: p + ".model", Default: sources[name]["model"], Type: "string", DisplayName: name + " 模型", Description: name + " 使用的模型名称", Category: "sources"})
+		reg(ConfigDef{Key: p + ".api_key", Default: "", Type: "password", DisplayName: name + " API 密钥", Description: name + " API 密钥", Category: "sources"})
+		reg(ConfigDef{Key: p + ".thinking_enabled", Default: sources[name]["thinking_enabled"], Type: "bool", DisplayName: name + " 深度思考", Description: name + " 启用深度思考模式", Category: "sources"})
+		reg(ConfigDef{Key: p + ".adapter", Default: sources[name]["adapter"], Type: "string", DisplayName: name + " 适配器", Description: name + " 协议适配器名称", Category: "sources"})
+		reg(ConfigDef{Key: p + ".adapter_path", Default: sources[name]["adapter_path"], Type: "string", DisplayName: name + " 适配器路径", Description: name + " 适配器脚本路径", Category: "sources"})
+	}
+
+	reg(ConfigDef{Key: "core.defaults.image", Default: "homeagent/agent-base:latest", Type: "string", DisplayName: "默认镜像", Description: "Agent 默认 Docker 镜像", Category: "defaults"})
+	reg(ConfigDef{Key: "core.defaults.openclaw_enabled", Default: "true", Type: "bool", DisplayName: "启用 OpenClaw", Description: "是否启用 OpenClaw 插件（网页内容抓取）", Category: "defaults"})
+	reg(ConfigDef{Key: "core.defaults.snapshot.interval", Default: "10m", Type: "duration", DisplayName: "快照间隔", Description: "自动快照创建间隔", Category: "snapshot"})
+	reg(ConfigDef{Key: "core.defaults.snapshot.max_snapshots", Default: "20", Type: "int", DisplayName: "最大快照数", Description: "保留的最大快照数量", Category: "snapshot"})
+	reg(ConfigDef{Key: "core.defaults.snapshot.pre_action", Default: "true", Type: "bool", DisplayName: "操作前快照", Description: "执行操作前自动创建快照", Category: "snapshot"})
+	reg(ConfigDef{Key: "core.defaults.snapshot.post_action", Default: "false", Type: "bool", DisplayName: "操作后快照", Description: "执行操作后自动创建快照", Category: "snapshot"})
+	reg(ConfigDef{Key: "core.defaults.rollback.max_retries", Default: "3", Type: "int", DisplayName: "最大重试", Description: "健康检查失败后的最大重试次数", Category: "rollback"})
+	reg(ConfigDef{Key: "core.defaults.rollback.health_threshold", Default: "3", Type: "int", DisplayName: "健康阈值", Description: "触发回滚的健康状态阈值", Category: "rollback"})
+	reg(ConfigDef{Key: "core.defaults.rollback.cooldown_period", Default: "30s", Type: "duration", DisplayName: "回滚冷却", Description: "回滚操作后的冷却时间", Category: "rollback"})
+	reg(ConfigDef{Key: "core.defaults.rollback.auto_rollback", Default: "true", Type: "bool", DisplayName: "自动回滚", Description: "达到健康阈值后自动执行回滚", Category: "rollback"})
+	reg(ConfigDef{Key: "core.defaults.resource.cpu", Default: "2", Type: "string", DisplayName: "CPU 限制", Description: "容器 CPU 限制（如 1、2、0.5）", Category: "resources"})
+	reg(ConfigDef{Key: "core.defaults.resource.memory", Default: "2g", Type: "string", DisplayName: "内存限制", Description: "容器内存限制（如 512m、2g）", Category: "resources"})
+	reg(ConfigDef{Key: "core.defaults.resource.disk", Default: "10g", Type: "string", DisplayName: "磁盘限制", Description: "容器磁盘限制", Category: "resources"})
+	reg(ConfigDef{Key: "core.defaults.resource.network", Default: "true", Type: "bool", DisplayName: "网络访问", Description: "是否允许容器访问网络", Category: "resources"})
+
+	plgDir := filepath.Join(dataDir, "plugins")
+	reg(ConfigDef{Key: "core.plugin.dir", Default: plgDir, Type: "string", DisplayName: "插件目录", Description: "外部插件安装目录", Category: "paths"})
+	reg(ConfigDef{Key: "core.memory.graph", Default: filepath.Join(dataDir, "memory", "graph.db"), Type: "string", DisplayName: "图数据库路径", Description: "长期记忆（图数据库）存储路径", Category: "paths"})
+	reg(ConfigDef{Key: "core.memory.text", Default: filepath.Join(dataDir, "memory", "text"), Type: "string", DisplayName: "文本记忆路径", Description: "短期文本记忆存储目录", Category: "paths"})
+	reg(ConfigDef{Key: "core.memory.documents", Default: filepath.Join(dataDir, "memory", "documents"), Type: "string", DisplayName: "文档记忆路径", Description: "文档记忆存储目录", Category: "paths"})
+	reg(ConfigDef{Key: "core.knowledge.path", Default: filepath.Join(dataDir, "knowledge"), Type: "string", DisplayName: "知识库路径", Description: "知识库存储目录", Category: "paths"})
+	reg(ConfigDef{Key: "core.skills.path", Default: filepath.Join(dataDir, "skills"), Type: "string", DisplayName: "技能目录", Description: "OpenClaw 技能存储目录", Category: "paths"})
+	reg(ConfigDef{Key: "core.log.path", Default: filepath.Join(dataDir, "log"), Type: "string", DisplayName: "日志目录", Description: "日志文件输出目录", Category: "paths"})
+
+	reg(ConfigDef{Key: "core.agent.max_tool_turns", Default: "10", Type: "int", DisplayName: "最大工具轮次", Description: "单次请求允许的最大工具调用轮数", Category: "agent"})
+	reg(ConfigDef{Key: "core.agent.max_context_size", Default: "30", Type: "int", DisplayName: "最大上下文", Description: "上下文窗口中保留的最大消息条数", Category: "agent"})
+	reg(ConfigDef{Key: "core.agent.distill_interval", Default: "30m", Type: "duration", DisplayName: "蒸馏间隔", Description: "记忆蒸馏的执行间隔", Category: "agent"})
+
+	reg(ConfigDef{Key: "core.input_processing.image.fallback_provider", Default: "", Type: "string", DisplayName: "图片回退提供商", Description: "当主 LLM 不支持图片处理时使用的提供商（留空则自动降级为文字描述）", Category: "input"})
+	reg(ConfigDef{Key: "core.input_processing.image.fallback_model", Default: "", Type: "string", DisplayName: "图片回退模型", Description: "图片回退提供商使用的模型名", Category: "input"})
+	reg(ConfigDef{Key: "core.input_processing.image.describe_prompt", Default: "请详细描述这张图片的内容", Type: "text", DisplayName: "图片描述提示词", Description: "生成图片文字描述时的系统提示词", Category: "input"})
+	reg(ConfigDef{Key: "core.input_processing.image.ocr_enabled", Default: "true", Type: "bool", DisplayName: "启用 OCR", Description: "是否启用图片文字识别工具", Category: "input"})
+	reg(ConfigDef{Key: "core.input_processing.audio.fallback_provider", Default: "", Type: "string", DisplayName: "音频回退提供商", Description: "当主 LLM 不支持音频处理时使用的提供商", Category: "input"})
+	reg(ConfigDef{Key: "core.input_processing.audio.fallback_model", Default: "", Type: "string", DisplayName: "音频回退模型", Description: "音频回退提供商使用的模型名", Category: "input"})
+	reg(ConfigDef{Key: "core.input_processing.audio.describe_prompt", Default: "请描述这段音频的内容", Type: "text", DisplayName: "音频描述提示词", Description: "生成音频文字描述时的系统提示词", Category: "input"})
+}
+
+// helpers
 
 func (r *ConfigRegistry) GetString(key, defaultVal string) string {
 	r.mu.RLock()
@@ -293,7 +420,7 @@ func (r *ConfigRegistry) GetBool(key string, defaultVal bool) bool {
 	return b
 }
 
-// ToConfig 从 config 表重建 *types.Config（数据库为真实源，YAML 仅作初始 seed）
+// ToConfig 从 config 表重建 *types.Config
 func (r *ConfigRegistry) ToConfig() *types.Config {
 	cfg := &types.Config{}
 	dump := r.Dump()
@@ -355,7 +482,6 @@ func (r *ConfigRegistry) ToConfig() *types.Config {
 	cfg.LLM.MaxTokens = readInt("core.llm.max_tokens", cfg.LLM.MaxTokens)
 	cfg.LLM.ThinkingEnabled = readBool("core.llm.thinking_enabled", cfg.LLM.ThinkingEnabled)
 
-	// 重建 sources —— 从 DB 中按前缀扫描，按名称排序保证确定性
 	sourceNames := make([]string, 0)
 	for k := range dump {
 		if strings.HasPrefix(k, "core.llm.sources.") && strings.HasSuffix(k, ".base_url") {
@@ -393,20 +519,32 @@ func (r *ConfigRegistry) ToConfig() *types.Config {
 	cfg.Defaults.ResourceLimit.Disk = read("core.defaults.resource.disk", cfg.Defaults.ResourceLimit.Disk)
 	cfg.Defaults.ResourceLimit.Network = readBool("core.defaults.resource.network", cfg.Defaults.ResourceLimit.Network)
 
+	cfg.Plugin.Dir = read("core.plugin.dir", cfg.Plugin.Dir)
+
+	cfg.InputProcessing.Image.FallbackProvider = read("core.input_processing.image.fallback_provider", cfg.InputProcessing.Image.FallbackProvider)
+	cfg.InputProcessing.Image.FallbackModel = read("core.input_processing.image.fallback_model", cfg.InputProcessing.Image.FallbackModel)
+	cfg.InputProcessing.Image.DescribePrompt = read("core.input_processing.image.describe_prompt", cfg.InputProcessing.Image.DescribePrompt)
+	cfg.InputProcessing.Image.OCREnabled = readBool("core.input_processing.image.ocr_enabled", cfg.InputProcessing.Image.OCREnabled)
+	cfg.InputProcessing.Audio.FallbackProvider = read("core.input_processing.audio.fallback_provider", cfg.InputProcessing.Audio.FallbackProvider)
+	cfg.InputProcessing.Audio.FallbackModel = read("core.input_processing.audio.fallback_model", cfg.InputProcessing.Audio.FallbackModel)
+	cfg.InputProcessing.Audio.DescribePrompt = read("core.input_processing.audio.describe_prompt", cfg.InputProcessing.Audio.DescribePrompt)
+
 	return cfg
 }
+
 func (r *ConfigRegistry) PluginConfig(name string) *PluginSettings {
 	r.ensurePluginTable(name)
 	return &PluginSettings{
 		registry: r,
 		table:    r.pluginTableName(name),
+		name:     name,
 	}
 }
 
-// PluginSettings 实现 sdk.SettingsAPI，作用域为单个插件表
 type PluginSettings struct {
 	registry *ConfigRegistry
 	table    string
+	name     string
 }
 
 func (p *PluginSettings) Get(key string) (interface{}, error) {
@@ -447,4 +585,16 @@ func (p *PluginSettings) List(prefix string) ([]string, error) {
 		}
 	}
 	return keys, nil
+}
+
+func (p *PluginSettings) RegisterDef(def ConfigDef) {
+	p.registry.mu.Lock()
+	defer p.registry.mu.Unlock()
+	qualified := "plugin." + p.name + "." + def.Key
+	def.Key = qualified
+	p.registry.defs[def.Key] = &def
+}
+
+func (p *PluginSettings) ListDefs(prefix string) []*ConfigDef {
+	return p.registry.ListDefs(prefix)
 }
