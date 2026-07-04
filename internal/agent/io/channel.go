@@ -241,6 +241,22 @@ func (m *IOManager) InjectTextTo(source, outputChannel, text string) {
 	})
 }
 
+// InjectTextNoMemoryTo 注入文本输入（不产生记忆）并指定输出通道
+func (m *IOManager) InjectTextNoMemoryTo(source, outputChannel, text string) {
+	m.InjectInputTo(source, outputChannel, "text", map[string]interface{}{
+		"content":   text,
+		"no_memory": true,
+	})
+}
+
+// InjectTextSyncNoMemoryTo 注入文本输入（同步等待，不产生记忆）并指定输出通道
+func (m *IOManager) InjectTextSyncNoMemoryTo(source, outputChannel, text string) *OutputEvent {
+	return m.InjectInputSyncTo(source, outputChannel, "text", map[string]interface{}{
+		"content":   text,
+		"no_memory": true,
+	})
+}
+
 // InjectInterrupt 向中断通道发送输入
 func (m *IOManager) InjectInterrupt(source, channel string, payload map[string]interface{}) {
 	if payload == nil {

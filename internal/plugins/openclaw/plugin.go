@@ -1,17 +1,22 @@
 package openclaw
 
 import (
+	_ "embed"
 	"fmt"
 	"log"
 	"os"
 	"path/filepath"
+	"sync"
 
 	"gitcode.com/JianFeeeee/HomeAgent/internal/plugin"
 	sdk "gitcode.com/JianFeeeee/HomeAgent/internal/sdk"
 )
 
-// SkillsDir 由 main.go 在 Load() 前设置，指向 SKILL.md 存放目录。
+//go:embed simulator/main.js
+var simulatorSrc string
+
 var SkillsDir string
+var SimulatorDir string
 
 func init() {
 	plugin.RegisterFactory("openclaw", func(name string, config map[string]interface{}) (sdk.Plugin, error) {
@@ -28,15 +33,23 @@ func init() {
 }
 
 type Plugin struct {
-	name    string
-	skillsDir string
-	skills  []*plugin.SKILLPlugin
+	name          string
+	skillsDir     string
+	simulatorDir  string
+	skills        []*plugin.SKILLPlugin
+	sidecars      []*sidecarProcess
+	mu            sync.Mutex
 }
 
 func New(name, skillsDir string) *Plugin {
+	sd := SimulatorDir
+	if sd == "" {
+		sd = filepath.Join(skillsDir, ".simulator")
+	}
 	return &Plugin{
-		name:      name,
-		skillsDir: skillsDir,
+		name:         name,
+		skillsDir:    skillsDir,
+		simulatorDir: sd,
 	}
 }
 
@@ -53,40 +66,158 @@ func (p *Plugin) Start(s *sdk.PluginSDK) error {
 
 	for _, entry := range entries {
 		skillPath := filepath.Join(p.skillsDir, entry.Name())
-		sk, err := plugin.LoadSKILL(skillPath)
+		subs, err := os.ReadDir(skillPath)
 		if err != nil {
-			log.Printf("[openclaw] load skill %s: %v", entry.Name(), err)
 			continue
 		}
-		p.skills = append(p.skills, sk)
 
-		// Register each tool defined in the SKILL
-		for _, td := range sk.Tools() {
-			name := td.Name
-			def := sdk.ToolDef{
-				Name:        name,
-				Description: td.Description,
-				Parameters:  td.Parameters,
-			}
-			// SKILL tools are informational (advisory) — no handler
-			if err := s.RegisterTool(name, def, nil); err != nil {
-				log.Printf("[openclaw] register tool %s: %v", name, err)
+		hasMainJS := false
+		hasOCManifest := false
+		for _, f := range subs {
+			switch f.Name() {
+			case "main.js":
+				hasMainJS = true
+			case "openclaw.plugin.json":
+				hasOCManifest = true
 			}
 		}
 
-		// Register IO config as a channel if defined
-		if iocfg := sk.IOConfig(); iocfg != nil {
-			log.Printf("[openclaw] skill %s io: type=%s in=%s out=%s caps=%v",
-				sk.Name(), iocfg.Type, iocfg.InputRoute, iocfg.OutputRoute, iocfg.OutputCaps)
-		}
+		switch {
+		case hasMainJS:
+			if err := p.loadSidecar(s, skillPath, entry.Name()); err != nil {
+				log.Printf("[openclaw] sidecar %s: %v", entry.Name(), err)
+			}
+		case hasOCManifest:
+			if err := p.loadOCPlugin(s, skillPath, entry.Name()); err != nil {
+				log.Printf("[openclaw] ocplugin %s: %v", entry.Name(), err)
+			}
+		default:
+			sk, err := plugin.LoadSKILL(skillPath)
+			if err != nil {
+				log.Printf("[openclaw] load skill %s: %v", entry.Name(), err)
+				continue
+			}
+			p.skills = append(p.skills, sk)
 
-		log.Printf("[openclaw] loaded skill: %s v%s", sk.Name(), sk.Version())
+			for _, td := range sk.Tools() {
+				if err := s.RegisterTool(td.Name, sdk.ToolDef{
+					Name:        td.Name,
+					Description: td.Description,
+					Parameters:  td.Parameters,
+				}, nil); err != nil {
+					log.Printf("[openclaw] register tool %s: %v", td.Name, err)
+				}
+			}
+
+			if iocfg := sk.IOConfig(); iocfg != nil {
+				log.Printf("[openclaw] skill %s io: type=%s in=%s out=%s caps=%v",
+					sk.Name(), iocfg.Type, iocfg.InputRoute, iocfg.OutputRoute, iocfg.OutputCaps)
+			}
+
+			log.Printf("[openclaw] loaded skill: %s v%s", sk.Name(), sk.Version())
+		}
 	}
 
 	return nil
 }
 
+func (p *Plugin) loadOCPlugin(s *sdk.PluginSDK, dir, name string) error {
+	simPath := filepath.Join(p.simulatorDir, "main.js")
+	if err := os.MkdirAll(p.simulatorDir, 0755); err != nil {
+		return fmt.Errorf("create simulator dir: %w", err)
+	}
+	if err := os.WriteFile(simPath, []byte(simulatorSrc), 0644); err != nil {
+		return fmt.Errorf("write simulator: %w", err)
+	}
+
+	sp, err := launchProcess("node", simPath, dir, name)
+	if err != nil {
+		return fmt.Errorf("launch simulator: %w", err)
+	}
+	if sp == nil {
+		return nil
+	}
+
+	tools, err := sp.ListTools()
+	if err != nil {
+		sp.Close()
+		return fmt.Errorf("list tools: %w", err)
+	}
+
+	for _, tool := range tools {
+		toolName := fmt.Sprintf("%s_%s", name, tool.Name)
+		tDef := sdk.ToolDef{
+			Name:        toolName,
+			Description: fmt.Sprintf("[%s] %s", name, tool.Description),
+			Parameters:  tool.InputSchema,
+		}
+		handler := func(sp *sidecarProcess, toolName string) sdk.ToolHandler {
+			return func(args map[string]interface{}) (interface{}, error) {
+				return sp.CallTool(toolName, args)
+			}
+		}(sp, tool.Name)
+		if err := s.RegisterTool(toolName, tDef, handler); err != nil {
+			log.Printf("[openclaw] register ocplugin tool %s: %v", toolName, err)
+			continue
+		}
+		log.Printf("[openclaw] registered ocplugin tool: %s (from %s)", toolName, name)
+	}
+
+	p.mu.Lock()
+	p.sidecars = append(p.sidecars, sp)
+	p.mu.Unlock()
+	log.Printf("[openclaw] ocplugin %s started with %d tools", name, len(tools))
+	return nil
+}
+
+func (p *Plugin) loadSidecar(s *sdk.PluginSDK, dir, name string) error {
+	sp, err := launchSidecar(dir, name)
+	if err != nil {
+		return fmt.Errorf("launch: %w", err)
+	}
+	if sp == nil {
+		return nil
+	}
+
+	tools, err := sp.ListTools()
+	if err != nil {
+		sp.Close()
+		return fmt.Errorf("list tools: %w", err)
+	}
+
+	for _, tool := range tools {
+		toolName := fmt.Sprintf("%s_%s", name, tool.Name)
+		tDef := sdk.ToolDef{
+			Name:        toolName,
+			Description: fmt.Sprintf("[%s] %s", name, tool.Description),
+			Parameters:  tool.InputSchema,
+		}
+		handler := func(sp *sidecarProcess, toolName string) sdk.ToolHandler {
+			return func(args map[string]interface{}) (interface{}, error) {
+				return sp.CallTool(toolName, args)
+			}
+		}(sp, tool.Name)
+		if err := s.RegisterTool(toolName, tDef, handler); err != nil {
+			log.Printf("[openclaw] register sidecar tool %s: %v", toolName, err)
+			continue
+		}
+		log.Printf("[openclaw] registered sidecar tool: %s (from %s)", toolName, name)
+	}
+
+	p.mu.Lock()
+	p.sidecars = append(p.sidecars, sp)
+	p.mu.Unlock()
+	log.Printf("[openclaw] sidecar %s started with %d tools", name, len(tools))
+	return nil
+}
+
 func (p *Plugin) Stop() error {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	for _, sp := range p.sidecars {
+		sp.Close()
+	}
+	p.sidecars = nil
 	p.skills = nil
 	return nil
 }
