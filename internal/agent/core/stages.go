@@ -53,6 +53,9 @@ func (h *StageHost) ExecuteTool(name string, args map[string]interface{}) (inter
 	if !ok {
 		return nil, fmt.Errorf("tool %s not found in any plugin", name)
 	}
+	if handler == nil {
+		return nil, fmt.Errorf("tool %s has nil handler", name)
+	}
 	return handler(args)
 }
 
