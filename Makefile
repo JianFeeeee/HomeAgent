@@ -1,7 +1,7 @@
 .PHONY: all build clean install test run build-cli
 
 BINARY=homed
-CLI_BINARY=homecli
+CLI_BINARY=waiter
 GO=go
 GOCACHE=/tmp/gocache
 GOPATH=$(shell go env GOPATH)
@@ -16,7 +16,7 @@ build:
 
 build-cli:
 	@mkdir -p $(BUILD_DIR)
-	CGO_ENABLED=0 $(GO) build -o $(BUILD_DIR)/$(CLI_BINARY) ./cmd/cli/
+	CGO_ENABLED=0 $(GO) build -o $(BUILD_DIR)/$(CLI_BINARY) ./cmd/waiter/
 	@echo "Built: $(BUILD_DIR)/$(CLI_BINARY)"
 
 build-static:

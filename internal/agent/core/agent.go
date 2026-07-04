@@ -96,6 +96,12 @@ type Agent struct {
 
 	// 启动时间
 	startTime time.Time
+
+	// 当前轮次的非文本媒体数据（图片/音频），供 describe_image 等工具访问
+	pendingMedia map[string]interface{}
+
+	// 非文本输入处理配置
+	inputCfg types.InputProcessingConfig
 }
 
 type AgentConfig struct {
@@ -123,6 +129,8 @@ type AgentConfig struct {
 	StageHost     *StageHost
 	EventBus      *events.Bus
 	ThinkingEnabled bool
+
+	InputProcessing types.InputProcessingConfig // 非文本输入处理配置
 }
 
 func New(cfg AgentConfig) *Agent {
@@ -166,6 +174,7 @@ func New(cfg AgentConfig) *Agent {
 		childResults:     make(map[string]string),
 		interceptCh:      make(chan string, 64),
 		thinkingEnabled:  cfg.ThinkingEnabled,
+		inputCfg:         cfg.InputProcessing,
 	}
 }
 
@@ -268,6 +277,9 @@ func (a *Agent) handleInput(evt *agentIO.InputEvent) {
 		}
 		a.processTextInput(evt, input)
 
+	case "image", "audio":
+		a.processMediaInput(evt)
+
 	case "event":
 		log.Printf("[agent] event from %s: %v", evt.Source, evt.Payload)
 
@@ -278,6 +290,123 @@ func (a *Agent) handleInput(evt *agentIO.InputEvent) {
 	default:
 		log.Printf("[agent] unknown event type from %s: %s", evt.Source, evt.Type)
 	}
+}
+
+// processMediaInput 处理图片/音频等非文本输入。
+// 将媒体数据附着到对话中，LLM 可通过 describe_image / transcribe_audio 等工具自主处理。
+func (a *Agent) processMediaInput(evt *agentIO.InputEvent) {
+	start := time.Now()
+	a.pendingMedia = evt.Payload
+	defer func() { a.pendingMedia = nil }()
+
+	a.currentOutputChannel = evt.OutputChannel
+	if a.currentOutputChannel == "" {
+		a.currentOutputChannel = evt.Source
+	}
+
+	blocks, fallback := a.mediaToBlocks(evt.Payload, evt.Type)
+
+	a.context.Append(ContextEvent{
+		Timestamp: start,
+		Source:    evt.Source,
+		Input:     fallback,
+	})
+
+	// stage 上下文携带 blocks，process() 会将其附着到 user message 上
+	stageCtx := a.stageCtxFromInput(fallback, evt.Source, "")
+	stageCtx.Extra = map[string]interface{}{
+		"media_blocks": blocks,
+		"media_type":   evt.Type,
+	}
+
+	a.publishEvent(events.EventRawInput, map[string]interface{}{
+		"content": evt.Payload,
+		"source":  evt.Source,
+	})
+
+	if a.runStage(sdk.StageOnInput, stageCtx) {
+		a.emitResponse(evt, *stageCtx.Response)
+		return
+	}
+
+	response, toolsUsed, err := a.process(fallback, stageCtx)
+	if err != nil {
+		log.Printf("[agent] process media error: %v", err)
+		resp := fmt.Sprintf("处理错误: %v", err)
+		a.emitResponse(evt, resp)
+		a.context.Append(ContextEvent{Timestamp: time.Now(), Source: "agent", Input: fallback, Response: resp})
+		return
+	}
+
+	elapsed := time.Since(start)
+	log.Printf("[agent] %s from %s → response (%dms, tools=%v)", evt.Type, evt.Source, elapsed.Milliseconds(), toolsUsed)
+
+	a.context.Append(ContextEvent{
+		Timestamp: time.Now(),
+		Source:    "agent",
+		Input:     fallback,
+		Response:  response,
+		ToolsUsed: toolsUsed,
+	})
+
+	archived := a.context.Prune(response, a.maxContextSize, a.docStore)
+	if archived > 0 {
+		log.Printf("[agent] pruned %d low-relevance events to document memory", archived)
+	}
+
+	a.emitResponse(evt, response)
+}
+
+// mediaToBlocks 将媒体 payload 转为多模态 ContentBlock 数组和纯文本 fallback。
+func (a *Agent) mediaToBlocks(payload map[string]interface{}, mediaType string) ([]agentAPI.ContentBlock, string) {
+	data, _ := payload["data"].(string)
+	mime, _ := payload["mime"].(string)
+	url, _ := payload["url"].(string)
+	alt, _ := payload["alt"].(string)
+	if alt == "" {
+		alt = fmt.Sprintf("[用户上传了%s]", mediaType)
+	}
+
+	var blocks []agentAPI.ContentBlock
+
+	// 文本描述块
+	desc := ""
+	switch mediaType {
+	case "image":
+		desc = a.inputCfg.Image.DescribePrompt
+		if desc == "" {
+			desc = "用户上传了一张图片，请使用 describe_image 工具查看详情。"
+		}
+	case "audio":
+		desc = a.inputCfg.Audio.DescribePrompt
+		if desc == "" {
+			desc = "用户上传了一段音频，请使用 transcribe_audio 工具查看内容。"
+		}
+	}
+	blocks = append(blocks, agentAPI.ContentBlock{Type: "text", Text: desc})
+
+	if data != "" || url != "" {
+		imgURL := url
+		if data != "" {
+			if mime == "" {
+				mime = "image/png"
+			}
+			imgURL = "data:" + mime + ";base64," + data
+		}
+		if mediaType == "image" {
+			blocks = append(blocks, agentAPI.ContentBlock{
+				Type: "image_url",
+				ImageURL: &agentAPI.ImageURL{URL: imgURL, Detail: "auto"},
+			})
+		} else if mediaType == "audio" {
+			blocks = append(blocks, agentAPI.ContentBlock{
+				Type: "audio_url",
+				AudioURL: &agentAPI.AudioURL{URL: imgURL},
+			})
+		}
+	}
+
+	return blocks, alt
 }
 
 func (a *Agent) processTextInput(evt *agentIO.InputEvent, input string) {
@@ -418,6 +547,12 @@ func (a *Agent) process(input string, stageCtx *sdk.StageContext) (response stri
 	tools := a.buildToolDefs()
 
 	msgs := a.buildMessages(sysPrompt, input)
+	// 如果 stageCtx 携带多模态 blocks，附着到 user message 上
+	if blocks, ok := stageCtx.Extra["media_blocks"].([]agentAPI.ContentBlock); ok && len(blocks) > 0 {
+		if len(msgs) > 0 {
+			msgs[len(msgs)-1].Blocks = blocks
+		}
+	}
 
 	log.Printf("[agent] tool call loop start, %d tools, %d context events, personality=%t, docs=%d",
 		len(tools), a.context.Len(),
@@ -616,6 +751,12 @@ func (a *Agent) executeToolCall(tc agentAPI.ToolCall) string {
 		return a.executeChildResultTool(tc)
 	case strings.HasPrefix(tc.Name, "llm_"):
 		return a.executeLLMTool(tc)
+	case tc.Name == "describe_image":
+		return a.executeDescribeImage(tc)
+	case tc.Name == "transcribe_audio":
+		return a.executeTranscribeAudio(tc)
+	case tc.Name == "ocr_image":
+		return a.executeOCRImage(tc)
 	}
 
 	// 插件工具（通过 SDK RegisterTool 注册）
@@ -1475,6 +1616,65 @@ func (a *Agent) buildToolDefs() []interface{} {
 		},
 	})
 
+	// 媒体处理工具：仅当本轮有未处理的媒体数据时注册
+	if a.pendingMedia != nil {
+		tools = append(tools, map[string]interface{}{
+			"type": "function",
+			"function": map[string]interface{}{
+				"name":        "describe_image",
+				"description": "描述当前用户上传的图片内容。使用配置的多模态模型或默认 LLM 进行识别。调用此工具后你将获得图片的详细文字描述。",
+				"parameters": map[string]interface{}{
+					"type": "object",
+					"properties": map[string]interface{}{
+						"provider": map[string]interface{}{
+							"type":        "string",
+							"description": "可选：用于图片描述的 LLM 源名称，不填则使用默认模型",
+						},
+						"detail": map[string]interface{}{
+							"type":        "string",
+							"description": "描述详细程度: high / low / auto",
+							"default":     "high",
+						},
+					},
+				},
+			},
+		})
+		tools = append(tools, map[string]interface{}{
+			"type": "function",
+			"function": map[string]interface{}{
+				"name":        "transcribe_audio",
+				"description": "转写当前用户上传的音频内容为文字。使用配置的多模态模型或默认 LLM 进行语音识别。",
+				"parameters": map[string]interface{}{
+					"type": "object",
+					"properties": map[string]interface{}{
+						"provider": map[string]interface{}{
+							"type":        "string",
+							"description": "可选：用于音频转写的 LLM 源名称，不填则使用默认模型",
+						},
+					},
+				},
+			},
+		})
+		if a.inputCfg.Image.OCREnabled {
+			tools = append(tools, map[string]interface{}{
+				"type": "function",
+				"function": map[string]interface{}{
+					"name":        "ocr_image",
+					"description": "对当前用户上传的图片执行 OCR 文字识别，提取图片中的文字内容。适用于截图、文档照片、菜单等场景。",
+					"parameters": map[string]interface{}{
+						"type": "object",
+						"properties": map[string]interface{}{
+							"language": map[string]interface{}{
+								"type":        "string",
+								"description": "OCR 语言（如 chi_sim+eng），默认自动",
+							},
+						},
+					},
+				},
+			})
+		}
+	}
+
 	return tools
 }
 
@@ -2089,6 +2289,155 @@ func (a *Agent) executeLLMTool(tc agentAPI.ToolCall) string {
 	default:
 		return fmt.Sprintf("未知的 LLM 工具: %s", tc.Name)
 	}
+}
+
+// executeDescribeImage 调用多模态模型描述当前图片。
+func (a *Agent) executeDescribeImage(tc agentAPI.ToolCall) string {
+	if a.pendingMedia == nil {
+		return "没有待处理的图片数据"
+	}
+	data, _ := a.pendingMedia["data"].(string)
+	mime, _ := a.pendingMedia["mime"].(string)
+	url, _ := a.pendingMedia["url"].(string)
+	if data == "" && url == "" {
+		return "图片数据为空"
+	}
+
+	providerName, _ := tc.Arguments["provider"].(string)
+	detail, _ := tc.Arguments["detail"].(string)
+	if detail == "" {
+		detail = "high"
+	}
+
+	p := a.providerManager.Get(providerName)
+	if p == nil {
+		p = a.provider
+	}
+
+	prompt := a.inputCfg.Image.DescribePrompt
+	if prompt == "" {
+		prompt = "请详细描述这张图片的内容，包括其中的文字、物体、人物、场景等信息。"
+	}
+
+	imgURL := url
+	if data != "" {
+		if mime == "" {
+			mime = "image/png"
+		}
+		imgURL = "data:" + mime + ";base64," + data
+	}
+
+	msg := agentAPI.Message{
+		Role: "user",
+		Blocks: []agentAPI.ContentBlock{
+			{Type: "text", Text: prompt},
+			{Type: "image_url", ImageURL: &agentAPI.ImageURL{URL: imgURL, Detail: detail}},
+		},
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 120*time.Second)
+	defer cancel()
+	resp, err := p.Chat(ctx, &agentAPI.CompletionRequest{
+		Messages:  []agentAPI.Message{msg},
+		MaxTokens: 2048,
+	})
+	if err != nil {
+		return fmt.Sprintf("图片描述失败: %v", err)
+	}
+	return fmt.Sprintf("[图片描述] %s", resp.Content)
+}
+
+// executeTranscribeAudio 调用多模态模型转写/描述当前音频。
+func (a *Agent) executeTranscribeAudio(tc agentAPI.ToolCall) string {
+	if a.pendingMedia == nil {
+		return "没有待处理的音频数据"
+	}
+	data, _ := a.pendingMedia["data"].(string)
+	mime, _ := a.pendingMedia["mime"].(string)
+	url, _ := a.pendingMedia["url"].(string)
+	if data == "" && url == "" {
+		return "音频数据为空"
+	}
+
+	providerName, _ := tc.Arguments["provider"].(string)
+	p := a.providerManager.Get(providerName)
+	if p == nil {
+		p = a.provider
+	}
+
+	prompt := a.inputCfg.Audio.DescribePrompt
+	if prompt == "" {
+		prompt = "请转写这段音频的内容。"
+	}
+
+	audURL := url
+	if data != "" {
+		if mime == "" {
+			mime = "audio/wav"
+		}
+		audURL = "data:" + mime + ";base64," + data
+	}
+
+	msg := agentAPI.Message{
+		Role: "user",
+		Blocks: []agentAPI.ContentBlock{
+			{Type: "text", Text: prompt},
+			{Type: "audio_url", AudioURL: &agentAPI.AudioURL{URL: audURL}},
+		},
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 120*time.Second)
+	defer cancel()
+	resp, err := p.Chat(ctx, &agentAPI.CompletionRequest{
+		Messages:  []agentAPI.Message{msg},
+		MaxTokens: 2048,
+	})
+	if err != nil {
+		return fmt.Sprintf("音频转写失败: %v", err)
+	}
+	return fmt.Sprintf("[音频转写] %s", resp.Content)
+}
+
+// executeOCRImage 对图片执行 OCR 文字识别（通过多模态模型实现）。
+func (a *Agent) executeOCRImage(tc agentAPI.ToolCall) string {
+	if a.pendingMedia == nil {
+		return "没有待处理的图片数据"
+	}
+	data, _ := a.pendingMedia["data"].(string)
+	mime, _ := a.pendingMedia["mime"].(string)
+	url, _ := a.pendingMedia["url"].(string)
+	if data == "" && url == "" {
+		return "图片数据为空"
+	}
+
+	p := a.provider
+
+	imgURL := url
+	if data != "" {
+		if mime == "" {
+			mime = "image/png"
+		}
+		imgURL = "data:" + mime + ";base64," + data
+	}
+
+	msg := agentAPI.Message{
+		Role: "user",
+		Blocks: []agentAPI.ContentBlock{
+			{Type: "text", Text: "请识别这张图片中的所有文字内容，按原文输出。仅输出文字本身，不要添加额外描述。"},
+			{Type: "image_url", ImageURL: &agentAPI.ImageURL{URL: imgURL, Detail: "high"}},
+		},
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 120*time.Second)
+	defer cancel()
+	resp, err := p.Chat(ctx, &agentAPI.CompletionRequest{
+		Messages:  []agentAPI.Message{msg},
+		MaxTokens: 4096,
+	})
+	if err != nil {
+		return fmt.Sprintf("OCR 识别失败: %v", err)
+	}
+	return fmt.Sprintf("[OCR 结果] %s", resp.Content)
 }
 
 // runStage — 运行阶段管道，若插件 Response 被设置则返回 true（短路）
