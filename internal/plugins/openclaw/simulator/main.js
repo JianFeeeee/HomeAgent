@@ -18,6 +18,10 @@ function readJSON(file) {
   }
 }
 
+function notify(method, params) {
+  writeJSON({ jsonrpc: '2.0', method, params });
+}
+
 // ---- 解析插件入口 ----
 const pluginDir = path.resolve(process.argv[2]);
 if (!pluginDir) {
@@ -25,20 +29,16 @@ if (!pluginDir) {
   process.exit(1);
 }
 
-// 1. 先读 package.json 找 extensions
 const pkgPath = path.join(pluginDir, 'package.json');
 const pkg = readJSON(pkgPath);
 let entryPath = null;
 
 if (pkg && pkg.openclaw) {
-  // runtimeExtensions > extensions (安装包首选编译后的 JS)
   let raw = pkg.openclaw.runtimeExtensions || pkg.openclaw.extensions;
   if (typeof raw === 'string') raw = [raw];
   if (Array.isArray(raw) && raw.length > 0) {
-    // 优先选已编译的 JS 入口: .ts 映射到 .js, .js 直接用
     for (const ext of raw) {
       let ep = path.resolve(pluginDir, ext);
-      // .ts → 同级 .js
       if (ep.endsWith('.ts')) {
         const jsEp = ep.replace(/\.ts$/, '.js');
         if (fs.existsSync(jsEp)) { entryPath = jsEp; break; }
@@ -48,7 +48,6 @@ if (pkg && pkg.openclaw) {
   }
 }
 
-// 2. 回退: openclaw.plugin.json 的 entry/main
 if (!entryPath) {
   const manifest = readJSON(path.join(pluginDir, 'openclaw.plugin.json'));
   if (manifest) {
@@ -57,7 +56,6 @@ if (!entryPath) {
   }
 }
 
-// 3. 最后尝试 index.js
 if (!entryPath) {
   entryPath = path.join(pluginDir, 'index.js');
 }
@@ -83,15 +81,11 @@ if (typeof entry !== 'object' || typeof entry.register !== 'function') {
   process.exit(1);
 }
 
-// ---- 构造完整的 PluginApi 模拟 ----
+// ---- 注册工具（本地存储，供 tools/list 和 tools/call 用） ----
 const registeredTools = [];
 
-// registerTool 支持两种签名:
-//   api.registerTool(toolDef, opts?)          — 对象形式
-//   api.registerTool(factory, opts?)           — 工厂函数形式
 function registerTool(defOrFactory, opts) {
   if (typeof defOrFactory === 'function') {
-    // 工厂形式: 传入 toolContext, 返回工具对象或数组
     const toolCtx = {
       id: 'simulator',
       cwd: pluginDir,
@@ -103,18 +97,15 @@ function registerTool(defOrFactory, opts) {
     for (const t of tools) {
       if (t && typeof t.execute === 'function') {
         registeredTools.push(t);
+        notify('register', { type: 'tool', data: { name: t.name, description: t.description, parameters: t.parameters } });
       }
     }
     return;
   }
 
-  // 对象形式
   const def = defOrFactory;
   if (!def || !def.name) return;
 
-  // definePluginEntry 的 register 传给 api.registerTool 时是完整工具定义
-  // defineToolPlugin 包装后传给 api.registerTool 的也是完整工具定义
-  // 关键是工具必须要有 execute 函数（或 factory 在之前展开）
   registeredTools.push({
     name: def.name,
     label: def.label || def.name,
@@ -122,9 +113,10 @@ function registerTool(defOrFactory, opts) {
     parameters: def.parameters || { type: 'object', properties: {} },
     execute: typeof def.execute === 'function' ? def.execute : undefined,
   });
+  notify('register', { type: 'tool', data: { name: def.name, label: def.label, description: def.description, parameters: def.parameters } });
 }
 
-// 完整的 OpenClawPluginApi 模拟
+// ---- 构造完整的 OpenClawPluginApi ----
 const api = {
   id: entry.id || 'unknown',
   name: entry.name || 'Unknown',
@@ -143,72 +135,93 @@ const api = {
   },
   resolvePath: (p) => path.resolve(pluginDir, p),
 
-  // 工具注册
+  // ---- 工具注册 ----
   registerTool,
 
-  // 以下 api 方法留为 no-op，保证真实插件调用时不崩溃
-  registerProvider: () => {},
-  registerChannel: () => {},
-  registerEmbeddingProvider: () => {},
-  registerSpeechProvider: () => {},
-  registerRealtimeTranscriptionProvider: () => {},
-  registerRealtimeVoiceProvider: () => {},
-  registerMediaUnderstandingProvider: () => {},
-  registerImageGenerationProvider: () => {},
-  registerMusicGenerationProvider: () => {},
-  registerVideoGenerationProvider: () => {},
-  registerWebFetchProvider: () => {},
-  registerWebSearchProvider: () => {},
-  registerMemoryEmbeddingProvider: () => {},
-  registerAgentHarness: () => {},
-  registerCliBackend: () => {},
-  registerHook: () => {},
-  registerHttpRoute: () => {},
-  registerGatewayMethod: () => {},
-  registerGatewayDiscoveryService: () => {},
-  registerCli: () => {},
-  registerNodeCliFeature: () => {},
-  registerService: () => {},
-  registerCommand: () => {},
-  registerInteractiveHandler: () => {},
-  registerAgentToolResultMiddleware: () => {},
-  registerTrustedToolPolicy: () => {},
-  registerToolMetadata: () => {},
-  registerContextEngine: () => {},
-  registerMemoryCapability: () => {},
-  registerMemoryPromptSection: () => {},
-  registerMemoryFlushPlan: () => {},
-  registerMemoryRuntime: () => {},
-  registerMemoryPromptSupplement: () => {},
-  registerMemoryCorpusSupplement: () => {},
+  // ---- Provider 注册 ----
+  registerProvider: (provider) => notify('register', { type: 'provider', data: { name: provider.name, description: provider.description } }),
+  registerEmbeddingProvider: (p) => notify('register', { type: 'embedding_provider', data: { name: p.name } }),
+  registerSpeechProvider: (p) => notify('register', { type: 'speech_provider', data: { name: p.name } }),
+  registerRealtimeTranscriptionProvider: (p) => notify('register', { type: 'realtime_transcription_provider', data: { name: p.name } }),
+  registerRealtimeVoiceProvider: (p) => notify('register', { type: 'realtime_voice_provider', data: { name: p.name } }),
+  registerMediaUnderstandingProvider: (p) => notify('register', { type: 'media_understanding_provider', data: { name: p.name } }),
+  registerImageGenerationProvider: (p) => notify('register', { type: 'image_generation_provider', data: { name: p.name } }),
+  registerMusicGenerationProvider: (p) => notify('register', { type: 'music_generation_provider', data: { name: p.name } }),
+  registerVideoGenerationProvider: (p) => notify('register', { type: 'video_generation_provider', data: { name: p.name } }),
+  registerWebFetchProvider: (p) => notify('register', { type: 'web_fetch_provider', data: { name: p.name } }),
+  registerWebSearchProvider: (p) => notify('register', { type: 'web_search_provider', data: { name: p.name } }),
+  registerMemoryEmbeddingProvider: (p) => notify('register', { type: 'memory_embedding_provider', data: { name: p.name } }),
 
-  // 会话相关
-  on: () => {},
-  onConversationBindingResolved: () => {},
+  // ---- Channel 注册 ----
+  registerChannel: (ch) => notify('register', { type: 'channel', data: { name: ch.name, type: ch.type } }),
+
+  // ---- Hook / 生命周期 ----
+  registerHook: (hook) => notify('register', { type: 'hook', data: { name: hook.name, event: hook.event } }),
+  registerRuntimeLifecycle: (lc) => notify('register', { type: 'runtime_lifecycle', data: { name: lc.name } }),
+
+  // ---- HTTP 路由 ----
+  registerHttpRoute: (route) => notify('register', { type: 'http_route', data: { path: route.path, method: route.method } }),
+
+  // ---- CLI 命令 ----
+  registerCommand: (cmd) => notify('register', { type: 'command', data: { name: cmd.name, description: cmd.description } }),
+  registerCli: (cli) => notify('register', { type: 'cli', data: { name: cli.name } }),
+  registerCliBackend: (cb) => notify('register', { type: 'cli_backend', data: { name: cb.name } }),
+  registerNodeCliFeature: (f) => notify('register', { type: 'node_cli_feature', data: { name: f.name } }),
+
+  // ---- Service ----
+  registerService: (svc) => notify('register', { type: 'service', data: { name: svc.name } }),
+
+  // ---- Agent 相关 ----
+  registerAgentHarness: (h) => notify('register', { type: 'agent_harness', data: { name: h.name } }),
+  registerAgentToolResultMiddleware: (m) => notify('register', { type: 'agent_tool_result_middleware', data: {} }),
+  registerInteractiveHandler: (h) => notify('register', { type: 'interactive_handler', data: { name: h.name } }),
+
+  // ---- Gateway ----
+  registerGatewayMethod: (gm) => notify('register', { type: 'gateway_method', data: { name: gm.name } }),
+  registerGatewayDiscoveryService: (gs) => notify('register', { type: 'gateway_discovery_service', data: { name: gs.name } }),
+
+  // ---- Trust & Metadata ----
+  registerTrustedToolPolicy: (p) => notify('register', { type: 'trusted_tool_policy', data: { name: p.name } }),
+  registerToolMetadata: (m) => notify('register', { type: 'tool_metadata', data: { name: m.name } }),
+
+  // ---- Context Engine ----
+  registerContextEngine: (ce) => notify('register', { type: 'context_engine', data: { name: ce.name } }),
+
+  // ---- Memory 子系统 ----
+  registerMemoryCapability: (mc) => notify('register', { type: 'memory_capability', data: { name: mc.name } }),
+  registerMemoryPromptSection: (ps) => notify('register', { type: 'memory_prompt_section', data: { name: ps.name } }),
+  registerMemoryFlushPlan: (fp) => notify('register', { type: 'memory_flush_plan', data: { name: fp.name } }),
+  registerMemoryRuntime: (mr) => notify('register', { type: 'memory_runtime', data: { name: mr.name } }),
+  registerMemoryPromptSupplement: (ps) => notify('register', { type: 'memory_prompt_supplement', data: { name: ps.name } }),
+  registerMemoryCorpusSupplement: (cs) => notify('register', { type: 'memory_corpus_supplement', data: { name: cs.name } }),
+
+  // ---- 会话相关 ----
+  on: (event, handler) => notify('register', { type: 'session_event', data: { event } }),
+  onConversationBindingResolved: (handler) => notify('register', { type: 'conversation_binding_resolved', data: {} }),
 
   session: {
-    state: { registerSessionExtension: () => {} },
+    state: { registerSessionExtension: (se) => notify('register', { type: 'session_extension', data: { name: se.name } }) },
     workflow: {
       enqueueNextTurnInjection: () => {},
-      registerSessionSchedulerJob: () => {},
+      registerSessionSchedulerJob: (job) => notify('register', { type: 'session_scheduler_job', data: { name: job.name } }),
       sendSessionAttachment: () => {},
       scheduleSessionTurn: () => {},
       unscheduleSessionTurnsByTag: () => {},
     },
     controls: {
-      registerControlUiDescriptor: () => {},
-      registerSessionAction: () => {},
+      registerControlUiDescriptor: (d) => notify('register', { type: 'control_ui_descriptor', data: { name: d.name } }),
+      registerSessionAction: (a) => notify('register', { type: 'session_action', data: { name: a.name } }),
     },
   },
 
   agent: {
     events: {
-      registerAgentEventSubscription: () => {},
-      emitAgentEvent: () => {},
+      registerAgentEventSubscription: (sub) => notify('register', { type: 'agent_event_subscription', data: { event: sub.event } }),
+      emitAgentEvent: (event, data) => notify('agent_event', { event, data }),
     },
   },
 
-  lifecycle: { registerRuntimeLifecycle: () => {} },
+  lifecycle: { registerRuntimeLifecycle: (lc) => notify('register', { type: 'lifecycle', data: { name: lc.name } }) },
 
   runContext: {
     setRunContext: () => {},
@@ -274,13 +287,10 @@ rl.on('line', async (line) => {
     }
 
     try {
-      // OpenClaw 工具 execute 签名: (toolCallId, params, signal, onUpdate) => AgentToolResult
       const result = await tool.execute('sim-call-1', args, undefined, undefined);
-      // 如果返回已经是 AgentToolResult 格式，直接转发
       if (result && typeof result === 'object' && Array.isArray(result.content)) {
         writeJSON({ jsonrpc: '2.0', id, result });
       } else {
-        // 否则包装为 text result
         const text = typeof result === 'string' ? result : JSON.stringify(result);
         writeJSON({ jsonrpc: '2.0', id, result: { content: [{ type: 'text', text }] } });
       }
