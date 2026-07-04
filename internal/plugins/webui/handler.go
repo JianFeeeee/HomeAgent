@@ -1,6 +1,7 @@
 package webui
 
 import (
+	"embed"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -10,6 +11,7 @@ import (
 	"strings"
 	"time"
 
+	agentCore "gitcode.com/JianFeeeee/HomeAgent/internal/agent/core"
 	agentIO "gitcode.com/JianFeeeee/HomeAgent/internal/agent/io"
 	internalConfig "gitcode.com/JianFeeeee/HomeAgent/internal/config"
 	"gitcode.com/JianFeeeee/HomeAgent/internal/events"
@@ -24,43 +26,57 @@ import (
 	"gitcode.com/JianFeeeee/HomeAgent/pkg/types"
 )
 
-type Handler struct {
-	supervisor *supervisor.Daemon
-	memory     *memory.GraphDB
-	indexer    *memory.Indexer
-	skills     *skill.Manager
-	lua        *luaVM.VM
-	config     *types.Config
-	startTime  time.Time
-	iom        *agentIO.IOManager
-	textMem    *text.Memory
-	knowledge  *knowledge.Store
-	tracker    *tracker.Tracker
-	cfgReg     *internalConfig.ConfigRegistry
-	pluginReg  *plugin.Registry
-	eventBus   *events.Bus
+//go:embed dashboard.html
+var dashboardFS embed.FS
+
+var dashboardHTML string
+
+func init() {
+	data, err := dashboardFS.ReadFile("dashboard.html")
+	if err == nil {
+		dashboardHTML = string(data)
+	}
 }
 
-func NewHandler(sup *supervisor.Daemon, mem *memory.GraphDB, sk *skill.Manager, lua *luaVM.VM, cfg *types.Config, iom *agentIO.IOManager, tm *text.Memory, ks *knowledge.Store, tr *tracker.Tracker, cr *internalConfig.ConfigRegistry, pr *plugin.Registry, evBus *events.Bus) *Handler {
+type Handler struct {
+	supervisor    *supervisor.Daemon
+	memory        *memory.GraphDB
+	indexer       *memory.Indexer
+	skills        *skill.Manager
+	lua           *luaVM.VM
+	config        *types.Config
+	startTime     time.Time
+	iom           *agentIO.IOManager
+	textMem       *text.Memory
+	knowledge     *knowledge.Store
+	tracker       *tracker.Tracker
+	cfgReg        *internalConfig.ConfigRegistry
+	pluginReg     *plugin.Registry
+	eventBus      *events.Bus
+	statusProvider agentCore.StatusProvider
+}
+
+func NewHandler(sup *supervisor.Daemon, mem *memory.GraphDB, sk *skill.Manager, lua *luaVM.VM, cfg *types.Config, iom *agentIO.IOManager, tm *text.Memory, ks *knowledge.Store, tr *tracker.Tracker, cr *internalConfig.ConfigRegistry, pr *plugin.Registry, evBus *events.Bus, sp agentCore.StatusProvider) *Handler {
 	var idx *memory.Indexer
 	if mem != nil {
 		idx = memory.NewIndexer(mem)
 	}
 	return &Handler{
-		supervisor: sup,
-		memory:     mem,
-		indexer:    idx,
-		skills:     sk,
-		lua:        lua,
-		config:     cfg,
-		startTime:  time.Now(),
-		iom:        iom,
-		textMem:    tm,
-		knowledge:  ks,
-		tracker:    tr,
-		cfgReg:     cr,
-		pluginReg:  pr,
-		eventBus:   evBus,
+		supervisor:     sup,
+		memory:         mem,
+		indexer:        idx,
+		skills:         sk,
+		lua:            lua,
+		config:         cfg,
+		startTime:      time.Now(),
+		iom:            iom,
+		textMem:        tm,
+		knowledge:      ks,
+		tracker:        tr,
+		cfgReg:         cr,
+		pluginReg:      pr,
+		eventBus:       evBus,
+		statusProvider: sp,
 	}
 }
 
@@ -86,6 +102,7 @@ func (h *Handler) RegisterRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("/api/v1/tracker/", h.handleTracker)
 	mux.HandleFunc("/api/v1/chat", h.handleChat)
 	mux.HandleFunc("/api/v1/chat/events", h.handleChatEvents)
+	mux.HandleFunc("/api/v1/kernel", h.handleKernel)
 	mux.HandleFunc("/v1/chat/completions", h.handleOpenAICompletions)
 	mux.HandleFunc("/", h.handleStatic)
 }
@@ -103,6 +120,18 @@ func (h *Handler) handleStatus(w http.ResponseWriter, r *http.Request) {
 		"version":   "0.1.0",
 		"startedAt": h.startTime,
 	})
+}
+
+func (h *Handler) handleKernel(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	if h.statusProvider == nil {
+		writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "kernel status provider not available"})
+		return
+	}
+	writeJSON(w, http.StatusOK, h.statusProvider.GetKernelStatus())
 }
 
 func (h *Handler) handleAgents(w http.ResponseWriter, r *http.Request) {
@@ -847,7 +876,7 @@ func (h *Handler) handleTracker(w http.ResponseWriter, r *http.Request) {
 func (h *Handler) handleStatic(w http.ResponseWriter, r *http.Request) {
 	if r.URL.Path == "/" {
 		w.Header().Set("Content-Type", "text/html; charset=utf-8")
-		w.Write(webuiHTML)
+		w.Write([]byte(dashboardHTML))
 		return
 	}
 	http.NotFound(w, r)
@@ -863,94 +892,3 @@ func writeJSON(w http.ResponseWriter, status int, data interface{}) {
 	w.WriteHeader(status)
 	json.NewEncoder(w).Encode(data)
 }
-
-var webuiHTML = []byte(`<!DOCTYPE html>
-<html lang="zh-CN">
-<head>
-<meta charset="UTF-8">
-<meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>HomeAgent Dashboard</title>
-<style>
-*{margin:0;padding:0;box-sizing:border-box;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif}
-body{background:#0f172a;color:#e2e8f0;min-height:100vh}
-nav{background:#1e293b;padding:12px 24px;display:flex;align-items:center;gap:24px;border-bottom:1px solid #334155}
-nav h1{font-size:18px;font-weight:600;color:#38bdf8}
-nav a{color:#94a3b8;text-decoration:none;font-size:14px;cursor:pointer}
-nav a:hover{color:#38bdf8;text-decoration:none}
-nav a.active{color:#38bdf8;border-bottom:2px solid #38bdf8}
-.container{padding:24px;max-width:1400px;margin:0 auto}
-.card{background:#1e293b;border:1px solid #334155;border-radius:12px;padding:20px;margin-bottom:16px}
-.card h2{font-size:16px;font-weight:600;margin-bottom:12px;color:#f1f5f9}
-.status-dot{display:inline-block;width:10px;height:10px;border-radius:50%;margin-right:8px}
-.dot-green{background:#22c55e}
-.dot-yellow{background:#eab308}
-.dot-red{background:#ef4444}
-.grid-2{display:grid;grid-template-columns:1fr 1fr;gap:16px}
-.grid-3{display:grid;grid-template-columns:1fr 1fr 1fr;gap:16px}
-.stat-value{font-size:28px;font-weight:700;color:#38bdf8}
-.stat-label{font-size:12px;color:#64748b;margin-top:4px}
-table{width:100%;border-collapse:collapse;font-size:13px}
-th{text-align:left;padding:8px 12px;color:#64748b;font-weight:500;border-bottom:1px solid #334155;font-size:12px;text-transform:uppercase}
-td{padding:8px 12px;border-bottom:1px solid #1e293b}
-.status-badge{display:inline-block;padding:2px 8px;border-radius:4px;font-size:11px;font-weight:500}
-.badge-running{background:#166534;color:#86efac}
-.badge-stopped{background:#7f1d1d;color:#fca5a5}
-.btn{padding:6px 14px;border-radius:6px;border:none;font-size:12px;cursor:pointer;font-weight:500}
-.btn-primary{background:#2563eb;color:#fff}
-.btn-primary:hover{background:#1d4ed8}
-.btn-danger{background:#dc2626;color:#fff}
-.btn-sm{padding:4px 10px;font-size:11px}
-.tab-content{display:none}
-.tab-content.active{display:block}
-input,textarea,select{background:#0f172a;border:1px solid #334155;border-radius:6px;padding:8px 12px;color:#e2e8f0;font-size:13px;width:100%;margin-bottom:12px}
-label{display:block;font-size:12px;color:#94a3b8;margin-bottom:4px}
-h3{font-size:14px;font-weight:600;color:#f1f5f9;margin-bottom:8px}
-pre{background:#0f172a;border-radius:6px;padding:12px;font-size:12px;overflow-x:auto;color:#a5b4fc}
-.settings-layout{display:flex;gap:20px;min-height:60vh}
-.settings-sidebar{width:200px;flex-shrink:0;background:#1e293b;border:1px solid #334155;border-radius:12px;padding:12px 0;overflow-y:auto}
-.settings-sidebar a{display:block;padding:10px 16px;color:#94a3b8;font-size:13px;cursor:pointer;text-decoration:none;border-left:3px solid transparent}
-.settings-sidebar a:hover{background:#0f172a;color:#e2e8f0}
-.settings-sidebar a.active{background:#0f172a;color:#38bdf8;border-left-color:#38bdf8}
-.settings-content{flex:1;min-width:0}
-.settings-key{font-family:monospace;font-size:12px;color:#64748b;margin-bottom:2px}
-.save-btn{float:right}
-.toast{position:fixed;bottom:20px;right:20px;background:#166534;color:#86efac;padding:10px 20px;border-radius:8px;font-size:13px;display:none;z-index:100}
-</style>
-</head>
-<body>
-<nav>
-<h1>HomeAgent</h1>
-<a class="active" onclick="switchTab('overview')">概览</a>
-<a onclick="switchTab('memory')">图记忆</a>
-<a onclick="switchTab('skills')">技能</a>
-<a onclick="switchTab('network')">网络</a>
-<a onclick="switchTab('config')">配置</a>
-</nav>
-<div class="container" id="app">
-<div id="tab-overview" class="tab-content active"></div>
-<div id="tab-memory" class="tab-content"></div>
-<div id="tab-skills" class="tab-content"></div>
-<div id="tab-network" class="tab-content"></div>
-<div id="tab-config" class="tab-content"></div>
-</div>
-<div id="toast" class="toast"></div>
-<script>
-let state={status:null,settings:null,settingsPlugins:[],selectedSection:'core'};
-async function api(p,o={}){const r=await fetch('/api/v1'+p,{headers:{'Content-Type':'application/json',...o.headers},...o});return r.json()}
-function switchTab(n){document.querySelectorAll('.tab-content').forEach(e=>e.classList.remove('active'));document.getElementById('tab-'+n).classList.add('active');document.querySelectorAll('nav a').forEach(e=>e.classList.remove('active'));document.querySelector('nav a[onclick*="'+n+'"]')?.classList.add('active');renderAll()}
-function toast(m){const t=document.getElementById('toast');t.textContent=m;t.style.display='block';setTimeout(()=>t.style.display='none',2500)}
-async function renderAll(){try{state.status=await api('/status')}catch(e){}try{var s=await api('/settings');state.settings=s.settings||{};state.settingsPlugins=s.plugins||['core']}catch(e){}renderOverview();renderMemory();renderSkills();renderNetwork();renderConfig();renderConfigSidebar()}
-function renderOverview(){const s=state.status||{};document.getElementById('tab-overview').innerHTML='<div class="grid-3">'+statCard('运行状态',s.status||'unknown')+statCard('运行时间',s.uptime||'-')+statCard('版本',s.version||'-')+'</div>'}
-function statCard(l,v){return '<div class="card"><div class="stat-value">'+v+'</div><div class="stat-label">'+l+'</div></div>'}
-function renderMemory(){document.getElementById('tab-memory').innerHTML='<div class="card"><h2>图记忆</h2><p style="color:#94a3b8">agent 通过 memory_recall / memory_commit 自动管理</p></div>'}
-function renderSkills(){document.getElementById('tab-skills').innerHTML='<div class="card"><h2>技能</h2><p style="color:#94a3b8">SKILL.md 插件通过 IO 层注入</p></div>'}
-function renderNetwork(){document.getElementById('tab-network').innerHTML='<div class="card"><h2>网络</h2><p style="color:#94a3b8">LLM API 连通性监控</p></div>'}
-function renderConfigSidebar(){var el=document.querySelector('.settings-sidebar');if(!el)return;el.innerHTML='';state.settingsPlugins.forEach(function(p){var a=document.createElement('a');a.textContent=p;if(p===state.selectedSection)a.className='active';a.onclick=function(){state.selectedSection=p;renderConfig()};el.appendChild(a)})}
-function renderConfig(){var prefix=state.selectedSection+'.';var filtered=Object.keys(state.settings||{}).filter(function(k){return k===prefix.slice(0,-1)||k.startsWith(prefix)});filtered.sort();var html='<div class="settings-layout"><div class="settings-sidebar" id="settings-sidebar"></div><div class="settings-content">';if(filtered.length===0){html+='<div class="card"><h2>'+state.selectedSection+'</h2><p style="color:#94a3b8">暂无设置项</p></div>'}else{filtered.forEach(function(k){var v=state.settings[k];var sv=typeof v==='object'?JSON.stringify(v):String(v);html+='<div class="card"><div class="save-btn"><button class="btn btn-primary btn-sm" onclick="saveSetting(\''+k+'\')">保存</button></div><div class="settings-key">'+k+'</div><label>值</label><input id="inp-'+k.replace(/\./g,'_')+'" value="'+escHtml(sv)+'" onchange="markDirty(\''+k+'\')"/></div>'})}html+='</div></div>';document.getElementById('tab-config').innerHTML=html;renderConfigSidebar()}
-function escHtml(s){return s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;')}
-function markDirty(k){var inp=document.getElementById('inp-'+k.replace(/\./g,'_'));if(inp)inp.style.borderColor='#eab308'}
-async function saveSetting(k){var inp=document.getElementById('inp-'+k.replace(/\./g,'_'));if(!inp)return;var raw=inp.value;var val;try{val=JSON.parse(raw)}catch(e){val=raw}var r=await api('/settings',{method:'PUT',body:JSON.stringify({key:k,value:val})});if(r.status==='ok'){inp.style.borderColor='';state.settings[k]=val;toast('已保存: '+k)}else{toast('保存失败: '+(r.error||'unknown'))}}
-renderAll();setInterval(renderAll,30000);
-</script>
-</body>
-</html>`)

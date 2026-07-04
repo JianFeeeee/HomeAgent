@@ -1,0 +1,158 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>HomeAgent Dashboard</title>
+<style>
+*{margin:0;padding:0;box-sizing:border-box;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif}
+body{background:#0f172a;color:#e2e8f0;min-height:100vh;overflow-x:hidden}
+nav{background:#1e293b;padding:0 24px;display:flex;align-items:center;gap:4px;border-bottom:1px solid #334155;height:48px;position:sticky;top:0;z-index:100}
+nav h1{font-size:16px;font-weight:700;color:#38bdf8;margin-right:24px;white-space:nowrap}
+nav a{padding:12px 16px;color:#94a3b8;text-decoration:none;font-size:13px;cursor:pointer;border-bottom:2px solid transparent;transition:all .15s}
+nav a:hover{color:#e2e8f0}
+nav a.active{color:#38bdf8;border-bottom-color:#38bdf8}
+.container{padding:20px 24px;max-width:1440px;margin:0 auto}
+.card{background:#1e293b;border:1px solid #334155;border-radius:10px;padding:20px;margin-bottom:16px}
+.card h2{font-size:15px;font-weight:600;margin-bottom:12px;color:#f1f5f9}
+.card h3{font-size:13px;font-weight:600;color:#94a3b8;margin:16px 0 8px}
+.grid-2{display:grid;grid-template-columns:1fr 1fr;gap:16px}
+.grid-3{display:grid;grid-template-columns:1fr 1fr 1fr;gap:16px}
+.grid-4{display:grid;grid-template-columns:repeat(4,1fr);gap:16px}
+.stat-value{font-size:26px;font-weight:700;color:#38bdf8}
+.stat-label{font-size:11px;color:#64748b;margin-top:2px}
+.stat-card{padding:16px 20px}
+.status-dot{display:inline-block;width:8px;height:8px;border-radius:50%;margin-right:6px}
+.dot-green{background:#22c55e}
+.dot-yellow{background:#eab308}
+.dot-red{background:#ef4444}
+.dot-gray{background:#475569}
+table{width:100%;border-collapse:collapse;font-size:13px}
+th{text-align:left;padding:8px 10px;color:#64748b;font-weight:500;border-bottom:1px solid #334155;font-size:11px;text-transform:uppercase;letter-spacing:.5px}
+td{padding:8px 10px;border-bottom:1px solid #1e293b}
+tr:hover td{background:#0f172a40}
+.badge{display:inline-block;padding:2px 8px;border-radius:4px;font-size:11px;font-weight:500}
+.badge-green{background:#166534;color:#86efac}
+.badge-red{background:#7f1d1d;color:#fca5a5}
+.badge-yellow{background:#713f12;color:#fde68a}
+.badge-blue{background:#1e3a5f;color:#93c5fd}
+.btn{padding:6px 14px;border-radius:6px;border:none;font-size:12px;cursor:pointer;font-weight:500;transition:all .15s}
+.btn-primary{background:#2563eb;color:#fff}
+.btn-primary:hover{background:#1d4ed8}
+.btn-danger{background:#dc2626;color:#fff}
+.btn-danger:hover{background:#b91c1c}
+.btn-sm{padding:4px 10px;font-size:11px}
+.btn-ghost{background:transparent;border:1px solid #334155;color:#94a3b8}
+.btn-ghost:hover{background:#1e293b;color:#e2e8f0}
+.tab-content{display:none}
+.tab-content.active{display:block}
+input,textarea,select{background:#0f172a;border:1px solid #334155;border-radius:6px;padding:8px 12px;color:#e2e8f0;font-size:13px;width:100%;margin-bottom:10px;outline:none;transition:border .15s}
+input:focus,textarea:focus,select:focus{border-color:#2563eb}
+textarea{resize:vertical;min-height:80px;font-family:monospace;font-size:12px}
+label{display:block;font-size:11px;color:#94a3b8;margin-bottom:3px;font-weight:500}
+pre{background:#0f172a;border-radius:6px;padding:12px;font-size:12px;overflow-x:auto;color:#a5b4fc;font-family:monospace;max-height:400px;overflow-y:auto}
+code{font-family:monospace;font-size:12px;color:#a5b4fc}
+.settings-layout{display:flex;gap:20px;min-height:60vh}
+.settings-sidebar{width:200px;flex-shrink:0;background:#1e293b;border:1px solid #334155;border-radius:10px;padding:8px 0;overflow-y:auto;max-height:70vh}
+.settings-sidebar a{display:block;padding:9px 16px;color:#94a3b8;font-size:13px;cursor:pointer;text-decoration:none;border-left:3px solid transparent;transition:all .1s}
+.settings-sidebar a:hover{background:#0f172a;color:#e2e8f0}
+.settings-sidebar a.active{background:#0f172a;color:#38bdf8;border-left-color:#38bdf8}
+.settings-content{flex:1;min-width:0}
+.settings-key{font-family:monospace;font-size:11px;color:#64748b;margin-bottom:2px}
+.toast{position:fixed;bottom:20px;right:20px;background:#166534;color:#86efac;padding:10px 20px;border-radius:8px;font-size:13px;display:none;z-index:100;box-shadow:0 4px 12px rgba(0,0,0,.3)}
+.toast.error{background:#7f1d1d;color:#fca5a5}
+.empty-state{text-align:center;padding:40px 20px;color:#64748b}
+.empty-state p{font-size:14px;margin-bottom:8px}
+.empty-state .icon{font-size:36px;margin-bottom:12px;opacity:.5}
+.chat-messages{max-height:500px;overflow-y:auto;margin-bottom:12px;padding:8px;border:1px solid #334155;border-radius:8px;background:#0f172a}
+.msg{display:flex;gap:10px;margin-bottom:12px;align-items:flex-start}
+.msg-avatar{width:32px;height:32px;border-radius:8px;display:flex;align-items:center;justify-content:center;font-size:14px;flex-shrink:0}
+.msg-user .msg-avatar{background:#1e3a5f;color:#93c5fd}
+.msg-assistant .msg-avatar{background:#1a3a2a;color:#86efac}
+.msg-system .msg-avatar{background:#3b1a3a;color:#f0abfc}
+.msg-content{flex:1;min-width:0}
+.msg-content .role{font-size:11px;color:#64748b;margin-bottom:2px}
+.msg-content .text{font-size:13px;line-height:1.5;white-space:pre-wrap;word-break:break-word}
+.msg-content .text .reasoning{color:#94a3b8;font-style:italic;font-size:12px;padding:4px 8px;background:#1e293b;border-radius:4px;margin:4px 0;display:block}
+.chat-input-row{display:flex;gap:8px}
+.chat-input-row input{flex:1;margin-bottom:0}
+.chat-input-row button{flex-shrink:0;margin-bottom:0}
+.loading{display:inline-block;width:16px;height:16px;border:2px solid #334155;border-radius:50%;border-top-color:#38bdf8;animation:spin .6s linear infinite}
+@keyframes spin{to{transform:rotate(360deg)}}
+.monaco-like{font-family:monospace;font-size:12px;background:#0f172a;border:1px solid #334155;border-radius:6px}
+.kv-row{display:flex;padding:6px 0;border-bottom:1px solid #1e293b;font-size:13px}
+.kv-row .key{color:#94a3b8;width:180px;flex-shrink:0}
+.kv-row .val{color:#e2e8f0;word-break:break-all}
+.tool-badge{display:inline-block;padding:1px 6px;border-radius:3px;font-size:10px;background:#1e3a5f;color:#93c5fd;margin:1px}
+.check-pass{color:#86efac}
+.check-fail{color:#fca5a5}
+.check-skip{color:#94a3b8}
+.memory-graph{width:100%;height:300px;background:#0f172a;border-radius:8px;border:1px solid #334155;position:relative;overflow:hidden;display:flex;align-items:center;justify-content:center;color:#64748b;font-size:13px}
+.health-panel{display:grid;gap:8px}
+.health-item{display:flex;align-items:center;gap:10px;padding:8px 12px;background:#0f172a;border-radius:6px;font-size:13px}
+.health-item .check-name{flex:1}
+.health-item .check-status{font-size:11px;font-weight:500}
+.fade-in{animation:fadeIn .2s ease}
+@keyframes fadeIn{from{opacity:0;transform:translateY(4px)}to{opacity:1;transform:translateY(0)}}
+@media(max-width:768px){.grid-2,.grid-3,.grid-4{grid-template-columns:1fr}.settings-layout{flex-direction:column}.settings-sidebar{width:100%;max-height:none;display:flex;flex-wrap:wrap;gap:0;padding:0}.settings-sidebar a{flex:1;min-width:80px;text-align:center;border-left:none;border-bottom:2px solid transparent;padding:8px}.settings-sidebar a.active{border-left:none;border-bottom-color:#38bdf8}}
+</style>
+</head>
+<body>
+<nav><h1>HomeAgent</h1><a class="active" onclick="switchTab('overview')">概览</a><a onclick="switchTab('chat')">对话</a><a onclick="switchTab('plugins')">插件</a><a onclick="switchTab('memory')">记忆</a><a onclick="switchTab('knowledge')">知识</a><a onclick="switchTab('settings')">设置</a><a onclick="switchTab('kernel')">内核</a></nav>
+<div class="container" id="app">
+<div id="tab-overview" class="tab-content active"></div>
+<div id="tab-chat" class="tab-content"></div>
+<div id="tab-plugins" class="tab-content"></div>
+<div id="tab-memory" class="tab-content"></div>
+<div id="tab-knowledge" class="tab-content"></div>
+<div id="tab-settings" class="tab-content"></div>
+<div id="tab-kernel" class="tab-content"></div>
+</div>
+<div id="toast" class="toast"></div>
+<script>
+let state={status:{},kernel:null,settings:{},settingsPlugins:['core'],selectedSection:'core',messages:[],chatLoading:false,healthResult:null};
+async function api(p,o){let opts={headers:{'Content-Type':'application/json',...o?.headers},...o};let r=await fetch('/api/v1'+p,opts);if(opts.raw)return r;let ct=r.headers.get('content-type')||'';if(ct.includes('json'))return r.json();return r.text()}
+function switchTab(n){document.querySelectorAll('.tab-content').forEach(e=>e.classList.remove('active'));let el=document.getElementById('tab-'+n);if(el)el.classList.add('active');document.querySelectorAll('nav a').forEach(e=>e.classList.remove('active'));document.querySelector('nav a[onclick*="\'+n+\'"]')||document.querySelector(`nav a[onclick*="${n}"]`)?.classList.add('active');renderAll()}
+function toast(m,isError){let t=document.getElementById('toast');t.textContent=m;t.className='toast'+(isError?' error':'');t.style.display='block';setTimeout(()=>t.style.display='none',3000)}
+async function renderAll(){try{let s=await api('/status');state.status=s}catch(e){}try{state.kernel=await api('/kernel')}catch(e){}try{let s=await api('/settings');state.settings=s.settings||{};state.settingsPlugins=s.plugins||['core']}catch(e){}renderOverview();renderChat();renderPlugins();renderMemory();renderKnowledge();renderKernel()}
+function escHtml(s){return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;')}
+function timeAgo(t){let s=Math.floor((Date.now()-new Date(t).getTime())/1000);if(s<60)return s+'秒前';let m=Math.floor(s/60);if(m<60)return m+'分钟前';return Math.floor(m/60)+'小时前'}
+
+// === Overview ===
+function renderOverview(){let s=state.status||{};let k=state.kernel;let html='<div class="grid-4">'+statCard('运行状态',s.status||'unknown','running')+statCard('运行时间',s.uptime||'-','uptime')+statCard('插件',(k?.plugins||[]).length||0,'plugin')+statCard('版本',s.version||'0.1.0','version')+'</div>';if(k){html+='<div class="grid-2"><div class="card"><h2>LLM 状态</h2><div class="kv-row"><span class="key">Provider</span><span class="val">'+(k.llm?.provider||'未配置')+'</span></div><div class="kv-row"><span class="key">可用源</span><span class="val">'+(k.llm?.sources||0)+'</span></div><div class="kv-row"><span class="key">状态</span><span class="val"><span class="status-dot '+(k.llm?.available?'dot-green':'dot-red')+'"></span>'+(k.llm?.available?'运行中':'不可用')+'</span></div></div><div class="card"><h2>记忆状态</h2><div class="kv-row"><span class="key">图记忆</span><span class="val"><span class="status-dot '+(k.memory?.available?'dot-green':'dot-gray')+'"></span>'+(k.memory?.available?k.memory.entity_count+' 实体, '+k.memory.relation_count+' 关系':'未初始化')+'</span></div><div class="kv-row"><span class="key">文档记忆</span><span class="val">'+(k.documents?.available?k.documents.doc_count+' 文档':'未初始化')+'</span></div><div class="kv-row"><span class="key">文本记忆</span><span class="val">'+(k.text_memory?.available?k.text_memory.file_count+' 文件':'未初始化')+'</span></div><div class="kv-row"><span class="key">知识库</span><span class="val">'+(k.knowledge?.available?k.knowledge.item_count+' 项':'未初始化')+'</span></div></div></div>';}html+='<div class="card"><h2>运行时</h2><div class="grid-3">'+statCard('Goroutines',k?.runtime?.goroutines||'-','')+statCard('内存',k?.runtime?.memory_mb?k.runtime.memory_mb+' MB':'-','')+statCard('Go 版本',k?.runtime?.go_version||'-','')+'</div></div>';document.getElementById('tab-overview').innerHTML=html}
+function statCard(l,v){return '<div class="card stat-card"><div class="stat-value">'+v+'</div><div class="stat-label">'+l+'</div></div>'}
+
+// === Chat ===
+function renderChat(){let msgs=state.messages;let html='<div class="card"><h2>对话调试</h2><div class="chat-messages" id="chat-msgs">';if(msgs.length===0){html+='<div class="empty-state"><p>开始对话以测试 Agent 回复</p></div>'}else{msgs.forEach((m,i)=>{let role=m.role||'user';let c=escHtml(m.content||'');let rc=m.reasoning_content?('<span class="reasoning">思考: '+escHtml(m.reasoning_content)+'</span>'):'';html+='<div class="msg msg-'+role+'"><div class="msg-avatar">'+(role==='user'?'U':role==='assistant'?'A':'S')+'</div><div class="msg-content"><div class="role">'+(role==='user'?'用户':role==='assistant'?'AI':'系统')+'</div><div class="text">'+rc+c+'</div></div></div>'})}html+='</div><div class="chat-input-row"><input id="chat-input" placeholder="输入消息..." onkeydown="if(event.key==\'Enter\')sendChat()"><button class="btn btn-primary" onclick="sendChat()" id="chat-send-btn">发送</button></div></div>';document.getElementById('tab-chat').innerHTML=html;let el=document.getElementById('chat-msgs');if(el)el.scrollTop=el.scrollHeight}
+async function sendChat(){let inp=document.getElementById('chat-input');let btn=document.getElementById('chat-send-btn');let text=inp.value.trim();if(!text||state.chatLoading)return;state.messages.push({role:'user',content:text});inp.value='';renderChat();state.chatLoading=true;btn.disabled=true;btn.textContent='...';try{let r=await api('/chat',{method:'POST',body:JSON.stringify({message:text})});state.messages.push({role:'assistant',content:r.response||'(无响应)',reasoning_content:r.reasoning_content});renderChat()}catch(e){state.messages.push({role:'assistant',content:'错误: '+e.message});renderChat();toast('请求失败: '+e.message,true)}finally{state.chatLoading=false;btn.disabled=false;btn.textContent='发送'}}
+
+// === Plugins ===
+function renderPlugins(){let k=state.kernel;let plugins=k?.plugins||[];let tools=k?.tools||[];let html='<div class="card"><h2>已加载插件 ('+plugins.length+')</h2>';if(plugins.length===0){html+='<div class="empty-state"><p>暂无已加载插件</p></div>'}else{html+='<table><tr><th>名称</th><th>状态</th></tr>';plugins.forEach(p=>{html+='<tr><td>'+escHtml(p.name)+'</td><td><span class="badge badge-green">已加载</span></td></tr>'});html+='</table>'}html+='</div>';if(tools.length>0){html+='<div class="card"><h2>已注册工具 ('+tools.length+')</h2><div style="display:flex;flex-wrap:wrap;gap:4px">';tools.forEach(t=>{html+='<span class="tool-badge" title="'+escHtml(t.description||'')+'">'+escHtml(t.name)+'</span>'});html+='</div></div>'}html+='<div class="card"><h2>健康检查</h2><div id="health-panel">';if(state.healthResult){html+=renderHealthResult(state.healthResult)}else{html+='<button class="btn btn-primary" onclick="runHealthcheck()">运行健康检查</button>'}html+='</div></div>';document.getElementById('tab-plugins').innerHTML=html}
+async function runHealthcheck(){let panel=document.getElementById('health-panel');if(!panel)return;panel.innerHTML='<div class="loading" style="margin:12px auto"></div><p style="text-align:center;color:#64748b">运行中...</p>';try{let r=await api('/kernel');let tools=r?.tools||[];let healthTool=tools.find(t=>t.name==='healthcheck');if(!healthTool){panel.innerHTML='<p style="color:#94a3b8">healthcheck 工具未注册</p>';return}panel.innerHTML='<p style="color:#94a3b8">通过 Agent 对话触发 healthcheck...</p>';let chatR=await api('/chat',{method:'POST',body:JSON.stringify({message:'请运行 healthcheck 工具进行全面健康检查并报告结果'})});panel.innerHTML='<pre>'+escHtml(JSON.stringify(chatR,null,2))+'</pre>'}catch(e){panel.innerHTML='<p style="color:#fca5a5">错误: '+escHtml(e.message)+'</p>';toast('健康检查失败: '+e.message,true)}}
+function renderHealthResult(r){if(!r||!r.checks)return '<p style="color:#94a3b8">暂无健康检查数据</p>';let checks=r.checks||[];let passed=checks.filter(c=>c.pass).length;let failed=checks.filter(c=>!c.pass).length;let html='<div style="margin-bottom:12px;display:flex;gap:16px;align-items:center"><span class="badge badge-green">通过: '+passed+'</span><span class="badge '+(failed>0?'badge-red':'badge-green')+'">失败: '+failed+'</span><span class="badge badge-blue">总计: '+checks.length+'</span></div>';checks.forEach(c=>{let passClass=c.pass?'check-pass':'check-fail';if(c.status==='skip')passClass='check-skip';html+='<div class="health-item"><span class="check-name">'+escHtml(c.name)+'</span><span class="check-status '+passClass+'">'+(c.status||'unknown')+'</span><span style="color:#64748b;font-size:11px">'+escHtml(c.detail||'')+'</span></div>'});return html}
+
+// === Memory ===
+function renderMemory(){let k=state.kernel;let mem=k?.memory;let html='<div class="grid-2"><div class="card"><h2>图记忆</h2>';if(mem?.available){html+='<div class="kv-row"><span class="key">实体数</span><span class="val">'+mem.entity_count+'</span></div><div class="kv-row"><span class="key">关系数</span><span class="val">'+mem.relation_count+'</span></div><div class="kv-row"><span class="key">实体类型</span><span class="val">'+mem.entity_types+'</span></div>'}else{html+='<div class="empty-state"><p>图记忆未初始化</p></div>'}html+='</div><div class="card"><h2>记忆查询</h2><input id="mem-query" placeholder="输入查询关键词（逗号分隔）"><button class="btn btn-primary" onclick="queryMemory()">查询</button><div id="mem-result" style="margin-top:12px"></div></div></div>';let tm=k?.text_memory;if(tm?.available){html+='<div class="card"><h2>文本记忆</h2><p style="color:#94a3b8;font-size:13px">已记录 '+tm.file_count+' 个文件</p></div>'}document.getElementById('tab-memory').innerHTML=html}
+async function queryMemory(){let q=document.getElementById('mem-query')?.value;let r=document.getElementById('mem-result');if(!r||!q)return;r.innerHTML='<div class="loading"></div>';try{let data=await api('/memory?q='+encodeURIComponent(q)+'&depth=2');r.innerHTML='<pre>'+escHtml(JSON.stringify(data,null,2))+'</pre>'}catch(e){r.innerHTML='<p style="color:#fca5a5">查询失败: '+escHtml(e.message)+'</p>'}}
+
+// === Knowledge ===
+function renderKnowledge(){let k=state.kernel;let know=k?.knowledge;let html='<div class="grid-2"><div class="card"><h2>知识库</h2>';if(know?.available){html+='<div class="kv-row"><span class="key">条目数</span><span class="val">'+know.item_count+'</span></div>';if(know.items&&know.items.length>0){html+='<h3>分类</h3>';know.items.forEach(n=>{html+='<span class="tool-badge">'+escHtml(n)+'</span> '})}}else{html+='<div class="empty-state"><p>知识库未初始化</p></div>'}html+='</div><div class="card"><h2>搜索</h2><input id="know-query" placeholder="输入关键词" onkeydown="if(event.key==\'Enter\')searchKnowledge()"><button class="btn btn-primary" onclick="searchKnowledge()">搜索</button><div id="know-result" style="margin-top:12px"></div></div></div><div class="card"><h2>新建知识</h2><div style="max-width:500px"><label>名称</label><input id="know-name" placeholder="知识名称"><label>内容</label><textarea id="know-content" placeholder="Markdown 内容"></textarea><button class="btn btn-primary" onclick="createKnowledge()">创建</button></div></div>';document.getElementById('tab-knowledge').innerHTML=html}
+async function searchKnowledge(){let q=document.getElementById('know-query')?.value;let r=document.getElementById('know-result');if(!r||!q)return;r.innerHTML='<div class="loading"></div>';try{let data=await api('/knowledge?q='+encodeURIComponent(q));r.innerHTML='<pre>'+escHtml(JSON.stringify(data,null,2))+'</pre>'}catch(e){r.innerHTML='<p style="color:#fca5a5">搜索失败: '+escHtml(e.message)+'</p>'}}
+async function createKnowledge(){let name=document.getElementById('know-name')?.value;let content=document.getElementById('know-content')?.value;if(!name||!content){toast('名称和内容不能为空',true);return}try{await api('/knowledge',{method:'POST',body:JSON.stringify({name,content})});toast('知识「'+name+'」已创建');document.getElementById('know-name').value='';document.getElementById('know-content').value='';renderAll()}catch(e){toast('创建失败: '+e.message,true)}}
+
+// === Settings ===
+function renderSettingsSidebar(){let el=document.querySelector('.settings-sidebar');if(!el)return;el.innerHTML='';state.settingsPlugins.forEach(function(p){let a=document.createElement('a');a.textContent=p;if(p===state.selectedSection)a.className='active';a.onclick=function(){state.selectedSection=p;renderOneSettings()};el.appendChild(a)})}
+function renderOneSettings(){let prefix=state.selectedSection+'.';let filtered=Object.keys(state.settings||{}).filter(k=>k===prefix.slice(0,-1)||k.startsWith(prefix));filtered.sort();let html='<div class="settings-layout"><div class="settings-sidebar"></div><div class="settings-content">';if(filtered.length===0){html+='<div class="card"><h2>'+escHtml(state.selectedSection)+'</h2><p style="color:#94a3b8">暂无设置项</p></div>'}else{filtered.forEach(k=>{let v=state.settings[k];let sv=typeof v==='object'?JSON.stringify(v):String(v);html+='<div class="card"><button class="btn btn-primary btn-sm save-btn" onclick="saveSetting(\''+k+'\')" style="float:right;margin-top:-4px">保存</button><div class="settings-key">'+escHtml(k)+'</div><label>值</label><input id="inp-'+k.replace(/\./g,'_')+'" value="'+escHtml(sv)+'" onchange="markDirty(\''+k+'\')"></div>'})}html+='</div></div>';document.getElementById('tab-settings').innerHTML=html;renderSettingsSidebar()}
+function markDirty(k){let inp=document.getElementById('inp-'+k.replace(/\./g,'_'));if(inp)inp.style.borderColor='#eab308'}
+async function saveSetting(k){let inp=document.getElementById('inp-'+k.replace(/\./g,'_'));if(!inp)return;let raw=inp.value;let val;try{val=JSON.parse(raw)}catch(e){val=raw}try{let r=await api('/settings',{method:'PUT',body:JSON.stringify({key:k,value:val})});if(r.status==='ok'){inp.style.borderColor='';state.settings[k]=val;toast('已保存: '+k)}else{toast('保存失败: '+(r.error||'unknown'),true)}}catch(e){toast('保存失败: '+e.message,true)}}
+function renderConfigDisabled(){document.getElementById('tab-settings').innerHTML='<div class="card"><h2>设置</h2><p style="color:#94a3b8">设置面板已加载</p></div>';renderOneSettings()}
+
+// === Kernel ===
+function renderKernel(){let k=state.kernel;if(!k){document.getElementById('tab-kernel').innerHTML='<div class="card"><div class="loading"></div><p style="color:#64748b">加载中...</p></div>';return}let html='<div class="card"><h2>内核状态快照</h2><pre>'+escHtml(JSON.stringify(k,null,2))+'</pre></div>';html+='<div class="card"><h2>通道</h2>';if(k.channels&&k.channels.length>0){html+='<table><tr><th>名称</th><th>类型</th><th>状态</th></tr>';k.channels.forEach(ch=>{html+='<tr><td>'+escHtml(ch.name)+'</td><td>'+escHtml(ch.type)+'</td><td><span class="status-dot '+(ch.ready?'dot-green':'dot-red')+'"></span>'+(ch.ready?'就绪':'离线')+'</td></tr>'});html+='</table>'}else{html+='<p style="color:#94a3b8">无通道</p>'}html+='</div>';if(k.tracker?.available){html+='<div class="card"><h2>变更追踪</h2><div class="kv-row"><span class="key">状态</span><span class="val"><span class="badge badge-green">活跃</span></span></div><div class="kv-row"><span class="key">目录</span><span class="val">'+escHtml(k.tracker.dir||'-')+'</span></div></div>'}document.getElementById('tab-kernel').innerHTML=html}
+
+// === Settings Override ===
+renderConfigDisabled();
+renderAll();setInterval(renderAll,15000);
+</script>
+</body>
+</html>

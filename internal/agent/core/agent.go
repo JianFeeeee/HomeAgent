@@ -93,6 +93,9 @@ type Agent struct {
 
 	// 模型思考模式（thinking/reasoning）
 	thinkingEnabled bool
+
+	// 启动时间
+	startTime time.Time
 }
 
 type AgentConfig struct {
@@ -135,6 +138,7 @@ func New(cfg AgentConfig) *Agent {
 	}
 	return &Agent{
 		id:              cfg.ID,
+		startTime:      time.Now(),
 		provider:        cfg.Provider,
 		providerManager: cfg.ProviderManager,
 		io:              cfg.IO,
@@ -291,8 +295,14 @@ func (a *Agent) processTextInput(evt *agentIO.InputEvent, input string) {
 		return
 	}
 
+	noMemory := false
+	if v, ok := evt.Payload["no_memory"].(bool); ok {
+		noMemory = v
+	}
+
 	// === Stage: on_input — 消息到达，插件可拦截 ===
 	stageCtx := a.stageCtxFromInput(input, evt.Source, "")
+	stageCtx.NoMemory = noMemory
 	a.publishEvent(events.EventRawInput, map[string]interface{}{
 		"content": input,
 		"source":  evt.Source,
@@ -337,7 +347,9 @@ func (a *Agent) processTextInput(evt *agentIO.InputEvent, input string) {
 
 	a.emitResponse(evt, response)
 
-	a.emitMemoryCandidate(evt.Source, input, response, toolsUsed)
+	if !stageCtx.NoMemory {
+		a.emitMemoryCandidate(evt.Source, input, response, toolsUsed)
+	}
 }
 
 func (a *Agent) emitResponse(evt *agentIO.InputEvent, response string) {
@@ -1825,7 +1837,6 @@ func (a *Agent) processConsolidation(input string) {
 		ToolsUsed: toolsUsed,
 	})
 	_ = a.context.Prune(response, a.maxContextSize, a.docStore)
-	// 只写入记忆，不发外部输出
 	a.emitMemoryCandidate("system", input, response, toolsUsed)
 	log.Printf("[agent] consolidation done (%dms, tools=%v)", time.Since(start).Milliseconds(), toolsUsed)
 }
