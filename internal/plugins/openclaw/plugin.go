@@ -142,6 +142,9 @@ func (p *Plugin) loadOCPlugin(s *sdk.PluginSDK, dir, name string) error {
 		return nil
 	}
 
+	// 收集插件注册过程中模拟器推送的通知
+	p.drainNotify(sp, name)
+
 	tools, err := sp.ListTools()
 	if err != nil {
 		sp.Close()
@@ -172,6 +175,37 @@ func (p *Plugin) loadOCPlugin(s *sdk.PluginSDK, dir, name string) error {
 	p.mu.Unlock()
 	log.Printf("[openclaw] ocplugin %s started with %d tools", name, len(tools))
 	return nil
+}
+
+func (p *Plugin) drainNotify(sp *sidecarProcess, name string) {
+	for {
+		select {
+		case n := <-sp.NotifyChan():
+			p.handleNotify(n, name)
+		default:
+			return
+		}
+	}
+}
+
+func (p *Plugin) handleNotify(n OCNotification, name string) {
+	if n.Method != "register" {
+		log.Printf("[openclaw] ocplugin %s: unknown notify method: %s", name, n.Method)
+		return
+	}
+	var params struct {
+		Type string          `json:"type"`
+		Data json.RawMessage `json:"data"`
+	}
+	if err := json.Unmarshal(n.Params, &params); err != nil {
+		log.Printf("[openclaw] ocplugin %s: bad notify params: %v", name, err)
+		return
+	}
+	dataStr := string(params.Data)
+	if len(dataStr) > 200 {
+		dataStr = dataStr[:200] + "..."
+	}
+	log.Printf("[openclaw] ocplugin %s: capability %s data=%s", name, params.Type, dataStr)
 }
 
 func (p *Plugin) loadSidecar(s *sdk.PluginSDK, dir, name string) error {
