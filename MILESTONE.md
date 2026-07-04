@@ -18,7 +18,7 @@
 - [x] `healthcheck_report` 工具 — LLM 上报测试结果
 - [x] `testLLMDriven()` — 独立工具循环：LLM 发现→调用→上报
 - [x] 动态排除本插件工具（`selfToolNames`），不硬编码插件名
-- [x] E2E 真实 DeepSeek API 测试通过（8 个真实工具全部测试通过）
+- [x] 核心遵循 OpenAI `/chat/completions` 请求格式，8 个 Lua adapter 脚本支持各厂商 API（DeepSeek/OpenAI/Anthropic/Gemini/Mistral/Groq/GitHub/Ollama），用户可编写自定义 adapter 接入任意 LLM
 
 ### 内核状态接口（`StatusProvider`）
 - [x] `internal/agent/core/status.go` — `KernelStatus` 聚合快照
