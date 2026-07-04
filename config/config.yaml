@@ -55,17 +55,6 @@ llm:
       adapter: "ollama"
       adapter_path: "adapters/ollama.lua"
 
-input_processing:
-  image:
-    fallback_provider: ""
-    fallback_model: ""
-    describe_prompt: "请详细描述这张图片的内容"
-    ocr_enabled: true
-  audio:
-    fallback_provider: ""
-    fallback_model: ""
-    describe_prompt: "请描述这段音频的内容"
-
 defaults:
   image: "homeagent/agent-base:latest"
   llm_endpoints:

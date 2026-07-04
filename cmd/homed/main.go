@@ -7,6 +7,7 @@ import (
 	"io"
 	"log"
 	"os"
+	"os/exec"
 	"os/signal"
 	"path/filepath"
 	"syscall"
@@ -29,6 +30,7 @@ import (
 	cli "gitcode.com/JianFeeeee/HomeAgent/internal/plugins/cli"
 	healthcheck "gitcode.com/JianFeeeee/HomeAgent/internal/plugins/healthcheck"
 	openclaw "gitcode.com/JianFeeeee/HomeAgent/internal/plugins/openclaw"
+	pluginmgr "gitcode.com/JianFeeeee/HomeAgent/internal/plugins/pluginmgr"
 	webui "gitcode.com/JianFeeeee/HomeAgent/internal/plugins/webui"
 	sdk "gitcode.com/JianFeeeee/HomeAgent/internal/sdk"
 	"gitcode.com/JianFeeeee/HomeAgent/internal/skill"
@@ -38,10 +40,23 @@ import (
 )
 
 func main() {
-	dataDir := flag.String("data", "/var/lib/homeagent", "data directory")
+	dataDir := flag.String("data", "", "data directory (default: auto-detect next to binary)")
 	httpAddr := flag.String("webui", ":8080", "webui listen address")
 	cliSocket := flag.String("socket", "", "cli unix socket path (default: <data>/cli.sock)")
 	flag.Parse()
+
+	if *dataDir == "" {
+		exe, err := os.Executable()
+		if err == nil {
+			*dataDir = filepath.Join(filepath.Dir(exe), "data")
+		} else {
+			if exe, err := exec.LookPath(os.Args[0]); err == nil {
+				*dataDir = filepath.Join(filepath.Dir(exe), "data")
+			} else {
+				*dataDir = "./data"
+			}
+		}
+	}
 
 	if *cliSocket == "" {
 		*cliSocket = filepath.Join(*dataDir, "cli.sock")
@@ -304,7 +319,7 @@ func main() {
 	pluginReg.SetKnowledge(ks)
 	pluginReg.SetProviderManager(providerMgr)
 	pluginReg.SetConfigRegistry(cfgReg)
-	pluginReg.SetPluginDir(filepath.Join(cfg.Daemon.DataDir, "plugins"))
+	pluginReg.SetPluginDir(cfg.Plugin.Dir)
 
 	// Wire registration callbacks: plugins' RegisterTool/RegisterStage → StageHost
 	pluginReg.SetToolRegistrar(func(name string, def sdk.ToolDef, handler sdk.ToolHandler) error {
@@ -360,7 +375,7 @@ func main() {
 		TextMemory:      textMem,
 		Personality:     personality,
 		PluginReg:       pluginReg,
-		PluginDir:       filepath.Join(cfg.Daemon.DataDir, "plugins"),
+		PluginDir:       cfg.Plugin.Dir,
 		ContextSavePath: filepath.Join(cfg.Daemon.DataDir, "memory", "context.json"),
 		StageHost:       stageHost,
 		EventBus:        evBus,
@@ -376,12 +391,15 @@ func main() {
 	)
 	healthcheck.Configure(stageHost, iom, pluginReg, memDB, ks, docStore, providerMgr, agent)
 
+	// Wire pluginmgr dependencies
+	pluginmgr.PluginDir = cfg.Plugin.Dir
+	pluginmgr.Reg = pluginReg
+
 	// Auto-create plugins directory (without hardcoding plugin names)
-	plgDir := filepath.Join(cfg.Daemon.DataDir, "plugins")
-	os.MkdirAll(plgDir, 0755)
+	os.MkdirAll(cfg.Plugin.Dir, 0755)
 
 	// Load all plugins — each scans its own dir and is loaded via factory or .so
-	if err := pluginReg.Load(plgDir); err != nil {
+	if err := pluginReg.Load(cfg.Plugin.Dir); err != nil {
 		log.Printf("[homed] warning: load plugins: %v", err)
 	}
 	log.Printf("[homed] stage host ready with %d registered tools", stageHost.ToolCount())

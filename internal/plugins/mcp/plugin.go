@@ -39,7 +39,15 @@ func New(name string) *Plugin {
 func (p *Plugin) Name() string { return p.name }
 
 func (p *Plugin) Start(s *sdk.PluginSDK) error {
-	// 从插件配置读取 MCP 服务器列表
+	s.Settings().RegisterDef(sdk.ConfigDef{
+		Key:         "servers",
+		Default:     "",
+		Type:        "text",
+		DisplayName: "MCP 服务器配置",
+		Description: "MCP 服务器列表，JSON 数组格式，包含 name、command/url、args、env 等字段",
+		Category:    "mcp",
+	})
+
 	cfgs, err := p.loadConfig(s)
 	if err != nil {
 		return fmt.Errorf("load mcp config: %w", err)

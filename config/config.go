@@ -40,19 +40,6 @@ func DefaultConfig() types.Config {
 				{Name: "ollama", BaseURL: "http://localhost:11434", Model: "llama3", Adapter: "ollama", AdapterPath: "adapters/ollama.lua"},
 			},
 		},
-		InputProcessing: types.InputProcessingConfig{
-			Image: types.ImageProcessingConfig{
-				FallbackProvider: "",
-				FallbackModel:    "",
-				DescribePrompt:   "请详细描述这张图片的内容",
-				OCREnabled:       true,
-			},
-			Audio: types.AudioProcessingConfig{
-				FallbackProvider: "",
-				FallbackModel:    "",
-				DescribePrompt:   "请描述这段音频的内容",
-			},
-		},
 		Defaults: types.AgentConfig{
 			Image:  "homeagent/agent-base:latest",
 			LLMEndpoints: []string{"https://api.openai.com/v1"},
