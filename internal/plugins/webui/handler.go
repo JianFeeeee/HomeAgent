@@ -644,12 +644,35 @@ func (h *Handler) handleSettings(w http.ResponseWriter, r *http.Request) {
 	switch r.Method {
 	case http.MethodGet:
 		prefix := r.URL.Query().Get("prefix")
-		keys := h.cfgReg.List(prefix)
 		values := make(map[string]interface{})
-		for _, k := range keys {
-			v, _ := h.cfgReg.Get(k)
-			values[k] = v
+		meta := make(map[string]*internalConfig.ConfigDef)
+
+		if strings.HasPrefix(prefix, "plugin.") {
+			// 插件配置：从插件自身 config_<name> 表读取
+			pluginName := prefix[7:]
+			ps := h.cfgReg.PluginConfig(pluginName)
+			keys, _ := ps.List("")
+			for _, k := range keys {
+				v, _ := ps.Get(k)
+				fullKey := prefix + "." + k
+				values[fullKey] = v
+				if def := h.cfgReg.GetDef(fullKey); def != nil {
+					meta[fullKey] = def
+				}
+			}
+		} else {
+			// 核心配置：从 core config 表读取
+			keys := h.cfgReg.List(prefix)
+			for _, k := range keys {
+				v, _ := h.cfgReg.Get(k)
+				values[k] = v
+			}
+			defs := h.cfgReg.ListDefs(prefix)
+			for _, d := range defs {
+				meta[d.Key] = d
+			}
 		}
+
 		plugins := []string{"core"}
 		if h.pluginReg != nil {
 			for _, p := range h.pluginReg.List() {
@@ -659,6 +682,7 @@ func (h *Handler) handleSettings(w http.ResponseWriter, r *http.Request) {
 		sort.Strings(plugins)
 		writeJSON(w, http.StatusOK, map[string]interface{}{
 			"settings": values,
+			"meta":     meta,
 			"plugins":  plugins,
 		})
 	case http.MethodPut:
@@ -670,9 +694,20 @@ func (h *Handler) handleSettings(w http.ResponseWriter, r *http.Request) {
 			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid request"})
 			return
 		}
-		if err := h.cfgReg.Set(body.Key, body.Value); err != nil {
-			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
-			return
+		if strings.HasPrefix(body.Key, "plugin.") {
+			parts := strings.SplitN(body.Key, ".", 3)
+			if len(parts) >= 3 {
+				ps := h.cfgReg.PluginConfig(parts[1])
+				if err := ps.Set(parts[2], body.Value); err != nil {
+					writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+					return
+				}
+			}
+		} else {
+			if err := h.cfgReg.Set(body.Key, body.Value); err != nil {
+				writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+				return
+			}
 		}
 		writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
 	default:
