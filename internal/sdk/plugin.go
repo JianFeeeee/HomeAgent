@@ -44,6 +44,7 @@ type StageContext struct {
 	Response        *string
 	Phase           Stage
 	Memory          []MemItem
+	NoMemory        bool
 	Extra           map[string]interface{}
 }
 
@@ -144,9 +145,24 @@ func (s *PluginSDK) InjectText(source, channel, text string) {
 	}
 }
 
+// InjectTextNoMemory 注入文本输入（不产生记忆）。适用于健康检查等无需记忆碎片的场景。
+func (s *PluginSDK) InjectTextNoMemory(source, channel, text string) {
+	if s.iom != nil {
+		s.iom.InjectTextNoMemoryTo(source, channel, text)
+	}
+}
+
 func (s *PluginSDK) InjectTextSync(source, channel, text string) *agentIO.OutputEvent {
 	if s.iom != nil {
 		return s.iom.InjectTextSyncTo(source, channel, text)
+	}
+	return nil
+}
+
+// InjectTextSyncNoMemory 注入文本输入（同步等待，不产生记忆）。
+func (s *PluginSDK) InjectTextSyncNoMemory(source, channel, text string) *agentIO.OutputEvent {
+	if s.iom != nil {
+		return s.iom.InjectTextSyncNoMemoryTo(source, channel, text)
 	}
 	return nil
 }

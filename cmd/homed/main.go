@@ -27,6 +27,7 @@ import (
 	"gitcode.com/JianFeeeee/HomeAgent/internal/memory/text"
 	"gitcode.com/JianFeeeee/HomeAgent/internal/plugin"
 	cli "gitcode.com/JianFeeeee/HomeAgent/internal/plugins/cli"
+	healthcheck "gitcode.com/JianFeeeee/HomeAgent/internal/plugins/healthcheck"
 	openclaw "gitcode.com/JianFeeeee/HomeAgent/internal/plugins/openclaw"
 	webui "gitcode.com/JianFeeeee/HomeAgent/internal/plugins/webui"
 	sdk "gitcode.com/JianFeeeee/HomeAgent/internal/sdk"
@@ -316,25 +317,8 @@ func main() {
 		return nil
 	})
 
-	// 为内置插件注入内核依赖（各插件通过 init() 自注册工厂）
-	cli.DefaultSocket = *cliSocket
-	openclaw.SkillsDir = filepath.Join(cfg.Daemon.DataDir, "skills")
-	webui.Configure(*httpAddr,
-		sup, memDB, skMgr, luaVM, cfg, iom, textMem, ks, trk, cfgReg, pluginReg, evBus,
-	)
-
-	// Auto-create plugins directory (without hardcoding plugin names)
-	plgDir := filepath.Join(cfg.Daemon.DataDir, "plugins")
-	os.MkdirAll(plgDir, 0755)
-
-	// Load all plugins — each scans its own dir and is loaded via factory or .so
-	if err := pluginReg.Load(plgDir); err != nil {
-		log.Printf("[homed] warning: load plugins: %v", err)
-	}
-	log.Printf("[homed] stage host ready with %d registered tools", stageHost.ToolCount())
-
 	// ========================================================================
-	// Agent Core
+	// Agent Core (需在插件加载前创建，因为插件 Configure 需要 StatusProvider)
 	// ========================================================================
 
 	agent := agentCore.New(agentCore.AgentConfig{
@@ -377,6 +361,25 @@ func main() {
 		EventBus:        evBus,
 		ThinkingEnabled: cfg.LLM.ThinkingEnabled,
 	})
+
+	// 为内置插件注入内核依赖（各插件通过 init() 自注册工厂）
+	cli.DefaultSocket = *cliSocket
+	openclaw.SkillsDir = filepath.Join(cfg.Daemon.DataDir, "skills")
+	webui.Configure(*httpAddr,
+		sup, memDB, skMgr, luaVM, cfg, iom, textMem, ks, trk, cfgReg, pluginReg, evBus, agent,
+	)
+	healthcheck.Configure(stageHost, iom, pluginReg, memDB, ks, docStore, providerMgr, agent)
+
+	// Auto-create plugins directory (without hardcoding plugin names)
+	plgDir := filepath.Join(cfg.Daemon.DataDir, "plugins")
+	os.MkdirAll(plgDir, 0755)
+
+	// Load all plugins — each scans its own dir and is loaded via factory or .so
+	if err := pluginReg.Load(plgDir); err != nil {
+		log.Printf("[homed] warning: load plugins: %v", err)
+	}
+	log.Printf("[homed] stage host ready with %d registered tools", stageHost.ToolCount())
+
 	agent.Start()
 	defer agent.Stop()
 

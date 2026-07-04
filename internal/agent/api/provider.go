@@ -605,6 +605,22 @@ func (m *ProviderManager) Default() Provider {
 	return m.providers[m.default_]
 }
 
+// QuickChat 向默认 LLM Provider 发送一条简短消息并返回回复。
+// 这是一个"非记忆"调用——直接通过 Provider HTTP 调用，不经过 Agent 的记忆/蒸馏管线。
+// 适用于健康检查、系统自检等不需要产生记忆碎片的场景。
+func (m *ProviderManager) QuickChat(ctx context.Context, prompt string) (*CompletionResponse, error) {
+	p := m.Default()
+	if p == nil {
+		return nil, fmt.Errorf("no default provider")
+	}
+	return p.Chat(ctx, &CompletionRequest{
+		Messages: []Message{
+			{Role: "user", Content: prompt},
+		},
+		MaxTokens: 128,
+	})
+}
+
 func (m *ProviderManager) List() []string {
 	m.mu.RLock()
 	defer m.mu.RUnlock()

@@ -613,12 +613,22 @@ internal/
 │   └── plugin.go                       — SKILL 插件解析 (OpenClaw 兼容)
 ├── plugins/
 │   ├── all.go                          — 空白导入触发所有内置插件 init()
-│   ├── timer/plugin.go                 — 定时器 (timer_set 工具 + 中断反馈)
+│   ├── all_test.go                     — 集成测试（14 工具跨插件）
+│   ├── agentcli/plugin.go              — PTY 终端 (6 个 terminal_* 工具)
 │   ├── cli/plugin.go                   — CLI 插件 (Unix socket, InjectTextSync)
-│   ├── openclaw/plugin.go              — OpenClaw 兼容 (SKILL.md → SDK 工具注册)
-│   └── webui/                          — WebUI 插件 (HTTP 服务器 + 仪表盘)
+│   ├── cmd/plugin.go                   — 命令执行 (cmd_run 工具)
+│   ├── healthcheck/plugin.go           — 健康检查 + 性能监控 + 自动调度
+│   ├── mcp/plugin.go                   — MCP 协议支持
+│   ├── openclaw/                       — OpenClaw 兼容
+│   │   ├── plugin.go                   — SKILL.md + sidecar + simulator 三通道
+│   │   ├── sidecar.go                  — JSON-RPC over stdio 侧车管理
+│   │   └── simulator/
+│   │       └── main.js                 — OpenClaw 插件模拟器 (go:embed)
+│   ├── timer/plugin.go                 — 定时器 (timer_set 工具 + 中断反馈)
+│   └── webui/                          — WebUI 插件 (HTTP 服务器 + SPA 仪表盘)
 │       ├── plugin.go
-│       └── handler.go
+│       ├── handler.go
+│       └── dashboard.html              — 嵌入式 SPA (go:embed)
 ├── memory/
 │   ├── graph.go                        — SQLite 图数据库
 │   ├── indexer.go                      — 图索引器
