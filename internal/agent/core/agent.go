@@ -304,7 +304,7 @@ func (a *Agent) processMediaInput(evt *agentIO.InputEvent) {
 		a.currentOutputChannel = evt.Source
 	}
 
-	blocks, fallback := a.mediaToBlocks(evt.Payload, evt.Type)
+	blocks, fallback := a.mediaToBlocks(evt.Payload, evt.Type, evt.Source)
 
 	a.context.Append(ContextEvent{
 		Timestamp: start,
@@ -358,13 +358,17 @@ func (a *Agent) processMediaInput(evt *agentIO.InputEvent) {
 }
 
 // mediaToBlocks 将媒体 payload 转为多模态 ContentBlock 数组和纯文本 fallback。
-func (a *Agent) mediaToBlocks(payload map[string]interface{}, mediaType string) ([]agentAPI.ContentBlock, string) {
+// source 是输入通道名，用于生成可读的描述文本（如"从 cli 收到了一张图片"）。
+func (a *Agent) mediaToBlocks(payload map[string]interface{}, mediaType string, source string) ([]agentAPI.ContentBlock, string) {
 	data, _ := payload["data"].(string)
 	mime, _ := payload["mime"].(string)
 	url, _ := payload["url"].(string)
 	alt, _ := payload["alt"].(string)
 	if alt == "" {
-		alt = fmt.Sprintf("[用户上传了%s]", mediaType)
+		if source == "" {
+			source = "unknown"
+		}
+		alt = fmt.Sprintf("[从 %s 收到了 %s]", source, mediaType)
 	}
 
 	var blocks []agentAPI.ContentBlock
@@ -375,12 +379,12 @@ func (a *Agent) mediaToBlocks(payload map[string]interface{}, mediaType string) 
 	case "image":
 		desc = a.inputCfg.Image.DescribePrompt
 		if desc == "" {
-			desc = "用户上传了一张图片，请使用 describe_image 工具查看详情。"
+			desc = fmt.Sprintf("从 %s 收到了一张图片，请使用 describe_image 工具查看详情。", source)
 		}
 	case "audio":
 		desc = a.inputCfg.Audio.DescribePrompt
 		if desc == "" {
-			desc = "用户上传了一段音频，请使用 transcribe_audio 工具查看内容。"
+			desc = fmt.Sprintf("从 %s 收到了一段音频，请使用 transcribe_audio 工具查看内容。", source)
 		}
 	}
 	blocks = append(blocks, agentAPI.ContentBlock{Type: "text", Text: desc})
