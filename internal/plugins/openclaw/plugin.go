@@ -103,21 +103,6 @@ func (p *Plugin) Start(s *sdk.PluginSDK) error {
 			}
 			p.skills = append(p.skills, sk)
 
-			for _, td := range sk.Tools() {
-				if err := s.RegisterTool(td.Name, sdk.ToolDef{
-					Name:        td.Name,
-					Description: td.Description,
-					Parameters:  td.Parameters,
-				}, nil); err != nil {
-					log.Printf("[openclaw] register tool %s: %v", td.Name, err)
-				}
-			}
-
-			if iocfg := sk.IOConfig(); iocfg != nil {
-				log.Printf("[openclaw] skill %s io: type=%s in=%s out=%s caps=%v",
-					sk.Name(), iocfg.Type, iocfg.InputRoute, iocfg.OutputRoute, iocfg.OutputCaps)
-			}
-
 			log.Printf("[openclaw] loaded skill: %s v%s", sk.Name(), sk.Version())
 		}
 	}
@@ -142,55 +127,45 @@ func (p *Plugin) loadOCPlugin(s *sdk.PluginSDK, dir, name string) error {
 		return nil
 	}
 
-	// 收集插件注册过程中模拟器推送的通知
-	p.drainNotify(sp, name)
+	// 通知是唯一注册路径。
+	// 插件 register(api) 期间模拟器将所有 register* 调用以通知推送给 Go。
+	// waitReady 之后所有初始化通知已缓冲在 notifyCh 中，同步排空处理。
+	for done := false; !done; {
+		select {
+		case n := <-sp.NotifyChan():
+			p.translateAndRegister(n, sp, s, name)
+		default:
+			done = true
+		}
+	}
 
+	// 启动持久通知协程：后续模拟器推送的注册通知持续转译注册到核心
+	go p.notifyLoop(sp, s, name)
+
+	// ListTools 仅验证日志，不参与注册
 	tools, err := sp.ListTools()
 	if err != nil {
 		sp.Close()
 		return fmt.Errorf("list tools: %w", err)
 	}
-
-	for _, tool := range tools {
-		toolName := fmt.Sprintf("%s_%s", name, tool.Name)
-		tDef := sdk.ToolDef{
-			Name:        toolName,
-			Description: fmt.Sprintf("[%s] %s", name, tool.Description),
-			Parameters:  tool.InputSchema,
-		}
-		handler := func(sp *sidecarProcess, toolName string) sdk.ToolHandler {
-			return func(args map[string]interface{}) (interface{}, error) {
-				return sp.CallTool(toolName, args)
-			}
-		}(sp, tool.Name)
-		if err := s.RegisterTool(toolName, tDef, handler); err != nil {
-			log.Printf("[openclaw] register ocplugin tool %s: %v", toolName, err)
-			continue
-		}
-		log.Printf("[openclaw] registered ocplugin tool: %s (from %s)", toolName, name)
-	}
+	log.Printf("[openclaw] ocplugin %s verified %d tools via ListTools", name, len(tools))
 
 	p.mu.Lock()
 	p.sidecars = append(p.sidecars, sp)
 	p.mu.Unlock()
-	log.Printf("[openclaw] ocplugin %s started with %d tools", name, len(tools))
 	return nil
 }
 
-func (p *Plugin) drainNotify(sp *sidecarProcess, name string) {
-	for {
-		select {
-		case n := <-sp.NotifyChan():
-			p.handleNotify(n, name)
-		default:
-			return
-		}
+// notifyLoop 持续监听模拟器的注册通知，即时转译注册到核心。
+// 生命周期绑定 sidecarProcess.NotifyChan，sp.Close() 时会关闭通道使循环退出。
+func (p *Plugin) notifyLoop(sp *sidecarProcess, s *sdk.PluginSDK, pluginName string) {
+	for n := range sp.NotifyChan() {
+		p.translateAndRegister(n, sp, s, pluginName)
 	}
 }
 
-func (p *Plugin) handleNotify(n OCNotification, name string) {
+func (p *Plugin) translateAndRegister(n OCNotification, sp *sidecarProcess, s *sdk.PluginSDK, pluginName string) {
 	if n.Method != "register" {
-		log.Printf("[openclaw] ocplugin %s: unknown notify method: %s", name, n.Method)
 		return
 	}
 	var params struct {
@@ -198,14 +173,45 @@ func (p *Plugin) handleNotify(n OCNotification, name string) {
 		Data json.RawMessage `json:"data"`
 	}
 	if err := json.Unmarshal(n.Params, &params); err != nil {
-		log.Printf("[openclaw] ocplugin %s: bad notify params: %v", name, err)
 		return
 	}
-	dataStr := string(params.Data)
-	if len(dataStr) > 200 {
-		dataStr = dataStr[:200] + "..."
+
+	switch params.Type {
+
+	case "tool":
+		var d struct {
+			Name        string                 `json:"name"`
+			Label       string                 `json:"label"`
+			Description string                 `json:"description"`
+			Parameters  map[string]interface{} `json:"parameters"`
+		}
+		if err := json.Unmarshal(params.Data, &d); err != nil || d.Name == "" {
+			return
+		}
+		toolName := fmt.Sprintf("%s_%s", pluginName, d.Name)
+		tDef := sdk.ToolDef{
+			Name:        d.Name,
+			Description: d.Description,
+			Parameters:  d.Parameters,
+		}
+		handler := func(sp *sidecarProcess, ocToolName string) sdk.ToolHandler {
+			return func(args map[string]interface{}) (interface{}, error) {
+				return sp.CallTool(ocToolName, args)
+			}
+		}(sp, d.Name)
+		if err := s.RegisterTool(toolName, tDef, handler); err != nil {
+			log.Printf("[openclaw] translate register tool %s: %v", toolName, err)
+		}
+
+	case "provider":
+		log.Printf("[openclaw] %s: provider registration (no HomeAgent equivalent, logged only)", pluginName)
+
+	case "channel":
+		log.Printf("[openclaw] %s: channel registration (no HomeAgent equivalent, logged only)", pluginName)
+
+	default:
+		log.Printf("[openclaw] %s: %s capability (no HomeAgent equivalent, logged only)", pluginName, params.Type)
 	}
-	log.Printf("[openclaw] ocplugin %s: capability %s data=%s", name, params.Type, dataStr)
 }
 
 func (p *Plugin) loadSidecar(s *sdk.PluginSDK, dir, name string) error {

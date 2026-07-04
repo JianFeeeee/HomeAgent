@@ -50,14 +50,6 @@ type OCNotification struct {
 	Params  json.RawMessage `json:"params"`
 }
 
-// OCNamedParam 通知参数中至少包含 name 的结构
-type OCNamedParam struct {
-	Type string `json:"type"`
-	Data *struct {
-		Name string `json:"name,omitempty"`
-	} `json:"data"`
-}
-
 type sidecarProcess struct {
 	name    string
 	dir     string
@@ -311,17 +303,6 @@ func (s *sidecarProcess) CallTool(name string, args map[string]interface{}) (str
 		}
 	}
 	return sb, nil
-}
-
-// DrainNotify 排空通知通道
-func (s *sidecarProcess) DrainNotify() {
-	for {
-		select {
-		case <-s.notifyCh:
-		default:
-			return
-		}
-	}
 }
 
 func (s *sidecarProcess) Close() {
