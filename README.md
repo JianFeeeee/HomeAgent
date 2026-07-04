@@ -11,13 +11,25 @@
 
 ```bash
 # 构建
-make build
+make build build-cli
 
 # 启动内核（需要 DeepSeek API 密钥）
 DEEPSEEK_API_KEY="sk-xxx" ./build/homed -data /tmp/ha
 
-# 在另一个终端聊天
-echo "你好" | ./build/waiter -socket /tmp/ha/cli.sock
+# 交互模式（自动发现 socket）
+./build/waiter
+
+# 或单条消息
+echo "你好" | ./build/waiter
+```
+
+配置文件 `~/.config/homeagent/cli.yaml`：
+
+```yaml
+mode: auto          # auto / local / remote
+colors: true
+history_size: 1000
+prompt: "waiter> "
 ```
 
 ## 架构一句话

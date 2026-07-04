@@ -14,18 +14,41 @@ import (
 	luaVM "gitcode.com/JianFeeeee/HomeAgent/internal/lua"
 )
 
+// ContentBlock 定义多模态内容块，用于图片/音频等非文本输入。
+type ContentBlock struct {
+	Type     string    `json:"type"`
+	Text     string    `json:"text,omitempty"`
+	ImageURL *ImageURL `json:"image_url,omitempty"`
+	AudioURL *AudioURL `json:"audio_url,omitempty"`
+}
+
+type ImageURL struct {
+	URL    string `json:"url"`
+	Detail string `json:"detail,omitempty"`
+}
+
+type AudioURL struct {
+	URL string `json:"url"`
+}
+
+// Message 表示对话消息。当 Blocks 不为空时 content 在 JSON 中序列化为数组（多模态格式）。
 type Message struct {
-	Role             string     `json:"role"`
-	Content          string     `json:"content"`
-	ReasoningContent string     `json:"reasoning_content,omitempty"`
-	ToolCallID       string     `json:"tool_call_id,omitempty"`
-	ToolCalls        []ToolCall `json:"-"`
+	Role             string         `json:"role"`
+	Content          string         `json:"content,omitempty"`
+	Blocks           []ContentBlock `json:"-"`
+	ReasoningContent string         `json:"reasoning_content,omitempty"`
+	ToolCallID       string         `json:"tool_call_id,omitempty"`
+	ToolCalls        []ToolCall     `json:"-"`
 }
 
 func (m Message) MarshalJSON() ([]byte, error) {
 	raw := map[string]interface{}{
-		"role":    m.Role,
-		"content": m.Content,
+		"role": m.Role,
+	}
+	if len(m.Blocks) > 0 {
+		raw["content"] = m.Blocks
+	} else {
+		raw["content"] = m.Content
 	}
 	if m.ReasoningContent != "" {
 		raw["reasoning_content"] = m.ReasoningContent
