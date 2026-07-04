@@ -117,11 +117,30 @@ type LLMConfig struct {
 	Sources         []LLMSource `json:"sources,omitempty"`
 }
 
+type ImageProcessingConfig struct {
+	FallbackProvider string `json:"fallback_provider" yaml:"fallback_provider"`
+	FallbackModel    string `json:"fallback_model" yaml:"fallback_model"`
+	DescribePrompt   string `json:"describe_prompt" yaml:"describe_prompt"`
+	OCREnabled       bool   `json:"ocr_enabled" yaml:"ocr_enabled"`
+}
+
+type AudioProcessingConfig struct {
+	FallbackProvider string `json:"fallback_provider" yaml:"fallback_provider"`
+	FallbackModel    string `json:"fallback_model" yaml:"fallback_model"`
+	DescribePrompt   string `json:"describe_prompt" yaml:"describe_prompt"`
+}
+
+type InputProcessingConfig struct {
+	Image ImageProcessingConfig `json:"image" yaml:"image"`
+	Audio AudioProcessingConfig `json:"audio" yaml:"audio"`
+}
+
 type Config struct {
-	Daemon    DaemonConfig    `json:"daemon"`
-	LLM       LLMConfig       `json:"llm"`
-	Defaults  AgentConfig     `json:"defaults"`
-	Agents    []AgentConfig   `json:"agents"`
+	Daemon          DaemonConfig          `json:"daemon"`
+	LLM             LLMConfig             `json:"llm"`
+	InputProcessing InputProcessingConfig `json:"input_processing"`
+	Defaults        AgentConfig           `json:"defaults"`
+	Agents          []AgentConfig         `json:"agents"`
 }
 
 type DaemonConfig struct {

@@ -339,6 +339,11 @@ func main() {
 - timer_set — 设置定时提醒
 - plgreload — 热重载插件
 - spawn_child — 生成子 Agent 执行独立任务
+- describe_image — 描述用户上传的图片
+- transcribe_audio — 转写用户上传的音频
+- ocr_image — 识别图片中的文字
+
+当用户上传图片或音频时，系统会自动附着媒体内容。如果模型不支持直接处理多媒体，请使用上述工具。
 
 回复你的真实想法，用自然语言与用户交流。`,
 		Provider:        provider,
@@ -359,7 +364,8 @@ func main() {
 		ContextSavePath: filepath.Join(cfg.Daemon.DataDir, "memory", "context.json"),
 		StageHost:       stageHost,
 		EventBus:        evBus,
-		ThinkingEnabled: cfg.LLM.ThinkingEnabled,
+		ThinkingEnabled:  cfg.LLM.ThinkingEnabled,
+		InputProcessing:  cfg.InputProcessing,
 	})
 
 	// 为内置插件注入内核依赖（各插件通过 init() 自注册工厂）

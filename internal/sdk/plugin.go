@@ -120,57 +120,57 @@ func New(name string, iom *agentIO.IOManager, eventBus *events.Bus, mem MemoryAP
 
 // === IO 双通道 ===
 
-func (s *PluginSDK) InjectInput(source, channel string, payload map[string]interface{}) {
+// InjectInput 注入任意类型的输入事件。
+// eventType 可选值: "text", "event", "command", 或插件自定义类型。
+// payload 可包含 "content" (文本), "image" (图片), "file" (文件), "audio" (音频) 等字段。
+func (s *PluginSDK) InjectInput(source, channel, eventType string, payload map[string]interface{}) {
 	if s.iom != nil {
-		s.iom.InjectInputTo(source, channel, "text", payload)
+		s.iom.InjectInputTo(source, channel, eventType, payload)
 	}
 }
 
-func (s *PluginSDK) InjectInterrupt(source, channel string, payload map[string]interface{}) {
+// InjectInputSync 注入任意类型输入并同步等待响应。
+func (s *PluginSDK) InjectInputSync(source, channel, eventType string, payload map[string]interface{}) *agentIO.OutputEvent {
 	if s.iom != nil {
-		p := payload
-		if p == nil {
-			p = map[string]interface{}{}
+		return s.iom.InjectInputSyncTo(source, channel, eventType, payload)
+	}
+	return nil
+}
+
+// InjectInterrupt 向中断通道注入任意类型的输入事件，可打断当前 LLM 处理。
+// eventType 会被写入 payload["type"]。
+func (s *PluginSDK) InjectInterrupt(source, channel, eventType string, payload map[string]interface{}) {
+	if s.iom != nil {
+		if payload == nil {
+			payload = map[string]interface{}{}
 		}
-		if _, ok := p["type"]; !ok {
-			p["type"] = "text"
-		}
-		s.iom.InjectInterrupt(source, channel, p)
+		payload["type"] = eventType
+		s.iom.InjectInterrupt(source, channel, payload)
 	}
 }
+
+// 以下 InjectText* / InjectInterruptText 为快捷方式，等价于调用对应的泛型方法并传入 "text" 类型。
 
 func (s *PluginSDK) InjectText(source, channel, text string) {
-	if s.iom != nil {
-		s.iom.InjectTextTo(source, channel, text)
-	}
+	s.InjectInput(source, channel, "text", map[string]interface{}{"content": text})
 }
 
 // InjectTextNoMemory 注入文本输入（不产生记忆）。适用于健康检查等无需记忆碎片的场景。
 func (s *PluginSDK) InjectTextNoMemory(source, channel, text string) {
-	if s.iom != nil {
-		s.iom.InjectTextNoMemoryTo(source, channel, text)
-	}
+	s.InjectInput(source, channel, "text", map[string]interface{}{"content": text, "no_memory": true})
 }
 
 func (s *PluginSDK) InjectTextSync(source, channel, text string) *agentIO.OutputEvent {
-	if s.iom != nil {
-		return s.iom.InjectTextSyncTo(source, channel, text)
-	}
-	return nil
+	return s.InjectInputSync(source, channel, "text", map[string]interface{}{"content": text})
 }
 
 // InjectTextSyncNoMemory 注入文本输入（同步等待，不产生记忆）。
 func (s *PluginSDK) InjectTextSyncNoMemory(source, channel, text string) *agentIO.OutputEvent {
-	if s.iom != nil {
-		return s.iom.InjectTextSyncNoMemoryTo(source, channel, text)
-	}
-	return nil
+	return s.InjectInputSync(source, channel, "text", map[string]interface{}{"content": text, "no_memory": true})
 }
 
 func (s *PluginSDK) InjectInterruptText(source, channel, text string) {
-	if s.iom != nil {
-		s.iom.InjectInterruptText(source, channel, text)
-	}
+	s.InjectInterrupt(source, channel, "text", map[string]interface{}{"content": text})
 }
 
 func (s *PluginSDK) OutputChan() <-chan *agentIO.OutputEvent {
