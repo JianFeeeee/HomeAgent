@@ -84,7 +84,7 @@ type Agent struct {
 	childResults map[string]string
 
 	// 高优先级打断通道：interceptLoop 注入，process() 在工具循环轮次间非阻塞读取
-	interceptCh chan string
+	interceptCh chan *agentIO.InputEvent
 
 	// 进行中的 LLM 请求取消函数，interceptLoop 可调用以在请求中打断
 	cancelLLM context.CancelFunc
@@ -166,7 +166,7 @@ func New(cfg AgentConfig) *Agent {
 		eventBus:         cfg.EventBus,
 		selfInputCh:      make(chan string, 64),
 		childResults:     make(map[string]string),
-		interceptCh:      make(chan string, 64),
+		interceptCh:      make(chan *agentIO.InputEvent, 64),
 		thinkingEnabled:  cfg.ThinkingEnabled,
 		inputCfg:         cfg.InputProcessing,
 	}
@@ -225,26 +225,51 @@ func (a *Agent) interceptLoop() {
 			if text == "" {
 				continue
 			}
-			log.Printf("[agent] interrupt from %s: %s", evt.Source, truncateStr(text, 80))
+			log.Printf("[agent] interrupt from %s/%s: %s", evt.Source, evt.OutputChannel, truncateStr(text, 80))
 
-			// (a) 直接取消进行中的 LLM 请求
+			clone := &agentIO.InputEvent{
+				RequestID:     evt.RequestID,
+				Source:        evt.Source,
+				Type:          evt.Type,
+				Payload:       map[string]interface{}{},
+				OutputChannel: evt.OutputChannel,
+			}
+			for k, v := range evt.Payload {
+				clone.Payload[k] = v
+			}
+			clone.Payload["interrupt"] = true
+			clone.Payload["interrupt_source"] = evt.Source
+			clone.Payload["interrupt_channel"] = evt.OutputChannel
+
+			// 若当前有进行中的 LLM 请求，则打断并走 interceptCh；否则直接回注入普通输入队列。
 			a.llmMu.Lock()
-			if a.cancelLLM != nil {
+			hasActiveLLM := a.cancelLLM != nil
+			if hasActiveLLM {
 				a.cancelLLM()
 				log.Printf("[agent] LLM request cancelled by interrupt")
 			}
 			a.llmMu.Unlock()
 
-			// 注入拦截通道 — process() 在工具循环中非阻塞读取
-			select {
-			case a.interceptCh <- text:
-			default:
+			if hasActiveLLM {
+				select {
+				case a.interceptCh <- clone:
+				default:
+					log.Printf("[agent] intercept channel full, queuing input for %s", evt.Source)
+					a.io.InjectInputTo(evt.Source, evt.OutputChannel, "text", map[string]interface{}{
+						"content":           text,
+						"interrupt":         true,
+						"interrupt_source":  evt.Source,
+						"interrupt_channel": evt.OutputChannel,
+					})
+				}
+			} else {
+				a.io.InjectInputTo(evt.Source, evt.OutputChannel, "text", map[string]interface{}{
+					"content":           text,
+					"interrupt":         true,
+					"interrupt_source":  evt.Source,
+					"interrupt_channel": evt.OutputChannel,
+				})
 			}
-
-			// (b) 投递为新输入 — 代理空闲时 eventLoop 会消费
-			a.io.InjectInput("interrupt", "text", map[string]interface{}{
-				"content": fmt.Sprintf("[interrupt] %s: %s", evt.Source, text),
-			})
 
 		case <-a.ctx.Done():
 			return
@@ -309,9 +334,12 @@ func (a *Agent) processMediaInput(evt *agentIO.InputEvent) {
 	// stage 上下文携带 blocks，process() 会将其附着到 user message 上
 	stageCtx := a.stageCtxFromInput(fallback, evt.Source, "")
 	stageCtx.Extra = map[string]interface{}{
-		"media_blocks": blocks,
-		"media_type":   evt.Type,
+		"media_blocks":   blocks,
+		"media_type":     evt.Type,
+		"input_source":   evt.Source,
+		"output_channel": evt.OutputChannel,
 	}
+	a.injectSourceContext(stageCtx, evt)
 
 	a.publishEvent(events.EventRawInput, map[string]interface{}{
 		"content": evt.Payload,
@@ -429,15 +457,13 @@ func (a *Agent) processTextInput(evt *agentIO.InputEvent, input string) {
 
 	// === Stage: on_input — 消息到达，插件可拦截 ===
 	stageCtx := a.stageCtxFromInput(input, evt.Source, "")
-	stageCtx.NoMemory = noMemory
-	a.publishEvent(events.EventRawInput, map[string]interface{}{
-		"content": input,
-		"source":  evt.Source,
-	})
-	if a.runStage(sdk.StageOnInput, stageCtx) {
-		a.emitResponse(evt, *stageCtx.Response)
-		return
+	stageCtx.Extra["input_source"] = evt.Source
+	stageCtx.Extra["output_channel"] = evt.OutputChannel
+	if noMemory {
+		stageCtx.NoMemory = true
 	}
+	a.injectSourceContext(stageCtx, evt)
+
 	input = stageCtx.RawMessage
 
 	a.context.Append(ContextEvent{
@@ -573,13 +599,13 @@ func (a *Agent) process(input string, stageCtx *sdk.StageContext) (response stri
 
 	for turn := 0; ; turn++ {
 		// === 高优先级打断：每次 LLM 调用前检查拦截通道 ===
-		if text := a.drainInterrupt(); text != "" {
+		for _, interrupt := range a.drainInterrupts() {
 			msgs = append(msgs, agentAPI.Message{
 				Role:    "system",
-				Content: fmt.Sprintf("[打断消息] 用户发来一条紧急消息，请优先处理:\n%s", text),
+				Content: interrupt,
 			})
-			log.Printf("[agent] interrupt injected before LLM call (turn %d)", turn)
 		}
+
 
 		eb := map[string]interface{}{}
 		if !a.thinkingEnabled {
@@ -2551,13 +2577,52 @@ func truncateStr(s string, max int) string {
 	return s
 }
 
-// drainInterrupt 非阻塞读取 interceptCh 中的一条打断消息。
-// 若有多条，只取最先到达的一条（丢弃后续）。
-func (a *Agent) drainInterrupt() string {
-	select {
-	case text := <-a.interceptCh:
-		return text
-	default:
-		return ""
+func (a *Agent) injectSourceContext(stageCtx *sdk.StageContext, evt *agentIO.InputEvent) {
+	if stageCtx == nil || evt == nil {
+		return
+	}
+	source := evt.Source
+	if source == "" {
+		source = "unknown"
+	}
+	channel := evt.OutputChannel
+	if channel == "" {
+		channel = source
+	}
+	content := fmt.Sprintf("当前输入来源: %s；默认输出通道: %s。", source, channel)
+	if flag, _ := evt.Payload["interrupt"].(bool); flag {
+		content = fmt.Sprintf("这是一条打断输入。来源: %s；默认输出通道: %s。", source, channel)
+	}
+	stageCtx.ContextMsgs = append(stageCtx.ContextMsgs, map[string]interface{}{
+		"role":    "system",
+		"content": content,
+	})
+}
+
+// drainInterrupts 非阻塞读取 interceptCh 中全部待处理打断消息，逐条保留来源信息。
+func (a *Agent) drainInterrupts() []string {
+	var out []string
+	for {
+		select {
+		case evt := <-a.interceptCh:
+			if evt == nil {
+				continue
+			}
+			text, _ := evt.Payload["content"].(string)
+			if text == "" {
+				continue
+			}
+			source := evt.Source
+			if source == "" {
+				source = "unknown"
+			}
+			channel := evt.OutputChannel
+			if channel == "" {
+				channel = source
+			}
+			out = append(out, fmt.Sprintf("[打断消息][来源:%s][输出通道:%s] %s", source, channel, text))
+		default:
+			return out
+		}
 	}
 }
