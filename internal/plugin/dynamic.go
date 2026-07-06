@@ -8,8 +8,10 @@ import (
 	"os"
 	"path/filepath"
 	"plugin"
+	"reflect"
 
 	sdk "gitcode.com/JianFeeeee/HomeAgent/internal/sdk"
+	sdkext "gitcode.com/JianFeeeee/homeagent-sdk/sdk"
 )
 
 // .so 插件必须导出函数 NewPlugin，签名与 NativeFactory 一致：
@@ -25,12 +27,14 @@ const (
 
 type dynamicPlugin struct {
 	name string
-	impl sdk.Plugin
+	impl sdkext.Plugin
 }
 
-func (p *dynamicPlugin) Name() string               { return p.name }
-func (p *dynamicPlugin) Start(s *sdk.PluginSDK) error { return p.impl.Start(s) }
-func (p *dynamicPlugin) Stop() error                { return p.impl.Stop() }
+func (p *dynamicPlugin) Name() string { return p.name }
+func (p *dynamicPlugin) Start(s *sdk.PluginSDK) error {
+	return p.impl.Start(s.PluginSDK)
+}
+func (p *dynamicPlugin) Stop() error { return p.impl.Stop() }
 
 // readManifest 读取插件目录下的 plugin.json。文件不存在时不报错。
 func readManifest(dir string) *PluginManifest {
@@ -77,14 +81,33 @@ func tryLoadSO(dir, name string, config map[string]interface{}) (sdk.Plugin, err
 		return nil, fmt.Errorf(".so %s must export NewPlugin: %w", soPath, err)
 	}
 
-	fn, ok := sym.(func(string, map[string]interface{}) (sdk.Plugin, error))
-	if !ok {
-		return nil, fmt.Errorf("NewPlugin in %s has wrong signature", soPath)
+	rv := reflect.ValueOf(sym)
+	if rv.Kind() != reflect.Func {
+		return nil, fmt.Errorf("NewPlugin in %s is not a function (type=%T)", soPath, sym)
 	}
-
-	plg, err := fn(name, config)
-	if err != nil {
-		return nil, fmt.Errorf("NewPlugin %s: %w", name, err)
+	if rv.Type().NumIn() != 2 || rv.Type().NumOut() != 2 {
+		return nil, fmt.Errorf("NewPlugin in %s has wrong arity: type=%s in=%d out=%d", soPath, rv.Type().String(), rv.Type().NumIn(), rv.Type().NumOut())
+	}
+	arg0 := rv.Type().In(0)
+	arg1 := rv.Type().In(1)
+	out0 := rv.Type().Out(0)
+	out1 := rv.Type().Out(1)
+	if arg0.Kind() != reflect.String || arg1.Kind() != reflect.Map || out1.String() != "error" {
+		return nil, fmt.Errorf("NewPlugin in %s signature mismatch: type=%s arg0=%s arg1=%s out0=%s out1=%s", soPath, rv.Type().String(), arg0.String(), arg1.String(), out0.String(), out1.String())
+	}
+	outs := rv.Call([]reflect.Value{reflect.ValueOf(name), reflect.ValueOf(config)})
+	if len(outs) != 2 {
+		return nil, fmt.Errorf("NewPlugin in %s returned unexpected values", soPath)
+	}
+	if !outs[1].IsNil() {
+		if err, ok := outs[1].Interface().(error); ok {
+			return nil, fmt.Errorf("NewPlugin %s: %w", name, err)
+		}
+		return nil, fmt.Errorf("NewPlugin %s returned non-error second value", name)
+	}
+	plg, ok := outs[0].Interface().(sdkext.Plugin)
+	if !ok {
+		return nil, fmt.Errorf("NewPlugin in %s returned value that does not implement external sdk.Plugin", soPath)
 	}
 
 	return &dynamicPlugin{name: name, impl: plg}, nil
