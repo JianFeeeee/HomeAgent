@@ -1,8 +1,0 @@
-{
-  "name": "files",
-  "version": "1.0.0",
-  "description": "文件系统操作插件，提供文件读写、编辑、目录列表等工具",
-  "author": "HomeAgent",
-  "entry": "plugin.so",
-  "tags": ["files", "filesystem", "io"]
-}
