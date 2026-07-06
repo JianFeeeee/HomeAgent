@@ -25,7 +25,7 @@ HomeAgent 是一个持续运行的个人智能 Agent 框架。
 
 ## 它实际做了什么
 
-代码位于 `/home/program/TrueAgent`，Go 语言实现。
+代码位于项目仓库根目录，Go 语言实现。
 
 **内核** (`internal/agent/core/agent.go`)：
 - 维护一个消息循环（`eventLoop`），从 IO 层排队接收输入
