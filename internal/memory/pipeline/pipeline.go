@@ -1,11 +1,14 @@
 package pipeline
 
 import (
+	"bufio"
 	"context"
 	"fmt"
 	"log"
 	"os"
 	"path/filepath"
+	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -103,24 +106,70 @@ func (d *Distiller) loadExisting() {
 	if err != nil {
 		return
 	}
+	cutoff := time.Now().AddDate(0, 0, -d.cfg.RetentionDays)
+	type fileInfo struct {
+		name string
+		mod  time.Time
+	}
+	var files []fileInfo
 	for _, entry := range entries {
 		if filepath.Ext(entry.Name()) != ".jsonl" {
 			continue
 		}
-		path := filepath.Join(d.rawPath, entry.Name())
-		data, err := os.ReadFile(path)
+		info, err := entry.Info()
 		if err != nil {
 			continue
 		}
-		for _, line := range parseLines(string(data)) {
-			parts := splitLine(line)
-			if len(parts) >= 4 {
+		if info.ModTime().Before(cutoff) {
+			_ = os.Remove(filepath.Join(d.rawPath, entry.Name()))
+			continue
+		}
+		files = append(files, fileInfo{name: entry.Name(), mod: info.ModTime()})
+	}
+	sort.Slice(files, func(i, j int) bool { return files[i].mod.After(files[j].mod) })
+	loaded := 0
+	const maxStartupRecords = 5000
+	for _, entry := range files {
+		if loaded >= maxStartupRecords {
+			break
+		}
+		path := filepath.Join(d.rawPath, entry.name)
+		f, err := os.Open(path)
+		if err != nil {
+			continue
+		}
+		func() {
+			defer f.Close()
+			scanner := bufio.NewScanner(f)
+			buf := make([]byte, 0, 64*1024)
+			scanner.Buffer(buf, 1024*1024)
+			for scanner.Scan() {
+				if loaded >= maxStartupRecords {
+					break
+				}
+				line := scanner.Text()
+				parts := splitLine(line)
+				if len(parts) < 5 {
+					continue
+				}
+				ts, err := strconv.ParseInt(parts[4], 10, 64)
+				if err != nil {
+					continue
+				}
+				createdAt := time.Unix(ts, 0)
+				if createdAt.Before(cutoff) {
+					continue
+				}
 				d.records = append(d.records, RawRecord{
-					ID: d.nextID, SessionID: parts[1], Role: parts[2], Content: parts[3],
+					ID: d.nextID, SessionID: parts[1], Role: parts[2], Content: parts[3], CreatedAt: createdAt,
 				})
 				d.nextID++
+				loaded++
 			}
-		}
+		}()
+	}
+	if loaded >= maxStartupRecords {
+		log.Printf("[memory] distiller startup load capped at %d recent records", loaded)
 	}
 }
 
@@ -395,39 +444,17 @@ func truncate(s string, max int) string {
 }
 
 func parseLines(data string) []string {
-	var lines []string
-	current := ""
-	for _, ch := range data {
-		if ch == '\n' {
-			if current != "" {
-				lines = append(lines, current)
-			}
-			current = ""
-		} else {
-			current += string(ch)
-		}
+	if data == "" {
+		return nil
 	}
-	if current != "" {
-		lines = append(lines, current)
-	}
-	return lines
+	return strings.Split(strings.TrimRight(data, "\n"), "\n")
 }
 
 func splitLine(line string) []string {
-	var parts []string
-	current := ""
-	for _, ch := range line {
-		if ch == '\t' {
-			parts = append(parts, current)
-			current = ""
-		} else {
-			current += string(ch)
-		}
+	if line == "" {
+		return nil
 	}
-	if current != "" {
-		parts = append(parts, current)
-	}
-	return parts
+	return strings.SplitN(line, "\t", 5)
 }
 
 func (d *Distiller) GetRecentRecords(limit int) []RawRecord {
