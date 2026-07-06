@@ -5,7 +5,7 @@
 HomeAgent 的所有外部交互能力都来自插件。插件通过 `PluginSDK`（Go API）与内核交互。
 
 **SDK 仓库**：插件开发工具、模板代码和示例插件统一托管在
-**[gitcode.com/JianFeeeee/homeagent-sdk](https://gitcode.com/JianFeeeee/homeagent-sdk)**。
+SDK 仓库。
 
 ```bash
 git clone https://gitcode.com/JianFeeeee/homeagent-sdk.git
