@@ -249,6 +249,17 @@ sdk.RegisterTool("weather_query", sdk.ToolDef{
 | `before_output` | 输出前 | 格式适配 |
 | `after_output` | 输出后 | 统计日志 |
 
+其中 `before_toolcall` / `after_toolcall` 阶段的 `StageContext` 会附带当前工具归属插件：
+- `ctx.ToolCalls[i].Plugin`
+- `ctx.ToolResults[i].Plugin`
+
+如果只想监听**当前插件自己的工具调用**，可使用：
+
+```go
+s.RegisterStageOwnTools(sdk.StageBeforeToolcall, handler)
+s.RegisterStageOwnTools(sdk.StageAfterToolcall, handler)
+```
+
 ```go
 sdk.RegisterStage(sdk.StageOnInput, func(ctx *sdk.StageContext) error {
     if ctx.UserID == "blocked_user" {
