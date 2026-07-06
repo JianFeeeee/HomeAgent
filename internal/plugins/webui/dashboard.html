@@ -98,7 +98,7 @@ code{font-family:monospace;font-size:12px;color:#a5b4fc}
 </style>
 </head>
 <body>
-<nav><h1>HomeAgent</h1><a class="active" onclick="switchTab('overview')">概览</a><a onclick="switchTab('chat')">对话</a><a onclick="switchTab('plugins')">插件</a><a onclick="switchTab('memory')">记忆</a><a onclick="switchTab('knowledge')">知识</a><a onclick="switchTab('settings')">设置</a><a onclick="switchTab('kernel')">内核</a></nav>
+<nav><h1>HomeAgent</h1><a class="active" onclick="switchTab('overview')">概览</a><a onclick="switchTab('chat')">对话</a><a onclick="switchTab('plugins')">插件</a><a onclick="switchTab('memory')">记忆</a><a onclick="switchTab('knowledge')">知识</a><a onclick="switchTab('settings')">设置</a><a onclick="switchTab('kernel')">内核</a><div style="margin-left:auto"><button class="btn btn-ghost btn-sm" onclick="logout()">退出登录</button></div></nav>
 <div class="container" id="app">
 <div id="tab-overview" class="tab-content active"></div>
 <div id="tab-chat" class="tab-content"></div>
@@ -111,7 +111,7 @@ code{font-family:monospace;font-size:12px;color:#a5b4fc}
 <div id="toast" class="toast"></div>
 <script>
 let state={status:{},kernel:null,settings:{},meta:{},settingsPlugins:['core'],selectedSection:'core',messages:[],chatLoading:false,healthResult:null};
-async function api(p,o){let opts={headers:{'Content-Type':'application/json',...o?.headers},...o};let r=await fetch('/api/v1'+p,opts);if(opts.raw)return r;let ct=r.headers.get('content-type')||'';if(ct.includes('json'))return r.json();return r.text()}
+async function api(p,o){let opts={credentials:'include',headers:{'Content-Type':'application/json',...o?.headers},...o};let r=await fetch('/api/v1'+p,opts);if(r.status===401){location.href='/login';throw new Error('unauthorized')}if(opts.raw)return r;let ct=r.headers.get('content-type')||'';if(ct.includes('json'))return r.json();return r.text()}
 function switchTab(n){document.querySelectorAll('.tab-content').forEach(e=>e.classList.remove('active'));let el=document.getElementById('tab-'+n);if(el)el.classList.add('active');document.querySelectorAll('nav a').forEach(e=>e.classList.remove('active'));document.querySelector('nav a[onclick*="\'+n+\'"]')||document.querySelector(`nav a[onclick*="${n}"]`)?.classList.add('active');renderAll()}
 function toast(m,isError){let t=document.getElementById('toast');t.textContent=m;t.className='toast'+(isError?' error':'');t.style.display='block';setTimeout(()=>t.style.display='none',3000)}
 async function renderAll(){try{let s=await api('/status');state.status=s}catch(e){}try{state.kernel=await api('/kernel')}catch(e){}try{let s=await api('/settings');state.settings=s.settings||{};state.meta=s.meta||{};state.settingsPlugins=s.plugins||['core']}catch(e){}try{state.installedPlugins=await api('/plugins')}catch(e){}renderOverview();renderChat();renderPlugins();renderMemory();renderKnowledge();renderKernel()}
@@ -166,6 +166,7 @@ function renderConfigDisabled(){document.getElementById('tab-settings').innerHTM
 function renderKernel(){let k=state.kernel;if(!k){document.getElementById('tab-kernel').innerHTML='<div class="card"><div class="loading"></div><p style="color:#64748b">加载中...</p></div>';return}let html='<div class="card"><h2>内核状态快照</h2><pre>'+escHtml(JSON.stringify(k,null,2))+'</pre></div>';html+='<div class="card"><h2>通道</h2>';if(k.channels&&k.channels.length>0){html+='<table><tr><th>名称</th><th>类型</th><th>状态</th></tr>';k.channels.forEach(ch=>{html+='<tr><td>'+escHtml(ch.name)+'</td><td>'+escHtml(ch.type)+'</td><td><span class="status-dot '+(ch.ready?'dot-green':'dot-red')+'"></span>'+(ch.ready?'就绪':'离线')+'</td></tr>'});html+='</table>'}else{html+='<p style="color:#94a3b8">无通道</p>'}html+='</div>';if(k.tracker?.available){html+='<div class="card"><h2>变更追踪</h2><div class="kv-row"><span class="key">状态</span><span class="val"><span class="badge badge-green">活跃</span></span></div><div class="kv-row"><span class="key">目录</span><span class="val">'+escHtml(k.tracker.dir||'-')+'</span></div></div>'}document.getElementById('tab-kernel').innerHTML=html}
 
 // === Settings Override ===
+async function logout(){try{await fetch('/api/v1/logout',{method:'POST',credentials:'include'});}catch(e){}location.href='/login'}
 renderConfigDisabled();
 renderAll();setInterval(renderAll,15000);
 </script>

@@ -1,7 +1,9 @@
 package webui
 
 import (
+	"crypto/rand"
 	"embed"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -10,6 +12,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	agentCore "gitcode.com/JianFeeeee/HomeAgent/internal/agent/core"
@@ -32,6 +35,8 @@ var dashboardFS embed.FS
 
 var dashboardHTML string
 
+const loginHTML = `<!DOCTYPE html><html lang="zh-CN"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1.0"><title>HomeAgent Login</title><style>body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;background:#0f172a;color:#e2e8f0;display:flex;align-items:center;justify-content:center;min-height:100vh;margin:0}.card{background:#1e293b;border:1px solid #334155;border-radius:12px;padding:28px;width:360px}h1{margin:0 0 16px;font-size:20px;color:#38bdf8}label{display:block;font-size:12px;color:#94a3b8;margin:10px 0 4px}input{width:100%;padding:10px 12px;border-radius:8px;border:1px solid #334155;background:#0f172a;color:#e2e8f0}button{width:100%;margin-top:16px;padding:10px 12px;border:none;border-radius:8px;background:#2563eb;color:#fff;font-weight:600;cursor:pointer}.err{margin-top:12px;color:#fca5a5;font-size:13px}</style></head><body><div class="card"><h1>HomeAgent</h1><form id="login-form"><label>用户名</label><input id="username" autocomplete="username"><label>密码</label><input id="password" type="password" autocomplete="current-password"><button type="submit">登录</button><div id="err" class="err"></div></form></div><script>document.getElementById('login-form').addEventListener('submit',async(e)=>{e.preventDefault();const username=document.getElementById('username').value;const password=document.getElementById('password').value;const err=document.getElementById('err');err.textContent='';const r=await fetch('/api/v1/login',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({username,password})});if(r.ok){location.href='/';return}let data={};try{data=await r.json()}catch(_){}err.textContent=data.error||'登录失败'})</script></body></html>`
+
 func init() {
 	data, err := dashboardFS.ReadFile("dashboard.html")
 	if err == nil {
@@ -40,21 +45,23 @@ func init() {
 }
 
 type Handler struct {
-	supervisor    *supervisor.Daemon
-	memory        *memory.GraphDB
-	indexer       *memory.Indexer
-	skills        *skill.Manager
-	lua           *luaVM.VM
-	config        *types.Config
-	startTime     time.Time
-	iom           *agentIO.IOManager
-	textMem       *text.Memory
-	knowledge     *knowledge.Store
-	tracker       *tracker.Tracker
-	cfgReg        *internalConfig.ConfigRegistry
-	pluginReg     *plugin.Registry
-	eventBus      *events.Bus
+	supervisor     *supervisor.Daemon
+	memory         *memory.GraphDB
+	indexer        *memory.Indexer
+	skills         *skill.Manager
+	lua            *luaVM.VM
+	config         *types.Config
+	startTime      time.Time
+	iom            *agentIO.IOManager
+	textMem        *text.Memory
+	knowledge      *knowledge.Store
+	tracker        *tracker.Tracker
+	cfgReg         *internalConfig.ConfigRegistry
+	pluginReg      *plugin.Registry
+	eventBus       *events.Bus
 	statusProvider agentCore.StatusProvider
+	sessionMu      sync.Mutex
+	sessions       map[string]time.Time
 }
 
 func NewHandler(sup *supervisor.Daemon, mem *memory.GraphDB, sk *skill.Manager, lua *luaVM.VM, cfg *types.Config, iom *agentIO.IOManager, tm *text.Memory, ks *knowledge.Store, tr *tracker.Tracker, cr *internalConfig.ConfigRegistry, pr *plugin.Registry, evBus *events.Bus, sp agentCore.StatusProvider) *Handler {
@@ -78,36 +85,199 @@ func NewHandler(sup *supervisor.Daemon, mem *memory.GraphDB, sk *skill.Manager, 
 		pluginReg:      pr,
 		eventBus:       evBus,
 		statusProvider: sp,
+		sessions:       make(map[string]time.Time),
+	}
+}
+
+func (h *Handler) getWebUIConfig() (apiKey, username, password string, ttl time.Duration) {
+	ttl = 24 * time.Hour
+	if h.cfgReg == nil {
+		return
+	}
+	ps := h.cfgReg.PluginConfig("webui")
+	if v, _ := ps.Get("api_key"); v != nil {
+		apiKey, _ = v.(string)
+	}
+	if v, _ := ps.Get("username"); v != nil {
+		username, _ = v.(string)
+	}
+	if v, _ := ps.Get("password"); v != nil {
+		password, _ = v.(string)
+	}
+	if v, _ := ps.Get("session_ttl_hours"); v != nil {
+		switch n := v.(type) {
+		case float64:
+			if n > 0 { ttl = time.Duration(n) * time.Hour }
+		case string:
+			if i, err := strconv.Atoi(n); err == nil && i > 0 { ttl = time.Duration(i) * time.Hour }
+		}
+	}
+	if username == "" { username = "admin" }
+	return
+}
+
+func (h *Handler) createSession() (string, time.Time, error) {
+	buf := make([]byte, 32)
+	if _, err := rand.Read(buf); err != nil {
+		return "", time.Time{}, err
+	}
+	_, _, _, ttl := h.getWebUIConfig()
+	expires := time.Now().Add(ttl)
+	token := hex.EncodeToString(buf)
+	h.sessionMu.Lock()
+	h.sessions[token] = expires
+	h.sessionMu.Unlock()
+	return token, expires, nil
+}
+
+func (h *Handler) validSession(r *http.Request) bool {
+	cookie, err := r.Cookie("homeagent_session")
+	if err != nil || cookie.Value == "" {
+		return false
+	}
+	h.sessionMu.Lock()
+	defer h.sessionMu.Unlock()
+	expires, ok := h.sessions[cookie.Value]
+	if !ok {
+		return false
+	}
+	if time.Now().After(expires) {
+		delete(h.sessions, cookie.Value)
+		return false
+	}
+	return true
+}
+
+func (h *Handler) validAPIKey(r *http.Request) bool {
+	apiKey, _, _, _ := h.getWebUIConfig()
+	if apiKey == "" {
+		return false
+	}
+	got := strings.TrimSpace(r.Header.Get("X-API-Key"))
+	if got == "" {
+		auth := strings.TrimSpace(r.Header.Get("Authorization"))
+		if strings.HasPrefix(auth, "Bearer ") {
+			got = strings.TrimSpace(strings.TrimPrefix(auth, "Bearer "))
+		}
+	}
+	return got != "" && got == apiKey
+}
+
+func (h *Handler) requireAPI(fn http.HandlerFunc) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		apiKey, _, _, _ := h.getWebUIConfig()
+		if apiKey == "" && !h.validSession(r) {
+			writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "webui api_key not configured"})
+			return
+		}
+		if h.validAPIKey(r) || h.validSession(r) {
+			fn(w, r)
+			return
+		}
+		writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "unauthorized"})
+	}
+}
+
+func (h *Handler) requireWeb(fn http.HandlerFunc) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		_, username, password, _ := h.getWebUIConfig()
+		if username == "" || password == "" {
+			http.Error(w, "webui username/password not configured", http.StatusServiceUnavailable)
+			return
+		}
+		if h.validSession(r) {
+			fn(w, r)
+			return
+		}
+		http.Redirect(w, r, "/login", http.StatusFound)
 	}
 }
 
 func (h *Handler) RegisterRoutes(mux *http.ServeMux) {
-	mux.HandleFunc("/api/v1/status", h.handleStatus)
-	mux.HandleFunc("/api/v1/agents", h.handleAgents)
-	mux.HandleFunc("/api/v1/agents/", h.handleAgentByID)
-	mux.HandleFunc("/api/v1/skills", h.handleSkills)
-	mux.HandleFunc("/api/v1/memory", h.handleMemory)
-	mux.HandleFunc("/api/v1/memory/", h.handleMemory)
-	mux.HandleFunc("/api/v1/memory/context", h.handleMemoryContext)
-	mux.HandleFunc("/api/v1/memory/tools", h.handleMemoryTools)
-	mux.HandleFunc("/api/v1/memory/text", h.handleTextMemory)
-	mux.HandleFunc("/api/v1/network", h.handleNetwork)
-	mux.HandleFunc("/api/v1/config", h.handleConfig)
-	mux.HandleFunc("/api/v1/settings", h.handleSettings)
-	mux.HandleFunc("/api/v1/settings/", h.handleSettings)
-	mux.HandleFunc("/api/v1/knowledge", h.handleKnowledge)
-	mux.HandleFunc("/api/v1/knowledge/", h.handleKnowledge)
-	mux.HandleFunc("/api/v1/adapters", h.handleAdapters)
-	mux.HandleFunc("/api/v1/adapters/", h.handleAdapterByID)
-	mux.HandleFunc("/api/v1/tracker", h.handleTracker)
-	mux.HandleFunc("/api/v1/tracker/", h.handleTracker)
-	mux.HandleFunc("/api/v1/chat", h.handleChat)
-	mux.HandleFunc("/api/v1/chat/events", h.handleChatEvents)
-	mux.HandleFunc("/api/v1/kernel", h.handleKernel)
-	mux.HandleFunc("/api/v1/plugins", h.handlePlugins)
-	mux.HandleFunc("/api/v1/plugins/", h.handlePluginByID)
-	mux.HandleFunc("/v1/chat/completions", h.handleOpenAICompletions)
-	mux.HandleFunc("/", h.handleStatic)
+	mux.HandleFunc("/login", h.handleLoginPage)
+	mux.HandleFunc("/api/v1/login", h.handleLogin)
+	mux.HandleFunc("/api/v1/logout", h.handleLogout)
+	mux.HandleFunc("/api/v1/status", h.requireAPI(h.handleStatus))
+	mux.HandleFunc("/api/v1/agents", h.requireAPI(h.handleAgents))
+	mux.HandleFunc("/api/v1/agents/", h.requireAPI(h.handleAgentByID))
+	mux.HandleFunc("/api/v1/skills", h.requireAPI(h.handleSkills))
+	mux.HandleFunc("/api/v1/memory", h.requireAPI(h.handleMemory))
+	mux.HandleFunc("/api/v1/memory/", h.requireAPI(h.handleMemory))
+	mux.HandleFunc("/api/v1/memory/context", h.requireAPI(h.handleMemoryContext))
+	mux.HandleFunc("/api/v1/memory/tools", h.requireAPI(h.handleMemoryTools))
+	mux.HandleFunc("/api/v1/memory/text", h.requireAPI(h.handleTextMemory))
+	mux.HandleFunc("/api/v1/network", h.requireAPI(h.handleNetwork))
+	mux.HandleFunc("/api/v1/config", h.requireAPI(h.handleConfig))
+	mux.HandleFunc("/api/v1/settings", h.requireAPI(h.handleSettings))
+	mux.HandleFunc("/api/v1/settings/", h.requireAPI(h.handleSettings))
+	mux.HandleFunc("/api/v1/knowledge", h.requireAPI(h.handleKnowledge))
+	mux.HandleFunc("/api/v1/knowledge/", h.requireAPI(h.handleKnowledge))
+	mux.HandleFunc("/api/v1/adapters", h.requireAPI(h.handleAdapters))
+	mux.HandleFunc("/api/v1/adapters/", h.requireAPI(h.handleAdapterByID))
+	mux.HandleFunc("/api/v1/tracker", h.requireAPI(h.handleTracker))
+	mux.HandleFunc("/api/v1/tracker/", h.requireAPI(h.handleTracker))
+	mux.HandleFunc("/api/v1/chat", h.requireAPI(h.handleChat))
+	mux.HandleFunc("/api/v1/chat/events", h.requireAPI(h.handleChatEvents))
+	mux.HandleFunc("/api/v1/kernel", h.requireAPI(h.handleKernel))
+	mux.HandleFunc("/api/v1/plugins", h.requireAPI(h.handlePlugins))
+	mux.HandleFunc("/api/v1/plugins/", h.requireAPI(h.handlePluginByID))
+	mux.HandleFunc("/v1/chat/completions", h.requireAPI(h.handleOpenAICompletions))
+	mux.HandleFunc("/", h.requireWeb(h.handleStatic))
+}
+
+func (h *Handler) handleLoginPage(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	if h.validSession(r) {
+		http.Redirect(w, r, "/", http.StatusFound)
+		return
+	}
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	_, _ = w.Write([]byte(loginHTML))
+}
+
+func (h *Handler) handleLogin(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	_, username, password, _ := h.getWebUIConfig()
+	if username == "" || password == "" {
+		writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "webui username/password not configured"})
+		return
+	}
+	var body struct { Username string `json:"username"`; Password string `json:"password"` }
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid request"})
+		return
+	}
+	if body.Username != username || body.Password != password {
+		writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "用户名或密码错误"})
+		return
+	}
+	token, expires, err := h.createSession()
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		return
+	}
+	http.SetCookie(w, &http.Cookie{Name: "homeagent_session", Value: token, Path: "/", HttpOnly: true, SameSite: http.SameSiteLaxMode, Expires: expires})
+	writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
+}
+
+func (h *Handler) handleLogout(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	if cookie, err := r.Cookie("homeagent_session"); err == nil {
+		h.sessionMu.Lock()
+		delete(h.sessions, cookie.Value)
+		h.sessionMu.Unlock()
+		http.SetCookie(w, &http.Cookie{Name: "homeagent_session", Value: "", Path: "/", Expires: time.Unix(0, 0), MaxAge: -1, HttpOnly: true, SameSite: http.SameSiteLaxMode})
+	}
+	writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
 }
 
 func (h *Handler) handleStatus(w http.ResponseWriter, r *http.Request) {
