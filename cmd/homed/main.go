@@ -368,7 +368,6 @@ func main() {
 		Indexer:         memIdx,
 		Skills:          skMgr,
 		Tracker:         trk,
-		MaxToolTurns:    10,
 		DocStore:        docStore,
 		Knowledge:       ks,
 		SocialStore:     socialStore,
@@ -394,6 +393,9 @@ func main() {
 	// Wire pluginmgr dependencies
 	pluginmgr.PluginDir = cfg.Plugin.Dir
 	pluginmgr.Reg = pluginReg
+
+	// CLI 插件结构化命令 — 直接注入内核依赖，不依赖 HTTP
+	cli.Configure(pluginReg, cfgReg, agent, cfg.Plugin.Dir)
 
 	// Auto-create plugins directory (without hardcoding plugin names)
 	os.MkdirAll(cfg.Plugin.Dir, 0755)

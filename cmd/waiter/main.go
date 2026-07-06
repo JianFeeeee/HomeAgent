@@ -378,15 +378,29 @@ func handleBuiltin(cmd string, mode, addr *string, reconnect func()) bool {
 	switch {
 	case cmd == "/help":
 		fmt.Println(`Built-in commands:
-  /help            show this help
-  /exit, /quit     exit waiter
-  /clear           clear screen
-  /reconnect       force reconnection
-  /connect <path>  switch to a different unix socket
-  /remote <url>    switch to remote HTTP mode
-  /local           switch back to local socket mode
+  /help                    show this help
+  /exit, /quit             exit waiter
+  /clear                   clear screen
+  /reconnect               force reconnection
+  /connect <path>          switch to a different unix socket
+  /remote <url>            switch to remote HTTP mode
+  /local                   switch back to local socket mode
 
-Any other text is sent as a message to the agent.`)
+Structured commands (processed server-side):
+  /status                  system status
+  /kernel                  kernel status
+  /settings [prefix]       list settings
+  /settings set <k> <v>    set a setting
+  /plugin list             list installed plugins
+  /plugin install <url>    install plugin
+  /plugin remove <name>    remove plugin
+  /plugin info <name>      plugin details
+  /memory query <text>     query graph memory
+  /knowledge               list knowledge base
+  /agents                  list agents
+  /chat <text>             send to agent
+
+Any other text is sent to the agent.`)
 		return true
 
 	case cmd == "/exit" || cmd == "/quit":
@@ -580,7 +594,10 @@ func (e *LineEditor) historyNext() {
 }
 
 func (e *LineEditor) doCompletion() {
-	cmds := []string{"/help", "/exit", "/quit", "/clear", "/reconnect", "/connect ", "/remote ", "/local"}
+	cmds := []string{"/help", "/exit", "/quit", "/clear", "/reconnect", "/connect ", "/remote ", "/local",
+		"/status", "/kernel", "/settings ", "/settings set ", "/chat ",
+		"/plugin ", "/plugin list", "/plugin install ", "/plugin remove ", "/plugin info ",
+		"/memory ", "/memory query ", "/knowledge", "/agents"}
 	prefix := string(e.buf)
 	for _, c := range cmds {
 		if strings.HasPrefix(c, prefix) && c != prefix {
