@@ -1,0 +1,13 @@
+[Unit]
+Description=HomeAgent - 24/7 AI Butler
+After=network.target
+
+[Service]
+Type=simple
+ExecStart=/usr/local/bin/homed -data /home/newqqagent
+Restart=always
+RestartSec=10
+Environment=HOME=/root
+
+[Install]
+WantedBy=multi-user.target
