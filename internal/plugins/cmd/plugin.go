@@ -45,7 +45,7 @@ func (p *Plugin) Start(s *sdk.PluginSDK) error {
 				},
 				"workdir": map[string]interface{}{
 					"type":        "string",
-					"description": "工作目录（可选，默认当前目录）",
+					"description": "工作目录（可选，默认由 core.agent.workdir 配置决定）",
 				},
 			},
 			"required": []string{"command"},
@@ -66,6 +66,15 @@ func (p *Plugin) Start(s *sdk.PluginSDK) error {
 		}
 
 		workdir, _ := args["workdir"].(string)
+		if workdir == "" {
+			if sett := s.Settings(); sett != nil {
+				if v, _ := sett.GetCore("core.agent.workdir"); v != nil {
+					if str, ok := v.(string); ok && str != "" {
+						workdir = str
+					}
+				}
+			}
+		}
 
 		ctx, cancel := context.WithTimeout(context.Background(), timeout)
 		defer cancel()

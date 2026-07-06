@@ -4,6 +4,7 @@ import (
 	"embed"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"os"
 	"sort"
@@ -103,6 +104,8 @@ func (h *Handler) RegisterRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("/api/v1/chat", h.handleChat)
 	mux.HandleFunc("/api/v1/chat/events", h.handleChatEvents)
 	mux.HandleFunc("/api/v1/kernel", h.handleKernel)
+	mux.HandleFunc("/api/v1/plugins", h.handlePlugins)
+	mux.HandleFunc("/api/v1/plugins/", h.handlePluginByID)
 	mux.HandleFunc("/v1/chat/completions", h.handleOpenAICompletions)
 	mux.HandleFunc("/", h.handleStatic)
 }
@@ -905,6 +908,90 @@ func (h *Handler) handleTracker(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusOK, map[string]string{"status": "cleared"})
 	default:
 		http.Error(w, "not found", http.StatusNotFound)
+	}
+}
+
+// ======== Plugin Management (proxied to pluginmgr HTTP API) ========
+
+func (h *Handler) pluginmgrAddr() string {
+	addr := "127.0.0.1:9876"
+	if h.cfgReg == nil {
+		return addr
+	}
+	ps := h.cfgReg.PluginConfig("pluginmgr")
+	if v, err := ps.Get("http_addr"); err == nil {
+		if s, ok := v.(string); ok && s != "" {
+			addr = s
+		}
+	}
+	return addr
+}
+
+func (h *Handler) proxyToPluginmgr(w http.ResponseWriter, r *http.Request, path string) {
+	addr := h.pluginmgrAddr()
+	url := "http://" + addr + path
+	req, err := http.NewRequestWithContext(r.Context(), r.Method, url, r.Body)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		return
+	}
+	req.Header = r.Header.Clone()
+
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		writeJSON(w, http.StatusBadGateway, map[string]string{"error": err.Error()})
+		return
+	}
+	defer resp.Body.Close()
+
+	for k, v := range resp.Header {
+		w.Header()[k] = v
+	}
+	w.WriteHeader(resp.StatusCode)
+	io.Copy(w, resp.Body)
+}
+
+func (h *Handler) handlePlugins(w http.ResponseWriter, r *http.Request) {
+	switch r.Method {
+	case http.MethodGet:
+		h.proxyToPluginmgr(w, r, "/plugins")
+	case http.MethodPost:
+		h.proxyToPluginmgr(w, r, "/plugins")
+	default:
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+	}
+}
+
+func (h *Handler) handlePluginByID(w http.ResponseWriter, r *http.Request) {
+	path := strings.TrimPrefix(r.URL.Path, "/api/v1/plugins/")
+	path = strings.TrimSuffix(path, "/")
+
+	if path == "reload" && r.Method == http.MethodPost {
+		if h.pluginReg == nil {
+			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "plugin registry not available"})
+			return
+		}
+		dir := ""
+		if h.cfgReg != nil {
+			if v, _ := h.cfgReg.Get("core.plugin.dir"); v != nil {
+				dir, _ = v.(string)
+			}
+		}
+		if _, err := h.pluginReg.Reload(dir); err != nil {
+			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]string{"status": "reloaded"})
+		return
+	}
+
+	switch r.Method {
+	case http.MethodGet:
+		h.proxyToPluginmgr(w, r, "/plugins/"+path)
+	case http.MethodDelete:
+		h.proxyToPluginmgr(w, r, "/plugins/"+path)
+	default:
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 	}
 }
 
