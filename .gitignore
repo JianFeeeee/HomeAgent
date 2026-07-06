@@ -6,4 +6,4 @@ build/
 plugins/*/plugin.so
 
 .tmp-plugins/
-third_party/homeagent-sdk/.git/
+qq

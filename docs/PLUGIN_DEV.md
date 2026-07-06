@@ -10,7 +10,7 @@ SDK 仓库。
 ```bash
 git clone https://gitcode.com/JianFeeeee/homeagent-sdk.git
 cd homeagent-sdk
-hack/plugin-dev/scaffold.sh myplugin ./plugins/myplugin
+tools/plugin-dev/scaffold.sh myplugin ./plugins/myplugin
 ```
 
 每个插件实现一个三方法接口：
@@ -363,7 +363,7 @@ pluginReg.Load(plgDir)  // 之后调用
 ```bash
 git clone https://gitcode.com/JianFeeeee/homeagent-sdk.git
 cd homeagent-sdk
-hack/plugin-dev/scaffold.sh myplugin ./plugins/myplugin
+tools/plugin-dev/scaffold.sh myplugin ./plugins/myplugin
 ```
 
 生成的代码：
@@ -421,7 +421,7 @@ cd plugins/myplugin && make
 使用 SDK 仓库的打包工具生成 `.hmap` 分发包：
 
 ```bash
-hack/plugin-dev/packager.sh plugins/myplugin
+tools/plugin-dev/packager.sh plugins/myplugin
 # 输出: dist/myplugin-0.1.0.hmap
 ```
 
