@@ -407,9 +407,7 @@ func NewLuaAdaptedProvider(cfg BaseConfig, vm *luaVM.VM, adapter string) *LuaAda
 func (p *LuaAdaptedProvider) Name() string { return p.name }
 
 func (p *LuaAdaptedProvider) Chat(ctx context.Context, req *CompletionRequest) (*CompletionResponse, error) {
-	if req.Model == "" {
-		req.Model = p.cfg.Model
-	}
+	req.Model = p.cfg.Model
 
 	rawReq, _ := json.Marshal(req)
 
@@ -464,9 +462,7 @@ func (p *LuaAdaptedProvider) Chat(ctx context.Context, req *CompletionRequest) (
 }
 
 func (p *LuaAdaptedProvider) ChatStream(ctx context.Context, req *CompletionRequest) (<-chan StreamChunk, error) {
-	if req.Model == "" {
-		req.Model = p.cfg.Model
-	}
+	req.Model = p.cfg.Model
 	req.Stream = true
 	rawReq, _ := json.Marshal(req)
 
@@ -585,6 +581,7 @@ func (s *SSEScanner) Text() string { return s.pending }
 type ProviderManager struct {
 	mu        sync.RWMutex
 	providers map[string]Provider
+	order     []string
 	default_  string
 }
 
@@ -598,6 +595,7 @@ func (m *ProviderManager) Register(name string, p Provider) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.providers[name] = p
+	m.order = append(m.order, name)
 	if m.default_ == "" {
 		m.default_ = name
 	}
@@ -647,11 +645,27 @@ func (m *ProviderManager) QuickChat(ctx context.Context, prompt string) (*Comple
 func (m *ProviderManager) List() []string {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
-	var names []string
-	for n := range m.providers {
-		names = append(names, n)
-	}
+	names := make([]string, len(m.order))
+	copy(names, m.order)
 	return names
+}
+
+func (m *ProviderManager) OrderedProviders() []Provider {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	list := make([]Provider, 0, len(m.order))
+	for _, name := range m.order {
+		if p, ok := m.providers[name]; ok {
+			list = append(list, p)
+		}
+	}
+	return list
+}
+
+func (m *ProviderManager) ProviderCount() int {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	return len(m.providers)
 }
 
 type rawToolCall struct {
