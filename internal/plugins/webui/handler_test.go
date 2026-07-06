@@ -37,6 +37,62 @@ func newTestHandler(t *testing.T) (*Handler, *supervisor.Daemon) {
 	return NewHandler(sup, nil, nil, nil, cfg, nil, nil, nil, nil, nil, nil, events.NewBus(), nil), sup
 }
 
+func TestAuthMiddleware(t *testing.T) {
+	cfgReg := internalConfig.NewConfigRegistry("")
+	cfgReg.PluginConfig("webui").Set("api_key", "test-api-key")
+	cfgReg.PluginConfig("webui").Set("username", "admin")
+	cfgReg.PluginConfig("webui").Set("password", "secret-pass")
+	cfgReg.PluginConfig("webui").Set("session_ttl_hours", "24")
+
+	h, sup := newTestHandler(t)
+	defer sup.Shutdown()
+	h.cfgReg = cfgReg
+	mux := http.NewServeMux()
+	h.RegisterRoutes(mux)
+
+	t.Run("api_requires_auth", func(t *testing.T) {
+		req := httptest.NewRequest(http.MethodGet, "/api/v1/status", nil)
+		w := httptest.NewRecorder()
+		mux.ServeHTTP(w, req)
+		if w.Code != http.StatusUnauthorized {
+			t.Fatalf("expected 401, got %d", w.Code)
+		}
+	})
+
+	t.Run("api_key_allows_access", func(t *testing.T) {
+		req := httptest.NewRequest(http.MethodGet, "/api/v1/status", nil)
+		req.Header.Set("X-API-Key", "test-api-key")
+		w := httptest.NewRecorder()
+		mux.ServeHTTP(w, req)
+		if w.Code != http.StatusOK {
+			t.Fatalf("expected 200, got %d", w.Code)
+		}
+	})
+
+	t.Run("login_sets_session_cookie", func(t *testing.T) {
+		body := `{"username":"admin","password":"secret-pass"}`
+		req := httptest.NewRequest(http.MethodPost, "/api/v1/login", strings.NewReader(body))
+		req.Header.Set("Content-Type", "application/json")
+		w := httptest.NewRecorder()
+		mux.ServeHTTP(w, req)
+		if w.Code != http.StatusOK {
+			t.Fatalf("expected 200, got %d", w.Code)
+		}
+		if len(w.Result().Cookies()) == 0 {
+			t.Fatal("expected session cookie")
+		}
+	})
+
+	t.Run("root_redirects_to_login_without_session", func(t *testing.T) {
+		req := httptest.NewRequest(http.MethodGet, "/", nil)
+		w := httptest.NewRecorder()
+		mux.ServeHTTP(w, req)
+		if w.Code != http.StatusFound {
+			t.Fatalf("expected 302, got %d", w.Code)
+		}
+	})
+}
+
 func TestHandleStatus(t *testing.T) {
 	h, sup := newTestHandler(t)
 	defer sup.Shutdown()
