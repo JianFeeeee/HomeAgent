@@ -42,7 +42,6 @@ type Agent struct {
 	systemPrompt string
 	ctx          context.Context
 	cancel       context.CancelFunc
-	maxTurns     int
 
 	// 文档记忆（第二层）
 	docStore *document.Store
@@ -114,7 +113,6 @@ type AgentConfig struct {
 	Indexer      *memory.Indexer
 	Skills       *skill.Manager
 	Tracker      *tracker.Tracker
-	MaxToolTurns int
 
 	DocStore        *document.Store
 	Knowledge       *knowledge.Store
@@ -135,9 +133,6 @@ type AgentConfig struct {
 
 func New(cfg AgentConfig) *Agent {
 	ctx, cancel := context.WithCancel(context.Background())
-	if cfg.MaxToolTurns <= 0 {
-		cfg.MaxToolTurns = 10
-	}
 	if cfg.DistillInterval <= 0 {
 		cfg.DistillInterval = 30 * time.Minute
 	}
@@ -158,7 +153,6 @@ func New(cfg AgentConfig) *Agent {
 		systemPrompt:    cfg.SystemPrompt,
 		ctx:             ctx,
 		cancel:          cancel,
-		maxTurns:        cfg.MaxToolTurns,
 		docStore:        cfg.DocStore,
 		knowledge:       cfg.Knowledge,
 		social:          cfg.SocialStore,
@@ -577,7 +571,7 @@ func (a *Agent) process(input string, stageCtx *sdk.StageContext) (response stri
 		}
 	}
 
-	for turn := 0; turn < a.maxTurns; turn++ {
+	for turn := 0; ; turn++ {
 		// === 高优先级打断：每次 LLM 调用前检查拦截通道 ===
 		if text := a.drainInterrupt(); text != "" {
 			msgs = append(msgs, agentAPI.Message{
@@ -600,20 +594,49 @@ func (a *Agent) process(input string, stageCtx *sdk.StageContext) (response stri
 		}
 
 		// 可取消的 LLM 调用：interceptLoop 通过 cancelLLM 打断进行中的请求
-		reqCtx, reqCancel := context.WithCancel(a.ctx)
-		a.llmMu.Lock()
-		a.cancelLLM = reqCancel
-		a.llmMu.Unlock()
+		// 多 LLM 源顺位降级：当当前 provider 失败时，按注册顺序依次尝试
+		var providers []agentAPI.Provider
+		if a.providerManager != nil {
+			providers = a.providerManager.OrderedProviders()
+		}
+		if len(providers) == 0 {
+			providers = []agentAPI.Provider{a.provider}
+		}
+		var resp *agentAPI.CompletionResponse
+		var llmErr error
 
-		resp, err := a.provider.Chat(reqCtx, req)
+		for pi, fbProvider := range providers {
+			if pi > 0 {
+				log.Printf("[agent] LLM fallback: trying provider %q (fallback #%d/%d)",
+					fbProvider.Name(), pi, len(providers)-1)
+			}
 
-		a.llmMu.Lock()
-		a.cancelLLM = nil
-		a.llmMu.Unlock()
-		reqCancel()
+			fCtx, fCancel := context.WithCancel(a.ctx)
+			a.llmMu.Lock()
+			a.cancelLLM = fCancel
+			a.llmMu.Unlock()
 
-		if err != nil {
-			return "", toolsUsed, fmt.Errorf("provider: %w", err)
+			resp, llmErr = fbProvider.Chat(fCtx, req)
+
+			a.llmMu.Lock()
+			a.cancelLLM = nil
+			a.llmMu.Unlock()
+			fCancel()
+
+			if llmErr == nil {
+				if fbProvider != a.provider {
+					a.provider = fbProvider
+					log.Printf("[agent] switched active provider to %q after fallback",
+						fbProvider.Name())
+				}
+				break
+			}
+			log.Printf("[agent] provider %q failed: %v", fbProvider.Name(), llmErr)
+		}
+
+		if llmErr != nil {
+			return "", toolsUsed, fmt.Errorf("all %d providers failed, last error: %w",
+				len(providers), llmErr)
 		}
 
 		// === Stage: post_action — LLM 返回，插件可审查/修改 ===
@@ -678,10 +701,8 @@ func (a *Agent) process(input string, stageCtx *sdk.StageContext) (response stri
 				"result": result,
 				"status": "ok",
 			})
-		}
 	}
-
-	return "", toolsUsed, fmt.Errorf("tool execution exceeded %d turns", a.maxTurns)
+}
 }
 
 func convertToolCalls(tcs []agentAPI.ToolCall) []sdk.ToolCall {
@@ -767,6 +788,8 @@ func (a *Agent) executeToolCall(tc agentAPI.ToolCall) string {
 	if a.stageHost != nil {
 		if result, err := a.stageHost.ExecuteTool(tc.Name, tc.Arguments); err == nil {
 			return fmt.Sprintf("%v", result)
+		} else if !strings.Contains(err.Error(), "not found in any plugin") {
+			return fmt.Sprintf("工具 %s 执行失败: %v", tc.Name, err)
 		}
 	}
 
@@ -1242,6 +1265,30 @@ func (a *Agent) buildSystemPrompt(memContext string, userInput string) string {
 	return prompt
 }
 
+// cleanParams removes empty required arrays from tool parameters that strict APIs reject.
+func cleanParams(params map[string]interface{}) map[string]interface{} {
+	if params == nil {
+		return nil
+	}
+	cleaned := make(map[string]interface{}, len(params))
+	for k, v := range params {
+		cleaned[k] = v
+	}
+	if req, ok := cleaned["required"]; ok {
+		switch v := req.(type) {
+		case []interface{}:
+			if len(v) == 0 {
+				delete(cleaned, "required")
+			}
+		case []string:
+			if len(v) == 0 {
+				delete(cleaned, "required")
+			}
+		}
+	}
+	return cleaned
+}
+
 func (a *Agent) buildToolDefs() []interface{} {
 	var tools []interface{}
 
@@ -1252,7 +1299,7 @@ func (a *Agent) buildToolDefs() []interface{} {
 				"function": map[string]interface{}{
 					"name":        td.Name,
 					"description": td.Description,
-					"parameters":  td.Parameters,
+					"parameters":  cleanParams(td.Parameters),
 				},
 			})
 		}
@@ -1266,7 +1313,7 @@ func (a *Agent) buildToolDefs() []interface{} {
 				"function": map[string]interface{}{
 					"name":        td.Name,
 					"description": td.Description,
-					"parameters":  td.Parameters,
+					"parameters":  cleanParams(td.Parameters),
 				},
 			})
 		}
