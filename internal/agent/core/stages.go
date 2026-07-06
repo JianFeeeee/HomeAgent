@@ -8,16 +8,18 @@ import (
 )
 
 type StageHost struct {
-	mu       sync.RWMutex
-	toolDefs []sdk.ToolDef
-	tools    map[string]sdk.ToolHandler
-	stages   map[sdk.Stage][]sdk.StageHandler
+	mu          sync.RWMutex
+	toolDefs    []sdk.ToolDef
+	tools       map[string]sdk.ToolHandler
+	toolPlugins map[string]string
+	stages      map[sdk.Stage][]sdk.StageHandler
 }
 
 func NewStageHost() *StageHost {
 	return &StageHost{
-		tools:  make(map[string]sdk.ToolHandler),
-		stages: make(map[sdk.Stage][]sdk.StageHandler),
+		tools:       make(map[string]sdk.ToolHandler),
+		toolPlugins: make(map[string]string),
+		stages:      make(map[sdk.Stage][]sdk.StageHandler),
 	}
 }
 
@@ -27,7 +29,11 @@ func (h *StageHost) RegisterTool(name string, def sdk.ToolDef, handler sdk.ToolH
 	if _, exists := h.tools[name]; exists {
 		return fmt.Errorf("tool %s already registered", name)
 	}
+	if def.Plugin == "" {
+		def.Plugin = inferToolPlugin(name)
+	}
 	h.tools[name] = handler
+	h.toolPlugins[name] = def.Plugin
 	h.toolDefs = append(h.toolDefs, def)
 	return nil
 }
@@ -57,6 +63,21 @@ func (h *StageHost) ExecuteTool(name string, args map[string]interface{}) (inter
 		return nil, fmt.Errorf("tool %s has nil handler", name)
 	}
 	return handler(args)
+}
+
+func (h *StageHost) ToolPlugin(name string) string {
+	h.mu.RLock()
+	defer h.mu.RUnlock()
+	return h.toolPlugins[name]
+}
+
+func inferToolPlugin(name string) string {
+	for i := 0; i < len(name); i++ {
+		if name[i] == '_' {
+			return name[:i]
+		}
+	}
+	return ""
 }
 
 // RunStage 并行调用同阶段所有注册的处理函数。
