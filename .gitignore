@@ -2,3 +2,8 @@ homed
 waiter
 *.test
 build/
+*.so
+plugins/*/plugin.so
+
+.tmp-plugins/
+third_party/homeagent-sdk/.git/

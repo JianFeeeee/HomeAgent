@@ -1,35 +1,13 @@
 package sdk
 
 import (
+	"fmt"
+	sdkext "gitcode.com/JianFeeeee/homeagent-sdk/sdk"
 	internalConfig "gitcode.com/JianFeeeee/HomeAgent/internal/config"
 )
 
-type ConfigDef = internalConfig.ConfigDef
-
-type SettingsAPI interface {
-	// 插件自身配置表 config_<name>
-	Get(key string) (interface{}, error)
-	Set(key string, value interface{}) error
-	List(prefix string) ([]string, error)
-
-	// 核心配置表 config
-	GetCore(key string) (interface{}, error)
-	SetCore(key string, value interface{}) error
-	ListCore(prefix string) ([]string, error)
-
-	// 任意插件配置表 config_<plugin>
-	GetPlugin(plugin, key string) (interface{}, error)
-	SetPlugin(plugin, key string, value interface{}) error
-	ListPlugin(plugin, prefix string) ([]string, error)
-
-	// 配置定义元信息
-	RegisterDef(def internalConfig.ConfigDef)
-	Defs(prefix string) []*internalConfig.ConfigDef
-
-	// 全局
-	Dump() map[string]interface{}
-	Plugins() []string
-}
+type ConfigDef = sdkext.ConfigDef
+type SettingsAPI = sdkext.SettingsAPI
 
 type settingsImpl struct {
 	pluginName string
@@ -41,101 +19,88 @@ func NewSettings(name string, reg *internalConfig.ConfigRegistry) SettingsAPI {
 }
 
 func (s *settingsImpl) Get(key string) (interface{}, error) {
-	if s.reg == nil {
-		return nil, nil
-	}
+	if s.reg == nil { return nil, nil }
 	return s.reg.PluginConfig(s.pluginName).Get(key)
 }
-
 func (s *settingsImpl) Set(key string, value interface{}) error {
-	if s.reg == nil {
-		return nil
-	}
+	if s.reg == nil { return nil }
 	return s.reg.PluginConfig(s.pluginName).Set(key, value)
 }
-
 func (s *settingsImpl) List(prefix string) ([]string, error) {
-	if s.reg == nil {
-		return nil, nil
-	}
+	if s.reg == nil { return nil, nil }
 	return s.reg.PluginConfig(s.pluginName).List(prefix)
 }
-
 func (s *settingsImpl) GetCore(key string) (interface{}, error) {
-	if s.reg == nil {
-		return nil, nil
-	}
+	if s.reg == nil { return nil, nil }
 	return s.reg.Get(key)
 }
-
 func (s *settingsImpl) SetCore(key string, value interface{}) error {
-	if s.reg == nil {
-		return nil
-	}
+	if s.reg == nil { return nil }
 	return s.reg.Set(key, value)
 }
-
 func (s *settingsImpl) ListCore(prefix string) ([]string, error) {
-	if s.reg == nil {
-		return nil, nil
-	}
+	if s.reg == nil { return nil, nil }
 	return s.reg.List(prefix), nil
 }
-
-func (s *settingsImpl) RegisterDef(def internalConfig.ConfigDef) {
-	if s.reg == nil {
-		return
-	}
-	s.reg.PluginConfig(s.pluginName).RegisterDef(def)
-}
-
-func (s *settingsImpl) Defs(prefix string) []*internalConfig.ConfigDef {
-	if s.reg == nil {
-		return nil
-	}
-	return s.reg.PluginConfig(s.pluginName).ListDefs(prefix)
-}
-
-func (s *settingsImpl) Dump() map[string]interface{} {
-	if s.reg == nil {
-		return nil
-	}
-	return s.reg.Dump()
-}
-
 func (s *settingsImpl) GetPlugin(plugin, key string) (interface{}, error) {
-	if s.reg == nil {
-		return nil, nil
-	}
+	if s.reg == nil { return nil, nil }
 	return s.reg.PluginConfig(plugin).Get(key)
 }
-
 func (s *settingsImpl) SetPlugin(plugin, key string, value interface{}) error {
-	if s.reg == nil {
-		return nil
-	}
+	if s.reg == nil { return nil }
 	return s.reg.PluginConfig(plugin).Set(key, value)
 }
-
 func (s *settingsImpl) ListPlugin(plugin, prefix string) ([]string, error) {
-	if s.reg == nil {
-		return nil, nil
-	}
+	if s.reg == nil { return nil, nil }
 	return s.reg.PluginConfig(plugin).List(prefix)
 }
-
-func (s *settingsImpl) Plugins() []string {
-	if s.reg == nil {
-		return nil
+func (s *settingsImpl) RegisterDef(def sdkext.ConfigDef) {
+	if s.reg == nil { return }
+	s.reg.PluginConfig(s.pluginName).RegisterDef(internalConfig.ConfigDef{
+		Key: def.Key, Type: def.Type, DisplayName: def.DisplayName, Description: def.Description,
+		Category: def.Category, Options: def.Options,
+		Default: stringifyDefault(def.Default),
+	})
+}
+func (s *settingsImpl) Defs(prefix string) []*sdkext.ConfigDef {
+	if s.reg == nil { return nil }
+	defs := s.reg.PluginConfig(s.pluginName).ListDefs(prefix)
+	out := make([]*sdkext.ConfigDef, len(defs))
+	for i, d := range defs {
+		cpy := sdkext.ConfigDef{
+			Key: d.Key, Default: d.Default, Type: d.Type, DisplayName: d.DisplayName,
+			Description: d.Description, Category: d.Category, Options: d.Options,
+		}
+		out[i] = &cpy
 	}
+	return out
+}
+func (s *settingsImpl) Dump() map[string]interface{} {
+	if s.reg == nil { return nil }
+	return s.reg.Dump()
+}
+func (s *settingsImpl) Plugins() []string {
+	if s.reg == nil { return nil }
 	keys := s.reg.List("config_")
 	names := make([]string, 0, len(keys)+1)
 	names = append(names, "core")
 	for _, k := range keys {
-		// config_xxx → xxx
-		if len(k) > 7 {
-			names = append(names, k[7:])
-		}
+		if len(k) > 7 { names = append(names, k[7:]) }
 	}
 	return names
+}
+
+func stringifyDefault(v interface{}) string {
+	if v == nil {
+		return ""
+	}
+	switch x := v.(type) {
+	case string:
+		return x
+	case bool:
+		if x { return "true" }
+		return "false"
+	default:
+		return fmt.Sprint(v)
+	}
 }
