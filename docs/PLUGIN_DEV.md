@@ -2,9 +2,18 @@
 
 ## 概述
 
-HomeAgent 的所有外部交互能力都来自插件。插件是独立运行的 Go 包，通过 `PluginSDK`（Go API）与内核交互。
+HomeAgent 的所有外部交互能力都来自插件。插件通过 `PluginSDK`（Go API）与内核交互。
 
-每个插件需要实现一个非常简单的接口：
+**SDK 仓库**：插件开发工具、模板代码和示例插件统一托管在
+**[gitcode.com/JianFeeeee/homeagent-sdk](https://gitcode.com/JianFeeeee/homeagent-sdk)**。
+
+```bash
+git clone https://gitcode.com/JianFeeeee/homeagent-sdk.git
+cd homeagent-sdk
+hack/plugin-dev/scaffold.sh myplugin ./plugins/myplugin
+```
+
+每个插件实现一个三方法接口：
 
 ```go
 type Plugin interface {
@@ -18,8 +27,8 @@ type Plugin interface {
 
 | 方式 | 适用场景 | 复杂度 |
 |------|---------|--------|
+| **动态 .so 插件（推荐）** | 独立分发的第三方插件 | 中等，使用 [SDK 仓库](https://gitcode.com/JianFeeeee/homeagent-sdk) 脚手架生成 |
 | **内置插件** | 随 HomeAgent 一起发布 | 简单，需合入主仓库 |
-| **动态 .so 插件** | 独立分发的第三方插件 | 中等，需编译为 .so |
 | **Lua 脚本插件** | 轻量快速原型 | 简单（预留功能） |
 
 ---
@@ -170,41 +179,37 @@ func (p *Plugin) Stop() error {
 
 ### PluginSDK 核心 API
 
-#### 📤 IO — 输入输出
+#### IO — 输入输出
 
 ```go
-// 向排队通道投递输入（按序处理）
+// 排队投递（按序处理）
 sdk.InjectInput(source, channel string, payload map[string]interface{})
 
-// 向中断通道投递输入（可打断当前 LLM 处理）
+// 中断投递（可打断当前 LLM 处理）
 sdk.InjectInterrupt(source, channel string, payload map[string]interface{})
 
-// 快捷方式：投递文本到排队通道
+// 快捷方式：text → Input
 sdk.InjectText(source, channel, text string)
-
-// 快捷方式：投递文本到中断通道
 sdk.InjectInterruptText(source, channel, text string)
 
-// 同步请求-响应：发送文本并等待回复（CLI 插件使用）
+// 同步请求-响应（CLI 插件使用）
 sdk.InjectTextSync(source, channel, text string) *OutputEvent
 
-// 注册一个输出通道（LLM 可通过 output_send 工具选择发送到此通道）
+// 注册/管理输出通道（LLM 通过 output_send 选择发送到哪个通道）
 sdk.RegisterChannel(name string, dev Device) error
 sdk.UnregisterChannel(name string)
 sdk.ListChannels() []ChannelInfo
 ```
 
-#### 🛠️ 工具 — 让 LLM 可调用你的能力
+#### 工具 — 让 LLM 可调用你的能力
 
 ```go
 sdk.RegisterTool(name string, def ToolDef, handler ToolHandler) error
 ```
 
-- `name`: 工具名称（LLM 通过此名称调用）
-- `def`: 工具定义（描述 + 参数 JSON Schema）
-- `handler`: 调用时执行的函数
-
-工具定义示例：
+- `name`: LLM 通过此名称调用
+- `def`: JSON Schema 描述+参数
+- `handler`: 执行函数
 
 ```go
 sdk.RegisterTool("weather_query", sdk.ToolDef{
@@ -222,7 +227,6 @@ sdk.RegisterTool("weather_query", sdk.ToolDef{
     },
 }, func(args map[string]interface{}) (interface{}, error) {
     city, _ := args["city"].(string)
-    // 查询天气并返回
     return map[string]interface{}{
         "city":    city,
         "temp":    25,
@@ -231,50 +235,46 @@ sdk.RegisterTool("weather_query", sdk.ToolDef{
 })
 ```
 
-#### 🔌 阶段钩子 — 干预消息处理流
+#### 阶段钩子 — 干预消息处理流
 
-7 个阶段, 按执行顺序：
+7 个阶段：
 
 | 阶段 | 时机 | 用途 |
 |------|------|------|
-| `on_input` | 消息刚到达 Agent | 黑名单、限流、短路回复 |
-| `pre_action` | 即将调用 LLM | 注入额外上下文 |
-| `post_action` | LLM 返回结果 | 修改 LLM 输出 |
+| `on_input` | 消息刚到达 Agent | 黑名单、限流、短路 |
+| `pre_action` | 即将调用 LLM | 注入上下文 |
+| `post_action` | LLM 返回结果 | 修改输出/工具列表 |
 | `before_toolcall` | 工具调用前 | 审计、拒绝、改参 |
 | `after_toolcall` | 工具执行后 | 脱敏、改写结果 |
-| `before_output` | 输出前 | 调整格式 |
-| `after_output` | 输出后 | 统计、记录 |
+| `before_output` | 输出前 | 格式适配 |
+| `after_output` | 输出后 | 统计日志 |
 
 ```go
 sdk.RegisterStage(sdk.StageOnInput, func(ctx *sdk.StageContext) error {
-    input := ctx.RawMessage
-    // 检查是否是黑名单用户
     if ctx.UserID == "blocked_user" {
         resp := "你已被限制使用"
-        ctx.Response = &resp  // 设置 Response 会短路后续阶段
+        ctx.Response = &resp  // 短路后续阶段
         return nil
     }
     return nil
 })
 ```
 
-#### 📡 事件 — 订阅/发布系统事件
+#### 事件 — 订阅/发布系统事件
 
 ```go
-// 订阅事件
 unsub := sdk.Subscribe(events.EventType("tool_call"), func(evt *events.Event) {
     log.Printf("工具被调用: %v", evt.Payload)
 })
-defer unsub()  // 插件 Stop 时取消订阅
+defer unsub()
 
-// 发布事件
 sdk.Publish(&events.Event{
     Type: "my_event",
     Payload: map[string]interface{}{"key": "value"},
 })
 ```
 
-#### 🧠 能力访问
+#### 能力访问
 
 ```go
 // 记忆
@@ -288,7 +288,7 @@ sdk.Knowledge().Search(query string) ([]string, error)
 sdk.LLM().ListSources() []SourceInfo
 sdk.LLM().SetSource(name string) error
 
-// 配置（插件自身的配置表 config_<plugin_name>）
+// 配置（插件自身的 config_<plugin_name> 表）
 sdk.Settings().Get(key string) (interface{}, error)
 sdk.Settings().Set(key string, value interface{}) error
 sdk.Settings().List(prefix string) ([]string, error)
@@ -296,20 +296,15 @@ sdk.Settings().List(prefix string) ([]string, error)
 
 ### 读取插件配置
 
-插件有自己的配置表 `config_<插件名>`，例如 `config_mcp`：
+每插件独立 SQLite 表 `config_<name>`：
 
 ```go
-// 在 Start() 中
 val, err := s.Settings().Get("api_key")
 if err != nil {
     // 未配置
 }
-```
 
-用户通过 WebUI 或 CLI 设置：
-
-```go
-// 读取其他插件的配置
+// 读取其他插件配置
 s.Settings().GetPlugin("other_plugin", "some_key")
 
 // 读取核心配置
@@ -345,14 +340,28 @@ pluginReg.Load(plgDir)  // 之后调用
 
 ## 四、动态 .so 插件
 
-### 编译插件为 .so
+动态插件是独立于 HomeAgent 内核编译的 Go 插件，使用外部的 [Plugin SDK](https://gitcode.com/JianFeeeee/homeagent-sdk)
+而非内核内部的 SDK 包。
+
+完整的外部插件示例在 SDK 仓库的 `example/` 目录下：`qq`、`files`、`memo`、`web`。
+
+### 快速开始
+
+使用 SDK 仓库的脚手架生成项目：
+
+```bash
+git clone https://gitcode.com/JianFeeeee/homeagent-sdk.git
+cd homeagent-sdk
+hack/plugin-dev/scaffold.sh myplugin ./plugins/myplugin
+```
+
+生成的代码：
 
 ```go
-// myplugin/plugin.go
 package main
 
 import (
-    sdk "gitcode.com/JianFeeeee/HomeAgent/internal/sdk"
+    "gitcode.com/JianFeeeee/homeagent-sdk/sdk"
 )
 
 func NewPlugin(name string, config map[string]interface{}) (sdk.Plugin, error) {
@@ -371,12 +380,22 @@ func (p *myPlugin) Start(s *sdk.PluginSDK) error {
 func (p *myPlugin) Stop() error { return nil }
 ```
 
-编译：
+### 编译
+
 ```bash
-go build -buildmode=plugin -o plugin.so ./myplugin/
+cd <SDK_REPO_ROOT>
+go build -buildmode=plugin -o plugins/myplugin/plugin.so plugins/myplugin/
+```
+
+或使用项目中的 Makefile：
+
+```bash
+cd plugins/myplugin && make
 ```
 
 ### 部署
+
+将插件目录（含 `plugin.json` + `plugin.so`）放入内核配置的插件目录：
 
 ```
 <dataDir>/plugins/myplugin/
@@ -386,20 +405,38 @@ go build -buildmode=plugin -o plugin.so ./myplugin/
 
 内核扫描时会自动发现并加载。无需修改 `main.go` 或 `all.go`。
 
+### 打包分发
+
+使用 SDK 仓库的打包工具生成 `.hmap` 分发包：
+
+```bash
+hack/plugin-dev/packager.sh plugins/myplugin
+# 输出: dist/myplugin-0.1.0.hmap
+```
+
+通过 WebUI 插件管理页面上传安装，或使用 `plugin_install` 工具。
+
+### 完整示例
+
+SDK 仓库的 `example/qq/` 目录提供了一个完整的 QQ 集成插件示例（对接 NapCat 框架），
+涵盖消息收发、群管理、好友管理、文件操作、OCR 等功能，可作为开发参考。
+
 ---
 
 ## 五、最佳实践
 
-1. **Start() 非阻塞** — 长时间运行的任务用 goroutine 启动，不要在 Start() 中阻塞
-2. **Stop() 清理资源** — 关闭网络连接、停止 goroutine、取消订阅
-3. **工具 name 唯一** — 工具名不能与其他插件冲突，建议用插件名前缀
-4. **错误处理** — 工具 handler 返回 `error` 时，LLM 会收到错误信息并可能重试
-5. **中断 vs 排队** — 需要打断当前 LLM 处理的用 `InjectInterruptText`，普通的用 `InjectText`
-6. **配置优先** — 不要硬编码配置，用 `Settings().Get/Set` 读写插件配置
+1. `Start()` 非阻塞 — goroutine 启动长任务，不要阻塞 Start
+2. `Stop()` 清理资源 — 关连接、停 goroutine、取消订阅
+3. 工具名唯一 — 建议插件名前缀避免冲突
+4. handler 返回 `error` 时 LLM 会收到并可能重试
+5. 打断用 `InjectInterruptText`，普通投递用 `InjectText`
+6. 配置用 `Settings().Get/Set`，不要硬编码
 
 ---
 
 ## 六、现有插件参考
+
+### 内置插件
 
 | 插件 | 位置 | 特点 |
 |------|------|------|
@@ -409,7 +446,15 @@ go build -buildmode=plugin -o plugin.so ./myplugin/
 | WebUI | `internal/plugins/webui/` | HTTP 服务 + 依赖注入（Configure 模式） |
 | MCP | `internal/plugins/mcp/` | JSON-RPC over stdio/SSE，连接 MCP 服务器 |
 
+### 外部插件示例
+
+| 插件 | 位置 | 特点 |
+|------|------|------|
+| QQ | `example/qq/` in [homeagent-sdk](https://gitcode.com/JianFeeeee/homeagent-sdk) | NapCat 框架对接，14 个工具 |
+| 你的插件 | `plugins/yourplugin/` | 使用 SDK 脚手架生成 |
+
 ---
 
 *了解项目整体目标？查看 [OVERVIEW.md](OVERVIEW.md)。*
 *了解技术架构？查看 [ARCHITECTURE.md](ARCHITECTURE.md)。*
+*SDK 仓库与开发工具？查看 [homeagent-sdk](https://gitcode.com/JianFeeeee/homeagent-sdk)。*

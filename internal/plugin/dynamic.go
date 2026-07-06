@@ -1,6 +1,8 @@
 package plugin
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -51,9 +53,23 @@ func tryLoadSO(dir, name string, config map[string]interface{}) (sdk.Plugin, err
 		return nil, nil
 	}
 
-	p, err := plugin.Open(soPath)
+	// 复制到临时路径以绕过 Go plugin.Open 的路径缓存
+	data, err := os.ReadFile(soPath)
 	if err != nil {
-		return nil, fmt.Errorf("plugin.Open %s: %w", soPath, err)
+		return nil, fmt.Errorf("read %s: %w", soPath, err)
+	}
+	h := sha256.Sum256(data)
+	cacheKey := fmt.Sprintf("plugin_%s_%s.so", name, hex.EncodeToString(h[:8]))
+	cachePath := filepath.Join(os.TempDir(), cacheKey)
+	if _, err := os.Stat(cachePath); os.IsNotExist(err) {
+		if err := os.WriteFile(cachePath, data, 0644); err != nil {
+			return nil, fmt.Errorf("write cache %s: %w", cachePath, err)
+		}
+	}
+
+	p, err := plugin.Open(cachePath)
+	if err != nil {
+		return nil, fmt.Errorf("plugin.Open %s: %w", cachePath, err)
 	}
 
 	sym, err := p.Lookup("NewPlugin")
