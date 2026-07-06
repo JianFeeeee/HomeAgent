@@ -50,12 +50,12 @@ internal/
 ├── config/         SQLite 配置中心
 ├── events/         事件总线
 └── lua/adapters/   8 个 LLM 协议适配器脚本
-外部插件（.so）示例在 [homeagent-sdk/example/](https://gitcode.com/JianFeeeee/homeagent-sdk)
+外部插件（.so）示例见 SDK 仓库的 `example/` 目录
 ```
 
 ## 项目状态
 
-核心可用，插件系统和 SDK 已就绪。内置 9 个插件，外部插件示例见 [SDK 仓库](https://gitcode.com/JianFeeeee/homeagent-sdk)。
+核心可用，插件系统和 SDK 已就绪。内置 10 个插件，外部插件示例见 SDK 仓库的 `example/` 目录。
 
 ## 文档
 
