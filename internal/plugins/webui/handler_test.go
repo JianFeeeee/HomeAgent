@@ -606,7 +606,6 @@ func TestHandleCompletionsEndToEnd(t *testing.T) {
 		IO:            iom,
 		Memory:        memDB,
 		Indexer:       nil,
-		MaxToolTurns:  0,
 		ContextSavePath: "",
 	})
 	agent.Start()

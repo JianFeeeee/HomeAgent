@@ -22,7 +22,7 @@ import (
 var (
 	PluginDir string          // 由 main.go 设置
 	Reg       *plugin.Registry // 由 main.go 设置
-	HTTPAddr  = "127.0.0.1:0" // 监听地址，可被 main.go 覆写
+	HTTPAddr  = "127.0.0.1:9876" // 监听地址，可被 main.go 覆写或 settings 配置
 )
 
 func init() {
