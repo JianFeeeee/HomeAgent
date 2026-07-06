@@ -674,6 +674,11 @@ func (a *Agent) process(input string, stageCtx *sdk.StageContext) (response stri
 			"total_tokens":      resp.TokenUsage.Total,
 		}
 		stageCtx.ToolCalls = convertToolCalls(resp.ToolCalls)
+		for i := range stageCtx.ToolCalls {
+			if stageCtx.ToolCalls[i].Plugin == "" {
+				stageCtx.ToolCalls[i].Plugin = a.resolveToolPlugin(stageCtx.ToolCalls[i].Name)
+			}
+		}
 		if a.runStage(sdk.StagePostAction, stageCtx) {
 			return *stageCtx.Response, toolsUsed, nil
 		}
@@ -686,10 +691,11 @@ func (a *Agent) process(input string, stageCtx *sdk.StageContext) (response stri
 
 		for _, tc := range resp.ToolCalls {
 			toolsUsed = append(toolsUsed, tc.Name)
-			log.Printf("[agent] executing tool: %s (id=%s)", tc.Name, tc.ID)
+			pluginName := a.resolveToolPlugin(tc.Name)
+			log.Printf("[agent] executing tool: %s (plugin=%s, id=%s)", tc.Name, pluginName, tc.ID)
 
 			// === Stage: before_toolcall — 插件可拒绝/改参 ===
-			sdkTC := sdk.ToolCall{ID: tc.ID, Name: tc.Name, Arguments: tc.Arguments}
+			sdkTC := sdk.ToolCall{ID: tc.ID, Name: tc.Name, Plugin: pluginName, Arguments: tc.Arguments}
 			stageCtx.ToolCalls = []sdk.ToolCall{sdkTC}
 			stageCtx.ToolResults = nil
 			if a.runStage(sdk.StageBeforeToolcall, stageCtx) {
@@ -698,6 +704,7 @@ func (a *Agent) process(input string, stageCtx *sdk.StageContext) (response stri
 				msgs = append(msgs, agentAPI.Message{Role: "tool", ToolCallID: tc.ID, Content: result})
 				a.publishEvent(events.EventToolCall, map[string]interface{}{
 					"tool":   tc.Name,
+					"plugin": pluginName,
 					"args":   tc.Arguments,
 					"result": result,
 					"status": "denied",
@@ -710,7 +717,7 @@ func (a *Agent) process(input string, stageCtx *sdk.StageContext) (response stri
 			log.Printf("[agent] tool %s result: %s", tc.Name, truncateStr(result, 100))
 
 			// === Stage: after_toolcall — 插件可改结果 ===
-			stageCtx.ToolResults = []sdk.ToolResult{{CallID: tc.ID, Name: tc.Name, Success: true, Result: result}}
+			stageCtx.ToolResults = []sdk.ToolResult{{CallID: tc.ID, Name: tc.Name, Plugin: pluginName, Success: true, Result: result}}
 			a.runStage(sdk.StageAfterToolcall, stageCtx)
 			if len(stageCtx.ToolResults) > 0 {
 				if r, ok := stageCtx.ToolResults[0].Result.(string); ok {
@@ -723,6 +730,7 @@ func (a *Agent) process(input string, stageCtx *sdk.StageContext) (response stri
 
 			a.publishEvent(events.EventToolCall, map[string]interface{}{
 				"tool":   tc.Name,
+				"plugin": pluginName,
 				"args":   tc.Arguments,
 				"result": result,
 				"status": "ok",
@@ -2575,6 +2583,18 @@ func truncateStr(s string, max int) string {
 		truncated++
 	}
 	return s
+}
+
+func (a *Agent) resolveToolPlugin(name string) string {
+	if a.stageHost != nil {
+		if plugin := a.stageHost.ToolPlugin(name); plugin != "" {
+			return plugin
+		}
+	}
+	if idx := strings.IndexByte(name, '_'); idx > 0 {
+		return name[:idx]
+	}
+	return "core"
 }
 
 func (a *Agent) injectSourceContext(stageCtx *sdk.StageContext, evt *agentIO.InputEvent) {

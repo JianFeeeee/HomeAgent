@@ -63,18 +63,21 @@ type MemItem struct {
 type ToolCall struct {
 	ID        string                 `json:"id"`
 	Name      string                 `json:"name"`
+	Plugin    string                 `json:"plugin,omitempty"`
 	Arguments map[string]interface{} `json:"arguments"`
 }
 
 type ToolResult struct {
 	CallID  string      `json:"call_id"`
 	Name    string      `json:"name"`
+	Plugin  string      `json:"plugin,omitempty"`
 	Success bool        `json:"success"`
 	Result  interface{} `json:"result"`
 }
 
 type ToolDef struct {
 	Name        string                 `json:"name"`
+	Plugin      string                 `json:"plugin,omitempty"`
 	Description string                 `json:"description"`
 	Parameters  map[string]interface{} `json:"parameters"`
 }
@@ -225,6 +228,9 @@ func (s *PluginSDK) LLM() LLMAPI                { return s.llm }
 func (s *PluginSDK) Settings() SettingsAPI      { return s.sett }
 
 func (s *PluginSDK) RegisterTool(name string, def ToolDef, handler ToolHandler) error {
+	if def.Plugin == "" {
+		def.Plugin = s.name
+	}
 	if s.regTool != nil {
 		return s.regTool(name, def, handler)
 	}
@@ -235,6 +241,33 @@ func (s *PluginSDK) RegisterStage(stage Stage, handler StageHandler) {
 	if s.regStage != nil {
 		s.regStage(stage, handler)
 	}
+}
+
+// RegisterStageOwnTools 仅在 before_toolcall / after_toolcall 阶段监听当前插件自己的工具调用。
+// 其他阶段会退化为普通 RegisterStage。
+func (s *PluginSDK) RegisterStageOwnTools(stage Stage, handler StageHandler) {
+	if s.regStage == nil {
+		return
+	}
+	if stage != StageBeforeToolcall && stage != StageAfterToolcall {
+		s.regStage(stage, handler)
+		return
+	}
+	s.regStage(stage, func(ctx *StageContext) error {
+		ctx.RLock()
+		match := false
+		switch stage {
+		case StageBeforeToolcall:
+			match = len(ctx.ToolCalls) > 0 && ctx.ToolCalls[0].Plugin == s.name
+		case StageAfterToolcall:
+			match = len(ctx.ToolResults) > 0 && ctx.ToolResults[0].Plugin == s.name
+		}
+		ctx.RUnlock()
+		if !match {
+			return nil
+		}
+		return handler(ctx)
+	})
 }
 
 func (s *PluginSDK) RegisterPluginAPI(name string) error {
