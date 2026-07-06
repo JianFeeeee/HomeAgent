@@ -86,7 +86,8 @@ func printlnC(color, msg string) {
 func main() {
 	socket := flag.String("socket", "", "unix socket path")
 	remote := flag.String("remote", "", "remote webui URL (e.g. http://127.0.0.1:8080)")
-	say := flag.String("say", "", "send a message and print response (one-shot)")
+	chat := flag.String("chat", "", "send a message and print final text (one-shot)")
+	say := flag.String("say", "", "deprecated alias of -chat")
 	flag.Parse()
 
 	sockAddr := discoverSocket(*socket)
@@ -100,8 +101,12 @@ func main() {
 		addr = *socket
 	}
 
-	if *say != "" {
-		oneShot(mode, addr, *say)
+	oneShotMsg := *chat
+	if oneShotMsg == "" {
+		oneShotMsg = *say
+	}
+	if oneShotMsg != "" {
+		oneShot(mode, addr, oneShotMsg)
 		return
 	}
 	runInteractive(mode, addr)
