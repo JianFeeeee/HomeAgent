@@ -2621,35 +2621,23 @@ func truncateStr(s string, max int) string {
 func formatTree(node *knowledge.TreeIndex, depth int) string {
 	var sb strings.Builder
 	indent := strings.Repeat("  ", depth)
+	// 先渲染子目录
 	for _, child := range node.Children {
 		sb.WriteString(fmt.Sprintf("%s%s/\n", indent, child.Name))
-		if len(child.Items) > 0 {
-			for _, item := range child.Items {
-				preview := item.Preview
-				if len([]rune(preview)) > 60 {
-					preview = string([]rune(preview)[:60]) + "..."
-				}
-				tags := ""
-				if len(item.Tags) > 0 {
-					tags = " [" + strings.Join(item.Tags, ", ") + "]"
-				}
-				sb.WriteString(fmt.Sprintf("%s  · %s%s\n    %s\n", indent, item.Name, tags, preview))
-			}
-		}
 		sb.WriteString(formatTree(child, depth+1))
 	}
-	if depth > 0 && len(node.Items) > 0 {
-		for _, item := range node.Items {
-			preview := item.Preview
-			if len([]rune(preview)) > 60 {
-				preview = string([]rune(preview)[:60]) + "..."
-			}
-			tags := ""
-			if len(item.Tags) > 0 {
-				tags = " [" + strings.Join(item.Tags, ", ") + "]"
-			}
-			sb.WriteString(fmt.Sprintf("  · %s%s\n    %s\n", item.Name, tags, preview))
+	// 再渲染当前节点条目（根节点也能显示）
+	for _, item := range node.Items {
+		preview := item.Preview
+		if len([]rune(preview)) > 60 {
+			preview = string([]rune(preview)[:60]) + "..."
 		}
+		tags := ""
+		if len(item.Tags) > 0 {
+			tags = " [" + strings.Join(item.Tags, ", ") + "]"
+		}
+		sb.WriteString(fmt.Sprintf("%s· %s%s\n", indent, item.Name, tags))
+		sb.WriteString(fmt.Sprintf("%s  %s\n", indent, preview))
 	}
 	if sb.Len() == 0 {
 		sb.WriteString("(空)")
