@@ -456,7 +456,11 @@ func (p *Plugin) testKnowledgeRaw() checkResult {
 	}
 
 	results := hcKnowledge.Search("健康检查测试标记", 3)
+
 	elapsed := time.Since(start)
+
+	// 清理测试条目，避免积累
+	hcKnowledge.Remove(marker)
 
 	if len(results) > 0 {
 		return checkResult{

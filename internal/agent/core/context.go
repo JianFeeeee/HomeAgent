@@ -223,6 +223,10 @@ func (c *RelevanceContext) ensureTrained() {
 			texts[i] = evt.Input + " " + evt.Response
 		}
 		c.veczer.Train(texts)
+		// 重算所有事件向量，与新的向量化器特征空间对齐
+		for _, evt := range c.events {
+			evt.Vector = c.veczer.Vectorize(evt.Input + " " + evt.Response)
+		}
 		c.trained = true
 	}
 }
