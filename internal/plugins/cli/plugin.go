@@ -108,6 +108,26 @@ func (p *Plugin) handleConn(conn net.Conn, s *sdk.PluginSDK) {
 	defer p.wg.Done()
 
 	scanner := bufio.NewScanner(conn)
+
+	apiKey := p.webuiAPIKey()
+	if apiKey != "" {
+		if !scanner.Scan() {
+			return
+		}
+		line := scanner.Text()
+		if !strings.HasPrefix(line, "/auth ") || strings.TrimSpace(line[6:]) != apiKey {
+			writeLine(conn, map[string]interface{}{
+				"type":  "error",
+				"error": "unauthorized",
+			})
+			return
+		}
+		writeLine(conn, map[string]interface{}{
+			"type":    "response",
+			"content": "authenticated",
+		})
+	}
+
 	for scanner.Scan() {
 		line := scanner.Text()
 		if line == "" {
@@ -134,6 +154,19 @@ func (p *Plugin) handleConn(conn net.Conn, s *sdk.PluginSDK) {
 			})
 		}
 	}
+}
+
+func (p *Plugin) webuiAPIKey() string {
+	if cfgReg == nil {
+		return ""
+	}
+	ps := cfgReg.PluginConfig("webui")
+	if v, _ := ps.Get("api_key"); v != nil {
+		if s, ok := v.(string); ok {
+			return s
+		}
+	}
+	return ""
 }
 
 func (p *Plugin) handleBuiltin(conn net.Conn, line string, s *sdk.PluginSDK) bool {
