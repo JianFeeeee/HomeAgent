@@ -2,6 +2,7 @@ package core
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log"
 	"strings"
@@ -251,16 +252,27 @@ func (a *Agent) interceptLoop() {
 			a.llmMu.Unlock()
 
 			if hasActiveLLM {
-				select {
-				case a.interceptCh <- clone:
-				default:
-					log.Printf("[agent] intercept channel full, queuing input for %s", evt.Source)
+				// 后台整理任务被打断：中断消息重新注入为独立输入（consolidation 的 process 不会路由回复）
+				if a.currentOutputChannel == "_consolidation_" {
+					log.Printf("[agent] consolidation interrupted, re-injecting input for %s/%s", evt.Source, evt.OutputChannel)
 					a.io.InjectInputTo(evt.Source, evt.OutputChannel, "text", map[string]interface{}{
 						"content":           text,
 						"interrupt":         true,
 						"interrupt_source":  evt.Source,
 						"interrupt_channel": evt.OutputChannel,
 					})
+				} else {
+					select {
+					case a.interceptCh <- clone:
+					default:
+						log.Printf("[agent] intercept channel full, queuing input for %s", evt.Source)
+						a.io.InjectInputTo(evt.Source, evt.OutputChannel, "text", map[string]interface{}{
+							"content":           text,
+							"interrupt":         true,
+							"interrupt_source":  evt.Source,
+							"interrupt_channel": evt.OutputChannel,
+						})
+					}
 				}
 			} else {
 				a.io.InjectInputTo(evt.Source, evt.OutputChannel, "text", map[string]interface{}{
@@ -325,6 +337,12 @@ func (a *Agent) processMediaInput(evt *agentIO.InputEvent) {
 
 	blocks, fallback := a.mediaToBlocks(evt.Payload, evt.Type, evt.Source)
 
+	// 先遗忘再输入
+	archived := a.context.Prune(fallback, a.maxContextSize-1, a.docStore)
+	if archived > 0 {
+		log.Printf("[agent] pruned %d low-relevance events to document memory", archived)
+	}
+
 	a.context.Append(ContextEvent{
 		Timestamp: start,
 		Source:    evt.Source,
@@ -370,11 +388,6 @@ func (a *Agent) processMediaInput(evt *agentIO.InputEvent) {
 		Response:  response,
 		ToolsUsed: toolsUsed,
 	})
-
-	archived := a.context.Prune(response, a.maxContextSize, a.docStore)
-	if archived > 0 {
-		log.Printf("[agent] pruned %d low-relevance events to document memory", archived)
-	}
 
 	a.emitResponse(evt, response)
 }
@@ -466,6 +479,12 @@ func (a *Agent) processTextInput(evt *agentIO.InputEvent, input string) {
 
 	input = stageCtx.RawMessage
 
+	// 先"遗忘"再输入：用当前输入决定淘汰哪些不相关旧事件（LSTM forget gate 模式）
+	archived := a.context.Prune(input, a.maxContextSize-1, a.docStore)
+	if archived > 0 {
+		log.Printf("[agent] pruned %d low-relevance events to document memory", archived)
+	}
+
 	a.context.Append(ContextEvent{
 		Timestamp: start,
 		Source:    evt.Source,
@@ -491,12 +510,6 @@ func (a *Agent) processTextInput(evt *agentIO.InputEvent, input string) {
 		Response:  response,
 		ToolsUsed: toolsUsed,
 	})
-
-	// 基于相关性裁剪上下文：保留与当前输入最相关的 maxContextSize 条
-	archived := a.context.Prune(response, a.maxContextSize, a.docStore)
-	if archived > 0 {
-		log.Printf("[agent] pruned %d low-relevance events to document memory", archived)
-	}
 
 	a.emitResponse(evt, response)
 
@@ -661,6 +674,14 @@ func (a *Agent) process(input string, stageCtx *sdk.StageContext) (response stri
 		}
 
 		if llmErr != nil {
+			if errors.Is(llmErr, context.Canceled) && a.ctx.Err() == nil {
+				// 后台整理任务被打断：中断已重新注入为独立输入，直接返回
+				if a.currentOutputChannel == "_consolidation_" {
+					return "", toolsUsed, fmt.Errorf("interrupted by user input")
+				}
+				// 用户对话被打断：继续下一轮 drain 打断消息，注入到当前对话上下文
+				continue
+			}
 			return "", toolsUsed, fmt.Errorf("all %d providers failed, last error: %w",
 				len(providers), llmErr)
 		}
@@ -1159,7 +1180,11 @@ func (a *Agent) executeKnowledgeTool(tc agentAPI.ToolCall) string {
 			if i >= topK {
 				break
 			}
-			parts = append(parts, fmt.Sprintf("[%s]\n%s", k.Name, truncateStr(k.Content, 200)))
+			label := k.Name
+			if k.Category != "" {
+				label = k.Category + "/" + k.Name
+			}
+			parts = append(parts, fmt.Sprintf("[%s]\n%s", label, truncateStr(k.Content, 200)))
 		}
 		return strings.Join(parts, "\n---\n")
 
@@ -1175,11 +1200,8 @@ func (a *Agent) executeKnowledgeTool(tc agentAPI.ToolCall) string {
 		return fmt.Sprintf("知识「%s」已创建并向量化索引（%d 字符）", name, len(content))
 
 	case "knowledge_list":
-		names := a.knowledge.List()
-		if len(names) == 0 {
-			return "知识库为空"
-		}
-		return "知识分类: " + strings.Join(names, ", ")
+		tree := a.knowledge.BuildTree()
+		return formatTree(tree, 0)
 
 	default:
 		return fmt.Sprintf("未知的知识工具: %s", tc.Name)
@@ -1802,9 +1824,14 @@ func (a *Agent) distillContext() {
 	if a.docStore == nil {
 		return
 	}
-	// 心跳时执行一次安全裁剪（兜底）
-	// 上下文的主要裁剪在 processTextInput 中基于相关性执行
-	_ = a.context.Len()
+	// 心跳时执行安全裁剪：上下文超过 maxContextSize*2 时强制归档
+	n := a.context.Len()
+	if n > a.maxContextSize*2 {
+		archived := a.context.Prune("", a.maxContextSize, a.docStore)
+		if archived > 0 {
+			log.Printf("[agent] distill: pruned %d low-relevance events to document memory (total=%d)", archived, n)
+		}
+	}
 }
 
 // syncGraphToDocs — 将图记忆的实体和关系注入文档记忆层
@@ -2104,6 +2131,13 @@ func (a *Agent) emitMemoryCandidate(source, input, response string, toolsUsed []
 func (a *Agent) processConsolidation(input string) {
 	start := time.Now()
 	a.currentOutputChannel = "_consolidation_"
+
+	// 遗忘不相关的旧事件
+	archived := a.context.Prune(input, a.maxContextSize-1, a.docStore)
+	if archived > 0 {
+		log.Printf("[agent] consolidation: pruned %d low-relevance events", archived)
+	}
+
 	a.context.Append(ContextEvent{
 		Timestamp: start,
 		Source:    "system",
@@ -2121,7 +2155,6 @@ func (a *Agent) processConsolidation(input string) {
 		Response:  response,
 		ToolsUsed: toolsUsed,
 	})
-	_ = a.context.Prune(response, a.maxContextSize, a.docStore)
 	a.emitMemoryCandidate("system", input, response, toolsUsed)
 	log.Printf("[agent] consolidation done (%dms, tools=%v)", time.Since(start).Milliseconds(), toolsUsed)
 }
@@ -2583,6 +2616,45 @@ func truncateStr(s string, max int) string {
 		truncated++
 	}
 	return s
+}
+
+func formatTree(node *knowledge.TreeIndex, depth int) string {
+	var sb strings.Builder
+	indent := strings.Repeat("  ", depth)
+	for _, child := range node.Children {
+		sb.WriteString(fmt.Sprintf("%s%s/\n", indent, child.Name))
+		if len(child.Items) > 0 {
+			for _, item := range child.Items {
+				preview := item.Preview
+				if len([]rune(preview)) > 60 {
+					preview = string([]rune(preview)[:60]) + "..."
+				}
+				tags := ""
+				if len(item.Tags) > 0 {
+					tags = " [" + strings.Join(item.Tags, ", ") + "]"
+				}
+				sb.WriteString(fmt.Sprintf("%s  · %s%s\n    %s\n", indent, item.Name, tags, preview))
+			}
+		}
+		sb.WriteString(formatTree(child, depth+1))
+	}
+	if depth > 0 && len(node.Items) > 0 {
+		for _, item := range node.Items {
+			preview := item.Preview
+			if len([]rune(preview)) > 60 {
+				preview = string([]rune(preview)[:60]) + "..."
+			}
+			tags := ""
+			if len(item.Tags) > 0 {
+				tags = " [" + strings.Join(item.Tags, ", ") + "]"
+			}
+			sb.WriteString(fmt.Sprintf("  · %s%s\n    %s\n", item.Name, tags, preview))
+		}
+	}
+	if sb.Len() == 0 {
+		sb.WriteString("(空)")
+	}
+	return sb.String()
 }
 
 func (a *Agent) resolveToolPlugin(name string) string {

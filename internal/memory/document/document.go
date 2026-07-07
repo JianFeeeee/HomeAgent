@@ -93,7 +93,7 @@ func (s *Store) Insert(doc *Doc) error {
 	return nil
 }
 
-// ContextToDoc — 将一段上下文对话历史提炼为文档
+// ContextToDoc — 将一段上下文对话历史提炼为文档（带内容去重）
 func (s *Store) ContextToDoc(source string, entries []ContextEntry) (*Doc, error) {
 	if len(entries) == 0 {
 		return nil, nil
@@ -108,26 +108,46 @@ func (s *Store) ContextToDoc(source string, entries []ContextEntry) (*Doc, error
 		parts = append(parts, line)
 	}
 	content := strings.Join(parts, "\n")
+	contentHash := simpleHash(content)
 
+	// 去重：检查是否已有相同 hash 的文档（在锁内完成创建/更新）
 	summary := summarizeEntries(entries)
 	tags := extractTags(entries)
 	entities := extractEntities(entries)
 
+	s.mu.Lock()
+	for _, d := range s.docs {
+		if d.Meta != nil && d.Meta["content_hash"] == contentHash {
+			d.UpdatedAt = time.Now()
+			d.LastAccess = time.Now()
+			d.Content = content
+			d.Source = source
+			d.Summary = summary
+			d.Tags = tags
+			d.Entities = entities
+			s.dirty = true
+			s.mu.Unlock()
+			return d, nil
+		}
+	}
+
+	id := fmt.Sprintf("doc_%d", time.Now().UnixNano())
 	doc := &Doc{
-		ID:        fmt.Sprintf("doc_%d", time.Now().UnixNano()),
-		Summary:   summary,
-		Content:   content,
-		Tags:      tags,
-		Entities:  entities,
-		CreatedAt: time.Now(),
-		UpdatedAt: time.Now(),
-		Source:    source,
+		ID:          id,
+		Summary:     summary,
+		Content:     content,
+		Tags:        tags,
+		Entities:    entities,
+		CreatedAt:   time.Now(),
+		UpdatedAt:   time.Now(),
+		LastAccess:  time.Now(),
+		AccessCount: 1,
+		Source:      source,
+		Meta:        map[string]string{"content_hash": contentHash},
 	}
-
-	if err := s.Insert(doc); err != nil {
-		return nil, err
-	}
-
+	s.docs[id] = doc
+	s.dirty = true
+	s.mu.Unlock()
 	return doc, nil
 }
 
@@ -421,4 +441,13 @@ func truncate(s string, max int) string {
 		return string(runes[:max]) + "..."
 	}
 	return s
+}
+
+func simpleHash(s string) string {
+	// 简单的基于内容的哈希，用于去重
+	h := 0
+	for _, r := range s {
+		h = h*31 + int(r)
+	}
+	return fmt.Sprintf("h%08x", h)
 }
