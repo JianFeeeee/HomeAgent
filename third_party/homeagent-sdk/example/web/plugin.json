@@ -1,0 +1,8 @@
+{
+  "name": "web",
+  "version": "1.0.0",
+  "description": "网络工具插件，提供网页搜索和内容抓取功能",
+  "author": "HomeAgent",
+  "entry": "plugin.so",
+  "tags": ["web", "search", "http"]
+}
