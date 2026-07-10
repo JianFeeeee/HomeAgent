@@ -1,0 +1,8 @@
+{
+  "name": "qq",
+  "version": "1.0.0",
+  "description": "QQ 集成插件，对接 NapCat OneBot 框架，支持消息收发、群管理、好友管理等",
+  "author": "HomeAgent",
+  "entry": "plugin.so",
+  "tags": ["qq", "napcat", "onebot", "messaging"]
+}

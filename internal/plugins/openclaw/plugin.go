@@ -7,6 +7,7 @@ import (
 	"log"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 
 	"gitcode.com/JianFeeeee/HomeAgent/internal/plugin"
@@ -15,6 +16,12 @@ import (
 
 //go:embed simulator/main.js
 var simulatorSrc string
+
+//go:embed manager/main.js
+var managerSrc string
+
+//go:embed pysimulator/main.py
+var pySimulatorSrc string
 
 var SkillsDir string
 var SimulatorDir string
@@ -39,7 +46,10 @@ type Plugin struct {
 	simulatorDir  string
 	skills        []*plugin.SKILLPlugin
 	sidecars      []*sidecarProcess
+	manager       *sidecarProcess
+	capabilities  []string
 	mu            sync.Mutex
+	sdk           *sdk.PluginSDK
 }
 
 func New(name, skillsDir string) *Plugin {
@@ -57,57 +67,331 @@ func New(name, skillsDir string) *Plugin {
 func (p *Plugin) Name() string { return p.name }
 
 func (p *Plugin) Start(s *sdk.PluginSDK) error {
-	entries, err := os.ReadDir(p.skillsDir)
-	if err != nil {
-		if os.IsNotExist(err) {
-			return nil
-		}
-		return fmt.Errorf("read skills dir %s: %w", p.skillsDir, err)
+	p.sdk = s
+
+	// Launch OC plugin manager first (handles OC-format plugin installation and lifecycle)
+	os.MkdirAll(p.skillsDir, 0755)
+	if err := p.launchManager(s); err != nil {
+		log.Printf("[openclaw] launch manager: %v", err)
 	}
 
-	for _, entry := range entries {
-		skillPath := filepath.Join(p.skillsDir, entry.Name())
-		subs, err := os.ReadDir(skillPath)
-		if err != nil {
-			continue
-		}
-
-		hasMainJS := false
-		hasOCManifest := false
-		hasOCPackage := false
-		for _, f := range subs {
-			switch f.Name() {
-			case "main.js":
-				hasMainJS = true
-			case "openclaw.plugin.json":
-				hasOCManifest = true
-			case "package.json":
-				hasOCPackage = hasOCExtensions(filepath.Join(skillPath, "package.json"))
-			}
-		}
-
-		switch {
-		case hasMainJS:
-			if err := p.loadSidecar(s, skillPath, entry.Name()); err != nil {
-				log.Printf("[openclaw] sidecar %s: %v", entry.Name(), err)
-			}
-		case hasOCManifest || hasOCPackage:
-			if err := p.loadOCPlugin(s, skillPath, entry.Name()); err != nil {
-				log.Printf("[openclaw] ocplugin %s: %v", entry.Name(), err)
-			}
-		default:
-			sk, err := plugin.LoadSKILL(skillPath)
+	// Load existing plugins from skills dir
+	if entries, err := os.ReadDir(p.skillsDir); err == nil {
+		for _, entry := range entries {
+			skillPath := filepath.Join(p.skillsDir, entry.Name())
+			subs, err := os.ReadDir(skillPath)
 			if err != nil {
-				log.Printf("[openclaw] load skill %s: %v", entry.Name(), err)
 				continue
 			}
-			p.skills = append(p.skills, sk)
 
-			log.Printf("[openclaw] loaded skill: %s v%s", sk.Name(), sk.Version())
+			hasMainJS := false
+			hasMainPy := false
+			hasOCManifest := false
+			hasOCPackage := false
+			for _, f := range subs {
+				switch f.Name() {
+				case "main.js":
+					hasMainJS = true
+				case "main.py":
+					hasMainPy = true
+				case "openclaw.plugin.json":
+					hasOCManifest = true
+				case "package.json":
+					hasOCPackage = hasOCExtensions(filepath.Join(skillPath, "package.json"))
+				}
+			}
+
+			switch {
+			case hasMainJS:
+				if err := p.loadSidecar(s, skillPath, entry.Name()); err != nil {
+					log.Printf("[openclaw] sidecar %s: %v", entry.Name(), err)
+				}
+			case hasMainPy:
+				if err := p.loadPySidecar(s, skillPath, entry.Name()); err != nil {
+					log.Printf("[openclaw] pysidecar %s: %v", entry.Name(), err)
+				}
+			case hasOCManifest || hasOCPackage:
+				log.Printf("[openclaw] ocplugin %s handled by manager", entry.Name())
+			default:
+				sk, err := plugin.LoadSKILL(skillPath)
+				if err != nil {
+					log.Printf("[openclaw] load skill %s: %v", entry.Name(), err)
+					continue
+				}
+				p.skills = append(p.skills, sk)
+				log.Printf("[openclaw] loaded skill: %s v%s", sk.Name(), sk.Version())
+			}
 		}
 	}
 
+	// Register plugin management tools that talk to the manager (always, even if skills dir is empty)
+	tp := p.name + "_"
+	s.RegisterTool(tp+"npm_install", sdk.ToolDef{
+		Name:        tp + "npm_install",
+		Description: "安装 OpenClaw 插件管理器中的 npm 插件。通过 npm 安装包，自动检测并加载到模拟器中。安装后立即可用。",
+		Parameters: map[string]interface{}{
+			"type": "object",
+			"properties": map[string]interface{}{
+				"package": map[string]interface{}{"type": "string", "description": "npm 包名或 git 地址 (例如 @openclaw/voice-call, npm:@openclaw/matrix)"},
+			},
+			"required": []string{"package"},
+		},
+	}, p.handlePluginInstall)
+
+	s.RegisterTool(tp+"npm_uninstall", sdk.ToolDef{
+		Name:        tp + "npm_uninstall",
+		Description: "从 OpenClaw 插件管理器中移除已安装的插件。",
+		Parameters: map[string]interface{}{
+			"type": "object",
+			"properties": map[string]interface{}{
+				"name": map[string]interface{}{"type": "string", "description": "要移除的插件名称"},
+			},
+			"required": []string{"name"},
+		},
+	}, p.handlePluginUninstall)
+
+	s.RegisterTool(tp+"list", sdk.ToolDef{
+		Name:        tp + "list",
+		Description: "列出插件管理器中所有已安装的 OpenClaw 插件及其工具。",
+		Parameters: map[string]interface{}{
+			"type":       "object",
+			"properties": map[string]interface{}{},
+		},
+	}, p.handlePluginList)
+
 	return nil
+}
+
+// ─── Manager ────────────────────────────────────────────────
+
+// launchManager 启动 OC 插件管理器（Node.js 进程），用于安装/卸载/加载 OC 格式插件
+func (p *Plugin) launchManager(s *sdk.PluginSDK) error {
+	managerPath := filepath.Join(p.simulatorDir, "manager.js")
+	if err := os.MkdirAll(p.simulatorDir, 0755); err != nil {
+		return fmt.Errorf("create simulator dir: %w", err)
+	}
+	if err := os.WriteFile(managerPath, []byte(managerSrc), 0644); err != nil {
+		return fmt.Errorf("write manager: %w", err)
+	}
+
+	// Ensure skills dir exists for the manager to scan
+	os.MkdirAll(p.skillsDir, 0755)
+
+	sp, err := launchProcess("node", managerPath, p.skillsDir, "manager")
+	if err != nil {
+		return fmt.Errorf("launch manager: %w", err)
+	}
+	if sp == nil {
+		return nil
+	}
+
+	// Drain initial registration notifications from already-loaded plugins
+	for done := false; !done; {
+		select {
+		case n := <-sp.NotifyChan():
+			p.translateAndRegister(n, sp, s, "manager")
+		default:
+			done = true
+		}
+	}
+	go p.notifyLoop(sp, s, "manager")
+
+	p.mu.Lock()
+	p.manager = sp
+	p.sidecars = append(p.sidecars, sp)
+	p.mu.Unlock()
+
+	log.Printf("[openclaw] OC plugin manager started")
+	return nil
+}
+
+// ─── 管理工具处理 ────────────────────────────────────────────
+
+func (p *Plugin) handlePluginInstall(args map[string]interface{}) (interface{}, error) {
+	pkg, _ := args["package"].(string)
+	if pkg == "" {
+		return errorResult("package is required"), nil
+	}
+
+	p.mu.Lock()
+	mgr := p.manager
+	p.mu.Unlock()
+
+	if mgr == nil {
+		return errorResult("plugin manager not available"), nil
+	}
+
+	data, err := mgr.call("plugins/install", map[string]interface{}{
+		"package": pkg,
+	})
+	if err != nil {
+		return errorResult(fmt.Sprintf("install failed: %v", err)), nil
+	}
+
+	var result struct {
+		Name  string   `json:"name"`
+		Tools []string `json:"tools"`
+	}
+	if err := json.Unmarshal(data, &result); err != nil {
+		return map[string]interface{}{
+			"content": fmt.Sprintf("Plugin installed. Raw response: %s", string(data)),
+		}, nil
+	}
+
+	return map[string]interface{}{
+		"content": fmt.Sprintf("已安装插件: %s\n  工具: %s", result.Name, strings.Join(result.Tools, ", ")),
+	}, nil
+}
+
+func (p *Plugin) handlePluginUninstall(args map[string]interface{}) (interface{}, error) {
+	name, _ := args["name"].(string)
+	if name == "" {
+		return errorResult("name is required"), nil
+	}
+
+	p.mu.Lock()
+	mgr := p.manager
+	p.mu.Unlock()
+
+	if mgr == nil {
+		return errorResult("plugin manager not available"), nil
+	}
+
+	data, err := mgr.call("plugins/uninstall", map[string]interface{}{
+		"name": name,
+	})
+	if err != nil {
+		return errorResult(fmt.Sprintf("uninstall failed: %v", err)), nil
+	}
+
+	return map[string]interface{}{
+		"content": fmt.Sprintf("已卸载插件: %s\n  %s", name, string(data)),
+	}, nil
+}
+
+func (p *Plugin) handlePluginList(args map[string]interface{}) (interface{}, error) {
+	p.mu.Lock()
+	mgr := p.manager
+	p.mu.Unlock()
+
+	if mgr != nil {
+		data, err := mgr.call("plugins/list", nil)
+		if err == nil && data != nil {
+			var result struct {
+				Plugins []struct {
+					Name  string `json:"name"`
+					Tools []struct {
+						Name        string `json:"name"`
+						Description string `json:"description"`
+					} `json:"tools"`
+				} `json:"plugins"`
+			}
+			if err := json.Unmarshal(data, &result); err == nil {
+				var parts []string
+				parts = append(parts, fmt.Sprintf("Skills dir: %s\n", p.skillsDir))
+
+				if len(result.Plugins) > 0 {
+					parts = append(parts, fmt.Sprintf("\nOC 插件 (%d):", len(result.Plugins)))
+					for _, pl := range result.Plugins {
+						var names []string
+						for _, t := range pl.Tools {
+							names = append(names, t.Name)
+						}
+						parts = append(parts, fmt.Sprintf("  %s: %s", pl.Name, strings.Join(names, ", ")))
+					}
+				}
+
+				p.mu.Lock()
+				if len(p.sidecars) > 0 {
+					sidecarCount := 0
+					for _, sp := range p.sidecars {
+						if sp != p.manager {
+							sidecarCount++
+						}
+					}
+					if sidecarCount > 0 {
+						parts = append(parts, fmt.Sprintf("\nSidecar 插件 (%d):", sidecarCount))
+						for _, sp := range p.sidecars {
+							if sp == p.manager {
+								continue
+							}
+							tools, _ := sp.ListTools()
+							var names []string
+							for _, t := range tools {
+								names = append(names, t.Name)
+							}
+							parts = append(parts, fmt.Sprintf("  %s: %s", sp.name, strings.Join(names, ", ")))
+						}
+					}
+				}
+				if len(p.skills) > 0 {
+					parts = append(parts, fmt.Sprintf("\nSKILL 插件 (%d):", len(p.skills)))
+					for _, sk := range p.skills {
+						parts = append(parts, fmt.Sprintf("  %s v%s", sk.Name(), sk.Version()))
+					}
+				}
+				if len(p.capabilities) > 0 {
+					parts = append(parts, fmt.Sprintf("\nCapabilities (%d):", len(p.capabilities)))
+					for _, c := range p.capabilities {
+						parts = append(parts, fmt.Sprintf("  %s", c))
+					}
+				}
+				if len(result.Plugins) == 0 && len(p.sidecars) <= 1 && len(p.skills) == 0 {
+					parts = append(parts, "没有已安装的插件。")
+				}
+				p.mu.Unlock()
+
+				return map[string]interface{}{
+					"content": strings.Join(parts, "\n"),
+				}, nil
+			}
+		}
+	}
+
+	// Fallback: list known plugins from Go side
+	p.mu.Lock()
+	defer p.mu.Unlock()
+
+	var parts []string
+	parts = append(parts, fmt.Sprintf("Skills dir: %s\n", p.skillsDir))
+
+	if len(p.sidecars) > 0 {
+		parts = append(parts, fmt.Sprintf("\nSidecar/OC 插件 (%d):", len(p.sidecars)))
+		for _, sp := range p.sidecars {
+			tools, err := sp.ListTools()
+			toolList := ""
+			if err == nil {
+				var names []string
+				for _, t := range tools {
+					names = append(names, t.Name)
+				}
+				toolList = strings.Join(names, ", ")
+			}
+			parts = append(parts, fmt.Sprintf("  %s: %s", sp.name, toolList))
+		}
+	}
+
+	if len(p.skills) > 0 {
+		parts = append(parts, fmt.Sprintf("\nSKILL 插件 (%d):", len(p.skills)))
+		for _, sk := range p.skills {
+			parts = append(parts, fmt.Sprintf("  %s v%s", sk.Name(), sk.Version()))
+		}
+	}
+
+	if len(p.capabilities) > 0 {
+		parts = append(parts, fmt.Sprintf("\nCapabilities (%d):", len(p.capabilities)))
+		for _, c := range p.capabilities {
+			parts = append(parts, fmt.Sprintf("  %s", c))
+		}
+	}
+
+	if len(p.sidecars) == 0 && len(p.skills) == 0 {
+		parts = append(parts, "没有已安装的插件。")
+	}
+
+	return map[string]interface{}{
+		"content": strings.Join(parts, "\n"),
+	}, nil
 }
 
 func (p *Plugin) loadOCPlugin(s *sdk.PluginSDK, dir, name string) error {
@@ -190,7 +474,7 @@ func (p *Plugin) translateAndRegister(n OCNotification, sp *sidecarProcess, s *s
 		}
 		toolName := fmt.Sprintf("%s_%s", pluginName, d.Name)
 		tDef := sdk.ToolDef{
-			Name:        d.Name,
+			Name:        toolName,
 			Description: d.Description,
 			Parameters:  d.Parameters,
 		}
@@ -204,14 +488,115 @@ func (p *Plugin) translateAndRegister(n OCNotification, sp *sidecarProcess, s *s
 		}
 
 	case "provider":
-		log.Printf("[openclaw] %s: provider registration (no HomeAgent equivalent, logged only)", pluginName)
+		var d struct {
+			Name        string `json:"name"`
+			Description string `json:"description"`
+		}
+		json.Unmarshal(params.Data, &d)
+		cap := fmt.Sprintf("[%s] provides %s provider", pluginName, d.Name)
+		if d.Description != "" {
+			cap += ": " + d.Description
+		}
+		p.mu.Lock()
+		p.capabilities = append(p.capabilities, cap)
+		p.mu.Unlock()
 
 	case "channel":
-		log.Printf("[openclaw] %s: channel registration (no HomeAgent equivalent, logged only)", pluginName)
+		var d struct {
+			Name string `json:"name"`
+			Type string `json:"type"`
+		}
+		json.Unmarshal(params.Data, &d)
+		cap := fmt.Sprintf("[%s] registers channel: %s (type: %s)", pluginName, d.Name, d.Type)
+		p.mu.Lock()
+		p.capabilities = append(p.capabilities, cap)
+		p.mu.Unlock()
+
+	case "image_generation_provider":
+		var d struct{ Name string `json:"name"` }
+		json.Unmarshal(params.Data, &d)
+		p.mu.Lock()
+		p.capabilities = append(p.capabilities, fmt.Sprintf("[%s] image generation provider: %s", pluginName, d.Name))
+		p.mu.Unlock()
+
+	case "web_fetch_provider":
+		var d struct{ Name string `json:"name"` }
+		json.Unmarshal(params.Data, &d)
+		p.mu.Lock()
+		p.capabilities = append(p.capabilities, fmt.Sprintf("[%s] web fetch provider: %s", pluginName, d.Name))
+		p.mu.Unlock()
+
+	case "web_search_provider":
+		var d struct{ Name string `json:"name"` }
+		json.Unmarshal(params.Data, &d)
+		p.mu.Lock()
+		p.capabilities = append(p.capabilities, fmt.Sprintf("[%s] web search provider: %s", pluginName, d.Name))
+		p.mu.Unlock()
 
 	default:
-		log.Printf("[openclaw] %s: %s capability (no HomeAgent equivalent, logged only)", pluginName, params.Type)
+		var d struct {
+			Name        string `json:"name"`
+			Description string `json:"description"`
+		}
+		json.Unmarshal(params.Data, &d)
+		cap := fmt.Sprintf("[%s] capability: %s", pluginName, params.Type)
+		if d.Name != "" {
+			cap += " (" + d.Name + ")"
+		}
+		p.mu.Lock()
+		p.capabilities = append(p.capabilities, cap)
+		p.mu.Unlock()
 	}
+}
+
+func (p *Plugin) loadPySidecar(s *sdk.PluginSDK, dir, name string) error {
+	simPath := filepath.Join(p.simulatorDir, "pysim.py")
+	if err := os.MkdirAll(p.simulatorDir, 0755); err != nil {
+		return fmt.Errorf("create simulator dir: %w", err)
+	}
+	if err := os.WriteFile(simPath, []byte(pySimulatorSrc), 0644); err != nil {
+		return fmt.Errorf("write pysimulator: %w", err)
+	}
+
+	// 查找可用的 Python 解释器
+	pythonBin := "python3"
+	for _, candidate := range []string{"/usr/bin/python3", "/usr/local/bin/python3"} {
+		if _, err := os.Stat(candidate); err == nil {
+			pythonBin = candidate
+			break
+		}
+	}
+
+	sp, err := launchProcess(pythonBin, simPath, dir, name)
+	if err != nil {
+		return fmt.Errorf("launch pysimulator: %w", err)
+	}
+	if sp == nil {
+		return nil
+	}
+
+	// 处理注册通知 (同 OC 插件流程)
+	for done := false; !done; {
+		select {
+		case n := <-sp.NotifyChan():
+			p.translateAndRegister(n, sp, s, name)
+		default:
+			done = true
+		}
+	}
+	go p.notifyLoop(sp, s, name)
+
+	tools, err := sp.ListTools()
+	if err != nil {
+		sp.Close()
+		return fmt.Errorf("list tools: %w", err)
+	}
+	log.Printf("[openclaw] pysidecar %s registered %d tools", name, len(tools))
+
+	p.mu.Lock()
+	p.sidecars = append(p.sidecars, sp)
+	p.mu.Unlock()
+	return nil
 }
 
 func (p *Plugin) loadSidecar(s *sdk.PluginSDK, dir, name string) error {
@@ -263,7 +648,16 @@ func (p *Plugin) Stop() error {
 	}
 	p.sidecars = nil
 	p.skills = nil
+	p.manager = nil
+	p.sdk = nil
 	return nil
+}
+
+func errorResult(msg string) interface{} {
+	return map[string]interface{}{
+		"isError": true,
+		"content": msg,
+	}
 }
 
 // hasOCExtensions 检测 package.json 中是否有 openclaw.extensions 或 openclaw.runtimeExtensions
