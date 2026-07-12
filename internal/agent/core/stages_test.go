@@ -146,7 +146,7 @@ func TestStageHostRunStageAll(t *testing.T) {
 		return nil
 	})
 
-	host.RunStageAll(sdk.StageAfterOutput, &sdk.StageContext{})
+	host.RunStage(sdk.StageAfterOutput, &sdk.StageContext{})
 
 	if count != 2 {
 		t.Errorf("expected 2 handlers called, got %d", count)

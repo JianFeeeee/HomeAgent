@@ -3,7 +3,12 @@ waiter
 *.test
 build/
 *.so
-plugins/*/plugin.so
-
+*.db
+data/
 .tmp-plugins/
-qq
+.go/
+.local/
+internal/meta/
+internal/plugins/openclaw/manager/
+internal/plugins/openclaw/pysimulator/
+*.hmap

@@ -11,7 +11,7 @@ import (
 	"reflect"
 
 	sdk "gitcode.com/JianFeeeee/HomeAgent/internal/sdk"
-	sdkext "gitcode.com/JianFeeeee/homeagent-sdk/sdk"
+	pubsdk "gitcode.com/JianFeeeee/homeagent-sdk/sdk"
 )
 
 // .so 插件必须导出函数 NewPlugin，签名与 NativeFactory 一致：
@@ -27,7 +27,7 @@ const (
 
 type dynamicPlugin struct {
 	name string
-	impl sdkext.Plugin
+	impl pubsdk.Plugin
 }
 
 func (p *dynamicPlugin) Name() string { return p.name }
@@ -105,9 +105,9 @@ func tryLoadSO(dir, name string, config map[string]interface{}) (sdk.Plugin, err
 		}
 		return nil, fmt.Errorf("NewPlugin %s returned non-error second value", name)
 	}
-	plg, ok := outs[0].Interface().(sdkext.Plugin)
+	plg, ok := outs[0].Interface().(pubsdk.Plugin)
 	if !ok {
-		return nil, fmt.Errorf("NewPlugin in %s returned value that does not implement external sdk.Plugin", soPath)
+		return nil, fmt.Errorf("NewPlugin in %s returned value that does not implement pubsdk.Plugin", soPath)
 	}
 
 	return &dynamicPlugin{name: name, impl: plg}, nil

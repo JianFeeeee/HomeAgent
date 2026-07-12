@@ -164,15 +164,12 @@ func (v *VM) LoadAdapter(path string) error {
 
 func (v *VM) CallTransformRequest(name, rawJSON string) (string, error) {
 	v.mu.Lock()
-	adapter, ok := v.loaded[name]
-	v.mu.Unlock()
+	defer v.mu.Unlock()
 
+	adapter, ok := v.loaded[name]
 	if !ok {
 		return "", fmt.Errorf("adapter %s not loaded", name)
 	}
-
-	v.mu.Lock()
-	defer v.mu.Unlock()
 
 	fn := adapter.RawGetString("transform_request")
 	if fn == nil {
@@ -194,15 +191,12 @@ func (v *VM) CallTransformRequest(name, rawJSON string) (string, error) {
 
 func (v *VM) CallTransformResponse(name, rawJSON string) (string, error) {
 	v.mu.Lock()
-	adapter, ok := v.loaded[name]
-	v.mu.Unlock()
+	defer v.mu.Unlock()
 
+	adapter, ok := v.loaded[name]
 	if !ok {
 		return rawJSON, nil
 	}
-
-	v.mu.Lock()
-	defer v.mu.Unlock()
 
 	fn := adapter.RawGetString("transform_response")
 	if fn == nil {
@@ -224,15 +218,12 @@ func (v *VM) CallTransformResponse(name, rawJSON string) (string, error) {
 
 func (v *VM) CallTransformStreamChunk(name, rawLine string) (string, error) {
 	v.mu.Lock()
-	adapter, ok := v.loaded[name]
-	v.mu.Unlock()
+	defer v.mu.Unlock()
 
+	adapter, ok := v.loaded[name]
 	if !ok {
 		return rawLine, nil
 	}
-
-	v.mu.Lock()
-	defer v.mu.Unlock()
 
 	fn := adapter.RawGetString("transform_stream_chunk")
 	if fn == nil {
@@ -257,15 +248,12 @@ func (v *VM) CallTransformStreamChunk(name, rawLine string) (string, error) {
 
 func (v *VM) GetAdapterEndpoint(name string) string {
 	v.mu.Lock()
-	adapter, ok := v.loaded[name]
-	v.mu.Unlock()
+	defer v.mu.Unlock()
 
+	adapter, ok := v.loaded[name]
 	if !ok {
 		return ""
 	}
-
-	v.mu.Lock()
-	defer v.mu.Unlock()
 
 	if ep := adapter.RawGetString("endpoint"); ep != nil {
 		return ep.String()
@@ -275,15 +263,12 @@ func (v *VM) GetAdapterEndpoint(name string) string {
 
 func (v *VM) GetAdapterHeaders(name string) map[string]string {
 	v.mu.Lock()
-	adapter, ok := v.loaded[name]
-	v.mu.Unlock()
+	defer v.mu.Unlock()
 
+	adapter, ok := v.loaded[name]
 	if !ok {
 		return nil
 	}
-
-	v.mu.Lock()
-	defer v.mu.Unlock()
 
 	headers := make(map[string]string)
 	if ht := adapter.RawGetString("headers"); ht != nil {

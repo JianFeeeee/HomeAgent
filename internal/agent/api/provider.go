@@ -197,7 +197,10 @@ func (p *OpenAIProvider) Chat(ctx context.Context, req *CompletionRequest) (*Com
 
 	if resp.StatusCode != 200 {
 		respBody, _ := io.ReadAll(resp.Body)
-		return nil, fmt.Errorf("api error %d: %s", resp.StatusCode, string(respBody))
+		return nil, &ProviderError{
+			StatusCode: resp.StatusCode,
+			Message:    fmt.Sprintf("api error %d: %s", resp.StatusCode, string(respBody)),
+		}
 	}
 
 	var rawResult struct {
@@ -445,7 +448,10 @@ func (p *LuaAdaptedProvider) Chat(ctx context.Context, req *CompletionRequest) (
 	}
 
 	if resp.StatusCode != 200 {
-		return nil, fmt.Errorf("api error %d: %s", resp.StatusCode, string(rawResp))
+		return nil, &ProviderError{
+			StatusCode: resp.StatusCode,
+			Message:    fmt.Sprintf("api error %d: %s", resp.StatusCode, string(rawResp)),
+		}
 	}
 
 	unifiedJSON, err := p.vm.CallTransformResponse(p.adapter, string(rawResp))
@@ -578,16 +584,28 @@ func (s *SSEScanner) Scan() bool {
 
 func (s *SSEScanner) Text() string { return s.pending }
 
+type providerStatus struct {
+	failCount    int
+	unavailableUntil time.Time
+}
+
 type ProviderManager struct {
 	mu        sync.RWMutex
 	providers map[string]Provider
 	order     []string
 	default_  string
+	status    map[string]*providerStatus
 }
+
+const (
+	providerCooldownBase = 30 * time.Second
+	providerCooldownMax  = 30 * time.Minute
+)
 
 func NewProviderManager() *ProviderManager {
 	return &ProviderManager{
 		providers: make(map[string]Provider),
+		status:    make(map[string]*providerStatus),
 	}
 }
 
@@ -650,11 +668,58 @@ func (m *ProviderManager) List() []string {
 	return names
 }
 
+func (m *ProviderManager) MarkUnavailable(name string) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	st := m.status[name]
+	if st == nil {
+		st = &providerStatus{}
+		m.status[name] = st
+	}
+	st.failCount++
+	cooldown := providerCooldownBase * time.Duration(1<<(st.failCount-1))
+	if cooldown > providerCooldownMax {
+		cooldown = providerCooldownMax
+	}
+	st.unavailableUntil = time.Now().Add(cooldown)
+}
+
+// ReportStatus records an HTTP status code for a provider, allowing auth errors
+// (401/403) to be distinguished from transient failures.
+func (m *ProviderManager) ReportStatus(name string, statusCode int) {
+	if statusCode == 401 || statusCode == 403 {
+		m.MarkUnavailable(name)
+	}
+}
+
+func (m *ProviderManager) ResetAvailability(name string) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	delete(m.status, name)
+}
+
+func (m *ProviderManager) IsAvailable(name string) bool {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	st, ok := m.status[name]
+	if !ok {
+		return true
+	}
+	return time.Now().After(st.unavailableUntil)
+}
+
 func (m *ProviderManager) OrderedProviders() []Provider {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 	list := make([]Provider, 0, len(m.order))
+	// 把默认 provider 放第一位，其余按注册顺序
+	if def, ok := m.providers[m.default_]; ok {
+		list = append(list, def)
+	}
 	for _, name := range m.order {
+		if name == m.default_ {
+			continue
+		}
 		if p, ok := m.providers[name]; ok {
 			list = append(list, p)
 		}
@@ -677,15 +742,14 @@ type rawToolCall struct {
 	} `json:"function"`
 }
 
-func messagesToMap(msgs []Message) []interface{} {
-	result := make([]interface{}, len(msgs))
-	for i, m := range msgs {
-		result[i] = map[string]interface{}{
-			"role":    m.Role,
-			"content": m.Content,
-		}
-	}
-	return result
+// ProviderError wraps an HTTP-level error with status code for precise auth detection.
+type ProviderError struct {
+	StatusCode int
+	Message    string
+}
+
+func (e *ProviderError) Error() string {
+	return e.Message
 }
 
 func getString(m map[string]interface{}, key string) string {

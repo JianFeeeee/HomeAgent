@@ -53,29 +53,6 @@ func TestExecuteOutputListChannelsEmpty(t *testing.T) {
 	}
 }
 
-func TestExecuteOutputChannelTool(t *testing.T) {
-	a := &Agent{}
-	tc := agentAPI.ToolCall{Name: "output_set_channel", Arguments: map[string]interface{}{
-		"channel": "voice",
-	}}
-	result := a.executeOutputChannelTool(tc)
-	if a.currentOutputChannel != "voice" {
-		t.Errorf("expected channel 'voice', got %q", a.currentOutputChannel)
-	}
-	if result == "" {
-		t.Error("expected non-empty result")
-	}
-}
-
-func TestExecuteOutputChannelToolEmpty(t *testing.T) {
-	a := &Agent{}
-	tc := agentAPI.ToolCall{Name: "output_set_channel", Arguments: map[string]interface{}{}}
-	result := a.executeOutputChannelTool(tc)
-	if result != "请指定输出通道名称，可选: voice, email, screen, http" {
-		t.Errorf("unexpected result: %s", result)
-	}
-}
-
 func TestExecuteOutputSendTool(t *testing.T) {
 	io := agentIO.NewIOManager()
 	io.RegisterDevice(&mockOutputDevice{
@@ -154,7 +131,6 @@ func TestBuildToolDefsOutputToolsAlwaysPresent(t *testing.T) {
 	a := &Agent{io: io, knowledge: nil, docStore: nil, pluginReg: nil}
 	tools := a.buildToolDefs()
 
-	foundSetChannel := false
 	foundSend := false
 	foundList := false
 	for _, td := range tools {
@@ -168,16 +144,11 @@ func TestBuildToolDefsOutputToolsAlwaysPresent(t *testing.T) {
 		}
 		name, _ := fn["name"].(string)
 		switch name {
-		case "output_set_channel":
-			foundSetChannel = true
 		case "output_send":
 			foundSend = true
 		case "output_list_channels":
 			foundList = true
 		}
-	}
-	if !foundSetChannel {
-		t.Error("output_set_channel should always be in tools")
 	}
 	if !foundSend {
 		t.Error("output_send should always be in tools")
@@ -191,8 +162,8 @@ func TestGetAllToolsEmpty(t *testing.T) {
 	io := agentIO.NewIOManager()
 	a := &Agent{io: io}
 	tools := a.buildToolDefs()
-	// should have at least output_set_channel, output_send, output_list_channels
-	if len(tools) < 3 {
-		t.Errorf("expected at least 3 tools, got %d", len(tools))
+	// should have at least output_send, output_list_channels
+	if len(tools) < 2 {
+		t.Errorf("expected at least 2 tools, got %d", len(tools))
 	}
 }
