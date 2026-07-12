@@ -64,30 +64,67 @@ eventLoop() → processTextInput()
 
 ## 三层记忆
 
+### 记忆流转
+
 ```
-                            输入
-                              │
-                              ▼
-Context (RelevanceContext) ←────────────────┐
-  ├─ 内存中 topK 条事件, TF-IDF 评分         │
-  ├─ keep=30, 超出 → Document               │
-  └─ JSON 持久化防崩溃                      │
-                              │             │
-                              ▼             │
-Document (document.Store) ────┤             │
-  ├─ JSON 文件 + TF-IDF 向量索引            │
-  ├─ 3 层冷化: 72h+access≤2 → Graph        │
-  └─ 用户也可主动 commit                    │
-                              │             │
-                              ▼             │
-Graph (GraphDB + Indexer) ────┘             │
-  ├─ SQLite: entities / relations 表        │
-  ├─ 搜索: BFS 遍历邻居                      │
-  └─ 蒸馏: Distiller 原始记录→三元组         │
-                              │             │
-                              ▼             │
-Context.Append(response) ───────────────────┘
+① Context (工作窗口)
+   RelevanceContext — 内存 events[] + JSON持久化
+   Append: 每次输入, Vectorize(char 1-2gram TF-IDF)
+   Prune:  TF-IDF CosineSimilarity, 保留 topK + 最近10条
+       ├── 保留 → timeline → system prompt (按时间排序)
+       └── 低分 → Document 层归档 (ContextToDoc)
+   Save: 5s debounce 写盘
+
+        ↓ Prune 归档                          ↑ LLM 主动召回
+
+② Document (文件记忆)
+   DocStore — JSON文件 + TF-IDF InvertedIndex
+   写入: Prune归档 / doc_commit / Graph快照(syncGraphToDocs)
+   读取:
+       ├── 自动注入: Query(input, top3) → 【相关记忆文档】→ system prompt (只读, 更新 AccessCount)
+       └── LLM主动:  doc_query → Consume(读取并删除)
+                         → 逐条 context.Append{Timestamp: d.CreatedAt, Source: "cold_storage"}
+                         → 文档以原始时间戳写入 context 时间线, 从 docStore 删除
+   冷化: FindColdDocs(72h, ≤2次访问) → docToTriples → Graph
+
+        ↓ 冷文档蒸馏                           ↑ 自动召回
+
+③ Graph (图数据库)
+   SQLite — entities + relations 表
+   写入: memory_commit / 冷文档蒸馏 / Pipeline 规则蒸馏
+   读取:
+       ├── 自动召回: Indexer.BuildContext(input)
+       │     → TF-IDF 实体名搜索 → BFS depth=2
+       │     → 【记忆索引】→ system prompt
+       └── LLM主动: memory_recall / doc_query
+   Social: person_query / set_trait / relate (包装 GraphDB)
+
+④ 蒸馏管道 (每30min心跳)
+   distillContext → 窗口>2×maxSize → 强制Prune
+   syncGraphToDocs → Graph 快照写入 Document(跨层可搜索)
+   reorgGraph:
+       Step1: indexer.Sync — 重建实体TF-IDF向量索引
+       Step2: docStore.Reindex — 重建文档TF-IDF向量索引
+       Step3: 冷文档 → docToTriples → GraphDB.Commit
+       Step4: 实体相似度(Bigram Jaccard>0.75) → consolidation → LLM判断合并
+       Step5: evaluateGraphQuality → LLM判断保留/删除
+
+⑤ Pipeline 规则蒸馏器 (每心跳)
+   distillOnce → 正则匹配个人信息:
+     我叫X / 我住在X / 我喜欢X / 我X岁 / 我的工作是X
+     → 三元组 → GraphDB.Commit
 ```
+
+### TF-IDF 向量化（char 1-2 gram）
+
+TF-IDF 是贯穿三层记忆的核心算法，在 4 个独立位置以不同方式使用：
+
+| 位置 | 文件 | 用途 | 算法 |
+|------|------|------|------|
+| Context Prune | `context.go:162` | 裁剪低相关性上下文事件 | CosineSimilarity(queryVec, evt.Vector) |
+| DocStore Query | `document.go:205` | 从文档记忆召回相关内容 | InvertedIndex + CosineSimilarity |
+| Indexer 实体搜索 | `indexer.go:149` | 从Graph召回相关实体 | InvertedIndex + CosineSimilarity |
+| 实体相似度检测 | `agent.go:2297` | 检测Graph中相似实体 | Bigram Jaccard (>0.75 → consolidation) |
 
 ### Context 层
 
