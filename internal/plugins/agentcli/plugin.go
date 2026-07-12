@@ -345,6 +345,10 @@ func (p *Plugin) handleCreate(s *sdk.PluginSDK, args map[string]interface{}) (in
 			timeout = d
 		}
 	}
+	// SSH 命令自动使用更长的超时（5 分钟）
+	if timeoutStr == "" && (strings.HasPrefix(command, "ssh ") || strings.HasPrefix(command, "ssh -")) {
+		timeout = 5 * time.Minute
+	}
 
 	rows := uint16(24)
 	cols := uint16(80)

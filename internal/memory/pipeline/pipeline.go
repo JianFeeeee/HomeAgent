@@ -88,7 +88,7 @@ func (d *Distiller) flush() {
 	if len(d.records) == 0 {
 		return
 	}
-	path := filepath.Join(d.rawPath, fmt.Sprintf("raw_%d.jsonl", time.Now().UnixNano()))
+	path := filepath.Join(d.rawPath, fmt.Sprintf("raw_%d.tsv", time.Now().UnixNano()))
 	f, err := os.Create(path)
 	if err != nil {
 		log.Printf("[memory] flush error: %v", err)
@@ -113,7 +113,8 @@ func (d *Distiller) loadExisting() {
 	}
 	var files []fileInfo
 	for _, entry := range entries {
-		if filepath.Ext(entry.Name()) != ".jsonl" {
+		ext := filepath.Ext(entry.Name())
+		if ext != ".tsv" && ext != ".jsonl" {
 			continue
 		}
 		info, err := entry.Info()
@@ -296,8 +297,8 @@ func extractName(s string) string {
 	}{
 		{"我叫", ""},
 		{"我的名字是", ""},
-		{"我是", ""},
 		{"名字是", ""},
+		{"我是", ""},
 	}
 	s = strings.TrimSpace(s)
 	for _, p := range patterns {
@@ -312,6 +313,10 @@ func extractName(s string) string {
 				if idx := strings.Index(candidate, sep); idx > 0 {
 					candidate = candidate[:idx]
 				}
+			}
+			// "我是张三"(姓名) vs "我是一个程序员"(职业)：名字通常 ≤4 字符
+			if p.prefix == "我是" && len([]rune(candidate)) > 4 {
+				continue
 			}
 			if len(candidate) > 0 && len(candidate) < 20 {
 				return candidate

@@ -98,7 +98,5 @@ return adapter
 1. 在 `internal/lua/adapters/` 下创建 `<name>.lua`
 2. 脚本定义 `transform_request` 和 `transform_response`
 3. （可选）定义 `transform_stream_chunk` 支持流式
-4. 在 `config/config.go` 的 `Sources` 中添加条目
-5. 在 `config/config.yaml` 中添加对应源
-6. 编译验证：`go build ./cmd/homed/`
-7. 测试验证：`go test ./...`
+4. 编译验证：`go build ./cmd/homed/`
+5. 测试验证：`go test ./...`

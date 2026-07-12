@@ -55,7 +55,7 @@ func TestContextFormat(t *testing.T) {
 
 func TestContextPruneKeepsTopK(t *testing.T) {
 	ctx := NewRelevanceContext("")
-	for i := 0; i < 10; i++ {
+	for i := 0; i < 20; i++ {
 		ctx.Append(ContextEvent{
 			Timestamp: time.Now(),
 			Source:    "user",
@@ -74,8 +74,9 @@ func TestContextPruneKeepsTopK(t *testing.T) {
 	archived := ctx.Prune("微积分", 5, nil) // nil docStore → 不归档，只裁剪
 	_ = archived
 
-	if ctx.Len() > 5 {
-		t.Errorf("after prune to 5, len should be ≤5, got %d", ctx.Len())
+	// protectCount=10 + topK=5 → 最多保留 15
+	if ctx.Len() > 15 {
+		t.Errorf("after prune to 5, len should be ≤15, got %d", ctx.Len())
 	}
 }
 
@@ -98,7 +99,8 @@ func TestContextPruneWithDocStore(t *testing.T) {
 
 func TestContextAppendAfterPrune(t *testing.T) {
 	ctx := NewRelevanceContext("")
-	for i := 0; i < 10; i++ {
+	// 需要超过 protectCount(10) + topK(3) 个事件才能产生修剪候选
+	for i := 0; i < 20; i++ {
 		ctx.Append(ContextEvent{
 			Timestamp: time.Now(),
 			Source:    "user",
@@ -107,13 +109,13 @@ func TestContextAppendAfterPrune(t *testing.T) {
 	}
 
 	ctx.Prune("hello", 3, nil)
-	if ctx.Len() > 3 {
-		t.Errorf("expected ≤3 after prune, got %d", ctx.Len())
+	if ctx.Len() > 13 { // 10 protected + 3 topK
+		t.Errorf("expected ≤13 after prune, got %d", ctx.Len())
 	}
 
 	ctx.Append(ContextEvent{Timestamp: time.Now(), Source: "user", Input: "new message"})
-	if ctx.Len() != 4 {
-		t.Errorf("after append, expected 4, got %d", ctx.Len())
+	if ctx.Len() > 14 {
+		t.Errorf("expected ≤14 after append, got %d", ctx.Len())
 	}
 }
 

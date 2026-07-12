@@ -10,14 +10,29 @@ import (
 	"log"
 	"net"
 	"net/http"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
 	"sync"
+	"time"
 
 	"gitcode.com/JianFeeeee/HomeAgent/internal/plugin"
 	sdk "gitcode.com/JianFeeeee/HomeAgent/internal/sdk"
 )
+
+var downloadClient = &http.Client{
+	Timeout: 30 * time.Second,
+	CheckRedirect: func(req *http.Request, via []*http.Request) error {
+		if len(via) >= 10 {
+			return fmt.Errorf("too many redirects")
+		}
+		if req.URL.Scheme != "http" && req.URL.Scheme != "https" {
+			return fmt.Errorf("redirect to disallowed scheme: %s", req.URL.Scheme)
+		}
+		return nil
+	},
+}
 
 var (
 	PluginDir string          // 由 main.go 设置
@@ -260,10 +275,18 @@ func (p *Plugin) handlePluginByID(w http.ResponseWriter, r *http.Request) {
 
 // ======== Core Logic ========
 
-func (p *Plugin) installFromURL(url string) (interface{}, error) {
-	log.Printf("[pluginmgr] downloading: %s", url)
+func (p *Plugin) installFromURL(rawURL string) (interface{}, error) {
+	log.Printf("[pluginmgr] downloading: %s", rawURL)
 
-	resp, err := http.Get(url)
+	parsed, err := url.Parse(rawURL)
+	if err != nil {
+		return nil, fmt.Errorf("invalid URL: %w", err)
+	}
+	if parsed.Scheme != "http" && parsed.Scheme != "https" {
+		return nil, fmt.Errorf("unsupported URL scheme: %s (only http/https allowed)", parsed.Scheme)
+	}
+
+	resp, err := downloadClient.Get(rawURL)
 	if err != nil {
 		return nil, fmt.Errorf("download failed: %w", err)
 	}

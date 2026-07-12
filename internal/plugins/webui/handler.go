@@ -20,6 +20,7 @@ import (
 	internalConfig "gitcode.com/JianFeeeee/HomeAgent/internal/config"
 	"gitcode.com/JianFeeeee/HomeAgent/internal/events"
 	"gitcode.com/JianFeeeee/HomeAgent/internal/knowledge"
+	"gitcode.com/JianFeeeee/HomeAgent/internal/meta"
 	luaVM "gitcode.com/JianFeeeee/HomeAgent/internal/lua"
 	"gitcode.com/JianFeeeee/HomeAgent/internal/memory"
 	"gitcode.com/JianFeeeee/HomeAgent/internal/memory/text"
@@ -290,7 +291,7 @@ func (h *Handler) handleStatus(w http.ResponseWriter, r *http.Request) {
 		"status":    "running",
 		"uptime":    time.Since(h.startTime).String(),
 		"agents":    len(agents),
-		"version":   "0.1.0",
+		"version":   meta.Version,
 		"startedAt": h.startTime,
 	})
 }

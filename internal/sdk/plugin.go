@@ -3,7 +3,7 @@ package sdk
 import (
 	"log"
 
-	sdkext "gitcode.com/JianFeeeee/homeagent-sdk/sdk"
+	pubsdk "gitcode.com/JianFeeeee/homeagent-sdk/sdk"
 	agentIO "gitcode.com/JianFeeeee/HomeAgent/internal/agent/io"
 	"gitcode.com/JianFeeeee/HomeAgent/internal/events"
 )
@@ -14,61 +14,68 @@ type Plugin interface {
 	Stop() error
 }
 
-type ToolHandler = sdkext.ToolHandler
-type StageHandler = sdkext.StageHandler
+type ToolHandler = pubsdk.ToolHandler
+type StageHandler = pubsdk.StageHandler
 
-type Stage = sdkext.Stage
+type Stage = pubsdk.Stage
 
 const (
-	StageOnInput        = sdkext.StageOnInput
-	StagePreAction      = sdkext.StagePreAction
-	StagePostAction     = sdkext.StagePostAction
-	StageBeforeToolcall = sdkext.StageBeforeToolcall
-	StageAfterToolcall  = sdkext.StageAfterToolcall
-	StageBeforeOutput   = sdkext.StageBeforeOutput
-	StageAfterOutput    = sdkext.StageAfterOutput
+	StageOnInput        = pubsdk.StageOnInput
+	StagePreAction      = pubsdk.StagePreAction
+	StagePostAction     = pubsdk.StagePostAction
+	StageBeforeToolcall = pubsdk.StageBeforeToolcall
+	StageAfterToolcall  = pubsdk.StageAfterToolcall
+	StageBeforeOutput   = pubsdk.StageBeforeOutput
+	StageAfterOutput    = pubsdk.StageAfterOutput
 )
 
-type StageContext = sdkext.StageContext
-type MemItem = sdkext.MemItem
-type ToolCall = sdkext.ToolCall
-type ToolResult = sdkext.ToolResult
-type ToolDef = sdkext.ToolDef
-
-type ToolRegistrar = func(name string, def ToolDef, handler ToolHandler) error
-type StageRegistrar = func(stage Stage, handler StageHandler)
-type APIRegistrar = func(name string) error
-
-type ioAdapter struct{ iom *agentIO.IOManager }
-
-func (i ioAdapter) InjectInterruptText(source, channel, text string) {
-	if i.iom != nil {
-		i.iom.InjectInterrupt(source, channel, map[string]interface{}{"type": "text", "content": text})
-	}
-}
-
-func (i ioAdapter) InjectText(source, channel, text string) {
-	if i.iom != nil {
-		i.iom.InjectInputTo(source, channel, "text", map[string]interface{}{"content": text})
-	}
-}
-
-func (i ioAdapter) InjectTextNoMemory(source, channel, text string) {
-	if i.iom != nil {
-		i.iom.InjectInputTo(source, channel, "text", map[string]interface{}{"content": text, "no_memory": true})
-	}
-}
+type StageContext = pubsdk.StageContext
+type MemItem = pubsdk.MemItem
+type ToolCall = pubsdk.ToolCall
+type ToolResult = pubsdk.ToolResult
+type ToolDef = pubsdk.ToolDef
+type IOInjector = pubsdk.IOInjector
+type ToolRegistrar = pubsdk.ToolRegistrar
+type StageRegistrar = pubsdk.StageRegistrar
+type APIRegistrar = pubsdk.APIRegistrar
 
 type PluginSDK struct {
-	*sdkext.PluginSDK
+	*pubsdk.PluginSDK
 	iom      *agentIO.IOManager
 	eventBus *events.Bus
 	logger   *log.Logger
 }
 
-func New(name string, iom *agentIO.IOManager, eventBus *events.Bus, mem MemoryAPI, textMem TextMemoryAPI, docMem DocMemoryAPI, know KnowledgeAPI, llm LLMAPI, sett SettingsAPI, regTool ToolRegistrar, regStage StageRegistrar, regAPI APIRegistrar) *PluginSDK {
-	base := sdkext.New(name, sett, regTool, regStage, regAPI)
-	base.SetIOInjector(ioAdapter{iom: iom})
+// ioAdapter 桥接 IOManager 到公共 SDK 的 IOInjector 接口，
+// 确保外部插件通过 s.InjectText() 等方法的调用能被路由到内核 IO 层。
+type ioAdapter struct{ iom *agentIO.IOManager }
+
+func (a ioAdapter) InjectInterruptText(source, channel, text string) {
+	if a.iom != nil {
+		a.iom.InjectInterrupt(source, channel, map[string]interface{}{"type": "text", "content": text})
+	}
+}
+
+func (a ioAdapter) InjectText(source, channel, text string) {
+	if a.iom != nil {
+		a.iom.InjectInputTo(source, channel, "text", map[string]interface{}{"content": text})
+	}
+}
+
+func (a ioAdapter) InjectTextNoMemory(source, channel, text string) {
+	if a.iom != nil {
+		a.iom.InjectInputTo(source, channel, "text", map[string]interface{}{"content": text, "no_memory": true})
+	}
+}
+
+func New(name string, iom *agentIO.IOManager, eventBus *events.Bus, mem MemoryAPI,
+	textMem TextMemoryAPI, docMem DocMemoryAPI, know KnowledgeAPI, llm LLMAPI,
+	sett SettingsAPI, regTool ToolRegistrar, regStage StageRegistrar, regAPI APIRegistrar,
+) *PluginSDK {
+	base := pubsdk.New(name, sett, regTool, regStage, regAPI)
+	if iom != nil {
+		base.SetIOInjector(ioAdapter{iom: iom})
+	}
 	base.SetMemoryAPI(mem)
 	base.SetTextMemoryAPI(textMem)
 	base.SetDocMemoryAPI(docMem)
@@ -152,5 +159,3 @@ func (s *PluginSDK) Subscribe(eventType events.EventType, handler events.Handler
 	}
 	return func() {}
 }
-
-func (s *PluginSDK) Logger() *log.Logger { return s.logger }

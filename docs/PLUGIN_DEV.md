@@ -5,12 +5,12 @@
 HomeAgent 的所有外部交互能力都来自插件。插件通过 `PluginSDK`（Go API）与内核交互。
 
 **SDK 仓库**：插件开发工具、模板代码和示例插件统一托管在
-SDK 仓库。
+[homeagent-sdk](https://gitcode.com/JianFeeeee/homeagent-sdk) 仓库。
 
 ```bash
 git clone https://gitcode.com/JianFeeeee/homeagent-sdk.git
 cd homeagent-sdk
-tools/plugin-dev/scaffold.sh myplugin ./plugins/myplugin
+hack/plugin-dev/scaffold.sh myplugin ./plugins/myplugin
 ```
 
 每个插件实现一个三方法接口：
@@ -354,7 +354,7 @@ pluginReg.Load(plgDir)  // 之后调用
 动态插件是独立于 HomeAgent 内核编译的 Go 插件，使用外部的 [Plugin SDK](https://gitcode.com/JianFeeeee/homeagent-sdk)
 而非内核内部的 SDK 包。
 
-完整的外部插件示例在 SDK 仓库的 `example/` 目录下：`qq`、`files`、`memo`、`web`。
+完整的外部插件示例在 [homeagent-sdk](https://gitcode.com/JianFeeeee/homeagent-sdk) 仓库的 `example/` 目录下：`qq`、`files`、`memo`、`web`、`bili`、`editdoc`、`a2a`、`ocr`。
 
 ### 快速开始
 
@@ -363,7 +363,7 @@ pluginReg.Load(plgDir)  // 之后调用
 ```bash
 git clone https://gitcode.com/JianFeeeee/homeagent-sdk.git
 cd homeagent-sdk
-tools/plugin-dev/scaffold.sh myplugin ./plugins/myplugin
+hack/plugin-dev/scaffold.sh myplugin ./plugins/myplugin
 ```
 
 生成的代码：
@@ -393,6 +393,19 @@ func (p *myPlugin) Stop() error { return nil }
 
 ### 编译
 
+> ⚠️ **内核-插件编译绑定**：Go 的 `-buildmode=plugin` 要求 .so 插件与宿主内核（`homed`）的**所有重叠依赖包的 build ID 完全一致**。
+> 因此**每次重新编译内核后，所有外部 .so 插件必须同步重新编译**，否则 `plugin.Open` 将报错
+> `"plugin was built with a different version of package XXX"`。
+>
+> 重新编译时需确保插件使用与内核相同的 SDK 版本和本地源码路径：
+> ```bash
+> SDK_VER="v0.0.0-20260708004841-e9bdcf9304b0"
+> SDK_PATH="/path/to/homeagent-sdk-repo"   # 与 go.work use 指向同一路径
+> go mod edit -require "gitcode.com/JianFeeeee/homeagent-sdk@${SDK_VER}"
+> go mod edit -replace "gitcode.com/JianFeeeee/homeagent-sdk@${SDK_VER}=${SDK_PATH}"
+> ```
+> 然后通过 `pluginmgr` 的 HTTP API (`:9876`) 或 `plugin_install` 工具重新安装。
+
 ```bash
 cd <SDK_REPO_ROOT>
 go build -buildmode=plugin -o plugins/myplugin/plugin.so plugins/myplugin/
@@ -421,7 +434,7 @@ cd plugins/myplugin && make
 使用 SDK 仓库的打包工具生成 `.hmap` 分发包：
 
 ```bash
-tools/plugin-dev/packager.sh plugins/myplugin
+hack/plugin-dev/package.sh plugins/myplugin
 # 输出: dist/myplugin-0.1.0.hmap
 ```
 
@@ -461,7 +474,14 @@ SDK 仓库的 `example/qq/` 目录提供了一个完整的 QQ 集成插件示例
 
 | 插件 | 位置 | 特点 |
 |------|------|------|
-| QQ | `example/qq/` in [homeagent-sdk](https://gitcode.com/JianFeeeee/homeagent-sdk) | NapCat 框架对接，14 个工具 |
+| QQ | `example/qq/` in [homeagent-sdk](https://gitcode.com/JianFeeeee/homeagent-sdk) | NapCat 框架对接，17 个工具，RCON 转发/文档读取/视频下载/CQ码解析 |
+| Files | `example/files/` in homeagent-sdk | 文件系统操作，4 种写入模式，沙箱隔离 |
+| Web | `example/web/` in homeagent-sdk | DuckDuckGo 搜索 + 网页抓取，SSRF 防护 |
+| Memo | `example/memo/` in homeagent-sdk | 备忘管理，PreAction 注入 + 定时打断双提醒 |
+| Bili | `example/bili/` in homeagent-sdk | B 站视频下载（yt-dlp） |
+| EditDoc | `example/editdoc/` in homeagent-sdk | Office 文档编辑与格式转换 |
+| A2A | `example/a2a/` in homeagent-sdk | Agent-to-Agent 协议 |
+| OCR | `example/ocr/` in homeagent-sdk | 离线文字识别（Tesseract） |
 | 你的插件 | `plugins/yourplugin/` | 使用 SDK 脚手架生成 |
 
 ---

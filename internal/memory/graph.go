@@ -526,7 +526,7 @@ func (g *GraphDB) Introspect() (map[string]interface{}, error) {
 // MergeEntities 合并两个实体：将 sourceName 的所有信息合并到 targetName
 // 1. sourceName 的所有关系重新指向 targetName
 // 2. targetName 的 mention_count 增加 sourceName 的计数
-// 3. sourceName 标记为 merged
+// 3. sourceName 彻底删除（不再残留 @merged_ 实体）
 // 返回 (关系的重定向数, error)
 func (g *GraphDB) MergeEntities(sourceName, targetName string) (int, error) {
 	g.mu.Lock()
@@ -554,7 +554,7 @@ func (g *GraphDB) MergeEntities(sourceName, targetName string) (int, error) {
 		return 0, fmt.Errorf("cannot merge entity with itself")
 	}
 
-	// 重定向 source → target 的关系（作为 source）
+	// 重定向 source → target 的活跃关系（作为 source）
 	res, err := tx.Exec(
 		`UPDATE relations SET source_id = ?, updated_at = CURRENT_TIMESTAMP
 		 WHERE source_id = ? AND status = 'active'`,
@@ -565,7 +565,7 @@ func (g *GraphDB) MergeEntities(sourceName, targetName string) (int, error) {
 	}
 	redirectedSource, _ := res.RowsAffected()
 
-	// 重定向 source → target 的关系（作为 target）
+	// 重定向 source → target 的活跃关系（作为 target）
 	res, err = tx.Exec(
 		`UPDATE relations SET target_id = ?, updated_at = CURRENT_TIMESTAMP
 		 WHERE target_id = ? AND status = 'active'`,
@@ -586,6 +586,12 @@ func (g *GraphDB) MergeEntities(sourceName, targetName string) (int, error) {
 		return 0, err
 	}
 
+	// 清理 source 残留的非活跃关系（archived/deleted），否则外键约束阻止删除实体
+	_, err = tx.Exec(`DELETE FROM relations WHERE source_id = ? OR target_id = ?`, sourceID, sourceID)
+	if err != nil {
+		return 0, err
+	}
+
 	// 更新 target 的 mention_count
 	_, err = tx.Exec(
 		`UPDATE entities SET mention_count = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?`,
@@ -595,14 +601,8 @@ func (g *GraphDB) MergeEntities(sourceName, targetName string) (int, error) {
 		return 0, err
 	}
 
-	// 标记 source 为 merged（改名避免 UNIQUE 冲突）
-	_, err = tx.Exec(
-		`UPDATE entities SET name = ? || '@merged_' || ?,
-			mention_count = 0,
-			updated_at = CURRENT_TIMESTAMP
-		 WHERE id = ?`,
-		sourceName, time.Now().Format("20060102150405"), sourceID,
-	)
+	// 彻底删除 source 实体（所有关系已重定向，自引用已删除）
+	_, err = tx.Exec(`DELETE FROM entities WHERE id = ?`, sourceID)
 	if err != nil {
 		return 0, err
 	}
@@ -613,6 +613,36 @@ func (g *GraphDB) MergeEntities(sourceName, targetName string) (int, error) {
 
 	total := int(redirectedSource + redirectedTarget)
 	return total, nil
+}
+
+// DeleteEntity 彻底删除一个实体及其所有关联关系。
+func (g *GraphDB) DeleteEntity(name string) error {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+
+	tx, err := g.db.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+
+	var id int64
+	err = tx.QueryRow("SELECT id FROM entities WHERE name = ?", name).Scan(&id)
+	if err != nil {
+		return fmt.Errorf("entity '%s' not found: %w", name, err)
+	}
+
+	_, err = tx.Exec(`DELETE FROM relations WHERE source_id = ? OR target_id = ?`, id, id)
+	if err != nil {
+		return err
+	}
+
+	_, err = tx.Exec(`DELETE FROM entities WHERE id = ?`, id)
+	if err != nil {
+		return err
+	}
+
+	return tx.Commit()
 }
 
 func (g *GraphDB) Archive(days int) (int, error) {

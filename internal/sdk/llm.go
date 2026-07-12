@@ -1,29 +1,5 @@
 package sdk
 
-import (
-	sdkext "gitcode.com/JianFeeeee/homeagent-sdk/sdk"
-	agentAPI "gitcode.com/JianFeeeee/HomeAgent/internal/agent/api"
-)
+import pubsdk "gitcode.com/JianFeeeee/homeagent-sdk/sdk"
 
-type LLMAPI = sdkext.LLMAPI
-
-type llmImpl struct{ mgr *agentAPI.ProviderManager }
-
-func NewLLM(mgr *agentAPI.ProviderManager) LLMAPI { return &llmImpl{mgr: mgr} }
-
-func (l *llmImpl) ListSources() []string {
-	if l.mgr == nil { return nil }
-	return l.mgr.List()
-}
-
-func (l *llmImpl) SetSource(name string) error {
-	if l.mgr == nil { return nil }
-	return l.mgr.SetDefault(name)
-}
-
-func (l *llmImpl) CurrentSource() string {
-	if l.mgr == nil { return "" }
-	p := l.mgr.Default()
-	if p == nil { return "" }
-	return p.Name()
-}
+type LLMAPI = pubsdk.LLMAPI

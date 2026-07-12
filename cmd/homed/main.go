@@ -20,6 +20,7 @@ import (
 	internalConfig "gitcode.com/JianFeeeee/HomeAgent/internal/config"
 	"gitcode.com/JianFeeeee/HomeAgent/internal/events"
 	"gitcode.com/JianFeeeee/HomeAgent/internal/knowledge"
+	"gitcode.com/JianFeeeee/HomeAgent/internal/meta"
 	luapkg "gitcode.com/JianFeeeee/HomeAgent/internal/lua"
 	"gitcode.com/JianFeeeee/HomeAgent/internal/memory"
 	"gitcode.com/JianFeeeee/HomeAgent/internal/memory/document"
@@ -79,7 +80,7 @@ func main() {
 		}
 	}
 
-	log.Printf("[homed] starting HomeAgent v0.1.0 (pure kernel)")
+	log.Printf("[homed] starting %s", meta.FullVersion())
 
 	agentWorkDir := filepath.Join(*dataDir, "agentfs")
 	dirs := []string{

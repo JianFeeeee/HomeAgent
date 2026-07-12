@@ -2,9 +2,11 @@ package core
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"log"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -102,6 +104,26 @@ type Agent struct {
 
 	// 非文本输入处理配置
 	inputCfg types.InputProcessingConfig
+
+	// noMergeMarkets 记录被标记"禁止合并"的实体对，key="entityA||entityB"（字典序），
+	// 每次 reorgGraph 扫描到对应实体对时计数减一，归零后自动移除。
+	noMergeMarkers map[string]int
+	noMergeMu      sync.Mutex
+
+	// toolCallRing 保护最近 40 条工具调用记录不被上下文淘汰，
+	// 确保 LLM 不会重复调用同一工具、反复查询同一数据。
+	toolCallRing     []ToolCallRecord
+	toolCallRingMax  int
+	toolCallRingMu   sync.Mutex // 独立的锁，不与 a.mu 混用避免死锁
+}
+
+// ToolCallRecord 记录一次工具调用，保留元数据供后续 LLM 回合参考。
+type ToolCallRecord struct {
+	Timestamp time.Time `json:"timestamp"`
+	Name      string    `json:"name"`
+	Args      string    `json:"args,omitempty"`   // 参数摘要（最多 200 字符）
+	ResultStub string  `json:"result_stub"`       // 结果摘要（具体内容通过文本记忆层获取）
+	FullResult string `json:"result_full,omitempty"` // 完整结果（仅保留最近 5 条，其余仅存 stub）
 }
 
 type AgentConfig struct {
@@ -169,7 +191,10 @@ func New(cfg AgentConfig) *Agent {
 		childResults:     make(map[string]string),
 		interceptCh:      make(chan *agentIO.InputEvent, 64),
 		thinkingEnabled:  cfg.ThinkingEnabled,
-		inputCfg:         cfg.InputProcessing,
+		inputCfg:          cfg.InputProcessing,
+		noMergeMarkers:    make(map[string]int),
+		toolCallRing:      make([]ToolCallRecord, 0, 40),
+		toolCallRingMax:   40,
 	}
 }
 
@@ -527,7 +552,7 @@ func (a *Agent) emitResponse(evt *agentIO.InputEvent, response string) {
 	a.runStage(sdk.StageBeforeOutput, stageCtx)
 	response = stageCtx.FinalText
 
-	// 读取当前输出通道（可能已被 AI 通过 output_set_channel 切换）
+	// 读取当前输出通道（来源：输入事件自带的 OutputChannel）
 	ch := a.currentOutputChannel
 	if ch == "" {
 		ch = evt.OutputChannel
@@ -546,8 +571,6 @@ func (a *Agent) emitResponse(evt *agentIO.InputEvent, response string) {
 	if stageCtx.TokenUsage != nil {
 		payload["usage"] = stageCtx.TokenUsage
 	}
-
-	a.io.EmitOutputTo(evt.Source, ch, "text", payload)
 
 	if evt.ResponseCh != nil {
 		evt.ResponseCh <- &agentIO.OutputEvent{
@@ -634,9 +657,16 @@ func (a *Agent) process(input string, stageCtx *sdk.StageContext) (response stri
 
 		// 可取消的 LLM 调用：interceptLoop 通过 cancelLLM 打断进行中的请求
 		// 多 LLM 源顺位降级：当当前 provider 失败时，按注册顺序依次尝试
+		// 带断路器：401/403 自动标记不可用，连续失败指数退避
 		var providers []agentAPI.Provider
 		if a.providerManager != nil {
-			providers = a.providerManager.OrderedProviders()
+			allProviders := a.providerManager.OrderedProviders()
+			providers = make([]agentAPI.Provider, 0, len(allProviders))
+			for _, p := range allProviders {
+				if a.providerManager.IsAvailable(p.Name()) {
+					providers = append(providers, p)
+				}
+			}
 		}
 		if len(providers) == 0 {
 			providers = []agentAPI.Provider{a.provider}
@@ -663,12 +693,21 @@ func (a *Agent) process(input string, stageCtx *sdk.StageContext) (response stri
 			fCancel()
 
 			if llmErr == nil {
+				a.providerManager.ResetAvailability(fbProvider.Name())
 				if fbProvider != a.provider {
 					a.provider = fbProvider
 					log.Printf("[agent] switched active provider to %q after fallback",
 						fbProvider.Name())
 				}
 				break
+			}
+
+			var pe *agentAPI.ProviderError
+			if errors.As(llmErr, &pe) && (pe.StatusCode == 401 || pe.StatusCode == 403) {
+				a.providerManager.ReportStatus(fbProvider.Name(), pe.StatusCode)
+				log.Printf("[agent] provider %q marked unavailable (HTTP %d)", fbProvider.Name(), pe.StatusCode)
+			} else {
+				a.providerManager.MarkUnavailable(fbProvider.Name())
 			}
 			log.Printf("[agent] provider %q failed: %v", fbProvider.Name(), llmErr)
 		}
@@ -746,6 +785,10 @@ func (a *Agent) process(input string, stageCtx *sdk.StageContext) (response stri
 				}
 			}
 
+			// 记录到工具调用环缓冲区（保护最近 40 条）
+			argsJSON, _ := json.Marshal(tc.Arguments)
+			a.recordToolCall(tc.Name, string(argsJSON), result)
+
 			msgs = append(msgs, agentAPI.Message{Role: "assistant", Content: resp.Content, ToolCalls: []agentAPI.ToolCall{tc}})
 			msgs = append(msgs, agentAPI.Message{Role: "tool", ToolCallID: tc.ID, Content: result})
 
@@ -795,11 +838,133 @@ func (a *Agent) docStoreSize() int {
 	return 0
 }
 
+// recordToolCall 在工具执行后记录到环缓冲区，保留最近 40 条，
+// 确保 LLM 在后续回合中能感知到已执行过的工具及其结果。
+func (a *Agent) recordToolCall(name, args, result string) {
+	a.toolCallRingMu.Lock()
+	defer a.toolCallRingMu.Unlock()
+
+	// 参数截断
+	if len(args) > 200 {
+		args = args[:200] + "..."
+	}
+
+	var resultStub string
+	var fullResult string
+	if len(a.toolCallRing) < 5 {
+		// 最近 5 条保留完整结果
+		fullResult = result
+	}
+	if len(result) > 80 {
+		resultStub = result[:80] + "..."
+	} else {
+		resultStub = result
+	}
+
+	rec := ToolCallRecord{
+		Timestamp:  time.Now(),
+		Name:       name,
+		Args:       args,
+		ResultStub: resultStub,
+		FullResult: fullResult,
+	}
+
+	if len(a.toolCallRing) >= a.toolCallRingMax {
+		a.toolCallRing = a.toolCallRing[1:]
+	}
+	a.toolCallRing = append(a.toolCallRing, rec)
+}
+
+// formatToolCallRing 输出工具调用环缓冲区为可读文本，注入到 system prompt。
+func (a *Agent) formatToolCallRing() string {
+	a.toolCallRingMu.Lock()
+	defer a.toolCallRingMu.Unlock()
+
+	if len(a.toolCallRing) == 0 {
+		return ""
+	}
+
+	var sb strings.Builder
+	sb.WriteString("【已执行工具记录(最近40条)】\n")
+	start := 0
+	if len(a.toolCallRing) > 40 {
+		start = len(a.toolCallRing) - 40
+	}
+	for i, rec := range a.toolCallRing[start:] {
+		if len(rec.FullResult) > 0 {
+			sb.WriteString(fmt.Sprintf("  [%d] %s: %s(%s)=%s\n", i+1,
+				rec.Timestamp.Format("15:04:05"), rec.Name, rec.Args,
+				truncateStr(rec.FullResult, 120)))
+		} else {
+			sb.WriteString(fmt.Sprintf("  [%d] %s: %s(%s) → (已缓存，具体结果通过文本记忆层获取)\n", i+1,
+				rec.Timestamp.Format("15:04:05"), rec.Name, rec.Args))
+		}
+	}
+	return sb.String()
+}
+
+// formatMergedTimeline 合并上下文事件和工具调用记录为一条按时间排序的对话时序，
+// 替代原先分块注入（【近期事件】+【已执行工具记录】）的方式。
+func (a *Agent) formatMergedTimeline() string {
+	a.context.mu.Lock()
+	events := make([]*ContextEvent, len(a.context.events))
+	copy(events, a.context.events)
+	a.context.mu.Unlock()
+
+	a.toolCallRingMu.Lock()
+	ring := make([]ToolCallRecord, len(a.toolCallRing))
+	copy(ring, a.toolCallRing)
+	a.toolCallRingMu.Unlock()
+
+	if len(events) == 0 && len(ring) == 0 {
+		return ""
+	}
+
+	type timelineEntry struct {
+		ts    time.Time
+		label string
+		text  string
+	}
+	entries := make([]timelineEntry, 0, len(events)+len(ring))
+
+	for _, e := range events {
+		text := fmt.Sprintf("[对话] %s: %s", e.Source, e.Input)
+		if len(e.ToolsUsed) > 0 {
+			text += fmt.Sprintf(" → 调用工具: %s", strings.Join(e.ToolsUsed, ", "))
+		}
+		if e.Response != "" {
+			text += fmt.Sprintf(" → %s", truncateStr(e.Response, 120))
+		}
+		entries = append(entries, timelineEntry{ts: e.Timestamp, label: "对话", text: text})
+	}
+
+	for _, r := range ring {
+		text := fmt.Sprintf("[工具] %s(%s)", r.Name, r.Args)
+		if r.FullResult != "" {
+			text += fmt.Sprintf(" = %s", truncateStr(r.FullResult, 120))
+		} else {
+			text += " → (结果已缓存，可通过文本记忆层获取)"
+		}
+		entries = append(entries, timelineEntry{ts: r.Timestamp, label: "工具", text: text})
+	}
+
+	sort.Slice(entries, func(i, j int) bool {
+		return entries[i].ts.Before(entries[j].ts)
+	})
+
+	var sb strings.Builder
+	sb.WriteString("【对话时序】\n")
+	for _, e := range entries {
+		sb.WriteString(fmt.Sprintf("[%s] %s\n", e.ts.Format("15:04:05"), e.text))
+	}
+	return sb.String()
+}
+
 func (a *Agent) buildMessages(sysPrompt, input string) []agentAPI.Message {
 	msgs := []agentAPI.Message{{Role: "system", Content: sysPrompt}}
 
-	ctxStr := a.context.Format()
-	if ctxStr != "" {
+	// 合并上下文事件 + 工具调用记录为一条完整时序
+	if ctxStr := a.formatMergedTimeline(); ctxStr != "" {
 		msgs = append(msgs, agentAPI.Message{Role: "system", Content: ctxStr})
 	}
 
@@ -817,8 +982,6 @@ func (a *Agent) executeToolCall(tc agentAPI.ToolCall) string {
 		return a.executeKnowledgeTool(tc)
 	case strings.HasPrefix(tc.Name, "doc_"):
 		return a.executeDocTool(tc)
-	case tc.Name == "output_set_channel":
-		return a.executeOutputChannelTool(tc)
 	case tc.Name == "output_send":
 		return a.executeOutputSendTool(tc)
 	case tc.Name == "output_list_channels":
@@ -911,6 +1074,22 @@ func (a *Agent) executeMemoryTool(tc agentAPI.ToolCall) string {
 		}
 		return strings.Join(parts, "\n")
 
+	case "memory_block_merge":
+		entityA, _ := tc.Arguments["entity_a"].(string)
+		entityB, _ := tc.Arguments["entity_b"].(string)
+		rounds, _ := tc.Arguments["rounds"].(float64)
+		if entityA == "" || entityB == "" || rounds <= 0 {
+			return "entity_a、entity_b 和 rounds 不能为空"
+		}
+		if entityA > entityB {
+			entityA, entityB = entityB, entityA
+		}
+		key := entityA + "||" + entityB
+		a.noMergeMu.Lock()
+		a.noMergeMarkers[key] = int(rounds)
+		a.noMergeMu.Unlock()
+		return fmt.Sprintf("已标记「%s」与「%s」在 %d 轮内不合并", entityA, entityB, int(rounds))
+
 	case "memory_commit":
 		triplesData, ok := tc.Arguments["triples"].([]interface{})
 		if !ok {
@@ -958,7 +1137,17 @@ func (a *Agent) executeMemoryTool(tc agentAPI.ToolCall) string {
 		if err != nil {
 			return fmt.Sprintf("合并失败: %v", err)
 		}
-		return fmt.Sprintf("已将「%s」合并到「%s」，%d 条关系已重定向", source, target, count)
+		return fmt.Sprintf("已将「%s」合并到「%s」，source 已彻底删除，%d 条关系已重定向", source, target, count)
+
+	case "memory_delete_entity":
+		name, _ := tc.Arguments["name"].(string)
+		if name == "" {
+			return "name 不能为空"
+		}
+		if err := a.memory.DeleteEntity(name); err != nil {
+			return fmt.Sprintf("删除失败: %v", err)
+		}
+		return fmt.Sprintf("已彻底删除实体「%s」及其所有关联关系", name)
 
 	case "memory_purge":
 		criteria := make(map[string]string)
@@ -1227,13 +1416,23 @@ func (a *Agent) executeDocTool(tc agentAPI.ToolCall) string {
 			return "未找到相关文档记忆"
 		}
 		var parts []string
+		var refs []string
 		for i, d := range docs {
 			parts = append(parts, fmt.Sprintf("[%d] %s (来源: %s)", i+1, d.Summary, d.Source))
 			if len(d.Tags) > 0 {
 				parts = append(parts, "  标签: "+strings.Join(d.Tags, ", "))
 			}
+			// 每个文档按原始时间写入 context 事件，确保时序正确
+			a.context.Append(ContextEvent{
+				Timestamp: d.CreatedAt,
+				Source:    "cold_storage",
+				Input:     fmt.Sprintf("加载文档记忆: %s", query),
+				Response:  d.Content,
+			})
+			refs = append(refs, fmt.Sprintf("#%d(%s)", i+1, d.Summary))
 		}
-		return strings.Join(parts, "\n")
+		return fmt.Sprintf("已加载 %d 篇文档记忆: %s\n(完整内容参见对话时序中 cold_storage 事件)",
+			len(docs), strings.Join(refs, ", "))
 
 	case "doc_commit":
 		content, _ := tc.Arguments["content"].(string)
@@ -1294,6 +1493,11 @@ func (a *Agent) buildSystemPrompt(memContext string, userInput string) string {
 	if memContext != "" {
 		prompt += "\n\n" + memContext
 	}
+
+	// 记忆清理指令：当用户要求整理或清理记忆时，必须实际调用 memory_ 工具执行操作，
+	// 不能只回复文本。先用 memory_introspect 查看概况，再用 memory_recall 获取详情，
+	// 然后依次调用 memory_merge/memory_purge/memory_edit/memory_block_merge 执行清理。
+	prompt += "\n\n【记忆清理指令】当用户要求整理或清理记忆时，你必须实际调用 memory_ 工具执行操作，不能只回复文本。先用 memory_introspect 查看概况，再用 memory_recall 获取详情。有同义实体则用 memory_merge 合并（source 会被彻底删除），有无用噪音实体则用 memory_delete_entity 直接删除，也可用 memory_purge 批量清理，用 memory_edit 修正错误，用 memory_block_merge 标记不合并。如果工具执行成功，把结果告知用户；不要只描述计划而不执行。"
 
 	// 文档记忆 — 查询相关文档摘要注入
 	if a.docStore != nil {
@@ -1387,7 +1591,7 @@ func (a *Agent) buildToolDefs() []interface{} {
 			"type": "function",
 			"function": map[string]interface{}{
 				"name":        "memory_merge",
-				"description": "合并两个同义实体：将所有关系从 source 重定向到 target，source 标记为 merged。仅在有明确证据时使用。",
+				"description": "【记忆清理】合并两个同义实体。将所有关系从 source 重定向到 target，然后彻底删除 source。注意：实体删除后不可恢复，合并前请确认语义一致。",
 				"parameters": map[string]interface{}{
 					"type": "object",
 					"properties": map[string]interface{}{
@@ -1401,13 +1605,43 @@ func (a *Agent) buildToolDefs() []interface{} {
 		tools = append(tools, map[string]interface{}{
 			"type": "function",
 			"function": map[string]interface{}{
-				"name":        "memory_purge",
-				"description": "删除指定条件的记忆关系。支持按主体、客体、关系类型筛选。谨慎使用。",
+				"name":        "memory_delete_entity",
+				"description": "【记忆清理】彻底删除指定实体及其所有关联关系。用于清理无用的噪音实体，如 mentionCount=0 的孤立实体、distiller 自动产生的垃圾节点、确认无用的旧数据。此操作不可恢复。",
 				"parameters": map[string]interface{}{
 					"type": "object",
 					"properties": map[string]interface{}{
-						"subject_contains": map[string]interface{}{"type": "string", "description": "主体名包含的关键词"},
-						"relation_type":    map[string]interface{}{"type": "string", "description": "关系类型"},
+						"name": map[string]interface{}{"type": "string", "description": "要删除的实体名称"},
+					},
+					"required": []string{"name"},
+				},
+			},
+		})
+		tools = append(tools, map[string]interface{}{
+			"type": "function",
+			"function": map[string]interface{}{
+				"name":        "memory_block_merge",
+				"description": "【记忆清理】标记两个实体在指定轮次内不尝试合并，用于阻止误判。当 LLM 判断两个实体虽然相似但不是同一事物时，使用此工具阻止后续心跳自动推送合并候选。每次心跳扫描双方计数各减一，归零后恢复候选资格。",
+				"parameters": map[string]interface{}{
+					"type": "object",
+					"properties": map[string]interface{}{
+						"entity_a": map[string]interface{}{"type": "string", "description": "第一个实体名"},
+						"entity_b": map[string]interface{}{"type": "string", "description": "第二个实体名"},
+						"rounds":   map[string]interface{}{"type": "integer", "description": "阻止轮次数（每次心跳各减一，归零后恢复）"},
+					},
+					"required": []string{"entity_a", "entity_b", "rounds"},
+				},
+			},
+		})
+		tools = append(tools, map[string]interface{}{
+			"type": "function",
+			"function": map[string]interface{}{
+				"name":        "memory_purge",
+				"description": "【记忆清理】删除记忆库中符合条件的垃圾关系和数据。当用户要求整理记忆时，用 memory_introspect 发现低质量实体后，用此工具批量删除。如 @merged 后缀的残留实体、mentionCount=0 的孤立实体、distiller 自动生成的噪音关系等。支持软删（soft）和物理删除（hard）。",
+				"parameters": map[string]interface{}{
+					"type": "object",
+					"properties": map[string]interface{}{
+						"subject_contains": map[string]interface{}{"type": "string", "description": "主体名包含的关键词，如 '@merged' 可清理已合并残留"},
+						"relation_type":    map[string]interface{}{"type": "string", "description": "关系类型，如 '提及'、'回应'"},
 						"target_contains":  map[string]interface{}{"type": "string", "description": "客体名包含的关键词"},
 						"mode":             map[string]interface{}{"type": "string", "description": "soft（标记删除）/ hard（物理删除）", "default": "soft"},
 					},
@@ -1418,7 +1652,7 @@ func (a *Agent) buildToolDefs() []interface{} {
 			"type": "function",
 			"function": map[string]interface{}{
 				"name":        "memory_edit",
-				"description": "编辑记忆：删除旧的 relation 并写入新的。例如修正错误的实体名或关系类型。",
+				"description": "【记忆清理】编辑单条记忆关系：删除旧的 relation 并写入新的。用于修正错误的实体名或关系类型。",
 				"parameters": map[string]interface{}{
 					"type": "object",
 					"properties": map[string]interface{}{
@@ -1671,25 +1905,24 @@ func (a *Agent) buildToolDefs() []interface{} {
 		})
 	}
 
-	// 输出通道工具
-	tools = append(tools, map[string]interface{}{
-		"type": "function",
-		"function": map[string]interface{}{
-			"name":        "output_set_channel",
-			"description": "切换当前对话的输出通道。例如从 voice 切换到 email，后续所有回复将通过新通道发送。",
-			"parameters": map[string]interface{}{
-				"type": "object",
-				"properties": map[string]interface{}{
-					"channel": map[string]interface{}{
-						"type":        "string",
-						"description": "输出通道名称: voice (语音), email (邮件), screen (屏幕), http (HTTP)",
-						"enum":        []interface{}{"voice", "email", "screen", "http"},
-					},
-				},
-				"required": []string{"channel"},
-			},
-		},
-	})
+	// 输出通道工具 — 从已注册 Device 动态生成
+	channels := a.io.ListChannels()
+	chanNames := make([]interface{}, 0, len(channels))
+	chanDesc := "输出通道名称: "
+	for i, ch := range channels {
+		if ch.Type == agentIO.DeviceOutput || ch.Type == agentIO.DeviceIO {
+			chanNames = append(chanNames, ch.Name)
+			if i > 0 {
+				chanDesc += ", "
+			}
+			chanDesc += ch.Name
+		}
+	}
+	if len(chanNames) == 0 {
+		chanNames = []interface{}{"default"}
+		chanDesc = "输出通道名称: default"
+	}
+
 	tools = append(tools, map[string]interface{}{
 		"type": "function",
 		"function": map[string]interface{}{
@@ -1711,7 +1944,7 @@ func (a *Agent) buildToolDefs() []interface{} {
 				"properties": map[string]interface{}{
 					"channel": map[string]interface{}{
 						"type":        "string",
-						"description": "输出通道: voice, email, screen, http",
+						"description": chanDesc,
 					},
 					"content": map[string]interface{}{
 						"type":        "string",
@@ -1794,7 +2027,10 @@ type ConsolidationTask struct {
 
 // enqueueConsolidationTask 将记忆整理任务通过自循环通道注入 Agent（不经过 IO 层）
 func (a *Agent) enqueueConsolidationTask(task ConsolidationTask) {
-	msg := fmt.Sprintf("【记忆整理任务】\n类型: %s\n说明: %s", task.Type, task.Reason)
+	msg := fmt.Sprintf(
+		"【记忆整理任务】\n类型: %s\n说明: %s\n\n注意：\n1. 仅使用 memory_merge 合并实体，或使用 memory_block_merge 标记不合并\n2. 不要使用 memory_commit 写入新的三元组\n3. 不要从这段任务文本中提取任何信息写入图库\n4. 只需要做出合并/不合并的判断并执行对应工具",
+		task.Type, task.Reason,
+	)
 	a.injectSelf(msg)
 	log.Printf("[agent] enqueued consolidation task: %s", task.Reason)
 }
@@ -1942,11 +2178,32 @@ func (a *Agent) reorgGraph() {
 		return
 	}
 
+	// 最多处理 5 个候选，避免阻塞用户消息太久
+	maxCandidates := 5
 	candidates := 0
-	for i := 0; i < len(result.Entities); i++ {
-		for j := i + 1; j < len(result.Entities); j++ {
+	for i := 0; i < len(result.Entities) && candidates < maxCandidates; i++ {
+		for j := i + 1; j < len(result.Entities) && candidates < maxCandidates; j++ {
+			ea, eb := result.Entities[i].Name, result.Entities[j].Name
+			if ea > eb {
+				ea, eb = eb, ea
+			}
+			key := ea + "||" + eb
+			a.noMergeMu.Lock()
+			rounds, ok := a.noMergeMarkers[key]
+			if ok {
+				rounds--
+				if rounds <= 0 {
+					delete(a.noMergeMarkers, key)
+				} else {
+					a.noMergeMarkers[key] = rounds
+				}
+			}
+			a.noMergeMu.Unlock()
+			if ok {
+				continue
+			}
 			sim := entitySimilarity(result.Entities[i].Name, result.Entities[j].Name)
-			if sim > 0.5 {
+			if sim > 0.75 {
 				candidates++
 				a.enqueueConsolidationTask(ConsolidationTask{
 					Type: "entity_merge",
@@ -2059,14 +2316,19 @@ func entitySimilarity(a, b string) float64 {
 		setA[string(runesA[i:i+2])] = true
 	}
 
-	intersect := 0
+	setB := make(map[string]bool)
 	for i := 0; i < len(runesB)-1; i++ {
-		if setA[string(runesB[i:i+2])] {
+		setB[string(runesB[i:i+2])] = true
+	}
+
+	intersect := 0
+	for bg := range setA {
+		if setB[bg] {
 			intersect++
 		}
 	}
 
-	union := len(setA) + len(runesB) - 1 - intersect
+	union := len(setA) + len(setB) - intersect
 	if union <= 0 {
 		return 0
 	}
@@ -2155,17 +2417,8 @@ func (a *Agent) processConsolidation(input string) {
 		Response:  response,
 		ToolsUsed: toolsUsed,
 	})
-	a.emitMemoryCandidate("system", input, response, toolsUsed)
+	// 整理任务不发射记忆候选，防止任务文本被蒸馏进图库造成污染
 	log.Printf("[agent] consolidation done (%dms, tools=%v)", time.Since(start).Milliseconds(), toolsUsed)
-}
-
-func (a *Agent) executeOutputChannelTool(tc agentAPI.ToolCall) string {
-	channel, _ := tc.Arguments["channel"].(string)
-	if channel == "" {
-		return "请指定输出通道名称，可选: voice, email, screen, http"
-	}
-	a.currentOutputChannel = channel
-	return fmt.Sprintf("输出通道已切换至: %s，后续输出将通过此通道", channel)
 }
 
 // executeOutputSendTool — AI 通过指定通道发送消息（校验通道能力）
@@ -2269,7 +2522,7 @@ func (a *Agent) runChildTask(taskID, task string) {
 	// 子 Agent 可调用核心以外的全部工具（记忆/知识/文档/社交），但不能调用输出工具
 	allTools := a.buildToolDefs()
 	childTools := make([]interface{}, 0, len(allTools))
-	outputTools := map[string]bool{"output_send": true, "output_set_channel": true, "output_list_channels": true, "spawn_child": true, "plgreload": true}
+	outputTools := map[string]bool{"output_send": true, "output_list_channels": true, "spawn_child": true, "plgreload": true}
 	for _, t := range allTools {
 		toolMap, ok := t.(map[string]interface{})
 		if !ok {
@@ -2313,7 +2566,7 @@ func (a *Agent) runChildTask(taskID, task string) {
 		for _, ct := range resp.ToolCalls {
 			var result string
 			switch {
-			case ct.Name == "output_send" || ct.Name == "output_set_channel" || ct.Name == "output_list_channels":
+			case ct.Name == "output_send" || ct.Name == "output_list_channels":
 				result = fmt.Sprintf("子 Agent 不允许调用输出工具: %s", ct.Name)
 			case ct.Name == "spawn_child" || ct.Name == "plgreload":
 				result = fmt.Sprintf("子 Agent 不允许调用系统工具: %s", ct.Name)
@@ -2399,9 +2652,7 @@ func (a *Agent) executeLLMTool(tc agentAPI.ToolCall) string {
 		if err := a.providerManager.SetDefault(name); err != nil {
 			return fmt.Sprintf("切换失败: %v", err)
 		}
-		a.mu.Lock()
 		a.provider = a.providerManager.Get(name)
-		a.mu.Unlock()
 		return fmt.Sprintf("已切换到 LLM 源: %s", name)
 
 	default:
@@ -2409,24 +2660,48 @@ func (a *Agent) executeLLMTool(tc agentAPI.ToolCall) string {
 	}
 }
 
+// mediaDataURL 从 pendingMedia 构建 data URL，返回最终 URL。
+func (a *Agent) mediaDataURL(defaultMime string) string {
+	if a.pendingMedia == nil {
+		return ""
+	}
+	data, _ := a.pendingMedia["data"].(string)
+	mime, _ := a.pendingMedia["mime"].(string)
+	url, _ := a.pendingMedia["url"].(string)
+	if data != "" {
+		if mime == "" {
+			mime = defaultMime
+		}
+		return "data:" + mime + ";base64," + data
+	}
+	return url
+}
+
+// mediaChat 调用指定 provider 的多模态 Chat，统一处理超时和错误。
+func (a *Agent) mediaChat(p agentAPI.Provider, msg agentAPI.Message, resultPrefix string, maxTokens int) string {
+	ctx, cancel := context.WithTimeout(context.Background(), 120*time.Second)
+	defer cancel()
+	resp, err := p.Chat(ctx, &agentAPI.CompletionRequest{
+		Messages:  []agentAPI.Message{msg},
+		MaxTokens: maxTokens,
+	})
+	if err != nil {
+		return fmt.Sprintf("%s失败: %v", resultPrefix, err)
+	}
+	return fmt.Sprintf("[%s] %s", resultPrefix, resp.Content)
+}
+
 // executeDescribeImage 调用多模态模型描述当前图片。
 func (a *Agent) executeDescribeImage(tc agentAPI.ToolCall) string {
 	if a.pendingMedia == nil {
 		return "没有待处理的图片数据"
 	}
-	data, _ := a.pendingMedia["data"].(string)
-	mime, _ := a.pendingMedia["mime"].(string)
-	url, _ := a.pendingMedia["url"].(string)
-	if data == "" && url == "" {
+	imgURL := a.mediaDataURL("image/png")
+	if imgURL == "" {
 		return "图片数据为空"
 	}
 
 	providerName, _ := tc.Arguments["provider"].(string)
-	detail, _ := tc.Arguments["detail"].(string)
-	if detail == "" {
-		detail = "high"
-	}
-
 	p := a.providerManager.Get(providerName)
 	if p == nil {
 		p = a.provider
@@ -2437,12 +2712,9 @@ func (a *Agent) executeDescribeImage(tc agentAPI.ToolCall) string {
 		prompt = "请详细描述这张图片的内容，包括其中的文字、物体、人物、场景等信息。"
 	}
 
-	imgURL := url
-	if data != "" {
-		if mime == "" {
-			mime = "image/png"
-		}
-		imgURL = "data:" + mime + ";base64," + data
+	detail, _ := tc.Arguments["detail"].(string)
+	if detail == "" {
+		detail = "high"
 	}
 
 	msg := agentAPI.Message{
@@ -2452,17 +2724,7 @@ func (a *Agent) executeDescribeImage(tc agentAPI.ToolCall) string {
 			{Type: "image_url", ImageURL: &agentAPI.ImageURL{URL: imgURL, Detail: detail}},
 		},
 	}
-
-	ctx, cancel := context.WithTimeout(context.Background(), 120*time.Second)
-	defer cancel()
-	resp, err := p.Chat(ctx, &agentAPI.CompletionRequest{
-		Messages:  []agentAPI.Message{msg},
-		MaxTokens: 2048,
-	})
-	if err != nil {
-		return fmt.Sprintf("图片描述失败: %v", err)
-	}
-	return fmt.Sprintf("[图片描述] %s", resp.Content)
+	return a.mediaChat(p, msg, "图片描述", 2048)
 }
 
 // executeTranscribeAudio 调用多模态模型转写/描述当前音频。
@@ -2470,10 +2732,8 @@ func (a *Agent) executeTranscribeAudio(tc agentAPI.ToolCall) string {
 	if a.pendingMedia == nil {
 		return "没有待处理的音频数据"
 	}
-	data, _ := a.pendingMedia["data"].(string)
-	mime, _ := a.pendingMedia["mime"].(string)
-	url, _ := a.pendingMedia["url"].(string)
-	if data == "" && url == "" {
+	audURL := a.mediaDataURL("audio/wav")
+	if audURL == "" {
 		return "音频数据为空"
 	}
 
@@ -2488,14 +2748,6 @@ func (a *Agent) executeTranscribeAudio(tc agentAPI.ToolCall) string {
 		prompt = "请转写这段音频的内容。"
 	}
 
-	audURL := url
-	if data != "" {
-		if mime == "" {
-			mime = "audio/wav"
-		}
-		audURL = "data:" + mime + ";base64," + data
-	}
-
 	msg := agentAPI.Message{
 		Role: "user",
 		Blocks: []agentAPI.ContentBlock{
@@ -2503,17 +2755,7 @@ func (a *Agent) executeTranscribeAudio(tc agentAPI.ToolCall) string {
 			{Type: "audio_url", AudioURL: &agentAPI.AudioURL{URL: audURL}},
 		},
 	}
-
-	ctx, cancel := context.WithTimeout(context.Background(), 120*time.Second)
-	defer cancel()
-	resp, err := p.Chat(ctx, &agentAPI.CompletionRequest{
-		Messages:  []agentAPI.Message{msg},
-		MaxTokens: 2048,
-	})
-	if err != nil {
-		return fmt.Sprintf("音频转写失败: %v", err)
-	}
-	return fmt.Sprintf("[音频转写] %s", resp.Content)
+	return a.mediaChat(p, msg, "音频转写", 2048)
 }
 
 // executeOCRImage 对图片执行 OCR 文字识别（通过多模态模型实现）。
@@ -2521,21 +2763,9 @@ func (a *Agent) executeOCRImage(tc agentAPI.ToolCall) string {
 	if a.pendingMedia == nil {
 		return "没有待处理的图片数据"
 	}
-	data, _ := a.pendingMedia["data"].(string)
-	mime, _ := a.pendingMedia["mime"].(string)
-	url, _ := a.pendingMedia["url"].(string)
-	if data == "" && url == "" {
+	imgURL := a.mediaDataURL("image/png")
+	if imgURL == "" {
 		return "图片数据为空"
-	}
-
-	p := a.provider
-
-	imgURL := url
-	if data != "" {
-		if mime == "" {
-			mime = "image/png"
-		}
-		imgURL = "data:" + mime + ";base64," + data
 	}
 
 	msg := agentAPI.Message{
@@ -2545,17 +2775,7 @@ func (a *Agent) executeOCRImage(tc agentAPI.ToolCall) string {
 			{Type: "image_url", ImageURL: &agentAPI.ImageURL{URL: imgURL, Detail: "high"}},
 		},
 	}
-
-	ctx, cancel := context.WithTimeout(context.Background(), 120*time.Second)
-	defer cancel()
-	resp, err := p.Chat(ctx, &agentAPI.CompletionRequest{
-		Messages:  []agentAPI.Message{msg},
-		MaxTokens: 4096,
-	})
-	if err != nil {
-		return fmt.Sprintf("OCR 识别失败: %v", err)
-	}
-	return fmt.Sprintf("[OCR 结果] %s", resp.Content)
+	return a.mediaChat(a.provider, msg, "OCR 结果", 4096)
 }
 
 // runStage — 运行阶段管道，若插件 Response 被设置则返回 true（短路）
