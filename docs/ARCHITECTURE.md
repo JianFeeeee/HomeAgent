@@ -202,12 +202,11 @@ RegisterStage(stage, fn)  ──→  runStage() 在对应阶段调用
 Subscribe(event, fn)      ──→  Publish() 通知所有订阅者
 ```
 
-`internal/plugin/sdk/` 定义完整 SDK：
+`internal/sdk/` 桥接外部 SDK 接口到内核，定义完整 PluginSDK：
 
 ```go
 sdk.RegisterTool(name, def, handler)
 sdk.RegisterStage(stage, handler)
-sdk.Subscribe(eventType, handler)
 sdk.Publish(event)
 sdk.InjectInput(source, channel, payload)
 sdk.InjectInterrupt(source, channel, payload)
@@ -281,7 +280,7 @@ internal/
 │   ├── agentcli/          — PTY 终端
 │   ├── healthcheck/       — 健康检查
 │   └── pluginmgr/         — 插件管理器
-├── sdk/                   — PluginSDK 定义
+├── internal/sdk/          — PluginSDK 定义
 │   ├── plugin.go          — Plugin 接口 + PluginSDK
 │   ├── memory.go          — MemoryAPI
 │   ├── knowledge.go       — KnowledgeAPI

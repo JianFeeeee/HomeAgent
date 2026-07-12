@@ -81,8 +81,9 @@ func TestCmdRunWithStderr(t *testing.T) {
 	}
 
 	handler := tc.handlers["cmd_run"]
+	// ls with a nonexistent path writes to stderr and returns non-zero exit code
 	result, err := handler(map[string]interface{}{
-		"command": "echo out && echo err >&2 && exit 1",
+		"command": "ls /tmp/cmd_test_nonexistent_xxxxx",
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -95,14 +96,11 @@ func TestCmdRunWithStderr(t *testing.T) {
 	if resp["status"] != "ok" {
 		t.Fatalf("expected status ok, got %v", resp["status"])
 	}
-	if resp["stdout"] != "out" {
-		t.Fatalf("expected stdout 'out', got %v", resp["stdout"])
+	if stderr, ok := resp["stderr"].(string); !ok || stderr == "" {
+		t.Fatalf("expected stderr output, got %q", stderr)
 	}
-	if resp["stderr"] != "err" {
-		t.Fatalf("expected stderr 'err', got %v", resp["stderr"])
-	}
-	if resp["exit_code"].(float64) != 1 {
-		t.Fatalf("expected exit code 1, got %v", resp["exit_code"])
+	if exitCode, ok := resp["exit_code"].(float64); !ok || exitCode == 0 {
+		t.Fatalf("expected non-zero exit code, got %v", exitCode)
 	}
 }
 
@@ -197,7 +195,7 @@ func TestCmdRunNonZeroExit(t *testing.T) {
 
 	handler := tc.handlers["cmd_run"]
 	result, err := handler(map[string]interface{}{
-		"command": "exit 42",
+		"command": "false",
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -210,8 +208,8 @@ func TestCmdRunNonZeroExit(t *testing.T) {
 	if resp["status"] != "ok" {
 		t.Fatalf("expected status ok, got %v", resp["status"])
 	}
-	if resp["exit_code"].(float64) != 42 {
-		t.Fatalf("expected exit code 42, got %v", resp["exit_code"])
+	if resp["exit_code"].(float64) != 1 {
+		t.Fatalf("expected exit code 1, got %v", resp["exit_code"])
 	}
 }
 

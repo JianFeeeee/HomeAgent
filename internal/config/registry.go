@@ -188,6 +188,10 @@ func (r *ConfigRegistry) Close() error {
 	return r.db.Close()
 }
 
+var defaultSources = map[string]map[string]string{
+	"deepseek": {"base_url": "https://api.deepseek.com", "model": "deepseek-v4-flash", "api_key": "", "thinking_enabled": "false", "adapter": "deepseek", "adapter_path": "adapters/deepseek.lua"},
+}
+
 func (r *ConfigRegistry) SeedDefaults(dataDir string) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -230,17 +234,7 @@ func (r *ConfigRegistry) seedDBValues(dataDir string) {
 	set("core.llm.max_tokens", "4096")
 	set("core.llm.thinking_enabled", "false")
 
-	sources := map[string]map[string]string{
-		"deepseek": {"base_url": "https://api.deepseek.com", "model": "deepseek-v4-flash", "api_key": "", "thinking_enabled": "false", "adapter": "deepseek", "adapter_path": "adapters/deepseek.lua"},
-		"openai":   {"base_url": "https://api.openai.com/v1", "model": "gpt-4o", "api_key": "", "thinking_enabled": "false", "adapter": "openai", "adapter_path": "adapters/openai.lua"},
-		"anthropic": {"base_url": "https://api.anthropic.com", "model": "claude-sonnet-4-20250514", "api_key": "", "thinking_enabled": "false", "adapter": "anthropic", "adapter_path": "adapters/anthropic.lua"},
-		"gemini":   {"base_url": "https://generativelanguage.googleapis.com", "model": "gemini-2.0-flash", "api_key": "", "thinking_enabled": "false", "adapter": "gemini", "adapter_path": "adapters/gemini.lua"},
-		"mistral":  {"base_url": "https://api.mistral.ai", "model": "mistral-large-latest", "api_key": "", "thinking_enabled": "false", "adapter": "mistral", "adapter_path": "adapters/mistral.lua"},
-		"groq":     {"base_url": "https://api.groq.com", "model": "llama3-70b-8192", "api_key": "", "thinking_enabled": "false", "adapter": "groq", "adapter_path": "adapters/groq.lua"},
-		"github":   {"base_url": "https://models.inference.ai.azure.com", "model": "gpt-4o", "api_key": "", "thinking_enabled": "false", "adapter": "github", "adapter_path": "adapters/github.lua"},
-		"ollama":   {"base_url": "http://localhost:11434", "model": "llama3", "api_key": "", "thinking_enabled": "false", "adapter": "ollama", "adapter_path": "adapters/ollama.lua"},
-	}
-	for name, props := range sources {
+	for name, props := range defaultSources {
 		p := "core.llm.sources." + name
 		set(p+".base_url", props["base_url"])
 		set(p+".model", props["model"])
@@ -306,24 +300,14 @@ func (r *ConfigRegistry) seedCoreDefs(dataDir string) {
 	reg(ConfigDef{Key: "core.llm.max_tokens", Default: "4096", Type: "int", DisplayName: "最大 Token", Description: "每次生成的最大 Token 数", Category: "llm"})
 	reg(ConfigDef{Key: "core.llm.thinking_enabled", Default: "false", Type: "bool", DisplayName: "深度思考", Description: "启用深度思考模式（如 DeepSeek R1 的思维链输出）", Category: "llm"})
 
-	sources := map[string]map[string]string{
-		"deepseek": {"base_url": "https://api.deepseek.com", "model": "deepseek-v4-flash", "api_key": "", "thinking_enabled": "false", "adapter": "deepseek", "adapter_path": "adapters/deepseek.lua"},
-		"openai":   {"base_url": "https://api.openai.com/v1", "model": "gpt-4o", "api_key": "", "thinking_enabled": "false", "adapter": "openai", "adapter_path": "adapters/openai.lua"},
-		"anthropic": {"base_url": "https://api.anthropic.com", "model": "claude-sonnet-4-20250514", "api_key": "", "thinking_enabled": "false", "adapter": "anthropic", "adapter_path": "adapters/anthropic.lua"},
-		"gemini":   {"base_url": "https://generativelanguage.googleapis.com", "model": "gemini-2.0-flash", "api_key": "", "thinking_enabled": "false", "adapter": "gemini", "adapter_path": "adapters/gemini.lua"},
-		"mistral":  {"base_url": "https://api.mistral.ai", "model": "mistral-large-latest", "api_key": "", "thinking_enabled": "false", "adapter": "mistral", "adapter_path": "adapters/mistral.lua"},
-		"groq":     {"base_url": "https://api.groq.com", "model": "llama3-70b-8192", "api_key": "", "thinking_enabled": "false", "adapter": "groq", "adapter_path": "adapters/groq.lua"},
-		"github":   {"base_url": "https://models.inference.ai.azure.com", "model": "gpt-4o", "api_key": "", "thinking_enabled": "false", "adapter": "github", "adapter_path": "adapters/github.lua"},
-		"ollama":   {"base_url": "http://localhost:11434", "model": "llama3", "api_key": "", "thinking_enabled": "false", "adapter": "ollama", "adapter_path": "adapters/ollama.lua"},
-	}
-	for name := range sources {
+	for name := range defaultSources {
 		p := "core.llm.sources." + name
-		reg(ConfigDef{Key: p + ".base_url", Default: sources[name]["base_url"], Type: "string", DisplayName: name + " API 地址", Description: name + " LLM API 基础地址", Category: "sources"})
-		reg(ConfigDef{Key: p + ".model", Default: sources[name]["model"], Type: "string", DisplayName: name + " 模型", Description: name + " 使用的模型名称", Category: "sources"})
+		reg(ConfigDef{Key: p + ".base_url", Default: defaultSources[name]["base_url"], Type: "string", DisplayName: name + " API 地址", Description: name + " LLM API 基础地址", Category: "sources"})
+		reg(ConfigDef{Key: p + ".model", Default: defaultSources[name]["model"], Type: "string", DisplayName: name + " 模型", Description: name + " 使用的模型名称", Category: "sources"})
 		reg(ConfigDef{Key: p + ".api_key", Default: "", Type: "password", DisplayName: name + " API 密钥", Description: name + " API 密钥", Category: "sources"})
-		reg(ConfigDef{Key: p + ".thinking_enabled", Default: sources[name]["thinking_enabled"], Type: "bool", DisplayName: name + " 深度思考", Description: name + " 启用深度思考模式", Category: "sources"})
-		reg(ConfigDef{Key: p + ".adapter", Default: sources[name]["adapter"], Type: "string", DisplayName: name + " 适配器", Description: name + " 协议适配器名称", Category: "sources"})
-		reg(ConfigDef{Key: p + ".adapter_path", Default: sources[name]["adapter_path"], Type: "string", DisplayName: name + " 适配器路径", Description: name + " 适配器脚本路径", Category: "sources"})
+		reg(ConfigDef{Key: p + ".thinking_enabled", Default: defaultSources[name]["thinking_enabled"], Type: "bool", DisplayName: name + " 深度思考", Description: name + " 启用深度思考模式", Category: "sources"})
+		reg(ConfigDef{Key: p + ".adapter", Default: defaultSources[name]["adapter"], Type: "string", DisplayName: name + " 适配器", Description: name + " 协议适配器名称", Category: "sources"})
+		reg(ConfigDef{Key: p + ".adapter_path", Default: defaultSources[name]["adapter_path"], Type: "string", DisplayName: name + " 适配器路径", Description: name + " 适配器脚本路径", Category: "sources"})
 	}
 
 	reg(ConfigDef{Key: "core.defaults.image", Default: "homeagent/agent-base:latest", Type: "string", DisplayName: "默认镜像", Description: "Agent 默认 Docker 镜像", Category: "defaults"})
@@ -457,6 +441,17 @@ func (r *ConfigRegistry) ToConfig() *types.Config {
 		}
 		return d
 	}
+	readFloat := func(key string, def float64) float64 {
+		s := read(key, "")
+		if s == "" {
+			return def
+		}
+		f, err := strconv.ParseFloat(s, 64)
+		if err != nil {
+			return def
+		}
+		return f
+	}
 	readBool := func(key string, def bool) bool {
 		s := read(key, "")
 		if s == "" {
@@ -480,7 +475,7 @@ func (r *ConfigRegistry) ToConfig() *types.Config {
 	cfg.LLM.BaseURL = read("core.llm.base_url", cfg.LLM.BaseURL)
 	cfg.LLM.APIKey = read("core.llm.api_key", cfg.LLM.APIKey)
 	cfg.LLM.Adapter = read("core.llm.adapter", cfg.LLM.Adapter)
-	cfg.LLM.Temperature = float64(readInt("core.llm.temperature", int(cfg.LLM.Temperature*100))) / 100
+	cfg.LLM.Temperature = readFloat("core.llm.temperature", cfg.LLM.Temperature)
 	cfg.LLM.MaxTokens = readInt("core.llm.max_tokens", cfg.LLM.MaxTokens)
 	cfg.LLM.ThinkingEnabled = readBool("core.llm.thinking_enabled", cfg.LLM.ThinkingEnabled)
 

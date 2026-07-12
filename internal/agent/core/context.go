@@ -24,13 +24,17 @@ type ContextEvent struct {
 	Vector    vector.Vector `json:"-"` // 缓存向量，避免重复计算
 }
 
+const contextFlushInterval = 5 * time.Second
+
 // RelevanceContext — 基于相关性的上下文管理，非固定阈值
 type RelevanceContext struct {
-	mu       sync.Mutex
-	events   []*ContextEvent
-	veczer   *vector.TFIDFVectorizer
-	trained  bool
-	savePath string // 持久化路径，空则不持久化
+	mu        sync.Mutex
+	events    []*ContextEvent
+	veczer    *vector.TFIDFVectorizer
+	trained   bool
+	savePath  string // 持久化路径，空则不持久化
+	saveTimer *time.Timer
+	dirty     bool
 }
 
 func NewRelevanceContext(savePath string) *RelevanceContext {
@@ -88,16 +92,36 @@ func (c *RelevanceContext) Append(evt ContextEvent) {
 	c.save()
 }
 
-// save 无锁版本，Append/Prune 内部持有锁时调用
+// save 无锁版本，Append/Prune 内部持有锁时调用。带 debounce，每 5s 写一次盘。
 func (c *RelevanceContext) save() error {
 	if c.savePath == "" {
 		return nil
 	}
+	if !c.dirty {
+		c.dirty = true
+		if c.saveTimer == nil {
+			c.saveTimer = time.AfterFunc(contextFlushInterval, c.flush)
+		} else {
+			c.saveTimer.Reset(contextFlushInterval)
+		}
+	}
+	return nil
+}
+
+func (c *RelevanceContext) flush() {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if !c.dirty {
+		return
+	}
 	data, err := json.Marshal(c.events)
 	if err != nil {
-		return err
+		return
 	}
-	return os.WriteFile(c.savePath, data, 0644)
+	if err := os.WriteFile(c.savePath, data, 0644); err != nil {
+		return
+	}
+	c.dirty = false
 }
 
 // Prune — 基于当前输入计算每条上下文的相关性，归档最不相关的
@@ -110,19 +134,31 @@ func (c *RelevanceContext) Prune(currentInput string, topK int, docStore *docume
 		return 0
 	}
 
+	// 保护最近 10 条记录不被淘汰，从更早的记录中选择淘汰对象
+	protectCount := 10
+	if protectCount > len(c.events) {
+		protectCount = len(c.events)
+	}
+	protected := c.events[len(c.events)-protectCount:]
+	candidates := c.events[:len(c.events)-protectCount]
+
+	if len(candidates) == 0 {
+		return 0
+	}
+
 	// 确保向量化器已训练
 	c.ensureTrained()
 
 	queryVec := c.veczer.Vectorize(currentInput)
 
-	// 计算每条上下文与当前输入的相关性
+	// 计算每条候选上下文与当前输入的相关性
 	type scored struct {
 		event *ContextEvent
 		score float64
 		idx   int
 	}
-	scoredEvents := make([]scored, len(c.events))
-	for i, evt := range c.events {
+	scoredEvents := make([]scored, len(candidates))
+	for i, evt := range candidates {
 		score := vector.CosineSimilarity(queryVec, evt.Vector)
 		scoredEvents[i] = scored{event: evt, score: score, idx: i}
 	}
@@ -132,18 +168,23 @@ func (c *RelevanceContext) Prune(currentInput string, topK int, docStore *docume
 		return scoredEvents[i].score > scoredEvents[j].score
 	})
 
-	// 保留 topK 最相关的
+	// 从候选中选 topK 最相关的保留，其余淘汰
+	keepCount := topK - len(protected)
+	if keepCount < 0 {
+		keepCount = 0
+	}
 	keep := scoredEvents
-	if len(keep) > topK {
-		keep = keep[:topK]
+	if len(keep) > keepCount {
+		keep = keep[:keepCount]
 	}
-	archive := scoredEvents[topK:]
+	archive := scoredEvents[keepCount:]
 
-	// 重建 events 为保留的
-	c.events = make([]*ContextEvent, len(keep))
-	for i, s := range keep {
-		c.events[i] = s.event
+	// 重建 events 为保留的候选 + 受保护的最新记录
+	c.events = make([]*ContextEvent, 0, len(keep)+len(protected))
+	for _, s := range keep {
+		c.events = append(c.events, s.event)
 	}
+	c.events = append(c.events, protected...)
 
 	// 按时间重新排序
 	sort.Slice(c.events, func(i, j int) bool {

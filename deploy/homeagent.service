@@ -6,7 +6,7 @@ Wants=network-online.target
 
 [Service]
 Type=simple
-ExecStart=/usr/local/bin/homed -config /etc/homeagent/config.yaml -data /var/lib/homeagent
+ExecStart=/usr/local/bin/homed -data /var/lib/homeagent
 Restart=always
 RestartSec=10
 StartLimitBurst=3

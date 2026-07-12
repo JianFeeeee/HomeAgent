@@ -12,6 +12,34 @@ import (
 	sdk "gitcode.com/JianFeeeee/HomeAgent/internal/sdk"
 )
 
+// shellUnquote 拆解命令字符串，处理单引号/双引号包裹的参数
+func shellUnquote(s string) []string {
+	var args []string
+	var cur strings.Builder
+	inSingle := false
+	inDouble := false
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		switch {
+		case c == '\'' && !inDouble:
+			inSingle = !inSingle
+		case c == '"' && !inSingle:
+			inDouble = !inDouble
+		case (c == ' ' || c == '\t') && !inSingle && !inDouble:
+			if cur.Len() > 0 {
+				args = append(args, cur.String())
+				cur.Reset()
+			}
+		default:
+			cur.WriteByte(c)
+		}
+	}
+	if cur.Len() > 0 {
+		args = append(args, cur.String())
+	}
+	return args
+}
+
 func init() {
 	plugin.RegisterFactory("cmd", func(name string, config map[string]interface{}) (sdk.Plugin, error) {
 		return New(name), nil
@@ -79,7 +107,11 @@ func (p *Plugin) Start(s *sdk.PluginSDK) error {
 		ctx, cancel := context.WithTimeout(context.Background(), timeout)
 		defer cancel()
 
-		cmd := exec.CommandContext(ctx, "sh", "-c", command)
+		parts := shellUnquote(command)
+		if len(parts) == 0 {
+			return map[string]interface{}{"error": "command is required"}, nil
+		}
+		cmd := exec.CommandContext(ctx, parts[0], parts[1:]...)
 		if workdir != "" {
 			cmd.Dir = workdir
 		}

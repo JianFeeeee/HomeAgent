@@ -37,10 +37,12 @@ type Store struct {
 	mu     sync.RWMutex
 
 	docs      map[string]*Doc
-	summaries []string // 用于训练向量化器
+	summaries []string // 用于训练向量化器，最大 10000 条
 
 	dirty bool
 }
+
+const maxSummaries = 10000
 
 func NewStore(dir string) *Store {
 	return &Store{
@@ -83,11 +85,15 @@ func (s *Store) Insert(doc *Doc) error {
 
 	s.docs[doc.ID] = doc
 
+	// 增量训练向量化器并加入向量索引
+	s.addSummary(doc.Summary)
 	vec := s.veczer.Vectorize(doc.Summary + " " + doc.Content)
 	s.vec.Insert(doc.ID, doc.Summary, vec, doc.Meta)
 
-	// 更新训练集
-	s.summaries = append(s.summaries, doc.Summary)
+	// 立即写盘
+	path := filepath.Join(s.dir, doc.ID+".json")
+	data, _ := json.MarshalIndent(doc, "", "  ")
+	os.WriteFile(path, data, 0644)
 
 	s.dirty = true
 	return nil
@@ -110,12 +116,13 @@ func (s *Store) ContextToDoc(source string, entries []ContextEntry) (*Doc, error
 	content := strings.Join(parts, "\n")
 	contentHash := simpleHash(content)
 
-	// 去重：检查是否已有相同 hash 的文档（在锁内完成创建/更新）
 	summary := summarizeEntries(entries)
 	tags := extractTags(entries)
 	entities := extractEntities(entries)
 
 	s.mu.Lock()
+
+	// 去重
 	for _, d := range s.docs {
 		if d.Meta != nil && d.Meta["content_hash"] == contentHash {
 			d.UpdatedAt = time.Now()
@@ -146,8 +153,20 @@ func (s *Store) ContextToDoc(source string, entries []ContextEntry) (*Doc, error
 		Meta:        map[string]string{"content_hash": contentHash},
 	}
 	s.docs[id] = doc
+
+	// 增量训练向量化器并加入向量索引
+	s.addSummary(summary)
+	vec := s.veczer.Vectorize(summary + " " + content)
+	s.vec.Insert(id, summary, vec, nil)
+
 	s.dirty = true
 	s.mu.Unlock()
+
+	// 立即写盘
+	path := filepath.Join(s.dir, id+".json")
+	data, _ := json.MarshalIndent(doc, "", "  ")
+	os.WriteFile(path, data, 0644)
+
 	return doc, nil
 }
 
@@ -166,8 +185,7 @@ func (s *Store) Consume(text string, topK int) []*Doc {
 	var docs []*Doc
 	for _, r := range results {
 		if d, ok := s.docs[r.ID]; ok {
-			delete(s.docs, r.ID)
-			s.vec.Remove(r.ID)
+			s.removeDoc(r.ID)
 			s.dirty = true
 			docs = append(docs, d)
 		}
@@ -266,13 +284,38 @@ func (s *Store) Remove(id string) {
 	defer s.mu.Unlock()
 
 	if _, ok := s.docs[id]; ok {
-		delete(s.docs, id)
-		s.vec.Remove(id)
+		s.removeDoc(id)
 		s.dirty = true
 	}
 }
 
 // ——— internal ———
+
+// addSummary 添加一条摘要到训练集，超限时截断并触发重索引。
+// 调用方必须已持有 s.mu 写锁。
+func (s *Store) addSummary(summary string) {
+	s.summaries = append(s.summaries, summary)
+	if len(s.summaries) > maxSummaries {
+		n := maxSummaries / 2
+		copy(s.summaries, s.summaries[len(s.summaries)-n:])
+		s.summaries = s.summaries[:n]
+		s.veczer.Train(s.summaries)
+		s.vec = vector.NewStore()
+		for _, doc := range s.docs {
+			vec := s.veczer.Vectorize(doc.Summary + " " + doc.Content)
+			s.vec.Insert(doc.ID, doc.Summary, vec, nil)
+		}
+	}
+}
+
+// removeDoc 从内存索引和磁盘删除文档。
+// 调用方必须已持有 s.mu 写锁。
+func (s *Store) removeDoc(id string) {
+	delete(s.docs, id)
+	s.vec.Remove(id)
+	path := filepath.Join(s.dir, id+".json")
+	os.Remove(path)
+}
 
 func (s *Store) loadAll() error {
 	entries, err := os.ReadDir(s.dir)

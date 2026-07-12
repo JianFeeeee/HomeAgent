@@ -103,10 +103,6 @@ func (h *StageHost) RunStage(stage sdk.Stage, ctx *sdk.StageContext) {
 	wg.Wait()
 }
 
-func (h *StageHost) RunStageAll(stage sdk.Stage, ctx *sdk.StageContext) {
-	h.RunStage(stage, ctx)
-}
-
 func (h *StageHost) ToolCount() int {
 	h.mu.RLock()
 	defer h.mu.RUnlock()

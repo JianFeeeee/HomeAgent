@@ -1,8 +1,0 @@
-{
-  "name": "memo",
-  "version": "1.0.0",
-  "description": "备忘插件，支持创建、完成、列出备忘条目，自动提醒",
-  "author": "HomeAgent",
-  "entry": "plugin.so",
-  "tags": ["memo", "reminder", "todo"]
-}
