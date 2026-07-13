@@ -1,26 +1,33 @@
-<!DOCTYPE html>
+﻿<!DOCTYPE html>
 <html lang="zh-CN">
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>HomeAgent Dashboard</title>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/three@0.128.0/examples/js/controls/OrbitControls.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/marked/4.3.0/marked.min.js"></script>
 <style>
+:root{--bg-primary:#0f172a;--bg-secondary:#1e293b;--bg-card:#1e293b;--bg-input:#0f172a;--bg-hover:rgba(15,23,42,0.25);--text-primary:#e2e8f0;--text-secondary:#94a3b8;--text-muted:#64748b;--border-color:#334155;--accent:#38bdf8;--accent-bg:#1e3a5f;--toast-bg:#166534;--toast-color:#86efac;--toast-error-bg:#7f1d1d;--toast-error-color:#fca5a5;--pre-color:#a5b4fc;--pre-bg:#0f172a;--chat-bg:#0f172a;--msg-user-bg:#1e3a5f;--msg-user-color:#93c5fd;--msg-assistant-bg:#1a3a2a;--msg-assistant-color:#86efac;--msg-system-bg:#3b1a3a;--msg-system-color:#f0abfc;--kv-border:#1e293b;--btn-ghost-border:#334155;--btn-ghost-hover-bg:#1e293b;--save-btn-border:#eab308;--loading-border:#334155;--loading-top:#38bdf8}
+[data-theme=light]{--bg-primary:#f8fafc;--bg-secondary:#ffffff;--bg-card:#ffffff;--bg-input:#f1f5f9;--bg-hover:rgba(241,245,249,0.8);--text-primary:#1e293b;--text-secondary:#64748b;--text-muted:#94a3b8;--border-color:#e2e8f0;--accent:#2563eb;--accent-bg:#dbeafe;--toast-bg:#166534;--toast-color:#86efac;--toast-error-bg:#7f1d1d;--toast-error-color:#fca5a5;--pre-color:#1e293b;--pre-bg:#f1f5f9;--chat-bg:#f1f5f9;--msg-user-bg:#dbeafe;--msg-user-color:#1e40af;--msg-assistant-bg:#dcfce7;--msg-assistant-color:#166534;--msg-system-bg:#f3e8ff;--msg-system-color:#7c3aed;--kv-border:#e2e8f0;--btn-ghost-border:#e2e8f0;--btn-ghost-hover-bg:#f1f5f9;--save-btn-border:#eab308;--loading-border:#e2e8f0;--loading-top:#2563eb}
 *{margin:0;padding:0;box-sizing:border-box;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif}
-body{background:#0f172a;color:#e2e8f0;min-height:100vh;overflow-x:hidden}
-nav{background:#1e293b;padding:0 24px;display:flex;align-items:center;gap:4px;border-bottom:1px solid #334155;height:48px;position:sticky;top:0;z-index:100}
-nav h1{font-size:16px;font-weight:700;color:#38bdf8;margin-right:24px;white-space:nowrap}
-nav a{padding:12px 16px;color:#94a3b8;text-decoration:none;font-size:13px;cursor:pointer;border-bottom:2px solid transparent;transition:all .15s}
-nav a:hover{color:#e2e8f0}
-nav a.active{color:#38bdf8;border-bottom-color:#38bdf8}
+body{background:var(--bg-primary);color:var(--text-primary);min-height:100vh;overflow-x:hidden;transition:background .2s,color .2s}
+nav{background:var(--bg-secondary);padding:0 24px;display:flex;align-items:center;gap:4px;border-bottom:1px solid var(--border-color);height:48px;position:sticky;top:0;z-index:100;transition:background .2s,border .2s}
+nav h1{font-size:16px;font-weight:700;color:var(--accent);margin-right:24px;white-space:nowrap}
+nav a{padding:12px 16px;color:var(--text-secondary);text-decoration:none;font-size:13px;cursor:pointer;border-bottom:2px solid transparent;transition:all .15s}
+nav a:hover{color:var(--text-primary)}
+nav a.active{color:var(--accent);border-bottom-color:var(--accent)}
+.theme-btn{background:none;border:1px solid var(--border-color);color:var(--text-secondary);cursor:pointer;padding:4px 8px;border-radius:6px;font-size:14px;line-height:1;margin-right:8px;transition:all .15s}
+.theme-btn:hover{color:var(--accent);border-color:var(--accent)}
 .container{padding:20px 24px;max-width:1440px;margin:0 auto}
-.card{background:#1e293b;border:1px solid #334155;border-radius:10px;padding:20px;margin-bottom:16px}
-.card h2{font-size:15px;font-weight:600;margin-bottom:12px;color:#f1f5f9}
-.card h3{font-size:13px;font-weight:600;color:#94a3b8;margin:16px 0 8px}
+.card{background:var(--bg-card);border:1px solid var(--border-color);border-radius:10px;padding:20px;margin-bottom:16px;transition:background .2s,border .2s}
+.card h2{font-size:15px;font-weight:600;margin-bottom:12px;color:var(--text-primary)}
+.card h3{font-size:13px;font-weight:600;color:var(--text-secondary);margin:16px 0 8px}
 .grid-2{display:grid;grid-template-columns:1fr 1fr;gap:16px}
 .grid-3{display:grid;grid-template-columns:1fr 1fr 1fr;gap:16px}
 .grid-4{display:grid;grid-template-columns:repeat(4,1fr);gap:16px}
-.stat-value{font-size:26px;font-weight:700;color:#38bdf8}
-.stat-label{font-size:11px;color:#64748b;margin-top:2px}
+.stat-value{font-size:26px;font-weight:700;color:var(--accent)}
+.stat-label{font-size:11px;color:var(--text-muted);margin-top:2px}
 .stat-card{padding:16px 20px}
 .status-dot{display:inline-block;width:8px;height:8px;border-radius:50%;margin-right:6px}
 .dot-green{background:#22c55e}
@@ -28,94 +35,139 @@ nav a.active{color:#38bdf8;border-bottom-color:#38bdf8}
 .dot-red{background:#ef4444}
 .dot-gray{background:#475569}
 table{width:100%;border-collapse:collapse;font-size:13px}
-th{text-align:left;padding:8px 10px;color:#64748b;font-weight:500;border-bottom:1px solid #334155;font-size:11px;text-transform:uppercase;letter-spacing:.5px}
-td{padding:8px 10px;border-bottom:1px solid #1e293b}
-tr:hover td{background:#0f172a40}
+th{text-align:left;padding:8px 10px;color:var(--text-muted);font-weight:500;border-bottom:1px solid var(--border-color);font-size:11px;text-transform:uppercase;letter-spacing:.5px}
+td{padding:8px 10px;border-bottom:1px solid var(--kv-border)}
+tr:hover td{background:var(--bg-hover)}
 .badge{display:inline-block;padding:2px 8px;border-radius:4px;font-size:11px;font-weight:500}
 .badge-green{background:#166534;color:#86efac}
 .badge-red{background:#7f1d1d;color:#fca5a5}
 .badge-yellow{background:#713f12;color:#fde68a}
 .badge-blue{background:#1e3a5f;color:#93c5fd}
 .btn{padding:6px 14px;border-radius:6px;border:none;font-size:12px;cursor:pointer;font-weight:500;transition:all .15s}
-.btn-primary{background:#2563eb;color:#fff}
-.btn-primary:hover{background:#1d4ed8}
+.btn-primary{background:var(--accent);color:#fff}
+.btn-primary:hover{filter:brightness(1.1)}
 .btn-danger{background:#dc2626;color:#fff}
 .btn-danger:hover{background:#b91c1c}
 .btn-sm{padding:4px 10px;font-size:11px}
-.btn-ghost{background:transparent;border:1px solid #334155;color:#94a3b8}
-.btn-ghost:hover{background:#1e293b;color:#e2e8f0}
+.btn-ghost{background:transparent;border:1px solid var(--btn-ghost-border);color:var(--text-secondary)}
+.btn-ghost:hover{background:var(--btn-ghost-hover-bg);color:var(--text-primary)}
 .tab-content{display:none}
 .tab-content.active{display:block}
-input,textarea,select{background:#0f172a;border:1px solid #334155;border-radius:6px;padding:8px 12px;color:#e2e8f0;font-size:13px;width:100%;margin-bottom:10px;outline:none;transition:border .15s}
-input:focus,textarea:focus,select:focus{border-color:#2563eb}
+input,textarea,select{background:var(--bg-input);border:1px solid var(--border-color);border-radius:6px;padding:8px 12px;color:var(--text-primary);font-size:13px;width:100%;margin-bottom:10px;outline:none;transition:border .15s,background .2s,color .2s}
+input:focus,textarea:focus,select:focus{border-color:var(--accent)}
 textarea{resize:vertical;min-height:80px;font-family:monospace;font-size:12px}
-label{display:block;font-size:11px;color:#94a3b8;margin-bottom:3px;font-weight:500}
-pre{background:#0f172a;border-radius:6px;padding:12px;font-size:12px;overflow-x:auto;color:#a5b4fc;font-family:monospace;max-height:400px;overflow-y:auto}
-code{font-family:monospace;font-size:12px;color:#a5b4fc}
+label{display:block;font-size:11px;color:var(--text-secondary);margin-bottom:3px;font-weight:500}
+pre{background:var(--pre-bg);border-radius:6px;padding:12px;font-size:12px;overflow-x:auto;color:var(--pre-color);font-family:monospace;max-height:400px;overflow-y:auto}
+code{font-family:monospace;font-size:12px;color:var(--pre-color)}
 .settings-layout{display:flex;gap:20px;min-height:60vh}
-.settings-sidebar{width:200px;flex-shrink:0;background:#1e293b;border:1px solid #334155;border-radius:10px;padding:8px 0;overflow-y:auto;max-height:70vh}
-.settings-sidebar a{display:block;padding:9px 16px;color:#94a3b8;font-size:13px;cursor:pointer;text-decoration:none;border-left:3px solid transparent;transition:all .1s}
-.settings-sidebar a:hover{background:#0f172a;color:#e2e8f0}
-.settings-sidebar a.active{background:#0f172a;color:#38bdf8;border-left-color:#38bdf8}
+.settings-sidebar{width:200px;flex-shrink:0;background:var(--bg-card);border:1px solid var(--border-color);border-radius:10px;padding:8px 0;overflow-y:auto;max-height:70vh}
+.settings-sidebar a{display:block;padding:9px 16px;color:var(--text-secondary);font-size:13px;cursor:pointer;text-decoration:none;border-left:3px solid transparent;transition:all .1s}
+.settings-sidebar a:hover{background:var(--bg-primary);color:var(--text-primary)}
+.settings-sidebar a.active{background:var(--bg-primary);color:var(--accent);border-left-color:var(--accent)}
 .settings-content{flex:1;min-width:0}
-.settings-key{font-family:monospace;font-size:11px;color:#64748b;margin-bottom:2px}
-.toast{position:fixed;bottom:20px;right:20px;background:#166534;color:#86efac;padding:10px 20px;border-radius:8px;font-size:13px;display:none;z-index:100;box-shadow:0 4px 12px rgba(0,0,0,.3)}
-.toast.error{background:#7f1d1d;color:#fca5a5}
-.empty-state{text-align:center;padding:40px 20px;color:#64748b}
+.settings-key{font-family:monospace;font-size:11px;color:var(--text-muted);margin-bottom:2px}
+.reasoning{border-left:2px solid #888;padding-left:12px;margin:8px 0;font-size:12px;color:#999}
+.reasoning-title{cursor:pointer;font-size:11px;color:#666;font-weight:600;user-select:none;margin-bottom:4px}
+.reasoning-body{color:#999;line-height:1.5}
+.reasoning-body p{margin:4px 0}
+.msg-content .text h1,.msg-content .text h2,.msg-content .text h3{font-size:1em;margin:8px 0 4px;color:var(--text-primary)}
+.msg-content .text p{margin:4px 0;line-height:1.5}
+.msg-content .text ul,.msg-content .text ol{padding-left:20px;margin:4px 0}
+.msg-content .text li{margin:2px 0}
+.msg-content .text code{background:var(--pre-bg);padding:1px 4px;border-radius:3px;font-size:11px}
+.msg-content .text pre{background:var(--pre-bg);border-radius:6px;padding:10px;margin:8px 0;overflow-x:auto;font-size:11px;max-height:300px}
+.msg-content .text pre code{background:none;padding:0}
+.msg-content .text blockquote{border-left:3px solid var(--border-color);padding-left:10px;margin:8px 0;color:var(--text-secondary)}
+.msg-content .text table{border-collapse:collapse;margin:8px 0;font-size:12px;width:100%}
+.msg-content .text th,.msg-content .text td{border:1px solid var(--border-color);padding:4px 8px;text-align:left}
+.msg-content .text img{max-width:100%;border-radius:6px}
+.toast{position:fixed;bottom:20px;right:20px;background:var(--toast-bg);color:var(--toast-color);padding:10px 20px;border-radius:8px;font-size:13px;display:none;z-index:100;box-shadow:0 4px 12px rgba(0,0,0,.3)}
+.toast.error{background:var(--toast-error-bg);color:var(--toast-error-color)}
+.empty-state{text-align:center;padding:40px 20px;color:var(--text-muted)}
 .empty-state p{font-size:14px;margin-bottom:8px}
 .empty-state .icon{font-size:36px;margin-bottom:12px;opacity:.5}
-.chat-messages{max-height:500px;overflow-y:auto;margin-bottom:12px;padding:8px;border:1px solid #334155;border-radius:8px;background:#0f172a}
+.chat-messages{max-height:500px;overflow-y:auto;margin-bottom:12px;padding:8px;border:1px solid var(--border-color);border-radius:8px;background:var(--chat-bg)}
 .msg{display:flex;gap:10px;margin-bottom:12px;align-items:flex-start}
 .msg-avatar{width:32px;height:32px;border-radius:8px;display:flex;align-items:center;justify-content:center;font-size:14px;flex-shrink:0}
-.msg-user .msg-avatar{background:#1e3a5f;color:#93c5fd}
-.msg-assistant .msg-avatar{background:#1a3a2a;color:#86efac}
-.msg-system .msg-avatar{background:#3b1a3a;color:#f0abfc}
+.msg-user .msg-avatar{background:var(--msg-user-bg);color:var(--msg-user-color)}
+.msg-assistant .msg-avatar{background:var(--msg-assistant-bg);color:var(--msg-assistant-color)}
+.msg-system .msg-avatar{background:var(--msg-system-bg);color:var(--msg-system-color)}
 .msg-content{flex:1;min-width:0}
-.msg-content .role{font-size:11px;color:#64748b;margin-bottom:2px}
+.msg-content .role{font-size:11px;color:var(--text-muted);margin-bottom:2px}
 .msg-content .text{font-size:13px;line-height:1.5;white-space:pre-wrap;word-break:break-word}
-.msg-content .text .reasoning{color:#94a3b8;font-style:italic;font-size:12px;padding:4px 8px;background:#1e293b;border-radius:4px;margin:4px 0;display:block}
+.msg-content .text .reasoning{color:var(--text-secondary);font-style:italic;font-size:12px;padding:4px 8px;background:var(--bg-card);border-radius:4px;margin:4px 0;display:block}
 .chat-input-row{display:flex;gap:8px}
 .chat-input-row input{flex:1;margin-bottom:0}
 .chat-input-row button{flex-shrink:0;margin-bottom:0}
-.loading{display:inline-block;width:16px;height:16px;border:2px solid #334155;border-radius:50%;border-top-color:#38bdf8;animation:spin .6s linear infinite}
+.loading{display:inline-block;width:16px;height:16px;border:2px solid var(--loading-border);border-radius:50%;border-top-color:var(--loading-top);animation:spin .6s linear infinite}
 @keyframes spin{to{transform:rotate(360deg)}}
-.monaco-like{font-family:monospace;font-size:12px;background:#0f172a;border:1px solid #334155;border-radius:6px}
-.kv-row{display:flex;padding:6px 0;border-bottom:1px solid #1e293b;font-size:13px}
-.kv-row .key{color:#94a3b8;width:180px;flex-shrink:0}
-.kv-row .val{color:#e2e8f0;word-break:break-all}
-.tool-badge{display:inline-block;padding:1px 6px;border-radius:3px;font-size:10px;background:#1e3a5f;color:#93c5fd;margin:1px}
+.monaco-like{font-family:monospace;font-size:12px;background:var(--bg-input);border:1px solid var(--border-color);border-radius:6px}
+.kv-row{display:flex;padding:6px 0;border-bottom:1px solid var(--kv-border);font-size:13px}
+.kv-row .key{color:var(--text-muted);width:180px;flex-shrink:0}
+.kv-row .val{color:var(--text-primary);word-break:break-all}
+.tool-badge{display:inline-block;padding:1px 6px;border-radius:3px;font-size:10px;background:var(--accent-bg);color:var(--accent);margin:1px}
 .check-pass{color:#86efac}
 .check-fail{color:#fca5a5}
-.check-skip{color:#94a3b8}
-.memory-graph{width:100%;height:300px;background:#0f172a;border-radius:8px;border:1px solid #334155;position:relative;overflow:hidden;display:flex;align-items:center;justify-content:center;color:#64748b;font-size:13px}
+.check-skip{color:var(--text-secondary)}
+.memory-graph{width:100%;height:300px;background:var(--bg-input);border-radius:8px;border:1px solid var(--border-color);position:relative;overflow:hidden;display:flex;align-items:center;justify-content:center;color:var(--text-muted);font-size:13px}
 .health-panel{display:grid;gap:8px}
-.health-item{display:flex;align-items:center;gap:10px;padding:8px 12px;background:#0f172a;border-radius:6px;font-size:13px}
+.health-item{display:flex;align-items:center;gap:10px;padding:8px 12px;background:var(--bg-input);border-radius:6px;font-size:13px}
 .health-item .check-name{flex:1}
 .health-item .check-status{font-size:11px;font-weight:500}
 .fade-in{animation:fadeIn .2s ease}
 @keyframes fadeIn{from{opacity:0;transform:translateY(4px)}to{opacity:1;transform:translateY(0)}}
-@media(max-width:768px){.grid-2,.grid-3,.grid-4{grid-template-columns:1fr}.settings-layout{flex-direction:column}.settings-sidebar{width:100%;max-height:none;display:flex;flex-wrap:wrap;gap:0;padding:0}.settings-sidebar a{flex:1;min-width:80px;text-align:center;border-left:none;border-bottom:2px solid transparent;padding:8px}.settings-sidebar a.active{border-left:none;border-bottom-color:#38bdf8}}
+#starmap-container{width:100%;height:calc(100vh - 88px);position:relative;overflow:hidden;border-radius:10px;border:1px solid var(--border-color);background:var(--bg-input)}
+#starmap-container canvas{display:block}
+#starmap-stats{position:absolute;top:16px;left:16px;background:rgba(10,10,26,0.85);padding:12px 16px;border-radius:8px;border:1px solid rgba(100,100,255,0.3);font-size:13px;z-index:10;backdrop-filter:blur(10px);color:#ccc}
+#starmap-stats h3{margin-bottom:6px;color:#4488ff;font-size:14px}
+#starmap-stats p{margin:2px 0;color:#888;font-size:12px}
+#starmap-stats span{color:#fff;font-weight:700}
+#starmap-info{position:absolute;top:16px;right:16px;background:rgba(10,10,26,0.9);padding:12px 16px;border-radius:8px;border:1px solid rgba(100,100,255,0.3);font-size:13px;z-index:10;display:none;backdrop-filter:blur(10px);color:#ccc;max-width:260px}
+#starmap-info h3{color:#44ff88;margin-bottom:6px;font-size:14px}
+#starmap-info p{margin:2px 0;color:#888;font-size:12px}
+#starmap-info .label{color:#666}
+#starmap-loading{position:absolute;top:50%;left:50%;transform:translate(-50%,-50%);font-size:18px;color:#4488ff;z-index:20}
+.starmap-toggle{position:absolute;bottom:16px;left:50%;transform:translateX(-50%);display:flex;gap:8px;z-index:10}
+.starmap-toggle button{background:rgba(10,10,26,0.85);border:1px solid rgba(100,100,255,0.3);color:#aaa;padding:6px 14px;border-radius:6px;cursor:pointer;font-size:12px;font-family:inherit;backdrop-filter:blur(10px);transition:all .2s}
+.starmap-toggle button:hover{background:rgba(68,136,255,0.2);color:#fff;border-color:rgba(68,136,255,0.6)}
+.starmap-toggle button.on{background:rgba(68,136,255,0.3);color:#4488ff;border-color:#4488ff}
+#sm-container-chat{height:260px;background:var(--bg-input);border-radius:6px;border:1px solid var(--border-color);overflow:hidden;position:relative}
+#sm-container-chat canvas{display:block}
+.chat-layout{display:flex;gap:16px;min-height:60vh}
+.chat-main{flex:2;min-width:0}
+.chat-sidebar{flex:1;min-width:260px;max-width:360px}
+.sidebar-subnav{display:flex;gap:0;border-bottom:1px solid var(--border-color);margin-bottom:10px}
+.sidebar-subnav span{padding:6px 12px;font-size:12px;cursor:pointer;color:var(--text-muted);border-bottom:2px solid transparent;transition:all .15s}
+.sidebar-subnav span:hover{color:var(--text-primary)}
+.sidebar-subnav span.active{color:var(--accent);border-bottom-color:var(--accent)}
+@media(max-width:900px){.chat-layout{flex-direction:column}.chat-sidebar{max-width:none}}@media(max-width:768px){nav{padding:0 8px;gap:2px}nav h1{font-size:13px;margin-right:8px}nav a{padding:8px 6px;font-size:11px}.container{padding:12px}.card{padding:12px}.grid-2,.grid-3,.grid-4{grid-template-columns:1fr}.stat-value{font-size:20px}.settings-layout{flex-direction:column}.settings-sidebar{width:100%;max-height:200px;display:flex;flex-wrap:wrap;padding:4px;overflow-x:auto}.settings-sidebar a{display:inline-block;padding:6px 12px;border-left:none;border-bottom:2px solid transparent;white-space:nowrap}.settings-sidebar a.active{border-left:none;border-bottom-color:var(--accent)}.kv-row{flex-direction:column;gap:2px}.kv-row .key{width:auto}#starmap-stats{top:8px;left:8px;padding:8px 10px;font-size:11px}#starmap-info{top:8px;right:8px;padding:8px 10px;max-width:180px;font-size:11px}#starmap-container{height:calc(100vh - 48px)}.chat-messages{max-height:300px}.msg-avatar{width:24px;height:24px;font-size:11px}.health-item{flex-wrap:wrap;gap:4px}.health-item .check-name{flex:auto;width:100%}}
 </style>
 </head>
 <body>
-<nav><h1>HomeAgent</h1><a class="active" onclick="switchTab('overview')">概览</a><a onclick="switchTab('chat')">对话</a><a onclick="switchTab('plugins')">插件</a><a onclick="switchTab('memory')">记忆</a><a onclick="switchTab('knowledge')">知识</a><a onclick="switchTab('settings')">设置</a><a onclick="switchTab('kernel')">内核</a><div style="margin-left:auto"><button class="btn btn-ghost btn-sm" onclick="logout()">退出登录</button></div></nav>
+<nav><h1>HomeAgent</h1><a class="active" onclick="switchTab('overview')" data-i18n="navOverview">概览</a><a onclick="switchTab('chat')" data-i18n="navChat">对话</a><a onclick="switchTab('plugins')" data-i18n="navPlugins">插件</a><a onclick="switchTab('settings')" data-i18n="navSettings">设置</a><a onclick="switchTab('adapters')" data-i18n="navAdapters">适配器</a><a onclick="switchTab('kernel')" data-i18n="navKernel">内核</a><div style="margin-left:auto;display:flex;align-items:center;gap:4px"><button class="theme-btn" onclick="toggleTheme()" id="theme-btn" title="切换亮色/暗色模式">☀️</button><button class="btn btn-ghost btn-sm" onclick="toggleLang()" id="lang-btn" title="切换语言/Language" style="font-size:13px;min-width:28px">EN</button><button class="btn btn-ghost btn-sm" onclick="logout()" data-i18n="navLogout">退出登录</button></div></nav>
 <div class="container" id="app">
 <div id="tab-overview" class="tab-content active"></div>
 <div id="tab-chat" class="tab-content"></div>
 <div id="tab-plugins" class="tab-content"></div>
-<div id="tab-memory" class="tab-content"></div>
-<div id="tab-knowledge" class="tab-content"></div>
 <div id="tab-settings" class="tab-content"></div>
+<div id="tab-adapters" class="tab-content"></div>
 <div id="tab-kernel" class="tab-content"></div>
 </div>
 <div id="toast" class="toast"></div>
 <script>
-let state={status:{},kernel:null,settings:{},meta:{},settingsPlugins:['core'],selectedSection:'core',messages:[],chatLoading:false,healthResult:null};
+let state={status:{},kernel:null,settings:{},meta:{},pluginMeta:{},settingsPlugins:['core'],selectedSection:'core',messages:[],chatLoading:false,healthResult:null,starmapInit:false,starmapLoading:false,starmapData:null,chatHistory:[],terminals:[],cmdHistory:[],eventSource:null,lang:localStorage.getItem('ha-lang')||'zh'};
+function __(zh,en){return state.lang==='en'?en:zh}
+function L(){return state.lang}
+function toggleLang(){state.lang=state.lang==='zh'?'en':'zh';localStorage.setItem('ha-lang',state.lang);document.querySelectorAll('[data-i18n]').forEach(function(el){var k=el.getAttribute('data-i18n');var m=window._i18n&&window._i18n[k];if(m)el.textContent=__(m[0],m[1])});renderAll()}
+window._i18n={navOverview:['概览','Overview'],navChat:['对话','Chat'],navPlugins:['插件','Plugins'],navSettings:['设置','Settings'],navAdapters:['适配器','Adapters'],navKernel:['内核','Kernel'],navLogout:['退出登录','Logout'],themeToggle:['切换亮色/暗色模式','Toggle theme']};
 async function api(p,o){let opts={credentials:'include',headers:{'Content-Type':'application/json',...o?.headers},...o};let r=await fetch('/api/v1'+p,opts);if(r.status===401){location.href='/login';throw new Error('unauthorized')}if(opts.raw)return r;let ct=r.headers.get('content-type')||'';if(ct.includes('json'))return r.json();return r.text()}
 function switchTab(n){document.querySelectorAll('.tab-content').forEach(e=>e.classList.remove('active'));let el=document.getElementById('tab-'+n);if(el)el.classList.add('active');document.querySelectorAll('nav a').forEach(e=>e.classList.remove('active'));document.querySelector('nav a[onclick*="\'+n+\'"]')||document.querySelector(`nav a[onclick*="${n}"]`)?.classList.add('active');renderAll()}
 function toast(m,isError){let t=document.getElementById('toast');t.textContent=m;t.className='toast'+(isError?' error':'');t.style.display='block';setTimeout(()=>t.style.display='none',3000)}
-async function renderAll(){try{let s=await api('/status');state.status=s}catch(e){}try{state.kernel=await api('/kernel')}catch(e){}try{let s=await api('/settings');state.settings=s.settings||{};state.meta=s.meta||{};state.settingsPlugins=s.plugins||['core']}catch(e){}try{state.installedPlugins=await api('/plugins')}catch(e){}renderOverview();renderChat();renderPlugins();renderMemory();renderKnowledge();renderKernel()}
-function escHtml(s){return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;')}
+function setTheme(name){document.documentElement.setAttribute('data-theme',name);localStorage.setItem('ha-theme',name);document.getElementById('theme-btn').textContent=name==='light'?'☀️':'🌙'}
+function toggleTheme(){let cur=document.documentElement.getAttribute('data-theme');setTheme(cur==='light'?'dark':'light')}
+(function(){let saved=localStorage.getItem('ha-theme');if(saved){setTheme(saved)}else{setTheme('dark')}})();
+async function renderAll(){try{let s=await api('/status');state.status=s}catch(e){}try{state.kernel=await api('/kernel')}catch(e){}try{let s=await api('/settings');state.settings=s.settings||{};state.meta=s.meta||{};state.settingsPlugins=s.plugins||['core'];state.pluginMeta=s.plugin_meta||{}}catch(e){}try{state.installedPlugins=await api('/plugins')}catch(e){}try{await loadTerminals()}catch(e){}try{await loadCmdHistory()}catch(e){}try{renderOverview()}catch(e){console.error('renderOverview',e)};try{renderChat()}catch(e){console.error('renderChat',e)};try{renderChatStarmap()}catch(e){console.error('renderChatStarmap',e)};try{renderPlugins()}catch(e){console.error('renderPlugins',e)};try{renderKernel()}catch(e){console.error('renderKernel',e)};try{renderOneSettings()}catch(e){console.error('renderOneSettings',e)};try{renderAdapters()}catch(e){console.error('renderAdapters',e)};applyI18n()}
+function applyI18n(){var lang=state.lang;var btn=document.getElementById('lang-btn');if(btn)btn.textContent=lang==='zh'?'EN':'中';document.querySelectorAll('[data-i18n]').forEach(function(el){var k=el.getAttribute('data-i18n');var m=window._i18n&&window._i18n[k];if(m)el.textContent=lang==='en'?m[1]:m[0]})}function escHtml(s){return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;')}
 function timeAgo(t){let s=Math.floor((Date.now()-new Date(t).getTime())/1000);if(s<60)return s+'秒前';let m=Math.floor(s/60);if(m<60)return m+'分钟前';return Math.floor(m/60)+'小时前'}
 
 // === Overview ===
@@ -123,8 +175,31 @@ function renderOverview(){let s=state.status||{};let k=state.kernel;let html='<d
 function statCard(l,v){return '<div class="card stat-card"><div class="stat-value">'+v+'</div><div class="stat-label">'+l+'</div></div>'}
 
 // === Chat ===
-function renderChat(){let msgs=state.messages;let html='<div class="card"><h2>对话调试</h2><div class="chat-messages" id="chat-msgs">';if(msgs.length===0){html+='<div class="empty-state"><p>开始对话以测试 Agent 回复</p></div>'}else{msgs.forEach((m,i)=>{let role=m.role||'user';let c=escHtml(m.content||'');let rc=m.reasoning_content?('<span class="reasoning">思考: '+escHtml(m.reasoning_content)+'</span>'):'';html+='<div class="msg msg-'+role+'"><div class="msg-avatar">'+(role==='user'?'U':role==='assistant'?'A':'S')+'</div><div class="msg-content"><div class="role">'+(role==='user'?'用户':role==='assistant'?'AI':'系统')+'</div><div class="text">'+rc+c+'</div></div></div>'})}html+='</div><div class="chat-input-row"><input id="chat-input" placeholder="输入消息..." onkeydown="if(event.key==\'Enter\')sendChat()"><button class="btn btn-primary" onclick="sendChat()" id="chat-send-btn">发送</button></div></div>';document.getElementById('tab-chat').innerHTML=html;let el=document.getElementById('chat-msgs');if(el)el.scrollTop=el.scrollHeight}
-async function sendChat(){let inp=document.getElementById('chat-input');let btn=document.getElementById('chat-send-btn');let text=inp.value.trim();if(!text||state.chatLoading)return;state.messages.push({role:'user',content:text});inp.value='';renderChat();state.chatLoading=true;btn.disabled=true;btn.textContent='...';try{let r=await api('/chat',{method:'POST',body:JSON.stringify({message:text})});state.messages.push({role:'assistant',content:r.response||'(无响应)',reasoning_content:r.reasoning_content});renderChat()}catch(e){state.messages.push({role:'assistant',content:'错误: '+e.message});renderChat();toast('请求失败: '+e.message,true)}finally{state.chatLoading=false;btn.disabled=false;btn.textContent='发送'}}
+function renderChat(){let cont=document.getElementById('tab-chat');let msgs=state.messages;let k=state.kernel;let html='<div class="chat-layout"><div class="chat-main">';html+='<div class="card"><h2>对话</h2><div class="chat-messages" id="chat-msgs">';if(msgs.length===0){html+='<div class="empty-state"><p>开始对话以测试 Agent 回复</p></div>'}else{	msgs.forEach((m,i)=>{let role=m.role||'user';let c=m.content||'';if(role==='assistant'||role==='system'){if(typeof marked!=='undefined'){c=marked.parse(c)}else{c='<pre>'+escHtml(c)+'</pre>'}}else{c=escHtml(c)}let rc=m.reasoning_content?('<div class="reasoning"><div class="reasoning-title" onclick="this.nextElementSibling.style.display=this.nextElementSibling.style.display===\'none\'?\'block\':\'none\';this.textContent=this.textContent===\'收起思考\'?\'展开思考\':\'收起思考\'">收起思考</div><div class="reasoning-body">'+(typeof marked!=='undefined'?marked.parse(m.reasoning_content):escHtml(m.reasoning_content))+'</div></div>'):'';html+='<div class="msg msg-'+role+'"><div class="msg-avatar">'+(role==='user'?'U':role==='assistant'?'A':'S')+'</div><div class="msg-content"><div class="role">'+(role==='user'?'用户':role==='assistant'?'AI':'系统')+'</div>'+rc+'<div class="text">'+c+'</div></div></div>'})}html+='</div><div class="chat-input-row"><input id="chat-input" placeholder="输入消息..." onkeydown="if(event.key==\'Enter\')sendChat()"><button class="btn btn-primary" onclick="sendChat()" id="chat-send-btn">发送</button></div></div>';html+='</div><div class="chat-sidebar"><div class="card" style="padding:12px"><h2 style="font-size:13px;margin-bottom:8px">星图</h2><div id="sm-container-chat" style="height:160px"><p style="color:var(--text-muted);padding:12px;text-align:center;font-size:11px">加载中..</p></div></div><div class="card" style="padding:12px"><h2 style="font-size:13px;margin-bottom:8px">终端 <span id="term-count-badge" class="badge badge-blue">0</span></h2><div id="term-list" style="max-height:160px;overflow-y:auto;font-size:11px"></div></div><div class="card" style="padding:12px"><h2 style="font-size:13px;margin-bottom:8px">命令历史 <span id="cmd-count-badge" class="badge badge-blue">0</span></h2><div id="cmd-list" style="max-height:120px;overflow-y:auto;font-size:11px"></div></div><div class="card" style="padding:12px"><div class="sidebar-subnav"><span class="active" onclick="switchChatSub(\'memory\',this)">记忆</span><span onclick="switchChatSub(\'context\',this)">上下文/span><span onclick="switchChatSub(\'knowledge\',this)">知识</span></div><div id="chat-sub-memory"><div class="kv-row"><span class="key">实体</span><span class="val">'+(k?.memory?.entity_count||'-')+'</span></div><div class="kv-row"><span class="key">关系</span><span class="val">'+(k?.memory?.relation_count||'-')+'</span></div><div style="margin-top:8px"><input id="mem-query" placeholder="关键词查询><button class="btn btn-primary btn-sm" onclick="queryMemoryChat()">查询</button></div><div id="mem-result-chat" style="margin-top:8px;max-height:180px;overflow:auto"></div></div><div id="chat-sub-context" style="display:none"><div style="margin-top:8px"><input id="ctx-query" placeholder="输入当前话题"><button class="btn btn-primary btn-sm" onclick="queryMemoryContext()">获取上下文/button></div><div id="ctx-result" style="margin-top:8px;max-height:200px;overflow:auto"></div></div><div id="chat-sub-knowledge" style="display:none"><div class="kv-row"><span class="key">项目</span><span class="val">'+(k?.knowledge?.item_count||'-')+'</span></div><div style="margin-top:8px"><input id="know-query" placeholder="搜索知识"><button class="btn btn-primary btn-sm" onclick="searchKnowledgeChat()">搜索</button></div><div id="know-result-chat" style="margin-top:8px;max-height:180px;overflow:auto"></div><div style="margin-top:12px;border-top:1px solid var(--border-color);padding-top:8px"><input id="know-name" placeholder="知识鍚嶇О" style="margin-bottom:4px"><textarea id="know-content" placeholder="内容" style="min-height:50px;margin-bottom:4px"></textarea><button class="btn btn-primary btn-sm" onclick="createKnowledgeChat()">创建</button></div></div></div></div></div>';cont.innerHTML=html;let el=document.getElementById('chat-msgs');if(el)el.scrollTop=el.scrollHeight;renderChatStarmap();renderTerminals();renderCmdHistory()}
+function renderChatStarmap(){let cont=document.getElementById('sm-container-chat');if(!cont)return;if(cont.querySelector('canvas')){let rect=cont.getBoundingClientRect();if(starmapRen&&rect.width>0)starmapRen.setSize(rect.width,Math.max(rect.height,250));return}if(state.starmapInit){if(starmapRen){let rect=cont.getBoundingClientRect();if(rect.width>0)starmapRen.setSize(rect.width,Math.max(rect.height,250));cont.appendChild(starmapRen.domElement);starmapRen.domElement.style.display='block'}return}if(state.starmapLoading)return;state.starmapLoading=true;loadChatStarmapData()}
+async function loadChatStarmapData(){try{let resp=await api('/memory/graph');if(!resp||!resp.success||!resp.data){document.getElementById('sm-container-chat').innerHTML='<p style="color:var(--text-muted);padding:20px;text-align:center">无数据</p>';state.starmapInit=true;state.starmapLoading=false;return}let d=resp.data;starmapNodes=d.nodes||[];starmapEdges=d.edges||[];state.starmapInit=true;state.starmapLoading=false;initChatStarmap()}catch(e){document.getElementById('sm-container-chat').innerHTML='<p style="color:var(--text-muted);padding:20px;text-align:center">加载失败</p>';state.starmapInit=true;state.starmapLoading=false}}
+function getStarmapBg(){let isLight=document.documentElement.getAttribute('data-theme')==='light';return isLight?0xf0f4f8:0x0a0a1a}
+function initChatStarmap(){let cont=document.getElementById('sm-container-chat');if(!cont)return;let rect=cont.getBoundingClientRect();let w=Math.max(rect.width||300,100),h=Math.max(rect.height||250,100);if(starmapRen){starmapRen.setSize(w,h);cont.appendChild(starmapRen.domElement);starmapRen.domElement.style.display='block';return}let bg=getStarmapBg();starmapScene=new THREE.Scene();starmapScene.fog=new THREE.FogExp2(bg,0.02);starmapCam=new THREE.PerspectiveCamera(60,w/h,0.1,2000);starmapCam.position.set(0,20,40);starmapRen=new THREE.WebGLRenderer({antialias:true,alpha:true});starmapRen.setSize(w,h);starmapRen.setPixelRatio(Math.min(window.devicePixelRatio,2));starmapRen.setClearColor(bg,1);cont.innerHTML='';cont.appendChild(starmapRen.domElement);starmapCtrl=new THREE.OrbitControls(starmapCam,starmapRen.domElement);starmapCtrl.enableDamping=true;starmapCtrl.dampingFactor=0.05;starmapCtrl.rotateSpeed=0.5;starmapCtrl.zoomSpeed=0.8;let al=new THREE.AmbientLight(0x444466,0.6);starmapScene.add(al);let dl=new THREE.DirectionalLight(0xffffff,0.8);dl.position.set(50,100,50);starmapScene.add(dl);createStarField();buildChatStarmapGraph();starmapRen.domElement.addEventListener('mousemove',onStarmapMove);starmapRen.domElement.addEventListener('click',onStarmapClick);window.addEventListener('resize',onStarmapResize);if(starmapRaf)cancelAnimationFrame(starmapRaf);starmapAnimate()}
+function buildChatStarmapGraph(){starmapNodeMeshes.forEach(function(m){starmapScene.remove(m)});starmapEdgeLines.forEach(function(l){starmapScene.remove(l)});starmapNodeMeshes=[];starmapEdgeLines=[];if(starmapNodes.length===0)return;let nMap={};starmapNodes.forEach(function(n){nMap[n.id]=n});let sorted=[...starmapNodes].sort(function(a,b){return(b.mention_count||0)-(a.mention_count||0)});let mc=sorted.map(function(n){return n.mention_count||0});let maxMc=Math.max(...mc,1),minMc=Math.min(...mc,0),rng=maxMc-minMc||1;let pos={};let baseR=10,maxR=50;let acc=0;sorted.forEach(function(n,i){let m=n.mention_count||0,mn=rng>0?(m-minMc)/rng:0;let rad=baseR+mn*(maxR-baseR);let baseStep=(Math.PI*2)/sorted.length;let step=baseStep+mn*baseStep*2;let angle=acc+step/2;acc+=step;pos[n.id]={x:rad*Math.cos(angle),y:(Math.random()-0.5)*(5+mn*15),z:rad*Math.sin(angle),mn:n,rad}});for(let it=0;it<50;it++){Object.keys(pos).forEach(function(i){Object.keys(pos).forEach(function(j){if(i>=j)return;let a=pos[i],b=pos[j];let dx=a.x-b.x,dy=a.y-b.y,dz=a.z-b.z,d=Math.sqrt(dx*dx+dy*dy+dz*dz)+0.1;let f=(0.5+(a.mn+b.mn)*0.5);if(d<20){let force=(0.08*f)/Math.max(d,0.5);a.x+=dx/d*force;a.y+=dy/d*force;a.z+=dz/d*force;b.x-=dx/d*force;b.y-=dy/d*force;b.z-=dz/d*force}})});starmapEdges.forEach(function(e){let a=pos[e.source_id],b=pos[e.target_id];if(!a||!b)return;let dx=b.x-a.x,dy=b.y-a.y,dz=b.z-a.z,d=Math.sqrt(dx*dx+dy*dy+dz*dz)+0.1;if(d>15){let f=0.05*Math.max(0.3,1-(a.mn+b.mn)*0.3);a.x+=dx/d*f;a.y+=dy/d*f;a.z+=dz/d*f;b.x-=dx/d*f;b.y-=dy/d*f;b.z-=dz/d*f}});Object.keys(pos).forEach(function(i){let p=pos[i];let d=Math.sqrt(p.x*p.x+p.y*p.y+p.z*p.z);let maxA=maxR*1.5;if(d>maxA){let s=maxA/d;p.x*=s;p.y*=s;p.z*=s}})};starmapNodes.forEach(function(n){let p=pos[n.id];if(!p)return;let mn=n.mention_count||0,mnr=rng>0?(mn-minMc)/rng:0;let rad=0.4+mnr*1.5;let col=smTypeColors[n.type]||0xcccccc;let ei=0.3+mnr*0.7;let g=new THREE.SphereGeometry(rad,16,12);let mat=new THREE.MeshPhongMaterial({color:col,emissive:col,emissiveIntensity:ei,shininess:30});let sp=new THREE.Mesh(g,mat);sp.position.set(p.x,p.y,p.z);sp.userData={nodeId:n.id,nodeData:n};let ca=document.createElement('canvas');ca.width=128;ca.height=48;let ctx=ca.getContext('2d');ctx.font='bold 16px Courier New';ctx.fillStyle='#fff';ctx.textAlign='center';ctx.shadowColor='#aaccff';ctx.shadowBlur=6;ctx.fillText((n.name||'').substring(0,10),64,28);let tex=new THREE.CanvasTexture(ca);tex.needsUpdate=true;let lm=new THREE.SpriteMaterial({map:tex,transparent:true,opacity:0.8,depthTest:false,depthWrite:false,blending:THREE.AdditiveBlending});let lb=new THREE.Sprite(lm);lb.scale.set(6,2,1);lb.position.y=rad+1.5;sp.add(lb);starmapScene.add(sp);starmapNodeMeshes.push(sp)});starmapEdges.forEach(function(e){let a=pos[e.source_id],b=pos[e.target_id];if(!a||!b)return;let col=smEdgeColors[e.relation_type]||0x444466;let g=new THREE.BufferGeometry().setFromPoints([new THREE.Vector3(a.x,a.y,a.z),new THREE.Vector3(b.x,b.y,b.z)]);let m=new THREE.LineBasicMaterial({color:col,transparent:true,opacity:0.4});let l=new THREE.Line(g,m);l.userData={edgeId:e.id,edgeData:e};starmapScene.add(l);starmapEdgeLines.push(l)});starmapCam.position.set(35,20,35);starmapCtrl.target.set(0,0,0);starmapCtrl.update()}
+async function sendChat(){let inp=document.getElementById('chat-input');let btn=document.getElementById('chat-send-btn');let text=inp.value.trim();if(!text||state.chatLoading)return;state.messages.push({role:'user',content:text});inp.value='';rerenderChat();state.chatLoading=true;btn.disabled=true;btn.textContent='...';try{let r=await api('/chat',{method:'POST',body:JSON.stringify({message:text})});var last=state.messages[state.messages.length-1];if(last&&last.role==='assistant'&&last._streaming){last.content=r.response||'(无响应)';last.reasoning_content=r.reasoning_content||'';last._final=true;delete last._streaming}else{state.messages.push({role:'assistant',content:r.response||'(无响应)',reasoning_content:r.reasoning_content,_final:true})}rerenderChat()}catch(e){state.messages.push({role:'assistant',content:'错误: '+e.message,_final:true});rerenderChat();toast('请求失败: '+e.message,true)}finally{state.chatLoading=false;btn.disabled=false;btn.textContent='发送'}}
+async function queryMemoryChat(){let q=document.getElementById('mem-query')?.value;let r=document.getElementById('mem-result-chat');if(!r||!q)return;r.innerHTML='<div class="loading"></div>';try{let data=await api('/memory?q='+encodeURIComponent(q)+'&depth=2');r.innerHTML='<pre style="font-size:11px">'+escHtml(JSON.stringify(data,null,2))+'</pre>'}catch(e){r.innerHTML='<p style="color:#fca5a5">查询失败: '+escHtml(e.message)+'</p>'}}
+async function queryMemoryContext(){let q=document.getElementById('ctx-query')?.value;let r=document.getElementById('ctx-result');if(!r)return;r.innerHTML='<div class="loading"></div>';try{let data=await api('/memory/context?q='+encodeURIComponent(q||''));let ctx=data?.context||'无上下文';let summary=data?.summary||'';let entities=data?.entities||[];let tk=data?.token_estimate||0;let html='<div style="font-size:11px">';if(summary)html+='<div class="kv-row"><span class="key">摘要</span><span class="val">'+escHtml(summary)+'</span></div>';html+='<div class="kv-row"><span class="key">Token 预估</span><span class="val">'+tk+'</span></div>';if(entities.length)html+='<div class="kv-row"><span class="key">实体</span><span class="val">'+entities.map(function(e){return escHtml(e.name||e.id||'')}).join(', ')+'</span></div>';html+='<pre style="font-size:11px;margin-top:8px">'+escHtml(ctx)+'</pre></div>';r.innerHTML=html}catch(e){r.innerHTML='<p style="color:#fca5a5">获取失败: '+escHtml(e.message)+'</p>'}}
+async function searchKnowledgeChat(){let q=document.getElementById('know-query')?.value;let r=document.getElementById('know-result-chat');if(!r||!q)return;r.innerHTML='<div class="loading"></div>';try{let data=await api('/knowledge?q='+encodeURIComponent(q));r.innerHTML='<pre style="font-size:11px">'+escHtml(JSON.stringify(data,null,2))+'</pre>'}catch(e){r.innerHTML='<p style="color:#fca5a5">查询失败: '+escHtml(e.message)+'</p>'}}
+async function createKnowledgeChat(){let name=document.getElementById('know-name')?.value;let content=document.getElementById('know-content')?.value;if(!name||!content){toast('名称和内容不能为空',true);return}try{let r=await api('/knowledge',{method:'POST',body:JSON.stringify({name,content})});if(r.status||r.id){toast('知识「'+name+'」已创建');document.getElementById('know-name').value='';document.getElementById('know-content').value=''}else{toast('创建失败',true)}}catch(e){toast('创建失败: '+e.message,true)}}
+
+function switchChatSub(tab,el){var cards={'memory':document.getElementById('chat-sub-memory'),'context':document.getElementById('chat-sub-context'),'knowledge':document.getElementById('chat-sub-knowledge')};Object.keys(cards).forEach(function(k){var c=cards[k];if(c)c.style.display=k===tab?'block':'none'});if(el){var parent=el.parentElement;if(parent){Array.from(parent.children).forEach(function(ch){ch.classList.remove('active')});el.classList.add('active')}}if(tab==='context')queryMemoryContext()}
+
+async function loadChatHistory(){try{let data=await api('/chat/history');if(data&&data.messages)state.messages=data.messages}catch(e){}}
+
+async function loadTerminals(){try{let data=await api('/terminals');if(data&&data.terminals)state.terminals=data.terminals}catch(e){}}
+
+async function loadCmdHistory(){try{let data=await api('/cmd/history');if(data&&data.history)state.cmdHistory=data.history}catch(e){}}
+
+function renderTerminals(){let r=document.getElementById('term-list');let cnt=document.getElementById('term-count');if(!r)return;let list=state.terminals||[];if(cnt)cnt.textContent=list.length;if(list.length===0){r.innerHTML='<p style="color:var(--text-muted);padding:8px;text-align:center;font-size:11px">暂无终端会话</p>';return}var html='';list.forEach(function(t,i){var detailId='term-detail-'+i;html+='<div style="border:1px solid var(--border-color);border-radius:6px;margin-bottom:4px;font-size:11px">';html+='<div style="display:flex;align-items:center;gap:6px;padding:6px 8px;cursor:pointer;background:var(--bg-hover)" onclick="var d=document.getElementById(\''+detailId+'\');d.style.display=d.style.display===\'none\'?\'block\':\'none\'">';html+='<span style="font-family:monospace;font-size:10px;flex:1">'+escHtml(t.id||'-')+'</span>';html+='<span style="flex:1;color:var(--text-muted)">'+escHtml(t.command||'')+'</span>';html+='<span class="badge '+(t.running?'badge-green':'badge-red')+'">'+(t.running?'运行中':'已关闭')+'</span>';html+='<span style="color:var(--text-muted);font-size:10px">'+escHtml(t.created_at||'')+'</span>';html+='</div>';html+='<div id="'+detailId+'" style="display:none;padding:8px;border-top:1px solid var(--border-color);background:var(--bg-input)">';html+='<div class="kv-row"><span class="key">ID</span><span class="val" style="font-family:monospace">'+escHtml(t.id||'-')+'</span></div>';html+='<div class="kv-row"><span class="key">命令</span><span class="val">'+escHtml(t.command||'-')+'</span></div>';html+='<div class="kv-row"><span class="key">状态</span><span class="val">'+(t.running?'运行中':'已关闭')+'</span></div>';html+='<div class="kv-row"><span class="key">创建时间</span><span class="val">'+escHtml(t.created_at||'-')+'</span></div>';if(t.uptime)html+='<div class="kv-row"><span class="key">运行时长</span><span class="val">'+escHtml(t.uptime)+'</span></div>';if(t.output)html+='<div class="kv-row"><span class="key">输出预览</span><span class="val"><pre style="font-size:10px;margin:0;max-height:120px;overflow:auto">'+escHtml(t.output)+'</pre></span></div>';html+='</div></div>'});r.innerHTML=html}
+
+function renderCmdHistory(){let r=document.getElementById('cmd-list');let cnt=document.getElementById('cmd-count');if(!r)return;let list=state.cmdHistory||[];if(cnt)cnt.textContent=list.length;if(list.length===0){r.innerHTML='<p style="color:var(--text-muted);padding:8px;text-align:center;font-size:11px">暂无命令记录</p>';return}var html='<table style="font-size:10px"><tr><th>命令</th><th>状态</th><th>时间</th></tr>';list.slice().reverse().slice(0,50).forEach(function(c){html+='<tr><td style="font-family:monospace;max-width:180px;overflow:hidden;text-overflow:ellipsis">'+escHtml(c.command||'')+'</td><td><span class="badge '+(c.status==='ok'?'badge-green':'badge-red')+'">'+escHtml(c.status||'')+'</span></td><td style="color:var(--text-muted);white-space:nowrap">'+escHtml((c.time||'').substring(0,19))+'</td></tr>'});html+='</table>';r.innerHTML=html}
+
+function connectSSE(){if(state.eventSource)state.eventSource.close();var es;try{es=new EventSource('/api/v1/chat/events');state.eventSource=es}catch(ex){}if(!es)return;es.addEventListener('agent_output',function(e){try{var ev=JSON.parse(e.data);var p=ev.payload||{};if(!p.content)return;if(state.messages.length>0&&state.messages[state.messages.length-1].role==='assistant'&&!state.messages[state.messages.length-1]._final){state.messages[state.messages.length-1].content+=p.content;renderChat();renderChatStarmap();return}state.messages.push({role:'assistant',content:p.content,_streaming:true});renderChat();renderChatStarmap()}catch(ex){}});es.addEventListener('reasoning',function(e){try{var ev=JSON.parse(e.data);var p=ev.payload||{};if(p.content&&state.messages.length>0){var last=state.messages[state.messages.length-1];if(last.role==='assistant'){last.reasoning_content=(last.reasoning_content||'')+p.content;renderChat();renderChatStarmap()}}}catch(ex){}});es.onerror=function(){setTimeout(connectSSE,5000)}}
 
 // === Plugins ===
 function renderPlugins(){let k=state.kernel;let plugins=k?.plugins||[];let tools=k?.tools||[];let installed=state.installedPlugins||[]
@@ -134,7 +209,7 @@ if(installed.length>0){html+='<div class="card"><h2>已安装外部插件 ('+ins
 if(state.pluginInfo){html+='<div class="card"><h2>插件详情: '+escHtml(state.pluginInfo.name)+'</h2><pre>'+escHtml(JSON.stringify(state.pluginInfo,null,2))+'</pre><button class="btn btn-ghost" onclick="closePluginInfo()">关闭</button></div>'}
 if(tools.length>0){html+='<div class="card"><h2>已注册工具 ('+tools.length+')</h2><div style="display:flex;flex-wrap:wrap;gap:4px">';tools.forEach(t=>{html+='<span class="tool-badge" title="'+escHtml(t.description||'')+'">'+escHtml(t.name)+'</span>'});html+='</div></div>'}
 html+='<div class="card"><h2>系统操作</h2><button class="btn btn-primary" onclick="reloadPlugins()" style="margin-right:8px">重载插件</button><button class="btn btn-ghost" onclick="runHealthcheck()" style="margin-right:8px">健康检查</button></div>'
-html+='<div class="card"><h2>健康检查</h2><div id="health-panel">';if(state.healthResult){html+=renderHealthResult(state.healthResult)}else{html+='<p style="color:#64748b;font-size:13px">点击上方按钮运行</p>'}html+='</div></div>'
+html+='<div class="card"><h2>健康检查</h2><div id="health-panel">';if(state.healthResult){html+=renderHealthResult(state.healthResult)}else{html+='<p style="color:var(--text-muted);font-size:13px">点击上方按钮运行</p>'}html+='</div></div>'
 document.getElementById('tab-plugins').innerHTML=html}
 async function loadInstalledPlugins(){try{state.installedPlugins=await api('/plugins')}catch(e){state.installedPlugins=[]}}
 async function installPlugin(){let inp=document.getElementById('plugin-url');let url=inp?.value.trim();if(!url){toast('请输入插件包 URL',true);return}try{let r=await api('/plugins',{method:'POST',body:JSON.stringify({url})});toast('安装结果: '+(r.status||JSON.stringify(r)));if(r.action==='reload_required'){toast('已安装，请点击「重载插件」加载',false)}loadInstalledPlugins();renderPlugins()}catch(e){toast('安装失败: '+e.message,true)}}
@@ -143,32 +218,120 @@ async function showPluginInfo(name){try{state.pluginInfo=await api('/plugins/'+e
 function closePluginInfo(){state.pluginInfo=null;renderPlugins()}
 async function removePlugin(name){if(!confirm('确定卸载插件「'+name+'」？'))return;try{let r=await api('/plugins/'+encodeURIComponent(name),{method:'DELETE'});toast('已卸载: '+(r.status||r.name));if(r.action==='reload_required'){toast('已卸载，请点击「重载插件」生效',false)}loadInstalledPlugins();renderPlugins()}catch(e){toast('卸载失败: '+e.message,true)}}
 async function reloadPlugins(){try{let r=await api('/plugins/reload',{method:'POST'});toast('插件已重载');state.kernel=await api('/kernel');renderPlugins()}catch(e){toast('重载失败: '+e.message,true)}}
-async function runHealthcheck(){let panel=document.getElementById('health-panel');if(!panel)return;panel.innerHTML='<div class="loading" style="margin:12px auto"></div><p style="text-align:center;color:#64748b">运行中...</p>';try{let r=await api('/kernel');let tools=r?.tools||[];let healthTool=tools.find(t=>t.name==='healthcheck');if(!healthTool){panel.innerHTML='<p style="color:#94a3b8">healthcheck 工具未注册</p>';return}panel.innerHTML='<p style="color:#94a3b8">通过 Agent 对话触发 healthcheck...</p>';let chatR=await api('/chat',{method:'POST',body:JSON.stringify({message:'请运行 healthcheck 工具进行全面健康检查并报告结果'})});panel.innerHTML='<pre>'+escHtml(JSON.stringify(chatR,null,2))+'</pre>'}catch(e){panel.innerHTML='<p style="color:#fca5a5">错误: '+escHtml(e.message)+'</p>';toast('健康检查失败: '+e.message,true)}}
-function renderHealthResult(r){if(!r||!r.checks)return '<p style="color:#94a3b8">暂无健康检查数据</p>';let checks=r.checks||[];let passed=checks.filter(c=>c.pass).length;let failed=checks.filter(c=>!c.pass).length;let html='<div style="margin-bottom:12px;display:flex;gap:16px;align-items:center"><span class="badge badge-green">通过: '+passed+'</span><span class="badge '+(failed>0?'badge-red':'badge-green')+'">失败: '+failed+'</span><span class="badge badge-blue">总计: '+checks.length+'</span></div>';checks.forEach(c=>{let passClass=c.pass?'check-pass':'check-fail';if(c.status==='skip')passClass='check-skip';html+='<div class="health-item"><span class="check-name">'+escHtml(c.name)+'</span><span class="check-status '+passClass+'">'+(c.status||'unknown')+'</span><span style="color:#64748b;font-size:11px">'+escHtml(c.detail||'')+'</span></div>'});return html}
-
-// === Memory ===
-function renderMemory(){let k=state.kernel;let mem=k?.memory;let html='<div class="grid-2"><div class="card"><h2>图记忆</h2>';if(mem?.available){html+='<div class="kv-row"><span class="key">实体数</span><span class="val">'+mem.entity_count+'</span></div><div class="kv-row"><span class="key">关系数</span><span class="val">'+mem.relation_count+'</span></div><div class="kv-row"><span class="key">实体类型</span><span class="val">'+mem.entity_types+'</span></div>'}else{html+='<div class="empty-state"><p>图记忆未初始化</p></div>'}html+='</div><div class="card"><h2>记忆查询</h2><input id="mem-query" placeholder="输入查询关键词（逗号分隔）"><button class="btn btn-primary" onclick="queryMemory()">查询</button><div id="mem-result" style="margin-top:12px"></div></div></div>';let tm=k?.text_memory;if(tm?.available){html+='<div class="card"><h2>文本记忆</h2><p style="color:#94a3b8;font-size:13px">已记录 '+tm.file_count+' 个文件</p></div>'}document.getElementById('tab-memory').innerHTML=html}
-async function queryMemory(){let q=document.getElementById('mem-query')?.value;let r=document.getElementById('mem-result');if(!r||!q)return;r.innerHTML='<div class="loading"></div>';try{let data=await api('/memory?q='+encodeURIComponent(q)+'&depth=2');r.innerHTML='<pre>'+escHtml(JSON.stringify(data,null,2))+'</pre>'}catch(e){r.innerHTML='<p style="color:#fca5a5">查询失败: '+escHtml(e.message)+'</p>'}}
-
-// === Knowledge ===
-function renderKnowledge(){let k=state.kernel;let know=k?.knowledge;let html='<div class="grid-2"><div class="card"><h2>知识库</h2>';if(know?.available){html+='<div class="kv-row"><span class="key">条目数</span><span class="val">'+know.item_count+'</span></div>';if(know.items&&know.items.length>0){html+='<h3>分类</h3>';know.items.forEach(n=>{html+='<span class="tool-badge">'+escHtml(n)+'</span> '})}}else{html+='<div class="empty-state"><p>知识库未初始化</p></div>'}html+='</div><div class="card"><h2>搜索</h2><input id="know-query" placeholder="输入关键词" onkeydown="if(event.key==\'Enter\')searchKnowledge()"><button class="btn btn-primary" onclick="searchKnowledge()">搜索</button><div id="know-result" style="margin-top:12px"></div></div></div><div class="card"><h2>新建知识</h2><div style="max-width:500px"><label>名称</label><input id="know-name" placeholder="知识名称"><label>内容</label><textarea id="know-content" placeholder="Markdown 内容"></textarea><button class="btn btn-primary" onclick="createKnowledge()">创建</button></div></div>';document.getElementById('tab-knowledge').innerHTML=html}
-async function searchKnowledge(){let q=document.getElementById('know-query')?.value;let r=document.getElementById('know-result');if(!r||!q)return;r.innerHTML='<div class="loading"></div>';try{let data=await api('/knowledge?q='+encodeURIComponent(q));r.innerHTML='<pre>'+escHtml(JSON.stringify(data,null,2))+'</pre>'}catch(e){r.innerHTML='<p style="color:#fca5a5">搜索失败: '+escHtml(e.message)+'</p>'}}
-async function createKnowledge(){let name=document.getElementById('know-name')?.value;let content=document.getElementById('know-content')?.value;if(!name||!content){toast('名称和内容不能为空',true);return}try{await api('/knowledge',{method:'POST',body:JSON.stringify({name,content})});toast('知识「'+name+'」已创建');document.getElementById('know-name').value='';document.getElementById('know-content').value='';renderAll()}catch(e){toast('创建失败: '+e.message,true)}}
-
-// === Settings ===
-function renderSettingsSidebar(){let el=document.querySelector('.settings-sidebar');if(!el)return;el.innerHTML='';state.settingsPlugins.forEach(function(p){let a=document.createElement('a');a.textContent=p;if(p===state.selectedSection)a.className='active';a.onclick=function(){state.selectedSection=p;renderOneSettings()};el.appendChild(a)})}
-function renderOneSettings(){let prefix=state.selectedSection+'.';let filtered=Object.keys(state.settings||{}).filter(k=>k===prefix.slice(0,-1)||k.startsWith(prefix));filtered.sort();let html='<div class="settings-layout"><div class="settings-sidebar"></div><div class="settings-content">';if(filtered.length===0){html+='<div class="card"><h2>'+escHtml(state.selectedSection)+'</h2><p style="color:#94a3b8">暂无设置项</p></div>'}else{filtered.forEach(k=>{let v=state.settings[k];let sv=typeof v==='object'?JSON.stringify(v):String(v);let m=state.meta?.[k];let label=m?.display_name||'值';let desc=m?.description||'';let typ=m?.type||'string';let ph=m?.placeholder||'';let opts=m?.options||[];let inpId='inp-'+k.replace(/\./g,'_');let inp='';if(typ==='bool'){let chk=sv==='true'?'checked':'';inp='<label style="display:flex;align-items:center;gap:8px;cursor:pointer"><input type="checkbox" id="'+inpId+'" '+chk+' onchange="markDirty(\''+k+'\')" style="width:auto;margin:0"> '+label+'</label>'}else if(typ==='password'){inp='<label>'+label+'</label><input type="password" id="'+inpId+'" value="'+escHtml(sv)+'" placeholder="'+escHtml(ph)+'" onchange="markDirty(\''+k+'\')">'}else if(typ==='text'){inp='<label>'+label+'</label><textarea id="'+inpId+'" onchange="markDirty(\''+k+'\')">'+escHtml(sv)+'</textarea>'}else if(typ==='select'&&opts.length>0){let sel='<label>'+label+'</label><select id="'+inpId+'" onchange="markDirty(\''+k+'\')">';opts.forEach(o=>{sel+='<option value="'+escHtml(o)+'"'+(sv===o?' selected':'')+'>'+escHtml(o)+'</option>'});sel+='</select>';inp=sel}else if(typ==='int'){inp='<label>'+label+'</label><input type="number" id="'+inpId+'" value="'+escHtml(sv)+'" placeholder="'+escHtml(ph)+'" onchange="markDirty(\''+k+'\')">'}else{inp='<label>'+label+'</label><input id="'+inpId+'" value="'+escHtml(sv)+'" placeholder="'+escHtml(ph)+'" onchange="markDirty(\''+k+'\')">'}html+='<div class="card"><button class="btn btn-primary btn-sm save-btn" onclick="saveSetting(\''+k+'\')" style="float:right;margin-top:-4px">保存</button><div class="settings-key">'+escHtml(k)+'</div>'+inp;if(desc){html+='<p style="color:#64748b;font-size:11px;margin-top:-6px">'+escHtml(desc)+'</p>'}html+='</div>'})}html+='</div></div>';document.getElementById('tab-settings').innerHTML=html;renderSettingsSidebar()}
-function markDirty(k){let inp=document.getElementById('inp-'+k.replace(/\./g,'_'));if(inp)inp.style.borderColor='#eab308'}
-async function saveSetting(k){let inp=document.getElementById('inp-'+k.replace(/\./g,'_'));if(!inp)return;let val;let m=state.meta?.[k];if(m?.type==='bool'){val=inp.checked?'true':'false'}else if(m?.type==='select'){val=inp.value}else{let raw=inp.value;try{val=JSON.parse(raw)}catch(e){val=raw}}try{let r=await api('/settings',{method:'PUT',body:JSON.stringify({key:k,value:val})});if(r.status==='ok'){inp.style.borderColor='';state.settings[k]=val;toast('已保存: '+k)}else{toast('保存失败: '+(r.error||'unknown'),true)}}catch(e){toast('保存失败: '+e.message,true)}}
-function renderConfigDisabled(){document.getElementById('tab-settings').innerHTML='<div class="card"><h2>设置</h2><p style="color:#94a3b8">设置面板已加载</p></div>';renderOneSettings()}
+async function runHealthcheck(){let panel=document.getElementById('health-panel');if(!panel)return;panel.innerHTML='<div class="loading" style="margin:12px auto"></div><p style="text-align:center;color:var(--text-muted)">运行中...</p>';try{let r=await api('/kernel');let tools=r?.tools||[];let healthTool=tools.find(t=>t.name==='healthcheck');if(!healthTool){panel.innerHTML='<p style="color:var(--text-secondary)">healthcheck 工具未注册</p>';return}panel.innerHTML='<p style="color:var(--text-secondary)">通过 Agent 对话触发 healthcheck...</p>';let chatR=await api('/chat',{method:'POST',body:JSON.stringify({message:'请运行 healthcheck 工具进行全面健康检查并报告结果'})});panel.innerHTML='<pre>'+escHtml(JSON.stringify(chatR,null,2))+'</pre>'}catch(e){panel.innerHTML='<p style="color:#fca5a5">错误: '+escHtml(e.message)+'</p>';toast('健康检查失败: '+e.message,true)}}
+function renderHealthResult(r){if(!r||!r.checks)return '<p style="color:var(--text-secondary)">暂无健康检查数据</p>';let checks=r.checks||[];let passed=checks.filter(c=>c.pass).length;let failed=checks.filter(c=>!c.pass).length;let html='<div style="margin-bottom:12px;display:flex;gap:16px;align-items:center"><span class="badge badge-green">通过: '+passed+'</span><span class="badge '+(failed>0?'badge-red':'badge-green')+'">失败: '+failed+'</span><span class="badge badge-blue">总计: '+checks.length+'</span></div>';checks.forEach(c=>{let passClass=c.pass?'check-pass':'check-fail';if(c.status==='skip')passClass='check-skip';html+='<div class="health-item"><span class="check-name">'+escHtml(c.name)+'</span><span class="check-status '+passClass+'">'+(c.status||'unknown')+'</span><span style="color:var(--text-muted);font-size:11px">'+escHtml(c.detail||'')+'</span></div>'});return html}
 
 // === Kernel ===
-function renderKernel(){let k=state.kernel;if(!k){document.getElementById('tab-kernel').innerHTML='<div class="card"><div class="loading"></div><p style="color:#64748b">加载中...</p></div>';return}let html='<div class="card"><h2>内核状态快照</h2><pre>'+escHtml(JSON.stringify(k,null,2))+'</pre></div>';html+='<div class="card"><h2>通道</h2>';if(k.channels&&k.channels.length>0){html+='<table><tr><th>名称</th><th>类型</th><th>状态</th></tr>';k.channels.forEach(ch=>{html+='<tr><td>'+escHtml(ch.name)+'</td><td>'+escHtml(ch.type)+'</td><td><span class="status-dot '+(ch.ready?'dot-green':'dot-red')+'"></span>'+(ch.ready?'就绪':'离线')+'</td></tr>'});html+='</table>'}else{html+='<p style="color:#94a3b8">无通道</p>'}html+='</div>';if(k.tracker?.available){html+='<div class="card"><h2>变更追踪</h2><div class="kv-row"><span class="key">状态</span><span class="val"><span class="badge badge-green">活跃</span></span></div><div class="kv-row"><span class="key">目录</span><span class="val">'+escHtml(k.tracker.dir||'-')+'</span></div></div>'}document.getElementById('tab-kernel').innerHTML=html}
+function renderKernel(){let k=state.kernel;if(!k){document.getElementById('tab-kernel').innerHTML='<div class="card"><p style="color:var(--text-muted)">内核未响应</p></div>';return}let html='<div class="card"><h2>运行时</h2><div class="grid-3">'+statCard('Goroutines',k?.runtime?.goroutines||'-','')+statCard('内存',k?.runtime?.memory_mb?k.runtime.memory_mb+' MB':'-','')+statCard('Go 版本',k?.runtime?.go_version||'-','')+'</div></div>';html+='<div class="card"><h2>LLM</h2><div class="kv-row"><span class="key">Provider</span><span class="val">'+(k.llm?.provider||'未配置')+'</span></div><div class="kv-row"><span class="key">可用源</span><span class="val">'+(k.llm?.sources||0)+'</span></div><div class="kv-row"><span class="key">状态</span><span class="val"><span class="status-dot '+(k.llm?.available?'dot-green':'dot-red')+'"></span>'+(k.llm?.available?'运行中':'不可用')+'</span></div></div>';html+='<div class="card"><h2>记忆</h2><div class="kv-row"><span class="key">图记忆</span><span class="val">'+(k.memory?.available?k.memory.entity_count+' 实体, '+k.memory.relation_count+' 关系':'未初始化')+'</span></div><div class="kv-row"><span class="key">文档记忆</span><span class="val">'+(k.documents?.available?k.documents.doc_count+' 文档':'未初始化')+'</span></div><div class="kv-row"><span class="key">文本记忆</span><span class="val">'+(k.text_memory?.available?k.text_memory.file_count+' 文件':'未初始化')+'</span></div><div class="kv-row"><span class="key">知识库</span><span class="val">'+(k.knowledge?.available?k.knowledge.item_count+' 项':'未初始化')+'</span></div></div>';html+='<div class="card"><h2>插件 ('+(k.plugins?.length||0)+')</h2>';if(k.plugins?.length){html+='<div style="display:flex;flex-wrap:wrap;gap:4px">';k.plugins.forEach(p=>{html+='<span class="badge badge-blue">'+escHtml(p.name)+'</span>'});html+='</div>'}else{html+='<p style="color:var(--text-muted)">无</p>'}html+='</div>';document.getElementById('tab-kernel').innerHTML=html}
+// === Star Map ===
+let starmapScene=null,starmapCam=null,starmapRen=null,starmapCtrl=null;
+let starmapNodes=[],starmapEdges=[];
+let starmapNodeMeshes=[],starmapEdgeLines=[],starmapStarField=null;
+let starmapHovered=null,starmapSelected=null,starmapAutoView=true;
+let starmapRaf=null;
+const smTypeColors={person:0x4488ff,task:0xff8844,ai:0xaa44ff,concept:0x44ff88,object:0xff4444};
+const smEdgeColors={'喜欢':0xff6b6b,'学习':0x4ecdc4,'属于':0x45b7d1,'相关':0x96ceb4,'使用':0xfeca57,'创建':0xff9ff3};
 
-// === Settings Override ===
+function createStarField(){
+  let c=3000;let p=new Float32Array(c*3),cl=new Float32Array(c*3),s=new Float32Array(c);
+  for(let i=0;i<c;i++){let i3=i*3;let r=400+Math.random()*600,th=Math.random()*Math.PI*2,ph=Math.acos(2*Math.random()-1);
+    p[i3]=r*Math.sin(ph)*Math.cos(th);p[i3+1]=r*Math.sin(ph)*Math.sin(th);p[i3+2]=r*Math.cos(ph);
+    if(Math.random()<0.7){cl[i3]=0.8+Math.random()*0.2;cl[i3+1]=0.8+Math.random()*0.2;cl[i3+2]=1}else{cl[i3]=1;cl[i3+1]=0.9+Math.random()*0.1;cl[i3+2]=0.8+Math.random()*0.2}
+    s[i]=0.5+Math.random()*2}
+  let g=new THREE.BufferGeometry();g.setAttribute('position',new THREE.BufferAttribute(p,3));g.setAttribute('color',new THREE.BufferAttribute(cl,3));g.setAttribute('size',new THREE.BufferAttribute(s,1));
+  let m=new THREE.PointsMaterial({size:1.5,vertexColors:true,transparent:true,opacity:0.8,sizeAttenuation:true});
+  starmapStarField=new THREE.Points(g,m);starmapScene.add(starmapStarField)
+}
+
+function onStarmapMove(e){
+  if(!starmapRen||!starmapCam)return;
+  let rect=starmapRen.domElement.getBoundingClientRect();
+  let mouse=new THREE.Vector2(((e.clientX-rect.left)/rect.width)*2-1,-((e.clientY-rect.top)/rect.height)*2+1);
+  let rc=new THREE.Raycaster();rc.setFromCamera(mouse,starmapCam);
+  let hits=rc.intersectObjects(starmapNodeMeshes);
+  let infoEl=document.getElementById('starmap-info');
+  if(hits.length>0){let n=hits[0].object;
+    if(starmapHovered!==n){if(starmapHovered)starmapHovered.scale.set(1,1,1);starmapHovered=n;n.scale.set(1.2,1.2,1.2);
+      let nd=n.userData.nodeData;if(infoEl){
+        let e1=document.getElementById('sm-info-name');if(e1)e1.textContent=nd.name||'';
+        let e2=document.getElementById('sm-info-type');if(e2)e2.textContent=nd.type||'';
+        let e3=document.getElementById('sm-info-mentions');if(e3)e3.textContent=(nd.mention_count||0)+'';
+        let lk=starmapEdges.filter(e=>e.source_id===nd.id||e.target_id===nd.id).length;
+        let e4=document.getElementById('sm-info-links');if(e4)e4.textContent=lk+'';
+        infoEl.style.display='block'}}}
+  else{if(starmapHovered){starmapHovered.scale.set(1,1,1);starmapHovered=null}if(!starmapSelected&&infoEl)infoEl.style.display='none'}
+}
+
+function onStarmapClick(e){
+  if(!starmapRen||!starmapCam)return;
+  let rect=starmapRen.domElement.getBoundingClientRect();
+  let mouse=new THREE.Vector2(((e.clientX-rect.left)/rect.width)*2-1,-((e.clientY-rect.top)/rect.height)*2+1);
+  let rc=new THREE.Raycaster();rc.setFromCamera(mouse,starmapCam);
+  let hits=rc.intersectObjects(starmapNodeMeshes);
+  if(hits.length>0){let n=hits[0].object;
+    starmapSelected=(starmapSelected===n)?null:n;
+    if(starmapAutoView&&starmapSelected){flyStarmapTo(starmapSelected.userData.nodeId,500)}
+    onStarmapMove(e)}
+  else{starmapSelected=null}
+}
+
+function flyStarmapTo(nodeId,dur){
+  if(!starmapAutoView)return;
+  let m=starmapNodeMeshes.find(x=>x.userData.nodeId===nodeId);if(!m)return;
+  let tp=m.position.clone(),sp=starmapCam.position.clone(),st=starmapCtrl.target.clone();
+  let dist=tp.length()+25,ep=new THREE.Vector3(tp.x,tp.y+dist*0.4,tp.z+dist*0.8);
+  let t0=Date.now();
+  (function lerp(){let t=Math.min((Date.now()-t0)/dur,1),e=1-Math.pow(1-t,3);
+    starmapCam.position.lerpVectors(sp,ep,e);starmapCtrl.target.lerpVectors(st,tp,e);if(t<1)requestAnimationFrame(lerp)})()
+}
+
+function onStarmapResize(){
+  let cont=document.getElementById('starmap-container');if(!cont||!starmapRen||!starmapCam)return;
+  let rect=cont.getBoundingClientRect();let w=rect.width||800,h=Math.max(rect.height||500,100);
+  if(w>0&&h>0){starmapCam.aspect=w/h;starmapCam.updateProjectionMatrix();starmapRen.setSize(w,h)}
+}
+
+function toggleStarmapAuto(){starmapAutoView=!starmapAutoView;let b=document.getElementById('sm-auto-btn');if(b)b.className=starmapAutoView?'on':''}
+
+function resetStarmapCamera(){
+  let maxD=0;starmapNodeMeshes.forEach(m=>{let d=m.position.length();if(d>maxD)maxD=d});
+  let td=Math.min(Math.max(maxD+20,30),150);
+  let sp=starmapCam.position.clone(),ep=new THREE.Vector3(td*0.9,td*0.6,td*0.9);
+  let st=starmapCtrl.target.clone(),t0=Date.now();
+  (function lerp(){let t=Math.min((Date.now()-t0)/400,1),e=1-Math.pow(1-t,3);
+    starmapCam.position.lerpVectors(sp,ep,e);starmapCtrl.target.lerpVectors(st,new THREE.Vector3(0,0,0),e);if(t<1)requestAnimationFrame(lerp)})()
+}
+
+function starmapAnimate(){
+  starmapRaf=requestAnimationFrame(starmapAnimate);
+  if(starmapCtrl)starmapCtrl.update();
+  if(starmapStarField)starmapStarField.rotation.y+=0.0001;
+  if(starmapRen&&starmapScene&&starmapCam)starmapRen.render(starmapScene,starmapCam)
+}
+
+// === Settings ===
+function pluginDisplayName(p){if(p==='core')return __('核心','Core');var name=p.replace('plugin.','');var meta=state.pluginMeta&&state.pluginMeta[name];if(meta)return state.lang==='en'?(meta.name_en||name):(meta.name_zh||name);return name}
+function renderSettingsSidebar(){let el=document.querySelector('.settings-sidebar');if(!el)return;el.innerHTML='';state.settingsPlugins.forEach(function(p){let a=document.createElement('a');a.textContent=pluginDisplayName(p);if(p===state.selectedSection)a.className='active';a.onclick=function(){state.selectedSection=p;renderOneSettings()};el.appendChild(a)})}
+function renderOneSettings(){let prefix=state.selectedSection+'.';let allKeys=Object.keys(state.settings||{});let filtered=allKeys.filter(k=>k===prefix.slice(0,-1)||k.startsWith(prefix));filtered.sort();let hideTopLlms=['core.llm.base_url','core.llm.model','core.llm.api_key','core.llm.adapter','core.llm.adapter_path','core.llm.thinking_enabled'];let sourceKeys=filtered.filter(k=>k.startsWith('core.llm.sources.'));let sourceMap={};sourceKeys.forEach(k=>{let parts=k.split('.');let srcName=parts[3];if(!sourceMap[srcName])sourceMap[srcName]={};sourceMap[srcName][k]=true});let mcpServerKeys=filtered.filter(k=>k.startsWith('plugin.mcp.servers.')&&k.split('.').length>=5);let mcpServerMap={};mcpServerKeys.forEach(k=>{let parts=k.split('.');let srvName=parts[3];if(!mcpServerMap[srvName])mcpServerMap[srvName]={};mcpServerMap[srvName][k]=true});let regularKeys=filtered.filter(k=>!k.startsWith('core.llm.sources.')&&hideTopLlms.indexOf(k)===-1&&!k.startsWith('plugin.mcp.servers.')&&k!=='plugin.mcp.servers');let html='<div class="settings-layout"><div class="settings-sidebar"></div><div class="settings-content">';if(regularKeys.length===0&&Object.keys(sourceMap).length===0&&Object.keys(mcpServerMap).length===0&&state.selectedSection!=='plugin.mcp'){html+='<div class="card"><h2>'+escHtml(state.selectedSection)+'</h2><p style="color:var(--text-muted)">暂无设置项</p></div>'}else{regularKeys.forEach(k=>{let v=state.settings[k];let sv=typeof v==='object'?JSON.stringify(v):String(v);let m=state.meta?.[k];let label=m?.display_name||'值';let desc=m?.description||'';let typ=m?.type||'string';let ph=m?.placeholder||'';let opts=m?.options||[];let inpId='inp-'+k.replace(/\./g,'_');let inp='';if(typ==='bool'){let chk=sv==='true'?'checked':'';inp='<label style="display:flex;align-items:center;gap:8px;cursor:pointer"><input type="checkbox" id="'+inpId+'" '+chk+' onchange="markDirty(\''+k+'\')" style="width:auto;margin:0"> '+label+'</label>'}else if(typ==='password'){inp='<label>'+label+'</label><input type="password" id="'+inpId+'" value="'+escHtml(sv)+'" placeholder="'+escHtml(ph)+'" onchange="markDirty(\''+k+'\')">'}else if(typ==='text'){inp='<label>'+label+'</label><textarea id="'+inpId+'" onchange="markDirty(\''+k+'\')">'+escHtml(sv)+'</textarea>'}else if(typ==='select'&&opts.length>0){let sel='<label>'+label+'</label><select id="'+inpId+'" onchange="markDirty(\''+k+'\')">';opts.forEach(o=>{sel+='<option value="'+escHtml(o)+'"'+(sv===o?' selected':'')+'>'+escHtml(o)+'</option>'});sel+='</select>';inp=sel}else if(typ==='int'){inp='<label>'+label+'</label><input type="number" id="'+inpId+'" value="'+escHtml(sv)+'" placeholder="'+escHtml(ph)+'" onchange="markDirty(\''+k+'\')">'}else{inp='<label>'+label+'</label><input id="'+inpId+'" value="'+escHtml(sv)+'" placeholder="'+escHtml(ph)+'" onchange="markDirty(\''+k+'\')">'}html+='<div class="card"><button class="btn btn-primary btn-sm save-btn" onclick="saveSetting(\''+k+'\')" style="float:right;margin-top:-4px">保存</button><div class="settings-key">'+escHtml(k)+'</div>'+inp;if(desc){html+='<p style="color:var(--text-muted);font-size:11px;margin-top:-6px">'+escHtml(desc)+'</p>'}html+='</div>'})}if(state.selectedSection==='core'){let srcNames=Object.keys(sourceMap).sort();srcNames.forEach(sn=>{let baseKey='core.llm.sources.'+sn;let srcHtml='<div class="card" style="border-left:3px solid var(--accent)"><h2 style="display:flex;justify-content:space-between;align-items:center"><span>&#127760; '+escHtml(sn)+'</span><button class="btn btn-danger btn-sm" onclick="deleteSource(\''+sn+'\')" style="font-size:10px">删除</button></h2>';let fields=[{key:'adapter',label:'适配器'},{key:'base_url',label:'API 地址'},{key:'model',label:'模型'},{key:'api_key',label:'API 密钥',typ:'password'},{key:'thinking_enabled',label:'深度思考',typ:'bool'}];fields.forEach(f=>{let fk=baseKey+'.'+f.key;let fv=state.settings[fk];let fsv=typeof fv==='object'?JSON.stringify(fv):String(fv||'');let fm=state.meta?.[fk];let ftyp=f.typ||fm?.type||'string';let finpId='inp-'+(baseKey+'.'+f.key).replace(/\./g,'_');let finp='';if(ftyp==='bool'){let chk=fsv==='true'?'checked':'';finp='<label style="display:flex;align-items:center;gap:8px;cursor:pointer;margin-bottom:6px"><input type="checkbox" id="'+finpId+'" '+chk+' onchange="markDirty(\''+baseKey+'.'+f.key+'\')" style="width:auto;margin:0"> '+f.label+'</label>'}else if(ftyp==='password'){finp='<label style="font-size:11px;color:var(--text-secondary)">'+f.label+'</label><input type="password" id="'+finpId+'" value="'+escHtml(fsv)+'" placeholder="留空则使用全局密钥" onchange="markDirty(\''+baseKey+'.'+f.key+'\')" style="margin-bottom:6px">'}else if(f.key==='adapter'&&window._adapters&&window._adapters.length){let sel='<label style="font-size:11px;color:var(--text-secondary)">'+f.label+'</label><select id="'+finpId+'" onchange="markDirty(\''+baseKey+'.'+f.key+'\')" style="margin-bottom:6px">';window._adapters.forEach(a=>{sel+='<option value="'+escHtml(a.name)+'" '+(a.name===fsv?'selected':'')+'>'+escHtml(a.name)+'</option>'});sel+='</select>';finp=sel}else{finp='<label style="font-size:11px;color:var(--text-secondary)">'+f.label+'</label><input id="'+finpId+'" value="'+escHtml(fsv)+'" placeholder="输入'+f.label+'" onchange="markDirty(\''+baseKey+'.'+f.key+'\')" style="margin-bottom:6px">'}srcHtml+=finp});srcHtml+='<button class="btn btn-primary btn-sm" onclick="saveSetting(\''+baseKey+'.adapter\');saveSetting(\''+baseKey+'.base_url\');saveSetting(\''+baseKey+'.model\');saveSetting(\''+baseKey+'.api_key\');if(document.getElementById(\''+('inp-'+baseKey+'.thinking_enabled').replace(/\./g,'_')+'\'))saveSetting(\''+baseKey+'.thinking_enabled\');toast(\'源 \\\''+sn+'\\\' 已保存\')" style="margin-top:6px">保存源</button></div>';html+=srcHtml});html+='<div style="margin-top:16px;text-align:center"><button class="btn btn-primary" onclick="showAddSourceDialog()" style="min-width:160px">+ 添加新 LLM 源</button></div>'};if(state.selectedSection==='plugin.mcp'){Object.keys(mcpServerMap).sort().forEach(sn=>{let baseKey='plugin.mcp.servers.'+sn;let cmd=state.settings[baseKey+'.command'],url=state.settings[baseKey+'.url'];if((cmd===undefined||cmd==='<nil>')&&(url===undefined||url==='<nil>'))return;let html2='<div class="card" style="border-left:3px solid var(--accent);margin-top:12px"><h2 style="display:flex;justify-content:space-between;align-items:center"><span>&#9881; '+escHtml(sn)+'</span><button class="btn btn-danger btn-sm" onclick="deleteMCPServer(\''+sn+'\')" style="font-size:10px">删除</button></h2>';let fields=[{key:'command',label:'命令'},{key:'url',label:'URL'},{key:'args',label:'参数(JSON)'},{key:'env',label:'环境变量(JSON)'}];fields.forEach(f=>{let fk=baseKey+'.'+f.key;let fv=state.settings[fk];let fsv=typeof fv==='object'?JSON.stringify(fv):String(fv||'');let finpId='inp-'+fk.replace(/\./g,'_');let finp='';if(f.key==='args'||f.key==='env'){finp='<label style="font-size:11px;color:var(--text-secondary)">'+f.label+'</label><textarea id="'+finpId+'" onchange="markDirty(\''+fk+'\')" style="margin-bottom:6px">'+escHtml(fsv)+'</textarea>'}else{finp='<label style="font-size:11px;color:var(--text-secondary)">'+f.label+'</label><input id="'+finpId+'" value="'+escHtml(fsv)+'" placeholder="输入'+f.label+'" onchange="markDirty(\''+fk+'\')" style="margin-bottom:6px">'}html2+=finp});html2+='<button class="btn btn-primary btn-sm" onclick="saveSetting(\''+baseKey+'.command\');saveSetting(\''+baseKey+'.url\');saveSetting(\''+baseKey+'.args\');saveSetting(\''+baseKey+'.env\')" style="margin-top:6px">保存</button></div>';html+=html2});html+='<div style="margin-top:16px;text-align:center"><button class="btn btn-primary" onclick="addMCPSource()" style="min-width:160px">+ 添加 MCP 服务器</button></div>'}html+='</div></div>';document.getElementById('tab-settings').innerHTML=html;renderSettingsSidebar()}
+function markDirty(k){let inp=document.getElementById('inp-'+k.replace(/\./g,'_'));if(inp)inp.style.borderColor='var(--save-btn-border)'}
+async function saveSetting(k){let inp=document.getElementById('inp-'+k.replace(/\./g,'_'));if(!inp)return;let val;let m=state.meta?.[k];if(m?.type==='bool'){val=inp.checked?'true':'false'}else if(m?.type==='select'){val=inp.value}else{let raw=inp.value;try{val=JSON.parse(raw)}catch(e){val=raw}}try{let r=await api('/settings',{method:'PUT',body:JSON.stringify({key:k,value:val})});if(r.status==='ok'){inp.style.borderColor='';state.settings[k]=val;toast('已保存: '+k)}else{toast('保存失败: '+(r.error||'unknown'),true)}}catch(e){toast('保存失败: '+e.message,true)}}
+function renderConfigDisabled(){document.getElementById('tab-settings').innerHTML='<div class="card"><h2>设置</h2><p style="color:var(--text-muted)">设置面板已加载</p></div>';renderOneSettings()}
+function showAddSourceDialog(){let name=prompt('输入新 LLM 源名称（如 openai、anthropic）:');if(!name||!name.trim())return;name=name.trim().toLowerCase().replace(/[^a-z0-9_]/g,'_');if(!name){toast('名称无效',true);return}let keys=['base_url','model','api_key','adapter','adapter_path','thinking_enabled'];let values={base_url:'https://api.'+name+'.com',model:'',api_key:'',adapter:name,adapter_path:'',thinking_enabled:'false'};let promises=keys.map(f=>api('/settings',{method:'PUT',body:JSON.stringify({key:'core.llm.sources.'+name+'.'+f,value:values[f]})}));Promise.all(promises).then(()=>{toast('源 "'+name+'" 已创建，请配置各项参数');renderAll()}).catch(e=>toast('创建失败: '+e.message,true))}
+async function deleteSource(name){if(!confirm('确认删除源 "'+name+'"?'))return;let base='core.llm.sources.'+name;let fields=['adapter','base_url','model','api_key','thinking_enabled','adapter_path'];try{for(let f of fields){await api('/settings',{method:'PUT',body:JSON.stringify({key:base+'.'+f,value:null})})}toast('源 "'+name+'" 已删除');renderAll()}catch(e){toast('删除失败: '+e.message,true)}}
+function addMCPSource(){let name=prompt('输入新 MCP 服务器名称:');if(!name||!name.trim())return;name=name.trim().toLowerCase().replace(/[^a-z0-9_]/g,'_');if(!name){toast('名称无效',true);return}let fields=['command','url','args','env'];let values={command:'',url:'',args:'[]',env:'[]'};let promises=fields.map(f=>api('/settings',{method:'PUT',body:JSON.stringify({key:'plugin.mcp.servers.'+name+'.'+f,value:values[f]})}));Promise.all(promises).then(()=>{toast('MCP 服务器 "'+name+'" 已创建');renderAll()}).catch(e=>toast('创建失败: '+e.message,true))}
+async function deleteMCPServer(name){if(!confirm('确认删除 MCP 服务器 "'+name+'"?'))return;let fields=['command','url','args','env'];try{for(let f of fields){await api('/settings',{method:'PUT',body:JSON.stringify({key:'plugin.mcp.servers.'+name+'.'+f,value:null})})}toast('MCP 服务器 "'+name+'" 已删除');renderAll()}catch(e){toast('删除失败: '+e.message,true)}}
+
+// === Adapters ===
+async function renderAdapters(){let html='<div class="card"><h2>Lua 适配器管理</h2><p style="color:var(--text-muted);font-size:12px;margin-bottom:12px">上传自定义 Lua 适配器脚本以支持新的 LLM 提供商。脚本文件将保存到适配器目录并自动加载到 Lua VM。</p></div>';try{let r=await api('/adapters');let adapters=r.adapters||[];window._adapters=adapters;html+='<div class="card"><h2>已加载的适配器 ('+adapters.length+')</h2>';if(adapters.length===0){html+='<p style="color:var(--text-muted)">暂无适配器</p>'}else{html+='<table><tr><th>名称</th><th>版本</th><th>操作</th></tr>';adapters.forEach(a=>{html+='<tr><td>'+escHtml(a.name)+'</td><td>'+escHtml(a.version||'-')+'</td><td><button class="btn btn-danger btn-sm" onclick="deleteAdapter(\''+escHtml(a.name)+'\')">删除</button></td></tr>'});html+='</table>'}html+='</div>';html+='<div class="card"><h2>上传新适配器</h2><label>适配器名称（不带 .lua）</label><input id="adapter-name" placeholder="如 openai"><label>Lua 脚本代码</label><textarea id="adapter-code" rows="12" placeholder="-- 返回一个适配器表&#10;return {&#10;  name = &#34;openai&#34;,&#10;  version = &#34;1.0&#34;,&#10;  transform_request = function(raw) ... end,&#10;  transform_response = function(raw) ... end,&#10;}"></textarea><button class="btn btn-primary" onclick="uploadAdapter()">上传</button></div>'}catch(e){html+='<div class="card"><p style="color:var(--text-muted)">加载适配器失败: '+escHtml(e.message)+'</p></div>'}document.getElementById('tab-adapters').innerHTML=html}
+async function uploadAdapter(){let name=document.getElementById('adapter-name')?.value;let code=document.getElementById('adapter-code')?.value;if(!name||!code){toast('名称和代码不能为空',true);return}try{let r=await api('/adapters',{method:'POST',body:JSON.stringify({name,code})});if(r.status==='loaded'){toast('适配器 "'+name+'" 已加载');renderAdapters()}else{toast('上传失败: '+(r.error||'unknown'),true)}}catch(e){toast('上传失败: '+e.message,true)}}
+async function deleteAdapter(name){if(!confirm('确定删除适配器 "'+name+'"？'))return;try{let r=await api('/adapters/'+encodeURIComponent(name),{method:'DELETE'});if(r.status==='deleted'){toast('适配器 "'+name+'" 已删除');renderAdapters()}else{toast('删除失败',true)}}catch(e){toast('删除失败: '+e.message,true)}}
+
+// === Init ===
 async function logout(){try{await fetch('/api/v1/logout',{method:'POST',credentials:'include'});}catch(e){}location.href='/login'}
 renderConfigDisabled();
-renderAll();setInterval(renderAll,15000);
+connectSSE();
+(async function(){await loadChatHistory();renderAll()})();
+setInterval(renderAll,15000);
 </script>
 </body>
 </html>

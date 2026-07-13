@@ -7,6 +7,7 @@ import (
 	"log"
 	"net/http"
 
+	agentAPI "gitcode.com/JianFeeeee/HomeAgent/internal/agent/api"
 	agentCore "gitcode.com/JianFeeeee/HomeAgent/internal/agent/core"
 	agentIO "gitcode.com/JianFeeeee/HomeAgent/internal/agent/io"
 	internalConfig "gitcode.com/JianFeeeee/HomeAgent/internal/config"
@@ -39,6 +40,8 @@ var (
 	webuiPR             *plugin.Registry
 	webuiEvBus          *events.Bus
 	webuiStatusProvider agentCore.StatusProvider
+	webuiProviderMgr    *agentAPI.ProviderManager
+	webuiBaseAPIKey     string
 )
 
 // Configure 注入 WebUI 插件需要的内核依赖。必须在 Load() 之前调用。
@@ -47,16 +50,19 @@ func Configure(addr string,
 	lua *luaVM.VM, cfg *types.Config, iom *agentIO.IOManager,
 	tm *text.Memory, ks *knowledge.Store, tr *tracker.Tracker,
 	cr *internalConfig.ConfigRegistry, pr *plugin.Registry, evBus *events.Bus,
-	sp agentCore.StatusProvider,
+	sp agentCore.StatusProvider, pm *agentAPI.ProviderManager, baseKey string,
 ) {
 	webuiAddr = addr
 	webuiSup, webuiMem, webuiSK, webuiLua = sup, mem, sk, lua
 	webuiCfg, webuiIOM, webuiTM, webuiKS = cfg, iom, tm, ks
 	webuiTR, webuiCR, webuiPR, webuiEvBus = tr, cr, pr, evBus
 	webuiStatusProvider = sp
+	webuiProviderMgr = pm
+	webuiBaseAPIKey = baseKey
 }
 
 func init() {
+	plugin.RegisterPluginMeta("webui", "Web 控制台", "WebUI")
 	plugin.RegisterFactory("webui", func(name string, config map[string]interface{}) (sdk.Plugin, error) {
 		if webuiSup == nil {
 			return nil, nil // 未 Configure 则跳过（不给日志警告）
@@ -69,6 +75,7 @@ func init() {
 			webuiSup, webuiMem, webuiSK, webuiLua,
 			webuiCfg, webuiIOM, webuiTM, webuiKS,
 			webuiTR, webuiCR, webuiPR, webuiEvBus, webuiStatusProvider,
+			webuiProviderMgr, webuiBaseAPIKey,
 		), nil
 	})
 }
@@ -93,6 +100,8 @@ type Plugin struct {
 	pr     *plugin.Registry
 	evBus  *events.Bus
 	statusProvider agentCore.StatusProvider
+	providerMgr    *agentAPI.ProviderManager
+	baseAPIKey     string
 }
 
 func New(name, addr string,
@@ -100,7 +109,7 @@ func New(name, addr string,
 	lua *luaVM.VM, cfg *types.Config, iom *agentIO.IOManager,
 	tm *text.Memory, ks *knowledge.Store, tr *tracker.Tracker,
 	cr *internalConfig.ConfigRegistry, pr *plugin.Registry, evBus *events.Bus,
-	sp agentCore.StatusProvider,
+	sp agentCore.StatusProvider, pm *agentAPI.ProviderManager, baseKey string,
 ) *Plugin {
 	return &Plugin{
 		name: name,
@@ -108,7 +117,7 @@ func New(name, addr string,
 		mux:  http.NewServeMux(),
 		sup:  sup, mem: mem, sk: sk, lua: lua, cfg: cfg,
 		iom: iom, tm: tm, ks: ks, tr: tr, cr: cr, pr: pr, evBus: evBus,
-		statusProvider: sp,
+		statusProvider: sp, providerMgr: pm, baseAPIKey: baseKey,
 	}
 }
 
@@ -151,7 +160,7 @@ func (p *Plugin) Start(s *sdk.PluginSDK) error {
 	s.Settings().RegisterDef(sdk.ConfigDef{Key: "password", Default: "", Type: "password", DisplayName: "Web 控制台登录密码", Description: "Web 控制台登录密码", Category: "webui"})
 	s.Settings().RegisterDef(sdk.ConfigDef{Key: "session_ttl_hours", Default: "24", Type: "int", DisplayName: "会话时长(小时)", Description: "登录 cookie 有效时长", Category: "webui"})
 	p.ensureAuthBootstrap(s)
-	h := NewHandler(p.sup, p.mem, p.sk, p.lua, p.cfg, p.iom, p.tm, p.ks, p.tr, p.cr, p.pr, p.evBus, p.statusProvider)
+	h := NewHandler(p.sup, p.mem, p.sk, p.lua, p.cfg, p.iom, p.tm, p.ks, p.tr, p.cr, p.pr, p.evBus, p.statusProvider, p.providerMgr, p.baseAPIKey)
 	p.handler = h
 	h.RegisterRoutes(p.mux)
 

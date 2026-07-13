@@ -2677,6 +2677,35 @@ func (a *Agent) mediaDataURL(defaultMime string) string {
 	return url
 }
 
+// mediaRequest 构造多模态请求并调用 LLM，统一处理 pendingMedia 检查和 data URL 转换。
+func (a *Agent) mediaRequest(p agentAPI.Provider, mime, emptyPendingMsg, emptyDataMsg, prompt, resultPrefix string, maxTokens int, blockType string, detail string) string {
+	if a.pendingMedia == nil {
+		return emptyPendingMsg
+	}
+	url := a.mediaDataURL(mime)
+	if url == "" {
+		return emptyDataMsg
+	}
+	msg := agentAPI.Message{
+		Role: "user",
+		Blocks: []agentAPI.ContentBlock{
+			{Type: "text", Text: prompt},
+		},
+	}
+	if blockType == "image_url" {
+		msg.Blocks = append(msg.Blocks, agentAPI.ContentBlock{
+			Type:     "image_url",
+			ImageURL: &agentAPI.ImageURL{URL: url, Detail: detail},
+		})
+	} else {
+		msg.Blocks = append(msg.Blocks, agentAPI.ContentBlock{
+			Type:     "audio_url",
+			AudioURL: &agentAPI.AudioURL{URL: url},
+		})
+	}
+	return a.mediaChat(p, msg, resultPrefix, maxTokens)
+}
+
 // mediaChat 调用指定 provider 的多模态 Chat，统一处理超时和错误。
 func (a *Agent) mediaChat(p agentAPI.Provider, msg agentAPI.Message, resultPrefix string, maxTokens int) string {
 	ctx, cancel := context.WithTimeout(context.Background(), 120*time.Second)
@@ -2693,89 +2722,34 @@ func (a *Agent) mediaChat(p agentAPI.Provider, msg agentAPI.Message, resultPrefi
 
 // executeDescribeImage 调用多模态模型描述当前图片。
 func (a *Agent) executeDescribeImage(tc agentAPI.ToolCall) string {
-	if a.pendingMedia == nil {
-		return "没有待处理的图片数据"
-	}
-	imgURL := a.mediaDataURL("image/png")
-	if imgURL == "" {
-		return "图片数据为空"
-	}
-
 	providerName, _ := tc.Arguments["provider"].(string)
 	p := a.providerManager.Get(providerName)
 	if p == nil {
 		p = a.provider
 	}
-
-	prompt := a.inputCfg.Image.DescribePrompt
-	if prompt == "" {
-		prompt = "请详细描述这张图片的内容，包括其中的文字、物体、人物、场景等信息。"
-	}
-
 	detail, _ := tc.Arguments["detail"].(string)
 	if detail == "" {
 		detail = "high"
 	}
-
-	msg := agentAPI.Message{
-		Role: "user",
-		Blocks: []agentAPI.ContentBlock{
-			{Type: "text", Text: prompt},
-			{Type: "image_url", ImageURL: &agentAPI.ImageURL{URL: imgURL, Detail: detail}},
-		},
-	}
-	return a.mediaChat(p, msg, "图片描述", 2048)
+	return a.mediaRequest(p, "image/png", "没有待处理的图片数据", "图片数据为空",
+		a.inputCfg.Image.DescribePrompt, "图片描述", 2048, "image_url", detail)
 }
 
 // executeTranscribeAudio 调用多模态模型转写/描述当前音频。
 func (a *Agent) executeTranscribeAudio(tc agentAPI.ToolCall) string {
-	if a.pendingMedia == nil {
-		return "没有待处理的音频数据"
-	}
-	audURL := a.mediaDataURL("audio/wav")
-	if audURL == "" {
-		return "音频数据为空"
-	}
-
 	providerName, _ := tc.Arguments["provider"].(string)
 	p := a.providerManager.Get(providerName)
 	if p == nil {
 		p = a.provider
 	}
-
-	prompt := a.inputCfg.Audio.DescribePrompt
-	if prompt == "" {
-		prompt = "请转写这段音频的内容。"
-	}
-
-	msg := agentAPI.Message{
-		Role: "user",
-		Blocks: []agentAPI.ContentBlock{
-			{Type: "text", Text: prompt},
-			{Type: "audio_url", AudioURL: &agentAPI.AudioURL{URL: audURL}},
-		},
-	}
-	return a.mediaChat(p, msg, "音频转写", 2048)
+	return a.mediaRequest(p, "audio/wav", "没有待处理的音频数据", "音频数据为空",
+		a.inputCfg.Audio.DescribePrompt, "音频转写", 2048, "audio_url", "")
 }
 
 // executeOCRImage 对图片执行 OCR 文字识别（通过多模态模型实现）。
 func (a *Agent) executeOCRImage(tc agentAPI.ToolCall) string {
-	if a.pendingMedia == nil {
-		return "没有待处理的图片数据"
-	}
-	imgURL := a.mediaDataURL("image/png")
-	if imgURL == "" {
-		return "图片数据为空"
-	}
-
-	msg := agentAPI.Message{
-		Role: "user",
-		Blocks: []agentAPI.ContentBlock{
-			{Type: "text", Text: "请识别这张图片中的所有文字内容，按原文输出。仅输出文字本身，不要添加额外描述。"},
-			{Type: "image_url", ImageURL: &agentAPI.ImageURL{URL: imgURL, Detail: "high"}},
-		},
-	}
-	return a.mediaChat(a.provider, msg, "OCR 结果", 4096)
+	return a.mediaRequest(a.provider, "image/png", "没有待处理的图片数据", "图片数据为空",
+		a.inputCfg.Image.OCRPrompt, "OCR 结果", 4096, "image_url", "high")
 }
 
 // runStage — 运行阶段管道，若插件 Response 被设置则返回 true（短路）

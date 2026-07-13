@@ -38,6 +38,7 @@ func Configure(pr *plugin.Registry, cr *internalConfig.ConfigRegistry, sp agentC
 }
 
 func init() {
+	plugin.RegisterPluginMeta("cli", "CLI", "CLI")
 	plugin.RegisterFactory("cli", func(name string, config map[string]interface{}) (sdk.Plugin, error) {
 		sock := DefaultSocket
 		if sock == "" {
@@ -69,6 +70,20 @@ func New(name, socketPath string) *Plugin {
 func (p *Plugin) Name() string { return p.name }
 
 func (p *Plugin) Start(s *sdk.PluginSDK) error {
+	s.Settings().RegisterDef(sdk.ConfigDef{
+		Key: "api_key", Type: "password", DisplayName: "CLI API 密钥",
+		Description: "CLI 客户端连接时需提供的认证密钥（留空则使用 WebUI 密钥）",
+	})
+	s.Settings().RegisterDef(sdk.ConfigDef{
+		Key: "socket_path", Type: "string", DisplayName: "Socket 管道路径",
+		Description: "CLI Unix 域套接字监听路径（留空则使用默认路径）",
+	})
+	if v, _ := s.Settings().Get("socket_path"); v != nil {
+		if s, ok := v.(string); ok && s != "" {
+			p.socket = s
+		}
+	}
+
 	dir := filepath.Dir(p.socket)
 	if err := os.MkdirAll(dir, 0755); err != nil {
 		return fmt.Errorf("create socket dir: %w", err)
@@ -109,7 +124,7 @@ func (p *Plugin) handleConn(conn net.Conn, s *sdk.PluginSDK) {
 
 	scanner := bufio.NewScanner(conn)
 
-	apiKey := p.webuiAPIKey()
+	apiKey := p.cliAPIKey(s)
 	if apiKey != "" {
 		if !scanner.Scan() {
 			return
@@ -154,6 +169,17 @@ func (p *Plugin) handleConn(conn net.Conn, s *sdk.PluginSDK) {
 			})
 		}
 	}
+}
+
+func (p *Plugin) cliAPIKey(s *sdk.PluginSDK) string {
+	if s != nil {
+		if v, _ := s.Settings().Get("api_key"); v != nil {
+			if k, ok := v.(string); ok && k != "" {
+				return k
+			}
+		}
+	}
+	return p.webuiAPIKey()
 }
 
 func (p *Plugin) webuiAPIKey() string {
