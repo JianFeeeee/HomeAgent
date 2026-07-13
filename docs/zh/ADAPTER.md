@@ -1,3 +1,5 @@
+[English](../en/ADAPTER.md) | **中文**
+
 # Lua Adapter — LLM 源适配指南
 
 每个 LLM API 源对应一个 Lua 脚本，负责请求转换（Go 统一格式 → API 格式）和响应转换（API 格式 → Go 统一格式）。

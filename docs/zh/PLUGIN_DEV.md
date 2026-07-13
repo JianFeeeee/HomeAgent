@@ -1,3 +1,5 @@
+[English](../en/PLUGIN_DEV.md) | **中文**
+
 # HomeAgent 插件开发指南
 
 ## 概述
