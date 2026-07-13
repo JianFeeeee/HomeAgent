@@ -6,7 +6,7 @@ import (
 	"sync"
 	"time"
 
-	_ "github.com/mattn/go-sqlite3"
+	_ "modernc.org/sqlite"
 )
 
 type Entity struct {
@@ -49,7 +49,7 @@ type GraphDB struct {
 }
 
 func NewGraphDB(dbPath string) (*GraphDB, error) {
-	db, err := sql.Open("sqlite3", dbPath+"?_journal_mode=WAL&_foreign_keys=on")
+	db, err := sql.Open("sqlite", dbPath+"?_journal_mode=WAL&_foreign_keys=on")
 	if err != nil {
 		return nil, fmt.Errorf("open graph db: %w", err)
 	}
@@ -489,6 +489,69 @@ func (g *GraphDB) Purge(criteria map[string]string, mode string) (int, error) {
 	}
 	n, _ := result.RowsAffected()
 	return int(n), nil
+}
+
+func (g *GraphDB) GraphData() (map[string]interface{}, error) {
+	g.mu.RLock()
+	defer g.mu.RUnlock()
+
+	rows, err := g.db.Query(`SELECT id, name, type, mention_count, created_at, updated_at FROM entities ORDER BY mention_count DESC`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	type graphEntity struct {
+		ID           int64     `json:"id"`
+		Name         string    `json:"name"`
+		Type         string    `json:"type"`
+		MentionCount int       `json:"mention_count"`
+		CreatedAt    time.Time `json:"created_at"`
+		UpdatedAt    time.Time `json:"updated_at"`
+	}
+	var entities []graphEntity
+	for rows.Next() {
+		var e graphEntity
+		if err := rows.Scan(&e.ID, &e.Name, &e.Type, &e.MentionCount, &e.CreatedAt, &e.UpdatedAt); err != nil {
+			return nil, err
+		}
+		entities = append(entities, e)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+
+	rrows, err := g.db.Query(`SELECT id, source_id, target_id, relation_type, confidence, status, created_at FROM relations WHERE status = 'active' ORDER BY created_at DESC`)
+	if err != nil {
+		return nil, err
+	}
+	defer rrows.Close()
+
+	type graphRelation struct {
+		ID           int64     `json:"id"`
+		SourceID     int64     `json:"source_id"`
+		TargetID     int64     `json:"target_id"`
+		RelationType string    `json:"relation_type"`
+		Confidence   float64   `json:"confidence"`
+		Status       string    `json:"status"`
+		CreatedAt    time.Time `json:"created_at"`
+	}
+	var relations []graphRelation
+	for rrows.Next() {
+		var r graphRelation
+		if err := rrows.Scan(&r.ID, &r.SourceID, &r.TargetID, &r.RelationType, &r.Confidence, &r.Status, &r.CreatedAt); err != nil {
+			return nil, err
+		}
+		relations = append(relations, r)
+	}
+	if err := rrows.Err(); err != nil {
+		return nil, err
+	}
+
+	return map[string]interface{}{
+		"nodes": entities,
+		"edges": relations,
+	}, nil
 }
 
 func (g *GraphDB) Introspect() (map[string]interface{}, error) {

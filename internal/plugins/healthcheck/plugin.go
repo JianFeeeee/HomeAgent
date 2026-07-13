@@ -63,6 +63,7 @@ func Configure(sh *agentCore.StageHost, iom *agentIO.IOManager, pr *plugin.Regis
 }
 
 func init() {
+	plugin.RegisterPluginMeta("healthcheck", "健康检查", "Health Check")
 	plugin.RegisterFactory("healthcheck", func(name string, config map[string]interface{}) (sdk.Plugin, error) {
 		if hcStageHost == nil {
 			return nil, nil
@@ -81,6 +82,12 @@ type Plugin struct {
 	stopCh  chan struct{}
 	stopOnce sync.Once
 	perfData   PerfData
+
+	autoInterval   time.Duration
+	llmTimeout    time.Duration
+	llmMaxTurns   int
+	llmMaxTokens  int
+	perfHistory   int
 }
 
 type PerfData struct {
@@ -106,6 +113,74 @@ func New(name string) *Plugin {
 func (p *Plugin) Name() string { return p.name }
 
 func (p *Plugin) Start(s *sdk.PluginSDK) error {
+	p.autoInterval = 30 * time.Minute
+	p.llmTimeout = 120 * time.Second
+	p.llmMaxTurns = 20
+	p.llmMaxTokens = 4096
+	p.perfHistory = 100
+
+	s.Settings().RegisterDef(sdk.ConfigDef{
+		Key: "auto_interval", Type: "string", DisplayName: "自动检查间隔",
+		Description: "自动健康检查的执行间隔，例如 30m, 1h, 10m（设为 0 禁用）",
+		Default:     "30m",
+	})
+	s.Settings().RegisterDef(sdk.ConfigDef{
+		Key: "llm_timeout", Type: "string", DisplayName: "LLM 检查超时",
+		Description: "LLM 驱动检查的超时时间，例如 120s, 3m, 5m（默认 120s）",
+		Default:     "120s",
+	})
+	s.Settings().RegisterDef(sdk.ConfigDef{
+		Key: "llm_max_turns", Type: "int", DisplayName: "LLM 最大对话轮数",
+		Description: "LLM 工具发现的最大对话轮数（默认 20）",
+		Default:     "20",
+	})
+	s.Settings().RegisterDef(sdk.ConfigDef{
+		Key: "llm_max_tokens", Type: "int", DisplayName: "LLM 最大 Token",
+		Description: "LLM 调用时的最大 Token 数（默认 4096）",
+		Default:     "4096",
+	})
+	s.Settings().RegisterDef(sdk.ConfigDef{
+		Key: "perf_history", Type: "int", DisplayName: "性能历史保留数",
+		Description: "保留的历史检查记录条数（默认 100）",
+		Default:     "100",
+	})
+
+	if v, _ := s.Settings().Get("auto_interval"); v != nil {
+		if s, ok := v.(string); ok && s != "" {
+			if d, err := time.ParseDuration(s); err == nil && d > 0 {
+				p.autoInterval = d
+			}
+		}
+	}
+	if v, _ := s.Settings().Get("llm_timeout"); v != nil {
+		if s, ok := v.(string); ok && s != "" {
+			if d, err := time.ParseDuration(s); err == nil && d > 0 {
+				p.llmTimeout = d
+			}
+		}
+	}
+	if v, _ := s.Settings().Get("llm_max_turns"); v != nil {
+		if s, ok := v.(string); ok && s != "" {
+			if n, err := fmt.Sscanf(s, "%d", &p.llmMaxTurns); err != nil || n < 1 {
+				p.llmMaxTurns = 20
+			}
+		}
+	}
+	if v, _ := s.Settings().Get("llm_max_tokens"); v != nil {
+		if s, ok := v.(string); ok && s != "" {
+			if n, err := fmt.Sscanf(s, "%d", &p.llmMaxTokens); err != nil || n < 1 {
+				p.llmMaxTokens = 4096
+			}
+		}
+	}
+	if v, _ := s.Settings().Get("perf_history"); v != nil {
+		if s, ok := v.(string); ok && s != "" {
+			if n, err := fmt.Sscanf(s, "%d", &p.perfHistory); err != nil || n < 1 {
+				p.perfHistory = 100
+			}
+		}
+	}
+
 	p.selfToolNames["healthcheck"] = true
 	s.RegisterTool("healthcheck", sdk.ToolDef{
 		Name:        "healthcheck",
@@ -220,7 +295,9 @@ func (p *Plugin) Start(s *sdk.PluginSDK) error {
 		}, nil
 	})
 
-	p.startAutoCheck(s, 30*time.Minute)
+	if p.autoInterval > 0 {
+		p.startAutoCheck(s, p.autoInterval)
+	}
 
 	log.Printf("[healthcheck] ready (stageHost=%v iom=%v reg=%v mem=%v ks=%v ds=%v pm=%v sp=%v)",
 		hcStageHost != nil, hcIOMgr != nil, hcPluginReg != nil,
@@ -278,8 +355,8 @@ func (p *Plugin) runAutoCheck(s *sdk.PluginSDK) {
 	p.mu.Lock()
 	p.perfData.LastCheck = pt.Time
 	p.perfData.Checks = append(p.perfData.Checks, pt)
-	if len(p.perfData.Checks) > 100 {
-		p.perfData.Checks = p.perfData.Checks[len(p.perfData.Checks)-100:]
+	if len(p.perfData.Checks) > p.perfHistory {
+		p.perfData.Checks = p.perfData.Checks[len(p.perfData.Checks)-p.perfHistory:]
 	}
 	p.mu.Unlock()
 
@@ -511,7 +588,7 @@ func (p *Plugin) testLLMDriven() checkResult {
 	}
 
 	start := time.Now()
-	ctx, cancel := context.WithTimeout(context.Background(), 120*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), p.llmTimeout)
 	defer cancel()
 
 	// 收集所有工具定义（排除健康检查自身的工具以避免循环测试）
@@ -537,10 +614,10 @@ func (p *Plugin) testLLMDriven() checkResult {
 	turnCount := 0
 	toolCallCount := 0
 
-	for turn := 0; turn < 20; turn++ {
+	for turn := 0; turn < p.llmMaxTurns; turn++ {
 		resp, err := provider.Chat(ctx, &agentAPI.CompletionRequest{
 			Messages:   msgs,
-			MaxTokens:  4096,
+			MaxTokens:  p.llmMaxTokens,
 			Tools:      tools,
 			ToolChoice: "auto",
 		})

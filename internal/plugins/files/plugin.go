@@ -14,6 +14,7 @@ import (
 )
 
 func init() {
+	plugin.RegisterPluginMeta("files", "文件系统", "Files")
 	plugin.RegisterFactory("files", func(name string, config map[string]interface{}) (sdk.Plugin, error) {
 		return New(name), nil
 	})

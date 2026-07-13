@@ -15,6 +15,7 @@ import (
 	"sync"
 	"time"
 
+	agentAPI "gitcode.com/JianFeeeee/HomeAgent/internal/agent/api"
 	agentCore "gitcode.com/JianFeeeee/HomeAgent/internal/agent/core"
 	agentIO "gitcode.com/JianFeeeee/HomeAgent/internal/agent/io"
 	internalConfig "gitcode.com/JianFeeeee/HomeAgent/internal/config"
@@ -61,16 +62,55 @@ type Handler struct {
 	pluginReg      *plugin.Registry
 	eventBus       *events.Bus
 	statusProvider agentCore.StatusProvider
+	providerMgr    *agentAPI.ProviderManager
+	baseAPIKey     string
 	sessionMu      sync.Mutex
 	sessions       map[string]time.Time
+
+	chatMu      sync.Mutex
+	chatHistory []ChatMsg
+	cmdMu       sync.Mutex
+	cmdHistory  []CmdExec
+	termMu      sync.Mutex
+	termStates  map[string]*termState
 }
 
-func NewHandler(sup *supervisor.Daemon, mem *memory.GraphDB, sk *skill.Manager, lua *luaVM.VM, cfg *types.Config, iom *agentIO.IOManager, tm *text.Memory, ks *knowledge.Store, tr *tracker.Tracker, cr *internalConfig.ConfigRegistry, pr *plugin.Registry, evBus *events.Bus, sp agentCore.StatusProvider) *Handler {
+type ChatMsg struct {
+	Role             string `json:"role"`
+	Content          string `json:"content"`
+	ReasoningContent string `json:"reasoning_content,omitempty"`
+	Time             string `json:"time"`
+}
+
+type CmdExec struct {
+	Command  string `json:"command"`
+	Stdout   string `json:"stdout"`
+	Stderr   string `json:"stderr"`
+	ExitCode int    `json:"exit_code"`
+	Status   string `json:"status"`
+	Time     string `json:"time"`
+}
+
+type termState struct {
+	ID        string `json:"id"`
+	Command   string `json:"command"`
+	Running   bool   `json:"running"`
+	Output    string `json:"output"`
+	CreatedAt string `json:"created_at"`
+	Uptime    string `json:"uptime"`
+	created   time.Time
+}
+
+const maxChatHistory = 200
+const maxCmdHistory = 100
+const maxTerminals = 50
+
+func NewHandler(sup *supervisor.Daemon, mem *memory.GraphDB, sk *skill.Manager, lua *luaVM.VM, cfg *types.Config, iom *agentIO.IOManager, tm *text.Memory, ks *knowledge.Store, tr *tracker.Tracker, cr *internalConfig.ConfigRegistry, pr *plugin.Registry, evBus *events.Bus, sp agentCore.StatusProvider, pm *agentAPI.ProviderManager, baseKey string) *Handler {
 	var idx *memory.Indexer
 	if mem != nil {
 		idx = memory.NewIndexer(mem)
 	}
-	return &Handler{
+	h := &Handler{
 		supervisor:     sup,
 		memory:         mem,
 		indexer:        idx,
@@ -86,8 +126,83 @@ func NewHandler(sup *supervisor.Daemon, mem *memory.GraphDB, sk *skill.Manager, 
 		pluginReg:      pr,
 		eventBus:       evBus,
 		statusProvider: sp,
+		providerMgr:    pm,
+		baseAPIKey:     baseKey,
 		sessions:       make(map[string]time.Time),
+		termStates:     make(map[string]*termState),
 	}
+	if evBus != nil {
+		go h.trackToolEvents()
+	}
+	return h
+}
+
+func (h *Handler) trackToolEvents() {
+	h.eventBus.Subscribe(events.EventToolCall, func(ev *events.Event) {
+		h.handleToolEvent(ev)
+	})
+}
+
+func (h *Handler) handleToolEvent(ev *events.Event) {
+	payload := ev.Payload
+	tool, _ := payload["tool"].(string)
+	args, _ := payload["args"].(map[string]interface{})
+	status, _ := payload["status"].(string)
+	ts := time.Now()
+
+	switch tool {
+	case "cmd_run":
+		exec := CmdExec{
+			Command: getStr(args, "command"),
+			Status:  status,
+			Time:    ts.Format(time.RFC3339),
+		}
+		h.cmdMu.Lock()
+		h.cmdHistory = append(h.cmdHistory, exec)
+		if len(h.cmdHistory) > maxCmdHistory {
+			h.cmdHistory = h.cmdHistory[len(h.cmdHistory)-maxCmdHistory:]
+		}
+		h.cmdMu.Unlock()
+
+	case "terminal_create":
+		id := getStr(args, "id")
+		cmd := getStr(args, "command")
+		now := time.Now()
+		term := &termState{
+			ID:        id,
+			Command:   cmd,
+			Running:   true,
+			CreatedAt: now.Format(time.RFC3339),
+			created:   now,
+		}
+		h.termMu.Lock()
+		h.termStates[id] = term
+		if len(h.termStates) > maxTerminals {
+			for k := range h.termStates {
+				delete(h.termStates, k)
+				break
+			}
+		}
+		h.termMu.Unlock()
+
+	case "terminal_close":
+		id := getStr(args, "id")
+		if id != "" {
+			h.termMu.Lock()
+			if t, ok := h.termStates[id]; ok {
+				t.Running = false
+			}
+			h.termMu.Unlock()
+		}
+	}
+}
+
+func getStr(m map[string]interface{}, key string) string {
+	if m == nil {
+		return ""
+	}
+	v, _ := m[key].(string)
+	return v
 }
 
 func (h *Handler) getWebUIConfig() (apiKey, username, password string, ttl time.Duration) {
@@ -204,6 +319,7 @@ func (h *Handler) RegisterRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("/api/v1/skills", h.requireAPI(h.handleSkills))
 	mux.HandleFunc("/api/v1/memory", h.requireAPI(h.handleMemory))
 	mux.HandleFunc("/api/v1/memory/", h.requireAPI(h.handleMemory))
+	mux.HandleFunc("/api/v1/memory/graph", h.requireAPI(h.handleMemoryGraph))
 	mux.HandleFunc("/api/v1/memory/context", h.requireAPI(h.handleMemoryContext))
 	mux.HandleFunc("/api/v1/memory/tools", h.requireAPI(h.handleMemoryTools))
 	mux.HandleFunc("/api/v1/memory/text", h.requireAPI(h.handleTextMemory))
@@ -218,7 +334,10 @@ func (h *Handler) RegisterRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("/api/v1/tracker", h.requireAPI(h.handleTracker))
 	mux.HandleFunc("/api/v1/tracker/", h.requireAPI(h.handleTracker))
 	mux.HandleFunc("/api/v1/chat", h.requireAPI(h.handleChat))
+	mux.HandleFunc("/api/v1/chat/history", h.requireAPI(h.handleChatHistory))
 	mux.HandleFunc("/api/v1/chat/events", h.requireAPI(h.handleChatEvents))
+	mux.HandleFunc("/api/v1/terminals", h.requireAPI(h.handleTerminals))
+	mux.HandleFunc("/api/v1/cmd/history", h.requireAPI(h.handleCmdHistory))
 	mux.HandleFunc("/api/v1/kernel", h.requireAPI(h.handleKernel))
 	mux.HandleFunc("/api/v1/plugins", h.requireAPI(h.handlePlugins))
 	mux.HandleFunc("/api/v1/plugins/", h.requireAPI(h.handlePluginByID))
@@ -528,6 +647,23 @@ func (h *Handler) handleMemoryTools(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+func (h *Handler) handleMemoryGraph(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	if h.memory == nil {
+		writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "memory system not available"})
+		return
+	}
+	data, err := h.memory.GraphData()
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]interface{}{"success": true, "data": data})
+}
+
 func (h *Handler) handleKnowledge(w http.ResponseWriter, r *http.Request) {
 	switch r.Method {
 	case http.MethodGet:
@@ -652,7 +788,7 @@ func (h *Handler) handleAdapters(w http.ResponseWriter, r *http.Request) {
 			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
 			return
 		}
-		if err := h.lua.ReloadAll(); err != nil {
+		if err := h.lua.LoadAdapter(path); err != nil {
 			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
 			return
 		}
@@ -687,7 +823,7 @@ func (h *Handler) handleAdapterByID(w http.ResponseWriter, r *http.Request) {
 			writeJSON(w, http.StatusNotFound, map[string]string{"error": "adapter not found"})
 			return
 		}
-		h.lua.ReloadAll()
+		h.lua.RemoveAdapter(name)
 		writeJSON(w, http.StatusOK, map[string]string{"status": "deleted", "name": name})
 	default:
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
@@ -703,6 +839,42 @@ func (h *Handler) handleNetwork(w http.ResponseWriter, r *http.Request) {
 		"network_status": "monitoring",
 		"endpoints":      h.config.Defaults.LLMEndpoints,
 	})
+}
+
+func (h *Handler) addChatMsg(msg ChatMsg) {
+	h.chatMu.Lock()
+	defer h.chatMu.Unlock()
+	h.chatHistory = append(h.chatHistory, msg)
+	if len(h.chatHistory) > maxChatHistory {
+		h.chatHistory = h.chatHistory[len(h.chatHistory)-maxChatHistory:]
+	}
+}
+
+func (h *Handler) handleChatHistory(w http.ResponseWriter, r *http.Request) {
+	h.chatMu.Lock()
+	result := make([]ChatMsg, len(h.chatHistory))
+	copy(result, h.chatHistory)
+	h.chatMu.Unlock()
+	writeJSON(w, http.StatusOK, map[string]interface{}{"messages": result})
+}
+
+func (h *Handler) handleTerminals(w http.ResponseWriter, r *http.Request) {
+	h.termMu.Lock()
+	terms := make([]*termState, 0, len(h.termStates))
+	for _, ts := range h.termStates {
+		ts.Uptime = time.Since(ts.created).Round(time.Second).String()
+		terms = append(terms, ts)
+	}
+	h.termMu.Unlock()
+	writeJSON(w, http.StatusOK, map[string]interface{}{"terminals": terms})
+}
+
+func (h *Handler) handleCmdHistory(w http.ResponseWriter, r *http.Request) {
+	h.cmdMu.Lock()
+	result := make([]CmdExec, len(h.cmdHistory))
+	copy(result, h.cmdHistory)
+	h.cmdMu.Unlock()
+	writeJSON(w, http.StatusOK, map[string]interface{}{"history": result})
 }
 
 func (h *Handler) handleChat(w http.ResponseWriter, r *http.Request) {
@@ -722,15 +894,22 @@ func (h *Handler) handleChat(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	h.addChatMsg(ChatMsg{Role: "user", Content: body.Message, Time: time.Now().Format(time.RFC3339)})
 	resp := h.iom.InjectTextSync("cli", body.Message)
 	if resp == nil {
 		writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "agent unavailable"})
 		return
 	}
 	content, _ := resp.Payload["content"].(string)
-	writeJSON(w, http.StatusOK, map[string]interface{}{
+	reasoning, _ := resp.Payload["reasoning_content"].(string)
+	result := map[string]interface{}{
 		"response": content,
-	})
+	}
+	if reasoning != "" {
+		result["reasoning_content"] = reasoning
+	}
+	h.addChatMsg(ChatMsg{Role: "assistant", Content: content, ReasoningContent: reasoning, Time: time.Now().Format(time.RFC3339)})
+	writeJSON(w, http.StatusOK, result)
 }
 
 func (h *Handler) handleChatEvents(w http.ResponseWriter, r *http.Request) {
@@ -771,15 +950,17 @@ func (h *Handler) handleChatEvents(w http.ResponseWriter, r *http.Request) {
 		}
 	}()
 
-	unsub := h.eventBus.Subscribe(events.EventAll, func(evt *events.Event) {
-		data, _ := json.Marshal(evt)
-		select {
-		case writeCh <- fmt.Sprintf("event: %s\ndata: %s", evt.Type, string(data)):
-		default:
-		}
-	})
-	defer unsub()
-
+	subTypes := []string{"agent_output", "reasoning", "agent_error"}
+	for _, t := range subTypes {
+		t2 := t
+		_ = h.eventBus.Subscribe(events.EventType(t2), func(evt *events.Event) {
+			data, _ := json.Marshal(evt)
+			select {
+			case writeCh <- fmt.Sprintf("event: %s\ndata: %s", evt.Type, string(data)):
+			default:
+			}
+		})
+	}
 	for {
 		select {
 		case <-done:
@@ -844,10 +1025,30 @@ func (h *Handler) handleSettings(w http.ResponseWriter, r *http.Request) {
 			defs := h.cfgReg.ListDefs(prefix)
 			for _, d := range defs {
 				meta[d.Key] = d
+				// 有 def 但 DB 中尚无值的 key，用 default 填充以便在 WebUI 中显示和编辑
+				if _, exists := values[d.Key]; !exists {
+					values[d.Key] = d.Default
+				}
+			}
+			// 无前缀时同时加载所有插件配置
+			if prefix == "" && h.pluginReg != nil {
+				for _, p := range h.pluginReg.List() {
+					ps := h.cfgReg.PluginConfig(p)
+					pkeys, _ := ps.List("")
+					for _, k := range pkeys {
+						v, _ := ps.Get(k)
+						fullKey := "plugin." + p + "." + k
+						values[fullKey] = v
+						if def := h.cfgReg.GetDef(fullKey); def != nil {
+							meta[fullKey] = def
+						}
+					}
+				}
 			}
 		}
 
 		plugins := []string{"core"}
+		pm := h.pluginReg.PluginMetas()
 		if h.pluginReg != nil {
 			for _, p := range h.pluginReg.List() {
 				plugins = append(plugins, "plugin."+p)
@@ -855,9 +1056,10 @@ func (h *Handler) handleSettings(w http.ResponseWriter, r *http.Request) {
 		}
 		sort.Strings(plugins)
 		writeJSON(w, http.StatusOK, map[string]interface{}{
-			"settings": values,
-			"meta":     meta,
-			"plugins":  plugins,
+			"settings":    values,
+			"meta":        meta,
+			"plugins":     plugins,
+			"plugin_meta": pm,
 		})
 	case http.MethodPut:
 		var body struct {
@@ -883,9 +1085,34 @@ func (h *Handler) handleSettings(w http.ResponseWriter, r *http.Request) {
 				return
 			}
 		}
+		if strings.HasPrefix(body.Key, "core.llm.") && h.providerMgr != nil && h.lua != nil {
+			h.reloadLLMProviders()
+		}
 		writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
 	default:
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+	}
+}
+
+func (h *Handler) reloadLLMProviders() {
+	cfg := h.cfgReg.ToConfig()
+	h.providerMgr.Reset()
+	for _, src := range cfg.LLM.Sources {
+		key := src.APIKey
+		if key == "" {
+			key = h.baseAPIKey
+		}
+		provider := agentAPI.NewLuaAdaptedProvider(agentAPI.BaseConfig{
+			Model:       src.Model,
+			BaseURL:     src.BaseURL,
+			APIKey:      key,
+			Temperature: cfg.LLM.Temperature,
+			MaxTokens:   cfg.LLM.MaxTokens,
+		}, h.lua, src.Adapter)
+		h.providerMgr.Register(src.Name, provider)
+	}
+	if cfg.LLM.Provider != "" {
+		_ = h.providerMgr.SetDefault(cfg.LLM.Provider)
 	}
 }
 
@@ -1169,6 +1396,9 @@ func (h *Handler) handlePluginByID(w http.ResponseWriter, r *http.Request) {
 func (h *Handler) handleStatic(w http.ResponseWriter, r *http.Request) {
 	if r.URL.Path == "/" {
 		w.Header().Set("Content-Type", "text/html; charset=utf-8")
+		w.Header().Set("Cache-Control", "no-cache, no-store, must-revalidate")
+		w.Header().Set("Pragma", "no-cache")
+		w.Header().Set("Expires", "0")
 		w.Write([]byte(dashboardHTML))
 		return
 	}

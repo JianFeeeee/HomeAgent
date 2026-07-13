@@ -11,7 +11,7 @@ import (
 	"time"
 
 	"gitcode.com/JianFeeeee/HomeAgent/pkg/types"
-	_ "github.com/mattn/go-sqlite3"
+	_ "modernc.org/sqlite"
 )
 
 type ConfigDef struct {
@@ -37,7 +37,7 @@ func NewConfigRegistry(dbPath string) *ConfigRegistry {
 	if dbPath == "" {
 		dbPath = ":memory:"
 	}
-	db, err := sql.Open("sqlite3", dbPath)
+	db, err := sql.Open("sqlite", dbPath)
 	if err != nil {
 		panic(fmt.Sprintf("open config db: %v", err))
 	}
@@ -95,6 +95,75 @@ func (r *ConfigRegistry) GetDef(key string) *ConfigDef {
 	return r.defs[key]
 }
 
+// sourceFieldDefs 定义 source 类型配置的字段元数据
+var sourceFieldDefs = []struct {
+	Field       string
+	Type        string
+	DisplayName string
+}{
+	{"base_url", "string", "API 地址"},
+	{"model", "string", "模型"},
+	{"api_key", "password", "API 密钥"},
+	{"thinking_enabled", "bool", "深度思考"},
+	{"adapter", "string", "适配器"},
+	{"adapter_path", "string", "适配器路径"},
+}
+
+// registerSourceDefs 注册 core.llm.sources.<name>.* 的 ConfigDef
+func (r *ConfigRegistry) registerSourceDefs(name string) {
+	for _, fd := range sourceFieldDefs {
+		key := "core.llm.sources." + name + "." + fd.Field
+		if _, exists := r.defs[key]; exists {
+			continue
+		}
+		r.defs[key] = &ConfigDef{
+			Key:         key,
+			Default:     "",
+			Type:        fd.Type,
+			DisplayName: name + " " + fd.DisplayName,
+			Category:    "sources",
+		}
+	}
+}
+
+// scanAndRegisterSourceDefsLocked 扫描 config DB 中已有的 core.llm.sources.<name>.* 键并注册 defs（调用方已持锁）
+func (r *ConfigRegistry) scanAndRegisterSourceDefsLocked() {
+	seen := make(map[string]bool)
+	rows, err := r.db.Query(`SELECT key FROM config WHERE key LIKE 'core.llm.sources.%.base_url'`)
+	if err != nil {
+		return
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var k string
+		if err := rows.Scan(&k); err != nil {
+			continue
+		}
+		rest := strings.TrimPrefix(k, "core.llm.sources.")
+		name := strings.TrimSuffix(rest, ".base_url")
+		if name == "" || seen[name] {
+			continue
+		}
+		seen[name] = true
+		r.defsLockedRegisterSource(name)
+	}
+}
+func (r *ConfigRegistry) defsLockedRegisterSource(name string) {
+	for _, fd := range sourceFieldDefs {
+		key := "core.llm.sources." + name + "." + fd.Field
+		if _, exists := r.defs[key]; exists {
+			continue
+		}
+		r.defs[key] = &ConfigDef{
+			Key:         key,
+			Default:     "",
+			Type:        fd.Type,
+			DisplayName: name + " " + fd.DisplayName,
+			Category:    "sources",
+		}
+	}
+}
+
 func (r *ConfigRegistry) ListDefs(prefix string) []*ConfigDef {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
@@ -126,6 +195,13 @@ func (r *ConfigRegistry) Set(key string, value interface{}) error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	_, err := r.db.Exec(`INSERT OR REPLACE INTO config (key, value) VALUES (?, ?)`, key, fmt.Sprint(value))
+	if err == nil && strings.HasPrefix(key, "core.llm.sources.") {
+		rest := strings.TrimPrefix(key, "core.llm.sources.")
+		parts := strings.SplitN(rest, ".", 2)
+		if len(parts) == 2 && parts[1] != "" {
+			r.defsLockedRegisterSource(parts[0])
+		}
+	}
 	return err
 }
 
@@ -197,6 +273,8 @@ func (r *ConfigRegistry) SeedDefaults(dataDir string) {
 	defer r.mu.Unlock()
 	r.seedDBValues(dataDir)
 	r.seedCoreDefs(dataDir)
+	// 扫描 config DB 中已有的 core.llm.sources.<name> 并注册 defs
+	r.scanAndRegisterSourceDefsLocked()
 }
 
 func (r *ConfigRegistry) seedDBValues(dataDir string) {
@@ -270,14 +348,38 @@ func (r *ConfigRegistry) seedDBValues(dataDir string) {
 	set("core.agent.max_context_size", "30")
 	set("core.agent.distill_interval", "30m")
 	set("core.agent.workdir", "")
+	set("core.agent.system_prompt", `你是 HomeAgent，一个持续运行的个人管家。
+你的每次回复会自动发送到当前输出通道（默认=输入源），无需额外工具。
+如需切换回复通道，使用 output_set_channel。
+如需异步发送消息或通知，使用 output_send 指定通道和内容。
+使用 output_list_channels 查看可用通道及其能力。
+
+可用工具列表会由系统自动传入，按需使用即可。以下是你尤其需要关注的几类工具：
+- memory_* — 图记忆（长期记忆，记录和查询个人信息/事实）
+- knowledge_* — 知识库（查阅预设知识文档）
+- doc_* — 文档记忆（近期对话的存档，查询后自动清除）
+- person_* — 人物特质与社交关系网
+- llm_* — LLM 源管理（列出/切换模型提供商）
+- output_* — 输出通道管理（切换/发送消息）
+- timer_set — 设置定时提醒
+- plgreload — 热重载插件
+- spawn_child — 生成子 Agent 执行独立任务
+- describe_image — 描述用户上传的图片
+- transcribe_audio — 转写用户上传的音频
+- ocr_image — 识别图片中的文字
+
+当用户上传图片或音频时，系统会自动附着媒体内容。如果模型不支持直接处理多媒体，请使用上述工具。
+
+回复你的真实想法，用自然语言与用户交流。`)
 
 	set("core.input_processing.image.fallback_provider", "")
 	set("core.input_processing.image.fallback_model", "")
-	set("core.input_processing.image.describe_prompt", "请详细描述这张图片的内容")
+	set("core.input_processing.image.describe_prompt", "请详细描述这张图片的内容，包括其中的文字、物体、人物、场景等信息。")
 	set("core.input_processing.image.ocr_enabled", "true")
+	set("core.input_processing.image.ocr_prompt", "请识别这张图片中的所有文字内容，按原文输出。仅输出文字本身，不要添加额外描述。")
 	set("core.input_processing.audio.fallback_provider", "")
 	set("core.input_processing.audio.fallback_model", "")
-	set("core.input_processing.audio.describe_prompt", "请描述这段音频的内容")
+	set("core.input_processing.audio.describe_prompt", "请转写这段音频的内容。")
 
 	tx.Commit()
 }
@@ -294,7 +396,7 @@ func (r *ConfigRegistry) seedCoreDefs(dataDir string) {
 	reg(ConfigDef{Key: "core.llm.provider", Default: "deepseek", Type: "string", DisplayName: "默认提供商", Description: "默认 LLM 提供商名称，需匹配 sources 中的定义", Category: "llm"})
 	reg(ConfigDef{Key: "core.llm.model", Default: "deepseek-v4-flash", Type: "string", DisplayName: "默认模型", Description: "默认 LLM 模型名称", Category: "llm"})
 	reg(ConfigDef{Key: "core.llm.base_url", Default: "https://api.deepseek.com", Type: "string", DisplayName: "默认 API 地址", Description: "默认 LLM API 基础地址", Category: "llm"})
-	reg(ConfigDef{Key: "core.llm.api_key", Default: "", Type: "password", DisplayName: "默认 API 密钥", Description: "默认 LLM API 密钥（空则从环境变量读取）", Placeholder: "留空则使用 DEEPSEEK_API_KEY", Category: "llm"})
+	reg(ConfigDef{Key: "core.llm.api_key", Default: "", Type: "password", DisplayName: "默认 API 密钥", Description: "默认 LLM API 密钥（空则从环境变量读取）", Placeholder: "留空则使用 LLM_API_KEY 或 DEEPSEEK_API_KEY", Category: "llm"})
 	reg(ConfigDef{Key: "core.llm.adapter", Default: "deepseek", Type: "string", DisplayName: "默认适配器", Description: "协议适配器名称（对应 adapters/ 下的 Lua 脚本）", Category: "llm"})
 	reg(ConfigDef{Key: "core.llm.temperature", Default: "0.7", Type: "string", DisplayName: "生成温度", Description: "LLM 生成温度 (0.0-2.0)", Category: "llm"})
 	reg(ConfigDef{Key: "core.llm.max_tokens", Default: "4096", Type: "int", DisplayName: "最大 Token", Description: "每次生成的最大 Token 数", Category: "llm"})
@@ -338,14 +440,16 @@ func (r *ConfigRegistry) seedCoreDefs(dataDir string) {
 	reg(ConfigDef{Key: "core.agent.max_context_size", Default: "30", Type: "int", DisplayName: "最大上下文", Description: "上下文窗口中保留的最大消息条数", Category: "agent"})
 	reg(ConfigDef{Key: "core.agent.distill_interval", Default: "30m", Type: "duration", DisplayName: "蒸馏间隔", Description: "记忆蒸馏的执行间隔", Category: "agent"})
 	reg(ConfigDef{Key: "core.agent.workdir", Default: "", Type: "string", DisplayName: "工作目录", Description: "Agent 命令执行的默认工作目录（如 cmd_run 工具的 fallback），留空使用内核所在目录", Category: "agent"})
+	reg(ConfigDef{Key: "core.agent.system_prompt", Default: "", Type: "text", DisplayName: "系统身份提示词", Description: "Agent 的系统提示词，定义身份和行为规则。留空则使用编译时内置默认值。修改后需重启生效。", Category: "agent"})
 
 	reg(ConfigDef{Key: "core.input_processing.image.fallback_provider", Default: "", Type: "string", DisplayName: "图片回退提供商", Description: "当主 LLM 不支持图片处理时使用的提供商（留空则自动降级为文字描述）", Category: "input"})
 	reg(ConfigDef{Key: "core.input_processing.image.fallback_model", Default: "", Type: "string", DisplayName: "图片回退模型", Description: "图片回退提供商使用的模型名", Category: "input"})
-	reg(ConfigDef{Key: "core.input_processing.image.describe_prompt", Default: "请详细描述这张图片的内容", Type: "text", DisplayName: "图片描述提示词", Description: "生成图片文字描述时的系统提示词", Category: "input"})
+	reg(ConfigDef{Key: "core.input_processing.image.describe_prompt", Default: "请详细描述这张图片的内容，包括其中的文字、物体、人物、场景等信息。", Type: "text", DisplayName: "图片描述提示词", Description: "生成图片文字描述时的系统提示词", Category: "input"})
 	reg(ConfigDef{Key: "core.input_processing.image.ocr_enabled", Default: "true", Type: "bool", DisplayName: "启用 OCR", Description: "是否启用图片文字识别工具", Category: "input"})
+	reg(ConfigDef{Key: "core.input_processing.image.ocr_prompt", Default: "请识别这张图片中的所有文字内容，按原文输出。仅输出文字本身，不要添加额外描述。", Type: "text", DisplayName: "OCR 提示词", Description: "OCR 文字识别时的系统提示词", Category: "input"})
 	reg(ConfigDef{Key: "core.input_processing.audio.fallback_provider", Default: "", Type: "string", DisplayName: "音频回退提供商", Description: "当主 LLM 不支持音频处理时使用的提供商", Category: "input"})
 	reg(ConfigDef{Key: "core.input_processing.audio.fallback_model", Default: "", Type: "string", DisplayName: "音频回退模型", Description: "音频回退提供商使用的模型名", Category: "input"})
-	reg(ConfigDef{Key: "core.input_processing.audio.describe_prompt", Default: "请描述这段音频的内容", Type: "text", DisplayName: "音频描述提示词", Description: "生成音频文字描述时的系统提示词", Category: "input"})
+	reg(ConfigDef{Key: "core.input_processing.audio.describe_prompt", Default: "请转写这段音频的内容。", Type: "text", DisplayName: "音频描述提示词", Description: "生成音频文字描述时的系统提示词", Category: "input"})
 }
 
 // helpers
@@ -522,6 +626,7 @@ func (r *ConfigRegistry) ToConfig() *types.Config {
 	cfg.InputProcessing.Image.FallbackModel = read("core.input_processing.image.fallback_model", cfg.InputProcessing.Image.FallbackModel)
 	cfg.InputProcessing.Image.DescribePrompt = read("core.input_processing.image.describe_prompt", cfg.InputProcessing.Image.DescribePrompt)
 	cfg.InputProcessing.Image.OCREnabled = readBool("core.input_processing.image.ocr_enabled", cfg.InputProcessing.Image.OCREnabled)
+	cfg.InputProcessing.Image.OCRPrompt = read("core.input_processing.image.ocr_prompt", cfg.InputProcessing.Image.OCRPrompt)
 	cfg.InputProcessing.Audio.FallbackProvider = read("core.input_processing.audio.fallback_provider", cfg.InputProcessing.Audio.FallbackProvider)
 	cfg.InputProcessing.Audio.FallbackModel = read("core.input_processing.audio.fallback_model", cfg.InputProcessing.Audio.FallbackModel)
 	cfg.InputProcessing.Audio.DescribePrompt = read("core.input_processing.audio.describe_prompt", cfg.InputProcessing.Audio.DescribePrompt)
@@ -587,6 +692,7 @@ func (p *PluginSettings) List(prefix string) ([]string, error) {
 func (p *PluginSettings) RegisterDef(def ConfigDef) {
 	p.registry.mu.Lock()
 	defer p.registry.mu.Unlock()
+	p.registry.db.Exec(fmt.Sprintf(`INSERT OR IGNORE INTO %s (key, value) VALUES (?, ?)`, p.table), def.Key, def.Default)
 	qualified := "plugin." + p.name + "." + def.Key
 	def.Key = qualified
 	p.registry.defs[def.Key] = &def

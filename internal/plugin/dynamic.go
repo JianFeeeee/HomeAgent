@@ -21,6 +21,7 @@ import (
 //	}
 const (
 	soEntry   = "plugin.so"
+	dllEntry  = "plugin.dll"
 	luaEntry  = "main.lua"
 	metaEntry = "plugin.json"
 )
@@ -111,16 +112,4 @@ func tryLoadSO(dir, name string, config map[string]interface{}) (sdk.Plugin, err
 	}
 
 	return &dynamicPlugin{name: name, impl: plg}, nil
-}
-
-// tryLoadLua 尝试从插件目录加载 main.lua（Lua 插件）。
-// 返回 nil,nil 表示目录中没有 main.lua。
-func tryLoadLua(dir, name string, config map[string]interface{}) (sdk.Plugin, error) {
-	luaPath := filepath.Join(dir, luaEntry)
-	if _, err := os.Stat(luaPath); os.IsNotExist(err) {
-		return nil, nil
-	}
-
-	// 预留：Lua 插件需在 LuaVM 中注册一个 LuaPlugin 包装器
-	return nil, fmt.Errorf("lua plugin loading not yet implemented: %s", name)
 }

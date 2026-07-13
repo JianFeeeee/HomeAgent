@@ -122,6 +122,7 @@ type ImageProcessingConfig struct {
 	FallbackModel    string `json:"fallback_model" yaml:"fallback_model"`
 	DescribePrompt   string `json:"describe_prompt" yaml:"describe_prompt"`
 	OCREnabled       bool   `json:"ocr_enabled" yaml:"ocr_enabled"`
+	OCRPrompt        string `json:"ocr_prompt" yaml:"ocr_prompt"`
 }
 
 type AudioProcessingConfig struct {

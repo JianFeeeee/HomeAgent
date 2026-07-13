@@ -252,6 +252,9 @@ func main() {
 
 	apiKey := cfg.LLM.APIKey
 	if apiKey == "" {
+		apiKey = os.Getenv("LLM_API_KEY")
+	}
+	if apiKey == "" {
 		apiKey = os.Getenv("DEEPSEEK_API_KEY")
 	}
 	baseAPIKey := apiKey
@@ -337,9 +340,7 @@ func main() {
 	// Agent Core (需在插件加载前创建，因为插件 Configure 需要 StatusProvider)
 	// ========================================================================
 
-	agent := agentCore.New(agentCore.AgentConfig{
-		ID: "main",
-		SystemPrompt: `你是 HomeAgent，一个持续运行的个人管家。
+	defaultPrompt := `你是 HomeAgent，一个持续运行的个人管家。
 你的每次回复会自动发送到当前输出通道（默认=输入源），无需额外工具。
 如需切换回复通道，使用 output_set_channel。
 如需异步发送消息或通知，使用 output_send 指定通道和内容。
@@ -361,7 +362,15 @@ func main() {
 
 当用户上传图片或音频时，系统会自动附着媒体内容。如果模型不支持直接处理多媒体，请使用上述工具。
 
-回复你的真实想法，用自然语言与用户交流。`,
+回复你的真实想法，用自然语言与用户交流。`
+	sysPrompt := cfgReg.GetString("core.agent.system_prompt", defaultPrompt)
+	if sysPrompt == "" {
+		sysPrompt = defaultPrompt
+	}
+
+	agent := agentCore.New(agentCore.AgentConfig{
+		ID:              "main",
+		SystemPrompt:    sysPrompt,
 		Provider:        provider,
 		ProviderManager: providerMgr,
 		IO:              iom,
@@ -388,6 +397,7 @@ func main() {
 	openclaw.SkillsDir = filepath.Join(cfg.Daemon.DataDir, "skills")
 	webui.Configure(*httpAddr,
 		sup, memDB, skMgr, luaVM, cfg, iom, textMem, ks, trk, cfgReg, pluginReg, evBus, agent,
+		providerMgr, baseAPIKey,
 	)
 	healthcheck.Configure(stageHost, iom, pluginReg, memDB, ks, docStore, providerMgr, agent)
 

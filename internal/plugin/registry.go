@@ -22,6 +22,28 @@ import (
 
 type NativeFactory func(name string, config map[string]interface{}) (sdk.Plugin, error)
 
+// PluginMeta 插件显示名称元数据。
+type PluginMeta struct {
+	NameZh string `json:"name_zh"`
+	NameEn string `json:"name_en"`
+}
+
+var globalPluginMeta sync.Map // name -> PluginMeta
+
+// RegisterPluginMeta 供插件包在 init() 中调用，注册显示名称。
+func RegisterPluginMeta(name, nameZh, nameEn string) {
+	globalPluginMeta.Store(name, PluginMeta{NameZh: nameZh, NameEn: nameEn})
+}
+
+// GetPluginMeta 查询插件的显示名称。
+func GetPluginMeta(name string) (PluginMeta, bool) {
+	v, ok := globalPluginMeta.Load(name)
+	if !ok {
+		return PluginMeta{}, false
+	}
+	return v.(PluginMeta), true
+}
+
 // globalFactories 是插件通过 init() 自注册的全局工厂表。
 // Registry.RegisterNative() 写入此表；Registry.Load() 从中查找。
 var globalFactories sync.Map
@@ -202,6 +224,13 @@ func (r *Registry) loadOne(plgDir, name string) bool {
 
 	var plg sdk.Plugin
 
+	// 读取 plugin.json 以获取插件显示名称元数据（主要用于外部插件）
+	if mft := readManifest(plgDir); mft != nil {
+		if mft.NameZh != "" || mft.NameEn != "" {
+			RegisterPluginMeta(name, mft.NameZh, mft.NameEn)
+		}
+	}
+
 	if hasFactory {
 		cfg := r.readConfig(plgDir)
 		p, err := factory(name, cfg)
@@ -277,16 +306,34 @@ func (r *Registry) Get(name string) sdk.Plugin {
 	return r.plugins[name]
 }
 
+func (r *Registry) PluginMetas() map[string]PluginMeta {
+	metas := make(map[string]PluginMeta)
+	globalPluginMeta.Range(func(key, val interface{}) bool {
+		metas[key.(string)] = val.(PluginMeta)
+		return true
+	})
+	return metas
+}
+
 func (r *Registry) tryDynamic(plgDir, name string, config map[string]interface{}) (sdk.Plugin, error) {
-	// 优先尝试 .so（Go plugin），其次 .lua（Lua 脚本）
-	plg, err := tryLoadSO(plgDir, name, config)
-	if err != nil {
-		return nil, err
+	// 尝试顺序：.so (Go plugin on Linux) → .dll (Windows) → .lua (跨平台)
+	for _, try := range []struct {
+		name string
+		fn   func(string, string, map[string]interface{}) (sdk.Plugin, error)
+	}{
+		{"so", tryLoadSO},
+		{"dll", tryLoadDLL},
+		{"lua", tryLoadLua},
+	} {
+		plg, err := try.fn(plgDir, name, config)
+		if err != nil {
+			return nil, err
+		}
+		if plg != nil {
+			return plg, nil
+		}
 	}
-	if plg != nil {
-		return plg, nil
-	}
-	return tryLoadLua(plgDir, name, config)
+	return nil, nil
 }
 
 func (r *Registry) readConfig(plgDir string) map[string]interface{} {

@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os/exec"
 	"strings"
+	"sync"
 	"time"
 
 	"gitcode.com/JianFeeeee/HomeAgent/internal/plugin"
@@ -41,13 +42,32 @@ func shellUnquote(s string) []string {
 }
 
 func init() {
+	plugin.RegisterPluginMeta("cmd", "命令执行", "Command")
 	plugin.RegisterFactory("cmd", func(name string, config map[string]interface{}) (sdk.Plugin, error) {
 		return New(name), nil
 	})
 }
 
+type cmdRecord struct {
+	Timestamp time.Time `json:"timestamp"`
+	Command   string    `json:"command"`
+	Stdout    string    `json:"stdout"`
+	Stderr    string    `json:"stderr"`
+	ExitCode  int       `json:"exit_code"`
+	Workdir   string    `json:"workdir"`
+	Timeout   string    `json:"timeout"`
+	Duration  string    `json:"duration"`
+	Status    string    `json:"status"`
+}
+
+const maxHistory = 100
+
 type Plugin struct {
-	name string
+	name           string
+	defaultTimeout string
+	maxOutput      int
+	mu             sync.Mutex
+	history        []cmdRecord
 }
 
 func New(name string) *Plugin {
@@ -57,6 +77,30 @@ func New(name string) *Plugin {
 func (p *Plugin) Name() string { return p.name }
 
 func (p *Plugin) Start(s *sdk.PluginSDK) error {
+	s.Settings().RegisterDef(sdk.ConfigDef{
+		Key: "default_timeout", Type: "string", DisplayName: "默认命令超时",
+		Description: "命令执行的默认超时时间，例如 30s, 1m, 5m（默认 30s）",
+		Default:     "30s",
+	})
+	s.Settings().RegisterDef(sdk.ConfigDef{
+		Key: "max_output_bytes", Type: "int", DisplayName: "最大输出字节数",
+		Description: "命令输出的最大字节数，超出部分将被截断（默认 32000）",
+		Default:     "32000",
+	})
+	p.maxOutput = 32000
+	if v, _ := s.Settings().Get("max_output_bytes"); v != nil {
+		if s, ok := v.(string); ok && s != "" {
+			if n, err := fmt.Sscanf(s, "%d", &p.maxOutput); err == nil && n > 0 {
+			}
+		}
+	}
+	p.defaultTimeout = "30s"
+	if v, _ := s.Settings().Get("default_timeout"); v != nil {
+		if s, ok := v.(string); ok && s != "" {
+			p.defaultTimeout = s
+		}
+	}
+
 	s.RegisterTool("cmd_run", sdk.ToolDef{
 		Name:        "cmd_run",
 		Description: "执行一条系统命令并返回输出。适用于查询系统信息、运行脚本、操作文件等单次命令场景。命令在临时 shell 中执行，不支持交互。如需交互式终端（如 vim、ssh、top），请使用 terminal_create 相关工具。",
@@ -86,7 +130,7 @@ func (p *Plugin) Start(s *sdk.PluginSDK) error {
 
 		timeoutStr, _ := args["timeout"].(string)
 		if timeoutStr == "" {
-			timeoutStr = "30s"
+			timeoutStr = p.defaultTimeout
 		}
 		timeout, err := time.ParseDuration(timeoutStr)
 		if err != nil {
@@ -104,6 +148,7 @@ func (p *Plugin) Start(s *sdk.PluginSDK) error {
 			}
 		}
 
+		tStart := time.Now()
 		ctx, cancel := context.WithTimeout(context.Background(), timeout)
 		defer cancel()
 
@@ -120,22 +165,40 @@ func (p *Plugin) Start(s *sdk.PluginSDK) error {
 		cmd.Stdout = &stdout
 		cmd.Stderr = &stderr
 
+		rec := cmdRecord{Timestamp: tStart, Command: command, Workdir: workdir, Timeout: timeoutStr}
+		exitCode := -1
+
 		if err := cmd.Run(); err != nil {
 			if ctx.Err() != nil {
+				rec.Status = "timeout"
+				rec.Stdout = p.truncateOutput(stdout.String())
+				rec.Stderr = p.truncateOutput(stderr.String())
+				rec.Duration = time.Since(tStart).Round(time.Millisecond).String()
+				p.recordCmd(rec)
 				return map[string]interface{}{
 					"status": "timeout",
-					"stdout": truncateOutput(stdout.String()),
-					"stderr": truncateOutput(stderr.String()),
+					"stdout": rec.Stdout,
+					"stderr": rec.Stderr,
 					"error":  fmt.Sprintf("命令执行超时（%s）", timeoutStr),
 				}, nil
 			}
 		}
+		if cmd.ProcessState != nil {
+			exitCode = cmd.ProcessState.ExitCode()
+		}
+
+		rec.Status = "ok"
+		rec.Stdout = p.truncateOutput(stdout.String())
+		rec.Stderr = p.truncateOutput(stderr.String())
+		rec.ExitCode = exitCode
+		rec.Duration = time.Since(tStart).Round(time.Millisecond).String()
+		p.recordCmd(rec)
 
 		return map[string]interface{}{
 			"status":     "ok",
-			"stdout":     truncateOutput(stdout.String()),
-			"stderr":     truncateOutput(stderr.String()),
-			"exit_code":  cmd.ProcessState.ExitCode(),
+			"stdout":     rec.Stdout,
+			"stderr":     rec.Stderr,
+			"exit_code":  exitCode,
 			"command":    command,
 		}, nil
 	})
@@ -147,8 +210,20 @@ func (p *Plugin) Stop() error {
 	return nil
 }
 
-func truncateOutput(s string) string {
-	const maxLen = 32000
+func (p *Plugin) recordCmd(r cmdRecord) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.history = append(p.history, r)
+	if len(p.history) > maxHistory {
+		p.history = p.history[len(p.history)-maxHistory:]
+	}
+}
+
+func (p *Plugin) truncateOutput(s string) string {
+	maxLen := p.maxOutput
+	if maxLen <= 0 {
+		maxLen = 32000
+	}
 	if len(s) > maxLen {
 		return s[:maxLen] + fmt.Sprintf("\n... [输出被截断，共 %d 字节]", len(s))
 	}
