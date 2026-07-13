@@ -1,3 +1,5 @@
+//go:build linux
+
 package agentcli
 
 import (
@@ -155,18 +157,13 @@ func (t *TerminalSession) IsExpired() bool {
 }
 
 type Plugin struct {
-	name     string
-	mu       sync.Mutex
-	wg       sync.WaitGroup
-	stopCh   chan struct{}
-	sessions map[string]*TerminalSession
-	nextID   int
-}
-
-func init() {
-	plugin.RegisterFactory("agentcli", func(name string, config map[string]interface{}) (sdk.Plugin, error) {
-		return New(name), nil
-	})
+	name           string
+	mu             sync.Mutex
+	wg             sync.WaitGroup
+	stopCh         chan struct{}
+	sessions       map[string]*TerminalSession
+	nextID         int
+	defaultTimeout time.Duration
 }
 
 func New(name string) *Plugin {
@@ -180,6 +177,22 @@ func New(name string) *Plugin {
 func (p *Plugin) Name() string { return p.name }
 
 func (p *Plugin) Start(s *sdk.PluginSDK) error {
+	s.Settings().RegisterDef(sdk.ConfigDef{
+		Key: "default_timeout", Type: "string", DisplayName: "默认终端超时",
+		Description: "终端自动关闭的默认时间，例如 5m, 10m, 30m, 1h（默认 5m）",
+		Default:     "5m",
+	})
+	if v, _ := s.Settings().Get("default_timeout"); v != nil {
+		if s, ok := v.(string); ok && s != "" {
+			if d, err := time.ParseDuration(s); err == nil {
+				p.defaultTimeout = d
+			}
+		}
+	}
+	if p.defaultTimeout <= 0 {
+		p.defaultTimeout = DefaultTimeout
+	}
+
 	s.RegisterTool("terminal_create", sdk.ToolDef{
 		Name:        "terminal_create",
 		Description: "创建一个新的交互式终端会话。返回终端 ID，后续通过此 ID 进行读写操作。适用于运行交互式程序如 vim、ssh、top、nano 等。终端默认 5 分钟后自动关闭，可通过 timeout 参数调整。",
@@ -339,7 +352,7 @@ func (p *Plugin) handleCreate(s *sdk.PluginSDK, args map[string]interface{}) (in
 	}
 
 	timeoutStr, _ := args["timeout"].(string)
-	timeout := DefaultTimeout
+	timeout := p.defaultTimeout
 	if timeoutStr != "" {
 		if d, err := time.ParseDuration(timeoutStr); err == nil {
 			timeout = d
@@ -793,6 +806,13 @@ func isTimeoutError(err error) bool {
 		return syscallErr == syscall.EAGAIN || syscallErr == syscall.EWOULDBLOCK || syscallErr == syscall.ETIMEDOUT
 	}
 	return strings.Contains(err.Error(), "timeout") || strings.Contains(err.Error(), "would block")
+}
+
+func init() {
+	plugin.RegisterFactory("agentcli", func(name string, config map[string]interface{}) (sdk.Plugin, error) {
+		return New(name), nil
+	})
+	plugin.RegisterPluginMeta("agentcli", "终端交互", "Agent CLI")
 }
 
 func sanitizePreview(s string) string {

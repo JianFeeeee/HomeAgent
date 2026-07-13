@@ -1,5 +1,7 @@
 homed
 waiter
+*.exe
+*.log
 *.test
 build/
 *.so
@@ -12,3 +14,4 @@ internal/meta/
 internal/plugins/openclaw/manager/
 internal/plugins/openclaw/pysimulator/
 *.hmap
+dev/

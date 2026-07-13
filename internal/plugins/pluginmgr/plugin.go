@@ -41,6 +41,7 @@ var (
 )
 
 func init() {
+	plugin.RegisterPluginMeta("pluginmgr", "插件管理", "Plugin Manager")
 	plugin.RegisterFactory("pluginmgr", func(name string, config map[string]interface{}) (sdk.Plugin, error) {
 		return New(name), nil
 	})
@@ -504,7 +505,7 @@ func validatePackage(data []byte) (*pluginPackage, error) {
 		return nil, fmt.Errorf("entry %q not found in package", pkg.Entry)
 	}
 
-	valid := map[string]bool{"plugin.so": true, "main.lua": true, "SKILL.md": true}
+	valid := map[string]bool{"plugin.so": true, "plugin.dll": true, "main.lua": true, "SKILL.md": true}
 	if !valid[pkg.Entry] {
 		return nil, fmt.Errorf("unsupported entry: %q", pkg.Entry)
 	}

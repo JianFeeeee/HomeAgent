@@ -11,6 +11,8 @@ const PackageExt = ".hmap"
 // PluginManifest 每个插件目录中的 plugin.json 元数据。
 type PluginManifest struct {
 	Name        string   `json:"name"`
+	NameZh      string   `json:"name_zh,omitempty"`
+	NameEn      string   `json:"name_en,omitempty"`
 	Version     string   `json:"version"`
 	Description string   `json:"description,omitempty"`
 	Author      string   `json:"author,omitempty"`

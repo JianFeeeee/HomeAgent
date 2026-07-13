@@ -27,6 +27,7 @@ var SkillsDir string
 var SimulatorDir string
 
 func init() {
+	plugin.RegisterPluginMeta("openclaw", "开放式交互", "OpenClaw")
 	plugin.RegisterFactory("openclaw", func(name string, config map[string]interface{}) (sdk.Plugin, error) {
 		dir := SkillsDir
 		if dir == "" {
@@ -68,6 +69,25 @@ func (p *Plugin) Name() string { return p.name }
 
 func (p *Plugin) Start(s *sdk.PluginSDK) error {
 	p.sdk = s
+
+	s.Settings().RegisterDef(sdk.ConfigDef{
+		Key: "skills_dir", Type: "string", DisplayName: "Skill 加载目录",
+		Description: "OpenClaw 技能加载目录路径（留空则使用默认路径）",
+	})
+	s.Settings().RegisterDef(sdk.ConfigDef{
+		Key: "simulator_dir", Type: "string", DisplayName: "模拟器工作目录",
+		Description: "OpenClaw 模拟器工作目录路径（留空则使用默认路径）",
+	})
+	if v, _ := s.Settings().Get("skills_dir"); v != nil {
+		if s, ok := v.(string); ok && s != "" {
+			p.skillsDir = s
+		}
+	}
+	if v, _ := s.Settings().Get("simulator_dir"); v != nil {
+		if s, ok := v.(string); ok && s != "" {
+			p.simulatorDir = s
+		}
+	}
 
 	// Launch OC plugin manager first (handles OC-format plugin installation and lifecycle)
 	os.MkdirAll(p.skillsDir, 0755)

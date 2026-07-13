@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
+	"strings"
 	"sync"
 
 	"gitcode.com/JianFeeeee/HomeAgent/internal/plugin"
@@ -20,6 +21,7 @@ type serverConfig struct {
 }
 
 func init() {
+	plugin.RegisterPluginMeta("mcp", "MCP 服务器", "MCP")
 	plugin.RegisterFactory("mcp", func(name string, config map[string]interface{}) (sdk.Plugin, error) {
 		return New(name), nil
 	})
@@ -39,15 +41,6 @@ func New(name string) *Plugin {
 func (p *Plugin) Name() string { return p.name }
 
 func (p *Plugin) Start(s *sdk.PluginSDK) error {
-	s.Settings().RegisterDef(sdk.ConfigDef{
-		Key:         "servers",
-		Default:     "",
-		Type:        "text",
-		DisplayName: "MCP 服务器配置",
-		Description: "MCP 服务器列表，JSON 数组格式，包含 name、command/url、args、env 等字段",
-		Category:    "mcp",
-	})
-
 	cfgs, err := p.loadConfig(s)
 	if err != nil {
 		return fmt.Errorf("load mcp config: %w", err)
@@ -89,7 +82,49 @@ func (p *Plugin) Start(s *sdk.PluginSDK) error {
 }
 
 func (p *Plugin) loadConfig(s *sdk.PluginSDK) ([]serverConfig, error) {
-	// 优先从 skill.json（config map）读取
+	// 优先从独立服务器配置键读取（servers.<name>.<field>）
+	keys, _ := s.Settings().List("servers.")
+	if len(keys) > 0 {
+		serverNames := make(map[string]bool)
+		for _, k := range keys {
+			parts := strings.SplitN(k, ".", 3)
+			if len(parts) >= 2 {
+				serverNames[parts[1]] = true
+			}
+		}
+		var cfgs []serverConfig
+		for name := range serverNames {
+			cfg := serverConfig{Name: name}
+			if v, _ := s.Settings().Get("servers." + name + ".command"); v != nil {
+				if s, ok := v.(string); ok {
+					cfg.Command = s
+				}
+			}
+			if v, _ := s.Settings().Get("servers." + name + ".url"); v != nil {
+				if s, ok := v.(string); ok {
+					cfg.URL = s
+				}
+			}
+			if v, _ := s.Settings().Get("servers." + name + ".args"); v != nil {
+				if s, ok := v.(string); ok && s != "" {
+					json.Unmarshal([]byte(s), &cfg.Args)
+				}
+			}
+			if v, _ := s.Settings().Get("servers." + name + ".env"); v != nil {
+				if s, ok := v.(string); ok && s != "" {
+					json.Unmarshal([]byte(s), &cfg.Env)
+				}
+			}
+			if cfg.Command != "" || cfg.URL != "" {
+				cfgs = append(cfgs, cfg)
+			}
+		}
+		if len(cfgs) > 0 {
+			return cfgs, nil
+		}
+	}
+
+	// 回退：从旧版 JSON blob 读取
 	raw, err := s.Settings().Get("servers")
 	if err == nil {
 		switch v := raw.(type) {
@@ -107,8 +142,6 @@ func (p *Plugin) loadConfig(s *sdk.PluginSDK) ([]serverConfig, error) {
 		}
 	}
 
-	// 备用：从 JSON 文件读取
-	// 没有配置时不报错，只返回空
 	return nil, nil
 }
 

@@ -609,6 +609,15 @@ func NewProviderManager() *ProviderManager {
 	}
 }
 
+func (m *ProviderManager) Reset() {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.providers = make(map[string]Provider)
+	m.order = nil
+	m.default_ = ""
+	m.status = make(map[string]*providerStatus)
+}
+
 func (m *ProviderManager) Register(name string, p Provider) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
