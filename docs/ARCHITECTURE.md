@@ -223,11 +223,13 @@ VM 内置 `json.encode` / `json.decode` / `log` / `http_get` / `http_post`。
 | 方式 | 注册机制 | 编译 | 用途 |
 |------|----------|------|------|
 | 内置插件 | `init()` → `RegisterFactory` | `internal/plugins/` 编译进内核 | webui/cli/timer/mcp 等 |
-| 外部 `.so` | `plugin.Open` 动态加载 | `-buildmode=plugin` | qq/files/web/memo 等 |
+| 外部 `.so`/`.dll` | `plugin.Open` 动态加载 | `-buildmode=plugin` | qq/files/web/memo 等 |
+| Lua 脚本插件 | 解析 `main.lua` 注册工具 | 无需编译，热加载 | luaplugintest/testlua 等 |
 | SKILL 插件 | 解析 `SKILL.md` | Markdown 定义 | OpenClaw 兼容 |
 
 内置插件注册：`internal/plugins/all.go` 空白导入 → 各插件 `init()` → `Registry.Load()` 扫描目录匹配工厂。
 外部插件加载：`internal/plugin/dynamic.go` → 复制到 SHA256 临时路径（绕过 `plugin.Open` 路径缓存）→ `Open` + `Lookup("NewPlugin")`。
+Lua 脚本插件加载：`internal/lua/` → 通过 Lua VM 解析 `main.lua`，调用 `start()` 注册工具。
 
 ### PluginSDK 三通道
 

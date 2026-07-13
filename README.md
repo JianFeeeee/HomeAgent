@@ -180,4 +180,4 @@ make test               # go test ./...
 make install            # 安装到系统
 ```
 
-依赖：Go 1.19+, CGo (go-sqlite3), Linux。
+依赖：Go 1.21+, CGo (go-sqlite3), Linux/Windows。
