@@ -439,7 +439,7 @@ import (
 4. handler 返回 `error` 时 LLM 会收到并可能重试
 5. 打断用 `InjectInterruptText`，普通投递用 `InjectText`
 6. 配置用 `Settings().Get/Set`，不要硬编码
-7. Go 插件与内核编译绑定，每次重新编译内核后需同步重新编译 Go 插件
+7. 外部 Go 插件独立编译，不依赖内核版本；内置插件才需随内核重新编译
 
 ---
 

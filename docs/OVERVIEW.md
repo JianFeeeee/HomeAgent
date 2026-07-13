@@ -47,7 +47,7 @@ HomeAgent 是一个持续运行的个人智能 Agent 框架。
 
 **插件系统** (`internal/plugin/`)：
 - 内置插件：Go `init()` 自注册，编译进内核
-- 外部插件：Go `-buildmode=plugin` 编译为 `.so`，通过 `plugin.Open` 动态加载
+- 外部插件：Go `-buildmode=plugin` 编译为 `.so`/`.dll`，通过 `plugin.Open` 动态加载；也支持 Lua 脚本插件
 - PluginSDK (`internal/sdk/`) 定义三通道：RegisterTool / RegisterStage / Subscribe
 - 阶段钩子 7 个：on_input → pre_action → post_action → before_toolcall → after_toolcall → before_output → after_output
 
@@ -68,5 +68,5 @@ HomeAgent 是一个持续运行的个人智能 Agent 框架。
 核心功能已可运行。插件系统和 SDK 已就绪，可独立开发外部插件。
 
 - 内置插件：webui / cli / timer / cmd / mcp / agentcli / healthcheck / pluginmgr / openclaw / files
-- 外部插件示例（[homeagent-sdk](https://gitcode.com/JianFeeeee/homeagent-sdk) 仓库 `example/`）：qq / files / web / memo / bili / editdoc / a2a / ocr
+- 外部插件示例（[homeagent-sdk](https://gitcode.com/JianFeeeee/homeagent-sdk) 仓库 `example/`，含 Go 和 Lua 两种类型）：qq / files / web / memo / bili / editdoc / a2a / ocr / sanitizer / luaplugintest / testlua
 - 打包分发：`.hmap` 插件包格式，通过 WebUI 安装
