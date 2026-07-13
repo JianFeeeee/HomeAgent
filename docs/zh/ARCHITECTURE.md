@@ -1,3 +1,5 @@
+[English](../en/ARCHITECTURE.md) | **中文**
+
 # HomeAgent 架构
 
 内核零 IO，一切外界交互来自插件。
@@ -342,3 +344,4 @@ internal/
 ├── supervisor/            — 守护进程管理
 ├── snapshot/              — 快照
 └── tokenizer/             — 中文分词 (jieba 包装)
+```

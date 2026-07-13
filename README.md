@@ -1,5 +1,7 @@
 # HomeAgent
 
+> **English**: [README_EN.md](./README_EN.md)
+
 首个提出**核心域与应用域分离**的 Agent 框架。内核零 IO，一切外界交互由插件承载——WebUI、QQ、命令行、文件操作、网络搜索、备忘，全部是插件，内核不碰任何 IO。
 
 配合**三层记忆架构**（Context → Document → Graph），单对话长期稳定运行，记忆不衰减。
@@ -166,10 +168,10 @@ internal/
 
 ## 文档
 
-- [项目概览](docs/OVERVIEW.md)
-- [技术架构](docs/ARCHITECTURE.md)
-- [插件开发指南](docs/PLUGIN_DEV.md)
-- [Lua Adapter](docs/ADAPTER.md)
+- [项目概览](docs/zh/OVERVIEW.md) | [English](docs/en/OVERVIEW.md)
+- [技术架构](docs/zh/ARCHITECTURE.md) | [English](docs/en/ARCHITECTURE.md)
+- [插件开发指南](docs/zh/PLUGIN_DEV.md) | [English](docs/en/PLUGIN_DEV.md)
+- [Lua Adapter](docs/zh/ADAPTER.md) | [English](docs/en/ADAPTER.md)
 - [知识库演示](knowledge/homeagent_architecture/content.md)
 
 ## 构建
