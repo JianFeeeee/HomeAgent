@@ -11,7 +11,7 @@ import (
 	"time"
 
 	"gitcode.com/JianFeeeee/HomeAgent/pkg/types"
-	_ "modernc.org/sqlite"
+	_ "github.com/mattn/go-sqlite3"
 )
 
 type ConfigDef struct {
@@ -37,7 +37,7 @@ func NewConfigRegistry(dbPath string) *ConfigRegistry {
 	if dbPath == "" {
 		dbPath = ":memory:"
 	}
-	db, err := sql.Open("sqlite", dbPath)
+	db, err := sql.Open("sqlite3", dbPath)
 	if err != nil {
 		panic(fmt.Sprintf("open config db: %v", err))
 	}

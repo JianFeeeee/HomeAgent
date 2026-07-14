@@ -6,7 +6,7 @@ import (
 	"sync"
 	"time"
 
-	_ "modernc.org/sqlite"
+	_ "github.com/mattn/go-sqlite3"
 )
 
 type Entity struct {
@@ -49,7 +49,7 @@ type GraphDB struct {
 }
 
 func NewGraphDB(dbPath string) (*GraphDB, error) {
-	db, err := sql.Open("sqlite", dbPath+"?_journal_mode=WAL&_foreign_keys=on")
+	db, err := sql.Open("sqlite3", dbPath+"?_journal_mode=WAL&_foreign_keys=on")
 	if err != nil {
 		return nil, fmt.Errorf("open graph db: %w", err)
 	}
