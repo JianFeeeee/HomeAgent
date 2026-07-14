@@ -950,7 +950,7 @@ func (h *Handler) handleChatEvents(w http.ResponseWriter, r *http.Request) {
 		}
 	}()
 
-	subTypes := []string{"agent_output", "reasoning", "agent_error"}
+	subTypes := []string{"agent_output", "reasoning", "agent_error", "tool_call"}
 	for _, t := range subTypes {
 		t2 := t
 		_ = h.eventBus.Subscribe(events.EventType(t2), func(evt *events.Event) {

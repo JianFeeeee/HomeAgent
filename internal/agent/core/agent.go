@@ -1522,6 +1522,9 @@ func (a *Agent) buildSystemPrompt(memContext string, userInput string) string {
 		prompt += "\n\n" + a.indexer.BuildToolPrompt()
 	}
 
+	// 动态工具目录
+	prompt += a.buildToolCatalog()
+
 	return prompt
 }
 
@@ -1547,6 +1550,41 @@ func cleanParams(params map[string]interface{}) map[string]interface{} {
 		}
 	}
 	return cleaned
+}
+
+func (a *Agent) buildToolCatalog() string {
+	defs := a.buildToolDefs()
+	if len(defs) == 0 {
+		return ""
+	}
+	var sb strings.Builder
+	sb.WriteString("\n\n【可用工具列表】")
+	seen := make(map[string]bool)
+	for _, d := range defs {
+		t, ok := d.(map[string]interface{})
+		if !ok {
+			continue
+		}
+		fn, ok := t["function"].(map[string]interface{})
+		if !ok {
+			continue
+		}
+		name, _ := fn["name"].(string)
+		if name == "" || seen[name] {
+			continue
+		}
+		seen[name] = true
+		desc, _ := fn["description"].(string)
+		sb.WriteString(fmt.Sprintf("\n- %s", name))
+		if desc != "" {
+			// only first 80 chars of description
+			if len(desc) > 80 {
+				desc = desc[:80] + "..."
+			}
+			sb.WriteString(": " + desc)
+		}
+	}
+	return sb.String()
 }
 
 func (a *Agent) buildToolDefs() []interface{} {

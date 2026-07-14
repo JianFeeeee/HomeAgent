@@ -42,7 +42,7 @@ import (
 
 func main() {
 	dataDir := flag.String("data", "", "data directory (default: auto-detect next to binary)")
-	httpAddr := flag.String("webui", ":8080", "webui listen address")
+	httpAddr := flag.String("webui", "", "webui listen address (default: webui.listen_addr from config)")
 	cliSocket := flag.String("socket", "", "cli unix socket path (default: <data>/cli.sock)")
 	flag.Parse()
 
@@ -395,7 +395,11 @@ func main() {
 	// 为内置插件注入内核依赖（各插件通过 init() 自注册工厂）
 	cli.DefaultSocket = *cliSocket
 	openclaw.SkillsDir = filepath.Join(cfg.Daemon.DataDir, "skills")
-	webui.Configure(*httpAddr,
+	webuiListenAddr := *httpAddr
+	if webuiListenAddr == "" {
+		webuiListenAddr = cfgReg.GetString("webui.listen_addr", ":8080")
+	}
+	webui.Configure(webuiListenAddr,
 		sup, memDB, skMgr, luaVM, cfg, iom, textMem, ks, trk, cfgReg, pluginReg, evBus, agent,
 		providerMgr, baseAPIKey,
 	)

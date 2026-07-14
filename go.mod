@@ -11,6 +11,8 @@ require (
 
 require gitcode.com/JianFeeeee/homeagent-sdk v0.0.0-20260708004841-e9bdcf9304b0 // direct
 
+replace gitcode.com/JianFeeeee/homeagent-sdk => ../homeagentsdk
+
 require (
 	github.com/dustin/go-humanize v1.0.1 // indirect
 	github.com/google/uuid v1.6.0 // indirect
