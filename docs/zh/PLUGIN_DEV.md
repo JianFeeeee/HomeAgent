@@ -300,6 +300,37 @@ s.LLM().ListSources() []SourceInfo
 s.LLM().SetSource(name string) error
 ```
 
+#### 事件订阅（内置插件）
+
+```go
+// 订阅系统事件，返回取消订阅函数
+unsub := s.Subscribe("tool_call", func(evt *events.Event) {
+    log.Printf("工具被调用: %v", evt.Payload)
+})
+defer unsub()
+
+// 发布事件
+s.Publish(&events.Event{
+    Type:    "custom_event",
+    Payload: map[string]interface{}{"key": "value"},
+})
+```
+
+#### IO 通道管理（内置插件）
+
+```go
+// 注册通道（绑定设备驱动）
+s.RegisterChannel("mydevice", deviceImpl)
+
+// 注销通道
+s.UnregisterChannel("mydevice")
+
+// 列出所有通道
+channels := s.ListChannels()
+```
+
+> **注意**：`Subscribe`、`Publish`、`RegisterChannel`、`UnregisterChannel`、`ListChannels`、`InjectInput`、`InjectInputSync`、`InjectInterrupt`、`InjectTextSync`、`InjectTextSyncNoMemory`、`OutputChan` 这些方法仅在内置插件中可用（`internal/sdk` 包），外部动态插件无法访问。外部插件请使用 `InjectText`、`InjectInterruptText`、`InjectTextNoMemory` 等公共 API。
+
 ---
 
 ## 三、Lua 插件开发详解
@@ -367,6 +398,8 @@ lua main.lua
 | `sdk.json.decode(str)` | JSON 解码 |
 | `sdk.http.get(url)` | HTTP GET 请求（`-- !impl`） |
 | `sdk.http.post(url, body, content_type)` | HTTP POST 请求（`-- !impl`） |
+
+> **注意**：Lua 插件的 `sdk.register_stage` 阶段回调目前仅传递 `raw_message`、`user_id`、`phase` 三个字段，功能受限。复杂的阶段处理逻辑建议使用 Go 插件。
 
 ---
 

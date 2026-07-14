@@ -168,8 +168,8 @@ func TestSeedDefaultsToConfig(t *testing.T) {
 	// Reconstruct config from DB
 	cfg2 := r.ToConfig()
 
-	if cfg2.Daemon.ListenAddr != ":8080" {
-		t.Fatalf("expected :8080, got %s", cfg2.Daemon.ListenAddr)
+	if v := r.GetString("webui.listen_addr", ""); v != ":8080" {
+		t.Fatalf("expected :8080, got %s", v)
 	}
 	if cfg2.LLM.Provider != "deepseek" {
 		t.Fatalf("expected deepseek, got %s", cfg2.LLM.Provider)

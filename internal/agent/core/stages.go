@@ -2,6 +2,7 @@ package core
 
 import (
 	"fmt"
+	"log"
 	"sync"
 
 	sdk "gitcode.com/JianFeeeee/HomeAgent/internal/sdk"
@@ -85,6 +86,7 @@ func inferToolPlugin(name string) string {
 //   - 只读操作先调用 ctx.RLock() / defer ctx.RUnlock()
 //   - 写操作（如设置 ctx.Response）先调用 ctx.Lock() / defer ctx.Unlock()
 // 如果任意 handler 设置了 Response，后续 handler 可通过 ctx.IsResponded() 判断后提前返回。
+// handler 返回的 error 会被收集到 ctx.Errors 中并记录日志，不会中断其他 handler 的执行。
 func (h *StageHost) RunStage(stage sdk.Stage, ctx *sdk.StageContext) {
 	h.mu.RLock()
 	handlers := h.stages[stage]
@@ -93,14 +95,29 @@ func (h *StageHost) RunStage(stage sdk.Stage, ctx *sdk.StageContext) {
 		return
 	}
 	var wg sync.WaitGroup
+	errCh := make(chan error, len(handlers))
 	for _, handler := range handlers {
 		wg.Add(1)
 		go func(fn sdk.StageHandler) {
 			defer wg.Done()
-			fn(ctx)
+			if err := fn(ctx); err != nil {
+				errCh <- err
+			}
 		}(handler)
 	}
 	wg.Wait()
+	close(errCh)
+
+	var errs []string
+	for err := range errCh {
+		errs = append(errs, err.Error())
+		log.Printf("[stage] %s handler error: %v", stage, err)
+	}
+	if len(errs) > 0 {
+		ctx.Lock()
+		ctx.Errors = append(ctx.Errors, errs...)
+		ctx.Unlock()
+	}
 }
 
 func (h *StageHost) ToolCount() int {
