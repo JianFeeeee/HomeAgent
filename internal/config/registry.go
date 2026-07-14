@@ -298,7 +298,7 @@ func (r *ConfigRegistry) seedDBValues(dataDir string) {
 
 	set := func(k, v string) { stmt.Exec(k, v) }
 
-	set("core.daemon.listen_addr", ":8080")
+	set("webui.listen_addr", ":8080")
 	set("core.daemon.data_dir", dataDir)
 	set("core.daemon.heartbeat_interval", "15s")
 	set("core.daemon.check_interval", "30s")
@@ -349,26 +349,11 @@ func (r *ConfigRegistry) seedDBValues(dataDir string) {
 	set("core.agent.distill_interval", "30m")
 	set("core.agent.workdir", "")
 	set("core.agent.system_prompt", `你是 HomeAgent，一个持续运行的个人管家。
-你的每次回复会自动发送到当前输出通道（默认=输入源），无需额外工具。
-如需切换回复通道，使用 output_set_channel。
-如需异步发送消息或通知，使用 output_send 指定通道和内容。
-使用 output_list_channels 查看可用通道及其能力。
+你的回复默认发送到用户的输入来源，无需额外工具。
+如需异步发送消息到其他通道，使用 output_send。
+使用 output_list_channels 查看可用通道。
 
-可用工具列表会由系统自动传入，按需使用即可。以下是你尤其需要关注的几类工具：
-- memory_* — 图记忆（长期记忆，记录和查询个人信息/事实）
-- knowledge_* — 知识库（查阅预设知识文档）
-- doc_* — 文档记忆（近期对话的存档，查询后自动清除）
-- person_* — 人物特质与社交关系网
-- llm_* — LLM 源管理（列出/切换模型提供商）
-- output_* — 输出通道管理（切换/发送消息）
-- timer_set — 设置定时提醒
-- plgreload — 热重载插件
-- spawn_child — 生成子 Agent 执行独立任务
-- describe_image — 描述用户上传的图片
-- transcribe_audio — 转写用户上传的音频
-- ocr_image — 识别图片中的文字
-
-当用户上传图片或音频时，系统会自动附着媒体内容。如果模型不支持直接处理多媒体，请使用上述工具。
+当用户上传图片或音频时，系统会自动附着媒体内容。如果模型不支持直接处理多媒体，请调用对应的媒体处理工具。
 
 回复你的真实想法，用自然语言与用户交流。`)
 
@@ -387,7 +372,7 @@ func (r *ConfigRegistry) seedDBValues(dataDir string) {
 func (r *ConfigRegistry) seedCoreDefs(dataDir string) {
 	reg := func(d ConfigDef) { r.defs[d.Key] = &d }
 
-	reg(ConfigDef{Key: "core.daemon.listen_addr", Default: ":8080", Type: "string", DisplayName: "监听地址", Description: "WebUI HTTP 监听地址", Category: "daemon"})
+	reg(ConfigDef{Key: "webui.listen_addr", Default: ":8080", Type: "string", DisplayName: "监听地址", Description: "WebUI HTTP 监听地址", Category: "webui"})
 	reg(ConfigDef{Key: "core.daemon.data_dir", Default: dataDir, Type: "string", DisplayName: "数据目录", Description: "数据存储根目录", Category: "daemon"})
 	reg(ConfigDef{Key: "core.daemon.heartbeat_interval", Default: "15s", Type: "duration", DisplayName: "心跳间隔", Description: "Agent 心跳检查间隔", Category: "daemon"})
 	reg(ConfigDef{Key: "core.daemon.check_interval", Default: "30s", Type: "duration", DisplayName: "检查间隔", Description: "网络状态检查间隔", Category: "daemon"})
@@ -568,7 +553,6 @@ func (r *ConfigRegistry) ToConfig() *types.Config {
 		return b
 	}
 
-	cfg.Daemon.ListenAddr = read("core.daemon.listen_addr", cfg.Daemon.ListenAddr)
 	cfg.Daemon.DataDir = read("core.daemon.data_dir", cfg.Daemon.DataDir)
 	cfg.Daemon.HeartbeatInterval = readDur("core.daemon.heartbeat_interval", cfg.Daemon.HeartbeatInterval)
 	cfg.Daemon.CheckInterval = readDur("core.daemon.check_interval", cfg.Daemon.CheckInterval)

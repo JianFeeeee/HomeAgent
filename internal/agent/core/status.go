@@ -68,32 +68,32 @@ func channelInfoFromIO(ch agentIO.ChannelInfo) ChannelInfo {
 }
 
 type MemoryStatus struct {
-	Available      bool   `json:"available"`
-	EntityCount    int    `json:"entity_count,omitempty"`
-	RelationCount  int    `json:"relation_count,omitempty"`
-	EntityTypes    int    `json:"entity_types,omitempty"`
+	Available      bool `json:"available"`
+	EntityCount    int  `json:"entity_count"`
+	RelationCount  int  `json:"relation_count"`
+	EntityTypes    int  `json:"entity_types"`
 }
 
 type KnowledgeStatus struct {
 	Available bool     `json:"available"`
-	ItemCount int      `json:"item_count,omitempty"`
+	ItemCount int      `json:"item_count"`
 	Items     []string `json:"items,omitempty"`
 }
 
 type DocumentStatus struct {
 	Available   bool `json:"available"`
-	DocCount    int  `json:"doc_count,omitempty"`
-	VectorCount int  `json:"vector_count,omitempty"`
+	DocCount    int  `json:"doc_count"`
+	VectorCount int  `json:"vector_count"`
 }
 
 type TextMemoryStatus struct {
 	Available bool `json:"available"`
-	FileCount int  `json:"file_count,omitempty"`
+	FileCount int  `json:"file_count"`
 }
 
 type SocialStatus struct {
 	Available   bool `json:"available"`
-	PersonCount int  `json:"person_count,omitempty"`
+	PersonCount int  `json:"person_count"`
 }
 
 type SkillsStatus struct {

@@ -5,6 +5,7 @@ import (
 	"context"
 	"fmt"
 	"os/exec"
+	"runtime"
 	"strings"
 	"sync"
 	"time"
@@ -12,6 +13,9 @@ import (
 	"gitcode.com/JianFeeeee/HomeAgent/internal/plugin"
 	sdk "gitcode.com/JianFeeeee/HomeAgent/internal/sdk"
 )
+
+// isWindows 缓存运行时检测结果
+var isWindows = runtime.GOOS == "windows"
 
 // shellUnquote 拆解命令字符串，处理单引号/双引号包裹的参数
 func shellUnquote(s string) []string {
@@ -152,7 +156,12 @@ func (p *Plugin) Start(s *sdk.PluginSDK) error {
 		ctx, cancel := context.WithTimeout(context.Background(), timeout)
 		defer cancel()
 
-		parts := shellUnquote(command)
+		// Windows 上预置 chcp 65001 确保控制台输出为 UTF-8，避免 GBK 乱码
+		execCmd := command
+		if isWindows {
+			execCmd = "chcp 65001>nul & " + command
+		}
+		parts := shellUnquote(execCmd)
 		if len(parts) == 0 {
 			return map[string]interface{}{"error": "command is required"}, nil
 		}

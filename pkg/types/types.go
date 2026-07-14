@@ -150,7 +150,6 @@ type Config struct {
 }
 
 type DaemonConfig struct {
-	ListenAddr        string        `json:"listen_addr"`
 	DataDir           string        `json:"data_dir"`
 	HeartbeatInterval time.Duration `json:"heartbeat_interval"`
 	CheckInterval     time.Duration `json:"check_interval"`

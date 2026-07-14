@@ -4,7 +4,6 @@ import (
 	"embed"
 	"encoding/json"
 	"fmt"
-	"io/fs"
 	"os"
 	"path/filepath"
 	"sync"
@@ -324,42 +323,24 @@ func (v *VM) GetAdapterHeaders(name string) map[string]string {
 }
 
 func (v *VM) writeBundledAdapters() error {
-	// Try multiple paths for compatibility
-	tryPaths := []string{"adapters", ".", "lua/adapters"}
-	var entries []fs.DirEntry
-	var err error
-	for _, p := range tryPaths {
-		entries, err = bundledAdapters.ReadDir(p)
-		if err == nil && len(entries) > 0 {
-			break
-		}
+	known := []string{
+		"openai", "anthropic", "deepseek", "gemini",
+		"github", "groq", "mistral", "ollama",
 	}
-	if err != nil || len(entries) == 0 {
-		return nil
-	}
-	for _, entry := range entries {
-		if entry.IsDir() {
-			continue
-		}
-		if filepath.Ext(entry.Name()) != ".lua" {
-			continue
-		}
-		dstPath := filepath.Join(v.adapterDir, entry.Name())
+	for _, name := range known {
+		srcPath := "adapters/" + name + ".lua"
+		dstPath := filepath.Join(v.adapterDir, name+".lua")
 		if _, err := os.Stat(dstPath); err == nil {
 			continue
 		}
-		data, err := bundledAdapters.ReadFile(filepath.Join("adapters", entry.Name()))
+		data, err := bundledAdapters.ReadFile(srcPath)
 		if err != nil {
-			// try alternative paths
-			data, err = bundledAdapters.ReadFile(entry.Name())
-			if err != nil {
-				continue
-			}
+			continue
 		}
 		if err := os.WriteFile(dstPath, data, 0644); err != nil {
-			return fmt.Errorf("write %s: %w", entry.Name(), err)
+			return fmt.Errorf("write %s: %w", name+".lua", err)
 		}
-		fmt.Printf("[lua] installed bundled adapter: %s\n", entry.Name())
+		fmt.Printf("[lua] installed bundled adapter: %s\n", name+".lua")
 	}
 	return nil
 }

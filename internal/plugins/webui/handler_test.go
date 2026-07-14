@@ -34,7 +34,7 @@ func newTestHandler(t *testing.T) (*Handler, *supervisor.Daemon) {
 	sup := supervisor.New(cfg)
 	sup.Start()
 
-	return NewHandler(sup, nil, nil, nil, cfg, nil, nil, nil, nil, nil, nil, events.NewBus(), nil), sup
+	return NewHandler(sup, nil, nil, nil, cfg, nil, nil, nil, nil, nil, nil, events.NewBus(), nil, nil, ""), sup
 }
 
 func TestAuthMiddleware(t *testing.T) {
@@ -194,7 +194,7 @@ func TestHandleKnowledgeSearch(t *testing.T) {
 	sup.Start()
 	defer sup.Shutdown()
 
-	h := NewHandler(sup, nil, nil, nil, cfg, nil, nil, ks, nil, nil, nil, events.NewBus(), nil)
+	h := NewHandler(sup, nil, nil, nil, cfg, nil, nil, ks, nil, nil, nil, events.NewBus(), nil, nil, "")
 
 	req := httptest.NewRequest(http.MethodGet, "/api/v1/knowledge?q=test", nil)
 	w := httptest.NewRecorder()
@@ -226,7 +226,7 @@ func TestHandleKnowledgeCreate(t *testing.T) {
 	sup.Start()
 	defer sup.Shutdown()
 
-	h := NewHandler(sup, nil, nil, nil, cfg, nil, nil, ks, nil, nil, nil, events.NewBus(), nil)
+	h := NewHandler(sup, nil, nil, nil, cfg, nil, nil, ks, nil, nil, nil, events.NewBus(), nil, nil, "")
 
 	body := `{"name":"new_doc","content":"fresh content"}`
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/knowledge", strings.NewReader(body))
@@ -291,7 +291,7 @@ func TestHandleTrackerStats(t *testing.T) {
 	sup.Start()
 	defer sup.Shutdown()
 
-	h := NewHandler(sup, nil, nil, nil, cfg, nil, nil, nil, tr, nil, nil, events.NewBus(), nil)
+	h := NewHandler(sup, nil, nil, nil, cfg, nil, nil, nil, tr, nil, nil, events.NewBus(), nil, nil, "")
 
 	req := httptest.NewRequest(http.MethodGet, "/api/v1/tracker", nil)
 	w := httptest.NewRecorder()
@@ -458,7 +458,7 @@ func TestSettingsAPIFlow(t *testing.T) {
 	cfgReg := internalConfig.NewConfigRegistry("")
 	cfgReg.Register("core.llm.model", "deepseek-v4-flash")
 	cfgReg.Register("core.llm.base_url", "https://api.deepseek.com")
-	cfgReg.Register("core.daemon.listen_addr", ":8080")
+	cfgReg.Register("webui.listen_addr", ":8080")
 	cfgReg.Register("plugin.qq.access_token", "secret123")
 
 	sup := supervisor.New(&types.Config{
@@ -471,7 +471,7 @@ func TestSettingsAPIFlow(t *testing.T) {
 	defer sup.Shutdown()
 
 	pluginReg := plugin.NewRegistry()
-	h := NewHandler(sup, nil, nil, nil, &types.Config{}, nil, nil, nil, nil, cfgReg, pluginReg, events.NewBus(), nil)
+	h := NewHandler(sup, nil, nil, nil, &types.Config{}, nil, nil, nil, nil, cfgReg, pluginReg, events.NewBus(), nil, nil, "")
 
 	t.Run("GET_settings_lists_keys_and_plugins", func(t *testing.T) {
 		req := httptest.NewRequest(http.MethodGet, "/api/v1/settings", nil)
@@ -505,7 +505,7 @@ func TestSettingsAPIFlow(t *testing.T) {
 	})
 
 	t.Run("GET_settings_with_prefix", func(t *testing.T) {
-		req := httptest.NewRequest(http.MethodGet, "/api/v1/settings?prefix=core.daemon", nil)
+		req := httptest.NewRequest(http.MethodGet, "/api/v1/settings?prefix=webui", nil)
 		w := httptest.NewRecorder()
 		h.handleSettings(w, req)
 
@@ -513,11 +513,11 @@ func TestSettingsAPIFlow(t *testing.T) {
 		json.NewDecoder(w.Body).Decode(&resp)
 		settings := resp["settings"].(map[string]interface{})
 
-		if _, ok := settings["core.daemon.listen_addr"]; !ok {
-			t.Fatal("expected core.daemon.listen_addr in filtered results")
+		if _, ok := settings["webui.listen_addr"]; !ok {
+			t.Fatal("expected webui.listen_addr in filtered results")
 		}
 		if _, ok := settings["core.llm.model"]; ok {
-			t.Fatal("core.llm.model should not be in core.daemon filtered results")
+			t.Fatal("core.llm.model should not be in webui filtered results")
 		}
 	})
 
@@ -578,7 +578,7 @@ func TestSettingsAPIFlow(t *testing.T) {
 	})
 
 	t.Run("settings_not_available_without_registry", func(t *testing.T) {
-		h2 := NewHandler(sup, nil, nil, nil, &types.Config{}, nil, nil, nil, nil, nil, nil, events.NewBus(), nil)
+		h2 := NewHandler(sup, nil, nil, nil, &types.Config{}, nil, nil, nil, nil, nil, nil, events.NewBus(), nil, nil, "")
 		req := httptest.NewRequest(http.MethodGet, "/api/v1/settings", nil)
 		w := httptest.NewRecorder()
 		h2.handleSettings(w, req)
@@ -604,7 +604,7 @@ func TestSettingsWithPluginRegistry(t *testing.T) {
 	defer sup.Shutdown()
 
 	pluginReg := plugin.NewRegistry()
-	h := NewHandler(sup, nil, nil, nil, &types.Config{}, nil, nil, nil, nil, cfgReg, pluginReg, events.NewBus(), nil)
+	h := NewHandler(sup, nil, nil, nil, &types.Config{}, nil, nil, nil, nil, cfgReg, pluginReg, events.NewBus(), nil, nil, "")
 
 	req := httptest.NewRequest(http.MethodGet, "/api/v1/settings", nil)
 	w := httptest.NewRecorder()
@@ -677,7 +677,7 @@ func TestHandleCompletionsEndToEnd(t *testing.T) {
 	sup.Start()
 	defer sup.Shutdown()
 
-	h := NewHandler(sup, nil, nil, nil, &types.Config{}, iom, nil, nil, nil, nil, nil, events.NewBus(), nil)
+	h := NewHandler(sup, nil, nil, nil, &types.Config{}, iom, nil, nil, nil, nil, nil, events.NewBus(), nil, nil, "")
 
 	t.Run("POST_chat_completions_returns_echo", func(t *testing.T) {
 		body := `{"model":"test","messages":[{"role":"user","content":"你好"}]}`
@@ -710,7 +710,7 @@ func TestHandleCompletionsEndToEnd(t *testing.T) {
 	})
 
 	t.Run("POST_chat_completions_no_iom_returns_503", func(t *testing.T) {
-		h2 := NewHandler(sup, nil, nil, nil, &types.Config{}, nil, nil, nil, nil, nil, nil, events.NewBus(), nil)
+		h2 := NewHandler(sup, nil, nil, nil, &types.Config{}, nil, nil, nil, nil, nil, nil, events.NewBus(), nil, nil, "")
 		body := `{"messages":[{"role":"user","content":"hi"}]}`
 		req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(body))
 		req.Header.Set("Content-Type", "application/json")

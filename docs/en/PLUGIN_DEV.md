@@ -299,6 +299,37 @@ s.LLM().ListSources() []SourceInfo
 s.LLM().SetSource(name string) error
 ```
 
+#### Event Subscription (built-in plugins)
+
+```go
+// Subscribe to system events, returns unsubscribe function
+unsub := s.Subscribe("tool_call", func(evt *events.Event) {
+    log.Printf("Tool was called: %v", evt.Payload)
+})
+defer unsub()
+
+// Publish event
+s.Publish(&events.Event{
+    Type:    "custom_event",
+    Payload: map[string]interface{}{"key": "value"},
+})
+```
+
+#### IO Channel Management (built-in plugins)
+
+```go
+// Register a channel (bind device driver)
+s.RegisterChannel("mydevice", deviceImpl)
+
+// Unregister a channel
+s.UnregisterChannel("mydevice")
+
+// List all channels
+channels := s.ListChannels()
+```
+
+> **Note**: `Subscribe`, `Publish`, `RegisterChannel`, `UnregisterChannel`, `ListChannels`, `InjectInput`, `InjectInputSync`, `InjectInterrupt`, `InjectTextSync`, `InjectTextSyncNoMemory`, `OutputChan` are only available in built-in plugins (`internal/sdk` package). External dynamic plugins should use the public APIs: `InjectText`, `InjectInterruptText`, `InjectTextNoMemory`.
+
 ---
 
 ## 3. Lua Plugin Development in Detail
@@ -366,6 +397,8 @@ When running inside the kernel, `sdk.*` global variables are injected by the Go 
 | `sdk.json.decode(str)` | JSON decode |
 | `sdk.http.get(url)` | HTTP GET request (`-- !impl`) |
 | `sdk.http.post(url, body, content_type)` | HTTP POST request (`-- !impl`) |
+
+> **Note**: Lua plugin's `sdk.register_stage` callback currently only receives `raw_message`, `user_id`, `phase` fields. The functionality is limited. For complex stage handling logic, use Go plugins.
 
 ---
 
