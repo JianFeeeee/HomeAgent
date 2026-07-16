@@ -60,6 +60,8 @@ type Registry struct {
 	instances []sdk.Plugin
 	factories map[string]NativeFactory
 
+	pluginAutoRestart map[string]bool
+
 	iom       *agentIO.IOManager
 	evBus     *events.Bus
 	memDB     *memory.GraphDB
@@ -77,8 +79,9 @@ type Registry struct {
 
 func NewRegistry() *Registry {
 	return &Registry{
-		plugins:   make(map[string]sdk.Plugin),
-		factories: make(map[string]NativeFactory),
+		plugins:           make(map[string]sdk.Plugin),
+		factories:         make(map[string]NativeFactory),
+		pluginAutoRestart: make(map[string]bool),
 	}
 }
 
@@ -102,6 +105,24 @@ func (r *Registry) RegisterNative(name string, factory NativeFactory) {
 	globalFactories.Store(name, factory)
 }
 
+type channelDevice struct {
+	name    string
+	desc    string
+	caps    agentIO.OutputCapability
+	handler sdk.ToolHandler
+}
+
+func (d *channelDevice) Name() string              { return d.name }
+func (d *channelDevice) Type() agentIO.DeviceType  { return agentIO.DeviceOutput }
+func (d *channelDevice) Description() string       { return d.desc }
+func (d *channelDevice) Start() error              { return nil }
+func (d *channelDevice) Stop() error               { return nil }
+func (d *channelDevice) OutputCapabilities() agentIO.OutputCapability { return d.caps }
+func (d *channelDevice) Tools() []agentIO.ToolDef  { return nil }
+func (d *channelDevice) Execute(tool string, args map[string]interface{}) (interface{}, error) {
+	return d.handler(args)
+}
+
 func (r *Registry) buildSDK(name string) *sdk.PluginSDK {
 	sett := sdk.NewSettings(name, r.cfgReg)
 
@@ -120,16 +141,32 @@ func (r *Registry) buildSDK(name string) *sdk.PluginSDK {
 		regAPI = func(name string) error { return nil }
 	}
 
-	return sdk.New(name,
-		r.iom, r.evBus,
-		sdk.NewGraphMemory(r.memDB),
-		sdk.NewTextMemory(r.textMem),
-		sdk.NewDocMemory(r.docStore),
-		sdk.NewKnowledge(r.ks),
-		sdk.NewLLM(r.mgr),
-		sett,
-		regTool, regStage, regAPI,
-	)
+	regOutput := func(chName string, caps int, desc string, handler sdk.ToolHandler) error {
+		if r.iom == nil {
+			return nil
+		}
+		return r.iom.RegisterDevice(&channelDevice{
+			name:    chName,
+			caps:    agentIO.OutputCapability(caps),
+			desc:    desc,
+			handler: handler,
+		})
+	}
+
+	return sdk.New(name, sdk.SDKConfig{
+		IOManager:  r.iom,
+		EventBus:   r.evBus,
+		Memory:     sdk.NewGraphMemory(r.memDB),
+		TextMemory: sdk.NewTextMemory(r.textMem),
+		DocMemory:  sdk.NewDocMemory(r.docStore),
+		Knowledge:  sdk.NewKnowledge(r.ks),
+		LLM:        sdk.NewLLM(r.mgr),
+		Settings:   sett,
+		RegTool:    regTool,
+		RegStage:   regStage,
+		RegAPI:     regAPI,
+		RegOutput:  regOutput,
+	})
 }
 
 func (r *Registry) Load(dir string) error {
@@ -201,6 +238,7 @@ func (r *Registry) Load(dir string) error {
 
 		r.mu.Lock()
 		r.plugins[name] = p
+		r.pluginAutoRestart[name] = plgSDK.AutoRestart()
 		r.instances = append(r.instances, p)
 		r.mu.Unlock()
 		log.Printf("[plugin] loaded: %s", name)
@@ -263,6 +301,7 @@ func (r *Registry) loadOne(plgDir, name string) bool {
 
 	r.mu.Lock()
 	r.plugins[name] = plg
+	r.pluginAutoRestart[name] = plgSDK.AutoRestart()
 	r.instances = append(r.instances, plg)
 	r.mu.Unlock()
 	log.Printf("[plugin] loaded: %s", name)
@@ -279,6 +318,7 @@ func (r *Registry) StopAll() {
 	}
 	r.plugins = make(map[string]sdk.Plugin)
 	r.instances = nil
+	r.pluginAutoRestart = make(map[string]bool)
 }
 
 func (r *Registry) Reload(dir string) (string, error) {
@@ -287,6 +327,32 @@ func (r *Registry) Reload(dir string) (string, error) {
 		return "", err
 	}
 	return fmt.Sprintf("loaded %d plugins", len(r.instances)), nil
+}
+
+func (r *Registry) ReloadOne(name string) error {
+	plgDir := filepath.Join(r.plgDir, name)
+
+	r.mu.Lock()
+	if p, ok := r.plugins[name]; ok {
+		if err := p.Stop(); err != nil {
+			log.Printf("[plugin] stop %s for reload: %v", name, err)
+		}
+		delete(r.plugins, name)
+		for i, inst := range r.instances {
+			if inst.Name() == name {
+				r.instances = append(r.instances[:i], r.instances[i+1:]...)
+				break
+			}
+		}
+	}
+	r.mu.Unlock()
+
+	ok := r.loadOne(plgDir, name)
+	if !ok {
+		return fmt.Errorf("reload plugin %s failed", name)
+	}
+	log.Printf("[plugin] reloaded: %s", name)
+	return nil
 }
 
 func (r *Registry) List() []string {
@@ -304,6 +370,16 @@ func (r *Registry) Get(name string) sdk.Plugin {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
 	return r.plugins[name]
+}
+
+func (r *Registry) AutoRestartEnabled(name string) bool {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	enabled, ok := r.pluginAutoRestart[name]
+	if !ok {
+		return true
+	}
+	return enabled
 }
 
 func (r *Registry) PluginMetas() map[string]PluginMeta {

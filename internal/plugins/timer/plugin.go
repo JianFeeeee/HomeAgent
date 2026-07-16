@@ -40,6 +40,7 @@ func New(name string) *Plugin {
 func (p *Plugin) Name() string { return p.name }
 
 func (p *Plugin) Start(s *sdk.PluginSDK) error {
+	s.SetAutoRestart(true)
 	p.maxDur = 24 * time.Hour
 	s.Settings().RegisterDef(sdk.ConfigDef{
 		Key: "max_duration", Type: "string", DisplayName: "最大定时时长",

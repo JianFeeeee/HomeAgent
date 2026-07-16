@@ -81,6 +81,7 @@ func New(name string) *Plugin {
 func (p *Plugin) Name() string { return p.name }
 
 func (p *Plugin) Start(s *sdk.PluginSDK) error {
+	s.SetAutoRestart(true)
 	s.Settings().RegisterDef(sdk.ConfigDef{
 		Key: "default_timeout", Type: "string", DisplayName: "默认命令超时",
 		Description: "命令执行的默认超时时间，例如 30s, 1m, 5m（默认 30s）",

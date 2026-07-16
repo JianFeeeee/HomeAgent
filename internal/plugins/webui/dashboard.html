@@ -4,9 +4,10 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>HomeAgent Dashboard</title>
-<script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
-<script src="https://cdn.jsdelivr.net/npm/three@0.128.0/examples/js/controls/OrbitControls.js"></script>
-<script src="https://cdnjs.cloudflare.com/ajax/libs/marked/4.3.0/marked.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js" onerror="window._THREE_FAILED=true"></script>
+<script src="https://cdn.jsdelivr.net/npm/three@0.128.0/examples/js/controls/OrbitControls.js" onerror="window._THREE_FAILED=true"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/marked/4.3.0/marked.min.js" onerror="console.warn('marked CDN failed')"></script>
+<script>setTimeout(function(){if(!window.THREE)window._THREE_FAILED=true},8000)</script>
 <style>
 :root {
   --bg-primary: #0f172a;
@@ -152,9 +153,9 @@ code { font-family:monospace; font-size:12px; color:var(--pre-color) }
 .empty-state { text-align:center; padding:40px 20px; color:var(--text-muted) }
 .empty-state p { font-size:14px; margin-bottom:8px }
 .empty-state .icon { font-size:36px; margin-bottom:12px; opacity:.5 }
-.chat-layout { display:flex; gap:16px; height:calc(100vh - 100px); min-height:60vh }
-.chat-main { flex:2; min-width:0; display:flex; flex-direction:column }
-.chat-main .card { flex:1; display:flex; flex-direction:column; margin-bottom:0 }
+.chat-layout { display:flex; gap:16px; height:calc(100vh - 100px); min-height:60vh; overflow:hidden }
+.chat-main { flex:2; min-width:0; min-height:0; display:flex; flex-direction:column }
+.chat-main .card { flex:1; display:flex; flex-direction:column; margin-bottom:0; min-height:0 }
 .chat-main .card h2 { flex-shrink:0 }
 .chat-messages { flex:1; overflow-y:auto; padding:12px; border:1px solid var(--border-color); border-radius:8px; background:var(--chat-bg); margin-bottom:0; display:flex; flex-direction:column; gap:4px; min-height:0 }
 .msg { display:flex; gap:8px; margin-bottom:2px; align-items:flex-start; max-width:85% }
@@ -229,6 +230,20 @@ code { font-family:monospace; font-size:12px; color:var(--pre-color) }
 #sm-container-chat { height:260px; background:var(--bg-input); border-radius:6px; border:1px solid var(--border-color); overflow:hidden; position:relative }
 #sm-container-chat canvas { display:block }
 
+.toggle-row { margin-top:8px; display:flex; align-items:center; gap:12px }
+.toggle-row .label-text { color:#8888aa; font-size:12px }
+.toggle-switch { position:relative; width:36px; height:20px; cursor:pointer; flex-shrink:0 }
+.toggle-track { position:absolute; inset:0; background:rgba(60,60,80,0.8); border-radius:10px; transition:all 0.3s; border:1px solid rgba(100,100,255,0.2) }
+.toggle-track.on { background:rgba(68,136,255,0.5); border-color:#4488ff }
+.toggle-knob { position:absolute; width:16px; height:16px; left:2px; top:2px; background:#6666aa; border-radius:50%; transition:all 0.3s }
+.toggle-knob.on { left:18px; background:#4488ff }
+.toggle-btn { display:flex; align-items:center; gap:4px; padding:2px 8px; border-radius:4px; border:1px solid rgba(100,100,255,0.15); background:transparent; color:#8888aa; font-size:12px; font-family:inherit; cursor:pointer; transition:all 0.2s }
+.toggle-btn:hover { background:rgba(68,136,255,0.15); color:#fff }
+.toggle-btn.on { background:rgba(68,136,255,0.3); color:#4488ff; border-color:#4488ff }
+.label-text { color:#8888aa; font-size:12px }
+.loading-spinner { width:32px; height:32px; border:3px solid rgba(68,136,255,0.15); border-top:3px solid #4488ff; border-radius:50%; animation:spin 0.8s linear infinite }
+@keyframes spin { to { transform:rotate(360deg) } }
+
 .sidebar-subnav { display:flex; gap:0; border-bottom:1px solid var(--border-color); margin-bottom:10px }
 .sidebar-subnav span { padding:6px 12px; font-size:12px; cursor:pointer; color:var(--text-muted); border-bottom:2px solid transparent; transition:all .15s }
 .sidebar-subnav span:hover { color:var(--text-primary) }
@@ -298,6 +313,7 @@ let state = {
   selectedSection: 'core',
   messages: [],
   chatLoading: false,
+  chatStage: '',
   healthResult: null,
   starmapInit: false,
   starmapLoading: false,
@@ -412,7 +428,7 @@ function switchTab(n) {
 
 // ===== Tab Render Dispatch =====
 async function renderAll() {
-  try { var s = await api('/status'); state.status = s } catch(e) {}
+  try { var s = await api('/status'); state.status = s; state.startedAt = s.startedAt ? new Date(s.startedAt).getTime() : null } catch(e) {}
   try { state.kernel = await api('/kernel') } catch(e) {}
   try {
     var s = await api('/settings');
@@ -434,6 +450,30 @@ async function renderAll() {
   applyI18n();
 }
 
+function fmtUptime(ms) {
+  var s = Math.floor(ms / 1000);
+  if (s < 60) return s + 's';
+  var m = Math.floor(s / 60); s = s % 60;
+  if (m < 60) return m + 'm ' + s + 's';
+  var h = Math.floor(m / 60); m = m % 60;
+  return h + 'h ' + m + 'm ' + s + 's';
+}
+
+var uptimeTick = null;
+function startUptimeTicker() {
+  if (uptimeTick) clearInterval(uptimeTick);
+  uptimeTick = setInterval(function() {
+    var el = document.querySelector('#uptime-val');
+    if (el && state.startedAt) {
+      var now = Date.now();
+      el.textContent = fmtUptime(now - state.startedAt);
+    } else if (!state.startedAt) {
+      var el2 = document.querySelector('#uptime-val');
+      if (el2) el2.textContent = '-';
+    }
+  }, 1000);
+}
+
 // ===== Overview =====
 function statCard(l, v) {
   return '<div class="card stat-card"><div class="stat-value">' + v + '</div><div class="stat-label">' + l + '</div></div>';
@@ -444,7 +484,7 @@ function renderOverview() {
   var k = state.kernel;
   var html = '<div class="grid-4">'
     + statCard(__('运行状态','Status'), s.status || 'unknown', 'running')
-    + statCard(__('运行时间','Uptime'), s.uptime || '-', 'uptime')
+    + statCard(__('运行时间','Uptime'), '<span id="uptime-val">' + (state.startedAt ? fmtUptime(Date.now() - state.startedAt) : '-') + '</span>', 'uptime')
     + statCard(__('插件','Plugins'), (k?.plugins || []).length || 0, 'plugin')
     + statCard(__('版本','Version'), s.version || '0.1.0', 'version')
     + '</div>';
@@ -471,59 +511,15 @@ function renderOverview() {
 }
 
 // ===== Chat =====
-function renderChat() {
+var _chatLayoutBuilt = false;
+
+function buildChatLayout() {
   var cont = document.getElementById('tab-chat');
-  var msgs = state.messages;
-  var k = state.kernel;
+  var k = state.kernel || {};
   var html = '<div class="chat-layout"><div class="chat-main">';
-  html += '<div class="card"><h2>' + __('对话','Chat') + '</h2><div class="chat-messages" id="chat-msgs">';
-  if (msgs.length === 0) {
+  html += '<div class="card"><h2>' + __('对话','Chat') + ' <span id="chat-stage" class="badge" style="font-size:10px;font-weight:400;display:' + (state.chatLoading ? 'inline' : 'none') + '">' + escHtml(state.chatStage || '') + '</span></h2><div class="chat-messages" id="chat-msgs">';
+  if (state.messages.length === 0) {
     html += '<div class="empty-state" style="flex:1;display:flex;align-items:center;justify-content:center"><p>' + __('开始对话以测试 Agent 回复','Start a conversation to test Agent replies') + '</p></div>';
-  } else {
-    msgs.forEach(function(m, i) {
-      var role = m.role || 'user';
-      var c = m.content || '';
-      // Format content based on role
-      if (role === 'assistant') {
-        if (typeof marked !== 'undefined') { c = marked.parse(c) } else { c = '<pre>' + escHtml(c) + '</pre>' }
-      } else if (role === 'system') {
-        c = escHtml(c);
-      } else {
-        c = escHtml(c);
-      }
-      // Reasoning section
-      var rc = '';
-      if (m.reasoning_content) {
-        var rcBody = (typeof marked !== 'undefined' ? marked.parse(m.reasoning_content) : escHtml(m.reasoning_content));
-        rc = '<div class="reasoning">'
-          + '<div class="reasoning-title" onclick="var n=this.nextElementSibling;n.style.display=n.style.display===\'none\'?\'block\':\'none\';this.textContent=this.textContent===\'' + __('收起思考','Collapse') + '\'?\'' + __('展开思考','Expand') + '\':\'' + __('收起思考','Collapse') + '\'">' + __('收起思考','Collapse') + '</div>'
-          + '<div class="reasoning-body" style="display:none">' + rcBody + '</div></div>';
-      }
-      // Tool calls section
-      var tcs = '';
-      if (m.tool_calls && m.tool_calls.length > 0) {
-        m.tool_calls.forEach(function(tc) {
-          var argsStr = typeof tc.args === 'object' ? JSON.stringify(tc.args, null, 1) : (tc.args || '');
-          var resultStr = tc.result ? (typeof tc.result === 'object' ? JSON.stringify(tc.result, null, 1).substring(0, 200) : String(tc.result).substring(0, 200)) : '';
-          var statusIcon = tc.status === 'denied' ? '⛔' : '🔧';
-          tcs += '<div class="tool-call">'
-            + '<div><span class="tc-name">' + statusIcon + ' ' + escHtml(tc.tool || tc.name || '') + '</span></div>'
-            + (argsStr && argsStr !== '{}' ? '<div class="tc-args">' + escHtml(argsStr) + '</div>' : '')
-            + (resultStr ? '<div class="tc-result">→ ' + escHtml(resultStr) + '</div>' : '')
-            + '</div>';
-        });
-      }
-      // Build bubble content
-      var body = rc + tcs + '<div class="text">' + c + '</div>';
-      if (role === 'system') {
-        html += '<div class="msg msg-system"><div class="msg-bubble">' + body + '</div></div>';
-      } else {
-        html += '<div class="msg msg-' + role + '">'
-          + '<div class="msg-avatar">' + (role === 'user' ? 'U' : 'A') + '</div>'
-          + '<div class="msg-content"><div class="msg-bubble">' + body + '</div></div>'
-          + '</div>';
-      }
-    });
   }
   html += '</div>'
     + '<div class="chat-input-row">'
@@ -532,7 +528,7 @@ function renderChat() {
     + '</div></div>';
   html += '</div><div class="chat-sidebar">'
     + '<div class="card" style="padding:12px"><h2 style="font-size:13px;margin-bottom:8px">' + __('星图','Star Map') + '</h2>'
-    + '<div id="sm-container-chat" style="height:160px"><p style="color:var(--text-muted);padding:12px;text-align:center;font-size:11px">' + __('加载中..','Loading..') + '</p></div></div>'
+    + '<div id="sm-container-chat" style="height:160px;display:flex;align-items:center;justify-content:center"><div class="loading-spinner"></div></div></div>'
     + '<div class="card" style="padding:12px"><h2 style="font-size:13px;margin-bottom:8px">' + __('终端','Terminal') + ' <span id="term-count-badge" class="badge badge-blue">0</span></h2>'
     + '<div id="term-list" style="max-height:160px;overflow-y:auto;font-size:11px"></div></div>'
     + '<div class="card" style="padding:12px"><h2 style="font-size:13px;margin-bottom:8px">' + __('命令历史','Command History') + ' <span id="cmd-count-badge" class="badge badge-blue">0</span></h2>'
@@ -569,24 +565,86 @@ function renderChat() {
     + '<button class="btn btn-primary btn-sm" onclick="createKnowledgeChat()">' + __('创建','Create') + '</button>'
     + '</div></div></div></div></div>';
   cont.innerHTML = html;
-  var el = document.getElementById('chat-msgs');
-  if (el) el.scrollTop = el.scrollHeight;
-  renderChatStarmap();
-  renderTerminals();
-  renderCmdHistory();
+  _chatLayoutBuilt = true;
 }
 
-function rerenderChat() { renderChat(); renderChatStarmap() }
+function renderChat() {
+  if (!_chatLayoutBuilt) { buildChatLayout(); renderChatStarmap(); renderTerminals(); renderCmdHistory() }
+  var msgsEl = document.getElementById('chat-msgs');
+  if (!msgsEl) return;
+  var msgs = state.messages;
+  var html = '';
+  if (msgs.length === 0) {
+    html = '<div class="empty-state" style="flex:1;display:flex;align-items:center;justify-content:center"><p>' + __('开始对话以测试 Agent 回复','Start a conversation to test Agent replies') + '</p></div>';
+  } else {
+    msgs.forEach(function(m, i) {
+      var role = m.role || 'user';
+      var c = m.content || '';
+      if (role === 'assistant') {
+        if (typeof marked !== 'undefined') { c = marked.parse(c) } else { c = '<pre>' + escHtml(c) + '</pre>' }
+      } else if (role === 'system') {
+        c = escHtml(c);
+      } else {
+        c = escHtml(c);
+      }
+      var rc = '';
+      if (m.reasoning_content) {
+        var rcBody = (typeof marked !== 'undefined' ? marked.parse(m.reasoning_content) : escHtml(m.reasoning_content));
+        rc = '<div class="reasoning">'
+          + '<div class="reasoning-title" onclick="var n=this.nextElementSibling;n.style.display=n.style.display===\'none\'?\'block\':\'none\';this.textContent=this.textContent===\'' + __('收起思考','Collapse') + '\'?\'' + __('展开思考','Expand') + '\':\'' + __('收起思考','Collapse') + '\'">' + __('收起思考','Collapse') + '</div>'
+          + '<div class="reasoning-body" style="display:none">' + rcBody + '</div></div>';
+      }
+      var tcs = '';
+      if (m.tool_calls && m.tool_calls.length > 0) {
+        m.tool_calls.forEach(function(tc) {
+          var argsStr = typeof tc.args === 'object' ? JSON.stringify(tc.args, null, 1) : (tc.args || '');
+          var resultStr = tc.result ? (typeof tc.result === 'object' ? JSON.stringify(tc.result, null, 1).substring(0, 200) : String(tc.result).substring(0, 200)) : '';
+          var statusIcon = tc.status === 'denied' ? '⛔' : '🔧';
+          tcs += '<div class="tool-call">'
+            + '<div><span class="tc-name">' + statusIcon + ' ' + escHtml(tc.tool || tc.name || '') + '</span></div>'
+            + (argsStr && argsStr !== '{}' ? '<div class="tc-args">' + escHtml(argsStr) + '</div>' : '')
+            + (resultStr ? '<div class="tc-result">→ ' + escHtml(resultStr) + '</div>' : '')
+            + '</div>';
+        });
+      }
+      var body = rc + tcs + '<div class="text">' + c + '</div>';
+      if (role === 'system') {
+        html += '<div class="msg msg-system"><div class="msg-bubble">' + body + '</div></div>';
+      } else {
+        html += '<div class="msg msg-' + role + '">'
+          + '<div class="msg-avatar">' + (role === 'user' ? 'U' : 'A') + '</div>'
+          + '<div class="msg-content"><div class="msg-bubble">' + body + '</div></div>'
+          + '</div>';
+      }
+    });
+  }
+  msgsEl.innerHTML = html;
+  msgsEl.scrollTop = msgsEl.scrollHeight;
+  updateChatBadge();
+}
+
+function updateChatBadge() {
+  var badge = document.getElementById('chat-stage');
+  if (!badge) return;
+  badge.textContent = state.chatStage || '';
+  badge.style.display = state.chatLoading ? 'inline' : 'none';
+}
+
+function rerenderChat() { renderChat(); renderChatStarmap(); renderTerminals(); renderCmdHistory() }
 
 function renderChatStarmap() {
   var cont = document.getElementById('sm-container-chat');
   if (!cont) return;
+  if (window._THREE_FAILED || (!window.THREE && window._THREE_FAILED !== undefined)) {
+    cont.innerHTML = '<p style="color:var(--text-muted);padding:20px;text-align:center;font-size:11px">' + __('3D 星图不可用（CDN 加载失败）','Star map unavailable (CDN load failed)') + '</p>';
+    state.starmapInit = true;
+    state.starmapLoading = false;
+    return;
+  }
   if (!window.THREE) {
-    if (!state.starmapLoading) {
-      cont.innerHTML = '<p style="color:var(--text-muted);padding:20px;text-align:center;font-size:12px">'
-        + __('Three.js 未加载','Three.js not loaded') + '</p>';
-      state.starmapInit = true;
-    }
+    cont.innerHTML = '<div style="display:flex;align-items:center;justify-content:center;height:100%;padding:20px"><div class="loading-spinner"></div></div>';
+    state.starmapInit = false;
+    state.starmapLoading = false;
     return;
   }
   if (cont.querySelector('canvas')) {
@@ -600,6 +658,10 @@ function renderChatStarmap() {
       if (rect.width > 0) starmapRen.setSize(rect.width, Math.max(rect.height, 250));
       cont.appendChild(starmapRen.domElement);
       starmapRen.domElement.style.display = 'block';
+    } else {
+      // starmapRen was destroyed (e.g. re-render cycle), restart
+      state.starmapInit = false;
+      state.starmapLoading = false;
     }
     return;
   }
@@ -635,8 +697,7 @@ async function loadChatStarmapData() {
 }
 
 function getStarmapBg() {
-  var isLight = document.documentElement.getAttribute('data-theme') === 'light';
-  return isLight ? 0xf0f4f8 : 0x0a0a1a;
+  return 0x0a0a1a;
 }
 
 function initChatStarmap() {
@@ -651,15 +712,14 @@ function initChatStarmap() {
     starmapRen.domElement.style.display = 'block';
     return;
   }
-  var bg = getStarmapBg();
   starmapScene = new THREE.Scene();
-  starmapScene.fog = new THREE.FogExp2(bg, 0.02);
+  starmapScene.fog = new THREE.FogExp2(0x0a0a1a, 0.015);
   starmapCam = new THREE.PerspectiveCamera(60, w / h, 0.1, 2000);
   starmapCam.position.set(0, 20, 40);
   starmapRen = new THREE.WebGLRenderer({ antialias: true, alpha: true });
   starmapRen.setSize(w, h);
   starmapRen.setPixelRatio(Math.min(window.devicePixelRatio, 2));
-  starmapRen.setClearColor(bg, 1);
+  starmapRen.setClearColor(0x0a0a1a, 1);
   cont.innerHTML = '';
   cont.appendChild(starmapRen.domElement);
   starmapCtrl = new THREE.OrbitControls(starmapCam, starmapRen.domElement);
@@ -673,6 +733,7 @@ function initChatStarmap() {
   dl.position.set(50, 100, 50);
   starmapScene.add(dl);
   createStarField();
+  createNebula();
   buildChatStarmapGraph();
   starmapRen.domElement.addEventListener('mousemove', onStarmapMove);
   starmapRen.domElement.addEventListener('click', onStarmapClick);
@@ -687,111 +748,154 @@ function buildChatStarmapGraph() {
   starmapNodeMeshes = [];
   starmapEdgeLines = [];
   if (starmapNodes.length === 0) return;
-  var nMap = {};
-  starmapNodes.forEach(function(n) { nMap[n.id] = n });
-  var sorted = [...starmapNodes].sort(function(a, b) {
+  // Calculate node degrees for leaf node detection
+  var nodeDegs = {};
+  starmapNodes.forEach(function(n) { nodeDegs[n.id] = 0 });
+  starmapEdges.forEach(function(e) {
+    nodeDegs[e.source_id] = (nodeDegs[e.source_id] || 0) + 1;
+    nodeDegs[e.target_id] = (nodeDegs[e.target_id] || 0) + 1;
+  });
+  var nodeMap = {};
+  starmapNodes.forEach(function(n) { nodeMap[n.id] = n });
+  var sorted = starmapNodes.slice().sort(function(a, b) {
     return (b.mention_count || 0) - (a.mention_count || 0);
   });
   var mc = sorted.map(function(n) { return n.mention_count || 0 });
   var maxMc = Math.max(...mc, 1), minMc = Math.min(...mc, 0), rng = maxMc - minMc || 1;
+  // Layout positions
   var pos = {};
-  var baseR = 10, maxR = 50;
+  var baseR = 15, maxR = 80;
+  var total = sorted.length;
   var acc = 0;
   sorted.forEach(function(n, i) {
     var m = n.mention_count || 0, mn = rng > 0 ? (m - minMc) / rng : 0;
-    var rad = baseR + mn * (maxR - baseR);
-    var baseStep = (Math.PI * 2) / sorted.length;
-    var step = baseStep + mn * baseStep * 2;
-    var angle = acc + step / 2;
-    acc += step;
+    var radius = baseR + mn * (maxR - baseR);
+    var baseStep = (Math.PI * 2) / total;
+    var extra = mn * baseStep * 2;
+    var angle = acc + extra / 2;
+    acc += baseStep + extra;
     pos[n.id] = {
-      x: rad * Math.cos(angle),
-      y: (Math.random() - 0.5) * (5 + mn * 15),
-      z: rad * Math.sin(angle),
-      mn: n,
-      rad: rad
+      x: radius * Math.cos(angle),
+      y: (Math.random() - 0.5) * (10 + mn * 20),
+      z: radius * Math.sin(angle),
+      mn: mn,
+      rad: radius
     };
   });
+  // Leaf nodes (degree 1) reposition near parent
+  sorted.forEach(function(n) {
+    var deg = nodeDegs[n.id] || 0;
+    if (deg !== 1) return;
+    var edge = starmapEdges.find(function(e) { return e.source_id === n.id || e.target_id === n.id });
+    if (!edge) return;
+    var parentId = edge.source_id === n.id ? edge.target_id : edge.source_id;
+    if (!pos[parentId]) return;
+    var pp = pos[parentId];
+    var m = n.mention_count || 0, mn = rng > 0 ? (m - minMc) / rng : 0;
+    var off = 6 + mn * 8 + Math.random() * 4;
+    var a2 = Math.random() * Math.PI * 2;
+    pos[n.id] = {
+      x: pp.x + off * Math.cos(a2),
+      y: pp.y + (Math.random() - 0.5) * (4 + mn * 6),
+      z: pp.z + off * Math.sin(a2),
+      mn: mn,
+      rad: off
+    };
+  });
+  // Force-directed simulation
   for (var it = 0; it < 50; it++) {
-    Object.keys(pos).forEach(function(i) {
-      Object.keys(pos).forEach(function(j) {
-        if (i >= j) return;
-        var a = pos[i], b = pos[j];
+    var ids = Object.keys(pos);
+    // Repulsion
+    for (var i = 0; i < ids.length; i++) {
+      for (var j = i + 1; j < ids.length; j++) {
+        var a = pos[ids[i]], b = pos[ids[j]];
         var dx = a.x - b.x, dy = a.y - b.y, dz = a.z - b.z, d = Math.sqrt(dx*dx + dy*dy + dz*dz) + 0.1;
-        var f = (0.5 + (a.mn + b.mn) * 0.5);
-        if (d < 20) {
-          var force = (0.08 * f) / Math.max(d, 0.5);
+        var rf = 0.5 + (a.mn + b.mn) * 0.5;
+        if (d < 25) {
+          var force = (0.06 * rf) / Math.max(d, 0.5);
           a.x += dx / d * force; a.y += dy / d * force; a.z += dz / d * force;
           b.x -= dx / d * force; b.y -= dy / d * force; b.z -= dz / d * force;
         }
-      });
-    });
+      }
+    }
+    // Attraction along edges
     starmapEdges.forEach(function(e) {
       var a = pos[e.source_id], b = pos[e.target_id];
       if (!a || !b) return;
       var dx = b.x - a.x, dy = b.y - a.y, dz = b.z - a.z, d = Math.sqrt(dx*dx + dy*dy + dz*dz) + 0.1;
-      if (d > 15) {
-        var f = 0.05 * Math.max(0.3, 1 - (a.mn + b.mn) * 0.3);
-        a.x += dx / d * f; a.y += dy / d * f; a.z += dz / d * f;
-        b.x -= dx / d * f; b.y -= dy / d * f; b.z -= dz / d * f;
+      var af = Math.max(0.3, 1.0 - (a.mn + b.mn) * 0.3);
+      if (d > 20) {
+        var force = 0.04 * af;
+        a.x += dx / d * force; a.y += dy / d * force; a.z += dz / d * force;
+        b.x -= dx / d * force; b.y -= dy / d * force; b.z -= dz / d * force;
       }
     });
-    Object.keys(pos).forEach(function(i) {
-      var p = pos[i];
-      var d = Math.sqrt(p.x * p.x + p.y * p.y + p.z * p.z);
+    // Centering constraint
+    ids.forEach(function(id) {
+      var p = pos[id];
+      var dist = Math.sqrt(p.x * p.x + p.y * p.y + p.z * p.z);
       var maxA = maxR * 1.5;
-      if (d > maxA) {
-        var s = maxA / d;
-        p.x *= s; p.y *= s; p.z *= s;
-      }
+      if (dist > maxA) { var s = maxA / dist; p.x *= s; p.y *= s; p.z *= s }
     });
   }
+  // Create nodes
   starmapNodes.forEach(function(n) {
     var p = pos[n.id];
     if (!p) return;
     var mn = n.mention_count || 0, mnr = rng > 0 ? (mn - minMc) / rng : 0;
-    var rad = 0.4 + mnr * 1.5;
+    var rad = 0.5 + mnr * 2.0;
     var col = smTypeColors[n.type] || 0xcccccc;
     var ei = 0.3 + mnr * 0.7;
     var g = new THREE.SphereGeometry(rad, 16, 12);
-    var mat = new THREE.MeshPhongMaterial({ color: col, emissive: col, emissiveIntensity: ei });
+    var mat = new THREE.MeshPhongMaterial({ color: col, emissive: col, emissiveIntensity: ei, shininess: 30 });
     var mesh = new THREE.Mesh(g, mat);
     mesh.position.set(p.x, p.y, p.z);
     mesh.userData.nodeData = n;
     mesh.userData.nodeId = n.id;
-    starmapScene.add(mesh);
-    starmapNodeMeshes.push(mesh);
-    // label sprite
+    mesh.userData.baseEmissive = ei;
+    // Glow sphere
+    var gr = rad * 1.2 + mnr * 0.5;
+    var gg = new THREE.SphereGeometry(gr, 16, 12);
+    var gm = new THREE.MeshBasicMaterial({ color: col, transparent: true, opacity: 0.12 + mnr * 0.08, side: THREE.BackSide, blending: THREE.AdditiveBlending });
+    var gs = new THREE.Mesh(gg, gm);
+    mesh.add(gs);
+    mesh.userData.glowSphere = gs;
+    // Label sprite
     var canvas = document.createElement('canvas');
     canvas.width = 256;
     canvas.height = 64;
     var ctx = canvas.getContext('2d');
-    ctx.fillStyle = 'rgba(0,0,0,0)';
-    ctx.fillRect(0, 0, 256, 64);
-    ctx.font = 'Bold 28px Arial';
+    ctx.clearRect(0, 0, 256, 64);
+    ctx.font = 'Bold 24px Courier New';
     ctx.textAlign = 'center';
     ctx.textBaseline = 'middle';
-    ctx.fillStyle = 'rgba(255,255,255,0.85)';
-    ctx.fillText(n.name || n.id, 128, 34);
+    ctx.shadowColor = '#aaccff';
+    ctx.shadowBlur = 8;
+    ctx.fillStyle = '#ffffff';
+    ctx.fillText((n.name || n.id).substring(0, 12), 128, 32);
     var tex = new THREE.CanvasTexture(canvas);
-    var spMat = new THREE.SpriteMaterial({ map: tex, transparent: true, depthTest: false });
+    tex.needsUpdate = true;
+    var spMat = new THREE.SpriteMaterial({ map: tex, transparent: true, opacity: 0.9, depthTest: false, depthWrite: false, blending: THREE.AdditiveBlending });
     var sprite = new THREE.Sprite(spMat);
-    sprite.position.set(p.x, p.y + rad + 1.5, p.z);
-    sprite.scale.set(6, 1.5, 1);
-    starmapScene.add(sprite);
-    starmapNodeMeshes.push(sprite);
+    sprite.scale.set(8, 2, 1);
+    sprite.position.y = rad + 2;
+    mesh.add(sprite);
+    starmapScene.add(mesh);
+    starmapNodeMeshes.push(mesh);
   });
+  // Create edges
   starmapEdges.forEach(function(e) {
     var a = pos[e.source_id], b = pos[e.target_id];
     if (!a || !b) return;
+    var col = smEdgeColors[e.relation_type] || smEdgeColors[e.type] || 0x444466;
     var pts = [
       new THREE.Vector3(a.x, a.y, a.z),
       new THREE.Vector3(b.x, b.y, b.z)
     ];
-    var col = smEdgeColors[e.type] || 0x888888;
     var geo = new THREE.BufferGeometry().setFromPoints(pts);
-    var mat = new THREE.LineBasicMaterial({ color: col, transparent: true, opacity: 0.35 });
+    var mat = new THREE.LineBasicMaterial({ color: col, transparent: true, opacity: 0.4 });
     var line = new THREE.Line(geo, mat);
+    line.userData = { edgeId: e.id, edgeData: e };
     starmapScene.add(line);
     starmapEdgeLines.push(line);
   });
@@ -806,12 +910,17 @@ async function sendChat() {
   inp.value = '';
   rerenderChat();
   state.chatLoading = true;
+  state.chatStage = __('等待AI回复...','Waiting for AI...');
   btn.disabled = true;
-  btn.textContent = '...';
+  btn.textContent = '';
+  rerenderChat();
   try {
     var r = await api('/chat', { method: 'POST', body: JSON.stringify({ message: text }) });
+    state.chatStage = '';
     var last = state.messages[state.messages.length - 1];
+    console.log('[sendChat] POST returned, last msg:', last ? {role:last.role, _streaming:last._streaming, _final:last._final, tool_calls:last.tool_calls?.length, content_len:last.content?.length} : null);
     if (last && last.role === 'assistant' && last._streaming) {
+      console.log('[sendChat] updating existing streaming msg, tool_calls before:', last.tool_calls?.length);
       last.content = r.response || __('(无响应)','(no response)');
       last.reasoning_content = r.reasoning_content || '';
       last._final = true;
@@ -832,8 +941,10 @@ async function sendChat() {
     toast(__('请求失败: ','Request failed: ') + e.message, true);
   } finally {
     state.chatLoading = false;
+    state.chatStage = '';
     btn.disabled = false;
-    btn.textContent = '发送';
+    btn.textContent = __('发送','Send');
+    rerenderChat();
   }
 }
 
@@ -996,23 +1107,26 @@ function renderCmdHistory() {
 }
 
 function connectSSE() {
-  if (state.eventSource) state.eventSource.close();
+  if (state.eventSource) { console.log('[SSE] closing old connection'); state.eventSource.close() }
   var es;
-  try { es = new EventSource('/api/v1/chat/events'); state.eventSource = es } catch(ex) {}
-  if (!es) return;
+  try { es = new EventSource('/api/v1/chat/events', { withCredentials: true }); state.eventSource = es } catch(ex) { console.error('[SSE] create failed', ex); return }
+  if (!es) { console.error('[SSE] es is null'); return }
+  console.log('[SSE] connected');
   es.addEventListener('agent_output', function(e) {
     try {
       var ev = JSON.parse(e.data);
       var p = ev.payload || {};
+      console.log('[SSE] agent_output received', p.content ? p.content.substring(0,50) : '(empty)');
       if (!p.content) return;
+      state.chatStage = __('AI 回复中...','AI replying...');
       if (state.messages.length > 0 && state.messages[state.messages.length - 1].role === 'assistant' && !state.messages[state.messages.length - 1]._final) {
         state.messages[state.messages.length - 1].content += p.content;
-        renderChat(); renderChatStarmap();
+        rerenderChat();
         return;
       }
       state.messages.push({ role: 'assistant', content: p.content, _streaming: true });
-      renderChat(); renderChatStarmap();
-    } catch(ex) {}
+      rerenderChat();
+    } catch(ex) { console.error('[SSE] agent_output error', ex) }
   });
   es.addEventListener('reasoning', function(e) {
     try {
@@ -1021,8 +1135,9 @@ function connectSSE() {
       if (p.content && state.messages.length > 0) {
         var last = state.messages[state.messages.length - 1];
         if (last.role === 'assistant') {
+          state.chatStage = __('AI 思考中...','AI thinking...');
           last.reasoning_content = (last.reasoning_content || '') + p.content;
-          renderChat(); renderChatStarmap();
+          rerenderChat();
         }
       }
     } catch(ex) {}
@@ -1031,23 +1146,62 @@ function connectSSE() {
     try {
       var ev = JSON.parse(e.data);
       var p = ev.payload || {};
+      console.log('[SSE] tool_call', p);
       if (!p.tool) return;
       var last = state.messages.length > 0 ? state.messages[state.messages.length - 1] : null;
-      if (last && last.role === 'assistant') {
-        if (!last.tool_calls) last.tool_calls = [];
-        last.tool_calls.push({
-          tool: p.tool,
-          name: p.tool,
-          args: p.args || {},
-          result: p.result || '',
-          status: p.status || 'ok',
-          plugin: p.plugin || ''
-        });
-        renderChat(); renderChatStarmap();
+      if (!last || last.role !== 'assistant') {
+        state.messages.push({ role: 'assistant', content: '', tool_calls: [], _streaming: true });
+        last = state.messages[state.messages.length - 1];
       }
+      if (!last.tool_calls) last.tool_calls = [];
+      last.tool_calls.push({
+        tool: p.tool,
+        name: p.tool,
+        args: p.args || {},
+        result: p.result || '',
+        status: p.status || 'ok',
+        plugin: p.plugin || ''
+      });
+      state.chatStage = __('工具调用: ','Tool: ') + (p.tool || '');
+      rerenderChat();
+    } catch(ex) { console.error('[SSE] tool_call error', ex) }
+  });
+  es.addEventListener('tool_result', function(e) {
+    try {
+      var ev = JSON.parse(e.data);
+      var p = ev.payload || {};
+      state.chatStage = __('工具结果已返回','Tool result received');
+      var badge = document.getElementById('chat-stage');
+      if (badge) badge.textContent = state.chatStage;
     } catch(ex) {}
   });
-  es.onerror = function() { setTimeout(connectSSE, 5000) };
+  es.addEventListener('stage', function(e) {
+    try {
+      var ev = JSON.parse(e.data);
+      var p = ev.payload || {};
+      var phase = p.phase || '';
+      var tool = p.tool || '';
+      console.log('[SSE] stage event', phase, tool);
+      if (phase === 'pre_action') {
+        state.chatStage = __('AI 思考中...','AI thinking...');
+      } else if (phase === 'before_toolcall') {
+        state.chatStage = __('工具调用: ','Tool: ') + (tool || '');
+      } else if (phase === 'before_output') {
+        state.chatStage = __('生成回复中...','Generating response...');
+      }
+      var badge = document.getElementById('chat-stage');
+      if (badge) { badge.textContent = state.chatStage || ''; badge.style.display = state.chatLoading ? 'inline' : 'none' }
+    } catch(ex) { console.error('[SSE] stage error', ex) }
+  });
+  es.onopen = function() { console.log('[SSE] connection opened') };
+  es.onerror = function(e) { console.error('[SSE] error', e); setTimeout(connectSSE, 5000) };
+  // Periodically refresh sidebar data
+  if (state._sidebarRefresh) clearInterval(state._sidebarRefresh);
+  state._sidebarRefresh = setInterval(async function() {
+    try { var td = await api('/terminals'); if (td && td.terminals) state.terminals = td.terminals } catch(e) {}
+    try { var ch = await api('/cmd/history'); if (ch && ch.history) state.cmdHistory = ch.history } catch(e) {}
+    renderTerminals(); renderCmdHistory();
+  }, 5000);
 }
 
 // ===== Plugins =====
@@ -1329,10 +1483,11 @@ function flyStarmapTo(nodeId, dur) {
 }
 
 function onStarmapResize() {
-  var cont = document.getElementById('starmap-container');
-  if (!cont || !starmapRen || !starmapCam) return;
+  if (!starmapRen || !starmapCam) return;
+  var cont = starmapRen.domElement.parentElement;
+  if (!cont) return;
   var rect = cont.getBoundingClientRect();
-  var w = rect.width || 800, h = Math.max(rect.height || 500, 100);
+  var w = rect.width || 800, h = Math.max(rect.height || 250, 100);
   if (w > 0 && h > 0) { starmapCam.aspect = w / h; starmapCam.updateProjectionMatrix(); starmapRen.setSize(w, h) }
 }
 
@@ -1343,8 +1498,10 @@ function toggleStarmapAuto() {
 }
 
 function resetStarmapCamera() {
+  if (!starmapCam || !starmapCtrl || !starmapNodeMeshes) return;
   var maxD = 0;
   starmapNodeMeshes.forEach(function(m) { var d = m.position.length(); if (d > maxD) maxD = d });
+  if (maxD < 1) maxD = 30;
   var td = Math.min(Math.max(maxD + 20, 30), 150);
   var sp = starmapCam.position.clone(), ep = new THREE.Vector3(td * 0.9, td * 0.6, td * 0.9);
   var st = starmapCtrl.target.clone(), t0 = Date.now();
@@ -1361,6 +1518,31 @@ function starmapAnimate() {
   if (starmapCtrl) starmapCtrl.update();
   if (starmapStarField) starmapStarField.rotation.y += 0.0001;
   if (starmapRen && starmapScene && starmapCam) starmapRen.render(starmapScene, starmapCam);
+}
+
+function createNebula() {
+  var nc = 500;
+  var p = new Float32Array(nc * 3), cl = new Float32Array(nc * 3);
+  for (var i = 0; i < nc; i++) {
+    var i3 = i * 3;
+    p[i3] = (Math.random() - 0.5) * 800;
+    p[i3+1] = (Math.random() - 0.5) * 800;
+    p[i3+2] = (Math.random() - 0.5) * 800;
+    var ch = Math.random();
+    if (ch < 0.33) {
+      cl[i3]=0.5+Math.random()*0.3; cl[i3+1]=0.2+Math.random()*0.2; cl[i3+2]=0.7+Math.random()*0.3;
+    } else if (ch < 0.66) {
+      cl[i3]=0.2+Math.random()*0.2; cl[i3+1]=0.3+Math.random()*0.3; cl[i3+2]=0.8+Math.random()*0.2;
+    } else {
+      cl[i3]=0.7+Math.random()*0.3; cl[i3+1]=0.2+Math.random()*0.2; cl[i3+2]=0.5+Math.random()*0.3;
+    }
+  }
+  var g = new THREE.BufferGeometry();
+  g.setAttribute('position', new THREE.BufferAttribute(p, 3));
+  g.setAttribute('color', new THREE.BufferAttribute(cl, 3));
+  var m = new THREE.PointsMaterial({ size: 8, vertexColors: true, transparent: true, opacity: 0.15, sizeAttenuation: true, blending: THREE.AdditiveBlending });
+  var np = new THREE.Points(g, m);
+  starmapScene.add(np);
 }
 
 // ===== Settings =====
@@ -1664,7 +1846,7 @@ async function logout() {
 
 renderConfigDisabled();
 connectSSE();
-(async function() { await loadChatHistory(); renderAll() })();
+(async function() { await loadChatHistory(); renderAll(); startUptimeTicker() })();
 setInterval(renderAll, 15000);
 </script>
 </body>

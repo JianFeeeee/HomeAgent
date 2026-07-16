@@ -42,7 +42,7 @@ func setupPlugin() (*Plugin, *toolCapture, error) {
 	Configure(sh, iom, pr, nil, nil, nil, nil, nil)
 	p := New("healthcheck")
 	tc := newToolCapture()
-	sdk := sdk.New("healthcheck", nil, nil, nil, nil, nil, nil, nil, nil, tc.RegisterTool, tc.RegisterStage, tc.RegisterAPI)
+	sdk := sdk.New("healthcheck", sdk.SDKConfig{RegTool: tc.RegisterTool, RegStage: tc.RegisterStage, RegAPI: tc.RegisterAPI})
 	if err := p.Start(sdk); err != nil {
 		return nil, nil, err
 	}
@@ -192,7 +192,7 @@ func TestHealthcheckWithMemory(t *testing.T) {
 	Configure(sh, iom, pr, memDB, nil, nil, nil, nil)
 	p := New("healthcheck")
 	tc := newToolCapture()
-	sdk := sdk.New("healthcheck", nil, nil, nil, nil, nil, nil, nil, nil, tc.RegisterTool, tc.RegisterStage, tc.RegisterAPI)
+	sdk := sdk.New("healthcheck", sdk.SDKConfig{RegTool: tc.RegisterTool, RegStage: tc.RegisterStage, RegAPI: tc.RegisterAPI})
 	if err := p.Start(sdk); err != nil {
 		t.Fatal(err)
 	}
@@ -235,7 +235,7 @@ func TestHealthcheckWithKnowledge(t *testing.T) {
 	Configure(sh, iom, pr, nil, ks, nil, nil, nil)
 	p := New("healthcheck")
 	tc := newToolCapture()
-	sdk := sdk.New("healthcheck", nil, nil, nil, nil, nil, nil, nil, nil, tc.RegisterTool, tc.RegisterStage, tc.RegisterAPI)
+	sdk := sdk.New("healthcheck", sdk.SDKConfig{RegTool: tc.RegisterTool, RegStage: tc.RegisterStage, RegAPI: tc.RegisterAPI})
 	if err := p.Start(sdk); err != nil {
 		t.Fatal(err)
 	}
@@ -289,7 +289,7 @@ func TestHealthcheckWithDocStore(t *testing.T) {
 	Configure(sh, iom, pr, nil, nil, ds, nil, nil)
 	p := New("healthcheck")
 	tc := newToolCapture()
-	sdk := sdk.New("healthcheck", nil, nil, nil, nil, nil, nil, nil, nil, tc.RegisterTool, tc.RegisterStage, tc.RegisterAPI)
+	sdk := sdk.New("healthcheck", sdk.SDKConfig{RegTool: tc.RegisterTool, RegStage: tc.RegisterStage, RegAPI: tc.RegisterAPI})
 	if err := p.Start(sdk); err != nil {
 		t.Fatal(err)
 	}

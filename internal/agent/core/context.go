@@ -10,6 +10,7 @@ import (
 	"sync"
 	"time"
 
+	"gitcode.com/JianFeeeee/HomeAgent/internal/memory"
 	"gitcode.com/JianFeeeee/HomeAgent/internal/memory/document"
 	"gitcode.com/JianFeeeee/HomeAgent/internal/memory/vector"
 )
@@ -28,18 +29,18 @@ const contextFlushInterval = 5 * time.Second
 
 // RelevanceContext — 基于相关性的上下文管理，非固定阈值
 type RelevanceContext struct {
-	mu        sync.Mutex
-	events    []*ContextEvent
-	veczer    *vector.TFIDFVectorizer
-	trained   bool
-	savePath  string // 持久化路径，空则不持久化
+	mu       sync.Mutex
+	events   []*ContextEvent
+	embedder *memory.LocalWordEmbedder
+	trained  bool
+	savePath string
 	saveTimer *time.Timer
-	dirty     bool
+	dirty    bool
 }
 
 func NewRelevanceContext(savePath string) *RelevanceContext {
 	rc := &RelevanceContext{
-		veczer:   vector.NewTFIDFVectorizer(2),
+		embedder: memory.NewLocalWordEmbedder(),
 		savePath: savePath,
 	}
 	if savePath != "" {
@@ -59,7 +60,7 @@ func (c *RelevanceContext) load() {
 		return
 	}
 	for _, evt := range events {
-		evt.Vector = c.veczer.Vectorize(evt.Input + " " + evt.Response)
+		evt.Vector = c.embedder.Vectorize(evt.Input + " " + evt.Response)
 	}
 	c.events = events
 }
@@ -83,10 +84,9 @@ func (c *RelevanceContext) Append(evt ContextEvent) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
-	evt.Vector = c.veczer.Vectorize(evt.Input + " " + evt.Response)
+	evt.Vector = c.embedder.Vectorize(evt.Input + " " + evt.Response)
 	c.events = append(c.events, &evt)
 
-	// 增量训练向量化器
 	c.trained = false
 
 	c.save()
@@ -146,10 +146,9 @@ func (c *RelevanceContext) Prune(currentInput string, topK int, docStore *docume
 		return 0
 	}
 
-	// 确保向量化器已训练
 	c.ensureTrained()
 
-	queryVec := c.veczer.Vectorize(currentInput)
+	queryVec := c.embedder.Vectorize(currentInput)
 
 	// 计算每条候选上下文与当前输入的相关性
 	type scored struct {
@@ -263,10 +262,9 @@ func (c *RelevanceContext) ensureTrained() {
 		for i, evt := range c.events {
 			texts[i] = evt.Input + " " + evt.Response
 		}
-		c.veczer.Train(texts)
-		// 重算所有事件向量，与新的向量化器特征空间对齐
+		c.embedder.Train(texts)
 		for _, evt := range c.events {
-			evt.Vector = c.veczer.Vectorize(evt.Input + " " + evt.Response)
+			evt.Vector = c.embedder.Vectorize(evt.Input + " " + evt.Response)
 		}
 		c.trained = true
 	}

@@ -11,6 +11,7 @@ import (
 	"sync"
 	"time"
 
+	"gitcode.com/JianFeeeee/HomeAgent/internal/memory"
 	"gitcode.com/JianFeeeee/HomeAgent/internal/memory/vector"
 )
 
@@ -388,7 +389,7 @@ func summarizeEntries(entries []ContextEntry) string {
 	var topics []string
 	for _, e := range entries {
 		sources[e.Source]++
-		words := extractKeywords(e.Content)
+		words := memory.ExtractKeywords(e.Content)
 		topics = append(topics, words...)
 	}
 
@@ -420,7 +421,7 @@ func summarizeEntries(entries []ContextEntry) string {
 func extractTags(entries []ContextEntry) []string {
 	tagSet := make(map[string]bool)
 	for _, e := range entries {
-		for _, kw := range extractKeywords(e.Content) {
+		for _, kw := range memory.ExtractKeywords(e.Content) {
 			tagSet[kw] = true
 		}
 	}
@@ -439,7 +440,7 @@ func extractEntities(entries []ContextEntry) []string {
 	var entities []string
 	seen := make(map[string]bool)
 	for _, e := range entries {
-		for _, kw := range extractKeywords(e.Content) {
+		for _, kw := range memory.ExtractKeywords(e.Content) {
 			if len(kw) >= 2 && !seen[kw] {
 				seen[kw] = true
 				entities = append(entities, kw)
@@ -450,32 +451,6 @@ func extractEntities(entries []ContextEntry) []string {
 		entities = entities[:20]
 	}
 	return entities
-}
-
-func extractKeywords(text string) []string {
-	stopWords := map[string]bool{
-		"的": true, "了": true, "是": true, "在": true, "有": true,
-		"和": true, "就": true, "不": true, "人": true, "都": true,
-		"一": true, "一个": true, "上": true, "也": true, "很": true,
-		"到": true, "说": true, "要": true, "去": true, "你": true,
-		"会": true, "着": true, "没有": true, "看": true, "好": true,
-		"自己": true, "这": true, "他": true, "她": true, "它": true,
-		"什么": true, "怎么": true, "为什么": true, "如何": true,
-		"我": true, "我们": true, "你们": true, "他们": true, "这个": true,
-		"那个": true, "可以": true, "吗": true, "吧": true, "啊": true,
-	}
-
-	var keywords []string
-	runes := []rune(text)
-
-	// bi-gram
-	for i := 0; i < len(runes)-1; i++ {
-		word := string(runes[i : i+2])
-		if !stopWords[word] && len(strings.TrimSpace(word)) == len(word) {
-			keywords = append(keywords, word)
-		}
-	}
-	return keywords
 }
 
 func truncate(s string, max int) string {

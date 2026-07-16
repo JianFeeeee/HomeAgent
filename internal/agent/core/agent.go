@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"runtime/debug"
 	"sort"
 	"strings"
 	"sync"
@@ -75,8 +76,9 @@ type Agent struct {
 	currentOutputChannel string
 
 	// 阶段管道：插件消息流编辑
-	stageHost *StageHost
-	eventBus  *events.Bus
+	stageHost    *StageHost
+	eventBus     *events.Bus
+	pluginHealth *pluginHealthTracker
 
 	// 自循环输入通道：核心内部任务（记忆消歧、系统维护），不经过 IO 层
 	selfInputCh chan string
@@ -190,6 +192,7 @@ func New(cfg AgentConfig) *Agent {
 		selfInputCh:      make(chan string, 64),
 		childResults:     make(map[string]string),
 		interceptCh:      make(chan *agentIO.InputEvent, 64),
+		pluginHealth:      newPluginHealthTracker(),
 		thinkingEnabled:  cfg.ThinkingEnabled,
 		inputCfg:          cfg.InputProcessing,
 		noMergeMarkers:    make(map[string]int),
@@ -227,6 +230,13 @@ func (a *Agent) injectSelf(task string) {
 }
 
 func (a *Agent) eventLoop() {
+	defer func() {
+		if r := recover(); r != nil {
+			log.Printf("[agent] eventLoop panic recovered: %v\n%s", r, debug.Stack())
+			time.Sleep(time.Second)
+			go a.eventLoop()
+		}
+	}()
 	for {
 		select {
 		case evt := <-a.io.InputChan():
@@ -244,6 +254,13 @@ func (a *Agent) eventLoop() {
 //   a) 通过 cancelLLM + interceptCh 直接打断进行中的 LLM 请求
 //   b) 通过 a.io.InjectInput() → InputChan → eventLoop（代理空闲时触发新处理循环）
 func (a *Agent) interceptLoop() {
+	defer func() {
+		if r := recover(); r != nil {
+			log.Printf("[agent] interceptLoop panic recovered: %v\n%s", r, debug.Stack())
+			time.Sleep(time.Second)
+			go a.interceptLoop()
+		}
+	}()
 	for {
 		select {
 		case evt := <-a.io.InputInterruptChan():
@@ -619,7 +636,6 @@ func (a *Agent) process(input string, stageCtx *sdk.StageContext) (response stri
 		a.personality != nil && a.personality.Content != "",
 		a.docStoreSize())
 
-	// === Stage: pre_action — 上下文就绪，即将调用 LLM ===
 	if a.runStage(sdk.StagePreAction, stageCtx) {
 		return *stageCtx.Response, toolsUsed, nil
 	}
@@ -745,6 +761,23 @@ func (a *Agent) process(input string, stageCtx *sdk.StageContext) (response stri
 		resp.Content = stageCtx.LLMText
 		resp.ToolCalls = convertBackToolCalls(stageCtx.ToolCalls)
 
+		// === 发布完整 LLM 响应（含 tool_calls）供插件消费（如 webui 展示） ===
+		chainPayload := map[string]interface{}{
+			"content":          resp.Content,
+			"reasoning":        resp.ReasoningContent,
+			"tool_calls":       resp.ToolCalls,
+			"phase":            "intermediate",
+			"turn":             turn,
+		}
+		if resp.TokenUsage.Total > 0 {
+			chainPayload["usage"] = map[string]int{
+				"prompt":     resp.TokenUsage.Prompt,
+				"completion": resp.TokenUsage.Completion,
+				"total":      resp.TokenUsage.Total,
+			}
+		}
+		a.publishEvent(events.EventAgentLLMChain, chainPayload)
+
 		if len(resp.ToolCalls) == 0 {
 			return resp.Content, toolsUsed, nil
 		}
@@ -754,7 +787,6 @@ func (a *Agent) process(input string, stageCtx *sdk.StageContext) (response stri
 			pluginName := a.resolveToolPlugin(tc.Name)
 			log.Printf("[agent] executing tool: %s (plugin=%s, id=%s)", tc.Name, pluginName, tc.ID)
 
-			// === Stage: before_toolcall — 插件可拒绝/改参 ===
 			sdkTC := sdk.ToolCall{ID: tc.ID, Name: tc.Name, Plugin: pluginName, Arguments: tc.Arguments}
 			stageCtx.ToolCalls = []sdk.ToolCall{sdkTC}
 			stageCtx.ToolResults = nil
@@ -772,6 +804,14 @@ func (a *Agent) process(input string, stageCtx *sdk.StageContext) (response stri
 				continue
 			}
 			tc.Arguments = stageCtx.ToolCalls[0].Arguments
+
+			if pluginName != "" && !a.pluginHealth.isHealthy(pluginName) {
+				result := fmt.Sprintf("插件 %s 处于崩溃状态，已跳过执行，等待自动恢复重载", pluginName)
+				log.Printf("[agent] skip tool %s: plugin %s unhealthy", tc.Name, pluginName)
+				msgs = append(msgs, agentAPI.Message{Role: "assistant", Content: resp.Content, ToolCalls: []agentAPI.ToolCall{tc}})
+				msgs = append(msgs, agentAPI.Message{Role: "tool", ToolCallID: tc.ID, Content: result})
+				continue
+			}
 
 			result := a.executeToolCall(tc)
 			log.Printf("[agent] tool %s result: %s", tc.Name, truncateStr(result, 100))
@@ -972,7 +1012,21 @@ func (a *Agent) buildMessages(sysPrompt, input string) []agentAPI.Message {
 	return msgs
 }
 
-func (a *Agent) executeToolCall(tc agentAPI.ToolCall) string {
+func (a *Agent) executeToolCall(tc agentAPI.ToolCall) (ret string) {
+	defer func() {
+		if r := recover(); r != nil {
+			stack := debug.Stack()
+			log.Printf("[agent] tool %s panic: %v\n%s", tc.Name, r, stack)
+
+			if pluginName := a.resolveToolPlugin(tc.Name); pluginName != "" {
+				if a.pluginHealth.recordCrash(pluginName) {
+					log.Printf("[agent] plugin %s exceeded crash threshold, scheduling reload", pluginName)
+				}
+			}
+
+			ret = fmt.Sprintf("工具 %s 执行崩溃: %v", tc.Name, r)
+		}
+	}()
 	switch {
 	case strings.HasPrefix(tc.Name, "memory_"):
 		return a.executeMemoryTool(tc)
@@ -982,7 +1036,9 @@ func (a *Agent) executeToolCall(tc agentAPI.ToolCall) string {
 		return a.executeKnowledgeTool(tc)
 	case strings.HasPrefix(tc.Name, "doc_"):
 		return a.executeDocTool(tc)
-	case tc.Name == "output_send":
+	case strings.HasPrefix(tc.Name, "output_send__") && strings.HasSuffix(tc.Name, "_help"):
+		return a.executeOutputSendHelp(tc)
+	case strings.HasPrefix(tc.Name, "output_send__"):
 		return a.executeOutputSendTool(tc)
 	case tc.Name == "output_list_channels":
 		return a.executeOutputListChannels()
@@ -1512,6 +1568,13 @@ func (a *Agent) buildSystemPrompt(memContext string, userInput string) string {
 		}
 	}
 
+	// 输出指令：使用 output_send__{channel} 作为回复手段
+	prompt += "\n\n【输出规则】你有多组输出门工具（type=output），每个对应一个输出通道。回复用户时必须调用对应的 output_send__{通道名} 工具。\n"
+	prompt += "- content 参数是 JSON 字符串，包含要发送的内容。具体格式因通道而异，用 output_send__{通道名}_help 查看每个通道的 JSON 格式说明。\n"
+	prompt += "- output_send__{通道名}_help 是普通 function 类型工具，调用后返回该通道的 JSON 格式详情和示例。\n"
+	prompt += "- 同一轮对话中可多次调用输出门工具。长消息应当分多次发出，而不是一口气发完。\n"
+	prompt += "- 直接返回纯文本不会到达任何用户端。"
+
 	if a.skills != nil {
 		if sp := a.skills.GetInjectedPrompt(); sp != "" {
 			prompt += "\n\n" + sp
@@ -1943,53 +2006,62 @@ func (a *Agent) buildToolDefs() []interface{} {
 		})
 	}
 
-	// 输出通道工具 — 从已注册 Device 动态生成
+	// 输出通道工具 — 每注册通道生成两个工具：
+	//   output_send__{name} (type=output) — 向该通道发送内容
+	//   output_send__{name}_help (type=function) — 查看该通道的 JSON 格式说明
 	channels := a.io.ListChannels()
-	chanNames := make([]interface{}, 0, len(channels))
-	chanDesc := "输出通道名称: "
-	for i, ch := range channels {
-		if ch.Type == agentIO.DeviceOutput || ch.Type == agentIO.DeviceIO {
-			chanNames = append(chanNames, ch.Name)
-			if i > 0 {
-				chanDesc += ", "
-			}
-			chanDesc += ch.Name
+	for _, ch := range channels {
+		if ch.Type != agentIO.DeviceOutput && ch.Type != agentIO.DeviceIO {
+			continue
 		}
-	}
-	if len(chanNames) == 0 {
-		chanNames = []interface{}{"default"}
-		chanDesc = "输出通道名称: default"
+		capStr := a.io.GetChannelCapabilities(ch.Name).String()
+		desc := ch.Description
+		if desc == "" {
+			desc = ch.Name + " 输出通道"
+		}
+
+		// 输出门工具
+		tools = append(tools, map[string]interface{}{
+			"type": "output",
+			"function": map[string]interface{}{
+				"name":        "output_send__" + ch.Name,
+				"description": desc + "。能力: " + capStr + "。content 参数为 JSON 字符串，具体格式请调用 output_send__" + ch.Name + "_help 查看。",
+				"parameters": map[string]interface{}{
+					"type": "object",
+					"properties": map[string]interface{}{
+						"content": map[string]interface{}{
+							"type":        "string",
+							"description": "JSON 字符串，包含要发送的内容和路由信息。格式因通道而异，用 _help 工具查看详情。",
+						},
+					},
+					"required": []string{"content"},
+				},
+			},
+		})
+
+		// 帮助工具
+		tools = append(tools, map[string]interface{}{
+			"type": "function",
+			"function": map[string]interface{}{
+				"name":        "output_send__" + ch.Name + "_help",
+				"description": "查看 " + ch.Name + " 输出通道的 JSON 格式说明和示例",
+				"parameters": map[string]interface{}{
+					"type":       "object",
+					"properties": map[string]interface{}{},
+				},
+			},
+		})
 	}
 
+	// output_list_channels — 列出所有可用输出通道
 	tools = append(tools, map[string]interface{}{
 		"type": "function",
 		"function": map[string]interface{}{
 			"name":        "output_list_channels",
-			"description": "列出所有可用输出通道及其能力（如 text/file/image/audio）和可调用工具。",
+			"description": "列出所有可用输出通道及其能力（如 text/file/image/audio）和对应的输出门工具名称。",
 			"parameters": map[string]interface{}{
 				"type":       "object",
 				"properties": map[string]interface{}{},
-			},
-		},
-	})
-	tools = append(tools, map[string]interface{}{
-		"type": "function",
-		"function": map[string]interface{}{
-			"name":        "output_send",
-			"description": "通过指定输出通道立即发送一条消息，不等待主回复。用于异步通知、中间进度等场景。",
-			"parameters": map[string]interface{}{
-				"type": "object",
-				"properties": map[string]interface{}{
-					"channel": map[string]interface{}{
-						"type":        "string",
-						"description": chanDesc,
-					},
-					"content": map[string]interface{}{
-						"type":        "string",
-						"description": "消息内容",
-					},
-				},
-				"required": []string{"channel", "content"},
 			},
 		},
 	})
@@ -2075,6 +2147,13 @@ func (a *Agent) enqueueConsolidationTask(task ConsolidationTask) {
 
 // distillLoop — 定期心跳：上下文→文档 + 图→文档 + 图重整
 func (a *Agent) distillLoop() {
+	defer func() {
+		if r := recover(); r != nil {
+			log.Printf("[agent] distillLoop panic recovered: %v\n%s", r, debug.Stack())
+			time.Sleep(time.Second)
+			go a.distillLoop()
+		}
+	}()
 	if a.docStore == nil && a.memory == nil {
 		return
 	}
@@ -2088,6 +2167,7 @@ func (a *Agent) distillLoop() {
 			a.distillContext()
 			a.syncGraphToDocs()
 			a.reorgGraph()
+			a.autoReloadPlugins()
 		case <-a.ctx.Done():
 			return
 		}
@@ -2461,22 +2541,88 @@ func (a *Agent) processConsolidation(input string) {
 
 // executeOutputSendTool — AI 通过指定通道发送消息（校验通道能力）
 func (a *Agent) executeOutputSendTool(tc agentAPI.ToolCall) string {
-	channel, _ := tc.Arguments["channel"].(string)
+	// tool name is "output_send__{channel}"
+	channel := strings.TrimPrefix(tc.Name, "output_send__")
 	content, _ := tc.Arguments["content"].(string)
 	if channel == "" || content == "" {
-		return "channel 和 content 不能为空"
+		return "工具名称格式: output_send__{channel}，content 不能为空"
 	}
 
+	// content 是一个 JSON 字符串，插件通过解析它确定如何发送消息
+	// === Stage: before_output — 输出前插件可审查/改写/拦截 ===
+	stageCtx := &sdk.StageContext{
+		FinalText: content,
+		Phase:     sdk.StageBeforeOutput,
+	}
+	a.runStage(sdk.StageBeforeOutput, stageCtx)
+	if stageCtx.Response != nil {
+		return fmt.Sprintf("输出被插件拦截: %s", *stageCtx.Response)
+	}
+	content = stageCtx.FinalText
+	if content == "" {
+		return "输出被插件清空"
+	}
+	tc.Arguments["content"] = content
+
+	// 通道能力检查
 	caps := a.io.GetChannelCapabilities(channel)
 	if caps == 0 {
-		return fmt.Sprintf("通道 [%s] 不存在或不可用。可用通道请用 output_list_channels 查看", channel)
+		return fmt.Sprintf("通道 [%s] 不存在或不可用。可用输出工具列表见 output_list_channels", channel)
 	}
 	if !caps.Supports(agentIO.CapText) {
 		return fmt.Sprintf("通道 [%s] 不支持文本输出（能力: %s）", channel, caps.String())
 	}
 
+	// 通过设备处理器投递
+	if dev := a.io.GetDevice(channel); dev != nil {
+		result, err := dev.Execute("output", tc.Arguments)
+		if err != nil {
+			return fmt.Sprintf("通过 [%s] 通道发送失败: %v", channel, err)
+		}
+		return fmt.Sprintf("已通过 [%s] 通道发送: %v", channel, result)
+	}
+
+	// 降级：发送到 outputCh（供 OutputChan 消费者）
 	a.io.EmitTextTo("agent_io", channel, content)
 	return fmt.Sprintf("已通过 [%s] 通道发送", channel)
+}
+
+// executeOutputSendHelp — 返回指定通道的 JSON 格式说明
+func (a *Agent) executeOutputSendHelp(tc agentAPI.ToolCall) string {
+	// tool name is "output_send__{channel}_help"
+	suffix := strings.TrimPrefix(tc.Name, "output_send__")
+	channel := strings.TrimSuffix(suffix, "_help")
+	if channel == "" {
+		return "工具名称格式: output_send__{channel}_help"
+	}
+
+	dev := a.io.GetDevice(channel)
+	if dev == nil {
+		return fmt.Sprintf("通道 [%s] 不存在", channel)
+	}
+
+	caps := a.io.GetChannelCapabilities(channel)
+	capStr := "无"
+	if caps != 0 {
+		capStr = caps.String()
+	}
+
+	desc := dev.Description()
+	if desc == "" {
+		desc = channel + " 输出通道"
+	}
+
+	return fmt.Sprintf(`通道 [%s]
+描述: %s
+能力: %s
+
+【content JSON 格式说明】
+发送到此通道时 content 必须是 JSON 字符串，包含以下字段：
+- "content": 消息正文（必填）
+- 根据通道不同可能还需要路由字段（如 "group_id", "user_id" 等）
+
+请在通道描述中查看具体字段要求。
+示例: {"content":"你好"}`, channel, desc, capStr)
 }
 
 // executeOutputListChannels — 列出所有可用通道及其能力
@@ -2520,6 +2666,28 @@ func (a *Agent) executePluginReload() string {
 	return msg
 }
 
+func (a *Agent) autoReloadPlugins() {
+	if a.pluginReg == nil {
+		return
+	}
+	for _, name := range a.pluginHealth.pendingReloads() {
+		if !a.pluginReg.AutoRestartEnabled(name) {
+			log.Printf("[agent] skip auto-reload plugin %s: auto-restart disabled by plugin", name)
+			continue
+		}
+		log.Printf("[agent] auto-reloading unhealthy plugin: %s", name)
+		if a.stageHost != nil {
+			a.stageHost.UnregisterPluginTools(name)
+		}
+		if err := a.pluginReg.ReloadOne(name); err != nil {
+			log.Printf("[agent] auto-reload plugin %s failed: %v", name, err)
+		} else {
+			a.pluginHealth.markReloaded(name)
+			log.Printf("[agent] plugin %s reloaded successfully", name)
+		}
+	}
+}
+
 // executeSpawnChild 创建子 Agent 异步执行独立任务
 // 不阻塞主 Agent，子任务完成后通过 selfInputCh 通知主 Agent 查看结果
 func (a *Agent) executeSpawnChild(tc agentAPI.ToolCall) string {
@@ -2560,7 +2728,6 @@ func (a *Agent) runChildTask(taskID, task string) {
 	// 子 Agent 可调用核心以外的全部工具（记忆/知识/文档/社交），但不能调用输出工具
 	allTools := a.buildToolDefs()
 	childTools := make([]interface{}, 0, len(allTools))
-	outputTools := map[string]bool{"output_send": true, "output_list_channels": true, "spawn_child": true, "plgreload": true}
 	for _, t := range allTools {
 		toolMap, ok := t.(map[string]interface{})
 		if !ok {
@@ -2571,9 +2738,10 @@ func (a *Agent) runChildTask(taskID, task string) {
 			continue
 		}
 		name, _ := fn["name"].(string)
-		if !outputTools[name] {
-			childTools = append(childTools, t)
+		if strings.HasPrefix(name, "output_send__") || name == "output_list_channels" || name == "spawn_child" || name == "plgreload" {
+			continue
 		}
+		childTools = append(childTools, t)
 	}
 
 	var finalResult string
@@ -2604,7 +2772,7 @@ func (a *Agent) runChildTask(taskID, task string) {
 		for _, ct := range resp.ToolCalls {
 			var result string
 			switch {
-			case ct.Name == "output_send" || ct.Name == "output_list_channels":
+			case strings.HasPrefix(ct.Name, "output_send__") || ct.Name == "output_list_channels":
 				result = fmt.Sprintf("子 Agent 不允许调用输出工具: %s", ct.Name)
 			case ct.Name == "spawn_child" || ct.Name == "plgreload":
 				result = fmt.Sprintf("子 Agent 不允许调用系统工具: %s", ct.Name)
@@ -2796,7 +2964,14 @@ func (a *Agent) runStage(stage sdk.Stage, ctx *sdk.StageContext) bool {
 		return false
 	}
 	ctx.Phase = stage
-	a.stageHost.RunStage(stage, ctx)
+	func() {
+		defer func() {
+			if r := recover(); r != nil {
+				log.Printf("[agent] stage %q plugin panic: %v\n%s", stage, r, debug.Stack())
+			}
+		}()
+		a.stageHost.RunStage(stage, ctx)
+	}()
 	return ctx.Response != nil
 }
 

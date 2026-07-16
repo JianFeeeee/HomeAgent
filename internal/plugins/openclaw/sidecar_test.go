@@ -326,13 +326,13 @@ func TestLoadOCPluginViaPluginStart(t *testing.T) {
 
 	var registeredTools []string
 	registeredHandlers := make(map[string]sdk.ToolHandler)
-	sdk := sdk.New("openclaw", nil, nil, nil, nil, nil, nil, nil, nil,
-		func(name string, def sdk.ToolDef, handler sdk.ToolHandler) error {
+	sdk := sdk.New("openclaw", sdk.SDKConfig{
+		RegTool: func(name string, def sdk.ToolDef, handler sdk.ToolHandler) error {
 			registeredTools = append(registeredTools, name)
 			registeredHandlers[name] = handler
 			return nil
 		},
-		nil, nil)
+	})
 
 	if err := p.Start(sdk); err != nil {
 		t.Fatalf("start plugin: %v", err)

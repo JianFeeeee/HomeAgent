@@ -186,9 +186,9 @@ func TestExtractKeywords(t *testing.T) {
 		{"的了的", 0}, // all stop words
 	}
 	for _, tt := range tests {
-		kw := extractKeywords(tt.input)
+		kw := ExtractKeywords(tt.input)
 		if len(kw) < tt.min {
-			t.Errorf("extractKeywords(%q) = %v, want at least %d keywords", tt.input, kw, tt.min)
+			t.Errorf("ExtractKeywords(%q) = %v, want at least %d keywords", tt.input, kw, tt.min)
 		}
 	}
 }

@@ -63,6 +63,7 @@ func New(name string) *Plugin {
 func (p *Plugin) Name() string { return p.name }
 
 func (p *Plugin) Start(s *sdk.PluginSDK) error {
+	s.SetAutoRestart(true)
 	s.Settings().RegisterDef(sdk.ConfigDef{
 		Key:         "http_addr",
 		Default:     HTTPAddr,

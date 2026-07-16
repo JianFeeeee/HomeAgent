@@ -11,6 +11,7 @@ import (
 	"sync"
 	"time"
 
+	"gitcode.com/JianFeeeee/HomeAgent/internal/memory"
 	"gitcode.com/JianFeeeee/HomeAgent/internal/memory/vector"
 )
 
@@ -165,7 +166,7 @@ func (s *Store) Add(name, content string) error {
 		Content:   content,
 		Path:      path,
 		Category:  sanitize(category),
-		Tags:      extractKeywords(name + " " + content),
+		Tags:      memory.ExtractKeywords(name + " " + content),
 		UpdatedAt: now,
 	}
 	s.items[id] = k
@@ -381,7 +382,7 @@ func (s *Store) scanDir(category, dirName string) {
 			Content:   content,
 			Path:      contentPath,
 			Category:  category,
-			Tags:      extractKeywords(dirName + " " + content),
+			Tags:      memory.ExtractKeywords(dirName + " " + content),
 			UpdatedAt: now,
 		}
 		s.items[name] = k
@@ -411,33 +412,4 @@ func sanitize(name string) string {
 	return name
 }
 
-func extractKeywords(text string) []string {
-	stopWords := map[string]bool{
-		"的": true, "了": true, "是": true, "在": true, "有": true,
-		"和": true, "就": true, "不": true, "都": true,
-		"一": true, "一个": true, "也": true, "很": true,
-		"到": true, "说": true, "要": true, "去": true,
-		"会": true, "着": true, "没有": true, "看": true, "好": true,
-		"自己": true, "这": true, "他": true, "她": true, "它": true,
-		"什么": true, "怎么": true, "为什么": true, "如何": true,
-		"我们": true, "你们": true, "他们": true, "这个": true,
-		"那个": true, "可以": true, "吗": true, "吧": true, "啊": true,
-	}
 
-	var keywords []string
-	runes := []rune(text)
-	seen := make(map[string]bool)
-
-	for i := 0; i < len(runes)-1; i++ {
-		word := string(runes[i : i+2])
-		if !stopWords[word] && len(strings.TrimSpace(word)) == len(word) && !seen[word] {
-			seen[word] = true
-			keywords = append(keywords, word)
-		}
-	}
-
-	if len(keywords) > 10 {
-		keywords = keywords[:10]
-	}
-	return keywords
-}

@@ -1,0 +1,68 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>HomeAgent</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+
+<!-- Connection Manager Overlay -->
+<div id="conn-overlay" class="overlay">
+  <div class="overlay-content conn-manager">
+    <h2>连接管理 / Connections</h2>
+    <div class="conn-list" id="conn-list"></div>
+    <div class="conn-form" id="conn-form" style="display:none">
+      <h3 id="conn-form-title">添加连接 / Add Connection</h3>
+      <label>名称 / Name</label>
+      <input id="conn-name" placeholder="My HomeAgent">
+      <label>地址 / URL</label>
+      <input id="conn-url" placeholder="http://localhost:8080">
+      <label>API 密钥 / API Key</label>
+      <input id="conn-key" type="password" placeholder="sk-...">
+      <div class="conn-form-actions">
+        <button class="btn btn-ghost" onclick="cancelConnForm()">取消 / Cancel</button>
+        <button class="btn btn-primary" onclick="saveConnForm()">保存 / Save</button>
+      </div>
+    </div>
+    <button class="btn btn-primary" onclick="showConnForm()" id="conn-add-btn" style="margin-top:12px">+ 添加连接 / Add Connection</button>
+  </div>
+</div>
+
+<!-- Main App -->
+<div id="app" style="display:none">
+  <!-- Top Bar -->
+  <nav>
+    <h1>HomeAgent</h1>
+    <a class="active" onclick="switchTab('overview')">概览</a>
+    <a onclick="switchTab('chat')">对话</a>
+    <a onclick="switchTab('plugins')">插件</a>
+    <a onclick="switchTab('settings')">设置</a>
+    <a onclick="switchTab('adapters')">适配器</a>
+    <a onclick="switchTab('kernel')">内核</a>
+    <div style="margin-left:auto;display:flex;align-items:center;gap:8px">
+      <span id="conn-status" class="conn-indicator" onclick="openConnManager()" title="点击管理连接">
+        <span class="status-dot dot-gray" id="conn-dot"></span>
+        <span id="conn-name-display">未连接</span>
+        <span style="font-size:10px;margin-left:4px;opacity:0.6">▼</span>
+      </span>
+      <button class="theme-btn" onclick="toggleTheme()" id="theme-btn">🌙</button>
+    </div>
+  </nav>
+
+  <div class="container" id="content">
+    <div id="tab-overview" class="tab-content active"></div>
+    <div id="tab-chat" class="tab-content"></div>
+    <div id="tab-plugins" class="tab-content"></div>
+    <div id="tab-settings" class="tab-content"></div>
+    <div id="tab-adapters" class="tab-content"></div>
+    <div id="tab-kernel" class="tab-content"></div>
+  </div>
+</div>
+
+<div id="toast" class="toast"></div>
+
+<script src="app.js"></script>
+</body>
+</html>
