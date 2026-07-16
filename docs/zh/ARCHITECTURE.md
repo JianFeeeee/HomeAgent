@@ -117,13 +117,25 @@ eventLoop() → processTextInput()
      → 三元组 → GraphDB.Commit
 ```
 
-### TF-IDF 向量化（char 1-2 gram）
+### 向量化算法：两种策略
 
-TF-IDF 是贯穿三层记忆的核心算法，在 4 个独立位置以不同方式使用：
+向量化在 4 个独立位置以不同方式使用：
+
+**策略 A — 局部词嵌入**（`LocalWordEmbedder`, `internal/memory/embedder.go`），用于 Context 层：
+
+- **jieba 分词** → 去除停用词和单字
+- **TF-IDF** 作为基础词权重
+- **滑动窗口（size=5）** 统计词对共现 → **PMI（点互信息）** → 保留 top 50
+- **向量化**：`vec[ctx] += TF-IDF × PMI` + 自身上标 `__w__` + TF-IDF
+
+**策略 B — char-bigram TF-IDF**（`TFIDFVectorizer`, `internal/memory/vector/`），用于 Document 和 Indexer 层：
+
+- **char bigram 分词**（1-2 gram）
+- **TF-IDF 权重** + **倒排索引**
 
 | 位置 | 文件 | 用途 | 算法 |
 |------|------|------|------|
-| Context Prune | `context.go:161` | 裁剪低相关性上下文事件 | CosineSimilarity(queryVec, evt.Vector) |
+| Context Prune | `context.go:161` | 裁剪低相关性上下文事件 | LocalWordEmbedder → CosineSimilarity(queryVec, evt.Vector) |
 | DocStore Query | `document.go:198` | 从文档记忆召回相关内容 | InvertedIndex + CosineSimilarity |
 | Indexer 实体搜索 | `indexer.go:149` | 从Graph召回相关实体 | InvertedIndex + CosineSimilarity |
 | 实体相似度检测 | `agent.go:2297` | 检测Graph中相似实体 | Bigram Jaccard (>0.75 → consolidation) |
@@ -132,7 +144,8 @@ TF-IDF 是贯穿三层记忆的核心算法，在 4 个独立位置以不同方�
 
 `internal/agent/core/context.go` — `RelevanceContext`
 - 维护最近事件列表，每次 Append/Prune 写入 JSON 防丢
-- 用户输入时做 TF-IDF 相关性评分，保留 topK
+- 用户输入时做词嵌入相关性评分（LocalWordEmbedder → CosineSimilarity），保留 topK
+- 保护最近 10 条记录免于淘汰，超出部分按相关性排序归档到文档记忆
 
 ### Document 层
 

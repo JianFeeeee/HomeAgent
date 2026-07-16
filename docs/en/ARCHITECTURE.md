@@ -117,13 +117,25 @@ Setting `ctx.Response` at any stage jumps to `after_output`.
      → triples → GraphDB.Commit
 ```
 
-### TF-IDF Vectorization (char 1-2 gram)
+### Vectorization: Two Strategies
 
-TF-IDF is the core algorithm running through all three memory layers, used in 4 independent locations:
+Vectorization is used in 4 independent locations with different strategies:
+
+**Strategy A — Local Word Embedding** (`LocalWordEmbedder`, `internal/memory/embedder.go`), used by Context layer:
+
+- **jieba tokenization** → removes stop words and single characters
+- **TF-IDF** as base word weight
+- **Sliding window (size=5)** counts word co-occurrence → **PMI (Pointwise Mutual Information)** → keeps top 50
+- **Vectorization**: `vec[ctx] += TF-IDF × PMI` + self-tag `__w__` + TF-IDF
+
+**Strategy B — char-bigram TF-IDF** (`TFIDFVectorizer`, `internal/memory/vector/`), used by Document and Indexer layers:
+
+- **char bigram tokenization** (1-2 gram)
+- **TF-IDF weights** + **inverted index**
 
 | Location | File | Purpose | Algorithm |
 |----------|------|---------|-----------|
-| Context Prune | `context.go:161` | Trim low-relevance context events | CosineSimilarity(queryVec, evt.Vector) |
+| Context Prune | `context.go:161` | Trim low-relevance context events | LocalWordEmbedder → CosineSimilarity(queryVec, evt.Vector) |
 | DocStore Query | `document.go:198` | Recall related content from document memory | InvertedIndex + CosineSimilarity |
 | Indexer Entity Search | `indexer.go:149` | Recall related entities from Graph | InvertedIndex + CosineSimilarity |
 | Entity Similarity Detection | `agent.go:2297` | Detect similar entities in Graph | Bigram Jaccard (>0.75 → consolidation) |
@@ -132,7 +144,8 @@ TF-IDF is the core algorithm running through all three memory layers, used in 4 
 
 `internal/agent/core/context.go` — `RelevanceContext`
 - Maintains recent event list, writes JSON on each Append/Prune to prevent data loss
-- TF-IDF relevance scoring on user input, keeps topK
+- Word embedding relevance scoring on user input (LocalWordEmbedder → CosineSimilarity), keeps topK
+- Protects last 10 events from eviction; excess candidates are sorted by relevance and archived to document memory
 
 ### Document Layer
 
