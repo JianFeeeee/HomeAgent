@@ -128,16 +128,17 @@ Vectorization is used in 4 independent locations with different strategies:
 - **Sliding window (size=5)** counts word co-occurrence → **PMI (Pointwise Mutual Information)** → keeps top 50
 - **Vectorization**: `vec[ctx] += TF-IDF × PMI` + self-tag `__w__` + TF-IDF
 
-**Strategy B — char-bigram TF-IDF** (`TFIDFVectorizer`, `internal/memory/vector/`), used by Document and Indexer layers:
+**Strategy B — char-bigram TF-IDF + jieba keyword extraction** (`TFIDFVectorizer` + `ExtractKeywords`), used by Document and Indexer layers:
 
-- **char bigram tokenization** (1-2 gram)
+- **char bigram tokenization** (1-2 gram) for entity name vector search
+- **jieba tokenization** for keyword extraction, paired with SQLite LIKE + BFS traversal
 - **TF-IDF weights** + **inverted index**
 
 | Location | File | Purpose | Algorithm |
 |----------|------|---------|-----------|
 | Context Prune | `context.go:161` | Trim low-relevance context events | LocalWordEmbedder → CosineSimilarity(queryVec, evt.Vector) |
-| DocStore Query | `document.go:198` | Recall related content from document memory | InvertedIndex + CosineSimilarity |
-| Indexer Entity Search | `indexer.go:149` | Recall related entities from Graph | InvertedIndex + CosineSimilarity |
+| DocStore Query | `document.go:198` | Recall related content from document memory | char-bigram TF-IDF + jieba keywords → InvertedIndex + CosineSimilarity |
+| Indexer Entity Search | `indexer.go:149` | Recall related entities from Graph | char-bigram TF-IDF vector search + jieba keywords → InvertedIndex + CosineSimilarity + SQLite BFS |
 | Entity Similarity Detection | `agent.go:2297` | Detect similar entities in Graph | Bigram Jaccard (>0.75 → consolidation) |
 
 ### Context Layer
@@ -151,7 +152,7 @@ Vectorization is used in 4 independent locations with different strategies:
 
 `internal/memory/document/document.go` — `Store`
 - Consume-on-read mode: deleted after `doc_query` retrieval
-- TF-IDF index with character bigram + inverted index
+- Dual recall: char-bigram TF-IDF vector search + jieba keyword extraction
 
 ### Graph Layer
 
@@ -174,7 +175,7 @@ Vectorization is used in 4 independent locations with different strategies:
 
 - **Social** (`internal/memory/social/social.go`) — Persona traits and relationship network, wraps GraphDB entity types
 - **Text Memory** (`internal/memory/text/text.go`) — Raw conversation JSONL logs, rotation strategy
-- **Memory Indexer** (`internal/memory/indexer.go`) — Entity vectorization, auto-inject into system prompt
+- **Memory Indexer** (`internal/memory/indexer.go`) — Entity vectorization + jieba keyword extraction, auto-inject into system prompt
 
 ### Distillation Pipeline
 
