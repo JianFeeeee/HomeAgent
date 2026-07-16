@@ -68,6 +68,7 @@ func configCandidates() []string {
 	if home != "" {
 		cands = append(cands, filepath.Join(home, ".config", "homeagent", "waiter.yaml"))
 	}
+	cands = append(cands, "/root/.config/homeagent/waiter.yaml")
 
 	cands = append(cands, filepath.Join(".", "waiter.yaml"))
 
