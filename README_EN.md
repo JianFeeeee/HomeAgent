@@ -164,7 +164,7 @@ External plugin development: see [homeagent-sdk](https://gitcode.com/JianFeeeee/
 
 ## Project Status
 
-Core is functional, plugin system and SDK are ready. 10 built-in plugins. External plugin development via [homeagent-sdk](https://gitcode.com/JianFeeeee/homeagent-sdk) repo using `plugindev` toolchain.
+**v0.7.1** — Core is functional, plugin system and SDK are ready. 10 built-in plugins. External plugin development via [homeagent-sdk](https://gitcode.com/JianFeeeee/homeagent-sdk) repo using `plugindev` toolchain. Output channel system, restricted external plugin API, and EventAgentLLMChain event are live.
 
 ## Documentation
 
