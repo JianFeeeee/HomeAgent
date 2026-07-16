@@ -155,10 +155,10 @@ internal/
 ├── knowledge/      Knowledge base (filesystem + TF-IDF)
 ├── plugin/         Plugin registry + .so/.dll dynamic loader
 ├── plugins/        10 built-in plugins (webui/cli/timer/cmd/mcp/openclaw/agentcli/healthcheck/pluginmgr/files)
-├── internal/sdk/   PluginSDK (Tool/Stage/Event three channels)
+├── sdk/            PluginSDK (Tool/Stage/Event three channels)
 ├── config/         SQLite config center
 ├── events/         Event bus
-└── lua/adapters/   8 LLM protocol adapter scripts
+└── internal/lua/adapters/   8 LLM protocol adapter scripts
 External plugin development: see [homeagent-sdk](https://gitcode.com/JianFeeeee/homeagent-sdk) repo, use `plugindev` toolchain, refer to Go and Lua examples in `example/`
 ```
 
@@ -182,4 +182,4 @@ make test               # go test ./...
 make install            # Install to system
 ```
 
-Dependencies: Go 1.21+, CGo (go-sqlite3), Linux/Windows.
+Dependencies: Go 1.25+, CGo (go-sqlite3), Linux/Windows.

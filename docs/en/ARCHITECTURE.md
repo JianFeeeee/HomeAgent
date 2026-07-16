@@ -123,8 +123,8 @@ TF-IDF is the core algorithm running through all three memory layers, used in 4 
 
 | Location | File | Purpose | Algorithm |
 |----------|------|---------|-----------|
-| Context Prune | `context.go:162` | Trim low-relevance context events | CosineSimilarity(queryVec, evt.Vector) |
-| DocStore Query | `document.go:205` | Recall related content from document memory | InvertedIndex + CosineSimilarity |
+| Context Prune | `context.go:161` | Trim low-relevance context events | CosineSimilarity(queryVec, evt.Vector) |
+| DocStore Query | `document.go:198` | Recall related content from document memory | InvertedIndex + CosineSimilarity |
 | Indexer Entity Search | `indexer.go:149` | Recall related entities from Graph | InvertedIndex + CosineSimilarity |
 | Entity Similarity Detection | `agent.go:2297` | Detect similar entities in Graph | Bigram Jaccard (>0.75 → consolidation) |
 
@@ -136,7 +136,7 @@ TF-IDF is the core algorithm running through all three memory layers, used in 4 
 
 ### Document Layer
 
-`internal/memory/document/doc.go` — `Store`
+`internal/memory/document/document.go` — `Store`
 - Consume-on-read mode: deleted after `doc_query` retrieval
 - TF-IDF index with character bigram + inverted index
 
@@ -185,7 +185,7 @@ Heartbeat 30min:
                           selfInputCh → LLM decides merge/skip
 ```
 
-Entity conflict detection heuristic (bigram Jaccard > 0.5), routed through `selfInputCh` internal channel, LLM makes the final merge decision.
+Entity conflict detection heuristic (bigram Jaccard > 0.75), routed through `selfInputCh` internal channel, LLM makes the final merge decision.
 
 ## Knowledge Base
 
@@ -366,7 +366,7 @@ internal/
 │   ├── agentcli/          — PTY terminal
 │   ├── healthcheck/       — Health check
 │   └── pluginmgr/         — Plugin manager
-├── internal/sdk/          — PluginSDK definitions
+├── sdk/                   — PluginSDK definitions
 │   ├── plugin.go          — Plugin interface + PluginSDK
 │   ├── memory.go          — MemoryAPI
 │   ├── knowledge.go       — KnowledgeAPI
@@ -376,7 +376,7 @@ internal/
 │   ├── graph.go           — SQLite graph database
 │   ├── indexer.go         — Graph → vector index
 │   ├── vector/store.go    — TF-IDF vector engine
-│   ├── document/doc.go    — Document memory
+│   ├── document/document.go — Document memory
 │   ├── text/text.go       — Text logs
 │   └── pipeline/          — Distiller
 ├── knowledge/knowledge.go — Knowledge base
@@ -387,6 +387,8 @@ internal/
 ├── events/bus.go          — Event bus
 ├── tracker/               — OverlayFS change tracking
 ├── supervisor/            — Daemon management
-├── snapshot/              — Snapshots
-└── tokenizer/             — Chinese tokenization (jieba wrapper)
+├── skill/                 — Skill plugin management
+│   └── manager.go         — Skill loading/matching
+└── meta/                  — Meta information
+    └── meta.go            — Agent metadata
 ```

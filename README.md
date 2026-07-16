@@ -155,10 +155,10 @@ internal/
 ├── knowledge/      知识库（文件系统 + TF-IDF）
 ├── plugin/         插件注册表 + .so 动态加载器
 ├── plugins/        内置 10 个插件（webui/cli/timer/cmd/mcp/openclaw/agentcli/healthcheck/pluginmgr/files）
-├── internal/sdk/   PluginSDK（Tool/Stage/Event 三通道）
+├── sdk/            PluginSDK（Tool/Stage/Event 三通道）
 ├── config/         SQLite 配置中心
 ├── events/         事件总线
-└── lua/adapters/   8 个 LLM 协议适配器脚本
+└── internal/lua/adapters/   8 个 LLM 协议适配器脚本
 外部插件开发见 [homeagent-sdk](https://gitcode.com/JianFeeeee/homeagent-sdk) 仓库，使用 `plugindev` 工具链开发，参考 `example/` 目录下的 Go 和 Lua 示例
 ```
 
@@ -182,4 +182,4 @@ make test               # go test ./...
 make install            # 安装到系统
 ```
 
-依赖：Go 1.21+, CGo (go-sqlite3), Linux/Windows。
+依赖：Go 1.25+, CGo (go-sqlite3), Linux/Windows。

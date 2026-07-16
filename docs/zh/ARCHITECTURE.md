@@ -123,8 +123,8 @@ TF-IDF 是贯穿三层记忆的核心算法，在 4 个独立位置以不同方�
 
 | 位置 | 文件 | 用途 | 算法 |
 |------|------|------|------|
-| Context Prune | `context.go:162` | 裁剪低相关性上下文事件 | CosineSimilarity(queryVec, evt.Vector) |
-| DocStore Query | `document.go:205` | 从文档记忆召回相关内容 | InvertedIndex + CosineSimilarity |
+| Context Prune | `context.go:161` | 裁剪低相关性上下文事件 | CosineSimilarity(queryVec, evt.Vector) |
+| DocStore Query | `document.go:198` | 从文档记忆召回相关内容 | InvertedIndex + CosineSimilarity |
 | Indexer 实体搜索 | `indexer.go:149` | 从Graph召回相关实体 | InvertedIndex + CosineSimilarity |
 | 实体相似度检测 | `agent.go:2297` | 检测Graph中相似实体 | Bigram Jaccard (>0.75 → consolidation) |
 
@@ -136,7 +136,7 @@ TF-IDF 是贯穿三层记忆的核心算法，在 4 个独立位置以不同方�
 
 ### Document 层
 
-`internal/memory/document/doc.go` — `Store`
+`internal/memory/document/document.go` — `Store`
 - 消费即删模式：`doc_query` 检索到后删除
 - TF-IDF 索引 character bigram + 倒排
 
@@ -185,7 +185,7 @@ TF-IDF 是贯穿三层记忆的核心算法，在 4 个独立位置以不同方�
                     selfInputCh → LLM 判断合并/跳过
 ```
 
-实体冲突检测启发式（bigram Jaccard > 0.5），走 `selfInputCh` 内部通道，LLM 最终判断是否合并。
+实体冲突检测启发式（bigram Jaccard > 0.75），走 `selfInputCh` 内部通道，LLM 最终判断是否合并。
 
 ## 知识库
 
@@ -366,7 +366,7 @@ internal/
 │   ├── agentcli/          — PTY 终端
 │   ├── healthcheck/       — 健康检查
 │   └── pluginmgr/         — 插件管理器
-├── internal/sdk/          — PluginSDK 定义
+├── sdk/                   — PluginSDK 定义
 │   ├── plugin.go          — Plugin 接口 + PluginSDK
 │   ├── memory.go          — MemoryAPI
 │   ├── knowledge.go       — KnowledgeAPI
@@ -376,7 +376,7 @@ internal/
 │   ├── graph.go           — SQLite 图数据库
 │   ├── indexer.go         — 图→向量索引
 │   ├── vector/store.go    — TF-IDF 向量引擎
-│   ├── document/doc.go    — 文档记忆
+│   ├── document/document.go — 文档记忆
 │   ├── text/text.go       — 文本日志
 │   └── pipeline/          — 蒸馏器
 ├── knowledge/knowledge.go — 知识库
@@ -387,6 +387,8 @@ internal/
 ├── events/bus.go          — 事件总线
 ├── tracker/               — OverlayFS 变更追踪
 ├── supervisor/            — 守护进程管理
-├── snapshot/              — 快照
-└── tokenizer/             — 中文分词 (jieba 包装)
+├── skill/                 — Skill 插件管理
+│   └── manager.go         — Skill 加载/匹配
+└── meta/                  — 元信息
+    └── meta.go            — Agent 元数据
 ```
