@@ -37,7 +37,7 @@ HomeAgent 是一个持续运行的个人智能 Agent 框架。
 
 **记忆系统** (`internal/memory/`)：
 - **GraphDB** (`graph.go`) — SQLite，entities + relations 表，BFS 遍历
-- **Document Store** (`document/doc.go`) — 临时记忆，JSON 文件 + TF-IDF 向量索引，消费即删
+- **Document Store** (`document/document.go`) — 临时记忆，JSON 文件 + TF-IDF 向量索引，消费即删
 - **Text Memory** (`text/text.go`) — 原始对话日志，JSONL 文件轮转
 - **Social Store** (`social/social.go`) — 人格特质 + 关系网，包装 GraphDB
 - **Memory Indexer** (`indexer.go`) — 自动将 GraphDB 实体向量化，用户输入时召回注入 system prompt
@@ -50,7 +50,7 @@ HomeAgent 是一个持续运行的个人智能 Agent 框架。
 **插件系统** (`internal/plugin/`)：
 - 内置插件：Go `init()` 自注册，编译进内核
 - 外部插件：Go `-buildmode=plugin` 编译为 `.so`/`.dll`，通过 `plugin.Open` 动态加载；也支持 Lua 脚本插件
-- PluginSDK (`internal/sdk/`) 定义三通道：RegisterTool / RegisterStage / Subscribe
+- PluginSDK (`internal/sdk/`) 定义四通道：RegisterTool / RegisterStage / Subscribe / RegisterOutputChannel
 - 阶段钩子 7 个：on_input → pre_action → post_action → before_toolcall → after_toolcall → before_output → after_output
 
 **LLM Provider** (`internal/agent/api/provider.go`)：

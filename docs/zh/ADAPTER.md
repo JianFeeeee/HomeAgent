@@ -82,6 +82,10 @@ return adapter
 
 `log(level, message)` — 输出日志（level: info/warn/error）
 
+`http_get(url)` — 发起 HTTP GET 请求，返回响应体字符串
+
+`http_post(url, body)` — 发起 HTTP POST 请求，返回响应体字符串
+
 ## 适配典型 API
 
 | API | endpoint | auth 方式 | 格式差异 |
