@@ -177,9 +177,11 @@ func (s *Store) Add(name, content string) error {
 	})
 	s.summaries = append(s.summaries, name+" "+content)
 
-	if err := s.writeIndex(); err != nil {
-		log.Printf("[knowledge] write index error after adding %s: %v", name, err)
-	}
+	go func() {
+		if err := s.writeIndex(); err != nil {
+			log.Printf("[knowledge] write index error after adding %s: %v", name, err)
+		}
+	}()
 	log.Printf("[knowledge] added: %s (%d bytes)", name, len(content))
 	return nil
 }
