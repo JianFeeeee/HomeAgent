@@ -41,6 +41,15 @@ func (s *State) Connected() bool {
 	return s.conn != nil
 }
 
+func (s *State) RemoteConn() *remoteConn {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if rc, ok := s.conn.(*remoteConn); ok {
+		return rc
+	}
+	return nil
+}
+
 func (s *State) Send(line string) error {
 	s.mu.Lock()
 	c := s.conn

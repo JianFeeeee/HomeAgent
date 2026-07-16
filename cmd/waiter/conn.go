@@ -76,19 +76,19 @@ func (c *localConn) Close() error {
 
 func dialRemote(baseURL, apiKey string) (Conn, error) {
 	baseURL = strings.TrimRight(baseURL, "/")
-	return &remoteConn{url: baseURL + "/api/v1/chat", apiKey: apiKey}, nil
+	return &remoteConn{baseURL: baseURL, apiKey: apiKey}, nil
 }
 
 type remoteConn struct {
-	url    string
-	apiKey string
-	mu     sync.Mutex
-	buf    []string
-	closed bool
+	baseURL string
+	apiKey  string
+	mu      sync.Mutex
+	buf     []string
+	closed  bool
 }
 
 func (c *remoteConn) Send(line string) error {
-	req, err := http.NewRequest("POST", c.url, strings.NewReader(
+	req, err := http.NewRequest("POST", c.baseURL+"/api/v1/chat", strings.NewReader(
 		fmt.Sprintf(`{"message":%q}`, line),
 	))
 	if err != nil {
@@ -115,6 +115,31 @@ func (c *remoteConn) Send(line string) error {
 	c.buf = append(c.buf, content)
 	c.mu.Unlock()
 	return nil
+}
+
+func (c *remoteConn) DoAPI(method, path string, body string) (map[string]interface{}, error) {
+	var bodyReader io.Reader
+	if body != "" {
+		bodyReader = strings.NewReader(body)
+	}
+	req, err := http.NewRequest(method, c.baseURL+path, bodyReader)
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("Content-Type", "application/json")
+	if c.apiKey != "" {
+		req.Header.Set("X-API-Key", c.apiKey)
+	}
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	var result map[string]interface{}
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		return nil, err
+	}
+	return result, nil
 }
 
 func (c *remoteConn) ReadLine() (string, error) {
