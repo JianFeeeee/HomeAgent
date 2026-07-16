@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"fmt"
+	"os"
 	"os/exec"
 	"runtime"
 	"strings"
@@ -133,6 +134,10 @@ func (p *Plugin) Start(s *sdk.PluginSDK) error {
 			return map[string]interface{}{"error": "command is required"}, nil
 		}
 
+		if blocked, reason := isDangerousCommand(command); blocked {
+			return map[string]interface{}{"error": reason, "status": "denied"}, nil
+		}
+
 		timeoutStr, _ := args["timeout"].(string)
 		if timeoutStr == "" {
 			timeoutStr = p.defaultTimeout
@@ -238,4 +243,40 @@ func (p *Plugin) truncateOutput(s string) string {
 		return s[:maxLen] + fmt.Sprintf("\n... [输出被截断，共 %d 字节]", len(s))
 	}
 	return strings.TrimRight(s, "\n")
+}
+
+func isDangerousCommand(command string) (bool, string) {
+	pid := os.Getpid()
+	pidStr := fmt.Sprintf("%d", pid)
+	lower := strings.ToLower(command)
+
+	dangerousPatterns := []string{
+		"homed",
+		pidStr,
+		"systemctl stop homeagent",
+		"systemctl restart homeagent",
+		"systemctl kill homeagent",
+		"service homeagent stop",
+		"service homeagent restart",
+	}
+
+	killPatterns := []string{"kill ", "killall ", "pkill ", "kill -", "kill -9"}
+
+	for _, kp := range killPatterns {
+		if strings.Contains(lower, kp) {
+			for _, target := range dangerousPatterns {
+				if strings.Contains(lower, strings.ToLower(target)) {
+					return true, fmt.Sprintf("命令被拦截：禁止向 homed 进程(pid=%s)发送信号", pidStr)
+				}
+			}
+		}
+	}
+
+	for _, dp := range dangerousPatterns[2:] {
+		if strings.Contains(lower, dp) {
+			return true, fmt.Sprintf("命令被拦截：禁止操作 homed 服务进程(pid=%s)", pidStr)
+		}
+	}
+
+	return false, ""
 }
