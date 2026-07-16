@@ -1,13 +1,14 @@
-.PHONY: all build build-cli clean install test run build-static build-linux-arm64 lint fmt
+.PHONY: all build build-cli build-gui clean install test run build-static build-linux-arm64 lint fmt
 
 BINARY=homed
 CLI_BINARY=waiter
+GUI_BINARY=homeagent-gui
 GO=go
 GOCACHE=/tmp/gocache
 export GOPATH=/tmp/gopath
 BUILD_DIR=build
 PROJECT_ROOT := $(CURDIR)
-VERSION ?= $(shell git describe --tags --dirty 2>/dev/null || echo "0.6.2")
+VERSION ?= $(shell git describe --tags --dirty 2>/dev/null || echo "0.7.1")
 COMMIT ?= $(shell git rev-parse --short HEAD 2>/dev/null || echo "unknown")
 BUILD_TIME ?= $(shell date -u '+%Y-%m-%dT%H:%M:%SZ')
 LDFLAGS = -X gitcode.com/JianFeeeee/HomeAgent/internal/meta.Version=$(VERSION) -X gitcode.com/JianFeeeee/HomeAgent/internal/meta.Commit=$(COMMIT) -X gitcode.com/JianFeeeee/HomeAgent/internal/meta.BuildTime=$(BUILD_TIME)
@@ -23,6 +24,10 @@ build-cli:
 	@mkdir -p $(BUILD_DIR)
 	CGO_ENABLED=0 $(GO) build -installsuffix dynlink -o $(BUILD_DIR)/$(CLI_BINARY) ./cmd/waiter/
 	@echo "Built: $(BUILD_DIR)/$(CLI_BINARY)"
+
+build-gui:
+	@cd cmd/gui && npm install --production && npx electron-packager . $(GUI_BINARY) --out=../../$(BUILD_DIR) --overwrite --no-sandbox
+	@echo "Built: $(BUILD_DIR)/$(GUI_BINARY)"
 
 build-static:
 	@mkdir -p $(BUILD_DIR)

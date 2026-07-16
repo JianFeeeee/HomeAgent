@@ -11,6 +11,7 @@ import (
 	"strings"
 	"syscall"
 	"time"
+	"unsafe"
 )
 
 const (
@@ -234,6 +235,36 @@ func printServerOutput(content string) {
 	default:
 		fmt.Printf("%s%s%s\n", clearLine, content, colorReset)
 	}
+}
+
+func setRawMode(fd int) (func(), error) {
+	type termios struct {
+		Iflag  uint32
+		Oflag  uint32
+		Cflag  uint32
+		Lflag  uint32
+		Cc     [20]byte
+		Ispeed uint32
+		Ospeed uint32
+	}
+	const (
+		TCGETS = 0x5401
+		TCSETS = 0x5402
+		ICANON = 0x2
+		ECHO   = 0x8
+	)
+	var old termios
+	if _, _, err := syscall.Syscall(syscall.SYS_IOCTL, uintptr(fd), TCGETS, uintptr(unsafe.Pointer(&old))); err != 0 {
+		return func() {}, fmt.Errorf("ioctl TCGETS: %v", err)
+	}
+	new := old
+	new.Lflag &^= ICANON | ECHO
+	if _, _, err := syscall.Syscall(syscall.SYS_IOCTL, uintptr(fd), TCSETS, uintptr(unsafe.Pointer(&new))); err != 0 {
+		return func() {}, fmt.Errorf("ioctl TCSETS: %v", err)
+	}
+	return func() {
+		syscall.Syscall(syscall.SYS_IOCTL, uintptr(fd), TCSETS, uintptr(unsafe.Pointer(&old)))
+	}, nil
 }
 
 
