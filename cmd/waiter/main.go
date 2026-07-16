@@ -86,6 +86,7 @@ func main() {
 
 	cfg := discoverConfig(*configPath)
 	cfg.MergeCLI(*socket, *remote, *apiKey)
+	cfg.ApplyDefault()
 
 	if cfg.Socket == "" && cfg.Remote == "" {
 		cfg.Socket = discoverSocket("")

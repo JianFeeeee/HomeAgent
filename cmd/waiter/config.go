@@ -8,10 +8,40 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
+type Connection struct {
+	Name   string `yaml:"name"`
+	Socket string `yaml:"socket,omitempty"`
+	Remote string `yaml:"remote,omitempty"`
+	APIKey string `yaml:"api_key,omitempty"`
+}
+
 type Config struct {
-	Socket string `yaml:"socket"`
-	Remote string `yaml:"remote"`
-	APIKey string `yaml:"api_key"`
+	Socket      string       `yaml:"socket"`
+	Remote      string       `yaml:"remote"`
+	APIKey      string       `yaml:"api_key"`
+	Default     string       `yaml:"default"`
+	Connections []Connection `yaml:"connections,omitempty"`
+}
+
+func (c *Config) Active() *Connection {
+	for i := range c.Connections {
+		if c.Connections[i].Name == c.Default {
+			return &c.Connections[i]
+		}
+	}
+	return nil
+}
+
+func (c *Config) ApplyDefault() {
+	conn := c.Active()
+	if conn == nil {
+		return
+	}
+	if c.Socket == "" && c.Remote == "" {
+		c.Socket = conn.Socket
+		c.Remote = conn.Remote
+		c.APIKey = conn.APIKey
+	}
 }
 
 func discoverConfig(configPath string) *Config {
@@ -48,6 +78,14 @@ func configCandidates() []string {
 	return cands
 }
 
+func configPath() string {
+	home, _ := os.UserHomeDir()
+	if home == "" {
+		return ""
+	}
+	return filepath.Join(home, ".config", "homeagent", "waiter.yaml")
+}
+
 func readFile(path string) *Config {
 	data, err := os.ReadFile(path)
 	if err != nil {
@@ -61,6 +99,19 @@ func readFile(path string) *Config {
 	return &cfg
 }
 
+func (c *Config) Save() {
+	p := configPath()
+	if p == "" {
+		return
+	}
+	os.MkdirAll(filepath.Dir(p), 0755)
+	data, err := yaml.Marshal(c)
+	if err != nil {
+		return
+	}
+	os.WriteFile(p, data, 0644)
+}
+
 func (c *Config) MergeCLI(socket, remote, apiKey string) {
 	if socket != "" {
 		c.Socket = socket
@@ -71,4 +122,52 @@ func (c *Config) MergeCLI(socket, remote, apiKey string) {
 	if apiKey != "" {
 		c.APIKey = apiKey
 	}
+}
+
+func (c *Config) SaveConnection(name string) {
+	conn := Connection{
+		Name:   name,
+		Socket: c.Socket,
+		Remote: c.Remote,
+		APIKey: c.APIKey,
+	}
+	for i, existing := range c.Connections {
+		if existing.Name == name {
+			c.Connections[i] = conn
+			c.Default = name
+			c.Save()
+			return
+		}
+	}
+	c.Connections = append(c.Connections, conn)
+	c.Default = name
+	c.Save()
+}
+
+func (c *Config) SwitchConnection(name string) bool {
+	for _, conn := range c.Connections {
+		if conn.Name == name {
+			c.Socket = conn.Socket
+			c.Remote = conn.Remote
+			c.APIKey = conn.APIKey
+			c.Default = name
+			c.Save()
+			return true
+		}
+	}
+	return false
+}
+
+func (c *Config) DeleteConnection(name string) bool {
+	for i, conn := range c.Connections {
+		if conn.Name == name {
+			c.Connections = append(c.Connections[:i], c.Connections[i+1:]...)
+			if c.Default == name {
+				c.Default = ""
+			}
+			c.Save()
+			return true
+		}
+	}
+	return false
 }
