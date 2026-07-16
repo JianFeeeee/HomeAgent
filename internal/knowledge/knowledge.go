@@ -224,9 +224,11 @@ func (s *Store) Remove(name string) error {
 	}
 	delete(s.items, id)
 	s.vec.Remove(id)
-	if err := s.writeIndex(); err != nil {
-		log.Printf("[knowledge] write index error after removing %s: %v", name, err)
-	}
+	go func() {
+		if err := s.writeIndex(); err != nil {
+			log.Printf("[knowledge] write index error after removing %s: %v", name, err)
+		}
+	}()
 	return nil
 }
 
