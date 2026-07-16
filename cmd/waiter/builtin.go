@@ -17,6 +17,10 @@ func handleBuiltin(cmd string, cfg *Config, state *State, reconnect func()) bool
   /connect <path>          switch to a different unix socket
   /remote <url>            switch to remote HTTP mode
   /local                   switch back to local socket mode
+  /conn list               list saved connections
+  /conn save <name>        save current connection as <name>
+  /conn use <name>         switch to saved connection
+  /conn del <name>         delete saved connection
 
 Server commands (sent to agent):
   /status                  system status
@@ -64,6 +68,48 @@ Any other text is sent to the agent directly.`)
 		cfg.Remote = ""
 		cfg.Socket = discoverSocket("")
 		reconnect()
+		return true
+
+	case cmd == "/conn list":
+		if len(cfg.Connections) == 0 {
+			fmt.Println("no saved connections")
+		}
+		for _, c := range cfg.Connections {
+			mark := " "
+			if c.Name == cfg.Default {
+				mark = "*"
+			}
+			addr := c.Remote
+			if addr == "" {
+				addr = c.Socket
+			}
+			fmt.Printf(" %s %-15s %s\n", mark, c.Name, addr)
+		}
+		return true
+
+	case strings.HasPrefix(cmd, "/conn save "):
+		name := strings.TrimSpace(cmd[11:])
+		cfg.SaveConnection(name)
+		fmt.Printf("connection saved as '%s' (default)\n", name)
+		return true
+
+	case strings.HasPrefix(cmd, "/conn use "):
+		name := strings.TrimSpace(cmd[10:])
+		if cfg.SwitchConnection(name) {
+			fmt.Printf("switched to '%s'\n", name)
+			reconnect()
+		} else {
+			fmt.Printf("connection '%s' not found\n", name)
+		}
+		return true
+
+	case strings.HasPrefix(cmd, "/conn del "):
+		name := strings.TrimSpace(cmd[10:])
+		if cfg.DeleteConnection(name) {
+			fmt.Printf("connection '%s' deleted\n", name)
+		} else {
+			fmt.Printf("connection '%s' not found\n", name)
+		}
 		return true
 
 	case cmd == "/status":
