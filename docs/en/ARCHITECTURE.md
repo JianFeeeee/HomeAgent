@@ -143,7 +143,7 @@ TF-IDF is the core algorithm running through all three memory layers, used in 4 
 ### Graph Layer
 
 `internal/memory/graph.go` — `GraphDB`
-- SQLite WAL mode, two tables
+- SQLite WAL mode, two tables (driver: mattn/go-sqlite3, CGo)
 - `Commit(triples)` — UPSERT entities + INSERT relations
 - `Recall(keywords, depth)` — Keyword LIKE search + BFS traversal
 
@@ -233,7 +233,7 @@ Built-in plugin registration: `internal/plugins/all.go` blank imports → each p
 External plugin loading: `internal/plugin/dynamic.go` → copy to SHA256 temp path (bypass `plugin.Open` path cache) → `Open` + `Lookup("NewPlugin")`.
 Lua script plugin loading: `internal/lua/` → parse `main.lua` via Lua VM, call `start()` to register tools.
 
-### PluginSDK Three Channels
+### PluginSDK Four Channels
 
 ```
 Plugin ──→ Kernel
@@ -241,6 +241,7 @@ Plugin ──→ Kernel
 RegisterTool(name, fn)   ──→  buildToolDefs() / executeToolCall()
 RegisterStage(stage, fn)  ──→  runStage() called at corresponding phase
 Subscribe(event, fn)      ──→  Publish() notify all subscribers
+RegisterOutputChannel(name, caps, desc, handler) ──→ output_send__{name} tool generation
 ```
 
 `internal/sdk/` bridges external SDK interface to kernel, defines complete PluginSDK:
@@ -254,6 +255,7 @@ sdk.InjectInterrupt(source, channel, payload)
 sdk.Memory().Recall/Commit
 sdk.Knowledge().Search/Create
 sdk.Settings().Get/Set/List
+sdk.RegisterOutputChannel("qq", sdk.CapText, "QQ消息通道，content为JSON: {text, group_id, user_id}", handler)
 ```
 
 ### Plugin Interface
@@ -265,6 +267,48 @@ type Plugin interface {
     Stop() error
 }
 ```
+
+## Output Channel System
+
+Each output channel generates two tools:
+
+| Tool | Type | Purpose |
+|------|------|---------|
+| `output_send__{name}` | function | Accepts a `content` JSON string parameter, transparently routed to the plugin's registered handler |
+| `output_send__{name}_help` | function | Returns the channel's JSON format documentation (desc field) |
+
+Capability flags:
+
+| Flag | Value | Meaning |
+|------|-------|---------|
+| CapText | 1 | Plain text |
+| CapFile | 2 | File |
+| CapImage | 4 | Image |
+| CapAudio | 8 | Audio |
+| CapStructured | 16 | Structured data |
+
+System prompt injection: output gate rules, multi-call support, long message splitting.
+Child agent permission: `output_send__` prefix tools are allowed.
+
+## EventAgentLLMChain Event
+
+- Event type `agent_llm_chain` emitted after each LLM turn
+- Contains the full LLM response (text + tool calls + reasoning)
+- WebUI subscribes to this event via SSE for real-time display
+- Plugins can subscribe via EventSubscriber (read-only for external plugins)
+
+## Restricted External Plugin API
+
+Layered architecture: internal plugins get full PluginSDK, external plugins get restricted SDK.
+
+| API | Internal Plugin | External Plugin |
+|-----|-----------------|-----------------|
+| SocialAPI | Full read/write | Read-only (GetPerson / GetTrait / GetRelations / GetNetwork / ListPersons) |
+| EventSubscriber | Subscribe + Publish | Subscribe-only (no Publish capability) |
+
+Extended fields:
+- Triple extensions: Confidence, SubjectType, ObjectType
+- Relation extension: Confidence
 
 ## Interrupt Mechanism
 
@@ -303,6 +347,7 @@ cmd/waiter/main.go         — CLI client (Unix socket)
 internal/
 ├── agent/
 │   ├── core/              — Agent core (eventLoop/process/stages/context)
+│   │   └── plugin_health.go — Plugin health monitoring and auto-restart
 │   ├── api/               — Provider interface + LuaAdaptedProvider
 │   ├── io/                — IOManager (queue/interrupt/output)
 │   └── personal.go        — Persona loading
