@@ -1464,6 +1464,16 @@ func (a *Agent) executeKnowledgeTool(tc agentAPI.ToolCall) string {
 		tree := a.knowledge.BuildTree()
 		return formatTree(tree, 0)
 
+	case "knowledge_delete":
+		name, _ := tc.Arguments["name"].(string)
+		if name == "" {
+			return "name 不能为空"
+		}
+		if err := a.knowledge.Remove(name); err != nil {
+			return fmt.Sprintf("知识删除失败: %v", err)
+		}
+		return fmt.Sprintf("知识「%s」已删除", name)
+
 	default:
 		return fmt.Sprintf("未知的知识工具: %s", tc.Name)
 	}
@@ -1830,6 +1840,20 @@ func (a *Agent) buildToolDefs() []interface{} {
 						"content": map[string]interface{}{"type": "string", "description": "知识内容，支持 Markdown"},
 					},
 					"required": []string{"name", "content"},
+				},
+			},
+		})
+		tools = append(tools, map[string]interface{}{
+			"type": "function",
+			"function": map[string]interface{}{
+				"name":        "knowledge_delete",
+				"description": "删除知识库中的指定知识条目。",
+				"parameters": map[string]interface{}{
+					"type": "object",
+					"properties": map[string]interface{}{
+						"name": map[string]interface{}{"type": "string", "description": "要删除的知识名称"},
+					},
+					"required": []string{"name"},
 				},
 			},
 		})

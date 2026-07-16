@@ -134,10 +134,6 @@ func (p *Plugin) Start(s *sdk.PluginSDK) error {
 			return map[string]interface{}{"error": "command is required"}, nil
 		}
 
-		if blocked, reason := isDangerousCommand(command); blocked {
-			return map[string]interface{}{"error": reason, "status": "denied"}, nil
-		}
-
 		timeoutStr, _ := args["timeout"].(string)
 		if timeoutStr == "" {
 			timeoutStr = p.defaultTimeout
@@ -218,6 +214,27 @@ func (p *Plugin) Start(s *sdk.PluginSDK) error {
 		}, nil
 	})
 
+	s.RegisterStageOwnTools(sdk.StageBeforeToolcall, func(ctx *sdk.StageContext) error {
+		if len(ctx.ToolCalls) == 0 {
+			return nil
+		}
+		tc := ctx.ToolCalls[0]
+		if tc.Name != "cmd_run" {
+			return nil
+		}
+		command, _ := tc.Arguments["command"].(string)
+		if command == "" {
+			return nil
+		}
+		if blocked, reason := isDangerousCommand(command); blocked {
+			ctx.Lock()
+			ctx.Response = &reason
+			ctx.Unlock()
+			return nil
+		}
+		return nil
+	})
+
 	return nil
 }
 
@@ -250,9 +267,9 @@ func isDangerousCommand(command string) (bool, string) {
 	pidStr := fmt.Sprintf("%d", pid)
 	lower := strings.ToLower(command)
 
-	dangerousPatterns := []string{
-		"homed",
-		pidStr,
+	selfTargets := []string{"homed", pidStr}
+	killCmds := []string{"kill ", "killall ", "pkill ", "kill -", "kill -9"}
+	serviceCmds := []string{
 		"systemctl stop homeagent",
 		"systemctl restart homeagent",
 		"systemctl kill homeagent",
@@ -260,20 +277,19 @@ func isDangerousCommand(command string) (bool, string) {
 		"service homeagent restart",
 	}
 
-	killPatterns := []string{"kill ", "killall ", "pkill ", "kill -", "kill -9"}
-
-	for _, kp := range killPatterns {
-		if strings.Contains(lower, kp) {
-			for _, target := range dangerousPatterns {
-				if strings.Contains(lower, strings.ToLower(target)) {
-					return true, fmt.Sprintf("命令被拦截：禁止向 homed 进程(pid=%s)发送信号", pidStr)
-				}
+	for _, kp := range killCmds {
+		if !strings.Contains(lower, kp) {
+			continue
+		}
+		for _, t := range selfTargets {
+			if strings.Contains(lower, strings.ToLower(t)) {
+				return true, fmt.Sprintf("命令被拦截：禁止向 homed 进程(pid=%s)发送信号", pidStr)
 			}
 		}
 	}
 
-	for _, dp := range dangerousPatterns[2:] {
-		if strings.Contains(lower, dp) {
+	for _, sc := range serviceCmds {
+		if strings.Contains(lower, sc) {
 			return true, fmt.Sprintf("命令被拦截：禁止操作 homed 服务进程(pid=%s)", pidStr)
 		}
 	}
