@@ -31,8 +31,7 @@ func (tc *toolCapture) RegisterAPI(name string) error                          {
 func setupPlugin() (*Plugin, *toolCapture, error) {
 	p := New("agentcli")
 	tc := newToolCapture()
-	// Use nil for fields we don't need (iom, eventBus, etc.)
-	sdk := sdk.New("agentcli", nil, nil, nil, nil, nil, nil, nil, nil, tc.RegisterTool, tc.RegisterStage, tc.RegisterAPI)
+	sdk := sdk.New("agentcli", sdk.SDKConfig{RegTool: tc.RegisterTool, RegStage: tc.RegisterStage, RegAPI: tc.RegisterAPI})
 	if err := p.Start(sdk); err != nil {
 		return nil, nil, err
 	}

@@ -8,6 +8,8 @@ require (
 	gopkg.in/yaml.v3 v3.0.1
 )
 
+require github.com/yanyiwu/gojieba v1.4.7 // indirect
+
 require gitcode.com/JianFeeeee/homeagent-sdk v0.0.0-20260708004841-e9bdcf9304b0 // direct
 
-replace gitcode.com/JianFeeeee/homeagent-sdk => ../homeagentsdk
+replace gitcode.com/JianFeeeee/homeagent-sdk => /tmp/opencode/homeagent-sdk-repo

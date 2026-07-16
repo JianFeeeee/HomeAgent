@@ -3,6 +3,7 @@ package io
 import (
 	"fmt"
 	"log"
+	"runtime/debug"
 	"sync"
 	"time"
 )
@@ -141,6 +142,12 @@ func (m *IOManager) RegisterDevice(dev Device) error {
 	}
 	m.devices[dev.Name()] = dev
 	return nil
+}
+
+func (m *IOManager) GetDevice(name string) Device {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	return m.devices[name]
 }
 
 func (m *IOManager) StartAll() error {
@@ -336,7 +343,7 @@ func (m *IOManager) GetAllTools() []ToolDef {
 	return tools
 }
 
-func (m *IOManager) ExecuteTool(name string, args map[string]interface{}) (interface{}, error) {
+func (m *IOManager) ExecuteTool(name string, args map[string]interface{}) (ret interface{}, err error) {
 	m.mu.RLock()
 	type nameDevice struct {
 		name string
@@ -356,6 +363,12 @@ func (m *IOManager) ExecuteTool(name string, args map[string]interface{}) (inter
 	if len(candidates) == 0 {
 		return nil, fmt.Errorf("tool %s not found", name)
 	}
+	defer func() {
+		if r := recover(); r != nil {
+			log.Printf("[io] tool %s execute panic: %v\n%s", name, r, debug.Stack())
+			err = fmt.Errorf("tool %s execute panic: %v", name, r)
+		}
+	}()
 	return candidates[0].dev.Execute(name, args)
 }
 

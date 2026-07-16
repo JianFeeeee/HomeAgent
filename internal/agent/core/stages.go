@@ -3,6 +3,7 @@ package core
 import (
 	"fmt"
 	"log"
+	"runtime/debug"
 	"sync"
 
 	sdk "gitcode.com/JianFeeeee/HomeAgent/internal/sdk"
@@ -53,7 +54,13 @@ func (h *StageHost) GetToolDefs() []sdk.ToolDef {
 	return defs
 }
 
-func (h *StageHost) ExecuteTool(name string, args map[string]interface{}) (interface{}, error) {
+func (h *StageHost) ExecuteTool(name string, args map[string]interface{}) (ret interface{}, err error) {
+	defer func() {
+		if r := recover(); r != nil {
+			log.Printf("[stage] tool %s handler panic: %v\n%s", name, r, debug.Stack())
+			err = fmt.Errorf("tool %s handler panic: %v", name, r)
+		}
+	}()
 	h.mu.RLock()
 	handler, ok := h.tools[name]
 	h.mu.RUnlock()
@@ -70,6 +77,22 @@ func (h *StageHost) ToolPlugin(name string) string {
 	h.mu.RLock()
 	defer h.mu.RUnlock()
 	return h.toolPlugins[name]
+}
+
+func (h *StageHost) UnregisterPluginTools(pluginName string) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+
+	var keepDefs []sdk.ToolDef
+	for _, def := range h.toolDefs {
+		if def.Plugin == pluginName {
+			delete(h.tools, def.Name)
+			delete(h.toolPlugins, def.Name)
+		} else {
+			keepDefs = append(keepDefs, def)
+		}
+	}
+	h.toolDefs = keepDefs
 }
 
 func inferToolPlugin(name string) string {
@@ -100,6 +123,11 @@ func (h *StageHost) RunStage(stage sdk.Stage, ctx *sdk.StageContext) {
 		wg.Add(1)
 		go func(fn sdk.StageHandler) {
 			defer wg.Done()
+			defer func() {
+				if r := recover(); r != nil {
+					log.Printf("[stage] handler panic: %v", r)
+				}
+			}()
 			if err := fn(ctx); err != nil {
 				errCh <- err
 			}

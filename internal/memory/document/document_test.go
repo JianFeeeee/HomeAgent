@@ -4,6 +4,8 @@ import (
 	"os"
 	"testing"
 	"time"
+
+	"gitcode.com/JianFeeeee/HomeAgent/internal/memory"
 )
 
 func TestInsertAndQuery(t *testing.T) {
@@ -186,7 +188,7 @@ func TestSummarizeEntries(t *testing.T) {
 }
 
 func TestExtractKeywords(t *testing.T) {
-	kws := extractKeywords("今天天气很好")
+	kws := memory.ExtractKeywords("今天天气很好")
 	if len(kws) == 0 {
 		t.Error("should extract keywords from Chinese text")
 	}

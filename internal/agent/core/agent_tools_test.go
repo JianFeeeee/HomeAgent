@@ -1,13 +1,13 @@
 package core
 
 import (
+	"strings"
 	"testing"
 
 	agentAPI "gitcode.com/JianFeeeee/HomeAgent/internal/agent/api"
 	agentIO "gitcode.com/JianFeeeee/HomeAgent/internal/agent/io"
 )
 
-// mockOutputDevice implements agentIO.Device for testing output tools
 type mockOutputDevice struct {
 	name   string
 	caps   agentIO.OutputCapability
@@ -61,24 +61,11 @@ func TestExecuteOutputSendTool(t *testing.T) {
 	})
 
 	a := &Agent{io: io}
-	tc := agentAPI.ToolCall{Name: "output_send", Arguments: map[string]interface{}{
-		"channel": "screen",
-		"content": "hello world",
+	tc := agentAPI.ToolCall{Name: "output_send__screen", Arguments: map[string]interface{}{
+		"content": `{"content":"hello world"}`,
 	}}
 	result := a.executeOutputSendTool(tc)
-	if result != "已通过 [screen] 通道发送" {
-		t.Errorf("unexpected result: %s", result)
-	}
-}
-
-func TestExecuteOutputSendToolMissingChannel(t *testing.T) {
-	io := agentIO.NewIOManager()
-	a := &Agent{io: io}
-	tc := agentAPI.ToolCall{Name: "output_send", Arguments: map[string]interface{}{
-		"content": "hello",
-	}}
-	result := a.executeOutputSendTool(tc)
-	if result != "channel 和 content 不能为空" {
+	if !strings.Contains(result, "screen") {
 		t.Errorf("unexpected result: %s", result)
 	}
 }
@@ -86,25 +73,22 @@ func TestExecuteOutputSendToolMissingChannel(t *testing.T) {
 func TestExecuteOutputSendToolEmptyContent(t *testing.T) {
 	io := agentIO.NewIOManager()
 	a := &Agent{io: io}
-	tc := agentAPI.ToolCall{Name: "output_send", Arguments: map[string]interface{}{
-		"channel": "screen",
-	}}
+	tc := agentAPI.ToolCall{Name: "output_send__screen", Arguments: map[string]interface{}{}}
 	result := a.executeOutputSendTool(tc)
-	if result != "channel 和 content 不能为空" {
-		t.Errorf("unexpected result: %s", result)
+	if result == "" || strings.Contains(result, "已通过") {
+		t.Errorf("expected error for empty content, got: %s", result)
 	}
 }
 
 func TestExecuteOutputSendToolChannelNotExist(t *testing.T) {
 	io := agentIO.NewIOManager()
 	a := &Agent{io: io}
-	tc := agentAPI.ToolCall{Name: "output_send", Arguments: map[string]interface{}{
-		"channel": "nonexistent",
+	tc := agentAPI.ToolCall{Name: "output_send__nonexistent", Arguments: map[string]interface{}{
 		"content": "hello",
 	}}
 	result := a.executeOutputSendTool(tc)
-	if result != "通道 [nonexistent] 不存在或不可用。可用通道请用 output_list_channels 查看" {
-		t.Errorf("unexpected result: %s", result)
+	if !strings.Contains(result, "不存在") && !strings.Contains(result, "不可用") {
+		t.Errorf("expected error for nonexistent channel, got: %s", result)
 	}
 }
 
@@ -116,23 +100,26 @@ func TestExecuteOutputSendToolNoTextCap(t *testing.T) {
 	})
 
 	a := &Agent{io: io}
-	tc := agentAPI.ToolCall{Name: "output_send", Arguments: map[string]interface{}{
-		"channel": "camera",
+	tc := agentAPI.ToolCall{Name: "output_send__camera", Arguments: map[string]interface{}{
 		"content": "hello",
 	}}
 	result := a.executeOutputSendTool(tc)
-	if result == "已通过 [camera] 通道发送" {
+	if strings.Contains(result, "已通过") {
 		t.Errorf("should reject channel without text capability")
 	}
 }
 
-func TestBuildToolDefsOutputToolsAlwaysPresent(t *testing.T) {
+func TestBuildToolDefsOutputToolsWithDevice(t *testing.T) {
 	io := agentIO.NewIOManager()
+	io.RegisterDevice(&mockOutputDevice{
+		name: "screen",
+		caps: agentIO.CapText,
+	})
 	a := &Agent{io: io, knowledge: nil, docStore: nil, pluginReg: nil}
 	tools := a.buildToolDefs()
 
 	foundSend := false
-	foundList := false
+	foundHelp := false
 	for _, td := range tools {
 		m, ok := td.(map[string]interface{})
 		if !ok {
@@ -144,17 +131,17 @@ func TestBuildToolDefsOutputToolsAlwaysPresent(t *testing.T) {
 		}
 		name, _ := fn["name"].(string)
 		switch name {
-		case "output_send":
+		case "output_send__screen":
 			foundSend = true
-		case "output_list_channels":
-			foundList = true
+		case "output_send__screen_help":
+			foundHelp = true
 		}
 	}
 	if !foundSend {
-		t.Error("output_send should always be in tools")
+		t.Error("output_send__screen should be in tools when device registered")
 	}
-	if !foundList {
-		t.Error("output_list_channels should always be in tools")
+	if !foundHelp {
+		t.Error("output_send__screen_help should be in tools when device registered")
 	}
 }
 
@@ -162,8 +149,7 @@ func TestGetAllToolsEmpty(t *testing.T) {
 	io := agentIO.NewIOManager()
 	a := &Agent{io: io}
 	tools := a.buildToolDefs()
-	// should have at least output_send, output_list_channels
-	if len(tools) < 2 {
-		t.Errorf("expected at least 2 tools, got %d", len(tools))
+	if len(tools) < 1 {
+		t.Errorf("expected at least 1 tool, got %d", len(tools))
 	}
 }

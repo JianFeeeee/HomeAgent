@@ -2,18 +2,21 @@ package events
 
 import (
 	"fmt"
+	"log"
 	"sync"
 )
 
 type EventType string
 
 const (
-	EventRawInput    EventType = "raw_input"
-	EventAgentOutput EventType = "agent_output"
-	EventToolCall    EventType = "tool_call"
-	EventReasoning   EventType = "reasoning"
-	EventSystem      EventType = "system"
-	EventAll         EventType = "*"
+	EventRawInput       EventType = "raw_input"
+	EventAgentOutput    EventType = "agent_output"
+	EventAgentLLMChain  EventType = "agent_llm_chain"
+	EventToolCall       EventType = "tool_call"
+	EventReasoning      EventType = "reasoning"
+	EventStage          EventType = "stage"
+	EventSystem         EventType = "system"
+	EventAll            EventType = "*"
 )
 
 type Event struct {
@@ -45,11 +48,20 @@ func (b *Bus) Publish(evt *Event) {
 	b.mu.RUnlock()
 
 	for _, h := range allHandlers {
-		h(evt)
+		b.safeCall(h, evt)
 	}
 	for _, h := range typeHandlers {
-		h(evt)
+		b.safeCall(h, evt)
 	}
+}
+
+func (b *Bus) safeCall(h Handler, evt *Event) {
+	defer func() {
+		if r := recover(); r != nil {
+			log.Printf("[bus] handler panic: %v", r)
+		}
+	}()
+	h(evt)
 }
 
 func (b *Bus) Subscribe(eventType EventType, handler Handler) func() {

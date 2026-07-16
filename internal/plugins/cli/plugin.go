@@ -70,6 +70,7 @@ func New(name, socketPath string) *Plugin {
 func (p *Plugin) Name() string { return p.name }
 
 func (p *Plugin) Start(s *sdk.PluginSDK) error {
+	s.SetAutoRestart(true)
 	s.Settings().RegisterDef(sdk.ConfigDef{
 		Key: "api_key", Type: "password", DisplayName: "CLI API 密钥",
 		Description: "CLI 客户端连接时需提供的认证密钥（留空则使用 WebUI 密钥）",
