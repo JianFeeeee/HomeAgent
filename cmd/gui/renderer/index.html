@@ -5,6 +5,10 @@
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>HomeAgent</title>
 <link rel="stylesheet" href="style.css">
+<script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js" onerror="window._THREE_FAILED=true"></script>
+<script src="https://cdn.jsdelivr.net/npm/three@0.128.0/examples/js/controls/OrbitControls.js" onerror="window._THREE_FAILED=true"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/marked/4.3.0/marked.min.js" onerror="console.warn('marked CDN failed')"></script>
+<script>setTimeout(function(){if(!window.THREE)window._THREE_FAILED=true},8000)</script>
 </head>
 <body>
 
@@ -19,7 +23,7 @@
       <input id="conn-name" placeholder="My HomeAgent">
       <label>地址 / URL</label>
       <input id="conn-url" placeholder="http://localhost:8080">
-      <label>API 密钥 / API Key</label>
+      <label>API 密钥 / API Key <span style="color:var(--text-muted);font-weight:400">(可选)</span></label>
       <input id="conn-key" type="password" placeholder="sk-...">
       <div class="conn-form-actions">
         <button class="btn btn-ghost" onclick="cancelConnForm()">取消 / Cancel</button>
@@ -32,26 +36,26 @@
 
 <!-- Main App -->
 <div id="app" style="display:none">
-  <!-- Top Bar -->
   <nav>
     <h1>HomeAgent</h1>
-    <a class="active" onclick="switchTab('overview')">概览</a>
-    <a onclick="switchTab('chat')">对话</a>
-    <a onclick="switchTab('plugins')">插件</a>
-    <a onclick="switchTab('settings')">设置</a>
-    <a onclick="switchTab('adapters')">适配器</a>
-    <a onclick="switchTab('kernel')">内核</a>
+    <a class="active" onclick="switchTab('overview')" data-i18n="navOverview">概览</a>
+    <a onclick="switchTab('chat')" data-i18n="navChat">对话</a>
+    <a onclick="switchTab('plugins')" data-i18n="navPlugins">插件</a>
+    <a onclick="switchTab('settings')" data-i18n="navSettings">设置</a>
+    <a onclick="switchTab('adapters')" data-i18n="navAdapters">适配器</a>
+    <a onclick="switchTab('kernel')" data-i18n="navKernel">内核</a>
     <div style="margin-left:auto;display:flex;align-items:center;gap:8px">
       <span id="conn-status" class="conn-indicator" onclick="openConnManager()" title="点击管理连接">
         <span class="status-dot dot-gray" id="conn-dot"></span>
         <span id="conn-name-display">未连接</span>
         <span style="font-size:10px;margin-left:4px;opacity:0.6">▼</span>
       </span>
-      <button class="theme-btn" onclick="toggleTheme()" id="theme-btn">🌙</button>
+      <span id="lang-btn" class="theme-btn" onclick="toggleLang()" style="font-size:13px;min-width:28px;cursor:pointer;padding:4px 8px;border:1px solid var(--border-color);border-radius:6px;text-align:center">EN</span>
+      <button class="theme-btn" onclick="toggleTheme()" id="theme-btn" title="切换亮色/暗色模式">🌙</button>
     </div>
   </nav>
 
-  <div class="container" id="content">
+  <div class="container" id="app-content">
     <div id="tab-overview" class="tab-content active"></div>
     <div id="tab-chat" class="tab-content"></div>
     <div id="tab-plugins" class="tab-content"></div>
