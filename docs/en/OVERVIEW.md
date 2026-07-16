@@ -19,7 +19,7 @@ Core architecture: a long-running kernel process (`homed`) that connects to vari
 The significance: the kernel stays pure (zero IO, only orchestration and memory), plugins stay flexible (each does its job, hot-loadable), with no cross-contamination.
 
 **Three-Layer Memory Architecture** — Solves the memory decay problem for long-running agents:
-- **Context Layer**: In-memory TF-IDF scored event window, maintains recent context in real-time, low-relevance events automatically sink to the next layer
+- **Context Layer**: In-memory local word embedding scored event window (jieba + TF-IDF + PMI → CosineSimilarity), maintains recent context in real-time, low-relevance events automatically sink to the next layer
 - **Document Layer**: JSON files + TF-IDF vector-indexed temporary memory, supports explicit submission and implicit archival, cold data distills to Graph
 - **Graph Layer**: SQLite graph database, persists entities and relations, BFS traversal recall, distillation pipeline extracts triples from conversations
 
@@ -33,7 +33,7 @@ Code is in the project root, implemented in Go.
 - Maintains a message loop (`eventLoop`), queuing input from the IO layer
 - Each input goes through the full processing pipeline: memory recall → persona injection → LLM call → tool execution → output delivery
 - LLM calls abstracted through Provider interface, supports 8 LLM sources with automatic fallback
-- Context management (`context.go`) based on TF-IDF scoring, automatic pruning of low-relevance events
+- Context management (`context.go`) based on word embedding scoring (LocalWordEmbedder → CosineSimilarity), automatic pruning of low-relevance events
 
 **Memory System** (`internal/memory/`):
 - **GraphDB** (`graph.go`) — SQLite, entities + relations tables, BFS traversal
