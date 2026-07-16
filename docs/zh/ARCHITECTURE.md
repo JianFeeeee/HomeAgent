@@ -128,16 +128,17 @@ eventLoop() → processTextInput()
 - **滑动窗口（size=5）** 统计词对共现 → **PMI（点互信息）** → 保留 top 50
 - **向量化**：`vec[ctx] += TF-IDF × PMI` + 自身上标 `__w__` + TF-IDF
 
-**策略 B — char-bigram TF-IDF**（`TFIDFVectorizer`, `internal/memory/vector/`），用于 Document 和 Indexer 层：
+**策略 B — char-bigram TF-IDF + jieba 关键词提取**（`TFIDFVectorizer` + `ExtractKeywords`），用于 Document 和 Indexer 层：
 
-- **char bigram 分词**（1-2 gram）
+- **char bigram 分词**（1-2 gram）用于实体名向量搜索
+- **jieba 分词**用于关键词提取，配合 SQLite LIKE + BFS 遍历
 - **TF-IDF 权重** + **倒排索引**
 
 | 位置 | 文件 | 用途 | 算法 |
 |------|------|------|------|
 | Context Prune | `context.go:161` | 裁剪低相关性上下文事件 | LocalWordEmbedder → CosineSimilarity(queryVec, evt.Vector) |
-| DocStore Query | `document.go:198` | 从文档记忆召回相关内容 | InvertedIndex + CosineSimilarity |
-| Indexer 实体搜索 | `indexer.go:149` | 从Graph召回相关实体 | InvertedIndex + CosineSimilarity |
+| DocStore Query | `document.go:198` | 从文档记忆召回相关内容 | char-bigram TF-IDF + jieba 关键词 → InvertedIndex + CosineSimilarity |
+| Indexer 实体搜索 | `indexer.go:149` | 从Graph召回相关实体 | char-bigram TF-IDF 向量搜索 + jieba 关键词 → InvertedIndex + CosineSimilarity + SQLite BFS |
 | 实体相似度检测 | `agent.go:2297` | 检测Graph中相似实体 | Bigram Jaccard (>0.75 → consolidation) |
 
 ### Context 层
@@ -151,7 +152,7 @@ eventLoop() → processTextInput()
 
 `internal/memory/document/document.go` — `Store`
 - 消费即删模式：`doc_query` 检索到后删除
-- TF-IDF 索引 character bigram + 倒排
+- 双路召回：char-bigram TF-IDF 向量搜索 + jieba 关键词提取
 
 ### Graph 层
 
@@ -174,7 +175,7 @@ eventLoop() → processTextInput()
 
 - **Social** (`internal/memory/social/social.go`) — 人格特质和关系网，包装 GraphDB 实体类型
 - **Text Memory** (`internal/memory/text/text.go`) — 原始对话 JSONL 日志，轮转策略
-- **Memory Indexer** (`internal/memory/indexer.go`) — 实体向量化，自动注入 system prompt
+- **Memory Indexer** (`internal/memory/indexer.go`) — 实体向量化 + jieba 关键词提取，自动注入 system prompt
 
 ### 蒸馏管道
 
