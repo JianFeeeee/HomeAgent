@@ -2007,7 +2007,7 @@ func (a *Agent) buildToolDefs() []interface{} {
 	}
 
 	// 输出通道工具 — 每注册通道生成两个工具：
-	//   output_send__{name} (type=output) — 向该通道发送内容
+	//   output_send__{name} (type=function) — 向该通道发送内容
 	//   output_send__{name}_help (type=function) — 查看该通道的 JSON 格式说明
 	channels := a.io.ListChannels()
 	for _, ch := range channels {
@@ -2022,7 +2022,7 @@ func (a *Agent) buildToolDefs() []interface{} {
 
 		// 输出门工具
 		tools = append(tools, map[string]interface{}{
-			"type": "output",
+			"type": "function",
 			"function": map[string]interface{}{
 				"name":        "output_send__" + ch.Name,
 				"description": desc + "。能力: " + capStr + "。content 参数为 JSON 字符串，具体格式请调用 output_send__" + ch.Name + "_help 查看。",
