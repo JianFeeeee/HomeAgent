@@ -82,6 +82,10 @@ return adapter
 
 `log(level, message)` — Output log (level: info/warn/error)
 
+`http_get(url)` — Perform HTTP GET request, returns response body as string
+
+`http_post(url, body)` — Perform HTTP POST request, returns response body as string
+
 ## Adapting Typical APIs
 
 | API | endpoint | auth method | Format differences |

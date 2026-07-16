@@ -266,10 +266,10 @@ s.Settings().GetPlugin("other_plugin", "some_key")
 
 ```go
 // 排队投递（按序处理）
-s.InjectInput(source, channel string, payload map[string]interface{})
+s.InjectInput(source, channel, eventType string, payload map[string]interface{})
 
 // 中断投递（可打断当前 LLM 处理）
-s.InjectInterrupt(source, channel string, payload map[string]interface{})
+s.InjectInterrupt(source, channel, eventType string, payload map[string]interface{})
 
 // 快捷方式
 s.InjectText(source, channel, text string)
@@ -319,7 +319,15 @@ s.Publish(&events.Event{
 #### IO 通道管理（内置插件）
 
 ```go
-// 注册通道（绑定设备驱动）
+// 注册通道（绑定设备驱动），dev 必须实现 agentIO.Device 接口：
+//   Name() string
+//   Type() DeviceType
+//   Description() string
+//   Tools() []ToolDef
+//   Execute(tool string, args map[string]interface{}) (interface{}, error)
+//   Start() error
+//   Stop() error
+//   OutputCapabilities() OutputCapability
 s.RegisterChannel("mydevice", deviceImpl)
 
 // 注销通道

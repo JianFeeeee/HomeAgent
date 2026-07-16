@@ -265,10 +265,10 @@ s.Settings().GetPlugin("other_plugin", "some_key")
 
 ```go
 // Queued delivery (processed in order)
-s.InjectInput(source, channel string, payload map[string]interface{})
+s.InjectInput(source, channel, eventType string, payload map[string]interface{})
 
 // Interrupt delivery (can interrupt current LLM processing)
-s.InjectInterrupt(source, channel string, payload map[string]interface{})
+s.InjectInterrupt(source, channel, eventType string, payload map[string]interface{})
 
 // Shortcuts
 s.InjectText(source, channel, text string)
@@ -318,7 +318,15 @@ s.Publish(&events.Event{
 #### IO Channel Management (built-in plugins)
 
 ```go
-// Register a channel (bind device driver)
+// Register a channel (bind device driver), dev must implement the agentIO.Device interface:
+//   Name() string
+//   Type() DeviceType
+//   Description() string
+//   Tools() []ToolDef
+//   Execute(tool string, args map[string]interface{}) (interface{}, error)
+//   Start() error
+//   Stop() error
+//   OutputCapabilities() OutputCapability
 s.RegisterChannel("mydevice", deviceImpl)
 
 // Unregister a channel

@@ -37,7 +37,7 @@ Code is in the project root, implemented in Go.
 
 **Memory System** (`internal/memory/`):
 - **GraphDB** (`graph.go`) — SQLite, entities + relations tables, BFS traversal
-- **Document Store** (`document/doc.go`) — Temporary memory, JSON files + TF-IDF vector index, consume-on-read
+- **Document Store** (`document/document.go`) — Temporary memory, JSON files + TF-IDF vector index, consume-on-read
 - **Text Memory** (`text/text.go`) — Raw conversation logs, JSONL file rotation
 - **Social Store** (`social/social.go`) — Persona traits + relationship network, wraps GraphDB
 - **Memory Indexer** (`indexer.go`) — Auto-vectorizes GraphDB entities, recalls and injects into system prompt on user input
@@ -50,7 +50,7 @@ Code is in the project root, implemented in Go.
 **Plugin System** (`internal/plugin/`):
 - Built-in plugins: Go `init()` self-registration, compiled into kernel
 - External plugins: Go `-buildmode=plugin` compiled to `.so`/`.dll`, dynamically loaded via `plugin.Open`; also supports Lua script plugins
-- PluginSDK (`internal/sdk/`) defines three channels: RegisterTool / RegisterStage / Subscribe
+- PluginSDK (`internal/sdk/`) defines four channels: RegisterTool / RegisterStage / Subscribe / RegisterOutputChannel
 - 7 stage hooks: on_input → pre_action → post_action → before_toolcall → after_toolcall → before_output → after_output
 
 **LLM Provider** (`internal/agent/api/provider.go`):
