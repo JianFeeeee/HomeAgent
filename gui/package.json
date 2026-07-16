@@ -1,0 +1,13 @@
+{
+  "name": "homeagent-gui",
+  "version": "1.0.0",
+  "description": "HomeAgent Desktop GUI - Multi-connection management dashboard",
+  "main": "main.js",
+  "scripts": {
+    "start": "electron . --no-sandbox",
+    "dev": "electron . --no-sandbox --dev"
+  },
+  "dependencies": {
+    "electron": "^33.0.0"
+  }
+}

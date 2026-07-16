@@ -42,7 +42,7 @@ func TestBridgeE2E_WebPlugin(t *testing.T) {
 	}
 
 	sett := sdk.NewSettings("web", nil)
-	psdk := sdk.New("web", nil, nil, nil, nil, nil, nil, nil, sett, regTool, regStage, regAPI)
+	psdk := sdk.New("web", sdk.SDKConfig{Settings: sett, RegTool: regTool, RegStage: regStage, RegAPI: regAPI})
 
 	plg, err := newDLLPlugin(dllPath, "web", nil)
 	if err != nil {
@@ -136,11 +136,11 @@ func TestBridgeE2E_SanitizerStages(t *testing.T) {
 	}
 
 	sett := sdk.NewSettings("sanitizer", nil)
-	psdk := sdk.New("sanitizer", nil, nil, nil, nil, nil, nil, nil, sett,
-		func(name string, def sdk.ToolDef, handler sdk.ToolHandler) error { return nil },
-		regStage,
-		func(name string) error { return nil },
-	)
+	psdk := sdk.New("sanitizer", sdk.SDKConfig{Settings: sett,
+		RegTool: func(name string, def sdk.ToolDef, handler sdk.ToolHandler) error { return nil },
+		RegStage: regStage,
+		RegAPI:   func(name string) error { return nil },
+	})
 
 	plg, err := newDLLPlugin(dllPath, "sanitizer", nil)
 	if err != nil {

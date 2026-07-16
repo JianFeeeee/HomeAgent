@@ -350,8 +350,9 @@ func (r *ConfigRegistry) seedDBValues(dataDir string) {
 	set("core.agent.workdir", "")
 	set("core.agent.system_prompt", `你是 HomeAgent，一个持续运行的个人管家。
 你的回复默认发送到用户的输入来源，无需额外工具。
-如需异步发送消息到其他通道，使用 output_send。
-使用 output_list_channels 查看可用通道。
+输出回复请使用 output_send__{通道名} 工具，content 为 JSON 字符串。用 output_list_channels 查看可用通道。
+使用 output_send__{通道名}_help 查看每个通道的 JSON 格式说明。
+输出通道可多次调用，长消息应当分多次发出而不是一口气发完。
 
 当用户上传图片或音频时，系统会自动附着媒体内容。如果模型不支持直接处理多媒体，请调用对应的媒体处理工具。
 

@@ -38,6 +38,7 @@ type IOInjector = pubsdk.IOInjector
 type ToolRegistrar = pubsdk.ToolRegistrar
 type StageRegistrar = pubsdk.StageRegistrar
 type APIRegistrar = pubsdk.APIRegistrar
+type OutputChannelRegistrar = pubsdk.OutputChannelRegistrar
 
 type PluginSDK struct {
 	*pubsdk.PluginSDK
@@ -68,23 +69,36 @@ func (a ioAdapter) InjectTextNoMemory(source, channel, text string) {
 	}
 }
 
-func New(name string, iom *agentIO.IOManager, eventBus *events.Bus, mem MemoryAPI,
-	textMem TextMemoryAPI, docMem DocMemoryAPI, know KnowledgeAPI, llm LLMAPI,
-	sett SettingsAPI, regTool ToolRegistrar, regStage StageRegistrar, regAPI APIRegistrar,
-) *PluginSDK {
-	base := pubsdk.New(name, sett, regTool, regStage, regAPI)
-	if iom != nil {
-		base.SetIOInjector(ioAdapter{iom: iom})
+// SDKConfig holds all dependencies for creating a PluginSDK.
+type SDKConfig struct {
+	IOManager  *agentIO.IOManager
+	EventBus   *events.Bus
+	Memory     MemoryAPI
+	TextMemory TextMemoryAPI
+	DocMemory  DocMemoryAPI
+	Knowledge  KnowledgeAPI
+	LLM        LLMAPI
+	Settings   SettingsAPI
+	RegTool    ToolRegistrar
+	RegStage   StageRegistrar
+	RegAPI     APIRegistrar
+	RegOutput  OutputChannelRegistrar
+}
+
+func New(name string, cfg SDKConfig) *PluginSDK {
+	base := pubsdk.New(name, cfg.Settings, cfg.RegTool, cfg.RegStage, cfg.RegAPI, cfg.RegOutput)
+	if cfg.IOManager != nil {
+		base.SetIOInjector(ioAdapter{iom: cfg.IOManager})
 	}
-	base.SetMemoryAPI(mem)
-	base.SetTextMemoryAPI(textMem)
-	base.SetDocMemoryAPI(docMem)
-	base.SetKnowledgeAPI(know)
-	base.SetLLMAPI(llm)
+	base.SetMemoryAPI(cfg.Memory)
+	base.SetTextMemoryAPI(cfg.TextMemory)
+	base.SetDocMemoryAPI(cfg.DocMemory)
+	base.SetKnowledgeAPI(cfg.Knowledge)
+	base.SetLLMAPI(cfg.LLM)
 	return &PluginSDK{
 		PluginSDK: base,
-		iom:       iom,
-		eventBus:  eventBus,
+		iom:       cfg.IOManager,
+		eventBus:  cfg.EventBus,
 		logger:    log.Default(),
 	}
 }

@@ -177,6 +177,7 @@ func New(name string) *Plugin {
 func (p *Plugin) Name() string { return p.name }
 
 func (p *Plugin) Start(s *sdk.PluginSDK) error {
+	s.SetAutoRestart(true)
 	s.Settings().RegisterDef(sdk.ConfigDef{
 		Key: "default_timeout", Type: "string", DisplayName: "默认终端超时",
 		Description: "终端自动关闭的默认时间，例如 5m, 10m, 30m, 1h（默认 5m）",

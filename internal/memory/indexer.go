@@ -94,7 +94,7 @@ func (idx *Indexer) BuildContext(userInput string) *InjectedContext {
 	vectorEntities := idx.vectorSearchEntities(userInput)
 
 	// 2. 关键词搜索：已有逻辑
-	keywords := extractKeywords(userInput)
+	keywords := ExtractKeywords(userInput)
 	if len(keywords) == 0 && len(vectorEntities) == 0 {
 		keywords = []string{userInput}
 	}
@@ -280,46 +280,6 @@ func (idx *Indexer) GetToolDefinitions() []map[string]interface{} {
 			},
 		},
 	}
-}
-
-func extractKeywords(input string) []string {
-	stopWords := map[string]bool{
-		"的": true, "了": true, "是": true, "在": true, "有": true,
-		"和": true, "就": true, "不": true, "人": true, "都": true,
-		"一": true, "一个": true, "上": true, "也": true, "很": true,
-		"到": true, "说": true, "要": true, "去": true, "你": true,
-		"会": true, "着": true, "没有": true, "看": true, "好": true,
-		"自己": true, "这": true, "他": true, "她": true, "它": true,
-		"什么": true, "怎么": true, "为什么": true, "如何": true,
-	}
-
-	var keywords []string
-	seen := make(map[string]bool)
-
-	runes := []rune(input)
-
-	bigram := []rune{}
-	for _, r := range runes {
-		bigram = append(bigram, r)
-		if len(bigram) >= 2 {
-			word := string(bigram)
-			if !stopWords[word] && !seen[word] {
-				seen[word] = true
-				keywords = append(keywords, word)
-			}
-			bigram = bigram[1:]
-		}
-	}
-
-	if len(keywords) == 0 && len(runes) > 0 {
-		keywords = []string{string(runes)}
-	}
-
-	if len(keywords) > 5 {
-		keywords = keywords[:5]
-	}
-
-	return keywords
 }
 
 func buildIndexSummary(entities []Entity) string {

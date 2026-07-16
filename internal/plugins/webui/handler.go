@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"log"
 	"net/http"
 	"os"
 	"sort"
@@ -131,10 +132,33 @@ func NewHandler(sup *supervisor.Daemon, mem *memory.GraphDB, sk *skill.Manager, 
 		sessions:       make(map[string]time.Time),
 		termStates:     make(map[string]*termState),
 	}
+	h.loadChatHistory()
 	if evBus != nil {
 		go h.trackToolEvents()
 	}
 	return h
+}
+
+func (h *Handler) loadChatHistory() {
+	if h.cfgReg == nil {
+		return
+	}
+	ps := h.cfgReg.PluginConfig("webui")
+	v, err := ps.Get("chathistory")
+	if err != nil || v == nil {
+		return
+	}
+	s, ok := v.(string)
+	if !ok || s == "" {
+		return
+	}
+	var msgs []ChatMsg
+	if err := json.Unmarshal([]byte(s), &msgs); err != nil {
+		return
+	}
+	h.chatMu.Lock()
+	h.chatHistory = msgs
+	h.chatMu.Unlock()
 }
 
 func (h *Handler) trackToolEvents() {
@@ -408,7 +432,7 @@ func (h *Handler) handleStatus(w http.ResponseWriter, r *http.Request) {
 	agents := h.supervisor.ListAgents()
 	writeJSON(w, http.StatusOK, map[string]interface{}{
 		"status":    "running",
-		"uptime":    time.Since(h.startTime).String(),
+		"uptime":    time.Since(h.startTime).Round(time.Second).String(),
 		"agents":    len(agents),
 		"version":   meta.Version,
 		"startedAt": h.startTime,
@@ -843,11 +867,17 @@ func (h *Handler) handleNetwork(w http.ResponseWriter, r *http.Request) {
 
 func (h *Handler) addChatMsg(msg ChatMsg) {
 	h.chatMu.Lock()
-	defer h.chatMu.Unlock()
 	h.chatHistory = append(h.chatHistory, msg)
 	if len(h.chatHistory) > maxChatHistory {
 		h.chatHistory = h.chatHistory[len(h.chatHistory)-maxChatHistory:]
 	}
+	// persist to webui config table as compact JSON
+	if h.cfgReg != nil {
+		ps := h.cfgReg.PluginConfig("webui")
+		b, _ := json.Marshal(h.chatHistory)
+		ps.Set("chathistory", string(b))
+	}
+	h.chatMu.Unlock()
 }
 
 func (h *Handler) handleChatHistory(w http.ResponseWriter, r *http.Request) {
@@ -944,23 +974,36 @@ func (h *Handler) handleChatEvents(w http.ResponseWriter, r *http.Request) {
 	defer close(writeCh)
 
 	go func() {
+		defer func() {
+			if r := recover(); r != nil {
+				log.Printf("[SSE] writer panic: %v", r)
+			}
+		}()
 		for line := range writeCh {
 			fmt.Fprintf(w, "%s\n", line)
 			flusher.Flush()
 		}
 	}()
 
-	subTypes := []string{"agent_output", "reasoning", "agent_error", "tool_call"}
+	subTypes := []string{"agent_output", "reasoning", "agent_error", "tool_call", "stage", "agent_llm_chain"}
+	var unsubs []func()
 	for _, t := range subTypes {
 		t2 := t
-		_ = h.eventBus.Subscribe(events.EventType(t2), func(evt *events.Event) {
+		unsub := h.eventBus.Subscribe(events.EventType(t2), func(evt *events.Event) {
 			data, _ := json.Marshal(evt)
 			select {
-			case writeCh <- fmt.Sprintf("event: %s\ndata: %s", evt.Type, string(data)):
+			case writeCh <- fmt.Sprintf("event: %s\ndata: %s\n", evt.Type, string(data)):
 			default:
+				log.Printf("[SSE] DROPPED event %s (writeCh full, len=%d)", evt.Type, len(writeCh))
 			}
 		})
+		unsubs = append(unsubs, unsub)
 	}
+	defer func() {
+		for _, unsub := range unsubs {
+			unsub()
+		}
+	}()
 	for {
 		select {
 		case <-done:

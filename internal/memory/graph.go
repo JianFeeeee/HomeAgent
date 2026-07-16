@@ -132,6 +132,9 @@ func (g *GraphDB) Commit(triples []Triple, sessionID string, turnID int) (int, i
 		if t.Subject == "" || t.Relation == "" || t.Object == "" {
 			continue
 		}
+		if !validEntityName(t.Subject) || !validEntityName(t.Object) {
+			continue
+		}
 
 		subjType := t.SubjectType
 		if subjType == "" {
@@ -161,11 +164,11 @@ func (g *GraphDB) Commit(triples []Triple, sessionID string, turnID int) (int, i
 		var sourceID, targetID int64
 		err = tx.QueryRow("SELECT id FROM entities WHERE name = ?", t.Subject).Scan(&sourceID)
 		if err != nil {
-			return 0, 0, err
+			return 0, 0, fmt.Errorf("subject %q: %w", t.Subject, err)
 		}
 		err = tx.QueryRow("SELECT id FROM entities WHERE name = ?", t.Object).Scan(&targetID)
 		if err != nil {
-			return 0, 0, err
+			return 0, 0, fmt.Errorf("object %q: %w", t.Object, err)
 		}
 
 		_, err = tx.Exec(
@@ -186,7 +189,27 @@ func (g *GraphDB) Commit(triples []Triple, sessionID string, turnID int) (int, i
 	return entitiesCreated, relationsCreated, nil
 }
 
+func validEntityName(name string) bool {
+	if name == "" {
+		return false
+	}
+	r := []rune(name)
+	if len(r) < 2 || len(r) > 50 {
+		return false
+	}
+	hasLetter := false
+	for _, ch := range r {
+		if (ch >= 'a' && ch <= 'z') || (ch >= 'A' && ch <= 'Z') || (ch >= '\u4e00' && ch <= '\u9fff') || ch == '-' || ch == '_' {
+			hasLetter = true
+		}
+	}
+	return hasLetter
+}
+
 func (g *GraphDB) upsertEntity(tx *sql.Tx, name string, entityType string) (int, error) {
+	if !validEntityName(name) {
+		return 0, nil
+	}
 	result, err := tx.Exec(
 		`INSERT INTO entities (name, type) VALUES (?, ?)
 		 ON CONFLICT(name) DO UPDATE SET

@@ -113,6 +113,7 @@ func New(name string) *Plugin {
 func (p *Plugin) Name() string { return p.name }
 
 func (p *Plugin) Start(s *sdk.PluginSDK) error {
+	s.SetAutoRestart(true)
 	p.autoInterval = 30 * time.Minute
 	p.llmTimeout = 120 * time.Second
 	p.llmMaxTurns = 20

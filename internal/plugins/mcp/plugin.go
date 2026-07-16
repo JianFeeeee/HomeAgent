@@ -41,6 +41,7 @@ func New(name string) *Plugin {
 func (p *Plugin) Name() string { return p.name }
 
 func (p *Plugin) Start(s *sdk.PluginSDK) error {
+	s.SetAutoRestart(true)
 	cfgs, err := p.loadConfig(s)
 	if err != nil {
 		return fmt.Errorf("load mcp config: %w", err)
