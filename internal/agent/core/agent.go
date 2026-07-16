@@ -1027,6 +1027,22 @@ func (a *Agent) executeToolCall(tc agentAPI.ToolCall) (ret string) {
 			ret = fmt.Sprintf("工具 %s 执行崩溃: %v", tc.Name, r)
 		}
 	}()
+
+	done := make(chan string, 1)
+	go func() {
+		done <- a.executeToolCallInner(tc)
+	}()
+
+	select {
+	case result := <-done:
+		return result
+	case <-time.After(60 * time.Second):
+		log.Printf("[agent] tool %s timed out after 60s", tc.Name)
+		return fmt.Sprintf("工具 %s 执行超时（60秒），已取消", tc.Name)
+	}
+}
+
+func (a *Agent) executeToolCallInner(tc agentAPI.ToolCall) string {
 	switch {
 	case strings.HasPrefix(tc.Name, "memory_"):
 		return a.executeMemoryTool(tc)
