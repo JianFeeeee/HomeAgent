@@ -164,7 +164,7 @@ internal/
 
 ## 项目状态
 
-核心可用，插件系统和 SDK 已就绪。内置 10 个插件，外部插件开发见 [homeagent-sdk](https://gitcode.com/JianFeeeee/homeagent-sdk) 仓库，使用 `plugindev` 工具链。
+**v0.7.1** — 核心可用，插件系统和 SDK 已就绪。内置 10 个插件，外部插件开发见 [homeagent-sdk](https://gitcode.com/JianFeeeee/homeagent-sdk) 仓库，使用 `plugindev` 工具链。输出通道系统、受限外部插件 API、EventAgentLLMChain 事件已上线。
 
 ## 文档
 

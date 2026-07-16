@@ -143,7 +143,7 @@ TF-IDF 是贯穿三层记忆的核心算法，在 4 个独立位置以不同方�
 ### Graph 层
 
 `internal/memory/graph.go` — `GraphDB`
-- SQLite WAL 模式，两张表
+- SQLite WAL 模式，两张表（驱动：mattn/go-sqlite3，CGo）
 - `Commit(triples)` — UPSERT entities + INSERT relations
 - `Recall(keywords, depth)` — 关键词 LIKE 搜索 + BFS 遍历
 
@@ -233,7 +233,7 @@ VM 内置 `json.encode` / `json.decode` / `log` / `http_get` / `http_post`。
 外部插件加载：`internal/plugin/dynamic.go` → 复制到 SHA256 临时路径（绕过 `plugin.Open` 路径缓存）→ `Open` + `Lookup("NewPlugin")`。
 Lua 脚本插件加载：`internal/lua/` → 通过 Lua VM 解析 `main.lua`，调用 `start()` 注册工具。
 
-### PluginSDK 三通道
+### PluginSDK 四通道
 
 ```
 插件 ──→ 核心
@@ -241,6 +241,7 @@ Lua 脚本插件加载：`internal/lua/` → 通过 Lua VM 解析 `main.lua`，�
 RegisterTool(name, fn)   ──→  buildToolDefs() / executeToolCall()
 RegisterStage(stage, fn)  ──→  runStage() 在对应阶段调用
 Subscribe(event, fn)      ──→  Publish() 通知所有订阅者
+RegisterOutputChannel(name, caps, desc, handler) ──→ output_send__{name} 工具生成
 ```
 
 `internal/sdk/` 桥接外部 SDK 接口到内核，定义完整 PluginSDK：
@@ -254,6 +255,7 @@ sdk.InjectInterrupt(source, channel, payload)
 sdk.Memory().Recall/Commit
 sdk.Knowledge().Search/Create
 sdk.Settings().Get/Set/List
+sdk.RegisterOutputChannel("qq", sdk.CapText, "QQ消息通道，content为JSON: {text, group_id, user_id}", handler)
 ```
 
 ### Plugin 接口
@@ -265,6 +267,48 @@ type Plugin interface {
     Stop() error
 }
 ```
+
+## 输出通道系统
+
+每个输出通道生成两个工具：
+
+| 工具 | 类型 | 作用 |
+|------|------|------|
+| `output_send__{name}` | function | 接受 `content` JSON 字符串参数，透明路由到插件注册的 handler |
+| `output_send__{name}_help` | function | 返回通道的 JSON 格式文档（desc 字段） |
+
+能力标志位：
+
+| 标志 | 值 | 含义 |
+|------|-----|------|
+| CapText | 1 | 纯文本 |
+| CapFile | 2 | 文件 |
+| CapImage | 4 | 图片 |
+| CapAudio | 8 | 音频 |
+| CapStructured | 16 | 结构化数据 |
+
+系统提示注入：输出门控规则、多调用支持、长消息拆分。
+子代理权限：`output_send__` 前缀工具允许使用。
+
+## LLM 链事件
+
+- 事件类型 `agent_llm_chain`，每次 LLM 轮次后发射
+- 包含完整 LLM 响应（文本 + 工具调用 + 推理）
+- WebUI 通过 SSE 订阅此事件实现实时显示
+- 插件可通过 EventSubscriber 订阅（外部插件只读）
+
+## 受限外部插件 API
+
+分层架构：内部插件获得完整 PluginSDK，外部插件获得受限 SDK。
+
+| API | 内部插件 | 外部插件 |
+|-----|----------|----------|
+| SocialAPI | 完整读写 | 只读（GetPerson / GetTrait / GetRelations / GetNetwork / ListPersons） |
+| EventSubscriber | 订阅 + 发布 | 仅订阅（无 Publish 能力） |
+
+扩展字段：
+- Triple 扩展：Confidence、SubjectType、ObjectType
+- Relation 扩展：Confidence
 
 ## 中断机制
 
@@ -303,6 +347,7 @@ cmd/waiter/main.go         — CLI 客户端 (Unix socket)
 internal/
 ├── agent/
 │   ├── core/              — Agent 核心 (eventLoop/process/stages/context)
+│   │   └── plugin_health.go — 插件健康监控与自动重启
 │   ├── api/               — Provider 接口 + LuaAdaptedProvider
 │   ├── io/                — IOManager (排队/中断/输出)
 │   └── personal.go        — 人格加载
