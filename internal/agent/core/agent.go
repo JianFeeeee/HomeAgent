@@ -147,8 +147,9 @@ type AgentConfig struct {
 	PluginReg       *plugin.Registry
 	PluginDir       string
 	DistillInterval time.Duration
-	MaxContextSize  int              // 活跃上下文最大条数，超出按相关性裁剪
-	ContextSavePath string           // 上下文持久化路径，空则不持久化
+	MaxContextSize    int              // 活跃上下文最大条数，超出按相关性裁剪
+	ContextSavePath   string           // 上下文持久化路径，空则不持久化
+	EmbeddingModelPath string          // 预训练词嵌入模型路径（word2vec 文本格式），空则不使用
 	StageHost     *StageHost
 	EventBus      *events.Bus
 	ThinkingEnabled bool
@@ -174,7 +175,7 @@ func New(cfg AgentConfig) *Agent {
 		indexer:         cfg.Indexer,
 		skills:          cfg.Skills,
 		tracker:         cfg.Tracker,
-		context:         NewRelevanceContext(cfg.ContextSavePath),
+		context:         NewRelevanceContext(cfg.ContextSavePath, memory.NewStaticEmbedder(strings.Split(cfg.EmbeddingModelPath, ",")...)),
 		systemPrompt:    cfg.SystemPrompt,
 		ctx:             ctx,
 		cancel:          cancel,
