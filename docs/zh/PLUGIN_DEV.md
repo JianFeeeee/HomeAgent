@@ -1,8 +1,8 @@
 [English](../en/PLUGIN_DEV.md) | **中文**
 
-<img src="../../branding/mascot-xiaozhai.webp" width="20" style="border-radius:50%;vertical-align:middle"> :
-
 # HomeAgent 插件开发指南
+
+<img src="../../branding/mascot-xiaozhai.webp" width="20" style="border-radius:50%;vertical-align:middle"> :
 
 ## 概述
 
@@ -35,6 +35,8 @@ type Plugin interface {
 | **Lua 脚本插件** | 轻量快速原型 | 简单，使用 `plugindev init --lua` 生成 |
 
 ---
+
+<img src="../../branding/mascot-xiaozhai.webp" width="20" style="border-radius:50%;vertical-align:middle"> :
 
 ## 一、快速开始：使用 plugindev 工具链
 
@@ -134,6 +136,8 @@ curl -X POST http://127.0.0.1:9876/plugins \
 或通过 WebUI 插件管理页面上传安装。
 
 ---
+
+<img src="../../branding/mascot-xiaozhai.webp" width="20" style="border-radius:50%;vertical-align:middle"> :
 
 ## 二、Go 插件开发详解
 
@@ -347,6 +351,8 @@ channels := s.ListChannels()
 
 ---
 
+<img src="../../branding/mascot-xiaozhai.webp" width="20" style="border-radius:50%;vertical-align:middle"> :
+
 ## 三、Lua 插件开发详解
 
 Lua 插件适合轻量级快速原型，无需 Go 编译环境，修改后直接重启内核即可生效。
@@ -417,6 +423,8 @@ lua main.lua
 
 ---
 
+<img src="../../branding/mascot-xiaozhai.webp" width="20" style="border-radius:50%;vertical-align:middle"> :
+
 ## 四、内置插件
 
 内置插件使用 `init()` 自注册方式，编译进内核，无需单独部署。
@@ -480,6 +488,8 @@ import (
 
 ---
 
+<img src="../../branding/mascot-xiaozhai.webp" width="20" style="border-radius:50%;vertical-align:middle"> :
+
 ## 五、最佳实践
 
 1. `Start()` 非阻塞 — goroutine 启动长任务，不要阻塞 Start
@@ -491,6 +501,8 @@ import (
 7. 外部 Go 插件独立编译，不依赖内核版本；内置插件才需随内核重新编译
 
 ---
+
+<img src="../../branding/mascot-xiaozhai.webp" width="20" style="border-radius:50%;vertical-align:middle"> :
 
 ## 六、示例插件参考
 

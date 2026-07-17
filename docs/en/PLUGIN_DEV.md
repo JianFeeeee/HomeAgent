@@ -1,8 +1,8 @@
 **中文** | [English](../zh/PLUGIN_DEV.md)
 
-<img src="../../branding/mascot-xiaozhai.webp" width="20" style="border-radius:50%;vertical-align:middle"> :
-
 # HomeAgent Plugin Development Guide
+
+<img src="../../branding/mascot-xiaozhai.webp" width="20" style="border-radius:50%;vertical-align:middle"> :
 
 ## Overview
 
@@ -34,6 +34,8 @@ type Plugin interface {
 | **Lua script plugin** | Lightweight rapid prototyping | Simple, generated using `plugindev init --lua` |
 
 ---
+
+<img src="../../branding/mascot-xiaozhai.webp" width="20" style="border-radius:50%;vertical-align:middle"> :
 
 ## 1. Quick Start: Using the plugindev Toolchain
 
@@ -133,6 +135,8 @@ curl -X POST http://127.0.0.1:9876/plugins \
 Or upload via WebUI plugin management page.
 
 ---
+
+<img src="../../branding/mascot-xiaozhai.webp" width="20" style="border-radius:50%;vertical-align:middle"> :
 
 ## 2. Go Plugin Development in Detail
 
@@ -346,6 +350,8 @@ channels := s.ListChannels()
 
 ---
 
+<img src="../../branding/mascot-xiaozhai.webp" width="20" style="border-radius:50%;vertical-align:middle"> :
+
 ## 3. Lua Plugin Development in Detail
 
 Lua plugins are suitable for lightweight rapid prototyping, requiring no Go compilation environment. Changes take effect after kernel restart.
@@ -416,6 +422,8 @@ When running inside the kernel, `sdk.*` global variables are injected by the Go 
 
 ---
 
+<img src="../../branding/mascot-xiaozhai.webp" width="20" style="border-radius:50%;vertical-align:middle"> :
+
 ## 4. Built-in Plugins
 
 Built-in plugins use `init()` self-registration, compiled into the kernel, no separate deployment needed.
@@ -479,6 +487,8 @@ import (
 
 ---
 
+<img src="../../branding/mascot-xiaozhai.webp" width="20" style="border-radius:50%;vertical-align:middle"> :
+
 ## 5. Best Practices
 
 1. `Start()` is non-blocking — start long tasks in goroutines, don't block Start
@@ -490,6 +500,8 @@ import (
 7. External Go plugins compile independently, not tied to kernel version; only built-in plugins need recompilation with kernel
 
 ---
+
+<img src="../../branding/mascot-xiaozhai.webp" width="20" style="border-radius:50%;vertical-align:middle"> :
 
 ## 6. Example Plugin Reference
 

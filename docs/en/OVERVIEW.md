@@ -1,8 +1,8 @@
 **中文** | [English](../zh/OVERVIEW.md)
 
-<img src="../../branding/mascot-xiaozhai.webp" width="20" style="border-radius:50%;vertical-align:middle"> :
-
 # HomeAgent — Project Overview
+
+<img src="../../branding/mascot-xiaozhai.webp" width="20" style="border-radius:50%;vertical-align:middle"> :
 
 ## What Is This
 
@@ -26,6 +26,8 @@ The significance: the kernel stays pure (zero IO, only orchestration and memory)
 - **Graph Layer**: SQLite graph database, persists entities and relations, BFS traversal recall, distillation pipeline extracts triples from conversations
 
 Three progressive layers: context → cold archive → long-term graph memory, ensuring the agent doesn't degrade over time.
+
+<img src="../../branding/mascot-xiaozhai.webp" width="20" style="border-radius:50%;vertical-align:middle"> :
 
 ## What It Actually Does
 
@@ -66,6 +68,8 @@ Code is in the project root, implemented in Go.
 - REST API: status query, configuration management, memory operations, knowledge management, plugin management
 - OpenAI API-compatible `/v1/chat/completions` endpoint
 - SSE event stream `/api/v1/chat/events`
+
+<img src="../../branding/mascot-xiaozhai.webp" width="20" style="border-radius:50%;vertical-align:middle"> :
 
 ## Project Status
 
