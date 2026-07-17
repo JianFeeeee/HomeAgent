@@ -60,6 +60,7 @@ type pluginState struct {
 	id    int32
 	name  string
 	sdk   *sdk.PluginSDK
+	invokeTool   func(name, argsJSON string) (string, error)
 	invokeOutput func(channel, msgType, payload string) error
 	invokeStage  func(stage, ctxJSON string) error
 }
@@ -126,6 +127,22 @@ func (h *Handle) CreateCoreAPI(s *sdk.PluginSDK) unsafe.Pointer {
 	if core == nil { return nil }
 	h.core = core
 	h.pstate.sdk = s
+
+	h.pstate.invokeTool = func(name, argsJSON string) (string, error) {
+		cName := C.CString(name)
+		cArgs := C.CString(argsJSON)
+		var result, cErr *C.char
+		defer C.free(unsafe.Pointer(cName))
+		defer C.free(unsafe.Pointer(cArgs))
+		if ret := int(C.call_invoke_tool(h.api, cName, cArgs, &result, &cErr)); ret != 0 {
+			errMsg := ""
+			if cErr != nil { errMsg = C.GoString(cErr); C.api_free_string(h.api, cErr) }
+			return "", fmt.Errorf("invoke_tool %s: %s", name, errMsg)
+		}
+		if result == nil { return "", nil }
+		defer C.api_free_string(h.api, result)
+		return C.GoString(result), nil
+	}
 
 	h.pstate.invokeOutput = func(channel, msgType, payload string) error {
 		cCh := C.CString(channel)
@@ -211,7 +228,6 @@ func (h *Handle) Close() {
 }
 
 // go_core_dispatch handles all plugin→core SDK calls.
-// CoreAPI.dispatch → dispatch_bridge (C) → go_core_dispatch (Go) → PluginSDK
 //
 //export go_core_dispatch
 func go_core_dispatch(methodID C.int, ctx unsafe.Pointer, s1, s2, s3 *C.char, i1, i2 C.int, result **C.char, errorOut **C.char) C.int {
@@ -220,43 +236,54 @@ func go_core_dispatch(methodID C.int, ctx unsafe.Pointer, s1, s2, s3 *C.char, i1
 	if !ok { return 1 }
 	ps := v.(*pluginState)
 	s := ps.sdk
+	if s == nil { return 1 }
 
 	a1, a2, a3 := goStr(s1), goStr(s2), goStr(s3)
 	n1, n2 := int(i1), int(i2)
 
-			_ = n2
 	switch int(methodID) {
 	case 1: // CORE_REGISTER_TOOL
 		var def sdk.ToolDef
 		if err := json.Unmarshal([]byte(a2), &def); err != nil { setErr(errorOut, err); return 1 }
 		def.Plugin = ps.name
 		_ = s.RegisterTool(a1, def, func(args map[string]interface{}) (interface{}, error) {
-			return nil, nil
+			argsJSON, _ := json.Marshal(args)
+			r, err := ps.invokeTool(a1, string(argsJSON))
+			if err != nil { return nil, err }
+			if r == "" { return nil, nil }
+			var res map[string]interface{}
+			json.Unmarshal([]byte(r), &res)
+			return res, nil
 		})
 		return 0
 
 	case 2: // CORE_REGISTER_STAGE
 		if ps.invokeStage != nil {
-			st := string(a1)
 			handler := func(sc *sdk.StageContext) error {
-				ctxJSON, _ := json.Marshal(map[string]interface{}{
-					"raw_message": sc.RawMessage,
-					"user_id":     sc.UserID,
-					"phase":       string(sc.Phase),
-				})
-				return ps.invokeStage(st, string(ctxJSON))
+				sc.RLock()
+				ctxMap := map[string]interface{}{
+					"raw_message": sc.RawMessage, "user_id": sc.UserID,
+					"group_id": sc.GroupID, "phase": string(sc.Phase),
+					"llm_text": sc.LLMText, "final_text": sc.FinalText,
+					"no_memory": sc.NoMemory,
+				}
+				if sc.Response != nil { ctxMap["response"] = *sc.Response }
+				if len(sc.ToolCalls) > 0 { ctxMap["tool_calls"] = sc.ToolCalls }
+				if len(sc.ToolResults) > 0 { ctxMap["tool_results"] = sc.ToolResults }
+				sc.RUnlock()
+				ctxJSON, _ := json.Marshal(ctxMap)
+				return ps.invokeStage(a1, string(ctxJSON))
 			}
-			s.RegisterStage(sdk.Stage(st), handler)
+			s.RegisterStage(sdk.Stage(a1), handler)
 		}
 		return 0
 
 	case 3: // CORE_REGISTER_OUTPUT_CH
 		if ps.invokeOutput != nil {
-			chName := a1
-			s.RegisterOutputChannel(chName, n1, a2, func(args map[string]interface{}) (interface{}, error) {
+			s.RegisterOutputChannel(a1, n1, a2, func(args map[string]interface{}) (interface{}, error) {
 				msgType, _ := args["type"].(string)
 				payload, _ := json.Marshal(args["payload"])
-				return nil, ps.invokeOutput(chName, msgType, string(payload))
+				return nil, ps.invokeOutput(a1, msgType, string(payload))
 			})
 		}
 		return 0
@@ -325,8 +352,7 @@ func go_core_dispatch(methodID C.int, ctx unsafe.Pointer, s1, s2, s3 *C.char, i1
 
 	case 14: // CORE_DOC_QUERY
 		if dm := s.DocMemory(); dm != nil {
-			docs := dm.Query(a1, n1)
-			b, _ := json.Marshal(docs)
+			b, _ := json.Marshal(dm.Query(a1, n1))
 			*result = C.CString(string(b))
 		}
 		return 0
@@ -397,6 +423,7 @@ func go_core_dispatch(methodID C.int, ctx unsafe.Pointer, s1, s2, s3 *C.char, i1
 		return 0
 
 	case 23: // CORE_SUBSCRIBE
+		_ = n2
 		return 0
 
 	case 24: // CORE_UNSUBSCRIBE
@@ -404,6 +431,58 @@ func go_core_dispatch(methodID C.int, ctx unsafe.Pointer, s1, s2, s3 *C.char, i1
 
 	case 25: // CORE_FREE_STRING
 		if s1 != nil { C.free(unsafe.Pointer(s1)) }
+		return 0
+
+	case 26: // CORE_SETTINGS_GET_CORE
+		if sett := s.Settings(); sett != nil {
+			v, err := sett.GetCore(a1)
+			if err != nil { setErr(errorOut, err); return 1 }
+			b, _ := json.Marshal(v)
+			*result = C.CString(string(b))
+		}
+		return 0
+
+	case 27: // CORE_SETTINGS_SET_CORE
+		if sett := s.Settings(); sett != nil {
+			var v interface{}
+			json.Unmarshal([]byte(a2), &v)
+			if err := sett.SetCore(a1, v); err != nil { setErr(errorOut, err); return 1 }
+		}
+		return 0
+
+	case 28: // CORE_SETTINGS_LIST_CORE
+		if sett := s.Settings(); sett != nil {
+			keys, err := sett.ListCore(a1)
+			if err != nil { setErr(errorOut, err); return 1 }
+			b, _ := json.Marshal(keys)
+			*result = C.CString(string(b))
+		}
+		return 0
+
+	case 29: // CORE_SETTINGS_GET_PLUGIN
+		if sett := s.Settings(); sett != nil {
+			v, err := sett.GetPlugin(a1, a2)
+			if err != nil { setErr(errorOut, err); return 1 }
+			b, _ := json.Marshal(v)
+			*result = C.CString(string(b))
+		}
+		return 0
+
+	case 30: // CORE_SETTINGS_SET_PLUGIN
+		if sett := s.Settings(); sett != nil {
+			var v interface{}
+			json.Unmarshal([]byte(a3), &v)
+			if err := sett.SetPlugin(a1, a2, v); err != nil { setErr(errorOut, err); return 1 }
+		}
+		return 0
+
+	case 31: // CORE_SETTINGS_LIST_PLUGIN
+		if sett := s.Settings(); sett != nil {
+			keys, err := sett.ListPlugin(a1, a2)
+			if err != nil { setErr(errorOut, err); return 1 }
+			b, _ := json.Marshal(keys)
+			*result = C.CString(string(b))
+		}
 		return 0
 	}
 	return 0
