@@ -90,11 +90,13 @@ func (idx *Indexer) BuildContext(userInput string) *InjectedContext {
 		return &InjectedContext{Summary: ""}
 	}
 
+	input := CleanTemplateText(userInput)
+
 	// 1. 向量搜索：从实体名向量索引中找到相关实体
-	vectorEntities := idx.vectorSearchEntities(userInput)
+	vectorEntities := idx.vectorSearchEntities(input)
 
 	// 2. 关键词搜索：已有逻辑
-	keywords := ExtractKeywords(userInput)
+	keywords := ExtractKeywords(input)
 	if len(keywords) == 0 && len(vectorEntities) == 0 {
 		keywords = []string{userInput}
 	}

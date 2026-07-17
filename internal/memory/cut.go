@@ -93,6 +93,7 @@ var stopWords = map[string]bool{
 }
 
 func ExtractKeywords(text string) []string {
+	text = CleanTemplateText(text)
 	x := GetJieba()
 	if x == nil {
 		return nil
