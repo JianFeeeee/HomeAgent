@@ -9,9 +9,12 @@ import (
 	"path/filepath"
 	"plugin"
 	"reflect"
+	"unsafe"
 
 	sdk "gitcode.com/JianFeeeee/HomeAgent/internal/sdk"
 	pubsdk "gitcode.com/JianFeeeee/homeagent-sdk/sdk"
+
+	"gitcode.com/JianFeeeee/HomeAgent/internal/plugin/cabi"
 )
 
 // .so 插件必须导出函数 NewPlugin，签名与 NativeFactory 一致：
@@ -50,15 +53,86 @@ func readManifest(dir string) *PluginManifest {
 	return &m
 }
 
-// tryLoadSO 尝试从插件目录加载 plugin.so（Go plugin -buildmode=plugin）。
-// 返回 nil,nil 表示目录中没有 plugin.so。
+// cabiPlugin wraps a C ABI loaded plugin (.so via -buildmode=c-shared).
+type cabiPlugin struct {
+	name   string
+	handle *cabi.Handle
+}
+
+func (p *cabiPlugin) Name() string { return p.name }
+func (p *cabiPlugin) Start(s *sdk.PluginSDK) error {
+	// Build CoreAPI from the provided PluginSDK and pass to plugin
+	corePtr := buildCoreAPI(s, p.name)
+	if err := p.handle.Start(corePtr); err != nil {
+		return err
+	}
+
+	// Discover tools/stages/channels registered by the plugin during Start
+	defs, _ := p.handle.GetToolDefs()
+	for _, d := range defs {
+		var td pubsdk.ToolDef
+		if err := json.Unmarshal(d, &td); err != nil {
+			continue
+		}
+		toolName := td.Name
+		td.Plugin = p.name
+		s.RegisterTool(toolName, sdk.ToolDef{
+			Name:        toolName,
+			Description: td.Description,
+			Parameters:  td.Parameters,
+			Plugin:      p.name,
+		}, makeCABIHandler(p.handle, toolName))
+	}
+
+	stages, _ := p.handle.GetStages()
+	for _, stage := range stages {
+		st := sdk.Stage(stage)
+		s.RegisterStage(st, func(sc *sdk.StageContext) error {
+			ctxJSON, _ := json.Marshal(map[string]interface{}{
+				"raw_message": sc.RawMessage,
+				"user_id":     sc.UserID,
+				"phase":       string(sc.Phase),
+			})
+			return p.handle.InvokeStage(stage, string(ctxJSON))
+		})
+	}
+
+	return nil
+}
+
+func (p *cabiPlugin) Stop() error {
+	p.handle.Close()
+	return nil
+}
+
+func makeCABIHandler(handle *cabi.Handle, toolName string) sdk.ToolHandler {
+	return func(args map[string]interface{}) (interface{}, error) {
+		return handle.InvokeTool(toolName, args)
+	}
+}
+
+// buildCoreAPI creates a C-compatible CoreAPI function table from a PluginSDK.
+// Returns an unsafe.Pointer to a C-allocated struct.
+// TODO: implement CoreAPI dispatch that calls back into the Go PluginSDK
+func buildCoreAPI(s *sdk.PluginSDK, pluginName string) unsafe.Pointer {
+	return unsafe.Pointer(nil) // placeholder - will be implemented in core dispatch
+}
+
+// tryLoadSO 尝试从插件目录加载 plugin.so。
+// 优先尝试 C ABI 加载（-buildmode=c-shared），失败时回退到 Go plugin.Open。
 func tryLoadSO(dir, name string, config map[string]interface{}) (sdk.Plugin, error) {
 	soPath := filepath.Join(dir, soEntry)
 	if _, err := os.Stat(soPath); os.IsNotExist(err) {
 		return nil, nil
 	}
 
-	// 复制到临时路径以绕过 Go plugin.Open 的路径缓存
+	// Try C ABI first
+	handle, err := cabi.Load(soPath, name, config)
+	if err == nil {
+		return &cabiPlugin{name: name, handle: handle}, nil
+	}
+
+	// Fall back to Go plugin.Open
 	data, err := os.ReadFile(soPath)
 	if err != nil {
 		return nil, fmt.Errorf("read %s: %w", soPath, err)
@@ -87,14 +161,7 @@ func tryLoadSO(dir, name string, config map[string]interface{}) (sdk.Plugin, err
 		return nil, fmt.Errorf("NewPlugin in %s is not a function (type=%T)", soPath, sym)
 	}
 	if rv.Type().NumIn() != 2 || rv.Type().NumOut() != 2 {
-		return nil, fmt.Errorf("NewPlugin in %s has wrong arity: type=%s in=%d out=%d", soPath, rv.Type().String(), rv.Type().NumIn(), rv.Type().NumOut())
-	}
-	arg0 := rv.Type().In(0)
-	arg1 := rv.Type().In(1)
-	out0 := rv.Type().Out(0)
-	out1 := rv.Type().Out(1)
-	if arg0.Kind() != reflect.String || arg1.Kind() != reflect.Map || out1.String() != "error" {
-		return nil, fmt.Errorf("NewPlugin in %s signature mismatch: type=%s arg0=%s arg1=%s out0=%s out1=%s", soPath, rv.Type().String(), arg0.String(), arg1.String(), out0.String(), out1.String())
+		return nil, fmt.Errorf("NewPlugin in %s has wrong arity", soPath)
 	}
 	outs := rv.Call([]reflect.Value{reflect.ValueOf(name), reflect.ValueOf(config)})
 	if len(outs) != 2 {
@@ -108,7 +175,7 @@ func tryLoadSO(dir, name string, config map[string]interface{}) (sdk.Plugin, err
 	}
 	plg, ok := outs[0].Interface().(pubsdk.Plugin)
 	if !ok {
-		return nil, fmt.Errorf("NewPlugin in %s returned value that does not implement pubsdk.Plugin", soPath)
+		return nil, fmt.Errorf("NewPlugin in %s does not implement pubsdk.Plugin", soPath)
 	}
 
 	return &dynamicPlugin{name: name, impl: plg}, nil
