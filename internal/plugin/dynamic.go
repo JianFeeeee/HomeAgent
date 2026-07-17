@@ -60,13 +60,10 @@ type cabiPlugin struct {
 
 func (p *cabiPlugin) Name() string { return p.name }
 func (p *cabiPlugin) Start(s *sdk.PluginSDK) error {
-	// Create CoreAPI backed by the real PluginSDK and pass to plugin
 	corePtr := p.handle.CreateCoreAPI(s)
 	if corePtr == nil {
 		return fmt.Errorf("cabi: failed to create CoreAPI for %s", p.name)
 	}
-	defer p.handle.FreeCoreAPI()
-
 	if err := p.handle.Start(corePtr); err != nil {
 		return fmt.Errorf("cabi: start %s: %w", p.name, err)
 	}
@@ -74,6 +71,8 @@ func (p *cabiPlugin) Start(s *sdk.PluginSDK) error {
 }
 
 func (p *cabiPlugin) Stop() error {
+	_ = p.handle.Stop()
+	p.handle.FreeCoreAPI()
 	p.handle.Close()
 	return nil
 }
