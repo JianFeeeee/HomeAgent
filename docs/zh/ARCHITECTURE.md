@@ -1,10 +1,10 @@
 [English](../en/ARCHITECTURE.md) | **中文**
 
-<img src="../../branding/mascot-xiaozhai.webp" width="20" style="border-radius:50%;vertical-align:middle"> :
-
 # HomeAgent 架构
 
 内核零 IO，一切外界交互来自插件。
+
+<img src="../../branding/mascot-xiaozhai.webp" width="20" style="border-radius:50%;vertical-align:middle"> :
 
 ## 消息处理流程
 
@@ -65,6 +65,8 @@ eventLoop() → processTextInput()
 ### 短路规则
 
 任意阶段设 `ctx.Response` 即跳到 `after_output`。
+
+<img src="../../branding/mascot-xiaozhai.webp" width="20" style="border-radius:50%;vertical-align:middle"> :
 
 ## 三层记忆
 
@@ -203,12 +205,16 @@ eventLoop() → processTextInput()
 
 实体冲突检测启发式（bigram Jaccard > 0.75），走 `selfInputCh` 内部通道，LLM 最终判断是否合并。
 
+<img src="../../branding/mascot-xiaozhai.webp" width="20" style="border-radius:50%;vertical-align:middle"> :
+
 ## 知识库
 
 `internal/knowledge/knowledge.go`
 - 文件目录 `knowledge/<name>/content.md`
 - 独立 TF-IDF 索引，与记忆系统不冲突
 - `knowledge_search` / `knowledge_create` / `knowledge_list`
+
+<img src="../../branding/mascot-xiaozhai.webp" width="20" style="border-radius:50%;vertical-align:middle"> :
 
 ## Provider 与 Lua 适配层
 
@@ -233,6 +239,8 @@ Provider 接口 (Name / Chat / ChatStream)
 ProviderManager 管理多个源，按注册顺序 fallback。Lua 适配器位于 `internal/lua/adapters/`，每个 `.lua` 脚本定义 `transform_request` / `transform_response` / `transform_stream_chunk`。
 
 VM 内置 `json.encode` / `json.decode` / `log` / `http_get` / `http_post`。
+
+<img src="../../branding/mascot-xiaozhai.webp" width="20" style="border-radius:50%;vertical-align:middle"> :
 
 ## 插件系统
 
@@ -284,6 +292,8 @@ type Plugin interface {
 }
 ```
 
+<img src="../../branding/mascot-xiaozhai.webp" width="20" style="border-radius:50%;vertical-align:middle"> :
+
 ## 输出通道系统
 
 每个输出通道生成两个工具：
@@ -306,12 +316,16 @@ type Plugin interface {
 系统提示注入：输出门控规则、多调用支持、长消息拆分。
 子代理权限：`output_send__` 前缀工具允许使用。
 
+<img src="../../branding/mascot-xiaozhai.webp" width="20" style="border-radius:50%;vertical-align:middle"> :
+
 ## LLM 链事件
 
 - 事件类型 `agent_llm_chain`，每次 LLM 轮次后发射
 - 包含完整 LLM 响应（文本 + 工具调用 + 推理）
 - WebUI 通过 SSE 订阅此事件实现实时显示
 - 插件可通过 EventSubscriber 订阅（外部插件只读）
+
+<img src="../../branding/mascot-xiaozhai.webp" width="20" style="border-radius:50%;vertical-align:middle"> :
 
 ## 受限外部插件 API
 
@@ -325,6 +339,8 @@ type Plugin interface {
 扩展字段：
 - Triple 扩展：Confidence、SubjectType、ObjectType
 - Relation 扩展：Confidence
+
+<img src="../../branding/mascot-xiaozhai.webp" width="20" style="border-radius:50%;vertical-align:middle"> :
 
 ## 中断机制
 
@@ -346,6 +362,8 @@ interceptLoop (goroutine)
 
 代码：`internal/agent/core/agent.go` — `interceptLoop` / `drainInterrupt`
 
+<img src="../../branding/mascot-xiaozhai.webp" width="20" style="border-radius:50%;vertical-align:middle"> :
+
 ## 配置系统
 
 `internal/config/registry.go` — ConfigRegistry
@@ -354,6 +372,8 @@ interceptLoop (goroutine)
 - 命名空间：`core.*` / `plugin.<name>.*`
 - `RegisterDefault` 插入 ~80 个默认键（8 个 LLM 源的 seeds）
 - WebUI 设置页 `/api/v1/settings` 读写
+
+<img src="../../branding/mascot-xiaozhai.webp" width="20" style="border-radius:50%;vertical-align:middle"> :
 
 ## 代码结构
 

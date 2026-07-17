@@ -1,10 +1,10 @@
 [English](../en/ADAPTER.md) | **中文**
 
-<img src="../../branding/mascot-xiaozhai.webp" width="20" style="border-radius:50%;vertical-align:middle"> :
-
 # Lua Adapter — LLM 源适配指南
 
 每个 LLM API 源对应一个 Lua 脚本，负责请求转换（Go 统一格式 → API 格式）和响应转换（API 格式 → Go 统一格式）。
+
+<img src="../../branding/mascot-xiaozhai.webp" width="20" style="border-radius:50%;vertical-align:middle"> :
 
 ## 适配器契约
 
@@ -45,6 +45,8 @@ end
 return adapter
 ```
 
+<img src="../../branding/mascot-xiaozhai.webp" width="20" style="border-radius:50%;vertical-align:middle"> :
+
 ## 统一 CompletionRequest 格式（Go → Adapter）
 
 ```json
@@ -63,6 +65,8 @@ return adapter
 }
 ```
 
+<img src="../../branding/mascot-xiaozhai.webp" width="20" style="border-radius:50%;vertical-align:middle"> :
+
 ## 统一 CompletionResponse 格式（Adapter → Go）
 
 ```json
@@ -76,6 +80,8 @@ return adapter
 }
 ```
 
+<img src="../../branding/mascot-xiaozhai.webp" width="20" style="border-radius:50%;vertical-align:middle"> :
+
 ## Lua VM 内置函数
 
 `json.encode(table)` — 将 Lua table 编码为 JSON 字符串
@@ -87,6 +93,8 @@ return adapter
 `http_get(url)` — 发起 HTTP GET 请求，返回响应体字符串
 
 `http_post(url, body)` — 发起 HTTP POST 请求，返回响应体字符串
+
+<img src="../../branding/mascot-xiaozhai.webp" width="20" style="border-radius:50%;vertical-align:middle"> :
 
 ## 适配典型 API
 
@@ -100,6 +108,8 @@ return adapter
 | **Groq** | `/openai/v1/chat/completions` | `Authorization: Bearer <key>` | OpenAI 兼容 |
 | **GitHub Models** | `/chat/completions` | `Authorization: Bearer <pat>` | OpenAI 兼容 |
 | **Ollama** | `/api/chat` | 无 | 不同的 options 格式 |
+
+<img src="../../branding/mascot-xiaozhai.webp" width="20" style="border-radius:50%;vertical-align:middle"> :
 
 ## 添加新源步骤
 

@@ -1,10 +1,10 @@
 **中文** | [English](../zh/ADAPTER.md)
 
-<img src="../../branding/mascot-xiaozhai.webp" width="20" style="border-radius:50%;vertical-align:middle"> :
-
 # Lua Adapter — LLM Source Adaptation Guide
 
 Each LLM API source corresponds to a Lua script, responsible for request transformation (Go unified format → API format) and response transformation (API format → Go unified format).
+
+<img src="../../branding/mascot-xiaozhai.webp" width="20" style="border-radius:50%;vertical-align:middle"> :
 
 ## Adapter Contract
 
@@ -45,6 +45,8 @@ end
 return adapter
 ```
 
+<img src="../../branding/mascot-xiaozhai.webp" width="20" style="border-radius:50%;vertical-align:middle"> :
+
 ## Unified CompletionRequest Format (Go → Adapter)
 
 ```json
@@ -63,6 +65,8 @@ return adapter
 }
 ```
 
+<img src="../../branding/mascot-xiaozhai.webp" width="20" style="border-radius:50%;vertical-align:middle"> :
+
 ## Unified CompletionResponse Format (Adapter → Go)
 
 ```json
@@ -76,6 +80,8 @@ return adapter
 }
 ```
 
+<img src="../../branding/mascot-xiaozhai.webp" width="20" style="border-radius:50%;vertical-align:middle"> :
+
 ## Lua VM Built-in Functions
 
 `json.encode(table)` — Encode Lua table to JSON string
@@ -87,6 +93,8 @@ return adapter
 `http_get(url)` — Perform HTTP GET request, returns response body as string
 
 `http_post(url, body)` — Perform HTTP POST request, returns response body as string
+
+<img src="../../branding/mascot-xiaozhai.webp" width="20" style="border-radius:50%;vertical-align:middle"> :
 
 ## Adapting Typical APIs
 
@@ -100,6 +108,8 @@ return adapter
 | **Groq** | `/openai/v1/chat/completions` | `Authorization: Bearer <key>` | OpenAI compatible |
 | **GitHub Models** | `/chat/completions` | `Authorization: Bearer <pat>` | OpenAI compatible |
 | **Ollama** | `/api/chat` | None | Different options format |
+
+<img src="../../branding/mascot-xiaozhai.webp" width="20" style="border-radius:50%;vertical-align:middle"> :
 
 ## Steps to Add a New Source
 

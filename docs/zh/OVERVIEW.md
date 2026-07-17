@@ -1,8 +1,8 @@
 [English](../en/OVERVIEW.md) | **中文**
 
-<img src="../../branding/mascot-xiaozhai.webp" width="20" style="border-radius:50%;vertical-align:middle"> :
-
 # HomeAgent — 项目概览
+
+<img src="../../branding/mascot-xiaozhai.webp" width="20" style="border-radius:50%;vertical-align:middle"> :
 
 ## 这是什么
 
@@ -26,6 +26,8 @@ HomeAgent 是一个持续运行的个人智能 Agent 框架。
 - **Graph 层**：SQLite 图数据库，持久化实体（entities）和关系（relations），BFS 遍历召回，蒸馏管道从对话中提取三元组
 
 三层递进：上下文 → 冷归档 → 长期图记忆，确保 Agent 长时间运行不退化。
+
+<img src="../../branding/mascot-xiaozhai.webp" width="20" style="border-radius:50%;vertical-align:middle"> :
 
 ## 它实际做了什么
 
@@ -66,6 +68,8 @@ HomeAgent 是一个持续运行的个人智能 Agent 框架。
 - REST API：状态查询、配置管理、记忆操作、知识库管理、插件管理
 - 兼容 OpenAI API 格式的 `/v1/chat/completions` 端点
 - SSE 事件流 `/api/v1/chat/events`
+
+<img src="../../branding/mascot-xiaozhai.webp" width="20" style="border-radius:50%;vertical-align:middle"> :
 
 ## 项目状态
 

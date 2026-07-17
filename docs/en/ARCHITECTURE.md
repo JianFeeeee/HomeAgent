@@ -1,10 +1,10 @@
 **中文** | [English](../zh/ARCHITECTURE.md)
 
-<img src="../../branding/mascot-xiaozhai.webp" width="20" style="border-radius:50%;vertical-align:middle"> :
-
 # HomeAgent Architecture
 
 The kernel performs zero IO; all external interaction comes from plugins.
+
+<img src="../../branding/mascot-xiaozhai.webp" width="20" style="border-radius:50%;vertical-align:middle"> :
 
 ## Message Processing Flow
 
@@ -65,6 +65,8 @@ Exit conditions: LLM has no tool calls / all rejected / exceeded limit.
 ### Short-Circuit Rules
 
 Setting `ctx.Response` at any stage jumps to `after_output`.
+
+<img src="../../branding/mascot-xiaozhai.webp" width="20" style="border-radius:50%;vertical-align:middle"> :
 
 ## Three-Layer Memory
 
@@ -203,12 +205,16 @@ Heartbeat 30min:
 
 Entity conflict detection heuristic (bigram Jaccard > 0.75), routed through `selfInputCh` internal channel, LLM makes the final merge decision.
 
+<img src="../../branding/mascot-xiaozhai.webp" width="20" style="border-radius:50%;vertical-align:middle"> :
+
 ## Knowledge Base
 
 `internal/knowledge/knowledge.go`
 - File directory `knowledge/<name>/content.md`
 - Independent TF-IDF index, separate from memory system
 - `knowledge_search` / `knowledge_create` / `knowledge_list`
+
+<img src="../../branding/mascot-xiaozhai.webp" width="20" style="border-radius:50%;vertical-align:middle"> :
 
 ## Provider & Lua Adapter Layer
 
@@ -233,6 +239,8 @@ Code: `internal/agent/api/provider.go`
 ProviderManager manages multiple sources, fallback in registration order. Lua adapters at `internal/lua/adapters/`, each `.lua` script defines `transform_request` / `transform_response` / `transform_stream_chunk`.
 
 VM built-ins: `json.encode` / `json.decode` / `log` / `http_get` / `http_post`.
+
+<img src="../../branding/mascot-xiaozhai.webp" width="20" style="border-radius:50%;vertical-align:middle"> :
 
 ## Plugin System
 
@@ -284,6 +292,8 @@ type Plugin interface {
 }
 ```
 
+<img src="../../branding/mascot-xiaozhai.webp" width="20" style="border-radius:50%;vertical-align:middle"> :
+
 ## Output Channel System
 
 Each output channel generates two tools:
@@ -306,12 +316,16 @@ Capability flags:
 System prompt injection: output gate rules, multi-call support, long message splitting.
 Child agent permission: `output_send__` prefix tools are allowed.
 
+<img src="../../branding/mascot-xiaozhai.webp" width="20" style="border-radius:50%;vertical-align:middle"> :
+
 ## EventAgentLLMChain Event
 
 - Event type `agent_llm_chain` emitted after each LLM turn
 - Contains the full LLM response (text + tool calls + reasoning)
 - WebUI subscribes to this event via SSE for real-time display
 - Plugins can subscribe via EventSubscriber (read-only for external plugins)
+
+<img src="../../branding/mascot-xiaozhai.webp" width="20" style="border-radius:50%;vertical-align:middle"> :
 
 ## Restricted External Plugin API
 
@@ -325,6 +339,8 @@ Layered architecture: internal plugins get full PluginSDK, external plugins get 
 Extended fields:
 - Triple extensions: Confidence, SubjectType, ObjectType
 - Relation extension: Confidence
+
+<img src="../../branding/mascot-xiaozhai.webp" width="20" style="border-radius:50%;vertical-align:middle"> :
 
 ## Interrupt Mechanism
 
@@ -346,6 +362,8 @@ Three delivery paths:
 
 Code: `internal/agent/core/agent.go` — `interceptLoop` / `drainInterrupt`
 
+<img src="../../branding/mascot-xiaozhai.webp" width="20" style="border-radius:50%;vertical-align:middle"> :
+
 ## Configuration System
 
 `internal/config/registry.go` — ConfigRegistry
@@ -354,6 +372,8 @@ Code: `internal/agent/core/agent.go` — `interceptLoop` / `drainInterrupt`
 - Namespaces: `core.*` / `plugin.<name>.*`
 - `RegisterDefault` inserts ~80 default keys (seeds for 8 LLM sources)
 - WebUI settings page `/api/v1/settings` for read/write
+
+<img src="../../branding/mascot-xiaozhai.webp" width="20" style="border-radius:50%;vertical-align:middle"> :
 
 ## Code Structure
 
