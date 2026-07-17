@@ -324,8 +324,10 @@ function renderChat() {
       if (role === 'system') {
         html += '<div class="msg msg-system"><div class="msg-bubble">' + body + '</div></div>';
       } else {
+        var userAvatar = '<svg viewBox="0 0 24 24" style="width:16px;height:16px" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><circle cx="12" cy="8" r="4"/><path d="M4 20c0-4 4-6 8-6s8 2 8 6"/></svg>';
+        var aiAvatar = '<img src="/mascot.webp" style="width:28px;height:28px;border-radius:50%;object-fit:cover" alt="小宅">';
         html += '<div class="msg msg-' + role + '">'
-          + '<div class="msg-avatar">' + (role === 'user' ? 'U' : 'A') + '</div>'
+          + '<div class="msg-avatar">' + (role === 'user' ? userAvatar : aiAvatar) + '</div>'
           + '<div class="msg-content"><div class="msg-bubble">' + body + '</div></div>'
           + '</div>';
       }

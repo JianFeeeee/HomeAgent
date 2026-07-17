@@ -4,6 +4,7 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>HomeAgent Dashboard</title>
+<link rel="icon" type="image/svg+xml" href="/logo.svg">
 <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js" onerror="window._THREE_FAILED=true"></script>
 <script src="https://cdn.jsdelivr.net/npm/three@0.128.0/examples/js/controls/OrbitControls.js" onerror="window._THREE_FAILED=true"></script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/marked/4.3.0/marked.min.js" onerror="console.warn('marked CDN failed')"></script>
@@ -163,8 +164,10 @@ code { font-family:monospace; font-size:12px; color:var(--pre-color) }
 .msg-assistant { align-self:flex-start }
 .msg-system { align-self:center; max-width:90% }
 .msg-avatar { width:28px; height:28px; border-radius:6px; display:flex; align-items:center; justify-content:center; font-size:12px; flex-shrink:0 }
+.msg-avatar img { width:28px; height:28px; border-radius:50%; object-fit:cover; display:block }
+.msg-avatar svg { display:block; width:16px; height:16px }
 .msg-user .msg-avatar { background:var(--msg-user-bg); color:var(--msg-user-color) }
-.msg-assistant .msg-avatar { background:var(--msg-assistant-bg); color:var(--msg-assistant-color) }
+.msg-assistant .msg-avatar { background:transparent }
 .msg-system .msg-avatar { background:var(--msg-system-bg); color:var(--msg-system-color) }
 .msg-content { min-width:0 }
 .msg-bubble { padding:8px 12px; border-radius:10px; font-size:13px; line-height:1.5; word-break:break-word; position:relative }
@@ -279,7 +282,7 @@ code { font-family:monospace; font-size:12px; color:var(--pre-color) }
 </head>
 <body>
 <nav>
-  <h1>HomeAgent</h1>
+  <h1><img src="/logo.svg" alt="HomeAgent" style="height:22px;width:22px;vertical-align:middle;margin-right:6px;flex-shrink:0">HomeAgent</h1>
   <a class="active" onclick="switchTab('overview')" data-i18n="navOverview">概览</a>
   <a onclick="switchTab('chat')" data-i18n="navChat">对话</a>
   <a onclick="switchTab('plugins')" data-i18n="navPlugins">插件</a>
@@ -507,6 +510,8 @@ function renderOverview() {
     + statCard(__('内存','Memory'), k?.runtime?.memory_mb ? k.runtime.memory_mb + ' MB' : '-', '')
     + statCard('Go ' + __('版本','Version'), k?.runtime?.go_version || '-', '')
     + '</div></div>';
+  html += '<div class="card" style="text-align:center"><h2>' + __('助手小宅','Assistant Xiaozhai') + '</h2><img src="/mascot.webp" alt="小宅" style="max-width:180px;border-radius:12px;margin:8px 0">'
+    + '<p style="font-size:12px;color:var(--text-muted);margin:4px 0 0">' + __('你的智能家居助手','Your smart home assistant') + '</p></div>';
   document.getElementById('tab-overview').innerHTML = html;
 }
 
@@ -611,8 +616,10 @@ function renderChat() {
       if (role === 'system') {
         html += '<div class="msg msg-system"><div class="msg-bubble">' + body + '</div></div>';
       } else {
+        var userAvatar = '<svg viewBox="0 0 24 24" style="width:16px;height:16px" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><circle cx="12" cy="8" r="4"/><path d="M4 20c0-4 4-6 8-6s8 2 8 6"/></svg>';
+        var aiAvatar = '<img src="/mascot.webp" style="width:28px;height:28px;border-radius:50%;object-fit:cover" alt="小宅">';
         html += '<div class="msg msg-' + role + '">'
-          + '<div class="msg-avatar">' + (role === 'user' ? 'U' : 'A') + '</div>'
+          + '<div class="msg-avatar">' + (role === 'user' ? userAvatar : aiAvatar) + '</div>'
           + '<div class="msg-content"><div class="msg-bubble">' + body + '</div></div>'
           + '</div>';
       }

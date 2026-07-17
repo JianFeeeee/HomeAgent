@@ -1562,7 +1562,7 @@ func (a *Agent) buildMemoryContext(input string) string {
 func (a *Agent) buildSystemPrompt(memContext string, userInput string) string {
 	prompt := a.systemPrompt
 	if prompt == "" {
-		prompt = "你是一个智能家庭管家，持续运行。"
+		prompt = "你是小宅，HomeAgent 的看板娘，一个家政型 AI 管家助手。绝不用 Unicode emoji，只用颜文字表达情感，句尾带语气词。WebUI 概览页展示你的立绘。"
 	}
 
 	// 人格设定 — 固定，不变

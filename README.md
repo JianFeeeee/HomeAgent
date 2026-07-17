@@ -1,3 +1,5 @@
+<img src="branding/mascot-xiaozhai.webp" width="20" style="border-radius:50%;vertical-align:middle"> :
+
 # HomeAgent
 
 > **English**: [README_EN.md](./README_EN.md)
@@ -125,6 +127,13 @@ flowchart TB
 ```
 
 详细说明见 [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md)。
+
+## 品牌吉祥物
+
+<div align="center">
+  <img src="branding/mascot-xiaozhai.webp" alt="HomeAgent 吉祥物 小宅" width="200">
+  <p><strong>小宅</strong> — HomeAgent 智能助手形象</p>
+</div>
 
 ## 快速体验
 
