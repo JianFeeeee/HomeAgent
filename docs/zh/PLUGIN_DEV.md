@@ -106,10 +106,10 @@ plugindev build
 
 执行过程：
 1. 读取 `plg.json` 确定目标平台
-2. **Go 插件**：执行 `go build -buildmode=plugin`（Linux）或 `-buildmode=c-shared`（Windows）
+2. **Go 插件**：执行 `go build -buildmode=c-shared`（生成 `.so` + C ABI header）
 3. **Lua 插件**：直接打包源码，无需编译
 4. 生成 `plugin.json` 清单文件
-5. 打包为 `.hmap` 分发包（zip 格式，内含 `plugin.json` + `plugin.so`/`plugin.dll`/`main.lua`）
+5. 打包为 `.hmap` 分发包（zip 格式，内含 `plugin.json` + `plugin.so` + `plugin.h` + `main.lua`）
 
 输出在 `dist/` 目录：
 ```
@@ -182,7 +182,7 @@ func NewPlugin(name string, config map[string]interface{}) (sdk.Plugin, error) {
 }
 ```
 
-对于 Windows `-buildmode=c-shared`，`plugindev build` 自动生成 C ABI bridge 代码，无需手动处理。
+对于 `-buildmode=c-shared`，`plugindev build` 自动生成 C ABI bridge 代码（`z_bridge_gen.go` + `z_entry.c`），无需手动处理。
 
 ### PluginSDK 核心 API
 
@@ -223,10 +223,11 @@ s.RegisterTool("weather_query", sdk.ToolDef{
 | `post_action` | LLM 返回结果 | 修改输出/工具列表 |
 | `before_toolcall` | 工具调用前 | 审计、拒绝、改参 |
 | `after_toolcall` | 工具执行后 | 脱敏、改写结果 |
-| `before_output` | 输出前 | 格式适配 |
+| `before_output` | 输出前 | 格式适配、泄漏清洗 |
 | `after_output` | 输出后 | 统计日志 |
 
 ```go
+// 全局监听：所有插件的阶段事件
 s.RegisterStage(sdk.StagePreAction, func(ctx *sdk.StageContext) error {
     ctx.Lock()
     ctx.ContextMsgs = append(ctx.ContextMsgs, map[string]interface{}{
@@ -236,6 +237,9 @@ s.RegisterStage(sdk.StagePreAction, func(ctx *sdk.StageContext) error {
     ctx.Unlock()
     return nil
 })
+
+// 仅自己工具：仅监听自己注册的 tool 的 before_toolcall/after_toolcall
+s.RegisterStage(sdk.StageBeforeToolcall, myHandler, sdk.StageScopeOwnTools)
 ```
 
 #### 配置管理

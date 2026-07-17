@@ -37,6 +37,12 @@ type ToolDef = pubsdk.ToolDef
 type IOInjector = pubsdk.IOInjector
 type ToolRegistrar = pubsdk.ToolRegistrar
 type StageRegistrar = pubsdk.StageRegistrar
+type StageScope = pubsdk.StageScope
+
+const (
+	StageScopeGlobal   = pubsdk.StageScopeGlobal
+	StageScopeOwnTools = pubsdk.StageScopeOwnTools
+)
 type APIRegistrar = pubsdk.APIRegistrar
 type OutputChannelRegistrar = pubsdk.OutputChannelRegistrar
 

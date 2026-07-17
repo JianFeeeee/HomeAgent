@@ -49,7 +49,7 @@ Code is in the project root, implemented in Go.
 
 **Plugin System** (`internal/plugin/`):
 - Built-in plugins: Go `init()` self-registration, compiled into kernel
-- External plugins: Go `-buildmode=plugin` compiled to `.so`/`.dll`, dynamically loaded via `plugin.Open`; also supports Lua script plugins
+- External plugins: Go `-buildmode=c-shared` compiled to `.so`, dynamically loaded via C ABI bridge; also supports Lua script plugins
 - PluginSDK (`internal/sdk/`) defines four channels: RegisterTool / RegisterStage / Subscribe / RegisterOutputChannel
 - 7 stage hooks: on_input → pre_action → post_action → before_toolcall → after_toolcall → before_output → after_output
 
