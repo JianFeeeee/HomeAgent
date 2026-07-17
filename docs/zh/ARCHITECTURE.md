@@ -239,7 +239,7 @@ VM 内置 `json.encode` / `json.decode` / `log` / `http_get` / `http_post`。
 | 方式 | 注册机制 | 编译 | 用途 |
 |------|----------|------|------|
 | 内置插件 | `init()` → `RegisterFactory` | `internal/plugins/` 编译进内核 | webui/cli/timer/mcp 等 |
-| 外部 `.so`/`.dll` | `plugin.Open` 动态加载 | `-buildmode=plugin` | qq/files/web/memo 等 |
+| 外部 `.so` | C ABI 动态加载 | `-buildmode=c-shared` + bridge | qq/files/web/memo 等 |
 | Lua 脚本插件 | 解析 `main.lua` 注册工具 | 无需编译，热加载 | luaplugintest/testlua 等 |
 | SKILL 插件 | 解析 `SKILL.md` | Markdown 定义 | OpenClaw 兼容 |
 
@@ -253,7 +253,7 @@ Lua 脚本插件加载：`internal/lua/` → 通过 Lua VM 解析 `main.lua`，�
 插件 ──→ 核心
 
 RegisterTool(name, fn)   ──→  buildToolDefs() / executeToolCall()
-RegisterStage(stage, fn)  ──→  runStage() 在对应阶段调用
+RegisterStage(stage, fn, scope...)  ──→  runStage() 在对应阶段调用（scope 控制全局/仅自己工具）
 Subscribe(event, fn)      ──→  Publish() 通知所有订阅者
 RegisterOutputChannel(name, caps, desc, handler) ──→ output_send__{name} 工具生成
 ```
@@ -262,7 +262,7 @@ RegisterOutputChannel(name, caps, desc, handler) ──→ output_send__{name} �
 
 ```go
 sdk.RegisterTool(name, def, handler)
-sdk.RegisterStage(stage, handler)
+sdk.RegisterStage(stage, handler, scope...)
 sdk.Publish(event)
 sdk.InjectInput(source, channel, payload)
 sdk.InjectInterrupt(source, channel, payload)

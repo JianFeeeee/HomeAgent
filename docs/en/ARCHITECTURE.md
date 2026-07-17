@@ -239,7 +239,7 @@ VM built-ins: `json.encode` / `json.decode` / `log` / `http_get` / `http_post`.
 | Method | Registration Mechanism | Compilation | Usage |
 |--------|----------------------|-------------|-------|
 | Built-in | `init()` → `RegisterFactory` | `internal/plugins/` compiled into kernel | webui/cli/timer/mcp etc. |
-| External `.so`/`.dll` | `plugin.Open` dynamic loading | `-buildmode=plugin` | qq/files/web/memo etc. |
+| External `.so` | C ABI dynamic loading | `-buildmode=c-shared` + bridge | qq/files/web/memo etc. |
 | Lua script plugin | Parse `main.lua` to register tools | No compilation, hot-reload | luaplugintest/testlua etc. |
 | SKILL plugin | Parse `SKILL.md` | Markdown definition | OpenClaw compatible |
 
@@ -253,7 +253,7 @@ Lua script plugin loading: `internal/lua/` → parse `main.lua` via Lua VM, call
 Plugin ──→ Kernel
 
 RegisterTool(name, fn)   ──→  buildToolDefs() / executeToolCall()
-RegisterStage(stage, fn)  ──→  runStage() called at corresponding phase
+RegisterStage(stage, fn, scope...)  ──→  runStage() called at corresponding phase (scope: global / own-tools-only)
 Subscribe(event, fn)      ──→  Publish() notify all subscribers
 RegisterOutputChannel(name, caps, desc, handler) ──→ output_send__{name} tool generation
 ```
@@ -262,7 +262,7 @@ RegisterOutputChannel(name, caps, desc, handler) ──→ output_send__{name} t
 
 ```go
 sdk.RegisterTool(name, def, handler)
-sdk.RegisterStage(stage, handler)
+sdk.RegisterStage(stage, handler, scope...)
 sdk.Publish(event)
 sdk.InjectInput(source, channel, payload)
 sdk.InjectInterrupt(source, channel, payload)

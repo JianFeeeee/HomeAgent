@@ -214,7 +214,7 @@ func (p *Plugin) Start(s *sdk.PluginSDK) error {
 		}, nil
 	})
 
-	s.RegisterStageOwnTools(sdk.StageBeforeToolcall, func(ctx *sdk.StageContext) error {
+	s.RegisterStage(sdk.StageBeforeToolcall, func(ctx *sdk.StageContext) error {
 		if len(ctx.ToolCalls) == 0 {
 			return nil
 		}
@@ -233,7 +233,7 @@ func (p *Plugin) Start(s *sdk.PluginSDK) error {
 			return nil
 		}
 		return nil
-	})
+	}, sdk.StageScopeOwnTools)
 
 	return nil
 }

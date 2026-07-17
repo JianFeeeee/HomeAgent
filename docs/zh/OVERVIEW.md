@@ -49,7 +49,7 @@ HomeAgent 是一个持续运行的个人智能 Agent 框架。
 
 **插件系统** (`internal/plugin/`)：
 - 内置插件：Go `init()` 自注册，编译进内核
-- 外部插件：Go `-buildmode=plugin` 编译为 `.so`/`.dll`，通过 `plugin.Open` 动态加载；也支持 Lua 脚本插件
+- 外部插件：Go `-buildmode=c-shared` 编译为 `.so`，通过 C ABI bridge 动态加载；也支持 Lua 脚本插件
 - PluginSDK (`internal/sdk/`) 定义四通道：RegisterTool / RegisterStage / Subscribe / RegisterOutputChannel
 - 阶段钩子 7 个：on_input → pre_action → post_action → before_toolcall → after_toolcall → before_output → after_output
 

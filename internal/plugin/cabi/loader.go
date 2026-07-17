@@ -44,6 +44,7 @@ import "C"
 import (
 	"encoding/json"
 	"fmt"
+	"log"
 	"sync"
 	"sync/atomic"
 	"unsafe"
@@ -142,16 +143,22 @@ func (h *Handle) FreeCoreAPI() {
 
 // Start calls the plugin's Start with a CoreAPI pointer.
 func (h *Handle) Start(corePtr unsafe.Pointer) error {
-	if ret := int(C.call_start_plugin(h.api, corePtr, C.int(1), nil)); ret != 0 {
-		return fmt.Errorf("start_plugin failed")
+	var cErr *C.char
+	if ret := int(C.call_start_plugin(h.api, corePtr, C.int(1), &cErr)); ret != 0 {
+		errMsg := ""
+		if cErr != nil { errMsg = C.GoString(cErr); C.api_free_string(h.api, cErr) }
+		return fmt.Errorf("start_plugin: %s", errMsg)
 	}
 	return nil
 }
 
 // Stop calls the plugin's Stop.
 func (h *Handle) Stop() error {
-	if ret := int(C.call_stop_plugin(h.api, nil)); ret != 0 {
-		return fmt.Errorf("stop_plugin failed")
+	var cErr *C.char
+	if ret := int(C.call_stop_plugin(h.api, &cErr)); ret != 0 {
+		errMsg := ""
+		if cErr != nil { errMsg = C.GoString(cErr); C.api_free_string(h.api, cErr) }
+		return fmt.Errorf("stop_plugin: %s", errMsg)
 	}
 	return nil
 }
@@ -214,10 +221,13 @@ func pluginInvokeOutput(pluginID int32, channel, payload string) error {
 	if ps.api == nil { return fmt.Errorf("plugin %d: nil api", pluginID) }
 	cCh := C.CString(channel)
 	cPayload := C.CString(payload)
+	var cErr *C.char
 	defer C.free(unsafe.Pointer(cCh))
 	defer C.free(unsafe.Pointer(cPayload))
-	if ret := int(C.call_invoke_output(ps.api, cCh, nil, cPayload, nil)); ret != 0 {
-		return fmt.Errorf("invoke_output %s failed", channel)
+	if ret := int(C.call_invoke_output(ps.api, cCh, nil, cPayload, &cErr)); ret != 0 {
+		errMsg := ""
+		if cErr != nil { errMsg = C.GoString(cErr); C.api_free_string(ps.api, cErr) }
+		return fmt.Errorf("invoke_output %s: %s", channel, errMsg)
 	}
 	return nil
 }
@@ -229,10 +239,13 @@ func pluginInvokeStage(pluginID int32, stage, ctxJSON string) error {
 	if ps.api == nil { return fmt.Errorf("plugin %d: nil api", pluginID) }
 	cStage := C.CString(stage)
 	cCtx := C.CString(ctxJSON)
+	var cErr *C.char
 	defer C.free(unsafe.Pointer(cStage))
 	defer C.free(unsafe.Pointer(cCtx))
-	if ret := int(C.call_invoke_stage(ps.api, cStage, cCtx, nil)); ret != 0 {
-		return fmt.Errorf("invoke_stage %s failed", stage)
+	if ret := int(C.call_invoke_stage(ps.api, cStage, cCtx, &cErr)); ret != 0 {
+		errMsg := ""
+		if cErr != nil { errMsg = C.GoString(cErr); C.api_free_string(ps.api, cErr) }
+		return fmt.Errorf("invoke_stage %s: %s", stage, errMsg)
 	}
 	return nil
 }
@@ -294,8 +307,18 @@ func go_core_dispatch(methodID C.int, ctx unsafe.Pointer, s1, s2, s3 *C.char, i1
 		pid := pluginID
 		chName := a1
 		s.RegisterOutputChannel(chName, n1, a2, func(args map[string]interface{}) (interface{}, error) {
-			argsJSON, _ := json.Marshal(args)
-			return nil, pluginInvokeOutput(pid, chName, string(argsJSON))
+			// Output is async: return immediately, send in background
+			// to avoid nested cgo calls (cgo within cgo can crash)
+			go func() {
+				argsJSON, _ := json.Marshal(args)
+				log.Printf("[dispatch] async output %s/%s args=%s", ps.name, chName, string(argsJSON))
+				if err := pluginInvokeOutput(pid, chName, string(argsJSON)); err != nil {
+					log.Printf("[dispatch] async output %s/%s failed: %v", ps.name, chName, err)
+				} else {
+					log.Printf("[dispatch] async output %s/%s OK", ps.name, chName)
+				}
+			}()
+			return map[string]interface{}{"status": "queued"}, nil
 		})
 		return 0
 
@@ -324,7 +347,7 @@ func go_core_dispatch(methodID C.int, ctx unsafe.Pointer, s1, s2, s3 *C.char, i1
 			entities, relations, err := mem.Recall([]string{a1}, n1)
 			if err != nil { setErr(errorOut, err); return 1 }
 			b, _ := json.Marshal(map[string]interface{}{"entities": entities, "relations": relations})
-			*result = C.CString(string(b))
+			setResult(result, string(b))
 		}
 		return 0
 
@@ -341,7 +364,7 @@ func go_core_dispatch(methodID C.int, ctx unsafe.Pointer, s1, s2, s3 *C.char, i1
 			r, err := mem.Introspect()
 			if err != nil { setErr(errorOut, err); return 1 }
 			b, _ := json.Marshal(r)
-			*result = C.CString(string(b))
+			setResult(result, string(b))
 		}
 		return 0
 
@@ -364,7 +387,7 @@ func go_core_dispatch(methodID C.int, ctx unsafe.Pointer, s1, s2, s3 *C.char, i1
 	case 14: // CORE_DOC_QUERY
 		if dm := s.DocMemory(); dm != nil {
 			b, _ := json.Marshal(dm.Query(a1, n1))
-			*result = C.CString(string(b))
+			setResult(result, string(b))
 		}
 		return 0
 
@@ -373,7 +396,7 @@ func go_core_dispatch(methodID C.int, ctx unsafe.Pointer, s1, s2, s3 *C.char, i1
 			results, err := kn.Search(a1, n1)
 			if err != nil { setErr(errorOut, err); return 1 }
 			b, _ := json.Marshal(results)
-			*result = C.CString(string(b))
+			setResult(result, string(b))
 		}
 		return 0
 
@@ -382,7 +405,7 @@ func go_core_dispatch(methodID C.int, ctx unsafe.Pointer, s1, s2, s3 *C.char, i1
 			v, err := sett.Get(a1)
 			if err != nil { setErr(errorOut, err); return 1 }
 			b, _ := json.Marshal(v)
-			*result = C.CString(string(b))
+			setResult(result, string(b))
 		}
 		return 0
 
@@ -405,7 +428,7 @@ func go_core_dispatch(methodID C.int, ctx unsafe.Pointer, s1, s2, s3 *C.char, i1
 	case 19: // CORE_LLM_LIST_SOURCES
 		if llm := s.LLM(); llm != nil {
 			b, _ := json.Marshal(llm.ListSources())
-			*result = C.CString(string(b))
+			setResult(result, string(b))
 		}
 		return 0
 
@@ -420,7 +443,7 @@ func go_core_dispatch(methodID C.int, ctx unsafe.Pointer, s1, s2, s3 *C.char, i1
 			p, err := social.GetPerson(a1)
 			if err != nil { setErr(errorOut, err); return 1 }
 			b, _ := json.Marshal(p)
-			*result = C.CString(string(b))
+			setResult(result, string(b))
 		}
 		return 0
 
@@ -429,7 +452,7 @@ func go_core_dispatch(methodID C.int, ctx unsafe.Pointer, s1, s2, s3 *C.char, i1
 			profiles, err := social.GetNetwork(a1, n1)
 			if err != nil { setErr(errorOut, err); return 1 }
 			b, _ := json.Marshal(profiles)
-			*result = C.CString(string(b))
+			setResult(result, string(b))
 		}
 		return 0
 
@@ -450,7 +473,7 @@ func go_core_dispatch(methodID C.int, ctx unsafe.Pointer, s1, s2, s3 *C.char, i1
 			v, err := sett.GetCore(a1)
 			if err != nil { setErr(errorOut, err); return 1 }
 			b, _ := json.Marshal(v)
-			*result = C.CString(string(b))
+			setResult(result, string(b))
 		}
 		return 0
 
@@ -467,7 +490,7 @@ func go_core_dispatch(methodID C.int, ctx unsafe.Pointer, s1, s2, s3 *C.char, i1
 			keys, err := sett.ListCore(a1)
 			if err != nil { setErr(errorOut, err); return 1 }
 			b, _ := json.Marshal(keys)
-			*result = C.CString(string(b))
+			setResult(result, string(b))
 		}
 		return 0
 
@@ -476,7 +499,7 @@ func go_core_dispatch(methodID C.int, ctx unsafe.Pointer, s1, s2, s3 *C.char, i1
 			v, err := sett.GetPlugin(a1, a2)
 			if err != nil { setErr(errorOut, err); return 1 }
 			b, _ := json.Marshal(v)
-			*result = C.CString(string(b))
+			setResult(result, string(b))
 		}
 		return 0
 
@@ -493,7 +516,7 @@ func go_core_dispatch(methodID C.int, ctx unsafe.Pointer, s1, s2, s3 *C.char, i1
 			keys, err := sett.ListPlugin(a1, a2)
 			if err != nil { setErr(errorOut, err); return 1 }
 			b, _ := json.Marshal(keys)
-			*result = C.CString(string(b))
+			setResult(result, string(b))
 		}
 		return 0
 
@@ -514,7 +537,7 @@ func go_core_dispatch(methodID C.int, ctx unsafe.Pointer, s1, s2, s3 *C.char, i1
 	case 34: // CORE_DOC_STATS
 		if dm := s.DocMemory(); dm != nil {
 			b, _ := json.Marshal(dm.Stats())
-			*result = C.CString(string(b))
+			setResult(result, string(b))
 		}
 		return 0
 
@@ -529,14 +552,14 @@ func go_core_dispatch(methodID C.int, ctx unsafe.Pointer, s1, s2, s3 *C.char, i1
 			list, err := kn.List()
 			if err != nil { setErr(errorOut, err); return 1 }
 			b, _ := json.Marshal(list)
-			*result = C.CString(string(b))
+			setResult(result, string(b))
 		}
 		return 0
 
 	case 37: // CORE_LLM_CURRENT_SOURCE
 		if llm := s.LLM(); llm != nil {
 			b, _ := json.Marshal(llm.CurrentSource())
-			*result = C.CString(string(b))
+			setResult(result, string(b))
 		}
 		return 0
 
@@ -544,7 +567,7 @@ func go_core_dispatch(methodID C.int, ctx unsafe.Pointer, s1, s2, s3 *C.char, i1
 		if social := s.Social(); social != nil {
 			val, ok := social.GetTrait(a1, a2)
 			b, _ := json.Marshal(map[string]interface{}{"value": val, "found": ok})
-			*result = C.CString(string(b))
+			setResult(result, string(b))
 		}
 		return 0
 
@@ -553,7 +576,7 @@ func go_core_dispatch(methodID C.int, ctx unsafe.Pointer, s1, s2, s3 *C.char, i1
 			rels, err := social.GetRelations(a1)
 			if err != nil { setErr(errorOut, err); return 1 }
 			b, _ := json.Marshal(rels)
-			*result = C.CString(string(b))
+			setResult(result, string(b))
 		}
 		return 0
 
@@ -562,7 +585,7 @@ func go_core_dispatch(methodID C.int, ctx unsafe.Pointer, s1, s2, s3 *C.char, i1
 			persons, err := social.ListPersons()
 			if err != nil { setErr(errorOut, err); return 1 }
 			b, _ := json.Marshal(persons)
-			*result = C.CString(string(b))
+			setResult(result, string(b))
 		}
 		return 0
 
@@ -571,6 +594,39 @@ func go_core_dispatch(methodID C.int, ctx unsafe.Pointer, s1, s2, s3 *C.char, i1
 			var evt sdk.TextEvent
 			if err := json.Unmarshal([]byte(a1), &evt); err != nil { setErr(errorOut, err); return 1 }
 			if err := tm.Append(evt); err != nil { setErr(errorOut, err); return 1 }
+		}
+		return 0
+
+	case 42: // CORE_SETTINGS_LIST
+		if sett := s.Settings(); sett != nil {
+			keys, err := sett.List(a1)
+			if err != nil { setErr(errorOut, err); return 1 }
+			b, _ := json.Marshal(keys)
+			setResult(result, string(b))
+		}
+		return 0
+
+	case 43: // CORE_SETTINGS_DEFS
+		if sett := s.Settings(); sett != nil {
+			defs := sett.Defs(a1)
+			b, _ := json.Marshal(defs)
+			setResult(result, string(b))
+		}
+		return 0
+
+	case 44: // CORE_SETTINGS_DUMP
+		if sett := s.Settings(); sett != nil {
+			dump := sett.Dump()
+			b, _ := json.Marshal(dump)
+			setResult(result, string(b))
+		}
+		return 0
+
+	case 45: // CORE_SETTINGS_PLUGINS
+		if sett := s.Settings(); sett != nil {
+			plugins := sett.Plugins()
+			b, _ := json.Marshal(plugins)
+			setResult(result, string(b))
 		}
 		return 0
 	}
@@ -585,5 +641,11 @@ func goStr(s *C.char) string {
 func setErr(errOut **C.char, err error) {
 	if errOut != nil && err != nil {
 		*errOut = C.CString(err.Error())
+	}
+}
+
+func setResult(result **C.char, v string) {
+	if result != nil {
+		*result = C.CString(v)
 	}
 }
