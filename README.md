@@ -128,11 +128,11 @@ flowchart TB
 
 详细说明见 [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md)。
 
-## 品牌吉祥物
+## 看板娘
 
 <div align="center">
-  <img src="branding/mascot-xiaozhai.webp" alt="HomeAgent 吉祥物 小宅" width="200">
-  <p><strong>小宅</strong> — HomeAgent 智能助手形象</p>
+  <img src="branding/mascot-xiaozhai.webp" alt="HomeAgent 看板娘 小宅" width="200">
+  <p><strong>小宅</strong> — HomeAgent 看板娘</p>
 </div>
 
 ## 快速体验
