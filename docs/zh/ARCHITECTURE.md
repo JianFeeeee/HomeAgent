@@ -1,5 +1,7 @@
 [English](../en/ARCHITECTURE.md) | **中文**
 
+<img src="../../branding/mascot-xiaozhai.webp" width="20" style="border-radius:50%;vertical-align:middle"> :
+
 # HomeAgent 架构
 
 内核零 IO，一切外界交互来自插件。

@@ -1,5 +1,7 @@
 **中文** | [English](../zh/ARCHITECTURE.md)
 
+<img src="../../branding/mascot-xiaozhai.webp" width="20" style="border-radius:50%;vertical-align:middle"> :
+
 # HomeAgent Architecture
 
 The kernel performs zero IO; all external interaction comes from plugins.

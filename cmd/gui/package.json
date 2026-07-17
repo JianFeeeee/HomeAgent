@@ -22,12 +22,14 @@
       "target": [
         "deb"
       ],
-      "category": "Utility"
+      "category": "Utility",
+      "icon": "icon.svg"
     },
     "files": [
       "main.js",
       "preload.js",
       "renderer/**/*",
+      "icon.svg",
       "node_modules/**/*",
       "!node_modules/electron-builder/**"
     ]

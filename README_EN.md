@@ -1,3 +1,5 @@
+<img src="branding/mascot-xiaozhai.webp" width="20" style="border-radius:50%;vertical-align:middle"> :
+
 # HomeAgent
 
 > **中文**: [README.md](./README.md)
@@ -125,6 +127,13 @@ flowchart TB
 ```
 
 See [`docs/en/ARCHITECTURE.md`](docs/en/ARCHITECTURE.md) for details.
+
+## Brand Mascot
+
+<div align="center">
+  <img src="branding/mascot-xiaozhai.webp" alt="HomeAgent Mascot Xiaozhai" width="200">
+  <p><strong>Xiaozhai</strong> — HomeAgent AI Assistant Character</p>
+</div>
 
 ## Quick Start
 

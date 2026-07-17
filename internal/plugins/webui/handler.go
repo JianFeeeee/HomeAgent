@@ -33,7 +33,7 @@ import (
 	"gitcode.com/JianFeeeee/HomeAgent/pkg/types"
 )
 
-//go:embed dashboard.html
+//go:embed dashboard.html mascot.webp logo.svg
 var dashboardFS embed.FS
 
 var dashboardHTML string
@@ -1443,6 +1443,28 @@ func (h *Handler) handleStatic(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Pragma", "no-cache")
 		w.Header().Set("Expires", "0")
 		w.Write([]byte(dashboardHTML))
+		return
+	}
+	if r.URL.Path == "/mascot.webp" {
+		data, err := dashboardFS.ReadFile("mascot.webp")
+		if err != nil {
+			http.NotFound(w, r)
+			return
+		}
+		w.Header().Set("Content-Type", "image/webp")
+		w.Header().Set("Cache-Control", "public, max-age=86400")
+		w.Write(data)
+		return
+	}
+	if r.URL.Path == "/logo.svg" {
+		data, err := dashboardFS.ReadFile("logo.svg")
+		if err != nil {
+			http.NotFound(w, r)
+			return
+		}
+		w.Header().Set("Content-Type", "image/svg+xml")
+		w.Header().Set("Cache-Control", "public, max-age=86400")
+		w.Write(data)
 		return
 	}
 	http.NotFound(w, r)

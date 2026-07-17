@@ -1,5 +1,7 @@
 **中文** | [English](../zh/ADAPTER.md)
 
+<img src="../../branding/mascot-xiaozhai.webp" width="20" style="border-radius:50%;vertical-align:middle"> :
+
 # Lua Adapter — LLM Source Adaptation Guide
 
 Each LLM API source corresponds to a Lua script, responsible for request transformation (Go unified format → API format) and response transformation (API format → Go unified format).

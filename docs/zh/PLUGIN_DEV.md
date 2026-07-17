@@ -1,5 +1,7 @@
 [English](../en/PLUGIN_DEV.md) | **中文**
 
+<img src="../../branding/mascot-xiaozhai.webp" width="20" style="border-radius:50%;vertical-align:middle"> :
+
 # HomeAgent 插件开发指南
 
 ## 概述
