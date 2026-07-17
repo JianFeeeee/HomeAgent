@@ -9,7 +9,6 @@ import (
 	"path/filepath"
 	"plugin"
 	"reflect"
-	"unsafe"
 
 	sdk "gitcode.com/JianFeeeee/HomeAgent/internal/sdk"
 	pubsdk "gitcode.com/JianFeeeee/homeagent-sdk/sdk"
@@ -61,61 +60,22 @@ type cabiPlugin struct {
 
 func (p *cabiPlugin) Name() string { return p.name }
 func (p *cabiPlugin) Start(s *sdk.PluginSDK) error {
-	// Build CoreAPI from the provided PluginSDK and pass to plugin
-	corePtr := buildCoreAPI(s, p.name)
+	// Create CoreAPI backed by the real PluginSDK and pass to plugin
+	corePtr := p.handle.CreateCoreAPI(s)
+	if corePtr == nil {
+		return fmt.Errorf("cabi: failed to create CoreAPI for %s", p.name)
+	}
+	defer p.handle.FreeCoreAPI()
+
 	if err := p.handle.Start(corePtr); err != nil {
-		return err
+		return fmt.Errorf("cabi: start %s: %w", p.name, err)
 	}
-
-	// Discover tools/stages/channels registered by the plugin during Start
-	defs, _ := p.handle.GetToolDefs()
-	for _, d := range defs {
-		var td pubsdk.ToolDef
-		if err := json.Unmarshal(d, &td); err != nil {
-			continue
-		}
-		toolName := td.Name
-		td.Plugin = p.name
-		s.RegisterTool(toolName, sdk.ToolDef{
-			Name:        toolName,
-			Description: td.Description,
-			Parameters:  td.Parameters,
-			Plugin:      p.name,
-		}, makeCABIHandler(p.handle, toolName))
-	}
-
-	stages, _ := p.handle.GetStages()
-	for _, stage := range stages {
-		st := sdk.Stage(stage)
-		s.RegisterStage(st, func(sc *sdk.StageContext) error {
-			ctxJSON, _ := json.Marshal(map[string]interface{}{
-				"raw_message": sc.RawMessage,
-				"user_id":     sc.UserID,
-				"phase":       string(sc.Phase),
-			})
-			return p.handle.InvokeStage(stage, string(ctxJSON))
-		})
-	}
-
 	return nil
 }
 
 func (p *cabiPlugin) Stop() error {
 	p.handle.Close()
 	return nil
-}
-
-func makeCABIHandler(handle *cabi.Handle, toolName string) sdk.ToolHandler {
-	return func(args map[string]interface{}) (interface{}, error) {
-		return handle.InvokeTool(toolName, args)
-	}
-}
-
-// buildCoreAPI creates a C-compatible CoreAPI function table from a PluginSDK.
-// Returns an unsafe.Pointer to a C-allocated struct.
-// TODO: implement CoreAPI dispatch that calls back into the Go PluginSDK
-func buildCoreAPI(s *sdk.PluginSDK, pluginName string) unsafe.Pointer {
-	return unsafe.Pointer(nil) // placeholder - will be implemented in core dispatch
 }
 
 // tryLoadSO 尝试从插件目录加载 plugin.so。
