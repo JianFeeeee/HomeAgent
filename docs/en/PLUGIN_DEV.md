@@ -105,7 +105,7 @@ plugindev build
 
 Execution process:
 1. Reads `plg.json` to determine target platform
-2. **Go plugin**: Runs `go build -buildmode=plugin` (Linux) or `-buildmode=c-shared` (Windows)
+2. **Go plugin**: Runs `go build -buildmode=c-shared` (produces `.so` + C ABI header)
 3. **Lua plugin**: Packages source code directly, no compilation needed
 4. Generates `plugin.json` manifest file
 5. Packages as `.hmap` distribution (zip format, containing `plugin.json` + `plugin.so`/`plugin.dll`/`main.lua`)
@@ -181,7 +181,7 @@ func NewPlugin(name string, config map[string]interface{}) (sdk.Plugin, error) {
 }
 ```
 
-For Windows `-buildmode=c-shared`, `plugindev build` auto-generates C ABI bridge code, no manual handling needed.
+For `-buildmode=c-shared`, `plugindev build` auto-generates C ABI bridge code (`z_bridge_gen.go` + `z_entry.c`), no manual handling needed.
 
 ### PluginSDK Core API
 
@@ -222,19 +222,23 @@ s.RegisterTool("weather_query", sdk.ToolDef{
 | `post_action` | LLM returned results | Modify output/tool list |
 | `before_toolcall` | Before tool execution | Audit, reject, modify params |
 | `after_toolcall` | After tool execution | Desensitize, rewrite results |
-| `before_output` | Before output | Format adaptation |
+| `before_output` | Before output | Format adaptation, leak cleanup |
 | `after_output` | After output | Statistics/logging |
 
 ```go
+// Global: receive all stage events
 s.RegisterStage(sdk.StagePreAction, func(ctx *sdk.StageContext) error {
-    ctx.Lock()
-    ctx.ContextMsgs = append(ctx.ContextMsgs, map[string]interface{}{
-        "role":    "system",
-        "content": "Injected context content",
-    })
-    ctx.Unlock()
-    return nil
+	ctx.Lock()
+	ctx.ContextMsgs = append(ctx.ContextMsgs, map[string]interface{}{
+		"role":    "system",
+		"content": "Injected context content",
+	})
+	ctx.Unlock()
+	return nil
 })
+
+// Own tools only: only before_toolcall/after_toolcall for this plugin's tools
+s.RegisterStage(sdk.StageBeforeToolcall, myHandler, sdk.StageScopeOwnTools)
 ```
 
 #### Configuration Management
