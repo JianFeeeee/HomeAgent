@@ -128,11 +128,11 @@ flowchart TB
 
 See [`docs/en/ARCHITECTURE.md`](docs/en/ARCHITECTURE.md) for details.
 
-## Brand Mascot
+## Web Mascot
 
 <div align="center">
-  <img src="branding/mascot-xiaozhai.webp" alt="HomeAgent Mascot Xiaozhai" width="200">
-  <p><strong>Xiaozhai</strong> — HomeAgent AI Assistant Character</p>
+  <img src="branding/mascot-xiaozhai.webp" alt="HomeAgent Web Mascot Xiaozhai" width="200">
+  <p><strong>Xiaozhai</strong> — HomeAgent Web Mascot</p>
 </div>
 
 ## Quick Start
