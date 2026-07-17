@@ -424,6 +424,7 @@ func go_core_dispatch(methodID C.int, ctx unsafe.Pointer, s1, s2, s3 *C.char, i1
 
 	case 23: // CORE_SUBSCRIBE
 		_ = n2
+		// Events API not wired for external plugins (SetEventSubscriber not called)
 		return 0
 
 	case 24: // CORE_UNSUBSCRIBE
@@ -482,6 +483,83 @@ func go_core_dispatch(methodID C.int, ctx unsafe.Pointer, s1, s2, s3 *C.char, i1
 			if err != nil { setErr(errorOut, err); return 1 }
 			b, _ := json.Marshal(keys)
 			*result = C.CString(string(b))
+		}
+		return 0
+
+	case 32: // CORE_DOC_INSERT
+		if dm := s.DocMemory(); dm != nil {
+			var doc sdk.Doc
+			if err := json.Unmarshal([]byte(a1), &doc); err != nil { setErr(errorOut, err); return 1 }
+			if err := dm.Insert(&doc); err != nil { setErr(errorOut, err); return 1 }
+		}
+		return 0
+
+	case 33: // CORE_DOC_REMOVE
+		if dm := s.DocMemory(); dm != nil {
+			dm.Remove(a1)
+		}
+		return 0
+
+	case 34: // CORE_DOC_STATS
+		if dm := s.DocMemory(); dm != nil {
+			b, _ := json.Marshal(dm.Stats())
+			*result = C.CString(string(b))
+		}
+		return 0
+
+	case 35: // CORE_KNOWLEDGE_ADD
+		if kn := s.Knowledge(); kn != nil {
+			if err := kn.Add(a1, a2); err != nil { setErr(errorOut, err); return 1 }
+		}
+		return 0
+
+	case 36: // CORE_KNOWLEDGE_LIST
+		if kn := s.Knowledge(); kn != nil {
+			list, err := kn.List()
+			if err != nil { setErr(errorOut, err); return 1 }
+			b, _ := json.Marshal(list)
+			*result = C.CString(string(b))
+		}
+		return 0
+
+	case 37: // CORE_LLM_CURRENT_SOURCE
+		if llm := s.LLM(); llm != nil {
+			b, _ := json.Marshal(llm.CurrentSource())
+			*result = C.CString(string(b))
+		}
+		return 0
+
+	case 38: // CORE_SOCIAL_GET_TRAIT
+		if social := s.Social(); social != nil {
+			val, ok := social.GetTrait(a1, a2)
+			b, _ := json.Marshal(map[string]interface{}{"value": val, "found": ok})
+			*result = C.CString(string(b))
+		}
+		return 0
+
+	case 39: // CORE_SOCIAL_GET_RELATIONS
+		if social := s.Social(); social != nil {
+			rels, err := social.GetRelations(a1)
+			if err != nil { setErr(errorOut, err); return 1 }
+			b, _ := json.Marshal(rels)
+			*result = C.CString(string(b))
+		}
+		return 0
+
+	case 40: // CORE_SOCIAL_LIST_PERSONS
+		if social := s.Social(); social != nil {
+			persons, err := social.ListPersons()
+			if err != nil { setErr(errorOut, err); return 1 }
+			b, _ := json.Marshal(persons)
+			*result = C.CString(string(b))
+		}
+		return 0
+
+	case 41: // CORE_TEXT_MEMORY_APPEND
+		if tm := s.TextMemory(); tm != nil {
+			var evt sdk.TextEvent
+			if err := json.Unmarshal([]byte(a1), &evt); err != nil { setErr(errorOut, err); return 1 }
+			if err := tm.Append(evt); err != nil { setErr(errorOut, err); return 1 }
 		}
 		return 0
 	}
