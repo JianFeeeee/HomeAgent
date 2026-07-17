@@ -75,42 +75,44 @@ eventLoop() → processTextInput()
 ```
 ① Context (工作窗口)
    RelevanceContext — 内存 events[] + JSON持久化
-   Append: 每次输入, Vectorize(char 1-2gram TF-IDF)
-   Prune:  TF-IDF CosineSimilarity, 保留 topK + 最近10条
-       ├── 保留 → timeline → system prompt (按时间排序)
-       └── 低分 → Document 层归档 (ContextToDoc)
+   Append: 每次输入, CleanTemplateText → 三分支向量(textForVector)
+            agent事件→Response, 用户事件→Input, cold_storage→Input+Response
+            StaticEmbedder 预训练词嵌入 / TF-IDF 回退
+   Prune:  StaticEmbedder CosineSimilarity, 保留 topK + 最近10条
+       ├── 保留 → timeline → 按时间排序 → system prompt
+       └── 低分 → Document 层归档 (原始时间戳)
    Save: 5s debounce 写盘
 
-        ↓ Prune 归档                          ↑ LLM 主动召回
+         ↓ Prune 归档                          ↑ LLM 主动召回
 
 ② Document (文件记忆)
    DocStore — JSON文件 + TF-IDF InvertedIndex
    写入: Prune归档 / doc_commit / Graph快照(syncGraphToDocs)
    读取:
-       ├── 自动注入: Query(input, top3) → 【相关记忆文档】→ system prompt (只读, 更新 AccessCount)
+       ├── 自动注入: Query(input, top3) → 相似度摘要 → 【相关记忆文档】→ system prompt (只读)
        └── LLM主动:  doc_query → Consume(读取并删除)
                          → 逐条 context.Append{Timestamp: d.CreatedAt, Source: "cold_storage"}
                          → 文档以原始时间戳写入 context 时间线, 从 docStore 删除
    冷化: FindColdDocs(72h, ≤2次访问) → docToTriples → Graph
 
-        ↓ 冷文档蒸馏                           ↑ 自动召回
+         ↓ 冷文档蒸馏                           ↑ 自动召回
 
 ③ Graph (图数据库)
    SQLite — entities + relations 表
-   写入: memory_commit / 冷文档蒸馏 / Pipeline 规则蒸馏
+   写入: memory_commit / 冷文档蒸馏 / Pipeline 规则蒸馏 / memory_merge
    读取:
        ├── 自动召回: Indexer.BuildContext(input)
-       │     → TF-IDF 实体名搜索 → BFS depth=2
+       │     → CleanTemplateText → 向量实体搜索 + jieba关键词 → SQLite LIKE + BFS depth=2
        │     → 【记忆索引】→ system prompt
-       └── LLM主动: memory_recall / doc_query
+       └── LLM主动: memory_recall / memory_merge / memory_purge / memory_edit / memory_delete_entity
    Social: person_query / set_trait / relate (包装 GraphDB)
 
 ④ 蒸馏管道 (每30min心跳)
    distillContext → 窗口>2×maxSize → 强制Prune
    syncGraphToDocs → Graph 快照写入 Document(跨层可搜索)
    reorgGraph:
-       Step1: indexer.Sync — 重建实体TF-IDF向量索引
-       Step2: docStore.Reindex — 重建文档TF-IDF向量索引
+       Step1: indexer.Sync — 重建实体向量索引
+       Step2: docStore.Reindex — 重建文档向量索引
        Step3: 冷文档 → docToTriples → GraphDB.Commit
        Step4: 实体相似度(Bigram Jaccard>0.75) → consolidation → LLM判断合并
        Step5: evaluateGraphQuality → LLM判断保留/删除
@@ -121,36 +123,35 @@ eventLoop() → processTextInput()
      → 三元组 → GraphDB.Commit
 ```
 
-### 向量化算法：两种策略
+### 向量化：预训练词嵌入 + TF-IDF 回退
 
-向量化在 4 个独立位置以不同方式使用：
+所有向量化统一使用 `StaticEmbedder`（`internal/memory/static_embedder.go`）：
 
-**策略 A — 局部词嵌入**（`LocalWordEmbedder`, `internal/memory/embedder.go`），用于 Context 层：
-
-- **jieba 分词** → 去除停用词和单字
-- **TF-IDF** 作为基础词权重
-- **滑动窗口（size=5）** 统计词对共现 → **PMI（点互信息）** → 保留 top 50
-- **向量化**：`vec[ctx] += TF-IDF × PMI` + 自身上标 `__w__` + TF-IDF
-
-**策略 B — char-bigram TF-IDF + jieba 关键词提取**（`TFIDFVectorizer` + `ExtractKeywords`），用于 Document 和 Indexer 层：
-
-- **char bigram 分词**（1-2 gram）用于实体名向量搜索
-- **jieba 分词**用于关键词提取，配合 SQLite LIKE + BFS 遍历
-- **TF-IDF 权重** + **倒排索引**
+**主策略 — 预训练词嵌入（词对齐 300 维）**
+- 模型来源：ConceptNet Numberbatch（77 语对齐）/ fastText 中文 / fastText 英文
+- 通过 `core.agent.embedding_model_path` 配置（逗号分隔多模型）
+- 路径名含 `numberbatch` → 自动下载 ConceptNet，含 `cc.zh.` → fastText 中文，含 `cc.en.` → fastText 英文
+- 不匹配则默认 ConceptNet
+- **前处理**：`CleanTemplateText` 剥离 QQ 工具调用模版、时间戳噪声，避免垃圾干扰相似度
+- **三分支向量来源**：agent→Response，用户→Input，cold_storage→Input+Response
+- **TF-IDF 回退**：模型下载失败或未配置时自动回退词袋 TF-IDF，服务不中断
 
 | 位置 | 文件 | 用途 | 算法 |
 |------|------|------|------|
-| Context Prune | `context.go:161` | 裁剪低相关性上下文事件 | LocalWordEmbedder → CosineSimilarity(queryVec, evt.Vector) |
-| DocStore Query | `document.go:198` | 从文档记忆召回相关内容 | char-bigram TF-IDF + jieba 关键词 → InvertedIndex + CosineSimilarity |
-| Indexer 实体搜索 | `indexer.go:149` | 从Graph召回相关实体 | char-bigram TF-IDF 向量搜索 + jieba 关键词 → InvertedIndex + CosineSimilarity + SQLite BFS |
-| 实体相似度检测 | `agent.go:2297` | 检测Graph中相似实体 | Bigram Jaccard (>0.75 → consolidation) |
+| Context Prune | `context.go:155` | 裁剪低相关性上下文事件 | VectorizeClean → CosineSimilarity(queryVec, evt.Vector) |
+| DocStore Query | `document.go:206` | 文档记忆召回 | TF-IDF Vectorize → vec.Search |
+| Indexer 实体搜索 | `indexer.go:96+111` | Graph实体召回 | 向量实体搜索 + jieba关键词 → SQLite LIKE + BFS |
+| 实体相似度检测 | `agent.go` | Graph中相似实体 | Bigram Jaccard (>0.75 → consolidation) |
 
 ### Context 层
 
 `internal/agent/core/context.go` — `RelevanceContext`
 - 维护最近事件列表，每次 Append/Prune 写入 JSON 防丢
-- 用户输入时做词嵌入相关性评分（LocalWordEmbedder → CosineSimilarity），保留 topK
+- 向量化前统一经 `CleanTemplateText` 去模版噪声
+- 三分支 `textForVector`：agent 事件用 Response、用户事件用 Input、cold_storage 用 Input+Response
+- 预训练词嵌入 `StaticEmbedder` → CosineSimilarity，模型不可用时自动回退 TF-IDF
 - 保护最近 10 条记录免于淘汰，超出部分按相关性排序归档到文档记忆
+- 归档事件以原始时间戳写入文档记忆，后续 `doc_query` 召回时按原始时间戳插回时序
 
 ### Document 层
 
@@ -171,6 +172,10 @@ eventLoop() → processTextInput()
 |------|------|
 | `memory_recall` | 从 Graph 召回 |
 | `memory_commit` | 写入 Graph 三元组 |
+| `memory_merge` | 合并两个实体节点 |
+| `memory_purge` | 删除指定实体 |
+| `memory_edit` | 编辑已有实体/关系 |
+| `memory_delete_entity` | 删除实体及其所有关系 |
 | `memory_introspect` | 查看记忆统计 |
 | `doc_query` | 从 Document 搜索 |
 | `doc_commit` | 写入 Document |
