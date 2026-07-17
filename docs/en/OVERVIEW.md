@@ -37,7 +37,7 @@ Code is in the project root, implemented in Go.
 - Maintains a message loop (`eventLoop`), queuing input from the IO layer
 - Each input goes through the full processing pipeline: memory recall → persona injection → LLM call → tool execution → output delivery
 - LLM calls abstracted through Provider interface, supports 8 LLM sources with automatic fallback
-- Context management (`context.go`) based on word embedding scoring (LocalWordEmbedder → CosineSimilarity), automatic pruning of low-relevance events
+- Context management (`context.go`) based on pretrained word embedding scoring (StaticEmbedder → CosineSimilarity, TF-IDF fallback), automatic pruning of low-relevance events
 
 **Memory System** (`internal/memory/`):
 - **GraphDB** (`graph.go`) — SQLite, entities + relations tables, BFS traversal

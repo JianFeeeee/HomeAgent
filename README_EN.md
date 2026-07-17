@@ -17,7 +17,7 @@ homed (kernel, zero IO) ← PluginSDK → plugins (all IO capabilities)
 **Separation of Core Domain and Application Domain** — The kernel only handles LLM orchestration, memory management, and knowledge retrieval; all IO capabilities (sending/receiving messages, reading/writing files, network requests, hardware interaction) are implemented by plugins. Plugins can be hot-loaded, independently developed, and independently released. This is not a microservice split of an RPC framework, but a domain-level separation in Agent framework design.
 
 **Three-Layer Memory Architecture** — Solves the memory decay problem for long-running agents:
-- **Context Layer**: TF-IDF relevance-scored event window, maintains recent topK context entries
+- **Context Layer**: Pretrained word embedding / TF-IDF fallback relevance-scored event window, protects last 10 entries, maintains topK context entries
 - **Document Layer**: Temporary memory with automatic cold data sinking, also supports user-initiated submissions
 - **Graph Layer**: SQLite graph database, persists entity relationships and semantic memory, supports distillation pipelines to extract triples from conversations
 
@@ -40,14 +40,14 @@ sequenceDiagram
     rect lavender
         Note over EV: processTextInput
         EV->>ST: StageOnInput  Plugin can rewrite/short-circuit
-        EV->>CTX: Prune(input,topK)  TF-IDF pruning
-        CTX->>MEM: Low-score events archived to Document
-        EV->>CTX: Append(input)  5s debounce write
+        EV->>CTX: Prune(input,topK)  StaticEmbedder/TF-IDF cosine pruning
+        CTX->>MEM: Low-score events archived to Document (original timestamp)
+        EV->>CTX: Append(input)  CleanTemplateText→three-branch vector→5s write
     end
     rect lightgreen
         Note over EV,LLM: process()
-        EV->>MEM: buildMemoryContext  Indexer recalls from Graph
-        EV->>MEM: buildSystemPrompt  Persona+Memory+Skills injection
+        EV->>MEM: buildMemoryContext  Indexer recalls from Graph (vector+jieba→BFS depth=2)
+        EV->>MEM: buildSystemPrompt  DocQuery summary+Graph memory index+Persona+Skills
         EV->>ST: StagePreAction  Plugin can pre-intercept
         loop Tool loop
             LLM->>LLM: drainInterrupts
@@ -99,21 +99,21 @@ flowchart LR
 flowchart TB
     subgraph C[① Context Working Window]
         RC[RelevanceContext]
-        A[Append] -->|Vectorize char 1-2gram| RC
-        P[Prune TF-IDF Cosine] -->|Low score| D
-        P -->|Keep| TL[timeline→system prompt]
+        A[Append] -->|CleanTemplateText→three-branch vector| RC
+        P[Prune StaticEmbedder/TF-IDF Cosine] -->|Low score original timestamp| D
+        P -->|Keep| TL[timeline→chronological→system prompt]
     end
     subgraph D[② Document File Memory]
         DS[DocStore JSON+TF-IDF]
-        Q1[Query auto-inject] -->|[Related Memory Docs]| SP
-        Q2[doc_query LLM active] -->|Consume+delete| DS
-        Q2 -->|Original timestamp write| RC
+        Q1[Query summary auto-inject] -->|[Related Memory Docs]| SP
+        Q2[doc_query LLM active recall] -->|Consume+delete source| DS
+        Q2 -->|Original timestamp write to context| RC
         CD[FindColdDocs 72h] -->|docToTriples| G
     end
     subgraph G[③ Graph Database]
         DB[(SQLite)]
-        IDX[Indexer BFS depth=2] -->|[Memory Index]| SP
-        MEM[memory_recall/commit]
+        IDX[Indexer vector+jieba→BFS depth=2] -->|[Memory Index]| SP
+        MEM[memory_recall/commit/merge/purge/edit]
         SOC[person_query/set_trait]
     end
     subgraph H[④ Heartbeat Distillation]
@@ -160,7 +160,7 @@ cmd/waiter/         CLI client (Unix socket)
 internal/
 ├── agent/core/     Agent core: event loop, LLM tool loop, 7-stage pipeline
 ├── agent/api/      LLM Provider + 8 Lua adapters
-├── memory/         Three-layer memory: Graph(SQLite) / Document(JSON+TF-IDF) / Text(JSONL)
+├── memory/         Three-layer memory: Graph(SQLite) / Document(JSON+TF-IDF) / Text(JSONL) + StaticEmbedder(pretrained word embedding/TF-IDF fallback) + CleanTemplateText(de-template)
 ├── knowledge/      Knowledge base (filesystem + TF-IDF)
 ├── plugin/         Plugin registry + .so/.dll dynamic loader
 ├── plugins/        10 built-in plugins (webui/cli/timer/cmd/mcp/openclaw/agentcli/healthcheck/pluginmgr/files)
