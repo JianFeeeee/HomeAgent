@@ -11,6 +11,25 @@
     "electron": "^33.0.0"
   },
   "devDependencies": {
+    "asar": "^3.2.0",
+    "electron-builder": "^26.15.3",
     "electron-packager": "^17.1.2"
+  },
+  "build": {
+    "appId": "com.homeagent.gui",
+    "productName": "HomeAgent",
+    "linux": {
+      "target": [
+        "deb"
+      ],
+      "category": "Utility"
+    },
+    "files": [
+      "main.js",
+      "preload.js",
+      "renderer/**/*",
+      "node_modules/**/*",
+      "!node_modules/electron-builder/**"
+    ]
   }
 }
