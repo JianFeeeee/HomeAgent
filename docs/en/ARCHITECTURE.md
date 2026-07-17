@@ -75,42 +75,44 @@ Setting `ctx.Response` at any stage jumps to `after_output`.
 ```
 ① Context (Working Window)
    RelevanceContext — In-memory events[] + JSON persistence
-   Append: Each input, Vectorize(char 1-2gram TF-IDF)
-   Prune:  TF-IDF CosineSimilarity, keep topK + last 10
-       ├── Keep → timeline → system prompt (sorted by time)
-       └── Low score → Document layer archive (ContextToDoc)
+   Append: Each input, CleanTemplateText → three-branch vector(textForVector)
+           agent→Response, user→Input, cold_storage→Input+Response
+           StaticEmbedder pretrained word embedding / TF-IDF fallback
+   Prune:  StaticEmbedder CosineSimilarity, keep topK + last 10
+       ├── Keep → timeline → chronologically sorted → system prompt
+       └── Low score → Document layer archive (original timestamp)
    Save: 5s debounce write to disk
 
-        ↓ Prune archive                       ↑ LLM active recall
+         ↓ Prune archive                       ↑ LLM active recall
 
 ② Document (File Memory)
    DocStore — JSON files + TF-IDF InvertedIndex
    Write: Prune archive / doc_commit / Graph snapshot (syncGraphToDocs)
    Read:
-       ├── Auto-inject: Query(input, top3) → [Related Memory Docs] → system prompt (read-only, update AccessCount)
+       ├── Auto-inject: Query(input, top3) → similarity summary → [Related Memory Docs] → system prompt (read-only)
        └── LLM active:  doc_query → Consume(read and delete)
                          → context.Append{Timestamp: d.CreatedAt, Source: "cold_storage"} per doc
                          → Docs written to context timeline with original timestamps, deleted from docStore
    Cold: FindColdDocs(72h, ≤2 accesses) → docToTriples → Graph
 
-        ↓ Cold doc distillation               ↑ Auto recall
+         ↓ Cold doc distillation               ↑ Auto recall
 
 ③ Graph (Graph Database)
    SQLite — entities + relations tables
-   Write: memory_commit / cold doc distillation / Pipeline rule distillation
+   Write: memory_commit / cold doc distillation / Pipeline rule distillation / memory_merge
    Read:
        ├── Auto recall: Indexer.BuildContext(input)
-       │     → TF-IDF entity name search → BFS depth=2
+       │     → CleanTemplateText → vector entity search + jieba keywords → SQLite LIKE + BFS depth=2
        │     → [Memory Index] → system prompt
-       └── LLM active: memory_recall / doc_query
+       └── LLM active: memory_recall / memory_merge / memory_purge / memory_edit / memory_delete_entity
    Social: person_query / set_trait / relate (wraps GraphDB)
 
 ④ Distillation Pipeline (30min heartbeat)
    distillContext → window > 2×maxSize → force Prune
    syncGraphToDocs → Graph snapshot to Document (cross-layer searchable)
    reorgGraph:
-       Step1: indexer.Sync — rebuild entity TF-IDF vector index
-       Step2: docStore.Reindex — rebuild document TF-IDF vector index
+       Step1: indexer.Sync — rebuild entity vector index
+       Step2: docStore.Reindex — rebuild document vector index
        Step3: Cold docs → docToTriples → GraphDB.Commit
        Step4: Entity similarity (Bigram Jaccard > 0.75) → consolidation → LLM decides merge
        Step5: evaluateGraphQuality → LLM decides keep/delete
@@ -121,36 +123,35 @@ Setting `ctx.Response` at any stage jumps to `after_output`.
      → triples → GraphDB.Commit
 ```
 
-### Vectorization: Two Strategies
+### Vectorization: Pretrained Word Embedding + TF-IDF Fallback
 
-Vectorization is used in 4 independent locations with different strategies:
+All vectorization unified under `StaticEmbedder` (`internal/memory/static_embedder.go`):
 
-**Strategy A — Local Word Embedding** (`LocalWordEmbedder`, `internal/memory/embedder.go`), used by Context layer:
-
-- **jieba tokenization** → removes stop words and single characters
-- **TF-IDF** as base word weight
-- **Sliding window (size=5)** counts word co-occurrence → **PMI (Pointwise Mutual Information)** → keeps top 50
-- **Vectorization**: `vec[ctx] += TF-IDF × PMI` + self-tag `__w__` + TF-IDF
-
-**Strategy B — char-bigram TF-IDF + jieba keyword extraction** (`TFIDFVectorizer` + `ExtractKeywords`), used by Document and Indexer layers:
-
-- **char bigram tokenization** (1-2 gram) for entity name vector search
-- **jieba tokenization** for keyword extraction, paired with SQLite LIKE + BFS traversal
-- **TF-IDF weights** + **inverted index**
+**Primary Strategy — Pretrained Word Embedding (aligned 300d)**
+- Model sources: ConceptNet Numberbatch (77-language aligned) / fastText Chinese / fastText English
+- Configured via `core.agent.embedding_model_path` (comma-separated multi-model)
+- Path containing `numberbatch` → auto-download ConceptNet; `cc.zh.` → fastText Chinese; `cc.en.` → fastText English
+- Falls back to ConceptNet by default if no match
+- **Pre-processing**: `CleanTemplateText` strips QQ tool-call templates and timestamp noise
+- **Three-branch vector source**: agent→Response, user→Input, cold_storage→Input+Response
+- **TF-IDF fallback**: auto-fallback to bag-of-words TF-IDF if model download fails or not configured
 
 | Location | File | Purpose | Algorithm |
 |----------|------|---------|-----------|
-| Context Prune | `context.go:161` | Trim low-relevance context events | LocalWordEmbedder → CosineSimilarity(queryVec, evt.Vector) |
-| DocStore Query | `document.go:198` | Recall related content from document memory | char-bigram TF-IDF + jieba keywords → InvertedIndex + CosineSimilarity |
-| Indexer Entity Search | `indexer.go:149` | Recall related entities from Graph | char-bigram TF-IDF vector search + jieba keywords → InvertedIndex + CosineSimilarity + SQLite BFS |
-| Entity Similarity Detection | `agent.go:2297` | Detect similar entities in Graph | Bigram Jaccard (>0.75 → consolidation) |
+| Context Prune | `context.go:155` | Trim low-relevance context events | VectorizeClean → CosineSimilarity(queryVec, evt.Vector) |
+| DocStore Query | `document.go:206` | Recall from document memory | TF-IDF Vectorize → vec.Search |
+| Indexer Entity Search | `indexer.go:96+111` | Recall from Graph | vector entity search + jieba keywords → SQLite LIKE + BFS |
+| Entity Similarity Detection | `agent.go` | Detect similar entities in Graph | Bigram Jaccard (>0.75 → consolidation) |
 
 ### Context Layer
 
 `internal/agent/core/context.go` — `RelevanceContext`
 - Maintains recent event list, writes JSON on each Append/Prune to prevent data loss
-- Word embedding relevance scoring on user input (LocalWordEmbedder → CosineSimilarity), keeps topK
+- Pre-vectorization pipeline runs through `CleanTemplateText` to remove template noise
+- Three-branch `textForVector`: agent events → Response, user events → Input, cold_storage → Input+Response
+- Pretrained word embedding `StaticEmbedder` → CosineSimilarity, auto-fallback to TF-IDF if unavailable
 - Protects last 10 events from eviction; excess candidates are sorted by relevance and archived to document memory
+- Archived events retain original timestamps; on `doc_query` recall they re-insert into the context timeline at their original position
 
 ### Document Layer
 
@@ -171,6 +172,10 @@ Vectorization is used in 4 independent locations with different strategies:
 |------|---------|
 | `memory_recall` | Recall from Graph |
 | `memory_commit` | Write triples to Graph |
+| `memory_merge` | Merge two entity nodes |
+| `memory_purge` | Delete entity node |
+| `memory_edit` | Edit existing entity/relation |
+| `memory_delete_entity` | Delete entity and all its relations |
 | `memory_introspect` | View memory statistics |
 | `doc_query` | Search from Document |
 | `doc_commit` | Write to Document |

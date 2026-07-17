@@ -17,7 +17,7 @@ homed（内核零 IO） ← PluginSDK → 插件（所有 IO 能力）
 **核心域与应用域分离** — 内核只做 LLM 编排、记忆管理、知识检索；所有 IO 能力（收发消息、读写文件、网络请求、硬件交互）全由插件实现。插件可热加载、独立开发、独立发布。这不是 RPC 框架的微服务拆分，而是 Agent 框架层次的领域划分。
 
 **三层记忆架构** — 解决 Agent 长期运行的记忆衰减问题：
-- **Context 层**：TF-IDF 相关性评分的事件窗口，维护最近 topK 条上下文
+- **Context 层**：预训练词嵌入 / TF-IDF 回退的相关性评分事件窗口，保护最近 10 条，维护 topK 条上下文
 - **Document 层**：临时记忆，冷数据自动下沉，也支持用户主动提交
 - **Graph 层**：SQLite 图数据库，持久化实体关系和语义记忆，支持蒸馏管道从原始对话中提取三元组
 
@@ -40,14 +40,14 @@ sequenceDiagram
     rect lavender
         Note over EV: processTextInput
         EV->>ST: StageOnInput  插件可改写/短路
-        EV->>CTX: Prune(input,topK)  TF-IDF裁剪
-        CTX->>MEM: 低分事件归档 Document
-        EV->>CTX: Append(input)  5s写盘
+        EV->>CTX: Prune(input,topK)  StaticEmbedder/TF-IDF余弦相似度裁剪
+        CTX->>MEM: 低分事件归档 Document (原始时间戳)
+        EV->>CTX: Append(input)  CleanTemplateText→三分支向量→5s写盘
     end
     rect lightgreen
         Note over EV,LLM: process()
-        EV->>MEM: buildMemoryContext  Indexer召回Graph
-        EV->>MEM: buildSystemPrompt  人格+记忆+技能注入
+        EV->>MEM: buildMemoryContext  Indexer召回Graph(向量+jieba→BFS depth=2)
+        EV->>MEM: buildSystemPrompt  DocQuery摘要+Graph记忆索引+人格+技能
         EV->>ST: StagePreAction  插件可预拦截
         loop 工具循环
             LLM->>LLM: drainInterrupts
@@ -99,21 +99,21 @@ flowchart LR
 flowchart TB
     subgraph C[① Context 工作窗口]
         RC[RelevanceContext]
-        A[Append] -->|Vectorize char 1-2gram| RC
-        P[Prune TF-IDF Cosine] -->|低分| D
-        P -->|保留| TL[timeline→system prompt]
+        A[Append] -->|CleanTemplateText→三分支向量| RC
+        P[Prune StaticEmbedder/TF-IDF Cosine] -->|低分原始时间戳| D
+        P -->|保留| TL[timeline→按时间排序→system prompt]
     end
     subgraph D[② Document 文件记忆]
         DS[DocStore JSON+TF-IDF]
-        Q1[Query 自动注入] -->|【相关记忆文档】| SP
-        Q2[doc_query LLM主动] -->|Consume+删除| DS
-        Q2 -->|原始时间戳写入| RC
+        Q1[Query 摘要自动注入] -->|【相关记忆文档】| SP
+        Q2[doc_query LLM主动召回] -->|Consume+删除源| DS
+        Q2 -->|原始时间戳写入上下文| RC
         CD[FindColdDocs 72h] -->|docToTriples| G
     end
     subgraph G[③ Graph 图数据库]
         DB[(SQLite)]
-        IDX[Indexer BFS depth=2] -->|【记忆索引】| SP
-        MEM[memory_recall/commit]
+        IDX[Indexer 向量+jieba→BFS depth=2] -->|【记忆索引】| SP
+        MEM[memory_recall/commit/merge/purge/edit]
         SOC[person_query/set_trait]
     end
     subgraph H[④ 心跳蒸馏]
@@ -160,7 +160,7 @@ cmd/waiter/         CLI 客户端（Unix socket）
 internal/
 ├── agent/core/     Agent 核心：事件循环、LLM 工具循环、7 阶段管道
 ├── agent/api/      LLM Provider + 8 个 Lua 适配器
-├── memory/         三层记忆：Graph(SQLite) / Document(JSON+TF-IDF) / Text(JSONL)
+├── memory/         三层记忆：Graph(SQLite) / Document(JSON+TF-IDF) / Text(JSONL) + StaticEmbedder(预训练词嵌入/TF-IDF回退) + CleanTemplateText(去模版)
 ├── knowledge/      知识库（文件系统 + TF-IDF）
 ├── plugin/         插件注册表 + .so 动态加载器
 ├── plugins/        内置 10 个插件（webui/cli/timer/cmd/mcp/openclaw/agentcli/healthcheck/pluginmgr/files）
