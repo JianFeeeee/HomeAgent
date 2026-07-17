@@ -72,8 +72,9 @@ func (p *cabiPlugin) Start(s *sdk.PluginSDK) error {
 
 func (p *cabiPlugin) Stop() error {
 	_ = p.handle.Stop()
-	p.handle.FreeCoreAPI()
-	p.handle.Close()
+	// Note: intentionally NOT calling p.handle.Close() (dlclose).
+	// The .so stays loaded because plugin goroutines (HTTP server, tickers)
+	// may still be running. dlclose would unmap their code and cause SIGSEGV.
 	return nil
 }
 
