@@ -348,6 +348,7 @@ func (r *ConfigRegistry) seedDBValues(dataDir string) {
 	set("core.agent.max_context_size", "30")
 	set("core.agent.distill_interval", "30m")
 	set("core.agent.workdir", "")
+	set("core.agent.embedding_model_path", "")
 	set("core.agent.system_prompt", `你是 HomeAgent，一个持续运行的个人管家。
 你的回复默认发送到用户的输入来源，无需额外工具。
 输出回复请使用 output_send__{通道名} 工具，content 为 JSON 字符串。用 output_list_channels 查看可用通道。
@@ -426,6 +427,7 @@ func (r *ConfigRegistry) seedCoreDefs(dataDir string) {
 	reg(ConfigDef{Key: "core.agent.max_context_size", Default: "30", Type: "int", DisplayName: "最大上下文", Description: "上下文窗口中保留的最大消息条数", Category: "agent"})
 	reg(ConfigDef{Key: "core.agent.distill_interval", Default: "30m", Type: "duration", DisplayName: "蒸馏间隔", Description: "记忆蒸馏的执行间隔", Category: "agent"})
 	reg(ConfigDef{Key: "core.agent.workdir", Default: "", Type: "string", DisplayName: "工作目录", Description: "Agent 命令执行的默认工作目录（如 cmd_run 工具的 fallback），留空使用内核所在目录", Category: "agent"})
+	reg(ConfigDef{Key: "core.agent.embedding_model_path", Default: "", Type: "string", DisplayName: "预训练词嵌入模型路径", Description: "预训练词嵌入模型路径（word2vec 文本格式），支持逗号分隔多个模型。空则使用 TF-IDF 回退。修改后需重启生效。", Category: "agent"})
 	reg(ConfigDef{Key: "core.agent.system_prompt", Default: "", Type: "text", DisplayName: "系统身份提示词", Description: "Agent 的系统提示词，定义身份和行为规则。留空则使用编译时内置默认值。修改后需重启生效。", Category: "agent"})
 
 	reg(ConfigDef{Key: "core.input_processing.image.fallback_provider", Default: "", Type: "string", DisplayName: "图片回退提供商", Description: "当主 LLM 不支持图片处理时使用的提供商（留空则自动降级为文字描述）", Category: "input"})
