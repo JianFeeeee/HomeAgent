@@ -1,5 +1,7 @@
 [English](../en/OVERVIEW.md) | **中文**
 
+<img src="../../branding/mascot-xiaozhai.webp" width="20" style="border-radius:50%;vertical-align:middle"> :
+
 # HomeAgent — 项目概览
 
 ## 这是什么
