@@ -59,7 +59,9 @@ var (
 type pluginState struct {
 	id    int32
 	name  string
-	sdk   *sdk.PluginSDK // set after CreateCoreAPI
+	sdk   *sdk.PluginSDK
+	invokeOutput func(channel, msgType, payload string) error
+	invokeStage  func(stage, ctxJSON string) error
 }
 
 // Handle represents a loaded C ABI plugin.
@@ -124,6 +126,30 @@ func (h *Handle) CreateCoreAPI(s *sdk.PluginSDK) unsafe.Pointer {
 	if core == nil { return nil }
 	h.core = core
 	h.pstate.sdk = s
+
+	h.pstate.invokeOutput = func(channel, msgType, payload string) error {
+		cCh := C.CString(channel)
+		cType := C.CString(msgType)
+		cPayload := C.CString(payload)
+		defer C.free(unsafe.Pointer(cCh))
+		defer C.free(unsafe.Pointer(cType))
+		defer C.free(unsafe.Pointer(cPayload))
+		if ret := int(C.call_invoke_output(h.api, cCh, cType, cPayload, nil)); ret != 0 {
+			return fmt.Errorf("invoke_output %s failed", channel)
+		}
+		return nil
+	}
+
+	h.pstate.invokeStage = func(stage, ctxJSON string) error {
+		cStage := C.CString(stage)
+		cCtx := C.CString(ctxJSON)
+		defer C.free(unsafe.Pointer(cStage))
+		defer C.free(unsafe.Pointer(cCtx))
+		if ret := int(C.call_invoke_stage(h.api, cStage, cCtx, nil)); ret != 0 {
+			return fmt.Errorf("invoke_stage %s failed", stage)
+		}
+		return nil
+	}
 
 	// Store plugin ID as context (safe integer, not a Go pointer)
 	core.ctx = unsafe.Pointer(uintptr(h.pstate.id))
@@ -210,10 +236,29 @@ func go_core_dispatch(methodID C.int, ctx unsafe.Pointer, s1, s2, s3 *C.char, i1
 		return 0
 
 	case 2: // CORE_REGISTER_STAGE
-		s.RegisterStage(sdk.Stage(a1), func(sc *sdk.StageContext) error { return nil })
+		if ps.invokeStage != nil {
+			st := string(a1)
+			handler := func(sc *sdk.StageContext) error {
+				ctxJSON, _ := json.Marshal(map[string]interface{}{
+					"raw_message": sc.RawMessage,
+					"user_id":     sc.UserID,
+					"phase":       string(sc.Phase),
+				})
+				return ps.invokeStage(st, string(ctxJSON))
+			}
+			s.RegisterStage(sdk.Stage(st), handler)
+		}
 		return 0
 
 	case 3: // CORE_REGISTER_OUTPUT_CH
+		if ps.invokeOutput != nil {
+			chName := a1
+			s.RegisterOutputChannel(chName, n1, a2, func(args map[string]interface{}) (interface{}, error) {
+				msgType, _ := args["type"].(string)
+				payload, _ := json.Marshal(args["payload"])
+				return nil, ps.invokeOutput(chName, msgType, string(payload))
+			})
+		}
 		return 0
 
 	case 4: // CORE_REGISTER_PLUGIN_API
