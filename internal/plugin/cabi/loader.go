@@ -60,9 +60,7 @@ type pluginState struct {
 	id    int32
 	name  string
 	sdk   *sdk.PluginSDK
-	invokeTool   func(name, argsJSON string) (string, error)
-	invokeOutput func(channel, msgType, payload string) error
-	invokeStage  func(stage, ctxJSON string) error
+	api   *C.plugin_api_t
 }
 
 // Handle represents a loaded C ABI plugin.
@@ -95,7 +93,7 @@ func Load(soPath, name string, config map[string]interface{}) (*Handle, error) {
 	}
 
 	id := atomic.AddInt32(&nextID, 1)
-	ps := &pluginState{id: id, name: name}
+	ps := &pluginState{id: id, name: name, api: api}
 	pluginMap.Store(id, ps)
 
 	handle := &Handle{soPath: soPath, lib: lib, api: api, pstate: ps}
@@ -127,46 +125,6 @@ func (h *Handle) CreateCoreAPI(s *sdk.PluginSDK) unsafe.Pointer {
 	if core == nil { return nil }
 	h.core = core
 	h.pstate.sdk = s
-
-	h.pstate.invokeTool = func(name, argsJSON string) (string, error) {
-		cName := C.CString(name)
-		cArgs := C.CString(argsJSON)
-		var result, cErr *C.char
-		defer C.free(unsafe.Pointer(cName))
-		defer C.free(unsafe.Pointer(cArgs))
-		if ret := int(C.call_invoke_tool(h.api, cName, cArgs, &result, &cErr)); ret != 0 {
-			errMsg := ""
-			if cErr != nil { errMsg = C.GoString(cErr); C.api_free_string(h.api, cErr) }
-			return "", fmt.Errorf("invoke_tool %s: %s", name, errMsg)
-		}
-		if result == nil { return "", nil }
-		defer C.api_free_string(h.api, result)
-		return C.GoString(result), nil
-	}
-
-	h.pstate.invokeOutput = func(channel, msgType, payload string) error {
-		cCh := C.CString(channel)
-		cType := C.CString(msgType)
-		cPayload := C.CString(payload)
-		defer C.free(unsafe.Pointer(cCh))
-		defer C.free(unsafe.Pointer(cType))
-		defer C.free(unsafe.Pointer(cPayload))
-		if ret := int(C.call_invoke_output(h.api, cCh, cType, cPayload, nil)); ret != 0 {
-			return fmt.Errorf("invoke_output %s failed", channel)
-		}
-		return nil
-	}
-
-	h.pstate.invokeStage = func(stage, ctxJSON string) error {
-		cStage := C.CString(stage)
-		cCtx := C.CString(ctxJSON)
-		defer C.free(unsafe.Pointer(cStage))
-		defer C.free(unsafe.Pointer(cCtx))
-		if ret := int(C.call_invoke_stage(h.api, cStage, cCtx, nil)); ret != 0 {
-			return fmt.Errorf("invoke_stage %s failed", stage)
-		}
-		return nil
-	}
 
 	// Store plugin ID as context (safe integer, not a Go pointer)
 	core.ctx = unsafe.Pointer(uintptr(h.pstate.id))
@@ -227,6 +185,58 @@ func (h *Handle) Close() {
 	}
 }
 
+// ---- plugin invocation helpers (stateless, use pluginMap lookup) ----
+
+func pluginInvokeTool(pluginID int32, name, argsJSON string) (string, error) {
+	v, ok := pluginMap.Load(pluginID)
+	if !ok { return "", fmt.Errorf("plugin %d not found", pluginID) }
+	ps := v.(*pluginState)
+	if ps.api == nil { return "", fmt.Errorf("plugin %d: nil api", pluginID) }
+	cName := C.CString(name)
+	cArgs := C.CString(argsJSON)
+	var result, cErr *C.char
+	defer C.free(unsafe.Pointer(cName))
+	defer C.free(unsafe.Pointer(cArgs))
+	if ret := int(C.call_invoke_tool(ps.api, cName, cArgs, &result, &cErr)); ret != 0 {
+		errMsg := ""
+		if cErr != nil { errMsg = C.GoString(cErr); C.api_free_string(ps.api, cErr) }
+		return "", fmt.Errorf("invoke_tool %s: %s", name, errMsg)
+	}
+	if result == nil { return "", nil }
+	defer C.api_free_string(ps.api, result)
+	return C.GoString(result), nil
+}
+
+func pluginInvokeOutput(pluginID int32, channel, payload string) error {
+	v, ok := pluginMap.Load(pluginID)
+	if !ok { return fmt.Errorf("plugin %d not found", pluginID) }
+	ps := v.(*pluginState)
+	if ps.api == nil { return fmt.Errorf("plugin %d: nil api", pluginID) }
+	cCh := C.CString(channel)
+	cPayload := C.CString(payload)
+	defer C.free(unsafe.Pointer(cCh))
+	defer C.free(unsafe.Pointer(cPayload))
+	if ret := int(C.call_invoke_output(ps.api, cCh, nil, cPayload, nil)); ret != 0 {
+		return fmt.Errorf("invoke_output %s failed", channel)
+	}
+	return nil
+}
+
+func pluginInvokeStage(pluginID int32, stage, ctxJSON string) error {
+	v, ok := pluginMap.Load(pluginID)
+	if !ok { return fmt.Errorf("plugin %d not found", pluginID) }
+	ps := v.(*pluginState)
+	if ps.api == nil { return fmt.Errorf("plugin %d: nil api", pluginID) }
+	cStage := C.CString(stage)
+	cCtx := C.CString(ctxJSON)
+	defer C.free(unsafe.Pointer(cStage))
+	defer C.free(unsafe.Pointer(cCtx))
+	if ret := int(C.call_invoke_stage(ps.api, cStage, cCtx, nil)); ret != 0 {
+		return fmt.Errorf("invoke_stage %s failed", stage)
+	}
+	return nil
+}
+
 // go_core_dispatch handles all plugin→core SDK calls.
 //
 //export go_core_dispatch
@@ -246,9 +256,11 @@ func go_core_dispatch(methodID C.int, ctx unsafe.Pointer, s1, s2, s3 *C.char, i1
 		var def sdk.ToolDef
 		if err := json.Unmarshal([]byte(a2), &def); err != nil { setErr(errorOut, err); return 1 }
 		def.Plugin = ps.name
+		pid := pluginID
+		toolName := a1
 		_ = s.RegisterTool(a1, def, func(args map[string]interface{}) (interface{}, error) {
 			argsJSON, _ := json.Marshal(args)
-			r, err := ps.invokeTool(a1, string(argsJSON))
+			r, err := pluginInvokeTool(pid, toolName, string(argsJSON))
 			if err != nil { return nil, err }
 			if r == "" { return nil, nil }
 			var res map[string]interface{}
@@ -258,34 +270,33 @@ func go_core_dispatch(methodID C.int, ctx unsafe.Pointer, s1, s2, s3 *C.char, i1
 		return 0
 
 	case 2: // CORE_REGISTER_STAGE
-		if ps.invokeStage != nil {
-			handler := func(sc *sdk.StageContext) error {
-				sc.RLock()
-				ctxMap := map[string]interface{}{
-					"raw_message": sc.RawMessage, "user_id": sc.UserID,
-					"group_id": sc.GroupID, "phase": string(sc.Phase),
-					"llm_text": sc.LLMText, "final_text": sc.FinalText,
-					"no_memory": sc.NoMemory,
-				}
-				if sc.Response != nil { ctxMap["response"] = *sc.Response }
-				if len(sc.ToolCalls) > 0 { ctxMap["tool_calls"] = sc.ToolCalls }
-				if len(sc.ToolResults) > 0 { ctxMap["tool_results"] = sc.ToolResults }
-				sc.RUnlock()
-				ctxJSON, _ := json.Marshal(ctxMap)
-				return ps.invokeStage(a1, string(ctxJSON))
+		pid := pluginID
+		st := a1
+		handler := func(sc *sdk.StageContext) error {
+			sc.RLock()
+			m := map[string]interface{}{
+				"raw_message": sc.RawMessage, "user_id": sc.UserID,
+				"group_id": sc.GroupID, "phase": string(sc.Phase),
+				"llm_text": sc.LLMText, "final_text": sc.FinalText,
+				"no_memory": sc.NoMemory,
 			}
-			s.RegisterStage(sdk.Stage(a1), handler)
+			if sc.Response != nil { m["response"] = *sc.Response }
+			if len(sc.ToolCalls) > 0 { m["tool_calls"] = sc.ToolCalls }
+			if len(sc.ToolResults) > 0 { m["tool_results"] = sc.ToolResults }
+			sc.RUnlock()
+			b, _ := json.Marshal(m)
+			return pluginInvokeStage(pid, st, string(b))
 		}
+		s.RegisterStage(sdk.Stage(st), handler)
 		return 0
 
 	case 3: // CORE_REGISTER_OUTPUT_CH
-		if ps.invokeOutput != nil {
-			s.RegisterOutputChannel(a1, n1, a2, func(args map[string]interface{}) (interface{}, error) {
-				msgType, _ := args["type"].(string)
-				payload, _ := json.Marshal(args["payload"])
-				return nil, ps.invokeOutput(a1, msgType, string(payload))
-			})
-		}
+		pid := pluginID
+		chName := a1
+		s.RegisterOutputChannel(chName, n1, a2, func(args map[string]interface{}) (interface{}, error) {
+			argsJSON, _ := json.Marshal(args)
+			return nil, pluginInvokeOutput(pid, chName, string(argsJSON))
+		})
 		return 0
 
 	case 4: // CORE_REGISTER_PLUGIN_API
