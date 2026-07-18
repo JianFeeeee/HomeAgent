@@ -349,6 +349,26 @@ s.UnregisterChannel("mydevice")
 channels := s.ListChannels()
 ```
 
+#### Input Delivery (built-in plugins)
+
+```go
+// Queued delivery (processed in order)
+s.InjectInput(source, channel, eventType string, payload map[string]interface{})
+
+// Synchronous delivery (waits for response)
+resp := s.InjectInputSync(source, channel, eventType string, payload map[string]interface{})
+
+// Interrupt delivery (can preempt current LLM processing)
+s.InjectInterrupt(source, channel, eventType string, payload map[string]interface{})
+
+// Synchronous text shortcuts
+resp := s.InjectTextSync(source, channel, text string)
+resp := s.InjectTextSyncNoMemory(source, channel, text string)
+
+// Get output channel
+outputCh := s.OutputChan()
+```
+
 > **Note**: `Subscribe`, `Publish`, `RegisterChannel`, `UnregisterChannel`, `ListChannels`, `InjectInput`, `InjectInputSync`, `InjectInterrupt`, `InjectTextSync`, `InjectTextSyncNoMemory`, `OutputChan` are only available in built-in plugins (`internal/sdk` package). External dynamic plugins should use the public APIs: `InjectText`, `InjectInterruptText`, `InjectTextNoMemory`.
 
 ---
