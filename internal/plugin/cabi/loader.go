@@ -300,7 +300,11 @@ func go_core_dispatch(methodID C.int, ctx unsafe.Pointer, s1, s2, s3 *C.char, i1
 			b, _ := json.Marshal(m)
 			return pluginInvokeStage(pid, st, string(b))
 		}
-		s.RegisterStage(sdk.Stage(st), handler)
+		scope := sdk.StageScopeGlobal
+		if a3 == "own_tools" {
+			scope = sdk.StageScopeOwnTools
+		}
+		s.RegisterStage(sdk.Stage(st), handler, scope)
 		return 0
 
 	case 3: // CORE_REGISTER_OUTPUT_CH

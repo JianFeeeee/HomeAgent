@@ -1,4 +1,4 @@
-**中文** | [English](../zh/PLUGIN_DEV.md)
+**中文** | [English](../en/PLUGIN_DEV.md)
 
 # HomeAgent Plugin Development Guide
 
@@ -45,8 +45,8 @@ type Plugin interface {
 
 ```bash
 cd homeagent-sdk/tools/plugindev
-go build -o plugindev.exe
-# Add plugindev.exe to PATH or use directly
+go build -o plugindev
+# Add plugindev to PATH or use directly
 ```
 
 ### Creating a Go Plugin
@@ -112,7 +112,7 @@ Execution process:
 2. **Go plugin**: Runs `go build -buildmode=c-shared` (produces `.so` + C ABI header)
 3. **Lua plugin**: Packages source code directly, no compilation needed
 4. Generates `plugin.json` manifest file
-5. Packages as `.hmap` distribution (zip format, containing `plugin.json` + `plugin.so`/`plugin.dll`/`main.lua`)
+5. Packages as `.hmap` distribution (zip format, containing `plugin.json` + `plugin.so` + `plugin.dll` + `main.lua`)
 
 Output in `dist/` directory:
 ```
@@ -274,21 +274,22 @@ s.Settings().GetPlugin("other_plugin", "some_key")
 #### Input Delivery
 
 ```go
-// Queued delivery (processed in order)
-s.InjectInput(source, channel, eventType string, payload map[string]interface{})
+// Normal delivery (processed in order)
+s.InjectText(source, channel, text string)
 
 // Interrupt delivery (can interrupt current LLM processing)
-s.InjectInterrupt(source, channel, eventType string, payload map[string]interface{})
-
-// Shortcuts
-s.InjectText(source, channel, text string)
 s.InjectInterruptText(source, channel, text string)
+
+// No memory recording
+s.InjectTextNoMemory(source, channel, text string)
 ```
 
 #### Event Subscription
 
 ```go
-unsub := s.Subscribe("tool_call", func(evt *events.Event) {
+import "gitcode.com/JianFeeeee/homeagent-sdk/sdk"
+
+unsub := s.Events().Subscribe(sdk.EventToolCall, func(evt *sdk.Event) {
     log.Printf("Tool was called: %v", evt.Payload)
 })
 defer unsub()
@@ -297,16 +298,18 @@ defer unsub()
 #### Capability Access
 
 ```go
-// Memory
-s.Memory().Recall(query string) ([]MemItem, error)
-s.Memory().Commit(triples []Triple) error
+// Graph Memory (entity-relation store)
+entities, relations, err := s.Memory().Recall([]string{"keyword"}, 2)
+
+// Document Memory (vector store)
+docs := s.DocMemory().Query("query text", 3)
 
 // Knowledge
-s.Knowledge().Search(query string) ([]string, error)
+results, err := s.Knowledge().Search("query", 5)
 
 // LLM source management
-s.LLM().ListSources() []SourceInfo
-s.LLM().SetSource(name string) error
+s.LLM().ListSources() // returns []string
+s.LLM().SetSource("deepseek")
 ```
 
 #### Event Subscription (built-in plugins)
@@ -512,14 +515,13 @@ import (
 | [memo](https://gitcode.com/JianFeeeee/homeagent-sdk/tree/main/example/memo) | Go | Memo management, PreAction injection + timed interrupt dual reminder |
 | [files](https://gitcode.com/JianFeeeee/homeagent-sdk/tree/main/example/files) | Go | File system operations, 4 write modes, sandbox isolation |
 | [web](https://gitcode.com/JianFeeeee/homeagent-sdk/tree/main/example/web) | Go | DuckDuckGo search + web scraping, SSRF protection |
+| [webfetch](https://gitcode.com/JianFeeeee/homeagent-sdk/tree/main/example/webfetch) | Go | Web content fetching |
 | [qq](https://gitcode.com/JianFeeeee/homeagent-sdk/tree/main/example/qq) | Go | NapCat OneBot integration, 17 tools |
 | [bili](https://gitcode.com/JianFeeeee/homeagent-sdk/tree/main/example/bili) | Go | Bilibili video download (you-get) |
 | [editdoc](https://gitcode.com/JianFeeeee/homeagent-sdk/tree/main/example/editdoc) | Go | Office document editing and format conversion |
 | [a2a](https://gitcode.com/JianFeeeee/homeagent-sdk/tree/main/example/a2a) | Go | Agent-to-Agent protocol |
 | [ocr](https://gitcode.com/JianFeeeee/homeagent-sdk/tree/main/example/ocr) | Go | Offline text recognition (Tesseract) |
 | [sanitizer](https://gitcode.com/JianFeeeee/homeagent-sdk/tree/main/example/sanitizer) | Go | Output sanitizer filter |
-| [luaplugintest](https://gitcode.com/JianFeeeee/homeagent-sdk/tree/main/example/luaplugintest) | Lua | Lua plugin Hello World |
-| [testlua](https://gitcode.com/JianFeeeee/homeagent-sdk/tree/main/example/testlua) | Lua | Lua plugin example |
 
 ### Built-in Plugins
 

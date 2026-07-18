@@ -4,9 +4,13 @@ import (
 	"embed"
 	"encoding/json"
 	"fmt"
+	"io"
+	"net/http"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
+	"time"
 
 	lua "github.com/yuin/gopher-lua"
 )
@@ -68,14 +72,34 @@ func (c *AdapterCache) setupGlobals() {
 
 	s.SetGlobal("http_get", s.NewFunction(func(L *lua.LState) int {
 		url := L.ToString(1)
-		L.Push(lua.LString(fmt.Sprintf(`{"url":%q,"status":200,"body":"mock"}`, url)))
+		client := &http.Client{Timeout: 30 * time.Second}
+		resp, err := client.Get(url)
+		if err != nil {
+			errJSON, _ := json.Marshal(map[string]interface{}{"url": url, "error": err.Error()})
+			L.Push(lua.LString(string(errJSON)))
+			return 1
+		}
+		defer resp.Body.Close()
+		body, _ := io.ReadAll(resp.Body)
+		result, _ := json.Marshal(map[string]interface{}{"url": url, "status": resp.StatusCode, "body": string(body)})
+		L.Push(lua.LString(string(result)))
 		return 1
 	}))
 
 	s.SetGlobal("http_post", s.NewFunction(func(L *lua.LState) int {
 		url := L.ToString(1)
 		body := L.ToString(2)
-		L.Push(lua.LString(fmt.Sprintf(`{"url":%q,"body":%q,"status":200}`, url, body)))
+		client := &http.Client{Timeout: 30 * time.Second}
+		resp, err := client.Post(url, "application/json", strings.NewReader(body))
+		if err != nil {
+			errJSON, _ := json.Marshal(map[string]interface{}{"url": url, "error": err.Error()})
+			L.Push(lua.LString(string(errJSON)))
+			return 1
+		}
+		defer resp.Body.Close()
+		respBody, _ := io.ReadAll(resp.Body)
+		result, _ := json.Marshal(map[string]interface{}{"url": url, "body": string(respBody), "status": resp.StatusCode})
+		L.Push(lua.LString(string(result)))
 		return 1
 	}))
 }

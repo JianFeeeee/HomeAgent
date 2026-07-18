@@ -1,4 +1,4 @@
-**中文** | [English](../zh/ARCHITECTURE.md)
+**中文** | [English](../en/ARCHITECTURE.md)
 
 # HomeAgent Architecture
 
@@ -249,7 +249,7 @@ VM built-ins: `json.encode` / `json.decode` / `log` / `http_get` / `http_post`.
 
 ## Plugin System
 
-### Three Loading Methods
+### Four Loading Methods
 
 | Method | Registration Mechanism | Compilation | Usage |
 |--------|----------------------|-------------|-------|
