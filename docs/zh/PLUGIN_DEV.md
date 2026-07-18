@@ -350,6 +350,26 @@ s.UnregisterChannel("mydevice")
 channels := s.ListChannels()
 ```
 
+#### 输入投递（内置插件）
+
+```go
+// 排队投递（按序处理）
+s.InjectInput(source, channel, eventType string, payload map[string]interface{})
+
+// 同步投递（等待响应）
+resp := s.InjectInputSync(source, channel, eventType string, payload map[string]interface{})
+
+// 中断投递（可打断当前 LLM 处理）
+s.InjectInterrupt(source, channel, eventType string, payload map[string]interface{})
+
+// 同步文本投递（快捷方式）
+resp := s.InjectTextSync(source, channel, text string)
+resp := s.InjectTextSyncNoMemory(source, channel, text string)
+
+// 获取输出通道
+outputCh := s.OutputChan()
+```
+
 > **注意**：`Subscribe`、`Publish`、`RegisterChannel`、`UnregisterChannel`、`ListChannels`、`InjectInput`、`InjectInputSync`、`InjectInterrupt`、`InjectTextSync`、`InjectTextSyncNoMemory`、`OutputChan` 这些方法仅在内置插件中可用（`internal/sdk` 包），外部动态插件无法访问。外部插件请使用 `InjectText`、`InjectInterruptText`、`InjectTextNoMemory` 等公共 API。
 
 ---
