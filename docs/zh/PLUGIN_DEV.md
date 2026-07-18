@@ -46,8 +46,8 @@ type Plugin interface {
 
 ```bash
 cd homeagent-sdk/tools/plugindev
-go build -o plugindev.exe
-# 将 plugindev.exe 加入 PATH 或直接使用
+go build -o plugindev
+# 将 plugindev 加入 PATH 或直接使用
 ```
 
 ### 创建 Go 插件
@@ -113,7 +113,7 @@ plugindev build
 2. **Go 插件**：执行 `go build -buildmode=c-shared`（生成 `.so` + C ABI header）
 3. **Lua 插件**：直接打包源码，无需编译
 4. 生成 `plugin.json` 清单文件
-5. 打包为 `.hmap` 分发包（zip 格式，内含 `plugin.json` + `plugin.so` + `plugin.h` + `main.lua`）
+5. 打包为 `.hmap` 分发包（zip 格式，内含 `plugin.json` + `plugin.so` + `plugin.dll` + `main.lua`）
 
 输出在 `dist/` 目录：
 ```
@@ -275,21 +275,22 @@ s.Settings().GetPlugin("other_plugin", "some_key")
 #### 输入投递
 
 ```go
-// 排队投递（按序处理）
-s.InjectInput(source, channel, eventType string, payload map[string]interface{})
+// 普通投递（按序处理）
+s.InjectText(source, channel, text string)
 
 // 中断投递（可打断当前 LLM 处理）
-s.InjectInterrupt(source, channel, eventType string, payload map[string]interface{})
-
-// 快捷方式
-s.InjectText(source, channel, text string)
 s.InjectInterruptText(source, channel, text string)
+
+// 不记入记忆
+s.InjectTextNoMemory(source, channel, text string)
 ```
 
 #### 事件订阅
 
 ```go
-unsub := s.Subscribe("tool_call", func(evt *events.Event) {
+import "gitcode.com/JianFeeeee/homeagent-sdk/sdk"
+
+unsub := s.Events().Subscribe(sdk.EventToolCall, func(evt *sdk.Event) {
     log.Printf("工具被调用: %v", evt.Payload)
 })
 defer unsub()
@@ -298,16 +299,18 @@ defer unsub()
 #### 能力访问
 
 ```go
-// 记忆
-s.Memory().Recall(query string) ([]MemItem, error)
-s.Memory().Commit(triples []Triple) error
+// 图记忆（实体-关系存储）
+entities, relations, err := s.Memory().Recall([]string{"关键词"}, 2)
 
-// 知识
-s.Knowledge().Search(query string) ([]string, error)
+// 文档记忆（向量存储）
+docs := s.DocMemory().Query("查询文本", 3)
+
+// 知识库
+results, err := s.Knowledge().Search("查询", 5)
 
 // LLM 源管理
-s.LLM().ListSources() []SourceInfo
-s.LLM().SetSource(name string) error
+s.LLM().ListSources() // 返回 []string
+s.LLM().SetSource("deepseek")
 ```
 
 #### 事件订阅（内置插件）
@@ -513,14 +516,13 @@ import (
 | [memo](https://gitcode.com/JianFeeeee/homeagent-sdk/tree/main/example/memo) | Go | 备忘管理，PreAction 注入 + 定时打断双提醒 |
 | [files](https://gitcode.com/JianFeeeee/homeagent-sdk/tree/main/example/files) | Go | 文件系统操作，4 种写入模式，沙箱隔离 |
 | [web](https://gitcode.com/JianFeeeee/homeagent-sdk/tree/main/example/web) | Go | DuckDuckGo 搜索 + 网页抓取，SSRF 防护 |
+| [webfetch](https://gitcode.com/JianFeeeee/homeagent-sdk/tree/main/example/webfetch) | Go | 网页内容抓取 |
 | [qq](https://gitcode.com/JianFeeeee/homeagent-sdk/tree/main/example/qq) | Go | NapCat OneBot 对接，17 个工具 |
 | [bili](https://gitcode.com/JianFeeeee/homeagent-sdk/tree/main/example/bili) | Go | B 站视频下载（you-get） |
 | [editdoc](https://gitcode.com/JianFeeeee/homeagent-sdk/tree/main/example/editdoc) | Go | Office 文档编辑与格式转换 |
 | [a2a](https://gitcode.com/JianFeeeee/homeagent-sdk/tree/main/example/a2a) | Go | Agent-to-Agent 协议 |
 | [ocr](https://gitcode.com/JianFeeeee/homeagent-sdk/tree/main/example/ocr) | Go | 离线文字识别（Tesseract） |
 | [sanitizer](https://gitcode.com/JianFeeeee/homeagent-sdk/tree/main/example/sanitizer) | Go | 输出清洗过滤器 |
-| [luaplugintest](https://gitcode.com/JianFeeeee/homeagent-sdk/tree/main/example/luaplugintest) | Lua | Lua 插件 Hello World |
-| [testlua](https://gitcode.com/JianFeeeee/homeagent-sdk/tree/main/example/testlua) | Lua | Lua 插件示例 |
 
 ### 内置插件
 

@@ -1,4 +1,4 @@
-**中文** | [English](../zh/OVERVIEW.md)
+**中文** | [English](../en/OVERVIEW.md)
 
 # HomeAgent — Project Overview
 

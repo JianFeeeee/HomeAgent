@@ -380,6 +380,27 @@ func (a *Agent) processMediaInput(evt *agentIO.InputEvent) {
 
 	blocks, fallback := a.mediaToBlocks(evt.Payload, evt.Type, evt.Source)
 
+	// stage 上下文携带 blocks，process() 会将其附着到 user message 上
+	stageCtx := a.stageCtxFromInput(fallback, evt.Source, "")
+	stageCtx.Extra = map[string]interface{}{
+		"media_blocks":   blocks,
+		"media_type":     evt.Type,
+		"input_source":   evt.Source,
+		"output_channel": evt.OutputChannel,
+	}
+	a.injectSourceContext(stageCtx, evt)
+
+	// === Stage: on_input — 插件可拦截/改写/短路（在 Append 之前） ===
+	if a.runStage(sdk.StageOnInput, stageCtx) {
+		a.emitResponse(evt, *stageCtx.Response)
+		return
+	}
+
+	a.publishEvent(events.EventRawInput, map[string]interface{}{
+		"content": evt.Payload,
+		"source":  evt.Source,
+	})
+
 	// 先遗忘再输入
 	archived := a.context.Prune(fallback, a.maxContextSize-1, a.docStore)
 	if archived > 0 {
@@ -391,26 +412,6 @@ func (a *Agent) processMediaInput(evt *agentIO.InputEvent) {
 		Source:    evt.Source,
 		Input:     fallback,
 	})
-
-	// stage 上下文携带 blocks，process() 会将其附着到 user message 上
-	stageCtx := a.stageCtxFromInput(fallback, evt.Source, "")
-	stageCtx.Extra = map[string]interface{}{
-		"media_blocks":   blocks,
-		"media_type":     evt.Type,
-		"input_source":   evt.Source,
-		"output_channel": evt.OutputChannel,
-	}
-	a.injectSourceContext(stageCtx, evt)
-
-	a.publishEvent(events.EventRawInput, map[string]interface{}{
-		"content": evt.Payload,
-		"source":  evt.Source,
-	})
-
-	if a.runStage(sdk.StageOnInput, stageCtx) {
-		a.emitResponse(evt, *stageCtx.Response)
-		return
-	}
 
 	response, toolsUsed, err := a.process(fallback, stageCtx)
 	if err != nil {
@@ -433,6 +434,10 @@ func (a *Agent) processMediaInput(evt *agentIO.InputEvent) {
 	})
 
 	a.emitResponse(evt, response)
+
+	if !stageCtx.NoMemory {
+		a.emitMemoryCandidate(evt.Source, fallback, response, toolsUsed)
+	}
 }
 
 // mediaToBlocks 将媒体 payload 转为多模态 ContentBlock 数组和纯文本 fallback。
@@ -502,7 +507,7 @@ func (a *Agent) processTextInput(evt *agentIO.InputEvent, input string) {
 
 	// 记忆整理任务：不路由到外部输出通道
 	if evt.OutputChannel == "_consolidation_" {
-		a.processConsolidation(input)
+		a.processConsolidation(evt, input)
 		return
 	}
 
@@ -520,7 +525,17 @@ func (a *Agent) processTextInput(evt *agentIO.InputEvent, input string) {
 	}
 	a.injectSourceContext(stageCtx, evt)
 
+	if a.runStage(sdk.StageOnInput, stageCtx) {
+		a.emitResponse(evt, *stageCtx.Response)
+		return
+	}
+
 	input = stageCtx.RawMessage
+
+	a.publishEvent(events.EventRawInput, map[string]interface{}{
+		"content": input,
+		"source":  evt.Source,
+	})
 
 	// 先"遗忘"再输入：用当前输入决定淘汰哪些不相关旧事件（LSTM forget gate 模式）
 	archived := a.context.Prune(input, a.maxContextSize-1, a.docStore)
@@ -2549,9 +2564,13 @@ func (a *Agent) emitMemoryCandidate(source, input, response string, toolsUsed []
 // executeOutputChannelTool — AI 切换当前请求的输出通道
 // 在 process() 内调用，mutex 保护，只有一个请求在执行
 // processConsolidation 处理后台记忆整理任务（不发外部输出）
-func (a *Agent) processConsolidation(input string) {
+func (a *Agent) processConsolidation(evt *agentIO.InputEvent, input string) {
 	start := time.Now()
 	a.currentOutputChannel = "_consolidation_"
+
+	stageCtx := a.stageCtxFromInput(input, evt.Source, "")
+	stageCtx.Extra["output_channel"] = evt.OutputChannel
+	a.injectSourceContext(stageCtx, evt)
 
 	// 遗忘不相关的旧事件
 	archived := a.context.Prune(input, a.maxContextSize-1, a.docStore)
@@ -2564,7 +2583,7 @@ func (a *Agent) processConsolidation(input string) {
 		Source:    "system",
 		Input:     input,
 	})
-	response, toolsUsed, err := a.process(input, &sdk.StageContext{RawMessage: input})
+	response, toolsUsed, err := a.process(input, stageCtx)
 	if err != nil {
 		log.Printf("[agent] consolidation error: %v", err)
 		return
