@@ -1,4 +1,4 @@
-**中文** | [English](../zh/ADAPTER.md)
+**中文** | [English](../en/ADAPTER.md)
 
 # Lua Adapter — LLM Source Adaptation Guide
 

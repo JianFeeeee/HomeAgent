@@ -8,6 +8,9 @@ import (
 	"gitcode.com/JianFeeeee/HomeAgent/internal/events"
 )
 
+// SDKVersion 是对外 SDK 版本号，与核心 meta.Version 保持一致。
+var SDKVersion = pubsdk.SDKVersion
+
 type Plugin interface {
 	Name() string
 	Start(sdk *PluginSDK) error
