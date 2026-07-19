@@ -15,4 +15,7 @@ const (
 	TCSETS = 0x5402
 	ICANON = 0x2
 	ECHO   = 0x8
+	ISIG   = 0x1
+	VMIN   = 6
+	VTIME  = 5
 )
