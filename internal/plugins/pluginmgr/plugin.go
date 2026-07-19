@@ -13,6 +13,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"sync"
 	"time"
@@ -20,6 +21,30 @@ import (
 	"gitcode.com/JianFeeeee/HomeAgent/internal/plugin"
 	sdk "gitcode.com/JianFeeeee/HomeAgent/internal/sdk"
 )
+
+// platformBinary 按当前 OS 选择正确的插件二进制文件名。
+// 返回 (zip内文件名, 安装后重命名).
+func platformBinary() (zipName, canonicalName string) {
+	switch runtime.GOOS {
+	case "linux":
+		return "plugin.so", "plugin.so"
+	case "darwin":
+		return "plugin.dylib", "plugin.so" // dlopen 兼容 .so 名称
+	case "windows":
+		return "plugin.dll", "plugin.dll"
+	default:
+		return "", ""
+	}
+}
+
+// validBinaries 是 .hmap 中所有可识别的平台二进制文件名。
+var validBinaries = map[string]bool{
+	"plugin.so":   true,
+	"plugin.dylib": true,
+	"plugin.dll":  true,
+	"main.lua":    true,
+	"SKILL.md":    true,
+}
 
 var downloadClient = &http.Client{
 	Timeout: 30 * time.Second,
@@ -210,22 +235,32 @@ func (p *Plugin) handlePlugins(w http.ResponseWriter, r *http.Request) {
 		ct := r.Header.Get("Content-Type")
 		if strings.HasPrefix(ct, "application/json") {
 			var body struct {
-				URL string `json:"url"`
+				URL  string `json:"url"`
+				Path string `json:"path"`
 			}
 			if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 				http.Error(w, "invalid json", http.StatusBadRequest)
 				return
 			}
-			if body.URL == "" {
-				http.Error(w, "url is required", http.StatusBadRequest)
+			switch {
+			case body.URL != "":
+				result, err := p.installFromURL(body.URL)
+				if err != nil {
+					writeJSON(w, http.StatusInternalServerError, map[string]interface{}{"error": err.Error()})
+					return
+				}
+				writeJSON(w, http.StatusOK, result)
+			case body.Path != "":
+				result, err := p.installFromPath(body.Path)
+				if err != nil {
+					writeJSON(w, http.StatusInternalServerError, map[string]interface{}{"error": err.Error()})
+					return
+				}
+				writeJSON(w, http.StatusOK, result)
+			default:
+				http.Error(w, "url or path is required", http.StatusBadRequest)
 				return
 			}
-			result, err := p.installFromURL(body.URL)
-			if err != nil {
-				writeJSON(w, http.StatusInternalServerError, map[string]interface{}{"error": err.Error()})
-				return
-			}
-			writeJSON(w, http.StatusOK, result)
 		} else {
 			data, err := io.ReadAll(r.Body)
 			if err != nil {
@@ -277,6 +312,14 @@ func (p *Plugin) handlePluginByID(w http.ResponseWriter, r *http.Request) {
 
 // ======== Core Logic ========
 
+func (p *Plugin) installFromPath(path string) (interface{}, error) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return nil, fmt.Errorf("read file: %w", err)
+	}
+	return p.installFromData(data)
+}
+
 func (p *Plugin) installFromURL(rawURL string) (interface{}, error) {
 	log.Printf("[pluginmgr] downloading: %s", rawURL)
 
@@ -303,7 +346,16 @@ func (p *Plugin) installFromURL(rawURL string) (interface{}, error) {
 		return nil, fmt.Errorf("read response: %w", err)
 	}
 
-	return p.installFromData(data)
+	result, err := p.installFromData(data)
+	if err != nil {
+		return nil, err
+	}
+
+	if m, ok := result.(map[string]interface{}); ok {
+		m["source"] = "url"
+		result = m
+	}
+	return result, nil
 }
 
 func (p *Plugin) installFromData(data []byte) (interface{}, error) {
@@ -438,9 +490,10 @@ func (p *Plugin) pluginInfo(name string) (interface{}, error) {
 // ======== Package Validation ========
 
 type pluginPackage struct {
-	Name    string `json:"name"`
-	Version string `json:"version"`
-	Entry   string `json:"entry"`
+	Name      string   `json:"name"`
+	Version   string   `json:"version"`
+	Entry     string   `json:"entry"`
+	Platforms []string `json:"platforms,omitempty"`
 }
 
 func validatePackage(data []byte) (*pluginPackage, error) {
@@ -495,23 +548,59 @@ func validatePackage(data []byte) (*pluginPackage, error) {
 		return nil, fmt.Errorf("manifest: entry required")
 	}
 
-	hasEntry := false
+	// verify at least one valid binary exists for any platform
+	hasBinary := false
+	zipEntries := map[string]bool{}
 	for _, f := range reader.File {
-		if f.Name == pkg.Entry && !f.FileInfo().IsDir() {
-			hasEntry = true
-			break
+		if !f.FileInfo().IsDir() {
+			zipEntries[f.Name] = true
 		}
 	}
-	if !hasEntry {
-		return nil, fmt.Errorf("entry %q not found in package", pkg.Entry)
+
+	if len(pkg.Platforms) > 0 {
+		// bundle mode: check each declared platform has a matching binary
+		for _, plat := range pkg.Platforms {
+			bin, ok := map[string]string{
+				"linux":   "plugin.so",
+				"darwin":  "plugin.dylib",
+				"windows": "plugin.dll",
+			}[plat]
+			if !ok {
+				return nil, fmt.Errorf("unsupported platform: %q", plat)
+			}
+			if zipEntries[bin] {
+				hasBinary = true
+			}
+		}
+	} else {
+		// legacy mode: check entry exists and is a known binary
+		if zipEntries[pkg.Entry] && validBinaries[pkg.Entry] {
+			hasBinary = true
+		}
 	}
 
-	valid := map[string]bool{"plugin.so": true, "plugin.dll": true, "main.lua": true, "SKILL.md": true}
-	if !valid[pkg.Entry] {
-		return nil, fmt.Errorf("unsupported entry: %q", pkg.Entry)
+	if !hasBinary {
+		return nil, fmt.Errorf("no valid binary found in package (entry=%q, platforms=%v)", pkg.Entry, pkg.Platforms)
 	}
 
 	return &pkg, nil
+}
+
+// copyZipEntry 解压 zip 中的单个文件到目标路径。
+func copyZipEntry(f *zip.File, dest string) error {
+	os.MkdirAll(filepath.Dir(dest), 0755)
+	rc, err := f.Open()
+	if err != nil {
+		return fmt.Errorf("open %s: %w", f.Name, err)
+	}
+	defer rc.Close()
+	out, err := os.OpenFile(dest, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, f.Mode())
+	if err != nil {
+		return fmt.Errorf("create %s: %w", dest, err)
+	}
+	defer out.Close()
+	_, err = io.Copy(out, rc)
+	return err
 }
 
 func extractPackage(data []byte, pluginDir string) error {
@@ -520,18 +609,21 @@ func extractPackage(data []byte, pluginDir string) error {
 		return err
 	}
 
-	// 先读 manifest 确定插件名
+	// 先读 manifest 确定插件名和平台信息
 	var pkgName string
+	var declaredPlatforms []string
 	for _, f := range reader.File {
 		if f.Name == "plugin.json" && !f.FileInfo().IsDir() {
 			rc, _ := f.Open()
 			mData, _ := io.ReadAll(rc)
 			rc.Close()
 			var m struct {
-				Name string `json:"name"`
+				Name      string   `json:"name"`
+				Platforms []string `json:"platforms"`
 			}
 			json.Unmarshal(mData, &m)
 			pkgName = m.Name
+			declaredPlatforms = m.Platforms
 			break
 		}
 	}
@@ -542,6 +634,9 @@ func extractPackage(data []byte, pluginDir string) error {
 	target := filepath.Join(pluginDir, pkgName)
 	os.MkdirAll(target, 0755)
 
+	zipBin, canonicalName := platformBinary()
+	isBundle := declaredPlatforms != nil
+
 	for _, f := range reader.File {
 		fpath := filepath.Join(target, f.Name)
 		if !strings.HasPrefix(filepath.Clean(fpath), filepath.Clean(target)+string(os.PathSeparator)) {
@@ -551,19 +646,21 @@ func extractPackage(data []byte, pluginDir string) error {
 			os.MkdirAll(fpath, 0755)
 			continue
 		}
-		os.MkdirAll(filepath.Dir(fpath), 0755)
-		rc, err := f.Open()
-		if err != nil {
-			return fmt.Errorf("open %s: %w", f.Name, err)
+
+		// bundle mode: skip other platforms' binaries, keep only current OS
+		if isBundle && validBinaries[f.Name] && f.Name != zipBin {
+			continue
 		}
-		out, err := os.OpenFile(fpath, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, f.Mode())
-		if err != nil {
-			rc.Close()
-			return fmt.Errorf("create %s: %w", f.Name, err)
+
+		// rename platform binary to canonical name (e.g. plugin.dylib → plugin.so)
+		dest := fpath
+		if isBundle && f.Name == zipBin && canonicalName != zipBin {
+			dest = filepath.Join(target, canonicalName)
 		}
-		io.Copy(out, rc)
-		rc.Close()
-		out.Close()
+
+		if err := copyZipEntry(f, dest); err != nil {
+			return err
+		}
 	}
 
 	return nil
