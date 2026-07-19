@@ -113,27 +113,51 @@ plugindev build
 2. **Go 插件**：执行 `go build -buildmode=c-shared`（生成 `.so` + C ABI header）
 3. **Lua 插件**：直接打包源码，无需编译
 4. 生成 `plugin.json` 清单文件
-5. 打包为 `.hmap` 分发包（zip 格式，内含 `plugin.json` + `plugin.so` + `plugin.dll` + `main.lua`）
+5. 打包为 `.hmap` 分发包（zip 格式，内含 `plugin.json` + 平台二进制）
+
+`plugin.json` 的 `platforms` 字段声明支持的平台，打包时自动包含对应二进制：
+
+| 平台 | 二进制文件名 |
+|------|-------------|
+| Linux | `plugin.so` |
+| macOS | `plugin.dylib` |
+| Windows | `plugin.dll` |
+
+> 使用 `--bundle` 可一次打包多平台，生成的 `.hmap` 内含所有平台的二进制。
+> 安装时核心自动选择当前平台的文件，跳过其他平台。
 
 输出在 `dist/` 目录：
 ```
 dist/
 ├── myplugin_linux_amd64.hmap      # Go 插件 Linux 版
 ├── myplugin_windows_amd64.hmap    # Go 插件 Windows 版
+├── myplugin_darwin_amd64.hmap     # Go 插件 macOS 版
 └── myplugin_lua.hmap              # Lua 插件
 ```
 
 ### 安装部署
 
-通过 PluginMgr HTTP API 安装：
+通过 PluginMgr HTTP API 安装，支持三种方式：
 
 ```bash
-# 内核 PluginMgr 监听 :9876
+# 1. 从 URL 安装（自动清理安装包）
 curl -X POST http://127.0.0.1:9876/plugins \
-  -F "file=@dist/myplugin_linux_amd64.hmap"
+  -H "Content-Type: application/json" \
+  -d '{"url": "https://example.com/myplugin.hmap"}'
+
+# 2. 从本地路径安装（保留安装包）
+curl -X POST http://127.0.0.1:9876/plugins \
+  -H "Content-Type: application/json" \
+  -d '{"path": "/path/to/myplugin.hmap"}'
+
+# 3. 直接上传二进制
+curl -X POST http://127.0.0.1:9876/plugins \
+  --data-binary @dist/myplugin.hmap
 ```
 
-或通过 WebUI 插件管理页面上传安装。
+安装后需调用 `/api/v1/plugins/reload` 或重启内核生效。
+
+也可通过 WebUI 插件管理页面上传安装。
 
 ---
 

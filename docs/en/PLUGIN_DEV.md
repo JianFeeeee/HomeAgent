@@ -112,25 +112,49 @@ Execution process:
 2. **Go plugin**: Runs `go build -buildmode=c-shared` (produces `.so` + C ABI header)
 3. **Lua plugin**: Packages source code directly, no compilation needed
 4. Generates `plugin.json` manifest file
-5. Packages as `.hmap` distribution (zip format, containing `plugin.json` + `plugin.so` + `plugin.dll` + `main.lua`)
+5. Packages as `.hmap` distribution (zip format, containing `plugin.json` + platform binary)
+
+The `platforms` field in `plugin.json` declares supported platforms; the build includes the corresponding binary:
+
+| Platform | Binary name |
+|----------|-------------|
+| Linux | `plugin.so` |
+| macOS | `plugin.dylib` |
+| Windows | `plugin.dll` |
+
+> Use `--bundle` to build a multi-platform bundle — the resulting `.hmap` contains binaries for all platforms.
+> During installation, the kernel automatically selects the correct binary for the current OS, skipping others.
 
 Output in `dist/` directory:
 ```
 dist/
 ├── myplugin_linux_amd64.hmap      # Go plugin Linux version
 ├── myplugin_windows_amd64.hmap    # Go plugin Windows version
+├── myplugin_darwin_amd64.hmap     # Go plugin macOS version
 └── myplugin_lua.hmap              # Lua plugin
 ```
 
 ### Deployment
 
-Install via PluginMgr HTTP API:
+Install via PluginMgr HTTP API (three methods):
 
 ```bash
-# Kernel PluginMgr listens on :9876
+# 1. Install from URL (auto-cleanup)
 curl -X POST http://127.0.0.1:9876/plugins \
-  -F "file=@dist/myplugin_linux_amd64.hmap"
+  -H "Content-Type: application/json" \
+  -d '{"url": "https://example.com/myplugin.hmap"}'
+
+# 2. Install from local path (keeps source file)
+curl -X POST http://127.0.0.1:9876/plugins \
+  -H "Content-Type: application/json" \
+  -d '{"path": "/path/to/myplugin.hmap"}'
+
+# 3. Upload binary directly
+curl -X POST http://127.0.0.1:9876/plugins \
+  --data-binary @dist/myplugin.hmap
 ```
+
+Reload plugins via `/api/v1/plugins/reload` or restart the kernel to activate.
 
 Or upload via WebUI plugin management page.
 
