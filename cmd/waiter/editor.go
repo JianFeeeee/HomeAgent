@@ -119,12 +119,18 @@ func (e *LineEditor) read() (string, error) {
 			e.doCompletion()
 
 		default:
-			if b[0] >= 0x20 {
+			r, size := decodeRune(b[0], in)
+			if r != -1 {
 				e.buf = append(e.buf, 0)
 				copy(e.buf[e.pos+1:], e.buf[e.pos:])
-				e.buf[e.pos] = rune(b[0])
+				e.buf[e.pos] = r
 				e.pos++
 				e.redraw()
+			} else if size > 0 {
+				// skip invalid continuation bytes
+				for i := 1; i < size; i++ {
+					io.ReadFull(in, make([]byte, 1))
+				}
 			}
 		}
 	}
@@ -176,6 +182,53 @@ func (e *LineEditor) doCompletion() {
 			return
 		}
 	}
+}
+
+// decodeRune reads a UTF-8 encoded rune from the input.
+// b is the first byte; in provides continuation bytes if needed.
+// Returns the rune (or -1 if invalid) and the total byte count consumed.
+func decodeRune(b byte, in *bufio.Reader) (rune, int) {
+	if b < 0x80 {
+		return rune(b), 1
+	}
+
+	var want int
+	switch {
+	case b >= 0xf0:
+		want = 4
+	case b >= 0xe0:
+		want = 3
+	case b >= 0xc0:
+		want = 2
+	default:
+		return -1, 1 // stray continuation byte, skip
+	}
+
+	seq := make([]byte, want)
+	seq[0] = b
+	for i := 1; i < want; i++ {
+		if _, err := io.ReadFull(in, seq[i:i+1]); err != nil {
+			return -1, want
+		}
+		if seq[i]&0xc0 != 0x80 {
+			return -1, want // invalid continuation
+		}
+	}
+
+	r := rune(0)
+	switch want {
+	case 2:
+		r = rune(seq[0]&0x1f)<<6 | rune(seq[1]&0x3f)
+	case 3:
+		r = rune(seq[0]&0x0f)<<12 | rune(seq[1]&0x3f)<<6 | rune(seq[2]&0x3f)
+	case 4:
+		r = rune(seq[0]&0x07)<<18 | rune(seq[1]&0x3f)<<12 | rune(seq[2]&0x3f)<<6 | rune(seq[3]&0x3f)
+	}
+
+	if r == 0 {
+		return -1, want
+	}
+	return r, want
 }
 
 func (e *LineEditor) redraw() {
