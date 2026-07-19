@@ -50,6 +50,21 @@ go build -o plugindev
 # 将 plugindev 加入 PATH 或直接使用
 ```
 
+### SDK 版本管理
+
+`plugindev sdk` 子命令管理本地 SDK 版本：
+
+```bash
+plugindev sdk list       # 列出已安装的 SDK 版本
+plugindev sdk current    # 显示当前使用的 SDK 版本
+plugindev sdk latest     # 显示最新可用版本
+plugindev sdk install v0.7.1  # 安装指定版本
+plugindev sdk use v0.7.1      # 切换使用版本
+plugindev sdk path       # 显示当前 SDK 路径
+```
+
+SDK 存储在 `~/.homeagent/plugindev/sdk/<version>/`，`plugindev init` 自动读取当前 SDK 版本填充 `go.mod`。
+
 ### 创建 Go 插件
 
 ```bash
@@ -82,12 +97,14 @@ plugindev build
 
 ```
 myplugin/
-├── plg.json       — 插件元信息（名称、版本、入口、目标平台）
-├── main.go        — 入口点（非 Windows 或非 cgo 时编译）
-├── plugin.go      — 插件实现（Plugin 接口）
+├── plg.json       — 插件元信息（名称、版本、入口、目标平台 targets）
+├── plugin.go      — 插件实现（Plugin 接口 + 导出函数 NewPlugin）
 ├── go.mod         — Go 模块定义
-└── README.md      — 说明文档
+├── README.md      — 说明文档
+└── thirdpart/     — 外部源码存放目录（可选）
 ```
+
+编译时自动生成 C ABI bridge 文件（`z_bridge_gen.go` + `z_entry.c`），无需手动创建。
 
 **Lua 插件**：
 
@@ -109,29 +126,44 @@ plugindev build
 ```
 
 执行过程：
-1. 读取 `plg.json` 确定目标平台
-2. **Go 插件**：执行 `go build -buildmode=c-shared`（生成 `.so` + C ABI header）
-3. **Lua 插件**：直接打包源码，无需编译
-4. 生成 `plugin.json` 清单文件
-5. 打包为 `.hmap` 分发包（zip 格式，内含 `plugin.json` + 平台二进制）
+1. 读取 `plg.json` 的 `targets` 字段确定目标平台
+2. 自动生成 C ABI bridge 代码（`z_bridge_gen.go` + `z_entry.c`）
+3. **Go 插件**：执行 `go build -buildmode=c-shared`（生成 `.so` / `.dylib` / `.dll`）
+4. **Lua 插件**：直接打包源码，无需编译
+5. 生成 `plugin.json` 输出清单
+6. 打包为 `.hmap` 分发包（zip 格式，内含 `plugin.json` + 二进制）
 
-`plugin.json` 的 `platforms` 字段声明支持的平台，打包时自动包含对应二进制：
+### plg.json（项目配置）vs plugin.json（输出清单）
 
-| 平台 | 二进制文件名 |
-|------|-------------|
+| 文件 | 用途 | 关键字段 |
+|------|------|---------|
+| `plg.json` | 项目元信息，由开发者维护 | `targets` — 构建目标（如 `"linux/amd64,windows/amd64"`）|
+| `plugin.json` | 构建产物清单，`plugindev build` 自动生成 | `entry` — 入口文件名；`platforms` — 声明的支持平台 |
+
+每个目标生成单独的 `.hmap`，二进制文件名由平台决定：
+
+| 平台 | 二进制 |
+|------|--------|
 | Linux | `plugin.so` |
 | macOS | `plugin.dylib` |
 | Windows | `plugin.dll` |
 
-> 使用 `--bundle` 可一次打包多平台，生成的 `.hmap` 内含所有平台的二进制。
-> 安装时核心自动选择当前平台的文件，跳过其他平台。
+### 多平台打包：--bundle
+
+```bash
+plugindev build --bundle
+```
+
+一次编译 linux/amd64 + darwin/amd64 + windows/amd64，生成包含所有平台二进制的单 `.hmap`，
+输出清单自动添加 `platforms` 字段。安装时核心自动选择当前平台的二进制，跳过其他平台。
 
 输出在 `dist/` 目录：
 ```
 dist/
-├── myplugin_linux_amd64.hmap      # Go 插件 Linux 版
-├── myplugin_windows_amd64.hmap    # Go 插件 Windows 版
-├── myplugin_darwin_amd64.hmap     # Go 插件 macOS 版
+├── myplugin_linux_amd64.hmap      # 单平台：Linux 版
+├── myplugin_windows_amd64.hmap    # 单平台：Windows 版
+├── myplugin_darwin_amd64.hmap     # 单平台：macOS 版
+├── myplugin_bundle.hmap           # 多平台合集
 └── myplugin_lua.hmap              # Lua 插件
 ```
 
@@ -198,21 +230,15 @@ func NewPluginFactory(name string, config map[string]interface{}) (sdk.Plugin, e
 
 ### 入口点
 
-`main.go` 提供了 `NewPlugin` 导出函数，它是内核加载插件时的入口：
+`plugindev init` 生成的 `plugin.go` 中直接包含 `NewPlugin` 导出函数，它是内核加载插件时的入口：
 
 ```go
-//go:build !windows || !cgo
-
-package main
-
-import "gitcode.com/JianFeeeee/homeagent-sdk/sdk"
-
 func NewPlugin(name string, config map[string]interface{}) (sdk.Plugin, error) {
-    return NewPluginFactory(name, config)
+    return &Plugin{name: name}, nil
 }
 ```
 
-对于 `-buildmode=c-shared`，`plugindev build` 自动生成 C ABI bridge 代码（`z_bridge_gen.go` + `z_entry.c`），无需手动处理。
+编译时 `plugindev build` 根据目标平台自动生成 C ABI bridge 代码（`z_bridge_gen.go` + `z_entry.c`），无需手动编写。Windows DLL 和 Linux/macOS .so 共享同一入口。
 
 ### PluginSDK 核心 API
 

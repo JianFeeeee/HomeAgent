@@ -49,6 +49,21 @@ go build -o plugindev
 # Add plugindev to PATH or use directly
 ```
 
+### SDK Version Management
+
+`plugindev sdk` manages local SDK versions:
+
+```bash
+plugindev sdk list       # list installed SDK versions
+plugindev sdk current    # show current SDK version
+plugindev sdk latest     # show latest available version
+plugindev sdk install v0.7.1  # install a specific version
+plugindev sdk use v0.7.1      # switch to a version
+plugindev sdk path       # show current SDK path
+```
+
+SDK is stored at `~/.homeagent/plugindev/sdk/<version>/`; `plugindev init` reads the current SDK version for `go.mod`.
+
 ### Creating a Go Plugin
 
 ```bash
@@ -81,12 +96,14 @@ plugindev build
 
 ```
 myplugin/
-├── plg.json       — Plugin metadata (name, version, entry, target platform)
-├── main.go        — Entry point (compiled for non-Windows or non-cgo)
-├── plugin.go      — Plugin implementation (Plugin interface)
+├── plg.json       — Plugin metadata (name, version, entry, target platforms)
+├── plugin.go      — Plugin implementation (Plugin interface + NewPlugin export)
 ├── go.mod         — Go module definition
-└── README.md      — Documentation
+├── README.md      — Documentation
+└── thirdpart/     — Optional external source code directory
 ```
+
+C ABI bridge files (`z_bridge_gen.go` + `z_entry.c`) are auto-generated at build time.
 
 **Lua plugin**:
 
@@ -108,29 +125,45 @@ plugindev build
 ```
 
 Execution process:
-1. Reads `plg.json` to determine target platform
-2. **Go plugin**: Runs `go build -buildmode=c-shared` (produces `.so` + C ABI header)
-3. **Lua plugin**: Packages source code directly, no compilation needed
-4. Generates `plugin.json` manifest file
-5. Packages as `.hmap` distribution (zip format, containing `plugin.json` + platform binary)
+1. Reads `plg.json` `targets` field to determine target platforms
+2. Auto-generates C ABI bridge code (`z_bridge_gen.go` + `z_entry.c`)
+3. **Go plugin**: Runs `go build -buildmode=c-shared` (produces `.so` / `.dylib` / `.dll`)
+4. **Lua plugin**: Packages source code directly, no compilation needed
+5. Generates `plugin.json` output manifest
+6. Packages as `.hmap` distribution (zip format, containing `plugin.json` + binary)
 
-The `platforms` field in `plugin.json` declares supported platforms; the build includes the corresponding binary:
+### plg.json (project config) vs plugin.json (output manifest)
 
-| Platform | Binary name |
-|----------|-------------|
+| File | Purpose | Key fields |
+|------|---------|------------|
+| `plg.json` | Project metadata, maintained by developer | `targets` — build targets (e.g. `"linux/amd64,windows/amd64"`) |
+| `plugin.json` | Build artifact manifest, auto-generated | `entry` — entry filename; `platforms` — declared platforms |
+
+Each target produces a separate `.hmap`; binary name by platform:
+
+| Platform | Binary |
+|----------|--------|
 | Linux | `plugin.so` |
 | macOS | `plugin.dylib` |
 | Windows | `plugin.dll` |
 
-> Use `--bundle` to build a multi-platform bundle — the resulting `.hmap` contains binaries for all platforms.
-> During installation, the kernel automatically selects the correct binary for the current OS, skipping others.
+### Multi-platform bundle: --bundle
+
+```bash
+plugindev build --bundle
+```
+
+Builds linux/amd64 + darwin/amd64 + windows/amd64 in one pass, producing a single `.hmap`
+with all platform binaries. The output manifest includes a `platforms` field.
+The kernel auto-selects the correct binary during installation.
 
 Output in `dist/` directory:
 ```
 dist/
-├── myplugin_linux_amd64.hmap      # Go plugin Linux version
-├── myplugin_windows_amd64.hmap    # Go plugin Windows version
-├── myplugin_darwin_amd64.hmap     # Go plugin macOS version
+├── myplugin_linux_amd64.hmap      # Single platform: Linux
+├── myplugin_windows_amd64.hmap    # Single platform: Windows
+├── myplugin_darwin_amd64.hmap     # Single platform: macOS
+├── myplugin_bundle.hmap           # Multi-platform bundle
 └── myplugin_lua.hmap              # Lua plugin
 ```
 
@@ -197,21 +230,17 @@ func NewPluginFactory(name string, config map[string]interface{}) (sdk.Plugin, e
 
 ### Entry Point
 
-`main.go` provides the `NewPlugin` export function, which is the entry point when the kernel loads the plugin:
+`plugindev init` generates `plugin.go` with the `NewPlugin` export function directly,
+which is the entry point when the kernel loads the plugin:
 
 ```go
-//go:build !windows || !cgo
-
-package main
-
-import "gitcode.com/JianFeeeee/homeagent-sdk/sdk"
-
 func NewPlugin(name string, config map[string]interface{}) (sdk.Plugin, error) {
-    return NewPluginFactory(name, config)
+    return &Plugin{name: name}, nil
 }
 ```
 
-For `-buildmode=c-shared`, `plugindev build` auto-generates C ABI bridge code (`z_bridge_gen.go` + `z_entry.c`), no manual handling needed.
+At build time, `plugindev build` auto-generates C ABI bridge code (`z_bridge_gen.go` + `z_entry.c`),
+shared by both Windows DLL and Linux/macOS .so builds. No manual bridge code needed.
 
 ### PluginSDK Core API
 
