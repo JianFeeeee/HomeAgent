@@ -37,13 +37,20 @@ func platformBinary() (zipName, canonicalName string) {
 	}
 }
 
-// validBinaries 是 .hmap 中所有可识别的平台二进制文件名。
+// validBinaries 是 .hmap 中所有可识别的文件入口（平台二进制或脚本）。
 var validBinaries = map[string]bool{
 	"plugin.so":   true,
 	"plugin.dylib": true,
 	"plugin.dll":  true,
 	"main.lua":    true,
 	"SKILL.md":    true,
+}
+
+// platformBinaries 是平台特定的二进制，bundle 模式下仅当前平台的被解压。
+var platformBinaries = map[string]bool{
+	"plugin.so":   true,
+	"plugin.dylib": true,
+	"plugin.dll":  true,
 }
 
 var downloadClient = &http.Client{
@@ -647,8 +654,8 @@ func extractPackage(data []byte, pluginDir string) error {
 			continue
 		}
 
-		// bundle mode: skip other platforms' binaries, keep only current OS
-		if isBundle && validBinaries[f.Name] && f.Name != zipBin {
+		// bundle mode: skip other platforms' platform-specific binaries
+		if isBundle && platformBinaries[f.Name] && f.Name != zipBin {
 			continue
 		}
 
