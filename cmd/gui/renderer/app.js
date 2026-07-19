@@ -767,7 +767,7 @@ async function loadCmdHistory() {
 
 function renderTerminals() {
   var r = document.getElementById('term-list');
-  var cnt = document.getElementById('term-count');
+  var cnt = document.getElementById('term-count-badge');
   if (!r) return;
   var list = state.terminals || [];
   if (cnt) cnt.textContent = list.length;
@@ -801,7 +801,7 @@ function renderTerminals() {
 
 function renderCmdHistory() {
   var r = document.getElementById('cmd-list');
-  var cnt = document.getElementById('cmd-count');
+  var cnt = document.getElementById('cmd-count-badge');
   if (!r) return;
   var list = state.cmdHistory || [];
   if (cnt) cnt.textContent = list.length;
