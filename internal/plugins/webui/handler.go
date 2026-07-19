@@ -985,14 +985,23 @@ func (h *Handler) handleChatEvents(w http.ResponseWriter, r *http.Request) {
 		}
 	}()
 
+	log.Printf("[SSE] handler started, subscribing to events")
 	subTypes := []string{"agent_output", "reasoning", "agent_error", "tool_call", "stage", "agent_llm_chain"}
 	var unsubs []func()
 	for _, t := range subTypes {
 		t2 := t
 		unsub := h.eventBus.Subscribe(events.EventType(t2), func(evt *events.Event) {
+			if evt.Type == events.EventToolCall {
+				toolName, _ := evt.Payload["tool"].(string)
+				log.Printf("[SSE] received tool_call event: tool=%s", toolName)
+			}
 			data, _ := json.Marshal(evt)
 			select {
 			case writeCh <- fmt.Sprintf("event: %s\ndata: %s\n", evt.Type, string(data)):
+				if evt.Type == events.EventToolCall {
+					toolName, _ := evt.Payload["tool"].(string)
+					log.Printf("[SSE] wrote tool_call to writeCh: tool=%s", toolName)
+				}
 			default:
 				log.Printf("[SSE] DROPPED event %s (writeCh full, len=%d)", evt.Type, len(writeCh))
 			}
