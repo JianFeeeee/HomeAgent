@@ -32,7 +32,57 @@ window._i18n = {
   navAdapters: ['适配器','Adapters'],
   navKernel: ['内核','Kernel'],
   navLogout: ['退出登录','Logout'],
-  themeToggle: ['切换亮色/暗色模式','Toggle theme']
+  themeToggle: ['切换亮色/暗色模式','Toggle theme'],
+  clickManage: ['点击管理连接','Click to manage connections'],
+  secondsAgo: ['秒前','s ago'],
+  minutesAgo: ['分钟前','min ago'],
+  hoursAgo: ['小时前','h ago'],
+  noConnection: ['未连接','Not connected'],
+  agentAvatar: ['小宅','Agent'],
+  waitingAI: ['等待AI回复...','Waiting for AI...'],
+  noResponse: ['(无响应)','(no response)'],
+  error: ['错误: ','Error: '],
+  requestFailed: ['请求失败: ','Request failed: '],
+  send: ['发送','Send'],
+  queryFailed: ['查询失败: ','Query failed: '],
+  searchFailed: ['搜索失败: ','Search failed: '],
+  getFailed: ['获取失败: ','Get failed: '],
+  createFailed: ['创建失败','Create failed'],
+  createFailedWith: ['创建失败: ','Create failed: '],
+  nameContentEmpty: ['名称和内容不能为空','Name and content cannot be empty'],
+  knowledgeCreated: ['知识「','Knowledge "'],
+  knowledgeCreatedEnd: ['」已创建','" created'],
+  noContext: ['无上下文','No context'],
+  noSessions: ['暂无终端会话','No terminal sessions'],
+  noHistory: ['暂无命令记录','No command history'],
+  running: ['运行中','Running'],
+  closed: ['已关闭','Closed'],
+  command: ['命令','Command'],
+  status: ['状态','Status'],
+  created: ['创建时间','Created'],
+  uptime: ['运行时长','Uptime'],
+  output: ['输出预览','Output'],
+  time: ['时间','Time'],
+  actions: ['操作','Actions'],
+  name: ['名称','Name'],
+  description: ['描述','Description'],
+  version: ['版本','Version'],
+  details: ['详情','Details'],
+  close: ['关闭','Close'],
+  install: ['安装','Install'],
+  installPlugin: ['安装插件','Install Plugin'],
+  packageUrl: ['.hmap 包下载 URL','Package URL'],
+  uploadHmap: ['选择 .hmap 文件上传','Upload .hmap file'],
+  loadedPlugins: ['已加载插件','Loaded Plugins'],
+  noLoadedPlugins: ['暂无已加载插件','No loaded plugins'],
+  loaded: ['已加载','Loaded'],
+  builtin: ['内置','Built-in'],
+  unload: ['卸载','Unload'],
+  installedExternal: ['已安装外部插件','Installed Plugins'],
+  pluginDetails: ['插件详情','Plugin Details'],
+  registeredTools: ['已注册工具','Registered Tools'],
+  systemOps: ['系统操作','System Operations'],
+  reloadPlugins: ['重载插件','Reload Plugins'],
 };
 
 function __(zh, en) { return state.lang === 'en' ? en : zh }
@@ -84,10 +134,10 @@ function escHtml(s) {
 
 function timeAgo(t) {
   var s = Math.floor((Date.now() - new Date(t).getTime()) / 1000);
-  if (s < 60) return s + '秒前';
+  if (s < 60) return s + __('秒前','s ago');
   var m = Math.floor(s / 60);
-  if (m < 60) return m + '分钟前';
-  return Math.floor(m / 60) + '小时前';
+  if (m < 60) return m + __('分钟前','min ago');
+  return Math.floor(m / 60) + __('小时前','h ago');
 }
 
 function toast(m, isError) {
@@ -325,7 +375,7 @@ function renderChat() {
         html += '<div class="msg msg-system"><div class="msg-bubble">' + body + '</div></div>';
       } else {
         var userAvatar = '<svg viewBox="0 0 24 24" style="width:16px;height:16px" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><circle cx="12" cy="8" r="4"/><path d="M4 20c0-4 4-6 8-6s8 2 8 6"/></svg>';
-        var aiAvatar = '<img src="/mascot.webp" style="width:28px;height:28px;border-radius:50%;object-fit:cover" alt="小宅">';
+        var aiAvatar = '<img src="mascot.svg" style="width:28px;height:28px;border-radius:50%;object-fit:cover" alt="' + __('小宅','Agent') + '">';
         html += '<div class="msg msg-' + role + '">'
           + '<div class="msg-avatar">' + (role === 'user' ? userAvatar : aiAvatar) + '</div>'
           + '<div class="msg-content"><div class="msg-bubble">' + body + '</div></div>'

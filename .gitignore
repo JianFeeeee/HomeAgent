@@ -1,4 +1,4 @@
-homed
+/homed
 /waiter
 *.exe
 *.log
@@ -14,6 +14,8 @@ internal/meta/
 
 *.hmap
 dev/
+
+login.json
 
 # GUI
 cmd/gui/node_modules/
