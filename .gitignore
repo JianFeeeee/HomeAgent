@@ -1,5 +1,5 @@
 homed
-waiter
+/waiter
 *.exe
 *.log
 *.test
@@ -14,3 +14,8 @@ internal/meta/
 
 *.hmap
 dev/
+
+# GUI
+cmd/gui/node_modules/
+cmd/gui/dist/
+
