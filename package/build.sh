@@ -13,18 +13,18 @@ TARGET="${1:-native}"
 COMPONENT="${2:-all}"
 
 # ---- platform matrix ----
-# homed:   linux/amd64 + linux/arm64 (CGO), macOS native-only (no osxcross)
-#          windows: blocked — gojieba CXX flags + dlfcn.h not available in MinGW
+# homed:   linux/amd64 + linux/arm64 (CGO), macOS native-only (no osxcross),
+#          windows/amd64 (MinGW)
 # waiter:  all platforms (CGO-free, raw terminal mode is a no-op on non-Linux)
 # gui:     electron-builder handles cross-platform natively
 
 case "$TARGET" in
   native)   GOOS="" GOARCH="" ;;
   linux/amd64)  GOOS=linux   GOARCH=amd64  CC="${CC:-}" ;;
-  linux/arm64)  GOOS=linux   GOARCH=arm64  CC="${CC:-aarch64-linux-gnu-gcc}" ;;
+  linux/arm64)  GOOS=linux   GOARCH=arm64  CC="${CC:-aarch64-linux-gnu-gcc}" CXX="${CXX:-aarch64-linux-gnu-g++}" ;;
   darwin/amd64) GOOS=darwin  GOARCH=amd64  CC="${CC:-}" ;;
   darwin/arm64) GOOS=darwin  GOARCH=arm64  CC="${CC:-}" ;;
-  windows/amd64) GOOS=windows GOARCH=amd64 CC="${CC:-x86_64-w64-mingw32-gcc}" ;;
+  windows/amd64) GOOS=windows GOARCH=amd64 CC="${CC:-x86_64-w64-mingw32-gcc}" CXX="${CXX:-x86_64-w64-mingw32-g++}" ;;
   all)
     "$0" linux/amd64   "$COMPONENT"
     "$0" linux/arm64   "$COMPONENT"
@@ -47,6 +47,9 @@ fi
 if [ -n "${CC:-}" ]; then
   export CC
 fi
+if [ -n "${CXX:-}" ]; then
+  export CXX
+fi
 export CGO_ENABLED="${CGO_ENABLED:-1}"
 
 mkdir -p "$BUILD_DIR"
@@ -61,11 +64,8 @@ build_homed() {
     return
   fi
   if [ "$GOOS" = "windows" ]; then
-    echo "[SKIP] homed ${plat} — gojieba CXX flags + dlfcn.h unavailable in MinGW cross-compiler"
-    return
+    out="${out}.exe"
   fi
-
-  if [ "$GOOS" = "windows" ]; then out="${out}.exe"; fi
   echo "[BUILD] homed ${plat} → $out"
   CGO_ENABLED=1 "$GO" build -trimpath -installsuffix dynlink \
     -ldflags "$LDFLAGS" -o "$out" ./cmd/homed/

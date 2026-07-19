@@ -19,7 +19,8 @@ type PluginManifest struct {
 	License     string   `json:"license,omitempty"`
 	Homepage    string   `json:"homepage,omitempty"`
 	Repository  string   `json:"repository,omitempty"`
-	Entry       string   `json:"entry"` // "plugin.so" | "main.lua" | "SKILL.md"
+	Entry       string   `json:"entry"` // "plugin.so" | "plugin.dll" | "main.lua" | "SKILL.md"
+	Platforms   []string `json:"platforms,omitempty"` // 声明的支持平台: ["linux","darwin","windows"]
 	MinVersion  string   `json:"min_version,omitempty"`
 	Tags        []string `json:"tags,omitempty"`
 	Deprecated  bool     `json:"deprecated,omitempty"`
