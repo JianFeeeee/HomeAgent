@@ -284,7 +284,7 @@ sdk.InjectInterrupt(source, channel, payload)
 sdk.Memory().Recall/Commit
 sdk.Knowledge().Search/Create
 sdk.Settings().Get/Set/List
-sdk.RegisterOutputChannel("qq", sdk.CapText, "QQ消息通道，content为JSON: {text, group_id, user_id}", handler)
+sdk.RegisterOutputChannel("qq", sdk.CapText|sdk.CapAudio|sdk.CapImage, "QQ消息通道，详见 output_send__qq_help", handler)
 ```
 
 ### Plugin 接口
@@ -305,8 +305,8 @@ type Plugin interface {
 
 | 工具 | 类型 | 作用 |
 |------|------|------|
-| `output_send__{name}` | function | 接受 `content` JSON 字符串参数，透明路由到插件注册的 handler |
-| `output_send__{name}_help` | function | 返回通道的 JSON 格式文档（desc 字段） |
+| `output_send__{name}` | function | 接受 `payload`(消息载荷)、`meta`(JSON 路由元数据)、`type`(枚举) 三个参，路由到插件 handler |
+| `output_send__{name}_help` | function | 返回通道的 meta 格式和 type 枚举说明 |
 
 能力标志位：
 

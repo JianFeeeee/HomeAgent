@@ -284,7 +284,7 @@ sdk.InjectInterrupt(source, channel, payload)
 sdk.Memory().Recall/Commit
 sdk.Knowledge().Search/Create
 sdk.Settings().Get/Set/List
-sdk.RegisterOutputChannel("qq", sdk.CapText, "QQ消息通道，content为JSON: {text, group_id, user_id}", handler)
+sdk.RegisterOutputChannel("qq", sdk.CapText|sdk.CapAudio|sdk.CapImage, "QQ channel, see output_send__qq_help for details", handler)
 ```
 
 ### Plugin Interface
@@ -305,8 +305,8 @@ Each output channel generates two tools:
 
 | Tool | Type | Purpose |
 |------|------|---------|
-| `output_send__{name}` | function | Accepts a `content` JSON string parameter, transparently routed to the plugin's registered handler |
-| `output_send__{name}_help` | function | Returns the channel's JSON format documentation (desc field) |
+| `output_send__{name}` | function | Accepts `payload` (content), `meta` (JSON routing metadata), `type` (enum) — routed to plugin handler |
+| `output_send__{name}_help` | function | Returns the channel's meta format and type enum documentation |
 
 Capability flags:
 
