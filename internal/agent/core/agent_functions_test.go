@@ -27,49 +27,35 @@ func TestEntitySimilarity(t *testing.T) {
 
 func TestDocToTriples(t *testing.T) {
 	doc := &document.Doc{
-		Summary:  "用户喜欢编程",
-		Content:  "用户提到喜欢Go和Python",
-		Tags:     []string{"编程", "Go"},
-		Entities: []string{"Go", "Python"},
-		Source:   "context",
+		Summary: "用户喜欢编程",
+		Content: "用户提到喜欢Go和Python",
+		Source:  "context",
 	}
 
 	triples := docToTriples(doc)
-	if len(triples) == 0 {
-		t.Fatal("expected non-empty triples")
-	}
 
 	foundSummary := false
-	foundEntity := false
-	foundTag := false
+	foundRel := false
 	foundSource := false
-
 	for _, tr := range triples {
-		if tr.Subject == "文档" && tr.Relation == "包含内容" {
+		switch {
+		case tr.Subject == "文档" && tr.Relation == "主题":
 			foundSummary = true
-		}
-		if tr.Subject == "文档" && tr.Relation == "提及实体" {
-			foundEntity = true
-		}
-		if tr.Subject == "文档" && tr.Relation == "标签" {
-			foundTag = true
-		}
-		if tr.Subject == "文档" && tr.Relation == "来源" {
+		case tr.Relation == "关联":
+			foundRel = true
+		case tr.Subject == "文档" && tr.Relation == "来源":
 			foundSource = true
 		}
 	}
 
 	if !foundSummary {
-		t.Error("missing '包含内容' triple")
-	}
-	if !foundEntity {
-		t.Error("missing '提及实体' triple")
-	}
-	if !foundTag {
-		t.Error("missing '标签' triple")
+		t.Error("missing '主题' triple")
 	}
 	if !foundSource {
 		t.Error("missing '来源' triple")
+	}
+	if needJieba() && !foundRel {
+		t.Error("missing '关联' triple with jieba available")
 	}
 }
 
@@ -95,15 +81,34 @@ func TestDocToTriplesNoSource(t *testing.T) {
 
 func TestDocToTriplesTypes(t *testing.T) {
 	doc := &document.Doc{
-		Summary:  "测试三元组类型",
-		Content:  "用于验证 SubjectType 和 ObjectType",
-		Entities: []string{"Go"},
+		Summary: "测试三元组类型",
+		Content: "用于验证 SubjectType 和 ObjectType",
+		Source:  "test",
 	}
 
 	triples := docToTriples(doc)
+
+	// 主题 and 来源 triples have Subject=文档
 	for _, tr := range triples {
-		if tr.Subject != "文档" {
-			t.Errorf("expected subject '文档', got %q", tr.Subject)
+		if tr.Subject == "文档" {
+			if tr.SubjectType != "Concept" {
+				t.Errorf("文档 subject_type should be Concept, got %q", tr.SubjectType)
+			}
+			if tr.Confidence != 1.0 {
+				t.Errorf("文档 triple confidence should be 1.0, got %f", tr.Confidence)
+			}
+		} else {
+			// 关联 triples use extracted terms as subject/object
+			if tr.Relation != "关联" {
+				t.Errorf("non-文档 triple should have 关联 relation, got %q", tr.Relation)
+			}
+			if tr.Confidence != 0.8 {
+				t.Errorf("关联 triple confidence should be 0.8, got %f", tr.Confidence)
+			}
+		}
+		// all should have SubjectType/ObjectType set
+		if tr.SubjectType == "" || tr.ObjectType == "" {
+			t.Errorf("triple %+v missing SubjectType or ObjectType", tr)
 		}
 	}
 }

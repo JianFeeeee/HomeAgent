@@ -200,7 +200,7 @@ func (c *RelevanceContext) Prune(currentInput string, topK int, docStore *docume
 				Response:  s.event.Response,
 			}
 		}
-		doc, err := docStore.ContextToDoc("context_archived", entries)
+		doc, err := docStore.ContextToDoc("context_archived", entries, c.embedder)
 		if err == nil && doc != nil {
 			archived = len(archive)
 		}
