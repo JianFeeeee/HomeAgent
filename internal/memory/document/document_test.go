@@ -82,7 +82,7 @@ func TestContextToDoc(t *testing.T) {
 		{Timestamp: time.Now(), Source: "user", Content: "特别是Go语言", Response: "Go很棒"},
 	}
 
-	doc, err := s.ContextToDoc("test", entries)
+	doc, err := s.ContextToDoc("test", entries, nil)
 	if err != nil {
 		t.Fatal(err)
 	}

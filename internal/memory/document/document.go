@@ -28,6 +28,7 @@ type Doc struct {
 	Meta        map[string]string `json:"meta,omitempty"`
 	AccessCount int               `json:"access_count"`    // 访问次数
 	LastAccess  time.Time         `json:"last_access"`     // 最后访问时间
+	Vector      vector.Vector     `json:"vector,omitempty"` // 预计算向量（与 context 同空间），nil 则用 TF-IDF 兜底
 }
 
 // Store — 文档记忆存储，包含向量索引
@@ -37,10 +38,29 @@ type Store struct {
 	veczer *vector.TFIDFVectorizer
 	mu     sync.RWMutex
 
-	docs      map[string]*Doc
-	summaries []string // 用于训练向量化器，最大 10000 条
+	docs       map[string]*Doc
+	summaries  []string // 用于训练向量化器，最大 10000 条
+	vectorizer vector.Vectorizer // 可选：与 context 同空间的向量化器
 
 	dirty bool
+}
+
+func (s *Store) SetVectorizer(v vector.Vectorizer) {
+	s.vectorizer = v
+}
+
+// ReindexWithVectorizer 用给定的向量化器重建所有文档的向量索引
+func (s *Store) ReindexWithVectorizer(v vector.Vectorizer) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	log.Printf("[document memory] reindex with vectorizer (%d docs)", len(s.docs))
+	s.vec = vector.NewStore()
+	for _, doc := range s.docs {
+		doc.Vector = v.Vectorize(doc.Summary + " " + doc.Content)
+		s.vec.Insert(doc.ID, doc.Summary, doc.Vector, doc.Meta)
+	}
+	log.Printf("[document memory] reindex with vectorizer complete (%d vectors)", s.vec.Size())
 }
 
 const maxSummaries = 10000
@@ -88,7 +108,10 @@ func (s *Store) Insert(doc *Doc) error {
 
 	// 增量训练向量化器并加入向量索引
 	s.addSummary(doc.Summary)
-	vec := s.veczer.Vectorize(doc.Summary + " " + doc.Content)
+	vec := doc.Vector
+	if vec == nil {
+		vec = s.veczer.Vectorize(doc.Summary + " " + doc.Content)
+	}
 	s.vec.Insert(doc.ID, doc.Summary, vec, doc.Meta)
 
 	// 立即写盘
@@ -101,7 +124,7 @@ func (s *Store) Insert(doc *Doc) error {
 }
 
 // ContextToDoc — 将一段上下文对话历史提炼为文档（带内容去重）
-func (s *Store) ContextToDoc(source string, entries []ContextEntry) (*Doc, error) {
+func (s *Store) ContextToDoc(source string, entries []ContextEntry, vec vector.Vectorizer) (*Doc, error) {
 	if len(entries) == 0 {
 		return nil, nil
 	}
@@ -140,6 +163,12 @@ func (s *Store) ContextToDoc(source string, entries []ContextEntry) (*Doc, error
 	}
 
 	id := fmt.Sprintf("doc_%d", time.Now().UnixNano())
+	var docVec vector.Vector
+	if vec != nil {
+		docVec = vec.Vectorize(summary + " " + content)
+	} else {
+		docVec = s.veczer.Vectorize(summary + " " + content)
+	}
 	doc := &Doc{
 		ID:          id,
 		Summary:     summary,
@@ -152,13 +181,13 @@ func (s *Store) ContextToDoc(source string, entries []ContextEntry) (*Doc, error
 		AccessCount: 1,
 		Source:      source,
 		Meta:        map[string]string{"content_hash": contentHash},
+		Vector:      docVec,
 	}
 	s.docs[id] = doc
 
-	// 增量训练向量化器并加入向量索引
+	// 加入向量索引
 	s.addSummary(summary)
-	vec := s.veczer.Vectorize(summary + " " + content)
-	s.vec.Insert(id, summary, vec, nil)
+	s.vec.Insert(id, summary, doc.Vector, nil)
 
 	s.dirty = true
 	s.mu.Unlock()
@@ -180,7 +209,7 @@ func (s *Store) Consume(text string, topK int) []*Doc {
 		topK = 5
 	}
 
-	vec := s.veczer.Vectorize(text)
+	vec := s.vectorizeQuery(text)
 	results := s.vec.Search(vec, topK)
 
 	var docs []*Doc
@@ -194,6 +223,14 @@ func (s *Store) Consume(text string, topK int) []*Doc {
 	return docs
 }
 
+// vectorizeQuery 用语义向量化器（首选）或 TF-IDF（兜底）处理查询文本
+func (s *Store) vectorizeQuery(text string) vector.Vector {
+	if s.vectorizer != nil {
+		return s.vectorizer.Vectorize(text)
+	}
+	return s.veczer.Vectorize(text)
+}
+
 // Query — 向量相似度查询文档
 func (s *Store) Query(text string, topK int) []*Doc {
 	s.mu.RLock()
@@ -203,7 +240,7 @@ func (s *Store) Query(text string, topK int) []*Doc {
 		topK = 5
 	}
 
-	vec := s.veczer.Vectorize(text)
+	vec := s.vectorizeQuery(text)
 	results := s.vec.Search(vec, topK)
 
 	var docs []*Doc
@@ -228,7 +265,10 @@ func (s *Store) Reindex() {
 
 	s.vec = vector.NewStore()
 	for _, doc := range s.docs {
-		vec := s.veczer.Vectorize(doc.Summary + " " + doc.Content)
+		vec := doc.Vector
+		if vec == nil {
+			vec = s.veczer.Vectorize(doc.Summary + " " + doc.Content)
+		}
 		s.vec.Insert(doc.ID, doc.Summary, vec, doc.Meta)
 	}
 
@@ -348,7 +388,10 @@ func (s *Store) loadAll() error {
 
 	// 重建向量索引
 	for _, doc := range s.docs {
-		vec := s.veczer.Vectorize(doc.Summary + " " + doc.Content)
+		vec := doc.Vector
+		if vec == nil {
+			vec = s.veczer.Vectorize(doc.Summary + " " + doc.Content)
+		}
 		s.vec.Insert(doc.ID, doc.Summary, vec, nil)
 	}
 

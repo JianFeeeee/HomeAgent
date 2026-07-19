@@ -2,7 +2,105 @@ package core
 
 import (
 	"testing"
+
+	"gitcode.com/JianFeeeee/HomeAgent/internal/memory"
+	"gitcode.com/JianFeeeee/HomeAgent/internal/memory/document"
 )
+
+func needJieba() bool {
+	return memory.GetJieba() != nil
+}
+
+func TestDocToTriplesEmpty(t *testing.T) {
+	doc := &document.Doc{
+		Summary: "empty doc",
+		Content: "",
+		Source:  "test",
+	}
+	triples := docToTriples(doc)
+	if len(triples) < 2 {
+		t.Fatalf("expected at least 2 triples (主题+来源), got %d", len(triples))
+	}
+
+	if triples[0].Subject != "文档" || triples[0].Relation != "主题" || triples[0].Object != "empty doc" {
+		t.Errorf("first triple mismatch: %+v", triples[0])
+	}
+
+	last := triples[len(triples)-1]
+	if last.Subject != "文档" || last.Relation != "来源" || last.Object != "test" {
+		t.Errorf("last triple mismatch: %+v", last)
+	}
+}
+
+func TestDocToTriplesConversation(t *testing.T) {
+	doc := &document.Doc{
+		Summary: "测试对话 (qq) 涉及: 天气",
+		Content: "[15:04] qq: 今天天气怎么样\n[15:05] agent: 今天天气很好",
+		Source:  "qq",
+	}
+	triples := docToTriples(doc)
+
+	minLen := 2
+	hasJieba := needJieba()
+
+	if hasJieba && len(triples) <= minLen {
+		t.Errorf("expected more than %d triples with jieba, got %d", minLen, len(triples))
+	}
+
+	for i, tr := range triples {
+		if tr.Subject == "" || tr.Relation == "" || tr.Object == "" {
+			t.Errorf("triple[%d] has empty field: %+v", i, tr)
+		}
+		if tr.Confidence <= 0 {
+			t.Errorf("triple[%d] has non-positive confidence: %+v", i, tr)
+		}
+	}
+
+	relCount := 0
+	for _, tr := range triples {
+		if tr.Relation == "关联" {
+			relCount++
+			if tr.Subject == tr.Object {
+				t.Errorf("关联 triple has same subject and object: %+v", tr)
+			}
+		}
+	}
+	if hasJieba && relCount == 0 {
+		t.Errorf("expected 关联 triples with jieba enabled, got 0 in %+v", triples)
+	}
+}
+
+func TestDocToTriplesMultiLine(t *testing.T) {
+	doc := &document.Doc{
+		Summary: "多轮对话",
+		Content: "[10:00] user: 你好\n[10:01] agent: 你好，有什么可以帮助你的\n[10:02] user: 今天天气如何\n[10:03] agent: 今天天气很好",
+		Source:  "qq",
+	}
+	triples := docToTriples(doc)
+	if len(triples) < 2 {
+		t.Fatalf("expected at least 2 triples, got %d", len(triples))
+	}
+
+	if triples[0].Subject != "文档" || triples[0].Relation != "主题" {
+		t.Errorf("first triple should be 主题, got %+v", triples[0])
+	}
+	last := triples[len(triples)-1]
+	if last.Subject != "文档" || last.Relation != "来源" {
+		t.Errorf("last triple should be 来源, got %+v", last)
+	}
+}
+
+func TestDocToTriplesEmptyContent(t *testing.T) {
+	doc := &document.Doc{
+		Summary: "空内容",
+		Content: "",
+		Source:  "test",
+	}
+	triples := docToTriples(doc)
+	if len(triples) != 2 {
+		t.Fatalf("expected exactly 2 triples (主题+来源) for empty content, got %d", len(triples))
+	}
+}
 
 func TestTruncateStr(t *testing.T) {
 	tests := []struct {

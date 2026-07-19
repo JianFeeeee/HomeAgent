@@ -165,9 +165,16 @@ func New(cfg AgentConfig) *Agent {
 	if cfg.MaxContextSize <= 0 {
 		cfg.MaxContextSize = 30
 	}
+
+	embedder := memory.NewStaticEmbedder(strings.Split(cfg.EmbeddingModelPath, ",")...)
+	if cfg.DocStore != nil {
+		cfg.DocStore.SetVectorizer(embedder)
+		cfg.DocStore.ReindexWithVectorizer(embedder)
+	}
+
 	return &Agent{
 		id:              cfg.ID,
-		startTime:      time.Now(),
+		startTime:       time.Now(),
 		provider:        cfg.Provider,
 		providerManager: cfg.ProviderManager,
 		io:              cfg.IO,
@@ -175,7 +182,7 @@ func New(cfg AgentConfig) *Agent {
 		indexer:         cfg.Indexer,
 		skills:          cfg.Skills,
 		tracker:         cfg.Tracker,
-		context:         NewRelevanceContext(cfg.ContextSavePath, memory.NewStaticEmbedder(strings.Split(cfg.EmbeddingModelPath, ",")...)),
+		context:         NewRelevanceContext(cfg.ContextSavePath, embedder),
 		systemPrompt:    cfg.SystemPrompt,
 		ctx:             ctx,
 		cancel:          cancel,
@@ -734,6 +741,10 @@ func (a *Agent) process(input string, stageCtx *sdk.StageContext) (response stri
 				break
 			}
 
+			if errors.Is(llmErr, context.Canceled) {
+				// 打断不是 provider 故障，不标记不可用，直接让外层循环重试
+				break
+			}
 			var pe *agentAPI.ProviderError
 			if errors.As(llmErr, &pe) && (pe.StatusCode == 401 || pe.StatusCode == 403) {
 				a.providerManager.ReportStatus(fbProvider.Name(), pe.StatusCode)
@@ -1612,8 +1623,8 @@ func (a *Agent) buildSystemPrompt(memContext string, userInput string) string {
 
 	// 输出指令：使用 output_send__{channel} 作为回复手段
 	prompt += "\n\n【输出规则】你有多组输出门工具（type=output），每个对应一个输出通道。回复用户时必须调用对应的 output_send__{通道名} 工具。\n"
-	prompt += "- content 参数是 JSON 字符串，包含要发送的内容。具体格式因通道而异，用 output_send__{通道名}_help 查看每个通道的 JSON 格式说明。\n"
-	prompt += "- output_send__{通道名}_help 是普通 function 类型工具，调用后返回该通道的 JSON 格式详情和示例。\n"
+	prompt += "- payload 参数是消息载荷（文本直接填文字），type 指定载荷类型（text/voice/image/file），meta 是 JSON 发送元数据（群号/用户号等）。\n"
+	prompt += "- 用 output_send__{通道名}_help 查看该通道的 meta 格式和 type 枚举。\n"
 	prompt += "- 同一轮对话中可多次调用输出门工具。长消息应当分多次发出，而不是一口气发完。\n"
 	prompt += "- 直接返回纯文本不会到达任何用户端。"
 
@@ -2081,16 +2092,24 @@ func (a *Agent) buildToolDefs() []interface{} {
 			"type": "function",
 			"function": map[string]interface{}{
 				"name":        "output_send__" + ch.Name,
-				"description": desc + "。能力: " + capStr + "。content 参数为 JSON 字符串，具体格式请调用 output_send__" + ch.Name + "_help 查看。",
+				"description": desc + "。能力: " + capStr + "。payload 为消息载荷，meta 为 JSON 发送元数据，type 为载荷类型。用 _help 查看 meta 格式和 type 枚举。",
 				"parameters": map[string]interface{}{
 					"type": "object",
 					"properties": map[string]interface{}{
-						"content": map[string]interface{}{
+						"payload": map[string]interface{}{
 							"type":        "string",
-							"description": "JSON 字符串，包含要发送的内容和路由信息。格式因通道而异，用 _help 工具查看详情。",
+							"description": "消息载荷。type=text 时填文字，type=file/image 时填 URL 或路径",
+						},
+						"meta": map[string]interface{}{
+							"type":        "string",
+							"description": "JSON 对象，包含发送所需的元数据。用 output_send__" + ch.Name + "_help 查看 meta 格式",
+						},
+						"type": map[string]interface{}{
+							"type":        "string",
+							"description": "载荷类型，用 channel._help 查看支持的枚举值",
 						},
 					},
-					"required": []string{"content"},
+					"required": []string{"payload", "type"},
 				},
 			},
 		})
@@ -2100,7 +2119,7 @@ func (a *Agent) buildToolDefs() []interface{} {
 			"type": "function",
 			"function": map[string]interface{}{
 				"name":        "output_send__" + ch.Name + "_help",
-				"description": "查看 " + ch.Name + " 输出通道的 JSON 格式说明和示例",
+				"description": "查看 " + ch.Name + " 输出通道的 meta 格式说明和 type 枚举",
 				"parameters": map[string]interface{}{
 					"type":       "object",
 					"properties": map[string]interface{}{},
@@ -2425,10 +2444,14 @@ func (a *Agent) evaluateGraphQuality() {
 	// 选出低质量候选：generic 关系（如 distiller 自动生成的泛化关系）
 	var lowQuality []string
 	for _, r := range result.Relations {
-		// 自动蒸馏生成的 (用户, 提及, ...) 和 (AI, 回应, ...) 通常是噪音
+		// 自动蒸馏生成的 (用户, 提及, ...), (AI, 回应, ...) 和 jieba 共现 (..., 关联, ...) 通常是噪音
 		if (r.SourceName == "用户" || r.SourceName == "AI") &&
 			(r.RelationType == "提及" || r.RelationType == "回应") {
 			lowQuality = append(lowQuality, fmt.Sprintf("「%s」-「%s」→「%s」", r.SourceName, r.RelationType, r.TargetName))
+			continue
+		}
+		if r.RelationType == "关联" {
+			lowQuality = append(lowQuality, fmt.Sprintf("「%s」-「%s」→「%s」(jieba 共现)", r.SourceName, r.RelationType, r.TargetName))
 			continue
 		}
 		// 极低 mention 的实体+generic 关系
@@ -2518,32 +2541,42 @@ func docToTriples(doc *document.Doc) []memory.Triple {
 	}
 
 	triples = append(triples, memory.Triple{
-		Subject:  "文档",
-		Relation: "包含内容",
-		Object:   doc.Summary,
+		Subject:     "文档",
+		SubjectType: "Concept",
+		Relation:    "主题",
+		Object:      doc.Summary,
+		ObjectType:  "Topic",
+		Confidence:  1.0,
 	})
 
-	for _, entity := range doc.Entities {
-		triples = append(triples, memory.Triple{
-			Subject:  "文档",
-			Relation: "提及实体",
-			Object:   entity,
-		})
-	}
-
-	for _, tag := range doc.Tags {
-		triples = append(triples, memory.Triple{
-			Subject:  "文档",
-			Relation: "标签",
-			Object:   tag,
-		})
+	// 用 jieba 精确模式逐句分词 → 相邻词共现三元组
+	lines := strings.Split(doc.Content, "\n")
+	for _, line := range lines {
+		line = strings.TrimSpace(line)
+		if line == "" {
+			continue
+		}
+		terms := memory.CutExact(line)
+		for i := 0; i < len(terms)-1; i++ {
+			triples = append(triples, memory.Triple{
+				Subject:     terms[i],
+				SubjectType: "Concept",
+				Relation:    "关联",
+				Object:      terms[i+1],
+				ObjectType:  "Concept",
+				Confidence:  0.8,
+			})
+		}
 	}
 
 	if doc.Source != "" {
 		triples = append(triples, memory.Triple{
-			Subject:  "文档",
-			Relation: "来源",
-			Object:   doc.Source,
+			Subject:     "文档",
+			SubjectType: "Concept",
+			Relation:    "来源",
+			Object:      doc.Source,
+			ObjectType:  "Source",
+			Confidence:  1.0,
 		})
 	}
 
@@ -2601,55 +2634,77 @@ func (a *Agent) processConsolidation(evt *agentIO.InputEvent, input string) {
 
 // executeOutputSendTool — AI 通过指定通道发送消息（校验通道能力）
 func (a *Agent) executeOutputSendTool(tc agentAPI.ToolCall) string {
-	// tool name is "output_send__{channel}"
 	channel := strings.TrimPrefix(tc.Name, "output_send__")
-	content, _ := tc.Arguments["content"].(string)
-	if channel == "" || content == "" {
-		return "工具名称格式: output_send__{channel}，content 不能为空"
+	payload, _ := tc.Arguments["payload"].(string)
+	rawType, _ := tc.Arguments["type"].(string)
+	if channel == "" || payload == "" || rawType == "" {
+		return "工具名称格式: output_send__{channel}，payload 和 type 不能为空"
 	}
-
-	// content 是一个 JSON 字符串，插件通过解析它确定如何发送消息
-	// === Stage: before_output — 输出前插件可审查/改写/拦截 ===
-	stageCtx := &sdk.StageContext{
-		FinalText: content,
-		Phase:     sdk.StageBeforeOutput,
-	}
-	a.runStage(sdk.StageBeforeOutput, stageCtx)
-	if stageCtx.Response != nil {
-		return fmt.Sprintf("输出被插件拦截: %s", *stageCtx.Response)
-	}
-	content = stageCtx.FinalText
-	if content == "" {
-		return "输出被插件清空"
-	}
-	tc.Arguments["content"] = content
+	meta, _ := tc.Arguments["meta"].(string)
 
 	// 通道能力检查
 	caps := a.io.GetChannelCapabilities(channel)
 	if caps == 0 {
 		return fmt.Sprintf("通道 [%s] 不存在或不可用。可用输出工具列表见 output_list_channels", channel)
 	}
-	if !caps.Supports(agentIO.CapText) {
-		return fmt.Sprintf("通道 [%s] 不支持文本输出（能力: %s）", channel, caps.String())
+	switch rawType {
+	case "text":
+		if !caps.Supports(agentIO.CapText) {
+			return fmt.Sprintf("通道 [%s] 不支持文本输出（能力: %s）", channel, caps.String())
+		}
+	case "voice", "audio":
+		if !caps.Supports(agentIO.CapAudio) {
+			return fmt.Sprintf("通道 [%s] 不支持语音输出（能力: %s）", channel, caps.String())
+		}
+	case "image":
+		if !caps.Supports(agentIO.CapImage) {
+			return fmt.Sprintf("通道 [%s] 不支持图片输出（能力: %s）", channel, caps.String())
+		}
+	case "file":
+		if !caps.Supports(agentIO.CapFile) {
+			return fmt.Sprintf("通道 [%s] 不支持文件输出（能力: %s）", channel, caps.String())
+		}
 	}
+
+	// 组装参数传给设备处理器
+	args := map[string]interface{}{
+		"payload": payload,
+		"type":    rawType,
+	}
+	if meta != "" {
+		args["meta"] = meta
+	}
+
+	// === Stage: before_output — 输出前插件可审查/改写/拦截 ===
+	stageCtx := &sdk.StageContext{
+		FinalText: payload,
+		Phase:     sdk.StageBeforeOutput,
+	}
+	a.runStage(sdk.StageBeforeOutput, stageCtx)
+	if stageCtx.Response != nil {
+		return fmt.Sprintf("输出被插件拦截: %s", *stageCtx.Response)
+	}
+	if stageCtx.FinalText == "" {
+		return "输出被插件清空"
+	}
+	args["payload"] = stageCtx.FinalText
 
 	// 通过设备处理器投递
 	if dev := a.io.GetDevice(channel); dev != nil {
-		result, err := dev.Execute("output", tc.Arguments)
+		result, err := dev.Execute("output", args)
 		if err != nil {
 			return fmt.Sprintf("通过 [%s] 通道发送失败: %v", channel, err)
 		}
 		return fmt.Sprintf("已通过 [%s] 通道发送: %v", channel, result)
 	}
 
-	// 降级：发送到 outputCh（供 OutputChan 消费者）
-	a.io.EmitTextTo("agent_io", channel, content)
+	// 降级
+	a.io.EmitTextTo("agent_io", channel, payload)
 	return fmt.Sprintf("已通过 [%s] 通道发送", channel)
 }
 
-// executeOutputSendHelp — 返回指定通道的 JSON 格式说明
+// executeOutputSendHelp — 返回指定通道的 meta 格式和 type 枚举
 func (a *Agent) executeOutputSendHelp(tc agentAPI.ToolCall) string {
-	// tool name is "output_send__{channel}_help"
 	suffix := strings.TrimPrefix(tc.Name, "output_send__")
 	channel := strings.TrimSuffix(suffix, "_help")
 	if channel == "" {
@@ -2676,13 +2731,24 @@ func (a *Agent) executeOutputSendHelp(tc agentAPI.ToolCall) string {
 描述: %s
 能力: %s
 
-【content JSON 格式说明】
-发送到此通道时 content 必须是 JSON 字符串，包含以下字段：
-- "content": 消息正文（必填）
-- 根据通道不同可能还需要路由字段（如 "group_id", "user_id" 等）
+【参数说明】
+payload — 消息载荷（必填）。type=text 时直接填文字，type=file/image 时填 URL 或路径
+meta    — JSON 对象，发送所需的元数据（可选，取决于通道是否需要路由信息）
+type    — 载荷类型（必填），枚举值见下方
 
-请在通道描述中查看具体字段要求。
-示例: {"content":"你好"}`, channel, desc, capStr)
+【type 枚举】
+- text    — 文本消息
+- voice   — 语音消息
+- image   — 图片
+- file    — 文件
+
+【meta JSON 格式】
+由通道描述定义，通常包含：
+- "group_id"  群号（群聊时必填）
+- "user_id"   目标用户 QQ 号（私聊时必填）
+- "reply_to"  回复某条消息 ID（可选）
+
+示例: output_send__%s(payload="你好", meta="{\"group_id\": 123456789}", type="text")`, channel, desc, capStr, channel)
 }
 
 // executeOutputListChannels — 列出所有可用通道及其能力
