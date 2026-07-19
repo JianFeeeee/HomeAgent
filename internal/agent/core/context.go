@@ -191,8 +191,15 @@ func (c *RelevanceContext) Prune(currentInput string, topK int, docStore *docume
 
 	archived := 0
 	if docStore != nil && len(archive) > 0 {
-		entries := make([]document.ContextEntry, len(archive))
-		for i, s := range archive {
+		var filtered []scored
+		for _, s := range archive {
+			if s.event.Source == "agentcli" || s.event.Source == "terminal" {
+				continue
+			}
+			filtered = append(filtered, s)
+		}
+		entries := make([]document.ContextEntry, len(filtered))
+		for i, s := range filtered {
 			entries[i] = document.ContextEntry{
 				Timestamp: s.event.Timestamp,
 				Source:    s.event.Source,
@@ -202,7 +209,7 @@ func (c *RelevanceContext) Prune(currentInput string, topK int, docStore *docume
 		}
 		doc, err := docStore.ContextToDoc("context_archived", entries, c.embedder)
 		if err == nil && doc != nil {
-			archived = len(archive)
+			archived = len(filtered)
 		}
 	}
 
