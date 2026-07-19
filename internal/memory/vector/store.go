@@ -84,7 +84,7 @@ func (s *Store) Search(query Vector, topK int) []DocVector {
 		for _, d := range s.docs {
 			if d.ID == id {
 				score := CosineSimilarity(query, d.Vector)
-				if score > 0 {
+				if score > 0.05 {
 					results = append(results, scored{d, score})
 				}
 				break

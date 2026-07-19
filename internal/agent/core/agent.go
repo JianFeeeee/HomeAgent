@@ -1532,11 +1532,15 @@ func (a *Agent) executeDocTool(tc agentAPI.ToolCall) string {
 				parts = append(parts, "  标签: "+strings.Join(d.Tags, ", "))
 			}
 			// 每个文档按原始时间写入 context 事件，确保时序正确
+			content := d.Content
+			if len(content) > 2000 {
+				content = content[:2000] + "..."
+			}
 			a.context.Append(ContextEvent{
 				Timestamp: d.CreatedAt,
 				Source:    "cold_storage",
 				Input:     fmt.Sprintf("加载文档记忆: %s", query),
-				Response:  d.Content,
+				Response:  content,
 			})
 			refs = append(refs, fmt.Sprintf("#%d(%s)", i+1, d.Summary))
 		}
@@ -2306,9 +2310,18 @@ func (a *Agent) syncGraphToDocs() {
 		}
 	}
 
+	summary := fmt.Sprintf("图记忆索引 (%d 实体, %d 关系)", len(result.Entities), len(result.Relations))
+	content := strings.Join(summaryParts, "\n")
+
+	// 去重：如果最近一篇 graph 文档内容相同，跳过
+	recent := a.docStore.RecentDocs(1)
+	if len(recent) > 0 && recent[0].Source == "graph" && recent[0].Content == content {
+		return
+	}
+
 	doc := &document.Doc{
-		Summary:  fmt.Sprintf("图记忆索引 (%d 实体, %d 关系)", len(result.Entities), len(result.Relations)),
-		Content:  strings.Join(summaryParts, "\n"),
+		Summary:  summary,
+		Content:  content,
 		Tags:     []string{"graph_memory", "auto_sync"},
 		Entities: extractEntityNames(result.Entities),
 		Source:   "graph",
