@@ -279,7 +279,9 @@ func go_core_dispatch(methodID C.int, ctx unsafe.Pointer, s1, s2, s3 *C.char, i1
 			if err != nil { return nil, err }
 			if r == "" { return nil, nil }
 			var res map[string]interface{}
-			json.Unmarshal([]byte(r), &res)
+			if err := json.Unmarshal([]byte(r), &res); err != nil {
+				return r, nil
+			}
 			return res, nil
 		})
 		return 0
