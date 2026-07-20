@@ -38,7 +38,7 @@
 !endif
 
 Name "${PRODUCT_DISPLAY_NAME}"
-OutFile "${OUTPUT_FILE}"
+OutFile "..\build\${OUTPUT_FILE}"
 InstallDir "$PROGRAMFILES64\${PRODUCT_NAME}"
 InstallDirRegKey HKLM "Software\${PRODUCT_NAME}" ""
 RequestExecutionLevel admin
@@ -217,17 +217,17 @@ Section "Install" SEC_INSTALL
   CreateDirectory "$INSTDIR\data\adapters"
 
 !if "${HAS_CORE}" == "1"
-  File "initconfig.exe"
-  File "homed.exe"
+  File "..\build\initconfig.exe"
+  File "..\build\homed.exe"
 !endif
 
 !if "${HAS_WAITER}" == "1"
-  File "waiter.exe"
+  File "..\build\waiter.exe"
 !endif
 
 !if "${HAS_GUI}" == "1"
   SetOutPath "$INSTDIR\homeagent-gui-win32-x64"
-  File /r "homeagent-gui-win32-x64\*.*"
+  File /r "..\build\homeagent-gui-win32-x64\*.*"
   SetOutPath "$INSTDIR"
 !endif
 
