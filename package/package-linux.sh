@@ -194,17 +194,23 @@ stage_variant() {
   mkdir -p "$staging/etc/systemd/system"
   mkdir -p "$staging/var/lib/homeagent"
 
+  local initconfig_bin="$BUILD_DIR/initconfig_$suffix"
+
   case "$variant" in
     full)
       cp "$BUILD_DIR/homed_$suffix" "$staging/usr/bin/homed"
       cp "$BUILD_DIR/waiter_$suffix" "$staging/usr/bin/waiter"
       cp "$PROJECT_ROOT/deploy/homeagent.service" "$staging/etc/systemd/system/homeagent.service"
+      [ -f "$initconfig_bin" ] && cp "$initconfig_bin" "$staging/usr/bin/initconfig"
+      stage_setup "$staging"
       stage_gui "$staging"
       ;;
     server)
       cp "$BUILD_DIR/homed_$suffix" "$staging/usr/bin/homed"
       cp "$BUILD_DIR/waiter_$suffix" "$staging/usr/bin/waiter"
       cp "$PROJECT_ROOT/deploy/homeagent.service" "$staging/etc/systemd/system/homeagent.service"
+      [ -f "$initconfig_bin" ] && cp "$initconfig_bin" "$staging/usr/bin/initconfig"
+      stage_setup "$staging"
       ;;
     client)
       cp "$BUILD_DIR/waiter_$suffix" "$staging/usr/bin/waiter"
@@ -229,6 +235,16 @@ SCRIPT
     chmod 755 "$staging/usr/bin/homeagent-gui"
   else
     echo "  WARNING: GUI not built, skipping GUI staging"
+  fi
+}
+
+stage_setup() {
+  local staging="$1"
+  local setup_src="$PROJECT_ROOT/package/linux/setup.sh"
+  if [ -f "$setup_src" ]; then
+    mkdir -p "$staging/usr/lib/homeagent"
+    cp "$setup_src" "$staging/usr/lib/homeagent/setup.sh"
+    chmod 755 "$staging/usr/lib/homeagent/setup.sh"
   fi
 }
 
@@ -273,19 +289,47 @@ build_deb() {
   echo "  Created: $deb_dir/$pkg_name ($(du -h "$deb_dir/$pkg_name" | cut -f1))"
 }
 
-# ---- create .tar.gz ----
+# ---- create combined .tar.gz (all binaries, no variant split) ----
 build_tar() {
-  local variant="$1"
-  local staging="$2"
   local tar_dir="${DIST_DIR}/tar"
   mkdir -p "$tar_dir"
 
-  local archive_name="homeagent-${variant}_${VERSION}_linux_${TAR_ARCH}.tar.gz"
-  local archive_dir="homeagent-${variant}"
+  local archive_name="homeagent_${VERSION}_linux_${TAR_ARCH}.tar.gz"
+  local archive_dir="homeagent-${VERSION}-linux-${TAR_ARCH}"
+
+  # build combined staging
+  local staging
+  staging="$(mktemp -d)"
+  mkdir -p "$staging/usr/bin" "$staging/usr/lib/homeagent"
+
+  # copy all available binaries
+  for bin in homed waiter initconfig; do
+    local src="$BUILD_DIR/${bin}_linux_${TAR_ARCH}"
+    [ -f "$src" ] && cp "$src" "$staging/usr/bin/$bin"
+  done
+
+  # setup script
+  local setup_src="$PROJECT_ROOT/package/linux/setup.sh"
+  [ -f "$setup_src" ] && cp "$setup_src" "$staging/usr/lib/homeagent/setup.sh"
+
+  # GUI if available
+  local gui_src="$BUILD_DIR/homeagent-gui-linux-${TAR_ARCH}"
+  if [ -d "$gui_src" ]; then
+    mkdir -p "$staging/usr/lib/homeagent-gui"
+    cp -r "$gui_src"/* "$staging/usr/lib/homeagent-gui/"
+    cat > "$staging/usr/bin/homeagent-gui" << 'SCRIPT'
+#!/bin/sh
+exec /usr/lib/homeagent-gui/homeagent-gui "$@"
+SCRIPT
+    chmod 755 "$staging/usr/bin/homeagent-gui"
+  fi
+
+  chmod 755 "$staging/usr/bin/"* 2>/dev/null || true
 
   echo ">>> Building .tar.gz: $archive_name"
   (cd "$staging" && tar czf "$tar_dir/$archive_name" --transform "s|^\.|${archive_dir}|" .)
   echo "  Created: $tar_dir/$archive_name ($(du -h "$tar_dir/$archive_name" | cut -f1))"
+  rm -rf "$staging"
 }
 
 # ---- create .rpm (via fpm if available) ----
@@ -297,25 +341,58 @@ build_rpm() {
 
   local pkg_name="homeagent-${variant}-${VERSION}-1.${RPM_ARCH}.rpm"
 
-  if command -v fpm &>/dev/null; then
-    echo ">>> Building .rpm via fpm: $pkg_name"
-    fpm -s dir -t rpm \
-      -n "homeagent-${variant}" \
-      -v "$VERSION" \
-      --iteration 1 \
-      -a "$RPM_ARCH" \
-      --description "HomeAgent ${variant^} package" \
-      --url "https://github.com/trueagent/HomeAgent" \
-      --license "Proprietary" \
-      -C "$staging" \
-      -p "$rpm_dir/$pkg_name" \
-      .
-    echo "  Created: $rpm_dir/$pkg_name"
-  else
+  # find fpm
+  local fpm_bin="$(command -v fpm 2>/dev/null || true)"
+  if [ -z "$fpm_bin" ]; then
+    fpm_bin="$(find /home -name "fpm" -type f -path "*/bin/*" 2>/dev/null | head -1 || true)"
+  fi
+
+  if [ -z "$fpm_bin" ]; then
     echo "  SKIP .rpm: fpm not installed. Install it with: gem install fpm"
     echo "  Alternatively, build RPM on Fedora/RHEL using:"
     echo "    rpmbuild -ba package/linux/homeagent.spec"
+    return
   fi
+
+  # find or extract rpmbuild (fpm needs it)
+  local rpmbuild_dir="/tmp/rpmext"
+  if [ ! -f "$rpmbuild_dir/usr/bin/rpmbuild" ]; then
+    # try to extract from cached deb packages
+    local rpm_deb
+    rpm_deb="$(find /tmp -name "rpm_*.deb" -type f 2>/dev/null | head -1)"
+    if [ -z "$rpm_deb" ]; then
+      rpm_deb="$(find "$PROJECT_ROOT" -name "rpm_*.deb" -type f 2>/dev/null | head -1)"
+    fi
+    if [ -n "$rpm_deb" ]; then
+      mkdir -p "$rpmbuild_dir"
+      (cd "$rpmbuild_dir" && ar x "$rpm_deb" 2>/dev/null && \
+        tar --no-same-permissions -xf data.tar.zst --zstd 2>/dev/null) || true
+      for libdeb in /tmp/librpm*.deb; do
+        [ -f "$libdeb" ] && (cd "$rpmbuild_dir" && ar x "$libdeb" 2>/dev/null && \
+          tar --no-same-permissions -xf data.tar.zst --zstd 2>/dev/null) || true
+      done
+    fi
+  fi
+
+  if [ -f "$rpmbuild_dir/usr/bin/rpmbuild" ]; then
+    export PATH="$rpmbuild_dir/usr/bin:$PATH"
+    export LD_LIBRARY_PATH="$rpmbuild_dir/usr/lib/x86_64-linux-gnu${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+    export RPM_CONFIGDIR="$rpmbuild_dir/usr/lib/rpm"
+  fi
+
+  echo ">>> Building .rpm via fpm: $pkg_name"
+  "$fpm_bin" -s dir -t rpm \
+    -n "homeagent-${variant}" \
+    -v "$VERSION" \
+    --iteration 1 \
+    -a "$RPM_ARCH" \
+    --description "HomeAgent ${variant^} package" \
+    --url "https://github.com/trueagent/HomeAgent" \
+    --license "Proprietary" \
+    -C "$staging" \
+    -p "$rpm_dir/$pkg_name" \
+    . 2>&1
+  echo "  Created: $rpm_dir/$pkg_name"
 }
 
 # ---- main ----
@@ -354,21 +431,21 @@ main() {
     esac
 
     case "$ACTION" in
-      all|tar) build_tar "$variant" "$staging" ;;
-    esac
-
-    case "$ACTION" in
       all|rpm) build_rpm "$variant" "$staging" ;;
     esac
 
     rm -rf "$staging"
   done
 
+  case "$ACTION" in
+    all|tar) build_tar ;;
+  esac
+
   echo ""
   echo "=== Done! Packages in: $DIST_DIR ==="
   echo ""
   echo "Summary:"
-  find "$DIST_DIR" -type f -name "*.deb" -o -name "*.tar.gz" -o -name "*.rpm" 2>/dev/null | sort | while read -r f; do
+  find "$DIST_DIR" -type f \( -name "*.deb" -o -name "homeagent_*.tar.gz" -o -name "*.rpm" \) 2>/dev/null | sort | while read -r f; do
     echo "  $(du -h "$f" | cut -f1)  $f"
   done
 }
