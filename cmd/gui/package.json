@@ -22,7 +22,9 @@
     "productName": "HomeAgent",
     "linux": {
       "target": [
-        "deb"
+        "deb",
+        "rpm",
+        "AppImage"
       ],
       "category": "Utility",
       "icon": "icon.svg"
