@@ -1,0 +1,17 @@
+Package: homeagent-full
+Version: VERSION_PLACEHOLDER
+Architecture: ARCH_PLACEHOLDER
+Maintainer: HomeAgent Team <team@homeagent.ai>
+Installed-Size: INSTALLED_SIZE_PLACEHOLDER
+Depends: libc6 (>= 2.28)
+Section: utils
+Priority: optional
+Homepage: https://github.com/trueagent/HomeAgent
+Description: HomeAgent Full Installation (Daemon + CLI + GUI)
+ HomeAgent is a personal AI home assistant that integrates
+ large language models with system automation.
+ .
+ This package includes the full suite:
+  - homed: the core daemon (background service)
+  - waiter: command-line client
+  - homeagent-gui: desktop graphical interface

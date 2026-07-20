@@ -1,5 +1,5 @@
-github.com/mattn/go-sqlite3 v1.14.22 h1:2gZY6PC6kBnID23Tichd1K+Z0oS6nE/XwU+Vz/5o4kU=
-github.com/mattn/go-sqlite3 v1.14.22/go.mod h1:Uh1q+B4BYcTPb+yiD3kU8Ct7aC0hY9fxUwlHK0RXw+Y=
+gitcode.com/JianFeeeee/homeagent-sdk v0.7.1 h1:2XEtUgV200uOqbGGEiKT5QyBmZ5aIfNiwm/Ozrm9AOg=
+gitcode.com/JianFeeeee/homeagent-sdk v0.7.1/go.mod h1:G48Rgpw9ReTkCf0qBHf50jb5CSeNR2c4OWcgcEm0plo=
 github.com/mattn/go-sqlite3 v1.14.48 h1:7XHIgl0a8HwOaiK4E47ozLkST78rR9+OtNGx27D/TFs=
 github.com/mattn/go-sqlite3 v1.14.48/go.mod h1:6JTjA44L93a0QCyJef5YvlPoKXntQPjzWv5gtm9sB6w=
 github.com/yanyiwu/gojieba v1.4.7 h1:2YkXELcYLTE0SJetq6xv4MjpEikWga6VpFn4jIFFQ/k=
