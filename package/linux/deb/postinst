@@ -1,0 +1,25 @@
+#!/bin/sh
+set -e
+
+SERVICE_NAME="homeagent"
+SERVICE_FILE="/etc/systemd/system/${SERVICE_NAME}.service"
+HOMED_BIN="/usr/bin/homed"
+DATA_DIR="/var/lib/homeagent"
+
+case "$1" in
+  configure)
+    if [ -f "$HOMED_BIN" ]; then
+      mkdir -p "$DATA_DIR"
+
+      if [ -f "$SERVICE_FILE" ]; then
+        systemctl daemon-reload 2>/dev/null || true
+      fi
+    fi
+    ;;
+  abort-upgrade|abort-remove|abort-deconfigure)
+    ;;
+  *)
+    ;;
+esac
+
+exit 0
