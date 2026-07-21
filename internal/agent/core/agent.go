@@ -810,6 +810,21 @@ func (a *Agent) process(input string, stageCtx *sdk.StageContext) (response stri
 		}
 
 		for _, tc := range resp.ToolCalls {
+			// === 工具执行前检查打断通道 ===
+			if len(a.interceptCh) > 0 {
+				for _, interrupt := range a.drainInterrupts() {
+					msgs = append(msgs, agentAPI.Message{Role: "system", Content: interrupt})
+				}
+				a.publishEvent(events.EventToolCall, map[string]interface{}{
+					"tool":   tc.Name,
+					"plugin": a.resolveToolPlugin(tc.Name),
+					"args":   tc.Arguments,
+					"status": "interrupted",
+					"reason": "user interrupt before execution",
+				})
+				break
+			}
+
 			toolsUsed = append(toolsUsed, tc.Name)
 			pluginName := a.resolveToolPlugin(tc.Name)
 			log.Printf("[agent] executing tool: %s (plugin=%s, id=%s)", tc.Name, pluginName, tc.ID)
@@ -866,6 +881,14 @@ func (a *Agent) process(input string, stageCtx *sdk.StageContext) (response stri
 				"result": result,
 				"status": "ok",
 			})
+
+			// === 工具执行后检查打断通道 ===
+			if len(a.interceptCh) > 0 {
+				for _, interrupt := range a.drainInterrupts() {
+					msgs = append(msgs, agentAPI.Message{Role: "system", Content: interrupt})
+				}
+				break
+			}
 	}
 }
 }

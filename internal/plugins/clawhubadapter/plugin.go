@@ -1,10 +1,17 @@
-package openclaw
+package clawhubadapter
 
 import (
+	"archive/tar"
+	"archive/zip"
+	"bytes"
+	"compress/gzip"
 	_ "embed"
 	"encoding/json"
 	"fmt"
+	"io"
 	"log"
+	"net/http"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
@@ -27,13 +34,13 @@ var SkillsDir string
 var SimulatorDir string
 
 func init() {
-	plugin.RegisterPluginMeta("openclaw", "开放式交互", "OpenClaw")
-	plugin.RegisterFactory("openclaw", func(name string, config map[string]interface{}) (sdk.Plugin, error) {
+	plugin.RegisterPluginMeta("clawhubadapter", "ClawHub 适配器", "ClawHub Adapter")
+	plugin.RegisterFactory("clawhubadapter", func(name string, config map[string]interface{}) (sdk.Plugin, error) {
 		dir := SkillsDir
 		if dir == "" {
 			dataDir, ok := config["data_dir"].(string)
 			if !ok {
-				return nil, fmt.Errorf("openclaw plugin: config missing 'data_dir' or not a string")
+				return nil, fmt.Errorf("clawhubadapter plugin: config missing 'data_dir' or not a string")
 			}
 			dir = filepath.Join(dataDir, "skills")
 		}
@@ -42,15 +49,16 @@ func init() {
 }
 
 type Plugin struct {
-	name          string
-	skillsDir     string
-	simulatorDir  string
-	skills        []*plugin.SKILLPlugin
-	sidecars      []*sidecarProcess
-	manager       *sidecarProcess
-	capabilities  []string
-	mu            sync.Mutex
-	sdk           *sdk.PluginSDK
+	name         string
+	skillsDir    string
+	simulatorDir string
+	skills       []*plugin.SKILLPlugin
+	sidecars     []*sidecarProcess
+	manager      *sidecarProcess
+	mu           sync.Mutex
+	sdk          *sdk.PluginSDK
+	dispatcher   *RegistryDispatcher
+	httpClient   *http.Client
 }
 
 func New(name, skillsDir string) *Plugin {
@@ -62,6 +70,7 @@ func New(name, skillsDir string) *Plugin {
 		name:         name,
 		skillsDir:    skillsDir,
 		simulatorDir: sd,
+		dispatcher:   NewDispatcher(),
 	}
 }
 
@@ -79,6 +88,7 @@ func (p *Plugin) Start(s *sdk.PluginSDK) error {
 		Key: "simulator_dir", Type: "string", DisplayName: "模拟器工作目录",
 		Description: "OpenClaw 模拟器工作目录路径（留空则使用默认路径）",
 	})
+	p.httpClient = &http.Client{}
 	if v, _ := s.Settings().Get("skills_dir"); v != nil {
 		if s, ok := v.(string); ok && s != "" {
 			p.skillsDir = s
@@ -93,7 +103,7 @@ func (p *Plugin) Start(s *sdk.PluginSDK) error {
 	// Launch OC plugin manager first (handles OC-format plugin installation and lifecycle)
 	os.MkdirAll(p.skillsDir, 0755)
 	if err := p.launchManager(s); err != nil {
-		log.Printf("[openclaw] launch manager: %v", err)
+		log.Printf("[clawhubadapter] launch manager: %v", err)
 	}
 
 	// Load existing plugins from skills dir
@@ -125,22 +135,22 @@ func (p *Plugin) Start(s *sdk.PluginSDK) error {
 			switch {
 			case hasMainJS:
 				if err := p.loadSidecar(s, skillPath, entry.Name()); err != nil {
-					log.Printf("[openclaw] sidecar %s: %v", entry.Name(), err)
+					log.Printf("[clawhubadapter] sidecar %s: %v", entry.Name(), err)
 				}
 			case hasMainPy:
 				if err := p.loadPySidecar(s, skillPath, entry.Name()); err != nil {
-					log.Printf("[openclaw] pysidecar %s: %v", entry.Name(), err)
+					log.Printf("[clawhubadapter] pysidecar %s: %v", entry.Name(), err)
 				}
 			case hasOCManifest || hasOCPackage:
-				log.Printf("[openclaw] ocplugin %s handled by manager", entry.Name())
+				log.Printf("[clawhubadapter] ocplugin %s handled by manager", entry.Name())
 			default:
 				sk, err := plugin.LoadSKILL(skillPath)
 				if err != nil {
-					log.Printf("[openclaw] load skill %s: %v", entry.Name(), err)
+					log.Printf("[clawhubadapter] load skill %s: %v", entry.Name(), err)
 					continue
 				}
 				p.skills = append(p.skills, sk)
-				log.Printf("[openclaw] loaded skill: %s v%s", sk.Name(), sk.Version())
+				log.Printf("[clawhubadapter] loaded skill: %s v%s", sk.Name(), sk.Version())
 			}
 		}
 	}
@@ -149,11 +159,11 @@ func (p *Plugin) Start(s *sdk.PluginSDK) error {
 	tp := p.name + "_"
 	s.RegisterTool(tp+"npm_install", sdk.ToolDef{
 		Name:        tp + "npm_install",
-		Description: "安装 OpenClaw 插件管理器中的 npm 插件。通过 npm 安装包，自动检测并加载到模拟器中。安装后立即可用。",
+		Description: "安装 ClawHub 适配器插件管理器中的插件。支持 npm: 前缀（npm 包）和 clawhub: 前缀（ClawHub 市场）。安装后立即可用。",
 		Parameters: map[string]interface{}{
 			"type": "object",
 			"properties": map[string]interface{}{
-				"package": map[string]interface{}{"type": "string", "description": "npm 包名或 git 地址 (例如 @openclaw/voice-call, npm:@openclaw/matrix)"},
+				"package": map[string]interface{}{"type": "string", "description": "插件包标识。npm:<pkg> 从 npm 安装，clawhub:<pkg> 从 ClawHub 市场安装（如 clawhub:openclaw-codex-app-server）"},
 			},
 			"required": []string{"package"},
 		},
@@ -161,7 +171,7 @@ func (p *Plugin) Start(s *sdk.PluginSDK) error {
 
 	s.RegisterTool(tp+"npm_uninstall", sdk.ToolDef{
 		Name:        tp + "npm_uninstall",
-		Description: "从 OpenClaw 插件管理器中移除已安装的插件。",
+		Description: "从插件管理器中移除已安装的插件。",
 		Parameters: map[string]interface{}{
 			"type": "object",
 			"properties": map[string]interface{}{
@@ -171,9 +181,21 @@ func (p *Plugin) Start(s *sdk.PluginSDK) error {
 		},
 	}, p.handlePluginUninstall)
 
+	s.RegisterTool(tp+"search", sdk.ToolDef{
+		Name:        tp + "search",
+		Description: "搜索 ClawHub 插件市场，查找可安装的插件。返回插件名称、描述和安装命令提示。",
+		Parameters: map[string]interface{}{
+			"type": "object",
+			"properties": map[string]interface{}{
+				"query": map[string]interface{}{"type": "string", "description": "搜索关键词"},
+			},
+			"required": []string{"query"},
+		},
+	}, p.handleClawHubSearch)
+
 	s.RegisterTool(tp+"list", sdk.ToolDef{
 		Name:        tp + "list",
-		Description: "列出插件管理器中所有已安装的 OpenClaw 插件及其工具。",
+		Description: "列出所有已安装的 ClawHub 插件及其工具。",
 		Parameters: map[string]interface{}{
 			"type":       "object",
 			"properties": map[string]interface{}{},
@@ -222,7 +244,7 @@ func (p *Plugin) launchManager(s *sdk.PluginSDK) error {
 	p.sidecars = append(p.sidecars, sp)
 	p.mu.Unlock()
 
-	log.Printf("[openclaw] OC plugin manager started")
+	log.Printf("[clawhubadapter] OC plugin manager started")
 	return nil
 }
 
@@ -232,6 +254,10 @@ func (p *Plugin) handlePluginInstall(args map[string]interface{}) (interface{}, 
 	pkg, _ := args["package"].(string)
 	if pkg == "" {
 		return errorResult("package is required"), nil
+	}
+
+	if strings.HasPrefix(pkg, "clawhub:") {
+		return p.installFromClawHub(pkg)
 	}
 
 	p.mu.Lock()
@@ -261,6 +287,102 @@ func (p *Plugin) handlePluginInstall(args map[string]interface{}) (interface{}, 
 
 	return map[string]interface{}{
 		"content": fmt.Sprintf("已安装插件: %s\n  工具: %s", result.Name, strings.Join(result.Tools, ", ")),
+	}, nil
+}
+
+const clawhubAPI = "https://clawhub.ai/api/v1"
+
+func (p *Plugin) installFromClawHub(spec string) (interface{}, error) {
+	name := strings.TrimPrefix(spec, "clawhub:")
+	if name == "" {
+		return errorResult("clawhub package name is required"), nil
+	}
+
+	pkgURL := fmt.Sprintf("%s/packages/%s/download", clawhubAPI, url.PathEscape(name))
+	resp, err := p.httpClient.Get(pkgURL)
+	if err != nil {
+		return errorResult(fmt.Sprintf("download failed: %v", err)), nil
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != 200 {
+		body, _ := io.ReadAll(resp.Body)
+		return errorResult(fmt.Sprintf("ClawHub API error (status %d): %s", resp.StatusCode, string(body))), nil
+	}
+
+	data, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return errorResult(fmt.Sprintf("read download: %v", err)), nil
+	}
+
+	extractDir := filepath.Join(p.skillsDir, name)
+	os.MkdirAll(extractDir, 0755)
+
+	if err := extractArchive(data, extractDir); err != nil {
+		return errorResult(fmt.Sprintf("extract failed: %v", err)), nil
+	}
+
+	if err := p.reloadPlugin(name); err != nil {
+		return errorResult(fmt.Sprintf("loaded but with warning: %v", err)), nil
+	}
+
+	return map[string]interface{}{
+		"content": fmt.Sprintf("已从 ClawHub 安装插件: %s", name),
+	}, nil
+}
+
+func (p *Plugin) handleClawHubSearch(args map[string]interface{}) (interface{}, error) {
+	query, _ := args["query"].(string)
+	if query == "" {
+		return errorResult("query is required"), nil
+	}
+
+	searchURL := fmt.Sprintf("%s/search?q=%s", clawhubAPI, url.QueryEscape(query))
+	resp, err := p.httpClient.Get(searchURL)
+	if err != nil {
+		return errorResult(fmt.Sprintf("search failed: %v", err)), nil
+	}
+	defer resp.Body.Close()
+
+	body, _ := io.ReadAll(resp.Body)
+
+	var result struct {
+		Results []struct {
+			Slug        string `json:"slug"`
+			DisplayName string `json:"displayName"`
+			Summary     string `json:"summary"`
+			Version     string `json:"version"`
+			Downloads   int    `json:"downloads"`
+		} `json:"results"`
+	}
+	if err := json.Unmarshal(body, &result); err != nil {
+		return map[string]interface{}{
+			"content": fmt.Sprintf("Search results (raw):\n%s", string(body)),
+		}, nil
+	}
+
+	if len(result.Results) == 0 {
+		return map[string]interface{}{
+			"content": fmt.Sprintf("未找到匹配 \"%s\" 的 ClawHub 插件", query),
+		}, nil
+	}
+
+	var lines []string
+	for _, pkg := range result.Results {
+		ver := pkg.Version
+		if ver == "" {
+			ver = "latest"
+		}
+		name := pkg.DisplayName
+		if name == "" {
+			name = pkg.Slug
+		}
+		lines = append(lines, fmt.Sprintf("- %s (%s) v%s | ⬇ %d\n  %s\n  安装: clawhubadapter_npm_install package=clawhub:%s",
+			name, pkg.Slug, ver, pkg.Downloads, pkg.Summary, pkg.Slug))
+	}
+
+	return map[string]interface{}{
+		"content": fmt.Sprintf("在 ClawHub 找到 %d 个插件:\n%s", len(result.Results), strings.Join(lines, "\n")),
 	}, nil
 }
 
@@ -351,60 +473,62 @@ func (p *Plugin) handlePluginList(args map[string]interface{}) (interface{}, err
 						parts = append(parts, fmt.Sprintf("  %s v%s", sk.Name(), sk.Version()))
 					}
 				}
-				if len(p.capabilities) > 0 {
-					parts = append(parts, fmt.Sprintf("\nCapabilities (%d):", len(p.capabilities)))
-					for _, c := range p.capabilities {
-						parts = append(parts, fmt.Sprintf("  %s", c))
-					}
+			caps := p.dispatcher.Capabilities()
+			if len(caps) > 0 {
+				parts = append(parts, fmt.Sprintf("\nCapabilities (%d):", len(caps)))
+				for _, c := range caps {
+					parts = append(parts, fmt.Sprintf("  %s", c))
 				}
-				if len(result.Plugins) == 0 && len(p.sidecars) <= 1 && len(p.skills) == 0 {
-					parts = append(parts, "没有已安装的插件。")
-				}
-				p.mu.Unlock()
-
-				return map[string]interface{}{
-					"content": strings.Join(parts, "\n"),
-				}, nil
 			}
-		}
-	}
-
-	// Fallback: list known plugins from Go side
-	p.mu.Lock()
-	defer p.mu.Unlock()
-
-	var parts []string
-	parts = append(parts, fmt.Sprintf("Skills dir: %s\n", p.skillsDir))
-
-	if len(p.sidecars) > 0 {
-		parts = append(parts, fmt.Sprintf("\nSidecar/OC 插件 (%d):", len(p.sidecars)))
-		for _, sp := range p.sidecars {
-			tools, err := sp.ListTools()
-			toolList := ""
-			if err == nil {
-				var names []string
-				for _, t := range tools {
-					names = append(names, t.Name)
-				}
-				toolList = strings.Join(names, ", ")
+			if len(result.Plugins) == 0 && len(p.sidecars) <= 1 && len(p.skills) == 0 {
+				parts = append(parts, "没有已安装的插件。")
 			}
-			parts = append(parts, fmt.Sprintf("  %s: %s", sp.name, toolList))
-		}
-	}
+			p.mu.Unlock()
 
-	if len(p.skills) > 0 {
-		parts = append(parts, fmt.Sprintf("\nSKILL 插件 (%d):", len(p.skills)))
-		for _, sk := range p.skills {
-			parts = append(parts, fmt.Sprintf("  %s v%s", sk.Name(), sk.Version()))
+			return map[string]interface{}{
+				"content": strings.Join(parts, "\n"),
+			}, nil
 		}
 	}
+}
 
-	if len(p.capabilities) > 0 {
-		parts = append(parts, fmt.Sprintf("\nCapabilities (%d):", len(p.capabilities)))
-		for _, c := range p.capabilities {
-			parts = append(parts, fmt.Sprintf("  %s", c))
+// Fallback: list known plugins from Go side
+p.mu.Lock()
+defer p.mu.Unlock()
+
+var parts []string
+parts = append(parts, fmt.Sprintf("Skills dir: %s\n", p.skillsDir))
+
+if len(p.sidecars) > 0 {
+	parts = append(parts, fmt.Sprintf("\nSidecar/OC 插件 (%d):", len(p.sidecars)))
+	for _, sp := range p.sidecars {
+		tools, err := sp.ListTools()
+		toolList := ""
+		if err == nil {
+			var names []string
+			for _, t := range tools {
+				names = append(names, t.Name)
+			}
+			toolList = strings.Join(names, ", ")
 		}
+		parts = append(parts, fmt.Sprintf("  %s: %s", sp.name, toolList))
 	}
+}
+
+if len(p.skills) > 0 {
+	parts = append(parts, fmt.Sprintf("\nSKILL 插件 (%d):", len(p.skills)))
+	for _, sk := range p.skills {
+		parts = append(parts, fmt.Sprintf("  %s v%s", sk.Name(), sk.Version()))
+	}
+}
+
+caps := p.dispatcher.Capabilities()
+if len(caps) > 0 {
+	parts = append(parts, fmt.Sprintf("\nCapabilities (%d):", len(caps)))
+	for _, c := range caps {
+		parts = append(parts, fmt.Sprintf("  %s", c))
+	}
+}
 
 	if len(p.sidecars) == 0 && len(p.skills) == 0 {
 		parts = append(parts, "没有已安装的插件。")
@@ -453,7 +577,7 @@ func (p *Plugin) loadOCPlugin(s *sdk.PluginSDK, dir, name string) error {
 		sp.Close()
 		return fmt.Errorf("list tools: %w", err)
 	}
-	log.Printf("[openclaw] ocplugin %s verified %d tools via ListTools", name, len(tools))
+	log.Printf("[clawhubadapter] ocplugin %s verified %d tools via ListTools", name, len(tools))
 
 	p.mu.Lock()
 	p.sidecars = append(p.sidecars, sp)
@@ -480,94 +604,7 @@ func (p *Plugin) translateAndRegister(n OCNotification, sp *sidecarProcess, s *s
 	if err := json.Unmarshal(n.Params, &params); err != nil {
 		return
 	}
-
-	switch params.Type {
-
-	case "tool":
-		var d struct {
-			Name        string                 `json:"name"`
-			Label       string                 `json:"label"`
-			Description string                 `json:"description"`
-			Parameters  map[string]interface{} `json:"parameters"`
-		}
-		if err := json.Unmarshal(params.Data, &d); err != nil || d.Name == "" {
-			return
-		}
-		toolName := fmt.Sprintf("%s_%s", pluginName, d.Name)
-		tDef := sdk.ToolDef{
-			Name:        toolName,
-			Description: d.Description,
-			Parameters:  d.Parameters,
-		}
-		handler := func(sp *sidecarProcess, ocToolName string) sdk.ToolHandler {
-			return func(args map[string]interface{}) (interface{}, error) {
-				return sp.CallTool(ocToolName, args)
-			}
-		}(sp, d.Name)
-		if err := s.RegisterTool(toolName, tDef, handler); err != nil {
-			log.Printf("[openclaw] translate register tool %s: %v", toolName, err)
-		}
-
-	case "provider":
-		var d struct {
-			Name        string `json:"name"`
-			Description string `json:"description"`
-		}
-		json.Unmarshal(params.Data, &d)
-		cap := fmt.Sprintf("[%s] provides %s provider", pluginName, d.Name)
-		if d.Description != "" {
-			cap += ": " + d.Description
-		}
-		p.mu.Lock()
-		p.capabilities = append(p.capabilities, cap)
-		p.mu.Unlock()
-
-	case "channel":
-		var d struct {
-			Name string `json:"name"`
-			Type string `json:"type"`
-		}
-		json.Unmarshal(params.Data, &d)
-		cap := fmt.Sprintf("[%s] registers channel: %s (type: %s)", pluginName, d.Name, d.Type)
-		p.mu.Lock()
-		p.capabilities = append(p.capabilities, cap)
-		p.mu.Unlock()
-
-	case "image_generation_provider":
-		var d struct{ Name string `json:"name"` }
-		json.Unmarshal(params.Data, &d)
-		p.mu.Lock()
-		p.capabilities = append(p.capabilities, fmt.Sprintf("[%s] image generation provider: %s", pluginName, d.Name))
-		p.mu.Unlock()
-
-	case "web_fetch_provider":
-		var d struct{ Name string `json:"name"` }
-		json.Unmarshal(params.Data, &d)
-		p.mu.Lock()
-		p.capabilities = append(p.capabilities, fmt.Sprintf("[%s] web fetch provider: %s", pluginName, d.Name))
-		p.mu.Unlock()
-
-	case "web_search_provider":
-		var d struct{ Name string `json:"name"` }
-		json.Unmarshal(params.Data, &d)
-		p.mu.Lock()
-		p.capabilities = append(p.capabilities, fmt.Sprintf("[%s] web search provider: %s", pluginName, d.Name))
-		p.mu.Unlock()
-
-	default:
-		var d struct {
-			Name        string `json:"name"`
-			Description string `json:"description"`
-		}
-		json.Unmarshal(params.Data, &d)
-		cap := fmt.Sprintf("[%s] capability: %s", pluginName, params.Type)
-		if d.Name != "" {
-			cap += " (" + d.Name + ")"
-		}
-		p.mu.Lock()
-		p.capabilities = append(p.capabilities, cap)
-		p.mu.Unlock()
-	}
+	p.dispatcher.Dispatch(params.Type, params.Data, pluginName, sp, s)
 }
 
 func (p *Plugin) loadPySidecar(s *sdk.PluginSDK, dir, name string) error {
@@ -612,7 +649,7 @@ func (p *Plugin) loadPySidecar(s *sdk.PluginSDK, dir, name string) error {
 		sp.Close()
 		return fmt.Errorf("list tools: %w", err)
 	}
-	log.Printf("[openclaw] pysidecar %s registered %d tools", name, len(tools))
+	log.Printf("[clawhubadapter] pysidecar %s registered %d tools", name, len(tools))
 
 	p.mu.Lock()
 	p.sidecars = append(p.sidecars, sp)
@@ -648,16 +685,16 @@ func (p *Plugin) loadSidecar(s *sdk.PluginSDK, dir, name string) error {
 			}
 		}(sp, tool.Name)
 		if err := s.RegisterTool(toolName, tDef, handler); err != nil {
-			log.Printf("[openclaw] register sidecar tool %s: %v", toolName, err)
+			log.Printf("[clawhubadapter] register sidecar tool %s: %v", toolName, err)
 			continue
 		}
-		log.Printf("[openclaw] registered sidecar tool: %s (from %s)", toolName, name)
+		log.Printf("[clawhubadapter] registered sidecar tool: %s (from %s)", toolName, name)
 	}
 
 	p.mu.Lock()
 	p.sidecars = append(p.sidecars, sp)
 	p.mu.Unlock()
-	log.Printf("[openclaw] sidecar %s started with %d tools", name, len(tools))
+	log.Printf("[clawhubadapter] sidecar %s started with %d tools", name, len(tools))
 	return nil
 }
 
@@ -697,4 +734,135 @@ func hasOCExtensions(pkgPath string) bool {
 		return false
 	}
 	return pkg.OpenClaw != nil && (pkg.OpenClaw.Extensions != nil || pkg.OpenClaw.RuntimeExtensions != nil)
+}
+
+func (p *Plugin) reloadPlugin(name string) error {
+	pluginDir := filepath.Join(p.skillsDir, name)
+	info, err := os.Stat(pluginDir)
+	if err != nil || !info.IsDir() {
+		return fmt.Errorf("plugin dir not found: %s", pluginDir)
+	}
+
+	if p.sdk == nil {
+		return fmt.Errorf("sdk not initialized")
+	}
+
+	subs, err := os.ReadDir(pluginDir)
+	if err != nil {
+		return err
+	}
+
+	hasMainJS := false
+	hasMainPy := false
+	hasOCManifest := false
+	for _, f := range subs {
+		switch f.Name() {
+		case "main.js":
+			hasMainJS = true
+		case "main.py":
+			hasMainPy = true
+		case "openclaw.plugin.json":
+			hasOCManifest = true
+		}
+	}
+
+	os.MkdirAll(p.simulatorDir, 0755)
+
+	switch {
+	case hasMainJS:
+		return p.loadSidecar(p.sdk, pluginDir, name)
+	case hasMainPy:
+		return p.loadPySidecar(p.sdk, pluginDir, name)
+	case hasOCManifest:
+		return p.loadOCPlugin(p.sdk, pluginDir, name)
+	default:
+		sk, err := plugin.LoadSKILL(pluginDir)
+		if err != nil {
+			return fmt.Errorf("load skill: %w", err)
+		}
+		p.mu.Lock()
+		p.skills = append(p.skills, sk)
+		p.mu.Unlock()
+		return nil
+	}
+}
+
+func extractArchive(data []byte, dest string) error {
+	if len(data) < 4 {
+		return fmt.Errorf("archive too small (%d bytes)", len(data))
+	}
+
+	if data[0] == 0x50 && data[1] == 0x4B && data[2] == 0x03 && data[3] == 0x04 {
+		return extractZIP(data, dest)
+	}
+
+	return extractTGZ(data, dest)
+}
+
+func extractZIP(data []byte, dest string) error {
+	zr, err := zip.NewReader(bytes.NewReader(data), int64(len(data)))
+	if err != nil {
+		return fmt.Errorf("zip: %w", err)
+	}
+	for _, f := range zr.File {
+		target := filepath.Join(dest, f.Name)
+		if f.FileInfo().IsDir() {
+			os.MkdirAll(target, 0755)
+			continue
+		}
+		os.MkdirAll(filepath.Dir(target), 0755)
+		r, err := f.Open()
+		if err != nil {
+			return err
+		}
+		out, err := os.Create(target)
+		if err != nil {
+			r.Close()
+			return err
+		}
+		_, err = io.Copy(out, r)
+		r.Close()
+		out.Close()
+		if err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func extractTGZ(data []byte, dest string) error {
+	gzr, err := gzip.NewReader(bytes.NewReader(data))
+	if err != nil {
+		return fmt.Errorf("gzip: %w", err)
+	}
+	defer gzr.Close()
+
+	tr := tar.NewReader(gzr)
+	for {
+		header, err := tr.Next()
+		if err == io.EOF {
+			break
+		}
+		if err != nil {
+			return err
+		}
+
+		target := filepath.Join(dest, header.Name)
+		switch header.Typeflag {
+		case tar.TypeDir:
+			os.MkdirAll(target, 0755)
+		case tar.TypeReg:
+			os.MkdirAll(filepath.Dir(target), 0755)
+			f, err := os.Create(target)
+			if err != nil {
+				return err
+			}
+			if _, err := io.Copy(f, tr); err != nil {
+				f.Close()
+				return err
+			}
+			f.Close()
+		}
+	}
+	return nil
 }

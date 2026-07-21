@@ -1,4 +1,4 @@
-package openclaw
+package clawhubadapter
 
 import (
 	"fmt"
