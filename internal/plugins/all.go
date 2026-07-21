@@ -2,6 +2,7 @@ package plugins
 
 import (
 	_ "gitcode.com/JianFeeeee/HomeAgent/internal/plugins/agentcli"
+	_ "gitcode.com/JianFeeeee/HomeAgent/internal/plugins/cfgmgr"
 	_ "gitcode.com/JianFeeeee/HomeAgent/internal/plugins/cli"
 	_ "gitcode.com/JianFeeeee/HomeAgent/internal/plugins/cmd"
 	_ "gitcode.com/JianFeeeee/HomeAgent/internal/plugins/files"
