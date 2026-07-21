@@ -84,6 +84,9 @@ if (typeof entry !== 'object' || typeof entry.register !== 'function') {
 // ---- 注册工具（本地存储，供 tools/list 和 tools/call 用） ----
 const registeredTools = [];
 
+// ---- Provider 存储（供 provider/call 用） ----
+const registeredProviders = {}; // type -> { name, instance }
+
 function registerTool(defOrFactory, opts) {
   if (typeof defOrFactory === 'function') {
     const toolCtx = {
@@ -138,19 +141,55 @@ const api = {
   // ---- 工具注册 ----
   registerTool,
 
-  // ---- Provider 注册 ----
-  registerProvider: (provider) => notify('register', { type: 'provider', data: { name: provider.name, description: provider.description } }),
-  registerEmbeddingProvider: (p) => notify('register', { type: 'embedding_provider', data: { name: p.name } }),
-  registerSpeechProvider: (p) => notify('register', { type: 'speech_provider', data: { name: p.name } }),
-  registerRealtimeTranscriptionProvider: (p) => notify('register', { type: 'realtime_transcription_provider', data: { name: p.name } }),
-  registerRealtimeVoiceProvider: (p) => notify('register', { type: 'realtime_voice_provider', data: { name: p.name } }),
-  registerMediaUnderstandingProvider: (p) => notify('register', { type: 'media_understanding_provider', data: { name: p.name } }),
-  registerImageGenerationProvider: (p) => notify('register', { type: 'image_generation_provider', data: { name: p.name } }),
-  registerMusicGenerationProvider: (p) => notify('register', { type: 'music_generation_provider', data: { name: p.name } }),
-  registerVideoGenerationProvider: (p) => notify('register', { type: 'video_generation_provider', data: { name: p.name } }),
-  registerWebFetchProvider: (p) => notify('register', { type: 'web_fetch_provider', data: { name: p.name } }),
-  registerWebSearchProvider: (p) => notify('register', { type: 'web_search_provider', data: { name: p.name } }),
-  registerMemoryEmbeddingProvider: (p) => notify('register', { type: 'memory_embedding_provider', data: { name: p.name } }),
+  // ---- Provider 注册（同时存储实例，支持 provider/call） ----
+  registerProvider: (provider) => {
+    if (provider && provider.id) registeredProviders['llm'] = { name: provider.id, instance: provider };
+    notify('register', { type: 'provider', data: { name: provider?.id || provider?.name, description: provider?.description } });
+  },
+  registerEmbeddingProvider: (p) => {
+    if (p) registeredProviders['embedding'] = { name: p.name, instance: p };
+    notify('register', { type: 'embedding_provider', data: { name: p?.name } });
+  },
+  registerSpeechProvider: (p) => {
+    if (p) registeredProviders['speech'] = { name: p.name, instance: p };
+    notify('register', { type: 'speech_provider', data: { name: p?.name } });
+  },
+  registerRealtimeTranscriptionProvider: (p) => {
+    if (p) registeredProviders['realtime_transcription'] = { name: p.name, instance: p };
+    notify('register', { type: 'realtime_transcription_provider', data: { name: p?.name } });
+  },
+  registerRealtimeVoiceProvider: (p) => {
+    if (p) registeredProviders['realtime_voice'] = { name: p.name, instance: p };
+    notify('register', { type: 'realtime_voice_provider', data: { name: p?.name } });
+  },
+  registerMediaUnderstandingProvider: (p) => {
+    if (p) registeredProviders['media_understanding'] = { name: p.name, instance: p };
+    notify('register', { type: 'media_understanding_provider', data: { name: p?.name } });
+  },
+  registerImageGenerationProvider: (p) => {
+    if (p) registeredProviders['image_generation'] = { name: p.name, instance: p };
+    notify('register', { type: 'image_generation_provider', data: { name: p?.name } });
+  },
+  registerMusicGenerationProvider: (p) => {
+    if (p) registeredProviders['music_generation'] = { name: p.name, instance: p };
+    notify('register', { type: 'music_generation_provider', data: { name: p?.name } });
+  },
+  registerVideoGenerationProvider: (p) => {
+    if (p) registeredProviders['video_generation'] = { name: p.name, instance: p };
+    notify('register', { type: 'video_generation_provider', data: { name: p?.name } });
+  },
+  registerWebFetchProvider: (p) => {
+    if (p) registeredProviders['web_fetch'] = { name: p.name, instance: p };
+    notify('register', { type: 'web_fetch_provider', data: { name: p?.name } });
+  },
+  registerWebSearchProvider: (p) => {
+    if (p) registeredProviders['web_search'] = { name: p.name, instance: p };
+    notify('register', { type: 'web_search_provider', data: { name: p?.name } });
+  },
+  registerMemoryEmbeddingProvider: (p) => {
+    if (p) registeredProviders['memory_embedding'] = { name: p.name, instance: p };
+    notify('register', { type: 'memory_embedding_provider', data: { name: p?.name } });
+  },
 
   // ---- Channel 注册 ----
   registerChannel: (ch) => notify('register', { type: 'channel', data: { name: ch.name, type: ch.type } }),
@@ -288,6 +327,34 @@ rl.on('line', async (line) => {
 
     try {
       const result = await tool.execute('sim-call-1', args, undefined, undefined);
+      if (result && typeof result === 'object' && Array.isArray(result.content)) {
+        writeJSON({ jsonrpc: '2.0', id, result });
+      } else {
+        const text = typeof result === 'string' ? result : JSON.stringify(result);
+        writeJSON({ jsonrpc: '2.0', id, result: { content: [{ type: 'text', text }] } });
+      }
+    } catch (e) {
+      sendError(id, -32603, e.message);
+    }
+    return;
+  }
+
+  // ---- Provider 调用 ----
+  if (method === 'provider/call') {
+    const { type, action, args } = req.params || {};
+    if (!type) { sendError(id, -32602, 'type required'); return; }
+
+    const provider = registeredProviders[type];
+    if (!provider) { sendError(id, -32601, `Provider not found: ${type}`); return; }
+
+    const methodName = action || 'execute';
+    if (typeof provider.instance[methodName] !== 'function') {
+      sendError(id, -32603, `Provider ${type} has no method ${methodName}`);
+      return;
+    }
+
+    try {
+      const result = await provider.instance[methodName](args);
       if (result && typeof result === 'object' && Array.isArray(result.content)) {
         writeJSON({ jsonrpc: '2.0', id, result });
       } else {

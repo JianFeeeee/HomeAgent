@@ -19,6 +19,7 @@ function readJSON(file) {
 // ---- Plugin registry ----
 const loadedPlugins = {}; // name -> { entry, tools: [{name, execute, ...}] }
 const allTools = [];      // flat list of all tools across all plugins
+const allProviders = {};  // type -> { name, instance } across all plugins
 
 function registerPluginTools(name, tools, api) {
   for (const t of tools) {
@@ -98,15 +99,27 @@ function loadPlugin(pluginDir, name) {
       if (!def || !def.name) return;
       registeredTools.push({ name: def.name, label: def.label || def.name, description: def.description || '', parameters: def.parameters || { type: 'object', properties: {} }, execute: typeof def.execute === 'function' ? def.execute : undefined });
     },
-    registerProvider: (p) => notify('register', { type: 'provider', data: { name: p.name } }),
+    registerProvider: (p) => {
+      if (p && p.id) allProviders['llm'] = { name: p.id, instance: p };
+      notify('register', { type: 'provider', data: { name: p?.id || p?.name } });
+    },
     registerChannel: (ch) => notify('register', { type: 'channel', data: { name: ch.name, type: ch.type } }),
     registerHook: (hook) => notify('register', { type: 'hook', data: { name: hook.name, event: hook.event } }),
     registerHttpRoute: (route) => notify('register', { type: 'http_route', data: { path: route.path, method: route.method } }),
     registerCommand: (cmd) => notify('register', { type: 'command', data: { name: cmd.name, description: cmd.description } }),
     registerService: (svc) => notify('register', { type: 'service', data: { name: svc.name } }),
-    registerImageGenerationProvider: (p) => notify('register', { type: 'image_generation_provider', data: { name: p.name } }),
-    registerWebFetchProvider: (p) => notify('register', { type: 'web_fetch_provider', data: { name: p.name } }),
-    registerWebSearchProvider: (p) => notify('register', { type: 'web_search_provider', data: { name: p.name } }),
+    registerImageGenerationProvider: (p) => {
+      if (p) allProviders['image_generation'] = { name: p.name, instance: p };
+      notify('register', { type: 'image_generation_provider', data: { name: p?.name } });
+    },
+    registerWebFetchProvider: (p) => {
+      if (p) allProviders['web_fetch'] = { name: p.name, instance: p };
+      notify('register', { type: 'web_fetch_provider', data: { name: p?.name } });
+    },
+    registerWebSearchProvider: (p) => {
+      if (p) allProviders['web_search'] = { name: p.name, instance: p };
+      notify('register', { type: 'web_search_provider', data: { name: p?.name } });
+    },
     start: (cb) => {},
     stop: (cb) => {},
   };
@@ -309,6 +322,31 @@ rl.on('line', async (line) => {
 
     try {
       const result = await tool.execute('mgr-call-1', args, undefined, undefined);
+      if (result && typeof result === 'object' && Array.isArray(result.content)) {
+        writeJSON({ jsonrpc: '2.0', id, result });
+      } else {
+        const text = typeof result === 'string' ? result : JSON.stringify(result);
+        writeJSON({ jsonrpc: '2.0', id, result: { content: [{ type: 'text', text }] } });
+      }
+    } catch (e) { sendError(id, -32603, e.message); }
+    return;
+  }
+
+  if (method === 'provider/call') {
+    const { type, action, args } = req.params || {};
+    if (!type) { sendError(id, -32602, 'type required'); return; }
+
+    const provider = allProviders[type];
+    if (!provider) { sendError(id, -32601, `Provider not found: ${type}`); return; }
+
+    const methodName = action || 'execute';
+    if (typeof provider.instance[methodName] !== 'function') {
+      sendError(id, -32603, `Provider ${type} has no method ${methodName}`);
+      return;
+    }
+
+    try {
+      const result = await provider.instance[methodName](args);
       if (result && typeof result === 'object' && Array.isArray(result.content)) {
         writeJSON({ jsonrpc: '2.0', id, result });
       } else {
