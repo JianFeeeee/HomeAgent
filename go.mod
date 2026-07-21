@@ -12,4 +12,3 @@ require github.com/yanyiwu/gojieba v1.4.7
 
 require gitcode.com/JianFeeeee/homeagent-sdk v0.7.1
 
-replace gitcode.com/JianFeeeee/homeagent-sdk => E:\program\homeagent\homeagentsdk
