@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"os"
 	"os/exec"
 	"sync"
 )
@@ -22,7 +23,7 @@ type StdioTransport struct {
 func NewStdioTransport(command string, args []string, env []string) (*StdioTransport, error) {
 	cmd := exec.Command(command, args...)
 	if len(env) > 0 {
-		cmd.Env = env
+		cmd.Env = append(os.Environ(), env...)
 	}
 
 	stdin, err := cmd.StdinPipe()
