@@ -1,4 +1,4 @@
-package openclaw
+package clawhubadapter
 
 import (
 	"bufio"
@@ -101,7 +101,7 @@ func (s *sidecarProcess) readLoop(r io.Reader) {
 
 		if !scanner.Scan() {
 			if scanner.Err() != nil {
-				log.Printf("[openclaw] sidecar %s read error: %v", s.name, scanner.Err())
+				log.Printf("[clawhubadapter] sidecar %s read error: %v", s.name, scanner.Err())
 			}
 			return
 		}
@@ -131,7 +131,7 @@ func (s *sidecarProcess) readLoop(r io.Reader) {
 				select {
 				case s.notifyCh <- notif:
 				default:
-					log.Printf("[openclaw] sidecar %s notify channel full, dropping: %s", s.name, notif.Method)
+					log.Printf("[clawhubadapter] sidecar %s notify channel full, dropping: %s", s.name, notif.Method)
 				}
 			}
 		}
@@ -305,6 +305,31 @@ func (s *sidecarProcess) CallTool(name string, args map[string]interface{}) (str
 	return sb, nil
 }
 
+func (s *sidecarProcess) CallProvider(providerType string, args map[string]interface{}) (string, error) {
+	data, err := s.call("provider/call", map[string]interface{}{
+		"type": providerType,
+		"action": "execute",
+		"args": args,
+	})
+	if err != nil {
+		return "", err
+	}
+	if data == nil {
+		return "", nil
+	}
+	var result OCCallResult
+	if err := json.Unmarshal(data, &result); err != nil {
+		return "", err
+	}
+	var sb string
+	for _, c := range result.Content {
+		if c.Type == "text" {
+			sb += c.Text
+		}
+	}
+	return sb, nil
+}
+
 func (s *sidecarProcess) Close() {
 	s.mu.Lock()
 	if s.closed || s.stopped {
@@ -330,5 +355,5 @@ func (s *sidecarProcess) Close() {
 	}
 	s.mu.Unlock()
 
-	log.Printf("[openclaw] sidecar %s stopped", s.name)
+	log.Printf("[clawhubadapter] sidecar %s stopped", s.name)
 }
