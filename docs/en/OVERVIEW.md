@@ -33,11 +33,12 @@ Three progressive layers: context → cold archive → long-term graph memory, e
 
 Code is in the project root, implemented in Go.
 
-**Kernel** (`internal/agent/core/agent.go`):
-- Maintains a message loop (`eventLoop`), queuing input from the IO layer
-- Each input goes through the full processing pipeline: memory recall → persona injection → LLM call → tool execution → output delivery
+**Kernel** (`internal/agent/core/`):
+- `eventloop.go` — Message loop (`eventLoop`), queuing input from the IO layer
+- `process.go` / `stages.go` — Processing pipeline: memory recall → persona injection → LLM call → tool execution → output delivery, 7 stage hooks
+- `toolcall.go` — Tool scheduling and execution
+- `context.go` — Context management (pretrained word embedding scoring StaticEmbedder → CosineSimilarity, TF-IDF fallback), automatic pruning of low-relevance events
 - LLM calls abstracted through Provider interface, supports 8 LLM sources with automatic fallback
-- Context management (`context.go`) based on pretrained word embedding scoring (StaticEmbedder → CosineSimilarity, TF-IDF fallback), automatic pruning of low-relevance events
 
 **Memory System** (`internal/memory/`):
 - **GraphDB** (`graph.go`) — SQLite, entities + relations tables, BFS traversal
