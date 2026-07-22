@@ -157,25 +157,25 @@ func (p *Plugin) Start(s *sdk.PluginSDK) error {
 
 	// Register plugin management tools that talk to the manager (always, even if skills dir is empty)
 	tp := p.name + "_"
-	s.RegisterTool(tp+"npm_install", sdk.ToolDef{
-		Name:        tp + "npm_install",
-		Description: "安装 ClawHub 适配器插件管理器中的插件。支持 npm: 前缀（npm 包）和 clawhub: 前缀（ClawHub 市场）。安装后立即可用。",
+	s.RegisterTool(tp+"plugin_install", sdk.ToolDef{
+		Name:        tp + "plugin_install",
+		Description: "安装插件。支持 npm: 前缀（npm 包）、clawhub: 前缀（ClawHub 市场，如 clawhub:openclaw-codex-app-server）。安装后立即可用。",
 		Parameters: map[string]interface{}{
 			"type": "object",
 			"properties": map[string]interface{}{
-				"package": map[string]interface{}{"type": "string", "description": "插件包标识。npm:<pkg> 从 npm 安装，clawhub:<pkg> 从 ClawHub 市场安装（如 clawhub:openclaw-codex-app-server）"},
+				"package": map[string]interface{}{"type": "string", "description": "插件包标识。npm:<pkg> 从 npm 安装，clawhub:<pkg> 从 ClawHub 市场安装"},
 			},
 			"required": []string{"package"},
 		},
 	}, p.handlePluginInstall)
 
-	s.RegisterTool(tp+"npm_uninstall", sdk.ToolDef{
-		Name:        tp + "npm_uninstall",
-		Description: "从插件管理器中移除已安装的插件。",
+	s.RegisterTool(tp+"plugin_uninstall", sdk.ToolDef{
+		Name:        tp + "plugin_uninstall",
+		Description: "卸载已安装的插件，支持所有类型（sidecar、skill、manager 插件、ClawHub 安装的插件）。会停止进程、删除目录并清理注册。",
 		Parameters: map[string]interface{}{
 			"type": "object",
 			"properties": map[string]interface{}{
-				"name": map[string]interface{}{"type": "string", "description": "要移除的插件名称"},
+				"name": map[string]interface{}{"type": "string", "description": "要卸载的插件名称（目录名，如 my-plugin）"},
 			},
 			"required": []string{"name"},
 		},
@@ -377,7 +377,7 @@ func (p *Plugin) handleClawHubSearch(args map[string]interface{}) (interface{}, 
 		if name == "" {
 			name = pkg.Slug
 		}
-		lines = append(lines, fmt.Sprintf("- %s (%s) v%s | ⬇ %d\n  %s\n  安装: clawhubadapter_npm_install package=clawhub:%s",
+		lines = append(lines, fmt.Sprintf("- %s (%s) v%s | ⬇ %d\n  %s\n  安装: clawhubadapter_plugin_install package=clawhub:%s",
 			name, pkg.Slug, ver, pkg.Downloads, pkg.Summary, pkg.Slug))
 	}
 
@@ -392,23 +392,62 @@ func (p *Plugin) handlePluginUninstall(args map[string]interface{}) (interface{}
 		return errorResult("name is required"), nil
 	}
 
+	var logs []string
+	pluginDir := filepath.Join(p.skillsDir, name)
+
+	// 1. Stop & remove sidecar process if running
 	p.mu.Lock()
-	mgr := p.manager
+	var aliveSidecars []*sidecarProcess
+	for _, sp := range p.sidecars {
+		if sp.name == name {
+			sp.Close()
+			logs = append(logs, fmt.Sprintf("已停止 sidecar 进程: %s", name))
+		} else {
+			aliveSidecars = append(aliveSidecars, sp)
+		}
+	}
+	p.sidecars = aliveSidecars
+
+	// 2. Remove from SKILL list if present
+	var aliveSkills []*plugin.SKILLPlugin
+	for _, sk := range p.skills {
+		if sk.Name() != name {
+			aliveSkills = append(aliveSkills, sk)
+		} else {
+			logs = append(logs, fmt.Sprintf("已移除 SKILL 插件: %s v%s", sk.Name(), sk.Version()))
+		}
+	}
+	p.skills = aliveSkills
 	p.mu.Unlock()
 
-	if mgr == nil {
-		return errorResult("plugin manager not available"), nil
+	// 3. Try manager for OC plugins
+	mgr := p.manager
+	if mgr != nil {
+		data, err := mgr.call("plugins/uninstall", map[string]interface{}{
+			"name": name,
+		})
+		if err == nil {
+			logs = append(logs, fmt.Sprintf("管理器已卸载: %s", string(data)))
+		}
 	}
 
-	data, err := mgr.call("plugins/uninstall", map[string]interface{}{
-		"name": name,
-	})
-	if err != nil {
-		return errorResult(fmt.Sprintf("uninstall failed: %v", err)), nil
+	// 4. Delete directory from disk
+	if _, statErr := os.Stat(pluginDir); statErr == nil {
+		if err := os.RemoveAll(pluginDir); err != nil {
+			logs = append(logs, fmt.Sprintf("删除目录失败: %v", err))
+		} else {
+			logs = append(logs, fmt.Sprintf("已删除目录: %s", pluginDir))
+		}
 	}
 
+	if len(logs) == 0 {
+		return errorResult(fmt.Sprintf("未找到插件 '%s'", name)), nil
+	}
+
+	result := fmt.Sprintf("已卸载插件: %s\n%s", name, strings.Join(logs, "\n"))
+	result += "\n提示: 部分工具注册信息将在下次重启后完全清理。如需立即生效，请使用 reload 命令。"
 	return map[string]interface{}{
-		"content": fmt.Sprintf("已卸载插件: %s\n  %s", name, string(data)),
+		"content": result,
 	}, nil
 }
 
