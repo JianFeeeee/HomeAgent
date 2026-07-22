@@ -256,7 +256,7 @@ VM 内置 `json.encode` / `json.decode` / `log` / `http_get` / `http_post`。
 | 内置插件 | `init()` → `RegisterFactory` | `internal/plugins/` 编译进内核 | webui/cli/timer/mcp 等 |
 | 外部 `.so` | C ABI 动态加载 | `-buildmode=c-shared` + bridge | qq/files/web/memo 等 |
 | Lua 脚本插件 | 解析 `main.lua` 注册工具 | 无需编译，热加载 | luaplugintest/testlua 等 |
-| SKILL 插件 | 解析 `SKILL.md` | Markdown 定义 | OpenClaw 兼容 |
+| SKILL 插件 | 解析 `SKILL.md` | Markdown 定义 | clawhubadapter 兼容加载 |
 
 内置插件注册：`internal/plugins/all.go` 空白导入 → 各插件 `init()` → `Registry.Load()` 扫描目录匹配工厂。
 外部插件加载：`internal/plugin/dynamic.go` → 复制到 SHA256 临时路径（绕过 `plugin.Open` 路径缓存）→ `Open` + `Lookup("NewPlugin")`。
@@ -403,10 +403,12 @@ internal/
 │   ├── timer/             — 定时器
 │   ├── cmd/               — 命令执行
 │   ├── mcp/               — MCP 协议
-│   ├── openclaw/          — OpenClaw 兼容
+│   ├── files/             — 文件操作
+│   ├── clawhubadapter/   — ClawHub 适配器（OC 插件/SKILL/JS/Python sidecar）
 │   ├── agentcli/          — PTY 终端
 │   ├── healthcheck/       — 健康检查
-│   └── pluginmgr/         — 插件管理器
+│   ├── pluginmgr/         — 插件管理器
+│   └── cfgmgr/            — 配置管理
 ├── sdk/                   — PluginSDK 定义
 │   ├── plugin.go          — Plugin 接口 + PluginSDK
 │   ├── memory.go          — MemoryAPI

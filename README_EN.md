@@ -163,7 +163,7 @@ internal/
 ├── memory/         Three-layer memory: Graph(SQLite) / Document(JSON+TF-IDF) / Text(JSONL) + StaticEmbedder(pretrained word embedding/TF-IDF fallback) + CleanTemplateText(de-template)
 ├── knowledge/      Knowledge base (filesystem + TF-IDF)
 ├── plugin/         Plugin registry + .so/.dll dynamic loader
-├── plugins/        10 built-in plugins (webui/cli/timer/cmd/mcp/openclaw/agentcli/healthcheck/pluginmgr/files)
+├── plugins/        11 built-in plugins (webui/cli/timer/cmd/mcp/clawhubadapter/agentcli/healthcheck/pluginmgr/files/cfgmgr)
 ├── sdk/            PluginSDK (Tool/Stage/Event three channels)
 ├── config/         SQLite config center
 ├── events/         Event bus
@@ -173,7 +173,7 @@ External plugin development: see [homeagent-sdk](https://gitcode.com/JianFeeeee/
 
 ## Project Status
 
-**v0.7.1** — Core is functional, plugin system and SDK are ready. 10 built-in plugins. External plugin development via [homeagent-sdk](https://gitcode.com/JianFeeeee/homeagent-sdk) repo using `plugindev` toolchain. Output channel system, restricted external plugin API, and EventAgentLLMChain event are live.
+**v0.7.1** — Core is functional, plugin system and SDK are ready. 11 built-in plugins. External plugin development via [homeagent-sdk](https://gitcode.com/JianFeeeee/homeagent-sdk) repo using `plugindev` toolchain. Output channel system, restricted external plugin API, and EventAgentLLMChain event are live.
 
 ## Documentation
 

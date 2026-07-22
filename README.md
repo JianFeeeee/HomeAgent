@@ -163,7 +163,7 @@ internal/
 ├── memory/         三层记忆：Graph(SQLite) / Document(JSON+TF-IDF) / Text(JSONL) + StaticEmbedder(预训练词嵌入/TF-IDF回退) + CleanTemplateText(去模版)
 ├── knowledge/      知识库（文件系统 + TF-IDF）
 ├── plugin/         插件注册表 + .so 动态加载器
-├── plugins/        内置 10 个插件（webui/cli/timer/cmd/mcp/openclaw/agentcli/healthcheck/pluginmgr/files）
+├── plugins/        内置 11 个插件（webui/cli/timer/cmd/mcp/clawhubadapter/agentcli/healthcheck/pluginmgr/files/cfgmgr）
 ├── sdk/            PluginSDK（Tool/Stage/Event 三通道）
 ├── config/         SQLite 配置中心
 ├── events/         事件总线
@@ -173,7 +173,7 @@ internal/
 
 ## 项目状态
 
-**v0.7.1** — 核心可用，插件系统和 SDK 已就绪。内置 10 个插件，外部插件开发见 [homeagent-sdk](https://gitcode.com/JianFeeeee/homeagent-sdk) 仓库，使用 `plugindev` 工具链。输出通道系统、受限外部插件 API、EventAgentLLMChain 事件已上线。
+**v0.7.1** — 核心可用，插件系统和 SDK 已就绪。内置 11 个插件，外部插件开发见 [homeagent-sdk](https://gitcode.com/JianFeeeee/homeagent-sdk) 仓库，使用 `plugindev` 工具链。输出通道系统、受限外部插件 API、EventAgentLLMChain 事件已上线。
 
 ## 文档
 

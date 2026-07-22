@@ -134,3 +134,11 @@ func (s *Server) CallTool(name string, args map[string]interface{}) (string, err
 func (s *Server) Close() error {
 	return s.transport.Close()
 }
+
+func (s *Server) SetTransport(t Transport) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.transport.Close()
+	s.transport = t
+	s.nextID = 0
+}
