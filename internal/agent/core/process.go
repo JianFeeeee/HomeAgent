@@ -179,6 +179,7 @@ func (a *Agent) process(input string, stageCtx *sdk.StageContext) (response stri
 			return resp.Content, toolsUsed, nil
 		}
 
+		contentOnce := true
 		for _, tc := range resp.ToolCalls {
 			if len(a.interceptCh) > 0 {
 				for _, interrupt := range a.drainInterrupts() {
@@ -203,7 +204,7 @@ func (a *Agent) process(input string, stageCtx *sdk.StageContext) (response stri
 			stageCtx.ToolResults = nil
 			if a.runStage(sdk.StageBeforeToolcall, stageCtx) {
 				result := fmt.Sprintf("工具 %s 已被插件拒绝", tc.Name)
-				msgs = append(msgs, agentAPI.Message{Role: "assistant", Content: resp.Content, ToolCalls: []agentAPI.ToolCall{tc}})
+				msgs = append(msgs, agentAPI.Message{Role: "assistant", ToolCalls: []agentAPI.ToolCall{tc}})
 				msgs = append(msgs, agentAPI.Message{Role: "tool", ToolCallID: tc.ID, Content: result})
 				a.publishEvent(events.EventToolCall, map[string]interface{}{
 					"tool":   tc.Name,
@@ -219,7 +220,7 @@ func (a *Agent) process(input string, stageCtx *sdk.StageContext) (response stri
 			if pluginName != "" && !a.pluginHealth.isHealthy(pluginName) {
 				result := fmt.Sprintf("插件 %s 处于崩溃状态，已跳过执行，等待自动恢复重载", pluginName)
 				log.Printf("[agent] skip tool %s: plugin %s unhealthy", tc.Name, pluginName)
-				msgs = append(msgs, agentAPI.Message{Role: "assistant", Content: resp.Content, ToolCalls: []agentAPI.ToolCall{tc}})
+				msgs = append(msgs, agentAPI.Message{Role: "assistant", ToolCalls: []agentAPI.ToolCall{tc}})
 				msgs = append(msgs, agentAPI.Message{Role: "tool", ToolCallID: tc.ID, Content: result})
 				continue
 			}
@@ -238,7 +239,12 @@ func (a *Agent) process(input string, stageCtx *sdk.StageContext) (response stri
 			argsJSON, _ := json.Marshal(tc.Arguments)
 			a.recordToolCall(tc.Name, string(argsJSON), result)
 
-			msgs = append(msgs, agentAPI.Message{Role: "assistant", Content: resp.Content, ToolCalls: []agentAPI.ToolCall{tc}})
+			msgContent := ""
+			if contentOnce {
+				msgContent = resp.Content
+				contentOnce = false
+			}
+			msgs = append(msgs, agentAPI.Message{Role: "assistant", Content: msgContent, ToolCalls: []agentAPI.ToolCall{tc}})
 			msgs = append(msgs, agentAPI.Message{Role: "tool", ToolCallID: tc.ID, Content: result})
 
 			a.publishEvent(events.EventToolCall, map[string]interface{}{
