@@ -256,7 +256,7 @@ VM built-ins: `json.encode` / `json.decode` / `log` / `http_get` / `http_post`.
 | Built-in | `init()` → `RegisterFactory` | `internal/plugins/` compiled into kernel | webui/cli/timer/mcp etc. |
 | External `.so` | C ABI dynamic loading | `-buildmode=c-shared` + bridge | qq/files/web/memo etc. |
 | Lua script plugin | Parse `main.lua` to register tools | No compilation, hot-reload | luaplugintest/testlua etc. |
-| SKILL plugin | Parse `SKILL.md` | Markdown definition | OpenClaw compatible |
+| SKILL plugin | Parse `SKILL.md` | Markdown definition | Loaded via clawhubadapter |
 
 Built-in plugin registration: `internal/plugins/all.go` blank imports → each plugin `init()` → `Registry.Load()` scans directory to match factory.
 External plugin loading: `internal/plugin/dynamic.go` → copy to SHA256 temp path (bypass `plugin.Open` path cache) → `Open` + `Lookup("NewPlugin")`.
@@ -403,10 +403,12 @@ internal/
 │   ├── timer/             — Timer
 │   ├── cmd/               — Command execution
 │   ├── mcp/               — MCP protocol
-│   ├── openclaw/          — OpenClaw compatible
+│   ├── files/             — File operations
+│   ├── clawhubadapter/   — ClawHub adapter (OC plugin/SKILL/JS/Python sidecar)
 │   ├── agentcli/          — PTY terminal
 │   ├── healthcheck/       — Health check
-│   └── pluginmgr/         — Plugin manager
+│   ├── pluginmgr/         — Plugin manager
+│   └── cfgmgr/            — Config manager
 ├── sdk/                   — PluginSDK definitions
 │   ├── plugin.go          — Plugin interface + PluginSDK
 │   ├── memory.go          — MemoryAPI

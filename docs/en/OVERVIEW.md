@@ -69,12 +69,19 @@ Code is in the project root, implemented in Go.
 - OpenAI API-compatible `/v1/chat/completions` endpoint
 - SSE event stream `/api/v1/chat/events`
 
+**ClawHub Adapter** (`internal/plugins/clawhubadapter/`):
+- Unified loader for OC plugins (Node.js), Python sidecar, JS sidecar, and SKILL plugins
+- RegistryDispatcher pattern: routes registration notifications to Tool/Provider/Channel/Stage registries
+- ClawHub marketplace search and install: `clawhubadapter_search` / `clawhubadapter_npm_install`
+- 9 provider types mapped to LLM-accessible tools (image generation, web search, speech, etc.)
+- OC channels auto-registered as IO devices with text/file/image/audio capability flags
+
 <img src="../../branding/mascot-xiaozhai.webp" width="20" style="border-radius:50%;vertical-align:middle"> :
 
 ## Project Status
 
 Core functionality is operational. Plugin system and SDK are ready for independent external plugin development.
 
-- Built-in plugins: webui / cli / timer / cmd / mcp / agentcli / healthcheck / pluginmgr / openclaw / files
+- Built-in plugins: webui / cli / timer / cmd / mcp / agentcli / healthcheck / pluginmgr / clawhubadapter / files / cfgmgr
 - External plugin examples ([homeagent-sdk](https://gitcode.com/JianFeeeee/homeagent-sdk) repo `example/`, both Go and Lua types): qq / files / web / memo / bili / editdoc / a2a / ocr / sanitizer / luaplugintest / testlua
 - Distribution: `.hmap` plugin package format, installable via WebUI
