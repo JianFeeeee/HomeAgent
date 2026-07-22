@@ -47,8 +47,10 @@ func (m Message) MarshalJSON() ([]byte, error) {
 	}
 	if len(m.Blocks) > 0 {
 		raw["content"] = m.Blocks
-	} else {
+	} else if m.Content != "" || len(m.ToolCalls) == 0 {
 		raw["content"] = m.Content
+	} else {
+		raw["content"] = nil
 	}
 	if m.ReasoningContent != "" {
 		raw["reasoning_content"] = m.ReasoningContent
