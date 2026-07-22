@@ -41,7 +41,7 @@ eventLoop() → processTextInput()
         └── after_output stage      Read-only, cleanup
 ```
 
-Code: `internal/agent/core/agent.go` — `process()` is the main tool loop
+Code: `internal/agent/core/process.go` — `process()` is the main tool loop
 
 ### 7 Stage Hooks
 
@@ -141,7 +141,7 @@ All vectorization unified under `StaticEmbedder` (`internal/memory/static_embedd
 | Context Prune | `context.go:155` | Trim low-relevance context events | VectorizeClean → CosineSimilarity(queryVec, evt.Vector) |
 | DocStore Query | `document.go:206` | Recall from document memory | TF-IDF Vectorize → vec.Search |
 | Indexer Entity Search | `indexer.go:96+111` | Recall from Graph | vector entity search + jieba keywords → SQLite LIKE + BFS |
-| Entity Similarity Detection | `agent.go` | Detect similar entities in Graph | Bigram Jaccard (>0.75 → consolidation) |
+| Entity Similarity Detection | `distill.go` | Detect similar entities in Graph | Bigram Jaccard (>0.75 → consolidation) |
 
 ### Context Layer
 
@@ -365,7 +365,7 @@ Three delivery paths:
 | interceptCh | Insert `[interrupt message]` in process() | Before each LLM call |
 | InjectInput | Trigger new processing when eventLoop is idle | No ongoing request |
 
-Code: `internal/agent/core/agent.go` — `interceptLoop` / `drainInterrupt`
+Code: `internal/agent/core/eventloop.go` — `interceptLoop` / `drainInterrupts`
 
 <img src="../../branding/mascot-xiaozhai.webp" width="20" style="border-radius:50%;vertical-align:middle"> :
 

@@ -33,11 +33,12 @@ HomeAgent 是一个持续运行的个人智能 Agent 框架。
 
 代码位于项目仓库根目录，Go 语言实现。
 
-**内核** (`internal/agent/core/agent.go`)：
-- 维护一个消息循环（`eventLoop`），从 IO 层排队接收输入
-- 每次输入走完整的处理管道：记忆召回 → 人格注入 → LLM 调用 → 工具执行 → 输出发送
+**内核** (`internal/agent/core/`)：
+- `eventloop.go` — 消息循环（`eventLoop`），从 IO 层排队接收输入
+- `process.go` / `stages.go` — 处理管道：记忆召回 → 人格注入 → LLM 调用 → 工具执行 → 输出发送，7 阶段钩子
+- `toolcall.go` — 工具调度与执行
+- `context.go` — 上下文管理（预训练词嵌入评分 StaticEmbedder → CosineSimilarity，TF-IDF 回退），自动剪枝低相关性事件
 - LLM 调用通过 Provider 接口抽象，支持 8 个 LLM 源自动降级
-- 上下文管理（`context.go`）基于预训练词嵌入评分（StaticEmbedder → CosineSimilarity，TF-IDF回退），自动剪枝低相关性事件
 
 **记忆系统** (`internal/memory/`)：
 - **GraphDB** (`graph.go`) — SQLite，entities + relations 表，BFS 遍历

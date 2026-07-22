@@ -41,7 +41,7 @@ eventLoop() → processTextInput()
         └── after_output stage       插件只读，收尾
 ```
 
-代码：`internal/agent/core/agent.go` — `process()` 是工具循环主体
+代码：`internal/agent/core/process.go` — `process()` 是工具循环主体
 
 ### 7 个阶段钩子
 
@@ -141,7 +141,7 @@ eventLoop() → processTextInput()
 | Context Prune | `context.go:155` | 裁剪低相关性上下文事件 | VectorizeClean → CosineSimilarity(queryVec, evt.Vector) |
 | DocStore Query | `document.go:206` | 文档记忆召回 | TF-IDF Vectorize → vec.Search |
 | Indexer 实体搜索 | `indexer.go:96+111` | Graph实体召回 | 向量实体搜索 + jieba关键词 → SQLite LIKE + BFS |
-| 实体相似度检测 | `agent.go` | Graph中相似实体 | Bigram Jaccard (>0.75 → consolidation) |
+| 实体相似度检测 | `distill.go` | Graph中相似实体 | Bigram Jaccard (>0.75 → consolidation) |
 
 ### Context 层
 
@@ -365,7 +365,7 @@ interceptLoop (goroutine)
 | interceptCh | process() 中插入 `[打断消息]` | 每个 LLM call 前 |
 | InjectInput | eventLoop 空闲时触发新处理 | 无进行中请求 |
 
-代码：`internal/agent/core/agent.go` — `interceptLoop` / `drainInterrupt`
+代码：`internal/agent/core/eventloop.go` — `interceptLoop` / `drainInterrupts`
 
 <img src="../../branding/mascot-xiaozhai.webp" width="20" style="border-radius:50%;vertical-align:middle"> :
 
