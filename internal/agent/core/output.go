@@ -1,0 +1,124 @@
+package core
+
+import (
+	"fmt"
+	"strings"
+
+	agentIO "gitcode.com/JianFeeeee/HomeAgent/internal/agent/io"
+	agentAPI "gitcode.com/JianFeeeee/HomeAgent/internal/agent/api"
+	sdk "gitcode.com/JianFeeeee/HomeAgent/internal/sdk"
+)
+
+func (a *Agent) executeOutputSendTool(tc agentAPI.ToolCall) string {
+	channel := strings.TrimPrefix(tc.Name, "output_send__")
+	if channel == "" {
+		return "工具名称格式: output_send__{channel}"
+	}
+	content, _ := tc.Arguments["content"].(string)
+	if content == "" {
+		return "content 不能为空"
+	}
+
+	caps := a.io.GetChannelCapabilities(channel)
+	if caps == 0 {
+		return fmt.Sprintf("通道 [%s] 不存在或不可用。可用输出工具列表见 output_list_channels", channel)
+	}
+
+	if !caps.Supports(agentIO.CapText) {
+		return fmt.Sprintf("通道 [%s] 不支持文本输出（能力: %s）", channel, caps.String())
+	}
+
+	stageCtx := &sdk.StageContext{
+		FinalText: content,
+		Phase:     sdk.StageBeforeOutput,
+	}
+	a.runStage(sdk.StageBeforeOutput, stageCtx)
+	if stageCtx.Response != nil {
+		return fmt.Sprintf("输出被插件拦截: %s", *stageCtx.Response)
+	}
+	if stageCtx.FinalText == "" {
+		return "输出被插件清空"
+	}
+
+	args := map[string]interface{}{
+		"payload": stageCtx.FinalText,
+		"type":    "text",
+	}
+
+	if dev := a.io.GetDevice(channel); dev != nil {
+		result, err := dev.Execute("output", args)
+		if err != nil {
+			return fmt.Sprintf("通过 [%s] 通道发送失败: %v", channel, err)
+		}
+		return fmt.Sprintf("已通过 [%s] 通道发送: %v", channel, result)
+	}
+
+	a.io.EmitTextTo("agent_io", channel, stageCtx.FinalText)
+	return fmt.Sprintf("已通过 [%s] 通道发送", channel)
+}
+
+func (a *Agent) executeOutputSendHelp(tc agentAPI.ToolCall) string {
+	suffix := strings.TrimPrefix(tc.Name, "output_send__")
+	channel := strings.TrimSuffix(suffix, "_help")
+	if channel == "" {
+		return "工具名称格式: output_send__{channel}_help"
+	}
+
+	dev := a.io.GetDevice(channel)
+	if dev == nil {
+		return fmt.Sprintf("通道 [%s] 不存在", channel)
+	}
+
+	caps := a.io.GetChannelCapabilities(channel)
+	capStr := "无"
+	if caps != 0 {
+		capStr = caps.String()
+	}
+
+	desc := dev.Description()
+	if desc == "" {
+		desc = channel + " 输出通道"
+	}
+
+	return fmt.Sprintf(`通道 [%s]
+描述: %s
+能力: %s
+
+【参数说明】
+payload — 消息载荷（必填）。type=text 时直接填文字，type=file/image 时填 URL 或路径
+meta    — JSON 对象，发送所需的元数据（可选，取决于通道是否需要路由信息）
+type    — 载荷类型（必填），枚举值见下方
+
+【type 枚举】
+- text    — 文本消息
+- voice   — 语音消息
+- image   — 图片
+- file    — 文件
+
+【meta JSON 格式】
+由通道描述定义，通常包含：
+- "group_id"  群号（群聊时必填）
+- "user_id"   目标用户 QQ 号（私聊时必填）
+- "reply_to"  回复某条消息 ID（可选）
+
+示例: output_send__%s(payload="你好", meta="{\"group_id\": 123456789}", type="text")`, channel, desc, capStr, channel)
+}
+
+func (a *Agent) executeOutputListChannels() string {
+	channels := a.io.ListChannels()
+	if len(channels) == 0 {
+		return "没有可用通道"
+	}
+	var parts []string
+	parts = append(parts, "可用通道:")
+	for _, ch := range channels {
+		if ch.OutputCaps == 0 {
+			continue
+		}
+		parts = append(parts, fmt.Sprintf("  - %s: [%s] %s", ch.Name, ch.OutputCaps.String(), ch.Description))
+		for _, t := range ch.Tools {
+			parts = append(parts, fmt.Sprintf("     工具: %s - %s", t.Name, t.Description))
+		}
+	}
+	return strings.Join(parts, "\n")
+}

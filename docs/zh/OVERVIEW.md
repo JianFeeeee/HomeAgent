@@ -69,12 +69,19 @@ HomeAgent 是一个持续运行的个人智能 Agent 框架。
 - 兼容 OpenAI API 格式的 `/v1/chat/completions` 端点
 - SSE 事件流 `/api/v1/chat/events`
 
+**ClawHub 适配器** (`internal/plugins/clawhubadapter/`)：
+- 统一加载 OC 插件（Node.js）、Python sidecar、JS sidecar、SKILL 四种插件类型
+- RegistryDispatcher 模式：Tool/Provider/Channel/Stage 注册通知分发
+- ClawHub 市场搜索与安装：`clawhubadapter_search` / `clawhubadapter_npm_install`
+- 9 种 Provider 类型映射为 LLM 可用工具（图片生成、搜索、语音等）
+- OC 通道自动注册为 IO 设备，支持文本/文件/图片/音频能力标志
+
 <img src="../../branding/mascot-xiaozhai.webp" width="20" style="border-radius:50%;vertical-align:middle"> :
 
 ## 项目状态
 
 核心功能已可运行。插件系统和 SDK 已就绪，可独立开发外部插件。
 
-- 内置插件：webui / cli / timer / cmd / mcp / agentcli / healthcheck / pluginmgr / openclaw / files
+- 内置插件：webui / cli / timer / cmd / mcp / agentcli / healthcheck / pluginmgr / clawhubadapter / files / cfgmgr
 - 外部插件示例（[homeagent-sdk](https://gitcode.com/JianFeeeee/homeagent-sdk) 仓库 `example/`，含 Go 和 Lua 两种类型）：qq / files / web / memo / bili / editdoc / a2a / ocr / sanitizer / luaplugintest / testlua
 - 打包分发：`.hmap` 插件包格式，通过 WebUI 安装
