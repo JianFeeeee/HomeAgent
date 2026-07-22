@@ -49,7 +49,8 @@ func (a *Agent) buildSystemPrompt(memContext string, userInput string) string {
 	prompt += "- payload 参数是消息载荷（文本直接填文字），type 指定载荷类型（text/voice/image/file），meta 是 JSON 发送元数据（群号/用户号等）。\n"
 	prompt += "- 用 output_send__{通道名}_help 查看该通道的 meta 格式和 type 枚举。\n"
 	prompt += "- 同一轮对话中可多次调用输出门工具。长消息应当分多次发出，而不是一口气发完。\n"
-	prompt += "- 直接返回纯文本不会到达任何用户端。"
+	prompt += "- 直接返回纯文本不会到达任何用户端。\n"
+	prompt += "- 需要多步执行的长任务：**必须先**用 output_send__ 发一条确认消息告诉用户已收到（如「好的我去看看～」），**然后再**执行具体排查工具。确认消息不代表任务完成，发出后仍需继续执行实际工具并最终汇报结果。"
 
 	if a.skills != nil {
 		if sp := a.skills.GetInjectedPrompt(); sp != "" {
