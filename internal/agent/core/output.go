@@ -11,25 +11,46 @@ import (
 
 func (a *Agent) executeOutputSendTool(tc agentAPI.ToolCall) string {
 	channel := strings.TrimPrefix(tc.Name, "output_send__")
-	if channel == "" {
-		return "工具名称格式: output_send__{channel}"
+	payload, _ := tc.Arguments["payload"].(string)
+	rawType, _ := tc.Arguments["type"].(string)
+	if channel == "" || payload == "" || rawType == "" {
+		return "工具名称格式: output_send__{channel}，payload 和 type 不能为空"
 	}
-	content, _ := tc.Arguments["content"].(string)
-	if content == "" {
-		return "content 不能为空"
-	}
+	meta, _ := tc.Arguments["meta"].(string)
 
 	caps := a.io.GetChannelCapabilities(channel)
 	if caps == 0 {
 		return fmt.Sprintf("通道 [%s] 不存在或不可用。可用输出工具列表见 output_list_channels", channel)
 	}
+	switch rawType {
+	case "text":
+		if !caps.Supports(agentIO.CapText) {
+			return fmt.Sprintf("通道 [%s] 不支持文本输出（能力: %s）", channel, caps.String())
+		}
+	case "voice", "audio":
+		if !caps.Supports(agentIO.CapAudio) {
+			return fmt.Sprintf("通道 [%s] 不支持语音输出（能力: %s）", channel, caps.String())
+		}
+	case "image":
+		if !caps.Supports(agentIO.CapImage) {
+			return fmt.Sprintf("通道 [%s] 不支持图片输出（能力: %s）", channel, caps.String())
+		}
+	case "file":
+		if !caps.Supports(agentIO.CapFile) {
+			return fmt.Sprintf("通道 [%s] 不支持文件输出（能力: %s）", channel, caps.String())
+		}
+	}
 
-	if !caps.Supports(agentIO.CapText) {
-		return fmt.Sprintf("通道 [%s] 不支持文本输出（能力: %s）", channel, caps.String())
+	args := map[string]interface{}{
+		"payload": payload,
+		"type":    rawType,
+	}
+	if meta != "" {
+		args["meta"] = meta
 	}
 
 	stageCtx := &sdk.StageContext{
-		FinalText: content,
+		FinalText: payload,
 		Phase:     sdk.StageBeforeOutput,
 	}
 	a.runStage(sdk.StageBeforeOutput, stageCtx)
@@ -39,11 +60,7 @@ func (a *Agent) executeOutputSendTool(tc agentAPI.ToolCall) string {
 	if stageCtx.FinalText == "" {
 		return "输出被插件清空"
 	}
-
-	args := map[string]interface{}{
-		"payload": stageCtx.FinalText,
-		"type":    "text",
-	}
+	args["payload"] = stageCtx.FinalText
 
 	if dev := a.io.GetDevice(channel); dev != nil {
 		result, err := dev.Execute("output", args)
@@ -53,7 +70,7 @@ func (a *Agent) executeOutputSendTool(tc agentAPI.ToolCall) string {
 		return fmt.Sprintf("已通过 [%s] 通道发送: %v", channel, result)
 	}
 
-	a.io.EmitTextTo("agent_io", channel, stageCtx.FinalText)
+	a.io.EmitTextTo("agent_io", channel, payload)
 	return fmt.Sprintf("已通过 [%s] 通道发送", channel)
 }
 
