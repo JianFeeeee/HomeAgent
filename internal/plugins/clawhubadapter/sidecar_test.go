@@ -7,7 +7,25 @@ import (
 	"testing"
 
 	sdk "gitcode.com/JianFeeeee/HomeAgent/internal/sdk"
+	pubsdk "gitcode.com/JianFeeeee/homeagent-sdk/sdk"
 )
+
+// mockSettings implements pubsdk.SettingsAPI for tests
+type mockSettings struct{}
+
+func (m *mockSettings) Get(key string) (interface{}, error) { return nil, nil }
+func (m *mockSettings) Set(key string, value interface{}) error { return nil }
+func (m *mockSettings) List(prefix string) ([]string, error) { return nil, nil }
+func (m *mockSettings) GetCore(key string) (interface{}, error) { return nil, nil }
+func (m *mockSettings) SetCore(key string, value interface{}) error { return nil }
+func (m *mockSettings) ListCore(prefix string) ([]string, error) { return nil, nil }
+func (m *mockSettings) GetPlugin(plugin, key string) (interface{}, error) { return nil, nil }
+func (m *mockSettings) SetPlugin(plugin, key string, value interface{}) error { return nil }
+func (m *mockSettings) ListPlugin(plugin, prefix string) ([]string, error) { return nil, nil }
+func (m *mockSettings) RegisterDef(def pubsdk.ConfigDef) {}
+func (m *mockSettings) Defs(prefix string) []*pubsdk.ConfigDef { return nil }
+func (m *mockSettings) Dump() map[string]interface{} { return nil }
+func (m *mockSettings) Plugins() []string { return nil }
 
 func TestLaunchSidecarNoMainJS(t *testing.T) {
 	tmpDir := t.TempDir()
@@ -327,6 +345,7 @@ func TestLoadOCPluginViaPluginStart(t *testing.T) {
 	var registeredTools []string
 	registeredHandlers := make(map[string]sdk.ToolHandler)
 	sdk := sdk.New("openclaw", sdk.SDKConfig{
+		Settings: &mockSettings{},
 		RegTool: func(name string, def sdk.ToolDef, handler sdk.ToolHandler) error {
 			registeredTools = append(registeredTools, name)
 			registeredHandlers[name] = handler
