@@ -9,6 +9,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"sync"
 	"time"
 )
@@ -161,6 +162,22 @@ func launchProcess(bin, arg, dir, name string) (*sidecarProcess, error) {
 	cmd := exec.Command(nodePath, arg, dir)
 	cmd.Dir = dir
 	cmd.Stderr = os.Stderr
+
+	// Add openclaw CLI bin dir to PATH so subprocesses can exec 'openclaw' command
+	if SimulatorDir != "" {
+		binDir := filepath.Join(SimulatorDir, "bin")
+		if info, err := os.Stat(binDir); err == nil && info.IsDir() {
+			env := os.Environ()
+			binDirPath := binDir + string(os.PathListSeparator)
+			for i, e := range env {
+				if strings.HasPrefix(e, "PATH=") {
+					env[i] = "PATH=" + binDirPath + e[5:]
+					break
+				}
+			}
+			cmd.Env = env
+		}
+	}
 
 	stdin, err := cmd.StdinPipe()
 	if err != nil {

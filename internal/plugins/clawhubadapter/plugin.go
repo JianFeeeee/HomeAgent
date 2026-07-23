@@ -30,6 +30,9 @@ var managerSrc string
 //go:embed pysimulator/main.py
 var pySimulatorSrc string
 
+//go:embed manager/openclaw_cli.js
+var openclawCliSrc string
+
 var SkillsDir string
 var SimulatorDir string
 
@@ -217,6 +220,16 @@ func (p *Plugin) launchManager(s *sdk.PluginSDK) error {
 		return fmt.Errorf("write manager: %w", err)
 	}
 
+	// Write openclaw CLI wrapper so plugins can exec 'openclaw plugin:install' etc.
+	cliBinDir := filepath.Join(p.simulatorDir, "bin")
+	if err := os.MkdirAll(cliBinDir, 0755); err != nil {
+		return fmt.Errorf("create cli bin dir: %w", err)
+	}
+	openclawPath := filepath.Join(cliBinDir, "openclaw")
+	if err := os.WriteFile(openclawPath, []byte(openclawCliSrc), 0755); err != nil {
+		return fmt.Errorf("write openclaw CLI: %w", err)
+	}
+
 	// Ensure skills dir exists for the manager to scan
 	os.MkdirAll(p.skillsDir, 0755)
 
@@ -323,6 +336,30 @@ func (p *Plugin) installFromClawHub(spec string) (interface{}, error) {
 	}
 
 	if err := p.reloadPlugin(name); err != nil {
+		// Fallback: try manager's enhanced detection
+		p.mu.Lock()
+		mgr := p.manager
+		p.mu.Unlock()
+
+		if mgr != nil {
+			data, mgrErr := mgr.call("plugins/detect", map[string]interface{}{
+				"dir":  extractDir,
+				"name": name,
+			})
+			if mgrErr == nil {
+				var result struct {
+					Name  string   `json:"name"`
+					Tools []string `json:"tools"`
+					Type  string   `json:"type"`
+				}
+				if json.Unmarshal(data, &result) == nil {
+					return map[string]interface{}{
+						"content": fmt.Sprintf("已从 ClawHub 安装插件: %s\n  工具: %s", result.Name, strings.Join(result.Tools, ", ")),
+					}, nil
+				}
+			}
+		}
+
 		return errorResult(fmt.Sprintf("loaded but with warning: %v", err)), nil
 	}
 

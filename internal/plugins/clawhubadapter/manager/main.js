@@ -16,6 +16,79 @@ function readJSON(file) {
   try { return JSON.parse(fs.readFileSync(file, 'utf8')); } catch (e) { return null; }
 }
 
+// ---- Enhanced OC Plugin Detection ----
+
+function resolvePackageEntry(dir, pkg) {
+  const candidates = [];
+
+  if (pkg) {
+    if (pkg.main) candidates.push(path.resolve(dir, pkg.main));
+    if (pkg.exports) {
+      const exp = pkg.exports;
+      if (typeof exp === 'string') candidates.push(path.resolve(dir, exp));
+      if (exp['.']) {
+        const dot = exp['.'];
+        if (typeof dot === 'string') candidates.push(path.resolve(dir, dot));
+        if (dot.require) candidates.push(path.resolve(dir, dot.require));
+        if (dot.default) candidates.push(path.resolve(dir, dot.default));
+      }
+    }
+  }
+
+  if (!pkg || !pkg.main) {
+    for (const name of ['index.js', 'main.js', 'src/index.js', 'lib/index.js']) {
+      candidates.push(path.join(dir, name));
+    }
+  }
+
+  for (const cp of candidates) {
+    if (fs.existsSync(cp)) return cp;
+  }
+  return null;
+}
+
+function ensureOCManifest(dir, name) {
+  const manifestPath = path.join(dir, 'openclaw.plugin.json');
+  if (fs.existsSync(manifestPath)) return;
+
+  const pkg = readJSON(path.join(dir, 'package.json'));
+  const entry = resolvePackageEntry(dir, pkg);
+  const relEntry = entry ? path.relative(dir, entry) : 'index.js';
+
+  const manifest = {
+    name: name,
+    version: (pkg && pkg.version) || '1.0.0',
+    entry: relEntry,
+    description: (pkg && pkg.description) || 'OpenClaw plugin (auto-detected)'
+  };
+  fs.writeFileSync(manifestPath, JSON.stringify(manifest, null, 2));
+  process.stderr.write(`[manager] created synthetic manifest: ${manifestPath}\n`);
+}
+
+function tryDetectOCPackage(pkgDir, pkgName) {
+  const pkg = readJSON(path.join(pkgDir, 'package.json'));
+  if (!pkg) return null;
+
+  const entryPath = resolvePackageEntry(pkgDir, pkg);
+  if (!entryPath) return null;
+
+  try {
+    delete require.cache[require.resolve(entryPath)];
+    const mod = require(entryPath);
+    const entry = mod.default || mod;
+    if (entry && typeof entry === 'object' && typeof entry.register === 'function') {
+      const name = pkgName || (pkg.openclaw ? (pkg.openclaw.name || pkg.name) : pkg.name) || path.basename(pkgDir);
+      ensureOCManifest(pkgDir, name);
+      process.stderr.write(`[manager] enhanced detection found OC plugin: ${name} (via require)\n`);
+      return { dir: pkgDir, name };
+    }
+  } catch (e) {
+    process.stderr.write(`[manager] require detect failed for ${pkgDir}: ${e.message}\n`);
+  }
+
+  return null;
+}
+
 // ---- Plugin registry ----
 const loadedPlugins = {}; // name -> { entry, tools: [{name, execute, ...}] }
 const allTools = [];      // flat list of all tools across all plugins
@@ -181,6 +254,27 @@ function installNPMPackage(spec, skillsDir) {
   }
 
   if (!foundPluginDir) {
+    process.stderr.write(`[manager] standard scan failed, trying enhanced detection...\n`);
+    for (const entry of entries) {
+      if (foundPluginDir) break;
+      const dir = path.join(nm, entry);
+      if (!fs.statSync(dir).isDirectory()) continue;
+
+      if (entry.startsWith('@')) {
+        for (const sub of fs.readdirSync(dir)) {
+          if (foundPluginDir) break;
+          const subDir = path.join(dir, sub);
+          const detected = tryDetectOCPackage(subDir, entry + '/' + sub);
+          if (detected) { foundPluginDir = detected.dir; foundName = detected.name; }
+        }
+      } else {
+        const detected = tryDetectOCPackage(dir, entry);
+        if (detected) { foundPluginDir = detected.dir; foundName = detected.name; }
+      }
+    }
+  }
+
+  if (!foundPluginDir) {
     fs.rmSync(installDir, { recursive: true, force: true });
     return { error: `no OC plugin found in installed package "${spec}"` };
   }
@@ -207,29 +301,195 @@ function cpSync(src, dst) {
   }
 }
 
+// ---- OpenClaw CLI compatibility ----
+
+function showQR(text) {
+  try {
+    const qrcode = require('qrcode');
+    qrcode.generate(text, { small: true }, (qr) => process.stdout.write(qr + '\n'));
+  } catch {
+    process.stdout.write(`QR: ${text}\n`);
+    process.stdout.write('(install qrcode package for QR display: npm install qrcode)\n');
+  }
+}
+
+async function runCLI(skillsDir, cliArgs) {
+  const cmd = cliArgs[0] || '';
+
+  switch (cmd) {
+    case 'plugin:install': {
+      const spec = cliArgs[1];
+      if (!spec) throw new Error('Usage: openclaw plugin:install <npm:package|clawhub:name|path>');
+      const result = installNPMPackage(spec, skillsDir);
+      if (result.error) throw new Error(result.error);
+      console.log(`Installed: ${result.name}`);
+      break;
+    }
+
+    case 'plugin:uninstall': {
+      const name = cliArgs[1];
+      if (!name) throw new Error('Usage: openclaw plugin:uninstall <name>');
+      const targetDir = path.join(skillsDir, name);
+      if (!fs.existsSync(targetDir)) throw new Error(`Plugin not found: ${name}`);
+      fs.rmSync(targetDir, { recursive: true, force: true });
+      console.log(`Uninstalled: ${name}`);
+      break;
+    }
+
+    case 'plugin:list': {
+      if (!fs.existsSync(skillsDir)) { console.log('(no plugins)'); break; }
+      let count = 0;
+      for (const entry of fs.readdirSync(skillsDir)) {
+        if (entry.startsWith('.')) continue;
+        const pluginDir = path.join(skillsDir, entry);
+        if (!fs.statSync(pluginDir).isDirectory()) continue;
+        const pkg = readJSON(path.join(pluginDir, 'package.json'));
+        const manifest = readJSON(path.join(pluginDir, 'openclaw.plugin.json'));
+        if (pkg || manifest) {
+          const version = pkg?.version || manifest?.version || '?';
+          const desc = pkg?.description || manifest?.description || '';
+          console.log(`  ${entry} v${version}${desc ? ' — ' + desc : ''}`);
+          count++;
+        }
+      }
+      if (count === 0) console.log('(no OpenClaw plugins)');
+      break;
+    }
+
+    case 'auth:login':
+    case 'auth:qrcode': {
+      const url = cliArgs[1] || 'openclaw://auth';
+      console.log('Scan the QR code to log in:');
+      showQR(url);
+      console.log('\nOr open this URL:');
+      console.log(`  ${url}`);
+      break;
+    }
+
+    case 'auth:status': {
+      console.log('Auth status: not implemented (running in HomeAgent mode)');
+      break;
+    }
+
+    case 'config:get': {
+      const key = cliArgs[1];
+      if (!key) throw new Error('Usage: openclaw config:get <key>');
+      // TODO: read from HomeAgent config system when bridged
+      console.log(`(not available in CLI mode: ${key})`);
+      break;
+    }
+
+    case 'config:set': {
+      const key = cliArgs[1];
+      const value = cliArgs[2];
+      if (!key || value === undefined) throw new Error('Usage: openclaw config:set <key> <value>');
+      // TODO: write to HomeAgent config system when bridged
+      console.log(`(not available in CLI mode: ${key}=${value})`);
+      break;
+    }
+
+    case 'config:list':
+      console.log('(not available in CLI mode)');
+      break;
+
+    case 'env': {
+      const info = {
+        homeAgent: true,
+        openclawVersion: 'compatible',
+        platform: process.platform,
+        nodeVersion: process.version,
+        skillsDir,
+      };
+      console.log(JSON.stringify(info, null, 2));
+      break;
+    }
+
+    case '--version':
+    case 'version':
+      console.log('HomeAgent OpenClaw Adapter 1.0.0 (openclaw-compatible)');
+      break;
+
+    case 'help':
+    case '--help':
+      console.log(`Usage: openclaw <command> [args]
+
+Commands:
+  plugin:install <spec>    Install a plugin (npm:xxx, clawhub:xxx, or path)
+  plugin:uninstall <name>  Uninstall a plugin
+  plugin:list              List installed plugins
+  auth:login [url]         Show QR code for login/binding
+  auth:status              Check authentication status
+  config:get <key>         Get config value
+  config:set <key> <val>   Set config value
+  config:list              List all config
+  env                      Show runtime environment info
+  --version                Show version
+  help                     Show this help`);
+      break;
+
+    default:
+      throw new Error(`Unknown command: ${cmd}\nRun 'openclaw help' for usage.`);
+  }
+}
+
 // ---- Main ----
 const args = process.argv.slice(2);
 if (args.length < 1) {
-  process.stderr.write('[manager] usage: node main.js <skills-dir>\n');
+  process.stderr.write('[manager] usage: node main.js <skills-dir> [openclaw-command...]\n');
   process.exit(1);
 }
 
 const skillsDir = path.resolve(args[0]);
 
+// CLI mode: if additional args provided, run as openclaw CLI command and exit
+if (args.length > 1) {
+  const cliArgs = args.slice(1);
+  runCLI(skillsDir, cliArgs).then(() => process.exit(0)).catch(e => {
+    process.stderr.write(`Error: ${e.message}\n`);
+    process.exit(1);
+  });
+  return;
+}
+
+// Server mode: persist skills dir reference for CLI wrapper
+try {
+  const simDir = path.dirname(process.argv[1]);
+  fs.writeFileSync(path.join(simDir, '.skillsdir'), skillsDir);
+} catch (e) {
+  process.stderr.write(`[manager] warning: could not write .skillsdir: ${e.message}\n`);
+}
+
+// Add our bin directory to PATH so subprocesses can find 'openclaw' CLI
+try {
+  const binDir = path.join(path.dirname(process.argv[1]), 'bin');
+  if (fs.existsSync(binDir)) {
+    const PATH = process.env.PATH || '';
+    if (!PATH.includes(binDir)) {
+      process.env.PATH = binDir + path.delimiter + PATH;
+    }
+  }
+} catch (e) {
+  process.stderr.write(`[manager] warning: could not update PATH: ${e.message}\n`);
+}
+
 // Load existing plugins on startup
 process.stderr.write(`[manager] scanning: ${skillsDir}\n`);
 if (fs.existsSync(skillsDir)) {
   for (const entry of fs.readdirSync(skillsDir)) {
-    if (entry.startsWith('.')) continue; // skip hidden
+    if (entry.startsWith('.')) continue;
     const pluginDir = path.join(skillsDir, entry);
     if (!fs.statSync(pluginDir).isDirectory()) continue;
     if (fs.existsSync(path.join(pluginDir, 'main.js')) || fs.existsSync(path.join(pluginDir, 'main.py'))) {
-      process.stderr.write(`[manager] skip non-OC plugin: ${entry} (main.js/main.py)\n`);
       continue;
     }
     if (fs.existsSync(path.join(pluginDir, 'openclaw.plugin.json')) ||
         (fs.existsSync(path.join(pluginDir, 'package.json')) && readJSON(path.join(pluginDir, 'package.json'))?.openclaw)) {
       loadPlugin(pluginDir, entry);
+    } else {
+      const detected = tryDetectOCPackage(pluginDir, entry);
+      if (detected) {
+        loadPlugin(detected.dir, detected.name);
+      }
     }
   }
 }
@@ -298,6 +558,66 @@ rl.on('line', async (line) => {
     if (fs.existsSync(pluginDir)) fs.rmSync(pluginDir, { recursive: true, force: true });
 
     writeJSON({ jsonrpc: '2.0', id, result: { status: 'uninstalled', name } });
+    return;
+  }
+
+  if (method === 'plugins/detect') {
+    const pluginDir = req.params?.dir;
+    const name = req.params?.name || (pluginDir ? path.basename(pluginDir) : '');
+    if (!pluginDir) { sendError(id, -32602, 'dir required'); return; }
+
+    const resolvedDir = path.resolve(pluginDir);
+    if (!fs.existsSync(resolvedDir)) {
+      sendError(id, -32601, `directory not found: ${resolvedDir}`);
+      return;
+    }
+
+    if (loadedPlugins[name]) {
+      writeJSON({ jsonrpc: '2.0', id, result: { name, tools: loadedPlugins[name].tools.map(t => t.name), type: 'loaded' } });
+      return;
+    }
+
+    // Install npm dependencies if package.json exists with deps
+    const pkgPath = path.join(resolvedDir, 'package.json');
+    if (fs.existsSync(pkgPath)) {
+      const pkg = readJSON(pkgPath);
+      if (pkg) {
+        const hasDeps = (pkg.dependencies && Object.keys(pkg.dependencies).length > 0) ||
+                        (pkg.devDependencies && Object.keys(pkg.devDependencies).length > 0);
+        if (hasDeps) {
+          try {
+            execSync(`npm install --no-save --prefix "${resolvedDir}"`, {
+              cwd: resolvedDir, stdio: ['pipe', 'pipe', 'pipe'],
+              timeout: 120000, env: { ...process.env, NODE_PATH: path.join(resolvedDir, 'node_modules') }
+            });
+            process.stderr.write(`[manager] installed dependencies for ${name}\n`);
+          } catch (e) {
+            process.stderr.write(`[manager] npm install failed for ${name}: ${e.message}\n`);
+          }
+        }
+      }
+    }
+
+    let detected = null;
+    if (fs.existsSync(path.join(resolvedDir, 'openclaw.plugin.json')) ||
+        (fs.existsSync(path.join(resolvedDir, 'package.json')) && readJSON(path.join(resolvedDir, 'package.json'))?.openclaw)) {
+      detected = { dir: resolvedDir, name };
+    } else {
+      detected = tryDetectOCPackage(resolvedDir, name);
+    }
+
+    if (!detected) {
+      sendError(id, -32601, `no OC plugin detected in: ${resolvedDir}`);
+      return;
+    }
+
+    const ok = loadPlugin(detected.dir, detected.name);
+    if (!ok) {
+      sendError(id, -32603, `failed to load detected plugin: ${detected.name}`);
+      return;
+    }
+
+    writeJSON({ jsonrpc: '2.0', id, result: { name: detected.name, tools: loadedPlugins[detected.name].tools.map(t => t.name), type: detected === Object(detected) && detected.dir === resolvedDir ? 'detected' : 'standard' } });
     return;
   }
 
