@@ -670,6 +670,23 @@ func (p *Plugin) notifyLoop(sp *sidecarProcess, s *sdk.PluginSDK, pluginName str
 }
 
 func (p *Plugin) translateAndRegister(n OCNotification, sp *sidecarProcess, s *sdk.PluginSDK, pluginName string) {
+	if n.Method == "channel_input" {
+		var params struct {
+			Channel string                 `json:"channel"`
+			Payload map[string]interface{} `json:"payload"`
+		}
+		if err := json.Unmarshal(n.Params, &params); err != nil || params.Channel == "" {
+			return
+		}
+		channelInputBuf[params.Channel] = append(channelInputBuf[params.Channel], params.Payload)
+		content, _ := params.Payload["content"].(string)
+		if content == "" {
+			data, _ := json.Marshal(params.Payload)
+			content = string(data)
+		}
+		s.InjectInterruptText(pluginName, params.Channel, fmt.Sprintf("[%s] %s", params.Channel, content))
+		return
+	}
 	if n.Method != "register" {
 		return
 	}
