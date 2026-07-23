@@ -4,11 +4,13 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
+	"strings"
 	"sync"
 
-	agentIO "gitcode.com/JianFeeeee/HomeAgent/internal/agent/io"
 	sdk "gitcode.com/JianFeeeee/HomeAgent/internal/sdk"
 )
+
+var channelInputBuf = map[string][]map[string]interface{}{}
 
 type ToolRegistry struct{}
 
@@ -95,39 +97,6 @@ func (r *ProviderRegistry) Dispatch(typeStr string, data json.RawMessage, plugin
 	log.Printf("[clawhubadapter] unknown provider type: %s (plugin: %s)", typeStr, pluginName)
 }
 
-type channelDevice struct {
-	name       string
-	pluginName string
-	sp         *sidecarProcess
-	ocType     string
-}
-
-func (d *channelDevice) Name() string                         { return d.name }
-func (d *channelDevice) Type() agentIO.DeviceType             { return agentIO.DeviceIO }
-func (d *channelDevice) Description() string                  { return fmt.Sprintf("OC channel %s (from %s)", d.name, d.pluginName) }
-func (d *channelDevice) OutputCapabilities() agentIO.OutputCapability { return ocTypeToCap(d.ocType) }
-func (d *channelDevice) Start() error                         { return nil }
-func (d *channelDevice) Stop() error                          { return nil }
-func (d *channelDevice) Tools() []agentIO.ToolDef             { return nil }
-func (d *channelDevice) Execute(tool string, args map[string]interface{}) (interface{}, error) {
-	return d.sp.CallTool(tool, args)
-}
-
-func ocTypeToCap(t string) agentIO.OutputCapability {
-	switch t {
-	case "text":
-		return agentIO.CapText
-	case "file":
-		return agentIO.CapFile
-	case "image":
-		return agentIO.CapImage
-	case "audio":
-		return agentIO.CapAudio
-	default:
-		return agentIO.CapText
-	}
-}
-
 type ChannelRegistry struct{}
 
 func (r *ChannelRegistry) Dispatch(data json.RawMessage, pluginName string, sp *sidecarProcess, s *sdk.PluginSDK) {
@@ -138,15 +107,44 @@ func (r *ChannelRegistry) Dispatch(data json.RawMessage, pluginName string, sp *
 	if err := json.Unmarshal(data, &d); err != nil || d.Name == "" {
 		return
 	}
-	dev := &channelDevice{
-		name:       d.Name,
-		pluginName: pluginName,
-		sp:         sp,
-		ocType:     d.Type,
+	chName := d.Name
+
+	var caps int
+	switch d.Type {
+	case "file":
+		caps = 2
+	case "image":
+		caps = 4
+	case "audio":
+		caps = 8
+	default:
+		caps = 1
 	}
-	if err := s.RegisterChannel(d.Name, dev); err != nil {
-		log.Printf("[clawhubadapter] register channel %s: %v", d.Name, err)
-	}
+	desc := fmt.Sprintf("OC channel %s (from %s)", chName, pluginName)
+	s.RegisterOutputChannel(chName, caps, desc, func(args map[string]interface{}) (interface{}, error) {
+		return sp.CallTool(chName, args)
+	})
+
+	readToolName := fmt.Sprintf("%s_read_%s_input", pluginName, strings.ReplaceAll(chName, "-", "_"))
+	s.RegisterTool(readToolName, sdk.ToolDef{
+		Name:        readToolName,
+		Description: fmt.Sprintf("读取 %s 通道的待处理输入消息", chName),
+		Parameters: map[string]interface{}{
+			"type":       "object",
+			"properties": map[string]interface{}{},
+		},
+	}, func(args map[string]interface{}) (interface{}, error) {
+		buf := channelInputBuf[chName]
+		if len(buf) == 0 {
+			return map[string]interface{}{"messages": []interface{}{}}, nil
+		}
+		msgs := make([]interface{}, len(buf))
+		for i, m := range buf {
+			msgs[i] = m
+		}
+		channelInputBuf[chName] = nil
+		return map[string]interface{}{"messages": msgs}, nil
+	})
 }
 
 type StageRegistry struct{}
