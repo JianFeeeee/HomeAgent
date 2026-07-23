@@ -93,13 +93,14 @@ function tryDetectOCPackage(pkgDir, pkgName) {
 const loadedPlugins = {}; // name -> { entry, tools: [{name, execute, ...}] }
 const allTools = [];      // flat list of all tools across all plugins
 const allProviders = {};  // type -> { name, instance } across all plugins
+const registeredChannels = {}; // name -> { pluginName, channelPlugin, output, send, type }
 
 function registerPluginTools(name, tools, api) {
   for (const t of tools) {
     if (t && t.name) {
       t._plugin = name;
       allTools.push(t);
-      notify('register', { type: 'tool', data: { name: t.name, description: t.description, parameters: t.parameters } });
+      notify('register', { type: 'tool', data: { name: t.name, description: t.description, parameters: t.parameters, plugin: name } });
     }
   }
   loadedPlugins[name] = { tools, api };
@@ -174,7 +175,7 @@ function loadPlugin(pluginDir, name) {
     },
     registerProvider: (p) => {
       if (p && p.id) allProviders['llm'] = { name: p.id, instance: p };
-      notify('register', { type: 'provider', data: { name: p?.id || p?.name } });
+      notify('register', { type: 'provider', data: { name: p?.id || p?.name, plugin: name } });
     },
     registerChannel: (ch) => {
       let chName = ch.name;
@@ -191,7 +192,7 @@ function loadPlugin(pluginDir, name) {
         registeredChannels[chName] = { pluginName: name, output: ch.output || ch.send, type: chType };
       }
 
-      notify('register', { type: 'channel', data: { name: chName, type: chType, id: chPlugin?.id } });
+      notify('register', { type: 'channel', data: { name: chName, type: chType, id: chPlugin?.id, plugin: name } });
     },
     submitInput: (msg) => {
       notify('channel_input', { channel: name, payload: msg });
@@ -202,15 +203,47 @@ function loadPlugin(pluginDir, name) {
     registerService: (svc) => notify('register', { type: 'service', data: { name: svc.name } }),
     registerImageGenerationProvider: (p) => {
       if (p) allProviders['image_generation'] = { name: p.name, instance: p };
-      notify('register', { type: 'image_generation_provider', data: { name: p?.name } });
+      notify('register', { type: 'image_generation_provider', data: { name: p?.name, plugin: name } });
     },
     registerWebFetchProvider: (p) => {
       if (p) allProviders['web_fetch'] = { name: p.name, instance: p };
-      notify('register', { type: 'web_fetch_provider', data: { name: p?.name } });
+      notify('register', { type: 'web_fetch_provider', data: { name: p?.name, plugin: name } });
     },
     registerWebSearchProvider: (p) => {
       if (p) allProviders['web_search'] = { name: p.name, instance: p };
-      notify('register', { type: 'web_search_provider', data: { name: p?.name } });
+      notify('register', { type: 'web_search_provider', data: { name: p?.name, plugin: name } });
+    },
+    registerSpeechProvider: (p) => {
+      if (p) allProviders['speech'] = { name: p.name, instance: p };
+      notify('register', { type: 'speech_provider', data: { name: p?.name, plugin: name } });
+    },
+    registerRealtimeTranscriptionProvider: (p) => {
+      if (p) allProviders['realtime_transcription'] = { name: p.name, instance: p };
+      notify('register', { type: 'realtime_transcription_provider', data: { name: p?.name, plugin: name } });
+    },
+    registerRealtimeVoiceProvider: (p) => {
+      if (p) allProviders['realtime_voice'] = { name: p.name, instance: p };
+      notify('register', { type: 'realtime_voice_provider', data: { name: p?.name, plugin: name } });
+    },
+    registerMediaUnderstandingProvider: (p) => {
+      if (p) allProviders['media_understanding'] = { name: p.name, instance: p };
+      notify('register', { type: 'media_understanding_provider', data: { name: p?.name, plugin: name } });
+    },
+    registerMusicGenerationProvider: (p) => {
+      if (p) allProviders['music_generation'] = { name: p.name, instance: p };
+      notify('register', { type: 'music_generation_provider', data: { name: p?.name, plugin: name } });
+    },
+    registerVideoGenerationProvider: (p) => {
+      if (p) allProviders['video_generation'] = { name: p.name, instance: p };
+      notify('register', { type: 'video_generation_provider', data: { name: p?.name, plugin: name } });
+    },
+    registerEmbeddingProvider: (p) => {
+      if (p) allProviders['embedding'] = { name: p.name, instance: p };
+      notify('register', { type: 'embedding_provider', data: { name: p?.name, plugin: name } });
+    },
+    registerMemoryEmbeddingProvider: (p) => {
+      if (p) allProviders['memory_embedding'] = { name: p.name, instance: p };
+      notify('register', { type: 'memory_embedding_provider', data: { name: p?.name, plugin: name } });
     },
     start: (cb) => {},
     stop: (cb) => {},
@@ -224,6 +257,8 @@ function loadPlugin(pluginDir, name) {
 
 // ---- Install npm package ----
 function installNPMPackage(spec, skillsDir) {
+  // Strip npm: prefix if present
+  if (spec.startsWith('npm:')) spec = spec.slice(4);
   process.stderr.write(`[manager] installing: ${spec}\n`);
   const installDir = path.join(skillsDir, '.npm_install_' + Date.now());
   fs.mkdirSync(installDir, { recursive: true });
@@ -342,6 +377,9 @@ async function runCLI(skillsDir, cliArgs) {
       const result = installNPMPackage(spec, skillsDir);
       if (result.error) throw new Error(result.error);
       console.log(`Installed: ${result.name}`);
+      // Write install result for CLI wrapper to pick up
+      const simDir = path.dirname(process.argv[1]);
+      fs.writeFileSync(path.join(simDir, '.install-result'), JSON.stringify({ name: result.name }));
       break;
     }
 
@@ -637,6 +675,25 @@ rl.on('line', async (line) => {
     }
 
     writeJSON({ jsonrpc: '2.0', id, result: { name: detected.name, tools: loadedPlugins[detected.name].tools.map(t => t.name), type: detected === Object(detected) && detected.dir === resolvedDir ? 'detected' : 'standard' } });
+    return;
+  }
+
+  if (method === 'plugins/load') {
+    const dir = req.params?.dir;
+    const pluginName = req.params?.name || (dir ? path.basename(dir) : '');
+    if (!dir) { sendError(id, -32602, 'dir required'); return; }
+    const resolvedDir = path.resolve(dir);
+    if (!fs.existsSync(resolvedDir)) { sendError(id, -32601, `directory not found: ${resolvedDir}`); return; }
+
+    if (loadedPlugins[pluginName]) {
+      writeJSON({ jsonrpc: '2.0', id, result: { name: pluginName, tools: loadedPlugins[pluginName].tools.map(t => t.name), type: 'already_loaded' } });
+      return;
+    }
+
+    const ok = loadPlugin(resolvedDir, pluginName);
+    if (!ok) { sendError(id, -32603, `failed to load plugin: ${pluginName}`); return; }
+
+    writeJSON({ jsonrpc: '2.0', id, result: { name: pluginName, tools: loadedPlugins[pluginName].tools.map(t => t.name), type: 'loaded' } });
     return;
   }
 
