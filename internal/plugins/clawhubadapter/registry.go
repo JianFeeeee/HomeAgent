@@ -10,7 +10,10 @@ import (
 	sdk "gitcode.com/JianFeeeee/HomeAgent/internal/sdk"
 )
 
-var channelInputBuf = map[string][]map[string]interface{}{}
+var (
+	channelInputBuf   = map[string][]map[string]interface{}{}
+	channelInputBufMu sync.Mutex
+)
 
 type ToolRegistry struct{}
 
@@ -20,11 +23,16 @@ func (r *ToolRegistry) Dispatch(data json.RawMessage, pluginName string, sp *sid
 		Label       string                 `json:"label"`
 		Description string                 `json:"description"`
 		Parameters  map[string]interface{} `json:"parameters"`
+		Plugin      string                 `json:"plugin"`
 	}
 	if err := json.Unmarshal(data, &d); err != nil || d.Name == "" {
 		return
 	}
-	toolName := fmt.Sprintf("%s_%s", pluginName, d.Name)
+	pn := pluginName
+	if d.Plugin != "" {
+		pn = d.Plugin
+	}
+	toolName := fmt.Sprintf("%s_%s", pn, d.Name)
 	tDef := sdk.ToolDef{
 		Name:        toolName,
 		Description: d.Description,
@@ -64,29 +72,75 @@ func (r *ProviderRegistry) Dispatch(typeStr string, data json.RawMessage, plugin
 	var d struct {
 		Name        string `json:"name"`
 		Description string `json:"description"`
+		Plugin      string `json:"plugin"`
 	}
 	json.Unmarshal(data, &d)
 
+	pn := pluginName
+	if d.Plugin != "" {
+		pn = d.Plugin
+	}
+
+	// Strip _provider suffix: "image_generation_provider" -> "image_generation"
+	lookupType := typeStr
+	if lookupType != "provider" {
+		lookupType = strings.TrimSuffix(lookupType, "_provider")
+	}
+	if lookupType == "" {
+		return
+	}
+
 	for _, p := range providerMap {
-		if p.ocType == typeStr {
-			toolName := fmt.Sprintf("%s_%s", pluginName, p.toolSuffix)
+		if p.ocType == lookupType {
+			toolName := fmt.Sprintf("%s_%s", pn, p.toolSuffix)
 			desc := p.desc
 			if d.Name != "" {
 				desc = fmt.Sprintf("[%s] %s", d.Name, desc)
+			}
+			props := map[string]interface{}{
+				"prompt": map[string]interface{}{"type": "string", "description": "Prompt for generation or search query"},
+			}
+			switch p.ocType {
+			case "image_generation":
+				props["prompt"] = map[string]interface{}{"type": "string", "description": "Image description prompt"}
+				props["size"] = map[string]interface{}{"type": "string", "description": "Image size (e.g. 1024x1024)", "enum": []interface{}{"256x256", "512x512", "1024x1024", "1792x1024", "1024x1792"}}
+			case "web_search":
+				props["query"] = map[string]interface{}{"type": "string", "description": "Search query"}
+				delete(props, "prompt")
+			case "web_fetch":
+				props["url"] = map[string]interface{}{"type": "string", "description": "URL to fetch"}
+				delete(props, "prompt")
+			case "media_understanding":
+				props["url"] = map[string]interface{}{"type": "string", "description": "Media URL to analyze"}
+				props["media_type"] = map[string]interface{}{"type": "string", "description": "Media type", "enum": []interface{}{"image", "audio", "video"}}
+			case "speech":
+				props["text"] = map[string]interface{}{"type": "string", "description": "Text to synthesize"}
+				props["voice"] = map[string]interface{}{"type": "string", "description": "Voice identifier"}
+			case "music_generation":
+				props["prompt"] = map[string]interface{}{"type": "string", "description": "Music description prompt"}
+				props["duration"] = map[string]interface{}{"type": "number", "description": "Duration in seconds"}
+			case "video_generation":
+				props["prompt"] = map[string]interface{}{"type": "string", "description": "Video description prompt"}
+				props["duration"] = map[string]interface{}{"type": "number", "description": "Duration in seconds"}
+			case "realtime_transcription":
+				props["audio_url"] = map[string]interface{}{"type": "string", "description": "Audio URL to transcribe"}
+			case "realtime_voice":
+				props["text"] = map[string]interface{}{"type": "string", "description": "Text to speak"}
+				props["voice"] = map[string]interface{}{"type": "string", "description": "Voice identifier"}
 			}
 			tDef := sdk.ToolDef{
 				Name:        toolName,
 				Description: desc,
 				Parameters: map[string]interface{}{
 					"type":       "object",
-					"properties": map[string]interface{}{},
+					"properties": props,
 				},
 			}
 			handler := func(sp *sidecarProcess, ocType string) sdk.ToolHandler {
 				return func(args map[string]interface{}) (interface{}, error) {
 					return sp.CallProvider(ocType, args)
 				}
-			}(sp, typeStr)
+			}(sp, lookupType)
 			if err := s.RegisterTool(toolName, tDef, handler); err != nil {
 				log.Printf("[clawhubadapter] register provider tool %s: %v", toolName, err)
 			}
@@ -94,20 +148,35 @@ func (r *ProviderRegistry) Dispatch(typeStr string, data json.RawMessage, plugin
 		}
 	}
 
-	log.Printf("[clawhubadapter] unknown provider type: %s (plugin: %s)", typeStr, pluginName)
+	if lookupType != typeStr {
+		log.Printf("[clawhubadapter] provider %s -> lookup %s (plugin: %s)", typeStr, lookupType, pluginName)
+	}
+	switch lookupType {
+	case "provider":
+		log.Printf("[clawhubadapter] generic LLM provider from %s handled natively by HomeAgent", pluginName)
+	case "embedding", "memory_embedding":
+		log.Printf("[clawhubadapter] embedding provider %s from %s ignored (HomeAgent uses native embeddings)", lookupType, pluginName)
+	default:
+		log.Printf("[clawhubadapter] unknown provider type: %s (plugin: %s)", typeStr, pluginName)
+	}
 }
 
 type ChannelRegistry struct{}
 
 func (r *ChannelRegistry) Dispatch(data json.RawMessage, pluginName string, sp *sidecarProcess, s *sdk.PluginSDK) {
 	var d struct {
-		Name string `json:"name"`
-		Type string `json:"type"`
+		Name   string `json:"name"`
+		Type   string `json:"type"`
+		Plugin string `json:"plugin"`
 	}
 	if err := json.Unmarshal(data, &d); err != nil || d.Name == "" {
 		return
 	}
 	chName := d.Name
+	pn := pluginName
+	if d.Plugin != "" {
+		pn = d.Plugin
+	}
 
 	var caps int
 	switch d.Type {
@@ -120,12 +189,12 @@ func (r *ChannelRegistry) Dispatch(data json.RawMessage, pluginName string, sp *
 	default:
 		caps = 1
 	}
-	desc := fmt.Sprintf("OC channel %s (from %s)", chName, pluginName)
+	desc := fmt.Sprintf("OC channel %s (from %s)", chName, pn)
 	s.RegisterOutputChannel(chName, caps, desc, func(args map[string]interface{}) (interface{}, error) {
 		return sp.CallTool(chName, args)
 	})
 
-	readToolName := fmt.Sprintf("%s_read_%s_input", pluginName, strings.ReplaceAll(chName, "-", "_"))
+	readToolName := fmt.Sprintf("%s_read_%s_input", pn, strings.ReplaceAll(chName, "-", "_"))
 	s.RegisterTool(readToolName, sdk.ToolDef{
 		Name:        readToolName,
 		Description: fmt.Sprintf("读取 %s 通道的待处理输入消息", chName),
@@ -134,8 +203,10 @@ func (r *ChannelRegistry) Dispatch(data json.RawMessage, pluginName string, sp *
 			"properties": map[string]interface{}{},
 		},
 	}, func(args map[string]interface{}) (interface{}, error) {
+		channelInputBufMu.Lock()
 		buf := channelInputBuf[chName]
 		if len(buf) == 0 {
+			channelInputBufMu.Unlock()
 			return map[string]interface{}{"messages": []interface{}{}}, nil
 		}
 		msgs := make([]interface{}, len(buf))
@@ -143,6 +214,7 @@ func (r *ChannelRegistry) Dispatch(data json.RawMessage, pluginName string, sp *
 			msgs[i] = m
 		}
 		channelInputBuf[chName] = nil
+		channelInputBufMu.Unlock()
 		return map[string]interface{}{"messages": msgs}, nil
 	})
 }

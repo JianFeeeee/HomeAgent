@@ -87,6 +87,9 @@ const registeredTools = [];
 // ---- Provider 存储（供 provider/call 用） ----
 const registeredProviders = {}; // type -> { name, instance }
 
+// ---- Channel 存储（供 tools/call 中通道输出路由用） ----
+const registeredChannels = {}; // name -> { output, send, channelPlugin, type }
+
 function registerTool(defOrFactory, opts) {
   if (typeof defOrFactory === 'function') {
     const toolCtx = {
@@ -192,7 +195,22 @@ const api = {
   },
 
   // ---- Channel 注册 ----
-  registerChannel: (ch) => notify('register', { type: 'channel', data: { name: ch.name, type: ch.type } }),
+  registerChannel: (ch) => {
+    let chName = ch.name;
+    let chType = ch.type || 'text';
+    const chPlugin = ch.plugin;
+    if (chPlugin && typeof chPlugin === 'object') {
+      registeredChannels[chName] = { channelPlugin: chPlugin, type: chType };
+    } else {
+      registeredChannels[chName] = { output: ch.output, send: ch.send, type: chType };
+    }
+    notify('register', { type: 'channel', data: { name: chName, type: chType } });
+  },
+
+  // ---- 输入提交（submitInput -> channel_input notification） ----
+  submitInput: (msg) => {
+    notify('channel_input', { channel: api.name, payload: msg });
+  },
 
   // ---- Hook / 生命周期 ----
   registerHook: (hook) => notify('register', { type: 'hook', data: { name: hook.name, event: hook.event } }),
@@ -313,6 +331,39 @@ rl.on('line', async (line) => {
     const params = req.params || {};
     const toolName = params.name;
     const args = params.arguments || {};
+
+    // Channel output routing: if toolName matches a registered channel, use channel's output handler
+    const ch = registeredChannels[toolName];
+    if (ch) {
+      try {
+        const channelPlugin = ch.channelPlugin;
+        if (channelPlugin && channelPlugin.outbound) {
+          const meta = args.meta || '';
+          let metaObj = {};
+          try { metaObj = typeof meta === 'string' ? JSON.parse(meta) : meta; } catch {}
+          const to = metaObj.user_id || metaObj.to || metaObj.group_id || '';
+          const ctx = { to, text: args.payload || '', mediaUrl: metaObj.mediaUrl || '', cfg: {}, accountId: metaObj.accountId || null };
+          let result;
+          if (ctx.mediaUrl && channelPlugin.outbound.sendMedia) {
+            result = await channelPlugin.outbound.sendMedia(ctx);
+          } else if (channelPlugin.outbound.sendText) {
+            result = await channelPlugin.outbound.sendText(ctx);
+          } else {
+            throw new Error(`channel ${toolName} has no sendText/sendMedia handler`);
+          }
+          writeJSON({ jsonrpc: '2.0', id, result: { status: 'sent', result } });
+        } else if (typeof ch.output === 'function') {
+          const result = await ch.output(args.payload, args.type, args.meta);
+          writeJSON({ jsonrpc: '2.0', id, result: { status: 'sent', result } });
+        } else if (typeof ch.send === 'function') {
+          const result = await ch.send(args.payload, args.meta);
+          writeJSON({ jsonrpc: '2.0', id, result: { status: 'sent', result } });
+        } else {
+          sendError(id, -32601, `channel ${toolName} has no output handler`);
+        }
+      } catch (e) { sendError(id, -32603, e.message); }
+      return;
+    }
 
     const tool = registeredTools.find(t => t.name === toolName);
     if (!tool) {
