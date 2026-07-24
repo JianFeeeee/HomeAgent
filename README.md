@@ -1,22 +1,20 @@
-<img src="branding/mascot-xiaozhai.webp" width="20" style="border-radius:50%;vertical-align:middle"> :
-
 # HomeAgent
 
 > **English**: [README_EN.md](./README_EN.md)
 
-首个提出**核心域与应用域分离**的 Agent 框架。内核零 IO，一切外界交互由插件承载——WebUI、QQ、命令行、文件操作、网络搜索、备忘，全部是插件，内核不碰任何 IO。
+以**核心域与应用域分离**为设计原则的 Agent 框架。内核执行零 IO 策略——所有外部交互（WebUI、QQ、命令行、文件操作、网络搜索、备忘等）均由插件层承载，内核不直接处理任何 IO 操作。
 
-配合**三层记忆架构**（Context → Document → Graph），单对话长期稳定运行，记忆不衰减。
+配合**三层记忆架构**（Context → Document → Graph），通过分级存储与自动归档机制维持单会话长周期运行的上下文连贯性。
 
 ```go
 homed（内核零 IO） ← PluginSDK → 插件（所有 IO 能力）
 ```
 
-## 核心创新
+## 设计要点
 
-**核心域与应用域分离** — 内核只做 LLM 编排、记忆管理、知识检索；所有 IO 能力（收发消息、读写文件、网络请求、硬件交互）全由插件实现。插件可热加载、独立开发、独立发布。这不是 RPC 框架的微服务拆分，而是 Agent 框架层次的领域划分。
+**核心域与应用域分离** — 内核职责限定为 LLM 编排、记忆管理与知识检索；所有 IO 能力（消息收发、文件读写、网络请求、硬件交互等）由插件实现。这种划分在 Agent 框架层面进行领域边界界定，内核与插件各有其责任范围。
 
-**三层记忆架构** — 解决 Agent 长期运行的记忆衰减问题：
+**三层记忆架构** — 通过分级存储策略管理 Agent 长期运行中的信息留存：
 - **Context 层**：预训练词嵌入 / TF-IDF 回退的相关性评分事件窗口，保护最近 10 条，维护 topK 条上下文
 - **Document 层**：临时记忆，冷数据自动下沉，也支持用户主动提交
 - **Graph 层**：SQLite 图数据库，持久化实体关系和语义记忆，支持蒸馏管道从原始对话中提取三元组
@@ -126,7 +124,7 @@ flowchart TB
     LLM -->|memory_recall| MEM
 ```
 
-详细说明见 [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md)。
+详细说明见 [`docs/zh/ARCHITECTURE.md`](docs/zh/ARCHITECTURE.md)。
 
 ## 看板娘
 

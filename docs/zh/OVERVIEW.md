@@ -2,32 +2,28 @@
 
 # HomeAgent — 项目概览
 
-<img src="../../branding/mascot-xiaozhai.webp" width="20" style="border-radius:50%;vertical-align:middle"> :
-
 ## 这是什么
 
 HomeAgent 是一个持续运行的个人智能 Agent 框架。
 
 核心架构：一个长时间运行的内核进程（`homed`），通过插件系统接入各种 IO 通道（QQ、Web、命令行等）。内核负责 LLM 调用编排、记忆管理、知识检索；插件负责所有外部 IO——收发消息、执行文件操作、搜索网络等。
 
-### 核心创新
+### 设计要点
 
-**核心域与应用域分离** — 这是首个明确提出这一划分的 Agent 框架。内核（核心域）不做任何 IO，所有 IO 能力归属插件（应用域）。边界通过 PluginSDK 明确定义：
+**核心域与应用域分离** — 内核（核心域）不执行任何 IO 操作，所有 IO 能力归属插件（应用域）。边界通过 PluginSDK 明确定义：
 - 插件向内核注册工具（Tool），供 LLM 调用
 - 插件挂入处理管道（Stage），在各阶段拦截/改写消息流
 - 插件订阅/发布事件（Event），松耦合通信
 - 插件通过 IO API 排队或打断投递输入
 
-这一划分的意义：内核保持纯粹（零 IO，只做编排和记忆），插件保持灵活（各司其职，热加载），互不污染。
+这一划分的意义在于职责边界清晰：内核专注于编排与记忆管理，插件负责具体 IO 实现，二者互不耦合。
 
-**三层记忆架构** — 解决 Agent 长期运行的记忆衰减：
+**三层记忆架构** — 通过分级存储策略管理 Agent 长周期运行中的信息留存：
 - **Context 层**：内存中局部词嵌入评分的事件窗口（jieba + TF-IDF + PMI → CosineSimilarity），实时维护最近上下文，低相关性事件自动下沉到下一层
 - **Document 层**：JSON 文件 + TF-IDF 向量索引的临时记忆，支持显式提交和隐式归档，冷数据蒸馏到 Graph
 - **Graph 层**：SQLite 图数据库，持久化实体（entities）和关系（relations），BFS 遍历召回，蒸馏管道从对话中提取三元组
 
-三层递进：上下文 → 冷归档 → 长期图记忆，确保 Agent 长时间运行不退化。
-
-<img src="../../branding/mascot-xiaozhai.webp" width="20" style="border-radius:50%;vertical-align:middle"> :
+三层递进：上下文 → 冷归档 → 长期图记忆，构成从短期到持久的信息衰减与整合管道。
 
 ## 它实际做了什么
 
@@ -77,7 +73,6 @@ HomeAgent 是一个持续运行的个人智能 Agent 框架。
 - 9 种 Provider 类型映射为 LLM 可用工具（图片生成、搜索、语音等）
 - OC 通道自动注册为 IO 设备，支持文本/文件/图片/音频能力标志
 
-<img src="../../branding/mascot-xiaozhai.webp" width="20" style="border-radius:50%;vertical-align:middle"> :
 
 ## 项目状态
 

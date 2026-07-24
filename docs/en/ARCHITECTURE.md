@@ -2,9 +2,23 @@
 
 # HomeAgent Architecture
 
-The kernel performs zero IO; all external interaction comes from plugins.
+## Architectural Principles
 
-<img src="../../branding/mascot-xiaozhai.webp" width="20" style="border-radius:50%;vertical-align:middle"> :
+HomeAgent's cognitive architecture consists of three subsystems: the event loop (eventLoop), the context window (RelevanceContext), and the stage pipeline (StageHost). Together they form the orchestration framework. Within this framework, the LLM serves as a scheduled reasoning unit; cognitive continuity is maintained by the event loop, context window, and stage pipeline.
+
+**The event loop (eventLoop)** is a three-way select: `a.io.InputChan()` receives external user input and dispatches to `processTextInput` / `processMediaInput`; `a.selfInputCh` receives internal system tasks (memory merges, distillation callbacks) routed through `processConsolidation` under the `_consolidation_` output channel; `a.ctx.Done()` accepts shutdown signals. A concurrently running `interceptLoop` goroutine independently reads `a.io.InputInterruptChan()` — on receiving a high-priority interrupt, it cancels the in-flight LLM HTTP request (`a.cancelLLM()`), then writes the event to `a.interceptCh`. This channel is drained non-blockingly by `drainInterrupts()` before each LLM call in `process()`, injecting interrupts as `[打断消息]` formatted entries into message history. The three interrupt delivery paths carry distinct semantics: `cancelLLM` terminates the current HTTP request, `interceptCh` injects text before the next LLM turn, and `InjectInput` triggers a new processing cycle when the event loop is idle.
+
+**The stage pipeline (StageHost)** manages two registration categories: tool definitions (ToolDef) and stage handlers (StageHandler). `RegisterTool` rejects duplicate names, infers the owning plugin name from the tool name prefix, and maintains a `toolPlugins` mapping. `RegisterStage` appends handlers to the corresponding stage list. On stage execution (`RunStage`), **all registered handlers execute in parallel via goroutines**, sharing a single `*StageContext` protected by `sync.RWMutex`. Individual handler panics are recovered independently without affecting other handlers. Short-circuit semantics are implemented by checking `ctx.Response != nil` — any stage handler can set this value to terminate the pipeline early. `ExecuteTool` includes built-in panic recovery with stack-trace recording. `UnregisterPluginTools` removes a plugin's tool set during hot-reload.
+
+**The context window (RelevanceContext)** maintains a chronologically ordered event list. `Append` applies `CleanTemplateText` to strip QQ templates and timestamp noise before computing the embedding vector using a three-branch strategy (agent events use Response, user events use Input, cold_storage uses Input+Response). `Prune` triggers when the event count exceeds `topK`: it **unconditionally protects the last 10 events from eviction** (recency bias), scores remaining candidates against the current input via CosineSimilarity, keeps `topK - 10` highest-scoring entries (floor at 0), then re-sorts chronologically. Pruned events from sources other than `agentcli` and `terminal` are archived to the Document layer via `docStore.ContextToDoc`, retaining original timestamps. Persistence uses 5-second debounced writes to a JSON file.
+
+**Tool definitions are aggregated from five sources**: IOManager-registered plugin tools; StageHost-registered SDK tools; Indexer-provided memory index tools; conditionally added built-in tools (depending on non-nil state of memory/knowledge/docStore/social/pluginReg/providerManager modules — including memory operations, knowledge retrieval, document queries, social networking, plugin reloading, child-agent spawning, per-output-channel send tools, and LLM source switching); and media processing tools added based on `pendingMedia` state. `buildToolDefs()` re-aggregates all sources on each process cycle.
+
+**Provider invocation follows an ordered fallback strategy**: `ProviderManager.OrderedProviders()` returns the provider list in registration order. The `process()` inner loop iterates this list attempting `Chat()` on each. HTTP 401/403 responses mark the provider as permanently unavailable; other error types also mark unavailability but with higher tolerance. If all providers fail, an error is returned to the caller. If a call is interrupted by context cancellation while the agent is still running, it is retried (only on non-consolidation paths).
+
+**The memory system adopts a three-tier storage hierarchy (Context → Document → Graph), tiering data by access locality and persistence requirements**: the Context layer is a fast-volatile working window using StaticEmbedder (pretrained word embeddings with TF-IDF fallback) for semantic relevance scoring; the Document layer **shares the same StaticEmbedder vector space with Context** (the embedder is injected into the Document Store at agent startup via `docStore.SetVectorizer(embedder)`), ensuring that relevance scores during Context pruning and semantic retrieval during Document queries operate within the same vector space — TF-IDF serves only as a fallback when the embedder is unavailable; the Graph layer uses SQLite as its persistence substrate with an entities table (nodes) and a relations table (directed edges), supporting BFS traversal recall. Data migration policies govern movement across tiers: low-scoring events sink from Context to Document (vectorized using the same embedder at archival time); cold documents, after a 72-hour no-access threshold, are distilled into triples via `docToTriples` and committed to Graph. The Indexer uses dual retrieval (entity vector similarity search + jieba keyword extraction) to construct Graph query seeds, and the `MarkRecalled` mechanism prevents entities already fetched via tool calls from being re-injected into the system prompt.
+
+**The separation of core domain and application domain** constrains the kernel's responsibilities to LLM orchestration, memory management, and knowledge retrieval — no direct IO operations; all external interaction is mediated through the plugin domain. This separation limits the kernel's complexity to a verifiable scope while granting the plugin domain independent evolution: plugins can be independently developed, independently released, hot-loaded, and do not directly affect the stability of the core domain.
 
 ## Message Processing Flow
 
@@ -66,7 +80,6 @@ Exit conditions: LLM has no tool calls / all rejected / exceeded limit.
 
 Setting `ctx.Response` at any stage jumps to `after_output`.
 
-<img src="../../branding/mascot-xiaozhai.webp" width="20" style="border-radius:50%;vertical-align:middle"> :
 
 ## Three-Layer Memory
 
@@ -86,10 +99,10 @@ Setting `ctx.Response` at any stage jumps to `after_output`.
          ↓ Prune archive                       ↑ LLM active recall
 
 ② Document (File Memory)
-   DocStore — JSON files + TF-IDF InvertedIndex
+   DocStore — JSON files + shared StaticEmbedder vector space with Context (fallback: TF-IDF InvertedIndex)
    Write: Prune archive / doc_commit / Graph snapshot (syncGraphToDocs)
    Read:
-       ├── Auto-inject: Query(input, top3) → similarity summary → [Related Memory Docs] → system prompt (read-only)
+       ├── Auto-inject: Query(input, top3) → similarity summary under same vector space → [Related Memory Docs] → system prompt (read-only)
        └── LLM active:  doc_query → Consume(read and delete)
                          → context.Append{Timestamp: d.CreatedAt, Source: "cold_storage"} per doc
                          → Docs written to context timeline with original timestamps, deleted from docStore
@@ -139,7 +152,7 @@ All vectorization unified under `StaticEmbedder` (`internal/memory/static_embedd
 | Location | File | Purpose | Algorithm |
 |----------|------|---------|-----------|
 | Context Prune | `context.go:155` | Trim low-relevance context events | VectorizeClean → CosineSimilarity(queryVec, evt.Vector) |
-| DocStore Query | `document.go:206` | Recall from document memory | TF-IDF Vectorize → vec.Search |
+| DocStore Query | `document.go:206` | Recall from document memory | StaticEmbedder.Vectorize (primary) / TF-IDF (fallback) → vec.Search |
 | Indexer Entity Search | `indexer.go:96+111` | Recall from Graph | vector entity search + jieba keywords → SQLite LIKE + BFS |
 | Entity Similarity Detection | `distill.go` | Detect similar entities in Graph | Bigram Jaccard (>0.75 → consolidation) |
 
@@ -157,7 +170,7 @@ All vectorization unified under `StaticEmbedder` (`internal/memory/static_embedd
 
 `internal/memory/document/document.go` — `Store`
 - Consume-on-read mode: deleted after `doc_query` retrieval
-- Dual recall: char-bigram TF-IDF vector search + jieba keyword extraction
+- Dual recall: shared StaticEmbedder semantic vector search + jieba keyword extraction (falls back to char-bigram TF-IDF when model is not loaded)
 
 ### Graph Layer
 
@@ -210,7 +223,6 @@ Heartbeat 30min:
 
 Entity conflict detection heuristic (bigram Jaccard > 0.75), routed through `selfInputCh` internal channel, LLM makes the final merge decision.
 
-<img src="../../branding/mascot-xiaozhai.webp" width="20" style="border-radius:50%;vertical-align:middle"> :
 
 ## Knowledge Base
 
@@ -219,7 +231,6 @@ Entity conflict detection heuristic (bigram Jaccard > 0.75), routed through `sel
 - Independent TF-IDF index, separate from memory system
 - `knowledge_search` / `knowledge_create` / `knowledge_list`
 
-<img src="../../branding/mascot-xiaozhai.webp" width="20" style="border-radius:50%;vertical-align:middle"> :
 
 ## Provider & Lua Adapter Layer
 
@@ -245,7 +256,6 @@ ProviderManager manages multiple sources, fallback in registration order. Lua ad
 
 VM built-ins: `json.encode` / `json.decode` / `log` / `http_get` / `http_post`.
 
-<img src="../../branding/mascot-xiaozhai.webp" width="20" style="border-radius:50%;vertical-align:middle"> :
 
 ## Plugin System
 
@@ -297,7 +307,6 @@ type Plugin interface {
 }
 ```
 
-<img src="../../branding/mascot-xiaozhai.webp" width="20" style="border-radius:50%;vertical-align:middle"> :
 
 ## Output Channel System
 
@@ -321,7 +330,6 @@ Capability flags:
 System prompt injection: output gate rules, multi-call support, long message splitting.
 Child agent permission: `output_send__` prefix tools are allowed.
 
-<img src="../../branding/mascot-xiaozhai.webp" width="20" style="border-radius:50%;vertical-align:middle"> :
 
 ## EventAgentLLMChain Event
 
@@ -330,7 +338,6 @@ Child agent permission: `output_send__` prefix tools are allowed.
 - WebUI subscribes to this event via SSE for real-time display
 - Plugins can subscribe via EventSubscriber (read-only for external plugins)
 
-<img src="../../branding/mascot-xiaozhai.webp" width="20" style="border-radius:50%;vertical-align:middle"> :
 
 ## Restricted External Plugin API
 
@@ -345,7 +352,6 @@ Extended fields:
 - Triple extensions: Confidence, SubjectType, ObjectType
 - Relation extension: Confidence
 
-<img src="../../branding/mascot-xiaozhai.webp" width="20" style="border-radius:50%;vertical-align:middle"> :
 
 ## Interrupt Mechanism
 
@@ -367,7 +373,6 @@ Three delivery paths:
 
 Code: `internal/agent/core/eventloop.go` — `interceptLoop` / `drainInterrupts`
 
-<img src="../../branding/mascot-xiaozhai.webp" width="20" style="border-radius:50%;vertical-align:middle"> :
 
 ## Configuration System
 
@@ -378,7 +383,6 @@ Code: `internal/agent/core/eventloop.go` — `interceptLoop` / `drainInterrupts`
 - `RegisterDefault` inserts ~80 default keys (seeds for 8 LLM sources)
 - WebUI settings page `/api/v1/settings` for read/write
 
-<img src="../../branding/mascot-xiaozhai.webp" width="20" style="border-radius:50%;vertical-align:middle"> :
 
 ## Code Structure
 
