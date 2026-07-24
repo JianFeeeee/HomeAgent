@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"gitcode.com/JianFeeeee/HomeAgent/internal/memory"
+	sdk "gitcode.com/JianFeeeee/HomeAgent/internal/sdk"
 )
 
 func newTestCtx() *RelevanceContext {
@@ -235,6 +236,40 @@ func containsStr(s, substr string) bool {
 		}
 	}
 	return false
+}
+
+func TestHasNoMemoryTool(t *testing.T) {
+	host := NewStageHost()
+	host.RegisterTool("no_mem_tool", sdk.ToolDef{Name: "no_mem_tool", NoMemory: true}, nil)
+	host.RegisterTool("mem_tool", sdk.ToolDef{Name: "mem_tool"}, nil)
+	lookup := host.ToolDef
+
+	gotNil := hasNoMemoryTool([]string{"no_mem_tool"}, nil)
+	if gotNil {
+		t.Error("hasNoMemoryTool with nil lookup should return false")
+	}
+
+	tests := []struct {
+		name      string
+		toolsUsed []string
+		want      bool
+	}{
+		{"empty tools", nil, false},
+		{"no matching tool", []string{"unknown"}, false},
+		{"tool without NoMemory", []string{"mem_tool"}, false},
+		{"tool with NoMemory", []string{"no_mem_tool"}, true},
+		{"mixed tools, first is no_memory", []string{"no_mem_tool", "mem_tool"}, true},
+		{"mixed tools, last is no_memory", []string{"mem_tool", "no_mem_tool"}, true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := hasNoMemoryTool(tt.toolsUsed, lookup)
+			if got != tt.want {
+				t.Errorf("hasNoMemoryTool(%v) = %v, want %v", tt.toolsUsed, got, tt.want)
+			}
+		})
+	}
 }
 
 func splitLines(s string) []string {

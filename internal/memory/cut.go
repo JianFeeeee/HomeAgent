@@ -93,7 +93,7 @@ var stopWords = map[string]bool{
 }
 
 func ExtractKeywords(text string) []string {
-	text = CleanTemplateText(text)
+	text = CleanText(text)
 	x := GetJieba()
 	if x == nil {
 		return nil
@@ -120,7 +120,7 @@ func ExtractKeywords(text string) []string {
 
 // CutExact 精确模式分词：返回去停用词后的所有有义项（不限数量），用于 doc→graph 蒸馏
 func CutExact(text string) []string {
-	text = CleanTemplateText(text)
+	text = CleanText(text)
 	x := GetJieba()
 	if x == nil {
 		return nil

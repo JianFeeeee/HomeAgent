@@ -54,6 +54,17 @@ func (h *StageHost) GetToolDefs() []sdk.ToolDef {
 	return defs
 }
 
+func (h *StageHost) ToolDef(name string) *sdk.ToolDef {
+	h.mu.RLock()
+	defer h.mu.RUnlock()
+	for _, def := range h.toolDefs {
+		if def.Name == name {
+			return &def
+		}
+	}
+	return nil
+}
+
 func (h *StageHost) ExecuteTool(name string, args map[string]interface{}) (ret interface{}, err error) {
 	defer func() {
 		if r := recover(); r != nil {

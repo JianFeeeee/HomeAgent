@@ -16,7 +16,7 @@ type realEvent struct {
 	Response  string    `json:"response"`
 }
 
-func TestCleanTemplateText(t *testing.T) {
+func TestCleanText(t *testing.T) {
 	cases := []struct {
 		input    string
 		expected string
@@ -53,7 +53,7 @@ func TestCleanTemplateText(t *testing.T) {
 	}
 
 	for i, c := range cases {
-		got := CleanTemplateText(c.input)
+		got := CleanText(c.input)
 		if c.expected != "" && got != c.expected {
 			t.Errorf("case %d:\n  input:    %q\n  expected: %q\n  got:      %q", i, trimLen(c.input, 60), c.expected, got)
 		}
@@ -91,11 +91,11 @@ func TestRealContextPerSourceVector(t *testing.T) {
 	clean := func(ev realEvent) string {
 		switch {
 		case ev.Source == "agent" && ev.Response != "":
-			return CleanTemplateText(ev.Response)
+			return CleanText(ev.Response)
 		case ev.Source == "cold_storage":
-			return CleanTemplateText(ev.Input + " " + ev.Response)
+			return CleanText(ev.Input + " " + ev.Response)
 		default:
-			return CleanTemplateText(ev.Input)
+			return CleanText(ev.Input)
 		}
 	}
 
@@ -275,11 +275,11 @@ func TestRealContextEmbedderStats(t *testing.T) {
 		var text string
 		switch {
 		case ev.Source == "agent" && ev.Response != "":
-			text = CleanTemplateText(ev.Response)
+			text = CleanText(ev.Response)
 		case ev.Source == "cold_storage":
-			text = CleanTemplateText(ev.Input + " " + ev.Response)
+			text = CleanText(ev.Input + " " + ev.Response)
 		default:
-			text = CleanTemplateText(ev.Input)
+			text = CleanText(ev.Input)
 		}
 		vec := e.Vectorize(text)
 		origLen := len(ev.Input + ev.Response)
