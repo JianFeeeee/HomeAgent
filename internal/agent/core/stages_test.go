@@ -197,3 +197,54 @@ func TestStageHostMultipleTools(t *testing.T) {
 		t.Errorf("expected from_p2, got %v", r2)
 	}
 }
+
+func TestStageHostToolDefLookup(t *testing.T) {
+	host := NewStageHost()
+	host.RegisterTool("tool_a", sdk.ToolDef{Name: "tool_a", NoMemory: true}, nil)
+	host.RegisterTool("tool_b", sdk.ToolDef{Name: "tool_b"}, nil)
+
+	def := host.ToolDef("tool_a")
+	if def == nil {
+		t.Fatal("expected tool_a to be found")
+	}
+	if !def.NoMemory {
+		t.Error("tool_a should have NoMemory=true")
+	}
+
+	def = host.ToolDef("tool_b")
+	if def == nil {
+		t.Fatal("expected tool_b to be found")
+	}
+	if def.NoMemory {
+		t.Error("tool_b should have NoMemory=false")
+	}
+
+	def = host.ToolDef("nonexistent")
+	if def != nil {
+		t.Errorf("expected nil for nonexistent tool, got %v", def)
+	}
+}
+
+func TestStageHostToolDefNoMemoryStored(t *testing.T) {
+	host := NewStageHost()
+	host.RegisterTool("mem_tool", sdk.ToolDef{Name: "mem_tool", NoMemory: true}, nil)
+	host.RegisterTool("normal_tool", sdk.ToolDef{Name: "normal_tool", NoMemory: false}, nil)
+
+	defs := host.GetToolDefs()
+	found := map[string]bool{}
+	for _, d := range defs {
+		found[d.Name] = d.NoMemory
+	}
+
+	if v, ok := found["mem_tool"]; !ok {
+		t.Error("mem_tool not found in defs")
+	} else if !v {
+		t.Error("mem_tool.NoMemory should be true")
+	}
+
+	if v, ok := found["normal_tool"]; !ok {
+		t.Error("normal_tool not found in defs")
+	} else if v {
+		t.Error("normal_tool.NoMemory should be false")
+	}
+}

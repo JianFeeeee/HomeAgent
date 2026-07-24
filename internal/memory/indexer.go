@@ -90,7 +90,7 @@ func (idx *Indexer) BuildContext(userInput string) *InjectedContext {
 		return &InjectedContext{Summary: ""}
 	}
 
-	input := CleanTemplateText(userInput)
+	input := CleanText(userInput)
 
 	// 1. 向量搜索：从实体名向量索引中找到相关实体
 	vectorEntities := idx.vectorSearchEntities(input)

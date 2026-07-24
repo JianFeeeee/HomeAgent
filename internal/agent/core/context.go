@@ -13,6 +13,7 @@ import (
 	"gitcode.com/JianFeeeee/HomeAgent/internal/memory"
 	"gitcode.com/JianFeeeee/HomeAgent/internal/memory/document"
 	"gitcode.com/JianFeeeee/HomeAgent/internal/memory/vector"
+	sdk "gitcode.com/JianFeeeee/HomeAgent/internal/sdk"
 )
 
 type ContextEvent struct {
@@ -27,12 +28,13 @@ type ContextEvent struct {
 const contextFlushInterval = 5 * time.Second
 
 type RelevanceContext struct {
-	mu       sync.Mutex
-	events   []*ContextEvent
-	embedder *memory.StaticEmbedder
-	savePath string
-	saveTimer *time.Timer
-	dirty    bool
+	mu            sync.Mutex
+	events        []*ContextEvent
+	embedder      *memory.StaticEmbedder
+	savePath      string
+	saveTimer     *time.Timer
+	dirty         bool
+	toolDefLookup func(name string) *sdk.ToolDef
 }
 
 func NewRelevanceContext(savePath string, embedder *memory.StaticEmbedder) *RelevanceContext {
@@ -46,6 +48,12 @@ func NewRelevanceContext(savePath string, embedder *memory.StaticEmbedder) *Rele
 	return rc
 }
 
+func (c *RelevanceContext) SetToolDefLookup(fn func(name string) *sdk.ToolDef) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.toolDefLookup = fn
+}
+
 func (c *RelevanceContext) load() {
 	data, err := os.ReadFile(c.savePath)
 	if err != nil {
@@ -56,7 +64,7 @@ func (c *RelevanceContext) load() {
 		return
 	}
 	for _, evt := range events {
-		evt.Input = memory.CleanTemplateText(evt.Input)
+		evt.Input = memory.CleanText(evt.Input)
 		evt.Vector = c.computeVector(evt)
 	}
 	c.events = events
@@ -65,11 +73,11 @@ func (c *RelevanceContext) load() {
 func textForVector(evt *ContextEvent) string {
 	switch {
 	case evt.Source == "agent" && evt.Response != "":
-		return memory.CleanTemplateText(evt.Response)
+		return memory.CleanText(evt.Response)
 	case evt.Source == "cold_storage":
-		return memory.CleanTemplateText(evt.Input + " " + evt.Response)
+		return memory.CleanText(evt.Input + " " + evt.Response)
 	default:
-		return memory.CleanTemplateText(evt.Input)
+		return memory.CleanText(evt.Input)
 	}
 }
 
@@ -95,7 +103,7 @@ func (c *RelevanceContext) Append(evt ContextEvent) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
-	evt.Input = memory.CleanTemplateText(evt.Input)
+	evt.Input = memory.CleanText(evt.Input)
 	evt.Vector = c.computeVector(&evt)
 	c.events = append(c.events, &evt)
 
@@ -193,7 +201,7 @@ func (c *RelevanceContext) Prune(currentInput string, topK int, docStore *docume
 	if docStore != nil && len(archive) > 0 {
 		var filtered []scored
 		for _, s := range archive {
-			if s.event.Source == "agentcli" || s.event.Source == "terminal" {
+			if hasNoMemoryTool(s.event.ToolsUsed, c.toolDefLookup) {
 				continue
 			}
 			filtered = append(filtered, s)
@@ -256,4 +264,16 @@ func (c *RelevanceContext) Len() int {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	return len(c.events)
+}
+
+func hasNoMemoryTool(toolsUsed []string, lookup func(string) *sdk.ToolDef) bool {
+	if lookup == nil {
+		return false
+	}
+	for _, name := range toolsUsed {
+		if def := lookup(name); def != nil && def.NoMemory {
+			return true
+		}
+	}
+	return false
 }

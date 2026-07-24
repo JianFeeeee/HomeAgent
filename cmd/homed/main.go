@@ -19,6 +19,7 @@ import (
 	agentPkg "gitcode.com/JianFeeeee/HomeAgent/internal/agent"
 	internalConfig "gitcode.com/JianFeeeee/HomeAgent/internal/config"
 	"gitcode.com/JianFeeeee/HomeAgent/internal/events"
+	logpkg "gitcode.com/JianFeeeee/HomeAgent/internal/log"
 	"gitcode.com/JianFeeeee/HomeAgent/internal/knowledge"
 	"gitcode.com/JianFeeeee/HomeAgent/internal/meta"
 	luapkg "gitcode.com/JianFeeeee/HomeAgent/internal/lua"
@@ -327,6 +328,7 @@ func main() {
 
 	// Wire registration callbacks: plugins' RegisterTool/RegisterStage → StageHost
 	pluginReg.SetToolRegistrar(func(name string, def sdk.ToolDef, handler sdk.ToolHandler) error {
+		log.Printf("[homed] SetToolRegistrar registering tool: %s (plugin=%s)", name, def.Plugin)
 		return stageHost.RegisterTool(name, def, handler)
 	})
 	pluginReg.SetStageRegistrar(func(stage sdk.Stage, handler sdk.StageHandler) {
@@ -335,6 +337,7 @@ func main() {
 	pluginReg.SetAPIRegistrar(func(name string) error {
 		return nil
 	})
+	pluginReg.SetToolCleaner(stageHost)
 
 	// ========================================================================
 	// Agent Core (需在插件加载前创建，因为插件 Configure 需要 StatusProvider)
@@ -420,7 +423,13 @@ func main() {
 	if err := pluginReg.Load(cfg.Plugin.Dir); err != nil {
 		log.Printf("[homed] warning: load plugins: %v", err)
 	}
-	log.Printf("[homed] stage host ready with %d registered tools", stageHost.ToolCount())
+	memory.SetTextCleaner(pluginReg.CleanText)
+	log.Printf("[homed] stage host ready with %d registered tools, text cleaner set", stageHost.ToolCount())
+
+	// 日志管理：层级压缩 + 保留策略
+	logManager := logpkg.NewManager(logDir, cfgReg)
+	go logManager.Start(ctx)
+	defer logManager.Stop()
 
 	agent.Start()
 	defer agent.Stop()

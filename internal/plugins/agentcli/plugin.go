@@ -197,6 +197,7 @@ func (p *Plugin) Start(s *sdk.PluginSDK) error {
 	s.RegisterTool("terminal_create", sdk.ToolDef{
 		Name:        "terminal_create",
 		Description: "创建一个新的交互式终端会话。返回终端 ID，后续通过此 ID 进行读写操作。适用于运行交互式程序如 vim、ssh、top、nano 等。终端默认 5 分钟后自动关闭，可通过 timeout 参数调整。",
+		NoMemory:    true,
 		Parameters: map[string]interface{}{
 			"type": "object",
 			"properties": map[string]interface{}{
@@ -225,6 +226,7 @@ func (p *Plugin) Start(s *sdk.PluginSDK) error {
 	s.RegisterTool("terminal_write", sdk.ToolDef{
 		Name:        "terminal_write",
 		Description: "向指定终端发送输入。支持普通文本和特殊键（通过 key 参数传入）。特殊键包括：enter, tab, escape, ctrl_a~ctrl_z, alt_a~alt_z, f1~f12, up, down, left, right, home, end, backspace, delete, page_up, page_down。普通文本传入 input 参数即可。",
+		NoMemory:    true,
 		Parameters: map[string]interface{}{
 			"type": "object",
 			"properties": map[string]interface{}{
@@ -250,6 +252,7 @@ func (p *Plugin) Start(s *sdk.PluginSDK) error {
 	s.RegisterTool("terminal_read", sdk.ToolDef{
 		Name:        "terminal_read",
 		Description: "读取指定终端的当前屏幕内容。返回自上次读取以来的新输出。如需持续监控请多次调用。",
+		NoMemory:    true,
 		Parameters: map[string]interface{}{
 			"type": "object",
 			"properties": map[string]interface{}{
@@ -271,6 +274,7 @@ func (p *Plugin) Start(s *sdk.PluginSDK) error {
 	s.RegisterTool("terminal_resize", sdk.ToolDef{
 		Name:        "terminal_resize",
 		Description: "调整指定终端的尺寸（行数和列数）。",
+		NoMemory:    true,
 		Parameters: map[string]interface{}{
 			"type": "object",
 			"properties": map[string]interface{}{
@@ -296,6 +300,7 @@ func (p *Plugin) Start(s *sdk.PluginSDK) error {
 	s.RegisterTool("terminal_close", sdk.ToolDef{
 		Name:        "terminal_close",
 		Description: "关闭指定终端会话。释放资源。",
+		NoMemory:    true,
 		Parameters: map[string]interface{}{
 			"type": "object",
 			"properties": map[string]interface{}{
@@ -313,6 +318,7 @@ func (p *Plugin) Start(s *sdk.PluginSDK) error {
 	s.RegisterTool("terminal_list", sdk.ToolDef{
 		Name:        "terminal_list",
 		Description: "列出所有活跃的终端会话及其状态。",
+		NoMemory:    true,
 		Parameters: map[string]interface{}{
 			"type":       "object",
 			"properties": map[string]interface{}{},

@@ -205,7 +205,7 @@ func (a *Agent) processMediaInput(evt *agentIO.InputEvent) {
 
 	a.emitResponse(evt, response)
 
-	if !stageCtx.NoMemory {
+	if !stageCtx.NoMemory && !a.hasNoMemoryTool(toolsUsed) {
 		a.emitMemoryCandidate(evt.Source, fallback, response, toolsUsed)
 	}
 }
@@ -334,7 +334,7 @@ func (a *Agent) processTextInput(evt *agentIO.InputEvent, input string) {
 
 	a.emitResponse(evt, response)
 
-	if !stageCtx.NoMemory {
+	if !stageCtx.NoMemory && !a.hasNoMemoryTool(toolsUsed) {
 		a.emitMemoryCandidate(evt.Source, input, response, toolsUsed)
 	}
 }
@@ -384,6 +384,15 @@ func (a *Agent) emitResponse(evt *agentIO.InputEvent, response string) {
 	})
 	stageCtx.Phase = sdk.StageAfterOutput
 	a.runStage(sdk.StageAfterOutput, stageCtx)
+}
+
+func (a *Agent) hasNoMemoryTool(toolsUsed []string) bool {
+	for _, name := range toolsUsed {
+		if def := a.stageHost.ToolDef(name); def != nil && def.NoMemory {
+			return true
+		}
+	}
+	return false
 }
 
 func (a *Agent) drainInterrupts() []string {

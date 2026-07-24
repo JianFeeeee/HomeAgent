@@ -110,6 +110,7 @@ func (p *Plugin) Start(s *sdk.PluginSDK) error {
 	s.RegisterTool("cmd_run", sdk.ToolDef{
 		Name:        "cmd_run",
 		Description: "执行一条系统命令并返回输出。适用于查询系统信息、运行脚本、操作文件等单次命令场景。命令在临时 shell 中执行，不支持交互。如需交互式终端（如 vim、ssh、top），请使用 terminal_create 相关工具。",
+		NoMemory:    true,
 		Parameters: map[string]interface{}{
 			"type": "object",
 			"properties": map[string]interface{}{

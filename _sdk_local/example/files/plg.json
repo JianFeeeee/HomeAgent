@@ -1,0 +1,11 @@
+{
+  "name": "files",
+  "name_zh": "文件系统",
+  "name_en": "File System",
+  "version": "1.0.0",
+  "description": "文件系统操作工具集（读取/写入/编辑/列表），提供沙箱化文件访问，支持配置工作目录。",
+  "author": "HomeAgent",
+  "entry": "plugin.so",
+  "tags": ["files", "filesystem"],
+  "targets": "linux/amd64"
+}
