@@ -2,32 +2,28 @@
 
 # HomeAgent — Project Overview
 
-<img src="../../branding/mascot-xiaozhai.webp" width="20" style="border-radius:50%;vertical-align:middle"> :
-
 ## What Is This
 
 HomeAgent is a continuously-running personal intelligent Agent framework.
 
 Core architecture: a long-running kernel process (`homed`) that connects to various IO channels (QQ, Web, CLI, etc.) through a plugin system. The kernel handles LLM orchestration, memory management, and knowledge retrieval; plugins handle all external IO — sending/receiving messages, file operations, web search, etc.
 
-### Key Innovations
+### Design Highlights
 
-**Separation of Core Domain and Application Domain** — This is the first Agent framework to explicitly make this distinction. The kernel (core domain) performs zero IO; all IO capabilities belong to plugins (application domain). The boundary is clearly defined through PluginSDK:
+**Separation of Core Domain and Application Domain** — The kernel (core domain) performs no IO operations; all IO capabilities belong to plugins (application domain). The boundary is defined through PluginSDK:
 - Plugins register tools (Tool) with the kernel for LLM invocation
 - Plugins hook into the processing pipeline (Stage) to intercept/rewrite message flow at various phases
 - Plugins subscribe/publish events (Event) for loosely-coupled communication
 - Plugins queue or interrupt input delivery through IO API
 
-The significance: the kernel stays pure (zero IO, only orchestration and memory), plugins stay flexible (each does its job, hot-loadable), with no cross-contamination.
+The significance lies in clear responsibility boundaries: the kernel focuses on orchestration and memory management, while plugins handle IO implementation — the two are not coupled.
 
-**Three-Layer Memory Architecture** — Solves the memory decay problem for long-running agents:
+**Three-Layer Memory Architecture** — Manages information retention across long agent runtimes through a tiered storage strategy:
 - **Context Layer**: In-memory local word embedding scored event window (jieba + TF-IDF + PMI → CosineSimilarity), maintains recent context in real-time, low-relevance events automatically sink to the next layer
 - **Document Layer**: JSON files + TF-IDF vector-indexed temporary memory, supports explicit submission and implicit archival, cold data distills to Graph
 - **Graph Layer**: SQLite graph database, persists entities and relations, BFS traversal recall, distillation pipeline extracts triples from conversations
 
-Three progressive layers: context → cold archive → long-term graph memory, ensuring the agent doesn't degrade over time.
-
-<img src="../../branding/mascot-xiaozhai.webp" width="20" style="border-radius:50%;vertical-align:middle"> :
+Three progressive layers — context, cold archive, long-term graph memory — form an information decay and consolidation pipeline from short-term to persistent storage.
 
 ## What It Actually Does
 
@@ -77,7 +73,6 @@ Code is in the project root, implemented in Go.
 - 9 provider types mapped to LLM-accessible tools (image generation, web search, speech, etc.)
 - OC channels auto-registered as IO devices with text/file/image/audio capability flags
 
-<img src="../../branding/mascot-xiaozhai.webp" width="20" style="border-radius:50%;vertical-align:middle"> :
 
 ## Project Status
 

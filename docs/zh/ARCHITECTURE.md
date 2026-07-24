@@ -2,9 +2,23 @@
 
 # HomeAgent 架构
 
-内核零 IO，一切外界交互来自插件。
+## 体系结构原则
 
-<img src="../../branding/mascot-xiaozhai.webp" width="20" style="border-radius:50%;vertical-align:middle"> :
+HomeAgent 的认知架构由三个核心子系统构成：事件循环（eventLoop）、上下文窗口（RelevanceContext）与阶段管道（StageHost）。三者共同组成编排框架。LLM 在其中作为可调度的推理执行单元运行；认知连续性由事件循环、上下文窗口与阶段管道维持。
+
+**事件循环（eventLoop）** 是一个三路 select 循环：`a.io.InputChan()` 接收外部用户输入并分发至 `processTextInput` / `processMediaInput`；`a.selfInputCh` 接收内部系统任务（如记忆合并、蒸馏回调），以 `_consolidation_` 输出通道标识区分，走 `processConsolidation` 路径；`a.ctx.Done()` 接受关闭信号。与之并行运行的 `interceptLoop` 协程独立监听 `a.io.InputInterruptChan()`，收到高优先级中断时先取消当前 LLM HTTP 请求（`a.cancelLLM()`），再将事件写入 `a.interceptCh`——该通道在 `process()` 每次 LLM 调用前由 `drainInterrupts()` 非阻塞排空，以 `[打断消息]` 格式注入消息历史。三条中断投递路径各具语义：`cancelLLM` 终结当前 HTTP 请求，`interceptCh` 在下一轮 LLM 调用前注入文本，`InjectInput` 在 eventLoop 空闲时触发新一轮处理。
+
+**阶段管道（StageHost）** 管理两类注册：工具定义（ToolDef）与阶段处理器（StageHandler）。`RegisterTool` 拒绝同名注册，推断工具所属插件名，并维护工具到插件的映射表 `toolPlugins`。`RegisterStage` 将处理器追加至对应阶段的处理器列表。触发阶段执行时（`RunStage`），**所有已注册处理器通过 goroutine 并行执行**，共享同一 `*StageContext` 实例（通过 `sync.RWMutex` 保护并发访问）。单个处理器的 panic 被独立恢复，不影响其他处理器。短路语义通过检查 `ctx.Response != nil` 实现——任一阶段处理器可设置此值提前终止当前链路。工具执行 `ExecuteTool` 内置 panic 恢复与栈追踪记录。`UnregisterPluginTools` 在插件热重载时移除对应工具集。
+
+**上下文窗口（RelevanceContext）** 维护一个按时间排序的事件列表。`Append` 在录入前经 `CleanTemplateText` 剥离 QQ 模板与时间戳噪声，再通过三分支向量策略（agent 事件用 Response，用户事件用 Input，cold_storage 用 Input+Response）计算嵌入向量。`Prune` 在事件数超过 `topK` 时触发，**无条件保护最近 10 条事件不被裁剪**（recency bias），对剩余候选事件计算与当前输入的 CosineSimilarity，按评分降序保留 `topK - 10` 条（下限为 0），之后按时间戳重排序。裁剪出的事件中，过滤掉 `agentcli` 和 `terminal` 来源后，其余通过 `docStore.ContextToDoc` 归档至 Document 层，保留原始时间戳。持久化采用 5 秒防抖写入磁盘 JSON 文件。
+
+**工具定义聚合自五个来源**：IOManager 注册的插件工具；StageHost 注册的 SDK 插件工具；Indexer 提供的记忆索引工具；内置条件工具（依据 memory / knowledge / docStore / social / pluginReg / providerManager 等模块的非空状态选择性添加，包括记忆操作、知识检索、文档查询、社交网络、插件重载、子代理生成、输出通道工具、LLM 源切换等）；以及按 `pendingMedia` 状态添加的媒体处理工具。`buildToolDefs()` 在每次 process 周期中重新聚合所有这些来源。
+
+**Provider 调用采用有序降级策略**：`ProviderManager.OrderedProviders()` 返回按注册顺序排列的 provider 列表。`process()` 内循环遍历该列表依次尝试 `Chat()` 调用。401/403 状态码将对应 provider 标记为永久不可用；其他错误类型同样标记不可用但容忍度更高。全部 provider 失败时返回错误返回调用方。若调用因 context 取消而中断且 Agent 仍在运行，则重试（仅当处理非 consolidation 路径时）。
+
+**记忆体系采用三级存储层级结构（Context → Document → Graph），按访问局部性与持久化需求进行数据分置**：Context 层为高速易失工作窗口，使用 StaticEmbedder（预训练词嵌入）进行语义相关性评分，以 TF-IDF 为回退策略；Document 层与 Context **共享同一 StaticEmbedder 向量空间**（agent 启动时将 embedder 注入 Document Store），使 Context 裁剪时的事件相关性评分与 Document 查询时的语义检索处于同一向量空间中，确保冷热数据之间的相似度可比——TF-IDF 仅在 embedder 未加载时作为兜底方案；Graph 层以 SQLite 为持久化载体，entities 表与 relations 表分别存储节点与有向边，支持 BFS 遍历召回。三级之间定义数据迁移策略：低分事件从 Context 下沉至 Document（以归档时相同的 embedder 向量化写入），冷文档经 72 小时未访问阈值判定后通过 `docToTriples` 蒸馏为三元组写入 Graph。Indexer 通过双路召回（实体向量相似度搜索 + jieba 关键词提取）构建 Graph 查询种子，结合 `MarkRecalled` 机制避免已被工具调用取回的实体重复注入系统提示。
+
+**核心域与应用域的职责域分离**是一项系统级架构决策：内核的责任边界限定在 LLM 编排、记忆管理与知识检索三个维度内，不直接承载任何 IO 操作；所有外部交互通过插件域接入。该分离将核心域的复杂度控制在可验证范围内，同时赋予插件域独立的演化自由度——后者可独立开发、独立发布、热加载，且不对核心域的稳定性构成直接影响。
 
 ## 消息处理流程
 
@@ -66,7 +80,6 @@ eventLoop() → processTextInput()
 
 任意阶段设 `ctx.Response` 即跳到 `after_output`。
 
-<img src="../../branding/mascot-xiaozhai.webp" width="20" style="border-radius:50%;vertical-align:middle"> :
 
 ## 三层记忆
 
@@ -86,10 +99,10 @@ eventLoop() → processTextInput()
          ↓ Prune 归档                          ↑ LLM 主动召回
 
 ② Document (文件记忆)
-   DocStore — JSON文件 + TF-IDF InvertedIndex
+   DocStore — JSON文件 + 与 Context 共享的 StaticEmbedder 向量空间（兜底: TF-IDF InvertedIndex）
    写入: Prune归档 / doc_commit / Graph快照(syncGraphToDocs)
    读取:
-       ├── 自动注入: Query(input, top3) → 相似度摘要 → 【相关记忆文档】→ system prompt (只读)
+       ├── 自动注入: Query(input, top3) → 同一向量空间下相似度摘要 → 【相关记忆文档】→ system prompt (只读)
        └── LLM主动:  doc_query → Consume(读取并删除)
                          → 逐条 context.Append{Timestamp: d.CreatedAt, Source: "cold_storage"}
                          → 文档以原始时间戳写入 context 时间线, 从 docStore 删除
@@ -139,7 +152,7 @@ eventLoop() → processTextInput()
 | 位置 | 文件 | 用途 | 算法 |
 |------|------|------|------|
 | Context Prune | `context.go:155` | 裁剪低相关性上下文事件 | VectorizeClean → CosineSimilarity(queryVec, evt.Vector) |
-| DocStore Query | `document.go:206` | 文档记忆召回 | TF-IDF Vectorize → vec.Search |
+| DocStore Query | `document.go:206` | 文档记忆召回 | StaticEmbedder.Vectorize（首选）/ TF-IDF（兜底）→ vec.Search |
 | Indexer 实体搜索 | `indexer.go:96+111` | Graph实体召回 | 向量实体搜索 + jieba关键词 → SQLite LIKE + BFS |
 | 实体相似度检测 | `distill.go` | Graph中相似实体 | Bigram Jaccard (>0.75 → consolidation) |
 
@@ -157,7 +170,7 @@ eventLoop() → processTextInput()
 
 `internal/memory/document/document.go` — `Store`
 - 消费即删模式：`doc_query` 检索到后删除
-- 双路召回：char-bigram TF-IDF 向量搜索 + jieba 关键词提取
+- 双路召回：与 Context 共享的 StaticEmbedder 语义向量搜索 + jieba 关键词提取（模型未加载时回退 char-bigram TF-IDF）
 
 ### Graph 层
 
@@ -210,7 +223,6 @@ eventLoop() → processTextInput()
 
 实体冲突检测启发式（bigram Jaccard > 0.75），走 `selfInputCh` 内部通道，LLM 最终判断是否合并。
 
-<img src="../../branding/mascot-xiaozhai.webp" width="20" style="border-radius:50%;vertical-align:middle"> :
 
 ## 知识库
 
@@ -219,7 +231,6 @@ eventLoop() → processTextInput()
 - 独立 TF-IDF 索引，与记忆系统不冲突
 - `knowledge_search` / `knowledge_create` / `knowledge_list`
 
-<img src="../../branding/mascot-xiaozhai.webp" width="20" style="border-radius:50%;vertical-align:middle"> :
 
 ## Provider 与 Lua 适配层
 
@@ -245,7 +256,6 @@ ProviderManager 管理多个源，按注册顺序 fallback。Lua 适配器位于
 
 VM 内置 `json.encode` / `json.decode` / `log` / `http_get` / `http_post`。
 
-<img src="../../branding/mascot-xiaozhai.webp" width="20" style="border-radius:50%;vertical-align:middle"> :
 
 ## 插件系统
 
@@ -297,7 +307,6 @@ type Plugin interface {
 }
 ```
 
-<img src="../../branding/mascot-xiaozhai.webp" width="20" style="border-radius:50%;vertical-align:middle"> :
 
 ## 输出通道系统
 
@@ -321,7 +330,6 @@ type Plugin interface {
 系统提示注入：输出门控规则、多调用支持、长消息拆分。
 子代理权限：`output_send__` 前缀工具允许使用。
 
-<img src="../../branding/mascot-xiaozhai.webp" width="20" style="border-radius:50%;vertical-align:middle"> :
 
 ## LLM 链事件
 
@@ -330,7 +338,6 @@ type Plugin interface {
 - WebUI 通过 SSE 订阅此事件实现实时显示
 - 插件可通过 EventSubscriber 订阅（外部插件只读）
 
-<img src="../../branding/mascot-xiaozhai.webp" width="20" style="border-radius:50%;vertical-align:middle"> :
 
 ## 受限外部插件 API
 
@@ -345,7 +352,6 @@ type Plugin interface {
 - Triple 扩展：Confidence、SubjectType、ObjectType
 - Relation 扩展：Confidence
 
-<img src="../../branding/mascot-xiaozhai.webp" width="20" style="border-radius:50%;vertical-align:middle"> :
 
 ## 中断机制
 
@@ -367,7 +373,6 @@ interceptLoop (goroutine)
 
 代码：`internal/agent/core/eventloop.go` — `interceptLoop` / `drainInterrupts`
 
-<img src="../../branding/mascot-xiaozhai.webp" width="20" style="border-radius:50%;vertical-align:middle"> :
 
 ## 配置系统
 
@@ -378,7 +383,6 @@ interceptLoop (goroutine)
 - `RegisterDefault` 插入 ~80 个默认键（8 个 LLM 源的 seeds）
 - WebUI 设置页 `/api/v1/settings` 读写
 
-<img src="../../branding/mascot-xiaozhai.webp" width="20" style="border-radius:50%;vertical-align:middle"> :
 
 ## 代码结构
 
