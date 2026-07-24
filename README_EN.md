@@ -1,22 +1,20 @@
-<img src="branding/mascot-xiaozhai.webp" width="20" style="border-radius:50%;vertical-align:middle"> :
-
 # HomeAgent
 
 > **中文**: [README.md](./README.md)
 
-The first Agent framework to propose **separation of core domain and application domain**. The kernel performs zero IO — all external interaction is handled by plugins: WebUI, QQ, CLI, file operations, web search, memos — everything is a plugin, the kernel doesn't touch any IO.
+An Agent framework designed around **separation of core domain and application domain**. The kernel enforces a zero-IO policy — all external interaction (WebUI, QQ, CLI, file operations, web search, memos, etc.) is handled by the plugin layer; the kernel performs no direct IO operations.
 
-Combined with a **three-layer memory architecture** (Context → Document → Graph), it achieves stable long-running single-conversation operation without memory decay.
+Combined with a **three-layer memory architecture** (Context → Document → Graph), it maintains contextual coherence across long-running single-conversation sessions through tiered storage and automated archival.
 
 ```go
 homed (kernel, zero IO) ← PluginSDK → plugins (all IO capabilities)
 ```
 
-## Key Innovations
+## Design Principles
 
-**Separation of Core Domain and Application Domain** — The kernel only handles LLM orchestration, memory management, and knowledge retrieval; all IO capabilities (sending/receiving messages, reading/writing files, network requests, hardware interaction) are implemented by plugins. Plugins can be hot-loaded, independently developed, and independently released. This is not a microservice split of an RPC framework, but a domain-level separation in Agent framework design.
+**Separation of Core Domain and Application Domain** — The kernel's responsibilities are limited to LLM orchestration, memory management, and knowledge retrieval; all IO capabilities (message send/receive, file read/write, network requests, hardware interaction, etc.) are implemented by plugins. This separation defines domain boundaries at the Agent framework level, with distinct responsibility scopes for the kernel and plugins.
 
-**Three-Layer Memory Architecture** — Solves the memory decay problem for long-running agents:
+**Three-Layer Memory Architecture** — Manages information retention in long-running agents through a tiered storage strategy:
 - **Context Layer**: Pretrained word embedding / TF-IDF fallback relevance-scored event window, protects last 10 entries, maintains topK context entries
 - **Document Layer**: Temporary memory with automatic cold data sinking, also supports user-initiated submissions
 - **Graph Layer**: SQLite graph database, persists entity relationships and semantic memory, supports distillation pipelines to extract triples from conversations
