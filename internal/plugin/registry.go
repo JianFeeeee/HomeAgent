@@ -54,6 +54,11 @@ func RegisterFactory(name string, factory NativeFactory) {
 	globalFactories.Store(name, factory)
 }
 
+// PluginToolCleaner 定义插件工具注销接口，由 StageHost 实现。
+type PluginToolCleaner interface {
+	UnregisterPluginTools(pluginName string)
+}
+
 type Registry struct {
 	mu        sync.RWMutex
 	plugins   map[string]sdk.Plugin
@@ -75,6 +80,11 @@ type Registry struct {
 	regTool  sdk.ToolRegistrar
 	regStage sdk.StageRegistrar
 	regAPI   sdk.APIRegistrar
+
+	toolCleaner PluginToolCleaner
+
+	knownDisabled map[string]bool
+	textCleaners  []func(string) string
 }
 
 func NewRegistry() *Registry {
@@ -82,6 +92,7 @@ func NewRegistry() *Registry {
 		plugins:           make(map[string]sdk.Plugin),
 		factories:         make(map[string]NativeFactory),
 		pluginAutoRestart: make(map[string]bool),
+		knownDisabled:     make(map[string]bool),
 	}
 }
 
@@ -97,6 +108,18 @@ func (r *Registry) SetPluginDir(dir string)                      { r.plgDir = di
 func (r *Registry) SetToolRegistrar(fn sdk.ToolRegistrar)        { r.regTool = fn }
 func (r *Registry) SetStageRegistrar(fn sdk.StageRegistrar)      { r.regStage = fn }
 func (r *Registry) SetAPIRegistrar(fn sdk.APIRegistrar)          { r.regAPI = fn }
+func (r *Registry) SetToolCleaner(tc PluginToolCleaner)           { r.toolCleaner = tc }
+
+// CleanText applies all registered text cleaners in order.
+func (r *Registry) CleanText(text string) string {
+	r.mu.RLock()
+	cleaners := r.textCleaners
+	r.mu.RUnlock()
+	for _, fn := range cleaners {
+		text = fn(text)
+	}
+	return text
+}
 
 func (r *Registry) RegisterNative(name string, factory NativeFactory) {
 	r.mu.Lock()
@@ -217,6 +240,13 @@ func (r *Registry) Load(dir string) error {
 		if loaded[name] {
 			continue
 		}
+		if r.isDisabled(name) {
+			log.Printf("[plugin] %s is disabled, skipping", name)
+			r.mu.Lock()
+			r.knownDisabled[name] = true
+			r.mu.Unlock()
+			continue
+		}
 		plgDir := filepath.Join(dir, name)
 		os.MkdirAll(plgDir, 0755)
 
@@ -240,6 +270,7 @@ func (r *Registry) Load(dir string) error {
 		r.plugins[name] = p
 		r.pluginAutoRestart[name] = plgSDK.AutoRestart()
 		r.instances = append(r.instances, p)
+		r.textCleaners = append(r.textCleaners, plgSDK.TextCleaners()...)
 		r.mu.Unlock()
 		log.Printf("[plugin] loaded: %s", name)
 	}
@@ -247,7 +278,26 @@ func (r *Registry) Load(dir string) error {
 	return nil
 }
 
+func (r *Registry) isDisabled(name string) bool {
+	if r.cfgReg == nil {
+		return false
+	}
+	v, err := r.cfgReg.PluginConfig(name).Get("disabled")
+	if err != nil || v == nil {
+		return false
+	}
+	return fmt.Sprint(v) == "true"
+}
+
 func (r *Registry) loadOne(plgDir, name string) bool {
+	if r.isDisabled(name) {
+		log.Printf("[plugin] %s is disabled, skipping", name)
+		r.mu.Lock()
+		r.knownDisabled[name] = true
+		r.mu.Unlock()
+		return false
+	}
+
 	// 1) 查找工厂（init 自注册或 RegisterNative）
 	r.mu.RLock()
 	factory, hasFactory := r.factories[name]
@@ -303,6 +353,7 @@ func (r *Registry) loadOne(plgDir, name string) bool {
 	r.plugins[name] = plg
 	r.pluginAutoRestart[name] = plgSDK.AutoRestart()
 	r.instances = append(r.instances, plg)
+	r.textCleaners = append(r.textCleaners, plgSDK.TextCleaners()...)
 	r.mu.Unlock()
 	log.Printf("[plugin] loaded: %s", name)
 	return true
@@ -319,6 +370,7 @@ func (r *Registry) StopAll() {
 	r.plugins = make(map[string]sdk.Plugin)
 	r.instances = nil
 	r.pluginAutoRestart = make(map[string]bool)
+	r.textCleaners = nil
 }
 
 func (r *Registry) Reload(dir string) (string, error) {
@@ -380,6 +432,94 @@ func (r *Registry) AutoRestartEnabled(name string) bool {
 		return true
 	}
 	return enabled
+}
+
+func (r *Registry) IsDisabled(name string) bool {
+	return r.isDisabled(name)
+}
+
+func (r *Registry) Enable(name string) error {
+	if r.cfgReg != nil {
+		r.cfgReg.PluginConfig(name).Set("disabled", "false")
+	}
+	r.mu.Lock()
+	delete(r.knownDisabled, name)
+	r.mu.Unlock()
+	plgDir := filepath.Join(r.plgDir, name)
+	if r.loadOne(plgDir, name) {
+		log.Printf("[plugin] enabled: %s", name)
+		return nil
+	}
+	return fmt.Errorf("enable plugin %s failed", name)
+}
+
+func (r *Registry) Disable(name string) error {
+	r.mu.Lock()
+	p, ok := r.plugins[name]
+	if ok {
+		if err := p.Stop(); err != nil {
+			log.Printf("[plugin] stop %s for disable: %v", name, err)
+		}
+		delete(r.plugins, name)
+		for i, inst := range r.instances {
+			if inst.Name() == name {
+				r.instances = append(r.instances[:i], r.instances[i+1:]...)
+				break
+			}
+		}
+	}
+	r.knownDisabled[name] = true
+	r.mu.Unlock()
+
+	if r.toolCleaner != nil {
+		r.toolCleaner.UnregisterPluginTools(name)
+	}
+
+	if r.cfgReg != nil {
+		r.cfgReg.PluginConfig(name).Set("disabled", "true")
+	}
+	log.Printf("[plugin] disabled: %s", name)
+	return nil
+}
+
+// ListKnown 返回所有已知插件（已加载 + 已禁用 + 已安装但未加载）。
+func (r *Registry) ListKnown() []string {
+	r.mu.RLock()
+	known := make(map[string]bool)
+	for name := range r.plugins {
+		known[name] = true
+	}
+	for name := range r.knownDisabled {
+		known[name] = true
+	}
+	r.mu.RUnlock()
+
+	if r.plgDir != "" {
+		entries, _ := os.ReadDir(r.plgDir)
+		for _, e := range entries {
+			if e.IsDir() {
+				known[e.Name()] = true
+			}
+		}
+	}
+
+	r.mu.RLock()
+	for name := range r.factories {
+		known[name] = true
+	}
+	r.mu.RUnlock()
+
+	globalFactories.Range(func(key, val interface{}) bool {
+		known[key.(string)] = true
+		return true
+	})
+
+	list := make([]string, 0, len(known))
+	for name := range known {
+		list = append(list, name)
+	}
+	sort.Strings(list)
+	return list
 }
 
 func (r *Registry) PluginMetas() map[string]PluginMeta {

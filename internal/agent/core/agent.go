@@ -165,6 +165,11 @@ func New(cfg AgentConfig) *Agent {
 		cfg.DocStore.ReindexWithVectorizer(embedder)
 	}
 
+	rc := NewRelevanceContext(cfg.ContextSavePath, embedder)
+	if cfg.StageHost != nil {
+		rc.SetToolDefLookup(cfg.StageHost.ToolDef)
+	}
+
 	return &Agent{
 		id:              cfg.ID,
 		startTime:       time.Now(),
@@ -175,7 +180,7 @@ func New(cfg AgentConfig) *Agent {
 		indexer:         cfg.Indexer,
 		skills:          cfg.Skills,
 		tracker:         cfg.Tracker,
-		context:         NewRelevanceContext(cfg.ContextSavePath, embedder),
+		context:         rc,
 		systemPrompt:    cfg.SystemPrompt,
 		ctx:             ctx,
 		cancel:          cancel,

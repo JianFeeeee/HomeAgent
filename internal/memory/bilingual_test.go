@@ -180,7 +180,7 @@ func TestBilingualVectorizeClean(t *testing.T) {
 		cleanVec := e.VectorizeClean(inp)
 		sim := cosineSim(rawVec, cleanVec)
 		rawTokens := len(e.tokenize(inp))
-		cleanTokens := len(e.tokenize(CleanTemplateText(inp)))
+		cleanTokens := len(e.tokenize(CleanText(inp)))
 		t.Logf("[%d] sim(raw,clean)=%.4f  tokens: raw=%d clean=%d", i, sim, rawTokens, cleanTokens)
 	}
 }
@@ -236,8 +236,8 @@ func genBilingualEvents() []bilingualEvent {
 func textForBilingual(ev bilingualEvent, modelPaths []string) string {
 	switch {
 	case ev.source == "agent" && ev.text != "":
-		return CleanTemplateText(ev.text)
+		return CleanText(ev.text)
 	default:
-		return CleanTemplateText(ev.text)
+		return CleanText(ev.text)
 	}
 }

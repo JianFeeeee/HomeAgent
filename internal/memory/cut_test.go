@@ -101,7 +101,7 @@ func TestCutExactRemoveTimestamp(t *testing.T) {
 	got := CutExact("[15:04] 今天天气不错")
 	for _, g := range got {
 		if g == "15" || g == "04" || g == "15:04" {
-			t.Errorf("timestamp should be removed by CleanTemplateText, got %q in %v", g, got)
+			t.Errorf("timestamp should be removed by CleanText, got %q in %v", g, got)
 		}
 	}
 }
