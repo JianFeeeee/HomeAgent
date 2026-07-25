@@ -156,6 +156,21 @@ func (p *Plugin) Name() string { return p.name }
 
 func (p *Plugin) Start(s *sdk.PluginSDK) error {
 	s.SetAutoRestart(true)
+
+	s.RegisterOutputChannel("webui", 1, "Web 控制台", func(args map[string]interface{}) (interface{}, error) {
+		payload, _ := args["payload"].(string)
+		if payload != "" {
+			p.evBus.Publish(&events.Event{
+				Type: events.EventAgentOutput,
+				Payload: map[string]interface{}{
+					"content": payload,
+					"channel": "webui",
+				},
+			})
+		}
+		return map[string]interface{}{"status": "ok"}, nil
+	})
+
 	s.Settings().RegisterDef(sdk.ConfigDef{Key: "api_key", Default: "", Type: "password", DisplayName: "API 密钥", Description: "访问 API 时需要的密钥", Category: "webui"})
 	s.Settings().RegisterDef(sdk.ConfigDef{Key: "username", Default: "admin", Type: "string", DisplayName: "登录用户名", Description: "Web 控制台登录用户名", Category: "webui"})
 	s.Settings().RegisterDef(sdk.ConfigDef{Key: "password", Default: "", Type: "password", DisplayName: "Web 控制台登录密码", Description: "Web 控制台登录密码", Category: "webui"})
