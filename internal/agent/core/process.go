@@ -15,12 +15,12 @@ import (
 	sdk "gitcode.com/JianFeeeee/HomeAgent/internal/sdk"
 )
 
-func (a *Agent) process(input string, stageCtx *sdk.StageContext) (response string, toolsUsed []string, err error) {
+func (a *Agent) process(input string, stageCtx *sdk.StageContext) (response string, toolsUsed []string, toolResults []ToolResultItem, err error) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 
 	if a.provider == nil {
-		return "", nil, fmt.Errorf("agent: no LLM provider configured")
+		return "", nil, nil, fmt.Errorf("agent: no LLM provider configured")
 	}
 
 	memContext := a.buildMemoryContext(input)
@@ -40,7 +40,7 @@ func (a *Agent) process(input string, stageCtx *sdk.StageContext) (response stri
 		a.docStoreSize())
 
 	if a.runStage(sdk.StagePreAction, stageCtx) {
-		return *stageCtx.Response, toolsUsed, nil
+		return *stageCtx.Response, toolsUsed, toolResults, nil
 	}
 	if len(stageCtx.ContextMsgs) > 0 {
 		for _, m := range stageCtx.ContextMsgs {
@@ -132,11 +132,11 @@ func (a *Agent) process(input string, stageCtx *sdk.StageContext) (response stri
 		if llmErr != nil {
 			if errors.Is(llmErr, context.Canceled) && a.ctx.Err() == nil {
 				if a.currentOutputChannel == "_consolidation_" {
-					return "", toolsUsed, fmt.Errorf("interrupted by user input")
+					return "", toolsUsed, toolResults, fmt.Errorf("interrupted by user input")
 				}
 				continue
 			}
-			return "", toolsUsed, fmt.Errorf("all %d providers failed, last error: %w",
+			return "", toolsUsed, toolResults, fmt.Errorf("all %d providers failed, last error: %w",
 				len(providers), llmErr)
 		}
 
@@ -154,7 +154,7 @@ func (a *Agent) process(input string, stageCtx *sdk.StageContext) (response stri
 			}
 		}
 		if a.runStage(sdk.StagePostAction, stageCtx) {
-			return *stageCtx.Response, toolsUsed, nil
+			return *stageCtx.Response, toolsUsed, toolResults, nil
 		}
 		resp.Content = stageCtx.LLMText
 		resp.ToolCalls = convertBackToolCalls(stageCtx.ToolCalls)
@@ -176,7 +176,7 @@ func (a *Agent) process(input string, stageCtx *sdk.StageContext) (response stri
 		a.publishEvent(events.EventAgentLLMChain, chainPayload)
 
 		if len(resp.ToolCalls) == 0 {
-			return resp.Content, toolsUsed, nil
+			return resp.Content, toolsUsed, toolResults, nil
 		}
 
 		contentOnce := true
@@ -226,6 +226,7 @@ func (a *Agent) process(input string, stageCtx *sdk.StageContext) (response stri
 			}
 
 			result := a.executeToolCall(tc)
+			toolResults = append(toolResults, ToolResultItem{Name: tc.Name, Output: result})
 			log.Printf("[agent] tool %s result: %s", tc.Name, truncateStr(result, 100))
 
 			stageCtx.ToolResults = []sdk.ToolResult{{CallID: tc.ID, Name: tc.Name, Plugin: pluginName, Success: true, Result: result}}

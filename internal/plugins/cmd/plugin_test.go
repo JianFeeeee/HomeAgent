@@ -214,8 +214,13 @@ func TestCmdRunNonZeroExit(t *testing.T) {
 }
 
 func TestTruncateOutput(t *testing.T) {
+	p, _, err := setupPlugin()
+	if err != nil {
+		t.Fatal(err)
+	}
+
 	short := "hello"
-	if s := truncateOutput(short); s != short {
+	if s := p.truncateOutput(short); s != short {
 		t.Fatalf("expected %q, got %q", short, s)
 	}
 
@@ -223,7 +228,7 @@ func TestTruncateOutput(t *testing.T) {
 	for i := range long {
 		long[i] = 'x'
 	}
-	s := truncateOutput(string(long))
+	s := p.truncateOutput(string(long))
 	if len(s) >= 40000 {
 		t.Fatal("expected truncation")
 	}

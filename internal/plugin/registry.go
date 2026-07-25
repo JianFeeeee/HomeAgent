@@ -84,7 +84,6 @@ type Registry struct {
 	toolCleaner PluginToolCleaner
 
 	knownDisabled map[string]bool
-	textCleaners  []func(string) string
 }
 
 func NewRegistry() *Registry {
@@ -109,17 +108,6 @@ func (r *Registry) SetToolRegistrar(fn sdk.ToolRegistrar)        { r.regTool = f
 func (r *Registry) SetStageRegistrar(fn sdk.StageRegistrar)      { r.regStage = fn }
 func (r *Registry) SetAPIRegistrar(fn sdk.APIRegistrar)          { r.regAPI = fn }
 func (r *Registry) SetToolCleaner(tc PluginToolCleaner)           { r.toolCleaner = tc }
-
-// CleanText applies all registered text cleaners in order.
-func (r *Registry) CleanText(text string) string {
-	r.mu.RLock()
-	cleaners := r.textCleaners
-	r.mu.RUnlock()
-	for _, fn := range cleaners {
-		text = fn(text)
-	}
-	return text
-}
 
 func (r *Registry) RegisterNative(name string, factory NativeFactory) {
 	r.mu.Lock()
@@ -270,7 +258,6 @@ func (r *Registry) Load(dir string) error {
 		r.plugins[name] = p
 		r.pluginAutoRestart[name] = plgSDK.AutoRestart()
 		r.instances = append(r.instances, p)
-		r.textCleaners = append(r.textCleaners, plgSDK.TextCleaners()...)
 		r.mu.Unlock()
 		log.Printf("[plugin] loaded: %s", name)
 	}
@@ -353,7 +340,6 @@ func (r *Registry) loadOne(plgDir, name string) bool {
 	r.plugins[name] = plg
 	r.pluginAutoRestart[name] = plgSDK.AutoRestart()
 	r.instances = append(r.instances, plg)
-	r.textCleaners = append(r.textCleaners, plgSDK.TextCleaners()...)
 	r.mu.Unlock()
 	log.Printf("[plugin] loaded: %s", name)
 	return true
@@ -370,7 +356,6 @@ func (r *Registry) StopAll() {
 	r.plugins = make(map[string]sdk.Plugin)
 	r.instances = nil
 	r.pluginAutoRestart = make(map[string]bool)
-	r.textCleaners = nil
 }
 
 func (r *Registry) Reload(dir string) (string, error) {

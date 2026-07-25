@@ -16,13 +16,19 @@ import (
 	sdk "gitcode.com/JianFeeeee/HomeAgent/internal/sdk"
 )
 
+type ToolResultItem struct {
+	Name   string `json:"name"`
+	Output string `json:"output"`
+}
+
 type ContextEvent struct {
-	Timestamp time.Time   `json:"timestamp"`
-	Source    string      `json:"source"`
-	Input     string      `json:"input"`
-	Response  string      `json:"response,omitempty"`
-	ToolsUsed []string    `json:"tools_used,omitempty"`
-	Vector    vector.Vector `json:"-"`
+	Timestamp   time.Time         `json:"timestamp"`
+	Source      string            `json:"source"`
+	Input       string            `json:"input"`
+	Response    string            `json:"response,omitempty"`
+	ToolsUsed   []string          `json:"tools_used,omitempty"`
+	ToolResults []ToolResultItem  `json:"tool_results,omitempty"`
+	Vector      vector.Vector     `json:"-"`
 }
 
 const contextFlushInterval = 5 * time.Second
@@ -64,25 +70,49 @@ func (c *RelevanceContext) load() {
 		return
 	}
 	for _, evt := range events {
-		evt.Input = memory.CleanText(evt.Input)
 		evt.Vector = c.computeVector(evt)
 	}
 	c.events = events
 }
 
-func textForVector(evt *ContextEvent) string {
+func textForVector(evt *ContextEvent, toolDefLookup func(name string) *sdk.ToolDef) string {
+	var text string
 	switch {
 	case evt.Source == "agent" && evt.Response != "":
-		return memory.CleanText(evt.Response)
+		text = evt.Response
 	case evt.Source == "cold_storage":
-		return memory.CleanText(evt.Input + " " + evt.Response)
+		text = evt.Input + " " + evt.Response
 	default:
-		return memory.CleanText(evt.Input)
+		text = evt.Input
 	}
+
+	// 计算层：附加工具输出，NoMemory 跳过，其余经 Cleaner 过滤
+	if toolDefLookup != nil {
+		noMemory := make(map[string]bool)
+		for _, tr := range evt.ToolResults {
+			def := toolDefLookup(tr.Name)
+			if def != nil && def.NoMemory {
+				noMemory[tr.Name] = true
+			}
+		}
+		for _, tr := range evt.ToolResults {
+			if noMemory[tr.Name] {
+				continue
+			}
+			cleaned := tr.Output
+			def := toolDefLookup(tr.Name)
+			if def != nil && def.Cleaner != nil {
+				cleaned = def.Cleaner(cleaned)
+			}
+			text += " " + cleaned
+		}
+	}
+
+	return memory.CleanText(text)
 }
 
 func (c *RelevanceContext) computeVector(evt *ContextEvent) vector.Vector {
-	return c.embedder.Vectorize(textForVector(evt))
+	return c.embedder.Vectorize(textForVector(evt, c.toolDefLookup))
 }
 
 func (c *RelevanceContext) Save() error {
@@ -103,7 +133,6 @@ func (c *RelevanceContext) Append(evt ContextEvent) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
-	evt.Input = memory.CleanText(evt.Input)
 	evt.Vector = c.computeVector(&evt)
 	c.events = append(c.events, &evt)
 
@@ -199,25 +228,19 @@ func (c *RelevanceContext) Prune(currentInput string, topK int, docStore *docume
 
 	archived := 0
 	if docStore != nil && len(archive) > 0 {
-		var filtered []scored
-		for _, s := range archive {
-			if hasNoMemoryTool(s.event.ToolsUsed, c.toolDefLookup) {
-				continue
-			}
-			filtered = append(filtered, s)
-		}
-		entries := make([]document.ContextEntry, len(filtered))
-		for i, s := range filtered {
+		entries := make([]document.ContextEntry, len(archive))
+		for i, s := range archive {
 			entries[i] = document.ContextEntry{
-				Timestamp: s.event.Timestamp,
-				Source:    s.event.Source,
-				Content:   s.event.Input,
-				Response:  s.event.Response,
+				Timestamp:   s.event.Timestamp,
+				Source:      s.event.Source,
+				Content:     s.event.Input,
+				Response:    s.event.Response,
+				ToolResults: convertToolResults(s.event.ToolResults),
 			}
 		}
 		doc, err := docStore.ContextToDoc("context_archived", entries, c.embedder)
 		if err == nil && doc != nil {
-			archived = len(filtered)
+			archived = len(entries)
 		}
 	}
 
@@ -266,14 +289,15 @@ func (c *RelevanceContext) Len() int {
 	return len(c.events)
 }
 
-func hasNoMemoryTool(toolsUsed []string, lookup func(string) *sdk.ToolDef) bool {
-	if lookup == nil {
-		return false
+func convertToolResults(items []ToolResultItem) []document.ToolResultItem {
+	if items == nil {
+		return nil
 	}
-	for _, name := range toolsUsed {
-		if def := lookup(name); def != nil && def.NoMemory {
-			return true
-		}
+	result := make([]document.ToolResultItem, len(items))
+	for i, item := range items {
+		result[i] = document.ToolResultItem{Name: item.Name, Output: item.Output}
 	}
-	return false
+	return result
 }
+
+
