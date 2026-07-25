@@ -220,6 +220,7 @@ func main() {
 					input, _ := evt.Payload["input"].(string)
 					response, _ := evt.Payload["response"].(string)
 					toolsUsed, _ := evt.Payload["tools_used"].([]string)
+					toolResults, _ := evt.Payload["tool_results"].([]interface{})
 					agentID, _ := evt.Payload["agent_id"].(string)
 
 					if input != "" && textMem != nil {
@@ -241,6 +242,15 @@ func main() {
 				}
 				if response != "" && memDB != nil {
 					distiller.Append("agent", "assistant", response)
+				}
+
+				// 工具输出接入蒸馏管线
+				for _, tr := range toolResults {
+					if trMap, ok := tr.(map[string]interface{}); ok {
+						if text, ok := trMap["output"].(string); ok && text != "" && memDB != nil {
+							distiller.Append("agent", "tool", text)
+						}
+					}
 				}
 				}
 			}
@@ -423,8 +433,7 @@ func main() {
 	if err := pluginReg.Load(cfg.Plugin.Dir); err != nil {
 		log.Printf("[homed] warning: load plugins: %v", err)
 	}
-	memory.SetTextCleaner(pluginReg.CleanText)
-	log.Printf("[homed] stage host ready with %d registered tools, text cleaner set", stageHost.ToolCount())
+	log.Printf("[homed] stage host ready with %d registered tools", stageHost.ToolCount())
 
 	// 日志管理：层级压缩 + 保留策略
 	logManager := logpkg.NewManager(logDir, cfgReg)

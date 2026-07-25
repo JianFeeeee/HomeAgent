@@ -159,6 +159,29 @@ func (h *StageHost) RunStage(stage sdk.Stage, ctx *sdk.StageContext) {
 	}
 }
 
+func (h *StageHost) ToolDefCleaner(name string) func(string) string {
+	h.mu.RLock()
+	defer h.mu.RUnlock()
+	for _, def := range h.toolDefs {
+		if def.Name == name {
+			return def.Cleaner
+		}
+	}
+	return nil
+}
+
+func (h *StageHost) NoMemoryToolNames() map[string]bool {
+	h.mu.RLock()
+	defer h.mu.RUnlock()
+	set := make(map[string]bool, len(h.toolDefs))
+	for _, def := range h.toolDefs {
+		if def.NoMemory {
+			set[def.Name] = true
+		}
+	}
+	return set
+}
+
 func (h *StageHost) ToolCount() int {
 	h.mu.RLock()
 	defer h.mu.RUnlock()

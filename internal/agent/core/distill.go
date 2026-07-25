@@ -377,14 +377,15 @@ func docToTriples(doc *document.Doc) []memory.Triple {
 	return triples
 }
 
-func (a *Agent) emitMemoryCandidate(source, input, response string, toolsUsed []string) {
+func (a *Agent) emitMemoryCandidate(source, input, response string, toolResults []ToolResultItem, toolsUsed []string) {
 	a.io.EmitOutput("memory", "memory_candidate", map[string]interface{}{
-		"source":     source,
-		"input":      input,
-		"response":   response,
-		"tools_used": toolsUsed,
-		"agent_id":   string(a.id),
-		"timestamp":  time.Now().Unix(),
+		"source":       source,
+		"input":        input,
+		"response":     response,
+		"tool_results": toolResults,
+		"tools_used":   toolsUsed,
+		"agent_id":     string(a.id),
+		"timestamp":    time.Now().Unix(),
 	})
 }
 
@@ -406,17 +407,18 @@ func (a *Agent) processConsolidation(evt *agentIO.InputEvent, input string) {
 		Source:    "system",
 		Input:     input,
 	})
-	response, toolsUsed, err := a.process(input, stageCtx)
+	response, toolsUsed, toolResults, err := a.process(input, stageCtx)
 	if err != nil {
 		log.Printf("[agent] consolidation error: %v", err)
 		return
 	}
 	a.context.Append(ContextEvent{
-		Timestamp: time.Now(),
-		Source:    "agent",
-		Input:     input,
-		Response:  response,
-		ToolsUsed: toolsUsed,
+		Timestamp:   time.Now(),
+		Source:      "agent",
+		Input:       input,
+		Response:    response,
+		ToolsUsed:   toolsUsed,
+		ToolResults: toolResults,
 	})
 	log.Printf("[agent] consolidation done (%dms, tools=%v)", time.Since(start).Milliseconds(), toolsUsed)
 }

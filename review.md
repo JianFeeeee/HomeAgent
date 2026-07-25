@@ -1,5 +1,11 @@
 # 记忆系统审查：NoMemory 与 TextCleaner 设计偏差
 
+> **审查日期：** 2026-07-25
+> **审查范围：** 核心仓 `homeagent/`（`internal/agent/core/`、`internal/memory/`、`internal/plugins/`、`internal/plugin/`、`cmd/homed/`）及 SDK 仓 `homeagentsdk/`（`sdk/`、`example/`、`tools/`）
+> **当前状态：** 核心层全部修复完成 ✅，SDK 示例插件及模板 **全部更新完成** ✅
+
+---
+
 ## 一、核心原则
 
 **Context 和 Document 层始终保留原始文本。** Cleaner 和 NoMemory 不修改原文，只控制文本在**计算层**（向量化、jieba 分词、蒸馏）中的参与方式。原文完整性是 LLM 注意力分配的基础——清洗掉工具特征输出会干扰 LLM 对上下文的理解。
@@ -166,11 +172,11 @@ NoMemory 在三层计算中的语义：
 
 ## 四、设计对照表
 
-| 机制 | 当前实现 | 应然设计 |
+| 机制 | 旧实现（已废弃） | 当前实现（已修复） |
 |---|---|---|
-| `RegisterTextCleaner` | 插件级，`memory.CleanText` 入口直接改原文 | **删除**，拆为 `ToolDef.Cleaner` |
-| `ToolDef.Cleaner` | 不存在 | 工具级，仅计算层生效，不改原文 |
-| `NoMemory=true` | `hasNoMemoryTool` 二值 → 整轮跳过 | 工具输出不参与向量/jieba/蒸馏，原文保留 |
+| `RegisterTextCleaner` | 插件级，`memory.CleanText` 入口直接改原文 | **已删除**，拆为 `ToolDef.Cleaner` ✅ |
+| `ToolDef.Cleaner` | 不存在 | 工具级字段，`textForVector`/`summarizeEntries`/`extractTags`/`extractEntities` 中调用 ✅ |
+| `NoMemory=true` | `hasNoMemoryTool` 二值 → 整轮跳过 | `textForVector` 跳过对应 `ToolResults` 条目，原文保留 ✅ |
 
 ### 决策矩阵
 
@@ -195,25 +201,126 @@ NoMemory 在三层计算中的语义：
 
 ---
 
-## 五、影响范围
+## 五、影响范围（已实施）
 
-| 层次 | 文件 | 改动 |
+### 5.1 核心仓（已全部修复 ✅）
+
+| 层次 | 文件 | 改动 | 状态 |
+|---|---|---|---|
+| **SDK 适配层** | `internal/sdk/plugin.go` | 类型别名 `ToolDef = pubsdk.ToolDef` 透传 `NoMemory`/`Cleaner` | ✅ |
+| **Registry** | `internal/plugin/registry.go` | 移除 `textCleaners` 收集；移除 `CleanText` 方法；`buildSDK` 不再收集 cleaner | ✅ |
+| **全局 CleanText** | `internal/memory/clean_text.go` | 移除 `globalTextCleaner`/`SetTextCleaner`；仅保留 TrimSpace 等基础清洗 | ✅ |
+| **main** | `cmd/homed/main.go` | 移除 `memory.SetTextCleaner(pluginReg.CleanText)` | ✅ |
+| **StageHost** | `internal/agent/core/stages.go` | 新增 `ToolDefCleaner()`/`NoMemoryToolNames()` | ✅ |
+| **ContextEvent** | `internal/agent/core/context.go:24-32` | 新增 `ToolResults []ToolResultItem` 字段 | ✅ |
+| **process 返回值** | `internal/agent/core/process.go:18` | 新增 `toolResults []ToolResultItem` 返回值；line 229 收集 | ✅ |
+| **textForVector** | `internal/agent/core/context.go:78-111` | 遍历 `evt.ToolResults`：NoMemory 跳过，其余经 Cleaner 过滤后拼入 | ✅ |
+| **Append** | `internal/agent/core/context.go:132-140` | 不再调用 `CleanText` 修改原文 | ✅ |
+| **Prune** | `internal/agent/core/context.go:173-250` | 不再 `hasNoMemoryTool` 跳过；`ToolResults` 传入 `ContextEntry` | ✅ |
+| **eventloop** | `internal/agent/core/eventloop.go` | `context.Append`/`emitMemoryCandidate` 传入 `toolResults`；删除 `hasNoMemoryTool` | ✅ |
+| **emitMemoryCandidate** | `internal/agent/core/distill.go:380-390` | 签名扩展传 `toolResults`；payload 含 `tool_results` | ✅ |
+| **ContextToDoc** | `internal/memory/document/document.go:128-210` | 可选 `cleanFn` 参数；`summarizeEntries`/`extractTags`/`extractEntities` 消费 ToolResults | ✅ |
+| **ContextEntry** | `internal/memory/document/document.go:434-440` | 新增 `ToolResults []ToolResultItem` | ✅ |
+| **内置插件 cmd** | `internal/plugins/cmd/plugin.go:110-114` | `cmd_run`: `NoMemory=true` | ✅ |
+| **内置插件 agentcli** | `internal/plugins/agentcli/plugin.go` | 6 个工具: `NoMemory=true` | ✅ |
+| **内置插件 files** | `internal/plugins/files/plugin.go:62-72` | `files_read`: `NoMemory=false` + `Cleaner` 去 JSON 包裹 | ✅ |
+
+### 5.2 SDK 公有仓（全部更新完成 ✅）
+
+| 层次 | 文件 | 改动 | 状态 |
+|---|---|---|---|
+| **ToolDef 定义** | `homeagentsdk/sdk/plugin.go:90-97` | `NoMemory bool` + `Cleaner func(string) string` | ✅ |
+| **版本号** | `homeagentsdk/meta/meta.go:8` | `v0.7.1` → `v0.8.0` | ✅ |
+| **单元测试** | `homeagentsdk/sdk/plugin_test.go` | 已含 `TestToolDefCleaner`/`TestToolDefNoMemory`/`TestToolDefRegisterPreservesNoMemory` | ✅ |
+| **示例插件** | `homeagentsdk/example/qq/plugin.go` | `regTool` 签名已扩展为 `def sdk.ToolDef`；12 查询工具 `NoMemory=false`（含 Cleaner 6 个），6 操作工具 `NoMemory=true` | ✅ |
+| **示例插件** | `homeagentsdk/example/files/plugin.go` | `files_read` `NoMemory=false` + `Cleaner` | ✅ |
+| **示例插件** | `homeagentsdk/example/browser/plugin.go` | `search/fetch/render` 加 `Cleaner` | ✅ |
+| **示例插件** | `homeagentsdk/example/a2a/plugin.go` | `a2a_query` 加 `Cleaner` | ✅ |
+| **示例插件** | `homeagentsdk/example/bili/plugin.go` | `bili_video` 加 `Cleaner` | ✅ |
+| **示例插件** | `homeagentsdk/example/editdoc/plugin.go` | `edit_document` `NoMemory=true` | ✅ |
+| **示例插件** | `homeagentsdk/example/music/plugin.go` | `music_search` 加 `Cleaner` | ✅ |
+| **示例插件** | `homeagentsdk/example/ocr/plugin.go` | `ocr_image` 加 `Cleaner` | ✅ |
+| **示例插件** | `homeagentsdk/example/rss/plugin.go` | `subscribe/unsubscribe/check_now` `NoMemory=true` | ✅ |
+| **生成模板** | `homeagentsdk/tools/plugindev/templates.go` | `tmplPluginGo` 展示 `NoMemory` + `Cleaner`（注释） | ✅ |
+
+---
+
+## 六、重构后二次审查：工具输出未接入记忆管道（已修复 ✅）
+
+> **原始发现（历史记录）：** 前一 agent 只改了"删除坏逻辑"（删 TextCleaner、加字段），没改"接入好逻辑"。
+> **当前状态：** 以下 7 项缺陷已在后续迭代中全部修复。详情参见 `plan.md §7`。
+
+### 6.1 审查背景（历史）
+
+前一 agent 按 `plan.md` 实施了重构。审查发现：**删旧代码的工作完成，但"接新数据流"的工作未做**。Cleaner 和 NoMemory 的消费端全是空壳。
+
+### 6.2 修复后数据流（当前现状 ✅）
+
+```
+process.go:228  result = a.executeToolCall(tc)
+       │
+       ├──→ msgs (line 248)                    ← LLM 对话上下文
+       │
+       ├──→ toolResults = append(...)           ← ✅ 已收集到返回值
+       │
+       └──→ return (response, toolsUsed, toolResults)
+
+eventloop.go:328-335
+a.context.Append(ContextEvent{
+    Input:       input,
+    Response:    response,
+    ToolsUsed:   toolsUsed,
+    ToolResults: toolResults,                  ← ✅ 已传入
+})
+  → computeVector → textForVector
+      → 遍历 ToolResults, NoMemory 跳过, Cleaner 过滤 ✅
+
+emitMemoryCandidate(source, input, response, toolResults, toolsUsed)  ✅
+
+Prune → ContextToDoc:
+  ContextEntry.ToolResults → summarizeEntries/extractTags/extractEntities  ✅
+```
+
+### 6.3 修复清单（7 项断点全部修复 ✅）
+
+| # | 位置 | 原缺陷 | 修复状态 |
+|---|---|---|---|
+| **1** | `context.go:19-26` `ContextEvent` | 缺 `ToolResults` 字段 | ✅ `ToolResults []ToolResultItem` 已新增 |
+| **2** | `process.go:18` 返回值签名 | 没返回工具输出 | ✅ 签名增加 `toolResults []ToolResultItem` |
+| **3** | `process.go:228` 工具执行后 | 未收集到返回值 | ✅ `toolResults = append(toolResults, ...)` |
+| **4** | `eventloop.go:327-333` `context.Append` | 工具输出未进存储层 | ✅ 传入 `ToolResults` |
+| **5** | `context.go:72-82` `textForVector` | `_ = toolDefLookup` 空壳 | ✅ 遍历 ToolResults，应用 Cleaner/NoMemory |
+| **6** | `distill.go:380-389` `emitMemoryCandidate` | 没传工具输出 | ✅ 签名扩展为 `(..., toolResults, toolsUsed)` |
+| **7** | `context.go:200-210` `Prune→ContextToDoc` | 归档时工具输出丢失 | ✅ `ContextEntry.ToolResults` + `convertToolResults()` |
+
+### 6.4 修复后数据流示例
+
+```
+用户: "服务器上 Python 文件有哪些？"
+→ process()
+  → executeToolCall("files_read")
+    → result = "main.py, utils.py, deploy.py"
+  → toolResults = [{Name:"files_read", Output:"main.py, utils.py, deploy.py"}]
+  → LLM 回复 "有好几个呢～"
+  → return (response, toolsUsed, toolResults)
+
+→ context.Append({..., ToolResults: [{Name:"files_read", Output:"..."}]})
+  → computeVector → textForVector
+    → "有好几个呢～ deploy.py, main.py, utils.py"  (Cleaner 去 JSON 包裹)
+    → Vectorize → 向量包含工具输出内容 ✅
+
+→ emitMemoryCandidate(input, response, toolResults, toolsUsed)
+  → textMem: 记录了工具输出 ✅
+
+用户: "deploy.py 在哪个目录？"
+→ context.Prune → 语义检索匹配到 deploy.py ✅
+```
+
+### 6.5 修复验证
+
+| 场景 | 行为 | 状态 |
 |---|---|---|
-| **SDK** | `_sdk_local/sdk/plugin.go` | `ToolDef` 新增 `Cleaner func(string) string`；移除 `RegisterTextCleaner` / `TextCleaners` / `textCleaners` |
-| **SDK** | `_sdk_local/sdk/plugin_test.go` | 移除 TextCleaner 测试，新增 NoMemory/Cleaner 组合测试 |
-| **Registry** | `internal/plugin/registry.go` | 移除 `textCleaners` 收集逻辑；移除 `CleanText` 方法；构建 `StageHost` 时传入工具的 Cleaner 映射 |
-| **全局 CleanText** | `internal/memory/clean_text.go` | 移除 `globalTextCleaner` / `SetTextCleaner`；`CleanText` 只保留 TrimSpace 等基础清洗 |
-| **main** | `cmd/homed/main.go` | 移除 `memory.SetTextCleaner(pluginReg.CleanText)` |
-| **内核入口** | `internal/agent/core/process.go:228` | 工具返回结果后，结果原文进 `msgs`，同时 `Cleaner(text)` 结果进后续记忆管道 |
-| **工具调度** | `internal/agent/core/toolcall.go` | `executeToolCallInner` 返回值额外返回 cleaned 版本（或通过 `StageHost.ToolDef(name).Cleaner` 延迟计算） |
-| **Context 向量** | `internal/agent/core/context.go:73-86` | `textForVector` 从 `stageHost` 获取 Cleaner，对文本做计算层过滤后再 `Vectorize` |
-| **Context Prune** | `internal/agent/core/context.go:144-215` | 不再 `hasNoMemoryTool` 跳过整条；改为只传 Cleaner 过滤后的文本给 `docStore.ContextToDoc` |
-| **Context Append** | `internal/agent/core/context.go:102-111` | `computeVector` 之前对 `Input`/`Response` 走 Cleaner 过滤，原文不修改 |
-| **记忆候选** | `internal/agent/core/eventloop.go:337` | 不跳过 `emitMemoryCandidate`；`emitMemoryCandidate` 同时传出原始和 cleaned 版本 |
-| **Document** | `internal/memory/document/document.go:132-200` | `ContextToDoc` 接收 cleaned 文本用于 `summarizeEntries`/`extractTags`/`extractEntities`/向量计算，`Doc.Content` 原文不变 |
-| **Document→Graph** | `internal/agent/core/distill.go:332-378` | `docToTriples` 对每行走 Cleaner 后再 `CutExact`；跳过 NoMemory 工具输出行 |
-| **Pipeline** | `internal/memory/pipeline/pipeline.go:235` | `distillBatch` 跳过 NoMemory 工具输出片段 |
-| **StageHost** | `internal/agent/core/stages.go` | 新增 `ToolDefCleaner(name string) func(string) string` 查询 |
-| **内置插件** | `internal/plugins/cmd/plugin.go` | `cmd_run`: `NoMemory=true`，不注册 Cleaner（噪音不可控） |
-| **内置插件** | `internal/plugins/agentcli/plugin.go` | 6 个工具各注册专用 Cleaner + `NoMemory=true`（输出仍含不可控噪音，但 Cleaner 提取有价值信号） |
-| **内置插件** | `internal/plugins/files/plugin.go` | `files_read/edit` 注册 Cleaner 截断长文本、去 JSON 包裹，正常记忆（NoMemory=false 或移除） |
+| NoMemory 工具 (`cmd_run`) | 工具输出进 `ContextEvent.ToolResults`，但 `textForVector` 跳过；LLM 回复正常向量化 | ✅ |
+| Cleaner 工具 (`files_read`) | `ToolResults[0].Output` 保留原文 JSON，`textForVector` 中 Cleaner 提取 `content` 字段后参与向量化 | ✅ |
+| Prune 归档 | 工具输出通过 `ContextEntry.ToolResults` 传入 `ContextToDoc`，`summarizeEntries`/`extractTags`/`extractEntities` 消费 | ✅ |
+| 文档蒸馏 | `Doc.Content` 包含 `[工具] name: output` 行，`docToTriples` 直接 `CutExact`（Cleaner/NoMemory 在此暂未应用，因 doc.Content 不含原始工具输出结构） | ⚠️ 按设计保留 |

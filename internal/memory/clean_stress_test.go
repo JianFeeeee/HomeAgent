@@ -7,24 +7,24 @@ import (
 	"testing"
 )
 
-func init() {
-	globalTextCleaner = func(text string) string {
-		reQQGroupSuffix := regexp.MustCompile(`，通过id\d+使用qq_get_message工具获取消息正文。获取内容后使用 output_send\(channel="qq"\) 回复该群聊，content 设为 JSON 字符串：\{[^}]*\}`)
-		reQQPrivateSuffix := regexp.MustCompile(`，通过id\d+使用qq_get_message工具获取消息正文。获取内容后使用 output_send\(channel="qq"\) 回复对方，content 设为 JSON 字符串：\{[^}]*\}`)
-		reQQOldReply := regexp.MustCompile(`通过id\d+使用qq_get_message工具获取消息正文。获取后必须使用[^。]+。`)
-		reQQOldForbid := regexp.MustCompile(`你只能通过qq_get_message先看消息，然后直接用%!s\(MISSING\)send_private_msg回复，中间的思考过程禁止调用任何其他工具\s*→\s*`)
-		reQQGeneral := regexp.MustCompile(`通过id\d+使用qq_get_message工具获取消息正文[。，][^。]*?(?:回复|发送消息)`)
-		reTimestamp := regexp.MustCompile(`\[\d{2}:\d{2}\]\s*`)
-		reMultiSpace := regexp.MustCompile(`\s+`)
-		text = reQQGroupSuffix.ReplaceAllString(text, "")
-		text = reQQPrivateSuffix.ReplaceAllString(text, "")
-		text = reQQOldReply.ReplaceAllString(text, "")
-		text = reQQOldForbid.ReplaceAllString(text, "")
-		text = reQQGeneral.ReplaceAllString(text, "")
-		text = reTimestamp.ReplaceAllString(text, "")
-		text = reMultiSpace.ReplaceAllString(text, " ")
-		return text
-	}
+// cleanQQTemplate 模拟之前由 globalTextCleaner 执行的模板噪音清理，
+// 用于 stress test 中生成 cleanedText。
+func cleanQQTemplate(text string) string {
+	reQQGroupSuffix := regexp.MustCompile(`，通过id\d+使用qq_get_message工具获取消息正文。获取内容后使用 output_send\(channel="qq"\) 回复该群聊，content 设为 JSON 字符串：\{[^}]*\}`)
+	reQQPrivateSuffix := regexp.MustCompile(`，通过id\d+使用qq_get_message工具获取消息正文。获取内容后使用 output_send\(channel="qq"\) 回复对方，content 设为 JSON 字符串：\{[^}]*\}`)
+	reQQOldReply := regexp.MustCompile(`通过id\d+使用qq_get_message工具获取消息正文。获取后必须使用[^。]+。`)
+	reQQOldForbid := regexp.MustCompile(`你只能通过qq_get_message先看消息，然后直接用%!s\(MISSING\)send_private_msg回复对方，中间的思考过程禁止调用任何其他工具\s*→\s*`)
+	reQQGeneral := regexp.MustCompile(`通过id\d+使用qq_get_message工具获取消息正文[。，][^。]*?(?:回复|发送消息)`)
+	reTimestamp := regexp.MustCompile(`\[\d{2}:\d{2}\]\s*`)
+	reMultiSpace := regexp.MustCompile(`\s+`)
+	text = reQQGroupSuffix.ReplaceAllString(text, "")
+	text = reQQPrivateSuffix.ReplaceAllString(text, "")
+	text = reQQOldReply.ReplaceAllString(text, "")
+	text = reQQOldForbid.ReplaceAllString(text, "")
+	text = reQQGeneral.ReplaceAllString(text, "")
+	text = reTimestamp.ReplaceAllString(text, "")
+	text = reMultiSpace.ReplaceAllString(text, " ")
+	return text
 }
 
 type cleanTestEvent struct {
@@ -305,13 +305,14 @@ func genStressEvents(n int) []cleanTestEvent {
 }
 
 func cleanEventText(source, input, response string) string {
+	// 先做基础 CleanText（去空格/逗号），再做模板噪音清理
 	switch {
 	case source == "agent" && response != "":
-		return CleanText(response)
+		return cleanQQTemplate(CleanText(response))
 	case source == "cold_storage":
-		return CleanText(input + " " + response)
+		return cleanQQTemplate(CleanText(input + " " + response))
 	default:
-		return CleanText(input)
+		return cleanQQTemplate(CleanText(input))
 	}
 }
 

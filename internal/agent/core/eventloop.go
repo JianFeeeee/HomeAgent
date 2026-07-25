@@ -183,7 +183,7 @@ func (a *Agent) processMediaInput(evt *agentIO.InputEvent) {
 		Input:     fallback,
 	})
 
-	response, toolsUsed, err := a.process(fallback, stageCtx)
+	response, toolsUsed, toolResults, err := a.process(fallback, stageCtx)
 	if err != nil {
 		log.Printf("[agent] process media error: %v", err)
 		resp := fmt.Sprintf("处理错误: %v", err)
@@ -196,17 +196,18 @@ func (a *Agent) processMediaInput(evt *agentIO.InputEvent) {
 	log.Printf("[agent] %s from %s → response (%dms, tools=%v)", evt.Type, evt.Source, elapsed.Milliseconds(), toolsUsed)
 
 	a.context.Append(ContextEvent{
-		Timestamp: time.Now(),
-		Source:    "agent",
-		Input:     fallback,
-		Response:  response,
-		ToolsUsed: toolsUsed,
+		Timestamp:   time.Now(),
+		Source:      "agent",
+		Input:       fallback,
+		Response:    response,
+		ToolsUsed:   toolsUsed,
+		ToolResults: toolResults,
 	})
 
 	a.emitResponse(evt, response)
 
-	if !stageCtx.NoMemory && !a.hasNoMemoryTool(toolsUsed) {
-		a.emitMemoryCandidate(evt.Source, fallback, response, toolsUsed)
+	if !stageCtx.NoMemory {
+		a.emitMemoryCandidate(evt.Source, fallback, response, toolResults, toolsUsed)
 	}
 }
 
@@ -312,7 +313,7 @@ func (a *Agent) processTextInput(evt *agentIO.InputEvent, input string) {
 		Input:     input,
 	})
 
-	response, toolsUsed, err := a.process(input, stageCtx)
+	response, toolsUsed, toolResults, err := a.process(input, stageCtx)
 	if err != nil {
 		log.Printf("[agent] process error: %v", err)
 		resp := fmt.Sprintf("处理错误: %v", err)
@@ -325,17 +326,18 @@ func (a *Agent) processTextInput(evt *agentIO.InputEvent, input string) {
 	log.Printf("[agent] input from %s → response (%dms, tools=%v)", evt.Source, elapsed.Milliseconds(), toolsUsed)
 
 	a.context.Append(ContextEvent{
-		Timestamp: time.Now(),
-		Source:    "agent",
-		Input:     input,
-		Response:  response,
-		ToolsUsed: toolsUsed,
+		Timestamp:   time.Now(),
+		Source:      "agent",
+		Input:       input,
+		Response:    response,
+		ToolsUsed:   toolsUsed,
+		ToolResults: toolResults,
 	})
 
 	a.emitResponse(evt, response)
 
-	if !stageCtx.NoMemory && !a.hasNoMemoryTool(toolsUsed) {
-		a.emitMemoryCandidate(evt.Source, input, response, toolsUsed)
+	if !stageCtx.NoMemory {
+		a.emitMemoryCandidate(evt.Source, input, response, toolResults, toolsUsed)
 	}
 }
 
@@ -384,15 +386,6 @@ func (a *Agent) emitResponse(evt *agentIO.InputEvent, response string) {
 	})
 	stageCtx.Phase = sdk.StageAfterOutput
 	a.runStage(sdk.StageAfterOutput, stageCtx)
-}
-
-func (a *Agent) hasNoMemoryTool(toolsUsed []string) bool {
-	for _, name := range toolsUsed {
-		if def := a.stageHost.ToolDef(name); def != nil && def.NoMemory {
-			return true
-		}
-	}
-	return false
 }
 
 func (a *Agent) drainInterrupts() []string {

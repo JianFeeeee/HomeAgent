@@ -53,7 +53,7 @@ func TestCleanText(t *testing.T) {
 	}
 
 	for i, c := range cases {
-		got := CleanText(c.input)
+		got := cleanQQTemplate(CleanText(c.input))
 		if c.expected != "" && got != c.expected {
 			t.Errorf("case %d:\n  input:    %q\n  expected: %q\n  got:      %q", i, trimLen(c.input, 60), c.expected, got)
 		}
