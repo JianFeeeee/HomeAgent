@@ -503,7 +503,7 @@ func (a *Agent) executeDocTool(tc agentAPI.ToolCall) string {
 			if len(content) > 2000 {
 				content = content[:2000] + "..."
 			}
-			a.context.Append(ContextEvent{
+			a.context.InsertByTimestamp(ContextEvent{
 				Timestamp: d.CreatedAt,
 				Source:    "cold_storage",
 				Input:     fmt.Sprintf("加载文档记忆: %s", query),

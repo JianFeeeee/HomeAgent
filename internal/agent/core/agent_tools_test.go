@@ -62,7 +62,8 @@ func TestExecuteOutputSendTool(t *testing.T) {
 
 	a := &Agent{io: io}
 	tc := agentAPI.ToolCall{Name: "output_send__screen", Arguments: map[string]interface{}{
-		"content": `{"content":"hello world"}`,
+		"payload": "hello world",
+		"type":    "text",
 	}}
 	result := a.executeOutputSendTool(tc)
 	if !strings.Contains(result, "screen") {
@@ -84,7 +85,8 @@ func TestExecuteOutputSendToolChannelNotExist(t *testing.T) {
 	io := agentIO.NewIOManager()
 	a := &Agent{io: io}
 	tc := agentAPI.ToolCall{Name: "output_send__nonexistent", Arguments: map[string]interface{}{
-		"content": "hello",
+		"payload": "hello",
+		"type":    "text",
 	}}
 	result := a.executeOutputSendTool(tc)
 	if !strings.Contains(result, "不存在") && !strings.Contains(result, "不可用") {
@@ -101,7 +103,8 @@ func TestExecuteOutputSendToolNoTextCap(t *testing.T) {
 
 	a := &Agent{io: io}
 	tc := agentAPI.ToolCall{Name: "output_send__camera", Arguments: map[string]interface{}{
-		"content": "hello",
+		"payload": "hello",
+		"type":    "text",
 	}}
 	result := a.executeOutputSendTool(tc)
 	if strings.Contains(result, "已通过") {

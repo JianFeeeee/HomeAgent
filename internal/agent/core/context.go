@@ -139,6 +139,23 @@ func (c *RelevanceContext) Append(evt ContextEvent) {
 	c.save()
 }
 
+func (c *RelevanceContext) InsertByTimestamp(evt ContextEvent) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	evt.Vector = c.computeVector(&evt)
+
+	idx := sort.Search(len(c.events), func(i int) bool {
+		return c.events[i].Timestamp.After(evt.Timestamp)
+	})
+
+	c.events = append(c.events, nil)
+	copy(c.events[idx+1:], c.events[idx:])
+	c.events[idx] = &evt
+
+	c.save()
+}
+
 func (c *RelevanceContext) save() error {
 	if c.savePath == "" {
 		return nil
