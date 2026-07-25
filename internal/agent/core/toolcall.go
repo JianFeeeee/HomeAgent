@@ -115,7 +115,12 @@ func (a *Agent) executeMemoryTool(tc agentAPI.ToolCall) string {
 		if query == "" {
 			return "请输入查询关键词"
 		}
-		result, err := a.memory.Recall(strings.Split(query, ","), nil, int(depth), "")
+		// 关键词提取：支持逗号分隔和自然语言
+		keywords := strings.Split(query, ",")
+		if len(keywords) == 1 {
+			keywords = memory.ExtractKeywords(query)
+		}
+		result, err := a.memory.Recall(keywords, nil, int(depth), "")
 		if err != nil {
 			return fmt.Sprintf("记忆检索失败: %v", err)
 		}
