@@ -2,6 +2,8 @@ package sdk
 
 import (
 	"fmt"
+	"strings"
+
 	internalConfig "gitcode.com/JianFeeeee/HomeAgent/internal/config"
 )
 
@@ -26,17 +28,28 @@ func (s *settingsImpl) List(prefix string) ([]string, error) {
 	if s.reg == nil { return nil, nil }
 	return s.reg.PluginConfig(s.pluginName).List(prefix)
 }
+func coreKey(key string) string {
+	if strings.HasPrefix(key, "core.") {
+		return key
+	}
+	return "core." + key
+}
+
 func (s *settingsImpl) GetCore(key string) (interface{}, error) {
 	if s.reg == nil { return nil, nil }
-	return s.reg.Get(key)
+	return s.reg.Get(coreKey(key))
 }
 func (s *settingsImpl) SetCore(key string, value interface{}) error {
 	if s.reg == nil { return nil }
-	return s.reg.Set(key, value)
+	return s.reg.Set(coreKey(key), value)
 }
 func (s *settingsImpl) ListCore(prefix string) ([]string, error) {
 	if s.reg == nil { return nil, nil }
-	return s.reg.List(prefix), nil
+	p := coreKey(prefix)
+	if p == "core." {
+		p = "core."
+	}
+	return s.reg.List(p), nil
 }
 func (s *settingsImpl) GetPlugin(plugin, key string) (interface{}, error) {
 	if s.reg == nil { return nil, nil }
@@ -78,13 +91,11 @@ func (s *settingsImpl) Dump() map[string]interface{} {
 }
 func (s *settingsImpl) Plugins() []string {
 	if s.reg == nil { return nil }
-	keys := s.reg.List("config_")
-	names := make([]string, 0, len(keys)+1)
-	names = append(names, "core")
-	for _, k := range keys {
-		if len(k) > 7 { names = append(names, k[7:]) }
-	}
-	return names
+	names := s.reg.ListPlugins()
+	result := make([]string, 0, len(names)+1)
+	result = append(result, "core")
+	result = append(result, names...)
+	return result
 }
 
 func stringifyDefault(v interface{}) string {

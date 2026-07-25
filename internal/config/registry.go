@@ -631,6 +631,24 @@ func (r *ConfigRegistry) ToConfig() *types.Config {
 	return cfg
 }
 
+func (r *ConfigRegistry) ListPlugins() []string {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	rows, err := r.db.Query(`SELECT name FROM sqlite_master WHERE type='table' AND name LIKE 'config_%' ORDER BY name`)
+	if err != nil {
+		return nil
+	}
+	defer rows.Close()
+	var names []string
+	for rows.Next() {
+		var tableName string
+		if err := rows.Scan(&tableName); err == nil {
+			names = append(names, tableName[7:])
+		}
+	}
+	return names
+}
+
 func (r *ConfigRegistry) PluginConfig(name string) *PluginSettings {
 	r.ensurePluginTable(name)
 	return &PluginSettings{
