@@ -5,7 +5,7 @@ package meta
 var (
 	// Version 是 HomeAgent 内核版本号。
 	// 通过 `-ldflags="-X gitcode.com/JianFeeeee/HomeAgent/internal/meta.Version=vX.Y.Z"` 注入。
-	Version = "0.7.1"
+	Version = "0.7.2"
 
 	// Commit 是构建时的 Git commit hash。
 	Commit = "unknown"
