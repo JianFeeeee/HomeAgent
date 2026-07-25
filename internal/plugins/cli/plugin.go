@@ -71,6 +71,15 @@ func (p *Plugin) Name() string { return p.name }
 
 func (p *Plugin) Start(s *sdk.PluginSDK) error {
 	s.SetAutoRestart(true)
+
+	s.RegisterOutputChannel("cli", 1, "CLI 终端", func(args map[string]interface{}) (interface{}, error) {
+		payload, _ := args["payload"].(string)
+		if payload != "" {
+			fmt.Println(payload)
+		}
+		return map[string]interface{}{"status": "ok"}, nil
+	})
+
 	s.Settings().RegisterDef(sdk.ConfigDef{
 		Key: "api_key", Type: "password", DisplayName: "CLI API 密钥",
 		Description: "CLI 客户端连接时需提供的认证密钥（留空则使用 WebUI 密钥）",
