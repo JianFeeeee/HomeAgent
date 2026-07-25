@@ -4,6 +4,8 @@
 #include <stdlib.h>
 #include <string.h>
 
+// HOMEAGENT_ABI_VERSION 与 internal/meta/meta.go ABIVersion 同步。
+// C ABI 通过 version/version_min 协商，旧插件不受影响。
 #define HOMEAGENT_ABI_VERSION 1
 
 // PluginAPI — provided by the plugin

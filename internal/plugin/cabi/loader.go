@@ -6,6 +6,8 @@ package cabi
 #cgo LDFLAGS: -ldl
 #include <stdlib.h>
 
+// HOMEAGENT_ABI_VERSION 是当前内核的 ABI 版本号，与 internal/meta/meta.go ABIVersion 保持同步。
+// 旧插件使用低版本 ABI 不受影响——C ABI wrapper 通过 version/version_min 字段协商兼容。
 #define HOMEAGENT_ABI_VERSION 1
 
 // PluginAPI — provided by the plugin via plugin_init()
@@ -94,6 +96,10 @@ func Load(soPath, name string, config map[string]interface{}) (*Handle, error) {
 		C.lib_close(lib)
 		return nil, fmt.Errorf("plugin %s: invalid PluginAPI (version=%d)", name, int(api.version))
 	}
+	if int(api.version) > ABIVersion {
+		C.lib_close(lib)
+		return nil, fmt.Errorf("plugin %s: ABI version %d > core %d, requires newer HomeAgent core", name, int(api.version), ABIVersion)
+	}
 
 	id := atomic.AddInt32(&nextID, 1)
 	ps := &pluginState{id: id, name: name, api: api}
@@ -146,7 +152,7 @@ func (h *Handle) FreeCoreAPI() {
 // Start calls the plugin's Start with a CoreAPI pointer.
 func (h *Handle) Start(corePtr unsafe.Pointer) error {
 	var cErr *C.char
-	if ret := int(C.call_start_plugin(h.api, corePtr, C.int(1), &cErr)); ret != 0 {
+	if ret := int(C.call_start_plugin(h.api, corePtr, C.int(ABIVersion), &cErr)); ret != 0 {
 		errMsg := ""
 		if cErr != nil { errMsg = C.GoString(cErr); C.api_free_string(h.api, cErr) }
 		return fmt.Errorf("start_plugin: %s", errMsg)
