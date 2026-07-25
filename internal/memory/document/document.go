@@ -124,9 +124,15 @@ func (s *Store) Insert(doc *Doc) error {
 }
 
 // ContextToDoc — 将一段上下文对话历史提炼为文档（带内容去重）
-func (s *Store) ContextToDoc(source string, entries []ContextEntry, vec vector.Vectorizer) (*Doc, error) {
+// cleanFn 可选，用于在计算层（摘要/标签/实体提取）前过滤文本，不影响原文存储。
+func (s *Store) ContextToDoc(source string, entries []ContextEntry, vec vector.Vectorizer, cleanFn ...func(string) string) (*Doc, error) {
 	if len(entries) == 0 {
 		return nil, nil
+	}
+
+	cleanText := func(text string) string { return text }
+	if len(cleanFn) > 0 && cleanFn[0] != nil {
+		cleanText = cleanFn[0]
 	}
 
 	var parts []string
@@ -135,14 +141,17 @@ func (s *Store) ContextToDoc(source string, entries []ContextEntry, vec vector.V
 		if e.Response != "" {
 			line += fmt.Sprintf(" → %s", truncate(e.Response, 100))
 		}
+		for _, tr := range e.ToolResults {
+			line += fmt.Sprintf("\n  [工具] %s: %s", tr.Name, truncate(tr.Output, 200))
+		}
 		parts = append(parts, line)
 	}
 	content := strings.Join(parts, "\n")
 	contentHash := simpleHash(content)
 
-	summary := summarizeEntries(entries)
-	tags := extractTags(entries)
-	entities := extractEntities(entries)
+	summary := summarizeEntries(entries, cleanText)
+	tags := extractTags(entries, cleanText)
+	entities := extractEntities(entries, cleanText)
 
 	s.mu.Lock()
 
@@ -417,23 +426,38 @@ func (s *Store) flush() {
 	s.dirty = false
 }
 
-type ContextEntry struct {
-	Timestamp time.Time
-	Source    string
-	Content   string
-	Response  string
+type ToolResultItem struct {
+	Name   string
+	Output string
 }
 
-func summarizeEntries(entries []ContextEntry) string {
+type ContextEntry struct {
+	Timestamp   time.Time
+	Source      string
+	Content     string
+	Response    string
+	ToolResults []ToolResultItem
+}
+
+func summarizeEntries(entries []ContextEntry, cleanText ...func(string) string) string {
 	if len(entries) == 0 {
 		return ""
+	}
+	clean := func(text string) string { return text }
+	if len(cleanText) > 0 && cleanText[0] != nil {
+		clean = cleanText[0]
 	}
 	sources := make(map[string]int)
 	var topics []string
 	for _, e := range entries {
 		sources[e.Source]++
-		words := memory.ExtractKeywords(e.Content)
+		words := memory.ExtractKeywords(clean(e.Content))
 		topics = append(topics, words...)
+		for _, tr := range e.ToolResults {
+			cleaned := clean(tr.Output)
+			toolWords := memory.ExtractKeywords(cleaned)
+			topics = append(topics, toolWords...)
+		}
 	}
 
 	summary := fmt.Sprintf("来自 %d 个来源的 %d 条对话", len(sources), len(entries))
@@ -461,11 +485,20 @@ func summarizeEntries(entries []ContextEntry) string {
 	return summary
 }
 
-func extractTags(entries []ContextEntry) []string {
+func extractTags(entries []ContextEntry, cleanText ...func(string) string) []string {
+	clean := func(text string) string { return text }
+	if len(cleanText) > 0 && cleanText[0] != nil {
+		clean = cleanText[0]
+	}
 	tagSet := make(map[string]bool)
 	for _, e := range entries {
-		for _, kw := range memory.ExtractKeywords(e.Content) {
+		for _, kw := range memory.ExtractKeywords(clean(e.Content)) {
 			tagSet[kw] = true
+		}
+		for _, tr := range e.ToolResults {
+			for _, kw := range memory.ExtractKeywords(clean(tr.Output)) {
+				tagSet[kw] = true
+			}
 		}
 	}
 	var tags []string
@@ -478,15 +511,27 @@ func extractTags(entries []ContextEntry) []string {
 	return tags
 }
 
-func extractEntities(entries []ContextEntry) []string {
+func extractEntities(entries []ContextEntry, cleanText ...func(string) string) []string {
 	// 简易实体提取：提取引号内的内容、粗体/标记词
+	clean := func(text string) string { return text }
+	if len(cleanText) > 0 && cleanText[0] != nil {
+		clean = cleanText[0]
+	}
 	var entities []string
 	seen := make(map[string]bool)
 	for _, e := range entries {
-		for _, kw := range memory.ExtractKeywords(e.Content) {
+		for _, kw := range memory.ExtractKeywords(clean(e.Content)) {
 			if len(kw) >= 2 && !seen[kw] {
 				seen[kw] = true
 				entities = append(entities, kw)
+			}
+		}
+		for _, tr := range e.ToolResults {
+			for _, kw := range memory.ExtractKeywords(clean(tr.Output)) {
+				if len(kw) >= 2 && !seen[kw] {
+					seen[kw] = true
+					entities = append(entities, kw)
+				}
 			}
 		}
 	}

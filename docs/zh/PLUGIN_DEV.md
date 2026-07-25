@@ -248,6 +248,10 @@ func NewPlugin(name string, config map[string]interface{}) (sdk.Plugin, error) {
 s.RegisterTool("weather_query", sdk.ToolDef{
     Name:        "weather_query",
     Description: "查询指定城市的天气",
+    NoMemory:    false,                            // false=输出参与记忆计算，true=跳过计算
+    // Cleaner:  func(output string) string {     // 可选：输出参与向量化/jieba/蒸馏前的清洗
+    //     return extractJSON(output, "content")
+    // },
     Parameters: map[string]interface{}{
         "type": "object",
         "properties": map[string]interface{}{
@@ -267,6 +271,26 @@ s.RegisterTool("weather_query", sdk.ToolDef{
     }, nil
 })
 ```
+
+##### NoMemory 与 Cleaner 说明
+
+`NoMemory` 和 `Cleaner` 是 `ToolDef` 上的两个可选字段，控制工具输出在**记忆计算层**（向量化、jieba 分词、蒸馏）中的行为：
+
+- **`NoMemory`**（默认 `false`）：设为 `true` 时，工具输出不参与任何记忆计算（向量、分词、蒸馏），但原文保留在 Context 和 Document 中，LLM 注意力不受影响。适用场景：`cmd_run`（命令输出含不可控噪音）、文件上传/删除等纯操作工具。
+
+- **`Cleaner`**（可选）：函数签名 `func(output string) string`。注册后，工具输出在参与向量化/jieba/蒸馏前先经过此函数过滤。典型用途：SQL 查询去前缀、JSON 包裹提取 `content` 字段。原文始终不变，Cleaner 只影响计算层输入。
+
+决策矩阵：
+
+```
+工具输出 → 对 LLM 注意力有信号价值？
+  ├── 否 → NoMemory=true（输出保留原文，跳过计算层）
+  └── 是 → 有可控噪音？
+       ├── 是 → Cleaner 过滤后参与计算
+       └── 否 → 正常记忆，无需额外处理
+```
+
+> **注意**：`Cleaner` 是 Go `func` 类型（`json:"-"`），不能跨 C ABI 边界序列化。Lua 插件和远程插件无法使用。
 
 #### 阶段钩子 — 干预消息处理流
 

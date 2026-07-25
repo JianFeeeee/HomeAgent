@@ -250,6 +250,10 @@ shared by both Windows DLL and Linux/macOS .so builds. No manual bridge code nee
 s.RegisterTool("weather_query", sdk.ToolDef{
     Name:        "weather_query",
     Description: "Query weather for a specified city",
+    NoMemory:    false,                            // false=output participates in memory, true=skip
+    // Cleaner:  func(output string) string {     // Optional: clean output before vector/jieba/distill
+    //     return extractJSON(output, "content")
+    // },
     Parameters: map[string]interface{}{
         "type": "object",
         "properties": map[string]interface{}{
@@ -269,6 +273,26 @@ s.RegisterTool("weather_query", sdk.ToolDef{
     }, nil
 })
 ```
+
+##### NoMemory and Cleaner
+
+`NoMemory` and `Cleaner` are optional fields on `ToolDef` that control how tool output participates in the **memory computation layer** (vectorization, jieba tokenization, distillation):
+
+- **`NoMemory`** (default `false`): When `true`, the tool's output is excluded from all memory computation (vector, tokenization, distillation), but the original text is preserved in Context and Document. LLM attention is unaffected. Use cases: `cmd_run` (unpredictable noise in command output), pure operation tools like file upload/delete.
+
+- **`Cleaner`** (optional): A function `func(output string) string`. When set, the tool output is filtered through this function before participating in vectorization/jieba/distillation. Typical use: stripping SQL prefixes, extracting a `content` field from JSON. The original output is never modified — Cleaner only affects the computation layer input.
+
+Decision matrix:
+
+```
+Tool output → valuable for LLM attention?
+  ├── No  → NoMemory=true (output preserved, skipped in computation)
+  └── Yes → Contains cleanable noise?
+       ├── Yes → Cleaner filters before computation
+       └── No  → Normal memory, no extra handling
+```
+
+> **Note**: `Cleaner` is a Go `func` type (`json:"-"`), cannot cross C ABI boundaries. Not available for Lua plugins or remote plugins.
 
 #### Stage Hooks — Intervene in message processing flow
 

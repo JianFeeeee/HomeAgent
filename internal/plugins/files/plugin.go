@@ -1,6 +1,7 @@
 package files
 
 import (
+	"encoding/json"
 	"fmt"
 	"log"
 	"os"
@@ -61,6 +62,14 @@ func (p *Plugin) Start(s *sdk.PluginSDK) error {
 	s.RegisterTool(tp+"read", sdk.ToolDef{
 		Name:        tp + "read",
 		Description: fmt.Sprintf("读取文件内容。支持 offset/limit 分段读取大文件。沙箱路径: %s", p.filesDir),
+		NoMemory:    false,
+		Cleaner: func(output string) string {
+			var r struct{ Content string }
+			if err := json.Unmarshal([]byte(output), &r); err != nil {
+				return output
+			}
+			return r.Content
+		},
 		Parameters: map[string]interface{}{
 			"type": "object",
 			"properties": map[string]interface{}{
