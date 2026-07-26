@@ -46,7 +46,6 @@ func (a *Agent) distillLoop() {
 		case <-ticker.C:
 			log.Printf("[agent] heartbeat distill tick")
 			a.distillContext()
-			a.syncGraphToDocs()
 			a.reorgGraph()
 			a.autoReloadPlugins()
 		case <-a.ctx.Done():
@@ -68,74 +67,7 @@ func (a *Agent) distillContext() {
 	}
 }
 
-func (a *Agent) syncGraphToDocs() {
-	if a.memory == nil || a.docStore == nil {
-		return
-	}
 
-	stats, err := a.memory.Introspect()
-	if err != nil {
-		return
-	}
-
-	entityCount, _ := stats["entity_count"].(int)
-	if entityCount == 0 {
-		return
-	}
-
-	result, err := a.memory.Recall(nil, nil, 1, "")
-	if err != nil || result == nil {
-		return
-	}
-
-	if len(result.Entities) == 0 && len(result.Relations) == 0 {
-		return
-	}
-
-	var summaryParts []string
-	summaryParts = append(summaryParts, fmt.Sprintf("图记忆快照: %d 个热点实体", len(result.Entities)))
-	for _, e := range result.Entities {
-		summaryParts = append(summaryParts, fmt.Sprintf("- %s (%s, %d次)", e.Name, e.Type, e.MentionCount))
-	}
-	if len(result.Relations) > 0 {
-		summaryParts = append(summaryParts, "关联关系:")
-		for i, r := range result.Relations {
-			if i >= 10 {
-				break
-			}
-			summaryParts = append(summaryParts, fmt.Sprintf("  %s →(%s)→ %s", r.SourceName, r.RelationType, r.TargetName))
-		}
-	}
-
-	summary := fmt.Sprintf("图记忆索引 (%d 实体, %d 关系)", len(result.Entities), len(result.Relations))
-	content := strings.Join(summaryParts, "\n")
-
-	recent := a.docStore.RecentDocs(1)
-	if len(recent) > 0 && recent[0].Source == "graph" && recent[0].Content == content {
-		return
-	}
-
-	doc := &document.Doc{
-		Summary:  summary,
-		Content:  content,
-		Tags:     []string{"graph_memory", "auto_sync"},
-		Entities: extractEntityNames(result.Entities),
-		Source:   "graph",
-	}
-	if err := a.docStore.Insert(doc); err != nil {
-		log.Printf("[agent] graph→doc sync error: %v", err)
-	} else {
-		log.Printf("[agent] graph→doc synced: %s", doc.Summary)
-	}
-}
-
-func extractEntityNames(entities []memory.Entity) []string {
-	names := make([]string, len(entities))
-	for i, e := range entities {
-		names[i] = e.Name
-	}
-	return names
-}
 
 func (a *Agent) reorgGraph() {
 	if a.memory == nil {
@@ -237,54 +169,69 @@ func (a *Agent) evaluateGraphQuality() {
 		return
 	}
 
-	result, err := a.memory.Recall(nil, nil, 1, "")
-	if err != nil || result == nil || len(result.Relations) == 0 {
+	pending, err := a.memory.RecallPending(10)
+	if err != nil {
+		log.Printf("[agent] recall pending relations error: %v", err)
+		return
+	}
+	if len(pending) == 0 {
 		return
 	}
 
 	var lowQuality []string
-	for _, r := range result.Relations {
+	var pendingIDs []int64
+	var skipIDs []int64
+	for _, r := range pending {
+		isLow := false
 		if (r.SourceName == "用户" || r.SourceName == "AI") &&
 			(r.RelationType == "提及" || r.RelationType == "回应") {
-			lowQuality = append(lowQuality, fmt.Sprintf("「%s」-「%s」→「%s」", r.SourceName, r.RelationType, r.TargetName))
+			isLow = true
+		} else if r.RelationType == "关联" {
+			isLow = true
+		} else if r.Confidence < 0.3 && r.RelationType != "" {
+			isLow = true
+		}
+		if !isLow {
+			skipIDs = append(skipIDs, r.ID)
 			continue
 		}
+		pendingIDs = append(pendingIDs, r.ID)
+		label := fmt.Sprintf("「%s」-「%s」→「%s」", r.SourceName, r.RelationType, r.TargetName)
 		if r.RelationType == "关联" {
-			lowQuality = append(lowQuality, fmt.Sprintf("「%s」-「%s」→「%s」(jieba 共现)", r.SourceName, r.RelationType, r.TargetName))
-			continue
+			label += "(jieba 共现)"
+		} else if r.Confidence < 0.3 {
+			label += fmt.Sprintf("(confidence=%.1f)", r.Confidence)
 		}
-		if r.Confidence < 0.3 && r.RelationType != "" {
-			lowQuality = append(lowQuality, fmt.Sprintf("「%s」-「%s」→「%s」(confidence=%.1f)", r.SourceName, r.RelationType, r.TargetName, r.Confidence))
-		}
+		lowQuality = append(lowQuality, label)
+	}
+
+	if len(skipIDs) > 0 {
+		a.memory.UpdateEvalStatusBatch(skipIDs, "approved")
 	}
 
 	if len(lowQuality) == 0 {
 		return
 	}
 
-	batchSize := 10
-	for i := 0; i < len(lowQuality); i += batchSize {
-		end := i + batchSize
-		if end > len(lowQuality) {
-			end = len(lowQuality)
-		}
-		batch := lowQuality[i:end]
-
-		a.enqueueConsolidationTask(ConsolidationTask{
-			Type: "graph_quality",
-			Reason: fmt.Sprintf(
-				"图数据库中发现 %d 条低质量关系，请逐条判断是否应该删除（保留 = keep，删除 = discard）：\n%s",
-				len(batch),
-				strings.Join(batch, "\n"),
-			),
-			Data: map[string]interface{}{
-				"candidates": batch,
-				"action":     "evaluate_quality",
-			},
-		})
+	if err := a.memory.UpdateEvalStatusBatch(pendingIDs, "evaluating"); err != nil {
+		log.Printf("[agent] mark relations evaluating error: %v", err)
+		return
 	}
 
-	log.Printf("[agent] graph quality: %d low-quality connection batches sent for LLM evaluation", (len(lowQuality)+batchSize-1)/batchSize)
+	a.enqueueConsolidationTask(ConsolidationTask{
+		Type: "graph_quality",
+		Reason: fmt.Sprintf(
+			"图数据库中发现 %d 条低质量关系，请逐条判断是否应该删除（保留 = keep，删除 = discard）：\n%s",
+			len(lowQuality),
+			strings.Join(lowQuality, "\n"),
+		),
+		Data: map[string]interface{}{
+			"candidates": lowQuality,
+			"action":     "evaluate_quality",
+		},
+	})
+
+	log.Printf("[agent] graph quality: %d pending relations sent for LLM evaluation", len(lowQuality))
 }
 
 func entitySimilarity(a, b string) float64 {
@@ -333,6 +280,10 @@ func docToTriples(doc *document.Doc) []memory.Triple {
 	var triples []memory.Triple
 	if doc == nil {
 		return triples
+	}
+
+	if doc.Source == "graph" || doc.Source == "" {
+		return nil
 	}
 
 	triples = append(triples, memory.Triple{
@@ -397,28 +348,19 @@ func (a *Agent) processConsolidation(evt *agentIO.InputEvent, input string) {
 	stageCtx.Extra["output_channel"] = evt.OutputChannel
 	a.injectSourceContext(stageCtx, evt)
 
-	archived := a.context.Prune(input, a.maxContextSize-1, a.docStore)
-	if archived > 0 {
-		log.Printf("[agent] consolidation: pruned %d low-relevance events", archived)
-	}
-
-	a.context.Append(ContextEvent{
-		Timestamp: start,
-		Source:    "system",
-		Input:     input,
-	})
-	response, toolsUsed, toolResults, err := a.process(input, stageCtx)
+	_, toolsUsed, _, err := a.process(input, stageCtx)
 	if err != nil {
 		log.Printf("[agent] consolidation error: %v", err)
 		return
 	}
-	a.context.Append(ContextEvent{
-		Timestamp:   time.Now(),
-		Source:      "agent",
-		Input:       input,
-		Response:    response,
-		ToolsUsed:   toolsUsed,
-		ToolResults: toolResults,
-	})
+
+	if a.memory != nil {
+		if n, err := a.memory.ResolveEvaluating(); err != nil {
+			log.Printf("[agent] resolve evaluating relations error: %v", err)
+		} else if n > 0 {
+			log.Printf("[agent] resolved %d evaluating relations to approved", n)
+		}
+	}
+
 	log.Printf("[agent] consolidation done (%dms, tools=%v)", time.Since(start).Milliseconds(), toolsUsed)
 }
