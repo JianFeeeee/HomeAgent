@@ -111,6 +111,25 @@ func textForVector(evt *ContextEvent, toolDefLookup func(name string) *sdk.ToolD
 	return memory.CleanText(text)
 }
 
+// toolOutputClean 根据工具定义的 NoMemory/Cleaner 清洗输出，用于计算层。
+// 返回 "" 表示跳过（NoMemory），否则返回清洗后文本（Cleaner 或原文）。
+func (c *RelevanceContext) toolOutputClean(name, output string) string {
+	if c.toolDefLookup == nil {
+		return output
+	}
+	def := c.toolDefLookup(name)
+	if def == nil {
+		return output
+	}
+	if def.NoMemory {
+		return ""
+	}
+	if def.Cleaner != nil {
+		return def.Cleaner(output)
+	}
+	return output
+}
+
 func (c *RelevanceContext) computeVector(evt *ContextEvent) vector.Vector {
 	return c.embedder.Vectorize(textForVector(evt, c.toolDefLookup))
 }
@@ -255,7 +274,7 @@ func (c *RelevanceContext) Prune(currentInput string, topK int, docStore *docume
 				ToolResults: convertToolResults(s.event.ToolResults),
 			}
 		}
-		doc, err := docStore.ContextToDoc("context_archived", entries, c.embedder)
+		doc, err := docStore.ContextToDoc("context_archived", entries, c.embedder, nil, c.toolOutputClean)
 		if err == nil && doc != nil {
 			archived = len(entries)
 		}

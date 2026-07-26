@@ -31,6 +31,9 @@ type Relation struct {
 	TurnID       int       `json:"turn_id"`
 	CreatedAt    time.Time `json:"created_at"`
 	DateBucket   string    `json:"date_bucket"`
+	EvalStatus   string    `json:"eval_status"`
+	EvalRound    int       `json:"eval_round"`
+	EvalAt       time.Time `json:"eval_at,omitempty"`
 }
 
 type Triple struct {
@@ -93,6 +96,9 @@ func (g *GraphDB) initSchema() error {
 			created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
 			updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
 			date_bucket TEXT,
+			eval_status TEXT DEFAULT 'pending',
+			eval_round INTEGER DEFAULT 0,
+			eval_at TIMESTAMP,
 			FOREIGN KEY (source_id) REFERENCES entities(id),
 			FOREIGN KEY (target_id) REFERENCES entities(id)
 		)`,
@@ -111,7 +117,20 @@ func (g *GraphDB) initSchema() error {
 		}
 	}
 
-	return tx.Commit()
+	if err := tx.Commit(); err != nil {
+		return err
+	}
+
+	migrations := []string{
+		`ALTER TABLE relations ADD COLUMN eval_status TEXT DEFAULT 'pending'`,
+		`ALTER TABLE relations ADD COLUMN eval_round INTEGER DEFAULT 0`,
+		`ALTER TABLE relations ADD COLUMN eval_at TIMESTAMP`,
+	}
+	for _, m := range migrations {
+		g.db.Exec(m)
+	}
+
+	return nil
 }
 
 func (g *GraphDB) Commit(triples []Triple, sessionID string, turnID int) (int, int, error) {
@@ -241,7 +260,7 @@ func (g *GraphDB) Recall(keywords []string, seedEntities []string, depth int, se
 	if len(keywords) == 0 && len(seedEntities) == 0 {
 		rows, err := g.db.Query(
 			`SELECT id, name, type, mention_count, created_at, updated_at
-			 FROM entities ORDER BY mention_count DESC LIMIT 50`,
+			 FROM entities ORDER BY mention_count DESC`,
 		)
 		if err != nil {
 			return nil, err
@@ -259,7 +278,8 @@ func (g *GraphDB) Recall(keywords []string, seedEntities []string, depth int, se
 		relRows, err := g.db.Query(
 			`SELECT r.id, r.source_id, r.target_id, e1.name, e2.name,
 					r.relation_type, r.confidence, r.status, r.session_id,
-					r.turn_id, r.created_at, COALESCE(r.date_bucket, '')
+					r.turn_id, r.created_at, COALESCE(r.date_bucket, ''),
+					COALESCE(r.eval_status, 'pending'), COALESCE(r.eval_round, 0), r.eval_at
 			 FROM relations r
 			 JOIN entities e1 ON r.source_id = e1.id
 			 JOIN entities e2 ON r.target_id = e2.id
@@ -275,7 +295,8 @@ func (g *GraphDB) Recall(keywords []string, seedEntities []string, depth int, se
 			if err := relRows.Scan(&rel.ID, &rel.SourceID, &rel.TargetID,
 				&rel.SourceName, &rel.TargetName, &rel.RelationType,
 				&rel.Confidence, &rel.Status, &rel.SessionID,
-				&rel.TurnID, &rel.CreatedAt, &rel.DateBucket); err != nil {
+				&rel.TurnID, &rel.CreatedAt, &rel.DateBucket,
+				&rel.EvalStatus, &rel.EvalRound, &rel.EvalAt); err != nil {
 				return nil, err
 			}
 			result.Relations = append(result.Relations, rel)
@@ -340,7 +361,8 @@ func (g *GraphDB) Recall(keywords []string, seedEntities []string, depth int, se
 		query := fmt.Sprintf(
 			`SELECT r.id, r.source_id, r.target_id, e1.name, e2.name,
 					r.relation_type, r.confidence, r.status, r.session_id,
-					r.turn_id, r.created_at, COALESCE(r.date_bucket, '')
+					r.turn_id, r.created_at, COALESCE(r.date_bucket, ''),
+					COALESCE(r.eval_status, 'pending'), COALESCE(r.eval_round, 0), r.eval_at
 			 FROM relations r
 			 JOIN entities e1 ON r.source_id = e1.id
 			 JOIN entities e2 ON r.target_id = e2.id
@@ -367,7 +389,8 @@ func (g *GraphDB) Recall(keywords []string, seedEntities []string, depth int, se
 			if err := relRows.Scan(&rel.ID, &rel.SourceID, &rel.TargetID,
 				&rel.SourceName, &rel.TargetName, &rel.RelationType,
 				&rel.Confidence, &rel.Status, &rel.SessionID,
-				&rel.TurnID, &rel.CreatedAt, &rel.DateBucket); err != nil {
+				&rel.TurnID, &rel.CreatedAt, &rel.DateBucket,
+				&rel.EvalStatus, &rel.EvalRound, &rel.EvalAt); err != nil {
 				relRows.Close()
 				return nil, err
 			}
@@ -739,6 +762,89 @@ func (g *GraphDB) Archive(days int) (int, error) {
 		`UPDATE relations SET status = 'archived', updated_at = CURRENT_TIMESTAMP
 		 WHERE status = 'active' AND created_at < datetime('now', ?)`,
 		fmt.Sprintf("-%d days", days),
+	)
+	if err != nil {
+		return 0, err
+	}
+	n, _ := result.RowsAffected()
+	return int(n), nil
+}
+
+func (g *GraphDB) RecallPending(limit int) ([]Relation, error) {
+	g.mu.RLock()
+	defer g.mu.RUnlock()
+
+	rows, err := g.db.Query(
+		`SELECT r.id, r.source_id, r.target_id, e1.name, e2.name,
+				r.relation_type, r.confidence, r.status, r.session_id,
+				r.turn_id, r.created_at, COALESCE(r.date_bucket, ''),
+				COALESCE(r.eval_status, 'pending'), COALESCE(r.eval_round, 0), r.eval_at
+		 FROM relations r
+		 JOIN entities e1 ON r.source_id = e1.id
+		 JOIN entities e2 ON r.target_id = e2.id
+		 WHERE r.status = 'active'
+		   AND (r.eval_status IS NULL OR r.eval_status = 'pending')
+		 ORDER BY r.created_at DESC
+		 LIMIT ?`, limit,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var relations []Relation
+	for rows.Next() {
+		var rel Relation
+		if err := rows.Scan(&rel.ID, &rel.SourceID, &rel.TargetID,
+			&rel.SourceName, &rel.TargetName, &rel.RelationType,
+			&rel.Confidence, &rel.Status, &rel.SessionID,
+			&rel.TurnID, &rel.CreatedAt, &rel.DateBucket,
+			&rel.EvalStatus, &rel.EvalRound, &rel.EvalAt); err != nil {
+			return nil, err
+		}
+		relations = append(relations, rel)
+	}
+	return relations, rows.Err()
+}
+
+func (g *GraphDB) UpdateEvalStatus(id int64, status string) error {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+
+	_, err := g.db.Exec(
+		`UPDATE relations SET eval_status = ?, eval_round = eval_round + 1, eval_at = CURRENT_TIMESTAMP WHERE id = ?`,
+		status, id,
+	)
+	return err
+}
+
+func (g *GraphDB) UpdateEvalStatusBatch(ids []int64, status string) error {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+
+	if len(ids) == 0 {
+		return nil
+	}
+
+	for _, id := range ids {
+		_, err := g.db.Exec(
+			`UPDATE relations SET eval_status = ?, eval_round = eval_round + 1, eval_at = CURRENT_TIMESTAMP WHERE id = ?`,
+			status, id,
+		)
+		if err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func (g *GraphDB) ResolveEvaluating() (int, error) {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+
+	result, err := g.db.Exec(
+		`UPDATE relations SET eval_status = 'approved', eval_round = eval_round + 1, eval_at = CURRENT_TIMESTAMP
+		 WHERE eval_status = 'evaluating' AND status = 'active'`,
 	)
 	if err != nil {
 		return 0, err

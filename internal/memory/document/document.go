@@ -124,15 +124,17 @@ func (s *Store) Insert(doc *Doc) error {
 }
 
 // ContextToDoc — 将一段上下文对话历史提炼为文档（带内容去重）
-// cleanFn 可选，用于在计算层（摘要/标签/实体提取）前过滤文本，不影响原文存储。
-func (s *Store) ContextToDoc(source string, entries []ContextEntry, vec vector.Vectorizer, cleanFn ...func(string) string) (*Doc, error) {
+// cleanFn 可选，在计算层前统一过滤文本，不影响原文存储。
+// toolCleanFn 可选，func(name, output string) string，按工具名对输出进行过滤/清洗：
+//   - 返回 "" → 跳过该工具输出（NoMemory）
+//   - 返回清洗后文本 → 用于计算层（Cleaner），原文不受影响
+func (s *Store) ContextToDoc(source string, entries []ContextEntry, vec vector.Vectorizer, cleanFn func(string) string, toolCleanFn func(name, output string) string) (*Doc, error) {
 	if len(entries) == 0 {
 		return nil, nil
 	}
 
-	cleanText := func(text string) string { return text }
-	if len(cleanFn) > 0 && cleanFn[0] != nil {
-		cleanText = cleanFn[0]
+	if cleanFn == nil {
+		cleanFn = func(text string) string { return text }
 	}
 
 	var parts []string
@@ -149,9 +151,9 @@ func (s *Store) ContextToDoc(source string, entries []ContextEntry, vec vector.V
 	content := strings.Join(parts, "\n")
 	contentHash := simpleHash(content)
 
-	summary := summarizeEntries(entries, cleanText)
-	tags := extractTags(entries, cleanText)
-	entities := extractEntities(entries, cleanText)
+	summary := summarizeEntries(entries, cleanFn, toolCleanFn)
+	tags := extractTags(entries, cleanFn, toolCleanFn)
+	entities := extractEntities(entries, cleanFn, toolCleanFn)
 
 	s.mu.Lock()
 
@@ -439,23 +441,26 @@ type ContextEntry struct {
 	ToolResults []ToolResultItem
 }
 
-func summarizeEntries(entries []ContextEntry, cleanText ...func(string) string) string {
+func summarizeEntries(entries []ContextEntry, cleanText func(string) string, toolCleanFn func(name, output string) string) string {
 	if len(entries) == 0 {
 		return ""
-	}
-	clean := func(text string) string { return text }
-	if len(cleanText) > 0 && cleanText[0] != nil {
-		clean = cleanText[0]
 	}
 	sources := make(map[string]int)
 	var topics []string
 	for _, e := range entries {
 		sources[e.Source]++
-		words := memory.ExtractKeywords(clean(e.Content))
+		words := memory.ExtractKeywords(cleanText(e.Content))
 		topics = append(topics, words...)
 		for _, tr := range e.ToolResults {
-			cleaned := clean(tr.Output)
-			toolWords := memory.ExtractKeywords(cleaned)
+			out := tr.Output
+			if toolCleanFn != nil {
+				if c := toolCleanFn(tr.Name, tr.Output); c == "" {
+					continue
+				} else {
+					out = c
+				}
+			}
+			toolWords := memory.ExtractKeywords(out)
 			topics = append(topics, toolWords...)
 		}
 	}
@@ -485,18 +490,22 @@ func summarizeEntries(entries []ContextEntry, cleanText ...func(string) string) 
 	return summary
 }
 
-func extractTags(entries []ContextEntry, cleanText ...func(string) string) []string {
-	clean := func(text string) string { return text }
-	if len(cleanText) > 0 && cleanText[0] != nil {
-		clean = cleanText[0]
-	}
+func extractTags(entries []ContextEntry, cleanText func(string) string, toolCleanFn func(name, output string) string) []string {
 	tagSet := make(map[string]bool)
 	for _, e := range entries {
-		for _, kw := range memory.ExtractKeywords(clean(e.Content)) {
+		for _, kw := range memory.ExtractKeywords(cleanText(e.Content)) {
 			tagSet[kw] = true
 		}
 		for _, tr := range e.ToolResults {
-			for _, kw := range memory.ExtractKeywords(clean(tr.Output)) {
+			out := tr.Output
+			if toolCleanFn != nil {
+				if c := toolCleanFn(tr.Name, tr.Output); c == "" {
+					continue
+				} else {
+					out = c
+				}
+			}
+			for _, kw := range memory.ExtractKeywords(out) {
 				tagSet[kw] = true
 			}
 		}
@@ -511,23 +520,26 @@ func extractTags(entries []ContextEntry, cleanText ...func(string) string) []str
 	return tags
 }
 
-func extractEntities(entries []ContextEntry, cleanText ...func(string) string) []string {
-	// 简易实体提取：提取引号内的内容、粗体/标记词
-	clean := func(text string) string { return text }
-	if len(cleanText) > 0 && cleanText[0] != nil {
-		clean = cleanText[0]
-	}
+func extractEntities(entries []ContextEntry, cleanText func(string) string, toolCleanFn func(name, output string) string) []string {
 	var entities []string
 	seen := make(map[string]bool)
 	for _, e := range entries {
-		for _, kw := range memory.ExtractKeywords(clean(e.Content)) {
+		for _, kw := range memory.ExtractKeywords(cleanText(e.Content)) {
 			if len(kw) >= 2 && !seen[kw] {
 				seen[kw] = true
 				entities = append(entities, kw)
 			}
 		}
 		for _, tr := range e.ToolResults {
-			for _, kw := range memory.ExtractKeywords(clean(tr.Output)) {
+			out := tr.Output
+			if toolCleanFn != nil {
+				if c := toolCleanFn(tr.Name, tr.Output); c == "" {
+					continue
+				} else {
+					out = c
+				}
+			}
+			for _, kw := range memory.ExtractKeywords(out) {
 				if len(kw) >= 2 && !seen[kw] {
 					seen[kw] = true
 					entities = append(entities, kw)

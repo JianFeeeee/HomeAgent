@@ -2,13 +2,10 @@ package core
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"log"
-	"sort"
 	"strings"
-	"time"
 
 	agentAPI "gitcode.com/JianFeeeee/HomeAgent/internal/agent/api"
 	"gitcode.com/JianFeeeee/HomeAgent/internal/events"
@@ -237,9 +234,6 @@ func (a *Agent) process(input string, stageCtx *sdk.StageContext) (response stri
 				}
 			}
 
-			argsJSON, _ := json.Marshal(tc.Arguments)
-			a.recordToolCall(tc.Name, string(argsJSON), result)
-
 			msgContent := ""
 			if contentOnce {
 				msgContent = resp.Content
@@ -301,117 +295,28 @@ func (a *Agent) docStoreSize() int {
 	return 0
 }
 
-func (a *Agent) recordToolCall(name, args, result string) {
-	a.toolCallRingMu.Lock()
-	defer a.toolCallRingMu.Unlock()
-
-	if len(args) > 200 {
-		args = args[:200] + "..."
-	}
-
-	var resultStub string
-	var fullResult string
-	if len(a.toolCallRing) < 5 {
-		fullResult = result
-	}
-	if len(result) > 80 {
-		resultStub = result[:80] + "..."
-	} else {
-		resultStub = result
-	}
-
-	rec := ToolCallRecord{
-		Timestamp:  time.Now(),
-		Name:       name,
-		Args:       args,
-		ResultStub: resultStub,
-		FullResult: fullResult,
-	}
-
-	if len(a.toolCallRing) >= a.toolCallRingMax {
-		a.toolCallRing = a.toolCallRing[1:]
-	}
-	a.toolCallRing = append(a.toolCallRing, rec)
-}
-
-func (a *Agent) formatToolCallRing() string {
-	a.toolCallRingMu.Lock()
-	defer a.toolCallRingMu.Unlock()
-
-	if len(a.toolCallRing) == 0 {
-		return ""
-	}
-
-	var sb strings.Builder
-	sb.WriteString("【已执行工具记录(最近40条)】\n")
-	start := 0
-	if len(a.toolCallRing) > 40 {
-		start = len(a.toolCallRing) - 40
-	}
-	for i, rec := range a.toolCallRing[start:] {
-		if len(rec.FullResult) > 0 {
-			sb.WriteString(fmt.Sprintf("  [%d] %s: %s(%s)=%s\n", i+1,
-				rec.Timestamp.Format("15:04:05"), rec.Name, rec.Args,
-				truncateStr(rec.FullResult, 120)))
-		} else {
-			sb.WriteString(fmt.Sprintf("  [%d] %s: %s(%s) → (已缓存，具体结果通过文本记忆层获取)\n", i+1,
-				rec.Timestamp.Format("15:04:05"), rec.Name, rec.Args))
-		}
-	}
-	return sb.String()
-}
-
 func (a *Agent) formatMergedTimeline() string {
 	a.context.mu.Lock()
 	events := make([]*ContextEvent, len(a.context.events))
 	copy(events, a.context.events)
 	a.context.mu.Unlock()
 
-	a.toolCallRingMu.Lock()
-	ring := make([]ToolCallRecord, len(a.toolCallRing))
-	copy(ring, a.toolCallRing)
-	a.toolCallRingMu.Unlock()
-
-	if len(events) == 0 && len(ring) == 0 {
+	if len(events) == 0 {
 		return ""
 	}
 
-	type timelineEntry struct {
-		ts    time.Time
-		label string
-		text  string
-	}
-	entries := make([]timelineEntry, 0, len(events)+len(ring))
-
-	for _, e := range events {
-		text := fmt.Sprintf("[对话] %s: %s", e.Source, e.Input)
-		if len(e.ToolsUsed) > 0 {
-			text += fmt.Sprintf(" → 调用工具: %s", strings.Join(e.ToolsUsed, ", "))
-		}
-		if e.Response != "" {
-			text += fmt.Sprintf(" → %s", truncateStr(e.Response, 120))
-		}
-		entries = append(entries, timelineEntry{ts: e.Timestamp, label: "对话", text: text})
-	}
-
-	for _, r := range ring {
-		text := fmt.Sprintf("[工具] %s(%s)", r.Name, r.Args)
-		if r.FullResult != "" {
-			text += fmt.Sprintf(" = %s", truncateStr(r.FullResult, 120))
-		} else {
-			text += " → (结果已缓存，可通过文本记忆层获取)"
-		}
-		entries = append(entries, timelineEntry{ts: r.Timestamp, label: "工具", text: text})
-	}
-
-	sort.Slice(entries, func(i, j int) bool {
-		return entries[i].ts.Before(entries[j].ts)
-	})
-
 	var sb strings.Builder
 	sb.WriteString("【对话时序】\n")
-	for _, e := range entries {
-		sb.WriteString(fmt.Sprintf("[%s] %s\n", e.ts.Format("15:04:05"), e.text))
+	for _, e := range events {
+		sb.WriteString(fmt.Sprintf("[%s] %s: %s",
+			e.Timestamp.Format("15:04:05"), e.Source, e.Input))
+		if len(e.ToolsUsed) > 0 {
+			sb.WriteString(fmt.Sprintf(" → 调用工具: %s", strings.Join(e.ToolsUsed, ", ")))
+		}
+		if e.Response != "" {
+			sb.WriteString(fmt.Sprintf(" → %s", truncateStr(e.Response, 120)))
+		}
+		sb.WriteString("\n")
 	}
 	return sb.String()
 }
