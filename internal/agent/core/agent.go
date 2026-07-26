@@ -105,20 +105,6 @@ type Agent struct {
 	noMergeMarkers map[string]int
 	noMergeMu      sync.Mutex
 
-	// toolCallRing 保护最近 40 条工具调用记录不被上下文淘汰，
-	// 确保 LLM 不会重复调用同一工具、反复查询同一数据。
-	toolCallRing     []ToolCallRecord
-	toolCallRingMax  int
-	toolCallRingMu   sync.Mutex // 独立的锁，不与 a.mu 混用避免死锁
-}
-
-// ToolCallRecord 记录一次工具调用，保留元数据供后续 LLM 回合参考。
-type ToolCallRecord struct {
-	Timestamp time.Time `json:"timestamp"`
-	Name      string    `json:"name"`
-	Args      string    `json:"args,omitempty"`   // 参数摘要（最多 200 字符）
-	ResultStub string  `json:"result_stub"`       // 结果摘要（具体内容通过文本记忆层获取）
-	FullResult string `json:"result_full,omitempty"` // 完整结果（仅保留最近 5 条，其余仅存 stub）
 }
 
 type AgentConfig struct {
@@ -202,8 +188,7 @@ func New(cfg AgentConfig) *Agent {
 		thinkingEnabled:  cfg.ThinkingEnabled,
 		inputCfg:          cfg.InputProcessing,
 		noMergeMarkers:    make(map[string]int),
-		toolCallRing:      make([]ToolCallRecord, 0, 40),
-		toolCallRingMax:   40,
+
 	}
 }
 

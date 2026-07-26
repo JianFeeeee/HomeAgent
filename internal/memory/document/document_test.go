@@ -82,7 +82,7 @@ func TestContextToDoc(t *testing.T) {
 		{Timestamp: time.Now(), Source: "user", Content: "特别是Go语言", Response: "Go很棒"},
 	}
 
-	doc, err := s.ContextToDoc("test", entries, nil)
+	doc, err := s.ContextToDoc("test", entries, nil, nil, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -178,7 +178,7 @@ func TestSummarizeEntries(t *testing.T) {
 		{Source: "user", Content: "今天天气如何"},
 		{Source: "user", Content: "明天会下雨吗"},
 	}
-	summary := summarizeEntries(entries)
+	summary := summarizeEntries(entries, func(s string) string { return s }, nil)
 	if summary == "" {
 		t.Error("summary should not be empty")
 	}
@@ -198,7 +198,7 @@ func TestExtractTags(t *testing.T) {
 	entries := []ContextEntry{
 		{Content: "我喜欢喝咖啡和编程"},
 	}
-	tags := extractTags(entries)
+	tags := extractTags(entries, func(s string) string { return s }, nil)
 	if len(tags) == 0 {
 		t.Error("should extract tags")
 	}
@@ -341,5 +341,129 @@ func TestRemoveNonexistent(t *testing.T) {
 	stats := s.Stats()
 	if stats["doc_count"].(int) != 1 {
 		t.Errorf("expected 1 doc after remove nonexistent, got %d", stats["doc_count"])
+	}
+}
+
+func TestSummarizeEntriesWithToolCleanFn(t *testing.T) {
+	tests := []struct {
+		name        string
+		toolCleanFn func(name, output string) string
+		wantTopics  []string
+		notTopics   []string
+	}{
+		{
+			name:        "nil toolCleanFn uses raw output",
+			toolCleanFn: nil,
+			wantTopics:  []string{"手机", "电脑"},
+			notTopics:   nil,
+		},
+		{
+			name: "NoMemory returns empty skips tool output",
+			toolCleanFn: func(name, output string) string {
+				return ""
+			},
+			wantTopics: nil,
+			notTopics:  []string{"手机", "电脑"},
+		},
+		{
+			name: "Cleaner applies filter",
+			toolCleanFn: func(name, output string) string {
+				return "电脑 编程"
+			},
+			wantTopics: []string{"电脑", "编程"},
+			notTopics:  nil,
+		},
+	}
+
+	entry := ContextEntry{
+		Content: "今天天气",
+		ToolResults: []ToolResultItem{
+			{Name: "test_tool", Output: "手机 电脑"},
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			summary := summarizeEntries([]ContextEntry{entry}, func(s string) string { return s }, tc.toolCleanFn)
+			for _, w := range tc.wantTopics {
+				if !contains(summary, w) {
+					t.Errorf("summary should contain %q, got: %s", w, summary)
+				}
+			}
+			for _, n := range tc.notTopics {
+				if contains(summary, n) {
+					t.Errorf("summary should NOT contain %q, got: %s", n, summary)
+				}
+			}
+		})
+	}
+}
+
+func TestExtractTagsWithToolCleanFn(t *testing.T) {
+	entries := []ContextEntry{
+		{
+			Content: "对话",
+			ToolResults: []ToolResultItem{
+				{Name: "search", Output: "编程和咖啡"},
+			},
+		},
+	}
+
+	// toolCleanFn 返回 "" → NoMemory，工具输出被跳过
+	tagsSkip := extractTags(entries, func(s string) string { return s }, func(name, output string) string { return "" })
+	for _, tag := range tagsSkip {
+		if tag == "编程" || tag == "咖啡" {
+			t.Errorf("NoMemory tool should not contribute keywords, got tag: %s", tag)
+		}
+	}
+
+	// toolCleanFn 返回清洗文本 → 用清洗后内容提取关键词
+	tagsClean := extractTags(entries, func(s string) string { return s }, func(name, output string) string { return "咖啡 编程" })
+	found := false
+	for _, tag := range tagsClean {
+		if tag == "编程" {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("cleaner output keywords should appear in tags, got: %v", tagsClean)
+	}
+}
+
+func TestContextToDocContentPreservesRawToolOutput(t *testing.T) {
+	dir, err := os.MkdirTemp("", "doc_toolclean_*")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer os.RemoveAll(dir)
+
+	s := NewStore(dir)
+	s.Start()
+	defer s.Stop()
+
+	entries := []ContextEntry{
+		{
+			Timestamp: time.Now(),
+			Source:    "user",
+			Content:   "查天气",
+			ToolResults: []ToolResultItem{
+				{Name: "weather", Output: "{\"temp\": 25}"},
+			},
+		},
+	}
+
+	// toolCleanFn 返回清洗文本，但 Content 必须保留原始输出
+	cleaner := func(name, output string) string {
+		return "天气 温度"
+	}
+	doc, err := s.ContextToDoc("test", entries, nil, nil, cleaner)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !contains(doc.Content, "{\"temp\": 25}") {
+		t.Errorf("Content should preserve raw tool output, got: %s", doc.Content)
+	}
+	if doc.Summary == "" {
+		t.Error("summary should not be empty")
 	}
 }
