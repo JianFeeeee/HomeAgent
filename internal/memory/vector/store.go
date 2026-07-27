@@ -121,21 +121,31 @@ func (s *Store) All() []DocVector {
 	return out
 }
 
-// TFIDFVectorizer 使用字符 bigram + TF-IDF
-type TFIDFVectorizer struct {
-	mu     sync.RWMutex
-	docFreq map[string]float64 // feature → 文档频率
-	totalDocs int
-	maxNGram int
+// Tokenizer 将文本拆分为词级 token
+type Tokenizer func(string) []string
+
+// NGramTokenizer 创建字符 n-gram tokenizer（降级方案）
+func NGramTokenizer(maxN int) Tokenizer {
+	return func(text string) []string {
+		return extractNGrams(text, maxN)
+	}
 }
 
-func NewTFIDFVectorizer(maxNGram int) *TFIDFVectorizer {
-	if maxNGram <= 0 {
-		maxNGram = 2
+// TFIDFVectorizer 使用 tokenizer + TF-IDF
+type TFIDFVectorizer struct {
+	mu        sync.RWMutex
+	tokenizer Tokenizer
+	docFreq   map[string]float64 // feature → 文档频率
+	totalDocs int
+}
+
+func NewTFIDFVectorizer(tokenizer Tokenizer) *TFIDFVectorizer {
+	if tokenizer == nil {
+		tokenizer = NGramTokenizer(2)
 	}
 	return &TFIDFVectorizer{
-		docFreq:  make(map[string]float64),
-		maxNGram: maxNGram,
+		tokenizer: tokenizer,
+		docFreq:   make(map[string]float64),
 	}
 }
 
@@ -148,7 +158,7 @@ func (v *TFIDFVectorizer) Train(docs []string) {
 
 	seen := make(map[string]map[string]bool)
 	for _, doc := range docs {
-		features := extractNGrams(doc, v.maxNGram)
+		features := v.tokenizer(doc)
 		key := doc
 		if seen[key] == nil {
 			seen[key] = make(map[string]bool)
@@ -166,7 +176,7 @@ func (v *TFIDFVectorizer) Vectorize(text string) Vector {
 	v.mu.RLock()
 	defer v.mu.RUnlock()
 
-	features := extractNGrams(text, v.maxNGram)
+	features := v.tokenizer(text)
 	tf := make(map[string]float64)
 	for _, f := range features {
 		tf[f]++

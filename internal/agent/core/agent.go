@@ -105,6 +105,8 @@ type Agent struct {
 	noMergeMarkers map[string]int
 	noMergeMu      sync.Mutex
 
+	// 词嵌入模型，用于实体语义相似度计算
+	embedder *memory.StaticEmbedder
 }
 
 type AgentConfig struct {
@@ -187,6 +189,7 @@ func New(cfg AgentConfig) *Agent {
 		pluginHealth:      newPluginHealthTracker(),
 		thinkingEnabled:  cfg.ThinkingEnabled,
 		inputCfg:          cfg.InputProcessing,
+		embedder:          embedder,
 		noMergeMarkers:    make(map[string]int),
 
 	}

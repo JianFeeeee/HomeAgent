@@ -69,7 +69,7 @@ func NewStore(dir string) *Store {
 	return &Store{
 		dir:    dir,
 		vec:    vector.NewStore(),
-		veczer: vector.NewTFIDFVectorizer(2),
+		veczer: vector.NewTFIDFVectorizer(memory.TokenizeWords),
 		docs:   make(map[string]*Doc),
 	}
 }

@@ -20,18 +20,21 @@ func (a *Agent) process(input string, stageCtx *sdk.StageContext) (response stri
 		return "", nil, nil, fmt.Errorf("agent: no LLM provider configured")
 	}
 
-	memContext := a.buildMemoryContext(input)
+	budget := ComputeTokenBudget(a.provider, a.systemPrompt)
+
+	memContext := a.buildMemoryContext(input, budget.MemoryTokens)
 	sysPrompt := a.buildSystemPrompt(memContext, input)
 	tools := a.buildToolDefs()
 
-	msgs := a.buildMessages(sysPrompt, input)
+	msgs := a.buildMessages(sysPrompt, input, budget.ContextTokens)
 	if blocks, ok := stageCtx.Extra["media_blocks"].([]agentAPI.ContentBlock); ok && len(blocks) > 0 {
 		if len(msgs) > 0 {
 			msgs[len(msgs)-1].Blocks = blocks
 		}
 	}
 
-	log.Printf("[agent] tool call loop start, %d tools, %d context events, personality=%t, docs=%d",
+	log.Printf("[agent] tool call loop start, max_ctx=%d target=%d fixed=%d mem=%d ctx=%d %d tools, %d events, personality=%t, docs=%d",
+		budget.MaxContext, budget.TargetUsage, budget.FixedTokens, budget.MemoryTokens, budget.ContextTokens,
 		len(tools), a.context.Len(),
 		a.personality != nil && a.personality.Content != "",
 		a.docStoreSize())
@@ -295,7 +298,7 @@ func (a *Agent) docStoreSize() int {
 	return 0
 }
 
-func (a *Agent) formatMergedTimeline() string {
+func (a *Agent) formatMergedTimeline(maxTokens int) string {
 	a.context.mu.Lock()
 	events := make([]*ContextEvent, len(a.context.events))
 	copy(events, a.context.events)
@@ -305,9 +308,35 @@ func (a *Agent) formatMergedTimeline() string {
 		return ""
 	}
 
+	// 第一轮：从最新到最旧，计算在预算内能放多少条
+	headerTokens := EstimateTokens("【对话时序】\n")
+	remaining := maxTokens - headerTokens
+	include := 0
+	for i := len(events) - 1; i >= 0; i-- {
+		e := events[i]
+		est := len(e.Source) + len(e.Input) + 40
+		if e.Response != "" {
+			est += 120
+		}
+		estTokens := est * 2
+		if remaining-estTokens < 0 && include > 0 {
+			break
+		}
+		remaining -= estTokens
+		include++
+	}
+	if include == 0 && len(events) > 0 {
+		include = 1
+	}
+
+	// 第二轮：按时间正序渲染
+	start := len(events) - include
+	if start < 0 {
+		start = 0
+	}
 	var sb strings.Builder
 	sb.WriteString("【对话时序】\n")
-	for _, e := range events {
+	for _, e := range events[start:] {
 		sb.WriteString(fmt.Sprintf("[%s] %s: %s",
 			e.Timestamp.Format("15:04:05"), e.Source, e.Input))
 		if len(e.ToolsUsed) > 0 {
@@ -321,11 +350,11 @@ func (a *Agent) formatMergedTimeline() string {
 	return sb.String()
 }
 
-func (a *Agent) buildMessages(sysPrompt, input string) []agentAPI.Message {
+func (a *Agent) buildMessages(sysPrompt, input string, ctxTokens int) []agentAPI.Message {
 	msgs := []agentAPI.Message{{Role: "system", Content: sysPrompt}}
 
-	if ctxStr := a.formatMergedTimeline(); ctxStr != "" {
-		msgs = append(msgs, agentAPI.Message{Role: "system", Content: ctxStr})
+	if ctxTok := a.formatMergedTimeline(ctxTokens); ctxTok != "" {
+		msgs = append(msgs, agentAPI.Message{Role: "system", Content: ctxTok})
 	}
 
 	msgs = append(msgs, agentAPI.Message{Role: "user", Content: input})

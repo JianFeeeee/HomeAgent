@@ -631,6 +631,7 @@ func TestSettingsWithPluginRegistry(t *testing.T) {
 type echoProvider struct{ name string }
 
 func (p *echoProvider) Name() string { return p.name }
+func (p *echoProvider) MaxContextTokens() int { return 8192 }
 func (p *echoProvider) Chat(ctx context.Context, req *agentAPI.CompletionRequest) (*agentAPI.CompletionResponse, error) {
 	content := "echo: " + req.Messages[len(req.Messages)-1].Content
 	return &agentAPI.CompletionResponse{Content: content, FinishReason: "stop"}, nil

@@ -118,11 +118,11 @@ func TestRecallWithDepth(t *testing.T) {
 	defer g.Close()
 
 	g.Commit([]Triple{
-		{Subject: "甲", Relation: "认识", Object: "乙"},
-		{Subject: "乙", Relation: "认识", Object: "丙"},
+		{Subject: "小明", Relation: "认识", Object: "小红"},
+		{Subject: "小红", Relation: "认识", Object: "小刚"},
 	}, "session3", 0)
 
-	result, err := g.Recall(nil, []string{"甲"}, 2, "")
+	result, err := g.Recall(nil, []string{"小明"}, 2, "")
 	if err != nil {
 		t.Fatal(err)
 	}
