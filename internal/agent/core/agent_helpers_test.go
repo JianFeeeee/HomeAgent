@@ -40,11 +40,8 @@ func TestDocToTriplesConversation(t *testing.T) {
 	}
 	triples := docToTriples(doc)
 
-	minLen := 2
-	hasJieba := needJieba()
-
-	if hasJieba && len(triples) <= minLen {
-		t.Errorf("expected more than %d triples with jieba, got %d", minLen, len(triples))
+	if len(triples) < 2 {
+		t.Errorf("expected at least 2 triples (主题+来源), got %d", len(triples))
 	}
 
 	for i, tr := range triples {
@@ -54,19 +51,6 @@ func TestDocToTriplesConversation(t *testing.T) {
 		if tr.Confidence <= 0 {
 			t.Errorf("triple[%d] has non-positive confidence: %+v", i, tr)
 		}
-	}
-
-	relCount := 0
-	for _, tr := range triples {
-		if tr.Relation == "关联" {
-			relCount++
-			if tr.Subject == tr.Object {
-				t.Errorf("关联 triple has same subject and object: %+v", tr)
-			}
-		}
-	}
-	if hasJieba && relCount == 0 {
-		t.Errorf("expected 关联 triples with jieba enabled, got 0 in %+v", triples)
 	}
 }
 

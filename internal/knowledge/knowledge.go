@@ -92,7 +92,7 @@ func NewStore(root string) *Store {
 		root:      root,
 		indexPath: filepath.Join(root, ".index.json"),
 		vec:       vector.NewStore(),
-		veczer:    vector.NewTFIDFVectorizer(3),
+		veczer:    vector.NewTFIDFVectorizer(memory.TokenizeWords),
 		items:     make(map[string]*Knowledge),
 	}
 }

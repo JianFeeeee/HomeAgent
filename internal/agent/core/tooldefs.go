@@ -7,12 +7,16 @@ import (
 	agentIO "gitcode.com/JianFeeeee/HomeAgent/internal/agent/io"
 )
 
-func (a *Agent) buildMemoryContext(input string) string {
+func (a *Agent) buildMemoryContext(input string, maxTokens int) string {
 	if a.indexer == nil {
 		return ""
 	}
 	injected := a.indexer.BuildContext(input)
-	return a.indexer.FormatContext(injected)
+	s := a.indexer.FormatContext(injected)
+	if maxTokens > 0 {
+		s = TruncateByTokens(s, maxTokens)
+	}
+	return s
 }
 
 func (a *Agent) buildSystemPrompt(memContext string, userInput string) string {
