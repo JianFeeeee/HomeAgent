@@ -22,7 +22,7 @@ func NewIndexer(db *GraphDB) *Indexer {
 	return &Indexer{
 		db:      db,
 		vec:     vector.NewStore(),
-		veczer:  vector.NewTFIDFVectorizer(2),
+		veczer:  vector.NewTFIDFVectorizer(TokenizeWords),
 		recalled: make(map[string]bool),
 	}
 }

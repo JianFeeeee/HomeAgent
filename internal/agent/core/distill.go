@@ -4,12 +4,13 @@ import (
 	"fmt"
 	"log"
 	"runtime/debug"
-	"strings"
 	"time"
 
 	agentIO "gitcode.com/JianFeeeee/HomeAgent/internal/agent/io"
 	"gitcode.com/JianFeeeee/HomeAgent/internal/memory"
 	"gitcode.com/JianFeeeee/HomeAgent/internal/memory/document"
+	"gitcode.com/JianFeeeee/HomeAgent/internal/memory/vector"
+	"gitcode.com/JianFeeeee/HomeAgent/internal/nlp"
 )
 
 type ConsolidationTask struct {
@@ -107,15 +108,18 @@ func (a *Agent) reorgGraph() {
 		return
 	}
 
+	llmCandidates := 0
 	maxCandidates := 5
-	candidates := 0
-	for i := 0; i < len(result.Entities) && candidates < maxCandidates; i++ {
-		for j := i + 1; j < len(result.Entities) && candidates < maxCandidates; j++ {
+
+	for i := 0; i < len(result.Entities) && llmCandidates < maxCandidates; i++ {
+		for j := i + 1; j < len(result.Entities) && llmCandidates < maxCandidates; j++ {
 			ea, eb := result.Entities[i].Name, result.Entities[j].Name
 			if ea > eb {
 				ea, eb = eb, ea
 			}
 			key := ea + "||" + eb
+
+			// 跳过已标记"不合并"的实体对
 			a.noMergeMu.Lock()
 			rounds, ok := a.noMergeMarkers[key]
 			if ok {
@@ -130,9 +134,16 @@ func (a *Agent) reorgGraph() {
 			if ok {
 				continue
 			}
+
+			// 复合相似度：字符二元组 + 语义向量（仅增强检测，不做自动合并）
 			sim := entitySimilarity(result.Entities[i].Name, result.Entities[j].Name)
+			semSim := entitySemanticSimilarity(result.Entities[i].Name, result.Entities[j].Name, a.embedder)
+			if semSim > sim {
+				sim = semSim
+			}
+
 			if sim > 0.75 {
-				candidates++
+				llmCandidates++
 				a.enqueueConsolidationTask(ConsolidationTask{
 					Type: "entity_merge",
 					Reason: fmt.Sprintf(
@@ -155,83 +166,24 @@ func (a *Agent) reorgGraph() {
 		}
 	}
 
-	if candidates > 0 {
-		log.Printf("[agent] graph reorg: %d merge candidates sent for LLM decision", candidates)
+	if llmCandidates > 0 {
+		log.Printf("[agent] graph reorg: %d merge candidates sent for LLM decision", llmCandidates)
 	} else {
 		log.Printf("[agent] graph reorg: no similar entities found")
 	}
-
-	a.evaluateGraphQuality()
 }
 
-func (a *Agent) evaluateGraphQuality() {
-	if a.memory == nil {
-		return
+// entitySemanticSimilarity 使用词嵌入向量余弦相似度计算实体名语义相似度
+func entitySemanticSimilarity(a, b string, embedder *memory.StaticEmbedder) float64 {
+	if a == "" || b == "" || embedder == nil || !embedder.Loaded() {
+		return 0
 	}
-
-	pending, err := a.memory.RecallPending(10)
-	if err != nil {
-		log.Printf("[agent] recall pending relations error: %v", err)
-		return
+	va := embedder.Vectorize(a)
+	vb := embedder.Vectorize(b)
+	if len(va) == 0 || len(vb) == 0 {
+		return 0
 	}
-	if len(pending) == 0 {
-		return
-	}
-
-	var lowQuality []string
-	var pendingIDs []int64
-	var skipIDs []int64
-	for _, r := range pending {
-		isLow := false
-		if (r.SourceName == "用户" || r.SourceName == "AI") &&
-			(r.RelationType == "提及" || r.RelationType == "回应") {
-			isLow = true
-		} else if r.RelationType == "关联" {
-			isLow = true
-		} else if r.Confidence < 0.3 && r.RelationType != "" {
-			isLow = true
-		}
-		if !isLow {
-			skipIDs = append(skipIDs, r.ID)
-			continue
-		}
-		pendingIDs = append(pendingIDs, r.ID)
-		label := fmt.Sprintf("「%s」-「%s」→「%s」", r.SourceName, r.RelationType, r.TargetName)
-		if r.RelationType == "关联" {
-			label += "(jieba 共现)"
-		} else if r.Confidence < 0.3 {
-			label += fmt.Sprintf("(confidence=%.1f)", r.Confidence)
-		}
-		lowQuality = append(lowQuality, label)
-	}
-
-	if len(skipIDs) > 0 {
-		a.memory.UpdateEvalStatusBatch(skipIDs, "approved")
-	}
-
-	if len(lowQuality) == 0 {
-		return
-	}
-
-	if err := a.memory.UpdateEvalStatusBatch(pendingIDs, "evaluating"); err != nil {
-		log.Printf("[agent] mark relations evaluating error: %v", err)
-		return
-	}
-
-	a.enqueueConsolidationTask(ConsolidationTask{
-		Type: "graph_quality",
-		Reason: fmt.Sprintf(
-			"图数据库中发现 %d 条低质量关系，请逐条判断是否应该删除（保留 = keep，删除 = discard）：\n%s",
-			len(lowQuality),
-			strings.Join(lowQuality, "\n"),
-		),
-		Data: map[string]interface{}{
-			"candidates": lowQuality,
-			"action":     "evaluate_quality",
-		},
-	})
-
-	log.Printf("[agent] graph quality: %d pending relations sent for LLM evaluation", len(lowQuality))
+	return vector.CosineSimilarity(va, vb)
 }
 
 func entitySimilarity(a, b string) float64 {
@@ -286,6 +238,7 @@ func docToTriples(doc *document.Doc) []memory.Triple {
 		return nil
 	}
 
+	// 文档元数据
 	triples = append(triples, memory.Triple{
 		Subject:     "文档",
 		SubjectType: "Concept",
@@ -295,22 +248,15 @@ func docToTriples(doc *document.Doc) []memory.Triple {
 		Confidence:  1.0,
 	})
 
-	lines := strings.Split(doc.Content, "\n")
-	for _, line := range lines {
-		line = strings.TrimSpace(line)
-		if line == "" {
-			continue
-		}
-		terms := memory.CutExact(line)
-		for i := 0; i < len(terms)-1; i++ {
-			triples = append(triples, memory.Triple{
-				Subject:     terms[i],
-				SubjectType: "Concept",
-				Relation:    "关联",
-				Object:      terms[i+1],
-				ObjectType:  "Concept",
-				Confidence:  0.8,
-			})
+	// NLP 通用提取
+	e := nlp.NewExtractor(nil)
+	result := e.Extract(doc.Content)
+	if result != nil {
+		for _, nt := range result.Triples {
+			mt := nlp.ToMemoryTriple(nt)
+			if mt.Subject != "" && mt.Relation != "" && mt.Object != "" {
+				triples = append(triples, mt)
+			}
 		}
 	}
 
@@ -352,14 +298,6 @@ func (a *Agent) processConsolidation(evt *agentIO.InputEvent, input string) {
 	if err != nil {
 		log.Printf("[agent] consolidation error: %v", err)
 		return
-	}
-
-	if a.memory != nil {
-		if n, err := a.memory.ResolveEvaluating(); err != nil {
-			log.Printf("[agent] resolve evaluating relations error: %v", err)
-		} else if n > 0 {
-			log.Printf("[agent] resolved %d evaluating relations to approved", n)
-		}
 	}
 
 	log.Printf("[agent] consolidation done (%dms, tools=%v)", time.Since(start).Milliseconds(), toolsUsed)

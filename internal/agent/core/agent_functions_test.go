@@ -35,14 +35,11 @@ func TestDocToTriples(t *testing.T) {
 	triples := docToTriples(doc)
 
 	foundSummary := false
-	foundRel := false
 	foundSource := false
 	for _, tr := range triples {
 		switch {
 		case tr.Subject == "文档" && tr.Relation == "主题":
 			foundSummary = true
-		case tr.Relation == "关联":
-			foundRel = true
 		case tr.Subject == "文档" && tr.Relation == "来源":
 			foundSource = true
 		}
@@ -53,9 +50,6 @@ func TestDocToTriples(t *testing.T) {
 	}
 	if !foundSource {
 		t.Error("missing '来源' triple")
-	}
-	if needJieba() && !foundRel {
-		t.Error("missing '关联' triple with jieba available")
 	}
 }
 
@@ -88,7 +82,6 @@ func TestDocToTriplesTypes(t *testing.T) {
 
 	triples := docToTriples(doc)
 
-	// 主题 and 来源 triples have Subject=文档
 	for _, tr := range triples {
 		if tr.Subject == "文档" {
 			if tr.SubjectType != "Concept" {
@@ -96,14 +89,6 @@ func TestDocToTriplesTypes(t *testing.T) {
 			}
 			if tr.Confidence != 1.0 {
 				t.Errorf("文档 triple confidence should be 1.0, got %f", tr.Confidence)
-			}
-		} else {
-			// 关联 triples use extracted terms as subject/object
-			if tr.Relation != "关联" {
-				t.Errorf("non-文档 triple should have 关联 relation, got %q", tr.Relation)
-			}
-			if tr.Confidence != 0.8 {
-				t.Errorf("关联 triple confidence should be 0.8, got %f", tr.Confidence)
 			}
 		}
 		// all should have SubjectType/ObjectType set

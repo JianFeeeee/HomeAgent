@@ -148,6 +148,47 @@ type Provider interface {
 	Name() string
 	Chat(ctx context.Context, req *CompletionRequest) (*CompletionResponse, error)
 	ChatStream(ctx context.Context, req *CompletionRequest) (<-chan StreamChunk, error)
+	MaxContextTokens() int
+}
+
+// ModelContextWindow 返回模型的最大上下文窗口（token 数）
+// 标称窗口 ≠ 有效窗口：接近满时注意力涣散，调用方应取 70-80% 为目标利用率
+func ModelContextWindow(model string) int {
+	model = strings.ToLower(model)
+	switch {
+	case strings.Contains(model, "deepseek-r1") || strings.Contains(model, "deepseek-chat"):
+		return 65536
+	case strings.Contains(model, "gpt-4") && (strings.Contains(model, "turbo") || strings.Contains(model, "mini") || strings.Contains(model, "omni")):
+		return 128000
+	case strings.Contains(model, "gpt-4"):
+		return 8192
+	case strings.Contains(model, "gpt-3.5"):
+		return 16384
+	case strings.Contains(model, "claude-3.5") || strings.Contains(model, "claude-3"):
+		return 200000
+	case strings.Contains(model, "claude"):
+		return 100000
+	case strings.Contains(model, "gemini-1.5") || strings.Contains(model, "gemini-2"):
+		return 1048576
+	case strings.Contains(model, "gemini"):
+		return 32768
+	case strings.Contains(model, "qwen"):
+		return 131072
+	case strings.Contains(model, "glm") || strings.Contains(model, "chatglm"):
+		return 131072
+	case strings.Contains(model, "llama-3"):
+		return 8192
+	case strings.Contains(model, "llama-2"):
+		return 4096
+	case strings.Contains(model, "mistral") || strings.Contains(model, "mixtral"):
+		return 32768
+	case strings.Contains(model, "yi-") || strings.Contains(model, "零一"):
+		return 200000
+	case strings.Contains(model, "moonshot") || strings.Contains(model, "kimi"):
+		return 131072
+	default:
+		return 32768
+	}
 }
 
 type BaseConfig struct {
@@ -407,6 +448,18 @@ func NewLuaAdaptedProvider(cfg BaseConfig, vm *luaVM.VM, adapter string) *LuaAda
 		adapter: adapter,
 		client:  &http.Client{Timeout: 120 * time.Second},
 	}
+}
+
+func (p *OpenAIProvider) MaxContextTokens() int {
+	return ModelContextWindow(p.cfg.Model)
+}
+
+func (p *OllamaProvider) MaxContextTokens() int {
+	return ModelContextWindow(p.cfg.Model)
+}
+
+func (p *LuaAdaptedProvider) MaxContextTokens() int {
+	return ModelContextWindow(p.cfg.Model)
 }
 
 func (p *LuaAdaptedProvider) Name() string { return p.name }

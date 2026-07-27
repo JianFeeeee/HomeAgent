@@ -271,7 +271,7 @@ func (e *StaticEmbedder) tokenize(text string) []string {
 	if e.jieba == nil {
 		return nil
 	}
-	words := e.jieba.Cut(text, true)
+	words := e.jieba.Cut(text, false)
 	var result []string
 	seen := make(map[string]bool)
 	for _, w := range words {

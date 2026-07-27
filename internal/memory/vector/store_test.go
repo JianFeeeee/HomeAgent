@@ -65,7 +65,7 @@ func TestCosineSimilarity(t *testing.T) {
 }
 
 func TestTFIDFVectorizer(t *testing.T) {
-	v := NewTFIDFVectorizer(2)
+	v := NewTFIDFVectorizer(NGramTokenizer(2))
 	docs := []string{"今天天气很好", "今天心情不错", "明天要下雨"}
 	v.Train(docs)
 
@@ -87,7 +87,7 @@ func TestTFIDFVectorizer(t *testing.T) {
 }
 
 func TestTFIDFVectorizerEmpty(t *testing.T) {
-	v := NewTFIDFVectorizer(2)
+	v := NewTFIDFVectorizer(NGramTokenizer(2))
 	v.Train(nil)
 	vec := v.Vectorize("test")
 	if len(vec) == 0 {
@@ -127,7 +127,7 @@ func TestInvertedIndex(t *testing.T) {
 
 func TestStoreInsertAndSearch(t *testing.T) {
 	s := NewStore()
-	v := NewTFIDFVectorizer(2)
+	v := NewTFIDFVectorizer(NGramTokenizer(2))
 	v.Train([]string{"hello world", "goodbye world"})
 
 	s.Insert("1", "hello world", v.Vectorize("hello world"), nil)
@@ -148,7 +148,7 @@ func TestStoreInsertAndSearch(t *testing.T) {
 
 func TestStoreRemove(t *testing.T) {
 	s := NewStore()
-	v := NewTFIDFVectorizer(1)
+	v := NewTFIDFVectorizer(NGramTokenizer(1))
 	v.Train([]string{"a"})
 
 	s.Insert("1", "a", v.Vectorize("a"), nil)
@@ -175,7 +175,7 @@ func TestStoreEmpty(t *testing.T) {
 
 func TestStoreAll(t *testing.T) {
 	s := NewStore()
-	v := NewTFIDFVectorizer(1)
+	v := NewTFIDFVectorizer(NGramTokenizer(1))
 	v.Train([]string{"a", "b"})
 
 	s.Insert("1", "a", v.Vectorize("a"), map[string]string{"k": "v"})

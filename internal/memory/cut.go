@@ -4,6 +4,7 @@ import (
 	"log"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 
 	"github.com/yanyiwu/gojieba"
@@ -92,13 +93,34 @@ var stopWords = map[string]bool{
 	"when": true, "who": true, "whom": true,
 }
 
+// TokenizeWords 使用 jieba 精确模式分词，返回去重后的所有词 token（不过滤停用词）
+func TokenizeWords(text string) []string {
+	text = CleanText(text)
+	x := GetJieba()
+	if x == nil {
+		return nil
+	}
+	words := x.Cut(text, false)
+	var result []string
+	seen := make(map[string]bool)
+	for _, w := range words {
+		w = strings.TrimSpace(w)
+		if w == "" || seen[w] {
+			continue
+		}
+		seen[w] = true
+		result = append(result, w)
+	}
+	return result
+}
+
 func ExtractKeywords(text string) []string {
 	text = CleanText(text)
 	x := GetJieba()
 	if x == nil {
 		return nil
 	}
-	words := x.Cut(text, true)
+	words := x.Cut(text, false)
 	var keywords []string
 	seen := make(map[string]bool)
 	for _, w := range words {
