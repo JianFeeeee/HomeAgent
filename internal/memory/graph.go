@@ -112,7 +112,6 @@ func (g *GraphDB) initSchema() error {
 		`CREATE INDEX IF NOT EXISTS idx_relation_type ON relations(relation_type)`,
 		`CREATE INDEX IF NOT EXISTS idx_relation_status ON relations(status)`,
 		`CREATE INDEX IF NOT EXISTS idx_relation_session ON relations(session_id)`,
-		`CREATE INDEX IF NOT EXISTS idx_relation_sentence ON relations(sentence_id)`,
 		`CREATE INDEX IF NOT EXISTS idx_sentences_text ON sentences(text)`,
 	}
 
@@ -124,11 +123,14 @@ func (g *GraphDB) initSchema() error {
 
 	// 迁移1：兼容旧版 sentence_ref 列（已有表则忽略）
 	tx.Exec(`ALTER TABLE relations ADD COLUMN sentence_ref TEXT DEFAULT ''`)
-	// 迁移2：为新表添加 sentence_id 列（已有表则忽略）
+	// 迁移2：为新表添加 sentence_id 列（必须放在索引创建之前，否则旧表无此列导致索引创建失败）
 	tx.Exec(`ALTER TABLE relations ADD COLUMN sentence_id INTEGER DEFAULT 0`)
 	// 迁移3：将现有 sentence_ref 数据迁移到 sentences 表
 	tx.Exec(`INSERT OR IGNORE INTO sentences (text) SELECT DISTINCT sentence_ref FROM relations WHERE sentence_ref != ''`)
 	tx.Exec(`UPDATE relations SET sentence_id = (SELECT id FROM sentences WHERE text = relations.sentence_ref) WHERE sentence_ref != ''`)
+
+	// sentence_id 索引在迁移后创建，避免旧表缺少该列时失败
+	tx.Exec(`CREATE INDEX IF NOT EXISTS idx_relation_sentence ON relations(sentence_id)`)
 
 	return tx.Commit()
 }

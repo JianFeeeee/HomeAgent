@@ -5,12 +5,17 @@ adapter.version = "2.0.0"
 adapter.endpoint = "/chat/completions"
 adapter.headers = {}
 
--- OpenAI /chat/completions format (pass-through, strip disable_thinking)
+-- OpenAI /chat/completions format (pass-through, strip provider-specific fields)
 function adapter.transform_request(raw_body)
     local ok, req = pcall(json.decode, raw_body)
     if not ok then return raw_body end
     req.disable_thinking = nil
     req.extra_body = nil
+    if req.messages then
+        for _, msg in ipairs(req.messages) do
+            msg.reasoning_content = nil
+        end
+    end
     return json.encode(req)
 end
 

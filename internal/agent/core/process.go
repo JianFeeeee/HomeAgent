@@ -238,7 +238,7 @@ func (a *Agent) process(input string, stageCtx *sdk.StageContext) (response stri
 				msgContent = resp.Content
 				contentOnce = false
 			}
-			msgs = append(msgs, agentAPI.Message{Role: "assistant", Content: msgContent, ToolCalls: []agentAPI.ToolCall{tc}})
+			msgs = append(msgs, agentAPI.Message{Role: "assistant", Content: msgContent, ReasoningContent: resp.ReasoningContent, ToolCalls: []agentAPI.ToolCall{tc}})
 			msgs = append(msgs, agentAPI.Message{Role: "tool", ToolCallID: tc.ID, Content: result})
 
 			a.publishEvent(events.EventToolCall, map[string]interface{}{
