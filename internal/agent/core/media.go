@@ -53,7 +53,7 @@ func (a *Agent) mediaRequest(p agentAPI.Provider, mime, emptyPendingMsg, emptyDa
 }
 
 func (a *Agent) mediaChat(p agentAPI.Provider, msg agentAPI.Message, resultPrefix string, maxTokens int) string {
-	ctx, cancel := context.WithTimeout(context.Background(), 120*time.Second)
+	ctx, cancel := context.WithTimeout(a.ctx, 120*time.Second)
 	defer cancel()
 	resp, err := p.Chat(ctx, &agentAPI.CompletionRequest{
 		Messages:  []agentAPI.Message{msg},

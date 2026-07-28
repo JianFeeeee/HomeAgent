@@ -10,7 +10,7 @@ HomeAgent 的认知架构由三个核心子系统构成：事件循环（eventLo
 
 **阶段管道（StageHost）** 管理两类注册：工具定义（ToolDef）与阶段处理器（StageHandler）。ToolDef 包含 `NoMemory bool` 和 `Cleaner func(string) string` 两个可选的记忆控制字段：`NoMemory=true` 时工具输出不参与向量化/jieba/蒸馏计算（原文保留）；`Cleaner` 在输出进入计算层前执行过滤（如提取 JSON 的 `content` 字段）。两者均不修改原文，只影响计算层输入。`RegisterTool` 拒绝同名注册，推断工具所属插件名，并维护工具到插件的映射表 `toolPlugins`。`RegisterStage` 将处理器追加至对应阶段的处理器列表。触发阶段执行时（`RunStage`），**所有已注册处理器通过 goroutine 并行执行**，共享同一 `*StageContext` 实例（通过 `sync.RWMutex` 保护并发访问）。单个处理器的 panic 被独立恢复，不影响其他处理器。短路语义通过检查 `ctx.Response != nil` 实现——任一阶段处理器可设置此值提前终止当前链路。工具执行 `ExecuteTool` 内置 panic 恢复与栈追踪记录。`UnregisterPluginTools` 在插件热重载时移除对应工具集。
 
-**上下文窗口（RelevanceContext）** 维护一个按时间排序的事件列表。`Append` 在录入前经 `CleanTemplateText` 剥离 QQ 模板与时间戳噪声，再通过三分支向量策略（agent 事件用 Response，用户事件用 Input，cold_storage 用 Input+Response）计算嵌入向量。`Prune` 在事件数超过 `topK` 时触发，**无条件保护最近 10 条事件不被裁剪**（recency bias），对剩余候选事件计算与当前输入的 CosineSimilarity，按评分降序保留 `topK - 10` 条（下限为 0），之后按时间戳重排序。裁剪出的事件中，过滤掉 `agentcli` 和 `terminal` 来源后，其余通过 `docStore.ContextToDoc` 归档至 Document 层，保留原始时间戳。持久化采用 5 秒防抖写入磁盘 JSON 文件。
+**上下文窗口（RelevanceContext）** 维护一个按时间排序的事件列表。`Append` 在录入前经 `textForVector` 聚合工具输出：按 `NoMemory` 跳过、`Cleaner` 过滤（插件为各自工具注册的清洗函数，如 QQ 外置插件剥离工具调用模板），最后经 `CleanText` 做基本空白规范化，再通过三分支向量策略（agent 事件用 Response，用户事件用 Input，cold_storage 用 Input+Response）计算嵌入向量。`Prune` 在事件数超过 `topK` 时触发，**无条件保护最近 10 条事件不被裁剪**（recency bias），对剩余候选事件计算与当前输入的 CosineSimilarity，按评分降序保留 `topK - 10` 条（下限为 0），之后按时间戳重排序。裁剪出的事件中，过滤掉 `agentcli` 和 `terminal` 来源后，其余通过 `docStore.ContextToDoc` 归档至 Document 层，保留原始时间戳。持久化采用 5 秒防抖写入磁盘 JSON 文件。
 
 **工具定义聚合自五个来源**：IOManager 注册的插件工具；StageHost 注册的 SDK 插件工具；Indexer 提供的记忆索引工具；内置条件工具（依据 memory / knowledge / docStore / social / pluginReg / providerManager 等模块的非空状态选择性添加，包括记忆操作、知识检索、文档查询、社交网络、插件重载、子代理生成、输出通道工具、LLM 源切换等）；以及按 `pendingMedia` 状态添加的媒体处理工具。`buildToolDefs()` 在每次 process 周期中重新聚合所有这些来源。
 
@@ -88,7 +88,7 @@ eventLoop() → processTextInput()
 ```
 ① Context (工作窗口)
    RelevanceContext — 内存 events[] + JSON持久化
-   Append: 每次输入, CleanTemplateText → 三分支向量(textForVector)
+   Append: 每次输入, CleanText → 三分支向量(textForVector)
             agent事件→Response, 用户事件→Input, cold_storage→Input+Response
             StaticEmbedder 预训练词嵌入 / TF-IDF 回退
    Prune:  StaticEmbedder CosineSimilarity, 保留 topK + 最近10条
@@ -115,7 +115,7 @@ eventLoop() → processTextInput()
    写入: memory_commit / 冷文档蒸馏 / Pipeline 规则蒸馏 / memory_merge
    读取:
        ├── 自动召回: Indexer.BuildContext(input)
-       │     → CleanTemplateText → 向量实体搜索 + jieba关键词 → SQLite LIKE + BFS depth=2
+       │     → CleanText → 向量实体搜索 + jieba关键词 → SQLite LIKE + BFS depth=2
        │     → 【记忆索引】→ system prompt
        └── LLM主动: memory_recall / memory_merge / memory_purge / memory_edit / memory_delete_entity
    Social: person_query / set_trait / relate (包装 GraphDB)
@@ -145,7 +145,7 @@ eventLoop() → processTextInput()
 - 通过 `core.agent.embedding_model_path` 配置（逗号分隔多模型）
 - 路径名含 `numberbatch` → 自动下载 ConceptNet，含 `cc.zh.` → fastText 中文，含 `cc.en.` → fastText 英文
 - 不匹配则默认 ConceptNet
-- **前处理**：`CleanTemplateText` 剥离 QQ 工具调用模版、时间戳噪声，避免垃圾干扰相似度
+- **前处理**：`textForVector` 聚合工具输出时逐一应用各工具的 `Cleaner`（由插件注册），最后经 `CleanText` 做基本空白规范化
 - **三分支向量来源**：agent→Response，用户→Input，cold_storage→Input+Response
 - **TF-IDF 回退**：模型下载失败或未配置时自动回退词袋 TF-IDF，服务不中断
 
@@ -160,7 +160,7 @@ eventLoop() → processTextInput()
 
 `internal/agent/core/context.go` — `RelevanceContext`
 - 维护最近事件列表，每次 Append/Prune 写入 JSON 防丢
-- 向量化前统一经 `CleanTemplateText` 去模版噪声
+- 向量化前统一经 `CleanText` 去模版噪声
 - 三分支 `textForVector`：agent 事件用 Response、用户事件用 Input、cold_storage 用 Input+Response
 - 预训练词嵌入 `StaticEmbedder` → CosineSimilarity，模型不可用时自动回退 TF-IDF
 - 保护最近 10 条记录免于淘汰，超出部分按相关性排序归档到文档记忆
@@ -240,9 +240,7 @@ Agent
   ▼
 Provider 接口 (Name / Chat / ChatStream)
   │
-  ├── OpenAIProvider   — 标准 OpenAI API
-  ├── OllamaProvider   — 本地 Ollama
-  └── LuaAdaptedProvider (主要)
+  └── LuaAdaptedProvider (唯一实现)
       ├── 序列化 CompletionRequest → JSON
       ├── adapter.transform_request() → API 格式
       ├── HTTP 请求 + adapter.headers

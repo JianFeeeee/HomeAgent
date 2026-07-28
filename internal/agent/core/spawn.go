@@ -60,16 +60,12 @@ func (a *Agent) runChildTask(taskID, task string) {
 
 	var finalResult string
 	for turn := 0; turn < 5; turn++ {
-		eb := map[string]interface{}{}
-		if !a.thinkingEnabled {
-			eb["thinking"] = map[string]interface{}{"type": "disabled"}
-		}
 		req := &agentAPI.CompletionRequest{
-			Messages:   msgs,
-			MaxTokens:  4096,
-			Tools:      childTools,
-			ToolChoice: "auto",
-			ExtraBody:  eb,
+			Messages:        msgs,
+			MaxTokens:       4096,
+			Tools:           childTools,
+			ToolChoice:      "auto",
+			DisableThinking: !a.thinkingEnabled,
 		}
 
 		resp, err := a.provider.Chat(a.ctx, req)

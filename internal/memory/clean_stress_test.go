@@ -7,8 +7,8 @@ import (
 	"testing"
 )
 
-// cleanQQTemplate 模拟之前由 globalTextCleaner 执行的模板噪音清理，
-// 用于 stress test 中生成 cleanedText。
+// cleanQQTemplate 剥离 QQ 工具调用模板与时间戳噪声。
+// 仅用于测试——生产环境中由 QQ 外置插件的工具 Cleaner 完成。
 func cleanQQTemplate(text string) string {
 	reQQGroupSuffix := regexp.MustCompile(`，通过id\d+使用qq_get_message工具获取消息正文。获取内容后使用 output_send\(channel="qq"\) 回复该群聊，content 设为 JSON 字符串：\{[^}]*\}`)
 	reQQPrivateSuffix := regexp.MustCompile(`，通过id\d+使用qq_get_message工具获取消息正文。获取内容后使用 output_send\(channel="qq"\) 回复对方，content 设为 JSON 字符串：\{[^}]*\}`)

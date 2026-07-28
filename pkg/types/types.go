@@ -102,6 +102,7 @@ type LLMSource struct {
 	APIKey          string `json:"api_key,omitempty"`
 	Adapter         string `json:"adapter"`
 	AdapterPath     string `json:"adapter_path,omitempty"`
+	ContextWindow   int    `json:"context_window,omitempty"`
 	ThinkingEnabled bool   `json:"thinking_enabled,omitempty"`
 }
 
@@ -113,6 +114,7 @@ type LLMConfig struct {
 	Adapter         string      `json:"adapter"`
 	Temperature     float64     `json:"temperature"`
 	MaxTokens       int         `json:"max_tokens"`
+	ContextWindow   int         `json:"context_window,omitempty"`
 	ThinkingEnabled bool        `json:"thinking_enabled"`
 	Sources         []LLMSource `json:"sources,omitempty"`
 }

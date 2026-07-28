@@ -89,7 +89,7 @@ func (p *Plugin) Start(s *sdk.PluginSDK) error {
 		Key: "simulator_dir", Type: "string", DisplayName: "模拟器工作目录",
 		Description: "OpenClaw 模拟器工作目录路径（留空则使用默认路径）",
 	})
-	p.httpClient = &http.Client{}
+	p.httpClient = &http.Client{Timeout: 30 * time.Second}
 	if v, _ := s.Settings().Get("skills_dir"); v != nil {
 		if s, ok := v.(string); ok && s != "" {
 			p.skillsDir = s

@@ -39,26 +39,30 @@ func GetJieba() *gojieba.Jieba {
 }
 
 func jiebaDictDir() string {
+	// GOMODCACHE is typically $GOPATH/pkg/mod. When set, Go writes modules
+	// under <GOMODCACHE>/github.com/... . Look first at GOMODCACHE, then
+	// derive from GOPATH, then try common locations.
 	candidates := []string{
 		os.Getenv("GOMODCACHE"),
-		os.Getenv("GOPATH"),
-		filepath.Join(os.Getenv("HOME"), "go"),
-		"/root/go",
-		"/go",
-		"/home/program/go",
 	}
+	if gp := os.Getenv("GOPATH"); gp != "" {
+		candidates = append(candidates, filepath.Join(gp, "pkg", "mod"))
+	}
+	if home, err := os.UserHomeDir(); err == nil && home != "" {
+		candidates = append(candidates, filepath.Join(home, "go", "pkg", "mod"))
+	}
+	if h := os.Getenv("HOME"); h != "" {
+		candidates = append(candidates, filepath.Join(h, "go", "pkg", "mod"))
+	}
+
+	suffix := filepath.Join("github.com", "yanyiwu", "gojieba@v1.4.7", "deps", "cppjieba", "dict")
 	for _, base := range candidates {
 		if base == "" {
 			continue
 		}
-		d := filepath.Join(base, "pkg", "mod", "github.com", "yanyiwu", "gojieba@v1.4.7", "deps", "cppjieba", "dict")
+		d := filepath.Join(base, suffix)
 		if info, err := os.Stat(d); err == nil && info.IsDir() {
 			return d
-		}
-		// also try without "pkg/mod" (in case GOPATH is already the mod cache)
-		d2 := filepath.Join(base, "github.com", "yanyiwu", "gojieba@v1.4.7", "deps", "cppjieba", "dict")
-		if info, err := os.Stat(d2); err == nil && info.IsDir() {
-			return d2
 		}
 	}
 	return ""
