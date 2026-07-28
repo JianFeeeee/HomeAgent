@@ -120,17 +120,13 @@ Setting `ctx.Response` at any stage jumps to `after_output`.
        └── LLM active: memory_recall / memory_merge / memory_purge / memory_edit / memory_delete_entity
    Social: person_query / set_trait / relate (wraps GraphDB)
 
-④ Distillation Pipeline (30min heartbeat)
-   distillContext → window > 2×maxSize → force Prune
-   syncGraphToDocs → Graph snapshot to Document (cross-layer searchable)
-   reorgGraph:
-       Step1: indexer.Sync — rebuild entity vector index
-       Step2: docStore.Reindex — rebuild document vector index
-       Step3: Cold docs → docToTriples → GraphDB.Commit
-       Step4: Entity similarity (Bigram Jaccard > 0.75) → consolidation → LLM decides merge
-       Step5: evaluateGraphQuality → LLM decides keep/delete
+④ Four Independent Heartbeat Loops (separate tickers and config intervals)
+   distillLoop  (distillInterval,  default 30m):  Context pruning — Context.Prune → Document
+   archiveLoop (archiveInterval, default 60m):  Cold doc archival — docToTriples → GraphDB
+   mergeLoop   (mergeInterval,   default 120m): Entity merge detection — similarity → LLM decision
+   reviewLoop  (reviewInterval,  default 120m): Relation review — SentenceRef recall → LLM fix
 
-⑤ Pipeline Rule Distiller (every heartbeat)
+⑤ Pipeline Rule Distiller (every 10min heartbeat)
    distillOnce → regex match personal info:
      我叫X / 我住在X / 我喜欢X / 我X岁 / 我的工作是X
      → triples → GraphDB.Commit
@@ -209,16 +205,15 @@ All vectorization unified under `StaticEmbedder` (`internal/memory/static_embedd
 ### Context Pruning
 
 ```
-Heartbeat 30min:
-  ├── distillContext()        — Distill current context
-  ├── syncGraphToDocs()       — Graph → Document sync
-  └── reorgGraph()
-      ├── Indexer.Sync()
-      ├── DocStore.Reindex()
-      ├── Cold docs → Graph
-      └── Entity conflicts → enqueueConsolidationTask()
-                                │
-                          selfInputCh → LLM decides merge/skip
+Four independent heartbeat loops (each with configurable interval):
+  ├── distillLoop  (distillInterval,  default 30m)
+  │   └── distillContext() — Context.Prune → Document
+  ├── archiveLoop (archiveInterval, default 60m)
+  │   └── archiveColdDocs() — Cold docs → docToTriples → GraphDB
+  ├── mergeLoop   (mergeInterval,   default 120m)
+  │   └── detectEntityMerge() — Entity similarity detection → LLM decision
+  └── reviewLoop  (reviewInterval,  default 120m)
+      └── reviewRelations() — Relation review → SentenceRef recall → LLM fix
 ```
 
 Entity conflict detection heuristic (bigram Jaccard > 0.75), routed through `selfInputCh` internal channel, LLM makes the final merge decision.
@@ -271,6 +266,25 @@ VM built-ins: `json.encode` / `json.decode` / `log` / `http_get` / `http_post`.
 Built-in plugin registration: `internal/plugins/all.go` blank imports → each plugin `init()` → `Registry.Load()` scans directory to match factory.
 External plugin loading: `internal/plugin/dynamic.go` → copy to SHA256 temp path (bypass `plugin.Open` path cache) → `Open` + `Lookup("NewPlugin")`.
 Lua script plugin loading: `internal/lua/` → parse `main.lua` via Lua VM, call `start()` to register tools.
+
+### Built-in vs External Plugins
+
+| Dimension | Built-in Plugin | External Plugin |
+|-----------|----------------|-----------------|
+| Registration | `init()` calls `plugin.RegisterFactory(name, factory)` | Implements `NewPluginFactory(name, config) (sdk.Plugin, error)` entry function |
+| Compilation | Compiled into `homed` binary, no separate build | Compiled via `plugindev build` to `.so`/`.dll` (`-buildmode=c-shared`), loaded via C ABI bridge |
+| Distribution | Bundled with kernel, not independently installable | `.hmap` package (ZIP archive), installed via WebUI or pluginmgr API |
+| Metadata | `plugin.RegisterPluginMeta()` for display name | `plugin.json` manifest file (name, version, entry, platforms, etc.) |
+| Plugin directory | No separate directory, compiled into binary | `plugins/<name>/` independent directory with `plugin.json` + binary |
+| SDK permissions | Full PluginSDK (SocialAPI read/write, Publish events) | Restricted SDK (SocialAPI read-only, Subscribe-only events) |
+| Lifecycle | Starts/stops with kernel, no individual hot-reload | Independent Start/Stop, supports hot-reload (ReloadOne) and enable/disable |
+| Crash recovery | No independent recovery | Supports `SetAutoRestart(true)` for automatic crash restart |
+
+Common ground:
+- Built-in `RegisterFactory` and external `NewPluginFactory` share the same `NativeFactory` type signature
+- `Registry.Load()` handles both uniformly: checks factory table first (built-in), falls back to dynamic loading (external)
+- Both use the same `Plugin` interface and `PluginSDK`; tool registration, stage hooks, and output channel APIs are identical
+- Both share the same tool registry (`StageHost`); LLM invocations treat them identically
 
 ### PluginSDK Four Channels
 
