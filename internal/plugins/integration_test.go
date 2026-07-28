@@ -17,7 +17,7 @@ import (
 	"gitcode.com/JianFeeeee/HomeAgent/internal/plugin"
 	cli "gitcode.com/JianFeeeee/HomeAgent/internal/plugins/cli"
 	healthcheck "gitcode.com/JianFeeeee/HomeAgent/internal/plugins/healthcheck"
-	openclaw "gitcode.com/JianFeeeee/HomeAgent/internal/plugins/openclaw"
+	openclaw "gitcode.com/JianFeeeee/HomeAgent/internal/plugins/clawhubadapter"
 	webui "gitcode.com/JianFeeeee/HomeAgent/internal/plugins/webui"
 	sdk "gitcode.com/JianFeeeee/HomeAgent/internal/sdk"
 )

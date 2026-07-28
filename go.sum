@@ -1,5 +1,5 @@
-gitcode.com/JianFeeeee/homeagent-sdk v0.7.1 h1:2XEtUgV200uOqbGGEiKT5QyBmZ5aIfNiwm/Ozrm9AOg=
-gitcode.com/JianFeeeee/homeagent-sdk v0.7.1/go.mod h1:G48Rgpw9ReTkCf0qBHf50jb5CSeNR2c4OWcgcEm0plo=
+gitcode.com/JianFeeeee/homeagent-sdk v0.7.2 h1:rB/eJUG7B/GI/chLUVN0Ls4g/F5iePJGTSo6sPd70p0=
+gitcode.com/JianFeeeee/homeagent-sdk v0.7.2/go.mod h1:G48Rgpw9ReTkCf0qBHf50jb5CSeNR2c4OWcgcEm0plo=
 github.com/mattn/go-sqlite3 v1.14.48 h1:7XHIgl0a8HwOaiK4E47ozLkST78rR9+OtNGx27D/TFs=
 github.com/mattn/go-sqlite3 v1.14.48/go.mod h1:6JTjA44L93a0QCyJef5YvlPoKXntQPjzWv5gtm9sB6w=
 github.com/yalue/onnxruntime_go v1.13.0 h1:5HDXHon3EukQMyYA7yPMed/raWaDE/gjwLOwnVoiwy8=
