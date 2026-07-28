@@ -278,11 +278,12 @@ func main() {
 			key = baseAPIKey
 		}
 		luaProvider := agentAPI.NewLuaAdaptedProvider(agentAPI.BaseConfig{
-			Model:       src.Model,
-			BaseURL:     src.BaseURL,
-			APIKey:      key,
-			Temperature: cfg.LLM.Temperature,
-			MaxTokens:   cfg.LLM.MaxTokens,
+			Model:         src.Model,
+			BaseURL:       src.BaseURL,
+			APIKey:        key,
+			Temperature:   cfg.LLM.Temperature,
+			MaxTokens:     cfg.LLM.MaxTokens,
+			ContextWindow: src.ContextWindow,
 		}, luaVM, src.Adapter)
 		providerMgr.Register(src.Name, luaProvider)
 	}

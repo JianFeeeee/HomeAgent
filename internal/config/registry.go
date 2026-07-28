@@ -608,6 +608,7 @@ func (r *ConfigRegistry) ToConfig() *types.Config {
 			APIKey:          read(p+".api_key", ""),
 			Adapter:         read(p+".adapter", ""),
 			AdapterPath:     read(p+".adapter_path", ""),
+			ContextWindow:   readInt(p+".context_window", 0),
 			ThinkingEnabled: readBool(p+".thinking_enabled", false),
 		})
 	}

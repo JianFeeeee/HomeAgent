@@ -7,7 +7,6 @@ adapter.headers = {
     ["anthropic-version"] = "2023-06-01"
 }
 
--- Anthropic Messages API: { model, messages[], max_tokens, system, stream }
 function adapter.transform_request(raw_body)
     local ok, req = pcall(json.decode, raw_body)
     if not ok then return raw_body end
@@ -28,6 +27,11 @@ function adapter.transform_request(raw_body)
         messages = msgs,
         stream = req.stream or false,
     }
+
+    if not req.disable_thinking then
+        anthropic_req.thinking = { type = "enabled", budget_tokens = 4096 }
+    end
+
     if system ~= "" then
         anthropic_req.system = system
     end

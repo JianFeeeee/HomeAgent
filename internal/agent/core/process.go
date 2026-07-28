@@ -60,16 +60,12 @@ func (a *Agent) process(input string, stageCtx *sdk.StageContext) (response stri
 			})
 		}
 
-		eb := map[string]interface{}{}
-		if !a.thinkingEnabled {
-			eb["thinking"] = map[string]interface{}{"type": "disabled"}
-		}
 		req := &agentAPI.CompletionRequest{
-			Messages:   msgs,
-			MaxTokens:  4096,
-			Tools:      tools,
-			ToolChoice: "auto",
-			ExtraBody:  eb,
+			Messages:        msgs,
+			MaxTokens:       4096,
+			Tools:           tools,
+			ToolChoice:      "auto",
+			DisableThinking: !a.thinkingEnabled,
 		}
 
 		var providers []agentAPI.Provider

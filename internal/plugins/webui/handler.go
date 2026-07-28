@@ -1155,11 +1155,12 @@ func (h *Handler) reloadLLMProviders() {
 			key = h.baseAPIKey
 		}
 		provider := agentAPI.NewLuaAdaptedProvider(agentAPI.BaseConfig{
-			Model:       src.Model,
-			BaseURL:     src.BaseURL,
-			APIKey:      key,
-			Temperature: cfg.LLM.Temperature,
-			MaxTokens:   cfg.LLM.MaxTokens,
+			Model:         src.Model,
+			BaseURL:       src.BaseURL,
+			APIKey:        key,
+			Temperature:   cfg.LLM.Temperature,
+			MaxTokens:     cfg.LLM.MaxTokens,
+			ContextWindow: src.ContextWindow,
 		}, h.lua, src.Adapter)
 		h.providerMgr.Register(src.Name, provider)
 	}

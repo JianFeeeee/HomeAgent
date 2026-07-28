@@ -5,14 +5,15 @@ adapter.version = "2.0.0"
 adapter.endpoint = "/chat/completions"
 adapter.headers = {}
 
--- raw_body: JSON string as received from Go (CompletionRequest marshalled)
--- return: transformed JSON string to send to API
+-- OpenAI /chat/completions format (pass-through, strip disable_thinking)
 function adapter.transform_request(raw_body)
-    return raw_body
+    local ok, req = pcall(json.decode, raw_body)
+    if not ok then return raw_body end
+    req.disable_thinking = nil
+    req.extra_body = nil
+    return json.encode(req)
 end
 
--- raw_body: JSON string from HTTP response body
--- return: unified JSON string in CompletionResponse format
 function adapter.transform_response(raw_body)
     local ok, resp = pcall(json.decode, raw_body)
     if not ok then return raw_body end
@@ -57,8 +58,6 @@ function adapter.transform_response(raw_body)
     return json.encode(unified)
 end
 
--- raw_chunk: single SSE data line (after "data: " prefix)
--- return: unified chunk JSON string, or "" to skip
 function adapter.transform_stream_chunk(raw_chunk)
     local ok, chunk = pcall(json.decode, raw_chunk)
     if not ok then return "" end

@@ -84,6 +84,7 @@ type CompletionRequest struct {
 	Stream          bool                   `json:"stream,omitempty"`
 	Tools           []interface{}          `json:"tools,omitempty"`
 	ToolChoice      interface{}            `json:"tool_choice,omitempty"`
+	DisableThinking bool                   `json:"disable_thinking"`
 	ExtraBody       map[string]interface{} `json:"-"`
 }
 
@@ -192,236 +193,12 @@ func ModelContextWindow(model string) int {
 }
 
 type BaseConfig struct {
-	Model       string  `json:"model"`
-	BaseURL     string  `json:"base_url"`
-	APIKey      string  `json:"api_key"`
-	Temperature float64 `json:"temperature"`
-	MaxTokens   int     `json:"max_tokens"`
-}
-
-type OpenAIProvider struct {
-	cfg    BaseConfig
-	client *http.Client
-}
-
-func NewOpenAIProvider(cfg BaseConfig) *OpenAIProvider {
-	if cfg.BaseURL == "" {
-		cfg.BaseURL = "https://api.openai.com/v1"
-	}
-	if cfg.Temperature == 0 {
-		cfg.Temperature = 0.7
-	}
-	if cfg.MaxTokens == 0 {
-		cfg.MaxTokens = 4096
-	}
-	return &OpenAIProvider{
-		cfg:    cfg,
-		client: &http.Client{Timeout: 60 * time.Second},
-	}
-}
-
-func (p *OpenAIProvider) Name() string { return "openai" }
-
-func (p *OpenAIProvider) Chat(ctx context.Context, req *CompletionRequest) (*CompletionResponse, error) {
-	if req.Model == "" {
-		req.Model = p.cfg.Model
-	}
-
-	body, _ := json.Marshal(req)
-	httpReq, _ := http.NewRequestWithContext(ctx, "POST", p.cfg.BaseURL+"/chat/completions", strings.NewReader(string(body)))
-	httpReq.Header.Set("Content-Type", "application/json")
-	httpReq.Header.Set("Authorization", "Bearer "+p.cfg.APIKey)
-
-	resp, err := p.client.Do(httpReq)
-	if err != nil {
-		return nil, fmt.Errorf("api call: %w", err)
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode != 200 {
-		respBody, _ := io.ReadAll(resp.Body)
-		return nil, &ProviderError{
-			StatusCode: resp.StatusCode,
-			Message:    fmt.Sprintf("api error %d: %s", resp.StatusCode, string(respBody)),
-		}
-	}
-
-	var rawResult struct {
-		Choices []struct {
-			Message struct {
-				Content          *string          `json:"content"`
-				ReasoningContent *string          `json:"reasoning_content"`
-				ToolCalls        []rawToolCall    `json:"tool_calls"`
-				Role             string           `json:"role"`
-			} `json:"message"`
-			FinishReason string `json:"finish_reason"`
-		} `json:"choices"`
-		Usage struct {
-			PromptTokens     int `json:"prompt_tokens"`
-			CompletionTokens int `json:"completion_tokens"`
-			TotalTokens      int `json:"total_tokens"`
-		} `json:"usage"`
-	}
-
-	if err := json.NewDecoder(resp.Body).Decode(&rawResult); err != nil {
-		return nil, fmt.Errorf("decode: %w", err)
-	}
-
-	if len(rawResult.Choices) == 0 {
-		return nil, fmt.Errorf("no choices returned")
-	}
-
-	ch := rawResult.Choices[0]
-	content := ""
-	if ch.Message.Content != nil {
-		content = *ch.Message.Content
-	}
-
-	var toolCalls []ToolCall
-	for _, tc := range ch.Message.ToolCalls {
-		tc := tc
-		args := make(map[string]interface{})
-		if err := json.Unmarshal([]byte(tc.Function.Arguments), &args); err != nil {
-			args["_raw"] = tc.Function.Arguments
-		}
-		toolCalls = append(toolCalls, ToolCall{
-			ID:        tc.ID,
-			Type:      tc.Type,
-			Name:      tc.Function.Name,
-			Arguments: args,
-		})
-	}
-
-	return &CompletionResponse{
-		Content:      content,
-		FinishReason: ch.FinishReason,
-		TokenUsage: TokenUsage{
-			Prompt:     rawResult.Usage.PromptTokens,
-			Completion: rawResult.Usage.CompletionTokens,
-			Total:      rawResult.Usage.TotalTokens,
-		},
-		ToolCalls: toolCalls,
-	}, nil
-}
-
-func (p *OpenAIProvider) ChatStream(ctx context.Context, req *CompletionRequest) (<-chan StreamChunk, error) {
-	req.Stream = true
-	ch := make(chan StreamChunk, 64)
-
-	body, _ := json.Marshal(req)
-	httpReq, _ := http.NewRequestWithContext(ctx, "POST", p.cfg.BaseURL+"/chat/completions", strings.NewReader(string(body)))
-	httpReq.Header.Set("Content-Type", "application/json")
-	httpReq.Header.Set("Authorization", "Bearer "+p.cfg.APIKey)
-
-	resp, err := p.client.Do(httpReq)
-	if err != nil {
-		return nil, fmt.Errorf("stream api: %w", err)
-	}
-
-	go func() {
-		defer resp.Body.Close()
-		defer close(ch)
-
-		decoder := json.NewDecoder(resp.Body)
-		for {
-			var line struct {
-				Choices []struct {
-					Delta struct {
-						Content string `json:"content"`
-					} `json:"delta"`
-					FinishReason *string `json:"finish_reason"`
-				} `json:"choices"`
-			}
-
-			if err := decoder.Decode(&line); err != nil {
-				return
-			}
-
-			if len(line.Choices) > 0 {
-				select {
-				case ch <- StreamChunk{
-					Content: line.Choices[0].Delta.Content,
-					Done:    line.Choices[0].FinishReason != nil,
-				}:
-				case <-ctx.Done():
-					return
-				}
-			}
-		}
-	}()
-
-	return ch, nil
-}
-
-type OllamaProvider struct {
-	cfg    BaseConfig
-	client *http.Client
-}
-
-func NewOllamaProvider(cfg BaseConfig) *OllamaProvider {
-	if cfg.BaseURL == "" {
-		cfg.BaseURL = "http://localhost:11434"
-	}
-	if cfg.Temperature == 0 {
-		cfg.Temperature = 0.7
-	}
-	if cfg.MaxTokens == 0 {
-		cfg.MaxTokens = 4096
-	}
-	return &OllamaProvider{
-		cfg:    cfg,
-		client: &http.Client{Timeout: 120 * time.Second},
-	}
-}
-
-func (p *OllamaProvider) Name() string { return "ollama" }
-
-func (p *OllamaProvider) Chat(ctx context.Context, req *CompletionRequest) (*CompletionResponse, error) {
-	ollamaReq := map[string]interface{}{
-		"model":    req.Model,
-		"messages": req.Messages,
-		"stream":   false,
-		"options": map[string]interface{}{
-			"temperature": req.Temperature,
-			"num_predict": req.MaxTokens,
-		},
-	}
-
-	body, _ := json.Marshal(ollamaReq)
-	httpReq, _ := http.NewRequestWithContext(ctx, "POST", p.cfg.BaseURL+"/api/chat", strings.NewReader(string(body)))
-	httpReq.Header.Set("Content-Type", "application/json")
-
-	resp, err := p.client.Do(httpReq)
-	if err != nil {
-		return nil, fmt.Errorf("ollama chat: %w", err)
-	}
-	defer resp.Body.Close()
-
-	var result struct {
-		Message struct {
-			Content string `json:"content"`
-		} `json:"message"`
-		DoneReason string `json:"done_reason"`
-	}
-	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
-		return nil, fmt.Errorf("decode: %w", err)
-	}
-
-	return &CompletionResponse{
-		Content:      result.Message.Content,
-		FinishReason: result.DoneReason,
-	}, nil
-}
-
-func (p *OllamaProvider) ChatStream(ctx context.Context, req *CompletionRequest) (<-chan StreamChunk, error) {
-	ch := make(chan StreamChunk, 64)
-
-	go func() {
-		defer close(ch)
-		ch <- StreamChunk{Done: true}
-	}()
-
-	return ch, nil
+	Model         string  `json:"model"`
+	BaseURL       string  `json:"base_url"`
+	APIKey        string  `json:"api_key"`
+	Temperature   float64 `json:"temperature"`
+	MaxTokens     int     `json:"max_tokens"`
+	ContextWindow int     `json:"context_window"`
 }
 
 // LuaAdaptedProvider 使用 Lua 脚本做请求/响应变换，直接发起 HTTP 调用
@@ -450,15 +227,10 @@ func NewLuaAdaptedProvider(cfg BaseConfig, vm *luaVM.VM, adapter string) *LuaAda
 	}
 }
 
-func (p *OpenAIProvider) MaxContextTokens() int {
-	return ModelContextWindow(p.cfg.Model)
-}
-
-func (p *OllamaProvider) MaxContextTokens() int {
-	return ModelContextWindow(p.cfg.Model)
-}
-
 func (p *LuaAdaptedProvider) MaxContextTokens() int {
+	if p.cfg.ContextWindow > 0 {
+		return p.cfg.ContextWindow
+	}
 	return ModelContextWindow(p.cfg.Model)
 }
 
@@ -642,6 +414,7 @@ func (s *SSEScanner) Text() string { return s.pending }
 type providerStatus struct {
 	failCount    int
 	unavailableUntil time.Time
+	permanent    bool // 401/403 永久不可用，不自动恢复
 }
 
 type ProviderManager struct {
@@ -748,12 +521,23 @@ func (m *ProviderManager) MarkUnavailable(name string) {
 	st.unavailableUntil = time.Now().Add(cooldown)
 }
 
-// ReportStatus records an HTTP status code for a provider, allowing auth errors
-// (401/403) to be distinguished from transient failures.
+// ReportStatus records an HTTP status code for a provider.
+// 401/403 = credential error → permanently unavailable (never retry).
+// Other codes → MarkUnavailable with exponential backoff.
 func (m *ProviderManager) ReportStatus(name string, statusCode int) {
 	if statusCode == 401 || statusCode == 403 {
-		m.MarkUnavailable(name)
+		m.mu.Lock()
+		defer m.mu.Unlock()
+		st := m.status[name]
+		if st == nil {
+			st = &providerStatus{}
+			m.status[name] = st
+		}
+		st.permanent = true
+		st.unavailableUntil = time.Date(9999, 1, 1, 0, 0, 0, 0, time.UTC)
+		return
 	}
+	m.MarkUnavailable(name)
 }
 
 func (m *ProviderManager) ResetAvailability(name string) {
@@ -762,12 +546,27 @@ func (m *ProviderManager) ResetAvailability(name string) {
 	delete(m.status, name)
 }
 
+func (m *ProviderManager) MarkPermanent(name string) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	st := m.status[name]
+	if st == nil {
+		st = &providerStatus{}
+		m.status[name] = st
+	}
+	st.permanent = true
+	st.unavailableUntil = time.Date(9999, 1, 1, 0, 0, 0, 0, time.UTC)
+}
+
 func (m *ProviderManager) IsAvailable(name string) bool {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 	st, ok := m.status[name]
 	if !ok {
 		return true
+	}
+	if st.permanent {
+		return false
 	}
 	return time.Now().After(st.unavailableUntil)
 }

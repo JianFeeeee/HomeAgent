@@ -13,6 +13,8 @@ function adapter.transform_request(raw_body)
     req.temperature = req.temperature or 0.7
     req.max_tokens = req.max_tokens or 4096
     req.stream = req.stream or false
+    req.disable_thinking = nil
+    req.extra_body = nil
     return json.encode(req)
 end
 

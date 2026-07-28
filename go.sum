@@ -2,6 +2,8 @@ gitcode.com/JianFeeeee/homeagent-sdk v0.7.1 h1:2XEtUgV200uOqbGGEiKT5QyBmZ5aIfNiw
 gitcode.com/JianFeeeee/homeagent-sdk v0.7.1/go.mod h1:G48Rgpw9ReTkCf0qBHf50jb5CSeNR2c4OWcgcEm0plo=
 github.com/mattn/go-sqlite3 v1.14.48 h1:7XHIgl0a8HwOaiK4E47ozLkST78rR9+OtNGx27D/TFs=
 github.com/mattn/go-sqlite3 v1.14.48/go.mod h1:6JTjA44L93a0QCyJef5YvlPoKXntQPjzWv5gtm9sB6w=
+github.com/yalue/onnxruntime_go v1.13.0 h1:5HDXHon3EukQMyYA7yPMed/raWaDE/gjwLOwnVoiwy8=
+github.com/yalue/onnxruntime_go v1.13.0/go.mod h1:b4X26A8pekNb1ACJ58wAXgNKeUCGEAQ9dmACut9Sm/4=
 github.com/yanyiwu/gojieba v1.4.7 h1:2YkXELcYLTE0SJetq6xv4MjpEikWga6VpFn4jIFFQ/k=
 github.com/yanyiwu/gojieba v1.4.7/go.mod h1:JUq4DddFVGdHXJHxxepxRmhrKlDpaBxR8O28v6fKYLY=
 github.com/yuin/gopher-lua v1.1.2 h1:yF/FjE3hD65tBbt0VXLE13HWS9h34fdzJmrWRXwobGA=
