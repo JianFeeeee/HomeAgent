@@ -32,7 +32,7 @@ func (a *Agent) enqueueConsolidationTask(task ConsolidationTask) {
 // 四个独立心跳循环，各自拥有独立的 ticker 和配置
 // ──────────────────────────────────────────────
 
-// distillLoop 上下文裁剪（L2 蒸馏），使用 distillInterval
+// distillLoop 上下文裁剪（L1→L2），使用 distillInterval
 func (a *Agent) distillLoop() {
 	defer func() {
 		if r := recover(); r != nil {
@@ -59,7 +59,7 @@ func (a *Agent) distillLoop() {
 	}
 }
 
-// archiveLoop 冷文档归档（L3→L4），使用 archiveInterval
+// archiveLoop 冷文档归档（L2→L3），使用 archiveInterval
 func (a *Agent) archiveLoop() {
 	defer func() {
 		if r := recover(); r != nil {

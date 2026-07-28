@@ -133,7 +133,7 @@ type AgentConfig struct {
 	PluginReg          *plugin.Registry
 	PluginDir          string
 	DistillInterval    time.Duration
-	ArchiveInterval    time.Duration // 冷文档归档间隔（L3→L4），0 则使用 DistillInterval
+	ArchiveInterval    time.Duration // 冷文档归档间隔（L2→L3），0 则使用 DistillInterval
 	ReviewInterval     time.Duration // 关系复审间隔，0 则使用 DistillInterval
 	MergeInterval      time.Duration // 实体合并检测间隔，0 则使用 DistillInterval
 	MaxContextSize     int           // 活跃上下文最大条数，超出按相关性裁剪

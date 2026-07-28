@@ -19,7 +19,7 @@ Core architecture: a long-running kernel process (`homed`) that connects to vari
 The significance lies in clear responsibility boundaries: the kernel focuses on orchestration and memory management, while plugins handle IO implementation — the two are not coupled.
 
 **Three-Layer Memory Architecture** — Manages information retention across long agent runtimes through a tiered storage strategy:
-- **Context Layer**: In-memory local word embedding scored event window (jieba + TF-IDF + PMI → CosineSimilarity), maintains recent context in real-time, low-relevance events automatically sink to the next layer
+- **Context Layer**: In-memory pretrained word embedding scored event window (StaticEmbedder word vectors → CosineSimilarity, TF-IDF fallback), maintains recent context in real-time, low-relevance events automatically sink to the next layer
 - **Document Layer**: JSON files + TF-IDF vector-indexed temporary memory, supports explicit submission and implicit archival, cold data distills to Graph
 - **Graph Layer**: SQLite graph database, persists entities and relations, BFS traversal recall, distillation pipeline extracts triples from conversations
 

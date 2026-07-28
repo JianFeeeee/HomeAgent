@@ -120,17 +120,13 @@ eventLoop() → processTextInput()
        └── LLM主动: memory_recall / memory_merge / memory_purge / memory_edit / memory_delete_entity
    Social: person_query / set_trait / relate (包装 GraphDB)
 
-④ 蒸馏管道 (每30min心跳)
-   distillContext → 窗口>2×maxSize → 强制Prune
-   syncGraphToDocs → Graph 快照写入 Document(跨层可搜索)
-   reorgGraph:
-       Step1: indexer.Sync — 重建实体向量索引
-       Step2: docStore.Reindex — 重建文档向量索引
-       Step3: 冷文档 → docToTriples → GraphDB.Commit
-       Step4: 实体相似度(Bigram Jaccard>0.75) → consolidation → LLM判断合并
-       Step5: evaluateGraphQuality → LLM判断保留/删除
+④ 四个独立心跳循环（各自独立的 ticker 和配置间隔）
+   distillLoop  (distillInterval,  默认30m): 上下文裁剪 — Context.Prune → Document
+   archiveLoop (archiveInterval, 默认60m): 冷文档归档 — docToTriples → GraphDB
+   mergeLoop   (mergeInterval,   默认120m): 实体合并检测 — 相似度 → LLM 裁决
+   reviewLoop  (reviewInterval,  默认120m): 关系复审 — SentenceRef 回溯 → LLM 修正
 
-⑤ Pipeline 规则蒸馏器 (每心跳)
+⑤ Pipeline 规则蒸馏器 (每10min心跳)
    distillOnce → 正则匹配个人信息:
      我叫X / 我住在X / 我喜欢X / 我X岁 / 我的工作是X
      → 三元组 → GraphDB.Commit
@@ -209,16 +205,15 @@ eventLoop() → processTextInput()
 ### 上下文剪枝
 
 ```
-心跳 30min:
-  ├── distillContext()        — 蒸馏当前上下文
-  ├── syncGraphToDocs()       — Graph→Document 同步
-  └── reorgGraph()
-      ├── Indexer.Sync()
-      ├── DocStore.Reindex()
-      ├── 冷文档→Graph
-      └── 实体冲突 → enqueueConsolidationTask()
-                          │
-                    selfInputCh → LLM 判断合并/跳过
+四个独立心跳循环（各自可配置间隔）:
+  ├── distillLoop  (distillInterval,  默认30m)
+  │   └── distillContext() — Context.Prune → Document
+  ├── archiveLoop (archiveInterval, 默认60m)
+  │   └── archiveColdDocs() — 冷文档 → docToTriples → GraphDB
+  ├── mergeLoop   (mergeInterval,   默认120m)
+  │   └── detectEntityMerge() — 实体相似度检测 → LLM 裁决
+  └── reviewLoop  (reviewInterval,  默认120m)
+      └── reviewRelations() — 关系复审 → SentenceRef 回溯 → LLM 修正
 ```
 
 实体冲突检测启发式（bigram Jaccard > 0.75），走 `selfInputCh` 内部通道，LLM 最终判断是否合并。
@@ -269,6 +264,25 @@ VM 内置 `json.encode` / `json.decode` / `log` / `http_get` / `http_post`。
 内置插件注册：`internal/plugins/all.go` 空白导入 → 各插件 `init()` → `Registry.Load()` 扫描目录匹配工厂。
 外部插件加载：`internal/plugin/dynamic.go` → 复制到 SHA256 临时路径（绕过 `plugin.Open` 路径缓存）→ `Open` + `Lookup("NewPlugin")`。
 Lua 脚本插件加载：`internal/lua/` → 通过 Lua VM 解析 `main.lua`，调用 `start()` 注册工具。
+
+### 内置插件 vs 外部插件
+
+| 维度 | 内置插件 | 外部插件 |
+|------|----------|----------|
+| 注册方式 | `init()` 调用 `plugin.RegisterFactory(name, factory)` | 实现 `NewPluginFactory(name, config) (sdk.Plugin, error)` 入口函数 |
+| 编译方式 | 编译进 `homed` 二进制，无需独立编译 | 通过 `plugindev build` 编译为 `.so`/`.dll`（`-buildmode=c-shared`），C ABI bridge 加载 |
+| 分发方式 | 随内核分发，不可独立安装/卸载 | `.hmap` 包（ZIP 归档），通过 WebUI 或 pluginmgr API 安装 |
+| 元数据 | 通过 `plugin.RegisterPluginMeta()` 注册显示名 | `plugin.json` manifest 文件（name, version, entry, platforms 等） |
+| 插件目录 | 无独立目录，编译进二进制 | `plugins/<name>/` 独立目录，包含 `plugin.json` + 二进制 |
+| SDK 权限 | 完整 PluginSDK（SocialAPI 读写、Publish 事件） | 受限 SDK（SocialAPI 只读、仅 Subscribe 事件） |
+| 生命周期 | 随内核启动/停止，不可单独热重载 | 独立 Start/Stop，支持热重载（ReloadOne）和禁用/启用 |
+| 崩溃恢复 | 无独立恢复机制 | 支持 `SetAutoRestart(true)` 崩溃自动重启 |
+
+两者的联系：
+- 内置插件的工厂函数 `RegisterFactory` 与外部插件的 `NewPluginFactory` 共用同一个 `NativeFactory` 类型签名
+- `Registry.Load()` 统一处理两者的加载：先查工厂表（内置），无工厂则尝试动态加载（外部）
+- 两者使用相同的 `Plugin` 接口和 `PluginSDK`，工具注册、阶段钩子、输出通道等 API 完全一致
+- 两者共享同一个工具注册表（`StageHost`），LLM 调用时无差别
 
 ### PluginSDK 四通道
 
