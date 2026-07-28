@@ -36,19 +36,32 @@ var depTemplates = []depTemplate{
 	{subjRel: "SBV", objRel: "IOB", score: 0.85},
 	{subjRel: "SBV", objRel: "FOB", score: 0.8},
 	{subjRel: "SBV", objRel: "POB", score: 0.75},
+	{subjRel: "ATT", objRel: "VOB", score: 0.7},
+	{subjRel: "ATT", objRel: "IOB", score: 0.65},
+	{subjRel: "ATT", objRel: "FOB", score: 0.6},
+	{subjRel: "ATT", objRel: "POB", score: 0.55},
 }
 
-// extractFromDep 基于依存句法树提取三元组
-func extractFromDep(result *ParseResult) []Triple {
+// extractFromDep 基于依存句法树提取三元组 (Phase 2: 结构初筛)
+// 输入：Token 序列（含依存关系）
+// 处理：标记名词性节点 → 遍历谓词中心 → 收集 SBV/ATT 主语、VOB/IOB/POB 宾语 → 笛卡尔积 → 赋句法置信度 → ATT 链合并
+// 输出：候选三元组列表（带 syntax_conf）
+func extractFromDep(result *ParseResult, sentence string) []Triple {
 	if len(result.Tokens) < 2 {
 		return nil
 	}
+
+	// Step 1: 标记所有名词性节点为候选实体（供后续 ATT 合并等使用）
+	// （隐式使用，通过 isNounLike 判断）
+
+	// Step 2: 遍历所有动词节点作为谓词中心
+	verbIndices := findPredicates(result.POS, result.Tokens)
 	var triples []Triple
 
-	verbIndices := findPredicates(result.POS, result.Tokens)
 	for _, vi := range verbIndices {
-		var subj, obj string
-		var objIdx int
+		// Step 3: 沿依存弧收集主语（SBV/ATT）和宾语（VOB/IOB/FOB/POB）
+		var subjIndices, objIndices []int
+		var subjRels, objRels []string
 
 		for i, head := range result.Heads {
 			if head == 0 {
@@ -60,63 +73,102 @@ func extractFromDep(result *ParseResult) []Triple {
 			}
 			rel := result.DepRels[i]
 
-			if isSubjRel(rel) && subj == "" {
-				subj = result.Tokens[i]
-			} else if isObjRel(rel) && obj == "" {
-				obj = result.Tokens[i]
-				objIdx = i
+			if isSubjRel(rel) {
+				subjIndices = append(subjIndices, i)
+				subjRels = append(subjRels, rel)
+			} else if isObjRel(rel) {
+				objIndices = append(objIndices, i)
+				objRels = append(objRels, rel)
 			}
 		}
 
-		if subj == "" {
+		// 主语降级：无 SBV/ATT 主语时向左查找最近的名词性节点
+		if len(subjIndices) == 0 {
 			for j := vi - 1; j >= 0; j-- {
 				if isNounLike(result.POS[j]) {
-					subj = result.Tokens[j]
+					subjIndices = append(subjIndices, j)
+					subjRels = append(subjRels, "SBV_IMPLICIT")
 					break
 				}
 			}
 		}
 
-		if subj != "" && obj != "" {
-			relLabel := result.Tokens[vi]
-			score := 0.8
-			if objIdx < len(result.Heads) && result.Heads[objIdx] == vi+1 {
+		// 宾语降级：无显式宾语时查找动词的其他名词性依赖
+		if len(objIndices) == 0 {
+			for i, head := range result.Heads {
+				if head == 0 {
+					continue
+				}
+				if head-1 == vi && isNounLike(result.POS[i]) && !isSubjRel(result.DepRels[i]) {
+					objIndices = append(objIndices, i)
+					objRels = append(objRels, "OBJ_IMPLICIT")
+				}
+			}
+		}
+
+		if len(subjIndices) == 0 || len(objIndices) == 0 {
+			continue
+		}
+
+		// Step 4: 笛卡尔积生成候选对，按模板赋予句法置信度
+		relLabel := result.Tokens[vi]
+		for _, si := range subjIndices {
+			for _, oi := range objIndices {
+				if si == oi {
+					continue
+				}
+				subj := result.Tokens[si]
+				obj := result.Tokens[oi]
+
+				score := 0.8 // 默认句法置信度
+				// 匹配模板查询精确置信度
 				for _, t := range depTemplates {
-					if t.objRel == result.DepRels[objIdx] {
+					if si < len(result.Heads) && result.Heads[si] == vi+1 &&
+						oi < len(result.Heads) && result.Heads[oi] == vi+1 &&
+						t.subjRel == result.DepRels[si] && t.objRel == result.DepRels[oi] {
 						score = t.score
 						break
 					}
 				}
+
+				triples = append(triples, Triple{
+					Subject:     subj,
+					Relation:    relLabel,
+					Object:      obj,
+					Score:       score,
+					Src:         "dep",
+					SentenceRef: sentence,
+				})
 			}
-			triples = append(triples, Triple{
-				Subject:  subj,
-				Relation: relLabel,
-				Object:   obj,
-				Score:    score,
-				Src:      "dep",
-			})
 		}
 
-		// COO 链扩展：如果宾语有并列结构，为每个并列项生成三元组
-		if obj != "" {
-			cooExpanded := expandCOO(result, objIdx, vi)
+		// COO 链扩展：为每个宾语所在的并列结构生成额外三元组
+		for _, oi := range objIndices {
+			cooExpanded := expandCOO(result, oi, vi)
 			for _, cooObj := range cooExpanded {
-				if cooObj == obj {
+				if cooObj == result.Tokens[oi] {
 					continue
 				}
-				relLabel := result.Tokens[vi]
-				triples = append(triples, Triple{
-					Subject:  subj,
-					Relation: relLabel,
-					Object:   cooObj,
-					Score:    0.7,
-					Src:      "dep_coo",
-				})
+				for _, si := range subjIndices {
+					subj := result.Tokens[si]
+					triples = append(triples, Triple{
+						Subject:     subj,
+						Relation:    relLabel,
+						Object:      cooObj,
+						Score:       0.7,
+						Src:         "dep_coo",
+						SentenceRef: sentence,
+					})
+				}
 			}
 		}
 	}
 
+	// Step 5: ATT 链合并多词实体
 	triples = mergeAttTriples(result, triples)
+
+	// 去重
+	triples = dedupTriples(triples)
 	return triples
 }
 
@@ -213,8 +265,8 @@ var posTemplates = []posTemplate{
 	{pattern: []string{"n", "v", "v", "n"}, subj: 0, verb: 1, obj: 3, score: 0.55},
 }
 
-// extractFromPOS 基于 POS 序列匹配模板提取三元组
-func extractFromPOS(result *ParseResult) []Triple {
+// extractFromPOS 基于 POS 序列匹配模板提取三元组 (Phase 2 降级路径)
+func extractFromPOS(result *ParseResult, sentence string) []Triple {
 	if len(result.Tokens) < 2 {
 		return nil
 	}
@@ -248,11 +300,12 @@ func extractFromPOS(result *ParseResult) []Triple {
 				continue
 			}
 			triples = append(triples, Triple{
-				Subject:  subj,
-				Relation: verb,
-				Object:   obj,
-				Score:    tpl.score,
-				Src:      "pos",
+				Subject:     subj,
+				Relation:    verb,
+				Object:      obj,
+				Score:       tpl.score,
+				Src:         "pos",
+				SentenceRef: sentence,
 			})
 		}
 	}
@@ -375,7 +428,7 @@ func isAdj(p string) bool {
 }
 
 func isSubjRel(rel string) bool {
-	return rel == "SBV"
+	return rel == "SBV" || rel == "ATT"
 }
 
 func isObjRel(rel string) bool {

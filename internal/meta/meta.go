@@ -18,8 +18,8 @@ var (
 	// KernelName 是内核名称。
 	KernelName = "HomeAgent"
 
-	// SDKCompatibleVersion 是此内核兼容的最低 SDK 版本（semver）。
-	SDKCompatibleVersion = "0.8.0"
+	// SDKCompatibleVersion 是此内核可兼容的最高 SDK 版本（semver）。
+	SDKCompatibleVersion = "0.7.2"
 )
 
 // FullVersion 返回完整的版本字符串。

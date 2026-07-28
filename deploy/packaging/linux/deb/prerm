@@ -1,0 +1,19 @@
+#!/bin/sh
+set -e
+
+SERVICE_NAME="homeagent"
+
+case "$1" in
+  remove|deconfigure)
+    if command -v systemctl >/dev/null 2>&1; then
+      systemctl stop "$SERVICE_NAME" 2>/dev/null || true
+      systemctl disable "$SERVICE_NAME" 2>/dev/null || true
+    fi
+    ;;
+  upgrade)
+    ;;
+  *)
+    ;;
+esac
+
+exit 0

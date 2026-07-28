@@ -1,0 +1,32 @@
+#!/bin/sh
+set -e
+
+SERVICE_NAME="homeagent"
+SERVICE_FILE="/lib/systemd/system/${SERVICE_NAME}.service"
+HOMED_BIN="/usr/bin/homed"
+DATA_DIR="/var/lib/homeagent"
+
+case "$1" in
+  configure)
+    if [ -f "$HOMED_BIN" ]; then
+      mkdir -p "$DATA_DIR"
+
+      # 初始化凭据和数据库
+      if [ -x /usr/lib/homeagent/setup.sh ]; then
+        HOMEAGENT_DATA="$DATA_DIR" /usr/lib/homeagent/setup.sh || true
+      fi
+
+      # 注册 systemd 服务
+      if [ -f "$SERVICE_FILE" ]; then
+        systemctl daemon-reload 2>/dev/null || true
+        systemctl enable "$SERVICE_NAME" 2>/dev/null || true
+      fi
+    fi
+    ;;
+  abort-upgrade|abort-remove|abort-deconfigure)
+    ;;
+  *)
+    ;;
+esac
+
+exit 0

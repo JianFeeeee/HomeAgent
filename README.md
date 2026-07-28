@@ -124,12 +124,12 @@ flowchart TB
     LLM -->|memory_recall| MEM
 ```
 
-详细说明见 [`docs/zh/ARCHITECTURE.md`](docs/zh/ARCHITECTURE.md)。
+详细说明见 [`assets/docs/zh/ARCHITECTURE.md`](assets/docs/zh/ARCHITECTURE.md)。
 
 ## 看板娘
 
 <div align="center">
-  <img src="branding/mascot-xiaozhai.webp" alt="HomeAgent 看板娘 小宅" width="200">
+  <img src="assets/branding/mascot-xiaozhai.webp" alt="HomeAgent 看板娘 小宅" width="200">
   <p><strong>小宅</strong> — HomeAgent 看板娘</p>
 </div>
 
@@ -171,15 +171,15 @@ internal/
 
 ## 项目状态
 
-**v0.7.1** — 核心可用，插件系统和 SDK 已就绪。内置 11 个插件，外部插件开发见 [homeagent-sdk](https://gitcode.com/JianFeeeee/homeagent-sdk) 仓库，使用 `plugindev` 工具链。输出通道系统、受限外部插件 API、EventAgentLLMChain 事件已上线。
+**v0.7.2** — 核心可用，插件系统和 SDK 已就绪。内置 11 个插件，外部插件开发见 [homeagent-sdk](https://gitcode.com/JianFeeeee/homeagent-sdk) 仓库，使用 `plugindev` 工具链。输出通道系统、受限外部插件 API、EventAgentLLMChain 事件已上线。
 
 ## 文档
 
-- [项目概览](docs/zh/OVERVIEW.md) | [English](docs/en/OVERVIEW.md)
-- [技术架构](docs/zh/ARCHITECTURE.md) | [English](docs/en/ARCHITECTURE.md)
-- [插件开发指南](docs/zh/PLUGIN_DEV.md) | [English](docs/en/PLUGIN_DEV.md)
-- [Lua Adapter](docs/zh/ADAPTER.md) | [English](docs/en/ADAPTER.md)
-- [知识库演示](knowledge/homeagent_architecture/content.md)
+- [项目概览](assets/docs/zh/OVERVIEW.md) | [English](assets/docs/en/OVERVIEW.md)
+- [技术架构](assets/docs/zh/ARCHITECTURE.md) | [English](assets/docs/en/ARCHITECTURE.md)
+- [插件开发指南](assets/docs/zh/PLUGIN_DEV.md) | [English](assets/docs/en/PLUGIN_DEV.md)
+- [Lua Adapter](assets/docs/zh/ADAPTER.md) | [English](assets/docs/en/ADAPTER.md)
+- [知识库演示](assets/knowledge/homeagent_architecture/content.md)
 
 ## 构建
 
