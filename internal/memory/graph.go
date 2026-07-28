@@ -31,15 +31,18 @@ type Relation struct {
 	TurnID       int       `json:"turn_id"`
 	CreatedAt    time.Time `json:"created_at"`
 	DateBucket   string    `json:"date_bucket"`
+	SentenceID   int64     `json:"sentence_id,omitempty"`   // FK → sentences.id
+	SentenceText string    `json:"sentence_text,omitempty"` // JOINed from sentences
 }
 
 type Triple struct {
-	Subject      string  `json:"subject"`
-	Relation     string  `json:"relation"`
-	Object       string  `json:"object"`
-	Confidence   float64 `json:"confidence,omitempty"`
-	SubjectType  string  `json:"subject_type,omitempty"`
-	ObjectType   string  `json:"object_type,omitempty"`
+	Subject     string  `json:"subject"`
+	Relation    string  `json:"relation"`
+	Object      string  `json:"object"`
+	Confidence  float64 `json:"confidence,omitempty"`
+	SubjectType string  `json:"subject_type,omitempty"`
+	ObjectType  string  `json:"object_type,omitempty"`
+	SentenceText string `json:"sentence_text,omitempty"` // 原始句子文本，Commit时写入sentences表
 }
 
 type GraphDB struct {
@@ -81,6 +84,11 @@ func (g *GraphDB) initSchema() error {
 			created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
 			updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 		)`,
+		`CREATE TABLE IF NOT EXISTS sentences (
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			text TEXT UNIQUE NOT NULL,
+			created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+		)`,
 		`CREATE TABLE IF NOT EXISTS relations (
 			id INTEGER PRIMARY KEY AUTOINCREMENT,
 			source_id INTEGER NOT NULL,
@@ -93,6 +101,7 @@ func (g *GraphDB) initSchema() error {
 			created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
 			updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
 			date_bucket TEXT,
+			sentence_id INTEGER DEFAULT 0,
 			FOREIGN KEY (source_id) REFERENCES entities(id),
 			FOREIGN KEY (target_id) REFERENCES entities(id)
 		)`,
@@ -103,6 +112,8 @@ func (g *GraphDB) initSchema() error {
 		`CREATE INDEX IF NOT EXISTS idx_relation_type ON relations(relation_type)`,
 		`CREATE INDEX IF NOT EXISTS idx_relation_status ON relations(status)`,
 		`CREATE INDEX IF NOT EXISTS idx_relation_session ON relations(session_id)`,
+		`CREATE INDEX IF NOT EXISTS idx_relation_sentence ON relations(sentence_id)`,
+		`CREATE INDEX IF NOT EXISTS idx_sentences_text ON sentences(text)`,
 	}
 
 	for _, s := range schemas {
@@ -110,6 +121,14 @@ func (g *GraphDB) initSchema() error {
 			return fmt.Errorf("schema exec: %w", err)
 		}
 	}
+
+	// 迁移1：兼容旧版 sentence_ref 列（已有表则忽略）
+	tx.Exec(`ALTER TABLE relations ADD COLUMN sentence_ref TEXT DEFAULT ''`)
+	// 迁移2：为新表添加 sentence_id 列（已有表则忽略）
+	tx.Exec(`ALTER TABLE relations ADD COLUMN sentence_id INTEGER DEFAULT 0`)
+	// 迁移3：将现有 sentence_ref 数据迁移到 sentences 表
+	tx.Exec(`INSERT OR IGNORE INTO sentences (text) SELECT DISTINCT sentence_ref FROM relations WHERE sentence_ref != ''`)
+	tx.Exec(`UPDATE relations SET sentence_id = (SELECT id FROM sentences WHERE text = relations.sentence_ref) WHERE sentence_ref != ''`)
 
 	return tx.Commit()
 }
@@ -171,10 +190,24 @@ func (g *GraphDB) Commit(triples []Triple, sessionID string, turnID int) (int, i
 			return 0, 0, fmt.Errorf("object %q: %w", t.Object, err)
 		}
 
+		// 写入/查找句子
+		var sentenceID int64
+		if t.SentenceText != "" {
+			_, err = tx.Exec(
+				`INSERT OR IGNORE INTO sentences (text) VALUES (?)`, t.SentenceText)
+			if err != nil {
+				return 0, 0, fmt.Errorf("insert sentence: %w", err)
+			}
+			err = tx.QueryRow("SELECT id FROM sentences WHERE text = ?", t.SentenceText).Scan(&sentenceID)
+			if err != nil {
+				sentenceID = 0
+			}
+		}
+
 		_, err = tx.Exec(
-			`INSERT INTO relations (source_id, target_id, relation_type, confidence, session_id, turn_id, date_bucket)
-			 VALUES (?, ?, ?, ?, ?, ?, ?)`,
-			sourceID, targetID, t.Relation, confidence, sessionID, turnID, dateBucket,
+			`INSERT INTO relations (source_id, target_id, relation_type, confidence, session_id, turn_id, date_bucket, sentence_id)
+			 VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+			sourceID, targetID, t.Relation, confidence, sessionID, turnID, dateBucket, sentenceID,
 		)
 		if err != nil {
 			return 0, 0, err
@@ -259,10 +292,12 @@ func (g *GraphDB) Recall(keywords []string, seedEntities []string, depth int, se
 		relRows, err := g.db.Query(
 			`SELECT r.id, r.source_id, r.target_id, e1.name, e2.name,
 					r.relation_type, r.confidence, r.status, r.session_id,
-					r.turn_id, r.created_at, COALESCE(r.date_bucket, '')
+					r.turn_id, r.created_at, COALESCE(r.date_bucket, ''),
+					COALESCE(r.sentence_id, 0), COALESCE(s.text, '')
 			 FROM relations r
 			 JOIN entities e1 ON r.source_id = e1.id
 			 JOIN entities e2 ON r.target_id = e2.id
+			 LEFT JOIN sentences s ON r.sentence_id = s.id
 			 WHERE r.status = 'active'
 			 ORDER BY r.created_at DESC LIMIT 30`,
 		)
@@ -275,7 +310,7 @@ func (g *GraphDB) Recall(keywords []string, seedEntities []string, depth int, se
 			if err := relRows.Scan(&rel.ID, &rel.SourceID, &rel.TargetID,
 				&rel.SourceName, &rel.TargetName, &rel.RelationType,
 				&rel.Confidence, &rel.Status, &rel.SessionID,
-				&rel.TurnID, &rel.CreatedAt, &rel.DateBucket); err != nil {
+				&rel.TurnID, &rel.CreatedAt, &rel.DateBucket, &rel.SentenceID, &rel.SentenceText); err != nil {
 				return nil, err
 			}
 			result.Relations = append(result.Relations, rel)
@@ -340,10 +375,12 @@ func (g *GraphDB) Recall(keywords []string, seedEntities []string, depth int, se
 		query := fmt.Sprintf(
 			`SELECT r.id, r.source_id, r.target_id, e1.name, e2.name,
 					r.relation_type, r.confidence, r.status, r.session_id,
-					r.turn_id, r.created_at, COALESCE(r.date_bucket, '')
+					r.turn_id, r.created_at, COALESCE(r.date_bucket, ''),
+					COALESCE(r.sentence_id, 0), COALESCE(s.text, '')
 			 FROM relations r
 			 JOIN entities e1 ON r.source_id = e1.id
 			 JOIN entities e2 ON r.target_id = e2.id
+			 LEFT JOIN sentences s ON r.sentence_id = s.id
 			 WHERE (r.source_id IN (%s) OR r.target_id IN (%s))
 			   AND r.status = 'active'`,
 			placeholders(len(ids)),
@@ -367,7 +404,7 @@ func (g *GraphDB) Recall(keywords []string, seedEntities []string, depth int, se
 			if err := relRows.Scan(&rel.ID, &rel.SourceID, &rel.TargetID,
 				&rel.SourceName, &rel.TargetName, &rel.RelationType,
 				&rel.Confidence, &rel.Status, &rel.SessionID,
-				&rel.TurnID, &rel.CreatedAt, &rel.DateBucket); err != nil {
+				&rel.TurnID, &rel.CreatedAt, &rel.DateBucket, &rel.SentenceID, &rel.SentenceText); err != nil {
 				relRows.Close()
 				return nil, err
 			}
@@ -544,7 +581,7 @@ func (g *GraphDB) GraphData() (map[string]interface{}, error) {
 		return nil, err
 	}
 
-	rrows, err := g.db.Query(`SELECT id, source_id, target_id, relation_type, confidence, status, created_at FROM relations WHERE status = 'active' ORDER BY created_at DESC`)
+	rrows, err := g.db.Query(`SELECT r.id, r.source_id, r.target_id, r.relation_type, r.confidence, r.status, r.created_at, COALESCE(r.sentence_id, 0), COALESCE(s.text, '') FROM relations r LEFT JOIN sentences s ON r.sentence_id = s.id WHERE r.status = 'active' ORDER BY r.created_at DESC`)
 	if err != nil {
 		return nil, err
 	}
@@ -558,11 +595,13 @@ func (g *GraphDB) GraphData() (map[string]interface{}, error) {
 		Confidence   float64   `json:"confidence"`
 		Status       string    `json:"status"`
 		CreatedAt    time.Time `json:"created_at"`
+		SentenceID   int64     `json:"sentence_id,omitempty"`
+		SentenceText string    `json:"sentence_text,omitempty"`
 	}
 	var relations []graphRelation
 	for rrows.Next() {
 		var r graphRelation
-		if err := rrows.Scan(&r.ID, &r.SourceID, &r.TargetID, &r.RelationType, &r.Confidence, &r.Status, &r.CreatedAt); err != nil {
+		if err := rrows.Scan(&r.ID, &r.SourceID, &r.TargetID, &r.RelationType, &r.Confidence, &r.Status, &r.CreatedAt, &r.SentenceID, &r.SentenceText); err != nil {
 			return nil, err
 		}
 		relations = append(relations, r)
@@ -603,8 +642,8 @@ func (g *GraphDB) Introspect() (map[string]interface{}, error) {
 	}
 
 	return map[string]interface{}{
-		"entity_count":   entityCount,
-		"relation_count": relationCount,
+		"entity_count":    entityCount,
+		"relation_count":  relationCount,
 		"memory_hotspots": hotspots,
 	}, nil
 }
@@ -739,6 +778,29 @@ func (g *GraphDB) Archive(days int) (int, error) {
 		`UPDATE relations SET status = 'archived', updated_at = CURRENT_TIMESTAMP
 		 WHERE status = 'active' AND created_at < datetime('now', ?)`,
 		fmt.Sprintf("-%d days", days),
+	)
+	if err != nil {
+		return 0, err
+	}
+	n, _ := result.RowsAffected()
+	return int(n), nil
+}
+
+// ClearSentenceID 清除指定关系的 sentence_id（LLM复审后解除句子引用）
+func (g *GraphDB) ClearSentenceID(relationID int64) error {
+	_, err := g.db.Exec(
+		`UPDATE relations SET sentence_id = 0, updated_at = CURRENT_TIMESTAMP WHERE id = ?`,
+		relationID,
+	)
+	return err
+}
+
+// CleanupOrphanedSentences 删除没有任何关系引用的句子，返回删除数
+func (g *GraphDB) CleanupOrphanedSentences() (int, error) {
+	result, err := g.db.Exec(
+		`DELETE FROM sentences WHERE id NOT IN (
+			SELECT DISTINCT sentence_id FROM relations WHERE sentence_id != 0
+		)`,
 	)
 	if err != nil {
 		return 0, err

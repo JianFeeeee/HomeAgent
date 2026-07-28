@@ -35,7 +35,7 @@ func TestExtractFromPOS(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			if tt.input == "" {
 				result, _ := p.Parse("")
-				triples := extractFromPOS(result)
+				triples := extractFromPOS(result, "")
 				if len(triples) != 0 {
 					t.Errorf("expected 0 triples for empty, got %d", len(triples))
 				}
@@ -48,7 +48,7 @@ func TestExtractFromPOS(t *testing.T) {
 			}
 
 			t.Logf("input=%q tokens=%v pos=%v", tt.input, result.Tokens, result.POS)
-			triples := extractFromPOS(result)
+			triples := extractFromPOS(result, tt.input)
 
 			for _, tr := range triples {
 				if tr.Subject == "" || tr.Relation == "" || tr.Object == "" {

@@ -124,12 +124,12 @@ flowchart TB
     LLM -->|memory_recall| MEM
 ```
 
-See [`docs/en/ARCHITECTURE.md`](docs/en/ARCHITECTURE.md) for details.
+See [`assets/docs/en/ARCHITECTURE.md`](assets/docs/en/ARCHITECTURE.md) for details.
 
 ## Web Mascot
 
 <div align="center">
-  <img src="branding/mascot-xiaozhai.webp" alt="HomeAgent Web Mascot Xiaozhai" width="200">
+  <img src="assets/branding/mascot-xiaozhai.webp" alt="HomeAgent Web Mascot Xiaozhai" width="200">
   <p><strong>Xiaozhai</strong> — HomeAgent Web Mascot</p>
 </div>
 
@@ -171,15 +171,15 @@ External plugin development: see [homeagent-sdk](https://gitcode.com/JianFeeeee/
 
 ## Project Status
 
-**v0.7.1** — Core is functional, plugin system and SDK are ready. 11 built-in plugins. External plugin development via [homeagent-sdk](https://gitcode.com/JianFeeeee/homeagent-sdk) repo using `plugindev` toolchain. Output channel system, restricted external plugin API, and EventAgentLLMChain event are live.
+**v0.7.2** — Core is functional, plugin system and SDK are ready. 11 built-in plugins. External plugin development via [homeagent-sdk](https://gitcode.com/JianFeeeee/homeagent-sdk) repo using `plugindev` toolchain. Output channel system, restricted external plugin API, and EventAgentLLMChain event are live.
 
 ## Documentation
 
-- [Project Overview](docs/en/OVERVIEW.md) | [中文](docs/zh/OVERVIEW.md)
-- [Technical Architecture](docs/en/ARCHITECTURE.md) | [中文](docs/zh/ARCHITECTURE.md)
-- [Plugin Development Guide](docs/en/PLUGIN_DEV.md) | [中文](docs/zh/PLUGIN_DEV.md)
-- [Lua Adapter](docs/en/ADAPTER.md) | [中文](docs/zh/ADAPTER.md)
-- [Knowledge Base Demo](knowledge/homeagent_architecture/content.md)
+- [Project Overview](assets/docs/en/OVERVIEW.md) | [中文](assets/docs/zh/OVERVIEW.md)
+- [Technical Architecture](assets/docs/en/ARCHITECTURE.md) | [中文](assets/docs/zh/ARCHITECTURE.md)
+- [Plugin Development Guide](assets/docs/en/PLUGIN_DEV.md) | [中文](assets/docs/zh/PLUGIN_DEV.md)
+- [Lua Adapter](assets/docs/en/ADAPTER.md) | [中文](assets/docs/zh/ADAPTER.md)
+- [Knowledge Base Demo](assets/knowledge/homeagent_architecture/content.md)
 
 ## Build
 

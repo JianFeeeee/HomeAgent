@@ -28,6 +28,7 @@ import (
 	"gitcode.com/JianFeeeee/HomeAgent/internal/memory/pipeline"
 	"gitcode.com/JianFeeeee/HomeAgent/internal/memory/social"
 	"gitcode.com/JianFeeeee/HomeAgent/internal/memory/text"
+	"gitcode.com/JianFeeeee/HomeAgent/internal/nlp"
 	"gitcode.com/JianFeeeee/HomeAgent/internal/plugin"
 	cli "gitcode.com/JianFeeeee/HomeAgent/internal/plugins/cli"
 	healthcheck "gitcode.com/JianFeeeee/HomeAgent/internal/plugins/healthcheck"
@@ -398,6 +399,10 @@ func main() {
 		Personality:     personality,
 		PluginReg:       pluginReg,
 		PluginDir:       cfg.Plugin.Dir,
+		DistillInterval:   cfgReg.GetDuration("core.agent.distill_interval", 30*time.Minute),
+		ArchiveInterval:   cfgReg.GetDuration("core.agent.archive_interval", 60*time.Minute),
+		ReviewInterval:    cfgReg.GetDuration("core.agent.review_interval", 120*time.Minute),
+		MergeInterval:     cfgReg.GetDuration("core.agent.merge_interval", 120*time.Minute),
 		ContextSavePath:    filepath.Join(cfg.Daemon.DataDir, "memory", "context.json"),
 		EmbeddingModelPath: cfgReg.GetString("core.agent.embedding_model_path", ""),
 		StageHost:          stageHost,
@@ -425,6 +430,22 @@ func main() {
 
 	// CLI 插件结构化命令 — 直接注入内核依赖，不依赖 HTTP
 	cli.Configure(pluginReg, cfgReg, agent, cfg.Plugin.Dir)
+
+	// ========================================================================
+	// 依存句法分析器（内嵌 ONNX 模型 / 规则引擎）
+	// ========================================================================
+
+	modelPath := cfgReg.GetString("core.agent.onnx_model_path", "")
+	onnxParser, err := nlp.NewONNXParser(nlp.ONNXConfig{
+		ModelPath: modelPath,
+		DataDir:   filepath.Join(cfg.Daemon.DataDir, "nlp"),
+	})
+	if err != nil {
+		log.Printf("[homed] warn: ONNX parser init: %v, using fallback", err)
+	} else {
+		nlp.SetDefaultParser(onnxParser)
+		log.Printf("[homed] dep parser initialized (model: %s)", modelPath)
+	}
 
 	// Auto-create plugins directory (without hardcoding plugin names)
 	os.MkdirAll(cfg.Plugin.Dir, 0755)

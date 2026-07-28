@@ -10,6 +10,8 @@ require (
 
 require github.com/yanyiwu/gojieba v1.4.7
 
+require github.com/yalue/onnxruntime_go v1.13.0
+
 require gitcode.com/JianFeeeee/homeagent-sdk v0.7.1
 
 replace gitcode.com/JianFeeeee/homeagent-sdk => ../homeagentsdk
