@@ -28,6 +28,11 @@ func (a *Agent) enqueueConsolidationTask(task ConsolidationTask) {
 	log.Printf("[agent] enqueued consolidation task: %s", task.Reason)
 }
 
+// ──────────────────────────────────────────────
+// 四个独立心跳循环，各自拥有独立的 ticker 和配置
+// ──────────────────────────────────────────────
+
+// distillLoop 上下文裁剪（L2 蒸馏），使用 distillInterval
 func (a *Agent) distillLoop() {
 	defer func() {
 		if r := recover(); r != nil {
@@ -36,7 +41,7 @@ func (a *Agent) distillLoop() {
 			go a.distillLoop()
 		}
 	}()
-	if a.docStore == nil && a.memory == nil {
+	if a.docStore == nil {
 		return
 	}
 	ticker := time.NewTicker(a.distillInterval)
@@ -47,13 +52,94 @@ func (a *Agent) distillLoop() {
 		case <-ticker.C:
 			log.Printf("[agent] heartbeat distill tick")
 			a.distillContext()
-			a.reorgGraph()
 			a.autoReloadPlugins()
 		case <-a.ctx.Done():
 			return
 		}
 	}
 }
+
+// archiveLoop 冷文档归档（L3→L4），使用 archiveInterval
+func (a *Agent) archiveLoop() {
+	defer func() {
+		if r := recover(); r != nil {
+			log.Printf("[agent] archiveLoop panic recovered: %v\n%s", r, debug.Stack())
+			time.Sleep(time.Second)
+			go a.archiveLoop()
+		}
+	}()
+	if a.memory == nil {
+		return
+	}
+	ticker := time.NewTicker(a.archiveInterval)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-ticker.C:
+			log.Printf("[agent] heartbeat archive tick")
+			a.archiveColdDocs()
+		case <-a.ctx.Done():
+			return
+		}
+	}
+}
+
+// mergeLoop 实体合并检测（GraphDB → LLM 裁决），使用 mergeInterval
+func (a *Agent) mergeLoop() {
+	defer func() {
+		if r := recover(); r != nil {
+			log.Printf("[agent] mergeLoop panic recovered: %v\n%s", r, debug.Stack())
+			time.Sleep(time.Second)
+			go a.mergeLoop()
+		}
+	}()
+	if a.memory == nil {
+		return
+	}
+	ticker := time.NewTicker(a.mergeInterval)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-ticker.C:
+			log.Printf("[agent] heartbeat merge tick")
+			a.detectEntityMerge()
+		case <-a.ctx.Done():
+			return
+		}
+	}
+}
+
+// reviewLoop 关系复审（GraphDB → ClearSentenceID → CleanupOrphanedSentences），使用 reviewInterval
+func (a *Agent) reviewLoop() {
+	defer func() {
+		if r := recover(); r != nil {
+			log.Printf("[agent] reviewLoop panic recovered: %v\n%s", r, debug.Stack())
+			time.Sleep(time.Second)
+			go a.reviewLoop()
+		}
+	}()
+	if a.memory == nil {
+		return
+	}
+	ticker := time.NewTicker(a.reviewInterval)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-ticker.C:
+			log.Printf("[agent] heartbeat review tick")
+			a.reviewRelations()
+		case <-a.ctx.Done():
+			return
+		}
+	}
+}
+
+// ──────────────────────────────────────────────
+// 蒸馏逻辑
+// ──────────────────────────────────────────────
 
 func (a *Agent) distillContext() {
 	if a.docStore == nil {
@@ -68,14 +154,16 @@ func (a *Agent) distillContext() {
 	}
 }
 
+// ──────────────────────────────────────────────
+// 冷文档归档：docStore → GraphDB (L3→L4)
+// ──────────────────────────────────────────────
 
-
-func (a *Agent) reorgGraph() {
+func (a *Agent) archiveColdDocs() {
 	if a.memory == nil {
 		return
 	}
 
-	log.Printf("[agent] graph reorg start")
+	log.Printf("[agent] cold doc archival start")
 
 	if a.indexer != nil {
 		if err := a.indexer.Sync(); err != nil {
@@ -102,6 +190,18 @@ func (a *Agent) reorgGraph() {
 			}
 		}
 	}
+}
+
+// ──────────────────────────────────────────────
+// 实体合并检测：GraphDB → LLM 裁决
+// ──────────────────────────────────────────────
+
+func (a *Agent) detectEntityMerge() {
+	if a.memory == nil {
+		return
+	}
+
+	log.Printf("[agent] entity merge detection start")
 
 	result, err := a.memory.Recall(nil, nil, 1, "")
 	if err != nil || result == nil || len(result.Entities) < 2 {
@@ -167,9 +267,68 @@ func (a *Agent) reorgGraph() {
 	}
 
 	if llmCandidates > 0 {
-		log.Printf("[agent] graph reorg: %d merge candidates sent for LLM decision", llmCandidates)
+		log.Printf("[agent] entity merge: %d merge candidates sent for LLM decision", llmCandidates)
 	} else {
-		log.Printf("[agent] graph reorg: no similar entities found")
+		log.Printf("[agent] entity merge: no similar entities found")
+	}
+}
+
+// ──────────────────────────────────────────────
+// 关系复审：GraphDB → ClearSentenceID → CleanupOrphanedSentences
+// ──────────────────────────────────────────────
+
+func (a *Agent) reviewRelations() {
+	if a.memory == nil {
+		return
+	}
+
+	log.Printf("[agent] relation review start")
+
+	reviewCount := 0
+	const maxReviewBatch = 5
+	relResult, err := a.memory.Recall(nil, nil, 1, "")
+	if err != nil || relResult == nil {
+		return
+	}
+	for _, rel := range relResult.Relations {
+		if reviewCount >= maxReviewBatch {
+			break
+		}
+		if rel.SentenceID == 0 || rel.SentenceText == "" {
+			continue
+		}
+
+		a.enqueueConsolidationTask(ConsolidationTask{
+			Type: "relation_review",
+			Reason: fmt.Sprintf(
+				"【关系复审】原始句子: '%s'\n当前三元组: (%s → %s → %s) 置信度 %.2f\n请判断是否需要修正（如相对引用未解析、主宾颠倒、噪音三元组等），如需修正请用 memory_edit 工具",
+				rel.SentenceText, rel.SourceName, rel.RelationType, rel.TargetName, rel.Confidence,
+			),
+			Data: map[string]interface{}{
+				"relation_id":   rel.ID,
+				"source":        rel.SourceName,
+				"relation_type": rel.RelationType,
+				"target":        rel.TargetName,
+				"confidence":    rel.Confidence,
+				"sentence":      rel.SentenceText,
+			},
+		})
+
+		// 清除句子引用（复审后解除关联）
+		if err := a.memory.ClearSentenceID(rel.ID); err != nil {
+			log.Printf("[agent] clear sentence_id for relation %d: %v", rel.ID, err)
+		}
+		reviewCount++
+	}
+
+	if reviewCount > 0 {
+		// 清理无引用的句子
+		if deleted, err := a.memory.CleanupOrphanedSentences(); err != nil {
+			log.Printf("[agent] cleanup orphaned sentences: %v", err)
+		} else if deleted > 0 {
+			log.Printf("[agent] cleanup %d orphaned sentences", deleted)
+		}
+		log.Printf("[agent] relation review: %d relations sent for review", reviewCount)
 	}
 }
 

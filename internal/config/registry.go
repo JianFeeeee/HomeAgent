@@ -10,6 +10,7 @@ import (
 	"sync"
 	"time"
 
+	"gitcode.com/JianFeeeee/HomeAgent/internal/meta"
 	"gitcode.com/JianFeeeee/HomeAgent/pkg/types"
 	_ "github.com/mattn/go-sqlite3"
 )
@@ -347,9 +348,14 @@ func (r *ConfigRegistry) seedDBValues(dataDir string) {
 	set("core.agent.max_tool_turns", "10")
 	set("core.agent.max_context_size", "30")
 	set("core.agent.distill_interval", "30m")
+	set("core.agent.archive_interval", "60m")
+	set("core.agent.review_interval", "120m")
+	set("core.agent.merge_interval", "120m")
 	set("core.agent.workdir", "")
 	set("core.agent.embedding_model_path", "")
-	set("core.agent.system_prompt", `你是 HomeAgent 的看板娘「小宅」(Xiao Zhai)，HΔ-Kernel v0.7.1 型号的家政型 AI 管家助手。
+	set("core.agent.onnx_model_path", "")
+	set("core.agent.system_prompt", fmt.Sprintf("你是 HomeAgent 的看板娘「小宅」(Xiao Zhai)，HΔ-Kernel v%s 型号的家政型 AI 管家助手。", meta.Version)+
+		`
 
 角色特质：
 - 对自己的三层记忆（Context → Document → Graph）引以为傲
@@ -436,8 +442,12 @@ func (r *ConfigRegistry) seedCoreDefs(dataDir string) {
 	reg(ConfigDef{Key: "core.agent.max_tool_turns", Default: "10", Type: "int", DisplayName: "最大工具轮次", Description: "单次请求允许的最大工具调用轮数", Category: "agent"})
 	reg(ConfigDef{Key: "core.agent.max_context_size", Default: "30", Type: "int", DisplayName: "最大上下文", Description: "上下文窗口中保留的最大消息条数", Category: "agent"})
 	reg(ConfigDef{Key: "core.agent.distill_interval", Default: "30m", Type: "duration", DisplayName: "蒸馏间隔", Description: "记忆蒸馏的执行间隔", Category: "agent"})
+	reg(ConfigDef{Key: "core.agent.archive_interval", Default: "60m", Type: "duration", DisplayName: "冷文档归档间隔", Description: "冷文档归档（L3→L4）的执行间隔", Category: "agent"})
+	reg(ConfigDef{Key: "core.agent.review_interval", Default: "120m", Type: "duration", DisplayName: "关系复审间隔", Description: "三元组关系复审的执行间隔", Category: "agent"})
+	reg(ConfigDef{Key: "core.agent.merge_interval", Default: "120m", Type: "duration", DisplayName: "实体合并检测间隔", Description: "实体合并检测（LLM 裁决）的执行间隔", Category: "agent"})
 	reg(ConfigDef{Key: "core.agent.workdir", Default: "", Type: "string", DisplayName: "工作目录", Description: "Agent 命令执行的默认工作目录（如 cmd_run 工具的 fallback），留空使用内核所在目录", Category: "agent"})
 	reg(ConfigDef{Key: "core.agent.embedding_model_path", Default: "", Type: "string", DisplayName: "预训练词嵌入模型路径", Description: "预训练词嵌入模型路径（word2vec 文本格式），支持逗号分隔多个模型。空则使用 TF-IDF 回退。修改后需重启生效。", Category: "agent"})
+	reg(ConfigDef{Key: "core.agent.onnx_model_path", Default: "", Type: "string", DisplayName: "ONNX 模型路径", Description: "依存句法分析 ONNX 模型文件路径。留空使用二进制内嵌模型/规则引擎。修改后需重启生效。", Category: "agent"})
 	reg(ConfigDef{Key: "core.agent.system_prompt", Default: "", Type: "text", DisplayName: "系统身份提示词", Description: "Agent 的系统提示词，定义身份和行为规则。留空则使用编译时内置默认值。修改后需重启生效。", Category: "agent"})
 
 	reg(ConfigDef{Key: "core.input_processing.image.fallback_provider", Default: "", Type: "string", DisplayName: "图片回退提供商", Description: "当主 LLM 不支持图片处理时使用的提供商（留空则自动降级为文字描述）", Category: "input"})

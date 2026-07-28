@@ -7,8 +7,8 @@ import (
 	"sync"
 	"time"
 
-	agentAPI "gitcode.com/JianFeeeee/HomeAgent/internal/agent/api"
 	agentPkg "gitcode.com/JianFeeeee/HomeAgent/internal/agent"
+	agentAPI "gitcode.com/JianFeeeee/HomeAgent/internal/agent/api"
 	agentIO "gitcode.com/JianFeeeee/HomeAgent/internal/agent/io"
 	"gitcode.com/JianFeeeee/HomeAgent/internal/events"
 	"gitcode.com/JianFeeeee/HomeAgent/internal/knowledge"
@@ -26,19 +26,19 @@ import (
 
 // Agent — 单 agent，不区分会话/实例
 type Agent struct {
-	mu           sync.Mutex
-	id           types.AgentID
-	provider     agentAPI.Provider
+	mu              sync.Mutex
+	id              types.AgentID
+	provider        agentAPI.Provider
 	providerManager *agentAPI.ProviderManager
-	io           *agentIO.IOManager
-	memory       *memory.GraphDB
-	indexer      *memory.Indexer
-	skills       *skill.Manager
-	tracker      *tracker.Tracker
-	context      *RelevanceContext
-	systemPrompt string
-	ctx          context.Context
-	cancel       context.CancelFunc
+	io              *agentIO.IOManager
+	memory          *memory.GraphDB
+	indexer         *memory.Indexer
+	skills          *skill.Manager
+	tracker         *tracker.Tracker
+	context         *RelevanceContext
+	systemPrompt    string
+	ctx             context.Context
+	cancel          context.CancelFunc
 
 	// 文档记忆（第二层）
 	docStore *document.Store
@@ -61,6 +61,11 @@ type Agent struct {
 
 	// 定期心跳蒸馏
 	distillInterval time.Duration
+
+	// 三个独立心跳任务间隔
+	archiveInterval time.Duration // 冷文档归档
+	reviewInterval  time.Duration // 关系复审
+	mergeInterval   time.Duration // 实体合并检测
 
 	// 上下文裁剪：活跃上下文最大条数，超出按相关性裁剪
 	maxContextSize int
@@ -110,30 +115,33 @@ type Agent struct {
 }
 
 type AgentConfig struct {
-	ID           types.AgentID
-	SystemPrompt string
-	Provider     agentAPI.Provider
+	ID              types.AgentID
+	SystemPrompt    string
+	Provider        agentAPI.Provider
 	ProviderManager *agentAPI.ProviderManager
-	IO           *agentIO.IOManager
-	Memory       *memory.GraphDB
-	Indexer      *memory.Indexer
-	Skills       *skill.Manager
-	Tracker      *tracker.Tracker
+	IO              *agentIO.IOManager
+	Memory          *memory.GraphDB
+	Indexer         *memory.Indexer
+	Skills          *skill.Manager
+	Tracker         *tracker.Tracker
 
-	DocStore        *document.Store
-	Knowledge       *knowledge.Store
-	SocialStore     *social.SocialStore
-	TextMemory      *text.Memory
-	Personality     *agentPkg.Personality
-	PluginReg       *plugin.Registry
-	PluginDir       string
-	DistillInterval time.Duration
-	MaxContextSize    int              // 活跃上下文最大条数，超出按相关性裁剪
-	ContextSavePath   string           // 上下文持久化路径，空则不持久化
-	EmbeddingModelPath string          // 预训练词嵌入模型路径（word2vec 文本格式），空则不使用
-	StageHost     *StageHost
-	EventBus      *events.Bus
-	ThinkingEnabled bool
+	DocStore           *document.Store
+	Knowledge          *knowledge.Store
+	SocialStore        *social.SocialStore
+	TextMemory         *text.Memory
+	Personality        *agentPkg.Personality
+	PluginReg          *plugin.Registry
+	PluginDir          string
+	DistillInterval    time.Duration
+	ArchiveInterval    time.Duration // 冷文档归档间隔（L3→L4），0 则使用 DistillInterval
+	ReviewInterval     time.Duration // 关系复审间隔，0 则使用 DistillInterval
+	MergeInterval      time.Duration // 实体合并检测间隔，0 则使用 DistillInterval
+	MaxContextSize     int           // 活跃上下文最大条数，超出按相关性裁剪
+	ContextSavePath    string        // 上下文持久化路径，空则不持久化
+	EmbeddingModelPath string        // 预训练词嵌入模型路径（word2vec 文本格式），空则不使用
+	StageHost          *StageHost
+	EventBus           *events.Bus
+	ThinkingEnabled    bool
 
 	InputProcessing types.InputProcessingConfig // 非文本输入处理配置
 }
@@ -143,6 +151,15 @@ func New(cfg AgentConfig) *Agent {
 	if cfg.DistillInterval <= 0 {
 		cfg.DistillInterval = 30 * time.Minute
 	}
+	if cfg.ArchiveInterval <= 0 {
+		cfg.ArchiveInterval = cfg.DistillInterval
+	}
+	if cfg.ReviewInterval <= 0 {
+		cfg.ReviewInterval = cfg.DistillInterval
+	}
+	if cfg.MergeInterval <= 0 {
+		cfg.MergeInterval = cfg.DistillInterval
+	}
 	if cfg.MaxContextSize <= 0 {
 		cfg.MaxContextSize = 30
 	}
@@ -151,6 +168,10 @@ func New(cfg AgentConfig) *Agent {
 	if cfg.DocStore != nil {
 		cfg.DocStore.SetVectorizer(embedder)
 		cfg.DocStore.ReindexWithVectorizer(embedder)
+	}
+	if cfg.Knowledge != nil {
+		cfg.Knowledge.SetVectorizer(embedder)
+		cfg.Knowledge.ReindexWithVectorizer(embedder)
 	}
 
 	rc := NewRelevanceContext(cfg.ContextSavePath, embedder)
@@ -179,19 +200,21 @@ func New(cfg AgentConfig) *Agent {
 		personality:     cfg.Personality,
 		pluginReg:       cfg.PluginReg,
 		pluginDir:       cfg.PluginDir,
-		distillInterval:  cfg.DistillInterval,
-		maxContextSize:   cfg.MaxContextSize,
-		stageHost:        cfg.StageHost,
-		eventBus:         cfg.EventBus,
-		selfInputCh:      make(chan string, 64),
-		childResults:     make(map[string]string),
-		interceptCh:      make(chan *agentIO.InputEvent, 64),
-		pluginHealth:      newPluginHealthTracker(),
-		thinkingEnabled:  cfg.ThinkingEnabled,
-		inputCfg:          cfg.InputProcessing,
-		embedder:          embedder,
-		noMergeMarkers:    make(map[string]int),
-
+		distillInterval: cfg.DistillInterval,
+		archiveInterval: cfg.ArchiveInterval,
+		reviewInterval:  cfg.ReviewInterval,
+		mergeInterval:   cfg.MergeInterval,
+		maxContextSize:  cfg.MaxContextSize,
+		stageHost:       cfg.StageHost,
+		eventBus:        cfg.EventBus,
+		selfInputCh:     make(chan string, 64),
+		childResults:    make(map[string]string),
+		interceptCh:     make(chan *agentIO.InputEvent, 64),
+		pluginHealth:    newPluginHealthTracker(),
+		thinkingEnabled: cfg.ThinkingEnabled,
+		inputCfg:        cfg.InputProcessing,
+		embedder:        embedder,
+		noMergeMarkers:  make(map[string]int),
 	}
 }
 
@@ -199,6 +222,9 @@ func (a *Agent) Start() {
 	go a.eventLoop()
 	go a.interceptLoop()
 	go a.distillLoop()
+	go a.archiveLoop()
+	go a.mergeLoop()
+	go a.reviewLoop()
 	log.Printf("[agent] %s started, waiting for IO interrupts", a.id)
 }
 

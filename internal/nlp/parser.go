@@ -1,10 +1,28 @@
 package nlp
 
-import "gitcode.com/JianFeeeee/HomeAgent/internal/memory/vector"
+import (
+	"sort"
+
+	"gitcode.com/JianFeeeee/HomeAgent/internal/memory/vector"
+)
 
 // Parser 依存句法分析器接口
 type Parser interface {
 	Parse(text string) (*ParseResult, error)
+}
+
+// defaultParser 包级默认解析器，由 SetDefaultParser 设置
+var defaultParser Parser
+
+// SetDefaultParser 设置包级默认解析器。
+// 设置后，NewExtractor(nil) 将使用此解析器而非纯降级模式。
+func SetDefaultParser(p Parser) {
+	defaultParser = p
+}
+
+// GetDefaultParser 返回当前包级默认解析器
+func GetDefaultParser() Parser {
+	return defaultParser
 }
 
 // Vectorizer 向量化接口，复用 memory/vector 或 memory/static_embedder
@@ -19,8 +37,13 @@ type Extractor struct {
 	embedder Vectorizer // 可选：用于 TransE 语义验证
 }
 
-// NewExtractor 创建提取器，parser 为 nil 时纯用 fallback
+// NewExtractor 创建提取器。
+// parser 为 nil 时尝试使用包级默认解析器 (SetDefaultParser)，
+// 若仍未设置则纯用 fallback (POS 模板匹配)。
 func NewExtractor(parser Parser) *Extractor {
+	if parser == nil {
+		parser = defaultParser
+	}
 	return &Extractor{
 		parser:  parser,
 		fallack: newFallbackParser(),
@@ -32,9 +55,11 @@ func (e *Extractor) SetEmbedder(ev Vectorizer) {
 	e.embedder = ev
 }
 
-// Extract 从文本中提取三元组
-// 优先使用 parser，失败/无结果时自动降级到 fallback
-// 如果设置了 embedder，还会做 h+r≈t 向量验证过滤
+// Extract 从文本中提取三元组（完整四阶段流水线）
+//  Phase 1: 句法解析（LTP 分词 → POS 标注 → 依存句法树）
+//  Phase 2: 结构初筛（依存模板 / POS 模板 → 候选三元组 + syntax_conf）
+//  Phase 3: 语义验证（TransE h+r≈t → vector_conf）
+//  Phase 4: 融合裁决（线性加权 → 阈值截断 → 降序输出）
 func (e *Extractor) Extract(text string) *TripleSet {
 	if text == "" {
 		return &TripleSet{Src: "", Err: nil}
@@ -50,11 +75,11 @@ func (e *Extractor) Extract(text string) *TripleSet {
 		}
 		var triples []Triple
 
-		// 主线：依存解析 + 模板匹配
+		// ——— Phase 1 & 2: 句法解析 + 结构初筛 ———
 		if e.parser != nil {
 			result, err := e.parser.Parse(sentence)
 			if err == nil && result != nil && len(result.Tokens) > 1 {
-				triples = extractFromDep(result)
+				triples = extractFromDep(result, sentence)
 				if len(triples) > 0 {
 					src = "dep_parser"
 				}
@@ -65,16 +90,21 @@ func (e *Extractor) Extract(text string) *TripleSet {
 		if len(triples) == 0 && e.fallack != nil {
 			result, err := e.fallack.Parse(sentence)
 			if err == nil && result != nil && len(result.Tokens) > 1 {
-				triples = extractFromPOS(result)
+				triples = extractFromPOS(result, sentence)
 				if len(triples) > 0 {
 					src = "fallback"
 				}
 			}
 		}
 
-		// 向量验证（可选）：用 h+r≈t 过滤不合理三元组
+		// ——— Phase 3: 语义验证 (TransE h+r≈t) ———
 		if len(triples) > 0 && e.embedder != nil {
 			triples = verifyTriples(triples, e.embedder)
+		}
+
+		// ——— Phase 4: 融合裁决 ———
+		if len(triples) > 0 {
+			triples = fuseTriples(triples)
 		}
 
 		allTriples = append(allTriples, triples...)
@@ -86,10 +116,15 @@ func (e *Extractor) Extract(text string) *TripleSet {
 	return &TripleSet{Src: src}
 }
 
-// verifyTriples 使用 TransE 打分 (h+r≈t) 验证三元组，过滤低分项
+// ——— Phase 3: 语义验证 ———
+
+// verifyTriples 使用 TransE 打分 (h+r≈t) 计算 vector_conf
+// 输入：候选三元组（带 syntax_conf）
+// 处理：cos(h+r, t) → vector_conf
+// 输出：带 vector_conf 的候选三元组
 func verifyTriples(triples []Triple, embedder Vectorizer) []Triple {
-	var kept []Triple
-	for _, t := range triples {
+	for i := range triples {
+		t := &triples[i]
 		h := embedder.Vectorize(t.Subject)
 		r := embedder.Vectorize(t.Relation)
 		tv := embedder.Vectorize(t.Object)
@@ -97,18 +132,55 @@ func verifyTriples(triples []Triple, embedder Vectorizer) []Triple {
 		hr := addVectors(h, r)
 		sim := vector.CosineSimilarity(hr, tv)
 
-		// 语义一致性过低 → 过滤（除非 fallback 无其他候选）
-		if sim >= 0.25 {
-			t.Score *= (0.5 + 0.5*sim)
+		// 将 cos 映射到 [0, 1] 区间（原始可能在 [-1, 1]）
+		t.VectorConf = (sim + 1.0) / 2.0
+	}
+	return triples
+}
+
+// ——— Phase 4: 融合裁决 ———
+
+const (
+	fusionAlpha = 0.4 // syntax_conf 权重
+	fusionBeta  = 0.6 // vector_conf 权重
+	fusionThreshold = 0.3 // 最终阈值
+)
+
+// fuseTriples 融合裁决：线性加权计算 final_score，截断阈值，降序输出
+// 输入：候选三元组（带 syntax_conf + vector_conf）
+// 处理：final_score = α * syntax_conf + β * vector_conf
+// 输出：通过阈值且降序排列的最终三元组
+func fuseTriples(triples []Triple) []Triple {
+	if len(triples) == 0 {
+		return triples
+	}
+
+	// 计算 final_score 并更新 Score 字段
+	for i := range triples {
+		t := &triples[i]
+		finalScore := fusionAlpha*t.Score + fusionBeta*t.VectorConf
+		t.Score = finalScore
+	}
+
+	// 截断低分项
+	kept := make([]Triple, 0, len(triples))
+	for _, t := range triples {
+		if t.Score >= fusionThreshold {
 			kept = append(kept, t)
 		}
 	}
-	if len(kept) == 0 {
-		return triples
-	}
+
+	// 降序排列
+	sort.Slice(kept, func(i, j int) bool {
+		return kept[i].Score > kept[j].Score
+	})
+
 	return kept
 }
 
+// ——— 向量工具 ———
+
+// addVectors 向量加法 (h + r)
 func addVectors(a, b vector.Vector) vector.Vector {
 	out := make(vector.Vector)
 	for k, v := range a {

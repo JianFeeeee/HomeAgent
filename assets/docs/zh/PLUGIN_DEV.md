@@ -1,0 +1,632 @@
+[English](../en/PLUGIN_DEV.md) | **中文**
+
+# HomeAgent 插件开发指南
+
+<img src="../../assets/branding/mascot-xiaozhai.webp" width="20" style="border-radius:50%;vertical-align:middle"> :
+
+## 概述
+
+HomeAgent 的所有外部交互能力都来自插件。插件通过 `PluginSDK`（Go API）与内核交互。
+
+**SDK 仓库**：插件开发工具、模板代码和示例插件统一托管在
+[homeagent-sdk](https://gitcode.com/JianFeeeee/homeagent-sdk) 仓库。
+
+```bash
+git clone https://gitcode.com/JianFeeeee/homeagent-sdk.git
+cd homeagent-sdk
+```
+
+每个插件实现一个三方法接口：
+
+```go
+type Plugin interface {
+    Name() string
+    Start(sdk *PluginSDK) error
+    Stop() error
+}
+```
+
+### 三种开发方式
+
+| 方式 | 适用场景 | 复杂度 |
+|------|---------|--------|
+| **动态 .so/.dll 插件（推荐）** | 独立分发的第三方插件 | 中等，使用 `plugindev` 工具链生成 |
+| **内置插件** | 随 HomeAgent 一起发布 | 简单，需合入主仓库 |
+| **Lua 脚本插件** | 轻量快速原型 | 简单，使用 `plugindev init --lua` 生成 |
+
+---
+
+<img src="../../assets/branding/mascot-xiaozhai.webp" width="20" style="border-radius:50%;vertical-align:middle"> :
+
+## 一、快速开始：使用 plugindev 工具链
+
+`plugindev` 是 SDK 仓库提供的统一插件开发工具链，支持 Go 和 Lua 两种插件类型。
+
+### 安装
+
+```bash
+cd homeagent-sdk/tools/plugindev
+go build -o plugindev
+# 将 plugindev 加入 PATH 或直接使用
+```
+
+### SDK 版本管理
+
+`plugindev sdk` 子命令管理本地 SDK 版本：
+
+```bash
+plugindev sdk list       # 列出已安装的 SDK 版本
+plugindev sdk current    # 显示当前使用的 SDK 版本
+plugindev sdk latest     # 显示最新可用版本
+plugindev sdk install v0.7.1  # 安装指定版本
+plugindev sdk use v0.7.1      # 切换使用版本
+plugindev sdk path       # 显示当前 SDK 路径
+```
+
+SDK 存储在 `~/.homeagent/plugindev/sdk/<version>/`，`plugindev init` 自动读取当前 SDK 版本填充 `go.mod`。
+
+### 创建 Go 插件
+
+```bash
+plugindev init myplugin
+cd myplugin
+# 编辑插件代码
+vim plugin.go
+# 编译打包
+plugindev build
+# 输出: dist/myplugin_linux_amd64.hmap (或 windows_amd64)
+```
+
+### 创建 Lua 插件
+
+```bash
+plugindev init myluaplugin --lua
+cd myluaplugin
+# 编辑插件代码
+vim main.lua
+# 本地测试
+lua main.lua
+# 编译打包
+plugindev build
+# 输出: dist/myluaplugin_lua.hmap
+```
+
+### 模板项目结构
+
+**Go 插件**：
+
+```
+myplugin/
+├── plg.json       — 插件元信息（名称、版本、入口、目标平台 targets）
+├── plugin.go      — 插件实现（Plugin 接口 + 导出函数 NewPlugin）
+├── go.mod         — Go 模块定义
+├── README.md      — 说明文档
+└── thirdpart/     — 外部源码存放目录（可选）
+```
+
+编译时自动生成 C ABI bridge 文件（`z_bridge_gen.go` + `z_entry.c`），无需手动创建。
+
+**Lua 插件**：
+
+```
+myluaplugin/
+├── plg.json       — 插件元信息（entry: "main.lua", targets: "lua"）
+├── main.lua       — 插件实现（Plugin 接口的 Lua 版本）
+├── sdk.lua        — SDK 模拟层（支持 `lua main.lua` 独立测试）
+└── README.md      — 说明文档
+```
+
+### 编译打包
+
+`plugindev build` 会自动完成编译和打包：
+
+```bash
+cd myplugin
+plugindev build
+```
+
+执行过程：
+1. 读取 `plg.json` 的 `targets` 字段确定目标平台
+2. 自动生成 C ABI bridge 代码（`z_bridge_gen.go` + `z_entry.c`）
+3. **Go 插件**：执行 `go build -buildmode=c-shared`（生成 `.so` / `.dylib` / `.dll`）
+4. **Lua 插件**：直接打包源码，无需编译
+5. 生成 `plugin.json` 输出清单
+6. 打包为 `.hmap` 分发包（zip 格式，内含 `plugin.json` + 二进制）
+
+### plg.json（项目配置）vs plugin.json（输出清单）
+
+| 文件 | 用途 | 关键字段 |
+|------|------|---------|
+| `plg.json` | 项目元信息，由开发者维护 | `targets` — 构建目标（如 `"linux/amd64,windows/amd64"`）|
+| `plugin.json` | 构建产物清单，`plugindev build` 自动生成 | `entry` — 入口文件名；`platforms` — 声明的支持平台 |
+
+每个目标生成单独的 `.hmap`，二进制文件名由平台决定：
+
+| 平台 | 二进制 |
+|------|--------|
+| Linux | `plugin.so` |
+| macOS | `plugin.dylib` |
+| Windows | `plugin.dll` |
+
+### 多平台打包：--bundle
+
+```bash
+plugindev build --bundle
+```
+
+一次编译 linux/amd64 + darwin/amd64 + windows/amd64，生成包含所有平台二进制的单 `.hmap`，
+输出清单自动添加 `platforms` 字段。安装时核心自动选择当前平台的二进制，跳过其他平台。
+
+输出在 `dist/` 目录：
+```
+dist/
+├── myplugin_linux_amd64.hmap      # 单平台：Linux 版
+├── myplugin_windows_amd64.hmap    # 单平台：Windows 版
+├── myplugin_darwin_amd64.hmap     # 单平台：macOS 版
+├── myplugin_bundle.hmap           # 多平台合集
+└── myplugin_lua.hmap              # Lua 插件
+```
+
+### 安装部署
+
+通过 PluginMgr HTTP API 安装，支持三种方式：
+
+```bash
+# 1. 从 URL 安装（自动清理安装包）
+curl -X POST http://127.0.0.1:9876/plugins \
+  -H "Content-Type: application/json" \
+  -d '{"url": "https://example.com/myplugin.hmap"}'
+
+# 2. 从本地路径安装（保留安装包）
+curl -X POST http://127.0.0.1:9876/plugins \
+  -H "Content-Type: application/json" \
+  -d '{"path": "/path/to/myplugin.hmap"}'
+
+# 3. 直接上传二进制
+curl -X POST http://127.0.0.1:9876/plugins \
+  --data-binary @dist/myplugin.hmap
+```
+
+安装后需调用 `/api/v1/plugins/reload` 或重启内核生效。
+
+也可通过 WebUI 插件管理页面上传安装。
+
+---
+
+<img src="../../assets/branding/mascot-xiaozhai.webp" width="20" style="border-radius:50%;vertical-align:middle"> :
+
+## 二、Go 插件开发详解
+
+### 插件接口
+
+```go
+package main
+
+import "gitcode.com/JianFeeeee/homeagent-sdk/sdk"
+
+type Plugin struct {
+    name string
+    sdk  *sdk.PluginSDK
+}
+
+func (p *Plugin) Name() string { return p.name }
+
+func (p *Plugin) Start(s *sdk.PluginSDK) error {
+    p.sdk = s
+    // 注册配置项、工具、阶段钩子等
+    return nil
+}
+
+func (p *Plugin) Stop() error {
+    // 清理资源
+    return nil
+}
+
+// NewPluginFactory 创建插件实例（由 main.go 或 Windows bridge 调用）
+func NewPluginFactory(name string, config map[string]interface{}) (sdk.Plugin, error) {
+    return &Plugin{name: name}, nil
+}
+```
+
+### 入口点
+
+`plugindev init` 生成的 `plugin.go` 中直接包含 `NewPlugin` 导出函数，它是内核加载插件时的入口：
+
+```go
+func NewPlugin(name string, config map[string]interface{}) (sdk.Plugin, error) {
+    return &Plugin{name: name}, nil
+}
+```
+
+编译时 `plugindev build` 根据目标平台自动生成 C ABI bridge 代码（`z_bridge_gen.go` + `z_entry.c`），无需手动编写。Windows DLL 和 Linux/macOS .so 共享同一入口。
+
+### PluginSDK 核心 API
+
+#### 工具注册 — 让 LLM 可调用你的能力
+
+```go
+s.RegisterTool("weather_query", sdk.ToolDef{
+    Name:        "weather_query",
+    Description: "查询指定城市的天气",
+    NoMemory:    false,                            // false=输出参与记忆计算，true=跳过计算
+    // Cleaner:  func(output string) string {     // 可选：输出参与向量化/jieba/蒸馏前的清洗
+    //     return extractJSON(output, "content")
+    // },
+    Parameters: map[string]interface{}{
+        "type": "object",
+        "properties": map[string]interface{}{
+            "city": map[string]interface{}{
+                "type":        "string",
+                "description": "城市名称，如 北京",
+            },
+        },
+        "required": []string{"city"},
+    },
+}, func(args map[string]interface{}) (interface{}, error) {
+    city, _ := args["city"].(string)
+    return map[string]interface{}{
+        "city":    city,
+        "temp":    25,
+        "weather": "晴",
+    }, nil
+})
+```
+
+##### NoMemory 与 Cleaner 说明
+
+`NoMemory` 和 `Cleaner` 是 `ToolDef` 上的两个可选字段，控制工具输出在**记忆计算层**（向量化、jieba 分词、蒸馏）中的行为：
+
+- **`NoMemory`**（默认 `false`）：设为 `true` 时，工具输出不参与任何记忆计算（向量、分词、蒸馏），但原文保留在 Context 和 Document 中，LLM 注意力不受影响。适用场景：`cmd_run`（命令输出含不可控噪音）、文件上传/删除等纯操作工具。
+
+- **`Cleaner`**（可选）：函数签名 `func(output string) string`。注册后，工具输出在参与向量化/jieba/蒸馏前先经过此函数过滤。典型用途：SQL 查询去前缀、JSON 包裹提取 `content` 字段。原文始终不变，Cleaner 只影响计算层输入。
+
+决策矩阵：
+
+```
+工具输出 → 对 LLM 注意力有信号价值？
+  ├── 否 → NoMemory=true（输出保留原文，跳过计算层）
+  └── 是 → 有可控噪音？
+       ├── 是 → Cleaner 过滤后参与计算
+       └── 否 → 正常记忆，无需额外处理
+```
+
+> **注意**：`Cleaner` 是 Go `func` 类型（`json:"-"`），不能跨 C ABI 边界序列化。Lua 插件和远程插件无法使用。
+
+#### 阶段钩子 — 干预消息处理流
+
+7 个阶段：
+
+| 阶段 | 时机 | 用途 |
+|------|------|------|
+| `on_input` | 消息刚到达 Agent | 黑名单、限流、短路 |
+| `pre_action` | 即将调用 LLM | 注入上下文 |
+| `post_action` | LLM 返回结果 | 修改输出/工具列表 |
+| `before_toolcall` | 工具调用前 | 审计、拒绝、改参 |
+| `after_toolcall` | 工具执行后 | 脱敏、改写结果 |
+| `before_output` | 输出前 | 格式适配、泄漏清洗 |
+| `after_output` | 输出后 | 统计日志 |
+
+```go
+// 全局监听：所有插件的阶段事件
+s.RegisterStage(sdk.StagePreAction, func(ctx *sdk.StageContext) error {
+    ctx.Lock()
+    ctx.ContextMsgs = append(ctx.ContextMsgs, map[string]interface{}{
+        "role":    "system",
+        "content": "注入的上下文内容",
+    })
+    ctx.Unlock()
+    return nil
+})
+
+// 仅自己工具：仅监听自己注册的 tool 的 before_toolcall/after_toolcall
+s.RegisterStage(sdk.StageBeforeToolcall, myHandler, sdk.StageScopeOwnTools)
+```
+
+#### 配置管理
+
+```go
+// 注册配置项定义
+s.Settings().RegisterDef(sdk.ConfigDef{
+    Key:         "plugin.myplugin.api_key",
+    Default:     "",
+    Type:        "string",
+    DisplayName: "API Key",
+    Description: "API 密钥",
+    Category:    "myplugin",
+})
+
+// 读写配置
+val, err := s.Settings().Get("api_key")
+s.Settings().Set("api_key", "new-value")
+
+// 读取核心配置
+s.Settings().GetCore("llm.model")
+
+// 读取其他插件配置
+s.Settings().GetPlugin("other_plugin", "some_key")
+```
+
+#### 输入投递
+
+```go
+// 普通投递（按序处理）
+s.InjectText(source, channel, text string)
+
+// 中断投递（可打断当前 LLM 处理）
+s.InjectInterruptText(source, channel, text string)
+
+// 不记入记忆
+s.InjectTextNoMemory(source, channel, text string)
+```
+
+#### 事件订阅
+
+```go
+import "gitcode.com/JianFeeeee/homeagent-sdk/sdk"
+
+unsub := s.Events().Subscribe(sdk.EventToolCall, func(evt *sdk.Event) {
+    log.Printf("工具被调用: %v", evt.Payload)
+})
+defer unsub()
+```
+
+#### 能力访问
+
+```go
+// 图记忆（实体-关系存储）
+entities, relations, err := s.Memory().Recall([]string{"关键词"}, 2)
+
+// 文档记忆（向量存储）
+docs := s.DocMemory().Query("查询文本", 3)
+
+// 知识库
+results, err := s.Knowledge().Search("查询", 5)
+
+// LLM 源管理
+s.LLM().ListSources() // 返回 []string
+s.LLM().SetSource("deepseek")
+```
+
+#### 事件订阅（内置插件）
+
+```go
+// 订阅系统事件，返回取消订阅函数
+unsub := s.Subscribe("tool_call", func(evt *events.Event) {
+    log.Printf("工具被调用: %v", evt.Payload)
+})
+defer unsub()
+
+// 发布事件
+s.Publish(&events.Event{
+    Type:    "custom_event",
+    Payload: map[string]interface{}{"key": "value"},
+})
+```
+
+#### IO 通道管理（内置插件）
+
+```go
+// 注册通道（绑定设备驱动），dev 必须实现 agentIO.Device 接口：
+//   Name() string
+//   Type() DeviceType
+//   Description() string
+//   Tools() []ToolDef
+//   Execute(tool string, args map[string]interface{}) (interface{}, error)
+//   Start() error
+//   Stop() error
+//   OutputCapabilities() OutputCapability
+s.RegisterChannel("mydevice", deviceImpl)
+
+// 注销通道
+s.UnregisterChannel("mydevice")
+
+// 列出所有通道
+channels := s.ListChannels()
+```
+
+#### 输入投递（内置插件）
+
+```go
+// 排队投递（按序处理）
+s.InjectInput(source, channel, eventType string, payload map[string]interface{})
+
+// 同步投递（等待响应）
+resp := s.InjectInputSync(source, channel, eventType string, payload map[string]interface{})
+
+// 中断投递（可打断当前 LLM 处理）
+s.InjectInterrupt(source, channel, eventType string, payload map[string]interface{})
+
+// 同步文本投递（快捷方式）
+resp := s.InjectTextSync(source, channel, text string)
+resp := s.InjectTextSyncNoMemory(source, channel, text string)
+
+// 获取输出通道
+outputCh := s.OutputChan()
+```
+
+> **注意**：`Subscribe`、`Publish`、`RegisterChannel`、`UnregisterChannel`、`ListChannels`、`InjectInput`、`InjectInputSync`、`InjectInterrupt`、`InjectTextSync`、`InjectTextSyncNoMemory`、`OutputChan` 这些方法仅在内置插件中可用（`internal/sdk` 包），外部动态插件无法访问。外部插件请使用 `InjectText`、`InjectInterruptText`、`InjectTextNoMemory` 等公共 API。
+
+---
+
+<img src="../../assets/branding/mascot-xiaozhai.webp" width="20" style="border-radius:50%;vertical-align:middle"> :
+
+## 三、Lua 插件开发详解
+
+Lua 插件适合轻量级快速原型，无需 Go 编译环境，修改后直接重启内核即可生效。
+
+### 插件结构
+
+```lua
+-- main.lua
+local plugin = {
+  name = "myluaplugin"
+}
+
+function plugin.start(sdk)
+  sdk.log("info", "myluaplugin starting...")
+
+  sdk.register_tool("myluaplugin_hello", {
+    description = "A hello world tool",
+    parameters = {
+      type = "object",
+      properties = {}
+    }
+  }, function(args)
+    return { content = "Hello from myluaplugin plugin!" }
+  end)
+
+  sdk.log("info", "myluaplugin started")
+end
+
+function plugin.stop()
+  sdk.log("info", "myluaplugin stopped")
+end
+
+return plugin
+```
+
+### SDK 模拟层
+
+`sdk.lua` 提供纯 Lua 的 SDK 模拟实现，支持 `lua main.lua` 独立测试：
+
+```bash
+lua main.lua
+# 输出:
+# [lua-plugin] info: myluaplugin starting...
+# [lua-plugin] register_tool: myluaplugin_hello
+# [lua-plugin] info: myluaplugin started
+```
+
+在内核中运行时，`sdk.*` 全局变量由 Go 层注入，所有 `-- !impl` 标记的函数会被替换为真实实现。
+
+### Lua SDK API
+
+| 函数 | 说明 |
+|------|------|
+| `sdk.log(level, msg)` | 日志输出 |
+| `sdk.register_tool(name, def, handler)` | 注册工具 |
+| `sdk.register_stage(stage, handler)` | 注册阶段钩子 |
+| `sdk.register_api(name)` | 注册 API |
+| `sdk.get_setting(key)` | 读取配置 |
+| `sdk.set_setting(key, value)` | 写入配置 |
+| `sdk.inject_text(source, channel, text)` | 投递文本消息 |
+| `sdk.inject_interrupt(source, channel, text)` | 中断投递 |
+| `sdk.json.encode(val)` | JSON 编码 |
+| `sdk.json.decode(str)` | JSON 解码 |
+| `sdk.http.get(url)` | HTTP GET 请求（`-- !impl`） |
+| `sdk.http.post(url, body, content_type)` | HTTP POST 请求（`-- !impl`） |
+
+> **注意**：Lua 插件的 `sdk.register_stage` 阶段回调目前仅传递 `raw_message`、`user_id`、`phase` 三个字段，功能受限。复杂的阶段处理逻辑建议使用 Go 插件。
+
+---
+
+<img src="../../assets/branding/mascot-xiaozhai.webp" width="20" style="border-radius:50%;vertical-align:middle"> :
+
+## 四、内置插件
+
+内置插件使用 `init()` 自注册方式，编译进内核，无需单独部署。
+
+### 目录结构
+
+```
+internal/plugins/yourplugin/
+    plugin.go       — 插件主文件
+```
+
+### 最小插件示例
+
+```go
+package yourplugin
+
+import (
+    "gitcode.com/JianFeeeee/HomeAgent/internal/plugin"
+    sdk "gitcode.com/JianFeeeee/HomeAgent/internal/sdk"
+)
+
+func init() {
+    plugin.RegisterFactory("yourplugin", func(name string, config map[string]interface{}) (sdk.Plugin, error) {
+        return New(name), nil
+    })
+}
+
+type Plugin struct {
+    name string
+}
+
+func New(name string) *Plugin {
+    return &Plugin{name: name}
+}
+
+func (p *Plugin) Name() string { return p.name }
+
+func (p *Plugin) Start(s *sdk.PluginSDK) error {
+    // 在这里初始化插件：启动 goroutine、注册工具、订阅事件等
+    return nil
+}
+
+func (p *Plugin) Stop() error {
+    // 清理资源
+    return nil
+}
+```
+
+### 注册到内核
+
+在 `internal/plugins/all.go` 中添加空白导入：
+
+```go
+package plugins
+
+import (
+    _ "gitcode.com/JianFeeeee/HomeAgent/internal/plugins/yourplugin"
+    // ... 其他插件
+)
+```
+
+---
+
+<img src="../../assets/branding/mascot-xiaozhai.webp" width="20" style="border-radius:50%;vertical-align:middle"> :
+
+## 五、最佳实践
+
+1. `Start()` 非阻塞 — goroutine 启动长任务，不要阻塞 Start
+2. `Stop()` 清理资源 — 关连接、停 goroutine、取消订阅
+3. 工具名唯一 — 建议插件名前缀避免冲突
+4. handler 返回 `error` 时 LLM 会收到并可能重试
+5. 打断用 `InjectInterruptText`，普通投递用 `InjectText`
+6. 配置用 `Settings().Get/Set`，不要硬编码
+7. 外部 Go 插件独立编译，不依赖内核版本；内置插件才需随内核重新编译
+
+---
+
+<img src="../../assets/branding/mascot-xiaozhai.webp" width="20" style="border-radius:50%;vertical-align:middle"> :
+
+## 六、示例插件参考
+
+### SDK 仓库示例（`homeagent-sdk/example/`）
+
+| 示例 | 类型 | 特点 |
+|------|------|------|
+| [memo](https://gitcode.com/JianFeeeee/homeagent-sdk/tree/main/example/memo) | Go | 备忘管理，PreAction 注入 + 定时打断双提醒 |
+| [files](https://gitcode.com/JianFeeeee/homeagent-sdk/tree/main/example/files) | Go | 文件系统操作，4 种写入模式，沙箱隔离 |
+| [browser](https://gitcode.com/JianFeeeee/homeagent-sdk/tree/main/example/browser) | Go | 网络搜索、网页抓取（SSRF）、浏览器渲染（合并自 web/webfetch） |
+| [bili](https://gitcode.com/JianFeeeee/homeagent-sdk/tree/main/example/bili) | Go | B 站视频下载（yt-dlp） |
+| [qq](https://gitcode.com/JianFeeeee/homeagent-sdk/tree/main/example/qq) | Go | NapCat OneBot 对接，17 个工具 |
+| [editdoc](https://gitcode.com/JianFeeeee/homeagent-sdk/tree/main/example/editdoc) | Go | Office 文档编辑与格式转换 |
+| [a2a](https://gitcode.com/JianFeeeee/homeagent-sdk/tree/main/example/a2a) | Go | Agent-to-Agent 协议 |
+| [ocr](https://gitcode.com/JianFeeeee/homeagent-sdk/tree/main/example/ocr) | Go | 离线文字识别（Tesseract） |
+| [sanitizer](https://gitcode.com/JianFeeeee/homeagent-sdk/tree/main/example/sanitizer) | Go | 输出清洗过滤器 |
+
+### 内置插件
+
+| 插件 | 位置 | 特点 |
+|------|------|------|
+| Timer | `internal/plugins/timer/` | 最简单的完整示例，注册一个工具 + 中断反馈 |
+| CLI | `internal/plugins/cli/` | Unix socket 监听 + 同步请求响应 |
+| WebUI | `internal/plugins/webui/` | HTTP 服务 + 依赖注入 |
+
+---
+
+*了解项目整体目标？查看 [OVERVIEW.md](OVERVIEW.md)。*
+*了解技术架构？查看 [ARCHITECTURE.md](ARCHITECTURE.md)。*
+*SDK 仓库与开发工具？查看 [homeagent-sdk](https://gitcode.com/JianFeeeee/homeagent-sdk)。*

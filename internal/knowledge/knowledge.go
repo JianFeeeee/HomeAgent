@@ -83,8 +83,9 @@ type Store struct {
 	mu     sync.RWMutex
 	items  map[string]*Knowledge
 
-	indexPath string
-	summaries []string
+	indexPath  string
+	summaries  []string
+	vectorizer vector.Vectorizer // 可选：词嵌入向量化器，优先于 TF-IDF
 }
 
 func NewStore(root string) *Store {
@@ -95,6 +96,35 @@ func NewStore(root string) *Store {
 		veczer:    vector.NewTFIDFVectorizer(memory.TokenizeWords),
 		items:     make(map[string]*Knowledge),
 	}
+}
+
+// SetVectorizer 设置词嵌入向量化器，优先于 TF-IDF
+func (s *Store) SetVectorizer(v vector.Vectorizer) {
+	s.vectorizer = v
+}
+
+// ReindexWithVectorizer 用给定的向量化器重建所有知识条目的向量索引
+func (s *Store) ReindexWithVectorizer(v vector.Vectorizer) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	log.Printf("[knowledge] reindex with vectorizer (%d items)", len(s.items))
+	s.vec = vector.NewStore()
+	for _, k := range s.items {
+		vec := v.Vectorize(k.Name + " " + k.Content)
+		s.vec.Insert(k.Name, k.Name+": "+k.Content, vec, map[string]string{
+			"name": k.Name, "path": k.Path,
+		})
+	}
+	log.Printf("[knowledge] reindex with vectorizer complete (%d vectors)", s.vec.Size())
+}
+
+// vectorize 优先使用词嵌入向量化器，不可用时回退到 TF-IDF
+func (s *Store) vectorize(text string) vector.Vector {
+	if s.vectorizer != nil {
+		return s.vectorizer.Vectorize(text)
+	}
+	return s.veczer.Vectorize(text)
 }
 
 func (s *Store) Start() error {
@@ -122,7 +152,7 @@ func (s *Store) Search(query string, topK int) []*Knowledge {
 		topK = 5
 	}
 
-	vec := s.veczer.Vectorize(query)
+	vec := s.vectorize(query)
 	results := s.vec.Search(vec, topK)
 
 	var out []*Knowledge
@@ -171,7 +201,7 @@ func (s *Store) Add(name, content string) error {
 	}
 	s.items[id] = k
 
-	vec := s.veczer.Vectorize(name + " " + content)
+	vec := s.vectorize(name + " " + content)
 	s.vec.Insert(id, name+": "+content, vec, map[string]string{
 		"name": name, "path": path,
 	})
@@ -202,7 +232,7 @@ func (s *Store) SearchCategories(query string, topK int) []string {
 		return names
 	}
 
-	vec := s.veczer.Vectorize(query)
+	vec := s.vectorize(query)
 	results := s.vec.Search(vec, topK)
 	var names []string
 	for _, r := range results {
@@ -274,7 +304,7 @@ func (s *Store) BuildTree() *TreeIndex {
 			}
 		}
 		// 获取该条目的向量并压缩
-		vec := s.veczer.Vectorize(k.Name + " " + k.Content)
+		vec := s.vectorize(k.Name + " " + k.Content)
 		preview := []rune(k.Content)
 		previewStr := ""
 		if len(preview) > 200 {
@@ -303,7 +333,7 @@ func (s *Store) SearchTree(query string, topK int) map[string][]*Knowledge {
 		topK = 10
 	}
 
-	vec := s.veczer.Vectorize(query)
+	vec := s.vectorize(query)
 	results := s.vec.Search(vec, topK*2)
 
 	categorized := make(map[string][]*Knowledge)
@@ -361,7 +391,7 @@ func (s *Store) scanAll() error {
 	}
 
 	for _, k := range s.items {
-		vec := s.veczer.Vectorize(k.Name + " " + k.Content)
+		vec := s.vectorize(k.Name + " " + k.Content)
 		s.vec.Insert(k.Name, k.Name+": "+k.Content, vec, map[string]string{
 			"name": k.Name, "path": k.Path,
 		})
