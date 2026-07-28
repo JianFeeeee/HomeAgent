@@ -1,13 +1,14 @@
 local adapter = {}
 
 adapter.name = "deepseek"
-adapter.version = "2.0.0"
+adapter.version = "2.1.0"
 adapter.endpoint = "/chat/completions"
 adapter.headers = {}
 
 function adapter.transform_request(raw_body)
     local ok, req = pcall(json.decode, raw_body)
     if not ok then return raw_body end
+
     req.model = req.model or "deepseek-chat"
     req.stream = req.stream or false
     if req.disable_thinking then
