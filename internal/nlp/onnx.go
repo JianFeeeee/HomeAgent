@@ -8,32 +8,35 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sync"
 
-	"gitcode.com/JianFeeeee/HomeAgent/internal/config"
+	"gitcode.com/JianFeeeee/HomeAgent/internal/memory"
 	ort "github.com/yalue/onnxruntime_go"
 )
 
 //go:embed models/*
 var onnxModelFS embed.FS
 
+const maxSeqLen = 128
+
 type ONNXParser struct {
-	rt      *ort.AdvancedSession
-	vocab   map[string]int64
+	rt       *ort.DynamicAdvancedSession
+	vocab    map[string]int64
 	posVocab map[string]int64
-	Release func()
+	close    sync.Once
 }
 
 type ONNXConfig struct {
-	ModelPath string // 留空使用内嵌模型
-	DataDir   string // 模型解压/缓存目录
+	ModelPath string
+	DataDir   string
 }
 
 func NewONNXParser(cfg ONNXConfig) (*ONNXParser, error) {
-	vocab, err := loadJSONMap[int64]("models/vocab.json", onnxModelFS)
+	vocab, err := loadWordMap("models/vocab.json")
 	if err != nil {
 		return nil, fmt.Errorf("load vocab: %w", err)
 	}
-	posVocab, err := loadJSONMap[int64]("models/pos_vocab.json", onnxModelFS)
+	posVocab, err := loadWordMap("models/pos_vocab.json")
 	if err != nil {
 		return nil, fmt.Errorf("load pos_vocab: %w", err)
 	}
@@ -46,35 +49,33 @@ func NewONNXParser(cfg ONNXConfig) (*ONNXParser, error) {
 		}
 	}
 
-	ort.SetSharedLibraryPath(findONNXRuntime())
+	ort.SetSharedLibraryPath(libPath())
 	if err := ort.InitializeEnvironment(); err != nil {
 		return nil, fmt.Errorf("init onnx env: %w", err)
 	}
 
-	inputs := ort.NewInputDetails()
-	inputs.Append("input_ids", []int64{1, 128})
+	inputNames := []string{"input_ids"}
+	outputNames := []string{"pos_logits", "head_logits", "rel_logits"}
 
-	outputs := ort.NewOutputDetails()
-	outputs.Append("pos_logits", []int64{1, 128, 18})
-	outputs.Append("head_logits", []int64{1, 128, 128})
-	outputs.Append("rel_logits", []int64{1, 128, 128, 18})
-
-	session, err := ort.NewAdvancedSession(modelPath, inputs, outputs, nil)
+	session, err := ort.NewDynamicAdvancedSession(modelPath, inputNames, outputNames, nil)
 	if err != nil {
-		return nil, fmt.Errorf("create session: %w", err)
-	}
-
-	release := func() {
-		session.Destroy()
 		ort.DestroyEnvironment()
+		return nil, fmt.Errorf("create session: %w", err)
 	}
 
 	return &ONNXParser{
 		rt:       session,
 		vocab:    vocab,
 		posVocab: posVocab,
-		Release:  release,
 	}, nil
+}
+
+func (p *ONNXParser) Close() error {
+	p.close.Do(func() {
+		p.rt.Destroy()
+		ort.DestroyEnvironment()
+	})
+	return nil
 }
 
 func (p *ONNXParser) Parse(text string) (*ParseResult, error) {
@@ -82,47 +83,187 @@ func (p *ONNXParser) Parse(text string) (*ParseResult, error) {
 		return &ParseResult{}, nil
 	}
 
-	inputIDs := tokenize(text, p.vocab, 128)
-	inputIDs = padTo(inputIDs, 128)
+	x := memory.GetJieba()
+	if x == nil {
+		return nil, fmt.Errorf("jieba unavailable")
+	}
+	words := x.Cut(text, true)
+	if len(words) == 0 {
+		return &ParseResult{}, nil
+	}
 
-	inputTensor, err := ort.NewTensor(ort.NewShape(1, 128), inputIDs)
+	inIDs := p.wordsToIDs(words, maxSeqLen)
+	n := len(inIDs) - 1 // exclude <bos>
+	if n <= 0 {
+		return &ParseResult{}, nil
+	}
+	if n > len(words) {
+		n = len(words)
+	}
+
+	padded := padTo(inIDs, maxSeqLen)
+
+	inTensor, err := ort.NewTensor(ort.NewShape(1, maxSeqLen), padded)
 	if err != nil {
 		return nil, fmt.Errorf("create input tensor: %w", err)
 	}
-	defer inputTensor.Destroy()
+	defer inTensor.Destroy()
 
-	outputs, err := p.rt.Call(inputTensor)
-	if err != nil {
-		return nil, fmt.Errorf("onnx call: %w", err)
+	outputs := make([]ort.Value, 3)
+	if err := p.rt.Run([]ort.Value{inTensor}, outputs); err != nil {
+		return nil, fmt.Errorf("onnx run: %w", err)
 	}
 
-	rawPOS := outputs[0].GetData().([]float32)
-	rawHeads := outputs[1].GetData().([]float32)
-	rawRels := outputs[2].GetData().([]float32)
+	posOut, ok := outputs[0].(*ort.Tensor[float32])
+	if !ok {
+		return nil, fmt.Errorf("pos output not Tensor[float32]")
+	}
+	headOut, ok := outputs[1].(*ort.Tensor[float32])
+	if !ok {
+		return nil, fmt.Errorf("head output not Tensor[float32]")
+	}
+	relOut, ok := outputs[2].(*ort.Tensor[float32])
+	if !ok {
+		return nil, fmt.Errorf("rel output not Tensor[float32]")
+	}
+	defer posOut.Destroy()
+	defer headOut.Destroy()
+	defer relOut.Destroy()
 
-	seqLen := actualLen(inputIDs)
-	tokens := idsToTokens(inputIDs[:seqLen], p.vocab)
-	pos := decodePOS(rawPOS, seqLen, p.posVocab)
-	heads := decodeHeads(rawHeads, seqLen)
-	rels := decodeRels(rawRels, seqLen)
+	posShape := posOut.GetShape()   // [1, seq, posDim]
+	headShape := headOut.GetShape() // [1, seq, seq]
+	relShape := relOut.GetShape()   // [1, seq, seq, relDim]
 
-	return &ParseResult{Tokens: tokens, POS: pos, Heads: heads, DepRels: rels}, nil
+	if len(posShape) < 3 || len(headShape) < 3 || len(relShape) < 4 {
+		return nil, fmt.Errorf("unexpected output ranks: pos=%d head=%d rel=%d",
+			len(posShape), len(headShape), len(relShape))
+	}
+
+	seqDim := int(headShape[1])
+	posDim := int(posShape[2])
+	relDim := int(relShape[3])
+
+	if n > seqDim {
+		n = seqDim
+	}
+
+	rawPOS := posOut.GetData()
+	rawHeads := headOut.GetData()
+	rawRels := relOut.GetData()
+
+	pos := decodePOS(rawPOS, n, posDim, p.posVocab)
+	heads := decodeHeads(rawHeads, n, seqDim)
+	rels := decodeRels(rawRels, n, seqDim, relDim, heads)
+
+	return &ParseResult{
+		Tokens:  words[:n],
+		POS:     pos,
+		Heads:   heads,
+		DepRels: rels,
+	}, nil
 }
 
-func loadJSONMap[T ~int64 | ~string](path string, fs embed.FS) (map[string]T, error) {
-	data, err := fs.ReadFile(path)
+func (p *ONNXParser) wordsToIDs(words []string, maxLen int) []int64 {
+	ids := make([]int64, 0, maxLen)
+	if bos, ok := p.vocab["<bos>"]; ok {
+		ids = append(ids, bos)
+	}
+	for _, w := range words {
+		if len(ids) >= maxLen {
+			break
+		}
+		if id, ok := p.vocab[w]; ok {
+			ids = append(ids, id)
+		} else if unk, ok := p.vocab["<unk>"]; ok {
+			ids = append(ids, unk)
+		}
+	}
+	return ids
+}
+
+func padTo(ids []int64, length int) []int64 {
+	for len(ids) < length {
+		ids = append(ids, 0)
+	}
+	return ids
+}
+
+func decodePOS(raw []float32, n, posDim int, posVocab map[string]int64) []string {
+	rev := make(map[int64]string)
+	for k, v := range posVocab {
+		rev[v] = k
+	}
+	pos := make([]string, n)
+	for i := 0; i < n; i++ {
+		bestIdx := 0
+		bestVal := float32(-1e9)
+		for j := 0; j < posDim; j++ {
+			if v := raw[i*posDim+j]; v > bestVal {
+				bestVal = v
+				bestIdx = j
+			}
+		}
+		if tag, ok := rev[int64(bestIdx)]; ok {
+			pos[i] = tag
+		} else {
+			pos[i] = "X"
+		}
+	}
+	return pos
+}
+
+func decodeHeads(raw []float32, n, seqDim int) []int {
+	heads := make([]int, n)
+	for i := 0; i < n; i++ {
+		bestIdx := 0
+		bestVal := float32(-1e9)
+		for j := 0; j < seqDim; j++ {
+			if v := raw[i*seqDim+j]; v > bestVal {
+				bestVal = v
+				bestIdx = j
+			}
+		}
+		heads[i] = bestIdx
+	}
+	return heads
+}
+
+func decodeRels(raw []float32, n, seqDim, relDim int, heads []int) []string {
+	rels := make([]string, n)
+	stride := seqDim * relDim
+	for i := 0; i < n; i++ {
+		h := heads[i]
+		if h < 0 || h >= seqDim {
+			rels[i] = "dep"
+			continue
+		}
+		bestIdx := 0
+		bestVal := float32(-1e9)
+		for r := 0; r < relDim; r++ {
+			if v := raw[i*stride+h*relDim+r]; v > bestVal {
+				bestVal = v
+				bestIdx = r
+			}
+		}
+		rels[i] = depRelLabel(bestIdx)
+	}
+	return rels
+}
+
+func loadWordMap(path string) (map[string]int64, error) {
+	data, err := onnxModelFS.ReadFile(path)
 	if err != nil {
 		return nil, err
 	}
 	var raw struct {
-		Word map[string]T `json:"word"`
+		Word map[string]int64 `json:"word"`
 	}
 	if err := json.Unmarshal(data, &raw); err != nil {
-		result := make(map[string]T)
-		if err2 := json.Unmarshal(data, &result); err2 != nil {
+		var flat map[string]int64
+		if err2 := json.Unmarshal(data, &flat); err2 != nil {
 			return nil, err
 		}
-		return result, nil
+		return flat, nil
 	}
 	return raw.Word, nil
 }
@@ -146,132 +287,37 @@ func extractEmbeddedModel(dataDir string) (string, error) {
 	return dst, nil
 }
 
-func findONNXRuntime() string {
-	candidates := []string{
-		"onnxruntime.dll",
-		"libonnxruntime.so",
-		"libonnxruntime.dylib",
-		filepath.Join(os.Getenv("ONNXRUNTIME_DIR"), "libonnxruntime.so"),
-		filepath.Join(os.Getenv("ONNXRUNTIME_DIR"), "onnxruntime.dll"),
+func libPath() string {
+	for _, env := range []string{"ONNXRUNTIME_DIR", "ONNX_ML_DIR"} {
+		if d := os.Getenv(env); d != "" {
+			for _, name := range []string{"libonnxruntime.so", "libonnxruntime.dylib", "onnxruntime.dll"} {
+				if candidate := filepath.Join(d, name); fileExists(candidate) {
+					return candidate
+				}
+			}
+		}
 	}
-	for _, c := range candidates {
-		if _, err := os.Stat(c); err == nil {
-			abs, _ := filepath.Abs(c)
+	for _, name := range []string{"libonnxruntime.so", "libonnxruntime.dylib", "onnxruntime.dll"} {
+		if fileExists(name) {
+			abs, _ := filepath.Abs(name)
 			return abs
 		}
 	}
 	return "onnxruntime.dll"
 }
 
-func tokenize(text string, vocab map[string]int64, maxLen int) []int64 {
-	ids := []int64{vocab["<bos>"]}
-	runes := []rune(text)
-	for i := 0; i < len(runes) && len(ids) < maxLen; i++ {
-		if id, ok := vocab[string(runes[i])]; ok {
-			ids = append(ids, id)
-		} else {
-			ids = append(ids, vocab["<unk>"])
-		}
-	}
-	return ids
+func fileExists(p string) bool {
+	_, err := os.Stat(p)
+	return err == nil
 }
 
-func padTo(ids []int64, length int) []int64 {
-	for len(ids) < length {
-		ids = append(ids, 0)
+func depRelLabel(id int) string {
+	labels := []string{"root", "nsubj", "obj", "iobj", "obl", "vocative", "expl", "csubj", "ccomp", "xcomp",
+		"advcl", "advmod", "amod", "appos", "nmod", "acl", "det", "clf", "case", "mark",
+		"nummod", "discourse", "aux", "cop", "cc", "conj", "fixed", "flat", "list", "parataxis",
+		"orphan", "goeswith", "reparandum", "punct", "dep"}
+	if id >= 0 && id < len(labels) {
+		return labels[id]
 	}
-	return ids
-}
-
-func actualLen(ids []int64) int {
-	for i, id := range ids {
-		if id == 0 {
-			return i
-		}
-	}
-	return len(ids)
-}
-
-func idsToTokens(ids []int64, vocab map[string]int64) []string {
-	rev := make(map[int64]string)
-	for k, v := range vocab {
-		rev[v] = k
-	}
-	var tokens []string
-	for _, id := range ids {
-		if t, ok := rev[id]; ok {
-			tokens = append(tokens, t)
-		}
-	}
-	return tokens
-}
-
-func decodePOS(raw []float32, seqLen int, posVocab map[string]int64) []string {
-	rev := make(map[int64]string)
-	for k, v := range posVocab {
-		rev[v] = k
-	}
-	pos := make([]string, seqLen)
-	for i := 0; i < seqLen; i++ {
-		bestIdx := 0
-		bestVal := float32(-1e9)
-		for j := 0; j < 18; j++ {
-			v := raw[i*18+j]
-			if v > bestVal {
-				bestVal = v
-				bestIdx = j
-			}
-		}
-		if tag, ok := rev[int64(bestIdx)]; ok {
-			pos[i] = tag
-		}
-	}
-	return pos
-}
-
-func decodeHeads(raw []float32, seqLen int) []int {
-	heads := make([]int, seqLen)
-	for i := 0; i < seqLen; i++ {
-		bestIdx := 0
-		bestVal := float32(-1e9)
-		for j := 0; j < seqLen; j++ {
-			v := raw[i*seqLen+j]
-			if v > bestVal {
-				bestVal = v
-				bestIdx = j
-			}
-		}
-		heads[i] = bestIdx
-	}
-	return heads
-}
-
-func decodeRels(raw []float32, seqLen int) []string {
-	rels := make([]string, seqLen)
-	for i := 0; i < seqLen; i++ {
-		bestIdx := 0
-		bestVal := float32(-1e9)
-		for j := 0; j < 18; j++ {
-			// average over head dimension for argmax
-			var sum float32
-			for k := 0; k < seqLen; k++ {
-				sum += raw[i*seqLen*18+k*18+j]
-			}
-			avg := sum / float32(seqLen)
-			if avg > bestVal {
-				bestVal = avg
-				bestIdx = j
-			}
-		}
-		rels[i] = posIDToTag(bestIdx)
-	}
-	return rels
-}
-
-func posIDToTag(id int) string {
-	tags := []string{"<bos>", "ADJ", "ADP", "ADV", "AUX", "CCONJ", "DET", "INTJ", "NOUN", "NUM", "PART", "PRON", "PROPN", "PUNCT", "SCONJ", "SYM", "VERB", "X"}
-	if id >= 0 && id < len(tags) {
-		return tags[id]
-	}
-	return "X"
+	return "dep"
 }

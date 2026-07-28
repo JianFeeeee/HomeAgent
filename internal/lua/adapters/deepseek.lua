@@ -5,12 +5,16 @@ adapter.version = "2.0.0"
 adapter.endpoint = "/chat/completions"
 adapter.headers = {}
 
--- DeepSeek 格式与 OpenAI 兼容，thinking 模式由 Go 端 ExtraBody 控制
 function adapter.transform_request(raw_body)
     local ok, req = pcall(json.decode, raw_body)
     if not ok then return raw_body end
     req.model = req.model or "deepseek-chat"
     req.stream = req.stream or false
+    if req.disable_thinking then
+        req.extra_body = req.extra_body or {}
+        req.extra_body.thinking = { type = "disabled" }
+    end
+    req.disable_thinking = nil
     return json.encode(req)
 end
 
