@@ -19,7 +19,7 @@ HomeAgent 是一个持续运行的个人智能 Agent 框架。
 这一划分的意义在于职责边界清晰：内核专注于编排与记忆管理，插件负责具体 IO 实现，二者互不耦合。
 
 **三层记忆架构** — 通过分级存储策略管理 Agent 长周期运行中的信息留存：
-- **Context 层**：内存中局部词嵌入评分的事件窗口（jieba + TF-IDF + PMI → CosineSimilarity），实时维护最近上下文，低相关性事件自动下沉到下一层
+- **Context 层**：内存中预训练词嵌入评分的事件窗口（StaticEmbedder 词向量 → CosineSimilarity，TF-IDF 回退），实时维护最近上下文，低相关性事件自动下沉到下一层
 - **Document 层**：JSON 文件 + TF-IDF 向量索引的临时记忆，支持显式提交和隐式归档，冷数据蒸馏到 Graph
 - **Graph 层**：SQLite 图数据库，持久化实体（entities）和关系（relations），BFS 遍历召回，蒸馏管道从对话中提取三元组
 
