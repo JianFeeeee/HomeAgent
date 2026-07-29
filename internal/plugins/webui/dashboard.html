@@ -107,6 +107,7 @@ tr:hover td { background:var(--bg-hover) }
 .badge-red { background:#7f1d1d; color:#fca5a5 }
 .badge-yellow { background:#713f12; color:#fde68a }
 .badge-blue { background:#1e3a5f; color:#93c5fd }
+.badge-gray { background:#374151; color:#9ca3af }
 .btn { padding:6px 14px; border-radius:6px; border:none; font-size:12px; cursor:pointer; font-weight:500; transition:all .15s }
 .btn-primary { background:var(--accent); color:#fff }
 .btn-primary:hover { filter:brightness(1.1) }
@@ -312,6 +313,7 @@ let state = {
   settings: {},
   meta: {},
   pluginMeta: {},
+  disabledPlugins: [],
   settingsPlugins: ['core'],
   selectedSection: 'core',
   messages: [],
@@ -439,6 +441,7 @@ async function renderAll() {
     state.meta = s.meta || {};
     state.settingsPlugins = s.plugins || ['core'];
     state.pluginMeta = s.plugin_meta || {};
+    state.disabledPlugins = s.disabled_plugins || [];
   } catch(e) {}
   try { state.installedPlugins = await api('/plugins') } catch(e) {}
   try { await loadTerminals() } catch(e) {}
@@ -1223,17 +1226,38 @@ function renderPlugins() {
     + '<button class="btn btn-primary" onclick="installPlugin()">' + __('安装','Install') + '</button></div>'
     + '<div><input type="file" id="plugin-file" accept=".hmap" style="display:inline;width:auto" onchange="installPluginFile(this.files[0])">'
     + '<label for="plugin-file" class="btn btn-ghost" style="cursor:pointer">' + __('选择 .hmap 文件上传','Upload .hmap file') + '</label></div></div>';
+  var disabledNames = {};
+  (state.disabledPlugins || []).forEach(function(d) { disabledNames[d.name] = d });
   var installedNames = (state.installedPlugins || []).map(function(p) { return p.name });
-  html += '<div class="card"><h2>' + __('已加载插件','Loaded Plugins') + ' (' + plugins.length + ')</h2>';
-  if (plugins.length === 0) {
-    html += '<div class="empty-state"><p>' + __('暂无已加载插件','No loaded plugins') + '</p></div>';
+  var allPluginNames = {};
+  plugins.forEach(function(p) { allPluginNames[p.name] = true });
+  state.disabledPlugins.forEach(function(d) { allPluginNames[d.name] = true });
+  html += '<div class="card"><h2>' + __('所有插件','All Plugins') + ' (' + Object.keys(allPluginNames).length + ')</h2>';
+  var names = Object.keys(allPluginNames).sort();
+  if (names.length === 0) {
+    html += '<div class="empty-state"><p>' + __('暂无插件','No plugins') + '</p></div>';
   } else {
     html += '<table><tr><th>' + __('名称','Name') + '</th><th>' + __('状态','Status') + '</th><th>' + __('操作','Actions') + '</th></tr>';
-    plugins.forEach(function(p) {
-      var isExternal = installedNames.indexOf(p.name) >= 0;
-      html += '<tr><td>' + escHtml(p.name) + '</td>'
-        + '<td><span class="badge badge-green">' + __('已加载','Loaded') + '</span></td>'
-        + '<td>' + (isExternal ? '<button class="btn btn-sm btn-danger" onclick="removePlugin(\'' + escHtml(p.name) + '\')">' + __('卸载','Unload') + '</button>' : '<span class="badge badge-blue">' + __('内置','Built-in') + '</span>') + '</td></tr>';
+    names.forEach(function(name) {
+      var isExternal = installedNames.indexOf(name) >= 0;
+      var isDisabled = disabledNames[name];
+      var loaded = plugins.some(function(p) { return p.name === name });
+      var statusHtml = loaded && !isDisabled ? '<span class="badge badge-green">' + __('已加载','Loaded') + '</span>'
+        : loaded && isDisabled ? '<span class="badge badge-yellow">' + __('运行中(禁用待生效)','Running (disable pending)') + '</span>'
+        : isDisabled ? '<span class="badge badge-red">' + __('已禁用','Disabled') + '</span>'
+        : '<span class="badge badge-gray">' + __('未加载','Not Loaded') + '</span>';
+      var actionsHtml = '';
+      if (loaded) {
+        actionsHtml += '<button class="btn btn-sm btn-warning" onclick="disablePlugin(\'' + escHtml(name) + '\')" style="margin-right:4px">' + __('禁用','Disable') + '</button>';
+      } else {
+        actionsHtml += '<button class="btn btn-sm btn-success" onclick="enablePlugin(\'' + escHtml(name) + '\')" style="margin-right:4px">' + __('启用','Enable') + '</button>';
+      }
+      if (isExternal) {
+        actionsHtml += '<button class="btn btn-sm btn-danger" onclick="removePlugin(\'' + escHtml(name) + '\')">' + __('卸载','Unload') + '</button>';
+      }
+      html += '<tr><td>' + escHtml(name) + '</td>'
+        + '<td>' + statusHtml + '</td>'
+        + '<td>' + actionsHtml + '</td></tr>';
     });
     html += '</table>';
   }
@@ -1317,6 +1341,32 @@ async function removePlugin(name) {
     if (r.action === 'reload_required') toast(__('已卸载，请点击「重载插件」生效','Unloaded, click "Reload Plugins" to apply'), false);
     loadInstalledPlugins(); renderPlugins();
   } catch(e) { toast(__('卸载失败: ','Unload failed: ') + e.message, true) }
+}
+
+async function disablePlugin(name) {
+  if (name === 'webui') {
+    var r = confirm(__('禁用 WebUI 后将无法通过 URL:端口访问此管理面板，若要重新启用需要通过 CLI 命令 /plugin enable webui 恢复。\n\n确定要禁用吗？','Disabling WebUI will make this management panel inaccessible via URL:port. To re-enable, use CLI command /plugin enable webui.\n\nAre you sure?'));
+    if (!r) return;
+  }
+  try {
+    var r = await api('/plugins/' + encodeURIComponent(name) + '/disable', { method: 'POST' });
+    toast(__('已禁用: ','Disabled: ') + name);
+    state.kernel = await api('/kernel');
+    var s = await api('/settings');
+    state.disabledPlugins = s.disabled_plugins || [];
+    renderPlugins();
+  } catch(e) { toast(__('禁用失败: ','Disable failed: ') + e.message, true) }
+}
+
+async function enablePlugin(name) {
+  try {
+    var r = await api('/plugins/' + encodeURIComponent(name) + '/enable', { method: 'POST' });
+    toast(__('已启用: ','Enabled: ') + name);
+    state.kernel = await api('/kernel');
+    var s = await api('/settings');
+    state.disabledPlugins = s.disabled_plugins || [];
+    renderPlugins();
+  } catch(e) { toast(__('启用失败: ','Enable failed: ') + e.message, true) }
 }
 
 async function reloadPlugins() {

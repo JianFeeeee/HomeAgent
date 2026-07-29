@@ -455,6 +455,11 @@ func (p *Plugin) removePlugin(name string) (interface{}, error) {
 		return map[string]interface{}{"error": err.Error()}, nil
 	}
 
+	// 同步清理禁用表
+	if Reg != nil {
+		Reg.EnablePlugin(name)
+	}
+
 	return map[string]interface{}{
 		"status": "removed",
 		"name":   name,

@@ -27,6 +27,7 @@ import (
 	"gitcode.com/JianFeeeee/HomeAgent/internal/memory"
 	"gitcode.com/JianFeeeee/HomeAgent/internal/memory/text"
 	"gitcode.com/JianFeeeee/HomeAgent/internal/plugin"
+	sdk "gitcode.com/JianFeeeee/HomeAgent/internal/sdk"
 	"gitcode.com/JianFeeeee/HomeAgent/internal/skill"
 	"gitcode.com/JianFeeeee/HomeAgent/internal/supervisor"
 	"gitcode.com/JianFeeeee/HomeAgent/internal/tracker"
@@ -61,6 +62,7 @@ type Handler struct {
 	tracker        *tracker.Tracker
 	cfgReg         *internalConfig.ConfigRegistry
 	pluginReg      *plugin.Registry
+	pluginMgr      sdk.PluginManager
 	eventBus       *events.Bus
 	statusProvider agentCore.StatusProvider
 	providerMgr    *agentAPI.ProviderManager
@@ -101,6 +103,8 @@ type termState struct {
 	Uptime    string `json:"uptime"`
 	created   time.Time
 }
+
+func (h *Handler) SetPluginMgr(mgr sdk.PluginManager) { h.pluginMgr = mgr }
 
 const maxChatHistory = 200
 const maxCmdHistory = 100
@@ -1106,12 +1110,17 @@ func (h *Handler) handleSettings(w http.ResponseWriter, r *http.Request) {
 				plugins = append(plugins, "plugin."+p)
 			}
 		}
+		var disabledPlugins []sdk.DisabledPluginInfo
+		if h.pluginMgr != nil {
+			disabledPlugins = h.pluginMgr.ListDisabledPlugins()
+		}
 		sort.Strings(plugins)
 		writeJSON(w, http.StatusOK, map[string]interface{}{
-			"settings":    values,
-			"meta":        meta,
-			"plugins":     plugins,
-			"plugin_meta": pm,
+			"settings":         values,
+			"meta":             meta,
+			"plugins":          plugins,
+			"plugin_meta":      pm,
+			"disabled_plugins": disabledPlugins,
 		})
 	case http.MethodPut:
 		var body struct {
@@ -1417,6 +1426,15 @@ func (h *Handler) handlePluginByID(w http.ResponseWriter, r *http.Request) {
 	path := strings.TrimPrefix(r.URL.Path, "/api/v1/plugins/")
 	path = strings.TrimSuffix(path, "/")
 
+	if path == "disabled" && r.Method == http.MethodGet {
+		if h.pluginMgr == nil {
+			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "plugin manager not available"})
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]interface{}{"disabled": h.pluginMgr.ListDisabledPlugins()})
+		return
+	}
+
 	if path == "reload" && r.Method == http.MethodPost {
 		if h.pluginReg == nil {
 			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "plugin registry not available"})
@@ -1434,6 +1452,38 @@ func (h *Handler) handlePluginByID(w http.ResponseWriter, r *http.Request) {
 		}
 		writeJSON(w, http.StatusOK, map[string]string{"status": "reloaded"})
 		return
+	}
+
+	if idx := strings.LastIndex(path, "/"); idx > 0 {
+		name := path[:idx]
+		action := path[idx+1:]
+		if r.Method == http.MethodPost {
+			switch action {
+			case "disable":
+				if h.pluginMgr == nil {
+					writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "plugin manager not available"})
+					return
+				}
+				if err := h.pluginMgr.DisablePlugin(name, "webui"); err != nil {
+					writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+					return
+				}
+				writeJSON(w, http.StatusOK, map[string]string{"status": "disabled"})
+				return
+
+			case "enable":
+				if h.pluginMgr == nil {
+					writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "plugin manager not available"})
+					return
+				}
+				if err := h.pluginMgr.EnablePlugin(name); err != nil {
+					writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+					return
+				}
+				writeJSON(w, http.StatusOK, map[string]string{"status": "enabled"})
+				return
+			}
+		}
 	}
 
 	switch r.Method {
