@@ -82,7 +82,7 @@ func TestContextToDoc(t *testing.T) {
 		{Timestamp: time.Now(), Source: "user", Content: "特别是Go语言", Response: "Go很棒"},
 	}
 
-	doc, err := s.ContextToDoc("test", entries, nil, nil, nil)
+	doc, err := s.ContextToDoc("test", entries, nil, nil, nil, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -178,7 +178,7 @@ func TestSummarizeEntries(t *testing.T) {
 		{Source: "user", Content: "今天天气如何"},
 		{Source: "user", Content: "明天会下雨吗"},
 	}
-	summary := summarizeEntries(entries, func(s string) string { return s }, nil)
+	summary := summarizeEntries(entries, func(s string) string { return s }, nil, nil)
 	if summary == "" {
 		t.Error("summary should not be empty")
 	}
@@ -198,7 +198,7 @@ func TestExtractTags(t *testing.T) {
 	entries := []ContextEntry{
 		{Content: "我喜欢喝咖啡和编程"},
 	}
-	tags := extractTags(entries, func(s string) string { return s }, nil)
+	tags := extractTags(entries, func(s string) string { return s }, nil, nil)
 	if len(tags) == 0 {
 		t.Error("should extract tags")
 	}
@@ -384,7 +384,7 @@ func TestSummarizeEntriesWithToolCleanFn(t *testing.T) {
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			summary := summarizeEntries([]ContextEntry{entry}, func(s string) string { return s }, tc.toolCleanFn)
+			summary := summarizeEntries([]ContextEntry{entry}, func(s string) string { return s }, tc.toolCleanFn, nil)
 			for _, w := range tc.wantTopics {
 				if !contains(summary, w) {
 					t.Errorf("summary should contain %q, got: %s", w, summary)
@@ -410,7 +410,7 @@ func TestExtractTagsWithToolCleanFn(t *testing.T) {
 	}
 
 	// toolCleanFn 返回 "" → NoMemory，工具输出被跳过
-	tagsSkip := extractTags(entries, func(s string) string { return s }, func(name, output string) string { return "" })
+	tagsSkip := extractTags(entries, func(s string) string { return s }, func(name, output string) string { return "" }, nil)
 	for _, tag := range tagsSkip {
 		if tag == "编程" || tag == "咖啡" {
 			t.Errorf("NoMemory tool should not contribute keywords, got tag: %s", tag)
@@ -418,7 +418,7 @@ func TestExtractTagsWithToolCleanFn(t *testing.T) {
 	}
 
 	// toolCleanFn 返回清洗文本 → 用清洗后内容提取关键词
-	tagsClean := extractTags(entries, func(s string) string { return s }, func(name, output string) string { return "咖啡 编程" })
+	tagsClean := extractTags(entries, func(s string) string { return s }, func(name, output string) string { return "咖啡 编程" }, nil)
 	found := false
 	for _, tag := range tagsClean {
 		if tag == "编程" {
@@ -456,7 +456,7 @@ func TestContextToDocContentPreservesRawToolOutput(t *testing.T) {
 	cleaner := func(name, output string) string {
 		return "天气 温度"
 	}
-	doc, err := s.ContextToDoc("test", entries, nil, nil, cleaner)
+	doc, err := s.ContextToDoc("test", entries, nil, nil, cleaner, nil)
 	if err != nil {
 		t.Fatal(err)
 	}

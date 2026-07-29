@@ -72,7 +72,7 @@ func (p *Plugin) Name() string { return p.name }
 func (p *Plugin) Start(s *sdk.PluginSDK) error {
 	s.SetAutoRestart(true)
 
-	s.RegisterOutputChannel("cli", 1, "CLI 终端", func(args map[string]interface{}) (interface{}, error) {
+	s.RegisterOutputChannel("cli", 1, "CLI 终端", sdk.ChannelDef{}, func(args map[string]interface{}) (interface{}, error) {
 		payload, _ := args["payload"].(string)
 		if payload != "" {
 			fmt.Println(payload)

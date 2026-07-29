@@ -157,7 +157,7 @@ func (p *Plugin) Name() string { return p.name }
 func (p *Plugin) Start(s *sdk.PluginSDK) error {
 	s.SetAutoRestart(true)
 
-	s.RegisterOutputChannel("webui", 1, "Web 控制台", func(args map[string]interface{}) (interface{}, error) {
+	s.RegisterOutputChannel("webui", 1, "Web 控制台", sdk.ChannelDef{}, func(args map[string]interface{}) (interface{}, error) {
 		payload, _ := args["payload"].(string)
 		if payload != "" {
 			p.evBus.Publish(&events.Event{

@@ -23,8 +23,8 @@ func TestCutExact(t *testing.T) {
 		{
 			name: "chinese_sentence",
 			text: "今天天气怎么样",
-			min:  2,
-			not:  nil,
+			min:  1, // "怎么样" 已加入停用词表
+			not:  []string{"怎么样"},
 		},
 		{
 			name: "stop_words_removed",
@@ -47,8 +47,8 @@ func TestCutExact(t *testing.T) {
 		{
 			name: "qq_conversation",
 			text: "今天天气怎么样 → 今天天气很好",
-			min:  2,
-			not:  nil,
+			min:  1, // "怎么样" "很" 已加入停用词表
+			not:  []string{"怎么样", "很好", "很"},
 		},
 		{
 			name: "all_stop_words",

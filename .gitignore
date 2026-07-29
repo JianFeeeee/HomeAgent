@@ -21,3 +21,11 @@ login.json
 cmd/gui/node_modules/
 cmd/gui/dist/
 
+.gopath/
+
+# SDK 工具链 — 核心仓不追踪
+third_party/homeagent-sdk/bin/
+third_party/homeagent-sdk/tools/
+third_party/homeagent-sdk/package/
+third_party/homeagent-sdk/.gitignore
+third_party/homeagent-sdk/README*

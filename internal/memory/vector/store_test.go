@@ -149,7 +149,7 @@ func TestStoreInsertAndSearch(t *testing.T) {
 func TestStoreRemove(t *testing.T) {
 	s := NewStore()
 	v := NewTFIDFVectorizer(NGramTokenizer(1))
-	v.Train([]string{"a"})
+	v.Train([]string{"hello world", "hello a", "foo bar", "baz qux", "test doc"})
 
 	s.Insert("1", "a", v.Vectorize("a"), nil)
 	s.Insert("2", "a", v.Vectorize("a"), nil)

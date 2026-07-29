@@ -15,6 +15,10 @@ import (
 	"gitcode.com/JianFeeeee/HomeAgent/internal/memory/vector"
 )
 
+// ChannelCleaner 按事件来源查找输入通道的 Cleaner 函数。
+// 返回 nil 表示不使用额外清洗。
+type ChannelCleaner func(source string) func(string) string
+
 // Doc — 记忆文档：由上下文提炼而来
 type Doc struct {
 	ID          string            `json:"id"`
@@ -128,7 +132,7 @@ func (s *Store) Insert(doc *Doc) error {
 // toolCleanFn 可选，func(name, output string) string，按工具名对输出进行过滤/清洗：
 //   - 返回 "" → 跳过该工具输出（NoMemory）
 //   - 返回清洗后文本 → 用于计算层（Cleaner），原文不受影响
-func (s *Store) ContextToDoc(source string, entries []ContextEntry, vec vector.Vectorizer, cleanFn func(string) string, toolCleanFn func(name, output string) string) (*Doc, error) {
+func (s *Store) ContextToDoc(source string, entries []ContextEntry, vec vector.Vectorizer, cleanFn func(string) string, toolCleanFn func(name, output string) string, channelCleaner ChannelCleaner) (*Doc, error) {
 	if len(entries) == 0 {
 		return nil, nil
 	}
@@ -151,9 +155,9 @@ func (s *Store) ContextToDoc(source string, entries []ContextEntry, vec vector.V
 	content := strings.Join(parts, "\n")
 	contentHash := simpleHash(content)
 
-	summary := summarizeEntries(entries, cleanFn, toolCleanFn)
-	tags := extractTags(entries, cleanFn, toolCleanFn)
-	entities := extractEntities(entries, cleanFn, toolCleanFn)
+	summary := summarizeEntries(entries, cleanFn, toolCleanFn, channelCleaner)
+	tags := extractTags(entries, cleanFn, toolCleanFn, channelCleaner)
+	entities := extractEntities(entries, cleanFn, toolCleanFn, channelCleaner)
 
 	s.mu.Lock()
 
@@ -441,7 +445,7 @@ type ContextEntry struct {
 	ToolResults []ToolResultItem
 }
 
-func summarizeEntries(entries []ContextEntry, cleanText func(string) string, toolCleanFn func(name, output string) string) string {
+func summarizeEntries(entries []ContextEntry, cleanText func(string) string, toolCleanFn func(name, output string) string, channelCleaner ChannelCleaner) string {
 	if len(entries) == 0 {
 		return ""
 	}
@@ -449,7 +453,13 @@ func summarizeEntries(entries []ContextEntry, cleanText func(string) string, too
 	var topics []string
 	for _, e := range entries {
 		sources[e.Source]++
-		words := memory.ExtractKeywords(cleanText(e.Content))
+		content := e.Content
+		if channelCleaner != nil {
+			if c := channelCleaner(e.Source); c != nil {
+				content = c(content)
+			}
+		}
+		words := memory.ExtractKeywords(cleanText(content))
 		topics = append(topics, words...)
 		for _, tr := range e.ToolResults {
 			out := tr.Output
@@ -490,10 +500,16 @@ func summarizeEntries(entries []ContextEntry, cleanText func(string) string, too
 	return summary
 }
 
-func extractTags(entries []ContextEntry, cleanText func(string) string, toolCleanFn func(name, output string) string) []string {
+func extractTags(entries []ContextEntry, cleanText func(string) string, toolCleanFn func(name, output string) string, channelCleaner ChannelCleaner) []string {
 	tagSet := make(map[string]bool)
 	for _, e := range entries {
-		for _, kw := range memory.ExtractKeywords(cleanText(e.Content)) {
+		content := e.Content
+		if channelCleaner != nil {
+			if c := channelCleaner(e.Source); c != nil {
+				content = c(content)
+			}
+		}
+		for _, kw := range memory.ExtractKeywords(cleanText(content)) {
 			tagSet[kw] = true
 		}
 		for _, tr := range e.ToolResults {
@@ -520,11 +536,17 @@ func extractTags(entries []ContextEntry, cleanText func(string) string, toolClea
 	return tags
 }
 
-func extractEntities(entries []ContextEntry, cleanText func(string) string, toolCleanFn func(name, output string) string) []string {
+func extractEntities(entries []ContextEntry, cleanText func(string) string, toolCleanFn func(name, output string) string, channelCleaner ChannelCleaner) []string {
 	var entities []string
 	seen := make(map[string]bool)
 	for _, e := range entries {
-		for _, kw := range memory.ExtractKeywords(cleanText(e.Content)) {
+		content := e.Content
+		if channelCleaner != nil {
+			if c := channelCleaner(e.Source); c != nil {
+				content = c(content)
+			}
+		}
+		for _, kw := range memory.ExtractKeywords(cleanText(content)) {
 			if len(kw) >= 2 && !seen[kw] {
 				seen[kw] = true
 				entities = append(entities, kw)
