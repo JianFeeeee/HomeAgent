@@ -29,3 +29,4 @@ third_party/homeagent-sdk/tools/
 third_party/homeagent-sdk/package/
 third_party/homeagent-sdk/.gitignore
 third_party/homeagent-sdk/README*
+third_party/homeagent-sdk/example/
