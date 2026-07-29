@@ -359,6 +359,41 @@ s.InjectInterruptText(source, channel, text string)
 s.InjectTextNoMemory(source, channel, text string)
 ```
 
+#### 输入通道注册 — 声明外部消息源
+
+```go
+s.RegisterInputChannel("qq", sdk.ChannelDef{
+    NoMemory: true,
+    Cleaner: func(text string) string {
+        return strings.TrimSpace(text)
+    },
+})
+```
+
+`ChannelDef` 控制通道在记忆计算层的行为：
+
+| 字段 | 默认 | 说明 |
+|------|------|------|
+| `NoMemory` | `false` | 通道输入/输出不参与向量化/关键词/蒸馏，原文保留 |
+| `Cleaner` | `nil` | `func(string) string` 计算层过滤（不改原文） |
+
+噪声源通道（QQ 群消息、RSS 等）建议 `NoMemory: true`。
+
+#### 输出通道注册 — 声明输出目的地
+
+```go
+s.RegisterOutputChannel("email", 1, "邮件发送", sdk.ChannelDef{
+    NoMemory: true,
+}, func(args map[string]interface{}) (interface{}, error) {
+    to, _ := args["to"].(string)
+    subject, _ := args["subject"].(string)
+    body, _ := args["body"].(string)
+    return map[string]interface{}{"status": "sent"}, nil
+})
+```
+
+参数：`name`（路由名）、`caps`（1=文本/2=富文本/4=文件/8=图片）、`desc`、`def`（ChannelDef）、`handler`（处理函数）。
+
 #### 事件订阅
 
 ```go
@@ -601,7 +636,42 @@ import (
 
 <img src="../../assets/branding/mascot-xiaozhai.webp" width="20" style="border-radius:50%;vertical-align:middle"> :
 
-## 六、示例插件参考
+## 六、插件管理
+
+### CLI 命令
+
+```bash
+/plugin list                  # 列出所有插件及状态（已加载/已禁用）
+/plugin disable <name>        # 禁用插件（立即生效，不再接收输入）
+/plugin enable <name>         # 启用插件（重启后恢复加载）
+/plugin reload                # 重载所有插件
+```
+
+### WebUI
+
+Dashboard 插件列表的操作列提供「禁用/启用」按钮。禁用 WebUI 自身时会弹出确认对话框，防止误操作。
+
+### 内置插件 API
+
+```go
+pmgr := s.PluginMgr()
+pmgr.DisablePlugin("qq", "admin")       // 禁用
+pmgr.EnablePlugin("qq")                  // 启用
+list := pmgr.ListDisabledPlugins()       // 列出已禁用插件
+loaded := pmgr.ListLoadedPlugins()       // 列出已加载插件
+pmgr.IsPluginDisabled("qq")              // 检查是否已禁用
+pmgr.ReloadPlugins()                     // 重载所有插件
+```
+
+内部机制：禁用记录存储在 SQLite `disabled_plugins` 表（`name`, `disabled_at`, `disabled_by`），禁用立即生效（插件不再接收输入），完全卸载需重启内核。
+
+> **注意**：`PluginMgr()` 仅内置插件可用，外部动态插件无法直接调用。
+
+---
+
+<img src="../../assets/branding/mascot-xiaozhai.webp" width="20" style="border-radius:50%;vertical-align:middle"> :
+
+## 七、示例插件参考
 
 ### SDK 仓库示例（`homeagent-sdk/example/`）
 
