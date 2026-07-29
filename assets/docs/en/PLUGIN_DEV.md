@@ -361,6 +361,41 @@ s.InjectInterruptText(source, channel, text string)
 s.InjectTextNoMemory(source, channel, text string)
 ```
 
+#### Input Channel Registration — Declare External Message Sources
+
+```go
+s.RegisterInputChannel("qq", sdk.ChannelDef{
+    NoMemory: true,
+    Cleaner: func(text string) string {
+        return strings.TrimSpace(text)
+    },
+})
+```
+
+`ChannelDef` controls channel behavior in the memory computation layer:
+
+| Field | Default | Description |
+|-------|---------|-------------|
+| `NoMemory` | `false` | Channel input/output skips vectorization/keyword/distillation; original text preserved in context |
+| `Cleaner` | `nil` | `func(string) string` computation filter (does not modify original text) |
+
+Noisy sources (QQ group messages, RSS feeds, etc.) should set `NoMemory: true`.
+
+#### Output Channel Registration — Declare Output Destinations
+
+```go
+s.RegisterOutputChannel("email", 1, "Send Email", sdk.ChannelDef{
+    NoMemory: true,
+}, func(args map[string]interface{}) (interface{}, error) {
+    to, _ := args["to"].(string)
+    subject, _ := args["subject"].(string)
+    body, _ := args["body"].(string)
+    return map[string]interface{}{"status": "sent"}, nil
+})
+```
+
+Parameters: `name` (route key), `caps` (1=text/2=rich/4=file/8=image), `desc`, `def` (ChannelDef), `handler` (callback).
+
 #### Event Subscription
 
 ```go
@@ -603,7 +638,42 @@ import (
 
 <img src="../../assets/branding/mascot-xiaozhai.webp" width="20" style="border-radius:50%;vertical-align:middle"> :
 
-## 6. Example Plugin Reference
+## 6. Plugin Management
+
+### CLI Commands
+
+```bash
+/plugin list                  # List all plugins with status (loaded/disabled)
+/plugin disable <name>        # Disable plugin (immediate, no longer receives input)
+/plugin enable <name>         # Enable plugin (restored after restart)
+/plugin reload                # Reload all plugins
+```
+
+### WebUI
+
+Dashboard plugin list provides "Disable/Enable" buttons in the actions column. Disabling WebUI itself shows a confirmation dialog to prevent misoperation.
+
+### Built-in Plugin API
+
+```go
+pmgr := s.PluginMgr()
+pmgr.DisablePlugin("qq", "admin")       // Disable
+pmgr.EnablePlugin("qq")                  // Enable
+list := pmgr.ListDisabledPlugins()       // List disabled plugins
+loaded := pmgr.ListLoadedPlugins()       // List loaded plugins
+pmgr.IsPluginDisabled("qq")              // Check if disabled
+pmgr.ReloadPlugins()                     // Reload all plugins
+```
+
+Internal: records are stored in SQLite `disabled_plugins` table (`name`, `disabled_at`, `disabled_by`). Disabling takes effect immediately (plugin stops receiving input); full removal requires a restart.
+
+> **Note**: `PluginMgr()` is only available to built-in plugins; external dynamic plugins cannot call it directly.
+
+---
+
+<img src="../../assets/branding/mascot-xiaozhai.webp" width="20" style="border-radius:50%;vertical-align:middle"> :
+
+## 7. Example Plugin Reference
 
 ### SDK Repository Examples (`homeagent-sdk/example/`)
 
