@@ -171,7 +171,7 @@ External plugin development: see [homeagent-sdk](https://gitcode.com/JianFeeeee/
 
 ## Project Status
 
-**v0.7.2** — Core is functional, plugin system and SDK are ready. 11 built-in plugins. External plugin development via [homeagent-sdk](https://gitcode.com/JianFeeeee/homeagent-sdk) repo using `plugindev` toolchain. Output channel system, restricted external plugin API, and EventAgentLLMChain event are live.
+**v0.8.0** — Core is functional, plugin system enhanced. 20+ built-in plugins. External plugin development via [homeagent-sdk](https://gitcode.com/JianFeeeee/homeagent-sdk) repo. Added input channel `NoMemory`/`Cleaner`, `ChannelDef`, plugin disable/enable system (CLI + WebUI), `plugindev` toolchain C ABI `ChannelDef` support.
 
 ## Documentation
 

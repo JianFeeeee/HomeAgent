@@ -171,7 +171,7 @@ internal/
 
 ## 项目状态
 
-**v0.7.2** — 核心可用，插件系统和 SDK 已就绪。内置 11 个插件，外部插件开发见 [homeagent-sdk](https://gitcode.com/JianFeeeee/homeagent-sdk) 仓库，使用 `plugindev` 工具链。输出通道系统、受限外部插件 API、EventAgentLLMChain 事件已上线。
+**v0.8.0** — 核心可用，插件系统增强。内置 20+ 插件，外部插件开发见 [homeagent-sdk](https://gitcode.com/JianFeeeee/homeagent-sdk) 仓库。新增输入通道 `NoMemory`/`Cleaner`、`ChannelDef`、插件禁用/启用系统（CLI + WebUI），`plugindev` 工具链完成 C ABI `ChannelDef` 传递。
 
 ## 文档
 
