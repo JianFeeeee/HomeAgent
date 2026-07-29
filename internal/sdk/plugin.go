@@ -51,12 +51,30 @@ type OutputChannelRegistrar = pubsdk.OutputChannelRegistrar
 type InputChannelRegistrar = pubsdk.InputChannelRegistrar
 type ChannelDef = pubsdk.ChannelDef
 
+type DisabledPluginInfo struct {
+	Name       string `json:"name"`
+	DisabledAt string `json:"disabled_at"`
+	DisabledBy string `json:"disabled_by"`
+}
+
+type PluginManager interface {
+	ListLoadedPlugins() []string
+	ListDisabledPlugins() []DisabledPluginInfo
+	IsPluginDisabled(name string) bool
+	DisablePlugin(name, by string) error
+	EnablePlugin(name string) error
+	ReloadPlugins() (string, error)
+}
+
 type PluginSDK struct {
 	*pubsdk.PluginSDK
-	iom      *agentIO.IOManager
-	eventBus *events.Bus
-	logger   *log.Logger
+	iom       *agentIO.IOManager
+	eventBus  *events.Bus
+	logger    *log.Logger
+	pluginMgr PluginManager
 }
+
+func (s *PluginSDK) PluginMgr() PluginManager { return s.pluginMgr }
 
 // ioAdapter 桥接 IOManager 到公共 SDK 的 IOInjector 接口，
 // 确保外部插件通过 s.InjectText() 等方法的调用能被路由到内核 IO 层。
@@ -95,6 +113,7 @@ type SDKConfig struct {
 	RegAPI     APIRegistrar
 	RegOutput  OutputChannelRegistrar
 	RegInput   InputChannelRegistrar
+	PluginMgr  PluginManager
 }
 
 func New(name string, cfg SDKConfig) *PluginSDK {
@@ -115,6 +134,7 @@ func New(name string, cfg SDKConfig) *PluginSDK {
 		iom:       cfg.IOManager,
 		eventBus:  cfg.EventBus,
 		logger:    log.Default(),
+		pluginMgr: cfg.PluginMgr,
 	}
 }
 

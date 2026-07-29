@@ -22,7 +22,7 @@ import (
 
 type NativeFactory func(name string, config map[string]interface{}) (sdk.Plugin, error)
 
-// PluginMeta 插件显示名称元数据。
+// PluginMeta 插件显示名称元数据，来源于 plg.json / RegisterPluginMeta。
 type PluginMeta struct {
 	NameZh string `json:"name_zh"`
 	NameEn string `json:"name_en"`
@@ -189,6 +189,7 @@ func (r *Registry) buildSDK(name string) *sdk.PluginSDK {
 		RegAPI:     regAPI,
 		RegOutput:  regOutput,
 		RegInput:   regInput,
+		PluginMgr:  r,
 	})
 }
 
@@ -281,11 +282,7 @@ func (r *Registry) isDisabled(name string) bool {
 	if r.cfgReg == nil {
 		return false
 	}
-	v, err := r.cfgReg.PluginConfig(name).Get("disabled")
-	if err != nil || v == nil {
-		return false
-	}
-	return fmt.Sprint(v) == "true"
+	return r.cfgReg.IsPluginDisabled(name)
 }
 
 func (r *Registry) loadOne(plgDir, name string) bool {
@@ -437,7 +434,7 @@ func (r *Registry) IsDisabled(name string) bool {
 
 func (r *Registry) Enable(name string) error {
 	if r.cfgReg != nil {
-		r.cfgReg.PluginConfig(name).Set("disabled", "false")
+		r.cfgReg.RemoveDisabledPlugin(name)
 	}
 	r.mu.Lock()
 	delete(r.knownDisabled, name)
@@ -473,11 +470,73 @@ func (r *Registry) Disable(name string) error {
 	}
 
 	if r.cfgReg != nil {
-		r.cfgReg.PluginConfig(name).Set("disabled", "true")
+		r.cfgReg.AddDisabledPlugin(name, "system")
 	}
 	log.Printf("[plugin] disabled: %s", name)
 	return nil
 }
+
+// ---- PluginManager interface ----
+
+func (r *Registry) ListLoadedPlugins() []string { return r.List() }
+
+func (r *Registry) ListDisabledPlugins() []sdk.DisabledPluginInfo {
+	if r.cfgReg == nil {
+		return nil
+	}
+	list, err := r.cfgReg.ListDisabledPlugins()
+	if err != nil {
+		return nil
+	}
+	result := make([]sdk.DisabledPluginInfo, len(list))
+	for i, v := range list {
+		result[i] = sdk.DisabledPluginInfo(v)
+	}
+	return result
+}
+
+func (r *Registry) IsPluginDisabled(name string) bool { return r.isDisabled(name) }
+
+func (r *Registry) DisablePlugin(name, by string) error {
+	// Check not disabling self if running
+	if r.cfgReg != nil {
+		// If already disabled, no-op
+		if r.cfgReg.IsPluginDisabled(name) {
+			return fmt.Errorf("plugin %s already disabled", name)
+		}
+	}
+
+	r.mu.Lock()
+	p, ok := r.plugins[name]
+	if ok {
+		if err := p.Stop(); err != nil {
+			log.Printf("[plugin] stop %s for disable: %v", name, err)
+		}
+		delete(r.plugins, name)
+		for i, inst := range r.instances {
+			if inst.Name() == name {
+				r.instances = append(r.instances[:i], r.instances[i+1:]...)
+				break
+			}
+		}
+	}
+	r.knownDisabled[name] = true
+	r.mu.Unlock()
+
+	if r.toolCleaner != nil {
+		r.toolCleaner.UnregisterPluginTools(name)
+	}
+
+	if r.cfgReg != nil {
+		r.cfgReg.AddDisabledPlugin(name, by)
+	}
+	log.Printf("[plugin] disabled: %s (by %s)", name, by)
+	return nil
+}
+
+func (r *Registry) EnablePlugin(name string) error { return r.Enable(name) }
+
+func (r *Registry) ReloadPlugins() (string, error) { return r.Reload(r.plgDir) }
 
 // ListKnown 返回所有已知插件（已加载 + 已禁用 + 已安装但未加载）。
 func (r *Registry) ListKnown() []string {
