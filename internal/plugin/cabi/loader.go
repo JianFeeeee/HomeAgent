@@ -320,7 +320,14 @@ func go_core_dispatch(methodID C.int, ctx unsafe.Pointer, s1, s2, s3 *C.char, i1
 	case 3: // CORE_REGISTER_OUTPUT_CH
 		pid := pluginID
 		chName := a1
-		s.RegisterOutputChannel(chName, n1, a2, sdk.ChannelDef{}, func(args map[string]interface{}) (interface{}, error) {
+		chDef := sdk.ChannelDef{}
+		if a3 != "" {
+			var def sdk.ChannelDef
+			if err := json.Unmarshal([]byte(a3), &def); err == nil {
+				chDef = def
+			}
+		}
+		s.RegisterOutputChannel(chName, n1, a2, chDef, func(args map[string]interface{}) (interface{}, error) {
 			// Output is async: return immediately, send in background
 			// to avoid nested cgo calls (cgo within cgo can crash)
 			go func() {
