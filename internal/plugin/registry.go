@@ -121,6 +121,7 @@ type channelDevice struct {
 	desc    string
 	caps    agentIO.OutputCapability
 	handler sdk.ToolHandler
+	chDef   agentIO.ChannelDef
 }
 
 func (d *channelDevice) Name() string              { return d.name }
@@ -133,6 +134,7 @@ func (d *channelDevice) Tools() []agentIO.ToolDef  { return nil }
 func (d *channelDevice) Execute(tool string, args map[string]interface{}) (interface{}, error) {
 	return d.handler(args)
 }
+func (d *channelDevice) ChannelDef() agentIO.ChannelDef { return d.chDef }
 
 func (r *Registry) buildSDK(name string) *sdk.PluginSDK {
 	sett := sdk.NewSettings(name, r.cfgReg)
@@ -152,7 +154,7 @@ func (r *Registry) buildSDK(name string) *sdk.PluginSDK {
 		regAPI = func(name string) error { return nil }
 	}
 
-	regOutput := func(chName string, caps int, desc string, handler sdk.ToolHandler) error {
+	regOutput := func(chName string, caps int, desc string, def sdk.ChannelDef, handler sdk.ToolHandler) error {
 		if r.iom == nil {
 			return nil
 		}
@@ -161,7 +163,16 @@ func (r *Registry) buildSDK(name string) *sdk.PluginSDK {
 			caps:    agentIO.OutputCapability(caps),
 			desc:    desc,
 			handler: handler,
+			chDef:   agentIO.ChannelDef(def),
 		})
+	}
+
+	regInput := func(name string, def sdk.ChannelDef) error {
+		if r.iom == nil {
+			return nil
+		}
+		r.iom.RegisterInputChannel(name, agentIO.ChannelDef(def))
+		return nil
 	}
 
 	return sdk.New(name, sdk.SDKConfig{
@@ -177,6 +188,7 @@ func (r *Registry) buildSDK(name string) *sdk.PluginSDK {
 		RegStage:   regStage,
 		RegAPI:     regAPI,
 		RegOutput:  regOutput,
+		RegInput:   regInput,
 	})
 }
 

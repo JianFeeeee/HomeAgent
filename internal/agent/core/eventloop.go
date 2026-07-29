@@ -281,6 +281,11 @@ func (a *Agent) processTextInput(evt *agentIO.InputEvent, input string) {
 	if v, ok := evt.Payload["no_memory"].(bool); ok {
 		noMemory = v
 	}
+	if !noMemory && a.io != nil {
+		if chDef, ok := a.io.GetInputChannelDef(evt.Source); ok && chDef.NoMemory {
+			noMemory = true
+		}
+	}
 
 	stageCtx := a.stageCtxFromInput(input, evt.Source, "")
 	stageCtx.Extra["input_source"] = evt.Source
@@ -297,12 +302,20 @@ func (a *Agent) processTextInput(evt *agentIO.InputEvent, input string) {
 
 	input = stageCtx.RawMessage
 
+	// 计算层用的清洗文本（不改原文）：通道 Cleaner 提取语义内容后用于向量化/提关键词
+	cleanInput := input
+	if a.io != nil {
+		if chDef, ok := a.io.GetInputChannelDef(evt.Source); ok && chDef.Cleaner != nil {
+			cleanInput = chDef.Cleaner(input)
+		}
+	}
+
 	a.publishEvent(events.EventRawInput, map[string]interface{}{
 		"content": input,
 		"source":  evt.Source,
 	})
 
-	archived := a.context.Prune(input, a.maxContextSize-1, a.docStore)
+	archived := a.context.Prune(cleanInput, a.maxContextSize-1, a.docStore)
 	if archived > 0 {
 		log.Printf("[agent] pruned %d low-relevance events to document memory", archived)
 	}
@@ -328,7 +341,7 @@ func (a *Agent) processTextInput(evt *agentIO.InputEvent, input string) {
 	a.context.Append(ContextEvent{
 		Timestamp:   time.Now(),
 		Source:      "agent",
-		Input:       input,
+		Input:       cleanInput,
 		Response:    response,
 		ToolsUsed:   toolsUsed,
 		ToolResults: toolResults,
@@ -337,7 +350,7 @@ func (a *Agent) processTextInput(evt *agentIO.InputEvent, input string) {
 	a.emitResponse(evt, response)
 
 	if !stageCtx.NoMemory {
-		a.emitMemoryCandidate(evt.Source, input, response, toolResults, toolsUsed)
+		a.emitMemoryCandidate(evt.Source, cleanInput, response, toolResults, toolsUsed)
 	}
 }
 

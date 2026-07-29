@@ -271,19 +271,31 @@ func (e *StaticEmbedder) tokenize(text string) []string {
 	if e.jieba == nil {
 		return nil
 	}
-	words := e.jieba.Cut(text, false)
+	tagged := e.jieba.Tag(text)
 	var result []string
 	seen := make(map[string]bool)
-	for _, w := range words {
-		w = strings.TrimSpace(w)
-		if w == "" || e.stopWords[w] || seen[w] {
+	for _, t := range tagged {
+		idx := strings.LastIndex(t, "/")
+		if idx < 0 {
 			continue
 		}
-		if utf8.RuneCountInString(w) < 2 {
+		word := t[:idx]
+		tag := t[idx+1:]
+		word = strings.TrimSpace(word)
+		if word == "" || seen[word] {
 			continue
 		}
-		seen[w] = true
-		result = append(result, w)
+		if e.stopWords[word] {
+			continue
+		}
+		if utf8.RuneCountInString(word) < 2 {
+			continue
+		}
+		if !contentPOS[tag] {
+			continue
+		}
+		seen[word] = true
+		result = append(result, word)
 	}
 	return result
 }

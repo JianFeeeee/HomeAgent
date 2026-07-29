@@ -22,6 +22,7 @@ func (d *mockOutputDevice) Tools() []agentIO.ToolDef              { return d.too
 func (d *mockOutputDevice) Start() error                          { return nil }
 func (d *mockOutputDevice) Stop() error                           { return nil }
 func (d *mockOutputDevice) OutputCapabilities() agentIO.OutputCapability { return d.caps }
+func (d *mockOutputDevice) ChannelDef() agentIO.ChannelDef { return agentIO.ChannelDef{} }
 func (d *mockOutputDevice) Execute(tool string, args map[string]interface{}) (interface{}, error) {
 	if d.toolFn != nil {
 		return d.toolFn(tool, args)

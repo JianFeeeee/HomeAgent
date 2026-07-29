@@ -191,12 +191,18 @@ func (v *TFIDFVectorizer) Vectorize(text string) Vector {
 	vec := make(Vector)
 	for f, count := range tf {
 		tfNorm := count / maxTF
-		idf := 1.0
-		if v.totalDocs > 0 {
-			df := v.docFreq[f]
-			if df > 0 {
-				idf = math.Log(float64(v.totalDocs+1)/df+1) + 1
-			}
+		if v.totalDocs < 3 {
+			vec[f] = tfNorm
+			continue
+		}
+		df := v.docFreq[f]
+		if df <= 0 {
+			continue
+		}
+		// 平滑 IDF，高频词趋近 0，低频词趋近 log(N)
+		idf := math.Log(float64(v.totalDocs+1) / (df + 1))
+		if idf < 0.1 {
+			continue
 		}
 		vec[f] = tfNorm * idf
 	}
