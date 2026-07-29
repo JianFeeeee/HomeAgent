@@ -221,7 +221,7 @@ func (p *Plugin) handleBuiltin(conn net.Conn, line string, s *sdk.PluginSDK) boo
 	case "/settings":
 		p.cmdSettings(conn, parts)
 	case "/plugin":
-		p.cmdPlugin(conn, parts)
+		p.cmdPlugin(conn, parts, s)
 	case "/memory":
 		p.cmdMemory(conn, parts, s)
 	case "/knowledge":
@@ -244,9 +244,11 @@ func (p *Plugin) cmdHelp(conn net.Conn) {
   /settings                    列出所有配置
   /settings set <key> <val>    修改配置项
   /settings core.llm           按前缀筛选
-  /plugin list                 列出已安装插件
+  /plugin list                 列出所有插件
   /plugin install <url>        安装插件（需回环网络）
   /plugin remove <name>        卸载插件
+  /plugin disable <name>       禁用插件
+  /plugin enable <name>        启用插件
   /plugin info <name>          查看插件详情
   /memory query <关键词>        查询图记忆
   /knowledge                   列出知识库
@@ -347,26 +349,49 @@ func (p *Plugin) cmdSettings(conn net.Conn, parts []string) {
 
 // ======== /plugin ========
 
-func (p *Plugin) cmdPlugin(conn net.Conn, parts []string) {
+func (p *Plugin) cmdPlugin(conn net.Conn, parts []string, s *sdk.PluginSDK) {
 	if len(parts) < 2 {
-		writeLine(conn, map[string]interface{}{"type": "response", "content": "用法: /plugin list|install <url>|remove <name>|info <name>"})
+		writeLine(conn, map[string]interface{}{"type": "response", "content": "用法: /plugin list|install <url>|remove <name>|info <name>|disable <name>|enable <name>"})
 		return
 	}
 
+	pmgr := s.PluginMgr()
+
 	switch parts[1] {
 	case "list":
-		if pluginReg == nil {
-			writeLine(conn, map[string]interface{}{"type": "error", "error": "plugin registry not available"})
+		if pmgr == nil {
+			writeLine(conn, map[string]interface{}{"type": "error", "error": "plugin manager not available"})
 			return
 		}
-		names := pluginReg.List()
-		if len(names) == 0 {
-			writeLine(conn, map[string]interface{}{"type": "response", "content": "无已加载插件"})
+		names := pmgr.ListLoadedPlugins()
+		disabled := pmgr.ListDisabledPlugins()
+		disabledNames := make(map[string]bool)
+		for _, d := range disabled {
+			disabledNames[d.Name] = true
+		}
+		all := make(map[string]string)
+		for _, n := range names {
+			all[n] = "\033[32m已加载\033[0m"
+		}
+		for _, d := range disabled {
+			if _, ok := all[d.Name]; !ok {
+				all[d.Name] = "\033[31m已禁用\033[0m"
+			} else {
+				all[d.Name] = "\033[32m已加载\033[0m (禁用将在重启后生效)"
+			}
+		}
+		if len(all) == 0 {
+			writeLine(conn, map[string]interface{}{"type": "response", "content": "无插件"})
 			return
 		}
+		var lines []string
+		for name, status := range all {
+			lines = append(lines, fmt.Sprintf("  %s %s", name, status))
+		}
+		sort.Strings(lines)
 		writeLine(conn, map[string]interface{}{
 			"type":    "response",
-			"content": fmt.Sprintf("已加载插件 (%d):\n  %s", len(names), strings.Join(names, "\n  ")),
+			"content": fmt.Sprintf("插件 (%d):\n%s", len(all), strings.Join(lines, "\n")),
 		})
 
 	case "install":
@@ -394,6 +419,10 @@ func (p *Plugin) cmdPlugin(conn net.Conn, parts []string) {
 			writeLine(conn, map[string]interface{}{"type": "error", "error": err.Error()})
 			return
 		}
+		// 同步清理禁用表
+		if pmgr != nil {
+			pmgr.EnablePlugin(name)
+		}
 		writeLine(conn, map[string]interface{}{"type": "response", "content": fmt.Sprintf("插件 %s 已删除，执行 /plugin reload 生效", name)})
 
 	case "info":
@@ -407,24 +436,58 @@ func (p *Plugin) cmdPlugin(conn net.Conn, parts []string) {
 		}
 		plg := pluginReg.Get(parts[2])
 		if plg == nil {
-			writeLine(conn, map[string]interface{}{"type": "response", "content": fmt.Sprintf("插件 %q 未加载", parts[2])})
+			if pmgr != nil && pmgr.IsPluginDisabled(parts[2]) {
+				writeLine(conn, map[string]interface{}{"type": "response", "content": fmt.Sprintf("插件 %q 已禁用", parts[2])})
+				return
+			}
+			writeLine(conn, map[string]interface{}{"type": "response", "content": fmt.Sprintf("插件 %q 未安装", parts[2])})
 			return
 		}
 		writeLine(conn, map[string]interface{}{"type": "response", "content": fmt.Sprintf("名称: %s\n状态: 已加载", plg.Name())})
 
-	case "reload":
-		if pluginReg == nil {
-			writeLine(conn, map[string]interface{}{"type": "error", "error": "plugin registry not available"})
+	case "disable":
+		if len(parts) < 3 {
+			writeLine(conn, map[string]interface{}{"type": "response", "content": "用法: /plugin disable <name>"})
 			return
 		}
-		if _, err := pluginReg.Reload(pluginDir); err != nil {
+		if pmgr == nil {
+			writeLine(conn, map[string]interface{}{"type": "error", "error": "plugin manager not available"})
+			return
+		}
+		if err := pmgr.DisablePlugin(parts[2], "cli"); err != nil {
+			writeLine(conn, map[string]interface{}{"type": "error", "error": err.Error()})
+			return
+		}
+		writeLine(conn, map[string]interface{}{"type": "response", "content": fmt.Sprintf("插件 %s 已禁用", parts[2])})
+
+	case "enable":
+		if len(parts) < 3 {
+			writeLine(conn, map[string]interface{}{"type": "response", "content": "用法: /plugin enable <name>"})
+			return
+		}
+		if pmgr == nil {
+			writeLine(conn, map[string]interface{}{"type": "error", "error": "plugin manager not available"})
+			return
+		}
+		if err := pmgr.EnablePlugin(parts[2]); err != nil {
+			writeLine(conn, map[string]interface{}{"type": "error", "error": err.Error()})
+			return
+		}
+		writeLine(conn, map[string]interface{}{"type": "response", "content": fmt.Sprintf("插件 %s 已启用", parts[2])})
+
+	case "reload":
+		if pmgr == nil {
+			writeLine(conn, map[string]interface{}{"type": "error", "error": "plugin manager not available"})
+			return
+		}
+		if _, err := pmgr.ReloadPlugins(); err != nil {
 			writeLine(conn, map[string]interface{}{"type": "error", "error": err.Error()})
 			return
 		}
 		writeLine(conn, map[string]interface{}{"type": "response", "content": "插件已重载"})
 
 	default:
-		writeLine(conn, map[string]interface{}{"type": "response", "content": "未知: /plugin " + parts[1] + "。支持: list, install, remove, info, reload"})
+		writeLine(conn, map[string]interface{}{"type": "response", "content": "未知: /plugin " + parts[1] + "。支持: list, install, remove, info, disable, enable, reload"})
 	}
 }
 

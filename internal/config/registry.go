@@ -53,6 +53,58 @@ func (r *ConfigRegistry) initCoreTable() {
 		key   TEXT PRIMARY KEY,
 		value TEXT NOT NULL
 	)`)
+	r.db.Exec(`CREATE TABLE IF NOT EXISTS disabled_plugins (
+		name       TEXT PRIMARY KEY,
+		disabled_at TEXT NOT NULL,
+		disabled_by TEXT NOT NULL DEFAULT ''
+	)`)
+}
+
+func (r *ConfigRegistry) AddDisabledPlugin(name, by string) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	_, err := r.db.Exec(`INSERT OR REPLACE INTO disabled_plugins (name, disabled_at, disabled_by) VALUES (?, datetime('now'), ?)`, name, by)
+	return err
+}
+
+func (r *ConfigRegistry) RemoveDisabledPlugin(name string) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	_, err := r.db.Exec(`DELETE FROM disabled_plugins WHERE name = ?`, name)
+	return err
+}
+
+type DisabledPluginInfo struct {
+	Name       string `json:"name"`
+	DisabledAt string `json:"disabled_at"`
+	DisabledBy string `json:"disabled_by"`
+}
+
+func (r *ConfigRegistry) ListDisabledPlugins() ([]DisabledPluginInfo, error) {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	rows, err := r.db.Query(`SELECT name, disabled_at, disabled_by FROM disabled_plugins ORDER BY name`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var list []DisabledPluginInfo
+	for rows.Next() {
+		var info DisabledPluginInfo
+		if err := rows.Scan(&info.Name, &info.DisabledAt, &info.DisabledBy); err != nil {
+			return nil, err
+		}
+		list = append(list, info)
+	}
+	return list, rows.Err()
+}
+
+func (r *ConfigRegistry) IsPluginDisabled(name string) bool {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	var count int
+	r.db.QueryRow(`SELECT COUNT(*) FROM disabled_plugins WHERE name = ?`, name).Scan(&count)
+	return count > 0
 }
 
 func (r *ConfigRegistry) ensurePluginTable(name string) {

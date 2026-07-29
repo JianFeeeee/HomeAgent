@@ -195,6 +195,7 @@ func (p *Plugin) Start(s *sdk.PluginSDK) error {
 	})
 
 	h := NewHandler(p.sup, p.mem, p.sk, p.lua, p.cfg, p.iom, p.tm, p.ks, p.tr, p.cr, p.pr, p.evBus, p.statusProvider, p.providerMgr, p.baseAPIKey)
+	h.SetPluginMgr(s.PluginMgr())
 	p.handler = h
 	h.RegisterRoutes(p.mux)
 
