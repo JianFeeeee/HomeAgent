@@ -58,8 +58,8 @@ go build -o plugindev
 plugindev sdk list       # 列出已安装的 SDK 版本
 plugindev sdk current    # 显示当前使用的 SDK 版本
 plugindev sdk latest     # 显示最新可用版本
-plugindev sdk install v0.7.1  # 安装指定版本
-plugindev sdk use v0.7.1      # 切换使用版本
+plugindev sdk install v0.8.0  # 安装指定版本
+plugindev sdk use v0.8.0      # 切换使用版本
 plugindev sdk path       # 显示当前 SDK 路径
 ```
 

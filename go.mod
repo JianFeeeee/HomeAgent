@@ -12,6 +12,6 @@ require github.com/yanyiwu/gojieba v1.4.7
 
 require github.com/yalue/onnxruntime_go v1.13.0
 
-require gitcode.com/JianFeeeee/homeagent-sdk v0.7.2
+require gitcode.com/JianFeeeee/homeagent-sdk v0.8.0
 
 replace gitcode.com/JianFeeeee/homeagent-sdk => ./third_party/homeagent-sdk

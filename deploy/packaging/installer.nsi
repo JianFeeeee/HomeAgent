@@ -10,7 +10,7 @@
 
 !define PRODUCT_NAME "HomeAgent"
 !define PRODUCT_PUBLISHER "HomeAgent Team"
-!define PRODUCT_VERSION "0.7.1"
+!define PRODUCT_VERSION "0.8.0"
 
 !if "${VARIANT}" == "full"
   !define PRODUCT_DISPLAY_NAME "HomeAgent 完整版"

@@ -8,7 +8,7 @@ GOCACHE=/tmp/gocache
 export GOPATH=/tmp/gopath
 BUILD_DIR=build
 PROJECT_ROOT := $(CURDIR)
-VERSION ?= $(shell git describe --tags --dirty 2>/dev/null || echo "0.7.2")
+VERSION ?= $(shell git describe --tags --dirty 2>/dev/null || echo "0.8.0")
 COMMIT ?= $(shell git rev-parse --short HEAD 2>/dev/null || echo "unknown")
 BUILD_TIME ?= $(shell date -u '+%Y-%m-%dT%H:%M:%SZ')
 LDFLAGS = -X gitcode.com/JianFeeeee/HomeAgent/internal/meta.Version=$(VERSION) -X gitcode.com/JianFeeeee/HomeAgent/internal/meta.Commit=$(COMMIT) -X gitcode.com/JianFeeeee/HomeAgent/internal/meta.BuildTime=$(BUILD_TIME)
