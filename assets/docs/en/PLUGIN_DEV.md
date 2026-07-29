@@ -57,8 +57,8 @@ go build -o plugindev
 plugindev sdk list       # list installed SDK versions
 plugindev sdk current    # show current SDK version
 plugindev sdk latest     # show latest available version
-plugindev sdk install v0.7.1  # install a specific version
-plugindev sdk use v0.7.1      # switch to a version
+plugindev sdk install v0.8.0  # install a specific version
+plugindev sdk use v0.8.0      # switch to a version
 plugindev sdk path       # show current SDK path
 ```
 

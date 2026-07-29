@@ -4,7 +4,7 @@ set -euo pipefail
 PROJECT_ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
 BUILD_DIR="${PROJECT_ROOT}/build"
 DIST_DIR="${PROJECT_ROOT}/dist/linux"
-VERSION="${VERSION:-$(git -C "$PROJECT_ROOT" describe --tags --dirty 2>/dev/null || echo "0.7.1")}"
+VERSION="${VERSION:-$(git -C "$PROJECT_ROOT" describe --tags --dirty 2>/dev/null || echo "0.8.0")}"
 PACKAGE_ROOT="${PROJECT_ROOT}/deploy/packaging/linux"
 GO="${GO:-$(command -v go 2>/dev/null || echo "/home/jianf/go1.26.5/go/bin/go")}"
 

@@ -6,7 +6,7 @@ package meta
 var (
 	// Version 是 HomeAgent SDK 版本号。
 	// 通过 `-ldflags="-X gitcode.com/JianFeeeee/homeagent-sdk/meta.Version=vX.Y.Z"` 注入。
-	Version = "0.7.2"
+	Version = "0.8.0"
 
 	// Commit 是构建时的 Git commit hash。
 	Commit = "unknown"
@@ -21,7 +21,7 @@ var (
 	CoreModule = "gitcode.com/JianFeeeee/HomeAgent"
 
 	// CoreVersion 是此 SDK 所兼容的最低核心版本。
-	CoreVersion = "0.7.2"
+	CoreVersion = "0.8.0"
 )
 
 // FullVersion 返回完整的版本字符串。
