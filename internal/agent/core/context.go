@@ -34,13 +34,14 @@ type ContextEvent struct {
 const contextFlushInterval = 5 * time.Second
 
 type RelevanceContext struct {
-	mu            sync.Mutex
-	events        []*ContextEvent
-	embedder      *memory.StaticEmbedder
-	savePath      string
-	saveTimer     *time.Timer
-	dirty         bool
-	toolDefLookup func(name string) *sdk.ToolDef
+	mu               sync.Mutex
+	events           []*ContextEvent
+	embedder         *memory.StaticEmbedder
+	savePath         string
+	saveTimer        *time.Timer
+	dirty            bool
+	toolDefLookup    func(name string) *sdk.ToolDef
+	channelDefLookup func(name string) (sdk.ChannelDef, bool)
 }
 
 func NewRelevanceContext(savePath string, embedder *memory.StaticEmbedder) *RelevanceContext {
@@ -60,6 +61,12 @@ func (c *RelevanceContext) SetToolDefLookup(fn func(name string) *sdk.ToolDef) {
 	c.toolDefLookup = fn
 }
 
+func (c *RelevanceContext) SetChannelDefLookup(fn func(name string) (sdk.ChannelDef, bool)) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.channelDefLookup = fn
+}
+
 func (c *RelevanceContext) load() {
 	data, err := os.ReadFile(c.savePath)
 	if err != nil {
@@ -75,7 +82,7 @@ func (c *RelevanceContext) load() {
 	c.events = events
 }
 
-func textForVector(evt *ContextEvent, toolDefLookup func(name string) *sdk.ToolDef) string {
+func textForVector(evt *ContextEvent, toolDefLookup func(name string) *sdk.ToolDef, channelDefLookup func(name string) (sdk.ChannelDef, bool)) string {
 	var text string
 	switch {
 	case evt.Source == "agent" && evt.Response != "":
@@ -84,6 +91,16 @@ func textForVector(evt *ContextEvent, toolDefLookup func(name string) *sdk.ToolD
 		text = evt.Input + " " + evt.Response
 	default:
 		text = evt.Input
+	}
+
+	// 计算层：应用输入通道的 Cleaner（不改原文，仅在计算层清洗）
+	if channelDefLookup != nil {
+		if chDef, ok := channelDefLookup(evt.Source); ok && chDef.Cleaner != nil {
+			text = chDef.Cleaner(text)
+		}
+		if chDef, ok := channelDefLookup(evt.Source); ok && chDef.NoMemory {
+			return ""
+		}
 	}
 
 	// 计算层：附加工具输出，NoMemory 跳过，其余经 Cleaner 过滤
@@ -130,8 +147,41 @@ func (c *RelevanceContext) toolOutputClean(name, output string) string {
 	return output
 }
 
+// inputChannelClean 根据输入通道的 Def 清洗输入文本，用于计算层。
+func (c *RelevanceContext) inputChannelClean(source, input string) string {
+	if c.channelDefLookup == nil {
+		return input
+	}
+	chDef, ok := c.channelDefLookup(source)
+	if !ok {
+		return input
+	}
+	if chDef.Cleaner != nil {
+		return chDef.Cleaner(input)
+	}
+	return input
+}
+
+// channelCleanerForDoc 返回 ChannelCleaner，使 document 包在存档时能按来源查找 Cleaner。
+func (c *RelevanceContext) channelCleanerForDoc() document.ChannelCleaner {
+	if c.channelDefLookup == nil {
+		return nil
+	}
+	return func(source string) func(string) string {
+		chDef, ok := c.channelDefLookup(source)
+		if !ok {
+			return nil
+		}
+		return chDef.Cleaner
+	}
+}
+
 func (c *RelevanceContext) computeVector(evt *ContextEvent) vector.Vector {
-	return c.embedder.Vectorize(textForVector(evt, c.toolDefLookup))
+	text := textForVector(evt, c.toolDefLookup, c.channelDefLookup)
+	if text == "" {
+		return nil
+	}
+	return c.embedder.Vectorize(text)
 }
 
 func (c *RelevanceContext) Save() error {
@@ -274,7 +324,7 @@ func (c *RelevanceContext) Prune(currentInput string, topK int, docStore *docume
 				ToolResults: convertToolResults(s.event.ToolResults),
 			}
 		}
-		doc, err := docStore.ContextToDoc("context_archived", entries, c.embedder, nil, c.toolOutputClean)
+		doc, err := docStore.ContextToDoc("context_archived", entries, c.embedder, nil, c.toolOutputClean, c.channelCleanerForDoc())
 		if err == nil && doc != nil {
 			archived = len(entries)
 		}

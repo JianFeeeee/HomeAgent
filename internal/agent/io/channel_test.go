@@ -43,6 +43,7 @@ func (d *mockDevice) Stop() error {
 	return nil
 }
 func (d *mockDevice) OutputCapabilities() OutputCapability { return d.caps }
+func (d *mockDevice) ChannelDef() ChannelDef { return ChannelDef{} }
 func (d *mockDevice) Execute(tool string, args map[string]interface{}) (interface{}, error) {
 	if d.executeFn != nil {
 		return d.executeFn(tool, args)

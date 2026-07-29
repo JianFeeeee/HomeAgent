@@ -48,6 +48,8 @@ const (
 )
 type APIRegistrar = pubsdk.APIRegistrar
 type OutputChannelRegistrar = pubsdk.OutputChannelRegistrar
+type InputChannelRegistrar = pubsdk.InputChannelRegistrar
+type ChannelDef = pubsdk.ChannelDef
 
 type PluginSDK struct {
 	*pubsdk.PluginSDK
@@ -92,12 +94,16 @@ type SDKConfig struct {
 	RegStage   StageRegistrar
 	RegAPI     APIRegistrar
 	RegOutput  OutputChannelRegistrar
+	RegInput   InputChannelRegistrar
 }
 
 func New(name string, cfg SDKConfig) *PluginSDK {
 	base := pubsdk.New(name, cfg.Settings, cfg.RegTool, cfg.RegStage, cfg.RegAPI, cfg.RegOutput)
 	if cfg.IOManager != nil {
 		base.SetIOInjector(ioAdapter{iom: cfg.IOManager})
+	}
+	if cfg.RegInput != nil {
+		base.SetInputChannelRegistrar(cfg.RegInput)
 	}
 	base.SetMemoryAPI(cfg.Memory)
 	base.SetTextMemoryAPI(cfg.TextMemory)

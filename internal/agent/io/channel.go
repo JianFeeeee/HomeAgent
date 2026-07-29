@@ -6,7 +6,12 @@ import (
 	"runtime/debug"
 	"sync"
 	"time"
+
+	pubsdk "gitcode.com/JianFeeeee/homeagent-sdk/sdk"
 )
+
+// ChannelDef 描述通道在记忆计算层的行为，与 ToolDef.NoMemory/Cleaner 语义一致。
+type ChannelDef = pubsdk.ChannelDef
 
 type DeviceType int
 
@@ -60,6 +65,7 @@ type Device interface {
 	Start() error
 	Stop() error
 	OutputCapabilities() OutputCapability
+	ChannelDef() ChannelDef
 }
 
 type ToolHandler func(args map[string]interface{}) (interface{}, error)
@@ -90,20 +96,22 @@ type OutputEvent struct {
 }
 
 type IOManager struct {
-	mu           sync.RWMutex
-	devices      map[string]Device
-	inputCh      chan *InputEvent
-	interruptCh  chan *InputEvent
-	outputCh     chan *OutputEvent
-	nextReqID    int64
+	mu            sync.RWMutex
+	devices       map[string]Device
+	inputCh       chan *InputEvent
+	interruptCh   chan *InputEvent
+	outputCh      chan *OutputEvent
+	nextReqID     int64
+	inputChannels map[string]ChannelDef
 }
 
 func NewIOManager() *IOManager {
 	return &IOManager{
-		devices:     make(map[string]Device),
-		inputCh:     make(chan *InputEvent, 256),
-		interruptCh: make(chan *InputEvent, 64),
-		outputCh:    make(chan *OutputEvent, 256),
+		devices:       make(map[string]Device),
+		inputCh:       make(chan *InputEvent, 256),
+		interruptCh:   make(chan *InputEvent, 64),
+		outputCh:      make(chan *OutputEvent, 256),
+		inputChannels: make(map[string]ChannelDef),
 	}
 }
 
@@ -333,6 +341,28 @@ func (m *IOManager) EmitTextTo(target, outputChannel, text string) {
 func (m *IOManager) InputChan() <-chan *InputEvent  { return m.inputCh }
 func (m *IOManager) OutputChan() <-chan *OutputEvent { return m.outputCh }
 
+// RegisterInputChannel 注册输入通道的记忆行为
+func (m *IOManager) RegisterInputChannel(name string, def ChannelDef) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.inputChannels[name] = def
+}
+
+// UnregisterInputChannel 注销输入通道
+func (m *IOManager) UnregisterInputChannel(name string) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	delete(m.inputChannels, name)
+}
+
+// GetInputChannelDef 查询输入通道的记忆行为定义
+func (m *IOManager) GetInputChannelDef(name string) (ChannelDef, bool) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	def, ok := m.inputChannels[name]
+	return def, ok
+}
+
 func (m *IOManager) GetAllTools() []ToolDef {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
@@ -434,6 +464,7 @@ func (d *Microphone) OutputCapabilities() OutputCapability { return 0 } // 纯�
 func (d *Microphone) Description() string { return fmt.Sprintf("麦克风 (%s, %dHz)", d.name, d.sampleRate) }
 func (d *Microphone) Start() error        { return nil }
 func (d *Microphone) Stop() error         { return nil }
+func (d *Microphone) ChannelDef() ChannelDef { return ChannelDef{} }
 
 func (d *Microphone) Tools() []ToolDef {
 	return []ToolDef{{
@@ -468,6 +499,7 @@ func (d *Speaker) OutputCapabilities() OutputCapability { return CapText | CapAu
 func (d *Speaker) Description() string { return fmt.Sprintf("扬声器 (%s)", d.name) }
 func (d *Speaker) Start() error        { return nil }
 func (d *Speaker) Stop() error         { return nil }
+func (d *Speaker) ChannelDef() ChannelDef { return ChannelDef{} }
 
 func (d *Speaker) Tools() []ToolDef {
 	return []ToolDef{{
@@ -504,6 +536,7 @@ func (d *Camera) OutputCapabilities() OutputCapability { return CapImage } // �
 func (d *Camera) Description() string { return fmt.Sprintf("摄像头 (%s)", d.name) }
 func (d *Camera) Start() error        { return nil }
 func (d *Camera) Stop() error         { return nil }
+func (d *Camera) ChannelDef() ChannelDef { return ChannelDef{} }
 
 func (d *Camera) Tools() []ToolDef {
 	return []ToolDef{
@@ -551,6 +584,7 @@ func (d *RobotArm) OutputCapabilities() OutputCapability { return CapStructured 
 func (d *RobotArm) Description() string { return fmt.Sprintf("机械臂 (%s)", d.name) }
 func (d *RobotArm) Start() error        { return nil }
 func (d *RobotArm) Stop() error         { return nil }
+func (d *RobotArm) ChannelDef() ChannelDef { return ChannelDef{} }
 
 func (d *RobotArm) Tools() []ToolDef {
 	return []ToolDef{
@@ -602,6 +636,7 @@ func (d *GPIODevice) OutputCapabilities() OutputCapability { return CapStructure
 func (d *GPIODevice) Description() string { return "GPIO 通用引脚" }
 func (d *GPIODevice) Start() error        { return nil }
 func (d *GPIODevice) Stop() error         { return nil }
+func (d *GPIODevice) ChannelDef() ChannelDef { return ChannelDef{} }
 
 func (d *GPIODevice) Tools() []ToolDef {
 	return []ToolDef{

@@ -178,6 +178,9 @@ func New(cfg AgentConfig) *Agent {
 	if cfg.StageHost != nil {
 		rc.SetToolDefLookup(cfg.StageHost.ToolDef)
 	}
+	if cfg.IO != nil {
+		rc.SetChannelDefLookup(cfg.IO.GetInputChannelDef)
+	}
 
 	return &Agent{
 		id:              cfg.ID,
