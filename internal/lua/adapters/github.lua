@@ -21,7 +21,7 @@ end
 
 function adapter.transform_response(raw_body)
     local ok, resp = pcall(json.decode, raw_body)
-    if not ok then return raw_body end
+    if not ok or resp == nil then return raw_body end
 
     local unified = {
         content = "",
@@ -29,17 +29,17 @@ function adapter.transform_response(raw_body)
         token_usage = { prompt = 0, completion = 0, total = 0 }
     }
 
-    if resp.usage then
+    if type(resp.usage) == "table" then
         unified.token_usage.prompt = resp.usage.prompt_tokens or 0
         unified.token_usage.completion = resp.usage.completion_tokens or 0
         unified.token_usage.total = resp.usage.total_tokens or 0
     end
 
-    if resp.choices and #resp.choices > 0 then
+    if type(resp.choices) == "table" and #resp.choices > 0 then
         local ch = resp.choices[1]
-        if ch.message then
+        if type(ch.message) == "table" then
             unified.content = ch.message.content or ""
-            if ch.message.tool_calls then
+            if type(ch.message.tool_calls) == "table" then
                 local tcs = {}
                 for _, tc in ipairs(ch.message.tool_calls) do
                     local args_ok, args = pcall(json.decode, tc["function"].arguments)
