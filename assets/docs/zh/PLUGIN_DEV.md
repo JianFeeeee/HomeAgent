@@ -290,7 +290,7 @@ s.RegisterTool("weather_query", sdk.ToolDef{
        └── 否 → 正常记忆，无需额外处理
 ```
 
-> **注意**：`Cleaner` 是 Go `func` 类型（`json:"-"`），不能跨 C ABI 边界序列化。Lua 插件和远程插件无法使用。
+> **注意**：`Cleaner` 是 Go `func` 类型（`json:"-"`），不能跨 C ABI 边界序列化，因此 C/C++/Rust 等远程插件无法使用。**Lua 插件不受此限**：def 表中直接传 Lua 函数即可（`cleaner = function(text) return text end`），Go 桥接层会在计算层调用时逐次回调 Lua。
 
 #### 阶段钩子 — 干预消息处理流
 
@@ -536,22 +536,49 @@ lua main.lua
 
 ### Lua SDK API
 
+Lua 插件的 `sdk.*` API 与外部插件（C ABI / 工具链编译的 `.so`/`.dll`）能力完全对齐：注册类函数调用即时报错（抛 Lua error），数据类函数统一返回 `(result, err)`，`err` 为 nil 表示成功。核心未装配的子系统（如 SocialAPI）返回空值而非报错。
+
+**注册类**
+
 | 函数 | 说明 |
 |------|------|
 | `sdk.log(level, msg)` | 日志输出 |
-| `sdk.register_tool(name, def, handler)` | 注册工具 |
-| `sdk.register_stage(stage, handler)` | 注册阶段钩子 |
+| `sdk.register_tool(name, def, handler)` | 注册工具；`def` 支持 `description`、`parameters`、`no_memory`、`cleaner` |
+| `sdk.register_stage(stage, handler, scope)` | 注册阶段钩子；`scope` 为 `nil`/`"global"`（默认）或 `"own_tools"`（仅 `before_toolcall`/`after_toolcall` 且工具属于本插件时触发） |
 | `sdk.register_api(name)` | 注册 API |
-| `sdk.get_setting(key)` | 读取配置 |
-| `sdk.set_setting(key, value)` | 写入配置 |
+| `sdk.register_output_channel(name, caps, desc, def, handler)` | 注册输出通道；`def` 支持 `no_memory`、`cleaner` |
+| `sdk.register_input_channel(name, def)` | 注册输入通道；`def` 同上 |
+| `sdk.set_auto_restart(enabled)` | 崩溃时内核自动拉起插件 |
+
+**阶段钩子上下文**
+
+`register_stage` 的 handler 收到完整上下文（与外部插件一致）：`raw_message`、`user_id`、`group_id`、`phase`、`llm_text`、`final_text`、`no_memory`、`response`（已响应时）、`tool_calls`、`tool_results`。
+
+**IO 与配置**
+
+| 函数 | 说明 |
+|------|------|
+| `sdk.get_setting(key)` / `sdk.set_setting(key, value)` | 本插件配置读写 |
+| `sdk.settings.get_core/set_core/list_core(key)` | 核心配置读写 |
+| `sdk.settings.get_plugin/set_plugin/list_plugin(plugin, key)` | 其他插件配置读写 |
+| `sdk.settings.list/defs/dump/plugins(prefix)` | 配置查询 |
+| `sdk.settings.register_def(def)` | 注册配置项定义（WebUI 展示） |
 | `sdk.inject_text(source, channel, text)` | 投递文本消息 |
 | `sdk.inject_interrupt(source, channel, text)` | 中断投递 |
-| `sdk.json.encode(val)` | JSON 编码 |
-| `sdk.json.decode(str)` | JSON 解码 |
-| `sdk.http.get(url)` | HTTP GET 请求（`-- !impl`） |
-| `sdk.http.post(url, body, content_type)` | HTTP POST 请求（`-- !impl`） |
+| `sdk.inject_text_no_memory(source, channel, text)` | 免记忆投递 |
 
-> **注意**：Lua 插件的 `sdk.register_stage` 阶段回调目前仅传递 `raw_message`、`user_id`、`phase` 三个字段，功能受限。复杂的阶段处理逻辑建议使用 Go 插件。
+**数据类（与 C ABI 对齐，均返回 `(result, err)`）**
+
+| 子表 | 函数 |
+|------|------|
+| `sdk.memory.*` | `recall(query, depth)`、`commit({triples})`、`introspect()`、`merge(source, target)`、`purge(criteria, hard)` |
+| `sdk.doc.*` | `query(text, top_k)`、`insert({id,title,content})`、`remove(id)`、`stats()` |
+| `sdk.knowledge.*` | `search(query, limit)`、`add(tag, content)`、`list()` |
+| `sdk.text_memory.*` | `append({role,content,timestamp,channel})` |
+| `sdk.llm.*` | `list_sources()`、`set_source(name)`、`current_source()` |
+| `sdk.social.*`（只读） | `get_person(name)`、`get_network(name, depth)`、`get_trait(name, trait)`、`get_relations(name)`、`list_persons()` |
+| `sdk.json.*` | `encode(val)`、`decode(str)` |
+| `sdk.http.*` | `get(url)`、`post(url, body, content_type)` |
 
 ---
 
@@ -677,15 +704,21 @@ pmgr.ReloadPlugins()                     // 重载所有插件
 
 | 示例 | 类型 | 特点 |
 |------|------|------|
+| [weather](https://gitcode.com/JianFeeeee/homeagent-sdk/tree/main/example/weather) | Go | 天气查询（wttr.in），演示 NoMemory/Cleaner/阶段钩子/通道/文本记忆 |
+| [luademo](https://gitcode.com/JianFeeeee/homeagent-sdk/tree/main/example/luademo) | Lua | Lua 全功能示例，覆盖 v0.8.0 Lua SDK 全部 API 面 |
+| [qq](https://gitcode.com/JianFeeeee/homeagent-sdk/tree/main/example/qq) | Go | NapCat OneBot 对接，17 个工具，输入/输出通道完整对接 |
 | [memo](https://gitcode.com/JianFeeeee/homeagent-sdk/tree/main/example/memo) | Go | 备忘管理，PreAction 注入 + 定时打断双提醒 |
 | [files](https://gitcode.com/JianFeeeee/homeagent-sdk/tree/main/example/files) | Go | 文件系统操作，4 种写入模式，沙箱隔离 |
 | [browser](https://gitcode.com/JianFeeeee/homeagent-sdk/tree/main/example/browser) | Go | 网络搜索、网页抓取（SSRF）、浏览器渲染（合并自 web/webfetch） |
 | [bili](https://gitcode.com/JianFeeeee/homeagent-sdk/tree/main/example/bili) | Go | B 站视频下载（yt-dlp） |
-| [qq](https://gitcode.com/JianFeeeee/homeagent-sdk/tree/main/example/qq) | Go | NapCat OneBot 对接，17 个工具 |
 | [editdoc](https://gitcode.com/JianFeeeee/homeagent-sdk/tree/main/example/editdoc) | Go | Office 文档编辑与格式转换 |
 | [a2a](https://gitcode.com/JianFeeeee/homeagent-sdk/tree/main/example/a2a) | Go | Agent-to-Agent 协议 |
 | [ocr](https://gitcode.com/JianFeeeee/homeagent-sdk/tree/main/example/ocr) | Go | 离线文字识别（Tesseract） |
 | [sanitizer](https://gitcode.com/JianFeeeee/homeagent-sdk/tree/main/example/sanitizer) | Go | 输出清洗过滤器 |
+| [calendar](https://gitcode.com/JianFeeeee/homeagent-sdk/tree/main/example/calendar) | Go | 日历管理 |
+| [rss](https://gitcode.com/JianFeeeee/homeagent-sdk/tree/main/example/rss) | Go | RSS 订阅 |
+| [ai_image](https://gitcode.com/JianFeeeee/homeagent-sdk/tree/main/example/ai_image) | Go | AI 图片生成 |
+| [music](https://gitcode.com/JianFeeeee/homeagent-sdk/tree/main/example/music) | Go | 音乐播放 |
 
 ### 内置插件
 

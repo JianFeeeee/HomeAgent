@@ -650,6 +650,17 @@ func go_core_dispatch(methodID C.int, ctx unsafe.Pointer, s1, s2, s3 *C.char, i1
 			setResult(result, string(b))
 		}
 		return 0
+
+	case 46: // CORE_REGISTER_INPUT_CH
+		chDef := sdk.ChannelDef{}
+		if a2 != "" {
+			var def sdk.ChannelDef
+			if err := json.Unmarshal([]byte(a2), &def); err == nil {
+				chDef = def
+			}
+		}
+		s.RegisterInputChannel(a1, chDef)
+		return 0
 	}
 	return 0
 }

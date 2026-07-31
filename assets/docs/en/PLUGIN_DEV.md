@@ -292,7 +292,7 @@ Tool output → valuable for LLM attention?
        └── No  → Normal memory, no extra handling
 ```
 
-> **Note**: `Cleaner` is a Go `func` type (`json:"-"`), cannot cross C ABI boundaries. Not available for Lua plugins or remote plugins.
+> **Note**: `Cleaner` is a Go `func` type (`json:"-"`), cannot cross C ABI boundaries, so it is unavailable for C/C++/Rust remote plugins. **Lua plugins are not affected**: pass a Lua function in the def table (`cleaner = function(text) return text end`) — the Go bridge calls it back per invocation during memory computation.
 
 #### Stage Hooks — Intervene in message processing flow
 
@@ -538,22 +538,49 @@ When running inside the kernel, `sdk.*` global variables are injected by the Go 
 
 ### Lua SDK API
 
+The `sdk.*` API of Lua plugins is fully aligned with external plugins (C ABI / toolchain-built `.so`/`.dll`): registration functions raise a Lua error on failure; data functions uniformly return `(result, err)` with `err == nil` on success. Subsystems not wired by the core (e.g. SocialAPI) return empty values instead of errors.
+
+**Registration**
+
 | Function | Description |
 |----------|-------------|
 | `sdk.log(level, msg)` | Log output |
-| `sdk.register_tool(name, def, handler)` | Register tool |
-| `sdk.register_stage(stage, handler)` | Register stage hook |
+| `sdk.register_tool(name, def, handler)` | Register tool; `def` supports `description`, `parameters`, `no_memory`, `cleaner` |
+| `sdk.register_stage(stage, handler, scope)` | Register stage hook; `scope` is `nil`/`"global"` (default) or `"own_tools"` (fires only for `before_toolcall`/`after_toolcall` when the tool belongs to this plugin) |
 | `sdk.register_api(name)` | Register API |
-| `sdk.get_setting(key)` | Read config |
-| `sdk.set_setting(key, value)` | Write config |
+| `sdk.register_output_channel(name, caps, desc, def, handler)` | Register output channel; `def` supports `no_memory`, `cleaner` |
+| `sdk.register_input_channel(name, def)` | Register input channel; `def` as above |
+| `sdk.set_auto_restart(enabled)` | Auto-restart the plugin after a crash |
+
+**Stage hook context**
+
+Stage handlers receive the full context (same as external plugins): `raw_message`, `user_id`, `group_id`, `phase`, `llm_text`, `final_text`, `no_memory`, `response` (when responded), `tool_calls`, `tool_results`.
+
+**IO and config**
+
+| Function | Description |
+|----------|-------------|
+| `sdk.get_setting(key)` / `sdk.set_setting(key, value)` | Own plugin config read/write |
+| `sdk.settings.get_core/set_core/list_core(key)` | Core config read/write |
+| `sdk.settings.get_plugin/set_plugin/list_plugin(plugin, key)` | Other plugin config read/write |
+| `sdk.settings.list/defs/dump/plugins(prefix)` | Config queries |
+| `sdk.settings.register_def(def)` | Register config definition (WebUI display) |
 | `sdk.inject_text(source, channel, text)` | Deliver text message |
 | `sdk.inject_interrupt(source, channel, text)` | Interrupt delivery |
-| `sdk.json.encode(val)` | JSON encode |
-| `sdk.json.decode(str)` | JSON decode |
-| `sdk.http.get(url)` | HTTP GET request (`-- !impl`) |
-| `sdk.http.post(url, body, content_type)` | HTTP POST request (`-- !impl`) |
+| `sdk.inject_text_no_memory(source, channel, text)` | Deliver without memory computation |
 
-> **Note**: Lua plugin's `sdk.register_stage` callback currently only receives `raw_message`, `user_id`, `phase` fields. The functionality is limited. For complex stage handling logic, use Go plugins.
+**Data APIs (aligned with C ABI, all return `(result, err)`)**
+
+| Sub-table | Functions |
+|-----------|-----------|
+| `sdk.memory.*` | `recall(query, depth)`, `commit({triples})`, `introspect()`, `merge(source, target)`, `purge(criteria, hard)` |
+| `sdk.doc.*` | `query(text, top_k)`, `insert({id,title,content})`, `remove(id)`, `stats()` |
+| `sdk.knowledge.*` | `search(query, limit)`, `add(tag, content)`, `list()` |
+| `sdk.text_memory.*` | `append({role,content,timestamp,channel})` |
+| `sdk.llm.*` | `list_sources()`, `set_source(name)`, `current_source()` |
+| `sdk.social.*` (read-only) | `get_person(name)`, `get_network(name, depth)`, `get_trait(name, trait)`, `get_relations(name)`, `list_persons()` |
+| `sdk.json.*` | `encode(val)`, `decode(str)` |
+| `sdk.http.*` | `get(url)`, `post(url, body, content_type)` |
 
 ---
 
@@ -679,15 +706,21 @@ Internal: records are stored in SQLite `disabled_plugins` table (`name`, `disabl
 
 | Example | Type | Features |
 |---------|------|----------|
+| [weather](https://gitcode.com/JianFeeeee/homeagent-sdk/tree/main/example/weather) | Go | Weather queries (wttr.in); demonstrates NoMemory/Cleaner/stage hooks/channels/text memory |
+| [luademo](https://gitcode.com/JianFeeeee/homeagent-sdk/tree/main/example/luademo) | Lua | Full-featured Lua example covering the whole v0.8.0 Lua SDK surface |
+| [qq](https://gitcode.com/JianFeeeee/homeagent-sdk/tree/main/example/qq) | Go | NapCat OneBot integration, 17 tools, full input/output channel wiring |
 | [memo](https://gitcode.com/JianFeeeee/homeagent-sdk/tree/main/example/memo) | Go | Memo management, PreAction injection + timed interrupt dual reminder |
 | [files](https://gitcode.com/JianFeeeee/homeagent-sdk/tree/main/example/files) | Go | File system operations, 4 write modes, sandbox isolation |
 | [browser](https://gitcode.com/JianFeeeee/homeagent-sdk/tree/main/example/browser) | Go | Web search + HTTP fetch (SSRF) + Chromium render (merged from web/webfetch) |
 | [bili](https://gitcode.com/JianFeeeee/homeagent-sdk/tree/main/example/bili) | Go | Bilibili video download (yt-dlp) |
-| [qq](https://gitcode.com/JianFeeeee/homeagent-sdk/tree/main/example/qq) | Go | NapCat OneBot integration, 17 tools |
 | [editdoc](https://gitcode.com/JianFeeeee/homeagent-sdk/tree/main/example/editdoc) | Go | Office document editing and format conversion |
 | [a2a](https://gitcode.com/JianFeeeee/homeagent-sdk/tree/main/example/a2a) | Go | Agent-to-Agent protocol |
 | [ocr](https://gitcode.com/JianFeeeee/homeagent-sdk/tree/main/example/ocr) | Go | Offline text recognition (Tesseract) |
 | [sanitizer](https://gitcode.com/JianFeeeee/homeagent-sdk/tree/main/example/sanitizer) | Go | Output sanitizer filter |
+| [calendar](https://gitcode.com/JianFeeeee/homeagent-sdk/tree/main/example/calendar) | Go | Calendar management |
+| [rss](https://gitcode.com/JianFeeeee/homeagent-sdk/tree/main/example/rss) | Go | RSS subscriptions |
+| [ai_image](https://gitcode.com/JianFeeeee/homeagent-sdk/tree/main/example/ai_image) | Go | AI image generation |
+| [music](https://gitcode.com/JianFeeeee/homeagent-sdk/tree/main/example/music) | Go | Music playback |
 
 ### Built-in Plugins
 

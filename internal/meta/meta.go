@@ -83,4 +83,5 @@ const (
 	CoreSettingsDefs          = 43
 	CoreSettingsDump          = 44
 	CoreSettingsPlugins       = 45
+	CoreRegisterInputCh       = 46
 )
