@@ -13,7 +13,7 @@ function sdk.log(level, msg)
 end
 
 -- !impl
--- def: { description="...", parameters={...} }
+-- def: { description="...", parameters={...}, no_memory=true/false, cleaner=function(text)->text }
 -- handler: function(args) -> result
 function sdk.register_tool(name, def, handler)
     print("[lua-plugin] register_tool: " .. tostring(name))
@@ -21,13 +21,27 @@ end
 
 -- !impl
 -- stage: "on_input" | "pre_action" | "post_action" | ...
-function sdk.register_stage(stage, handler)
-    print("[lua-plugin] register_stage: " .. tostring(stage))
+-- scope: nil/"global" (默认) | "own_tools"（仅 before_toolcall/after_toolcall 且工具属于本插件时触发）
+function sdk.register_stage(stage, handler, scope)
+    print("[lua-plugin] register_stage: " .. tostring(stage) .. " scope=" .. tostring(scope))
 end
 
 -- !impl
 function sdk.register_api(name)
     print("[lua-plugin] register_api: " .. tostring(name))
+end
+
+-- !impl
+-- def: { no_memory=true/false, cleaner=function(text)->text }
+-- handler: function(args) -> result
+function sdk.register_output_channel(name, caps, desc, def, handler)
+    print("[lua-plugin] register_output_channel: " .. tostring(name))
+end
+
+-- !impl
+-- def: { no_memory=true/false, cleaner=function(text)->text }
+function sdk.register_input_channel(name, def)
+    print("[lua-plugin] register_input_channel: " .. tostring(name))
 end
 
 -- !impl
@@ -54,6 +68,111 @@ end
 function sdk.inject_text_no_memory(source, channel, text)
     print("[lua-plugin] inject_text_no_memory: " .. tostring(source))
 end
+
+-- !impl
+-- enabled: true/false，崩溃时内核自动拉起
+function sdk.set_auto_restart(enabled)
+    print("[lua-plugin] set_auto_restart: " .. tostring(enabled))
+end
+
+-- ============ graph memory ============
+-- !impl
+sdk.memory = {}
+-- !impl
+-- query: string, depth: number -> {entities={...}, relations={...}}
+function sdk.memory.recall(query, depth) return {entities={}, relations={}} end
+-- !impl
+-- triples: { {subject=, relation=, object=, [confidence=], [sentence_text=]} } -> err
+function sdk.memory.commit(triples) return nil end
+-- !impl
+function sdk.memory.introspect() return {} end
+-- !impl
+function sdk.memory.merge(source, target) return 0 end
+-- !impl
+-- criteria: {key=value}, hard: boolean
+function sdk.memory.purge(criteria, hard) return 0 end
+
+-- ============ document memory ============
+-- !impl
+sdk.doc = {}
+-- !impl
+function sdk.doc.query(text, top_k) return {} end
+-- !impl
+-- doc: { id=, title=, content= }
+function sdk.doc.insert(doc) return nil end
+-- !impl
+function sdk.doc.remove(id) return nil end
+-- !impl
+function sdk.doc.stats() return {} end
+
+-- ============ knowledge ============
+-- !impl
+sdk.knowledge = {}
+-- !impl
+function sdk.knowledge.search(query, limit) return {} end
+-- !impl
+function sdk.knowledge.add(tag, content) return nil end
+-- !impl
+function sdk.knowledge.list() return {} end
+
+-- ============ text memory ============
+-- !impl
+sdk.text_memory = {}
+-- !impl
+-- evt: { timestamp=, role=, content=, channel= }
+function sdk.text_memory.append(evt) return nil end
+
+-- ============ llm ============
+-- !impl
+sdk.llm = {}
+-- !impl
+function sdk.llm.list_sources() return {} end
+-- !impl
+function sdk.llm.set_source(name) return nil end
+-- !impl
+function sdk.llm.current_source() return nil end
+
+-- ============ social (只读) ============
+-- !impl
+sdk.social = {}
+-- !impl
+function sdk.social.get_person(name) return {} end
+-- !impl
+function sdk.social.get_network(name, depth) return {} end
+-- !impl
+function sdk.social.get_trait(name, trait) return {value=nil, found=false} end
+-- !impl
+function sdk.social.get_relations(name) return {} end
+-- !impl
+function sdk.social.list_persons() return {} end
+
+-- ============ settings (作用域变体) ============
+-- !impl
+sdk.settings = {}
+-- !impl
+function sdk.settings.get_core(key) return nil end
+-- !impl
+function sdk.settings.set_core(key, value) return nil end
+-- !impl
+function sdk.settings.list_core(prefix) return {} end
+-- !impl
+function sdk.settings.get_plugin(plugin, key) return nil end
+-- !impl
+function sdk.settings.set_plugin(plugin, key, value) return nil end
+-- !impl
+function sdk.settings.list_plugin(plugin, prefix) return {} end
+-- !impl
+function sdk.settings.list(prefix) return {} end
+-- !impl
+-- def: { key=, type=, display_name=, description=, category=, options=, default=,
+--        min=, max=, step=, required=, secret= }
+function sdk.settings.register_def(def) return nil end
+-- !impl
+function sdk.settings.defs(prefix) return {} end
+-- !impl
+function sdk.settings.dump() return {} end
+-- !impl
+function sdk.settings.plugins() return {} end
 
 -- json utils (pure Lua)
 sdk.json = {}

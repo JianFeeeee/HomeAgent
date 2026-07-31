@@ -55,4 +55,5 @@ const (
 	CoreSettingsDefs          = meta.CoreSettingsDefs
 	CoreSettingsDump          = meta.CoreSettingsDump
 	CoreSettingsPlugins       = meta.CoreSettingsPlugins
+	CoreRegisterInputCh       = meta.CoreRegisterInputCh
 )
