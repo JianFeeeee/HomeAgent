@@ -259,13 +259,13 @@ VM built-ins: `json.encode` / `json.decode` / `log` / `http_get` / `http_post`.
 | Method | Registration Mechanism | Compilation | Usage |
 |--------|----------------------|-------------|-------|
 | Built-in | `init()` → `RegisterFactory` | `internal/plugins/` compiled into kernel | webui/cli/timer/mcp etc. |
-| External `.so` | C ABI dynamic loading | `-buildmode=c-shared` + bridge | qq/files/web/memo etc. |
-| Lua script plugin | Parse `main.lua` to register tools | No compilation, hot-reload | luaplugintest/testlua etc. |
+| External `.so` | C ABI dynamic loading | `-buildmode=c-shared` + bridge | qq/browser/files etc. |
+| Lua script plugin | Execute `main.lua` to register tools | No compilation, takes effect after restart/reload | luademo etc. |
 | SKILL plugin | Parse `SKILL.md` | Markdown definition | Loaded via clawhubadapter |
 
 Built-in plugin registration: `internal/plugins/all.go` blank imports → each plugin `init()` → `Registry.Load()` scans directory to match factory.
 External plugin loading: `internal/plugin/dynamic.go` → copy to SHA256 temp path (bypass `plugin.Open` path cache) → `Open` + `Lookup("NewPlugin")`.
-Lua script plugin loading: `internal/lua/` → parse `main.lua` via Lua VM, call `start()` to register tools.
+Lua script plugin loading: `internal/plugin/` → the gopher-lua interpreter executes `main.lua` (at load time `sdk.register_*` only buffers handlers), then `Start()` swaps in the real SDK implementation and registers them in batch. The script is read only once at load time; runtime execution happens via callbacks.
 
 ### Built-in vs External Plugins
 

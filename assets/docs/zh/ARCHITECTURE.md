@@ -257,13 +257,13 @@ VM 内置 `json.encode` / `json.decode` / `log` / `http_get` / `http_post`。
 | 方式 | 注册机制 | 编译 | 用途 |
 |------|----------|------|------|
 | 内置插件 | `init()` → `RegisterFactory` | `internal/plugins/` 编译进内核 | webui/cli/timer/mcp 等 |
-| 外部 `.so` | C ABI 动态加载 | `-buildmode=c-shared` + bridge | qq/files/web/memo 等 |
-| Lua 脚本插件 | 解析 `main.lua` 注册工具 | 无需编译，热加载 | luaplugintest/testlua 等 |
+| 外部 `.so` | C ABI 动态加载 | `-buildmode=c-shared` + bridge | qq/browser/files 等 |
+| Lua 脚本插件 | 执行 `main.lua` 注册工具 | 无需编译，重启/重载生效 | luademo 等 |
 | SKILL 插件 | 解析 `SKILL.md` | Markdown 定义 | clawhubadapter 兼容加载 |
 
 内置插件注册：`internal/plugins/all.go` 空白导入 → 各插件 `init()` → `Registry.Load()` 扫描目录匹配工厂。
 外部插件加载：`internal/plugin/dynamic.go` → 复制到 SHA256 临时路径（绕过 `plugin.Open` 路径缓存）→ `Open` + `Lookup("NewPlugin")`。
-Lua 脚本插件加载：`internal/lua/` → 通过 Lua VM 解析 `main.lua`，调用 `start()` 注册工具。
+Lua 脚本插件加载：`internal/plugin/` → gopher-lua 解释器执行 `main.lua`（加载期 `sdk.register_*` 仅暂存 handler），`Start()` 时替换为真实 SDK 实现并批量注册。脚本只在加载时读取一次，运行期通过回调执行。
 
 ### 内置插件 vs 外部插件
 
