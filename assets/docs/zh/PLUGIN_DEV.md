@@ -65,6 +65,14 @@ plugindev sdk path       # 显示当前 SDK 路径
 
 SDK 存储在 `~/.homeagent/plugindev/sdk/<version>/`，`plugindev init` 自动读取当前 SDK 版本填充 `go.mod`。
 
+### 源码调试
+
+`plugindev debug` 直接用解释器执行插件源码并输出调用轨迹，无需编译环境：
+
+```bash
+plugindev debug [dir]   # dir 默认当前目录
+```
+
 ### 创建 Go 插件
 
 ```bash
@@ -73,7 +81,10 @@ cd myplugin
 # 编辑插件代码
 vim plugin.go
 # 编译打包
-plugindev build
+plugindev build          # 默认多平台 bundle（见下节）
+# 输出: dist/myplugin_bundle.hmap
+# 单平台构建：
+plugindev build --no-bundle
 # 输出: dist/myplugin_linux_amd64.hmap (或 windows_amd64)
 ```
 
@@ -122,14 +133,19 @@ myluaplugin/
 
 ```bash
 cd myplugin
-plugindev build
+plugindev build                      # 默认 bundle 模式（多平台合集）
+plugindev build --no-bundle          # 单平台构建（仅当前 plg.json targets）
+plugindev build --target linux/amd64 # 在 targets 基础上追加一个目标
+plugindev build --outdir dist        # 指定输出目录（默认 dist）
+plugindev build --sdk-path <path>    # 指定 SDK 路径（覆盖 go.mod replace）
+plugindev build --replace <mod@path> # 追加 go.mod replace 指令（可多次）
 ```
 
 执行过程：
-1. 读取 `plg.json` 的 `targets` 字段确定目标平台
-2. 自动生成 C ABI bridge 代码（`z_bridge_gen.go` + `z_entry.c`）
+1. 读取 `plg.json` 的 `targets`/`bundle` 字段确定构建目标（bundle 模式优先，见下节）
+2. 自动生成 C ABI bridge 代码（`z_bridge_gen.go` + `z_entry.c`，Windows 仅 `z_bridge_gen.go`）
 3. **Go 插件**：执行 `go build -buildmode=c-shared`（生成 `.so` / `.dylib` / `.dll`）
-4. **Lua 插件**：直接打包源码，无需编译
+4. **Lua 插件**：直接打包源码，无需编译（打包内容：`plugin.json` + `main.lua`，以及可选的 `README.md`、`LICENSE`、`thirdpart/*.lua`）
 5. 生成 `plugin.json` 输出清单
 6. 打包为 `.hmap` 分发包（zip 格式，内含 `plugin.json` + 二进制）
 
@@ -137,7 +153,7 @@ plugindev build
 
 | 文件 | 用途 | 关键字段 |
 |------|------|---------|
-| `plg.json` | 项目元信息，由开发者维护 | `targets` — 构建目标（如 `"linux/amd64,windows/amd64"`）|
+| `plg.json` | 项目元信息，由开发者维护 | `targets` — 单平台构建目标（如 `"linux/amd64,windows/amd64"`）；`bundle` — 多平台合集开关（默认 `true`）|
 | `plugin.json` | 构建产物清单，`plugindev build` 自动生成 | `entry` — 入口文件名；`platforms` — 声明的支持平台 |
 
 每个目标生成单独的 `.hmap`，二进制文件名由平台决定：
@@ -148,22 +164,28 @@ plugindev build
 | macOS | `plugin.dylib` |
 | Windows | `plugin.dll` |
 
-### 多平台打包：--bundle
+### 构建目标与多平台打包（bundle）
+
+**`plugindev build` 默认就是 bundle 模式**（`plg.json` 未显式写 `"bundle": false` 时）：一次编译 linux/amd64 + darwin/amd64 + windows/amd64，生成包含所有平台二进制的单 `.hmap`，输出清单自动添加 `platforms` 字段。安装时核心自动选择当前平台的二进制，跳过其他平台。
 
 ```bash
-plugindev build --bundle
+plugindev build              # 默认 bundle，输出 dist/myplugin_bundle.hmap
+plugindev build --bundle     # 显式开启 bundle（同上）
+plugindev build --no-bundle  # 关闭 bundle，按 plg.json 的 targets 逐平台构建
 ```
 
-一次编译 linux/amd64 + darwin/amd64 + windows/amd64，生成包含所有平台二进制的单 `.hmap`，
-输出清单自动添加 `platforms` 字段。安装时核心自动选择当前平台的二进制，跳过其他平台。
+注意：
+- bundle 模式下 `plg.json` 的 `targets` 字段被忽略，固定构建上述三个平台
+- 跨平台交叉编译需要对应工具链（如 Linux 上构建 darwin 需 clang/macOS SDK）；缺少工具链时编译会失败，此时使用 `--no-bundle` 只构建当前平台
+- 单平台输出文件名：`{name}_{os}_{arch}.hmap`，如 `myplugin_linux_amd64.hmap`
 
 输出在 `dist/` 目录：
 ```
 dist/
-├── myplugin_linux_amd64.hmap      # 单平台：Linux 版
-├── myplugin_windows_amd64.hmap    # 单平台：Windows 版
-├── myplugin_darwin_amd64.hmap     # 单平台：macOS 版
-├── myplugin_bundle.hmap           # 多平台合集
+├── myplugin_bundle.hmap           # 默认 bundle：多平台合集
+├── myplugin_linux_amd64.hmap      # --no-bundle 后：Linux 版
+├── myplugin_windows_amd64.hmap    # --no-bundle 后：Windows 版
+├── myplugin_darwin_amd64.hmap     # --no-bundle 后：macOS 版
 └── myplugin_lua.hmap              # Lua 插件
 ```
 
@@ -172,12 +194,12 @@ dist/
 通过 PluginMgr HTTP API 安装，支持三种方式：
 
 ```bash
-# 1. 从 URL 安装（自动清理安装包）
+# 1. 从 URL 安装（仅支持 http/https，流式下载不落盘）
 curl -X POST http://127.0.0.1:9876/plugins \
   -H "Content-Type: application/json" \
   -d '{"url": "https://example.com/myplugin.hmap"}'
 
-# 2. 从本地路径安装（保留安装包）
+# 2. 从本地路径安装（读取指定文件，不移动原文件）
 curl -X POST http://127.0.0.1:9876/plugins \
   -H "Content-Type: application/json" \
   -d '{"path": "/path/to/myplugin.hmap"}'
@@ -187,9 +209,18 @@ curl -X POST http://127.0.0.1:9876/plugins \
   --data-binary @dist/myplugin.hmap
 ```
 
+`9876` 为 pluginmgr 本地监听端口（默认仅监听 127.0.0.1，无鉴权）。
+
 安装后需调用 `/api/v1/plugins/reload` 或重启内核生效。
 
-也可通过 WebUI 插件管理页面上传安装。
+也可通过 WebUI 插件管理页面上传安装，或走 WebUI 的 HTTP API（端口默认 8080，需 `api_key` 鉴权，内部代理到 pluginmgr）：
+
+```bash
+curl -X POST http://127.0.0.1:8080/api/v1/plugins \
+  -H "Authorization: Bearer <api_key>" \
+  -H "Content-Type: application/json" \
+  -d '{"path": "/path/to/myplugin.hmap"}'
+```
 
 ---
 
@@ -488,6 +519,14 @@ outputCh := s.OutputChan()
 ## 三、Lua 插件开发详解
 
 Lua 插件适合轻量级快速原型，无需 Go 编译环境，修改后直接重启内核即可生效。
+
+### 执行模型
+
+Lua 插件运行在内核进程内的 gopher-lua 解释器中（单 Lua 状态 + 互斥锁），与 Go 插件的执行模型有本质区别：
+
+- **被动回调模型**：`main.lua` 仅在加载时执行一次，此后插件的工具、阶段钩子、输出/输入通道、注册 API 全部由内核事件驱动回调 Lua 函数；插件不能自己启动后台任务。
+- **无并发/无常驻服务能力**：Lua 侧没有 goroutine、协程调度、`os`/`io` 库和 socket 监听能力，唯一主动出站通道是 `sdk.http.get/post`（同步请求）。任何阻塞循环都会持锁卡死该插件的所有调用。
+- **常驻服务（如监听端口、后台轮询、定时任务）请使用 Go 插件**（工具链编译的 `.so`/`.dll`，可自行启动 goroutine，参见 webui/cli 插件）。Lua 插件的等价做法是事件驱动：注册工具/阶段钩子/通道由内核回调，或经 `sdk.http` 与外部进程交互。
 
 ### 插件结构
 

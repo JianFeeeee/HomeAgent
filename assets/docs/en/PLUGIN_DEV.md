@@ -64,6 +64,14 @@ plugindev sdk path       # show current SDK path
 
 SDK is stored at `~/.homeagent/plugindev/sdk/<version>/`; `plugindev init` reads the current SDK version for `go.mod`.
 
+### Source Debugging
+
+`plugindev debug` interprets plugin source and prints a call trace, no compilation environment needed:
+
+```bash
+plugindev debug [dir]   # dir defaults to the current directory
+```
+
 ### Creating a Go Plugin
 
 ```bash
@@ -71,8 +79,11 @@ plugindev init myplugin
 cd myplugin
 # Edit plugin code
 vim plugin.go
-# Build and package
+# Build and package (default is a multi-platform bundle, see below)
 plugindev build
+# Output: dist/myplugin_bundle.hmap
+# Single-platform build:
+plugindev build --no-bundle
 # Output: dist/myplugin_linux_amd64.hmap (or windows_amd64)
 ```
 
@@ -121,14 +132,19 @@ myluaplugin/
 
 ```bash
 cd myplugin
-plugindev build
+plugindev build                      # default bundle mode (multi-platform)
+plugindev build --no-bundle          # single-target build (per plg.json targets)
+plugindev build --target linux/amd64 # append a target on top of plg.json targets
+plugindev build --outdir dist        # output directory (default: dist)
+plugindev build --sdk-path <path>    # SDK path override (go.mod replace)
+plugindev build --replace <mod@path> # append a go.mod replace directive (repeatable)
 ```
 
 Execution process:
-1. Reads `plg.json` `targets` field to determine target platforms
-2. Auto-generates C ABI bridge code (`z_bridge_gen.go` + `z_entry.c`)
+1. Reads `plg.json` `targets`/`bundle` fields to determine build targets (bundle takes priority, see below)
+2. Auto-generates C ABI bridge code (`z_bridge_gen.go` + `z_entry.c`; Windows only `z_bridge_gen.go`)
 3. **Go plugin**: Runs `go build -buildmode=c-shared` (produces `.so` / `.dylib` / `.dll`)
-4. **Lua plugin**: Packages source code directly, no compilation needed
+4. **Lua plugin**: Packages source code directly, no compilation needed (contents: `plugin.json` + `main.lua`, plus optional `README.md`, `LICENSE`, `thirdpart/*.lua`)
 5. Generates `plugin.json` output manifest
 6. Packages as `.hmap` distribution (zip format, containing `plugin.json` + binary)
 
@@ -136,7 +152,7 @@ Execution process:
 
 | File | Purpose | Key fields |
 |------|---------|------------|
-| `plg.json` | Project metadata, maintained by developer | `targets` — build targets (e.g. `"linux/amd64,windows/amd64"`) |
+| `plg.json` | Project metadata, maintained by developer | `targets` — single-target build list (e.g. `"linux/amd64,windows/amd64"`); `bundle` — multi-platform bundle switch (default `true`) |
 | `plugin.json` | Build artifact manifest, auto-generated | `entry` — entry filename; `platforms` — declared platforms |
 
 Each target produces a separate `.hmap`; binary name by platform:
@@ -147,23 +163,28 @@ Each target produces a separate `.hmap`; binary name by platform:
 | macOS | `plugin.dylib` |
 | Windows | `plugin.dll` |
 
-### Multi-platform bundle: --bundle
+### Build Targets & Multi-platform Bundle
+
+**`plugindev build` defaults to bundle mode** (unless `plg.json` explicitly sets `"bundle": false`): it builds linux/amd64 + darwin/amd64 + windows/amd64 in one pass, producing a single `.hmap` with all platform binaries. The output manifest includes a `platforms` field. The kernel auto-selects the correct binary during installation.
 
 ```bash
-plugindev build --bundle
+plugindev build              # default bundle, outputs dist/myplugin_bundle.hmap
+plugindev build --bundle     # explicitly enable bundle (same as above)
+plugindev build --no-bundle  # disable bundle, build per plg.json targets
 ```
 
-Builds linux/amd64 + darwin/amd64 + windows/amd64 in one pass, producing a single `.hmap`
-with all platform binaries. The output manifest includes a `platforms` field.
-The kernel auto-selects the correct binary during installation.
+Notes:
+- In bundle mode the `plg.json` `targets` field is ignored; the three platforms above are always built
+- Cross-compilation needs the corresponding toolchains (e.g. building darwin on Linux requires clang/macOS SDK); if a toolchain is missing the build fails — use `--no-bundle` to build only the current platform
+- Single-target output naming: `{name}_{os}_{arch}.hmap`, e.g. `myplugin_linux_amd64.hmap`
 
 Output in `dist/` directory:
 ```
 dist/
-├── myplugin_linux_amd64.hmap      # Single platform: Linux
-├── myplugin_windows_amd64.hmap    # Single platform: Windows
-├── myplugin_darwin_amd64.hmap     # Single platform: macOS
-├── myplugin_bundle.hmap           # Multi-platform bundle
+├── myplugin_bundle.hmap           # default bundle: multi-platform
+├── myplugin_linux_amd64.hmap      # after --no-bundle: Linux
+├── myplugin_windows_amd64.hmap    # after --no-bundle: Windows
+├── myplugin_darwin_amd64.hmap     # after --no-bundle: macOS
 └── myplugin_lua.hmap              # Lua plugin
 ```
 
@@ -172,12 +193,12 @@ dist/
 Install via PluginMgr HTTP API (three methods):
 
 ```bash
-# 1. Install from URL (auto-cleanup)
+# 1. Install from URL (http/https only, streamed, no local temp file)
 curl -X POST http://127.0.0.1:9876/plugins \
   -H "Content-Type: application/json" \
   -d '{"url": "https://example.com/myplugin.hmap"}'
 
-# 2. Install from local path (keeps source file)
+# 2. Install from local path (reads the given file, source file untouched)
 curl -X POST http://127.0.0.1:9876/plugins \
   -H "Content-Type: application/json" \
   -d '{"path": "/path/to/myplugin.hmap"}'
@@ -187,9 +208,18 @@ curl -X POST http://127.0.0.1:9876/plugins \
   --data-binary @dist/myplugin.hmap
 ```
 
+`9876` is the pluginmgr local port (defaults to listening on 127.0.0.1 only, no auth).
+
 Reload plugins via `/api/v1/plugins/reload` or restart the kernel to activate.
 
-Or upload via WebUI plugin management page.
+Or upload via the WebUI plugin management page, or through the WebUI HTTP API (default port 8080, requires the `api_key` bearer token; it proxies to pluginmgr):
+
+```bash
+curl -X POST http://127.0.0.1:8080/api/v1/plugins \
+  -H "Authorization: Bearer <api_key>" \
+  -H "Content-Type: application/json" \
+  -d '{"path": "/path/to/myplugin.hmap"}'
+```
 
 ---
 
@@ -490,6 +520,14 @@ outputCh := s.OutputChan()
 ## 3. Lua Plugin Development in Detail
 
 Lua plugins are suitable for lightweight rapid prototyping, requiring no Go compilation environment. Changes take effect after kernel restart.
+
+### Execution Model
+
+Lua plugins run inside the kernel process on a gopher-lua interpreter (single Lua state guarded by a mutex). This differs fundamentally from Go plugins:
+
+- **Passive callback model**: `main.lua` executes only once at load time. Afterward, tools, stage hooks, output/input channels, and registered APIs are all invoked by the kernel via callbacks into Lua functions. Plugins cannot start background tasks on their own.
+- **No concurrency / no long-running services**: Lua has no goroutines, coroutine scheduling, `os`/`io` libraries, or socket listening. The only outbound capability is `sdk.http.get/post` (synchronous). Any blocking loop will stall every call of that plugin while holding the lock.
+- **For long-running services (listening on a port, background polling, timers) use a Go plugin** (`.so`/`.dll` built with the toolchain, which may spawn goroutines — see the webui/cli plugins). The Lua equivalent is event-driven: register tools/stage hooks/channels to be called back by the kernel, or interact with external processes via `sdk.http`.
 
 ### Plugin Structure
 
