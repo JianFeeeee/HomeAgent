@@ -28,7 +28,7 @@ func TestQuickChatWithRealKey(t *testing.T) {
 		Model:   "deepseek-v4-flash",
 		BaseURL: "https://api.deepseek.com",
 		APIKey:  apiKey,
-	}, vm, "deepseek"))
+	}, vm, "deepseek", "deepseek"))
 
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()

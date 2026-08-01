@@ -26,10 +26,12 @@ func (m *mockSettings) RegisterDef(def pubsdk.ConfigDef) {}
 func (m *mockSettings) Defs(prefix string) []*pubsdk.ConfigDef { return nil }
 func (m *mockSettings) Dump() map[string]interface{} { return nil }
 func (m *mockSettings) Plugins() []string { return nil }
+func (m *mockSettings) DefsCore(prefix string) []*sdk.ConfigDef { return nil }
+func (m *mockSettings) DefsPlugin(plugin, prefix string) []*sdk.ConfigDef { return nil }
 
 func TestLaunchSidecarNoMainJS(t *testing.T) {
 	tmpDir := t.TempDir()
-	sp, err := launchSidecar(tmpDir, "nonexistent")
+	sp, err := launchSidecar(tmpDir, "nonexistent", "")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -50,7 +52,7 @@ func TestLaunchSidecarAndListTools(t *testing.T) {
 		t.Fatalf("write test plugin: %v", err)
 	}
 
-	sp, err := launchSidecar(tmpDir, "echoplugin")
+	sp, err := launchSidecar(tmpDir, "echoplugin", "")
 	if err != nil {
 		t.Fatalf("launch sidecar: %v", err)
 	}
@@ -92,7 +94,7 @@ func TestCallEchoTool(t *testing.T) {
 		t.Fatalf("write test plugin: %v", err)
 	}
 
-	sp, err := launchSidecar(tmpDir, "echoplugin")
+	sp, err := launchSidecar(tmpDir, "echoplugin", "")
 	if err != nil {
 		t.Fatalf("launch sidecar: %v", err)
 	}
@@ -124,7 +126,7 @@ func TestCallAddTool(t *testing.T) {
 		t.Fatalf("write test plugin: %v", err)
 	}
 
-	sp, err := launchSidecar(tmpDir, "echoplugin")
+	sp, err := launchSidecar(tmpDir, "echoplugin", "")
 	if err != nil {
 		t.Fatalf("launch sidecar: %v", err)
 	}
@@ -157,7 +159,7 @@ func TestCallNonexistentTool(t *testing.T) {
 		t.Fatalf("write test plugin: %v", err)
 	}
 
-	sp, err := launchSidecar(tmpDir, "echoplugin")
+	sp, err := launchSidecar(tmpDir, "echoplugin", "")
 	if err != nil {
 		t.Fatalf("launch sidecar: %v", err)
 	}
@@ -182,7 +184,7 @@ func TestConcurrentCalls(t *testing.T) {
 		t.Fatalf("write test plugin: %v", err)
 	}
 
-	sp, err := launchSidecar(tmpDir, "echoplugin")
+	sp, err := launchSidecar(tmpDir, "echoplugin", "")
 	if err != nil {
 		t.Fatalf("launch sidecar: %v", err)
 	}
@@ -217,7 +219,7 @@ func launchSimulator(t *testing.T, pluginDir, name string) *sidecarProcess {
 	if err != nil {
 		t.Fatalf("abs simulator path: %v", err)
 	}
-	sp, err := launchProcess("node", simPath, pluginDir, name)
+	sp, err := launchProcess("node", simPath, pluginDir, name, "")
 	if err != nil {
 		t.Fatalf("launch simulator for %s: %v", name, err)
 	}
@@ -337,8 +339,6 @@ func TestLoadOCPluginViaPluginStart(t *testing.T) {
 			t.Fatalf("write %s: %v", name, err)
 		}
 	}
-
-	SimulatorDir = filepath.Join(t.TempDir(), ".simulator")
 
 	p := New("openclaw", skillsDir)
 

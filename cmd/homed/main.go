@@ -31,10 +31,10 @@ import (
 	"gitcode.com/JianFeeeee/HomeAgent/internal/nlp"
 	"gitcode.com/JianFeeeee/HomeAgent/internal/plugin"
 	cli "gitcode.com/JianFeeeee/HomeAgent/internal/plugins/cli"
-	healthcheck "gitcode.com/JianFeeeee/HomeAgent/internal/plugins/healthcheck"
-	openclaw "gitcode.com/JianFeeeee/HomeAgent/internal/plugins/clawhubadapter"
-	pluginmgr "gitcode.com/JianFeeeee/HomeAgent/internal/plugins/pluginmgr"
-	webui "gitcode.com/JianFeeeee/HomeAgent/internal/plugins/webui"
+	_ "gitcode.com/JianFeeeee/HomeAgent/internal/plugins/clawhubadapter"
+	_ "gitcode.com/JianFeeeee/HomeAgent/internal/plugins/healthcheck"
+	_ "gitcode.com/JianFeeeee/HomeAgent/internal/plugins/pluginmgr"
+	_ "gitcode.com/JianFeeeee/HomeAgent/internal/plugins/webui"
 	sdk "gitcode.com/JianFeeeee/HomeAgent/internal/sdk"
 	"gitcode.com/JianFeeeee/HomeAgent/internal/skill"
 	"gitcode.com/JianFeeeee/HomeAgent/internal/supervisor"
@@ -284,7 +284,7 @@ func main() {
 			Temperature:   cfg.LLM.Temperature,
 			MaxTokens:     cfg.LLM.MaxTokens,
 			ContextWindow: src.ContextWindow,
-		}, luaVM, src.Adapter)
+		}, luaVM, src.Name, src.Adapter)
 		providerMgr.Register(src.Name, luaProvider)
 	}
 	if cfg.LLM.Provider != "" {
@@ -412,25 +412,30 @@ func main() {
 		InputProcessing:  cfg.InputProcessing,
 	})
 
+	// 通过 Registry 将内核依赖注入每个插件的 PluginSDK（阶段6 将替换遗留的 util.Configure）
+	pluginReg.SetLuaVM(luaVM)
+	pluginReg.SetBaseAPIKey(baseAPIKey)
+	pluginReg.SetSupervisor(supervisor.NewSDKAdapter(sup))
+	pluginReg.SetSkillManager(skMgr)
+	pluginReg.SetTracker(trk)
+	pluginReg.SetConfig(cfg)
+	pluginReg.SetStageHost(stageHost)
+	pluginReg.SetIndexer(memIdx)
+	pluginReg.SetStatusProvider(agent)
+
 	// 为内置插件注入内核依赖（各插件通过 init() 自注册工厂）
 	cli.DefaultSocket = *cliSocket
-	openclaw.SkillsDir = filepath.Join(cfg.Daemon.DataDir, "skills")
+	// webui 插件作为内置插件经 Registry 启动，读取自身 settings["addr"]（默认 :8080）。
+	// 保留 CLI --webui 与 webui.listen_addr 配置对监听地址的覆盖。
 	webuiListenAddr := *httpAddr
 	if webuiListenAddr == "" {
 		webuiListenAddr = cfgReg.GetString("webui.listen_addr", ":8080")
 	}
-	webui.Configure(webuiListenAddr,
-		sup, memDB, skMgr, luaVM, cfg, iom, textMem, ks, trk, cfgReg, pluginReg, evBus, agent,
-		providerMgr, baseAPIKey,
-	)
-	healthcheck.Configure(stageHost, iom, pluginReg, memDB, ks, docStore, providerMgr, agent)
-
-	// Wire pluginmgr dependencies
-	pluginmgr.PluginDir = cfg.Plugin.Dir
-	pluginmgr.Reg = pluginReg
-
-	// CLI 插件结构化命令 — 直接注入内核依赖，不依赖 HTTP
-	cli.Configure(pluginReg, cfgReg, agent, cfg.Plugin.Dir)
+	if ps := cfgReg.PluginConfig("webui"); ps != nil {
+		if v, _ := ps.Get("addr"); v == nil {
+			_ = ps.Set("addr", webuiListenAddr)
+		}
+	}
 
 	// ========================================================================
 	// 依存句法分析器（内嵌 ONNX 模型 / 规则引擎）

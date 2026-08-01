@@ -66,11 +66,7 @@ var downloadClient = &http.Client{
 	},
 }
 
-var (
-	PluginDir string          // 由 main.go 设置
-	Reg       *plugin.Registry // 由 main.go 设置
-	HTTPAddr  = "127.0.0.1:9876" // 监听地址，可被 main.go 覆写或 settings 配置
-)
+var HTTPAddr = "127.0.0.1:9876" // 监听地址，可被 settings 配置
 
 func init() {
 	plugin.RegisterPluginMeta("pluginmgr", "插件管理", "Plugin Manager")
@@ -80,12 +76,14 @@ func init() {
 }
 
 type Plugin struct {
-	name    string
-	mu      sync.Mutex
-	server  *http.Server
-	mux     *http.ServeMux
-	listen  net.Listener
-	httpURL string
+	name      string
+	mu        sync.Mutex
+	server    *http.Server
+	mux       *http.ServeMux
+	listen    net.Listener
+	httpURL   string
+	sdk       *sdk.PluginSDK
+	pluginDir string
 }
 
 func New(name string) *Plugin {
@@ -96,6 +94,7 @@ func (p *Plugin) Name() string { return p.name }
 
 func (p *Plugin) Start(s *sdk.PluginSDK) error {
 	s.SetAutoRestart(true)
+	p.sdk = s
 	s.Settings().RegisterDef(sdk.ConfigDef{
 		Key:         "http_addr",
 		Default:     HTTPAddr,
@@ -108,6 +107,12 @@ func (p *Plugin) Start(s *sdk.PluginSDK) error {
 	if v, _ := s.Settings().Get("http_addr"); v != nil {
 		if addr, ok := v.(string); ok && addr != "" {
 			HTTPAddr = addr
+		}
+	}
+
+	if v, _ := s.Settings().GetCore("plugin.dir"); v != nil {
+		if dir, ok := v.(string); ok && dir != "" {
+			p.pluginDir = dir
 		}
 	}
 
@@ -374,7 +379,7 @@ func (p *Plugin) installFromData(data []byte) (interface{}, error) {
 		}, nil
 	}
 
-	dir := PluginDir
+	dir := p.pluginDir
 	if dir == "" {
 		return map[string]interface{}{"error": "plugin dir not configured"}, nil
 	}
@@ -409,7 +414,7 @@ func (p *Plugin) installFromData(data []byte) (interface{}, error) {
 }
 
 func (p *Plugin) listPlugins() (interface{}, error) {
-	dir := PluginDir
+	dir := p.pluginDir
 	if dir == "" {
 		return []map[string]interface{}{}, nil
 	}
@@ -446,7 +451,7 @@ func (p *Plugin) listPlugins() (interface{}, error) {
 }
 
 func (p *Plugin) removePlugin(name string) (interface{}, error) {
-	dir := filepath.Join(PluginDir, name)
+	dir := filepath.Join(p.pluginDir, name)
 	if _, err := os.Stat(dir); os.IsNotExist(err) {
 		return map[string]interface{}{"error": "plugin not found", "name": name}, nil
 	}
@@ -456,8 +461,10 @@ func (p *Plugin) removePlugin(name string) (interface{}, error) {
 	}
 
 	// 同步清理禁用表
-	if Reg != nil {
-		Reg.EnablePlugin(name)
+	if p.sdk != nil && p.sdk.PluginMgr() != nil {
+		if err := p.sdk.PluginMgr().EnablePlugin(name); err != nil {
+			log.Printf("[pluginmgr] enable %s after remove: %v", name, err)
+		}
 	}
 
 	return map[string]interface{}{
@@ -468,7 +475,7 @@ func (p *Plugin) removePlugin(name string) (interface{}, error) {
 }
 
 func (p *Plugin) pluginInfo(name string) (interface{}, error) {
-	dir := filepath.Join(PluginDir, name)
+	dir := filepath.Join(p.pluginDir, name)
 	m, err := plugin.ReadManifest(dir)
 	if err != nil {
 		return nil, fmt.Errorf("plugin %q not found", name)

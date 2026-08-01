@@ -9,6 +9,7 @@ import (
 
 	"gitcode.com/JianFeeeee/HomeAgent/internal/network"
 	"gitcode.com/JianFeeeee/HomeAgent/internal/tracker"
+	sdk "gitcode.com/JianFeeeee/HomeAgent/internal/sdk"
 	"gitcode.com/JianFeeeee/HomeAgent/pkg/types"
 )
 
@@ -224,11 +225,5 @@ func (d *Daemon) RollbackAgent(id types.AgentID, snapID types.SnapshotID) error 
 	return fmt.Errorf("no tracker available for rollback")
 }
 
-type AgentStatus struct {
-	ID           types.AgentID            `json:"id"`
-	State        types.AgentState         `json:"state"`
-	Health       types.HealthStatus       `json:"health"`
-	Uptime       time.Duration            `json:"uptime,omitempty"`
-	Network      types.NetworkCheckResult `json:"network,omitempty"`
-	TrackerStats map[string]interface{}   `json:"tracker_stats,omitempty"`
-}
+// AgentStatus 已迁入内置 SDK，此处保留别名以兼容现有调用方。
+type AgentStatus = sdk.AgentStatus

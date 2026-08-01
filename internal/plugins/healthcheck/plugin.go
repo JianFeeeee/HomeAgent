@@ -9,25 +9,8 @@ import (
 	"sync"
 	"time"
 
-	agentAPI "gitcode.com/JianFeeeee/HomeAgent/internal/agent/api"
-	agentCore "gitcode.com/JianFeeeee/HomeAgent/internal/agent/core"
-	agentIO "gitcode.com/JianFeeeee/HomeAgent/internal/agent/io"
-	"gitcode.com/JianFeeeee/HomeAgent/internal/knowledge"
-	"gitcode.com/JianFeeeee/HomeAgent/internal/memory"
-	doc "gitcode.com/JianFeeeee/HomeAgent/internal/memory/document"
 	"gitcode.com/JianFeeeee/HomeAgent/internal/plugin"
 	sdk "gitcode.com/JianFeeeee/HomeAgent/internal/sdk"
-)
-
-var (
-	hcStageHost      *agentCore.StageHost
-	hcIOMgr          *agentIO.IOManager
-	hcPluginReg      *plugin.Registry
-	hcMemory         *memory.GraphDB
-	hcKnowledge      *knowledge.Store
-	hcDocStore       *doc.Store
-	hcProviderMgr    *agentAPI.ProviderManager
-	hcStatusProvider agentCore.StatusProvider
 )
 
 type toolInfo struct {
@@ -50,24 +33,9 @@ type llmReport struct {
 	Detail   string `json:"detail,omitempty"`
 }
 
-func Configure(sh *agentCore.StageHost, iom *agentIO.IOManager, pr *plugin.Registry,
-	mem *memory.GraphDB, ks *knowledge.Store, ds *doc.Store, pm *agentAPI.ProviderManager, sp agentCore.StatusProvider) {
-	hcStageHost = sh
-	hcIOMgr = iom
-	hcPluginReg = pr
-	hcMemory = mem
-	hcKnowledge = ks
-	hcDocStore = ds
-	hcProviderMgr = pm
-	hcStatusProvider = sp
-}
-
 func init() {
 	plugin.RegisterPluginMeta("healthcheck", "健康检查", "Health Check")
 	plugin.RegisterFactory("healthcheck", func(name string, config map[string]interface{}) (sdk.Plugin, error) {
-		if hcStageHost == nil {
-			return nil, nil
-		}
 		return New(name), nil
 	})
 }
@@ -215,7 +183,7 @@ func (p *Plugin) Start(s *sdk.PluginSDK) error {
 			"properties": map[string]interface{}{},
 		},
 	}, func(args map[string]interface{}) (interface{}, error) {
-		return p.listAllTools()
+		return p.listAllTools(s)
 	})
 
 	p.selfToolNames["healthcheck_memory"] = true
@@ -227,7 +195,7 @@ func (p *Plugin) Start(s *sdk.PluginSDK) error {
 			"properties": map[string]interface{}{},
 		},
 	}, func(args map[string]interface{}) (interface{}, error) {
-		return p.checkMemory()
+		return p.checkMemory(s)
 	})
 
 	p.selfToolNames["healthcheck_report"] = true
@@ -255,7 +223,7 @@ func (p *Plugin) Start(s *sdk.PluginSDK) error {
 		return map[string]interface{}{"ok": true, "received": count}, nil
 	})
 
-	if hcStatusProvider != nil {
+	if s.Status() != nil {
 		p.selfToolNames["healthcheck_kernel"] = true
 		s.RegisterTool("healthcheck_kernel", sdk.ToolDef{
 			Name:        "healthcheck_kernel",
@@ -265,7 +233,7 @@ func (p *Plugin) Start(s *sdk.PluginSDK) error {
 				"properties": map[string]interface{}{},
 			},
 		}, func(args map[string]interface{}) (interface{}, error) {
-			return hcStatusProvider.GetKernelStatus(), nil
+			return s.Status().GetKernelStatus(), nil
 		})
 	}
 
@@ -300,9 +268,9 @@ func (p *Plugin) Start(s *sdk.PluginSDK) error {
 		p.startAutoCheck(s, p.autoInterval)
 	}
 
-	log.Printf("[healthcheck] ready (stageHost=%v iom=%v reg=%v mem=%v ks=%v ds=%v pm=%v sp=%v)",
-		hcStageHost != nil, hcIOMgr != nil, hcPluginReg != nil,
-		hcMemory != nil, hcKnowledge != nil, hcDocStore != nil, hcProviderMgr != nil, hcStatusProvider != nil)
+	log.Printf("[healthcheck] ready (tool=%v mem=%v ks=%v ds=%v llm=%v plugins=%v status=%v)",
+		s.Tool() != nil, s.Memory() != nil, s.Knowledge() != nil,
+		s.DocMemory() != nil, s.LLM() != nil, s.PluginMgr() != nil, s.Status() != nil)
 	return nil
 }
 
@@ -367,36 +335,32 @@ func (p *Plugin) runAutoCheck(s *sdk.PluginSDK) {
 func (p *Plugin) runFullCheck(s *sdk.PluginSDK) (interface{}, error) {
 	results := []checkResult{}
 
-	pluginResult := p.checkPluginsRaw()
+	pluginResult := p.checkPluginsRaw(s)
 	results = append(results, pluginResult...)
 
-	toolResult := p.checkToolsRaw()
+	toolResult := p.checkToolsRaw(s)
 	results = append(results, toolResult...)
 
-	if hcMemory != nil {
-		r := p.testMemoryRaw()
-		results = append(results, r)
+	if s.Memory() != nil {
+		results = append(results, p.testMemoryRaw(s))
 	} else {
 		results = append(results, checkResult{Name: "memory", Status: "skip", Detail: "图记忆未初始化", Pass: true})
 	}
 
-	if hcKnowledge != nil {
-		r := p.testKnowledgeRaw()
-		results = append(results, r)
+	if s.Knowledge() != nil {
+		results = append(results, p.testKnowledgeRaw(s))
 	} else {
 		results = append(results, checkResult{Name: "knowledge", Status: "skip", Detail: "知识库未初始化", Pass: true})
 	}
 
-	if hcDocStore != nil {
-		r := p.testDocStoreRaw()
-		results = append(results, r)
+	if s.DocMemory() != nil {
+		results = append(results, p.testDocStoreRaw(s))
 	} else {
 		results = append(results, checkResult{Name: "documents", Status: "skip", Detail: "文档记忆未初始化", Pass: true})
 	}
 
-	if hcProviderMgr != nil {
-		r := p.testLLMDriven()
-		results = append(results, r)
+	if s.LLM() != nil {
+		results = append(results, p.testLLMDriven(s))
 	} else {
 		results = append(results, checkResult{Name: "llm_discovery", Status: "skip", Detail: "LLM Provider 未初始化", Pass: true})
 	}
@@ -424,7 +388,7 @@ func (p *Plugin) runFullCheck(s *sdk.PluginSDK) (interface{}, error) {
 }
 
 func (p *Plugin) checkPlugins(s *sdk.PluginSDK) (interface{}, error) {
-	results := p.checkPluginsRaw()
+	results := p.checkPluginsRaw(s)
 	return map[string]interface{}{
 		"status":  "ok",
 		"plugins": results,
@@ -432,12 +396,12 @@ func (p *Plugin) checkPlugins(s *sdk.PluginSDK) (interface{}, error) {
 	}, nil
 }
 
-func (p *Plugin) checkPluginsRaw() []checkResult {
-	if hcPluginReg == nil {
+func (p *Plugin) checkPluginsRaw(s *sdk.PluginSDK) []checkResult {
+	if s.PluginMgr() == nil {
 		return []checkResult{{Name: "plugins", Status: "skip", Detail: "插件注册表未初始化", Pass: true}}
 	}
 
-	names := hcPluginReg.List()
+	names := s.PluginMgr().ListLoadedPlugins()
 	if names == nil {
 		names = []string{}
 	}
@@ -449,8 +413,8 @@ func (p *Plugin) checkPluginsRaw() []checkResult {
 	}}
 }
 
-func (p *Plugin) listAllTools() (interface{}, error) {
-	tools := p.collectAllTools()
+func (p *Plugin) listAllTools(s *sdk.PluginSDK) (interface{}, error) {
+	tools := p.collectAllTools(s)
 	return map[string]interface{}{
 		"status": "ok",
 		"count":  len(tools),
@@ -458,8 +422,8 @@ func (p *Plugin) listAllTools() (interface{}, error) {
 	}, nil
 }
 
-func (p *Plugin) checkToolsRaw() []checkResult {
-	tools := p.collectAllTools()
+func (p *Plugin) checkToolsRaw(s *sdk.PluginSDK) []checkResult {
+	tools := p.collectAllTools(s)
 	return []checkResult{{
 		Name:   "tools",
 		Status: "ok",
@@ -468,7 +432,7 @@ func (p *Plugin) checkToolsRaw() []checkResult {
 	}}
 }
 
-func (p *Plugin) collectAllTools() []toolInfo {
+func (p *Plugin) collectAllTools(s *sdk.PluginSDK) []toolInfo {
 	seen := map[string]bool{}
 	var tools []toolInfo
 
@@ -480,14 +444,12 @@ func (p *Plugin) collectAllTools() []toolInfo {
 		tools = append(tools, toolInfo{Name: name, Source: source, Description: desc})
 	}
 
-	if hcStageHost != nil {
-		for _, def := range hcStageHost.GetToolDefs() {
+	if s.Tool() != nil {
+		for _, def := range s.Tool().GetToolDefs() {
 			addTool(def.Name, "plugin", def.Description)
 		}
-	}
 
-	if hcIOMgr != nil {
-		for _, def := range hcIOMgr.GetAllTools() {
+		for _, def := range s.Tool().GetAllTools() {
 			addTool(def.Name, "device", def.Description)
 		}
 	}
@@ -495,23 +457,18 @@ func (p *Plugin) collectAllTools() []toolInfo {
 	return tools
 }
 
-func (p *Plugin) testMemoryRaw() checkResult {
+func (p *Plugin) testMemoryRaw(s *sdk.PluginSDK) checkResult {
 	marker := fmt.Sprintf("_hc_%d", time.Now().UnixNano())
-	triples := []memory.Triple{
+	triples := []sdk.Triple{
 		{Subject: marker, Relation: "is", Object: "healthcheck_test", SubjectType: "System", ObjectType: "Flag"},
 	}
 
 	start := time.Now()
-	ec, rc, err := hcMemory.Commit(triples, "healthcheck", 0)
-	if err != nil {
+	if err := s.Memory().Commit(triples); err != nil {
 		return checkResult{Name: "memory_write", Status: "fail", Detail: fmt.Sprintf("写入失败: %v", err), Pass: false}
 	}
 
-	if _, _, err := hcMemory.Commit(triples, "healthcheck_cleanup", 0); err != nil {
-		log.Printf("[healthcheck] memory cleanup error: %v", err)
-	}
-
-	n, err := hcMemory.Purge(map[string]string{"subject_contains": marker}, "hard")
+	n, err := s.Memory().Purge(map[string]string{"subject_contains": marker}, "hard")
 	if err != nil {
 		return checkResult{Name: "memory_purge", Status: "fail", Detail: fmt.Sprintf("清理失败: %v", err), Pass: false}
 	}
@@ -520,25 +477,29 @@ func (p *Plugin) testMemoryRaw() checkResult {
 	return checkResult{
 		Name:   "memory",
 		Status: "ok",
-		Detail: fmt.Sprintf("写入 %d 实体/%d 关系, 清理 %d 条, 耗时 %v", ec, rc, n, elapsed.Round(time.Millisecond)),
+		Detail: fmt.Sprintf("写入+清理 %d 条, 耗时 %v", n, elapsed.Round(time.Millisecond)),
 		Pass:   true,
 	}
 }
 
-func (p *Plugin) testKnowledgeRaw() checkResult {
+func (p *Plugin) testKnowledgeRaw(s *sdk.PluginSDK) checkResult {
 	marker := fmt.Sprintf("_hc_knowledge_test_%d", time.Now().UnixNano())
 	start := time.Now()
 
-	if err := hcKnowledge.Add(marker, "健康检查测试标记，可忽略"); err != nil {
+	if err := s.Knowledge().Add(marker, "健康检查测试标记，可忽略"); err != nil {
 		return checkResult{Name: "knowledge", Status: "fail", Detail: fmt.Sprintf("写入失败: %v", err), Pass: false}
 	}
 
-	results := hcKnowledge.Search("健康检查测试标记", 3)
+	results, err := s.Knowledge().Search("健康检查测试标记", 3)
+	if err != nil {
+		s.Knowledge().Remove(marker)
+		return checkResult{Name: "knowledge", Status: "fail", Detail: fmt.Sprintf("查询失败: %v", err), Pass: false}
+	}
 
 	elapsed := time.Since(start)
 
 	// 清理测试条目，避免积累
-	hcKnowledge.Remove(marker)
+	s.Knowledge().Remove(marker)
 
 	if len(results) > 0 {
 		return checkResult{
@@ -557,20 +518,21 @@ func (p *Plugin) testKnowledgeRaw() checkResult {
 	}
 }
 
-func (p *Plugin) testDocStoreRaw() checkResult {
+func (p *Plugin) testDocStoreRaw(s *sdk.PluginSDK) checkResult {
 	start := time.Now()
-	doc := &doc.Doc{
-		Summary: "健康检查测试文档",
+	doc := &sdk.Doc{
+		Title:   fmt.Sprintf("健康检查测试文档 %d", time.Now().UnixNano()),
 		Content: "这是一条由 healthcheck 插件创建的测试文档，用于验证文档记忆系统是否正常工作。",
-		Tags:    []string{"healthcheck", "test"},
-		Source:  "healthcheck",
 	}
-	if err := hcDocStore.Insert(doc); err != nil {
+	if err := s.DocMemory().Insert(doc); err != nil {
 		return checkResult{Name: "documents", Status: "fail", Detail: fmt.Sprintf("写入失败: %v", err), Pass: false}
 	}
 
-	if doc.ID != "" {
-		hcDocStore.Remove(doc.ID)
+	// 清理测试文档，避免积累（SDK Insert 不回填 ID，经 Query 按标题定位）
+	for _, d := range s.DocMemory().Query("健康检查测试文档", 10) {
+		if d.ID != "" && strings.HasPrefix(d.Title, "健康检查测试文档") {
+			s.DocMemory().Remove(d.ID)
+		}
 	}
 
 	elapsed := time.Since(start)
@@ -582,9 +544,9 @@ func (p *Plugin) testDocStoreRaw() checkResult {
 	}
 }
 
-func (p *Plugin) testLLMDriven() checkResult {
-	provider := hcProviderMgr.Default()
-	if provider == nil {
+func (p *Plugin) testLLMDriven(s *sdk.PluginSDK) checkResult {
+	llmName := s.LLM().CurrentSource()
+	if llmName == "" {
 		return checkResult{Name: "llm_discovery", Status: "skip", Detail: "无可用 LLM Provider", Pass: true}
 	}
 
@@ -593,7 +555,7 @@ func (p *Plugin) testLLMDriven() checkResult {
 	defer cancel()
 
 	// 收集所有工具定义（排除健康检查自身的工具以避免循环测试）
-	toolDefs := p.collectToolDefsForLLM()
+	toolDefs := p.collectToolDefsForLLM(s)
 
 	if len(toolDefs) == 0 {
 		return checkResult{Name: "llm_discovery", Status: "skip", Detail: "没有可测试的工具", Pass: true}
@@ -608,15 +570,14 @@ func (p *Plugin) testLLMDriven() checkResult {
 	// 构建 prompt
 	prompt := p.buildDiscoveryPrompt(toolDefs)
 
-	msgs := []agentAPI.Message{{Role: "user", Content: prompt}}
+	msgs := []sdk.LLMMessage{{Role: "user", Content: prompt}}
 	tools := convertToolDefs(toolDefs)
 
-	llmName := provider.Name()
 	turnCount := 0
 	toolCallCount := 0
 
 	for turn := 0; turn < p.llmMaxTurns; turn++ {
-		resp, err := provider.Chat(ctx, &agentAPI.CompletionRequest{
+		resp, err := s.LLM().Chat(ctx, &sdk.LLMCompletionRequest{
 			Messages:   msgs,
 			MaxTokens:  p.llmMaxTokens,
 			Tools:      tools,
@@ -638,12 +599,12 @@ func (p *Plugin) testLLMDriven() checkResult {
 			break
 		}
 
-		msgs = append(msgs, agentAPI.Message{Role: "assistant", Content: resp.Content, ToolCalls: resp.ToolCalls})
+		msgs = append(msgs, sdk.LLMMessage{Role: "assistant", Content: resp.Content, ToolCalls: resp.ToolCalls})
 
 		for _, tc := range resp.ToolCalls {
 			toolCallCount++
-			content := p.executeToolForLLM(tc)
-			msgs = append(msgs, agentAPI.Message{Role: "tool", ToolCallID: tc.ID, Content: content})
+			content := p.executeToolForLLM(s, tc)
+			msgs = append(msgs, sdk.LLMMessage{Role: "tool", ToolCallID: tc.ID, Content: content})
 		}
 	}
 
@@ -666,7 +627,7 @@ func (p *Plugin) testLLMDriven() checkResult {
 
 // collectToolDefsForLLM 收集全部已注册的工具定义供 LLM 发现和测试。
 // 动态排除本插件自身注册的工具（通过 selfToolNames），避免 LLM 自我循环调用。
-func (p *Plugin) collectToolDefsForLLM() []sdk.ToolDef {
+func (p *Plugin) collectToolDefsForLLM(s *sdk.PluginSDK) []sdk.ToolDef {
 	seen := map[string]bool{}
 	var defs []sdk.ToolDef
 
@@ -678,14 +639,12 @@ func (p *Plugin) collectToolDefsForLLM() []sdk.ToolDef {
 		defs = append(defs, d)
 	}
 
-	if hcStageHost != nil {
-		for _, d := range hcStageHost.GetToolDefs() {
+	if s.Tool() != nil {
+		for _, d := range s.Tool().GetToolDefs() {
 			addDef(d)
 		}
-	}
-	if hcIOMgr != nil {
-		for _, d := range hcIOMgr.GetAllTools() {
-			addDef(sdk.ToolDef{Name: d.Name, Description: d.Description, Parameters: d.Parameters})
+		for _, d := range s.Tool().GetAllTools() {
+			addDef(d)
 		}
 	}
 
@@ -715,10 +674,10 @@ func (p *Plugin) buildDiscoveryPrompt(toolDefs []sdk.ToolDef) string {
 }
 
 // executeToolForLLM 在 LLM 工具循环中执行工具调用。
-// healthcheck_report 通过 StageHost 路由到自身注册的 handler，负责收集 LLM 上报。
-func (p *Plugin) executeToolForLLM(tc agentAPI.ToolCall) string {
-	if hcStageHost != nil {
-		result, err := hcStageHost.ExecuteTool(tc.Name, tc.Arguments)
+// healthcheck_report 经 SDK ToolAPI 路由到自身注册的 handler，负责收集 LLM 上报。
+func (p *Plugin) executeToolForLLM(s *sdk.PluginSDK, tc sdk.LLMToolCall) string {
+	if s.Tool() != nil {
+		result, err := s.Tool().ExecuteTool(tc.Name, tc.Arguments)
 		if err != nil {
 			return fmt.Sprintf("调用工具 %s 失败: %v", tc.Name, err)
 		}
@@ -726,7 +685,7 @@ func (p *Plugin) executeToolForLLM(tc agentAPI.ToolCall) string {
 		return string(data)
 	}
 
-	return fmt.Sprintf("工具 %s 不可执行（StageHost 未初始化）", tc.Name)
+	return fmt.Sprintf("工具 %s 不可执行（工具注册表未初始化）", tc.Name)
 }
 
 func convertToolDefs(defs []sdk.ToolDef) []interface{} {
@@ -744,11 +703,11 @@ func convertToolDefs(defs []sdk.ToolDef) []interface{} {
 	return tools
 }
 
-func (p *Plugin) checkMemory() (interface{}, error) {
-	if hcMemory == nil {
+func (p *Plugin) checkMemory(s *sdk.PluginSDK) (interface{}, error) {
+	if s.Memory() == nil {
 		return map[string]interface{}{"status": "skip", "pass": true, "detail": "图记忆未初始化"}, nil
 	}
-	r := p.testMemoryRaw()
+	r := p.testMemoryRaw(s)
 	c := map[string]interface{}{
 		"status": r.Status,
 		"pass":   r.Pass,

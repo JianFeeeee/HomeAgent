@@ -211,7 +211,7 @@ type LuaAdaptedProvider struct {
 	client  *http.Client
 }
 
-func NewLuaAdaptedProvider(cfg BaseConfig, vm *luaVM.VM, adapter string) *LuaAdaptedProvider {
+func NewLuaAdaptedProvider(cfg BaseConfig, vm *luaVM.VM, name, adapter string) *LuaAdaptedProvider {
 	if cfg.Temperature == 0 {
 		cfg.Temperature = 0.7
 	}
@@ -219,7 +219,7 @@ func NewLuaAdaptedProvider(cfg BaseConfig, vm *luaVM.VM, adapter string) *LuaAda
 		cfg.MaxTokens = 4096
 	}
 	return &LuaAdaptedProvider{
-		name:    fmt.Sprintf("lua_%s", adapter),
+		name:    name,
 		cfg:     cfg,
 		vm:      vm,
 		adapter: adapter,

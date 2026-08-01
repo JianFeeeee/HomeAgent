@@ -18,21 +18,23 @@ import (
 	sdk "gitcode.com/JianFeeeee/HomeAgent/internal/sdk"
 	agentAPI "gitcode.com/JianFeeeee/HomeAgent/internal/agent/api"
 	internalConfig "gitcode.com/JianFeeeee/HomeAgent/internal/config"
+	luaVM "gitcode.com/JianFeeeee/HomeAgent/internal/lua"
+	"gitcode.com/JianFeeeee/HomeAgent/internal/skill"
+	"gitcode.com/JianFeeeee/HomeAgent/internal/tracker"
+	"gitcode.com/JianFeeeee/HomeAgent/pkg/types"
 )
 
 type NativeFactory func(name string, config map[string]interface{}) (sdk.Plugin, error)
 
 // PluginMeta 插件显示名称元数据，来源于 plg.json / RegisterPluginMeta。
-type PluginMeta struct {
-	NameZh string `json:"name_zh"`
-	NameEn string `json:"name_en"`
-}
+// 与内置 SDK 中的 PluginMeta 保持一致，供 PluginManager 接口返回。
+type PluginMeta = sdk.PluginMeta
 
 var globalPluginMeta sync.Map // name -> PluginMeta
 
 // RegisterPluginMeta 供插件包在 init() 中调用，注册显示名称。
 func RegisterPluginMeta(name, nameZh, nameEn string) {
-	globalPluginMeta.Store(name, PluginMeta{NameZh: nameZh, NameEn: nameEn})
+	globalPluginMeta.Store(name, sdk.PluginMeta{NameZh: nameZh, NameEn: nameEn})
 }
 
 // GetPluginMeta 查询插件的显示名称。
@@ -76,12 +78,22 @@ type Registry struct {
 	mgr       *agentAPI.ProviderManager
 	cfgReg    *internalConfig.ConfigRegistry
 	plgDir    string
+	lua       *luaVM.VM
+	baseKey   string
 
 	regTool  sdk.ToolRegistrar
 	regStage sdk.StageRegistrar
 	regAPI   sdk.APIRegistrar
 
 	toolCleaner PluginToolCleaner
+
+	status    sdk.StatusAPI
+	sup       sdk.SupervisorAPI
+	skMgr     *skill.Manager
+	trk       *tracker.Tracker
+	cfg       *types.Config
+	stageHost sdk.ToolSource
+	idx       *memory.Indexer
 
 	knownDisabled map[string]bool
 }
@@ -104,10 +116,19 @@ func (r *Registry) SetKnowledge(ks *knowledge.Store)             { r.ks = ks }
 func (r *Registry) SetProviderManager(mgr *agentAPI.ProviderManager) { r.mgr = mgr }
 func (r *Registry) SetConfigRegistry(cfgReg *internalConfig.ConfigRegistry) { r.cfgReg = cfgReg }
 func (r *Registry) SetPluginDir(dir string)                      { r.plgDir = dir }
+func (r *Registry) SetLuaVM(vm *luaVM.VM)                        { r.lua = vm }
+func (r *Registry) SetBaseAPIKey(key string)                     { r.baseKey = key }
 func (r *Registry) SetToolRegistrar(fn sdk.ToolRegistrar)        { r.regTool = fn }
 func (r *Registry) SetStageRegistrar(fn sdk.StageRegistrar)      { r.regStage = fn }
 func (r *Registry) SetAPIRegistrar(fn sdk.APIRegistrar)          { r.regAPI = fn }
 func (r *Registry) SetToolCleaner(tc PluginToolCleaner)           { r.toolCleaner = tc }
+func (r *Registry) SetStatusProvider(sp sdk.StatusAPI)            { r.status = sp }
+func (r *Registry) SetSupervisor(sup sdk.SupervisorAPI)           { r.sup = sup }
+func (r *Registry) SetSkillManager(skMgr *skill.Manager)          { r.skMgr = skMgr }
+func (r *Registry) SetTracker(trk *tracker.Tracker)               { r.trk = trk }
+func (r *Registry) SetConfig(cfg *types.Config)                   { r.cfg = cfg }
+func (r *Registry) SetStageHost(sh sdk.ToolSource)                { r.stageHost = sh }
+func (r *Registry) SetIndexer(idx *memory.Indexer)                { r.idx = idx }
 
 func (r *Registry) RegisterNative(name string, factory NativeFactory) {
 	r.mu.Lock()
@@ -182,7 +203,7 @@ func (r *Registry) buildSDK(name string) *sdk.PluginSDK {
 		TextMemory: sdk.NewTextMemory(r.textMem),
 		DocMemory:  sdk.NewDocMemory(r.docStore),
 		Knowledge:  sdk.NewKnowledge(r.ks),
-		LLM:        sdk.NewLLM(r.mgr),
+		LLM:        sdk.NewLLM(r.mgr, r.cfgReg, r.lua, r.baseKey),
 		Settings:   sett,
 		RegTool:    regTool,
 		RegStage:   regStage,
@@ -190,6 +211,15 @@ func (r *Registry) buildSDK(name string) *sdk.PluginSDK {
 		RegOutput:  regOutput,
 		RegInput:   regInput,
 		PluginMgr:  r,
+
+		Status:     r.status,
+		Supervisor: r.sup,
+		Skill:      r.skMgr,
+		Adapter:    sdk.NewAdapter(r.lua),
+		Tracker:    r.trk,
+		Config:     sdk.NewConfig(r.cfg),
+		Tool:       sdk.NewTool(r.stageHost, r.iom),
+		Indexer:    sdk.NewIndexer(r.idx),
 	})
 }
 
@@ -578,13 +608,17 @@ func (r *Registry) ListKnown() []string {
 	return list
 }
 
-func (r *Registry) PluginMetas() map[string]PluginMeta {
-	metas := make(map[string]PluginMeta)
+func (r *Registry) PluginMetas() map[string]sdk.PluginMeta {
+	metas := make(map[string]sdk.PluginMeta)
 	globalPluginMeta.Range(func(key, val interface{}) bool {
-		metas[key.(string)] = val.(PluginMeta)
+		metas[key.(string)] = val.(sdk.PluginMeta)
 		return true
 	})
 	return metas
+}
+
+func (r *Registry) PluginDir() string {
+	return r.plgDir
 }
 
 func (r *Registry) tryDynamic(plgDir, name string, config map[string]interface{}) (sdk.Plugin, error) {

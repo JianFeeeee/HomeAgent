@@ -9,28 +9,13 @@ import (
 	"io"
 	"log"
 	"net/http"
-	"os"
 	"sort"
 	"strconv"
 	"strings"
 	"sync"
 	"time"
 
-	agentAPI "gitcode.com/JianFeeeee/HomeAgent/internal/agent/api"
-	agentCore "gitcode.com/JianFeeeee/HomeAgent/internal/agent/core"
-	agentIO "gitcode.com/JianFeeeee/HomeAgent/internal/agent/io"
-	internalConfig "gitcode.com/JianFeeeee/HomeAgent/internal/config"
-	"gitcode.com/JianFeeeee/HomeAgent/internal/events"
-	"gitcode.com/JianFeeeee/HomeAgent/internal/knowledge"
-	"gitcode.com/JianFeeeee/HomeAgent/internal/meta"
-	luaVM "gitcode.com/JianFeeeee/HomeAgent/internal/lua"
-	"gitcode.com/JianFeeeee/HomeAgent/internal/memory"
-	"gitcode.com/JianFeeeee/HomeAgent/internal/memory/text"
-	"gitcode.com/JianFeeeee/HomeAgent/internal/plugin"
 	sdk "gitcode.com/JianFeeeee/HomeAgent/internal/sdk"
-	"gitcode.com/JianFeeeee/HomeAgent/internal/skill"
-	"gitcode.com/JianFeeeee/HomeAgent/internal/supervisor"
-	"gitcode.com/JianFeeeee/HomeAgent/internal/tracker"
 	"gitcode.com/JianFeeeee/HomeAgent/pkg/types"
 )
 
@@ -49,26 +34,24 @@ func init() {
 }
 
 type Handler struct {
-	supervisor     *supervisor.Daemon
-	memory         *memory.GraphDB
-	indexer        *memory.Indexer
-	skills         *skill.Manager
-	lua            *luaVM.VM
-	config         *types.Config
-	startTime      time.Time
-	iom            *agentIO.IOManager
-	textMem        *text.Memory
-	knowledge      *knowledge.Store
-	tracker        *tracker.Tracker
-	cfgReg         *internalConfig.ConfigRegistry
-	pluginReg      *plugin.Registry
-	pluginMgr      sdk.PluginManager
-	eventBus       *events.Bus
-	statusProvider agentCore.StatusProvider
-	providerMgr    *agentAPI.ProviderManager
-	baseAPIKey     string
-	sessionMu      sync.Mutex
-	sessions       map[string]time.Time
+	sdk        *sdk.PluginSDK
+	supervisor sdk.SupervisorAPI
+	memory     sdk.MemoryAPI
+	indexer    sdk.IndexerAPI
+	skills     sdk.SkillAPI
+	adapter    sdk.AdapterAPI
+	config     sdk.ConfigAPI
+	startTime  time.Time
+	textMem    sdk.TextMemoryAPI
+	knowledge  sdk.KnowledgeAPI
+	tracker    sdk.TrackerAPI
+	settings   sdk.SettingsAPI
+	pluginMgr  sdk.PluginManager
+	status     sdk.StatusAPI
+	llm        sdk.LLMAPI
+
+	sessionMu  sync.Mutex
+	sessions   map[string]time.Time
 
 	chatMu      sync.Mutex
 	chatHistory []ChatMsg
@@ -104,51 +87,64 @@ type termState struct {
 	created   time.Time
 }
 
-func (h *Handler) SetPluginMgr(mgr sdk.PluginManager) { h.pluginMgr = mgr }
-
 const maxChatHistory = 200
 const maxCmdHistory = 100
 const maxTerminals = 50
 
-func NewHandler(sup *supervisor.Daemon, mem *memory.GraphDB, sk *skill.Manager, lua *luaVM.VM, cfg *types.Config, iom *agentIO.IOManager, tm *text.Memory, ks *knowledge.Store, tr *tracker.Tracker, cr *internalConfig.ConfigRegistry, pr *plugin.Registry, evBus *events.Bus, sp agentCore.StatusProvider, pm *agentAPI.ProviderManager, baseKey string) *Handler {
-	var idx *memory.Indexer
-	if mem != nil {
-		idx = memory.NewIndexer(mem)
+func NewHandler(s *sdk.PluginSDK) *Handler {
+	var (
+		sup sdk.SupervisorAPI
+		mem sdk.MemoryAPI
+		idx sdk.IndexerAPI
+		sk  sdk.SkillAPI
+		ad  sdk.AdapterAPI
+		cfg sdk.ConfigAPI
+		tm  sdk.TextMemoryAPI
+		ks  sdk.KnowledgeAPI
+		tr  sdk.TrackerAPI
+		se  sdk.SettingsAPI
+		pm  sdk.PluginManager
+		st  sdk.StatusAPI
+		llm sdk.LLMAPI
+	)
+	if s != nil {
+		sup, mem, idx = s.Supervisor(), s.Memory(), s.Indexer()
+		sk, ad, cfg = s.Skill(), s.Adapter(), s.Config()
+		tm, ks, tr = s.TextMemory(), s.Knowledge(), s.Tracker()
+		se, pm = s.Settings(), s.PluginMgr()
+		st, llm = s.Status(), s.LLM()
 	}
 	h := &Handler{
-		supervisor:     sup,
-		memory:         mem,
-		indexer:        idx,
-		skills:         sk,
-		lua:            lua,
-		config:         cfg,
-		startTime:      time.Now(),
-		iom:            iom,
-		textMem:        tm,
-		knowledge:      ks,
-		tracker:        tr,
-		cfgReg:         cr,
-		pluginReg:      pr,
-		eventBus:       evBus,
-		statusProvider: sp,
-		providerMgr:    pm,
-		baseAPIKey:     baseKey,
-		sessions:       make(map[string]time.Time),
-		termStates:     make(map[string]*termState),
+		sdk:        s,
+		supervisor: sup,
+		memory:     mem,
+		indexer:    idx,
+		skills:     sk,
+		adapter:    ad,
+		config:     cfg,
+		startTime:  time.Now(),
+		textMem:    tm,
+		knowledge:  ks,
+		tracker:    tr,
+		settings:   se,
+		pluginMgr:  pm,
+		status:     st,
+		llm:        llm,
+		sessions:   make(map[string]time.Time),
+		termStates: make(map[string]*termState),
 	}
 	h.loadChatHistory()
-	if evBus != nil {
+	if s != nil {
 		go h.trackToolEvents()
 	}
 	return h
 }
 
 func (h *Handler) loadChatHistory() {
-	if h.cfgReg == nil {
+	if h.settings == nil {
 		return
 	}
-	ps := h.cfgReg.PluginConfig("webui")
-	v, err := ps.Get("chathistory")
+	v, err := h.settings.Get("chathistory")
 	if err != nil || v == nil {
 		return
 	}
@@ -166,12 +162,15 @@ func (h *Handler) loadChatHistory() {
 }
 
 func (h *Handler) trackToolEvents() {
-	h.eventBus.Subscribe(events.EventToolCall, func(ev *events.Event) {
+	if h.sdk == nil {
+		return
+	}
+	h.sdk.Subscribe(sdk.EventToolCall, func(ev *sdk.Event) {
 		h.handleToolEvent(ev)
 	})
 }
 
-func (h *Handler) handleToolEvent(ev *events.Event) {
+func (h *Handler) handleToolEvent(ev *sdk.Event) {
 	payload := ev.Payload
 	tool, _ := payload["tool"].(string)
 	args, _ := payload["args"].(map[string]interface{})
@@ -235,20 +234,19 @@ func getStr(m map[string]interface{}, key string) string {
 
 func (h *Handler) getWebUIConfig() (apiKey, username, password string, ttl time.Duration) {
 	ttl = 24 * time.Hour
-	if h.cfgReg == nil {
+	if h.settings == nil {
 		return
 	}
-	ps := h.cfgReg.PluginConfig("webui")
-	if v, _ := ps.Get("api_key"); v != nil {
+	if v, _ := h.settings.Get("api_key"); v != nil {
 		apiKey, _ = v.(string)
 	}
-	if v, _ := ps.Get("username"); v != nil {
+	if v, _ := h.settings.Get("username"); v != nil {
 		username, _ = v.(string)
 	}
-	if v, _ := ps.Get("password"); v != nil {
+	if v, _ := h.settings.Get("password"); v != nil {
 		password, _ = v.(string)
 	}
-	if v, _ := ps.Get("session_ttl_hours"); v != nil {
+	if v, _ := h.settings.Get("session_ttl_hours"); v != nil {
 		switch n := v.(type) {
 		case float64:
 			if n > 0 { ttl = time.Duration(n) * time.Hour }
@@ -433,12 +431,15 @@ func (h *Handler) handleStatus(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
-	agents := h.supervisor.ListAgents()
+	agentCount := 0
+	if h.supervisor != nil {
+		agentCount = len(h.supervisor.ListAgents())
+	}
 	writeJSON(w, http.StatusOK, map[string]interface{}{
 		"status":    "running",
 		"uptime":    time.Since(h.startTime).Round(time.Second).String(),
-		"agents":    len(agents),
-		"version":   meta.Version,
+		"agents":    agentCount,
+		"version":   sdk.SDKVersion,
 		"startedAt": h.startTime,
 	})
 }
@@ -448,16 +449,20 @@ func (h *Handler) handleKernel(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
-	if h.statusProvider == nil {
+	if h.status == nil {
 		writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "kernel status provider not available"})
 		return
 	}
-	writeJSON(w, http.StatusOK, h.statusProvider.GetKernelStatus())
+	writeJSON(w, http.StatusOK, h.status.GetKernelStatus())
 }
 
 func (h *Handler) handleAgents(w http.ResponseWriter, r *http.Request) {
 	switch r.Method {
 	case http.MethodGet:
+		if h.supervisor == nil {
+			writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "supervisor not available"})
+			return
+		}
 		agents := h.supervisor.ListAgents()
 		writeJSON(w, http.StatusOK, map[string]interface{}{"agents": agents})
 	case http.MethodPost:
@@ -470,7 +475,10 @@ func (h *Handler) handleAgents(w http.ResponseWriter, r *http.Request) {
 			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "agent id is required"})
 			return
 		}
-		h.config.Agents = append(h.config.Agents, cfg)
+		if h.config != nil {
+			kcfg := h.config.Get()
+			kcfg.Agents = append(kcfg.Agents, cfg)
+		}
 		writeJSON(w, http.StatusCreated, map[string]string{"id": string(cfg.ID)})
 	default:
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
@@ -484,7 +492,11 @@ func (h *Handler) handleAgentByID(w http.ResponseWriter, r *http.Request) {
 	if len(parts) == 1 {
 		switch r.Method {
 		case http.MethodGet:
-			status, err := h.supervisor.GetAgentStatus(agentID)
+			if h.supervisor == nil {
+				writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "supervisor not available"})
+				return
+			}
+			status, err := h.supervisor.GetAgentStatus(string(agentID))
 			if err != nil {
 				writeJSON(w, http.StatusNotFound, map[string]string{"error": err.Error()})
 				return
@@ -515,7 +527,11 @@ func (h *Handler) handleSnapshots(w http.ResponseWriter, r *http.Request, agentI
 	case http.MethodGet:
 		writeJSON(w, http.StatusOK, map[string]interface{}{"agent_id": agentID, "snapshots": []map[string]interface{}{}})
 	case http.MethodPost:
-		snap, err := h.supervisor.PreActionSnapshot(agentID)
+		if h.supervisor == nil {
+			writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "supervisor not available"})
+			return
+		}
+		snap, err := h.supervisor.PreActionSnapshot(string(agentID))
 		if err != nil {
 			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
 			return
@@ -531,8 +547,12 @@ func (h *Handler) handleRollback(w http.ResponseWriter, r *http.Request, agentID
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
+	if h.supervisor == nil {
+		writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "supervisor not available"})
+		return
+	}
 	snapID := types.SnapshotID(parts[2])
-	if err := h.supervisor.RollbackAgent(agentID, snapID); err != nil {
+	if err := h.supervisor.RollbackAgent(string(agentID), string(snapID)); err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
 		return
 	}
@@ -598,28 +618,25 @@ func (h *Handler) handleMemory(w http.ResponseWriter, r *http.Request) {
 		if depth <= 0 {
 			depth = 2
 		}
-		result, err := h.memory.Recall(keywords, nil, depth, "")
+		entities, relations, err := h.memory.Recall(keywords, depth)
 		if err != nil {
 			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
 			return
 		}
-		writeJSON(w, http.StatusOK, result)
+		writeJSON(w, http.StatusOK, map[string]interface{}{"entities": entities, "relations": relations})
 	case http.MethodPost:
 		var req struct {
-			Triples   []memory.Triple `json:"triples"`
-			SessionID string          `json:"session_id"`
-			TurnID    int             `json:"turn_id"`
+			Triples []sdk.Triple `json:"triples"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid request"})
 			return
 		}
-		ec, rc, err := h.memory.Commit(req.Triples, req.SessionID, req.TurnID)
-		if err != nil {
+		if err := h.memory.Commit(req.Triples); err != nil {
 			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
 			return
 		}
-		writeJSON(w, http.StatusCreated, map[string]int{"entities_created": ec, "relations_created": rc})
+		writeJSON(w, http.StatusCreated, map[string]interface{}{"status": "committed", "committed": len(req.Triples)})
 	case http.MethodDelete:
 		var req struct {
 			Criteria map[string]string `json:"criteria"`
@@ -650,7 +667,11 @@ func (h *Handler) handleMemoryContext(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	userInput := r.URL.Query().Get("q")
-	injected := h.indexer.BuildContext(userInput)
+	injected, err := h.indexer.BuildContext(userInput)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		return
+	}
 	writeJSON(w, http.StatusOK, map[string]interface{}{
 		"context":        h.indexer.FormatContext(injected),
 		"summary":        injected.Summary,
@@ -701,12 +722,13 @@ func (h *Handler) handleKnowledge(w http.ResponseWriter, r *http.Request) {
 		}
 		query := r.URL.Query().Get("q")
 		if query != "" {
-			results := h.knowledge.Search(query, 10)
+			results, _ := h.knowledge.Search(query, 10)
 			writeJSON(w, http.StatusOK, map[string]interface{}{"results": results})
 			return
 		}
+		categories, _ := h.knowledge.List()
 		writeJSON(w, http.StatusOK, map[string]interface{}{
-			"categories": h.knowledge.List(),
+			"categories": categories,
 			"stats":      h.knowledge.Stats(),
 		})
 
@@ -795,13 +817,13 @@ func (h *Handler) handleTextMemory(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *Handler) handleAdapters(w http.ResponseWriter, r *http.Request) {
-	if h.lua == nil {
+	if h.adapter == nil {
 		writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "lua vm not available"})
 		return
 	}
 	switch r.Method {
 	case http.MethodGet:
-		writeJSON(w, http.StatusOK, map[string]interface{}{"adapters": h.lua.ListAdapters()})
+		writeJSON(w, http.StatusOK, map[string]interface{}{"adapters": h.adapter.List()})
 	case http.MethodPost:
 		var req struct {
 			Name string `json:"name"`
@@ -811,12 +833,7 @@ func (h *Handler) handleAdapters(w http.ResponseWriter, r *http.Request) {
 			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid request"})
 			return
 		}
-		path := fmt.Sprintf("%s/%s.lua", h.lua.AdapterDir(), req.Name)
-		if err := os.WriteFile(path, []byte(req.Code), 0644); err != nil {
-			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
-			return
-		}
-		if err := h.lua.LoadAdapter(path); err != nil {
+		if err := h.adapter.Load(req.Name, req.Code); err != nil {
 			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
 			return
 		}
@@ -827,7 +844,7 @@ func (h *Handler) handleAdapters(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *Handler) handleAdapterByID(w http.ResponseWriter, r *http.Request) {
-	if h.lua == nil {
+	if h.adapter == nil {
 		writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "lua vm not available"})
 		return
 	}
@@ -838,7 +855,7 @@ func (h *Handler) handleAdapterByID(w http.ResponseWriter, r *http.Request) {
 	}
 	switch r.Method {
 	case http.MethodGet:
-		for _, a := range h.lua.ListAdapters() {
+		for _, a := range h.adapter.List() {
 			if a.Name == name {
 				writeJSON(w, http.StatusOK, a)
 				return
@@ -846,12 +863,10 @@ func (h *Handler) handleAdapterByID(w http.ResponseWriter, r *http.Request) {
 		}
 		http.NotFound(w, r)
 	case http.MethodDelete:
-		path := fmt.Sprintf("%s/%s.lua", h.lua.AdapterDir(), name)
-		if err := os.Remove(path); err != nil {
+		if err := h.adapter.Remove(name); err != nil {
 			writeJSON(w, http.StatusNotFound, map[string]string{"error": "adapter not found"})
 			return
 		}
-		h.lua.RemoveAdapter(name)
 		writeJSON(w, http.StatusOK, map[string]string{"status": "deleted", "name": name})
 	default:
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
@@ -865,7 +880,7 @@ func (h *Handler) handleNetwork(w http.ResponseWriter, r *http.Request) {
 	}
 	writeJSON(w, http.StatusOK, map[string]interface{}{
 		"network_status": "monitoring",
-		"endpoints":      h.config.Defaults.LLMEndpoints,
+		"endpoints":      h.config.Get().Defaults.LLMEndpoints,
 	})
 }
 
@@ -876,10 +891,9 @@ func (h *Handler) addChatMsg(msg ChatMsg) {
 		h.chatHistory = h.chatHistory[len(h.chatHistory)-maxChatHistory:]
 	}
 	// persist to webui config table as compact JSON
-	if h.cfgReg != nil {
-		ps := h.cfgReg.PluginConfig("webui")
+	if h.settings != nil {
 		b, _ := json.Marshal(h.chatHistory)
-		ps.Set("chathistory", string(b))
+		_ = h.settings.Set("chathistory", string(b))
 	}
 	h.chatMu.Unlock()
 }
@@ -929,7 +943,11 @@ func (h *Handler) handleChat(w http.ResponseWriter, r *http.Request) {
 	}
 
 	h.addChatMsg(ChatMsg{Role: "user", Content: body.Message, Time: time.Now().Format(time.RFC3339)})
-	resp := h.iom.InjectTextSync("cli", body.Message)
+	if h.sdk == nil {
+		writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "agent unavailable"})
+		return
+	}
+	resp := h.sdk.InjectTextSync("cli", "cli", body.Message)
 	if resp == nil {
 		writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "agent unavailable"})
 		return
@@ -965,7 +983,7 @@ func (h *Handler) handleChatEvents(w http.ResponseWriter, r *http.Request) {
 	flusher.Flush()
 
 	done := r.Context().Done()
-	if h.eventBus == nil {
+	if h.sdk == nil {
 		fmt.Fprintf(w, "event: error\ndata: {\"msg\":\"event bus unavailable\"}\n\n")
 		flusher.Flush()
 		return
@@ -994,15 +1012,15 @@ func (h *Handler) handleChatEvents(w http.ResponseWriter, r *http.Request) {
 	var unsubs []func()
 	for _, t := range subTypes {
 		t2 := t
-		unsub := h.eventBus.Subscribe(events.EventType(t2), func(evt *events.Event) {
-			if evt.Type == events.EventToolCall {
+		unsub := h.sdk.Subscribe(sdk.EventType(t2), func(evt *sdk.Event) {
+			if evt.Type == sdk.EventToolCall {
 				toolName, _ := evt.Payload["tool"].(string)
 				log.Printf("[SSE] received tool_call event: tool=%s", toolName)
 			}
 			data, _ := json.Marshal(evt)
 			select {
 			case writeCh <- fmt.Sprintf("event: %s\ndata: %s\n", evt.Type, string(data)):
-				if evt.Type == events.EventToolCall {
+				if evt.Type == sdk.EventToolCall {
 					toolName, _ := evt.Payload["tool"].(string)
 					log.Printf("[SSE] wrote tool_call to writeCh: tool=%s", toolName)
 				}
@@ -1031,16 +1049,20 @@ func (h *Handler) handleChatEvents(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *Handler) handleConfig(w http.ResponseWriter, r *http.Request) {
+	if h.config == nil {
+		writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "config not available"})
+		return
+	}
 	switch r.Method {
 	case http.MethodGet:
-		writeJSON(w, http.StatusOK, h.config)
+		writeJSON(w, http.StatusOK, h.config.Get())
 	case http.MethodPut:
 		var cfg types.Config
 		if err := json.NewDecoder(r.Body).Decode(&cfg); err != nil {
 			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid config"})
 			return
 		}
-		h.config = &cfg
+		h.config.Put(&cfg)
 		writeJSON(w, http.StatusOK, map[string]string{"status": "config_updated"})
 	default:
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
@@ -1048,7 +1070,7 @@ func (h *Handler) handleConfig(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *Handler) handleSettings(w http.ResponseWriter, r *http.Request) {
-	if h.cfgReg == nil {
+	if h.settings == nil {
 		writeJSON(w, http.StatusNotFound, map[string]string{"error": "config registry not available"})
 		return
 	}
@@ -1056,30 +1078,35 @@ func (h *Handler) handleSettings(w http.ResponseWriter, r *http.Request) {
 	case http.MethodGet:
 		prefix := r.URL.Query().Get("prefix")
 		values := make(map[string]interface{})
-		meta := make(map[string]*internalConfig.ConfigDef)
+		meta := make(map[string]*sdk.ConfigDef)
 
 		if strings.HasPrefix(prefix, "plugin.") {
 			// 插件配置：从插件自身 config_<name> 表读取
 			pluginName := prefix[7:]
-			ps := h.cfgReg.PluginConfig(pluginName)
-			keys, _ := ps.List("")
+			keys, _ := h.settings.ListPlugin(pluginName, "")
 			for _, k := range keys {
-				v, _ := ps.Get(k)
+				v, _ := h.settings.GetPlugin(pluginName, k)
 				fullKey := prefix + "." + k
 				values[fullKey] = v
-				if def := h.cfgReg.GetDef(fullKey); def != nil {
-					meta[fullKey] = def
-				}
+			}
+			for _, def := range h.settings.DefsPlugin(pluginName, "") {
+				fullKey := prefix + "." + def.Key
+				meta[fullKey] = def
 			}
 		} else {
-			// 核心配置：从 core config 表读取
-			keys := h.cfgReg.List(prefix)
-			for _, k := range keys {
-				v, _ := h.cfgReg.Get(k)
-				values[k] = v
+			// 核心配置：从 core config 表读取（键可为任意前缀，如 core.llm.*、webui.*）
+			all := h.settings.Dump()
+			var keys []string
+			for k := range all {
+				if strings.HasPrefix(k, prefix) {
+					keys = append(keys, k)
+				}
 			}
-			defs := h.cfgReg.ListDefs(prefix)
-			for _, d := range defs {
+			sort.Strings(keys)
+			for _, k := range keys {
+				values[k] = all[k]
+			}
+			for _, d := range h.settings.DefsCore(prefix) {
 				meta[d.Key] = d
 				// 有 def 但 DB 中尚无值的 key，用 default 填充以便在 WebUI 中显示和编辑
 				if _, exists := values[d.Key]; !exists {
@@ -1087,28 +1114,34 @@ func (h *Handler) handleSettings(w http.ResponseWriter, r *http.Request) {
 				}
 			}
 			// 无前缀时同时加载所有插件配置
-			if prefix == "" && h.pluginReg != nil {
-				for _, p := range h.pluginReg.List() {
-					ps := h.cfgReg.PluginConfig(p)
-					pkeys, _ := ps.List("")
+			if prefix == "" {
+				for _, p := range h.settings.Plugins() {
+					if p == "core" {
+						continue
+					}
+					pkeys, _ := h.settings.ListPlugin(p, "")
 					for _, k := range pkeys {
-						v, _ := ps.Get(k)
+						v, _ := h.settings.GetPlugin(p, k)
 						fullKey := "plugin." + p + "." + k
 						values[fullKey] = v
-						if def := h.cfgReg.GetDef(fullKey); def != nil {
-							meta[fullKey] = def
-						}
+					}
+					for _, def := range h.settings.DefsPlugin(p, "") {
+						fullKey := "plugin." + p + "." + def.Key
+						meta[fullKey] = def
 					}
 				}
 			}
 		}
 
 		plugins := []string{"core"}
-		pm := h.pluginReg.PluginMetas()
-		if h.pluginReg != nil {
-			for _, p := range h.pluginReg.List() {
+		for _, p := range h.settings.Plugins() {
+			if p != "core" {
 				plugins = append(plugins, "plugin."+p)
 			}
+		}
+		var pm map[string]sdk.PluginMeta
+		if h.pluginMgr != nil {
+			pm = h.pluginMgr.PluginMetas()
 		}
 		var disabledPlugins []sdk.DisabledPluginInfo
 		if h.pluginMgr != nil {
@@ -1134,47 +1167,25 @@ func (h *Handler) handleSettings(w http.ResponseWriter, r *http.Request) {
 		if strings.HasPrefix(body.Key, "plugin.") {
 			parts := strings.SplitN(body.Key, ".", 3)
 			if len(parts) >= 3 {
-				ps := h.cfgReg.PluginConfig(parts[1])
-				if err := ps.Set(parts[2], body.Value); err != nil {
+				if err := h.settings.SetPlugin(parts[1], parts[2], body.Value); err != nil {
 					writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
 					return
 				}
 			}
 		} else {
-			if err := h.cfgReg.Set(body.Key, body.Value); err != nil {
+			if err := h.settings.SetCore(body.Key, body.Value); err != nil {
 				writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
 				return
 			}
 		}
-		if strings.HasPrefix(body.Key, "core.llm.") && h.providerMgr != nil && h.lua != nil {
-			h.reloadLLMProviders()
+		if strings.HasPrefix(body.Key, "core.llm.") && h.llm != nil {
+			if err := h.llm.ReloadFromConfig(); err != nil {
+				log.Printf("[webui] failed to reload LLM providers: %v", err)
+			}
 		}
 		writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
 	default:
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
-	}
-}
-
-func (h *Handler) reloadLLMProviders() {
-	cfg := h.cfgReg.ToConfig()
-	h.providerMgr.Reset()
-	for _, src := range cfg.LLM.Sources {
-		key := src.APIKey
-		if key == "" {
-			key = h.baseAPIKey
-		}
-		provider := agentAPI.NewLuaAdaptedProvider(agentAPI.BaseConfig{
-			Model:         src.Model,
-			BaseURL:       src.BaseURL,
-			APIKey:        key,
-			Temperature:   cfg.LLM.Temperature,
-			MaxTokens:     cfg.LLM.MaxTokens,
-			ContextWindow: src.ContextWindow,
-		}, h.lua, src.Adapter)
-		h.providerMgr.Register(src.Name, provider)
-	}
-	if cfg.LLM.Provider != "" {
-		_ = h.providerMgr.SetDefault(cfg.LLM.Provider)
 	}
 }
 
@@ -1184,7 +1195,7 @@ func (h *Handler) handleOpenAICompletions(w http.ResponseWriter, r *http.Request
 		return
 	}
 
-	if h.iom == nil {
+	if h.sdk == nil {
 		writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "IO manager not available"})
 		return
 	}
@@ -1211,9 +1222,9 @@ func (h *Handler) handleOpenAICompletions(w http.ResponseWriter, r *http.Request
 		return
 	}
 
-	response := h.iom.InjectTextSync("http", lastMsg.Content)
+	response := h.sdk.InjectTextSync("http", "http", lastMsg.Content)
 	if response == nil {
-		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "no response from agent"})
+		writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "no response from agent"})
 		return
 	}
 
@@ -1375,11 +1386,10 @@ func (h *Handler) handleTracker(w http.ResponseWriter, r *http.Request) {
 
 func (h *Handler) pluginmgrAddr() string {
 	addr := "127.0.0.1:9876"
-	if h.cfgReg == nil {
+	if h.settings == nil {
 		return addr
 	}
-	ps := h.cfgReg.PluginConfig("pluginmgr")
-	if v, err := ps.Get("http_addr"); err == nil {
+	if v, err := h.settings.GetPlugin("pluginmgr", "http_addr"); err == nil {
 		if s, ok := v.(string); ok && s != "" {
 			addr = s
 		}
@@ -1436,17 +1446,11 @@ func (h *Handler) handlePluginByID(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if path == "reload" && r.Method == http.MethodPost {
-		if h.pluginReg == nil {
+		if h.pluginMgr == nil {
 			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "plugin registry not available"})
 			return
 		}
-		dir := ""
-		if h.cfgReg != nil {
-			if v, _ := h.cfgReg.Get("core.plugin.dir"); v != nil {
-				dir, _ = v.(string)
-			}
-		}
-		if _, err := h.pluginReg.Reload(dir); err != nil {
+		if _, err := h.pluginMgr.ReloadPlugins(); err != nil {
 			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
 			return
 		}
