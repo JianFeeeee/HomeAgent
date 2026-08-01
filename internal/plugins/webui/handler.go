@@ -65,6 +65,7 @@ type ChatMsg struct {
 	Role             string `json:"role"`
 	Content          string `json:"content"`
 	ReasoningContent string `json:"reasoning_content,omitempty"`
+	Source           string `json:"source,omitempty"`
 	Time             string `json:"time"`
 }
 
@@ -136,6 +137,7 @@ func NewHandler(s *sdk.PluginSDK) *Handler {
 	h.loadChatHistory()
 	if s != nil {
 		go h.trackToolEvents()
+		h.subscribeChatEvents()
 	}
 	return h
 }
@@ -167,6 +169,40 @@ func (h *Handler) trackToolEvents() {
 	}
 	h.sdk.Subscribe(sdk.EventToolCall, func(ev *sdk.Event) {
 		h.handleToolEvent(ev)
+	})
+}
+
+// subscribeChatEvents 捕获所有通道（cli/qq/webui 等）的对话轮次，
+// 与 handleChat 的注入一起构成完整的全通道对话历史。
+func (h *Handler) subscribeChatEvents() {
+	if h.sdk == nil {
+		return
+	}
+	h.sdk.Subscribe(sdk.EventRawInput, func(ev *sdk.Event) {
+		content, _ := ev.Payload["content"].(string)
+		source, _ := ev.Payload["source"].(string)
+		if content == "" {
+			return
+		}
+		h.addChatMsg(ChatMsg{
+			Role:    "user",
+			Content: content,
+			Source:  source,
+			Time:    time.Unix(ev.Timestamp, 0).Format(time.RFC3339),
+		})
+	})
+	h.sdk.Subscribe(sdk.EventAgentOutput, func(ev *sdk.Event) {
+		content, _ := ev.Payload["content"].(string)
+		channel, _ := ev.Payload["channel"].(string)
+		if content == "" {
+			return
+		}
+		h.addChatMsg(ChatMsg{
+			Role:    "assistant",
+			Content: content,
+			Source:  channel,
+			Time:    time.Unix(ev.Timestamp, 0).Format(time.RFC3339),
+		})
 	})
 }
 
@@ -942,12 +978,11 @@ func (h *Handler) handleChat(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	h.addChatMsg(ChatMsg{Role: "user", Content: body.Message, Time: time.Now().Format(time.RFC3339)})
 	if h.sdk == nil {
 		writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "agent unavailable"})
 		return
 	}
-	resp := h.sdk.InjectTextSync("cli", "cli", body.Message)
+	resp := h.sdk.InjectTextSync("webui", "webui", body.Message)
 	if resp == nil {
 		writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "agent unavailable"})
 		return
@@ -960,7 +995,6 @@ func (h *Handler) handleChat(w http.ResponseWriter, r *http.Request) {
 	if reasoning != "" {
 		result["reasoning_content"] = reasoning
 	}
-	h.addChatMsg(ChatMsg{Role: "assistant", Content: content, ReasoningContent: reasoning, Time: time.Now().Format(time.RFC3339)})
 	writeJSON(w, http.StatusOK, result)
 }
 

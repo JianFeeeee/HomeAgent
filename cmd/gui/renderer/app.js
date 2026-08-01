@@ -371,6 +371,9 @@ function renderChat() {
         });
       }
       var body = rc + tcs + '<div class="text">' + c + '</div>';
+      if (m.source && m.source !== 'webui') {
+        body = '<div class="msg-source">' + escHtml(__('通道','Channel')) + ': ' + escHtml(m.source) + '</div>' + body;
+      }
       if (role === 'system') {
         html += '<div class="msg msg-system"><div class="msg-bubble">' + body + '</div></div>';
       } else {
