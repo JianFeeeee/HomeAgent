@@ -7,32 +7,21 @@ import (
 	"os"
 	"path/filepath"
 	"time"
+
+	sdk "gitcode.com/JianFeeeee/HomeAgent/internal/sdk"
 )
 
-type ChangeType string
+// DTO 已迁入内置 SDK，此处保留别名以兼容现有调用方。
+type ChangeType = sdk.ChangeType
 
 const (
-	ChangeFileCreated ChangeType = "created"
-	ChangeFileModified ChangeType = "modified"
-	ChangeFileDeleted ChangeType = "deleted"
+	ChangeFileCreated  = sdk.ChangeFileCreated
+	ChangeFileModified = sdk.ChangeFileModified
+	ChangeFileDeleted  = sdk.ChangeFileDeleted
 )
 
-type FileChange struct {
-	Path       string     `json:"path"`
-	Type       ChangeType `json:"type"`
-	SizeBefore int64      `json:"size_before,omitempty"`
-	SizeAfter  int64      `json:"size_after,omitempty"`
-	HashBefore string     `json:"hash_before,omitempty"`
-	HashAfter  string     `json:"hash_after,omitempty"`
-	Content    []byte     `json:"-"` // stored separately, not in JSON
-}
-
-type ChangeSet struct {
-	ID        string       `json:"id"`
-	Action    string       `json:"action"`
-	Timestamp time.Time    `json:"timestamp"`
-	Files     []FileChange `json:"files"`
-}
+type FileChange = sdk.FileChange
+type ChangeSet = sdk.ChangeSet
 
 func NewChangeSet(action string) *ChangeSet {
 	return &ChangeSet{

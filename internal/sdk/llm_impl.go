@@ -1,26 +1,133 @@
 package sdk
 
-import agentAPI "gitcode.com/JianFeeeee/HomeAgent/internal/agent/api"
+import (
+	"context"
+	"fmt"
 
-type llmImpl struct{ mgr *agentAPI.ProviderManager }
+	agentAPI "gitcode.com/JianFeeeee/HomeAgent/internal/agent/api"
+	internalConfig "gitcode.com/JianFeeeee/HomeAgent/internal/config"
+	luaVM "gitcode.com/JianFeeeee/HomeAgent/internal/lua"
+)
 
-func NewLLM(mgr *agentAPI.ProviderManager) LLMAPI { return &llmImpl{mgr: mgr} }
+type llmImpl struct {
+	mgr        *agentAPI.ProviderManager
+	cfgReg     *internalConfig.ConfigRegistry
+	lua        *luaVM.VM
+	baseAPIKey string
+}
+
+func NewLLM(mgr *agentAPI.ProviderManager, cfgReg *internalConfig.ConfigRegistry, lua *luaVM.VM, baseAPIKey string) LLMAPI {
+	return &llmImpl{mgr: mgr, cfgReg: cfgReg, lua: lua, baseAPIKey: baseAPIKey}
+}
 
 func (l *llmImpl) ListSources() []string {
-	if l.mgr == nil { return nil }
+	if l.mgr == nil {
+		return nil
+	}
 	return l.mgr.List()
 }
 
 func (l *llmImpl) SetSource(name string) error {
-	if l.mgr == nil { return nil }
+	if l.mgr == nil {
+		return nil
+	}
 	return l.mgr.SetDefault(name)
 }
 
 func (l *llmImpl) CurrentSource() string {
-	if l.mgr == nil { return "" }
+	if l.mgr == nil {
+		return ""
+	}
 	p := l.mgr.Default()
-	if p == nil { return "" }
+	if p == nil {
+		return ""
+	}
 	return p.Name()
+}
+
+func (l *llmImpl) Chat(ctx context.Context, req *LLMCompletionRequest) (*LLMCompletionResponse, error) {
+	if l.mgr == nil {
+		return nil, fmt.Errorf("llm: provider manager not available")
+	}
+	p := l.mgr.Default()
+	if p == nil {
+		return nil, fmt.Errorf("llm: no default provider")
+	}
+	apiReq := &agentAPI.CompletionRequest{
+		Model:           req.Model,
+		Temperature:     req.Temperature,
+		MaxTokens:       req.MaxTokens,
+		Stream:          req.Stream,
+		Tools:           req.Tools,
+		ToolChoice:      req.ToolChoice,
+		DisableThinking: req.DisableThinking,
+	}
+	if len(req.Messages) > 0 {
+		apiReq.Messages = make([]agentAPI.Message, len(req.Messages))
+		for i, m := range req.Messages {
+			msg := agentAPI.Message{
+				Role:             m.Role,
+				Content:          m.Content,
+				ReasoningContent: m.ReasoningContent,
+				ToolCallID:       m.ToolCallID,
+			}
+			if len(m.ToolCalls) > 0 {
+				msg.ToolCalls = make([]agentAPI.ToolCall, len(m.ToolCalls))
+				for j, tc := range m.ToolCalls {
+					msg.ToolCalls[j] = agentAPI.ToolCall{ID: tc.ID, Name: tc.Name, Arguments: tc.Arguments}
+				}
+			}
+			apiReq.Messages[i] = msg
+		}
+	}
+	resp, err := p.Chat(ctx, apiReq)
+	if err != nil {
+		return nil, err
+	}
+	out := &LLMCompletionResponse{
+		Content:          resp.Content,
+		ReasoningContent: resp.ReasoningContent,
+		FinishReason:     resp.FinishReason,
+		TokenUsage: LLMTokenUsage{
+			Prompt:     resp.TokenUsage.Prompt,
+			Completion: resp.TokenUsage.Completion,
+			Total:      resp.TokenUsage.Total,
+		},
+	}
+	for _, tc := range resp.ToolCalls {
+		out.ToolCalls = append(out.ToolCalls, LLMToolCall{ID: tc.ID, Name: tc.Name, Arguments: tc.Arguments})
+	}
+	return out, nil
+}
+
+func (l *llmImpl) ReloadFromConfig() error {
+	if l.mgr == nil || l.cfgReg == nil || l.lua == nil {
+		return nil
+	}
+	cfg := l.cfgReg.ToConfig()
+	if cfg == nil {
+		return nil
+	}
+	l.mgr.Reset()
+	for _, src := range cfg.LLM.Sources {
+		key := src.APIKey
+		if key == "" {
+			key = l.baseAPIKey
+		}
+			provider := agentAPI.NewLuaAdaptedProvider(agentAPI.BaseConfig{
+				Model:         src.Model,
+				BaseURL:       src.BaseURL,
+				APIKey:        key,
+				Temperature:   cfg.LLM.Temperature,
+				MaxTokens:     cfg.LLM.MaxTokens,
+				ContextWindow: src.ContextWindow,
+			}, l.lua, src.Name, src.Adapter)
+		l.mgr.Register(src.Name, provider)
+	}
+	if cfg.LLM.Provider != "" {
+		_ = l.mgr.SetDefault(cfg.LLM.Provider)
+	}
+	return nil
 }
 
 var _ LLMAPI = (*llmImpl)(nil)

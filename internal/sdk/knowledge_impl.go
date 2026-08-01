@@ -26,4 +26,14 @@ func (k *knowledgeImpl) List() ([]string, error) {
 	return k.ks.List(), nil
 }
 
+func (k *knowledgeImpl) Stats() map[string]interface{} {
+	if k.ks == nil { return map[string]interface{}{} }
+	return k.ks.Stats()
+}
+
+func (k *knowledgeImpl) Remove(name string) error {
+	if k.ks == nil { return nil }
+	return k.ks.Remove(name)
+}
+
 var _ KnowledgeAPI = (*knowledgeImpl)(nil)

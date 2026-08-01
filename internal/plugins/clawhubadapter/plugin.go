@@ -31,18 +31,11 @@ var pySimulatorSrc string
 //go:embed simulator/openclaw_cli.js
 var openclawCliSrc string
 
-var SkillsDir string
-var SimulatorDir string
-
 func init() {
 	plugin.RegisterPluginMeta("clawhubadapter", "ClawHub 适配器", "ClawHub Adapter")
 	plugin.RegisterFactory("clawhubadapter", func(name string, config map[string]interface{}) (sdk.Plugin, error) {
-		dir := SkillsDir
-		if dir == "" {
-			dataDir, ok := config["data_dir"].(string)
-			if !ok {
-				return nil, fmt.Errorf("clawhubadapter plugin: config missing 'data_dir' or not a string")
-			}
+		dir := ""
+		if dataDir, ok := config["data_dir"].(string); ok && dataDir != "" {
 			dir = filepath.Join(dataDir, "skills")
 		}
 		return New(name, dir), nil
@@ -63,8 +56,8 @@ type Plugin struct {
 }
 
 func New(name, skillsDir string) *Plugin {
-	sd := SimulatorDir
-	if sd == "" {
+	sd := ""
+	if skillsDir != "" {
 		sd = filepath.Join(skillsDir, ".simulator")
 	}
 	return &Plugin{
@@ -99,6 +92,20 @@ func (p *Plugin) Start(s *sdk.PluginSDK) error {
 		if s, ok := v.(string); ok && s != "" {
 			p.simulatorDir = s
 		}
+	}
+	// 默认目录：内核 data_dir 下 skills 目录（与配置 core.daemon.data_dir 对齐）
+	if p.skillsDir == "" {
+		if v, _ := s.Settings().GetCore("daemon.data_dir"); v != nil {
+			if dir, ok := v.(string); ok && dir != "" {
+				p.skillsDir = filepath.Join(dir, "skills")
+			}
+		}
+	}
+	if p.skillsDir == "" {
+		p.skillsDir = filepath.Join("data", "skills")
+	}
+	if p.simulatorDir == "" {
+		p.simulatorDir = filepath.Join(p.skillsDir, ".simulator")
 	}
 
 	// Launch OC plugin manager first (handles OC-format plugin installation and lifecycle)
@@ -283,7 +290,7 @@ func (p *Plugin) launchManager(s *sdk.PluginSDK) error {
 	// Ensure skills dir exists for the manager to scan
 	os.MkdirAll(p.skillsDir, 0755)
 
-	sp, err := launchProcess("node", managerPath, p.skillsDir, "manager")
+	sp, err := launchProcess("node", managerPath, p.skillsDir, "manager", p.simulatorDir)
 	if err != nil {
 		return fmt.Errorf("launch manager: %w", err)
 	}
@@ -775,7 +782,7 @@ func (p *Plugin) loadPySidecar(s *sdk.PluginSDK, dir, name string) error {
 		}
 	}
 
-	sp, err := launchProcess(pythonBin, simPath, dir, name)
+	sp, err := launchProcess(pythonBin, simPath, dir, name, p.simulatorDir)
 	if err != nil {
 		return fmt.Errorf("launch pysimulator: %w", err)
 	}
@@ -808,7 +815,7 @@ func (p *Plugin) loadPySidecar(s *sdk.PluginSDK, dir, name string) error {
 }
 
 func (p *Plugin) loadSidecar(s *sdk.PluginSDK, dir, name string) error {
-	sp, err := launchSidecar(dir, name)
+	sp, err := launchSidecar(dir, name, p.simulatorDir)
 	if err != nil {
 		return fmt.Errorf("launch: %w", err)
 	}

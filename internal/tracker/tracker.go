@@ -11,6 +11,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	sdk "gitcode.com/JianFeeeee/HomeAgent/internal/sdk"
 )
 
 type Tracker struct {
@@ -302,3 +304,6 @@ func (t *Tracker) Stats() map[string]interface{} {
 		"max_changeset_age": t.maxChangesetAge.String(),
 	}
 }
+
+// Tracker 直接满足内置 SDK 的 TrackerAPI（复用优先，无需独立适配器）。
+var _ sdk.TrackerAPI = (*Tracker)(nil)

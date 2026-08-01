@@ -1,0 +1,25 @@
+package sdk
+
+import (
+	"time"
+
+	"gitcode.com/JianFeeeee/HomeAgent/pkg/types"
+)
+
+// SupervisorAPI provides access to agent lifecycle management.
+type SupervisorAPI interface {
+	ListAgents() []AgentStatus
+	GetAgentStatus(id string) (*AgentStatus, error)
+	PreActionSnapshot(id string) (*types.Snapshot, error)
+	RollbackAgent(id string, snapID string) error
+}
+
+// AgentStatus is a neutral snapshot of a supervised agent.
+type AgentStatus struct {
+	ID           types.AgentID             `json:"id"`
+	State        types.AgentState          `json:"state"`
+	Health       types.HealthStatus        `json:"health"`
+	Uptime       time.Duration             `json:"uptime,omitempty"`
+	Network      types.NetworkCheckResult  `json:"network,omitempty"`
+	TrackerStats map[string]interface{}    `json:"tracker_stats,omitempty"`
+}

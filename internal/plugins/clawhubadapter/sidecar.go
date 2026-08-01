@@ -143,15 +143,15 @@ func (s *sidecarProcess) NotifyChan() <-chan OCNotification {
 	return s.notifyCh
 }
 
-func launchSidecar(dir, name string) (*sidecarProcess, error) {
+func launchSidecar(dir, name, simDir string) (*sidecarProcess, error) {
 	mainJS := filepath.Join(dir, "main.js")
 	if _, err := os.Stat(mainJS); os.IsNotExist(err) {
 		return nil, nil
 	}
-	return launchProcess("node", mainJS, dir, name)
+	return launchProcess("node", mainJS, dir, name, simDir)
 }
 
-func launchProcess(bin, arg, dir, name string) (*sidecarProcess, error) {
+func launchProcess(bin, arg, dir, name, simDir string) (*sidecarProcess, error) {
 	nodePath := bin
 	if bin == "node" {
 		if p := os.Getenv("NODE_PATH"); p != "" {
@@ -164,8 +164,8 @@ func launchProcess(bin, arg, dir, name string) (*sidecarProcess, error) {
 	cmd.Stderr = os.Stderr
 
 	// Add openclaw CLI bin dir to PATH so subprocesses can exec 'openclaw' command
-	if SimulatorDir != "" {
-		binDir := filepath.Join(SimulatorDir, "bin")
+	if simDir != "" {
+		binDir := filepath.Join(simDir, "bin")
 		if info, err := os.Stat(binDir); err == nil && info.IsDir() {
 			env := os.Environ()
 			binDirPath := binDir + string(os.PathListSeparator)
