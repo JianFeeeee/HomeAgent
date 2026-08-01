@@ -34,7 +34,12 @@ func (tc *toolCapture) RegisterAPI(name string) error { return nil }
 func setupPlugin() (*Plugin, *toolCapture, error) {
 	p := New("cmd")
 	tc := newToolCapture()
-	sdk := sdk.New("cmd", sdk.SDKConfig{RegTool: tc.RegisterTool, RegStage: tc.RegisterStage, RegAPI: tc.RegisterAPI})
+	sdk := sdk.New("cmd", sdk.SDKConfig{
+		RegTool:  tc.RegisterTool,
+		RegStage: tc.RegisterStage,
+		RegAPI:   tc.RegisterAPI,
+		Settings: sdk.NewSettings("cmd", nil),
+	})
 	if err := p.Start(sdk); err != nil {
 		return nil, nil, err
 	}

@@ -8,18 +8,12 @@ import (
 	"sort"
 	"strings"
 	"sync"
+
+	sdk "gitcode.com/JianFeeeee/HomeAgent/internal/sdk"
 )
 
-type Skill struct {
-	Name        string `json:"name"`
-	Description string `json:"description"`
-	Version     string `json:"version"`
-	Author      string `json:"author,omitempty"`
-	Entry       string `json:"entry,omitempty"`
-	Source      string `json:"source,omitempty"`
-	Enabled     bool   `json:"enabled"`
-	RawContent  string `json:"-"`
-}
+// Skill 已迁入内置 SDK，此处保留别名以兼容现有调用方。
+type Skill = sdk.Skill
 
 type Manager struct {
 	mu          sync.RWMutex
@@ -194,6 +188,9 @@ func (m *Manager) GetInjectedPrompt() string {
 	}
 	return strings.Join(parts, "\n\n")
 }
+
+// Manager 直接满足内置 SDK 的 SkillAPI（复用优先，无需独立适配器）。
+var _ sdk.SkillAPI = (*Manager)(nil)
 
 func extractDescription(content string) string {
 	lines := strings.Split(content, "\n")

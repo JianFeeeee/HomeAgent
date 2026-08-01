@@ -17,11 +17,18 @@ import (
 	"gitcode.com/JianFeeeee/HomeAgent/internal/events"
 	"gitcode.com/JianFeeeee/HomeAgent/internal/knowledge"
 	"gitcode.com/JianFeeeee/HomeAgent/internal/memory"
-	"gitcode.com/JianFeeeee/HomeAgent/internal/plugin"
+	sdk "gitcode.com/JianFeeeee/HomeAgent/internal/sdk"
 	"gitcode.com/JianFeeeee/HomeAgent/internal/supervisor"
 	"gitcode.com/JianFeeeee/HomeAgent/internal/tracker"
 	"gitcode.com/JianFeeeee/HomeAgent/pkg/types"
 )
+
+func testSDK(cfg sdk.SDKConfig) *sdk.PluginSDK {
+	if cfg.EventBus == nil {
+		cfg.EventBus = events.NewBus()
+	}
+	return sdk.New("webui", cfg)
+}
 
 func newTestHandler(t *testing.T) (*Handler, *supervisor.Daemon) {
 	t.Helper()
@@ -34,7 +41,11 @@ func newTestHandler(t *testing.T) (*Handler, *supervisor.Daemon) {
 	sup := supervisor.New(cfg)
 	sup.Start()
 
-	return NewHandler(sup, nil, nil, nil, cfg, nil, nil, nil, nil, nil, nil, events.NewBus(), nil, nil, ""), sup
+	s := testSDK(sdk.SDKConfig{
+		Supervisor: supervisor.NewSDKAdapter(sup),
+		Config:     sdk.NewConfig(cfg),
+	})
+	return NewHandler(s), sup
 }
 
 func TestAuthMiddleware(t *testing.T) {
@@ -44,9 +55,21 @@ func TestAuthMiddleware(t *testing.T) {
 	cfgReg.PluginConfig("webui").Set("password", "secret-pass")
 	cfgReg.PluginConfig("webui").Set("session_ttl_hours", "24")
 
-	h, sup := newTestHandler(t)
+	sup := supervisor.New(&types.Config{
+		Daemon: types.DaemonConfig{
+			CheckInterval:     time.Minute,
+			HeartbeatInterval: 30 * time.Second,
+		},
+	})
+	sup.Start()
 	defer sup.Shutdown()
-	h.cfgReg = cfgReg
+
+	s := testSDK(sdk.SDKConfig{
+		Supervisor: supervisor.NewSDKAdapter(sup),
+		Settings:   sdk.NewSettings("webui", cfgReg),
+		Config:     sdk.NewConfig(&types.Config{}),
+	})
+	h := NewHandler(s)
 	mux := http.NewServeMux()
 	h.RegisterRoutes(mux)
 
@@ -194,7 +217,12 @@ func TestHandleKnowledgeSearch(t *testing.T) {
 	sup.Start()
 	defer sup.Shutdown()
 
-	h := NewHandler(sup, nil, nil, nil, cfg, nil, nil, ks, nil, nil, nil, events.NewBus(), nil, nil, "")
+	s := testSDK(sdk.SDKConfig{
+		Supervisor: supervisor.NewSDKAdapter(sup),
+		Knowledge:  sdk.NewKnowledge(ks),
+		Config:     sdk.NewConfig(cfg),
+	})
+	h := NewHandler(s)
 
 	req := httptest.NewRequest(http.MethodGet, "/api/v1/knowledge?q=test", nil)
 	w := httptest.NewRecorder()
@@ -226,7 +254,12 @@ func TestHandleKnowledgeCreate(t *testing.T) {
 	sup.Start()
 	defer sup.Shutdown()
 
-	h := NewHandler(sup, nil, nil, nil, cfg, nil, nil, ks, nil, nil, nil, events.NewBus(), nil, nil, "")
+	s := testSDK(sdk.SDKConfig{
+		Supervisor: supervisor.NewSDKAdapter(sup),
+		Knowledge:  sdk.NewKnowledge(ks),
+		Config:     sdk.NewConfig(cfg),
+	})
+	h := NewHandler(s)
 
 	body := `{"name":"new_doc","content":"fresh content"}`
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/knowledge", strings.NewReader(body))
@@ -291,7 +324,12 @@ func TestHandleTrackerStats(t *testing.T) {
 	sup.Start()
 	defer sup.Shutdown()
 
-	h := NewHandler(sup, nil, nil, nil, cfg, nil, nil, nil, tr, nil, nil, events.NewBus(), nil, nil, "")
+	s := testSDK(sdk.SDKConfig{
+		Supervisor: supervisor.NewSDKAdapter(sup),
+		Tracker:    tr,
+		Config:     sdk.NewConfig(cfg),
+	})
+	h := NewHandler(s)
 
 	req := httptest.NewRequest(http.MethodGet, "/api/v1/tracker", nil)
 	w := httptest.NewRecorder()
@@ -305,8 +343,6 @@ func TestHandleTrackerStats(t *testing.T) {
 func TestHandleOpenAICompletionsNoMessages(t *testing.T) {
 	h, sup := newTestHandler(t)
 	defer sup.Shutdown()
-	// 给 handler 一个 IOManager，才能通过 nil 检查到达消息校验
-	h.iom = agentIO.NewIOManager()
 
 	body := `{"model":"test"}`
 	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(body))
@@ -322,8 +358,6 @@ func TestHandleOpenAICompletionsNoMessages(t *testing.T) {
 func TestHandleOpenAICompletionsLastMsgNotUser(t *testing.T) {
 	h, sup := newTestHandler(t)
 	defer sup.Shutdown()
-	// 给 handler 一个 IOManager，才能通过 nil 检查到达消息校验
-	h.iom = agentIO.NewIOManager()
 
 	body := `{"messages":[{"role":"assistant","content":"hi"}]}`
 	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(body))
@@ -392,8 +426,26 @@ func TestHandleConfigGet(t *testing.T) {
 }
 
 func TestRegisterRoutes(t *testing.T) {
-	h, sup := newTestHandler(t)
+	cfgReg := internalConfig.NewConfigRegistry("")
+	cfgReg.PluginConfig("webui").Set("api_key", "test-api-key")
+	cfgReg.PluginConfig("webui").Set("username", "admin")
+	cfgReg.PluginConfig("webui").Set("password", "secret-pass")
+
+	sup := supervisor.New(&types.Config{
+		Daemon: types.DaemonConfig{
+			CheckInterval:     time.Minute,
+			HeartbeatInterval: 30 * time.Second,
+		},
+	})
+	sup.Start()
 	defer sup.Shutdown()
+
+	s := testSDK(sdk.SDKConfig{
+		Supervisor: supervisor.NewSDKAdapter(sup),
+		Settings:   sdk.NewSettings("webui", cfgReg),
+		Config:     sdk.NewConfig(&types.Config{}),
+	})
+	h := NewHandler(s)
 
 	mux := http.NewServeMux()
 	h.RegisterRoutes(mux)
@@ -407,7 +459,7 @@ func TestRegisterRoutes(t *testing.T) {
 		{"/api/v1/agents", http.MethodGet, http.StatusOK},
 		{"/api/v1/config", http.MethodGet, http.StatusOK},
 		{"/api/v1/network", http.MethodGet, http.StatusOK},
-		{"/", http.MethodGet, http.StatusOK},
+		{"/", http.MethodGet, http.StatusFound},
 		{"/api/v1/memory", http.MethodGet, http.StatusServiceUnavailable},
 		{"/api/v1/knowledge", http.MethodGet, http.StatusServiceUnavailable},
 		{"/api/v1/tracker", http.MethodGet, http.StatusServiceUnavailable},
@@ -416,6 +468,9 @@ func TestRegisterRoutes(t *testing.T) {
 
 	for _, tt := range tests {
 		req := httptest.NewRequest(tt.method, tt.path, nil)
+		if strings.HasPrefix(tt.path, "/api/v1/") {
+			req.Header.Set("X-API-Key", "test-api-key")
+		}
 		w := httptest.NewRecorder()
 		mux.ServeHTTP(w, req)
 
@@ -470,8 +525,12 @@ func TestSettingsAPIFlow(t *testing.T) {
 	sup.Start()
 	defer sup.Shutdown()
 
-	pluginReg := plugin.NewRegistry()
-	h := NewHandler(sup, nil, nil, nil, &types.Config{}, nil, nil, nil, nil, cfgReg, pluginReg, events.NewBus(), nil, nil, "")
+	s := testSDK(sdk.SDKConfig{
+		Supervisor: supervisor.NewSDKAdapter(sup),
+		Settings:   sdk.NewSettings("webui", cfgReg),
+		Config:     sdk.NewConfig(&types.Config{}),
+	})
+	h := NewHandler(s)
 
 	t.Run("GET_settings_lists_keys_and_plugins", func(t *testing.T) {
 		req := httptest.NewRequest(http.MethodGet, "/api/v1/settings", nil)
@@ -578,7 +637,11 @@ func TestSettingsAPIFlow(t *testing.T) {
 	})
 
 	t.Run("settings_not_available_without_registry", func(t *testing.T) {
-		h2 := NewHandler(sup, nil, nil, nil, &types.Config{}, nil, nil, nil, nil, nil, nil, events.NewBus(), nil, nil, "")
+		s2 := testSDK(sdk.SDKConfig{
+			Supervisor: supervisor.NewSDKAdapter(sup),
+			Config:     sdk.NewConfig(&types.Config{}),
+		})
+		h2 := NewHandler(s2)
 		req := httptest.NewRequest(http.MethodGet, "/api/v1/settings", nil)
 		w := httptest.NewRecorder()
 		h2.handleSettings(w, req)
@@ -603,8 +666,12 @@ func TestSettingsWithPluginRegistry(t *testing.T) {
 	sup.Start()
 	defer sup.Shutdown()
 
-	pluginReg := plugin.NewRegistry()
-	h := NewHandler(sup, nil, nil, nil, &types.Config{}, nil, nil, nil, nil, cfgReg, pluginReg, events.NewBus(), nil, nil, "")
+	s := testSDK(sdk.SDKConfig{
+		Supervisor: supervisor.NewSDKAdapter(sup),
+		Settings:   sdk.NewSettings("webui", cfgReg),
+		Config:     sdk.NewConfig(&types.Config{}),
+	})
+	h := NewHandler(s)
 
 	req := httptest.NewRequest(http.MethodGet, "/api/v1/settings", nil)
 	w := httptest.NewRecorder()
@@ -633,13 +700,22 @@ type echoProvider struct{ name string }
 func (p *echoProvider) Name() string { return p.name }
 func (p *echoProvider) MaxContextTokens() int { return 8192 }
 func (p *echoProvider) Chat(ctx context.Context, req *agentAPI.CompletionRequest) (*agentAPI.CompletionResponse, error) {
-	content := "echo: " + req.Messages[len(req.Messages)-1].Content
+	content := "echo: " + lastUserContent(req.Messages)
 	return &agentAPI.CompletionResponse{Content: content, FinishReason: "stop"}, nil
 }
 func (p *echoProvider) ChatStream(ctx context.Context, req *agentAPI.CompletionRequest) (<-chan agentAPI.StreamChunk, error) {
 	ch := make(chan agentAPI.StreamChunk, 1)
 	ch <- agentAPI.StreamChunk{Content: "mock", Done: true}
 	return ch, nil
+}
+
+func lastUserContent(msgs []agentAPI.Message) string {
+	for i := len(msgs) - 1; i >= 0; i-- {
+		if msgs[i].Role == "user" {
+			return msgs[i].Content
+		}
+	}
+	return ""
 }
 
 func init() {
@@ -656,19 +732,22 @@ func TestHandleCompletionsEndToEnd(t *testing.T) {
 	}
 	defer memDB.Close()
 
+	pm := agentAPI.NewProviderManager()
+	pm.Register("echo", &echoProvider{name: "echo"})
+
 	agent := agentCore.New(agentCore.AgentConfig{
-		ID:            "test",
-		SystemPrompt:  "你是测试助手",
-		Provider:      &echoProvider{name: "echo"},
-		IO:            iom,
-		Memory:        memDB,
-		Indexer:       nil,
+		ID:              "test",
+		SystemPrompt:    "你是测试助手",
+		Provider:        &echoProvider{name: "echo"},
+		ProviderManager: pm,
+		IO:              iom,
+		Memory:          memDB,
+		Indexer:         nil,
 		ContextSavePath: "",
 	})
 	agent.Start()
 	defer agent.Stop()
 
-	// Handler 需要 iom
 	sup := supervisor.New(&types.Config{
 		Daemon: types.DaemonConfig{
 			CheckInterval:     time.Minute,
@@ -678,7 +757,12 @@ func TestHandleCompletionsEndToEnd(t *testing.T) {
 	sup.Start()
 	defer sup.Shutdown()
 
-	h := NewHandler(sup, nil, nil, nil, &types.Config{}, iom, nil, nil, nil, nil, nil, events.NewBus(), nil, nil, "")
+	s := testSDK(sdk.SDKConfig{
+		Supervisor: supervisor.NewSDKAdapter(sup),
+		IOManager:  iom,
+		Config:     sdk.NewConfig(&types.Config{}),
+	})
+	h := NewHandler(s)
 
 	t.Run("POST_chat_completions_returns_echo", func(t *testing.T) {
 		body := `{"model":"test","messages":[{"role":"user","content":"你好"}]}`
@@ -711,7 +795,10 @@ func TestHandleCompletionsEndToEnd(t *testing.T) {
 	})
 
 	t.Run("POST_chat_completions_no_iom_returns_503", func(t *testing.T) {
-		h2 := NewHandler(sup, nil, nil, nil, &types.Config{}, nil, nil, nil, nil, nil, nil, events.NewBus(), nil, nil, "")
+		s2 := testSDK(sdk.SDKConfig{
+			Supervisor: supervisor.NewSDKAdapter(sup),
+		})
+		h2 := NewHandler(s2)
 		body := `{"messages":[{"role":"user","content":"hi"}]}`
 		req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(body))
 		req.Header.Set("Content-Type", "application/json")

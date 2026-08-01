@@ -10,15 +10,13 @@ import (
 	agentAPI "gitcode.com/JianFeeeee/HomeAgent/internal/agent/api"
 	agentCore "gitcode.com/JianFeeeee/HomeAgent/internal/agent/core"
 	agentIO "gitcode.com/JianFeeeee/HomeAgent/internal/agent/io"
+	internalConfig "gitcode.com/JianFeeeee/HomeAgent/internal/config"
 	"gitcode.com/JianFeeeee/HomeAgent/internal/knowledge"
 	luaVM "gitcode.com/JianFeeeee/HomeAgent/internal/lua"
 	"gitcode.com/JianFeeeee/HomeAgent/internal/memory"
 	doc "gitcode.com/JianFeeeee/HomeAgent/internal/memory/document"
 	"gitcode.com/JianFeeeee/HomeAgent/internal/plugin"
 	cli "gitcode.com/JianFeeeee/HomeAgent/internal/plugins/cli"
-	healthcheck "gitcode.com/JianFeeeee/HomeAgent/internal/plugins/healthcheck"
-	openclaw "gitcode.com/JianFeeeee/HomeAgent/internal/plugins/clawhubadapter"
-	webui "gitcode.com/JianFeeeee/HomeAgent/internal/plugins/webui"
 	sdk "gitcode.com/JianFeeeee/HomeAgent/internal/sdk"
 )
 
@@ -77,11 +75,17 @@ func setupIntegrationWithProvider(t *testing.T, pm *agentAPI.ProviderManager) *t
 		t.Fatal(err)
 	}
 
+	pluginReg.SetStageHost(stageHost)
+	pluginReg.SetProviderManager(pm)
+	pluginReg.SetKnowledge(ks)
+	pluginReg.SetDocStore(docStore)
+
 	cli.DefaultSocket = filepath.Join(tmpDir, "cli.sock")
-	openclaw.SkillsDir = filepath.Join(tmpDir, "skills")
-	os.MkdirAll(openclaw.SkillsDir, 0755)
-	webui.Configure(":0", nil, memDB, nil, nil, nil, iom, nil, ks, nil, nil, pluginReg, nil, nil)
-	healthcheck.Configure(stageHost, iom, pluginReg, memDB, ks, docStore, pm, nil)
+
+	// 经 ConfigRegistry 装配内核路径配置（clawhubadapter/pluginmgr 等经 SDK settings 读取）
+	cfgReg := internalConfig.NewConfigRegistry("")
+	cfgReg.SeedDefaults(tmpDir)
+	pluginReg.SetConfigRegistry(cfgReg)
 
 	plgDir := filepath.Join(tmpDir, "plugins")
 	os.MkdirAll(plgDir, 0755)
@@ -229,7 +233,7 @@ func TestIntegrationCmdRunStderr(t *testing.T) {
 	defer env.cleanup()
 
 	result, err := env.stageHost.ExecuteTool("cmd_run", map[string]interface{}{
-		"command": "echo stderr_test >&2",
+		"command": "sh -c \"echo stderr_test >&2\"",
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -520,7 +524,7 @@ func TestIntegrationLLMDrivenDiscoveryWithRealKey(t *testing.T) {
 		Model:   "deepseek-v4-flash",
 		BaseURL: "https://api.deepseek.com",
 		APIKey:  apiKey,
-	}, vm, "deepseek"))
+	}, vm, "deepseek", "deepseek"))
 
 	// Setup — 加载所有真实内置插件
 	env := setupIntegrationWithProvider(t, pm)

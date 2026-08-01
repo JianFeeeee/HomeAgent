@@ -12,30 +12,12 @@ import (
 	"strings"
 	"sync"
 
-	agentCore "gitcode.com/JianFeeeee/HomeAgent/internal/agent/core"
-	internalConfig "gitcode.com/JianFeeeee/HomeAgent/internal/config"
 	"gitcode.com/JianFeeeee/HomeAgent/internal/plugin"
 	sdk "gitcode.com/JianFeeeee/HomeAgent/internal/sdk"
 )
 
 // DefaultSocket 由 main.go 在 Load() 前设置，覆盖默认 socket 路径。
 var DefaultSocket string
-
-// 以下通过 Configure() 注入内核依赖
-var (
-	pluginReg  *plugin.Registry
-	cfgReg     *internalConfig.ConfigRegistry
-	statusProv agentCore.StatusProvider
-	pluginDir  string
-)
-
-// Configure 由 main.go 在 Load() 前调用，注入内核依赖供结构化命令使用。
-func Configure(pr *plugin.Registry, cr *internalConfig.ConfigRegistry, sp agentCore.StatusProvider, pDir string) {
-	pluginReg = pr
-	cfgReg = cr
-	statusProv = sp
-	pluginDir = pDir
-}
 
 func init() {
 	plugin.RegisterPluginMeta("cli", "CLI", "CLI")
@@ -189,18 +171,16 @@ func (p *Plugin) cliAPIKey(s *sdk.PluginSDK) string {
 			}
 		}
 	}
-	return p.webuiAPIKey()
+	return p.webuiAPIKey(s)
 }
 
-func (p *Plugin) webuiAPIKey() string {
-	if cfgReg == nil {
+func (p *Plugin) webuiAPIKey(s *sdk.PluginSDK) string {
+	if s == nil {
 		return ""
 	}
-	ps := cfgReg.PluginConfig("webui")
-	if v, _ := ps.Get("api_key"); v != nil {
-		if s, ok := v.(string); ok {
-			return s
-		}
+	v, _ := s.Settings().GetPlugin("webui", "api_key")
+	if k, ok := v.(string); ok {
+		return k
 	}
 	return ""
 }
@@ -215,11 +195,11 @@ func (p *Plugin) handleBuiltin(conn net.Conn, line string, s *sdk.PluginSDK) boo
 	case "/help":
 		p.cmdHelp(conn)
 	case "/status":
-		p.cmdStatus(conn)
+		p.cmdStatus(conn, s)
 	case "/kernel":
-		p.cmdKernel(conn)
+		p.cmdKernel(conn, s)
 	case "/settings":
-		p.cmdSettings(conn, parts)
+		p.cmdSettings(conn, parts, s)
 	case "/plugin":
 		p.cmdPlugin(conn, parts, s)
 	case "/memory":
@@ -227,7 +207,7 @@ func (p *Plugin) handleBuiltin(conn net.Conn, line string, s *sdk.PluginSDK) boo
 	case "/knowledge":
 		p.cmdKnowledge(conn, s)
 	case "/agents":
-		p.cmdAgents(conn)
+		p.cmdAgents(conn, s)
 	default:
 		return false
 	}
@@ -260,12 +240,13 @@ func (p *Plugin) cmdHelp(conn net.Conn) {
 
 // ======== /status ========
 
-func (p *Plugin) cmdStatus(conn net.Conn) {
-	if statusProv == nil {
+func (p *Plugin) cmdStatus(conn net.Conn, s *sdk.PluginSDK) {
+	st := s.Status()
+	if st == nil {
 		writeLine(conn, map[string]interface{}{"type": "error", "error": "status provider not available"})
 		return
 	}
-	ks := statusProv.GetKernelStatus()
+	ks := st.GetKernelStatus()
 
 	llmStatus := "不可用"
 	if ks.LLM.Available {
@@ -294,19 +275,21 @@ func (p *Plugin) cmdStatus(conn net.Conn) {
 
 // ======== /kernel ========
 
-func (p *Plugin) cmdKernel(conn net.Conn) {
-	if statusProv == nil {
+func (p *Plugin) cmdKernel(conn net.Conn, s *sdk.PluginSDK) {
+	st := s.Status()
+	if st == nil {
 		writeLine(conn, map[string]interface{}{"type": "error", "error": "status provider not available"})
 		return
 	}
-	data, _ := json.MarshalIndent(statusProv.GetKernelStatus(), "", "  ")
+	data, _ := json.MarshalIndent(st.GetKernelStatus(), "", "  ")
 	writeLine(conn, map[string]interface{}{"type": "response", "content": string(data)})
 }
 
 // ======== /settings ========
 
-func (p *Plugin) cmdSettings(conn net.Conn, parts []string) {
-	if cfgReg == nil {
+func (p *Plugin) cmdSettings(conn net.Conn, parts []string, s *sdk.PluginSDK) {
+	sett := s.Settings()
+	if sett == nil {
 		writeLine(conn, map[string]interface{}{"type": "error", "error": "config registry not available"})
 		return
 	}
@@ -318,7 +301,7 @@ func (p *Plugin) cmdSettings(conn net.Conn, parts []string) {
 		}
 		key := parts[2]
 		val := strings.Join(parts[3:], " ")
-		if err := cfgReg.Set(key, val); err != nil {
+		if err := sett.SetCore(key, val); err != nil {
 			writeLine(conn, map[string]interface{}{"type": "error", "error": err.Error()})
 			return
 		}
@@ -330,7 +313,7 @@ func (p *Plugin) cmdSettings(conn net.Conn, parts []string) {
 	if len(parts) >= 2 {
 		prefix = parts[1]
 	}
-	keys := cfgReg.List(prefix)
+	keys, _ := sett.ListCore(prefix)
 	sort.Strings(keys)
 	if len(keys) == 0 {
 		writeLine(conn, map[string]interface{}{"type": "response", "content": "无匹配配置项"})
@@ -338,7 +321,7 @@ func (p *Plugin) cmdSettings(conn net.Conn, parts []string) {
 	}
 	var lines []string
 	for _, k := range keys {
-		v, _ := cfgReg.Get(k)
+		v, _ := sett.GetCore(k)
 		lines = append(lines, fmt.Sprintf("  %s = %v", k, v))
 	}
 	writeLine(conn, map[string]interface{}{
@@ -409,20 +392,22 @@ func (p *Plugin) cmdPlugin(conn net.Conn, parts []string, s *sdk.PluginSDK) {
 			writeLine(conn, map[string]interface{}{"type": "response", "content": "用法: /plugin remove <name>"})
 			return
 		}
+		if pmgr == nil {
+			writeLine(conn, map[string]interface{}{"type": "error", "error": "plugin manager not available"})
+			return
+		}
 		name := parts[2]
-		if pluginDir == "" {
+		dir := pmgr.PluginDir()
+		if dir == "" {
 			writeLine(conn, map[string]interface{}{"type": "error", "error": "plugin dir not configured"})
 			return
 		}
-		dir := filepath.Join(pluginDir, name)
-		if err := os.RemoveAll(dir); err != nil {
+		if err := os.RemoveAll(filepath.Join(dir, name)); err != nil {
 			writeLine(conn, map[string]interface{}{"type": "error", "error": err.Error()})
 			return
 		}
 		// 同步清理禁用表
-		if pmgr != nil {
-			pmgr.EnablePlugin(name)
-		}
+		_ = pmgr.EnablePlugin(name)
 		writeLine(conn, map[string]interface{}{"type": "response", "content": fmt.Sprintf("插件 %s 已删除，执行 /plugin reload 生效", name)})
 
 	case "info":
@@ -430,20 +415,33 @@ func (p *Plugin) cmdPlugin(conn net.Conn, parts []string, s *sdk.PluginSDK) {
 			writeLine(conn, map[string]interface{}{"type": "response", "content": "用法: /plugin info <name>"})
 			return
 		}
-		if pluginReg == nil {
-			writeLine(conn, map[string]interface{}{"type": "error", "error": "plugin registry not available"})
+		if pmgr == nil {
+			writeLine(conn, map[string]interface{}{"type": "error", "error": "plugin manager not available"})
 			return
 		}
-		plg := pluginReg.Get(parts[2])
-		if plg == nil {
-			if pmgr != nil && pmgr.IsPluginDisabled(parts[2]) {
-				writeLine(conn, map[string]interface{}{"type": "response", "content": fmt.Sprintf("插件 %q 已禁用", parts[2])})
-				return
+		name := parts[2]
+		metas := pmgr.PluginMetas()
+		meta, hasMeta := metas[name]
+		loaded := false
+		for _, n := range pmgr.ListLoadedPlugins() {
+			if n == name {
+				loaded = true
+				break
 			}
-			writeLine(conn, map[string]interface{}{"type": "response", "content": fmt.Sprintf("插件 %q 未安装", parts[2])})
+		}
+		if loaded {
+			display := name
+			if hasMeta && meta.NameZh != "" {
+				display = meta.NameZh
+			}
+			writeLine(conn, map[string]interface{}{"type": "response", "content": fmt.Sprintf("名称: %s (%s)\n状态: 已加载", display, name)})
 			return
 		}
-		writeLine(conn, map[string]interface{}{"type": "response", "content": fmt.Sprintf("名称: %s\n状态: 已加载", plg.Name())})
+		if pmgr.IsPluginDisabled(name) {
+			writeLine(conn, map[string]interface{}{"type": "response", "content": fmt.Sprintf("插件 %q 已禁用", name)})
+			return
+		}
+		writeLine(conn, map[string]interface{}{"type": "response", "content": fmt.Sprintf("插件 %q 未安装", name)})
 
 	case "disable":
 		if len(parts) < 3 {
@@ -541,12 +539,13 @@ func (p *Plugin) cmdKnowledge(conn net.Conn, s *sdk.PluginSDK) {
 
 // ======== /agents ========
 
-func (p *Plugin) cmdAgents(conn net.Conn) {
-	if statusProv == nil {
+func (p *Plugin) cmdAgents(conn net.Conn, s *sdk.PluginSDK) {
+	st := s.Status()
+	if st == nil {
 		writeLine(conn, map[string]interface{}{"type": "error", "error": "status provider not available"})
 		return
 	}
-	ks := statusProv.GetKernelStatus()
+	ks := st.GetKernelStatus()
 	data, _ := json.MarshalIndent(map[string]string{"agent_id": ks.AgentID}, "", "  ")
 	writeLine(conn, map[string]interface{}{"type": "response", "content": string(data)})
 }

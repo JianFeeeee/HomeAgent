@@ -57,6 +57,12 @@ type DisabledPluginInfo struct {
 	DisabledBy string `json:"disabled_by"`
 }
 
+// PluginMeta is the display-name metadata for a plugin (from plg.json / RegisterPluginMeta).
+type PluginMeta struct {
+	NameZh string `json:"name_zh"`
+	NameEn string `json:"name_en"`
+}
+
 type PluginManager interface {
 	ListLoadedPlugins() []string
 	ListDisabledPlugins() []DisabledPluginInfo
@@ -64,17 +70,44 @@ type PluginManager interface {
 	DisablePlugin(name, by string) error
 	EnablePlugin(name string) error
 	ReloadPlugins() (string, error)
+	PluginMetas() map[string]PluginMeta
+	PluginDir() string
 }
 
 type PluginSDK struct {
 	*pubsdk.PluginSDK
+	settings SettingsAPI
+	memory   MemoryAPI
+	textMem  TextMemoryAPI
+	docMem   DocMemoryAPI
+	know     KnowledgeAPI
+	llm      LLMAPI
+
 	iom       *agentIO.IOManager
 	eventBus  *events.Bus
 	logger    *log.Logger
 	pluginMgr PluginManager
+
+	status     StatusAPI
+	supervisor SupervisorAPI
+	skill      SkillAPI
+	adapter    AdapterAPI
+	tracker    TrackerAPI
+	config     ConfigAPI
+	tool       ToolAPI
+	indexer    IndexerAPI
 }
 
 func (s *PluginSDK) PluginMgr() PluginManager { return s.pluginMgr }
+
+// 以下访问器遮蔽公共 SDK 的同名方法，返回内置插件可用的全量接口。
+
+func (s *PluginSDK) Settings() SettingsAPI     { return s.settings }
+func (s *PluginSDK) Memory() MemoryAPI         { return s.memory }
+func (s *PluginSDK) TextMemory() TextMemoryAPI { return s.textMem }
+func (s *PluginSDK) DocMemory() DocMemoryAPI   { return s.docMem }
+func (s *PluginSDK) Knowledge() KnowledgeAPI   { return s.know }
+func (s *PluginSDK) LLM() LLMAPI               { return s.llm }
 
 // ioAdapter 桥接 IOManager 到公共 SDK 的 IOInjector 接口，
 // 确保外部插件通过 s.InjectText() 等方法的调用能被路由到内核 IO 层。
@@ -114,6 +147,15 @@ type SDKConfig struct {
 	RegOutput  OutputChannelRegistrar
 	RegInput   InputChannelRegistrar
 	PluginMgr  PluginManager
+
+	Status     StatusAPI
+	Supervisor SupervisorAPI
+	Skill      SkillAPI
+	Adapter    AdapterAPI
+	Tracker    TrackerAPI
+	Config     ConfigAPI
+	Tool       ToolAPI
+	Indexer    IndexerAPI
 }
 
 func New(name string, cfg SDKConfig) *PluginSDK {
@@ -131,12 +173,37 @@ func New(name string, cfg SDKConfig) *PluginSDK {
 	base.SetLLMAPI(cfg.LLM)
 	return &PluginSDK{
 		PluginSDK: base,
+		settings:  cfg.Settings,
+		memory:    cfg.Memory,
+		textMem:   cfg.TextMemory,
+		docMem:    cfg.DocMemory,
+		know:      cfg.Knowledge,
+		llm:       cfg.LLM,
+
 		iom:       cfg.IOManager,
 		eventBus:  cfg.EventBus,
 		logger:    log.Default(),
 		pluginMgr: cfg.PluginMgr,
+
+		status:     cfg.Status,
+		supervisor: cfg.Supervisor,
+		skill:      cfg.Skill,
+		adapter:    cfg.Adapter,
+		tracker:    cfg.Tracker,
+		config:     cfg.Config,
+		tool:       cfg.Tool,
+		indexer:    cfg.Indexer,
 	}
 }
+
+func (s *PluginSDK) Status() StatusAPI        { return s.status }
+func (s *PluginSDK) Supervisor() SupervisorAPI { return s.supervisor }
+func (s *PluginSDK) Skill() SkillAPI          { return s.skill }
+func (s *PluginSDK) Adapter() AdapterAPI      { return s.adapter }
+func (s *PluginSDK) Tracker() TrackerAPI      { return s.tracker }
+func (s *PluginSDK) Config() ConfigAPI        { return s.config }
+func (s *PluginSDK) Tool() ToolAPI            { return s.tool }
+func (s *PluginSDK) Indexer() IndexerAPI      { return s.indexer }
 
 func (s *PluginSDK) InjectInput(source, channel, eventType string, payload map[string]interface{}) {
 	if s.iom != nil {

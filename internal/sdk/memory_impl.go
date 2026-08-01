@@ -50,6 +50,11 @@ func (m *graphMemory) Purge(criteria map[string]string, mode string) (int, error
 	return m.db.Purge(criteria, mode)
 }
 
+func (m *graphMemory) GraphData() (map[string]interface{}, error) {
+	if m.db == nil { return map[string]interface{}{}, nil }
+	return m.db.GraphData()
+}
+
 type textMemoryImpl struct{ tm *text.Memory }
 
 func NewTextMemory(tm *text.Memory) TextMemoryAPI { return &textMemoryImpl{tm: tm} }
@@ -59,6 +64,22 @@ func (m *textMemoryImpl) Append(evt TextEvent) error {
 	return m.tm.Append(text.Event{
 		Timestamp: evt.Timestamp, Source: evt.Role, Input: evt.Content, AgentID: evt.Channel,
 	})
+}
+
+func (m *textMemoryImpl) RecentEvents(n int) ([]TextEvent, error) {
+	if m.tm == nil { return nil, nil }
+	got, err := m.tm.RecentEvents(n)
+	if err != nil { return nil, err }
+	out := make([]TextEvent, len(got))
+	for i, e := range got {
+		out[i] = TextEvent{Role: e.Source, Content: e.Input, Timestamp: e.Timestamp, Channel: e.AgentID}
+	}
+	return out, nil
+}
+
+func (m *textMemoryImpl) Stats() map[string]interface{} {
+	if m.tm == nil { return map[string]interface{}{} }
+	return m.tm.Stats()
 }
 
 type docMemoryImpl struct{ ds *doc.Store }

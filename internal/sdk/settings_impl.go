@@ -79,7 +79,7 @@ func (s *settingsImpl) Defs(prefix string) []*ConfigDef {
 		// ConfigDef = pubsdk.ConfigDef (type alias), so direct conversion works
 		cpy := ConfigDef{
 			Key: d.Key, Type: d.Type, DisplayName: d.DisplayName, Description: d.Description,
-			Category: d.Category, Options: d.Options,
+			Category: d.Category, Options: d.Options, Default: d.Default,
 		}
 		out[i] = &cpy
 	}
@@ -96,6 +96,25 @@ func (s *settingsImpl) Plugins() []string {
 	result = append(result, "core")
 	result = append(result, names...)
 	return result
+}
+func (s *settingsImpl) DefsCore(prefix string) []*ConfigDef {
+	if s.reg == nil { return nil }
+	return mapDefs(s.reg.ListDefs(prefix))
+}
+func (s *settingsImpl) DefsPlugin(plugin, prefix string) []*ConfigDef {
+	if s.reg == nil { return nil }
+	return mapDefs(s.reg.PluginConfig(plugin).ListDefs(prefix))
+}
+
+func mapDefs(defs []*internalConfig.ConfigDef) []*ConfigDef {
+	out := make([]*ConfigDef, len(defs))
+	for i, d := range defs {
+		out[i] = &ConfigDef{
+			Key: d.Key, Type: d.Type, DisplayName: d.DisplayName, Description: d.Description,
+			Category: d.Category, Options: d.Options, Default: d.Default,
+		}
+	}
+	return out
 }
 
 func stringifyDefault(v interface{}) string {

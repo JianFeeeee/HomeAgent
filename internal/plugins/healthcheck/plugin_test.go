@@ -10,7 +10,6 @@ import (
 	"gitcode.com/JianFeeeee/HomeAgent/internal/knowledge"
 	"gitcode.com/JianFeeeee/HomeAgent/internal/memory"
 	doc "gitcode.com/JianFeeeee/HomeAgent/internal/memory/document"
-	"gitcode.com/JianFeeeee/HomeAgent/internal/plugin"
 	sdk "gitcode.com/JianFeeeee/HomeAgent/internal/sdk"
 )
 
@@ -34,16 +33,28 @@ func (tc *toolCapture) RegisterTool(name string, def sdk.ToolDef, handler sdk.To
 func (tc *toolCapture) RegisterStage(stage sdk.Stage, handler sdk.StageHandler) {}
 func (tc *toolCapture) RegisterAPI(name string) error                          { return nil }
 
-func setupPlugin() (*Plugin, *toolCapture, error) {
-	sh := agentCore.NewStageHost()
-	iom := agentIO.NewIOManager()
-	pr := plugin.NewRegistry()
+func newTestSDK(cfg sdk.SDKConfig) *sdk.PluginSDK {
+	if cfg.Settings == nil {
+		cfg.Settings = sdk.NewSettings("healthcheck", nil)
+	}
+	if cfg.Tool == nil {
+		cfg.Tool = sdk.NewTool(agentCore.NewStageHost(), agentIO.NewIOManager())
+	}
+	return sdk.New("healthcheck", cfg)
+}
 
-	Configure(sh, iom, pr, nil, nil, nil, nil, nil)
-	p := New("healthcheck")
+func setupPlugin() (*Plugin, *toolCapture, error) {
+	return setupPluginWith(sdk.SDKConfig{})
+}
+
+func setupPluginWith(cfg sdk.SDKConfig) (*Plugin, *toolCapture, error) {
 	tc := newToolCapture()
-	sdk := sdk.New("healthcheck", sdk.SDKConfig{RegTool: tc.RegisterTool, RegStage: tc.RegisterStage, RegAPI: tc.RegisterAPI})
-	if err := p.Start(sdk); err != nil {
+	cfg.RegTool = tc.RegisterTool
+	cfg.RegStage = tc.RegisterStage
+	cfg.RegAPI = tc.RegisterAPI
+	p := New("healthcheck")
+	s := newTestSDK(cfg)
+	if err := p.Start(s); err != nil {
 		return nil, nil, err
 	}
 	return p, tc, nil
@@ -185,15 +196,8 @@ func TestHealthcheckWithMemory(t *testing.T) {
 	}
 	defer memDB.Close()
 
-	sh := agentCore.NewStageHost()
-	iom := agentIO.NewIOManager()
-	pr := plugin.NewRegistry()
-
-	Configure(sh, iom, pr, memDB, nil, nil, nil, nil)
-	p := New("healthcheck")
-	tc := newToolCapture()
-	sdk := sdk.New("healthcheck", sdk.SDKConfig{RegTool: tc.RegisterTool, RegStage: tc.RegisterStage, RegAPI: tc.RegisterAPI})
-	if err := p.Start(sdk); err != nil {
+	_, tc, err := setupPluginWith(sdk.SDKConfig{Memory: sdk.NewGraphMemory(memDB)})
+	if err != nil {
 		t.Fatal(err)
 	}
 
@@ -228,15 +232,8 @@ func TestHealthcheckWithKnowledge(t *testing.T) {
 	}
 	defer ks.Stop()
 
-	sh := agentCore.NewStageHost()
-	iom := agentIO.NewIOManager()
-	pr := plugin.NewRegistry()
-
-	Configure(sh, iom, pr, nil, ks, nil, nil, nil)
-	p := New("healthcheck")
-	tc := newToolCapture()
-	sdk := sdk.New("healthcheck", sdk.SDKConfig{RegTool: tc.RegisterTool, RegStage: tc.RegisterStage, RegAPI: tc.RegisterAPI})
-	if err := p.Start(sdk); err != nil {
+	_, tc, err := setupPluginWith(sdk.SDKConfig{Knowledge: sdk.NewKnowledge(ks)})
+	if err != nil {
 		t.Fatal(err)
 	}
 
@@ -282,15 +279,8 @@ func TestHealthcheckWithDocStore(t *testing.T) {
 	}
 	defer ds.Stop()
 
-	sh := agentCore.NewStageHost()
-	iom := agentIO.NewIOManager()
-	pr := plugin.NewRegistry()
-
-	Configure(sh, iom, pr, nil, nil, ds, nil, nil)
-	p := New("healthcheck")
-	tc := newToolCapture()
-	sdk := sdk.New("healthcheck", sdk.SDKConfig{RegTool: tc.RegisterTool, RegStage: tc.RegisterStage, RegAPI: tc.RegisterAPI})
-	if err := p.Start(sdk); err != nil {
+	_, tc, err := setupPluginWith(sdk.SDKConfig{DocMemory: sdk.NewDocMemory(ds)})
+	if err != nil {
 		t.Fatal(err)
 	}
 
@@ -337,13 +327,6 @@ func TestLLMReportCollection(t *testing.T) {
 	}
 	if p.reports[0].ToolName != "test_tool" {
 		t.Fatalf("expected tool_name=test_tool, got %s", p.reports[0].ToolName)
-	}
-}
-
-func TestConfigureNilStageHost(t *testing.T) {
-	Configure(nil, nil, nil, nil, nil, nil, nil, nil)
-	if hcStageHost != nil {
-		t.Fatal("expected hcStageHost to be nil")
 	}
 }
 
