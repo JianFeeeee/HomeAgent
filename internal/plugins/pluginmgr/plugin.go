@@ -456,6 +456,13 @@ func (p *Plugin) removePlugin(name string) (interface{}, error) {
 		return map[string]interface{}{"error": "plugin not found", "name": name}, nil
 	}
 
+	// 先经内核卸载：停止插件（stop handlers + Stop）并执行插件注册的 onRemove 回调
+	if p.sdk != nil && p.sdk.PluginMgr() != nil {
+		if err := p.sdk.PluginMgr().RemovePlugin(name); err != nil {
+			log.Printf("[pluginmgr] RemovePlugin %s: %v", name, err)
+		}
+	}
+
 	if err := os.RemoveAll(dir); err != nil {
 		return map[string]interface{}{"error": err.Error()}, nil
 	}

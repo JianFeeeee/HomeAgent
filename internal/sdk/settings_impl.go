@@ -24,6 +24,10 @@ func (s *settingsImpl) Set(key string, value interface{}) error {
 	if s.reg == nil { return nil }
 	return s.reg.PluginConfig(s.pluginName).Set(key, value)
 }
+func (s *settingsImpl) Remove(key string) error {
+	if s.reg == nil { return nil }
+	return s.reg.PluginConfig(s.pluginName).Remove(key)
+}
 func (s *settingsImpl) List(prefix string) ([]string, error) {
 	if s.reg == nil { return nil, nil }
 	return s.reg.PluginConfig(s.pluginName).List(prefix)
