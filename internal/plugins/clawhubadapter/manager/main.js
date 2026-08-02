@@ -105,10 +105,22 @@ const registeredChannels = {}; // name -> { pluginName, channelPlugin, output, s
 function makeChannelRuntime(chName, ch) {
   return {
     id: chName,
-    // OC 通用通道轮询输入：manager 模式消息由插件自身 pollLoop 推送（经 deliver 入站），
-    // 此处空转防止插件把 poll 判定为断连。
-    chatPolls: async () => ({ msgs: [] }),
-    getPolls: async () => ({ msgs: [] }),
+    // OC 通用通道轮询输入：Go 端经 channel/send 注入的消息放入 ch.pollQueue，
+    // 插件每次 chatPolls/getPolls 取走（poll 语义：取走即消费，不重复投递）。
+    chatPolls: async (opts) => {
+      const accountId = (opts && opts.accountId) || 'default';
+      const limit = (opts && opts.limit) || 20;
+      const q = ch.pollQueues.get(accountId) || [];
+      const msgs = q.splice(0, limit).map((m) => ({ ...m }));
+      return { msgs };
+    },
+    getPolls: async (opts) => {
+      const accountId = (opts && opts.accountId) || 'default';
+      const limit = (opts && opts.limit) || 20;
+      const q = ch.pollQueues.get(accountId) || [];
+      const msgs = q.splice(0, limit).map((m) => ({ ...m }));
+      return { msgs };
+    },
     // 插件经 runtime 直接调用服务器 API：无目标服务器，转发 Go 端作日志/降级
     call: async (method, args) => {
       notify('channel_output', { channel: chName, type: 'call', method, args });
@@ -342,6 +354,7 @@ function loadPlugin(pluginDir, name) {
         registeredChannels[chName] = {
           pluginName: name, channelPlugin: chPlugin, type: chType,
           deliverers: new Map(), accounts: {}, status: {},
+          pollQueues: new Map(),
         };
         // gateway 生命周期桥：fire-and-forget，绝不阻塞 registerChannel
         startChannels(chName).catch((e) =>
@@ -723,6 +736,25 @@ rl.on('line', async (line) => {
 
   if (method === 'ping') {
     writeJSON({ jsonrpc: '2.0', id, result: { status: 'ok', plugins: Object.keys(loadedPlugins).length } });
+    return;
+  }
+
+  // 向通道注入输入：Go 端外部输入（webui 会话/其他插件）→ pollQueue → 插件 chatPolls 轮询取走
+  if (method === 'channel/send') {
+    const chName = req.params?.channel;
+    const payload = req.params?.payload || {};
+    const accountId = (req.params && req.params.accountId) || payload.accountId || 'default';
+    const ch = registeredChannels[chName];
+    if (!ch) { sendError(id, -32601, `channel not found: ${chName}`); return; }
+    ch.pollQueues.set(accountId, ch.pollQueues.get(accountId) || []);
+    ch.pollQueues.get(accountId).push({
+      sessionKey: payload.sessionKey || `${chName}:${accountId}:${payload.from || 'poll'}`,
+      from: payload.from || '',
+      text: payload.content || payload.text || '',
+      type: payload.type || 'text',
+      timestamp: Date.now(),
+    });
+    writeJSON({ jsonrpc: '2.0', id, result: { status: 'queued', channel: chName, accountId } });
     return;
   }
 
