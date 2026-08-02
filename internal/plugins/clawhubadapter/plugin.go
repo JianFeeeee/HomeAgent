@@ -55,6 +55,9 @@ type Plugin struct {
 	httpClient   *http.Client
 }
 
+// pluginSingleton 内核单例引用（Start 时设置），供 SendToChannel/ChannelSender 使用
+var pluginSingleton *Plugin
+
 func New(name, skillsDir string) *Plugin {
 	sd := ""
 	if skillsDir != "" {
@@ -73,6 +76,7 @@ func (p *Plugin) Name() string { return p.name }
 func (p *Plugin) Start(s *sdk.PluginSDK) error {
 	s.SetAutoRestart(true)
 	p.sdk = s
+	pluginSingleton = p
 
 	s.Settings().RegisterDef(sdk.ConfigDef{
 		Key: "skills_dir", Type: "string", DisplayName: "Skill 加载目录",
@@ -817,8 +821,28 @@ func (p *Plugin) translateAndRegister(n OCNotification, sp *sidecarProcess, s *s
 	p.dispatcher.Dispatch(params.Type, params.Data, pluginName, sp, s)
 }
 
-func (p *Plugin) loadPySidecar(s *sdk.PluginSDK, dir, name string) error {
-	simPath := filepath.Join(p.simulatorDir, "pysim.py")
+// 向通道注入外部输入（经 manager channel/send → pollQueue → 插件 chatPolls 轮询取走）。
+// 供内核其他组件（webui 会话、其他插件）向依赖 runtime 轮询的通用通道插件投递消息。
+func (p *Plugin) SendToChannel(channel string, payload map[string]interface{}) error {
+	p.mu.Lock()
+	m := p.manager
+	p.mu.Unlock()
+	if m == nil {
+		return fmt.Errorf("clawhubadapter manager not running")
+	}
+	_, err := m.call("channel/send", map[string]interface{}{
+		"channel": channel,
+		"payload": payload,
+	})
+	return err
+}
+
+// ChannelSender 返回 clawhubadapter 单例，供内核其他组件注入通道输入（nil 表示未启动）
+func ChannelSender() *Plugin {
+	return pluginSingleton
+}
+
+func (p *Plugin) loadPySidecar(s *sdk.PluginSDK, dir, name string) error {	simPath := filepath.Join(p.simulatorDir, "pysim.py")
 	if err := os.MkdirAll(p.simulatorDir, 0755); err != nil {
 		return fmt.Errorf("create simulator dir: %w", err)
 	}
