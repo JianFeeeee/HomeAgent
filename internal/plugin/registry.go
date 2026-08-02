@@ -615,6 +615,7 @@ func (r *Registry) RemovePlugin(name string) error {
 	}
 	if r.cfgReg != nil {
 		r.cfgReg.RemoveDisabledPlugin(name)
+		r.cfgReg.RemovePlugin(name)
 	}
 	log.Printf("[plugin] removed: %s", name)
 	return nil
