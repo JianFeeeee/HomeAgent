@@ -17,7 +17,6 @@ import (
 	"gitcode.com/JianFeeeee/HomeAgent/internal/memory/social"
 	"gitcode.com/JianFeeeee/HomeAgent/internal/memory/text"
 	"gitcode.com/JianFeeeee/HomeAgent/internal/plugin"
-	"gitcode.com/JianFeeeee/HomeAgent/internal/skill"
 	"gitcode.com/JianFeeeee/HomeAgent/internal/tracker"
 	"gitcode.com/JianFeeeee/HomeAgent/pkg/types"
 )
@@ -33,7 +32,6 @@ type Agent struct {
 	io              *agentIO.IOManager
 	memory          *memory.GraphDB
 	indexer         *memory.Indexer
-	skills          *skill.Manager
 	tracker         *tracker.Tracker
 	context         *RelevanceContext
 	systemPrompt    string
@@ -122,7 +120,6 @@ type AgentConfig struct {
 	IO              *agentIO.IOManager
 	Memory          *memory.GraphDB
 	Indexer         *memory.Indexer
-	Skills          *skill.Manager
 	Tracker         *tracker.Tracker
 
 	DocStore           *document.Store
@@ -190,7 +187,6 @@ func New(cfg AgentConfig) *Agent {
 		io:              cfg.IO,
 		memory:          cfg.Memory,
 		indexer:         cfg.Indexer,
-		skills:          cfg.Skills,
 		tracker:         cfg.Tracker,
 		context:         rc,
 		systemPrompt:    cfg.SystemPrompt,

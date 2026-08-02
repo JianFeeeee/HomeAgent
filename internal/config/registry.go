@@ -711,7 +711,6 @@ func (r *ConfigRegistry) ListPlugins() []string {
 }
 
 func (r *ConfigRegistry) PluginConfig(name string) *PluginSettings {
-	r.ensurePluginTable(name)
 	return &PluginSettings{
 		registry: r,
 		table:    r.pluginTableName(name),
@@ -768,6 +767,9 @@ func (p *PluginSettings) List(prefix string) ([]string, error) {
 func (p *PluginSettings) RegisterDef(def ConfigDef) {
 	p.registry.mu.Lock()
 	defer p.registry.mu.Unlock()
+	// 只有注册配置定义才创建插件配置表：任意 scope 的读写不得隐式建表，
+	// 避免非插件（如 SKILL 目录名）被注册成配置命名空间。
+	p.registry.ensurePluginTable(p.name)
 	p.registry.db.Exec(fmt.Sprintf(`INSERT OR IGNORE INTO %s (key, value) VALUES (?, ?)`, p.table), def.Key, def.Default)
 	qualified := "plugin." + p.name + "." + def.Key
 	def.Key = qualified

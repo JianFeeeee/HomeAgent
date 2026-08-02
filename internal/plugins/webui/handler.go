@@ -38,7 +38,6 @@ type Handler struct {
 	supervisor sdk.SupervisorAPI
 	memory     sdk.MemoryAPI
 	indexer    sdk.IndexerAPI
-	skills     sdk.SkillAPI
 	adapter    sdk.AdapterAPI
 	config     sdk.ConfigAPI
 	startTime  time.Time
@@ -97,7 +96,6 @@ func NewHandler(s *sdk.PluginSDK) *Handler {
 		sup sdk.SupervisorAPI
 		mem sdk.MemoryAPI
 		idx sdk.IndexerAPI
-		sk  sdk.SkillAPI
 		ad  sdk.AdapterAPI
 		cfg sdk.ConfigAPI
 		tm  sdk.TextMemoryAPI
@@ -110,7 +108,7 @@ func NewHandler(s *sdk.PluginSDK) *Handler {
 	)
 	if s != nil {
 		sup, mem, idx = s.Supervisor(), s.Memory(), s.Indexer()
-		sk, ad, cfg = s.Skill(), s.Adapter(), s.Config()
+		ad, cfg = s.Adapter(), s.Config()
 		tm, ks, tr = s.TextMemory(), s.Knowledge(), s.Tracker()
 		se, pm = s.Settings(), s.PluginMgr()
 		st, llm = s.Status(), s.LLM()
@@ -120,7 +118,6 @@ func NewHandler(s *sdk.PluginSDK) *Handler {
 		supervisor: sup,
 		memory:     mem,
 		indexer:    idx,
-		skills:     sk,
 		adapter:    ad,
 		config:     cfg,
 		startTime:  time.Now(),
@@ -378,7 +375,6 @@ func (h *Handler) RegisterRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("/api/v1/status", h.requireAPI(h.handleStatus))
 	mux.HandleFunc("/api/v1/agents", h.requireAPI(h.handleAgents))
 	mux.HandleFunc("/api/v1/agents/", h.requireAPI(h.handleAgentByID))
-	mux.HandleFunc("/api/v1/skills", h.requireAPI(h.handleSkills))
 	mux.HandleFunc("/api/v1/memory", h.requireAPI(h.handleMemory))
 	mux.HandleFunc("/api/v1/memory/", h.requireAPI(h.handleMemory))
 	mux.HandleFunc("/api/v1/memory/graph", h.requireAPI(h.handleMemoryGraph))
@@ -601,44 +597,6 @@ func (h *Handler) handleAgentAction(w http.ResponseWriter, r *http.Request, agen
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]string{"status": fmt.Sprintf("%s_requested", action), "agent": string(agentID)})
-}
-
-func (h *Handler) handleSkills(w http.ResponseWriter, r *http.Request) {
-	if h.skills == nil {
-		writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "skills not available"})
-		return
-	}
-	switch r.Method {
-	case http.MethodGet:
-		writeJSON(w, http.StatusOK, map[string]interface{}{"skills": h.skills.List()})
-	case http.MethodPost:
-		var req struct {
-			Name    string `json:"name"`
-			Content string `json:"content"`
-		}
-		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid request"})
-			return
-		}
-		if err := h.skills.Install(req.Name, req.Content); err != nil {
-			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
-			return
-		}
-		writeJSON(w, http.StatusCreated, map[string]string{"status": "installed", "name": req.Name})
-	case http.MethodDelete:
-		name := r.URL.Query().Get("name")
-		if name == "" {
-			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "name query param required"})
-			return
-		}
-		if err := h.skills.Uninstall(name); err != nil {
-			writeJSON(w, http.StatusNotFound, map[string]string{"error": err.Error()})
-			return
-		}
-		writeJSON(w, http.StatusOK, map[string]string{"status": "uninstalled", "name": name})
-	default:
-		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
-	}
 }
 
 func (h *Handler) handleMemory(w http.ResponseWriter, r *http.Request) {

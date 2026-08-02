@@ -121,6 +121,7 @@ func TestPluginConfig(t *testing.T) {
 	r := NewConfigRegistry(path)
 
 	ps := r.PluginConfig("test_deepseek")
+	ps.RegisterDef(ConfigDef{Key: "api_key", Default: "sk-test123"})
 	if err := ps.Set("api_key", "sk-test123"); err != nil {
 		t.Fatalf("PluginSettings.Set: %v", err)
 	}
