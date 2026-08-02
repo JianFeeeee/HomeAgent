@@ -11,7 +11,6 @@ import (
 	"gitcode.com/JianFeeeee/HomeAgent/internal/memory/social"
 	"gitcode.com/JianFeeeee/HomeAgent/internal/memory/text"
 	"gitcode.com/JianFeeeee/HomeAgent/internal/plugin"
-	"gitcode.com/JianFeeeee/HomeAgent/internal/skill"
 	sdk "gitcode.com/JianFeeeee/HomeAgent/internal/sdk"
 	"gitcode.com/JianFeeeee/HomeAgent/internal/tracker"
 )
@@ -30,7 +29,6 @@ type KnowledgeStatus = sdk.KnowledgeStatus
 type DocumentStatus = sdk.DocumentStatus
 type TextMemoryStatus = sdk.TextMemoryStatus
 type SocialStatus = sdk.SocialStatus
-type SkillsStatus = sdk.SkillsStatus
 type LLMStatus = sdk.LLMStatus
 type ContextStatus = sdk.ContextStatus
 type RuntimeStatus = sdk.RuntimeStatus
@@ -59,7 +57,6 @@ func collectKernelStatus(
 	docStore *document.Store,
 	textMem *text.Memory,
 	socialStore *social.SocialStore,
-	skMgr *skill.Manager,
 	trk *tracker.Tracker,
 ) *KernelStatus {
 	status := &KernelStatus{
@@ -146,15 +143,6 @@ func collectKernelStatus(
 		}
 	}
 
-	// Skills
-	if skMgr != nil {
-		status.Skills.Available = true
-		skills := skMgr.List()
-		status.Skills.SkillList = make([]string, len(skills))
-		for i, sk := range skills {
-			status.Skills.SkillList[i] = sk.Name
-		}
-	}
 
 	// Tracker
 	if trk != nil {
@@ -191,10 +179,6 @@ func (a *Agent) GetKernelStatus() *KernelStatus {
 		socialStore = a.social
 	}
 
-	var skMgr *skill.Manager
-	if a.skills != nil {
-		skMgr = a.skills
-	}
 
 	var trk *tracker.Tracker
 	if a.tracker != nil {
@@ -214,7 +198,6 @@ func (a *Agent) GetKernelStatus() *KernelStatus {
 		a.docStore,
 		textMem,
 		socialStore,
-		skMgr,
 		trk,
 	)
 

@@ -56,12 +56,6 @@ func (a *Agent) buildSystemPrompt(memContext string, userInput string) string {
 	prompt += "- 直接返回纯文本不会到达任何用户端。\n"
 	prompt += "- 需要多步执行的长任务：**必须先**用 output_send__ 发一条确认消息告诉用户已收到（如「好的我去看看～」），**然后再**执行具体排查工具。确认消息不代表任务完成，发出后仍需继续执行实际工具并最终汇报结果。"
 
-	if a.skills != nil {
-		if sp := a.skills.GetInjectedPrompt(); sp != "" {
-			prompt += "\n\n" + sp
-		}
-	}
-
 	if a.indexer != nil {
 		prompt += "\n\n" + a.indexer.BuildToolPrompt()
 	}

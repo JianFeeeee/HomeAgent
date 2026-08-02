@@ -21,7 +21,6 @@ type KernelStatus struct {
 	Documents  DocumentStatus   `json:"documents"`
 	TextMemory TextMemoryStatus `json:"text_memory"`
 	Social     SocialStatus     `json:"social"`
-	Skills     SkillsStatus     `json:"skills"`
 
 	LLM LLMStatus `json:"llm"`
 
@@ -70,11 +69,6 @@ type TextMemoryStatus struct {
 type SocialStatus struct {
 	Available   bool `json:"available"`
 	PersonCount int  `json:"person_count"`
-}
-
-type SkillsStatus struct {
-	Available bool     `json:"available"`
-	SkillList []string `json:"skill_list,omitempty"`
 }
 
 type LLMStatus struct {
