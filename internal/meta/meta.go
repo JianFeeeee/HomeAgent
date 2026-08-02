@@ -84,4 +84,5 @@ const (
 	CoreSettingsDump          = 44
 	CoreSettingsPlugins       = 45
 	CoreRegisterInputCh       = 46
+	CoreInjectInputSync       = 47
 )
