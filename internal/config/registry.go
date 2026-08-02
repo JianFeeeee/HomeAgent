@@ -745,6 +745,14 @@ func (p *PluginSettings) Set(key string, value interface{}) error {
 	return err
 }
 
+// Remove 删除插件配置中的单个键（用于插件删除时的自身配置清理）。
+func (p *PluginSettings) Remove(key string) error {
+	p.registry.mu.Lock()
+	defer p.registry.mu.Unlock()
+	_, err := p.registry.db.Exec(fmt.Sprintf(`DELETE FROM %s WHERE key = ?`, p.table), key)
+	return err
+}
+
 func (p *PluginSettings) List(prefix string) ([]string, error) {
 	p.registry.mu.RLock()
 	defer p.registry.mu.RUnlock()

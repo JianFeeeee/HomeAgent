@@ -205,6 +205,9 @@ type PluginSDK struct {
 
 	stopMu       sync.Mutex
 	stopHandlers []func()
+
+	removeMu       sync.Mutex
+	removeHandlers []func()
 }
 
 // New creates a PluginSDK with the given dependencies.
@@ -404,6 +407,31 @@ func (s *PluginSDK) RunStopHandlers() {
 	handlers := append([]func(){}, s.stopHandlers...)
 	s.stopHandlers = nil
 	s.stopMu.Unlock()
+	for i := len(handlers) - 1; i >= 0; i-- {
+		handlers[i]()
+	}
+}
+
+// RegisterOnRemoveHandler 注册插件被删除（卸载）时的清理回调。
+// 注册的 handler 会在插件目录被移除前按"后注册先执行"的顺序调用，
+// 适用于清理外部资源、删除配置表、下线状态等删除后处理。
+// 可注册多个；执行后清空（一次删除只执行一次）。
+func (s *PluginSDK) RegisterOnRemoveHandler(fn func()) {
+	if fn == nil {
+		return
+	}
+	s.removeMu.Lock()
+	s.removeHandlers = append(s.removeHandlers, fn)
+	s.removeMu.Unlock()
+}
+
+// RunOnRemoveHandlers 执行全部已注册的 onRemove handler（后注册先执行，执行后清空，幂等）。
+// 由内核在卸载插件（registry.RemovePlugin）时、插件 Stop() 之后执行。
+func (s *PluginSDK) RunOnRemoveHandlers() {
+	s.removeMu.Lock()
+	handlers := append([]func(){}, s.removeHandlers...)
+	s.removeHandlers = nil
+	s.removeMu.Unlock()
 	for i := len(handlers) - 1; i >= 0; i-- {
 		handlers[i]()
 	}
