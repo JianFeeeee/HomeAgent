@@ -74,6 +74,24 @@ func (r *ConfigRegistry) RemoveDisabledPlugin(name string) error {
 	return err
 }
 
+// RemovePlugin 卸载插件时清理其全部配置痕迹：删除配置项定义
+// （defs 中 plugin.<name>.*，即该插件 RegisterDef 注册的配置项）并删除
+// 插件配置表（config_<name>，含用户设置值）。卸载后该插件配置区完全消失；
+// 与插件自身的 onRemove 回调（清理数据文件）配合完成删除清理。
+func (r *ConfigRegistry) RemovePlugin(name string) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	prefix := "plugin." + name + "."
+	for k := range r.defs {
+		if strings.HasPrefix(k, prefix) {
+			delete(r.defs, k)
+		}
+	}
+	table := r.pluginTableName(name)
+	_, err := r.db.Exec(fmt.Sprintf(`DROP TABLE IF EXISTS %s`, table))
+	return err
+}
+
 type DisabledPluginInfo struct {
 	Name       string `json:"name"`
 	DisabledAt string `json:"disabled_at"`
