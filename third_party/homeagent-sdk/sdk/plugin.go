@@ -199,6 +199,9 @@ type PluginSDK struct {
 	events    EventSubscriber
 
 	autoRestart bool
+
+	stopMu       sync.Mutex
+	stopHandlers []func()
 }
 
 // New creates a PluginSDK with the given dependencies.
@@ -367,3 +370,28 @@ func (s *PluginSDK) SetAutoRestart(enabled bool) { s.autoRestart = enabled }
 
 // AutoRestart 返回插件是否允许自动重启。
 func (s *PluginSDK) AutoRestart() bool { return s.autoRestart }
+
+// RegisterStopHandler 注册插件停止阶段的清理回调。
+// 注册的 handler 会在插件 Stop() 之前按"后注册先执行"的顺序调用，
+// 适用于释放资源、落盘状态、关闭子进程等停止时清理操作。
+// 可注册多个；执行后清空（进程停止前只执行一次）。
+func (s *PluginSDK) RegisterStopHandler(fn func()) {
+	if fn == nil {
+		return
+	}
+	s.stopMu.Lock()
+	s.stopHandlers = append(s.stopHandlers, fn)
+	s.stopMu.Unlock()
+}
+
+// RunStopHandlers 执行全部已注册的 stop handler（后注册先执行，执行后清空，幂等）。
+// 由内核（内置插件）或插件桥接层（外部插件 z_bridge 的 StopPlugin）在调用插件 Stop() 前执行。
+func (s *PluginSDK) RunStopHandlers() {
+	s.stopMu.Lock()
+	handlers := append([]func(){}, s.stopHandlers...)
+	s.stopHandlers = nil
+	s.stopMu.Unlock()
+	for i := len(handlers) - 1; i >= 0; i-- {
+		handlers[i]()
+	}
+}

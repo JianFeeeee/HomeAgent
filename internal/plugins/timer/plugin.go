@@ -42,6 +42,8 @@ func (p *Plugin) Name() string { return p.name }
 func (p *Plugin) Start(s *sdk.PluginSDK) error {
 	s.SetAutoRestart(true)
 	p.maxDur = 24 * time.Hour
+	// 停止清理（取消倒计时）交由 stop handler：内核在调用 Stop() 之前执行。
+	s.RegisterStopHandler(func() { close(p.stopCh) })
 	s.Settings().RegisterDef(sdk.ConfigDef{
 		Key: "max_duration", Type: "string", DisplayName: "最大定时时长",
 		Description: "允许设置的最大定时时长，例如 24h, 7d, 1h（默认 24h）",
@@ -118,7 +120,6 @@ func (p *Plugin) Start(s *sdk.PluginSDK) error {
 }
 
 func (p *Plugin) Stop() error {
-	close(p.stopCh)
 	p.wg.Wait()
 	return nil
 }

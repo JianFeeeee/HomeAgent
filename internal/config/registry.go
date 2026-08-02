@@ -394,7 +394,6 @@ func (r *ConfigRegistry) seedDBValues(dataDir string) {
 	set("core.memory.text", filepath.Join(dataDir, "memory", "text"))
 	set("core.memory.documents", filepath.Join(dataDir, "memory", "documents"))
 	set("core.knowledge.path", filepath.Join(dataDir, "knowledge"))
-	set("core.skills.path", filepath.Join(dataDir, "skills"))
 	set("core.log.path", filepath.Join(dataDir, "log"))
 
 	set("core.agent.max_tool_turns", "10")
@@ -488,7 +487,6 @@ func (r *ConfigRegistry) seedCoreDefs(dataDir string) {
 	reg(ConfigDef{Key: "core.memory.text", Default: filepath.Join(dataDir, "memory", "text"), Type: "string", DisplayName: "文本记忆路径", Description: "短期文本记忆存储目录", Category: "paths"})
 	reg(ConfigDef{Key: "core.memory.documents", Default: filepath.Join(dataDir, "memory", "documents"), Type: "string", DisplayName: "文档记忆路径", Description: "文档记忆存储目录", Category: "paths"})
 	reg(ConfigDef{Key: "core.knowledge.path", Default: filepath.Join(dataDir, "knowledge"), Type: "string", DisplayName: "知识库路径", Description: "知识库存储目录", Category: "paths"})
-	reg(ConfigDef{Key: "core.skills.path", Default: filepath.Join(dataDir, "skills"), Type: "string", DisplayName: "技能目录", Description: "OpenClaw 技能存储目录", Category: "paths"})
 	reg(ConfigDef{Key: "core.log.path", Default: filepath.Join(dataDir, "log"), Type: "string", DisplayName: "日志目录", Description: "日志文件输出目录", Category: "paths"})
 
 	reg(ConfigDef{Key: "core.agent.max_tool_turns", Default: "10", Type: "int", DisplayName: "最大工具轮次", Description: "单次请求允许的最大工具调用轮数", Category: "agent"})
