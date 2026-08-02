@@ -758,12 +758,60 @@ rl.on('line', async (line) => {
     return;
   }
 
+  // 停止通道账号（stopAccount：停止心跳/轮询）。channel 可省略（停该插件全部通道）
+  if (method === 'channel/stop') {
+    const chName = req.params?.channel;
+    const accountId = req.params?.accountId;
+    if (chName) {
+      const ch = registeredChannels[chName];
+      if (!ch) { sendError(id, -32601, `channel not found: ${chName}`); return; }
+      if (accountId) {
+        const gateway = ch.channelPlugin && ch.channelPlugin.gateway;
+        if (gateway && typeof gateway.stopAccount === 'function') {
+          gateway.stopAccount({ account: { accountId }, channelRuntime: ch.runtime, cfg: ch.pluginConfig || {} }).catch((e) =>
+            process.stderr.write(`[manager] ${chName}: stopAccount(${accountId}) failed: ${e.message}\n`));
+        }
+        if (ch.accounts) delete ch.accounts[accountId];
+      } else {
+        stopChannels(chName);
+      }
+      writeJSON({ jsonrpc: '2.0', id, result: { status: 'stopped', channel: chName, accountId: accountId || 'all' } });
+    } else {
+      for (const name of Object.keys(registeredChannels)) stopChannels(name);
+      writeJSON({ jsonrpc: '2.0', id, result: { status: 'stopped', channel: 'all' } });
+    }
+    return;
+  }
+
+  // 启动通道账号（gateway.startAccount fire-and-forget）
+  if (method === 'channel/start') {
+    const chName = req.params?.channel;
+    const ch = registeredChannels[chName];
+    if (!ch) { sendError(id, -32601, `channel not found: ${chName}`); return; }
+    ch.accounts = {};
+    startChannels(chName).catch((e) => process.stderr.write(`[manager] ${chName}: startChannels failed: ${e.message}\n`));
+    writeJSON({ jsonrpc: '2.0', id, result: { status: 'started', channel: chName } });
+    return;
+  }
+
   if (method === 'plugins/list') {
     const list = Object.entries(loadedPlugins).map(([name, p]) => ({
       name,
       tools: p.tools.map(t => ({ name: t.name, description: t.description })),
     }));
     writeJSON({ jsonrpc: '2.0', id, result: { plugins: list } });
+    return;
+  }
+
+  if (method === 'plugins/channels') {
+    const list = Object.entries(registeredChannels).map(([name, ch]) => ({
+      name,
+      plugin: ch.pluginName,
+      type: ch.type || 'text',
+      status: ch.status || {},
+      accounts: ch.accounts ? Object.keys(ch.accounts) : [],
+    }));
+    writeJSON({ jsonrpc: '2.0', id, result: { channels: list } });
     return;
   }
 
@@ -793,6 +841,13 @@ rl.on('line', async (line) => {
     if (!name) { sendError(id, -32602, 'name required'); return; }
 
     if (!loadedPlugins[name]) { sendError(id, -32601, `plugin not found: ${name}`); return; }
+
+    // 先优雅停靠通道账号（stopAccount 停止心跳/轮询），再卸载
+    for (const chName of Object.keys(registeredChannels)) {
+      if (registeredChannels[chName].pluginName === name) {
+        stopChannels(chName);
+      }
+    }
 
     // Remove tools
     const idxs = [];
