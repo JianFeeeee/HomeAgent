@@ -19,7 +19,6 @@ import (
 	agentAPI "gitcode.com/JianFeeeee/HomeAgent/internal/agent/api"
 	internalConfig "gitcode.com/JianFeeeee/HomeAgent/internal/config"
 	luaVM "gitcode.com/JianFeeeee/HomeAgent/internal/lua"
-	"gitcode.com/JianFeeeee/HomeAgent/internal/skill"
 	"gitcode.com/JianFeeeee/HomeAgent/internal/tracker"
 	"gitcode.com/JianFeeeee/HomeAgent/pkg/types"
 )
@@ -90,7 +89,6 @@ type Registry struct {
 
 	status    sdk.StatusAPI
 	sup       sdk.SupervisorAPI
-	skMgr     *skill.Manager
 	trk       *tracker.Tracker
 	cfg       *types.Config
 	stageHost sdk.ToolSource
@@ -126,7 +124,6 @@ func (r *Registry) SetAPIRegistrar(fn sdk.APIRegistrar)          { r.regAPI = fn
 func (r *Registry) SetToolCleaner(tc PluginToolCleaner)           { r.toolCleaner = tc }
 func (r *Registry) SetStatusProvider(sp sdk.StatusAPI)            { r.status = sp }
 func (r *Registry) SetSupervisor(sup sdk.SupervisorAPI)           { r.sup = sup }
-func (r *Registry) SetSkillManager(skMgr *skill.Manager)          { r.skMgr = skMgr }
 func (r *Registry) SetTracker(trk *tracker.Tracker)               { r.trk = trk }
 func (r *Registry) SetConfig(cfg *types.Config)                   { r.cfg = cfg }
 func (r *Registry) SetStageHost(sh sdk.ToolSource)                { r.stageHost = sh }
@@ -216,7 +213,6 @@ func (r *Registry) buildSDK(name string) *sdk.PluginSDK {
 
 		Status:     r.status,
 		Supervisor: r.sup,
-		Skill:      r.skMgr,
 		Adapter:    sdk.NewAdapter(r.lua),
 		Tracker:    r.trk,
 		Config:     sdk.NewConfig(r.cfg),

@@ -394,8 +394,8 @@ function plugin.start(sdk)
   sdk.settings.set_plugin("other", "okey", "oval")
   _G.res.plugin_val = sdk.settings.get_plugin("other", "okey")
   _G.res.plugin_list = sdk.settings.list_plugin("other", "")
-  _G.res.sett_list_type = type(sdk.settings.list(""))
   sdk.settings.register_def({key="def_key", type="string", display_name="DK", default="dv"})
+  _G.res.sett_list_type = type(sdk.settings.list(""))
   _G.res.def_val = sdk.get_setting("def_key")
   _G.res.defs_type = type(sdk.settings.defs(""))
   _G.res.dump_type = type(sdk.settings.dump())
@@ -415,7 +415,10 @@ return plugin
 	lp := plg.(*luaPlugin)
 
 	var capturedHandler sdk.StageHandler
-	sett := sdk.NewSettings("aligned", internalConfig.NewConfigRegistry(""))
+	reg := internalConfig.NewConfigRegistry("")
+	sett := sdk.NewSettings("aligned", reg)
+	// 目标插件须先注册配置定义才会建表（任意 scope 不再隐式建表）
+	sdk.NewSettings("other", reg).RegisterDef(sdk.ConfigDef{Key: "okey", Default: "oval", Type: "string"})
 	s := sdk.New("aligned", sdk.SDKConfig{
 		Settings: sett,
 		RegStage: func(stage sdk.Stage, handler sdk.StageHandler) {

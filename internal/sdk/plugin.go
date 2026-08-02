@@ -90,7 +90,6 @@ type PluginSDK struct {
 
 	status     StatusAPI
 	supervisor SupervisorAPI
-	skill      SkillAPI
 	adapter    AdapterAPI
 	tracker    TrackerAPI
 	config     ConfigAPI
@@ -150,7 +149,6 @@ type SDKConfig struct {
 
 	Status     StatusAPI
 	Supervisor SupervisorAPI
-	Skill      SkillAPI
 	Adapter    AdapterAPI
 	Tracker    TrackerAPI
 	Config     ConfigAPI
@@ -187,7 +185,6 @@ func New(name string, cfg SDKConfig) *PluginSDK {
 
 		status:     cfg.Status,
 		supervisor: cfg.Supervisor,
-		skill:      cfg.Skill,
 		adapter:    cfg.Adapter,
 		tracker:    cfg.Tracker,
 		config:     cfg.Config,
@@ -198,7 +195,6 @@ func New(name string, cfg SDKConfig) *PluginSDK {
 
 func (s *PluginSDK) Status() StatusAPI        { return s.status }
 func (s *PluginSDK) Supervisor() SupervisorAPI { return s.supervisor }
-func (s *PluginSDK) Skill() SkillAPI          { return s.skill }
 func (s *PluginSDK) Adapter() AdapterAPI      { return s.adapter }
 func (s *PluginSDK) Tracker() TrackerAPI      { return s.tracker }
 func (s *PluginSDK) Config() ConfigAPI        { return s.config }

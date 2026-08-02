@@ -36,7 +36,6 @@ import (
 	_ "gitcode.com/JianFeeeee/HomeAgent/internal/plugins/pluginmgr"
 	_ "gitcode.com/JianFeeeee/HomeAgent/internal/plugins/webui"
 	sdk "gitcode.com/JianFeeeee/HomeAgent/internal/sdk"
-	"gitcode.com/JianFeeeee/HomeAgent/internal/skill"
 	"gitcode.com/JianFeeeee/HomeAgent/internal/supervisor"
 	"gitcode.com/JianFeeeee/HomeAgent/internal/tracker"
 	_ "gitcode.com/JianFeeeee/HomeAgent/internal/plugins"
@@ -88,7 +87,6 @@ func main() {
 	dirs := []string{
 		*dataDir,
 		filepath.Join(*dataDir, "snapshots"),
-		filepath.Join(*dataDir, "skills"),
 		filepath.Join(*dataDir, "plugins"),
 		filepath.Join(*dataDir, "changesets"),
 		filepath.Join(*dataDir, "memory"),
@@ -129,11 +127,6 @@ func main() {
 	if memDB != nil {
 		distiller.Start()
 		defer distiller.Stop()
-	}
-
-	skMgr := skill.NewManager(filepath.Join(*dataDir, "skills"))
-	if err := skMgr.Init(); err != nil {
-		log.Printf("[homed] warning: skill init failed: %v", err)
 	}
 
 	// ========================================================================
@@ -391,7 +384,6 @@ func main() {
 		IO:              iom,
 		Memory:          memDB,
 		Indexer:         memIdx,
-		Skills:          skMgr,
 		Tracker:         trk,
 		DocStore:        docStore,
 		Knowledge:       ks,
@@ -416,7 +408,6 @@ func main() {
 	pluginReg.SetLuaVM(luaVM)
 	pluginReg.SetBaseAPIKey(baseAPIKey)
 	pluginReg.SetSupervisor(supervisor.NewSDKAdapter(sup))
-	pluginReg.SetSkillManager(skMgr)
 	pluginReg.SetTracker(trk)
 	pluginReg.SetConfig(cfg)
 	pluginReg.SetStageHost(stageHost)
