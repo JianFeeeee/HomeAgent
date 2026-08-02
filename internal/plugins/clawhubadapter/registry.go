@@ -13,6 +13,8 @@ import (
 var (
 	channelInputBuf   = map[string][]map[string]interface{}{}
 	channelInputBufMu sync.Mutex
+	channelStatus     map[string]map[string]interface{} // 通道运行状态（channel_status 通知）
+	channelStatusMu   sync.Mutex
 )
 
 type ToolRegistry struct{}

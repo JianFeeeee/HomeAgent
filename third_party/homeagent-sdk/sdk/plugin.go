@@ -111,6 +111,9 @@ type IOInjector interface {
 	InjectInterruptText(source, channel, text string)
 	InjectText(source, channel, text string)
 	InjectTextNoMemory(source, channel, text string)
+	// InjectInputSync 注入输入事件并同步等待 agent 回复，返回回复文本（无回复时返回空串）。
+	// 用于通道消息的完整闭环：收到入站 → agent 处理 → 回复取回 → 送回通道。
+	InjectInputSync(source, channel, text string) string
 }
 
 // EventType identifies the kind of system event.
@@ -362,6 +365,16 @@ func (s *PluginSDK) InjectTextNoMemory(source, channel, text string) {
 	if s.io != nil {
 		s.io.InjectTextNoMemory(source, channel, text)
 	}
+}
+
+// InjectInputSync injects a text message and synchronously waits for the agent reply,
+// returning the reply text (empty string if none). Replies must be dispatched back
+// to the source channel by the caller.
+func (s *PluginSDK) InjectInputSync(source, channel, text string) string {
+	if s.io == nil {
+		return ""
+	}
+	return s.io.InjectInputSync(source, channel, text)
 }
 
 // SetAutoRestart 设置插件是否允许内核自动重启（崩溃后自动重载）。
