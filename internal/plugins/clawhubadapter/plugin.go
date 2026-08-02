@@ -748,7 +748,60 @@ func (p *Plugin) translateAndRegister(n OCNotification, sp *sidecarProcess, s *s
 			data, _ := json.Marshal(params.Payload)
 			content = string(data)
 		}
-		s.InjectInterruptText(pluginName, params.Channel, fmt.Sprintf("[%s] %s", params.Channel, content))
+		// 同步注入并取回复，再把回复送回通道（agent → output_send__<通道> → deliver → 微信）
+		out := s.InjectInputSync(pluginName, params.Channel, "text", map[string]interface{}{
+			"content": content,
+		})
+		if out != nil {
+			reply, _ := out.Payload["content"].(string)
+			if reply != "" {
+				meta := map[string]interface{}{}
+				if from, _ := params.Payload["from"].(string); from != "" {
+					meta["user_id"] = from
+				}
+				if acc, _ := params.Payload["accountId"].(string); acc != "" {
+					meta["accountId"] = acc
+				}
+				go func() {
+					if _, err := sp.CallTool(params.Channel, map[string]interface{}{
+						"payload": reply,
+						"meta":    meta,
+					}); err != nil {
+						log.Printf("[clawhubadapter] channel %s reply dispatch failed: %v", params.Channel, err)
+					}
+				}()
+			}
+		}
+		return
+	}
+	if n.Method == "channel_status" {
+		var params struct {
+			Channel string                 `json:"channel"`
+			Status  map[string]interface{} `json:"status"`
+		}
+		if err := json.Unmarshal(n.Params, &params); err != nil || params.Channel == "" {
+			return
+		}
+		channelStatusMu.Lock()
+		if channelStatus == nil {
+			channelStatus = make(map[string]map[string]interface{})
+		}
+		channelStatus[params.Channel] = params.Status
+		channelStatusMu.Unlock()
+		log.Printf("[clawhubadapter] channel_status %s: running=%v connected=%v", params.Channel,
+			params.Status["running"], params.Status["connected"])
+		return
+	}
+	if n.Method == "channel_output" {
+		// 降级输出事件（通道已启动但 deliver 尚未建立）：仅记录，消息不丢失于协议层
+		var params struct {
+			Channel string `json:"channel"`
+			Type    string `json:"type"`
+			Text    string `json:"text"`
+		}
+		if json.Unmarshal(n.Params, &params) == nil && params.Channel != "" {
+			log.Printf("[clawhubadapter] channel_output %s (type=%s): %.120s", params.Channel, params.Type, params.Text)
+		}
 		return
 	}
 	if n.Method != "register" {

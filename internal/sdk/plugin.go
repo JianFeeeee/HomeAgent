@@ -118,6 +118,21 @@ func (a ioAdapter) InjectInterruptText(source, channel, text string) {
 	}
 }
 
+// InjectInputSync 同步注入输入并等待回复（阻塞直至 agent 处理完成），返回回复文本。
+func (a ioAdapter) InjectInputSync(source, channel, text string) string {
+	if a.iom == nil {
+		return ""
+	}
+	out := a.iom.InjectInputSyncTo(source, channel, "text", map[string]interface{}{
+		"content": text,
+	})
+	if out == nil {
+		return ""
+	}
+	reply, _ := out.Payload["content"].(string)
+	return reply
+}
+
 func (a ioAdapter) InjectText(source, channel, text string) {
 	if a.iom != nil {
 		a.iom.InjectInputTo(source, channel, "text", map[string]interface{}{"content": text})
