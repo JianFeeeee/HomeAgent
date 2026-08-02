@@ -359,6 +359,13 @@ func go_core_dispatch(methodID C.int, ctx unsafe.Pointer, s1, s2, s3 *C.char, i1
 		s.InjectTextNoMemory(a1, a2, a3)
 		return 0
 
+	case 47: // CORE_INJECT_INPUT_SYNC
+		if out := s.InjectInputSync(a1, a2, "text", map[string]interface{}{"content": a3}); out != nil {
+			reply, _ := out.Payload["content"].(string)
+			setResult(result, reply)
+		}
+		return 0
+
 	case 8: // CORE_SET_AUTO_RESTART
 		s.SetAutoRestart(n1 != 0)
 		return 0
