@@ -3,6 +3,10 @@ const path = require('path');
 const { execSync } = require('child_process');
 
 // ---- Utility ----
+// stdout 仅承载 JSON-RPC；插件/manager 的 console 输出一律走 stderr，避免污染协议流
+const rawLog = console.log.bind(console);
+console.log = (...args) => process.stderr.write(args.map(String).join(' ') + '\n');
+
 function writeJSON(obj) {
   process.stdout.write(JSON.stringify(obj) + '\n');
 }
@@ -93,7 +97,156 @@ function tryDetectOCPackage(pkgDir, pkgName) {
 const loadedPlugins = {}; // name -> { entry, tools: [{name, execute, ...}] }
 const allTools = [];      // flat list of all tools across all plugins
 const allProviders = {};  // type -> { name, instance } across all plugins
-const registeredChannels = {}; // name -> { pluginName, channelPlugin, output, send, type }
+const registeredChannels = {}; // name -> { pluginName, channelPlugin, output, send, type, runtime, deliverers, accounts, status }
+
+// ---- OpenClaw channelRuntime mock ----
+// 真实通道插件依赖 channelRuntime 完成：入站转发（dispatchReplyWithBufferedBlockDispatcher）、
+// 出站回调（dispatcherOptions.deliver，插件自带的发送实现）、poll 轮询与 call 透传。
+function makeChannelRuntime(chName, ch) {
+  return {
+    id: chName,
+    // OC 通用通道轮询输入：manager 模式消息由插件自身 pollLoop 推送（经 deliver 入站），
+    // 此处空转防止插件把 poll 判定为断连。
+    chatPolls: async () => ({ msgs: [] }),
+    getPolls: async () => ({ msgs: [] }),
+    // 插件经 runtime 直接调用服务器 API：无目标服务器，转发 Go 端作日志/降级
+    call: async (method, args) => {
+      notify('channel_output', { channel: chName, type: 'call', method, args });
+      return { ok: true };
+    },
+    reply: {
+      // 入站消息 + 出站 deliver 绑定。ctx 来自真实插件（Body/From/SessionKey/AccountId...）
+      dispatchReplyWithBufferedBlockDispatcher: async (opts) => {
+        const ctx = (opts && opts.ctx) || {};
+        const dopts = (opts && opts.dispatcherOptions) || {};
+        const accountId = ctx.AccountId || ctx.accountId || 'default';
+        ch.deliverers.set(accountId, {
+          deliver: dopts.deliver,
+          typingCallbacks: dopts.typingCallbacks || {},
+        });
+        notify('channel_input', {
+          channel: chName,
+          payload: {
+            content: ctx.BodyForAgent || ctx.Body || ctx.RawBody || '',
+            from: ctx.From || ctx.SenderId || '',
+            sessionKey: ctx.SessionKey || '',
+            accountId,
+            messageSid: ctx.MessageSid || '',
+            chatType: ctx.ChatType || 'direct',
+            raw: ctx,
+          },
+        });
+        const buffer = [];
+        return {
+          sendNow: async (items) => {
+            for (const item of (items || [])) await deliverItem(ch, accountId, item);
+          },
+          addToBuffer: async (item) => { buffer.push(item); },
+          sendBuffer: async () => {
+            for (const item of buffer) await deliverItem(ch, accountId, item);
+            buffer.length = 0;
+          },
+          closeBuffer: async () => {},
+        };
+      },
+    },
+  };
+}
+
+async function deliverItem(ch, accountId, item) {
+  const d = ch.deliverers.get(accountId);
+  if (!d || typeof d.deliver !== 'function') return;
+  const payload = {
+    text: (item && item.text) || '',
+    mediaUrls: (item && (item.mediaUrls || (item.mediaUrl ? [item.mediaUrl] : []))) || [],
+  };
+  if (d.typingCallbacks && typeof d.typingCallbacks.onReplyStart === 'function') {
+    try { await d.typingCallbacks.onReplyStart(payload); } catch {}
+  }
+  await d.deliver(payload);
+  if (d.typingCallbacks && typeof d.typingCallbacks.onCleanup === 'function') {
+    try { await d.typingCallbacks.onCleanup(payload); } catch {}
+  }
+}
+
+// ---- OpenClaw gateway 生命周期桥 ----
+// 通道插件的心跳/收消息/状态上报都挂在 gateway.startAccount 上；startAccount 会永久挂起
+// （await new Promise(()=>{})），配合 OC health-monitor 判定账号存活，必须 fire-and-forget。
+async function startChannels(name) {
+  const ch = registeredChannels[name];
+  if (!ch || !ch.channelPlugin) return;
+  const gateway = ch.channelPlugin.gateway;
+  if (!gateway || typeof gateway.startAccount !== 'function') return;
+
+  ch.runtime = ch.runtime || makeChannelRuntime(name, ch);
+  ch.accounts = ch.accounts || {};
+  ch.status = ch.status || { running: false, connected: false };
+
+  const chCfg = ch.channelPlugin.config || {};
+  const passCfg = ch.pluginConfig || chCfg;
+  let accountIds = [];
+  try {
+    if (typeof chCfg.listAccountIds === 'function') {
+      // OC 规范签名: listAccountIds(cfg)
+      const ids = chCfg.listAccountIds(passCfg);
+      accountIds = (ids && ids.then ? await ids : (Array.isArray(ids) ? ids : []));
+    }
+  } catch (e) {
+    process.stderr.write(`[manager] ${name}: listAccountIds failed: ${e.message}\n`);
+  }
+  if (!Array.isArray(accountIds) || accountIds.length === 0) accountIds = ['default'];
+
+  for (const accountId of accountIds) {
+    let account = null;
+    try {
+      if (typeof chCfg.resolveAccount === 'function') {
+        // OC 规范签名: resolveAccount(cfg, accountId)
+        account = chCfg.resolveAccount(passCfg, accountId);
+        if (account && account.then) account = await account;
+      }
+    } catch (e) {
+      process.stderr.write(`[manager] ${name}: resolveAccount(${accountId}) failed: ${e.message}\n`);
+    }
+    if (!account) account = { accountId };
+
+    if (ch.accounts[accountId]) continue;
+    ch.accounts[accountId] = { started: true };
+
+    const getStatus = () => ({ ...ch.status, accountId });
+    const setStatus = (patch) => {
+      ch.status = { ...ch.status, ...(patch || {}) };
+      notify('channel_status', { channel: name, status: { ...ch.status, accountId } });
+    };
+
+    const ctx = {
+      account,
+      cfg: ch.pluginConfig || chCfg,
+      channelRuntime: ch.runtime,
+      getStatus,
+      setStatus,
+    };
+
+    gateway.startAccount(ctx).catch((err) => {
+      process.stderr.write(`[manager] ${name}: startAccount(${accountId}) crashed: ${err.message}\n`);
+      ch.status = { ...ch.status, running: false, connected: false, error: err.message };
+      notify('channel_status', { channel: name, status: { ...ch.status, accountId } });
+    });
+  }
+}
+
+function stopChannels(name) {
+  const ch = registeredChannels[name];
+  if (!ch || !ch.channelPlugin || !ch.accounts) return;
+  const gateway = ch.channelPlugin.gateway;
+  if (!gateway || typeof gateway.stopAccount !== 'function') return;
+  for (const accountId of Object.keys(ch.accounts)) {
+    const account = { accountId };
+    gateway.stopAccount({ account, channelRuntime: ch.runtime, cfg: ch.pluginConfig || {} }).catch((err) => {
+      process.stderr.write(`[manager] ${name}: stopAccount(${accountId}) failed: ${err.message}\n`);
+    });
+  }
+  ch.accounts = {};
+}
 
 function registerPluginTools(name, tools, api) {
   for (const t of tools) {
@@ -182,11 +335,17 @@ function loadPlugin(pluginDir, name) {
       let chType = ch.type || 'text';
       const chPlugin = ch.plugin;
 
-      // OpenClaw ChannelPlugin 格式: { plugin: { id, outbound: { sendText, sendMedia }, ... } }
+      // OpenClaw ChannelPlugin 格式: { plugin: { id, gateway: {startAccount, stopAccount}, config: {...}, ... } }
       if (chPlugin && typeof chPlugin === 'object') {
         chName = chName || chPlugin.id || chPlugin.meta?.id || name + '-channel';
         chType = chType || (chPlugin.capabilities?.media ? 'io' : 'text');
-        registeredChannels[chName] = { pluginName: name, channelPlugin: chPlugin, type: chType };
+        registeredChannels[chName] = {
+          pluginName: name, channelPlugin: chPlugin, type: chType,
+          deliverers: new Map(), accounts: {}, status: {},
+        };
+        // gateway 生命周期桥：fire-and-forget，绝不阻塞 registerChannel
+        startChannels(chName).catch((e) =>
+          process.stderr.write(`[manager] ${name}: startChannels failed: ${e.message}\n`));
       } else {
         // 简单格式: { name, type, output }
         registeredChannels[chName] = { pluginName: name, output: ch.output || ch.send, type: chType };
@@ -717,12 +876,14 @@ rl.on('line', async (line) => {
     if (ch) {
       try {
         const channelPlugin = ch.channelPlugin;
+        let metaObj = {};
+        try { metaObj = typeof args.meta === 'string' ? JSON.parse(args.meta) : (args.meta || {}); } catch {}
+        const accountId = metaObj.accountId || 'default';
+
         if (channelPlugin && channelPlugin.outbound) {
-          const meta = args.meta || '';
-          let metaObj = {};
-          try { metaObj = typeof meta === 'string' ? JSON.parse(meta) : meta; } catch {}
+          // 旧格式 outbound 直发
           const to = metaObj.user_id || metaObj.to || metaObj.group_id || '';
-          const ctx = { to, text: args.payload || '', mediaUrl: metaObj.mediaUrl || '', cfg: {}, accountId: metaObj.accountId || null };
+          const ctx = { to, text: args.payload || '', mediaUrl: metaObj.mediaUrl || '', cfg: {}, accountId };
           let result;
           if (ctx.mediaUrl && channelPlugin.outbound.sendMedia) {
             result = await channelPlugin.outbound.sendMedia(ctx);
@@ -738,6 +899,20 @@ rl.on('line', async (line) => {
         } else if (typeof ch.send === 'function') {
           const result = await ch.send(args.payload, args.meta);
           writeJSON({ jsonrpc: '2.0', id, result: { status: 'sent', result } });
+        } else if (ch.deliverers && ch.deliverers.has(accountId)) {
+          // OpenClaw ChannelPlugin 事件式发送：回复交给插件在入站时挂载的 deliver（插件自带发送实现）
+          await deliverItem(ch, accountId, {
+            text: args.payload || '',
+            mediaUrls: metaObj.mediaUrl ? [metaObj.mediaUrl] : [],
+          });
+          writeJSON({ jsonrpc: '2.0', id, result: { status: 'sent', via: 'channelRuntime.deliver' } });
+        } else if (ch.runtime) {
+          // 通道已启动但尚未收到入站消息（deliver 未建立）：降级为 channel_output 事件
+          notify('channel_output', {
+            channel: toolName, type: 'message',
+            text: args.payload || '', mediaUrl: metaObj.mediaUrl || '', to: metaObj.user_id || '',
+          });
+          writeJSON({ jsonrpc: '2.0', id, result: { status: 'queued', via: 'channel_output' } });
         } else {
           sendError(id, -32601, `channel ${toolName} has no output handler`);
         }
@@ -788,3 +963,14 @@ rl.on('line', async (line) => {
 
   sendError(id, -32601, `Method not found: ${method}`);
 });
+
+// ---- 优雅停靠：进程退出前逐个 stopAccount（插件停止心跳/轮询） ----
+let shuttingDown = false;
+async function shutdown() {
+  if (shuttingDown) return;
+  shuttingDown = true;
+  for (const name of Object.keys(registeredChannels)) stopChannels(name);
+  setTimeout(() => process.exit(0), 2000);
+}
+process.on('SIGTERM', shutdown);
+process.on('SIGINT', shutdown);
