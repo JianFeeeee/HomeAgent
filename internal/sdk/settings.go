@@ -9,6 +9,8 @@ type SettingsAPI interface {
 	DefsCore(prefix string) []*ConfigDef
 	// DefsPlugin 返回另一个插件的配置定义。
 	DefsPlugin(plugin, prefix string) []*ConfigDef
+	// Remove 删除本插件配置中的单个键（插件删除时清理自身配置用）。
+	Remove(key string) error
 }
 
 type ConfigDef = pubsdk.ConfigDef

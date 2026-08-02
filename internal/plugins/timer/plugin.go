@@ -44,6 +44,12 @@ func (p *Plugin) Start(s *sdk.PluginSDK) error {
 	p.maxDur = 24 * time.Hour
 	// 停止清理（取消倒计时）交由 stop handler：内核在调用 Stop() 之前执行。
 	s.RegisterStopHandler(func() { close(p.stopCh) })
+	// 删除清理：移除插件自身配置（删除专用回调，重载不触发）。
+	s.RegisterOnRemoveHandler(func() {
+		if err := s.Settings().Remove("max_duration"); err != nil {
+			log.Printf("[timer] onRemove cleanup: %v", err)
+		}
+	})
 	s.Settings().RegisterDef(sdk.ConfigDef{
 		Key: "max_duration", Type: "string", DisplayName: "最大定时时长",
 		Description: "允许设置的最大定时时长，例如 24h, 7d, 1h（默认 24h）",

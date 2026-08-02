@@ -69,6 +69,9 @@ type PluginManager interface {
 	IsPluginDisabled(name string) bool
 	DisablePlugin(name, by string) error
 	EnablePlugin(name string) error
+	// RemovePlugin 卸载插件：先停止（stop handlers + Stop），再执行插件注册的
+	// onRemove 回调（RegisterOnRemoveHandler），最后从注册表移除。目录删除由调用方负责。
+	RemovePlugin(name string) error
 	ReloadPlugins() (string, error)
 	PluginMetas() map[string]PluginMeta
 	PluginDir() string

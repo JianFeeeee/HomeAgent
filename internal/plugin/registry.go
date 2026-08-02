@@ -390,6 +390,13 @@ func (r *Registry) runStopHandlers(name string) {
 	}
 }
 
+// runOnRemoveHandlers 执行插件注册的删除清理回调（SDK 层），插件 Stop() 之后、从注册表移除前执行。
+func (r *Registry) runOnRemoveHandlers(name string) {
+	if sdk, ok := r.sdkRefs[name]; ok {
+		sdk.RunOnRemoveHandlers()
+	}
+}
+
 func (r *Registry) StopAll() {
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -579,6 +586,39 @@ func (r *Registry) DisablePlugin(name, by string) error {
 }
 
 func (r *Registry) EnablePlugin(name string) error { return r.Enable(name) }
+
+// RemovePlugin 卸载插件：先停止（stop handlers + Stop），再执行插件注册的 onRemove
+// 回调（删除专用，重载不触发），最后从注册表移除并清理禁用/工具注册。
+// 插件目录的物理删除由调用方（pluginmgr）负责。
+func (r *Registry) RemovePlugin(name string) error {
+	r.mu.Lock()
+	p, ok := r.plugins[name]
+	if ok {
+		r.runStopHandlers(name)
+		if err := p.Stop(); err != nil {
+			log.Printf("[plugin] stop %s for remove: %v", name, err)
+		}
+		delete(r.plugins, name)
+		delete(r.sdkRefs, name)
+		for i, inst := range r.instances {
+			if inst.Name() == name {
+				r.instances = append(r.instances[:i], r.instances[i+1:]...)
+				break
+			}
+		}
+	}
+	r.runOnRemoveHandlers(name)
+	r.mu.Unlock()
+
+	if r.toolCleaner != nil {
+		r.toolCleaner.UnregisterPluginTools(name)
+	}
+	if r.cfgReg != nil {
+		r.cfgReg.RemoveDisabledPlugin(name)
+	}
+	log.Printf("[plugin] removed: %s", name)
+	return nil
+}
 
 func (r *Registry) ReloadPlugins() (string, error) { return r.Reload(r.plgDir) }
 
