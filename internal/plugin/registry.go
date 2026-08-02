@@ -68,6 +68,7 @@ type Registry struct {
 	factories map[string]NativeFactory
 
 	pluginAutoRestart map[string]bool
+	sdkRefs           map[string]*sdk.PluginSDK
 
 	iom       *agentIO.IOManager
 	evBus     *events.Bus
@@ -103,6 +104,7 @@ func NewRegistry() *Registry {
 		plugins:           make(map[string]sdk.Plugin),
 		factories:         make(map[string]NativeFactory),
 		pluginAutoRestart: make(map[string]bool),
+		sdkRefs:           make(map[string]*sdk.PluginSDK),
 		knownDisabled:     make(map[string]bool),
 	}
 }
@@ -378,16 +380,25 @@ func (r *Registry) loadOne(plgDir, name string) bool {
 	r.mu.Lock()
 	r.plugins[name] = plg
 	r.pluginAutoRestart[name] = plgSDK.AutoRestart()
+	r.sdkRefs[name] = plgSDK
 	r.instances = append(r.instances, plg)
 	r.mu.Unlock()
 	log.Printf("[plugin] loaded: %s", name)
 	return true
 }
 
+// runStopHandlers 执行插件注册的停止清理回调（SDK 层），须在调用插件 Stop() 之前执行。
+func (r *Registry) runStopHandlers(name string) {
+	if sdk, ok := r.sdkRefs[name]; ok {
+		sdk.RunStopHandlers()
+	}
+}
+
 func (r *Registry) StopAll() {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	for _, p := range r.instances {
+		r.runStopHandlers(p.Name())
 		if err := p.Stop(); err != nil {
 			log.Printf("[plugin] stop %s: %v", p.Name(), err)
 		}
@@ -395,6 +406,7 @@ func (r *Registry) StopAll() {
 	r.plugins = make(map[string]sdk.Plugin)
 	r.instances = nil
 	r.pluginAutoRestart = make(map[string]bool)
+	r.sdkRefs = make(map[string]*sdk.PluginSDK)
 }
 
 func (r *Registry) Reload(dir string) (string, error) {
@@ -410,10 +422,12 @@ func (r *Registry) ReloadOne(name string) error {
 
 	r.mu.Lock()
 	if p, ok := r.plugins[name]; ok {
+		r.runStopHandlers(name)
 		if err := p.Stop(); err != nil {
 			log.Printf("[plugin] stop %s for reload: %v", name, err)
 		}
 		delete(r.plugins, name)
+		delete(r.sdkRefs, name)
 		for i, inst := range r.instances {
 			if inst.Name() == name {
 				r.instances = append(r.instances[:i], r.instances[i+1:]...)
@@ -481,10 +495,12 @@ func (r *Registry) Disable(name string) error {
 	r.mu.Lock()
 	p, ok := r.plugins[name]
 	if ok {
+		r.runStopHandlers(name)
 		if err := p.Stop(); err != nil {
 			log.Printf("[plugin] stop %s for disable: %v", name, err)
 		}
 		delete(r.plugins, name)
+		delete(r.sdkRefs, name)
 		for i, inst := range r.instances {
 			if inst.Name() == name {
 				r.instances = append(r.instances[:i], r.instances[i+1:]...)
@@ -539,10 +555,12 @@ func (r *Registry) DisablePlugin(name, by string) error {
 	r.mu.Lock()
 	p, ok := r.plugins[name]
 	if ok {
+		r.runStopHandlers(name)
 		if err := p.Stop(); err != nil {
 			log.Printf("[plugin] stop %s for disable: %v", name, err)
 		}
 		delete(r.plugins, name)
+		delete(r.sdkRefs, name)
 		for i, inst := range r.instances {
 			if inst.Name() == name {
 				r.instances = append(r.instances[:i], r.instances[i+1:]...)
