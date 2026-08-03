@@ -424,6 +424,7 @@ func (r *Registry) ReloadOne(name string) error {
 	plgDir := filepath.Join(r.plgDir, name)
 
 	r.mu.Lock()
+	var removed sdk.Plugin
 	if p, ok := r.plugins[name]; ok {
 		r.runStopHandlers(name)
 		if err := p.Stop(); err != nil {
@@ -437,8 +438,11 @@ func (r *Registry) ReloadOne(name string) error {
 				break
 			}
 		}
+		removed = p
 	}
 	r.mu.Unlock()
+
+	r.closeDynamic(removed)
 
 	ok := r.loadOne(plgDir, name)
 	if !ok {
@@ -446,6 +450,20 @@ func (r *Registry) ReloadOne(name string) error {
 	}
 	log.Printf("[plugin] reloaded: %s", name)
 	return nil
+}
+
+// closeDynamic 释放动态加载插件的共享库句柄（dlclose）。
+// Linux dlopen 对同一路径返回已加载的旧句柄，若不释放，插件二进制更新后
+// 重载/卸载仍会执行旧代码。Go plugin.Open 路径（dynamicPlugin）不可卸载，跳过。
+func (r *Registry) closeDynamic(p sdk.Plugin) {
+	if p == nil {
+		return
+	}
+	if c, ok := p.(interface{ Close() error }); ok {
+		if err := c.Close(); err != nil {
+			log.Printf("[plugin] close dynamic %s: %v", p.Name(), err)
+		}
+	}
 }
 
 func (r *Registry) List() []string {
@@ -588,10 +606,11 @@ func (r *Registry) DisablePlugin(name, by string) error {
 func (r *Registry) EnablePlugin(name string) error { return r.Enable(name) }
 
 // RemovePlugin 卸载插件：先停止（stop handlers + Stop），再执行插件注册的 onRemove
-// 回调（删除专用，重载不触发），最后从注册表移除并清理禁用/工具注册。
+// 回调（删除专用，重载不触发），最后从注册表移除并清理禁用/工具注册/配置。
 // 插件目录的物理删除由调用方（pluginmgr）负责。
 func (r *Registry) RemovePlugin(name string) error {
 	r.mu.Lock()
+	var removed sdk.Plugin
 	p, ok := r.plugins[name]
 	if ok {
 		r.runStopHandlers(name)
@@ -606,6 +625,7 @@ func (r *Registry) RemovePlugin(name string) error {
 				break
 			}
 		}
+		removed = p
 	}
 	r.runOnRemoveHandlers(name)
 	r.mu.Unlock()
@@ -617,6 +637,7 @@ func (r *Registry) RemovePlugin(name string) error {
 		r.cfgReg.RemoveDisabledPlugin(name)
 		r.cfgReg.RemovePlugin(name)
 	}
+	r.closeDynamic(removed)
 	log.Printf("[plugin] removed: %s", name)
 	return nil
 }
