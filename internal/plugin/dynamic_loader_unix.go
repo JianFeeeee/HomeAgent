@@ -51,6 +51,13 @@ func (p *cabiPlugin) Stop() error {
 	return nil
 }
 
+// Close 卸载动态库（dlclose）。卸载/重载后必须调用，否则同一路径的 dlopen
+// 会复用旧句柄（Linux dlopen 语义），新版本的 plugin.so 不会生效。
+func (p *cabiPlugin) Close() error {
+	p.handle.Close()
+	return nil
+}
+
 func tryLoadSO(dir, name string, config map[string]interface{}) (sdk.Plugin, error) {
 	soPath := filepath.Join(dir, soEntry)
 	if _, err := os.Stat(soPath); os.IsNotExist(err) {
