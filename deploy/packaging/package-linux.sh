@@ -25,24 +25,33 @@ echo "Version: $VERSION"
 echo "Arch:    $ARCH"
 echo ""
 
-# ---- prepare go.mod for Linux build: replace Windows SDK path with local clone ----
+# ---- prepare go.mod for Linux build: point SDK replace at the in-repo SDK ----
+# SDK 仓库（含工具链/示例）以嵌套 git 仓库形式维护在 third_party/homeagent-sdk，
+# 打包直接用该目录，不再 clone 到 /tmp。
 prepare_gomod() {
   local gomod="$PROJECT_ROOT/go.mod"
+  local sdk_local="$PROJECT_ROOT/third_party/homeagent-sdk"
   local sdk_clone="/tmp/homeagent-sdk"
   local patched=0
 
   if grep -q 'replace gitcode.com/JianFeeeee/homeagent-sdk' "$gomod"; then
-    echo ">>> Updating go.mod: replacing Windows SDK path with local clone..."
-    if [ ! -d "$sdk_clone" ]; then
-      echo ">>> Cloning SDK to $sdk_clone..."
+    echo ">>> Updating go.mod: replacing Windows SDK path with in-repo SDK..."
+    if [ -d "$sdk_local" ]; then
+      sed -i.bak "s|^replace gitcode.com/JianFeeeee/homeagent-sdk => .*|replace gitcode.com/JianFeeeee/homeagent-sdk => ${sdk_local}|" "$gomod"
+      patched=1
+    elif [ ! -d "$sdk_clone" ]; then
+      echo ">>> Cloning SDK to $sdk_clone (in-repo SDK missing)..."
       git clone git@gitcode.com:JianFeeeee/homeagent-sdk.git "$sdk_clone" 2>/dev/null || \
       git clone https://gitcode.com/JianFeeeee/homeagent-sdk.git "$sdk_clone" 2>/dev/null || true
-    fi
-    if [ -d "$sdk_clone" ]; then
+      if [ -d "$sdk_clone" ]; then
+        sed -i.bak "s|^replace gitcode.com/JianFeeeee/homeagent-sdk => .*|replace gitcode.com/JianFeeeee/homeagent-sdk => ${sdk_clone}|" "$gomod"
+        patched=1
+      else
+        echo "WARNING: Cannot clone SDK. Build may fail."
+      fi
+    else
       sed -i.bak "s|^replace gitcode.com/JianFeeeee/homeagent-sdk => .*|replace gitcode.com/JianFeeeee/homeagent-sdk => ${sdk_clone}|" "$gomod"
       patched=1
-    else
-      echo "WARNING: Cannot clone SDK. Build may fail."
     fi
   fi
   return $patched
