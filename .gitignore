@@ -31,3 +31,6 @@ third_party/homeagent-sdk/.gitignore
 third_party/homeagent-sdk/README*
 third_party/homeagent-sdk/example/
 .codegraph/
+
+# codegraph 本地索引配置（含嵌套 SDK 仓放行，仅本地生效）
+codegraph.json
