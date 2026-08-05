@@ -32,7 +32,7 @@ func TestDocToTriples(t *testing.T) {
 		Source:  "context",
 	}
 
-	triples := docToTriples(doc)
+	triples := docToTriples(doc, nil)
 
 	foundSummary := false
 	foundSource := false
@@ -54,7 +54,7 @@ func TestDocToTriples(t *testing.T) {
 }
 
 func TestDocToTriplesNil(t *testing.T) {
-	triples := docToTriples(nil)
+	triples := docToTriples(nil, nil)
 	if len(triples) != 0 {
 		t.Errorf("expected empty for nil doc, got %d", len(triples))
 	}
@@ -65,7 +65,7 @@ func TestDocToTriplesNoSource(t *testing.T) {
 		Summary: "无来源文档",
 		Content: "content",
 	}
-	triples := docToTriples(doc)
+	triples := docToTriples(doc, nil)
 	for _, tr := range triples {
 		if tr.Relation == "来源" {
 			t.Error("should not have source triple when Source is empty")
@@ -80,7 +80,7 @@ func TestDocToTriplesTypes(t *testing.T) {
 		Source:  "test",
 	}
 
-	triples := docToTriples(doc)
+	triples := docToTriples(doc, nil)
 
 	for _, tr := range triples {
 		if tr.Subject == "文档" {

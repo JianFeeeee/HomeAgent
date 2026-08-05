@@ -136,6 +136,7 @@ type AgentConfig struct {
 	MaxContextSize     int           // 活跃上下文最大条数，超出按相关性裁剪
 	ContextSavePath    string        // 上下文持久化路径，空则不持久化
 	EmbeddingModelPath string        // 预训练词嵌入模型路径（word2vec 文本格式），空则不使用
+	Embedder           *memory.StaticEmbedder // 共享词嵌入实例；nil 时按 EmbeddingModelPath 自建
 	StageHost          *StageHost
 	EventBus           *events.Bus
 	ThinkingEnabled    bool
@@ -161,7 +162,10 @@ func New(cfg AgentConfig) *Agent {
 		cfg.MaxContextSize = 30
 	}
 
-	embedder := memory.NewStaticEmbedder(strings.Split(cfg.EmbeddingModelPath, ",")...)
+	embedder := cfg.Embedder
+	if embedder == nil {
+		embedder = memory.NewStaticEmbedder(strings.Split(cfg.EmbeddingModelPath, ",")...)
+	}
 	if cfg.DocStore != nil {
 		cfg.DocStore.SetVectorizer(embedder)
 		cfg.DocStore.ReindexWithVectorizer(embedder)
