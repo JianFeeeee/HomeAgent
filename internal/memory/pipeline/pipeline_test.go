@@ -7,7 +7,15 @@ import (
 	"time"
 
 	"gitcode.com/JianFeeeee/HomeAgent/internal/memory"
+	"gitcode.com/JianFeeeee/HomeAgent/internal/memory/vector"
 )
+
+// constVectorizer 恒等向量器：所有候选统一过融合阈值，验证嵌入接线是否生效。
+type constVectorizer struct{}
+
+func (constVectorizer) Vectorize(text string) vector.Vector {
+	return vector.Vector{"0": 1.0, "1": 0.5}
+}
 
 func TestNewDistiller(t *testing.T) {
 	d := NewDistiller(nil, t.TempDir(), DistillerConfig{
@@ -147,7 +155,7 @@ func TestExtractKeyTriples(t *testing.T) {
 	}
 
 	for _, tt := range tests {
-		triples := extractKeyTriples(tt.user, tt.assistant)
+		triples := extractKeyTriples(tt.user, tt.assistant, constVectorizer{})
 		if tt.check != nil && !tt.check(triples) {
 			t.Errorf("extractKeyTriples(%q) = %v, check failed", tt.user, triples)
 		}
