@@ -48,12 +48,21 @@ func newTestHandler(t *testing.T) (*Handler, *supervisor.Daemon) {
 	return NewHandler(s), sup
 }
 
+func seedWebUIConfig(cfgReg *internalConfig.ConfigRegistry) {
+	webuiCfg := cfgReg.PluginConfig("webui")
+	webuiCfg.RegisterDef(internalConfig.ConfigDef{Key: "api_key", Default: ""})
+	webuiCfg.RegisterDef(internalConfig.ConfigDef{Key: "username", Default: "admin"})
+	webuiCfg.RegisterDef(internalConfig.ConfigDef{Key: "password", Default: ""})
+	webuiCfg.RegisterDef(internalConfig.ConfigDef{Key: "session_ttl_hours", Default: "24"})
+	webuiCfg.Set("api_key", "test-api-key")
+	webuiCfg.Set("username", "admin")
+	webuiCfg.Set("password", "secret-pass")
+	webuiCfg.Set("session_ttl_hours", "24")
+}
+
 func TestAuthMiddleware(t *testing.T) {
 	cfgReg := internalConfig.NewConfigRegistry("")
-	cfgReg.PluginConfig("webui").Set("api_key", "test-api-key")
-	cfgReg.PluginConfig("webui").Set("username", "admin")
-	cfgReg.PluginConfig("webui").Set("password", "secret-pass")
-	cfgReg.PluginConfig("webui").Set("session_ttl_hours", "24")
+	seedWebUIConfig(cfgReg)
 
 	sup := supervisor.New(&types.Config{
 		Daemon: types.DaemonConfig{
@@ -427,9 +436,7 @@ func TestHandleConfigGet(t *testing.T) {
 
 func TestRegisterRoutes(t *testing.T) {
 	cfgReg := internalConfig.NewConfigRegistry("")
-	cfgReg.PluginConfig("webui").Set("api_key", "test-api-key")
-	cfgReg.PluginConfig("webui").Set("username", "admin")
-	cfgReg.PluginConfig("webui").Set("password", "secret-pass")
+	seedWebUIConfig(cfgReg)
 
 	sup := supervisor.New(&types.Config{
 		Daemon: types.DaemonConfig{
