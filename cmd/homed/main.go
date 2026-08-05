@@ -10,6 +10,7 @@ import (
 	"os/exec"
 	"os/signal"
 	"path/filepath"
+	"strings"
 	"syscall"
 	"time"
 
@@ -137,6 +138,11 @@ func main() {
 	defer cfgReg.Close()
 	cfgReg.SeedDefaults(*dataDir)
 	cfg := cfgReg.ToConfig()
+
+	// 共享词嵌入：蒸馏提取（Phase 3 TransE 验证）与 Agent 上下文复用同一实例，
+	// 避免同一模型被二次加载（约 200k×300 维 ≈ 数百 MB 内存）。
+	embedder := memory.NewStaticEmbedder(strings.Split(cfgReg.GetString("core.agent.embedding_model_path", ""), ",")...)
+	distiller.SetEmbedder(embedder)
 
 	// ========================================================================
 	// Lua VM（LLM 协议适配）
@@ -398,6 +404,7 @@ func main() {
 		MergeInterval:     cfgReg.GetDuration("core.agent.merge_interval", 120*time.Minute),
 		ContextSavePath:    filepath.Join(cfg.Daemon.DataDir, "memory", "context.json"),
 		EmbeddingModelPath: cfgReg.GetString("core.agent.embedding_model_path", ""),
+		Embedder:          embedder,
 		StageHost:          stageHost,
 		EventBus:        evBus,
 		ThinkingEnabled:  cfg.LLM.ThinkingEnabled,

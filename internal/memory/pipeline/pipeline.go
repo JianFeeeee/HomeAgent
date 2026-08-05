@@ -42,7 +42,10 @@ type Distiller struct {
 	ctx       context.Context
 	cancel    context.CancelFunc
 	onMemory  func(input, response string)
+	embedder  nlp.Vectorizer
 }
+
+func (d *Distiller) SetEmbedder(ev nlp.Vectorizer) { d.embedder = ev }
 
 func NewDistiller(db *memory.GraphDB, dataDir string, cfg DistillerConfig) *Distiller {
 	ctx, cancel := context.WithCancel(context.Background())
@@ -233,7 +236,7 @@ func (d *Distiller) distillBatch(batch []RawRecord) {
 			assistantContent += r.Content + " "
 		}
 	}
-	triples := extractKeyTriples(userContent, assistantContent)
+	triples := extractKeyTriples(userContent, assistantContent, d.embedder)
 	if len(triples) > 0 {
 		sessionID := ""
 		for sid := range sessionIDs {
@@ -263,10 +266,13 @@ func (d *Distiller) cleanupRawFiles() {
 	}
 }
 
-func extractKeyTriples(userContent, assistantContent string) []memory.Triple {
+func extractKeyTriples(userContent, assistantContent string, embedder nlp.Vectorizer) []memory.Triple {
 	var triples []memory.Triple
 
 	e := nlp.NewExtractor(nil)
+	if embedder != nil {
+		e.SetEmbedder(embedder)
+	}
 	text := userContent
 	if assistantContent != "" {
 		text += assistantContent

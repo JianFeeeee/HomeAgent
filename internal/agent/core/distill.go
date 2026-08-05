@@ -178,7 +178,7 @@ func (a *Agent) archiveColdDocs() {
 	if a.docStore != nil {
 		coldDocs := a.docStore.FindColdDocs(72*time.Hour, 2)
 		for _, doc := range coldDocs {
-			triples := docToTriples(doc)
+			triples := docToTriples(doc, a.embedder)
 			if len(triples) > 0 {
 				ec, rc, err := a.memory.Commit(triples, string(a.id)+"_doc_archival", 0)
 				if err != nil {
@@ -387,7 +387,7 @@ func entitySimilarity(a, b string) float64 {
 	return float64(intersect) / float64(union)
 }
 
-func docToTriples(doc *document.Doc) []memory.Triple {
+func docToTriples(doc *document.Doc, embedder nlp.Vectorizer) []memory.Triple {
 	var triples []memory.Triple
 	if doc == nil {
 		return triples
@@ -409,6 +409,9 @@ func docToTriples(doc *document.Doc) []memory.Triple {
 
 	// NLP 通用提取
 	e := nlp.NewExtractor(nil)
+	if embedder != nil {
+		e.SetEmbedder(embedder)
+	}
 	result := e.Extract(doc.Content)
 	if result != nil {
 		for _, nt := range result.Triples {

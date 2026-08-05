@@ -17,7 +17,7 @@ func TestDocToTriplesEmpty(t *testing.T) {
 		Content: "",
 		Source:  "test",
 	}
-	triples := docToTriples(doc)
+	triples := docToTriples(doc, nil)
 	if len(triples) < 2 {
 		t.Fatalf("expected at least 2 triples (主题+来源), got %d", len(triples))
 	}
@@ -38,7 +38,7 @@ func TestDocToTriplesConversation(t *testing.T) {
 		Content: "[15:04] qq: 今天天气怎么样\n[15:05] agent: 今天天气很好",
 		Source:  "qq",
 	}
-	triples := docToTriples(doc)
+	triples := docToTriples(doc, nil)
 
 	if len(triples) < 2 {
 		t.Errorf("expected at least 2 triples (主题+来源), got %d", len(triples))
@@ -60,7 +60,7 @@ func TestDocToTriplesMultiLine(t *testing.T) {
 		Content: "[10:00] user: 你好\n[10:01] agent: 你好，有什么可以帮助你的\n[10:02] user: 今天天气如何\n[10:03] agent: 今天天气很好",
 		Source:  "qq",
 	}
-	triples := docToTriples(doc)
+	triples := docToTriples(doc, nil)
 	if len(triples) < 2 {
 		t.Fatalf("expected at least 2 triples, got %d", len(triples))
 	}
@@ -80,7 +80,7 @@ func TestDocToTriplesEmptyContent(t *testing.T) {
 		Content: "",
 		Source:  "test",
 	}
-	triples := docToTriples(doc)
+	triples := docToTriples(doc, nil)
 	if len(triples) != 2 {
 		t.Fatalf("expected exactly 2 triples (主题+来源) for empty content, got %d", len(triples))
 	}
