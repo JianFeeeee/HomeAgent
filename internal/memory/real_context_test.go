@@ -1,8 +1,6 @@
 package memory
 
 import (
-	"encoding/json"
-	"os"
 	"sort"
 	"strings"
 	"testing"
@@ -65,21 +63,10 @@ func TestCleanText(t *testing.T) {
 }
 
 func TestRealContextPerSourceVector(t *testing.T) {
-	modelPath := "/tmp/cc.zh.sample.vec"
-	if _, err := os.Stat(modelPath); os.IsNotExist(err) {
-		t.Skip("real embedding file not found")
-	}
-	e := NewStaticEmbedder(modelPath)
+	e := newSynthEmbedder(t, 300)
 
-	data, err := os.ReadFile("/tmp/context.json")
-	if err != nil {
-		t.Fatal(err)
-	}
-	var raw []realEvent
-	if err := json.Unmarshal(data, &raw); err != nil {
-		t.Fatal(err)
-	}
-	t.Logf("loaded %d real events", len(raw))
+	raw := genRealEvents()
+	t.Logf("loaded %d synthetic events", len(raw))
 
 	type scored struct {
 		idx    int
@@ -257,19 +244,9 @@ func TestRealContextPerSourceVector(t *testing.T) {
 }
 
 func TestRealContextEmbedderStats(t *testing.T) {
-	e := NewStaticEmbedder("/tmp/cc.zh.sample.vec")
-	if !e.Loaded() {
-		t.Skip("embedder not loaded")
-	}
+	e := newSynthEmbedder(t, 300)
 
-	data, err := os.ReadFile("/tmp/context.json")
-	if err != nil {
-		t.Fatal(err)
-	}
-	var raw []realEvent
-	if err := json.Unmarshal(data, &raw); err != nil {
-		t.Fatal(err)
-	}
+	raw := genRealEvents()
 
 	for _, ev := range raw[:5] {
 		var text string
@@ -290,6 +267,68 @@ func TestRealContextEmbedderStats(t *testing.T) {
 			}
 		}
 	}
+}
+
+// genRealEvents 生成跨领域的合成事件夹具（替代曾依赖的 /tmp/context.json）。
+func genRealEvents() []realEvent {
+	now := time.Now()
+	var out []realEvent
+	add := func(src, input, response string) {
+		out = append(out, realEvent{Timestamp: now, Source: src, Input: input, Response: response})
+	}
+
+	for _, s := range []string{
+		"河南医药大学招生分数线出来了",
+		"扶高升学咨询群讨论专业排名",
+		"医药大学录取结果查询方法",
+		"河南高考志愿填报咨询",
+		"大学招生简章发布了",
+	} {
+		add("qq", s, "")
+	}
+	add("agent", "来自升学群的（医药大学咨询）消息", "已回复关于河南医药大学录取分数线的咨询")
+
+	for _, s := range []string{
+		"老大私聊消息安排了一个任务",
+		"回复老大关于服务器配置的问题",
+		"老大要求检查容器运行状态",
+		"老大说了关于组件封装的事情",
+		"给老大汇报工作进展",
+	} {
+		add("qq", s, "")
+	}
+	add("agent", "收到老大的（私聊）消息", "已回复老大关于任务安排的消息")
+
+	for _, s := range []string{
+		"用户要求图片转换SVG工具",
+		"图片转SVG后尺寸优化完成",
+		"转换图片格式为SVG",
+		"生成SVG工具使用说明",
+	} {
+		add("cli", "查询"+s, "查到了"+s+"的结果")
+	}
+
+	for _, s := range []string{
+		"南航航空航天专业介绍",
+		"电气专业转南航的录取咨询",
+		"南航院校分数线讨论",
+		"航空航天方向的就业前景",
+	} {
+		add("qq", s, "")
+	}
+
+	for _, s := range []string{
+		"今天天气怎么样",
+		"晚上吃什么",
+		"推荐一部电影",
+		"股票基金收益行情如何",
+		"查询快递送达状态",
+		"设置一个明早的闹钟",
+	} {
+		add("cold_storage", s, "已处理，结果记录完成")
+	}
+
+	return out
 }
 
 func containsAny(s string, subs []string) bool {
