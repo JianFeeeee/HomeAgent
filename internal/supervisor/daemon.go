@@ -8,21 +8,23 @@ import (
 	"time"
 
 	"gitcode.com/JianFeeeee/HomeAgent/internal/network"
-	"gitcode.com/JianFeeeee/HomeAgent/internal/tracker"
 	sdk "gitcode.com/JianFeeeee/HomeAgent/internal/sdk"
+	"gitcode.com/JianFeeeee/HomeAgent/internal/tracker"
 	"gitcode.com/JianFeeeee/HomeAgent/pkg/types"
 )
 
 const directAgentID types.AgentID = "main"
 
 type Daemon struct {
-	cfg    *types.Config
-	nm     *network.Monitor
-	trk    *tracker.Tracker
-	agents map[types.AgentID]*agentInstance
-	mu     sync.RWMutex
-	ctx    context.Context
-	cancel context.CancelFunc
+	cfg             *types.Config
+	nm              *network.Monitor
+	trk             *tracker.Tracker
+	agents          map[types.AgentID]*agentInstance
+	mu              sync.RWMutex
+	ctx             context.Context
+	cancel          context.CancelFunc
+	heartbeatSource func(id types.AgentID) (time.Time, types.HealthStatus, error)
+	restartHandler  func(id types.AgentID)
 }
 
 type agentInstance struct {
@@ -49,6 +51,21 @@ func New(cfg *types.Config) *Daemon {
 
 func (d *Daemon) SetTracker(trk *tracker.Tracker) {
 	d.trk = trk
+}
+
+// SetHeartbeatSource 接入 agent 真实存活探测源（direct 模式下为同进程 agent core 状态）。
+// 成功返回时 lastHB 才更新；无源时 agent 健康保持未知。
+func (d *Daemon) SetHeartbeatSource(fn func(id types.AgentID) (time.Time, types.HealthStatus, error)) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	d.heartbeatSource = fn
+}
+
+// SetRestartHandler 接入真实重启动作（direct 模式下由 homed 注册"清理后以特殊码退出"，交给 guard/systemd 重建）。
+func (d *Daemon) SetRestartHandler(fn func(id types.AgentID)) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	d.restartHandler = fn
 }
 
 func (d *Daemon) Start() error {
@@ -127,18 +144,35 @@ func (d *Daemon) checkAllAgents() {
 }
 
 func (d *Daemon) checkAgent(id types.AgentID, agent *agentInstance) {
-	netStatus := d.nm.AggregateResult()
+	// 1) agent 存活源：只有确认存活才更新 lastHB
+	d.mu.RLock()
+	hbSrc := d.heartbeatSource
+	d.mu.RUnlock()
 
-	if !netStatus.LLMAPIReachable {
-		agent.health = types.HealthDegraded
-		agent.failCount++
-		log.Printf("[homed] agent %s: LLM API unreachable (fail %d)", id, agent.failCount)
+	if hbSrc != nil {
+		hbTime, hbHealth, err := hbSrc(id)
+		if err != nil || hbTime.IsZero() {
+			agent.health = types.HealthDown
+			log.Printf("[homed] agent %s heartbeat lost: %v", id, err)
+		} else {
+			agent.lastHB = hbTime
+			agent.health = hbHealth
+		}
 	} else {
-		agent.health = types.HealthHealthy
-		agent.failCount = 0
+		agent.health = types.HealthUnknown
 	}
 
-	agent.lastHB = time.Now()
+	// 2) 网络：仅在配置了探活端点时才据此判定降级
+	netStatus := d.nm.AggregateResult()
+	if netStatus.EndpointsConfigured && !netStatus.LLMAPIReachable {
+		if agent.health != types.HealthDown {
+			agent.health = types.HealthDegraded
+		}
+		agent.failCount++
+		log.Printf("[homed] agent %s: LLM API unreachable (fail %d)", id, agent.failCount)
+	} else if agent.health == types.HealthHealthy {
+		agent.failCount = 0
+	}
 
 	if agent.failCount >= agent.cfg.RollbackPolicy.MaxRetries {
 		d.handleFailure(id, agent)
@@ -164,13 +198,23 @@ func (d *Daemon) handleFailure(id types.AgentID, agent *agentInstance) {
 }
 
 func (d *Daemon) restartAgent(id types.AgentID, agent *agentInstance) {
-	log.Printf("[homed] resetting agent %s", id)
-
 	agent.state = types.AgentStateStopped
-	d.RegisterAgent(id)
-
 	agent.failCount = 0
-	log.Printf("[homed] agent %s reset", id)
+
+	d.mu.RLock()
+	handler := d.restartHandler
+	d.mu.RUnlock()
+
+	if handler != nil {
+		log.Printf("[homed] agent %s restart handler invoked", id)
+		handler(id)
+		return
+	}
+
+	// 无真实重启通道：退回内存态复位（记录，不再假装成功）
+	d.RegisterAgent(id)
+	agent.failCount = 0
+	log.Printf("[homed] agent %s reset in-memory only (no restart handler registered)", id)
 }
 
 func (d *Daemon) GetAgentStatus(id types.AgentID) (*AgentStatus, error) {

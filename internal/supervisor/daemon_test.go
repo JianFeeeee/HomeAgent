@@ -184,7 +184,7 @@ func TestRegisterAgentMultiple(t *testing.T) {
 	d := New(cfg)
 
 	for i := 0; i < 5; i++ {
-		d.RegisterAgent(types.AgentID(string(rune('a'+i))))
+		d.RegisterAgent(types.AgentID(string(rune('a' + i))))
 	}
 
 	agents := d.ListAgents()
@@ -205,5 +205,66 @@ func TestConcurrentAccess(t *testing.T) {
 	// Register from multiple goroutines
 	for i := 0; i < 10; i++ {
 		go d.RegisterAgent(types.AgentID(string(rune('a' + i))))
+	}
+}
+
+func TestCheckAgentHeartbeatSource(t *testing.T) {
+	cfg := &types.Config{
+		Daemon: types.DaemonConfig{CheckInterval: time.Minute, HeartbeatInterval: 30 * time.Second},
+	}
+	cfg.Defaults.RollbackPolicy.MaxRetries = 3
+	d := New(cfg)
+	d.RegisterAgent("main")
+	a := d.agents["main"]
+
+	d.SetHeartbeatSource(func(id types.AgentID) (time.Time, types.HealthStatus, error) {
+		return time.Now(), types.HealthHealthy, nil
+	})
+
+	regHB := a.lastHB
+	if regHB.IsZero() {
+		t.Fatal("lastHB should be set at register")
+	}
+
+	d.checkAgent("main", a)
+	if a.lastHB.Before(regHB) {
+		t.Fatal("lastHB should update after a successful heartbeat poll")
+	}
+	if a.health != types.HealthHealthy {
+		t.Fatalf("expected healthy, got %v", a.health)
+	}
+
+	// 健康源丢失：lastHB 不应再更新，状态置 Down
+	lastHB := a.lastHB
+	time.Sleep(2 * time.Millisecond)
+	d.SetHeartbeatSource(func(id types.AgentID) (time.Time, types.HealthStatus, error) {
+		return time.Time{}, types.HealthDown, nil
+	})
+	d.checkAgent("main", a)
+	if a.health != types.HealthDown {
+		t.Fatalf("expected down, got %v", a.health)
+	}
+	if !a.lastHB.Equal(lastHB) {
+		t.Fatal("lastHB must NOT update when the agent does not respond")
+	}
+}
+
+func TestRestartHandlerInvoked(t *testing.T) {
+	cfg := &types.Config{
+		Daemon: types.DaemonConfig{CheckInterval: time.Minute, HeartbeatInterval: 30 * time.Second},
+	}
+	cfg.Defaults.RollbackPolicy.MaxRetries = 3
+	d := New(cfg)
+	d.RegisterAgent("main")
+	a := d.agents["main"]
+
+	called := false
+	d.SetRestartHandler(func(id types.AgentID) { called = true })
+	d.restartAgent("main", a)
+	if !called {
+		t.Fatal("restart handler should be invoked")
+	}
+	if a.failCount != 0 {
+		t.Fatalf("failCount should reset, got %d", a.failCount)
 	}
 }
