@@ -7,18 +7,19 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strings"
 	"sync"
 
+	agentAPI "gitcode.com/JianFeeeee/HomeAgent/internal/agent/api"
 	agentIO "gitcode.com/JianFeeeee/HomeAgent/internal/agent/io"
+	internalConfig "gitcode.com/JianFeeeee/HomeAgent/internal/config"
 	"gitcode.com/JianFeeeee/HomeAgent/internal/events"
 	"gitcode.com/JianFeeeee/HomeAgent/internal/knowledge"
+	luaVM "gitcode.com/JianFeeeee/HomeAgent/internal/lua"
 	"gitcode.com/JianFeeeee/HomeAgent/internal/memory"
 	doc "gitcode.com/JianFeeeee/HomeAgent/internal/memory/document"
 	"gitcode.com/JianFeeeee/HomeAgent/internal/memory/text"
 	sdk "gitcode.com/JianFeeeee/HomeAgent/internal/sdk"
-	agentAPI "gitcode.com/JianFeeeee/HomeAgent/internal/agent/api"
-	internalConfig "gitcode.com/JianFeeeee/HomeAgent/internal/config"
-	luaVM "gitcode.com/JianFeeeee/HomeAgent/internal/lua"
 	"gitcode.com/JianFeeeee/HomeAgent/internal/tracker"
 	"gitcode.com/JianFeeeee/HomeAgent/pkg/types"
 )
@@ -69,17 +70,17 @@ type Registry struct {
 	pluginAutoRestart map[string]bool
 	sdkRefs           map[string]*sdk.PluginSDK
 
-	iom       *agentIO.IOManager
-	evBus     *events.Bus
-	memDB     *memory.GraphDB
-	textMem   *text.Memory
-	docStore  *doc.Store
-	ks        *knowledge.Store
-	mgr       *agentAPI.ProviderManager
-	cfgReg    *internalConfig.ConfigRegistry
-	plgDir    string
-	lua       *luaVM.VM
-	baseKey   string
+	iom      *agentIO.IOManager
+	evBus    *events.Bus
+	memDB    *memory.GraphDB
+	textMem  *text.Memory
+	docStore *doc.Store
+	ks       *knowledge.Store
+	mgr      *agentAPI.ProviderManager
+	cfgReg   *internalConfig.ConfigRegistry
+	plgDir   string
+	lua      *luaVM.VM
+	baseKey  string
 
 	regTool  sdk.ToolRegistrar
 	regStage sdk.StageRegistrar
@@ -95,6 +96,7 @@ type Registry struct {
 	idx       *memory.Indexer
 
 	knownDisabled map[string]bool
+	allowlist     map[string]bool
 }
 
 func NewRegistry() *Registry {
@@ -107,27 +109,51 @@ func NewRegistry() *Registry {
 	}
 }
 
-func (r *Registry) SetIOManager(iom *agentIO.IOManager)          { r.iom = iom }
-func (r *Registry) SetEventBus(evBus *events.Bus)                { r.evBus = evBus }
-func (r *Registry) SetMemory(memDB *memory.GraphDB)              { r.memDB = memDB }
-func (r *Registry) SetTextMemory(tm *text.Memory)                { r.textMem = tm }
-func (r *Registry) SetDocStore(ds *doc.Store)                    { r.docStore = ds }
-func (r *Registry) SetKnowledge(ks *knowledge.Store)             { r.ks = ks }
-func (r *Registry) SetProviderManager(mgr *agentAPI.ProviderManager) { r.mgr = mgr }
+func (r *Registry) SetIOManager(iom *agentIO.IOManager)                     { r.iom = iom }
+func (r *Registry) SetEventBus(evBus *events.Bus)                           { r.evBus = evBus }
+func (r *Registry) SetMemory(memDB *memory.GraphDB)                         { r.memDB = memDB }
+func (r *Registry) SetTextMemory(tm *text.Memory)                           { r.textMem = tm }
+func (r *Registry) SetDocStore(ds *doc.Store)                               { r.docStore = ds }
+func (r *Registry) SetKnowledge(ks *knowledge.Store)                        { r.ks = ks }
+func (r *Registry) SetProviderManager(mgr *agentAPI.ProviderManager)        { r.mgr = mgr }
 func (r *Registry) SetConfigRegistry(cfgReg *internalConfig.ConfigRegistry) { r.cfgReg = cfgReg }
-func (r *Registry) SetPluginDir(dir string)                      { r.plgDir = dir }
-func (r *Registry) SetLuaVM(vm *luaVM.VM)                        { r.lua = vm }
-func (r *Registry) SetBaseAPIKey(key string)                     { r.baseKey = key }
-func (r *Registry) SetToolRegistrar(fn sdk.ToolRegistrar)        { r.regTool = fn }
-func (r *Registry) SetStageRegistrar(fn sdk.StageRegistrar)      { r.regStage = fn }
-func (r *Registry) SetAPIRegistrar(fn sdk.APIRegistrar)          { r.regAPI = fn }
-func (r *Registry) SetToolCleaner(tc PluginToolCleaner)           { r.toolCleaner = tc }
-func (r *Registry) SetStatusProvider(sp sdk.StatusAPI)            { r.status = sp }
-func (r *Registry) SetSupervisor(sup sdk.SupervisorAPI)           { r.sup = sup }
-func (r *Registry) SetTracker(trk *tracker.Tracker)               { r.trk = trk }
-func (r *Registry) SetConfig(cfg *types.Config)                   { r.cfg = cfg }
-func (r *Registry) SetStageHost(sh sdk.ToolSource)                { r.stageHost = sh }
-func (r *Registry) SetIndexer(idx *memory.Indexer)                { r.idx = idx }
+func (r *Registry) SetPluginDir(dir string)                                 { r.plgDir = dir }
+func (r *Registry) SetLuaVM(vm *luaVM.VM)                                   { r.lua = vm }
+func (r *Registry) SetBaseAPIKey(key string)                                { r.baseKey = key }
+func (r *Registry) SetToolRegistrar(fn sdk.ToolRegistrar)                   { r.regTool = fn }
+func (r *Registry) SetStageRegistrar(fn sdk.StageRegistrar)                 { r.regStage = fn }
+func (r *Registry) SetAPIRegistrar(fn sdk.APIRegistrar)                     { r.regAPI = fn }
+func (r *Registry) SetToolCleaner(tc PluginToolCleaner)                     { r.toolCleaner = tc }
+func (r *Registry) SetStatusProvider(sp sdk.StatusAPI)                      { r.status = sp }
+func (r *Registry) SetSupervisor(sup sdk.SupervisorAPI)                     { r.sup = sup }
+func (r *Registry) SetTracker(trk *tracker.Tracker)                         { r.trk = trk }
+func (r *Registry) SetConfig(cfg *types.Config)                             { r.cfg = cfg }
+func (r *Registry) SetStageHost(sh sdk.ToolSource)                          { r.stageHost = sh }
+func (r *Registry) SetIndexer(idx *memory.Indexer)                          { r.idx = idx }
+
+// SetLoadAllowlist 限制 Load 仅装载指定插件名（failback 受限启动用）。
+// 空/未设置 = 装载全部。违反白名单的插件（含已注册工厂）一律跳过。
+func (r *Registry) SetLoadAllowlist(names []string) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.allowlist = nil
+	if len(names) == 0 {
+		return
+	}
+	r.allowlist = make(map[string]bool, len(names))
+	for _, n := range names {
+		r.allowlist[strings.TrimSpace(n)] = true
+	}
+}
+
+func (r *Registry) allowlistAllows(name string) bool {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	if r.allowlist == nil {
+		return true
+	}
+	return r.allowlist[name]
+}
 
 func (r *Registry) RegisterNative(name string, factory NativeFactory) {
 	r.mu.Lock()
@@ -144,13 +170,13 @@ type channelDevice struct {
 	chDef   agentIO.ChannelDef
 }
 
-func (d *channelDevice) Name() string              { return d.name }
-func (d *channelDevice) Type() agentIO.DeviceType  { return agentIO.DeviceOutput }
-func (d *channelDevice) Description() string       { return d.desc }
-func (d *channelDevice) Start() error              { return nil }
-func (d *channelDevice) Stop() error               { return nil }
+func (d *channelDevice) Name() string                                 { return d.name }
+func (d *channelDevice) Type() agentIO.DeviceType                     { return agentIO.DeviceOutput }
+func (d *channelDevice) Description() string                          { return d.desc }
+func (d *channelDevice) Start() error                                 { return nil }
+func (d *channelDevice) Stop() error                                  { return nil }
 func (d *channelDevice) OutputCapabilities() agentIO.OutputCapability { return d.caps }
-func (d *channelDevice) Tools() []agentIO.ToolDef  { return nil }
+func (d *channelDevice) Tools() []agentIO.ToolDef                     { return nil }
 func (d *channelDevice) Execute(tool string, args map[string]interface{}) (interface{}, error) {
 	return d.handler(args)
 }
@@ -243,6 +269,9 @@ func (r *Registry) Load(dir string) error {
 			continue
 		}
 		name := entry.Name()
+		if !r.allowlistAllows(name) {
+			continue
+		}
 		plgDir := filepath.Join(dir, name)
 		if r.loadOne(plgDir, name) {
 			loaded[name] = true
@@ -267,6 +296,9 @@ func (r *Registry) Load(dir string) error {
 
 	for name, factory := range allFactories {
 		if loaded[name] {
+			continue
+		}
+		if !r.allowlistAllows(name) {
 			continue
 		}
 		if r.isDisabled(name) {

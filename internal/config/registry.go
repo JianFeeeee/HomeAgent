@@ -2,7 +2,10 @@ package config
 
 import (
 	"database/sql"
+	"encoding/json"
 	"fmt"
+	"log"
+	"os"
 	"path/filepath"
 	"sort"
 	"strconv"
@@ -28,10 +31,11 @@ type ConfigDef struct {
 }
 
 type ConfigRegistry struct {
-	mu     sync.RWMutex
-	db     *sql.DB
-	dbPath string
-	defs   map[string]*ConfigDef
+	mu          sync.RWMutex
+	db          *sql.DB
+	dbPath      string
+	defs        map[string]*ConfigDef
+	llmSnapFile string
 }
 
 func NewConfigRegistry(dbPath string) *ConfigRegistry {
@@ -265,6 +269,9 @@ func (r *ConfigRegistry) Get(key string) (interface{}, error) {
 func (r *ConfigRegistry) Set(key string, value interface{}) error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
+	if strings.HasPrefix(key, "core.llm.") {
+		r.writeLLMSnapshotLocked()
+	}
 	_, err := r.db.Exec(`INSERT OR REPLACE INTO config (key, value) VALUES (?, ?)`, key, fmt.Sprint(value))
 	if err == nil && strings.HasPrefix(key, "core.llm.sources.") {
 		rest := strings.TrimPrefix(key, "core.llm.sources.")
@@ -301,6 +308,107 @@ func (r *ConfigRegistry) Delete(key string) error {
 	defer r.mu.Unlock()
 	_, err := r.db.Exec(`DELETE FROM config WHERE key = ?`, key)
 	return err
+}
+
+// SnapshotCoreLLM 捕获全部 core.llm.* 键值（LLM 源密度快照），供写前留档。
+// 返回值是 key→value 的不可变拷贝；写入 guard 配置恢复的基线。
+func (r *ConfigRegistry) SnapshotCoreLLM() map[string]string {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	return r.listPrefixLocked("core.llm.")
+}
+
+// SetLLMSnapshotFile 设定写前留档文件：此后任意写入 core.llm.* 键时，
+// 先把当前 llm 配置整体快照到该文件（guard 恢复的外部基线）。
+func (r *ConfigRegistry) SetLLMSnapshotFile(path string) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if path != "" {
+		r.writeLLMSnapshotToFileLocked(path)
+	}
+	r.llmSnapFile = path
+}
+
+// writeLLMSnapshotLocked 调用方须持有写锁；若已配置快照文件则写入当前 llm 快照。
+func (r *ConfigRegistry) writeLLMSnapshotLocked() {
+	if r.llmSnapFile == "" {
+		return
+	}
+	r.writeLLMSnapshotToFileLocked(r.llmSnapFile)
+}
+
+func (r *ConfigRegistry) writeLLMSnapshotToFileLocked(path string) {
+	snap := r.listPrefixLocked("core.llm.")
+	if err := SaveLLMSnapshot(path, snap); err != nil {
+		log.Printf("[config] save llm snapshot %s: %v", path, err)
+	}
+}
+
+// RestoreCoreLLM 精确还原到快照状态：快照里有的键回写旧值，
+// 当前存在但快照里没有的 core.llm.* 键删除（保持与快照一致）。
+func (r *ConfigRegistry) RestoreCoreLLM(snap map[string]string) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	current := r.listPrefixLocked("core.llm.")
+	seen := make(map[string]bool, len(snap))
+	for k, v := range snap {
+		seen[k] = true
+		if _, err := r.db.Exec(`INSERT OR REPLACE INTO config (key, value) VALUES (?, ?)`, k, v); err != nil {
+			return err
+		}
+	}
+	for k := range current {
+		if seen[k] {
+			continue
+		}
+		if _, err := r.db.Exec(`DELETE FROM config WHERE key = ?`, k); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// SaveLLMSnapshot 把 LLM 快照持久化到文件（guard 恢复的外部基线）。
+func SaveLLMSnapshot(path string, snap map[string]string) error {
+	if err := os.MkdirAll(filepath.Dir(path), 0755); err != nil {
+		return err
+	}
+	data, err := json.MarshalIndent(snap, "", "  ")
+	if err != nil {
+		return err
+	}
+	return os.WriteFile(path, data, 0600)
+}
+
+// LoadLLMSnapshot 从文件读回 LLM 快照。
+func LoadLLMSnapshot(path string) (map[string]string, error) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return nil, err
+	}
+	snap := make(map[string]string)
+	if err := json.Unmarshal(data, &snap); err != nil {
+		return nil, err
+	}
+	return snap, nil
+}
+
+// listPrefixLocked 调用方须持有锁；返回 prefix 开头的全部键值。
+func (r *ConfigRegistry) listPrefixLocked(prefix string) map[string]string {
+	out := make(map[string]string)
+	rows, err := r.db.Query(`SELECT key, value FROM config WHERE key LIKE ? ORDER BY key`, prefix+"%")
+	if err != nil {
+		return out
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var k, v string
+		if err := rows.Scan(&k, &v); err == nil {
+			out[k] = v
+		}
+	}
+	return out
 }
 
 func (r *ConfigRegistry) Dump() map[string]interface{} {
@@ -464,6 +572,7 @@ func (r *ConfigRegistry) seedCoreDefs(dataDir string) {
 	reg(ConfigDef{Key: "core.daemon.heartbeat_interval", Default: "15s", Type: "duration", DisplayName: "心跳间隔", Description: "Agent 心跳检查间隔", Category: "daemon"})
 	reg(ConfigDef{Key: "core.daemon.check_interval", Default: "30s", Type: "duration", DisplayName: "检查间隔", Description: "网络状态检查间隔", Category: "daemon"})
 	reg(ConfigDef{Key: "core.daemon.log_level", Default: "info", Type: "select", DisplayName: "日志级别", Description: "日志输出级别", Options: []string{"debug", "info", "warn", "error"}, Category: "daemon"})
+	reg(ConfigDef{Key: "core.defaults.llm_endpoints", Default: "", Type: "string", DisplayName: "探活端点", Description: "健康检查的 LLM 探活端点，逗号分隔；留空自动取 LLM 源 base_url", Category: "daemon"})
 
 	reg(ConfigDef{Key: "core.llm.provider", Default: "deepseek", Type: "string", DisplayName: "默认提供商", Description: "默认 LLM 提供商名称，需匹配 sources 中的定义", Category: "llm"})
 	reg(ConfigDef{Key: "core.llm.model", Default: "deepseek-v4-flash", Type: "string", DisplayName: "默认模型", Description: "默认 LLM 模型名称", Category: "llm"})
@@ -697,6 +806,23 @@ func (r *ConfigRegistry) ToConfig() *types.Config {
 	cfg.Defaults.ResourceLimit.Network = readBool("core.defaults.resource.network", cfg.Defaults.ResourceLimit.Network)
 
 	cfg.Plugin.Dir = read("core.plugin.dir", cfg.Plugin.Dir)
+
+	// 探活端点：优先显式配置，缺省取 LLM 源 base_url（去重），保证健康检查有实际目标
+	if eps := read("core.defaults.llm_endpoints", ""); eps != "" {
+		for _, ep := range strings.Split(eps, ",") {
+			if ep = strings.TrimSpace(ep); ep != "" {
+				cfg.Defaults.LLMEndpoints = append(cfg.Defaults.LLMEndpoints, ep)
+			}
+		}
+	} else {
+		seen := make(map[string]bool)
+		for _, src := range cfg.LLM.Sources {
+			if src.BaseURL != "" && !seen[src.BaseURL] {
+				seen[src.BaseURL] = true
+				cfg.Defaults.LLMEndpoints = append(cfg.Defaults.LLMEndpoints, src.BaseURL)
+			}
+		}
+	}
 
 	cfg.InputProcessing.Image.FallbackProvider = read("core.input_processing.image.fallback_provider", cfg.InputProcessing.Image.FallbackProvider)
 	cfg.InputProcessing.Image.FallbackModel = read("core.input_processing.image.fallback_model", cfg.InputProcessing.Image.FallbackModel)

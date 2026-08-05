@@ -44,6 +44,7 @@ func NewMonitor(interval time.Duration) *Monitor {
 			},
 		},
 		interval: interval,
+		status:   make([]EndpointStatus, 0),
 	}
 }
 
@@ -143,12 +144,19 @@ func (m *Monitor) AggregateResult() types.NetworkCheckResult {
 	defer m.mu.RUnlock()
 
 	result := types.NetworkCheckResult{
-		LLMAPIReachable: true,
-		DNSResolving:    true,
-		TCPReachable:    true,
+		LLMAPIReachable:     true,
+		EndpointsConfigured: len(m.status) > 0,
+		DNSResolving:        true,
+		TCPReachable:        true,
 	}
 	var totalLatency time.Duration
 	checked := 0
+
+	if !result.EndpointsConfigured {
+		// 无任何探活端点：不谎报"可达"，标为未配置
+		result.LLMAPIReachable = false
+		result.Error = "no LLM endpoints configured for health check"
+	}
 
 	for _, s := range m.status {
 		if !s.Reachable {

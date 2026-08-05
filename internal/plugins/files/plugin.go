@@ -12,6 +12,7 @@ import (
 
 	"gitcode.com/JianFeeeee/HomeAgent/internal/plugin"
 	sdk "gitcode.com/JianFeeeee/HomeAgent/internal/sdk"
+	"gitcode.com/JianFeeeee/HomeAgent/internal/system"
 )
 
 func init() {
@@ -26,6 +27,7 @@ type Plugin struct {
 	sdk      *sdk.PluginSDK
 	mu       sync.RWMutex
 	filesDir string
+	baseDir  string // L0 写前留档根目录（<data>/file_baseline 的父目录），空则禁用
 }
 
 func New(name string) *Plugin {
@@ -56,6 +58,29 @@ func (p *Plugin) Start(s *sdk.PluginSDK) error {
 		return fmt.Errorf("resolve files.dir: %w", err)
 	}
 	p.filesDir = abs
+
+	// L0 写前留档：主 agent 写 /etc 等受保护路径前自动存档原文（homed 注入 <data>）
+	if cfg := s.Config().Get(); cfg != nil {
+		if dd := cfg.Daemon.DataDir; dd != "" {
+			p.baseDir = dd
+		}
+	}
+	s.Settings().RegisterDef(sdk.ConfigDef{
+		Key:         "baseline_dir",
+		Default:     p.baseDir,
+		Type:        "string",
+		DisplayName: "写前留档目录",
+		Description: "写受保护系统路径前自动存档原文的目录（空禁用）",
+		Category:    "files",
+	})
+	if v, err := s.Settings().Get("baseline_dir"); err == nil && v != nil {
+		if s, ok := v.(string); ok && s != "" {
+			p.baseDir = s
+		}
+	}
+	if p.baseDir != "" {
+		log.Printf("[%s] write-ahead baseline dir: %s", p.name, system.FileBaselineDir(p.baseDir))
+	}
 
 	tp := p.name + "_"
 
@@ -251,6 +276,15 @@ func (p *Plugin) handleWrite(args map[string]interface{}) (interface{}, error) {
 		return errorResult(err.Error()), nil
 	}
 
+	// L0 写前留档：覆盖已有受保护文件前，原文存档供 guard 还原。
+	if mode != "create" {
+		if archived, aerr := p.archiveBeforeWrite(absPath); aerr != nil {
+			log.Printf("[%s] write-ahead archive %s: %v", p.name, absPath, aerr)
+		} else if archived {
+			log.Printf("[%s] write-ahead archived %s", p.name, absPath)
+		}
+	}
+
 	switch mode {
 	case "create":
 		if _, err := os.Stat(absPath); err == nil {
@@ -335,6 +369,13 @@ func (p *Plugin) handleEdit(args map[string]interface{}) (interface{}, error) {
 	absPath, err := p.resolvePath(path)
 	if err != nil {
 		return errorResult(err.Error()), nil
+	}
+
+	// L0 写前留档（edit 可能覆盖已存在文件）
+	if archived, aerr := p.archiveBeforeWrite(absPath); aerr != nil {
+		log.Printf("[%s] write-ahead archive %s: %v", p.name, absPath, aerr)
+	} else if archived {
+		log.Printf("[%s] write-ahead archived %s", p.name, absPath)
 	}
 
 	rawEdits, ok := args["edits"].([]interface{})
@@ -479,6 +520,14 @@ func errorResult(msg string) map[string]interface{} {
 		"isError": true,
 		"content": msg,
 	}
+}
+
+// archiveBeforeWrite L0 写前留档：若目标为受保护系统路径且已存在，则存档原文。
+func (p *Plugin) archiveBeforeWrite(absPath string) (bool, error) {
+	if p.baseDir == "" {
+		return false, nil
+	}
+	return system.ArchiveBeforeWrite(p.baseDir, absPath)
 }
 
 func getSetting[T any](s sdk.SettingsAPI, key string, def T) T {
