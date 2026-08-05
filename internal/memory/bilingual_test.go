@@ -15,8 +15,8 @@ type bilingualEvent struct {
 }
 
 func TestBilingualPruningAccuracy(t *testing.T) {
-	zhPath := "/tmp/cc.zh.top200k.vec"
-	enPath := "/tmp/cc.en.top200k.vec"
+	zhPath := writeSynthModel(t, 300)
+	enPath := writeSynthModel(t, 300)
 
 	// Test with Chinese-only vs Chinese+English
 	type modelConfig struct {
@@ -103,8 +103,8 @@ func TestBilingualPruningAccuracy(t *testing.T) {
 }
 
 func TestBilingualCrossLingualSimilarity(t *testing.T) {
-	zhPath := "/tmp/cc.zh.top200k.vec"
-	enPath := "/tmp/cc.en.top200k.vec"
+	zhPath := writeSynthModel(t, 300)
+	enPath := writeSynthModel(t, 300)
 	e := NewStaticEmbedder(zhPath, enPath)
 	if !e.Loaded() {
 		t.Skip("embedder not loaded")
@@ -137,7 +137,7 @@ func TestBilingualCrossLingualSimilarity(t *testing.T) {
 }
 
 func TestBilingualEdgeCases(t *testing.T) {
-	zhPath := "/tmp/cc.zh.top200k.vec"
+	zhPath := writeSynthModel(t, 300)
 	e := NewStaticEmbedder(zhPath)
 	if !e.Loaded() {
 		t.Skip("embedder not loaded")
@@ -165,7 +165,7 @@ func TestBilingualEdgeCases(t *testing.T) {
 }
 
 func TestBilingualVectorizeClean(t *testing.T) {
-	zhPath := "/tmp/cc.zh.top200k.vec"
+	zhPath := writeSynthModel(t, 300)
 	e := NewStaticEmbedder(zhPath)
 
 	inputs := []string{

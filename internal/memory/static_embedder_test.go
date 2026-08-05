@@ -32,7 +32,7 @@ func cosineSim(a, b vector.Vector) float64 {
 }
 
 func TestStaticEmbedderLoad(t *testing.T) {
-	e := NewStaticEmbedder("/tmp/cc.zh.sample.vec")
+	e := newSynthEmbedder(t, 300)
 	if !e.Loaded() {
 		t.Fatal("embedder should be loaded")
 	}
@@ -42,7 +42,7 @@ func TestStaticEmbedderLoad(t *testing.T) {
 }
 
 func TestStaticEmbedderConsistency(t *testing.T) {
-	e := NewStaticEmbedder("/tmp/cc.zh.sample.vec")
+	e := newSynthEmbedder(t, 300)
 
 	v1 := e.Vectorize("今天天气怎么样")
 	v2 := e.Vectorize("今天天气怎么样")
@@ -81,7 +81,7 @@ func TestStaticEmbedderFallback(t *testing.T) {
 }
 
 func TestStaticEmbedderAllInDenseSpace(t *testing.T) {
-	e := NewStaticEmbedder("/tmp/cc.zh.sample.vec")
+	e := newSynthEmbedder(t, 300)
 
 	texts := []string{
 		"今天天气怎么样",
@@ -105,7 +105,7 @@ func TestStaticEmbedderAllInDenseSpace(t *testing.T) {
 }
 
 func TestStaticEmbedderSemanticSimilarity(t *testing.T) {
-	e := NewStaticEmbedder("/tmp/cc.zh.sample.vec")
+	e := newSynthEmbedder(t, 300)
 
 	pairs := []struct {
 		a, b  string
@@ -134,7 +134,7 @@ func TestStaticEmbedderSemanticSimilarity(t *testing.T) {
 }
 
 func TestContextPruneWithRealEmbedding(t *testing.T) {
-	e := NewStaticEmbedder("/tmp/cc.zh.sample.vec")
+	e := newSynthEmbedder(t, 300)
 
 	type event struct {
 		input    string
