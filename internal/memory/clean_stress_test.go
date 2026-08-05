@@ -41,7 +41,7 @@ func TestCleanStressPrecision(t *testing.T) {
 	events := genStressEvents(200)
 	topics := []string{"大学招生", "老大私聊", "前端开发", "服务器运维", "股票基金"}
 
-	e := NewStaticEmbedder("/tmp/cc.zh.sample.vec")
+	e := newSynthEmbedder(t, 300)
 	if !e.Loaded() {
 		t.Skip("embedder not loaded")
 	}
@@ -113,7 +113,7 @@ func TestCleanStressPrecision(t *testing.T) {
 func TestCleanStressCrossTopic(t *testing.T) {
 	events := genStressEvents(200)
 
-	e := NewStaticEmbedder("/tmp/cc.zh.sample.vec")
+	e := newSynthEmbedder(t, 300)
 	if !e.Loaded() {
 		t.Skip("embedder not loaded")
 	}
@@ -154,7 +154,7 @@ func TestCleanStressCrossTopic(t *testing.T) {
 }
 
 func TestCleanTemplateNoiseSuppression(t *testing.T) {
-	e := NewStaticEmbedder("/tmp/cc.zh.sample.vec")
+	e := newSynthEmbedder(t, 300)
 	if !e.Loaded() {
 		t.Skip("embedder not loaded")
 	}
@@ -181,7 +181,7 @@ func TestCleanTemplateNoiseSuppression(t *testing.T) {
 }
 
 func TestCleanVectorConsistency(t *testing.T) {
-	e := NewStaticEmbedder("/tmp/cc.zh.sample.vec")
+	e := newSynthEmbedder(t, 300)
 	if !e.Loaded() {
 		t.Skip("embedder not loaded")
 	}
@@ -217,7 +217,7 @@ func TestCleanVectorConsistency(t *testing.T) {
 }
 
 func BenchmarkCleanVectorize(b *testing.B) {
-	e := NewStaticEmbedder("/tmp/cc.zh.sample.vec")
+	e := newSynthEmbedder(b, 300)
 	if !e.Loaded() {
 		b.Skip("embedder not loaded")
 	}
