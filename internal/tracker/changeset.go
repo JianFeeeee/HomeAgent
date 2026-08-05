@@ -40,6 +40,9 @@ func fileHash(path string) (string, int64, error) {
 	return hex.EncodeToString(h[:]), int64(len(data)), nil
 }
 
+// maxCapturedContent 回滚内容捕获上限：超大文件不保存原文（回滚时跳过并告警）。
+const maxCapturedContent = 8 << 20
+
 func fileInfo(path string) (size int64, modTime time.Time, err error) {
 	info, err := os.Stat(path)
 	if err != nil {
@@ -53,6 +56,7 @@ type FSState struct {
 	Root  string                `json:"root"`
 }
 
+// captureFSState 仅记录哈希/尺寸（用于"之后"快照，省内存）。
 func captureFSState(root string) (*FSState, error) {
 	state := &FSState{
 		Files: make(map[string]FileChange),
@@ -77,6 +81,27 @@ func captureFSState(root string) (*FSState, error) {
 	return state, err
 }
 
+// captureFSStateWithContent 额外捕获文件原文（用于"之前"基线，供回滚还原被改/被删文件）。
+func captureFSStateWithContent(root string) (*FSState, error) {
+	state, err := captureFSState(root)
+	if err != nil {
+		return nil, err
+	}
+	for rel := range state.Files {
+		path := filepath.Join(root, rel)
+		info, err := os.Stat(path)
+		if err != nil || info.Size() > maxCapturedContent {
+			continue
+		}
+		if data, err := os.ReadFile(path); err == nil {
+			fc := state.Files[rel]
+			fc.Content = data
+			state.Files[rel] = fc
+		}
+	}
+	return state, nil
+}
+
 func diffStates(before, after *FSState) []FileChange {
 	var changes []FileChange
 	if before == nil || after == nil {
@@ -95,6 +120,7 @@ func diffStates(before, after *FSState) []FileChange {
 					HashAfter:  afterFile.HashAfter,
 					SizeBefore: beforeFile.SizeAfter,
 					SizeAfter:  afterFile.SizeAfter,
+					Content:    beforeFile.Content, // 原始内容，供回滚还原
 				})
 			}
 		} else {
@@ -114,6 +140,7 @@ func diffStates(before, after *FSState) []FileChange {
 				Type:       ChangeFileDeleted,
 				HashBefore: before.Files[path].HashAfter,
 				SizeBefore: before.Files[path].SizeAfter,
+				Content:    before.Files[path].Content, // 原始内容，供回滚还原
 			})
 		}
 	}

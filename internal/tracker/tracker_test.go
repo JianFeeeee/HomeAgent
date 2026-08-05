@@ -312,3 +312,134 @@ func TestCaptureDirNotExist(t *testing.T) {
 		t.Error("expected error for nonexistent directory")
 	}
 }
+
+func TestDiffStatesModifiedContent(t *testing.T) {
+	dir := t.TempDir()
+	f := filepath.Join(dir, "f.txt")
+	os.WriteFile(f, []byte("original-content"), 0644)
+	before, err := captureFSStateWithContent(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	os.WriteFile(f, []byte("tampered-content"), 0644)
+	after, _ := captureFSState(dir)
+
+	changes := diffStates(before, after)
+	if len(changes) != 1 || changes[0].Type != ChangeFileModified {
+		t.Fatalf("expected 1 modified, got %+v", changes)
+	}
+	if string(changes[0].Content) != "original-content" {
+		t.Fatalf("modified change should carry original content, got %q", changes[0].Content)
+	}
+}
+
+func TestDiffStatesDeletedContent(t *testing.T) {
+	dir := t.TempDir()
+	f := filepath.Join(dir, "f.txt")
+	os.WriteFile(f, []byte("do-not-lose"), 0644)
+	before, err := captureFSStateWithContent(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	os.Remove(f)
+	after, _ := captureFSState(dir)
+
+	changes := diffStates(before, after)
+	if len(changes) != 1 || changes[0].Type != ChangeFileDeleted {
+		t.Fatalf("expected 1 deleted, got %+v", changes)
+	}
+	if string(changes[0].Content) != "do-not-lose" {
+		t.Fatalf("deleted change should carry original content, got %q", changes[0].Content)
+	}
+}
+
+func TestRollbackLatest(t *testing.T) {
+	dir := t.TempDir()
+	work := filepath.Join(dir, "work")
+	tr := NewTracker(filepath.Join(dir, "data"), work)
+	if err := tr.Init(); err != nil {
+		t.Fatal(err)
+	}
+
+	upper := tr.upperDir
+	os.WriteFile(filepath.Join(upper, "keep.txt"), []byte("stable"), 0644)
+	os.WriteFile(filepath.Join(upper, "gone.txt"), []byte("do-not-lose"), 0644)
+
+	// 动作1：改 keep、加 new（应保留）
+	tr.PreAction("action1")
+	os.WriteFile(filepath.Join(upper, "keep.txt"), []byte("tampered"), 0644)
+	os.WriteFile(filepath.Join(upper, "new.txt"), []byte("added"), 0644)
+	tr.PostAction("action1")
+
+	// 动作2：删 gone（仅撤销这条）
+	tr.PreAction("action2")
+	os.Remove(filepath.Join(upper, "gone.txt"))
+	tr.PostAction("action2")
+
+	if !tr.HasChanges() {
+		t.Fatal("expected changes after PostAction")
+	}
+
+	if err := tr.RollbackLatest(); err != nil {
+		t.Fatalf("RollbackLatest: %v", err)
+	}
+
+	restored, err := os.ReadFile(filepath.Join(upper, "gone.txt"))
+	if err != nil || string(restored) != "do-not-lose" {
+		t.Fatalf("gone.txt should be recreated with original content, got %q err=%v", restored, err)
+	}
+	// action1 的改动不受影响
+	got, err := os.ReadFile(filepath.Join(upper, "keep.txt"))
+	if err != nil || string(got) != "tampered" {
+		t.Fatalf("keep.txt should keep action1 changes, got %q err=%v", got, err)
+	}
+	if _, err := os.Stat(filepath.Join(upper, "new.txt")); err != nil {
+		t.Fatalf("new.txt should still exist after latest-only rollback, err=%v", err)
+	}
+	if tr.HasChanges() != true {
+		t.Fatal("earlier change sets should remain after latest-only rollback")
+	}
+	if got := len(tr.ChangeSets()); got != 1 {
+		t.Fatalf("expected 1 remaining change set, got %d", got)
+	}
+}
+
+func TestRollbackFull(t *testing.T) {
+	dir := t.TempDir()
+	work := filepath.Join(dir, "work")
+	tr := NewTracker(filepath.Join(dir, "data"), work)
+	if err := tr.Init(); err != nil {
+		t.Fatal(err)
+	}
+
+	upper := tr.upperDir
+	os.WriteFile(filepath.Join(upper, "keep.txt"), []byte("stable"), 0644)
+	os.WriteFile(filepath.Join(upper, "deleteme.txt"), []byte("bye"), 0644)
+
+	// 动作1：改 keep、加 new
+	tr.PreAction("a")
+	os.WriteFile(filepath.Join(upper, "keep.txt"), []byte("tampered"), 0644)
+	os.WriteFile(filepath.Join(upper, "new.txt"), []byte("added"), 0644)
+	tr.PostAction("a")
+
+	// 动作2：删 deleteme（在受追踪的动作内）
+	tr.PreAction("b")
+	os.Remove(filepath.Join(upper, "deleteme.txt"))
+	tr.PostAction("b")
+
+	if err := tr.Rollback(); err != nil {
+		t.Fatalf("Rollback: %v", err)
+	}
+
+	got, _ := os.ReadFile(filepath.Join(upper, "keep.txt"))
+	if string(got) != "stable" {
+		t.Fatalf("keep.txt should be restored, got %q", got)
+	}
+	if _, err := os.Stat(filepath.Join(upper, "new.txt")); !os.IsNotExist(err) {
+		t.Fatalf("new.txt should be gone after full rollback")
+	}
+	restored, err := os.ReadFile(filepath.Join(upper, "deleteme.txt"))
+	if err != nil || string(restored) != "bye" {
+		t.Fatalf("deleted file should be recreated with original content, got %q err=%v", restored, err)
+	}
+}

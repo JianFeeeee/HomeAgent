@@ -26,7 +26,7 @@ type Tracker struct {
 	active          bool
 	before          *FSState
 	changeSets      []*ChangeSet
-	keepChangesets  int     // 保留最近 N 份 changeset，0 = 不限
+	keepChangesets  int           // 保留最近 N 份 changeset，0 = 不限
 	maxChangesetAge time.Duration // changeset 最大保留时长，0 = 不限
 }
 
@@ -115,7 +115,7 @@ func (t *Tracker) PostAction(action string) *ChangeSet {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 
-	after := t.capture()
+	after, _ := captureFSState(t.upperDir)
 	changes := diffStates(t.before, after)
 
 	cs := NewChangeSet(action)
@@ -146,7 +146,7 @@ func (t *Tracker) ChangeSets() []*ChangeSet {
 }
 
 func (t *Tracker) capture() *FSState {
-	state, err := captureFSState(t.upperDir)
+	state, err := captureFSStateWithContent(t.upperDir)
 	if err != nil {
 		return &FSState{Files: make(map[string]FileChange), Root: t.upperDir}
 	}
@@ -192,6 +192,41 @@ func (t *Tracker) saveChangeSet(cs *ChangeSet) {
 	if err := os.WriteFile(path, data, 0644); err != nil {
 		log.Printf("[tracker] write changeset %s: %v", cs.ID, err)
 	}
+
+	// Content 字段是 json:"-"，不随 JSON 落盘；为保证 L2 离线回滚（guard 重启后）
+	// 仍能还原被改/被删文件，把回滚原文作为伴随 blob 单独持久化。
+	t.saveContentBlobs(cs, dir)
+}
+
+// saveContentBlobs 把 changeset 中各文件的回滚原文写入 <dataDir>/changesets/<csID>_blobs/<i>.bin。
+func (t *Tracker) saveContentBlobs(cs *ChangeSet, dir string) {
+	blobDir := filepath.Join(dir, cs.ID+"_blobs")
+	os.MkdirAll(blobDir, 0755)
+	for i, f := range cs.Files {
+		if len(f.Content) == 0 {
+			continue
+		}
+		bp := filepath.Join(blobDir, fmt.Sprintf("%03d.bin", i))
+		if err := os.WriteFile(bp, f.Content, 0600); err != nil {
+			log.Printf("[tracker] write blob %s: %v", bp, err)
+		}
+	}
+}
+
+// loadContentBlobs 读回 <csID>_blobs 目录中的回滚原文到 FileChange.Content。
+func (t *Tracker) loadContentBlobs(cs *ChangeSet, dir string) {
+	blobDir := filepath.Join(dir, cs.ID+"_blobs")
+	for i := range cs.Files {
+		bp := filepath.Join(blobDir, fmt.Sprintf("%03d.bin", i))
+		if data, err := os.ReadFile(bp); err == nil {
+			cs.Files[i].Content = data
+		}
+	}
+}
+
+// removeContentBlobs 删除一个 changeset 的 blob 目录。
+func removeContentBlobs(dir, id string) {
+	os.RemoveAll(filepath.Join(dir, id+"_blobs"))
 }
 
 func (t *Tracker) cleanupChangeSets() {
@@ -202,8 +237,8 @@ func (t *Tracker) cleanupChangeSets() {
 	}
 
 	type csFile struct {
-		name  string
-		info  os.FileInfo
+		name string
+		info os.FileInfo
 	}
 	var files []csFile
 	for _, e := range entries {
@@ -243,6 +278,7 @@ func (t *Tracker) cleanupChangeSets() {
 		for i := 0; i < excess; i++ {
 			path := filepath.Join(dir, remaining[i].name)
 			os.Remove(path)
+			removeContentBlobs(dir, strings.TrimSuffix(remaining[i].name, ".json"))
 		}
 		remaining = remaining[excess:]
 	}
@@ -253,6 +289,9 @@ func (t *Tracker) cleanupChangeSets() {
 	}
 }
 
+// Rollback 全量回滚：按时间逆序应用每个 changeset 的逆操作，把工作区恢复到
+// 首条 changeset 之前的状态（用捕获的原文还原被改/被删文件、删除新增文件）。
+// 无任何 changeset 时退回整目录重置（移除 upper 重建，丢弃全部变更）。
 func (t *Tracker) Rollback() error {
 	t.mu.Lock()
 	defer t.mu.Unlock()
@@ -263,22 +302,77 @@ func (t *Tracker) Rollback() error {
 		}
 	}
 
+	if len(t.changeSets) > 0 {
+		for i := len(t.changeSets) - 1; i >= 0; i-- {
+			t.applyReverseLocked(t.changeSets[i])
+		}
+		log.Printf("[tracker] rollback complete: reverted %d change sets", len(t.changeSets))
+	} else {
+		if err := t.resetUpperLocked(); err != nil {
+			return err
+		}
+		log.Printf("[tracker] rollback complete: no change sets, reset upper dir")
+	}
+
+	t.changeSets = nil
+	t.before = nil
+	t.mounted = false
+	return nil
+}
+
+// RollbackLatest 仅撤销最近一条 changeset（定向回滚，不动更早的改动）。
+func (t *Tracker) RollbackLatest() error {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+
+	if len(t.changeSets) == 0 {
+		return fmt.Errorf("no change sets to roll back")
+	}
+	cs := t.changeSets[len(t.changeSets)-1]
+	t.applyReverseLocked(cs)
+	t.changeSets = t.changeSets[:len(t.changeSets)-1]
+	t.before = t.capture()
+	log.Printf("[tracker] rolled back latest change set %s (%d files)", cs.ID, len(cs.Files))
+	return nil
+}
+
+// applyReverseLocked 逆应用一个 changeset：created→删除；modified→写回原文；deleted→用原文重建。
+// 调用方须持有写锁。
+func (t *Tracker) applyReverseLocked(cs *ChangeSet) {
+	for _, f := range cs.Files {
+		path := filepath.Join(t.upperDir, filepath.Clean(f.Path))
+		switch f.Type {
+		case ChangeFileCreated:
+			if err := os.RemoveAll(path); err != nil {
+				log.Printf("[tracker] rollback remove %s: %v", f.Path, err)
+			}
+		case ChangeFileModified, ChangeFileDeleted:
+			if len(f.Content) == 0 {
+				log.Printf("[tracker] rollback %s: original content not captured, skipping", f.Path)
+				continue
+			}
+			if err := os.MkdirAll(filepath.Dir(path), 0755); err != nil {
+				log.Printf("[tracker] rollback mkdir %s: %v", filepath.Dir(f.Path), err)
+				continue
+			}
+			if err := os.WriteFile(path, f.Content, 0644); err != nil {
+				log.Printf("[tracker] rollback restore %s: %v", f.Path, err)
+			}
+		}
+	}
+}
+
+// resetUpperLocked 整目录重置（无 changeset 时的兜底），调用方须持有写锁。
+func (t *Tracker) resetUpperLocked() error {
 	if err := os.RemoveAll(t.upperDir); err != nil {
 		return fmt.Errorf("remove upper: %w", err)
 	}
 	if err := os.RemoveAll(filepath.Join(t.workDir, "work")); err != nil {
 		return fmt.Errorf("remove work: %w", err)
 	}
-
 	if err := os.MkdirAll(t.upperDir, 0755); err != nil {
 		return fmt.Errorf("recreate upper: %w", err)
 	}
-
-	t.changeSets = nil
-	t.before = nil
-	t.mounted = false
-
-	log.Printf("[tracker] rollback complete")
 	return nil
 }
 

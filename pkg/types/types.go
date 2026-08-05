@@ -26,46 +26,47 @@ type AgentID string
 type SnapshotID string
 
 type Snapshot struct {
-	ID        SnapshotID `json:"id"`
-	AgentID   AgentID    `json:"agent_id"`
-	CreatedAt time.Time  `json:"created_at"`
-	Reason    string     `json:"reason"`
-	Size      int64      `json:"size_bytes"`
-	DockerImage string   `json:"docker_image,omitempty"`
-	Valid     bool       `json:"valid"`
+	ID          SnapshotID `json:"id"`
+	AgentID     AgentID    `json:"agent_id"`
+	CreatedAt   time.Time  `json:"created_at"`
+	Reason      string     `json:"reason"`
+	Size        int64      `json:"size_bytes"`
+	DockerImage string     `json:"docker_image,omitempty"`
+	Valid       bool       `json:"valid"`
 }
 
 type Heartbeat struct {
-	AgentID      AgentID      `json:"agent_id"`
-	Timestamp    time.Time    `json:"timestamp"`
-	State        AgentState   `json:"state"`
-	Health       HealthStatus `json:"health"`
+	AgentID      AgentID       `json:"agent_id"`
+	Timestamp    time.Time     `json:"timestamp"`
+	State        AgentState    `json:"state"`
+	Health       HealthStatus  `json:"health"`
 	Uptime       time.Duration `json:"uptime"`
-	LLMConnected bool         `json:"llm_connected"`
-	Error        string       `json:"error,omitempty"`
+	LLMConnected bool          `json:"llm_connected"`
+	Error        string        `json:"error,omitempty"`
 }
 
 type NetworkCheckResult struct {
-	LLMAPIReachable   bool          `json:"llm_api_reachable"`
-	DNSResolving      bool          `json:"dns_resolving"`
-	TCPReachable      bool          `json:"tcp_reachable"`
-	Latency           time.Duration `json:"latency_ms"`
-	LatencyDegraded   bool          `json:"latency_degraded"`
-	Error             string        `json:"error,omitempty"`
+	LLMAPIReachable     bool          `json:"llm_api_reachable"`
+	EndpointsConfigured bool          `json:"endpoints_configured"`
+	DNSResolving        bool          `json:"dns_resolving"`
+	TCPReachable        bool          `json:"tcp_reachable"`
+	Latency             time.Duration `json:"latency_ms"`
+	LatencyDegraded     bool          `json:"latency_degraded"`
+	Error               string        `json:"error,omitempty"`
 }
 
 type SnapshotPolicy struct {
-	Interval         time.Duration `json:"interval"`
-	MaxSnapshots     int           `json:"max_snapshots"`
-	PreAction        bool          `json:"pre_action"`
-	PostAction       bool          `json:"post_action"`
+	Interval     time.Duration `json:"interval"`
+	MaxSnapshots int           `json:"max_snapshots"`
+	PreAction    bool          `json:"pre_action"`
+	PostAction   bool          `json:"post_action"`
 }
 
 type RollbackPolicy struct {
-	MaxRetries        int           `json:"max_retries"`
-	HealthThreshold   HealthStatus  `json:"health_threshold"`
-	CooldownPeriod    time.Duration `json:"cooldown_period"`
-	AutoRollback      bool          `json:"auto_rollback"`
+	MaxRetries      int           `json:"max_retries"`
+	HealthThreshold HealthStatus  `json:"health_threshold"`
+	CooldownPeriod  time.Duration `json:"cooldown_period"`
+	AutoRollback    bool          `json:"auto_rollback"`
 }
 
 type AgentConfig struct {
@@ -87,12 +88,12 @@ type ResourceLimit struct {
 }
 
 type OperationLog struct {
-	ID         string    `json:"id"`
-	AgentID    AgentID   `json:"agent_id"`
-	Timestamp  time.Time `json:"timestamp"`
-	Action     string    `json:"action"`
+	ID         string     `json:"id"`
+	AgentID    AgentID    `json:"agent_id"`
+	Timestamp  time.Time  `json:"timestamp"`
+	Action     string     `json:"action"`
 	SnapshotID SnapshotID `json:"snapshot_id,omitempty"`
-	Success    bool      `json:"success"`
+	Success    bool       `json:"success"`
 }
 
 type LLMSource struct {

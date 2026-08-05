@@ -7,58 +7,61 @@ import (
 	"io"
 	"log"
 	"os"
-	"os/exec"
 	"os/signal"
 	"path/filepath"
 	"strings"
 	"syscall"
 	"time"
 
+	agentPkg "gitcode.com/JianFeeeee/HomeAgent/internal/agent"
 	agentAPI "gitcode.com/JianFeeeee/HomeAgent/internal/agent/api"
 	agentCore "gitcode.com/JianFeeeee/HomeAgent/internal/agent/core"
 	agentIO "gitcode.com/JianFeeeee/HomeAgent/internal/agent/io"
-	agentPkg "gitcode.com/JianFeeeee/HomeAgent/internal/agent"
 	internalConfig "gitcode.com/JianFeeeee/HomeAgent/internal/config"
 	"gitcode.com/JianFeeeee/HomeAgent/internal/events"
-	logpkg "gitcode.com/JianFeeeee/HomeAgent/internal/log"
+	"gitcode.com/JianFeeeee/HomeAgent/internal/ipc"
 	"gitcode.com/JianFeeeee/HomeAgent/internal/knowledge"
-	"gitcode.com/JianFeeeee/HomeAgent/internal/meta"
+	logpkg "gitcode.com/JianFeeeee/HomeAgent/internal/log"
 	luapkg "gitcode.com/JianFeeeee/HomeAgent/internal/lua"
 	"gitcode.com/JianFeeeee/HomeAgent/internal/memory"
 	"gitcode.com/JianFeeeee/HomeAgent/internal/memory/document"
 	"gitcode.com/JianFeeeee/HomeAgent/internal/memory/pipeline"
 	"gitcode.com/JianFeeeee/HomeAgent/internal/memory/social"
 	"gitcode.com/JianFeeeee/HomeAgent/internal/memory/text"
+	"gitcode.com/JianFeeeee/HomeAgent/internal/meta"
 	"gitcode.com/JianFeeeee/HomeAgent/internal/nlp"
 	"gitcode.com/JianFeeeee/HomeAgent/internal/plugin"
-	cli "gitcode.com/JianFeeeee/HomeAgent/internal/plugins/cli"
+	_ "gitcode.com/JianFeeeee/HomeAgent/internal/plugins"
 	_ "gitcode.com/JianFeeeee/HomeAgent/internal/plugins/clawhubadapter"
+	cli "gitcode.com/JianFeeeee/HomeAgent/internal/plugins/cli"
 	_ "gitcode.com/JianFeeeee/HomeAgent/internal/plugins/healthcheck"
 	_ "gitcode.com/JianFeeeee/HomeAgent/internal/plugins/pluginmgr"
 	_ "gitcode.com/JianFeeeee/HomeAgent/internal/plugins/webui"
+	"gitcode.com/JianFeeeee/HomeAgent/internal/recovery"
 	sdk "gitcode.com/JianFeeeee/HomeAgent/internal/sdk"
 	"gitcode.com/JianFeeeee/HomeAgent/internal/supervisor"
 	"gitcode.com/JianFeeeee/HomeAgent/internal/tracker"
-	_ "gitcode.com/JianFeeeee/HomeAgent/internal/plugins"
+	"gitcode.com/JianFeeeee/HomeAgent/pkg/types"
 )
 
 func main() {
 	dataDir := flag.String("data", "", "data directory (default: auto-detect next to binary)")
 	httpAddr := flag.String("webui", "", "webui listen address (default: webui.listen_addr from config)")
 	cliSocket := flag.String("socket", "", "cli unix socket path (default: <data>/cli.sock)")
+	role := flag.String("role", "agent", "process role: guard (父守护) | agent (工作进程)")
+	boot := flag.String("boot", "normal", "agent boot mode: normal | failback (受限启动，仅 failback 插件集)")
 	flag.Parse()
 
+	// 父守护模式：只负责拉起/守护 worker，不初始化 agent 内核
+	if *role == "guard" {
+		runGuard(resolveDataDir(*dataDir))
+		return
+	}
+
+	log.Printf("[homed] role=agent boot=%s", *boot)
+
 	if *dataDir == "" {
-		exe, err := os.Executable()
-		if err == nil {
-			*dataDir = filepath.Join(filepath.Dir(exe), "data")
-		} else {
-			if exe, err := exec.LookPath(os.Args[0]); err == nil {
-				*dataDir = filepath.Join(filepath.Dir(exe), "data")
-			} else {
-				*dataDir = "./data"
-			}
-		}
+		*dataDir = resolveDataDir(*dataDir)
 	}
 
 	if *cliSocket == "" {
@@ -137,6 +140,8 @@ func main() {
 	cfgReg := internalConfig.NewConfigRegistry(filepath.Join(*dataDir, "config.db"))
 	defer cfgReg.Close()
 	cfgReg.SeedDefaults(*dataDir)
+	// LLM 配置写前留档（config_set 写 core.llm.* 前自动快照），guard 恢复用基线
+	cfgReg.SetLLMSnapshotFile(filepath.Join(*dataDir, "llm_snapshot.json"))
 	cfg := cfgReg.ToConfig()
 
 	// 共享词嵌入：蒸馏提取（Phase 3 TransE 验证）与 Agent 上下文复用同一实例，
@@ -235,23 +240,23 @@ func main() {
 						if err := textMem.Append(te); err != nil {
 							log.Printf("[homed] text memory append: %v", err)
 						}
-				}
+					}
 
-				if input != "" && memDB != nil {
-					distiller.Append("agent", "user", input)
-				}
-				if response != "" && memDB != nil {
-					distiller.Append("agent", "assistant", response)
-				}
+					if input != "" && memDB != nil {
+						distiller.Append("agent", "user", input)
+					}
+					if response != "" && memDB != nil {
+						distiller.Append("agent", "assistant", response)
+					}
 
-				// 工具输出接入蒸馏管线
-				for _, tr := range toolResults {
-					if trMap, ok := tr.(map[string]interface{}); ok {
-						if text, ok := trMap["output"].(string); ok && text != "" && memDB != nil {
-							distiller.Append("agent", "tool", text)
+					// 工具输出接入蒸馏管线
+					for _, tr := range toolResults {
+						if trMap, ok := tr.(map[string]interface{}); ok {
+							if text, ok := trMap["output"].(string); ok && text != "" && memDB != nil {
+								distiller.Append("agent", "tool", text)
+							}
 						}
 					}
-				}
 				}
 			}
 		}
@@ -290,6 +295,12 @@ func main() {
 		providerMgr.SetDefault(cfg.LLM.Provider)
 	}
 	provider := providerMgr.Default()
+
+	// L1 failback：受限 worker 启动即跑恢复梯子（probe→还原DNS/proxy→还原config+ReloadFromConfig→probe），
+	// 结果以退出码 exitRecovered=43 / exitRecoveryFailed=44 交回 guard，不进入主 agent 循环。
+	if *boot == "failback" {
+		runFailbackRecovery(*dataDir, cfgReg, luaVM, providerMgr, baseAPIKey)
+	}
 
 	// ========================================================================
 	// 文档记忆 + 知识库
@@ -383,32 +394,32 @@ func main() {
 	}
 
 	agent := agentCore.New(agentCore.AgentConfig{
-		ID:              "main",
-		SystemPrompt:    sysPrompt,
-		Provider:        provider,
-		ProviderManager: providerMgr,
-		IO:              iom,
-		Memory:          memDB,
-		Indexer:         memIdx,
-		Tracker:         trk,
-		DocStore:        docStore,
-		Knowledge:       ks,
-		SocialStore:     socialStore,
-		TextMemory:      textMem,
-		Personality:     personality,
-		PluginReg:       pluginReg,
-		PluginDir:       cfg.Plugin.Dir,
-		DistillInterval:   cfgReg.GetDuration("core.agent.distill_interval", 30*time.Minute),
-		ArchiveInterval:   cfgReg.GetDuration("core.agent.archive_interval", 60*time.Minute),
-		ReviewInterval:    cfgReg.GetDuration("core.agent.review_interval", 120*time.Minute),
-		MergeInterval:     cfgReg.GetDuration("core.agent.merge_interval", 120*time.Minute),
+		ID:                 "main",
+		SystemPrompt:       sysPrompt,
+		Provider:           provider,
+		ProviderManager:    providerMgr,
+		IO:                 iom,
+		Memory:             memDB,
+		Indexer:            memIdx,
+		Tracker:            trk,
+		DocStore:           docStore,
+		Knowledge:          ks,
+		SocialStore:        socialStore,
+		TextMemory:         textMem,
+		Personality:        personality,
+		PluginReg:          pluginReg,
+		PluginDir:          cfg.Plugin.Dir,
+		DistillInterval:    cfgReg.GetDuration("core.agent.distill_interval", 30*time.Minute),
+		ArchiveInterval:    cfgReg.GetDuration("core.agent.archive_interval", 60*time.Minute),
+		ReviewInterval:     cfgReg.GetDuration("core.agent.review_interval", 120*time.Minute),
+		MergeInterval:      cfgReg.GetDuration("core.agent.merge_interval", 120*time.Minute),
 		ContextSavePath:    filepath.Join(cfg.Daemon.DataDir, "memory", "context.json"),
 		EmbeddingModelPath: cfgReg.GetString("core.agent.embedding_model_path", ""),
-		Embedder:          embedder,
+		Embedder:           embedder,
 		StageHost:          stageHost,
-		EventBus:        evBus,
-		ThinkingEnabled:  cfg.LLM.ThinkingEnabled,
-		InputProcessing:  cfg.InputProcessing,
+		EventBus:           evBus,
+		ThinkingEnabled:    cfg.LLM.ThinkingEnabled,
+		InputProcessing:    cfg.InputProcessing,
 	})
 
 	// 通过 Registry 将内核依赖注入每个插件的 PluginSDK（阶段6 将替换遗留的 util.Configure）
@@ -454,6 +465,24 @@ func main() {
 	// Auto-create plugins directory (without hardcoding plugin names)
 	os.MkdirAll(cfg.Plugin.Dir, 0755)
 
+	// failback 受限启动：仅装载 failback 插件集（webfetch/files/cmd 为内核内置，
+	// 此处仅控制外部插件，默认含 recoverydiag 以便直接在受限态产出恢复结论）
+	if *boot == "failback" {
+		list := cfgReg.GetString("core.agent.failback_plugins", "webui,pluginmgr,recoverydiag")
+		// 优先使用 guard.yaml 经过 recovery 任务下发的插件集（guard 是 failback 权威）
+		if task, terr := recovery.LoadTask(recovery.TaskPath(*dataDir)); terr == nil && len(task.Plugins()) > 0 {
+			list = strings.Join(task.Plugins(), ",")
+		}
+		var names []string
+		for _, s := range strings.Split(list, ",") {
+			if s = strings.TrimSpace(s); s != "" {
+				names = append(names, s)
+			}
+		}
+		pluginReg.SetLoadAllowlist(names)
+		log.Printf("[homed] failback boot: plugin allowlist = %v", names)
+	}
+
 	// Load all plugins — each scans its own dir and is loaded via factory or .so
 	if err := pluginReg.Load(cfg.Plugin.Dir); err != nil {
 		log.Printf("[homed] warning: load plugins: %v", err)
@@ -468,8 +497,59 @@ func main() {
 	agent.Start()
 	defer agent.Stop()
 
+	// PING/ACK 心跳服务：worker 监听 unix socket，guard 发 PING、worker 回 ACK
+	// （含自诊断 kernel 状态快照），替换纯文件心跳。文件心跳保留作回退。
+	ipcServer := ipc.NewServer(*dataDir, func() *ipc.Status {
+		st := agent.GetKernelStatus()
+		llmOK := st != nil && st.LLM.Available
+		tools := 0
+		if st != nil {
+			tools = len(st.Tools)
+		}
+		uptime := int64(0)
+		if st != nil {
+			if d, err := time.ParseDuration(st.Uptime); err == nil {
+				uptime = int64(d.Seconds())
+			}
+		}
+		return &ipc.Status{
+			PID:     os.Getpid(),
+			Boot:    *boot,
+			UptimeSec: uptime,
+			LLMOK:   &llmOK,
+			Tools:   tools,
+			LastDiag: lastDiagSummary(*dataDir),
+		}
+	})
+	if err := ipcServer.Start(); err != nil {
+		log.Printf("[homed] warning: ipc heartbeat server: %v", err)
+	} else {
+		defer ipcServer.Stop()
+	}
+
 	sup.SetTracker(trk)
 	sup.RegisterAgent("main")
+
+	// 真实存活源 + 重启通道：daemon 心跳语义由此修正（lastHB 只在确认存活时更新），
+	// 重启动作不再空转——清理后以特殊退出码交给 guard/systemd 重建。
+	restartCh := make(chan struct{}, 1)
+	sup.SetHeartbeatSource(func(id types.AgentID) (time.Time, types.HealthStatus, error) {
+		st := agent.GetKernelStatus()
+		if st == nil {
+			return time.Time{}, types.HealthDown, fmt.Errorf("no kernel status")
+		}
+		h := types.HealthHealthy
+		if !st.LLM.Available {
+			h = types.HealthDegraded
+		}
+		return time.Now(), h, nil
+	})
+	sup.SetRestartHandler(func(id types.AgentID) {
+		select {
+		case restartCh <- struct{}{}:
+		default:
+		}
+	})
 
 	log.Printf("[homed] main agent started, model=%s base=%s sources=%d adapters=%d",
 		cfg.LLM.Model, cfg.LLM.BaseURL, len(cfg.LLM.Sources), len(luaVM.ListAdapters()))
@@ -481,9 +561,42 @@ func main() {
 
 	sigCh := make(chan os.Signal, 1)
 	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
-	<-sigCh
 
-	log.Printf("[homed] shutting down...")
+	// 心跳：每 5s 触碰 <data>/heartbeat，guard 据此判定工作进程是否存活/卡死
+	hbPath := filepath.Join(*dataDir, "heartbeat")
+	hbStop := make(chan struct{})
+	go func() {
+		t := time.NewTicker(5 * time.Second)
+		defer t.Stop()
+		writeHB := func() {
+			if f, err := os.OpenFile(hbPath, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0644); err == nil {
+				fmt.Fprintf(f, "t=%d\n", time.Now().Unix())
+				f.Close()
+			}
+		}
+		writeHB()
+		for {
+			select {
+			case <-t.C:
+				writeHB()
+			case <-hbStop:
+				return
+			case <-ctx.Done():
+				return
+			}
+		}
+	}()
+
+	restartRequested := false
+	select {
+	case <-sigCh:
+		log.Printf("[homed] shutting down...")
+	case <-restartCh:
+		restartRequested = true
+		log.Printf("[homed] restart requested, shutting down cleanly then exiting with code %d", exitRestartRequested)
+	}
+
+	close(hbStop)
 	pluginReg.StopAll()
 	if trk != nil {
 		trk.Stop()
@@ -493,4 +606,8 @@ func main() {
 	}
 	sup.Shutdown()
 	log.Printf("[homed] stopped")
+
+	if restartRequested {
+		os.Exit(exitRestartRequested)
+	}
 }

@@ -220,3 +220,73 @@ func TestGetHelpers(t *testing.T) {
 		t.Fatalf("GetBool fallback: expected true, got %v", got)
 	}
 }
+
+func TestSnapshotRestoreCoreLLM(t *testing.T) {
+	r := NewConfigRegistry("")
+	defer r.Close()
+
+	r.Set("core.llm.sources.main.base_url", "https://a")
+	r.Set("core.llm.sources.main.model", "m1")
+	r.Set("core.llm.sources.main.api_key", "k1")
+
+	snap := r.SnapshotCoreLLM()
+	if len(snap) != 3 {
+		t.Fatalf("expected 3 keys, got %d: %v", len(snap), snap)
+	}
+
+	// 模拟写坏
+	r.Set("core.llm.sources.main.base_url", "https://broken")
+	r.Set("core.llm.sources.main.api_key", "hacked")
+	r.Set("core.llm.sources.extra.model", "intruder")
+
+	if err := r.RestoreCoreLLM(snap); err != nil {
+		t.Fatalf("RestoreCoreLLM: %v", err)
+	}
+	got := r.SnapshotCoreLLM()
+	if len(got) != 3 {
+		t.Fatalf("after restore expected 3 keys, got %d: %v", len(got), got)
+	}
+	for k, v := range snap {
+		if got[k] != v {
+			t.Errorf("key %s: want %q got %q", k, v, got[k])
+		}
+	}
+}
+
+func TestLLMSnapshotFile(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "llm_snapshot.json")
+	snap := map[string]string{"core.llm.sources.main.base_url": "https://a", "core.llm.sources.main.model": "m1"}
+	if err := SaveLLMSnapshot(path, snap); err != nil {
+		t.Fatalf("Save: %v", err)
+	}
+	got, err := LoadLLMSnapshot(path)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if got["core.llm.sources.main.base_url"] != "https://a" || got["core.llm.sources.main.model"] != "m1" {
+		t.Fatalf("round-trip mismatch: %v", got)
+	}
+}
+
+func TestSetLLMSnapshotFile(t *testing.T) {
+	r := NewConfigRegistry("")
+	defer r.Close()
+	r.Set("core.llm.sources.main.base_url", "https://orig")
+	r.Set("core.llm.sources.main.model", "m0")
+
+	path := filepath.Join(t.TempDir(), "llm_pre.json")
+	r.SetLLMSnapshotFile(path)
+	// 再次写入：写前自动留档应记录当前值 orig/m0，随后才被覆盖
+	r.Set("core.llm.sources.main.base_url", "https://broken")
+
+	got, err := LoadLLMSnapshot(path)
+	if err != nil {
+		t.Fatalf("Load snapshot: %v", err)
+	}
+	if got["core.llm.sources.main.base_url"] != "https://orig" {
+		t.Fatalf("write-ahead snapshot should record pre-write value, got %q", got["core.llm.sources.main.base_url"])
+	}
+	if got["core.llm.sources.main.model"] != "m0" {
+		t.Fatalf("snapshot missing untouched key model: %v", got)
+	}
+}
