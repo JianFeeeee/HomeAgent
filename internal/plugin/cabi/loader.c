@@ -1,3 +1,5 @@
+//go:build linux || darwin
+
 // HomeAgent C ABI loader — C implementation (compiled alongside Go code via cgo)
 
 #include <dlfcn.h>

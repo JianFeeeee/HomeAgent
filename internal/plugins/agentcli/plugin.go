@@ -1,4 +1,4 @@
-//go:build linux
+//go:build linux || windows
 
 package agentcli
 
@@ -12,17 +12,9 @@ import (
 	"sync"
 	"syscall"
 	"time"
-	"unsafe"
 
 	"gitcode.com/JianFeeeee/HomeAgent/internal/plugin"
 	sdk "gitcode.com/JianFeeeee/HomeAgent/internal/sdk"
-)
-
-// PTY ioctl constants for Linux
-const (
-	TIOCGPTN   = 0x80045430
-	TIOCSPTLCK = 0x40045431
-	TIOCSWINSZ = 0x5414
 )
 
 const (
@@ -32,56 +24,31 @@ const (
 	NotifyOutputDelay = 500 * time.Millisecond
 )
 
-type winsize struct {
-	Row    uint16
-	Col    uint16
-	XPixel uint16
-	YPixel uint16
+// ptyTerm 抽象平台终端后端（Linux PTY / Windows ConPTY）。
+type ptyTerm interface {
+	Read(buf []byte) (int, error)
+	WriteString(s string) (int, error)
+	Resize(rows, cols uint16) error
+	Running() bool
+	Kill() error
+	Close() error
 }
 
-func ioctl(fd, cmd uintptr, ptr unsafe.Pointer) error {
-	_, _, errno := syscall.Syscall(syscall.SYS_IOCTL, fd, cmd, uintptr(ptr))
-	if errno != 0 {
-		return errno
+// terminalRunning 判断终端后端进程是否仍在运行：优先走平台实现，
+// 否则回落到 exec.Cmd 的 ProcessState（仅 Linux 传统路径）。
+func terminalRunning(t *TerminalSession) bool {
+	if p, ok := t.session.(interface {
+		Running() bool
+	}); ok && p.Running() {
+		return true
 	}
-	return nil
-}
-
-func openPty() (master *os.File, slave *os.File, err error) {
-	mfd, err := syscall.Open("/dev/ptmx", syscall.O_RDWR|syscall.O_NOCTTY, 0)
-	if err != nil {
-		return nil, nil, fmt.Errorf("open /dev/ptmx: %w", err)
-	}
-	master = os.NewFile(uintptr(mfd), "/dev/ptmx")
-
-	var unlock int32
-	if err := ioctl(uintptr(mfd), TIOCSPTLCK, unsafe.Pointer(&unlock)); err != nil {
-		master.Close()
-		return nil, nil, fmt.Errorf("TIOCSPTLCK: %w", err)
-	}
-
-	var ptyno int32
-	if err := ioctl(uintptr(mfd), TIOCGPTN, unsafe.Pointer(&ptyno)); err != nil {
-		master.Close()
-		return nil, nil, fmt.Errorf("TIOCGPTN: %w", err)
-	}
-
-	slavePath := fmt.Sprintf("/dev/pts/%d", ptyno)
-	sfd, err := syscall.Open(slavePath, syscall.O_RDWR|syscall.O_NOCTTY, 0)
-	if err != nil {
-		master.Close()
-		return nil, nil, fmt.Errorf("open slave %s: %w", slavePath, err)
-	}
-	slave = os.NewFile(uintptr(sfd), slavePath)
-
-	return master, slave, nil
+	return t.cmd != nil && (t.cmd.ProcessState == nil || !t.cmd.ProcessState.Exited())
 }
 
 type TerminalSession struct {
 	id        string
 	cmd       *exec.Cmd
-	master    *os.File
-	slave     *os.File
+	session   ptyTerm
 	mu        sync.Mutex
 	buf       bytes.Buffer
 	createdAt time.Time
@@ -92,11 +59,33 @@ type TerminalSession struct {
 }
 
 func (t *TerminalSession) Write(input string) (int, error) {
-	return t.master.WriteString(input)
+	return t.session.WriteString(input)
 }
 
 func (t *TerminalSession) Read(buf []byte) (int, error) {
-	return t.master.Read(buf)
+	return t.session.Read(buf)
+}
+
+func (t *TerminalSession) Resize(rows, cols uint16) error {
+	return t.session.Resize(rows, cols)
+}
+
+func (t *TerminalSession) Close() {
+	t.mu.Lock()
+	if t.closed {
+		t.mu.Unlock()
+		return
+	}
+	t.closed = true
+	t.mu.Unlock()
+
+	close(t.stopCh)
+	t.session.Close()
+	<-t.done
+
+	if t.cmd != nil && t.cmd.Process != nil {
+		t.cmd.Process.Kill()
+	}
 }
 
 func (t *TerminalSession) ReadOutput() string {
@@ -125,31 +114,6 @@ func (t *TerminalSession) appendOutput(data []byte) {
 		}
 	}
 	t.buf.Write(data)
-}
-
-func (t *TerminalSession) Resize(rows, cols uint16) error {
-	ws := winsize{Row: rows, Col: cols}
-	if err := ioctl(uintptr(t.master.Fd()), TIOCSWINSZ, unsafe.Pointer(&ws)); err != nil {
-		return fmt.Errorf("TIOCSWINSZ: %w", err)
-	}
-	return nil
-}
-
-func (t *TerminalSession) Close() {
-	t.mu.Lock()
-	if t.closed {
-		t.mu.Unlock()
-		return
-	}
-	t.closed = true
-	t.mu.Unlock()
-
-	close(t.stopCh)
-	t.master.Close()
-	<-t.done
-
-	t.slave.Close()
-	t.cmd.Process.Kill()
 }
 
 func (t *TerminalSession) IsExpired() bool {
@@ -355,7 +319,7 @@ func (p *Plugin) nextIDLocked() string {
 func (p *Plugin) handleCreate(s *sdk.PluginSDK, args map[string]interface{}) (interface{}, error) {
 	command, _ := args["command"].(string)
 	if command == "" {
-		command = "bash"
+		command = defaultShell()
 	}
 
 	timeoutStr, _ := args["timeout"].(string)
@@ -379,32 +343,14 @@ func (p *Plugin) handleCreate(s *sdk.PluginSDK, args map[string]interface{}) (in
 		cols = uint16(c)
 	}
 
-	master, slave, err := openPty()
+	term, cmd, err := newCommandPty(command, rows, cols)
 	if err != nil {
-		return map[string]interface{}{"error": fmt.Sprintf("创建 PTY 失败: %v", err)}, nil
+		return map[string]interface{}{"error": fmt.Sprintf("创建终端失败: %v", err)}, nil
 	}
-
-	cmd := exec.Command("sh", "-c", command)
-	cmd.Stdin = slave
-	cmd.Stdout = slave
-	cmd.Stderr = slave
-	cmd.SysProcAttr = &syscall.SysProcAttr{
-		Setsid: true,
-		Setctty: true,
-		Ctty: 0,
-	}
-
-	if err := cmd.Start(); err != nil {
-		master.Close()
-		slave.Close()
-		return map[string]interface{}{"error": fmt.Sprintf("启动命令失败: %v", err)}, nil
-	}
-
-	slave.Close()
 
 	session := &TerminalSession{
 		cmd:       cmd,
-		master:    master,
+		session:   term,
 		createdAt: time.Now(),
 		timeout:   timeout,
 		stopCh:    make(chan struct{}),
@@ -415,9 +361,6 @@ func (p *Plugin) handleCreate(s *sdk.PluginSDK, args map[string]interface{}) (in
 	id := p.nextIDLocked()
 	session.id = id
 	p.sessions[id] = session
-
-	ws := winsize{Row: rows, Col: cols}
-	ioctl(uintptr(master.Fd()), TIOCSWINSZ, unsafe.Pointer(&ws))
 	p.mu.Unlock()
 
 	p.wg.Add(1)
@@ -510,7 +453,7 @@ func (p *Plugin) handleRead(args map[string]interface{}) (interface{}, error) {
 		"status":   "ok",
 		"terminal": id,
 		"output":   output,
-		"running":  session.cmd.ProcessState == nil || !session.cmd.ProcessState.Exited(),
+		"running":  terminalRunning(session),
 		"uptime":   time.Since(session.createdAt).String(),
 	}, nil
 }
@@ -586,7 +529,7 @@ func (p *Plugin) handleList() (interface{}, error) {
 
 	var terms []termInfo
 	for _, t := range p.sessions {
-		running := t.cmd.ProcessState == nil || !t.cmd.ProcessState.Exited()
+		running := terminalRunning(t)
 		remaining := t.timeout - time.Since(t.createdAt)
 		if remaining < 0 {
 			remaining = 0
@@ -631,7 +574,7 @@ func (p *Plugin) readLoop(t *TerminalSession, s *sdk.PluginSDK) {
 			return
 		}
 
-		if t.cmd.ProcessState != nil && t.cmd.ProcessState.Exited() {
+		if !terminalRunning(t) {
 			s.InjectText("agentcli", "agentcli", fmt.Sprintf("[终端 %s 中的进程已退出]", t.id))
 			p.mu.Lock()
 			delete(p.sessions, t.id)
@@ -672,7 +615,7 @@ type readResult struct {
 
 func (p *Plugin) reader(t *TerminalSession, buf []byte, ch chan<- readResult) {
 	for {
-		n, err := t.master.Read(buf)
+		n, err := t.session.Read(buf)
 		select {
 		case ch <- readResult{n, err}:
 		case <-t.stopCh:
@@ -703,7 +646,7 @@ func (p *Plugin) cleanupLoop(s *sdk.PluginSDK) {
 						term.Close()
 					}(t)
 				}
-				if t.cmd.ProcessState != nil && t.cmd.ProcessState.Exited() {
+				if !terminalRunning(t) {
 					log.Printf("[agentcli] cleanup: terminal %s process exited", id)
 					delete(p.sessions, id)
 					go func(term *TerminalSession) {
