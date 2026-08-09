@@ -695,6 +695,14 @@ func (r *ConfigRegistry) GetBool(key string, defaultVal bool) bool {
 	return b
 }
 
+func validLLMEndpoint(s string) bool {
+	s = strings.TrimSpace(s)
+	if s == "" || strings.EqualFold(s, "<nil>") || strings.EqualFold(s, "nil") || strings.EqualFold(s, "null") {
+		return false
+	}
+	return strings.HasPrefix(s, "http://") || strings.HasPrefix(s, "https://")
+}
+
 // ToConfig 从 config 表重建 *types.Config
 func (r *ConfigRegistry) ToConfig() *types.Config {
 	cfg := &types.Config{}
@@ -817,10 +825,12 @@ func (r *ConfigRegistry) ToConfig() *types.Config {
 	} else {
 		seen := make(map[string]bool)
 		for _, src := range cfg.LLM.Sources {
-			if src.BaseURL != "" && !seen[src.BaseURL] {
-				seen[src.BaseURL] = true
-				cfg.Defaults.LLMEndpoints = append(cfg.Defaults.LLMEndpoints, src.BaseURL)
+			baseURL := strings.TrimSpace(src.BaseURL)
+			if !validLLMEndpoint(baseURL) || seen[baseURL] {
+				continue
 			}
+			seen[baseURL] = true
+			cfg.Defaults.LLMEndpoints = append(cfg.Defaults.LLMEndpoints, baseURL)
 		}
 	}
 

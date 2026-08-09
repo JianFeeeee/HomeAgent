@@ -45,14 +45,34 @@ function adapter.transform_response(raw_body)
             if type(ch.message.tool_calls) == "table" then
                 local tcs = {}
                 for _, tc in ipairs(ch.message.tool_calls) do
-                    local args_ok, args = pcall(json.decode, tc["function"].arguments)
-                    if not args_ok then args = {} end
-                    table.insert(tcs, {
-                        id = tc.id,
-                        type = tc.type or "function",
-                        name = tc["function"].name,
-                        arguments = args
-                    })
+                    local fn = tc["function"]
+                    local name = tc.name
+                    local raw_args = tc.arguments
+                    if type(fn) == "table" then
+                        name = fn.name or name
+                        raw_args = fn.arguments or raw_args
+                    end
+                    local args = {}
+                    if type(raw_args) == "table" then
+                        args = raw_args
+                    elseif type(raw_args) == "string" and raw_args ~= "" then
+                        local args_ok, decoded = pcall(json.decode, raw_args)
+                        if args_ok and type(decoded) == "table" then
+                            args = decoded
+                        elseif args_ok then
+                            args = { value = decoded }
+                        else
+                            args = { raw = raw_args }
+                        end
+                    end
+                    if name ~= nil and name ~= "" then
+                        table.insert(tcs, {
+                            id = tc.id,
+                            type = tc.type or "function",
+                            name = name,
+                            arguments = args
+                        })
+                    end
                 end
                 unified.tool_calls = tcs
             end
@@ -71,10 +91,17 @@ function adapter.transform_stream_chunk(raw_chunk)
     local delta = chunk.choices[1].delta or {}
     local fr = chunk.choices[1].finish_reason
 
-    return json.encode({
+    local unified = {
         content = delta.content or "",
         done = (fr ~= nil)
-    })
+    }
+    if delta.reasoning_content then
+        unified.reasoning_content = delta.reasoning_content
+    end
+    if delta.tool_calls then
+        unified.tool_calls = delta.tool_calls
+    end
+    return json.encode(unified)
 end
 
 return adapter

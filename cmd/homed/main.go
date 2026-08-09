@@ -277,6 +277,10 @@ func main() {
 
 	providerMgr := agentAPI.NewProviderManager()
 	for _, src := range cfg.LLM.Sources {
+		if !agentAPI.IsValidSourceConfig(src.Name, src.BaseURL, src.Model, src.Adapter) {
+			log.Printf("[homed] skip invalid llm source %q (base_url=%q model=%q adapter=%q)", src.Name, src.BaseURL, src.Model, src.Adapter)
+			continue
+		}
 		key := src.APIKey
 		if key == "" {
 			key = baseAPIKey
@@ -513,12 +517,12 @@ func main() {
 			}
 		}
 		return &ipc.Status{
-			PID:     os.Getpid(),
-			Boot:    *boot,
+			PID:       os.Getpid(),
+			Boot:      *boot,
 			UptimeSec: uptime,
-			LLMOK:   &llmOK,
-			Tools:   tools,
-			LastDiag: lastDiagSummary(*dataDir),
+			LLMOK:     &llmOK,
+			Tools:     tools,
+			LastDiag:  lastDiagSummary(*dataDir),
 		}
 	})
 	if err := ipcServer.Start(); err != nil {

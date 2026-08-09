@@ -110,18 +110,21 @@ func (l *llmImpl) ReloadFromConfig() error {
 	}
 	l.mgr.Reset()
 	for _, src := range cfg.LLM.Sources {
+		if !agentAPI.IsValidSourceConfig(src.Name, src.BaseURL, src.Model, src.Adapter) {
+			continue
+		}
 		key := src.APIKey
 		if key == "" {
 			key = l.baseAPIKey
 		}
-			provider := agentAPI.NewLuaAdaptedProvider(agentAPI.BaseConfig{
-				Model:         src.Model,
-				BaseURL:       src.BaseURL,
-				APIKey:        key,
-				Temperature:   cfg.LLM.Temperature,
-				MaxTokens:     cfg.LLM.MaxTokens,
-				ContextWindow: src.ContextWindow,
-			}, l.lua, src.Name, src.Adapter)
+		provider := agentAPI.NewLuaAdaptedProvider(agentAPI.BaseConfig{
+			Model:         src.Model,
+			BaseURL:       src.BaseURL,
+			APIKey:        key,
+			Temperature:   cfg.LLM.Temperature,
+			MaxTokens:     cfg.LLM.MaxTokens,
+			ContextWindow: src.ContextWindow,
+		}, l.lua, src.Name, src.Adapter)
 		l.mgr.Register(src.Name, provider)
 	}
 	if cfg.LLM.Provider != "" {
