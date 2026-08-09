@@ -129,9 +129,9 @@ type ToolCall struct {
 }
 
 type apiToolCall struct {
-	ID       string         `json:"id"`
-	Type     string         `json:"type"`
-	Function apiFunction    `json:"function"`
+	ID       string      `json:"id"`
+	Type     string      `json:"type"`
+	Function apiFunction `json:"function"`
 }
 
 type apiFunction struct {
@@ -140,9 +140,11 @@ type apiFunction struct {
 }
 
 type StreamChunk struct {
-	Content   string `json:"content"`
-	Done      bool   `json:"done"`
-	ToolCall  *ToolCall `json:"tool_call,omitempty"`
+	Content          string     `json:"content"`
+	ReasoningContent string     `json:"reasoning_content,omitempty"`
+	Done             bool       `json:"done"`
+	ToolCall         *ToolCall  `json:"tool_call,omitempty"`
+	ToolCalls        []ToolCall `json:"tool_calls,omitempty"`
 }
 
 type Provider interface {
@@ -227,6 +229,19 @@ func NewLuaAdaptedProvider(cfg BaseConfig, vm *luaVM.VM, name, adapter string) *
 	}
 }
 
+func IsValidSourceConfig(name, baseURL, model, adapter string) bool {
+	return validConfigValue(name) && validConfigValue(baseURL) && validConfigValue(model) && validConfigValue(adapter) &&
+		(strings.HasPrefix(baseURL, "http://") || strings.HasPrefix(baseURL, "https://"))
+}
+
+func validConfigValue(s string) bool {
+	s = strings.TrimSpace(s)
+	if s == "" {
+		return false
+	}
+	return !strings.EqualFold(s, "<nil>") && !strings.EqualFold(s, "null") && !strings.EqualFold(s, "nil")
+}
+
 func (p *LuaAdaptedProvider) MaxContextTokens() int {
 	if p.cfg.ContextWindow > 0 {
 		return p.cfg.ContextWindow
@@ -283,15 +298,172 @@ func (p *LuaAdaptedProvider) Chat(ctx context.Context, req *CompletionRequest) (
 
 	unifiedJSON, err := p.vm.CallTransformResponse(p.adapter, string(rawResp))
 	if err != nil {
+		if parsed, perr := parseOpenAICompatibleResponse(rawResp); perr == nil {
+			return parsed, nil
+		}
 		return nil, fmt.Errorf("lua transform_response: %w", err)
 	}
 
 	var result CompletionResponse
 	if err := json.Unmarshal([]byte(unifiedJSON), &result); err != nil {
+		if parsed, perr := parseOpenAICompatibleResponse(rawResp); perr == nil {
+			return parsed, nil
+		}
 		return nil, fmt.Errorf("unmarshal unified response: %w (body: %s)", err, unifiedJSON)
 	}
 
 	return &result, nil
+}
+
+func parseOpenAICompatibleResponse(raw []byte) (*CompletionResponse, error) {
+	var resp struct {
+		Usage struct {
+			PromptTokens     int `json:"prompt_tokens"`
+			CompletionTokens int `json:"completion_tokens"`
+			TotalTokens      int `json:"total_tokens"`
+		} `json:"usage"`
+		Choices []struct {
+			FinishReason string `json:"finish_reason"`
+			Message      struct {
+				Content          interface{}      `json:"content"`
+				ReasoningContent string           `json:"reasoning_content"`
+				ToolCalls        []openAIToolCall `json:"tool_calls"`
+			} `json:"message"`
+		} `json:"choices"`
+	}
+	if err := json.Unmarshal(raw, &resp); err != nil {
+		return nil, err
+	}
+	out := &CompletionResponse{
+		TokenUsage: TokenUsage{
+			Prompt:     resp.Usage.PromptTokens,
+			Completion: resp.Usage.CompletionTokens,
+			Total:      resp.Usage.TotalTokens,
+		},
+	}
+	if len(resp.Choices) == 0 {
+		return out, nil
+	}
+	ch := resp.Choices[0]
+	out.FinishReason = ch.FinishReason
+	out.Content = stringifyContent(ch.Message.Content)
+	out.ReasoningContent = ch.Message.ReasoningContent
+	out.ToolCalls = normalizeOpenAIToolCalls(ch.Message.ToolCalls)
+	return out, nil
+}
+
+type openAIToolCall struct {
+	ID       string `json:"id"`
+	Type     string `json:"type"`
+	Function struct {
+		Name      string      `json:"name"`
+		Arguments interface{} `json:"arguments"`
+	} `json:"function"`
+	Name      string      `json:"name"`
+	Arguments interface{} `json:"arguments"`
+}
+
+func normalizeOpenAIToolCalls(raw []openAIToolCall) []ToolCall {
+	if len(raw) == 0 {
+		return nil
+	}
+	out := make([]ToolCall, 0, len(raw))
+	for _, tc := range raw {
+		name := tc.Function.Name
+		argsRaw := tc.Function.Arguments
+		if name == "" {
+			name = tc.Name
+			argsRaw = tc.Arguments
+		}
+		if name == "" {
+			continue
+		}
+		typ := tc.Type
+		if typ == "" {
+			typ = "function"
+		}
+		out = append(out, ToolCall{
+			ID:        tc.ID,
+			Type:      typ,
+			Name:      name,
+			Arguments: parseToolArguments(argsRaw),
+		})
+	}
+	return out
+}
+
+func parseToolArguments(v interface{}) map[string]interface{} {
+	switch x := v.(type) {
+	case nil:
+		return map[string]interface{}{}
+	case map[string]interface{}:
+		return x
+	case string:
+		if strings.TrimSpace(x) == "" {
+			return map[string]interface{}{}
+		}
+		var m map[string]interface{}
+		if err := json.Unmarshal([]byte(x), &m); err == nil && m != nil {
+			return m
+		}
+		var any interface{}
+		if err := json.Unmarshal([]byte(x), &any); err == nil {
+			return map[string]interface{}{"value": any}
+		}
+		return map[string]interface{}{"raw": x}
+	default:
+		b, _ := json.Marshal(x)
+		var m map[string]interface{}
+		if err := json.Unmarshal(b, &m); err == nil && m != nil {
+			return m
+		}
+		return map[string]interface{}{"value": x}
+	}
+}
+
+func stringifyContent(v interface{}) string {
+	switch x := v.(type) {
+	case nil:
+		return ""
+	case string:
+		return x
+	case []interface{}:
+		var b strings.Builder
+		for _, part := range x {
+			if m, ok := part.(map[string]interface{}); ok {
+				if text, ok := m["text"].(string); ok {
+					b.WriteString(text)
+				}
+			}
+		}
+		return b.String()
+	default:
+		b, _ := json.Marshal(x)
+		return string(b)
+	}
+}
+
+func parseOpenAICompatibleStreamChunk(raw []byte) (StreamChunk, bool) {
+	var resp struct {
+		Choices []struct {
+			Delta struct {
+				Content          interface{}      `json:"content"`
+				ReasoningContent string           `json:"reasoning_content"`
+				ToolCalls        []openAIToolCall `json:"tool_calls"`
+			} `json:"delta"`
+			FinishReason *string `json:"finish_reason"`
+		} `json:"choices"`
+	}
+	if err := json.Unmarshal(raw, &resp); err != nil || len(resp.Choices) == 0 {
+		return StreamChunk{}, false
+	}
+	choice := resp.Choices[0]
+	return StreamChunk{
+		Content:          stringifyContent(choice.Delta.Content),
+		ReasoningContent: choice.Delta.ReasoningContent,
+		ToolCalls:        normalizeOpenAIToolCalls(choice.Delta.ToolCalls),
+		Done:             choice.FinishReason != nil,
+	}, true
 }
 
 func (p *LuaAdaptedProvider) ChatStream(ctx context.Context, req *CompletionRequest) (<-chan StreamChunk, error) {
@@ -341,27 +513,15 @@ func (p *LuaAdaptedProvider) ChatStream(ctx context.Context, req *CompletionRequ
 			// 尝试用 Lua 变换流块（如果 adapter 定义了 transform_stream_chunk）
 			unified, err := p.vm.CallTransformStreamChunk(p.adapter, line)
 			if err != nil || unified == line {
-				// 无流变换函数或变换透传，尝试标准 SSE 解析
-				var raw struct {
-					Choices []struct {
-						Delta struct {
-							Content string `json:"content"`
-						} `json:"delta"`
-						FinishReason *string `json:"finish_reason"`
-					} `json:"choices"`
-				}
-				if err := json.Unmarshal([]byte(unified), &raw); err != nil {
+				// 无流变换函数或变换透传，尝试标准 OpenAI SSE 解析
+				chunk, ok := parseOpenAICompatibleStreamChunk([]byte(line))
+				if !ok {
 					continue
 				}
-				if len(raw.Choices) > 0 {
-					select {
-					case ch <- StreamChunk{
-						Content: raw.Choices[0].Delta.Content,
-						Done:    raw.Choices[0].FinishReason != nil,
-					}:
-					case <-ctx.Done():
-						return
-					}
+				select {
+				case ch <- chunk:
+				case <-ctx.Done():
+					return
 				}
 				continue
 			}
@@ -412,9 +572,9 @@ func (s *SSEScanner) Scan() bool {
 func (s *SSEScanner) Text() string { return s.pending }
 
 type providerStatus struct {
-	failCount    int
+	failCount        int
 	unavailableUntil time.Time
-	permanent    bool // 401/403 永久不可用，不自动恢复
+	permanent        bool // 401/403 永久不可用，不自动恢复
 }
 
 type ProviderManager struct {
