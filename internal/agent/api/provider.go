@@ -201,6 +201,7 @@ type BaseConfig struct {
 	Temperature   float64 `json:"temperature"`
 	MaxTokens     int     `json:"max_tokens"`
 	ContextWindow int     `json:"context_window"`
+	MaxConcurrent int     `json:"max_concurrent"`
 }
 
 // LuaAdaptedProvider 使用 Lua 脚本做请求/响应变换，直接发起 HTTP 调用
@@ -272,11 +273,7 @@ func (p *LuaAdaptedProvider) Chat(ctx context.Context, req *CompletionRequest) (
 		return nil, fmt.Errorf("create request: %w", err)
 	}
 	httpReq.Header.Set("Content-Type", "application/json")
-	httpReq.Header.Set("Authorization", "Bearer "+p.cfg.APIKey)
-
-	for k, v := range p.vm.GetAdapterHeaders(p.adapter) {
-		httpReq.Header.Set(k, v)
-	}
+	p.applyAdapterHeaders(httpReq, url, transformedBody)
 
 	resp, err := p.client.Do(httpReq)
 	if err != nil {
@@ -313,6 +310,31 @@ func (p *LuaAdaptedProvider) Chat(ctx context.Context, req *CompletionRequest) (
 	}
 
 	return &result, nil
+}
+
+// applyAdapterHeaders 优先调用 adapter.build_headers(meta) 动态签名钩子，
+// 未定义时回落到静态 adapter.headers，最后确保带 Authorization。
+func (p *LuaAdaptedProvider) applyAdapterHeaders(httpReq *http.Request, url, body string) {
+	meta := map[string]interface{}{
+		"url":       url,
+		"method":    http.MethodPost,
+		"body":      body,
+		"api_key":   p.cfg.APIKey,
+		"timestamp": time.Now().Unix(),
+		"source": map[string]interface{}{
+			"name": p.name,
+		},
+	}
+	hdrs, err := p.vm.BuildHeaders(p.adapter, meta)
+	if err != nil {
+		hdrs = p.vm.GetAdapterHeaders(p.adapter)
+	}
+	for k, v := range hdrs {
+		httpReq.Header.Set(k, v)
+	}
+	if httpReq.Header.Get("Authorization") == "" && p.cfg.APIKey != "" {
+		httpReq.Header.Set("Authorization", "Bearer "+p.cfg.APIKey)
+	}
 }
 
 func parseOpenAICompatibleResponse(raw []byte) (*CompletionResponse, error) {

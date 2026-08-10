@@ -185,6 +185,7 @@ var sourceFieldDefs = []struct {
 	{"thinking_enabled", "bool", "深度思考"},
 	{"adapter", "string", "适配器"},
 	{"adapter_path", "string", "适配器路径"},
+	{"max_concurrent", "int", "并发上限"},
 }
 
 // registerSourceDefs 注册 core.llm.sources.<name>.* 的 ConfigDef
@@ -814,6 +815,7 @@ func (r *ConfigRegistry) ToConfig() *types.Config {
 			Adapter:         read(p+".adapter", ""),
 			AdapterPath:     read(p+".adapter_path", ""),
 			ContextWindow:   readInt(p+".context_window", 0),
+			MaxConcurrent:   readInt(p+".max_concurrent", 8),
 			ThinkingEnabled: readBool(p+".thinking_enabled", false),
 		})
 	}
