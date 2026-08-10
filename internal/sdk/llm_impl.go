@@ -109,6 +109,7 @@ func (l *llmImpl) ReloadFromConfig() error {
 		return nil
 	}
 	l.mgr.Reset()
+	adapterConcurrency := map[string]int{}
 	for _, src := range cfg.LLM.Sources {
 		if !agentAPI.IsValidSourceConfig(src.Name, src.BaseURL, src.Model, src.Adapter) {
 			continue
@@ -124,8 +125,15 @@ func (l *llmImpl) ReloadFromConfig() error {
 			Temperature:   cfg.LLM.Temperature,
 			MaxTokens:     cfg.LLM.MaxTokens,
 			ContextWindow: src.ContextWindow,
+			MaxConcurrent: src.MaxConcurrent,
 		}, l.lua, src.Name, src.Adapter)
 		l.mgr.Register(src.Name, provider)
+		if src.Adapter != "" {
+			adapterConcurrency[src.Adapter] += src.MaxConcurrent
+		}
+	}
+	if l.lua != nil {
+		l.lua.ConfigureConcurrency(adapterConcurrency)
 	}
 	if cfg.LLM.Provider != "" {
 		if l.mgr.Get(cfg.LLM.Provider) != nil {

@@ -104,6 +104,7 @@ type LLMSource struct {
 	Adapter         string `json:"adapter"`
 	AdapterPath     string `json:"adapter_path,omitempty"`
 	ContextWindow   int    `json:"context_window,omitempty"`
+	MaxConcurrent   int    `json:"max_concurrent,omitempty"`
 	ThinkingEnabled bool   `json:"thinking_enabled,omitempty"`
 }
 
