@@ -294,6 +294,7 @@ func main() {
 			MaxTokens:     cfg.LLM.MaxTokens,
 			ContextWindow: src.ContextWindow,
 			MaxConcurrent: src.MaxConcurrent,
+			Priority:      src.Priority,
 		}, luaVM, src.Name, src.Adapter)
 		providerMgr.Register(src.Name, luaProvider)
 		if src.Adapter != "" {

@@ -186,6 +186,7 @@ var sourceFieldDefs = []struct {
 	{"adapter", "string", "适配器"},
 	{"adapter_path", "string", "适配器路径"},
 	{"max_concurrent", "int", "并发上限"},
+	{"priority", "int", "AUTO 优先级（大者优先）"},
 }
 
 // registerSourceDefs 注册 core.llm.sources.<name>.* 的 ConfigDef
@@ -816,6 +817,7 @@ func (r *ConfigRegistry) ToConfig() *types.Config {
 			AdapterPath:     read(p+".adapter_path", ""),
 			ContextWindow:   readInt(p+".context_window", 0),
 			MaxConcurrent:   readInt(p+".max_concurrent", 8),
+			Priority:        readInt(p+".priority", 0),
 			ThinkingEnabled: readBool(p+".thinking_enabled", false),
 		})
 	}
