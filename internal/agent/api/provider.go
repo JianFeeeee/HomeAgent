@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -154,6 +155,14 @@ type Provider interface {
 	MaxContextTokens() int
 }
 
+// RoutableProvider 是支持精确模型路由/AUTO 优先级的 provider。
+// 不与 Provider 强绑定，避免破坏第三方 Provider 实现。
+type RoutableProvider interface {
+	Provider
+	Model() string // 该 provider 提供的模型名（可能为空表示 AUTO）
+	Priority() int // AUTO 跨源选择的优先级，大者优先
+}
+
 // ModelContextWindow 返回模型的最大上下文窗口（token 数）
 // 标称窗口 ≠ 有效窗口：接近满时注意力涣散，调用方应取 70-80% 为目标利用率
 func ModelContextWindow(model string) int {
@@ -202,6 +211,7 @@ type BaseConfig struct {
 	MaxTokens     int     `json:"max_tokens"`
 	ContextWindow int     `json:"context_window"`
 	MaxConcurrent int     `json:"max_concurrent"`
+	Priority      int     `json:"priority"`
 }
 
 // LuaAdaptedProvider 使用 Lua 脚本做请求/响应变换，直接发起 HTTP 调用
@@ -250,11 +260,14 @@ func (p *LuaAdaptedProvider) MaxContextTokens() int {
 	return ModelContextWindow(p.cfg.Model)
 }
 
-func (p *LuaAdaptedProvider) Name() string { return p.name }
+func (p *LuaAdaptedProvider) Name() string  { return p.name }
+func (p *LuaAdaptedProvider) Model() string { return p.cfg.Model }
+func (p *LuaAdaptedProvider) Priority() int { return p.cfg.Priority }
 
 func (p *LuaAdaptedProvider) Chat(ctx context.Context, req *CompletionRequest) (*CompletionResponse, error) {
-	req.Model = p.cfg.Model
-
+	if p.cfg.Model != "" && (req.Model == "" || req.Model == "AUTO") {
+		req.Model = p.cfg.Model
+	}
 	rawReq, _ := json.Marshal(req)
 
 	transformedBody, err := p.vm.CallTransformRequest(p.adapter, string(rawReq))
@@ -489,7 +502,9 @@ func parseOpenAICompatibleStreamChunk(raw []byte) (StreamChunk, bool) {
 }
 
 func (p *LuaAdaptedProvider) ChatStream(ctx context.Context, req *CompletionRequest) (<-chan StreamChunk, error) {
-	req.Model = p.cfg.Model
+	if p.cfg.Model != "" && (req.Model == "" || req.Model == "AUTO") {
+		req.Model = p.cfg.Model
+	}
 	req.Stream = true
 	rawReq, _ := json.Marshal(req)
 
@@ -756,20 +771,63 @@ func (m *ProviderManager) IsAvailable(name string) bool {
 func (m *ProviderManager) OrderedProviders() []Provider {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
+	return m.orderedLocked("")
+}
+
+// orderedLocked 返回 provider 候选链。model 为 "" 表示 AUTO：
+// 按 (优先级 desc, 可用性, 默认优先) 稳定排序；model 非空且存在归属源时，
+// 命中的源排在最前（精确模型路由），其余按优先级跟随。
+func (m *ProviderManager) orderedLocked(model string) []Provider {
 	list := make([]Provider, 0, len(m.order))
-	// 把默认 provider 放第一位，其余按注册顺序
-	if def, ok := m.providers[m.default_]; ok {
-		list = append(list, def)
-	}
 	for _, name := range m.order {
-		if name == m.default_ {
-			continue
-		}
-		if p, ok := m.providers[name]; ok {
+		if p, ok := m.providers[name]; ok && p != nil {
 			list = append(list, p)
 		}
 	}
-	return list
+	type pp struct {
+		p       Provider
+		prio    int
+		isDef   bool
+		isMatch bool
+	}
+	items := make([]pp, 0, len(list))
+	lower := strings.ToLower(strings.TrimSpace(model))
+	for _, p := range list {
+		it := pp{p: p, prio: 0, isDef: p.Name() == m.default_}
+		if rp, ok := p.(RoutableProvider); ok {
+			it.prio = rp.Priority()
+			if lower != "" && lower != "auto" {
+				if strings.EqualFold(rp.Model(), model) {
+					it.isMatch = true
+				}
+			}
+		}
+		items = append(items, it)
+	}
+	sort.SliceStable(items, func(i, j int) bool {
+		if items[i].isMatch != items[j].isMatch {
+			return items[i].isMatch
+		}
+		if items[i].prio != items[j].prio {
+			return items[i].prio > items[j].prio
+		}
+		if items[i].isDef != items[j].isDef {
+			return items[i].isDef
+		}
+		return items[i].p.Name() < items[j].p.Name()
+	})
+	out := make([]Provider, len(items))
+	for i := range items {
+		out[i] = items[i].p
+	}
+	return out
+}
+
+// ResolveForModel 按精确模型名路由到归属 provider；找不到则回落到 AUTO 链。
+func (m *ProviderManager) ResolveForModel(model string) []Provider {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	return m.orderedLocked(model)
 }
 
 func (m *ProviderManager) ProviderCount() int {

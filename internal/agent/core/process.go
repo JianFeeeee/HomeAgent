@@ -70,7 +70,13 @@ func (a *Agent) process(input string, stageCtx *sdk.StageContext) (response stri
 
 		var providers []agentAPI.Provider
 		if a.providerManager != nil {
-			allProviders := a.providerManager.OrderedProviders()
+			// 精确模型名走 byModel 路由；AUTO/空走优先级链
+			var allProviders []agentAPI.Provider
+			if req.Model != "" && !strings.EqualFold(req.Model, "AUTO") {
+				allProviders = a.providerManager.ResolveForModel(req.Model)
+			} else {
+				allProviders = a.providerManager.OrderedProviders()
+			}
 			providers = make([]agentAPI.Provider, 0, len(allProviders))
 			for _, p := range allProviders {
 				if a.providerManager.IsAvailable(p.Name()) {
@@ -156,11 +162,11 @@ func (a *Agent) process(input string, stageCtx *sdk.StageContext) (response stri
 		resp.ToolCalls = convertBackToolCalls(stageCtx.ToolCalls)
 
 		chainPayload := map[string]interface{}{
-			"content":          resp.Content,
-			"reasoning":        resp.ReasoningContent,
-			"tool_calls":       resp.ToolCalls,
-			"phase":            "intermediate",
-			"turn":             turn,
+			"content":    resp.Content,
+			"reasoning":  resp.ReasoningContent,
+			"tool_calls": resp.ToolCalls,
+			"phase":      "intermediate",
+			"turn":       turn,
 		}
 		if resp.TokenUsage.Total > 0 {
 			chainPayload["usage"] = map[string]int{
