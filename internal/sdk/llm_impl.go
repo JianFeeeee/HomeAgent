@@ -126,6 +126,7 @@ func (l *llmImpl) ReloadFromConfig() error {
 			MaxTokens:     cfg.LLM.MaxTokens,
 			ContextWindow: src.ContextWindow,
 			MaxConcurrent: src.MaxConcurrent,
+			Priority:      src.Priority,
 		}, l.lua, src.Name, src.Adapter)
 		l.mgr.Register(src.Name, provider)
 		if src.Adapter != "" {
