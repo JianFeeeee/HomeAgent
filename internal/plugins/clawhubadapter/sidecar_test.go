@@ -29,6 +29,8 @@ func (m *mockSettings) Plugins() []string { return nil }
 func (m *mockSettings) DefsCore(prefix string) []*sdk.ConfigDef { return nil }
 func (m *mockSettings) DefsPlugin(plugin, prefix string) []*sdk.ConfigDef { return nil }
 func (m *mockSettings) Remove(key string) error { return nil }
+func (m *mockSettings) RemoveCore(key string) error { return nil }
+func (m *mockSettings) RemovePlugin(plugin, key string) error { return nil }
 
 func TestLaunchSidecarNoMainJS(t *testing.T) {
 	tmpDir := t.TempDir()
