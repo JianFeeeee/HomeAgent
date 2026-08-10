@@ -2,14 +2,16 @@ package api
 
 import (
 	"context"
+	"encoding/json"
+	"strings"
 	"testing"
 )
 
 // stubRoutableProvider implements both Provider and RoutableProvider.
 type stubRoutableProvider struct {
-	name    string
-	model   string
-	prio    int
+	name  string
+	model string
+	prio  int
 }
 
 func (s *stubRoutableProvider) Name() string          { return s.name }
@@ -63,4 +65,41 @@ func names(ps []Provider) []string {
 		out[i] = p.Name()
 	}
 	return out
+}
+func TestMessageAudioBlockToInputAudio(t *testing.T) {
+	const b64 = "QUJDREVG" // base64 of "ABCDEF"
+	m := Message{
+		Role: "user",
+		Blocks: []ContentBlock{
+			{Type: "text", Text: "what is this"},
+			{Type: "audio_url", AudioURL: &AudioURL{URL: "data:audio/wav;base64," + b64}},
+		},
+	}
+	data, err := json.Marshal(m)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	s := string(data)
+	if !strings.Contains(s, `"type":"input_audio"`) {
+		t.Fatalf("expected input_audio, got: %s", s)
+	}
+	if !strings.Contains(s, `"format":"wav"`) || !strings.Contains(s, b64) {
+		t.Fatalf("missing data/format: %s", s)
+	}
+	if strings.Contains(s, `"type":"audio_url"`) {
+		t.Fatalf("audio_url should be converted: %s", s)
+	}
+}
+
+func TestMessageAudioURLPassthroughWhenNotBase64(t *testing.T) {
+	m := Message{
+		Role: "user",
+		Blocks: []ContentBlock{
+			{Type: "audio_url", AudioURL: &AudioURL{URL: "https://cdn.example/a.wav"}},
+		},
+	}
+	data, _ := json.Marshal(m)
+	if !strings.Contains(string(data), `"type":"audio_url"`) {
+		t.Fatalf("non-base64 audio_url should stay: %s", data)
+	}
 }
