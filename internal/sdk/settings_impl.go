@@ -17,19 +17,33 @@ func NewSettings(name string, reg *internalConfig.ConfigRegistry) SettingsAPI {
 }
 
 func (s *settingsImpl) Get(key string) (interface{}, error) {
-	if s.reg == nil { return nil, nil }
+	if s.reg == nil {
+		return nil, nil
+	}
 	return s.reg.PluginConfig(s.pluginName).Get(key)
 }
 func (s *settingsImpl) Set(key string, value interface{}) error {
-	if s.reg == nil { return nil }
+	if s.reg == nil {
+		return nil
+	}
 	return s.reg.PluginConfig(s.pluginName).Set(key, value)
 }
 func (s *settingsImpl) Remove(key string) error {
-	if s.reg == nil { return nil }
+	if s.reg == nil {
+		return nil
+	}
 	return s.reg.PluginConfig(s.pluginName).Remove(key)
 }
+func (s *settingsImpl) RemoveCore(key string) error {
+	if s.reg == nil {
+		return nil
+	}
+	return s.reg.Delete(coreKey(key))
+}
 func (s *settingsImpl) List(prefix string) ([]string, error) {
-	if s.reg == nil { return nil, nil }
+	if s.reg == nil {
+		return nil, nil
+	}
 	return s.reg.PluginConfig(s.pluginName).List(prefix)
 }
 func coreKey(key string) string {
@@ -40,15 +54,21 @@ func coreKey(key string) string {
 }
 
 func (s *settingsImpl) GetCore(key string) (interface{}, error) {
-	if s.reg == nil { return nil, nil }
+	if s.reg == nil {
+		return nil, nil
+	}
 	return s.reg.Get(coreKey(key))
 }
 func (s *settingsImpl) SetCore(key string, value interface{}) error {
-	if s.reg == nil { return nil }
+	if s.reg == nil {
+		return nil
+	}
 	return s.reg.Set(coreKey(key), value)
 }
 func (s *settingsImpl) ListCore(prefix string) ([]string, error) {
-	if s.reg == nil { return nil, nil }
+	if s.reg == nil {
+		return nil, nil
+	}
 	p := coreKey(prefix)
 	if p == "core." {
 		p = "core."
@@ -56,19 +76,33 @@ func (s *settingsImpl) ListCore(prefix string) ([]string, error) {
 	return s.reg.List(p), nil
 }
 func (s *settingsImpl) GetPlugin(plugin, key string) (interface{}, error) {
-	if s.reg == nil { return nil, nil }
+	if s.reg == nil {
+		return nil, nil
+	}
 	return s.reg.PluginConfig(plugin).Get(key)
 }
 func (s *settingsImpl) SetPlugin(plugin, key string, value interface{}) error {
-	if s.reg == nil { return nil }
+	if s.reg == nil {
+		return nil
+	}
 	return s.reg.PluginConfig(plugin).Set(key, value)
 }
+func (s *settingsImpl) RemovePlugin(plugin, key string) error {
+	if s.reg == nil {
+		return nil
+	}
+	return s.reg.PluginConfig(plugin).Remove(key)
+}
 func (s *settingsImpl) ListPlugin(plugin, prefix string) ([]string, error) {
-	if s.reg == nil { return nil, nil }
+	if s.reg == nil {
+		return nil, nil
+	}
 	return s.reg.PluginConfig(plugin).List(prefix)
 }
 func (s *settingsImpl) RegisterDef(def ConfigDef) {
-	if s.reg == nil { return }
+	if s.reg == nil {
+		return
+	}
 	s.reg.PluginConfig(s.pluginName).RegisterDef(internalConfig.ConfigDef{
 		Key: def.Key, Type: def.Type, DisplayName: def.DisplayName, Description: def.Description,
 		Category: def.Category, Options: def.Options,
@@ -76,7 +110,9 @@ func (s *settingsImpl) RegisterDef(def ConfigDef) {
 	})
 }
 func (s *settingsImpl) Defs(prefix string) []*ConfigDef {
-	if s.reg == nil { return nil }
+	if s.reg == nil {
+		return nil
+	}
 	defs := s.reg.PluginConfig(s.pluginName).ListDefs(prefix)
 	out := make([]*ConfigDef, len(defs))
 	for i, d := range defs {
@@ -90,11 +126,15 @@ func (s *settingsImpl) Defs(prefix string) []*ConfigDef {
 	return out
 }
 func (s *settingsImpl) Dump() map[string]interface{} {
-	if s.reg == nil { return nil }
+	if s.reg == nil {
+		return nil
+	}
 	return s.reg.Dump()
 }
 func (s *settingsImpl) Plugins() []string {
-	if s.reg == nil { return nil }
+	if s.reg == nil {
+		return nil
+	}
 	names := s.reg.ListPlugins()
 	result := make([]string, 0, len(names)+1)
 	result = append(result, "core")
@@ -102,11 +142,15 @@ func (s *settingsImpl) Plugins() []string {
 	return result
 }
 func (s *settingsImpl) DefsCore(prefix string) []*ConfigDef {
-	if s.reg == nil { return nil }
+	if s.reg == nil {
+		return nil
+	}
 	return mapDefs(s.reg.ListDefs(prefix))
 }
 func (s *settingsImpl) DefsPlugin(plugin, prefix string) []*ConfigDef {
-	if s.reg == nil { return nil }
+	if s.reg == nil {
+		return nil
+	}
 	return mapDefs(s.reg.PluginConfig(plugin).ListDefs(prefix))
 }
 
@@ -122,13 +166,19 @@ func mapDefs(defs []*internalConfig.ConfigDef) []*ConfigDef {
 }
 
 func stringifyDefault(v interface{}) string {
-	if v == nil { return "" }
+	if v == nil {
+		return ""
+	}
 	switch x := v.(type) {
-	case string: return x
+	case string:
+		return x
 	case bool:
-		if x { return "true" }
+		if x {
+			return "true"
+		}
 		return "false"
-	default: return fmt.Sprint(v)
+	default:
+		return fmt.Sprint(v)
 	}
 }
 

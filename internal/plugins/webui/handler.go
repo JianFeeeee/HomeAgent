@@ -49,8 +49,8 @@ type Handler struct {
 	status     sdk.StatusAPI
 	llm        sdk.LLMAPI
 
-	sessionMu  sync.Mutex
-	sessions   map[string]time.Time
+	sessionMu sync.Mutex
+	sessions  map[string]time.Time
 
 	chatMu      sync.Mutex
 	chatHistory []ChatMsg
@@ -282,12 +282,18 @@ func (h *Handler) getWebUIConfig() (apiKey, username, password string, ttl time.
 	if v, _ := h.settings.Get("session_ttl_hours"); v != nil {
 		switch n := v.(type) {
 		case float64:
-			if n > 0 { ttl = time.Duration(n) * time.Hour }
+			if n > 0 {
+				ttl = time.Duration(n) * time.Hour
+			}
 		case string:
-			if i, err := strconv.Atoi(n); err == nil && i > 0 { ttl = time.Duration(i) * time.Hour }
+			if i, err := strconv.Atoi(n); err == nil && i > 0 {
+				ttl = time.Duration(i) * time.Hour
+			}
 		}
 	}
-	if username == "" { username = "admin" }
+	if username == "" {
+		username = "admin"
+	}
 	return
 }
 
@@ -426,7 +432,10 @@ func (h *Handler) handleLogin(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "webui username/password not configured"})
 		return
 	}
-	var body struct { Username string `json:"username"`; Password string `json:"password"` }
+	var body struct {
+		Username string `json:"username"`
+		Password string `json:"password"`
+	}
 	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid request"})
 		return
@@ -1156,16 +1165,29 @@ func (h *Handler) handleSettings(w http.ResponseWriter, r *http.Request) {
 			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid request"})
 			return
 		}
+		deleting := body.Value == nil
 		if strings.HasPrefix(body.Key, "plugin.") {
 			parts := strings.SplitN(body.Key, ".", 3)
 			if len(parts) >= 3 {
-				if err := h.settings.SetPlugin(parts[1], parts[2], body.Value); err != nil {
+				var err error
+				if deleting {
+					err = h.settings.RemovePlugin(parts[1], parts[2])
+				} else {
+					err = h.settings.SetPlugin(parts[1], parts[2], body.Value)
+				}
+				if err != nil {
 					writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
 					return
 				}
 			}
 		} else {
-			if err := h.settings.SetCore(body.Key, body.Value); err != nil {
+			var err error
+			if deleting {
+				err = h.settings.RemoveCore(body.Key)
+			} else {
+				err = h.settings.SetCore(body.Key, body.Value)
+			}
+			if err != nil {
 				writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
 				return
 			}
@@ -1320,8 +1342,8 @@ func (h *Handler) writeOpenAIStream(w http.ResponseWriter, model, content, reaso
 		"model":   model,
 		"choices": []map[string]interface{}{
 			{
-				"index": 0,
-				"delta": map[string]interface{}{},
+				"index":         0,
+				"delta":         map[string]interface{}{},
 				"finish_reason": "stop",
 			},
 		},
