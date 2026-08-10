@@ -276,6 +276,7 @@ func main() {
 	baseAPIKey := apiKey
 
 	providerMgr := agentAPI.NewProviderManager()
+	adapterConcurrency := map[string]int{}
 	for _, src := range cfg.LLM.Sources {
 		if !agentAPI.IsValidSourceConfig(src.Name, src.BaseURL, src.Model, src.Adapter) {
 			log.Printf("[homed] skip invalid llm source %q (base_url=%q model=%q adapter=%q)", src.Name, src.BaseURL, src.Model, src.Adapter)
@@ -292,9 +293,14 @@ func main() {
 			Temperature:   cfg.LLM.Temperature,
 			MaxTokens:     cfg.LLM.MaxTokens,
 			ContextWindow: src.ContextWindow,
+			MaxConcurrent: src.MaxConcurrent,
 		}, luaVM, src.Name, src.Adapter)
 		providerMgr.Register(src.Name, luaProvider)
+		if src.Adapter != "" {
+			adapterConcurrency[src.Adapter] += src.MaxConcurrent
+		}
 	}
+	luaVM.ConfigureConcurrency(adapterConcurrency)
 	if cfg.LLM.Provider != "" {
 		providerMgr.SetDefault(cfg.LLM.Provider)
 	}
