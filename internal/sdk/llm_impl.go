@@ -128,7 +128,9 @@ func (l *llmImpl) ReloadFromConfig() error {
 		l.mgr.Register(src.Name, provider)
 	}
 	if cfg.LLM.Provider != "" {
-		_ = l.mgr.SetDefault(cfg.LLM.Provider)
+		if l.mgr.Get(cfg.LLM.Provider) != nil {
+			_ = l.mgr.SetDefault(cfg.LLM.Provider)
+		}
 	}
 	return nil
 }

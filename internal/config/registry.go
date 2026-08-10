@@ -91,6 +91,9 @@ func (r *ConfigRegistry) RemovePlugin(name string) error {
 			delete(r.defs, k)
 		}
 	}
+	if _, err := r.db.Exec(`DELETE FROM config WHERE key LIKE ?`, prefix+"%"); err != nil {
+		return err
+	}
 	table := r.pluginTableName(name)
 	_, err := r.db.Exec(fmt.Sprintf(`DROP TABLE IF EXISTS %s`, table))
 	return err
@@ -307,6 +310,23 @@ func (r *ConfigRegistry) Delete(key string) error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	_, err := r.db.Exec(`DELETE FROM config WHERE key = ?`, key)
+	if err == nil {
+		if strings.HasPrefix(key, "core.llm.sources.") {
+			rest := strings.TrimPrefix(key, "core.llm.sources.")
+			parts := strings.SplitN(rest, ".", 2)
+			if len(parts) == 2 {
+				prefix := "core.llm.sources." + parts[0] + "."
+				for k := range r.defs {
+					if strings.HasPrefix(k, prefix) {
+						delete(r.defs, k)
+					}
+				}
+			}
+		}
+		if strings.HasPrefix(key, "core.llm.") {
+			r.writeLLMSnapshotLocked()
+		}
+	}
 	return err
 }
 
