@@ -3,6 +3,7 @@ package api
 import (
 	"bufio"
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -30,6 +31,67 @@ type ImageURL struct {
 
 type AudioURL struct {
 	URL string `json:"url"`
+}
+
+// MarshalJSON 把音频块序列化成 OpenAI「input_audio」多模态格式（base64 内嵌），
+// 供支持音频的模型识别。audio_url 非 OpenAI 标准块；含 base64 数据时转
+// input_audio，否则回落到原生 audio_url（透传）。
+func (b ContentBlock) MarshalJSON() ([]byte, error) {
+	if b.Type == "audio_url" && b.AudioURL != nil && b.AudioURL.URL != "" {
+		if data, format, ok := parseAudioDataURL(b.AudioURL.URL); ok {
+			return json.Marshal(map[string]interface{}{
+				"type": "input_audio",
+				"input_audio": map[string]string{
+					"data":   data,
+					"format": format,
+				},
+			})
+		}
+	}
+	type alias ContentBlock
+	return json.Marshal(alias(b))
+}
+
+// parseAudioDataURL 从 data:<mime>;base64,<data> 提取 base64 与 format。
+// 非 base64（如 http url）返回 ok=false。
+func parseAudioDataURL(url string) (data, format string, ok bool) {
+	const prefix = "data:"
+	if !strings.HasPrefix(url, prefix) {
+		return "", "", false
+	}
+	rest := url[len(prefix):]
+	comma := strings.IndexByte(rest, ',')
+	if comma < 0 {
+		return "", "", false
+	}
+	mime := rest[:comma]
+	data = rest[comma+1:]
+	if mime == "" || data == "" {
+		return "", "", false
+	}
+	if _, err := base64.StdEncoding.DecodeString(data); err != nil {
+		return "", "", false
+	}
+	format = audioFormatFromMIME(mime)
+	return data, format, true
+}
+
+func audioFormatFromMIME(mime string) string {
+	m := strings.ToLower(strings.TrimSpace(mime))
+	switch {
+	case strings.Contains(m, "wav"):
+		return "wav"
+	case strings.Contains(m, "mp3"), strings.Contains(m, "mpeg"):
+		return "mp3"
+	case strings.Contains(m, "mp4"), strings.Contains(m, "m4a"):
+		return "mp4"
+	case strings.Contains(m, "ogg"), strings.Contains(m, "opus"):
+		return "ogg"
+	case strings.Contains(m, "flac"):
+		return "flac"
+	default:
+		return "wav"
+	}
 }
 
 // Message 表示对话消息。当 Blocks 不为空时 content 在 JSON 中序列化为数组（多模态格式）。
