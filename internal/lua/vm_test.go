@@ -135,3 +135,58 @@ func TestVMConcurrentCalls(t *testing.T) {
 		t.Fatalf("concurrent call: %v", err)
 	}
 }
+func TestOllamaMultimodal(t *testing.T) {
+	vm := NewVM(t.TempDir())
+	if err := vm.Start(); err != nil {
+		t.Fatalf("start vm: %v", err)
+	}
+	defer vm.Stop()
+
+	raw := `{"model":"llama3","messages":[{"role":"user","content":"hi"},{"role":"user","content":[{"type":"text","text":"look"},{"type":"image_url","image_url":{"url":"data:image/png;base64,AAAA"}}]}]}`
+	out, err := vm.CallTransformRequest("ollama", raw)
+	if err != nil {
+		t.Fatalf("transform_request: %v", err)
+	}
+	if !strings.Contains(out, `"images":["AAAA"]`) {
+		t.Fatalf("expected base64 images array, got: %s", out)
+	}
+	if !strings.Contains(out, `"content":"look"`) {
+		t.Fatalf("text not preserved: %s", out)
+	}
+}
+
+func TestAnthropicMultimodal(t *testing.T) {
+	vm := NewVM(t.TempDir())
+	if err := vm.Start(); err != nil {
+		t.Fatalf("start vm: %v", err)
+	}
+	defer vm.Stop()
+
+	raw := `{"model":"claude-sonnet-4-20250514","messages":[{"role":"user","content":[{"type":"text","text":"what is this"},{"type":"image_url","image_url":{"url":"data:image/png;base64,AAEC"}}]}]}`
+	out, err := vm.CallTransformRequest("anthropic", raw)
+	if err != nil {
+		t.Fatalf("transform_request: %v", err)
+	}
+	if !strings.Contains(out, `"type":"image"`) || !strings.Contains(out, `"media_type":"image/png"`) || !strings.Contains(out, `"data":"AAEC"`) {
+		t.Fatalf("expected anthropic image source block, got: %s", out)
+	}
+	if !strings.Contains(out, `"type":"text"`) {
+		t.Fatalf("expected text block preserved: %s", out)
+	}
+}
+
+func TestOpenAIPassthroughKeepsMultimodal(t *testing.T) {
+	vm := NewVM(t.TempDir())
+	if err := vm.Start(); err != nil {
+		t.Fatalf("start vm: %v", err)
+	}
+	defer vm.Stop()
+	raw := `{"model":"auto","messages":[{"role":"user","content":[{"type":"text","text":"hi"},{"type":"image_url","image_url":{"url":"data:image/png;base64,QUJD"}}]}]}`
+	out, err := vm.CallTransformRequest("openai", raw)
+	if err != nil {
+		t.Fatalf("transform_request: %v", err)
+	}
+	if !strings.Contains(out, `"image_url"`) || !strings.Contains(out, "QUJD") {
+		t.Fatalf("openai passthrough dropped multimodal: %s", out)
+	}
+}
