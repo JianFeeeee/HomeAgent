@@ -18,10 +18,11 @@ import (
 )
 
 const (
-	DefaultTimeout    = 5 * time.Minute
-	ReadBufSize       = 4096
-	MaxOutputBuffer   = 128 * 1024
-	NotifyOutputDelay = 500 * time.Millisecond
+	DefaultTimeout      = 5 * time.Minute
+	ReadBufSize         = 4096
+	MaxOutputBuffer     = 128 * 1024
+	DefaultNotifyBytes  = 2048 // 积累 2KB 未读输出再通知
+	DefaultNotifyInterval = 2 * time.Second // 同一终端两次通知的最小间隔（兜底）
 )
 
 // ptyTerm 抽象平台终端后端（Linux PTY / Windows ConPTY）。
@@ -56,6 +57,10 @@ type TerminalSession struct {
 	closed    bool
 	stopCh    chan struct{}
 	done      chan struct{}
+
+	// 通知节流字段
+	unreadBytes   int           // 最近一次通知后积累的未读字节数
+	lastNotify    time.Time     // 最近一次通知时间
 }
 
 func (t *TerminalSession) Write(input string) (int, error) {
@@ -128,6 +133,8 @@ type Plugin struct {
 	sessions       map[string]*TerminalSession
 	nextID         int
 	defaultTimeout time.Duration
+	notifyBytes    int
+	notifyInterval time.Duration
 }
 
 func New(name string) *Plugin {
@@ -147,6 +154,16 @@ func (p *Plugin) Start(s *sdk.PluginSDK) error {
 		Description: "终端自动关闭的默认时间，例如 5m, 10m, 30m, 1h（默认 5m）",
 		Default:     "5m",
 	})
+	s.Settings().RegisterDef(sdk.ConfigDef{
+		Key: "notify_bytes", Type: "int", DisplayName: "通知阈值字节数",
+		Description: "累积多少字节未读输出后发送通知（默认 2048）",
+		Default:     "2048",
+	})
+	s.Settings().RegisterDef(sdk.ConfigDef{
+		Key: "notify_interval", Type: "string", DisplayName: "通知最小间隔",
+		Description: "同一终端两次通知的最小时间间隔，如 2s, 5s（默认 2s）",
+		Default:     "2s",
+	})
 	if v, _ := s.Settings().Get("default_timeout"); v != nil {
 		if s, ok := v.(string); ok && s != "" {
 			if d, err := time.ParseDuration(s); err == nil {
@@ -156,6 +173,24 @@ func (p *Plugin) Start(s *sdk.PluginSDK) error {
 	}
 	if p.defaultTimeout <= 0 {
 		p.defaultTimeout = DefaultTimeout
+	}
+	if v, _ := s.Settings().Get("notify_bytes"); v != nil {
+		if i, ok := v.(float64); ok && i > 0 {
+			p.notifyBytes = int(i)
+		}
+	}
+	if p.notifyBytes <= 0 {
+		p.notifyBytes = DefaultNotifyBytes
+	}
+	if v, _ := s.Settings().Get("notify_interval"); v != nil {
+		if s, ok := v.(string); ok && s != "" {
+			if d, err := time.ParseDuration(s); err == nil {
+				p.notifyInterval = d
+			}
+		}
+	}
+	if p.notifyInterval <= 0 {
+		p.notifyInterval = DefaultNotifyInterval
 	}
 
 	s.RegisterTool("terminal_create", sdk.ToolDef{
@@ -558,11 +593,14 @@ func (p *Plugin) readLoop(t *TerminalSession, s *sdk.PluginSDK) {
 	defer close(t.done)
 
 	buf := make([]byte, ReadBufSize)
-	lastNotify := time.Now()
 	pollInterval := 200 * time.Millisecond
 
 	readCh := make(chan readResult, 4)
 	go p.reader(t, buf, readCh)
+
+	// 立即发送首次"终端已启动"通知，让 agent 感知存在
+	s.InjectText("agentcli", "agentcli", fmt.Sprintf("[终端 %s 已启动]", t.id))
+	t.lastNotify = time.Now()
 
 	for {
 		if t.IsExpired() {
@@ -587,20 +625,34 @@ func (p *Plugin) readLoop(t *TerminalSession, s *sdk.PluginSDK) {
 			return
 		case r := <-readCh:
 			if r.err != nil {
+				// 读取错误/EOF → 立即通知（进程可能已结束）
+				s.InjectText("agentcli", "agentcli", fmt.Sprintf("[终端 %s 读取结束: %v]", t.id, r.err))
 				return
 			}
 			if r.n > 0 {
 				data := make([]byte, r.n)
 				copy(data, buf[:r.n])
 				t.appendOutput(data)
-				if time.Since(lastNotify) > NotifyOutputDelay {
-					preview := string(data)
-					if len(preview) > 100 {
-						preview = preview[:100]
+
+				// 语义通知：累积未读字节数
+				t.mu.Lock()
+				t.unreadBytes += r.n
+				needNotify := t.unreadBytes >= p.notifyBytes ||
+					time.Since(t.lastNotify) >= p.notifyInterval
+				t.mu.Unlock()
+
+				if needNotify {
+					t.mu.Lock()
+					preview := t.buf.String()
+					if len(preview) > 200 {
+						preview = preview[len(preview)-200:] // 取最新 200 字符
 					}
 					preview = sanitizePreview(preview)
+					t.unreadBytes = 0
+					t.lastNotify = time.Now()
+					t.mu.Unlock()
+
 					s.InjectText("agentcli", "agentcli", fmt.Sprintf("[终端 %s 有新输出]\n%s", t.id, preview))
-					lastNotify = time.Now()
 				}
 			}
 		case <-time.After(pollInterval):

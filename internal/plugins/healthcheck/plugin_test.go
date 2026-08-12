@@ -3,6 +3,7 @@ package healthcheck
 import (
 	"encoding/json"
 	"os"
+	"strings"
 	"testing"
 
 	agentCore "gitcode.com/JianFeeeee/HomeAgent/internal/agent/core"
@@ -196,6 +197,20 @@ func TestHealthcheckWithMemory(t *testing.T) {
 	}
 	defer memDB.Close()
 
+	// 预置一条生产数据，验证 healthcheck 自检后不触碰它
+	_, _, err = memDB.Commit([]memory.Triple{{Subject: "用户", Relation: "喜欢", Object: "咖啡"}}, "test", 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	memSnapshot := func() (int, int) {
+		m, _ := memDB.Introspect()
+		ents, _ := m["entity_count"].(int)
+		rels, _ := m["relation_count"].(int)
+		return ents, rels
+	}
+	be, br := memSnapshot()
+
 	_, tc, err := setupPluginWith(sdk.SDKConfig{Memory: sdk.NewGraphMemory(memDB)})
 	if err != nil {
 		t.Fatal(err)
@@ -212,10 +227,24 @@ func TestHealthcheckWithMemory(t *testing.T) {
 	json.Unmarshal(data, &resp)
 
 	if resp["status"] != "ok" {
-		t.Fatalf("expected status ok, got %v", resp["status"])
+		t.Fatalf("expected status ok, got %v (detail=%v)", resp["status"], resp["detail"])
 	}
 	if pass, ok := resp["pass"].(bool); !ok || !pass {
 		t.Fatalf("expected pass=true, got pass=%v status=%v detail=%v", pass, resp["status"], resp["detail"])
+	}
+
+	// 关键：生产记忆内容必须保持不变（未被 healthcheck 污染）
+	ae, ar := memSnapshot()
+	if ae != be || ar != br {
+		t.Fatalf("production memory polluted by healthcheck self-test: before=(%d,%d) after=(%d,%d)", be, br, ae, ar)
+	}
+
+	// 再次确认：注入实例中不应出现 _hc_ 测试实体
+	relResult, _ := memDB.Recall([]string{"_hc_"}, nil, 1, "")
+	for _, e := range relResult.Entities {
+		if len(e.Name) >= 4 && e.Name[:4] == "_hc_" {
+			t.Fatalf("healthcheck left _hc_ entity in production memory: %q", e.Name)
+		}
 	}
 }
 
@@ -231,6 +260,12 @@ func TestHealthcheckWithKnowledge(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer ks.Stop()
+
+	// 预置一条真实知识，验证 healthcheck 自检后不触碰它
+	if err := ks.Add("生产知识点", "这是生产知识，不应被健康检查破坏"); err != nil {
+		t.Fatal(err)
+	}
+	before := len(ks.List())
 
 	_, tc, err := setupPluginWith(sdk.SDKConfig{Knowledge: sdk.NewKnowledge(ks)})
 	if err != nil {
@@ -264,6 +299,20 @@ func TestHealthcheckWithKnowledge(t *testing.T) {
 	if knowledgeCheck == nil {
 		t.Fatal("expected knowledge check in results")
 	}
+	if knowledgeCheck["status"] != "ok" {
+		t.Fatalf("expected knowledge check ok, got %v (detail=%v)", knowledgeCheck["status"], knowledgeCheck["detail"])
+	}
+
+	// 生产知识库内容必须保持不变（未被 healthcheck 污染）
+	after := len(ks.List())
+	if after != before {
+		t.Fatalf("production knowledge polluted: before=%d after=%d", before, after)
+	}
+	for _, name := range ks.List() {
+		if strings.HasPrefix(name, "_hc_knowledge_test_") {
+			t.Fatalf("healthcheck left test knowledge in production: %q", name)
+		}
+	}
 }
 
 func TestHealthcheckWithDocStore(t *testing.T) {
@@ -278,6 +327,12 @@ func TestHealthcheckWithDocStore(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer ds.Stop()
+
+	// 预置一篇生产文档，验证 healthcheck 自检后不触碰它
+	if err := ds.Insert(&doc.Doc{ID: "prod_doc", Summary: "生产文档", Content: "这是生产文档，不应被健康检查破坏"}); err != nil {
+		t.Fatal(err)
+	}
+	before := len(ds.Query("生产文档", 10))
 
 	_, tc, err := setupPluginWith(sdk.SDKConfig{DocMemory: sdk.NewDocMemory(ds)})
 	if err != nil {
@@ -311,6 +366,15 @@ func TestHealthcheckWithDocStore(t *testing.T) {
 	if docCheck == nil {
 		t.Fatal("expected documents check in results")
 	}
+	if docCheck["status"] != "ok" {
+		t.Fatalf("expected documents check ok, got %v (detail=%v)", docCheck["status"], docCheck["detail"])
+	}
+
+	// 生产文档必须保持不变（未被 healthcheck 污染）
+	after := len(ds.Query("生产文档", 10))
+	if after != before {
+		t.Fatalf("production doc store polluted: before=%d after=%d", before, after)
+	}
 }
 
 func TestLLMReportCollection(t *testing.T) {
@@ -327,6 +391,90 @@ func TestLLMReportCollection(t *testing.T) {
 	}
 	if p.reports[0].ToolName != "test_tool" {
 		t.Fatalf("expected tool_name=test_tool, got %s", p.reports[0].ToolName)
+	}
+}
+
+// TestSafeReadonlyTool 验证 LLM 自检工具过滤：写类/副作用工具被拒绝，只读工具被放行。
+func TestSafeReadonlyTool(t *testing.T) {
+	// 只读：应放行
+	readonly := []string{
+		"memory_recall", "memory_introspect", "doc_query",
+		"knowledge_search", "knowledge_list", "person_query",
+		"person_network", "llm_list_sources", "output_list_channels",
+		"terminal_list", "files_list",
+	}
+	for _, name := range readonly {
+		if !isSafeReadonlyTool(name) {
+			t.Errorf("expected readonly tool %q to be safe, but rejected", name)
+		}
+	}
+
+	// 写/删/改/副作用：应被拒绝
+	mutating := []string{
+		"memory_commit", "memory_edit", "memory_purge", "memory_delete_entity",
+		"memory_merge", "memory_block_merge",
+		"knowledge_create", "knowledge_delete",
+		"doc_commit", "doc_delete",
+		"person_set_trait", "person_relate",
+		"output_send__qq", "output_send__cli",
+		"llm_set_source", "config_set",
+		"timer_set", "plgreload", "plugin_disable",
+		"cmd_run", "files_write", "files_delete", "terminal_create", "terminal_write",
+		"terminal_close", "spawn_child",
+	}
+	for _, name := range mutating {
+		if isSafeReadonlyTool(name) {
+			t.Errorf("expected mutating tool %q to be rejected, but allowed", name)
+		}
+	}
+}
+
+// TestCollectToolDefsForLLMNoMutating 验证 collectToolDefsForLLM 不会把写类工具交给 LLM 自检。
+func TestCollectToolDefsForLLMNoMutating(t *testing.T) {
+	p := &Plugin{name: "healthcheck", selfToolNames: map[string]bool{"healthcheck": true, "healthcheck_report": true}}
+
+	// 构造一个包含写类工具的 ToolDef 集合，注入工具注册表
+	stage := agentCore.NewStageHost()
+	defs := []sdk.ToolDef{
+		{Name: "memory_recall", Plugin: "memory", Description: "recall"},
+		{Name: "memory_commit", Plugin: "memory", Description: "commit"},
+		{Name: "doc_query", Plugin: "doc", Description: "query"},
+		{Name: "doc_commit", Plugin: "doc", Description: "commit doc"},
+		{Name: "knowledge_search", Plugin: "knowledge", Description: "search"},
+		{Name: "knowledge_create", Plugin: "knowledge", Description: "create"},
+		{Name: "cmd_run", Plugin: "cmd", Description: "run cmd"},
+		{Name: "files_list", Plugin: "files", Description: "list"},
+	}
+	for _, d := range defs {
+		d := d
+		stage.RegisterTool(d.Name, d, func(map[string]interface{}) (interface{}, error) { return nil, nil })
+	}
+
+	tc := newToolCapture()
+	s := newTestSDK(sdk.SDKConfig{
+		RegTool:  tc.RegisterTool,
+		RegStage: tc.RegisterStage,
+		RegAPI:   tc.RegisterAPI,
+		Tool:     sdk.NewTool(stage, agentIO.NewIOManager()),
+	})
+
+	got := p.collectToolDefsForLLM(s)
+	allowed := map[string]bool{}
+	for _, d := range got {
+		allowed[d.Name] = true
+	}
+
+	// 只读工具应被包含
+	for _, name := range []string{"memory_recall", "doc_query", "knowledge_search", "files_list"} {
+		if !allowed[name] {
+			t.Errorf("expected readonly tool %q in LLM selftest set, missing", name)
+		}
+	}
+	// 写类/副作用工具绝不能被交给 LLM
+	for _, name := range []string{"memory_commit", "doc_commit", "knowledge_create", "cmd_run"} {
+		if allowed[name] {
+			t.Errorf("mutating tool %q must NOT be in LLM selftest set", name)
+		}
 	}
 }
 

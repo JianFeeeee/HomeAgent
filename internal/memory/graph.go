@@ -3,6 +3,7 @@ package memory
 import (
 	"database/sql"
 	"fmt"
+	"strings"
 	"sync"
 	"time"
 
@@ -103,7 +104,8 @@ func (g *GraphDB) initSchema() error {
 			date_bucket TEXT,
 			sentence_id INTEGER DEFAULT 0,
 			FOREIGN KEY (source_id) REFERENCES entities(id),
-			FOREIGN KEY (target_id) REFERENCES entities(id)
+			FOREIGN KEY (target_id) REFERENCES entities(id),
+			UNIQUE(source_id, target_id, relation_type, session_id)
 		)`,
 		`CREATE INDEX IF NOT EXISTS idx_entity_name ON entities(name)`,
 		`CREATE INDEX IF NOT EXISTS idx_entity_type ON entities(type)`,
@@ -132,7 +134,62 @@ func (g *GraphDB) initSchema() error {
 	// sentence_id 索引在迁移后创建，避免旧表缺少该列时失败
 	tx.Exec(`CREATE INDEX IF NOT EXISTS idx_relation_sentence ON relations(sentence_id)`)
 
+	// 迁移4：为旧版 relations 表（无复合唯一约束）重建表以去重。
+	// 旧表由 2026-07 之前的版本创建，缺少 UNIQUE(source_id, target_id, relation_type, session_id)，
+	// 生产库累积了海量重复关系。这里检查 sqlite_master 中已建表的 DDL，
+	// 若不含该约束则走"新建带约束表 → INSERT OR IGNORE 拷贝去重 → 换名"的官方 12 步迁移。
+	if err := g.migrateRelationUnique(tx); err != nil {
+		return fmt.Errorf("migrate relations unique: %w", err)
+	}
+
 	return tx.Commit()
+}
+
+// migrateRelationUnique 检测 relations 表是否带复合唯一约束，缺失则重建去重。
+// 必须在 initSchema 的同一个事务内调用（外键/索引均已存在时需先禁用外键再换名）。
+func (g *GraphDB) migrateRelationUnique(tx *sql.Tx) error {
+	var ddl string
+	err := tx.QueryRow(`SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'relations'`).Scan(&ddl)
+	if err != nil {
+		if err == sql.ErrNoRows {
+			return nil // 表都不存在，无从迁移
+		}
+		return err
+	}
+	if strings.Contains(ddl, "UNIQUE") {
+		return nil // 已是新 schema
+	}
+
+	stmt := []string{
+		`ALTER TABLE relations RENAME TO relations_old`,
+		`CREATE TABLE relations (
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			source_id INTEGER NOT NULL,
+			target_id INTEGER NOT NULL,
+			relation_type TEXT NOT NULL,
+			confidence REAL DEFAULT 1.0,
+			status TEXT DEFAULT 'active',
+			session_id TEXT,
+			turn_id INTEGER DEFAULT 0,
+			created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+			updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+			date_bucket TEXT,
+			sentence_id INTEGER DEFAULT 0,
+			sentence_ref TEXT DEFAULT '',
+			FOREIGN KEY (source_id) REFERENCES entities(id),
+			FOREIGN KEY (target_id) REFERENCES entities(id),
+			UNIQUE(source_id, target_id, relation_type, session_id)
+		)`,
+		`INSERT OR IGNORE INTO relations (id, source_id, target_id, relation_type, confidence, status, session_id, turn_id, created_at, updated_at, date_bucket, sentence_id, sentence_ref)
+		 SELECT id, source_id, target_id, relation_type, confidence, status, session_id, turn_id, created_at, updated_at, date_bucket, sentence_id, sentence_ref FROM relations_old`,
+		`DROP TABLE relations_old`,
+	}
+	for _, s := range stmt {
+		if _, err := tx.Exec(s); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 func (g *GraphDB) Commit(triples []Triple, sessionID string, turnID int) (int, int, error) {
@@ -206,15 +263,34 @@ func (g *GraphDB) Commit(triples []Triple, sessionID string, turnID int) (int, i
 			}
 		}
 
-		_, err = tx.Exec(
-			`INSERT INTO relations (source_id, target_id, relation_type, confidence, session_id, turn_id, date_bucket, sentence_id)
-			 VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
-			sourceID, targetID, t.Relation, confidence, sessionID, turnID, dateBucket, sentenceID,
-		)
-		if err != nil {
+		var existing int
+		err = tx.QueryRow(
+			`SELECT 1 FROM relations WHERE source_id = ? AND target_id = ? AND relation_type = ? AND session_id = ?`,
+			sourceID, targetID, t.Relation, sessionID,
+		).Scan(&existing)
+		if err == sql.ErrNoRows {
+			_, err = tx.Exec(
+				`INSERT INTO relations (source_id, target_id, relation_type, confidence, session_id, turn_id, date_bucket, sentence_id)
+				 VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+				sourceID, targetID, t.Relation, confidence, sessionID, turnID, dateBucket, sentenceID,
+			)
+			if err != nil {
+				return 0, 0, err
+			}
+			relationsCreated++
+		} else if err != nil {
 			return 0, 0, err
+		} else {
+			// 同一(会话内)三元组已存在：仅刷新置信度与时间戳，不重复计数
+			_, err = tx.Exec(
+				`UPDATE relations SET confidence = ?, updated_at = CURRENT_TIMESTAMP
+				 WHERE source_id = ? AND target_id = ? AND relation_type = ? AND session_id = ?`,
+				confidence, sourceID, targetID, t.Relation, sessionID,
+			)
+			if err != nil {
+				return 0, 0, err
+			}
 		}
-		relationsCreated++
 	}
 
 	if err := tx.Commit(); err != nil {
