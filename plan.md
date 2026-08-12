@@ -205,6 +205,65 @@ internal/memory/static_embedder.go # 量化/裁剪入口（可选）
 
 ---
 
+## 已知遗留问题（非阻塞，记录待后续排期）
+
+- **内置 WebUI 插件 (`internal/plugins/webui/`) 设计低劣、Bug 多**：前端交互廉价、API 不稳定、与核心插件机制契合度差。属于技术债，**不在当前核心修复路径**（Phase 0-7）内，待核心记忆层/通知层稳定后统一重写或剥离。
+
+---
+
+## WebUI 改进计划（参考 NapCat WebUI Design DNA）
+
+> NapCat WebUI 设计特征：ACG 樱花/霜蓝配色 + Glassmorphism 玻璃态 + HeroUI 组件 + Framer Motion 弹簧动效 + Canvas 数据可视化。
+> HomeAgent WebUI 为 Go 嵌入式 HTML/JS（非 React），改进方向：**在原有技术栈内尽可能逼近设计原则**，重点提升信息架构、交互反馈、视觉层次。
+
+### 设计系统适配（Go 模板 + 原生 CSS/JS）
+| 维度 | NapCat 参考 | HomeAgent 适配策略 |
+|------|-------------|-------------------|
+| **配色** | 樱花粉 `#FF7FAC` / 霜蓝 `#88C0D0` / 玫瑰红 `#F33B7C`；粉色调中性色 | CSS 变量定义同色系；浅/深色模式切换；主色用于 CTA/聚焦态 |
+| **字体** | Quicksand/Nunito 圆润无衬线 + JetBrains Mono | 引入 Google Fonts Quicksand + JetBrains Mono；标题 -0.02em tracking |
+| **间距** | 4px 基准单位；卡片 p-4~6；区块 gap-4/6 | CSS Grid/Flex 统一 4px 节奏；卡片内边距 16/20/24px |
+| **圆角** | 6/8/12px + 胶囊全圆角 | `--radius-sm:6px --radius-md:8px --radius-lg:12px --radius-full:9999px` |
+| **玻璃态** | `backdrop-blur-sm~xl` + 半透明白/黑 + 微边框 | CSS `backdrop-filter: blur(8px)` + `rgba(255,255,255,0.6)` / `rgba(0,0,0,0.4)` + `border:1px solid rgba(255,255,255,0.25)` |
+| **阴影/层级** | 软扩散 + backdrop-blur 分层 | `box-shadow: 0 1px 2px rgba(0,0,0,.05)` 低层 / `0 4px 6px rgba(0,0,0,.07)` 中层 / `0 20px 25px rgba(0,0,0,.1)` 高层 |
+| **动效** | 弹簧物理 120-150 stiffness；150-400ms | CSS `transition: 200ms cubic-bezier(.34,1.56,.64,1)` 模拟弹簧；页面切换 fade-up+scale |
+| **图标** | Lucide 2px stroke | 引入 Lucide 静态 SVG（内联）或同风格 iconfont |
+
+### 信息架构重构（核心痛点）
+| 现状 | 目标（对标 NapCat Dashboard） |
+|------|-----------------------------|
+| 单页面堆砌所有功能 | **左侧可折叠侧边栏**（16rem 固定）→ 导航分组：概览/记忆/工具/插件/配置/日志 |
+| 无面包屑、无状态反馈 | 顶部面包屑 + 悬停微动效；关键操作 Toast 反馈（右上角） |
+| 表格/列表无视觉分组 | 卡片网格布局：每卡片 = 一个功能模块（记忆统计/插件状态/工具调用/系统资源） |
+| 无数据可视化 | Canvas 2D 绘制：记忆增长趋势图、CPU/内存环图、工具调用热力图 |
+
+### 交互体验对标
+| 场景 | NapCat 做法 | HomeAgent 改进 |
+|------|-------------|----------------|
+| 卡片悬停 | 3D 透视倾斜 + 光标跟随渐变光斑 | CSS `transform: perspective(1000px) rotateX/Y(±5deg)` + 伪元素光斑跟随鼠标 |
+| 按钮点击 | 弹簧 scale + loading 态 | `:active { transform: scale(0.97) }` + 内置 spinner |
+| 页面切换 | Framer Motion fade-up+scale stagger | CSS `@keyframes fadeUpScale` + JS 交错延迟 50ms |
+| 空状态 | 插画 + 友好文案 + 引导 | 每模块空状态统一组件：图标 + 说明 + 主操作按钮 |
+| 错误处理 | Toast 右上 + 破坏性操作确认弹窗 | 统一 `showToast(type, msg)` + `confirmDialog(action, onConfirm)` |
+
+### 实施路线（非阻塞，Phase 8+）
+```
+Phase 8.1: CSS 变量系统 + Glassmorphism 基础样式（浅/深色）
+Phase 8.2: 布局重构 — 侧边栏 + 面包屑 + 卡片网格响应式
+Phase 8.3: 核心页面卡片化 — 概览/记忆/插件/工具/配置/日志
+Phase 8.4: 交互微动效 — 3D 倾斜卡片、弹簧按钮、Toast、Loading
+Phase 8.5: 数据可视化 — Canvas 记忆趋势/资源环图/工具热力图
+Phase 8.6: 空状态/错误/确认弹窗统一组件库
+Phase 8.7: 无障碍/键盘导航/移动端适配
+```
+
+### 技术约束
+- **保持 Go `html/template` + 内嵌静态资源** —— 不引入 Node/构建链
+- 静态资源（CSS/JS/字体/图标）以 `embed.FS` 内嵌二进制
+- 复杂动效用纯 CSS + 极简 Vanilla JS（无框架依赖）
+- 优先修复现有 Bug（API 500、WebSocket 断连、表单提交无反馈）再做视觉
+
+---
+
 ## 回滚预案
 
 - Phase 1/2 修改数据库 Schema/写入逻辑：保留 `graph.db.backup.*`，出问题 `systemctl stop homeagent && cp backup graph.db && systemctl start`。
