@@ -7,6 +7,7 @@ import (
 	"log"
 	"os"
 	"path/filepath"
+	"regexp"
 	"sort"
 	"strconv"
 	"strings"
@@ -695,11 +696,42 @@ func (r *ConfigRegistry) GetDuration(key string, defaultVal time.Duration) time.
 	if err != nil {
 		return defaultVal
 	}
-	d, err := time.ParseDuration(v)
+	d, err := parseDurationExtended(v)
 	if err != nil {
 		return defaultVal
 	}
 	return d
+}
+
+// durationUnitRe 匹配 `\d+[dhw]`（天/小时/周）这类 Go time.ParseDuration 不支持的天气单位。
+var durationUnitRe = regexp.MustCompile(`(\d+)\s*([dhw])`)
+
+// parseDurationExtended 解析人类可读时长，支持 Go 原生单位（ns/us/ms/s/m/h，
+// 及复合如 "1h30m"）加上 d（天）与 w（周）。返回实例化 duration，失败返回 error。
+func parseDurationExtended(s string) (time.Duration, error) {
+	s = strings.TrimSpace(s)
+	if s == "" {
+		return 0, fmt.Errorf("empty duration")
+	}
+	// 先展开 d/w，再交给 time.ParseDuration 处理剩余（含 m/h/s 组合）。
+	expanded := durationUnitRe.ReplaceAllStringFunc(s, func(m string) string {
+		parts := durationUnitRe.FindStringSubmatch(m)
+		n, _ := strconv.Atoi(parts[1])
+		switch parts[2] {
+		case "d":
+			return fmt.Sprintf("%dh", n*24)
+		case "w":
+			return fmt.Sprintf("%dh", n*24*7)
+		case "h":
+			return m
+		}
+		return m
+	})
+	d, err := time.ParseDuration(expanded)
+	if err != nil {
+		return 0, err
+	}
+	return d, nil
 }
 
 func (r *ConfigRegistry) GetBool(key string, defaultVal bool) bool {

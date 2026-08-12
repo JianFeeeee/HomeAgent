@@ -2,6 +2,7 @@ package sdk
 
 import (
 	"log"
+	"sync"
 
 	pubsdk "gitcode.com/JianFeeeee/homeagent-sdk/sdk"
 	agentIO "gitcode.com/JianFeeeee/HomeAgent/internal/agent/io"
@@ -98,6 +99,9 @@ type PluginSDK struct {
 	config     ConfigAPI
 	tool       ToolAPI
 	indexer    IndexerAPI
+
+	selftestMu sync.Mutex
+	selftest   *VirtualInstance
 }
 
 func (s *PluginSDK) PluginMgr() PluginManager { return s.pluginMgr }
@@ -209,6 +213,42 @@ func New(name string, cfg SDKConfig) *PluginSDK {
 		tool:       cfg.Tool,
 		indexer:    cfg.Indexer,
 	}
+}
+
+// Selftest 返回一个隔离的虚拟自检实例（healthcheck 等内置插件用），
+// 完全独立于生产存储，不产生任何污染。首次调用创建，复用已存在实例；
+// 每轮自检前调用 SelftestReset 重建以清空上轮测试数据。
+func (s *PluginSDK) Selftest(scope string) (*VirtualInstance, error) {
+	s.selftestMu.Lock()
+	defer s.selftestMu.Unlock()
+	if s.selftest == nil {
+		vi, err := NewVirtualInstance(scope)
+		if err != nil {
+			return nil, err
+		}
+		s.selftest = vi
+	}
+	return s.selftest, nil
+}
+
+// SelftestReset 清理并重建隔离自检实例，用于每轮健康检查前重置状态。
+func (s *PluginSDK) SelftestReset(scope string) error {
+	s.selftestMu.Lock()
+	defer s.selftestMu.Unlock()
+	if s.selftest == nil {
+		vi, err := NewVirtualInstance(scope)
+		if err != nil {
+			return err
+		}
+		s.selftest = vi
+		return nil
+	}
+	vi, err := s.selftest.Reset(scope)
+	if err != nil {
+		return err
+	}
+	s.selftest = vi
+	return nil
 }
 
 func (s *PluginSDK) Status() StatusAPI        { return s.status }

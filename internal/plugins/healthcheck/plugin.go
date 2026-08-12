@@ -335,6 +335,11 @@ func (p *Plugin) runAutoCheck(s *sdk.PluginSDK) {
 func (p *Plugin) runFullCheck(s *sdk.PluginSDK) (interface{}, error) {
 	results := []checkResult{}
 
+	// 每轮自检前重置隔离虚拟实例，清空上轮测试数据（仅影响虚拟空间，不碰生产存储）。
+	if err := s.SelftestReset("hc"); err != nil {
+		log.Printf("[healthcheck] selftest reset: %v", err)
+	}
+
 	pluginResult := p.checkPluginsRaw(s)
 	results = append(results, pluginResult...)
 
@@ -457,55 +462,86 @@ func (p *Plugin) collectAllTools(s *sdk.PluginSDK) []toolInfo {
 	return tools
 }
 
+func (p *Plugin) selftestInst(s *sdk.PluginSDK) (*sdk.VirtualInstance, error) {
+	vi, err := s.Selftest("hc")
+	if err != nil {
+		return nil, err
+	}
+	if vi == nil {
+		return nil, fmt.Errorf("Selftest 不可用")
+	}
+	return vi, nil
+}
+
 func (p *Plugin) testMemoryRaw(s *sdk.PluginSDK) checkResult {
+	// 在隔离虚拟图记忆上验证写→查→删，绝不动生产 GraphDB。
+	vi, err := p.selftestInst(s)
+	if err != nil {
+		return checkResult{Name: "memory", Status: "skip", Detail: fmt.Sprintf("虚拟实例不可用: %v", err), Pass: true}
+	}
+
 	marker := fmt.Sprintf("_hc_%d", time.Now().UnixNano())
 	triples := []sdk.Triple{
 		{Subject: marker, Relation: "is", Object: "healthcheck_test", SubjectType: "System", ObjectType: "Flag"},
 	}
 
 	start := time.Now()
-	if err := s.Memory().Commit(triples); err != nil {
-		return checkResult{Name: "memory_write", Status: "fail", Detail: fmt.Sprintf("写入失败: %v", err), Pass: false}
+	if err := vi.Memory.Commit(triples); err != nil {
+		return checkResult{Name: "memory", Status: "fail", Detail: fmt.Sprintf("写入失败: %v", err), Pass: false}
 	}
 
-	n, err := s.Memory().Purge(map[string]string{"subject_contains": marker}, "hard")
+	ents, rels, err := vi.Memory.Recall([]string{marker}, 1)
 	if err != nil {
-		return checkResult{Name: "memory_purge", Status: "fail", Detail: fmt.Sprintf("清理失败: %v", err), Pass: false}
+		return checkResult{Name: "memory", Status: "fail", Detail: fmt.Sprintf("查询失败: %v", err), Pass: false}
+	}
+	if len(ents) == 0 && len(rels) == 0 {
+		return checkResult{Name: "memory", Status: "warn", Detail: "写入成功但查询未命中", Pass: true}
+	}
+
+	_, err = vi.Memory.Purge(map[string]string{"subject_contains": marker}, "hard")
+	if err != nil {
+		return checkResult{Name: "memory", Status: "fail", Detail: fmt.Sprintf("清理失败: %v", err), Pass: false}
 	}
 
 	elapsed := time.Since(start)
 	return checkResult{
 		Name:   "memory",
 		Status: "ok",
-		Detail: fmt.Sprintf("写入+清理 %d 条, 耗时 %v", n, elapsed.Round(time.Millisecond)),
+		Detail: fmt.Sprintf("隔离虚拟记忆写入+查询+清理正常, 耗时 %v", elapsed.Round(time.Millisecond)),
 		Pass:   true,
 	}
 }
 
 func (p *Plugin) testKnowledgeRaw(s *sdk.PluginSDK) checkResult {
+	// 在隔离虚拟知识库上验证写→查→删，绝不动生产知识库。
+	vi, err := p.selftestInst(s)
+	if err != nil {
+		return checkResult{Name: "knowledge", Status: "skip", Detail: fmt.Sprintf("虚拟实例不可用: %v", err), Pass: true}
+	}
+
 	marker := fmt.Sprintf("_hc_knowledge_test_%d", time.Now().UnixNano())
 	start := time.Now()
 
-	if err := s.Knowledge().Add(marker, "健康检查测试标记，可忽略"); err != nil {
+	if err := vi.Knowledge.Add(marker, "健康检查测试标记，可忽略"); err != nil {
 		return checkResult{Name: "knowledge", Status: "fail", Detail: fmt.Sprintf("写入失败: %v", err), Pass: false}
 	}
 
-	results, err := s.Knowledge().Search("健康检查测试标记", 3)
+	results, err := vi.Knowledge.Search("健康检查测试标记", 3)
 	if err != nil {
-		s.Knowledge().Remove(marker)
+		vi.Knowledge.Remove(marker)
 		return checkResult{Name: "knowledge", Status: "fail", Detail: fmt.Sprintf("查询失败: %v", err), Pass: false}
 	}
 
 	elapsed := time.Since(start)
 
 	// 清理测试条目，避免积累
-	s.Knowledge().Remove(marker)
+	vi.Knowledge.Remove(marker)
 
 	if len(results) > 0 {
 		return checkResult{
 			Name:   "knowledge",
 			Status: "ok",
-			Detail: fmt.Sprintf("写入+查询正常, 耗时 %v", elapsed.Round(time.Millisecond)),
+			Detail: fmt.Sprintf("隔离虚拟知识库写入+查询+清理正常, 耗时 %v", elapsed.Round(time.Millisecond)),
 			Pass:   true,
 		}
 	}
@@ -519,19 +555,25 @@ func (p *Plugin) testKnowledgeRaw(s *sdk.PluginSDK) checkResult {
 }
 
 func (p *Plugin) testDocStoreRaw(s *sdk.PluginSDK) checkResult {
+	// 在隔离虚拟文档记忆上验证写→查→删，绝不动生产 Document。
+	vi, err := p.selftestInst(s)
+	if err != nil {
+		return checkResult{Name: "documents", Status: "skip", Detail: fmt.Sprintf("虚拟实例不可用: %v", err), Pass: true}
+	}
+
 	start := time.Now()
 	doc := &sdk.Doc{
 		Title:   fmt.Sprintf("健康检查测试文档 %d", time.Now().UnixNano()),
 		Content: "这是一条由 healthcheck 插件创建的测试文档，用于验证文档记忆系统是否正常工作。",
 	}
-	if err := s.DocMemory().Insert(doc); err != nil {
+	if err := vi.DocMemory.Insert(doc); err != nil {
 		return checkResult{Name: "documents", Status: "fail", Detail: fmt.Sprintf("写入失败: %v", err), Pass: false}
 	}
 
 	// 清理测试文档，避免积累（SDK Insert 不回填 ID，经 Query 按标题定位）
-	for _, d := range s.DocMemory().Query("健康检查测试文档", 10) {
+	for _, d := range vi.DocMemory.Query("健康检查测试文档", 10) {
 		if d.ID != "" && strings.HasPrefix(d.Title, "健康检查测试文档") {
-			s.DocMemory().Remove(d.ID)
+			vi.DocMemory.Remove(d.ID)
 		}
 	}
 
@@ -539,7 +581,7 @@ func (p *Plugin) testDocStoreRaw(s *sdk.PluginSDK) checkResult {
 	return checkResult{
 		Name:   "documents",
 		Status: "ok",
-		Detail: fmt.Sprintf("写入+删除正常, 耗时 %v", elapsed.Round(time.Millisecond)),
+		Detail: fmt.Sprintf("隔离虚拟文档记忆写入+查询+清理正常, 耗时 %v", elapsed.Round(time.Millisecond)),
 		Pass:   true,
 	}
 }
@@ -626,13 +668,17 @@ func (p *Plugin) testLLMDriven(s *sdk.PluginSDK) checkResult {
 }
 
 // collectToolDefsForLLM 收集全部已注册的工具定义供 LLM 发现和测试。
-// 动态排除本插件自身注册的工具（通过 selfToolNames），避免 LLM 自我循环调用。
+// 动态排除本插件自身注册的工具（通过 selfToolNames），避免 LLM 自我循环调用；
+// 且仅保留"只读/轻量验证"类工具（白名单语义），防止 LLM 自检污染生产数据或引发副作用。
 func (p *Plugin) collectToolDefsForLLM(s *sdk.PluginSDK) []sdk.ToolDef {
 	seen := map[string]bool{}
 	var defs []sdk.ToolDef
 
 	addDef := func(d sdk.ToolDef) {
 		if p.selfToolNames[d.Name] || seen[d.Name] {
+			return
+		}
+		if !isSafeReadonlyTool(d.Name) {
 			return
 		}
 		seen[d.Name] = true
@@ -651,10 +697,38 @@ func (p *Plugin) collectToolDefsForLLM(s *sdk.PluginSDK) []sdk.ToolDef {
 	return defs
 }
 
+// isSafeReadonlyTool 判断工具是否为"只读/无副作用、适合健康检查 LLM 自检"的工具。
+// 仅白名单语义：不在白名单的工具一律不测（宁可少测，不可污染/引发副作用）。
+func isSafeReadonlyTool(name string) bool {
+	// 明确只读的查询/列表类工具
+	readonlyExact := map[string]bool{
+		"memory_recall":      true,
+		"memory_introspect":  true,
+		"doc_query":          true,
+		"knowledge_search":   true,
+		"knowledge_list":     true,
+		"person_query":       true,
+		"person_network":     true,
+		"llm_list_sources":   true,
+		"output_list_channels": true,
+		"terminal_list":      true,
+	}
+	if readonlyExact[name] {
+		return true
+	}
+	// 带 _list/_help 后缀的通常是只读展示
+	for _, sfx := range []string{"_list", "_help"} {
+		if strings.HasSuffix(name, sfx) {
+			return true
+		}
+	}
+	return false
+}
+
 // buildDiscoveryPrompt 为 LLM 构造工具探索 prompt。
 func (p *Plugin) buildDiscoveryPrompt(toolDefs []sdk.ToolDef) string {
 	var b strings.Builder
-	b.WriteString(fmt.Sprintf(`你是一名系统健康检查专家。以下是系统中各插件提供的 %d 个工具（已自动排除健康检查插件自身工具）：
+	b.WriteString(fmt.Sprintf(`你是一名系统健康检查专家。以下是系统中各插件提供的 %d 个工具（已自动排除健康检查插件自身工具及所有会写/删/改生产数据或产生外部副作用的工具，以下均为只读/查询/列表类工具）：
 
 你的任务是：逐一尝试调用这些工具，验证它们是否正常工作，并对于每个工具使用 healthcheck_report 工具上报测试结果。
 
@@ -665,7 +739,7 @@ func (p *Plugin) buildDiscoveryPrompt(toolDefs []sdk.ToolDef) string {
 4. 调用 healthcheck_report 工具上报（tool_name, status=ok/fail/skip, detail=详情）
 
 注意：
-- 有些工具有副作用（如写入数据），请使用安全参数，测试后应清理
+- 所有工具均为只读、无副作用，可放心调用
 - 尽可能覆盖所有工具
 - 每个工具只需测试一次
 
