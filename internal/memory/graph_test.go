@@ -1,6 +1,8 @@
 package memory
 
 import (
+	"database/sql"
+	"path/filepath"
 	"os"
 	"testing"
 )
@@ -57,6 +59,135 @@ func TestCommitTriples(t *testing.T) {
 	}
 	if rc != 2 {
 		t.Errorf("expected 2 relations, got %d", rc)
+	}
+}
+
+func TestCommitDedupSameSession(t *testing.T) {
+	g := newTestGraph(t)
+	defer os.Remove(g.dbPath)
+	defer g.Close()
+
+	triple := []Triple{{Subject: "李四", Relation: "喜欢", Object: "篮球"}}
+
+	ec, rc, err := g.Commit(triple, "session_dup", 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if ec != 2 || rc != 1 {
+		t.Fatalf("first commit: want 2/1, got %d/%d", ec, rc)
+	}
+
+	// 同一会话重复 commit 同一三元组：关系不再新增
+	_, rc, err = g.Commit(triple, "session_dup", 2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if rc != 0 {
+		t.Errorf("duplicate commit should not create relations again, got %d", rc)
+	}
+
+	var cnt int
+	if err := g.db.QueryRow(`SELECT COUNT(*) FROM relations`).Scan(&cnt); err != nil {
+		t.Fatal(err)
+	}
+	if cnt != 1 {
+		t.Errorf("expected exactly 1 relation after duplicate commit, got %d", cnt)
+	}
+}
+
+func TestCommitDedupDifferentSession(t *testing.T) {
+	g := newTestGraph(t)
+	defer os.Remove(g.dbPath)
+	defer g.Close()
+
+	triple := []Triple{{Subject: "王五", Relation: "喜欢", Object: "足球"}}
+
+	for _, sess := range []string{"s1", "s2"} {
+		if _, _, err := g.Commit(triple, sess, 0); err != nil {
+			t.Fatal(err)
+		}
+	}
+	var cnt int
+	if err := g.db.QueryRow(`SELECT COUNT(*) FROM relations`).Scan(&cnt); err != nil {
+		t.Fatal(err)
+	}
+	if cnt != 2 {
+		t.Errorf("different sessions may repeat a triple, expected 2 relations, got %d", cnt)
+	}
+}
+
+func TestMigrateRelationUniqueDedupsOldTable(t *testing.T) {
+	dir := t.TempDir()
+	dbPath := filepath.Join(dir, "legacy.db")
+
+	// 构造旧版 schema：relations 无复合唯一约束，且塞入重复行
+	db, err := sql.Open("sqlite3", dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	setup := []string{
+		`CREATE TABLE entities (
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			name TEXT UNIQUE NOT NULL,
+			type TEXT DEFAULT 'Concept',
+			mention_count INTEGER DEFAULT 1,
+			created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+			updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+		)`,
+		`CREATE TABLE sentences (
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			text TEXT UNIQUE NOT NULL,
+			created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+		)`,
+		`CREATE TABLE relations (
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			source_id INTEGER NOT NULL,
+			target_id INTEGER NOT NULL,
+			relation_type TEXT NOT NULL,
+			confidence REAL DEFAULT 1.0,
+			status TEXT DEFAULT 'active',
+			session_id TEXT,
+			turn_id INTEGER DEFAULT 0,
+			created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+			updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+			date_bucket TEXT,
+			sentence_id INTEGER DEFAULT 0,
+			sentence_ref TEXT DEFAULT '',
+			FOREIGN KEY (source_id) REFERENCES entities(id),
+			FOREIGN KEY (target_id) REFERENCES entities(id)
+		)`,
+		`INSERT INTO entities (id, name) VALUES (1, '张三'), (2, '编程')`,
+		`INSERT INTO relations (source_id, target_id, relation_type, session_id) VALUES (1, 2, '喜欢', 's'), (1, 2, '喜欢', 's')`,
+	}
+	for _, s := range setup {
+		if _, err := db.Exec(s); err != nil {
+			t.Fatal(err)
+		}
+	}
+	db.Close()
+
+	// 用 NewGraphDB 打开，应触发 migrateRelationUnique：重建带约束表并去重
+	g, err := NewGraphDB(dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer g.Close()
+
+	var cnt int
+	if err := g.db.QueryRow(`SELECT COUNT(*) FROM relations`).Scan(&cnt); err != nil {
+		t.Fatal(err)
+	}
+	if cnt != 1 {
+		t.Errorf("expected 1 relation after migration dedup, got %d", cnt)
+	}
+
+	// 再次提交重复三元组不应再新增
+	_, rc, err := g.Commit([]Triple{{Subject: "张三", Relation: "喜欢", Object: "编程"}}, "s", 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if rc != 0 {
+		t.Errorf("after migration, duplicate commit should add 0 relations, got %d", rc)
 	}
 }
 

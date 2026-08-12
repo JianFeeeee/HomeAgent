@@ -210,6 +210,14 @@ func TestGetHelpers(t *testing.T) {
 	if got := r.GetDuration("dur_key", 0); got != 5*time.Minute {
 		t.Fatalf("GetDuration: expected 5m, got %v", got)
 	}
+	r.Set("dur_key_days", "2d")
+	if got := r.GetDuration("dur_key_days", 0); got != 48*time.Hour {
+		t.Fatalf("GetDuration d-unit: expected 48h, got %v", got)
+	}
+	r.Set("dur_key_weeks", "1w")
+	if got := r.GetDuration("dur_key_weeks", 0); got != 168*time.Hour {
+		t.Fatalf("GetDuration w-unit: expected 168h, got %v", got)
+	}
 	if got := r.GetDuration("nonexistent", 30*time.Second); got != 30*time.Second {
 		t.Fatalf("GetDuration fallback: expected 30s, got %v", got)
 	}
@@ -218,6 +226,42 @@ func TestGetHelpers(t *testing.T) {
 	}
 	if got := r.GetBool("nonexistent", true); got != true {
 		t.Fatalf("GetBool fallback: expected true, got %v", got)
+	}
+}
+
+func TestParseDurationExtended(t *testing.T) {
+	cases := []struct {
+		in      string
+		want    time.Duration
+		wantErr bool
+	}{
+		{"2d", 48 * time.Hour, false},
+		{"1w", 7 * 24 * time.Hour, false},
+		{"1d", 24 * time.Hour, false},
+		{"2d12h", 60 * time.Hour, false},
+		{"30m", 30 * time.Minute, false},
+		{"500ms", 500 * time.Millisecond, false},
+		{"1h30m", 90 * time.Minute, false},
+		{" 3d ", 72 * time.Hour, false},
+		{"2w", 336 * time.Hour, false},
+		{"", 0, true},
+		{"abc", 0, true},
+	}
+	for _, c := range cases {
+		got, err := parseDurationExtended(c.in)
+		if c.wantErr {
+			if err == nil {
+				t.Errorf("%q: expected error, got %v", c.in, got)
+			}
+			continue
+		}
+		if err != nil {
+			t.Errorf("%q: unexpected error: %v", c.in, err)
+			continue
+		}
+		if got != c.want {
+			t.Errorf("%q: expected %v, got %v", c.in, c.want, got)
+		}
 	}
 }
 
