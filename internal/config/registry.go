@@ -568,9 +568,9 @@ func (r *ConfigRegistry) seedDBValues(dataDir string) {
 
 WebUI 概览页展示你的立绘，可通过 /mascot.webp 直接访问。如输出通道支持图片引用，可借此发送自己的立绘。
 
-回复默认发送到用户的输入来源，无需额外工具。
-输出回复请使用 output_send__{通道名} 工具，content 为 JSON 字符串。用 output_list_channels 查看可用通道。
-使用 output_send__{通道名}_help 查看每个通道的 JSON 格式说明。
+回复会自动发送到用户的输入来源通道，直接返回纯文本即可送达，无需额外工具。
+输出门工具 output_send__{通道名} 仅用于主动向指定通道推送消息（群发、主动通知、向其他通道发言），不是回复的必要步骤。用 output_list_channels 查看可用通道。
+使用 output_send__{通道名}_help 查看每个通道的格式说明。
 输出通道可多次调用，长消息应当分多次发出而不是一口气发完。
 
 当用户上传图片或音频时，系统会自动附着媒体内容。如果模型不支持直接处理多媒体，请调用对应的媒体处理工具。`)
@@ -646,7 +646,7 @@ func (r *ConfigRegistry) seedCoreDefs(dataDir string) {
 	reg(ConfigDef{Key: "core.agent.review_interval", Default: "120m", Type: "duration", DisplayName: "关系复审间隔", Description: "三元组关系复审的执行间隔", Category: "agent"})
 	reg(ConfigDef{Key: "core.agent.merge_interval", Default: "120m", Type: "duration", DisplayName: "实体合并检测间隔", Description: "实体合并检测（LLM 裁决）的执行间隔", Category: "agent"})
 	reg(ConfigDef{Key: "core.agent.workdir", Default: "", Type: "string", DisplayName: "工作目录", Description: "Agent 命令执行的默认工作目录（如 cmd_run 工具的 fallback），留空使用内核所在目录", Category: "agent"})
-	reg(ConfigDef{Key: "core.agent.embedding_model_path", Default: "", Type: "string", DisplayName: "预训练词嵌入模型路径", Description: "预训练词嵌入模型路径（word2vec 文本格式），支持逗号分隔多个模型。空则使用 TF-IDF 回退。修改后需重启生效。", Category: "agent"})
+	reg(ConfigDef{Key: "core.agent.embedding_model_path", Default: "", Type: "string", DisplayName: "预训练词嵌入模型路径", Description: "预训练词嵌入模型路径（word2vec 文本格式），支持逗号分隔多个模型。路径后可加 #topN 规格只加载前 N 个词向量（如 /data/cc.zh.300.vec#top50000）以控制常驻内存，词频降序命中覆盖绝大部分文本。空则使用 TF-IDF 回退。修改后需重启生效。", Category: "agent"})
 	reg(ConfigDef{Key: "core.agent.onnx_model_path", Default: "", Type: "string", DisplayName: "ONNX 模型路径", Description: "依存句法分析 ONNX 模型文件路径。留空使用二进制内嵌模型/规则引擎。修改后需重启生效。", Category: "agent"})
 	reg(ConfigDef{Key: "core.agent.system_prompt", Default: "", Type: "text", DisplayName: "系统身份提示词", Description: "Agent 的系统提示词，定义身份和行为规则。留空则使用编译时内置默认值。修改后需重启生效。", Category: "agent"})
 

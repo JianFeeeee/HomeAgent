@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"log"
 	"runtime/debug"
+	"strings"
 	"time"
 
 	agentIO "gitcode.com/JianFeeeee/HomeAgent/internal/agent/io"
@@ -397,15 +398,19 @@ func docToTriples(doc *document.Doc, embedder nlp.Vectorizer) []memory.Triple {
 		return nil
 	}
 
-	// 文档元数据
-	triples = append(triples, memory.Triple{
-		Subject:     "文档",
-		SubjectType: "Concept",
-		Relation:    "主题",
-		Object:      doc.Summary,
-		ObjectType:  "Topic",
-		Confidence:  1.0,
-	})
+	isArchivedContext := doc.Meta != nil && doc.Meta["is_archived_context"] == "true"
+
+	// 文档元数据:仅当 summary 合理(非空、非模板化、长度适中)时才写「主题」
+	if !isArchivedContext && doc.Summary != "" && len([]rune(doc.Summary)) < 80 && !isTemplateSummary(doc.Summary) {
+		triples = append(triples, memory.Triple{
+			Subject:     "文档",
+			SubjectType: "Concept",
+			Relation:    "主题",
+			Object:      doc.Summary,
+			ObjectType:  "Topic",
+			Confidence:  1.0,
+		})
+	}
 
 	// NLP 通用提取
 	e := nlp.NewExtractor(nil)
@@ -422,7 +427,8 @@ func docToTriples(doc *document.Doc, embedder nlp.Vectorizer) []memory.Triple {
 		}
 	}
 
-	if doc.Source != "" {
+	// 仅当来源非归档上下文且非空时写「来源」——归档文档写死模板三元组属于垃圾
+	if doc.Source != "" && doc.Source != "context_archived" {
 		triples = append(triples, memory.Triple{
 			Subject:     "文档",
 			SubjectType: "Concept",
@@ -434,6 +440,16 @@ func docToTriples(doc *document.Doc, embedder nlp.Vectorizer) []memory.Triple {
 	}
 
 	return triples
+}
+
+// isTemplateSummary 识别 summarizeEntries 生成的模板化摘要
+// （形如「来自 N 个来源的 M 条对话 (src1, src2) 涉及: kw1, kw2」），
+// 这类摘要无独立信息量,不应作为「主题」实体写入图库。
+func isTemplateSummary(s string) bool {
+	if s == "" {
+		return true
+	}
+	return strings.HasPrefix(s, "来自 ") && strings.Contains(s, "条对话")
 }
 
 func (a *Agent) emitMemoryCandidate(source, input, response string, toolResults []ToolResultItem, toolsUsed []string) {

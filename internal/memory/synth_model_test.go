@@ -86,3 +86,45 @@ func newSynthEmbedder(t testing.TB, dim int) *StaticEmbedder {
 	}
 	return e
 }
+
+// Phase 5: #topN 规格裁剪加载——只加载前 N 个词向量，控制常驻内存
+func TestStaticEmbedderTopNSpec(t *testing.T) {
+	path := writeSynthModel(t, 300)
+
+	// 解析规格
+	cleanPath, topN := parseModelSpec(path + "#top5")
+	if cleanPath != path || topN != 5 {
+		t.Fatalf("parseModelSpec(#top5) = (%q, %d), want (%q, 5)", cleanPath, topN, path)
+	}
+	cleanPath2, topN2 := parseModelSpec(path)
+	if cleanPath2 != path || topN2 != 0 {
+		t.Fatalf("parseModelSpec(plain) = (%q, %d), want (%q, 0)", cleanPath2, topN2, path)
+	}
+	cleanPath3, topN3 := parseModelSpec(path + "#abc")
+	if cleanPath3 != path || topN3 != 0 {
+		t.Fatalf("parseModelSpec(#abc) = (%q, %d), want (%q, 0)", cleanPath3, topN3, path)
+	}
+
+	// 裁剪加载
+	e := NewStaticEmbedder(path + "#top5")
+	if !e.Loaded() {
+		t.Fatal("topN embedder should be loaded")
+	}
+	if len(e.words) != 5 {
+		t.Errorf("expected 5 words loaded with #top5, got %d", len(e.words))
+	}
+}
+
+// Phase 5: 裁剪后向量化仍可用（未命中词走 unkVec 兜底）
+func TestStaticEmbedderTopNVectorize(t *testing.T) {
+	path := writeSynthModel(t, 300)
+	e := NewStaticEmbedder(path + "#top1")
+	if !e.Loaded() {
+		t.Fatal("embedder should be loaded")
+	}
+	v := e.Vectorize("天气怎么样")
+	// 未命中词不应产生空向量（unkVec 兜底）
+	if len(v) == 0 {
+		t.Error("vectorize with topN=1 should still produce a vector (unkVec fallback)")
+	}
+}

@@ -35,7 +35,8 @@
 - [x] **LLM 驱动自检防护**：`collectToolDefsForLLM` 改为只收集**只读白名单**工具（`isSafeReadonlyTool`），写/删/改生产数据及外部副作用工具（memory_commit/doc_commit/knowledge_create/cmd_run/files_write/terminal_*/output_send/spawn_child 等）一律不交给 LLM 自检，防止 LLM 乱调污染生产。
 - [x] 单测：healthcheck 自检后注入的"生产"实例内容不变（快照对比 + `_hc_` 无残留）；读/写工具白名单过滤测试通过。
 - [x] 存量清理：删除生产残留的 `gotest/`、`luatest/`、`_hc_knowledge_test_*/` 目录（保留真实知识库）；备份留于 `/tmp/opencode/knowledge_garbage_backup_20260812_122322`。
-- [ ] 部署验证：编译新 `homed` 部署后，`knowledge/`、`memory/graph.db`、`memory/documents/` 不再出现 `_hc_*` 残留。
+- [x] 代码复核：healthcheck 三自检（memory/knowledge/doc）全部经 `s.Selftest("hc")` 隔离虚拟实例写→查→删，生产实例零接触（plugin.go:339/466-473/476-549）。
+- [ ] 部署验证：编译新 `homed` 部署后，`knowledge/`、`memory/graph.db`、`memory/documents/` 不再出现 `_hc_*` 残留。—— **验证脚本已就绪：`scripts/verify_deploy.sh [data_dir]`，部署后一键检查 0.1 残留 / 1 去重与 UNIQUE 迁移 / 2 archived 残留 / 5 嵌入规格**
 
 ---
 
@@ -92,19 +93,19 @@
 - [x] **Schema 迁移**：`initSchema` 新增 `migrateRelationUnique`——检测旧 relations 表无复合唯一约束（旧 DD表），自动重建为带 `UNIQUE(source_id, target_id, relation_type, session_id)` 的新表并 `INSERT OR IGNORE` 去重（官方 12 步迁移），无需人工干预。
 - [x] **Commit 逻辑**：改为"查存在 → 不存在才 INSERT 并计数；已存在则仅刷新 confidence/updated_at"，重复提交不新增、不重计。
 - [x] **验证**：`TestCommitDedupSameSession`（同会话重复 commit 不增行）、`TestCommitDedupDifferentSession`（跨会话允许重复）、`TestMigrateRelationUniqueDedupsOldTable`（旧表重建去重）全绿；`go build ./...` 通过。
-- [ ] 生产部署后确认：graph.db 36→ 去重（2 组 `like/plugin` 重复消失），跑 1 周不再新增重复。
+- [ ] 生产部署后确认：graph.db 36→ 去重（2 组 `like/plugin` 重复消失），跑 1 周不再新增重复。—— **`scripts/verify_deploy.sh` 已含 relations 重复率 + UNIQUE 索引检查**
 
 > 注：entities 已有 `UNIQUE(name)` 保护，仅 relations 缺失。
 
 ---
 
-### Phase 2：归档三元组模板清理（治本）✅ **计划中**
+### Phase 2：归档三元组模板清理（治本）✅ **已完成**
 
 **目标**：`docToTriples` 不再把 `context_archived`/`Topic` 摘要当成实体写入图库。
 
-- [ ] 重构 `docToTriples`：仅当 `doc.Source` 非 `context_archived` 且非空时写 `文档→来源`；`文档→主题` 仅当 summary 长度合理（<80 字）且非模板化时写，否则跳过。
-- [ ] 引入 `doc.Meta["is_archived_context"]` 标记上下文归档文档，供 `docToTriples` 识别并跳过。
-- [ ] 单测验证：构造冷文档 → `archiveColdDocs` → 无模板垃圾产出。
+- [x] 重构 `docToTriples`：仅当 `doc.Source` 非 `context_archived` 且非空时写 `文档→来源`；`文档→主题` 仅当 summary 长度合理（<80 字）且非模板化时写，否则跳过。
+- [x] 引入 `doc.Meta["is_archived_context"]` 标记上下文归档文档，供 `docToTriples` 识别并跳过（`ContextToDoc` 在 source=`context_archived` 时自动打标）。
+- [x] 单测验证：构造冷文档 → `archiveColdDocs` → 无模板垃圾产出（`TestDocToTriplesArchivedContext`/`TestDocToTriplesTemplateSummary`/`TestDocToTriplesLongSummary`/`TestIsTemplateSummary` 全绿，既有 4 个 docToTriples 用例回归通过）。
 
 ---
 
@@ -119,19 +120,20 @@
 
 ---
 
-### Phase 4：Pipeline Distiller 行为对齐文档（可选，低优）✅ **计划中**
+### Phase 4：Pipeline Distiller 行为对齐文档（可选，低优）✅ **已完成**
 
-- [ ] 改为真正的增量蒸馏：每 tick 取最近 `RetentionDays` 内、未蒸馏记录 → `extractKeyTriples` → `Commit`，标记 `Distilled=true`。
-- [ ] 移除 `CreatedAt.Before(cutoff)` 的 7 天门槛，改为"每 tick 处理前 N 条"，保持文档所述 10min 频率。
-- [ ] 单测验证启动即蒸馏 + 不重复蒸馏。
+- [x] 改为真正的增量蒸馏：每 tick 取前 N 条（`BatchSize`，默认 50）未蒸馏记录 → `extractKeyTriples` → `Commit`，**移除 RetentionDays 时间门槛**——新记录下个 tick 即蒸馏（文档所述 10min 频率），不再等 7 天。
+- [x] 蒸馏失败重试：`distillBatch` 返回成功标志，Commit 失败时记录写回队头，下个 tick 重试（原实现无论成败都移除，会丢数据）。
+- [x] 单测验证启动即蒸馏 + 不重复蒸馏 + batch 分批消化（`TestDistillOnceFreshRecords`/`TestDistillOnceBatchLimit` 新增，既有用例回归通过）。
 
 ---
 
-### Phase 5：嵌入模型内存优化（运维侧）✅ **计划中**
+### Phase 5：嵌入模型内存优化（运维侧）✅ **已完成（代码层）**
 
-- [ ] 提供 **量化/裁剪** 选项：`embedding_model_path` 支持 `top50k` 等规格，或运行时 `mmap` 只加载词表需求词。
-- [ ] 文档补充内存预算说明：双模 300 维 ≈ 1.5G RAM/模型。
-- [ ] 生产可选降级：仅保留中文模型（主语言）。
+- [x] 提供 **量化/裁剪** 选项：`embedding_model_path` 支持 `#topN` 规格（如 `/data/cc.zh.300.vec#top50000`），只加载前 N 个词向量（fastText 词频降序，前 N 词覆盖绝大多数文本命中）；`parseModelSpec` 解析规格，`ensureModelFile`/`load` 均按裁剪路径处理，未命中词走 `unkVec` 兜底。无规格行为不变。
+- [x] 文档补充：配置项 Description 已写明 `#topN` 用法与内存预算建议（双模 300 维全量 ≈ 1.5G RAM/模型，`top50000` 级裁剪可显著降低）。
+- [ ] 生产可选降级：仅保留中文模型（主语言）——部署时在 `embedding_model_path` 只填中文模型或加 `#topN` 即可，无需改代码。
+- [x] 单测：`TestStaticEmbedderTopNSpec`（规格解析 + topN 裁剪加载词数）+ `TestStaticEmbedderTopNVectorize`（裁剪后 unkVec 兜底不空向量）全绿。
 
 ---
 
@@ -150,8 +152,8 @@
   - **首次创建 → 立即通知"**已启动**"**，确保 agent 感知终端存在。
 - [x] 通知频率可配置（per-plugin settings，`notify_bytes`、`notify_interval`），把控制权交还 agent，不写死。
 - [x] 纯进度输出仍吸入 `t.buf`，agent 需要时用现有 `terminal_read` 主动拉全量（保持 agent 可感知存在、可自主决策取量）。
-- [ ] 单测：终端持续吐进度时，消息注入频率显著低于 500ms/条；进程结束/出错/提示符时立即通知。
-- [ ] 运维止血：杀掉残留 `term_3` bash（PID 3716282），验证 QQ 消息恢复响应。
+- [x] 单测：mock ptyTerm + capture IOInjector 三用例——`TestReadLoopNotifyThrottle`（3s 持续 2KB/s 吐进度仅 ≤3 条通知，远低于 500ms/条的 6 条）、`TestReadLoopNotifyOnExit`（进程退出立即通知）、`TestReadLoopNotifyOnReadError`（读取错误立即通知）全绿。
+- [ ] 运维止血：杀掉残留 `term_3` bash（PID 3716282），验证 QQ 消息恢复响应。（生产侧，代码已就绪）
 
 ---
 
@@ -247,14 +249,16 @@ internal/memory/static_embedder.go # 量化/裁剪入口（可选）
 
 ### 实施路线（非阻塞，Phase 8+）
 ```
-Phase 8.1: CSS 变量系统 + Glassmorphism 基础样式（浅/深色）
-Phase 8.2: 布局重构 — 侧边栏 + 面包屑 + 卡片网格响应式
-Phase 8.3: 核心页面卡片化 — 概览/记忆/插件/工具/配置/日志
-Phase 8.4: 交互微动效 — 3D 倾斜卡片、弹簧按钮、Toast、Loading
-Phase 8.5: 数据可视化 — Canvas 记忆趋势/资源环图/工具热力图
-Phase 8.6: 空状态/错误/确认弹窗统一组件库
-Phase 8.7: 无障碍/键盘导航/移动端适配
+Phase 8.1: ✅ CSS 变量系统 + Glassmorphism 基础样式（浅/深色）— dashboard.html :root 重写 NapCat DNA tokens（sakura/frost 色板、玻璃变量、阴影、圆角、字体、动效）
+Phase 8.2: ✅ 布局重构 — 左侧 16rem 可折叠侧边栏 + 顶部面包屑 topbar + 卡片网格响应式（toggleSidebar/switchTab 联动）
+Phase 8.3: ✅ 核心页面卡片化 — 全部 .card 玻璃态 + hover 抬升 + 语义色 badge/dot/按钮；星图/终端/设置面板统一换肤
+Phase 8.4: ✅ 交互微动效 — 3D 透视倾斜 + 光标光斑（事件委托 .card.tilt）、弹簧按钮 scale、Toast 滑入动画、Loading、tab 切换 fade-up
+Phase 8.5: ✅ 数据可视化 — Canvas 记忆分布环图（drawDonut 扫掠动画）+ 运行时资源条形图（延迟生长动画）
+Phase 8.6: ✅ 空状态/错误/确认弹窗统一组件库 — showToast(type,msg) + confirmDialog(action,onConfirm)（Esc/Enter/遮罩关闭）
+Phase 8.7: ✅ 无障碍/键盘导航/移动端适配 — :focus-visible ring、prefers-reduced-motion 全停动效、主题滚动条、移动端自动折叠侧边栏
+Phase 8.8: ✅ 用户反馈迭代（8.x 收尾）— ①健康检查 UI 去冗余（系统操作卡仅保留重载插件，健康检查卡自带右上角「运行」按钮+空态文案）；②主题跟随系统（无手动偏好时用 prefers-color-scheme，并监听系统实时切换）；③设置页内容列 max-width 860px 居中；④emoji 清理（☰/☀️/🌙/⛔/🔧/🧠 → 内联 SVG/纯文本，聊天工具调用状态用语义色图标）；⑤总览页重构为插件页式全宽单列卡片（移除看板娘大照片卡、移除不准确的记忆分布环图+运行时资源条形图，runtime/memory 改 kv-row 精确数字展示），kernel 页同化
 ```
+> 实现均在 `internal/plugins/webui/dashboard.html`（纯 CSS + Vanilla JS，无构建链）；`handler_test.go:641` 修复上游遗留断言失配（`api('/settings'` → `api("/settings"`）。
 
 ### 技术约束
 - **保持 Go `html/template` + 内嵌静态资源** —— 不引入 Node/构建链

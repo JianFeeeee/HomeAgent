@@ -193,11 +193,15 @@ func (d *Distiller) distillLoop() {
 
 func (d *Distiller) distillOnce() {
 	d.mu.Lock()
-	cutoff := time.Now().AddDate(0, 0, -d.cfg.RetentionDays)
+	batchSize := d.cfg.BatchSize
+	if batchSize <= 0 {
+		batchSize = 50
+	}
+	// 每 tick 取前 N 条未蒸馏记录（无 RetentionDays 门槛），蒸馏成功才标记/移除
 	var toDistill []RawRecord
 	var remaining []RawRecord
 	for _, r := range d.records {
-		if r.CreatedAt.Before(cutoff) && !r.Distilled {
+		if !r.Distilled && len(toDistill) < batchSize {
 			toDistill = append(toDistill, r)
 		} else {
 			remaining = append(remaining, r)
@@ -210,22 +214,29 @@ func (d *Distiller) distillOnce() {
 		return
 	}
 
-	batchSize := d.cfg.BatchSize
-	if batchSize <= 0 {
-		batchSize = 50
-	}
+	distilled := 0
 	for i := 0; i < len(toDistill); i += batchSize {
 		end := i + batchSize
 		if end > len(toDistill) {
 			end = len(toDistill)
 		}
-		d.distillBatch(toDistill[i:end])
+		if d.distillBatch(toDistill[i:end]) {
+			distilled += end - i
+		} else {
+			// 蒸馏失败：记录写回待处理队列，下次 tick 重试
+			d.mu.Lock()
+			d.records = append(toDistill[i:end], d.records...)
+			d.mu.Unlock()
+		}
 	}
 	d.cleanupRawFiles()
-	log.Printf("[memory] distilled %d records", len(toDistill))
+	if distilled > 0 {
+		log.Printf("[memory] distilled %d records", distilled)
+	}
 }
 
-func (d *Distiller) distillBatch(batch []RawRecord) {
+// distillBatch 蒸馏一批记录，全部成功返回 true，任一失败返回 false（调用方重试）
+func (d *Distiller) distillBatch(batch []RawRecord) bool {
 	var userContent, assistantContent string
 	sessionIDs := make(map[string]bool)
 	for _, r := range batch {
@@ -245,8 +256,10 @@ func (d *Distiller) distillBatch(batch []RawRecord) {
 		}
 		if _, _, err := d.db.Commit(triples, sessionID, 0); err != nil {
 			log.Printf("[memory] distill commit: %v", err)
+			return false
 		}
 	}
+	return true
 }
 
 func (d *Distiller) cleanupRawFiles() {

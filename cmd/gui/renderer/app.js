@@ -6,6 +6,7 @@ let state = {
   meta: {},
   pluginMeta: {},
   settingsPlugins: ['core'],
+  currentView: 'chat',
   selectedSection: 'core',
   messages: [],
   chatLoading: false,
@@ -17,6 +18,9 @@ let state = {
   chatHistory: [],
   terminals: [],
   cmdHistory: [],
+  termScreens: {},
+  chatStick: true,
+  pendingTools: [],
   eventSource: null,
   lang: localStorage.getItem('ha-lang') || 'zh',
   connections: [], currentConn: null,
@@ -111,10 +115,16 @@ function applyI18n() {
 }
 
 // ===== Theme =====
+var ICON_SUN_GUI =
+  '<svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><circle cx="12" cy="12" r="4"/><path d="M12 2v2m0 16v2M4.9 4.9l1.4 1.4m11.4 11.4 1.4 1.4M2 12h2m16 0h2M4.9 19.1l1.4-1.4m11.4-11.4 1.4-1.4"/></svg>';
+var ICON_MOON_GUI =
+  '<svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M21 12.8A9 9 0 1 1 11.2 3a7 7 0 0 0 9.8 9.8z"/></svg>';
+
 function setTheme(name) {
   document.documentElement.setAttribute('data-theme', name);
   localStorage.setItem('ha-theme', name);
-  document.getElementById('theme-btn').textContent = name === 'light' ? '☀️' : '🌙';
+  var btn = document.getElementById('theme-btn');
+  if (btn) btn.innerHTML = name === 'light' ? ICON_SUN_GUI : ICON_MOON_GUI;
 }
 
 function toggleTheme() {
@@ -149,8 +159,36 @@ function toast(m, isError) {
 }
 
 // ===== API =====
+async function cliRequest(line) {
+  var conn = state.currentConn;
+  if (!conn) throw new Error(__('未选择连接','No connection selected'));
+  if (!window.homeagent || !window.homeagent.cli) throw new Error('cli bridge unavailable');
+  var resp = await window.homeagent.cli.request(conn.socketPath || conn.url, conn.apiKey, line);
+  if (resp && resp.error) throw new Error(resp.error);
+  return resp;
+}
+
+// CLI 传输映射：将 REST 路径转换为 cli 内置命令或直接对话
+function cliMap(path, o) {
+  o = o || {};
+  var m = o.method || 'GET';
+  if (m === 'POST' && path.indexOf('/chat') !== -1) {
+    var body = {};
+    try { body = JSON.parse(o.body || '{}'); } catch (e) {}
+    return cliRequest(body.message || '');
+  }
+  if (path === '/status') return cliRequest('/status');
+  if (path === '/kernel') return cliRequest('/kernel');
+  if (path === '/settings') return cliRequest('/settings');
+  if (path === '/chat/history') return Promise.resolve({ messages: [] });
+  return Promise.reject(new Error(__('CLI 连接不支持此功能','Not supported on CLI connection')));
+}
+
 async function api(p, o) {
   if (!state.currentConn) throw new Error(__('未选择连接','No connection selected'));
+  if (state.currentConn.type === 'cli') {
+    return cliMap(p, o);
+  }
   var opts = o || {};
   var headers = { 'Content-Type': 'application/json', ...(opts.headers || {}) };
   if (state.currentConn.apiKey) headers['X-API-Key'] = state.currentConn.apiKey;
@@ -163,13 +201,19 @@ async function api(p, o) {
 }
 
 // ===== Navigation =====
-function switchTab(n) {
-  document.querySelectorAll('.tab-content').forEach(function(e) { e.classList.remove('active') });
-  var el = document.getElementById('tab-' + n);
+function switchView(n) {
+  document.querySelectorAll('.view').forEach(function(e) { e.classList.remove('active') });
+  var el = document.getElementById('view-' + n);
   if (el) el.classList.add('active');
-  document.querySelectorAll('nav a').forEach(function(e) { e.classList.remove('active') });
-  var match = document.querySelector('nav a[onclick*="' + n + '"]');
-  if (match) match.classList.add('active');
+  document.querySelectorAll('.rail-btn').forEach(function(e) { e.classList.remove('active') });
+  var rb = document.getElementById('rail-' + n);
+  if (rb) rb.classList.add('active');
+  state.currentView = n;
+  if (n === 'chat') {
+    state.chatStick = true;
+    var msgsEl = document.getElementById('chat-msgs');
+    if (msgsEl) { try { msgsEl.scrollTo({ top: msgsEl.scrollHeight, behavior: 'smooth' }) } catch(e) { msgsEl.scrollTop = msgsEl.scrollHeight } }
+  }
   renderAll();
 }
 
@@ -270,17 +314,41 @@ function renderOverview() {
     + statCard(__('内存','Memory'), k?.runtime?.memory_mb ? k.runtime.memory_mb + ' MB' : '-', '')
     + statCard('Go ' + __('版本','Version'), k?.runtime?.go_version || '-', '')
     + '</div></div>';
-  document.getElementById('tab-overview').innerHTML = html;
+  document.getElementById('view-overview').innerHTML = html;
 }
 
 // ===== Chat =====
 var _chatLayoutBuilt = false;
 
 function buildChatLayout() {
-  var cont = document.getElementById('tab-chat');
+  var cont = document.getElementById('view-chat');
   var k = state.kernel || {};
-  var html = '<div class="chat-layout"><div class="chat-main">';
-  html += '<div class="card"><h2>' + __('对话','Chat') + ' <span id="chat-stage" class="badge" style="font-size:10px;font-weight:400;display:' + (state.chatLoading ? 'inline' : 'none') + '">' + escHtml(state.chatStage || '') + '</span></h2><div class="chat-messages" id="chat-msgs">';
+  var html = '<div class="chat-layout">';
+  html += '<div class="chat-tabs">'
+    + '<span class="active" onclick="switchChatPanel(\'chat\',this)">' + __('对话','Chat') + '</span>'
+    + '<span onclick="switchChatPanel(\'starmap\',this)">' + __('星图','Star Map') + '</span>'
+    + '<span onclick="switchChatPanel(\'terminal\',this)">' + __('终端','Terminal') + '</span>'
+    + '<span onclick="switchChatPanel(\'cmd\',this)">' + __('运行中命令','Running Commands') + '</span>'
+    + '<span onclick="switchChatPanel(\'memory\',this)">' + __('记忆','Memory') + '</span>'
+    + '<span onclick="switchChatPanel(\'context\',this)">' + __('上下文','Context') + '</span>'
+    + '<span onclick="switchChatPanel(\'knowledge\',this)">' + __('知识','Knowledge') + '</span>'
+    + '</div>';
+  if (!state.currentConn) {
+    html += '<div class="chat-panel active" id="chat-panel-chat"><div class="card setup-card">'
+      + '<svg class="setup-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M21 11.5a8.38 8.38 0 0 1-.9 3.8 8.5 8.5 0 0 1-7.6 4.7 8.38 8.38 0 0 1-3.8-.9L3 21l1.9-5.7a8.38 8.38 0 0 1-.9-3.8 8.5 8.5 0 0 1 4.7-7.6 8.38 8.38 0 0 1 3.8-.9h.5a8.48 8.48 0 0 1 8 8v.5z"/></svg>'
+      + '<h2>' + __('未配置后端','No backend configured') + '</h2>'
+      + '<p>' + __('连接 HomeAgent 服务端后即可开始对话。请在设置中添加后端连接。','Connect to a HomeAgent server to start chatting. Add a backend connection in Settings.') + '</p>'
+      + '<button class="btn btn-primary" onclick="goSettingsConn()">' + __('前往设置添加后端','Go to Settings to add backend') + '</button>'
+      + '</div></div>';
+    for (var p2 = 0; p2 < 6; p2++) {
+      html += '<div class="chat-panel" id="chat-panel-' + ['starmap','terminal','cmd','memory','context','knowledge'][p2] + '"><div class="card"><p style="color:var(--text-muted)">' + __('请先在设置中添加后端连接','Add a backend connection in Settings first') + '</p></div></div>';
+    }
+    cont.innerHTML = html;
+    _chatLayoutBuilt = true;
+    return;
+  }
+  html += '<div class="chat-panel active" id="chat-panel-chat"><div class="chat-main">';
+  html += '<div class="card"><h2>' + __('对话','Chat') + ' <span id="chat-stage" class="badge" style="font-size:10px;font-weight:400;display:none">' + escHtml(state.chatStage || '') + '</span></h2><div class="chat-messages" id="chat-msgs">';
   if (state.messages.length === 0) {
     html += '<div class="empty-state" style="flex:1;display:flex;align-items:center;justify-content:center"><p>' + __('开始对话以测试 Agent 回复','Start a conversation to test Agent replies') + '</p></div>';
   }
@@ -288,35 +356,28 @@ function buildChatLayout() {
     + '<div class="chat-input-row">'
     + '<input id="chat-input" placeholder="' + __('输入消息...','Type a message...') + '" onkeydown="if(event.key==\'Enter\')sendChat()">'
     + '<button class="btn btn-primary" onclick="sendChat()" id="chat-send-btn">' + __('发送','Send') + '</button>'
-    + '</div></div>';
-  html += '</div><div class="chat-sidebar">'
-    + '<div class="card" style="padding:12px"><h2 style="font-size:13px;margin-bottom:8px">' + __('星图','Star Map') + '</h2>'
-    + '<div id="sm-container-chat" style="height:160px;display:flex;align-items:center;justify-content:center"><div class="loading-spinner"></div></div></div>'
-    + '<div class="card" style="padding:12px"><h2 style="font-size:13px;margin-bottom:8px">' + __('终端','Terminal') + ' <span id="term-count-badge" class="badge badge-blue">0</span></h2>'
-    + '<div id="term-list" style="max-height:160px;overflow-y:auto;font-size:11px"></div></div>'
-    + '<div class="card" style="padding:12px"><h2 style="font-size:13px;margin-bottom:8px">' + __('命令历史','Command History') + ' <span id="cmd-count-badge" class="badge badge-blue">0</span></h2>'
-    + '<div id="cmd-list" style="max-height:120px;overflow-y:auto;font-size:11px"></div></div>'
-    + '<div class="card" style="padding:12px">'
-    + '<div class="sidebar-subnav">'
-    + '<span class="active" onclick="switchChatSub(\'memory\',this)">' + __('记忆','Memory') + '</span>'
-    + '<span onclick="switchChatSub(\'context\',this)">' + __('上下文','Context') + '</span>'
-    + '<span onclick="switchChatSub(\'knowledge\',this)">' + __('知识','Knowledge') + '</span>'
-    + '</div>'
-    + '<div id="chat-sub-memory">'
+    + '</div></div></div></div>';
+  html += '<div class="chat-panel" id="chat-panel-starmap"><div class="card"><h2>' + __('星图','Star Map') + '</h2>'
+    + '<div id="sm-container-chat" style="display:flex;align-items:center;justify-content:center;min-height:480px"><div class="loading-spinner"></div></div></div></div>';
+  html += '<div class="chat-panel" id="chat-panel-terminal"><div class="card"><h2>' + __('终端','Terminal') + ' <span id="term-count-badge" class="badge badge-blue">0</span></h2>'
+    + '<div id="term-list" style="max-height:60vh;overflow-y:auto;font-size:12px"></div></div></div>';
+  html += '<div class="chat-panel" id="chat-panel-cmd"><div class="card"><h2>' + __('运行中命令','Running Commands') + ' <span id="cmd-count-badge" class="badge badge-blue">0</span></h2>'
+    + '<div id="cmd-list" style="max-height:60vh;overflow-y:auto;font-size:12px"></div></div></div>';
+  html += '<div class="chat-panel" id="chat-panel-memory"><div class="card"><h2>' + __('记忆','Memory') + '</h2>'
     + '<div class="kv-row"><span class="key">' + __('实体','Entities') + '</span><span class="val">' + (k?.memory?.entity_count || '-') + '</span></div>'
     + '<div class="kv-row"><span class="key">' + __('关系','Relations') + '</span><span class="val">' + (k?.memory?.relation_count || '-') + '</span></div>'
     + '<div style="margin-top:8px">'
     + '<input id="mem-query" placeholder="' + __('关键词查询','Keyword query') + '">'
     + '<button class="btn btn-primary btn-sm" onclick="queryMemoryChat()">' + __('查询','Query') + '</button>'
     + '</div><div id="mem-result-chat" style="margin-top:8px;max-height:180px;overflow:auto"></div>'
-    + '</div>'
-    + '<div id="chat-sub-context" style="display:none">'
+    + '</div></div>';
+  html += '<div class="chat-panel" id="chat-panel-context"><div class="card"><h2>' + __('上下文','Context') + '</h2>'
     + '<div style="margin-top:8px">'
     + '<input id="ctx-query" placeholder="' + __('输入当前话题','Enter current topic') + '">'
     + '<button class="btn btn-primary btn-sm" onclick="queryMemoryContext()">' + __('获取上下文','Get Context') + '</button>'
     + '</div><div id="ctx-result" style="margin-top:8px;max-height:200px;overflow:auto"></div>'
-    + '</div>'
-    + '<div id="chat-sub-knowledge" style="display:none">'
+    + '</div></div>';
+  html += '<div class="chat-panel" id="chat-panel-knowledge"><div class="card"><h2>' + __('知识','Knowledge') + '</h2>'
     + '<div class="kv-row"><span class="key">' + __('项目','Items') + '</span><span class="val">' + (k?.knowledge?.item_count || '-') + '</span></div>'
     + '<div style="margin-top:8px">'
     + '<input id="know-query" placeholder="' + __('搜索知识','Search knowledge') + '">'
@@ -326,16 +387,67 @@ function buildChatLayout() {
     + '<input id="know-name" placeholder="' + __('知识名称','Knowledge name') + '" style="margin-bottom:4px">'
     + '<textarea id="know-content" placeholder="' + __('内容','Content') + '" style="min-height:50px;margin-bottom:4px"></textarea>'
     + '<button class="btn btn-primary btn-sm" onclick="createKnowledgeChat()">' + __('创建','Create') + '</button>'
-    + '</div></div></div></div></div>';
+    + '</div></div></div>';
   cont.innerHTML = html;
   _chatLayoutBuilt = true;
+}
+
+var CHAN_COLORS = ['#e08a5f', '#5f9fe0', '#6bbf8f', '#c06bbf', '#d9a13b', '#5fb3bf', '#b06b6b', '#7f8ce0'];
+
+function chanColor(src) {
+  var h = 0;
+  for (var i = 0; i < src.length; i++) h = (h * 31 + src.charCodeAt(i)) >>> 0;
+  return CHAN_COLORS[h % CHAN_COLORS.length];
+}
+
+function chanLetter(src) {
+  var s = (src || '').trim();
+  if (!s) return 'C';
+  var ch = s.charAt(0).toUpperCase();
+  return /[A-Za-z0-9]/.test(ch) ? ch : 'C';
 }
 
 function renderChat() {
   if (!_chatLayoutBuilt) { buildChatLayout(); renderChatStarmap(); renderTerminals(); renderCmdHistory() }
   var msgsEl = document.getElementById('chat-msgs');
   if (!msgsEl) return;
+  if (!msgsEl._stickBound) {
+    msgsEl._stickBound = true;
+    msgsEl.addEventListener('scroll', function() {
+      state.chatStick = msgsEl.scrollHeight - msgsEl.scrollTop - msgsEl.clientHeight < 80;
+    }, { passive: true });
+  }
   var msgs = state.messages;
+  var sig = msgs.map(function(m) {
+    var c = m.content || '';
+    return (m.role || '') + ':' + c.length + ':' + c.slice(-40) + ':' + (m.tool_calls || []).map(function(t) { return (t.tool || t.name || '') + '/' + (t.status || '') }).join(',');
+  }).join('|') + '|L' + (state.chatLoading ? '1' : '0') + '|P' + (state.pendingTools || []).join(',');
+  if (msgsEl._chatSig === sig && msgsEl.childElementCount > 0) { return; }
+  msgsEl._chatSig = sig;
+  var prevPending = msgsEl._lastPending || [];
+  var newPending = (state.pendingTools || []).slice();
+  var lastM = msgs.length ? msgs[msgs.length - 1] : null;
+  if (state.chatLoading && lastM && lastM.role === 'assistant') {
+    (lastM.tool_calls || []).forEach(function(tc) {
+      if (!tc.result && tc.status !== 'denied') {
+        var nm = tc.tool || tc.name || '';
+        if (newPending.indexOf(nm) === -1) newPending.push(nm);
+      }
+    });
+  }
+  var newlyDone = prevPending.filter(function(n) { return newPending.indexOf(n) === -1; });
+  msgsEl._lastPending = newPending;
+  var streamingLast = !!(state.chatLoading && lastM && lastM.role === 'assistant' && !lastM._final);
+  function pillHtml() {
+    var s = '';
+    newPending.forEach(function(nm) {
+      var anim = prevPending.indexOf(nm) !== -1 ? '' : ' pill-in';
+      s += '<span class="thinking-tool' + anim + '" data-tool="' + escHtml(nm) + '">'
+        + '<svg viewBox="0 0 24 24" width="11" height="11" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M14.7 6.3a4 4 0 0 0-5.4 5.4L3 18l3 3 6.3-6.3a4 4 0 0 0 5.4-5.4l-2.9 2.9-2.5-.6-.6-2.5z"/></svg>'
+        + escHtml(nm) + '</span>';
+    });
+    return s;
+  }
   var html = '';
   if (msgs.length === 0) {
     html = '<div class="empty-state" style="flex:1;display:flex;align-items:center;justify-content:center"><p>' + __('开始对话以测试 Agent 回复','Start a conversation to test Agent replies') + '</p></div>';
@@ -350,44 +462,77 @@ function renderChat() {
       } else {
         c = escHtml(c);
       }
+      var isChan = !!(m.source && m.source !== 'webui');
       var rc = '';
       if (m.reasoning_content) {
         var rcBody = (typeof marked !== 'undefined' ? marked.parse(m.reasoning_content) : escHtml(m.reasoning_content));
-        rc = '<div class="reasoning">'
-          + '<div class="reasoning-title" onclick="var n=this.nextElementSibling;n.style.display=n.style.display===\'none\'?\'block\':\'none\';this.textContent=this.textContent===\'' + __('收起思考','Collapse') + '\'?\'' + __('展开思考','Expand') + '\':\'' + __('收起思考','Collapse') + '\'">' + __('收起思考','Collapse') + '</div>'
-          + '<div class="reasoning-body" style="display:none">' + rcBody + '</div></div>';
+        rc = '<div class="msg-bubble"><div class="reasoning">'
+          + '<div class="reasoning-title" onclick="var n=this.nextElementSibling;n.style.display=n.style.display===\'none\'?\'block\':\'none\';this.textContent=this.textContent===\'' + __('展开思考','Expand') + '\'?\'' + __('收起思考','Collapse') + '\':\'' + __('展开思考','Expand') + '\'">' + __('展开思考','Expand') + '</div>'
+          + '<div class="reasoning-body" style="display:none">' + rcBody + '</div></div></div>';
       }
       var tcs = '';
       if (m.tool_calls && m.tool_calls.length > 0) {
         m.tool_calls.forEach(function(tc) {
           var argsStr = typeof tc.args === 'object' ? JSON.stringify(tc.args, null, 1) : (tc.args || '');
-          var resultStr = tc.result ? (typeof tc.result === 'object' ? JSON.stringify(tc.result, null, 1).substring(0, 200) : String(tc.result).substring(0, 200)) : '';
-          var statusIcon = tc.status === 'denied' ? '⛔' : '🔧';
-          tcs += '<div class="tool-call">'
-            + '<div><span class="tc-name">' + statusIcon + ' ' + escHtml(tc.tool || tc.name || '') + '</span></div>'
+          var resultStr = tc.result ? (typeof tc.result === 'object' ? JSON.stringify(tc.result, null, 1) : String(tc.result)) : '';
+          var statusIcon = tc.status === 'denied'
+            ? '<svg viewBox="0 0 24 24" width="12" height="12" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" style="color:var(--error);vertical-align:-1px"><circle cx="12" cy="12" r="9"/><path d="M5.6 5.6l12.8 12.8"/></svg>'
+            : '<svg viewBox="0 0 24 24" width="12" height="12" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" style="color:var(--accent);vertical-align:-1px"><path d="M14.7 6.3a4 4 0 0 0-5.4 5.4L3 18l3 3 6.3-6.3a4 4 0 0 0 5.4-5.4l-2.9 2.9-2.5-.6-.6-2.5z"/></svg>';
+          tcs += '<div class="msg-bubble"><div class="tool-call' + (newlyDone.indexOf(tc.tool || tc.name || '') !== -1 ? ' tool-drip-in' : '') + '" onclick="toggleToolCall(this)">'
+            + '<div class="tc-line"><span class="tc-ico">' + statusIcon + '</span><span class="tc-name">' + escHtml(tc.tool || tc.name || '') + '</span>'
+            + (tc.status === 'denied'
+                ? '<span class="tc-state tc-deny">' + __('已拒绝','Denied') + '</span>'
+                : (resultStr
+                    ? '<span class="tc-state tc-done">' + __('完成','Done') + '</span>'
+                    : '<span class="tc-state tc-run">' + __('调用中','Running') + '</span>'))
+            + '<span class="tc-caret">▾</span></div>'
+            + '<div class="tc-detail" style="display:none">'
             + (argsStr && argsStr !== '{}' ? '<div class="tc-args">' + escHtml(argsStr) + '</div>' : '')
-            + (resultStr ? '<div class="tc-result">→ ' + escHtml(resultStr) + '</div>' : '')
-            + '</div>';
+            + (resultStr ? '<div class="tc-result">' + escHtml(resultStr) + '</div>' : '')
+            + '</div></div></div>';
         });
       }
-      var body = rc + tcs + '<div class="text">' + c + '</div>';
-      if (m.source && m.source !== 'webui') {
-        body = '<div class="msg-source">' + escHtml(__('通道','Channel')) + ': ' + escHtml(m.source) + '</div>' + body;
+      var body = rc + tcs;
+      var growCls = m._grow ? ' grow-in' : '';
+      if (m._grow) m._grow = false;
+      var isStreamingLast = i === msgs.length - 1 && streamingLast;
+      if (isStreamingLast) {
+        var liveRow = '<span class="live-spinner"></span>' + (newPending.length ? '<span class="thinking-tools">' + pillHtml() + '</span>' : '');
+        if (c) {
+          body += '<div class="msg-bubble' + growCls + '">' + liveRow + '<div class="text">' + c + '</div></div>';
+          c = '';
+        } else {
+          body += '<div class="msg-bubble">' + liveRow + '</div>';
+        }
+      } else if (c) {
+        body += '<div class="msg-bubble' + growCls + '"><div class="text">' + c + '</div></div>';
       }
       if (role === 'system') {
-        html += '<div class="msg msg-system"><div class="msg-bubble">' + body + '</div></div>';
+        html += '<div class="msg msg-system"><div class="msg-bubble">' + (c || '') + '</div></div>';
+      } else if (isChan) {
+        html += '<div class="msg msg-channel">'
+          + '<div class="msg-avatar chan-avatar" style="background:' + chanColor(m.source) + '">' + chanLetter(m.source) + '</div>'
+          + '<div class="msg-content"><div class="msg-chan-name">' + escHtml(m.source) + '</div>' + body + '</div>'
+          + '</div>';
       } else {
         var userAvatar = '<svg viewBox="0 0 24 24" style="width:16px;height:16px" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><circle cx="12" cy="8" r="4"/><path d="M4 20c0-4 4-6 8-6s8 2 8 6"/></svg>';
-        var aiAvatar = '<img src="mascot.svg" style="width:28px;height:28px;border-radius:50%;object-fit:cover" alt="' + __('小宅','Agent') + '">';
+        var aiAvatar = '<img src="mascot.webp" style="width:28px;height:28px;border-radius:50%;object-fit:cover" alt="' + __('小宅','Agent') + '">';
         html += '<div class="msg msg-' + role + '">'
           + '<div class="msg-avatar">' + (role === 'user' ? userAvatar : aiAvatar) + '</div>'
-          + '<div class="msg-content"><div class="msg-bubble">' + body + '</div></div>'
+          + '<div class="msg-content">' + body + '</div>'
           + '</div>';
       }
     });
   }
+  if (state.chatLoading && !streamingLast) {
+    var aiAvatar2 = '<img src="mascot.webp" style="width:28px;height:28px;border-radius:50%;object-fit:cover" alt="' + __('小宅','Agent') + '">';
+    html += '<div class="msg msg-assistant"><div class="msg-avatar">' + aiAvatar2 + '</div><div class="msg-content"><div class="msg-bubble">'
+      + '<span class="live-spinner"></span>'
+      + (newPending.length ? '<span class="thinking-tools">' + pillHtml() + '</span>' : '')
+      + '</div></div></div>';
+  }
   msgsEl.innerHTML = html;
-  msgsEl.scrollTop = msgsEl.scrollHeight;
+  if (state.chatStick !== false) { try { msgsEl.scrollTo({ top: msgsEl.scrollHeight, behavior: 'smooth' }) } catch(e) { msgsEl.scrollTop = msgsEl.scrollHeight } }
   updateChatBadge();
 }
 
@@ -395,10 +540,18 @@ function updateChatBadge() {
   var badge = document.getElementById('chat-stage');
   if (!badge) return;
   badge.textContent = state.chatStage || '';
-  badge.style.display = state.chatLoading ? 'inline' : 'none';
+  badge.style.display = 'none';
 }
 
 function rerenderChat() { renderChat(); renderChatStarmap(); renderTerminals(); renderCmdHistory() }
+
+function toggleToolCall(el) {
+  var d = el.querySelector('.tc-detail');
+  if (!d) return;
+  var open = d.style.display !== 'none';
+  d.style.display = open ? 'none' : 'block';
+  if (open) { el.classList.remove('open'); } else { el.classList.add('open'); }
+}
 
 function renderChatStarmap() {
   var cont = document.getElementById('sm-container-chat');
@@ -674,6 +827,7 @@ async function sendChat() {
   var btn = document.getElementById('chat-send-btn');
   var text = inp.value.trim();
   if (!text || state.chatLoading) return;
+  state.chatStick = true;
   state.messages.push({ role: 'user', content: text });
   inp.value = '';
   rerenderChat();
@@ -690,7 +844,8 @@ async function sendChat() {
     if (last && last.role === 'assistant' && last._streaming) {
       console.log('[sendChat] updating existing streaming msg, tool_calls before:', last.tool_calls?.length);
       last.content = r.response || __('(无响应)','(no response)');
-      last.reasoning_content = r.reasoning_content || '';
+      last._grow = true;
+      if (!last.reasoning_content) last.reasoning_content = r.reasoning_content || '';
       last._final = true;
       delete last._streaming;
     } else {
@@ -699,7 +854,8 @@ async function sendChat() {
         content: r.response || __('(无响应)','(no response)'),
         reasoning_content: r.reasoning_content,
         tool_calls: last && last.role === 'assistant' && last.tool_calls ? last.tool_calls : [],
-        _final: true
+        _final: true,
+        _grow: true
       });
     }
     rerenderChat();
@@ -786,15 +942,19 @@ async function createKnowledgeChat() {
   }
 }
 
-function switchChatSub(tab, el) {
-  var cards = {
-    'memory': document.getElementById('chat-sub-memory'),
-    'context': document.getElementById('chat-sub-context'),
-    'knowledge': document.getElementById('chat-sub-knowledge')
+function switchChatPanel(tab, el) {
+  var panels = {
+    'chat': document.getElementById('chat-panel-chat'),
+    'starmap': document.getElementById('chat-panel-starmap'),
+    'terminal': document.getElementById('chat-panel-terminal'),
+    'cmd': document.getElementById('chat-panel-cmd'),
+    'memory': document.getElementById('chat-panel-memory'),
+    'context': document.getElementById('chat-panel-context'),
+    'knowledge': document.getElementById('chat-panel-knowledge')
   };
-  Object.keys(cards).forEach(function(k) {
-    var c = cards[k];
-    if (c) c.style.display = k === tab ? 'block' : 'none';
+  Object.keys(panels).forEach(function(k) {
+    var p = panels[k];
+    if (p) p.classList.toggle('active', k === tab);
   });
   if (el) {
     var parent = el.parentElement;
@@ -803,7 +963,12 @@ function switchChatSub(tab, el) {
       el.classList.add('active');
     }
   }
+  if (tab === 'starmap') { renderChatStarmap(); onStarmapResize(); }
+  if (tab === 'terminal') renderTerminals();
+  if (tab === 'cmd') renderCmdHistory();
+  if (tab === 'memory') queryMemoryChat();
   if (tab === 'context') queryMemoryContext();
+  if (tab === 'knowledge') searchKnowledgeChat();
 }
 
 async function loadChatHistory() {
@@ -816,6 +981,15 @@ async function loadTerminals() {
 
 async function loadCmdHistory() {
   try { var data = await api('/cmd/history'); if (data && data.history) state.cmdHistory = data.history } catch(e) {}
+}
+
+function appendTermBuf(el, text) {
+  if (!text) return;
+  el.textContent += text;
+  if (el.textContent.length > 262144) {
+    el.textContent = el.textContent.slice(el.textContent.length - 262144);
+  }
+  el.scrollTop = el.scrollHeight;
 }
 
 function renderTerminals() {
@@ -831,23 +1005,26 @@ function renderTerminals() {
   var html = '';
   list.forEach(function(t, i) {
     var detailId = 'term-detail-' + i;
+    var scr = (state.termScreens && state.termScreens[t.id]) || null;
+    var running = scr ? scr.running : !!t.running;
+    var fullOut = scr ? scr.output : t.output || '';
+    if (!fullOut) {
+      fullOut = '<span style="color:#5c6672">' + __('[终端暂无输出]','[No terminal output]') + '</span>';
+    } else {
+      fullOut = escHtml(fullOut);
+    }
     html += '<div style="border:1px solid var(--border-color);border-radius:6px;margin-bottom:4px;font-size:11px">';
     html += '<div style="display:flex;align-items:center;gap:6px;padding:6px 8px;cursor:pointer;background:var(--bg-hover)" onclick="var d=document.getElementById(\'' + detailId + '\');d.style.display=d.style.display===\'none\'?\'block\':\'none\'">';
     html += '<span style="font-family:monospace;font-size:10px;flex:1">' + escHtml(t.id || '-') + '</span>';
-    html += '<span style="flex:1;color:var(--text-muted)">' + escHtml(t.command || '') + '</span>';
-    html += '<span class="badge ' + (t.running ? 'badge-green' : 'badge-red') + '">' + (t.running ? __('运行中','Running') : __('已关闭','Closed')) + '</span>';
+    html += '<span style="flex:1;color:var(--text-muted);overflow:hidden;text-overflow:ellipsis;white-space:nowrap">' + escHtml(t.command || '') + '</span>';
+    html += '<span class="badge ' + (running ? 'badge-green' : 'badge-red') + '">' + (running ? __('运行中','Running') : __('已关闭','Closed')) + '</span>';
     html += '<span style="color:var(--text-muted);font-size:10px">' + escHtml(t.created_at || '') + '</span>';
     html += '</div>';
     html += '<div id="' + detailId + '" style="display:none;padding:8px;border-top:1px solid var(--border-color);background:var(--bg-input)">';
-    html += '<div class="kv-row"><span class="key">ID</span><span class="val" style="font-family:monospace">' + escHtml(t.id || '-') + '</span></div>';
-    html += '<div class="kv-row"><span class="key">' + __('命令','Command') + '</span><span class="val">' + escHtml(t.command || '-') + '</span></div>';
-    html += '<div class="kv-row"><span class="key">' + __('状态','Status') + '</span><span class="val">' + (t.running ? __('运行中','Running') : __('已关闭','Closed')) + '</span></div>';
-    html += '<div class="kv-row"><span class="key">' + __('创建时间','Created') + '</span><span class="val">' + escHtml(t.created_at || '-') + '</span></div>';
-    if (t.uptime) html += '<div class="kv-row"><span class="key">' + __('运行时长','Uptime') + '</span><span class="val">' + escHtml(t.uptime) + '</span></div>';
-    if (t.output) {
-      html += '<div class="kv-row"><span class="key">' + __('输出预览','Output') + '</span><span class="val"><pre style="font-size:10px;margin:0;max-height:100px;overflow:auto">' + escHtml((t.output || '').substring(0, 500)) + '</pre></span></div>';
-    }
-    html += '</div></div>';
+    html += '<div class="term-screen">';
+    html += '<div class="term-head"><span class="term-dot' + (running ? '' : ' stopped') + '" id="term-dot-' + escHtml(t.id) + '"></span><span style="font-weight:600">' + escHtml(t.id) + '</span><span>' + escHtml(t.command || '') + '</span><span style="flex:1"></span><span>' + escHtml(t.uptime || '') + '</span></div>';
+    html += '<pre class="term-buf" id="term-buf-' + escHtml(t.id) + '">' + fullOut + '</pre>';
+    html += '</div></div></div>';
   });
   r.innerHTML = html;
 }
@@ -856,19 +1033,24 @@ function renderCmdHistory() {
   var r = document.getElementById('cmd-list');
   var cnt = document.getElementById('cmd-count-badge');
   if (!r) return;
-  var list = state.cmdHistory || [];
-  if (cnt) cnt.textContent = list.length;
-  if (list.length === 0) {
-    r.innerHTML = '<p style="color:var(--text-muted);padding:8px;text-align:center;font-size:11px">' + __('暂无命令记录','No command history') + '</p>';
+  var running = (state.terminals || []).filter(function(t) { return t.running; });
+  if (cnt) cnt.textContent = running.length;
+  if (running.length === 0) {
+    r.innerHTML = '<p style="color:var(--text-muted);padding:8px;text-align:center;font-size:11px">' + __('暂无运行中的命令','No running commands') + '</p>';
     return;
   }
-  var html = '<table style="font-size:10px"><tr><th>' + __('命令','Command') + '</th><th>' + __('状态','Status') + '</th><th>' + __('时间','Time') + '</th></tr>';
-  list.slice().reverse().slice(0, 50).forEach(function(c) {
+  var html = '<table style="font-size:10px"><tr><th>' + __('命令','Command') + '</th><th>' + __('状态','Status') + '</th><th>' + __('运行时长','Uptime') + '</th></tr>';
+  running.forEach(function(t) {
+    var scr = (state.termScreens && state.termScreens[t.id]) || null;
+    var out = scr ? scr.output : t.output || '';
     html += '<tr>'
-      + '<td style="font-family:monospace;max-width:180px;overflow:hidden;text-overflow:ellipsis">' + escHtml(c.command || '') + '</td>'
-      + '<td><span class="badge ' + (c.status === 'ok' ? 'badge-green' : 'badge-red') + '">' + escHtml(c.status || '') + '</span></td>'
-      + '<td style="color:var(--text-muted);white-space:nowrap">' + escHtml((c.time || '').substring(0, 19)) + '</td>'
+      + '<td style="font-family:monospace;max-width:200px;overflow:hidden;text-overflow:ellipsis">' + escHtml(t.command || t.id || '') + '</td>'
+      + '<td><span class="badge badge-green">' + __('运行中','Running') + '</span></td>'
+      + '<td style="color:var(--text-muted);white-space:nowrap">' + escHtml(t.uptime || '-') + '</td>'
       + '</tr>';
+    if (out) {
+      html += '<tr><td colspan="3" style="padding:0"><pre style="margin:0;padding:4px 8px;max-height:120px;overflow:auto;background:var(--bg-input);border-radius:4px;font-size:10px;color:var(--text-secondary)">' + escHtml(out.substring(0, 2000)) + '</pre></td></tr>';
+    }
   });
   html += '</table>';
   r.innerHTML = html;
@@ -936,7 +1118,7 @@ function renderPlugins() {
     html += '<p style="color:var(--text-muted);font-size:13px">' + __('点击上方按钮运行','Click the button above to run') + '</p>';
   }
   html += '</div></div>';
-  document.getElementById('tab-plugins').innerHTML = html;
+  document.getElementById('view-plugins').innerHTML = html;
 }
 
 async function loadInstalledPlugins() {
@@ -1029,7 +1211,7 @@ function renderHealthResult(r) {
 // ===== Kernel =====
 function renderKernel() {
   var k = state.kernel;
-  if (!k) { document.getElementById('tab-kernel').innerHTML = '<div class="card"><p style="color:var(--text-muted)">' + __('内核未响应','Kernel not responding') + '</p></div>'; return }
+  if (!k) { document.getElementById('view-kernel').innerHTML = '<div class="card"><p style="color:var(--text-muted)">' + __('内核未响应','Kernel not responding') + '</p></div>'; return }
   var html = '<div class="card"><h2>' + __('运行时','Runtime') + '</h2><div class="grid-3">'
     + statCard('Goroutines', k?.runtime?.goroutines || '-', '')
     + statCard(__('内存','Memory'), k?.runtime?.memory_mb ? k.runtime.memory_mb + ' MB' : '-', '')
@@ -1053,7 +1235,7 @@ function renderKernel() {
     html += '<p style="color:var(--text-muted)">' + __('无','None') + '</p>';
   }
   html += '</div>';
-  document.getElementById('tab-kernel').innerHTML = html;
+  document.getElementById('view-kernel').innerHTML = html;
 }
 
 // ===== Star Map =====
@@ -1224,16 +1406,16 @@ function pluginDisplayName(p) {
   return name;
 }
 
-function renderSettingsSidebar() {
-  var el = document.querySelector('.settings-sidebar');
+function renderSettingsTabs() {
+  var el = document.getElementById('settings-tabs');
   if (!el) return;
   el.innerHTML = '';
   state.settingsPlugins.forEach(function(p) {
-    var a = document.createElement('a');
-    a.textContent = pluginDisplayName(p);
-    if (p === state.selectedSection) a.className = 'active';
-    a.onclick = function() { state.selectedSection = p; renderOneSettings() };
-    el.appendChild(a);
+    var s = document.createElement('span');
+    s.textContent = pluginDisplayName(p);
+    if (p === state.selectedSection) s.className = 'active';
+    s.onclick = function() { state.selectedSection = p; renderOneSettings() };
+    el.appendChild(s);
   });
 }
 
@@ -1262,7 +1444,10 @@ function renderOneSettings() {
   var regularKeys = filtered.filter(function(k) {
     return !k.startsWith('core.llm.sources.') && hideTopLlms.indexOf(k) === -1 && !k.startsWith('plugin.mcp.servers.') && k !== 'plugin.mcp.servers';
   });
-  var html = '<div class="settings-layout"><div class="settings-sidebar"></div><div class="settings-content">';
+  var html = '<div class="card"><h2>' + __('后端连接','Backend Connections') + '</h2>'
+    + '<div id="conn-manager"></div></div>'
+    + '<div class="settings-tabs" id="settings-tabs"></div>'
+    + '<div class="settings-content">';
   if (regularKeys.length === 0 && Object.keys(sourceMap).length === 0 && Object.keys(mcpServerMap).length === 0 && state.selectedSection !== 'plugin.mcp') {
     html += '<div class="card"><h2>' + escHtml(state.selectedSection) + '</h2><p style="color:var(--text-muted)">' + __('暂无设置项','No settings') + '</p></div>';
   } else {
@@ -1371,8 +1556,9 @@ function renderOneSettings() {
     }
   }
   html += '</div></div>';
-  document.getElementById('tab-settings').innerHTML = html;
-  renderSettingsSidebar();
+  document.getElementById('view-settings').innerHTML = html;
+  renderSettingsTabs();
+  renderConnSection();
 }
 
 function markDirty(k) {
@@ -1401,7 +1587,7 @@ async function saveSetting(k) {
 }
 
 function renderConfigDisabled() {
-  document.getElementById('tab-settings').innerHTML = '<div class="card"><h2>' + __('设置','Settings') + '</h2><p style="color:var(--text-muted)">' + __('设置面板已加载','Settings panel loaded') + '</p></div>';
+  document.getElementById('view-settings').innerHTML = '<div class="card"><h2>' + __('设置','Settings') + '</h2><p style="color:var(--text-muted)">' + __('设置面板已加载','Settings panel loaded') + '</p></div>';
   renderOneSettings();
 }
 
@@ -1458,8 +1644,7 @@ async function deleteMCPServer(name) {
 
 // ===== Adapters =====
 async function renderAdapters() {
-  var html = '<div class="card"><h2>' + __('Lua 适配器管理','Lua Adapter Management') + '</h2>'
-    + '<p style="color:var(--text-muted);font-size:12px;margin-bottom:12px">' + __('上传自定义 Lua 适配器脚本以支持新的 LLM 提供商。脚本文件将保存到适配器目录并自动加载到 Lua VM。','Upload custom Lua adapter scripts to support new LLM providers. Scripts are saved to the adapter directory and auto-loaded into the Lua VM.') + '</p></div>';
+  var html = '';
   try {
     var r = await api('/adapters');
     var adapters = r.adapters || [];
@@ -1485,7 +1670,7 @@ async function renderAdapters() {
   } catch(e) {
     html += '<div class="card"><p style="color:var(--text-muted)">' + __('加载适配器失败: ','Failed to load adapters: ') + escHtml(e.message) + '</p></div>';
   }
-  document.getElementById('tab-adapters').innerHTML = html;
+  document.getElementById('view-adapters').innerHTML = html;
 }
 
 async function uploadAdapter() {
@@ -1515,32 +1700,125 @@ async function deleteAdapter(name) {
   state.connections = data.connections || [];
   if (data.currentId) state.currentConn = state.connections.find(function(c) { return c.id === data.currentId }) || null;
   if (state.currentConn) {
-    document.getElementById('app').style.display = 'block';
     connectSSE();
     await loadChatHistory();
     doRenderAll();
     startUptimeTicker();
     setInterval(doRenderAll, 15000);
   } else {
-    document.getElementById('conn-overlay').style.display = 'flex';
+    renderAll();
+    updateConnIndicator();
   }
-  renderConnList();
 })();
 
 // ===== Connection Management =====
 function updateConnIndicator() {
   var el = document.getElementById('conn-name-display');
   var dot = document.getElementById('conn-dot');
+  var rdot = document.getElementById('rail-conn-dot');
   if (state.currentConn) {
     el.textContent = state.currentConn.name;
-    dot.className = 'status-dot ' + (state.status.status === 'running' ? 'dot-green pulse' : 'dot-yellow');
+    var cls = state.status.status === 'running' ? 'dot-green pulse' : 'dot-yellow';
+    dot.className = 'status-dot ' + cls;
+    if (rdot) rdot.className = 'conn-dot ' + (state.status.status === 'running' ? 'dot-green' : 'dot-yellow');
   } else {
-    el.textContent = '未连接';
+    el.textContent = __('未连接','Not connected');
     dot.className = 'status-dot dot-gray';
+    if (rdot) rdot.className = 'conn-dot';
   }
 }
 
-function openConnManager() { renderConnList(); document.getElementById('conn-overlay').style.display = 'flex'; }
+function goSettingsConn() {
+  switchView('settings');
+  renderConnSection();
+}
+
+function openConnManager() { renderConnSection(); switchView('settings'); }
+
+function renderConnSection() {
+  var cont = document.getElementById('conn-manager');
+  if (!cont) return;
+  cont.innerHTML = '';
+  if (state.connections.length === 0) {
+    cont.innerHTML += '<div class="card"><p style="color:var(--text-muted)">' + __('暂无后端连接，添加一个以开始使用','No backend connections yet. Add one to get started.') + '</p></div>';
+  } else {
+    state.connections.forEach(function(c) {
+      var div = document.createElement('div');
+      div.className = 'conn-item ' + (state.currentConn && state.currentConn.id === c.id ? 'active' : '');
+      div.innerHTML = '<span class="status-dot ' + (state.currentConn && state.currentConn.id === c.id ? 'dot-green' : 'dot-gray') + '"></span>'
+        + '<div class="conn-info"><div class="conn-name">' + escHtml(c.name) + '</div><div class="conn-url">' + escHtml(c.url) + '</div></div>'
+        + '<div class="conn-actions">'
+        + '<button class="btn btn-ghost btn-sm" onclick="selectConnection(\'' + c.id + '\')">' + __('连接','Connect') + '</button> '
+        + '<button class="btn btn-ghost btn-sm" onclick="editConnection(\'' + c.id + '\', event)">' + __('编辑','Edit') + '</button> '
+        + '<button class="btn btn-danger btn-sm" onclick="deleteConnection(\'' + c.id + '\', event)">' + __('删除','Delete') + '</button></div>';
+      cont.appendChild(div);
+    });
+  }
+  var form = document.createElement('div');
+  form.className = 'conn-form';
+  form.id = 'conn-form';
+  form.style.display = 'none';
+  form.innerHTML = '<h3 id="conn-form-title">' + __('添加连接','Add Connection') + '</h3>'
+    + '<label>' + __('名称','Name') + '</label><input id="conn-name" placeholder="My HomeAgent">'
+    + '<label>' + __('连接类型','Type') + '</label><select id="conn-type" onchange="toggleConnType()">'
+    + '<option value="webui">WebUI (HTTP)</option>'
+    + '<option value="cli">CLI (unix socket)</option></select>'
+    + '<div id="conn-addr-webui"><label>' + __('地址','URL') + '</label><input id="conn-url" placeholder="http://localhost:18080"></div>'
+    + '<div id="conn-addr-cli" style="display:none"><label>' + __('Socket 路径','Socket Path') + '</label><input id="conn-sock" placeholder="C:\\path\\to\\cli.sock"></div>'
+    + '<label>' + __('API 密钥','API Key') + ' <span style="color:var(--text-muted);font-weight:400">(' + __('可选','optional') + ')</span></label>'
+    + '<input id="conn-key" type="password" placeholder="sk-...">'
+    + '<div class="conn-form-actions">'
+    + '<button class="btn btn-ghost" onclick="cancelConnForm()">' + __('取消','Cancel') + '</button>'
+    + '<button class="btn btn-primary" onclick="saveConnForm()" id="conn-save-btn">' + __('保存','Save') + '</button></div>';
+  cont.appendChild(form);
+  var addBtn = document.createElement('button');
+  addBtn.className = 'btn btn-primary';
+  addBtn.id = 'conn-add-btn';
+  addBtn.textContent = '+ ' + __('添加连接','Add Connection');
+  addBtn.style.marginTop = '8px';
+  addBtn.onclick = showConnForm;
+  cont.appendChild(addBtn);
+}
+
+function toggleConnType() {
+  var t = document.getElementById('conn-type').value;
+  document.getElementById('conn-addr-webui').style.display = t === 'cli' ? 'none' : 'block';
+  document.getElementById('conn-addr-cli').style.display = t === 'cli' ? 'block' : 'none';
+}
+
+function showConnForm() {
+  editingConnId = null;
+  document.getElementById('conn-form-title').textContent = __('添加连接','Add Connection');
+  document.getElementById('conn-name').value = '';
+  document.getElementById('conn-url').value = 'http://localhost:18080';
+  document.getElementById('conn-sock').value = '';
+  document.getElementById('conn-key').value = '';
+  document.getElementById('conn-type').value = 'webui';
+  toggleConnType();
+  document.getElementById('conn-form').style.display = 'block';
+  document.getElementById('conn-add-btn').style.display = 'none';
+}
+
+function editConnection(id, e) {
+  if (e) e.stopPropagation();
+  var c = state.connections.find(function(x) { return x.id === id });
+  if (!c) return;
+  editingConnId = id;
+  document.getElementById('conn-form-title').textContent = __('编辑连接','Edit Connection');
+  document.getElementById('conn-name').value = c.name;
+  document.getElementById('conn-url').value = c.url || 'http://localhost:18080';
+  document.getElementById('conn-sock').value = c.socketPath || '';
+  document.getElementById('conn-key').value = c.apiKey;
+  document.getElementById('conn-type').value = c.type === 'cli' ? 'cli' : 'webui';
+  toggleConnType();
+  document.getElementById('conn-form').style.display = 'block';
+  document.getElementById('conn-add-btn').style.display = 'none';
+}
+
+function cancelConnForm() {
+  document.getElementById('conn-form').style.display = 'none';
+  document.getElementById('conn-add-btn').style.display = 'block';
+}
 
 async function selectConnection(id) {
   if (state.eventSource) { state.eventSource.close(); state.eventSource = null; }
@@ -1548,18 +1826,18 @@ async function selectConnection(id) {
   state.currentConn = data.connections.find(function(c) { return c.id === id }) || null;
   state.connections = data.connections;
   state.messages = [];
-  document.getElementById('app').style.display = 'block';
-  document.getElementById('conn-overlay').style.display = 'none';
   updateConnIndicator();
   connectSSE();
   await loadChatHistory();
   doRenderAll();
   startUptimeTicker();
+  switchView('chat');
+  renderConnSection();
 }
 
 async function deleteConnection(id, e) {
-  e.stopPropagation();
-  if (!confirm('确定删除此连接？')) return;
+  if (e) e.stopPropagation();
+  if (!confirm(__('确定删除此连接？','Delete this connection?'))) return;
   var wasCurrent = state.currentConn && state.currentConn.id === id;
   var data = await window.homeagent.connections.delete(id);
   state.connections = data.connections;
@@ -1568,89 +1846,67 @@ async function deleteConnection(id, e) {
   if (state.currentConn) {
     updateConnIndicator(); doRenderAll(); connectSSE();
   } else {
-    document.getElementById('app').style.display = 'none';
-    document.getElementById('conn-overlay').style.display = 'flex';
+    updateConnIndicator();
   }
-  renderConnList();
-}
-
-function renderConnList() {
-  var list = document.getElementById('conn-list');
-  if (!list) return;
-  list.innerHTML = state.connections.map(function(c) {
-    return '<div class="conn-item ' + (state.currentConn && state.currentConn.id === c.id ? 'active' : '') + '" onclick="selectConnection(\'' + c.id + '\')">'
-    + '<span class="status-dot ' + (state.currentConn && state.currentConn.id === c.id ? 'dot-green' : 'dot-gray') + '"></span>'
-    + '<div class="conn-info"><div class="conn-name">' + escHtml(c.name) + '</div><div class="conn-url">' + escHtml(c.url) + '</div></div>'
-    + '<div class="conn-actions">'
-    + '<button class="btn btn-ghost btn-sm" onclick="editConnection(\'' + c.id + '\', event)">' + __('编辑','Edit') + '</button>'
-    + '<button class="btn btn-danger btn-sm" onclick="deleteConnection(\'' + c.id + '\', event)">' + __('删除','Delete') + '</button></div></div>';
-  }).join('');
+  renderConnSection();
 }
 
 var editingConnId = null;
 
-function showConnForm() {
-  editingConnId = null;
-  document.getElementById('conn-form-title').textContent = __('添加连接','Add Connection');
-  document.getElementById('conn-name').value = '';
-  document.getElementById('conn-url').value = 'http://localhost:8080';
-  document.getElementById('conn-key').value = '';
-  document.getElementById('conn-form').style.display = 'block';
-  document.getElementById('conn-add-btn').style.display = 'none';
-}
-
-function editConnection(id, e) {
-  e.stopPropagation();
-  var c = state.connections.find(function(x) { return x.id === id });
-  if (!c) return;
-  editingConnId = id;
-  document.getElementById('conn-form-title').textContent = __('编辑连接','Edit Connection');
-  document.getElementById('conn-name').value = c.name;
-  document.getElementById('conn-url').value = c.url;
-  document.getElementById('conn-key').value = c.apiKey;
-  document.getElementById('conn-form').style.display = 'block';
-  document.getElementById('conn-add-btn').style.display = 'none';
-  document.querySelectorAll('.conn-item').forEach(function(el) { el.style.opacity = '0.4' });
-}
-
-function cancelConnForm() {
-  document.getElementById('conn-form').style.display = 'none';
-  document.getElementById('conn-add-btn').style.display = 'block';
-  document.querySelectorAll('.conn-item').forEach(function(el) { el.style.opacity = '1' });
-}
-
 async function saveConnForm() {
   var name = document.getElementById('conn-name').value.trim();
+  var ctype = document.getElementById('conn-type').value;
   var url = document.getElementById('conn-url').value.trim().replace(/\/+$/, '');
+  var sock = document.getElementById('conn-sock').value.trim();
   var apiKey = document.getElementById('conn-key').value.trim();
-  if (!name || !url) { toast(__('名称和地址不能为空','Name and URL required'), true); return; }
+  if (ctype === 'cli') {
+    if (!name || !sock) { toast(__('名称和 Socket 路径不能为空','Name and Socket Path required'), true); return; }
+  } else {
+    if (!name || !url) { toast(__('名称和地址不能为空','Name and URL required'), true); return; }
+  }
   var testBtn = document.querySelector('#conn-form .btn-primary');
   testBtn.textContent = __('测试中...','Testing...'); testBtn.disabled = true;
   try {
-    var testR = await fetch(url + '/api/v1/status', { headers: apiKey ? { 'X-API-Key': apiKey } : {} });
-    if (!testR.ok) { toast(__('连接测试失败: HTTP ','Connection test failed: HTTP ') + testR.status, true); testBtn.textContent = __('保存 / Save','Save'); testBtn.disabled = false; return; }
+    if (ctype === 'cli') {
+      if (!window.homeagent.cli) throw new Error('cli bridge unavailable');
+      var testR = await window.homeagent.cli.request(sock, apiKey, '/status');
+      if (testR.error || testR.type === 'error') {
+        toast(__('CLI 连接测试失败: ','CLI test failed: ') + (testR.error || testR.type), true);
+        testBtn.textContent = __('保存','Save'); testBtn.disabled = false; return;
+      }
+    } else {
+      var testR = await fetch(url + '/api/v1/status', { headers: apiKey ? { 'X-API-Key': apiKey } : {} });
+      if (!testR.ok) { toast(__('连接测试失败: HTTP ','Connection test failed: HTTP ') + testR.status, true); testBtn.textContent = __('保存','Save'); testBtn.disabled = false; return; }
+    }
   } catch(e) {
-    toast(__('无法连接到 ','Cannot connect to ') + url + ': ' + e.message, true);
-    testBtn.textContent = __('保存 / Save','Save'); testBtn.disabled = false; return;
+    toast(__('无法连接到 ','Cannot connect to ') + (ctype === 'cli' ? sock : url) + ': ' + e.message, true);
+    testBtn.textContent = __('保存','Save'); testBtn.disabled = false; return;
   }
-  testBtn.textContent = __('保存 / Save','Save'); testBtn.disabled = false;
+  testBtn.textContent = __('保存','Save'); testBtn.disabled = false;
+  var connData = ctype === 'cli'
+    ? { name: name, type: 'cli', socketPath: sock, url: '', apiKey: apiKey }
+    : { name: name, type: 'webui', url: url, apiKey: apiKey };
   var data;
   if (editingConnId) {
-    data = await window.homeagent.connections.update(editingConnId, { name: name, url: url, apiKey: apiKey });
+    data = await window.homeagent.connections.update(editingConnId, connData);
   } else {
-    data = await window.homeagent.connections.add({ name: name, url: url, apiKey: apiKey });
+    data = await window.homeagent.connections.add(connData);
   }
   state.connections = data.connections;
   var cur = data.connections.find(function(c) { return c.id === data.currentId });
+  var switched = !!cur && (!state.currentConn || state.currentConn.id !== cur.id);
   if (cur) {
     state.currentConn = cur;
-    if (!document.getElementById('app').style.display || document.getElementById('app').style.display === 'none') {
-      document.getElementById('app').style.display = 'block';
-      document.getElementById('conn-overlay').style.display = 'none';
+    if (switched) {
+      if (state.eventSource) { state.eventSource.close(); state.eventSource = null; }
+      state.messages = [];
       updateConnIndicator(); connectSSE(); await loadChatHistory(); doRenderAll(); startUptimeTicker();
-    } else { updateConnIndicator(); if (editingConnId) doRenderAll(); }
+      switchView('chat');
+    } else {
+      updateConnIndicator(); doRenderAll();
+    }
   }
-  cancelConnForm(); renderConnList();
+  cancelConnForm(); renderConnSection();
 }
 
 document.addEventListener('keydown', function(e) {
@@ -1661,6 +1917,8 @@ document.addEventListener('keydown', function(e) {
 connectSSE = function() {
   if (state.eventSource) { state.eventSource.close(); state.eventSource = null; }
   if (!state.currentConn) return;
+  // CLI 连接无 SSE 通道，聊天走同步 cli:request
+  if (state.currentConn.type === 'cli') return;
   connectFetchSSE(state.currentConn.url + '/api/v1/chat/events');
 };
 
@@ -1688,39 +1946,72 @@ async function connectFetchSSE(url) {
         var ev = JSON.parse(raw); var p = ev.payload || {};
         if (type === 'agent_output') {
           state.chatStage = __('AI 回复中...','AI replying...');
-          if (state.messages.length > 0 && state.messages[state.messages.length - 1].role === 'assistant' && !state.messages[state.messages.length - 1]._final) {
-            state.messages[state.messages.length - 1].content += (p.content || '');
+          if (p.kind === 'channel_output') {
+            state.messages.push({ role: 'assistant', content: p.content || '', source: p.channel || '', _final: true, _grow: true });
             rerenderChatIfActive(); return;
           }
-          state.messages.push({ role: 'assistant', content: p.content || '', _streaming: true });
+          var last = state.messages.length > 0 ? state.messages[state.messages.length - 1] : null;
+          if (last && last.role === 'assistant' && !last._final) {
+            last._grow = true;
+            last.content += (p.content || '');
+            rerenderChatIfActive(); return;
+          }
+          if (last && last.role === 'assistant' && last._final) { return; }
+          state.messages.push({ role: 'assistant', content: p.content || '', _streaming: true, _grow: true });
           rerenderChatIfActive();
         } else if (type === 'reasoning') {
-          if (p.content && state.messages.length > 0) {
-            var last = state.messages[state.messages.length - 1];
-            if (last.role === 'assistant') {
-              state.chatStage = __('AI 思考中...','AI thinking...');
-              last.reasoning_content = (last.reasoning_content || '') + (p.content || '');
-              rerenderChatIfActive();
+          if (p.content) {
+            state.chatStage = __('AI 思考中...','AI thinking...');
+            var last = state.messages.length > 0 ? state.messages[state.messages.length - 1] : null;
+            if (!last || last.role !== 'assistant' || last._final) {
+              state.messages.push({ role: 'assistant', content: '', reasoning_content: '', tool_calls: [], _streaming: true });
+              last = state.messages[state.messages.length - 1];
             }
+            last.reasoning_content = (last.reasoning_content || '') + (p.content || '');
+            rerenderChatIfActive();
           }
         } else if (type === 'tool_call') {
           if (!p.tool) return;
           var last = state.messages.length > 0 ? state.messages[state.messages.length - 1] : null;
-          if (!last || last.role !== 'assistant') {
+          if (!last || last.role !== 'assistant' || last._final) {
             state.messages.push({ role: 'assistant', content: '', tool_calls: [], _streaming: true });
             last = state.messages[state.messages.length - 1];
           }
           if (!last.tool_calls) last.tool_calls = [];
           last.tool_calls.push({ tool: p.tool, name: p.tool, args: p.args || {}, result: p.result || '', status: p.status || 'ok', plugin: p.plugin || '' });
+          var pidx = (state.pendingTools || []).indexOf(p.tool);
+          if (pidx !== -1) state.pendingTools.splice(pidx, 1);
           state.chatStage = __('工具调用: ','Tool: ') + (p.tool || '');
           rerenderChatIfActive();
+        } else if (type === 'terminal_output') {
+          if (!p.terminal_id) return;
+          var tid = p.terminal_id;
+          if (!state.termScreens) state.termScreens = {};
+          var scr = state.termScreens[tid] || (state.termScreens[tid] = { output: '', running: true });
+          if (p.output) scr.output += p.output;
+          if (typeof p.running === 'boolean') scr.running = p.running;
+          var bufel = document.getElementById('term-buf-' + tid);
+          if (bufel) {
+            appendTermBuf(bufel, p.output || '');
+            var dot = document.getElementById('term-dot-' + tid);
+            if (dot) dot.className = 'term-dot' + (scr.running ? '' : ' stopped');
+          }
         } else if (type === 'stage') {
           var phase = p.phase || ''; var tool = p.tool || '';
-          if (phase === 'pre_action') state.chatStage = __('AI 思考中...','AI thinking...');
-          else if (phase === 'before_toolcall') state.chatStage = __('工具调用: ','Tool: ') + (tool || '');
-          else if (phase === 'before_output') state.chatStage = __('生成回复中...','Generating response...');
+          if (p.channel !== '_consolidation_') {
+            if (phase === 'pre_action') state.chatStage = __('AI 思考中...','AI thinking...');
+            else if (phase === 'before_toolcall') {
+              state.chatStage = __('工具调用: ','Tool: ') + (tool || '');
+              if (tool && (state.pendingTools || []).indexOf(tool) === -1) {
+                if (!state.pendingTools) state.pendingTools = [];
+                state.pendingTools.push(tool);
+                rerenderChatIfActive();
+              }
+            }
+            else if (phase === 'before_output') state.chatStage = __('生成回复中...','Generating response...');
+          }
           var badge = document.getElementById('chat-stage');
-          if (badge) { badge.textContent = state.chatStage || ''; badge.style.display = state.chatLoading ? 'inline' : 'none' }
+          if (badge) { badge.textContent = state.chatStage || ''; badge.style.display = 'none'; }
         }
       } catch(err) {}
     }
@@ -1735,7 +2026,7 @@ async function connectFetchSSE(url) {
 }
 
 function rerenderChatIfActive() {
-  var tab = document.getElementById('tab-chat');
+  var tab = document.getElementById('view-chat');
   if (tab && tab.classList.contains('active')) { renderChat(); renderChatStarmap(); renderTerminals(); renderCmdHistory(); }
 }
 

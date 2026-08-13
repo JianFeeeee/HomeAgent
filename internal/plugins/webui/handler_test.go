@@ -632,13 +632,13 @@ func TestSettingsAPIFlow(t *testing.T) {
 		if !strings.Contains(html, "settings-layout") {
 			t.Fatal("HTML should contain settings-layout class")
 		}
-		if !strings.Contains(html, "settings-sidebar") {
-			t.Fatal("HTML should contain settings-sidebar class")
+		if !strings.Contains(html, "settings-tabs") {
+			t.Fatal("HTML should contain settings-tabs class")
 		}
 		if !strings.Contains(html, "saveSetting") {
 			t.Fatal("HTML should contain saveSetting JS function")
 		}
-		if !strings.Contains(html, "api('/settings'") {
+		if !strings.Contains(html, `api("/settings"`) {
 			t.Fatal("HTML should call api('/settings')")
 		}
 	})
