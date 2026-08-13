@@ -22,6 +22,7 @@ let state = {
   chatStick: true,
   pendingTools: [],
   eventSource: null,
+  chatFinalIdx: -1,
   lang: localStorage.getItem('ha-lang') || 'zh',
   connections: [], currentConn: null,
 
@@ -828,6 +829,7 @@ async function sendChat() {
   var text = inp.value.trim();
   if (!text || state.chatLoading) return;
   state.chatStick = true;
+  state.chatFinalIdx = -1;
   state.messages.push({ role: 'user', content: text });
   inp.value = '';
   rerenderChat();
@@ -858,6 +860,7 @@ async function sendChat() {
         _grow: true
       });
     }
+    state.chatFinalIdx = state.messages.length - 1;
     rerenderChat();
   } catch(e) {
     state.messages.push({ role: 'assistant', content: __('错误: ','Error: ') + e.message, _final: true });
@@ -1947,7 +1950,13 @@ async function connectFetchSSE(url) {
         if (type === 'agent_output') {
           state.chatStage = __('AI 回复中...','AI replying...');
           if (p.kind === 'channel_output') {
-            state.messages.push({ role: 'assistant', content: p.content || '', source: p.channel || '', _final: true, _grow: true });
+            var cm = { role: 'assistant', content: p.content || '', source: p.channel || '', _final: true, _grow: true };
+            if (state.chatFinalIdx >= 0 && state.chatFinalIdx < state.messages.length) {
+              state.messages.splice(state.chatFinalIdx, 0, cm);
+              state.chatFinalIdx++;
+            } else {
+              state.messages.push(cm);
+            }
             rerenderChatIfActive(); return;
           }
           var last = state.messages.length > 0 ? state.messages[state.messages.length - 1] : null;
@@ -1956,7 +1965,7 @@ async function connectFetchSSE(url) {
             last.content += (p.content || '');
             rerenderChatIfActive(); return;
           }
-          if (last && last.role === 'assistant' && last._final) { return; }
+          if (last && last.role === 'assistant' && last._final && !last.source) { return; }
           state.messages.push({ role: 'assistant', content: p.content || '', _streaming: true, _grow: true });
           rerenderChatIfActive();
         } else if (type === 'reasoning') {
