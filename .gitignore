@@ -34,3 +34,11 @@ third_party/homeagent-sdk/example/
 
 # codegraph 本地索引配置（含嵌套 SDK 仓放行，仅本地生效）
 codegraph.json
+
+# 运行时产物(不提交)
+adapters/
+knowledge/
+memory/
+scripts/
+terminal_locked_log.txt
+
