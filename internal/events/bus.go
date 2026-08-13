@@ -16,6 +16,7 @@ const (
 	EventReasoning      EventType = "reasoning"
 	EventStage          EventType = "stage"
 	EventSystem         EventType = "system"
+	EventTerminalOutput EventType = "terminal_output"
 	EventAll            EventType = "*"
 )
 

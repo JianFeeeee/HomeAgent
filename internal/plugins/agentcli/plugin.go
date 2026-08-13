@@ -46,8 +46,17 @@ func terminalRunning(t *TerminalSession) bool {
 	return t.cmd != nil && (t.cmd.ProcessState == nil || !t.cmd.ProcessState.Exited())
 }
 
+// terminalWatch 终端提醒规则（由 terminal_watch 工具设置）。
+type terminalWatch struct {
+	interval    time.Duration // 固定时间反馈间隔，0 禁用
+	onExit      bool          // 命令执行结束提醒（默认 true）
+	bufferBytes int           // 该终端专用缓冲阈值（字节），0 使用全局 notify_bytes
+	quiet       bool          // 静默模式：不随输出流通知，仅定时反馈/结束提醒/空闲汇总
+}
+
 type TerminalSession struct {
 	id        string
+	command   string
 	cmd       *exec.Cmd
 	session   ptyTerm
 	mu        sync.Mutex
@@ -59,8 +68,15 @@ type TerminalSession struct {
 	done      chan struct{}
 
 	// 通知节流字段
-	unreadBytes   int           // 最近一次通知后积累的未读字节数
-	lastNotify    time.Time     // 最近一次通知时间
+	unreadBytes  int             // 最近一次通知后积累的未读字节数
+	lastNotify   time.Time       // 最近一次通知时间
+	lastData     time.Time       // 最近一次读到的数据时间（用于判定输出停止）
+	lastFeedback time.Time       // 最近一次定时反馈时间
+	backoff      time.Duration   // 输出风暴退避：持续高速输出时通知间隔翻倍
+	watch        terminalWatch   // 该终端的提醒规则
+
+	// 实时画面推流（terminal_output 事件）
+	stream bytes.Buffer // 待推送的增量输出，由 readLoop 每 200ms flush 一次
 }
 
 func (t *TerminalSession) Write(input string) (int, error) {
@@ -85,12 +101,13 @@ func (t *TerminalSession) Close() {
 	t.mu.Unlock()
 
 	close(t.stopCh)
+	// 先终止进程（各平台实现：Linux 信号 / Windows TerminateProcess，幂等），再释放资源。
+	// 不能依赖 cmd.Process.Kill()：Windows 后端 cmd.Process 为占位（仅 Pid）。
+	if t.session != nil {
+		_ = t.session.Kill()
+	}
 	t.session.Close()
 	<-t.done
-
-	if t.cmd != nil && t.cmd.Process != nil {
-		t.cmd.Process.Kill()
-	}
 }
 
 func (t *TerminalSession) ReadOutput() string {
@@ -119,6 +136,17 @@ func (t *TerminalSession) appendOutput(data []byte) {
 		}
 	}
 	t.buf.Write(data)
+	// 同步追加到实时画面推流缓冲（最大 64KB，超出丢弃最旧部分）
+	const maxStream = 64 * 1024
+	if t.stream.Len()+len(data) > maxStream {
+		excess := t.stream.Len() + len(data) - maxStream
+		if t.stream.Len() > excess {
+			t.stream.Next(excess)
+		} else {
+			t.stream.Reset()
+		}
+	}
+	t.stream.Write(data)
 }
 
 func (t *TerminalSession) IsExpired() bool {
@@ -194,8 +222,10 @@ func (p *Plugin) Start(s *sdk.PluginSDK) error {
 	}
 
 	s.RegisterTool("terminal_create", sdk.ToolDef{
-		Name:        "terminal_create",
-		Description: "创建一个新的交互式终端会话。返回终端 ID，后续通过此 ID 进行读写操作。适用于运行交互式程序如 vim、ssh、top、nano 等。终端默认 5 分钟后自动关闭，可通过 timeout 参数调整。",
+		Name: "terminal_create",
+		Description: "创建一个新的交互式终端会话。返回终端 ID，后续通过此 ID 进行读写操作。适用于运行交互式程序如 vim、ssh、top、nano 等。" +
+			"通知模式通过 notify 参数选择（默认 exit）：exit=仅命令执行结束后提醒一次；interval=定时反馈（如 interval=30s 每 30 秒反馈一次状态摘要）；" +
+			"buffer=未读输出积累到指定字节数后提醒（如 buffer=8192）；多个模式用逗号组合（如 interval=30s,buffer=8192）。终端默认 5 分钟后自动关闭，可通过 timeout 参数调整。",
 		NoMemory:    true,
 		Parameters: map[string]interface{}{
 			"type": "object",
@@ -203,6 +233,10 @@ func (p *Plugin) Start(s *sdk.PluginSDK) error {
 				"command": map[string]interface{}{
 					"type":        "string",
 					"description": "要执行的命令（默认 bash）。如需运行特定程序直接传入即可，例如：vim /tmp/test.txt",
+				},
+				"notify": map[string]interface{}{
+					"type":        "string",
+					"description": "通知模式（可选）：exit（默认，命令结束后提醒）；interval=时长（定时反馈，如 30s/1m）；buffer=字节数（缓冲阈值提醒）；可逗号组合",
 				},
 				"timeout": map[string]interface{}{
 					"type":        "string",
@@ -249,8 +283,8 @@ func (p *Plugin) Start(s *sdk.PluginSDK) error {
 	})
 
 	s.RegisterTool("terminal_read", sdk.ToolDef{
-		Name:        "terminal_read",
-		Description: "读取指定终端的当前屏幕内容。返回自上次读取以来的新输出。如需持续监控请多次调用。",
+		Name: "terminal_read",
+		Description: "读取指定终端的输出。mode=new（默认）返回自上次读取以来的新输出并清空缓冲；mode=now 返回终端当前显示的全部屏幕内容（不清空缓冲）。如需持续监控请多次调用。",
 		NoMemory:    true,
 		Parameters: map[string]interface{}{
 			"type": "object",
@@ -259,9 +293,13 @@ func (p *Plugin) Start(s *sdk.PluginSDK) error {
 					"type":        "string",
 					"description": "终端 ID",
 				},
+				"mode": map[string]interface{}{
+					"type":        "string",
+					"description": "读取模式：new（默认，新输出并清空缓冲）或 now（当前屏幕全部内容，不清理）",
+				},
 				"clear": map[string]interface{}{
 					"type":        "boolean",
-					"description": "读取后是否清除缓冲区（默认 true）",
+					"description": "读取后是否清除缓冲区（默认与 mode 一致：new 清除，now 不清除）",
 				},
 			},
 			"required": []string{"id"},
@@ -326,6 +364,48 @@ func (p *Plugin) Start(s *sdk.PluginSDK) error {
 		return p.handleList()
 	})
 
+	s.RegisterTool("terminal_watch", sdk.ToolDef{
+		Name: "terminal_watch",
+		Description: "为指定终端设置提醒规则，避免长时间运行任务（编译/下载/构建等）的输出造成通知风暴。" +
+			"可选规则：interval=固定时间反馈（每隔该时长向 agent 反馈一次终端状态摘要）；" +
+			"on_exit=命令执行结束提醒；buffer_bytes=未读输出积累到该字节数时提醒一次；" +
+			"quiet=静默模式（抑制随输出流的通知，仅保留定时反馈与结束提醒，推荐长任务使用）。" +
+			"未提供的字段保持原值，clear=true 清除全部规则。默认 on_exit=true。",
+		NoMemory: true,
+		Parameters: map[string]interface{}{
+			"type": "object",
+			"properties": map[string]interface{}{
+				"id": map[string]interface{}{
+					"type":        "string",
+					"description": "终端 ID，来自 terminal_create 的返回值",
+				},
+				"interval": map[string]interface{}{
+					"type":        "string",
+					"description": "固定时间反馈间隔，如 30s, 1m, 5m（可选，0 禁用）",
+				},
+				"on_exit": map[string]interface{}{
+					"type":        "boolean",
+					"description": "命令执行结束时是否提醒（默认 true）",
+				},
+				"buffer_bytes": map[string]interface{}{
+					"type":        "integer",
+					"description": "未读输出积累阈值（字节），达到后提醒一次（可选，默认全局 2048）",
+				},
+				"quiet": map[string]interface{}{
+					"type":        "boolean",
+					"description": "静默模式：不随输出流通知，仅保留定时反馈与结束提醒（推荐编译/下载等长任务）",
+				},
+				"clear": map[string]interface{}{
+					"type":        "boolean",
+					"description": "清除该终端全部提醒规则（恢复默认行为）",
+				},
+			},
+			"required": []string{"id"},
+		},
+	}, func(args map[string]interface{}) (interface{}, error) {
+		return p.handleWatch(args)
+	})
+
 	p.wg.Add(1)
 	go p.cleanupLoop(s)
 
@@ -378,18 +458,28 @@ func (p *Plugin) handleCreate(s *sdk.PluginSDK, args map[string]interface{}) (in
 		cols = uint16(c)
 	}
 
+	// 通知模式：默认 exit（命令执行结束后提醒一次）。
+	// 支持 interval=30s / buffer=8192 / quiet，可逗号组合。
+	watch := terminalWatch{onExit: true, quiet: true}
+	if notifyStr, ok := args["notify"].(string); ok && notifyStr != "" {
+		watch = parseNotifyMode(notifyStr, watch)
+	}
+
 	term, cmd, err := newCommandPty(command, rows, cols)
 	if err != nil {
 		return map[string]interface{}{"error": fmt.Sprintf("创建终端失败: %v", err)}, nil
 	}
 
 	session := &TerminalSession{
+		id:        "",
+		command:   command,
 		cmd:       cmd,
 		session:   term,
 		createdAt: time.Now(),
 		timeout:   timeout,
 		stopCh:    make(chan struct{}),
 		done:      make(chan struct{}),
+		watch:     watch,
 	}
 
 	p.mu.Lock()
@@ -404,13 +494,32 @@ func (p *Plugin) handleCreate(s *sdk.PluginSDK, args map[string]interface{}) (in
 	log.Printf("[agentcli] created terminal %s: command=%q timeout=%v rows=%d cols=%d", id, command, timeout, rows, cols)
 
 	return map[string]interface{}{
-		"id":      id,
-		"status":  "created",
-		"command": command,
-		"timeout": timeout.String(),
-		"rows":    rows,
-		"cols":    cols,
+		"id":          id,
+		"status":      "created",
+		"command":     command,
+		"timeout":     timeout.String(),
+		"rows":        rows,
+		"cols":        cols,
+		"notify_mode": notifyModeString(watch),
 	}, nil
+}
+
+// notifyModeString 输出可读的通知模式描述。
+func notifyModeString(w terminalWatch) string {
+	var parts []string
+	if w.onExit {
+		parts = append(parts, "exit")
+	}
+	if w.interval > 0 {
+		parts = append(parts, "interval="+w.interval.String())
+	}
+	if w.bufferBytes > 0 {
+		parts = append(parts, fmt.Sprintf("buffer=%d", w.bufferBytes))
+	}
+	if len(parts) == 0 {
+		return "quiet"
+	}
+	return strings.Join(parts, ",")
 }
 
 func (p *Plugin) handleWrite(s *sdk.PluginSDK, args map[string]interface{}) (interface{}, error) {
@@ -455,13 +564,49 @@ func (p *Plugin) handleWrite(s *sdk.PluginSDK, args map[string]interface{}) (int
 	}, nil
 }
 
+// parseNotifyMode 解析 notify 参数并合并进 watch。
+// 支持：exit / quiet / interval=时长 / buffer=字节数，逗号分隔组合。
+func parseNotifyMode(s string, base terminalWatch) terminalWatch {
+	w := base
+	for _, part := range strings.Split(s, ",") {
+		part = strings.TrimSpace(part)
+		if part == "" {
+			continue
+		}
+		kv := strings.SplitN(part, "=", 2)
+		key := strings.TrimSpace(kv[0])
+		val := ""
+		if len(kv) == 2 {
+			val = strings.TrimSpace(kv[1])
+		}
+		switch key {
+		case "exit":
+			w.onExit = true
+			w.quiet = false
+		case "quiet", "silent":
+			w.quiet = true
+		case "interval":
+			if d, err := time.ParseDuration(val); err == nil && d > 0 {
+				w.interval = d
+			}
+		case "buffer":
+			var n int
+			if _, err := fmt.Sscanf(val, "%d", &n); err == nil && n > 0 {
+				w.bufferBytes = n
+			}
+		}
+	}
+	return w
+}
+
 func (p *Plugin) handleRead(args map[string]interface{}) (interface{}, error) {
 	id, _ := args["id"].(string)
 	if id == "" {
 		return map[string]interface{}{"error": "id is required"}, nil
 	}
 
-	clear := true
+	mode, _ := args["mode"].(string)
+	clear := mode != "now"
 	if v, ok := args["clear"].(bool); ok {
 		clear = v
 	}
@@ -474,19 +619,29 @@ func (p *Plugin) handleRead(args map[string]interface{}) (interface{}, error) {
 	}
 
 	var output string
+	session.mu.Lock()
 	if clear {
-		output = session.ReadAndClearOutput()
+		output = session.buf.String()
+		session.buf.Reset()
+		// 实时画面推流缓冲同步清空，避免 terminal_output 事件与读取结果重复
+		session.stream.Reset()
 	} else {
-		output = session.ReadOutput()
+		output = session.buf.String()
 	}
+	session.mu.Unlock()
 
 	if output == "" {
-		output = "[终端无新输出]"
+		if mode == "now" {
+			output = "[终端当前无屏幕内容]"
+		} else {
+			output = "[终端无新输出]"
+		}
 	}
 
 	return map[string]interface{}{
 		"status":   "ok",
 		"terminal": id,
+		"mode":     mode,
 		"output":   output,
 		"running":  terminalRunning(session),
 		"uptime":   time.Since(session.createdAt).String(),
@@ -550,6 +705,55 @@ func (p *Plugin) handleClose(args map[string]interface{}) (interface{}, error) {
 	}, nil
 }
 
+func (p *Plugin) handleWatch(args map[string]interface{}) (interface{}, error) {
+	id, _ := args["id"].(string)
+	if id == "" {
+		return map[string]interface{}{"error": "id is required"}, nil
+	}
+
+	p.mu.Lock()
+	session, ok := p.sessions[id]
+	p.mu.Unlock()
+	if !ok {
+		return map[string]interface{}{"error": fmt.Sprintf("终端 %s 不存在或已关闭", id)}, nil
+	}
+
+	session.mu.Lock()
+	if v, ok := args["clear"].(bool); ok && v {
+		session.watch = terminalWatch{onExit: true}
+	} else {
+		if v, ok := args["interval"].(string); ok && v != "" {
+			if d, err := time.ParseDuration(v); err == nil && d >= 0 {
+				session.watch.interval = d
+			}
+		}
+		if v, ok := args["on_exit"].(bool); ok {
+			session.watch.onExit = v
+		}
+		if v, ok := args["buffer_bytes"].(float64); ok && v >= 0 {
+			session.watch.bufferBytes = int(v)
+		}
+		if v, ok := args["quiet"].(bool); ok {
+			session.watch.quiet = v
+		}
+		if session.watch.interval == 0 && session.watch.bufferBytes == 0 && !session.watch.quiet {
+			session.watch.onExit = true
+		}
+	}
+	w := session.watch
+	session.mu.Unlock()
+
+	log.Printf("[agentcli] watch updated for %s: %+v", id, w)
+	return map[string]interface{}{
+		"status":       "ok",
+		"terminal":     id,
+		"interval":     w.interval.String(),
+		"on_exit":      w.onExit,
+		"buffer_bytes": w.bufferBytes,
+		"quiet":        w.quiet,
+	}, nil
+}
+
 func (p *Plugin) handleList() (interface{}, error) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
@@ -571,6 +775,7 @@ func (p *Plugin) handleList() (interface{}, error) {
 		}
 		terms = append(terms, termInfo{
 			ID:        t.id,
+			Command:   t.command,
 			Uptime:    time.Since(t.createdAt).Round(time.Second).String(),
 			ExpiresIn: remaining.Round(time.Second).String(),
 			Running:   running,
@@ -598,9 +803,24 @@ func (p *Plugin) readLoop(t *TerminalSession, s *sdk.PluginSDK) {
 	readCh := make(chan readResult, 4)
 	go p.reader(t, buf, readCh)
 
+	// 实时画面推流 ticker：每 200ms 批量发布一次 terminal_output 事件
+	flushTicker := time.NewTicker(200 * time.Millisecond)
+	defer flushTicker.Stop()
+
 	// 立即发送首次"终端已启动"通知，让 agent 感知存在
 	s.InjectText("agentcli", "agentcli", fmt.Sprintf("[终端 %s 已启动]", t.id))
-	t.lastNotify = time.Now()
+	now := time.Now()
+	t.mu.Lock()
+	t.lastNotify = now
+	t.lastData = now
+	t.lastFeedback = now
+	t.mu.Unlock()
+
+// 硬上限：未读输出积累达到该值也通知一次（防大输出静默丢失），频率极低
+	hardNotifyBytes := 64 * 1024
+	hardNotifyInterval := 10 * time.Second
+	// 输出停止判定：超过该时长无新数据则视为输出停止
+	quietLatency := 2 * time.Second
 
 	for {
 		if t.IsExpired() {
@@ -613,16 +833,52 @@ func (p *Plugin) readLoop(t *TerminalSession, s *sdk.PluginSDK) {
 		}
 
 		if !terminalRunning(t) {
-			s.InjectText("agentcli", "agentcli", fmt.Sprintf("[终端 %s 中的进程已退出]", t.id))
+			if t.watch.onExit {
+				s.InjectText("agentcli", "agentcli", fmt.Sprintf("[终端 %s 中的命令已执行结束]", t.id))
+			} else {
+				s.InjectText("agentcli", "agentcli", fmt.Sprintf("[终端 %s 中的进程已退出]", t.id))
+			}
 			p.mu.Lock()
 			delete(p.sessions, t.id)
 			p.mu.Unlock()
 			return
 		}
 
+		// 固定时间反馈：watch.interval > 0 时每隔该时长主动反馈一次状态摘要
+		t.mu.Lock()
+		if t.watch.interval > 0 && time.Since(t.lastFeedback) >= t.watch.interval {
+			t.lastFeedback = time.Now()
+			t.lastNotify = t.lastFeedback
+			unread := t.unreadBytes
+			t.unreadBytes = 0
+			preview := previewTail(t.buf.String(), 120)
+			t.mu.Unlock()
+			s.InjectText("agentcli", "agentcli",
+				fmt.Sprintf("[终端 %s 定时反馈: 运行中, 期间新输出约 %d 字节]\n%s", t.id, unread, preview))
+			continue
+		}
+		t.mu.Unlock()
+
 		select {
 		case <-t.stopCh:
 			return
+		case <-flushTicker.C:
+			// 批量推送终端实时画面增量（独立 ticker，避免被高密度数据饿死）
+			var streamData string
+			t.mu.Lock()
+			if t.stream.Len() > 0 {
+				streamData = t.stream.String()
+				t.stream.Reset()
+			}
+			t.mu.Unlock()
+			if streamData != "" {
+				s.Publish(&sdk.Event{
+					Type:      sdk.EventTerminalOutput,
+					Source:    "agentcli",
+					Payload:   map[string]interface{}{"terminal_id": t.id, "output": streamData, "running": terminalRunning(t)},
+					Timestamp: time.Now().UnixMilli(),
+				})
+			}
 		case r := <-readCh:
 			if r.err != nil {
 				// 读取错误/EOF → 立即通知（进程可能已结束）
@@ -634,30 +890,64 @@ func (p *Plugin) readLoop(t *TerminalSession, s *sdk.PluginSDK) {
 				copy(data, buf[:r.n])
 				t.appendOutput(data)
 
-				// 语义通知：累积未读字节数
+				// 缓冲阈值通知（仅当 agent 显式选择 buffer 模式，或未读积累达到硬上限）。
+				// 默认模式（仅 exit 提醒）下不随输出流通知，杜绝通知风暴。
 				t.mu.Lock()
+				t.lastData = time.Now()
 				t.unreadBytes += r.n
-				needNotify := t.unreadBytes >= p.notifyBytes ||
-					time.Since(t.lastNotify) >= p.notifyInterval
-				t.mu.Unlock()
-
-				if needNotify {
-					t.mu.Lock()
-					preview := t.buf.String()
-					if len(preview) > 200 {
-						preview = preview[len(preview)-200:] // 取最新 200 字符
+				bufThr := t.watch.bufferBytes
+				if bufThr <= 0 {
+					bufThr = p.notifyBytes
+				}
+				minInterval := p.notifyInterval
+				if t.watch.interval > 0 {
+					minInterval = t.watch.interval
+				}
+				// 风暴退避：距上次通知不足 1s 说明输出极速，通知间隔翻倍（上限 30s）
+				if time.Since(t.lastNotify) < time.Second && t.unreadBytes >= bufThr {
+					if t.backoff == 0 {
+						t.backoff = minInterval
+					} else if t.backoff < 30*time.Second {
+						t.backoff *= 2
+						if t.backoff > 30*time.Second {
+							t.backoff = 30 * time.Second
+						}
 					}
-					preview = sanitizePreview(preview)
-					t.unreadBytes = 0
+				}
+				interval := t.backoff + minInterval
+				isHard := t.watch.bufferBytes <= 0 && t.unreadBytes >= hardNotifyBytes
+				if isHard && hardNotifyInterval > interval {
+					interval = hardNotifyInterval
+				}
+				need := t.unreadBytes >= bufThr && time.Since(t.lastNotify) >= interval
+				if need {
 					t.lastNotify = time.Now()
+					t.unreadBytes = 0
+					preview := previewTail(t.buf.String(), 200)
 					t.mu.Unlock()
-
-					s.InjectText("agentcli", "agentcli", fmt.Sprintf("[终端 %s 有新输出]\n%s", t.id, preview))
+					s.InjectText("agentcli", "agentcli",
+						fmt.Sprintf("[终端 %s 有新输出]\n%s", t.id, preview))
+				} else {
+					t.mu.Unlock()
 				}
 			}
 		case <-time.After(pollInterval):
+			// 空闲轮询：输出已停止时复位退避
+			t.mu.Lock()
+			if t.backoff > 0 && time.Since(t.lastData) >= quietLatency {
+				t.backoff = 0
+			}
+			t.mu.Unlock()
 		}
 	}
+}
+
+// previewTail 返回 s 末尾最多 n 字符，并转义控制字符保证可读。
+func previewTail(s string, n int) string {
+	if len(s) > n {
+		s = s[len(s)-n:]
+	}
+	return sanitizePreview(s)
 }
 
 type readResult struct {

@@ -27,6 +27,14 @@ func (a *Agent) process(input string, stageCtx *sdk.StageContext) (response stri
 	tools := a.buildToolDefs()
 
 	msgs := a.buildMessages(sysPrompt, input, budget.ContextTokens)
+	// 工具提醒（interrupt）：以 system 角色注入，不让模型误认为用户发言
+	if a.interruptInput {
+		last := msgs[len(msgs)-1]
+		last.Role = "system"
+		last.Content = "[中断消息] " + last.Content
+		msgs[len(msgs)-1] = last
+		a.interruptInput = false
+	}
 	if blocks, ok := stageCtx.Extra["media_blocks"].([]agentAPI.ContentBlock); ok && len(blocks) > 0 {
 		if len(msgs) > 0 {
 			msgs[len(msgs)-1].Blocks = blocks
@@ -56,7 +64,16 @@ func (a *Agent) process(input string, stageCtx *sdk.StageContext) (response stri
 		for _, interrupt := range a.drainInterrupts() {
 			msgs = append(msgs, agentAPI.Message{
 				Role:    "system",
-				Content: interrupt,
+				Content: "[中断消息] " + interrupt,
+			})
+		}
+
+		// zen 兼容网关要求请求的最后一条消息必须是 user(thinking 续写模式校验),
+		// 工具轮产出的 tool/assistant 消息作结尾会被 400 拒绝,故补一条 user 占位。
+		if last := msgs[len(msgs)-1]; last.Role != "user" {
+			msgs = append(msgs, agentAPI.Message{
+				Role:    "user",
+				Content: "请根据以上工具结果继续。",
 			})
 		}
 
@@ -177,6 +194,13 @@ func (a *Agent) process(input string, stageCtx *sdk.StageContext) (response stri
 		}
 		a.publishEvent(events.EventAgentLLMChain, chainPayload)
 
+		if resp.ReasoningContent != "" {
+			a.publishEvent(events.EventReasoning, map[string]interface{}{
+				"content": resp.ReasoningContent,
+				"channel": a.currentOutputChannel,
+			})
+		}
+
 		if len(resp.ToolCalls) == 0 {
 			return resp.Content, toolsUsed, toolResults, nil
 		}
@@ -185,15 +209,16 @@ func (a *Agent) process(input string, stageCtx *sdk.StageContext) (response stri
 		for _, tc := range resp.ToolCalls {
 			if len(a.interceptCh) > 0 {
 				for _, interrupt := range a.drainInterrupts() {
-					msgs = append(msgs, agentAPI.Message{Role: "system", Content: interrupt})
+					msgs = append(msgs, agentAPI.Message{Role: "system", Content: "[中断消息] " + interrupt})
 				}
-				a.publishEvent(events.EventToolCall, map[string]interface{}{
-					"tool":   tc.Name,
-					"plugin": a.resolveToolPlugin(tc.Name),
-					"args":   tc.Arguments,
-					"status": "interrupted",
-					"reason": "user interrupt before execution",
-				})
+			a.publishEvent(events.EventToolCall, map[string]interface{}{
+				"tool":    tc.Name,
+				"plugin":  a.resolveToolPlugin(tc.Name),
+				"args":    tc.Arguments,
+				"status":  "interrupted",
+				"reason":  "user interrupt before execution",
+				"channel": a.currentOutputChannel,
+			})
 				break
 			}
 
@@ -208,13 +233,14 @@ func (a *Agent) process(input string, stageCtx *sdk.StageContext) (response stri
 				result := fmt.Sprintf("工具 %s 已被插件拒绝", tc.Name)
 				msgs = append(msgs, agentAPI.Message{Role: "assistant", ToolCalls: []agentAPI.ToolCall{tc}})
 				msgs = append(msgs, agentAPI.Message{Role: "tool", ToolCallID: tc.ID, Content: result})
-				a.publishEvent(events.EventToolCall, map[string]interface{}{
-					"tool":   tc.Name,
-					"plugin": pluginName,
-					"args":   tc.Arguments,
-					"result": result,
-					"status": "denied",
-				})
+			a.publishEvent(events.EventToolCall, map[string]interface{}{
+				"tool":    tc.Name,
+				"plugin":  pluginName,
+				"args":    tc.Arguments,
+				"result":  result,
+				"status":  "denied",
+				"channel": a.currentOutputChannel,
+			})
 				continue
 			}
 			tc.Arguments = stageCtx.ToolCalls[0].Arguments
@@ -248,16 +274,17 @@ func (a *Agent) process(input string, stageCtx *sdk.StageContext) (response stri
 			msgs = append(msgs, agentAPI.Message{Role: "tool", ToolCallID: tc.ID, Content: result})
 
 			a.publishEvent(events.EventToolCall, map[string]interface{}{
-				"tool":   tc.Name,
-				"plugin": pluginName,
-				"args":   tc.Arguments,
-				"result": result,
-				"status": "ok",
+				"tool":    tc.Name,
+				"plugin":  pluginName,
+				"args":    tc.Arguments,
+				"result":  result,
+				"status":  "ok",
+				"channel": a.currentOutputChannel,
 			})
 
 			if len(a.interceptCh) > 0 {
 				for _, interrupt := range a.drainInterrupts() {
-					msgs = append(msgs, agentAPI.Message{Role: "system", Content: interrupt})
+					msgs = append(msgs, agentAPI.Message{Role: "system", Content: "[中断消息] " + interrupt})
 				}
 				break
 			}

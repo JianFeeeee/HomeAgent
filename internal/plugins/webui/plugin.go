@@ -83,6 +83,7 @@ func (p *Plugin) Start(s *sdk.PluginSDK) error {
 				Payload: map[string]interface{}{
 					"content": payload,
 					"channel": "webui",
+					"kind":    "channel_output",
 				},
 			})
 		}

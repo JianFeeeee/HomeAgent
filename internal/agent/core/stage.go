@@ -12,6 +12,14 @@ import (
 )
 
 func (a *Agent) runStage(stage sdk.Stage, ctx *sdk.StageContext) bool {
+	payload := map[string]interface{}{
+		"phase":   string(stage),
+		"channel": a.currentOutputChannel,
+	}
+	if ctx != nil && len(ctx.ToolCalls) > 0 {
+		payload["tool"] = ctx.ToolCalls[0].Name
+	}
+	a.publishEvent(events.EventStage, payload)
 	if a.stageHost == nil {
 		return false
 	}

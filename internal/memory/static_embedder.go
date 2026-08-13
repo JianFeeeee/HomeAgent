@@ -129,12 +129,13 @@ func ensureModelFile(modelPath string) {
 	if modelPath == "" {
 		return
 	}
-	if _, err := os.Stat(modelPath); err == nil {
+	path, _ := parseModelSpec(modelPath)
+	if _, err := os.Stat(path); err == nil {
 		return
 	}
-	url := modelDownloadURL(modelPath)
-	log.Printf("[static_embedder] model %s not found, downloading from fastText...", modelPath)
-	if dlErr := downloadFastTextModel(modelPath, url); dlErr != nil {
+	url := modelDownloadURL(path)
+	log.Printf("[static_embedder] model %s not found, downloading from fastText...", path)
+	if dlErr := downloadFastTextModel(path, url); dlErr != nil {
 		log.Printf("[static_embedder] download failed: %v, will use TF-IDF fallback", dlErr)
 	} else {
 		log.Printf("[static_embedder] download ok")
@@ -183,7 +184,24 @@ func (e *StaticEmbedder) loadAll(paths []string) error {
 	return firstErr
 }
 
-func (e *StaticEmbedder) load(path string, primary bool) error {
+// parseModelSpec 解析模型路径规格：`path#top50000` 表示只加载前 50000 个词向量（按文件顺序，fastText
+// 词频降序，前 N 词覆盖绝大多数文本命中），用于降低常驻内存；无规格返回原路径与 0（全量加载）。
+func parseModelSpec(p string) (path string, topN int) {
+	path = p
+	if i := strings.IndexByte(p, '#'); i >= 0 {
+		path = p[:i]
+		spec := p[i+1:]
+		if strings.HasPrefix(spec, "top") {
+			if n, err := strconv.Atoi(strings.TrimPrefix(spec, "top")); err == nil && n > 0 {
+				topN = n
+			}
+		}
+	}
+	return path, topN
+}
+
+func (e *StaticEmbedder) load(spec string, primary bool) error {
+	path, topN := parseModelSpec(spec)
 	f, err := os.Open(path)
 	if err != nil {
 		return fmt.Errorf("open: %w", err)
@@ -217,7 +235,11 @@ func (e *StaticEmbedder) load(path string, primary bool) error {
 		vecSum = make([]float64, dim)
 	}
 
+	loaded := 0
 	for scanner.Scan() {
+		if topN > 0 && loaded >= topN {
+			break
+		}
 		line := strings.TrimSpace(scanner.Text())
 		if line == "" {
 			continue
@@ -244,6 +266,7 @@ func (e *StaticEmbedder) load(path string, primary bool) error {
 			}
 			count++
 		}
+		loaded++
 	}
 
 	if primary {
@@ -263,7 +286,7 @@ func (e *StaticEmbedder) load(path string, primary bool) error {
 		e.loaded = true
 	}
 
-	log.Printf("[static_embedder] loaded %d words, dim=%d from %s", len(e.words), e.dim, path)
+	log.Printf("[static_embedder] loaded %d words, dim=%d from %s (topN=%d)", len(e.words), e.dim, path, topN)
 	return nil
 }
 

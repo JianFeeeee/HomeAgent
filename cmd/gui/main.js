@@ -12,16 +12,28 @@ let mainWindow;
 function loadConnections() {
   try {
     if (fs.existsSync(CONNECTIONS_FILE)) {
-      return JSON.parse(fs.readFileSync(CONNECTIONS_FILE, 'utf-8'));
+      const data = JSON.parse(fs.readFileSync(CONNECTIONS_FILE, 'utf-8'));
+      normalizeConnections(data);
+      return data;
     }
   } catch (e) {
     console.error('Failed to load connections:', e);
+    // 配置损坏：备份后重建，避免应用一直处于"无连接"状态
+    try {
+      const backup = CONNECTIONS_FILE + '.bak';
+      fs.copyFileSync(CONNECTIONS_FILE, backup);
+      fs.writeFileSync(CONNECTIONS_FILE, '{"connections":[],"currentId":null}', 'utf-8');
+      console.error('Backed up corrupt connections to', backup);
+    } catch (e2) {
+      console.error('Failed to recover connections file:', e2);
+    }
   }
   // Fallback: check app resource dir (installer writes fallback copy there)
   try {
     const fallback = path.join(__dirname, 'connections.json');
     if (fs.existsSync(fallback)) {
       const data = JSON.parse(fs.readFileSync(fallback, 'utf-8'));
+      normalizeConnections(data);
       saveConnections(data);
       console.log('Imported connections from app resource dir');
       return data;
@@ -30,6 +42,15 @@ function loadConnections() {
     console.error('Fallback connections load failed:', e);
   }
   return { connections: [], currentId: null };
+}
+
+// 兼容旧数据：缺失的 type 默认为 webui（HTTP）
+function normalizeConnections(data) {
+  if (!data || !Array.isArray(data.connections)) return;
+  data.connections.forEach((c) => {
+    if (!c.type) c.type = 'webui';
+    if (c.type !== 'cli' && c.type !== 'webui') c.type = 'webui';
+  });
 }
 
 function saveConnections(data) {
@@ -109,7 +130,8 @@ function createWindow() {
     minWidth: 900,
     minHeight: 600,
     title: 'HomeAgent',
-    icon: path.join(__dirname, 'icon.svg'),
+    frame: false,
+    icon: path.join(__dirname, 'icon.ico'),
     webPreferences: {
       preload: path.join(__dirname, 'preload.js'),
       contextIsolation: true,
@@ -128,6 +150,18 @@ function createWindow() {
   });
 }
 
+ipcMain.handle('window:minimize', (e) => {
+  BrowserWindow.fromWebContents(e.sender)?.minimize();
+});
+ipcMain.handle('window:toggleMaximize', (e) => {
+  const win = BrowserWindow.fromWebContents(e.sender);
+  if (!win) return;
+  if (win.isMaximized()) win.unmaximize(); else win.maximize();
+});
+ipcMain.handle('window:close', (e) => {
+  BrowserWindow.fromWebContents(e.sender)?.close();
+});
+
 ipcMain.handle('connections:list', () => {
   return loadConnections();
 });
@@ -135,7 +169,14 @@ ipcMain.handle('connections:list', () => {
 ipcMain.handle('connections:add', (_, conn) => {
   const data = loadConnections();
   const id = Date.now().toString(36) + Math.random().toString(36).slice(2, 6);
-  data.connections.push({ id, name: conn.name, url: conn.url, apiKey: conn.apiKey });
+  data.connections.push({
+    id,
+    name: conn.name,
+    url: conn.url || '',
+    apiKey: conn.apiKey || '',
+    type: conn.type === 'cli' ? 'cli' : 'webui',
+    socketPath: conn.socketPath || '',
+  });
   if (!data.currentId) data.currentId = id;
   saveConnections(data);
   return data;
@@ -168,6 +209,52 @@ ipcMain.handle('connections:setCurrent', (_, id) => {
     saveConnections(data);
   }
   return data;
+});
+
+// CLI 传输：通过 homed 的 unix socket（逐行 JSON 协议）发起请求。
+// 认证行：/auth <apiKey>（若配置了密钥）。返回 JSON 响应行。
+ipcMain.handle('cli:request', (_, { socketPath, apiKey, line }) => {
+  return new Promise((resolve) => {
+    const net = require('net');
+    let client;
+    try {
+      client = net.createConnection({ path: socketPath });
+    } catch (e) {
+      return resolve({ error: 'create connection: ' + e.message });
+    }
+    const timeout = setTimeout(() => {
+      try { client.destroy(); } catch (_) {}
+      resolve({ error: 'timeout waiting for cli response' });
+    }, 30000);
+
+    let buf = '';
+    const onData = (chunk) => {
+      buf += chunk.toString('utf8');
+      const idx = buf.indexOf('\n');
+      if (idx === -1) return;
+      const lineOut = buf.slice(0, idx);
+      clearTimeout(timeout);
+      try { client.destroy(); } catch (_) {}
+      try {
+        resolve(JSON.parse(lineOut));
+      } catch (e) {
+        resolve({ error: 'bad response: ' + lineOut });
+      }
+    };
+    const onError = (err) => {
+      clearTimeout(timeout);
+      try { client.destroy(); } catch (_) {}
+      resolve({ error: err.message });
+    };
+
+    client.on('error', onError);
+    client.on('data', onData);
+    client.on('connect', () => {
+      let next = line;
+      if (apiKey) next = '/auth ' + apiKey + '\n' + next;
+      client.write(next + '\n');
+    });
+  });
 });
 
 app.whenReady().then(async () => {

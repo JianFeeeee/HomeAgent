@@ -287,6 +287,16 @@ func (a *Agent) processTextInput(evt *agentIO.InputEvent, input string) {
 		}
 	}
 
+	// 工具提醒/中断（terminal_watch、timer 等）不是用户发言：
+	// 以 system 角色注入 LLM，且不写入用户对话履历。
+	isInterrupt, _ := evt.Payload["interrupt"].(bool)
+	a.mu.Lock()
+	a.interruptInput = isInterrupt
+	a.mu.Unlock()
+	if isInterrupt {
+		noMemory = true
+	}
+
 	stageCtx := a.stageCtxFromInput(input, evt.Source, "")
 	stageCtx.Extra["input_source"] = evt.Source
 	stageCtx.Extra["output_channel"] = evt.OutputChannel
@@ -320,11 +330,13 @@ func (a *Agent) processTextInput(evt *agentIO.InputEvent, input string) {
 		log.Printf("[agent] pruned %d low-relevance events to document memory", archived)
 	}
 
-	a.context.Append(ContextEvent{
-		Timestamp: start,
-		Source:    evt.Source,
-		Input:     input,
-	})
+	if !isInterrupt {
+		a.context.Append(ContextEvent{
+			Timestamp: start,
+			Source:    evt.Source,
+			Input:     input,
+		})
+	}
 
 	response, toolsUsed, toolResults, err := a.process(input, stageCtx)
 	if err != nil {
@@ -380,7 +392,6 @@ func (a *Agent) emitResponse(evt *agentIO.InputEvent, response string) {
 	if stageCtx.TokenUsage != nil {
 		payload["usage"] = stageCtx.TokenUsage
 	}
-
 	if evt.ResponseCh != nil {
 		evt.ResponseCh <- &agentIO.OutputEvent{
 			RequestID:     evt.RequestID,
@@ -392,11 +403,15 @@ func (a *Agent) emitResponse(evt *agentIO.InputEvent, response string) {
 		}
 	}
 
-	a.publishEvent(events.EventAgentOutput, map[string]interface{}{
+	out := map[string]interface{}{
 		"content": response,
 		"channel": ch,
 		"source":  evt.Source,
-	})
+	}
+	if stageCtx.ReasoningContent != "" {
+		out["reasoning_content"] = stageCtx.ReasoningContent
+	}
+	a.publishEvent(events.EventAgentOutput, out)
 	stageCtx.Phase = sdk.StageAfterOutput
 	a.runStage(sdk.StageAfterOutput, stageCtx)
 }

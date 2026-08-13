@@ -4,6 +4,7 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>HomeAgent</title>
+<link rel="icon" type="image/svg+xml" href="icon.svg">
 <link rel="stylesheet" href="style.css">
 <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js" onerror="window._THREE_FAILED=true"></script>
 <script src="https://cdn.jsdelivr.net/npm/three@0.128.0/examples/js/controls/OrbitControls.js" onerror="window._THREE_FAILED=true"></script>
@@ -12,56 +13,67 @@
 </head>
 <body>
 
-<!-- Connection Manager Overlay -->
-<div id="conn-overlay" class="overlay">
-  <div class="overlay-content conn-manager">
-    <h2>连接管理 / Connections</h2>
-    <div class="conn-list" id="conn-list"></div>
-    <div class="conn-form" id="conn-form" style="display:none">
-      <h3 id="conn-form-title">添加连接 / Add Connection</h3>
-      <label>名称 / Name</label>
-      <input id="conn-name" placeholder="My HomeAgent">
-      <label>地址 / URL</label>
-      <input id="conn-url" placeholder="http://localhost:8080">
-      <label>API 密钥 / API Key <span style="color:var(--text-muted);font-weight:400">(可选)</span></label>
-      <input id="conn-key" type="password" placeholder="sk-...">
-      <div class="conn-form-actions">
-        <button class="btn btn-ghost" onclick="cancelConnForm()">取消 / Cancel</button>
-        <button class="btn btn-primary" onclick="saveConnForm()">保存 / Save</button>
-      </div>
-    </div>
-    <button class="btn btn-primary" onclick="showConnForm()" id="conn-add-btn" style="margin-top:12px">+ 添加连接 / Add Connection</button>
+<div class="titlebar" id="titlebar">
+  <div class="titlebar-controls">
+    <button class="tb-btn" id="tb-min" title="最小化" onclick="window.homeagent&&homeagent.win.minimize()">
+      <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"><line x1="4" y1="12" x2="20" y2="12"/></svg>
+    </button>
+    <button class="tb-btn" id="tb-max" title="最大化" onclick="window.homeagent&&homeagent.win.toggleMaximize()">
+      <svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"><rect x="5" y="5" width="14" height="14" rx="1.5"/></svg>
+    </button>
+    <button class="tb-btn tb-close" id="tb-close" title="关闭" onclick="window.homeagent&&homeagent.win.close()">
+      <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"><path d="M6 6l12 12M18 6L6 18"/></svg>
+    </button>
   </div>
 </div>
 
-<!-- Main App -->
-<div id="app" style="display:none">
-  <nav>
-    <h1>HomeAgent</h1>
-    <a class="active" onclick="switchTab('overview')" data-i18n="navOverview">概览</a>
-    <a onclick="switchTab('chat')" data-i18n="navChat">对话</a>
-    <a onclick="switchTab('plugins')" data-i18n="navPlugins">插件</a>
-    <a onclick="switchTab('settings')" data-i18n="navSettings">设置</a>
-    <a onclick="switchTab('adapters')" data-i18n="navAdapters">适配器</a>
-    <a onclick="switchTab('kernel')" data-i18n="navKernel">内核</a>
-    <div style="margin-left:auto;display:flex;align-items:center;gap:8px">
-      <span id="conn-status" class="conn-indicator" onclick="openConnManager()" title="点击管理连接 / Click to manage connections">
+<div id="app">
+  <!-- 左侧图标栏：主页=对话，其余为二级页面 -->
+  <aside class="rail" id="rail">
+    <div class="rail-logo"><img src="icon.svg" alt="HomeAgent"></div>
+    <button class="rail-btn active" id="rail-chat" onclick="switchView('chat')" title="对话">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 11.5a8.38 8.38 0 0 1-.9 3.8 8.5 8.5 0 0 1-7.6 4.7 8.38 8.38 0 0 1-3.8-.9L3 21l1.9-5.7a8.38 8.38 0 0 1-.9-3.8 8.5 8.5 0 0 1 4.7-7.6 8.38 8.38 0 0 1 3.8-.9h.5a8.48 8.48 0 0 1 8 8v.5z"/></svg>
+    </button>
+    <button class="rail-btn" id="rail-overview" onclick="switchView('overview')" title="概览">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M22 12h-4l-3 9L9 3l-3 9H2"/></svg>
+    </button>
+    <button class="rail-btn" id="rail-plugins" onclick="switchView('plugins')" title="插件">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/></svg>
+    </button>
+    <button class="rail-btn" id="rail-adapters" onclick="switchView('adapters')" title="适配器">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 2l-2 2m-7.61 7.61a5.5 5.5 0 1 1-7.778 7.778 5.5 5.5 0 0 1 7.777-7.777zm0 0L15.5 7.5m0 0l3 3L22 7l-3-3m-3.5 3.5L19 4"/></svg>
+    </button>
+    <button class="rail-btn" id="rail-kernel" onclick="switchView('kernel')" title="内核">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="4" y="4" width="16" height="16" rx="2"/><rect x="9" y="9" width="6" height="6"/><path d="M9 1v4M15 1v4M9 19v4M15 19v4M1 9h4M1 15h4M19 9h4M19 15h4"/></svg>
+    </button>
+    <div class="rail-spacer"></div>
+    <button class="rail-btn" id="rail-settings" onclick="switchView('settings')" title="设置">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>
+    </button>
+    <button class="rail-btn" onclick="toggleTheme()" title="切换亮色/暗色模式" id="theme-btn"><svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M21 12.8A9 9 0 1 1 11.2 3a7 7 0 0 0 9.8 9.8z"/></svg></button>
+    <span class="conn-dot dot-gray" id="rail-conn-dot" title="连接状态"></span>
+  </aside>
+
+  <div class="main">
+    <div class="topbar">
+      <h1>HomeAgent</h1>
+      <span class="conn-indicator" id="conn-indicator" onclick="goSettingsConn()" title="点击管理后端连接">
         <span class="status-dot dot-gray" id="conn-dot"></span>
         <span id="conn-name-display">未连接</span>
-        <span style="font-size:10px;margin-left:4px;opacity:0.6">▼</span>
+        <span style="font-size:10px;margin-left:4px;opacity:.6">▼</span>
       </span>
-      <span id="lang-btn" class="theme-btn" onclick="toggleLang()" style="font-size:13px;min-width:28px;cursor:pointer;padding:4px 8px;border:1px solid var(--border-color);border-radius:6px;text-align:center">EN</span>
-      <button class="theme-btn" onclick="toggleTheme()" id="theme-btn" title="切换亮色/暗色模式">🌙</button>
+      <div class="spacer"></div>
+      <button class="lang-btn" onclick="toggleLang()" id="lang-btn">EN</button>
     </div>
-  </nav>
 
-  <div class="container" id="app-content">
-    <div id="tab-overview" class="tab-content active"></div>
-    <div id="tab-chat" class="tab-content"></div>
-    <div id="tab-plugins" class="tab-content"></div>
-    <div id="tab-settings" class="tab-content"></div>
-    <div id="tab-adapters" class="tab-content"></div>
-    <div id="tab-kernel" class="tab-content"></div>
+    <div class="container">
+      <div id="view-chat" class="view active"></div>
+      <div id="view-overview" class="view"></div>
+      <div id="view-plugins" class="view"></div>
+      <div id="view-adapters" class="view"></div>
+      <div id="view-kernel" class="view"></div>
+      <div id="view-settings" class="view"></div>
+    </div>
   </div>
 </div>
 
