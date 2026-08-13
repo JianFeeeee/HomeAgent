@@ -6,6 +6,7 @@ import (
 	"log"
 	"os"
 	"path/filepath"
+	"runtime"
 	"sort"
 	"strings"
 	"sync"
@@ -29,6 +30,8 @@ type Plugin struct {
 	filesDir string
 	baseDir  string // L0 写前留档根目录（<data>/file_baseline 的父目录），空则禁用
 }
+
+var isWindowsBuild = runtime.GOOS == "windows"
 
 func New(name string) *Plugin {
 	return &Plugin{name: name}
@@ -178,10 +181,39 @@ func (p *Plugin) resolvePath(userPath string) (string, error) {
 		return "", fmt.Errorf("resolve path: %w", err)
 	}
 	base := filepath.Clean(p.filesDir)
-	if base != "/" && !strings.HasPrefix(abs, base+string(filepath.Separator)) && abs != base {
+	if !pathWithinSandbox(abs, base) {
 		return "", fmt.Errorf("path outside sandbox: %s", userPath)
 	}
 	return abs, nil
+}
+
+// pathWithinSandbox 判断 abs 是否位于沙箱 base 之内。
+// Windows 文件系统大小写不敏感，且卷根目录（如 C:\）应放行全盘路径。
+func pathWithinSandbox(abs, base string) bool {
+	lower := func(s string) string {
+		if isWindowsBuild {
+			return strings.ToLower(s)
+		}
+		return s
+	}
+	abs = filepath.Clean(abs)
+	base = filepath.Clean(base)
+	if equalFoldPath(abs, base) {
+		return true
+	}
+	// 卷根沙箱（C:\、D:\ 等）表示整机可访问
+	if isWindowsBuild && len(base) == 3 && base[1] == ':' && base[2] == '\\' {
+		return true
+	}
+	prefix := lower(base) + string(filepath.Separator)
+	return strings.HasPrefix(lower(abs), prefix)
+}
+
+func equalFoldPath(a, b string) bool {
+	if isWindowsBuild {
+		return strings.EqualFold(a, b)
+	}
+	return a == b
 }
 
 func (p *Plugin) handleRead(args map[string]interface{}) (interface{}, error) {

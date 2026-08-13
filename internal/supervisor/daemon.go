@@ -117,7 +117,11 @@ func (d *Daemon) RegisterAgent(id types.AgentID) {
 }
 
 func (d *Daemon) healthLoop() {
-	ticker := time.NewTicker(d.cfg.Daemon.HeartbeatInterval)
+	interval := d.cfg.Daemon.HeartbeatInterval
+	if interval <= 0 {
+		interval = 30 * time.Second
+	}
+	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
 
 	for {

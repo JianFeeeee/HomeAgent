@@ -4,6 +4,9 @@ package agentcli
 
 import (
 	"encoding/json"
+	"fmt"
+	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -388,4 +391,254 @@ func TestToolsRegistered(t *testing.T) {
 			t.Errorf("tool %s not registered", name)
 		}
 	}
+}
+
+// ——— Phase 6: 通知节流测试（mock 终端 + 捕获注入） ———
+
+type injectCapture struct {
+	mu    sync.Mutex
+	texts []string
+}
+
+func (c *injectCapture) InjectInterruptText(source, channel, text string) {
+	c.mu.Lock()
+	c.texts = append(c.texts, text)
+	c.mu.Unlock()
+}
+func (c *injectCapture) InjectText(source, channel, text string) {
+	c.mu.Lock()
+	c.texts = append(c.texts, text)
+	c.mu.Unlock()
+}
+func (c *injectCapture) InjectTextNoMemory(source, channel, text string) {
+	c.mu.Lock()
+	c.texts = append(c.texts, text)
+	c.mu.Unlock()
+}
+func (c *injectCapture) InjectInputSync(source, channel, text string) string { return "" }
+
+func (c *injectCapture) snapshot() []string {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	out := make([]string, len(c.texts))
+	copy(out, c.texts)
+	return out
+}
+
+// mockTerm 可控输出流的假终端：Read 从 data chan 取数据，可模拟进程退出/读取错误
+type mockTerm struct {
+	mu      sync.Mutex
+	data    chan []byte
+	running bool
+	err     error
+}
+
+func newMockTerm() *mockTerm {
+	return &mockTerm{data: make(chan []byte, 16), running: true}
+}
+
+func (m *mockTerm) Read(buf []byte) (int, error) {
+	for {
+		m.mu.Lock()
+		err := m.err
+		running := m.running
+		m.mu.Unlock()
+		if err != nil {
+			return 0, err
+		}
+		if !running {
+			return 0, fmt.Errorf("process exited")
+		}
+		select {
+		case data, ok := <-m.data:
+			if !ok {
+				return 0, fmt.Errorf("closed")
+			}
+			n := copy(buf, data)
+			return n, nil
+		case <-time.After(20 * time.Millisecond):
+		}
+	}
+}
+
+func (m *mockTerm) WriteString(s string) (int, error) { return len(s), nil }
+func (m *mockTerm) Resize(rows, cols uint16) error    { return nil }
+func (m *mockTerm) Running() bool {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.running
+}
+func (m *mockTerm) Kill() error  { return nil }
+func (m *mockTerm) Close() error { return nil }
+
+func (m *mockTerm) push(data []byte) {
+	m.data <- data
+}
+
+func (m *mockTerm) setRunning(v bool) {
+	m.mu.Lock()
+	m.running = v
+	m.mu.Unlock()
+}
+
+func (m *mockTerm) setErr(err error) {
+	m.mu.Lock()
+	m.err = err
+	m.mu.Unlock()
+}
+
+func newTestSession(term ptyTerm) *TerminalSession {
+	return &TerminalSession{
+		id:        "t1",
+		session:   term,
+		createdAt: time.Now(),
+		timeout:   10 * time.Minute,
+		stopCh:    make(chan struct{}),
+		done:      make(chan struct{}),
+	}
+}
+
+func startReadLoop(p *Plugin, s *sdk.PluginSDK, t *TerminalSession) {
+	p.wg.Add(1)
+	go p.readLoop(t, s)
+}
+
+func waitInjected(c *injectCapture, substr string, timeout time.Duration) bool {
+	deadline := time.Now().Add(timeout)
+	for time.Now().Before(deadline) {
+		for _, text := range c.snapshot() {
+			if strings.Contains(text, substr) {
+				return true
+			}
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	return false
+}
+
+// Phase 6: 持续吐进度时，通知频率显著低于 500ms/条（节流生效）
+func TestReadLoopNotifyThrottle(t *testing.T) {
+	p := New("agentcli")
+	p.notifyBytes = 2048
+	p.notifyInterval = 2 * time.Second
+
+	capture := &injectCapture{}
+	sdkInst := sdk.New("agentcli", sdk.SDKConfig{
+		RegTool:  newToolCapture().RegisterTool,
+		RegStage: func(sdk.Stage, sdk.StageHandler) {},
+		RegAPI:   func(string) error { return nil },
+		Settings: sdk.NewSettings("agentcli", nil),
+	})
+	sdkInst.SetIOInjector(capture)
+
+	term := newMockTerm()
+	ts := newTestSession(term)
+	startReadLoop(p, sdkInst, ts)
+
+	if !waitInjected(capture, "已启动", 2*time.Second) {
+		t.Fatal("expected startup notification")
+	}
+
+	// 持续以 100B/50ms(=2KB/s) 吐进度 3 秒
+	stop := make(chan struct{})
+	go func() {
+		ticker := time.NewTicker(50 * time.Millisecond)
+		defer ticker.Stop()
+		chunk := make([]byte, 100)
+		for i := range chunk {
+			chunk[i] = 'x'
+		}
+		for {
+			select {
+			case <-stop:
+				return
+			case <-ticker.C:
+				term.push(chunk)
+			}
+		}
+	}()
+
+	time.Sleep(3 * time.Second)
+	close(stop)
+
+	notifies := 0
+	for _, text := range capture.snapshot() {
+		if strings.Contains(text, "有新输出") {
+			notifies++
+		}
+	}
+	// 3 秒持续输出，500ms/条 的旧行为应有 6 条；节流后 ≤3 条
+	if notifies > 3 {
+		t.Errorf("notify throttle ineffective: %d notifies in 3s (expected <=3)", notifies)
+	}
+	if notifies == 0 {
+		t.Error("expected at least one output notification")
+	}
+
+	close(ts.stopCh)
+	<-ts.done
+}
+
+// Phase 6: 进程退出 → 立即通知（两条路径：PTY Read 返回 EOF 走"读取结束"，
+// 或 reader 阻塞时顶部 terminalRunning 检测走"进程已退出"）
+func TestReadLoopNotifyOnExit(t *testing.T) {
+	p := New("agentcli")
+	p.notifyBytes = 2048
+	p.notifyInterval = 2 * time.Second
+
+	capture := &injectCapture{}
+	sdkInst := sdk.New("agentcli", sdk.SDKConfig{
+		RegTool:  newToolCapture().RegisterTool,
+		RegStage: func(sdk.Stage, sdk.StageHandler) {},
+		RegAPI:   func(string) error { return nil },
+		Settings: sdk.NewSettings("agentcli", nil),
+	})
+	sdkInst.SetIOInjector(capture)
+
+	term := newMockTerm()
+	ts := newTestSession(term)
+	startReadLoop(p, sdkInst, ts)
+
+	if !waitInjected(capture, "已启动", 2*time.Second) {
+		t.Fatal("expected startup notification")
+	}
+
+	term.setRunning(false)
+	gotExit := waitInjected(capture, "进程已退出", 2*time.Second)
+	gotReadEnd := waitInjected(capture, "读取结束", time.Second)
+	if !gotExit && !gotReadEnd {
+		t.Error("expected immediate notification on process exit (either 进程已退出 or 读取结束)")
+	}
+	close(ts.stopCh)
+}
+
+// Phase 6: 读取错误/EOF → 立即通知
+func TestReadLoopNotifyOnReadError(t *testing.T) {
+	p := New("agentcli")
+	p.notifyBytes = 2048
+	p.notifyInterval = 2 * time.Second
+
+	capture := &injectCapture{}
+	sdkInst := sdk.New("agentcli", sdk.SDKConfig{
+		RegTool:  newToolCapture().RegisterTool,
+		RegStage: func(sdk.Stage, sdk.StageHandler) {},
+		RegAPI:   func(string) error { return nil },
+		Settings: sdk.NewSettings("agentcli", nil),
+	})
+	sdkInst.SetIOInjector(capture)
+
+	term := newMockTerm()
+	ts := newTestSession(term)
+	startReadLoop(p, sdkInst, ts)
+
+	if !waitInjected(capture, "已启动", 2*time.Second) {
+		t.Fatal("expected startup notification")
+	}
+
+	term.setErr(fmt.Errorf("read timeout"))
+	if !waitInjected(capture, "读取结束", 3*time.Second) {
+		t.Error("expected immediate notification on read error")
+	}
+	close(ts.stopCh)
+	<-ts.done
 }

@@ -16,5 +16,6 @@ const (
 	EventReasoning      = events.EventReasoning
 	EventStage          = events.EventStage
 	EventSystem         = events.EventSystem
+	EventTerminalOutput = events.EventTerminalOutput
 	EventAll            = events.EventAll
 )

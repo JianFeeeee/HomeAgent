@@ -184,6 +184,10 @@ func (s *Store) ContextToDoc(source string, entries []ContextEntry, vec vector.V
 	} else {
 		docVec = s.veczer.Vectorize(summary + " " + content)
 	}
+		meta := map[string]string{"content_hash": contentHash}
+	if source == "context_archived" {
+		meta["is_archived_context"] = "true"
+	}
 	doc := &Doc{
 		ID:          id,
 		Summary:     summary,
@@ -195,7 +199,7 @@ func (s *Store) ContextToDoc(source string, entries []ContextEntry, vec vector.V
 		LastAccess:  time.Now(),
 		AccessCount: 1,
 		Source:      source,
-		Meta:        map[string]string{"content_hash": contentHash},
+		Meta:        meta,
 		Vector:      docVec,
 	}
 	s.docs[id] = doc

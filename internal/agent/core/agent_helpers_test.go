@@ -86,6 +86,83 @@ func TestDocToTriplesEmptyContent(t *testing.T) {
 	}
 }
 
+// Phase 2: 归档上下文文档不得产出模板垃圾（context_archived 来源/主题模板三元组）
+func TestDocToTriplesArchivedContext(t *testing.T) {
+	doc := &document.Doc{
+		Summary: "来自 2 个来源的 5 条对话 (qq, webui) 涉及: 天气, 测试",
+		Content: "[15:04] qq: 今天天气怎么样\n[15:05] agent: 今天天气很好",
+		Source:  "context_archived",
+		Meta:    map[string]string{"is_archived_context": "true"},
+	}
+	triples := docToTriples(doc, nil)
+
+	for _, tr := range triples {
+		if tr.Subject == "文档" && tr.Relation == "来源" && tr.Object == "context_archived" {
+			t.Errorf("archived context must not write 来源 triple: %+v", tr)
+		}
+		if tr.Subject == "文档" && tr.Relation == "主题" {
+			t.Errorf("archived context must not write 主题 template triple: %+v", tr)
+		}
+	}
+}
+
+// Phase 2: 模板化摘要（summarizeEntries 生成）不得作为主题写入
+func TestDocToTriplesTemplateSummary(t *testing.T) {
+	doc := &document.Doc{
+		Summary: "来自 3 个来源的 10 条对话 (a, b, c) 涉及: 关键词1, 关键词2, 关键词3",
+		Content: "[10:00] a: 你好",
+		Source:  "manual",
+	}
+	triples := docToTriples(doc, nil)
+
+	for _, tr := range triples {
+		if tr.Subject == "文档" && tr.Relation == "主题" {
+			t.Errorf("template summary must not be written as 主题 triple: %+v", tr)
+		}
+	}
+	// 但非归档来源仍保留 来源 三元组
+	foundSource := false
+	for _, tr := range triples {
+		if tr.Subject == "文档" && tr.Relation == "来源" && tr.Object == "manual" {
+			foundSource = true
+		}
+	}
+	if !foundSource {
+		t.Errorf("non-archived source should still produce 来源 triple")
+	}
+}
+
+// Phase 2: 过长摘要不得写入主题
+func TestDocToTriplesLongSummary(t *testing.T) {
+	long := ""
+	for i := 0; i < 100; i++ {
+		long += "很长的摘要内容片段重复拼接"
+	}
+	doc := &document.Doc{
+		Summary: long,
+		Content: "[10:00] a: 你好",
+		Source:  "test",
+	}
+	triples := docToTriples(doc, nil)
+	for _, tr := range triples {
+		if tr.Subject == "文档" && tr.Relation == "主题" {
+			t.Errorf("overlong summary must not be written as 主题 triple")
+		}
+	}
+}
+
+func TestIsTemplateSummary(t *testing.T) {
+	if !isTemplateSummary("来自 2 个来源的 5 条对话 (qq, webui) 涉及: 天气") {
+		t.Errorf("template summary not recognized")
+	}
+	if isTemplateSummary("今天天气很好") {
+		t.Errorf("plain summary wrongly recognized as template")
+	}
+	if !isTemplateSummary("") {
+		t.Errorf("empty summary should be treated as template")
+	}
+}
+
 func TestTruncateStr(t *testing.T) {
 	tests := []struct {
 		input string

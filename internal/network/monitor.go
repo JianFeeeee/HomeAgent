@@ -57,7 +57,11 @@ func (m *Monitor) Start(ctx context.Context, endpoints []string) {
 	}
 	m.mu.Unlock()
 
-	ticker := time.NewTicker(m.interval)
+	interval := m.interval
+	if interval <= 0 {
+		interval = 30 * time.Second
+	}
+	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
 
 	m.checkAll(ctx)

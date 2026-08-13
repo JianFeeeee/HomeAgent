@@ -558,6 +558,7 @@ func (v *VM) writeBundledAdapters() error {
 	known := []string{
 		"openai", "anthropic", "deepseek", "gemini",
 		"github", "groq", "mistral", "ollama", "kimicode",
+		"server",
 	}
 	for _, name := range known {
 		srcPath := "adapters/" + name + ".lua"

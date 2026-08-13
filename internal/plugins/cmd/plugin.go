@@ -159,16 +159,19 @@ func (p *Plugin) Start(s *sdk.PluginSDK) error {
 		ctx, cancel := context.WithTimeout(context.Background(), timeout)
 		defer cancel()
 
-		// Windows 上预置 chcp 65001 确保控制台输出为 UTF-8，避免 GBK 乱码
-		execCmd := command
+		// Windows 上必须经 cmd.exe /c 执行（chcp 65001 预置为 UTF-8 输出），
+		// 直接 exec 会把整条命令当成一个程序路径导致所有命令失败。
+		var cmd *exec.Cmd
 		if isWindows {
-			execCmd = "chcp 65001>nul & " + command
+			execCmd := "chcp 65001>nul & " + command
+			cmd = exec.CommandContext(ctx, "cmd.exe", "/d", "/c", execCmd)
+		} else {
+			parts := shellUnquote(command)
+			if len(parts) == 0 {
+				return map[string]interface{}{"error": "command is required"}, nil
+			}
+			cmd = exec.CommandContext(ctx, parts[0], parts[1:]...)
 		}
-		parts := shellUnquote(execCmd)
-		if len(parts) == 0 {
-			return map[string]interface{}{"error": "command is required"}, nil
-		}
-		cmd := exec.CommandContext(ctx, parts[0], parts[1:]...)
 		if workdir != "" {
 			cmd.Dir = workdir
 		}

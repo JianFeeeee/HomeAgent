@@ -58,6 +58,14 @@ func (p *Plugin) Start(s *sdk.PluginSDK) error {
 		payload, _ := args["payload"].(string)
 		if payload != "" {
 			fmt.Println(payload)
+			s.Publish(&sdk.Event{
+				Type: sdk.EventAgentOutput,
+				Payload: map[string]interface{}{
+					"content": payload,
+					"channel": "cli",
+					"kind":    "channel_output",
+				},
+			})
 		}
 		return map[string]interface{}{"status": "ok"}, nil
 	})

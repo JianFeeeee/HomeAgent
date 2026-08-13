@@ -1,6 +1,7 @@
 package pipeline
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"testing"
@@ -114,6 +115,71 @@ func TestDistillOnce(t *testing.T) {
 	// 验证蒸馏后已有记录被标记（distillOnce 从 records 中移除已蒸馏记录，检查剩余数量）
 	if len(d.records) != 0 {
 		t.Logf("records after distill: %d (all should have been removed)", len(d.records))
+	}
+}
+
+// Phase 4: 新记录无需等待 RetentionDays，下一 tick 立即蒸馏（文档所述 10min 频率）
+func TestDistillOnceFreshRecords(t *testing.T) {
+	db, err := memory.NewGraphDB(filepath.Join(t.TempDir(), "test.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+
+	dir := t.TempDir()
+	d := NewDistiller(db, dir, DistillerConfig{
+		Interval:      10 * time.Minute,
+		RetentionDays: 7,
+		BatchSize:     50,
+	})
+	d.Append("sess1", "user", "我的名字是李四")
+	d.Append("sess1", "assistant", "你好李四！")
+
+	if len(d.records) != 2 {
+		t.Fatalf("expected 2 fresh records, got %d", len(d.records))
+	}
+
+	d.distillOnce()
+	if len(d.records) != 0 {
+		t.Errorf("fresh records should be distilled on next tick (no retention gate), got %d remaining", len(d.records))
+	}
+
+	// 二次蒸馏不重复（已蒸馏记录已被移除）
+	d.distillOnce()
+	if len(d.records) != 0 {
+		t.Errorf("second distill should be no-op, got %d records", len(d.records))
+	}
+}
+
+// Phase 4: BatchSize 限制每 tick 处理前 N 条，未蒸馏记录留待下个 tick
+func TestDistillOnceBatchLimit(t *testing.T) {
+	db, err := memory.NewGraphDB(filepath.Join(t.TempDir(), "test.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+
+	dir := t.TempDir()
+	d := NewDistiller(db, dir, DistillerConfig{
+		Interval:      10 * time.Minute,
+		RetentionDays: 7,
+		BatchSize:     3,
+	})
+	for i := 0; i < 10; i++ {
+		d.Append("sess1", "user", fmt.Sprintf("第 %d 条消息内容", i))
+	}
+
+	d.distillOnce()
+	if len(d.records) != 7 {
+		t.Fatalf("expected 7 records remaining after batch 3, got %d", len(d.records))
+	}
+
+	// 后续 tick 继续消化，最终全部蒸馏
+	for i := 0; i < 5 && len(d.records) > 0; i++ {
+		d.distillOnce()
+	}
+	if len(d.records) != 0 {
+		t.Errorf("all records should be distilled after several ticks, got %d remaining", len(d.records))
 	}
 }
 

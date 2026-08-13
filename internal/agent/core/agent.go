@@ -100,6 +100,9 @@ type Agent struct {
 	// 当前轮次的非文本媒体数据（图片/音频），供 describe_image 等工具访问
 	pendingMedia map[string]interface{}
 
+	// 当前输入是否为工具提醒/中断（以 system 角色注入，避免被当成用户消息）
+	interruptInput bool
+
 	// 非文本输入处理配置
 	inputCfg types.InputProcessingConfig
 
