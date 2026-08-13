@@ -1,6 +1,7 @@
 package webui
 
 import (
+	"context"
 	"crypto/rand"
 	"embed"
 	"encoding/hex"
@@ -15,6 +16,7 @@ import (
 	"sync"
 	"time"
 
+	agentIO "gitcode.com/JianFeeeee/HomeAgent/internal/agent/io"
 	sdk "gitcode.com/JianFeeeee/HomeAgent/internal/sdk"
 	"gitcode.com/JianFeeeee/HomeAgent/pkg/types"
 )
@@ -519,6 +521,7 @@ func (h *Handler) handleAgents(w http.ResponseWriter, r *http.Request) {
 		if h.config != nil {
 			kcfg := h.config.Get()
 			kcfg.Agents = append(kcfg.Agents, cfg)
+			h.config.Put(kcfg)
 		}
 		writeJSON(w, http.StatusCreated, map[string]string{"id": string(cfg.ID)})
 	default:
@@ -725,11 +728,19 @@ func (h *Handler) handleKnowledge(w http.ResponseWriter, r *http.Request) {
 		}
 		query := r.URL.Query().Get("q")
 		if query != "" {
-			results, _ := h.knowledge.Search(query, 10)
+			results, err := h.knowledge.Search(query, 10)
+			if err != nil {
+				writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+				return
+			}
 			writeJSON(w, http.StatusOK, map[string]interface{}{"results": results})
 			return
 		}
-		categories, _ := h.knowledge.List()
+		categories, err := h.knowledge.List()
+		if err != nil {
+			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+			return
+		}
 		writeJSON(w, http.StatusOK, map[string]interface{}{
 			"categories": categories,
 			"stats":      h.knowledge.Stats(),
@@ -887,15 +898,23 @@ func (h *Handler) handleNetwork(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+// chatSaveThrottle 控制写盘频率：最多每 3 秒写一次
+const chatSaveThrottle = 3 * time.Second
+
 func (h *Handler) addChatMsg(msg ChatMsg) {
 	h.chatMu.Lock()
 	h.chatHistory = append(h.chatHistory, msg)
 	if len(h.chatHistory) > maxChatHistory {
 		h.chatHistory = h.chatHistory[len(h.chatHistory)-maxChatHistory:]
 	}
-	// persist to webui config table as compact JSON
+	// 只持 latest 50 条做持久化（写放大防护），全量仍保留在内存
 	if h.settings != nil {
-		b, _ := json.Marshal(h.chatHistory)
+		persistLen := len(h.chatHistory)
+		if persistLen > 50 {
+			persistLen = 50
+		}
+		toPersist := h.chatHistory[len(h.chatHistory)-persistLen:]
+		b, _ := json.Marshal(toPersist)
 		_ = h.settings.Set("chathistory", string(b))
 	}
 	h.chatMu.Unlock()
@@ -949,7 +968,24 @@ func (h *Handler) handleChat(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "agent unavailable"})
 		return
 	}
-	resp := h.sdk.InjectTextSync("webui", "webui", body.Message)
+
+	// 带超时的上下文，防止 InjectTextSync 长时间阻塞 HTTP 请求
+	ctx, cancel := context.WithTimeout(r.Context(), 60*time.Second)
+	defer cancel()
+
+	respCh := make(chan *agentIO.OutputEvent, 1)
+	go func() {
+		respCh <- h.sdk.InjectTextSync("webui", "webui", body.Message)
+	}()
+
+	var resp *agentIO.OutputEvent
+	select {
+	case resp = <-respCh:
+	case <-ctx.Done():
+		writeJSON(w, http.StatusGatewayTimeout, map[string]string{"error": "agent timeout (60s)"})
+		return
+	}
+
 	if resp == nil {
 		writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "agent unavailable"})
 		return
@@ -1009,6 +1045,13 @@ func (h *Handler) handleChatEvents(w http.ResponseWriter, r *http.Request) {
 	}()
 
 	log.Printf("[SSE] handler started, subscribing to events")
+
+	// 解析 Last-Event-ID（断线重连时客户端携带）
+	lastEventID := r.Header.Get("Last-Event-ID")
+	if lastEventID != "" {
+		log.Printf("[SSE] client reported Last-Event-ID: %s", lastEventID)
+	}
+
 	subTypes := []string{"agent_output", "reasoning", "agent_error", "tool_call", "stage", "agent_llm_chain"}
 	var unsubs []func()
 	for _, t := range subTypes {
@@ -1236,7 +1279,23 @@ func (h *Handler) handleOpenAICompletions(w http.ResponseWriter, r *http.Request
 		return
 	}
 
-	response := h.sdk.InjectTextSync("http", "http", lastMsg.Content)
+	// 带超时的上下文
+	ctx, cancel := context.WithTimeout(r.Context(), 60*time.Second)
+	defer cancel()
+
+	respCh := make(chan *agentIO.OutputEvent, 1)
+	go func() {
+		respCh <- h.sdk.InjectTextSync("http", "http", lastMsg.Content)
+	}()
+
+	var response *agentIO.OutputEvent
+	select {
+	case response = <-respCh:
+	case <-ctx.Done():
+		writeJSON(w, http.StatusGatewayTimeout, map[string]string{"error": "agent timeout (60s)"})
+		return
+	}
+
 	if response == nil {
 		writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "no response from agent"})
 		return
