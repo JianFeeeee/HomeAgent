@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -46,6 +47,7 @@ type Plugin struct {
 	reports    []llmReport
 	sessionID  string
 	selfToolNames map[string]bool
+	checkMu    sync.Mutex
 
 	stopCh  chan struct{}
 	stopOnce sync.Once
@@ -153,13 +155,16 @@ func (p *Plugin) Start(s *sdk.PluginSDK) error {
 	p.selfToolNames["healthcheck"] = true
 	s.RegisterTool("healthcheck", sdk.ToolDef{
 		Name:        "healthcheck",
-		Description: "运行系统全面健康检查。先执行静态检查（插件/工具列表/记忆/知识库/文档），再启动 LLM 驱动检查：LLM 主动发现并逐个测试各插件提供的工具，并通过 healthcheck_report 上报结果。返回详细的状态报告。",
+		Description: "运行系统全面健康检查。先执行静态检查（插件/工具列表/记忆/知识库/文档），再启动 LLM 驱动检查：LLM 主动发现并逐个测试各插件提供的工具，并通过 healthcheck_report 上报结果。返回详细的状态报告（每个插件、每个工具一条结果）。可用 plugin 参数只针对指定插件检查。",
 		Parameters: map[string]interface{}{
-			"type":       "object",
-			"properties": map[string]interface{}{},
+			"type": "object",
+			"properties": map[string]interface{}{
+				"plugin": map[string]interface{}{"type": "string", "description": "可选：指定只检查该插件的健康状态（列出插件工具并逐一测试），不填则检查全部插件"},
+			},
 		},
 	}, func(args map[string]interface{}) (interface{}, error) {
-		return p.runFullCheck(s)
+		plugin, _ := args["plugin"].(string)
+		return p.runFullCheck(s, plugin)
 	})
 
 	p.selfToolNames["healthcheck_plugins"] = true
@@ -298,7 +303,7 @@ func (p *Plugin) startAutoCheck(s *sdk.PluginSDK, interval time.Duration) {
 }
 
 func (p *Plugin) runAutoCheck(s *sdk.PluginSDK) {
-	result, err := p.runFullCheck(s)
+	result, err := p.runFullCheck(s, "")
 	if err != nil {
 		log.Printf("[healthcheck] auto-check error: %v", err)
 		return
@@ -307,10 +312,14 @@ func (p *Plugin) runAutoCheck(s *sdk.PluginSDK) {
 	passed, _ := resp["passed"].(int)
 	failed, _ := resp["failed"].(int)
 	total, _ := resp["total"].(int)
-	elapsed := int64(0)
-	if checks, ok := resp["checks"]; ok {
-		if arr, ok := checks.([]checkResult); ok && len(arr) > 0 {
-			elapsed = int64(len(arr)) // approximate
+	elapsedMs, _ := resp["elapsed_ms"].(int64)
+
+	// 失败项明细（定位问题用）
+	if checks, ok := resp["checks"].([]checkResult); ok {
+		for _, c := range checks {
+			if !c.Pass {
+				log.Printf("[healthcheck] FAILED %s: status=%s detail=%s", c.Name, c.Status, c.Detail)
+			}
 		}
 	}
 
@@ -319,7 +328,7 @@ func (p *Plugin) runAutoCheck(s *sdk.PluginSDK) {
 		Passed:    passed,
 		Failed:    failed,
 		Total:     total,
-		ElapsedMs: elapsed,
+		ElapsedMs: elapsedMs,
 	}
 	p.mu.Lock()
 	p.perfData.LastCheck = pt.Time
@@ -329,10 +338,15 @@ func (p *Plugin) runAutoCheck(s *sdk.PluginSDK) {
 	}
 	p.mu.Unlock()
 
-	log.Printf("[healthcheck] auto-check complete: passed=%d failed=%d total=%d", passed, failed, total)
+	log.Printf("[healthcheck] auto-check complete: passed=%d failed=%d total=%d elapsed=%dms", passed, failed, total, elapsedMs)
 }
 
-func (p *Plugin) runFullCheck(s *sdk.PluginSDK) (interface{}, error) {
+func (p *Plugin) runFullCheck(s *sdk.PluginSDK, pluginFilter string) (interface{}, error) {
+	// 单飞：auto-check 与手动调用并发时，避免互相 reset 虚拟实例或 LLM 检查串扰
+	p.checkMu.Lock()
+	defer p.checkMu.Unlock()
+	start := time.Now()
+
 	results := []checkResult{}
 
 	// 每轮自检前重置隔离虚拟实例，清空上轮测试数据（仅影响虚拟空间，不碰生产存储）。
@@ -340,10 +354,10 @@ func (p *Plugin) runFullCheck(s *sdk.PluginSDK) (interface{}, error) {
 		log.Printf("[healthcheck] selftest reset: %v", err)
 	}
 
-	pluginResult := p.checkPluginsRaw(s)
+	pluginResult := p.checkPluginsRaw(s, pluginFilter)
 	results = append(results, pluginResult...)
 
-	toolResult := p.checkToolsRaw(s)
+	toolResult := p.checkToolsRaw(s, pluginFilter)
 	results = append(results, toolResult...)
 
 	if s.Memory() != nil {
@@ -365,7 +379,8 @@ func (p *Plugin) runFullCheck(s *sdk.PluginSDK) (interface{}, error) {
 	}
 
 	if s.LLM() != nil {
-		results = append(results, p.testLLMDriven(s))
+		results = append(results, p.testLLMDriven(s, pluginFilter))
+		results = append(results, p.reportsToChecks()...)
 	} else {
 		results = append(results, checkResult{Name: "llm_discovery", Status: "skip", Detail: "LLM Provider 未初始化", Pass: true})
 	}
@@ -380,20 +395,22 @@ func (p *Plugin) runFullCheck(s *sdk.PluginSDK) (interface{}, error) {
 		}
 	}
 
-	summary := fmt.Sprintf("通过 %d / %d, 失败 %d", passCount, len(results), failCount)
+	elapsed := time.Since(start)
+	summary := fmt.Sprintf("通过 %d / %d, 失败 %d, 耗时 %v", passCount, len(results), failCount, elapsed.Round(time.Millisecond))
 
 	return map[string]interface{}{
-		"status":   "ok",
-		"summary":  summary,
-		"total":    len(results),
-		"passed":   passCount,
-		"failed":   failCount,
-		"checks":   results,
+		"status":     "ok",
+		"summary":    summary,
+		"total":      len(results),
+		"passed":     passCount,
+		"failed":     failCount,
+		"elapsed_ms": elapsed.Milliseconds(),
+		"checks":     results,
 	}, nil
 }
 
 func (p *Plugin) checkPlugins(s *sdk.PluginSDK) (interface{}, error) {
-	results := p.checkPluginsRaw(s)
+	results := p.checkPluginsRaw(s, "")
 	return map[string]interface{}{
 		"status":  "ok",
 		"plugins": results,
@@ -401,7 +418,8 @@ func (p *Plugin) checkPlugins(s *sdk.PluginSDK) (interface{}, error) {
 	}, nil
 }
 
-func (p *Plugin) checkPluginsRaw(s *sdk.PluginSDK) []checkResult {
+// checkPluginsRaw 按插件逐个产出检查项（每个插件一条：加载状态 + 工具数）。
+func (p *Plugin) checkPluginsRaw(s *sdk.PluginSDK, pluginFilter string) []checkResult {
 	if s.PluginMgr() == nil {
 		return []checkResult{{Name: "plugins", Status: "skip", Detail: "插件注册表未初始化", Pass: true}}
 	}
@@ -410,16 +428,66 @@ func (p *Plugin) checkPluginsRaw(s *sdk.PluginSDK) []checkResult {
 	if names == nil {
 		names = []string{}
 	}
-	return []checkResult{{
-		Name:   "plugins",
-		Status: "ok",
-		Detail: fmt.Sprintf("已加载 %d 个插件: %v", len(names), names),
-		Pass:   true,
-	}}
+	sort.Strings(names)
+	disabled := map[string]bool{}
+	for _, d := range s.PluginMgr().ListDisabledPlugins() {
+		disabled[d.Name] = true
+	}
+
+	// 工具按插件聚合统计
+	toolCount := map[string]int{}
+	if s.Tool() != nil {
+		for _, def := range s.Tool().GetToolDefs() {
+			pl := def.Plugin
+			if pl == "" {
+				pl = "unknown"
+			}
+			toolCount[pl]++
+		}
+	}
+
+	var out []checkResult
+	for _, name := range names {
+		if pluginFilter != "" && name != pluginFilter {
+			continue
+		}
+		status, detail := "ok", ""
+		pass := true
+		if disabled[name] {
+			status, detail, pass = "disabled", "插件已禁用", true
+		}
+		if n := toolCount[name]; n > 0 {
+			if detail != "" {
+				detail += ", "
+			}
+			detail += fmt.Sprintf("%d 个工具", n)
+		} else if !disabled[name] {
+			status, detail, pass = "warn", "插件已加载但未注册工具", true
+		}
+		out = append(out, checkResult{Name: "plugin/" + name, Status: status, Detail: detail, Pass: pass})
+	}
+
+	if pluginFilter != "" {
+		matched := false
+		for _, name := range names {
+			if name == pluginFilter {
+				matched = true
+				break
+			}
+		}
+		if !matched {
+			out = append(out, checkResult{Name: "plugin/" + pluginFilter, Status: "fail", Detail: "插件未加载或不存在", Pass: false})
+		}
+	}
+
+	if len(out) == 0 {
+		out = append(out, checkResult{Name: "plugins", Status: "ok", Detail: "无已加载插件", Pass: true})
+	}
+	return out
 }
 
 func (p *Plugin) listAllTools(s *sdk.PluginSDK) (interface{}, error) {
-	tools := p.collectAllTools(s)
+	tools := p.collectAllTools(s, "")
 	return map[string]interface{}{
 		"status": "ok",
 		"count":  len(tools),
@@ -427,17 +495,34 @@ func (p *Plugin) listAllTools(s *sdk.PluginSDK) (interface{}, error) {
 	}, nil
 }
 
-func (p *Plugin) checkToolsRaw(s *sdk.PluginSDK) []checkResult {
-	tools := p.collectAllTools(s)
+func (p *Plugin) checkToolsRaw(s *sdk.PluginSDK, pluginFilter string) []checkResult {
+	tools := p.collectAllTools(s, pluginFilter)
+	byPlugin := map[string]int{}
+	for _, t := range tools {
+		src := t.Source
+		if src == "" {
+			src = "unknown"
+		}
+		byPlugin[src]++
+	}
+	names := make([]string, 0, len(byPlugin))
+	for n := range byPlugin {
+		names = append(names, n)
+	}
+	sort.Strings(names)
+	var parts []string
+	for _, n := range names {
+		parts = append(parts, fmt.Sprintf("%s=%d", n, byPlugin[n]))
+	}
 	return []checkResult{{
 		Name:   "tools",
 		Status: "ok",
-		Detail: fmt.Sprintf("系统中共 %d 个工具", len(tools)),
+		Detail: fmt.Sprintf("共 %d 个工具（%s）", len(tools), strings.Join(parts, ", ")),
 		Pass:   true,
 	}}
 }
 
-func (p *Plugin) collectAllTools(s *sdk.PluginSDK) []toolInfo {
+func (p *Plugin) collectAllTools(s *sdk.PluginSDK, pluginFilter string) []toolInfo {
 	seen := map[string]bool{}
 	var tools []toolInfo
 
@@ -451,11 +536,20 @@ func (p *Plugin) collectAllTools(s *sdk.PluginSDK) []toolInfo {
 
 	if s.Tool() != nil {
 		for _, def := range s.Tool().GetToolDefs() {
-			addTool(def.Name, "plugin", def.Description)
+			if pluginFilter != "" && def.Plugin != pluginFilter {
+				continue
+			}
+			src := def.Plugin
+			if src == "" {
+				src = "unknown"
+			}
+			addTool(def.Name, src, def.Description)
 		}
 
-		for _, def := range s.Tool().GetAllTools() {
-			addTool(def.Name, "device", def.Description)
+		if pluginFilter == "" {
+			for _, def := range s.Tool().GetAllTools() {
+				addTool(def.Name, "device", def.Description)
+			}
 		}
 	}
 
@@ -586,7 +680,7 @@ func (p *Plugin) testDocStoreRaw(s *sdk.PluginSDK) checkResult {
 	}
 }
 
-func (p *Plugin) testLLMDriven(s *sdk.PluginSDK) checkResult {
+func (p *Plugin) testLLMDriven(s *sdk.PluginSDK, pluginFilter string) checkResult {
 	llmName := s.LLM().CurrentSource()
 	if llmName == "" {
 		return checkResult{Name: "llm_discovery", Status: "skip", Detail: "无可用 LLM Provider", Pass: true}
@@ -597,7 +691,7 @@ func (p *Plugin) testLLMDriven(s *sdk.PluginSDK) checkResult {
 	defer cancel()
 
 	// 收集所有工具定义（排除健康检查自身的工具以避免循环测试）
-	toolDefs := p.collectToolDefsForLLM(s)
+	toolDefs := p.collectToolDefsForLLM(s, pluginFilter)
 
 	if len(toolDefs) == 0 {
 		return checkResult{Name: "llm_discovery", Status: "skip", Detail: "没有可测试的工具", Pass: true}
@@ -610,7 +704,7 @@ func (p *Plugin) testLLMDriven(s *sdk.PluginSDK) checkResult {
 	p.mu.Unlock()
 
 	// 构建 prompt
-	prompt := p.buildDiscoveryPrompt(toolDefs)
+	prompt := p.buildDiscoveryPrompt(toolDefs, pluginFilter)
 
 	msgs := []sdk.LLMMessage{{Role: "user", Content: prompt}}
 	tools := convertToolDefs(toolDefs)
@@ -656,7 +750,7 @@ func (p *Plugin) testLLMDriven(s *sdk.PluginSDK) checkResult {
 
 	elapsed := time.Since(start).Round(time.Millisecond)
 
-	detail := fmt.Sprintf("Provider %s, %d 轮对话, %d 次工具调用, %d 份报告, 耗时 %v",
+	detail := fmt.Sprintf("Provider %s, %d 轮对话, %d 次工具调用, %d 份工具报告, 耗时 %v",
 		llmName, turnCount, toolCallCount, reportCount, elapsed)
 
 	return checkResult{
@@ -667,10 +761,29 @@ func (p *Plugin) testLLMDriven(s *sdk.PluginSDK) checkResult {
 	}
 }
 
+// reportsToChecks 把 LLM 逐工具上报的 healthcheck_report 明细转为细粒度检查项。
+func (p *Plugin) reportsToChecks() []checkResult {
+	p.mu.Lock()
+	reports := append([]llmReport{}, p.reports...)
+	p.mu.Unlock()
+
+	out := make([]checkResult, 0, len(reports))
+	for _, r := range reports {
+		pass := r.Status == "ok" || r.Status == "skip"
+		out = append(out, checkResult{
+			Name:   "llm_tool/" + r.ToolName,
+			Status: r.Status,
+			Detail: r.Detail,
+			Pass:   pass,
+		})
+	}
+	return out
+}
+
 // collectToolDefsForLLM 收集全部已注册的工具定义供 LLM 发现和测试。
 // 动态排除本插件自身注册的工具（通过 selfToolNames），避免 LLM 自我循环调用；
 // 且仅保留"只读/轻量验证"类工具（白名单语义），防止 LLM 自检污染生产数据或引发副作用。
-func (p *Plugin) collectToolDefsForLLM(s *sdk.PluginSDK) []sdk.ToolDef {
+func (p *Plugin) collectToolDefsForLLM(s *sdk.PluginSDK, pluginFilter string) []sdk.ToolDef {
 	seen := map[string]bool{}
 	var defs []sdk.ToolDef
 
@@ -687,10 +800,15 @@ func (p *Plugin) collectToolDefsForLLM(s *sdk.PluginSDK) []sdk.ToolDef {
 
 	if s.Tool() != nil {
 		for _, d := range s.Tool().GetToolDefs() {
+			if pluginFilter != "" && d.Plugin != pluginFilter {
+				continue
+			}
 			addDef(d)
 		}
-		for _, d := range s.Tool().GetAllTools() {
-			addDef(d)
+		if pluginFilter == "" {
+			for _, d := range s.Tool().GetAllTools() {
+				addDef(d)
+			}
 		}
 	}
 
@@ -726,9 +844,13 @@ func isSafeReadonlyTool(name string) bool {
 }
 
 // buildDiscoveryPrompt 为 LLM 构造工具探索 prompt。
-func (p *Plugin) buildDiscoveryPrompt(toolDefs []sdk.ToolDef) string {
+func (p *Plugin) buildDiscoveryPrompt(toolDefs []sdk.ToolDef, pluginFilter string) string {
+	target := "全部插件"
+	if pluginFilter != "" {
+		target = "插件「" + pluginFilter + "」"
+	}
 	var b strings.Builder
-	b.WriteString(fmt.Sprintf(`你是一名系统健康检查专家。以下是系统中各插件提供的 %d 个工具（已自动排除健康检查插件自身工具及所有会写/删/改生产数据或产生外部副作用的工具，以下均为只读/查询/列表类工具）：
+	b.WriteString(fmt.Sprintf(`你是一名系统健康检查专家。以下是%s提供的 %d 个工具（已自动排除健康检查插件自身工具及所有会写/删/改生产数据或产生外部副作用的工具，以下均为只读/查询/列表类工具）：
 
 你的任务是：逐一尝试调用这些工具，验证它们是否正常工作，并对于每个工具使用 healthcheck_report 工具上报测试结果。
 
@@ -742,8 +864,9 @@ func (p *Plugin) buildDiscoveryPrompt(toolDefs []sdk.ToolDef) string {
 - 所有工具均为只读、无副作用，可放心调用
 - 尽可能覆盖所有工具
 - 每个工具只需测试一次
+- 每个工具都必须单独调用 healthcheck_report 上报，不要合并
 
-开始测试！`, len(toolDefs)))
+开始测试！`, target, len(toolDefs)))
 	return b.String()
 }
 
