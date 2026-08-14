@@ -2232,11 +2232,7 @@
           if (m) crumb.textContent = __(m[0], m[1]);
           else crumb.textContent = n;
         }
-        if (window.innerWidth <= 768) {
-          document.body.classList.add("sidebar-collapsed");
-        }
-        renderAll();
-      }
+        if (window.innerWidth <= 768) {\n            document.body.classList.add(\"sidebar-collapsed\");\n          }\n          if (n === \"chat\") {\n            state.chatStick = true;\n            var msgsEl = document.getElementById(\"chat-msgs\");\n            if (msgsEl) {\n              msgsEl.scrollTop = msgsEl.scrollHeight;\n            }\n          }\n          renderAll();\n        }
 
       function toggleSidebar() {
         document.body.classList.toggle("sidebar-collapsed");
@@ -2660,10 +2656,7 @@
                   msgsEl.clientHeight <
                 80;
             },
-            { passive: true },
-          );
-        }
-        var msgs = state.messages;
+            { passive: true },\n          );\n          msgsEl.addEventListener(\n            \"load\",\n            function () {\n              if (state.chatStick === true) {\n                msgsEl.scrollTop = msgsEl.scrollHeight;\n              }\n            },\n            true,\n          );\n        }\n        var msgs = state.messages;
         var sig = msgs
           .map(function (m) {
             var c = m.content || "";
@@ -2686,9 +2679,7 @@
           (state.chatLoading ? "1" : "0") +
           "|P" +
           (state.pendingTools || []).join(",");
-        if (msgsEl._chatSig === sig && msgsEl.childElementCount > 0) {
-          return;
-        }
+        \1          if (state.chatStick === true) {\n            msgsEl.scrollTop = msgsEl.scrollHeight;\n          }\n\2
         msgsEl._chatSig = sig;
         var prevPending = msgsEl._lastPending || [];
         var newPending = (state.pendingTools || []).slice();
@@ -2899,14 +2890,7 @@
               : "") +
             "</div></div></div>";
         }
-        msgsEl.innerHTML = html;
-        if (state.chatStick !== false) {
-          try {
-            msgsEl.scrollTo({ top: msgsEl.scrollHeight, behavior: "smooth" });
-          } catch (e) {
-            msgsEl.scrollTop = msgsEl.scrollHeight;
-          }
-        }
+        msgsEl.innerHTML = html;\n        if (state.chatStick !== false) {\n          msgsEl.scrollTop = msgsEl.scrollHeight;\n        }
         updateChatBadge();
       }
 
