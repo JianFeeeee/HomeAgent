@@ -458,7 +458,7 @@ func TestCollectToolDefsForLLMNoMutating(t *testing.T) {
 		Tool:     sdk.NewTool(stage, agentIO.NewIOManager()),
 	})
 
-	got := p.collectToolDefsForLLM(s)
+	got := p.collectToolDefsForLLM(s, "")
 	allowed := map[string]bool{}
 	for _, d := range got {
 		allowed[d.Name] = true
@@ -475,6 +475,87 @@ func TestCollectToolDefsForLLMNoMutating(t *testing.T) {
 		if allowed[name] {
 			t.Errorf("mutating tool %q must NOT be in LLM selftest set", name)
 		}
+	}
+}
+
+// TestCollectToolDefsForLLMPluginFilter 验证指定插件时只收集该插件的只读工具。
+func TestCollectToolDefsForLLMPluginFilter(t *testing.T) {
+	p := &Plugin{name: "healthcheck", selfToolNames: map[string]bool{"healthcheck": true, "healthcheck_report": true}}
+
+	stage := agentCore.NewStageHost()
+	defs := []sdk.ToolDef{
+		{Name: "memory_recall", Plugin: "memory", Description: "recall"},
+		{Name: "memory_commit", Plugin: "memory", Description: "commit"},
+		{Name: "doc_query", Plugin: "doc", Description: "query"},
+		{Name: "doc_commit", Plugin: "doc", Description: "commit doc"},
+		{Name: "knowledge_search", Plugin: "knowledge", Description: "search"},
+		{Name: "files_list", Plugin: "files", Description: "list"},
+		{Name: "files_write", Plugin: "files", Description: "write"},
+		{Name: "cmd_run", Plugin: "cmd", Description: "run cmd"},
+	}
+	for _, d := range defs {
+		d := d
+		stage.RegisterTool(d.Name, d, func(map[string]interface{}) (interface{}, error) { return nil, nil })
+	}
+
+	tc := newToolCapture()
+	s := newTestSDK(sdk.SDKConfig{
+		RegTool:  tc.RegisterTool,
+		RegStage: tc.RegisterStage,
+		RegAPI:   tc.RegisterAPI,
+		Tool:     sdk.NewTool(stage, agentIO.NewIOManager()),
+	})
+
+	got := p.collectToolDefsForLLM(s, "files")
+	allowed := map[string]bool{}
+	for _, d := range got {
+		allowed[d.Name] = true
+	}
+	if len(got) != 1 || !allowed["files_list"] {
+		t.Fatalf("expected only files_list for files plugin, got %v", allowed)
+	}
+	for _, name := range []string{"memory_recall", "doc_query", "knowledge_search", "files_write"} {
+		if allowed[name] {
+			t.Errorf("tool %q must NOT be in files-filtered set", name)
+		}
+	}
+
+	gotMemory := p.collectToolDefsForLLM(s, "memory")
+	if len(gotMemory) != 1 || gotMemory[0].Name != "memory_recall" {
+		t.Fatalf("expected only memory_recall for memory plugin, got %v", gotMemory)
+	}
+
+	// 全量时不丢任何只读工具
+	all := p.collectToolDefsForLLM(s, "")
+	if len(all) != 4 {
+		t.Fatalf("expected 4 readonly tools unfiltered, got %d", len(all))
+	}
+}
+
+// TestReportsToChecks 验证 LLM 上报明细转为细粒度检查项（ok/skip 通过, fail 失败）。
+func TestReportsToChecks(t *testing.T) {
+	p := &Plugin{}
+	p.reports = []llmReport{
+		{ToolName: "qq_get_message", Status: "ok", Detail: "正常"},
+		{ToolName: "doc_query", Status: "skip", Detail: "无可测数据"},
+		{ToolName: "knowledge_search", Status: "fail", Detail: "搜索超时"},
+	}
+	checks := p.reportsToChecks()
+	if len(checks) != 3 {
+		t.Fatalf("expected 3 checks, got %d", len(checks))
+	}
+	byName := map[string]checkResult{}
+	for _, c := range checks {
+		byName[c.Name] = c
+	}
+	if !byName["llm_tool/qq_get_message"].Pass {
+		t.Error("ok report must pass")
+	}
+	if !byName["llm_tool/doc_query"].Pass {
+		t.Error("skip report must pass")
+	}
+	if byName["llm_tool/knowledge_search"].Pass {
+		t.Error("fail report must NOT pass")
 	}
 }
 
