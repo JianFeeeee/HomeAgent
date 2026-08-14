@@ -95,8 +95,17 @@
         --btn-ghost-border: rgba(255, 255, 255, 0.14);
         --btn-ghost-hover-bg: rgba(255, 255, 255, 0.07);
         --save-btn-border: #d99a2b;
-        --loading-border: rgba(255, 255, 255, 0.12);
+--loading-border: rgba(255, 255, 255, 0.12);
         --loading-top: #ff7fac;
+        --grad-a: rgba(255, 127, 172, 0.14);
+        --grad-b: rgba(136, 192, 208, 0.12);
+        --grad-c: rgba(243, 59, 124, 0.1);
+        --c-sakura: #ff7fac;
+        --c-cyan: #2dd4bf;
+        --c-violet: #a78bfa;
+        --c-emerald: #34d399;
+        --c-amber: #fbbf24;
+        --c-blue: #60a5fa;
       }
 [data-theme="light"] {
         --glass-bg: rgba(255, 255, 255, 0.66);
@@ -108,7 +117,7 @@
         --shadow-lg: 0 16px 40px rgba(153, 27, 75, 0.14);
         --shadow-glow: 0 0 0 1px rgba(243, 59, 124, 0.3),
           0 6px 22px rgba(243, 59, 124, 0.14);
-        --bg-primary: #fdf3f7;
+        --bg-primary: #ffffff;
         --bg-secondary: rgba(255, 255, 255, 0.78);
         --bg-card: rgba(255, 255, 255, 0.72);
         --bg-input: rgba(255, 224, 233, 0.55);
@@ -139,8 +148,147 @@
         --btn-ghost-border: rgba(201, 36, 98, 0.22);
         --btn-ghost-hover-bg: #ffe4e9;
         --save-btn-border: #d99a2b;
-        --loading-border: rgba(201, 36, 98, 0.18);
+--loading-border: rgba(201, 36, 98, 0.18);
         --loading-top: #c92462;
+        --grad-a: rgba(255, 127, 172, 0.16);
+        --grad-b: rgba(136, 192, 208, 0.12);
+        --grad-c: rgba(243, 59, 124, 0.12);
+      }
+      [data-color="sakura"][data-theme="light"] {
+        --bg-primary: #ffffff;
+        --bg-input: rgba(255, 224, 233, 0.55);
+        --bg-hover: rgba(255, 127, 172, 0.08);
+        --pre-bg: #fff0f5;
+        --chat-bg: #fff0f5;
+        --msg-bubble-border: rgba(201, 36, 98, 0.14);
+        --btn-ghost-hover-bg: #ffe4e9;
+        --grad-a: rgba(255, 127, 172, 0.14);
+        --grad-c: rgba(243, 59, 124, 0.09);
+      }
+      [data-color="cyan"] {
+        --accent: #2dd4bf;
+        --accent-bg: rgba(45, 212, 191, 0.14);
+        --msg-user-bg: rgba(45, 212, 191, 0.16);
+        --msg-user-color: #99f6e4;
+        --loading-top: #2dd4bf;
+        --grad-a: rgba(45, 212, 191, 0.14);
+        --grad-c: rgba(45, 212, 191, 0.1);
+      }
+      [data-color="cyan"][data-theme="light"] {
+        --accent: #0f766e;
+        --accent-bg: #ccfbf1;
+        --msg-user-bg: #ccfbf1;
+        --msg-user-color: #0f766e;
+        --loading-top: #0f766e;
+        --bg-primary: #f0fdfa;
+        --bg-input: rgba(204, 251, 241, 0.6);
+        --bg-hover: rgba(13, 148, 136, 0.08);
+        --pre-bg: #e7f9f3;
+        --chat-bg: #e7f9f3;
+        --msg-bubble-border: rgba(13, 148, 136, 0.14);
+        --btn-ghost-hover-bg: #ccfbf1;
+        --grad-a: rgba(13, 148, 136, 0.14);
+        --grad-c: rgba(13, 148, 136, 0.09);
+      }
+      [data-color="violet"] {
+        --accent: #a78bfa;
+        --accent-bg: rgba(167, 139, 250, 0.14);
+        --msg-user-bg: rgba(167, 139, 250, 0.16);
+        --msg-user-color: #ddd6fe;
+        --loading-top: #a78bfa;
+        --grad-a: rgba(167, 139, 250, 0.14);
+        --grad-c: rgba(167, 139, 250, 0.1);
+      }
+      [data-color="violet"][data-theme="light"] {
+        --accent: #7c3aed;
+        --accent-bg: #ede9fe;
+        --msg-user-bg: #ede9fe;
+        --msg-user-color: #7c3aed;
+        --loading-top: #7c3aed;
+        --bg-primary: #f8f6ff;
+        --bg-input: rgba(237, 233, 254, 0.6);
+        --bg-hover: rgba(124, 58, 237, 0.08);
+        --pre-bg: #f3f0ff;
+        --chat-bg: #f3f0ff;
+        --msg-bubble-border: rgba(124, 58, 237, 0.14);
+        --btn-ghost-hover-bg: #ede9fe;
+        --grad-a: rgba(124, 58, 237, 0.13);
+        --grad-c: rgba(124, 58, 237, 0.08);
+      }
+      [data-color="emerald"] {
+        --accent: #34d399;
+        --accent-bg: rgba(52, 211, 153, 0.14);
+        --msg-user-bg: rgba(52, 211, 153, 0.16);
+        --msg-user-color: #a7f3d0;
+        --loading-top: #34d399;
+        --grad-a: rgba(52, 211, 153, 0.14);
+        --grad-c: rgba(52, 211, 153, 0.1);
+      }
+      [data-color="emerald"][data-theme="light"] {
+        --accent: #059669;
+        --accent-bg: #d1fae5;
+        --msg-user-bg: #d1fae5;
+        --msg-user-color: #059669;
+        --loading-top: #059669;
+        --bg-primary: #f0fdf6;
+        --bg-input: rgba(209, 250, 229, 0.6);
+        --bg-hover: rgba(5, 150, 105, 0.08);
+        --pre-bg: #e9f9f0;
+        --chat-bg: #e9f9f0;
+        --msg-bubble-border: rgba(5, 150, 105, 0.14);
+        --btn-ghost-hover-bg: #d1fae5;
+        --grad-a: rgba(5, 150, 105, 0.14);
+        --grad-c: rgba(5, 150, 105, 0.09);
+      }
+      [data-color="amber"] {
+        --accent: #fbbf24;
+        --accent-bg: rgba(251, 191, 36, 0.14);
+        --msg-user-bg: rgba(251, 191, 36, 0.16);
+        --msg-user-color: #fde68a;
+        --loading-top: #fbbf24;
+        --grad-a: rgba(251, 191, 36, 0.14);
+        --grad-c: rgba(251, 191, 36, 0.1);
+      }
+      [data-color="amber"][data-theme="light"] {
+        --accent: #d97706;
+        --accent-bg: #fef3c7;
+        --msg-user-bg: #fef3c7;
+        --msg-user-color: #b45309;
+        --loading-top: #d97706;
+        --bg-primary: #fffdf4;
+        --bg-input: rgba(254, 243, 199, 0.6);
+        --bg-hover: rgba(217, 119, 6, 0.08);
+        --pre-bg: #fdf6e1;
+        --chat-bg: #fdf6e1;
+        --msg-bubble-border: rgba(217, 119, 6, 0.14);
+        --btn-ghost-hover-bg: #fef3c7;
+        --grad-a: rgba(217, 119, 6, 0.13);
+        --grad-c: rgba(217, 119, 6, 0.08);
+      }
+      [data-color="blue"] {
+        --accent: #60a5fa;
+        --accent-bg: rgba(96, 165, 250, 0.14);
+        --msg-user-bg: rgba(96, 165, 250, 0.16);
+        --msg-user-color: #bfdbfe;
+        --loading-top: #60a5fa;
+        --grad-a: rgba(96, 165, 250, 0.14);
+        --grad-c: rgba(96, 165, 250, 0.1);
+      }
+      [data-color="blue"][data-theme="light"] {
+        --accent: #2563eb;
+        --accent-bg: #dbeafe;
+        --msg-user-bg: #dbeafe;
+        --msg-user-color: #2563eb;
+        --loading-top: #2563eb;
+        --bg-primary: #f7faff;
+        --bg-input: rgba(219, 234, 254, 0.6);
+        --bg-hover: rgba(37, 99, 235, 0.08);
+        --pre-bg: #eef4ff;
+        --chat-bg: #eef4ff;
+        --msg-bubble-border: rgba(37, 99, 235, 0.14);
+        --btn-ghost-hover-bg: #dbeafe;
+        --grad-a: rgba(37, 99, 235, 0.13);
+        --grad-c: rgba(37, 99, 235, 0.08);
       }
       * {
         margin: 0;
@@ -149,20 +297,20 @@
         font-family: var(--font-sans);
       }
             body {
-        background:
+background:
           radial-gradient(
             900px 700px at 85% -10%,
-            rgba(255, 127, 172, 0.14),
+            var(--grad-a),
             transparent 60%
           ),
           radial-gradient(
             800px 600px at -10% 20%,
-            rgba(136, 192, 208, 0.12),
+            var(--grad-b),
             transparent 60%
           ),
           radial-gradient(
             700px 500px at 50% 110%,
-            rgba(243, 59, 124, 0.1),
+            var(--grad-c),
             transparent 60%
           ),
           var(--bg-primary);
@@ -352,6 +500,94 @@
         border-color: rgba(255, 127, 172, 0.5);
         box-shadow: var(--shadow-glow);
         transform: scale(1.06);
+      }
+      #bg-layer {
+        position: fixed;
+        inset: 0;
+        z-index: -1;
+        pointer-events: none;
+        background-image: var(--bg-img, none);
+        background-size: cover;
+        background-position: center;
+        background-repeat: no-repeat;
+        transform: scale(1.04);
+        filter: blur(calc(var(--bg-blur, 0) * 1px));
+        transition: filter 0.25s var(--ease-out);
+      }
+      .palette-pop {
+        position: fixed;
+        bottom: 66px;
+        left: 16px;
+        width: 200px;
+        padding: 12px;
+        background: var(--glass-bg-strong);
+        backdrop-filter: blur(12px);
+        border: 1px solid var(--glass-border);
+        border-radius: var(--radius-md);
+        box-shadow: var(--shadow-lg);
+        display: none;
+        z-index: 90;
+      }
+      .palette-pop.on {
+        display: block;
+        animation: viewIn 0.16s var(--ease-out);
+      }
+      .palette-pop h4 {
+        font-size: 11px;
+        font-weight: 600;
+        color: var(--text-secondary);
+        margin: 2px 0 6px;
+      }
+      .palette-pop button.cdot {
+        width: 22px;
+        height: 22px;
+        border-radius: 50%;
+        border: 2px solid rgba(255, 255, 255, 0.18);
+        cursor: pointer;
+        margin: 3px;
+        padding: 0;
+        vertical-align: middle;
+        transition: transform var(--dur-micro) var(--ease-out);
+      }
+      .palette-pop button.cdot:hover {
+        transform: scale(1.25);
+      }
+      .palette-pop button.cdot.on {
+        border-color: var(--text-primary);
+        box-shadow: var(--shadow-glow);
+        transform: scale(1.15);
+      }
+      .palette-pop input[type="text"] {
+        background: var(--bg-input);
+        border: 1px solid var(--border-color);
+        border-radius: var(--radius-sm);
+        padding: 5px 8px;
+        color: var(--text-primary);
+        font-size: 11px;
+        width: 100%;
+        margin-bottom: 6px;
+        outline: none;
+      }
+      .palette-pop input[type="range"] {
+        width: 100%;
+        margin: 2px 0 4px;
+        accent-color: var(--accent);
+      }
+      .palette-pop .pp-row {
+        display: flex;
+        align-items: center;
+        gap: 6px;
+        margin-top: 4px;
+      }
+      .palette-pop .pp-row .btn {
+        padding: 3px 10px;
+        font-size: 11px;
+      }
+      .palette-pop .pp-val {
+        font-size: 11px;
+        color: var(--text-muted);
+        min-width: 30px;
+        text-align: right;
       }
       .container {
         padding: 24px;
@@ -1862,6 +2098,8 @@
     </style>
   </head>
   <body>
+    <div id="bg-layer"></div>
+    <div class="palette-pop" id="palette-pop"></div>
     <nav id="sidebar">
       <h1>
         <img
@@ -1898,6 +2136,14 @@
             title="切换亮色/暗色模式"
           >
             <svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M21 12.8A9 9 0 1 1 11.2 3a7 7 0 0 0 9.8 9.8z"/></svg>
+          </button>
+          <button
+            class="theme-btn"
+            onclick="toggleAppearance()"
+            id="palette-btn"
+            title="外观：主题色 / 背景图"
+          >
+            <svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 22a10 10 0 1 1 10-10c0 2.2-1.8 4-4 4h-2a3 3 0 0 0-3 3c0 1.1.9 2 2 2 1.4 0 2.5-1.1 3.6-2.1C19.3 18.5 20 20 21.5 20.5A1 1 0 0 0 22 19c0-4-3.6-7-10-7-5.5 0-9 3.8-9 9z"/><circle cx="7.5" cy="10.5" r="1"/><circle cx="12" cy="7.5" r="1"/><circle cx="16.5" cy="10.5" r="1"/></svg>
           </button>
           <button
             class="btn btn-ghost btn-sm"
@@ -2053,16 +2299,94 @@
         saveTheme(cur === "light" ? "dark" : "light");
       }
 
+      var PALETTES = {
+        sakura: "#ff7fac",
+        cyan: "#2dd4bf",
+        violet: "#a78bfa",
+        emerald: "#34d399",
+        amber: "#fbbf24",
+        blue: "#60a5fa"
+      };
+
+      function setColor(name) {
+        document.documentElement.setAttribute("data-color", name);
+        localStorage.setItem("ha-color", name);
+        var pop = document.getElementById("palette-pop");
+        if (!pop) return;
+        var btns = pop.querySelectorAll("button.cdot");
+        for (var i = 0; i < btns.length; i++) {
+          btns[i].className = btns[i].getAttribute("data-c") === name ? "cdot on" : "cdot";
+        }
+      }
+
+      function applyBgImg(url) {
+        url = (url || "").trim();
+        if (!url) {
+          document.documentElement.style.setProperty("--bg-img", "none");
+          localStorage.removeItem("ha-bg-img");
+          return;
+        }
+        document.documentElement.style.setProperty(
+          "--bg-img",
+          'url("' + url.replace(/"/g, '\\"') + '")'
+        );
+        localStorage.setItem("ha-bg-img", url);
+      }
+
+      function applyBgBlur(n) {
+        n = Math.max(0, Math.min(30, Number(n) || 0));
+        document.documentElement.style.setProperty("--bg-blur", String(n));
+        localStorage.setItem("ha-bg-blur", String(n));
+        var v = document.getElementById("bg-blur-val");
+        if (v) v.textContent = n + "px";
+        var r = document.getElementById("bg-blur-range");
+        if (r) r.value = String(n);
+      }
+
+      function toggleAppearance() {
+        var pop = document.getElementById("palette-pop");
+        if (!pop) return;
+        var on = pop.classList.contains("on");
+        if (!pop.querySelector("button.cdot")) {
+          var cur = localStorage.getItem("ha-color") || "sakura";
+          var img = localStorage.getItem("ha-bg-img") || "";
+          var blur = localStorage.getItem("ha-bg-blur") || "0";
+          var dots = "";
+          Object.keys(PALETTES).forEach(function (k) {
+            dots +=
+              '<button class="cdot" data-c="' + k + '" title="' + k + '" style="background:' +
+              PALETTES[k] + '"' +
+              (k === cur ? "" : "") + ' onclick="setColor(\'' + k + '\')"></button>';
+          });
+          pop.innerHTML =
+            '<h4>主题色</h4><div>' + dots + '</div>' +
+            '<h4 style="margin-top:8px">背景图片 URL</h4>' +
+            '<input type="text" id="bg-img-input" placeholder="https://...jpg / png" value="' +
+            escHtml(img) + '">' +
+            '<div class="pp-row"><button class="btn btn-ghost btn-sm" onclick="applyBgImg(document.getElementById(\'bg-img-input\').value)">应用</button>' +
+            '<button class="btn btn-ghost btn-sm" onclick="applyBgImg(\'\')">清除</button>' +
+            '<span class="pp-val" style="margin-left:auto;min-width:90px;font-size:10px">模糊 ' +
+            '<input type="range" id="bg-blur-range" min="0" max="30" value="' + blur + '" oninput="applyBgBlur(this.value)" style="width:80px;display:inline-block;vertical-align:middle">' +
+            '<span id="bg-blur-val">' + blur + 'px</span></span></div>';
+          setColor(cur);
+          var rr = document.getElementById("bg-blur-range");
+          if (rr) rr.value = blur;
+          var vv = document.getElementById("bg-blur-val");
+          if (vv) vv.textContent = blur + "px";
+        }
+        pop.classList.toggle("on", !on);
+      }
+
+      (function initAppearance() {
+        var img = localStorage.getItem("ha-bg-img");
+        var blur = localStorage.getItem("ha-bg-blur");
+        if (img) applyBgImg(img);
+        if (blur) applyBgBlur(blur);
+      })();
+
       (function () {
         var saved = localStorage.getItem("ha-theme");
-        setTheme(saved || systemTheme());
-        window
-          .matchMedia("(prefers-color-scheme: dark)")
-          .addEventListener("change", function (e) {
-            if (!localStorage.getItem("ha-theme")) {
-              setTheme(e.matches ? "dark" : "light");
-            }
-          });
+        setTheme(saved || "light");
         var sb = localStorage.getItem("ha-sidebar");
         if (sb === "1" || (!sb && window.innerWidth <= 768)) {
           document.body.classList.add("sidebar-collapsed");
@@ -2232,7 +2556,18 @@
           if (m) crumb.textContent = __(m[0], m[1]);
           else crumb.textContent = n;
         }
-        if (window.innerWidth <= 768) {\n            document.body.classList.add(\"sidebar-collapsed\");\n          }\n          if (n === \"chat\") {\n            state.chatStick = true;\n            var msgsEl = document.getElementById(\"chat-msgs\");\n            if (msgsEl) {\n              msgsEl.scrollTop = msgsEl.scrollHeight;\n            }\n          }\n          renderAll();\n        }
+        if (window.innerWidth <= 768) {
+          document.body.classList.add("sidebar-collapsed");
+        }
+        if (n === "chat") {
+          state.chatStick = true;
+          var msgsEl = document.getElementById("chat-msgs");
+          if (msgsEl) {
+            msgsEl.scrollTop = msgsEl.scrollHeight;
+          }
+        }
+        renderAll();
+      }
 
       function toggleSidebar() {
         document.body.classList.toggle("sidebar-collapsed");
@@ -2656,7 +2991,19 @@
                   msgsEl.clientHeight <
                 80;
             },
-            { passive: true },\n          );\n          msgsEl.addEventListener(\n            \"load\",\n            function () {\n              if (state.chatStick === true) {\n                msgsEl.scrollTop = msgsEl.scrollHeight;\n              }\n            },\n            true,\n          );\n        }\n        var msgs = state.messages;
+            { passive: true },
+          );
+          msgsEl.addEventListener(
+            "load",
+            function () {
+              if (state.chatStick === true) {
+                msgsEl.scrollTop = msgsEl.scrollHeight;
+              }
+            },
+            true,
+          );
+        }
+        var msgs = state.messages;
         var sig = msgs
           .map(function (m) {
             var c = m.content || "";
@@ -2679,7 +3026,12 @@
           (state.chatLoading ? "1" : "0") +
           "|P" +
           (state.pendingTools || []).join(",");
-        \1          if (state.chatStick === true) {\n            msgsEl.scrollTop = msgsEl.scrollHeight;\n          }\n\2
+        if (msgsEl._chatSig === sig && msgsEl.childElementCount > 0) {
+          if (state.chatStick === true) {
+            msgsEl.scrollTop = msgsEl.scrollHeight;
+          }
+          return;
+        }
         msgsEl._chatSig = sig;
         var prevPending = msgsEl._lastPending || [];
         var newPending = (state.pendingTools || []).slice();
@@ -2890,7 +3242,10 @@
               : "") +
             "</div></div></div>";
         }
-        msgsEl.innerHTML = html;\n        if (state.chatStick !== false) {\n          msgsEl.scrollTop = msgsEl.scrollHeight;\n        }
+        msgsEl.innerHTML = html;
+        if (state.chatStick !== false) {
+          msgsEl.scrollTop = msgsEl.scrollHeight;
+        }
         updateChatBadge();
       }
 
