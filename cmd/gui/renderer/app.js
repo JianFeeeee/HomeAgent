@@ -6,6 +6,7 @@ let state = {
   meta: {},
   pluginMeta: {},
   settingsPlugins: ['core'],
+  disabledPlugins: [],
   currentView: 'chat',
   selectedSection: 'core',
   messages: [],
@@ -96,11 +97,7 @@ function L() { return state.lang }
 function toggleLang() {
   state.lang = state.lang === 'zh' ? 'en' : 'zh';
   localStorage.setItem('ha-lang', state.lang);
-  document.querySelectorAll('[data-i18n]').forEach(function(el) {
-    var k = el.getAttribute('data-i18n');
-    var m = window._i18n && window._i18n[k];
-    if (m) el.textContent = __(m[0], m[1]);
-  });
+  applyI18n();
   renderAll();
 }
 
@@ -133,9 +130,130 @@ function toggleTheme() {
   setTheme(cur === 'light' ? 'dark' : 'light');
 }
 
+// ===== Appearance: 主题色 / 背景图 =====
+var PALETTES_GUI = {
+  sakura: '#ff7fac',
+  cyan: '#2dd4bf',
+  violet: '#a78bfa',
+  emerald: '#34d399',
+  amber: '#fbbf24',
+  blue: '#60a5fa'
+};
+
+function setColor(name) {
+  document.documentElement.setAttribute('data-color', name);
+  localStorage.setItem('ha-color', name);
+  var pop = document.getElementById('palette-pop');
+  if (!pop) return;
+  var btns = pop.querySelectorAll('button.cdot');
+  for (var i = 0; i < btns.length; i++) {
+    btns[i].className = btns[i].getAttribute('data-c') === name ? 'cdot on' : 'cdot';
+  }
+}
+
+async function applyBgImg(input) {
+  var src = (input || '').trim();
+  if (!src) {
+    document.documentElement.style.setProperty('--bg-img', 'none');
+    localStorage.removeItem('ha-bg-img');
+    localStorage.removeItem('ha-bg-final');
+    return;
+  }
+  var finalSrc = src;
+  if (window.homeagent && window.homeagent.cacheBg) {
+    try {
+      var r = await window.homeagent.cacheBg(src);
+      if (r && r.ok && r.file) finalSrc = r.file;
+      else if (r && r.error && !r.useOriginal) toast(__('背景图加载失败: ','Bg load failed: ') + r.error, true);
+    } catch (e) { toast(__('背景图加载失败: ','Bg load failed: ') + e.message, true); }
+  }
+  document.documentElement.style.setProperty('--bg-img', 'url("' + finalSrc.replace(/"/g, '\\"') + '")');
+  if (/^data:/.test(src)) {
+    localStorage.setItem('ha-bg-img', finalSrc);
+  } else {
+    localStorage.setItem('ha-bg-img', src);
+  }
+  localStorage.setItem('ha-bg-final', finalSrc);
+}
+
+function setBgImgVar(finalSrc) {
+  document.documentElement.style.setProperty('--bg-img', 'url("' + (finalSrc || '').replace(/"/g, '\\"') + '")');
+}
+
+function pickBgFile() {
+  var fi = document.getElementById('bg-file-input');
+  if (!fi) {
+    fi = document.createElement('input');
+    fi.type = 'file';
+    fi.id = 'bg-file-input';
+    fi.accept = 'image/*';
+    fi.style.display = 'none';
+    fi.onchange = function () {
+      var f = fi.files && fi.files[0];
+      if (!f) return;
+      var rd = new FileReader();
+      rd.onload = function () { applyBgImg(rd.result); };
+      rd.readAsDataURL(f);
+      fi.value = '';
+    };
+    document.body.appendChild(fi);
+  }
+  fi.click();
+}
+
+function applyBgBlur(n) {
+  n = Math.max(0, Math.min(30, Number(n) || 0));
+  document.documentElement.style.setProperty('--bg-blur', String(n));
+  localStorage.setItem('ha-bg-blur', String(n));
+  var v = document.getElementById('bg-blur-val');
+  if (v) v.textContent = n + 'px';
+  var r = document.getElementById('bg-blur-range');
+  if (r) r.value = String(n);
+}
+
+function toggleAppearance() {
+  var pop = document.getElementById('palette-pop');
+  if (!pop) return;
+  var on = pop.classList.contains('on');
+  if (!pop.querySelector('button.cdot')) {
+    var cur = localStorage.getItem('ha-color') || 'sakura';
+    var img = localStorage.getItem('ha-bg-img') || '';
+    var blur = localStorage.getItem('ha-bg-blur') || '0';
+    var dots = '';
+    Object.keys(PALETTES_GUI).forEach(function (k) {
+      dots += '<button class="cdot" data-c="' + k + '" title="' + k +
+        '" style="background:' + PALETTES_GUI[k] +
+        '" onclick="setColor(\'' + k + '\')"></button>';
+    });
+    pop.innerHTML =
+      '<h4>' + __('主题色','Theme color') + '</h4><div>' + dots + '</div>' +
+      '<h4 style="margin-top:8px">' + __('背景图片 URL','Background image URL') + '</h4>' +
+      '<input type="text" id="bg-img-input" placeholder="https://...jpg / png" value="' + escHtml(img) + '">' +
+      '<div class="pp-row"><button class="btn btn-ghost btn-sm" onclick="applyBgImg(document.getElementById(\'bg-img-input\').value)">' + __('应用','Apply') + '</button>' +
+      '<button class="btn btn-ghost btn-sm" onclick="pickBgFile()">' + __('本地图片…','Local image…') + '</button>' +
+      '<button class="btn btn-ghost btn-sm" onclick="applyBgImg(\'\')">' + __('清除','Clear') + '</button>' +
+      '<span class="pp-val">' + __('模糊','Blur') + ' <input type="range" id="bg-blur-range" min="0" max="30" value="' + blur + '" oninput="applyBgBlur(this.value)">' +
+      '<span id="bg-blur-val">' + blur + 'px</span></span></div>';
+    setColor(cur);
+    var rr = document.getElementById('bg-blur-range');
+    if (rr) rr.value = blur;
+    var vv = document.getElementById('bg-blur-val');
+    if (vv) vv.textContent = blur + 'px';
+  }
+  pop.classList.toggle('on', !on);
+}
+
 (function() {
   var saved = localStorage.getItem('ha-theme');
-  setTheme(saved || 'dark');
+  setTheme(saved || 'light');
+  var finalSrc = localStorage.getItem('ha-bg-final');
+  var img = localStorage.getItem('ha-bg-img');
+  var blur = localStorage.getItem('ha-bg-blur');
+  if (img) {
+    if (finalSrc) setBgImgVar(finalSrc);
+    else applyBgImg(img);
+  }
+  if (blur) applyBgBlur(blur);
 })();
 
 // ===== Utility =====
@@ -191,9 +309,19 @@ async function api(p, o) {
     return cliMap(p, o);
   }
   var opts = o || {};
+  var to = opts.timeout || 8000;
   var headers = { 'Content-Type': 'application/json', ...(opts.headers || {}) };
   if (state.currentConn.apiKey) headers['X-API-Key'] = state.currentConn.apiKey;
-  var r = await fetch(state.currentConn.url + '/api/v1' + p, { ...opts, headers: headers });
+  var ctl = new AbortController();
+  var timer = setTimeout(function(){ ctl.abort() }, to);
+  var r;
+  try {
+    r = await fetch(state.currentConn.url + '/api/v1' + p, { ...opts, headers: headers, signal: ctl.signal });
+  } catch (e) {
+    clearTimeout(timer);
+    throw new Error(__('连接超时或失败','Timeout or connection failed'));
+  }
+  clearTimeout(timer);
   if (r.status === 401) throw new Error(__('认证失败','unauthorized'));
   if (opts.raw) return r;
   var ct = r.headers.get('content-type') || '';
@@ -220,6 +348,22 @@ function switchView(n) {
 
 // ===== Tab Render Dispatch =====
 async function doRenderAll() {
+  await refreshAll();
+}
+
+function renderAll() {
+  try { renderOverview() } catch(e) { console.error('renderOverview', e) }
+  try { renderChat() } catch(e) { console.error('renderChat', e) }
+  try { renderChatStarmap() } catch(e) { console.error('renderChatStarmap', e) }
+  try { renderPlugins() } catch(e) { console.error('renderPlugins', e) }
+  try { renderKernel() } catch(e) { console.error('renderKernel', e) }
+  try { renderOneSettings() } catch(e) { console.error('renderOneSettings', e) }
+  try { renderAdapters() } catch(e) { console.error('renderAdapters', e) }
+  applyI18n();
+  refreshAll();
+}
+
+async function refreshAll() {
   try { var s = await api('/status'); state.status = s; state.startedAt = s.startedAt ? new Date(s.startedAt).getTime() : null; updateConnIndicator() } catch(e) {}
   try { state.kernel = await api('/kernel') } catch(e) {}
   try {
@@ -228,22 +372,7 @@ async function doRenderAll() {
     state.meta = s.meta || {};
     state.settingsPlugins = s.plugins || ['core'];
     state.pluginMeta = s.plugin_meta || {};
-  } catch(e) {}
-  try { state.installedPlugins = await api('/plugins') } catch(e) {}
-  try { await loadTerminals() } catch(e) {}
-  try { await loadCmdHistory() } catch(e) {}
-  renderAll();
-}
-
-async function renderAll() {
-  try { var s = await api('/status'); state.status = s; state.startedAt = s.startedAt ? new Date(s.startedAt).getTime() : null } catch(e) {}
-  try { state.kernel = await api('/kernel') } catch(e) {}
-  try {
-    var s = await api('/settings');
-    state.settings = s.settings || {};
-    state.meta = s.meta || {};
-    state.settingsPlugins = s.plugins || ['core'];
-    state.pluginMeta = s.plugin_meta || {};
+    state.disabledPlugins = s.disabled_plugins || [];
   } catch(e) {}
   try { state.installedPlugins = await api('/plugins') } catch(e) {}
   try { await loadTerminals() } catch(e) {}
@@ -351,7 +480,7 @@ function buildChatLayout() {
   html += '<div class="chat-panel active" id="chat-panel-chat"><div class="chat-main">';
   html += '<div class="card"><h2>' + __('对话','Chat') + ' <span id="chat-stage" class="badge" style="font-size:10px;font-weight:400;display:none">' + escHtml(state.chatStage || '') + '</span></h2><div class="chat-messages" id="chat-msgs">';
   if (state.messages.length === 0) {
-    html += '<div class="empty-state" style="flex:1;display:flex;align-items:center;justify-content:center"><p>' + __('开始对话以测试 Agent 回复','Start a conversation to test Agent replies') + '</p></div>';
+    html += '<div class="empty-state" style="flex:1;display:flex;align-items:center;justify-content:center"><p>' + __('开始与您的 HomeAgent 聊天吧','Start chatting with your HomeAgent') + '</p></div>';
   }
   html += '</div>'
     + '<div class="chat-input-row">'
@@ -451,7 +580,7 @@ function renderChat() {
   }
   var html = '';
   if (msgs.length === 0) {
-    html = '<div class="empty-state" style="flex:1;display:flex;align-items:center;justify-content:center"><p>' + __('开始对话以测试 Agent 回复','Start a conversation to test Agent replies') + '</p></div>';
+    html = '<div class="empty-state" style="flex:1;display:flex;align-items:center;justify-content:center"><p>' + __('开始与您的 HomeAgent 聊天吧','Start chatting with your HomeAgent') + '</p></div>';
   } else {
     msgs.forEach(function(m, i) {
       var role = m.role || 'user';
@@ -839,7 +968,7 @@ async function sendChat() {
   btn.textContent = '';
   rerenderChat();
   try {
-    var r = await api('/chat', { method: 'POST', body: JSON.stringify({ message: text }) });
+    var r = await api('/chat', { method: 'POST', body: JSON.stringify({ message: text }), timeout: 120000 });
     state.chatStage = '';
     var last = state.messages[state.messages.length - 1];
     console.log('[sendChat] POST returned, last msg:', last ? {role:last.role, _streaming:last._streaming, _final:last._final, tool_calls:last.tool_calls?.length, content_len:last.content?.length} : null);
@@ -1072,16 +1201,42 @@ function renderPlugins() {
     + '<div><input type="file" id="plugin-file" accept=".hmap" style="display:inline;width:auto" onchange="installPluginFile(this.files[0])">'
     + '<label for="plugin-file" class="btn btn-ghost" style="cursor:pointer">' + __('选择 .hmap 文件上传','Upload .hmap file') + '</label></div></div>';
   var installedNames = (state.installedPlugins || []).map(function(p) { return p.name });
+  var disabledNames = {};
+  (state.disabledPlugins || []).forEach(function(d) { disabledNames[d.name] = d; });
   html += '<div class="card"><h2>' + __('已加载插件','Loaded Plugins') + ' (' + plugins.length + ')</h2>';
-  if (plugins.length === 0) {
+  if (plugins.length === 0 && (state.disabledPlugins || []).length === 0) {
     html += '<div class="empty-state"><p>' + __('暂无已加载插件','No loaded plugins') + '</p></div>';
   } else {
     html += '<table><tr><th>' + __('名称','Name') + '</th><th>' + __('状态','Status') + '</th><th>' + __('操作','Actions') + '</th></tr>';
-    plugins.forEach(function(p) {
-      var isExternal = installedNames.indexOf(p.name) >= 0;
-      html += '<tr><td>' + escHtml(p.name) + '</td>'
-        + '<td><span class="badge badge-green">' + __('已加载','Loaded') + '</span></td>'
-        + '<td>' + (isExternal ? '<button class="btn btn-sm btn-danger" onclick="removePlugin(\'' + escHtml(p.name) + '\')">' + __('卸载','Unload') + '</button>' : '<span class="badge badge-blue">' + __('内置','Built-in') + '</span>') + '</td></tr>';
+    var allNames = {};
+    plugins.forEach(function(p) { allNames[p.name] = true; });
+    (state.disabledPlugins || []).forEach(function(d) { allNames[d.name] = true; });
+    Object.keys(allNames).sort().forEach(function(name) {
+      var loaded = plugins.some(function(p) { return p.name === name });
+      var isDisabled = !!disabledNames[name];
+      var isExternal = installedNames.indexOf(name) >= 0;
+      var statusHtml = loaded && !isDisabled
+        ? '<span class="badge badge-green">' + __('已加载','Loaded') + '</span>'
+        : loaded && isDisabled
+          ? '<span class="badge badge-yellow">' + __('运行中(禁用待生效)','Running (disable pending)') + '</span>'
+          : isDisabled
+            ? '<span class="badge badge-red">' + __('已禁用','Disabled') + '</span>'
+            : '<span class="badge">' + __('未加载','Not Loaded') + '</span>';
+      var actionsHtml = '';
+      if (loaded && !isDisabled) {
+        actionsHtml += '<button class="btn btn-sm btn-warning" onclick="disablePlugin(\'' + escHtml(name) + '\')" style="margin-right:4px">' + __('禁用','Disable') + '</button>';
+      }
+      if (isDisabled) {
+        actionsHtml += '<button class="btn btn-sm btn-primary" onclick="enablePlugin(\'' + escHtml(name) + '\')" style="margin-right:4px">' + __('启用','Enable') + '</button>';
+      }
+      if (loaded && isExternal) {
+        actionsHtml += '<button class="btn btn-sm btn-danger" onclick="removePlugin(\'' + escHtml(name) + '\')">' + __('卸载','Unload') + '</button>';
+      } else if (loaded) {
+        actionsHtml += '<span class="badge badge-blue">' + __('内置','Built-in') + '</span>';
+      }
+      html += '<tr><td>' + escHtml(name) + '</td>'
+        + '<td>' + statusHtml + '</td>'
+        + '<td>' + actionsHtml + '</td></tr>';
     });
     html += '</table>';
   }
@@ -1165,6 +1320,32 @@ async function removePlugin(name) {
     if (r.action === 'reload_required') toast(__('已卸载，请点击「重载插件」生效','Unloaded, click "Reload Plugins" to apply'), false);
     loadInstalledPlugins(); renderPlugins();
   } catch(e) { toast(__('卸载失败: ','Unload failed: ') + e.message, true) }
+}
+
+async function disablePlugin(name) {
+  if (name === 'webui') {
+    var r = confirm(__('禁用 WebUI 后将无法通过 URL:端口访问此管理面板，若要重新启用需要通过 CLI 命令 /plugin enable webui 恢复。\n\n确定要禁用吗？','Disabling WebUI will make this management panel inaccessible via URL:port. To re-enable, use CLI command /plugin enable webui.\n\nAre you sure?'));
+    if (!r) return;
+  }
+  try {
+    await api('/plugins/' + encodeURIComponent(name) + '/disable', { method: 'POST' });
+    toast(__('已禁用: ','Disabled: ') + name);
+    state.kernel = await api('/kernel');
+    var s = await api('/settings');
+    state.disabledPlugins = s.disabled_plugins || [];
+    renderPlugins();
+  } catch(e) { toast(__('禁用失败: ','Disable failed: ') + e.message, true) }
+}
+
+async function enablePlugin(name) {
+  try {
+    await api('/plugins/' + encodeURIComponent(name) + '/enable', { method: 'POST' });
+    toast(__('已启用: ','Enabled: ') + name);
+    state.kernel = await api('/kernel');
+    var s = await api('/settings');
+    state.disabledPlugins = s.disabled_plugins || [];
+    renderPlugins();
+  } catch(e) { toast(__('启用失败: ','Enable failed: ') + e.message, true) }
 }
 
 async function reloadPlugins() {
@@ -1703,6 +1884,7 @@ async function deleteAdapter(name) {
   state.connections = data.connections || [];
   if (data.currentId) state.currentConn = state.connections.find(function(c) { return c.id === data.currentId }) || null;
   if (state.currentConn) {
+    await syncConnAuth();
     connectSSE();
     await loadChatHistory();
     doRenderAll();
@@ -1768,6 +1950,24 @@ function renderConnSection() {
     + '<option value="cli">CLI (unix socket)</option></select>'
     + '<div id="conn-addr-webui"><label>' + __('地址','URL') + '</label><input id="conn-url" placeholder="http://localhost:18080"></div>'
     + '<div id="conn-addr-cli" style="display:none"><label>' + __('Socket 路径','Socket Path') + '</label><input id="conn-sock" placeholder="C:\\path\\to\\cli.sock"></div>'
+    + '<div id="conn-auth-webui">'
+    + '<label>' + __('WebUI 账号','WebUI Username') + ' <span style="color:var(--text-muted);font-weight:400">(' + __('自动登录第二层网关','auto-login 2nd gateway') + ')</span></label>'
+    + '<input id="conn-user" placeholder="admin">'
+    + '<label>' + __('密码','Password') + '</label><input id="conn-pass" type="password" placeholder="••••">'
+    + '<div style="display:flex;gap:6px;align-items:center;padding:4px 0 8px;color:var(--text-secondary);font-size:12px">'
+    + '<input type="checkbox" id="conn-gw" onchange="toggleGwFields()" style="width:auto;margin:0">'
+    + '<label for="conn-gw" style="margin:0;font-size:12px">' + __('经过总网关（可选）','Via gateway (optional)') + '</label>'
+    + '</div>'
+    + '<div id="conn-gw-fields" style="display:none">'
+    + '<label>' + __('总网关 Cookie','Gateway Cookie') + ' <span style="color:var(--text-muted);font-weight:400">(' + __('登录窗口自动抓取','auto-captured by login window') + ')</span></label>'
+    + '<textarea id="conn-cookie" rows="2" placeholder="sl-session=...; gateway_session=..." style="min-height:40px"></textarea>'
+    + '<div style="display:flex;gap:6px;align-items:center;margin-bottom:10px">'
+    + '<button class="btn btn-ghost btn-sm" onclick="openLoginWindow()">' + __('打开登录窗口（自动抓取 Cookie）','Open login window (auto-grab cookies)') + '</button>'
+    + '</div>'
+    + '</div>'
+    + '<label>' + __('额外请求头 JSON','Extra Headers JSON') + ' <span style="color:var(--text-muted);font-weight:400">(' + __('可选','optional') + ')</span></label>'
+    + '<input id="conn-headers" placeholder=\'{"X-Api-Key":"..."}\'>'
+    + '</div>'
     + '<label>' + __('API 密钥','API Key') + ' <span style="color:var(--text-muted);font-weight:400">(' + __('可选','optional') + ')</span></label>'
     + '<input id="conn-key" type="password" placeholder="sk-...">'
     + '<div class="conn-form-actions">'
@@ -1787,6 +1987,69 @@ function toggleConnType() {
   var t = document.getElementById('conn-type').value;
   document.getElementById('conn-addr-webui').style.display = t === 'cli' ? 'none' : 'block';
   document.getElementById('conn-addr-cli').style.display = t === 'cli' ? 'block' : 'none';
+  document.getElementById('conn-auth-webui').style.display = t === 'cli' ? 'none' : 'block';
+  toggleGwFields();
+}
+
+function toggleGwFields() {
+  var gw = document.getElementById('conn-gw');
+  var fields = document.getElementById('conn-gw-fields');
+  if (gw && fields) fields.style.display = gw.checked ? 'block' : 'none';
+}
+
+async function openLoginWindow(useForm) {
+  if (useForm === undefined) useForm = true;
+  var url, us, ps;
+  if (useForm) {
+    url = document.getElementById('conn-url').value.trim().replace(/\/+$/, '');
+    us = document.getElementById('conn-user').value.trim();
+    ps = document.getElementById('conn-pass').value;
+  } else {
+    url = arguments[1];
+    us = arguments[2] || '';
+    ps = arguments[3] || '';
+  }
+  if (!url) { toast(__('请先填写地址','Set URL first'), true); return; }
+  var handled = false;
+  window.homeagent.webui.onLoginResult(function(d) {
+    if (handled) return; handled = true;
+    if (window.homeagent && window.homeagent.log) window.homeagent.log('r: login-result ok=' + (d && d.ok) + ' count=' + (d && d.count));
+    if (_loginWaitRes) {
+      var r = _loginWaitRes; _loginWaitRes = null;
+      r(d);
+      return;
+    }
+    if (!d || !d.ok) {
+      toast(__('未取得 Cookie: ','No cookies: ') + ((d && d.error) || 'unknown'), true);
+      return;
+    }
+    var form = document.getElementById('conn-form');
+    var editing = form && form.style.display === 'block';
+    if (editing) {
+      document.getElementById('conn-cookie').value = d.cookie || '';
+      toast(__('已取得 ','Got ') + (d.count || 0) + __(' 个 Cookie，点保存生效',' cookies, click Save to apply'));
+      return;
+    }
+    if (state.currentConn && d.url.replace(/\/+$/, '') === state.currentConn.url) {
+      window.homeagent.connections.update(state.currentConn.id, { cookie: d.cookie || '' })
+        .then(function (data) {
+          state.connections = data.connections;
+          state.currentConn = data.connections.find(function (c) { return c.id === data.currentId }) || state.currentConn;
+          updateConnIndicator();
+          return syncConnAuth();
+        })
+        .then(function () {
+          toast(__('总网关 Cookie 已自动生效','Gateway cookie applied automatically'));
+          if (state.messages.length === 0) loadChatHistory().then(function(){ rerenderChat() }).catch(function(){});
+          return null;
+        })
+        .catch(function (e) { toast(__('应用 Cookie 失败: ','Apply cookie failed: ') + e.message, true); });
+    } else {
+      toast(__('已获得 Cookie（请切换到对应连接后保存）','Cookies acquired (switch to the matching connection to save)'), false);
+    }
+  });
+  var r = await window.homeagent.webui.openLogin(url, us, ps);
+  if (!r || !r.ok) toast(__('无法打开登录窗口: ','Cannot open login window: ') + ((r && r.error) || ''), true);
 }
 
 function showConnForm() {
@@ -1796,6 +2059,12 @@ function showConnForm() {
   document.getElementById('conn-url').value = 'http://localhost:18080';
   document.getElementById('conn-sock').value = '';
   document.getElementById('conn-key').value = '';
+  document.getElementById('conn-user').value = '';
+  document.getElementById('conn-pass').value = '';
+  document.getElementById('conn-cookie').value = '';
+  document.getElementById('conn-headers').value = '';
+  document.getElementById('conn-gw').checked = false;
+  toggleGwFields();
   document.getElementById('conn-type').value = 'webui';
   toggleConnType();
   document.getElementById('conn-form').style.display = 'block';
@@ -1812,6 +2081,12 @@ function editConnection(id, e) {
   document.getElementById('conn-url').value = c.url || 'http://localhost:18080';
   document.getElementById('conn-sock').value = c.socketPath || '';
   document.getElementById('conn-key').value = c.apiKey;
+  document.getElementById('conn-user').value = c.username || '';
+  document.getElementById('conn-pass').value = c.password || '';
+  document.getElementById('conn-cookie').value = c.cookie || '';
+  document.getElementById('conn-headers').value = c.headers || '';
+  document.getElementById('conn-gw').checked = !!(c.gateway || c.cookie);
+  toggleGwFields();
   document.getElementById('conn-type').value = c.type === 'cli' ? 'cli' : 'webui';
   toggleConnType();
   document.getElementById('conn-form').style.display = 'block';
@@ -1830,6 +2105,7 @@ async function selectConnection(id) {
   state.connections = data.connections;
   state.messages = [];
   updateConnIndicator();
+  await syncConnAuth();
   connectSSE();
   await loadChatHistory();
   doRenderAll();
@@ -1847,21 +2123,60 @@ async function deleteConnection(id, e) {
   state.currentConn = data.currentId ? state.connections.find(function(c) { return c.id === data.currentId }) : null;
   if (wasCurrent && state.eventSource) { state.eventSource.close(); state.eventSource = null; }
   if (state.currentConn) {
-    updateConnIndicator(); doRenderAll(); connectSSE();
+    updateConnIndicator(); doRenderAll(); syncConnAuth(); connectSSE();
   } else {
     updateConnIndicator();
+    if (window.homeagent.webui) await window.homeagent.webui.setAuth('', '', '', '', '');
   }
   renderConnSection();
 }
 
 var editingConnId = null;
+var _loginWaitRes = null;
+
+function waitLogin() {
+  return new Promise(function (res) { _loginWaitRes = res; });
+}
+
+async function syncConnAuth() {
+  var c = state.currentConn;
+  if (!c || c.type !== 'webui' || !c.url) {
+    if (window.homeagent.webui) await window.homeagent.webui.setAuth('', '', '', '', '');
+    return true;
+  }
+  var headers = {};
+  if (c.headers) { try { headers = JSON.parse(c.headers) || {} } catch (e) {} }
+  var r = await window.homeagent.webui.setAuth(c.url, c.cookie || '', headers, c.username || '', c.password || '');
+  if (r && r.ok === false) {
+    toast(__('自动登录 WebUI 失败（已忽略，继续使用现有 Cookie）: ','WebUI auto-login failed (ignored): ') + r.error, true);
+    if (c.gateway && !c.cookie) {
+      setTimeout(function () { openLoginWindow(false, c.url, c.username || '', c.password || '') }, 900);
+    }
+    return false;
+  }
+  if (c.gateway && c.cookie && r && r.ok !== false) {
+    toast(__('总网关 Cookie 已生效','Gateway cookie active'));
+  }
+  return true;
+}
 
 async function saveConnForm() {
+  if (window.homeagent && window.homeagent.log) window.homeagent.log('save: start');
   var name = document.getElementById('conn-name').value.trim();
   var ctype = document.getElementById('conn-type').value;
   var url = document.getElementById('conn-url').value.trim().replace(/\/+$/, '');
   var sock = document.getElementById('conn-sock').value.trim();
   var apiKey = document.getElementById('conn-key').value.trim();
+  var username = document.getElementById('conn-user').value.trim();
+  var password = document.getElementById('conn-pass').value;
+  var gwEnabled = !!(document.getElementById('conn-gw') && document.getElementById('conn-gw').checked);
+  var cookie = gwEnabled ? document.getElementById('conn-cookie').value.trim() : '';
+  var headersRaw = document.getElementById('conn-headers').value.trim();
+  var headers = '';
+  if (headersRaw) {
+    try { JSON.parse(headersRaw); headers = headersRaw; }
+    catch (e) { toast(__('额外请求头不是合法 JSON','Extra headers not valid JSON'), true); return; }
+  }
   if (ctype === 'cli') {
     if (!name || !sock) { toast(__('名称和 Socket 路径不能为空','Name and Socket Path required'), true); return; }
   } else {
@@ -1878,8 +2193,38 @@ async function saveConnForm() {
         testBtn.textContent = __('保存','Save'); testBtn.disabled = false; return;
       }
     } else {
-      var testR = await fetch(url + '/api/v1/status', { headers: apiKey ? { 'X-API-Key': apiKey } : {} });
-      if (!testR.ok) { toast(__('连接测试失败: HTTP ','Connection test failed: HTTP ') + testR.status, true); testBtn.textContent = __('保存','Save'); testBtn.disabled = false; return; }
+      if (window.homeagent && window.homeagent.webui) {
+        if (gwEnabled && !cookie) {
+          testBtn.textContent = __('请在登录窗口完成网关登录…','Complete gateway login…');
+          testBtn.disabled = true;
+          openLoginWindow(false, url, username, password);
+          var lg = await waitLogin();
+          if (!lg || !lg.ok) {
+            toast(__('网关登录未完成，已取消保存','Gateway login incomplete, save cancelled') + ((lg && lg.error) ? ': ' + lg.error : ''), true);
+            testBtn.textContent = __('保存','Save'); testBtn.disabled = false;
+            return;
+          }
+          cookie = lg.cookie || '';
+        }
+        var tHeaders = {};
+        if (headersRaw) { try { tHeaders = JSON.parse(headersRaw) } catch (e) {} }
+        if (window.homeagent.log) window.homeagent.log('save: setAuth url=' + url + ' gw=' + gwEnabled + ' cookieLen=' + cookie.length);
+        try {
+          await window.homeagent.webui.setAuth(url, cookie, tHeaders, username, password);
+        } catch (e) { toast(__('应用认证失败: ','Apply auth failed: ') + e.message, true); }
+      }
+      if (window.homeagent.log) window.homeagent.log('save: testing ' + url + '/api/v1/status');
+      var testR;
+      try {
+        testR = await fetch(url + '/api/v1/status', { headers: apiKey ? { 'X-API-Key': apiKey } : {} });
+      } catch (e) {
+        if (window.homeagent.log) window.homeagent.log('save: fetch error: ' + e.message);
+        toast(__('无法连接到 ','Cannot connect to ') + url + ': ' + e.message, true);
+        testBtn.textContent = __('保存','Save'); testBtn.disabled = false;
+        return;
+      }
+      if (window.homeagent.log) window.homeagent.log('save: status=' + testR.status);
+      if (!testR.ok) { toast(__('连接测试失败: HTTP ','Connection test failed: HTTP ') + testR.status + '（' + (await testR.text()).slice(0, 120) + '）', true); testBtn.textContent = __('保存','Save'); testBtn.disabled = false; return; }
     }
   } catch(e) {
     toast(__('无法连接到 ','Cannot connect to ') + (ctype === 'cli' ? sock : url) + ': ' + e.message, true);
@@ -1888,7 +2233,7 @@ async function saveConnForm() {
   testBtn.textContent = __('保存','Save'); testBtn.disabled = false;
   var connData = ctype === 'cli'
     ? { name: name, type: 'cli', socketPath: sock, url: '', apiKey: apiKey }
-    : { name: name, type: 'webui', url: url, apiKey: apiKey };
+    : { name: name, type: 'webui', url: url, apiKey: apiKey, username: username, password: password, cookie: cookie, headers: headers, gateway: gwEnabled };
   var data;
   if (editingConnId) {
     data = await window.homeagent.connections.update(editingConnId, connData);
@@ -1900,6 +2245,7 @@ async function saveConnForm() {
   var switched = !!cur && (!state.currentConn || state.currentConn.id !== cur.id);
   if (cur) {
     state.currentConn = cur;
+    await syncConnAuth();
     if (switched) {
       if (state.eventSource) { state.eventSource.close(); state.eventSource = null; }
       state.messages = [];
