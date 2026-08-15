@@ -6,7 +6,7 @@ package meta
 var (
 	// Version 是 HomeAgent SDK 版本号。
 	// 通过 `-ldflags="-X gitcode.com/JianFeeeee/homeagent-sdk/meta.Version=vX.Y.Z"` 注入。
-	Version = "0.8.0"
+	Version = "0.9.0"
 
 	// Commit 是构建时的 Git commit hash。
 	Commit = "unknown"
@@ -21,7 +21,7 @@ var (
 	CoreModule = "gitcode.com/JianFeeeee/HomeAgent"
 
 	// CoreVersion 是此 SDK 所兼容的最低核心版本。
-	CoreVersion = "0.8.0"
+	CoreVersion = "0.9.0"
 )
 
 // FullVersion 返回完整的版本字符串。
@@ -30,11 +30,23 @@ func FullVersion() string {
 }
 
 // ---- ABI 版本（与核心仓 internal/meta/meta.go 同步） ----
-// 修改时需确保核心仓与 SDK 仓的值一致。
+// ABI 标识版本直接取内核版本号字符串（semver），与核心 Version 保持一致，不使用独立数字编码。
+// 协商层（C 结构体 int version 字段）使用 CABINum：由版本字符串派生的整数（major*100 + minor）。
+// 映射：v0.8.x → CABINum=800；v0.9.x → CABINum=900（invoke_stage 写回）。
+// 小版本（patch）演进不影响 ABI，CABINum 不变。version_min 保证旧 ABI 插件仍可加载。
+
+var (
+	// ABIVersion 是 ABI 标识版本（字符串 semver，与 SDK CoreVersion 对齐）。
+	ABIVersion = CoreVersion
+	// ABIVersionMin 是兼容的最低 ABI 标识版本。
+	ABIVersionMin = "0.8.0"
+)
 
 const (
-	ABIVersion    = 1
-	ABIVersionMin = 1
+	// CABINum 是 C 层协商用的整数版本（major*100 + minor），随 ABIVersion 派生。
+	CABINum = 900
+	// CABINumMin 是 C 层兼容的最低整数版本。
+	CABINumMin = 800
 )
 
 // ---- Dispatch Method IDs（与核心仓 internal/meta/meta.go 同步） ----

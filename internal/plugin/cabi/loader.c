@@ -6,9 +6,9 @@
 #include <stdlib.h>
 #include <string.h>
 
-// HOMEAGENT_ABI_VERSION 与 internal/meta/meta.go ABIVersion 同步。
+// HOMEAGENT_ABI_VERSION 与 internal/meta/meta.go CABINum 同步（major*100+minor，v0.9.x→900）。
 // C ABI 通过 version/version_min 协商，旧插件不受影响。
-#define HOMEAGENT_ABI_VERSION 1
+#define HOMEAGENT_ABI_VERSION 900
 
 // PluginAPI — provided by the plugin
 typedef struct {
@@ -17,7 +17,7 @@ typedef struct {
     int (*start_plugin)(void*, int, char**);
     int (*stop_plugin)(char**);
     int (*invoke_tool)(char*, char*, char**, char**);
-    int (*invoke_stage)(char*, char*, char**);
+    int (*invoke_stage)(char*, char*, char**, char**);
     int (*invoke_output)(char*, char*, char*, char**);
     void (*free_string)(char*);
 } plugin_api_t;
@@ -75,5 +75,5 @@ int call_init_plugin(plugin_api_t* api, char* name, char* config, char** err) { 
 int call_start_plugin(plugin_api_t* api, void* core, int ver, char** err) { return api->start_plugin(core, ver, err); }
 int call_stop_plugin(plugin_api_t* api, char** err) { return api->stop_plugin(err); }
 int call_invoke_tool(plugin_api_t* api, char* n, char* a, char** r, char** e) { return api->invoke_tool(n, a, r, e); }
-int call_invoke_stage(plugin_api_t* api, char* s, char* c, char** e) { return api->invoke_stage(s, c, e); }
+int call_invoke_stage(plugin_api_t* api, char* s, char* c, char** r, char** e) { return api->invoke_stage(s, c, r, e); }
 int call_invoke_output(plugin_api_t* api, char* c, char* m, char* p, char** e) { return api->invoke_output(c, m, p, e); }
