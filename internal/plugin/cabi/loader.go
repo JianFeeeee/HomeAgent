@@ -6,9 +6,10 @@ package cabi
 #cgo LDFLAGS: -ldl
 #include <stdlib.h>
 
-// HOMEAGENT_ABI_VERSION 是当前内核的 ABI 版本号，与 internal/meta/meta.go ABIVersion 保持同步。
-// 旧插件使用低版本 ABI 不受影响——C ABI wrapper 通过 version/version_min 字段协商兼容。
-#define HOMEAGENT_ABI_VERSION 1
+// HOMEAGENT_ABI_VERSION 是当前内核的 C ABI 整数协商版本，由 internal/meta/meta.go CABINum 派生
+// （major*100 + minor，随核心版本号映射：v0.8.x→800，v0.9.x→900）。
+// 旧插件使用低整数版本不受影响——C ABI wrapper 通过 version/version_min 字段协商兼容。
+#define HOMEAGENT_ABI_VERSION 900
 
 // PluginAPI — provided by the plugin via plugin_init()
 typedef struct {
@@ -17,7 +18,7 @@ typedef struct {
     int (*start_plugin)(void*, int, char**);
     int (*stop_plugin)(char**);
     int (*invoke_tool)(char*, char*, char**, char**);
-    int (*invoke_stage)(char*, char*, char**);
+    int (*invoke_stage)(char*, char*, char**, char**);
     int (*invoke_output)(char*, char*, char*, char**);
     void (*free_string)(char*);
 } plugin_api_t;
@@ -36,7 +37,7 @@ extern int call_init_plugin(plugin_api_t*, char*, char*, char**);
 extern int call_start_plugin(plugin_api_t*, void*, int, char**);
 extern int call_stop_plugin(plugin_api_t*, char**);
 extern int call_invoke_tool(plugin_api_t*, char*, char*, char**, char**);
-extern int call_invoke_stage(plugin_api_t*, char*, char*, char**);
+extern int call_invoke_stage(plugin_api_t*, char*, char*, char**, char**);
 extern int call_invoke_output(plugin_api_t*, char*, char*, char*, char**);
 extern void api_free_string(plugin_api_t*, char*);
 extern void* lib_open(const char*);
@@ -62,10 +63,10 @@ var (
 )
 
 type pluginState struct {
-	id    int32
-	name  string
-	sdk   *sdk.PluginSDK
-	api   *C.plugin_api_t
+	id   int32
+	name string
+	sdk  *sdk.PluginSDK
+	api  *C.plugin_api_t
 }
 
 // Handle represents a loaded C ABI plugin.
@@ -96,9 +97,14 @@ func Load(soPath, name string, config map[string]interface{}) (*Handle, error) {
 		C.lib_close(lib)
 		return nil, fmt.Errorf("plugin %s: invalid PluginAPI (version=%d)", name, int(api.version))
 	}
-	if int(api.version) > ABIVersion {
+	if int(api.version) > CABINum {
 		C.lib_close(lib)
-		return nil, fmt.Errorf("plugin %s: ABI version %d > core %d, requires newer HomeAgent core", name, int(api.version), ABIVersion)
+		return nil, fmt.Errorf("plugin %s: ABI version %d > core %d (v%s), requires newer HomeAgent core", name, int(api.version), CABINum, ABIVersion)
+	}
+
+	if int(api.version) < CABINumMin {
+		C.lib_close(lib)
+		return nil, fmt.Errorf("plugin %s: ABI version %d < core min %d (v%s), plugin too old", name, int(api.version), CABINumMin, ABIVersionMin)
 	}
 
 	id := atomic.AddInt32(&nextID, 1)
@@ -119,7 +125,10 @@ func Load(soPath, name string, config map[string]interface{}) (*Handle, error) {
 
 	if ret := int(C.call_init_plugin(api, cName, cConfig, &initErr)); ret != 0 {
 		errMsg := ""
-		if initErr != nil { errMsg = C.GoString(initErr); C.api_free_string(api, initErr) }
+		if initErr != nil {
+			errMsg = C.GoString(initErr)
+			C.api_free_string(api, initErr)
+		}
 		handle.Close()
 		return nil, fmt.Errorf("init_plugin %s: %s", name, errMsg)
 	}
@@ -131,7 +140,9 @@ func Load(soPath, name string, config map[string]interface{}) (*Handle, error) {
 // The CoreAPI dispatches all SDK calls back to Go, routing to the plugin's PluginSDK.
 func (h *Handle) CreateCoreAPI(s *sdk.PluginSDK) unsafe.Pointer {
 	core := C.make_core_api()
-	if core == nil { return nil }
+	if core == nil {
+		return nil
+	}
 	h.core = core
 	h.pstate.sdk = s
 
@@ -152,9 +163,12 @@ func (h *Handle) FreeCoreAPI() {
 // Start calls the plugin's Start with a CoreAPI pointer.
 func (h *Handle) Start(corePtr unsafe.Pointer) error {
 	var cErr *C.char
-	if ret := int(C.call_start_plugin(h.api, corePtr, C.int(ABIVersion), &cErr)); ret != 0 {
+	if ret := int(C.call_start_plugin(h.api, corePtr, C.int(CABINum), &cErr)); ret != 0 {
 		errMsg := ""
-		if cErr != nil { errMsg = C.GoString(cErr); C.api_free_string(h.api, cErr) }
+		if cErr != nil {
+			errMsg = C.GoString(cErr)
+			C.api_free_string(h.api, cErr)
+		}
 		return fmt.Errorf("start_plugin: %s", errMsg)
 	}
 	return nil
@@ -165,7 +179,10 @@ func (h *Handle) Stop() error {
 	var cErr *C.char
 	if ret := int(C.call_stop_plugin(h.api, &cErr)); ret != 0 {
 		errMsg := ""
-		if cErr != nil { errMsg = C.GoString(cErr); C.api_free_string(h.api, cErr) }
+		if cErr != nil {
+			errMsg = C.GoString(cErr)
+			C.api_free_string(h.api, cErr)
+		}
 		return fmt.Errorf("stop_plugin: %s", errMsg)
 	}
 	return nil
@@ -182,13 +199,20 @@ func (h *Handle) InvokeTool(name string, args map[string]interface{}) (map[strin
 
 	if ret := int(C.call_invoke_tool(h.api, cName, cArgs, &result, &cErr)); ret != 0 {
 		errMsg := ""
-		if cErr != nil { errMsg = C.GoString(cErr); C.api_free_string(h.api, cErr) }
+		if cErr != nil {
+			errMsg = C.GoString(cErr)
+			C.api_free_string(h.api, cErr)
+		}
 		return nil, fmt.Errorf("invoke_tool %s: %s", name, errMsg)
 	}
-	if result == nil { return nil, nil }
+	if result == nil {
+		return nil, nil
+	}
 	defer C.api_free_string(h.api, result)
 	var r map[string]interface{}
-	if err := json.Unmarshal([]byte(C.GoString(result)), &r); err != nil { return nil, err }
+	if err := json.Unmarshal([]byte(C.GoString(result)), &r); err != nil {
+		return nil, err
+	}
 	return r, nil
 }
 
@@ -204,9 +228,13 @@ func (h *Handle) Close() {
 
 func pluginInvokeTool(pluginID int32, name, argsJSON string) (string, error) {
 	v, ok := pluginMap.Load(pluginID)
-	if !ok { return "", fmt.Errorf("plugin %d not found", pluginID) }
+	if !ok {
+		return "", fmt.Errorf("plugin %d not found", pluginID)
+	}
 	ps := v.(*pluginState)
-	if ps.api == nil { return "", fmt.Errorf("plugin %d: nil api", pluginID) }
+	if ps.api == nil {
+		return "", fmt.Errorf("plugin %d: nil api", pluginID)
+	}
 	cName := C.CString(name)
 	cArgs := C.CString(argsJSON)
 	var result, cErr *C.char
@@ -214,19 +242,28 @@ func pluginInvokeTool(pluginID int32, name, argsJSON string) (string, error) {
 	defer C.free(unsafe.Pointer(cArgs))
 	if ret := int(C.call_invoke_tool(ps.api, cName, cArgs, &result, &cErr)); ret != 0 {
 		errMsg := ""
-		if cErr != nil { errMsg = C.GoString(cErr); C.api_free_string(ps.api, cErr) }
+		if cErr != nil {
+			errMsg = C.GoString(cErr)
+			C.api_free_string(ps.api, cErr)
+		}
 		return "", fmt.Errorf("invoke_tool %s: %s", name, errMsg)
 	}
-	if result == nil { return "", nil }
+	if result == nil {
+		return "", nil
+	}
 	defer C.api_free_string(ps.api, result)
 	return C.GoString(result), nil
 }
 
 func pluginInvokeOutput(pluginID int32, channel, payload string) error {
 	v, ok := pluginMap.Load(pluginID)
-	if !ok { return fmt.Errorf("plugin %d not found", pluginID) }
+	if !ok {
+		return fmt.Errorf("plugin %d not found", pluginID)
+	}
 	ps := v.(*pluginState)
-	if ps.api == nil { return fmt.Errorf("plugin %d: nil api", pluginID) }
+	if ps.api == nil {
+		return fmt.Errorf("plugin %d: nil api", pluginID)
+	}
 	cCh := C.CString(channel)
 	cPayload := C.CString(payload)
 	var cErr *C.char
@@ -234,26 +271,91 @@ func pluginInvokeOutput(pluginID int32, channel, payload string) error {
 	defer C.free(unsafe.Pointer(cPayload))
 	if ret := int(C.call_invoke_output(ps.api, cCh, nil, cPayload, &cErr)); ret != 0 {
 		errMsg := ""
-		if cErr != nil { errMsg = C.GoString(cErr); C.api_free_string(ps.api, cErr) }
+		if cErr != nil {
+			errMsg = C.GoString(cErr)
+			C.api_free_string(ps.api, cErr)
+		}
 		return fmt.Errorf("invoke_output %s: %s", channel, errMsg)
 	}
 	return nil
 }
 
-func pluginInvokeStage(pluginID int32, stage, ctxJSON string) error {
+// applyStageResult 将插件回传的修改后上下文应用回内核 StageContext。
+// 只回写插件有权改写的字段（RawMessage/LLMText/FinalText/Response/ToolResults/NoMemory）。
+func applyStageResult(sc *sdk.StageContext, resultJSON string) {
+	var m map[string]interface{}
+	if err := json.Unmarshal([]byte(resultJSON), &m); err != nil {
+		return
+	}
+	sc.Lock()
+	defer sc.Unlock()
+	if v, ok := m["raw_message"].(string); ok {
+		sc.RawMessage = v
+	}
+	if v, ok := m["llm_text"].(string); ok {
+		sc.LLMText = v
+	}
+	if v, ok := m["final_text"].(string); ok {
+		sc.FinalText = v
+	}
+	if v, ok := m["user_id"].(string); ok {
+		sc.UserID = v
+	}
+	if v, ok := m["group_id"].(string); ok {
+		sc.GroupID = v
+	}
+	if v, ok := m["no_memory"].(bool); ok {
+		sc.NoMemory = v
+	}
+	if v, ok := m["response"].(string); ok {
+		vv := v
+		sc.Response = &vv
+	}
+	if v, ok := m["tool_calls"].([]interface{}); ok && len(v) > 0 {
+		if b, err := json.Marshal(v); err == nil {
+			var tcs []sdk.ToolCall
+			if json.Unmarshal(b, &tcs) == nil {
+				sc.ToolCalls = tcs
+			}
+		}
+	}
+	if v, ok := m["tool_results"].([]interface{}); ok && len(v) > 0 {
+		if b, err := json.Marshal(v); err == nil {
+			var trs []sdk.ToolResult
+			if json.Unmarshal(b, &trs) == nil {
+				sc.ToolResults = trs
+			}
+		}
+	}
+}
+
+func pluginInvokeStage(pluginID int32, stage, ctxJSON string, resultOut *string) error {
 	v, ok := pluginMap.Load(pluginID)
-	if !ok { return fmt.Errorf("plugin %d not found", pluginID) }
+	if !ok {
+		return fmt.Errorf("plugin %d not found", pluginID)
+	}
 	ps := v.(*pluginState)
-	if ps.api == nil { return fmt.Errorf("plugin %d: nil api", pluginID) }
+	if ps.api == nil {
+		return fmt.Errorf("plugin %d: nil api", pluginID)
+	}
 	cStage := C.CString(stage)
 	cCtx := C.CString(ctxJSON)
 	var cErr *C.char
+	var cResult *C.char
 	defer C.free(unsafe.Pointer(cStage))
 	defer C.free(unsafe.Pointer(cCtx))
-	if ret := int(C.call_invoke_stage(ps.api, cStage, cCtx, &cErr)); ret != 0 {
+	// 仅当调用方要求回传时传 &cResult，否则传 NULL（兼容无需写回的阶段）。
+	if ret := int(C.call_invoke_stage(ps.api, cStage, cCtx, &cResult, &cErr)); ret != 0 {
 		errMsg := ""
-		if cErr != nil { errMsg = C.GoString(cErr); C.api_free_string(ps.api, cErr) }
+		if cErr != nil {
+			errMsg = C.GoString(cErr)
+			C.api_free_string(ps.api, cErr)
+		}
 		return fmt.Errorf("invoke_stage %s: %s", stage, errMsg)
+	}
+	if resultOut != nil && cResult != nil {
+		*resultOut = C.GoString(cResult)
+		C.api_free_string(ps.api, cResult)
 	}
 	return nil
 }
@@ -264,10 +366,14 @@ func pluginInvokeStage(pluginID int32, stage, ctxJSON string) error {
 func go_core_dispatch(methodID C.int, ctx unsafe.Pointer, s1, s2, s3 *C.char, i1, i2 C.int, result **C.char, errorOut **C.char) C.int {
 	pluginID := int32(uintptr(ctx))
 	v, ok := pluginMap.Load(pluginID)
-	if !ok { return 1 }
+	if !ok {
+		return 1
+	}
 	ps := v.(*pluginState)
 	s := ps.sdk
-	if s == nil { return 1 }
+	if s == nil {
+		return 1
+	}
 
 	a1, a2, a3 := goStr(s1), goStr(s2), goStr(s3)
 	n1, n2 := int(i1), int(i2)
@@ -275,15 +381,22 @@ func go_core_dispatch(methodID C.int, ctx unsafe.Pointer, s1, s2, s3 *C.char, i1
 	switch int(methodID) {
 	case 1: // CORE_REGISTER_TOOL
 		var def sdk.ToolDef
-		if err := json.Unmarshal([]byte(a2), &def); err != nil { setErr(errorOut, err); return 1 }
+		if err := json.Unmarshal([]byte(a2), &def); err != nil {
+			setErr(errorOut, err)
+			return 1
+		}
 		def.Plugin = ps.name
 		pid := pluginID
 		toolName := a1
 		_ = s.RegisterTool(a1, def, func(args map[string]interface{}) (interface{}, error) {
 			argsJSON, _ := json.Marshal(args)
 			r, err := pluginInvokeTool(pid, toolName, string(argsJSON))
-			if err != nil { return nil, err }
-			if r == "" { return nil, nil }
+			if err != nil {
+				return nil, err
+			}
+			if r == "" {
+				return nil, nil
+			}
 			var res map[string]interface{}
 			if err := json.Unmarshal([]byte(r), &res); err != nil {
 				return r, nil
@@ -303,12 +416,27 @@ func go_core_dispatch(methodID C.int, ctx unsafe.Pointer, s1, s2, s3 *C.char, i1
 				"llm_text": sc.LLMText, "final_text": sc.FinalText,
 				"no_memory": sc.NoMemory,
 			}
-			if sc.Response != nil { m["response"] = *sc.Response }
-			if len(sc.ToolCalls) > 0 { m["tool_calls"] = sc.ToolCalls }
-			if len(sc.ToolResults) > 0 { m["tool_results"] = sc.ToolResults }
+			if sc.Response != nil {
+				m["response"] = *sc.Response
+			}
+			if len(sc.ToolCalls) > 0 {
+				m["tool_calls"] = sc.ToolCalls
+			}
+			if len(sc.ToolResults) > 0 {
+				m["tool_results"] = sc.ToolResults
+			}
 			sc.RUnlock()
 			b, _ := json.Marshal(m)
-			return pluginInvokeStage(pid, st, string(b))
+
+			// ABI v2: 插件可回传修改后的上下文写回内核 sc（如 RawMessage/LLMText/Response/ToolResults）。
+			var result string
+			if err := pluginInvokeStage(pid, st, string(b), &result); err != nil {
+				return err
+			}
+			if result != "" {
+				applyStageResult(sc, result)
+			}
+			return nil
 		}
 		scope := sdk.StageScopeGlobal
 		if a3 == "own_tools" {
@@ -373,7 +501,10 @@ func go_core_dispatch(methodID C.int, ctx unsafe.Pointer, s1, s2, s3 *C.char, i1
 	case 9: // CORE_MEMORY_RECALL
 		if mem := s.Memory(); mem != nil {
 			entities, relations, err := mem.Recall([]string{a1}, n1)
-			if err != nil { setErr(errorOut, err); return 1 }
+			if err != nil {
+				setErr(errorOut, err)
+				return 1
+			}
 			b, _ := json.Marshal(map[string]interface{}{"entities": entities, "relations": relations})
 			setResult(result, string(b))
 		}
@@ -382,15 +513,24 @@ func go_core_dispatch(methodID C.int, ctx unsafe.Pointer, s1, s2, s3 *C.char, i1
 	case 10: // CORE_MEMORY_COMMIT
 		if mem := s.Memory(); mem != nil {
 			var triples []sdk.Triple
-			if err := json.Unmarshal([]byte(a1), &triples); err != nil { setErr(errorOut, err); return 1 }
-			if err := mem.Commit(triples); err != nil { setErr(errorOut, err); return 1 }
+			if err := json.Unmarshal([]byte(a1), &triples); err != nil {
+				setErr(errorOut, err)
+				return 1
+			}
+			if err := mem.Commit(triples); err != nil {
+				setErr(errorOut, err)
+				return 1
+			}
 		}
 		return 0
 
 	case 11: // CORE_MEMORY_INTROSPECT
 		if mem := s.Memory(); mem != nil {
 			r, err := mem.Introspect()
-			if err != nil { setErr(errorOut, err); return 1 }
+			if err != nil {
+				setErr(errorOut, err)
+				return 1
+			}
 			b, _ := json.Marshal(r)
 			setResult(result, string(b))
 		}
@@ -398,17 +538,28 @@ func go_core_dispatch(methodID C.int, ctx unsafe.Pointer, s1, s2, s3 *C.char, i1
 
 	case 12: // CORE_MEMORY_MERGE
 		if mem := s.Memory(); mem != nil {
-			if _, err := mem.MergeEntities(a1, a2); err != nil { setErr(errorOut, err); return 1 }
+			if _, err := mem.MergeEntities(a1, a2); err != nil {
+				setErr(errorOut, err)
+				return 1
+			}
 		}
 		return 0
 
 	case 13: // CORE_MEMORY_PURGE
 		if mem := s.Memory(); mem != nil {
 			var criteria map[string]string
-			if err := json.Unmarshal([]byte(a1), &criteria); err != nil { setErr(errorOut, err); return 1 }
+			if err := json.Unmarshal([]byte(a1), &criteria); err != nil {
+				setErr(errorOut, err)
+				return 1
+			}
 			mode := "soft"
-			if n1 != 0 { mode = "hard" }
-			if _, err := mem.Purge(criteria, mode); err != nil { setErr(errorOut, err); return 1 }
+			if n1 != 0 {
+				mode = "hard"
+			}
+			if _, err := mem.Purge(criteria, mode); err != nil {
+				setErr(errorOut, err)
+				return 1
+			}
 		}
 		return 0
 
@@ -422,7 +573,10 @@ func go_core_dispatch(methodID C.int, ctx unsafe.Pointer, s1, s2, s3 *C.char, i1
 	case 15: // CORE_KNOWLEDGE_SEARCH
 		if kn := s.Knowledge(); kn != nil {
 			results, err := kn.Search(a1, n1)
-			if err != nil { setErr(errorOut, err); return 1 }
+			if err != nil {
+				setErr(errorOut, err)
+				return 1
+			}
 			b, _ := json.Marshal(results)
 			setResult(result, string(b))
 		}
@@ -431,7 +585,10 @@ func go_core_dispatch(methodID C.int, ctx unsafe.Pointer, s1, s2, s3 *C.char, i1
 	case 16: // CORE_SETTINGS_GET
 		if sett := s.Settings(); sett != nil {
 			v, err := sett.Get(a1)
-			if err != nil { setErr(errorOut, err); return 1 }
+			if err != nil {
+				setErr(errorOut, err)
+				return 1
+			}
 			b, _ := json.Marshal(v)
 			setResult(result, string(b))
 		}
@@ -441,14 +598,20 @@ func go_core_dispatch(methodID C.int, ctx unsafe.Pointer, s1, s2, s3 *C.char, i1
 		if sett := s.Settings(); sett != nil {
 			var v interface{}
 			json.Unmarshal([]byte(a2), &v)
-			if err := sett.Set(a1, v); err != nil { setErr(errorOut, err); return 1 }
+			if err := sett.Set(a1, v); err != nil {
+				setErr(errorOut, err)
+				return 1
+			}
 		}
 		return 0
 
 	case 18: // CORE_SETTINGS_REGISTER_DEF
 		if sett := s.Settings(); sett != nil {
 			var def sdk.ConfigDef
-			if err := json.Unmarshal([]byte(a1), &def); err != nil { setErr(errorOut, err); return 1 }
+			if err := json.Unmarshal([]byte(a1), &def); err != nil {
+				setErr(errorOut, err)
+				return 1
+			}
 			sett.RegisterDef(def)
 		}
 		return 0
@@ -462,14 +625,20 @@ func go_core_dispatch(methodID C.int, ctx unsafe.Pointer, s1, s2, s3 *C.char, i1
 
 	case 20: // CORE_LLM_SET_SOURCE
 		if llm := s.LLM(); llm != nil {
-			if err := llm.SetSource(a1); err != nil { setErr(errorOut, err); return 1 }
+			if err := llm.SetSource(a1); err != nil {
+				setErr(errorOut, err)
+				return 1
+			}
 		}
 		return 0
 
 	case 21: // CORE_SOCIAL_GET_PERSON
 		if social := s.Social(); social != nil {
 			p, err := social.GetPerson(a1)
-			if err != nil { setErr(errorOut, err); return 1 }
+			if err != nil {
+				setErr(errorOut, err)
+				return 1
+			}
 			b, _ := json.Marshal(p)
 			setResult(result, string(b))
 		}
@@ -478,7 +647,10 @@ func go_core_dispatch(methodID C.int, ctx unsafe.Pointer, s1, s2, s3 *C.char, i1
 	case 22: // CORE_SOCIAL_GET_NETWORK
 		if social := s.Social(); social != nil {
 			profiles, err := social.GetNetwork(a1, n1)
-			if err != nil { setErr(errorOut, err); return 1 }
+			if err != nil {
+				setErr(errorOut, err)
+				return 1
+			}
 			b, _ := json.Marshal(profiles)
 			setResult(result, string(b))
 		}
@@ -493,13 +665,18 @@ func go_core_dispatch(methodID C.int, ctx unsafe.Pointer, s1, s2, s3 *C.char, i1
 		return 0
 
 	case 25: // CORE_FREE_STRING
-		if s1 != nil { C.free(unsafe.Pointer(s1)) }
+		if s1 != nil {
+			C.free(unsafe.Pointer(s1))
+		}
 		return 0
 
 	case 26: // CORE_SETTINGS_GET_CORE
 		if sett := s.Settings(); sett != nil {
 			v, err := sett.GetCore(a1)
-			if err != nil { setErr(errorOut, err); return 1 }
+			if err != nil {
+				setErr(errorOut, err)
+				return 1
+			}
 			b, _ := json.Marshal(v)
 			setResult(result, string(b))
 		}
@@ -509,14 +686,20 @@ func go_core_dispatch(methodID C.int, ctx unsafe.Pointer, s1, s2, s3 *C.char, i1
 		if sett := s.Settings(); sett != nil {
 			var v interface{}
 			json.Unmarshal([]byte(a2), &v)
-			if err := sett.SetCore(a1, v); err != nil { setErr(errorOut, err); return 1 }
+			if err := sett.SetCore(a1, v); err != nil {
+				setErr(errorOut, err)
+				return 1
+			}
 		}
 		return 0
 
 	case 28: // CORE_SETTINGS_LIST_CORE
 		if sett := s.Settings(); sett != nil {
 			keys, err := sett.ListCore(a1)
-			if err != nil { setErr(errorOut, err); return 1 }
+			if err != nil {
+				setErr(errorOut, err)
+				return 1
+			}
 			b, _ := json.Marshal(keys)
 			setResult(result, string(b))
 		}
@@ -525,7 +708,10 @@ func go_core_dispatch(methodID C.int, ctx unsafe.Pointer, s1, s2, s3 *C.char, i1
 	case 29: // CORE_SETTINGS_GET_PLUGIN
 		if sett := s.Settings(); sett != nil {
 			v, err := sett.GetPlugin(a1, a2)
-			if err != nil { setErr(errorOut, err); return 1 }
+			if err != nil {
+				setErr(errorOut, err)
+				return 1
+			}
 			b, _ := json.Marshal(v)
 			setResult(result, string(b))
 		}
@@ -535,14 +721,20 @@ func go_core_dispatch(methodID C.int, ctx unsafe.Pointer, s1, s2, s3 *C.char, i1
 		if sett := s.Settings(); sett != nil {
 			var v interface{}
 			json.Unmarshal([]byte(a3), &v)
-			if err := sett.SetPlugin(a1, a2, v); err != nil { setErr(errorOut, err); return 1 }
+			if err := sett.SetPlugin(a1, a2, v); err != nil {
+				setErr(errorOut, err)
+				return 1
+			}
 		}
 		return 0
 
 	case 31: // CORE_SETTINGS_LIST_PLUGIN
 		if sett := s.Settings(); sett != nil {
 			keys, err := sett.ListPlugin(a1, a2)
-			if err != nil { setErr(errorOut, err); return 1 }
+			if err != nil {
+				setErr(errorOut, err)
+				return 1
+			}
 			b, _ := json.Marshal(keys)
 			setResult(result, string(b))
 		}
@@ -551,8 +743,14 @@ func go_core_dispatch(methodID C.int, ctx unsafe.Pointer, s1, s2, s3 *C.char, i1
 	case 32: // CORE_DOC_INSERT
 		if dm := s.DocMemory(); dm != nil {
 			var doc sdk.Doc
-			if err := json.Unmarshal([]byte(a1), &doc); err != nil { setErr(errorOut, err); return 1 }
-			if err := dm.Insert(&doc); err != nil { setErr(errorOut, err); return 1 }
+			if err := json.Unmarshal([]byte(a1), &doc); err != nil {
+				setErr(errorOut, err)
+				return 1
+			}
+			if err := dm.Insert(&doc); err != nil {
+				setErr(errorOut, err)
+				return 1
+			}
 		}
 		return 0
 
@@ -571,14 +769,20 @@ func go_core_dispatch(methodID C.int, ctx unsafe.Pointer, s1, s2, s3 *C.char, i1
 
 	case 35: // CORE_KNOWLEDGE_ADD
 		if kn := s.Knowledge(); kn != nil {
-			if err := kn.Add(a1, a2); err != nil { setErr(errorOut, err); return 1 }
+			if err := kn.Add(a1, a2); err != nil {
+				setErr(errorOut, err)
+				return 1
+			}
 		}
 		return 0
 
 	case 36: // CORE_KNOWLEDGE_LIST
 		if kn := s.Knowledge(); kn != nil {
 			list, err := kn.List()
-			if err != nil { setErr(errorOut, err); return 1 }
+			if err != nil {
+				setErr(errorOut, err)
+				return 1
+			}
 			b, _ := json.Marshal(list)
 			setResult(result, string(b))
 		}
@@ -602,7 +806,10 @@ func go_core_dispatch(methodID C.int, ctx unsafe.Pointer, s1, s2, s3 *C.char, i1
 	case 39: // CORE_SOCIAL_GET_RELATIONS
 		if social := s.Social(); social != nil {
 			rels, err := social.GetRelations(a1)
-			if err != nil { setErr(errorOut, err); return 1 }
+			if err != nil {
+				setErr(errorOut, err)
+				return 1
+			}
 			b, _ := json.Marshal(rels)
 			setResult(result, string(b))
 		}
@@ -611,7 +818,10 @@ func go_core_dispatch(methodID C.int, ctx unsafe.Pointer, s1, s2, s3 *C.char, i1
 	case 40: // CORE_SOCIAL_LIST_PERSONS
 		if social := s.Social(); social != nil {
 			persons, err := social.ListPersons()
-			if err != nil { setErr(errorOut, err); return 1 }
+			if err != nil {
+				setErr(errorOut, err)
+				return 1
+			}
 			b, _ := json.Marshal(persons)
 			setResult(result, string(b))
 		}
@@ -620,15 +830,24 @@ func go_core_dispatch(methodID C.int, ctx unsafe.Pointer, s1, s2, s3 *C.char, i1
 	case 41: // CORE_TEXT_MEMORY_APPEND
 		if tm := s.TextMemory(); tm != nil {
 			var evt sdk.TextEvent
-			if err := json.Unmarshal([]byte(a1), &evt); err != nil { setErr(errorOut, err); return 1 }
-			if err := tm.Append(evt); err != nil { setErr(errorOut, err); return 1 }
+			if err := json.Unmarshal([]byte(a1), &evt); err != nil {
+				setErr(errorOut, err)
+				return 1
+			}
+			if err := tm.Append(evt); err != nil {
+				setErr(errorOut, err)
+				return 1
+			}
 		}
 		return 0
 
 	case 42: // CORE_SETTINGS_LIST
 		if sett := s.Settings(); sett != nil {
 			keys, err := sett.List(a1)
-			if err != nil { setErr(errorOut, err); return 1 }
+			if err != nil {
+				setErr(errorOut, err)
+				return 1
+			}
 			b, _ := json.Marshal(keys)
 			setResult(result, string(b))
 		}
@@ -673,7 +892,9 @@ func go_core_dispatch(methodID C.int, ctx unsafe.Pointer, s1, s2, s3 *C.char, i1
 }
 
 func goStr(s *C.char) string {
-	if s == nil { return "" }
+	if s == nil {
+		return ""
+	}
 	return C.GoString(s)
 }
 

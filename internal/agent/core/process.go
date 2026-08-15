@@ -70,7 +70,9 @@ func (a *Agent) process(input string, stageCtx *sdk.StageContext) (response stri
 
 		// zen 兼容网关要求请求的最后一条消息必须是 user(thinking 续写模式校验),
 		// 工具轮产出的 tool/assistant 消息作结尾会被 400 拒绝,故补一条 user 占位。
-		if last := msgs[len(msgs)-1]; last.Role != "user" {
+		// 注意:仅当尾部确为工具轮产物(assistant/tool)时才补位;首轮 system 上下文结尾不补,
+		// 否则会错误覆盖实际用户输入(如 injectSourceContext 追加的 system 说明)。
+		if last := msgs[len(msgs)-1]; last.Role == "assistant" || last.Role == "tool" {
 			msgs = append(msgs, agentAPI.Message{
 				Role:    "user",
 				Content: "请根据以上工具结果继续。",
@@ -211,14 +213,14 @@ func (a *Agent) process(input string, stageCtx *sdk.StageContext) (response stri
 				for _, interrupt := range a.drainInterrupts() {
 					msgs = append(msgs, agentAPI.Message{Role: "system", Content: "[中断消息] " + interrupt})
 				}
-			a.publishEvent(events.EventToolCall, map[string]interface{}{
-				"tool":    tc.Name,
-				"plugin":  a.resolveToolPlugin(tc.Name),
-				"args":    tc.Arguments,
-				"status":  "interrupted",
-				"reason":  "user interrupt before execution",
-				"channel": a.currentOutputChannel,
-			})
+				a.publishEvent(events.EventToolCall, map[string]interface{}{
+					"tool":    tc.Name,
+					"plugin":  a.resolveToolPlugin(tc.Name),
+					"args":    tc.Arguments,
+					"status":  "interrupted",
+					"reason":  "user interrupt before execution",
+					"channel": a.currentOutputChannel,
+				})
 				break
 			}
 
@@ -233,14 +235,14 @@ func (a *Agent) process(input string, stageCtx *sdk.StageContext) (response stri
 				result := fmt.Sprintf("工具 %s 已被插件拒绝", tc.Name)
 				msgs = append(msgs, agentAPI.Message{Role: "assistant", ToolCalls: []agentAPI.ToolCall{tc}})
 				msgs = append(msgs, agentAPI.Message{Role: "tool", ToolCallID: tc.ID, Content: result})
-			a.publishEvent(events.EventToolCall, map[string]interface{}{
-				"tool":    tc.Name,
-				"plugin":  pluginName,
-				"args":    tc.Arguments,
-				"result":  result,
-				"status":  "denied",
-				"channel": a.currentOutputChannel,
-			})
+				a.publishEvent(events.EventToolCall, map[string]interface{}{
+					"tool":    tc.Name,
+					"plugin":  pluginName,
+					"args":    tc.Arguments,
+					"result":  result,
+					"status":  "denied",
+					"channel": a.currentOutputChannel,
+				})
 				continue
 			}
 			tc.Arguments = stageCtx.ToolCalls[0].Arguments

@@ -3,9 +3,16 @@ package cabi
 import "gitcode.com/JianFeeeee/HomeAgent/internal/meta"
 
 // ABI version constants — single source of truth is meta.go
-const (
+// ABIVersion/ABIVersionMin 是字符串 semver（var 转发，因 meta 侧 Version 为注入变量）；
+// CABINum/CABINumMin 是 C 层整数协商版本。
+var (
 	ABIVersion    = meta.ABIVersion
 	ABIVersionMin = meta.ABIVersionMin
+)
+
+const (
+	CABINum    = meta.CABINum
+	CABINumMin = meta.CABINumMin
 )
 
 // Dispatch method IDs — single source of truth is meta.go
