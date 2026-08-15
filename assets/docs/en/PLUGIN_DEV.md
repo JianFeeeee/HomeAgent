@@ -594,6 +594,21 @@ The `sdk.*` API of Lua plugins is fully aligned with external plugins (C ABI / t
 
 Stage handlers receive the full context (same as external plugins): `raw_message`, `user_id`, `group_id`, `phase`, `llm_text`, `final_text`, `no_memory`, `response` (when responded), `tool_calls`, `tool_results`.
 
+**Stage writeback (ABI v2)**: the `ctx` table passed to the handler is a reference — mutating writable fields inside the handler syncs back to the core `StageContext` (aligned with the C ABI v2 external-plugin capability):
+
+```lua
+sdk.register_stage("on_input", function(ctx)
+  ctx.raw_message = "[clean]" .. ctx.raw_message   -- modify input, adopted by core
+end)
+
+sdk.register_stage("post_action", function(ctx)
+  ctx.llm_text = ctx.llm_text .. "[tail]"            -- modify LLM output
+  ctx.tool_results = { { call_id = "x", result = "rewritten" } }
+end)
+```
+
+Writable fields: `raw_message`, `llm_text`, `final_text`, `user_id`, `group_id`, `no_memory`, `response`, `tool_calls`, `tool_results`. Other fields are read-only.
+
 **IO and config**
 
 | Function | Description |

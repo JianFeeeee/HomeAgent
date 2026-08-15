@@ -593,6 +593,21 @@ Lua 插件的 `sdk.*` API 与外部插件（C ABI / 工具链编译的 `.so`/`.d
 
 `register_stage` 的 handler 收到完整上下文（与外部插件一致）：`raw_message`、`user_id`、`group_id`、`phase`、`llm_text`、`final_text`、`no_memory`、`response`（已响应时）、`tool_calls`、`tool_results`。
 
+**Stage 写回（ABI v2）**：handler 收到的 `ctx` 是引用 table——在 handler 内直接修改可写回字段并同步至内核 `StageContext`（与 C ABI v2 外部插件能力对齐）：
+
+```lua
+sdk.register_stage("on_input", function(ctx)
+  ctx.raw_message = "[清洗]" .. ctx.raw_message   -- 修改输入，内核会采用
+end)
+
+sdk.register_stage("post_action", function(ctx)
+  ctx.llm_text = ctx.llm_text .. "[尾部标记]"       -- 修改 LLM 输出
+  ctx.tool_results = { { call_id = "x", result = "改写结果" } } -- 改写工具结果
+end)
+```
+
+可写回字段：`raw_message`、`llm_text`、`final_text`、`user_id`、`group_id`、`no_memory`、`response`、`tool_calls`、`tool_results`。其余字段为只读。
+
 **IO 与配置**
 
 | 函数 | 说明 |
