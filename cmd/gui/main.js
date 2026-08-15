@@ -364,6 +364,7 @@ function doWebuiLogin(baseUrl, username, password, extraCookie) {
 }
 
 ipcMain.on('log:r', (_e, m) => { log('[r] ' + m); });
+ipcMain.handle('log:r', (_e, m) => { log('[r] ' + m); return true; });
 
 ipcMain.handle('webui:setAuth', async (_, { url, cookie, headers, username, password }) => {
   const resp = { ok: true, error: '' };
