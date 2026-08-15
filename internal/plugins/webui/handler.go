@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"math"
 	"net/http"
 	"sort"
 	"strconv"
@@ -1409,6 +1410,11 @@ func (h *Handler) handleSettings(w http.ResponseWriter, r *http.Request) {
 		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid request"})
 			return
+		}
+		// 整数型 float64（如 QQ 号 2.198972886e+09）规范化为 int64，
+		// 避免被 fmt.Sprint 以科学计数法存库导致后续读取/解析失败。
+		if f, ok := body.Value.(float64); ok && f == math.Trunc(f) && math.Abs(f) < 1e15 {
+			body.Value = int64(f)
 		}
 		deleting := body.Value == nil
 		if strings.HasPrefix(body.Key, "plugin.") {
