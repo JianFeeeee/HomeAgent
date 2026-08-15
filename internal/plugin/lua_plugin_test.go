@@ -526,3 +526,74 @@ return plugin
 		t.Errorf("stage ctx raw_message = %v, want 'hi'", ctxTbl.RawGetString("raw_message"))
 	}
 }
+
+func TestLuaStageWriteback(t *testing.T) {
+	dir := t.TempDir()
+
+	os.WriteFile(filepath.Join(dir, "plugin.json"), []byte(`{"name":"wblua","entry":"main.lua"}`), 0644)
+	os.WriteFile(filepath.Join(dir, "main.lua"), []byte(`
+local plugin = { name = "wblua" }
+
+function plugin.start(sdk)
+  sdk.register_stage("on_input", function(ctx)
+    ctx.raw_message = "[清洗]" .. ctx.raw_message
+    ctx.final_text = "改写后的最终文本"
+  end)
+  sdk.register_stage("post_action", function(ctx)
+    ctx.llm_text = ctx.llm_text .. "[尾部标记]"
+  end)
+end
+
+function plugin.stop() end
+return plugin
+`), 0644)
+
+	plg, err := tryLoadLua(dir, "wblua", nil)
+	if err != nil {
+		t.Fatalf("tryLoadLua failed: %v", err)
+	}
+
+	var handlers = map[sdk.Stage]sdk.StageHandler{}
+	reg := internalConfig.NewConfigRegistry("")
+	sett := sdk.NewSettings("wblua", reg)
+	s := sdk.New("wblua", sdk.SDKConfig{
+		Settings: sett,
+		RegStage: func(stage sdk.Stage, handler sdk.StageHandler) {
+			handlers[stage] = handler
+		},
+	})
+
+	if err := plg.Start(s); err != nil {
+		t.Fatalf("Start failed: %v", err)
+	}
+	defer plg.Stop()
+
+	// 触发 on_input stage，验证 Lua 修改写回内核 sc
+	onInput, ok := handlers[sdk.StageOnInput]
+	if !ok {
+		t.Fatal("on_input handler not registered")
+	}
+	sc := &sdk.StageContext{RawMessage: "原始消息"}
+	if err := onInput(sc); err != nil {
+		t.Fatalf("on_input: %v", err)
+	}
+	if sc.RawMessage != "[清洗]原始消息" {
+		t.Errorf("raw_message writeback: got %q, want %q", sc.RawMessage, "[清洗]原始消息")
+	}
+	if sc.FinalText != "改写后的最终文本" {
+		t.Errorf("final_text writeback: got %q", sc.FinalText)
+	}
+
+	// 触发 post_action stage
+	post, ok := handlers[sdk.StagePostAction]
+	if !ok {
+		t.Fatal("post_action handler not registered")
+	}
+	sc2 := &sdk.StageContext{LLMText: "模型输出"}
+	if err := post(sc2); err != nil {
+		t.Fatalf("post_action: %v", err)
+	}
+	if sc2.LLMText != "模型输出[尾部标记]" {
+		t.Errorf("llm_text writeback: got %q, want %q", sc2.LLMText, "模型输出[尾部标记]")
+	}
+}

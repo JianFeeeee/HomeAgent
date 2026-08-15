@@ -741,12 +741,64 @@ func makeStageHandler(plg *luaPlugin, stage sdk.Stage, fn *lua.LFunction) sdk.St
 		if len(sc.ToolResults) > 0 {
 			ctx["tool_results"] = jsonToIface(sc.ToolResults)
 		}
+		ctxTbl := goValueToLua(L, ctx).(*lua.LTable)
 		L.Push(fn)
-		L.Push(goValueToLua(L, ctx))
+		L.Push(ctxTbl)
 		if err := L.PCall(1, 0, nil); err != nil {
 			return fmt.Errorf("lua stage %s: %w", stage, err)
 		}
+		// 写回：Lua handler 对 ctx table 的字段修改同步回内核 StageContext
+		applyLuaStageResult(sc, luaValueToGo(ctxTbl))
 		return nil
+	}
+}
+
+// applyLuaStageResult 将 Lua stage handler 修改后的 ctx 字段写回内核 StageContext。
+// Lua 侧修改的字段以 Lua table（引用）形式读回，仅回写插件有权改写的键。
+func applyLuaStageResult(sc *sdk.StageContext, modified interface{}) {
+	m, ok := modified.(map[string]interface{})
+	if !ok {
+		return
+	}
+	sc.Lock()
+	defer sc.Unlock()
+	if v, ok := m["raw_message"].(string); ok {
+		sc.RawMessage = v
+	}
+	if v, ok := m["llm_text"].(string); ok {
+		sc.LLMText = v
+	}
+	if v, ok := m["final_text"].(string); ok {
+		sc.FinalText = v
+	}
+	if v, ok := m["user_id"].(string); ok {
+		sc.UserID = v
+	}
+	if v, ok := m["group_id"].(string); ok {
+		sc.GroupID = v
+	}
+	if v, ok := m["no_memory"].(bool); ok {
+		sc.NoMemory = v
+	}
+	if v, ok := m["response"].(string); ok {
+		vv := v
+		sc.Response = &vv
+	}
+	if v, ok := m["tool_calls"].([]interface{}); ok && len(v) > 0 {
+		if b, err := json.Marshal(v); err == nil {
+			var tcs []sdk.ToolCall
+			if json.Unmarshal(b, &tcs) == nil {
+				sc.ToolCalls = tcs
+			}
+		}
+	}
+	if v, ok := m["tool_results"].([]interface{}); ok && len(v) > 0 {
+		if b, err := json.Marshal(v); err == nil {
+			var trs []sdk.ToolResult
+			if json.Unmarshal(b, &trs) == nil {
+				sc.ToolResults = trs
+			}
+		}
 	}
 }
 
