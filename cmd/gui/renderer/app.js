@@ -664,6 +664,18 @@ function renderChat() {
   msgsEl.innerHTML = html;
   if (state.chatStick !== false) { try { msgsEl.scrollTo({ top: msgsEl.scrollHeight, behavior: 'smooth' }) } catch(e) { msgsEl.scrollTop = msgsEl.scrollHeight } }
   updateChatBadge();
+  if (window.homeagent && window.homeagent.log) {
+    window.homeagent.log('render: msgs=' + msgs.length + ' sig=' + sig.slice(0, 60)
+      + ' last=' + (lastM ? lastM.role + '/C=' + String(lastM.content || '').length + '/T=' + ((lastM.tool_calls || []).length) : 'none')
+      + ' roles=' + msgs.map(function(m){ return m.role + (m.content ? '#' + String(m.content).length : '') + (m.source ? '@' + m.source : '') + (m.tool_calls && m.tool_calls.length ? 'T' + m.tool_calls.length : '') }).join(','));
+  }
+}
+
+function guardedRenderChat() {
+  try { renderChat() } catch (e) {
+    if (window.homeagent && window.homeagent.log) window.homeagent.log('renderChat ERROR: ' + e.message + ' stack=' + (e.stack || '').split('\n').slice(0, 2).join(';'));
+    console.error('renderChat error', e);
+  }
 }
 
 function updateChatBadge() {
@@ -673,7 +685,7 @@ function updateChatBadge() {
   badge.style.display = 'none';
 }
 
-function rerenderChat() { renderChat(); renderChatStarmap(); renderTerminals(); renderCmdHistory() }
+function rerenderChat() { guardedRenderChat(); renderChatStarmap(); renderTerminals(); renderCmdHistory() }
 
 function toggleToolCall(el) {
   var d = el.querySelector('.tc-detail');
@@ -1104,7 +1116,7 @@ function switchChatPanel(tab, el) {
 }
 
 async function loadChatHistory() {
-  try { var data = await api('/chat/history'); if (data && data.messages) state.messages = data.messages } catch(e) {}
+  try { var data = await api('/chat/history'); if (data && data.messages) { state.messages = data.messages; if (window.homeagent && window.homeagent.log) window.homeagent.log('history: loaded ' + data.messages.length); } else if (window.homeagent && window.homeagent.log) { window.homeagent.log('history: no messages field'); } } catch(e) { if (window.homeagent && window.homeagent.log) window.homeagent.log('history: error ' + e.message) }
 }
 
 async function loadTerminals() {
@@ -2311,7 +2323,6 @@ async function connectFetchSSE(url) {
             last.content += (p.content || '');
             rerenderChatIfActive(); return;
           }
-          if (last && last.role === 'assistant' && last._final && !last.source) { return; }
           state.messages.push({ role: 'assistant', content: p.content || '', _streaming: true, _grow: true });
           rerenderChatIfActive();
         } else if (type === 'reasoning') {
