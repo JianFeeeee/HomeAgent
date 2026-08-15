@@ -46,7 +46,10 @@ const (
 	// CABINum 是 C 层协商用的整数版本（major*100 + minor），随 ABIVersion 派生。
 	CABINum = 900
 	// CABINumMin 是 C 层兼容的最低整数版本。
-	CABINumMin = 800
+	// 旧工具链（v0.8 之前）写入的整数 version=1，无写回能力但与新内核结构兼容，
+	// 因此最小值保持 1 以兼容全部旧插件（新插件 900 匹配，旧插件 1/2 通过）；
+	// 仅当未来内核 ABI 破坏兼容时才提高该值。
+	CABINumMin = 1
 )
 
 // ---- Dispatch Method IDs（与核心仓 internal/meta/meta.go 同步） ----
