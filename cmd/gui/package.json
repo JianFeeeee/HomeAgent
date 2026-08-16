@@ -1,6 +1,8 @@
 {
   "name": "homeagent-gui",
   "version": "1.0.0",
+  "author": "JianFeeeee <jianfeeeee@homeagent.local>",
+  "homepage": "https://gitcode.com/JianFeeeee/HomeAgent",
   "description": "HomeAgent Desktop GUI - Multi-connection management dashboard",
   "main": "main.js",
   "scripts": {
@@ -8,10 +10,10 @@
     "dev": "electron . --no-sandbox --dev"
   },
   "dependencies": {
-    "electron": "^33.0.0"
   },
   "devDependencies": {
     "asar": "^3.2.0",
+    "electron": "^33.0.0",
     "electron-builder": "^26.15.3",
     "electron-packager": "^17.1.2",
     "icojs": "^0.23.0",
