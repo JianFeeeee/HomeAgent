@@ -289,6 +289,8 @@ function toggleAppearance() {
 (() => {
   var saved = localStorage.getItem("ha-theme");
   setTheme(saved || "light");
+  var savedColor = localStorage.getItem("ha-color");
+  if (savedColor) setColor(savedColor);
   var finalSrc = localStorage.getItem("ha-bg-final");
   var img = localStorage.getItem("ha-bg-img");
   var blur = localStorage.getItem("ha-bg-blur");
@@ -963,6 +965,27 @@ function chanLetter(src) {
   return /[A-Za-z0-9]/.test(ch) ? ch : "C";
 }
 
+// PiDeck 风格思考卡片：Brain 图标 + 折叠时单行预览（流式中扫光）+ 展开/收起
+// PiDeck 风格思考卡片：Brain 图标 + 折叠单行预览（流式中扫光）+ 展开懒加载全文
+function renderReasoningCard(text, isStreaming, idx) {
+  var preview =
+    typeof marked === "undefined"
+      ? escHtml(text).replace(/<[^>]+>/g, " ").slice(0, 60)
+      : text.replace(/[\s\n]+/g, " ").slice(0, 60);
+  return (
+    '<div class="reasoning-card' + (isStreaming ? " rc-streaming" : "") + '" data-idx="' + (idx | 0) + '">' +
+    '<div class="reasoning-head" onclick="toggleReasoning(this)">' +
+    '<svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="rc-ico"><path d="M9 3a2 2 0 0 0-2 2v2a2 2 0 0 1-2 2H3a2 2 0 0 0-2 2v6a2 2 0 0 0 2 2h2a2 2 0 0 1 2 2v2a2 2 0 0 0 2 2h1a2 2 0 0 0 2-2v-2a2 2 0 0 1 2-2h2a2 2 0 0 0 2-2V7a2 2 0 0 0-2-2h-2a2 2 0 0 1-2-2V3a2 2 0 0 0-2-2H9zM12 8v4m0 4h.01"/></svg>' +
+    '<span class="rc-title">' + (isStreaming ? __("思考中...","Thinking...") : __("思考","Thinking")) + '</span>' +
+    '<span class="rc-chev">▾</span></div>' +
+    '<div class="reasoning-body" style="display:' + (isStreaming ? "block" : "none") + '">' +
+    (isStreaming
+      ? '<div class="reasoning-preview">' + escHtml(preview) + '</div><div class="reasoning-sweep"></div>'
+      : '<div class="reasoning-content">' + (typeof marked !== "undefined" ? marked.parse(text) : escHtml(text)) + '</div>') +
+    '</div></div>'
+  );
+}
+
 function renderChat() {
   if (!_chatLayoutBuilt) {
     buildChatLayout();
@@ -1068,24 +1091,7 @@ function renderChat() {
       var isChan = !!(m.source && m.source !== "webui");
       var rc = "";
       if (m.reasoning_content) {
-        var rcBody =
-          typeof marked === "undefined"
-            ? escHtml(m.reasoning_content)
-            : marked.parse(m.reasoning_content);
-        rc =
-          '<div class="msg-bubble"><div class="reasoning">' +
-          "<div class=\"reasoning-title\" onclick=\"var n=this.nextElementSibling;n.style.display=n.style.display==='none'?'block':'none';this.textContent=this.textContent==='" +
-          __("展开思考", "Expand") +
-          "'?'" +
-          __("收起思考", "Collapse") +
-          "':'" +
-          __("展开思考", "Expand") +
-          "'\">" +
-          __("展开思考", "Expand") +
-          "</div>" +
-          '<div class="reasoning-body" style="display:none">' +
-          rcBody +
-          "</div></div></div>";
+        rc = renderReasoningCard(m.reasoning_content, isStreamingLast, i);
       }
       var tcs = "";
       if (m.tool_calls && m.tool_calls.length > 0) {
@@ -1099,41 +1105,47 @@ function renderChat() {
               ? JSON.stringify(tc.result, null, 1)
               : String(tc.result)
             : "";
-          var statusIcon =
+          var running = !resultStr && tc.status !== "denied";
+          var error = tc.status === "error" || tc.status === "denied" || !!tc.error;
+          var drip = newlyDone.indexOf(tc.tool || tc.name || "") !== -1 ? " tool-drip-in" : "";
+          var iconSvg =
+            error
+              ? '<svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><circle cx="12" cy="12" r="9"/><path d="M5.6 5.6l12.8 12.8"/></svg>'
+              : running
+                ? '<span class="tc-spinner"></span>'
+                : '<svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M14.7 6.3a4 4 0 0 0-5.4 5.4L3 18l3 3 6.3-6.3a4 4 0 0 0 5.4-5.4l-2.9 2.9-2.5-.6-.6-2.5z"/></svg>';
+          var statusHtml =
             tc.status === "denied"
-              ? '<svg viewBox="0 0 24 24" width="12" height="12" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" style="color:var(--error);vertical-align:-1px"><circle cx="12" cy="12" r="9"/><path d="M5.6 5.6l12.8 12.8"/></svg>'
-              : '<svg viewBox="0 0 24 24" width="12" height="12" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" style="color:var(--accent);vertical-align:-1px"><path d="M14.7 6.3a4 4 0 0 0-5.4 5.4L3 18l3 3 6.3-6.3a4 4 0 0 0 5.4-5.4l-2.9 2.9-2.5-.6-.6-2.5z"/></svg>';
+              ? '<span class="tc-state tc-deny">' + __("已拒绝","Denied") + "</span>"
+              : running
+                ? '<span class="tc-state tc-run">' + __("调用中","Running") + "</span>"
+                : '<span class="tc-state tc-done">' + __("完成","Done") + "</span>";
+          var pluginHtml = tc.plugin
+            ? '<span class="tc-plugin">' + escHtml(tc.plugin) + "</span>"
+            : "";
           tcs +=
-            '<div class="msg-bubble"><div class="tool-call' +
-            (newlyDone.indexOf(tc.tool || tc.name || "") === -1
-              ? ""
-              : " tool-drip-in") +
+            '<div class="tool-card' +
+            (error ? " tc-error" : running ? " tc-running" : " tc-done") +
+            drip +
+            '" data-tool="' +
+            escHtml(tc.tool || tc.name || "") +
             '" onclick="toggleToolCall(this)">' +
             '<div class="tc-line"><span class="tc-ico">' +
-            statusIcon +
+            iconSvg +
             '</span><span class="tc-name">' +
             escHtml(tc.tool || tc.name || "") +
             "</span>" +
-            (tc.status === "denied"
-              ? '<span class="tc-state tc-deny">' +
-                __("已拒绝", "Denied") +
-                "</span>"
-              : resultStr
-                ? '<span class="tc-state tc-done">' +
-                  __("完成", "Done") +
-                  "</span>"
-                : '<span class="tc-state tc-run">' +
-                  __("调用中", "Running") +
-                  "</span>") +
+            pluginHtml +
+            statusHtml +
             '<span class="tc-caret">▾</span></div>' +
             '<div class="tc-detail" style="display:none">' +
             (argsStr && argsStr !== "{}"
-              ? '<div class="tc-args">' + escHtml(argsStr) + "</div>"
+              ? '<div class="tc-args"><div class="tc-detail-label">' + __("参数","Args") + "</div>" + escHtml(argsStr) + "</div>"
               : "") +
             (resultStr
-              ? '<div class="tc-result">' + escHtml(resultStr) + "</div>"
+              ? '<div class="tc-result"><div class="tc-detail-label">' + __("结果","Result") + "</div>" + escHtml(resultStr) + "</div>"
               : "") +
-            "</div></div></div>";
+            "</div></div>";
         });
       }
       var body = rc + tcs;
@@ -1300,6 +1312,29 @@ function toggleToolCall(el) {
   } else {
     el.classList.add("open");
   }
+}
+
+function toggleReasoning(el) {
+  var card = el.closest(".reasoning-card");
+  if (!card) return;
+  var body = card.querySelector(".reasoning-body");
+  if (!body) return;
+  var open = body.style.display !== "none";
+  if (open) {
+    body.style.display = "none";
+    card.classList.remove("open");
+    return;
+  }
+  // 展开时懒加载全文（流式中只有 preview，未 parse 全文）
+  var content = card.querySelector(".reasoning-content");
+  if (content && !content.childElementCount) {
+    var idx = parseInt(card.getAttribute("data-idx"), 10) || 0;
+    var text = (state.messages[idx] && state.messages[idx].reasoning_content) || "";
+    content.innerHTML =
+      typeof marked !== "undefined" ? marked.parse(text) : escHtml(text);
+  }
+  body.style.display = "block";
+  card.classList.add("open");
 }
 
 function renderChatStarmap() {
@@ -4487,10 +4522,78 @@ async function connectFetchSSE(url) {
 
 function rerenderChatIfActive() {
   var tab = document.getElementById("view-chat");
-  if (tab && tab.classList.contains("active")) {
-    renderChat();
-    renderChatStarmap();
-    renderTerminals();
-    renderCmdHistory();
+  if (!tab || !tab.classList.contains("active")) return;
+  // 流式增量路径：防抖合并 + 只更新最后一条消息的正文/思考节点，避免全量重建
+  var msgs = state.messages;
+  var last = msgs.length ? msgs[msgs.length - 1] : null;
+  var streamingLast =
+    !!last && last.role === "assistant" && !last._final && state.chatLoading;
+  if (streamingLast) {
+    if (state._streamTimer) clearTimeout(state._streamTimer);
+    state._streamTimer = setTimeout(function () {
+      state._streamTimer = null;
+      renderChatStreamChunk();
+    }, 90);
+    return;
   }
+  // 非流式（完成/工具/历史变化）：全量渲染
+  if (state._streamTimer) {
+    clearTimeout(state._streamTimer);
+    state._streamTimer = null;
+  }
+  renderChat();
+  renderChatStarmap();
+  renderTerminals();
+  renderCmdHistory();
 }
+
+// 流式增量渲染：仅更新最后一条 assistant 消息的正文（渐进，节流 parse）与思考预览
+function renderChatStreamChunk() {
+  var msgsEl = document.getElementById("chat-msgs");
+  var msgs = state.messages;
+  var last = msgs.length ? msgs[msgs.length - 1] : null;
+  if (!msgsEl || !last) return;
+  var el = msgsEl.lastElementChild;
+  if (!el) {
+    renderChat();
+    return;
+  }
+  // 更新正文文本（节流 parse：内容变化 >200 字符或时间 >300ms 才 parse）
+  var textEl = el.querySelector(".msg-bubble .text");
+  var c = last.content || "";
+  if (textEl) {
+    var now = Date.now();
+    var lastParse = el.__lastParse || 0;
+    var lastLen = el.__lastLen || 0;
+    if (c.length - lastLen > 200 || now - lastParse > 300) {
+      textEl.innerHTML =
+        typeof marked !== "undefined" ? marked.parse(c) : escHtml(c);
+      el.__lastParse = now;
+      el.__lastLen = c.length;
+    } else {
+      // 小增量：纯文本渐进，避免反复 parse
+      var tail = c.slice(lastLen);
+      if (tail) {
+        var tn = document.createTextNode(tail);
+        textEl.appendChild(tn);
+      }
+      el.__lastLen = c.length;
+    }
+    if (state.chatStick !== false) {
+      try {
+        msgsEl.scrollTop = msgsEl.scrollHeight;
+      } catch (e) {}
+    }
+    return;
+  }
+  // 思考预览更新（流式中折叠，只刷 preview + sweep）
+  var rc = el.querySelector(".reasoning-card.rc-streaming .reasoning-preview");
+  if (rc && last.reasoning_content) {
+    var prev = last.reasoning_content.replace(/[\s\n]+/g, " ").slice(0, 60);
+    rc.textContent = prev;
+    return;
+  }
+  // 兜底：结构变化则全量
+  renderChat();
+}
+
