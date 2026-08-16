@@ -101,4 +101,7 @@ const (
 	CoreSettingsPlugins     = 45
 	CoreRegisterInputCh     = 46
 	CoreInjectInputSync     = 47
+	CorePluginReloadOne     = 48
+	CorePluginListLoaded    = 49
+	CorePluginIsDisabled    = 50
 )

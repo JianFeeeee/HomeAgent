@@ -74,6 +74,8 @@ type PluginManager interface {
 	// onRemove 回调（RegisterOnRemoveHandler），最后从注册表移除。目录删除由调用方负责。
 	RemovePlugin(name string) error
 	ReloadPlugins() (string, error)
+	// ReloadOne 重载单个插件（停止后重新加载，处理 dlclose/dynamic 句柄）。
+	ReloadOne(name string) error
 	PluginMetas() map[string]PluginMeta
 	PluginDir() string
 }
