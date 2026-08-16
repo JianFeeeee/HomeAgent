@@ -147,6 +147,17 @@ type EventSubscriber interface {
 	Subscribe(eventType EventType, handler EventHandler) func()
 }
 
+// PluginMgrAPI 提供插件管理能力（外部插件可调用）。
+// 由 bridge 注入 dispatch 实现，走 C ABI CORE_PLUGIN_RELOAD_ONE 等。
+type PluginMgrAPI interface {
+	// ReloadOne 重载单个插件（停止后重新加载）。
+	ReloadOne(name string) error
+	// ListLoadedPlugins 列出已加载插件。
+	ListLoadedPlugins() []string
+	// IsPluginDisabled 查询插件是否被禁用。
+	IsPluginDisabled(name string) bool
+}
+
 // StageScope controls which events a stage handler receives.
 type StageScope int
 
@@ -200,6 +211,7 @@ type PluginSDK struct {
 	sett      SettingsAPI
 	social    SocialAPI
 	events    EventSubscriber
+	plgMgr    PluginMgrAPI
 
 	autoRestart bool
 
@@ -346,6 +358,13 @@ func (s *PluginSDK) SetKnowledgeAPI(kn KnowledgeAPI)   { s.know = kn }
 func (s *PluginSDK) SetLLMAPI(llm LLMAPI)              { s.llm = llm }
 func (s *PluginSDK) SetSocialAPI(social SocialAPI)      { s.social = social }
 func (s *PluginSDK) SetEventSubscriber(es EventSubscriber) { s.events = es }
+
+// SetPluginMgrAPI sets the plugin manager API (called by the bridge at startup).
+func (s *PluginSDK) SetPluginMgrAPI(pm PluginMgrAPI) { s.plgMgr = pm }
+
+// PluginMgr returns the plugin manager API (ReloadOne / ReloadPlugins / list).
+// May be nil if the host did not wire it.
+func (s *PluginSDK) PluginMgr() PluginMgrAPI { return s.plgMgr }
 
 // ---- IO Convenience Methods ----
 
