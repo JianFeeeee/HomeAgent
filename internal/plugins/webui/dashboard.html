@@ -518,7 +518,10 @@ background:
         position: fixed;
         bottom: 66px;
         left: 16px;
-        width: 200px;
+        width: 216px;
+        max-width: calc(100vw - 24px);
+        max-height: calc(100vh - 130px);
+        overflow-y: auto;
         padding: 12px;
         background: var(--glass-bg-strong);
         backdrop-filter: blur(12px);
@@ -526,7 +529,7 @@ background:
         border-radius: var(--radius-md);
         box-shadow: var(--shadow-lg);
         display: none;
-        z-index: 90;
+        z-index: 300;
       }
       .palette-pop.on {
         display: block;
@@ -547,7 +550,7 @@ background:
         margin: 3px;
         padding: 0;
         vertical-align: middle;
-        transition: transform var(--dur-micro) var(--ease-out);
+        transition: transform 0.15s, box-shadow 0.15s;
       }
       .palette-pop button.cdot:hover {
         transform: scale(1.25);
@@ -568,26 +571,33 @@ background:
         margin-bottom: 6px;
         outline: none;
       }
-      .palette-pop input[type="range"] {
-        width: 100%;
-        margin: 2px 0 4px;
-        accent-color: var(--accent);
-      }
       .palette-pop .pp-row {
         display: flex;
+        flex-wrap: wrap;
         align-items: center;
-        gap: 6px;
+        gap: 5px;
         margin-top: 4px;
       }
       .palette-pop .pp-row .btn {
-        padding: 3px 10px;
+        padding: 3px 9px;
         font-size: 11px;
+        white-space: nowrap;
       }
       .palette-pop .pp-val {
-        font-size: 11px;
+        display: inline-flex;
+        align-items: center;
+        gap: 4px;
+        font-size: 10px;
         color: var(--text-muted);
-        min-width: 30px;
+        min-width: 0;
         text-align: right;
+        margin-left: auto;
+      }
+      .palette-pop input[type="range"] {
+        width: 72px;
+        margin: 0;
+        accent-color: var(--accent);
+        vertical-align: middle;
       }
       .container {
         padding: 24px;
@@ -1373,26 +1383,73 @@ background:
         max-width: 100%;
         border-radius: 6px;
       }
-      .msg-bubble .reasoning {
-        border-left: 2px solid #dddddd;
-        padding-left: 8px;
+
+      /* ===== 思考卡片（PiDeck 风格）===== */
+      .reasoning-card {
         margin: 6px 0;
-        font-size: 11px;
-        opacity: 0.8;
+        border: 1px dashed var(--kv-border);
+        border-radius: var(--radius-sm);
+        background: var(--bg-panel, var(--bg-hover));
+        overflow: hidden;
       }
-      .msg-bubble .reasoning-title {
+      .reasoning-card .reasoning-head {
+        display: flex;
+        align-items: center;
+        gap: 7px;
+        padding: 6px 10px;
+        font-size: 11px;
         cursor: pointer;
-        font-size: 10px;
-        font-weight: 600;
         user-select: none;
-        margin-bottom: 2px;
+        color: var(--text-secondary);
+      }
+      .reasoning-card .reasoning-head:hover {
+        background: var(--bg-hover);
+      }
+      .reasoning-card .rc-ico {
+        color: var(--accent);
+        flex-shrink: 0;
+      }
+      .reasoning-card .rc-title {
+        font-weight: 600;
+        color: var(--text-primary);
+      }
+      .reasoning-card .rc-chev {
+        margin-left: auto;
+        font-size: 10px;
+        color: var(--text-muted);
+        transition: transform 0.2s var(--ease-out);
+      }
+      .reasoning-card.open .rc-chev {
+        transform: rotate(180deg);
+      }
+      .reasoning-card .reasoning-body {
+        padding: 4px 10px 8px;
+      }
+      .reasoning-card .reasoning-content {
+        line-height: 1.5;
+        color: var(--text-tertiary);
+        font-size: 11.5px;
+      }
+      .reasoning-card .reasoning-content p {
+        margin: 4px 0;
+      }
+      .reasoning-card .reasoning-sweep {
+        height: 2px;
+        border-radius: 2px;
+        margin-top: 6px;
+        background: linear-gradient(90deg, transparent, var(--accent), transparent);
+        background-size: 200% 100%;
+        animation: reasoningSweep 1.2s var(--ease-out) infinite;
         opacity: 0.6;
       }
-      .msg-bubble .reasoning-body {
-        line-height: 1.4;
+      @keyframes reasoningSweep {
+        from { background-position: 200% 0; }
+        to { background-position: -200% 0; }
       }
-      .msg-bubble .tool-call {
-        background: var(--bg-hover);
+
+      /* ===== 工具卡片（PiDeck 风格，扁平不套气泡）===== */
+      .tool-card {
+        background: var(--bg-panel, var(--bg-hover));
         color: var(--text-secondary);
         border-radius: var(--radius-sm);
         padding: 7px 10px;
@@ -1401,54 +1458,101 @@ background:
         border: 1px solid var(--kv-border);
         border-left: 3px solid var(--accent);
         cursor: pointer;
+        transition: border-color 0.2s var(--ease-out), background 0.2s var(--ease-out);
       }
-      .msg-bubble .tool-call .tc-line {
+      .tool-card.tc-running {
+        border-left-color: var(--accent);
+      }
+      .tool-card.tc-done {
+        border-left-color: rgba(23, 169, 100, 0.8);
+      }
+      .tool-card.tc-error {
+        border-left-color: var(--error, #db3694);
+      }
+      .tool-card .tc-line {
         display: flex;
         align-items: center;
         gap: 6px;
         font-size: 11px;
         user-select: none;
       }
-      .msg-bubble .tool-call .tc-ico {
+      .tool-card .tc-ico {
         display: inline-flex;
         flex-shrink: 0;
+        color: var(--accent);
       }
-      .msg-bubble .tool-call .tc-name {
+      .tool-card.tc-error .tc-ico {
+        color: var(--error, #db3694);
+      }
+      .tool-card.tc-done .tc-ico {
+        color: rgba(23, 169, 100, 0.9);
+      }
+      .tool-card .tc-name {
         font-weight: 600;
         color: var(--text-primary);
       }
-      .msg-bubble .tool-call .tc-state {
+      .tool-card .tc-plugin {
+        font-size: 9.5px;
+        color: var(--text-muted);
+        background: var(--pre-bg);
+        border-radius: 4px;
+        padding: 0 4px;
+        line-height: 1.6;
+        flex-shrink: 0;
+      }
+      .tool-card .tc-state {
         margin-left: auto;
         font-size: 9.5px;
         font-weight: 500;
         padding: 1px 6px;
         border-radius: 999px;
         flex-shrink: 0;
+        display: inline-flex;
+        align-items: center;
+        gap: 4px;
       }
-      .msg-bubble .tool-call .tc-run {
+      .tool-card .tc-run {
         background: rgba(63, 110, 245, 0.18);
         color: #a3b8ff;
       }
-      .msg-bubble .tool-call .tc-done {
+      .tool-card .tc-done {
         background: rgba(23, 169, 100, 0.18);
         color: #6ee7a8;
       }
-      .msg-bubble .tool-call .tc-deny {
+      .tool-card .tc-deny {
         background: rgba(219, 54, 148, 0.18);
         color: #ff9ec6;
       }
-      .msg-bubble .tool-call .tc-caret {
+      .tool-card .tc-spinner {
+        width: 11px;
+        height: 11px;
+        border-radius: 50%;
+        border: 2px solid rgba(63, 110, 245, 0.25);
+        border-top-color: #3f6ef5;
+        animation: spin 0.7s linear infinite;
+        display: inline-block;
+      }
+      .tool-card .tc-caret {
         font-size: 10px;
         color: var(--text-muted);
         transition: transform 0.15s var(--ease-out);
       }
-      .msg-bubble .tool-call.open .tc-caret {
+      .tool-card.open .tc-caret {
         transform: rotate(180deg);
       }
-      .msg-bubble .tool-call .tc-detail {
+      .tool-card .tc-detail {
         margin-top: 6px;
       }
-      .msg-bubble .tool-call .tc-args {
+      .tool-card .tc-detail-label {
+        font-size: 9.5px;
+        font-weight: 600;
+        color: var(--text-muted);
+        text-transform: uppercase;
+        letter-spacing: 0.03em;
+        margin-bottom: 2px;
+      }
+      .tool-card .tc-args,
+      .tool-card .tc-result {
         font-family: var(--font-mono);
         font-size: 11px;
         opacity: 0.85;
@@ -1460,28 +1564,36 @@ background:
         border-radius: 4px;
         padding: 5px 7px;
       }
-      .msg-bubble .tool-call .tc-result {
-        font-family: var(--font-mono);
-        font-size: 11px;
+      .tool-card .tc-result {
         opacity: 0.72;
-        white-space: pre-wrap;
-        word-break: break-all;
-        margin-top: 5px;
-        background: var(--pre-bg);
-        color: var(--pre-color);
-        border-radius: 4px;
-        padding: 5px 7px;
         max-height: 80px;
         overflow-y: auto;
       }
-      [data-theme="light"] .msg-bubble .tool-call .tc-run {
+      [data-theme="light"] .tool-card .tc-run {
         color: #3f6ef5;
       }
-      [data-theme="light"] .msg-bubble .tool-call .tc-done {
+      [data-theme="light"] .tool-card .tc-done {
         color: #128a52;
       }
-      [data-theme="light"] .msg-bubble .tool-call .tc-deny {
+      [data-theme="light"] .tool-card .tc-deny {
         color: #c2185b;
+      }
+      .tool-card.tool-drip-in {
+        animation: toolDripIn 0.32s var(--ease-out) both;
+      }
+      @keyframes toolDripIn {
+        0% {
+          opacity: 0;
+          transform: translateY(-18px) scale(0.96);
+        }
+        70% {
+          opacity: 1;
+          transform: translateY(2px) scale(1.005);
+        }
+        100% {
+          opacity: 1;
+          transform: translateY(0) scale(1);
+        }
       }
       .msg-bubble .thinking-tools {
         display: flex;
@@ -2387,6 +2499,8 @@ background:
       (function () {
         var saved = localStorage.getItem("ha-theme");
         setTheme(saved || "light");
+        var savedColor = localStorage.getItem("ha-color");
+        if (savedColor) setColor(savedColor);
         var sb = localStorage.getItem("ha-sidebar");
         if (sb === "1" || (!sb && window.innerWidth <= 768)) {
           document.body.classList.add("sidebar-collapsed");
@@ -3097,70 +3211,65 @@ background:
               c = escHtml(c);
             }
             var isChan = !!(m.source && m.source !== "webui");
-            var rc = "";
-            if (m.reasoning_content) {
-              var rcBody =
-                typeof marked !== "undefined"
-                  ? marked.parse(m.reasoning_content)
-                  : escHtml(m.reasoning_content);
-              rc =
-                '<div class="msg-bubble"><div class="reasoning">' +
-                "<div class=\"reasoning-title\" onclick=\"var n=this.nextElementSibling;n.style.display=n.style.display==='none'?'block':'none';this.textContent=this.textContent==='" +
-                __("展开思考", "Expand") +
-                "'?'" +
-                __("收起思考", "Collapse") +
-                "':'" +
-                __("展开思考", "Expand") +
-                "'\">" +
-                __("展开思考", "Expand") +
-                "</div>" +
-                '<div class="reasoning-body" style="display:none">' +
-                rcBody +
-                "</div></div></div>";
-            }
-            var tcs = "";
-            if (m.tool_calls && m.tool_calls.length > 0) {
-              m.tool_calls.forEach(function (tc) {
-                var argsStr =
-                  typeof tc.args === "object"
-                    ? JSON.stringify(tc.args, null, 1)
-                    : tc.args || "";
-                var resultStr = tc.result
-                  ? typeof tc.result === "object"
-                    ? JSON.stringify(tc.result, null, 1)
-                    : String(tc.result)
-                  : "";
-                var statusIcon =
-                  tc.status === "denied"
-                    ? '<svg viewBox="0 0 24 24" width="12" height="12" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" style="color:var(--error);vertical-align:-1px"><circle cx="12" cy="12" r="9"/><path d="M5.6 5.6l12.8 12.8"/></svg>'
-                    : '<svg viewBox="0 0 24 24" width="12" height="12" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" style="color:var(--accent);vertical-align:-1px"><path d="M14.7 6.3a4 4 0 0 0-5.4 5.4L3 18l3 3 6.3-6.3a4 4 0 0 0 5.4-5.4l-2.9 2.9-2.5-.6-.6-2.5z"/></svg>';
-                tcs +=
-                  '<div class="msg-bubble"><div class="tool-call' +
-                  (newlyDone.indexOf(tc.tool || tc.name || "") !== -1
-                    ? " tool-drip-in"
-                    : "") +
-                  '" onclick="toggleToolCall(this)">' +
-                  '<div class="tc-line"><span class="tc-ico">' +
-                  statusIcon +
-                  '</span><span class="tc-name">' +
-                  escHtml(tc.tool || tc.name || "") +
-                  "</span>" +
-                  (tc.status === "denied"
-                    ? '<span class="tc-state tc-deny">' + __("已拒绝", "Denied") + "</span>"
-                    : resultStr
-                      ? '<span class="tc-state tc-done">' + __("完成", "Done") + "</span>"
-                      : '<span class="tc-state tc-run">' + __("调用中", "Running") + "</span>") +
-                  '<span class="tc-caret">▾</span></div>' +
-                  '<div class="tc-detail" style="display:none">' +
-                  (argsStr && argsStr !== "{}"
-                    ? '<div class="tc-args">' + escHtml(argsStr) + "</div>"
-                    : "") +
-                  (resultStr
-                    ? '<div class="tc-result">' + escHtml(resultStr) + "</div>"
-                    : "") +
-                  "</div></div></div>";
-              });
-            }
+              var rc = "";
+              if (m.reasoning_content) {
+                rc = renderReasoningCard(m.reasoning_content, isStreamingLast);
+              }
+              var tcs = "";
+              if (m.tool_calls && m.tool_calls.length > 0) {
+                m.tool_calls.forEach(function (tc) {
+                  var argsStr =
+                    typeof tc.args === "object"
+                      ? JSON.stringify(tc.args, null, 1)
+                      : tc.args || "";
+                  var resultStr = tc.result
+                    ? typeof tc.result === "object"
+                      ? JSON.stringify(tc.result, null, 1)
+                      : String(tc.result)
+                    : "";
+                  var running = !resultStr && tc.status !== "denied";
+                  var error = tc.status === "error" || tc.status === "denied" || !!tc.error;
+                  var drip = newlyDone.indexOf(tc.tool || tc.name || "") !== -1 ? " tool-drip-in" : "";
+                  var iconSvg =
+                    error
+                      ? '<svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><circle cx="12" cy="12" r="9"/><path d="M5.6 5.6l12.8 12.8"/></svg>'
+                      : running
+                        ? '<span class="tc-spinner"></span>'
+                        : '<svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M14.7 6.3a4 4 0 0 0-5.4 5.4L3 18l3 3 6.3-6.3a4 4 0 0 0 5.4-5.4l-2.9 2.9-2.5-.6-.6-2.5z"/></svg>';
+                  var statusHtml =
+                    tc.status === "denied"
+                      ? '<span class="tc-state tc-deny">' + __("已拒绝", "Denied") + "</span>"
+                      : running
+                        ? '<span class="tc-state tc-run">' + __("调用中", "Running") + "</span>"
+                        : '<span class="tc-state tc-done">' + __("完成", "Done") + "</span>";
+                  var pluginHtml = tc.plugin
+                    ? '<span class="tc-plugin">' + escHtml(tc.plugin) + "</span>"
+                    : "";
+                  tcs +=
+                    '<div class="tool-card' +
+                    (error ? " tc-error" : running ? " tc-running" : " tc-done") +
+                    drip +
+                    '" data-tool="' +
+                    escHtml(tc.tool || tc.name || "") +
+                    '" onclick="toggleToolCall(this)">' +
+                    '<div class="tc-line"><span class="tc-ico">' +
+                    iconSvg +
+                    '</span><span class="tc-name">' +
+                    escHtml(tc.tool || tc.name || "") +
+                    "</span>" +
+                    pluginHtml +
+                    statusHtml +
+                    '<span class="tc-caret">▾</span></div>' +
+                    '<div class="tc-detail" style="display:none">' +
+                    (argsStr && argsStr !== "{}"
+                      ? '<div class="tc-args"><div class="tc-detail-label">' + __("参数", "Args") + "</div>" + escHtml(argsStr) + "</div>"
+                      : "") +
+                    (resultStr
+                      ? '<div class="tc-result"><div class="tc-detail-label">' + __("结果", "Result") + "</div>" + escHtml(resultStr) + "</div>"
+                      : "") +
+                    "</div></div>";
+                });
+              }
             var body = rc + tcs;
             var growCls = m._grow ? " grow-in" : "";
             if (m._grow) m._grow = false;
@@ -3271,6 +3380,41 @@ background:
           el.classList.remove("open");
         } else {
           el.classList.add("open");
+        }
+      }
+
+      function renderReasoningCard(text, isStreaming) {
+        var body =
+          typeof marked !== "undefined"
+            ? marked.parse(text)
+            : escHtml(text);
+        var preview =
+          typeof marked !== "undefined"
+            ? text.replace(/[\s\n]+/g, " ").slice(0, 60)
+            : escHtml(text).replace(/<[^>]+>/g, " ").slice(0, 60);
+        return (
+          '<div class="reasoning-card">' +
+          '<div class="reasoning-head" onclick="toggleReasoning(this)">' +
+          '<svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="rc-ico"><path d="M9 3a2 2 0 0 0-2 2v2a2 2 0 0 1-2 2H3a2 2 0 0 0-2 2v6a2 2 0 0 0 2 2h2a2 2 0 0 1 2 2v2a2 2 0 0 0 2 2h1a2 2 0 0 0 2-2v-2a2 2 0 0 1 2-2h2a2 2 0 0 0 2-2V7a2 2 0 0 0-2-2h-2a2 2 0 0 1-2-2V3a2 2 0 0 0-2-2H9zM12 8v4m0 4h.01"/></svg>' +
+          '<span class="rc-title">' + (isStreaming ? __("思考中...", "Thinking...") : __("思考", "Thinking")) + '</span>' +
+          '<span class="rc-chev">▾</span></div>' +
+          '<div class="reasoning-body" style="display:' + (isStreaming ? "block" : "none") + '">' +
+          '<div class="reasoning-content">' + body + '</div>' +
+          (isStreaming ? '<div class="reasoning-sweep"></div>' : "") +
+          '</div></div>'
+        );
+      }
+      function toggleReasoning(el) {
+        var card = el.closest(".reasoning-card");
+        if (!card) return;
+        var body = card.querySelector(".reasoning-body");
+        if (!body) return;
+        var open = body.style.display !== "none";
+        body.style.display = open ? "none" : "block";
+        if (open) {
+          card.classList.remove("open");
+        } else {
+          card.classList.add("open");
         }
       }
 
