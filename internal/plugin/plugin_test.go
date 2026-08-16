@@ -2,6 +2,8 @@ package plugin
 
 import (
 	"testing"
+
+	sdk "gitcode.com/JianFeeeee/HomeAgent/internal/sdk"
 )
 
 func TestExtractDescription(t *testing.T) {
@@ -194,4 +196,9 @@ A tool with no parameters`
 	if len(props) != 0 {
 		t.Errorf("expected no params, got %d", len(props))
 	}
+}
+
+func TestPluginManagerInterfaceReloadOne(t *testing.T) {
+	// 编译期契约：Registry 必须实现 PluginManager（含 ReloadOne 单插件重载）。
+	var _ sdk.PluginManager = (*Registry)(nil)
 }
