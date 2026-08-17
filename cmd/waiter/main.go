@@ -81,6 +81,8 @@ func main() {
 	configPath := flag.String("config", "", "config file path")
 	chat := flag.String("chat", "", "send a message and print final text (one-shot)")
 	say := flag.String("say", "", "deprecated alias of -chat")
+	deviceGateway := flag.String("device", "", "remotedevice 网关地址（如 127.0.0.1:9890），启动设备桥")
+	deviceToken := flag.String("device-token", "", "设备接入 token")
 	flag.Parse()
 
 	cfg := discoverConfig(*configPath)
@@ -102,6 +104,26 @@ func main() {
 		os.Exit(1)
 	}
 	defer state.Disconnect()
+
+	// 设备桥：--device 或配置 device_gateway 时，waiter 作为被控设备接入 remotedevice
+	var bridge *deviceBridge
+	dg := *deviceGateway
+	if dg == "" {
+		dg = cfg.DeviceGateway
+	}
+	dt := *deviceToken
+	if dt == "" {
+		dt = cfg.DeviceToken
+	}
+	if dg != "" && dt != "" {
+		bridge = newDeviceBridge(dg, dt)
+		if err := bridge.Start(); err != nil {
+			printlnC(colorYellow, fmt.Sprintf("device bridge: %v (continue without)", err))
+		} else {
+			printlnC(colorGreen, "device bridge active: "+bridge.deviceID)
+			defer bridge.Stop()
+		}
+	}
 
 	if oneShotMsg != "" {
 		oneshot(state, oneShotMsg)
@@ -236,6 +258,3 @@ func printServerOutput(content string) {
 		fmt.Printf("%s%s%s\n", clearLine, content, colorReset)
 	}
 }
-
-
-

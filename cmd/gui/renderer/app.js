@@ -27,6 +27,9 @@ const state = {
   lang: localStorage.getItem("ha-lang") || "zh",
   connections: [],
   currentConn: null,
+  devices: [],
+  selfDeviceId: "",
+  selfGateway: "",
 };
 
 // ===== I18n =====
@@ -525,6 +528,11 @@ function renderAll() {
   } catch (e) {
     console.error("renderAdapters", e);
   }
+  try {
+    renderDevices();
+  } catch (e) {
+    console.error("renderDevices", e);
+  }
   applyI18n();
   applyCardTilt();
   refreshAll();
@@ -556,6 +564,28 @@ async function refreshAll() {
   } catch (e) {}
   try {
     await loadCmdHistory();
+  } catch (e) {}
+  try {
+    if (state.currentConn && state.currentConn.type === "device") {
+      var d = await api("/device");
+      state.devices = d.devices || [];
+    }
+  } catch (e) {
+    state.devices = [];
+  }
+  try {
+    if (
+      state.currentConn &&
+      state.currentConn.type === "device" &&
+      window.homeagent &&
+      window.homeagent.device
+    ) {
+      var idn = await window.homeagent.device.identity();
+      if (idn) {
+        state.selfDeviceId = idn.device_id || "";
+        state.selfGateway = idn.address || "";
+      }
+    }
   } catch (e) {}
   try {
     renderOverview();
@@ -591,6 +621,11 @@ async function refreshAll() {
     renderAdapters();
   } catch (e) {
     console.error("renderAdapters", e);
+  }
+  try {
+    renderDevices();
+  } catch (e) {
+    console.error("renderDevices", e);
   }
   applyI18n();
   applyCardTilt();
@@ -970,19 +1005,33 @@ function chanLetter(src) {
 function renderReasoningCard(text, isStreaming, idx) {
   var preview =
     typeof marked === "undefined"
-      ? escHtml(text).replace(/<[^>]+>/g, " ").slice(0, 60)
+      ? escHtml(text)
+          .replace(/<[^>]+>/g, " ")
+          .slice(0, 60)
       : text.replace(/[\s\n]+/g, " ").slice(0, 60);
   return (
-    '<div class="reasoning-card' + (isStreaming ? " rc-streaming" : "") + '" data-idx="' + (idx | 0) + '">' +
+    '<div class="reasoning-card' +
+    (isStreaming ? " rc-streaming" : "") +
+    '" data-idx="' +
+    (idx | 0) +
+    '">' +
     '<div class="reasoning-head" onclick="toggleReasoning(this)">' +
     '<svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="rc-ico"><path d="M9 3a2 2 0 0 0-2 2v2a2 2 0 0 1-2 2H3a2 2 0 0 0-2 2v6a2 2 0 0 0 2 2h2a2 2 0 0 1 2 2v2a2 2 0 0 0 2 2h1a2 2 0 0 0 2-2v-2a2 2 0 0 1 2-2h2a2 2 0 0 0 2-2V7a2 2 0 0 0-2-2h-2a2 2 0 0 1-2-2V3a2 2 0 0 0-2-2H9zM12 8v4m0 4h.01"/></svg>' +
-    '<span class="rc-title">' + (isStreaming ? __("思考中...","Thinking...") : __("思考","Thinking")) + '</span>' +
+    '<span class="rc-title">' +
+    (isStreaming ? __("思考中...", "Thinking...") : __("思考", "Thinking")) +
+    "</span>" +
     '<span class="rc-chev">▾</span></div>' +
-    '<div class="reasoning-body" style="display:' + (isStreaming ? "block" : "none") + '">' +
+    '<div class="reasoning-body" style="display:' +
+    (isStreaming ? "block" : "none") +
+    '">' +
     (isStreaming
-      ? '<div class="reasoning-preview">' + escHtml(preview) + '</div><div class="reasoning-sweep"></div>'
-      : '<div class="reasoning-content">' + (typeof marked !== "undefined" ? marked.parse(text) : escHtml(text)) + '</div>') +
-    '</div></div>'
+      ? '<div class="reasoning-preview">' +
+        escHtml(preview) +
+        '</div><div class="reasoning-sweep"></div>'
+      : '<div class="reasoning-content">' +
+        (typeof marked === "undefined" ? escHtml(text) : marked.parse(text)) +
+        "</div>") +
+    "</div></div>"
   );
 }
 
@@ -1106,20 +1155,29 @@ function renderChat() {
               : String(tc.result)
             : "";
           var running = !resultStr && tc.status !== "denied";
-          var error = tc.status === "error" || tc.status === "denied" || !!tc.error;
-          var drip = newlyDone.indexOf(tc.tool || tc.name || "") !== -1 ? " tool-drip-in" : "";
-          var iconSvg =
-            error
-              ? '<svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><circle cx="12" cy="12" r="9"/><path d="M5.6 5.6l12.8 12.8"/></svg>'
-              : running
-                ? '<span class="tc-spinner"></span>'
-                : '<svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M14.7 6.3a4 4 0 0 0-5.4 5.4L3 18l3 3 6.3-6.3a4 4 0 0 0 5.4-5.4l-2.9 2.9-2.5-.6-.6-2.5z"/></svg>';
+          var error =
+            tc.status === "error" || tc.status === "denied" || !!tc.error;
+          var drip =
+            newlyDone.indexOf(tc.tool || tc.name || "") === -1
+              ? ""
+              : " tool-drip-in";
+          var iconSvg = error
+            ? '<svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><circle cx="12" cy="12" r="9"/><path d="M5.6 5.6l12.8 12.8"/></svg>'
+            : running
+              ? '<span class="tc-spinner"></span>'
+              : '<svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M14.7 6.3a4 4 0 0 0-5.4 5.4L3 18l3 3 6.3-6.3a4 4 0 0 0 5.4-5.4l-2.9 2.9-2.5-.6-.6-2.5z"/></svg>';
           var statusHtml =
             tc.status === "denied"
-              ? '<span class="tc-state tc-deny">' + __("已拒绝","Denied") + "</span>"
+              ? '<span class="tc-state tc-deny">' +
+                __("已拒绝", "Denied") +
+                "</span>"
               : running
-                ? '<span class="tc-state tc-run">' + __("调用中","Running") + "</span>"
-                : '<span class="tc-state tc-done">' + __("完成","Done") + "</span>";
+                ? '<span class="tc-state tc-run">' +
+                  __("调用中", "Running") +
+                  "</span>"
+                : '<span class="tc-state tc-done">' +
+                  __("完成", "Done") +
+                  "</span>";
           var pluginHtml = tc.plugin
             ? '<span class="tc-plugin">' + escHtml(tc.plugin) + "</span>"
             : "";
@@ -1140,10 +1198,18 @@ function renderChat() {
             '<span class="tc-caret">▾</span></div>' +
             '<div class="tc-detail" style="display:none">' +
             (argsStr && argsStr !== "{}"
-              ? '<div class="tc-args"><div class="tc-detail-label">' + __("参数","Args") + "</div>" + escHtml(argsStr) + "</div>"
+              ? '<div class="tc-args"><div class="tc-detail-label">' +
+                __("参数", "Args") +
+                "</div>" +
+                escHtml(argsStr) +
+                "</div>"
               : "") +
             (resultStr
-              ? '<div class="tc-result"><div class="tc-detail-label">' + __("结果","Result") + "</div>" + escHtml(resultStr) + "</div>"
+              ? '<div class="tc-result"><div class="tc-detail-label">' +
+                __("结果", "Result") +
+                "</div>" +
+                escHtml(resultStr) +
+                "</div>"
               : "") +
             "</div></div>";
         });
@@ -1329,9 +1395,10 @@ function toggleReasoning(el) {
   var content = card.querySelector(".reasoning-content");
   if (content && !content.childElementCount) {
     var idx = parseInt(card.getAttribute("data-idx"), 10) || 0;
-    var text = (state.messages[idx] && state.messages[idx].reasoning_content) || "";
+    var text =
+      (state.messages[idx] && state.messages[idx].reasoning_content) || "";
     content.innerHTML =
-      typeof marked !== "undefined" ? marked.parse(text) : escHtml(text);
+      typeof marked === "undefined" ? escHtml(text) : marked.parse(text);
   }
   body.style.display = "block";
   card.classList.add("open");
@@ -1691,6 +1758,16 @@ async function sendChat() {
   var btn = document.getElementById("chat-send-btn");
   var text = inp.value.trim();
   if (!text || state.chatLoading) return;
+  if (state.currentConn && state.currentConn.type === "device") {
+    toast(
+      __(
+        "设备网关连接不支持聊天",
+        "Device gateway connection does not support chat",
+      ),
+      true,
+    );
+    return;
+  }
   state.chatStick = true;
   state.chatFinalIdx = -1;
   state.messages.push({ role: "user", content: text });
@@ -1702,51 +1779,57 @@ async function sendChat() {
   btn.textContent = "";
   rerenderChat();
   try {
-    var r = await api("/chat", {
-      method: "POST",
-      body: JSON.stringify({ message: text }),
-      timeout: 120000,
-    });
-    state.chatStage = "";
-    var last = state.messages[state.messages.length - 1];
-    console.log(
-      "[sendChat] POST returned, last msg:",
-      last
-        ? {
-            role: last.role,
-            _streaming: last._streaming,
-            _final: last._final,
-            tool_calls: last.tool_calls?.length,
-            content_len: last.content?.length,
-          }
-        : null,
-    );
-    if (last && last.role === "assistant" && last._streaming) {
-      console.log(
-        "[sendChat] updating existing streaming msg, tool_calls before:",
-        last.tool_calls?.length,
-      );
-      last.content = r.response || __("(无响应)", "(no response)");
-      last._grow = true;
-      if (!last.reasoning_content)
-        last.reasoning_content = r.reasoning_content || "";
-      last._final = true;
-      delete last._streaming;
-    } else {
-      state.messages.push({
-        role: "assistant",
-        content: r.response || __("(无响应)", "(no response)"),
-        reasoning_content: r.reasoning_content,
-        tool_calls:
-          last && last.role === "assistant" && last.tool_calls
-            ? last.tool_calls
-            : [],
-        _final: true,
-        _grow: true,
-      });
+    // webui 连接：触发式 + SSE 流式接管（避免 POST 与 SSE 双通道重复渲染卡死）
+    var isWebui = !state.currentConn || state.currentConn.type !== "cli";
+    var r = null;
+    try {
+      if (isWebui) {
+        // 触发请求：短超时确认受理，回复靠 SSE
+        r = await api("/chat", {
+          method: "POST",
+          body: JSON.stringify({ message: text }),
+          timeout: 15000,
+          headers: { "X-Trigger-Only": "1" },
+        });
+      } else {
+        r = await api("/chat", {
+          method: "POST",
+          body: JSON.stringify({ message: text }),
+          timeout: 120000,
+        });
+      }
+    } catch (e) {
+      // 触发请求超时/失败：不阻塞 UI，等 SSE 兜底；若 SSE 也无响应则报错
+      console.warn("[sendChat] trigger failed: " + e.message);
+      r = null;
     }
-    state.chatFinalIdx = state.messages.length - 1;
-    rerenderChat();
+    state.chatStage = __("AI 回复中...", "AI replying...");
+    var last = state.messages[state.messages.length - 1];
+    // CLI/device 无 SSE：POST 完整结果直接填充
+    if (!isWebui && r) {
+      if (last && last.role === "assistant" && last._streaming) {
+        last.content = r.response || __("(无响应)", "(no response)");
+        last._grow = true;
+        if (!last.reasoning_content)
+          last.reasoning_content = r.reasoning_content || "";
+        last._final = true;
+        delete last._streaming;
+      } else {
+        state.messages.push({
+          role: "assistant",
+          content: r.response || __("(无响应)", "(no response)"),
+          reasoning_content: r.reasoning_content,
+          tool_calls:
+            last && last.role === "assistant" && last.tool_calls
+              ? last.tool_calls
+              : [],
+          _final: true,
+          _grow: true,
+        });
+      }
+      state.chatFinalIdx = state.messages.length - 1;
+    }
+    if (!isWebui) rerenderChat();
   } catch (e) {
     state.messages.push({
       role: "assistant",
@@ -2950,6 +3033,7 @@ function renderOneSettings() {
     __("后端连接", "Backend Connections") +
     "</h2>" +
     '<div id="conn-manager"></div></div>' +
+    '<div id="gui-prefs"></div>' +
     '<div class="settings-tabs" id="settings-tabs"></div>' +
     '<div class="settings-content">';
   if (
@@ -3290,8 +3374,10 @@ function renderOneSettings() {
   }
   html += "</div></div>";
   document.getElementById("view-settings").innerHTML = html;
+  renderGuiPrefs();
   renderSettingsTabs();
   renderConnSection();
+  loadGuiPrefs();
 }
 
 function markDirty(k) {
@@ -3689,6 +3775,76 @@ function openConnManager() {
   switchView("settings");
 }
 
+// ===== 客户端偏好（开机自启/静默启动/退出进托盘） =====
+var guiPrefs = { autoLaunch: false, silentStart: false, exitToTray: true };
+async function loadGuiPrefs() {
+  try {
+    if (window.homeagent && window.homeagent.prefs) {
+      guiPrefs = (await window.homeagent.prefs.get()) || guiPrefs;
+    }
+  } catch (e) {}
+}
+async function saveGuiPrefs(key, val) {
+  var next = Object.assign({}, guiPrefs, { [key]: val });
+  try {
+    if (window.homeagent && window.homeagent.prefs) {
+      guiPrefs = (await window.homeagent.prefs.set(next)) || next;
+    } else {
+      guiPrefs = next;
+    }
+  } catch (e) {
+    toast(__("保存偏好失败: ", "Save prefs failed: ") + e.message, true);
+    return;
+  }
+  toast(__("已保存", "Saved"));
+  renderGuiPrefs();
+}
+function renderGuiPrefs() {
+  var el = document.getElementById("gui-prefs");
+  if (!el) return;
+  function sw(key, label, desc, onchange) {
+    return (
+      '<div class="pref-row" style="margin:8px 0;display:flex;justify-content:space-between;align-items:center">' +
+      "<div><div>" +
+      label +
+      "</div>" +
+      (desc
+        ? '<div style="font-size:11px;color:var(--text-muted)">' +
+          desc +
+          "</div>"
+        : "") +
+      "</div>" +
+      '<label class="switch"><input type="checkbox" ' +
+      (guiPrefs[key] ? "checked" : "") +
+      ' onchange="' +
+      onchange +
+      '"><span></span></label></div>'
+    );
+  }
+  el.innerHTML =
+    '<div class="card" id="gui-prefs-card"><h2>' +
+    __("客户端偏好", "Client Preferences") +
+    "</h2>" +
+    sw(
+      "autoLaunch",
+      __("开机自启", "Auto launch on start"),
+      __("登录后自动启动 HomeAgent（静默）", "Start silently at login"),
+      "saveGuiPrefs('autoLaunch', this.checked)",
+    ) +
+    sw(
+      "silentStart",
+      __("静默启动", "Silent start"),
+      __("启动时不显示主窗口，驻留托盘后台运行", "Start hidden, keep in tray"),
+      "saveGuiPrefs('silentStart', this.checked)",
+    ) +
+    sw(
+      "exitToTray",
+      __("退出进托盘", "Exit to tray"),
+      __("关闭窗口时驻留托盘而不是退出", "Closing window keeps app in tray"),
+      "saveGuiPrefs('exitToTray', this.checked)",
+    ) +
+    "</div>";
+}
 function renderConnSection() {
   var cont = document.getElementById("conn-manager");
   if (!cont) return;
@@ -3755,7 +3911,8 @@ function renderConnSection() {
     __("连接类型", "Type") +
     '</label><select id="conn-type" onchange="toggleConnType()">' +
     '<option value="webui">WebUI (HTTP)</option>' +
-    '<option value="cli">CLI (unix socket)</option></select>' +
+    '<option value="cli">CLI (unix socket)</option>' +
+    '<option value="device">设备网关 (remotedevice)</option></select>' +
     '<div id="conn-addr-webui"><label>' +
     __("地址", "URL") +
     '</label><input id="conn-url" placeholder="http://localhost:18080"></div>' +
@@ -3832,6 +3989,11 @@ function toggleConnType() {
     t === "cli" ? "block" : "none";
   document.getElementById("conn-auth-webui").style.display =
     t === "cli" ? "none" : "block";
+  // device 类型不适用 webui 网关登录
+  var gwField = document.getElementById("conn-gw");
+  if (gwField)
+    gwField.closest("label, div").style.display =
+      t === "device" ? "none" : "block";
   toggleGwFields();
 }
 
@@ -4160,6 +4322,38 @@ async function saveConnForm() {
         testBtn.disabled = false;
         return;
       }
+    } else if (ctype === "device") {
+      // 设备网关：直接探活 /api/v1/device（带 token）
+      var devTest;
+      try {
+        devTest = await fetch(url + "/api/v1/device", {
+          headers: apiKey ? { "X-API-Key": apiKey } : {},
+        });
+      } catch (e) {
+        toast(
+          __("无法连接到设备网关 ", "Cannot connect to device gateway ") +
+            url +
+            ": " +
+            e.message,
+          true,
+        );
+        testBtn.textContent = __("保存", "Save");
+        testBtn.disabled = false;
+        return;
+      }
+      if (!devTest.ok) {
+        toast(
+          __("设备网关测试失败: ", "Device gateway test failed: ") +
+            devTest.status +
+            "（" +
+            (await devTest.text()).slice(0, 120) +
+            "）",
+          true,
+        );
+        testBtn.textContent = __("保存", "Save");
+        testBtn.disabled = false;
+        return;
+      }
     } else {
       if (window.homeagent && window.homeagent.webui) {
         if (gwEnabled && !cookie) {
@@ -4260,19 +4454,31 @@ async function saveConnForm() {
   testBtn.textContent = __("保存", "Save");
   testBtn.disabled = false;
   var connData =
-    ctype === "cli"
-      ? { name: name, type: "cli", socketPath: sock, url: "", apiKey: apiKey }
-      : {
+    ctype === "device"
+      ? {
           name: name,
-          type: "webui",
+          type: "device",
           url: url,
           apiKey: apiKey,
-          username: username,
-          password: password,
-          cookie: cookie,
-          headers: headers,
-          gateway: gwEnabled,
-        };
+          username: "",
+          password: "",
+          cookie: "",
+          headers: "",
+          gateway: false,
+        }
+      : ctype === "cli"
+        ? { name: name, type: "cli", socketPath: sock, url: "", apiKey: apiKey }
+        : {
+            name: name,
+            type: "webui",
+            url: url,
+            apiKey: apiKey,
+            username: username,
+            password: password,
+            cookie: cookie,
+            headers: headers,
+            gateway: gwEnabled,
+          };
   var data;
   if (editingConnId) {
     data = await window.homeagent.connections.update(editingConnId, connData);
@@ -4322,8 +4528,9 @@ connectSSE = () => {
     state.eventSource = null;
   }
   if (!state.currentConn) return;
-  // CLI 连接无 SSE 通道，聊天走同步 cli:request
-  if (state.currentConn.type === "cli") return;
+  // CLI/device 连接无 SSE 通道，聊天走同步
+  if (state.currentConn.type === "cli" || state.currentConn.type === "device")
+    return;
   connectFetchSSE(state.currentConn.url + "/api/v1/chat/events");
 };
 
@@ -4530,7 +4737,7 @@ function rerenderChatIfActive() {
     !!last && last.role === "assistant" && !last._final && state.chatLoading;
   if (streamingLast) {
     if (state._streamTimer) clearTimeout(state._streamTimer);
-    state._streamTimer = setTimeout(function () {
+    state._streamTimer = setTimeout(() => {
       state._streamTimer = null;
       renderChatStreamChunk();
     }, 90);
@@ -4567,7 +4774,7 @@ function renderChatStreamChunk() {
     var lastLen = el.__lastLen || 0;
     if (c.length - lastLen > 200 || now - lastParse > 300) {
       textEl.innerHTML =
-        typeof marked !== "undefined" ? marked.parse(c) : escHtml(c);
+        typeof marked === "undefined" ? escHtml(c) : marked.parse(c);
       el.__lastParse = now;
       el.__lastLen = c.length;
     } else {
@@ -4597,3 +4804,196 @@ function renderChatStreamChunk() {
   renderChat();
 }
 
+// ===== Devices (remotedevice gateway) =====
+function renderDevices() {
+  var el = document.getElementById("view-devices");
+  if (!el) return;
+  var conn = state.currentConn;
+  if (!conn || conn.type !== "device") {
+    el.innerHTML =
+      '<div class="card"><h2>' +
+      __("设备", "Devices") +
+      '</h2><p style="color:var(--text-muted)">' +
+      __(
+        "请先在设置中添加并切换到「设备网关 (remotedevice)」连接，以查看已接入设备。",
+        "Add and switch to a Remote Device Gateway connection in Settings to view devices.",
+      ) +
+      "</p>" +
+      '<button class="btn btn-primary" onclick="goSettingsConn()">' +
+      __("管理连接", "Manage Connections") +
+      "</button></div>";
+    return;
+  }
+  var devs = state.devices || [];
+  var selfDev = null;
+  if (state.selfDeviceId) {
+    for (var si = 0; si < devs.length; si++) {
+      if (devs[si].device_id === state.selfDeviceId) {
+        selfDev = devs[si];
+        break;
+      }
+    }
+  }
+  var selfHtml =
+    '<div class="card" style="border-left:3px solid #4f8cff"><h2>' +
+    __("本机 GUI 设备", "Local GUI Device") +
+    "</h2>";
+  if (state.selfDeviceId) {
+    var sOnline = selfDev ? selfDev.online : false;
+    var sAuth = selfDev ? selfDev.authorized : false;
+    selfHtml +=
+      '<div class="kv-row"><span class="key">' +
+      __("设备 ID", "Device ID") +
+      '</span><span class="val">' +
+      escHtml(state.selfDeviceId) +
+      "</span></div>" +
+      '<div class="kv-row"><span class="key">' +
+      __("网关", "Gateway") +
+      '</span><span class="val">' +
+      escHtml(state.selfGateway || "-") +
+      "</span></div>" +
+      '<div class="kv-row"><span class="key">' +
+      __("状态", "Status") +
+      "</span><span>" +
+      (sOnline
+        ? '<span class="dot-green">' + __("在线", "Online") + "</span>"
+        : '<span class="dot-gray">' + __("离线", "Offline") + "</span>") +
+      "</span></div>" +
+      '<div class="kv-row"><span class="key">' +
+      __("授权", "Authorized") +
+      '</span><span class="val" style="display:flex;align-items:center;gap:8px">' +
+      '<label class="switch"><input type="checkbox" ' +
+      (sAuth ? "checked" : "") +
+      " onchange=\"deviceToggleAuth('" +
+      state.selfDeviceId +
+      "',this.checked)\"><span></span></label>" +
+      (sAuth
+        ? '<span class="dot-green">' + __("已授权", "Yes") + "</span>"
+        : '<span class="dot-red">' + __("未授权", "No") + "</span>") +
+      "</span></div>";
+  } else {
+    selfHtml +=
+      '<p style="color:var(--text-muted)">' +
+      __(
+        "未接入设备网关。请在设置中配置「设备网关 (remotedevice)」连接后重启。",
+        "Not connected. Configure a Remote Device Gateway connection in Settings then restart.",
+      ) +
+      "</p>";
+  }
+  selfHtml += "</div>";
+  var html =
+    selfHtml +
+    '<div class="card"><h2>' +
+    __("设备网关", "Device Gateway") +
+    " (" +
+    devs.length +
+    ")" +
+    "</h2>" +
+    '<div style="margin-bottom:8px"><button class="btn btn-ghost btn-sm" onclick="deviceRefresh()">' +
+    __("刷新", "Refresh") +
+    "</button></div>";
+  if (devs.length === 0) {
+    html +=
+      '<p style="color:var(--text-muted)">' +
+      __(
+        "暂无设备接入。设备通过 WebSocket 连接到设备网关（默认 127.0.0.1:9890/api/v1/device/ws），携带 token 后 hello 登记、bind 授权。",
+        "No devices yet. Devices connect via WebSocket (default 127.0.0.1:9890/api/v1/device/ws), hello to register, bind to authorize.",
+      ) +
+      "</p>";
+  } else {
+    html +=
+      "<table><tr><th>" +
+      __("设备", "Device") +
+      "</th><th>" +
+      __("种类", "Kind") +
+      "</th><th>" +
+      __("状态", "Status") +
+      "</th><th>" +
+      __("授权", "Authorized") +
+      "</th><th>" +
+      __("能力", "Caps") +
+      "</th><th>" +
+      __("操作", "Actions") +
+      "</th></tr>";
+    devs.forEach((d) => {
+      var online = d.online
+        ? '<span class="dot-green">' + __("在线", "Online") + "</span>"
+        : '<span class="dot-gray">' + __("离线", "Offline") + "</span>";
+      var auth = d.authorized
+        ? '<span class="dot-green">' + __("已授权", "Yes") + "</span>"
+        : '<span class="dot-red">' + __("未授权", "No") + "</span>";
+      var caps = (d.caps || []).join(", ") || "-";
+      html +=
+        "<tr><td><b>" +
+        escHtml(d.name || d.device_id) +
+        '</b><br><span style="font-size:11px;color:var(--text-muted)">' +
+        escHtml(d.device_id) +
+        "</span></td><td>" +
+        escHtml(d.kind || "-") +
+        "</td><td>" +
+        online +
+        "</td><td>" +
+        auth +
+        "</td><td>" +
+        escHtml(caps) +
+        "</td><td>" +
+        (d.authorized
+          ? '<label class="switch"><input type="checkbox" checked' +
+            " onchange=\"deviceToggleAuth('" +
+            d.device_id +
+            "',this.checked)\"><span></span></label> " +
+            __("已授权", "Yes")
+          : '<label class="switch"><input type="checkbox"' +
+            " onchange=\"deviceToggleAuth('" +
+            d.device_id +
+            "',this.checked)\"><span></span></label> " +
+            __("未授权", "No")) +
+        "</td></tr>";
+    });
+    html += "</table>";
+  }
+  html += "</div>";
+  el.innerHTML = html;
+}
+
+async function deviceRefresh() {
+  try {
+    var d = await api("/device");
+    state.devices = d.devices || [];
+    renderDevices();
+  } catch (e) {
+    toast(__("设备列表刷新失败: ", "Refresh failed: ") + e.message, true);
+  }
+}
+
+async function deviceToggleAuth(deviceID, auth) {
+  try {
+    await api("/device/auth", {
+      method: "POST",
+      body: JSON.stringify({ device_id: deviceID, authorize: auth }),
+    });
+    toast(__("授权已更新", "Authorization updated"));
+    deviceRefresh();
+  } catch (e) {
+    toast(__("授权失败: ", "Auth failed: ") + e.message, true);
+  }
+}
+
+function deviceSendCmd(deviceID) {
+  var cmd = prompt(__("输入要执行的命令", "Enter command to run"));
+  if (!cmd) return;
+  api("/device/push", {
+    method: "POST",
+    body: JSON.stringify({
+      device_id: deviceID,
+      payload: { op: "cmd", command: cmd },
+    }),
+  })
+    .then(() => {
+      toast(__("命令已下发", "Command sent"));
+      deviceRefresh();
+    })
+    .catch((e) => {
+      toast(__("下发失败: ", "Send failed: ") + e.message, true);
+    });
+}

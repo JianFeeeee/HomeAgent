@@ -22,7 +22,7 @@
 **根因**：`internal/plugins/healthcheck/plugin.go` 的三个"写入通道"自检**全部在真实生产存储上写入再删除**：
 
 | 函数 | 写入 | 清理 | 固化问题 |
-|------|------|------|----------|
+| ------ | ------ | ------ | ---------- |
 | `testMemoryRaw` (:460) | `Memory().Commit(_hc_<ts> triple)` | `Purge(hard)` | GraphDB 空实体/AUTOINCREMENT id 膨胀 |
 | `testKnowledgeRaw` (:485) | `Knowledge().Add(_hc_knowledge_test_<ts>)` | `Remove(marker)` | Add 异步 `go writeIndex` vs Remove 异步重写**竞态**；`dirName`(用了 `/` 解析)与 `Remove` 的 `id=sanitize(name)` 计算**不一致**→ 删除可能失效 → **残留目录固化成文件** |
 | `testDocStoreRaw` (:521) | `DocMemory().Insert(...)` | Query 后 Remove | 真实 docStore 写文件再删，抖动 |
@@ -30,6 +30,7 @@
 **原则**：健康检查验证的是"写入通道是否可用"，**结果不应固化进生产记忆**。改为**独立虚拟/影子空间**或**不落盘验证**。
 
 **实现**：
+
 - [x] **核心实现**：SDK 新增 `VirtualInstance`（`internal/sdk/selftest.go`），healthcheck 的三个 raw 自检改为在完全隔离的虚拟空间（`os.MkdirTemp` 独立图库/知识库/文档/文本）上做真实"写→查→删"，绝不碰生产存储。
 - [x] `PluginSDK.Selftest()/SelftestReset()` 暴露隔离实例（含 mutex 防并发），每轮自检前 `SelftestReset` 重建清空上轮数据。
 - [x] **LLM 驱动自检防护**：`collectToolDefsForLLM` 改为只收集**只读白名单**工具（`isSafeReadonlyTool`），写/删/改生产数据及外部副作用工具（memory_commit/doc_commit/knowledge_create/cmd_run/files_write/terminal_*/output_send/spawn_child 等）一律不交给 LLM 自检，防止 LLM 乱调污染生产。
@@ -75,7 +76,7 @@
 ## 核心问题清单
 
 | # | 问题 | 影响 | 位置 |
-|---|------|------|------|
+| --- | ------ | ------ | ------ |
 | 1 | GraphDB.Commit 对 relations **裸 INSERT 无去重** | 同一三元组每次归档无限重复，生产 5613 条 `文档→来源→context_archived` 重复垃圾 | `internal/memory/graph.go:209` |
 | 2 | `docToTriples()` **对每篇冷文档永远生成固定模板三元组**（`文档→来源→context_archived`、`文档→主题→{summary}`） | 归档即写垃圾，配合问题1指数级累积 | `internal/agent/core/distill.go:390-437` |
 | 3 | `core.agent.distill_interval=2d` 配置 **静默失效**（Go `time.ParseDuration` 不支持 `d` 单位），回退 30 分钟默认值 | archiveColdDocs **每小时跑**而非每 2 天，放大问题 1/2 | `internal/config/registry.go:698` |
@@ -142,10 +143,12 @@
 **背景**：`readLoop`（`internal/plugins/agentcli/plugin.go:556-608`）用写死常量 `NotifyOutputDelay = 500ms`（`plugin.go:24`）做**定时节流**：只要终端持续输出（如 `git sparse clone` 进度），就每 500ms 注入一条 `[终端 X 有新输出]` 到 agent，造成无限自喂送、占满 eventLoop，使 QQ 消息永远只能塞进回环通道且被 echo 上下文淹没。
 
 **原则（明确保留通知，不改中断机制）**：
+
 - **通知机制必须保留**——agent 需要感知"终端仍在运行、可能有待读取的输出"，否则会忘记终端的存在、不知何时去 `terminal_read`。
 - 真正要改的是**写死的 500ms 定时节流**，改为**基于输出语义/任务生命周期的通知策略**，"多少输出一通知 / 命令执行结束再通知"由可配策略决定，而非插件写死。
 
 **实现**：
+
 - [x] 通知从"按 500ms 定时"改为**按终端生命周期事件触发**：
   - **进程结束 / 超时 / 读取错误 → 立即通知**（已存在 + 增强 EOF 即时触发）。
   - **持续运行、仅产出进度 → 低频"有新输出"通知**（累计 `notify_bytes` 默认 2KB 未读字节，或距上次通知 `notify_interval` 默认 2s，两条件满足任一即触发），而非每 500ms。
@@ -172,8 +175,8 @@
 ## 验收标准
 
 | 指标 | 当前 | 目标 | 验收方式 |
-|------|------|------|----------|
-| Graph relations 重复率 | ~90% (5613/6225) | 0% | `SELECT count(*), count(DISTINCT source_id||target_id||relation_type) FROM relations` |
+| ------ | ------ | ------ | ---------- |
+| Graph relations 重复率 | ~90% (5613/6225) | 0% | `SELECT count(*), count(DISTINCT source_id | | target_id | | relation_type) FROM relations` |
 | `context_archived` 关系残留 | 5613 | 0 | `grep` 关系表 |
 | `distill_interval` 配置生效 | 失效(30m) | 2d | 日志 `heartbeat distill tick` 间隔 = 48h |
 | Pipeline distiller 频率 | 7天一批 | 10min | 日志 `distilled N records` 每 10min |
@@ -219,8 +222,9 @@ internal/memory/static_embedder.go # 量化/裁剪入口（可选）
 > HomeAgent WebUI 为 Go 嵌入式 HTML/JS（非 React），改进方向：**在原有技术栈内尽可能逼近设计原则**，重点提升信息架构、交互反馈、视觉层次。
 
 ### 设计系统适配（Go 模板 + 原生 CSS/JS）
+
 | 维度 | NapCat 参考 | HomeAgent 适配策略 |
-|------|-------------|-------------------|
+| ------ | ------------- | ------------------- |
 | **配色** | 樱花粉 `#FF7FAC` / 霜蓝 `#88C0D0` / 玫瑰红 `#F33B7C`；粉色调中性色 | CSS 变量定义同色系；浅/深色模式切换；主色用于 CTA/聚焦态 |
 | **字体** | Quicksand/Nunito 圆润无衬线 + JetBrains Mono | 引入 Google Fonts Quicksand + JetBrains Mono；标题 -0.02em tracking |
 | **间距** | 4px 基准单位；卡片 p-4~6；区块 gap-4/6 | CSS Grid/Flex 统一 4px 节奏；卡片内边距 16/20/24px |
@@ -231,16 +235,18 @@ internal/memory/static_embedder.go # 量化/裁剪入口（可选）
 | **图标** | Lucide 2px stroke | 引入 Lucide 静态 SVG（内联）或同风格 iconfont |
 
 ### 信息架构重构（核心痛点）
+
 | 现状 | 目标（对标 NapCat Dashboard） |
-|------|-----------------------------|
+| ------ | ----------------------------- |
 | 单页面堆砌所有功能 | **左侧可折叠侧边栏**（16rem 固定）→ 导航分组：概览/记忆/工具/插件/配置/日志 |
 | 无面包屑、无状态反馈 | 顶部面包屑 + 悬停微动效；关键操作 Toast 反馈（右上角） |
 | 表格/列表无视觉分组 | 卡片网格布局：每卡片 = 一个功能模块（记忆统计/插件状态/工具调用/系统资源） |
 | 无数据可视化 | Canvas 2D 绘制：记忆增长趋势图、CPU/内存环图、工具调用热力图 |
 
 ### 交互体验对标
+
 | 场景 | NapCat 做法 | HomeAgent 改进 |
-|------|-------------|----------------|
+| ------ | ------------- | ---------------- |
 | 卡片悬停 | 3D 透视倾斜 + 光标跟随渐变光斑 | CSS `transform: perspective(1000px) rotateX/Y(±5deg)` + 伪元素光斑跟随鼠标 |
 | 按钮点击 | 弹簧 scale + loading 态 | `:active { transform: scale(0.97) }` + 内置 spinner |
 | 页面切换 | Framer Motion fade-up+scale stagger | CSS `@keyframes fadeUpScale` + JS 交错延迟 50ms |
@@ -248,6 +254,7 @@ internal/memory/static_embedder.go # 量化/裁剪入口（可选）
 | 错误处理 | Toast 右上 + 破坏性操作确认弹窗 | 统一 `showToast(type, msg)` + `confirmDialog(action, onConfirm)` |
 
 ### 实施路线（非阻塞，Phase 8+）
+
 ```
 Phase 8.1: ✅ CSS 变量系统 + Glassmorphism 基础样式（浅/深色）— dashboard.html :root 重写 NapCat DNA tokens（sakura/frost 色板、玻璃变量、阴影、圆角、字体、动效）
 Phase 8.2: ✅ 布局重构 — 左侧 16rem 可折叠侧边栏 + 顶部面包屑 topbar + 卡片网格响应式（toggleSidebar/switchTab 联动）
@@ -258,9 +265,11 @@ Phase 8.6: ✅ 空状态/错误/确认弹窗统一组件库 — showToast(type,m
 Phase 8.7: ✅ 无障碍/键盘导航/移动端适配 — :focus-visible ring、prefers-reduced-motion 全停动效、主题滚动条、移动端自动折叠侧边栏
 Phase 8.8: ✅ 用户反馈迭代（8.x 收尾）— ①健康检查 UI 去冗余（系统操作卡仅保留重载插件，健康检查卡自带右上角「运行」按钮+空态文案）；②主题跟随系统（无手动偏好时用 prefers-color-scheme，并监听系统实时切换）；③设置页内容列 max-width 860px 居中；④emoji 清理（☰/☀️/🌙/⛔/🔧/🧠 → 内联 SVG/纯文本，聊天工具调用状态用语义色图标）；⑤总览页重构为插件页式全宽单列卡片（移除看板娘大照片卡、移除不准确的记忆分布环图+运行时资源条形图，runtime/memory 改 kv-row 精确数字展示），kernel 页同化
 ```
+
 > 实现均在 `internal/plugins/webui/dashboard.html`（纯 CSS + Vanilla JS，无构建链）；`handler_test.go:641` 修复上游遗留断言失配（`api('/settings'` → `api("/settings"`）。
 
 ### 技术约束
+
 - **保持 Go `html/template` + 内嵌静态资源** —— 不引入 Node/构建链
 - 静态资源（CSS/JS/字体/图标）以 `embed.FS` 内嵌二进制
 - 复杂动效用纯 CSS + 极简 Vanilla JS（无框架依赖）
@@ -278,3 +287,308 @@ Phase 8.8: ✅ 用户反馈迭代（8.x 收尾）— ①健康检查 UI 去冗�
 
 *更新时间：2026-08-11*
 *生产实例：`/home/newqqagent`，systemd 托管，二进制 `/usr/local/bin/homed` (v0.8.0, 2026-07-28 build)*
+---
+
+## 9. device_ctl 设备接入网关：WebUI 监听 + devicedetect 扫描
+
+### 设计意图备忘（对齐核心架构原则）
+
+1. **插件即 Agent 的 App，IO 全在插件层** —— 设备接入是 IO 能力，**必须全部收敛到 webui 插件**（内核零 IO 原则），
+   设备状态归 webui 插件管理，agent 只经工具访问。**不触碰 CLI/waiter**（CLI 本机自执行命令已有 `cmd` 插件，反向操控 CLI 属重复造轮子，不在本计划范围）。
+2. **认知负荷最小 / 反提示词注入** —— 设备元数据（dev_id/ip/status）只出现在工具参数与返回值，**绝不进 system prompt**；
+   agent 只通过 `devicedetect` / `device_ctl_*` 工具按需查询，避免设备名/IP 污染对话上下文。
+3. **工具语义自解释** —— `devicedetect` / `device_ctl_*` 的 Description 让 agent「读完即知怎么用」，无需额外指令。
+4. **显式授权为唯一信任源** —— 任何 device_ctl 执行必须 **先授权、后执行**；高危操作（cmdrun/open）需**每次二次确认**（授权确认响应中的 accept 字段）。授权状态持久化，重启不丢。
+
+### 目标（需求澄清）
+
+用户明确收敛为：**只做 webui**（webui 开监听端口作为设备接入网关），提供 `devicedetect` 工具供 agent 扫描设备连接状态。
+CLI 本机自执行命令已有 cmd 插件，不做反向操控 CLI。
+
+### 一、协议与接入（webui 充当“设备注册网关”）
+
+**背景**：当前 webui 是纯 HTTP/SSE 服务（`internal/plugins/webui`）：`/api/v1/*` REST（webui API key 认证）+ 聊天 SSE。设备接入需要一条**独立、受控、可被反向推送**的通道。
+
+**设计**：新增 **JSON-over-WebSocket 监听**（agent→设备反向推送 + 设备→agent 上报，双向长连接），复用 webui 插件。
+
+| # | 内容 | 位置 | 风险 |
+| --- | ------ | ------ | ------ |
+| A1 | 新增 WebSocket 端点 `/api/v1/device/ws`（API key 认证，仅连接期有效），JSON 消息帧 | `internal/plugins/webui/handler.go` | 中（WS 依赖库 `github.com/gorilla/websocket`，判断是否已引入；若无则用 `golang.org/x/net/websocket` 或静态协议） |
+| A2 | 新增 REST：`GET /api/v1/device/online`（在线设备列表/状态）、`POST /api/v1/device/push`（向已连接设备推 JSON） | 同上 | 低 |
+| A3 | **设备能力声明**：连接时设备上传 `{op:"hello", device:{name,kind,caps:[...]}}`，webui 记录并登记在线 | 同上 | 低 |
+| A4 | **设备侧授权绑定**：首次连接需 `{op:"bind", token}`；token 由 webui 设置页生成（`device_gateway.token` 配置），绑定成功后该设备进入“已授权”集合 | `plugin.go`(设置) + handler | 中 |
+
+### 二、Agent 工具（devicedetect 等）
+
+**设计**：注册一个 `devicectl` 设备（实现 `agentIO.Device` 接口，`internal/plugins/webui` 内定义），
+`Tools()` 返回三工具，`Execute()` 检查授权 + 路由到 WebSocket 在线设备。
+
+| 工具 | 语义 | 参数 | 返回值 |
+| ------ | ------ | ------ | -------- |
+| `devicedetect` | 扫描/列出已连接且已授权的设备 | `kind`(可选) | `[{device_id,name,kind,caps,online}]` |
+| `device_ctl_status` | 查询单设备实时状态 | `device_id` | `{device,status,last_seen}` |
+| `device_ctl_cmdrun` | 向设备发送命令执行请求（**高危，需授权+二次确认**） | `device_id, command` | `{accepted:true, request_id}` 或拒绝 |
+
+**注意**：webui 插件属于内置插件，注册 `devicectl` 设备走 `s.RegisterChannel("devicectl", dev)`（IOManager 自动并入工具集，`ExecuteTool` 自动可达）。设备 Execute 是**同步阻塞**的，但 cmdrun 是异步的——需维护 **pending 请求表（request_id → chan）**，WS 收到设备结果后写回，工具循环内超时返回。
+
+### 三、webui 前端：设备管理页
+
+| # | 内容 | 位置 | 风险 |
+| --- | ------ | ------ | ------ |
+| F1 | 侧栏新增「设备」入口 + 页面：设备列表（在线/离线/已授权/未授权）、连接状态徽标 | `dashboard.html` | 低（纯前端） |
+| F2 | 设备详情：基本信息（名称/种类/caps）、状态/历史、授权/取消授权按钮、`device_ctl_cmdrun` 命令输入+结果展示 | 同上 | 低 |
+| F3 | 设备接入引导：显示 `device_gateway.token` + 接入方式说明（WS URL + 绑定 token），供外部设备复制 | 同上 | 中（token 明文展示，需「显示/隐藏」） |
+
+### 四、安全与授权
+
+| # | 内容 | 位置 | 风险 |
+| --- | ------ | ------ | ------ |
+| S1 | `device_gateway.token`：启动时生成并持久化（复用 `Settings()` 机制，webui 插件设置页可「显示/重置」） | `plugin.go` / handler | 低 |
+| S2 | **授权级别**：只读（status/detect）无需确认；**执行类（cmdrun）需二次确认**——工具返回 `{accepted:false, require_confirm:true}`，agent 需再调 `device_ctl_confirm` 或经 webui 前端用户点击「允许」 | handler + 工具 | 中 |
+| S3 | **授权状态持久化**：已授权设备集合存 webui 插件配置（SQLite config.db，复用 Settings），重启不丢 | 同上 | 低 |
+| S4 | **WS 连接安全**：连接即要求 API key（`Sec-WebSocket-Protocol` 或 query token）；每消息帧校验；超时/断开自动清理在线表 | handler | 中 |
+
+### 五、实施顺序（本计划按此逐步 push，每步可独立验证）
+
+| Phase | 内容 | 验证 |
+| ------- | ------ | ------ |
+| **P1** | 协议与接入：新增 WS 端点 + hello/bind 握手 + 在线设备登记（内存） | curl/WS 客户端连上 → `GET /api/v1/device/online` 可见 |
+| **P2** | REST 面：`/api/v1/device/online`、`/api/v1/device/push`、（device_gateway.token 设置注册） | token 生成/持久化；push 到在线设备收到 JSON |
+| **P3** | Agent 工具：`devicectl` Device + `devicedetect` / `device_ctl_status` / `device_ctl_cmdrun` | agent 工具面板可见三工具；devicedetect 返回在线设备 |
+| **P4** | 异步 cmdrun：pending 请求表 + WS 结果回写 + 超时 | 模拟设备返回 cmdrun 结果，agent 拿到 |
+| **P5** | 授权：bind 绑定 + token 校验 + 持久化已授权集合 + cmdrun 二次确认流 | 未绑定拒绝；已绑定可查询；cmdrun 需确认 |
+| **P6** | webui 前端设备管理页（F1–F3） | 页面可见在线/授权/执行状态 |
+| **P7** | 单测 + 文档：handler/工具/授权单测；README/架构文档补充 | `make test` 全绿 |
+
+### 六、里程碑外延（明确不做）
+
+- **不做 CLI/waiter 反向操控**（本机命令已由 cmd 插件承担；预期语义是“设备本来就是远程的”）。
+- 不做 QQ/微信等具体设备插件——设备按通用 WS 协议接入即可。
+- 单设备回调/事件推送的复杂路由（多设备扇出、订阅过滤）留给后续迭代。
+
+### 七、回滚预案
+
+- P1–P5 均为新增代码/路由，不触碰现有 webui 路由与 CLI socket；既有功能完全不受影响。
+- 若 WS 依赖库引入失败：回退为**独立 TCP 监听**（复用 cli 插件逐行 JSON 模式，协议一致）——同样满足“设备接入网关”。
+- 所有改动先 `make build build-cli` + `make test` 后再部署；生产回滚即替换旧 `homed` 二进制。
+
+> **更新（2026-08-16）**：用户定案——device 接入独立为 `remotedevice` 插件（webui 只做前端反代，如 `proxyToPluginmgr` 先例；不把 WS 监听直接长在 webui 插件上，避免 webui 过重）。本插件的所有实现细节沿用上述设计，落点全部移到 `internal/plugins/remotedevice/`：
+>
+> - 设备网关（WS 监听 + hello/bind/在线登记）→ remotedevice 自持监听端口（默认 127.0.0.1:9890，配置 `listen_addr`）
+> - REST（online/push）→ remotedevice 自带 HTTP mux（地址同上）
+> - Agent 工具（devicectl Device + devicedetect/device_ctl_*）→ remotedevice 内 `s.RegisterChannel("devicectl", dev)`
+> - 设置项（listen_addr / ws token / 已授权集合）→ remotedevice 插件 Settings（config_remotedevice 表）
+> - webui 前端设备页 → webui `/api/v1/device/*` **可选反代**到 remotedevice（参照 `proxyToPluginmgr` 模式）：**默认禁用**，用户配置 `device_gateway_enabled` / `device_gateway_addr` / `device_gateway_token` 后才挂载，避免硬耦合
+> - 设备网关鉴权：webui 层 API key（`requireAPI`）+ 网关层 remotedevice token（`X-API-Key`）双鉴权
+
+## 10. 实施：remotedevice 独立插件（逐步推进）
+
+### Phase 0：插件骨架 + 设备注册表 + WS 网关（本轮）
+
+### Phase 0：插件骨架 + 设备注册表 + WS 网关 + devicectl 工具（已实施）
+
+**已交付**：
+
+- `internal/plugins/remotedevice/` 独立插件：`registry.go`（设备注册表 + 标准库 WebSocket 网关 + push/await/结果留档）、`plugin.go`（设置 + REST 面 + HTTP 服务）、`device.go`（devicectl Device + 四工具）
+- Agent 工具：`devicedetect` / `device_ctl_status` / `device_ctl_cmdrun` / `device_ctl_cmdresult`（经 `s.RegisterChannel("devicectl", dev)` 并入 IOManager 工具集）
+- 设备接入：WS 端点 `/api/v1/device/ws`（token 认证，hello/bind/status/cmd_result 协议），默认监听 127.0.0.1:9890
+- REST 管理面：`/api/v1/device`（列表）、`/api/v1/device/online`、`/api/v1/device/{id}`、`/api/v1/device/push`、`/api/v1/device/auth`（全部 token 鉴权）
+- 授权：token 校验（`ws_token`，启动生成持久化）+ 已授权集合持久化（`authorized_devices`，逗号分隔）+ `RestoreAuthorized` 重启恢复
+- webui 可配置反代：新增 `device_gateway_enabled`(默认 false)/`device_gateway_addr`/`device_gateway_token` 设置；仅启用时挂 `/api/v1/device/` 反代路由（webui API key 鉴权 → 转发带 remotedevice token）
+- 装配：`internal/plugins/all.go` 注册 remotedevice
+
+**验证**：`gofmt -w` + `go build ./...` exit:0 ✅
+
+**待办（后续 Phase）**：
+
+- [] 单测：注册表/WS 握手/push/cmdrun/授权
+- [] webui 前端设备管理页（非必选，可经 REST/CLI 使用）
+- [] 心跳/离线自动清理的周期 goroutine（当前断开即清理）
+
+### Phase 0b：GUI 连接 remotedevice（已实施）
+
+**需求**：本机有 GUI（Electron），为其添加连接 remotedevice 网关的逻辑，可查看/授权/控制设备。
+
+**已交付**（cmd/gui/）：
+
+- **连接类型**：表单新增 `device`（设备网关 remotedevice）类型；`saveConnForm` 加 device 分支（url+apiKey=ws_token）；连接测试加 device 探活（GET /api/v1/device，带 X-API-Key）
+- **normalize 修复**：`main.js normalizeConnections` 允许 `type==="device"`（原来会强制改回 webui）
+- **侧栏「设备」入口** + `view-devices` 容器（index.html）
+- **renderDevices()**：设备列表（名称/种类/在线/授权/能力）、空态引导、"执行命令"（prompt 输入→POST /device/push）、"授权/取消授权"（POST /device/auth）、"刷新"
+- `renderAll`/`refreshAll` 挂载 renderDevices；state.devices
+
+**验证**：`node --check renderer/app.js` 与 `node --check main.js` 全通过；`go test ./internal/plugins/... ./internal/sdk/... ./internal/agent/...` 全绿；remotedevice 端到端（WS 设备接入 → REST 列表/online/鉴权/push）验证通过。
+
+**设备模拟全链路**（验证实录）：
+
+- WS 连 /api/v1/device/ws?token=... → hello_ack → bind_ack → 服务端 push {op:cmd, command} → 设备回 cmd_result
+- GET /api/v1/device 返回全部设备（合并授权态）；GET /api/v1/device/online 只返回在线；无 token 401
+- GUI 的 "执行命令" 走 /device/push 已验证下发到达设备
+
+### Phase 0c：端到端验收（已完成）
+
+**环境**：临时 homed（-data /tmp/ha-dev）+ Python WS 设备模拟 + Electron GUI 冒烟。
+
+**验证结果**：
+
+- ✅ `go build ./...` exit:0；`go test ./internal/plugins/... ./internal/sdk/... ./internal/agent/...` 全绿
+- ✅ remotedevice 网关监听 127.0.0.1:9890（config_remotedevice 表：listen_addr/ws_token/authorized_devices 持久化）
+- ✅ WS 设备接入全链路：hello_ack → bind_ack → 服务端 push {op:cmd} → 设备回 cmd_result
+- ✅ REST：GET /api/v1/device（含授权态合并）、/online（仅在线）、无 token 401
+- ✅ GUI：`node --check renderer/app.js` + `node --check main.js` 通过；Electron 冒烟（--disable-gpu）稳定运行无 JS 错误（headless 容器需禁 GPU）
+- ✅ 说明：webui 反代默认禁用（device_gateway_enabled=false），GUI 直连 remotedevice 网关不受影响
+
+**遗留/后续**：
+
+- [ ] remotedevice 单测（registry/WS 握手/push/授权）
+- [ ] agent 真实工具调用验证（需 LLM key，本环境无）
+- [ ] webui 设备管理页（可选，GUI 已覆盖）
+- [ ] cmdrun 二次确认流（当前为已授权即下发）
+
+### Phase 0d：真实 LLM 驱动工具调用测试（完成 ✅）
+
+**环境**：本机 LLM 网关 `http://127.0.0.1:8080/v1`（deepseek-v4-flash-free，Bearer key）+ 临时 homed + Python WS 模拟设备（living-light 客厅灯，已授权在线）。
+
+**配置**：`core.llm.base_url/api_key/model=AUTO/adapter=openai` + `core.llm.sources.default.*`；重启后 `model=AUTO base=http://127.0.0.1:8080/v1 sources=2` ✓
+
+**测试1：devicedetect（扫描设备）**
+> 用户指令："请扫描一下当前有哪些设备在线，用devicedetect工具"
+> Agent 真实调用 devicedetect → 返回客厅智能灯（living-light）类型/状态/授权/能力/最近在线时间 ✓（7.8s）
+
+**测试2：device_ctl_cmdrun（反向操控设备）—— 决定性验证**
+> 用户指令："用device_ctl_cmdrun让客厅灯living-light执行 turn_on 命令打开灯"
+> 设备模拟日志：`PUSHED: {command: turn_on, op: cmd, req_id: f00dd0596ffeee2d}` → 设备回 `cmd_result`
+> Agent 回复："开灯指令已成功下发执行（status: ok，请求 ID f00dd0596ffeee2d）" ✓（16.6s）
+
+**结论**：HomeAgent → LLM 决策 → devicectl 工具 → WS push → 设备执行 → cmd_result 回执 → agent 汇报 全链路真实跑通，即"agent 反向操控设备"核心能力已验证。
+
+**清理**：已终止临时 homed / 模拟设备 / 临时文件；代码改动与 plan.md 保留。
+
+### Phase 0e：GUI 作为设备接入 + 托盘驻留 + 偏好设置 + 聊天卡顿修复（已实施）
+
+**设备桥（GUI 作为设备）**
+
+- `cmd/gui/main.js` 新增设备桥：GUI 以 `device_id: gui-<hostname>` 接入 remotedevice WS（hello/bind），收到 `{op:cmd}` 用 `spawn` 本机执行（白名单命令 + 15s 限时 + 8KB 截断）回 `cmd_result`
+- whenReady 时若存在 `type="device"` 连接则自动启动设备桥；before-quit 停设备桥
+
+**托盘驻留**
+
+- `initTray()`：nativeImage icon + 菜单（显示主界面/退出）+ 双击显示；whenReady 调用
+- `window-all-closed` 依 `exitToTray` 偏好：true 则隐藏驻留（后台维持设备桥），false 则 quit
+- `window:close` handler 改为 exitToTray 时 hide（修复了托盘块重复注册崩溃）
+
+**偏好设置（prefs:get/set + 设置页 UI）**
+
+- `gui-prefs.json`（userData）存 `autoLaunch`（开机自启，Electron `app.setLoginItemSettings` + openAsHidden）/ `silentStart`（静默启动，createWindow 后 hide）/ `exitToTray`（退出进托盘，默认 true）
+- preload 暴露 `homeagent.prefs`；设置页「客户端偏好」卡片三个开关
+
+**聊天卡顿/输入框卡死修复**
+
+- 根因：webui 连接 sendChat POST `/chat`（同步等 60s 完整结果）与 SSE 流式（agent_output 增量）**双通道重复**，回复长时反复全量 innerHTML 重建 + marked.parse 占满主线程 → UI 卡死、输入冻结
+- 修复：webui 走**触发式 POST**（15s 短超时确认受理，回复靠 SSE 流式增量渲染）；cli/device 无 SSE 保持同步等完整结果
+- `connectSSE` 跳过 device（设备网关无 chat/events）；sendChat 对 device 连接提示不支持聊天
+- 流式增量渲染（`renderChatStreamChunk` 90ms 防抖 + 200字符/300ms 节流 parse）保留，输入框 DOM 不被重建
+
+**验证**：node --check main.js/preload.js/app.js 全通过；Electron 冒烟（--disable-gpu --in-process-gpu）稳定运行无 JS 错误；go build ./... exit:0；go test plugins 全绿
+
+**待后续**：screenuse（GUI 拉起窗口显示信息，规划中）；cmdrun 二次确认流；remotedevice 单测
+
+### Phase 0f：deviceinfo 工具 + GUI 被控端能力声明（已实施并真实验证）
+
+**deviceinfo 工具（agent 探查设备详情+能力）**
+
+- `internal/plugins/remotedevice/device.go`：新增第五个工具 `deviceinfo`（参数 device_id），返回设备接入时声明的 info（hostname/platform/arch/cpus/mem/版本）+ caps 能力列表；需已授权
+- `registry.go`：`DeviceMeta` 新增 `Info map[string]interface{}`；`metaFromMsg` 解析 hello 的 `device.info`；`publicDevices` 输出带 info
+
+**GUI 被控端能力**
+
+- `cmd/gui/main.js` 设备桥 hello 声明 `caps: ["status","cmdrun","deviceinfo","cmdresult"]` + `info`（本机 hostname/platform/arch/cpus/totalmem/node/electron 版本）
+
+**真实验证（模拟 GUI 设备 + 本机 LLM 网关）**
+> 用户指令："用deviceinfo探查 gui-testhost 这台设备的信息和它支持什么能力"
+> Agent 调 deviceinfo → 返回基本信息（device_id/名称/类型/平台/主机名/在线授权）、硬件（8核/16G/Node v22/Electron 33）、能力（status/cmdrun/deviceinfo）✓（11.7s）
+
+**遗留**：screenuse（GUI 拉起窗口显示，规划中）；cmdrun 二次确认流；remotedevice 单测
+
+### Phase 0g：waiter CLI 设备桥（已实施并端到端验证）
+
+**实现**（cmd/waiter/）：
+
+- `device.go`：`deviceBridge`（纯 Go 标准库 WS 客户端）——握手/帧/hello/bind/readLoop/execCommand，白名单命令 + 15s 超时 + 8KB 截断；cap 声明 status/cmdrun/deviceinfo；info 上报 hostname/platform/arch/cpus/mem_mb
+- `config.go`：Config 加 `device_gateway` + `device_token`（waiter.yaml）
+- `main.go`：`--device` / `--device-token` 启动设备桥；或读配置
+
+**端到端验证（真实执行）**：
+
+- `waiter -device 127.0.0.1:9890 -device-token ...` → `device bridge active: waiter-jianf-Station`
+- remotedevice 登记：waiter-jianf-Station / HomeAgent CLI (waiter) / computer / caps[status,cmdrun,deviceinfo] / info{arch:amd64,cpus:32,mem_mb:23129,hostname:jianf-Station} authorized ✓ online ✓
+- **device_ctl_cmdrun**："用device_ctl_cmdrun让 waiter-jianf-Station 执行 uname -a" → agent 调工具 → waiter 本机 exec → 返回 `Linux jianf-Station 6.12.101+deb13-amd64 ... x86_64 GNU/Linux` ✓（9.2s）
+- **deviceinfo**："用deviceinfo查看 waiter-jianf-Station" → 32 核 / 22.6GB / Linux amd64 / 三能力 ✓（11.3s）
+
+**修复的关键 Bug**：9890 被残留进程占用导致新 homed remotedevice 监听失败（acceptBind 用旧 token → 401）；杀残留后恢复正常。
+
+**验证环境**：临时 homed（LLM 网关）+ 新编译 waiter；全量 go build/test 通过（仅剩 2 个与改动无关的既有 system 失败）。
+
+### Phase 0h：设备默认不授权，用户手动授权（已实施并真实验证）
+
+**需求**：GUI 与 waiter 设备默认不授权，必须用户手动授权。
+
+**修复（registry.go bind）**：
+
+- bind 原无条件 `SetAuthorized(id, true)`（每次重连/心跳都自动授权，撤销被覆盖）→ 改为**仅验证 token + 登记设备，绝不自动授权**
+- 授权完全由用户手动控制：GUI 本机卡片/设备页「授权本机」按钮 → REST `/api/v1/device/auth`，或 waiter 用户手动操作
+- 新增设备接入即 `authorized:false`，agent 的 device_ctl_* 默认拒绝
+
+**配套修复（cmd/gui/main.js）**：
+
+- 设备桥选连接：优先 `currentId`，否则最后一个 device 连接（避免列表里旧连接旧 token 抢先 → 401）
+- 清理 connections.json 残留的旧 device 连接
+
+**真实验证（GUI 被控端 + 本机 LLM 网关）**：
+
+- GUI 接入后 `gui-jianf-Station authorized: **False**` ✅（默认不授权）
+- **手动授权后** → agent `device_ctl_cmdrun echo AUTH_OK` → 返回 AUTH_OK ✅
+- **撤销授权后** → agent `device_ctl_cmdrun` 返回 "device gui-jianf-Station 未授权，无法执行命令" ❌；本地 cmd_run 兜底成功（本机能力，合理）
+- agent 智能：未授权时自动改用本地 cmd_run 并提示"去设备管理页授权"
+
+**结论**：GUI/waiter 被控设备默认不可被 agent 远程操控，用户手动授权后才可；撤销即时生效。
+
+### Phase 0i：GUI 视觉修复（圆角 / 字体方框 / 托盘图标 / 授权开关融合）
+
+**托盘图标**（cmd/gui/）：
+
+- 生成 `icon-tray.png`(22x22) + `icon-tray@2x.png`(44x44)（ImageMagick 从 icon.svg 转换）
+- `initTray` 平台化：Linux 用 PNG（ico/svg 在 Linux 托盘不受支持）、Windows 用 ico、Linux resize 22x22 兜底
+
+**窗口圆角**（cmd/gui/）：
+
+- `createWindow` 加 `transparent: true` + `roundedCorners`（透明帧圆角窗口）
+- CSS：`body` 透明 + 18px 圆角；`#app` 18px 圆角 + 背景（背景移入容器内裁切）
+
+**设备页字体/方框修复**（renderer/style.css）：
+
+- table 10px 圆角 + collapse + 行 hover；th 加粗；kv-row .val flex 对齐
+- `.switch input` `-webkit-appearance:none` + 背景透明（消除 checkbox 浅蓝方框）
+
+**授权开关融合**（renderer/app.js）：
+
+- 本机授权改为 **kv-row 信息行内嵌滑动开关**（key=授权，val=开关+状态圆点），与设备ID/网关/状态行同构，消除割裂
+- 设备列表"执行命令"按钮替换为**授权开关**（checked=已授权）
+- 修复 onchange `JSON.stringify(id)` 双引号冲突 → 单引号转义 `deviceToggleAuth('id',this.checked)`
+
+**验证**（CDP 计算样式）：body/app 18px 圆角可见、card 14px、table 10px、switch input 背景透明；CDP 模拟点击授权开关 → authorized true 持久化；agent device_ctl_cmdrun 操控 GUI 成功。
+
+### Phase 0j：白屏根因定位 + 逐步安全加回（已完成）
+
+**白屏根因（二分定位确定）**：新版 main.js 顶层 `const { Tray, Menu: ElectronMenu, nativeImage } = require("electron")`（在 asar/无托盘环境加载异常）→ 导致 renderer 合成卡死、窗口全灰白无绘制。设备桥/新版 renderer 本身安全（混合测试证明）。
+
+**修复**：托盘改**函数内惰性 require + try/catch 安全降级**（失败不动托盘、不影响窗口）。
+
+**逐步加回验证**（每步实测窗口字节 70KB 正常）：
+
+- F3：旧 main 主体 + 设备桥 + handlers + 新版 renderer（可用基线）
+- Step1：安全托盘（惰性 require）— 显示正常 ✅
+- Step2：完整 prefs（GUI_PREFS_FILE 持久化 / loadGuiPrefs / applyAutoLaunch / silentStart / 开机自启）— 显示正常 ✅
+- Step3：生命周期（window-all-closed 退出进托盘依偏好、before-quit 清理托盘/设备桥）— 显示正常 ✅
+
+**最终版已安装**：/opt/HomeAgent（md5 047f2f1bbe，备份 /tmp/ha-app-step3-final.asar），含：设备桥 / 设备页+授权开关 / 惰性托盘 / prefs 持久化 / 退出进托盘 / 字体/圆角（renderer）。

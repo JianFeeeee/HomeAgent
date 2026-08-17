@@ -611,6 +611,8 @@ func (h *Handler) RegisterRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("/api/v1/kernel", h.requireAPI(h.handleKernel))
 	mux.HandleFunc("/api/v1/plugins", h.requireAPI(h.handlePlugins))
 	mux.HandleFunc("/api/v1/plugins/", h.requireAPI(h.handlePluginByID))
+	// 设备网关（可配置反代到 remotedevice；默认禁用，未启用时返回 404）
+	mux.HandleFunc("/api/v1/device/", h.requireAPI(h.handleDeviceGatewayProxy))
 	mux.HandleFunc("/v1/chat/completions", h.requireAPI(h.handleOpenAICompletions))
 	mux.HandleFunc("/", h.requireWeb(h.handleStatic))
 }
@@ -1661,6 +1663,55 @@ func (h *Handler) handleTracker(w http.ResponseWriter, r *http.Request) {
 	default:
 		http.Error(w, "not found", http.StatusNotFound)
 	}
+}
+
+// ======== Remote Device Gateway (proxied to remotedevice, opt-in) ========
+
+// deviceGatewayEnabled / deviceGatewayAddr 由 webui 插件启动时从设置读取并注入。
+// 默认禁用：用户显式配置 device_gateway_enabled=true 后，/api/v1/device/* 才会反代到
+// remotedevice 插件（self-contained），避免与 remotedevice 耦合。
+var (
+	deviceGatewayEnabled bool
+	deviceGatewayAddr    string
+	deviceGatewayToken   string
+)
+
+// handleDeviceGatewayProxy 将 /api/v1/device/* 反代到 remotedevice 内部 HTTP 服务。
+// 鉴权：本端走 requireAPI（webui API key），转发时带 remotedevice 的 token（X-API-Key）。
+func (h *Handler) handleDeviceGatewayProxy(w http.ResponseWriter, r *http.Request) {
+	if !deviceGatewayEnabled {
+		http.NotFound(w, r)
+		return
+	}
+	addr := deviceGatewayAddr
+	if addr == "" {
+		addr = "127.0.0.1:9890"
+	}
+	path := r.URL.Path // 保留 /api/v1/device/... 全路径
+	url := "http://" + addr + path
+	if r.URL.RawQuery != "" {
+		url += "?" + r.URL.RawQuery
+	}
+	req, err := http.NewRequestWithContext(r.Context(), r.Method, url, r.Body)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		return
+	}
+	req.Header = r.Header.Clone()
+	if deviceGatewayToken != "" {
+		req.Header.Set("X-API-Key", deviceGatewayToken)
+	}
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		writeJSON(w, http.StatusBadGateway, map[string]string{"error": "device gateway unreachable: " + err.Error()})
+		return
+	}
+	defer resp.Body.Close()
+	for k, v := range resp.Header {
+		w.Header()[k] = v
+	}
+	w.WriteHeader(resp.StatusCode)
+	io.Copy(w, resp.Body)
 }
 
 // ======== Plugin Management (proxied to pluginmgr HTTP API) ========
