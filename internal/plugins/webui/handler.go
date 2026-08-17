@@ -11,6 +11,7 @@ import (
 	"io"
 	"log"
 	"math"
+	"net"
 	"net/http"
 	"sort"
 	"strconv"
@@ -1725,32 +1726,62 @@ func (h *Handler) handleDeviceGatewayProxy(w http.ResponseWriter, r *http.Reques
 
 // proxyWebSocket 用 TCP 直连 + hijack 将客户端 WS 连接双向透传到设备网关。
 func (h *Handler) proxyWebSocket(w http.ResponseWriter, r *http.Request, addr, path string) {
-	upstream := "ws://" + addr + path
-	if r.URL.RawQuery != "" {
-		upstream += "?" + r.URL.RawQuery
+	// 设备网关默认仅监听 127.0.0.1（remotedevice），反代目标即内网 homed 本机或指定 addr。
+	// 用 net.Dial 直连网关并手动发起 WS 升级握手（net/http 客户端不支持 ws:// 升级）。
+	host, port := addr, "9890"
+	if h2, p2, ok := splitHostPort(addr); ok {
+		host, port = h2, p2
 	}
-	ctx, cancel := context.WithTimeout(r.Context(), 15*time.Second)
-	defer cancel()
-	// 构造带 Upgrade 头的请求：http.Transport 对 Upgrade 请求保留连接字节流
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, upstream, nil)
-	if err != nil {
-		http.Error(w, "ws upstream: "+err.Error(), http.StatusBadGateway)
-		return
-	}
-	req.Header = r.Header.Clone()
-	if deviceGatewayToken != "" {
-		req.Header.Set("X-API-Key", deviceGatewayToken)
-	}
-	tr := &http.Transport{
-		Proxy: http.ProxyFromEnvironment,
-	}
-	resp, err := tr.RoundTrip(req)
+	target := net.JoinHostPort(host, port)
+	upConn, err := net.DialTimeout("tcp", target, 15*time.Second)
 	if err != nil {
 		http.Error(w, "ws upstream dial: "+err.Error(), http.StatusBadGateway)
 		return
 	}
+	defer upConn.Close()
+
+	// 手动构造 WS 升级请求（保留客户端头 + 注入网关 token）
+	key := r.Header.Get("Sec-WebSocket-Key")
+	if key == "" {
+		key = "homeagent-proxy-random-key"
+	}
+	reqPath := path
+	if r.URL.RawQuery != "" {
+		reqPath += "?" + r.URL.RawQuery
+	}
+	var b strings.Builder
+	b.WriteString("GET " + reqPath + " HTTP/1.1\r\n")
+	b.WriteString("Host: " + addr + "\r\n")
+	b.WriteString("Upgrade: websocket\r\n")
+	b.WriteString("Connection: Upgrade\r\n")
+	b.WriteString("Sec-WebSocket-Key: " + key + "\r\n")
+	b.WriteString("Sec-WebSocket-Version: 13\r\n")
+	if deviceGatewayToken != "" {
+		b.WriteString("X-API-Key: " + deviceGatewayToken + "\r\n")
+	}
+	for k, vv := range r.Header {
+		kl := strings.ToLower(k)
+		if kl == "upgrade" || kl == "connection" || kl == "sec-websocket-key" || kl == "sec-websocket-version" || kl == "host" || kl == "x-api-key" || kl == "authorization" {
+			continue
+		}
+		for _, v := range vv {
+			b.WriteString(k + ": " + v + "\r\n")
+		}
+	}
+	b.WriteString("\r\n")
+	if _, err := upConn.Write([]byte(b.String())); err != nil {
+		http.Error(w, "ws upstream write: "+err.Error(), http.StatusBadGateway)
+		return
+	}
+
+	// 读上游 101 响应
+	br := bufio.NewReader(upConn)
+	resp, err := http.ReadResponse(br, nil)
+	if err != nil {
+		http.Error(w, "ws upstream response: "+err.Error(), http.StatusBadGateway)
+		return
+	}
 	if resp.StatusCode != http.StatusSwitchingProtocols {
-		defer resp.Body.Close()
 		http.Error(w, "ws upstream status: "+resp.Status, http.StatusBadGateway)
 		return
 	}
@@ -1758,37 +1789,25 @@ func (h *Handler) proxyWebSocket(w http.ResponseWriter, r *http.Request, addr, p
 	// 客户端 hijack：把 101 响应头写给客户端并接管双向连接
 	hj, ok := w.(http.Hijacker)
 	if !ok {
-		resp.Body.Close()
 		http.Error(w, "hijack not supported", http.StatusInternalServerError)
 		return
 	}
 	clientConn, brw, err := hj.Hijack()
 	if err != nil {
-		resp.Body.Close()
 		return
 	}
 	defer clientConn.Close()
 
-	// 向上游写回 101 响应头
+	// 向上游 101 响应头转发给客户端
 	if err := resp.Write(brw); err != nil {
-		resp.Body.Close()
 		return
 	}
 	if err := brw.Flush(); err != nil {
-		resp.Body.Close()
 		return
 	}
 
-	// 上游连接
-	upConn, ok := resp.Body.(io.ReadWriteCloser)
-	if !ok {
-		clientConn.Close()
-		http.Error(w, "upstream conn not rw", http.StatusBadGateway)
-		return
-	}
-	defer upConn.Close()
-
-	// 双向透传（WS 帧字节不动）
+	// 双向透传（WS 帧字节不动）：
+	// 客户端 -> 上游
 	errCh := make(chan struct{}, 2)
 	go func() {
 		io.Copy(upConn, brw)
@@ -1797,12 +1816,25 @@ func (h *Handler) proxyWebSocket(w http.ResponseWriter, r *http.Request, addr, p
 		}
 		errCh <- struct{}{}
 	}()
+	// 上游 -> 客户端
 	go func() {
-		io.Copy(bufio.NewWriter(clientConn), upConn)
+		wb := bufio.NewWriter(clientConn)
+		io.Copy(wb, br)
+		wb.Flush()
 		errCh <- struct{}{}
 	}()
 	<-errCh
-	tr.CloseIdleConnections()
+}
+
+// splitHostPort 拆分 addr 为 host/port；无端口时返回 ok=false。
+func splitHostPort(addr string) (string, string, bool) {
+	if strings.Contains(addr, ":") {
+		h, p, err := net.SplitHostPort(addr)
+		if err == nil {
+			return h, p, true
+		}
+	}
+	return addr, "", false
 }
 
 // ======== Plugin Management (proxied to pluginmgr HTTP API) ========
