@@ -49,8 +49,7 @@ type Plugin struct {
 	selfToolNames map[string]bool
 	checkMu    sync.Mutex
 
-	stopCh  chan struct{}
-	stopOnce sync.Once
+	stopCh chan struct{}
 	perfData   PerfData
 
 	autoInterval   time.Duration
@@ -83,6 +82,15 @@ func New(name string) *Plugin {
 func (p *Plugin) Name() string { return p.name }
 
 func (p *Plugin) Start(s *sdk.PluginSDK) error {
+	// 幂等重启 auto-check：若实例被 Stop 过（stopCh 已关闭）后再次 Start
+	// （如 plgreload 复用实例），重建 stopCh 使 startAutoCheck 能重新调度 ticker。
+	p.mu.Lock()
+	select {
+	case <-p.stopCh:
+		p.stopCh = make(chan struct{})
+	default:
+	}
+	p.mu.Unlock()
 	s.SetAutoRestart(true)
 	p.autoInterval = 30 * time.Minute
 	p.llmTimeout = 120 * time.Second
@@ -280,9 +288,14 @@ func (p *Plugin) Start(s *sdk.PluginSDK) error {
 }
 
 func (p *Plugin) Stop() error {
-	p.stopOnce.Do(func() {
+	// 幂等关闭：仅当 stopCh 未被关闭时 close。
+	p.mu.Lock()
+	select {
+	case <-p.stopCh:
+	default:
 		close(p.stopCh)
-	})
+	}
+	p.mu.Unlock()
 	return nil
 }
 

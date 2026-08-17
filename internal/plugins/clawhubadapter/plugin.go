@@ -53,6 +53,9 @@ type Plugin struct {
 	sdk          *sdk.PluginSDK
 	dispatcher   *RegistryDispatcher
 	httpClient   *http.Client
+
+	stopCh    chan struct{}
+	stopOnce  sync.Once
 }
 
 // pluginSingleton 内核单例引用（Start 时设置），供 SendToChannel/ChannelSender 使用
@@ -65,6 +68,7 @@ func New(name, skillsDir string) *Plugin {
 	}
 	return &Plugin{
 		name:         name,
+		stopCh:       make(chan struct{}),
 		skillsDir:    skillsDir,
 		simulatorDir: sd,
 		dispatcher:   NewDispatcher(),
@@ -300,10 +304,14 @@ func (p *Plugin) ipcGoroutine(s *sdk.PluginSDK) {
 	ticker := time.NewTicker(3 * time.Second)
 	defer ticker.Stop()
 
-	for range ticker.C {
-		p.mu.Lock()
-		simDir := p.simulatorDir
-		p.mu.Unlock()
+	for {
+		select {
+		case <-p.stopCh:
+			return
+		case <-ticker.C:
+			p.mu.Lock()
+			simDir := p.simulatorDir
+			p.mu.Unlock()
 		if simDir == "" {
 			continue
 		}
@@ -338,6 +346,7 @@ func (p *Plugin) ipcGoroutine(s *sdk.PluginSDK) {
 				}
 			}
 			os.Remove(reloadPath)
+		}
 		}
 	}
 }
@@ -1247,6 +1256,10 @@ func (p *Plugin) loadSidecar(s *sdk.PluginSDK, dir, name string) error {
 func (p *Plugin) Stop() error {
 	p.mu.Lock()
 	defer p.mu.Unlock()
+	// 关停 ipcGoroutine（stopCh），避免重载后旧 goroutine 残留导致线程累积
+	p.stopOnce.Do(func() {
+		close(p.stopCh)
+	})
 	for _, sp := range p.sidecars {
 		sp.Close()
 	}

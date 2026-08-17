@@ -887,6 +887,40 @@ func go_core_dispatch(methodID C.int, ctx unsafe.Pointer, s1, s2, s3 *C.char, i1
 		}
 		s.RegisterInputChannel(a1, chDef)
 		return 0
+
+	case 48: // CORE_PLUGIN_RELOAD_ONE
+		if s.PluginMgr() == nil {
+			setErr(errorOut, fmt.Errorf("plugin manager not available"))
+			return 1
+		}
+		if err := s.PluginMgr().ReloadOne(a1); err != nil {
+			setErr(errorOut, err)
+			return 1
+		}
+		setResult(result, "reloaded: "+a1)
+		return 0
+
+	case 49: // CORE_PLUGIN_LIST_LOADED
+		if s.PluginMgr() == nil {
+			setErr(errorOut, fmt.Errorf("plugin manager not available"))
+			return 1
+		}
+		if b, err := json.Marshal(s.PluginMgr().ListLoadedPlugins()); err == nil {
+			setResult(result, string(b))
+		}
+		return 0
+
+	case 50: // CORE_PLUGIN_IS_DISABLED
+		if s.PluginMgr() == nil {
+			setErr(errorOut, fmt.Errorf("plugin manager not available"))
+			return 1
+		}
+		if s.PluginMgr().IsPluginDisabled(a1) {
+			setResult(result, "1")
+		} else {
+			setResult(result, "0")
+		}
+		return 0
 	}
 	return 0
 }

@@ -1,6 +1,8 @@
 package plugin
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"log"
@@ -97,6 +99,10 @@ type Registry struct {
 
 	knownDisabled map[string]bool
 	allowlist     map[string]bool
+
+	// pluginHashes 记录各插件二进制(plugin.so/main.lua)的 SHA256，
+	// 供增量重载(Reload)对比：仅重载有变更的插件，避免全量 StopAll+Load 导致重复加载。
+	pluginHashes map[string]string
 }
 
 func NewRegistry() *Registry {
@@ -106,6 +112,7 @@ func NewRegistry() *Registry {
 		pluginAutoRestart: make(map[string]bool),
 		sdkRefs:           make(map[string]*sdk.PluginSDK),
 		knownDisabled:     make(map[string]bool),
+		pluginHashes:     make(map[string]string),
 	}
 }
 
@@ -345,6 +352,19 @@ func (r *Registry) isDisabled(name string) bool {
 	return r.cfgReg.IsPluginDisabled(name)
 }
 
+// pluginEntryHash 计算插件入口文件（plugin.so 或 main.lua）的 SHA256，用于增量重载对比。
+// 无入口文件（内置纯工厂插件）返回空字符串（始终视为已加载）。
+func pluginEntryHash(plgDir string) string {
+	for _, candidate := range []string{"plugin.so", "plugin.dll", "main.lua", "SKILL.md"} {
+		path := filepath.Join(plgDir, candidate)
+		if data, err := os.ReadFile(path); err == nil && len(data) > 0 {
+			sum := sha256.Sum256(data)
+			return hex.EncodeToString(sum[:])
+		}
+	}
+	return ""
+}
+
 func (r *Registry) loadOne(plgDir, name string) bool {
 	if r.isDisabled(name) {
 		log.Printf("[plugin] %s is disabled, skipping", name)
@@ -410,6 +430,11 @@ func (r *Registry) loadOne(plgDir, name string) bool {
 	r.pluginAutoRestart[name] = plgSDK.AutoRestart()
 	r.sdkRefs[name] = plgSDK
 	r.instances = append(r.instances, plg)
+	if h := pluginEntryHash(plgDir); h != "" {
+		r.pluginHashes[name] = h
+	} else {
+		delete(r.pluginHashes, name)
+	}
 	r.mu.Unlock()
 	log.Printf("[plugin] loaded: %s", name)
 	return true
@@ -445,11 +470,55 @@ func (r *Registry) StopAll() {
 }
 
 func (r *Registry) Reload(dir string) (string, error) {
-	r.StopAll()
-	if err := r.Load(dir); err != nil {
+	if dir == "" {
+		dir = r.plgDir
+	}
+	// 增量重载：扫描插件目录，对比入口文件 hash，仅 Stop+重载有变更的插件。
+	// 未变更插件保持运行，避免 plgreload 触发全量 StopAll+Load 导致所有插件重复加载
+	// 及内置插件(如 healthcheck)状态机错乱。
+	entries, err := os.ReadDir(dir)
+	if err != nil {
 		return "", err
 	}
-	return fmt.Sprintf("loaded %d plugins", len(r.instances)), nil
+	changed := 0
+	remaining := 0
+	for _, entry := range entries {
+		if !entry.IsDir() {
+			continue
+		}
+		name := entry.Name()
+		if !r.allowlistAllows(name) {
+			continue
+		}
+		plgDir := filepath.Join(dir, name)
+		h := pluginEntryHash(plgDir)
+		r.mu.RLock()
+		old := r.pluginHashes[name]
+		loaded := r.plugins[name] != nil
+		r.mu.RUnlock()
+		// 无入口文件（纯内置工厂插件）始终视为已加载；
+		// 有变更或首次出现且未加载 → 需要重载。
+		if !loaded {
+			if r.loadOne(plgDir, name) {
+				changed++
+			}
+			continue
+		}
+		if h == "" {
+			remaining++
+			continue
+		}
+		if old != h {
+			if err := r.ReloadOne(name); err != nil {
+				log.Printf("[plugin] reload %s: %v", name, err)
+			} else {
+				changed++
+			}
+		} else {
+			remaining++
+		}
+	}
+	return fmt.Sprintf("reloaded %d plugins, %d unchanged", changed, remaining), nil
 }
 
 func (r *Registry) ReloadOne(name string) error {
