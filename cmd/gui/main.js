@@ -329,6 +329,17 @@ function createWindow() {
     mainWindow.webContents.openDevTools();
   }
 
+  // 退出进托盘：拦截窗口关闭事件（exitToTray 且托盘可用时 hide 而非 close）
+  mainWindow.on("close", (e) => {
+    try {
+      const _p = loadGuiPrefs();
+      if (_p && _p.exitToTray && tray) {
+        e.preventDefault();
+        mainWindow.hide();
+        return;
+      }
+    } catch (err) {}
+  });
   mainWindow.on("closed", () => {
     mainWindow = null;
   });
@@ -344,7 +355,23 @@ ipcMain.handle("window:toggleMaximize", (e) => {
   else win.maximize();
 });
 ipcMain.handle("window:close", (e) => {
-  BrowserWindow.fromWebContents(e.sender)?.close();
+  const win = BrowserWindow.fromWebContents(e.sender);
+  if (!win) return;
+  // 退出进托盘：偏好开启且托盘存在时隐藏而非关闭
+  try {
+    const _p = loadGuiPrefs();
+    console.log(
+      "[window:close] exitToTray=" +
+        !!(_p && _p.exitToTray) +
+        " tray=" +
+        !!tray,
+    );
+    if (_p && _p.exitToTray && tray) {
+      win.hide();
+      return true;
+    }
+  } catch (err) {}
+  win.close();
 });
 
 ipcMain.handle("connections:list", () => {
@@ -742,6 +769,257 @@ ipcMain.handle("cli:request", (_, { socketPath, apiKey, line }) => {
   });
 });
 
+// ============ Device Bridge: GUI 作为设备接入 remotedevice 网关 ============
+// 复用 net（raw TCP）+ 手写 WS 帧；收到 {op:"cmd"} 用 spawn 在本机执行并回 cmd_result。
+const devNet = require("net");
+const devOs = require("os");
+
+let deviceBridge = null; // 当前活动设备桥
+let deviceBridgeId = ""; // 设备 meta device_id（hello 后可用于 cmd_result）
+let deviceBridgeAddr = ""; // 设备桥网关地址
+
+// 建立到 remotedevice WS 网关连接，返回 {send(obj), close()}，消息经 onMsg 回调。
+function connectDeviceWS(url, token, onMsg) {
+  const m = /^https?:\/\/([^:/]+)(?::(\d+))?/.exec(url || "");
+  const host = m ? m[1] : "127.0.0.1";
+  const port = m && m[2] ? parseInt(m[2], 10) : 9890;
+  const path = "/api/v1/device/ws?token=" + encodeURIComponent(token || "");
+  return new Promise((resolve, reject) => {
+    const sock = devNet.createConnection({ host, port }, () => {
+      const key = crypto.randomBytes(16).toString("base64");
+      sock.write(
+        "GET " +
+          path +
+          " HTTP/1.1\r\n" +
+          "Host: " +
+          host +
+          ":" +
+          port +
+          "\r\n" +
+          "Upgrade: websocket\r\nConnection: Upgrade\r\n" +
+          "Sec-WebSocket-Key: " +
+          key +
+          "\r\nSec-WebSocket-Version: 13\r\n\r\n",
+      );
+    });
+    let buf = Buffer.alloc(0);
+    let upgraded = false;
+    let opened = false;
+    sock.on("data", (chunk) => {
+      buf = Buffer.concat([buf, chunk]);
+      if (!upgraded) {
+        const idx = buf.indexOf("\r\n\r\n");
+        if (idx === -1) return;
+        const head = buf.slice(0, idx).toString("utf8");
+        buf = buf.slice(idx + 4);
+        upgraded = true;
+        if (!head.includes("101")) {
+          sock.destroy();
+          return reject(
+            new Error("WS upgrade failed: " + head.split("\r\n")[0]),
+          );
+        }
+        opened = true;
+        resolve({
+          send: (obj) => sendDeviceFrame(sock, JSON.stringify(obj)),
+          close: () => sock.destroy(),
+        });
+      }
+      while (buf.length >= 2) {
+        const b0 = buf[0];
+        const opcode = b0 & 0x0f;
+        const b1 = buf[1];
+        let len = b1 & 0x7f;
+        let off = 2;
+        if (len === 126) {
+          if (buf.length < 4) break;
+          len = buf.readUInt16BE(2);
+          off = 4;
+        } else if (len === 127) {
+          if (buf.length < 10) break;
+          len = Number(buf.readBigUInt64BE(2));
+          off = 10;
+        }
+        if (buf.length < off + len) break;
+        const payload = buf.slice(off, off + len);
+        buf = buf.slice(off + len);
+        if (opcode === 0x1) {
+          try {
+            onMsg(JSON.parse(payload.toString("utf8")));
+          } catch (e) {}
+        } else if (opcode === 0x8) {
+          sock.destroy();
+          return;
+        }
+      }
+    });
+    sock.on("error", (e) => {
+      if (!opened) reject(e);
+    });
+    sock.on("close", () => {
+      deviceBridge = null;
+    });
+  });
+}
+
+// 发送 WS text 帧（客户端加掩码）
+function sendDeviceFrame(sock, text) {
+  const payload = Buffer.from(text, "utf8");
+  const mask = crypto.randomBytes(4);
+  const masked = Buffer.from(payload);
+  for (let i = 0; i < masked.length; i++) masked[i] ^= mask[i % 4];
+  const len = masked.length;
+  let hdr;
+  if (len < 126) {
+    hdr = Buffer.from([0x81, 0x80 | len]);
+  } else if (len < 65536) {
+    hdr = Buffer.alloc(4);
+    hdr[0] = 0x81;
+    hdr[1] = 0x80 | 126;
+    hdr.writeUInt16BE(len, 2);
+  } else {
+    hdr = Buffer.alloc(10);
+    hdr[0] = 0x81;
+    hdr[1] = 0x80 | 127;
+    hdr.writeBigUInt64BE(BigInt(len), 2);
+  }
+  sock.write(Buffer.concat([hdr, mask, masked]));
+}
+
+// 启动设备桥：以 device 连接（url=网关地址, apiKey=token）接入网关。
+async function startDeviceBridge(conn) {
+  if (!conn || conn.type !== "device") return;
+  const token = conn.apiKey || "";
+  if (!token) {
+    console.error("[device-bridge] missing token");
+    return;
+  }
+  deviceBridgeAddr = conn.url || "";
+  deviceBridgeId =
+    "gui-" + (devOs.hostname() || "local").replace(/[^a-zA-Z0-9_-]/g, "_");
+  try {
+    const ws = await connectDeviceWS(conn.url, token, onDeviceMsg);
+    deviceBridge = ws;
+    ws.send({
+      op: "hello",
+      device: {
+        device_id: deviceBridgeId,
+        name: "HomeAgent GUI",
+        kind: "computer",
+        caps: ["status", "cmdrun", "deviceinfo", "cmdresult"],
+        info: {
+          hostname: devOs.hostname() || "",
+          platform: process.platform || "",
+          arch: process.arch || "",
+          os_release: "", // 不提权读取 /etc/os-release，避免破坏沙箱；如需可在白名单命令里由 agent 探
+          node_version:
+            process.versions && process.versions.node
+              ? process.versions.node
+              : "",
+          electron_version:
+            process.versions && process.versions.electron
+              ? process.versions.electron
+              : "",
+          version: app.getVersion ? app.getVersion() : "",
+          cpus: devOs.cpus ? devOs.cpus().length : 0,
+          total_mem_bytes: devOs.totalmem ? devOs.totalmem() : 0,
+        },
+      },
+    });
+    ws.send({ op: "bind", device_id: deviceBridgeId, token });
+    console.log(
+      "[device-bridge] connected as " + deviceBridgeId + " @ " + conn.url,
+    );
+  } catch (e) {
+    console.error("[device-bridge] connect failed: " + e.message);
+  }
+}
+
+function stopDeviceBridge() {
+  if (deviceBridge) {
+    try {
+      deviceBridge.close();
+    } catch (e) {}
+    deviceBridge = null;
+  }
+}
+
+// ============ 系统托盘（惰性 + 安全降级） ============
+let tray = null;
+function initTray() {
+  if (tray) return;
+  try {
+    const electron = require("electron");
+    const Tray = electron.Tray;
+    const TMenu = electron.Menu;
+    const nImg = electron.nativeImage;
+    let img = null;
+    const cands = [
+      path.join(__dirname, "icon-tray@2x.png"),
+      path.join(__dirname, "icon-tray.png"),
+      path.join(__dirname, "icon.ico"),
+    ];
+    for (const c of cands) {
+      try {
+        const m = nImg.createFromPath(c);
+        if (m && !m.isEmpty()) {
+          img = m;
+          break;
+        }
+      } catch (e) {}
+    }
+    if (!img || img.isEmpty()) {
+      try {
+        img = nImg.createFromPath(path.join(__dirname, "icon-tray.png"));
+      } catch (e) {}
+    }
+    if (!img || img.isEmpty()) {
+      img = nImg.createEmpty();
+    }
+    tray = new Tray(img);
+    const tmenu = TMenu.buildFromTemplate([
+      { label: "HomeAgent", enabled: false },
+      { type: "separator" },
+      { label: "显示主界面", click: () => showMainWindow() },
+      {
+        label: "退出",
+        click: () => {
+          app.isQuitting = true;
+          app.quit();
+        },
+      },
+    ]);
+    tray.setToolTip("HomeAgent - 个人智能管家");
+    tray.setContextMenu(tmenu);
+    tray.on("double-click", () => showMainWindow());
+    console.log("[tray] READY: " + (tray ? "tray-created" : "null"));
+  } catch (e) {
+    console.error("[tray] init failed (safe ignore): " + e.message);
+    try {
+      if (tray) {
+        tray.destroy();
+        tray = null;
+      }
+    } catch (e2) {}
+  }
+}
+function showMainWindow() {
+  try {
+    if (mainWindow && !mainWindow.isDestroyed()) {
+      mainWindow.show();
+      mainWindow.focus();
+    }
+  } catch (e) {}
+}
+function destroyTray() {
+  try {
+    if (tray) {
+      tray.destroy();
+      tray = null;
+    }
+  } catch (e) {}
+}
+
 app.whenReady().then(async () => {
   installAuthRule();
   const running = await isServerRunning();
@@ -754,17 +1032,120 @@ app.whenReady().then(async () => {
       console.error("homed failed to start within timeout");
     }
   }
+  // 设备桥：启动接入 remotedevice
+  try {
+    var _devs = loadConnections().connections || [];
+    var _dev = _devs.filter((c) => c.type === "device");
+    if (_dev.length > 0) startDeviceBridge(_dev[_dev.length - 1]);
+  } catch (e) {
+    console.error("device bridge init: " + e.message);
+  }
+  try {
+    initTray();
+  } catch (e) {
+    console.error("[tray] whenReady call: " + e.message);
+  }
   createWindow();
 });
 
-app.on("before-quit", stopHomed);
+app.on("before-quit", () => {
+  stopHomed();
+  try {
+    stopDeviceBridge();
+  } catch (e) {}
+  try {
+    destroyTray();
+  } catch (e) {}
+});
 
 app.on("window-all-closed", () => {
-  if (process.platform !== "darwin") app.quit();
+  // 退出进托盘：依偏好决定（安全降级：无托盘时退出）
+  let _exitTray = false;
+  try {
+    const _p = loadGuiPrefs();
+    _exitTray = !!(_p && _p.exitToTray);
+  } catch (e) {}
+  if (_exitTray && tray) {
+    try {
+      if (mainWindow && !mainWindow.isDestroyed()) mainWindow.hide();
+    } catch (e) {}
+  } else {
+    app.quit();
+  }
 });
 
 app.on("activate", () => {
   if (mainWindow === null) {
     createWindow();
   }
+});
+// IPC：prefs（renderer 设置页需要）
+// IPC：本机设备身份（renderer 设备页需要）
+ipcMain.handle("device:identity", () =>
+  deviceBridge
+    ? {
+        device_id: deviceBridgeId,
+        active: true,
+        address: deviceBridgeAddr || "",
+      }
+    : { device_id: "", active: false, address: "" },
+);
+const GUI_PREFS_FILE = path.join(app.getPath("userData"), "gui-prefs.json");
+
+function loadGuiPrefs() {
+  try {
+    if (fs.existsSync(GUI_PREFS_FILE)) {
+      const d = JSON.parse(fs.readFileSync(GUI_PREFS_FILE, "utf-8"));
+      return {
+        autoLaunch: !!d.autoLaunch,
+        silentStart: !!d.silentStart,
+        exitToTray: d.exitToTray === undefined ? true : !!d.exitToTray,
+      };
+    }
+  } catch (e) {}
+  return { autoLaunch: false, silentStart: false, exitToTray: true };
+}
+
+function saveGuiPrefs(p) {
+  try {
+    fs.writeFileSync(GUI_PREFS_FILE, JSON.stringify(p, null, 2), "utf-8");
+  } catch (e) {}
+  return p;
+}
+
+// 应用开机自启设置（Electron LoginItem）
+function applyAutoLaunch(enabled) {
+  try {
+    app.setLoginItemSettings({
+      openAtLogin: enabled,
+      openAsHidden: true, // 开机自启时静默（Windows/macOS 支持）
+      path: process.execPath,
+    });
+    return true;
+  } catch (e) {
+    console.error("setLoginItemSettings failed: " + e.message);
+    return false;
+  }
+}
+
+// 全局偏好缓存（供 createWindow 静默判断使用）
+let guiPrefs = loadGuiPrefs();
+
+// IPC：本机设备身份（设备桥登记的设备 ID 与状态）
+
+// IPC：读取偏好
+ipcMain.handle("prefs:get", () => {
+  return loadGuiPrefs();
+});
+// IPC：写入并应用偏好
+ipcMain.handle("prefs:set", (_, p) => {
+  const cur = loadGuiPrefs();
+  const next = Object.assign({}, cur, p || {});
+  if (typeof next.autoLaunch === "boolean") {
+    next.autoLaunch = applyAutoLaunch(next.autoLaunch)
+      ? next.autoLaunch
+      : false;
+  }
+  guiPrefs = saveGuiPrefs(next);
+  return guiPrefs;
 });

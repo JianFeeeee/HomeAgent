@@ -286,6 +286,7 @@ body {
   color: var(--text-primary);
   min-height: 100vh;
   overflow-x: hidden;
+  font-family: var(--font-sans);
   transition:
     background 0.2s,
     color 0.2s;
@@ -590,7 +591,9 @@ body.maximized .tb-max svg {
   margin: 3px;
   padding: 0;
   vertical-align: middle;
-  transition: transform 0.15s, box-shadow 0.15s;
+  transition:
+    transform 0.15s,
+    box-shadow 0.15s;
 }
 .palette-pop button.cdot:hover {
   transform: scale(1.25);
@@ -1249,8 +1252,12 @@ code {
   opacity: 0.6;
 }
 @keyframes reasoningSweep {
-  from { background-position: 200% 0; }
-  to { background-position: -200% 0; }
+  from {
+    background-position: 200% 0;
+  }
+  to {
+    background-position: -200% 0;
+  }
 }
 
 /* ===== 工具卡片（PiDeck 风格，扁平不套气泡）===== */
@@ -1264,7 +1271,9 @@ code {
   border: 1px solid var(--kv-border);
   border-left: 3px solid var(--accent);
   cursor: pointer;
-  transition: border-color 0.2s var(--ease-out), background 0.2s var(--ease-out);
+  transition:
+    border-color 0.2s var(--ease-out),
+    background 0.2s var(--ease-out);
 }
 .tool-card.tc-running {
   border-left-color: var(--accent);
@@ -2070,4 +2079,96 @@ code {
     flex-wrap: wrap;
     gap: 4px;
   }
+}
+
+/* ===== Toggle switch（左右滑动开关按钮）===== */
+.switch {
+  position: relative;
+  display: inline-block;
+  width: 44px;
+  height: 24px;
+  vertical-align: middle;
+  flex-shrink: 0;
+  cursor: pointer;
+}
+.switch input {
+  opacity: 0;
+  width: 0;
+  height: 0;
+  position: absolute;
+}
+.switch span {
+  position: absolute;
+  top: 0;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  background: #888;
+  border-radius: 24px;
+  transition: background 0.25s;
+}
+.switch span::before {
+  content: "";
+  position: absolute;
+  width: 18px;
+  height: 18px;
+  left: 3px;
+  top: 3px;
+  background: #fff;
+  border-radius: 50%;
+  transition: transform 0.25s;
+}
+.switch input:checked + span {
+  background: #34c759;
+}
+.switch input:checked + span::before {
+  transform: translateX(20px);
+}
+td .switch {
+  margin-right: 6px;
+}
+
+/* ===== 设备页样式修复 ===== */
+/* 开关输入框彻底隐藏，避免浅蓝方框露出 */
+.switch input {
+  -webkit-appearance: none;
+  appearance: none;
+  border: none;
+  outline: none;
+  background: transparent;
+}
+/* 设备列表表格圆角化（去方框感） */
+.card table {
+  width: 100%;
+  border-collapse: collapse;
+  overflow: hidden;
+  border-radius: var(--radius-md);
+  font-size: 13px;
+}
+.card table th,
+.card table td {
+  text-align: left;
+  padding: 8px 10px;
+  border-bottom: 1px solid var(--glass-border, rgba(128, 128, 128, 0.15));
+  vertical-align: middle;
+}
+.card table th {
+  font-weight: 600;
+  color: var(--text-muted, #888);
+  white-space: nowrap;
+}
+.card table tr:last-child td {
+  border-bottom: none;
+}
+.card table tr:hover td {
+  background: var(--glass-hover, rgba(128, 128, 128, 0.06));
+}
+/* kv-row 值区对齐（含开关） */
+.kv-row .val {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.kv-row .val .switch {
+  margin-right: 4px;
 }

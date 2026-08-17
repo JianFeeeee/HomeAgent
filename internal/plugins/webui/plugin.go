@@ -95,7 +95,26 @@ func (p *Plugin) Start(s *sdk.PluginSDK) error {
 	s.Settings().RegisterDef(sdk.ConfigDef{Key: "username", Default: "admin", Type: "string", DisplayName: "登录用户名", Description: "Web 控制台登录用户名", Category: "webui"})
 	s.Settings().RegisterDef(sdk.ConfigDef{Key: "password", Default: "", Type: "password", DisplayName: "Web 控制台登录密码", Description: "Web 控制台登录密码", Category: "webui"})
 	s.Settings().RegisterDef(sdk.ConfigDef{Key: "session_ttl_hours", Default: "24", Type: "int", DisplayName: "会话时长(小时)", Description: "登录 cookie 有效时长", Category: "webui"})
+	s.Settings().RegisterDef(sdk.ConfigDef{Key: "device_gateway_enabled", Default: "false", Type: "bool", DisplayName: "设备网关反代", Description: "启用后 /api/v1/device/* 反代到 remotedevice 插件（默认关闭，避免硬耦合）", Category: "webui"})
+	s.Settings().RegisterDef(sdk.ConfigDef{Key: "device_gateway_addr", Default: "127.0.0.1:9890", Type: "string", DisplayName: "设备网关地址", Description: "remotedevice 插件的内部监听地址", Category: "webui"})
+	s.Settings().RegisterDef(sdk.ConfigDef{Key: "device_gateway_token", Default: "", Type: "password", DisplayName: "设备网关令牌", Description: "访问 remotedevice 的 token（与 remotedevice 的 ws_token 一致）", Category: "webui"})
 	p.ensureAuthBootstrap(s)
+	// 注入设备网关反代配置（默认禁用；仅当用户开启时才挂载路由）
+	if v, _ := s.Settings().Get("device_gateway_enabled"); v != nil {
+		if s2, ok := v.(string); ok && s2 == "true" {
+			deviceGatewayEnabled = true
+		}
+	}
+	if v, _ := s.Settings().Get("device_gateway_addr"); v != nil {
+		if s2, ok := v.(string); ok && s2 != "" {
+			deviceGatewayAddr = s2
+		}
+	}
+	if v, _ := s.Settings().Get("device_gateway_token"); v != nil {
+		if s2, ok := v.(string); ok && s2 != "" {
+			deviceGatewayToken = s2
+		}
+	}
 
 	s.RegisterStage(sdk.StagePreAction, func(ctx *sdk.StageContext) error {
 		s.Publish(&sdk.Event{Type: sdk.EventStage, Payload: map[string]interface{}{"phase": "pre_action", "message": "thinking"}})
