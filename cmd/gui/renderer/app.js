@@ -475,16 +475,24 @@ function switchView(n) {
   state.currentView = n;
   if (n === "chat") {
     state.chatStick = true;
-    var msgsEl = document.getElementById("chat-msgs");
-    if (msgsEl) {
+    var scrollToBottom = () => {
+      var msgsEl = document.getElementById("chat-msgs");
+      if (!msgsEl) return;
       try {
-        msgsEl.scrollTo({ top: msgsEl.scrollHeight, behavior: "smooth" });
-      } catch (e) {
         msgsEl.scrollTop = msgsEl.scrollHeight;
-      }
-    }
+      } catch (e) {}
+    };
+    // 立即滚 + 渲染完成后/延迟再滚（DOM 重建后会重置滚动位置）
+    scrollToBottom();
+    setTimeout(scrollToBottom, 60);
+    setTimeout(scrollToBottom, 300);
   }
   renderAll();
+  if (n === "chat") {
+    // renderAll（含异步 refreshAll）完成后确保仍在底部
+    setTimeout(scrollToBottom, 600);
+    setTimeout(scrollToBottom, 1500);
+  }
 }
 
 // ===== Tab Render Dispatch =====
@@ -499,14 +507,13 @@ function renderAll() {
     console.error("renderOverview", e);
   }
   try {
-    renderChat();
+    // 聊天视图未激活时不重建聊天 DOM（避免每次轮询/切换全量重建→卡死）
+    if (!state.currentView || state.currentView === "chat") {
+      renderChat();
+      renderChatStarmap();
+    }
   } catch (e) {
     console.error("renderChat", e);
-  }
-  try {
-    renderChatStarmap();
-  } catch (e) {
-    console.error("renderChatStarmap", e);
   }
   try {
     renderPlugins();
@@ -593,14 +600,13 @@ async function refreshAll() {
     console.error("renderOverview", e);
   }
   try {
-    renderChat();
+    // 聊天视图未激活时不重建聊天 DOM（避免每次轮询/切换全量重建→卡死）
+    if (!state.currentView || state.currentView === "chat") {
+      renderChat();
+      renderChatStarmap();
+    }
   } catch (e) {
     console.error("renderChat", e);
-  }
-  try {
-    renderChatStarmap();
-  } catch (e) {
-    console.error("renderChatStarmap", e);
   }
   try {
     renderPlugins();
@@ -1028,9 +1034,7 @@ function renderReasoningCard(text, isStreaming, idx) {
       ? '<div class="reasoning-preview">' +
         escHtml(preview) +
         '</div><div class="reasoning-sweep"></div>'
-      : '<div class="reasoning-content">' +
-        (typeof marked === "undefined" ? escHtml(text) : marked.parse(text)) +
-        "</div>") +
+      : '<div class="reasoning-content"></div>') +
     "</div></div>"
   );
 }
@@ -1508,9 +1512,10 @@ function initChatStarmap() {
   starmapScene.fog = new THREE.FogExp2(0x0a0a1a, 0.015);
   starmapCam = new THREE.PerspectiveCamera(60, w / h, 0.1, 2000);
   starmapCam.position.set(0, 20, 40);
-  starmapRen = new THREE.WebGLRenderer({ antialias: true, alpha: true });
+  // 性能：关抗锯齿 + pixelRatio 1（装饰背景，视觉差异极小，GPU 负载显著下降）
+  starmapRen = new THREE.WebGLRenderer({ antialias: false, alpha: true });
   starmapRen.setSize(w, h);
-  starmapRen.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+  starmapRen.setPixelRatio(1);
   starmapRen.setClearColor(0x0a0a1a, 1);
   cont.innerHTML = "";
   cont.appendChild(starmapRen.domElement);
@@ -1531,6 +1536,11 @@ function initChatStarmap() {
   starmapRen.domElement.addEventListener("click", onStarmapClick);
   window.addEventListener("resize", onStarmapResize);
   if (starmapRaf) cancelAnimationFrame(starmapRaf);
+  // 首次加载强制渲染一帧（即使星图面板未激活，切换过去也有内容）
+  try {
+    if (starmapRen && starmapScene && starmapCam)
+      starmapRen.render(starmapScene, starmapCam);
+  } catch (e) {}
   starmapAnimate();
 }
 
@@ -1984,6 +1994,11 @@ function switchChatPanel(tab, el) {
   if (tab === "starmap") {
     renderChatStarmap();
     onStarmapResize();
+    // 星图面板激活：若动画未在跑则启动
+    if (!starmapRaf) {
+      starmapLastFrame = 0;
+      starmapAnimate();
+    }
   }
   if (tab === "terminal") renderTerminals();
   if (tab === "cmd") renderCmdHistory();
@@ -2753,7 +2768,7 @@ var smEdgeColors = {
 };
 
 function createStarField() {
-  var c = 3000;
+  var c = 1200;
   var p = new Float32Array(c * 3),
     cl = new Float32Array(c * 3),
     s = new Float32Array(c);
@@ -2915,8 +2930,23 @@ function resetStarmapCamera() {
   })();
 }
 
+var starmapLastFrame = 0;
+function starmapPanelActive() {
+  // 仅当 chat 视图且"星图"子面板激活时才运行动画
+  if (!state.currentView || state.currentView !== "chat") return false;
+  var panel = document.getElementById("chat-panel-starmap");
+  return panel && panel.classList.contains("active");
+}
 function starmapAnimate() {
+  if (!starmapPanelActive()) {
+    starmapRaf = null;
+    return;
+  }
   starmapRaf = requestAnimationFrame(starmapAnimate);
+  // 帧率限制 ~12fps：装饰背景无需 60fps（GPU 高占用主因）
+  var now = Date.now();
+  if (now - starmapLastFrame < 83) return;
+  starmapLastFrame = now;
   if (starmapCtrl) starmapCtrl.update();
   if (starmapStarField) starmapStarField.rotation.y += 0.0001;
   if (starmapRen && starmapScene && starmapCam)

@@ -1,4 +1,4 @@
-const { app, BrowserWindow, ipcMain, dialog, Menu } = require("electron");
+const { app, BrowserWindow, ipcMain, Menu } = require("electron");
 const path = require("path");
 const fs = require("fs");
 const { spawn } = require("child_process");
@@ -1032,11 +1032,17 @@ app.whenReady().then(async () => {
       console.error("homed failed to start within timeout");
     }
   }
-  // 设备桥：启动接入 remotedevice
+  // 设备桥：由 GUI 偏好（deviceBridge 开关+网关+token）驱动，独立于连接
   try {
-    var _devs = loadConnections().connections || [];
-    var _dev = _devs.filter((c) => c.type === "device");
-    if (_dev.length > 0) startDeviceBridge(_dev[_dev.length - 1]);
+    const _prefs = loadGuiPrefs();
+    const _db = _prefs.deviceBridge || {};
+    if (_db.enabled && _db.gateway && _db.token) {
+      startDeviceBridge({ url: _db.gateway, apiKey: _db.token });
+    } else if (_db.enabled) {
+      console.error(
+        "[device-bridge] enabled but missing gateway/token, skipped",
+      );
+    }
   } catch (e) {
     console.error("device bridge init: " + e.message);
   }
@@ -1096,14 +1102,25 @@ function loadGuiPrefs() {
   try {
     if (fs.existsSync(GUI_PREFS_FILE)) {
       const d = JSON.parse(fs.readFileSync(GUI_PREFS_FILE, "utf-8"));
+      const db = d.deviceBridge || {};
       return {
         autoLaunch: !!d.autoLaunch,
         silentStart: !!d.silentStart,
         exitToTray: d.exitToTray === undefined ? true : !!d.exitToTray,
+        deviceBridge: {
+          enabled: !!db.enabled,
+          gateway: db.gateway || "",
+          token: db.token || "",
+        },
       };
     }
   } catch (e) {}
-  return { autoLaunch: false, silentStart: false, exitToTray: true };
+  return {
+    autoLaunch: false,
+    silentStart: false,
+    exitToTray: true,
+    deviceBridge: { enabled: false, gateway: "", token: "" },
+  };
 }
 
 function saveGuiPrefs(p) {
@@ -1131,7 +1148,45 @@ function applyAutoLaunch(enabled) {
 // 全局偏好缓存（供 createWindow 静默判断使用）
 let guiPrefs = loadGuiPrefs();
 
-// IPC：本机设备身份（设备桥登记的设备 ID 与状态）
+// IPC：本机设备桥状态（启用+网关+token+连接状态）
+ipcMain.handle("device-bridge:get", () => {
+  const p = loadGuiPrefs();
+  const db = p.deviceBridge || {};
+  return {
+    enabled: !!db.enabled,
+    gateway: db.gateway || "",
+    tokenSet: !!(db.token || ""),
+    connected: !!deviceBridge,
+    deviceId: deviceBridgeId,
+    address: deviceBridgeAddr,
+  };
+});
+
+// IPC：配置本机设备桥（开关+网关+token），保存并动态启停
+ipcMain.handle("device-bridge:set", (_, cfg) => {
+  const cur = loadGuiPrefs();
+  const db = Object.assign({}, cur.deviceBridge || {}, cfg || {});
+  const next = Object.assign({}, cur, { deviceBridge: db });
+  guiPrefs = saveGuiPrefs(next);
+  // 动态应用：停止现有桥，按新配置启动
+  try {
+    stopDeviceBridge();
+  } catch (e) {}
+  if (db.enabled && db.gateway && db.token) {
+    try {
+      startDeviceBridge({ url: db.gateway, apiKey: db.token });
+    } catch (e) {
+      console.error("[device-bridge] start failed: " + e.message);
+    }
+  }
+  return {
+    enabled: !!db.enabled,
+    gateway: db.gateway || "",
+    connected: !!deviceBridge,
+    deviceId: deviceBridgeId,
+    address: deviceBridgeAddr,
+  };
+});
 
 // IPC：读取偏好
 ipcMain.handle("prefs:get", () => {
