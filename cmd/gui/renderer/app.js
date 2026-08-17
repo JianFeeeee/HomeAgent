@@ -581,16 +581,29 @@ async function refreshAll() {
     state.devices = [];
   }
   try {
-    if (
-      state.currentConn &&
-      state.currentConn.type === "device" &&
-      window.homeagent &&
-      window.homeagent.device
-    ) {
-      var idn = await window.homeagent.device.identity();
-      if (idn) {
-        state.selfDeviceId = idn.device_id || "";
-        state.selfGateway = idn.address || "";
+    // 本机设备桥身份：设备桥由 gui-prefs 驱动，独立于当前连接类型
+    if (window.homeagent && window.homeagent.deviceBridge) {
+      var dbinfo = await window.homeagent.deviceBridge.get();
+      if (dbinfo && dbinfo.enabled) {
+        if (dbinfo.deviceId) {
+          state.selfDeviceId = dbinfo.deviceId;
+          state.selfGateway = dbinfo.address || state.selfGateway;
+        }
+        // 若尚未有设备列表且已启用设备桥但非 device 连接，尝试经设备桥网关拉取
+        if (
+          state.devices.length === 0 &&
+          dbinfo.gateway &&
+          window.homeagent &&
+          window.homeagent.device
+        ) {
+          try {
+            var eb = await window.homeagent.device.identity();
+            if (eb && eb.device_id) {
+              state.selfDeviceId = eb.device_id;
+              state.selfGateway = eb.address || dbinfo.gateway;
+            }
+          } catch (e2) {}
+        }
       }
     }
   } catch (e) {}
@@ -4839,21 +4852,6 @@ function renderDevices() {
   var el = document.getElementById("view-devices");
   if (!el) return;
   var conn = state.currentConn;
-  if (!conn || conn.type !== "device") {
-    el.innerHTML =
-      '<div class="card"><h2>' +
-      __("设备", "Devices") +
-      '</h2><p style="color:var(--text-muted)">' +
-      __(
-        "请先在设置中添加并切换到「设备网关 (remotedevice)」连接，以查看已接入设备。",
-        "Add and switch to a Remote Device Gateway connection in Settings to view devices.",
-      ) +
-      "</p>" +
-      '<button class="btn btn-primary" onclick="goSettingsConn()">' +
-      __("管理连接", "Manage Connections") +
-      "</button></div>";
-    return;
-  }
   var devs = state.devices || [];
   var selfDev = null;
   if (state.selfDeviceId) {
@@ -4864,6 +4862,8 @@ function renderDevices() {
       }
     }
   }
+  // 本机 GUI 设备卡片：始终显示（不依赖当前连接类型），
+  // 设备桥由 gui-prefs 的 deviceBridge 驱动，独立于连接。
   var selfHtml =
     '<div class="card" style="border-left:3px solid #4f8cff"><h2>' +
     __("本机 GUI 设备", "Local GUI Device") +

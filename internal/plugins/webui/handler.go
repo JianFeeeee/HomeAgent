@@ -1,6 +1,7 @@
 package webui
 
 import (
+	"bufio"
 	"context"
 	"crypto/rand"
 	"embed"
@@ -1678,6 +1679,7 @@ var (
 
 // handleDeviceGatewayProxy 将 /api/v1/device/* 反代到 remotedevice 内部 HTTP 服务。
 // 鉴权：本端走 requireAPI（webui API key），转发时带 remotedevice 的 token（X-API-Key）。
+// WS 升级请求（Upgrade: websocket）走 hijack 双向字节透传（标准库 http.Client 不支持 101 升级）。
 func (h *Handler) handleDeviceGatewayProxy(w http.ResponseWriter, r *http.Request) {
 	if !deviceGatewayEnabled {
 		http.NotFound(w, r)
@@ -1692,6 +1694,13 @@ func (h *Handler) handleDeviceGatewayProxy(w http.ResponseWriter, r *http.Reques
 	if r.URL.RawQuery != "" {
 		url += "?" + r.URL.RawQuery
 	}
+
+	// WebSocket 升级：hijack 双向透传（支持 WS over 远程 homed）
+	if strings.EqualFold(r.Header.Get("Upgrade"), "websocket") {
+		h.proxyWebSocket(w, r, addr, path)
+		return
+	}
+
 	req, err := http.NewRequestWithContext(r.Context(), r.Method, url, r.Body)
 	if err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
@@ -1712,6 +1721,88 @@ func (h *Handler) handleDeviceGatewayProxy(w http.ResponseWriter, r *http.Reques
 	}
 	w.WriteHeader(resp.StatusCode)
 	io.Copy(w, resp.Body)
+}
+
+// proxyWebSocket 用 TCP 直连 + hijack 将客户端 WS 连接双向透传到设备网关。
+func (h *Handler) proxyWebSocket(w http.ResponseWriter, r *http.Request, addr, path string) {
+	upstream := "ws://" + addr + path
+	if r.URL.RawQuery != "" {
+		upstream += "?" + r.URL.RawQuery
+	}
+	ctx, cancel := context.WithTimeout(r.Context(), 15*time.Second)
+	defer cancel()
+	// 构造带 Upgrade 头的请求：http.Transport 对 Upgrade 请求保留连接字节流
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, upstream, nil)
+	if err != nil {
+		http.Error(w, "ws upstream: "+err.Error(), http.StatusBadGateway)
+		return
+	}
+	req.Header = r.Header.Clone()
+	if deviceGatewayToken != "" {
+		req.Header.Set("X-API-Key", deviceGatewayToken)
+	}
+	tr := &http.Transport{
+		Proxy: http.ProxyFromEnvironment,
+	}
+	resp, err := tr.RoundTrip(req)
+	if err != nil {
+		http.Error(w, "ws upstream dial: "+err.Error(), http.StatusBadGateway)
+		return
+	}
+	if resp.StatusCode != http.StatusSwitchingProtocols {
+		defer resp.Body.Close()
+		http.Error(w, "ws upstream status: "+resp.Status, http.StatusBadGateway)
+		return
+	}
+
+	// 客户端 hijack：把 101 响应头写给客户端并接管双向连接
+	hj, ok := w.(http.Hijacker)
+	if !ok {
+		resp.Body.Close()
+		http.Error(w, "hijack not supported", http.StatusInternalServerError)
+		return
+	}
+	clientConn, brw, err := hj.Hijack()
+	if err != nil {
+		resp.Body.Close()
+		return
+	}
+	defer clientConn.Close()
+
+	// 向上游写回 101 响应头
+	if err := resp.Write(brw); err != nil {
+		resp.Body.Close()
+		return
+	}
+	if err := brw.Flush(); err != nil {
+		resp.Body.Close()
+		return
+	}
+
+	// 上游连接
+	upConn, ok := resp.Body.(io.ReadWriteCloser)
+	if !ok {
+		clientConn.Close()
+		http.Error(w, "upstream conn not rw", http.StatusBadGateway)
+		return
+	}
+	defer upConn.Close()
+
+	// 双向透传（WS 帧字节不动）
+	errCh := make(chan struct{}, 2)
+	go func() {
+		io.Copy(upConn, brw)
+		if tc, ok := upConn.(interface{ CloseWrite() error }); ok {
+			tc.CloseWrite()
+		}
+		errCh <- struct{}{}
+	}()
+	go func() {
+		io.Copy(bufio.NewWriter(clientConn), upConn)
+		errCh <- struct{}{}
+	}()
+	<-errCh
+	tr.CloseIdleConnections()
 }
 
 // ======== Plugin Management (proxied to pluginmgr HTTP API) ========
