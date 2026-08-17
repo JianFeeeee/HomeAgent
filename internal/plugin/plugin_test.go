@@ -1,8 +1,12 @@
 package plugin
 
 import (
+	"os"
+	"path/filepath"
+	"strings"
 	"testing"
 
+	internalConfig "gitcode.com/JianFeeeee/HomeAgent/internal/config"
 	sdk "gitcode.com/JianFeeeee/HomeAgent/internal/sdk"
 )
 
@@ -201,4 +205,56 @@ A tool with no parameters`
 func TestPluginManagerInterfaceReloadOne(t *testing.T) {
 	// 编译期契约：Registry 必须实现 PluginManager（含 ReloadOne 单插件重载）。
 	var _ sdk.PluginManager = (*Registry)(nil)
+}
+
+func TestRegistryIncrementalReload(t *testing.T) {
+	dir := t.TempDir()
+	plgDir := filepath.Join(dir, "plugins")
+	os.MkdirAll(plgDir, 0755)
+
+	// 一个 Lua 插件
+	luaDir := filepath.Join(plgDir, "reloaddemo")
+	os.MkdirAll(luaDir, 0755)
+	os.WriteFile(filepath.Join(luaDir, "plugin.json"), []byte(`{"name":"reloaddemo","entry":"main.lua"}`), 0644)
+	writeLua := func(body string) {
+		os.WriteFile(filepath.Join(luaDir, "main.lua"), []byte(`local plugin = { name = "reloaddemo" }
+function plugin.start(sdk) sdk.log("info", "`+body+`") end
+function plugin.stop() end
+return plugin
+`), 0644)
+	}
+	writeLua("v1")
+
+	reg := NewRegistry()
+	reg.SetPluginDir(plgDir)
+	reg.SetConfigRegistry(internalConfig.NewConfigRegistry(""))
+
+
+	// 首次 Reload：应加载 1 个
+	msg, err := reg.Reload(plgDir)
+	if err != nil {
+		t.Fatalf("first reload: %v", err)
+	}
+	if len(reg.List()) != 1 {
+		t.Fatalf("first reload loaded=%d, want 1 (%s)", len(reg.List()), msg)
+	}
+
+	// 无变更再 Reload：不应重载（0 changed, 1 unchanged）
+	msg, err = reg.Reload(plgDir)
+	if err != nil {
+		t.Fatalf("second reload: %v", err)
+	}
+	if !strings.Contains(msg, "0 plugins") || !strings.Contains(msg, "1 unchanged") {
+		t.Errorf("unchanged reload should skip: %q", msg)
+	}
+
+	// 修改 main.lua → 应重载该插件
+	writeLua("v2")
+	msg, err = reg.Reload(plgDir)
+	if err != nil {
+		t.Fatalf("changed reload: %v", err)
+	}
+	if !strings.Contains(msg, "1 plugins") {
+		t.Errorf("changed reload should reload 1: %q", msg)
+	}
 }
