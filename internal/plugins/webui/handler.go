@@ -1291,10 +1291,12 @@ func (h *Handler) handleChatEvents(w http.ResponseWriter, r *http.Request) {
 		case <-done:
 			return
 		case <-ticker.C:
-			select {
-			case writeCh <- ": heartbeat":
-			default:
+			// 心跳直接写 w 并 flush（绕过 writeCh，事件密集/队列满时也能保活长连接，
+			// 避免远程 nginx 网关因长时间无字节而 504/半开）。
+			if _, err := fmt.Fprintf(w, ": heartbeat\n\n"); err != nil {
+				return
 			}
+			flusher.Flush()
 		}
 	}
 }
