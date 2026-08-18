@@ -772,6 +772,25 @@ body.maximized .tb-max svg {
 .dot-gray {
   background: #475569;
 }
+/* 单独用作状态点（无 status-dot 前缀时）也呈现为小圆点 */
+.dot-green,
+.dot-yellow,
+.dot-red,
+.dot-gray {
+  display: inline-block;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  margin-right: 6px;
+  vertical-align: middle;
+  flex-shrink: 0;
+}
+/* 含文字的场景（点+文字并排）不受圆点尺寸影响 */
+.kv-row .val .dot-green,
+.kv-row .val .dot-gray,
+.kv-row .val .dot-red {
+  margin-right: 4px;
+}
 @keyframes pulseDot {
   0%,
   100% {

@@ -4886,8 +4886,8 @@ function renderDevices() {
       __("状态", "Status") +
       "</span><span>" +
       (sOnline
-        ? '<span class="dot-green">' + __("在线", "Online") + "</span>"
-        : '<span class="dot-gray">' + __("离线", "Offline") + "</span>") +
+        ? '<span class="dot-green"></span>' + __("在线", "Online")
+        : '<span class="dot-gray"></span>' + __("离线", "Offline")) +
       "</span></div>" +
       '<div class="kv-row"><span class="key">' +
       __("授权", "Authorized") +
@@ -4898,8 +4898,8 @@ function renderDevices() {
       state.selfDeviceId +
       "',this.checked)\"><span></span></label>" +
       (sAuth
-        ? '<span class="dot-green">' + __("已授权", "Yes") + "</span>"
-        : '<span class="dot-red">' + __("未授权", "No") + "</span>") +
+        ? '<span class="dot-green"></span>' + __("已授权", "Yes")
+        : '<span class="dot-red"></span>' + __("未授权", "No")) +
       "</span></div>";
   } else {
     selfHtml +=
@@ -4947,11 +4947,11 @@ function renderDevices() {
       "</th></tr>";
     devs.forEach((d) => {
       var online = d.online
-        ? '<span class="dot-green">' + __("在线", "Online") + "</span>"
-        : '<span class="dot-gray">' + __("离线", "Offline") + "</span>";
+        ? '<span class="dot-green"></span>' + __("在线", "Online")
+        : '<span class="dot-gray"></span>' + __("离线", "Offline");
       var auth = d.authorized
-        ? '<span class="dot-green">' + __("已授权", "Yes") + "</span>"
-        : '<span class="dot-red">' + __("未授权", "No") + "</span>";
+        ? '<span class="dot-green"></span>' + __("已授权", "Yes")
+        : '<span class="dot-red"></span>' + __("未授权", "No");
       var caps = (d.caps || []).join(", ") || "-";
       html +=
         "<tr><td><b>" +
