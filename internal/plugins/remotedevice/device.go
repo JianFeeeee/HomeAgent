@@ -56,7 +56,11 @@ func (d *devicectlDevice) Tools() []agentIO.ToolDef {
 		},
 		{
 			Name: "device_ctl_cmdrun",
-			Description: "向一台已授权且在线设备发送命令执行请求（如开机/重启/播放/自定义命令）。" +
+			Description: "向设备下发命令/操作（异步，accepted=true 后用 device_ctl_cmdresult 轮询结果）。" +
+				"command 支持两类（前缀区分）：\n" +
+				"- shell-cmd: 在设备上执行原生 shell 命令，如 shell-cmd ls -la /tmp\n" +
+				"- homeagent-cmd: 调用设备端 HomeAgent 内置能力，如 homeagent-camerasue（调用用户侧摄像头）、" +
+				"homeagent-screensue（用户侧屏幕显示内容）\n" +
 				"⚡ 高危：设备必须已授权，且该操作会改变设备行为。" +
 				"返回 accepted=true 表示已下发并等待设备执行，之后可用 device_ctl_cmdresult 查询结果。" +
 				"若设备未授权或离线，返回错误信息。",
@@ -64,7 +68,7 @@ func (d *devicectlDevice) Tools() []agentIO.ToolDef {
 				"type": "object",
 				"properties": map[string]interface{}{
 					"device_id": map[string]interface{}{"type": "string", "description": "目标设备 ID"},
-					"command":   map[string]interface{}{"type": "string", "description": "要执行的命令（设备自定义语义，如 power_on、play:xxx 或 shell 命令）"},
+					"command":   map[string]interface{}{"type": "string", "description": "以 shell-cmd 或 homeagent-cmd 前缀开头。如 shell-cmd pwd、homeagent-camerasue"},
 				},
 				"required": []interface{}{"device_id", "command"},
 			},
@@ -191,8 +195,23 @@ func (d *devicectlDevice) cmdrun(args map[string]interface{}) (interface{}, erro
 	if !m.Online {
 		return nil, fmt.Errorf("device %s 不在线，无法执行命令", id)
 	}
+	// 命令类型：shell-cmd / homeagent-* 前缀区分；无前缀按 shell 处理（兼容旧格式）
+	cmdType := "shell"
+	switch {
+	case strings.HasPrefix(cmd, "shell-cmd"):
+		cmdType = "shell"
+		cmd = strings.TrimSpace(strings.TrimPrefix(cmd, "shell-cmd"))
+	case strings.HasPrefix(cmd, "homeagent-cmd"):
+		cmdType = "homeagent"
+		cmd = strings.TrimSpace(strings.TrimPrefix(cmd, "homeagent-cmd"))
+	case strings.HasPrefix(cmd, "homeagent-"):
+		cmdType = "homeagent"
+		cmd = strings.TrimSpace(strings.TrimPrefix(cmd, "homeagent-"))
+	default:
+		cmdType = "shell"
+	}
 	reqID := newReqID()
-	if err := d.reg.PushCmd(id, reqID, cmd); err != nil {
+	if err := d.reg.PushCmd(id, reqID, cmd, cmdType); err != nil {
 		return nil, fmt.Errorf("下发命令失败: %w", err)
 	}
 	// 阻塞等待设备结果（带超时）；结果同时由 registry 留档。
