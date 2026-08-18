@@ -98,31 +98,42 @@ func (a *Agent) buildToolCatalog() string {
 	if len(defs) == 0 {
 		return ""
 	}
-	var sb strings.Builder
-	sb.WriteString("\n\n【可用工具列表】")
-	seen := make(map[string]bool)
-	for _, d := range defs {
-		t, ok := d.(map[string]interface{})
-		if !ok {
-			continue
-		}
-		fn, ok := t["function"].(map[string]interface{})
+	// 仅注入插件/通道能力摘要，避免全量工具定义污染 system prompt。
+	// 每个插件列：名称 + 能力描述 + 工具数。完整工具定义由 get_plugin_tools 按需拉取。
+	byPlugin := map[string]int{}          // plugin -> 工具数
+	pluginDesc := map[string]string{}     // plugin -> 首个工具描述(作能力概览)
+	var order []string
+	for _, t := range defs {
+		fn, ok := t.(map[string]interface{})["function"].(map[string]interface{})
 		if !ok {
 			continue
 		}
 		name, _ := fn["name"].(string)
-		if name == "" || seen[name] {
+		if name == "" {
 			continue
 		}
-		seen[name] = true
-		desc, _ := fn["description"].(string)
-		sb.WriteString(fmt.Sprintf("\n- %s", name))
-		if desc != "" {
-			if len(desc) > 80 {
-				desc = desc[:80] + "..."
-			}
-			sb.WriteString(": " + desc)
+		plg := a.resolveToolPlugin(name)
+		if _, seen := byPlugin[plg]; !seen {
+			order = append(order, plg)
 		}
+		byPlugin[plg]++
+		if pluginDesc[plg] == "" {
+			desc, _ := fn["description"].(string)
+			if len(desc) > 60 {
+				desc = desc[:60] + "..."
+			}
+			pluginDesc[plg] = desc
+		}
+	}
+	var sb strings.Builder
+	sb.WriteString("\n\n【可用工具能力】\n")
+	sb.WriteString("工具按插件分组注册。需要某个插件的具体工具时，调用 get_plugin_tools(\"{插件名}\") 获取该插件的完整工具定义（名称/参数/用途）。\n")
+	for _, plg := range order {
+		sb.WriteString(fmt.Sprintf("- %s (%d 个工具)", plg, byPlugin[plg]))
+		if d := pluginDesc[plg]; d != "" {
+			sb.WriteString(": " + d)
+		}
+		sb.WriteString("\n")
 	}
 	return sb.String()
 }
@@ -421,6 +432,21 @@ func (a *Agent) buildToolDefs() []interface{} {
 			},
 		})
 	}
+
+	// 按插件动态拉取工具定义(避免全量注入提示词污染)
+	tools = append(tools, map[string]interface{}{
+		"type": "function",
+		"function": map[string]interface{}{
+			"name":        "get_plugin_tools",
+			"description": "获取指定插件的完整工具定义(名称/参数/用途)。参数 plugin_name 传插件名(见系统提示的【可用工具能力】列表)。省略时返回全部插件的工具摘要。",
+			"parameters": map[string]interface{}{
+				"type": "object",
+				"properties": map[string]interface{}{
+					"plugin_name": map[string]interface{}{"type": "string", "description": "插件名，如 qq / remotedevice / weather", "default": ""},
+				},
+			},
+		},
+	})
 
 	tools = append(tools, map[string]interface{}{
 		"type": "function",
