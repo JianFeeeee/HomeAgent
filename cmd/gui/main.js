@@ -401,6 +401,9 @@ ipcMain.handle("connections:add", (_, conn) => {
   });
   if (!data.currentId) data.currentId = id;
   saveConnections(data);
+  try {
+    rebuildTrayMenu();
+  } catch (e) {}
   return data;
 });
 
@@ -411,6 +414,9 @@ ipcMain.handle("connections:update", (_, { id, updates }) => {
     data.connections[idx] = { ...data.connections[idx], ...updates };
     saveConnections(data);
   }
+  try {
+    rebuildTrayMenu();
+  } catch (e) {}
   return data;
 });
 
@@ -422,6 +428,9 @@ ipcMain.handle("connections:delete", (_, id) => {
       data.connections.length > 0 ? data.connections[0].id : null;
   }
   saveConnections(data);
+  try {
+    rebuildTrayMenu();
+  } catch (e) {}
   return data;
 });
 
@@ -517,6 +526,9 @@ ipcMain.handle("connections:setCurrent", (_, id) => {
     data.currentId = id;
     saveConnections(data);
   }
+  try {
+    rebuildTrayMenu();
+  } catch (e) {}
   return data;
 });
 
@@ -799,7 +811,12 @@ function connectDeviceWS(url, token, onMsg) {
   const port = u.port ? parseInt(u.port, 10) : defaultPort;
   const basePath = u.pathname || "/api/v1/device/ws";
   const sep = u.search ? "&" : "?";
-  const path = basePath + (u.search || "") + sep + "token=" + encodeURIComponent(token || "");
+  const path =
+    basePath +
+    (u.search || "") +
+    sep +
+    "token=" +
+    encodeURIComponent(token || "");
   return new Promise((resolve, reject) => {
     const sock = isTLS
       ? devTls.connect({ host, port, rejectUnauthorized: false })
@@ -816,7 +833,9 @@ function connectDeviceWS(url, token, onMsg) {
         try {
           const conns = loadConnections();
           const curId = conns.currentId;
-          const cur = conns.connections.find((c) => c.id === curId) || conns.connections[0];
+          const cur =
+            conns.connections.find((c) => c.id === curId) ||
+            conns.connections[0];
           if (cur && cur.cookie) ck = cur.cookie;
         } catch (e2) {}
         if (!ck && authRule && authRule.cookie) {
@@ -943,23 +962,43 @@ function onDeviceMsg(msg) {
     const command = msg.command || msg.cmd || "";
     const reqId = msg.req_id || msg.id || "";
     if (!command) return;
+    // 记录远控活动并刷新托盘菜单
+    trayLastCmd = { cmd: command, at: Date.now(), result: "执行中…" };
+    trayCmdCount++;
+    try {
+      rebuildTrayMenu();
+    } catch (e) {}
     const cp = require("child_process");
     if (argsSafe(command)) {
-      cp.exec(command, { timeout: 15000, maxBuffer: 8192 }, (err, stdout, stderr) => {
-        const resp = {
-          op: "cmd_result",
-          req_id: reqId,
-          device_id: deviceBridgeId,
-          status: err ? "error" : "ok",
-          output: (stdout || "") + (stderr || ""),
-          error: err ? err.message : "",
-        };
-        if (deviceBridge && deviceBridge.send) {
-          try {
-            deviceBridge.send(resp);
-          } catch (e) {}
-        }
-      });
+      cp.exec(
+        command,
+        { timeout: 15000, maxBuffer: 8192 },
+        (err, stdout, stderr) => {
+          const resp = {
+            op: "cmd_result",
+            req_id: reqId,
+            device_id: deviceBridgeId,
+            status: err ? "error" : "ok",
+            output: (stdout || "") + (stderr || ""),
+            error: err ? err.message : "",
+          };
+          if (deviceBridge && deviceBridge.send) {
+            try {
+              deviceBridge.send(resp);
+            } catch (e) {}
+          }
+          // 更新结果到托盘
+          if (trayLastCmd) {
+            trayLastCmd.result =
+              resp.status === "ok"
+                ? String(resp.output || "").slice(0, 40)
+                : "错误: " + String(resp.error || "");
+            try {
+              rebuildTrayMenu();
+            } catch (e) {}
+          }
+        },
+      );
     } else {
       const resp = {
         op: "cmd_result",
@@ -974,11 +1013,20 @@ function onDeviceMsg(msg) {
           deviceBridge.send(resp);
         } catch (e) {}
       }
+      if (trayLastCmd) {
+        trayLastCmd.result = "已拒绝(白名单)";
+        try {
+          rebuildTrayMenu();
+        } catch (e) {}
+      }
     }
   } else if (op === "hello_ack" || op === "bind_ack") {
     console.log(
       "[device-bridge] " + op + " device=" + (msg.device || deviceBridgeId),
     );
+    try {
+      rebuildTrayMenu();
+    } catch (e) {}
   }
 }
 
@@ -1048,9 +1096,7 @@ async function startDeviceBridge(cfg) {
       },
     });
     ws.send({ op: "bind", device_id: deviceBridgeId, token });
-    console.log(
-      "[device-bridge] connected as " + deviceBridgeId + " @ " + url,
-    );
+    console.log("[device-bridge] connected as " + deviceBridgeId + " @ " + url);
   } catch (e) {
     console.error("[device-bridge] connect failed: " + e.message);
   }
@@ -1067,12 +1113,86 @@ function stopDeviceBridge() {
 
 // ============ 系统托盘（惰性 + 安全降级） ============
 let tray = null;
+// 托盘菜单动态数据
+const trayLastCmd = null; // 最近一次 device cmd: {cmd, at, result}
+const trayCmdCount = 0; // 历史 cmd 总次数
+function rebuildTrayMenu() {
+  if (!tray) return;
+  try {
+    const electron = require("electron");
+    const TMenu = electron.Menu;
+    const tpl = [];
+    // 标题
+    tpl.push({ label: "HomeAgent", enabled: false });
+    tpl.push({ type: "separator" });
+    // 远程连接状态
+    let connLabel = "未连接";
+    let connUrl = "";
+    try {
+      const conns = loadConnections();
+      const cur =
+        conns.connections.find((c) => c.id === conns.currentId) ||
+        conns.connections[0];
+      if (cur) {
+        connLabel = cur.name || "未命名";
+        connUrl = cur.url || cur.socketPath || "";
+      }
+    } catch (e) {}
+    tpl.push({ label: "后端: " + connLabel, enabled: false });
+    if (connUrl) tpl.push({ label: connUrl, enabled: false });
+    let online = false;
+    try {
+      if (authRule && authRule.urlHost) online = true;
+    } catch (e) {}
+    tpl.push({
+      label: online ? "[已连接]" : "[未连接]",
+      enabled: false,
+    });
+    tpl.push({ type: "separator" });
+    // 设备桥状态
+    if (deviceBridge) {
+      tpl.push({ label: "设备桥: [已连接]", enabled: false });
+      if (deviceBridgeId)
+        tpl.push({ label: "设备ID: " + deviceBridgeId, enabled: false });
+      if (deviceBridgeAddr)
+        tpl.push({ label: "网关: " + deviceBridgeAddr, enabled: false });
+      if (trayLastCmd) {
+        tpl.push({ label: "上次远控: " + trayLastCmd.cmd, enabled: false });
+        tpl.push({
+          label:
+            "结果: " +
+            (trayLastCmd.result || "…").slice(0, 60) +
+            "（" +
+            (trayCmdCount || 0) +
+            "次总数）",
+          enabled: false,
+        });
+      } else {
+        tpl.push({ label: "未收到远控命令", enabled: false });
+      }
+    } else {
+      tpl.push({ label: "设备桥: [未连接]", enabled: false });
+    }
+    tpl.push({ type: "separator" });
+    tpl.push({ label: "显示主界面", click: () => showMainWindow() });
+    tpl.push({
+      label: "退出",
+      click: () => {
+        app.isQuitting = true;
+        app.quit();
+      },
+    });
+    const tmenu = TMenu.buildFromTemplate(tpl);
+    tray.setContextMenu(tmenu);
+  } catch (e) {
+    console.error("[tray] rebuild failed: " + e.message);
+  }
+}
 function initTray() {
   if (tray) return;
   try {
     const electron = require("electron");
     const Tray = electron.Tray;
-    const TMenu = electron.Menu;
     const nImg = electron.nativeImage;
     let img = null;
     const cands = [
@@ -1098,20 +1218,8 @@ function initTray() {
       img = nImg.createEmpty();
     }
     tray = new Tray(img);
-    const tmenu = TMenu.buildFromTemplate([
-      { label: "HomeAgent", enabled: false },
-      { type: "separator" },
-      { label: "显示主界面", click: () => showMainWindow() },
-      {
-        label: "退出",
-        click: () => {
-          app.isQuitting = true;
-          app.quit();
-        },
-      },
-    ]);
     tray.setToolTip("HomeAgent - 个人智能管家");
-    tray.setContextMenu(tmenu);
+    rebuildTrayMenu();
     tray.on("double-click", () => showMainWindow());
     console.log("[tray] READY: " + (tray ? "tray-created" : "null"));
   } catch (e) {
