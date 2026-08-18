@@ -1159,7 +1159,9 @@ func (h *Handler) handleChat(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var body struct {
-		Message string `json:"message"`
+		Message    string `json:"message"`
+		DeviceID   string `json:"device_id"`   // 消息来源设备（GUI/受控设备），可选
+		DeviceName string `json:"device_name"` // 设备显示名，可选
 	}
 	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid json"})
@@ -1174,13 +1176,24 @@ func (h *Handler) handleChat(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "agent unavailable"})
 		return
 	}
+	// 来源编码：带设备身份时用 webui/{device_id}（agent 经 injectSourceContext 可见来源）；
+	// 无设备时保持 webui（兼容旧调用）。device_name 一并注入便于 agent 识别。
+	source := "webui"
+	if body.DeviceID != "" {
+		source = "webui/" + body.DeviceID
+	}
+	payload := map[string]interface{}{"content": body.Message}
+	if body.DeviceID != "" {
+		payload["device_id"] = body.DeviceID
+		payload["device_name"] = body.DeviceName
+	}
 	// 带超时的上下文，防止 InjectTextSync 长时间阻塞 HTTP 请求
 	ctx, cancel := context.WithTimeout(r.Context(), 60*time.Second)
 	defer cancel()
 
 	respCh := make(chan *agentIO.OutputEvent, 1)
 	go func() {
-		respCh <- h.sdk.InjectTextSync("webui", "webui", body.Message)
+		respCh <- h.sdk.InjectInputSync(source, "webui", "text", payload)
 	}()
 
 	var resp *agentIO.OutputEvent
