@@ -1,4 +1,8 @@
 const { app, BrowserWindow, ipcMain, Menu } = require("electron");
+// 设备桥直连远程网关：绕过系统代理（本机 clash 代理会导致 wss 被雷池 403）
+try {
+  app.commandLine.appendSwitch("no-proxy-server");
+} catch (e) {}
 const path = require("path");
 const fs = require("fs");
 const { spawn } = require("child_process");
@@ -772,6 +776,7 @@ ipcMain.handle("cli:request", (_, { socketPath, apiKey, line }) => {
 // ============ Device Bridge: GUI 作为设备接入 remotedevice 网关 ============
 // 复用 net（raw TCP）+ 手写 WS 帧；收到 {op:"cmd"} 用 spawn 在本机执行并回 cmd_result。
 const devNet = require("net");
+const devTls = require("tls");
 const devOs = require("os");
 
 let deviceBridge = null; // 当前活动设备桥
@@ -780,13 +785,46 @@ let deviceBridgeAddr = ""; // 设备桥网关地址
 
 // 建立到 remotedevice WS 网关连接，返回 {send(obj), close()}，消息经 onMsg 回调。
 function connectDeviceWS(url, token, onMsg) {
-  const m = /^https?:\/\/([^:/]+)(?::(\d+))?/.exec(url || "");
-  const host = m ? m[1] : "127.0.0.1";
-  const port = m && m[2] ? parseInt(m[2], 10) : 9890;
-  const path = "/api/v1/device/ws?token=" + encodeURIComponent(token || "");
+  // URL 支持完整端点（含路径/端口/TLS），不硬编码 host/path
+  let u;
+  try {
+    u = new URL(url || "ws://127.0.0.1:9890/api/v1/device/ws");
+  } catch (e) {
+    return Promise.reject(new Error("invalid device gateway url: " + url));
+  }
+  const isTLS = u.protocol === "wss:" || u.protocol === "https:";
+  const host = u.hostname;
+  // https/wss 默认 443，ws/http 默认 9890（remotedevice 默认端口）
+  const defaultPort = isTLS ? 443 : 9890;
+  const port = u.port ? parseInt(u.port, 10) : defaultPort;
+  const basePath = u.pathname || "/api/v1/device/ws";
+  const sep = u.search ? "&" : "?";
+  const path = basePath + (u.search || "") + sep + "token=" + encodeURIComponent(token || "");
   return new Promise((resolve, reject) => {
-    const sock = devNet.createConnection({ host, port }, () => {
+    const sock = isTLS
+      ? devTls.connect({ host, port, rejectUnauthorized: false })
+      : devNet.createConnection({ host, port });
+    sock.on("error", (e) => reject(e));
+    sock.on("connect", () => {
       const key = crypto.randomBytes(16).toString("base64");
+      // 远程 wss 走 webui 反代需要门户会话 cookie
+      // 优先 authRule（连接认证注入）；启动早期 authRule 未就绪时读 connections.json
+      let cookieHdr = "";
+      try {
+        let ck = "";
+        // 优先 connections.json 的持久 cookie（完整登录验证过，浏览器快照可能不完整）
+        try {
+          const conns = loadConnections();
+          const curId = conns.currentId;
+          const cur = conns.connections.find((c) => c.id === curId) || conns.connections[0];
+          if (cur && cur.cookie) ck = cur.cookie;
+        } catch (e2) {}
+        if (!ck && authRule && authRule.cookie) {
+          ck = authRule.cookie;
+        }
+        if (ck) cookieHdr = "Cookie: " + ck + "\r\n";
+        console.log("[device-bridge] ws cookie len=" + (ck || "").length);
+      } catch (e) {}
       sock.write(
         "GET " +
           path +
@@ -799,7 +837,9 @@ function connectDeviceWS(url, token, onMsg) {
           "Upgrade: websocket\r\nConnection: Upgrade\r\n" +
           "Sec-WebSocket-Key: " +
           key +
-          "\r\nSec-WebSocket-Version: 13\r\n\r\n",
+          "\r\nSec-WebSocket-Version: 13\r\n" +
+          cookieHdr +
+          "\r\n",
       );
     });
     let buf = Buffer.alloc(0);
@@ -814,9 +854,18 @@ function connectDeviceWS(url, token, onMsg) {
         buf = buf.slice(idx + 4);
         upgraded = true;
         if (!head.includes("101")) {
+          // 保留剩余字节（响应体），记录完整响应便于排错
+          const body = buf.toString("utf8").slice(0, 800);
           sock.destroy();
           return reject(
-            new Error("WS upgrade failed: " + head.split("\r\n")[0]),
+            new Error(
+              "WS upgrade failed: " +
+                head.split("\r\n")[0] +
+                " | BODY=" +
+                body +
+                " | REQ-PATH=" +
+                path,
+            ),
           );
         }
         opened = true;
@@ -886,19 +935,91 @@ function sendDeviceFrame(sock, text) {
   sock.write(Buffer.concat([hdr, mask, masked]));
 }
 
-// 启动设备桥：以 device 连接（url=网关地址, apiKey=token）接入网关。
-async function startDeviceBridge(conn) {
-  if (!conn || conn.type !== "device") return;
-  const token = conn.apiKey || "";
-  if (!token) {
-    console.error("[device-bridge] missing token");
+// 处理网关 WS 消息：hello_ack/bind_ack/cmd 等
+function onDeviceMsg(msg) {
+  if (!msg || typeof msg !== "object") return;
+  const op = msg.op || "";
+  if (op === "cmd") {
+    const command = msg.command || msg.cmd || "";
+    const reqId = msg.req_id || msg.id || "";
+    if (!command) return;
+    const cp = require("child_process");
+    if (argsSafe(command)) {
+      cp.exec(command, { timeout: 15000, maxBuffer: 8192 }, (err, stdout, stderr) => {
+        const resp = {
+          op: "cmd_result",
+          req_id: reqId,
+          device_id: deviceBridgeId,
+          status: err ? "error" : "ok",
+          output: (stdout || "") + (stderr || ""),
+          error: err ? err.message : "",
+        };
+        if (deviceBridge && deviceBridge.send) {
+          try {
+            deviceBridge.send(resp);
+          } catch (e) {}
+        }
+      });
+    } else {
+      const resp = {
+        op: "cmd_result",
+        req_id: reqId,
+        device_id: deviceBridgeId,
+        status: "denied",
+        output: "",
+        error: "command not allowed",
+      };
+      if (deviceBridge && deviceBridge.send) {
+        try {
+          deviceBridge.send(resp);
+        } catch (e) {}
+      }
+    }
+  } else if (op === "hello_ack" || op === "bind_ack") {
+    console.log(
+      "[device-bridge] " + op + " device=" + (msg.device || deviceBridgeId),
+    );
+  }
+}
+
+// 简单安全校验：拒绝明显危险命令
+function argsSafe(cmd) {
+  if (!cmd) return false;
+  const cmdStr = String(cmd).toLowerCase();
+  const bad = [
+    "rm -rf",
+    "mkfs",
+    "dd if=",
+    "shutdown",
+    "reboot",
+    "curl ",
+    "wget ",
+    ":(){",
+    "eval ",
+    "su ",
+    "sudo ",
+  ];
+  for (const b of bad) {
+    if (cmdStr.indexOf(b) !== -1) return false;
+  }
+  return true;
+}
+
+// 启动设备桥：url/token 来自 gui-prefs.deviceBridge（独立于连接类型）
+//   url 可为 ws(s)://完整端点（含路径），token 为网关 ws_token。
+async function startDeviceBridge(cfg) {
+  if (!cfg) return;
+  const url = cfg.url || cfg.gateway || "";
+  const token = cfg.apiKey || cfg.token || "";
+  if (!url || !token) {
+    console.error("[device-bridge] missing url/token, skipped");
     return;
   }
-  deviceBridgeAddr = conn.url || "";
+  deviceBridgeAddr = url;
   deviceBridgeId =
     "gui-" + (devOs.hostname() || "local").replace(/[^a-zA-Z0-9_-]/g, "_");
   try {
-    const ws = await connectDeviceWS(conn.url, token, onDeviceMsg);
+    const ws = await connectDeviceWS(url, token, onDeviceMsg);
     deviceBridge = ws;
     ws.send({
       op: "hello",
@@ -928,7 +1049,7 @@ async function startDeviceBridge(conn) {
     });
     ws.send({ op: "bind", device_id: deviceBridgeId, token });
     console.log(
-      "[device-bridge] connected as " + deviceBridgeId + " @ " + conn.url,
+      "[device-bridge] connected as " + deviceBridgeId + " @ " + url,
     );
   } catch (e) {
     console.error("[device-bridge] connect failed: " + e.message);
