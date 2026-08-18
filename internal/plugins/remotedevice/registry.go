@@ -248,11 +248,15 @@ func (r *Registry) PushJSON(deviceID string, payload map[string]interface{}) err
 }
 
 // PushCmd 向设备发送命令执行请求。
-func (r *Registry) PushCmd(deviceID, reqID, command string) error {
+func (r *Registry) PushCmd(deviceID, reqID, command, cmdType string) error {
+	if cmdType == "" {
+		cmdType = "shell"
+	}
 	return r.PushJSON(deviceID, map[string]interface{}{
-		"op":      "cmd",
-		"req_id":  reqID,
-		"command": command,
+		"op":       "cmd",
+		"req_id":   reqID,
+		"command":  command,
+		"cmd_type": cmdType,
 	})
 }
 

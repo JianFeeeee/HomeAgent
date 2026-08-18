@@ -61,6 +61,9 @@ func (a *Agent) executeToolCallInner(tc agentAPI.ToolCall) string {
 		return a.executeOutputListChannels()
 	case tc.Name == "plgreload":
 		return a.executePluginReload()
+	case tc.Name == "get_plugin_tools":
+		pluginName, _ := tc.Arguments["plugin_name"].(string)
+		return a.executeGetPluginTools(pluginName)
 	case tc.Name == "spawn_child":
 		return a.executeSpawnChild(tc)
 	case tc.Name == "child_result":
