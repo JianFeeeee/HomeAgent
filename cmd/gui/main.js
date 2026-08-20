@@ -1695,6 +1695,188 @@ function stopDeviceBridge() {
   }
 }
 
+// ============ 定时授权调度（睡眠期间自动撤销，恢复时自动恢复） ============
+let schedAuthTimer = null;
+let schedAuthState = null; // "revoked" | "restored" 防抖
+
+// 读授权调度配置 prefs.deviceBridge.authSchedule = {revokeTime:"23:00", restoreTime:"07:00", enabled}
+function getAuthSchedule() {
+  try {
+    const prefs = loadGuiPrefs();
+    const db = prefs.deviceBridge || {};
+    const s = db.authSchedule || {};
+    return {
+      enabled: !!s.enabled,
+      revokeTime: s.revokeTime || "",
+      restoreTime: s.restoreTime || "",
+    };
+  } catch (e) {
+    return { enabled: false, revokeTime: "", restoreTime: "" };
+  }
+}
+
+// 当前 HH:mm
+function nowHHMM() {
+  const d = new Date();
+  return (
+    String(d.getHours()).padStart(2, "0") +
+    ":" +
+    String(d.getMinutes()).padStart(2, "0")
+  );
+}
+
+// 比较 HH:mm；返回 true 表示 a <= b
+function timeLeq(a, b) {
+  return a <= b;
+}
+
+// 执行授权开关（经 webui 反代 /api/v1/device/auth）
+async function setDeviceAuthorized(authorized) {
+  try {
+    // URL + cookie 优先 authRule；否则从 connections.json 取当前连接（webui 反代）
+    let base = "";
+    let cookie = "";
+    if (authRule && authRule.url) {
+      base = authRule.url.replace(/\/+$/, "");
+      cookie =
+        (authRule.cookie || "") +
+        (authRule.slSession ? "; " + authRule.slSession : "");
+    } else {
+      try {
+        const conns = loadConnections();
+        const cur =
+          conns.connections.find((c) => c.id === conns.currentId) ||
+          conns.connections[0];
+        if (cur && cur.url) {
+          base = cur.url.replace(/\/+$/, "");
+          cookie = cur.cookie || "";
+        }
+      } catch (e2) {}
+    }
+    if (!base || !cookie) {
+      console.log("[auth-schedule] no base/cookie, skip");
+      return;
+    }
+    const url = base + "/api/v1/device/auth";
+    const body = JSON.stringify({
+      device_id: deviceBridgeId,
+      authorize: authorized,
+    });
+    // 用 node https 直连（带 cookie + 跟随 302），不走 Electron session（避免 jar 会话差异）
+    const resp = await new Promise((resolve, reject) => {
+      const https = require("https");
+      const u = new URL(url);
+      const req = https.request(
+        {
+          hostname: u.hostname,
+          port: u.port || 443,
+          path: u.pathname + u.search,
+          method: "POST",
+          rejectUnauthorized: false,
+          headers: {
+            "Content-Type": "application/json",
+            "User-Agent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36",
+            Cookie: cookie,
+            "Content-Length": Buffer.byteLength(body),
+          },
+        },
+        (res) => {
+          let buf = "";
+          res.on("data", (c) => (buf += c));
+          res.on("end", () => {
+            if (
+              res.statusCode >= 300 &&
+              res.statusCode < 400 &&
+              res.headers.location
+            ) {
+              // 跟随 302 到登录域后重试一次
+              const loc = res.headers.location;
+              const lurl = loc.startsWith("http")
+                ? loc
+                : new URL(loc, url).toString();
+              const req2 = https.request(
+                {
+                  ...u2opts(lurl),
+                  method: "POST",
+                  headers: {
+                    "Content-Type": "application/json",
+                    "User-Agent": "Mozilla/5.0",
+                    Cookie: cookie,
+                    "Content-Length": Buffer.byteLength(body),
+                  },
+                },
+                (r2) => {
+                  let b2 = "";
+                  r2.on("data", (c) => (b2 += c));
+                  r2.on("end", () =>
+                    resolve({ status: r2.statusCode, body: b2 }),
+                  );
+                },
+              );
+              req2.write(body);
+              req2.end();
+              return;
+            }
+            resolve({ status: res.statusCode, body: buf });
+          });
+        },
+      );
+      req.on("error", reject);
+      req.write(body);
+      req.end();
+    });
+    console.log(
+      "[auth-schedule] set authorized=" +
+        authorized +
+        " -> HTTP " +
+        resp.status +
+        " " +
+        resp.body.slice(0, 60),
+    );
+  } catch (e) {
+    console.error("[auth-schedule] set authorized failed: " + e.message);
+  }
+}
+
+// 调度器：每分钟检查，到点执行撤销/恢复
+function startScheduledAuth() {
+  if (schedAuthTimer) clearInterval(schedAuthTimer);
+  const check = async () => {
+    try {
+      const s = getAuthSchedule();
+      if (!s.enabled || !s.revokeTime) return;
+      if (!deviceBridgeId) return;
+      const now = nowHHMM();
+      // 支持跨天：revoke 23:00 restore 07:00
+      let shouldRevoke = false;
+      if (s.revokeTime && s.restoreTime) {
+        if (s.revokeTime <= s.restoreTime) {
+          // 同日: revoke <= now <= restore 撤销
+          shouldRevoke =
+            timeLeq(s.revokeTime, now) && timeLeq(now, s.restoreTime);
+        } else {
+          // 跨天: now >= revoke 或 now <= restore 撤销
+          shouldRevoke =
+            timeLeq(s.revokeTime, now) || timeLeq(now, s.restoreTime);
+        }
+      } else if (s.revokeTime) {
+        shouldRevoke = timeLeq(s.revokeTime, now);
+      }
+      if (shouldRevoke && schedAuthState !== "revoked") {
+        schedAuthState = "revoked";
+        await setDeviceAuthorized(false);
+      } else if (!shouldRevoke && schedAuthState === "revoked") {
+        schedAuthState = "restored";
+        await setDeviceAuthorized(true);
+      } else if (!shouldRevoke && schedAuthState === null) {
+        schedAuthState = "restored";
+      }
+    } catch (e) {}
+  };
+  check();
+  schedAuthTimer = setInterval(check, 60000);
+}
+
 // ============ 系统托盘（惰性 + 安全降级） ============
 let tray = null;
 // 托盘菜单动态数据
@@ -1883,6 +2065,12 @@ app.whenReady().then(async () => {
   } catch (e) {
     console.error("[tray] whenReady call: " + e.message);
   }
+  // 定时撤销/恢复授权：按 prefs.deviceBridge.authSchedule {revokeTime, restoreTime} 每分钟检查
+  try {
+    startScheduledAuth();
+  } catch (e) {
+    console.error("[auth-schedule] start failed: " + e.message);
+  }
   createWindow();
 });
 
@@ -1943,6 +2131,10 @@ function loadGuiPrefs() {
           enabled: !!db.enabled,
           gateway: db.gateway || "",
           token: db.token || "",
+          screensueDisplay: db.screensueDisplay || "0",
+          screensueDuration: db.screensueDuration || "0",
+          exec: db.exec || {},
+          authSchedule: db.authSchedule || {},
         },
       };
     }
@@ -1951,7 +2143,15 @@ function loadGuiPrefs() {
     autoLaunch: false,
     silentStart: false,
     exitToTray: true,
-    deviceBridge: { enabled: true, gateway: "", token: "" },
+    deviceBridge: {
+      enabled: true,
+      gateway: "",
+      token: "",
+      screensueDisplay: "0",
+      screensueDuration: "0",
+      exec: {},
+      authSchedule: {},
+    },
   };
 }
 
@@ -1984,15 +2184,18 @@ let guiPrefs = loadGuiPrefs();
 ipcMain.handle("displays:list", () => {
   try {
     const ds = screen.getAllDisplays() || [];
-    return ds.map((d, i) => ({
-      index: i,
-      name: d.label || "显示器" + (i + 1),
-      id: d.id,
-      size: d.bounds ? d.size.width + "x" + d.size.height : "",
-      primary:
-        d.id ===
-        (screen.getPrimaryDisplay ? screen.getPrimaryDisplay().id : -1),
-    }));
+    return ds.map((d, i) => {
+      const lbl = (d.label || "").trim();
+      return {
+        index: i,
+        name: lbl || "显示器" + (i + 1),
+        id: d.id,
+        size: d.bounds ? d.bounds.width + "x" + d.bounds.height : "",
+        primary:
+          d.id ===
+          (screen.getPrimaryDisplay ? screen.getPrimaryDisplay().id : -1),
+      };
+    });
   } catch (e) {
     return [];
   }
@@ -2011,6 +2214,7 @@ ipcMain.handle("device-bridge:get", () => {
     address: deviceBridgeAddr,
     screensueDisplay: db.screensueDisplay || "0",
     exec: db.exec || {},
+    authSchedule: db.authSchedule || {},
   };
 });
 
@@ -2037,6 +2241,9 @@ ipcMain.handle("device-bridge:set", (_, cfg) => {
     connected: !!deviceBridge,
     deviceId: deviceBridgeId,
     address: deviceBridgeAddr,
+    screensueDisplay: db.screensueDisplay || "0",
+    exec: db.exec || {},
+    authSchedule: db.authSchedule || {},
   };
 });
 

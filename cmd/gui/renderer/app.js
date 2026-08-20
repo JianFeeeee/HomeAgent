@@ -1,3 +1,22 @@
+// 全局 JS 错误捕获（透传到 gui.log 便于诊断）
+window.onerror = (msg, src, line, col, err) => {
+  try {
+    if (window.homeagent && window.homeagent.log)
+      window.homeagent.log(
+        "JS-ERR " + msg + " @ " + src + ":" + line + ":" + col,
+      );
+  } catch (e) {}
+};
+window.onunhandledrejection = (e) => {
+  try {
+    if (window.homeagent && window.homeagent.log)
+      window.homeagent.log(
+        "JS-REJ " +
+          (e && e.reason ? String(e.reason).slice(0, 200) : "unknown"),
+      );
+  } catch (e2) {}
+};
+
 // ===== State =====
 const state = {
   status: {},
@@ -466,11 +485,44 @@ async function api(p, o) {
     throw new Error(__("连接超时或失败", "Timeout or connection failed"));
   }
   clearTimeout(timer);
-  if (r.status === 401) throw new Error(__("认证失败", "unauthorized"));
+  if (r.status === 401) {
+    // 认证失败：尝试自动重新登录一次（避免 cookie 过期后界面持续报错）
+    if (window._haReloginLock) throw new Error(__("认证失败", "unauthorized"));
+    window._haReloginLock = true;
+    try {
+      await syncConnAuth();
+      await new Promise((res2) => setTimeout(res2, 800));
+    } catch (e2) {}
+    window._haReloginLock = false;
+    // 重试一次
+    return api(p, o);
+  }
   if (opts.raw) return r;
+  var body = await r.text();
+  // 网关会话过期：返回 200 但内容为登录页 HTML —— 自动重登后重试
+  if (
+    body.indexOf("THEME_PLACEHOLDER") !== -1 ||
+    body.indexOf("统一门户登录") !== -1 ||
+    (body.indexOf("<title>") !== -1 && body.indexOf("login") !== -1)
+  ) {
+    if (window._haReloginLock) throw new Error(__("认证失败", "unauthorized"));
+    window._haReloginLock = true;
+    try {
+      await syncConnAuth();
+      await new Promise((res2) => setTimeout(res2, 800));
+    } catch (e2) {}
+    window._haReloginLock = false;
+    return api(p, o);
+  }
   var ct = r.headers.get("content-type") || "";
-  if (ct.includes("json")) return r.json();
-  return r.text();
+  if (ct.includes("json")) {
+    try {
+      return JSON.parse(body);
+    } catch (e3) {
+      return body;
+    }
+  }
+  return body;
 }
 
 // ===== Navigation =====
@@ -4899,6 +4951,7 @@ function renderDevices() {
   }
   var curGateway = dbc.gateway || webuiUrl || "";
   var dbExec = dbc.exec || {};
+  var dbAuthSchedule = dbc.authSchedule || {};
   var dispIdx = dbc.screensueDisplay || "0";
   var dispOpts = (state.displays || [])
     .map(
@@ -4973,6 +5026,22 @@ function renderDevices() {
         escHtml(dbExec.boxDir || "") +
         '" placeholder="沙箱目录" style="flex:1;min-width:120px;font-size:13px;padding:3px 6px;border-radius:4px;border:1px solid var(--border-color);background:var(--bg-input);color:var(--text-primary)">'
       : '<input id="dev-bridge-boxdir" style="display:none">') +
+    "</div>" +
+    // 定时撤销/恢复授权（睡眠期间自动撤销，醒来自动恢复）
+    '<div style="display:flex;gap:6px;align-items:center;flex-wrap:wrap">' +
+    "<label style='font-size:13px'>" +
+    __("定时撤销授权", "Scheduled revoke") +
+    '</label><label class="switch" style="margin-right:4px"><input type="checkbox" id="dev-auth-sched-enabled" ' +
+    (dbAuthSchedule && dbAuthSchedule.enabled ? "checked" : "") +
+    "><span></span></label>" +
+    __("撤销", "Revoke") +
+    ' <input type="time" id="dev-auth-revoke" value="' +
+    escHtml((dbAuthSchedule && dbAuthSchedule.revokeTime) || "") +
+    '" style="font-size:13px;padding:2px 6px;border-radius:4px;border:1px solid var(--border-color);background:var(--bg-input);color:var(--text-primary)">' +
+    __("恢复", "Restore") +
+    ' <input type="time" id="dev-auth-restore" value="' +
+    escHtml((dbAuthSchedule && dbAuthSchedule.restoreTime) || "") +
+    '" style="font-size:13px;padding:2px 6px;border-radius:4px;border:1px solid var(--border-color);background:var(--bg-input);color:var(--text-primary)">' +
     "</div>" +
     '<button class="btn btn-ghost btn-sm" onclick="saveBridgeChannel()">' +
     __("保存并应用", "Save & Apply") +
@@ -5080,6 +5149,15 @@ async function saveBridgeChannel() {
     if (sandbox) ex.sandbox = sandbox.value || "off";
     if (boxdir) ex.boxDir = boxdir.value.trim();
     cfg.exec = ex;
+    // 定时撤销/恢复授权
+    var schedEnabled = document.getElementById("dev-auth-sched-enabled");
+    var schedRevoke = document.getElementById("dev-auth-revoke");
+    var schedRestore = document.getElementById("dev-auth-restore");
+    cfg.authSchedule = {
+      enabled: !!(schedEnabled && schedEnabled.checked),
+      revokeTime: schedRevoke ? schedRevoke.value || "" : "",
+      restoreTime: schedRestore ? schedRestore.value || "" : "",
+    };
     var r = await window.homeagent.deviceBridge.set(cfg);
     state.dbConfig = r || state.dbConfig;
     toast(__("设备通道已保存并应用", "Device channel saved & applied"));
