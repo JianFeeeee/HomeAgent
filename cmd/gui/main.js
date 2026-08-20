@@ -1,4 +1,5 @@
-const { app, BrowserWindow, ipcMain, Menu } = require("electron");
+const { app, BrowserWindow, ipcMain, Menu, screen } = require("electron");
+let screensueWin = null; // screensue 展示窗口（独立于主窗口，显示在配置的屏幕）
 // 设备桥直连远程网关：绕过系统代理（本机 clash 代理会导致 wss 被雷池 403）
 try {
   app.commandLine.appendSwitch("no-proxy-server");
@@ -53,10 +54,25 @@ function installAuthRule() {
       }
       // Electron 会自动附带 jar 中 Cookie（含外部网关 Set-Cookie 的 sl-session）。
       // 这里再显式合并持久化 cookie 与 sl-session 兜底，避免网关再 302。
+      // 注意去重：多个 sl-session 叠加会让 portal 网关解析冲突 → 401
       const extra = [authRule.cookie, authRule.slSession].filter(Boolean);
       if (extra.length) {
         const existing = h["Cookie"] || "";
-        h["Cookie"] = [existing].concat(extra).filter(Boolean).join("; ");
+        const merged = [existing].concat(extra).filter(Boolean).join("; ");
+        // 按 cookie 名去重：保留第一个，后续同名丢弃（网关只认首值）
+        const seen = {};
+        const dedup = merged
+          .split("; ")
+          .map((s) => s.trim())
+          .filter((s) => {
+            const eq = s.indexOf("=");
+            const name = eq > 0 ? s.slice(0, eq) : s;
+            if (seen[name]) return false;
+            seen[name] = true;
+            return true;
+          })
+          .join("; ");
+        h["Cookie"] = dedup;
       }
     }
     callback({ requestHeaders: h });
@@ -794,6 +810,80 @@ const devOs = require("os");
 let deviceBridge = null; // 当前活动设备桥
 let deviceBridgeId = ""; // 设备 meta device_id（hello 后可用于 cmd_result）
 let deviceBridgeAddr = ""; // 设备桥网关地址
+// 音频/媒体接收聚合缓冲（服务端分块推送二进制→聚合→播放）
+let speechAccum = null;
+
+// 播放设备收到的音频（由 cmd_speech_end 触发，二进制已聚合）
+function playDeviceAudio(audioBuf, mime, reqId) {
+  try {
+    const os = require("os");
+    const path = require("path");
+    const fs = require("fs");
+    const porcp = require("child_process");
+    const ext =
+      (mime || "").indexOf("mp3") === -1
+        ? (mime || "").indexOf("ogg") === -1
+          ? "wav"
+          : "ogg"
+        : "mp3";
+    const tmp = path.join(os.tmpdir(), "ha_speech_" + Date.now() + "." + ext);
+    fs.writeFileSync(tmp, audioBuf);
+    const platform = process.platform;
+    let cmd = null;
+    let args = [];
+    if (platform === "linux") {
+      if (porcp.spawnSync("which", ["aplay"]).status === 0) {
+        cmd = "aplay";
+        args = [tmp];
+      } else if (porcp.spawnSync("which", ["paplay"]).status === 0) {
+        cmd = "paplay";
+        args = [tmp];
+      } else if (porcp.spawnSync("which", ["ffplay"]).status === 0) {
+        cmd = "ffplay";
+        args = ["-nodisp", "-autoexit", "-loglevel", "quiet", tmp];
+      }
+    } else if (platform === "darwin") {
+      cmd = "afplay";
+      args = [tmp];
+    } else if (platform === "win32") {
+      cmd = "powershell";
+      args = [
+        "-Command",
+        "(New-Object Media.SoundPlayer '" + tmp + "').PlaySync()",
+      ];
+    }
+    if (cmd) {
+      porcp.execFile(cmd, args, { timeout: 60000 }, () => {
+        try {
+          fs.unlinkSync(tmp);
+        } catch (e2) {}
+      });
+      // 回执：媒体收到并开始播放
+      sendCmdResult(
+        reqId || "",
+        baseResult(
+          reqId || "",
+          "ok",
+          "audio played: " + audioBuf.length + " bytes",
+          "",
+        ),
+      );
+    } else {
+      // 无播放器，至少落盘供手动查看，回执带文件路径
+      sendCmdResult(
+        reqId || "",
+        baseResult(
+          reqId || "",
+          "ok",
+          "audio saved: " + tmp + " (" + audioBuf.length + " bytes)",
+          "",
+        ),
+      );
+    }
+  } catch (e) {
+    console.log("[device-bridge] play audio error: " + e.message);
+  }
+}
 
 // 建立到 remotedevice WS 网关连接，返回 {send(obj), close()}，消息经 onMsg 回调。
 function connectDeviceWS(url, token, onMsg) {
@@ -890,6 +980,7 @@ function connectDeviceWS(url, token, onMsg) {
         opened = true;
         resolve({
           send: (obj) => sendDeviceFrame(sock, JSON.stringify(obj)),
+          __sock: sock, // 暴露底层 socket 供二进制分块发送
           close: () => sock.destroy(),
         });
       }
@@ -913,8 +1004,42 @@ function connectDeviceWS(url, token, onMsg) {
         buf = buf.slice(off + len);
         if (opcode === 0x1) {
           try {
-            onMsg(JSON.parse(payload.toString("utf8")));
+            const obj = JSON.parse(payload.toString("utf8"));
+            if (obj && obj.op === "cmd_speech_start") {
+              // 收到音频开始：初始化聚合缓冲
+              try {
+                if (speechAccum) speechAccum = null;
+              } catch (e2) {}
+              speechAccum = {
+                reqId: obj.req_id || "",
+                kind: obj.kind || "speech",
+                mime: obj.mime || "audio/wav",
+                total: obj.total || 0,
+                chunks: [],
+                got: 0,
+              };
+              continue;
+            }
+            if (obj && obj.op === "cmd_speech_end") {
+              // 音频结束：合并块并播放
+              const reqId = obj.req_id || "";
+              if (speechAccum) {
+                try {
+                  const audio = Buffer.concat(speechAccum.chunks);
+                  playDeviceAudio(audio, speechAccum.mime, reqId);
+                } catch (e2) {}
+                speechAccum = null;
+              }
+              continue;
+            }
+            onMsg(obj);
           } catch (e) {}
+        } else if (opcode === 0x2) {
+          // 二进制帧：接收音频数据块（若处于聚合状态）
+          if (speechAccum) {
+            speechAccum.chunks.push(payload);
+            speechAccum.got += payload.length;
+          }
         } else if (opcode === 0x8) {
           sock.destroy();
           return;
@@ -954,13 +1079,104 @@ function sendDeviceFrame(sock, text) {
   sock.write(Buffer.concat([hdr, mask, masked]));
 }
 
-// 处理网关 WS 消息：hello_ack/bind_ack/cmd 等
+// 发送 WS 二进制帧（0x2）——用于大体积数据（如录像）分块回传
+function sendDeviceBinaryFrame(sock, buf) {
+  const mask = crypto.randomBytes(4);
+  const masked = Buffer.from(buf);
+  for (let i = 0; i < masked.length; i++) masked[i] ^= mask[i % 4];
+  const len = masked.length;
+  let hdr;
+  if (len < 126) {
+    hdr = Buffer.from([0x82, 0x80 | len]);
+  } else if (len < 65536) {
+    hdr = Buffer.alloc(4);
+    hdr[0] = 0x82;
+    hdr[1] = 0x80 | 126;
+    hdr.writeUInt16BE(len, 2);
+  } else {
+    hdr = Buffer.alloc(10);
+    hdr[0] = 0x82;
+    hdr[1] = 0x80 | 127;
+    hdr.writeBigUInt64BE(BigInt(len), 2);
+  }
+  sock.write(Buffer.concat([hdr, mask, masked]));
+}
+// 通过设备通道以二进制分块回传大体积数据（如录像）。
+// 协议（与服务端协商）：
+//   cmd_data_start {op, req_id, kind, total, chunk_size, mime}  —— 文本帧
+//   <N 个二进制帧 0x2>                                          —— video bytes
+//   cmd_data_end   {op, req_id, status:ok|error, error?}        —— 文本帧
+// 服务端按 req_id 聚合二进制块 → 存入 cmdresult，供 device_ctl_cmdresult 取回。
+function sendDeviceDataChunked(reqId, kind, mime, buf) {
+  if (!deviceBridge || !deviceBridge.send) {
+    sendCmdResult(
+      reqId,
+      baseResult(reqId, "error", "", "device bridge not connected"),
+    );
+    return;
+  }
+  // 分块大小 8KB
+  const CHUNK = 8192;
+  // 取底层 socket 直接发二进制帧（deviceBridge.send 是文本封装）
+  const total = buf.length;
+  // 控制帧走文本协议（deviceBridge.send 封装）
+  try {
+    // 用 send 发文本帧控制头（start）
+    deviceBridge.send({
+      op: "cmd_data_start",
+      req_id: reqId,
+      kind: kind,
+      mime: mime || "application/octet-stream",
+      total: total,
+      chunk_size: CHUNK,
+    });
+  } catch (e) {}
+  // 二进制块：需要底层 socket。这里用包装的 raw send
+  // sendDeviceRaw 通过 deviceBridge 的隐藏引用发二进制
+  const rawSock = deviceBridge.__sock;
+  if (rawSock && !rawSock.destroyed) {
+    for (let off = 0; off < total; off += CHUNK) {
+      sendDeviceBinaryFrame(rawSock, buf.slice(off, off + CHUNK));
+    }
+  } else {
+    // 无 raw socket 时回退文本 base64（服务端老协议兜底）
+    sendCmdResult(
+      reqId,
+      baseResult(
+        reqId,
+        "ok",
+        "data:" + mime + ";base64," + buf.toString("base64"),
+        "",
+      ),
+    );
+    return;
+  }
+  try {
+    deviceBridge.send({
+      op: "cmd_data_end",
+      req_id: reqId,
+      status: "ok",
+      total: total,
+    });
+  } catch (e) {}
+}
+
+// 处理网关 WS 消息：hello_ack/bind_ack/cmd 等。命令类型由服务端 cmd_type 指定（shell/homeagent）。
 function onDeviceMsg(msg) {
   if (!msg || typeof msg !== "object") return;
+  console.log(
+    "[device-bridge] recv op=" +
+      (msg.op || "") +
+      " cmd_type=" +
+      (msg.cmd_type || "") +
+      " cmd=" +
+      String(msg.command || msg.cmd || "").slice(0, 60),
+  );
   const op = msg.op || "";
   if (op === "cmd") {
     const command = msg.command || msg.cmd || "";
     const reqId = msg.req_id || msg.id || "";
+    const cmdType = msg.cmd_type || "shell";
     if (!command) return;
     // 记录远控活动并刷新托盘菜单
     trayLastCmd = { cmd: command, at: Date.now(), result: "执行中…" };
@@ -968,57 +1184,14 @@ function onDeviceMsg(msg) {
     try {
       rebuildTrayMenu();
     } catch (e) {}
-    const cp = require("child_process");
-    if (argsSafe(command)) {
-      cp.exec(
-        command,
-        { timeout: 15000, maxBuffer: 8192 },
-        (err, stdout, stderr) => {
-          const resp = {
-            op: "cmd_result",
-            req_id: reqId,
-            device_id: deviceBridgeId,
-            status: err ? "error" : "ok",
-            output: (stdout || "") + (stderr || ""),
-            error: err ? err.message : "",
-          };
-          if (deviceBridge && deviceBridge.send) {
-            try {
-              deviceBridge.send(resp);
-            } catch (e) {}
-          }
-          // 更新结果到托盘
-          if (trayLastCmd) {
-            trayLastCmd.result =
-              resp.status === "ok"
-                ? String(resp.output || "").slice(0, 40)
-                : "错误: " + String(resp.error || "");
-            try {
-              rebuildTrayMenu();
-            } catch (e) {}
-          }
-        },
-      );
-    } else {
-      const resp = {
-        op: "cmd_result",
-        req_id: reqId,
-        device_id: deviceBridgeId,
-        status: "denied",
-        output: "",
-        error: "command not allowed",
-      };
-      if (deviceBridge && deviceBridge.send) {
-        try {
-          deviceBridge.send(resp);
-        } catch (e) {}
+    try {
+      if (cmdType === "homeagent" || command.indexOf("homeagent-") === 0) {
+        executeHomeagentCmd(command.replace(/^homeagent-/, ""), reqId);
+      } else {
+        executeShellCmd(command, reqId);
       }
-      if (trayLastCmd) {
-        trayLastCmd.result = "已拒绝(白名单)";
-        try {
-          rebuildTrayMenu();
-        } catch (e) {}
-      }
+    } catch (e) {
+      console.log("[device-bridge] exec error: " + e.message);
     }
   } else if (op === "hello_ack" || op === "bind_ack") {
     console.log(
@@ -1027,6 +1200,417 @@ function onDeviceMsg(msg) {
     try {
       rebuildTrayMenu();
     } catch (e) {}
+  }
+}
+
+// 统一发送命令结果（回执 + 托盘更新）。兼容两种调用：sendCmdResult(resp) 或 sendCmdResult(reqId, resp)
+function sendCmdResult(a, b) {
+  const resp = b || a;
+  console.log(
+    "[device-bridge] send result op=cmd_result status=" +
+      (resp.status || "") +
+      " req=" +
+      (resp.req_id || ""),
+  );
+  if (deviceBridge && deviceBridge.send) {
+    try {
+      deviceBridge.send(resp);
+    } catch (e) {}
+  }
+  if (trayLastCmd) {
+    trayLastCmd.result =
+      resp.status === "ok"
+        ? String(resp.output || "").slice(0, 40)
+        : "错误: " + String(resp.error || "");
+    try {
+      rebuildTrayMenu();
+    } catch (e) {}
+  }
+}
+
+function baseResult(reqId, status, output, error) {
+  return {
+    op: "cmd_result",
+    req_id: reqId,
+    device_id: deviceBridgeId,
+    status: status,
+    output: output || "",
+    error: error || "",
+  };
+}
+
+// 读取设备命令执行配置（gui-prefs.deviceBridge.exec）
+function getExecConfig() {
+  try {
+    const prefs = loadGuiPrefs();
+    const db = prefs.deviceBridge || {};
+    const ex = db.exec || {};
+    return {
+      cwd: ex.cwd || "",
+      sandbox: ex.sandbox || "off", // off | home | box
+      boxDir: ex.boxDir || "",
+      timeout: parseInt(ex.timeout || "15", 10) || 15,
+      maxBuffer: (parseInt(ex.maxBuffer || "8192", 10) || 8192) * 1024,
+    };
+  } catch (e) {
+    return {
+      cwd: "",
+      sandbox: "off",
+      boxDir: "",
+      timeout: 15,
+      maxBuffer: 8192 * 1024,
+    };
+  }
+}
+
+// shell 命令：按 exec 配置（cwd/沙箱/超时）执行
+function executeShellCmd(command, reqId) {
+  console.log(
+    "[device-bridge] execShell cmd=" +
+      String(command).slice(0, 60) +
+      " req=" +
+      reqId,
+  );
+  const cp = require("child_process");
+  const ex = getExecConfig();
+  if (!argsSafe(command)) {
+    sendCmdResult(
+      reqId,
+      baseResult(reqId, "denied", "", "command not allowed"),
+    );
+    return;
+  }
+  // 沙箱策略：home=锁定用户主目录; box=锁定指定目录; off=cwd 或默认
+  const os = require("os");
+  let cwd = ex.cwd || os.homedir() || process.cwd();
+  if (ex.sandbox === "home") cwd = os.homedir() || cwd;
+  else if (ex.sandbox === "box" && ex.boxDir) cwd = ex.boxDir;
+  else if (ex.sandbox === "box" && !ex.boxDir) {
+    sendCmdResult(
+      reqId,
+      baseResult(reqId, "denied", "", "sandbox=box 需配置 boxDir"),
+    );
+    return;
+  }
+  cp.exec(
+    command,
+    {
+      cwd: cwd,
+      timeout: ex.timeout * 1000,
+      maxBuffer: ex.maxBuffer,
+      env: process.env,
+    },
+    (err, stdout, stderr) => {
+      sendCmdResult(
+        reqId,
+        baseResult(
+          reqId,
+          err ? "error" : "ok",
+          (stdout || "") + (stderr || ""),
+          err ? err.message : "",
+        ),
+      );
+    },
+  );
+}
+
+// homeagent 内置能力分发（与服务端 device_ctl_cmdrun 的 homeagent-* 对齐）
+function executeHomeagentCmd(capability, reqId) {
+  const name = String(capability || "")
+    .trim()
+    .split(/[ >\n]/)[0];
+  switch (name) {
+    case "camerasue": {
+      // 摄像头：camerasue=抓拍单张；camerasue <秒>=录制 N 秒视频，返回 base64
+      const argStr = String(capability || "")
+        .replace(/^camerasue/, "")
+        .trim();
+      const durMatch = /^\d+$/.test(argStr) ? parseInt(argStr, 10) : 0;
+      const isVideo = durMatch > 0;
+      const cp = require("child_process");
+      const os = require("os");
+      const path = require("path");
+      const fs = require("fs");
+      if (isVideo) {
+        // 录像：ffmpeg 录 N 秒 mp4 到临时文件
+        const outFile = path.join(os.tmpdir(), "ha_cam_" + Date.now() + ".mp4");
+        const args = [
+          "-f",
+          "v4l2",
+          "-i",
+          "/dev/video0",
+          "-t",
+          String(durMatch),
+          "-pix_fmt",
+          "yuv420p",
+          "-c:v",
+          "libx264",
+          "-f",
+          "mp4",
+          outFile,
+        ];
+        cp.execFile(
+          "ffmpeg",
+          args,
+          { timeout: (durMatch + 15) * 1000, maxBuffer: 64 * 1024 * 1024 },
+          (err) => {
+            if (err || !fs.existsSync(outFile)) {
+              sendCmdResult(
+                reqId,
+                baseResult(
+                  reqId,
+                  "error",
+                  "",
+                  "camera record failed: " + (err ? err.message : "no file"),
+                ),
+              );
+              return;
+            }
+            try {
+              const data = fs.readFileSync(outFile);
+              fs.unlinkSync(outFile);
+              // 录像以二进制分块经设备通道回传（协议 cmd_data_start/二进制帧/cmd_data_end）
+              sendDeviceDataChunked(reqId, "camera_video", "video/mp4", data);
+            } catch (e2) {
+              sendCmdResult(
+                reqId,
+                baseResult(
+                  reqId,
+                  "error",
+                  "",
+                  "camera record read failed: " + e2.message,
+                ),
+              );
+            }
+          },
+        );
+        return;
+      }
+      // 抓拍单张 jpeg
+      const args = [
+        "-f",
+        "v4l2",
+        "-i",
+        "/dev/video0",
+        "-frames:v",
+        "1",
+        "-f",
+        "image2pipe",
+        "-vcodec",
+        "mjpeg",
+        "pipe:1",
+      ];
+      cp.execFile(
+        "ffmpeg",
+        args,
+        { timeout: 10000, maxBuffer: 8 * 1024 * 1024 },
+        (err, stdout) => {
+          if (err || !stdout) {
+            sendCmdResult(
+              reqId,
+              baseResult(
+                reqId,
+                "error",
+                "",
+                "camera capture failed: " + (err ? err.message : "no data"),
+              ),
+            );
+            return;
+          }
+          const b64 = Buffer.from(stdout).toString("base64");
+          sendCmdResult(
+            reqId,
+            baseResult(reqId, "ok", "data:image/jpeg;base64," + b64, ""),
+          );
+        },
+      );
+      return;
+    }
+    case "screensue": {
+      // 在配置的目标屏幕上拉起独立窗口显示内容（支持文字 / HTML）
+      var duration = 0; // 显示时长(秒)，0=常驻
+      var raw = String(capability || "")
+        .replace(/^screensue/, "")
+        .trim();
+      // 配置: gui-prefs.deviceBridge.screensueDisplay / screensueDuration
+      var dispIdx = 0;
+      try {
+        const prefs = loadGuiPrefs();
+        const db = prefs.deviceBridge || {};
+        dispIdx = parseInt(db.screensueDisplay || "0", 10) || 0;
+        duration = parseInt(db.screensueDuration || "0", 10) || 0;
+      } catch (e) {}
+      // 参数支持 "screensue [时长秒] 内容"：首个纯数字 token 作为时长
+      const tokens = raw.split(/\s+/);
+      if (tokens.length > 1 && /^\d+$/.test(tokens[0])) {
+        duration = parseInt(tokens[0], 10);
+        raw = tokens.slice(1).join(" ");
+      }
+      const display =
+        (screen.getAllDisplays() || [])[dispIdx] || screen.getAllDisplays()[0];
+      const area = display
+        ? display.workArea
+        : { x: 0, y: 0, width: 800, height: 480 };
+      const w = Math.min(parseInt(area.width || 800, 10) - 40, 900);
+      const h = Math.min(parseInt(area.height || 600, 10) - 40, 560);
+      const html = /<\/?[a-z][\s\S]*>/i.test(raw)
+        ? raw
+        : "<div style='font-family:sans-serif;display:flex;flex-direction:column;justify-content:center;align-items:center;height:100%;padding:24px;box-sizing:border-box'><h1 style='margin:0 0 16px;color:#ff7fac'>HomeAgent</h1><p style='font-size:16px;line-height:1.6;white-space:pre-wrap;word-break:break-all'>" +
+          String(raw || "HomeAgent 远程屏幕提示").replace(/</g, "&lt;") +
+          "</p></div>";
+      try {
+        if (screensueWin && !screensueWin.isDestroyed()) screensueWin.destroy();
+        screensueWin = new BrowserWindow({
+          x: area.x + 20,
+          y: area.y + 20,
+          width: w,
+          height: h,
+          alwaysOnTop: true,
+          frame: false,
+          resizable: true,
+          title: "HomeAgent · screensue",
+          webPreferences: { nodeIntegration: false, contextIsolation: true },
+        });
+        screensueWin.setAlwaysOnTop(true, "screen-saver");
+        screensueWin.loadURL(
+          "data:text/html;charset=utf-8," +
+            encodeURIComponent(
+              "<html><head><meta charset='utf-8'><style>body{margin:0;background:#0b1020;color:#eef1f8}</style></head><body>" +
+                html +
+                "</body></html>",
+            ),
+        );
+        const closeHint =
+          "<div style='position:fixed;top:8px;right:12px;font-size:12px;color:#77809a;background:rgba(20,26,44,.7);padding:2px 10px;border-radius:10px;cursor:pointer' onclick='window.close()'>× 关闭</div>";
+        screensueWin.webContents.on("did-finish-load", () => {
+          try {
+            screensueWin.webContents.executeJavaScript(
+              "document.body.insertAdjacentHTML('beforeend', '" +
+                closeHint.replace(/'/g, "\\'") +
+                "');",
+            );
+          } catch (e2) {}
+        });
+        // 显示时长：duration>0 时定时自动关闭
+        if (duration > 0) {
+          setTimeout(() => {
+            try {
+              if (screensueWin && !screensueWin.isDestroyed()) {
+                screensueWin.destroy();
+                screensueWin = null;
+              }
+            } catch (e3) {}
+          }, duration * 1000);
+        }
+        sendCmdResult(
+          reqId,
+          baseResult(
+            reqId,
+            "ok",
+            "screensue shown on display " +
+              dispIdx +
+              (duration > 0 ? " for " + duration + "s" : "") +
+              ": " +
+              raw.slice(0, 80),
+            "",
+          ),
+        );
+      } catch (e) {
+        sendCmdResult(
+          reqId,
+          baseResult(reqId, "error", "", "screensue failed: " + e.message),
+        );
+      }
+      return;
+    }
+    case "speakeruse": {
+      // 音频播报：speakeruse <文字> 用语音朗读（TTS）。
+      // 依赖系统 TTS；Linux 用 espeak/festival，macOS 用 say，Windows 用 PowerShell SAPI。
+      const text = String(capability || "")
+        .replace(/^speakeruse/, "")
+        .trim();
+      const cp = require("child_process");
+      const platform = process.platform;
+      let cmd = null;
+      let args = [];
+      if (platform === "linux") {
+        // 优先尝试 espeak，其次 festival
+        if (cp.spawnSync("which", ["espeak"]).status === 0) {
+          cmd = "espeak";
+          args = [text];
+        } else if (cp.spawnSync("which", ["festival"]).status === 0) {
+          cmd = "bash";
+          args = [
+            "-c",
+            "echo '" +
+              String(text).replace(/'/g, "'\\''") +
+              "' | festival --tts",
+          ];
+        } else {
+          sendCmdResult(
+            reqId,
+            baseResult(
+              reqId,
+              "error",
+              "",
+              "speakeruse: no TTS engine (espeak/festival)",
+            ),
+          );
+          return;
+        }
+      } else if (platform === "darwin") {
+        cmd = "say";
+        args = [text];
+      } else if (platform === "win32") {
+        cmd = "powershell";
+        args = [
+          "-Command",
+          "(New-Object -ComObject SAPI.SpVoice).Speak('" +
+            String(text).replace(/'/g, "''") +
+            "')",
+        ];
+      } else {
+        sendCmdResult(
+          reqId,
+          baseResult(reqId, "error", "", "speakeruse: unsupported platform"),
+        );
+        return;
+      }
+      if (!text) {
+        sendCmdResult(
+          reqId,
+          baseResult(reqId, "error", "", "speakeruse: empty text"),
+        );
+        return;
+      }
+      cp.execFile(
+        cmd,
+        args,
+        { timeout: 30000, maxBuffer: 1024 * 1024 },
+        (err) => {
+          sendCmdResult(
+            reqId,
+            baseResult(
+              reqId,
+              err ? "error" : "ok",
+              err ? "" : "spoken: " + text.slice(0, 60),
+              err ? err.message : "",
+            ),
+          );
+        },
+      );
+      return;
+    }
+    default:
+      sendCmdResult(
+        reqId,
+        baseResult(
+          reqId,
+          "error",
+          "",
+          "unsupported homeagent capability: " + name,
+        ),
+      );
   }
 }
 
@@ -1114,79 +1698,98 @@ function stopDeviceBridge() {
 // ============ 系统托盘（惰性 + 安全降级） ============
 let tray = null;
 // 托盘菜单动态数据
-const trayLastCmd = null; // 最近一次 device cmd: {cmd, at, result}
-const trayCmdCount = 0; // 历史 cmd 总次数
-function rebuildTrayMenu() {
+let trayLastCmd = null; // 最近一次 device cmd: {cmd, at, result}
+let trayCmdCount = 0; // 历史 cmd 总次数
+// 托盘菜单构建缓存 + 防抖（避免设备桥消息风暴时反复 setContextMenu 导致弹出卡顿）
+const trayConnCache = { connLabel: "", connUrl: "" };
+let trayRebuildTimer = null;
+let trayMenuBuilt = false;
+function buildTrayMenuTemplate() {
+  const electron = require("electron");
+  const TMenu = electron.Menu;
+  const tpl = [];
+  tpl.push({ label: "HomeAgent", enabled: true });
+  tpl.push({ type: "separator" });
+  // 远程连接状态（缓存避免每次读文件）
+  const connLabel = trayConnCache.connLabel || "未连接";
+  const connUrl = trayConnCache.connUrl || "";
+  tpl.push({ label: "后端: " + connLabel, enabled: true });
+  if (connUrl) tpl.push({ label: connUrl, enabled: true });
+  let online = false;
+  try {
+    if (authRule && authRule.urlHost) online = true;
+  } catch (e) {}
+  tpl.push({
+    label: online ? "[已连接]" : "[未连接]",
+    enabled: true,
+  });
+  tpl.push({ type: "separator" });
+  // 设备桥状态
+  if (deviceBridge) {
+    tpl.push({ label: "设备桥: [已连接]", enabled: true });
+    if (deviceBridgeId)
+      tpl.push({ label: "设备ID: " + deviceBridgeId, enabled: true });
+    if (deviceBridgeAddr)
+      tpl.push({ label: "网关: " + deviceBridgeAddr, enabled: true });
+    if (trayLastCmd) {
+      tpl.push({ label: "上次远控: " + trayLastCmd.cmd, enabled: true });
+      tpl.push({
+        label:
+          "结果: " +
+          (trayLastCmd.result || "…").slice(0, 60) +
+          "（" +
+          (trayCmdCount || 0) +
+          "次总数）",
+        enabled: true,
+      });
+    } else {
+      tpl.push({ label: "未收到远控命令", enabled: true });
+    }
+  } else {
+    tpl.push({ label: "设备桥: [未连接]", enabled: true });
+  }
+  tpl.push({ type: "separator" });
+  tpl.push({ label: "显示主界面", click: () => showMainWindow() });
+  tpl.push({
+    label: "退出",
+    click: () => {
+      app.isQuitting = true;
+      app.quit();
+    },
+  });
+  return TMenu.buildFromTemplate(tpl);
+}
+function applyTrayMenu() {
   if (!tray) return;
   try {
-    const electron = require("electron");
-    const TMenu = electron.Menu;
-    const tpl = [];
-    // 标题
-    tpl.push({ label: "HomeAgent", enabled: false });
-    tpl.push({ type: "separator" });
-    // 远程连接状态
-    let connLabel = "未连接";
-    let connUrl = "";
-    try {
-      const conns = loadConnections();
-      const cur =
-        conns.connections.find((c) => c.id === conns.currentId) ||
-        conns.connections[0];
-      if (cur) {
-        connLabel = cur.name || "未命名";
-        connUrl = cur.url || cur.socketPath || "";
-      }
-    } catch (e) {}
-    tpl.push({ label: "后端: " + connLabel, enabled: false });
-    if (connUrl) tpl.push({ label: connUrl, enabled: false });
-    let online = false;
-    try {
-      if (authRule && authRule.urlHost) online = true;
-    } catch (e) {}
-    tpl.push({
-      label: online ? "[已连接]" : "[未连接]",
-      enabled: false,
-    });
-    tpl.push({ type: "separator" });
-    // 设备桥状态
-    if (deviceBridge) {
-      tpl.push({ label: "设备桥: [已连接]", enabled: false });
-      if (deviceBridgeId)
-        tpl.push({ label: "设备ID: " + deviceBridgeId, enabled: false });
-      if (deviceBridgeAddr)
-        tpl.push({ label: "网关: " + deviceBridgeAddr, enabled: false });
-      if (trayLastCmd) {
-        tpl.push({ label: "上次远控: " + trayLastCmd.cmd, enabled: false });
-        tpl.push({
-          label:
-            "结果: " +
-            (trayLastCmd.result || "…").slice(0, 60) +
-            "（" +
-            (trayCmdCount || 0) +
-            "次总数）",
-          enabled: false,
-        });
-      } else {
-        tpl.push({ label: "未收到远控命令", enabled: false });
-      }
+    tray.setContextMenu(buildTrayMenuTemplate());
+    trayMenuBuilt = true;
+  } catch (e) {}
+}
+// 防抖重建：高频触发时合并，200ms 内只实际 setContextMenu 一次
+function rebuildTrayMenu() {
+  if (!tray) return;
+  // 先刷新连接缓存
+  try {
+    const conns = loadConnections();
+    const cur =
+      conns.connections.find((c) => c.id === conns.currentId) ||
+      conns.connections[0];
+    if (cur) {
+      trayConnCache.connLabel = cur.name || "未命名";
+      trayConnCache.connUrl = cur.url || cur.socketPath || "";
     } else {
-      tpl.push({ label: "设备桥: [未连接]", enabled: false });
+      trayConnCache.connLabel = "未连接";
+      trayConnCache.connUrl = "";
     }
-    tpl.push({ type: "separator" });
-    tpl.push({ label: "显示主界面", click: () => showMainWindow() });
-    tpl.push({
-      label: "退出",
-      click: () => {
-        app.isQuitting = true;
-        app.quit();
-      },
-    });
-    const tmenu = TMenu.buildFromTemplate(tpl);
-    tray.setContextMenu(tmenu);
-  } catch (e) {
-    console.error("[tray] rebuild failed: " + e.message);
+  } catch (e) {}
+  // 首建立即（保证右键立刻有菜单），后续防抖
+  if (!trayMenuBuilt) {
+    applyTrayMenu();
+    return;
   }
+  if (trayRebuildTimer) clearTimeout(trayRebuildTimer);
+  trayRebuildTimer = setTimeout(applyTrayMenu, 200);
 }
 function initTray() {
   if (tray) return;
@@ -1348,7 +1951,7 @@ function loadGuiPrefs() {
     autoLaunch: false,
     silentStart: false,
     exitToTray: true,
-    deviceBridge: { enabled: false, gateway: "", token: "" },
+    deviceBridge: { enabled: true, gateway: "", token: "" },
   };
 }
 
@@ -1377,6 +1980,24 @@ function applyAutoLaunch(enabled) {
 // 全局偏好缓存（供 createWindow 静默判断使用）
 let guiPrefs = loadGuiPrefs();
 
+// IPC：本机显示屏幕列表（用于 screensue 默认屏幕配置）
+ipcMain.handle("displays:list", () => {
+  try {
+    const ds = screen.getAllDisplays() || [];
+    return ds.map((d, i) => ({
+      index: i,
+      name: d.label || "显示器" + (i + 1),
+      id: d.id,
+      size: d.bounds ? d.size.width + "x" + d.size.height : "",
+      primary:
+        d.id ===
+        (screen.getPrimaryDisplay ? screen.getPrimaryDisplay().id : -1),
+    }));
+  } catch (e) {
+    return [];
+  }
+});
+
 // IPC：本机设备桥状态（启用+网关+token+连接状态）
 ipcMain.handle("device-bridge:get", () => {
   const p = loadGuiPrefs();
@@ -1388,6 +2009,8 @@ ipcMain.handle("device-bridge:get", () => {
     connected: !!deviceBridge,
     deviceId: deviceBridgeId,
     address: deviceBridgeAddr,
+    screensueDisplay: db.screensueDisplay || "0",
+    exec: db.exec || {},
   };
 });
 
