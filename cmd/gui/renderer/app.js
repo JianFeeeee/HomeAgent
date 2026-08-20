@@ -28,6 +28,7 @@ const state = {
   connections: [],
   currentConn: null,
   devices: [],
+  displays: [],
   selfDeviceId: "",
   selfGateway: "",
 };
@@ -321,6 +322,18 @@ function timeAgo(t) {
   return Math.floor(m / 60) + __("小时前", "h ago");
 }
 
+// 生成客户端唯一消息 ID（服务端据此去重，避免断线/重试重放）
+function clientMsgId() {
+  return (
+    "cli-" +
+    Date.now().toString(36) +
+    "-" +
+    Math.random().toString(36).slice(2, 8)
+  );
+}
+// 最近一次发送的消息 ID（防重复重发提示用）
+var lastClientMsgId = null;
+
 function toast(m, isError, warn) {
   var t = document.getElementById("toast");
   t.textContent = m;
@@ -573,17 +586,31 @@ async function refreshAll() {
     await loadCmdHistory();
   } catch (e) {}
   try {
-    if (state.currentConn && state.currentConn.type === "device") {
-      var d = await api("/device");
-      state.devices = d.devices || [];
+    // 设备列表：webui 连接时经 webui 反代 /api/v1/device/online 拉取（反代只挂 /api/v1/device/ 前缀）
+    if (
+      state.currentConn &&
+      state.currentConn.type === "webui" &&
+      state.currentConn.url
+    ) {
+      var d = await api("/device/online");
+      state.devices = (d && d.devices) || [];
+    } else {
+      state.devices = [];
     }
   } catch (e) {
     state.devices = [];
   }
   try {
+    // 本机显示器列表（screensue 默认屏幕配置用）
+    try {
+      if (window.homeagent && window.homeagent.displays) {
+        state.displays = (await window.homeagent.displays.list()) || [];
+      }
+    } catch (e) {}
     // 本机设备桥身份：设备桥由 gui-prefs 驱动，独立于当前连接类型
     if (window.homeagent && window.homeagent.deviceBridge) {
       var dbinfo = await window.homeagent.deviceBridge.get();
+      state.dbConfig = dbinfo || state.dbConfig;
       if (dbinfo && dbinfo.enabled) {
         if (dbinfo.deviceId) {
           state.selfDeviceId = dbinfo.deviceId;
@@ -893,7 +920,7 @@ function buildChatLayout() {
   html +=
     '<div class="card"><h2>' +
     __("对话", "Chat") +
-    ' <span id="chat-stage" class="badge" style="font-size:10px;font-weight:400;display:none">' +
+    ' <span id="chat-stage" class="badge" style="font-size:12px;font-weight:400;display:none">' +
     escHtml(state.chatStage || "") +
     '</span></h2><div class="chat-messages" id="chat-msgs">';
   if (state.messages.length === 0) {
@@ -1429,7 +1456,7 @@ function renderChatStarmap() {
     (!window.THREE && window._THREE_FAILED !== undefined)
   ) {
     cont.innerHTML =
-      '<p style="color:var(--text-muted);padding:20px;text-align:center;font-size:11px">' +
+      '<p style="color:var(--text-muted);padding:20px;text-align:center;font-size:13px">' +
       __(
         "3D 星图不可用（CDN 加载失败）",
         "Star map unavailable (CDN load failed)",
@@ -1781,7 +1808,7 @@ async function sendChat() {
   var btn = document.getElementById("chat-send-btn");
   var text = inp.value.trim();
   if (!text || state.chatLoading) return;
-  if (state.currentConn && state.currentConn.type === "device") {
+  if (state.currentConn && state.currentConn.type === "cli") {
     toast(
       __(
         "设备网关连接不支持聊天",
@@ -1802,34 +1829,35 @@ async function sendChat() {
   btn.textContent = "";
   rerenderChat();
   try {
-    // webui 连接：触发式 + SSE 流式接管（避免 POST 与 SSE 双通道重复渲染卡死）
+    // webui 连接：同步 POST 等完整回复（服务端 X-Trigger-Only 也返回 response；SSE 公网不稳时靠同步兜底）
     var isWebui = !state.currentConn || state.currentConn.type !== "cli";
     var r = null;
+    // 唯一消息 ID：服务端据此去重（断线重放/超时重试不再重复处理）
+    var cid = clientMsgId();
+    lastClientMsgId = cid;
     try {
-      if (isWebui) {
-        // 触发请求：短超时确认受理，回复靠 SSE
-        r = await api("/chat", {
-          method: "POST",
-          body: JSON.stringify({ message: text }),
-          timeout: 15000,
-          headers: { "X-Trigger-Only": "1" },
-        });
-      } else {
-        r = await api("/chat", {
-          method: "POST",
-          body: JSON.stringify({ message: text }),
-          timeout: 120000,
-        });
-      }
+      r = await api("/chat", {
+        method: "POST",
+        body: JSON.stringify({ message: text, client_msg_id: cid }),
+        timeout: 120000,
+      });
     } catch (e) {
-      // 触发请求超时/失败：不阻塞 UI，等 SSE 兜底；若 SSE 也无响应则报错
+      // 同步超时/失败：不阻塞 UI，等 SSE 兜底；若 SSE 也无响应则报错。
+      // 明确提示"可能已发送"，避免用户在超时后重复点击导致服务端收到多条相同消息
       console.warn("[sendChat] trigger failed: " + e.message);
+      toast(
+        __(
+          "请求超时（可能已发送，请稍候或在收到回复前勿重复发送）",
+          "Request timeout (may have been sent; wait for reply before resending)",
+        ),
+        true,
+      );
       r = null;
     }
     state.chatStage = __("AI 回复中...", "AI replying...");
     var last = state.messages[state.messages.length - 1];
-    // CLI/device 无 SSE：POST 完整结果直接填充
-    if (!isWebui && r) {
+    // 无论 webui/cli：同步 POST 拿到完整回复就直接填充（SSE 公网不稳靠此兜底）
+    if (r && r.response) {
       if (last && last.role === "assistant" && last._streaming) {
         last.content = r.response || __("(无响应)", "(no response)");
         last._grow = true;
@@ -1852,7 +1880,7 @@ async function sendChat() {
       }
       state.chatFinalIdx = state.messages.length - 1;
     }
-    if (!isWebui) rerenderChat();
+    rerenderChat();
   } catch (e) {
     state.messages.push({
       role: "assistant",
@@ -1878,7 +1906,7 @@ async function queryMemoryChat() {
   try {
     var data = await api("/memory?q=" + encodeURIComponent(q) + "&depth=2");
     r.innerHTML =
-      '<pre style="font-size:11px">' +
+      '<pre style="font-size:13px">' +
       escHtml(JSON.stringify(data, null, 2)) +
       "</pre>";
   } catch (e) {
@@ -1901,7 +1929,7 @@ async function queryMemoryContext() {
     var summary = data?.summary || "";
     var entities = data?.entities || [];
     var tk = data?.token_estimate || 0;
-    var html = '<div style="font-size:11px">';
+    var html = '<div style="font-size:13px">';
     if (summary)
       html +=
         '<div class="kv-row"><span class="key">' +
@@ -1924,7 +1952,7 @@ async function queryMemoryContext() {
         "</span></div>";
     }
     html +=
-      '<pre style="font-size:11px;margin-top:8px">' +
+      '<pre style="font-size:13px;margin-top:8px">' +
       escHtml(ctx) +
       "</pre></div>";
     r.innerHTML = html;
@@ -1945,7 +1973,7 @@ async function searchKnowledgeChat() {
   try {
     var data = await api("/knowledge?q=" + encodeURIComponent(q));
     r.innerHTML =
-      '<pre style="font-size:11px">' +
+      '<pre style="font-size:13px">' +
       escHtml(JSON.stringify(data, null, 2)) +
       "</pre>";
   } catch (e) {
@@ -2067,7 +2095,7 @@ function renderTerminals() {
   if (cnt) cnt.textContent = list.length;
   if (list.length === 0) {
     r.innerHTML =
-      '<p style="color:var(--text-muted);padding:8px;text-align:center;font-size:11px">' +
+      '<p style="color:var(--text-muted);padding:8px;text-align:center;font-size:13px">' +
       __("暂无终端会话", "No terminal sessions") +
       "</p>";
     return;
@@ -2087,13 +2115,13 @@ function renderTerminals() {
         "</span>";
     }
     html +=
-      '<div style="border:1px solid var(--border-color);border-radius:6px;margin-bottom:4px;font-size:11px">';
+      '<div style="border:1px solid var(--border-color);border-radius:6px;margin-bottom:4px;font-size:13px">';
     html +=
       '<div style="display:flex;align-items:center;gap:6px;padding:6px 8px;cursor:pointer;background:var(--bg-hover)" onclick="var d=document.getElementById(\'' +
       detailId +
       "');d.style.display=d.style.display==='none'?'block':'none'\">";
     html +=
-      '<span style="font-family:monospace;font-size:10px;flex:1">' +
+      '<span style="font-family:monospace;font-size:12px;flex:1">' +
       escHtml(t.id || "-") +
       "</span>";
     html +=
@@ -2107,7 +2135,7 @@ function renderTerminals() {
       (running ? __("运行中", "Running") : __("已关闭", "Closed")) +
       "</span>";
     html +=
-      '<span style="color:var(--text-muted);font-size:10px">' +
+      '<span style="color:var(--text-muted);font-size:12px">' +
       escHtml(t.created_at || "") +
       "</span>";
     html += "</div>";
@@ -2147,13 +2175,13 @@ function renderCmdHistory() {
   if (cnt) cnt.textContent = running.length;
   if (running.length === 0) {
     r.innerHTML =
-      '<p style="color:var(--text-muted);padding:8px;text-align:center;font-size:11px">' +
+      '<p style="color:var(--text-muted);padding:8px;text-align:center;font-size:13px">' +
       __("暂无运行中的命令", "No running commands") +
       "</p>";
     return;
   }
   var html =
-    '<table style="font-size:10px"><tr><th>' +
+    '<table style="font-size:12px"><tr><th>' +
     __("命令", "Command") +
     "</th><th>" +
     __("状态", "Status") +
@@ -2177,7 +2205,7 @@ function renderCmdHistory() {
       "</tr>";
     if (out) {
       html +=
-        '<tr><td colspan="3" style="padding:0"><pre style="margin:0;padding:4px 8px;max-height:120px;overflow:auto;background:var(--bg-input);border-radius:4px;font-size:10px;color:var(--text-secondary)">' +
+        '<tr><td colspan="3" style="padding:0"><pre style="margin:0;padding:4px 8px;max-height:120px;overflow:auto;background:var(--bg-input);border-radius:4px;font-size:12px;color:var(--text-secondary)">' +
         escHtml(out.substring(0, 2000)) +
         "</pre></td></tr>";
     }
@@ -2650,7 +2678,7 @@ function renderHealthResult(r) {
       '">' +
       (c.status || "unknown") +
       "</span>" +
-      '<span style="color:var(--text-muted);font-size:11px">' +
+      '<span style="color:var(--text-muted);font-size:13px">' +
       escHtml(c.detail || "") +
       "</span></div>";
   });
@@ -3208,7 +3236,7 @@ function renderOneSettings() {
         });
       }
       var descHtml = desc
-        ? '<p style="font-size:11px;color:var(--text-muted);margin:-6px 0 10px">' +
+        ? '<p style="font-size:13px;color:var(--text-muted);margin:-6px 0 10px">' +
           escHtml(desc) +
           "</p>"
         : "";
@@ -3343,7 +3371,7 @@ function renderOneSettings() {
       html +=
         '<div class="card"><h2>' +
         __("MCP 服务器", "MCP Servers") +
-        '</h2><p style="font-size:11px;color:var(--text-muted);margin-bottom:8px">' +
+        '</h2><p style="font-size:13px;color:var(--text-muted);margin-bottom:8px">' +
         __(
           "配置 Model Context Protocol 服务端连接",
           "Configure Model Context Protocol server connections",
@@ -3852,7 +3880,7 @@ function renderGuiPrefs() {
       label +
       "</div>" +
       (desc
-        ? '<div style="font-size:11px;color:var(--text-muted)">' +
+        ? '<div style="font-size:13px;color:var(--text-muted)">' +
           desc +
           "</div>"
         : "") +
@@ -3954,8 +3982,7 @@ function renderConnSection() {
     __("连接类型", "Type") +
     '</label><select id="conn-type" onchange="toggleConnType()">' +
     '<option value="webui">WebUI (HTTP)</option>' +
-    '<option value="cli">CLI (unix socket)</option>' +
-    '<option value="device">设备网关 (remotedevice)</option></select>' +
+    '<option value="cli">CLI (unix socket)</option></select>' +
     '<div id="conn-addr-webui"><label>' +
     __("地址", "URL") +
     '</label><input id="conn-url" placeholder="http://localhost:18080"></div>' +
@@ -4032,11 +4059,6 @@ function toggleConnType() {
     t === "cli" ? "block" : "none";
   document.getElementById("conn-auth-webui").style.display =
     t === "cli" ? "none" : "block";
-  // device 类型不适用 webui 网关登录
-  var gwField = document.getElementById("conn-gw");
-  if (gwField)
-    gwField.closest("label, div").style.display =
-      t === "device" ? "none" : "block";
   toggleGwFields();
 }
 
@@ -4365,38 +4387,6 @@ async function saveConnForm() {
         testBtn.disabled = false;
         return;
       }
-    } else if (ctype === "device") {
-      // 设备网关：直接探活 /api/v1/device（带 token）
-      var devTest;
-      try {
-        devTest = await fetch(url + "/api/v1/device", {
-          headers: apiKey ? { "X-API-Key": apiKey } : {},
-        });
-      } catch (e) {
-        toast(
-          __("无法连接到设备网关 ", "Cannot connect to device gateway ") +
-            url +
-            ": " +
-            e.message,
-          true,
-        );
-        testBtn.textContent = __("保存", "Save");
-        testBtn.disabled = false;
-        return;
-      }
-      if (!devTest.ok) {
-        toast(
-          __("设备网关测试失败: ", "Device gateway test failed: ") +
-            devTest.status +
-            "（" +
-            (await devTest.text()).slice(0, 120) +
-            "）",
-          true,
-        );
-        testBtn.textContent = __("保存", "Save");
-        testBtn.disabled = false;
-        return;
-      }
     } else {
       if (window.homeagent && window.homeagent.webui) {
         if (gwEnabled && !cookie) {
@@ -4497,31 +4487,19 @@ async function saveConnForm() {
   testBtn.textContent = __("保存", "Save");
   testBtn.disabled = false;
   var connData =
-    ctype === "device"
-      ? {
+    ctype === "cli"
+      ? { name: name, type: "cli", socketPath: sock, url: "", apiKey: apiKey }
+      : {
           name: name,
-          type: "device",
+          type: "webui",
           url: url,
           apiKey: apiKey,
-          username: "",
-          password: "",
-          cookie: "",
-          headers: "",
-          gateway: false,
-        }
-      : ctype === "cli"
-        ? { name: name, type: "cli", socketPath: sock, url: "", apiKey: apiKey }
-        : {
-            name: name,
-            type: "webui",
-            url: url,
-            apiKey: apiKey,
-            username: username,
-            password: password,
-            cookie: cookie,
-            headers: headers,
-            gateway: gwEnabled,
-          };
+          username: username,
+          password: password,
+          cookie: cookie,
+          headers: headers,
+          gateway: gwEnabled,
+        };
   var data;
   if (editingConnId) {
     data = await window.homeagent.connections.update(editingConnId, connData);
@@ -4572,8 +4550,7 @@ connectSSE = () => {
   }
   if (!state.currentConn) return;
   // CLI/device 连接无 SSE 通道，聊天走同步
-  if (state.currentConn.type === "cli" || state.currentConn.type === "device")
-    return;
+  if (state.currentConn.type === "cli") return;
   connectFetchSSE(state.currentConn.url + "/api/v1/chat/events");
 };
 
@@ -4910,6 +4887,97 @@ function renderDevices() {
       ) +
       "</p>";
   }
+  // 设备通道配置（独立于连接类型：devicced 是 GUI 组件，默认走 webui 反代端口）
+  var dbc = state.dbConfig || {};
+  var webuiUrl = "";
+  if (
+    state.currentConn &&
+    state.currentConn.type === "webui" &&
+    state.currentConn.url
+  ) {
+    webuiUrl = state.currentConn.url.replace(/\/+$/, "") + "/api/v1/device/ws";
+  }
+  var curGateway = dbc.gateway || webuiUrl || "";
+  var dbExec = dbc.exec || {};
+  var dispIdx = dbc.screensueDisplay || "0";
+  var dispOpts = (state.displays || [])
+    .map(
+      (d) =>
+        '<option value="' +
+        d.index +
+        '"' +
+        (String(d.index) === String(dispIdx) ? " selected" : "") +
+        ">" +
+        escHtml(d.name) +
+        (d.size ? " (" + escHtml(d.size) + ")" : "") +
+        (d.primary ? " 主" : "") +
+        "</option>",
+    )
+    .join("");
+  selfHtml +=
+    '<div class="kv-row"><span class="key">' +
+    __("设备通道", "Device Channel") +
+    '</span><span class="val" style="flex-direction:column;align-items:stretch;gap:4px">' +
+    '<div style="display:flex;gap:6px;flex-wrap:wrap">' +
+    '<span style="font-size:13px;color:var(--text-muted)">' +
+    (dbc.connected
+      ? __("设备桥已连接", "Bridge connected")
+      : __("设备桥未连接", "Bridge not connected")) +
+    (dbc.deviceId ? " · " + escHtml(dbc.deviceId) : "") +
+    "</span></div>" +
+    '<input id="dev-bridge-gw" value="' +
+    escHtml(curGateway) +
+    '" style="width:100%;font-size:13px;padding:4px 6px;border-radius:4px;border:1px solid var(--border-color);background:var(--bg-input);color:var(--text-primary)">' +
+    '<input id="dev-bridge-token" value="' +
+    escHtml(dbc.tokenSet ? "" : "") +
+    '" placeholder="' +
+    __("ws_token（留空保留已存）", "ws_token (empty keeps stored)") +
+    '" type="password" style="width:100%;font-size:13px;padding:4px 6px;border-radius:4px;border:1px solid var(--border-color);background:var(--bg-input);color:var(--text-primary)">' +
+    '<div style="display:flex;gap:6px;align-items:center;flex-wrap:wrap">' +
+    "<label style='font-size:13px'>" +
+    __("screensue 屏幕", "screensue display") +
+    '</label><select id="dev-bridge-display" style="font-size:13px;padding:3px 6px;border-radius:4px;border:1px solid var(--border-color);background:var(--bg-input);color:var(--text-primary)">' +
+    (dispOpts || '<option value="0">默认</option>') +
+    "</select>" +
+    "</div>" +
+    '<div style="display:flex;gap:6px;align-items:center;flex-wrap:wrap">' +
+    "<label style='font-size:13px'>" +
+    __("cmdrun 目录", "cmdrun cwd") +
+    '</label><input id="dev-bridge-cwd" value="' +
+    escHtml(dbExec.cwd || "") +
+    '" placeholder="' +
+    __("留空=用户主目录", "empty=home dir") +
+    '" style="flex:1;min-width:120px;font-size:13px;padding:3px 6px;border-radius:4px;border:1px solid var(--border-color);background:var(--bg-input);color:var(--text-primary)">' +
+    "</div>" +
+    '<div style="display:flex;gap:6px;align-items:center;flex-wrap:wrap">' +
+    "<label style='font-size:13px'>" +
+    __("沙箱", "Sandbox") +
+    '</label><select id="dev-bridge-sandbox" style="font-size:13px;padding:3px 6px;border-radius:4px;border:1px solid var(--border-color);background:var(--bg-input);color:var(--text-primary)">' +
+    '<option value="off"' +
+    ((dbExec.sandbox || "off") === "off" ? " selected" : "") +
+    ">" +
+    __("不限", "off") +
+    "</option>" +
+    '<option value="home"' +
+    (dbExec.sandbox === "home" ? " selected" : "") +
+    ">" +
+    __("主目录", "home") +
+    "</option>" +
+    '<option value="box"' +
+    (dbExec.sandbox === "box" ? " selected" : "") +
+    ">" +
+    __("指定目录", "box") +
+    "</option></select>" +
+    (dbExec.sandbox === "box"
+      ? '<input id="dev-bridge-boxdir" value="' +
+        escHtml(dbExec.boxDir || "") +
+        '" placeholder="沙箱目录" style="flex:1;min-width:120px;font-size:13px;padding:3px 6px;border-radius:4px;border:1px solid var(--border-color);background:var(--bg-input);color:var(--text-primary)">'
+      : '<input id="dev-bridge-boxdir" style="display:none">') +
+    "</div>" +
+    '<button class="btn btn-ghost btn-sm" onclick="saveBridgeChannel()">' +
+    __("保存并应用", "Save & Apply") +
+    "</button></div></div>";
+
   selfHtml += "</div>";
   var html =
     selfHtml +
@@ -4956,7 +5024,7 @@ function renderDevices() {
       html +=
         "<tr><td><b>" +
         escHtml(d.name || d.device_id) +
-        '</b><br><span style="font-size:11px;color:var(--text-muted)">' +
+        '</b><br><span style="font-size:13px;color:var(--text-muted)">' +
         escHtml(d.device_id) +
         "</span></td><td>" +
         escHtml(d.kind || "-") +
@@ -4986,9 +5054,45 @@ function renderDevices() {
   el.innerHTML = html;
 }
 
+// 保存设备通道配置（网关 + token + 启用），调主进程 deviceBridge:set
+async function saveBridgeChannel() {
+  try {
+    if (!window.homeagent || !window.homeagent.deviceBridge) {
+      toast(__("设备桥不可用", "Device bridge unavailable"), true);
+      return;
+    }
+    var gw = (document.getElementById("dev-bridge-gw").value || "").trim();
+    var tok = (document.getElementById("dev-bridge-token").value || "").trim();
+    if (!gw) {
+      toast(__("请填设备通道地址", "Set device channel URL first"), true);
+      return;
+    }
+    var cfg = { enabled: true, gateway: gw };
+    if (tok) cfg.token = tok;
+    // 能力配置：screensue 屏幕 / cmdrun 目录 / 沙箱
+    var disp = document.getElementById("dev-bridge-display");
+    if (disp) cfg.screensueDisplay = disp.value || "0";
+    var cwd = document.getElementById("dev-bridge-cwd");
+    var sandbox = document.getElementById("dev-bridge-sandbox");
+    var boxdir = document.getElementById("dev-bridge-boxdir");
+    var ex = {};
+    if (cwd) ex.cwd = cwd.value.trim();
+    if (sandbox) ex.sandbox = sandbox.value || "off";
+    if (boxdir) ex.boxDir = boxdir.value.trim();
+    cfg.exec = ex;
+    var r = await window.homeagent.deviceBridge.set(cfg);
+    state.dbConfig = r || state.dbConfig;
+    toast(__("设备通道已保存并应用", "Device channel saved & applied"));
+    refreshAll();
+    renderDevices();
+  } catch (e) {
+    toast(__("保存失败: ", "Save failed: ") + e.message, true);
+  }
+}
+
 async function deviceRefresh() {
   try {
-    var d = await api("/device");
+    var d = await api("/device/online");
     state.devices = d.devices || [];
     renderDevices();
   } catch (e) {

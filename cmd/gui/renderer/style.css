@@ -45,8 +45,8 @@
   --bg-input: rgba(13, 18, 34, 0.75);
   --bg-hover: rgba(255, 255, 255, 0.06);
   --text-primary: #eef1f8;
-  --text-secondary: #a7b0c4;
-  --text-muted: #77809a;
+  --text-secondary: #b8c1d6;
+  --text-muted: #93a0b8;
   --border-color: rgba(255, 255, 255, 0.09);
   --accent: #ff7fac;
   --accent-bg: rgba(255, 127, 172, 0.14);
@@ -98,8 +98,8 @@
   --bg-input: rgba(255, 224, 233, 0.55);
   --bg-hover: rgba(255, 127, 172, 0.08);
   --text-primary: #3b2030;
-  --text-secondary: #7a5c6b;
-  --text-muted: #a48a96;
+  --text-secondary: #6b4b5c;
+  --text-muted: #8f6f7d;
   --border-color: rgba(201, 36, 98, 0.14);
   --accent: #c92462;
   --accent-bg: #ffe4e9;
@@ -290,7 +290,7 @@ body {
   transition:
     background 0.2s,
     color 0.2s;
-  font-size: 14px;
+  font-size: 15px;
   -webkit-font-smoothing: antialiased;
   text-rendering: optimizeLegibility;
   user-select: none;
@@ -707,13 +707,13 @@ body.maximized .tb-max svg {
   transform: translateY(-1px);
 }
 .card h2 {
-  font-size: 15px;
+  font-size: 16px;
   font-weight: 600;
   margin-bottom: 12px;
   color: var(--text-primary);
 }
 .card h3 {
-  font-size: 13px;
+  font-size: 14px;
   font-weight: 600;
   color: var(--text-secondary);
   margin: 16px 0 8px;
@@ -901,7 +901,7 @@ select {
   border-radius: var(--radius-sm);
   padding: 8px 12px;
   color: var(--text-primary);
-  font-size: 13px;
+  font-size: 14px;
   width: 100%;
   margin-bottom: 10px;
   outline: none;
@@ -923,9 +923,9 @@ textarea {
 }
 label {
   display: block;
-  font-size: 11px;
+  font-size: 13px;
   color: var(--text-secondary);
-  margin-bottom: 3px;
+  margin-bottom: 4px;
   font-weight: 500;
 }
 pre {
@@ -1597,10 +1597,10 @@ code {
   margin-bottom: 16px;
 }
 .settings-tabs span {
-  padding: 6px 14px;
-  font-size: 13px;
+  padding: 7px 16px;
+  font-size: 14px;
   cursor: pointer;
-  color: var(--text-muted);
+  color: var(--text-secondary);
   border-radius: var(--radius-pill);
   border: 1px solid transparent;
   transition: all 0.15s;
@@ -1619,18 +1619,18 @@ code {
 }
 .settings-key {
   font-family: var(--font-mono);
-  font-size: 11px;
-  color: var(--text-muted);
-  margin-bottom: 2px;
+  font-size: 13px;
+  color: var(--text-secondary);
+  margin-bottom: 3px;
 }
 .kv-row {
   display: flex;
-  padding: 6px 0;
+  padding: 7px 0;
   border-bottom: 1px solid var(--kv-border);
-  font-size: 13px;
+  font-size: 14px;
 }
 .kv-row .key {
-  color: var(--text-muted);
+  color: var(--text-secondary);
   width: 180px;
   flex-shrink: 0;
 }
@@ -1716,8 +1716,8 @@ code {
   vertical-align: 1px;
 }
 .conn-item .conn-url {
-  font-size: 11px;
-  color: var(--text-muted);
+  font-size: 12px;
+  color: var(--text-secondary);
   margin-top: 2px;
 }
 .conn-item .conn-actions {
