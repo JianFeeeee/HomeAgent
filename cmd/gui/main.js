@@ -1726,6 +1726,224 @@ function executeHomeagentCmd(capability, reqId) {
       );
       return;
     }
+    case "computeruse": {
+      // computeruse：agent 控制鼠标/键盘在目标屏幕操作（点击/移动/滚动/按键/输入）
+      // 参数：homeagent-computeruse {"x":100,"y":200,"action":"click","button":"left"}
+      //   action: click/doubleclick/rightclick/move/scroll/type/keypress
+      //   x/y: 相对屏幕左上角(px)；scroll 用 dx/dy; type 用 text
+      const cp = require("child_process");
+      const platform = process.platform;
+      const raw = String(capability || "")
+        .replace(/^computeruse/, "")
+        .trim();
+      // 解析 JSON 参数
+      let params = {};
+      const jsonM = raw.match(/\{[\s\S]*\}/);
+      if (jsonM) {
+        try {
+          params = JSON.parse(jsonM[0]);
+        } catch (e) {
+          sendCmdResult(
+            reqId,
+            baseResult(
+              reqId,
+              "error",
+              "",
+              "computeruse: invalid JSON params: " + e.message,
+            ),
+          );
+          return;
+        }
+      } else {
+        // 支持 "x y action" 简写
+        const t = raw.split(/\s+/).filter(Boolean);
+        params.x = parseFloat(t[0]);
+        params.y = parseFloat(t[1]);
+        params.action = t[2] || "click";
+      }
+      const action = params.action || "click";
+      // 跨平台输入模拟：Linux=xdotool / macOS=cliclick(或用osascript) / Windows=PowerShell user32
+      const os_ = platform === "win32" ? "win32" : platform === "darwin" ? "darwin" : "linux";
+      let tool = null; // {cmd, args, shell}
+      if (os_ === "linux") {
+        if (cp.spawnSync("which", ["xdotool"]).status === 0) tool = { cmd: "xdotool", shell: false };
+      } else if (os_ === "darwin") {
+        if (cp.spawnSync("which", ["cliclick"]).status === 0) tool = { cmd: "cliclick", shell: false };
+      } // win32 用 PowerShell 内联，下面单独处理
+      if (os_ === "linux" && !tool) {
+        sendCmdResult(reqId, baseResult(reqId, "error", "", "computeruse: xdotool not installed"));
+        return;
+      }
+      if (os_ === "darwin" && !tool) {
+        sendCmdResult(reqId, baseResult(reqId, "error", "", "computeruse: cliclick not installed"));
+        return;
+      }
+      // 目标屏幕左上角原点偏移：沿用 screensueDisplay；坐标相对该屏幕
+      let dispIdx = 0;
+      try {
+        const prefs = loadGuiPrefs();
+        dispIdx = parseInt((prefs.deviceBridge || {}).screensueDisplay || "0", 10) || 0;
+      } catch (e) {}
+      const displays = screen.getAllDisplays() || [];
+      if (dispIdx >= displays.length) dispIdx = 0;
+      const disp = displays[dispIdx];
+      const ox = disp ? (disp.bounds.x || 0) : 0;
+      const oy = disp ? (disp.bounds.y || 0) : 0;
+      const absX = Math.round(ox + (parseFloat(params.x) || 0));
+      const absY = Math.round(oy + (parseFloat(params.y) || 0));
+      const run = (cmdStr, done) => {
+        if (os_ === "win32") {
+          // Windows: 用 PowerShell user32 SendInput
+          cp.execFile(
+            "powershell",
+            ["-NoProfile", "-Command", cmdStr],
+            { timeout: 15000, maxBuffer: 1024 * 1024 },
+            (err) => {
+              sendCmdResult(
+                reqId,
+                baseResult(
+                  reqId,
+                  err ? "error" : "ok",
+                  err ? "" : "computeruse " + action + " @ (" + absX + "," + absY + ")" + (done ? " " + done : ""),
+                  err ? err.message : "",
+                ),
+              );
+            },
+          );
+          return;
+        }
+        if (os_ === "darwin") {
+          // macOS cliclick
+          cp.execFile(
+            "cliclick",
+            cmdStr,
+            { timeout: 15000, maxBuffer: 1024 * 1024 },
+            (err) => {
+              sendCmdResult(
+                reqId,
+                baseResult(
+                  reqId,
+                  err ? "error" : "ok",
+                  err ? "" : "computeruse " + action + " @ (" + absX + "," + absY + ")" + (done ? " " + done : ""),
+                  err ? err.message : "",
+                ),
+              );
+            },
+          );
+          return;
+        }
+        // Linux xdotool
+        cp.execFile("xdotool", cmdStr, { timeout: 15000, maxBuffer: 1024 * 1024 }, (err) => {
+          sendCmdResult(
+            reqId,
+            baseResult(
+              reqId,
+              err ? "error" : "ok",
+              err ? "" : "computeruse " + action + " @ (" + absX + "," + absY + ")" + (done ? " " + done : ""),
+              err ? err.message : "",
+            ),
+          );
+        });
+      };
+      // Windows 命令构建
+      const winCmd = (body) =>
+        "Add-Type -AssemblyName System.Windows.Forms; Add-Type -MemberDefinition '[DllImport(\"user32.dll\")] public static extern bool SetCursorPos(int x,int y); [DllImport(\"user32.dll\")] public static extern void mouse_event(uint dwFlags,uint dx,uint dy,uint dwData,uint dwExtraInfo);' -Name U -Namespace W; [U]::SetCursorPos(" + absX + "," + absY + "); " + body;
+      if (os_ === "win32") {
+        const btnDown = params.button === "right" ? 0x0008 : params.button === "middle" ? 0x0020 : 0x0002;
+        const btnUp = params.button === "right" ? 0x0010 : params.button === "middle" ? 0x0040 : 0x0004;
+        switch (action) {
+          case "move":
+            run(winCmd("")); return;
+          case "click":
+            run(winCmd("[U]::mouse_event(" + btnDown + ",0,0,0,0); [U]::mouse_event(" + btnUp + ",0,0,0,0);")); return;
+          case "doubleclick":
+            run(winCmd("[U]::mouse_event(" + btnDown + ",0,0,0,0); [U]::mouse_event(" + btnUp + ",0,0,0,0); Start-Sleep -Milliseconds 50; [U]::mouse_event(" + btnDown + ",0,0,0,0); [U]::mouse_event(" + btnUp + ",0,0,0,0);")); return;
+          case "rightclick":
+            run(winCmd("[U]::mouse_event(0x0008,0,0,0,0); [U]::mouse_event(0x0010,0,0,0,0);")); return;
+          case "scroll":
+            run(winCmd("[U]::mouse_event(0x0800,0,0," + String(Math.round((params.dy || 120) * 120)) + ",0);")); return;
+          case "keypress":
+            run("Add-Type -AssemblyName System.Windows.Forms; [System.Windows.Forms.SendKeys]::SendWait('" + String(params.key || params.text || "").replace(/'/g, "").replace(/\+/g, "{+}").replace(/\^/g, "{^}").replace(/%/g, "{%}") + "')"); return;
+          case "type":
+            run("Add-Type -AssemblyName System.Windows.Forms; [System.Windows.Forms.SendKeys]::SendWait('" + String(params.text || "").replace(/\+/g, "{+}").replace(/\^/g, "{^}").replace(/%/g, "{%}").replace(/~/g, "{~}") + "')"); return;
+          default:
+            sendCmdResult(reqId, baseResult(reqId, "error", "", "computeruse: unknown action " + action)); return;
+        }
+      }
+      // Linux / macOS 通过工具 argv
+      const L = (a) => {
+        if (os_ === "darwin") {
+          // cliclick 参数: c:x,y / m:v1,v2 / w:+,-
+          const pos = absX + "," + absY;
+          switch (a[0]) {
+            case "move": return ["m:" + pos];
+            case "click": return ["c:" + pos];
+            case "doubleclick": return ["dc:" + pos];
+            case "rightclick": return ["c:" + pos];
+            case "scroll": return ["w:" + (params.dy > 0 ? "+" : "-")];
+            default: return a;
+          }
+        }
+        return a;
+      };
+      switch (action) {
+        case "move":
+          run(L(["mousemove", String(absX), String(absY)]));
+          return;
+        case "click": {
+          const btn = params.button === "right" ? 3 : params.button === "middle" ? 2 : 1;
+          run(L(["mousemove", String(absX), String(absY), "click", String(btn)]) );
+          return;
+        }
+        case "doubleclick":
+          run(L(["mousemove", String(absX), String(absY), "click", "--repeat", "2", "--delay", "50", "1"]));
+          return;
+        case "rightclick":
+          run(L(["mousemove", String(absX), String(absY), "click", "3"]));
+          return;
+        case "scroll":
+          run(L(["mousemove", String(absX), String(absY), "scroll", "--button", "5", String(Math.round(params.dy || params.y || 0))]));
+          return;
+        case "keypress":
+          run(L(["key", String(params.key || params.text || "")]));
+          return;
+        case "type": {
+          // macOS cliclick 无 type，用 osascript
+          if (os_ === "darwin") {
+            const t = String(params.text || "");
+            cp.execFile(
+              "osascript",
+              ["-e", 'tell application "System Events" to keystroke ' + JSON.stringify(t)],
+              { timeout: 15000, maxBuffer: 1024 * 1024 },
+              (err) => {
+                sendCmdResult(
+                  reqId,
+                  baseResult(reqId, err ? "error" : "ok", err ? "" : "typed: " + t.slice(0, 40), err ? err.message : ""),
+                );
+              },
+            );
+            return;
+          }
+          const t = String(params.text || "");
+          const shellSafe = "'" + String(t).replace(/'/g, "'\\''") + "'";
+          cp.execFile(
+            "bash",
+            ["-c", "xdotool type " + shellSafe],
+            { timeout: 15000, maxBuffer: 1024 * 1024 },
+            (err) => {
+              sendCmdResult(
+                reqId,
+                baseResult(reqId, err ? "error" : "ok", err ? "" : "typed: " + t.slice(0, 40), err ? err.message : ""),
+              );
+            },
+          );
+          return;
+        }
+        default:
+          sendCmdResult(reqId, baseResult(reqId, "error", "", "computeruse: unknown action " + action));
+          return;
+      }
+    }
     default:
       sendCmdResult(
         reqId,
@@ -1784,7 +2002,7 @@ async function startDeviceBridge(cfg) {
         device_id: deviceBridgeId,
         name: "HomeAgent GUI",
         kind: "computer",
-        caps: ["status", "cmdrun", "deviceinfo", "cmdresult"],
+        caps: ["status", "cmdrun", "deviceinfo", "cmdresult", "computeruse"],
         info: {
           hostname: devOs.hostname() || "",
           platform: process.platform || "",
