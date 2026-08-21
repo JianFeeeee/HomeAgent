@@ -1,4 +1,4 @@
-const { app, BrowserWindow, ipcMain, Menu, screen, desktopCapturer } = require("electron");
+const { app, BrowserWindow, ipcMain, Menu, screen, desktopCapturer, clipboard } = require("electron");
 let screensueWin = null; // screensue 展示窗口（独立于主窗口，显示在配置的屏幕）
 // 设备桥直连远程网关：绕过系统代理（本机 clash 代理会导致 wss 被雷池 403）
 try {
@@ -1943,6 +1943,45 @@ function executeHomeagentCmd(capability, reqId) {
           sendCmdResult(reqId, baseResult(reqId, "error", "", "computeruse: unknown action " + action));
           return;
       }
+    }
+    case "clipboardsee": {
+      // 读取设备剪切板当前文字内容（仅文本）。隐私提示：可能含密码，仅用户明确要求时读。
+      // 协议: homeagent-clipboardsee
+      try {
+        const txt = clipboard.readText();
+        const has = !!(txt && txt.length);
+        sendCmdResult(
+          reqId,
+          Object.assign(baseResult(reqId, "ok", has ? String(txt) : "", ""), {
+            content: has ? "ok" : "empty",
+          }),
+        );
+      } catch (e) {
+        sendCmdResult(reqId, baseResult(reqId, "error", "", "clipboardsee failed: " + e.message));
+      }
+      return;
+    }
+    case "clipboardsue": {
+      // 写入文字到设备剪切板（用户可直接 Ctrl+V 粘贴）。
+      // 协议: homeagent-clipboardsue <文字>
+      const txt = String(capability || "")
+        .replace(/^clipboardsue/, "")
+        .trim();
+      try {
+        clipboard.writeText(txt);
+        sendCmdResult(
+          reqId,
+          baseResult(
+            reqId,
+            "ok",
+            "written " + Buffer.byteLength(txt) + " bytes: " + txt.slice(0, 60),
+            "",
+          ),
+        );
+      } catch (e) {
+        sendCmdResult(reqId, baseResult(reqId, "error", "", "clipboardsue failed: " + e.message));
+      }
+      return;
     }
     default:
       sendCmdResult(
