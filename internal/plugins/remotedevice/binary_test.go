@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 )
@@ -559,4 +560,116 @@ func TestClipboardEndToEnd(t *testing.T) {
 			t.Fatal("unauthorized should error")
 		}
 	})
+}
+
+// ===== 能力矩阵：caps 声明 → 工具可用性 =====
+
+func TestCapabilityMatrix(t *testing.T) {
+	cases := []struct {
+		name     string
+		caps     []string
+		tool     string
+		expected bool
+	}{
+		{"摄像头只声明camera不能screensee", []string{"camera"}, "screensee", false},
+		{"摄像头只声明camera可以camerasue", []string{"camera"}, "camerasue", true},
+		{"屏幕设备支持screensue+screensee", []string{"screen"}, "screensee", true},
+		{"clipboard能力含读写", []string{"clipboard"}, "clipboardsue", true},
+		{"精确声明computeruse", []string{"computeruse"}, "computeruse", true},
+		{"历史cmd视为全能力", []string{"status", "cmdrun", "deviceinfo"}, "screensee", true},
+		{"无任何已知能力视为全兼容", []string{}, "computeruse", true},
+		{"混合：有已知能力则严格匹配", []string{"camera", "screen"}, "computeruse", false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := deviceSupportsTool(tc.caps, tc.tool); got != tc.expected {
+				t.Fatalf("deviceSupportsTool(%v, %s) = %v, want %v", tc.caps, tc.tool, got, tc.expected)
+			}
+		})
+	}
+
+	// 端到端：声明 camera 的设备调 screensee 应被拒绝
+	reg := NewRegistry()
+	token := "test-cap-token"
+	reg.SetAcceptToken(func(provided string) bool { return provided == token })
+	dev := &devicectlDevice{reg: reg}
+
+	srv := httptest.NewServer(http.HandlerFunc(reg.ServeWS))
+	defer srv.Close()
+	cli := dialTestWS(t, srv.URL, token)
+	defer cli.close()
+
+	cli.sendText([]byte(`{"op":"hello","device":{"device_id":"cam-only","name":"纯摄像头","kind":"camera","caps":["camera"]}}`))
+	if _, _, err := cli.readMsg(); err != nil {
+		t.Fatalf("read hello_ack: %v", err)
+	}
+	reg.SetAuthorized("cam-only", true)
+
+	if _, err := dev.Execute("screensee", map[string]interface{}{"device_id": "cam-only"}); err == nil {
+		t.Fatal("camera-only device should not support screensee")
+	} else if !strings.Contains(err.Error(), "未声明 screensee 能力") {
+		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
+// ===== 设备主动上报事件 → 事件回调 =====
+
+func TestDeviceEventReport(t *testing.T) {
+	reg := NewRegistry()
+	token := "test-evt-token"
+	reg.SetAcceptToken(func(provided string) bool { return provided == token })
+
+	var events []map[string]interface{}
+	var evtMu sync.Mutex
+	reg.SetEventHandler(func(deviceID string, msg map[string]interface{}) {
+		evtMu.Lock()
+		events = append(events, msg)
+		evtMu.Unlock()
+	})
+
+	srv := httptest.NewServer(http.HandlerFunc(reg.ServeWS))
+	defer srv.Close()
+	cli := dialTestWS(t, srv.URL, token)
+	defer cli.close()
+
+	cli.sendText([]byte(`{"op":"hello","device":{"device_id":"cam-watch","name":"监控摄像头","kind":"camera","caps":["camera"]}}`))
+	if _, _, err := cli.readMsg(); err != nil {
+		t.Fatalf("read hello_ack: %v", err)
+	}
+
+	// 设备主动上报：识别到未知人员驻留
+	cli.sendText(mustJSON(map[string]interface{}{
+		"op": "event", "device_id": "cam-watch",
+		"type":    "unknown_person_detected",
+		"detail":  "后门区域检测到陌生面孔，驻留超过30秒",
+	}))
+	// 不带 device_id 时应回退到当前连接的设备
+	cli.sendText(mustJSON(map[string]interface{}{
+		"op":   "event",
+		"type": "motion",
+	}))
+
+	deadline := time.After(3 * time.Second)
+	for {
+		evtMu.Lock()
+		n := len(events)
+		evtMu.Unlock()
+		if n >= 2 {
+			break
+		}
+		select {
+		case <-deadline:
+			t.Fatalf("expected 2 events, got %d", n)
+		default:
+			time.Sleep(20 * time.Millisecond)
+		}
+	}
+	evtMu.Lock()
+	defer evtMu.Unlock()
+	if events[0]["type"] != "unknown_person_detected" {
+		t.Fatalf("unexpected first event: %v", events[0])
+	}
+	if events[1]["type"] != "motion" {
+		t.Fatalf("unexpected second event: %v", events[1])
+	}
 }

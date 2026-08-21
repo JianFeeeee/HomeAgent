@@ -9,6 +9,7 @@ import (
 	"log"
 	"net/http"
 	"strings"
+	"sync"
 	"time"
 
 	"gitcode.com/JianFeeeee/HomeAgent/internal/plugin"
@@ -114,6 +115,49 @@ func (p *Plugin) Start(s *sdk.PluginSDK) error {
 	if err := s.RegisterChannel("devicectl", p.dev); err != nil {
 		log.Printf("[remotedevice] register devicectl channel: %v", err)
 	}
+
+	// ---- 设备主动上报事件 → agent 注入 ----------------
+	// 摄像头发现异常/传感器报警等场景：设备经 WS op=event 上报，
+	// 插件将其格式化为文本经 SDK InjectText 异步注入 agent（source=device/{id}，
+	// 回复路由回 device/{id} 通道），同时发 EventBus 供 WebUI 展示。
+	// 节流：同设备同类型事件 10s 内去重，防传感器风暴。
+	lastEventAt := map[string]time.Time{}
+	var eventMu sync.Mutex
+	p.registry.SetEventHandler(func(deviceID string, msg map[string]interface{}) {
+		evtType, _ := msg["type"].(string)
+		if evtType == "" {
+			evtType = "unknown"
+		}
+		key := deviceID + "|" + evtType
+		eventMu.Lock()
+		if last, ok := lastEventAt[key]; ok && time.Since(last) < 10*time.Second {
+			eventMu.Unlock()
+			log.Printf("[remotedevice] event throttled: %s from %s", evtType, deviceID)
+			return
+		}
+		lastEventAt[key] = time.Now()
+		eventMu.Unlock()
+
+		// 组装人类可读的事件文本（agent 可直接理解）
+		detail, _ := msg["detail"].(string)
+		if detail == "" {
+			if d, ok := msg["payload"].(map[string]interface{}); ok {
+				b, _ := json.Marshal(d)
+				detail = string(b)
+			}
+		}
+		text := fmt.Sprintf("【设备事件上报】设备 %s 触发事件 %s", deviceID, evtType)
+		if detail != "" {
+			text += "：" + detail
+		}
+		text += "。请关注此事件并按需处理（如通知用户、调用相关工具核实）。"
+
+		log.Printf("[remotedevice] event from %s: %s", deviceID, evtType)
+		if p.sdk != nil {
+			// 异步注入：不阻塞 WS 读循环；回复路由回 device/{id} 输出通道
+			p.sdk.InjectInput("device/"+deviceID, "device/"+deviceID, "text", map[string]interface{}{"content": text})
+		}
+	})
 
 	// ---- REST 管理面 + WS 设备通道 ----------------
 	p.registerRoutes()

@@ -391,6 +391,9 @@ func (d *devicectlDevice) screensee(args map[string]interface{}) (interface{}, e
 	if !m.Online {
 		return nil, fmt.Errorf("device %s 不在线", id)
 	}
+	if !d.reg.SupportsTool(id, "screensee") {
+		return nil, fmt.Errorf("device %s 未声明 screensee 能力（caps=%v），无法截屏", id, m.Caps)
+	}
 	reqID := newReqID()
 	if err := d.reg.PushCmd(id, reqID, "screensee", "homeagent"); err != nil {
 		return nil, fmt.Errorf("下发截屏命令失败: %w", err)
@@ -438,6 +441,9 @@ func (d *devicectlDevice) computeruse(args map[string]interface{}) (interface{},
 	}
 	if !m.Online {
 		return nil, fmt.Errorf("device %s 不在线", id)
+	}
+	if !d.reg.SupportsTool(id, "computeruse") {
+		return nil, fmt.Errorf("device %s 未声明 computeruse 能力（caps=%v），无法操控鼠标键盘", id, m.Caps)
 	}
 
 	// 构造 GUI 端约定的 JSON 参数（坐标相对 screensueDisplay 所选屏）
@@ -492,8 +498,9 @@ func (d *devicectlDevice) computeruse(args map[string]interface{}) (interface{},
 	return out, nil
 }
 
-// clipboardCheck 检查设备可操作性（存在/已授权/在线），返回错误或 nil。
-func (d *devicectlDevice) clipboardCheck(id, verb string) error {
+// clipboardCheck 检查设备可操作性（存在/已授权/在线/能力声明），返回错误或 nil。
+// tool 为空时跳过能力校验（如 device_ctl_cmdrun 由自身逻辑处理）。
+func (d *devicectlDevice) clipboardCheck(id, verb, tool string) error {
 	if id == "" {
 		return fmt.Errorf("device_id required")
 	}
@@ -507,6 +514,9 @@ func (d *devicectlDevice) clipboardCheck(id, verb string) error {
 	if !m.Online {
 		return fmt.Errorf("device %s 不在线", id)
 	}
+	if tool != "" && !d.reg.SupportsTool(id, tool) {
+		return fmt.Errorf("device %s 未声明 %s 能力（caps=%v），无法执行此操作", id, tool, m.Caps)
+	}
 	return nil
 }
 
@@ -514,7 +524,7 @@ func (d *devicectlDevice) clipboardCheck(id, verb string) error {
 // 协议（GUI 配套）：homeagent-clipboardsee → 回执 output 字段为剪切板文字。
 func (d *devicectlDevice) clipboardsee(args map[string]interface{}) (interface{}, error) {
 	id, _ := args["device_id"].(string)
-	if err := d.clipboardCheck(id, "读取"); err != nil {
+	if err := d.clipboardCheck(id, "读取", "clipboardsee"); err != nil {
 		return nil, err
 	}
 	reqID := newReqID()
@@ -551,7 +561,7 @@ func (d *devicectlDevice) clipboardsue(args map[string]interface{}) (interface{}
 	if text == "" {
 		return nil, fmt.Errorf("text required（要写入剪切板的内容）")
 	}
-	if err := d.clipboardCheck(id, "写入"); err != nil {
+	if err := d.clipboardCheck(id, "写入", "clipboardsue"); err != nil {
 		return nil, err
 	}
 	reqID := newReqID()
