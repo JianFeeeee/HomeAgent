@@ -813,6 +813,51 @@ let deviceBridgeAddr = ""; // 设备桥网关地址
 // 音频/媒体接收聚合缓冲（服务端分块推送二进制→聚合→播放）
 let speechAccum = null;
 
+// 读取设备音频输出配置（gui-prefs.deviceBridge.audio）
+function getAudioConfig() {
+  try {
+    const prefs = loadGuiPrefs();
+    const db = prefs.deviceBridge || {};
+    const au = db.audio || {};
+    return { device: au.device || "default" };
+  } catch (e) {
+    return { device: "default" };
+  }
+}
+
+// 枚举本机可用音频输出设备（aplay -L 解析：设备名顶格、描述缩进）
+function listAudioDevices() {
+  const porcp = require("child_process");
+  const out = [];
+  const SKIP_PREFIXES = ["lavrate", "samplerate", "speex", "jack", "oss",
+    "upmix", "vdownmix", "speexrate"];
+  try {
+    const r = porcp.spawnSync("aplay", ["-L"], { encoding: "utf8" });
+    const lines = ((r.stdout || "") + "\n").split("\n");
+    for (let i = 0; i < lines.length; i++) {
+      const ln = lines[i];
+      if (!ln || ln[0] === " " || ln[0] === "\t") continue; // 跳过缩进的描述行
+      const name = ln.trim();
+      if (!name || /^(Default PCM|List of|Plug PCM)/.test(name)) continue;
+      if (SKIP_PREFIXES.some((s) => name === s)) continue; // 插件类，非实体设备
+      // 只保留可实际输出的设备类型；纯 hw: 裸设备不支持自动通道转换
+      // （mono→stereo）易失败，改用 plughw:（带转换）。pipewire/pulse/sysdefault 亦可。
+      const useful = name === "default" || name === "pipewire" ||
+        name === "pulse" || name === "sysdefault" ||
+        /^plughw:/.test(name) || /^sysdefault:/.test(name);
+      if (!useful) continue;
+      let desc = "";
+      // 下一行可能是描述（缩进）
+      if (lines[i + 1] && (lines[i + 1][0] === " " || lines[i + 1][0] === "\t"))
+        desc = lines[i + 1].trim();
+      out.push({ name, desc });
+    }
+  } catch (e) {}
+  if (!out.find((d) => d.name === "default"))
+    out.unshift({ name: "default", desc: "系统默认设备" });
+  return out;
+}
+
 // 播放设备收到的音频（由 cmd_speech_end 触发，二进制已聚合）
 function playDeviceAudio(audioBuf, mime, reqId) {
   try {
@@ -820,6 +865,7 @@ function playDeviceAudio(audioBuf, mime, reqId) {
     const path = require("path");
     const fs = require("fs");
     const porcp = require("child_process");
+    const au = getAudioConfig();
     const ext =
       (mime || "").indexOf("mp3") === -1
         ? (mime || "").indexOf("ogg") === -1
@@ -834,7 +880,8 @@ function playDeviceAudio(audioBuf, mime, reqId) {
     if (platform === "linux") {
       if (porcp.spawnSync("which", ["aplay"]).status === 0) {
         cmd = "aplay";
-        args = [tmp];
+        // 支持用户选择的输出设备（默认 default）
+        args = au.device && au.device !== "default" ? ["-D", au.device, tmp] : [tmp];
       } else if (porcp.spawnSync("which", ["paplay"]).status === 0) {
         cmd = "paplay";
         args = [tmp];
@@ -864,7 +911,7 @@ function playDeviceAudio(audioBuf, mime, reqId) {
         baseResult(
           reqId || "",
           "ok",
-          "audio played: " + audioBuf.length + " bytes",
+          "audio played: " + audioBuf.length + " bytes via " + (au.device || "default"),
           "",
         ),
       );
@@ -2144,6 +2191,7 @@ function loadGuiPrefs() {
           screensueDuration: db.screensueDuration === undefined || db.screensueDuration === null || db.screensueDuration === "" ? "5" : String(db.screensueDuration),
           exec: db.exec || {},
           authSchedule: db.authSchedule || {},
+          audio: db.audio || {},
         },
       };
     }
@@ -2160,6 +2208,7 @@ function loadGuiPrefs() {
       screensueDuration: "5",
       exec: {},
       authSchedule: {},
+      audio: {},
     },
   };
 }
@@ -2210,6 +2259,15 @@ ipcMain.handle("displays:list", () => {
   }
 });
 
+// IPC：本机音频输出设备列表（供设备通道选择声卡）
+ipcMain.handle("audio:list", () => {
+  try {
+    return listAudioDevices();
+  } catch (e) {
+    return [];
+  }
+});
+
 // IPC：本机设备桥状态（启用+网关+token+连接状态）
 ipcMain.handle("device-bridge:get", () => {
   const p = loadGuiPrefs();
@@ -2224,6 +2282,7 @@ ipcMain.handle("device-bridge:get", () => {
     screensueDisplay: db.screensueDisplay || "0",
     exec: db.exec || {},
     authSchedule: db.authSchedule || {},
+    audio: db.audio || {},
   };
 });
 
@@ -2253,6 +2312,7 @@ ipcMain.handle("device-bridge:set", (_, cfg) => {
     screensueDisplay: db.screensueDisplay || "0",
     exec: db.exec || {},
     authSchedule: db.authSchedule || {},
+    audio: db.audio || {},
   };
 });
 

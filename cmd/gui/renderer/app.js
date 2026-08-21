@@ -659,6 +659,12 @@ async function refreshAll() {
         state.displays = (await window.homeagent.displays.list()) || [];
       }
     } catch (e) {}
+    // 本机音频输出设备列表（speakeruse 声卡选择用）
+    try {
+      if (window.homeagent && window.homeagent.audio) {
+        state.audioDevices = (await window.homeagent.audio.list()) || [];
+      }
+    } catch (e) {}
     // 本机设备桥身份：设备桥由 gui-prefs 驱动，独立于当前连接类型
     if (window.homeagent && window.homeagent.deviceBridge) {
       var dbinfo = await window.homeagent.deviceBridge.get();
@@ -4967,6 +4973,20 @@ function renderDevices() {
         "</option>",
     )
     .join("");
+  var audioDev = dbc.audio && dbc.audio.device ? dbc.audio.device : "default";
+  var audioOpts = (state.audioDevices || [])
+    .map(
+      (a) =>
+        '<option value="' +
+        escHtml(a.name) +
+        '"' +
+        (a.name === audioDev ? " selected" : "") +
+        ">" +
+        escHtml(a.name) +
+        (a.desc ? " — " + escHtml(String(a.desc).slice(0, 32)) : "") +
+        "</option>",
+    )
+    .join("");
   selfHtml +=
     '<div class="kv-row"><span class="key">' +
     __("设备通道", "Device Channel") +
@@ -4999,6 +5019,13 @@ function renderDevices() {
     '" placeholder="5，0=常驻" title="' +
     __("screensue 默认显示秒数；0=永不超时常驻。命令带数字可临时覆盖", "screensue default seconds; 0=persistent. Command number overrides") +
     '" style="width:70px;font-size:13px;padding:3px 6px;border-radius:4px;border:1px solid var(--border-color);background:var(--bg-input);color:var(--text-primary)">' +
+    "</div>" +
+    '<div style="display:flex;gap:6px;align-items:center;flex-wrap:wrap">' +
+    "<label style='font-size:13px'>" +
+    __("speakeruse 声卡", "speakeruse audio out") +
+    '</label><select id="dev-bridge-audio" style="font-size:13px;padding:3px 6px;border-radius:4px;border:1px solid var(--border-color);background:var(--bg-input);color:var(--text-primary);min-width:160px">' +
+    (audioOpts || '<option value="default">default</option>') +
+    "</select>" +
     "</div>" +
     '<div style="display:flex;gap:6px;align-items:center;flex-wrap:wrap">' +
     "<label style='font-size:13px'>" +
@@ -5153,6 +5180,8 @@ async function saveBridgeChannel() {
       var dv = parseInt(dur.value, 10);
       cfg.screensueDuration = Number.isFinite(dv) && dv >= 0 ? String(dv) : "5";
     }
+    var audioSel = document.getElementById("dev-bridge-audio");
+    if (audioSel) cfg.audio = { device: audioSel.value || "default" };
     var cwd = document.getElementById("dev-bridge-cwd");
     var sandbox = document.getElementById("dev-bridge-sandbox");
     var boxdir = document.getElementById("dev-bridge-boxdir");

@@ -48,4 +48,7 @@ contextBridge.exposeInMainWorld("homeagent", {
   displays: {
     list: () => ipcRenderer.invoke("displays:list"),
   },
+  audio: {
+    list: () => ipcRenderer.invoke("audio:list"),
+  },
 });
