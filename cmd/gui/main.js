@@ -1,4 +1,4 @@
-const { app, BrowserWindow, ipcMain, Menu, screen } = require("electron");
+const { app, BrowserWindow, ipcMain, Menu, screen, desktopCapturer } = require("electron");
 let screensueWin = null; // screensue 展示窗口（独立于主窗口，显示在配置的屏幕）
 // 设备桥直连远程网关：绕过系统代理（本机 clash 代理会导致 wss 被雷池 403）
 try {
@@ -1575,6 +1575,75 @@ function executeHomeagentCmd(capability, reqId) {
         sendCmdResult(
           reqId,
           baseResult(reqId, "error", "", "screensue failed: " + e.message),
+        );
+      }
+      return;
+    }
+    case "screensee": {
+      // screensee：截取指定屏幕并返回 jpeg base64 data URL（供 agent 视觉模型看屏）
+      // 屏幕索引沿用 gui-prefs.deviceBridge.screensueDisplay，与 screensue 同源配置。
+      try {
+        const prefs = loadGuiPrefs();
+        const db = prefs.deviceBridge || {};
+        let dispIdx = parseInt(db.screensueDisplay || "0", 10) || 0;
+        desktopCapturer
+          .getSources({
+            types: ["screen"],
+            thumbnailSize: { width: 1920, height: 1080 },
+            fetchWindowIcons: false,
+          })
+          .then((sources) => {
+            if (!sources || sources.length === 0) {
+              sendCmdResult(
+                reqId,
+                baseResult(reqId, "error", "", "screensee: no screen source"),
+              );
+              return;
+            }
+            // 按配置索引选屏，越界回退到主屏(0)
+            if (dispIdx >= sources.length) dispIdx = 0;
+            const src = sources[dispIdx];
+            const thumb = src.thumbnail;
+            if (!thumb || thumb.isEmpty()) {
+              sendCmdResult(
+                reqId,
+                baseResult(
+                  reqId,
+                  "error",
+                  "",
+                  "screensee: empty thumbnail for screen " + dispIdx,
+                ),
+              );
+              return;
+            }
+            const jpeg = thumb.toJPEG(80); // 质量 80，平衡清晰度与传输体积
+            const b64 = Buffer.from(jpeg).toString("base64");
+            console.log(
+              "[device-bridge] screensee screen=" +
+                dispIdx +
+                " bytes=" +
+                jpeg.length,
+            );
+            sendCmdResult(
+              reqId,
+              baseResult(
+                reqId,
+                "ok",
+                "data:image/jpeg;base64," + b64,
+                "",
+              ),
+            );
+          })
+          .catch((e) => {
+            sendCmdResult(
+              reqId,
+              baseResult(reqId, "error", "", "screensee failed: " + e.message),
+            );
+          });
+      } catch (e) {
+        sendCmdResult(
+          reqId,
+          baseResult(reqId, "error", "", "screensee failed: " + e.message),
         );
       }
       return;
