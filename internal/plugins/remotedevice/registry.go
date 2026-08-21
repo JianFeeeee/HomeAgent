@@ -43,6 +43,7 @@ type Registry struct {
 	conns      map[string]*wconn      // deviceID -> 活跃连接（支持 push）
 	onlineCh   chan string
 	onStatus   func(msg map[string]interface{})
+	onEvent    func(deviceID string, msg map[string]interface{})
 	acceptFn   func(token string) bool
 	cmdPending map[string]chan map[string]interface{} // reqID -> 结果 channel
 	results    map[string]resultEntry                 // reqID -> 已留档结果
@@ -52,6 +53,69 @@ type Registry struct {
 type resultEntry struct {
 	Result map[string]interface{}
 	Time   time.Time
+}
+
+// ===== 能力矩阵：caps 声明 → 工具可用性 =====
+// 设备 hello 时声明自身能力（caps），服务端据此校验工具调用：
+// 摄像头只声明 camera 就不能被调 screensee/computeruse，避免无效下发。
+// 兼容历史值：cmd/cmdrun 视为 shell 命令能力；未声明任何已知能力的设备
+// （如旧版 GUI/waiter）视为全能力，保持向后兼容。
+var capabilityTools = map[string][]string{
+	// 屏幕显示/查看
+	"screen":     {"screensue", "screensee"},
+	"screensue":  {"screensue"},
+	"screensee":  {"screensee"},
+	// 鼠标键盘操控
+	"computeruse": {"computeruse"},
+	// 剪切板
+	"clipboard":    {"clipboardsee", "clipboardsue"},
+	"clipboardsee": {"clipboardsee"},
+	"clipboardsue": {"clipboardsue"},
+	// 摄像头（抓拍/录像）
+	"camera":    {"camerasue"},
+	"camerasue": {"camerasue"},
+	// 音频播放
+	"speaker":    {"speakeruse"},
+	"speakeruse": {"speakeruse"},
+}
+
+// compatFullCaps 视为「全能力」的历史 caps 值：声明了这些的设备不参与能力裁剪。
+var compatFullCaps = map[string]bool{
+	"cmd": true, "cmdrun": true, "deviceinfo": true,
+	"status": true, "cmdresult": true,
+}
+
+// SupportsTool 判断设备是否支持某 agent 工具（基于其声明的 caps）。
+// 规则：
+//   - 设备未声明任何已知能力且无兼容全能力标记 → 视为全能力（旧设备兼容）
+//   - 声明了任一兼容全能力标记（cmd/cmdrun 等）→ 全能力
+//   - 否则严格按 capabilityTools 映射匹配
+func (r *Registry) SupportsTool(deviceID, tool string) bool {
+	r.mu.RLock()
+	m, ok := r.devices[deviceID]
+	r.mu.RUnlock()
+	if !ok {
+		return false
+	}
+	return deviceSupportsTool(m.Caps, tool)
+}
+
+func deviceSupportsTool(caps []string, tool string) bool {
+	hasKnown := false
+	for _, c := range caps {
+		if compatFullCaps[c] {
+			return true // 历史全能力设备
+		}
+		if _, known := capabilityTools[c]; known {
+			hasKnown = true
+			for _, t := range capabilityTools[c] {
+				if t == tool {
+					return true
+				}
+			}
+		}
+	}
+	return !hasKnown // 未声明任何已知能力 → 全能力兼容
 }
 
 func NewRegistry() *Registry {
@@ -77,6 +141,15 @@ func (r *Registry) SetStatusHandler(h func(msg map[string]interface{})) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	r.onStatus = h
+}
+
+// SetEventHandler 注册设备主动上报事件的回调（设备→agent 单向推送）。
+// 典型场景：摄像头识别到未知人员驻留、传感器报警等，设备无需 agent 轮询即可上报。
+// 回调参数：deviceID + 事件消息（含 type/payload 等）。
+func (r *Registry) SetEventHandler(h func(deviceID string, msg map[string]interface{})) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.onEvent = h
 }
 
 func (r *Registry) acceptBind(token string) bool {
@@ -633,6 +706,24 @@ func (r *Registry) handleWS(conn net.Conn, rw *bufio.ReadWriter) {
 			r.mu.RUnlock()
 			if h != nil {
 				h(msg)
+			}
+		case "event":
+			// 设备主动上报事件（单向推送，无需回执）：摄像头发现异常、传感器报警等。
+			// 转交插件层（经 SDK InjectText 异步注入 agent），无回调时仅记日志。
+			id, _ := msg["device_id"].(string)
+			if id == "" {
+				id = curID
+			}
+			if id == "" {
+				continue
+			}
+			r.mu.RLock()
+			h := r.onEvent
+			r.mu.RUnlock()
+			if h != nil {
+				h(id, msg)
+			} else {
+				log.Printf("[remotedevice] event from %s (no handler): %v", id, msg)
 			}
 		case "cmd_result":
 			reqID, _ := msg["req_id"].(string)
