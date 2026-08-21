@@ -136,6 +136,36 @@ func (d *devicectlDevice) Tools() []agentIO.ToolDef {
 			},
 		},
 		{
+			Name: "clipboardsee",
+			Description: "读取一台已授权设备的剪切板当前内容（用户最近复制/剪切的文字）。" +
+				"与 clipboardsue 配对：clipboardsee 是读，clipboardsue 是写。" +
+				"适用场景：用户说「看看我刚复制的东西」「把我复制的链接打开」。" +
+				"⚡ 隐私敏感：剪切板可能含密码/隐私，仅在用户明确要求时使用。设备必须已授权且在线。",
+			Parameters: map[string]interface{}{
+				"type": "object",
+				"properties": map[string]interface{}{
+					"device_id": map[string]interface{}{"type": "string", "description": "目标设备 ID"},
+				},
+				"required": []interface{}{"device_id"},
+			},
+		},
+		{
+			Name: "clipboardsue",
+			Description: "把指定文字写入一台已授权设备的剪切板（用户之后可直接 Ctrl+V 粘贴）。" +
+				"与 clipboardsee 配对：clipboardsee 是读，clipboardsue 是写。" +
+				"适用场景：帮用户准备好要粘贴的长文本/链接/代码，避免 computeruse type 逐字输入慢且易错。" +
+				"典型组合：clipboardsue 写入 → 提示用户 Ctrl+V，或 clipboardsue + computeruse keypress ctrl+v 自动粘贴。" +
+				"设备必须已授权且在线。",
+			Parameters: map[string]interface{}{
+				"type": "object",
+				"properties": map[string]interface{}{
+					"device_id": map[string]interface{}{"type": "string", "description": "目标设备 ID"},
+					"text":      map[string]interface{}{"type": "string", "description": "要写入剪切板的内容"},
+				},
+				"required": []interface{}{"device_id", "text"},
+			},
+		},
+		{
 			Name: "deviceinfo",
 			Description: "探查一台设备接入网关时声明的详细信息与支持能力。" +
 				"返回设备的 OS/架构/CPU/内存/能力 caps 等（设备接入时上报，非实时）。" +
@@ -165,6 +195,10 @@ func (d *devicectlDevice) Execute(tool string, args map[string]interface{}) (int
 		return d.screensee(args)
 	case "computeruse":
 		return d.computeruse(args)
+	case "clipboardsee":
+		return d.clipboardsee(args)
+	case "clipboardsue":
+		return d.clipboardsue(args)
 	case "deviceinfo":
 		return d.info(args)
 	default:
@@ -456,4 +490,101 @@ func (d *devicectlDevice) computeruse(args map[string]interface{}) (interface{},
 	out["req_id"] = reqID
 	d.reg.SaveResult(reqID, out)
 	return out, nil
+}
+
+// clipboardCheck 检查设备可操作性（存在/已授权/在线），返回错误或 nil。
+func (d *devicectlDevice) clipboardCheck(id, verb string) error {
+	if id == "" {
+		return fmt.Errorf("device_id required")
+	}
+	m, ok := d.reg.Get(id)
+	if !ok {
+		return fmt.Errorf("device %s 不存在", id)
+	}
+	if !m.Authorized {
+		return fmt.Errorf("device %s 未授权，无法%s剪切板（请先在设备管理页授权）", id, verb)
+	}
+	if !m.Online {
+		return fmt.Errorf("device %s 不在线", id)
+	}
+	return nil
+}
+
+// clipboardsee 实现 clipboardsee：读取设备剪切板当前内容。
+// 协议（GUI 配套）：homeagent-clipboardsee → 回执 output 字段为剪切板文字。
+func (d *devicectlDevice) clipboardsee(args map[string]interface{}) (interface{}, error) {
+	id, _ := args["device_id"].(string)
+	if err := d.clipboardCheck(id, "读取"); err != nil {
+		return nil, err
+	}
+	reqID := newReqID()
+	if err := d.reg.PushCmd(id, reqID, "clipboardsee", "homeagent"); err != nil {
+		return nil, fmt.Errorf("下发读取命令失败: %w", err)
+	}
+	res, err := d.reg.AwaitResult(reqID, 15*time.Second)
+	if err != nil {
+		d.reg.SaveResult(reqID, map[string]interface{}{"accepted": true, "error": err.Error(), "pending": true})
+		return nil, fmt.Errorf("设备未在超时内回执: %w", err)
+	}
+	if res["status"] != "ok" {
+		errMsg, _ := res["error"].(string)
+		if errMsg == "" {
+			errMsg = fmt.Sprintf("status=%v", res["status"])
+		}
+		return nil, fmt.Errorf("读取剪切板失败: %s", errMsg)
+	}
+	content, _ := res["output"].(string)
+	out := map[string]interface{}{
+		"req_id":  reqID,
+		"content": content,
+		"empty":   content == "",
+	}
+	d.reg.SaveResult(reqID, out)
+	return out, nil
+}
+
+// clipboardsue 实现 clipboardsue：把文字写入设备剪切板。
+// 协议（GUI 配套）：homeagent-clipboardsue <文字>，回执 ok 表示已写入。
+func (d *devicectlDevice) clipboardsue(args map[string]interface{}) (interface{}, error) {
+	id, _ := args["device_id"].(string)
+	text, _ := args["text"].(string)
+	if text == "" {
+		return nil, fmt.Errorf("text required（要写入剪切板的内容）")
+	}
+	if err := d.clipboardCheck(id, "写入"); err != nil {
+		return nil, err
+	}
+	reqID := newReqID()
+	// 命令格式：clipboardsue <文字>（GUI 端取首个空格后的全部内容作为写入文本）
+	if err := d.reg.PushCmd(id, reqID, "clipboardsue "+text, "homeagent"); err != nil {
+		return nil, fmt.Errorf("下发写入命令失败: %w", err)
+	}
+	res, err := d.reg.AwaitResult(reqID, 15*time.Second)
+	if err != nil {
+		d.reg.SaveResult(reqID, map[string]interface{}{"accepted": true, "error": err.Error(), "pending": true})
+		return nil, fmt.Errorf("设备未在超时内回执: %w", err)
+	}
+	if res["status"] != "ok" {
+		errMsg, _ := res["error"].(string)
+		if errMsg == "" {
+			errMsg = fmt.Sprintf("status=%v", res["status"])
+		}
+		return nil, fmt.Errorf("写入剪切板失败: %s", errMsg)
+	}
+	out := map[string]interface{}{
+		"req_id":  reqID,
+		"written": len(text),
+		"preview": truncateForPreview(text, 60),
+	}
+	d.reg.SaveResult(reqID, out)
+	return out, nil
+}
+
+// truncateForPreview 截断长文本用于回执预览。
+func truncateForPreview(s string, max int) string {
+	r := []rune(s)
+	if len(r) <= max {
+		return s
+	}
+	return string(r[:max]) + "..."
 }
