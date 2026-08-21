@@ -295,3 +295,76 @@ func TestPushDataOfflineDevice(t *testing.T) {
 		t.Fatalf("expected not online error, got %v", err)
 	}
 }
+
+// ===== screensee：截屏回传 + 视觉描述回调 =====
+
+func TestScreenseeEndToEnd(t *testing.T) {
+	reg := NewRegistry()
+	token := "test-token-see"
+	reg.SetAcceptToken(func(provided string) bool { return provided == token })
+
+	dev := &devicectlDevice{reg: reg}
+	var gotDataURL string
+	dev.SetSeeHandler(func(dataURL string, provider string) string {
+		gotDataURL = dataURL
+		return "屏幕上显示的是测试画面"
+	})
+
+	srv := httptest.NewServer(http.HandlerFunc(reg.ServeWS))
+	defer srv.Close()
+
+	cli := dialTestWS(t, srv.URL, token)
+	defer cli.close()
+
+	// 设备 hello + bind（bind 需 token 才能被授权流程识别，这里直接手动授权）
+	cli.sendText([]byte(`{"op":"hello","device":{"device_id":"see-dev","name":"屏幕机","kind":"computer","caps":["cmd"]}}`))
+	if _, _, err := cli.readMsg(); err != nil {
+		t.Fatalf("read hello_ack: %v", err)
+	}
+	reg.SetAuthorized("see-dev", true)
+
+	// 设备侧循环收命令并回执（模拟 GUI screensee 实现）
+	go func() {
+		for {
+			op, payload, err := cli.readMsg()
+			if err != nil {
+				return
+			}
+			if op != 0x1 {
+				continue
+			}
+			var msg map[string]interface{}
+			if json.Unmarshal(payload, &msg) != nil {
+				continue
+			}
+			if msg["op"] == "cmd" && msg["command"] == "screensee" {
+				reqID, _ := msg["req_id"].(string)
+				fakeJPEG := []byte{0xFF, 0xD8, 0xFF, 0xE0, 0x00, 0x10} // JPEG magic
+				b64 := base64.StdEncoding.EncodeToString(fakeJPEG)
+				cli.sendText(mustJSON(map[string]interface{}{
+					"op": "cmd_result", "req_id": reqID, "device_id": "see-dev",
+					"status": "ok", "output": "data:image/jpeg;base64," + b64,
+				}))
+			}
+		}
+	}()
+
+	// agent 调用 screensee
+	res, err := dev.Execute("screensee", map[string]interface{}{"device_id": "see-dev"})
+	if err != nil {
+		t.Fatalf("screensee: %v", err)
+	}
+	m := res.(map[string]interface{})
+	if m["description"] != "屏幕上显示的是测试画面" {
+		t.Fatalf("unexpected description: %v", m["description"])
+	}
+	if !strings.HasPrefix(gotDataURL, "data:image/jpeg;base64,") {
+		t.Fatalf("handler received bad dataURL: %s", gotDataURL)
+	}
+
+	// 未授权设备应拒绝
+	reg.SetAuthorized("see-dev", false)
+	if _, err := dev.Execute("screensee", map[string]interface{}{"device_id": "see-dev"}); err == nil {
+		t.Fatal("expected unauthorized error")
+	}
+}

@@ -23,6 +23,16 @@ type LLMMessage struct {
 	ReasoningContent string        `json:"reasoning_content,omitempty"`
 	ToolCallID       string        `json:"tool_call_id,omitempty"`
 	ToolCalls        []LLMToolCall `json:"tool_calls,omitempty"`
+	// Blocks 多模态内容块（与 Content 二选一；非空时优先）。
+	// 支持 text 与 image_url 两类，用于视觉模型看图（如 screensee 截屏描述）。
+	Blocks []LLMContentBlock `json:"blocks,omitempty"`
+}
+
+// LLMContentBlock 是多模态消息中的单个内容块。
+type LLMContentBlock struct {
+	Type     string `json:"type"` // "text" | "image_url"
+	Text     string `json:"text,omitempty"`
+	ImageURL string `json:"image_url,omitempty"` // data URL 或 http(s) URL
 }
 
 // LLMToolCall 是中立的工具调用请求。

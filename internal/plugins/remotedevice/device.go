@@ -10,11 +10,15 @@ import (
 )
 
 // devicectlDevice 把设备网关暴露为 IOManager 的一个 Device：
-// Tools() 提供 devicedetect / device_ctl_status / device_ctl_cmdrun / device_ctl_cmdresult，
+// Tools() 提供 devicedetect / device_ctl_status / device_ctl_cmdrun / device_ctl_cmdresult / screensee，
 // Execute() 检查授权并路由到 WS 在线设备。
 type devicectlDevice struct {
 	reg     *Registry
 	persist func() // 授权变更后持久化
+
+	// screensee 回调：设备截屏回传后由 agent 核心消费（视觉描述）。
+	// 由插件 Start 注入；nil 时退化为仅返回 base64 数据。
+	seeHandler func(dataURL string, provider string) string
 }
 
 func (d *devicectlDevice) Name() string                                 { return "devicectl" }
@@ -90,6 +94,21 @@ func (d *devicectlDevice) Tools() []agentIO.ToolDef {
 			},
 		},
 		{
+			Name: "screensee",
+			Description: "查看一台已授权设备的屏幕当前画面（截屏回传）。" +
+				"与 screensue（向用户屏幕显示内容）配对：screensue 是给用户看，screensee 是你看。" +
+				"返回屏幕截图的自动视觉描述；如需读取屏上文字可接着用 ocr_image。" +
+				"需要 device_id（来自 devicedetect）。设备必须已授权且在线。",
+			Parameters: map[string]interface{}{
+				"type": "object",
+				"properties": map[string]interface{}{
+					"device_id": map[string]interface{}{"type": "string", "description": "目标设备 ID"},
+					"provider":  map[string]interface{}{"type": "string", "description": "可选：用于视觉描述的 LLM 源名称，不填则使用默认模型"},
+				},
+				"required": []interface{}{"device_id"},
+			},
+		},
+		{
 			Name: "deviceinfo",
 			Description: "探查一台设备接入网关时声明的详细信息与支持能力。" +
 				"返回设备的 OS/架构/CPU/内存/能力 caps 等（设备接入时上报，非实时）。" +
@@ -115,6 +134,8 @@ func (d *devicectlDevice) Execute(tool string, args map[string]interface{}) (int
 		return d.cmdrun(args)
 	case "device_ctl_cmdresult":
 		return d.cmdresult(args)
+	case "screensee":
+		return d.screensee(args)
 	case "deviceinfo":
 		return d.info(args)
 	default:
@@ -282,4 +303,56 @@ func (d *devicectlDevice) info(args map[string]interface{}) (interface{}, error)
 		out["info"] = m.Info
 	}
 	return out, nil
+}
+
+// SetSeeHandler 注入 screensee 的视觉描述回调（agent 核心提供）。
+func (d *devicectlDevice) SetSeeHandler(fn func(dataURL string, provider string) string) {
+	d.seeHandler = fn
+}
+
+// screensee 实现 screensee：向设备下发 homeagent-screensee 截屏命令，
+// 等待回传 jpeg base64，交给 seeHandler（agent 核心）做视觉描述。
+func (d *devicectlDevice) screensee(args map[string]interface{}) (interface{}, error) {
+	id, _ := args["device_id"].(string)
+	provider, _ := args["provider"].(string)
+	if id == "" {
+		return nil, fmt.Errorf("device_id required")
+	}
+	m, ok := d.reg.Get(id)
+	if !ok {
+		return nil, fmt.Errorf("device %s 不存在", id)
+	}
+	if !m.Authorized {
+		return nil, fmt.Errorf("device %s 未授权，无法查看屏幕（请先在设备管理页授权）", id)
+	}
+	if !m.Online {
+		return nil, fmt.Errorf("device %s 不在线", id)
+	}
+	reqID := newReqID()
+	if err := d.reg.PushCmd(id, reqID, "screensee", "homeagent"); err != nil {
+		return nil, fmt.Errorf("下发截屏命令失败: %w", err)
+	}
+	res, err := d.reg.AwaitResult(reqID, 30*time.Second)
+	if err != nil {
+		d.reg.SaveResult(reqID, map[string]interface{}{"accepted": true, "error": err.Error(), "pending": true})
+		return nil, fmt.Errorf("设备未在超时内回传屏幕画面: %w", err)
+	}
+	if res["status"] != "ok" {
+		errMsg, _ := res["error"].(string)
+		if errMsg == "" {
+			errMsg = fmt.Sprintf("status=%v", res["status"])
+		}
+		return nil, fmt.Errorf("设备截屏失败: %s", errMsg)
+	}
+	output, _ := res["output"].(string)
+	// 设备端回传 data URL（data:image/jpeg;base64,...）或裸 base64
+	if !strings.HasPrefix(output, "data:") {
+		output = "data:image/jpeg;base64," + output
+	}
+	d.reg.SaveResult(reqID, res)
+	if d.seeHandler == nil {
+		return map[string]interface{}{"image_data_url": output, "note": "无视觉描述处理器，仅返回原始图像数据"}, nil
+	}
+	desc := d.seeHandler(output, provider)
+	return map[string]interface{}{"description": desc}, nil
 }
