@@ -4992,6 +4992,13 @@ function renderDevices() {
     '</label><select id="dev-bridge-display" style="font-size:13px;padding:3px 6px;border-radius:4px;border:1px solid var(--border-color);background:var(--bg-input);color:var(--text-primary)">' +
     (dispOpts || '<option value="0">默认</option>') +
     "</select>" +
+    "<label style='font-size:13px;margin-left:8px'>" +
+    __("默认时长(秒)", "default duration(s)") +
+    '</label><input id="dev-bridge-duration" value="' +
+    escHtml(dbc.screensueDuration === undefined || dbc.screensueDuration === null ? "5" : String(dbc.screensueDuration)) +
+    '" placeholder="5，0=常驻" title="' +
+    __("screensue 默认显示秒数；0=永不超时常驻。命令带数字可临时覆盖", "screensue default seconds; 0=persistent. Command number overrides") +
+    '" style="width:70px;font-size:13px;padding:3px 6px;border-radius:4px;border:1px solid var(--border-color);background:var(--bg-input);color:var(--text-primary)">' +
     "</div>" +
     '<div style="display:flex;gap:6px;align-items:center;flex-wrap:wrap">' +
     "<label style='font-size:13px'>" +
@@ -5138,9 +5145,14 @@ async function saveBridgeChannel() {
     }
     var cfg = { enabled: true, gateway: gw };
     if (tok) cfg.token = tok;
-    // 能力配置：screensue 屏幕 / cmdrun 目录 / 沙箱
+    // 能力配置：screensue 屏幕/时长 / cmdrun 目录 / 沙箱
     var disp = document.getElementById("dev-bridge-display");
     if (disp) cfg.screensueDisplay = disp.value || "0";
+    var dur = document.getElementById("dev-bridge-duration");
+    if (dur) {
+      var dv = parseInt(dur.value, 10);
+      cfg.screensueDuration = Number.isFinite(dv) && dv >= 0 ? String(dv) : "5";
+    }
     var cwd = document.getElementById("dev-bridge-cwd");
     var sandbox = document.getElementById("dev-bridge-sandbox");
     var boxdir = document.getElementById("dev-bridge-boxdir");

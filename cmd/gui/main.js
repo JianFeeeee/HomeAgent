@@ -1428,7 +1428,8 @@ function executeHomeagentCmd(capability, reqId) {
     }
     case "screensue": {
       // 在配置的目标屏幕上拉起独立窗口显示内容（支持文字 / HTML）
-      var duration = 0; // 显示时长(秒)，0=常驻
+      // 默认 5 秒自动关闭；命令可带 [秒] 指定时长，0 = 永不超时（常驻，用户手动关闭）
+      var duration = 5;
       var raw = String(capability || "")
         .replace(/^screensue/, "")
         .trim();
@@ -1438,9 +1439,15 @@ function executeHomeagentCmd(capability, reqId) {
         const prefs = loadGuiPrefs();
         const db = prefs.deviceBridge || {};
         dispIdx = parseInt(db.screensueDisplay || "0", 10) || 0;
-        duration = parseInt(db.screensueDuration || "0", 10) || 0;
+        const cfgDur = db.screensueDuration;
+        if (cfgDur === undefined || cfgDur === null || cfgDur === "") {
+          duration = 5; // 未配置时默认 5 秒
+        } else {
+          duration = parseInt(cfgDur, 10);
+          if (!Number.isFinite(duration) || duration < 0) duration = 5;
+        }
       } catch (e) {}
-      // 参数支持 "screensue [时长秒] 内容"：首个纯数字 token 作为时长
+      // 参数支持 "screensue [时长秒] 内容"：首个纯数字 token 作为时长（0=永不超时）
       const tokens = raw.split(/\s+/);
       if (tokens.length > 1 && /^\d+$/.test(tokens[0])) {
         duration = parseInt(tokens[0], 10);
@@ -1509,7 +1516,9 @@ function executeHomeagentCmd(capability, reqId) {
             "ok",
             "screensue shown on display " +
               dispIdx +
-              (duration > 0 ? " for " + duration + "s" : "") +
+              (duration > 0
+                ? " for " + duration + "s"
+                : " (persistent until closed)") +
               ": " +
               raw.slice(0, 80),
             "",
@@ -2132,7 +2141,7 @@ function loadGuiPrefs() {
           gateway: db.gateway || "",
           token: db.token || "",
           screensueDisplay: db.screensueDisplay || "0",
-          screensueDuration: db.screensueDuration || "0",
+          screensueDuration: db.screensueDuration === undefined || db.screensueDuration === null || db.screensueDuration === "" ? "5" : String(db.screensueDuration),
           exec: db.exec || {},
           authSchedule: db.authSchedule || {},
         },
@@ -2148,7 +2157,7 @@ function loadGuiPrefs() {
       gateway: "",
       token: "",
       screensueDisplay: "0",
-      screensueDuration: "0",
+      screensueDuration: "5",
       exec: {},
       authSchedule: {},
     },
