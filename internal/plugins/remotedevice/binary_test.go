@@ -368,3 +368,94 @@ func TestScreenseeEndToEnd(t *testing.T) {
 		t.Fatal("expected unauthorized error")
 	}
 }
+
+// ===== computeruse：鼠标/键盘控制命令下发 =====
+
+func TestComputeruseEndToEnd(t *testing.T) {
+	reg := NewRegistry()
+	token := "test-token-cu"
+	reg.SetAcceptToken(func(provided string) bool { return provided == token })
+
+	dev := &devicectlDevice{reg: reg}
+
+	srv := httptest.NewServer(http.HandlerFunc(reg.ServeWS))
+	defer srv.Close()
+
+	cli := dialTestWS(t, srv.URL, token)
+	defer cli.close()
+
+	cli.sendText([]byte(`{"op":"hello","device":{"device_id":"cu-dev","name":"操控机","kind":"computer","caps":["cmd","computeruse"]}}`))
+	if _, _, err := cli.readMsg(); err != nil {
+		t.Fatalf("read hello_ack: %v", err)
+	}
+	reg.SetAuthorized("cu-dev", true)
+
+	// 设备侧收 computeruse 命令并回执
+	var receivedCmd string
+	done := make(chan struct{})
+	go func() {
+		for {
+			op, payload, err := cli.readMsg()
+			if err != nil {
+				return
+			}
+			if op != 0x1 {
+				continue
+			}
+			var msg map[string]interface{}
+			if json.Unmarshal(payload, &msg) != nil {
+				continue
+			}
+			if msg["op"] == "cmd" && msg["cmd_type"] == "homeagent" {
+				receivedCmd, _ = msg["command"].(string)
+				reqID, _ := msg["req_id"].(string)
+				if strings.HasPrefix(receivedCmd, "computeruse ") {
+					cli.sendText(mustJSON(map[string]interface{}{
+						"op": "cmd_result", "req_id": reqID, "device_id": "cu-dev",
+						"status": "ok", "output": "clicked at (3009,450)",
+					}))
+					close(done)
+					return
+				}
+			}
+		}
+	}()
+
+	// agent 调用 computeruse（结构化参数）
+	res, err := dev.Execute("computeruse", map[string]interface{}{
+		"device_id": "cu-dev", "action": "click", "x": float64(3009), "y": float64(450),
+	})
+	if err != nil {
+		t.Fatalf("computeruse: %v", err)
+	}
+	select {
+	case <-done:
+	case <-time.After(3 * time.Second):
+		t.Fatal("device did not receive command")
+	}
+	// 验证下发的命令是合法 JSON 参数格式
+	payloadJSON := strings.TrimPrefix(receivedCmd, "computeruse ")
+	var params map[string]interface{}
+	if err := json.Unmarshal([]byte(payloadJSON), &params); err != nil {
+		t.Fatalf("command payload not valid JSON: %v (%s)", err, payloadJSON)
+	}
+	if params["action"] != "click" || params["x"] != float64(3009) || params["y"] != float64(450) {
+		t.Fatalf("unexpected params: %v", params)
+	}
+	if m := res.(map[string]interface{}); m["status"] != "ok" {
+		t.Fatalf("expected ok result: %v", m)
+	}
+
+	// 缺坐标应报错
+	if _, err := dev.Execute("computeruse", map[string]interface{}{"device_id": "cu-dev", "action": "click"}); err == nil {
+		t.Fatal("click without x/y should error")
+	}
+	// 未知 action 应报错
+	if _, err := dev.Execute("computeruse", map[string]interface{}{"device_id": "cu-dev", "action": "fly"}); err == nil {
+		t.Fatal("unknown action should error")
+	}
+	// type 需要 text
+	if _, err := dev.Execute("computeruse", map[string]interface{}{"device_id": "cu-dev", "action": "type"}); err == nil {
+		t.Fatal("type without text should error")
+	}
+}
