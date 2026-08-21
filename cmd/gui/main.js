@@ -2041,7 +2041,16 @@ async function startDeviceBridge(cfg) {
         device_id: deviceBridgeId,
         name: "HomeAgent GUI",
         kind: "computer",
-        caps: ["status", "cmdrun", "deviceinfo", "cmdresult", "computeruse"],
+        caps: [
+          "status",
+          "cmdrun",
+          "deviceinfo",
+          "cmdresult",
+          "computeruse",
+          "screensee",
+          "clipboardsee",
+          "clipboardsue",
+        ],
         info: {
           hostname: devOs.hostname() || "",
           platform: process.platform || "",
