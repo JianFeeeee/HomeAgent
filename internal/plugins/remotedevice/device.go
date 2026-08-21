@@ -59,8 +59,12 @@ func (d *devicectlDevice) Tools() []agentIO.ToolDef {
 			Description: "向设备下发命令/操作（异步，accepted=true 后用 device_ctl_cmdresult 轮询结果）。" +
 				"command 支持两类（前缀区分）：\n" +
 				"- shell-cmd: 在设备上执行原生 shell 命令，如 shell-cmd ls -la /tmp\n" +
-				"- homeagent-cmd: 调用设备端 HomeAgent 内置能力，如 homeagent-camerasue（调用用户侧摄像头）、" +
-				"homeagent-screensue（用户侧屏幕显示内容）\n" +
+				"- homeagent-cmd: 调用设备端 HomeAgent 内置能力：\n" +
+				"  · homeagent-screensue <显示内容/HTML> — 用户侧屏幕弹窗显示自定义内容（带参显示，如 homeagent-screensue 会议提醒：三点开会）\n" +
+				"  · homeagent-screensue <秒> <内容> — 显示指定时长后自动关闭；不带参数则常驻\n" +
+				"  · homeagent-camerasue — 抓拍单张 jpeg（结果为 base64 data URL）\n" +
+				"  · homeagent-camerasue <N秒> — 录像 N 秒 mp4（二进制分块回传，cmdresult 含 data_base64 字段）\n" +
+				"  · homeagent-speakeruse <文字> — 设备端 TTS 语音朗读文字\n" +
 				"⚡ 高危：设备必须已授权，且该操作会改变设备行为。" +
 				"返回 accepted=true 表示已下发并等待设备执行，之后可用 device_ctl_cmdresult 查询结果。" +
 				"若设备未授权或离线，返回错误信息。",
@@ -68,7 +72,7 @@ func (d *devicectlDevice) Tools() []agentIO.ToolDef {
 				"type": "object",
 				"properties": map[string]interface{}{
 					"device_id": map[string]interface{}{"type": "string", "description": "目标设备 ID"},
-					"command":   map[string]interface{}{"type": "string", "description": "以 shell-cmd 或 homeagent-cmd 前缀开头。如 shell-cmd pwd、homeagent-camerasue"},
+					"command":   map[string]interface{}{"type": "string", "description": "以 shell-cmd 或 homeagent-cmd 前缀开头。如 shell-cmd pwd、homeagent-screensue 三点开会、homeagent-camerasue 5（录5秒）、homeagent-speakeruse 你好"},
 				},
 				"required": []interface{}{"device_id", "command"},
 			},
