@@ -71,6 +71,18 @@ func (l *llmImpl) Chat(ctx context.Context, req *LLMCompletionRequest) (*LLMComp
 				ReasoningContent: m.ReasoningContent,
 				ToolCallID:       m.ToolCallID,
 			}
+			// 多模态 Blocks：text/image_url → agentAPI.ContentBlock
+			for _, b := range m.Blocks {
+				switch b.Type {
+				case "text":
+					msg.Blocks = append(msg.Blocks, agentAPI.ContentBlock{Type: "text", Text: b.Text})
+				case "image_url":
+					msg.Blocks = append(msg.Blocks, agentAPI.ContentBlock{
+						Type:     "image_url",
+						ImageURL: &agentAPI.ImageURL{URL: b.ImageURL, Detail: "high"},
+					})
+				}
+			}
 			if len(m.ToolCalls) > 0 {
 				msg.ToolCalls = make([]agentAPI.ToolCall, len(m.ToolCalls))
 				for j, tc := range m.ToolCalls {

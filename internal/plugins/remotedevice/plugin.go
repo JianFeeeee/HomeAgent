@@ -109,6 +109,8 @@ func (p *Plugin) Start(s *sdk.PluginSDK) error {
 
 	// ---- devicectl Device（agent 工具） ----------------
 	p.dev = &devicectlDevice{reg: p.registry, persist: p.persistAuthorized}
+	// screensee 视觉描述回调：截屏回传后用视觉模型描述屏幕内容
+	p.dev.SetSeeHandler(p.describeScreen)
 	if err := s.RegisterChannel("devicectl", p.dev); err != nil {
 		log.Printf("[remotedevice] register devicectl channel: %v", err)
 	}
@@ -248,6 +250,41 @@ func (p *Plugin) handleDeviceAuth(w http.ResponseWriter, r *http.Request) {
 	p.registry.SetAuthorized(req.DeviceID, req.Authorize)
 	p.persistAuthorized()
 	writeJSON(w, http.StatusOK, map[string]interface{}{"device_id": req.DeviceID, "authorized": req.Authorize})
+}
+
+// describeScreen 用视觉模型描述设备屏幕截图（screensee 回调）。
+// provider 为空时使用默认 LLM 源；模型不支持视觉时返回友好错误。
+func (p *Plugin) describeScreen(dataURL string, provider string) string {
+	if p.sdk == nil || p.sdk.LLM() == nil {
+		return "LLM 不可用，无法描述屏幕内容"
+	}
+	llm := p.sdk.LLM()
+	req := &sdk.LLMCompletionRequest{
+		MaxTokens: 2048,
+		Messages: []sdk.LLMMessage{{
+			Role: "user",
+			Blocks: []sdk.LLMContentBlock{
+				{Type: "text", Text: "这是用户设备的屏幕截图。请详细描述屏幕上显示的内容：正在运行的窗口/应用、可见的文字内容、界面状态等。如果是代码编辑器或终端，尽量转述关键文字信息。"},
+				{Type: "image_url", ImageURL: dataURL},
+			},
+		}},
+	}
+	// 指定源：临时切换（低频操作，用完恢复原源）
+	if provider != "" {
+		prev := llm.CurrentSource()
+		if err := llm.SetSource(provider); err != nil {
+			log.Printf("[remotedevice] screensee set source %s: %v", provider, err)
+		} else if prev != "" {
+			defer func() { _ = llm.SetSource(prev) }()
+		}
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 120*time.Second)
+	defer cancel()
+	resp, err := llm.Chat(ctx, req)
+	if err != nil {
+		return fmt.Sprintf("屏幕截图视觉描述失败: %v（当前模型可能不支持图像输入）", err)
+	}
+	return resp.Content
 }
 
 func (p *Plugin) Stop() error {
