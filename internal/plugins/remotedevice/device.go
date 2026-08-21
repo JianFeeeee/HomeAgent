@@ -1,6 +1,7 @@
 package remotedevice
 
 import (
+	"encoding/json"
 	"fmt"
 	"sort"
 	"strings"
@@ -110,6 +111,31 @@ func (d *devicectlDevice) Tools() []agentIO.ToolDef {
 			},
 		},
 		{
+			Name: "computeruse",
+			Description: "控制一台已授权设备的鼠标/键盘（远程操控电脑屏幕）。" +
+				"典型流程：先 screensee 看屏幕 → computeruse 操作 → 再 screensee 确认结果。" +
+				"坐标为设备屏幕像素（原点左上角，与 screensee 截图一致）。" +
+				"⚡ 高危：直接操作用户设备，务必确认操作意图明确。设备必须已授权且在线。",
+			Parameters: map[string]interface{}{
+				"type": "object",
+				"properties": map[string]interface{}{
+					"device_id": map[string]interface{}{"type": "string", "description": "目标设备 ID"},
+					"action": map[string]interface{}{
+						"type": "string",
+						"description": "操作类型：click(单击) / doubleclick(双击) / rightclick(右键) / move(移动) / scroll(滚动) / keypress(按键) / type(输入文字)",
+						"enum": []interface{}{"click", "doubleclick", "rightclick", "move", "scroll", "keypress", "type"},
+					},
+					"x":      map[string]interface{}{"type": "integer", "description": "鼠标 X 坐标（像素）。click/doubleclick/rightclick/move 必填"},
+					"y":      map[string]interface{}{"type": "integer", "description": "鼠标 Y 坐标（像素）。click/doubleclick/rightclick/move 必填"},
+					"button": map[string]interface{}{"type": "string", "description": "鼠标按钮：left(默认)/right/middle（可选）"},
+					"dy":     map[string]interface{}{"type": "integer", "description": "scroll 滚动量：正=向下，负=向上"},
+					"key":    map[string]interface{}{"type": "string", "description": "keypress 按键名，如 Return / space / ctrl+c / alt+F4"},
+					"text":   map[string]interface{}{"type": "string", "description": "type 要输入的文字"},
+				},
+				"required": []interface{}{"device_id", "action"},
+			},
+		},
+		{
 			Name: "deviceinfo",
 			Description: "探查一台设备接入网关时声明的详细信息与支持能力。" +
 				"返回设备的 OS/架构/CPU/内存/能力 caps 等（设备接入时上报，非实时）。" +
@@ -137,6 +163,8 @@ func (d *devicectlDevice) Execute(tool string, args map[string]interface{}) (int
 		return d.cmdresult(args)
 	case "screensee":
 		return d.screensee(args)
+	case "computeruse":
+		return d.computeruse(args)
 	case "deviceinfo":
 		return d.info(args)
 	default:
@@ -356,4 +384,76 @@ func (d *devicectlDevice) screensee(args map[string]interface{}) (interface{}, e
 	}
 	desc := d.seeHandler(output, provider)
 	return map[string]interface{}{"description": desc}, nil
+}
+
+// computeruse 实现 computeruse：向设备下发鼠标/键盘控制命令。
+// 协议（GUI b4e5b39）：homeagent-computeruse {"x":px,"y":px,"action":"act","button":"btn","text":"txt"}
+// 服务端负责把结构化参数序列化为 JSON，避免 LLM 手拼字符串出错。
+func (d *devicectlDevice) computeruse(args map[string]interface{}) (interface{}, error) {
+	id, _ := args["device_id"].(string)
+	action, _ := args["action"].(string)
+	if id == "" || action == "" {
+		return nil, fmt.Errorf("device_id and action required")
+	}
+	m, ok := d.reg.Get(id)
+	if !ok {
+		return nil, fmt.Errorf("device %s 不存在", id)
+	}
+	if !m.Authorized {
+		return nil, fmt.Errorf("device %s 未授权，无法远程操控（请先在设备管理页授权）", id)
+	}
+	if !m.Online {
+		return nil, fmt.Errorf("device %s 不在线", id)
+	}
+
+	// 构造 GUI 端约定的 JSON 参数（坐标相对 screensueDisplay 所选屏）
+	params := map[string]interface{}{"action": action}
+	switch action {
+	case "click", "doubleclick", "rightclick", "move":
+		x, xok := args["x"].(float64)
+		y, yok := args["y"].(float64)
+		if !xok || !yok {
+			return nil, fmt.Errorf("action=%s 需要 x/y 坐标", action)
+		}
+		params["x"] = int(x)
+		params["y"] = int(y)
+		if btn, ok := args["button"].(string); ok && btn != "" {
+			params["button"] = btn
+		}
+	case "scroll":
+		dy, ok := args["dy"].(float64)
+		if !ok {
+			return nil, fmt.Errorf("action=scroll 需要 dy 滚动量（正=向下，负=向上）")
+		}
+		params["dy"] = int(dy)
+	case "keypress":
+		key, _ := args["key"].(string)
+		if key == "" {
+			return nil, fmt.Errorf("action=keypress 需要 key 按键名（如 Return / ctrl+c）")
+		}
+		params["key"] = key
+	case "type":
+		text, _ := args["text"].(string)
+		if text == "" {
+			return nil, fmt.Errorf("action=type 需要 text 要输入的文字")
+		}
+		params["text"] = text
+	default:
+		return nil, fmt.Errorf("不支持的操作类型 %s（可选 click/doubleclick/rightclick/move/scroll/keypress/type）", action)
+	}
+
+	cmdBytes, _ := json.Marshal(params)
+	reqID := newReqID()
+	if err := d.reg.PushCmd(id, reqID, "computeruse "+string(cmdBytes), "homeagent"); err != nil {
+		return nil, fmt.Errorf("下发操控命令失败: %w", err)
+	}
+	res, err := d.reg.AwaitResult(reqID, 30*time.Second)
+	if err != nil {
+		d.reg.SaveResult(reqID, map[string]interface{}{"accepted": true, "error": err.Error(), "pending": true})
+		return nil, fmt.Errorf("设备未在超时内回执: %w", err)
+	}
+	out := res
+	out["req_id"] = reqID
+	d.reg.SaveResult(reqID, out)
+	return out, nil
 }
