@@ -841,3 +841,141 @@ func TestHandleCompletionsEndToEnd(t *testing.T) {
 		}
 	})
 }
+
+// ===== client_msg_id 去重测试（防 GUI 断线重连消息重放）=====
+
+func TestHandleChatClientMsgIDDedup(t *testing.T) {
+	iom := agentIO.NewIOManager()
+
+	memDB, err := memory.NewGraphDB(t.TempDir() + "/graph.db")
+	if err != nil {
+		t.Fatalf("NewGraphDB: %v", err)
+	}
+	defer memDB.Close()
+
+	pm := agentAPI.NewProviderManager()
+	pm.Register("echo", &echoProvider{name: "echo"})
+
+	agent := agentCore.New(agentCore.AgentConfig{
+		ID:              "test",
+		SystemPrompt:    "你是测试助手",
+		Provider:        &echoProvider{name: "echo"},
+		ProviderManager: pm,
+		IO:              iom,
+		Memory:          memDB,
+	})
+	agent.Start()
+	defer agent.Stop()
+
+	sup := supervisor.New(&types.Config{
+		Daemon: types.DaemonConfig{
+			CheckInterval:     time.Minute,
+			HeartbeatInterval: 30 * time.Second,
+		},
+	})
+	sup.Start()
+	defer sup.Shutdown()
+
+	s := testSDK(sdk.SDKConfig{
+		Supervisor: supervisor.NewSDKAdapter(sup),
+		IOManager:  iom,
+		Config:     sdk.NewConfig(&types.Config{}),
+	})
+	h := NewHandler(s)
+
+	t.Run("same_client_msg_id_replay_returns_cached_response", func(t *testing.T) {
+		body := `{"message":"你好","client_msg_id":"msg-abc-123"}`
+		req := httptest.NewRequest(http.MethodPost, "/api/v1/chat", strings.NewReader(body))
+		w := httptest.NewRecorder()
+		h.handleChat(w, req)
+		if w.Code != http.StatusOK {
+			t.Fatalf("first request: expected 200, got %d: %s", w.Code, w.Body.String())
+		}
+		var first map[string]interface{}
+		json.NewDecoder(w.Body).Decode(&first)
+		if first["response"] != "echo: 你好" {
+			t.Fatalf("expected echo response, got %v", first["response"])
+		}
+
+		// 同 ID 重放：应直接复用首次结果，不重复注入 agent
+		req2 := httptest.NewRequest(http.MethodPost, "/api/v1/chat", strings.NewReader(body))
+		w2 := httptest.NewRecorder()
+		h.handleChat(w2, req2)
+		if w2.Code != http.StatusOK {
+			t.Fatalf("replay: expected 200, got %d: %s", w2.Code, w2.Body.String())
+		}
+		var second map[string]interface{}
+		json.NewDecoder(w2.Body).Decode(&second)
+		if second["response"] != "echo: 你好" {
+			t.Fatalf("replay expected same response, got %v", second["response"])
+		}
+		if second["deduplicated"] != true {
+			t.Fatalf("replay expected deduplicated=true, got %v", second["deduplicated"])
+		}
+	})
+
+	t.Run("different_client_msg_id_processed_normally", func(t *testing.T) {
+		body := `{"message":"第二条","client_msg_id":"msg-def-456"}`
+		req := httptest.NewRequest(http.MethodPost, "/api/v1/chat", strings.NewReader(body))
+		w := httptest.NewRecorder()
+		h.handleChat(w, req)
+		if w.Code != http.StatusOK {
+			t.Fatalf("expected 200, got %d: %s", w.Code, w.Body.String())
+		}
+		var resp map[string]interface{}
+		json.NewDecoder(w.Body).Decode(&resp)
+		if resp["deduplicated"] == true {
+			t.Fatal("new msg id should not be deduplicated")
+		}
+	})
+
+	t.Run("no_client_msg_id_backward_compatible", func(t *testing.T) {
+		body := `{"message":"旧客户端消息"}`
+		req := httptest.NewRequest(http.MethodPost, "/api/v1/chat", strings.NewReader(body))
+		w := httptest.NewRecorder()
+		h.handleChat(w, req)
+		if w.Code != http.StatusOK {
+			t.Fatalf("expected 200, got %d: %s", w.Code, w.Body.String())
+		}
+	})
+}
+
+// ===== agent 核心层内容级去重测试 =====
+
+func TestAgentDuplicateInputDedup(t *testing.T) {
+	iom := agentIO.NewIOManager()
+
+	memDB, err := memory.NewGraphDB(t.TempDir() + "/graph.db")
+	if err != nil {
+		t.Fatalf("NewGraphDB: %v", err)
+	}
+	defer memDB.Close()
+
+	pm := agentAPI.NewProviderManager()
+	pm.Register("echo", &echoProvider{name: "echo"})
+
+	agent := agentCore.New(agentCore.AgentConfig{
+		ID:              "test",
+		SystemPrompt:    "你是测试助手",
+		Provider:        &echoProvider{name: "echo"},
+		ProviderManager: pm,
+		IO:              iom,
+		Memory:          memDB,
+	})
+	agent.Start()
+	defer agent.Stop()
+
+	// 直接验证 isDuplicateInput 行为
+	if agent.IsDuplicateInput("webui", "重复消息") {
+		t.Fatal("first input should not be duplicate")
+	}
+	if !agent.IsDuplicateInput("webui", "重复消息") {
+		t.Fatal("immediate same-content same-source should be duplicate")
+	}
+	if agent.IsDuplicateInput("webui", "不同消息") {
+		t.Fatal("different content should not be duplicate")
+	}
+	if agent.IsDuplicateInput("qq", "重复消息") {
+		t.Fatal("different source should not be duplicate")
+	}
+}

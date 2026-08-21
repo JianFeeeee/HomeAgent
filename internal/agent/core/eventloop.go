@@ -124,6 +124,11 @@ func (a *Agent) handleInput(evt *agentIO.InputEvent) {
 		if input == "" {
 			return
 		}
+		// 去重：webui/GUI 断线重连会重放未确认消息，短窗口内同来源同内容丢弃，避免轰炸
+		if a.isDuplicateInput(evt.Source, input) {
+			log.Printf("[agent] dropped duplicate input from %s: %s", evt.Source, truncateStr(input, 60))
+			return
+		}
 		a.processTextInput(evt, input)
 
 	case "image", "audio":

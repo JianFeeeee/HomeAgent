@@ -88,6 +88,10 @@ type Handler struct {
 	chatMu      sync.Mutex
 	chatHistory []ChatMsg
 	pendingIdx  int // chatHistory 中正在进行的 assistant 消息索引，-1 表示无
+
+	chatMsgMu     sync.Mutex
+	chatMsgCache  map[string]*chatMsgEntry // client_msg_id -> 首次处理结果
+	chatMsgOrder  []string                 // FIFO 淘汰序
 	cmdMu       sync.Mutex
 	cmdHistory  []CmdExec
 	termMu      sync.Mutex
@@ -135,6 +139,40 @@ const maxChatHistory = 200
 const maxCmdHistory = 100
 const maxTerminals = 50
 
+// ===== client_msg_id 去重（防 GUI 断线重连/超时重试导致的消息重放）=====
+// GUI 端每条发送消息带唯一 client_msg_id；服务端按 ID 单飞（singleflight）：
+// 首次请求正常注入 agent，同 ID 重放等待首次结果并直接复用，不再重复处理。
+
+const maxChatMsgCache = 256
+
+type chatMsgEntry struct {
+	done chan struct{}
+	resp *agentIO.OutputEvent
+}
+
+func (h *Handler) claimChatMsg(id string) (*chatMsgEntry, bool) {
+	h.chatMsgMu.Lock()
+	defer h.chatMsgMu.Unlock()
+	if e, ok := h.chatMsgCache[id]; ok {
+		return e, true
+	}
+	e := &chatMsgEntry{done: make(chan struct{})}
+	h.chatMsgCache[id] = e
+	h.chatMsgOrder = append(h.chatMsgOrder, id)
+	if len(h.chatMsgOrder) > maxChatMsgCache {
+		old := h.chatMsgOrder[0]
+		h.chatMsgOrder = h.chatMsgOrder[1:]
+		delete(h.chatMsgCache, old)
+	}
+	return e, false
+}
+
+// completeChatMsg 记录首次处理结果并唤醒所有等待的同 ID 重放请求。
+func (h *Handler) completeChatMsg(e *chatMsgEntry, resp *agentIO.OutputEvent) {
+	e.resp = resp
+	close(e.done)
+}
+
 func NewHandler(s *sdk.PluginSDK) *Handler {
 	var (
 		sup sdk.SupervisorAPI
@@ -175,6 +213,7 @@ func NewHandler(s *sdk.PluginSDK) *Handler {
 		sessions:   make(map[string]time.Time),
 		termStates: make(map[string]*termState),
 		pendingIdx: -1,
+		chatMsgCache: make(map[string]*chatMsgEntry),
 	}
 	h.loadChatHistory()
 	if s != nil {
@@ -1159,9 +1198,10 @@ func (h *Handler) handleChat(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var body struct {
-		Message    string `json:"message"`
-		DeviceID   string `json:"device_id"`   // 消息来源设备（GUI/受控设备），可选
-		DeviceName string `json:"device_name"` // 设备显示名，可选
+		Message     string `json:"message"`
+		DeviceID    string `json:"device_id"`   // 消息来源设备（GUI/受控设备），可选
+		DeviceName  string `json:"device_name"` // 设备显示名，可选
+		ClientMsgID string `json:"client_msg_id"` // 客户端唯一消息 ID（防断线重放/超时重试）
 	}
 	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid json"})
@@ -1176,6 +1216,36 @@ func (h *Handler) handleChat(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "agent unavailable"})
 		return
 	}
+
+	// client_msg_id 去重：同 ID 重放等待首次结果直接复用，不重复注入 agent。
+	// 无 ID 的旧客户端走原路径（agent 核心层另有内容级短窗口去重兑底）。
+	var entry *chatMsgEntry
+	if body.ClientMsgID != "" {
+		var replay bool
+		entry, replay = h.claimChatMsg(body.ClientMsgID)
+		if replay {
+			log.Printf("[webui] duplicate chat msg %s: waiting for first request result", body.ClientMsgID)
+			select {
+			case <-entry.done:
+				resp := entry.resp
+				if resp == nil {
+					writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "agent unavailable"})
+					return
+				}
+				content, _ := resp.Payload["content"].(string)
+				reasoning, _ := resp.Payload["reasoning_content"].(string)
+				result := map[string]interface{}{"response": content, "deduplicated": true}
+				if reasoning != "" {
+					result["reasoning_content"] = reasoning
+				}
+				writeJSON(w, http.StatusOK, result)
+			case <-r.Context().Done():
+				return
+			}
+			return
+		}
+	}
+
 	// 来源编码：带设备身份时用 webui/{device_id}（agent 经 injectSourceContext 可见来源）；
 	// 无设备时保持 webui（兼容旧调用）。device_name 一并注入便于 agent 识别。
 	source := "webui"
@@ -1187,7 +1257,10 @@ func (h *Handler) handleChat(w http.ResponseWriter, r *http.Request) {
 		payload["device_id"] = body.DeviceID
 		payload["device_name"] = body.DeviceName
 	}
-	// 带超时的上下文，防止 InjectTextSync 长时间阻塞 HTTP 请求
+	if body.ClientMsgID != "" {
+		payload["client_msg_id"] = body.ClientMsgID
+	}
+	// 带超时的上下文，防止 InjectInputSync 长时间阻塞 HTTP 请求
 	ctx, cancel := context.WithTimeout(r.Context(), 60*time.Second)
 	defer cancel()
 
@@ -1200,8 +1273,15 @@ func (h *Handler) handleChat(w http.ResponseWriter, r *http.Request) {
 	select {
 	case resp = <-respCh:
 	case <-ctx.Done():
+		if entry != nil {
+			h.completeChatMsg(entry, nil)
+		}
 		writeJSON(w, http.StatusGatewayTimeout, map[string]string{"error": "agent timeout (60s)"})
 		return
+	}
+
+	if entry != nil {
+		h.completeChatMsg(entry, resp)
 	}
 
 	if resp == nil {
