@@ -111,6 +111,11 @@ type Agent struct {
 	noMergeMarkers map[string]int
 	noMergeMu      sync.Mutex
 
+	// 输入去重：防 webui/GUI 断线重连导致的消息重放
+	// key=source+"|"+content, value=上次接收时间；短窗口内同内容丢弃
+	lastInput  map[string]time.Time
+	lastInputMu sync.Mutex
+
 	// 词嵌入模型，用于实体语义相似度计算
 	embedder *memory.StaticEmbedder
 }
@@ -221,6 +226,7 @@ func New(cfg AgentConfig) *Agent {
 		inputCfg:        cfg.InputProcessing,
 		embedder:        embedder,
 		noMergeMarkers:  make(map[string]int),
+		lastInput:       make(map[string]time.Time),
 	}
 }
 
@@ -239,6 +245,34 @@ func (a *Agent) Stop() {
 }
 
 func (a *Agent) ID() types.AgentID { return a.id }
+
+// isDuplicateInput 判断是否为短窗口内的重复输入（防 webui/GUI 断线重连消息重放）。
+// key=source+"|"+content；窗口内重复返回 true 并刷新时间戳（持续轰炸时保持拦截）。
+const duplicateInputWindow = 10 * time.Second
+
+func (a *Agent) isDuplicateInput(source, content string) bool {
+	a.lastInputMu.Lock()
+	defer a.lastInputMu.Unlock()
+	now := time.Now()
+	key := source + "|" + content
+	if last, ok := a.lastInput[key]; ok && now.Sub(last) < duplicateInputWindow {
+		a.lastInput[key] = now
+		return true
+	}
+	a.lastInput[key] = now
+	// 顺带清理过期项，防止 map 无限增长
+	for k, t := range a.lastInput {
+		if now.Sub(t) > duplicateInputWindow {
+			delete(a.lastInput, k)
+		}
+	}
+	return false
+}
+
+// IsDuplicateInput 导出包装，供测试验证去重行为。
+func (a *Agent) IsDuplicateInput(source, content string) bool {
+	return a.isDuplicateInput(source, content)
+}
 
 // SelfInputChan 返回自循环输入通道（只读，供内部测试验证）
 func (a *Agent) SelfInputChan() <-chan string {
