@@ -459,3 +459,104 @@ func TestComputeruseEndToEnd(t *testing.T) {
 		t.Fatal("type without text should error")
 	}
 }
+
+// ===== clipboardsee / clipboardsue：剪切板读写 =====
+
+func TestClipboardEndToEnd(t *testing.T) {
+	reg := NewRegistry()
+	token := "test-token-clip"
+	reg.SetAcceptToken(func(provided string) bool { return provided == token })
+
+	dev := &devicectlDevice{reg: reg}
+
+	srv := httptest.NewServer(http.HandlerFunc(reg.ServeWS))
+	defer srv.Close()
+
+	cli := dialTestWS(t, srv.URL, token)
+	defer cli.close()
+
+	cli.sendText([]byte(`{"op":"hello","device":{"device_id":"clip-dev","name":"剪贴板机","kind":"computer","caps":["cmd"]}}`))
+	if _, _, err := cli.readMsg(); err != nil {
+		t.Fatalf("read hello_ack: %v", err)
+	}
+	reg.SetAuthorized("clip-dev", true)
+
+	// 设备侧响应剪贴板命令
+	go func() {
+		for {
+			op, payload, err := cli.readMsg()
+			if err != nil {
+				return
+			}
+			if op != 0x1 {
+				continue
+			}
+			var msg map[string]interface{}
+			if json.Unmarshal(payload, &msg) != nil {
+				continue
+			}
+			if msg["op"] != "cmd" || msg["cmd_type"] != "homeagent" {
+				continue
+			}
+			cmd, _ := msg["command"].(string)
+			reqID, _ := msg["req_id"].(string)
+			switch {
+			case cmd == "clipboardsee":
+				cli.sendText(mustJSON(map[string]interface{}{
+					"op": "cmd_result", "req_id": reqID, "device_id": "clip-dev",
+					"status": "ok", "output": "https://example.com/copied-link",
+				}))
+			case strings.HasPrefix(cmd, "clipboardsue "):
+				written := strings.TrimPrefix(cmd, "clipboardsue ")
+				cli.sendText(mustJSON(map[string]interface{}{
+					"op": "cmd_result", "req_id": reqID, "device_id": "clip-dev",
+					"status": "ok", "output": "clipboard set: " + written,
+				}))
+			}
+		}
+	}()
+
+	t.Run("clipboardsee_returns_content", func(t *testing.T) {
+		res, err := dev.Execute("clipboardsee", map[string]interface{}{"device_id": "clip-dev"})
+		if err != nil {
+			t.Fatalf("clipboardsee: %v", err)
+		}
+		m := res.(map[string]interface{})
+		if m["content"] != "https://example.com/copied-link" {
+			t.Fatalf("unexpected content: %v", m["content"])
+		}
+		if m["empty"] == true {
+			t.Fatal("content should not be empty")
+		}
+	})
+
+	t.Run("clipboardsue_writes_text", func(t *testing.T) {
+		long := strings.Repeat("你好", 100) // 200 runes，验证 preview 截断
+		res, err := dev.Execute("clipboardsue", map[string]interface{}{"device_id": "clip-dev", "text": long})
+		if err != nil {
+			t.Fatalf("clipboardsue: %v", err)
+		}
+		m := res.(map[string]interface{})
+		if m["written"] != len(long) {
+			t.Fatalf("written mismatch: %v", m["written"])
+		}
+		preview, _ := m["preview"].(string)
+		if !strings.HasSuffix(preview, "...") || len([]rune(preview)) > 64 {
+			t.Fatalf("preview should be truncated: %q", preview)
+		}
+	})
+
+	t.Run("clipboardsue_requires_text", func(t *testing.T) {
+		if _, err := dev.Execute("clipboardsue", map[string]interface{}{"device_id": "clip-dev"}); err == nil {
+			t.Fatal("missing text should error")
+		}
+	})
+
+	t.Run("unauthorized_device_rejected", func(t *testing.T) {
+		reg.SetAuthorized("clip-dev", false)
+		defer reg.SetAuthorized("clip-dev", true)
+		if _, err := dev.Execute("clipboardsee", map[string]interface{}{"device_id": "clip-dev"}); err == nil {
+			t.Fatal("unauthorized should error")
+		}
+	})
+}
