@@ -83,7 +83,15 @@ func main() {
 	say := flag.String("say", "", "deprecated alias of -chat")
 	deviceGateway := flag.String("device", "", "remotedevice 网关地址（如 127.0.0.1:9890），启动设备桥")
 	deviceToken := flag.String("device-token", "", "设备接入 token")
+	testCap := flag.String("test-cap", "", "测试本地能力（screensue/speakeruse/screensee/clipboardsee/clipboardsue/computeruse/camerasue），如 --test-cap screensue")
+	testCapArgs := flag.String("test-cap-args", "", "测试能力的参数")
 	flag.Parse()
+
+	// 本地能力测试模式（无需连接服务器）
+	if *testCap != "" {
+		runCapTest(*testCap, *testCapArgs)
+		return
+	}
 
 	cfg := discoverConfig(*configPath)
 	cfg.MergeCLI(*socket, *remote, *apiKey)
@@ -106,7 +114,6 @@ func main() {
 	defer state.Disconnect()
 
 	// 设备桥：--device 或配置 device_gateway 时，waiter 作为被控设备接入 remotedevice
-	var bridge *deviceBridge
 	dg := *deviceGateway
 	if dg == "" {
 		dg = cfg.DeviceGateway
@@ -116,12 +123,11 @@ func main() {
 		dt = cfg.DeviceToken
 	}
 	if dg != "" && dt != "" {
-		bridge = newDeviceBridge(dg, dt)
-		if err := bridge.Start(); err != nil {
+		if err := startDeviceBridge(dg, dt); err != nil {
 			printlnC(colorYellow, fmt.Sprintf("device bridge: %v (continue without)", err))
 		} else {
-			printlnC(colorGreen, "device bridge active: "+bridge.deviceID)
-			defer bridge.Stop()
+			printlnC(colorGreen, "device bridge active: "+deviceBridgeID)
+			defer stopDeviceBridge()
 		}
 	}
 
@@ -129,6 +135,7 @@ func main() {
 		oneshot(state, oneShotMsg)
 		return
 	}
+
 	runInteractive(state, cfg)
 }
 
@@ -139,6 +146,28 @@ func oneshot(state *State, msg string) {
 		os.Exit(1)
 	}
 	fmt.Println(resp)
+}
+
+// runCapTest 本地能力测试（无需连接服务器）
+func runCapTest(capName, args string) {
+	fmt.Printf("=== 测试能力: %s ===\n", capName)
+	fmt.Printf("参数: %s\n", args)
+	fmt.Println("===========================")
+
+	// 覆盖 sendBridgeResult 为本地打印
+	sendBridgeResult = func(reqID, status, output, errMsg string) {
+		fmt.Printf("结果状态: %s\n", status)
+		if output != "" {
+			fmt.Printf("输出: %s\n", output)
+		}
+		if errMsg != "" {
+			fmt.Printf("错误: %s\n", errMsg)
+		}
+	}
+
+	handleHomeagentCmd("test-001", "homeagent-"+capName+" "+args)
+	fmt.Println("===========================")
+	fmt.Println("测试完成")
 }
 
 func runInteractive(state *State, cfg *Config) {
