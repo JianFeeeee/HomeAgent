@@ -1,0 +1,483 @@
+package client
+
+import (
+	"encoding/json"
+	"fmt"
+	"log"
+	"os"
+	"runtime"
+	"sync"
+	"time"
+)
+
+// CmdHandler 是命令处理回调类型。
+// 当收到 remotedevice 下发的 cmd 时调用，reqID 用于回执，command 是命令内容。
+type CmdHandler func(reqID, command string)
+
+// CmdResult 是命令执行结果回调（用于异步通知 GUI 层）。
+type CmdResultHandler func(reqID, status, output, errMsg string)
+
+// DataHandler 是二进制数据接收回调（如 TTS 音频）。
+type DataHandler func(reqID, kind, mime string, data []byte)
+
+// Bridge 是设备桥客户端核心结构体。
+// 管理 WebSocket 连接、消息路由、心跳保活和命令分发。
+type Bridge struct {
+	mu       sync.RWMutex
+	gateway  string
+	token    string
+	deviceID string
+	name     string
+	kind     string
+	caps     []string
+	info     map[string]interface{}
+
+	ws       *wsConn
+	stopCh   chan struct{}
+	doneCh   chan struct{}
+	started  bool
+
+	// 回调
+	cmdHandler     CmdHandler
+	resultHandler  CmdResultHandler
+	dataHandler    DataHandler
+
+	// 二进制数据聚合（服务端→设备，如 TTS 音频）
+	speechAccum *speechBuffer
+
+	// 心跳间隔
+	pingInterval time.Duration
+}
+
+// speechBuffer 聚合服务端分块推送的二进制数据。
+type speechBuffer struct {
+	reqID string
+	kind  string
+	mime  string
+	total int
+	data  []byte
+}
+
+// New 创建设备桥客户端。
+// gateway: ws://host:port（可选 /api/v1/device/ws 路径）
+// token: 接入令牌
+// deviceID: 设备唯一标识
+// name: 设备显示名称
+// caps: 能力列表（如 ["status","cmdrun","screensee","computeruse"]）
+// info: 额外设备信息（hostname, platform, arch 等），可为 nil
+func New(gateway, token, deviceID, name string, caps []string, info map[string]interface{}) *Bridge {
+	if info == nil {
+		info = make(map[string]interface{})
+	}
+	// 填充默认信息
+	if _, ok := info["hostname"]; !ok {
+		hostname, _ := os.Hostname()
+		info["hostname"] = hostname
+	}
+	if _, ok := info["platform"]; !ok {
+		info["platform"] = runtime.GOOS
+	}
+	if _, ok := info["arch"]; !ok {
+		info["arch"] = runtime.GOARCH
+	}
+	if _, ok := info["cpus"]; !ok {
+		info["cpus"] = runtime.NumCPU()
+	}
+
+	return &Bridge{
+		gateway:       gateway,
+		token:         token,
+		deviceID:      deviceID,
+		name:          name,
+		kind:          "computer",
+		caps:          caps,
+		info:          info,
+		stopCh:        make(chan struct{}),
+		doneCh:        make(chan struct{}),
+		pingInterval:  30 * time.Second,
+	}
+}
+
+// OnCmd 注册命令处理器。当收到 remotedevice 下发的 cmd 时调用。
+func (b *Bridge) OnCmd(handler CmdHandler) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	b.cmdHandler = handler
+}
+
+// OnResult 注册命令结果回调（用于异步通知）。
+func (b *Bridge) OnResult(handler CmdResultHandler) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	b.resultHandler = handler
+}
+
+// OnData 注册二进制数据接收回调（如 TTS 音频）。
+func (b *Bridge) OnData(handler DataHandler) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	b.dataHandler = handler
+}
+
+// SetPingInterval 设置心跳间隔（默认 30 秒）。
+func (b *Bridge) SetPingInterval(d time.Duration) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	b.pingInterval = d
+}
+
+// Start 启动设备桥连接。
+// 会阻塞直到连接建立或超时失败。
+func (b *Bridge) Start() error {
+	b.mu.Lock()
+	if b.started {
+		b.mu.Unlock()
+		return fmt.Errorf("devicebridge: already started")
+	}
+	b.started = true
+	b.mu.Unlock()
+
+	ws, err := dialWS(b.gateway, b.token, 10*time.Second)
+	if err != nil {
+		b.mu.Lock()
+		b.started = false
+		b.mu.Unlock()
+		return fmt.Errorf("devicebridge: dial: %w", err)
+	}
+
+	b.mu.Lock()
+	b.ws = ws
+	b.mu.Unlock()
+
+	// 发送 hello
+	b.sendJSON(map[string]interface{}{
+		"op": "hello",
+		"device": map[string]interface{}{
+			"device_id": b.deviceID,
+			"name":      b.name,
+			"kind":      b.kind,
+			"caps":      b.caps,
+			"info":      b.info,
+		},
+	})
+
+	// 发送 bind
+	b.sendJSON(map[string]interface{}{
+		"op":        "bind",
+		"device_id": b.deviceID,
+		"token":     b.token,
+	})
+
+	go b.readLoop()
+	go b.pingLoop()
+
+	return nil
+}
+
+// Stop 停止设备桥连接。
+func (b *Bridge) Stop() {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if !b.started {
+		return
+	}
+	select {
+	case <-b.stopCh:
+		return
+	default:
+		close(b.stopCh)
+	}
+	if b.ws != nil {
+		_ = b.ws.close()
+		b.ws = nil
+	}
+}
+
+// Wait 等待设备桥连接关闭。
+func (b *Bridge) Wait() {
+	<-b.doneCh
+}
+
+// DeviceID 返回设备 ID。
+func (b *Bridge) DeviceID() string {
+	b.mu.RLock()
+	defer b.mu.RUnlock()
+	return b.deviceID
+}
+
+// Connected 返回是否已连接。
+func (b *Bridge) Connected() bool {
+	b.mu.RLock()
+	defer b.mu.RUnlock()
+	return b.ws != nil && !b.ws.closed
+}
+
+// ===== 发送消息 =====
+
+// SendResult 发送命令执行结果。
+func (b *Bridge) SendResult(reqID, status, output, errMsg string) {
+	msg := map[string]interface{}{
+		"op":        "cmd_result",
+		"req_id":    reqID,
+		"status":    status,
+		"device_id": b.deviceID,
+	}
+	if output != "" {
+		msg["output"] = output
+	}
+	if errMsg != "" {
+		msg["error"] = errMsg
+	}
+	b.sendJSON(msg)
+}
+
+// SendDataStart 开始二进制数据传输（设备→网关，如录像回传）。
+func (b *Bridge) SendDataStart(reqID, kind, mime string, total int) {
+	b.sendJSON(map[string]interface{}{
+		"op":         "cmd_data_start",
+		"req_id":     reqID,
+		"kind":       kind,
+		"mime":       mime,
+		"total":      total,
+		"chunk_size": 8192,
+	})
+}
+
+// SendDataChunk 发送一块二进制数据。
+func (b *Bridge) SendDataChunk(data []byte) error {
+	b.mu.RLock()
+	ws := b.ws
+	b.mu.RUnlock()
+	if ws == nil || ws.closed {
+		return fmt.Errorf("devicebridge: not connected")
+	}
+	return ws.writeBinary(data)
+}
+
+// SendDataEnd 结束二进制数据传输。
+func (b *Bridge) SendDataEnd(reqID, status, errMsg string) {
+	msg := map[string]interface{}{
+		"op":     "cmd_data_end",
+		"req_id": reqID,
+		"status": status,
+	}
+	if errMsg != "" {
+		msg["error"] = errMsg
+	}
+	b.sendJSON(msg)
+}
+
+// SendDataChunked 便捷方法：自动分块发送完整二进制数据。
+func (b *Bridge) SendDataChunked(reqID, kind, mime string, data []byte) {
+	total := len(data)
+	b.SendDataStart(reqID, kind, mime, total)
+	const chunkSize = 8192
+	for off := 0; off < total; off += chunkSize {
+		end := off + chunkSize
+		if end > total {
+			end = total
+		}
+		if err := b.SendDataChunk(data[off:end]); err != nil {
+			b.SendDataEnd(reqID, "error", err.Error())
+			return
+		}
+	}
+	b.SendDataEnd(reqID, "ok", "")
+}
+
+// SendEvent 发送设备主动上报事件。
+func (b *Bridge) SendEvent(eventType string, payload interface{}) {
+	b.sendJSON(map[string]interface{}{
+		"op":        "event",
+		"device_id": b.deviceID,
+		"type":      eventType,
+		"payload":   payload,
+	})
+}
+
+// SendStatus 发送设备状态更新。
+func (b *Bridge) SendStatus(status string) {
+	b.sendJSON(map[string]interface{}{
+		"op":        "status",
+		"device_id": b.deviceID,
+		"status":    status,
+	})
+}
+
+// ===== 内部方法 =====
+
+func (b *Bridge) sendJSON(v interface{}) {
+	b.mu.RLock()
+	ws := b.ws
+	b.mu.RUnlock()
+	if ws == nil || ws.closed {
+		return
+	}
+	payload := mustJSON(v)
+	_ = ws.writeText(payload)
+}
+
+func (b *Bridge) readLoop() {
+	defer func() {
+		b.mu.Lock()
+		b.started = false
+		if b.ws != nil {
+			_ = b.ws.close()
+			b.ws = nil
+		}
+		b.mu.Unlock()
+		close(b.doneCh)
+	}()
+
+	for {
+		select {
+		case <-b.stopCh:
+			return
+		default:
+		}
+
+		// 设置读超时（2 倍 ping 间隔）
+		b.mu.RLock()
+		ws := b.ws
+		interval := b.pingInterval
+		b.mu.RUnlock()
+		if ws == nil {
+			return
+		}
+
+		ws.setDeadline(time.Now().Add(interval * 2))
+		payload, isClose, opcode, err := ws.readFrame()
+		if err != nil {
+			if err == errPing {
+				_ = ws.writePong()
+				continue
+			}
+			// 超时或其他错误，退出
+			return
+		}
+		if isClose {
+			return
+		}
+		if opcode == 0x2 {
+			// 二进制帧：处于聚合状态时追加
+			b.handleBinaryFrame(payload)
+			continue
+		}
+
+		var msg map[string]interface{}
+		if err := json.Unmarshal(payload, &msg); err != nil {
+			continue
+		}
+		b.handleMessage(msg)
+	}
+}
+
+func (b *Bridge) handleMessage(msg map[string]interface{}) {
+	op, _ := msg["op"].(string)
+	switch op {
+	case "cmd":
+		reqID, _ := msg["req_id"].(string)
+		command, _ := msg["command"].(string)
+		cmdType, _ := msg["cmd_type"].(string)
+		if reqID == "" || command == "" {
+			return
+		}
+		// 记录日志
+		log.Printf("[devicebridge] cmd req=%s type=%s cmd=%s", reqID, cmdType, truncateString(command, 60))
+
+		b.mu.RLock()
+		handler := b.cmdHandler
+		b.mu.RUnlock()
+		if handler != nil {
+			handler(reqID, command)
+		}
+
+	case "hello_ack", "bind_ack":
+		log.Printf("[devicebridge] %s device=%v", op, msg["device"])
+
+	case "cmd_speech_start":
+		reqID, _ := msg["req_id"].(string)
+		kind, _ := msg["kind"].(string)
+		mime, _ := msg["mime"].(string)
+		total := 0
+		if v, ok := msg["total"].(float64); ok {
+			total = int(v)
+		}
+		b.mu.Lock()
+		b.speechAccum = &speechBuffer{
+			reqID: reqID,
+			kind:  kind,
+			mime:  mime,
+			total: total,
+		}
+		b.mu.Unlock()
+
+	case "cmd_speech_end":
+		reqID, _ := msg["req_id"].(string)
+		b.mu.Lock()
+		acc := b.speechAccum
+		b.speechAccum = nil
+		b.mu.Unlock()
+		if acc == nil || acc.reqID != reqID {
+			return
+		}
+		data := acc.data
+		b.mu.RLock()
+		dh := b.dataHandler
+		b.mu.RUnlock()
+		if dh != nil {
+			dh(reqID, acc.kind, acc.mime, data)
+		}
+
+	default:
+		log.Printf("[devicebridge] unhandled op=%s", op)
+	}
+}
+
+func (b *Bridge) handleBinaryFrame(payload []byte) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if b.speechAccum == nil {
+		return
+	}
+	b.speechAccum.data = append(b.speechAccum.data, payload...)
+	// 防滥用：超出声明 total 的 2 倍或硬上限 64MB 时放弃
+	limit := b.speechAccum.total*2 + 1024
+	if limit < 64<<20 {
+		limit = 64 << 20
+	}
+	if len(b.speechAccum.data) > limit {
+		log.Printf("[devicebridge] speech data exceeded limit, dropped")
+		b.speechAccum = nil
+	}
+}
+
+func (b *Bridge) pingLoop() {
+	b.mu.RLock()
+	interval := b.pingInterval
+	b.mu.RUnlock()
+
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-b.stopCh:
+			return
+		case <-ticker.C:
+			b.mu.RLock()
+			ws := b.ws
+			b.mu.RUnlock()
+			if ws != nil && !ws.closed {
+				_ = ws.writeFrame(0x9, nil) // ping
+			}
+		}
+	}
+}
+
+func truncateString(s string, n int) string {
+	if len(s) <= n {
+		return s
+	}
+	return s[:n] + "..."
+}
