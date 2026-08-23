@@ -1743,16 +1743,24 @@ function executeHomeagentCmd(capability, reqId) {
         try {
           params = JSON.parse(jsonM[0]);
         } catch (e) {
-          sendCmdResult(
-            reqId,
-            baseResult(
+          // 兼容非标准 JSON: {x:500,y:300} → 补双引号
+          try {
+            const fixed = jsonM[0]
+              .replace(/([{,]\s*)([a-zA-Z_][a-zA-Z0-9_]*)\s*:/g, '$1"$2":')  // 给 key 加引号
+              .replace(/:\s*'([^']*)'/g, ':"$1"');  // 单引号值转双引号
+            params = JSON.parse(fixed);
+          } catch (e2) {
+            sendCmdResult(
               reqId,
-              "error",
-              "",
-              "computeruse: invalid JSON params: " + e.message,
-            ),
-          );
-          return;
+              baseResult(
+                reqId,
+                "error",
+                "",
+                "computeruse: invalid JSON params: " + e.message,
+              ),
+            );
+            return;
+          }
         }
       } else {
         // 支持 "x y action" 简写
@@ -1791,84 +1799,55 @@ function executeHomeagentCmd(capability, reqId) {
       const oy = disp ? (disp.bounds.y || 0) : 0;
       const absX = Math.round(ox + (parseFloat(params.x) || 0));
       const absY = Math.round(oy + (parseFloat(params.y) || 0));
-      const run = (cmdStr, done) => {
-        if (os_ === "win32") {
-          // Windows: 用 PowerShell user32 SendInput
-          cp.execFile(
-            "powershell",
-            ["-NoProfile", "-Command", cmdStr],
-            { timeout: 15000, maxBuffer: 1024 * 1024 },
-            (err) => {
-              sendCmdResult(
-                reqId,
-                baseResult(
-                  reqId,
-                  err ? "error" : "ok",
-                  err ? "" : "computeruse " + action + " @ (" + absX + "," + absY + ")" + (done ? " " + done : ""),
-                  err ? err.message : "",
-                ),
-              );
-            },
-          );
-          return;
-        }
-        if (os_ === "darwin") {
-          // macOS cliclick
-          cp.execFile(
-            "cliclick",
-            cmdStr,
-            { timeout: 15000, maxBuffer: 1024 * 1024 },
-            (err) => {
-              sendCmdResult(
-                reqId,
-                baseResult(
-                  reqId,
-                  err ? "error" : "ok",
-                  err ? "" : "computeruse " + action + " @ (" + absX + "," + absY + ")" + (done ? " " + done : ""),
-                  err ? err.message : "",
-                ),
-              );
-            },
-          );
-          return;
-        }
-        // Linux xdotool
-        cp.execFile("xdotool", cmdStr, { timeout: 15000, maxBuffer: 1024 * 1024 }, (err) => {
-          sendCmdResult(
-            reqId,
-            baseResult(
-              reqId,
-              err ? "error" : "ok",
-              err ? "" : "computeruse " + action + " @ (" + absX + "," + absY + ")" + (done ? " " + done : ""),
-              err ? err.message : "",
-            ),
-          );
-        });
-      };
-      // Windows 命令构建
-      const winCmd = (body) =>
-        "Add-Type -AssemblyName System.Windows.Forms; Add-Type -MemberDefinition '[DllImport(\"user32.dll\")] public static extern bool SetCursorPos(int x,int y); [DllImport(\"user32.dll\")] public static extern void mouse_event(uint dwFlags,uint dx,uint dy,uint dwData,uint dwExtraInfo);' -Name U -Namespace W; [U]::SetCursorPos(" + absX + "," + absY + "); " + body;
+
+      // === Windows: 用 koffi 直接调用 user32.dll，不依赖 PowerShell C# 编译 ===
       if (os_ === "win32") {
-        const btnDown = params.button === "right" ? 0x0008 : params.button === "middle" ? 0x0020 : 0x0002;
-        const btnUp = params.button === "right" ? 0x0010 : params.button === "middle" ? 0x0040 : 0x0004;
-        switch (action) {
-          case "move":
-            run(winCmd("")); return;
-          case "click":
-            run(winCmd("[U]::mouse_event(" + btnDown + ",0,0,0,0); [U]::mouse_event(" + btnUp + ",0,0,0,0);")); return;
-          case "doubleclick":
-            run(winCmd("[U]::mouse_event(" + btnDown + ",0,0,0,0); [U]::mouse_event(" + btnUp + ",0,0,0,0); Start-Sleep -Milliseconds 50; [U]::mouse_event(" + btnDown + ",0,0,0,0); [U]::mouse_event(" + btnUp + ",0,0,0,0);")); return;
-          case "rightclick":
-            run(winCmd("[U]::mouse_event(0x0008,0,0,0,0); [U]::mouse_event(0x0010,0,0,0,0);")); return;
-          case "scroll":
-            run(winCmd("[U]::mouse_event(0x0800,0,0," + String(Math.round((params.dy || 120) * 120)) + ",0);")); return;
-          case "keypress":
-            run("Add-Type -AssemblyName System.Windows.Forms; [System.Windows.Forms.SendKeys]::SendWait('" + String(params.key || params.text || "").replace(/'/g, "").replace(/\+/g, "{+}").replace(/\^/g, "{^}").replace(/%/g, "{%}") + "')"); return;
-          case "type":
-            run("Add-Type -AssemblyName System.Windows.Forms; [System.Windows.Forms.SendKeys]::SendWait('" + String(params.text || "").replace(/\+/g, "{+}").replace(/\^/g, "{^}").replace(/%/g, "{%}").replace(/~/g, "{~}") + "')"); return;
-          default:
-            sendCmdResult(reqId, baseResult(reqId, "error", "", "computeruse: unknown action " + action)); return;
+        try {
+          const koffi = require("koffi");
+          const user32 = koffi.load("user32.dll");
+          const SetCursorPos = user32.func("bool SetCursorPos(int x, int y)");
+          const mouse_event = user32.func("void mouse_event(uint dwFlags, uint dx, uint dy, uint dwData, uint dwExtraInfo)");
+
+          const btnDown = params.button === "right" ? 0x0008 : params.button === "middle" ? 0x0020 : 0x0002;
+          const btnUp = params.button === "right" ? 0x0010 : params.button === "middle" ? 0x0040 : 0x0004;
+
+          // 先移动鼠标到目标位置
+          SetCursorPos(absX, absY);
+
+          switch (action) {
+            case "move":
+              sendCmdResult(reqId, baseResult(reqId, "ok", "computeruse move @ (" + absX + "," + absY + ")", ""));
+              break;
+            case "click":
+              mouse_event(btnDown, 0, 0, 0, 0);
+              mouse_event(btnUp, 0, 0, 0, 0);
+              sendCmdResult(reqId, baseResult(reqId, "ok", "computeruse click @ (" + absX + "," + absY + ")", ""));
+              break;
+            case "doubleclick":
+              mouse_event(btnDown, 0, 0, 0, 0);
+              mouse_event(btnUp, 0, 0, 0, 0);
+              setTimeout(() => {
+                mouse_event(btnDown, 0, 0, 0, 0);
+                mouse_event(btnUp, 0, 0, 0, 0);
+                sendCmdResult(reqId, baseResult(reqId, "ok", "computeruse doubleclick @ (" + absX + "," + absY + ")", ""));
+              }, 50);
+              break;
+            case "rightclick":
+              mouse_event(0x0008, 0, 0, 0, 0);
+              mouse_event(0x0010, 0, 0, 0, 0);
+              sendCmdResult(reqId, baseResult(reqId, "ok", "computeruse rightclick @ (" + absX + "," + absY + ")", ""));
+              break;
+            case "scroll":
+              mouse_event(0x0800, 0, 0, Math.round((params.dy || 120) * 120), 0);
+              sendCmdResult(reqId, baseResult(reqId, "ok", "computeruse scroll @ (" + absX + "," + absY + ")", ""));
+              break;
+            default:
+              sendCmdResult(reqId, baseResult(reqId, "error", "", "computeruse: unknown action " + action));
+          }
+        } catch (e) {
+          sendCmdResult(reqId, baseResult(reqId, "error", "", "computeruse: " + e.message));
         }
+        return;
       }
       // Linux / macOS 通过工具 argv
       const L = (a) => {
@@ -1961,6 +1940,43 @@ function executeHomeagentCmd(capability, reqId) {
       }
       return;
     }
+    case "omniparse": {
+      // 解析当前屏幕 UI 元素，返回结构化 JSON 供 agent 分析
+      // 使用 PowerShell Get-Process + .NET 获取窗口信息
+      try {
+        const cp = require("child_process");
+        const psScript = `
+$wins = @()
+$procs = [System.Diagnostics.Process]::GetProcesses()
+foreach ($p in $procs) {
+    if ($p.MainWindowHandle -ne 0 -and $p.MainWindowTitle) {
+        $wins += @{
+            pid = $p.Id
+            name = $p.ProcessName
+            title = $p.MainWindowTitle.Trim()
+            hwnd = $p.MainWindowHandle.ToString("x")
+        }
+    }
+}
+if ($wins.Count -gt 50) { $wins = $wins[0..49] }
+return ($wins | ConvertTo-Json -Compress)
+`;
+        const psFile = require("path").join(require("os").tmpdir(), "ha_omniparse_" + Date.now() + ".ps1");
+        require("fs").writeFileSync(psFile, psScript, "utf8");
+        cp.execFile("powershell", ["-NoProfile", "-ExecutionPolicy", "Bypass", "-File", psFile],
+          { timeout: 15000, maxBuffer: 1024 * 1024 },
+          (err, stdout) => {
+            try { require("fs").unlinkSync(psFile); } catch (e) {}
+            if (err) { sendCmdResult(reqId, baseResult(reqId, "error", "", "omniparse: " + err.message)); return; }
+            const out = (stdout || "").trim();
+            if (!out) { sendCmdResult(reqId, baseResult(reqId, "error", "", "omniparse: no output")); return; }
+            sendCmdResult(reqId, baseResult(reqId, "ok", out, ""));
+          });
+      } catch (e) {
+        sendCmdResult(reqId, baseResult(reqId, "error", "", "omniparse: " + e.message));
+      }
+      return;
+    }
     case "clipboardsue": {
       // 写入文字到设备剪切板（用户可直接 Ctrl+V 粘贴）。
       // 协议: homeagent-clipboardsue <文字>
@@ -2050,6 +2066,10 @@ async function startDeviceBridge(cfg) {
           "screensee",
           "clipboardsee",
           "clipboardsue",
+          "speakeruse",
+          "camerasue",
+          "screensue",
+          "omniparse",
         ],
         info: {
           hostname: devOs.hostname() || "",
