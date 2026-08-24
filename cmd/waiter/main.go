@@ -185,6 +185,22 @@ func main() {
 	runInteractive(state, cfg)
 }
 
+// runInteractive 交互入口：TTY 下走 Bubble Tea 全屏 TUI，非 TTY 回退行式 REPL。
+func runInteractive(state *State, cfg *Config) {
+	history := newHistory(historyPath(), 1000)
+	history.load()
+
+	if isTTYFile(os.Stdin) && isTTYFile(os.Stdout) && colors {
+		if err := runTUI(state, cfg, history); err != nil {
+			printlnC(colorRed, fmt.Sprintf("tui: %v", err))
+			printlnC(colorYellow, "falling back to line mode")
+			runLineMode(state, cfg, history)
+		}
+		return
+	}
+	runLineMode(state, cfg, history)
+}
+
 func oneshot(state *State, msg string) {
 	stop := startSpinner("thinking...")
 	resp, err := state.SendChatStream(msg, func(rl respLine) {
@@ -222,12 +238,10 @@ func runCapTest(capName, args string) {
 	fmt.Println("测试完成")
 }
 
-func runInteractive(state *State, cfg *Config) {
+// runLineMode 传统行式 REPL（非 TTY 回退 / TUI 启动失败时使用）。
+func runLineMode(state *State, cfg *Config, history History) {
 	sigCh := make(chan os.Signal, 1)
 	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
-
-	history := newHistory(historyPath(), 1000)
-	history.load()
 
 	line := newLineEditor(&history)
 
@@ -298,7 +312,7 @@ loop:
 		}
 
 		if cmd[0] == '/' {
-			if handleBuiltin(cmd, cfg, state, reconnect) {
+			if handleBuiltin(cmd, cfg, state, reconnect, os.Stdout) {
 				if cmd == "/exit" || cmd == "/quit" {
 					break loop
 				}
