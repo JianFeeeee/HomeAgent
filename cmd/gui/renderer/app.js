@@ -825,6 +825,28 @@ async function refreshAll() {
           state.selfDeviceId = dbinfo.deviceId;
           state.selfGateway = dbinfo.address || state.selfGateway;
         }
+        // 本机授权状态以客户端本地为准（服务端自报值仅展示）
+        if (typeof dbinfo.authorized === "boolean") {
+          var found = false;
+          for (var di = 0; di < state.devices.length; di++) {
+            if (state.devices[di].device_id === dbinfo.deviceId) {
+              state.devices[di].authorized = dbinfo.authorized;
+              found = true;
+              break;
+            }
+          }
+          if (!found && dbinfo.authorized) {
+            // 服务端列表未含本机（可能离线），仍展示本地状态
+            state.devices.push({
+              device_id: dbinfo.deviceId,
+              name: "HomeAgent GUI",
+              kind: "computer",
+              authorized: dbinfo.authorized,
+              online: false,
+              caps: [],
+            });
+          }
+        }
         // 若尚未有设备列表且已启用设备桥但非 device 连接，尝试经设备桥网关拉取
         if (
           state.devices.length === 0 &&
@@ -5295,19 +5317,20 @@ function renderDevices() {
         auth +
         "</td><td>" +
         escHtml(caps) +
-        "</td><td>" +
-        (d.authorized
-          ? '<label class="switch"><input type="checkbox" checked' +
-            " onchange=\"deviceToggleAuth('" +
-            d.device_id +
-            "',this.checked)\"><span></span></label> " +
-            __("已授权", "Yes")
-          : '<label class="switch"><input type="checkbox"' +
-            " onchange=\"deviceToggleAuth('" +
-            d.device_id +
-            "',this.checked)\"><span></span></label> " +
-            __("未授权", "No")) +
-        "</td></tr>";
+        "</td><td>";
+      // 客户端鉴权：只有本机设备可切换授权开关；其它设备的授权由其自身控制
+      if (d.device_id === state.selfDeviceId) {
+        html +=
+          '<label class="switch"><input type="checkbox"' +
+          (d.authorized ? " checked" : "") +
+          " onchange=\"deviceToggleAuth('" +
+          d.device_id +
+          "',this.checked)\"><span></span></label>";
+      } else {
+        html += '<span style="color:var(--text-muted);font-size:12px">' +
+          __("由该设备自行控制", "Controlled by device itself") + "</span>";
+      }
+      html += "</td></tr>";
     });
     html += "</table>";
   }
@@ -5379,11 +5402,15 @@ async function deviceRefresh() {
 
 async function deviceToggleAuth(deviceID, auth) {
   try {
-    await api("/device/auth", {
-      method: "POST",
-      body: JSON.stringify({ device_id: deviceID, authorize: auth }),
-    });
-    toast(__("授权已更新", "Authorization updated"));
+    // 客户端鉴权：授权状态存在设备本地（gui-prefs），不经服务端，agent 无法篡改
+    if (window.homeagent && window.homeagent.deviceBridge) {
+      await window.homeagent.deviceBridge.setAuthorized(auth);
+    }
+    toast(
+      __("本机授权已更新", "Local authorization updated") + " (" +
+        (auth ? __("已授权", "Yes") : __("未授权", "No")) +
+        ")",
+    );
     deviceRefresh();
   } catch (e) {
     toast(__("授权失败: ", "Auth failed: ") + e.message, true);

@@ -1221,6 +1221,18 @@ function onDeviceMsg(msg) {
   );
   const op = msg.op || "";
   if (op === "cmd") {
+    // 客户端鉴权：未授权时拒绝执行（授权状态存本地 gui-prefs，服务端无法篡改）
+    if (!guiPrefs?.deviceBridge?.authorized) {
+      console.log("[device-bridge] cmd rejected (unauthorized): req=" + (msg.req_id || ""));
+      sendCmdResult({
+        op: "cmd_result",
+        req_id: msg.req_id || msg.id || "",
+        device_id: deviceBridgeId,
+        status: "error",
+        error: "设备未授权：请在设备 GUI 设置页开启远程控制授权",
+      });
+      return;
+    }
     const command = msg.command || msg.cmd || "";
     const reqId = msg.req_id || msg.id || "";
     const cmdType = msg.cmd_type || "shell";
@@ -2057,6 +2069,7 @@ async function startDeviceBridge(cfg) {
         device_id: deviceBridgeId,
         name: "HomeAgent GUI",
         kind: "computer",
+        authorized: guiPrefs?.deviceBridge?.authorized || false, // 客户端自报授权状态
         caps: [
           "status",
           "cmdrun",
@@ -2141,111 +2154,34 @@ function timeLeq(a, b) {
   return a <= b;
 }
 
-// 执行授权开关（经 webui 反代 /api/v1/device/auth）
+// 执行授权开关（客户端本地鉴权：写 gui-prefs.deviceBridge.authorized，
+// 并重新 hello 同步自报状态到服务端展示。服务端不存储授权，agent 无法篡改。）
 async function setDeviceAuthorized(authorized) {
   try {
-    // URL + cookie 优先 authRule；否则从 connections.json 取当前连接（webui 反代）
-    let base = "";
-    let cookie = "";
-    if (authRule && authRule.url) {
-      base = authRule.url.replace(/\/+$/, "");
-      cookie =
-        (authRule.cookie || "") +
-        (authRule.slSession ? "; " + authRule.slSession : "");
-    } else {
-      try {
-        const conns = loadConnections();
-        const cur =
-          conns.connections.find((c) => c.id === conns.currentId) ||
-          conns.connections[0];
-        if (cur && cur.url) {
-          base = cur.url.replace(/\/+$/, "");
-          cookie = cur.cookie || "";
-        }
-      } catch (e2) {}
-    }
-    if (!base || !cookie) {
-      console.log("[auth-schedule] no base/cookie, skip");
-      return;
-    }
-    const url = base + "/api/v1/device/auth";
-    const body = JSON.stringify({
-      device_id: deviceBridgeId,
-      authorize: authorized,
-    });
-    // 用 node https 直连（带 cookie + 跟随 302），不走 Electron session（避免 jar 会话差异）
-    const resp = await new Promise((resolve, reject) => {
-      const https = require("https");
-      const u = new URL(url);
-      const req = https.request(
-        {
-          hostname: u.hostname,
-          port: u.port || 443,
-          path: u.pathname + u.search,
-          method: "POST",
-          rejectUnauthorized: false,
-          headers: {
-            "Content-Type": "application/json",
-            "User-Agent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36",
-            Cookie: cookie,
-            "Content-Length": Buffer.byteLength(body),
-          },
+    const prefs = loadGuiPrefs();
+    prefs.deviceBridge = prefs.deviceBridge || {};
+    prefs.deviceBridge.authorized = !!authorized;
+    saveGuiPrefs(prefs);
+    console.log("[auth] set local authorized=" + !!authorized);
+    // 若设备桥已连接，重新 hello 同步状态
+    if (deviceBridge && deviceBridge.send && deviceBridgeId) {
+      deviceBridge.send({
+        op: "hello",
+        device: {
+          device_id: deviceBridgeId,
+          name: "HomeAgent GUI",
+          kind: "computer",
+          authorized: !!authorized,
+          caps: [
+            "status", "cmdrun", "deviceinfo", "cmdresult",
+            "computeruse", "screensee", "clipboardsee", "clipboardsue",
+            "speakeruse", "camerasue", "screensue", "omniparse",
+          ],
         },
-        (res) => {
-          let buf = "";
-          res.on("data", (c) => (buf += c));
-          res.on("end", () => {
-            if (
-              res.statusCode >= 300 &&
-              res.statusCode < 400 &&
-              res.headers.location
-            ) {
-              // 跟随 302 到登录域后重试一次
-              const loc = res.headers.location;
-              const lurl = loc.startsWith("http")
-                ? loc
-                : new URL(loc, url).toString();
-              const req2 = https.request(
-                {
-                  ...u2opts(lurl),
-                  method: "POST",
-                  headers: {
-                    "Content-Type": "application/json",
-                    "User-Agent": "Mozilla/5.0",
-                    Cookie: cookie,
-                    "Content-Length": Buffer.byteLength(body),
-                  },
-                },
-                (r2) => {
-                  let b2 = "";
-                  r2.on("data", (c) => (b2 += c));
-                  r2.on("end", () =>
-                    resolve({ status: r2.statusCode, body: b2 }),
-                  );
-                },
-              );
-              req2.write(body);
-              req2.end();
-              return;
-            }
-            resolve({ status: res.statusCode, body: buf });
-          });
-        },
-      );
-      req.on("error", reject);
-      req.write(body);
-      req.end();
-    });
-    console.log(
-      "[auth-schedule] set authorized=" +
-        authorized +
-        " -> HTTP " +
-        resp.status +
-        " " +
-        resp.body.slice(0, 60),
-    );
+      });
+    }
   } catch (e) {
-    console.error("[auth-schedule] set authorized failed: " + e.message);
+    console.error("[auth] set authorized failed: " + e.message);
   }
 }
 
@@ -2540,6 +2476,7 @@ function loadGuiPrefs() {
         exitToTray: d.exitToTray === undefined ? true : !!d.exitToTray,
         deviceBridge: {
           enabled: !!db.enabled,
+          authorized: !!db.authorized, // 客户端本地授权（用户在设备上手动开启，服务端不存储）
           gateway: db.gateway || "",
           token: db.token || "",
           screensueDisplay: db.screensueDisplay || "0",
@@ -2557,6 +2494,7 @@ function loadGuiPrefs() {
     exitToTray: true,
     deviceBridge: {
       enabled: true,
+      authorized: false, // 默认不授权，用户手动开启
       gateway: "",
       token: "",
       screensueDisplay: "0",
@@ -2629,6 +2567,7 @@ ipcMain.handle("device-bridge:get", () => {
   const db = p.deviceBridge || {};
   return {
     enabled: !!db.enabled,
+    authorized: !!db.authorized, // 客户端本地授权状态
     gateway: db.gateway || "",
     tokenSet: !!(db.token || ""),
     connected: !!deviceBridge,
@@ -2639,6 +2578,12 @@ ipcMain.handle("device-bridge:get", () => {
     authSchedule: db.authSchedule || {},
     audio: db.audio || {},
   };
+});
+
+// IPC：设置本机授权状态（客户端鉴权：仅写本地 prefs + 重发 hello，不经服务端）
+ipcMain.handle("device-bridge:setAuthorized", (_, auth) => {
+  setDeviceAuthorized(!!auth);
+  return { authorized: !!auth };
 });
 
 // IPC：配置本机设备桥（开关+网关+token），保存并动态启停

@@ -83,6 +83,7 @@ func main() {
 	say := flag.String("say", "", "deprecated alias of -chat")
 	deviceGateway := flag.String("device", "", "remotedevice 网关地址（如 127.0.0.1:9890），启动设备桥")
 	deviceToken := flag.String("device-token", "", "设备接入 token")
+	deviceAuthorized := flag.Bool("device-authorized", false, "客户端本地授权（允许远程操控本机；也可在 waiter.yaml 配 device_authorized: true）")
 	testCap := flag.String("test-cap", "", "测试本地能力（screensue/speakeruse/screensee/clipboardsee/clipboardsue/computeruse/camerasue），如 --test-cap screensue")
 	testCapArgs := flag.String("test-cap-args", "", "测试能力的参数")
 	flag.Parse()
@@ -126,7 +127,10 @@ func main() {
 		if err := startDeviceBridge(dg, dt); err != nil {
 			printlnC(colorYellow, fmt.Sprintf("device bridge: %v (continue without)", err))
 		} else {
-			printlnC(colorGreen, "device bridge active: "+deviceBridgeID)
+			// 客户端本地授权：命令行 --device-authorized 或 waiter.yaml device_authorized
+			auth := *deviceAuthorized || cfg.DeviceAuthorized
+			deviceBridge.SetAuthorized(auth)
+			printlnC(colorGreen, "device bridge active: "+deviceBridgeID+" authorized="+fmt.Sprint(auth))
 			defer stopDeviceBridge()
 		}
 	}

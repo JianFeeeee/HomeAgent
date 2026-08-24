@@ -17,6 +17,8 @@ import (
 )
 
 // DeviceMeta 描述一台接入了网关的设备。
+// Authorized 设备自报（由客户端存储和声明），服务端仅报告不决策。
+// 鉴权在设备端执行：服务端推送命令后，设备自行决定是否执行。
 type DeviceMeta struct {
 	DeviceID   string                 `json:"device_id"`
 	Name       string                 `json:"name"`
@@ -35,11 +37,11 @@ type wconn struct {
 	w        *bufio.Writer
 }
 
-// Registry 是设备接入网关的注册表：管理在线连接、设备元数据与已授权集合。线程安全。
+// Registry 是设备接入网关的注册表：管理在线连接、设备元数据。线程安全。
+// 鉴权在设备端执行，服务端不存储授权状态。
 type Registry struct {
 	mu         sync.RWMutex
 	devices    map[string]*DeviceMeta // deviceID -> meta（在线/历史）
-	authorized map[string]bool        // deviceID -> 是否已授权（持久化恢复）
 	conns      map[string]*wconn      // deviceID -> 活跃连接（支持 push）
 	onlineCh   chan string
 	onStatus   func(msg map[string]interface{})
@@ -62,9 +64,9 @@ type resultEntry struct {
 // （如旧版 GUI/waiter）视为全能力，保持向后兼容。
 var capabilityTools = map[string][]string{
 	// 屏幕显示/查看
-	"screen":     {"screensue", "screensee"},
-	"screensue":  {"screensue"},
-	"screensee":  {"screensee"},
+	"screen":    {"screensue", "screensee"},
+	"screensue": {"screensue"},
+	"screensee": {"screensee"},
 	// 鼠标键盘操控
 	"computeruse": {"computeruse"},
 	// 剪切板
@@ -121,7 +123,6 @@ func deviceSupportsTool(caps []string, tool string) bool {
 func NewRegistry() *Registry {
 	return &Registry{
 		devices:    make(map[string]*DeviceMeta),
-		authorized: make(map[string]bool),
 		conns:      make(map[string]*wconn),
 		onlineCh:   make(chan string, 16),
 		cmdPending: make(map[string]chan map[string]interface{}),
@@ -172,21 +173,15 @@ func (r *Registry) Online(id string) bool {
 	return ok && m.Online
 }
 
-// Authorized 返回设备是否已授权。
-func (r *Registry) Authorized(id string) bool {
-	r.mu.RLock()
-	defer r.mu.RUnlock()
-	return r.authorized[id]
-}
+// Authorized 已移除：授权状态由设备端自报（DeviceMeta.Authorized），服务端不存储。
 
-// List 返回全部设备（在线或历史），合并授权态。
+// List 返回全部设备（在线或历史）。
 func (r *Registry) List() []DeviceMeta {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
 	out := make([]DeviceMeta, 0, len(r.devices))
 	for _, m := range r.devices {
 		c := *m
-		c.Authorized = r.authorized[c.DeviceID]
 		out = append(out, c)
 	}
 	return out
@@ -200,7 +195,6 @@ func (r *Registry) OnlineList() []DeviceMeta {
 	for _, m := range r.devices {
 		if m.Online {
 			c := *m
-			c.Authorized = r.authorized[c.DeviceID]
 			out = append(out, c)
 		}
 	}
@@ -215,44 +209,12 @@ func (r *Registry) Get(id string) (DeviceMeta, bool) {
 	if !ok {
 		return DeviceMeta{}, false
 	}
-	c := *m
-	c.Authorized = r.authorized[id]
-	return c, true
+	return *m, true
 }
 
 // ============ 授权 ============
-
-// SetAuthorized 标记某设备已授权/取消授权（持久化由插件负责）。
-func (r *Registry) SetAuthorized(id string, auth bool) {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	r.authorized[id] = auth
-	if m, ok := r.devices[id]; ok {
-		m.Authorized = auth
-	}
-}
-
-// RestoreAuthorized 插件启动时从配置恢复已授权设备集合。
-func (r *Registry) RestoreAuthorized(ids []string) {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	for _, id := range ids {
-		r.authorized[id] = true
-	}
-}
-
-// AuthorizedIDs 返回全部已授权设备 ID（供插件持久化）。
-func (r *Registry) AuthorizedIDs() []string {
-	r.mu.RLock()
-	defer r.mu.RUnlock()
-	var out []string
-	for id, ok := range r.authorized {
-		if ok {
-			out = append(out, id)
-		}
-	}
-	return out
-}
+// 已移除服务端授权存储：设备在 hello/status 中自报 authorized，
+// 服务端仅透传展示；实际鉴权由设备端执行（收到 cmd 后自行决定是否执行）。
 
 // ============ 在线状态维护 ============
 
@@ -260,7 +222,7 @@ func (r *Registry) register(meta DeviceMeta) {
 	r.mu.Lock()
 	meta.Online = true
 	meta.LastSeen = time.Now().Unix()
-	meta.Authorized = r.authorized[meta.DeviceID]
+	// 保留设备自报的授权状态（客户端鉴权，服务端不覆盖）
 	r.devices[meta.DeviceID] = &meta
 	r.mu.Unlock()
 	r.notifyChange(meta.DeviceID)
@@ -335,7 +297,9 @@ func (r *Registry) PushCmd(deviceID, reqID, command, cmdType string) error {
 
 // PushData 向设备分块下发二进制数据（网关→设备，如 TTS 音频）。
 // 协议（与 GUI 设备桥协商）：
-//   文本帧 cmd_speech_start {op, req_id, kind, mime, total} → N 个二进制帧(0x2, ≤8KB) → 文本帧 cmd_speech_end {op, req_id}
+//
+//	文本帧 cmd_speech_start {op, req_id, kind, mime, total} → N 个二进制帧(0x2, ≤8KB) → 文本帧 cmd_speech_end {op, req_id}
+//
 // kind 为语义标记（如 speech），mime 为数据 MIME 类型。设备聚合后按自身能力处理（播放等）。
 func (r *Registry) PushData(deviceID, reqID, kind, mime string, data []byte) error {
 	r.mu.RLock()
@@ -812,6 +776,9 @@ func metaFromMsg(msg map[string]interface{}) DeviceMeta {
 					meta.Caps = append(meta.Caps, s)
 				}
 			}
+		}
+		if v, ok := d["authorized"].(bool); ok {
+			meta.Authorized = v
 		}
 		if info, ok := d["info"].(map[string]interface{}); ok {
 			if len(info) > 0 {

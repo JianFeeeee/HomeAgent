@@ -12,10 +12,9 @@ import (
 
 // devicectlDevice 把设备网关暴露为 IOManager 的一个 Device：
 // Tools() 提供 devicedetect / device_ctl_status / device_ctl_cmdrun / device_ctl_cmdresult / screensee，
-// Execute() 检查授权并路由到 WS 在线设备。
+// Execute() 推送命令到设备，设备端自行鉴权（客户端存储授权）。
 type devicectlDevice struct {
-	reg     *Registry
-	persist func() // 授权变更后持久化
+	reg *Registry
 
 	// screensee 回调：设备截屏回传后由 agent 核心消费（视觉描述）。
 	// 由插件 Start 注入；nil 时退化为仅返回 base64 数据。
@@ -121,9 +120,9 @@ func (d *devicectlDevice) Tools() []agentIO.ToolDef {
 				"properties": map[string]interface{}{
 					"device_id": map[string]interface{}{"type": "string", "description": "目标设备 ID"},
 					"action": map[string]interface{}{
-						"type": "string",
+						"type":        "string",
 						"description": "操作类型：click(单击) / doubleclick(双击) / rightclick(右键) / move(移动) / scroll(滚动) / keypress(按键) / type(输入文字)",
-						"enum": []interface{}{"click", "doubleclick", "rightclick", "move", "scroll", "keypress", "type"},
+						"enum":        []interface{}{"click", "doubleclick", "rightclick", "move", "scroll", "keypress", "type"},
 					},
 					"x":      map[string]interface{}{"type": "integer", "description": "鼠标 X 坐标（像素）。click/doubleclick/rightclick/move 必填"},
 					"y":      map[string]interface{}{"type": "integer", "description": "鼠标 Y 坐标（像素）。click/doubleclick/rightclick/move 必填"},
@@ -257,9 +256,7 @@ func (d *devicectlDevice) status(args map[string]interface{}) (interface{}, erro
 	if !ok {
 		return nil, fmt.Errorf("device %s 不存在", id)
 	}
-	if !m.Authorized {
-		return nil, fmt.Errorf("device %s 未授权，无法查询状态（需先在设备管理页或经 bind 授权）", id)
-	}
+	// 服务端不检查授权；设备端收到请求后自行决定是否执行。
 	if !m.Online {
 		return publicDevices([]DeviceMeta{m}), nil // 带 offline=true
 	}
@@ -277,9 +274,7 @@ func (d *devicectlDevice) cmdrun(args map[string]interface{}) (interface{}, erro
 	if !ok {
 		return nil, fmt.Errorf("device %s 不存在", id)
 	}
-	if !m.Authorized {
-		return nil, fmt.Errorf("device %s 未授权，无法执行命令（请先在设备管理页授权）", id)
-	}
+	// 服务端不检查授权；设备端收到请求后自行决定是否执行。
 	if !m.Online {
 		return nil, fmt.Errorf("device %s 不在线，无法执行命令", id)
 	}
@@ -328,12 +323,9 @@ func (d *devicectlDevice) cmdresult(args map[string]interface{}) (interface{}, e
 	if deviceID != "" {
 		// 返回该设备最近一次结果（简化：遍历 results 找 device_id 匹配的最近一条）
 		// 说明：当前只按 req_id 查询；device_id 查询留给后续迭代。
-		m, ok := d.reg.Get(deviceID)
+		_, ok := d.reg.Get(deviceID)
 		if !ok {
 			return nil, fmt.Errorf("device %s 不存在", deviceID)
-		}
-		if !m.Authorized {
-			return nil, fmt.Errorf("device %s 未授权", deviceID)
 		}
 		return map[string]interface{}{"device_id": deviceID, "note": "请用 device_ctl_cmdrun 返回的 req_id 查询命令结果"}, nil
 	}
@@ -349,9 +341,6 @@ func (d *devicectlDevice) info(args map[string]interface{}) (interface{}, error)
 	m, ok := d.reg.Get(id)
 	if !ok {
 		return nil, fmt.Errorf("device %s 不存在", id)
-	}
-	if !m.Authorized {
-		return nil, fmt.Errorf("device %s 未授权，无法探查信息（请先在设备管理页授权）", id)
 	}
 	out := map[string]interface{}{
 		"device_id":  m.DeviceID,
@@ -385,9 +374,7 @@ func (d *devicectlDevice) screensee(args map[string]interface{}) (interface{}, e
 	if !ok {
 		return nil, fmt.Errorf("device %s 不存在", id)
 	}
-	if !m.Authorized {
-		return nil, fmt.Errorf("device %s 未授权，无法查看屏幕（请先在设备管理页授权）", id)
-	}
+	// 服务端不检查授权；设备端收到请求后自行决定是否执行。
 	if !m.Online {
 		return nil, fmt.Errorf("device %s 不在线", id)
 	}
@@ -436,9 +423,7 @@ func (d *devicectlDevice) computeruse(args map[string]interface{}) (interface{},
 	if !ok {
 		return nil, fmt.Errorf("device %s 不存在", id)
 	}
-	if !m.Authorized {
-		return nil, fmt.Errorf("device %s 未授权，无法远程操控（请先在设备管理页授权）", id)
-	}
+	// 服务端不检查授权；设备端收到请求后自行决定是否执行。
 	if !m.Online {
 		return nil, fmt.Errorf("device %s 不在线", id)
 	}
@@ -507,9 +492,6 @@ func (d *devicectlDevice) clipboardCheck(id, verb, tool string) error {
 	m, ok := d.reg.Get(id)
 	if !ok {
 		return fmt.Errorf("device %s 不存在", id)
-	}
-	if !m.Authorized {
-		return fmt.Errorf("device %s 未授权，无法%s剪切板（请先在设备管理页授权）", id, verb)
 	}
 	if !m.Online {
 		return fmt.Errorf("device %s 不在线", id)

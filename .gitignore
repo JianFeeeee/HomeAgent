@@ -45,3 +45,4 @@ terminal_locked_log.txt
 dist/
 .pi-glla/
 .omo/
+.pi/

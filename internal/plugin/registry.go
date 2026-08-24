@@ -112,7 +112,7 @@ func NewRegistry() *Registry {
 		pluginAutoRestart: make(map[string]bool),
 		sdkRefs:           make(map[string]*sdk.PluginSDK),
 		knownDisabled:     make(map[string]bool),
-		pluginHashes:     make(map[string]string),
+		pluginHashes:      make(map[string]string),
 	}
 }
 
@@ -645,6 +645,24 @@ func (r *Registry) Disable(name string) error {
 }
 
 // ---- PluginManager interface ----
+
+// PluginManager interface
+
+// IsBuiltinPlugin 判断插件是否为内置插件（有编译期工厂,由 init() 注册）。
+// 内置插件只能禁用/启用，不能卸载。
+func (r *Registry) IsBuiltinPlugin(name string) bool {
+	if r == nil {
+		return false
+	}
+	r.mu.RLock()
+	_, ok := r.factories[name]
+	r.mu.RUnlock()
+	if ok {
+		return true
+	}
+	_, ok = globalFactories.Load(name)
+	return ok
+}
 
 func (r *Registry) ListLoadedPlugins() []string { return r.List() }
 

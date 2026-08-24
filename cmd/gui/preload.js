@@ -44,6 +44,8 @@ contextBridge.exposeInMainWorld("homeagent", {
   deviceBridge: {
     get: () => ipcRenderer.invoke("device-bridge:get"),
     set: (cfg) => ipcRenderer.invoke("device-bridge:set", cfg),
+    setAuthorized: (auth) =>
+      ipcRenderer.invoke("device-bridge:setAuthorized", auth),
   },
   displays: {
     list: () => ipcRenderer.invoke("displays:list"),
