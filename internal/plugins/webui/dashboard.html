@@ -3593,12 +3593,10 @@ background:
         btn.textContent = "";
         rerenderChat(true);
         // 触发式 POST：短超时仅确认受理；回复靠 SSE 流式渲染（对齐 GUI 行为）。
-        // 长 LLM 工具链不再因同步等全量响应而 60s 超时报错。
         try {
           var ctrl = new AbortController();
-          var acked = false; // 受理确认是否在超时内返回
           var ackTimer = setTimeout(function () {
-            if (!acked) ctrl.abort();
+            ctrl.abort();
           }, 15000);
           var r = null;
           try {
@@ -3607,40 +3605,46 @@ background:
               body: JSON.stringify({ message: text }),
               signal: ctrl.signal,
             });
-            acked = true;
           } catch (ackErr) {
-            if (acked) throw ackErr;
-            // 受理确认超时：agent 已在后台处理，保持 loading 等待 SSE 流式回包
-            console.log("[sendChat] ack timeout (15s), waiting for SSE stream");
-            state.chatStage = __("AI 处理中...（长任务，请稍候）", "AI processing... (long task)");
-            return; // 保持 chatLoading=true；SSE 完成事件负责收尾
+            // 同步超时/失败：不阻塞 UI，等 SSE 兑底；明确提示"可能已发送"
+            console.warn("[sendChat] trigger failed: " + ackErr.message);
+            toast(
+              __(
+                "请求超时（可能已发送，请稍候或在收到回复前勿重复发送）",
+                "Request timeout (may have been sent; wait for reply before resending)",
+              ),
+              true,
+            );
+            r = null;
           } finally {
             clearTimeout(ackTimer);
           }
-          state.chatStage = "";
+          state.chatStage = __("AI 回复中...", "AI replying...");
           var last = state.messages[state.messages.length - 1];
-          if (last && last.role === "assistant" && last._streaming) {
-            last.content = r.response || __("(无响应)", "(no response)");
-            last._grow = true;
-            if (!last.reasoning_content) {
-              last.reasoning_content = r.reasoning_content || "";
+          if (r && r.response) {
+            if (last && last.role === "assistant" && last._streaming) {
+              last.content = r.response || __("(无响应)", "(no response)");
+              last._grow = true;
+              if (!last.reasoning_content) {
+                last.reasoning_content = r.reasoning_content || "";
+              }
+              last._final = true;
+              delete last._streaming;
+            } else {
+              state.messages.push({
+                role: "assistant",
+                content: r.response || __("(无响应)", "(no response)"),
+                reasoning_content: r.reasoning_content,
+                tool_calls:
+                  last && last.role === "assistant" && last.tool_calls
+                    ? last.tool_calls
+                    : [],
+                _final: true,
+                _grow: true,
+              });
             }
-            last._final = true;
-            delete last._streaming;
-          } else {
-            state.messages.push({
-              role: "assistant",
-              content: r.response || __("(无响应)", "(no response)"),
-              reasoning_content: r.reasoning_content,
-              tool_calls:
-                last && last.role === "assistant" && last.tool_calls
-                  ? last.tool_calls
-                  : [],
-              _final: true,
-              _grow: true,
-            });
+            state.chatFinalIdx = state.messages.length - 1;
           }
-          state.chatFinalIdx = state.messages.length - 1;
           rerenderChat(true);
         } catch (e) {
           // 真实错误（非受理超时）：展示错误信息
