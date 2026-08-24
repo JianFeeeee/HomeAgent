@@ -1,7 +1,6 @@
 package main
 
 import (
-	"context"
 	"fmt"
 	"strings"
 	"time"
@@ -80,7 +79,7 @@ type serverLineMsg struct{ line string }
 
 type readerErrMsg struct {
 	err error
-	gen int // reader 世代号：旧 reader 迟到的错误会被忽略
+	gen int
 }
 
 type reconnectDoneMsg struct{ ok bool }
@@ -109,14 +108,14 @@ type tuiModel struct {
 	historyDraft string
 
 	lines       chan string
-	errs        chan error
+	errs        chan readerErrMsg
 	readerGen   int // 当前 reader 世代；重启时递增
 	readerAlive bool
 
 	reconnecting bool
 }
 
-func newTuiModel(state *State, cfg *Config, history History, lines chan string, errs chan error) tuiModel {
+func newTuiModel(state *State, cfg *Config, history *History, lines chan string, errs chan readerErrMsg) tuiModel {
 	ti := textarea.New()
 	ti.Placeholder = "输入消息，/help 查看命令"
 	ti.Prompt = ""
@@ -130,7 +129,7 @@ func newTuiModel(state *State, cfg *Config, history History, lines chan string, 
 		cfg:         cfg,
 		input:       ti,
 		vp:          viewport.New(80, 20),
-		history:     &history,
+		history:     history,
 		historyIdx:  -1,
 		lines:       lines,
 		errs:        errs,
@@ -143,19 +142,27 @@ func (m tuiModel) Init() tea.Cmd {
 }
 
 // waitServer 阻塞等待下一行服务器输出或读错误。
-func waitServer(lines chan string, errs chan error) tea.Cmd {
+func waitServer(lines chan string, errs chan readerErrMsg) tea.Cmd {
 	return func() tea.Msg {
 		select {
 		case l := <-lines:
 			return serverLineMsg{l}
 		case e := <-errs:
-			return readerErrMsg{e}
+			return e
 		}
 	}
 }
 
 func spinTick() tea.Cmd {
 	return tea.Tick(90*time.Millisecond, func(time.Time) tea.Msg { return spinnerTickMsg{} })
+}
+
+// spinCmd busy 时启动 spinner tick 循环。
+func (m tuiModel) spinCmd() tea.Cmd {
+	if !m.busy {
+		return nil
+	}
+	return spinTick()
 }
 
 // reconnectCmd 后台重连（State 自带锁，goroutine 安全）。
@@ -196,7 +203,6 @@ func (m *tuiModel) readPump(gen int) {
 			return
 		}
 	}
-}
 }
 
 // ---------------------------------------------------------------------------
@@ -332,6 +338,10 @@ func (m tuiModel) handleSubmit() (tea.Model, tea.Cmd) {
 				m.reconnecting = true
 				return m, m.reconnectCmd()
 			}
+			// 即使内置命令也可能触发服务器回复（如 /status），所以继续保持监听
+			if m.readerAlive {
+				return m, waitServer(m.lines, m.errs)
+			}
 			return m, nil
 		}
 	}
@@ -348,7 +358,10 @@ func (m tuiModel) handleSubmit() (tea.Model, tea.Cmd) {
 		m.reconnecting = true
 		return m, m.reconnectCmd()
 	}
-	return m, nil
+	if m.readerAlive {
+		return m, tea.Batch(waitServer(m.lines, m.errs), m.spinCmd())
+	}
+	return m, m.spinCmd()
 }
 
 func (m *tuiModel) handleServerLine(line string) {
@@ -622,7 +635,7 @@ func (m tuiModel) View() string {
 func (m tuiModel) statusLine() string {
 	var leftSeg string
 	if m.busy {
-		leftSeg = styleTitle.Render(spinnerFrames[m.spinnerIdx%len(spinnerFrames)]+" thinking...")
+		leftSeg = styleTitle.Render(spinnerFrames[m.spinnerIdx%len(spinnerFrames)] + " thinking...")
 	} else {
 		leftSeg = styleDim.Render("enter 发送 · PgUp/PgDn 翻页 · ctrl+c 退出")
 	}
@@ -666,8 +679,8 @@ func maxInt(a, b int) int {
 // ---------------------------------------------------------------------------
 
 // runTUI 启动 Bubble Tea 全屏界面。
-func runTUI(state *State, cfg *Config, history History) error {
-	m := newTuiModel(state, cfg, history, make(chan string, 128), make(chan error, 8))
+func runTUI(state *State, cfg *Config, history *History) error {
+	m := newTuiModel(state, cfg, history, make(chan string, 128), make(chan readerErrMsg, 8))
 	m.readerAlive = true
 	go m.readPump(m.readerGen) // 初始读循环
 
