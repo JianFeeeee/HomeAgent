@@ -1,3 +1,5 @@
+> ⚠️ **AI-Assisted Programming Notice**: Parts of this project's code, documentation, and commit history were generated or modified with AI assistance. Key changes have been human-reviewed, but please evaluate and verify before use.
+
 # HomeAgent
 
 > **中文**: [README.md](./README.md)
