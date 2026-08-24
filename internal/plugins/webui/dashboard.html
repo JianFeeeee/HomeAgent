@@ -3164,12 +3164,24 @@ background:
         badge.style.display = "none";
       }
 
-      // 流式渲染防抖：SSE 高频推送时合并为一次重建，避免每个 chunk 全量 innerHTML。
-      // 聊天内容变化 → 短超时后只重渲聊天（跳过星图/终端/命令历史等无关重建）。
+      // 流式渲染分发：流式增量（只更新最后一条正文）vs 全量重建
       var _rerenderTimer = null;
       function rerenderChat(full) {
+        // 流式中且非强制全量：走增量路径（防抖合并 chunk，只更新最后一条消息节点）
+        if (!full && state.chatLoading) {
+          var msgs = state.messages;
+          var last = msgs.length ? msgs[msgs.length - 1] : null;
+          if (last && last.role === "assistant" && !last._final) {
+            if (_rerenderTimer) return; // 已有排程的增量更新
+            _rerenderTimer = setTimeout(function () {
+              _rerenderTimer = null;
+              renderChatStreamChunk();
+            }, 90);
+            return;
+          }
+        }
+        // 非流式（完成/工具/历史变化）：全量重渲（含防抖合并）
         if (_rerenderTimer) clearTimeout(_rerenderTimer);
-        // 流式增量（非全量）走短防抖，仅重渲聊天；工具调用/历史变化等需全量重渲
         _rerenderTimer = setTimeout(function () {
           _rerenderTimer = null;
           renderChat();
@@ -3179,6 +3191,47 @@ background:
             renderCmdHistory();
           }
         }, 90);
+      }
+
+      // 流式增量渲染（移植自 GUI）：仅更新最后一条 assistant 消息的正文与思考预览，
+      // 不重建 DOM。正文节流 parse（>200 字符或 >300ms 才 renderMd），小增量纯文本追加。
+      function renderChatStreamChunk() {
+        var msgsEl = document.getElementById("chat-msgs");
+        var last = state.messages.length ? state.messages[state.messages.length - 1] : null;
+        if (!msgsEl || !last) return;
+        var el = msgsEl.lastElementChild;
+        if (!el) { renderChat(); return; }
+        var textEl = el.querySelector(".msg-bubble .text");
+        var c = last.content || "";
+        if (textEl && c) {
+          var now = Date.now();
+          var lastParse = el.__lastParse || 0;
+          var lastLen = el.__lastLen || 0;
+          if (c.length - lastLen > 200 || now - lastParse > 300) {
+            textEl.innerHTML = renderMd(c);
+            el.__lastParse = now;
+            el.__lastLen = c.length;
+          } else {
+            var tail = c.slice(lastLen);
+            if (tail) textEl.appendChild(document.createTextNode(tail));
+            el.__lastLen = c.length;
+          }
+          if (state.chatStick !== false) {
+            try { msgsEl.scrollTop = msgsEl.scrollHeight; } catch (e) {}
+          }
+          return;
+        }
+        // 思考预览更新（流式中折叠，只刷 preview 文本）
+        var rcPrev = el.querySelector(".reasoning-preview");
+        if (rcPrev && last.reasoning_content) {
+          rcPrev.textContent = last.reasoning_content.replace(/[\s\n]+/g, " ").slice(0, 60);
+          if (state.chatStick !== false) {
+            try { msgsEl.scrollTop = msgsEl.scrollHeight; } catch (e) {}
+          }
+          return;
+        }
+        // 结构变化兜底：全量
+        renderChat();
       }
       function toggleToolCall(el) {
         var d = el.querySelector(".tc-detail");
