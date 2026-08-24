@@ -1,15 +1,16 @@
 package main
 
 import (
+	"io"
 	"encoding/json"
 	"fmt"
 	"strings"
 )
 
-func handleBuiltin(cmd string, cfg *Config, state *State, reconnect func()) bool {
+func handleBuiltin(cmd string, cfg *Config, state *State, reconnect func(), out io.Writer) bool {
 	switch {
 	case cmd == "/help":
-		fmt.Println(`Built-in commands:
+		fmt.Fprintln(out, `Built-in commands:
   /help                    show this help
   /exit, /quit             exit waiter
   /clear                   clear screen
@@ -44,7 +45,7 @@ Any other text is sent to the agent directly.`)
 		return true
 
 	case cmd == "/clear":
-		fmt.Print("\033[H\033[2J")
+		fmt.Fprint(out, "\033[H\033[2J")
 		return true
 
 	case cmd == "/reconnect":
@@ -72,7 +73,7 @@ Any other text is sent to the agent directly.`)
 
 	case cmd == "/conn list":
 		if len(cfg.Connections) == 0 {
-			fmt.Println("no saved connections")
+			fmt.Fprintln(out, "no saved connections")
 		}
 		for _, c := range cfg.Connections {
 			mark := " "
@@ -83,39 +84,39 @@ Any other text is sent to the agent directly.`)
 			if addr == "" {
 				addr = c.Socket
 			}
-			fmt.Printf(" %s %-15s %s\n", mark, c.Name, addr)
+			fmt.Fprintf(out, " %s %-15s %s\n", mark, c.Name, addr)
 		}
 		return true
 
 	case strings.HasPrefix(cmd, "/conn save "):
 		name := strings.TrimSpace(cmd[11:])
 		cfg.SaveConnection(name)
-		fmt.Printf("connection saved as '%s' (default)\n", name)
+		fmt.Fprintf(out, "connection saved as '%s' (default)\n", name)
 		return true
 
 	case strings.HasPrefix(cmd, "/conn use "):
 		name := strings.TrimSpace(cmd[10:])
 		if cfg.SwitchConnection(name) {
-			fmt.Printf("switched to '%s'\n", name)
+			fmt.Fprintf(out, "switched to '%s'\n", name)
 			reconnect()
 		} else {
-			fmt.Printf("connection '%s' not found\n", name)
+			fmt.Fprintf(out, "connection '%s' not found\n", name)
 		}
 		return true
 
 	case strings.HasPrefix(cmd, "/conn del "):
 		name := strings.TrimSpace(cmd[10:])
 		if cfg.DeleteConnection(name) {
-			fmt.Printf("connection '%s' deleted\n", name)
+			fmt.Fprintf(out, "connection '%s' deleted\n", name)
 		} else {
-			fmt.Printf("connection '%s' not found\n", name)
+			fmt.Fprintf(out, "connection '%s' not found\n", name)
 		}
 		return true
 
 	case cmd == "/status":
 		if rc := state.RemoteConn(); rc != nil {
 			d, _ := rc.DoAPI("GET", "/api/v1/status", "")
-			printJSON(d)
+			printJSON(out, d)
 		} else {
 			state.Send("/status")
 		}
@@ -124,7 +125,7 @@ Any other text is sent to the agent directly.`)
 	case cmd == "/kernel":
 		if rc := state.RemoteConn(); rc != nil {
 			d, _ := rc.DoAPI("GET", "/api/v1/kernel", "")
-			printJSON(d)
+			printJSON(out, d)
 		} else {
 			state.Send("/kernel")
 		}
@@ -133,13 +134,13 @@ Any other text is sent to the agent directly.`)
 	case strings.HasPrefix(cmd, "/settings set "):
 		parts := strings.SplitN(cmd[14:], " ", 2)
 		if len(parts) < 2 {
-			fmt.Println("usage: /settings set <key> <value>")
+			fmt.Fprintln(out, "usage: /settings set <key> <value>")
 			return true
 		}
 		if rc := state.RemoteConn(); rc != nil {
 			body := fmt.Sprintf(`{"%s":%q}`, parts[0], parts[1])
 			rc.DoAPI("PUT", "/api/v1/settings", body)
-			fmt.Println("ok")
+			fmt.Fprintln(out, "ok")
 		} else {
 			state.Send(cmd[1:])
 		}
@@ -148,7 +149,7 @@ Any other text is sent to the agent directly.`)
 	case strings.HasPrefix(cmd, "/settings"):
 		if rc := state.RemoteConn(); rc != nil {
 			d, _ := rc.DoAPI("GET", "/api/v1/settings", "")
-			printJSON(d)
+			printJSON(out, d)
 		} else {
 			state.Send(cmd[1:])
 		}
@@ -157,7 +158,7 @@ Any other text is sent to the agent directly.`)
 	case cmd == "/plugin list":
 		if rc := state.RemoteConn(); rc != nil {
 			d, _ := rc.DoAPI("GET", "/api/v1/plugins", "")
-			printJSON(d)
+			printJSON(out, d)
 		} else {
 			state.Send("/plugin list")
 		}
@@ -168,7 +169,7 @@ Any other text is sent to the agent directly.`)
 		if rc := state.RemoteConn(); rc != nil {
 			body := fmt.Sprintf(`{"url":%q}`, url)
 			d, _ := rc.DoAPI("POST", "/api/v1/plugins", body)
-			printJSON(d)
+			printJSON(out, d)
 		} else {
 			state.Send(cmd[1:])
 		}
@@ -178,7 +179,7 @@ Any other text is sent to the agent directly.`)
 		name := strings.TrimSpace(cmd[15:])
 		if rc := state.RemoteConn(); rc != nil {
 			d, _ := rc.DoAPI("DELETE", "/api/v1/plugins/"+name, "")
-			printJSON(d)
+			printJSON(out, d)
 		} else {
 			state.Send(cmd[1:])
 		}
@@ -188,7 +189,7 @@ Any other text is sent to the agent directly.`)
 		name := strings.TrimSpace(cmd[13:])
 		if rc := state.RemoteConn(); rc != nil {
 			d, _ := rc.DoAPI("GET", "/api/v1/plugins/"+name, "")
-			printJSON(d)
+			printJSON(out, d)
 		} else {
 			state.Send(cmd[1:])
 		}
@@ -198,7 +199,7 @@ Any other text is sent to the agent directly.`)
 		q := strings.TrimSpace(cmd[14:])
 		if rc := state.RemoteConn(); rc != nil {
 			d, _ := rc.DoAPI("GET", "/api/v1/memory?query="+q, "")
-			printJSON(d)
+			printJSON(out, d)
 		} else {
 			state.Send(cmd[1:])
 		}
@@ -208,7 +209,7 @@ Any other text is sent to the agent directly.`)
 		name := strings.TrimSpace(cmd[18:])
 		if rc := state.RemoteConn(); rc != nil {
 			d, _ := rc.DoAPI("DELETE", "/api/v1/knowledge/"+name, "")
-			printJSON(d)
+			printJSON(out, d)
 		} else {
 			state.Send(cmd[1:])
 		}
@@ -217,7 +218,7 @@ Any other text is sent to the agent directly.`)
 	case cmd == "/knowledge":
 		if rc := state.RemoteConn(); rc != nil {
 			d, _ := rc.DoAPI("GET", "/api/v1/knowledge", "")
-			printJSON(d)
+			printJSON(out, d)
 		} else {
 			state.Send("/knowledge")
 		}
@@ -226,7 +227,7 @@ Any other text is sent to the agent directly.`)
 	case cmd == "/agents":
 		if rc := state.RemoteConn(); rc != nil {
 			d, _ := rc.DoAPI("GET", "/api/v1/agents", "")
-			printJSON(d)
+			printJSON(out, d)
 		} else {
 			state.Send("/agents")
 		}
@@ -237,11 +238,11 @@ Any other text is sent to the agent directly.`)
 	}
 }
 
-func printJSON(d map[string]interface{}) {
+func printJSON(out io.Writer, d map[string]interface{}) {
 	if d == nil {
-		fmt.Println("(no data)")
+		fmt.Fprintln(out, "(no data)")
 		return
 	}
 	b, _ := json.MarshalIndent(d, "", "  ")
-	fmt.Println(string(b))
+	fmt.Fprintln(out, string(b))
 }

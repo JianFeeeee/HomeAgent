@@ -298,7 +298,10 @@ func NewLuaAdaptedProvider(cfg BaseConfig, vm *luaVM.VM, name, adapter string) *
 		cfg:     cfg,
 		vm:      vm,
 		adapter: adapter,
-		client:  &http.Client{Timeout: 120 * time.Second},
+		// 180s: llmsproxy 的 AUTO 链会串行尝试多个 tier，每个失败 tier 耗
+		// busyWait(2s)+上游超时；120s 曾导致网关侧记录大量 "context canceled"
+		// (客户端先放弃)。放宽到 180s 给链式 failover 留足时间。
+		client:  &http.Client{Timeout: 180 * time.Second},
 	}
 }
 
