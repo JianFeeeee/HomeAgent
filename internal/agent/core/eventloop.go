@@ -24,8 +24,8 @@ func (a *Agent) eventLoop() {
 		select {
 		case evt := <-a.io.InputChan():
 			a.handleInput(evt)
-		case task := <-a.selfInputCh:
-			a.handleSelfInput(task)
+		case msg := <-a.selfInputCh:
+			a.handleSelfInput(msg)
 		case <-a.ctx.Done():
 			return
 		}
@@ -108,13 +108,29 @@ func (a *Agent) interceptLoop() {
 	}
 }
 
-func (a *Agent) handleSelfInput(task string) {
+// channelConsolidation 标记记忆整理类自输入：无记忆路径处理，
+// 不写入对话上下文、不向任何输出通道 emit 响应。
+const channelConsolidation = "_consolidation_"
+
+// selfInputMsg 自循环输入消息。channel 决定处理路径：
+//   - channelConsolidation：记忆整理，无记忆（不污染上下文/知识库）
+//   - 其他值（如 "cli"、"webui"）：正常输入路径，写入上下文并 emit 响应
+//     （典型场景：子 Agent 完成通知，需让父 Agent 感知并可回复用户）
+type selfInputMsg struct {
+	text    string
+	channel string
+}
+
+func (a *Agent) handleSelfInput(msg selfInputMsg) {
+	if msg.channel == "" {
+		msg.channel = channelConsolidation // 兼容空值：默认走整理路径
+	}
 	a.processTextInput(&agentIO.InputEvent{
 		Source:        "system",
 		Type:          "text",
-		Payload:       map[string]interface{}{"content": task},
-		OutputChannel: "_consolidation_",
-	}, task)
+		Payload:       map[string]interface{}{"content": msg.text},
+		OutputChannel: msg.channel,
+	}, msg.text)
 }
 
 func (a *Agent) handleInput(evt *agentIO.InputEvent) {
