@@ -2,13 +2,13 @@ package main
 
 import (
 	"context"
-	"encoding/json"
 	"flag"
 	"fmt"
 	"os"
 	"os/signal"
 	"path/filepath"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 )
@@ -25,6 +25,48 @@ const (
 const clearLine = "\033[2K\r"
 
 var colors = true
+
+var spinnerFrames = []string{"⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"}
+
+// isTTYFile 判断文件是否为字符终端（非终端时禁用 spinner 转圈）。
+func isTTYFile(f *os.File) bool {
+	fi, err := f.Stat()
+	if err != nil {
+		return false
+	}
+	return fi.Mode()&os.ModeCharDevice != 0
+}
+
+// startSpinner 启动 npm 风格的加载动画，返回停止函数。
+// stop() 幂等：终止动画并清除当前行。非终端环境直接空操作。
+func startSpinner(label string) func() {
+	if !colors || !isTTYFile(os.Stdout) {
+		return func() {}
+	}
+	done := make(chan struct{})
+	var once sync.Once
+	go func() {
+		ticker := time.NewTicker(80 * time.Millisecond)
+		defer ticker.Stop()
+		i := 0
+		for {
+			select {
+			case <-done:
+				return
+			case <-ticker.C:
+				fmt.Printf("%s%s %s%s\n", clearLine, colorDim, spinnerFrames[i%len(spinnerFrames)]+" "+label, colorReset)
+				i++
+			}
+		}
+	}()
+	stop := func() {
+		once.Do(func() {
+			close(done)
+			fmt.Print(clearLine)
+		})
+	}
+	return stop
+}
 
 func init() {
 	if os.Getenv("NO_COLOR") != "" {
@@ -144,12 +186,18 @@ func main() {
 }
 
 func oneshot(state *State, msg string) {
-	resp, err := state.SendChat(msg)
+	stop := startSpinner("thinking...")
+	resp, err := state.SendChatStream(msg, func(rl respLine) {
+		// 第一个过程帧到达即停转，后续帧直接渲染
+		stop()
+		printServerEvent(rl)
+	})
+	stop()
 	if err != nil {
 		printlnC(colorRed, fmt.Sprintf("error: %v", err))
 		os.Exit(1)
 	}
-	fmt.Println(resp)
+	printlnC(colorGreen, resp)
 }
 
 // runCapTest 本地能力测试（无需连接服务器）
@@ -203,10 +251,18 @@ func runInteractive(state *State, cfg *Config) {
 	fmt.Println("Type /help for commands.")
 
 	var readerCancel func()
+	var spinnerStopMu sync.Mutex
+	var spinnerStop = func() {}
 	startReader := func() {
 		ctx, cancel := context.WithCancel(context.Background())
 		readerCancel = cancel
-		go state.ReadLoop(ctx, printServerOutput)
+		go state.ReadLoop(ctx, func(line string) {
+			spinnerStopMu.Lock()
+			stop := spinnerStop
+			spinnerStopMu.Unlock()
+			stop()
+			printServerOutput(line)
+		})
 	}
 	startReader()
 
@@ -260,6 +316,11 @@ loop:
 			state.Send(cmd)
 		}
 
+		// 发送成功后启动加载动画，收到第一帧服务器输出时自动停止
+		spinnerStopMu.Lock()
+		spinnerStop = startSpinner("thinking...")
+		spinnerStopMu.Unlock()
+
 		select {
 		case <-sigCh:
 			break loop
@@ -272,22 +333,71 @@ loop:
 	}
 }
 
+// printServerOutput 渲染一行服务器输出（JSON 帧）。
 func printServerOutput(content string) {
+	rl := parseRespLineStruct(content)
 	if !colors {
-		fmt.Printf("%s%s\n", clearLine, content)
+		fmt.Printf("%s%s\n", clearLine, renderPlain(rl, content))
 		return
 	}
-	var rl respLine
-	if err := json.Unmarshal([]byte(content), &rl); err != nil {
-		fmt.Printf("%s%s%s\n", clearLine, content, colorReset)
+	printServerEventColored(rl, content)
+}
+
+// printServerEvent 渲染一个已解析的过程/终结事件。
+func printServerEvent(rl respLine) {
+	if !colors {
+		fmt.Printf("%s%s\n", clearLine, renderPlain(rl, ""))
 		return
 	}
+	printServerEventColored(rl, "")
+}
+
+// renderPlain 无色模式下的纯文本渲染。
+func renderPlain(rl respLine, raw string) string {
 	switch rl.Type {
+	case "reasoning":
+		return "[思考] " + rl.Content
+	case "tool_call":
+		return fmt.Sprintf("[工具] %s (%s) %s", rl.Tool, rl.Status, rl.Result)
+	case "response":
+		return rl.Content
+	case "error":
+		return "[错误] " + rl.Error
+	default:
+		if raw != "" {
+			return raw
+		}
+		return rl.Content
+	}
+}
+
+// printServerEventColored 彩色模式下的帧渲染。
+func printServerEventColored(rl respLine, raw string) {
+	switch rl.Type {
+	case "reasoning":
+		fmt.Printf("%s%s· %s%s\n", clearLine, colorDim, rl.Content, colorReset)
+	case "tool_call":
+		mark, markColor := "⚙", colorYellow
+		switch rl.Status {
+		case "ok":
+			mark, markColor = "✔", colorGreen
+		case "denied", "interrupted", "error":
+			mark, markColor = "✘", colorRed
+		}
+		preview := rl.Result
+		if preview != "" {
+			preview = " " + preview
+		}
+		fmt.Printf("%s%s%s %s [%s]%s%s\n", clearLine, markColor, mark, rl.Tool, rl.Status, preview, colorReset)
 	case "response":
 		fmt.Printf("%s%s%s%s\n", clearLine, colorGreen, rl.Content, colorReset)
 	case "error":
 		fmt.Printf("%s%s%s%s\n", clearLine, colorRed, rl.Error, colorReset)
 	default:
-		fmt.Printf("%s%s%s\n", clearLine, content, colorReset)
+		text := raw
+		if text == "" {
+			text = rl.Content
+		}
+		fmt.Printf("%s%s%s\n", clearLine, text, colorReset)
 	}
 }
