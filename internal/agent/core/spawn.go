@@ -19,12 +19,19 @@ func (a *Agent) executeSpawnChild(tc agentAPI.ToolCall) string {
 	taskID := fmt.Sprintf("child_%d", a.childNextID)
 	a.childMu.Unlock()
 
-	go a.runChildTask(taskID, task)
+	// 捕获父 Agent 当前输出通道：子任务完成通知需回到发起对话的通道，
+	// 让父 Agent 正常感知并可回复用户（而非走无记忆整理路径丢失通知）。
+	parentChannel := a.currentOutputChannel
+	if parentChannel == "" || parentChannel == channelConsolidation {
+		parentChannel = "cli"
+	}
+
+	go a.runChildTask(taskID, task, parentChannel)
 
 	return fmt.Sprintf("子任务已启动（ID: %s），完成后会自动通知你，届时请使用 child_result 工具查看输出", taskID)
 }
 
-func (a *Agent) runChildTask(taskID, task string) {
+func (a *Agent) runChildTask(taskID, task string, parentChannel string) {
 	if a.provider == nil {
 		log.Printf("[child] %s failed: no LLM provider configured", taskID)
 		return
@@ -105,11 +112,10 @@ func (a *Agent) runChildTask(taskID, task string) {
 	log.Printf("[child] %s done: %s", taskID, truncateStr(finalResult, 100))
 
 	notification := fmt.Sprintf("子任务 %s 已完成，请调用 child_result 工具查看输出", taskID)
-	select {
-	case a.selfInputCh <- notification:
-	default:
-		log.Printf("[child] self input channel full, dropping notification for %s", taskID)
-	}
+	a.injectSelfChannel(selfInputMsg{
+		text:    notification,
+		channel: parentChannel, // 回到父对话通道，正常处理（写入上下文 + emit 响应）
+	})
 }
 
 func (a *Agent) executeChildResultTool(tc agentAPI.ToolCall) string {
@@ -122,13 +128,7 @@ func (a *Agent) executeChildResultTool(tc agentAPI.ToolCall) string {
 	result, ok := a.childResults[taskID]
 	if !ok {
 		a.childMu.Unlock()
-
-		a.childMu.Lock()
-		_, exists := a.childResults[taskID]
-		a.childMu.Unlock()
-		if !exists {
-			return fmt.Sprintf("子任务 %s 不存在或已过期", taskID)
-		}
+		return fmt.Sprintf("子任务 %s 不存在或已过期", taskID)
 	}
 	delete(a.childResults, taskID)
 	a.childMu.Unlock()
