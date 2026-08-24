@@ -19,6 +19,11 @@ import (
 // DefaultSocket 由 main.go 在 Load() 前设置，覆盖默认 socket 路径。
 var DefaultSocket string
 
+const (
+	cliSource  = "cli"
+	cliChannel = "cli"
+)
+
 func init() {
 	plugin.RegisterPluginMeta("cli", "CLI", "CLI")
 	plugin.RegisterFactory("cli", func(name string, config map[string]interface{}) (sdk.Plugin, error) {
@@ -155,19 +160,72 @@ func (p *Plugin) handleConn(conn net.Conn, s *sdk.PluginSDK) {
 			}
 		}
 
-		resp := s.InjectTextSync("cli", "cli", line)
-		if resp != nil {
-			content, _ := resp.Payload["content"].(string)
-			writeLine(conn, map[string]interface{}{
-				"type":    "response",
-				"content": content,
-			})
-		} else {
-			writeLine(conn, map[string]interface{}{
-				"type":  "error",
-				"error": "agent is not available",
-			})
+		p.handleChat(&connWriter{conn: conn}, line, s)
+	}
+}
+
+// connWriter 为单条连接提供互斥保护的 JSON 行写入。
+// 对话过程中事件订阅回调运行在事件总线的发布 goroutine 上，
+// 与主循环写最终响应并发，因此写入必须串行化。
+type connWriter struct {
+	conn net.Conn
+	mu   sync.Mutex
+}
+
+func (w *connWriter) writeLine(v interface{}) {
+	data, err := json.Marshal(v)
+	if err != nil {
+		return
+	}
+	data = append(data, '\n')
+	w.mu.Lock()
+	w.conn.Write(data)
+	w.mu.Unlock()
+}
+
+// handleChat 处理一条对话消息：订阅内核的推理/工具调用事件并实时
+// 转发给客户端（流式过程输出），InjectTextSync 返回后写出最终响应。
+// 仅插件层改动：通过 SDK 订阅事件，不触碰内核。
+func (p *Plugin) handleChat(w *connWriter, line string, s *sdk.PluginSDK) {
+	unsubReasoning := s.Subscribe(sdk.EventReasoning, func(evt *sdk.Event) {
+		if ch, _ := evt.Payload["channel"].(string); ch != cliChannel {
+			return
 		}
+		content, _ := evt.Payload["content"].(string)
+		if content == "" {
+			return
+		}
+		w.writeLine(map[string]interface{}{"type": "reasoning", "content": content})
+	})
+	unsubToolCall := s.Subscribe(sdk.EventToolCall, func(evt *sdk.Event) {
+		if ch, _ := evt.Payload["channel"].(string); ch != cliChannel {
+			return
+		}
+		tool, _ := evt.Payload["tool"].(string)
+		status, _ := evt.Payload["status"].(string)
+		result, _ := evt.Payload["result"].(string)
+		w.writeLine(map[string]interface{}{
+			"type":   "tool_call",
+			"tool":   tool,
+			"status": status,
+			"result": truncateOneLine(result, 160),
+		})
+	})
+	defer unsubReasoning()
+	defer unsubToolCall()
+
+	resp := s.InjectTextSync(cliSource, cliChannel, line)
+	if resp != nil {
+		content, _ := resp.Payload["content"].(string)
+		w.writeLine(map[string]interface{}{
+			"type":    "response",
+			"content": content,
+		})
+	} else {
+		w.writeLine(map[string]interface{}{
+			"type":  "error",
+			"error": "agent is not available",
+		})
 	}
 }
 
@@ -559,6 +617,16 @@ func (p *Plugin) cmdAgents(conn net.Conn, s *sdk.PluginSDK) {
 }
 
 // ======== helpers ========
+
+// truncateOneLine 将多行文本压成单行并按 rune 截断，用于事件结果预览。
+func truncateOneLine(s string, max int) string {
+	s = strings.Join(strings.Fields(s), " ")
+	r := []rune(s)
+	if len(r) > max {
+		return string(r[:max]) + "…"
+	}
+	return s
+}
 
 func writeLine(conn net.Conn, v interface{}) {
 	data, err := json.Marshal(v)
