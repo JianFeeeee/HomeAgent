@@ -3246,20 +3246,20 @@ background:
       }
 
       function renderReasoningCard(text, isStreaming) {
-        var body = renderMd(text);
         var preview =
           typeof marked !== "undefined"
             ? text.replace(/[\s\n]+/g, " ").slice(0, 60)
             : escHtml(text).replace(/<[^>]+>/g, " ").slice(0, 60);
         return (
-          '<div class="reasoning-card">' +
+          '<div class="reasoning-card' + (isStreaming ? " rc-streaming" : "") + '">' +
           '<div class="reasoning-head" onclick="toggleReasoning(this)">' +
           '<svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="rc-ico"><path d="M9 3a2 2 0 0 0-2 2v2a2 2 0 0 1-2 2H3a2 2 0 0 0-2 2v6a2 2 0 0 0 2 2h2a2 2 0 0 1 2 2v2a2 2 0 0 0 2 2h1a2 2 0 0 0 2-2v-2a2 2 0 0 1 2-2h2a2 2 0 0 0 2-2V7a2 2 0 0 0-2-2h-2a2 2 0 0 1-2-2V3a2 2 0 0 0-2-2H9zM12 8v4m0 4h.01"/></svg>' +
           '<span class="rc-title">' + (isStreaming ? __("思考中...", "Thinking...") : __("思考", "Thinking")) + '</span>' +
           '<span class="rc-chev">▾</span></div>' +
           '<div class="reasoning-body" style="display:' + (isStreaming ? "block" : "none") + '">' +
-          '<div class="reasoning-content">' + body + '</div>' +
-          (isStreaming ? '<div class="reasoning-sweep"></div>' : "") +
+          (isStreaming
+            ? '<div class="reasoning-preview">' + escHtml(preview) + '</div><div class="reasoning-sweep"></div>'
+            : '<div class="reasoning-content">' + renderMd(text) + '</div>') +
           '</div></div>'
         );
       }

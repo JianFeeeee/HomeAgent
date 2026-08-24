@@ -61,14 +61,41 @@ func (s *State) Send(line string) error {
 }
 
 func (s *State) SendChat(msg string) (string, error) {
+	return s.SendChatStream(msg, nil)
+}
+
+// SendChatStream 发送一条对话消息并循环读取响应行直至终结帧。
+// onEvent 回调在每收到一个过程帧（reasoning/tool_call）时被调用，
+// 可为 nil；返回值为最终响应内容或错误。
+func (s *State) SendChatStream(msg string, onEvent func(respLine)) (string, error) {
 	if err := s.Send(msg); err != nil {
 		return "", err
 	}
-	line, err := s.readLine()
-	if err != nil {
-		return "", err
+	for {
+		line, err := s.readLine()
+		if err != nil {
+			return "", err
+		}
+		rl := parseRespLineStruct(line)
+		switch rl.Type {
+		case "response":
+			return rl.Content, nil
+		case "error":
+			if rl.Error == "" {
+				rl.Error = line
+			}
+			return "", fmt.Errorf("%s", rl.Error)
+		default:
+			// 过程帧：reasoning / tool_call / 旧版服务器的普通文本
+			if rl.Type == "" && onEvent == nil && rl.Content == "" && rl.Error == "" {
+				// 非JSON旧行且无回调：直接当最终输出（向后兼容旧服务器）
+				return line, nil
+			}
+			if onEvent != nil {
+				onEvent(rl)
+			}
+		}
 	}
-	return parseRespLine(line)
 }
 
 func (s *State) SendBuiltin(cmd string) (string, error) {
@@ -96,13 +123,22 @@ type respLine struct {
 	Type    string `json:"type"`
 	Content string `json:"content"`
 	Error   string `json:"error"`
+	Tool    string `json:"tool"`
+	Status  string `json:"status"`
+	Result  string `json:"result"`
+}
+
+// parseRespLineStruct 解析一行 JSON 响应帧，解析失败时将原文放入 Content。
+func parseRespLineStruct(line string) respLine {
+	var rl respLine
+	if err := json.Unmarshal([]byte(line), &rl); err != nil {
+		return respLine{Content: line}
+	}
+	return rl
 }
 
 func parseRespLine(line string) (string, error) {
-	var rl respLine
-	if err := json.Unmarshal([]byte(line), &rl); err != nil {
-		return line, nil
-	}
+	rl := parseRespLineStruct(line)
 	switch rl.Type {
 	case "response":
 		return rl.Content, nil
