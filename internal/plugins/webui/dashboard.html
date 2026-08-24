@@ -1745,9 +1745,6 @@ background:
         flex-shrink: 0;
         margin-bottom: 0;
       }
-      #sm-container-chat {
-        height: 480px;
-      }
       .loading {
         display: inline-block;
         width: 16px;
@@ -1855,119 +1852,6 @@ background:
           opacity: 1;
           transform: translateY(0);
         }
-      }
-      #starmap-container {
-        width: 100%;
-        height: calc(100vh - 100px);
-        position: relative;
-        overflow: hidden;
-        border-radius: var(--radius-md);
-        border: 1px solid var(--border-color);
-        background: var(--bg-input);
-      }
-      #starmap-container canvas {
-        display: block;
-      }
-      #starmap-stats {
-        position: absolute;
-        top: 16px;
-        left: 16px;
-        background: var(--glass-bg-strong);
-        padding: 12px 16px;
-        border-radius: var(--radius-md);
-        border: 1px solid var(--glass-border);
-        font-size: 13px;
-        z-index: 10;
-        backdrop-filter: blur(12px);
-        -webkit-backdrop-filter: blur(12px);
-        color: var(--text-secondary);
-        box-shadow: var(--shadow-md);
-      }
-      #starmap-stats h3 {
-        margin-bottom: 6px;
-        color: var(--accent);
-        font-size: 14px;
-      }
-      #starmap-stats p {
-        margin: 2px 0;
-        color: var(--text-muted);
-        font-size: 12px;
-      }
-      #starmap-stats span {
-        color: var(--text-primary);
-        font-weight: 700;
-      }
-      #starmap-info {
-        position: absolute;
-        top: 16px;
-        right: 16px;
-        background: var(--glass-bg-strong);
-        padding: 12px 16px;
-        border-radius: var(--radius-md);
-        border: 1px solid var(--glass-border);
-        font-size: 13px;
-        z-index: 10;
-        display: none;
-        backdrop-filter: blur(12px);
-        -webkit-backdrop-filter: blur(12px);
-        color: var(--text-secondary);
-        max-width: 260px;
-        box-shadow: var(--shadow-md);
-      }
-      #starmap-info h3 {
-        color: var(--success);
-        margin-bottom: 6px;
-        font-size: 14px;
-      }
-      #starmap-info p {
-        margin: 2px 0;
-        color: var(--text-muted);
-        font-size: 12px;
-      }
-      #starmap-info .label {
-        color: var(--text-muted);
-      }
-      #starmap-loading {
-        position: absolute;
-        top: 50%;
-        left: 50%;
-        transform: translate(-50%, -50%);
-        font-size: 18px;
-        color: var(--accent);
-        z-index: 20;
-      }
-      .starmap-toggle {
-        position: absolute;
-        bottom: 16px;
-        left: 50%;
-        transform: translateX(-50%);
-        display: flex;
-        gap: 8px;
-        z-index: 10;
-      }
-      .starmap-toggle button {
-        background: var(--glass-bg-strong);
-        border: 1px solid var(--glass-border);
-        color: var(--text-secondary);
-        padding: 6px 14px;
-        border-radius: var(--radius-pill);
-        cursor: pointer;
-        font-size: 12px;
-        font-family: inherit;
-        backdrop-filter: blur(10px);
-        -webkit-backdrop-filter: blur(10px);
-        transition: all 0.2s;
-      }
-      .starmap-toggle button:hover {
-        background: var(--accent-bg);
-        color: var(--text-primary);
-        border-color: rgba(255, 127, 172, 0.5);
-      }
-      .starmap-toggle button.on {
-        background: var(--accent-bg);
-        color: var(--accent);
-        border-color: var(--accent);
-        box-shadow: var(--shadow-glow);
       }
       #sm-container-chat {
         height: 260px;
@@ -2139,22 +2023,6 @@ background:
         }
         .kv-row .key {
           width: auto;
-        }
-        #starmap-stats {
-          top: 8px;
-          left: 8px;
-          padding: 8px 10px;
-          font-size: 11px;
-        }
-        #starmap-info {
-          top: 8px;
-          right: 8px;
-          padding: 8px 10px;
-          max-width: 180px;
-          font-size: 11px;
-        }
-        #starmap-container {
-          height: calc(100vh - 60px);
         }
         .msg-avatar {
           width: 24px;
@@ -2393,11 +2261,6 @@ background:
       var ICON_MOON =
         '<svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M21 12.8A9 9 0 1 1 11.2 3a7 7 0 0 0 9.8 9.8z"/></svg>';
 
-      function systemTheme() {
-        return window.matchMedia("(prefers-color-scheme: dark)").matches
-          ? "dark"
-          : "light";
-      }
 
       function setTheme(name) {
         document.documentElement.setAttribute("data-theme", name);
@@ -2539,13 +2402,6 @@ background:
           .replace(/"/g, "&quot;");
       }
 
-      function timeAgo(t) {
-        var s = Math.floor((Date.now() - new Date(t).getTime()) / 1000);
-        if (s < 60) return s + "秒前";
-        var m = Math.floor(s / 60);
-        if (m < 60) return m + "分钟前";
-        return Math.floor(m / 60) + "小时前";
-      }
 
       function toast(m, isError) {
         var t = document.getElementById("toast");
@@ -2559,74 +2415,7 @@ background:
       }
 
       // ===== 8.6 Unified toast + confirm dialog =====
-      function showToast(type, msg) {
-        var cls = "toast";
-        if (type === "success") cls += " success";
-        else if (type === "error") cls += " error";
-        else if (type === "warn") cls += " warn";
-        var t = document.getElementById("toast");
-        t.textContent = msg;
-        t.className = cls;
-        t.style.display = "block";
-        t.style.animation = "none";
-        void t.offsetWidth;
-        t.style.animation = "";
-        clearTimeout(t._hideTimer);
-        t._hideTimer = setTimeout(function () {
-          t.style.display = "none";
-        }, 3000);
-      }
 
-      function confirmDialog(action, onConfirm) {
-        var existing = document.getElementById("confirm-overlay");
-        if (existing) existing.remove();
-        var o = document.createElement("div");
-        o.id = "confirm-overlay";
-        o.className = "confirm-overlay";
-        o.innerHTML =
-          '<div class="confirm-box" role="alertdialog" aria-modal="true" aria-labelledby="confirm-title">' +
-          '<h3 id="confirm-title">' +
-          __("确认操作", "Confirm action") +
-          "</h3>" +
-          "<p>" +
-          escHtml(action) +
-          "</p>" +
-          '<div class="confirm-actions">' +
-          '<button class="btn btn-ghost" data-confirm="no">' +
-          __("取消", "Cancel") +
-          "</button>" +
-          '<button class="btn btn-primary" data-confirm="yes">' +
-          __("确认", "Confirm") +
-          "</button>" +
-          "</div></div>";
-        document.body.appendChild(o);
-        o.style.display = "flex";
-        o.querySelector('[data-confirm="no"]').focus();
-        function close(ok) {
-          o.remove();
-          if (ok && onConfirm) onConfirm();
-        }
-        o.querySelector('[data-confirm="yes"]').addEventListener(
-          "click",
-          function () {
-            close(true);
-          },
-        );
-        o.querySelector('[data-confirm="no"]').addEventListener(
-          "click",
-          function () {
-            close(false);
-          },
-        );
-        o.addEventListener("click", function (e) {
-          if (e.target === o) close(false);
-        });
-        document.addEventListener("keydown", function (ev) {
-          if (!document.getElementById("confirm-overlay")) return;
-          if (ev.key === "Escape") close(false);
-          if (ev.key === "Enter") close(true);
-        });
-      }
 
       // ===== 8.4 Card 3D tilt + cursor glow =====
       document.addEventListener("mousemove", function (e) {
@@ -2823,15 +2612,6 @@ background:
       }
 
       // ===== Overview =====
-      function statCard(l, v) {
-        return (
-          '<div class="card stat-card"><div class="stat-value">' +
-          v +
-          '</div><div class="stat-label">' +
-          l +
-          "</div></div>"
-        );
-      }
 
       function renderOverview() {
         var s = state.status || {};
@@ -3518,9 +3298,6 @@ background:
         }
       }
 
-      function getStarmapBg() {
-        return 0x0a0a1a;
-      }
 
       function initChatStarmap() {
         var cont = document.getElementById("sm-container-chat");
@@ -5126,35 +4903,18 @@ background:
         var rc = new THREE.Raycaster();
         rc.setFromCamera(mouse, starmapCam);
         var hits = rc.intersectObjects(starmapNodeMeshes);
-        var infoEl = document.getElementById("starmap-info");
         if (hits.length > 0) {
           var n = hits[0].object;
           if (starmapHovered !== n) {
             if (starmapHovered) starmapHovered.scale.set(1, 1, 1);
             starmapHovered = n;
             n.scale.set(1.2, 1.2, 1.2);
-            var nd = n.userData.nodeData;
-            if (infoEl) {
-              var e1 = document.getElementById("sm-info-name");
-              if (e1) e1.textContent = nd.name || "";
-              var e2 = document.getElementById("sm-info-type");
-              if (e2) e2.textContent = nd.type || "";
-              var e3 = document.getElementById("sm-info-mentions");
-              if (e3) e3.textContent = (nd.mention_count || 0) + "";
-              var lk = starmapEdges.filter(function (e) {
-                return e.source_id === nd.id || e.target_id === nd.id;
-              }).length;
-              var e4 = document.getElementById("sm-info-links");
-              if (e4) e4.textContent = lk + "";
-              infoEl.style.display = "block";
-            }
           }
         } else {
           if (starmapHovered) {
             starmapHovered.scale.set(1, 1, 1);
             starmapHovered = null;
           }
-          if (!starmapSelected && infoEl) infoEl.style.display = "none";
         }
       }
 
@@ -5214,33 +4974,7 @@ background:
         }
       }
 
-      function toggleStarmapAuto() {
-        starmapAutoView = !starmapAutoView;
-        var b = document.getElementById("sm-auto-btn");
-        if (b) b.className = starmapAutoView ? "on" : "";
-      }
 
-      function resetStarmapCamera() {
-        if (!starmapCam || !starmapCtrl || !starmapNodeMeshes) return;
-        var maxD = 0;
-        starmapNodeMeshes.forEach(function (m) {
-          var d = m.position.length();
-          if (d > maxD) maxD = d;
-        });
-        if (maxD < 1) maxD = 30;
-        var td = Math.min(Math.max(maxD + 20, 30), 150);
-        var sp = starmapCam.position.clone(),
-          ep = new THREE.Vector3(td * 0.9, td * 0.6, td * 0.9);
-        var st = starmapCtrl.target.clone(),
-          t0 = Date.now();
-        (function lerp() {
-          var t = Math.min((Date.now() - t0) / 400, 1),
-            e = 1 - Math.pow(1 - t, 3);
-          starmapCam.position.lerpVectors(sp, ep, e);
-          starmapCtrl.target.lerpVectors(st, new THREE.Vector3(0, 0, 0), e);
-          if (t < 1) requestAnimationFrame(lerp);
-        })();
-      }
 
       function starmapAnimate() {
         starmapRaf = requestAnimationFrame(starmapAnimate);
