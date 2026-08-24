@@ -43,6 +43,7 @@ const state = {
   pendingTools: [],
   eventSource: null,
   chatFinalIdx: -1,
+  sseLastEventID: "", // 最近一次 SSE 事件 id，断线重连时随 Last-Event-ID 头回传
   lang: localStorage.getItem("ha-lang") || "zh",
   connections: [],
   currentConn: null,
@@ -325,6 +326,29 @@ function toggleAppearance() {
 })();
 
 // ===== Utility =====
+// 安全渲染 markdown：marked 转 HTML 后由 DOMPurify 剥离脚本/事件/危险标签。
+// CDN 加载失败时降级为纯转义文本，绝不把未消毒 HTML 直接写入 innerHTML。
+function renderMd(text) {
+  if (typeof text !== "string") text = String(text || "");
+  var html;
+  if (typeof marked !== "undefined") {
+    try { html = marked.parse(text); }
+    catch (e) { html = escHtml(text); }
+  } else {
+    html = "<pre>" + escHtml(text) + "</pre>";
+  }
+  if (typeof DOMPurify !== "undefined" && typeof DOMPurify.sanitize === "function") {
+    try { return DOMPurify.sanitize(html, { USE_PROFILES: { html: true } }); }
+    catch (e) {}
+  }
+  // 兜底：手动删除 <script> 块 + 危险属性/事件句柄（CDN 加载失败时）
+  return html
+    .replace(/<script[\s\S]*?<\/script>/gi, "")
+    .replace(/\son\w+\s*=\s*"[^"]*"/gi, "")
+    .replace(/\son\w+\s*=\s*'[^']*'/gi, "")
+    .replace(/javascript:/gi, "");
+}
+
 function escHtml(s) {
   return String(s)
     .replace(/&/g, "&amp;")
@@ -459,6 +483,17 @@ function cliMap(path, o) {
   );
 }
 
+// HTTP API 错误对象：携带 status/statusText/body，便于调用方按 HTTP 语义分支处理。
+function ApiError(message, status, statusText, body) {
+  this.name = "ApiError";
+  this.message = message;
+  this.status = status;
+  this.statusText = statusText || "";
+  this.body = body || null;
+  this.stack = (new Error()).stack;
+}
+ApiError.prototype = Object.create(Error.prototype);
+
 async function api(p, o) {
   if (!state.currentConn)
     throw new Error(__("未选择连接", "No connection selected"));
@@ -487,7 +522,7 @@ async function api(p, o) {
   clearTimeout(timer);
   if (r.status === 401) {
     // 认证失败：尝试自动重新登录一次（避免 cookie 过期后界面持续报错）
-    if (window._haReloginLock) throw new Error(__("认证失败", "unauthorized"));
+    if (window._haReloginLock) throw new ApiError(__("认证失败", "unauthorized"), 401, r.statusText, null);
     window._haReloginLock = true;
     try {
       await syncConnAuth();
@@ -497,6 +532,20 @@ async function api(p, o) {
     // 重试一次
     return api(p, o);
   }
+  if (r.status === 408 || r.status === 504) {
+    // 网关超时：API 层直接抛错，调用方可选择提示用户重试或自动降级
+    throw new ApiError(__("请求超时", "Request timeout"), r.status, r.statusText, null);
+  }
+  if (r.status === 429) {
+    // 限流：抛错 + 建议调用方退避
+    var retryAfter = r.headers.get("Retry-After");
+    throw new ApiError(
+      __("请求过于频繁，请稍后重试", "Rate limited, please retry later"),
+      429,
+      r.statusText,
+      retryAfter ? { retryAfterSeconds: parseInt(retryAfter, 10) } : null,
+    );
+  }
   if (opts.raw) return r;
   var body = await r.text();
   // 网关会话过期：返回 200 但内容为登录页 HTML —— 自动重登后重试
@@ -505,7 +554,7 @@ async function api(p, o) {
     body.indexOf("统一门户登录") !== -1 ||
     (body.indexOf("<title>") !== -1 && body.indexOf("login") !== -1)
   ) {
-    if (window._haReloginLock) throw new Error(__("认证失败", "unauthorized"));
+    if (window._haReloginLock) throw new ApiError(__("认证失败", "unauthorized"), r.status, r.statusText, body);
     window._haReloginLock = true;
     try {
       await syncConnAuth();
@@ -513,6 +562,21 @@ async function api(p, o) {
     } catch (e2) {}
     window._haReloginLock = false;
     return api(p, o);
+  }
+  // 非 2xx 状态码：解包 server error + 以 ApiError 抛出，调用方按 status 分支处理
+  if (!r.ok) {
+    var errMsg = body;
+    try {
+      var parsed = JSON.parse(body);
+      if (parsed.error) errMsg = parsed.error;
+      else if (parsed.message) errMsg = parsed.message;
+    } catch (e) {}
+    throw new ApiError(
+      __("请求失败: ", "Request failed: ") + errMsg,
+      r.status,
+      r.statusText,
+      body,
+    );
   }
   var ct = r.headers.get("content-type") || "";
   if (ct.includes("json")) {
@@ -562,6 +626,13 @@ function switchView(n) {
 
 // ===== Tab Render Dispatch =====
 async function doRenderAll() {
+  // 如果连接表单正在显示（用户正在编辑），跳过全量刷新，避免擦掉用户输入
+  var connForm = document.getElementById("conn-form");
+  if (connForm && connForm.style.display === "block") {
+    // 仅刷新数据，不重建 DOM
+    await refreshDataOnly();
+    return;
+  }
   await refreshAll();
 }
 
@@ -608,6 +679,86 @@ function renderAll() {
   applyI18n();
   applyCardTilt();
   refreshAll();
+}
+
+async function refreshDataOnly() {
+  // 仅刷新 state 数据，不重建 DOM（用于定时轮询时避免擦掉用户输入）
+  try {
+    var s = await api("/status");
+    state.status = s;
+    state.startedAt = s.startedAt ? new Date(s.startedAt).getTime() : null;
+    updateConnIndicator();
+  } catch (e) {}
+  try {
+    state.kernel = await api("/kernel");
+  } catch (e) {}
+  try {
+    var s = await api("/settings");
+    state.settings = s.settings || {};
+    state.meta = s.meta || {};
+    state.settingsPlugins = s.plugins || ["core"];
+    state.pluginMeta = s.plugin_meta || {};
+    state.disabledPlugins = s.disabled_plugins || [];
+  } catch (e) {}
+  try {
+    state.installedPlugins = await api("/plugins");
+  } catch (e) {}
+  try {
+    await loadTerminals();
+  } catch (e) {}
+  try {
+    await loadCmdHistory();
+  } catch (e) {}
+  try {
+    if (
+      state.currentConn &&
+      state.currentConn.type === "webui" &&
+      state.currentConn.url
+    ) {
+      var d = await api("/device/online");
+      state.devices = (d && d.devices) || [];
+    } else {
+      state.devices = [];
+    }
+  } catch (e) {
+    state.devices = [];
+  }
+  try {
+    try {
+      if (window.homeagent && window.homeagent.displays) {
+        state.displays = (await window.homeagent.displays.list()) || [];
+      }
+    } catch (e) {}
+    try {
+      if (window.homeagent && window.homeagent.audio) {
+        state.audioDevices = (await window.homeagent.audio.list()) || [];
+      }
+    } catch (e) {}
+    if (window.homeagent && window.homeagent.deviceBridge) {
+      var dbinfo = await window.homeagent.deviceBridge.get();
+      state.dbConfig = dbinfo || state.dbConfig;
+      if (dbinfo && dbinfo.enabled) {
+        if (dbinfo.deviceId) {
+          state.selfDeviceId = dbinfo.deviceId;
+          state.selfGateway = dbinfo.address || state.selfGateway;
+        }
+        if (
+          state.devices.length === 0 &&
+          dbinfo.gateway &&
+          window.homeagent &&
+          window.homeagent.device
+        ) {
+          try {
+            var eb = await window.homeagent.device.identity();
+            if (eb && eb.device_id) {
+              state.selfDeviceId = eb.device_id;
+              state.selfGateway = eb.address || dbinfo.gateway;
+            }
+          } catch (e2) {}
+        }
+      }
+    }
+  } catch (e) {}
 }
 
 async function refreshAll() {
@@ -1232,7 +1383,7 @@ function renderChat() {
         if (typeof marked === "undefined") {
           c = "<pre>" + escHtml(c) + "</pre>";
         } else {
-          c = marked.parse(c);
+          c = renderMd(c);
         }
       } else if (role === "system") {
         c = escHtml(c);
@@ -1499,8 +1650,7 @@ function toggleReasoning(el) {
     var idx = parseInt(card.getAttribute("data-idx"), 10) || 0;
     var text =
       (state.messages[idx] && state.messages[idx].reasoning_content) || "";
-    content.innerHTML =
-      typeof marked === "undefined" ? escHtml(text) : marked.parse(text);
+    content.innerHTML = renderMd(text);
   }
   body.style.display = "block";
   card.classList.add("open");
@@ -4617,6 +4767,9 @@ async function connectFetchSSE(url) {
     var headers = {};
     if (state.currentConn && state.currentConn.apiKey)
       headers["X-API-Key"] = state.currentConn.apiKey;
+    // 断线重连时回传 Last-Event-ID，让服务端重放遗漏事件
+    if (state.sseLastEventID)
+      headers["Last-Event-ID"] = state.sseLastEventID;
     var resp = await fetch(url, { headers: headers, cache: "no-store" });
     if (!resp.ok || !resp.body) {
       setTimeout(() => {
@@ -4638,10 +4791,14 @@ async function connectFetchSSE(url) {
       var lines = buffer.split("\n");
       buffer = lines.pop() || "";
       var eventType = "",
-        data = "";
+        data = "",
+        id = "";
       for (var i = 0; i < lines.length; i++) {
         var line = lines[i];
-        if (line.startsWith("event: ")) eventType = line.slice(7).trim();
+        if (line.startsWith("id: ")) {
+          id = line.slice(4).trim();
+          if (id) state.sseLastEventID = id;
+        } else if (line.startsWith("event: ")) eventType = line.slice(7).trim();
         else if (line.startsWith("data: ")) data = line.slice(6).trim();
         else if (line === "" && eventType && data) {
           handleSSEEvent(eventType, data);
@@ -4795,13 +4952,15 @@ async function connectFetchSSE(url) {
       }
       reconnectTimer = setTimeout(() => {
         connectSSE();
-      }, 3000);
+      }, Math.min(1000 * Math.pow(2, Math.min((state._sseRetryAttempts || 0), 5)), 60000));
     }
     pump();
   } catch (e) {
+    var attempts = (state._sseRetryAttempts || 0) + 1;
+    state._sseRetryAttempts = attempts;
     setTimeout(() => {
       connectSSE();
-    }, 5000);
+    }, Math.min(1000 * Math.pow(2, Math.min(attempts - 1, 5)), 60000));
   }
 }
 
@@ -4851,8 +5010,7 @@ function renderChatStreamChunk() {
     var lastParse = el.__lastParse || 0;
     var lastLen = el.__lastLen || 0;
     if (c.length - lastLen > 200 || now - lastParse > 300) {
-      textEl.innerHTML =
-        typeof marked === "undefined" ? escHtml(c) : marked.parse(c);
+      textEl.innerHTML = renderMd(c);
       el.__lastParse = now;
       el.__lastLen = c.length;
     } else {
