@@ -22,25 +22,28 @@ type DataHandler func(reqID, kind, mime string, data []byte)
 
 // Bridge 是设备桥客户端核心结构体。
 // 管理 WebSocket 连接、消息路由、心跳保活和命令分发。
+// 授权状态由设备端本地存储（客户端鉴权），服务端不存储；
+// 未授权时收到 cmd 直接拒绝执行并回执 error。
 type Bridge struct {
-	mu       sync.RWMutex
-	gateway  string
-	token    string
-	deviceID string
-	name     string
-	kind     string
-	caps     []string
-	info     map[string]interface{}
+	mu         sync.RWMutex
+	gateway    string
+	token      string
+	deviceID   string
+	name       string
+	kind       string
+	caps       []string
+	info       map[string]interface{}
+	authorized bool // 客户端本地授权状态（用户在设备上手动开启）
 
-	ws       *wsConn
-	stopCh   chan struct{}
-	doneCh   chan struct{}
-	started  bool
+	ws      *wsConn
+	stopCh  chan struct{}
+	doneCh  chan struct{}
+	started bool
 
 	// 回调
-	cmdHandler     CmdHandler
-	resultHandler  CmdResultHandler
-	dataHandler    DataHandler
+	cmdHandler    CmdHandler
+	resultHandler CmdResultHandler
+	dataHandler   DataHandler
 
 	// 二进制数据聚合（服务端→设备，如 TTS 音频）
 	speechAccum *speechBuffer
@@ -85,17 +88,50 @@ func New(gateway, token, deviceID, name string, caps []string, info map[string]i
 	}
 
 	return &Bridge{
-		gateway:       gateway,
-		token:         token,
-		deviceID:      deviceID,
-		name:          name,
-		kind:          "computer",
-		caps:          caps,
-		info:          info,
-		stopCh:        make(chan struct{}),
-		doneCh:        make(chan struct{}),
-		pingInterval:  30 * time.Second,
+		gateway:      gateway,
+		token:        token,
+		deviceID:     deviceID,
+		name:         name,
+		kind:         "computer",
+		caps:         caps,
+		info:         info,
+		stopCh:       make(chan struct{}),
+		doneCh:       make(chan struct{}),
+		pingInterval: 30 * time.Second,
 	}
+}
+
+// SetAuthorized 设置客户端本地授权状态（用户在设备上手动开启）。
+// 授权后立即重新发送 hello 同步到服务端展示。
+func (b *Bridge) SetAuthorized(auth bool) {
+	b.mu.Lock()
+	b.authorized = auth
+	b.mu.Unlock()
+	// 重新 hello 同步状态
+	b.mu.RLock()
+	ws := b.ws
+	connected := ws != nil && !ws.closed
+	b.mu.RUnlock()
+	if connected {
+		b.sendJSON(map[string]interface{}{
+			"op": "hello",
+			"device": map[string]interface{}{
+				"device_id":  b.deviceID,
+				"name":       b.name,
+				"kind":       b.kind,
+				"caps":       b.caps,
+				"info":       b.info,
+				"authorized": auth,
+			},
+		})
+	}
+}
+
+// Authorized 返回当前客户端本地授权状态。
+func (b *Bridge) Authorized() bool {
+	b.mu.RLock()
+	defer b.mu.RUnlock()
+	return b.authorized
 }
 
 // OnCmd 注册命令处理器。当收到 remotedevice 下发的 cmd 时调用。
@@ -149,15 +185,19 @@ func (b *Bridge) Start() error {
 	b.ws = ws
 	b.mu.Unlock()
 
-	// 发送 hello
+	// 发送 hello（含设备自报的授权状态，服务端仅展示不决策）
+	b.mu.RLock()
+	auth := b.authorized
+	b.mu.RUnlock()
 	b.sendJSON(map[string]interface{}{
 		"op": "hello",
 		"device": map[string]interface{}{
-			"device_id": b.deviceID,
-			"name":      b.name,
-			"kind":      b.kind,
-			"caps":      b.caps,
-			"info":      b.info,
+			"device_id":  b.deviceID,
+			"name":       b.name,
+			"kind":       b.kind,
+			"caps":       b.caps,
+			"info":       b.info,
+			"authorized": auth,
 		},
 	})
 
@@ -382,12 +422,19 @@ func (b *Bridge) handleMessage(msg map[string]interface{}) {
 		if reqID == "" || command == "" {
 			return
 		}
+		// 客户端鉴权：未授权时拒绝执行（服务端不存储授权状态，无法被 agent 篡改）
+		b.mu.RLock()
+		auth := b.authorized
+		handler := b.cmdHandler
+		b.mu.RUnlock()
+		if !auth {
+			log.Printf("[devicebridge] cmd rejected (unauthorized) req=%s cmd=%s", reqID, truncateString(command, 60))
+			b.SendResult(reqID, "error", "", "设备未授权：请在设备本机开启远程控制授权")
+			return
+		}
 		// 记录日志
 		log.Printf("[devicebridge] cmd req=%s type=%s cmd=%s", reqID, cmdType, truncateString(command, 60))
 
-		b.mu.RLock()
-		handler := b.cmdHandler
-		b.mu.RUnlock()
 		if handler != nil {
 			handler(reqID, command)
 		}

@@ -71,7 +71,8 @@ func (p *Plugin) Start(s *sdk.PluginSDK) error {
 	// ---- 设置 ----------------
 	s.Settings().RegisterDef(sdk.ConfigDef{Key: "listen_addr", Default: defaultAddr, Type: "string", DisplayName: "监听地址", Description: "设备网关 HTTP/WS 监听地址（默认 127.0.0.1:9890，仅本机）", Category: "remotedevice"})
 	s.Settings().RegisterDef(sdk.ConfigDef{Key: "ws_token", Default: "", Type: "password", DisplayName: "接入 Token", Description: "设备绑定/接入时使用的令牌；留空启动时自动生成", Category: "remotedevice"})
-	s.Settings().RegisterDef(sdk.ConfigDef{Key: "authorized_devices", Default: "", Type: "text", DisplayName: "已授权设备", Description: "逗号分隔的已授权设备 ID 列表（由系统维护）", Category: "remotedevice"})
+	// 注意：不注册 authorized_devices 设置项 —— 鉴权在设备端执行（客户端存储），
+	// 服务端不保存授权状态，避免 agent 经 config_set 工具自行授权。
 
 	p.addr = defaultAddr
 	if v, _ := s.Settings().Get("listen_addr"); v != nil {
@@ -95,21 +96,8 @@ func (p *Plugin) Start(s *sdk.PluginSDK) error {
 		return provided != "" && provided == p.token
 	})
 
-	// 恢复已授权设备集合
-	if v, _ := s.Settings().Get("authorized_devices"); v != nil {
-		if s2, ok := v.(string); ok && s2 != "" {
-			var ids []string
-			for _, id := range strings.Split(s2, ",") {
-				if id = strings.TrimSpace(id); id != "" {
-					ids = append(ids, id)
-				}
-			}
-			p.registry.RestoreAuthorized(ids)
-		}
-	}
-
 	// ---- devicectl Device（agent 工具） ----------------
-	p.dev = &devicectlDevice{reg: p.registry, persist: p.persistAuthorized}
+	p.dev = &devicectlDevice{reg: p.registry}
 	// screensee 视觉描述回调：截屏回传后用视觉模型描述屏幕内容
 	p.dev.SetSeeHandler(p.describeScreen)
 	if err := s.RegisterChannel("devicectl", p.dev); err != nil {
@@ -171,24 +159,15 @@ func (p *Plugin) Start(s *sdk.PluginSDK) error {
 	return nil
 }
 
-// persistAuthorized 在授权变更后写回设置（持久化重启不丢）。
-func (p *Plugin) persistAuthorized() {
-	if p.sdk == nil {
-		return
-	}
-	ids := p.registry.AuthorizedIDs()
-	_ = p.sdk.Settings().Set("authorized_devices", strings.Join(ids, ","))
-}
-
 func (p *Plugin) registerRoutes() {
 	// 设备通道（WS）
 	p.mux.HandleFunc("/api/v1/device/ws", p.registry.ServeWS)
 	// REST 管理面（全部需 token）
+	// 注意：/api/v1/device/auth 已移除 —— 授权由设备端控制，服务端不提供授权接口。
 	p.mux.HandleFunc("/api/v1/device", p.requireToken(p.handleDeviceList))
 	p.mux.HandleFunc("/api/v1/device/online", p.requireToken(p.handleDeviceOnline))
 	p.mux.HandleFunc("/api/v1/device/", p.requireToken(p.handleDeviceByID))
 	p.mux.HandleFunc("/api/v1/device/push", p.requireToken(p.handleDevicePush))
-	p.mux.HandleFunc("/api/v1/device/auth", p.requireToken(p.handleDeviceAuth))
 }
 
 // requireToken 校验 REST 请求的接入令牌（X-API-Key header 或 ?token=）。
@@ -268,32 +247,6 @@ func (p *Plugin) handleDevicePush(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]interface{}{"status": "ok"})
-}
-
-func (p *Plugin) handleDeviceAuth(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodPost {
-		http.NotFound(w, r)
-		return
-	}
-	var req struct {
-		DeviceID  string `json:"device_id"`
-		Authorize bool   `json:"authorize"`
-	}
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		writeJSON(w, http.StatusBadRequest, map[string]interface{}{"error": err.Error()})
-		return
-	}
-	if req.DeviceID == "" {
-		writeJSON(w, http.StatusBadRequest, map[string]interface{}{"error": "device_id required"})
-		return
-	}
-	if _, ok := p.registry.Get(req.DeviceID); !ok {
-		writeJSON(w, http.StatusNotFound, map[string]interface{}{"error": "device not found"})
-		return
-	}
-	p.registry.SetAuthorized(req.DeviceID, req.Authorize)
-	p.persistAuthorized()
-	writeJSON(w, http.StatusOK, map[string]interface{}{"device_id": req.DeviceID, "authorized": req.Authorize})
 }
 
 // describeScreen 用视觉模型描述设备屏幕截图（screensee 回调）。

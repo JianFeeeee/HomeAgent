@@ -39,18 +39,18 @@ func platformBinary() (zipName, canonicalName string) {
 
 // validBinaries 是 .hmap 中所有可识别的文件入口（平台二进制或脚本）。
 var validBinaries = map[string]bool{
-	"plugin.so":   true,
+	"plugin.so":    true,
 	"plugin.dylib": true,
-	"plugin.dll":  true,
-	"main.lua":    true,
-	"SKILL.md":    true,
+	"plugin.dll":   true,
+	"main.lua":     true,
+	"SKILL.md":     true,
 }
 
 // platformBinaries 是平台特定的二进制，bundle 模式下仅当前平台的被解压。
 var platformBinaries = map[string]bool{
-	"plugin.so":   true,
+	"plugin.so":    true,
 	"plugin.dylib": true,
-	"plugin.dll":  true,
+	"plugin.dll":   true,
 }
 
 var downloadClient = &http.Client{
@@ -312,7 +312,16 @@ func (p *Plugin) handlePluginByID(w http.ResponseWriter, r *http.Request) {
 	case http.MethodDelete:
 		result, err := p.removePlugin(name)
 		if err != nil {
-			writeJSON(w, http.StatusInternalServerError, map[string]interface{}{"error": err.Error()})
+			// 内置插件禁卸 → 409 Conflict；不存在 → 404；其余删除失败 → 500
+			msg := err.Error()
+			switch {
+			case strings.Contains(msg, "built-in plugin"):
+				writeJSON(w, http.StatusConflict, map[string]interface{}{"error": msg, "name": name, "plugin_type": "builtin"})
+			case strings.Contains(msg, "not found"):
+				writeJSON(w, http.StatusNotFound, map[string]interface{}{"error": msg, "name": name})
+			default:
+				writeJSON(w, http.StatusInternalServerError, map[string]interface{}{"error": msg, "name": name})
+			}
 			return
 		}
 		writeJSON(w, http.StatusOK, result)
@@ -451,9 +460,14 @@ func (p *Plugin) listPlugins() (interface{}, error) {
 }
 
 func (p *Plugin) removePlugin(name string) (interface{}, error) {
+	// 内置插件只能禁用不能卸载：目录下无产物，且从注册表删除会破坏内核依赖。
+	if p.sdk != nil && p.sdk.PluginMgr() != nil && p.sdk.PluginMgr().IsBuiltinPlugin(name) {
+		return nil, fmt.Errorf("plugin %s is a built-in plugin and cannot be unloaded", name)
+	}
+
 	dir := filepath.Join(p.pluginDir, name)
 	if _, err := os.Stat(dir); os.IsNotExist(err) {
-		return map[string]interface{}{"error": "plugin not found", "name": name}, nil
+		return nil, fmt.Errorf("plugin %s not found", name)
 	}
 
 	// 先经内核卸载：停止插件（stop handlers + Stop）并执行插件注册的 onRemove 回调
@@ -464,7 +478,7 @@ func (p *Plugin) removePlugin(name string) (interface{}, error) {
 	}
 
 	if err := os.RemoveAll(dir); err != nil {
-		return map[string]interface{}{"error": err.Error()}, nil
+		return nil, fmt.Errorf("remove plugin dir: %w", err)
 	}
 
 	// 同步清理禁用表
@@ -474,10 +488,11 @@ func (p *Plugin) removePlugin(name string) (interface{}, error) {
 		}
 	}
 
+	// 卸载已即时生效（停止+注册表移除+目录删除），无需 reload
 	return map[string]interface{}{
-		"status": "removed",
-		"name":   name,
-		"action": "reload_required",
+		"status":          "removed",
+		"name":            name,
+		"reload_required": false,
 	}, nil
 }
 

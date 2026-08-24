@@ -16,13 +16,14 @@ type Connection struct {
 }
 
 type Config struct {
-	Socket        string       `yaml:"socket"`
-	Remote        string       `yaml:"remote"`
-	APIKey        string       `yaml:"api_key"`
-	Default       string       `yaml:"default"`
-	Connections   []Connection `yaml:"connections,omitempty"`
-	DeviceGateway string       `yaml:"device_gateway,omitempty"` // remotedevice 网关地址（如 127.0.0.1:9890）
-	DeviceToken   string       `yaml:"device_token,omitempty"`   // 设备接入 token
+	Socket           string       `yaml:"socket"`
+	Remote           string       `yaml:"remote"`
+	APIKey           string       `yaml:"api_key"`
+	Default          string       `yaml:"default"`
+	Connections      []Connection `yaml:"connections,omitempty"`
+	DeviceGateway    string       `yaml:"device_gateway,omitempty"`    // remotedevice 网关地址（如 127.0.0.1:9890）
+	DeviceToken      string       `yaml:"device_token,omitempty"`      // 设备接入 token
+	DeviceAuthorized bool         `yaml:"device_authorized,omitempty"` // 客户端本地授权（用户手动开启，服务端无法篡改）
 }
 
 func (c *Config) Active() *Connection {

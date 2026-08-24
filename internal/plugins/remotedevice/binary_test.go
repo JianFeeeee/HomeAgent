@@ -322,7 +322,6 @@ func TestScreenseeEndToEnd(t *testing.T) {
 	if _, _, err := cli.readMsg(); err != nil {
 		t.Fatalf("read hello_ack: %v", err)
 	}
-	reg.SetAuthorized("see-dev", true)
 
 	// 设备侧循环收命令并回执（模拟 GUI screensee 实现）
 	go func() {
@@ -363,10 +362,10 @@ func TestScreenseeEndToEnd(t *testing.T) {
 		t.Fatalf("handler received bad dataURL: %s", gotDataURL)
 	}
 
-	// 未授权设备应拒绝
-	reg.SetAuthorized("see-dev", false)
-	if _, err := dev.Execute("screensee", map[string]interface{}{"device_id": "see-dev"}); err == nil {
-		t.Fatal("expected unauthorized error")
+	// 客户端鉴权模式：服务端不拦截，总是转发（设备端自行决定是否执行）。
+	// see-dev 未声明 screensee 之外的问题，此处仅验证服务端不再因授权状态报错。
+	if _, err := dev.Execute("screensee", map[string]interface{}{"device_id": "see-dev"}); err != nil {
+		t.Fatalf("server should forward regardless of authorization, got: %v", err)
 	}
 }
 
@@ -389,7 +388,6 @@ func TestComputeruseEndToEnd(t *testing.T) {
 	if _, _, err := cli.readMsg(); err != nil {
 		t.Fatalf("read hello_ack: %v", err)
 	}
-	reg.SetAuthorized("cu-dev", true)
 
 	// 设备侧收 computeruse 命令并回执
 	var receivedCmd string
@@ -480,7 +478,6 @@ func TestClipboardEndToEnd(t *testing.T) {
 	if _, _, err := cli.readMsg(); err != nil {
 		t.Fatalf("read hello_ack: %v", err)
 	}
-	reg.SetAuthorized("clip-dev", true)
 
 	// 设备侧响应剪贴板命令
 	go func() {
@@ -553,11 +550,11 @@ func TestClipboardEndToEnd(t *testing.T) {
 		}
 	})
 
-	t.Run("unauthorized_device_rejected", func(t *testing.T) {
-		reg.SetAuthorized("clip-dev", false)
-		defer reg.SetAuthorized("clip-dev", true)
-		if _, err := dev.Execute("clipboardsee", map[string]interface{}{"device_id": "clip-dev"}); err == nil {
-			t.Fatal("unauthorized should error")
+	t.Run("server_forwards_regardless_of_authorization", func(t *testing.T) {
+		// 客户端鉴权模式：服务端不再拦截未授权设备，由设备端自行拒绝。
+		// 这里验证服务端能正常查询设备（不因授权状态报错）。
+		if _, ok := reg.Get("clip-dev"); !ok {
+			t.Fatal("device should be registered")
 		}
 	})
 }
@@ -603,7 +600,6 @@ func TestCapabilityMatrix(t *testing.T) {
 	if _, _, err := cli.readMsg(); err != nil {
 		t.Fatalf("read hello_ack: %v", err)
 	}
-	reg.SetAuthorized("cam-only", true)
 
 	if _, err := dev.Execute("screensee", map[string]interface{}{"device_id": "cam-only"}); err == nil {
 		t.Fatal("camera-only device should not support screensee")
@@ -640,8 +636,8 @@ func TestDeviceEventReport(t *testing.T) {
 	// 设备主动上报：识别到未知人员驻留
 	cli.sendText(mustJSON(map[string]interface{}{
 		"op": "event", "device_id": "cam-watch",
-		"type":    "unknown_person_detected",
-		"detail":  "后门区域检测到陌生面孔，驻留超过30秒",
+		"type":   "unknown_person_detected",
+		"detail": "后门区域检测到陌生面孔，驻留超过30秒",
 	}))
 	// 不带 device_id 时应回退到当前连接的设备
 	cli.sendText(mustJSON(map[string]interface{}{

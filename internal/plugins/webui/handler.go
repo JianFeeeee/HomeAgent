@@ -136,13 +136,13 @@ type Handler struct {
 	chatHistory []ChatMsg
 	pendingIdx  int // chatHistory 中正在进行的 assistant 消息索引，-1 表示无
 
-	chatMsgMu     sync.Mutex
-	chatMsgCache  map[string]*chatMsgEntry // client_msg_id -> 首次处理结果
-	chatMsgOrder  []string                 // FIFO 淘汰序
-	cmdMu       sync.Mutex
-	cmdHistory  []CmdExec
-	termMu      sync.Mutex
-	termStates  map[string]*termState
+	chatMsgMu    sync.Mutex
+	chatMsgCache map[string]*chatMsgEntry // client_msg_id -> 首次处理结果
+	chatMsgOrder []string                 // FIFO 淘汰序
+	cmdMu        sync.Mutex
+	cmdHistory   []CmdExec
+	termMu       sync.Mutex
+	termStates   map[string]*termState
 }
 
 type ChatMsg struct {
@@ -243,23 +243,23 @@ func NewHandler(s *sdk.PluginSDK) *Handler {
 		st, llm = s.Status(), s.LLM()
 	}
 	h := &Handler{
-		sdk:        s,
-		supervisor: sup,
-		memory:     mem,
-		indexer:    idx,
-		adapter:    ad,
-		config:     cfg,
-		startTime:  time.Now(),
-		textMem:    tm,
-		knowledge:  ks,
-		tracker:    tr,
-		settings:   se,
-		pluginMgr:  pm,
-		status:     st,
-		llm:        llm,
-		sessions:   make(map[string]time.Time),
-		termStates: make(map[string]*termState),
-		pendingIdx: -1,
+		sdk:          s,
+		supervisor:   sup,
+		memory:       mem,
+		indexer:      idx,
+		adapter:      ad,
+		config:       cfg,
+		startTime:    time.Now(),
+		textMem:      tm,
+		knowledge:    ks,
+		tracker:      tr,
+		settings:     se,
+		pluginMgr:    pm,
+		status:       st,
+		llm:          llm,
+		sessions:     make(map[string]time.Time),
+		termStates:   make(map[string]*termState),
+		pendingIdx:   -1,
 		chatMsgCache: make(map[string]*chatMsgEntry),
 		sseEvents:    newSSEEventRing(200),
 	}
@@ -1247,8 +1247,8 @@ func (h *Handler) handleChat(w http.ResponseWriter, r *http.Request) {
 	}
 	var body struct {
 		Message     string `json:"message"`
-		DeviceID    string `json:"device_id"`   // 消息来源设备（GUI/受控设备），可选
-		DeviceName  string `json:"device_name"` // 设备显示名，可选
+		DeviceID    string `json:"device_id"`     // 消息来源设备（GUI/受控设备），可选
+		DeviceName  string `json:"device_name"`   // 设备显示名，可选
 		ClientMsgID string `json:"client_msg_id"` // 客户端唯一消息 ID（防断线重放/超时重试）
 	}
 	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
@@ -1848,6 +1848,14 @@ func (h *Handler) handleDeviceGatewayProxy(w http.ResponseWriter, r *http.Reques
 		http.NotFound(w, r)
 		return
 	}
+	// 客户端鉴权模式：服务端不再提供授权接口（授权由设备端本地控制）。
+	// 拒绝旧的 /device/auth 调用，避免误导。
+	if strings.HasSuffix(r.URL.Path, "/device/auth") {
+		writeJSON(w, http.StatusGone, map[string]string{
+			"error": "device authorization moved to client-side; the server no longer stores authorization state",
+		})
+		return
+	}
 	addr := deviceGatewayAddr
 	if addr == "" {
 		addr = "127.0.0.1:9890"
@@ -2053,6 +2061,23 @@ func (h *Handler) handlePluginByID(w http.ResponseWriter, r *http.Request) {
 	path := strings.TrimPrefix(r.URL.Path, "/api/v1/plugins/")
 	path = strings.TrimSuffix(path, "/")
 
+	// 插件名白名单：仅允许单段安全名称，阻断路径穿越/空名/嵌套路径
+	validPluginName := func(s string) bool {
+		if s == "" || len(s) > 128 {
+			return false
+		}
+		// 禁止路径分隔符、连续点(父目录穿越)、冒号、空格等危险字符
+		if strings.Contains(s, "..") || strings.ContainsAny(s, "/\\: \t\r\n\x00") {
+			return false
+		}
+		for _, c := range s {
+			if !(c >= 'a' && c <= 'z' || c >= 'A' && c <= 'Z' || c >= '0' && c <= '9' || c == '_' || c == '-' || c == '.') {
+				return false
+			}
+		}
+		return true
+	}
+
 	if path == "disabled" && r.Method == http.MethodGet {
 		if h.pluginMgr == nil {
 			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "plugin manager not available"})
@@ -2062,16 +2087,21 @@ func (h *Handler) handlePluginByID(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if path == "reload" && r.Method == http.MethodPost {
-		if h.pluginMgr == nil {
-			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "plugin registry not available"})
+	if path == "reload" {
+		if r.Method == http.MethodPost {
+			if h.pluginMgr == nil {
+				writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "plugin registry not available"})
+				return
+			}
+			if _, err := h.pluginMgr.ReloadPlugins(); err != nil {
+				writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+				return
+			}
+			writeJSON(w, http.StatusOK, map[string]string{"status": "reloaded"})
 			return
 		}
-		if _, err := h.pluginMgr.ReloadPlugins(); err != nil {
-			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
-			return
-		}
-		writeJSON(w, http.StatusOK, map[string]string{"status": "reloaded"})
+		// reload/disabled 是保留字，不允许 DELETE/GET 等其它操作误把其当作插件名
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
 
@@ -2083,6 +2113,10 @@ func (h *Handler) handlePluginByID(w http.ResponseWriter, r *http.Request) {
 			case "disable":
 				if h.pluginMgr == nil {
 					writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "plugin manager not available"})
+					return
+				}
+				if !validPluginName(name) {
+					writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid plugin name"})
 					return
 				}
 				if err := h.pluginMgr.DisablePlugin(name, "webui"); err != nil {
@@ -2097,6 +2131,10 @@ func (h *Handler) handlePluginByID(w http.ResponseWriter, r *http.Request) {
 					writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "plugin manager not available"})
 					return
 				}
+				if !validPluginName(name) {
+					writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid plugin name"})
+					return
+				}
 				if err := h.pluginMgr.EnablePlugin(name); err != nil {
 					writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
 					return
@@ -2105,6 +2143,14 @@ func (h *Handler) handlePluginByID(w http.ResponseWriter, r *http.Request) {
 				return
 			}
 		}
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	// 单段插件名路径（GET 详情 / DELETE 卸载）
+	if !validPluginName(path) {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid plugin name"})
+		return
 	}
 
 	switch r.Method {

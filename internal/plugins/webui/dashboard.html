@@ -4667,10 +4667,21 @@ background:
           return;
         }
         try {
-          var r = await api("/plugins", {
+          var raw = await api("/plugins", {
             method: "POST",
             body: JSON.stringify({ url: url }),
+            raw: true,
           });
+          var ct = raw.headers.get("content-type") || "";
+          var r = ct.includes("json") ? await raw.json() : await raw.text();
+          if (!raw.ok || (r && r.error)) {
+            toast(
+              __("安装失败: ", "Install failed: ") +
+                ((r && (r.error || r.details)) || "HTTP " + raw.status),
+              true,
+            );
+            return;
+          }
           toast(
             __("安装结果: ", "Install result: ") +
               (r.status || JSON.stringify(r)),
@@ -4683,7 +4694,7 @@ background:
               ),
               false,
             );
-          loadInstalledPlugins();
+          await loadInstalledPlugins();
           renderPlugins();
         } catch (e) {
           toast(__("安装失败: ", "Install failed: ") + e.message, true);
@@ -4732,7 +4743,10 @@ background:
         renderPlugins();
       }
 
+      var removingPlugins = {};
+
       async function removePlugin(name) {
+        if (removingPlugins[name]) return; // 防重复点击
         if (
           !confirm(
             __("确定卸载插件", "Are you sure to unload plugin") +
@@ -4742,23 +4756,39 @@ background:
           )
         )
           return;
+        removingPlugins[name] = true;
         try {
-          var r = await api("/plugins/" + encodeURIComponent(name), {
-            method: "DELETE",
-          });
-          toast(__("已卸载: ", "Unloaded: ") + (r.status || r.name));
-          if (r.action === "reload_required")
-            toast(
-              __(
-                "已卸载，请点击「重载插件」生效",
-                'Unloaded, click "Reload Plugins" to apply',
-              ),
-              false,
-            );
-          loadInstalledPlugins();
+          var raw = await api(
+            "/plugins/" + encodeURIComponent(name),
+            { method: "DELETE", raw: true },
+          );
+          var ct = raw.headers.get("content-type") || "";
+          var body = ct.includes("json")
+            ? await raw.json()
+            : await raw.text();
+          if (!raw.ok) {
+            var em =
+              (body && (body.error || body.details)) ||
+              ("HTTP " + raw.status);
+            toast(__("卸载失败: ", "Unload failed: ") + em, true);
+            // 内置插件或路径错误时刷新一次列表保持状态一致
+            loadInstalledPlugins();
+            renderPlugins();
+            return;
+          }
+          toast(__("已卸载: ", "Unloaded: ") + (body.name || body.status || name));
+          await loadInstalledPlugins();
+          // 同步内核插件/禁用列表，确保列表与工具立即消失
+          try {
+            state.kernel = await api("/kernel");
+            var s = await api("/settings");
+            state.disabledPlugins = s.disabled_plugins || [];
+          } catch (e2) {}
           renderPlugins();
         } catch (e) {
           toast(__("卸载失败: ", "Unload failed: ") + e.message, true);
+        } finally {
+          delete removingPlugins[name];
         }
       }
 

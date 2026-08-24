@@ -89,9 +89,9 @@ type StatusMsg struct {
 
 // EventMsg 设备主动上报事件
 type EventMsg struct {
-	Op       string `json:"op"`
-	DeviceID string `json:"device_id,omitempty"`
-	Type     string `json:"type"`
+	Op       string      `json:"op"`
+	DeviceID string      `json:"device_id,omitempty"`
+	Type     string      `json:"type"`
 	Payload  interface{} `json:"payload,omitempty"`
 }
 
