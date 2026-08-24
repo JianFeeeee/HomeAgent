@@ -4,9 +4,9 @@ import (
 	"log"
 	"sync"
 
-	pubsdk "gitcode.com/JianFeeeee/homeagent-sdk/sdk"
 	agentIO "gitcode.com/JianFeeeee/HomeAgent/internal/agent/io"
 	"gitcode.com/JianFeeeee/HomeAgent/internal/events"
+	pubsdk "gitcode.com/JianFeeeee/homeagent-sdk/sdk"
 )
 
 // SDKVersion 是对外 SDK 版本号，与核心 meta.Version 保持一致。
@@ -47,6 +47,7 @@ const (
 	StageScopeGlobal   = pubsdk.StageScopeGlobal
 	StageScopeOwnTools = pubsdk.StageScopeOwnTools
 )
+
 type APIRegistrar = pubsdk.APIRegistrar
 type OutputChannelRegistrar = pubsdk.OutputChannelRegistrar
 type InputChannelRegistrar = pubsdk.InputChannelRegistrar
@@ -68,6 +69,9 @@ type PluginManager interface {
 	ListLoadedPlugins() []string
 	ListDisabledPlugins() []DisabledPluginInfo
 	IsPluginDisabled(name string) bool
+	// IsBuiltinPlugin 判断插件是否为内置插件（编译期工厂，init() 自注册）。
+	// 内置插件只能禁用/启用，不能卸载。
+	IsBuiltinPlugin(name string) bool
 	DisablePlugin(name, by string) error
 	EnablePlugin(name string) error
 	// RemovePlugin 卸载插件：先停止（stop handlers + Stop），再执行插件注册的
@@ -253,13 +257,13 @@ func (s *PluginSDK) SelftestReset(scope string) error {
 	return nil
 }
 
-func (s *PluginSDK) Status() StatusAPI        { return s.status }
+func (s *PluginSDK) Status() StatusAPI         { return s.status }
 func (s *PluginSDK) Supervisor() SupervisorAPI { return s.supervisor }
-func (s *PluginSDK) Adapter() AdapterAPI      { return s.adapter }
-func (s *PluginSDK) Tracker() TrackerAPI      { return s.tracker }
-func (s *PluginSDK) Config() ConfigAPI        { return s.config }
-func (s *PluginSDK) Tool() ToolAPI            { return s.tool }
-func (s *PluginSDK) Indexer() IndexerAPI      { return s.indexer }
+func (s *PluginSDK) Adapter() AdapterAPI       { return s.adapter }
+func (s *PluginSDK) Tracker() TrackerAPI       { return s.tracker }
+func (s *PluginSDK) Config() ConfigAPI         { return s.config }
+func (s *PluginSDK) Tool() ToolAPI             { return s.tool }
+func (s *PluginSDK) Indexer() IndexerAPI       { return s.indexer }
 
 func (s *PluginSDK) InjectInput(source, channel, eventType string, payload map[string]interface{}) {
 	if s.iom != nil {
