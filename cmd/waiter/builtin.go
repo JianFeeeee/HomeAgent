@@ -1,9 +1,9 @@
 package main
 
 import (
-	"io"
 	"encoding/json"
 	"fmt"
+	"io"
 	"strings"
 )
 
