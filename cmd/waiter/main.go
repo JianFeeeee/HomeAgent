@@ -239,11 +239,11 @@ func runCapTest(capName, args string) {
 }
 
 // runLineMode 传统行式 REPL（非 TTY 回退 / TUI 启动失败时使用）。
-func runLineMode(state *State, cfg *Config, history History) {
+func runLineMode(state *State, cfg *Config, history *History) {
 	sigCh := make(chan os.Signal, 1)
 	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
 
-	line := newLineEditor(&history)
+	line := newLineEditor(history)
 
 	restore, err := setRawMode(0)
 	if err != nil {

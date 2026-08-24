@@ -13,8 +13,8 @@ type History struct {
 	mu    sync.Mutex
 }
 
-func newHistory(path string, max int) History {
-	return History{path: path, max: max}
+func newHistory(path string, max int) *History {
+	return &History{path: path, max: max}
 }
 
 func (h *History) load() {
