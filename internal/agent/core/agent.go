@@ -76,8 +76,11 @@ type Agent struct {
 	eventBus     *events.Bus
 	pluginHealth *pluginHealthTracker
 
-	// 自循环输入通道：核心内部任务（记忆消歧、系统维护），不经过 IO 层
-	selfInputCh chan string
+	// 自循环输入通道：核心内部任务（记忆消歧、系统维护、子 Agent 通知），
+	// 不经过 IO 层。每条消息携带目标输出通道：
+	//   "_consolidation_" = 记忆整理（无记忆路径，不写入上下文、不 emit 响应）
+	//   其他 = 正常处理（写入上下文、emit 响应到该通道）
+	selfInputCh chan selfInputMsg
 
 	// 子任务异步执行
 	childMu      sync.Mutex
@@ -218,7 +221,7 @@ func New(cfg AgentConfig) *Agent {
 		maxContextSize:  cfg.MaxContextSize,
 		stageHost:       cfg.StageHost,
 		eventBus:        cfg.EventBus,
-		selfInputCh:     make(chan string, 64),
+		selfInputCh:     make(chan selfInputMsg, 64),
 		childResults:    make(map[string]string),
 		interceptCh:     make(chan *agentIO.InputEvent, 64),
 		pluginHealth:    newPluginHealthTracker(),
@@ -275,16 +278,25 @@ func (a *Agent) IsDuplicateInput(source, content string) bool {
 }
 
 // SelfInputChan 返回自循环输入通道（只读，供内部测试验证）
-func (a *Agent) SelfInputChan() <-chan string {
+func (a *Agent) SelfInputChan() <-chan selfInputMsg {
 	return a.selfInputCh
 }
 
-// injectSelf 向自循环通道发送内部任务（记忆消歧、系统维护）
-// 线程安全，不阻塞发送者（通道缓冲 64）
+// injectSelf 向自循环通道发送记忆整理类内部任务（无记忆路径）。
+// 线程安全，不阻塞发送者（通道缓冲 64）。
 func (a *Agent) injectSelf(task string) {
+	a.injectSelfChannel(selfInputMsg{
+		text:    task,
+		channel: channelConsolidation,
+	})
+}
+
+// injectSelfChannel 向自循环通道发送一条带目标通道标志的消息。
+// channel == "_consolidation_" 走无记忆整理路径；其他值走正常处理路径。
+func (a *Agent) injectSelfChannel(msg selfInputMsg) {
 	select {
-	case a.selfInputCh <- task:
+	case a.selfInputCh <- msg:
 	default:
-		log.Printf("[agent] self input channel full, dropping task: %s", truncateStr(task, 80))
+		log.Printf("[agent] self input channel full, dropping task: %s", truncateStr(msg.text, 80))
 	}
 }
