@@ -17,6 +17,10 @@
       src="https://cdnjs.cloudflare.com/ajax/libs/marked/4.3.0/marked.min.js"
       onerror="console.warn('marked CDN failed')"
     ></script>
+    <script
+      src="https://cdn.jsdelivr.net/npm/dompurify@3.2.4/dist/purify.min.js"
+      onerror="console.warn('DOMPurify CDN failed')"
+    ></script>
     <script>
       setTimeout(function () {
         if (!window.THREE) window._THREE_FAILED = true;
@@ -2508,6 +2512,25 @@ background:
       })();
 
       // ===== Utility =====
+      function renderMd(text) {
+        if (typeof text !== "string") text = String(text || "");
+        var html;
+        if (typeof marked !== "undefined") {
+          try { html = marked.parse(text); }
+          catch (e) { html = escHtml(text); }
+        } else {
+          html = "<pre>" + escHtml(text) + "</pre>";
+        }
+        if (typeof DOMPurify !== "undefined" && typeof DOMPurify.sanitize === "function") {
+          try { return DOMPurify.sanitize(html, { USE_PROFILES: { html: true } }); }
+          catch (e) {}
+        }
+        return html
+          .replace(/<script[\s\S]*?<\/script>/gi, "")
+          .replace(/\son\w+\s*=\s*"[^"]*"/gi, "")
+          .replace(/\son\w+\s*=\s*'[^']*'/gi, "")
+          .replace(/javascript:/gi, "");
+      }
       function escHtml(s) {
         return String(s)
           .replace(/&/g, "&amp;")
@@ -3200,11 +3223,7 @@ background:
             var role = m.role || "user";
             var c = m.content || "";
             if (role === "assistant") {
-              if (typeof marked !== "undefined") {
-                c = marked.parse(c);
-              } else {
-                c = "<pre>" + escHtml(c) + "</pre>";
-              }
+              c = renderMd(c);
             } else if (role === "system") {
               c = escHtml(c);
             } else {
@@ -3384,10 +3403,7 @@ background:
       }
 
       function renderReasoningCard(text, isStreaming) {
-        var body =
-          typeof marked !== "undefined"
-            ? marked.parse(text)
-            : escHtml(text);
+        var body = renderMd(text);
         var preview =
           typeof marked !== "undefined"
             ? text.replace(/[\s\n]+/g, " ").slice(0, 60)
