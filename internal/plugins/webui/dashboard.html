@@ -3633,6 +3633,46 @@ background:
         });
       }
 
+      // 回合收尾：由 SSE 事件（agent_output final / reset 帧）或 watchdog 驱动。
+      // POST 结束 ≠ 回合结束：agent 可能还在生成（排队+长生成），提前复位
+      // chatLoading 会让后续 delta 走全量重建、停止按钮消失、用户误发重复消息。
+      function endChatTurn() {
+        if (!state.chatLoading) return;
+        state.chatLoading = false;
+        state.chatStage = "";
+        if (state._turnWatchdog) {
+          clearTimeout(state._turnWatchdog);
+          state._turnWatchdog = null;
+        }
+        var btn = document.getElementById("chat-send-btn");
+        if (btn) {
+          btn.disabled = false;
+          btn.textContent = __("发送", "Send");
+        }
+        var sb = document.getElementById("chat-stop-btn");
+        if (sb) sb.style.display = "none";
+        rerenderChat(true);
+      }
+
+      // 回合看门狗：POST 已 abort 且 SSE 迟迟无终帧时兕底收尾（连接不稳/事件丢失），
+      // 提示用户回复可能已生成、可刷新查看历史。避免回合永久卡在 loading。
+      function armTurnWatchdog() {
+        if (state._turnWatchdog) clearTimeout(state._turnWatchdog);
+        state._turnWatchdog = setTimeout(function () {
+          state._turnWatchdog = null;
+          if (state.chatLoading) {
+            endChatTurn();
+            toast(
+              __(
+                "长时间未收到回复，连接可能不稳定；回复可能已生成，可刷新页面查看",
+                "No reply received for a long time; the reply may have been generated, refresh to check",
+              ),
+              true,
+            );
+          }
+        }, 120000);
+      }
+
       async function sendChat() {
         var inp = document.getElementById("chat-input");
         var btn = document.getElementById("chat-send-btn");
@@ -3677,7 +3717,6 @@ background:
           } finally {
             clearTimeout(ackTimer);
           }
-          state.chatStage = __("AI 回复中...", "AI replying...");
           var last = state.messages[state.messages.length - 1];
           if (r && r.response) {
             if (last && last.role === "assistant" && last._streaming) {
@@ -3716,13 +3755,14 @@ background:
             toast(__("请求失败: ", "Request failed: ") + e.message, true);
           }
         } finally {
-          state.chatLoading = false;
-          state.chatStage = "";
-          btn.disabled = false;
-          btn.textContent = __("发送", "Send");
-          var sb2 = document.getElementById("chat-stop-btn");
-          if (sb2) sb2.style.display = "none"; // 回复完成/失败，隐藏停止按钮
-          rerenderChat(true);
+          if (r && r.response) {
+            // 同步兜底已拿到完整回复：回合结束
+            endChatTurn();
+          } else {
+            // 触发式受理（POST 已 abort/失败）：回合仍打开，等 SSE 流式渲染；
+            // 由 agent_output final / reset 帧 / watchdog 收尾
+            armTurnWatchdog();
+          }
         }
       }
 
@@ -4146,6 +4186,7 @@ background:
               lastM2.content = p.content;
               lastM2._final = true;
               rerenderChat();
+              endChatTurn();
               return;
             }
             if (
@@ -4154,7 +4195,13 @@ background:
               lastM2._final &&
               !lastM2.source
             ) {
-              return;
+              // 去重：同一轮的重复帧（如 SSE 重连回放）内容相同则忽略；
+              // 内容不同视为新一轮输出（上一轮已 final 且无 source），开新消息。
+              // 旧逻辑无条件 return 会丢弃多轮连发时新一轮的最终回复。
+              if (lastM2.content === p.content) {
+                endChatTurn();
+                return;
+              }
             }
             state.messages.push({
               role: "assistant",
@@ -4164,6 +4211,7 @@ background:
               _final: true,
             });
             rerenderChat();
+            endChatTurn();
           } catch (ex) {
             console.error("[SSE] agent_output error", ex);
           }
@@ -4183,6 +4231,10 @@ background:
                 lm._final = true;
                 rerenderChat();
               }
+              // 轮次作废（用户中断）：定格已显示内容；核心会以 [中断消息]
+              // 重启轮次，保持回合打开让确认回复继续流式渲染，
+              // 由其 agent_output final / watchdog 收尾。
+              armTurnWatchdog();
               return;
             }
             if (!p.content) return;

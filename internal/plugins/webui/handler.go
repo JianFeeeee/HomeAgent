@@ -1342,8 +1342,11 @@ func (h *Handler) handleChat(w http.ResponseWriter, r *http.Request) {
 	if body.ClientMsgID != "" {
 		payload["client_msg_id"] = body.ClientMsgID
 	}
-	// 带超时的上下文，防止 InjectInputSync 长时间阻塞 HTTP 请求
-	ctx, cancel := context.WithTimeout(r.Context(), 60*time.Second)
+	// 带超时的上下文，防止 InjectInputSync 长时间阻塞 HTTP 请求。
+	// 注意：ctx 派生自 r.Context()，客户端提前断开（前端 15s ackTimer abort）时
+	// 立即取消，不会真等满 300s；300s 只约束"连接保持 + agent 排队/长生成"场景
+	// （agent 串行处理，后发消息的排队时间也计入，60s 曾导致连发第 3 条必超时）。
+	ctx, cancel := context.WithTimeout(r.Context(), 300*time.Second)
 	defer cancel()
 
 	respCh := make(chan *agentIO.OutputEvent, 1)
@@ -1706,8 +1709,8 @@ func (h *Handler) handleOpenAICompletions(w http.ResponseWriter, r *http.Request
 		return
 	}
 
-	// 带超时的上下文
-	ctx, cancel := context.WithTimeout(r.Context(), 60*time.Second)
+	// 带超时的上下文（同 handleChat：客户端断开立即取消；300s 约束长生成）
+	ctx, cancel := context.WithTimeout(r.Context(), 300*time.Second)
 	defer cancel()
 
 	respCh := make(chan *agentIO.OutputEvent, 1)
@@ -1719,7 +1722,7 @@ func (h *Handler) handleOpenAICompletions(w http.ResponseWriter, r *http.Request
 	select {
 	case response = <-respCh:
 	case <-ctx.Done():
-		writeJSON(w, http.StatusGatewayTimeout, map[string]string{"error": "agent timeout (60s)"})
+		writeJSON(w, http.StatusGatewayTimeout, map[string]string{"error": "agent timeout (300s)"})
 		return
 	}
 

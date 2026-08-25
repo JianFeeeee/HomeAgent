@@ -31,6 +31,7 @@ const state = {
   messages: [],
   chatLoading: false,
   chatStage: "",
+  _turnWatchdog: null,
   healthResult: null,
   starmapInit: false,
   starmapLoading: false,
@@ -2036,6 +2037,46 @@ function buildChatStarmapGraph() {
   });
 }
 
+// 回合收尾：由 SSE 事件（agent_output final / reset 帧）或 watchdog 驱动。
+// POST 结束 ≠ 回合结束：agent 可能还在生成（排队+长生成），提前复位
+// chatLoading 会让后续 delta 走全量重建、停止按钮消失、用户误发重复消息。
+function endChatTurn() {
+  if (!state.chatLoading) return;
+  state.chatLoading = false;
+  state.chatStage = "";
+  if (state._turnWatchdog) {
+    clearTimeout(state._turnWatchdog);
+    state._turnWatchdog = null;
+  }
+  var btn = document.getElementById("chat-send-btn");
+  if (btn) {
+    btn.disabled = false;
+    btn.textContent = __("发送", "Send");
+  }
+  var sb = document.getElementById("chat-stop-btn");
+  if (sb) sb.style.display = "none";
+  rerenderChatIfActive();
+}
+
+// 回合看门狗：POST 已超时且 SSE 迟迟无终帧时兕底收尾（连接不稳/事件丢失），
+// 提示用户回复可能已生成、可刷新查看历史。避免回合永久卡在 loading。
+function armTurnWatchdog() {
+  if (state._turnWatchdog) clearTimeout(state._turnWatchdog);
+  state._turnWatchdog = setTimeout(() => {
+    state._turnWatchdog = null;
+    if (state.chatLoading) {
+      endChatTurn();
+      toast(
+        __(
+          "长时间未收到回复，连接可能不稳定；回复可能已生成，可刷新连接后查看",
+          "No reply for a long time; the reply may have been generated, reconnect to check",
+        ),
+        true,
+      );
+    }
+  }, 120000);
+}
+
 async function sendChat() {
   var inp = document.getElementById("chat-input");
   var btn = document.getElementById("chat-send-btn");
@@ -2125,13 +2166,14 @@ async function sendChat() {
     rerenderChat();
     toast(__("请求失败: ", "Request failed: ") + e.message, true);
   } finally {
-    state.chatLoading = false;
-    state.chatStage = "";
-    btn.disabled = false;
-    btn.textContent = __("发送", "Send");
-    var sb2 = document.getElementById("chat-stop-btn");
-    if (sb2) sb2.style.display = "none"; // 回复完成/失败，隐藏停止按钮
-    rerenderChat();
+    if (r && r.response) {
+      // 同步兜底已拿到完整回复：回合结束
+      endChatTurn();
+    } else {
+      // 触发式受理（POST 超时/失败）：回合仍打开，等 SSE 流式渲染；
+      // 由 agent_output final / reset 帧 / watchdog 收尾
+      armTurnWatchdog();
+    }
   }
 }
 
@@ -4881,9 +4923,23 @@ async function connectFetchSSE(url) {
               ? state.messages[state.messages.length - 1]
               : null;
           if (last && last.role === "assistant" && !last._final) {
+            // 聚合最终响应：覆盖 delta 累积的中间内容（以聚合为准，含 stage 插件改写后的文本），置 final 结束本轮流式。
             last._grow = true;
-            last.content += p.content || "";
+            last.content = p.content || "";
+            last._final = true;
             rerenderChatIfActive();
+            endChatTurn();
+            return;
+          }
+          if (
+            last &&
+            last.role === "assistant" &&
+            last._final &&
+            !last.source &&
+            last.content === (p.content || "")
+          ) {
+            // 去重：同一轮的重复帧（如 SSE 重连回放）内容相同则忽略，仅收尾回合
+            endChatTurn();
             return;
           }
           state.messages.push({
@@ -4891,8 +4947,10 @@ async function connectFetchSSE(url) {
             content: p.content || "",
             _streaming: true,
             _grow: true,
+            _final: true,
           });
           rerenderChatIfActive();
+          endChatTurn();
         } else if (type === "reasoning") {
           if (p.content) {
             state.chatStage = __("AI 思考中...", "AI thinking...");
@@ -4910,10 +4968,74 @@ async function connectFetchSSE(url) {
               });
               last = state.messages[state.messages.length - 1];
             }
-            last.reasoning_content =
-              (last.reasoning_content || "") + (p.content || "");
+            last.reasoning_content = p.content;
             rerenderChatIfActive();
           }
+        } else if (type === "reasoning_delta") {
+          // token 级思考流式增量：逐块追加到当前思考内容；reset 帧表示轮次作废
+          if (p.channel === "_consolidation_") return;
+          if (p.reset) {
+            var lm = state.messages.length
+              ? state.messages[state.messages.length - 1]
+              : null;
+            if (lm && lm.role === "assistant" && !lm._final) {
+              lm._final = true;
+              rerenderChatIfActive();
+            }
+            armTurnWatchdog();
+            return;
+          }
+          if (!p.content) return;
+          state.chatStage = __("AI 思考中...", "AI thinking...");
+          var last =
+            state.messages.length > 0
+              ? state.messages[state.messages.length - 1]
+              : null;
+          if (!last || last.role !== "assistant" || last._final) {
+            state.messages.push({
+              role: "assistant",
+              content: "",
+              reasoning_content: "",
+              tool_calls: [],
+              _streaming: true,
+            });
+            last = state.messages[state.messages.length - 1];
+          }
+          last.reasoning_content =
+            (last.reasoning_content || "") + p.content;
+          rerenderChatIfActive();
+        } else if (type === "content_delta") {
+          // token 级回复流式增量：逐块追加到当前回复内容；reset 帧表示轮次作废（中断）
+          if (p.channel === "_consolidation_") return;
+          if (p.reset) {
+            var lm = state.messages.length
+              ? state.messages[state.messages.length - 1]
+              : null;
+            if (lm && lm.role === "assistant" && !lm._final) {
+              lm._final = true;
+              rerenderChatIfActive();
+            }
+            armTurnWatchdog();
+            return;
+          }
+          if (!p.content) return;
+          state.chatStage = __("AI 回复中...", "AI replying...");
+          var last =
+            state.messages.length > 0
+              ? state.messages[state.messages.length - 1]
+              : null;
+          if (!last || last.role !== "assistant" || last._final) {
+            state.messages.push({
+              role: "assistant",
+              content: "",
+              tool_calls: [],
+              _streaming: true,
+              _grow: true,
+            });
+            last = state.messages[state.messages.length - 1];
+          }
+          last.content += p.content;
+          rerenderChatIfActive();
         } else if (type === "tool_call") {
           if (!p.tool) return;
           var last =
