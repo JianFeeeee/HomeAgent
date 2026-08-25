@@ -291,16 +291,18 @@ func (p *Plugin) registerExport() {
 func (p *Plugin) registerInstall() {
 	p.sdk.RegisterTool(tp+"install", sdk.ToolDef{
 		Name:        tp + "install",
-		Description: "安装技能包：支持 .skm 包路径或 local:<skills目录路径> 本地目录。安装后立即加载生效。",
+		Description: "安装技能包：支持 .skm 包路径或 local:<skills目录路径> 本地目录。同名技能已存在时传 overwrite=true 原地覆盖（保留无持久配置，直接替换文件）。安装后立即加载生效。",
 		Parameters: map[string]interface{}{
 			"type": "object",
 			"properties": map[string]interface{}{
-				"source": map[string]interface{}{"type": "string", "description": "安装来源：<path>.skm 或 local:<dir>"},
+				"source":    map[string]interface{}{"type": "string", "description": "安装来源：<path>.skm 或 local:<dir>"},
+				"overwrite": map[string]interface{}{"type": "boolean", "description": "同名技能存在时覆盖更新（默认 false）"},
 			},
 			"required": []string{"source"},
 		},
 	}, func(args map[string]interface{}) (interface{}, error) {
 		source, _ := args["source"].(string)
+		overwrite, _ := args["overwrite"].(bool)
 		source = strings.TrimSpace(source)
 		switch {
 		case strings.HasPrefix(source, "local:"):
@@ -314,8 +316,8 @@ func (p *Plugin) registerInstall() {
 				return nil, err
 			}
 			dst := filepath.Join(p.skillsDir, dstName)
-			if _, err := os.Stat(dst); err == nil {
-				return nil, fmt.Errorf("skill dir already exists: %s", dst)
+			if err := p.replaceSkillDir(dst, overwrite); err != nil {
+				return nil, err
 			}
 			if err := copyDir(dir, dst); err != nil {
 				return nil, fmt.Errorf("copy failed: %w", err)
@@ -336,8 +338,8 @@ func (p *Plugin) registerInstall() {
 				return nil, err
 			}
 			dst := filepath.Join(p.skillsDir, dstName)
-			if _, err := os.Stat(dst); err == nil {
-				return nil, fmt.Errorf("skill dir already exists: %s", dst)
+			if err := p.replaceSkillDir(dst, overwrite); err != nil {
+				return nil, err
 			}
 			n, err := unpackSkill(source, dst)
 			if err != nil {
@@ -355,6 +357,23 @@ func (p *Plugin) registerInstall() {
 			return nil, fmt.Errorf("unsupported source: %q (use <path>.skm or local:<dir>)", source)
 		}
 	})
+}
+
+// replaceSkillDir 安装前的同名目录处理：不存在则放行；存在且 overwrite=true
+// 则先卸载旧实例并删除旧目录（skill 无持久配置，直接替换）；否则报错。
+func (p *Plugin) replaceSkillDir(dst string, overwrite bool) error {
+	if _, err := os.Stat(dst); err != nil {
+		return nil // 不存在，直接装
+	}
+	if !overwrite {
+		return fmt.Errorf("skill dir already exists: %s (传 overwrite=true 覆盖更新)", dst)
+	}
+	name := filepath.Base(dst)
+	p.removeOne(name) // 从注册表移除旧实例
+	if err := os.RemoveAll(dst); err != nil {
+		return fmt.Errorf("remove old skill dir: %w", err)
+	}
+	return nil
 }
 
 // validateSkillName 校验技能名：小写字母/数字/连字符，1-64 字符。

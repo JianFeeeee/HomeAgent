@@ -75,8 +75,12 @@ type PluginManager interface {
 	DisablePlugin(name, by string) error
 	EnablePlugin(name string) error
 	// RemovePlugin 卸载插件：先停止（stop handlers + Stop），再执行插件注册的
-	// onRemove 回调（RegisterOnRemoveHandler），最后从注册表移除。目录删除由调用方负责。
+	// onRemove 回调（RegisterOnRemoveHandler），最后从注册表移除并清理配置表。
+	// 目录删除由调用方负责。
 	RemovePlugin(name string) error
+	// StopAndUnload 停止并从注册表移除插件但保留配置表，供更新/升级流程使用：
+	// 换产物不动配置，重装后配置原样生效。不触发 onRemove 回调。
+	StopAndUnload(name string) error
 	ReloadPlugins() (string, error)
 	// ReloadOne 重载单个插件（停止后重新加载，处理 dlclose/dynamic 句柄）。
 	ReloadOne(name string) error

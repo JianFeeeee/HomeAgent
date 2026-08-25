@@ -24,6 +24,7 @@ func (s *stubRoutableProvider) Chat(context.Context, *CompletionRequest) (*Compl
 func (s *stubRoutableProvider) ChatStream(context.Context, *CompletionRequest) (<-chan StreamChunk, error) {
 	ch := make(chan StreamChunk, 1)
 	ch <- StreamChunk{Done: true}
+	close(ch) // 流契约：发送完毕必须关闭 channel（accumulateStream 以此为终止条件）
 	return ch, nil
 }
 
