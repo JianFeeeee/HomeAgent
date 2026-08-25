@@ -13,7 +13,7 @@ require github.com/yanyiwu/gojieba v1.4.7
 require github.com/yalue/onnxruntime_go v1.13.0
 
 require (
-	gitcode.com/JianFeeeee/homeagent-sdk v0.8.0
+	gitcode.com/JianFeeeee/homeagent-sdk v0.9.1
 	github.com/charmbracelet/bubbles v1.0.0
 	github.com/charmbracelet/bubbletea v1.3.10
 	github.com/charmbracelet/lipgloss v1.1.0

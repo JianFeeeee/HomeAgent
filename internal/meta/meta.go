@@ -7,7 +7,7 @@ package meta
 var (
 	// Version 是 HomeAgent 内核版本号。
 	// 通过 `-ldflags="-X gitcode.com/JianFeeeee/HomeAgent/internal/meta.Version=vX.Y.Z"` 注入。
-	Version = "0.9.0"
+	Version = "0.9.1"
 
 	// Commit 是构建时的 Git commit hash。
 	Commit = "unknown"
@@ -19,7 +19,7 @@ var (
 	KernelName = "HomeAgent"
 
 	// SDKCompatibleVersion 是此内核可兼容的最高 SDK 版本（semver）。
-	SDKCompatibleVersion = "0.9.0"
+	SDKCompatibleVersion = "0.9.1"
 )
 
 // FullVersion 返回完整的版本字符串。
