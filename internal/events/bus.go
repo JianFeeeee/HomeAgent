@@ -25,6 +25,11 @@ const (
 	EventReasoningDelta EventType = "reasoning_delta"
 	EventContentDelta   EventType = "content_delta"
 
+	// skill_detected：clawhubadapter（OpenClaw 兼容层）扫描 skills 目录时
+	// 发现纯 SKILL 类型插件后发布，由原生 skillmgr 插件订阅并接管注册。
+	// 职责链：发现者（兼容层）→ 移交事件 → 归属者（skillmgr）加载管理。
+	EventSkillDetected EventType = "skill_detected"
+
 	EventAll EventType = "*"
 )
 

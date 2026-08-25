@@ -65,6 +65,14 @@ func (a *Agent) buildSystemPrompt(memContext string, userInput string) string {
 		prompt += "\n\n" + a.indexer.BuildToolPrompt()
 	}
 
+	// 技能索引（方案B）：轻量注入已加载技能列表，LLM 匹配到场景时
+	// 主动 skill_info 拉取全文按文档执行
+	if a.skillIndex != nil {
+		if idx := a.skillIndex.SkillIndex(); idx != "" {
+			prompt += "\n\n【可用技能】以下是已安装的原生技能。当用户请求与某技能描述匹配时，\n先用 skill_info(\"技能名\") 拉取全文，再严格按文档步骤执行：\n" + idx
+		}
+	}
+
 	prompt += a.buildToolCatalog()
 
 	return prompt

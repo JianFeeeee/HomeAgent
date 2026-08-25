@@ -18,6 +18,7 @@ import (
 	"sync"
 	"time"
 
+	"gitcode.com/JianFeeeee/HomeAgent/internal/events"
 	"gitcode.com/JianFeeeee/HomeAgent/internal/plugin"
 	sdk "gitcode.com/JianFeeeee/HomeAgent/internal/sdk"
 )
@@ -46,7 +47,6 @@ type Plugin struct {
 	name         string
 	skillsDir    string
 	simulatorDir string
-	skills       []*plugin.SKILLPlugin
 	sidecars     []*sidecarProcess
 	manager      *sidecarProcess
 	mu           sync.Mutex
@@ -163,13 +163,9 @@ func (p *Plugin) Start(s *sdk.PluginSDK) error {
 			case hasOCManifest || hasOCPackage:
 				log.Printf("[clawhubadapter] ocplugin %s handled by manager", entry.Name())
 			default:
-				sk, err := plugin.LoadSKILL(skillPath)
-				if err != nil {
-					log.Printf("[clawhubadapter] load skill %s: %v", entry.Name(), err)
-					continue
-				}
-				p.skills = append(p.skills, sk)
-				log.Printf("[clawhubadapter] loaded skill: %s v%s", sk.Name(), sk.Version())
+				// 纯 SKILL 类型：不属于 OpenClaw 兼容层，移交原生 skillmgr 管理。
+				// skillmgr 启动时也会自行全扫（本插件启动更早的场景由事件补齐）。
+				p.publishSkillDetected(s, skillPath)
 			}
 		}
 	}
@@ -592,16 +588,6 @@ func (p *Plugin) handlePluginUninstall(args map[string]interface{}) (interface{}
 	}
 	p.sidecars = aliveSidecars
 
-	// 2. Remove from SKILL list if present
-	var aliveSkills []*plugin.SKILLPlugin
-	for _, sk := range p.skills {
-		if sk.Name() != name {
-			aliveSkills = append(aliveSkills, sk)
-		} else {
-			logs = append(logs, fmt.Sprintf("已移除 SKILL 插件: %s v%s", sk.Name(), sk.Version()))
-		}
-	}
-	p.skills = aliveSkills
 	p.mu.Unlock()
 
 	// 3. Try manager for OC plugins
@@ -690,12 +676,6 @@ func (p *Plugin) handlePluginList(args map[string]interface{}) (interface{}, err
 						}
 					}
 				}
-				if len(p.skills) > 0 {
-					parts = append(parts, fmt.Sprintf("\nSKILL 插件 (%d):", len(p.skills)))
-					for _, sk := range p.skills {
-						parts = append(parts, fmt.Sprintf("  %s v%s", sk.Name(), sk.Version()))
-					}
-				}
 				caps := p.dispatcher.Capabilities()
 				if len(caps) > 0 {
 					parts = append(parts, fmt.Sprintf("\nCapabilities (%d):", len(caps)))
@@ -703,7 +683,7 @@ func (p *Plugin) handlePluginList(args map[string]interface{}) (interface{}, err
 						parts = append(parts, fmt.Sprintf("  %s", c))
 					}
 				}
-				if len(result.Plugins) == 0 && len(p.sidecars) <= 1 && len(p.skills) == 0 {
+				if len(result.Plugins) == 0 && len(p.sidecars) <= 1 {
 					parts = append(parts, "没有已安装的插件。")
 				}
 				p.mu.Unlock()
@@ -738,13 +718,6 @@ func (p *Plugin) handlePluginList(args map[string]interface{}) (interface{}, err
 		}
 	}
 
-	if len(p.skills) > 0 {
-		parts = append(parts, fmt.Sprintf("\nSKILL 插件 (%d):", len(p.skills)))
-		for _, sk := range p.skills {
-			parts = append(parts, fmt.Sprintf("  %s v%s", sk.Name(), sk.Version()))
-		}
-	}
-
 	caps := p.dispatcher.Capabilities()
 	if len(caps) > 0 {
 		parts = append(parts, fmt.Sprintf("\nCapabilities (%d):", len(caps)))
@@ -753,8 +726,8 @@ func (p *Plugin) handlePluginList(args map[string]interface{}) (interface{}, err
 		}
 	}
 
-	if len(p.sidecars) == 0 && len(p.skills) == 0 {
-		parts = append(parts, "没有已安装的插件。")
+	if len(p.sidecars) == 0 {
+		parts = append(parts, "没有已安装的插件（原生技能由 skillmgr 管理，用 skill_list 查看）。")
 	}
 
 	return map[string]interface{}{
@@ -809,11 +782,6 @@ func (p *Plugin) handlePluginInfo(args map[string]interface{}) (interface{}, err
 				for _, t := range tl {
 					tools = append(tools, t.Name)
 				}
-			}
-		}
-		for _, sk := range p.skills {
-			if sk.Name() == name {
-				typ = "SKILL"
 			}
 		}
 		p.mu.Unlock()
@@ -1264,10 +1232,21 @@ func (p *Plugin) Stop() error {
 		sp.Close()
 	}
 	p.sidecars = nil
-	p.skills = nil
 	p.manager = nil
 	p.sdk = nil
 	return nil
+}
+
+// publishSkillDetected 发布 skill_detected 事件，将纯 SKILL 条目移交原生
+// skillmgr 插件注册。OpenClaw 兼容层不持有 native skill 状态。
+func (p *Plugin) publishSkillDetected(s *sdk.PluginSDK, path string) {
+	s.Publish(&events.Event{
+		Type:      events.EventSkillDetected,
+		Source:    p.name,
+		Payload:   map[string]interface{}{"path": path},
+		Timestamp: time.Now().Unix(),
+	})
+	log.Printf("[clawhubadapter] skill %s detected, handed off to skillmgr", filepath.Base(path))
 }
 
 func errorResult(msg string) interface{} {
@@ -1338,13 +1317,8 @@ func (p *Plugin) reloadPlugin(name string) error {
 	case hasOCManifest || hasOCPackage:
 		return p.loadOCPlugin(p.sdk, pluginDir, name)
 	default:
-		sk, err := plugin.LoadSKILL(pluginDir)
-		if err != nil {
-			return fmt.Errorf("load skill: %w", err)
-		}
-		p.mu.Lock()
-		p.skills = append(p.skills, sk)
-		p.mu.Unlock()
+		// 纯 SKILL 类型：移交原生 skillmgr（与 Start 扫描行为一致）
+		p.publishSkillDetected(p.sdk, pluginDir)
 		return nil
 	}
 }
