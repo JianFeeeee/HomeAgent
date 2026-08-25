@@ -99,7 +99,28 @@ function adapter.transform_stream_chunk(raw_chunk)
         unified.reasoning_content = delta.reasoning_content
     end
     if delta.tool_calls then
-        unified.tool_calls = delta.tool_calls
+        local tcs = {}
+        for _, tc in ipairs(delta.tool_calls) do
+            -- OpenAI 流式格式: {function:{name,arguments}, id, type, index}
+            -- homed StreamChunk.ToolCalls 期望扁平格式: {id, type, name, raw_arguments}
+            local fn = tc["function"]
+            local name = (type(fn) == "table" and fn.name) or tc.name or ""
+            local raw_args = ""
+            if type(fn) == "table" and type(fn.arguments) == "string" then
+                raw_args = fn.arguments
+            elseif type(tc.arguments) == "string" then
+                raw_args = tc.arguments
+            end
+            -- 不能按 name 过滤：OpenAI 流式分片中后续块 name 为空但携带 arguments
+            -- accumulateStream 按 index 累积并在 flushToolCall 时校验 name
+            table.insert(tcs, {
+                id = tc.id or "",
+                type = tc.type or "function",
+                name = name,
+                raw_arguments = raw_args
+            })
+        end
+        unified.tool_calls = tcs
     end
     return json.encode(unified)
 end
