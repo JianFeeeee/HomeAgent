@@ -69,6 +69,7 @@ type chatMsg struct {
 	tool   string // msgTool: 工具名
 	status string // msgTool: ok/denied/interrupted/error/running
 	result string // msgTool: 结果预览
+	final  bool   // msgAgent: 流式消息已完成（后续 delta 不再追加）
 }
 
 // ---- tea.Msg ----
@@ -375,18 +376,61 @@ func (m *tuiModel) handleServerLine(line string) {
 		} else {
 			m.append(cm)
 		}
+	case "reasoning_delta":
+		// token 级增量：与 reasoning 同样合并到最后一条 reasoning 消息
+		if rl.Reset {
+			m.messages = []chatMsg{}
+			break
+		}
+		if n := len(m.messages); n > 0 && m.messages[n-1].kind == msgReasoning {
+			m.messages[n-1].text += rl.Content
+		} else if rl.Content != "" {
+			m.append(chatMsg{kind: msgReasoning, text: rl.Content})
+		}
+	case "content_delta":
+		// token 级增量：追加到最后一条 agent 消息（流式生成中的回复）
+		if rl.Reset {
+			m.sealLastAgent()
+			break
+		}
+		if n := len(m.messages); n > 0 && m.messages[n-1].kind == msgAgent && !m.messages[n-1].final {
+			m.messages[n-1].text += rl.Content
+		} else if rl.Content != "" {
+			m.append(chatMsg{kind: msgAgent, text: rl.Content})
+		}
 	case "tool_call":
+		// 工具调用打断内容流：置 final 防止后续 delta 误追加到旧消息
+		m.sealLastAgent()
 		m.append(chatMsg{kind: msgTool, tool: rl.Tool, status: rl.Status, result: rl.Result})
 	case "response":
+		// 聚合最终响应：覆盖/替换 delta 累积的最后一条 agent 消息（内容相同），
+		// 或在无 delta 时新建。置 final 标记本轮完成。
 		m.busy = false
-		m.append(chatMsg{kind: msgAgent, text: rl.Content})
+		if n := len(m.messages); n > 0 && m.messages[n-1].kind == msgAgent && !m.messages[n-1].final {
+			if rl.Content != "" {
+				m.messages[n-1].text = rl.Content // 以聚合为准（含 stage 插件改写后的最终文本）
+			}
+			m.messages[n-1].final = true
+		} else {
+			cm := chatMsg{kind: msgAgent, text: rl.Content, final: true}
+			m.append(cm)
+		}
 	case "error":
 		m.busy = false
+		m.sealLastAgent()
 		m.append(chatMsg{kind: msgError, text: rl.Error})
 	default:
 		// 非 JSON 旧行（旧服务器）：当最终输出
 		m.busy = false
-		m.append(chatMsg{kind: msgAgent, text: line})
+		m.append(chatMsg{kind: msgAgent, text: line, final: true})
+	}
+	m.refreshViewport()
+}
+
+// sealLastAgent 将最后一条未完成的 agent 流式消息标记为完成。
+func (m *tuiModel) sealLastAgent() {
+	if n := len(m.messages); n > 0 && m.messages[n-1].kind == msgAgent {
+		m.messages[n-1].final = true
 	}
 }
 

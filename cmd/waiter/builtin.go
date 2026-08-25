@@ -12,6 +12,7 @@ func handleBuiltin(cmd string, cfg *Config, state *State, reconnect func(), out 
 	case cmd == "/help":
 		fmt.Fprintln(out, `Built-in commands:
   /help                    show this help
+  /stop [msg]              stop generation / send interrupt (alias /interrupt)
   /exit, /quit             exit waiter
   /clear                   clear screen
   /reconnect               force reconnection
