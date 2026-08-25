@@ -120,12 +120,44 @@ func (p *SKILLPlugin) SetEnabled(v bool)      { p.mu.Lock(); defer p.mu.Unlock()
 func (p *SKILLPlugin) Tools() []ToolDef       { return p.toolDefs }
 func (p *SKILLPlugin) IOConfig() *IOConfig    { return p.ioConfig }
 func (p *SKILLPlugin) RawContent() string     { return p.rawContent }
+func (p *SKILLPlugin) SourceDir() string      { return p.sourceDir }
+
+// ValidateSKILLContent 校验 SKILL.md 内容是否可被 LoadSKILL 正确解析：
+// 必须含非空正文（description 来源），且提取出的工具定义名称合法。
+// 供 skillmgr 的 skill_create 在落盘前校验生成结果。
+func ValidateSKILLContent(content string) error {
+	if strings.TrimSpace(content) == "" {
+		return fmt.Errorf("SKILL content is empty")
+	}
+	if extractDescription(content) == "" {
+		return fmt.Errorf("SKILL content has no description (first non-empty non-heading line required)")
+	}
+	for _, td := range extractToolDefs(content) {
+		if strings.TrimSpace(td.Name) == "" || strings.ContainsAny(td.Name, " \t\n/") {
+			return fmt.Errorf("invalid tool name in SKILL content: %q", td.Name)
+		}
+	}
+	return nil
+}
 
 func extractDescription(content string) string {
-	for _, line := range splitLines(content) {
-		line = trimSpace(line)
-		if line != "" && !strings.HasPrefix(line, "#") {
-			return line
+	inFrontmatter := false
+	for i, line := range splitLines(content) {
+		trimmed := trimSpace(line)
+		// 跳过 YAML frontmatter 块（首行 --- 至闭合 ---），
+		// 否则分隔符会被误认为描述（所有带 frontmatter 的 SKILL.md 描述都变成 "---"）
+		if i == 0 && trimmed == "---" {
+			inFrontmatter = true
+			continue
+		}
+		if inFrontmatter {
+			if trimmed == "---" {
+				inFrontmatter = false
+			}
+			continue
+		}
+		if trimmed != "" && !strings.HasPrefix(trimmed, "#") {
+			return trimmed
 		}
 	}
 	return ""
@@ -139,7 +171,12 @@ func extractField(content string, field string) string {
 		if strings.HasPrefix(strings.ToLower(trimmed), lowerPrefix) {
 			for i := 0; i < len(trimmed); i++ {
 				if trimmed[i] == ':' {
-					return strings.TrimSpace(trimmed[i+1:])
+					v := strings.TrimSpace(trimmed[i+1:])
+					// YAML 风格引号值：剥掉成对的首尾引号
+					if len(v) >= 2 && (v[0] == '"' || v[0] == '\'') && v[len(v)-1] == v[0] {
+						v = v[1 : len(v)-1]
+					}
+					return v
 				}
 			}
 		}
