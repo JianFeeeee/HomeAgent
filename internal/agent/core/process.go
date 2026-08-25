@@ -315,11 +315,28 @@ func chatStreamWithFallback(ctx context.Context, p agentAPI.Provider, req *agent
 	}
 
 	resp, accErr := accumulateStream(ctx, ch, a)
+
+	// 中断/超时取消必须保持取消语义传给调用方（与原 Chat() 行为一致：
+	// 被 cancel 时丢弃已收内容返回 err），让 process() 的 continue 分支
+	// 重启轮次并以 [中断消息] 注入打断内容。绝不能把部分内容当成功返回，
+	// 否则用户打断会被无视、继续执行工具/输出。
+	if errors.Is(accErr, context.Canceled) || errors.Is(accErr, context.DeadlineExceeded) {
+		// 通知客户端：本轮流式作废，清空 delta 累积并定格已显示内容
+		if a != nil {
+			a.publishEvent(events.EventContentDelta, map[string]interface{}{
+				"content": "",
+				"channel": a.currentOutputChannel,
+				"reset":   true,
+			})
+		}
+		return resp, accErr
+	}
+
 	if accErr == nil {
 		return resp, nil
 	}
 
-	// 流中途错误：若已累积到内容则返回部分结果，否则回退非流式
+	// 其他错误（网络中断等）：已累积到实质内容则返回部分结果，否则回退非流式
 	if resp != nil && (resp.Content != "" || len(resp.ToolCalls) > 0) {
 		log.Printf("[agent] stream interrupted mid-way (%v), returning partial result", accErr)
 		return resp, nil

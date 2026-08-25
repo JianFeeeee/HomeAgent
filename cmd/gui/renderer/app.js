@@ -1166,6 +1166,9 @@ function buildChatLayout() {
     '<input id="chat-input" placeholder="' +
     __("输入消息...", "Type a message...") +
     '" onkeydown="if(event.key==\'Enter\')sendChat()">' +
+    '<button class="btn" onclick="interruptChat()" id="chat-stop-btn" style="display:none;background:#d1383d;color:#fff">' +
+    __("停止", "Stop") +
+    "</button>" +
     '<button class="btn btn-primary" onclick="sendChat()" id="chat-send-btn">' +
     __("发送", "Send") +
     "</button>" +
@@ -2036,6 +2039,7 @@ function buildChatStarmapGraph() {
 async function sendChat() {
   var inp = document.getElementById("chat-input");
   var btn = document.getElementById("chat-send-btn");
+  var stopBtn = document.getElementById("chat-stop-btn");
   var text = inp.value.trim();
   if (!text || state.chatLoading) return;
   if (state.currentConn && state.currentConn.type === "cli") {
@@ -2057,6 +2061,7 @@ async function sendChat() {
   state.chatStage = __("等待AI回复...", "Waiting for AI...");
   btn.disabled = true;
   btn.textContent = "";
+  if (stopBtn) stopBtn.style.display = ""; // 生成期间可停止
   rerenderChat();
   try {
     // webui 连接：同步 POST 等完整回复（服务端 X-Trigger-Only 也返回 response；SSE 公网不稳时靠同步兜底）
@@ -2124,7 +2129,23 @@ async function sendChat() {
     state.chatStage = "";
     btn.disabled = false;
     btn.textContent = __("发送", "Send");
+    var sb2 = document.getElementById("chat-stop-btn");
+    if (sb2) sb2.style.display = "none"; // 回复完成/失败，隐藏停止按钮
     rerenderChat();
+  }
+}
+
+// 停止生成 / 发送中断消息。核心拦截语义：有 LLM 在跑则取消当前请求并以
+// [中断消息] 重启轮次；无则在跑则作为普通消息处理。
+async function interruptChat() {
+  try {
+    await api("/chat/interrupt", {
+      method: "POST",
+      body: JSON.stringify({}),
+    });
+    toast(__("已发送中断信号", "Interrupt signal sent"));
+  } catch (e) {
+    toast(__("中断失败: ", "Interrupt failed: ") + e.message, true);
   }
 }
 

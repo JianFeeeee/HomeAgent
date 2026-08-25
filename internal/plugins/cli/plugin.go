@@ -211,8 +211,33 @@ func (p *Plugin) handleChat(w *connWriter, line string, s *sdk.PluginSDK) {
 			"result": truncateOneLine(result, 160),
 		})
 	})
+	// token 级流式增量帧：客户端可选订做逐 token 渲染。
+	// 旧客户端收到未知 type 会忽略；聚合 reasoning/response 帧仍照常发送，
+	// 保证旧/新客户端最终都能看到完整文本。
+	unsubReasoningDelta := s.Subscribe(sdk.EventReasoningDelta, func(evt *sdk.Event) {
+		if ch, _ := evt.Payload["channel"].(string); ch != cliChannel {
+			return
+		}
+		content, _ := evt.Payload["content"].(string)
+		if content == "" {
+			return
+		}
+		w.writeLine(map[string]interface{}{"type": "reasoning_delta", "content": content})
+	})
+	unsubContentDelta := s.Subscribe(sdk.EventContentDelta, func(evt *sdk.Event) {
+		if ch, _ := evt.Payload["channel"].(string); ch != cliChannel {
+			return
+		}
+		content, _ := evt.Payload["content"].(string)
+		if content == "" {
+			return
+		}
+		w.writeLine(map[string]interface{}{"type": "content_delta", "content": content})
+	})
 	defer unsubReasoning()
 	defer unsubToolCall()
+	defer unsubReasoningDelta()
+	defer unsubContentDelta()
 
 	resp := s.InjectTextSync(cliSource, cliChannel, line)
 	if resp != nil {
@@ -260,6 +285,8 @@ func (p *Plugin) handleBuiltin(conn net.Conn, line string, s *sdk.PluginSDK) boo
 	switch parts[0] {
 	case "/help":
 		p.cmdHelp(conn)
+	case "/stop", "/interrupt":
+		p.cmdInterrupt(conn, parts, s)
 	case "/status":
 		p.cmdStatus(conn, s)
 	case "/kernel":
@@ -285,6 +312,7 @@ func (p *Plugin) cmdHelp(conn net.Conn) {
 		"type": "response",
 		"content": `内置命令（直接对话内核，不依赖网络）:
   /help                        显示此帮助
+  /stop [消息]                 停止当前生成/发送中断消息（别名 /interrupt）
   /status                      系统运行状态
   /kernel                      内核状态（插件、工具、LLM、记忆）
   /settings                    列出所有配置
@@ -302,6 +330,36 @@ func (p *Plugin) cmdHelp(conn net.Conn) {
 
 其他文本直接发送给 Agent 处理。`,
 	})
+}
+
+// ======== /stop ========
+
+// cmdInterrupt 注入用户中断。核心拦截语义（interceptLoop）：
+//   - 有 LLM 在跑：cancelLLM 取消当前流式请求，中断入队，process() 以
+//     [中断消息] 重启轮次（模型看到被打断的上下文 + 用户新输入）；
+//   - 无 LLM 在跑：作为普通输入处理（等同发了一条消息）。
+//
+// 可选附带消息：/stop 换个话题（空参数 = 纯取消）。
+func (p *Plugin) cmdInterrupt(conn net.Conn, parts []string, s *sdk.PluginSDK) {
+	msg := strings.TrimSpace(strings.TrimPrefix(line2(parts), "/stop"))
+	if alias := strings.TrimSpace(strings.TrimPrefix(line2(parts), "/interrupt")); alias != "" {
+		msg = alias
+	}
+	s.InjectInterrupt(cliSource, cliChannel, "text", map[string]interface{}{
+		"content": msg,
+	})
+	writeLine(conn, map[string]interface{}{
+		"type":    "response",
+		"content": "已发送中断信号",
+	})
+}
+
+// line2 将命令行参数重组为原始字符串（保留词间空格，去掉首 token）。
+func line2(parts []string) string {
+	if len(parts) < 2 {
+		return ""
+	}
+	return strings.Join(parts[1:], " ")
 }
 
 // ======== /status ========
