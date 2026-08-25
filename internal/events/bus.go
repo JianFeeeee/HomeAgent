@@ -17,7 +17,15 @@ const (
 	EventStage          EventType = "stage"
 	EventSystem         EventType = "system"
 	EventTerminalOutput EventType = "terminal_output"
-	EventAll            EventType = "*"
+
+	// 流式增量事件（LLM token 级）：核心改为流式后每收到一个增量块发布。
+	// 订阅者可选订；不认识的旧订阅者自然忽略（Bus 按 EventType 精确匹配分发）。
+	// 聚合事件 EventReasoning / EventAgentLLMChain 仍照常在每轮结束时全文发布，
+	// 插件体系行为不变。
+	EventReasoningDelta EventType = "reasoning_delta"
+	EventContentDelta   EventType = "content_delta"
+
+	EventAll EventType = "*"
 )
 
 type Event struct {
