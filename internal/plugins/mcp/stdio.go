@@ -8,6 +8,7 @@ import (
 	"os"
 	"os/exec"
 	"sync"
+	"time"
 )
 
 // StdioTransport 通过子进程 stdin/stdout 进行 JSON-RPC 通信
@@ -105,11 +106,22 @@ func (t *StdioTransport) Send(req *rpcRequest) (*rpcResponse, error) {
 		return nil, fmt.Errorf("write newline: %w", err)
 	}
 
+	// 超时保护：MCP server 进程启动慢/卡死不响应时，不能让插件加载永久阻塞
+	// （stdio server 冷启动如 npx 拉包可能数十秒，给 60s）
+	timeout := time.After(60 * time.Second)
 	select {
 	case resp := <-ch:
 		return resp, nil
 	case <-t.done:
+		t.mu.Lock()
+		delete(t.pending, req.ID)
+		t.mu.Unlock()
 		return nil, fmt.Errorf("mcp transport closed")
+	case <-timeout:
+		t.mu.Lock()
+		delete(t.pending, req.ID)
+		t.mu.Unlock()
+		return nil, fmt.Errorf("mcp request timeout (60s), method may be hung")
 	}
 }
 
