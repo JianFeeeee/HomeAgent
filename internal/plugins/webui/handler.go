@@ -694,6 +694,7 @@ func (h *Handler) RegisterRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("/api/v1/tracker/", h.requireAPI(h.handleTracker))
 	mux.HandleFunc("/api/v1/chat", h.requireAPI(h.handleChat))
 	mux.HandleFunc("/api/v1/chat/history", h.requireAPI(h.handleChatHistory))
+	mux.HandleFunc("/api/v1/chat/interrupt", h.requireAPI(h.handleChatInterrupt))
 	mux.HandleFunc("/api/v1/chat/events", h.requireAPI(h.handleChatEvents))
 	mux.HandleFunc("/api/v1/terminals", h.requireAPI(h.handleTerminals))
 	mux.HandleFunc("/api/v1/cmd/history", h.requireAPI(h.handleCmdHistory))
@@ -1221,6 +1222,39 @@ func (h *Handler) handleChatHistory(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]interface{}{"messages": result})
 }
 
+// handleChatInterrupt 注入用户中断：取消正在进行的 LLM 生成并/或发送打断消息。
+// 核心拦截语义（interceptLoop）：
+//   - 有 LLM 在跑：cancelLLM 取消当前请求 + 中断入队，process() 以
+//     [中断消息] 重启轮次，模型看到被打断的上下文和用户新输入；
+//   - 无 LLM 在跑：作为普通输入处理（等同发了一条消息）。
+// message 可选：空则纯取消（仍会注入空内容中断触发取消）。
+func (h *Handler) handleChatInterrupt(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	if h.sdk == nil {
+		writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "agent unavailable"})
+		return
+	}
+	var body struct {
+		Message  string `json:"message"`
+		DeviceID string `json:"device_id"`
+	}
+	if r.Body != nil {
+		_ = json.NewDecoder(r.Body).Decode(&body) // body 可选
+	}
+
+	source := "webui"
+	if body.DeviceID != "" {
+		source = "webui/" + body.DeviceID
+	}
+	h.sdk.InjectInterrupt(source, "webui", "text", map[string]interface{}{
+		"content": body.Message,
+	})
+	writeJSON(w, http.StatusOK, map[string]string{"status": "interrupted"})
+}
+
 func (h *Handler) handleTerminals(w http.ResponseWriter, r *http.Request) {
 	h.termMu.Lock()
 	terms := make([]*termState, 0, len(h.termStates))
@@ -1413,8 +1447,27 @@ func (h *Handler) handleChatEvents(w http.ResponseWriter, r *http.Request) {
 	}
 
 	subTypes := []string{"agent_output", "reasoning", "agent_error", "tool_call", "stage", "agent_llm_chain", "terminal_output"}
+	// token 级流式增量事件：实时转发给浏览器做逐 token 渲染。
+	// 不进 sseEventRing —— 断线重连只重放聚合事件（最终真相），
+	// 避免重放 delta 与聚合内容重复追加。
 	var unsubs []func()
 	var seq int64
+	appendDeltaSub := func(evtType sdk.EventType) {
+		unsub := h.sdk.Subscribe(evtType, func(evt *sdk.Event) {
+			data, _ := json.Marshal(evt)
+			seq++
+			id := fmt.Sprintf("%d-%d", evt.Timestamp, seq)
+			select {
+			case writeCh <- fmt.Sprintf("id: %s\nevent: %s\ndata: %s\n", id, evt.Type, string(data)):
+			default:
+				log.Printf("[SSE] DROPPED %s (writeCh full, len=%d)", evt.Type, len(writeCh))
+			}
+		})
+		unsubs = append(unsubs, unsub)
+	}
+	appendDeltaSub(sdk.EventReasoningDelta)
+	appendDeltaSub(sdk.EventContentDelta)
+
 	for _, t := range subTypes {
 		t2 := t
 		unsub := h.sdk.Subscribe(sdk.EventType(t2), func(evt *sdk.Event) {

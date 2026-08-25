@@ -126,6 +126,7 @@ type respLine struct {
 	Tool    string `json:"tool"`
 	Status  string `json:"status"`
 	Result  string `json:"result"`
+	Reset   bool   `json:"reset,omitempty"` // delta 帧：服务端轮次作废，清空累积
 }
 
 // parseRespLineStruct 解析一行 JSON 响应帧，解析失败时将原文放入 Content。

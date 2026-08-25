@@ -202,10 +202,15 @@ func runInteractive(state *State, cfg *Config) {
 }
 
 func oneshot(state *State, msg string) {
+	var sr streamRender
 	stop := startSpinner("thinking...")
 	resp, err := state.SendChatStream(msg, func(rl respLine) {
 		// 第一个过程帧到达即停转，后续帧直接渲染
 		stop()
+		if sr.handleDelta(rl) {
+			return // delta 已增量渲染
+		}
+		sr.reset() // 聚合帧/工具帧：结束 delta 流，换行输出
 		printServerEvent(rl)
 	})
 	stop()
@@ -347,6 +352,56 @@ loop:
 	}
 }
 
+// streamRender 累积 token 级 delta 帧并增量重绘当前行。
+// 聚合帧（reasoning/tool_call/response）到达时清空累积状态（该轮已结束）。
+// 旧服务器不发 delta，此结构始终为空，行为与原来完全一致。
+type streamRender struct {
+	reasoning strings.Builder
+	content   strings.Builder
+}
+
+// handleDelta 处理 delta 帧；返回是否消费了该帧。
+// reset=true 的空帧表示服务端轮次作废（用户中断）：清空累积并定格已显示内容。
+func (sr *streamRender) handleDelta(rl respLine) bool {
+	switch rl.Type {
+	case "reasoning_delta":
+		if rl.Reset {
+			sr.reasoning.Reset()
+			fmt.Print(clearLine)
+			return true
+		}
+		sr.reasoning.WriteString(rl.Content)
+		if colors {
+			fmt.Printf("%s%s· %s%s", clearLine, colorDim, sr.reasoning.String(), colorReset)
+		} else {
+			fmt.Printf("%s[思考] %s", clearLine, sr.reasoning.String())
+		}
+		return true
+	case "content_delta":
+		if rl.Reset {
+			sr.content.Reset()
+			fmt.Print(clearLine + "\n") // 定格已显示的部分内容，换行
+			return true
+		}
+		sr.content.WriteString(rl.Content)
+		if colors {
+			fmt.Printf("%s%s%s%s", clearLine, colorGreen, sr.content.String(), colorReset)
+		} else {
+			fmt.Printf("%s%s", clearLine, sr.content.String())
+		}
+		return true
+	}
+	return false
+}
+
+// reset 在收到聚合帧/工具帧时调用：delta 流被打断或结束，
+// 下一行输出不再覆盖 delta 内容。
+func (sr *streamRender) reset() {
+	sr.reasoning.Reset()
+	sr.content.Reset()
+	fmt.Print(clearLine + "\n")
+}
+
 // printServerOutput 渲染一行服务器输出（JSON 帧）。
 func printServerOutput(content string) {
 	rl := parseRespLineStruct(content)
@@ -369,8 +424,10 @@ func printServerEvent(rl respLine) {
 // renderPlain 无色模式下的纯文本渲染。
 func renderPlain(rl respLine, raw string) string {
 	switch rl.Type {
-	case "reasoning":
+	case "reasoning", "reasoning_delta":
 		return "[思考] " + rl.Content
+	case "content_delta":
+		return rl.Content
 	case "tool_call":
 		return fmt.Sprintf("[工具] %s (%s) %s", rl.Tool, rl.Status, rl.Result)
 	case "response":
