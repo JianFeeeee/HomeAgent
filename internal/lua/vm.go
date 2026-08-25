@@ -335,6 +335,42 @@ func (v *VM) CallTransformResponse(name, rawJSON string) (string, error) {
 	return out, nil
 }
 
+// TransformError 执行可选的 adapter.transform_error(status, body) 钩子。
+// 返回 reason: 适配器提取的错误原因；ok=false 表示适配器未定义此钩子。
+func (v *VM) TransformError(name string, status int, body string) (reason string, ok bool, err error) {
+	p := v.pool(name)
+	if p == nil {
+		return "", false, nil
+	}
+	w, err := p.acquire()
+	if err != nil {
+		return "", false, err
+	}
+	defer p.release(w)
+	L := w.L
+	adapter := L.GetGlobal(adapterGlobal)
+	tbl, ok2 := adapter.(*lua.LTable)
+	if !ok2 {
+		return "", false, nil
+	}
+	f := tbl.RawGetString("transform_error")
+	if _, ok := f.(*lua.LFunction); !ok {
+		return "", false, nil
+	}
+	L.Push(f)
+	L.Push(lua.LNumber(status))
+	L.Push(lua.LString(body))
+	if err := L.PCall(2, 1, nil); err != nil {
+		return "", false, fmt.Errorf("transform_error: %w", err)
+	}
+	res := L.Get(-1)
+	L.Pop(1)
+	if res.Type() != lua.LTString {
+		return "", false, nil
+	}
+	return res.String(), true, nil
+}
+
 func (v *VM) CallTransformStreamChunk(name, rawLine string) (string, error) {
 	p := v.pool(name)
 	if p == nil {
