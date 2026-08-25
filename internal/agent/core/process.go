@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"log"
 	"strings"
+	"time"
 
 	agentAPI "gitcode.com/JianFeeeee/HomeAgent/internal/agent/api"
 	"gitcode.com/JianFeeeee/HomeAgent/internal/events"
@@ -116,28 +117,61 @@ func (a *Agent) process(input string, stageCtx *sdk.StageContext) (response stri
 					fbProvider.Name(), pi, len(providers)-1)
 			}
 
-			fCtx, fCancel := context.WithCancel(a.ctx)
-			a.llmMu.Lock()
-			a.cancelLLM = fCancel
-			a.llmMu.Unlock()
-
-			resp, llmErr = chatStreamWithFallback(fCtx, fbProvider, req, a)
-
-			a.llmMu.Lock()
-			a.cancelLLM = nil
-			a.llmMu.Unlock()
-			fCancel()
-
-			if llmErr == nil {
-				a.providerManager.ResetAvailability(fbProvider.Name())
-				if fbProvider != a.provider {
-					a.provider = fbProvider
-					log.Printf("[agent] switched active provider to %q after fallback",
-						fbProvider.Name())
+			// 同源瞬时错误重试：网关瞬断（502/503/504/429/网络抖动）通常秒级恢复，
+			// 直接跳下一个 provider（或直接报错）会丢掉本可成功的请求。
+			// 凭证错误（401/403）与用户中断不重试。
+			const maxAttempts = 2
+			for attempt := 1; attempt <= maxAttempts; attempt++ {
+				if attempt > 1 {
+					log.Printf("[agent] provider %q transient failure, retry %d/%d in 2s: %v",
+						fbProvider.Name(), attempt, maxAttempts, llmErr)
+					select {
+					case <-time.After(2 * time.Second):
+					case <-a.ctx.Done():
+						llmErr = a.ctx.Err()
+					}
+					if llmErr == nil || errors.Is(llmErr, context.Canceled) || errors.Is(llmErr, context.DeadlineExceeded) {
+						break
+					}
 				}
-				break
+
+				fCtx, fCancel := context.WithCancel(a.ctx)
+				a.llmMu.Lock()
+				a.cancelLLM = fCancel
+				a.llmMu.Unlock()
+
+				resp, llmErr = chatStreamWithFallback(fCtx, fbProvider, req, a)
+
+				a.llmMu.Lock()
+				a.cancelLLM = nil
+				a.llmMu.Unlock()
+				fCancel()
+
+				if llmErr == nil {
+					a.providerManager.ResetAvailability(fbProvider.Name())
+					if fbProvider != a.provider {
+						a.provider = fbProvider
+						log.Printf("[agent] switched active provider to %q after fallback",
+							fbProvider.Name())
+					}
+					break
+				}
+
+				// 用户中断：立即终止，不重试也不换 provider
+				if errors.Is(llmErr, context.Canceled) {
+					break
+				}
+				// 凭证错误：重试无意义，跳出重试循环进入 provider 标记/切换
+				var pe *agentAPI.ProviderError
+				if errors.As(llmErr, &pe) && (pe.StatusCode == 401 || pe.StatusCode == 403) {
+					break
+				}
+				// 其余错误（含 5xx/429/网络）：还有重试机会则继续，否则跳出
 			}
 
+			if llmErr == nil {
+				break
+			}
 			if errors.Is(llmErr, context.Canceled) {
 				break
 			}

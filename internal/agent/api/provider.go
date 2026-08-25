@@ -384,12 +384,20 @@ func (p *LuaAdaptedProvider) Chat(ctx context.Context, req *CompletionRequest) (
 		if parsed, perr := parseOpenAICompatibleResponse(rawResp); perr == nil {
 			return parsed, nil
 		}
+		// 网关在非流式请求下返回了 SSE 流 body（上游恢复后吐 chunk 流），
+		// 拼接为完整响应，避免丢掉已生成的整段回复
+		if parsed, ok := parseOpenAICompatibleSSEBody(rawResp); ok {
+			return parsed, nil
+		}
 		return nil, fmt.Errorf("lua transform_response: %w", err)
 	}
 
 	var result CompletionResponse
 	if err := json.Unmarshal([]byte(unifiedJSON), &result); err != nil {
 		if parsed, perr := parseOpenAICompatibleResponse(rawResp); perr == nil {
+			return parsed, nil
+		}
+		if parsed, ok := parseOpenAICompatibleSSEBody(rawResp); ok {
 			return parsed, nil
 		}
 		return nil, fmt.Errorf("unmarshal unified response: %w (body: %s)", err, unifiedJSON)
@@ -460,6 +468,86 @@ func parseOpenAICompatibleResponse(raw []byte) (*CompletionResponse, error) {
 	return out, nil
 }
 
+// parseOpenAICompatibleSSEBody 将 SSE 格式的响应体（"data: {...}" 多行）
+// 拼接为完整 CompletionResponse。场景：网关（llmsproxy auto 链等）在非流式
+// 请求下也可能返回流式 body——上游恢复后吐出的是已生成的 chunk 流，若按
+// 普通 JSON 解析会报 "invalid character 'd'" 而丢掉整段完整回复。
+// 返回 false 表示 body 不是 SSE 格式，调用方继续走原有解析路径。
+func parseOpenAICompatibleSSEBody(raw []byte) (*CompletionResponse, bool) {
+	body := strings.TrimSpace(string(raw))
+	if !strings.HasPrefix(body, "data:") && !strings.Contains(body, "\ndata:") {
+		return nil, false
+	}
+	type sseAcc struct {
+		id      string
+		name    string
+		argsRaw strings.Builder
+	}
+	var out CompletionResponse
+	var contentBuf, reasoningBuf strings.Builder
+	accs := map[int]*sseAcc{}
+	toolOrder := []int{}
+	finish := ""
+	found := false
+
+	for _, line := range strings.Split(body, "\n") {
+		line = strings.TrimSpace(line)
+		if !strings.HasPrefix(line, "data:") {
+			continue
+		}
+		payload := strings.TrimSpace(strings.TrimPrefix(line, "data:"))
+		if payload == "" || payload == "[DONE]" {
+			continue
+		}
+		ck, ok := parseOpenAICompatibleStreamChunkFull(payload)
+		if !ok {
+			continue
+		}
+		found = true
+		contentBuf.WriteString(ck.Content)
+		reasoningBuf.WriteString(ck.ReasoningContent)
+		for i, tc := range ck.ToolCalls {
+			acc := accs[i]
+			if acc == nil {
+				acc = &sseAcc{}
+				accs[i] = acc
+				toolOrder = append(toolOrder, i)
+			}
+			if tc.ID != "" {
+				acc.id = tc.ID
+			}
+			if tc.Name != "" {
+				acc.name = tc.Name
+			}
+			acc.argsRaw.WriteString(tc.RawArguments)
+		}
+		if ck.Done && ck.FinishReason != "" {
+			finish = ck.FinishReason
+		}
+		if ck.Usage != nil {
+			out.TokenUsage = *ck.Usage
+		}
+	}
+	if !found {
+		return nil, false
+	}
+	out.Content = contentBuf.String()
+	out.ReasoningContent = reasoningBuf.String()
+	out.FinishReason = finish
+	for _, i := range toolOrder {
+		acc := accs[i]
+		name := strings.TrimSpace(acc.name)
+		argsStr := strings.TrimSpace(acc.argsRaw.String())
+		if name == "" && argsStr == "" && acc.id == "" {
+			continue
+		}
+		tc := ToolCall{ID: acc.id, Type: "function", Name: name, RawArguments: argsStr}
+		tc.Arguments = parseToolArguments(argsStr)
+		out.ToolCalls = append(out.ToolCalls, tc)
+	}
+	return &out, true
+}
+
 type openAIToolCall struct {
 	ID       string `json:"id"`
 	Type     string `json:"type"`
@@ -526,7 +614,11 @@ func normalizeStreamToolCalls(raw []openAIToolCall) []ToolCall {
 		argsRaw := tc.Function.Arguments
 		if name == "" {
 			name = tc.Name
-			argsRaw = tc.Arguments
+			// 仅当顶层 Arguments 存在才用扁平格式；否则保留 function.arguments 嵌套值
+			// （OpenAI 流式续传 chunk：name 不重发但 function.arguments 继续）
+			if tc.Arguments != nil {
+				argsRaw = tc.Arguments
+			}
 		}
 		typ := tc.Type
 		if typ == "" && (tc.ID != "" || name != "" || argsRaw != nil) {

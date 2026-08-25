@@ -379,7 +379,7 @@ func (m *tuiModel) handleServerLine(line string) {
 	case "reasoning_delta":
 		// token 级增量：与 reasoning 同样合并到最后一条 reasoning 消息
 		if rl.Reset {
-			m.messages = []chatMsg{}
+			m.sealLastAgent()
 			break
 		}
 		if n := len(m.messages); n > 0 && m.messages[n-1].kind == msgReasoning {
