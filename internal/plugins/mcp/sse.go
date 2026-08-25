@@ -5,8 +5,10 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"strings"
+	"time"
 )
 
 // SSETransport 通过 HTTP POST 进行 JSON-RPC 通信。
@@ -18,9 +20,19 @@ type SSETransport struct {
 }
 
 func NewSSETransport(url string) *SSETransport {
+	// 必须带超时：远程 MCP server 网络抖动/无响应时，
+	// 无超时的 client 会让插件加载永久阻塞（webui 等后续插件全部起不来）
 	return &SSETransport{
-		url:    url,
-		client: &http.Client{},
+		url: url,
+		client: &http.Client{
+			Timeout: 30 * time.Second,
+			Transport: &http.Transport{
+				DialContext: (&net.Dialer{
+					Timeout:   10 * time.Second,
+					KeepAlive: 30 * time.Second,
+				}).DialContext,
+			},
+		},
 	}
 }
 

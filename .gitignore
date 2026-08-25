@@ -36,7 +36,7 @@ third_party/homeagent-sdk/example/
 codegraph.json
 
 # 运行时产物(不提交)
-adapters/
+/adapters/
 knowledge/
 memory/
 scripts/
