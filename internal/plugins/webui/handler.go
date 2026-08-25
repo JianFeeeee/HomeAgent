@@ -1412,18 +1412,26 @@ func (h *Handler) handleChatEvents(w http.ResponseWriter, r *http.Request) {
 	ticker := time.NewTicker(15 * time.Second)
 	defer ticker.Stop()
 
+	// writeCh 不 close：Subscribe 回调闭包持有它，handler 退出后回调仍可能被
+	// 总线异步触发，close 后再发送会 panic（send on closed channel，生产日志中
+	// 单日数千次）。writer goroutine 通过 done 退出；发送侧 select on done 防泄漏。
 	writeCh := make(chan string, 64)
-	defer close(writeCh)
-
+	writerDone := make(chan struct{})
 	go func() {
 		defer func() {
 			if r := recover(); r != nil {
 				log.Printf("[SSE] writer panic: %v", r)
 			}
+			close(writerDone)
 		}()
-		for line := range writeCh {
-			fmt.Fprintf(w, "%s\n", line)
-			flusher.Flush()
+		for {
+			select {
+			case line := <-writeCh:
+				fmt.Fprintf(w, "%s\n", line)
+				flusher.Flush()
+			case <-done:
+				return
+			}
 		}
 	}()
 
@@ -1501,6 +1509,7 @@ func (h *Handler) handleChatEvents(w http.ResponseWriter, r *http.Request) {
 		for _, unsub := range unsubs {
 			unsub()
 		}
+		<-writerDone // 等 writer 退出，保证 handler 返回后无残余写入
 	}()
 	for {
 		select {
