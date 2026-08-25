@@ -2,7 +2,7 @@ package remotedevice
 
 import (
 	"bufio"
-	"crypto/sha256"
+	"crypto/sha1" // RFC6455 规定 Sec-WebSocket-Accept 必须用 SHA-1，勿改
 	"encoding/base64"
 	"encoding/binary"
 	"encoding/json"
@@ -372,8 +372,12 @@ func (r *Registry) deliverResult(reqID string, res map[string]interface{}) {
 
 const wsGUID = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11"
 
+// wsAccept 计算 RFC6455 §4.2.2 握手响应值：base64(SHA1(key + GUID))。
+// 注意必须用 SHA-1——这是协议规定而非安全选择；此前误用 SHA-256 导致
+// 所有标准 WS 客户端（浏览器/Electron/各语言标准库）校验 Accept 失败
+// 后立即断开，设备永远无法完成 hello 注册（devicedetect 恒为空）。
 func wsAccept(key string) string {
-	h := sha256.Sum256([]byte(key + wsGUID))
+	h := sha1.Sum([]byte(key + wsGUID))
 	return base64.StdEncoding.EncodeToString(h[:])
 }
 
