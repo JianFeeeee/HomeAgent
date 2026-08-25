@@ -2,6 +2,7 @@ package core
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"log"
@@ -120,7 +121,7 @@ func (a *Agent) process(input string, stageCtx *sdk.StageContext) (response stri
 			a.cancelLLM = fCancel
 			a.llmMu.Unlock()
 
-			resp, llmErr = fbProvider.Chat(fCtx, req)
+			resp, llmErr = chatStreamWithFallback(fCtx, fbProvider, req, a)
 
 			a.llmMu.Lock()
 			a.cancelLLM = nil
@@ -292,6 +293,155 @@ func (a *Agent) process(input string, stageCtx *sdk.StageContext) (response stri
 			}
 		}
 	}
+}
+
+// chatStreamWithFallback 优先流式调用 provider，失败时回退非流式 Chat()。
+//
+// 流式路径：ChatStream 拿到 chunk channel，逐块累积 content/reasoning_content，
+// 并发布 EventReasoningDelta / EventContentDelta 增量事件（新订阅者可选订，
+// 旧订阅者不认识自然忽略）。流结束后拼出与 Chat() 等价的 CompletionResponse
+// 返回——process() 的后续逻辑（stageCtx/聚合事件/工具循环）完全不变。
+//
+// 回退条件：ChatStream 返回错误（连接失败、provider 不支持流式）。
+// 已收到部分 chunk 后出错则不回退（避免重复生成），直接返回已累积内容。
+//
+// 超时收益：首包 ~1-3s 到达即建立活性，后续只要 token 在流动就不会触发
+// 空闲超时；总生成时长不再受限於 180s 整体超时。
+func chatStreamWithFallback(ctx context.Context, p agentAPI.Provider, req *agentAPI.CompletionRequest, a *Agent) (*agentAPI.CompletionResponse, error) {
+	ch, err := p.ChatStream(ctx, req)
+	if err != nil {
+		log.Printf("[agent] stream connect failed (%v), falling back to non-stream chat", err)
+		return p.Chat(ctx, req)
+	}
+
+	resp, accErr := accumulateStream(ctx, ch, a)
+	if accErr == nil {
+		return resp, nil
+	}
+
+	// 流中途错误：若已累积到内容则返回部分结果，否则回退非流式
+	if resp != nil && (resp.Content != "" || len(resp.ToolCalls) > 0) {
+		log.Printf("[agent] stream interrupted mid-way (%v), returning partial result", accErr)
+		return resp, nil
+	}
+	log.Printf("[agent] stream failed before content (%v), falling back to non-stream chat", accErr)
+	return p.Chat(ctx, req)
+}
+
+// toolCallAcc 累积流式 tool call 的各个分片。OpenAI 风格：每个 index 的
+// id/name/arguments 跨多个 chunk 增量到达，arguments 是 JSON 字符串分片。
+type toolCallAcc struct {
+	id      string
+	name    string
+	argsRaw strings.Builder
+}
+
+// accumulateStream 消费 chunk channel，累积为完整 CompletionResponse，
+// 同时发布增量事件。返回的 response 与非流式 Chat() 的返回等价。
+func accumulateStream(ctx context.Context, ch <-chan agentAPI.StreamChunk, a *Agent) (*agentAPI.CompletionResponse, error) {
+	resp := &agentAPI.CompletionResponse{
+		ToolCalls: make([]agentAPI.ToolCall, 0),
+	}
+	accs := make(map[int]*toolCallAcc) // index → 累积中的 tool call
+	var lastFinish string
+
+	flushToolCall := func(idx int) {
+		acc := accs[idx]
+		if acc == nil {
+			return
+		}
+		if acc.name == "" {
+			delete(accs, idx)
+			return
+		}
+		tc := agentAPI.ToolCall{
+			ID:        acc.id,
+			Name:      acc.name,
+			Arguments: parseToolArgsJSON(acc.argsRaw.String()),
+		}
+		resp.ToolCalls = append(resp.ToolCalls, tc)
+		delete(accs, idx)
+	}
+
+	for {
+		select {
+		case ck, ok := <-ch:
+			if !ok {
+				for idx := range accs {
+					flushToolCall(idx)
+				}
+				if lastFinish != "" {
+					resp.FinishReason = lastFinish
+				}
+				return resp, nil
+			}
+
+			if ck.ReasoningContent != "" {
+				resp.ReasoningContent += ck.ReasoningContent
+				if a != nil {
+					a.publishEvent(events.EventReasoningDelta, map[string]interface{}{
+						"content": ck.ReasoningContent,
+						"channel": a.currentOutputChannel,
+					})
+				}
+			}
+			if ck.Content != "" {
+				resp.Content += ck.Content
+				if a != nil {
+					a.publishEvent(events.EventContentDelta, map[string]interface{}{
+						"content": ck.Content,
+						"channel": a.currentOutputChannel,
+					})
+				}
+			}
+
+			// 增量 tool call 分片：OpenAI 风格按 index 拼接 id/name/arguments
+			for i, tc := range ck.ToolCalls {
+				idx := i
+				acc := accs[idx]
+				if acc == nil {
+					acc = &toolCallAcc{}
+					accs[idx] = acc
+				}
+				if tc.ID != "" {
+					acc.id = tc.ID
+				}
+				if tc.Name != "" {
+					acc.name = tc.Name
+				}
+				// arguments 以 JSON 字符串分片到达（OpenAI 标准），拼接后最终解析
+				if tc.RawArguments != "" {
+					acc.argsRaw.WriteString(tc.RawArguments)
+				}
+			}
+
+			if ck.Done && ck.FinishReason != "" {
+				lastFinish = ck.FinishReason
+			}
+			if ck.Usage != nil {
+				resp.TokenUsage = *ck.Usage
+			}
+
+		case <-ctx.Done():
+			for idx := range accs {
+				flushToolCall(idx)
+			}
+			return resp, ctx.Err()
+		}
+	}
+}
+
+// parseToolArgsJSON 将经过完整拼接的 tool call arguments JSON 字符串解析为 map。
+// 空字符串返回空 map。
+func parseToolArgsJSON(s string) map[string]interface{} {
+	if s == "" {
+		return map[string]interface{}{}
+	}
+	var m map[string]interface{}
+	if err := json.Unmarshal([]byte(s), &m); err == nil && m != nil {
+		return m
+	}
+	return map[string]interface{}{}
 }
 
 func convertToolCalls(tcs []agentAPI.ToolCall) []sdk.ToolCall {
