@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"sort"
 	"strings"
@@ -203,11 +204,13 @@ type apiFunction struct {
 }
 
 type StreamChunk struct {
-	Content          string     `json:"content"`
-	ReasoningContent string     `json:"reasoning_content,omitempty"`
-	Done             bool       `json:"done"`
-	ToolCall         *ToolCall  `json:"tool_call,omitempty"`
-	ToolCalls        []ToolCall `json:"tool_calls,omitempty"`
+	Content          string      `json:"content"`
+	ReasoningContent string      `json:"reasoning_content,omitempty"`
+	Done             bool        `json:"done"`
+	FinishReason     string      `json:"finish_reason,omitempty"`
+	ToolCall         *ToolCall   `json:"tool_call,omitempty"`
+	ToolCalls        []ToolCall  `json:"tool_calls,omitempty"`
+	Usage            *TokenUsage `json:"usage,omitempty"`
 }
 
 type Provider interface {
@@ -284,6 +287,10 @@ type LuaAdaptedProvider struct {
 	vm      *luaVM.VM
 	adapter string
 	client  *http.Client
+	// streamClient 专用于 SSE 流式调用：无整体超时（SSE 长连接不被截断），
+	// 仅保留拨号超时。懒初始化，首次 ChatStream 时创建。
+	streamClient *http.Client
+	streamMu     sync.Mutex
 }
 
 func NewLuaAdaptedProvider(cfg BaseConfig, vm *luaVM.VM, name, adapter string) *LuaAdaptedProvider {
@@ -301,7 +308,7 @@ func NewLuaAdaptedProvider(cfg BaseConfig, vm *luaVM.VM, name, adapter string) *
 		// 180s: llmsproxy 的 AUTO 链会串行尝试多个 tier，每个失败 tier 耗
 		// busyWait(2s)+上游超时；120s 曾导致网关侧记录大量 "context canceled"
 		// (客户端先放弃)。放宽到 180s 给链式 failover 留足时间。
-		client:  &http.Client{Timeout: 180 * time.Second},
+		client: &http.Client{Timeout: 180 * time.Second},
 	}
 }
 
@@ -543,8 +550,11 @@ func stringifyContent(v interface{}) string {
 	}
 }
 
-func parseOpenAICompatibleStreamChunk(raw []byte) (StreamChunk, bool) {
-	var resp struct {
+// parseOpenAICompatibleStreamChunkFull 解析标准 OpenAI SSE 块（含 usage 字段）。
+// 兼容多种 token 用量键名（prompt_tokens/prompt、total_tokens/total 等）
+// 与 prompt cache 细节字段。返回 false 表示非内容块（纯 usage 心跳等）。
+func parseOpenAICompatibleStreamChunkFull(data string) (StreamChunk, bool) {
+	var raw struct {
 		Choices []struct {
 			Delta struct {
 				Content          interface{}      `json:"content"`
@@ -553,17 +563,100 @@ func parseOpenAICompatibleStreamChunk(raw []byte) (StreamChunk, bool) {
 			} `json:"delta"`
 			FinishReason *string `json:"finish_reason"`
 		} `json:"choices"`
+		UpstreamUsage struct {
+			PromptTokens        int `json:"prompt_tokens"`
+			CompletionTokens    int `json:"completion_tokens"`
+			TotalTokens         int `json:"total_tokens"`
+			Prompt              int `json:"prompt"`
+			Completion          int `json:"completion"`
+			Total               int `json:"total"`
+			PromptCacheHit      int `json:"prompt_cache_hit_tokens"`
+			PromptCacheMiss     int `json:"prompt_cache_miss_tokens"`
+			PromptTokensDetails *struct {
+				CachedTokens int `json:"cached_tokens"`
+			} `json:"prompt_tokens_details"`
+		} `json:"usage"`
 	}
-	if err := json.Unmarshal(raw, &resp); err != nil || len(resp.Choices) == 0 {
+	if err := json.Unmarshal([]byte(data), &raw); err != nil {
 		return StreamChunk{}, false
 	}
-	choice := resp.Choices[0]
-	return StreamChunk{
+
+	var usage *TokenUsage
+	pu := raw.UpstreamUsage
+	if pu.Total > 0 || pu.TotalTokens > 0 || pu.Prompt > 0 || pu.PromptTokens > 0 {
+		usage = &TokenUsage{
+			Prompt:     pickFirstInt(pu.PromptTokens, pu.Prompt),
+			Completion: pickFirstInt(pu.CompletionTokens, pu.Completion),
+			Total:      pickFirstInt(pu.TotalTokens, pu.Total),
+		}
+	}
+
+	if len(raw.Choices) == 0 {
+		// 纯 usage 心跳块：有 usage 就透传，否则丢弃
+		if usage != nil {
+			return StreamChunk{Usage: usage}, true
+		}
+		return StreamChunk{}, false
+	}
+
+	choice := raw.Choices[0]
+	ck := StreamChunk{
 		Content:          stringifyContent(choice.Delta.Content),
 		ReasoningContent: choice.Delta.ReasoningContent,
 		ToolCalls:        normalizeOpenAIToolCalls(choice.Delta.ToolCalls),
-		Done:             choice.FinishReason != nil,
-	}, true
+		Usage:            usage,
+	}
+	// finish reason 为空字符串不算终止信号（sensenova 每块都发 ""）
+	if choice.FinishReason != nil && *choice.FinishReason != "" {
+		ck.Done = true
+		ck.FinishReason = *choice.FinishReason
+	}
+	return ck, true
+}
+
+// pickFirstInt 返回 a 非零时的 a，否则 b（兼容 *_tokens 与短键名两种 usage 格式）。
+func pickFirstInt(a, b int) int {
+	if a != 0 {
+		return a
+	}
+	return b
+}
+
+// streamHTTPClient 返回专用的流式 HTTP client（懒初始化）。
+// SSE 长连接不能套整体超时（非流式 180s 会在长流中途报断），
+// 只保留拨号/握手超时。
+func (p *LuaAdaptedProvider) streamHTTPClient() *http.Client {
+	p.streamMu.Lock()
+	defer p.streamMu.Unlock()
+	if p.streamClient == nil {
+		p.streamClient = &http.Client{
+			Timeout: 0, // 无整体超时：SSE 流持续时间不可预知
+			Transport: &http.Transport{
+				DialContext: (&net.Dialer{
+					Timeout:   30 * time.Second,
+					KeepAlive: 30 * time.Second,
+				}).DialContext,
+				ForceAttemptHTTP2: true,
+				MaxIdleConns:      10,
+				IdleConnTimeout:   90 * time.Second,
+			},
+		}
+	}
+	return p.streamClient
+}
+
+// errorOnlyChunk 判断一个流块是否只携带上游错误信号：done 块带非标准
+// finish_reason 且无任何内容/工具调用/推理文本。标准 OpenAI finish reason
+// 不算错误，正常的空补全（finish_reason:"stop" 无输出）仍会送达调用方。
+func errorOnlyChunk(ck StreamChunk) bool {
+	if !ck.Done || ck.FinishReason == "" {
+		return false
+	}
+	switch ck.FinishReason {
+	case "stop", "length", "tool_calls", "function_call", "content_filter":
+		return false
+	}
+	return ck.Content == "" && len(ck.ToolCalls) == 0 && ck.ReasoningContent == ""
 }
 
 func (p *LuaAdaptedProvider) ChatStream(ctx context.Context, req *CompletionRequest) (<-chan StreamChunk, error) {
@@ -589,15 +682,22 @@ func (p *LuaAdaptedProvider) ChatStream(ctx context.Context, req *CompletionRequ
 		return nil, fmt.Errorf("create stream request: %w", err)
 	}
 	httpReq.Header.Set("Content-Type", "application/json")
-	httpReq.Header.Set("Authorization", "Bearer "+p.cfg.APIKey)
+	// 与 Chat() 一致走 applyAdapterHeaders：支持 build_headers 动态签名钩子
+	p.applyAdapterHeaders(httpReq, url, transformedBody)
 
-	for k, v := range p.vm.GetAdapterHeaders(p.adapter) {
-		httpReq.Header.Set(k, v)
-	}
-
-	resp, err := p.client.Do(httpReq)
+	resp, err := p.streamHTTPClient().Do(httpReq)
 	if err != nil {
 		return nil, fmt.Errorf("stream api: %w", err)
+	}
+
+	if resp.StatusCode != 200 {
+		raw, _ := io.ReadAll(resp.Body)
+		resp.Body.Close()
+		// transform_error 钩子优先（适配器层协议知识）；未定义时回退标准解析
+		if reason, ok, _ := p.vm.TransformError(p.adapter, resp.StatusCode, string(raw)); ok && strings.TrimSpace(reason) != "" {
+			return nil, fmt.Errorf("api error %d: %s", resp.StatusCode, truncateOneLineStr(reason, 200))
+		}
+		return nil, fmt.Errorf("api error %d: %s", resp.StatusCode, truncateOneLineStr(string(raw), 300))
 	}
 
 	ch := make(chan StreamChunk, 64)
@@ -605,73 +705,106 @@ func (p *LuaAdaptedProvider) ChatStream(ctx context.Context, req *CompletionRequ
 		defer resp.Body.Close()
 		defer close(ch)
 
-		scanner := NewSSEScanner(resp.Body)
+		scanner := bufio.NewScanner(resp.Body)
+		scanner.Buffer(make([]byte, 0, 64*1024), 1024*1024)
+		var doneSent bool // 适配器已发过带真实 finish_reason 的终止块则不重复发 [DONE]
+
+		emit := func(ck StreamChunk) bool {
+			if ck.Done {
+				doneSent = true
+			}
+			select {
+			case ch <- ck:
+				return true
+			case <-ctx.Done():
+				return false
+			}
+		}
+
 		for scanner.Scan() {
-			line := scanner.Text()
-			if line == "" {
+			line := strings.TrimSpace(scanner.Text())
+			if line == "" || !strings.HasPrefix(line, "data:") {
+				continue
+			}
+			data := strings.TrimSpace(strings.TrimPrefix(line, "data:"))
+			if data == "" {
+				continue
+			}
+			if data == "[DONE]" {
+				if !doneSent {
+					if !emit(StreamChunk{Done: true}) {
+						return
+					}
+				}
 				continue
 			}
 
-			// 尝试用 Lua 变换流块（如果 adapter 定义了 transform_stream_chunk）
-			unified, err := p.vm.CallTransformStreamChunk(p.adapter, line)
-			if err != nil || unified == line {
-				// 无流变换函数或变换透传，尝试标准 OpenAI SSE 解析
-				chunk, ok := parseOpenAICompatibleStreamChunk([]byte(line))
+			// Lua transform_stream_chunk 优先；透传/无钩子时用标准解析
+			unified, terr := p.vm.CallTransformStreamChunk(p.adapter, data)
+			var ck StreamChunk
+			if terr == nil && unified != "" && unified != data {
+				if json.Unmarshal([]byte(unified), &ck) != nil {
+					continue
+				}
+			} else {
+				parsed, ok := parseOpenAICompatibleStreamChunkFull(data)
 				if !ok {
 					continue
 				}
-				select {
-				case ch <- chunk:
-				case <-ctx.Done():
-					return
-				}
-				continue
+				ck = parsed
 			}
+			if !emit(ck) {
+				return
+			}
+		}
 
-			// Lua 返回了变换后的统一格式
-			var chunk StreamChunk
-			if err := json.Unmarshal([]byte(unified), &chunk); err == nil {
-				select {
-				case ch <- chunk:
-				case <-ctx.Done():
-					return
-				}
+		// 干净 EOF 但无 done 块：补一个，保证消费方能收到终止信号
+		if !doneSent && ctx.Err() == nil {
+			select {
+			case ch <- StreamChunk{Done: true}:
+			default:
 			}
 		}
 	}()
 
-	return ch, nil
-}
-
-// SSEScanner 读取 SSE 格式的流（data: ...）
-type SSEScanner struct {
-	reader  *bufio.Reader
-	pending string
-}
-
-func NewSSEScanner(r io.Reader) *SSEScanner {
-	return &SSEScanner{reader: bufio.NewReader(r)}
-}
-
-func (s *SSEScanner) Scan() bool {
-	s.pending = ""
-	for {
-		line, err := s.reader.ReadString('\n')
-		if err != nil {
-			return false
+	// 扣住首块校验流是否真的携带内容：部分上游返回 HTTP 200 但流里只有
+	// 错误 finish_reason 的退化块（如 zen 免费池 network_error）。在这里
+	// 失败该候选，让上层 fallback 到下一源，而不是给客户端吐空响应。
+	select {
+	case first, ok := <-ch:
+		if !ok {
+			return nil, fmt.Errorf("provider %s: empty stream", p.Name())
 		}
-		line = strings.TrimRight(line, "\r\n")
-		if strings.HasPrefix(line, "data: ") {
-			s.pending = strings.TrimPrefix(line, "data: ")
-			if s.pending == "[DONE]" {
-				return false
+		if errorOnlyChunk(first) {
+			go func() {
+				for range ch { //nolint:revive
+				} // 排空避免生产 goroutine 阻塞泄漏
+			}()
+			return nil, fmt.Errorf("provider %s: upstream returned %q stream", p.Name(), first.FinishReason)
+		}
+		out := make(chan StreamChunk, 64)
+		go func() {
+			defer close(out)
+			out <- first
+			for ck := range ch {
+				out <- ck
 			}
-			return true
-		}
+		}()
+		return out, nil
+	case <-ctx.Done():
+		return nil, ctx.Err()
 	}
 }
 
-func (s *SSEScanner) Text() string { return s.pending }
+// truncateOneLineStr 截断为单行且限制最大长度（用于错误消息防 HTML dump 泄漏）。
+func truncateOneLineStr(s string, max int) string {
+	s = strings.ReplaceAll(s, "\n", " ")
+	s = strings.TrimSpace(s)
+	if len(s) > max {
+		s = s[:max] + "..."
+	}
+	return s
+}
 
 type providerStatus struct {
 	failCount        int
