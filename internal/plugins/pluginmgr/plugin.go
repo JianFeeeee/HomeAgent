@@ -14,6 +14,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -137,13 +138,17 @@ func (p *Plugin) Stop() error {
 func (p *Plugin) registerTools(s *sdk.PluginSDK) {
 	s.RegisterTool("plugin_install", sdk.ToolDef{
 		Name:        "plugin_install",
-		Description: "从 URL 安装 HomeAgent 插件包（.hmap 文件）。安装后需调用 plgreload 或重启生效。",
+		Description: "从 URL 安装 HomeAgent 插件包（.hmap 文件）。插件已存在时传 overwrite=true 原地更新（升级/降级/重装，保留配置表，无需卸载重装）。更新后需调用 plgreload 或重启生效。",
 		Parameters: map[string]interface{}{
 			"type": "object",
 			"properties": map[string]interface{}{
 				"url": map[string]interface{}{
 					"type":        "string",
 					"description": "插件包的下载 URL",
+				},
+				"overwrite": map[string]interface{}{
+					"type":        "boolean",
+					"description": "已存在时原地更新（保留配置）。默认 false",
 				},
 			},
 			"required": []string{"url"},
@@ -153,7 +158,8 @@ func (p *Plugin) registerTools(s *sdk.PluginSDK) {
 		if url == "" {
 			return map[string]interface{}{"error": "url is required"}, nil
 		}
-		return p.installFromURL(url)
+		overwrite, _ := args["overwrite"].(bool)
+		return p.installFromURL(url, overwrite)
 	})
 
 	s.RegisterTool("plugin_list", sdk.ToolDef{
@@ -247,8 +253,9 @@ func (p *Plugin) handlePlugins(w http.ResponseWriter, r *http.Request) {
 		ct := r.Header.Get("Content-Type")
 		if strings.HasPrefix(ct, "application/json") {
 			var body struct {
-				URL  string `json:"url"`
-				Path string `json:"path"`
+				URL       string `json:"url"`
+				Path      string `json:"path"`
+				Overwrite bool   `json:"overwrite"` // 已存在时原地更新（保留配置）
 			}
 			if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 				http.Error(w, "invalid json", http.StatusBadRequest)
@@ -256,14 +263,14 @@ func (p *Plugin) handlePlugins(w http.ResponseWriter, r *http.Request) {
 			}
 			switch {
 			case body.URL != "":
-				result, err := p.installFromURL(body.URL)
+				result, err := p.installFromURL(body.URL, body.Overwrite)
 				if err != nil {
 					writeJSON(w, http.StatusInternalServerError, map[string]interface{}{"error": err.Error()})
 					return
 				}
 				writeJSON(w, http.StatusOK, result)
 			case body.Path != "":
-				result, err := p.installFromPath(body.Path)
+				result, err := p.installFromPath(body.Path, body.Overwrite)
 				if err != nil {
 					writeJSON(w, http.StatusInternalServerError, map[string]interface{}{"error": err.Error()})
 					return
@@ -279,7 +286,7 @@ func (p *Plugin) handlePlugins(w http.ResponseWriter, r *http.Request) {
 				http.Error(w, "read body: "+err.Error(), http.StatusBadRequest)
 				return
 			}
-			result, err := p.installFromData(data)
+			result, err := p.installFromData(data, false)
 			if err != nil {
 				writeJSON(w, http.StatusInternalServerError, map[string]interface{}{"error": err.Error()})
 				return
@@ -333,15 +340,15 @@ func (p *Plugin) handlePluginByID(w http.ResponseWriter, r *http.Request) {
 
 // ======== Core Logic ========
 
-func (p *Plugin) installFromPath(path string) (interface{}, error) {
+func (p *Plugin) installFromPath(path string, overwrite bool) (interface{}, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {
 		return nil, fmt.Errorf("read file: %w", err)
 	}
-	return p.installFromData(data)
+	return p.installFromData(data, overwrite)
 }
 
-func (p *Plugin) installFromURL(rawURL string) (interface{}, error) {
+func (p *Plugin) installFromURL(rawURL string, overwrite bool) (interface{}, error) {
 	log.Printf("[pluginmgr] downloading: %s", rawURL)
 
 	parsed, err := url.Parse(rawURL)
@@ -367,7 +374,7 @@ func (p *Plugin) installFromURL(rawURL string) (interface{}, error) {
 		return nil, fmt.Errorf("read response: %w", err)
 	}
 
-	result, err := p.installFromData(data)
+	result, err := p.installFromData(data, overwrite)
 	if err != nil {
 		return nil, err
 	}
@@ -379,7 +386,10 @@ func (p *Plugin) installFromURL(rawURL string) (interface{}, error) {
 	return result, nil
 }
 
-func (p *Plugin) installFromData(data []byte) (interface{}, error) {
+// installFromData 安装（或 overwrite=true 时原地更新）插件包。
+// 更新语义：StopAndUnload 停止旧实例但保留配置表，备份旧目录→解压新包→失败回滚；
+// 更新后配置原样生效，无需用户手动卸载重装。
+func (p *Plugin) installFromData(data []byte, overwrite bool) (interface{}, error) {
 	pkg, err := validatePackage(data)
 	if err != nil {
 		return map[string]interface{}{
@@ -394,12 +404,78 @@ func (p *Plugin) installFromData(data []byte) (interface{}, error) {
 	}
 
 	target := filepath.Join(dir, pkg.Name)
-	if _, err := os.Stat(target); err == nil {
+	var oldVersion string
+	existing := false
+	if m, err := plugin.ReadManifest(target); err == nil && m != nil {
+		existing = true
+		oldVersion = m.Version
+	} else if _, statErr := os.Stat(target); statErr == nil {
+		existing = true // 目录存在但 manifest 不可读：视为已安装、版本未知
+	}
+
+	if existing && !overwrite {
 		return map[string]interface{}{
-			"error":   "plugin already exists",
-			"name":    pkg.Name,
-			"version": pkg.Version,
-			"action":  "remove_first",
+			"error":    "plugin already exists",
+			"name":     pkg.Name,
+			"version":  pkg.Version,
+			"current":  oldVersion,
+			"action":   "remove_first",
+			"hint":     `传 "overwrite": true 可原地更新（保留配置）`,
+		}, nil
+	}
+
+	if existing && overwrite {
+		// 原地更新：停旧实例（保留配置表），备份旧目录，解压新包，失败回滚。
+		if p.sdk != nil && p.sdk.PluginMgr() != nil {
+			if err := p.sdk.PluginMgr().StopAndUnload(pkg.Name); err != nil {
+				log.Printf("[pluginmgr] StopAndUnload %s: %v", pkg.Name, err)
+			}
+		}
+		backup := target + ".bak"
+		os.RemoveAll(backup)
+		if err := os.Rename(target, backup); err != nil {
+			return map[string]interface{}{
+				"error": "backup old plugin dir failed",
+				"details": err.Error(),
+			}, nil
+		}
+		if err := extractPackage(data, dir); err != nil {
+			// 回滚：恢复旧目录并重新加载旧版
+			os.RemoveAll(target)
+			if rbErr := os.Rename(backup, target); rbErr != nil {
+				return map[string]interface{}{
+					"error":   "extract failed AND rollback failed",
+					"details": err.Error(),
+					"rollback": rbErr.Error(),
+				}, nil
+			}
+			if p.sdk != nil && p.sdk.PluginMgr() != nil {
+				_ = p.sdk.PluginMgr().ReloadOne(pkg.Name)
+			}
+			return map[string]interface{}{
+				"error":   "extract failed (rolled back to " + oldVersion + ")",
+				"details": err.Error(),
+			}, nil
+		}
+		os.RemoveAll(backup)
+
+		checksum := fmt.Sprintf("%x", sha256.Sum256(data))
+		action := "upgraded"
+		if cmpVersion(pkg.Version, oldVersion) < 0 {
+			action = "downgraded"
+		} else if cmpVersion(pkg.Version, oldVersion) == 0 {
+			action = "reinstalled"
+		}
+		return map[string]interface{}{
+			"status":          "installed",
+			"name":            pkg.Name,
+			"version":         pkg.Version,
+			"previous_version": oldVersion,
+			"entry":           pkg.Entry,
+			"checksum":        checksum,
+			"action":          action,
+			"reload_required": true,
+			"config_kept":     true,
 		}, nil
 	}
 
@@ -420,6 +496,36 @@ func (p *Plugin) installFromData(data []byte) (interface{}, error) {
 		"checksum": checksum,
 		"action":   "reload_required",
 	}, nil
+}
+
+// cmpVersion 比较点分版本号：a<b 返回 -1，a>b 返回 1，相等返回 0。
+// 非数字段按字符串比较；长度不齐缺段视作 0。
+func cmpVersion(a, b string) int {
+	parse := func(s string) []int {
+		parts := strings.SplitN(strings.TrimPrefix(strings.TrimSpace(s), "v"), ".", 4)
+		out := make([]int, 0, len(parts))
+		for _, p := range parts {
+			n, err := strconv.Atoi(strings.TrimSpace(p))
+			if err != nil {
+				n = 0
+			}
+			out = append(out, n)
+		}
+		for len(out) < 3 {
+			out = append(out, 0)
+		}
+		return out
+	}
+	a1, b1 := parse(a), parse(b)
+	for i := range a1 {
+		if a1[i] < b1[i] {
+			return -1
+		}
+		if a1[i] > b1[i] {
+			return 1
+		}
+	}
+	return 0
 }
 
 func (p *Plugin) listPlugins() (interface{}, error) {

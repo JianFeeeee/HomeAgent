@@ -711,8 +711,14 @@ func (p *echoProvider) Chat(ctx context.Context, req *agentAPI.CompletionRequest
 	return &agentAPI.CompletionResponse{Content: content, FinishReason: "stop"}, nil
 }
 func (p *echoProvider) ChatStream(ctx context.Context, req *agentAPI.CompletionRequest) (<-chan agentAPI.StreamChunk, error) {
+	// 流契约：chunk 发送完毕后必须 close(channel) 标识流结束（与
+	// LuaAdaptedProvider.ChatStream 的 defer close(ch) 一致）；
+	// accumulateStream 以 channel 关闭为终止条件，Done 只是 finish_reason 载体。
+	// 内容与 Chat() 保持一致，保证端到端断言在流式/非流式两条路径下等价。
 	ch := make(chan agentAPI.StreamChunk, 1)
-	ch <- agentAPI.StreamChunk{Content: "mock", Done: true}
+	content := "echo: " + lastUserContent(req.Messages)
+	ch <- agentAPI.StreamChunk{Content: content, Done: true, FinishReason: "stop"}
+	close(ch)
 	return ch, nil
 }
 

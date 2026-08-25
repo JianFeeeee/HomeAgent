@@ -127,6 +127,11 @@ const (
 	EventReasoning     EventType = "reasoning"
 	EventStage         EventType = "stage"
 	EventSystem        EventType = "system"
+
+	// 流式增量事件（token 级）：核心 process() 流式化后每收到一个增量块发布。
+	// 客户端可选订做真逐 token 渲染；聚合事件仍照常发布，旧订阅者不受影响。
+	EventReasoningDelta EventType = "reasoning_delta"
+	EventContentDelta   EventType = "content_delta"
 )
 
 // Event represents a system event published by the kernel.
