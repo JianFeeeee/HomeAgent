@@ -1380,7 +1380,8 @@ function executeHomeagentCmd(capability, reqId) {
     .split(/[ >\n]/)[0];
   switch (name) {
     case "camerasue": {
-      // 摄像头：camerasue=抓拍单张；camerasue <秒>=录制 N 秒视频，返回 base64
+      // 摄像头：camerasue=抓拍单张；camerasue <秒>=录制 N 秒视频
+      // 平台分支：Windows=dshow(设备名自动探测)，macOS=avfoundation，Linux=v4l2
       const argStr = String(capability || "")
         .replace(/^camerasue/, "")
         .trim();
@@ -1390,24 +1391,54 @@ function executeHomeagentCmd(capability, reqId) {
       const os = require("os");
       const path = require("path");
       const fs = require("fs");
+      // 探测平台可用的 ffmpeg 输入参数（缓存结果避免重复探测）
+      let camInput = null;
+      function resolveCameraInput(cb) {
+        if (camInput) return cb(camInput);
+        const plat = process.platform;
+        if (plat === "win32") {
+          // dshow：先枚举设备名取第一个视频设备
+          cp.execFile(
+            "ffmpeg",
+            ["-hide_banner", "-list_devices", "true", "-f", "dshow", "-i", "video= dummy"],
+            { timeout: 8000 },
+            (err, _so, se) => {
+              const out = String(se || "");
+              const m = out.match(/"([^"]+)"\s*\((?:video|默认)|"([^"]+)"[\s\S]{0,200}?\(video/)
+                || out.match(/"([^"]+)"[^\n]*\(video/i);
+              const name = m ? (m[1] || m[2]) : null;
+              if (name) {
+                camInput = { pre: ["-f", "dshow", "-i", "video=" + name] };
+              } else {
+                camInput = { pre: ["-f", "dshow", "-i", "video=USB Camera"] }; // 常见默认名兑底
+              }
+              cb(camInput);
+            },
+          );
+          return;
+        }
+        if (plat === "darwin") {
+          camInput = { pre: ["-f", "avfoundation", "-i", "0:0"] }; // 默认摄像头
+          return cb(camInput);
+        }
+        camInput = { pre: ["-f", "v4l2", "-i", "/dev/video0"] }; // Linux
+        return cb(camInput);
+      }
+      resolveCameraInput((cam) => {
       if (isVideo) {
         // 录像：ffmpeg 录 N 秒 mp4 到临时文件
         const outFile = path.join(os.tmpdir(), "ha_cam_" + Date.now() + ".mp4");
         const args = [
-          "-f",
-          "v4l2",
-          "-i",
-          "/dev/video0",
+          ...cam.pre,
           "-t",
           String(durMatch),
           "-pix_fmt",
           "yuv420p",
-          "-c:v",
-          "libx264",
-          "-f",
-          "mp4",
-          outFile,
         ];
+        if (process.platform !== "win32") {
+          args.push("-c:v", "libx264"); // Windows dshow→mp4 由扩展名驱动原生编码器
+        }
+        args.push("-f", "mp4", outFile);
         cp.execFile(
           "ffmpeg",
           args,
@@ -1446,19 +1477,16 @@ function executeHomeagentCmd(capability, reqId) {
         return;
       }
       // 抓拍单张 jpeg
-      const args = [
-        "-f",
-        "v4l2",
-        "-i",
-        "/dev/video0",
-        "-frames:v",
-        "1",
-        "-f",
-        "image2pipe",
-        "-vcodec",
-        "mjpeg",
-        "pipe:1",
-      ];
+        const args = [
+          ...cam.pre,
+          "-frames:v",
+          "1",
+          "-f",
+          "image2pipe",
+          "-vcodec",
+          "mjpeg",
+          "pipe:1",
+        ];
       cp.execFile(
         "ffmpeg",
         args,
@@ -1483,6 +1511,7 @@ function executeHomeagentCmd(capability, reqId) {
           );
         },
       );
+      }); // resolveCameraInput 回调闭合
       return;
     }
     case "screensue": {

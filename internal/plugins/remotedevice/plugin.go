@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"log"
 	"net/http"
+	"path/filepath"
 	"strings"
 	"sync"
 	"time"
@@ -102,6 +103,15 @@ func (p *Plugin) Start(s *sdk.PluginSDK) error {
 	p.dev.SetSeeHandler(p.describeScreen)
 	if err := s.RegisterChannel("devicectl", p.dev); err != nil {
 		log.Printf("[remotedevice] register devicectl channel: %v", err)
+	}
+
+	// ---- 媒体落盘目录：<data>/device_media ----------------
+	// 设备回传的录像/照片等二进制聚合后写入此目录，cmd_result 返回 file 路径，
+	// 避免 base64 内联撑爆 LLM 上下文。目录由 logManager/运维定期清理。
+	if dataDir, err := s.Settings().GetCore("daemon.data_dir"); err == nil {
+		if dd, ok := dataDir.(string); ok && dd != "" {
+			p.registry.SetMediaDir(filepath.Join(dd, "device_media"))
+		}
 	}
 
 	// ---- 设备主动上报事件 → agent 注入 ----------------

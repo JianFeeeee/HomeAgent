@@ -9,6 +9,8 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
@@ -204,6 +206,73 @@ func TestWSBinaryChunkUpload(t *testing.T) {
 	}
 	if string(decoded) != string(videoData) {
 		t.Fatal("decoded data mismatch")
+	}
+}
+
+// ===== 媒体落盘：SetMediaDir 后 cmd_result 返回 file 路径而非 base64 内联 =====
+func TestWSBinaryMediaToFile(t *testing.T) {
+	reg := NewRegistry()
+	token := "test-token-123"
+	reg.SetAcceptToken(func(provided string) bool { return provided == token })
+	mediaDir := t.TempDir()
+	reg.SetMediaDir(mediaDir)
+
+	srv := httptest.NewServer(http.HandlerFunc(reg.ServeWS))
+	defer srv.Close()
+
+	cli := dialTestWS(t, srv.URL, token)
+	defer cli.close()
+
+	cli.sendText([]byte(`{"op":"hello","device":{"device_id":"gui-media","name":"媒体机","kind":"computer","caps":["cmd"]}}`))
+	if _, _, err := cli.readMsg(); err != nil { // hello_ack
+		t.Fatalf("read hello_ack: %v", err)
+	}
+
+	videoData := make([]byte, 30000)
+	for i := range videoData {
+		videoData[i] = byte(i % 253)
+	}
+	go func() {
+		time.Sleep(50 * time.Millisecond)
+		cli.sendText(mustJSON(map[string]interface{}{
+			"op": "cmd_data_start", "req_id": "req-file-1",
+			"kind": "camera_video", "mime": "video/mp4",
+			"total": len(videoData),
+		}))
+		const chunk = 8192
+		for off := 0; off < len(videoData); off += chunk {
+			end := off + chunk
+			if end > len(videoData) {
+				end = len(videoData)
+			}
+			cli.sendBinary(videoData[off:end])
+		}
+		cli.sendText(mustJSON(map[string]interface{}{
+			"op": "cmd_data_end", "req_id": "req-file-1", "status": "ok",
+		}))
+	}()
+
+	res, err := reg.AwaitResult("req-file-1", 5*time.Second)
+	if err != nil {
+		t.Fatalf("await result: %v", err)
+	}
+	// 落盘模式：file 字段存在且内容一致；不应再有 data_base64
+	fp, ok := res["file"].(string)
+	if !ok || fp == "" {
+		t.Fatalf("expected file path in result, got %v", res)
+	}
+	if _, hasB64 := res["data_base64"]; hasB64 {
+		t.Fatal("data_base64 should be absent in file mode")
+	}
+	if want := filepath.Join(mediaDir, "req-file-1.mp4"); fp != want {
+		t.Fatalf("file path = %s, want %s", fp, want)
+	}
+	got, err := os.ReadFile(fp)
+	if err != nil {
+		t.Fatalf("read media file: %v", err)
+	}
+	if string(got) != string(videoData) {
+		t.Fatal("media file content mismatch")
 	}
 }
 

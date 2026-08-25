@@ -11,6 +11,8 @@ import (
 	"log"
 	"net"
 	"net/http"
+	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"time"
@@ -49,6 +51,7 @@ type Registry struct {
 	acceptFn   func(token string) bool
 	cmdPending map[string]chan map[string]interface{} // reqID -> 结果 channel
 	results    map[string]resultEntry                 // reqID -> 已留档结果
+	mediaDir   string                                 // 设备回传媒体落盘目录；空则退化为 base64 内联
 }
 
 // resultEntry 保存一次 cmdrun 的结果（供 device_ctl_cmdresult 查询）。
@@ -120,6 +123,43 @@ func deviceSupportsTool(caps []string, tool string) bool {
 	return !hasKnown // 未声明任何已知能力 → 全能力兼容
 }
 
+// SetMediaDir 设置设备回传媒体的落盘目录。
+// 非空时 cmd_data_end 聚合完成后写入该目录，cmd_result 返回 file 路径
+// （大体积 base64 内联会撑爆 LLM 上下文与工具结果管道）；空则保持旧的内联行为。
+func (r *Registry) SetMediaDir(dir string) {
+	r.mu.Lock()
+	r.mediaDir = dir
+	r.mu.Unlock()
+}
+
+// mediaExt 按 mime/kind 推断扩展名。
+func mediaExt(mime, kind string) string {
+	m := strings.ToLower(mime)
+	switch {
+	case strings.Contains(m, "mp4"):
+		return ".mp4"
+	case strings.Contains(m, "webm"):
+		return ".webm"
+	case strings.Contains(m, "jpeg"), strings.Contains(m, "jpg"):
+		return ".jpg"
+	case strings.Contains(m, "png"):
+		return ".png"
+	case strings.Contains(m, "wav"):
+		return ".wav"
+	case strings.Contains(m, "mpeg"), strings.Contains(m, "mp3"):
+		return ".mp3"
+	}
+	k := strings.ToLower(kind)
+	if strings.Contains(k, "video") {
+		return ".mp4"
+	}
+	if strings.Contains(k, "image") || strings.Contains(k, "camera_photo") {
+		return ".jpg"
+	}
+	return ".bin"
+}
+
+// NewRegistry 返回初始化后的设备注册表。
 func NewRegistry() *Registry {
 	return &Registry{
 		devices:    make(map[string]*DeviceMeta),
@@ -743,8 +783,28 @@ func (r *Registry) handleWS(conn net.Conn, rw *bufio.ReadWriter) {
 				"mime":     acc.mime,
 				"size":     len(data),
 				"expected": acc.total,
-				// base64 编码完整二进制（录像 mp4 等），供 agent/上层取回后解码使用
-				"data_base64": base64.StdEncoding.EncodeToString(data),
+			}
+			// 媒体落盘模式：写入 <mediaDir>/<reqID>.<ext>，cmd_result 返回 file 路径。
+			// 大体积 base64 内联会撑爆 LLM 上下文（一段 10s 录像即数 MB），
+			// agent 应拿路径后用 files/describe_image/ocr 等工具消费。
+			r.mu.RLock()
+			mediaDir := r.mediaDir
+			r.mu.RUnlock()
+			if mediaDir != "" {
+				if err := os.MkdirAll(mediaDir, 0755); err == nil {
+					fp := filepath.Join(mediaDir, reqID+mediaExt(acc.mime, acc.kind))
+					if werr := os.WriteFile(fp, data, 0644); werr == nil {
+						res["file"] = fp
+					} else {
+						log.Printf("[remotedevice] media write %s: %v", fp, werr)
+					}
+				} else {
+					log.Printf("[remotedevice] media dir %s: %v", mediaDir, err)
+				}
+			}
+			// 未配置落盘目录时保持旧行为：base64 内联返回（小体积数据仍可用）
+			if _, hasFile := res["file"]; !hasFile {
+				res["data_base64"] = base64.StdEncoding.EncodeToString(data)
 			}
 			r.SaveResult(reqID, res)
 			r.deliverResult(reqID, res)
