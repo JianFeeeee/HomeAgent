@@ -724,9 +724,41 @@ func (r *Registry) DisablePlugin(name, by string) error {
 
 func (r *Registry) EnablePlugin(name string) error { return r.Enable(name) }
 
+// StopAndUnload 停止并从注册表移除插件，但保留其配置表（config_<name>）。
+// 供插件更新/升级流程使用：换 so/文件不动配置，重装后配置原样生效。
+// 不执行 onRemove 回调（那是删除专用语义）。目录由调用方管理。
+func (r *Registry) StopAndUnload(name string) error {
+	r.mu.Lock()
+	var unloaded sdk.Plugin
+	p, ok := r.plugins[name]
+	if ok {
+		r.runStopHandlers(name)
+		if err := p.Stop(); err != nil {
+			log.Printf("[plugin] stop %s for unload: %v", name, err)
+		}
+		delete(r.plugins, name)
+		delete(r.sdkRefs, name)
+		for i, inst := range r.instances {
+			if inst.Name() == name {
+				r.instances = append(r.instances[:i], r.instances[i+1:]...)
+				break
+			}
+		}
+		unloaded = p
+	}
+	r.mu.Unlock()
+
+	if r.toolCleaner != nil {
+		r.toolCleaner.UnregisterPluginTools(name)
+	}
+	r.closeDynamic(unloaded)
+	log.Printf("[plugin] unloaded (config kept): %s", name)
+	return nil
+}
+
 // RemovePlugin 卸载插件：先停止（stop handlers + Stop），再执行插件注册的 onRemove
 // 回调（删除专用，重载不触发），最后从注册表移除并清理禁用/工具注册/配置。
-// 插件目录的物理删除由调用方（pluginmgr）负责。
+// 插件目录的物理删除由调用方（pluginmgr）负责。更新场景请用 StopAndUnload。
 func (r *Registry) RemovePlugin(name string) error {
 	r.mu.Lock()
 	var removed sdk.Plugin
