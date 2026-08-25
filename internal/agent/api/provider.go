@@ -186,10 +186,11 @@ type TokenUsage struct {
 }
 
 type ToolCall struct {
-	ID        string                 `json:"id"`
-	Type      string                 `json:"type"`
-	Name      string                 `json:"name"`
-	Arguments map[string]interface{} `json:"arguments"`
+	ID           string                 `json:"id"`
+	Type         string                 `json:"type"`
+	Name         string                 `json:"name"`
+	Arguments    map[string]interface{} `json:"arguments"`
+	RawArguments string                 `json:"raw_arguments,omitempty"` // 流式分片原始 JSON 字符串
 }
 
 type apiToolCall struct {
@@ -490,10 +491,52 @@ func normalizeOpenAIToolCalls(raw []openAIToolCall) []ToolCall {
 			typ = "function"
 		}
 		out = append(out, ToolCall{
-			ID:        tc.ID,
-			Type:      typ,
-			Name:      name,
-			Arguments: parseToolArguments(argsRaw),
+			ID:           tc.ID,
+			Type:         typ,
+			Name:         name,
+			Arguments:    parseToolArguments(argsRaw),
+			RawArguments: rawArgsString(argsRaw),
+		})
+	}
+	return out
+}
+
+// rawArgsString 将 arguments 字段转为字符串形式（用于流式分片拼接）。
+func rawArgsString(v interface{}) string {
+	switch x := v.(type) {
+	case nil:
+		return ""
+	case string:
+		return x
+	default:
+		b, _ := json.Marshal(x)
+		return string(b)
+	}
+}
+
+// normalizeStreamToolCalls 流式专用：保留无 name 的分片（后续 arguments
+// 分片 name 为空，但携带 RawArguments 需要拼接），由调用方按 index 累积。
+func normalizeStreamToolCalls(raw []openAIToolCall) []ToolCall {
+	if len(raw) == 0 {
+		return nil
+	}
+	out := make([]ToolCall, 0, len(raw))
+	for _, tc := range raw {
+		name := tc.Function.Name
+		argsRaw := tc.Function.Arguments
+		if name == "" {
+			name = tc.Name
+			argsRaw = tc.Arguments
+		}
+		typ := tc.Type
+		if typ == "" && (tc.ID != "" || name != "" || argsRaw != nil) {
+			typ = "function"
+		}
+		out = append(out, ToolCall{
+			ID:           tc.ID,
+			Type:         typ,
+			Name:         name,
+			RawArguments: rawArgsString(argsRaw),
 		})
 	}
 	return out
@@ -603,7 +646,7 @@ func parseOpenAICompatibleStreamChunkFull(data string) (StreamChunk, bool) {
 	ck := StreamChunk{
 		Content:          stringifyContent(choice.Delta.Content),
 		ReasoningContent: choice.Delta.ReasoningContent,
-		ToolCalls:        normalizeOpenAIToolCalls(choice.Delta.ToolCalls),
+		ToolCalls:        normalizeStreamToolCalls(choice.Delta.ToolCalls),
 		Usage:            usage,
 	}
 	// finish reason 为空字符串不算终止信号（sensenova 每块都发 ""）
