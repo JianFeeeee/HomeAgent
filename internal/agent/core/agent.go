@@ -121,6 +121,17 @@ type Agent struct {
 
 	// 词嵌入模型，用于实体语义相似度计算
 	embedder *memory.StaticEmbedder
+
+	// 技能索引提供者：由 skillmgr 插件实现，向 system prompt 注入轻量技能索引
+	skillIndex SkillIndexProvider
+}
+
+// SkillIndexProvider 提供已加载技能的精炼索引，供 buildSystemPrompt 注入。
+// 实现方（skillmgr）需线程安全并快速返回（每次 LLM 调用都会调用）。
+type SkillIndexProvider interface {
+	// SkillIndex 返回多行文本的技能索引，每行形如 "name vX.Y - description"；
+	// 无技能时返回空串。
+	SkillIndex() string
 }
 
 type AgentConfig struct {
@@ -151,6 +162,8 @@ type AgentConfig struct {
 	StageHost          *StageHost
 	EventBus           *events.Bus
 	ThinkingEnabled    bool
+
+	SkillIndexProvider SkillIndexProvider
 
 	InputProcessing types.InputProcessingConfig // 非文本输入处理配置
 }
@@ -220,6 +233,7 @@ func New(cfg AgentConfig) *Agent {
 		mergeInterval:   cfg.MergeInterval,
 		maxContextSize:  cfg.MaxContextSize,
 		stageHost:       cfg.StageHost,
+		skillIndex:      cfg.SkillIndexProvider,
 		eventBus:        cfg.EventBus,
 		selfInputCh:     make(chan selfInputMsg, 64),
 		childResults:    make(map[string]string),
@@ -232,6 +246,9 @@ func New(cfg AgentConfig) *Agent {
 		lastInput:       make(map[string]time.Time),
 	}
 }
+
+// SetSkillIndexProvider 注入技能索引提供者（skillmgr 插件加载后由 main 接线）。
+func (a *Agent) SetSkillIndexProvider(p SkillIndexProvider) { a.skillIndex = p }
 
 func (a *Agent) Start() {
 	go a.eventLoop()

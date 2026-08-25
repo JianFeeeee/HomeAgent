@@ -500,6 +500,14 @@ func main() {
 	}
 	log.Printf("[homed] stage host ready with %d registered tools", stageHost.ToolCount())
 
+	// 技能索引接线：skillmgr 插件实现 SkillIndexProvider 时注入 agent（方案B prompt 注入）
+	if sp := pluginReg.Get("skillmgr"); sp != nil {
+		if prov, ok := sp.(agentCore.SkillIndexProvider); ok {
+			agent.SetSkillIndexProvider(prov)
+			log.Printf("[homed] skill index wired from skillmgr plugin")
+		}
+	}
+
 	// 日志管理：层级压缩 + 保留策略
 	logManager := logpkg.NewManager(logDir, cfgReg)
 	go logManager.Start(ctx)
