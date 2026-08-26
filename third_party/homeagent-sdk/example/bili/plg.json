@@ -1,0 +1,19 @@
+{
+  "name": "bili",
+  "name_zh": "B站视频下载",
+  "name_en": "Bilibili Video Downloader",
+  "version": "1.2.0",
+  "description": "B站视频下载工具，基于 yt-dlp 引擎。支持查看视频清晰度列表、指定格式下载、可配置下载目录。",
+  "author": "HomeAgent",
+  "entry": "plugin.so",
+  "tags": [
+    "bili",
+    "video",
+    "download"
+  ],
+  "targets": "linux/amd64",
+  "outdir": "dist",
+  "bundle": true,
+  "replaces": {},
+  "source_dirs": []
+}

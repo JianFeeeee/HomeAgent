@@ -1,0 +1,21 @@
+{
+  "name": "recoverydiag",
+  "name_zh": "恢复诊断",
+  "name_en": "Recovery Diagnostics",
+  "version": "0.2.0",
+  "description": "快速检查/崩溃取证工具集：diag_triage（退出码/信号/存活粗分）、diag_db（config.db 完整性 + LLM 源解析校验）、diag_log_scan（日志签名命中）、diag_delta（last-good 快照 vs 现状 diff）、diag_loc（正交综合定位）。全部返回结论而非原文，确定性、不消耗 LLM token，供 guard / failback 恢复决策使用。",
+  "author": "HomeAgent",
+  "entry": "plugin.so",
+  "tags": [
+    "diag",
+    "recovery",
+    "diagnostics",
+    "triage",
+    "failback"
+  ],
+  "targets": "linux/amd64",
+  "outdir": "dist",
+  "bundle": true,
+  "replaces": {},
+  "source_dirs": []
+}
