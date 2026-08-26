@@ -13,6 +13,16 @@ func (a *Agent) executeSpawnChild(tc agentAPI.ToolCall) string {
 	if task == "" {
 		return "请提供 task 参数"
 	}
+	maxTurns := 0
+	if v, ok := tc.Arguments["max_turns"].(float64); ok {
+		maxTurns = int(v)
+	}
+	if maxTurns < 1 {
+		maxTurns = defaultChildMaxTurns
+	}
+	if maxTurns > 30 {
+		maxTurns = 30
+	}
 
 	a.childMu.Lock()
 	a.childNextID++
@@ -26,12 +36,15 @@ func (a *Agent) executeSpawnChild(tc agentAPI.ToolCall) string {
 		parentChannel = "cli"
 	}
 
-	go a.runChildTask(taskID, task, parentChannel)
+	go a.runChildTask(taskID, task, parentChannel, maxTurns)
 
-	return fmt.Sprintf("子任务已启动（ID: %s），完成后会自动通知你，届时请使用 child_result 工具查看输出", taskID)
+	return fmt.Sprintf("子任务已启动（ID: %s，最多 %d 轮），完成后会自动通知你，届时请使用 child_result 工具查看输出", taskID, maxTurns)
 }
 
-func (a *Agent) runChildTask(taskID, task string, parentChannel string) {
+// defaultChildMaxTurns 子 Agent 默认工具轮数（可被 spawn_child 的 max_turns 参数覆盖）。
+const defaultChildMaxTurns = 5
+
+func (a *Agent) runChildTask(taskID, task string, parentChannel string, maxTurns int) {
 	if a.provider == nil {
 		log.Printf("[child] %s failed: no LLM provider configured", taskID)
 		return
@@ -66,7 +79,7 @@ func (a *Agent) runChildTask(taskID, task string, parentChannel string) {
 	}
 
 	var finalResult string
-	for turn := 0; turn < 5; turn++ {
+	for turn := 0; turn < maxTurns; turn++ {
 		req := &agentAPI.CompletionRequest{
 			Messages:        msgs,
 			MaxTokens:       4096,
