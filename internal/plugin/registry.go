@@ -81,6 +81,7 @@ type Registry struct {
 	mgr      *agentAPI.ProviderManager
 	cfgReg   *internalConfig.ConfigRegistry
 	plgDir   string
+	dataDir  string // 守护进程数据目录（注入给插件 SettingsAPI.DataDir）
 	lua      *luaVM.VM
 	baseKey  string
 
@@ -125,6 +126,7 @@ func (r *Registry) SetKnowledge(ks *knowledge.Store)                        { r.
 func (r *Registry) SetProviderManager(mgr *agentAPI.ProviderManager)        { r.mgr = mgr }
 func (r *Registry) SetConfigRegistry(cfgReg *internalConfig.ConfigRegistry) { r.cfgReg = cfgReg }
 func (r *Registry) SetPluginDir(dir string)                                 { r.plgDir = dir }
+func (r *Registry) SetDataDir(dir string)                                   { r.dataDir = dir }
 func (r *Registry) SetLuaVM(vm *luaVM.VM)                                   { r.lua = vm }
 func (r *Registry) SetBaseAPIKey(key string)                                { r.baseKey = key }
 func (r *Registry) SetToolRegistrar(fn sdk.ToolRegistrar)                   { r.regTool = fn }
@@ -191,6 +193,12 @@ func (d *channelDevice) ChannelDef() agentIO.ChannelDef { return d.chDef }
 
 func (r *Registry) buildSDK(name string) *sdk.PluginSDK {
 	sett := sdk.NewSettings(name, r.cfgReg)
+	if sd, ok := sett.(interface{ SetDataDir(string) }); ok {
+		// 插件专属数据目录：<data>/plugin_data/<name>，保证存在
+		dir := filepath.Join(r.dataDir, "plugin_data", name)
+		os.MkdirAll(dir, 0755)
+		sd.SetDataDir(dir)
+	}
 
 	regTool := r.regTool
 	if regTool == nil {

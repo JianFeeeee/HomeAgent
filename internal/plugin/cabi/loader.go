@@ -877,6 +877,12 @@ func go_core_dispatch(methodID C.int, ctx unsafe.Pointer, s1, s2, s3 *C.char, i1
 		}
 		return 0
 
+	case 51: // CORE_SETTINGS_DATA_DIR：插件专属数据目录（内核保证存在）
+		if sett := s.Settings(); sett != nil {
+			setResult(result, sett.DataDir())
+		}
+		return 0
+
 	case 46: // CORE_REGISTER_INPUT_CH
 		chDef := sdk.ChannelDef{}
 		if a2 != "" {
