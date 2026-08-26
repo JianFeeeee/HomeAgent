@@ -1,6 +1,7 @@
 package core
 
 import (
+	"encoding/json"
 	"fmt"
 	"log"
 	"strings"
@@ -11,6 +12,9 @@ import (
 func (a *Agent) executeSpawnChild(tc agentAPI.ToolCall) string {
 	task, _ := tc.Arguments["task"].(string)
 	if task == "" {
+		if b, _ := json.Marshal(tc.Arguments); len(b) > 2 {
+			log.Printf("[spawn] task empty but arguments present: %s", truncateStr(string(b), 300))
+		}
 		return "请提供 task 参数"
 	}
 	maxTurns := 0
@@ -36,6 +40,9 @@ func (a *Agent) executeSpawnChild(tc agentAPI.ToolCall) string {
 		parentChannel = "cli"
 	}
 
+	a.childMu.Lock()
+	a.childRunning[taskID] = true
+	a.childMu.Unlock()
 	go a.runChildTask(taskID, task, parentChannel, maxTurns)
 
 	return fmt.Sprintf("子任务已启动（ID: %s，最多 %d 轮），完成后会自动通知你，届时请使用 child_result 工具查看输出", taskID, maxTurns)
@@ -120,6 +127,7 @@ func (a *Agent) runChildTask(taskID, task string, parentChannel string, maxTurns
 
 	a.childMu.Lock()
 	a.childResults[taskID] = finalResult
+	delete(a.childRunning, taskID)
 	a.childMu.Unlock()
 
 	log.Printf("[child] %s done: %s", taskID, truncateStr(finalResult, 100))
@@ -139,14 +147,17 @@ func (a *Agent) executeChildResultTool(tc agentAPI.ToolCall) string {
 
 	a.childMu.Lock()
 	result, ok := a.childResults[taskID]
-	if !ok {
+	if ok {
+		delete(a.childResults, taskID)
 		a.childMu.Unlock()
-		return fmt.Sprintf("子任务 %s 不存在或已过期", taskID)
+		return fmt.Sprintf("【子任务 %s 结果】\n%s", taskID, result)
 	}
-	delete(a.childResults, taskID)
+	if a.childRunning[taskID] {
+		a.childMu.Unlock()
+		return fmt.Sprintf("子任务 %s 仍在运行中，尚未完成。请等待完成通知后再查询。", taskID)
+	}
 	a.childMu.Unlock()
-
-	return fmt.Sprintf("【子任务 %s 结果】\n%s", taskID, result)
+	return fmt.Sprintf("子任务 %s 不存在或已过期", taskID)
 }
 
 func (a *Agent) executeLLMTool(tc agentAPI.ToolCall) string {
