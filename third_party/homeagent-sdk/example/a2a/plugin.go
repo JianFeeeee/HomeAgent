@@ -77,6 +77,7 @@ func (p *Plugin) Start(s *sdk.PluginSDK) error {
 			"properties": map[string]interface{}{
 				"agent_url": map[string]interface{}{"type": "string", "description": "目标 Agent 的 A2A 端点 URL"},
 				"query":     map[string]interface{}{"type": "string", "description": "发送给目标 Agent 的文本查询"},
+				"session_id": map[string]interface{}{"type": "string", "description": "可选。上次调用返回的 session_id，传入可延续与该 agent 的多轮对话上下文"},
 				"timeout":   map[string]interface{}{"type": "integer", "description": "超时时间（秒），默认 60"},
 			},
 			"required": []string{"agent_url", "query"},
@@ -169,6 +170,43 @@ func truncateRunes(s string, n int) string {
 	return string(r[:n]) + "..."
 }
 
+// sessionMessages 返回指定会话的近 limit 条消息（时间正序），
+// 会话不存在返回 nil。消息格式 [{role, text, ts}]。
+func (p *Plugin) sessionMessages(sessionID string, limit int) []map[string]interface{} {
+	p.sessMu.Lock()
+	sess := p.sessions[sessionID]
+	var hist []string
+	var lastUsed time.Time
+	if sess != nil {
+		hist = append([]string{}, sess.History...)
+		lastUsed = sess.LastUsed
+	}
+	p.sessMu.Unlock()
+	if sess == nil {
+		return nil
+	}
+	_ = lastUsed
+	// History 交替 [user, agent, user, agent...]，取末尾 limit 条，保持时间正序
+	start := 0
+	if len(hist) > limit {
+		start = len(hist) - limit
+	}
+	msgs := make([]map[string]interface{}, 0, len(hist)-start)
+	for i := start; i < len(hist); i++ {
+		role, text := "user", hist[i]
+		if after, ok := strings.CutPrefix(text, "用户: "); ok {
+			role, text = "user", after
+		} else if after, ok := strings.CutPrefix(text, "助手: "); ok {
+			role, text = "agent", after
+		}
+		msgs = append(msgs, map[string]interface{}{
+			"role": role,
+			"text": text,
+		})
+	}
+	return msgs
+}
+
 func (p *Plugin) stopServer() {
 	p.srvMu.Lock()
 	defer p.srvMu.Unlock()
@@ -248,6 +286,7 @@ func (p *Plugin) handleIncomingA2A(w http.ResponseWriter, r *http.Request) {
 		Params  struct {
 			Query     string `json:"query,omitempty"`
 			SessionID string `json:"session_id,omitempty"`
+			Limit     int    `json:"limit,omitempty"`
 			Message *struct {
 				Role  string `json:"role"`
 				Parts []struct {
@@ -330,11 +369,37 @@ func (p *Plugin) handleIncomingA2A(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(resp)
 
-	case "tasks.get":
+	case "tasks.get", "session.get":
+		// 按 session_id 返回会话内近 N 条消息（默认 10 条）。
+		sessionID := strings.TrimSpace(req.Params.SessionID)
+		if sessionID == "" {
+			sessionID = strings.TrimSpace(req.Params.Query)
+		}
+		limit := 10
+		if req.Params.Limit > 0 && req.Params.Limit <= 100 {
+			limit = req.Params.Limit
+		}
+		msgs := p.sessionMessages(sessionID, limit)
+		if msgs == nil {
+			w.Header().Set("Content-Type", "application/json")
+			json.NewEncoder(w).Encode(map[string]interface{}{
+				"jsonrpc": "2.0", "id": req.ID,
+				"result": map[string]interface{}{
+					"session_id": sessionID,
+					"status":     "not_found",
+					"messages":   []interface{}{},
+				},
+			})
+			return
+		}
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(map[string]interface{}{
 			"jsonrpc": "2.0", "id": req.ID,
-			"result": map[string]interface{}{"id": req.Params.Query, "status": "unknown"},
+			"result": map[string]interface{}{
+				"session_id": sessionID,
+				"status":     "completed",
+				"messages":   msgs,
+			},
 		})
 
 	default:
@@ -378,9 +443,10 @@ type A2ARequest struct {
 }
 
 type A2AParams struct {
-	Query   string      `json:"query,omitempty"`
-	Message *A2AMessage `json:"message,omitempty"`
-	TaskID  string      `json:"id,omitempty"`
+	Query     string      `json:"query,omitempty"`
+	SessionID string      `json:"session_id,omitempty"`
+	Message   *A2AMessage `json:"message,omitempty"`
+	TaskID    string      `json:"id,omitempty"`
 }
 
 type A2AResponse struct {
@@ -393,6 +459,7 @@ type A2AResponse struct {
 type A2AResult struct {
 	TaskID    string       `json:"id,omitempty"`
 	Status    string       `json:"status,omitempty"`
+	SessionID string       `json:"session_id,omitempty"`
 	Message   *A2AMessage  `json:"message,omitempty"`
 	AgentCard *A2AAgentCard `json:"agent_card,omitempty"`
 }
@@ -458,6 +525,7 @@ func (p *Plugin) handleA2ADiscover(args map[string]interface{}) (interface{}, er
 func (p *Plugin) handleA2AQuery(args map[string]interface{}) (interface{}, error) {
 	agentURL, _ := args["agent_url"].(string)
 	query, _ := args["query"].(string)
+	sessionID, _ := args["session_id"].(string) // 可选：延续对方会话
 	timeoutSec := 60
 	if v, ok := args["timeout"].(float64); ok && v > 0 {
 		timeoutSec = int(v)
@@ -479,7 +547,8 @@ func (p *Plugin) handleA2AQuery(args map[string]interface{}) (interface{}, error
 		ID:      fmt.Sprintf("a2a_%d", time.Now().UnixNano()),
 		Method:  "tasks.send",
 		Params: A2AParams{
-			Message: &A2AMessage{Role: "user", Parts: []A2APart{{Text: query, Type: "text"}}},
+			SessionID: sessionID,
+			Message:   &A2AMessage{Role: "user", Parts: []A2APart{{Text: query, Type: "text"}}},
 		},
 	}
 
@@ -518,10 +587,18 @@ func (p *Plugin) handleA2AQuery(args map[string]interface{}) (interface{}, error
 		replyText = strings.TrimSpace(replyText)
 	}
 
-	return map[string]interface{}{
+	result := map[string]interface{}{
 		"task_id": a2aResp.Result.TaskID, "status": a2aResp.Result.Status,
 		"response": replyText,
-	}, nil
+	}
+	if a2aResp.Result.SessionID != "" || sessionID != "" {
+		result["session_id"] = a2aResp.Result.SessionID
+		if result["session_id"] == "" {
+			result["session_id"] = sessionID
+		}
+		result["note"] = "延续会话：下次调用传此 session_id 可保持上下文"
+	}
+	return result, nil
 }
 
 // ---- Management Handlers ----
