@@ -819,6 +819,7 @@ func (p *Plugin) handleWebhook(w http.ResponseWriter, r *http.Request) {
 				if evt.GroupID == rule.GroupID {
 					mcMsg := fmt.Sprintf("%s 说 %s", nickname, text)
 					go func(r ForwardRule, msg string) {
+						defer func() { _ = recover() }()
 						if err := rconSend(r.Host, r.Port, r.Password, "say "+msg); err != nil {
 							log.Printf("[qq] rcon forward to %s:%d: %v", r.Host, r.Port, err)
 						}
@@ -989,6 +990,7 @@ func (p *Plugin) handleGetMessage(args map[string]interface{}) (interface{}, err
 
 	// 异步标记已读
 	go func() {
+		defer func() { _ = recover() }() // 后台任务不允许 panic 冒泡带崩进程
 		if d.MessageType == "group" && d.GroupID > 0 {
 			p.napcat("mark_group_msg_as_read", map[string]interface{}{"group_id": d.GroupID})
 		} else if d.UserID > 0 {
@@ -1659,7 +1661,8 @@ func (p *Plugin) handleGetGroupFiles(args map[string]interface{}) (interface{}, 
 			return resp, nil
 		}
 		dlURL := parsed.Data.URL
-		httpResp, err := http.Get(dlURL)
+		client := &http.Client{Timeout: 120 * time.Second}
+		httpResp, err := client.Get(dlURL)
 		if err != nil {
 			return nil, fmt.Errorf("download: %w", err)
 		}
@@ -1714,6 +1717,11 @@ func (p *Plugin) handleDownloadFile(args map[string]interface{}) (interface{}, e
 	task := p.addDownloadTask(fileID, filename)
 
 	go func(t *DownloadTask, fid, fname, furl string, gid, uid int64) {
+		defer func() {
+			if r := recover(); r != nil {
+				log.Printf("[qq] download task %s panic: %v", fid, r)
+			}
+		}()
 		savePath := ""
 		errMsg := ""
 		if furl != "" {

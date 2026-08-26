@@ -1,0 +1,19 @@
+{
+  "name": "memo",
+  "name_zh": "备忘录",
+  "name_en": "Memo",
+  "version": "1.1.0",
+  "description": "待办与备忘录插件。待办（todo_add/todo_complete/todo_list）会主动提醒；备忘录（memo_create/memo_list/memo_delete）纯记事不提醒。",
+  "author": "HomeAgent",
+  "entry": "plugin.so",
+  "tags": [
+    "memo",
+    "todo",
+    "notes"
+  ],
+  "targets": "linux/amd64",
+  "outdir": "dist",
+  "bundle": true,
+  "replaces": {},
+  "source_dirs": []
+}
