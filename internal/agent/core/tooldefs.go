@@ -460,13 +460,17 @@ func (a *Agent) buildToolDefs() []interface{} {
 		"type": "function",
 		"function": map[string]interface{}{
 			"name":        "spawn_child",
-			"description": "启动一个异步子 Agent 执行独立任务。子 Agent 后台运行，不阻塞当前对话。完成后系统会自动通知你，届时请调用 child_result 工具查看输出。",
+			"description": "启动一个异步子 Agent 执行独立任务。子 Agent 后台运行，不阻塞当前对话。完成后系统会自动通知你，届时请调用 child_result 工具查看输出。\n使用时机：多个互不依赖的子任务（如同时查三个网站、分别处理多个文件）应并行 spawn 多个子 Agent，不要自己串行逐个执行；长耗时任务（批量处理、多轮搜索）也应交给子 Agent，避免阻塞对话。",
 			"parameters": map[string]interface{}{
 				"type": "object",
 				"properties": map[string]interface{}{
 					"task": map[string]interface{}{
 						"type":        "string",
 						"description": "要子 Agent 完成的任务描述。请描述清晰、完整，包含所有必要背景。",
+					},
+					"max_turns": map[string]interface{}{
+						"type":        "integer",
+						"description": "子 Agent 最大工具轮数（默认 5，范围 1-30）。复杂任务可调高。",
 					},
 				},
 				"required": []string{"task"},

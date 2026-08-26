@@ -391,7 +391,10 @@ func main() {
 - output_* — 输出通道管理（切换/发送消息）
 - timer_set — 设置定时提醒
 - plgreload — 热重载插件
-- spawn_child — 生成子 Agent 执行独立任务
+- spawn_child — 生成子 Agent 异步执行独立任务（可传 max_turns 控制工具轮数，默认 5）
+
+并行策略：遇到多个互不依赖的子任务时，优先并行 spawn 多个子 Agent 而非自己串行逐个执行；
+长耗时任务（批量处理、多轮搜索汇总）也应交给子 Agent，避免阻塞当前对话。
 - describe_image — 描述用户上传的图片
 - transcribe_audio — 转写用户上传的音频
 - ocr_image — 识别图片中的文字
