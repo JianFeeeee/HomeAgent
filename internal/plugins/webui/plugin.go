@@ -48,6 +48,10 @@ func randomSecret(n int) string {
 // 由插件 Start 时从 daemon.data_dir 推导注入。
 var webFilesDir string
 
+// uploadsDir 是用户经 webui 上传文件的存储目录（<data>/uploads）。
+// handleChatFile 落盘、handleUploads 下载共用；参考 qq 插件 files_dir 收文件设计。
+var uploadsDir string
+
 // stageWebFile 把 agent 要发送的本地文件拷贝到 webui_files 中转目录，
 // 返回可下载 URL 路径与字节数。image/file 的 payload 支持本地路径或 http(s) URL
 // （URL 直接透传给前端，不落盘）。文件名用随机 UUID 防路径猜测，扩展名保留自源文件。
@@ -132,6 +136,7 @@ func (p *Plugin) Start(s *sdk.PluginSDK) error {
 	if dd, err := s.Settings().GetCore("daemon.data_dir"); err == nil {
 		if s2, ok := dd.(string); ok && s2 != "" {
 			webFilesDir = filepath.Join(s2, "webui_files")
+			uploadsDir = filepath.Join(s2, "uploads")
 		}
 	}
 

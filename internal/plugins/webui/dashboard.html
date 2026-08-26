@@ -2459,6 +2459,10 @@ background:
           headers: { "Content-Type": "application/json", ...o?.headers },
           ...o,
         };
+        // FormData 时不能手动设 Content-Type（浏览器需自动生成 multipart boundary）
+        if (o?.body instanceof FormData) {
+          delete opts.headers["Content-Type"];
+        }
         var r = await fetch("/api/v1" + p, opts);
         if (r.status === 401) {
           location.href = "/login";
@@ -2500,6 +2504,7 @@ background:
           if (msgsEl) {
             msgsEl.scrollTop = msgsEl.scrollHeight;
           }
+          initChatDragDrop();
         }
         renderAll();
       }
@@ -2780,6 +2785,10 @@ background:
         html +=
           "</div>" +
           '<div class="chat-input-row">' +
+          '<input type="file" id="chat-file" style="display:none" onchange="sendChatFile(this.files[0])">' +
+          '<button class="btn" onclick=\'document.getElementById("chat-file").click()\' id="chat-file-btn" title="' +
+          __("发送文件", "Send file") +
+          '" style="padding:0 12px">📎</button>' +
           '<input id="chat-input" placeholder="' +
           __("输入消息...", "Type a message...") +
           '" onkeydown="if(event.key==\'Enter\')sendChat()">' +
@@ -3705,6 +3714,73 @@ background:
             );
           }
         }, 120000);
+      }
+
+      // 上传文件并注入 agent：multipart POST /api/v1/chat/file。
+      // 服务端落盘 uploads/ 后注入「[用户发送了文件: 名字 (大小)] 已保存到 <路径>」；
+      // 回复与普通消息一样走 SSE 流式渲染。可选附言从输入框读取。
+      // 拖拽文件到聊天区即发送（可选：先在输入框写附言）
+      function initChatDragDrop() {
+        var panel = document.getElementById("chat-panel-chat");
+        if (!panel || panel.__dnd) return;
+        panel.__dnd = true;
+        panel.addEventListener("dragover", function (e) {
+          e.preventDefault();
+          panel.style.outline = "2px dashed var(--accent, #4a90d9)";
+        });
+        panel.addEventListener("dragleave", function () {
+          panel.style.outline = "";
+        });
+        panel.addEventListener("drop", function (e) {
+          e.preventDefault();
+          panel.style.outline = "";
+          if (e.dataTransfer.files && e.dataTransfer.files.length) {
+            sendChatFile(e.dataTransfer.files[0]);
+          }
+        });
+        // 粘贴截图/复制的文件直接发送
+        document.addEventListener("paste", function (e) {
+          var chatVisible =
+            document.getElementById("chat-panel-chat") &&
+            document.getElementById("chat-input");
+          if (!chatVisible) return;
+          var items = e.clipboardData && e.clipboardData.files;
+          if (items && items.length && document.activeElement !== null) {
+            sendChatFile(items[0]);
+          }
+        });
+      }
+
+      async function sendChatFile(fileObj, extraText) {
+        if (!fileObj || state.chatLoading) return;
+        var inp = document.getElementById("chat-input");
+        var message = (extraText || inp.value || "").trim();
+        if (inp) inp.value = "";
+        var fd = new FormData();
+        fd.append("file", fileObj);
+        if (message) fd.append("message", message);
+        state.messages.push({
+          role: "user",
+          content: message,
+          attachment: {
+            type: /^image\//.test(fileObj.type) ? "image" : "file",
+            url: URL.createObjectURL(fileObj),
+            name: fileObj.name,
+            size: fileObj.size,
+          },
+        });
+        rerenderChat(true);
+        state.chatLoading = true;
+        state.chatStage = __("等待AI回复...", "Waiting for AI...");
+        rerenderChat(true);
+        try {
+          await api("/chat/file", { method: "POST", body: fd, rawBody: true });
+          // 回复经 SSE 流式到达，这里无需处理响应体
+        } catch (e) {
+          toast(__("文件发送失败：" + e.message, "File send failed: " + e.message), true);
+          state.chatLoading = false;
+          endChatTurn();
+        }
       }
 
       async function sendChat() {
