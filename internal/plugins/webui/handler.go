@@ -154,6 +154,17 @@ type ChatMsg struct {
 	ToolCalls        []ChatToolCall `json:"tool_calls,omitempty"`
 	Source           string         `json:"source,omitempty"`
 	Time             string         `json:"time"`
+	// Attachment 附件输出（output_send__webui type=image/file）：
+	// image 前端内联展示，file 渲染下载卡片。nil 表示纯文本消息。
+	Attachment *Attachment `json:"attachment,omitempty"`
+}
+
+// Attachment 描述一条附件消息（与 SSE agent_output 事件的 output_type/url/size 对应）。
+type Attachment struct {
+	Type string `json:"type"`           // "image" | "file"
+	URL  string `json:"url"`            // /files/<name> 或远程 http(s) URL
+	Size int64  `json:"size,omitempty"`  // 字节数（远程 URL 为 0）
+	Name string `json:"name,omitempty"` // 展示用文件名
 }
 
 type ChatToolCall struct {
@@ -349,6 +360,20 @@ func (h *Handler) subscribeChatEvents() {
 	h.sdk.Subscribe(sdk.EventRawInput, func(ev *sdk.Event) {
 		content, _ := ev.Payload["content"].(string)
 		source, _ := ev.Payload["source"].(string)
+		// 用户上传的附件（handleChatFile 注入的 payload 携带 upload_* 字段）
+		var att *Attachment
+		if url, _ := ev.Payload["upload_url"].(string); url != "" {
+			ut, _ := ev.Payload["upload_type"].(string)
+			var size int64
+			switch v := ev.Payload["upload_size"].(type) {
+			case int64:
+				size = v
+			case float64:
+				size = int64(v)
+			}
+			name, _ := ev.Payload["upload_name"].(string)
+			att = &Attachment{Type: ut, URL: url, Size: size, Name: name}
+		}
 		if content == "" {
 			return
 		}
@@ -356,10 +381,11 @@ func (h *Handler) subscribeChatEvents() {
 		h.pendingIdx = -1
 		h.chatMu.Unlock()
 		h.addChatMsg(ChatMsg{
-			Role:    "user",
-			Content: content,
-			Source:  source,
-			Time:    time.Unix(ev.Timestamp, 0).Format(time.RFC3339),
+			Role:       "user",
+			Content:    content,
+			Source:     source,
+			Time:       time.Unix(ev.Timestamp, 0).Format(time.RFC3339),
+			Attachment: att,
 		})
 	})
 	h.sdk.Subscribe(sdk.EventToolCall, func(ev *sdk.Event) {
@@ -423,16 +449,38 @@ func (h *Handler) subscribeChatEvents() {
 		// 输出通道主动输出(output_send__{通道})作为独立气泡,不并入最终回复
 		if kind == "channel_output" {
 			h.pendingIdx = -1
-			h.chatMu.Unlock()
-			if content == "" {
+			// 附件输出（output_type=image/file）：存 attachment 字段供前端渲染，
+			// content 保留原始 payload 作为备选文案（历史兼容旧数据）。
+			var att *Attachment
+			if ot, _ := ev.Payload["output_type"].(string); ot == "image" || ot == "file" {
+				url, _ := ev.Payload["url"].(string)
+				size, _ := ev.Payload["size"].(int64)
+				if f, ok := ev.Payload["size"].(float64); ok && size == 0 {
+					size = int64(f)
+				}
+				name := url
+				if i := strings.LastIndexByte(url, '/'); i >= 0 {
+					name = url[i+1:]
+				}
+				att = &Attachment{Type: ot, URL: url, Size: size, Name: name}
+			}
+			if content == "" && att == nil {
+				h.chatMu.Unlock()
 				return
 			}
-			h.addChatMsg(ChatMsg{
-				Role:    "assistant",
-				Content: content,
-				Source:  channel,
-				Time:    time.Unix(ev.Timestamp, 0).Format(time.RFC3339),
-			})
+			m := ChatMsg{
+				Role:       "assistant",
+				Content:    content,
+				Source:     channel,
+				Time:       time.Unix(ev.Timestamp, 0).Format(time.RFC3339),
+				Attachment: att,
+			}
+			// 附件消息不把本地路径当正文展示（如 "/tmp/homeagent.png"），置空
+			if att != nil {
+				m.Content = ""
+			}
+			h.addChatMsg(m)
+			h.chatMu.Unlock()
 			return
 		}
 		if msg := h.pendingAssistantLocked(); msg != nil && content != "" {
@@ -695,6 +743,8 @@ func (h *Handler) RegisterRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("/api/v1/tracker", h.requireAPI(h.handleTracker))
 	mux.HandleFunc("/api/v1/tracker/", h.requireAPI(h.handleTracker))
 	mux.HandleFunc("/api/v1/chat", h.requireAPI(h.handleChat))
+	// 用户上传文件并附带消息注入 agent（multipart：file + message）
+	mux.HandleFunc("/api/v1/chat/file", h.requireAPI(h.handleChatFile))
 	mux.HandleFunc("/api/v1/chat/history", h.requireAPI(h.handleChatHistory))
 	mux.HandleFunc("/api/v1/chat/interrupt", h.requireAPI(h.handleChatInterrupt))
 	mux.HandleFunc("/api/v1/chat/events", h.requireAPI(h.handleChatEvents))
@@ -707,6 +757,8 @@ func (h *Handler) RegisterRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("/api/v1/device/", h.requireAPI(h.handleDeviceGatewayProxy))
 	// agent 发送的文件下载（webui_files 中转目录；requireWeb 与 dashboard 同源同鉴权）
 	mux.HandleFunc("/files/", h.requireWeb(h.handleFiles))
+	// 用户上传文件的下载（uploads 目录，同一安全模型）
+	mux.HandleFunc("/uploads/", h.requireWeb(h.handleUploads))
 	mux.HandleFunc("/v1/chat/completions", h.requireAPI(h.handleOpenAICompletions))
 	mux.HandleFunc("/", h.requireWeb(h.handleStatic))
 }
@@ -1224,6 +1276,184 @@ func (h *Handler) handleChatHistory(w http.ResponseWriter, r *http.Request) {
 	copy(result, h.chatHistory)
 	h.chatMu.Unlock()
 	writeJSON(w, http.StatusOK, map[string]interface{}{"messages": result})
+}
+
+// handleChatFile 处理用户经 webui 上传文件并附带消息注入 agent。
+// 设计对齐 qq 插件收文件模式：文件落盘到固定目录（<data>/uploads），
+// 注入文本带「文件名 + 保存路径」，agent 用 files_read 等工具按路径消费。
+// 表单字段：file（必填，multipart 文件）、message（可选附言）、device_id/device_name。
+func (h *Handler) handleChatFile(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	if uploadsDir == "" {
+		writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "uploads dir not initialized"})
+		return
+	}
+	if err := r.ParseMultipartForm(64 << 20); err != nil { // 单文件上限 64MB
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid multipart: " + err.Error()})
+		return
+	}
+	file, hdr, err := r.FormFile("file")
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "file field required"})
+		return
+	}
+	defer file.Close()
+	message := r.FormValue("message")
+	deviceID := r.FormValue("device_id")
+	deviceName := r.FormValue("device_name")
+	clientMsgID := r.FormValue("client_msg_id")
+
+	if h.sdk == nil {
+		writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "agent unavailable"})
+		return
+	}
+
+	// 落盘：保留原文件名；重名加毫秒后缀防覆盖。文件名消毒防路径穿越。
+	base := filepath.Base(hdr.Filename)
+	if base == "" || base == "." || strings.Contains(base, "..") {
+		base = "upload.bin"
+	}
+	if err := os.MkdirAll(uploadsDir, 0755); err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "create uploads dir"})
+		return
+	}
+	savePath := filepath.Join(uploadsDir, base)
+	if _, err := os.Stat(savePath); err == nil {
+		ext := filepath.Ext(base)
+		stem := strings.TrimSuffix(base, ext)
+		savePath = filepath.Join(uploadsDir, fmt.Sprintf("%s_%d%s", stem, time.Now().UnixMilli(), ext))
+	}
+	out, err := os.Create(savePath)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "save file"})
+		return
+	}
+	sz, err := io.Copy(out, file)
+	out.Close()
+	if err != nil {
+		os.Remove(savePath)
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "write file"})
+		return
+	}
+
+	// 下载 URL（前端附件卡片用）：/uploads/ 与 /files/ 同一鉴权模型，路由在 RegisterRoutes 挂载
+	dlURL := "/uploads/" + filepath.Base(savePath)
+	attType := "file"
+	ct := hdr.Header.Get("Content-Type")
+	if strings.HasPrefix(ct, "image/") {
+		attType = "image"
+	}
+
+	// 注入 agent 的文本（qq 插件模式：[xx发送了文件] + 路径）
+	humanSize := formatBytesGo(sz)
+	text := fmt.Sprintf("[用户通过 webui 发送了%s: %s (%s)]\n文件已保存到: %s\n可用 files_read 等工具读取此路径处理。",
+		map[string]string{"image": "图片", "file": "文件"}[attType], base, humanSize, savePath)
+	if message != "" {
+		text = message + "\n" + text
+	}
+
+	source := "webui"
+	if deviceID != "" {
+		source = "webui/" + deviceID
+	}
+	payload := map[string]interface{}{
+		"content":     text,
+		"upload_url":  dlURL,
+		"upload_type": attType,
+		"upload_size": sz,
+		"upload_name": base,
+	}
+	if deviceID != "" {
+		payload["device_id"] = deviceID
+		payload["device_name"] = deviceName
+	}
+	if clientMsgID != "" {
+		payload["client_msg_id"] = clientMsgID
+	}
+
+	ctx, cancel := context.WithTimeout(r.Context(), 300*time.Second)
+	defer cancel()
+	respCh := make(chan *agentIO.OutputEvent, 1)
+	go func() {
+		respCh <- h.sdk.InjectInputSync(source, "webui", "text", payload)
+	}()
+	var resp *agentIO.OutputEvent
+	select {
+	case resp = <-respCh:
+	case <-ctx.Done():
+		writeJSON(w, http.StatusGatewayTimeout, map[string]string{"error": "agent timeout"})
+		return
+	}
+	if resp == nil {
+		writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "agent unavailable"})
+		return
+	}
+	content, _ := resp.Payload["content"].(string)
+	reasoning, _ := resp.Payload["reasoning_content"].(string)
+	result := map[string]interface{}{
+		"response": content,
+		"file":      map[string]interface{}{"url": dlURL, "name": base, "size": sz, "path": savePath, "type": attType},
+	}
+	if reasoning != "" {
+		result["reasoning_content"] = reasoning
+	}
+	writeJSON(w, http.StatusOK, result)
+}
+
+// formatBytesGo 服务端字节人性化显示。
+func formatBytesGo(n int64) string {
+	if n <= 0 {
+		return "0 B"
+	}
+	units := []string{"B", "KB", "MB", "GB"}
+	i := 0
+	f := float64(n)
+	for f >= 1024 && i < len(units)-1 {
+		f /= 1024
+		i++
+	}
+	if i == 0 {
+		return fmt.Sprintf("%d %s", n, units[i])
+	}
+	return fmt.Sprintf("%.1f %s", f, units[i])
+}
+
+// handleUploads 服务 /uploads/<name>：用户上传文件的下载（与 /files/ 同一安全模型）。
+func (h *Handler) handleUploads(w http.ResponseWriter, r *http.Request) {
+	if uploadsDir == "" {
+		http.NotFound(w, r)
+		return
+	}
+	name := strings.TrimPrefix(r.URL.Path, "/uploads/")
+	if name == "" || strings.Contains(name, "/") || strings.Contains(name, "\\") || strings.Contains(name, "..") {
+		http.NotFound(w, r)
+		return
+	}
+	fp := filepath.Join(uploadsDir, name)
+	f, err := os.Open(fp)
+	if err != nil {
+		http.NotFound(w, r)
+		return
+	}
+	defer f.Close()
+	st, err := f.Stat()
+	if err != nil || st.IsDir() {
+		http.NotFound(w, r)
+		return
+	}
+	ct := contentTypeByExt(strings.ToLower(filepath.Ext(name)))
+	w.Header().Set("Content-Type", ct)
+	if strings.HasPrefix(ct, "image/") || strings.HasPrefix(ct, "video/") || strings.HasPrefix(ct, "audio/") {
+		w.Header().Set("Content-Disposition", "inline; filename="+name)
+	} else {
+		w.Header().Set("Content-Disposition", "attachment; filename="+name)
+	}
+	w.Header().Set("X-Content-Type-Options", "nosniff")
+	w.Header().Set("Cache-Control", "private, max-age=3600")
+	http.ServeContent(w, r, name, st.ModTime(), f)
 }
 
 // handleChatInterrupt 注入用户中断：取消正在进行的 LLM 生成并/或发送打断消息。
