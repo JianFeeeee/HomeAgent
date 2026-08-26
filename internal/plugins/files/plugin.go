@@ -201,6 +201,12 @@ func pathWithinSandbox(abs, base string) bool {
 	if equalFoldPath(abs, base) {
 		return true
 	}
+	// 根沙箱（Linux "/"）表示整机可访问：Clean("") 会返回 "."，
+	// 而 prefix 变成 "//" 导致所有绝对路径误判逃逸（生产实锤：files.dir=/ 时
+	// 全部 files_read/write 报 path outside sandbox）。根目录直接放行。
+	if base == string(filepath.Separator) {
+		return true
+	}
 	// 卷根沙箱（C:\、D:\ 等）表示整机可访问
 	if isWindowsBuild && len(base) == 3 && base[1] == ':' && base[2] == '\\' {
 		return true

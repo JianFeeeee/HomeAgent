@@ -159,18 +159,20 @@ func (p *Plugin) Start(s *sdk.PluginSDK) error {
 		ctx, cancel := context.WithTimeout(context.Background(), timeout)
 		defer cancel()
 
-		// Windows 上必须经 cmd.exe /c 执行（chcp 65001 预置为 UTF-8 输出），
-		// 直接 exec 会把整条命令当成一个程序路径导致所有命令失败。
+		// Linux/Unix 经 /bin/sh -c 执行完整 shell 语法：管道、分号、&&、
+		// 命令替换、heredoc、重定向全部可用。旧实现 shellUnquote 拆词后
+		// 直接 exec，导致 pwd; ls / 变成执行名为 "pwd;" 的程序（exit -1）、
+		// heredoc 被截断——agent 多次反馈"命令解析奇怪"即此。
 		var cmd *exec.Cmd
 		if isWindows {
 			execCmd := "chcp 65001>nul & " + command
 			cmd = exec.CommandContext(ctx, "cmd.exe", "/d", "/c", execCmd)
 		} else {
-			parts := shellUnquote(command)
-			if len(parts) == 0 {
-				return map[string]interface{}{"error": "command is required"}, nil
+			shell := "/bin/sh"
+			if _, err := os.Stat("/bin/bash"); err == nil {
+				shell = "/bin/bash" // bash 支持更完整的语法（数组、[[ ]] 等）
 			}
-			cmd = exec.CommandContext(ctx, parts[0], parts[1:]...)
+			cmd = exec.CommandContext(ctx, shell, "-c", command)
 		}
 		if workdir != "" {
 			cmd.Dir = workdir
@@ -210,11 +212,11 @@ func (p *Plugin) Start(s *sdk.PluginSDK) error {
 		p.recordCmd(rec)
 
 		return map[string]interface{}{
-			"status":     "ok",
-			"stdout":     rec.Stdout,
-			"stderr":     rec.Stderr,
-			"exit_code":  exitCode,
-			"command":    command,
+			"status":    "ok",
+			"stdout":    rec.Stdout,
+			"stderr":    rec.Stderr,
+			"exit_code": exitCode,
+			"command":   command,
 		}, nil
 	})
 
