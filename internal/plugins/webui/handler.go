@@ -470,7 +470,6 @@ func (h *Handler) subscribeChatEvents() {
 			}
 			m := ChatMsg{
 				Role:       "assistant",
-				Content:    content,
 				Source:     channel,
 				Time:       time.Unix(ev.Timestamp, 0).Format(time.RFC3339),
 				Attachment: att,
@@ -478,8 +477,23 @@ func (h *Handler) subscribeChatEvents() {
 			// 附件消息不把本地路径当正文展示（如 "/tmp/homeagent.png"），置空
 			if att != nil {
 				m.Content = ""
+			} else {
+				m.Content = content
 			}
-			h.addChatMsg(m)
+			// 已持 chatMu：直接操作 chatHistory + persist，不可调 addChatMsg
+			//（内部会重入加锁导致死锁——output_send__webui 发图 60s 超时的根因）
+			h.chatHistory = append(h.chatHistory, m)
+			if len(h.chatHistory) > maxChatHistory {
+				drop := len(h.chatHistory) - maxChatHistory
+				h.chatHistory = h.chatHistory[drop:]
+				if h.pendingIdx >= 0 {
+					h.pendingIdx -= drop
+					if h.pendingIdx < 0 {
+						h.pendingIdx = -1
+					}
+				}
+			}
+			h.persistChatLocked()
 			h.chatMu.Unlock()
 			return
 		}
