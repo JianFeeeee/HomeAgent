@@ -86,6 +86,7 @@ type Agent struct {
 	childMu      sync.Mutex
 	childNextID  int64
 	childResults map[string]string
+	childRunning map[string]bool // 运行中的子任务（child_result 查询时区分'运行中'与'不存在'）
 
 	// 高优先级打断通道：interceptLoop 注入，process() 在工具循环轮次间非阻塞读取
 	interceptCh chan *agentIO.InputEvent
@@ -237,6 +238,7 @@ func New(cfg AgentConfig) *Agent {
 		eventBus:        cfg.EventBus,
 		selfInputCh:     make(chan selfInputMsg, 64),
 		childResults:    make(map[string]string),
+		childRunning:    make(map[string]bool),
 		interceptCh:     make(chan *agentIO.InputEvent, 64),
 		pluginHealth:    newPluginHealthTracker(),
 		thinkingEnabled: cfg.ThinkingEnabled,

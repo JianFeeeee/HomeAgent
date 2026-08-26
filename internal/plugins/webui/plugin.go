@@ -165,12 +165,12 @@ func (p *Plugin) Start(s *sdk.PluginSDK) error {
 			s.Publish(&sdk.Event{
 				Type: sdk.EventAgentOutput,
 				Payload: map[string]interface{}{
-					"content":    payload,
-					"channel":    "webui",
-					"kind":       "channel_output",
+					"content":     payload,
+					"channel":     "webui",
+					"kind":        "channel_output",
 					"output_type": rawType,
-					"url":        url,
-					"size":       size,
+					"url":         url,
+					"size":        size,
 				},
 			})
 			return map[string]interface{}{"status": "ok", "url": url, "size": size}, nil
