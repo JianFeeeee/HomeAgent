@@ -163,7 +163,7 @@ type ChatMsg struct {
 type Attachment struct {
 	Type string `json:"type"`           // "image" | "file"
 	URL  string `json:"url"`            // /files/<name> 或远程 http(s) URL
-	Size int64  `json:"size,omitempty"`  // 字节数（远程 URL 为 0）
+	Size int64  `json:"size,omitempty"` // 字节数（远程 URL 为 0）
 	Name string `json:"name,omitempty"` // 展示用文件名
 }
 
@@ -1347,20 +1347,49 @@ func (h *Handler) handleChatFile(w http.ResponseWriter, r *http.Request) {
 		attType = "image"
 	}
 
-	// 注入 agent 的文本（qq 插件模式：[xx发送了文件] + 路径）
+	// 注入 agent：文件元信息走 interrupt 通道（内核以 system 角色注入 LLM，
+	// 不写入用户对话履历、不产生独立用户气泡——对齐 terminal_watch/timer 的
+	// 工具提醒模式）。用户的附言若有则作为正常消息先行注入。
+	// qq 插件同款文本格式：[xx发送了文件] + 路径，agent 用 files_read 消费。
 	humanSize := formatBytesGo(sz)
-	text := fmt.Sprintf("[用户通过 webui 发送了%s: %s (%s)]\n文件已保存到: %s\n可用 files_read 等工具读取此路径处理。",
-		map[string]string{"image": "图片", "file": "文件"}[attType], base, humanSize, savePath)
-	if message != "" {
-		text = message + "\n" + text
-	}
-
 	source := "webui"
 	if deviceID != "" {
 		source = "webui/" + deviceID
 	}
+	fileNote := fmt.Sprintf("[用户通过 webui 发送了%s: %s (%s)]\n文件已保存到: %s\n可用 files_read 等工具读取此路径处理。",
+		map[string]string{"image": "图片", "file": "文件"}[attType], base, humanSize, savePath)
+	if message != "" {
+		text := message
+		go func() {
+			// 附言作为用户消息（带附件卡片）注入；文件说明紧随其后以 interrupt 补充
+			payload2 := map[string]interface{}{"content": text}
+			if deviceID != "" {
+				payload2["device_id"] = deviceID
+				payload2["device_name"] = deviceName
+			}
+			if clientMsgID != "" {
+				payload2["client_msg_id"] = clientMsgID + "-note"
+			}
+			h.sdk.InjectInput(source, "webui", "text", func() map[string]interface{} {
+				p := payload2
+				p["upload_url"] = dlURL
+				p["upload_type"] = attType
+				p["upload_size"] = sz
+				p["upload_name"] = base
+				return p
+			}())
+		}()
+		time.Sleep(100 * time.Millisecond) // 保证附言先入队
+		h.sdk.InjectInterrupt(source, "webui", "text", map[string]interface{}{"content": fileNote, "no_memory": true})
+		writeJSON(w, http.StatusOK, map[string]interface{}{
+			"status": "accepted",
+			"file":   map[string]interface{}{"url": dlURL, "name": base, "size": sz, "path": savePath, "type": attType},
+		})
+		return
+	}
+	// 无附言：仅文件说明，直接同步注入并等待回复（与普通聊天体验一致）
 	payload := map[string]interface{}{
-		"content":     text,
+		"content":     fileNote,
 		"upload_url":  dlURL,
 		"upload_type": attType,
 		"upload_size": sz,
@@ -1395,7 +1424,7 @@ func (h *Handler) handleChatFile(w http.ResponseWriter, r *http.Request) {
 	reasoning, _ := resp.Payload["reasoning_content"].(string)
 	result := map[string]interface{}{
 		"response": content,
-		"file":      map[string]interface{}{"url": dlURL, "name": base, "size": sz, "path": savePath, "type": attType},
+		"file":     map[string]interface{}{"url": dlURL, "name": base, "size": sz, "path": savePath, "type": attType},
 	}
 	if reasoning != "" {
 		result["reasoning_content"] = reasoning
@@ -1461,6 +1490,7 @@ func (h *Handler) handleUploads(w http.ResponseWriter, r *http.Request) {
 //   - 有 LLM 在跑：cancelLLM 取消当前请求 + 中断入队，process() 以
 //     [中断消息] 重启轮次，模型看到被打断的上下文和用户新输入；
 //   - 无 LLM 在跑：作为普通输入处理（等同发了一条消息）。
+//
 // message 可选：空则纯取消（仍会注入空内容中断触发取消）。
 func (h *Handler) handleChatInterrupt(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
