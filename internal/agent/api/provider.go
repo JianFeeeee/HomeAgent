@@ -7,6 +7,8 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"log"
+	"os"
 	"net"
 	"net/http"
 	"sort"
@@ -191,6 +193,10 @@ type ToolCall struct {
 	Name         string                 `json:"name"`
 	Arguments    map[string]interface{} `json:"arguments"`
 	RawArguments string                 `json:"raw_arguments,omitempty"` // 流式分片原始 JSON 字符串
+	// StreamIndex 是上游流式 tool_call 的 OpenAI index 字段（并行多工具调用
+	// 时同一轮的分片用它区分归属）。lua 适配器以 stream_index 键透传；
+	// 仅内核流式累积内部使用，不序列化到对外 API。
+	StreamIndex int `json:"stream_index,omitempty"`
 }
 
 type apiToolCall struct {
@@ -403,6 +409,14 @@ func (p *LuaAdaptedProvider) Chat(ctx context.Context, req *CompletionRequest) (
 		return nil, fmt.Errorf("unmarshal unified response: %w (body: %s)", err, unifiedJSON)
 	}
 
+	// 诊断：tool_calls 存在但参数为空——上游/适配器丢参数，打印原始响应片段定位
+	for _, tc := range result.ToolCalls {
+		if len(tc.Arguments) == 0 && tc.RawArguments == "" {
+			log.Printf("[provider:%s] tool_call %s (%s) has empty arguments; raw body head: %s",
+				p.name, tc.Name, tc.ID, string(rawResp[:min(len(rawResp), 400)]))
+		}
+	}
+
 	return &result, nil
 }
 
@@ -551,6 +565,7 @@ func parseOpenAICompatibleSSEBody(raw []byte) (*CompletionResponse, bool) {
 type openAIToolCall struct {
 	ID       string `json:"id"`
 	Type     string `json:"type"`
+	Index    int    `json:"index"`
 	Function struct {
 		Name      string      `json:"name"`
 		Arguments interface{} `json:"arguments"`
@@ -584,6 +599,7 @@ func normalizeOpenAIToolCalls(raw []openAIToolCall) []ToolCall {
 			Name:         name,
 			Arguments:    parseToolArguments(argsRaw),
 			RawArguments: rawArgsString(argsRaw),
+			StreamIndex:  tc.Index,
 		})
 	}
 	return out
@@ -629,6 +645,7 @@ func normalizeStreamToolCalls(raw []openAIToolCall) []ToolCall {
 			Type:         typ,
 			Name:         name,
 			RawArguments: rawArgsString(argsRaw),
+			StreamIndex:  tc.Index,
 		})
 	}
 	return out
@@ -856,6 +873,7 @@ func (p *LuaAdaptedProvider) ChatStream(ctx context.Context, req *CompletionRequ
 			}
 		}
 
+		debugSSE := os.Getenv("HOMED_DEBUG_SSE") == "1"
 		for scanner.Scan() {
 			line := strings.TrimSpace(scanner.Text())
 			if line == "" || !strings.HasPrefix(line, "data:") {
@@ -864,6 +882,9 @@ func (p *LuaAdaptedProvider) ChatStream(ctx context.Context, req *CompletionRequ
 			data := strings.TrimSpace(strings.TrimPrefix(line, "data:"))
 			if data == "" {
 				continue
+			}
+			if debugSSE && strings.Contains(data, "tool_calls") {
+				log.Printf("[provider:%s] SSE raw tool_call line: %s", p.name, truncateForLog(data, 400))
 			}
 			if data == "[DONE]" {
 				if !doneSent {
@@ -1207,4 +1228,12 @@ func getFloat(m map[string]interface{}, key string) float64 {
 		}
 	}
 	return 0
+}
+
+// truncateForLog 诊断日志用截断。
+func truncateForLog(s string, n int) string {
+	if len(s) <= n {
+		return s
+	}
+	return s[:n] + "..."
 }

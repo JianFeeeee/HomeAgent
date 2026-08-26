@@ -262,6 +262,9 @@ func (a *Agent) process(input string, stageCtx *sdk.StageContext) (response stri
 			toolsUsed = append(toolsUsed, tc.Name)
 			pluginName := a.resolveToolPlugin(tc.Name)
 			log.Printf("[agent] executing tool: %s (plugin=%s, id=%s)", tc.Name, pluginName, tc.ID)
+			if tc.RawArguments != "" {
+				log.Printf("[agent] tool %s raw_arguments: %s", tc.Name, truncateStr(tc.RawArguments, 300))
+			}
 
 			sdkTC := sdk.ToolCall{ID: tc.ID, Name: tc.Name, Plugin: pluginName, Arguments: tc.Arguments}
 			stageCtx.ToolCalls = []sdk.ToolCall{sdkTC}
@@ -402,13 +405,22 @@ func accumulateStream(ctx context.Context, ch <-chan agentAPI.StreamChunk, a *Ag
 			return
 		}
 		if acc.name == "" {
+			log.Printf("[agent] stream tool_call idx=%d flushed with EMPTY name (args=%q) — dropped", idx, truncateStr(acc.argsRaw.String(), 120))
 			delete(accs, idx)
 			return
+		}
+		args, argsOK := parseToolArgsJSON(acc.argsRaw.String())
+		raw := strings.TrimSpace(acc.argsRaw.String())
+		// 空参诊断：区分「上游没发分片」(raw="")、「混拼污染」(解析失败) 与「合法空对象」({})。
+		if !argsOK {
+			log.Printf("[agent] stream tool_call %s (idx=%d) argument fragments invalid JSON: %q", acc.name, idx, truncateStr(raw, 200))
+		} else if raw == "" {
+			log.Printf("[agent] stream tool_call %s (idx=%d) received NO argument fragments", acc.name, idx)
 		}
 		tc := agentAPI.ToolCall{
 			ID:        acc.id,
 			Name:      acc.name,
-			Arguments: parseToolArgsJSON(acc.argsRaw.String()),
+			Arguments: args,
 		}
 		resp.ToolCalls = append(resp.ToolCalls, tc)
 		delete(accs, idx)
@@ -446,9 +458,16 @@ func accumulateStream(ctx context.Context, ch <-chan agentAPI.StreamChunk, a *Ag
 				}
 			}
 
-			// 增量 tool call 分片：OpenAI 风格按 index 拼接 id/name/arguments
-			for i, tc := range ck.ToolCalls {
-				idx := i
+			// 增量 tool call 分片：OpenAI 风格按 index 字段拼接 id/name/arguments。
+			// 注意必须用分片自带的 StreamIndex（上游 JSON "index"），不能用 Go
+			// range 序号：每个 SSE chunk 通常只含一个 tool_call 元素，slice 序号
+			// 恒为 0，并行多工具调用（index=0,1,2...）的分片会全部污染到同一个桶，
+			// 导致 name 相互覆盖、args 碎片混拼解析失败（空参数工具调用）。
+			for _, tc := range ck.ToolCalls {
+				idx := tc.StreamIndex
+				if idx == 0 && tc.Name == "" && tc.RawArguments == "" {
+					continue
+				}
 				acc := accs[idx]
 				if acc == nil {
 					acc = &toolCallAcc{}
@@ -483,16 +502,17 @@ func accumulateStream(ctx context.Context, ch <-chan agentAPI.StreamChunk, a *Ag
 }
 
 // parseToolArgsJSON 将经过完整拼接的 tool call arguments JSON 字符串解析为 map。
-// 空字符串返回空 map。
-func parseToolArgsJSON(s string) map[string]interface{} {
-	if s == "" {
-		return map[string]interface{}{}
+// 第二个返回值 ok=false 表示分片拼接结果不是合法 JSON（分片污染/丢失），
+// 与「合法的空对象 {}」相区分。
+func parseToolArgsJSON(s string) (map[string]interface{}, bool) {
+	if strings.TrimSpace(s) == "" {
+		return map[string]interface{}{}, true
 	}
 	var m map[string]interface{}
 	if err := json.Unmarshal([]byte(s), &m); err == nil && m != nil {
-		return m
+		return m, true
 	}
-	return map[string]interface{}{}
+	return map[string]interface{}{}, false
 }
 
 func convertToolCalls(tcs []agentAPI.ToolCall) []sdk.ToolCall {
