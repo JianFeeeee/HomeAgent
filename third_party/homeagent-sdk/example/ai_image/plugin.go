@@ -5,7 +5,10 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"log"
 	"net/http"
+	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"time"
@@ -22,6 +25,7 @@ type Plugin struct {
 	model   string
 	size    string
 	baseURL string
+	dataDir string // <data>/ai_images：生成本地图片存放目录
 }
 
 func NewPluginFactory(name string, config map[string]interface{}) (sdk.Plugin, error) {
@@ -139,9 +143,21 @@ func (p *Plugin) Start(s *sdk.PluginSDK) error {
 	p.size = getSetting(s.Settings(), "size", "1024x1024")
 	p.baseURL = strings.TrimRight(strings.TrimSpace(getSetting(s.Settings(), "base_url", "")), "/")
 
+// 生图本地存放目录：插件专属数据目录（SDK DataDir API，内核保证存在）。
+if p.sdk != nil {
+	if dd := s.Settings().DataDir(); dd != "" {
+		p.dataDir = dd
+	}
+}
+if p.dataDir == "" {
+	// 旧版内核无 DataDir API 时退到 /tmp
+	p.dataDir = filepath.Join(os.TempDir(), "homeagent_ai_images")
+}
+os.MkdirAll(p.dataDir, 0755)
+
 	tp := p.name + "_"
 	s.RegisterTool(tp+"generate", sdk.ToolDef{
-		Name: tp + "generate", Description: "Generate image from text prompt using AI. Returns image URL.",
+		Name: tp + "generate", Description: "Generate image from text prompt using AI. Downloads the result locally and returns a local file path (permanent, no expiry). To show the user, send it via output_send with type=image and payload=the returned path.",
 		Parameters: map[string]interface{}{
 			"type": "object",
 			"properties": map[string]interface{}{
@@ -232,6 +248,7 @@ func (p *Plugin) generateOpenAI(prompt, model, size string, n int, apiKey string
 		ResponseFormat: "url",
 	}
 
+	log.Printf("[ai_image] endpoint=%s baseURL=%q model=%q", endpoint, p.baseURL, model)
 	b, _ := json.Marshal(body)
 	req, _ := http.NewRequest("POST", endpoint, bytes.NewReader(b))
 	req.Header.Set("Content-Type", "application/json")
@@ -262,12 +279,72 @@ func (p *Plugin) generateOpenAI(prompt, model, size string, n int, apiKey string
 		urls[i] = d.URL
 	}
 
+	// 下载到本地 data 目录，返回本地文件路径（而非临时 S3 URL）：
+	// - S3 临时 URL 约 1 小时过期，且对无浏览器 UA 的客户端拒绝访问
+	// - 本地路径可经 webui /files/ 永久下发给所有客户端（含 API key 客户端）
+	localPaths := make([]string, len(urls))
+	var errs []string
+	for i, u := range urls {
+		path, err := p.downloadImage(u, fmt.Sprintf("ai_%s_%d", model, time.Now().UnixNano()))
+		if err != nil {
+			errs = append(errs, fmt.Sprintf("第%d张下载失败: %v", i+1, err))
+			continue
+		}
+		localPaths[i] = path
+	}
+
+	content := fmt.Sprintf("Generated %d image(s) with model %s:", len(urls), model)
+	for _, pth := range localPaths {
+		if pth != "" {
+			content += "\n" + pth
+		}
+	}
+	if len(errs) > 0 {
+		content += "\n\n" + strings.Join(errs, "\n")
+	}
+	content += "\n\n已将图片保存到本地（不会过期）。如需展示请用 output_send__webui(payload=本地路径, type=image)。"
 	return map[string]interface{}{
-		"content": fmt.Sprintf("Generated %d image(s) with model %s:\n%s", len(urls), model, strings.Join(urls, "\n")),
-		"images":  urls,
-		"prompt":  prompt,
-		"model":   model,
+		"content":     content,
+		"images":      localPaths,
+		"prompt":      prompt,
+		"model":       model,
+		"local_paths": localPaths,
 	}, nil
+}
+
+// downloadImage 把生图返回的临时 URL 下载为本地文件，返回本地路径。
+// 带浏览器 UA 以规避图床对无 UA 客户端的拦截。
+func (p *Plugin) downloadImage(url, baseName string) (string, error) {
+	dl := &http.Client{Timeout: 60 * time.Second}
+	req, err := http.NewRequest("GET", url, nil)
+	if err != nil {
+		return "", err
+	}
+	req.Header.Set("User-Agent", "Mozilla/5.0 (compatible; HomeAgent/1.0)")
+	resp, err := dl.Do(req)
+	if err != nil {
+		return "", err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		b, _ := io.ReadAll(resp.Body)
+		return "", fmt.Errorf("HTTP %d: %s", resp.StatusCode, strings.TrimSpace(string(b))[:200])
+	}
+	data, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return "", err
+	}
+	ext := ".png"
+	if ct := resp.Header.Get("Content-Type"); strings.Contains(ct, "jpeg") || strings.Contains(ct, "jpg") {
+		ext = ".jpg"
+	} else if strings.Contains(ct, "webp") {
+		ext = ".webp"
+	}
+	path := filepath.Join(p.dataDir, baseName+ext)
+	if err := os.WriteFile(path, data, 0644); err != nil {
+		return "", err
+	}
+	return path, nil
 }
 
 type stabilityReq struct {
@@ -349,7 +426,7 @@ func (p *Plugin) generateStability(prompt, model, size string, n int, apiKey str
 	}
 
 	return map[string]interface{}{
-		"content": fmt.Sprintf("Generated %d image(s) via Stability AI:\n%s", len(urls), strings.Join(urls, "\n")),
+		"content": fmt.Sprintf("Generated %d image(s) via Stability AI:\n%s\n\n图片已保存到本地，如需展示请用 output_send(type=image)。", len(urls), strings.Join(urls, "\n")),
 		"images":  urls,
 		"prompt":  prompt,
 		"model":   model,

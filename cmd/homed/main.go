@@ -358,6 +358,7 @@ func main() {
 	pluginReg.SetProviderManager(providerMgr)
 	pluginReg.SetConfigRegistry(cfgReg)
 	pluginReg.SetPluginDir(cfg.Plugin.Dir)
+	pluginReg.SetDataDir(*dataDir) // 插件 SettingsAPI.DataDir() 的数据根目录
 
 	// Wire registration callbacks: plugins' RegisterTool/RegisterStage → StageHost
 	pluginReg.SetToolRegistrar(func(name string, def sdk.ToolDef, handler sdk.ToolHandler) error {

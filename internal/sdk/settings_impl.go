@@ -10,11 +10,18 @@ import (
 type settingsImpl struct {
 	pluginName string
 	reg        *internalConfig.ConfigRegistry
+	dataDir    string
 }
 
 func NewSettings(name string, reg *internalConfig.ConfigRegistry) SettingsAPI {
 	return &settingsImpl{pluginName: name, reg: reg}
 }
+
+// SetDataDir 注入本插件的数据目录（内核装配时调用）。
+func (s *settingsImpl) SetDataDir(dir string) { s.dataDir = dir }
+
+// DataDir 返回插件专属数据目录 <data>/plugin_data/<name>，保证目录存在。
+func (s *settingsImpl) DataDir() string { return s.dataDir }
 
 func (s *settingsImpl) Get(key string) (interface{}, error) {
 	if s.reg == nil {

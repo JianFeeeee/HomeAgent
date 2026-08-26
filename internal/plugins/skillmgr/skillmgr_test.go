@@ -19,6 +19,8 @@ import (
 
 type nilSettings struct{}
 
+func (m *nilSettings) DataDir() string { return "/tmp/mock_data" }
+
 func (m *nilSettings) Get(string) (interface{}, error)                    { return nil, nil }
 func (m *nilSettings) Set(string, interface{}) error                      { return nil }
 func (m *nilSettings) List(string) ([]string, error)                      { return nil, nil }
