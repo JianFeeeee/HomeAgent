@@ -707,6 +707,9 @@ func (p *Plugin) fetchWithChromium(rawURL string, maxChars int) (interface{}, er
 	}, nil
 }
 
+// handleRender 无头渲染 JS 页面并提取文本（normal 模式）。
+// 主路径走共享浏览器后端：开临时标签页（带全机登录态）→ 渲染 → 取 text → 关标签页；
+// 后端不可用时 failback 到独立 chromium --dump-dom（无登录态，仅保功能）。
 func (p *Plugin) handleRender(args map[string]interface{}) (interface{}, error) {
 	rawURL := readArg(args, "url", "")
 	if rawURL == "" {
@@ -716,32 +719,69 @@ func (p *Plugin) handleRender(args map[string]interface{}) (interface{}, error) 
 		return errResult(err.Error()), nil
 	}
 	waitSec := int64(readArg(args, "wait", float64(0)))
-	if waitSec > 0 {
-		time.Sleep(time.Duration(waitSec) * time.Second)
+
+	var title, html string
+	rendered := false
+
+	ok, needInstall, _ := p.ensureBackend()
+	if ok {
+		remoteCtx, remoteCancel := chromedp.NewRemoteAllocator(context.Background(), cdpEndpoint)
+		defer remoteCancel()
+		tabCtx, tabCancel := chromedp.NewContext(remoteCtx)
+		defer tabCancel()
+		actions := []chromedp.Action{
+			chromedp.Navigate(rawURL),
+			chromedp.WaitReady("body"),
+		}
+		if waitSec > 0 {
+			actions = append(actions, chromedp.Sleep(time.Duration(waitSec)*time.Second))
+		}
+		actions = append(actions,
+			chromedp.Title(&title),
+			chromedp.OuterHTML("html", &html),
+		)
+		// 整体限时 30s，防慢页拖死工具
+		rctx, rcancel := context.WithTimeout(tabCtx, 30*time.Second)
+		defer rcancel()
+		if err := chromedp.Run(rctx, actions...); err == nil {
+			rendered = true
+		} else {
+			log.Printf("[%s] render via backend failed (%v), fallback to dump-dom", p.name, err)
+		}
+	} else if needInstall {
+		return map[string]interface{}{
+			"error":        "browser backend not installed",
+			"need_install": true,
+			"guide":        "调用 browser_install 安装共享后端；或重试本工具自动降级为独立 chromium 渲染（不带登录态）",
+		}, nil
 	}
-	var html string
-	chromiumPath := "/usr/local/bin/chromium"
-	if _, err := os.Stat(chromiumPath); err == nil {
+
+	if !rendered {
+		chromiumPath := "/usr/local/bin/chromium"
+		if _, err := os.Stat(chromiumPath); err != nil {
+			if _, e2 := exec.LookPath("chromium"); e2 == nil {
+				chromiumPath = "chromium"
+			} else {
+				return errResult("no chromium available"), nil
+			}
+		}
 		var out bytes.Buffer
 		cmd := exec.Command(chromiumPath, "--headless", "--disable-gpu", "--no-sandbox", "--dump-dom", rawURL)
 		cmd.Stdout = &out
-		if err := cmd.Run(); err != nil {
-			return errResult("chromium: " + err.Error()), nil
+		done := make(chan error, 1)
+		go func() { done <- cmd.Run() }()
+		select {
+		case err := <-done:
+			if err != nil {
+				return errResult("chromium: " + err.Error()), nil
+			}
+		case <-time.After(30 * time.Second):
+			cmd.Process.Kill()
+			return errResult("chromium dump-dom timeout (30s)"), nil
 		}
 		html = out.String()
-	} else {
-		resp, err := http.Get(rawURL)
-		if err != nil {
-			return errResult("http get: " + err.Error()), nil
-		}
-		defer resp.Body.Close()
-		body, _ := io.ReadAll(resp.Body)
-		html = string(body)
 	}
-	title := ""
-	if m := regexp.MustCompile(`<title>([^<]+)</title>`).FindStringSubmatch(html); len(m) > 1 {
-		title = m[1]
-	}
+
 	text := htmlToText(html)
 	origLen := len(text)
 	truncated := origLen > 5000
@@ -756,17 +796,13 @@ func (p *Plugin) handleRender(args map[string]interface{}) (interface{}, error) 
 	if truncated {
 		result += fmt.Sprintf("\n\n...(仅显示前 5000 字符，共 %d 字符)", origLen)
 	}
-	return map[string]interface{}{"content": result, "title": title}, nil
+	mode := "backend-tab"
+	if !rendered {
+		mode = "local-dump-dom"
+	}
+	return map[string]interface{}{"content": result, "title": title, "mode": mode}, nil
 }
 
-// ── Interactive Browser Session (CDP) ─────────────────────
-
-// ── 共享浏览器后端（systemd 托管）+ 本地 spawn failback ──────────
-
-// cdpEndpoint 是共享 Chromium 后端的 CDP 地址（homeagent-browser.service）。
-const cdpEndpoint = "http://127.0.0.1:9222"
-
-// cdpReachable 探测浏览器后端是否在线（GET /json/version）。
 func cdpReachable(endpoint string) bool {
 	client := &http.Client{Timeout: 2 * time.Second}
 	resp, err := client.Get(endpoint + "/json/version")
@@ -787,6 +823,9 @@ func systemdUnitInstalled() bool {
 func startSystemdUnit() error {
 	return exec.Command("systemctl", "start", "homeagent-browser.service").Run()
 }
+
+// cdpEndpoint 是共享 Chromium 后端的 CDP 地址（homeagent-browser.service）。
+const cdpEndpoint = "http://127.0.0.1:9222"
 
 // ensureBackend 确保共享浏览器后端可用：探测 → 拉起已装服务 → 报告未装。
 // 返回 (ok, needInstall, err)。
