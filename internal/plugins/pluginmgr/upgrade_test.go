@@ -35,6 +35,8 @@ func TestCmpVersion(t *testing.T) {
 
 type pmSettings struct{}
 
+func (m *pmSettings) DataDir() string { return "/tmp/mock_data" }
+
 func (m *pmSettings) Get(string) (interface{}, error)               { return nil, nil }
 func (m *pmSettings) Set(string, interface{}) error                 { return nil }
 func (m *pmSettings) List(string) ([]string, error)                 { return nil, nil }

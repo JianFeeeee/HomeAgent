@@ -13,6 +13,8 @@ import (
 // mockSettings implements pubsdk.SettingsAPI for tests
 type mockSettings struct{}
 
+func (m *mockSettings) DataDir() string { return "/tmp/mock_data" }
+
 func (m *mockSettings) Get(key string) (interface{}, error) { return nil, nil }
 func (m *mockSettings) Set(key string, value interface{}) error { return nil }
 func (m *mockSettings) List(prefix string) ([]string, error) { return nil, nil }

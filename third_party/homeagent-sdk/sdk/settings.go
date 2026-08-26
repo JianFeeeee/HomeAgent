@@ -19,6 +19,11 @@ type SettingsAPI interface {
 	// ListCore lists core config keys matching the prefix.
 	ListCore(prefix string) ([]string, error)
 
+	// DataDir returns the plugin-specific data directory (guaranteed to exist):
+	// <daemon data>/plugin_data/<plugin_name>. Plugins should persist any
+	// runtime files (generated images, caches, downloads) here.
+	DataDir() string
+
 	// GetPlugin reads another plugin's config table.
 	GetPlugin(plugin, key string) (interface{}, error)
 
