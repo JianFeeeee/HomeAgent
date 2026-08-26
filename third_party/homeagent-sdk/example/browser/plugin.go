@@ -777,6 +777,7 @@ func (p *Plugin) handleRender(args map[string]interface{}) (interface{}, error) 
 			}
 		case <-time.After(30 * time.Second):
 			cmd.Process.Kill()
+			<-done // 回收子进程避免僵尸
 			return errResult("chromium dump-dom timeout (30s)"), nil
 		}
 		html = out.String()
