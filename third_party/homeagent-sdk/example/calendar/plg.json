@@ -1,0 +1,20 @@
+{
+  "name": "calendar",
+  "name_zh": "日历",
+  "name_en": "Calendar",
+  "version": "1.1.0",
+  "description": "日历事件管理，支持提醒和重复事件",
+  "author": "HomeAgent",
+  "entry": "plugin.so",
+  "tags": [
+    "calendar",
+    "event",
+    "reminder",
+    "schedule"
+  ],
+  "targets": "linux/amd64",
+  "outdir": "dist",
+  "bundle": true,
+  "replaces": {},
+  "source_dirs": []
+}
