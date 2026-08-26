@@ -1,0 +1,20 @@
+{
+  "name": "ai_image",
+  "name_zh": "AI绘图",
+  "name_en": "AI Image",
+  "version": "1.1.0",
+  "description": "AI 图像生成插件，支持 OpenAI DALL·E / Stable Diffusion",
+  "author": "HomeAgent",
+  "entry": "plugin.so",
+  "tags": [
+    "ai",
+    "image",
+    "draw",
+    "generate"
+  ],
+  "targets": "linux/amd64",
+  "outdir": "dist",
+  "bundle": true,
+  "replaces": {},
+  "source_dirs": []
+}
