@@ -720,6 +720,13 @@ func (h *Handler) requireAPI(fn http.HandlerFunc) http.HandlerFunc {
 
 func (h *Handler) requireWeb(fn http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
+		// API key 客户端（ArkTS/GUI 远程连接）与 cookie session 同等放行：
+		// agent 输出的 /files/、/uploads/ 附件 URL 会被非浏览器客户端直接加载，
+		// 它们没有也不应有 web 登录态。
+		if h.validAPIKey(r) {
+			fn(w, r)
+			return
+		}
 		_, username, password, _ := h.getWebUIConfig()
 		if username == "" || password == "" {
 			http.Error(w, "webui username/password not configured", http.StatusServiceUnavailable)
