@@ -71,6 +71,7 @@ func (p *Plugin) Start(s *sdk.PluginSDK) error {
 			"properties": map[string]interface{}{
 				"server_url": map[string]interface{}{"type": "string", "description": "目标 ACP 服务端地址（如 http://127.0.0.1:13000）"},
 				"prompt":     map[string]interface{}{"type": "string", "description": "发送给目标 Agent 的任务描述"},
+				"session_id": map[string]interface{}{"type": "string", "description": "可选。上次调用返回的 session_id，传入可延续与该 agent 的多轮对话上下文"},
 				"timeout":    map[string]interface{}{"type": "integer", "description": "等待回复超时（秒），默认 120"},
 			},
 			"required": []string{"server_url", "prompt"},
@@ -184,6 +185,7 @@ func (p *Plugin) handleSessionPost(w http.ResponseWriter, r *http.Request) {
 				Text string `json:"text"`
 			} `json:"request,omitempty"`
 			SessionID string `json:"session_id,omitempty"`
+			Limit     int    `json:"limit,omitempty"`
 			Final     bool   `json:"final,omitempty"`
 		} `json:"params,omitempty"`
 	}
@@ -253,6 +255,59 @@ func (p *Plugin) handleSessionPost(w http.ResponseWriter, r *http.Request) {
 			"result": map[string]interface{}{
 				"session": map[string]interface{}{"id": sid},
 				"reply":   reply,
+			},
+		})
+
+	case "session/get":
+		// 按 session_id 返回会话内近 N 条消息（默认 10 条，时间正序）
+		sid := req.Params.SessionID
+		p.mu.RLock()
+		st := p.sessions[sid]
+		var hist []string
+		if st != nil {
+			hist = append([]string{}, st.History...)
+		}
+		p.mu.RUnlock()
+		if st == nil {
+			w.Header().Set("Content-Type", "application/json")
+			json.NewEncoder(w).Encode(map[string]interface{}{
+				"jsonrpc": "2.0", "id": req.ID,
+				"result": map[string]interface{}{
+					"session_id": sid,
+					"status":     "not_found",
+					"messages":   []interface{}{},
+				},
+			})
+			return
+		}
+		limit := 10
+		if req.Params.Limit > 0 && req.Params.Limit <= 100 {
+			limit = req.Params.Limit
+		}
+		start := 0
+		if len(hist) > limit {
+			start = len(hist) - limit
+		}
+		msgs := make([]map[string]interface{}, 0, len(hist)-start)
+		for i := start; i < len(hist); i++ {
+			role, text := "user", hist[i]
+			if after, ok := strings.CutPrefix(text, "用户: "); ok {
+				role, text = "user", after
+			} else if after, ok := strings.CutPrefix(text, "助手: "); ok {
+				role, text = "agent", after
+			}
+			msgs = append(msgs, map[string]interface{}{
+				"role": role,
+				"text": text,
+			})
+		}
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"jsonrpc": "2.0", "id": req.ID,
+			"result": map[string]interface{}{
+				"session_id": sid,
+				"status":     "completed",
+				"messages":   msgs,
 			},
 		})
 
@@ -391,6 +446,7 @@ func (p *Plugin) handleAcpQuery(args map[string]interface{}) (interface{}, error
 	if prompt == "" {
 		return map[string]interface{}{"error": "prompt 不能为空"}, nil
 	}
+	sessionID, _ := args["session_id"].(string) // 可选：延续对方会话
 	timeoutSec := 120
 	if v, ok := args["timeout"].(float64); ok && v > 0 {
 		timeoutSec = int(v)
@@ -399,12 +455,16 @@ func (p *Plugin) handleAcpQuery(args map[string]interface{}) (interface{}, error
 	endpoint := serverURL + "/api/session"
 	client := &http.Client{Timeout: time.Duration(timeoutSec) * time.Second}
 
+	params := map[string]interface{}{
+		"request": map[string]interface{}{"text": prompt},
+	}
+	if sessionID != "" {
+		params["session_id"] = sessionID
+	}
 	newBody, _ := json.Marshal(map[string]interface{}{
 		"jsonrpc": "2.0", "id": "acp-" + fmt.Sprintf("%d", time.Now().UnixNano()),
 		"method": "session/new",
-		"params": map[string]interface{}{
-			"request": map[string]interface{}{"text": prompt},
-		},
+		"params": params,
 	})
 
 	req, _ := http.NewRequest("POST", endpoint, bytes.NewReader(newBody))
@@ -469,6 +529,7 @@ func (p *Plugin) handleAcpQuery(args map[string]interface{}) (interface{}, error
 		"session_id": sid,
 		"status":     "completed",
 		"reply":      replyText,
+		"note":       "延续会话：下次调用传此 session_id 可保持上下文",
 	}, nil
 }
 
