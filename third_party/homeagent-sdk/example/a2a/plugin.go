@@ -21,14 +21,46 @@ type Plugin struct {
 	srvMu      sync.Mutex
 	server     *http.Server
 	serverAddr string
+
+	// 会话表：session_id → 上下文前缀。A2A 无状态协议下由插件侧维护
+	// 多轮上下文：同 session 的后续请求会把之前的对话拼进注入文本。
+	sessMu    sync.Mutex
+	sessions  map[string]*a2aSession
 }
+
+// a2aSession 记录一个会话的轮次历史，用于延续上下文。
+type a2aSession struct {
+	ID       string
+	History  []string // 轮次文本 [user1, agent1, user2, agent2, ...]
+	LastUsed time.Time
+}
+
+// maxSessionTurns 单会话保留的最大轮次对数（防上下文无限膨胀）。
+const maxSessionTurns = 10
+
+// sessionGCPeriod 会话过期清理周期；超过 2 小时未用的会话回收。
+const sessionGCPeriod = 30 * time.Minute
 
 func (p *Plugin) Name() string { return p.name }
 
 func (p *Plugin) Start(s *sdk.PluginSDK) error {
 	s.SetAutoRestart(true)
 	p.sdk = s
+	p.sessions = make(map[string]*a2aSession)
 	tp := p.name + "_"
+
+	// 注册自身为输出通道：agent 回复 emit 到本通道时有落点，
+	// 且 output_list_channels 可见（agent 能主动向 a2a 会话推送消息）。
+	if err := s.RegisterOutputChannel(p.name, 1, "A2A Agent 互联通道（外部 agent 查询的回复由此返回）", sdk.ChannelDef{}, func(args map[string]interface{}) (interface{}, error) {
+		payload, _ := args["payload"].(string)
+		log.Printf("[%s] channel output: %s", p.name, truncateRunes(payload, 120))
+		return map[string]interface{}{"status": "ok"}, nil
+	}); err != nil {
+		log.Printf("[%s] register output channel: %v", p.name, err)
+	}
+
+	// 会话 GC：后台周期回收长期不用的会话
+	go p.sessionGCLoop()
 
 	s.Settings().RegisterDef(sdk.ConfigDef{
 		Key: "listen", Default: "127.0.0.1:12000",
@@ -114,6 +146,29 @@ func (p *Plugin) Stop() error {
 	return nil
 }
 
+// sessionGCLoop 周期清理超时会话。
+func (p *Plugin) sessionGCLoop() {
+	ticker := time.NewTicker(sessionGCPeriod)
+	defer ticker.Stop()
+	for range ticker.C {
+		p.sessMu.Lock()
+		for id, sess := range p.sessions {
+			if time.Since(sess.LastUsed) > 2*time.Hour {
+				delete(p.sessions, id)
+			}
+		}
+		p.sessMu.Unlock()
+	}
+}
+
+func truncateRunes(s string, n int) string {
+	r := []rune(s)
+	if len(r) <= n {
+		return s
+	}
+	return string(r[:n]) + "..."
+}
+
 func (p *Plugin) stopServer() {
 	p.srvMu.Lock()
 	defer p.srvMu.Unlock()
@@ -191,7 +246,8 @@ func (p *Plugin) handleIncomingA2A(w http.ResponseWriter, r *http.Request) {
 		ID      string `json:"id"`
 		Method  string `json:"method"`
 		Params  struct {
-			Query   string `json:"query,omitempty"`
+			Query     string `json:"query,omitempty"`
+			SessionID string `json:"session_id,omitempty"`
 			Message *struct {
 				Role  string `json:"role"`
 				Parts []struct {
@@ -215,19 +271,60 @@ func (p *Plugin) handleIncomingA2A(w http.ResponseWriter, r *http.Request) {
 			}
 			queryText = strings.TrimSpace(queryText)
 		}
-
-		// Inject into agent pipeline via interrupt (preempt current processing) or direct input
-		if queryText != "" {
-			p.sdk.InjectInterruptText("a2a", "webui", fmt.Sprintf("[来自A2A Agent的查询]\n%s", queryText))
+		if queryText == "" {
+			http.Error(w, "query/message.text required", http.StatusBadRequest)
+			return
 		}
 
-		// Respond with task accepted
+		// 会话：调用方可指定 session_id 延续多轮上下文；不指定则新建。
+		sessionID := strings.TrimSpace(req.Params.SessionID)
+		injectText := queryText
+		p.sessMu.Lock()
+		if sessionID != "" {
+			sess := p.sessions[sessionID]
+			if sess == nil {
+				sess = &a2aSession{ID: sessionID, LastUsed: time.Now()}
+				p.sessions[sessionID] = sess
+			}
+			sess.LastUsed = time.Now()
+			// 有历史则把上下文拼在前面（截尾防爆量）
+			if len(sess.History) > 0 {
+				ctxText := strings.Join(sess.History, "\n")
+				injectText = "[对话上下文]\n" + ctxText + "\n[本轮输入]\n" + queryText
+			}
+		} else {
+			sessionID = fmt.Sprintf("a2a_%d", time.Now().UnixNano())
+			p.sessions[sessionID] = &a2aSession{ID: sessionID, LastUsed: time.Now()}
+		}
+		p.sessMu.Unlock()
+
+		// 同步注入：阻塞等待 agent 处理完成拿回复（不再抢占打断、
+		// 也不再回 202 让请求方永远等不到结果）。HTTP 超时由调用方控制。
+		reply := p.sdk.InjectInputSync(p.name, p.name,
+			fmt.Sprintf("[来自A2A Agent的查询 session=%s]\n%s\n[注意] 请直接以文本回复本查询，不要调用 output_send__%s——你的最终文本回复会被系统自动返回给请求方。", sessionID, injectText, p.name))
+
+		// 回复写回会话历史（下一轮作为上下文）
+		p.sessMu.Lock()
+		if sess := p.sessions[sessionID]; sess != nil {
+			sess.History = append(sess.History, "用户: "+queryText, "助手: "+reply)
+			if len(sess.History) > maxSessionTurns*2 {
+				sess.History = sess.History[len(sess.History)-maxSessionTurns*2 :]
+			}
+			sess.LastUsed = time.Now()
+		}
+		p.sessMu.Unlock()
+
 		resp := map[string]interface{}{
 			"jsonrpc": "2.0",
 			"id":      req.ID,
 			"result": map[string]interface{}{
 				"id":     fmt.Sprintf("task_%d", time.Now().UnixNano()),
-				"status": "submitted",
+				"status": "completed",
+				"session_id": sessionID,
+				"message": map[string]interface{}{
+					"role": "agent",
+					"parts": []map[string]string{{"type": "text", "text": reply}},
+				},
 			},
 		}
 		w.Header().Set("Content-Type", "application/json")
