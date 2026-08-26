@@ -27,7 +27,7 @@
       }, 8000);
     </script>
     <style>
-                  :root {
+      :root {
         /* ===== NapCat Design DNA tokens ===== */
         --sakura-100: #ffe4e9;
         --sakura-200: #ffcdd9;
@@ -53,17 +53,20 @@
         --shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.25);
         --shadow-md: 0 4px 16px rgba(0, 0, 0, 0.28);
         --shadow-lg: 0 12px 36px rgba(0, 0, 0, 0.38);
-        --shadow-glow: 0 0 0 1px rgba(255, 127, 172, 0.4),
+        --shadow-glow:
+          0 0 0 1px rgba(255, 127, 172, 0.4),
           0 4px 20px rgba(255, 127, 172, 0.18);
         --radius-sm: 6px;
         --radius-md: 10px;
         --radius-lg: 14px;
         --radius-pill: 999px;
---font-sans: "Segoe UI", "Segoe UI Variable Text", -apple-system,
+        --font-sans:
+          "Segoe UI", "Segoe UI Variable Text", -apple-system,
           BlinkMacSystemFont, Roboto, "PingFang SC", "Hiragino Sans GB",
           "Microsoft YaHei UI", "Microsoft YaHei", sans-serif;
-        --font-mono: "JetBrains Mono", ui-monospace, "SFMono-Regular",
-          "SF Mono", "Menlo", "Consolas", monospace;
+        --font-mono:
+          "JetBrains Mono", ui-monospace, "SFMono-Regular", "SF Mono", "Menlo",
+          "Consolas", monospace;
         --ease-out: cubic-bezier(0.22, 1, 0.36, 1);
         --dur-micro: 150ms;
         --dur-normal: 300ms;
@@ -90,7 +93,7 @@
         --msg-user-color: #ffb9d0;
         --msg-assistant-bg: rgba(136, 192, 208, 0.14);
         --msg-assistant-color: #a9d6e3;
---msg-system-bg: rgba(63, 110, 245, 0.16);
+        --msg-system-bg: rgba(63, 110, 245, 0.16);
         --msg-system-color: #a3b8ff;
         --msg-bubble-bg: #161b2e;
         --msg-bubble-color: #e9edf6;
@@ -99,7 +102,7 @@
         --btn-ghost-border: rgba(255, 255, 255, 0.14);
         --btn-ghost-hover-bg: rgba(255, 255, 255, 0.07);
         --save-btn-border: #d99a2b;
---loading-border: rgba(255, 255, 255, 0.12);
+        --loading-border: rgba(255, 255, 255, 0.12);
         --loading-top: #ff7fac;
         --grad-a: rgba(255, 127, 172, 0.14);
         --grad-b: rgba(136, 192, 208, 0.12);
@@ -111,7 +114,7 @@
         --c-amber: #fbbf24;
         --c-blue: #60a5fa;
       }
-[data-theme="light"] {
+      [data-theme="light"] {
         --glass-bg: rgba(255, 255, 255, 0.66);
         --glass-bg-strong: rgba(255, 255, 255, 0.88);
         --glass-border: rgba(255, 127, 172, 0.22);
@@ -119,8 +122,8 @@
         --shadow-sm: 0 1px 3px rgba(153, 27, 75, 0.08);
         --shadow-md: 0 6px 20px rgba(153, 27, 75, 0.1);
         --shadow-lg: 0 16px 40px rgba(153, 27, 75, 0.14);
-        --shadow-glow: 0 0 0 1px rgba(243, 59, 124, 0.3),
-          0 6px 22px rgba(243, 59, 124, 0.14);
+        --shadow-glow:
+          0 0 0 1px rgba(243, 59, 124, 0.3), 0 6px 22px rgba(243, 59, 124, 0.14);
         --bg-primary: #ffffff;
         --bg-secondary: rgba(255, 255, 255, 0.78);
         --bg-card: rgba(255, 255, 255, 0.72);
@@ -143,7 +146,7 @@
         --msg-user-color: #c2185b;
         --msg-assistant-bg: #e3f2f6;
         --msg-assistant-color: #2f7188;
---msg-system-bg: #e6ecfe;
+        --msg-system-bg: #e6ecfe;
         --msg-system-color: #3f6ef5;
         --msg-bubble-bg: #ffffff;
         --msg-bubble-color: #262a33;
@@ -152,7 +155,7 @@
         --btn-ghost-border: rgba(201, 36, 98, 0.22);
         --btn-ghost-hover-bg: #ffe4e9;
         --save-btn-border: #d99a2b;
---loading-border: rgba(201, 36, 98, 0.18);
+        --loading-border: rgba(201, 36, 98, 0.18);
         --loading-top: #c92462;
         --grad-a: rgba(255, 127, 172, 0.16);
         --grad-b: rgba(136, 192, 208, 0.12);
@@ -300,8 +303,8 @@
         box-sizing: border-box;
         font-family: var(--font-sans);
       }
-            body {
-background:
+      body {
+        background:
           radial-gradient(
             900px 700px at 85% -10%,
             var(--grad-a),
@@ -554,7 +557,9 @@ background:
         margin: 3px;
         padding: 0;
         vertical-align: middle;
-        transition: transform 0.15s, box-shadow 0.15s;
+        transition:
+          transform 0.15s,
+          box-shadow 0.15s;
       }
       .palette-pop button.cdot:hover {
         transform: scale(1.25);
@@ -800,7 +805,11 @@ background:
         transform: scale(0.96);
       }
       .btn-primary {
-        background: linear-gradient(120deg, var(--sakura-400), var(--sakura-500));
+        background: linear-gradient(
+          120deg,
+          var(--sakura-400),
+          var(--sakura-500)
+        );
         color: #fff;
         box-shadow: 0 2px 12px rgba(255, 127, 172, 0.35);
       }
@@ -1441,14 +1450,23 @@ background:
         height: 2px;
         border-radius: 2px;
         margin-top: 6px;
-        background: linear-gradient(90deg, transparent, var(--accent), transparent);
+        background: linear-gradient(
+          90deg,
+          transparent,
+          var(--accent),
+          transparent
+        );
         background-size: 200% 100%;
         animation: reasoningSweep 1.2s var(--ease-out) infinite;
         opacity: 0.6;
       }
       @keyframes reasoningSweep {
-        from { background-position: 200% 0; }
-        to { background-position: -200% 0; }
+        from {
+          background-position: 200% 0;
+        }
+        to {
+          background-position: -200% 0;
+        }
       }
 
       /* ===== 工具卡片（PiDeck 风格，扁平不套气泡）===== */
@@ -1462,7 +1480,9 @@ background:
         border: 1px solid var(--kv-border);
         border-left: 3px solid var(--accent);
         cursor: pointer;
-        transition: border-color 0.2s var(--ease-out), background 0.2s var(--ease-out);
+        transition:
+          border-color 0.2s var(--ease-out),
+          background 0.2s var(--ease-out);
       }
       .tool-card.tc-running {
         border-left-color: var(--accent);
@@ -2100,7 +2120,10 @@ background:
         />HomeAgent
       </h1>
       <div class="nav-links">
-        <a class="active" onclick="switchTab('overview')" data-i18n="navOverview"
+        <a
+          class="active"
+          onclick="switchTab('overview')"
+          data-i18n="navOverview"
           >概览</a
         >
         <a onclick="switchTab('chat')" data-i18n="navChat">对话</a>
@@ -2110,16 +2133,24 @@ background:
         <a onclick="switchTab('kernel')" data-i18n="navKernel">内核</a>
       </div>
       <div class="nav-footer">
-        <div
-          style="display: flex; align-items: center; gap: 4px"
-        >
+        <div style="display: flex; align-items: center; gap: 4px">
           <button
             class="theme-btn"
             onclick="toggleTheme()"
             id="theme-btn"
             title="切换亮色/暗色模式"
           >
-            <svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M21 12.8A9 9 0 1 1 11.2 3a7 7 0 0 0 9.8 9.8z"/></svg>
+            <svg
+              viewBox="0 0 24 24"
+              width="15"
+              height="15"
+              fill="none"
+              stroke="currentColor"
+              stroke-width="2"
+              stroke-linecap="round"
+            >
+              <path d="M21 12.8A9 9 0 1 1 11.2 3a7 7 0 0 0 9.8 9.8z" />
+            </svg>
           </button>
           <button
             class="theme-btn"
@@ -2127,7 +2158,23 @@ background:
             id="palette-btn"
             title="外观：主题色 / 背景图"
           >
-            <svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 22a10 10 0 1 1 10-10c0 2.2-1.8 4-4 4h-2a3 3 0 0 0-3 3c0 1.1.9 2 2 2 1.4 0 2.5-1.1 3.6-2.1C19.3 18.5 20 20 21.5 20.5A1 1 0 0 0 22 19c0-4-3.6-7-10-7-5.5 0-9 3.8-9 9z"/><circle cx="7.5" cy="10.5" r="1"/><circle cx="12" cy="7.5" r="1"/><circle cx="16.5" cy="10.5" r="1"/></svg>
+            <svg
+              viewBox="0 0 24 24"
+              width="15"
+              height="15"
+              fill="none"
+              stroke="currentColor"
+              stroke-width="2"
+              stroke-linecap="round"
+              stroke-linejoin="round"
+            >
+              <path
+                d="M12 22a10 10 0 1 1 10-10c0 2.2-1.8 4-4 4h-2a3 3 0 0 0-3 3c0 1.1.9 2 2 2 1.4 0 2.5-1.1 3.6-2.1C19.3 18.5 20 20 21.5 20.5A1 1 0 0 0 22 19c0-4-3.6-7-10-7-5.5 0-9 3.8-9 9z"
+              />
+              <circle cx="7.5" cy="10.5" r="1" />
+              <circle cx="12" cy="7.5" r="1" />
+              <circle cx="16.5" cy="10.5" r="1" />
+            </svg>
           </button>
           <button
             class="btn btn-ghost btn-sm"
@@ -2176,13 +2223,13 @@ background:
         </div>
       </header>
       <div class="container" id="app">
-      <div id="tab-overview" class="tab-content active"></div>
-      <div id="tab-chat" class="tab-content"></div>
-      <div id="tab-plugins" class="tab-content"></div>
-      <div id="tab-settings" class="tab-content"></div>
-      <div id="tab-adapters" class="tab-content"></div>
-      <div id="tab-kernel" class="tab-content"></div>
-    </div>
+        <div id="tab-overview" class="tab-content active"></div>
+        <div id="tab-chat" class="tab-content"></div>
+        <div id="tab-plugins" class="tab-content"></div>
+        <div id="tab-settings" class="tab-content"></div>
+        <div id="tab-adapters" class="tab-content"></div>
+        <div id="tab-kernel" class="tab-content"></div>
+      </div>
     </div>
     <div id="toast" class="toast"></div>
     <script>
@@ -2261,7 +2308,6 @@ background:
       var ICON_MOON =
         '<svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M21 12.8A9 9 0 1 1 11.2 3a7 7 0 0 0 9.8 9.8z"/></svg>';
 
-
       function setTheme(name) {
         document.documentElement.setAttribute("data-theme", name);
         var btn = document.getElementById("theme-btn");
@@ -2284,7 +2330,7 @@ background:
         violet: "#a78bfa",
         emerald: "#34d399",
         amber: "#fbbf24",
-        blue: "#60a5fa"
+        blue: "#60a5fa",
       };
 
       function setColor(name) {
@@ -2294,7 +2340,8 @@ background:
         if (!pop) return;
         var btns = pop.querySelectorAll("button.cdot");
         for (var i = 0; i < btns.length; i++) {
-          btns[i].className = btns[i].getAttribute("data-c") === name ? "cdot on" : "cdot";
+          btns[i].className =
+            btns[i].getAttribute("data-c") === name ? "cdot on" : "cdot";
         }
       }
 
@@ -2307,7 +2354,7 @@ background:
         }
         document.documentElement.style.setProperty(
           "--bg-img",
-          'url("' + url.replace(/"/g, '\\"') + '")'
+          'url("' + url.replace(/"/g, '\\"') + '")',
         );
         localStorage.setItem("ha-bg-img", url);
       }
@@ -2333,20 +2380,35 @@ background:
           var dots = "";
           Object.keys(PALETTES).forEach(function (k) {
             dots +=
-              '<button class="cdot" data-c="' + k + '" title="' + k + '" style="background:' +
-              PALETTES[k] + '"' +
-              (k === cur ? "" : "") + ' onclick="setColor(\'' + k + '\')"></button>';
+              '<button class="cdot" data-c="' +
+              k +
+              '" title="' +
+              k +
+              '" style="background:' +
+              PALETTES[k] +
+              '"' +
+              (k === cur ? "" : "") +
+              " onclick=\"setColor('" +
+              k +
+              "')\"></button>";
           });
           pop.innerHTML =
-            '<h4>主题色</h4><div>' + dots + '</div>' +
+            "<h4>主题色</h4><div>" +
+            dots +
+            "</div>" +
             '<h4 style="margin-top:8px">背景图片 URL</h4>' +
             '<input type="text" id="bg-img-input" placeholder="https://...jpg / png" value="' +
-            escHtml(img) + '">' +
+            escHtml(img) +
+            '">' +
             '<div class="pp-row"><button class="btn btn-ghost btn-sm" onclick="applyBgImg(document.getElementById(\'bg-img-input\').value)">应用</button>' +
             '<button class="btn btn-ghost btn-sm" onclick="applyBgImg(\'\')">清除</button>' +
             '<span class="pp-val" style="margin-left:auto;min-width:90px;font-size:10px">模糊 ' +
-            '<input type="range" id="bg-blur-range" min="0" max="30" value="' + blur + '" oninput="applyBgBlur(this.value)" style="width:80px;display:inline-block;vertical-align:middle">' +
-            '<span id="bg-blur-val">' + blur + 'px</span></span></div>';
+            '<input type="range" id="bg-blur-range" min="0" max="30" value="' +
+            blur +
+            '" oninput="applyBgBlur(this.value)" style="width:80px;display:inline-block;vertical-align:middle">' +
+            '<span id="bg-blur-val">' +
+            blur +
+            "px</span></span></div>";
           setColor(cur);
           var rr = document.getElementById("bg-blur-range");
           if (rr) rr.value = blur;
@@ -2379,7 +2441,10 @@ background:
         if (!n || n <= 0) return "";
         var units = ["B", "KB", "MB", "GB"];
         var i = 0;
-        while (n >= 1024 && i < units.length - 1) { n /= 1024; i++; }
+        while (n >= 1024 && i < units.length - 1) {
+          n /= 1024;
+          i++;
+        }
         return (i === 0 ? n : n.toFixed(1)) + " " + units[i];
       }
 
@@ -2388,14 +2453,21 @@ background:
         if (typeof text !== "string") text = String(text || "");
         var html;
         if (typeof marked !== "undefined") {
-          try { html = marked.parse(text); }
-          catch (e) { html = escHtml(text); }
+          try {
+            html = marked.parse(text);
+          } catch (e) {
+            html = escHtml(text);
+          }
         } else {
           html = "<pre>" + escHtml(text) + "</pre>";
         }
-        if (typeof DOMPurify !== "undefined" && typeof DOMPurify.sanitize === "function") {
-          try { return DOMPurify.sanitize(html, { USE_PROFILES: { html: true } }); }
-          catch (e) {}
+        if (
+          typeof DOMPurify !== "undefined" &&
+          typeof DOMPurify.sanitize === "function"
+        ) {
+          try {
+            return DOMPurify.sanitize(html, { USE_PROFILES: { html: true } });
+          } catch (e) {}
         }
         return html
           .replace(/<script[\s\S]*?<\/script>/gi, "")
@@ -2411,7 +2483,6 @@ background:
           .replace(/"/g, "&quot;");
       }
 
-
       function toast(m, isError) {
         var t = document.getElementById("toast");
         t.textContent = m;
@@ -2425,16 +2496,13 @@ background:
 
       // ===== 8.6 Unified toast + confirm dialog =====
 
-
       // ===== 8.4 Card 3D tilt + cursor glow =====
       document.addEventListener("mousemove", function (e) {
-        var card = e.target.closest
-          ? e.target.closest(".card.tilt")
-          : null;
+        var card = e.target.closest ? e.target.closest(".card.tilt") : null;
         if (card) {
           var r = card.getBoundingClientRect();
-          card.style.setProperty("--mx", (e.clientX - r.left) + "px");
-          card.style.setProperty("--my", (e.clientY - r.top) + "px");
+          card.style.setProperty("--mx", e.clientX - r.left + "px");
+          card.style.setProperty("--my", e.clientY - r.top + "px");
           var rx = ((e.clientY - r.top) / r.height - 0.5) * -4;
           var ry = ((e.clientX - r.left) / r.width - 0.5) * 4;
           card.style.transform =
@@ -2446,9 +2514,7 @@ background:
         }
       });
       document.addEventListener("mouseleave", function (e) {
-        var card = e.target.closest
-          ? e.target.closest(".card.tilt")
-          : null;
+        var card = e.target.closest ? e.target.closest(".card.tilt") : null;
         if (card) card.style.transform = "";
       });
 
@@ -2488,8 +2554,7 @@ background:
         if (match) match.classList.add("active");
         var crumb = document.querySelector(".crumb-current");
         if (crumb) {
-          var crumbKey =
-            "nav" + n.charAt(0).toUpperCase() + n.slice(1);
+          var crumbKey = "nav" + n.charAt(0).toUpperCase() + n.slice(1);
           var m = window._i18n && window._i18n[crumbKey];
           crumb.setAttribute("data-i18n", crumbKey);
           if (m) crumb.textContent = __(m[0], m[1]);
@@ -2585,7 +2650,9 @@ background:
         try {
           if (!window.matchMedia("(hover: none)").matches) {
             document
-              .querySelectorAll("#tab-overview .card, #tab-plugins .card, #tab-kernel .card")
+              .querySelectorAll(
+                "#tab-overview .card, #tab-plugins .card, #tab-kernel .card",
+              )
               .forEach(function (c) {
                 if (!c.querySelector(".tilt-glow")) {
                   var g = document.createElement("span");
@@ -2748,25 +2815,26 @@ background:
           '<span class="active" onclick="switchChatPanel(\'chat\',this)">' +
           __("对话", "Chat") +
           "</span>" +
-          '<span onclick="switchChatPanel(\'starmap\',this)">' +
+          "<span onclick=\"switchChatPanel('starmap',this)\">" +
           __("星图", "Star Map") +
           "</span>" +
-          '<span onclick="switchChatPanel(\'terminal\',this)">' +
+          "<span onclick=\"switchChatPanel('terminal',this)\">" +
           __("终端", "Terminal") +
           "</span>" +
-          '<span onclick="switchChatPanel(\'cmd\',this)">' +
+          "<span onclick=\"switchChatPanel('cmd',this)\">" +
           __("运行中命令", "Running Commands") +
           "</span>" +
-          '<span onclick="switchChatPanel(\'memory\',this)">' +
+          "<span onclick=\"switchChatPanel('memory',this)\">" +
           __("记忆", "Memory") +
           "</span>" +
-          '<span onclick="switchChatPanel(\'context\',this)">' +
+          "<span onclick=\"switchChatPanel('context',this)\">" +
           __("上下文", "Context") +
           "</span>" +
-          '<span onclick="switchChatPanel(\'knowledge\',this)">' +
+          "<span onclick=\"switchChatPanel('knowledge',this)\">" +
           __("知识", "Knowledge") +
           "</span></div>";
-        html += '<div class="chat-panel active" id="chat-panel-chat"><div class="chat-main">';
+        html +=
+          '<div class="chat-panel active" id="chat-panel-chat"><div class="chat-main">';
         html +=
           '<div class="card"><h2>' +
           __("对话", "Chat") +
@@ -2788,7 +2856,9 @@ background:
           '<input type="file" id="chat-file" style="display:none" onchange="sendChatFile(this.files[0])">' +
           '<button class="btn" onclick=\'document.getElementById("chat-file").click()\' id="chat-file-btn" title="' +
           __("发送文件", "Send file") +
-          '" style="padding:0 12px">📎</button>' +
+          '" style="padding:0 12px;display:flex;align-items:center">' +
+          '<svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M21.44 11.05l-9.19 9.19a6 6 0 01-8.49-8.49l9.19-9.19a4 4 0 015.66 5.66l-9.2 9.19a2 2 0 01-2.83-2.83l8.49-8.48"/></svg>' +
+          "</button>" +
           '<input id="chat-input" placeholder="' +
           __("输入消息...", "Type a message...") +
           '" onkeydown="if(event.key==\'Enter\')sendChat()">' +
@@ -2924,9 +2994,7 @@ background:
             "scroll",
             function () {
               state.chatStick =
-                msgsEl.scrollHeight -
-                  msgsEl.scrollTop -
-                  msgsEl.clientHeight <
+                msgsEl.scrollHeight - msgsEl.scrollTop - msgsEl.clientHeight <
                 80;
             },
             { passive: true },
@@ -2942,24 +3010,25 @@ background:
           );
         }
         var msgs = state.messages;
-        var sig = msgs
-          .map(function (m) {
-            var c = m.content || "";
-            return (
-              (m.role || "") +
-              ":" +
-              c.length +
-              ":" +
-              c.slice(-40) +
-              ":" +
-              (m.tool_calls || [])
-                .map(function (t) {
-                  return (t.tool || t.name || "") + "/" + (t.status || "");
-                })
-                .join(",")
-            );
-          })
-          .join("|") +
+        var sig =
+          msgs
+            .map(function (m) {
+              var c = m.content || "";
+              return (
+                (m.role || "") +
+                ":" +
+                c.length +
+                ":" +
+                c.slice(-40) +
+                ":" +
+                (m.tool_calls || [])
+                  .map(function (t) {
+                    return (t.tool || t.name || "") + "/" + (t.status || "");
+                  })
+                  .join(",")
+              );
+            })
+            .join("|") +
           "|L" +
           (state.chatLoading ? "1" : "0") +
           "|P" +
@@ -3023,26 +3092,50 @@ background:
           msgs.forEach(function (m, i) {
             var role = m.role || "user";
             var c = m.content || "";
-            // 附件消息（agent 经 output_send__webui 发送的 image/file）
+            // 附件消息：agent 经 output_send__webui 发送，或用户上传。
+            // 用 role 区分方向（user=右侧你发的 / assistant=左侧小宅发的），
+            // 卡片加来源标签避免混淆。
             if (m.attachment) {
               var att = m.attachment;
+              var isUserAtt = role === "user";
+              var srcLabel = isUserAtt
+                ? __("你发送的", "You sent")
+                : __("小宅发送的", "Sent by agent");
               var attHtml = "";
               if (att.type === "image") {
                 attHtml =
-                  '<a href="' + escHtml(att.url) + '" target="_blank" rel="noopener">' +
-                  '<img class="chat-attachment-img" src="' + escHtml(att.url) + '" ' +
+                  '<a href="' +
+                  escHtml(att.url) +
+                  '" target="_blank" rel="noopener">' +
+                  '<img class="chat-attachment-img" src="' +
+                  escHtml(att.url) +
+                  '" ' +
                   'alt="image" loading="lazy" style="max-width:320px;max-height:240px;border-radius:10px;display:block;cursor:zoom-in" ' +
                   'onerror="this.parentElement.innerHTML=\'<span class=\\"att-err\\">图片加载失败</span>\'"/></a>';
               } else {
                 var sizeStr = att.size ? formatBytes(att.size) : "";
                 attHtml =
-                  '<a class="chat-attachment-file" href="' + escHtml(att.url) + '" download ' +
-                  'style="display:inline-flex;align-items:center;gap:8px;padding:8px 14px;border-radius:10px;background:var(--bg-sec,#f0f2f5);text-decoration:none;color:inherit">' +
+                  '<a class="chat-attachment-file" href="' +
+                  escHtml(att.url) +
+                  '" download ' +
+                  'style="display:inline-flex;align-items:center;gap:8px;padding:8px 14px;border-radius:10px;background:' +
+                  (isUserAtt
+                    ? "var(--accent-weak, rgba(74,144,217,0.12))"
+                    : "var(--bg-sec,#f0f2f5)") +
+                  ';text-decoration:none;color:inherit">' +
                   '<svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 15v4a2 2 0 01-2 2H5a2 2 0 01-2-2v-4M7 10l5 5 5-5M12 15V3"/></svg>' +
-                  '<span>' + escHtml(att.name || "附件") + (sizeStr ? ' <small>(' + sizeStr + ')</small>' : '') + '</span></a>';
+                  "<span>" +
+                  escHtml(att.name || "附件") +
+                  (sizeStr ? " <small>(" + sizeStr + ")</small>" : "") +
+                  "</span></a>";
               }
               html +=
-                '<div class="msg assistant"><div class="msg-bubble"><div class="att-wrap">' +
+                '<div class="msg ' +
+                (isUserAtt ? "user" : "assistant") +
+                '"><div class="msg-bubble"><div class="att-wrap">' +
+                '<div style="font-size:11px;opacity:0.65;margin-bottom:4px">' +
+                srcLabel +
+                "</div>" +
                 attHtml +
                 (c ? '<div class="text">' + renderMd(c) + "</div>" : "") +
                 "</div></div></div>";
@@ -3056,65 +3149,82 @@ background:
               c = escHtml(c);
             }
             var isChan = !!(m.source && m.source !== "webui");
-              var rc = "";
-              if (m.reasoning_content) {
-                rc = renderReasoningCard(m.reasoning_content, isStreamingLast);
-              }
-              var tcs = "";
-              if (m.tool_calls && m.tool_calls.length > 0) {
-                m.tool_calls.forEach(function (tc) {
-                  var argsStr =
-                    typeof tc.args === "object"
-                      ? JSON.stringify(tc.args, null, 1)
-                      : tc.args || "";
-                  var resultStr = tc.result
-                    ? typeof tc.result === "object"
-                      ? JSON.stringify(tc.result, null, 1)
-                      : String(tc.result)
+            var rc = "";
+            if (m.reasoning_content) {
+              rc = renderReasoningCard(m.reasoning_content, isStreamingLast);
+            }
+            var tcs = "";
+            if (m.tool_calls && m.tool_calls.length > 0) {
+              m.tool_calls.forEach(function (tc) {
+                var argsStr =
+                  typeof tc.args === "object"
+                    ? JSON.stringify(tc.args, null, 1)
+                    : tc.args || "";
+                var resultStr = tc.result
+                  ? typeof tc.result === "object"
+                    ? JSON.stringify(tc.result, null, 1)
+                    : String(tc.result)
+                  : "";
+                var running = !resultStr && tc.status !== "denied";
+                var error =
+                  tc.status === "error" || tc.status === "denied" || !!tc.error;
+                var drip =
+                  newlyDone.indexOf(tc.tool || tc.name || "") !== -1
+                    ? " tool-drip-in"
                     : "";
-                  var running = !resultStr && tc.status !== "denied";
-                  var error = tc.status === "error" || tc.status === "denied" || !!tc.error;
-                  var drip = newlyDone.indexOf(tc.tool || tc.name || "") !== -1 ? " tool-drip-in" : "";
-                  var iconSvg =
-                    error
-                      ? '<svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><circle cx="12" cy="12" r="9"/><path d="M5.6 5.6l12.8 12.8"/></svg>'
-                      : running
-                        ? '<span class="tc-spinner"></span>'
-                        : '<svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M14.7 6.3a4 4 0 0 0-5.4 5.4L3 18l3 3 6.3-6.3a4 4 0 0 0 5.4-5.4l-2.9 2.9-2.5-.6-.6-2.5z"/></svg>';
-                  var statusHtml =
-                    tc.status === "denied"
-                      ? '<span class="tc-state tc-deny">' + __("已拒绝", "Denied") + "</span>"
-                      : running
-                        ? '<span class="tc-state tc-run">' + __("调用中", "Running") + "</span>"
-                        : '<span class="tc-state tc-done">' + __("完成", "Done") + "</span>";
-                  var pluginHtml = tc.plugin
-                    ? '<span class="tc-plugin">' + escHtml(tc.plugin) + "</span>"
-                    : "";
-                  tcs +=
-                    '<div class="tool-card' +
-                    (error ? " tc-error" : running ? " tc-running" : " tc-done") +
-                    drip +
-                    '" data-tool="' +
-                    escHtml(tc.tool || tc.name || "") +
-                    '" onclick="toggleToolCall(this)">' +
-                    '<div class="tc-line"><span class="tc-ico">' +
-                    iconSvg +
-                    '</span><span class="tc-name">' +
-                    escHtml(tc.tool || tc.name || "") +
-                    "</span>" +
-                    pluginHtml +
-                    statusHtml +
-                    '<span class="tc-caret">▾</span></div>' +
-                    '<div class="tc-detail" style="display:none">' +
-                    (argsStr && argsStr !== "{}"
-                      ? '<div class="tc-args"><div class="tc-detail-label">' + __("参数", "Args") + "</div>" + escHtml(argsStr) + "</div>"
-                      : "") +
-                    (resultStr
-                      ? '<div class="tc-result"><div class="tc-detail-label">' + __("结果", "Result") + "</div>" + escHtml(resultStr) + "</div>"
-                      : "") +
-                    "</div></div>";
-                });
-              }
+                var iconSvg = error
+                  ? '<svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><circle cx="12" cy="12" r="9"/><path d="M5.6 5.6l12.8 12.8"/></svg>'
+                  : running
+                    ? '<span class="tc-spinner"></span>'
+                    : '<svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M14.7 6.3a4 4 0 0 0-5.4 5.4L3 18l3 3 6.3-6.3a4 4 0 0 0 5.4-5.4l-2.9 2.9-2.5-.6-.6-2.5z"/></svg>';
+                var statusHtml =
+                  tc.status === "denied"
+                    ? '<span class="tc-state tc-deny">' +
+                      __("已拒绝", "Denied") +
+                      "</span>"
+                    : running
+                      ? '<span class="tc-state tc-run">' +
+                        __("调用中", "Running") +
+                        "</span>"
+                      : '<span class="tc-state tc-done">' +
+                        __("完成", "Done") +
+                        "</span>";
+                var pluginHtml = tc.plugin
+                  ? '<span class="tc-plugin">' + escHtml(tc.plugin) + "</span>"
+                  : "";
+                tcs +=
+                  '<div class="tool-card' +
+                  (error ? " tc-error" : running ? " tc-running" : " tc-done") +
+                  drip +
+                  '" data-tool="' +
+                  escHtml(tc.tool || tc.name || "") +
+                  '" onclick="toggleToolCall(this)">' +
+                  '<div class="tc-line"><span class="tc-ico">' +
+                  iconSvg +
+                  '</span><span class="tc-name">' +
+                  escHtml(tc.tool || tc.name || "") +
+                  "</span>" +
+                  pluginHtml +
+                  statusHtml +
+                  '<span class="tc-caret">▾</span></div>' +
+                  '<div class="tc-detail" style="display:none">' +
+                  (argsStr && argsStr !== "{}"
+                    ? '<div class="tc-args"><div class="tc-detail-label">' +
+                      __("参数", "Args") +
+                      "</div>" +
+                      escHtml(argsStr) +
+                      "</div>"
+                    : "") +
+                  (resultStr
+                    ? '<div class="tc-result"><div class="tc-detail-label">' +
+                      __("结果", "Result") +
+                      "</div>" +
+                      escHtml(resultStr) +
+                      "</div>"
+                    : "") +
+                  "</div></div>";
+              });
+            }
             var body = rc + tcs;
             var growCls = m._grow ? " grow-in" : "";
             if (m._grow) m._grow = false;
@@ -3167,8 +3277,7 @@ background:
             } else {
               var userAvatar =
                 '<svg viewBox="0 0 24 24" style="width:16px;height:16px" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><circle cx="12" cy="8" r="4"/><path d="M4 20c0-4 4-6 8-6s8 2 8 6"/></svg>';
-              var aiAvatar =
-                '<img src="/mascot.webp" alt="小宅">';
+              var aiAvatar = '<img src="/mascot.webp" alt="小宅">';
               html +=
                 '<div class="msg msg-' +
                 role +
@@ -3184,8 +3293,7 @@ background:
           });
         }
         if (state.chatLoading && !streamingLast) {
-          var aiAvatarL =
-            '<img src="/mascot.webp" alt="小宅">';
+          var aiAvatarL = '<img src="/mascot.webp" alt="小宅">';
           html +=
             '<div class="msg msg-assistant"><div class="msg-avatar">' +
             aiAvatarL +
@@ -3243,10 +3351,15 @@ background:
       // 不重建 DOM。正文节流 parse（>200 字符或 >300ms 才 renderMd），小增量纯文本追加。
       function renderChatStreamChunk() {
         var msgsEl = document.getElementById("chat-msgs");
-        var last = state.messages.length ? state.messages[state.messages.length - 1] : null;
+        var last = state.messages.length
+          ? state.messages[state.messages.length - 1]
+          : null;
         if (!msgsEl || !last) return;
         var el = msgsEl.lastElementChild;
-        if (!el) { renderChat(); return; }
+        if (!el) {
+          renderChat();
+          return;
+        }
         var textEl = el.querySelector(".msg-bubble .text");
         var c = last.content || "";
         if (textEl && c) {
@@ -3263,16 +3376,22 @@ background:
             el.__lastLen = c.length;
           }
           if (state.chatStick !== false) {
-            try { msgsEl.scrollTop = msgsEl.scrollHeight; } catch (e) {}
+            try {
+              msgsEl.scrollTop = msgsEl.scrollHeight;
+            } catch (e) {}
           }
           return;
         }
         // 思考预览更新（流式中折叠，只刷 preview 文本）
         var rcPrev = el.querySelector(".reasoning-preview");
         if (rcPrev && last.reasoning_content) {
-          rcPrev.textContent = last.reasoning_content.replace(/[\s\n]+/g, " ").slice(0, 60);
+          rcPrev.textContent = last.reasoning_content
+            .replace(/[\s\n]+/g, " ")
+            .slice(0, 60);
           if (state.chatStick !== false) {
-            try { msgsEl.scrollTop = msgsEl.scrollHeight; } catch (e) {}
+            try {
+              msgsEl.scrollTop = msgsEl.scrollHeight;
+            } catch (e) {}
           }
           return;
         }
@@ -3295,18 +3414,30 @@ background:
         var preview =
           typeof marked !== "undefined"
             ? text.replace(/[\s\n]+/g, " ").slice(0, 60)
-            : escHtml(text).replace(/<[^>]+>/g, " ").slice(0, 60);
+            : escHtml(text)
+                .replace(/<[^>]+>/g, " ")
+                .slice(0, 60);
         return (
-          '<div class="reasoning-card' + (isStreaming ? " rc-streaming" : "") + '">' +
+          '<div class="reasoning-card' +
+          (isStreaming ? " rc-streaming" : "") +
+          '">' +
           '<div class="reasoning-head" onclick="toggleReasoning(this)">' +
           '<svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="rc-ico"><path d="M9 3a2 2 0 0 0-2 2v2a2 2 0 0 1-2 2H3a2 2 0 0 0-2 2v6a2 2 0 0 0 2 2h2a2 2 0 0 1 2 2v2a2 2 0 0 0 2 2h1a2 2 0 0 0 2-2v-2a2 2 0 0 1 2-2h2a2 2 0 0 0 2-2V7a2 2 0 0 0-2-2h-2a2 2 0 0 1-2-2V3a2 2 0 0 0-2-2H9zM12 8v4m0 4h.01"/></svg>' +
-          '<span class="rc-title">' + (isStreaming ? __("思考中...", "Thinking...") : __("思考", "Thinking")) + '</span>' +
-          '<span class="rc-chev">▾</span></div>' +
-          '<div class="reasoning-body" style="display:' + (isStreaming ? "block" : "none") + '">' +
+          '<span class="rc-title">' +
           (isStreaming
-            ? '<div class="reasoning-preview">' + escHtml(preview) + '</div><div class="reasoning-sweep"></div>'
-            : '<div class="reasoning-content">' + renderMd(text) + '</div>') +
-          '</div></div>'
+            ? __("思考中...", "Thinking...")
+            : __("思考", "Thinking")) +
+          "</span>" +
+          '<span class="rc-chev">▾</span></div>' +
+          '<div class="reasoning-body" style="display:' +
+          (isStreaming ? "block" : "none") +
+          '">' +
+          (isStreaming
+            ? '<div class="reasoning-preview">' +
+              escHtml(preview) +
+              '</div><div class="reasoning-sweep"></div>'
+            : '<div class="reasoning-content">' + renderMd(text) + "</div>") +
+          "</div></div>"
         );
       }
       function toggleReasoning(el) {
@@ -3406,7 +3537,6 @@ background:
           state.starmapLoading = false;
         }
       }
-
 
       function initChatStarmap() {
         var cont = document.getElementById("sm-container-chat");
@@ -3777,7 +3907,10 @@ background:
           await api("/chat/file", { method: "POST", body: fd, rawBody: true });
           // 回复经 SSE 流式到达，这里无需处理响应体
         } catch (e) {
-          toast(__("文件发送失败：" + e.message, "File send failed: " + e.message), true);
+          toast(
+            __("文件发送失败：" + e.message, "File send failed: " + e.message),
+            true,
+          );
           state.chatLoading = false;
           endChatTurn();
         }
@@ -4091,9 +4224,7 @@ background:
         if (!text) return;
         el.textContent += text;
         if (el.textContent.length > 262144) {
-          el.textContent = el.textContent.slice(
-            el.textContent.length - 262144,
-          );
+          el.textContent = el.textContent.slice(el.textContent.length - 262144);
         }
         el.scrollTop = el.scrollHeight;
       }
@@ -4114,8 +4245,7 @@ background:
         var html = "";
         list.forEach(function (t, i) {
           var detailId = "term-detail-" + i;
-          var scr =
-            (state.termScreens && state.termScreens[t.id]) || null;
+          var scr = (state.termScreens && state.termScreens[t.id]) || null;
           var running = scr ? scr.running : !!t.running;
           var fullOut = scr ? scr.output : t.output || "";
           if (!fullOut) {
@@ -4190,10 +4320,7 @@ background:
         if (running.length === 0) {
           r.innerHTML =
             '<p style="color:var(--text-muted);padding:8px;text-align:center;font-size:11px">' +
-            __(
-              "暂无运行中的命令",
-              "No running commands",
-            ) +
+            __("暂无运行中的命令", "No running commands") +
             "</p>";
           return;
         }
@@ -4296,11 +4423,7 @@ background:
             var lastM2 = state.messages.length
               ? state.messages[state.messages.length - 1]
               : null;
-            if (
-              lastM2 &&
-              lastM2.role === "assistant" &&
-              !lastM2._final
-            ) {
+            if (lastM2 && lastM2.role === "assistant" && !lastM2._final) {
               // 聚合最终响应：覆盖 delta 累积的中间内容（以聚合为准，
               // 含 stage 插件改写后的最终文本），并置 final 结束本轮流式。
               lastM2._grow = true;
@@ -4750,7 +4873,10 @@ background:
         } else {
           html +=
             '<p style="color:var(--text-muted);font-size:13px">' +
-            __("尚未运行,点击右上角「运行」开始", "Not run yet, click Run to start") +
+            __(
+              "尚未运行,点击右上角「运行」开始",
+              "Not run yet, click Run to start",
+            ) +
             "</p>";
         }
         html += "</div></div>";
@@ -4864,25 +4990,24 @@ background:
           return;
         removingPlugins[name] = true;
         try {
-          var raw = await api(
-            "/plugins/" + encodeURIComponent(name),
-            { method: "DELETE", raw: true },
-          );
+          var raw = await api("/plugins/" + encodeURIComponent(name), {
+            method: "DELETE",
+            raw: true,
+          });
           var ct = raw.headers.get("content-type") || "";
-          var body = ct.includes("json")
-            ? await raw.json()
-            : await raw.text();
+          var body = ct.includes("json") ? await raw.json() : await raw.text();
           if (!raw.ok) {
             var em =
-              (body && (body.error || body.details)) ||
-              ("HTTP " + raw.status);
+              (body && (body.error || body.details)) || "HTTP " + raw.status;
             toast(__("卸载失败: ", "Unload failed: ") + em, true);
             // 内置插件或路径错误时刷新一次列表保持状态一致
             loadInstalledPlugins();
             renderPlugins();
             return;
           }
-          toast(__("已卸载: ", "Unloaded: ") + (body.name || body.status || name));
+          toast(
+            __("已卸载: ", "Unloaded: ") + (body.name || body.status || name),
+          );
           await loadInstalledPlugins();
           // 同步内核插件/禁用列表，确保列表与工具立即消失
           try {
@@ -5302,8 +5427,6 @@ background:
           starmapRen.setSize(w, h);
         }
       }
-
-
 
       function starmapAnimate() {
         starmapRaf = requestAnimationFrame(starmapAnimate);

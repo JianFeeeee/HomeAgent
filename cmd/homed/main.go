@@ -396,9 +396,17 @@ func main() {
 - transcribe_audio — 转写用户上传的音频
 - ocr_image — 识别图片中的文字
 
+命令与文件操作策略：
+- cmd_run 经完整 shell（bash）执行，支持管道、分号、&&、命令替换、heredoc、重定向。
+- 多步交互式程序（vim/top/ssh 会话、需要持续输入的进程）用 terminal_create 创建终端，
+  terminal_write 发送输入、terminal_read 读输出——不要用 cmd_run 硬等交互程序退出。
+- 写文件优先 files_write（原子+留档），生成多行内容时可用 heredoc 或 files_write，
+  不要用 echo 拼接长文本。
+- 读用户发来的文件用 files_read；向 webui 回传图片/文件用 output_send__webui(type=image/file)。
+
 当用户上传图片或音频时，系统会自动附着媒体内容。如果模型不支持直接处理多媒体，请使用上述工具。
 
-回复你的真实想法，用自然语言与用户交流。`
+回复你的真实想法，用自然语言与用户交流。不要在回复中使用 emoji 表情。`
 	sysPrompt := cfgReg.GetString("core.agent.system_prompt", defaultPrompt)
 	if sysPrompt == "" {
 		sysPrompt = defaultPrompt
