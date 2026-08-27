@@ -13,7 +13,7 @@ require github.com/yanyiwu/gojieba v1.4.7
 require github.com/yalue/onnxruntime_go v1.13.0
 
 require (
-	gitcode.com/JianFeeeee/homeagent-sdk v0.9.1
+	gitcode.com/JianFeeeee/homeagent-sdk v0.9.2
 	github.com/charmbracelet/bubbles v1.0.0
 	github.com/charmbracelet/bubbletea v1.3.10
 	github.com/charmbracelet/lipgloss v1.1.0
@@ -42,5 +42,6 @@ require (
 	github.com/xo/terminfo v0.0.0-20220910002029-abceb7e1c41e // indirect
 	golang.org/x/text v0.3.8 // indirect
 )
+
 
 replace gitcode.com/JianFeeeee/homeagent-sdk => ./third_party/homeagent-sdk
