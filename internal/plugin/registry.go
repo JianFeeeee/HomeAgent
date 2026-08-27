@@ -672,6 +672,33 @@ func (r *Registry) IsBuiltinPlugin(name string) bool {
 	return ok
 }
 
+// pluginInstalled 判断插件是否已安装（可用于禁用/启用等操作前的存在性校验）。
+// 命中任一即视为已安装：
+//  1. 已加载（plugins map 中）
+//  2. 已注册工厂（内置插件，通过 init() 自注册，无需物理目录）
+//  3. 插件目录 plgDir/<name> 存在（外部插件的安装目录）
+func (r *Registry) pluginInstalled(name string) bool {
+	if r == nil || name == "" {
+		return false
+	}
+	r.mu.RLock()
+	_, loaded := r.plugins[name]
+	_, isFactory := r.factories[name]
+	r.mu.RUnlock()
+	if loaded || isFactory {
+		return true
+	}
+	if _, ok := globalFactories.Load(name); ok {
+		return true
+	}
+	if r.plgDir != "" {
+		if fi, err := os.Stat(filepath.Join(r.plgDir, name)); err == nil && fi.IsDir() {
+			return true
+		}
+	}
+	return false
+}
+
 func (r *Registry) ListLoadedPlugins() []string { return r.List() }
 
 func (r *Registry) ListDisabledPlugins() []sdk.DisabledPluginInfo {
@@ -692,6 +719,11 @@ func (r *Registry) ListDisabledPlugins() []sdk.DisabledPluginInfo {
 func (r *Registry) IsPluginDisabled(name string) bool { return r.isDisabled(name) }
 
 func (r *Registry) DisablePlugin(name, by string) error {
+	// 插件不存在（未安装）：拒绝并返回错误，避免把不存在的插件写进 disabled_plugins。
+	// 判断标准：已加载 / 已注册工厂（内置）/ 插件目录存在，任一命中视为已安装。
+	if !r.pluginInstalled(name) {
+		return fmt.Errorf("plugin %s not installed", name)
+	}
 	// Check not disabling self if running
 	if r.cfgReg != nil {
 		// If already disabled, no-op
@@ -731,7 +763,6 @@ func (r *Registry) DisablePlugin(name, by string) error {
 }
 
 func (r *Registry) EnablePlugin(name string) error { return r.Enable(name) }
-
 // StopAndUnload 停止并从注册表移除插件，但保留其配置表（config_<name>）。
 // 供插件更新/升级流程使用：换 so/文件不动配置，重装后配置原样生效。
 // 不执行 onRemove 回调（那是删除专用语义）。目录由调用方管理。
