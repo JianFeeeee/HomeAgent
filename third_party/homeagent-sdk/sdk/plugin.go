@@ -114,6 +114,9 @@ type IOInjector interface {
 	// InjectInputSync 注入输入事件并同步等待 agent 回复，返回回复文本（无回复时返回空串）。
 	// 用于通道消息的完整闭环：收到入站 → agent 处理 → 回复取回 → 送回通道。
 	InjectInputSync(source, channel, text string) string
+	// SetToolBlocks 插件工具注入多模态内容块（image_url/audio_url），内核在下一条
+	// tool message 的 content 数组里带上这些块，让模型在后续轮次看到图/听到音频。
+	SetToolBlocks(blocks []ContentBlock)
 }
 
 // EventType identifies the kind of system event.
@@ -459,4 +462,23 @@ func (s *PluginSDK) RunOnRemoveHandlers() {
 	for i := len(handlers) - 1; i >= 0; i-- {
 		handlers[i]()
 	}
+}
+
+// ContentBlock 是多模态内容块（OpenAI 格式：text/image_url/audio_url）。
+// 插件工具返回结果时可用 PluginSDK.SetToolBlocks 注入，让下一轮 LLM
+// 请求在 tool message 的 content 数组里带上图片/音频，实现"模型看图/听音频"。
+type ContentBlock struct {
+	Type     string    `json:"type"`
+	Text     string    `json:"text,omitempty"`
+	ImageURL *ImageURL `json:"image_url,omitempty"`
+	AudioURL *AudioURL `json:"audio_url,omitempty"`
+}
+
+type ImageURL struct {
+	URL    string `json:"url"`
+	Detail string `json:"detail,omitempty"`
+}
+
+type AudioURL struct {
+	URL string `json:"url"`
 }

@@ -126,6 +126,7 @@ func main() {
 	deviceGateway := flag.String("device", "", "remotedevice 网关地址（如 127.0.0.1:9890），启动设备桥")
 	deviceToken := flag.String("device-token", "", "设备接入 token")
 	deviceAuthorized := flag.Bool("device-authorized", false, "客户端本地授权（允许远程操控本机；也可在 waiter.yaml 配 device_authorized: true）")
+	daemonMode := flag.Bool("daemon", false, "后台驻留模式：维持 homed 连接 + 设备桥，等待 TUI 实例接入")
 	testCap := flag.String("test-cap", "", "测试本地能力（screensue/speakeruse/screensee/clipboardsee/clipboardsue/computeruse/camerasue），如 --test-cap screensue")
 	testCapArgs := flag.String("test-cap-args", "", "测试能力的参数")
 	flag.Parse()
@@ -142,6 +143,12 @@ func main() {
 
 	if cfg.Socket == "" && cfg.Remote == "" {
 		cfg.Socket = discoverSocket("")
+	}
+
+	// Daemon 模式：后台驻留
+	if *daemonMode {
+		runDaemon(cfg)
+		return
 	}
 
 	oneShotMsg := *chat
