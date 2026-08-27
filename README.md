@@ -151,6 +151,23 @@ make build build-cli
 echo "你好，记住我喜欢喝咖啡" | ./build/waiter
 ```
 
+### 后台驻留模式（daemon）
+
+waiter 也支持后台驻留，保持与 homed 的持久连接并等待 TUI 实例接入，适合让 agent 主动召唤用户/设备桥持续存活：
+
+```bash
+# 后台驻留（默认连 ~/.homeagent/cli.sock）
+./build/waiter --daemon
+
+# 指定 socket
+./build/waiter --socket /path/to/cli.sock --daemon
+
+# 随后任意 TUI/一行实例都会自动接入正在运行的 daemon，而不是直连 homed
+./build/waiter
+```
+
+daemon 监听 `~/.homeagent/waiter.sock`，新客户端连入时会回放缓冲的最近对话（256 行），断连后 daemon 持续存活、自动重连 homed，并保持设备桥（若配置了 `device_gateway`/`device_token`）。
+
 API 密钥通过 WebUI `http://localhost:8080` 设置页配置，持久化在 SQLite 中。
 
 ## 代码结构
