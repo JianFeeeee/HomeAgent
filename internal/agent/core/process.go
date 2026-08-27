@@ -12,6 +12,7 @@ import (
 	agentAPI "gitcode.com/JianFeeeee/HomeAgent/internal/agent/api"
 	"gitcode.com/JianFeeeee/HomeAgent/internal/events"
 	sdk "gitcode.com/JianFeeeee/HomeAgent/internal/sdk"
+	pubsdk "gitcode.com/JianFeeeee/homeagent-sdk/sdk"
 )
 
 func (a *Agent) process(input string, stageCtx *sdk.StageContext) (response string, toolsUsed []string, toolResults []ToolResultItem, err error) {
@@ -311,7 +312,31 @@ func (a *Agent) process(input string, stageCtx *sdk.StageContext) (response stri
 				contentOnce = false
 			}
 			msgs = append(msgs, agentAPI.Message{Role: "assistant", Content: msgContent, ReasoningContent: resp.ReasoningContent, ToolCalls: []agentAPI.ToolCall{tc}})
-			msgs = append(msgs, agentAPI.Message{Role: "tool", ToolCallID: tc.ID, Content: result})
+
+			// 多模态工具结果：插件通过 SDK.SetToolBlocks 注入 image_url/audio_url block，
+			// process.go 拾起并追加到 tool message 的 content 数组（OpenAI 多模态格式），
+			// 让下一轮 LLM 请求在 tool message 里看到图/音频。
+			toolMsg := agentAPI.Message{Role: "tool", ToolCallID: tc.ID, Content: result}
+			if rawBlocks := a.io.ConsumeToolBlocks(); len(rawBlocks) > 0 {
+				var blocks []agentAPI.ContentBlock
+				for _, b := range rawBlocks {
+					if cb, ok := b.(pubsdk.ContentBlock); ok {
+						// 跨包类型拷贝（pubsdk.ContentBlock → agentAPI.ContentBlock）
+						block := agentAPI.ContentBlock{Type: cb.Type, Text: cb.Text}
+						if cb.ImageURL != nil {
+							block.ImageURL = &agentAPI.ImageURL{URL: cb.ImageURL.URL, Detail: cb.ImageURL.Detail}
+						}
+						if cb.AudioURL != nil {
+							block.AudioURL = &agentAPI.AudioURL{URL: cb.AudioURL.URL}
+						}
+						blocks = append(blocks, block)
+					}
+				}
+				if len(blocks) > 0 {
+					toolMsg.Blocks = blocks
+				}
+			}
+			msgs = append(msgs, toolMsg)
 
 			a.publishEvent(events.EventToolCall, map[string]interface{}{
 				"tool":    tc.Name,
