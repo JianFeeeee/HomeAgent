@@ -339,3 +339,27 @@ func (s *PluginSDK) Subscribe(eventType events.EventType, handler events.Handler
 	}
 	return func() {}
 }
+
+// SetToolBlocks 桥接到 IOManager：插件工具注入多模态块，process.go 消费。
+func (a ioAdapter) SetToolBlocks(blocks []pubsdk.ContentBlock) {
+	if a.iom == nil {
+		return
+	}
+	ifaces := make([]interface{}, len(blocks))
+	for i, b := range blocks {
+		ifaces[i] = b
+	}
+	a.iom.SetToolBlocks(ifaces)
+}
+
+// SetToolBlocks 注入多模态内容块（图片/音频），内核在下一条 tool message
+// 的 content 数组里带上这些块，让模型在后续轮次看到图/听到音频。
+func (s *PluginSDK) SetToolBlocks(blocks []pubsdk.ContentBlock) {
+	if s.iom != nil {
+		ifaces := make([]interface{}, len(blocks))
+		for i, b := range blocks {
+			ifaces[i] = b
+		}
+		s.iom.SetToolBlocks(ifaces)
+	}
+}

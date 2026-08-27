@@ -103,6 +103,11 @@ type IOManager struct {
 	outputCh      chan *OutputEvent
 	nextReqID     int64
 	inputChannels map[string]ChannelDef
+
+	// toolBlocks：插件工具注入多模态内容块，process.go 在下一条 tool message 时消费。
+	// 用 interface{}[] 避免 import api.ContentBlock 导致的循环依赖。
+	toolBlocksMu      sync.Mutex
+	toolPendingBlocks []interface{}
 }
 
 func NewIOManager() *IOManager {
@@ -668,4 +673,21 @@ func (d *GPIODevice) Tools() []ToolDef {
 
 func (d *GPIODevice) Execute(tool string, args map[string]interface{}) (interface{}, error) {
 	return map[string]interface{}{"device": d.name, "tool": tool, "status": "ok"}, nil
+}
+
+// SetToolBlocks 插件工具调用时注入多模态内容块（image_url/audio_url 等），
+// 下一条 tool message 追加这些块到 content 数组（OpenAI 多模态格式）。
+func (m *IOManager) SetToolBlocks(blocks []interface{}) {
+	m.toolBlocksMu.Lock()
+	m.toolPendingBlocks = blocks
+	m.toolBlocksMu.Unlock()
+}
+
+// ConsumeToolBlocks 返回并清空 pending blocks，process.go 在 append tool message 时调用。
+func (m *IOManager) ConsumeToolBlocks() []interface{} {
+	m.toolBlocksMu.Lock()
+	blocks := m.toolPendingBlocks
+	m.toolPendingBlocks = nil
+	m.toolBlocksMu.Unlock()
+	return blocks
 }

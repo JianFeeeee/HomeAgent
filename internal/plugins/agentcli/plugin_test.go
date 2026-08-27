@@ -11,6 +11,7 @@ import (
 	"time"
 
 	sdk "gitcode.com/JianFeeeee/HomeAgent/internal/sdk"
+	sdkpub "gitcode.com/JianFeeeee/homeagent-sdk/sdk"
 )
 
 type toolCapture struct {
@@ -414,6 +415,10 @@ func (c *injectCapture) InjectTextNoMemory(source, channel, text string) {
 	c.mu.Lock()
 	c.texts = append(c.texts, text)
 	c.mu.Unlock()
+}
+
+func (c *injectCapture) SetToolBlocks(blocks []sdkpub.ContentBlock) {
+	// 测试桩：忽略多模态块
 }
 func (c *injectCapture) InjectInputSync(source, channel, text string) string { return "" }
 
