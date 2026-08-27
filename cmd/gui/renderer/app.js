@@ -966,6 +966,7 @@ function fmtUptime(ms) {
 }
 
 var uptimeTick = null;
+var _chatSyncTick = null;
 function startUptimeTicker() {
   if (uptimeTick) clearInterval(uptimeTick);
   uptimeTick = setInterval(() => {
@@ -978,6 +979,15 @@ function startUptimeTicker() {
       if (el2) el2.textContent = "-";
     }
   }, 1000);
+  // 消息同步轮询兜底：每30秒增量同步 chatHistory，补偿 SSE 断连窗口期
+  // 丢失的事件（尤其是非 GUI 触发的跨渠道消息，如 CLI/QQ/设备桥输出）。
+  // syncChatFromHistory 增量同步，不重建已有消息 DOM，无闪烁。
+  if (_chatSyncTick) clearInterval(_chatSyncTick);
+  _chatSyncTick = setInterval(function () {
+    if (state.currentConn && state.currentConn.type !== "cli") {
+      syncChatFromHistory().catch(function () {});
+    }
+  }, 30000);
 }
 
 // ===== Overview =====
@@ -2355,6 +2365,37 @@ async function loadChatHistory() {
     if (window.homeagent && window.homeagent.log)
       window.homeagent.log("history: error " + e.message);
   }
+}
+
+// syncChatFromHistory 增量同步：对比服务端历史，仅追加新消息 DOM 节点，
+// 不重建已有消息 → 无闪烁。用于 SSE 断连恢复期间的轮询兜底（跨渠道消息补偿）。
+function syncChatFromHistory() {
+  return api("/chat/history").then(function (data) {
+    if (!data || !data.messages || data.messages.length === 0) return;
+    var serverMsgs = data.messages;
+    var localMsgs = state.messages;
+    if (localMsgs.length === 0) {
+      state.messages = serverMsgs;
+      rerenderChatIfActive();
+      return;
+    }
+    if (serverMsgs.length <= localMsgs.length) {
+      var lastLocal = localMsgs[localMsgs.length - 1];
+      var lastServer = serverMsgs[serverMsgs.length - 1];
+      var localContent = lastLocal.content || lastLocal.Content || "";
+      var serverContent = lastServer.content || lastServer.Content || "";
+      if (lastServer.role === "assistant" && localContent !== serverContent && serverContent) {
+        lastLocal.content = serverContent;
+        if (lastServer.ReasoningContent) lastLocal.reasoning_content = lastServer.ReasoningContent;
+        rerenderChatIfActive();
+      }
+      return;
+    }
+    // 服务端消息更多 → 仅追加新消息对象（不重建已有 DOM）
+    var newMsgs = serverMsgs.slice(localMsgs.length);
+    Array.prototype.push.apply(state.messages, newMsgs);
+    rerenderChatIfActive();
+  }).catch(function () {});
 }
 
 async function loadTerminals() {
@@ -5101,6 +5142,10 @@ async function connectFetchSSE(url) {
             badge.textContent = state.chatStage || "";
             badge.style.display = "none";
           }
+        } else if (type === "sync_required") {
+          // Server 因 Last-Event-ID 不在 ring（delta ID / 已到 tip）无法重放，
+          // 通知前端增量补拉历史——避免空等后续聚合事件导致「消息同步不及时」。
+          syncChatFromHistory();
         }
       } catch (err) {}
     }
@@ -5115,6 +5160,8 @@ async function connectFetchSSE(url) {
           break;
         }
       }
+      // 断连后先增量同步历史（补偿断连窗口期丢失的事件），再重连
+      syncChatFromHistory().catch(function () {});
       reconnectTimer = setTimeout(() => {
         connectSSE();
       }, Math.min(1000 * Math.pow(2, Math.min((state._sseRetryAttempts || 0), 5)), 60000));
