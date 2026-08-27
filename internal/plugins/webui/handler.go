@@ -2600,7 +2600,16 @@ func (h *Handler) handlePluginByID(w http.ResponseWriter, r *http.Request) {
 					return
 				}
 				if err := h.pluginMgr.DisablePlugin(name, "webui"); err != nil {
-					writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+					// 未安装 → 404；已禁用 → 409；其余为真实内部错误
+					status := http.StatusInternalServerError
+					msg := err.Error()
+					switch {
+					case strings.HasSuffix(msg, "not installed"):
+						status = http.StatusNotFound
+					case strings.HasSuffix(msg, "already disabled"):
+						status = http.StatusConflict
+					}
+					writeJSON(w, status, map[string]string{"error": msg})
 					return
 				}
 				writeJSON(w, http.StatusOK, map[string]string{"status": "disabled"})
@@ -2616,7 +2625,12 @@ func (h *Handler) handlePluginByID(w http.ResponseWriter, r *http.Request) {
 					return
 				}
 				if err := h.pluginMgr.EnablePlugin(name); err != nil {
-					writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+					// 启用失败多数是“插件不存在/加载失败” → 404 更贴切
+					status := http.StatusInternalServerError
+					if strings.Contains(err.Error(), "failed") {
+						status = http.StatusNotFound
+					}
+					writeJSON(w, status, map[string]string{"error": err.Error()})
 					return
 				}
 				writeJSON(w, http.StatusOK, map[string]string{"status": "enabled"})
