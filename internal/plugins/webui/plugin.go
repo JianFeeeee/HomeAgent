@@ -232,7 +232,9 @@ func (p *Plugin) Start(s *sdk.PluginSDK) error {
 	p.handler = NewHandler(s)
 	p.handler.RegisterRoutes(p.mux)
 
-	p.server = &http.Server{Addr: addr, Handler: p.mux}
+	// 最外层套 logged 中间件：记录每个请求的来源 IP / 方法 / 路径 / 认证方式 / 状态码。
+	// 用于排查“谁调用了什么接口”（如插件禁用等变更操作）。
+	p.server = &http.Server{Addr: addr, Handler: p.handler.logged(p.mux)}
 	go func() {
 		log.Printf("[webui] HTTP server listening on %s", addr)
 		if err := p.server.ListenAndServe(); err != nil && err != http.ErrServerClosed {

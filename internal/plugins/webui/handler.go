@@ -740,6 +740,97 @@ func (h *Handler) requireWeb(fn http.HandlerFunc) http.HandlerFunc {
 	}
 }
 
+// clientIP 提取请求的真实客户端 IP。
+// 优先取 X-Forwarded-For / X-Real-IP（反向代理/frp 场景），回退 RemoteAddr。
+func clientIP(r *http.Request) string {
+	if xff := r.Header.Get("X-Forwarded-For"); xff != "" {
+		// 取第一个（最接近客户端的地址）
+		if i := strings.IndexByte(xff, ','); i >= 0 {
+			return strings.TrimSpace(xff[:i])
+		}
+		return strings.TrimSpace(xff)
+	}
+	if xr := r.Header.Get("X-Real-IP"); xr != "" {
+		return strings.TrimSpace(xr)
+	}
+	host, _, err := net.SplitHostPort(r.RemoteAddr)
+	if err != nil {
+		return r.RemoteAddr
+	}
+	return host
+}
+
+// requestLog 每次请求的日志行（含 IP、认证方式、状态码）。
+// 由 logged 中间件在请求完成后调用，authType 为 caller 预先判定。
+func requestLog(r *http.Request, authType, ip string, status int, dur time.Duration) {
+	// 认证方式判定（供排查谁调用了变更接口）
+	if authType == "" {
+		switch {
+		case r.Header.Get("X-API-Key") != "" || strings.HasPrefix(r.Header.Get("Authorization"), "Bearer "):
+			authType = "api-key"
+		case func() bool { c, err := r.Cookie("homeagent_session"); return err == nil && c.Value != "" }():
+			authType = "session"
+		default:
+			authType = "none"
+		}
+	}
+	log.Printf("[webui] %s %s from=%s auth=%s status=%d (%s)", r.Method, r.URL.Path, ip, authType, status, dur.Round(time.Millisecond))
+}
+
+// logged 中间件：包装任意 handler，记录请求 IP / 方法 / 路径 / 认证方式 / 状态码。
+// 置于最外层（mux 之上），覆盖所有路由（含登录页、静态资源）。
+func (h *Handler) logged(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// 预判认证方式（在 requireAPI/requireWeb 之前的原始请求判定）
+		authType := "none"
+		switch {
+		case h.validAPIKey(r):
+			authType = "api-key"
+		case h.validSession(r):
+			authType = "session"
+		}
+		// SSE 长连接：不阻塞在完成时记录（连接可能持续很久），启动即记一条
+		if strings.HasSuffix(r.URL.Path, "/chat/events") {
+			requestLog(r, authType, clientIP(r), http.StatusOK, 0)
+			next.ServeHTTP(w, r)
+			return
+		}
+		start := time.Now()
+		sw := &statusWriter{ResponseWriter: w, status: http.StatusOK}
+		next.ServeHTTP(sw, r)
+		requestLog(r, authType, clientIP(r), sw.status, time.Since(start))
+	})
+}
+
+// statusWriter 包装 ResponseWriter 以捕获响应状态码。
+// SSE 等流式写入直接透传不做缓冲。
+type statusWriter struct {
+	http.ResponseWriter
+	status int
+}
+
+func (sw *statusWriter) WriteHeader(code int) {
+	sw.status = code
+	sw.ResponseWriter.WriteHeader(code)
+}
+
+func (sw *statusWriter) Write(b []byte) (int, error) {
+	return sw.ResponseWriter.Write(b)
+}
+
+func (sw *statusWriter) Flush() {
+	if f, ok := sw.ResponseWriter.(http.Flusher); ok {
+		f.Flush()
+	}
+}
+
+func (sw *statusWriter) Hijack() (net.Conn, *bufio.ReadWriter, error) {
+	if hj, ok := sw.ResponseWriter.(http.Hijacker); ok {
+		return hj.Hijack()
+	}
+	return nil, nil, fmt.Errorf("hijack not supported")
+}
+
 func (h *Handler) RegisterRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("/login", h.handleLoginPage)
 	mux.HandleFunc("/api/v1/login", h.handleLogin)
