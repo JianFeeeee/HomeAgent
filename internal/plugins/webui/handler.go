@@ -1669,6 +1669,25 @@ func (h *Handler) handleChat(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, result)
 }
 
+// sendSSE 向 writeCh 发送一条 SSE 事件；队列满时等 100ms 再试，
+// 比立即 drop 更友好，避免密集 tool_call/delta 期间前端丢帧。
+func sendSSE(writeCh chan string, id, eventType, data string) {
+	line := fmt.Sprintf("id: %s\nevent: %s\ndata: %s\n", id, eventType, data)
+	select {
+	case writeCh <- line:
+		return
+	default:
+	}
+	// 队列满：等 100ms 让 writer flush，再试一次
+	timer := time.NewTimer(100 * time.Millisecond)
+	defer timer.Stop()
+	select {
+	case writeCh <- line:
+	case <-timer.C:
+		log.Printf("[SSE] DROPPED %s id=%s (writeCh full 100ms, len=%d)", eventType, id, len(writeCh))
+	}
+}
+
 func (h *Handler) handleChatEvents(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
@@ -1700,10 +1719,10 @@ func (h *Handler) handleChatEvents(w http.ResponseWriter, r *http.Request) {
 	// writeCh 不 close：Subscribe 回调闭包持有它，handler 退出后回调仍可能被
 	// 总线异步触发，close 后再发送会 panic（send on closed channel，生产日志中
 	// 单日数千次）。writer goroutine 通过 done 退出；发送侧 select on done 防泄漏。
-	// 缓冲加大到 512 且 writer 做批量合并：reasoning/content 增量是高频小包，
-	// 每条单独 flush 会因 socket 写慢而填满小缓冲导致 delta 被丢弃（表现为
-	// 前端只能等最终的 agent_output 整段，体感延迟）。
-	writeCh := make(chan string, 512)
+	// 缓冲 2048：reasoning/content 增量是高频小包（LLM token 级），
+	// 512 时连续 tool_call + reasoning + delta 密集期会溢出导致前端丢帧。
+	// 写入侧用短超时(50ms)兜底，比立即丢弃更友好。
+	writeCh := make(chan string, 2048)
 	writerDone := make(chan struct{})
 	go func() {
 		defer func() {
@@ -1731,7 +1750,8 @@ func (h *Handler) handleChatEvents(w http.ResponseWriter, r *http.Request) {
 			select {
 			case line := <-writeCh:
 				pending = append(pending, line)
-				if len(pending) >= 64 {
+				// 大批量一次性 flush：阈值从 64 提高，利用批量减少 syscall 开销
+				if len(pending) >= 128 {
 					flushPending()
 				}
 			case <-flushTicker.C:
@@ -1754,6 +1774,10 @@ func (h *Handler) handleChatEvents(w http.ResponseWriter, r *http.Request) {
 			replayed := h.sseEvents.After(lastEventID)
 			if len(replayed) == 0 {
 				log.Printf("[SSE] replay: nothing after id %s (id not in ring or already at tip)", lastEventID)
+				// ID 不在 ring：说明最后一帧是 delta（delta 不进 ring）或已到最新。
+				// 显式通知前端补拉历史，避免其空等后续聚合事件（表现为消息同步不及时）。
+				fmt.Fprintf(w, "event: sync_required\ndata: {}\n\n")
+				flusher.Flush()
 			} else {
 				log.Printf("[SSE] replay: sending %d events after id %s", len(replayed), lastEventID)
 				for _, rec := range replayed {
@@ -1776,11 +1800,7 @@ func (h *Handler) handleChatEvents(w http.ResponseWriter, r *http.Request) {
 			data, _ := json.Marshal(evt)
 			seq++
 			id := fmt.Sprintf("%d-%d", evt.Timestamp, seq)
-			select {
-			case writeCh <- fmt.Sprintf("id: %s\nevent: %s\ndata: %s\n", id, evt.Type, string(data)):
-			default:
-				log.Printf("[SSE] DROPPED %s (writeCh full, len=%d)", evt.Type, len(writeCh))
-			}
+			sendSSE(writeCh, id, string(evt.Type), string(data))
 		})
 		unsubs = append(unsubs, unsub)
 	}
@@ -1801,14 +1821,10 @@ func (h *Handler) handleChatEvents(w http.ResponseWriter, r *http.Request) {
 			if h.sseEvents != nil {
 				h.sseEvents.Append(id, string(evt.Type), data)
 			}
-			select {
-			case writeCh <- fmt.Sprintf("id: %s\nevent: %s\ndata: %s\n", id, evt.Type, string(data)):
-				if evt.Type == sdk.EventToolCall {
-					toolName, _ := evt.Payload["tool"].(string)
-					log.Printf("[SSE] wrote tool_call to writeCh: tool=%s", toolName)
-				}
-			default:
-				log.Printf("[SSE] DROPPED event %s (writeCh full, len=%d)", evt.Type, len(writeCh))
+			sendSSE(writeCh, id, string(evt.Type), string(data))
+			if evt.Type == sdk.EventToolCall {
+				toolName, _ := evt.Payload["tool"].(string)
+				log.Printf("[SSE] wrote tool_call to writeCh: tool=%s", toolName)
 			}
 		})
 		unsubs = append(unsubs, unsub)

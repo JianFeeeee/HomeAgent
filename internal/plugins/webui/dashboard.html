@@ -4206,6 +4206,87 @@
         } catch (e) {}
       }
 
+      // syncChatFromHistory 增量同步：对比服务端历史，仅追加新消息 DOM 节点，
+      // 不重建已有消息 → 无闪烁。用于 SSE 断连恢复期间的轮询兜底。
+      function syncChatFromHistory() {
+        return api("/chat/history").then(function (data) {
+          if (!data || !data.messages || data.messages.length === 0) return;
+          var serverMsgs = data.messages;
+          var localMsgs = state.messages;
+          // 空历史 → 全量加载（首次同步）
+          if (localMsgs.length === 0) {
+            state.messages = serverMsgs;
+            rerenderChat(true);
+            return;
+          }
+          // 无新增消息 → 检查最后一条是否被改写
+          if (serverMsgs.length <= localMsgs.length) {
+            var lastLocal = localMsgs[localMsgs.length - 1];
+            var lastServer = serverMsgs[serverMsgs.length - 1];
+            var localContent = lastLocal.content || lastLocal.Content || "";
+            var serverContent = lastServer.content || lastServer.Content || "";
+            if (lastServer.role === "assistant" && localContent !== serverContent && serverContent) {
+              lastLocal.content = serverContent;
+              if (lastServer.ReasoningContent) lastLocal.reasoning_content = lastServer.ReasoningContent;
+              // 仅更新最后一条消息 DOM，不全量重建
+              var msgsEl = document.getElementById("chat-msgs");
+              if (msgsEl && msgsEl.lastElementChild) {
+                var el = msgsEl.lastElementChild;
+                var textEl = el.querySelector(".msg-bubble .text");
+                if (textEl) textEl.innerHTML = renderMd(serverContent);
+              }
+            }
+            return;
+          }
+          // 有新增消息：追加到 state.messages + DOM（仅追加节点，不触碰已有）
+          var newMsgs = serverMsgs.slice(localMsgs.length);
+          var msgsEl = document.getElementById("chat-msgs");
+          if (msgsEl) {
+            var aiAvatar = '<img src="/mascot.webp" alt="小宅">';
+            var userAvatar = '<svg viewBox="0 0 24 24" style="width:16px;height:16px" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><circle cx="12" cy="8" r="4"/><path d="M4 20c0-4 4-6 8-6s8 2 8 6"/></svg>';
+            newMsgs.forEach(function (m) {
+              var role = m.role || m.Role || "user";
+              var c = m.content || m.Content || "";
+              if (role === "assistant") c = renderMd(c); else c = escHtml(c);
+              var isChan = !!(m.source && m.source !== "webui");
+              var bubble = c ? '<div class="msg-bubble"><div class="text">' + c + '</div></div>' : '<div class="msg-bubble"></div>';
+              if (role === "system") {
+                msgsEl.insertAdjacentHTML("beforeend", '<div class="msg msg-system"><div class="msg-bubble">' + c + '</div></div>');
+              } else if (isChan) {
+                msgsEl.insertAdjacentHTML("beforeend", '<div class="msg msg-channel"><div class="msg-avatar chan-avatar" style="background:#888">' + (m.source||"?")[0].toUpperCase() + '</div><div class="msg-content"><div class="msg-chan-name">' + escHtml(m.source) + '</div>' + bubble + '</div></div>');
+              } else {
+                msgsEl.insertAdjacentHTML("beforeend", '<div class="msg msg-' + role + '"><div class="msg-avatar">' + (role === "user" ? userAvatar : aiAvatar) + '</div><div class="msg-content">' + bubble + '</div></div>');
+              }
+            });
+            // 删除流式占位符（同步完成，下一次 SSE 会重建）
+            var streamingPh = msgsEl.querySelector(".msg-streaming-ph");
+            if (streamingPh) streamingPh.remove();
+          }
+          // 追加新消息对象到 state.messages
+          Array.prototype.push.apply(state.messages, newMsgs);
+          // 同步聊天占位符（如果有新消息但最后一条非 assistant → 显示流式占位）
+          syncStreamingPlaceholder();
+        }).catch(function () {});
+      }
+      // syncStreamingPlaceholder：同步聊天占位符的可见性
+      function syncStreamingPlaceholder() {
+        var msgsEl = document.getElementById("chat-msgs");
+        if (!msgsEl) return;
+        var existing = msgsEl.querySelector(".msg-streaming-ph");
+        var lastMsg = state.messages.length ? state.messages[state.messages.length - 1] : null;
+        var showPh = state.chatLoading && (!lastMsg || lastMsg.role !== "assistant" || lastMsg._final);
+        if (showPh && !existing) {
+          var aiAvatar = '<img src="/mascot.webp" alt="小宅">';
+          var pillHtml = "";
+          (state.pendingTools || []).forEach(function (nm) {
+            pillHtml += '<span class="thinking-tool"><svg viewBox="0 0 24 24" width="11" height="11" fill="none" stroke="currentColor" stroke-width="2"><path d="M14.7 6.3a4 4 0 0 0-5.4 5.4L3 18l3 3 6.3-6.3a4 4 0 0 0 5.4-5.4l-2.9 2.9-2.5-.6-.6-2.5z"/></svg>' + escHtml(nm) + '</span>';
+          });
+          msgsEl.insertAdjacentHTML("beforeend", '<div class="msg msg-assistant msg-streaming-ph"><div class="msg-avatar">' + aiAvatar + '</div><div class="msg-content"><div class="msg-bubble"><span class="live-spinner"></span>' + (pillHtml ? '<span class="thinking-tools">' + pillHtml + '</span>' : '') + '</div></div></div>');
+        } else if (!showPh && existing) {
+          existing.remove();
+        }
+      }
+
       async function loadTerminals() {
         try {
           var data = await api("/terminals");
@@ -4649,8 +4730,19 @@
         };
         es.onerror = function (e) {
           console.error("[SSE] error", e);
-          setTimeout(connectSSE, 5000);
+          // 1) 立即 close 阻止浏览器原生自动重连与手动 setTimeout(connectSSE) 双连接竞态
+          try { state.eventSource && state.eventSource.close(); state.eventSource = null; } catch(ex){}
+          // 2) 连接错误期间可能丢失事件，增量补拉历史（无闪烁）
+          syncChatFromHistory().catch(function(){});
+          // 3) 2s 后手动重连（比原 5s 更快恢复）
+          setTimeout(connectSSE, 2000);
         };
+        // sync_required：Server 因 Last-Event-ID 不在 ring（delta ID / 已到 tip）无法重放，
+        // 通知前端增量补拉历史——避免前端空等后续聚合事件导致「消息同步不及时」。
+        es.addEventListener("sync_required", function(e) {
+          console.log("[SSE] sync_required received, incremental sync");
+          syncChatFromHistory().catch(function(){});
+        });
         // Periodically refresh sidebar data
         if (state._sidebarRefresh) clearInterval(state._sidebarRefresh);
         state._sidebarRefresh = setInterval(async function () {
@@ -6278,13 +6370,20 @@
       }
 
       renderConfigDisabled();
-      connectSSE();
+      // 先加载历史再连 SSE：避免 SSE 事件先到与历史加载顺序不确定导致消息重复/丢失
       (async function () {
         await loadChatHistory();
         renderAll();
+        connectSSE();
         startUptimeTicker();
       })();
       setInterval(renderAll, 15000);
+      // 消息同步轮询兜底：每30秒增量同步 chatHistory，补偿 SSE 断连窗口期
+      // 丢失的事件（尤其是非 WebUI 触发的跨渠道消息，如 CLI/QQ/设备桥输出）。
+      // syncChatFromHistory 仅追加新消息 DOM 节点，不重建已有消息，无闪烁。
+      setInterval(function () {
+        syncChatFromHistory().catch(function(){});
+      }, 30000);
     </script>
   </body>
 </html>
