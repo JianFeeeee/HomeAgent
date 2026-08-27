@@ -9,6 +9,7 @@ import (
 	_ "gitcode.com/JianFeeeee/HomeAgent/internal/plugins/cmd"
 	_ "gitcode.com/JianFeeeee/HomeAgent/internal/plugins/files"
 	_ "gitcode.com/JianFeeeee/HomeAgent/internal/plugins/healthcheck"
+	_ "gitcode.com/JianFeeeee/HomeAgent/internal/plugins/localuse"
 	_ "gitcode.com/JianFeeeee/HomeAgent/internal/plugins/mcp"
 	_ "gitcode.com/JianFeeeee/HomeAgent/internal/plugins/multimodal"
 	_ "gitcode.com/JianFeeeee/HomeAgent/internal/plugins/pluginmgr"

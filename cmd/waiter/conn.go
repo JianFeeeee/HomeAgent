@@ -19,6 +19,12 @@ type Conn interface {
 }
 
 func dial(cfg *Config) (Conn, error) {
+	// 优先连接运行中的 daemon（后台驻留模式）
+	if daemonIsRunning() {
+		if c, err := dialDaemon(); err == nil {
+			return c, nil
+		}
+	}
 	if cfg.Remote != "" {
 		return dialRemote(cfg.Remote, cfg.APIKey)
 	}
@@ -50,6 +56,39 @@ func dialLocal(socket, apiKey string) (Conn, error) {
 		}
 	}
 	return lc, nil
+}
+
+// daemonConn 是连接到运行中 waiter daemon 的轻量封装。
+// 协议与 localConn 完全一致（行式 \n 分隔），但不做 /auth（daemon 已集中鉴权）。
+type daemonConn struct {
+	conn net.Conn
+	r    *bufio.Reader
+}
+
+func dialDaemon() (Conn, error) {
+	sock := daemonSocketPath()
+	c, err := net.DialTimeout("unix", sock, 3*time.Second)
+	if err != nil {
+		return nil, fmt.Errorf("daemon %s: %w", sock, err)
+	}
+	return &daemonConn{conn: c, r: bufio.NewReader(c)}, nil
+}
+
+func (c *daemonConn) Send(line string) error {
+	_, err := fmt.Fprintf(c.conn, "%s\n", line)
+	return err
+}
+
+func (c *daemonConn) ReadLine() (string, error) {
+	s, err := c.r.ReadString('\n')
+	if err != nil {
+		return "", err
+	}
+	return strings.TrimSuffix(s, "\n"), nil
+}
+
+func (c *daemonConn) Close() error {
+	return c.conn.Close()
 }
 
 type localConn struct {
