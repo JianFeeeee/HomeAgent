@@ -1230,6 +1230,15 @@ func getFloat(m map[string]interface{}, key string) float64 {
 	return 0
 }
 
+// ToolOutput 是工具 handler 返回的结构化结果，支持多模态内容。
+// 返回 string 时等价于 ToolOutput{Text: result}。
+type ToolOutput struct {
+	Text   string         `json:"text"`                         // LLM 看到的文字描述
+	Blocks []ContentBlock `json:"blocks,omitempty"`             // 附加的多模态块（image_url/audio_url），追加到 tool message
+}
+
+func (t ToolOutput) String() string { return t.Text }
+
 // truncateForLog 诊断日志用截断。
 func truncateForLog(s string, n int) string {
 	if len(s) <= n {

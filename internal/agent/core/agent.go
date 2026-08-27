@@ -98,6 +98,8 @@ type Agent struct {
 	// 模型思考模式（thinking/reasoning）
 	thinkingEnabled bool
 
+	pendingToolBlocks []interface{} // 插件工具通过 SetToolBlocks 注入的多模态块（type agentAPI.ContentBlock），process.go 消费后追加到 tool message
+
 	// 启动时间
 	startTime time.Time
 
