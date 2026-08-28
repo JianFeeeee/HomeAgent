@@ -174,9 +174,6 @@ type ChatToolCall struct {
 	Result interface{} `json:"result,omitempty"`
 	Status string      `json:"status,omitempty"`
 	Plugin string      `json:"plugin,omitempty"`
-	// Truncated 标记本条工具调用的 args/result 已被服务端裁剪（lean 模式），
-	// 前端可据此显示「详情需展开加载」而不是把空结果当成执行失败。
-	Truncated bool `json:"truncated,omitempty"`
 }
 
 type CmdExec struct {
@@ -1390,10 +1387,10 @@ func (h *Handler) addChatMsg(msg ChatMsg) {
 // 查询参数（全部可选，省略时保持旧行为=返回全量，向后兼容旧客户端）：
 //   - limit:  返回条数上限（1..maxChatHistory）。带 limit 时默认取「最新的 limit 条」。
 //   - before: 游标，只返回下标 < before 的消息（配合 limit 向上翻页取更早历史）。
-//   - lean:   "1"/"true" 时裁剪重负载字段（tool_calls 的 args/result 置空、reasoning_content 省略），
-//     体积可降约 80%（实测 tool_calls 占 ~72%、reasoning ~12%）。用于移动端/弱网首屏。
 //
 // 响应额外返回 total / offset / has_more，供前端判断是否继续向上加载。
+// 注意：不对 tool_calls / reasoning_content 做任何裁剪——工具调用详情是排查与
+// 上下文还原的关键信息，必须完整下发；瘦身只通过分页控制条数。
 func (h *Handler) handleChatHistory(w http.ResponseWriter, r *http.Request) {
 	q := r.URL.Query()
 	limit := parseIntDefault(q.Get("limit"), 0)
@@ -1403,7 +1400,6 @@ func (h *Handler) handleChatHistory(w http.ResponseWriter, r *http.Request) {
 	if limit > maxChatHistory {
 		limit = maxChatHistory
 	}
-	lean := q.Get("lean") == "1" || strings.EqualFold(q.Get("lean"), "true")
 
 	h.chatMu.Lock()
 	total := len(h.chatHistory)
@@ -1420,9 +1416,6 @@ func (h *Handler) handleChatHistory(w http.ResponseWriter, r *http.Request) {
 	copy(result, h.chatHistory[start:end])
 	h.chatMu.Unlock()
 
-	if lean {
-		result = leanChatMsgs(result)
-	}
 	writeJSON(w, http.StatusOK, map[string]interface{}{
 		"messages": result,
 		"total":    total,
@@ -1441,31 +1434,6 @@ func parseIntDefault(s string, def int) int {
 		return def
 	}
 	return n
-}
-
-// leanChatMsgs 裁剪重负载字段用于移动端/弱网首屏：
-// tool_calls 只保留 tool/name/status/plugin（args/result 置 nil 并标记 truncated），
-// reasoning_content 整体省略。前端需要完整内容时按 before/limit 拉非 lean 分段。
-func leanChatMsgs(in []ChatMsg) []ChatMsg {
-	out := make([]ChatMsg, len(in))
-	for i, m := range in {
-		m.ReasoningContent = ""
-		if len(m.ToolCalls) > 0 {
-			tcs := make([]ChatToolCall, len(m.ToolCalls))
-			for j, tc := range m.ToolCalls {
-				tcs[j] = ChatToolCall{
-					Tool:      tc.Tool,
-					Name:      tc.Name,
-					Status:    tc.Status,
-					Plugin:    tc.Plugin,
-					Truncated: true,
-				}
-			}
-			m.ToolCalls = tcs
-		}
-		out[i] = m
-	}
-	return out
 }
 
 // handleChatFile 处理用户经 webui 上传文件并附带消息注入 agent。
