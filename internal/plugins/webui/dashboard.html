@@ -2258,6 +2258,9 @@
         pendingTools: [],
         eventSource: null,
         chatFinalIdx: -1,
+        chatOffset: 0, // 分段历史：当前已加载消息在服务端全量中的起始下标
+        chatTotal: 0, // 服务端历史总条数
+        chatHasMore: false, // 是否还有更早历史可向上加载
         lang: localStorage.getItem("ha-lang") || "zh",
       };
 
@@ -2996,6 +2999,10 @@
               state.chatStick =
                 msgsEl.scrollHeight - msgsEl.scrollTop - msgsEl.clientHeight <
                 80;
+              // 触顶（近顶部 60px）且服务端还有更早历史 → 向上懒加载下一页
+              if (msgsEl.scrollTop < 60 && state.chatHasMore) {
+                loadOlderChat();
+              }
             },
             { passive: true },
           );
@@ -4199,47 +4206,116 @@
         if (tab === "context") queryMemoryContext();
       }
 
+      // 首屏分段加载条数：只拉最新 N 条，向上滚动触顶时再拉更早的。
+      var CHAT_PAGE_SIZE = 40;
       async function loadChatHistory() {
         try {
-          var data = await api("/chat/history");
-          if (data && data.messages) state.messages = data.messages;
+          var data = await api("/chat/history?limit=" + CHAT_PAGE_SIZE);
+          if (data && data.messages) {
+            state.messages = data.messages;
+            state.chatOffset = typeof data.offset === "number" ? data.offset : 0;
+            state.chatTotal = typeof data.total === "number" ? data.total : data.messages.length;
+            state.chatHasMore = !!data.has_more;
+          }
         } catch (e) {}
+      }
+
+      // loadOlderChat 向上翻页：拉 offset 之前的一页，前置到 messages 头部。
+      // 保持滚动位置（插入前后 scrollHeight 差值补偿），避免视口跳动。
+      var _loadingOlder = false;
+      async function loadOlderChat() {
+        if (_loadingOlder || !state.chatHasMore) return;
+        _loadingOlder = true;
+        var msgsEl = document.getElementById("chat-msgs");
+        var prevH = msgsEl ? msgsEl.scrollHeight : 0;
+        var prevTop = msgsEl ? msgsEl.scrollTop : 0;
+        try {
+          var before = state.chatOffset || 0;
+          if (before <= 0) {
+            state.chatHasMore = false;
+            return;
+          }
+          var data = await api(
+            "/chat/history?limit=" + CHAT_PAGE_SIZE + "&before=" + before,
+          );
+          if (data && data.messages && data.messages.length) {
+            state.messages = data.messages.concat(state.messages);
+            state.chatOffset = typeof data.offset === "number" ? data.offset : 0;
+            state.chatHasMore = !!data.has_more;
+            state.chatStick = false; // 向上翻页时不自动粘底
+            renderChat();
+            if (msgsEl) {
+              // 补偿新增内容高度，保持用户视觉位置不变
+              msgsEl.scrollTop = prevTop + (msgsEl.scrollHeight - prevH);
+            }
+          } else {
+            state.chatHasMore = false;
+          }
+        } catch (e) {
+        } finally {
+          _loadingOlder = false;
+        }
       }
 
       // syncChatFromHistory 增量同步：对比服务端历史，仅追加新消息 DOM 节点，
       // 不重建已有消息 → 无闪烁。用于 SSE 断连恢复期间的轮询兜底。
       function syncChatFromHistory() {
-        return api("/chat/history").then(function (data) {
+        return api("/chat/history?limit=" + CHAT_PAGE_SIZE).then(function (data) {
           if (!data || !data.messages || data.messages.length === 0) return;
           var serverMsgs = data.messages;
           var localMsgs = state.messages;
-          // 空历史 → 全量加载（首次同步）
+          // 首次加载（空列表）→ 全量赋值
           if (localMsgs.length === 0) {
             state.messages = serverMsgs;
+            state.chatOffset = typeof data.offset === "number" ? data.offset : 0;
+            state.chatHasMore = !!data.has_more;
             rerenderChat(true);
             return;
           }
-          // 无新增消息 → 检查最后一条是否被改写
-          if (serverMsgs.length <= localMsgs.length) {
-            var lastLocal = localMsgs[localMsgs.length - 1];
-            var lastServer = serverMsgs[serverMsgs.length - 1];
-            var localContent = lastLocal.content || lastLocal.Content || "";
-            var serverContent = lastServer.content || lastServer.Content || "";
+          // 以「本地末尾 vs 服务端末尾」做依据。分段拉取只会回传最新页，
+          // 本地已向上翻页加载了更早内容，长度上本地可能 ≥ 服务端。
+          var lastLocal = localMsgs[localMsgs.length - 1];
+          var lastServer = serverMsgs[serverMsgs.length - 1];
+          var localContent = lastLocal.content || lastLocal.Content || "";
+          var serverContent = lastServer.content || lastServer.Content || "";
+          // 服务端末尾和本地末尾内容相同 → 无新增（可能裁剪过的轻量项因不含 tool_calls args/result，
+          // 依赖 content+role+time 足以识别）
+          if (localContent === serverContent) {
+            // 检查是否本地末尾被服务端改写（如 stage 插件改写最终文本）
             if (lastServer.role === "assistant" && localContent !== serverContent && serverContent) {
               lastLocal.content = serverContent;
               if (lastServer.ReasoningContent) lastLocal.reasoning_content = lastServer.ReasoningContent;
-              // 仅更新最后一条消息 DOM，不全量重建
-              var msgsEl = document.getElementById("chat-msgs");
-              if (msgsEl && msgsEl.lastElementChild) {
-                var el = msgsEl.lastElementChild;
-                var textEl = el.querySelector(".msg-bubble .text");
-                if (textEl) textEl.innerHTML = renderMd(serverContent);
+              var msgsEl0 = document.getElementById("chat-msgs");
+              if (msgsEl0 && msgsEl0.lastElementChild) {
+                var textEl0 = msgsEl0.lastElementChild.querySelector(".msg-bubble .text");
+                if (textEl0) textEl0.innerHTML = renderMd(serverContent);
               }
             }
             return;
           }
-          // 有新增消息：追加到 state.messages + DOM（仅追加节点，不触碰已有）
-          var newMsgs = serverMsgs.slice(localMsgs.length);
+          // 有新增消息：服务端末尾与本地末尾不同 → 找出本地新增的差异，追加到 DOM。
+          // 服务端只回传最新页，我们需在 localMsgs 末尾取交集起点（本地末尾在服务端页的位置）
+          // 简化：取服务端末尾3条与本地末尾3条比对，找到重含点的下标；若找不到全量替换最新页。
+          var overlap = -1;
+          for (var k = Math.min(3, serverMsgs.length - 1, localMsgs.length - 1); k >= 1; k--) {
+            var sMsg = serverMsgs[serverMsgs.length - 1 - k];
+            var lMsg = localMsgs[localMsgs.length - 1 - k];
+            if (lMsg && (lMsg.content || "") === (sMsg.content || "") && lMsg.role === sMsg.role) {
+              overlap = k;
+              break;
+            }
+          }
+          var newMsgs;
+          if (overlap >= 0) {
+            // 本地末尾 overlap 条在服务端页里，之后的部分是新增
+            newMsgs = serverMsgs.slice(serverMsgs.length - overlap);
+            if (newMsgs.length === 0) return; // 无新增（内容改写走上面的分支）
+          } else {
+            // 找不到重含点（本地领先太多，超出服务端页）→ 无法精确差异，安全退化为全量刷新
+            state.messages = serverMsgs;
+            rerenderChat(true);
+            return;
+          }
           var msgsEl = document.getElementById("chat-msgs");
           if (msgsEl) {
             var aiAvatar = '<img src="/mascot.webp" alt="小宅">';
