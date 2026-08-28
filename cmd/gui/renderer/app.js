@@ -44,6 +44,9 @@ const state = {
   pendingTools: [],
   eventSource: null,
   chatFinalIdx: -1,
+  chatOffset: 0, // 分段历史：当前已加载消息在服务端全量中的起始下标
+  chatTotal: 0, // 服务端历史总条数
+  chatHasMore: false, // 是否还有更早历史可向上加载
   sseLastEventID: "", // 最近一次 SSE 事件 id，断线重连时随 Last-Event-ID 头回传
   lang: localStorage.getItem("ha-lang") || "zh",
   connections: [],
@@ -1340,6 +1343,10 @@ function renderChat() {
       () => {
         state.chatStick =
           msgsEl.scrollHeight - msgsEl.scrollTop - msgsEl.clientHeight < 80;
+        // 触顶（近顶部 60px）且服务端还有更早历史 → 向上懒加载下一页
+        if (msgsEl.scrollTop < 60 && state.chatHasMore) {
+          loadOlderChat();
+        }
       },
       { passive: true },
     );
@@ -2351,13 +2358,26 @@ function switchChatPanel(tab, el) {
   if (tab === "knowledge") searchKnowledgeChat();
 }
 
+// 首屏分段加载条数：只拉最新 N 条，向上滚动触顶时再拉更早的。
+var CHAT_PAGE_SIZE = 40;
+
 async function loadChatHistory() {
   try {
-    var data = await api("/chat/history");
+    var data = await api("/chat/history?limit=" + CHAT_PAGE_SIZE);
     if (data && data.messages) {
       state.messages = data.messages;
+      state.chatOffset = typeof data.offset === "number" ? data.offset : 0;
+      state.chatTotal =
+        typeof data.total === "number" ? data.total : data.messages.length;
+      state.chatHasMore = !!data.has_more;
       if (window.homeagent && window.homeagent.log)
-        window.homeagent.log("history: loaded " + data.messages.length);
+        window.homeagent.log(
+          "history: loaded " +
+            data.messages.length +
+            "/" +
+            state.chatTotal +
+            (state.chatHasMore ? " (has more)" : ""),
+        );
     } else if (window.homeagent && window.homeagent.log) {
       window.homeagent.log("history: no messages field");
     }
@@ -2367,35 +2387,101 @@ async function loadChatHistory() {
   }
 }
 
+// loadOlderChat 向上翻页：拉 offset 之前的一页，前置到 messages 头部。
+// 保持滚动位置补偿，避免视口跳动。
+var _loadingOlder = false;
+async function loadOlderChat() {
+  if (_loadingOlder || !state.chatHasMore) return;
+  _loadingOlder = true;
+  var msgsEl = document.getElementById("chat-msgs");
+  var prevH = msgsEl ? msgsEl.scrollHeight : 0;
+  var prevTop = msgsEl ? msgsEl.scrollTop : 0;
+  try {
+    var before = state.chatOffset || 0;
+    if (before <= 0) {
+      state.chatHasMore = false;
+      return;
+    }
+    var data = await api(
+      "/chat/history?limit=" + CHAT_PAGE_SIZE + "&before=" + before,
+    );
+    if (data && data.messages && data.messages.length) {
+      state.messages = data.messages.concat(state.messages);
+      state.chatOffset =
+        typeof data.offset === "number" ? data.offset : 0;
+      state.chatHasMore = !!data.has_more;
+      state.chatStick = false;
+      rerenderChatIfActive();
+      if (msgsEl) {
+        msgsEl.scrollTop = prevTop + (msgsEl.scrollHeight - prevH);
+      }
+      if (window.homeagent && window.homeagent.log)
+        window.homeagent.log(
+          "history: older " + data.messages.length + " (offset=" + state.chatOffset + ")",
+        );
+    } else {
+      state.chatHasMore = false;
+    }
+  } catch (e) {
+  } finally {
+    _loadingOlder = false;
+  }
+}
+
 // syncChatFromHistory 增量同步：对比服务端历史，仅追加新消息 DOM 节点，
 // 不重建已有消息 → 无闪烁。用于 SSE 断连恢复期间的轮询兜底（跨渠道消息补偿）。
 function syncChatFromHistory() {
-  return api("/chat/history").then(function (data) {
-    if (!data || !data.messages || data.messages.length === 0) return;
-    var serverMsgs = data.messages;
-    var localMsgs = state.messages;
-    if (localMsgs.length === 0) {
-      state.messages = serverMsgs;
-      rerenderChatIfActive();
-      return;
-    }
-    if (serverMsgs.length <= localMsgs.length) {
+  return api("/chat/history?limit=" + CHAT_PAGE_SIZE)
+    .then(function (data) {
+      if (!data || !data.messages || data.messages.length === 0) return;
+      var serverMsgs = data.messages;
+      var localMsgs = state.messages;
+      // 首次加载（空列表）→ 全量赋值
+      if (localMsgs.length === 0) {
+        state.messages = serverMsgs;
+        state.chatOffset = typeof data.offset === "number" ? data.offset : 0;
+        state.chatHasMore = !!data.has_more;
+        rerenderChatIfActive();
+        return;
+      }
+      // 分段拉取只回传最新页，本地可能已向上翻页加载更多，
+      // 因此不能用长度比较，改用末尾内容比对 + 重叠区对齐。
       var lastLocal = localMsgs[localMsgs.length - 1];
       var lastServer = serverMsgs[serverMsgs.length - 1];
       var localContent = lastLocal.content || lastLocal.Content || "";
       var serverContent = lastServer.content || lastServer.Content || "";
-      if (lastServer.role === "assistant" && localContent !== serverContent && serverContent) {
-        lastLocal.content = serverContent;
-        if (lastServer.ReasoningContent) lastLocal.reasoning_content = lastServer.ReasoningContent;
+      // 末尾一致 → 无新增
+      if (localContent === serverContent) return;
+      // 寻找重叠点（本地末尾 k 条在服务端页中的位置）
+      var overlap = -1;
+      var maxK = Math.min(3, serverMsgs.length - 1, localMsgs.length - 1);
+      for (var k = maxK; k >= 1; k--) {
+        var sMsg = serverMsgs[serverMsgs.length - 1 - k];
+        var lMsg = localMsgs[localMsgs.length - 1 - k];
+        if (
+          lMsg &&
+          sMsg &&
+          (lMsg.content || "") === (sMsg.content || "") &&
+          lMsg.role === sMsg.role
+        ) {
+          overlap = k;
+          break;
+        }
+      }
+      if (overlap >= 0) {
+        var newMsgs = serverMsgs.slice(serverMsgs.length - overlap);
+        if (newMsgs.length === 0) return;
+        Array.prototype.push.apply(state.messages, newMsgs);
+        rerenderChatIfActive();
+      } else {
+        // 无重叠点（本地领先过多/已失同步）→ 安全退化为全量刷新最新页
+        state.messages = serverMsgs;
+        state.chatOffset = typeof data.offset === "number" ? data.offset : 0;
+        state.chatHasMore = !!data.has_more;
         rerenderChatIfActive();
       }
-      return;
-    }
-    // 服务端消息更多 → 仅追加新消息对象（不重建已有 DOM）
-    var newMsgs = serverMsgs.slice(localMsgs.length);
-    Array.prototype.push.apply(state.messages, newMsgs);
-    rerenderChatIfActive();
-  }).catch(function () {});
+    })
+    .catch(function () {});
 }
 
 async function loadTerminals() {
