@@ -854,7 +854,7 @@ export struct SettingsPage {
             .onChange((v: string) => {
               this.editName = v;
             })
-          TextInput({ placeholder: '地址 (如 http://192.168.1.100:8080)', text: this.editUrl })
+          TextInput({ placeholder: '地址 (域名或 http://192.168.1.100:8080)', text: this.editUrl })
             .height(36).fontSize(13).fontColor(this.palette().textPrimary)
             .placeholderColor(this.palette().textMuted).backgroundColor(this.palette().bgInput)
             .borderRadius(RADIUS_SM).border({ width: 1, color: this.palette().border })
