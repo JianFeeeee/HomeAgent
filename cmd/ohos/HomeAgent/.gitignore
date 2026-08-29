@@ -1,0 +1,19 @@
+# 构建产物
+build/
+.hvigor/
+.cxx/
+
+# 依赖
+oh_modules/
+node_modules/
+
+# 本地 SDK / Node 路径，每台机器不同
+local.properties
+
+# 签名材料：含 keyPassword / storePassword 明文与本机绝对路径，不入库
+build-profile.json5
+
+# hvigorw 在本机是指向 /opt/huawei/command-line-tools/bin/hvigorw 的符号链接，
+# 绝对路径因机而异，入库后他人 clone 得到的是坏链接。
+# 请改用本机 DevEco command-line-tools 里的 hvigorw（见 README）。
+hvigorw
