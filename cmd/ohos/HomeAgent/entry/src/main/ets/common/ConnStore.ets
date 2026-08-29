@@ -1,7 +1,7 @@
 import { preferences } from '@kit.ArkData';
 import { Context } from '@kit.AbilityKit';
 import { deviceInfo } from '@kit.BasicServicesKit';
-import { ConnectionConfig, AppSettings, emptySettings, defaultConnection } from '../model/Model';
+import { ConnectionConfig, AppSettings, emptySettings, defaultConnection, normalizeBaseUrl } from '../model/Model';
 
 const PREF_NAME: string = 'homeagent_prefs';
 const KEY_CONNECTIONS: string = 'connections_json';
@@ -31,6 +31,12 @@ export class ConnStore {
       } catch (e) {
         this.connections = [];
       }
+      // 存量数据可能是旧版本存进去的裸域名或带尾斜杠的地址，读出来时一并规范化，
+      // 否则老用户升级后仍然会拼出错误的请求地址。
+      for (let i = 0; i < this.connections.length; i++) {
+        const c: ConnectionConfig = this.connections[i];
+        c.url = normalizeBaseUrl(c.url);
+      }
     }
     const settingsJson: string = await this.prefs.get(KEY_SETTINGS, '') as string;
     if (settingsJson.length > 0) {
@@ -42,18 +48,8 @@ export class ConnStore {
     }
   }
 
-  // 首次启动时预置默认连接（用户后端），避免所有页面空白
-  async ensureDefaultConnection(): Promise<void> {
-    await this.load();
-    if (this.connections.length > 0) {
-      return;
-    }
-    const conn: ConnectionConfig = defaultConnection();
-    conn.id = 'default';
-    this.connections.push(conn);
-    this.settings.currentConnId = conn.id;
-    await this.save();
-  }
+  // 不预置任何连接：地址与密钥属于用户私有配置，不能随源码分发。
+  // 连接列表为空时各页面走"尚未配置后端连接"的统一提示，用户到设置页添加。
 
   getConnections(): ConnectionConfig[] {
     return this.connections;
@@ -82,7 +78,7 @@ export class ConnStore {
     const conn: ConnectionConfig = defaultConnection();
     conn.id = Date.now().toString(36) + Math.floor(Math.random() * 10000).toString(36);
     conn.name = name;
-    conn.url = url;
+    conn.url = normalizeBaseUrl(url);
     conn.apiKey = apiKey;
     conn.type = 'webui';
     this.connections.push(conn);
@@ -99,7 +95,7 @@ export class ConnStore {
       const c: ConnectionConfig = this.connections[i];
       if (c.id === id) {
         c.name = name;
-        c.url = url;
+        c.url = normalizeBaseUrl(url);
         c.apiKey = apiKey;
         break;
       }

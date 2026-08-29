@@ -81,7 +81,6 @@ export default class EntryAbility extends UIAbility {
     windowStage.getMainWindow((err: BusinessError, win: window.Window) => {
       if (err.code !== 0) {
         connStore.init(this.context).then(async () => {
-          await connStore.ensureDefaultConnection();
           const cur = connStore.getCurrentConnection();
           if (cur !== null) {
             apiClient.setConnection(cur);
@@ -100,7 +99,6 @@ export default class EntryAbility extends UIAbility {
         console.warn('[HomeAgent] setWindowLayoutFullScreen failed: ' + (e as Error).message);
       }
       connStore.init(this.context).then(async () => {
-        await connStore.ensureDefaultConnection();
         const cur = connStore.getCurrentConnection();
         if (cur !== null) {
           apiClient.setConnection(cur);

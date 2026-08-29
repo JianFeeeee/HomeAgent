@@ -163,12 +163,45 @@ export function emptySettings(): AppSettings {
   return s;
 }
 
+/**
+ * 规范化用户填写的后端地址。
+ *
+ * 用户习惯直接敲域名（homeagent.example.xyz）或粘贴带路径的地址。
+ * 三件事必须在存库前做掉，否则请求会以各种方式失败：
+ *
+ * 1) 补协议，且默认 https。
+ *    很多反代把 http 整站 302 到别的主机（例如门户站 www.xxx），
+ *    重定向后的主机没有 API，客户端只会拿到 404 页面而不是 401/200，
+ *    表现为"连接直接失败"且看不出原因。默认 https 可以绕过整类问题。
+ *    只有明确写了 http:// 的内网地址才走明文。
+ * 2) 去掉结尾斜杠，避免拼出 //api/v1。
+ * 3) 去掉用户误粘的 /api/v1 后缀，避免拼成 /api/v1/api/v1。
+ */
+export function normalizeBaseUrl(raw: string): string {
+  let u: string = raw.trim();
+  if (u.length === 0) {
+    return '';
+  }
+  const lower: string = u.toLowerCase();
+  if (!lower.startsWith('http://') && !lower.startsWith('https://')) {
+    u = 'https://' + u;
+  }
+  u = u.replace(/\/+$/, '');
+  u = u.replace(/\/api\/v1$/, '');
+  return u;
+}
+
+/**
+ * 新建连接用的空白模板。
+ * 这里不能写死任何地址或密钥：源码是公开的，硬编码等于把内网地址和访问凭据一起发布。
+ * 地址与 API Key 由用户在「设置 - 连接」里填写，未配置时各页面统一提示（见 UserError.MSG_NO_CONN）。
+ */
 export function defaultConnection(): ConnectionConfig {
   const c: ConnectionConfig = {
     id: '',
     name: 'HomeAgent',
-    url: 'http://192.168.2.60:8080',
-    apiKey: 'jinrui233719',
+    url: '',
+    apiKey: '',
     type: 'webui',
   };
   return c;
