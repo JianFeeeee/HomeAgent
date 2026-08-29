@@ -1,0 +1,57 @@
+{
+  app: {
+    products: [
+      {
+        name: 'default',
+        signingConfig: 'default',
+        compileSdkVersion: '26.0.0',
+        compatibleSdkVersion: '6.1.1(24)',
+        runtimeOS: 'HarmonyOS',
+        buildOption: {
+          strictMode: {
+            useNormalizedOHMUrl: true,
+          },
+        },
+      },
+    ],
+    buildModeSet: [
+      {
+        name: 'debug',
+      },
+      {
+        name: 'release',
+      },
+    ],
+    // 复制为 build-profile.json5 后，把下面四项换成本机 DevEco 生成的调试签名材料
+    // （默认在 ~/.ohos/config/ 下），keyPassword / storePassword 用自己的值。
+    signingConfigs: [
+      {
+        name: 'default',
+        type: 'HarmonyOS',
+        material: {
+          certpath: 'REPLACE_WITH_YOUR_CER_PATH',
+          keyAlias: 'debugKey',
+          keyPassword: 'REPLACE_WITH_YOUR_KEY_PASSWORD',
+          profile: 'REPLACE_WITH_YOUR_P7B_PATH',
+          signAlg: 'SHA256withECDSA',
+          storeFile: 'REPLACE_WITH_YOUR_P12_PATH',
+          storePassword: 'REPLACE_WITH_YOUR_STORE_PASSWORD',
+        },
+      },
+    ],
+  },
+  modules: [
+    {
+      name: 'entry',
+      srcPath: './entry',
+      targets: [
+        {
+          name: 'default',
+          applyToProducts: [
+            'default',
+          ],
+        },
+      ],
+    },
+  ],
+}

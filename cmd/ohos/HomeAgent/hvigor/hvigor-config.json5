@@ -1,0 +1,7 @@
+{
+  "modelVersion": "5.0.0",
+  "dependencies": {
+    "@ohos/hvigor": "file:/opt/huawei/command-line-tools/hvigor/hvigor",
+    "@ohos/hvigor-ohos-plugin": "file:/opt/huawei/command-line-tools/hvigor/hvigor-ohos-plugin"
+  }
+}

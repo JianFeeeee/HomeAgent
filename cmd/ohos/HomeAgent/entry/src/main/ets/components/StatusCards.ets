@@ -1,0 +1,307 @@
+import { ThemePalette, DARK_PALETTE, LIGHT_PALETTE, RADIUS_LG, RADIUS_SM } from '../common/Constants';
+import { COLOR_ACCENT, COLOR_SUCCESS, COLOR_CYAN, COLOR_ERROR } from '../common/Constants';
+import {
+  statusStore, StatGroup, StatField, compactDuration,
+  K_UP, K_VERSION, K_STARTED, K_AGENTS, K_PLUGINS, K_TOOLS, K_ERR, K_LOADING, K_REV,
+} from '../common/StatusStore';
+
+/**
+ * 运行状态摘要卡：嵌在设置一级页顶部（原「状态」Tab 已删除）。
+ *
+ * 只放一眼可读的东西：环形仪表 + 运行时长 + 三项 KPI + 版本，
+ * 明细（内核 / 模型 / 记忆 / 运行时 / 工具清单）走二级页面。
+ * 点击整卡进入明细，所以自身不放任何按钮，避免嵌套点击。
+ */
+@Component
+export struct StatusSummaryCard {
+  @StorageProp('themeIsDark') private isDark: boolean = true;
+  @StorageProp(K_UP) private up: boolean = false;
+  @StorageProp(K_VERSION) private version: string = '-';
+  @StorageProp(K_STARTED) private startedAt: string = '';
+  @StorageProp(K_AGENTS) private agents: number = 0;
+  @StorageProp(K_PLUGINS) private plugins: number = 0;
+  @StorageProp(K_TOOLS) private tools: number = 0;
+  @StorageProp(K_ERR) private err: string = '';
+  @StorageProp(K_LOADING) private loading: boolean = false;
+  /** 秒级刷新的运行时长文本：环心不能用 startedAt 直接算，否则不会自动跳秒 */
+  @State private uptime: string = '-';
+  private timerId: number = -1;
+  onTap?: () => void;
+
+  aboutToAppear(): void {
+    this.uptime = compactDuration(this.startedAt);
+    this.timerId = setInterval(() => {
+      this.uptime = compactDuration(this.startedAt);
+    }, 1000);
+  }
+
+  aboutToDisappear(): void {
+    if (this.timerId >= 0) {
+      clearInterval(this.timerId);
+      this.timerId = -1;
+    }
+  }
+
+  build() {
+    Column() {
+      if (this.err.length > 0) {
+        // 连接失败：只显示一句人话，技术细节在 hilog 里
+        Row() {
+          Image($r('app.media.ic_error'))
+            .width(16)
+            .height(16)
+            .fillColor(COLOR_ERROR)
+            .draggable(false)
+          Text(this.err)
+            .fontSize(13)
+            .fontColor(COLOR_ERROR)
+            .layoutWeight(1)
+            .margin({ left: 10 })
+        }
+        .width('100%')
+        .alignItems(VerticalAlign.Top)
+      } else if (this.loading && !this.up) {
+        Row() {
+          LoadingProgress()
+            .width(26)
+            .height(26)
+            .color(this.palette().accent)
+        }
+        .width('100%')
+        .justifyContent(FlexAlign.Center)
+        .padding({ top: 20, bottom: 20 })
+      } else {
+        // 状态主行：一枚状态图标（运行=脉搏，离线=断开）+ 状态词 + 运行时长。
+        // 之前那个环形进度条表达的是"100% / 0%"，而在线与否是布尔量，
+        // 用百分比环表示只会让人以为有什么在加载；架构是单 agent 单 session，
+        // "Agent 数" 恒为 1，也没有信息量，一并去掉。
+        Row({ space: 12 }) {
+          Stack({ alignContent: Alignment.Center }) {
+            Image(this.up ? $r('app.media.ic_pulse') : $r('app.media.ic_offline'))
+              .width(24)
+              .height(24)
+              .fillColor(this.up ? COLOR_SUCCESS : this.palette().textMuted)
+              .draggable(false)
+          }
+          .width(48)
+          .height(48)
+          .borderRadius(RADIUS_SM)
+          .backgroundColor(this.up ? 'rgba(23, 169, 100, 0.16)' : this.palette().bgHover)
+
+          Column({ space: 3 }) {
+            Text(this.up ? '运行中' : '离线')
+              .fontSize(17)
+              .fontWeight(FontWeight.Bold)
+              .fontColor(this.up ? COLOR_SUCCESS : this.palette().textMuted)
+            Text(this.up ? '已运行 ' + this.uptime : '未连接到后端服务')
+              .fontSize(12)
+              .fontColor(this.palette().textSecondary)
+              .maxLines(1)
+              .textOverflow({ overflow: TextOverflow.Ellipsis })
+          }
+          .alignItems(HorizontalAlign.Start)
+          .layoutWeight(1)
+        }
+        .width('100%')
+        .alignItems(VerticalAlign.Center)
+
+        // 能力计数：图标 + 数字，只保留真正会变的两项（插件 / 工具）
+        Row({ space: 10 }) {
+          this.kpiTile($r('app.media.ic_plug'), '插件', this.plugins, COLOR_ACCENT)
+          this.kpiTile($r('app.media.ic_tool'), '工具', this.tools, COLOR_CYAN)
+        }
+        .width('100%')
+        .margin({ top: 14 })
+
+        // 版本 + 「查看明细」提示，与 KPI 之间用分割线断开
+        Row() {
+          Text('版本')
+            .fontSize(12)
+            .fontColor(this.palette().textMuted)
+          Text(this.version)
+            .fontSize(12)
+            .fontWeight(FontWeight.Medium)
+            .fontColor(this.palette().textSecondary)
+            .layoutWeight(1)
+            .maxLines(1)
+            .textOverflow({ overflow: TextOverflow.Ellipsis })
+            .margin({ left: 10 })
+          Text('明细')
+            .fontSize(12)
+            .fontColor(this.palette().accent)
+          Image($r('app.media.ic_chevron_right'))
+            .width(14)
+            .height(14)
+            .fillColor(this.palette().accent)
+            .draggable(false)
+        }
+        .width('100%')
+        .alignItems(VerticalAlign.Center)
+        .margin({ top: 14 })
+        .padding({ top: 11 })
+        .border({ width: { top: 1 }, color: this.palette().kvBorder })
+      }
+    }
+    .width('100%')
+    .padding(18)
+    .borderRadius(RADIUS_LG)
+    .backgroundColor(this.palette().bgCard)
+    .border({ width: 1, color: this.palette().glassBorder })
+    .alignItems(HorizontalAlign.Start)
+    .margin({ bottom: 18 })
+    .onClick(() => {
+      const cb = this.onTap;
+      if (cb !== undefined) {
+        cb();
+      }
+    })
+  }
+
+  @Builder
+  kpiTile(icon: Resource, label: string, value: number, color: string) {
+    Row({ space: 8 }) {
+      Image(icon)
+        .width(16)
+        .height(16)
+        .fillColor(color)
+        .draggable(false)
+      Column({ space: 1 }) {
+        Text(value > 0 ? value.toString() : '-')
+          .fontSize(17)
+          .fontWeight(FontWeight.Bold)
+          .fontColor(this.palette().textPrimary)
+        Text(label)
+          .fontSize(11)
+          .fontColor(this.palette().textMuted)
+      }
+      .alignItems(HorizontalAlign.Start)
+    }
+    .layoutWeight(1)
+    .padding({ left: 12, right: 12, top: 10, bottom: 10 })
+    .borderRadius(RADIUS_SM)
+    .backgroundColor(this.palette().bgHover)
+    .alignItems(VerticalAlign.Center)
+  }
+
+  private palette(): ThemePalette {
+    return this.isDark ? DARK_PALETTE : LIGHT_PALETTE;
+  }
+}
+
+/**
+ * 运行状态明细：设置页「运行状态」二级页面的内容。
+ *
+ * 服务负载三条容量条 + 分组明细卡（系统概览 / 内核 / 模型 / 记忆 / 运行时 / 工具）。
+ * 分组数组不放 AppStorage（数组同步语义不可靠），改为订阅版本号 K_REV，
+ * 版本变化时从 statusStore 重取一次快照。
+ */
+@Component
+export struct StatusDetailContent {
+  @StorageProp('themeIsDark') private isDark: boolean = true;
+  @StorageProp(K_UP) private up: boolean = false;
+  @StorageProp(K_AGENTS) private agents: number = 0;
+  @StorageProp(K_PLUGINS) private plugins: number = 0;
+  @StorageProp(K_TOOLS) private tools: number = 0;
+  @StorageProp(K_ERR) private err: string = '';
+  @StorageProp(K_LOADING) private loading: boolean = false;
+  @StorageProp(K_REV) @Watch('onRevChanged') private rev: number = 0;
+  @State groups: StatGroup[] = [];
+
+  aboutToAppear(): void {
+    this.groups = statusStore.getGroups();
+  }
+
+  private onRevChanged(): void {
+    this.groups = statusStore.getGroups();
+  }
+
+  build() {
+    Column() {
+      if (this.err.length > 0) {
+        Row() {
+          Image($r('app.media.ic_error'))
+            .width(16)
+            .height(16)
+            .fillColor(COLOR_ERROR)
+            .draggable(false)
+          Text(this.err)
+            .fontSize(13)
+            .fontColor(COLOR_ERROR)
+            .layoutWeight(1)
+            .margin({ left: 10 })
+        }
+        .width('100%')
+        .padding(16)
+        .borderRadius(RADIUS_LG)
+        .backgroundColor(this.palette().bgCard)
+        .border({ width: 1, color: this.palette().glassBorder })
+        .alignItems(VerticalAlign.Top)
+        .margin({ bottom: 14 })
+      }
+
+      if (this.loading && this.groups.length === 0) {
+        Row() {
+          LoadingProgress()
+            .width(28)
+            .height(28)
+            .color(this.palette().accent)
+        }
+        .width('100%')
+        .justifyContent(FlexAlign.Center)
+        .padding({ top: 40, bottom: 40 })
+      }
+
+      // 这里原本有一张"服务负载"卡，用两条容量条画插件/工具数量。
+      // 后端并不存在"插件上限/工具上限"这种容量概念，分母是两者取大值，
+      // 于是 31 个插件在 203 个工具旁边只剩一条短线 —— 读数没有意义。
+      // 数量本身已在摘要卡上以图标+数字直观呈现，这里不再重复。
+
+      ForEach(this.groups, (g: StatGroup) => {
+        Column() {
+          Text(g.title)
+            .fontSize(15)
+            .fontWeight(FontWeight.Medium)
+            .fontColor(this.palette().textPrimary)
+            .margin({ bottom: 6 })
+          ForEach(g.fields, (f: StatField, idx: number) => {
+            Row() {
+              Text(f.label)
+                .fontSize(13)
+                .fontColor(this.palette().textSecondary)
+                .layoutWeight(1)
+                .maxLines(1)
+                .textOverflow({ overflow: TextOverflow.Ellipsis })
+              Text(f.value.length > 0 ? f.value : '-')
+                .fontSize(13)
+                .fontColor(this.palette().textPrimary)
+                .textAlign(TextAlign.End)
+                .maxLines(1)
+                .textOverflow({ overflow: TextOverflow.Ellipsis })
+                .constraintSize({ maxWidth: 200 })
+                .margin({ left: 16 })
+            }
+            .width('100%')
+            .padding({ top: 9, bottom: 9 })
+            .border({
+              width: { bottom: idx < g.fields.length - 1 ? 1 : 0 },
+              color: this.palette().kvBorder,
+            })
+          }, (f: StatField) => g.title + f.label)
+        }
+        .width('100%')
+        .padding(18)
+        .borderRadius(RADIUS_LG)
+        .backgroundColor(this.palette().bgCard)
+        .border({ width: 1, color: this.palette().glassBorder })
+        .alignItems(HorizontalAlign.Start)
+        .margin({ bottom: 14 })
+      }, (g: StatGroup) => g.title)
+    }
+    .width('100%')
+    .alignItems(HorizontalAlign.Start)
+  }
+
+  private palette(): ThemePalette {
+    return this.isDark ? DARK_PALETTE : LIGHT_PALETTE;
+  }
+}
