@@ -8,6 +8,8 @@ import { navBar } from '../common/NavBarController';
 import { handleBackPress } from '../common/NavStackRegistry';
 import { ConnectionConfig } from '../model/Model';
 import { ThemePalette, DARK_PALETTE, LIGHT_PALETTE, WIDE_MIN_WIDTH, WIDE_NAV_BAR_WIDTH } from '../common/Constants';
+import { ANIM_NORMAL, ANIM_SLOW } from '../common/Constants';
+import { MotionBase } from '../components/MotionBase';
 import { GradientBackground } from '../components/GradientBackground';
 import { registerScreensueHandler, installCmdRouter } from '../common/BridgeRouter';
 import { ScreensuePayload, snapshotComponentId } from '../common/BridgeCaps';
@@ -33,24 +35,32 @@ export struct RailTab {
   @Prop muted: string = '';
 
   build() {
-    Column({ space: 3 }) {
-      Image(this.icon)
-        .width(22)
-        .height(22)
-        .fillColor(this.active ? this.accent : this.muted)
-        .draggable(false)
+    // 底部导航按压反馈：交给 MotionBase 统一（flexWeight 由外层调用点的
+    // .layoutWeight(1) 负责，这里内部只需撑满自己那一格）。
+    MotionBase({ pressEnabled: true }) {
+      Column({ space: 3 }) {
+        Image(this.icon)
+          .width(22)
+          .height(22)
+          .fillColor(this.active ? this.accent : this.muted)
+          // 选中态的颜色迁移必须写在子节点上：父容器的 .animation()
+          // 只驱动它自己的属性，不会下传给 Image / Text。
+          .animation({ duration: ANIM_NORMAL, curve: Curve.EaseOut })
+          .draggable(false)
 
-      Text(this.label)
-        .fontSize(10)
-        .fontWeight(this.active ? FontWeight.Medium : FontWeight.Normal)
-        .fontColor(this.active ? this.accent : this.muted)
-        .maxLines(1)
+        Text(this.label)
+          .fontSize(10)
+          // fontWeight 不可插值，切换时仍是跳变，只对颜色做过渡
+          .fontWeight(this.active ? FontWeight.Medium : FontWeight.Normal)
+          .fontColor(this.active ? this.accent : this.muted)
+          .animation({ duration: ANIM_NORMAL, curve: Curve.EaseOut })
+          .maxLines(1)
+      }
+      .justifyContent(FlexAlign.Center)
+      .alignItems(HorizontalAlign.Center)
+      .width('100%')
+      .height(48)
     }
-    .justifyContent(FlexAlign.Center)
-    .alignItems(HorizontalAlign.Center)
-    .width('100%')
-    .height(48)
-    .animation({ duration: 200, curve: Curve.EaseOut })
   }
 }
 
@@ -325,7 +335,7 @@ struct Index {
       // 所有页面滑动时隐藏导航栏
       .translate({ y: !this.navVisible ? 130 : 0 })
       .opacity(!this.navVisible ? 0 : 1)
-      .animation({ duration: 400, curve: Curve.EaseOut })
+      .animation({ duration: ANIM_SLOW, curve: Curve.EaseOut })
       // 导航栏本身不吃触摸空白区，避免遮住下层内容点击
       .hitTestBehavior(HitTestMode.Transparent)
 

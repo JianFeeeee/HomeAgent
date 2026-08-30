@@ -6,7 +6,8 @@ import { noConnectionMessage } from '../common/UserError';
 import { handleNavOnScroll } from '../common/NavBarController';
 import { registerNavStack, unregisterNavStack } from '../common/NavStackRegistry';
 import { DeviceInfo } from '../model/Model';
-import { ThemePalette, DARK_PALETTE, LIGHT_PALETTE, WIDE_NAV_BAR_WIDTH, WIDE_MIN_CONTENT } from '../common/Constants';
+import { ThemePalette, DARK_PALETTE, LIGHT_PALETTE, WIDE_NAV_BAR_WIDTH, WIDE_MIN_CONTENT, ANIM_FAST, ANIM_NORMAL, ANIM_ENTER } from '../common/Constants';
+import { MotionBase } from '../components/MotionBase';
 import { common } from '@kit.AbilityKit';
 import { PageTopBar, NavFloatOverlay, NavFloatRow, FloatIconButton } from '../components/PageTopBar';
 import { SubPageLayer, NavGroup, NavRow, PlainCard, markSubPageOpen, subPageParam } from '../components/SubPage';
@@ -79,7 +80,9 @@ export struct DevicePage {
       // ignore context errors
     }
     deviceBridge.setStateListener((open: boolean) => {
-      this.bridgeConnected = open;
+      this.getUIContext().animateTo({ duration: ANIM_NORMAL, curve: Curve.EaseOut }, () => {
+        this.bridgeConnected = open;
+      });
       if (open) {
         this.lastError = '';
         this.showToast('设备网关已连接', false);
@@ -140,7 +143,9 @@ export struct DevicePage {
    *   所以用 replace 换页而不是叠栈 —— 否则返回手势要一层层退回去。
    */
   private openSub(id: string): void {
-    this.activeSub = id;
+    this.getUIContext().animateTo({ duration: ANIM_NORMAL, curve: Curve.EaseOut }, () => {
+      this.activeSub = id;
+    });
     if (this.isWide && this.navStack.size() > 0) {
       this.navStack.replacePathByName(id, subPageParam(id), false);
     } else {
@@ -151,7 +156,9 @@ export struct DevicePage {
   /** 二级页面返回键：宽屏下左栏常驻可见，SubPageLayer 已隐藏返回键 */
   private closeSub(): void {
     this.navStack.pop();
-    this.activeSub = SUB_NONE;
+    this.getUIContext().animateTo({ duration: ANIM_NORMAL, curve: Curve.EaseOut }, () => {
+      this.activeSub = SUB_NONE;
+    });
   }
 
   /** Toggle local authorization flag; hello 同步到网关。 */
@@ -203,10 +210,15 @@ export struct DevicePage {
   }
 
   private showToast(msg: string, isError: boolean): void {
-    this.toastMsg = msg;
+    // 颜色标记必须在动画闭包外先落定，否则第一帧用的还是上一条 toast 的配色
     this.toastIsError = isError;
+    this.getUIContext().animateTo({ duration: ANIM_NORMAL, curve: Curve.EaseOut }, () => {
+      this.toastMsg = msg;
+    });
     setTimeout(() => {
-      this.toastMsg = '';
+      this.getUIContext().animateTo({ duration: ANIM_NORMAL, curve: Curve.EaseOut }, () => {
+        this.toastMsg = '';
+      });
     }, 2500);
   }
 
@@ -244,7 +256,9 @@ export struct DevicePage {
             list.push(info);
           }
         }
-        this.devices = list;
+        this.getUIContext().animateTo({ duration: ANIM_ENTER, curve: Curve.EaseOut }, () => {
+          this.devices = list;
+        });
       } else {
         this.devices = [];
       }
@@ -327,7 +341,9 @@ export struct DevicePage {
         }
       } else {
         this.navStack.clear(false);
-        this.activeSub = SUB_NONE;
+        this.getUIContext().animateTo({ duration: ANIM_NORMAL, curve: Curve.EaseOut }, () => {
+          this.activeSub = SUB_NONE;
+        });
         markSubPageOpen(false);
       }
     })
@@ -403,6 +419,9 @@ export struct DevicePage {
       .justifyContent(FlexAlign.End)
       .padding({ right: 20 })
       .margin({ bottom: 166 })
+      .transition(TransitionEffect.OPACITY
+        .combine(TransitionEffect.translate({ y: 12 }))
+        .animation({ duration: ANIM_NORMAL, curve: Curve.EaseOut }))
     }
   }
 
@@ -499,10 +518,12 @@ export struct DevicePage {
       Row() {
         Circle({ width: 8, height: 8 })
           .fill(this.authorized ? '#17A964' : '#E84026')
+          .animation({ duration: ANIM_NORMAL, curve: Curve.EaseOut })
           .margin({ right: 8 })
         Text(this.authorized ? '已授权 — agent 可远程调用能力' : '未授权 — agent 将拒绝远程命令')
           .fontSize(12)
           .fontColor(this.authorized ? '#17A964' : this.palette().textMuted)
+          .animation({ duration: ANIM_NORMAL, curve: Curve.EaseOut })
       }
       .width('100%')
       .margin({ top: 12 })
@@ -551,36 +572,46 @@ export struct DevicePage {
         .fontSize(12)
         .fontColor('#E84026')
         .padding({ left: 4 })
+        .transition(TransitionEffect.OPACITY
+          .combine(TransitionEffect.translate({ y: -8 }))
+          .animation({ duration: ANIM_NORMAL, curve: Curve.EaseOut }))
     }
 
     PlainCard({ caption: '操作' }) {
       Row() {
-        Button(this.bridgeConnected ? '断开' : '连接网关')
-          .height(34)
-          .fontSize(12)
-          .backgroundColor(this.bridgeConnected ? Color.Transparent : this.palette().accent)
-          .fontColor(this.bridgeConnected ? this.palette().textSecondary : Color.White)
-          .border({
-            width: this.bridgeConnected ? 1 : 0,
-            color: this.palette().btnGhostBorder,
-          })
-          .onClick(() => {
-            if (this.bridgeConnected) {
-              deviceBridge.disconnect();
-            } else {
-              this.connectBridge();
-            }
-          })
+        // 缩放反馈由 MotionBase 统一；连接态的底色/字色切换仍需按钮自己缓动，
+        // 因为父容器的 .animation() 到不了子节点。
+        MotionBase({ pressEnabled: true, fillWidth: false }) {
+          Button(this.bridgeConnected ? '断开' : '连接网关')
+            .height(34)
+            .fontSize(12)
+            .backgroundColor(this.bridgeConnected ? Color.Transparent : this.palette().accent)
+            .fontColor(this.bridgeConnected ? this.palette().textSecondary : Color.White)
+            .animation({ duration: ANIM_FAST, curve: Curve.EaseOut })
+            .border({
+              width: this.bridgeConnected ? 1 : 0,
+              color: this.palette().btnGhostBorder,
+            })
+            .onClick(() => {
+              if (this.bridgeConnected) {
+                deviceBridge.disconnect();
+              } else {
+                this.connectBridge();
+              }
+            })
+        }
         Blank()
-        Button('刷新设备')
-          .height(34)
-          .fontSize(12)
-          .backgroundColor(Color.Transparent)
-          .border({ width: 1, color: this.palette().btnGhostBorder })
-          .fontColor(this.palette().textSecondary)
-          .onClick(() => {
-            this.refreshDevices();
-          })
+        MotionBase({ pressEnabled: true, fillWidth: false }) {
+          Button('刷新设备')
+            .height(34)
+            .fontSize(12)
+            .backgroundColor(Color.Transparent)
+            .border({ width: 1, color: this.palette().btnGhostBorder })
+            .fontColor(this.palette().textSecondary)
+            .onClick(() => {
+              this.refreshDevices();
+            })
+        }
       }
       .width('100%')
 
@@ -600,31 +631,40 @@ export struct DevicePage {
         .fontSize(12)
         .fontColor(this.palette().textMuted)
         .padding({ left: 4 })
+        .transition(TransitionEffect.OPACITY.animation({ duration: ANIM_FAST, curve: Curve.EaseOut }))
     }
 
     ForEach(this.devices, (dev: DeviceInfo) => {
-      PlainCard({ caption: '' }) {
-        Row() {
-          Circle({ width: 8, height: 8 })
-            .fill(dev.online ? '#17A964' : '#77809A')
-            .margin({ right: 10 })
-          Column() {
-            Text(dev.name.length > 0 ? dev.name : dev.deviceId)
-              .fontSize(14)
-              .fontColor(this.palette().textPrimary)
-            Text(dev.kind + (dev.authorized ? ' · 已授权' : ' · 未授权'))
-              .fontSize(11)
-              .fontColor(dev.authorized ? '#17A964' : this.palette().textMuted)
-          }
-          .layoutWeight(1)
-          .alignItems(HorizontalAlign.Start)
+      // PlainCard 是自定义组件，transition 不能直接挂在它上面（会生成 __Common__ 包装），
+      // 所以用一个无 padding、满宽的 Column 承载入场动画，布局不受影响。
+      Column() {
+        PlainCard({ caption: '' }) {
+          Row() {
+            Circle({ width: 8, height: 8 })
+              .fill(dev.online ? '#17A964' : '#77809A')
+              .margin({ right: 10 })
+            Column() {
+              Text(dev.name.length > 0 ? dev.name : dev.deviceId)
+                .fontSize(14)
+                .fontColor(this.palette().textPrimary)
+              Text(dev.kind + (dev.authorized ? ' · 已授权' : ' · 未授权'))
+                .fontSize(11)
+                .fontColor(dev.authorized ? '#17A964' : this.palette().textMuted)
+            }
+            .layoutWeight(1)
+            .alignItems(HorizontalAlign.Start)
 
-          Text(dev.caps.length.toString() + ' 能力')
-            .fontSize(10)
-            .fontColor(this.palette().textMuted)
+            Text(dev.caps.length.toString() + ' 能力')
+              .fontSize(10)
+              .fontColor(this.palette().textMuted)
+          }
+          .width('100%')
         }
-        .width('100%')
       }
+      .width('100%')
+      .transition(TransitionEffect.OPACITY
+        .combine(TransitionEffect.translate({ y: 12 }))
+        .animation({ duration: ANIM_ENTER, curve: Curve.EaseOut }))
     }, (dev: DeviceInfo) => dev.deviceId + dev.online.toString())
   }
 

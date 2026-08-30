@@ -52,6 +52,25 @@ export const WIDE_MIN_CONTENT: number = 380;
 /** 悬浮导航胶囊的最大宽度（vp）：宽屏下避免被拉成长条 */
 export const NAV_PILL_MAX_WIDTH: number = 620;
 
+// ===== 动效时长（ms）=====
+/**
+ * 统一动效节奏，避免每处各写一个魔数导致快慢不一。
+ *
+ * 取值依据：状态切换类交互（按下、展开、选中）控制在 150-250ms，
+ * 超过 300ms 会显得"拖"；进出场大位移（导航栏收起、悬浮层）用 300-400ms
+ * 才不突兀。曲线统一 EaseOut：起步快、收尾缓，手感上更"跟手"。
+ */
+/** 按压反馈、图标旋转等即时反馈 */
+export const ANIM_FAST: number = 150;
+/** 展开/折叠、选中态迁移等常规状态切换 */
+export const ANIM_NORMAL: number = 220;
+/** 卡片入场、列表项出现 */
+export const ANIM_ENTER: number = 280;
+/** 导航栏收起、悬浮层进出等大位移 */
+export const ANIM_SLOW: number = 400;
+/** 按压态缩放：轻微下沉即可，过度缩放显廉价 */
+export const PRESS_SCALE: number = 0.97;
+
 /** Every color token the app renders with. */
 export interface ThemePalette {
   bgPrimary: string;

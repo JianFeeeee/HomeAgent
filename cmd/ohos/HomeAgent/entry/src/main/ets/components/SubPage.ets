@@ -1,4 +1,6 @@
-import { ThemePalette, DARK_PALETTE, LIGHT_PALETTE, RADIUS_LG } from '../common/Constants';
+import { ThemePalette, DARK_PALETTE, LIGHT_PALETTE, RADIUS_LG,
+  ANIM_NORMAL } from '../common/Constants';
+import { MotionBase } from './MotionBase';
 import { handleNavOnScroll } from '../common/NavBarController';
 import { PageTopBar, NavFloatOverlay, NavFloatRow, FloatIconButton } from './PageTopBar';
 import { GradientBackground } from './GradientBackground';
@@ -69,6 +71,7 @@ export struct SubPageLayer {
         .width('100%')
         // 宽屏右栏底部没有主导航胶囊，只保留悬浮键的空间
         .padding({ left: 16, right: 16, top: 76, bottom: this.isWide ? 108 : 174 })
+        .animation({ duration: ANIM_NORMAL, curve: Curve.EaseOut })
         .alignItems(HorizontalAlign.Start)
       }
       .width('100%')
@@ -88,24 +91,33 @@ export struct SubPageLayer {
       NavFloatOverlay({ tab: this.tab }) {
         NavFloatRow() {
           if (!this.isWide) {
-            SubPageBackButton({
-              onTap: () => {
-                const cb = this.onBack;
-                if (cb !== undefined) {
-                  cb();
-                }
-              },
-            })
-            if (this.showRefresh) {
-              FloatIconButton({
-                icon: $r('app.media.ic_refresh'),
+            // 自定义组件不能直接挂 .transition()（会生成 __Common__ 包装节点），
+            // 所以各自套一层无 padding 的 Column，由它承载出入场动画，
+            // 让悬浮键与 400ms 平滑滑出的悬浮层不再"一帧硬切"。
+            Column() {
+              SubPageBackButton({
                 onTap: () => {
-                  const cb = this.onRefresh;
+                  const cb = this.onBack;
                   if (cb !== undefined) {
                     cb();
                   }
                 },
               })
+            }
+            .transition(TransitionEffect.OPACITY.combine(TransitionEffect.scale({ x: 0.8, y: 0.8 })).animation({ duration: ANIM_NORMAL, curve: Curve.EaseOut }))
+            if (this.showRefresh) {
+              Column() {
+                FloatIconButton({
+                  icon: $r('app.media.ic_refresh'),
+                  onTap: () => {
+                    const cb = this.onRefresh;
+                    if (cb !== undefined) {
+                      cb();
+                    }
+                  },
+                })
+              }
+              .transition(TransitionEffect.OPACITY.combine(TransitionEffect.scale({ x: 0.8, y: 0.8 })).animation({ duration: ANIM_NORMAL, curve: Curve.EaseOut }))
             }
           }
         }
@@ -138,71 +150,82 @@ export struct NavRow {
   onTap?: () => void;
 
   build() {
-    Row() {
-      if (this.icon !== undefined) {
-        Row() {
-          Image(this.icon)
-            .width(17)
-            .height(17)
-            .fillColor(this.iconColor())
-            .draggable(false)
+    // 通用按压动画收进 MotionBase（父组件）：scale 回弹统一。
+    // 选中态底色仍在这里管：它是 NavRow 特有外观，不归父组件。
+    MotionBase({ pressEnabled: true }) {
+      Row() {
+        if (this.icon !== undefined) {
+          Row() {
+            Image(this.icon)
+              .width(17)
+              .height(17)
+              .fillColor(this.iconColor())
+              .draggable(false)
+          }
+          .width(32)
+          .height(32)
+          .borderRadius(10)
+          .backgroundColor(this.iconBg())
+          .justifyContent(FlexAlign.Center)
+          .margin({ right: 12 })
         }
-        .width(32)
-        .height(32)
-        .borderRadius(10)
-        .backgroundColor(this.iconBg())
-        .justifyContent(FlexAlign.Center)
-        .margin({ right: 12 })
-      }
 
-      Column({ space: 2 }) {
-        Text(this.title)
-          .fontSize(15)
-          .fontColor(this.selected ? this.palette().accent : this.palette().textPrimary)
-          .fontWeight(this.selected ? FontWeight.Medium : FontWeight.Normal)
-          .maxLines(1)
-          .textOverflow({ overflow: TextOverflow.Ellipsis })
-        if (this.subtitle.length > 0) {
-          Text(this.subtitle)
-            .fontSize(11)
-            .fontColor(this.palette().textMuted)
+        Column({ space: 2 }) {
+          Text(this.title)
+            .fontSize(15)
+            .fontColor(this.selected ? this.palette().accent : this.palette().textPrimary)
+            // 父行 MotionBase 的 .animation() 到不了子节点，选中态字色自己缓动
+            .animation({ duration: ANIM_NORMAL, curve: Curve.EaseOut })
+            .fontWeight(this.selected ? FontWeight.Medium : FontWeight.Normal)
             .maxLines(1)
             .textOverflow({ overflow: TextOverflow.Ellipsis })
+          if (this.subtitle.length > 0) {
+            Text(this.subtitle)
+              .fontSize(11)
+              .fontColor(this.palette().textMuted)
+              .maxLines(1)
+              .textOverflow({ overflow: TextOverflow.Ellipsis })
+          }
         }
-      }
-      .layoutWeight(1)
-      .alignItems(HorizontalAlign.Start)
+        .layoutWeight(1)
+        .alignItems(HorizontalAlign.Start)
 
-      if (this.value.length > 0) {
-        Text(this.value)
-          .fontSize(12)
-          .fontColor(this.palette().textSecondary)
-          .maxLines(1)
-          .textOverflow({ overflow: TextOverflow.Ellipsis })
-          .constraintSize({ maxWidth: 130 })
-          .margin({ right: 8 })
-      }
+        if (this.value.length > 0) {
+          Text(this.value)
+            .fontSize(12)
+            .fontColor(this.palette().textSecondary)
+            .maxLines(1)
+            .textOverflow({ overflow: TextOverflow.Ellipsis })
+            .constraintSize({ maxWidth: 130 })
+            .margin({ right: 8 })
+        }
 
-      Image($r('app.media.ic_chevron_right'))
-        .width(15)
-        .height(15)
-        .fillColor(this.selected ? this.palette().accent : this.palette().textMuted)
-        .draggable(false)
+        Image($r('app.media.ic_chevron_right'))
+          .width(15)
+          .height(15)
+          .fillColor(this.selected ? this.palette().accent : this.palette().textMuted)
+          .animation({ duration: ANIM_NORMAL, curve: Curve.EaseOut })
+          .draggable(false)
+      }
+      .width('100%')
+      .padding({ left: 14, right: 14, top: 12, bottom: 12 })
+      .alignItems(VerticalAlign.Center)
+      // 选中态底色：写在 .border 之前，避免分割线宽度被纳入动画。
+      // MotionBase 的 .animation() 只作用在包装 Column 上，到不了这里，
+      // 选中高亮的底色迁移要本行自己声明。
+      .backgroundColor(this.selected ? this.palette().accentBg : Color.Transparent)
+      .animation({ duration: ANIM_NORMAL, curve: Curve.EaseOut })
+      .border({
+        width: { bottom: this.showDivider ? 1 : 0 },
+        color: this.palette().kvBorder,
+      })
+      .onClick(() => {
+        const cb = this.onTap;
+        if (cb !== undefined) {
+          cb();
+        }
+      })
     }
-    .width('100%')
-    .padding({ left: 14, right: 14, top: 12, bottom: 12 })
-    .alignItems(VerticalAlign.Center)
-    .backgroundColor(this.selected ? this.palette().accentBg : Color.Transparent)
-    .border({
-      width: { bottom: this.showDivider ? 1 : 0 },
-      color: this.palette().kvBorder,
-    })
-    .onClick(() => {
-      const cb = this.onTap;
-      if (cb !== undefined) {
-        cb();
-      }
-    })
   }
 
   private iconColor(): string {
@@ -301,30 +324,34 @@ export struct SubPageBackButton {
   onTap?: () => void;
 
   build() {
-    Button() {
-      Row({ space: 4 }) {
-        Image($r('app.media.ic_arrow_back'))
-          .width(17)
-          .height(17)
-          .fillColor(this.palette().textSecondary)
-          .draggable(false)
+    // 玻璃底自带的按压变暗在 45% 透明度上几乎看不见，缩放反馈由 MotionBase 统一提供。
+    // fillWidth: false —— 悬浮区按内容宽度排列，不能撑满整行。
+    MotionBase({ pressEnabled: true, fillWidth: false }) {
+      Button() {
+        Row({ space: 4 }) {
+          Image($r('app.media.ic_arrow_back'))
+            .width(17)
+            .height(17)
+            .fillColor(this.palette().textSecondary)
+            .draggable(false)
+        }
       }
+      .width(42)
+      .height(42)
+      .type(ButtonType.Circle)
+      .backgroundColor(this.palette().navBarBg)
+      .border({
+        width: { left: 1, top: 1, right: 1, bottom: 1 },
+        color: this.palette().navBarBorder,
+      })
+      .shadow({ radius: 24, color: this.palette().shadow, offsetY: 8 })
+      .onClick(() => {
+        const cb = this.onTap;
+        if (cb !== undefined) {
+          cb();
+        }
+      })
     }
-    .width(42)
-    .height(42)
-    .type(ButtonType.Circle)
-    .backgroundColor(this.palette().navBarBg)
-    .border({
-      width: { left: 1, top: 1, right: 1, bottom: 1 },
-      color: this.palette().navBarBorder,
-    })
-    .shadow({ radius: 24, color: this.palette().shadow, offsetY: 8 })
-    .onClick(() => {
-      const cb = this.onTap;
-      if (cb !== undefined) {
-        cb();
-      }
-    })
   }
 
   private palette(): ThemePalette {
