@@ -46,3 +46,8 @@ dist/
 .pi-glla/
 .omo/
 .pi/
+
+# HarmonyOS 构建工具链缓存（HVIGOR_USER_HOME / ohpm 生成，非源码）
+.hvigor-home/
+.npm-cache/
+.ohpm/
