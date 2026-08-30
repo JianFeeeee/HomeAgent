@@ -540,6 +540,9 @@ func (dispatchIO) InjectInterruptText(s, c, t string) { callVoid(6, s, c, t, 0, 
 func (dispatchIO) InjectText(s, c, t string)           { callVoid(5, s, c, t, 0, 0) }
 func (dispatchIO) InjectTextNoMemory(s, c, t string)   { callVoid(7, s, c, t, 0, 0) }
 func (dispatchIO) InjectInputSync(s, c, t string) string { r, _ := callString(47, s, c, t, 0, 0); return r }
+// SetToolBlocks 是 Go 原生（非 ABI）的多模态注入；跨 ABI 的外部插件无对应内核桥接，
+// 故为空实现（满足接口即可）。需要多模态块时用插件内自持 SDK，不走 ABI。
+func (dispatchIO) SetToolBlocks([]sdk.ContentBlock) {}
 
 type dispatchMemory struct{}
 func (dispatchMemory) Recall(q []string, d int) ([]sdk.Entity, []sdk.Relation, error) {

@@ -107,11 +107,147 @@ type Plugin struct {
 	downloadTasks  []*DownloadTask
 	typingMu       sync.Mutex
 	typingMap      map[int64]*typingState
+
+	// msg_id → peer 映射 + 会话最新状态（<7 天兜底 get_history + list_chats）
+	msgMu   sync.Mutex
+	msgMap  map[int64]msgRef   // message_id → {peer, time}
+	chats   map[int64]*chatMeta // peerID → 会话状态（群号或 QQ 号）
 }
+
 
 type typingState struct {
 	userID int64
 	stopCh chan struct{}
+}
+
+// msgRef 一条已见过的消息的引用：只记录 msg_id → (peer, time) 映射，不缓存正文。
+// 用途：NapCat get_msg 的临时短号 <7 天失效时，据此把 get_msg 兜底为按 peer 拉 get_history。
+type msgRef struct {
+	peerID  int64
+	isGroup bool
+	time    int64 // 秒级时间戳
+}
+
+// chatMeta 一个会话（群/私聊）的最新状态，供 list_chats 展示。
+// 只维护最新一条的短摘要（≤qqLastSumLen 字符）与未读数，不缓存完整历史。
+type chatMeta struct {
+	peerID   int64
+	isGroup  bool
+	name     string
+	unread   int
+	lastTime int64
+	lastText string
+	lastNick string
+}
+
+const qqMsgTTL = 7 * 86400 // 7 天：msg_id → peer 映射的有效期
+const qqLastSumLen = 60    // list_chats 里最新一条摘要的最大长度
+
+// snapshotMsg 记录一条策略允许的消息：更新 msg_id→peer 映射与会话未读/最新状态。
+// 不缓存消息正文（仅最新一条留 ≤qqLastSumLen 的摘要供列表展示）。
+func (p *Plugin) snapshotMsg(msgID, peerID int64, isGroup bool, t int64, nickname, text string) {
+	if msgID <= 0 {
+		return
+	}
+	p.msgMu.Lock()
+	defer p.msgMu.Unlock()
+
+	// msg_id 映射（7 天 TTL，惰性清理）
+	p.msgMap[msgID] = msgRef{peerID: peerID, isGroup: isGroup, time: t}
+	now := time.Now().Unix()
+	if len(p.msgMap) > 2000 { // 定期清理过期项
+		for k, v := range p.msgMap {
+			if now-v.time > qqMsgTTL {
+				delete(p.msgMap, k)
+			}
+		}
+	}
+
+	ch := p.chats[peerID]
+	if ch == nil {
+		ch = &chatMeta{peerID: peerID, isGroup: isGroup}
+		p.chats[peerID] = ch
+	}
+	if ch.name == "" {
+		if isGroup {
+			ch.name = fmt.Sprintf("群%d", peerID)
+		} else {
+			ch.name = nickname
+		}
+	}
+	// 按到达次序维护未读与最新摘要：仅当本条更新时才更新 lastTime/lastText（保持按时间排）
+	if t > ch.lastTime {
+		ch.lastTime = t
+		ch.lastText = text
+		ch.lastNick = nickname
+	}
+	ch.unread++
+}
+
+// lookupMsgRef 查 msg_id 映射，返回 (peer, isGroup, time, ok)。超过 7 天视为无效（交给 get_history）。
+func (p *Plugin) lookupMsgRef(msgID int64) (int64, bool, int64, bool) {
+	p.msgMu.Lock()
+	defer p.msgMu.Unlock()
+	ref, ok := p.msgMap[msgID]
+	if !ok {
+		return 0, false, 0, false
+	}
+	now := time.Now().Unix()
+	if now-ref.time > qqMsgTTL {
+		delete(p.msgMap, msgID)
+		return 0, false, 0, false
+	}
+	return ref.peerID, ref.isGroup, ref.time, true
+}
+
+// markChatRead 清零某会话未读数（模型处理完该会话后调用）。
+func (p *Plugin) markChatRead(peerID int64) {
+	p.msgMu.Lock()
+	defer p.msgMu.Unlock()
+	if ch := p.chats[peerID]; ch != nil {
+		ch.unread = 0
+	}
+}
+
+// listChats 返回会话列表：按最新消息时间降序，含未读数与最新一条摘要。
+func (p *Plugin) listChats(capN int) []map[string]interface{} {
+	p.msgMu.Lock()
+	list := make([]*chatMeta, 0, len(p.chats))
+	for _, c := range p.chats {
+		list = append(list, c)
+	}
+	p.msgMu.Unlock()
+
+	// 降序（最新消息在前）
+	for i := 1; i < len(list); i++ {
+		for j := i; j > 0 && list[j].lastTime > list[j-1].lastTime; j-- {
+			list[j], list[j-1] = list[j-1], list[j]
+		}
+	}
+	if len(list) > capN {
+		list = list[:capN]
+	}
+
+	out := make([]map[string]interface{}, 0, len(list))
+	for _, c := range list {
+		typ := "private"
+		if c.isGroup {
+			typ = "group"
+		}
+		item := map[string]interface{}{
+			"peer_id":   c.peerID,
+			"type":      typ,
+			"name":      c.name,
+			"unread":    c.unread,
+			"last_text": c.lastText,
+			"last_nick": c.lastNick,
+		}
+		if c.lastTime > 0 {
+			item["last_time"] = time.Unix(c.lastTime, 0).Format("2006-01-02 15:04")
+		}
+		out = append(out, item)
+	}
+	return out
 }
 
 func (p *Plugin) Name() string { return p.name }
@@ -149,6 +285,10 @@ func (p *Plugin) Start(s *sdk.PluginSDK) error {
 	os.MkdirAll(p.remoteDir, 0755)
 
 	p.httpClient = &http.Client{Timeout: 30 * time.Second}
+
+	// msg_id → peer 映射 + 会话状态（不缓存正文）
+	p.msgMap = make(map[int64]msgRef)
+	p.chats = make(map[int64]*chatMeta)
 
 	// 从 NapCat 获取 Bot 身份（阻塞等待，最多 5s）
 	p.fetchBotInfo()
@@ -247,6 +387,27 @@ type 枚举: text（文字）/ voice（语音转文字后发送）/ image（图�
 			}, "required": []string{},
 		},
 	}, p.handleGetHistory)
+
+	p.regTool(s, sdk.ToolDef{
+		Name: tp + "list_chats", Description: "获取QQ会话列表，与真人客户端一致：按最新消息先后排序，每条标注会话（群/私聊）、会话名、未读消息数、最新一条消息摘要与时间。用于发现有未读消息的会话，再配合 qq_get_history 拉取对应会话内容、output_send__qq 回复。",
+		NoMemory: false,
+		Parameters: map[string]interface{}{
+			"type": "object", "properties": map[string]interface{}{
+				"count": map[string]interface{}{"type": "integer", "description": "最多返回会话数，默认10"},
+			}, "required": []string{},
+		},
+	}, p.handleListChats)
+
+	p.regTool(s, sdk.ToolDef{
+		Name: tp + "mark_read", Description: "将某个会话的未读计数清零（对象：群聊传 group_id，私聊传 user_id）。处理完某会话消息后可调用，让 list_chats 的未读数回到0，与真人客户端标记已读一致。",
+		NoMemory: false,
+		Parameters: map[string]interface{}{
+			"type": "object", "properties": map[string]interface{}{
+				"group_id": map[string]interface{}{"type": "integer", "description": "群号（与user_id二选一）"},
+				"user_id":  map[string]interface{}{"type": "integer", "description": "QQ号（与group_id二选一）"},
+			}, "required": []string{},
+		},
+	}, p.handleMarkRead)
 
 	// ---- 查询 ----
 	p.regTool(s, sdk.ToolDef{
@@ -772,6 +933,28 @@ func (p *Plugin) handleWebhook(w http.ResponseWriter, r *http.Request) {
 			w.WriteHeader(http.StatusOK)
 			return
 		}
+	}
+
+	// ---- 记录 msg_id→peer 映射与会话状态（不缓存正文，仅最新一条短摘要）----
+	// 策略允许的消息（群/私聊、是否 @bot 均记），供 get_msg 兜底与 list_chats 使用；
+	// @bot 与否只决定是否发中断，不影响记录——与真人客户端一致看到全部会话。
+	{
+		peerID, isGroup := evt.UserID, false
+		if evt.MessageType == "group" {
+			peerID, isGroup = evt.GroupID, true
+		}
+		sum := text
+		runes := []rune(sum)
+		if len(runes) > qqLastSumLen {
+			sum = string(runes[:qqLastSumLen]) + "…"
+		}
+		if evt.Time == 0 {
+			evt.Time = time.Now().Unix()
+		}
+		p.snapshotMsg(evt.MessageID, peerID, isGroup, evt.Time, nickname, sum)
+	}
+
+	if evt.MessageType == "group" {
 		// 群消息必须 @ 机器人才响应
 		if p.botID == 0 {
 			log.Printf("[qq] bot ID unknown, rejecting group message from %d", evt.GroupID)
@@ -791,9 +974,9 @@ func (p *Plugin) handleWebhook(w http.ResponseWriter, r *http.Request) {
 	outputTool := "output_send__" + p.name
 	var interrupt string
 	if evt.MessageType == "group" {
-		interrupt = fmt.Sprintf("来自「%s」在群「%s」的消息(message_id=%d)。使用%sget_message(message_id=%d)获取消息正文。如果消息包含引用回复，使用%sget_history(group_id=%d)查看上下文。使用%s回复群聊", nickname, "群聊", evt.MessageID, tp, evt.MessageID, tp, evt.GroupID, outputTool)
+		interrupt = fmt.Sprintf("来自「%s」在群「%s」的消息(message_id=%d)。先用%sget_message(message_id=%d)取正文；若取不到（消息已过期），改用%sget_history(group_id=%d)按会话拉取上下文，或用%slist_chats 查看未读会话。用%s回复群聊", nickname, "群聊", evt.MessageID, tp, evt.MessageID, tp, evt.GroupID, tp, outputTool)
 	} else {
-		interrupt = fmt.Sprintf("来自「%s」的私聊消息(message_id=%d)。使用%sget_message(message_id=%d)获取消息正文。使用%s回复对方", nickname, evt.MessageID, tp, evt.MessageID, outputTool)
+		interrupt = fmt.Sprintf("来自「%s」的私聊消息(message_id=%d, user_id=%d)。先用%sget_message(message_id=%d)取正文；若取不到（消息已过期），改用%sget_history(user_id=%d)按会话拉取上下文，或用%slist_chats 查看未读会话。用%s回复对方", nickname, evt.MessageID, evt.UserID, tp, evt.MessageID, tp, evt.UserID, tp, outputTool)
 	}
 	if p.isAdmin(evt.UserID) {
 		interrupt = "【重要！老大消息】" + interrupt
@@ -841,6 +1024,126 @@ func (p *Plugin) handleWebhook(w http.ResponseWriter, r *http.Request) {
 
 // ======== Tool Handlers ========
 
+// getMsgFromHistoryByTime 按 (peer, isGroup, targetTime) 从 NapCat 拉最近历史，返回距 targetTime 最近的完整消息。
+func (p *Plugin) getMsgFromHistoryByTime(peerID int64, isGroup bool, targetTime int64) (map[string]interface{}, bool) {
+	ep := "get_friend_msg_history"
+	params := map[string]interface{}{"user_id": peerID, "count": 50}
+	if isGroup {
+		ep = "get_group_msg_history"
+		params = map[string]interface{}{"group_id": peerID, "count": 50}
+	}
+	raw, err := p.napcat(ep, params)
+	if err != nil {
+		return nil, false
+	}
+	rawStr, _ := rawString(raw)
+	if rawStr == "" {
+		return nil, false
+	}
+	var resp struct {
+		Data *struct {
+			Messages []interface{} `json:"messages"`
+		} `json:"data"`
+	}
+	if json.Unmarshal([]byte(rawStr), &resp) != nil || resp.Data == nil {
+		return nil, false
+	}
+	var best map[string]interface{}
+	bestAbs := int64(-1)
+	for _, m := range resp.Data.Messages {
+		mm, ok := m.(map[string]interface{})
+		if !ok {
+			continue
+		}
+		mt, _ := mm["time"].(float64)
+		t := int64(mt)
+		if t == 0 {
+			continue
+		}
+		abs := t - targetTime
+		if abs < 0 {
+			abs = -abs
+		}
+		if bestAbs < 0 || abs < bestAbs {
+			bestAbs = abs
+			best = mm
+		}
+	}
+	if best == nil {
+		return nil, false
+	}
+	return best, true
+}
+
+// msgToGetMsgResult 把一条 NapCat 历史消息对象转成与 get_msg 同构的结果（历史包装语义）。
+func msgToGetMsgResult(msg map[string]interface{}) map[string]interface{} {
+	nickname := ""
+	if s, ok := msg["sender"].(map[string]interface{}); ok {
+		if n, _ := s["nickname"].(string); n != "" {
+			nickname = n
+		}
+		if c, _ := s["card"].(string); c != "" {
+			nickname = c
+		}
+	}
+	rawText, _ := msg["raw_message"].(string)
+	content := rawText
+	if content == "" {
+		if segs, ok := msg["message"].([]interface{}); ok {
+			var parts []string
+			for _, seg := range segs {
+				segMap, _ := seg.(map[string]interface{})
+				if segMap == nil {
+					continue
+				}
+				typ, _ := segMap["type"].(string)
+				segData, _ := segMap["data"].(map[string]interface{})
+				if segData == nil {
+					continue
+				}
+				switch typ {
+				case "text":
+					if t, _ := segData["text"].(string); t != "" {
+						parts = append(parts, t)
+					}
+				case "image":
+					parts = append(parts, "[图片]")
+				case "file":
+					if n, _ := segData["name"].(string); n != "" {
+						parts = append(parts, "[文件:"+n+"]")
+					}
+				default:
+					if typ != "" {
+						parts = append(parts, "["+typ+"]")
+					}
+				}
+			}
+			if len(parts) > 0 {
+				content = strings.Join(parts, " ")
+			}
+		}
+	}
+	mid, _ := msg["message_id"].(float64)
+	uid, _ := msg["user_id"].(float64)
+	gid, _ := msg["group_id"].(float64)
+	mt, _ := msg["time"].(float64)
+	mtType, _ := msg["message_type"].(string)
+	loc := "私聊"
+	if mtType == "group" || gid > 0 {
+		loc = "群聊"
+	}
+	return map[string]interface{}{
+		"content":      content,
+		"message_id":   int64(mid),
+		"user_id":      int64(uid),
+		"group_id":     int64(gid),
+		"nickname":     nickname,
+		"message_type": mtType,
+		"type":         loc,
+		"time":         time.Unix(int64(mt), 0).Format("2006-01-02 15:04:05"),
+	}
+}
+
 func (p *Plugin) handleGetMessage(args map[string]interface{}) (interface{}, error) {
 	msgID, err := convInt64(args["message_id"])
 	if err != nil {
@@ -850,10 +1153,24 @@ func (p *Plugin) handleGetMessage(args map[string]interface{}) (interface{}, err
 		}, nil
 	}
 
+	// 本地 msg_id→peer 映射命中且 <7 天 → 用 get_history 语义兜底（NapCat 临时短号失效也不怕）
+	if peerID, isGroup, t, ok := p.lookupMsgRef(msgID); ok {
+		if m, found := p.getMsgFromHistoryByTime(peerID, isGroup, t); found {
+			// 找到同会话、时间最接近的消息，包装为 get_msg 同构返回
+			res := msgToGetMsgResult(m)
+			res["resolved_via"] = "history" // 标明由历史查询兜底
+			return res, nil
+		}
+		// 历史窗口内没找到（消息可能被裁剪/更早），回退 NapCat 原查询
+	}
+	return p.getMsgFromNapcat(msgID)
+}
+
+func (p *Plugin) getMsgFromNapcat(msgID int64) (interface{}, error) {
 	raw, err := p.napcat("get_msg", map[string]interface{}{"message_id": msgID})
 	if err != nil {
 		return map[string]interface{}{
-			"content":    fmt.Sprintf("查询 NapCat 失败: %s", err),
+			"content":    fmt.Sprintf("查询 NapCat 失败: %s。该 message_id 可能已过期，请改用 qq_get_history 按会话拉取最近消息（或用 qq_list_chats 看未读会话）", err),
 			"message_id": msgID,
 			"not_found":  true,
 		}, nil
@@ -884,7 +1201,7 @@ func (p *Plugin) handleGetMessage(args map[string]interface{}) (interface{}, err
 	}
 	if err := json.Unmarshal([]byte(rawStr), &resp); err != nil || resp.Data == nil {
 		return map[string]interface{}{
-			"content":    "解析 NapCat 响应失败",
+			"content":    "解析 NapCat 响应失败（消息可能已过期）。请改用 qq_get_history 按会话拉取最近消息，或用 qq_list_chats 查看未读会话",
 			"message_id": msgID,
 			"not_found":  true,
 		}, nil
@@ -1214,6 +1531,31 @@ func (p *Plugin) handleSendFile(args map[string]interface{}) (interface{}, error
 	return p.napcat("send_private_msg", params)
 }
 
+func (p *Plugin) handleListChats(args map[string]interface{}) (interface{}, error) {
+	count := 10
+	if c, err := convInt64(args["count"]); err == nil && c > 0 && c < 100 {
+		count = int(c)
+	}
+	chats := p.listChats(count)
+	return map[string]interface{}{
+		"chats": chats,
+		"total": len(chats),
+		"hint":  "按最新消息先后排序；unread 为该会话未读消息数，处理完用 qq_mark_read 清零；用 qq_get_history(group_id/user_id) 拉取会话内容",
+	}, nil
+}
+
+func (p *Plugin) handleMarkRead(args map[string]interface{}) (interface{}, error) {
+	if gid, err := convInt64(args["group_id"]); err == nil {
+		p.markChatRead(gid)
+		return map[string]interface{}{"status": "ok", "group_id": gid, "unread": 0}, nil
+	}
+	if uid, err := convInt64(args["user_id"]); err == nil {
+		p.markChatRead(uid)
+		return map[string]interface{}{"status": "ok", "user_id": uid, "unread": 0}, nil
+	}
+	return nil, fmt.Errorf("need group_id or user_id")
+}
+
 func (p *Plugin) handleGetHistory(args map[string]interface{}) (interface{}, error) {
 	gid, gerr := convInt64(args["group_id"])
 	uid, uerr := convInt64(args["user_id"])
@@ -1351,6 +1693,12 @@ func (p *Plugin) handleGetHistory(args map[string]interface{}) (interface{}, err
 	}
 	if len(files) > 0 {
 		result["files"] = files
+	}
+	// 拉取过某会话历史即视为已读（与真人客户端一致：看过=已读）
+	if gerr == nil {
+		p.markChatRead(gid)
+	} else if uerr == nil {
+		p.markChatRead(uid)
 	}
 	return result, nil
 }
