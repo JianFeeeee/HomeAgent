@@ -1,4 +1,6 @@
 import { ThemePalette, DARK_PALETTE, LIGHT_PALETTE } from '../common/Constants';
+import { ANIM_FAST, ANIM_SLOW } from '../common/Constants';
+import { MotionBase } from './MotionBase';
 
 /**
  * 顶栏高度（vp）。页面 padding-top 应略大于此值，避免内容被标题压住，
@@ -123,31 +125,36 @@ export struct FloatIconButton {
   onTap?: () => void;
 
   build() {
-    Button() {
-      Image(this.icon)
-        .width(18)
-        .height(18)
-        .fillColor(this.accent ? this.palette().accent : this.palette().textSecondary)
-    }
-    .width(FLOAT_NODE_SIZE)
-    .height(FLOAT_NODE_SIZE)
-    .type(ButtonType.Circle)
-    .backgroundColor(this.palette().navBarBg)
-    .border({
-      width: { left: 1, top: 1, right: 1, bottom: 1 },
-      color: this.palette().navBarBorder,
-    })
-    .shadow({
-      radius: 24,
-      color: this.palette().shadow,
-      offsetY: 8,
-    })
-    .onClick(() => {
-      const cb = this.onTap;
-      if (cb !== undefined) {
-        cb();
+    // 按压缩放交给 MotionBase（父组件统一手感）；
+    // fillWidth: false —— 悬浮区靠右对齐，包装节点必须按内容 42vp 收窄。
+    MotionBase({ pressEnabled: true, fillWidth: false }) {
+      Button() {
+        Image(this.icon)
+          .width(18)
+          .height(18)
+          .fillColor(this.accent ? this.palette().accent : this.palette().textSecondary)
+          .animation({ duration: ANIM_FAST, curve: Curve.EaseOut })
       }
-    })
+      .width(FLOAT_NODE_SIZE)
+      .height(FLOAT_NODE_SIZE)
+      .type(ButtonType.Circle)
+      .backgroundColor(this.palette().navBarBg)
+      .border({
+        width: { left: 1, top: 1, right: 1, bottom: 1 },
+        color: this.palette().navBarBorder,
+      })
+      .shadow({
+        radius: 24,
+        color: this.palette().shadow,
+        offsetY: 8,
+      })
+      .onClick(() => {
+        const cb = this.onTap;
+        if (cb !== undefined) {
+          cb();
+        }
+      })
+    }
   }
 
   private palette(): ThemePalette {
@@ -203,6 +210,6 @@ export struct NavFloatOverlay {
     .margin({ bottom: 94 })
     .translate({ y: (!this.navVisible || this.currentTab !== this.tab) ? 140 : 0 })
     .opacity((!this.navVisible || this.currentTab !== this.tab) ? 0 : 1)
-    .animation({ duration: 400, curve: Curve.EaseOut })
+    .animation({ duration: ANIM_SLOW, curve: Curve.EaseOut })
   }
 }

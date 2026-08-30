@@ -4,8 +4,9 @@ import { common } from '@kit.AbilityKit';
 import { apiClient } from '../common/ApiClient';
 import { userMessage } from '../common/UserError';
 import { ChatAttachment } from '../model/Model';
-import { ThemePalette, DARK_PALETTE, LIGHT_PALETTE, RADIUS_LG, RADIUS_MD, RADIUS_SM } from '../common/Constants';
+import { ThemePalette, DARK_PALETTE, LIGHT_PALETTE, RADIUS_LG, RADIUS_MD, RADIUS_SM, ANIM_FAST, ANIM_NORMAL, ANIM_ENTER } from '../common/Constants';
 import { COLOR_ERROR } from '../common/Constants';
+import { MotionBase } from './MotionBase';
 import { PlainCard } from './SubPage';
 
 /**
@@ -131,6 +132,9 @@ export struct AttachmentCard {
   }
 
   build() {
+    // 整卡按压反馈统一收进 MotionBase（父组件）：scale 回弹 + 透明度压暗。
+    // fillWidth: false —— 附件卡在聊天气泡内按内容自适应宽度，不能撑满整行。
+    MotionBase({ pressEnabled: true, pressOpacity: 0.88, fillWidth: false }) {
     Column({ space: 6 }) {
       Text(this.mine ? '你发送的' : '小宅发送的')
         .fontSize(11)
@@ -144,6 +148,9 @@ export struct AttachmentCard {
             .objectFit(ImageFit.Cover)
             .borderRadius(RADIUS_MD)
             .draggable(false)
+            .transition(TransitionEffect.OPACITY
+              .combine(TransitionEffect.scale({ x: 0.98, y: 0.98 }))
+              .animation({ duration: ANIM_ENTER, curve: Curve.EaseOut }))
         } else if (this.failed) {
           Row({ space: 6 }) {
             Image($r('app.media.ic_error'))
@@ -158,6 +165,7 @@ export struct AttachmentCard {
           .padding({ left: 10, right: 10, top: 8, bottom: 8 })
           .borderRadius(RADIUS_SM)
           .backgroundColor(this.palette().bgHover)
+          .transition(TransitionEffect.OPACITY.animation({ duration: ANIM_FAST, curve: Curve.EaseOut }))
         } else {
           Row() {
             LoadingProgress()
@@ -170,6 +178,7 @@ export struct AttachmentCard {
           .justifyContent(FlexAlign.Center)
           .borderRadius(RADIUS_SM)
           .backgroundColor(this.palette().bgHover)
+          .transition(TransitionEffect.OPACITY.animation({ duration: ANIM_FAST, curve: Curve.EaseOut }))
         }
       } else {
         Row({ space: 8 }) {
@@ -212,6 +221,7 @@ export struct AttachmentCard {
         cb();
       }
     })
+    }
   }
 
   private palette(): ThemePalette {
@@ -259,7 +269,9 @@ export struct AttachmentDetailContent {
     } catch (e) {
       this.err = userMessage('attachment.load', e);
     }
-    this.loading = false;
+    this.getUIContext().animateTo({ duration: ANIM_ENTER, curve: Curve.EaseOut }, () => {
+      this.loading = false;
+    });
   }
 
   /** 保存到应用沙箱 files 目录（不申请媒体库权限，避免为了看一张图要授权相册）。 */
@@ -300,6 +312,9 @@ export struct AttachmentDetailContent {
         .border({ width: 1, color: this.palette().glassBorder })
         .alignItems(VerticalAlign.Top)
         .margin({ bottom: 14 })
+        .transition(TransitionEffect.OPACITY
+          .combine(TransitionEffect.translate({ y: -12 }))
+          .animation({ duration: ANIM_ENTER, curve: Curve.EaseOut }))
       }
 
       // 预览：图片铺满宽度可缩放查看；文件给一个大图标占位
@@ -315,6 +330,7 @@ export struct AttachmentDetailContent {
             .width('100%')
             .height(200)
             .justifyContent(FlexAlign.Center)
+            .transition(TransitionEffect.OPACITY.animation({ duration: ANIM_FAST, curve: Curve.EaseOut }))
           } else if (this.pixel !== undefined) {
             Image(this.pixel)
               .width('100%')
@@ -322,6 +338,7 @@ export struct AttachmentDetailContent {
               .objectFit(ImageFit.Contain)
               .borderRadius(RADIUS_MD)
               .draggable(false)
+              .transition(TransitionEffect.OPACITY.animation({ duration: ANIM_ENTER, curve: Curve.EaseOut }))
           }
         } else {
           Column({ space: 10 }) {
@@ -375,6 +392,9 @@ export struct AttachmentDetailContent {
             .fontColor(this.palette().textMuted)
             .width('100%')
             .margin({ top: 8 })
+            .transition(TransitionEffect.OPACITY
+              .combine(TransitionEffect.translate({ y: 6 }))
+              .animation({ duration: ANIM_ENTER, curve: Curve.EaseOut }))
         }
       }
     }
@@ -401,6 +421,7 @@ export struct AttachmentDetailContent {
     .width('100%')
     .padding({ top: 8, bottom: 8 })
     .alignItems(VerticalAlign.Top)
+    .transition(TransitionEffect.OPACITY.animation({ duration: ANIM_NORMAL, curve: Curve.EaseOut }))
   }
 
   private palette(): ThemePalette {

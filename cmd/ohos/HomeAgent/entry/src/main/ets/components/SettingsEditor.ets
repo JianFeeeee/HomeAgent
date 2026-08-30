@@ -3,6 +3,7 @@ import { userMessage, noConnectionMessage } from '../common/UserError';
 import { ThemePalette, DARK_PALETTE, LIGHT_PALETTE } from '../common/Constants';
 import { RADIUS_SM } from '../common/Constants';
 import { COLOR_ERROR } from '../common/Constants';
+import { ANIM_FAST, ANIM_NORMAL, ANIM_ENTER } from '../common/Constants';
 
 /**
  * 可复用的后端配置编辑器（按 key 前缀取一段配置并就地编辑）。
@@ -243,6 +244,7 @@ export struct SettingsEditor {
         .width('100%')
         .justifyContent(FlexAlign.Center)
         .padding({ top: 14, bottom: 14 })
+        .transition(TransitionEffect.OPACITY.animation({ duration: ANIM_FAST, curve: Curve.EaseOut }))
       }
 
       if (this.err.length > 0) {
@@ -250,6 +252,8 @@ export struct SettingsEditor {
           .fontSize(12)
           .fontColor(COLOR_ERROR)
           .width('100%')
+          .transition(TransitionEffect.OPACITY.combine(TransitionEffect.translate({ y: -12 }))
+            .animation({ duration: ANIM_ENTER, curve: Curve.EaseOut }))
       }
 
       if (!this.loading && this.err.length === 0 && this.entries.length === 0) {
@@ -257,6 +261,7 @@ export struct SettingsEditor {
           .fontSize(12)
           .fontColor(this.palette().textMuted)
           .width('100%')
+          .transition(TransitionEffect.OPACITY.animation({ duration: ANIM_FAST, curve: Curve.EaseOut }))
       }
 
       ForEach(this.entries, (entry: EditorEntry) => {
@@ -268,6 +273,8 @@ export struct SettingsEditor {
           .fontSize(11)
           .fontColor(this.toastErr ? COLOR_ERROR : this.palette().accent)
           .margin({ top: 4 })
+          .transition(TransitionEffect.OPACITY.combine(TransitionEffect.translate({ y: -12 }))
+            .animation({ duration: ANIM_ENTER, curve: Curve.EaseOut }))
       }
     }
     .width('100%')
@@ -302,6 +309,7 @@ export struct SettingsEditor {
           Text(entry.value === 'true' ? '已开启' : '已关闭')
             .fontSize(12)
             .fontColor(entry.value === 'true' ? this.palette().accent : this.palette().textMuted)
+            .animation({ duration: ANIM_NORMAL, curve: Curve.EaseOut })
           Blank()
           Toggle({ type: ToggleType.Switch, isOn: entry.value === 'true' })
             .selectedColor(this.palette().accent)
@@ -325,6 +333,7 @@ export struct SettingsEditor {
               .margin({ right: 6, bottom: 6 })
               .backgroundColor(entry.value === opt ? this.palette().accent : this.palette().bgHover)
               .fontColor(entry.value === opt ? Color.White : this.palette().textSecondary)
+              .animation({ duration: ANIM_NORMAL, curve: Curve.EaseOut })
               .onClick(() => {
                 this.save(entry, opt);
               })
@@ -352,6 +361,7 @@ export struct SettingsEditor {
             .fontSize(12)
             .backgroundColor(entry.dirty ? '#D99A2B' : this.palette().accent)
             .fontColor(Color.White)
+            .animation({ duration: ANIM_FAST, curve: Curve.EaseOut })
             .margin({ left: 8 })
             .onClick(() => {
               this.save(entry, this.latestValue(entry.key));
