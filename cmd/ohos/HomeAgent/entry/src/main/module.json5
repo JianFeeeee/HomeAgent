@@ -24,9 +24,11 @@
         "name": "EntryAbility",
         "srcEntry": "./ets/entryability/EntryAbility.ets",
         "description": "HomeAgent main entry",
-        "icon": "$media:app_icon",
+        "icon": "$media:layered_image",
         "label": "$string:app_name",
-        "startWindowIcon": "$media:app_icon",
+        // 启动页图标用透明底字形，配合随主题切换的 start_window_background，
+        // 浅色/深色模式下遮罩与图标都能对上，不再恒为深色样式。
+        "startWindowIcon": "$media:start_icon",
         "startWindowBackground": "$color:start_window_background",
         "exported": true,
         "skills": [

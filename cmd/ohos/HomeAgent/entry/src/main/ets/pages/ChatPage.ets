@@ -9,6 +9,8 @@ import { ThemePalette, DARK_PALETTE, LIGHT_PALETTE } from '../common/Constants';
 import { RADIUS_MD, RADIUS_PILL, RADIUS_SM } from '../common/Constants';
 import { WIDE_NAV_BAR_WIDTH, WIDE_MIN_CONTENT } from '../common/Constants';
 import { CHAT_PAGE_SIZE } from '../common/Constants';
+import { ANIM_FAST, ANIM_NORMAL, ANIM_ENTER } from '../common/Constants';
+import { MotionBase } from '../components/MotionBase';
 import { MarkdownView } from '../components/MarkdownView';
 import { PageTopBar, NavFloatOverlay, NavFloatRow, FloatIconButton } from '../components/PageTopBar';
 import { SubPageLayer, markSubPageOpen, subPageParam } from '../components/SubPage';
@@ -746,7 +748,9 @@ export struct ChatPage {
 
   /** 从图库挑一张图 */
   private async pickImage(): Promise<void> {
-    this.attachMenuOpen = false;
+    this.getUIContext().animateTo({ duration: ANIM_NORMAL, curve: Curve.EaseOut }, () => {
+      this.attachMenuOpen = false;
+    });
     try {
       const options = new picker.PhotoSelectOptions();
       options.MIMEType = picker.PhotoViewMIMETypes.IMAGE_TYPE;
@@ -765,7 +769,9 @@ export struct ChatPage {
 
   /** 从文件管理器挑一个文件 */
   private async pickFile(): Promise<void> {
-    this.attachMenuOpen = false;
+    this.getUIContext().animateTo({ duration: ANIM_NORMAL, curve: Curve.EaseOut }, () => {
+      this.attachMenuOpen = false;
+    });
     try {
       const options = new picker.DocumentSelectOptions();
       options.maxSelectNumber = 1;
@@ -993,8 +999,12 @@ export struct ChatPage {
   }
 
   private toggleReasoning(msg: ChatMessage): void {
-    msg.reasoningOpen = !(msg.reasoningOpen === true);
-    this.forceRefresh();
+    // 在 animateTo 里翻转：展开/收起时 chevron 走已有 .animation，
+    // 面板节点在 animateTo 帧内获得默认过渡，不会再硬切。
+    this.getUIContext().animateTo({ duration: ANIM_NORMAL, curve: Curve.EaseOut }, () => {
+      msg.reasoningOpen = !(msg.reasoningOpen === true);
+      this.forceRefresh();
+    });
   }
 
   /**
@@ -1168,7 +1178,9 @@ export struct ChatPage {
               .width('100%')
               .justifyContent(FlexAlign.Start)
               .padding({ left: 52, top: 6, bottom: 6 })
-              .opacity(1)
+              // if 控制的节点无法用 .animation() 做进出场（那只驱动自身属性的增量更新）；
+              // 用 transition 才能让"处理中"这条在出现和消失时都淡入淡出。
+              .transition(TransitionEffect.OPACITY.animation({ duration: ANIM_FAST, curve: Curve.EaseOut }))
             }
           }
           .width('100%')
@@ -1229,7 +1241,11 @@ export struct ChatPage {
             FloatIconButton({
               icon: $r('app.media.ic_plus'),
               onTap: () => {
-                this.attachMenuOpen = !this.attachMenuOpen;
+                // 菜单展开会同时改变 listBottomPad，用 animateTo 把
+                // 列表内边距和菜单进出场拉到同一个时钟上。
+                this.getUIContext().animateTo({ duration: ANIM_NORMAL, curve: Curve.EaseOut }, () => {
+                  this.attachMenuOpen = !this.attachMenuOpen;
+                });
               },
             })
             Blank()
@@ -1244,6 +1260,8 @@ export struct ChatPage {
                 .height(44)
                 .type(ButtonType.Circle)
                 .backgroundColor('#77809A')
+                // 发送/中断切换是 if 分支整体替换，用 transition 淡入淡出
+                .transition(TransitionEffect.OPACITY.combine(TransitionEffect.scale({ x: 0.9, y: 0.9 })).animation({ duration: ANIM_FAST, curve: Curve.EaseOut }))
                 .onClick(() => {
                   this.interruptChat();
                 })
@@ -1259,6 +1277,7 @@ export struct ChatPage {
                 .type(ButtonType.Circle)
                 .backgroundColor(this.palette().accent)
                 .enabled(this.inputText.trim().length > 0 || this.pendingPath.length > 0)
+                .transition(TransitionEffect.OPACITY.combine(TransitionEffect.scale({ x: 0.9, y: 0.9 })).animation({ duration: ANIM_FAST, curve: Curve.EaseOut }))
                 .onClick(() => {
                   this.sendChat();
                 })
@@ -1353,73 +1372,83 @@ export struct ChatPage {
     .justifyContent(FlexAlign.Start)
     .margin({ bottom: 8 })
     .hitTestBehavior(HitTestMode.Transparent)
+    // 加号菜单由 if 控制，进出场只能靠 transition；配合下面 toggle 处的
+    // animateTo，展开时两枚胶囊从加号上方浮起而不是硬闪出来。
+    .transition(TransitionEffect.OPACITY.combine(TransitionEffect.translate({ y: 12 })).animation({ duration: ANIM_NORMAL, curve: Curve.EaseOut }))
   }
 
   @Builder
   AttachOption(icon: Resource, label: string, tap: () => void) {
-    Row({ space: 6 }) {
-      Image(icon)
-        .width(15)
-        .height(15)
-        .fillColor(this.palette().textSecondary)
-        .draggable(false)
-      Text(label)
-        .fontSize(12)
-        .fontColor(this.palette().textPrimary)
+    // 按压反馈交给 MotionBase：每个实例自带独立按压态，
+    // 修掉了原先两枚胶囊共用一个 @State、按一枚两枚同时缩放的问题。
+    MotionBase({ pressEnabled: true, fillWidth: false }) {
+      Row({ space: 6 }) {
+        Image(icon)
+          .width(15)
+          .height(15)
+          .fillColor(this.palette().textSecondary)
+          .draggable(false)
+        Text(label)
+          .fontSize(12)
+          .fontColor(this.palette().textPrimary)
+      }
+      .padding({ left: 12, right: 14, top: 8, bottom: 8 })
+      .backgroundColor(this.palette().navBarBg)
+      .borderRadius(RADIUS_PILL)
+      .border({ width: 1, color: this.palette().navBarBorder })
+      .shadow({ radius: 20, color: this.palette().shadow, offsetY: 6 })
+      .onClick(tap)
     }
-    .padding({ left: 12, right: 14, top: 8, bottom: 8 })
-    .backgroundColor(this.palette().navBarBg)
-    .borderRadius(RADIUS_PILL)
-    .border({ width: 1, color: this.palette().navBarBorder })
-    .shadow({ radius: 20, color: this.palette().shadow, offsetY: 6 })
-    .onClick(tap)
   }
 
   /** 待发送附件预览条：缩略信息 + 一个移除按钮 */
   @Builder
   PendingAttachmentChip() {
-    Row({ space: 8 }) {
-      Image(this.pendingIsImage ? $r('app.media.ic_image') : $r('app.media.ic_file'))
-        .width(15)
-        .height(15)
-        .fillColor(this.palette().accent)
-        .draggable(false)
-      Column({ space: 1 }) {
-        Text(this.pendingName)
-          .fontSize(12)
-          .fontColor(this.palette().textPrimary)
-          .maxLines(1)
-          .textOverflow({ overflow: TextOverflow.Ellipsis })
-        Text(this.uploading ? '上传中...' : formatBytes(this.pendingSize))
-          .fontSize(10)
-          .fontColor(this.palette().textMuted)
-      }
-      .alignItems(HorizontalAlign.Start)
-      .layoutWeight(1)
-      if (this.uploading) {
-        LoadingProgress()
-          .width(14)
-          .height(14)
-          .color(this.palette().accent)
-      } else {
-        Image($r('app.media.ic_close'))
-          .width(13)
-          .height(13)
-          .fillColor(this.palette().textMuted)
+    // 按压反馈交给 MotionBase（全宽预览条）
+    MotionBase({ pressEnabled: true }) {
+      Row({ space: 8 }) {
+        Image(this.pendingIsImage ? $r('app.media.ic_image') : $r('app.media.ic_file'))
+          .width(15)
+          .height(15)
+          .fillColor(this.palette().accent)
           .draggable(false)
-          .onClick(() => {
-            this.clearPendingFile();
-            this.forceRefresh();
-          })
+        Column({ space: 1 }) {
+          Text(this.pendingName)
+            .fontSize(12)
+            .fontColor(this.palette().textPrimary)
+            .maxLines(1)
+            .textOverflow({ overflow: TextOverflow.Ellipsis })
+          Text(this.uploading ? '上传中...' : formatBytes(this.pendingSize))
+            .fontSize(10)
+            .fontColor(this.palette().textMuted)
+        }
+        .alignItems(HorizontalAlign.Start)
+        .layoutWeight(1)
+        if (this.uploading) {
+          LoadingProgress()
+            .width(14)
+            .height(14)
+            .color(this.palette().accent)
+        } else {
+          Image($r('app.media.ic_close'))
+            .width(13)
+            .height(13)
+            .fillColor(this.palette().textMuted)
+            .draggable(false)
+            .onClick(() => {
+              this.clearPendingFile();
+              this.forceRefresh();
+            })
+        }
       }
+      .width('100%')
+      .padding({ left: 12, right: 12, top: 8, bottom: 8 })
+      .margin({ bottom: 8 })
+      .backgroundColor(this.palette().navBarBg)
+      .borderRadius(RADIUS_MD)
+      .border({ width: 1, color: this.palette().navBarBorder })
+      .shadow({ radius: 20, color: this.palette().shadow, offsetY: 6 })
     }
-    .width('100%')
-    .padding({ left: 12, right: 12, top: 8, bottom: 8 })
-    .margin({ bottom: 8 })
-    .backgroundColor(this.palette().navBarBg)
-    .borderRadius(RADIUS_MD)
-    .border({ width: 1, color: this.palette().navBarBorder })
-    .shadow({ radius: 20, color: this.palette().shadow, offsetY: 6 })
   }
 
   @Builder
@@ -1487,6 +1516,8 @@ export struct ChatPage {
           .maxLines(24)
           .textOverflow({ overflow: TextOverflow.Ellipsis })
           .wordBreak(WordBreak.BREAK_ALL)
+          // 面板内容靠 if 挂载：用 transition 在展开/收起时淡入淡出
+          .transition(TransitionEffect.OPACITY.combine(TransitionEffect.translate({ y: -6 })).animation({ duration: ANIM_NORMAL, curve: Curve.EaseOut }))
       }
 
       // 流式思考中：扫光动画条（对齐 WebGUI reasoningSweep）
@@ -1614,38 +1645,44 @@ export struct ChatPage {
       })
 
       if (tc.open === true) {
-        if (tc.args.length > 0 && tc.args !== '{}') {
-          Text('参数')
-            .fontSize(9.5).fontWeight(FontWeight.Medium)
-            .fontColor(this.palette().textMuted)
-            .margin({ top: 6, bottom: 2 })
-          Text(tc.args)
-            .fontSize(11)
-            .fontColor(this.palette().preText)
-            .backgroundColor(this.palette().preBg)
-            .borderRadius(4)
-            .padding({ left: 7, right: 7, top: 5, bottom: 5 })
-            .width('100%')
-            .textAlign(TextAlign.Start)
-            .wordBreak(WordBreak.BREAK_ALL)
+        Column() {
+          if (tc.args.length > 0 && tc.args !== '{}') {
+            Text('参数')
+              .fontSize(9.5).fontWeight(FontWeight.Medium)
+              .fontColor(this.palette().textMuted)
+              .margin({ top: 6, bottom: 2 })
+            Text(tc.args)
+              .fontSize(11)
+              .fontColor(this.palette().preText)
+              .backgroundColor(this.palette().preBg)
+              .borderRadius(4)
+              .padding({ left: 7, right: 7, top: 5, bottom: 5 })
+              .width('100%')
+              .textAlign(TextAlign.Start)
+              .wordBreak(WordBreak.BREAK_ALL)
+          }
+          if (tc.result !== undefined && tc.result.length > 0) {
+            Text('结果')
+              .fontSize(9.5).fontWeight(FontWeight.Medium)
+              .fontColor(this.palette().textMuted)
+              .margin({ top: 6, bottom: 2 })
+            Text(tc.result)
+              .fontSize(11)
+              .fontColor(this.palette().preText)
+              .backgroundColor(this.palette().preBg)
+              .borderRadius(4)
+              .padding({ left: 7, right: 7, top: 5, bottom: 5 })
+              .width('100%')
+              .textAlign(TextAlign.Start)
+              .wordBreak(WordBreak.BREAK_ALL)
+              .maxLines(8)
+              .textOverflow({ overflow: TextOverflow.Ellipsis })
+          }
         }
-        if (tc.result !== undefined && tc.result.length > 0) {
-          Text('结果')
-            .fontSize(9.5).fontWeight(FontWeight.Medium)
-            .fontColor(this.palette().textMuted)
-            .margin({ top: 6, bottom: 2 })
-          Text(tc.result)
-            .fontSize(11)
-            .fontColor(this.palette().preText)
-            .backgroundColor(this.palette().preBg)
-            .borderRadius(4)
-            .padding({ left: 7, right: 7, top: 5, bottom: 5 })
-            .width('100%')
-            .textAlign(TextAlign.Start)
-            .wordBreak(WordBreak.BREAK_ALL)
-            .maxLines(8)
-            .textOverflow({ overflow: TextOverflow.Ellipsis })
-        }
+        .width('100%')
+        .alignItems(HorizontalAlign.Start)
+        // 展开内容整体用 if 挂载：transition 让参数/结果随 chevron 一起淡入
+        .transition(TransitionEffect.OPACITY.combine(TransitionEffect.translate({ y: -6 })).animation({ duration: ANIM_NORMAL, curve: Curve.EaseOut }))
       }
       }
       .layoutWeight(1)
@@ -1710,8 +1747,10 @@ export struct ChatPage {
   /** 工具卡/思考卡在气泡内是独占一行的块，气泡 78% 宽度对它们太窄 —— 见 BubbleBody */
 
   private toggleToolCard(tc: ToolCallInfo): void {
-    tc.open = !(tc.open === true);
-    this.forceRefresh();
+    this.getUIContext().animateTo({ duration: ANIM_NORMAL, curve: Curve.EaseOut }, () => {
+      tc.open = !(tc.open === true);
+      this.forceRefresh();
+    });
   }
 
   /**

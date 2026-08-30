@@ -1,5 +1,7 @@
-import { ThemePalette, DARK_PALETTE, LIGHT_PALETTE, RADIUS_LG, RADIUS_SM } from '../common/Constants';
+import { ThemePalette, DARK_PALETTE, LIGHT_PALETTE, RADIUS_LG, RADIUS_SM,
+  ANIM_FAST, ANIM_NORMAL, ANIM_ENTER } from '../common/Constants';
 import { COLOR_ACCENT, COLOR_SUCCESS, COLOR_CYAN, COLOR_ERROR } from '../common/Constants';
+import { MotionBase } from './MotionBase';
 import {
   statusStore, StatGroup, StatField, compactDuration,
   K_UP, K_VERSION, K_STARTED, K_AGENTS, K_PLUGINS, K_TOOLS, K_ERR, K_LOADING, K_REV,
@@ -43,6 +45,10 @@ export struct StatusSummaryCard {
   }
 
   build() {
+    // 整卡按压反馈统一收进 MotionBase（父组件）：这里是进明细页的唯一入口，
+    // 父组件负责 scale 回弹；导航语义仍由本卡自己的 onClick（点击释放）负责，
+    // 避免"按下即跳转"的误触手感。
+    MotionBase({ pressEnabled: true }) {
     Column() {
       if (this.err.length > 0) {
         // 连接失败：只显示一句人话，技术细节在 hilog 里
@@ -60,6 +66,7 @@ export struct StatusSummaryCard {
         }
         .width('100%')
         .alignItems(VerticalAlign.Top)
+        .transition(TransitionEffect.OPACITY.animation({ duration: ANIM_ENTER, curve: Curve.EaseOut }))
       } else if (this.loading && !this.up) {
         Row() {
           LoadingProgress()
@@ -70,6 +77,7 @@ export struct StatusSummaryCard {
         .width('100%')
         .justifyContent(FlexAlign.Center)
         .padding({ top: 20, bottom: 20 })
+        .transition(TransitionEffect.OPACITY.animation({ duration: ANIM_FAST, curve: Curve.EaseOut }))
       } else {
         // 状态主行：一枚状态图标（运行=脉搏，离线=断开）+ 状态词 + 运行时长。
         // 之前那个环形进度条表达的是"100% / 0%"，而在线与否是布尔量，
@@ -81,18 +89,21 @@ export struct StatusSummaryCard {
               .width(24)
               .height(24)
               .fillColor(this.up ? COLOR_SUCCESS : this.palette().textMuted)
+              .animation({ duration: ANIM_NORMAL, curve: Curve.EaseOut })
               .draggable(false)
           }
           .width(48)
           .height(48)
           .borderRadius(RADIUS_SM)
           .backgroundColor(this.up ? 'rgba(23, 169, 100, 0.16)' : this.palette().bgHover)
+          .animation({ duration: ANIM_NORMAL, curve: Curve.EaseOut })
 
           Column({ space: 3 }) {
             Text(this.up ? '运行中' : '离线')
               .fontSize(17)
               .fontWeight(FontWeight.Bold)
               .fontColor(this.up ? COLOR_SUCCESS : this.palette().textMuted)
+              .animation({ duration: ANIM_NORMAL, curve: Curve.EaseOut })
             Text(this.up ? '已运行 ' + this.uptime : '未连接到后端服务')
               .fontSize(12)
               .fontColor(this.palette().textSecondary)
@@ -104,6 +115,7 @@ export struct StatusSummaryCard {
         }
         .width('100%')
         .alignItems(VerticalAlign.Center)
+        .transition(TransitionEffect.OPACITY.combine(TransitionEffect.translate({ y: 12 })).animation({ duration: ANIM_ENTER, curve: Curve.EaseOut }))
 
         // 能力计数：图标 + 数字，只保留真正会变的两项（插件 / 工具）
         Row({ space: 10 }) {
@@ -155,6 +167,7 @@ export struct StatusSummaryCard {
         cb();
       }
     })
+    }
   }
 
   @Builder
@@ -237,6 +250,7 @@ export struct StatusDetailContent {
         .border({ width: 1, color: this.palette().glassBorder })
         .alignItems(VerticalAlign.Top)
         .margin({ bottom: 14 })
+        .transition(TransitionEffect.OPACITY.combine(TransitionEffect.translate({ y: 12 })).animation({ duration: ANIM_ENTER, curve: Curve.EaseOut }))
       }
 
       if (this.loading && this.groups.length === 0) {
@@ -249,6 +263,7 @@ export struct StatusDetailContent {
         .width('100%')
         .justifyContent(FlexAlign.Center)
         .padding({ top: 40, bottom: 40 })
+        .transition(TransitionEffect.OPACITY.animation({ duration: ANIM_FAST, curve: Curve.EaseOut }))
       }
 
       // 这里原本有一张"服务负载"卡，用两条容量条画插件/工具数量。
@@ -295,6 +310,7 @@ export struct StatusDetailContent {
         .border({ width: 1, color: this.palette().glassBorder })
         .alignItems(HorizontalAlign.Start)
         .margin({ bottom: 14 })
+        .transition(TransitionEffect.OPACITY.combine(TransitionEffect.translate({ y: 12 })).animation({ duration: ANIM_ENTER, curve: Curve.EaseOut }))
       }, (g: StatGroup) => g.title)
     }
     .width('100%')

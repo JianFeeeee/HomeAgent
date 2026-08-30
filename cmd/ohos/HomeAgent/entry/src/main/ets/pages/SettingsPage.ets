@@ -5,6 +5,8 @@ import { handleNavOnScroll } from '../common/NavBarController';
 import { registerNavStack, unregisterNavStack } from '../common/NavStackRegistry';
 import { ConnectionConfig, AppSettings, emptySettings } from '../model/Model';
 import { ThemePalette, DARK_PALETTE, LIGHT_PALETTE, applyThemeMode, WIDE_NAV_BAR_WIDTH, WIDE_MIN_CONTENT } from '../common/Constants';
+import { ANIM_FAST, ANIM_NORMAL, ANIM_ENTER } from '../common/Constants';
+import { MotionBase } from '../components/MotionBase';
 import { picker, fileIo } from '@kit.CoreFileKit';
 import { common } from '@kit.AbilityKit';
 import { PageTopBar, NavFloatOverlay, NavFloatRow, FloatIconButton } from '../components/PageTopBar';
@@ -572,10 +574,15 @@ export struct SettingsPage {
   }
 
   private showToast(msg: string, isError: boolean): void {
-    this.toastMsg = msg;
+    // 颜色标记必须在 animateTo 之外先定好，否则第一帧会用上一条 toast 的配色
     this.toastIsError = isError;
+    this.getUIContext().animateTo({ duration: ANIM_NORMAL, curve: Curve.EaseOut }, () => {
+      this.toastMsg = msg;
+    });
     setTimeout(() => {
-      this.toastMsg = '';
+      this.getUIContext().animateTo({ duration: ANIM_NORMAL, curve: Curve.EaseOut }, () => {
+        this.toastMsg = '';
+      });
     }, 2500);
   }
 
@@ -748,6 +755,8 @@ export struct SettingsPage {
       .justifyContent(FlexAlign.End)
       .padding({ right: 20 })
       .margin({ bottom: 166 })
+      // if 控制的节点靠 transition 做进出场，配合 showToast 里的 animateTo
+      .transition(TransitionEffect.OPACITY.combine(TransitionEffect.translate({ y: 12 })).animation({ duration: ANIM_NORMAL, curve: Curve.EaseOut }))
     }
   }
 
@@ -1139,23 +1148,31 @@ export struct SettingsPage {
 
   @Builder
   ThemeOption(label: string, mode: string) {
-    Column() {
-      Text(label)
-        .fontSize(12)
-        .fontColor(this.themeMode === mode ? Color.White : this.palette().textSecondary)
+    // 按压缩放由 MotionBase 统一；flexWeight: 1 让三枚选项在 Row 里继续等分。
+    MotionBase({ pressEnabled: true, flexWeight: 1 }) {
+      Column() {
+        Text(label)
+          .fontSize(12)
+          .fontColor(this.themeMode === mode ? Color.White : this.palette().textSecondary)
+          // 子节点的颜色迁移要自己声明：父容器的 .animation() 不下传
+          .animation({ duration: ANIM_NORMAL, curve: Curve.EaseOut })
+      }
+      .justifyContent(FlexAlign.Center)
+      .width('100%')
+      .height(34)
+      .borderRadius(RADIUS_MD)
+      .backgroundColor(this.themeMode === mode ? this.palette().accent : this.palette().bgHover)
+      // 三选一的选中态迁移：底色与描边一起过渡。写在 .border 之后、
+      // 覆盖它上面的所有状态驱动属性。
+      .border({
+        width: 1,
+        color: this.themeMode === mode ? this.palette().accent : this.palette().btnGhostBorder,
+      })
+      .animation({ duration: ANIM_NORMAL, curve: Curve.EaseOut })
+      .onClick(() => {
+        this.applyTheme(mode);
+      })
     }
-    .justifyContent(FlexAlign.Center)
-    .layoutWeight(1)
-    .height(34)
-    .borderRadius(RADIUS_MD)
-    .backgroundColor(this.themeMode === mode ? this.palette().accent : this.palette().bgHover)
-    .border({
-      width: 1,
-      color: this.themeMode === mode ? this.palette().accent : this.palette().btnGhostBorder,
-    })
-    .onClick(() => {
-      this.applyTheme(mode);
-    })
   }
 
   @Builder
@@ -1200,6 +1217,7 @@ export struct SettingsPage {
           Text(entry.value === 'true' ? 'true' : 'false')
             .fontSize(12)
             .fontColor(entry.value === 'true' ? '#17A964' : this.palette().textMuted)
+            .animation({ duration: ANIM_NORMAL, curve: Curve.EaseOut })
           Blank()
           Toggle({ type: ToggleType.Switch, isOn: entry.value === 'true' })
             .selectedColor(this.palette().accent)
@@ -1223,6 +1241,8 @@ export struct SettingsPage {
               .margin({ right: 6, bottom: 6 })
               .backgroundColor(entry.value === opt ? this.palette().accent : this.palette().bgHover)
               .fontColor(entry.value === opt ? Color.White : this.palette().textSecondary)
+              // 选中项迁移：底色与字色一起过渡，避免整排选项同时硬切
+              .animation({ duration: ANIM_FAST, curve: Curve.EaseOut })
               .onClick(() => {
                 this.saveSetting(entry, opt);
               })

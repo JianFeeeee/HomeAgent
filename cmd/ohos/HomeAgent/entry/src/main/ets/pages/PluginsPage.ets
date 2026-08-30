@@ -5,6 +5,8 @@ import { registerNavStack, unregisterNavStack } from '../common/NavStackRegistry
 import { PluginRow, PluginDetail, emptyPluginDetail } from '../model/Model';
 import { ThemePalette, DARK_PALETTE, LIGHT_PALETTE, WIDE_NAV_BAR_WIDTH, WIDE_MIN_CONTENT } from '../common/Constants';
 import { RADIUS_LG, RADIUS_MD, RADIUS_SM, RADIUS_PILL, COLOR_ERROR } from '../common/Constants';
+import { ANIM_FAST, ANIM_NORMAL, ANIM_ENTER } from '../common/Constants';
+import { MotionBase } from '../components/MotionBase';
 import { PageTopBar, NavFloatOverlay, NavFloatRow, GlassShell, FloatIconButton } from '../components/PageTopBar';
 import { SubPageLayer, PlainCard, markSubPageOpen, subPageParam } from '../components/SubPage';
 import { SettingsEditor } from '../components/SettingsEditor';
@@ -184,11 +186,17 @@ export struct PluginsPage {
         };
         rows.push(row);
       }
-      this.plugins = rows;
+      // 列表整体重建（ForEach key 含 loaded/disabled，启停会整行重挂载）：
+      // 放进 animateTo 让新旧行走 transition 交叉淡入，而不是硬切一帧。
+      this.getUIContext().animateTo({ duration: ANIM_ENTER, curve: Curve.EaseOut }, () => {
+        this.plugins = rows;
+      });
     } catch (e) {
       this.showToast(userMessage('plugins.load', e), true);
     }
-    this.loading = false;
+    this.getUIContext().animateTo({ duration: ANIM_ENTER, curve: Curve.EaseOut }, () => {
+      this.loading = false;
+    });
   }
 
   /** 徽标状态：与 GUI 一致 —— 已加载绿 / 禁用待生效黄 / 已禁用红 / 未加载灰。 */
@@ -239,7 +247,9 @@ export struct PluginsPage {
       await apiClient.post('/plugins', bodyObj);
       this.showToast('安装请求已发送', false);
       this.installUrl = '';
-      this.showInstallForm = false;
+      this.getUIContext().animateTo({ duration: ANIM_ENTER, curve: Curve.EaseOut }, () => {
+        this.showInstallForm = false;
+      });
       this.loadPlugins();
     } catch (e) {
       this.showToast(userMessage('plugins.install', e), true);
@@ -293,7 +303,10 @@ export struct PluginsPage {
       d.deprecated = o['deprecated'] as boolean ?? false;
       d.tags = this.strArray(o['tags']);
       d.files = this.strArray(o['files']);
-      this.detail = d;
+      // 详情字段一次性落地：条件卡片在 animateTo 帧内挂载，V1 给它们默认透明度过渡
+      this.getUIContext().animateTo({ duration: ANIM_ENTER, curve: Curve.EaseOut }, () => {
+        this.detail = d;
+      });
     } catch (e) {
       // 内置插件没有清单，属于预期情况，不当成错误刷红
       const row: PluginRow | null = this.findRow(name);
@@ -303,12 +316,15 @@ export struct PluginsPage {
         d.version = row.version ?? '';
         d.description = row.description ?? '';
       }
-      this.detail = d;
-      if (row !== null && row.external) {
-        this.detailError = userMessage('plugins.detail', e);
-      }
+      const errText: string = (row !== null && row.external) ? userMessage('plugins.detail', e) : '';
+      this.getUIContext().animateTo({ duration: ANIM_ENTER, curve: Curve.EaseOut }, () => {
+        this.detail = d;
+        this.detailError = errText;
+      });
     }
-    this.detailLoading = false;
+    this.getUIContext().animateTo({ duration: ANIM_ENTER, curve: Curve.EaseOut }, () => {
+      this.detailLoading = false;
+    });
   }
 
   private strArray(raw: Object | undefined): string[] {
@@ -351,10 +367,15 @@ export struct PluginsPage {
   }
 
   private showToast(msg: string, isError: boolean): void {
-    this.toastMsg = msg;
+    // 颜色标志必须在 animateTo 闭包之外先落地，否则第一帧配色是上一次的
     this.toastIsError = isError;
+    this.getUIContext().animateTo({ duration: ANIM_NORMAL, curve: Curve.EaseOut }, () => {
+      this.toastMsg = msg;
+    });
     setTimeout(() => {
-      this.toastMsg = '';
+      this.getUIContext().animateTo({ duration: ANIM_NORMAL, curve: Curve.EaseOut }, () => {
+        this.toastMsg = '';
+      });
     }, 2500);
   }
 
@@ -404,6 +425,8 @@ export struct PluginsPage {
                 .width(20)
                 .height(20)
                 .fillColor(Color.White)
+                .rotate({ angle: this.showInstallForm ? 45 : 0 })
+                .animation({ duration: ANIM_NORMAL, curve: Curve.EaseOut })
             }
               .width(50)
               .height(50)
@@ -411,7 +434,9 @@ export struct PluginsPage {
               .backgroundColor(this.palette().accent)
               .shadow({ radius: 24, color: this.palette().shadow, offsetY: 8 })
               .onClick(() => {
-                this.showInstallForm = !this.showInstallForm;
+                this.getUIContext().animateTo({ duration: ANIM_ENTER, curve: Curve.EaseOut }, () => {
+                  this.showInstallForm = !this.showInstallForm;
+                });
               })
           }
         }
@@ -510,6 +535,9 @@ export struct PluginsPage {
     .border({ width: 1, color: this.palette().navBarBorder })
     .shadow({ radius: 20, color: this.palette().shadow, offsetY: 6 })
     .alignItems(VerticalAlign.Center)
+    .transition(TransitionEffect.OPACITY
+      .combine(TransitionEffect.translate({ y: 12 }))
+      .animation({ duration: ANIM_ENTER, curve: Curve.EaseOut }))
   }
 
   /** 加载中 / 未配置 / 空列表三种占位态 */
@@ -521,6 +549,7 @@ export struct PluginsPage {
         .height(32)
         .color(this.palette().accent)
         .margin({ top: 40 })
+        .transition(TransitionEffect.OPACITY.animation({ duration: ANIM_FAST, curve: Curve.EaseOut }))
     }
 
     if (!apiClient.hasConnection()) {
@@ -528,6 +557,7 @@ export struct PluginsPage {
         .fontSize(13)
         .fontColor(this.palette().textMuted)
         .padding(20)
+        .transition(TransitionEffect.OPACITY.animation({ duration: ANIM_FAST, curve: Curve.EaseOut }))
     }
 
     if (!this.loading && this.plugins.length === 0 && apiClient.hasConnection()) {
@@ -535,6 +565,7 @@ export struct PluginsPage {
         .fontSize(13)
         .fontColor(this.palette().textMuted)
         .padding(20)
+        .transition(TransitionEffect.OPACITY.animation({ duration: ANIM_FAST, curve: Curve.EaseOut }))
     }
   }
 
@@ -545,62 +576,78 @@ export struct PluginsPage {
   @Builder
   PluginList() {
     ForEach(this.plugins, (plugin: PluginRow) => {
-      Row() {
-        Column({ space: 3 }) {
-          Row({ space: 6 }) {
-            Text(plugin.name)
-              .fontSize(15)
-              .fontWeight(this.activeName === plugin.name ? FontWeight.Medium : FontWeight.Normal)
-              .fontColor(this.activeName === plugin.name
-                ? this.palette().accent : this.palette().textPrimary)
-              .maxLines(1)
-              .textOverflow({ overflow: TextOverflow.Ellipsis })
-            if (plugin.version !== undefined && plugin.version.length > 0) {
-              Text('v' + plugin.version)
-                .fontSize(10)
-                .fontColor(this.palette().textMuted)
+      // 外层 Column 只为承载 transition：.transition() 不能直接挂在自定义组件
+      // 调用点上（会生成 __Common__ 包装节点）。按压缩放由 MotionBase 统一提供，
+      // 每行自带独立按压态，不再需要 pressedName 这种"哪一行被按"的手工记账。
+      Column() {
+        MotionBase({ pressEnabled: true }) {
+          Row() {
+            Column({ space: 3 }) {
+              Row({ space: 6 }) {
+                Text(plugin.name)
+                  .fontSize(15)
+                  .fontWeight(this.activeName === plugin.name ? FontWeight.Medium : FontWeight.Normal)
+                  .fontColor(this.activeName === plugin.name
+                    ? this.palette().accent : this.palette().textPrimary)
+                  .maxLines(1)
+                  .textOverflow({ overflow: TextOverflow.Ellipsis })
+                  .animation({ duration: ANIM_FAST, curve: Curve.EaseOut })
+                if (plugin.version !== undefined && plugin.version.length > 0) {
+                  Text('v' + plugin.version)
+                    .fontSize(10)
+                    .fontColor(this.palette().textMuted)
+                }
+              }
+              // 徽标全部去掉（用户要求）：状态用一个 3vp 圆点表达，
+              // 其余信息退化为一行灰字副标题 —— 列表只负责"选谁"，细节看详情页。
+              Row({ space: 6 }) {
+                Circle({ width: 6, height: 6 })
+                  .fill(this.statusDotColor(plugin))
+                Text(this.rowSubtitle(plugin))
+                  .fontSize(11)
+                  .fontColor(this.palette().textMuted)
+                  .maxLines(1)
+                  .textOverflow({ overflow: TextOverflow.Ellipsis })
+                  .layoutWeight(1)
+              }
+              .width('100%')
+              .alignItems(VerticalAlign.Center)
             }
-          }
-          // 徽标全部去掉（用户要求）：状态用一个 3vp 圆点表达，
-          // 其余信息退化为一行灰字副标题 —— 列表只负责"选谁"，细节看详情页。
-          Row({ space: 6 }) {
-            Circle({ width: 6, height: 6 })
-              .fill(this.statusDotColor(plugin))
-            Text(this.rowSubtitle(plugin))
-              .fontSize(11)
-              .fontColor(this.palette().textMuted)
-              .maxLines(1)
-              .textOverflow({ overflow: TextOverflow.Ellipsis })
-              .layoutWeight(1)
+            .layoutWeight(1)
+            .alignItems(HorizontalAlign.Start)
+
+            Image($r('app.media.ic_chevron_right'))
+              .width(15)
+              .height(15)
+              .fillColor(this.activeName === plugin.name
+                ? this.palette().accent : this.palette().textMuted)
+              .animation({ duration: ANIM_FAST, curve: Curve.EaseOut })
+              .draggable(false)
           }
           .width('100%')
+          .padding(14)
+          .borderRadius(RADIUS_LG)
+          .backgroundColor(this.activeName === plugin.name
+            ? this.palette().accentBg : this.palette().bgCard)
+          .border({
+            width: 1,
+            color: this.activeName === plugin.name
+              ? this.palette().accent : this.palette().glassBorder,
+          })
+          // 选中态的底色/描边渐变：MotionBase 的 .animation() 到不了这里
+          .animation({ duration: ANIM_FAST, curve: Curve.EaseOut })
           .alignItems(VerticalAlign.Center)
+          .onClick(() => {
+            this.openDetail(plugin.name);
+          })
         }
-        .layoutWeight(1)
-        .alignItems(HorizontalAlign.Start)
-
-        Image($r('app.media.ic_chevron_right'))
-          .width(15)
-          .height(15)
-          .fillColor(this.activeName === plugin.name
-            ? this.palette().accent : this.palette().textMuted)
-          .draggable(false)
       }
       .width('100%')
-      .padding(14)
-      .borderRadius(RADIUS_LG)
-      .backgroundColor(this.activeName === plugin.name
-        ? this.palette().accentBg : this.palette().bgCard)
-      .border({
-        width: 1,
-        color: this.activeName === plugin.name
-          ? this.palette().accent : this.palette().glassBorder,
-      })
       .margin({ bottom: 10 })
-      .alignItems(VerticalAlign.Center)
-      .onClick(() => {
-        this.openDetail(plugin.name);
-      })
+      // ForEach key 含 loaded/disabled：启停会整行重挂载，靠 transition 变成交叉淡入
+      .transition(TransitionEffect.OPACITY
+        .combine(TransitionEffect.translate({ y: 12 }))
+        .animation({ duration: ANIM_ENTER, curve: Curve.EaseOut }))
     }, (plugin: PluginRow) => plugin.name + (plugin.loaded ? 'L' : '') + (plugin.disabled ? 'D' : ''))
   }
 
@@ -621,6 +668,7 @@ export struct PluginsPage {
       .width('100%')
       .justifyContent(FlexAlign.Center)
       .padding({ top: 30, bottom: 30 })
+      .transition(TransitionEffect.OPACITY.animation({ duration: ANIM_FAST, curve: Curve.EaseOut }))
     }
 
     if (this.detailError.length > 0) {
@@ -628,6 +676,7 @@ export struct PluginsPage {
         .fontSize(12)
         .fontColor(COLOR_ERROR)
         .padding({ left: 4, bottom: 12 })
+        .transition(TransitionEffect.OPACITY.animation({ duration: ANIM_FAST, curve: Curve.EaseOut }))
     }
 
     // 概览卡：名称、版本、状态徽标、描述
@@ -786,6 +835,7 @@ export struct PluginsPage {
             })
             .fontColor(this.activeIsDisabled()
               ? this.palette().textSecondary : '#D99A2B')
+            .animation({ duration: ANIM_FAST, curve: Curve.EaseOut })
             .onClick(() => {
               const r: PluginRow | null = this.activeRow();
               if (r !== null) {
@@ -806,6 +856,7 @@ export struct PluginsPage {
                   this.removePlugin(r);
                 }
               })
+              .transition(TransitionEffect.OPACITY.animation({ duration: ANIM_FAST, curve: Curve.EaseOut }))
           }
         }
         .width('100%')
@@ -892,6 +943,9 @@ export struct PluginsPage {
       .justifyContent(FlexAlign.End)
       .padding({ right: 20 })
       .margin({ bottom: 166 })
+      .transition(TransitionEffect.OPACITY
+        .combine(TransitionEffect.translate({ y: 12 }))
+        .animation({ duration: ANIM_NORMAL, curve: Curve.EaseOut }))
     }
   }
 
