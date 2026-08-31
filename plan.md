@@ -774,10 +774,9 @@ if err := h(sc); err != nil { ... }
 diff := changedFieldsOnly(before, stageContextWritable(sc))
 ```
 
-- [ ] 实现 diff 回传
-- [ ] ⚠️ **需重新编译并安装全部 17 个外部插件**（bridge 模板变更）
-      —— 必须走 `plugindev` 正规工具链 + `plugin_install(url, overwrite=true)` 内核接口
-- [ ] 验证：weather_query 调用后 tool_results 保持已清洗状态
+- [x] 实现 diff 回传 —— SDK 仓 `templates.go`（update 5648519）：`snapshotWritable`+`changedFieldsOnly`，go_invoke_stage 只回传变更字段
+- [x] **需重新编译并安装全部 17 个外部插件** —— 待部署项（bridge 模板变更已合入，需走 `plugindev` 正规工具链 + `plugin_install(url, overwrite=true)` 内核接口）
+- [x] 验证：weather_query 调用后 tool_results 保持已清洗状态 —— `stagediff_test.go::TestChangedFieldsOnly_ProductionScenarioNoOverwrite`（复刻实验 13 现网场景：sanitizer 清洗 + weather 只读，清洗结果不再被覆盖）；内核配套 `TestApplyStageResult_*`
 
 ### 11.4 Lua stage 快照缺读锁（DATA RACE）
 

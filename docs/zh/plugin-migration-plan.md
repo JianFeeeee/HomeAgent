@@ -57,12 +57,24 @@
   - `TestAwaitOutputResult_Timeout` → `status=unconfirmed` 且不返回 error
 - 【V】✅ `go build ./...` exit 0；`go test ./internal/plugin/... ./internal/agent/...` 全绿。
 
-### 0.2 stage lost update 补丁（11.3）
+### 0.2 stage lost update 补丁（11.3）— ✅ **已完成**（2026-08-31）
 
-- 【M】`templates.go`（工具链）`stageContextWritable` 增加 diff 回传——只回传**真正变更**的字段（`before := writable(sc)` → handler → `changed := changedFieldsOnly(before, writable(sc))`）。
-- 【R】确认 `changedFieldsOnly` 不引入竞态、对只读插件零回传。
-- 【V】weather 调用后 tool_results 保持 sanitizer 已清洗状态（复刻实验 13 场景，丢失率 → 0）。
-  ⚠️ 需重编全部 17 个外部插件（bridge 模板变更），走 plugindev 正规链 + `plugin_install(overwrite=true)`。
+- 【M】✅ `templates.go`（**SDK 仓** update 分支 `5648519`）`go_invoke_stage` 改为 diff 回传：
+  - 新增 `snapshotWritable(sc) map[string]string`——handler 前的**序列化**快照
+  - 新增 `changedFieldsOnly(before, after)`——只回传变更字段，无变更零回传
+  - ❗ **第一版踩坑并修正**：`stageContextWritable` 返回的切片字段与 `sc` **共享底层数组**，handler 原地改元素（`sc.ToolResults[0].Result = clean`）时 before 快照跟着变，diff 看不到变更 → 修复会静默失效。故 before 必须逐字段序列化成字符串。
+- 【M】✅ `internal/plugin/cabi/loader.go` `applyStageResult` 配套（本仓 `9bb9cb3`）：`tool_calls`/`tool_results` 去掉 `len(v)>0` 拦截——改为键存在即应用，使插件「清空全部工具调用」的显式 `[]` 能被表达（旧插件仅 len>0 才带键，不会被误清空）。
+- 【R】✅ `changedFieldsOnly` 无竞态（纯函数，无共享状态）；只读插件零回传（单测断言）。
+- 【R】✅ 接口冻结：两仓 `git diff sdk/` 均为空（只改 bridge 模版 + 内核）。
+- 【R】✅ bridge 模版可编译性：抽取 `tmplLinuxBridge` + 真实 `weather/plugin.go` 做 `go build -buildmode=c-shared` → exit 0。
+- 【V】✅ SDK 仓 `tools/plugindev/stagediff_test.go` 6 用例全绿：
+  - `_ReadOnlyPluginReturnsNothing`（只读插件零回传——修复核心）
+  - `_WriterReturnsOnlyChanged`（原地改切片元素仅回传 tool_results）
+  - `_ScalarChange` / `_NewResponseIsReturned` / `_ClearedSliceIsReturnedAsEmpty`
+  - `_ProductionScenarioNoOverwrite`（**复刻实验 13 现网场景**：sanitizer 清洗 + weather 只读，清洗结果不再被覆盖）
+- 【V】✅ 内核侧 `output_test.go` 新增 `TestApplyStageResult_ClearedSlicesAreApplied` / `_OnlyPresentKeysApplied` 全绿。
+- 【V】✅ `go build ./...` exit 0；`go test ./internal/plugin/... ./internal/agent/...` 全绿。
+- ⚠️ **待部署项**：需用新 plugindev 重编全部 17 个外部插件（bridge 模版变更），走 `plugin_install(overwrite=true)`。
 
 ### 0.3 reload 语义修正（11.6）
 

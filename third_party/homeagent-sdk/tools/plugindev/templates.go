@@ -765,6 +765,65 @@ func stageContextWritable(sc *sdk.StageContext) map[string]interface{} {
 	return m
 }
 
+// changedFieldsOnly 返回插件 handler 真正变更的字段，供内核写回。
+// 修复 plan.md 11.3：旧实现无条件回传 stageContextWritable 的全部字段（含插件
+// 从内核收到的旧快照），两个插件并发时，只读插件会把自己收到的旧值覆盖回
+// 改写插件已清洗的结果（实验 13 复刻现网 sanitizer + weather 场景，丢失率 1.6~4.3%）。
+// 只回传差异字段后，只读插件零回传，改写插件的清洗结果不再被覆盖。
+//
+// ❗ before 必须是 handler 运行前的**序列化快照**（snapshotWritable），不能直接存 Go 值：
+// stageContextWritable 返回的 tool_calls/tool_results 与 sc 共享切片底层数组，handler
+// 原地修改元素（如 sc.ToolResults[0].Result = clean）会让 before 同步变化，diff 将看不到变更。
+func changedFieldsOnly(before map[string]string, after map[string]interface{}) map[string]interface{} {
+	diff := map[string]interface{}{}
+	keys := map[string]bool{}
+	for k := range before {
+		keys[k] = true
+	}
+	for k := range after {
+		keys[k] = true
+	}
+	for k := range keys {
+		bRaw, bHas := before[k]
+		a, aHas := after[k]
+		switch {
+		case aHas && !bHas:
+			diff[k] = a
+		case aHas && bHas:
+			ab, _ := json.Marshal(a)
+			if bRaw != string(ab) {
+				diff[k] = a
+			}
+		case bHas && !aHas:
+			// 插件把切片类字段清空了（writable 对 len==0 不输出），显式回传空值
+			switch k {
+			case "tool_calls":
+				diff[k] = []sdk.ToolCall{}
+			case "tool_results":
+				diff[k] = []sdk.ToolResult{}
+			case "response":
+				// response 从非 nil 变 nil：内核侧 applyStageResult 无法表达「清空」，
+				// 且短路语义不应被插件撑销，故不回传。
+			}
+		}
+	}
+	return diff
+}
+
+// snapshotWritable 把 writable 字段逐个序列化成 JSON 字符串，作为 handler 前的不可变快照。
+// 必须序列化：否则切片字段与 sc 共享底层数组，handler 原地改元素时快照跟着变，diff 失效。
+func snapshotWritable(sc *sdk.StageContext) map[string]string {
+	snap := map[string]string{}
+	for k, v := range stageContextWritable(sc) {
+		b, err := json.Marshal(v)
+		if err != nil {
+			continue
+		}
+		snap[k] = string(b)
+	}
+	return snap
+}
+
 //export go_invoke_stage
 func go_invoke_stage(stage *C.char, ctxJSON *C.char, resultOut **C.char, errorOut **C.char) C.int {
 	goStage := C.GoString(stage)
@@ -776,10 +835,17 @@ func go_invoke_stage(stage *C.char, ctxJSON *C.char, resultOut **C.char, errorOu
 	if ctxJSON != nil {
 		fillStageContext(sc, C.GoString(ctxJSON))
 	}
+	// plan.md 11.3：记录 handler 前的**序列化**快照，回传时只带真正变更的字段，
+	// 避免只读插件把自己收到的旧快照覆盖其他插件的改写（lost update）。
+	before := snapshotWritable(sc)
 	if err := h(sc); err != nil { *errorOut = C.CString(err.Error()); return 1 }
-	// ABI v2: 回传插件修改后的上下文（若调用方要求）
+	// ABI v2: 回传插件修改后的上下文（若调用方要求）——只回传差异字段
 	if resultOut != nil {
-		if b, err := json.Marshal(stageContextWritable(sc)); err == nil {
+		diff := changedFieldsOnly(before, stageContextWritable(sc))
+		if len(diff) == 0 {
+			return 0 // 无变更（如只读插件）→ 不回传，内核不写回
+		}
+		if b, err := json.Marshal(diff); err == nil {
 			*resultOut = C.CString(string(b))
 		}
 	}
