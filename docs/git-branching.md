@@ -92,7 +92,8 @@ main ──────────────── E ────────
 | 现存分支 | 状态 | 处理 |
 |---|---|---|
 | `main` | `48b5c24` [origin/main] | ✅ 保持不变（规范基线） |
-| `update` | `2e2602f`（领先 main 4 commit：文档基线 + Part 0.1/0.2） | ⚠️ 按规范重命名/整理 |
+| `feature/plugin-proc-migration` | 原 `update`，`69a138c`（领先 main 5：文档基线 + Part 0.1/0.2 + 本规范） | ✅ **已对齐重命名**（2026-08-31） |
+| `backup-local`（SDK 仓） | `7092d15`（ahead 3, behind 14，含 `ignore example/recoverydiag` 敏感提交） | ⚠️ 遗留本地分支，功能已合入 main，**保留不删**（无远端，删除即永久丢失） |
 
 ### SDK 仓（homeagent-sdk）
 
