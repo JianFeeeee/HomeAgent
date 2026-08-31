@@ -360,7 +360,10 @@ func applyStageResult(sc *sdk.StageContext, resultJSON string) {
 		vv := v
 		sc.Response = &vv
 	}
-	if v, ok := m["tool_calls"].([]interface{}); ok && len(v) > 0 {
+	if v, ok := m["tool_calls"].([]interface{}); ok {
+		// 注意不要加 len(v)>0 条件：ABI v2 diff 回传（plan.md 11.3）下，插件拒绝全部
+		// 工具调用时会显式回传 `[]`，必须能表达「清空」。旧插件（全量回传）仅在
+		// len>0 时才带该键，因此不会因此变更而被误清空。
 		if b, err := json.Marshal(v); err == nil {
 			var tcs []sdk.ToolCall
 			if json.Unmarshal(b, &tcs) == nil {
@@ -368,7 +371,7 @@ func applyStageResult(sc *sdk.StageContext, resultJSON string) {
 			}
 		}
 	}
-	if v, ok := m["tool_results"].([]interface{}); ok && len(v) > 0 {
+	if v, ok := m["tool_results"].([]interface{}); ok {
 		if b, err := json.Marshal(v); err == nil {
 			var trs []sdk.ToolResult
 			if json.Unmarshal(b, &trs) == nil {
