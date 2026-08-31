@@ -592,3 +592,318 @@ CLI 本机自执行命令已有 cmd 插件，不做反向操控 CLI。
 - Step3：生命周期（window-all-closed 退出进托盘依偏好、before-quit 清理托盘/设备桥）— 显示正常 ✅
 
 **最终版已安装**：/opt/HomeAgent（md5 047f2f1bbe，备份 /tmp/ha-app-step3-final.asar），含：设备桥 / 设备页+授权开关 / 惰性托盘 / prefs 持久化 / 退出进托盘 / 字体/圆角（renderer）。
+
+---
+
+## 11. 插件架构缺陷修复 + 子进程化迁移评估
+
+> 完整评估文档：[`docs/zh/架构迁移评估.md`](docs/zh/架构迁移评估.md)
+> —— **先读其第零章「给接手者的阅读指引」**，该文档是增量写成的，前六章部分结论已被后续推翻。
+> 可复跑实验：[`docs/zh/experiments/plugin-arch/`](docs/zh/experiments/plugin-arch/)（18 项，`./run.sh`）
+>
+> **本节 11.1~11.6 是修复项的唯一权威编号。** 评估文档中出现的 `0.x` / `A-F`
+> 仅为历史分组，勿用于实施。本节只列可执行项与决策状态；论证与数据见评估文档。
+
+### 11.0-pre 三个易被误解的前提（动手前必读）
+
+1. **stage 的并发扇出是原始设计，不是缺陷。**
+   `stages.go:124` 的 `go func` + `wg.Wait()` 是刻意的，`StageContext` 的 `RWMutex`
+   与公开 `Lock/RLock` 就是为它准备的。**问题是 C ABI 把外部插件降级成副本模型**，
+   使那把锁在 ABI 边界外变成空转（内置 0% 丢失 vs 副本 35.8~36.8%）。
+   → 不要试图"取消并发"来修 11.3。
+
+2. **内置插件的高权限是刻意设计，不是"自己人所以安全"。**
+   但当前实现混淆了「应有的权限梯度」与「C ABI 表达能力天花板」：
+   外部插件拿不到 `OutputChan`/`Subscribe` 是技术限制（`case 23/24` 是空实现，
+   属"给不了"），而非权限决定。迁移目标是让梯度**显式化并强制**，不是消除梯度。
+
+3. **副本模型是"为方便插件加载的无奈之举"。**
+   C ABI 用于绕开 Go 原生 `plugin` 包的同版本限制，副本模型是其必然代价。
+   问题在于该代价未被记录、后果未被发现——不是当初的选择错了。
+
+### 11.0 起因
+
+更换 `plugin.so` 后 `plgreload` 报成功但运行旧代码。根因是 Go c-shared 的
+ELF `DF_1_NODELETE` 标记使 `dlclose` 成为 no-op，**换 `.so` 必须重启 homed**。
+排查该问题时连带发现 6 类此前未知的缺陷，其中 **2 项正在生产环境造成故障**。
+
+### 11.1 紧急：output_send 永远返回成功 ⚠️ 现网已发生
+
+**现象**：模型调用 `output_send__qq` 收到「已发送」，但消息实际未送达，模型不知道也不重试。
+
+**根因**（`internal/plugin/cabi/loader.go:458-470`）——注释自己写明了原因：
+
+```go
+// Output is async: return immediately, send in background
+// to avoid nested cgo calls (cgo within cgo can crash)
+go func() {
+    if err := pluginInvokeOutput(pid, chName, argsJSON); err != nil {
+        log.Printf("[dispatch] async output %s/%s failed: %v", ...)  // ← 仅日志
+    }
+}()
+return map[string]interface{}{"status": "queued"}, nil   // ← 立即返回"成功"
+```
+
+`output.go:65-70` 拿到 `{status:queued}` + `err=nil`，返回给模型「已通过 [qq] 通道发送」。
+
+**现网证据**（近 7 天）：成功 44 次，失败 2 次。
+
+```
+Aug 30 15:10:51 [dispatch] async output qq/qq failed:
+  invoke_output qq: meta 中需要 group_id 或 user_id 字段
+```
+
+**与此前排查的关系**：之前诊断「qq 渠道回复丢失」时修复了系统提示词
+（`a3a5cd4`，强调 qq 是异步通道、必须用 `output_send`），
+但**未发现 `output_send` 本身永远报成功**——模型即使正确调用也无法感知失败。
+
+**修复方案**（保留 goroutine + 带超时 channel 等待，避免 cgo 嵌套）：
+
+```go
+resCh := make(chan error, 1)
+go func() { resCh <- pluginInvokeOutput(pid, chName, argsJSON) }()
+select {
+case err := <-resCh:
+    if err != nil { return nil, err }                      // 真实失败上报
+    return map[string]interface{}{"status": "sent"}, nil
+case <-time.After(10 * time.Second):
+    return map[string]interface{}{"status": "queued", "note": "发送超时未确认"}, nil
+}
+```
+
+`dev.Execute` 由 `executeOutputSendTool` 从 Go 侧调起（不在 cgo 栈内），
+goroutine 里的 `pluginInvokeOutput` 才是 cgo 调用，**不构成嵌套**。
+
+- [ ] 实现修复
+- [ ] **实测验证不触发 cgo 嵌套崩溃**（此判断为推理，必须实测）
+- [ ] 构造 meta 缺 `user_id` 的失败场景，确认模型收到错误而非"已发送"
+
+### 11.2 紧急：cgo 工具超时不可中断，线性泄漏 ⚠️ 现网已发生 26 次
+
+**现象**：`toolcall.go:41` 日志称「已取消」，实际什么都没取消。
+
+**根因**：`select` 超时只让调用方返回，goroutine 仍卡在 `C.call_invoke_tool` 里。
+**cgo 调用不可被 Go runtime 抢占或取消**，该 OS 线程永久占用。
+
+**实验 14 实测**（纯 C 死循环 `.so`，20 次卡死调用）：
+
+```
+ 5 次后: goroutines= 6 threads= 9 (+3)
+10 次后: goroutines=11 threads=14 (+8)
+20 次后: goroutines=21 threads=24 (+18)
+线性泄漏，永不回收
+```
+
+对照：子进程模型 `Process.Kill()` 后 OS 回收全部资源，**零泄漏**。
+
+**现网统计**（近 14 天 26 次超时）：
+
+```
+  9  browser_screenshot      2  browser_type     1  cmd_run
+  5  browser_render          2  browser_start    1  browser_html
+  2  output_send__webui      2  browser_click    1  browser_fetch
+```
+
+`browser` 插件占 22/26。历史进程（`homed[1063615]`、`homed[2609279]`）必然已累积泄漏。
+
+- [ ] **短期**：日志措辞改为「已放弃等待（插件仍在后台运行，其占用的线程无法回收）」
+      —— 消除语义谎言，1 行改动
+- [ ] **短期**：排查 `browser` 插件为何频繁 60s 超时（22/26 集中于它）
+- [ ] 真正的取消能力需子进程模型（见 11.7）
+
+### 11.3 stage 副本模型的 lost update ⚠️ 现网数据污染（量级百分之几）
+
+**核心事实更正**：外部 `.so` 插件**从未共享过 `StageContext`**，一直是「快照-副本-写回」：
+
+```
+内核 sc.RLock() → 快照 10 字段为 JSON → 跨 ABI
+  → go_invoke_stage: sc := &sdk.StageContext{}   ← 插件进程内全新对象
+  → handler 改副本（其 ctx.Lock() 是空操作，无跨插件互斥）
+  → stageContextWritable → Marshal 回传
+  → applyStageResult: sc.Lock() 逐字段写回
+```
+
+这是**为方便插件加载的无奈之举**（C ABI 无法传 Go 对象引用），但带来三个后果：
+
+1. **`ctx.Lock()` 是空操作** —— 插件按文档正确加锁，锁语义在 ABI 边界静默失效
+2. **字段被裁剪** —— 16 个字段只下发 10 个，`ContextMsgs`/`ReasoningContent`/`TokenUsage`/`Memory`/`Extra`/`Errors` 外部插件永远看不到
+3. **lost update** —— read-modify-write 非原子，实验 12 实测丢失率 **36.8%**（内置模型 0%）
+
+**现网触发点**：`AfterToolcall` 上有两个外部插件
+
+| Stage | 注册者 | 风险 |
+|---|---|---|
+| `AfterToolcall` | **sanitizer**(Global,改写 ToolResults) + **weather**(own_tools,只读) | ⚠️ 真实冲突 |
+| `PreAction` | memo(外部) + webui(内置) | ⚡ |
+| `BeforeToolcall` | qq(外部) + webui(内置) + cmd(内置) | ⚡ |
+
+根因在 `templates.go:762` —— **无条件回传未修改字段**：
+
+```go
+if len(sc.ToolResults) > 0 {
+    m["tool_results"] = sc.ToolResults    // weather 没改也回传它收到的旧快照
+}
+```
+
+**实验 13 复刻现网场景**（模型调用 `weather_query`，3000 轮）：
+
+```
+47 轮 sanitizer 的清洗结果被 weather 的旧快照覆盖 (1.6%)
+→ 脏数据（ANSI 转义）进入 LLM 上下文
+```
+
+⚠️ **该比率不是常数**：三次复跑得 1.6% / 2.1% / 4.3%，取决于两插件 handler 的
+实际耗时比。**应表述为「量级百分之几」**，不要把 1.6% 当精确值写进代码注释或对外说明。
+
+⚠️ **修复方向的红线**：不要通过"把 `RunStage` 改成串行"来消除冲突。
+并发扇出是原始设计（见 11.0-pre 第 1 条），串行化会改变所有 stage 插件的时序语义，
+且掩盖真正的根因（副本模型 + 无条件回传）。正确做法是让回传只带真正变更的字段。
+
+现网条件已确认：sanitizer v0.1.0 / weather v1.0.0 均 8/15 部署、`disabled_plugins` 为空、
+日志有 `[sanitizer] stage OnInput/AfterToolcall/PostAction registered`。
+
+**修复**：`stageContextWritable` 只回传**真正变更**的字段
+
+```go
+before := stageContextWritable(sc)
+if err := h(sc); err != nil { ... }
+diff := changedFieldsOnly(before, stageContextWritable(sc))
+```
+
+- [ ] 实现 diff 回传
+- [ ] ⚠️ **需重新编译并安装全部 17 个外部插件**（bridge 模板变更）
+      —— 必须走 `plugindev` 正规工具链 + `plugin_install(url, overwrite=true)` 内核接口
+- [ ] 验证：weather_query 调用后 tool_results 保持已清洗状态
+
+### 11.4 Lua stage 快照缺读锁（DATA RACE）
+
+`lua_plugin.go:726` 直接读 `sc.RawMessage` 等字段，**未持 `sc.RLock()`**：
+
+| 路径 | 快照时是否持锁 |
+|---|---|
+| cabi（`loader.go:412`） | ✅ `sc.RLock()` |
+| Lua（`lua_plugin.go:726`） | ❌ 无锁 |
+
+`RunStage` 是并发扇出，这与其他 handler 的 `sc.Lock()` 构成数据竞争。
+
+**现网未触发**（无 Lua 插件部署，`find` 无 `main.lua`），但缺陷已存在。
+
+- [ ] 加 `sc.RLock()`/`sc.RUnlock()` 包裹快照构造（约 3 行）
+
+### 11.5 Windows DLL 路径能力严重退化
+
+`dynamic_dll_windows.go:227-245`：
+
+```go
+ctxJSON, _ := json.Marshal(map[string]interface{}{
+    "raw_message": sc.RawMessage, "user_id": sc.UserID, "phase": string(sc.Phase),
+})   // ← 只有 3 个字段
+syscall.SyscallN(p.invokeStage, p.handle, ...)
+return nil       // ← 无 resultOut，无 applyStageResult
+```
+
+| 路径 | 下发字段 | 写回 |
+|---|---|---|
+| Linux cabi | 10 | ✅ |
+| Lua | 10 | ✅ |
+| **Windows DLL** | **3** | ❌ **完全没有** |
+
+**后果**：`sanitizer` 类改写型插件在 Windows 上**静默失效**——handler 正常执行、
+日志正常打印，修改全部丢弃；且看不到 `llm_text`/`tool_calls`/`tool_results`。
+
+- [ ] 补齐字段下发 + 写回（无 Windows 环境，需借测试机验证）
+
+### 11.6 reload 语义谎言（原始起因）
+
+`plgreload` 对 `.so` 插件报成功但运行旧代码。已实验确证 `dlclose` 对
+`DF_1_NODELETE` 是 no-op，且**套任何层数的 C 中间件都绕不过去**
+（NODELETE 属于被卸载对象自身的 ELF 属性）。
+
+已评估并**否决**版本化路径方案：技术上可行，但每次重载永久泄漏
+**5.8 个线程 + 1.5MB**（30 次实测 +168 线程 / +46MB），对 24/7 常驻进程不可接受。
+
+- [ ] ELF 检测 `DF_1_NODELETE` → 标记插件"不可热重载"（`dynamic_loader_unix.go`）
+- [ ] `ReloadOne` 对此类插件返回"需重启 homed"，停止假装成功（`registry.go`）
+- [ ] `plugin_install` 返回 `restart_required` 替代误导性的 `reload_required`（`pluginmgr/plugin.go`）
+
+### 11.7 子进程 + 共享内存架构迁移（待决策）
+
+**目标架构**：
+
+```
+今天： homed ──dlopen──> plugin.so（cgo bridge 385 行 + 51 个整数 method id）
+                         ↑ C 层唯一目的：绕开 Go plugin 包同版本限制
+
+之后： homed ──spawn──> plugin（纯 Go 二进制，零 cgo）
+         ├── stdio JSON-RPC   控制面：51 个 case 平移为 method 名
+         ├── shm + 偏移        数据面：StageContext 并发改写、二进制零拷贝
+         └── eventfd          通知面：事件环 post-and-forget
+```
+
+**关键洞察**：C 中间层存在的唯一理由是绕开 Go 原生 `plugin` 包的版本枷锁。
+子进程模型下**进程边界本身就是 ABI 边界**，C 层解决的问题消失，C 层自己也就该消失。
+可删除 `cabi/` 1096 行 + 每插件 385 行 bridge 模板。
+
+**11 项可行性实验全部通过**（详见评估文档第七章）：
+
+| 验证项 | 结果 |
+|---|---|
+| eventfd 走 netpoller | ✅ 200 等待者仅 +1 线程 |
+| 跨进程偏移解引用 | ✅ 父子 mmap 不同基址仍正确 |
+| 锁仲裁 RPC 成本 | ✅ 19.4 µs/次 |
+| post-and-forget 解耦流式 | ✅ 2218x 加速 |
+| 17 子进程常驻开销 | ✅ 29MB RSS（原估 50-70MB） |
+| 崩溃隔离 + 退出码信号 | ✅ 退出码 2，EOF 2.5ms 感知 |
+| 子进程热重载 | ✅ 同路径替换即生效 |
+| **跨进程并发改写 StageContext** | ✅ 5 插件×300 轮零丢失 |
+| 持锁进程崩溃自愈 | ✅ 无需 robust mutex，**零 cgo** |
+| 二进制零拷贝 | ✅ 18-22x，体积省 100% |
+| 工具调用 RPC 延迟 | ✅ p50 19.5 µs |
+
+**工作量约 8-9 周**（6 阶段，详见评估文档第四章）。
+双通道共存（按 manifest `entry` 分派 `.so`/`.bin`）使迁移可逐插件推进、随时回退。
+
+**迁移正当性 6 条**：① 热重载 ② 崩溃隔离 ③ 能力断层消除
+④ 内置插件解耦 ⑤ 修复 stage lost update ⑥ 修复超时泄漏/output 假成功/Windows 退化
+
+其中 ②③④⑥ 全是 C ABI 前提的直接产物（三套 ABI 实现、cgo 不可抢占、cgo 不可嵌套），
+在进程边界下自动消失。
+
+**待决策**：
+
+- [ ] **是否全量迁移？** 若只为热重载，11.6（1 人日）即够；8-9 周投入的理由必须是 ②-⑥
+- [x] 跨进程锁选型 → **已裁定**：锁仲裁回内核，零 cgo（实验 3+9）
+- [x] `Extra` 处置 → **维持**：4 键提升为具名字段，`Extra` 留 RPC 副本
+- [ ] 权限梯度显式形式（manifest 声明 caps？内核白名单？）
+      —— 注：内置插件的高权限是**刻意设计**，迁移目标是让梯度从"C ABI 表达能力的
+      意外产物"变成"显式声明并强制的策略"，而非消除梯度
+
+### 11.8 实施顺序建议
+
+按「影响 × 成本」排序，前 4 项不依赖迁移决策：
+
+| 序 | 项 | 规模 | 现网影响 |
+|---|---|---|---|
+| 1 | **11.1** output_send 同步等结果 | M | ❗ 用户收不到消息且模型以为成功 |
+| 2 | **11.3** stageContextWritable diff 回传 | S | ❗ 脏数据进 LLM（量级百分之几） |
+| 3 | **11.6** reload 语义修正（3 项） | S | 误导模型白跑重载 |
+| 4 | **11.2** 超时日志措辞 + browser 排查 | S | 已泄漏 26 次 |
+| 5 | 11.4 Lua 读锁 | S | 潜在 |
+| 6 | 11.5 Windows 补齐 | M | 无部署 |
+| 7 | 11.7 迁移（待决策） | 8-9 周 | — |
+
+### 11.9 附带发现（独立问题，非本节范围）
+
+测量对照数据时发现 homed 内存异常：
+
+```
+homed RSS = 2.34 GB   RssAnon = 2.35 GB（真实驻留）
+  2420 MB × 1   ← 主 homed 的 Go heap
+   512 MB × 15  ← 15 个插件各自的 heap arena（虚拟预留，不占物理内存）
+```
+
+512MB×15 说明当前架构下**插件间内存无法协同回收**（各自独立 Go runtime）。
+但 **2.36 GB 真实驻留在主 homed heap 上，与插件无关**，疑似 chat history /
+context 累积导致的内存增长。
+
+- [ ] 单独排查 homed 主 heap 的 2.36GB 驻留来源
