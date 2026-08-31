@@ -31,23 +31,31 @@
 > 依据：plan.md §11.1/11.3/11.6。不依赖任何新架构，独立交付，现网直接受益。
 > 目的：在副本模型内部打补丁，止血，为后续迁移争取时间。
 
-### 0.1 output_send 假成功修复（11.1）
+### 0.1 output_send 假成功修复（11.1）— ✅ **已完成**（2026-08-31）
 
-- 【M】`internal/plugin/cabi/loader.go:458`——`CORE_REGISTER_OUTPUT_CH` 的异步 output 从「goroutine 直接返回 queued」改为「goroutine + 带超时 channel 等真实结果」：
+- 【M】✅ `internal/plugin/cabi/loader.go`——`CORE_REGISTER_OUTPUT_CH`（:454）的异步 output 从「goroutine 直接返回 queued」改为「goroutine + 带超时 channel 等真实结果」。
+  新增 `awaitOutputResult`（:276）+ 可注入版 `awaitOutputResultWith`（:281）+ 常量 `outputSendTimeout = 10s`：
   ```go
   resCh := make(chan error, 1)
-  go func() { resCh <- pluginInvokeOutput(pid, chName, argsJSON) }()
+  go func() { resCh <- invoke(pid, channel, argsJSON) }()
   select {
   case err := <-resCh:
-      if err != nil { return nil, err }
+      if err != nil { return nil, err }               // 真实失败上报
       return map[string]interface{}{"status": "sent"}, nil
-  case <-time.After(10 * time.Second):
-      return map[string]interface{}{"status": "queued", "note": "发送超时未确认"}, nil
+  case <-time.After(timeout):
+      return map[string]interface{}{"status": "unconfirmed", "note": "..."}, nil
   }
   ```
   关键：`dev.Execute` 由 `executeOutputSendTool` 从 Go 侧调起（不在 cgo 栈内），goroutine 内的 `pluginInvokeOutput` 才是 cgo，**不构成嵌套**。
-- 【R】确认无 cgo 嵌套；审「超时未确认」措辞不误导（区别于 11.2 的"已取消"谎言）。
-- 【V】构造 meta 缺 `user_id` 的失败场景 → 模型收到错误而非"已发送"；正常场景收到 "sent"。
+- 【M】✅ `internal/agent/core/output.go` `executeOutputSendTool`：识别 `status=unconfirmed|queued` → 返回「发送结果未确认：<note>」而非「已发送」，把未确认状态透传给模型。
+- 【R】✅ 无 cgo 嵌套（`awaitOutputResult` 只在 `RegisterOutputChannel` 的 handler 内被调用，该 handler 从 Go 侧调起）；
+  「超时未确认」措辞与 11.2 的"已取消"谎言区分——用 `unconfirmed` + 显式 note，不谎报成功也不谎报失败。
+- 【R】✅ 接口冻结：`git diff third_party/homeagent-sdk/sdk/` 为空。
+- 【V】✅ 新增 `internal/plugin/cabi/output_test.go` 三用例全绿：
+  - `TestAwaitOutputResult_Success` → `status=sent`
+  - `TestAwaitOutputResult_Failure`（模拟 meta 缺 user_id）→ **返回 error**（旧实现会谎报成功）
+  - `TestAwaitOutputResult_Timeout` → `status=unconfirmed` 且不返回 error
+- 【V】✅ `go build ./...` exit 0；`go test ./internal/plugin/... ./internal/agent/...` 全绿。
 
 ### 0.2 stage lost update 补丁（11.3）
 

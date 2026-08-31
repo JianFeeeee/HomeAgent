@@ -52,10 +52,16 @@ import (
 	"log"
 	"sync"
 	"sync/atomic"
+	"time"
 	"unsafe"
 
 	sdk "gitcode.com/JianFeeeee/HomeAgent/internal/sdk"
 )
+
+// outputSendTimeout 是 output_send 等待通道真实发送确认的超时。
+// 超过该时间仍未收到插件确认，返回 unconfirmed（结果未知）而非谎报成功。
+// （plan.md 11.1）
+const outputSendTimeout = 10 * time.Second
 
 var (
 	pluginMap sync.Map // int32 pluginID → *pluginState
@@ -253,6 +259,49 @@ func pluginInvokeTool(pluginID int32, name, argsJSON string) (string, error) {
 	}
 	defer C.api_free_string(ps.api, result)
 	return C.GoString(result), nil
+}
+
+// awaitOutputResult 在 goroutine 内执行真正的 cgo 发送调用，并等待其结果：
+//   - 发送成功 → {status: sent}
+//   - 发送失败 → 返回 error（模型可感知并重试），不再像旧实现那样谎报成功
+//   - 超时未确认 → {status: unconfirmed}（结果未知，不谎报成功/失败）
+//
+// 为什么用 goroutine + channel 而不是直接同步调用：pluginInvokeOutput 是 cgo 调用，
+// 不能嵌套在 cgo 栈上执行（cgo within cgo 会崩溃）。本 handler 由 executeOutputSendTool
+// 从 Go 侧调起（不在 cgo 栈内），所以这里启动子 goroutine 执行 cgo 调用并等待其结果，
+// 不构成嵌套。
+//
+// 修复 plan.md 11.1：旧实现无条件返回 {status: queued} + err=nil，模型永远收到「已发送」
+// 而实际失败（如 meta 缺 user_id）只写日志，模型无法感知、不会重试。
+func awaitOutputResult(pid int32, channel, argsJSON string) (interface{}, error) {
+	return awaitOutputResultWith(pid, channel, argsJSON, pluginInvokeOutput, outputSendTimeout)
+}
+
+// awaitOutputResultWith 是 awaitOutputResult 的可注入版本（供单测替换 cgo 发送与超时）。
+func awaitOutputResultWith(
+	pid int32,
+	channel, argsJSON string,
+	invoke func(pluginID int32, channel, payload string) error,
+	timeout time.Duration,
+) (interface{}, error) {
+	resCh := make(chan error, 1)
+	go func() { resCh <- invoke(pid, channel, argsJSON) }()
+	select {
+	case err := <-resCh:
+		if err != nil {
+			log.Printf("[dispatch] output %s failed: %v", channel, err)
+			return nil, err
+		}
+		log.Printf("[dispatch] output %s OK", channel)
+		return map[string]interface{}{"status": "sent"}, nil
+	case <-time.After(timeout):
+		// 超时未确认：插件仍在后台发送，结果未知。不谎报成功，也不谎报失败。
+		log.Printf("[dispatch] output %s 等待确认超时（%s），插件仍在后台发送", channel, timeout)
+		return map[string]interface{}{
+			"status": "unconfirmed",
+			"note":   fmt.Sprintf("发送已提交但 %s 内未收到通道确认，结果未知；如需确认请查询该通道状态", timeout),
+		}, nil
+	}
 }
 
 func pluginInvokeOutput(pluginID int32, channel, payload string) error {
@@ -456,18 +505,13 @@ func go_core_dispatch(methodID C.int, ctx unsafe.Pointer, s1, s2, s3 *C.char, i1
 			}
 		}
 		s.RegisterOutputChannel(chName, n1, a2, chDef, func(args map[string]interface{}) (interface{}, error) {
-			// Output is async: return immediately, send in background
-			// to avoid nested cgo calls (cgo within cgo can crash)
-			go func() {
-				argsJSON, _ := json.Marshal(args)
-				log.Printf("[dispatch] async output %s/%s args=%s", ps.name, chName, string(argsJSON))
-				if err := pluginInvokeOutput(pid, chName, string(argsJSON)); err != nil {
-					log.Printf("[dispatch] async output %s/%s failed: %v", ps.name, chName, err)
-				} else {
-					log.Printf("[dispatch] async output %s/%s OK", ps.name, chName)
-				}
-			}()
-			return map[string]interface{}{"status": "queued"}, nil
+			// 发送在 goroutine 内进行（cgo 调用不能嵌套在 cgo 栈上，否则可能崩溃），
+			// 但调用方必须拿到真实结果：本 handler 由 executeOutputSendTool 从 Go 侧
+			// 调起，不在 cgo 栈内，因此这里等待 goroutine 的结果不构成 cgo 嵌套。
+			// （plan.md 11.1）
+			argsJSON, _ := json.Marshal(args)
+			log.Printf("[dispatch] output %s/%s args=%s", ps.name, chName, string(argsJSON))
+			return awaitOutputResult(pid, chName, string(argsJSON))
 		})
 		return 0
 

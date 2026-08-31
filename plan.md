@@ -674,9 +674,13 @@ case <-time.After(10 * time.Second):
 `dev.Execute` 由 `executeOutputSendTool` 从 Go 侧调起（不在 cgo 栈内），
 goroutine 里的 `pluginInvokeOutput` 才是 cgo 调用，**不构成嵌套**。
 
-- [ ] 实现修复
-- [ ] **实测验证不触发 cgo 嵌套崩溃**（此判断为推理，必须实测）
-- [ ] 构造 meta 缺 `user_id` 的失败场景，确认模型收到错误而非"已发送"
+- [x] 实现修复 —— `loader.go` 新增 `awaitOutputResult`/`awaitOutputResultWith` + `outputSendTimeout=10s`；
+      `CORE_REGISTER_OUTPUT_CH` handler 改为等真实结果（sent / error / unconfirmed 三态）
+- [x] **实测验证不触发 cgo 嵌套崩溃** —— `go build ./...` exit 0 + `go test ./internal/plugin/... ./internal/agent/...` 全绿；
+      `awaitOutputResult` 只在 `RegisterOutputChannel` handler 内被调用，该 handler 由 `executeOutputSendTool` 从 Go 侧调起，非 cgo 栈
+- [x] 构造 meta 缺 `user_id` 的失败场景，确认模型收到错误而非"已发送" —— `TestAwaitOutputResult_Failure` 断言返回 error；
+      `output.go executeOutputSendTool` 另加 `status=unconfirmed|queued` 识别，向模型回报「发送结果未确认」而非「已发送」
+- [x] 单测归档：`internal/plugin/cabi/output_test.go`（Success/Failure/Timeout 三例）
 
 ### 11.2 紧急：cgo 工具超时不可中断，线性泄漏 ⚠️ 现网已发生 26 次
 
