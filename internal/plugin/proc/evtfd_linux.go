@@ -33,3 +33,6 @@ func EvtfdNotify(efd int) {
 func evtfdReadFile(efd int) *os.File {
 	return os.NewFile(uintptr(efd), "evtring-notify")
 }
+
+// evtfdClose 关闭通知句柄。Unix 侧由 *os.File.Close 负责，此处为跨平台签名占位。
+func evtfdClose(efd int) {}
