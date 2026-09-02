@@ -374,7 +374,7 @@ func (r *Registry) isDisabled(name string) bool {
 // plugin.bin 排在最前：与 detectEntryKind 保持一致的优先级，迁移期间同目录
 // 两种产物共存时以子进程产物为准。
 func pluginEntryHash(plgDir string) string {
-	for _, candidate := range []string{binEntry, soEntry, dllEntry, "plugin.dylib", luaEntry, skillEntry} {
+	for _, candidate := range []string{binEntry, luaEntry, skillEntry} {
 		path := filepath.Join(plgDir, candidate)
 		if data, err := os.ReadFile(path); err == nil && len(data) > 0 {
 			sum := sha256.Sum256(data)
@@ -905,8 +905,10 @@ func (r *Registry) PluginDir() string {
 }
 
 func (r *Registry) tryDynamic(plgDir, name string, config map[string]interface{}) (sdk.Plugin, error) {
-	// 按 manifest entry 分派到对应加载通道（外部插件多进程化：.so/.dll 与 .bin 双通道共存）。
-	// 这使迁移可逐插件推进、随时回退——把 entry 改回 plugin.so 即回到旧通道。
+	// 按 manifest entry 分派加载通道。
+	//
+	// C ABI 通道（.so/.dll/.dylib）已整体删除：外部插件统一走子进程，
+	// 三套独立 ABI 实现收敛为单一 RPC 实现（§9.2）。
 	if detectEntryKind(plgDir) == entryProc {
 		plg, err := r.loadProc(plgDir, name, config)
 		if err != nil {
@@ -916,29 +918,21 @@ func (r *Registry) tryDynamic(plgDir, name string, config map[string]interface{}
 			log.Printf("[plugin] %s: 经 proc 通道加载（子进程）", name)
 			return plg, nil
 		}
-		// entry 声明了 plugin.bin 但文件不存在/不可用 → 不隐式回退到 cabi，
-		// 否则"已迁移插件静默跑回旧通道"极难排查。
 		return nil, fmt.Errorf("plugin %s: entry 声明 %s 但未找到可用二进制", name, binEntry)
 	}
 
-	// 既有探测顺序（保持不变）：.so → .dll → .lua
-	for _, try := range []struct {
-		name string
-		fn   func(string, string, map[string]interface{}) (sdk.Plugin, error)
-	}{
-		{"so", tryLoadSO},
-		{"dll", tryLoadDLL},
-		{"lua", tryLoadLua},
-	} {
-		plg, err := try.fn(plgDir, name, config)
-		if err != nil {
-			return nil, err
-		}
-		if plg != nil {
-			return plg, nil
-		}
+	// 旧 .so/.dll 插件给明确错误，不静默跳过。
+	// 静默跳过会让「插件目录在但没加载」看起来像配置问题，
+	// 而实际原因是需要用新 plugindev 重编。
+	if hasLegacyCABIEntry(plgDir) {
+		return nil, fmt.Errorf(
+			"plugin %s: 检测到旧 C ABI 产物（plugin.so/.dll/.dylib）。"+
+				"外部插件已改为子进程模式，请用新版 plugindev 重编产出 %s"+
+				"（业务代码无需修改）", name, binEntry)
 	}
-	return nil, nil
+
+	// Lua 插件仍走解释器
+	return tryLoadLua(plgDir, name, config)
 }
 
 func (r *Registry) readConfig(plgDir string) map[string]interface{} {

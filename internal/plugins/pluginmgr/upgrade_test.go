@@ -89,12 +89,12 @@ func buildHmap(t *testing.T, name, version string) []byte {
 	zw := zip.NewWriter(&buf)
 	manifest := map[string]interface{}{
 		"name": name, "name_zh": name, "name_en": name,
-		"version": version, "entry": "plugin.so",
+		"version": version, "entry": "plugin.bin",
 	}
 	mData, _ := json.Marshal(manifest)
 	f, _ := zw.Create("plugin.json")
 	f.Write(mData)
-	bin, _ := zw.Create("plugin.so")
+	bin, _ := zw.Create("plugin.bin")
 	bin.Write([]byte("binary-" + name + "-" + version))
 	zw.Close()
 	return buf.Bytes()
@@ -152,12 +152,12 @@ func TestInstallThenUpgradeKeepsConfig(t *testing.T) {
 		t.Fatalf("StopAndUnload not called once with demo: %v", calls)
 	}
 	// 新二进制写入
-	soData, err := os.ReadFile(filepath.Join(dir, "demo", "plugin.so"))
+	binData, err := os.ReadFile(filepath.Join(dir, "demo", "plugin.bin"))
 	if err != nil {
-		t.Fatalf("read new so: %v", err)
+		t.Fatalf("read new bin: %v", err)
 	}
-	if string(soData) != "binary-demo-2.0.0" {
-		t.Fatalf("so not overwritten: %q", string(soData))
+	if string(binData) != "binary-demo-2.0.0" {
+		t.Fatalf("bin not overwritten: %q", string(binData))
 	}
 
 	// 4. 降级 v2.0.0 → v1.5.0
@@ -187,7 +187,7 @@ func TestExtractFailureRollsBack(t *testing.T) {
 	// 构造损坏包：zip 但缺 plugin.json（extractPackage 会失败）
 	var buf bytes.Buffer
 	zw := zip.NewWriter(&buf)
-	f, _ := zw.Create("plugin.so")
+	f, _ := zw.Create("plugin.bin")
 	f.Write([]byte("corrupt"))
 	zw.Close()
 
@@ -200,7 +200,7 @@ func TestExtractFailureRollsBack(t *testing.T) {
 	f2, _ := zw2.Create("../../evil")
 	f2.Write([]byte("x"))
 	mf, _ := zw2.Create("plugin.json")
-	mData, _ := json.Marshal(map[string]interface{}{"name": "rollback", "version": "9.9.9", "entry": "plugin.so"})
+	mData, _ := json.Marshal(map[string]interface{}{"name": "rollback", "version": "9.9.9", "entry": "plugin.bin"})
 	mf.Write(mData)
 	zw2.Close()
 	bad = rb.Bytes()

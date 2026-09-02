@@ -23,16 +23,16 @@ import (
 	sdk "gitcode.com/JianFeeeee/HomeAgent/internal/sdk"
 )
 
-// platformBinary 按当前 OS 选择正确的插件二进制文件名。
+// platformBinary 按当前 OS/ARCH 选择正确的插件二进制文件名。
 // 返回 (zip内文件名, 安装后重命名).
+//
+// 子进程模式下各平台产物统一叫 plugin.bin（进程边界即 ABI 边界，
+// 不存在 .so/.dylib/.dll 的区分），故 zip 内按平台加后缀区分，
+// 解包时挑当前平台那一份重命名为 plugin.bin。
 func platformBinary() (zipName, canonicalName string) {
 	switch runtime.GOOS {
-	case "linux":
-		return "plugin.so", "plugin.so"
-	case "darwin":
-		return "plugin.dylib", "plugin.so" // dlopen 兼容 .so 名称
-	case "windows":
-		return "plugin.dll", "plugin.dll"
+	case "linux", "darwin", "windows", "freebsd":
+		return fmt.Sprintf("plugin.bin.%s.%s", runtime.GOOS, runtime.GOARCH), "plugin.bin"
 	default:
 		return "", ""
 	}
@@ -40,18 +40,17 @@ func platformBinary() (zipName, canonicalName string) {
 
 // validBinaries 是 .hmap 中所有可识别的文件入口（平台二进制或脚本）。
 var validBinaries = map[string]bool{
-	"plugin.so":    true,
-	"plugin.dylib": true,
-	"plugin.dll":   true,
-	"main.lua":     true,
-	"SKILL.md":     true,
+	"plugin.bin": true,
+	"main.lua":   true,
+	"SKILL.md":   true,
 }
 
-// platformBinaries 是平台特定的二进制，bundle 模式下仅当前平台的被解压。
-var platformBinaries = map[string]bool{
-	"plugin.so":    true,
-	"plugin.dylib": true,
-	"plugin.dll":   true,
+// isPlatformBinary 判断 zip 条目是否为平台特定二进制（bundle 模式下仅当前平台的被解压）。
+//
+// 形式：plugin.bin.<goos>.<goarch>。不用固定表是因为平台组合会增长
+// （linux/arm64、darwin/arm64 等），按前缀判断无需维护清单。
+func isPlatformBinary(name string) bool {
+	return strings.HasPrefix(name, "plugin.bin.")
 }
 
 var downloadClient = &http.Client{
@@ -705,17 +704,19 @@ func validatePackage(data []byte) (*pluginPackage, error) {
 	}
 
 	if len(pkg.Platforms) > 0 {
-		// bundle mode: check each declared platform has a matching binary
+		// bundle mode：每个声明的平台都要有对应二进制。
+		// 子进程模式下条目形式为 plugin.bin.<goos>.<goarch>，
+		// 故按前缀匹配而不枚举架构（同一 OS 可能有 amd64/arm64 两份）。
 		for _, plat := range pkg.Platforms {
-			bin, ok := map[string]string{
-				"linux":   "plugin.so",
-				"darwin":  "plugin.dylib",
-				"windows": "plugin.dll",
-			}[plat]
-			if !ok {
-				return nil, fmt.Errorf("unsupported platform: %q", plat)
+			prefix := "plugin.bin." + plat + "."
+			found := false
+			for name := range zipEntries {
+				if strings.HasPrefix(name, prefix) {
+					found = true
+					break
+				}
 			}
-			if zipEntries[bin] {
+			if found {
 				hasBinary = true
 			}
 		}
@@ -795,11 +796,11 @@ func extractPackage(data []byte, pluginDir string) error {
 		}
 
 		// bundle mode: skip other platforms' platform-specific binaries
-		if isBundle && platformBinaries[f.Name] && f.Name != zipBin {
+		if isBundle && isPlatformBinary(f.Name) && f.Name != zipBin {
 			continue
 		}
 
-		// rename platform binary to canonical name (e.g. plugin.dylib → plugin.so)
+		// 平台二进制重命名为规范名（plugin.bin.linux.amd64 → plugin.bin）
 		dest := fpath
 		if isBundle && f.Name == zipBin && canonicalName != zipBin {
 			dest = filepath.Join(target, canonicalName)
@@ -807,6 +808,15 @@ func extractPackage(data []byte, pluginDir string) error {
 
 		if err := copyZipEntry(f, dest); err != nil {
 			return err
+		}
+
+		// 子进程插件必须可执行。
+		// zip 保留了原文件权限位，但经某些工具链/传输后可能丢失；
+		// 内核加载时会因缺执行位报错（带 chmod +x 提示），在此提前补上。
+		if filepath.Base(dest) == "plugin.bin" {
+			if err := os.Chmod(dest, 0o755); err != nil {
+				return fmt.Errorf("chmod %s: %w", dest, err)
+			}
 		}
 	}
 
