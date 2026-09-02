@@ -72,7 +72,19 @@ func (r *Registry) loadProc(dir, name string, config map[string]interface{}) (sd
 		return nil, fmt.Errorf("proc plugin %s: %w", name, err)
 	}
 
-	return procPluginAdapter{Plugin: proc.New(name, binPath, dir, config, host, r.onProcCrash)}, nil
+	// manifest 声明的能力集（§3.8 权限梯度）。
+	// 无 manifest 或未声明 capabilities 时不限制，保存存量插件行为。
+	var caps []string
+	if mft := readManifest(dir); mft != nil {
+		caps = mft.Capabilities
+		if len(caps) > 0 {
+			log.Printf("[plugin] %s 声明能力: %v", name, caps)
+		}
+	}
+
+	return procPluginAdapter{
+		Plugin: proc.New(name, binPath, dir, config, host, r.onProcCrash, caps...),
+	}, nil
 }
 
 // ensureProcHost 惰性创建共享段 Host（全进程唯一）。

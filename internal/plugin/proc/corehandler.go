@@ -39,6 +39,11 @@ type coreHandler struct {
 
 	// evtRing 是事件环的订阅接口（实现由 internal/plugin 提供，避免循环依赖）。
 	evtRing EvtRingSubscriber
+
+	// caps 是本插件被授予的能力集（§3.8 权限梯度）。
+	// nil 或 unrestricted 时不限制——存量插件未声明 capabilities，
+	// 若按最小权限处理会让它们静默降级。
+	caps *capabilitySet
 }
 
 // EvtRingSubscriber 是事件环订阅接口，由 internal/plugin.EventRing 实现。
@@ -91,7 +96,15 @@ type CoreSDK interface {
 }
 
 // Handle 分派一次插件 → 内核的调用。
+//
+// 权限梯度在此强制（§3.8）：manifest 未声明的能力组被**明确拒绝**。
+// 不静默忽略：C ABI 时代 case 23/24 返回成功但永远收不到事件
+// （§1.3 的「给不了」而非「不给」），插件作者无从得知。
 func (h *coreHandler) Handle(method string, params json.RawMessage) (interface{}, error) {
+	if ok, cap := h.caps.allows(method); !ok {
+		return nil, errCapabilityDenied(h.name, method, cap)
+	}
+
 	switch method {
 
 	// ---- 注册面（原 case 1/2/3/4/46）----
