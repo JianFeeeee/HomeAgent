@@ -360,10 +360,12 @@ func (r *Registry) isDisabled(name string) bool {
 	return r.cfgReg.IsPluginDisabled(name)
 }
 
-// pluginEntryHash 计算插件入口文件（plugin.so 或 main.lua）的 SHA256，用于增量重载对比。
+// pluginEntryHash 计算插件入口文件的 SHA256，用于增量重载对比。
 // 无入口文件（内置纯工厂插件）返回空字符串（始终视为已加载）。
+// plugin.bin 排在最前：与 detectEntryKind 保持一致的优先级，迁移期间同目录
+// 两种产物共存时以子进程产物为准。
 func pluginEntryHash(plgDir string) string {
-	for _, candidate := range []string{"plugin.so", "plugin.dll", "main.lua", "SKILL.md"} {
+	for _, candidate := range []string{binEntry, soEntry, dllEntry, "plugin.dylib", luaEntry, skillEntry} {
 		path := filepath.Join(plgDir, candidate)
 		if data, err := os.ReadFile(path); err == nil && len(data) > 0 {
 			sum := sha256.Sum256(data)
@@ -763,6 +765,7 @@ func (r *Registry) DisablePlugin(name, by string) error {
 }
 
 func (r *Registry) EnablePlugin(name string) error { return r.Enable(name) }
+
 // StopAndUnload 停止并从注册表移除插件，但保留其配置表（config_<name>）。
 // 供插件更新/升级流程使用：换 so/文件不动配置，重装后配置原样生效。
 // 不执行 onRemove 回调（那是删除专用语义）。目录由调用方管理。
@@ -888,7 +891,23 @@ func (r *Registry) PluginDir() string {
 }
 
 func (r *Registry) tryDynamic(plgDir, name string, config map[string]interface{}) (sdk.Plugin, error) {
-	// 尝试顺序：.so (Go plugin on Linux) → .dll (Windows) → .lua (跨平台)
+	// 按 manifest entry 分派到对应加载通道（外部插件多进程化：.so/.dll 与 .bin 双通道共存）。
+	// 这使迁移可逐插件推进、随时回退——把 entry 改回 plugin.so 即回到旧通道。
+	if detectEntryKind(plgDir) == entryProc {
+		plg, err := tryLoadProc(plgDir, name, config)
+		if err != nil {
+			return nil, err
+		}
+		if plg != nil {
+			log.Printf("[plugin] %s: 经 proc 通道加载（子进程）", name)
+			return plg, nil
+		}
+		// entry 声明了 plugin.bin 但文件不存在/不可用 → 不隐式回退到 cabi，
+		// 否则"已迁移插件静默跑回旧通道"极难排查。
+		return nil, fmt.Errorf("plugin %s: entry 声明 %s 但未找到可用二进制", name, binEntry)
+	}
+
+	// 既有探测顺序（保持不变）：.so → .dll → .lua
 	for _, try := range []struct {
 		name string
 		fn   func(string, string, map[string]interface{}) (sdk.Plugin, error)
