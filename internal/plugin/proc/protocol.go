@@ -153,10 +153,10 @@ type HandshakeParams struct {
 	Protocol    int    `json:"protocol"`     // 内核支持的协议版本
 	CoreVersion string `json:"core_version"` // 内核版本（诊断用）
 	PluginName  string `json:"plugin_name"`  // 内核分配的插件名
-	// ShmVersion 让插件确认共享段布局一致；不匹配时插件应拒绝启动而非错读。
-	ShmVersion uint32 `json:"shm_version"`
-	// ShmSize 是内核分配的共享段大小，插件据此 mmap（段本身经 fd 3 传入）。
-	ShmSize int `json:"shm_size"`
+	ShmVersion  uint32 `json:"shm_version"`
+	ShmSize     int    `json:"shm_size"`
+	// EvtRingSize 是事件环段大小（0 表示不支持事件环）。插件据此 mmap fd 4。
+	EvtRingSize int `json:"evt_ring_size,omitempty"`
 }
 
 // HandshakeResult 是插件 → 内核的建链应答：上报自身信息。

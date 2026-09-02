@@ -68,8 +68,8 @@ func evtTypeMask(types ...pubsdk.EventType) uint32 {
 const (
 	evtRingMagic   uint32 = 0x48455654 // "HEVT"
 	evtRingVersion uint32 = 1
-	evtRingCap     uint32 = 8192       // 2^13，满足流式场景突发（实验 4）
-	evtRingSlotLen uint32 = 32         // seq(8)+type(4)+off(4)+len(4)+pad(12)
+	evtRingCap     uint32 = 8192 // 2^13，满足流式场景突发（实验 4）
+	evtRingSlotLen uint32 = 32   // seq(8)+type(4)+off(4)+len(4)+pad(12)
 
 	evtOffMagic    uint32 = 0
 	evtOffVersion  uint32 = 4

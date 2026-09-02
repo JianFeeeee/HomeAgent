@@ -31,10 +31,11 @@ type Host struct {
 	shmSize int
 
 	// 事件环段（独立于 StageContext）
-	evtfd     *os.File // eventfd fd（fd 5 的句柄，子进程读取消费）
-	evtRing   *EvtRing // 内核侧事件环句柄
-	evtRingFd *os.File // 事件环段 memfd（fd 4，子进程 mmap 读事件）
-	evtData   []byte   // 事件环段 mmap 数据
+	evtfd       *os.File // Unix：eventfd/pipe 读端（fd 5）。Windows 为 nil，用 evtNotifyFd 。
+	evtNotifyFd int      // 通知句柄的平台无关标识（Unix 是真 fd，Windows 是伪 fd）
+	evtRing     *EvtRing // 内核侧事件环句柄
+	evtRingFd   *os.File // Unix：事件环段 memfd（fd 4）。Windows 为 nil（命名段）。
+	evtData     []byte   // 事件环段 mmap 数据
 
 	// evtSubscriber 由 internal/plugin 注入，coreHandler 用它接子进程的 events.subscribe 请求。
 	// proc 包不依赖 internal/plugin（循环依赖），故用接口类型存储。
@@ -48,11 +49,13 @@ type Host struct {
 
 // NewHost 创建共享段（平台层 allocShm + 布局初始化）。
 //
-// 段的分配按平台分开（shmalloc_*.go）：Linux 用 memfd，macOS 用
-// 立即 unlink 的临时文件（无 memfd_create），其余平台明确报错。
-// 两者语义一致：无文件名残留，fd 可经 ExtraFiles 传给子进程，
-// 子进程 mmap 同一 inode——「全部插件共享一块段」的前提得以成立。
-// 实验 2 已验证父子 mmap 到不同虚拟地址时相对偏移仍正确解引用。
+// 段的**传递机制**按平台分开（shmalloc_*.go），但**布局**完全一致：
+//   - Linux：memfd，经 ExtraFiles 传继承 fd
+//   - macOS：立即 unlink 的临时文件（无 memfd_create），同样走 fd 继承
+//   - Windows：命名 FileMapping（无 fd 继承语义），插件按名字打开
+//
+// 三者共同点：全部插件看到同一份物理页，段内一律用相对偏移而非指针
+// （实验 2 已验证各进程 mmap 到不同虚拟地址时偏移解引用仍正确）。
 func NewHost() (*Host, error) {
 	memfd, data, err := allocShm(shmDefaultSize)
 	if err != nil {
@@ -78,15 +81,16 @@ func NewHost() (*Host, error) {
 	evtRing.Init()
 
 	return &Host{
-		memfd:    memfd,
-		data:     data,
-		seg:      seg,
-		shmSize:  shmDefaultSize,
-		evtfd:    evtfdReadFile(efd),
-		evtRing:  evtRing,
-		evtRingFd: evtRingFd,
-		evtData:  evtData,
-		locks:    &lockRegistry{},
+		memfd:       memfd,
+		data:        data,
+		seg:         seg,
+		shmSize:     shmDefaultSize,
+		evtfd:       evtfdReadFile(efd),
+		evtNotifyFd: efd,
+		evtRing:     evtRing,
+		evtRingFd:   evtRingFd,
+		evtData:     evtData,
+		locks:       &lockRegistry{},
 	}, nil
 }
 
@@ -117,6 +121,7 @@ func (h *Host) Close() error {
 		h.evtfd.Close()
 		h.evtfd = nil
 	}
+	evtfdClose(h.evtNotifyFd)
 	return firstErr
 }
 
@@ -240,8 +245,15 @@ func (h *Host) ShmSize() int { return h.shmSize }
 // EvtRing 返回内核侧事件环句柄。
 func (h *Host) EvtRing() *EvtRing { return h.evtRing }
 
-// Evtfd 返回 eventfd 的 *os.File（供 EventRing 写通知）。
+// Evtfd 返回通知读端的 *os.File（Unix；eventfd/pipe）。
+// Windows 返回 nil——命名 Event 不是文件句柄，用 EvtNotifyFd 代替。
 func (h *Host) Evtfd() *os.File { return h.evtfd }
+
+// EvtNotifyFd 返回通知句柄的平台无关标识，供 EventRing 写通知。
+//
+// Unix 是真 fd；Windows 是映射到命名 Event 句柄的伪 fd。
+// EvtfdNotify 接受这个值并按平台分派。
+func (h *Host) EvtNotifyFd() int { return h.evtNotifyFd }
 
 // SetEvtSubscriber 注入事件环订阅接口（由 Registry 在创建 Host 后设置）。
 func (h *Host) SetEvtSubscriber(sub EvtRingSubscriber) { h.evtSubscriber = sub }

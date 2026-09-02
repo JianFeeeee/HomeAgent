@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
-	"os"
 	"sync"
 
 	pubsdk "gitcode.com/JianFeeeee/homeagent-sdk/sdk"
@@ -69,10 +68,10 @@ func (p *Plugin) Start(core CoreSDK) error {
 	}
 
 	p.handler = &coreHandler{
-		sdk:   core,
-		name:  p.name,
-		host:  p.host,
-		locks: p.host.locks,
+		sdk:     core,
+		name:    p.name,
+		host:    p.host,
+		locks:   p.host.locks,
 		evtRing: p.host.evtSubscriber,
 	}
 	// 反向调用闭包：注册回调时捕获，运行期经 RPC 打到插件进程。
@@ -82,12 +81,15 @@ func (p *Plugin) Start(core CoreSDK) error {
 
 	proc, err := Spawn(p.name, p.bin, Options{
 		Dir: p.dir,
-		Env: p.env,
-		// 子进程 fd 布局：3=StageContext 段，4=事件环段，5=eventfd
-		ExtraFiles: []*os.File{p.host.memfd, p.host.evtRingFd, p.host.evtfd},
-		ShmSize:    p.host.shmSize,
-		Handler:    p.handler.Handle,
-		OnExit:     p.handleExit,
+		// 共享段的传递机制按平台不同（shmpass_*.go）：
+		// Unix 经 ExtraFiles 传继承 fd（ 3=StageContext, 4=事件环, 5=通知）；
+		// Windows 无 fd 继承语义，改用命名内核对象，名字经环境变量传入。
+		Env:         append(p.env, p.host.procEnvForShm()...),
+		ExtraFiles:  p.host.procExtraFilesForShm(),
+		ShmSize:     p.host.shmSize,
+		EvtRingSize: evtTotalSize,
+		Handler:     p.handler.Handle,
+		OnExit:      p.handleExit,
 	})
 	if err != nil {
 		return err

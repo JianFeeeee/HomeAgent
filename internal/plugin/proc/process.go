@@ -62,6 +62,8 @@ type Process struct {
 
 	// shmSize 是握手时告知插件的共享段大小（0 表示本插件不用共享段）。
 	shmSize int
+	// evtRingSize 是事件环段大小（0 表示不支持事件环）。
+	evtRingSize int
 }
 
 // RequestHandler 处理插件 → 内核的调用。
@@ -79,6 +81,8 @@ type Options struct {
 	ExtraFiles []*os.File
 	// ShmSize 是共享段大小，握手时告知插件（与 ExtraFiles[0] 的 memfd 对应）。
 	ShmSize int
+	// EvtRingSize 是事件环段大小（0 表示不支持事件环）。
+	EvtRingSize int
 	// Handler 处理插件反向调用。
 	Handler RequestHandler
 	// OnExit 进程退出回调。
@@ -127,18 +131,19 @@ func Spawn(name, bin string, opts Options) (*Process, error) {
 	}
 
 	p := &Process{
-		name:    name,
-		bin:     bin,
-		dir:     opts.Dir,
-		cmd:     cmd,
-		stdin:   bufio.NewWriter(stdinPipe),
-		stdout:  stdoutPipe,
-		pending: make(map[uint64]chan *Response),
-		handler: opts.Handler,
-		exited:  make(chan struct{}),
-		ready:   make(chan struct{}),
-		onExit:  opts.OnExit,
-		shmSize: opts.ShmSize,
+		name:        name,
+		bin:         bin,
+		dir:         opts.Dir,
+		cmd:         cmd,
+		stdin:       bufio.NewWriter(stdinPipe),
+		stdout:      stdoutPipe,
+		pending:     make(map[uint64]chan *Response),
+		handler:     opts.Handler,
+		exited:      make(chan struct{}),
+		ready:       make(chan struct{}),
+		onExit:      opts.OnExit,
+		shmSize:     opts.ShmSize,
+		evtRingSize: opts.EvtRingSize,
 	}
 
 	if err := cmd.Start(); err != nil {
@@ -190,6 +195,7 @@ func (p *Process) handshake(timeout time.Duration) error {
 		PluginName:  p.name,
 		ShmVersion:  shmVersion,
 		ShmSize:     p.shmSize,
+		EvtRingSize: p.evtRingSize,
 	})
 	if err != nil {
 		return fmt.Errorf("proc: %s 握手失败: %w", p.name, err)
