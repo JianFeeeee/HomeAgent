@@ -7,7 +7,6 @@ import (
 	"sync"
 
 	pubsdk "gitcode.com/JianFeeeee/homeagent-sdk/sdk"
-	"golang.org/x/sys/unix"
 )
 
 // Host 持有**被全部子进程插件共享的一块 StageContext 段**，是共享内存数据面的
@@ -43,35 +42,26 @@ type Host struct {
 	coord   *stageCoordinator
 }
 
-// NewHost 创建共享段（memfd + mmap + 布局初始化）。
+// NewHost 创建共享段（平台层 allocShm + 布局初始化）。
 //
-// 用 memfd 而非 /dev/shm 文件：无需文件名、不残留（进程退出即回收）、
-// 可经 ExtraFiles 传给子进程。实验 2 已验证父子 mmap 到不同虚拟地址时
-// 相对偏移仍正确解引用。
+// 段的分配按平台分开（shmalloc_*.go）：Linux 用 memfd，macOS 用
+// 立即 unlink 的临时文件（无 memfd_create），其余平台明确报错。
+// 两者语义一致：无文件名残留，fd 可经 ExtraFiles 传给子进程，
+// 子进程 mmap 同一 inode——「全部插件共享一块段」的前提得以成立。
+// 实验 2 已验证父子 mmap 到不同虚拟地址时相对偏移仍正确解引用。
 func NewHost() (*Host, error) {
-	fd, err := unix.MemfdCreate("hastagectx", unix.MFD_CLOEXEC)
+	memfd, data, err := allocShm(shmDefaultSize)
 	if err != nil {
-		return nil, fmt.Errorf("proc: 创建共享段 memfd: %w", err)
-	}
-	if err := unix.Ftruncate(fd, int64(shmDefaultSize)); err != nil {
-		unix.Close(fd)
-		return nil, fmt.Errorf("proc: 共享段 ftruncate: %w", err)
-	}
-	data, err := unix.Mmap(fd, 0, shmDefaultSize,
-		unix.PROT_READ|unix.PROT_WRITE, unix.MAP_SHARED)
-	if err != nil {
-		unix.Close(fd)
-		return nil, fmt.Errorf("proc: 共享段 mmap: %w", err)
+		return nil, err
 	}
 	seg, err := NewSegment(data)
 	if err != nil {
-		unix.Munmap(data)
-		unix.Close(fd)
+		freeShm(memfd, data)
 		return nil, err
 	}
 
 	return &Host{
-		memfd:   os.NewFile(uintptr(fd), "hastagectx"),
+		memfd:   memfd,
 		data:    data,
 		seg:     seg,
 		shmSize: shmDefaultSize,
@@ -88,16 +78,9 @@ const shmDefaultSize = 256 * 1024
 
 // Close 释放共享段。
 func (h *Host) Close() error {
-	if h.data != nil {
-		unix.Munmap(h.data)
-		h.data = nil
-	}
-	if h.memfd != nil {
-		err := h.memfd.Close()
-		h.memfd = nil
-		return err
-	}
-	return nil
+	data, f := h.data, h.memfd
+	h.data, h.memfd = nil, nil
+	return freeShm(f, data)
 }
 
 // beginStage 由插件 handler 进入时调用。
@@ -213,3 +196,6 @@ func (c *stageCoordinator) leave() (last bool, err error) {
 	}
 	return last, nil
 }
+
+// ShmSize 返回共享段大小（供诊断/日志）。
+func (h *Host) ShmSize() int { return h.shmSize }

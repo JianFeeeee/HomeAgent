@@ -21,6 +21,7 @@ import (
 	"gitcode.com/JianFeeeee/HomeAgent/internal/memory"
 	doc "gitcode.com/JianFeeeee/HomeAgent/internal/memory/document"
 	"gitcode.com/JianFeeeee/HomeAgent/internal/memory/text"
+	"gitcode.com/JianFeeeee/HomeAgent/internal/plugin/proc"
 	sdk "gitcode.com/JianFeeeee/HomeAgent/internal/sdk"
 	"gitcode.com/JianFeeeee/HomeAgent/internal/tracker"
 	"gitcode.com/JianFeeeee/HomeAgent/pkg/types"
@@ -101,9 +102,17 @@ type Registry struct {
 	knownDisabled map[string]bool
 	allowlist     map[string]bool
 
-	// pluginHashes 记录各插件二进制(plugin.so/main.lua)的 SHA256，
+	// pluginHashes 记录各插件二进制(plugin.so/plugin.bin/main.lua)的 SHA256，
 	// 供增量重载(Reload)对比：仅重载有变更的插件，避免全量 StopAll+Load 导致重复加载。
 	pluginHashes map[string]string
+
+	// procHost 是**全部子进程插件共享的那一块** StageContext 段（§3.3/§3.4）。
+	//
+	// 懒创建（首个 .bin 插件加载时），随内核存活。共享而非每插件一段是关键：
+	// 每插件一段会让「内核 ctx → 段 → 插件改 → 回读 ctx」在多插件下退化成副本模型，
+	// lost update 原样复现（§8.4 实测 35.8~36.8%）。
+	procHostMu sync.Mutex
+	procHost   *proc.Host
 }
 
 func NewRegistry() *Registry {
@@ -466,7 +475,6 @@ func (r *Registry) runOnRemoveHandlers(name string) {
 
 func (r *Registry) StopAll() {
 	r.mu.Lock()
-	defer r.mu.Unlock()
 	for _, p := range r.instances {
 		r.runStopHandlers(p.Name())
 		if err := p.Stop(); err != nil {
@@ -477,6 +485,12 @@ func (r *Registry) StopAll() {
 	r.instances = nil
 	r.pluginAutoRestart = make(map[string]bool)
 	r.sdkRefs = make(map[string]*sdk.PluginSDK)
+	r.mu.Unlock()
+
+	// 共享段在全部子进程退出后再释放：插件还持有映射时拆段，
+	// 它们下一次访问就是 SIGBUS。在锁外调用：Close 不需 registry 锁，
+	// 而持锁调它会与 onProcCrash 路径（子进程退出回调）产生锁序风险。
+	r.closeProcHost()
 }
 
 func (r *Registry) Reload(dir string) (string, error) {
@@ -894,7 +908,7 @@ func (r *Registry) tryDynamic(plgDir, name string, config map[string]interface{}
 	// 按 manifest entry 分派到对应加载通道（外部插件多进程化：.so/.dll 与 .bin 双通道共存）。
 	// 这使迁移可逐插件推进、随时回退——把 entry 改回 plugin.so 即回到旧通道。
 	if detectEntryKind(plgDir) == entryProc {
-		plg, err := tryLoadProc(plgDir, name, config)
+		plg, err := r.loadProc(plgDir, name, config)
 		if err != nil {
 			return nil, err
 		}
