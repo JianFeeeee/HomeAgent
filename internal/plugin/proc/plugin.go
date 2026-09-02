@@ -73,6 +73,7 @@ func (p *Plugin) Start(core CoreSDK) error {
 		name:  p.name,
 		host:  p.host,
 		locks: p.host.locks,
+		evtRing: p.host.evtSubscriber,
 	}
 	// 反向调用闭包：注册回调时捕获，运行期经 RPC 打到插件进程。
 	p.handler.invokeTool = p.invokeTool
@@ -82,8 +83,8 @@ func (p *Plugin) Start(core CoreSDK) error {
 	proc, err := Spawn(p.name, p.bin, Options{
 		Dir: p.dir,
 		Env: p.env,
-		// 子进程 fd 3 = 共享段 memfd（全部插件同一个，故看到同一份物理页）
-		ExtraFiles: []*os.File{p.host.memfd},
+		// 子进程 fd 布局：3=StageContext 段，4=事件环段，5=eventfd
+		ExtraFiles: []*os.File{p.host.memfd, p.host.evtRingFd, p.host.evtfd},
 		ShmSize:    p.host.shmSize,
 		Handler:    p.handler.Handle,
 		OnExit:     p.handleExit,

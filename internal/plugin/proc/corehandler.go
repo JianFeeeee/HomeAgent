@@ -36,9 +36,18 @@ type coreHandler struct {
 	invokeTool    func(name string, args map[string]interface{}) (interface{}, error)
 	invokeStageFn func(ctx context.Context, stage string, seq uint64) error
 	invokeOutput  func(channel string, args map[string]interface{}) (interface{}, error)
+
+	// evtRing 是事件环的订阅接口（实现由 internal/plugin 提供，避免循环依赖）。
+	evtRing EvtRingSubscriber
 }
 
-// invokeStageWithCtx 反向调用插件执行 stage。
+// EvtRingSubscriber 是事件环订阅接口，由 internal/plugin.EventRing 实现。
+// proc 包不依赖 internal/plugin，通过接口解耦。
+// EvtRingSubscribe 返回一个取消函数（与 Bus.Subscribe 约定一致）。
+type EvtRingSubscriber interface {
+	EvtRingSubscribe(types []pubsdk.EventType) func()
+}
+
 func (h *coreHandler) invokeStageWithCtx(ctx context.Context, stage string, seq uint64) error {
 	if h.invokeStageFn == nil {
 		return fmt.Errorf("插件 %s: stage 调用通道未就绪", h.name)
@@ -447,12 +456,26 @@ func (h *coreHandler) Handle(method string, params json.RawMessage) (interface{}
 		}
 		return nil, h.locks.release(h.name)
 
-	// ---- 事件订阅（原 case 23/24，今日空实现）----
-	case MethodEventsSubscribe, MethodEventsUnsubscribe:
-		// Part 5 通知面（事件环 + eventfd）落地后接线。
-		// 今日 C ABI 侧是空实现（"给不了"而非"不给"，§1.3）；
-		// 明确返回未实现，比静默成功后收不到事件更容易排查。
-		return nil, fmt.Errorf("%s: 事件订阅待 Part 5 通知面落地（事件环 + eventfd）", method)
+	// ---- 事件订阅（原 case 23/24，子进程下首次真正可用，§3.6）----
+	case MethodEventsSubscribe:
+		var p struct {
+			Types []pubsdk.EventType `json:"types"`
+		}
+		if err := unmarshal(params, &p); err != nil {
+			return nil, err
+		}
+		if h.evtRing == nil {
+			return nil, fmt.Errorf("%s: 事件环未就绪", method)
+		}
+		// 订阅请求来自子进程——handler 直接注册到 Bus，
+		// 事件经 EventRing 写入环后由子进程消费。
+		h.evtRing.EvtRingSubscribe(p.Types)
+		return nil, nil
+
+	case MethodEventsUnsubscribe:
+		// 事件环的订阅没有持久化句柄（取消函数由 Subscribe 返回但子进程未保存）。
+		// 当前设计：子进程 Stop 时由内核统一清理其订阅。
+		return nil, nil
 
 	// ---- 多模态注入（C ABI 侧空实现）----
 	case MethodIOSetToolBlocks:

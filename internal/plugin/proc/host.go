@@ -20,24 +20,28 @@ import (
 //
 // 生命周期：Host 由 registry 创建一次，随内核存活；每个插件 spawn 时经
 // ExtraFiles 拿到同一 memfd（fd 3），mmap 后即看到同一份物理页。
+//
+// 另外持有事件环段（§3.6）：独立于 StageContext 的事件通知通道，
+// 子进程从 eventfd 感知新事件并从 mmap 读 slot。
+// fd 分配：fd 3 = StageContext，fd 4 = 事件环，fd 5 = eventfd。
 type Host struct {
 	memfd   *os.File
 	data    []byte
 	seg     *Segment
 	shmSize int
 
-	// locks 被全部插件的 coreHandler 共享——同阶段并发扇出的插件在此排队，
-	// 语义等价于内置插件共享 *StageContext 的 sync.RWMutex（§0.2 第 1 条）。
-	locks *lockRegistry
+	// 事件环段（独立于 StageContext）
+	evtfd     *os.File // eventfd fd（fd 5 的句柄，子进程读取消费）
+	evtRing   *EvtRing // 内核侧事件环句柄
+	evtRingFd *os.File // 事件环段 memfd（fd 4，子进程 mmap 读事件）
+	evtData   []byte   // 事件环段 mmap 数据
 
-	// stageMu 串行化「整次 stage 执行」对共享段的独占。
-	//
-	// 必要性：内核可能在不同路径并发触发 RunStage（如 emitResponse 的
-	// before_output 与主循环的其他阶段）。段只有一份，两次 stage 交叠会互相污染。
-	// 由首个进入的插件加锁、最后离开的插件解锁；RunStage 的 wg.Wait() 保证
-	// 每个 handler 的 defer 必然执行，故 inflight 必然归零，不会死锁。
+	// evtSubscriber 由 internal/plugin 注入，coreHandler 用它接子进程的 events.subscribe 请求。
+	// proc 包不依赖 internal/plugin（循环依赖），故用接口类型存储。
+	evtSubscriber EvtRingSubscriber
+
+	locks   *lockRegistry
 	stageMu sync.Mutex
-
 	coordMu sync.Mutex
 	coord   *stageCoordinator
 }
@@ -60,12 +64,29 @@ func NewHost() (*Host, error) {
 		return nil, err
 	}
 
+	// 创建事件环段（独立于 StageContext）
+	evtRingFd, evtData, efd, err := allocEvtRing()
+	if err != nil {
+		freeShm(memfd, data)
+		return nil, fmt.Errorf("事件环: %w", err)
+	}
+	evtRing, err := NewEvtRing(evtData)
+	if err != nil {
+		freeShm(memfd, data)
+		return nil, fmt.Errorf("事件环初始化: %w", err)
+	}
+	evtRing.Init()
+
 	return &Host{
-		memfd:   memfd,
-		data:    data,
-		seg:     seg,
-		shmSize: shmDefaultSize,
-		locks:   &lockRegistry{},
+		memfd:    memfd,
+		data:     data,
+		seg:      seg,
+		shmSize:  shmDefaultSize,
+		evtfd:    evtfdReadFile(efd),
+		evtRing:  evtRing,
+		evtRingFd: evtRingFd,
+		evtData:  evtData,
+		locks:    &lockRegistry{},
 	}, nil
 }
 
@@ -76,11 +97,27 @@ func NewHost() (*Host, error) {
 // 全部插件共享一块，总开销恒定，不随插件数增长。
 const shmDefaultSize = 256 * 1024
 
-// Close 释放共享段。
+// Close 释放共享段（StageContext + 事件环）。
 func (h *Host) Close() error {
-	data, f := h.data, h.memfd
-	h.data, h.memfd = nil, nil
-	return freeShm(f, data)
+	var firstErr error
+	if h.data != nil {
+		if err := freeShm(h.memfd, h.data); err != nil && firstErr == nil {
+			firstErr = err
+		}
+		h.data, h.memfd = nil, nil
+	}
+	if h.evtData != nil {
+		if h.evtRingFd != nil {
+			h.evtRingFd.Close()
+			h.evtRingFd = nil
+		}
+		h.evtData = nil
+	}
+	if h.evtfd != nil {
+		h.evtfd.Close()
+		h.evtfd = nil
+	}
+	return firstErr
 }
 
 // beginStage 由插件 handler 进入时调用。
@@ -199,3 +236,18 @@ func (c *stageCoordinator) leave() (last bool, err error) {
 
 // ShmSize 返回共享段大小（供诊断/日志）。
 func (h *Host) ShmSize() int { return h.shmSize }
+
+// EvtRing 返回内核侧事件环句柄。
+func (h *Host) EvtRing() *EvtRing { return h.evtRing }
+
+// Evtfd 返回 eventfd 的 *os.File（供 EventRing 写通知）。
+func (h *Host) Evtfd() *os.File { return h.evtfd }
+
+// SetEvtSubscriber 注入事件环订阅接口（由 Registry 在创建 Host 后设置）。
+func (h *Host) SetEvtSubscriber(sub EvtRingSubscriber) { h.evtSubscriber = sub }
+
+// EvtData 返回事件环段 mmap 数据（子进程消费者用）。
+func (h *Host) EvtData() []byte { return h.evtData }
+
+// EvtfdReadFile 返回 eventfd 的 *os.File（供子进程读取消费）。
+func (h *Host) EvtfdReadFile() *os.File { return h.evtfd }
