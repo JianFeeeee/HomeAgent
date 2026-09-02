@@ -15,14 +15,18 @@
 
 ## 目录
 
-- **Part 0** 脆弱基线先行（不依赖迁移，现网可直接受益）
-- **Part 1** 加载分派骨架（`entry` 双通道共存）
-- **Part 2** 子进程通道原型（spawn / JSON-RPC / procPlugin）
+- **Part 0** 脆弱基线先行（不依赖迁移，现网可直接受益）— 0.1 ✅ / 0.2 ✅ / 0.3 ⏭️ / 0.4 ⏭️
+- **Part 1** 加载分派骨架（`entry` 双通道共存）— ✅ **已完成**
+- **Part 2** 子进程通道原型（spawn / JSON-RPC / procPlugin）— ⏳ 下一步
 - **Part 3** plugindev 工具链改造（`.bin` 产物）
-- **Part 4** 共享内存数据面（StageContext 跨进程并发改写）
+- **Part 4** 共享内存数据面（StageContext 跨进程并发改写）— ✅ **核心已完成**（段/编解码/锁仲裁），RunStage 接线待 Part 2
 - **Part 5** 通知面（事件环 + eventfd）
 - **Part 6** 迁移与收尾（17 插件逐个 + 删 cabi + 权限显式化）
 - 最终验收清单
+
+> **进度快照（2026-08-31）**：分支 `feature/plugin-proc-migration`。
+> 已交付：现网止血 2 项（11.1/11.3）、entry 双通道分派、共享内存 stage 并发（16 项测试含 -race）。
+> 下一步：Part 2 子进程通道原型（spawn + stdio JSON-RPC + procPlugin），完成后把 `RunStage` 接到共享段。
 
 ---
 
@@ -76,7 +80,11 @@
 - 【V】✅ `go build ./...` exit 0；`go test ./internal/plugin/... ./internal/agent/...` 全绿。
 - ⚠️ **待部署项**：需用新 plugindev 重编全部 17 个外部插件（bridge 模版变更），走 `plugin_install(overwrite=true)`。
 
-### 0.3 reload 语义修正（11.6）
+### 0.3 reload 语义修正（11.6）— ⏭️ **已跳过**（2026-08-31 用户决策：直接进入进程化重构）
+
+> 子进程模型下 `DF_1_NODELETE` 议题**整体消失**（§3.1）——同路径替换 `plugin.bin` 重启进程即生效。
+> 在 cabi 路径上补 ELF 检测属于「给即将删除的代码打补丁」，性价比低。
+> 现网仍受 reload 假成功影响，但 Part 1 的 entry 分派已为迁移铺路，迁移完成即根治。
 
 - 【M】`dynamic_loader_unix.go`：ELF 检测 `DF_1_NODELETE` → 标记"不可热重载"。
 - 【M】`registry.go` 的 `ReloadOne`：对此类插件返回"需重启 homed"。
@@ -84,7 +92,10 @@
 - 【R】确认 `.so` 插件重载不再"假成功"。
 - 【V】单测：mock ELF 头带 NODELETE vs 不带 → 正确区分。
 
-### 0.4 超时日志措辞修正 + 附带（11.2 短期项 + 11.4）
+### 0.4 超时日志措辞修正 + 附带（11.2 短期项 + 11.4）— ⏭️ **已跳过**（同上）
+
+> 11.2 的 cgo 超时不可中断在子进程模型下由 `Process.Kill()` 真正解决（§9.5）；
+> 11.4 的 Lua 路径在迁移后统一走 RPC（三套 ABI 收敛），锁语义天然有边界。
 
 - 【M】`internal/agent/core/toolcall.go:41`：日志从"已取消"改为"已放弃等待（插件仍在后台运行，其占用的线程无法回收）"。
 - 【M】`internal/plugin/lua_plugin.go:726`：stage 快照加 `sc.RLock()`/`RUnlock()`（11.4）。
@@ -126,6 +137,26 @@
 - 【V】既有 `.so` 插件加载 e2e 不回归（带一个真实 .so 冒烟）。
 
 **Part 1 出口条件**：分派骨架在，`.bin` 有明确桩位，`.so` 全回归。
+#### ✅ **Part 1 已完成**（2026-08-31，commit `610e9d0`）
+
+- 【M】✅ `dynamic.go`：新增 `binEntry`/`skillEntry` 常量 + `entryKind` 枚举 + `classifyEntry` / `detectEntryKind`
+  - **manifest 的 entry 优先级最高**——把 entry 改回 `plugin.so` 即回退 cabi 通道（回退路径的保证）
+  - 无 manifest 时按目录探测，`.bin` 优先于 `.so`（迁移期同目录两产物共存时走新通道）
+- 【M】✅ `registry.go` `tryDynamic`：按 entry 分派 proc/cabi；entry 声明 `.bin` 但二进制缺失时**报明确错误，不静默回退**
+- 【M】✅ `registry.go` `pluginEntryHash`：候选顺序与 `detectEntryKind` 对齐（`.bin` 优先），否则增量重载会用错文件算 hash
+- 【M】✅ `manifest.go`：`Entry` 字段注释补 `plugin.bin`
+- 【M】✅ `dynamic_proc_unix.go` / `dynamic_proc_windows.go`：`tryLoadProc` 桩位（存在性/类型/可执行权限校验已实现）
+- 【R】✅ 内置插件（`hasFactory` 分支）完全未受影响——仍走进程内 `RegisterNative`
+- 【R】✅ `.so` 路径行为与改动前一致（既有测试全绿，无回归）
+- 【R】✅ 接口冻结：`git diff third_party/homeagent-sdk/sdk/` 为空
+- 【V】✅ `entry_dispatch_test.go` 9 项全绿：
+  - `TestClassifyEntry`（8 种 entry 分类）
+  - `TestDetectEntryKind_ManifestWins` / `_ManifestCanForceRollback`（**回退路径验证**）
+  - `TestDetectEntryKind_ProbeOrderPrefersBin` / `_ProbeFallbacks`（4 子例）
+  - `TestTryLoadProc_MissingBinaryReturnsNil` / `_NonExecutableRejected`
+  - `TestPluginEntryHash_PrefersBin` / `_EmptyForFactoryOnlyPlugin`
+- 【V】✅ `go build ./...` exit 0；`go test -race ./internal/plugin/...` 全绿；全量 32 个包测试通过
+
 
 ---
 
@@ -225,6 +256,39 @@
 - 【V】改写型插件行为基线测试：`sanitizer`/`multimodal` 迁移前后行为对拍（迁移评估 §4.4 风险缓解）。
 
 **Part 4 出口条件**：跨进程并发改写零丢失，内置/外置语义一致，16 字段全可见。
+#### ✅ **Part 4 核心已完成**（2026-08-31，commit `610e9d0`）—— 段 / 编解码 / 锁仲裁三件套
+
+> 用户明确指出「基于共享内存的 stage 并发是最为关键的」，故先于 Part 2/3 落地数据面。
+> `RunStage` 的跨进程接线（3.4）待 Part 2 的进程通道就绪后进行。
+
+- 【M】✅ `proc/shm.go` 段布局与 arena 分配器（§3.3）
+  - `Header(64B) + ShmStageCtx(描述符数组 + 标志位) + append-only arena`
+  - **相对偏移**：各进程 mmap 到不同虚拟地址仍能正确解引用
+  - `NewSegment` / `AttachSegment` 带魔数 + 版本校验（版本不匹配显式报错，不静默错读）
+  - **arena 用尽显式报错**而非静默截断（§4.4 风险登记的硬要求）
+  - `Compact()` 回收 append-only 垃圾，须在无插件持锁时调用
+- 【M】✅ `proc/shmcodec.go` StageContext 16 字段跨进程编解码（§3.4）
+  - **字段级描述符消除 lost update**：只改 `FinalText` 的插件完全不触碰 `ToolResults` 描述符
+  - `WriteDirty` 只写脏字段——**只读插件零写入**，不可能覆盖他人改写
+  - `Snapshot` 存**序列化字符串**（切片共享底层数组的坑，C ABI 侧修 11.3 时已踩过一次）
+  - `Extra` 4 键提升为具名字段；`Response` 用标志位区分 nil 与空串（短路语义）
+  - **全 16 字段可见**——今日经 C ABI 只有 10 个，`ContextMsgs`/`ReasoningContent`/`TokenUsage`/`Memory`/`Extra`/`Errors` 首次对外部插件可见
+- 【M】✅ `proc/lock.go` 锁仲裁回归内核（§3.7 已裁定，**零 cgo**）
+  - `ForceRelease` 实现实验 9 的崩溃自愈 → 排除 robust pthread_mutex 必要性
+  - 重复加锁**显式拒绝**（否则死锁 30s，比挂死更难排查）
+  - 等待超时有补偿 goroutine 防锁永久泄漏
+- 【R】✅ 并发语义：`TestSegment_ConcurrentAppend_NoLostUpdate` 断言「各标记计数之和 == 最终长度 且 == 期望写入次数」，同时排除丢失与撕裂
+- 【R】✅ arena 上限报错（非静默截断）：`TestSegment_ArenaExhaustionReturnsError`
+- 【R】✅ `Extra` 维持 4 键具名字段，未引入通用 tagged union 成本
+- 【R】✅ 接口冻结：`sdk/` 零 diff；`StageContext` 结构体未改
+- 【R】✅ `go vet` 干净（含 copylocks 检查）
+- 【V】✅ proc 包 **16 项测试全绿（含 `-race`）**：
+  - 段：魔数/版本校验、全 16 字段往返、Response nil vs 空串
+  - 脏字段：只读零写回、原地改切片被识别、压实不破坏字段
+  - **现网场景复刻**：`TestSegment_ProductionScenario_SanitizerNotOverwrittenByWeather`（sanitizer 清洗 + weather 只读并发，清洗结果不被覆盖）
+  - **并发零丢失**：5 插件 × 40 轮读-改-写同一字段，200 次写入全部保留
+  - 锁：互斥、串扰拒绝、未持锁释放拒绝、重复加锁拒绝、**崩溃自愈**、定向强制释放、临界区串行化
+
 
 ---
 
