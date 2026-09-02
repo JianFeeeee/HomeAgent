@@ -68,6 +68,20 @@ func (p *e2ePlugin) Start(s *sdk.PluginSDK) error {
 func (p *e2ePlugin) Stop() error { return nil }
 `
 
+// procRuntimeTemplates 列出 plugindev 会生成到插件目录的运行时文件。
+//
+// 必须与 SDK 仓 tools/plugindev/proc_runtime.go 的 procRuntimeFiles 一致：
+// 共享段与事件通知的传递机制按平台不同（Unix 继承 fd，Windows 命名
+// 内核对象），故拆成带 build tag 的文件；只写主模板会编译失败。
+var procRuntimeTemplates = []struct {
+	tmpl string
+	out  string
+}{
+	{"proc_main.go.tmpl", "z_proc_gen.go"},
+	{"proc_shm_unix.go.tmpl", "z_proc_shm_unix.go"},
+	{"proc_shm_windows.go.tmpl", "z_proc_shm_windows.go"},
+}
+
 // buildPluginWithRealTemplate 用 plugindev 的真实模板编译一个插件二进制。
 func buildPluginWithRealTemplate(t *testing.T, businessCode string) string {
 	t.Helper()
@@ -75,17 +89,19 @@ func buildPluginWithRealTemplate(t *testing.T, businessCode string) string {
 		t.Skip("环境无 go 工具链，跳过端到端测试")
 	}
 
-	tmpl := filepath.Join("..", "..", "..",
-		"third_party", "homeagent-sdk", "tools", "plugindev",
-		"templates", "proc_main.go.tmpl")
-	runtime, err := os.ReadFile(tmpl)
-	if err != nil {
-		t.Skipf("plugindev 模板不可读（SDK 仓可能未就位）: %v", err)
-	}
+	tmplDir := filepath.Join("..", "..", "..",
+		"third_party", "homeagent-sdk", "tools", "plugindev", "templates")
 
 	dir := t.TempDir()
 	mustWriteFile(t, filepath.Join(dir, "plugin.go"), businessCode)
-	mustWriteFile(t, filepath.Join(dir, "z_proc_gen.go"), string(runtime))
+
+	for _, rt := range procRuntimeTemplates {
+		data, err := os.ReadFile(filepath.Join(tmplDir, rt.tmpl))
+		if err != nil {
+			t.Skipf("plugindev 模板 %s 不可读（SDK 仓可能未就位）: %v", rt.tmpl, err)
+		}
+		mustWriteFile(t, filepath.Join(dir, rt.out), string(data))
+	}
 
 	sdkPath, err := filepath.Abs(filepath.Join("..", "..", "..", "third_party", "homeagent-sdk"))
 	if err != nil {
