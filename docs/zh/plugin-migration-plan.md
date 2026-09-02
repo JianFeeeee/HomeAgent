@@ -17,16 +17,21 @@
 
 - **Part 0** 脆弱基线先行（不依赖迁移，现网可直接受益）— 0.1 ✅ / 0.2 ✅ / 0.3 ⏭️ / 0.4 ⏭️
 - **Part 1** 加载分派骨架（`entry` 双通道共存）— ✅ **已完成**
-- **Part 2** 子进程通道原型（spawn / JSON-RPC / procPlugin）— ⏳ 下一步
-- **Part 3** plugindev 工具链改造（`.bin` 产物）
-- **Part 4** 共享内存数据面（StageContext 跨进程并发改写）— ✅ **核心已完成**（段/编解码/锁仲裁），RunStage 接线待 Part 2
-- **Part 5** 通知面（事件环 + eventfd）
+- **Part 2** 子进程通道原型（spawn / JSON-RPC / procPlugin）— ✅ **已完成**
+- **Part 3** plugindev 工具链改造（`.bin` 产物）— ✅ **已完成**
+- **Part 4** 共享内存数据面（StageContext 跨进程并发改写）— ✅ **已完成**（段/编解码/锁仲裁 + RunStage 接线）
+- **Part 5** 通知面（事件环 + eventfd）— ⏳ 下一步
 - **Part 6** 迁移与收尾（17 插件逐个 + 删 cabi + 权限显式化）
 - 最终验收清单
 
-> **进度快照（2026-08-31）**：分支 `feature/plugin-proc-migration`。
-> 已交付：现网止血 2 项（11.1/11.3）、entry 双通道分派、共享内存 stage 并发（16 项测试含 -race）。
-> 下一步：Part 2 子进程通道原型（spawn + stdio JSON-RPC + procPlugin），完成后把 `RunStage` 接到共享段。
+> **进度快照（2026-09-02）**：分支 `feature/plugin-proc-migration`。
+> 已交付：现网止血 2 项（11.1/11.3）、entry 双通道分派、共享内存 stage 并发、
+> 子进程控制面（NDJSON RPC + 51 method 名平移）、plugindev `.bin` 构建、
+> registry 接线。**外部插件已可端到端跑在子进程 + 共享内存上**：
+> `example/weather` 业务代码逐字节未改，只把 `plg.json` 的 entry 换成 `plugin.bin`。
+> 测试：内核 `internal/plugin/proc` 36 项 + `internal/plugin` 13 项（含 `-race`），
+> SDK 仓 plugindev 16 项静态检查。
+> 下一步：Part 5 通知面（事件环 + eventfd），然后 Part 6 逐插件迁移 + 删 `internal/plugin/cabi/`。
 
 ---
 
@@ -191,6 +196,27 @@
 
 **Part 2 出口条件**：一个真实外部插件 `.bin` 全链路可用，崩溃隔离生效，接口零改动。
 
+#### ✅ **Part 2 已完成**（2026-09-01，commit `d62430a` + `82dcc86`）
+
+- `proc/protocol.go`：NDJSON 帧、**51 个 method id 平移为 method 名**（编号扔掉）、握手/stage/tool/output 参数类型。
+  `case 25`(CORE_FREE_STRING) 无对应 method（GC 接管）；`case 23/24`(事件订阅) 与 `io.setToolBlocks`
+  明确返回未实现，**不静默成功**。
+- `proc/process.go`：Spawn/readLoop/CallContext/Notify/Stop/Kill/markExited；单帧上限 1MB。
+- `proc/corehandler.go`：51 case 平移 + `CoreSDK` 接口（**刻意排除**内核内部机制，见 Part 6 权限梯度）。
+- `proc/host.go`：**全部插件共享同一 memfd**。最初写成每插件一块段，尝试后发现
+  那等于**副本模型换壳**（各写各段、各自回读、最后回读者覆盖前者），已改正。
+- `proc/stage.go`：RunStage 接线 + lockRegistry；`proc/plugin.go`：Plugin 实体。
+- 共享段分配按平台拆分（`shmalloc_linux.go` memfd / `shmalloc_darwin.go` 立即 unlink 的临时文件 /
+  `shmalloc_other.go` 明确报错）——不静默降级成「无共享段」，那会让 stage 静默失去数据面。
+- registry 接线（commit `11c1bbc`）：`tryDynamic` → `Registry.loadProc`；Host 惰创建且全局唯一；
+  `StopAll` **锁外**释放共享段（插件还持有映射时拆段 → SIGBUS；持锁调与 onProcCrash 有锁序风险）；
+  `onProcCrash` 只发 EventSystem 事件，**不在回调里直接重载**（重载需 registry 锁）。
+- `proc_core.go` —— 权限梯度的类型系统落点：`procCore` 用**命名字段**持有 `*isdk.PluginSDK`，
+  不是嵌入。嵌入会提升全部方法，外部插件就能经类型断言拿到
+  Supervisor/Tracker/Adapter/Indexer/Status/Selftest。
+- 测试 36 项含 `-race`：`testdata/` 8 个假插件 + `e2e_template_test.go` 用**真实 plugindev 模板**
+  编译插件跑全链路（验证「模板 ↔ 内核」协议/布局真的对齐，不只是内核自己跟自己对齐）。
+
 ---
 
 ## Part 3：plugindev 工具链改造（阶段 2.6/2.7/2.8，M，SDK 仓）
@@ -221,6 +247,46 @@
 - 【V】（与 Part 2 集成）weather.bin 被 homed proc 通道正确加载运行。
 
 **Part 3 出口条件**：plugindev 一条命令产出 `.bin` + 正确 `.hmap`，外部插件源码零改动。
+
+#### ✅ **Part 3 已完成**（2026-09-02，SDK 仓 commit `09b64dc`）
+
+**模板落地方式换了**：不是计划里的 `templates.go` 新增 `tmplProcMain` raw string，
+而是真实 `.go` 源文件 `templates/proc_main.go.tmpl` + `//go:embed`（`proc_runtime.go`）。
+原因：900+ 行代码塞在字符串里写错只能等生成插件时才炸，作为源文件可被
+`go/parser`、`gofmt`、`go vet` 直接检查。这也是 `proc_runtime_test.go` 16 项
+静态检查得以存在的前提。
+
+- `templates/proc_main.go.tmpl`（1113 行）：51 个 method 的插件侧 RPC 实现
+  （`procIO`/`procMemory`/`procSettings`/`procSocial`/`procLLM`/`procKnowledge`/
+  `procDocMemory`/`procTextMemory`/`procPluginMgr`）、共享段访问（fd 3）与 16 字段
+  StageContext 编解码、`handleStageInvoke`（拿锁 → 读段 → handler → **只写脏字段** → 放锁）。
+- `cmd_build.go`：`resolveBuild(target, proc)` 分派；proc 走 `go build -trimpath` + `CGO_ENABLED=0`，
+  **交叉编译不再需要目标平台 C 工具链**。bundle 模式各平台产物同名（进程边界即 ABI 边界，
+  无平台扩展名），故 zip 内加平台后缀 `plugin.bin.linux.amd64`。
+- `proc_runtime.go`：生成时清理残留 `z_bridge_gen.go`/`z_entry.c`——同目录两套 main 会编译冲突，
+  这让 `.so` → `.bin` 切换无需人工清理。
+
+**计划外补的一个真缺口**：`lifecycle.autoRestart` 没接线。公开 SDK 的 `SetAutoRestart`
+是纯 setter（`s.autoRestart = enabled`，无回调 hook）。C ABI 下内核在 `Start` 返回后
+直接读 `plgSDK.AutoRestart()`；子进程隔着进程边界读不到，插件调它只改自己进程内的副本。
+修法：模板在 `plg.Start()` 返回后显式上报一次（内核侧 `corehandler.go:145` 早已就绪）。
+**没有改公开 SDK 接口**。
+
+验证（均已实测）：
+```
+$ plugindev build              # plg.json: entry = "plugin.bin"
+  compiling linux/amd64 (子进程模式，CGO_ENABLED=0)...
+  packaged weather_linux_amd64.hmap
+
+build/plugin.bin  →  ELF 64-bit executable, statically linked   ← 零 cgo
+dist/*.hmap       →  plugin.json + plugin.bin
+
+$ diff example/weather/plugin.go <构建目录>/plugin.go
+✅ 逐字节一致                    ← 业务代码零改动的硬证据
+
+$ git diff third_party/homeagent-sdk/sdk/
+(空)                            ← 接口冻结保持
+```
 
 ---
 
@@ -282,13 +348,31 @@
 - 【R】✅ `Extra` 维持 4 键具名字段，未引入通用 tagged union 成本
 - 【R】✅ 接口冻结：`sdk/` 零 diff；`StageContext` 结构体未改
 - 【R】✅ `go vet` 干净（含 copylocks 检查）
-- 【V】✅ proc 包 **16 项测试全绿（含 `-race`）**：
+- 【V】✅ proc 包共享段部分 **16 项测试全绿（含 `-race`）**（全包现 36 项，含进程/端到端）：
   - 段：魔数/版本校验、全 16 字段往返、Response nil vs 空串
   - 脏字段：只读零写回、原地改切片被识别、压实不破坏字段
   - **现网场景复刻**：`TestSegment_ProductionScenario_SanitizerNotOverwrittenByWeather`（sanitizer 清洗 + weather 只读并发，清洗结果不被覆盖）
   - **并发零丢失**：5 插件 × 40 轮读-改-写同一字段，200 次写入全部保留
   - 锁：互斥、串扰拒绝、未持锁释放拒绝、重复加锁拒绝、**崩溃自愈**、定向强制释放、临界区串行化
 
+#### ✅ **Part 4 RunStage 接线已完成**（2026-09-01～09-02）
+
+- `proc/stage.go` 把内核 `RunStage` 的并发扇出接到共享段：
+  `Host.beginStage`（首个到达者独占段并写入 StageContext）→ `stage.invoke` RPC →
+  插件侧 `stage.lock` → 读段 → handler → 只写脏字段 → `stage.unlock` →
+  `Host.endStage`（最后离开者回读 + 压实 arena）。
+- **并发扇出保留**（§0.2 第 1 条：并发扇出是原始设计，不是缺陷）；
+  `stageMu` 串行化整次 stage 对共享段的独占（内核可能在不同路径并发触发
+  RunStage，而段只有一份）。
+- 端到端验证（`e2e_template_test.go`，用**真实 plugindev 模板**编译的插件，
+  而非 `testdata/` 手写假插件——后者只能验证内核自己跟自己对齐）：
+  - `TestE2E_RealTemplatePluginFullLifecycle`：握手 → init/start → 反向注册 →
+    工具调用 → stage 读改写；同时验证 `FinalText` 回传
+    （**C ABI 下 after_toolcall 看不到此字段**，§8.3 10→16）
+  - `TestE2E_RealTemplateReadOnlyPluginDoesNotOverwrite`：两插件共享同一 Host 并发，
+    只读插件不覆盖改写插件的结果（若每插件一块段，此测试必然失败）
+
+**Part 4 已整体完成**。
 
 ---
 
