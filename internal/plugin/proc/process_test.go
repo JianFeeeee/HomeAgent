@@ -1,0 +1,334 @@
+package proc
+
+import (
+	"context"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"os"
+	"os/exec"
+	"path/filepath"
+	"strings"
+	"sync"
+	"testing"
+	"time"
+)
+
+// Process 的测试用真实子进程（go build 出的小二进制），而非 mock：
+// 崩溃隔离、EOF 感知、Kill 回收这些性质只有真进程才能验证——
+// 它们恰是迁移相对 C ABI 的核心收益（§9.5）。
+
+// buildTestPlugin 编译 testdata 下的假插件，返回二进制路径。
+func buildTestPlugin(t *testing.T, srcName string) string {
+	t.Helper()
+	if _, err := exec.LookPath("go"); err != nil {
+		t.Skip("环境无 go 工具链，跳过子进程测试")
+	}
+
+	src := filepath.Join("testdata", srcName)
+	if _, err := os.Stat(src); err != nil {
+		t.Fatalf("测试插件源码缺失 %s: %v", src, err)
+	}
+
+	bin := filepath.Join(t.TempDir(), strings.TrimSuffix(srcName, ".go"))
+	cmd := exec.Command("go", "build", "-o", bin, src)
+	cmd.Env = append(os.Environ(), "CGO_ENABLED=0")
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("编译测试插件 %s 失败: %v\n%s", srcName, err, out)
+	}
+	return bin
+}
+
+// noopHandler 是最简的内核侧 handler（测试中不需要真实 core.* 能力）。
+func noopHandler(method string, params json.RawMessage) (interface{}, error) {
+	return nil, fmt.Errorf("测试环境未实现 %s", method)
+}
+
+func TestProcess_SpawnHandshakeAndToolInvoke(t *testing.T) {
+	bin := buildTestPlugin(t, "echoplugin.go")
+
+	p, err := Spawn("echo", bin, Options{Handler: noopHandler})
+	if err != nil {
+		t.Fatalf("Spawn: %v", err)
+	}
+	defer p.Kill()
+
+	if p.PID() == 0 {
+		t.Error("PID 应非零")
+	}
+
+	raw, err := p.Call(MethodToolInvoke, ToolInvokeParams{
+		Name: "echo_tool",
+		Args: map[string]interface{}{"text": "你好"},
+	})
+	if err != nil {
+		t.Fatalf("tool.invoke: %v", err)
+	}
+	var res ToolInvokeResult
+	if err := json.Unmarshal(raw, &res); err != nil {
+		t.Fatalf("解析应答: %v", err)
+	}
+	if res.Result != "你好" {
+		t.Fatalf("工具应回显 '你好'，实际 %v", res.Result)
+	}
+}
+
+// 插件返回错误时调用方必须收到 error —— 对比 C ABI 路径的 output_send
+// 永远返回成功（§9.4，现网 2 次消息发不出而模型以为成功）。
+func TestProcess_PluginErrorIsReported(t *testing.T) {
+	bin := buildTestPlugin(t, "echoplugin.go")
+	p, err := Spawn("echo", bin, Options{Handler: noopHandler})
+	if err != nil {
+		t.Fatalf("Spawn: %v", err)
+	}
+	defer p.Kill()
+
+	_, err = p.Call(MethodToolInvoke, ToolInvokeParams{Name: "fail_tool"})
+	if err == nil {
+		t.Fatal("插件返回错误时调用方应收到 error")
+	}
+	if !strings.Contains(err.Error(), "故意失败") {
+		t.Errorf("错误信息应透传插件的原因，实际: %v", err)
+	}
+}
+
+// 插件反向调用内核（51 个 core.* method 的机制验证）。
+func TestProcess_PluginCallsBackIntoKernel(t *testing.T) {
+	bin := buildTestPlugin(t, "callbackplugin.go")
+
+	var (
+		mu      sync.Mutex
+		gotCall []string
+	)
+	handler := func(method string, params json.RawMessage) (interface{}, error) {
+		mu.Lock()
+		gotCall = append(gotCall, method)
+		mu.Unlock()
+		switch method {
+		case MethodSettingsGet:
+			return map[string]interface{}{"value": "配置值"}, nil
+		case MethodToolRegister:
+			return nil, nil
+		}
+		return nil, fmt.Errorf("未实现 %s", method)
+	}
+
+	p, err := Spawn("cb", bin, Options{Handler: handler})
+	if err != nil {
+		t.Fatalf("Spawn: %v", err)
+	}
+	defer p.Kill()
+
+	// plugin.start 期间插件会回调 tool.register + settings.get
+	if _, err := p.Call(MethodPluginStart, nil); err != nil {
+		t.Fatalf("plugin.start: %v", err)
+	}
+
+	mu.Lock()
+	defer mu.Unlock()
+	if len(gotCall) < 2 {
+		t.Fatalf("内核应收到插件的反向调用，实际 %v", gotCall)
+	}
+	hasRegister, hasSettings := false, false
+	for _, m := range gotCall {
+		if m == MethodToolRegister {
+			hasRegister = true
+		}
+		if m == MethodSettingsGet {
+			hasSettings = true
+		}
+	}
+	if !hasRegister || !hasSettings {
+		t.Errorf("应收到 tool.register 与 settings.get，实际 %v", gotCall)
+	}
+}
+
+// 崩溃隔离：插件 panic 只让子进程退出，内核存活并收到 onExit（§9.5 表格第 2 行）。
+// C ABI 路径下 panic 跨 C 栈，recover 兜不住会带崩整个 homed（§1.4）。
+func TestProcess_CrashIsolationAndExitDetection(t *testing.T) {
+	bin := buildTestPlugin(t, "crashplugin.go")
+
+	exitCh := make(chan error, 1)
+	p, err := Spawn("crash", bin, Options{
+		Handler: noopHandler,
+		OnExit:  func(name string, err error) { exitCh <- err },
+	})
+	if err != nil {
+		t.Fatalf("Spawn: %v", err)
+	}
+
+	// 触发插件 panic
+	_, callErr := p.Call(MethodToolInvoke, ToolInvokeParams{Name: "boom"})
+	if callErr == nil {
+		t.Error("插件崩溃时在途调用应返回错误，而非挂死")
+	}
+
+	select {
+	case exitErr := <-exitCh:
+		if exitErr == nil {
+			t.Error("panic 退出应报告非 nil 错误（供 recordCrash 使用）")
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("未在 5s 内检测到进程退出（EOF 感知失效）")
+	}
+
+	select {
+	case <-p.Exited():
+	case <-time.After(time.Second):
+		t.Error("Exited() 通道应已关闭")
+	}
+
+	// 进程已退出后继续调用应立即失败，不能挂死
+	if _, err := p.Call(MethodToolInvoke, ToolInvokeParams{Name: "echo_tool"}); !errors.Is(err, ErrProcessExited) {
+		t.Errorf("退出后调用应返回 ErrProcessExited，实际 %v", err)
+	}
+}
+
+// 优雅停止：plugin.stop 后进程自行退出。
+func TestProcess_GracefulStop(t *testing.T) {
+	bin := buildTestPlugin(t, "echoplugin.go")
+	p, err := Spawn("echo", bin, Options{Handler: noopHandler})
+	if err != nil {
+		t.Fatalf("Spawn: %v", err)
+	}
+
+	if err := p.Stop(); err != nil {
+		t.Fatalf("Stop: %v", err)
+	}
+	select {
+	case <-p.Exited():
+	case <-time.After(3 * time.Second):
+		t.Fatal("Stop 后进程应退出")
+	}
+	if err := p.ExitError(); err != nil {
+		t.Errorf("优雅停止应无错误退出，实际 %v", err)
+	}
+}
+
+// **真正的取消**：卡死的插件可被 Kill 回收（§9.3 对照 cgo 超时线程永久泄漏）。
+func TestProcess_KillHungPlugin(t *testing.T) {
+	bin := buildTestPlugin(t, "hangplugin.go")
+	p, err := Spawn("hang", bin, Options{Handler: noopHandler})
+	if err != nil {
+		t.Fatalf("Spawn: %v", err)
+	}
+
+	// 调用会卡住，用 context 超时返回（调用方不被拖死）
+	ctx, cancel := context.WithTimeout(context.Background(), 300*time.Millisecond)
+	defer cancel()
+	_, err = p.CallContext(ctx, MethodToolInvoke, ToolInvokeParams{Name: "hang_tool"})
+	if err == nil {
+		t.Fatal("卡死的调用应因 ctx 超时返回")
+	}
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Errorf("应为 DeadlineExceeded，实际 %v", err)
+	}
+
+	// pending 条目必须已清理（不泄漏）
+	p.mu.Lock()
+	pendingCount := len(p.pending)
+	p.mu.Unlock()
+	if pendingCount != 0 {
+		t.Errorf("超时后 pending 表应清空，实际残留 %d 条", pendingCount)
+	}
+
+	// Kill 真正回收资源
+	if err := p.Kill(); err != nil {
+		t.Fatalf("Kill: %v", err)
+	}
+	select {
+	case <-p.Exited():
+	case <-time.After(3 * time.Second):
+		t.Fatal("Kill 后进程应退出")
+	}
+}
+
+// 通知（ID=0）不等应答——事件投递路径必须 post-and-forget（§2.4 约束 B）。
+func TestProcess_NotifyDoesNotWait(t *testing.T) {
+	bin := buildTestPlugin(t, "echoplugin.go")
+	p, err := Spawn("echo", bin, Options{Handler: noopHandler})
+	if err != nil {
+		t.Fatalf("Spawn: %v", err)
+	}
+	defer p.Kill()
+
+	start := time.Now()
+	for i := 0; i < 100; i++ {
+		if err := p.Notify("event.deliver", map[string]interface{}{"seq": i}); err != nil {
+			t.Fatalf("Notify: %v", err)
+		}
+	}
+	elapsed := time.Since(start)
+	// 100 条通知若每条都等应答，至少要 100 个往返；post-and-forget 应远快于此
+	if elapsed > time.Second {
+		t.Errorf("100 条通知耗时 %v，疑似在等应答（应 post-and-forget）", elapsed)
+	}
+
+	// 通知不占 pending 表
+	p.mu.Lock()
+	pendingCount := len(p.pending)
+	p.mu.Unlock()
+	if pendingCount != 0 {
+		t.Errorf("通知不应占用 pending 表，实际 %d 条", pendingCount)
+	}
+}
+
+// 并发调用：pending 表按 ID 正确路由，应答不串。
+func TestProcess_ConcurrentCallsRouteCorrectly(t *testing.T) {
+	bin := buildTestPlugin(t, "echoplugin.go")
+	p, err := Spawn("echo", bin, Options{Handler: noopHandler})
+	if err != nil {
+		t.Fatalf("Spawn: %v", err)
+	}
+	defer p.Kill()
+
+	const n = 50
+	var wg sync.WaitGroup
+	errs := make(chan error, n)
+	for i := 0; i < n; i++ {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			want := fmt.Sprintf("msg-%d", i)
+			raw, err := p.Call(MethodToolInvoke, ToolInvokeParams{
+				Name: "echo_tool",
+				Args: map[string]interface{}{"text": want},
+			})
+			if err != nil {
+				errs <- err
+				return
+			}
+			var res ToolInvokeResult
+			if err := json.Unmarshal(raw, &res); err != nil {
+				errs <- err
+				return
+			}
+			if res.Result != want {
+				errs <- fmt.Errorf("应答串了：期望 %q，实际 %v", want, res.Result)
+			}
+		}(i)
+	}
+	wg.Wait()
+	close(errs)
+	for err := range errs {
+		t.Errorf("并发调用失败: %v", err)
+	}
+}
+
+// 协议版本不匹配必须显式拒绝，不能半兼容运行。
+func TestProcess_ProtocolMismatchRejected(t *testing.T) {
+	bin := buildTestPlugin(t, "badprotoplugin.go")
+	_, err := Spawn("badproto", bin, Options{Handler: noopHandler})
+	if err == nil {
+		t.Fatal("协议版本不匹配应拒绝建链")
+	}
+	if !strings.Contains(err.Error(), "协议版本不匹配") {
+		t.Errorf("错误应说明版本不匹配，实际: %v", err)
+	}
+}
+
+func TestProcess_SpawnRequiresHandler(t *testing.T) {
+	if _, err := Spawn("x", "/bin/true", Options{}); err == nil {
+		t.Fatal("缺少 Handler 应报错（插件无法回调内核）")
+	}
+}
