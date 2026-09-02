@@ -81,3 +81,57 @@ RSS 随二进制体积线性增长，故绝对数字不可比。可比的是结�
 这些测试用**真实 example 产物**而非 testdata 假插件，且 manifest 刻意写
 `"entry":"plugin.so"`——验证「业务代码零改动」这一承诺在完整内核装配下成立。
 未重编时 skip 而非 fail，CI 不强制先跑重编脚本。
+
+## 压测与延迟（Part 6.6 验收）
+
+基准与压测在代码里而非独立脚本：
+`internal/plugin/proc/bench_test.go` + `streaming_test.go`。
+
+```bash
+go test -run '^$' -bench . ./internal/plugin/proc/
+go test -run 'TestStreaming_' -v ./internal/plugin/proc/
+```
+
+### 实测（2026-09-02，AMD Ryzen 7 7840HS）
+
+| 项目 | 实测 | 基线 | 判断 |
+|---|---|---|---|
+| 工具调用 RPC 往返 | 24.1 µs | 实验 11: 19.6 µs | 同量级 |
+| 锁仲裁（内核侧） | 0.76 µs | — | 见下注 |
+| 事件环写入 | 95 ns | — | 亚微秒 |
+| 事件环并发写入 | 83 ns | — | 无锁竞争恶化 |
+| 完整 stage 往返 | 132 µs | — | 含 3 次进程间往返 |
+| 共享段编解码 | 3.7 µs | — | 占 stage 的 2.8% |
+
+**锁仲裁 0.76µs 不可与实验 3 的 19.40µs 对照**——两者测的不是同一个东西：
+实验 3 测插件经 RPC 请求锁的完整跨进程往返，本基准只测内核侧
+`lockRegistry.acquire/release`。真实成本仍在 20µs 量级（那部分是 RPC 往返）。
+基准原名 `BenchmarkStageLockRoundTrip` 有误导性，已改为
+`BenchmarkStageLockArbitration`。
+
+**stage 往返 132µs 的成本构成**：共享段编解码只占 3.7µs（2.8%），
+其余是**一次 stage 要走 3 次进程间往返**——`stage.invoke` 加上插件侧反向的
+`stage.lock` / `stage.unlock`。相对 LLM 往返 2-8 秒可忽略；若日后要优化，
+方向是把 lock/unlock 合入 `stage.invoke` 的请求/应答，省掉两次往返。
+
+### 流式压测（§4.3 标记「风险高」的那一项）
+
+原文的担忧：「`Bus.Publish` 路径禁用任何锁/阻塞——流式输出逐 token 发布，
+任何等待都会卡顿」。
+
+```
+5000 次 Publish + 每条睡 20µs 的慢消费者
+  实测 2.29ms，均摊 457 ns/token
+  同步语义理论下限 100ms（5000 × 20µs）
+
+订阅者 1 个：1.547ms（515 ns/次）
+订阅者 8 个：1.518ms（506 ns/次）   ← 几乎不变，无线性恶化
+
+环溢出（无消费者写 30000 次，cap=8192）：均摊 35 ns/次   ← 仍 O(1)
+```
+
+2.29ms 与实验 4 的数字完全一致（那次也是 2.29ms / 0.46µs per token）——
+post-and-forget 在实现中成立。
+
+最后一项的意义：消费者完全停摆时写端覆盖最旧 slot，这条路径仍是 O(1)，
+故「消费者卡住」不会连带拖慢内核主循环。
