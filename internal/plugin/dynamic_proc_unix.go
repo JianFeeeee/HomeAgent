@@ -87,6 +87,14 @@ func (r *Registry) ensureProcHost() (*proc.Host, error) {
 		return nil, err
 	}
 	r.procHost = host
+
+	// 事件环适配层：Bus 发布 → 写 EvtRing slot → eventfd 通知子进程
+	if r.evBus != nil {
+		er := NewEventRing(host.EvtRing(), int(host.Evtfd().Fd()), r.evBus)
+		host.SetEvtSubscriber(er)
+		log.Printf("[plugin] 事件环已创建（Bus → EvtRing → eventfd）")
+	}
+
 	log.Printf("[plugin] 共享段已创建（全部子进程插件共用一块，%d KB）", host.ShmSize()/1024)
 	return host, nil
 }
