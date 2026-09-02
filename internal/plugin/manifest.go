@@ -19,11 +19,25 @@ type PluginManifest struct {
 	License     string   `json:"license,omitempty"`
 	Homepage    string   `json:"homepage,omitempty"`
 	Repository  string   `json:"repository,omitempty"`
-	Entry       string   `json:"entry"`               // "plugin.bin"(子进程) | "plugin.so" | "plugin.dll" | "main.lua" | "SKILL.md"
+	Entry       string   `json:"entry"`               // "plugin.bin"(子进程) | "main.lua" | "SKILL.md"
 	Platforms   []string `json:"platforms,omitempty"` // 声明的支持平台: ["linux","darwin","windows"]
 	MinVersion  string   `json:"min_version,omitempty"`
 	Tags        []string `json:"tags,omitempty"`
 	Deprecated  bool     `json:"deprecated,omitempty"`
+
+	// Capabilities 声明本插件需要的内核能力组（§3.8 权限梯度）。
+	//
+	// 取值见 internal/plugin/proc.KnownCapabilities()：
+	// io / memory / doc_memory / knowledge / text_memory / llm / social /
+	// events / plugin_mgr / settings_cross
+	//
+	// **省略或为空 = 不受限**，而不是「只有基础能力」。
+	// 理由：17 个存量插件的 plugin.json 都没有这个字段，若空声明当作最小权限，
+	// 它们会全部失去 IO 注入、记忆读写等能力而**静默降级**——
+	// 违反「外部插件零改动」的硬约束。收紧的路径是让插件显式声明。
+	//
+	// core（注册自身工具/阶段/通道 + 读写自己的配置）无需声明，始终可用。
+	Capabilities []string `json:"capabilities,omitempty"`
 }
 
 func ReadManifest(dir string) (*PluginManifest, error) {

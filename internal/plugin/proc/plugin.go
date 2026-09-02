@@ -39,13 +39,20 @@ type Plugin struct {
 	// onCrash 由 registry 注入，把进程退出喂给 plugin_health.recordCrash（§2.3）。
 	onCrash func(name string, err error)
 
+	// caps 是 manifest 声明的能力集（§3.8 权限梯度）。
+	caps *capabilitySet
+
 	stopOnce sync.Once
 }
 
 // New 创建子进程插件（不启动进程）。
 //
 // host 必须是全部子进程插件共用的实例（由 registry 创建一次）。
-func New(name, bin, dir string, config map[string]interface{}, host *Host, onCrash func(string, error)) *Plugin {
+// New 创建子进程插件（不启动进程）。
+//
+// host 必须是全部子进程插件共用的实例（由 registry 创建一次）。
+// capabilities 来自 manifest 的 capabilities 字段；为空时不限制（存量插件向后兼容）。
+func New(name, bin, dir string, config map[string]interface{}, host *Host, onCrash func(string, error), capabilities ...string) *Plugin {
 	return &Plugin{
 		name:    name,
 		bin:     bin,
@@ -53,6 +60,7 @@ func New(name, bin, dir string, config map[string]interface{}, host *Host, onCra
 		config:  config,
 		host:    host,
 		onCrash: onCrash,
+		caps:    newCapabilitySet(capabilities),
 	}
 }
 
@@ -73,6 +81,7 @@ func (p *Plugin) Start(core CoreSDK) error {
 		host:    p.host,
 		locks:   p.host.locks,
 		evtRing: p.host.evtSubscriber,
+		caps:    p.caps,
 	}
 	// 反向调用闭包：注册回调时捕获，运行期经 RPC 打到插件进程。
 	p.handler.invokeTool = p.invokeTool
