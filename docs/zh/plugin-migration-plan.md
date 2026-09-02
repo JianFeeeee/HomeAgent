@@ -20,18 +20,18 @@
 - **Part 2** 子进程通道原型（spawn / JSON-RPC / procPlugin）— ✅ **已完成**
 - **Part 3** plugindev 工具链改造（`.bin` 产物）— ✅ **已完成**
 - **Part 4** 共享内存数据面（StageContext 跨进程并发改写）— ✅ **已完成**（段/编解码/锁仲裁 + RunStage 接线）
-- **Part 5** 通知面（事件环 + eventfd）— ⏳ 下一步
+- **Part 5** 通知面（事件环 + eventfd）— ✅ **核心已完成**
 - **Part 6** 迁移与收尾（17 插件逐个 + 删 cabi + 权限显式化）
 - 最终验收清单
 
 > **进度快照（2026-09-02）**：分支 `feature/plugin-proc-migration`。
 > 已交付：现网止血 2 项（11.1/11.3）、entry 双通道分派、共享内存 stage 并发、
 > 子进程控制面（NDJSON RPC + 51 method 名平移）、plugindev `.bin` 构建、
-> registry 接线。**外部插件已可端到端跑在子进程 + 共享内存上**：
-> `example/weather` 业务代码逐字节未改，只把 `plg.json` 的 entry 换成 `plugin.bin`。
-> 测试：内核 `internal/plugin/proc` 36 项 + `internal/plugin` 13 项（含 `-race`），
-> SDK 仓 plugindev 16 项静态检查。
-> 下一步：Part 5 通知面（事件环 + eventfd），然后 Part 6 逐插件迁移 + 删 `internal/plugin/cabi/`。
+> registry 接线、**事件环（§3.6）**。**外部插件已可端到端跑在子进程 + 共享内存上**，
+> 且首次获得事件订阅能力（C ABI 下 case 23/24 一直是空实现）。
+> 测试：内核 `internal/plugin/proc` 38 项 + `internal/plugin` 16 项（含 `-race`），
+> SDK 仓 plugindev 16 项。
+ > 下一步：Part 6 逐插件迁移 + 删 `internal/plugin/cabi/`。
 
 ---
 
