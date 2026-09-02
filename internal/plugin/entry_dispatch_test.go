@@ -3,26 +3,30 @@ package plugin
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
-// entry 分派骨架（docs/zh/plugin-migration-plan.md Part 1）：
-// 外部插件多进程化期间 .so/.dll（cabi）与 .bin（proc）双通道共存，
-// 按 plugin.json 的 entry 字段分派，使迁移可逐插件推进、随时回退。
+// entry 分派（docs/zh/plugin-migration-plan.md Part 1/6）。
+//
+// C ABI 通道（.so/.dll/.dylib）已整体退场：外部插件统一走子进程 + stdio RPC。
+// 这些测试守住的是「旧产物给明确错误」而非「静默跳过」——后者会让
+// 「插件目录在但没加载」看起来像配置问题。
 
 func TestClassifyEntry(t *testing.T) {
 	cases := []struct {
 		entry string
 		want  entryKind
 	}{
-		{"plugin.so", entryCABI},
-		{"plugin.dll", entryCABI},
-		{"plugin.dylib", entryCABI},
 		{"plugin.bin", entryProc},
 		{"main.lua", entryLua},
 		{"SKILL.md", entrySkill},
 		{"", entryUnknown},
 		{"plugin.wasm", entryUnknown},
+		// 已退场的 C ABI 产物不再是有效通道
+		{"plugin.so", entryUnknown},
+		{"plugin.dll", entryUnknown},
+		{"plugin.dylib", entryUnknown},
 	}
 	for _, c := range cases {
 		if got := classifyEntry(c.entry); got != c.want {
@@ -34,45 +38,34 @@ func TestClassifyEntry(t *testing.T) {
 // manifest 显式声明的 entry 优先级最高。
 func TestDetectEntryKind_ManifestWins(t *testing.T) {
 	dir := t.TempDir()
-	// 目录里放 .so，但 manifest 声明 .bin → 应走 proc
-	mustWrite(t, filepath.Join(dir, "plugin.so"), "fake so")
+	mustWrite(t, filepath.Join(dir, "main.lua"), "fake lua")
 	mustWrite(t, filepath.Join(dir, "plugin.bin"), "fake bin")
-	mustWrite(t, filepath.Join(dir, metaEntry), `{"name":"x","entry":"plugin.bin"}`)
+	mustWrite(t, filepath.Join(dir, metaEntry), `{"name":"x","entry":"main.lua"}`)
 
-	if got := detectEntryKind(dir); got != entryProc {
-		t.Fatalf("manifest 声明 plugin.bin 应走 proc，实际 %v", got)
+	if got := detectEntryKind(dir); got != entryLua {
+		t.Fatalf("manifest 声明 main.lua 应走 lua，实际 %v", got)
 	}
 }
 
-// manifest 声明 .so 时即便存在 .bin 也走 cabi —— 这是回退路径的保证。
-func TestDetectEntryKind_ManifestCanForceRollback(t *testing.T) {
+// 存量插件的 plugin.json 仍写着 "plugin.so"（历史产物），
+// 此时 classifyEntry 返回 unknown，须靠目录探测找到 plugin.bin。
+//
+// 这是「外部插件零改动」的直接后果：17 个插件的 manifest 没人去改。
+func TestDetectEntryKind_LegacyManifestFallsBackToProbe(t *testing.T) {
 	dir := t.TempDir()
-	mustWrite(t, filepath.Join(dir, "plugin.so"), "fake so")
 	mustWrite(t, filepath.Join(dir, "plugin.bin"), "fake bin")
 	mustWrite(t, filepath.Join(dir, metaEntry), `{"name":"x","entry":"plugin.so"}`)
 
-	if got := detectEntryKind(dir); got != entryCABI {
-		t.Fatalf("manifest 声明 plugin.so 应回退到 cabi，实际 %v", got)
-	}
-}
-
-// 无 manifest（或 entry 为空）时按目录探测，.bin 优先于 .so：
-// 迁移期间同目录可能两种产物共存（升级未清理），此时应走新通道。
-func TestDetectEntryKind_ProbeOrderPrefersBin(t *testing.T) {
-	dir := t.TempDir()
-	mustWrite(t, filepath.Join(dir, "plugin.so"), "fake so")
-	mustWrite(t, filepath.Join(dir, "plugin.bin"), "fake bin")
-
 	if got := detectEntryKind(dir); got != entryProc {
-		t.Fatalf("无 manifest 时应优先 plugin.bin，实际 %v", got)
+		t.Fatalf("manifest 写 plugin.so 但目录有 plugin.bin 时应走 proc，实际 %v", got)
 	}
 }
 
 func TestDetectEntryKind_ProbeFallbacks(t *testing.T) {
-	t.Run("only so", func(t *testing.T) {
+	t.Run("only bin", func(t *testing.T) {
 		dir := t.TempDir()
-		mustWrite(t, filepath.Join(dir, "plugin.so"), "x")
-		if got := detectEntryKind(dir); got != entryCABI {
+		mustWrite(t, filepath.Join(dir, "plugin.bin"), "x")
+		if got := detectEntryKind(dir); got != entryProc {
 			t.Fatalf("got %v", got)
 		}
 	})
@@ -95,15 +88,60 @@ func TestDetectEntryKind_ProbeFallbacks(t *testing.T) {
 			t.Fatalf("空目录应为 unknown，实际 %v", got)
 		}
 	})
+	t.Run("only legacy so", func(t *testing.T) {
+		dir := t.TempDir()
+		mustWrite(t, filepath.Join(dir, "plugin.so"), "x")
+		if got := detectEntryKind(dir); got != entryUnknown {
+			t.Fatalf("只有 .so 时应为 unknown（C ABI 已退场），实际 %v", got)
+		}
+	})
 }
 
-// entry 声明 plugin.bin 但二进制缺失时必须报明确错误，
-// 不得静默回退到 cabi —— 否则"已迁移插件跑回旧通道"极难排查。
+// C ABI 残留必须能被识别，供 tryDynamic 给出「需要重编」的明确错误。
+func TestHasLegacyCABIEntry(t *testing.T) {
+	for _, name := range []string{"plugin.so", "plugin.dll", "plugin.dylib"} {
+		dir := t.TempDir()
+		mustWrite(t, filepath.Join(dir, name), "x")
+		if !hasLegacyCABIEntry(dir) {
+			t.Errorf("%s 应被识别为 C ABI 残留", name)
+		}
+	}
+	t.Run("clean dir", func(t *testing.T) {
+		dir := t.TempDir()
+		mustWrite(t, filepath.Join(dir, "plugin.bin"), "x")
+		if hasLegacyCABIEntry(dir) {
+			t.Error("只有 plugin.bin 的目录不应被判为 C ABI 残留")
+		}
+	})
+}
+
+// 旧 .so 插件必须报「用新 plugindev 重编」而非静默跳过。
+func TestTryDynamic_LegacyCABIGivesActionableError(t *testing.T) {
+	r := NewRegistry()
+	defer r.closeProcHost()
+
+	dir := t.TempDir()
+	mustWrite(t, filepath.Join(dir, "plugin.so"), "old cabi binary")
+
+	_, err := r.tryDynamic(dir, "legacy", nil)
+	if err == nil {
+		t.Fatal("旧 C ABI 产物应报错，不得静默跳过")
+	}
+	// 错误消息须指向解决办法，且明确业务代码无需改
+	msg := err.Error()
+	for _, want := range []string{"plugindev", "plugin.bin", "业务代码"} {
+		if !strings.Contains(msg, want) {
+			t.Errorf("错误消息应含 %q，实际: %v", want, err)
+		}
+	}
+}
+
+// entry 声明 plugin.bin 但二进制缺失时返回 nil,nil（交由后续探测）。
 func TestTryLoadProc_MissingBinaryReturnsNil(t *testing.T) {
 	dir := t.TempDir()
 	plg, err := tryLoadProc(dir, "demo", nil)
 	if plg != nil || err != nil {
-		t.Fatalf("无 plugin.bin 应返回 nil,nil（交由后续探测），实际 plg=%v err=%v", plg, err)
+		t.Fatalf("无 plugin.bin 应返回 nil,nil，实际 plg=%v err=%v", plg, err)
 	}
 }
 
@@ -123,9 +161,8 @@ func TestTryLoadProc_NonExecutableRejected(t *testing.T) {
 
 // pluginEntryHash 的候选顺序须与 detectEntryKind 一致（plugin.bin 优先），
 // 否则增量重载会用错文件算 hash，导致"换了 .bin 但内核以为没变"。
-func TestPluginEntryHash_PrefersBin(t *testing.T) {
+func TestPluginEntryHash_UsesBin(t *testing.T) {
 	dir := t.TempDir()
-	mustWrite(t, filepath.Join(dir, "plugin.so"), "so content")
 	mustWrite(t, filepath.Join(dir, "plugin.bin"), "bin content")
 
 	h1 := pluginEntryHash(dir)
@@ -133,16 +170,19 @@ func TestPluginEntryHash_PrefersBin(t *testing.T) {
 		t.Fatal("应算出 hash")
 	}
 
-	// 改 .so 不应影响 hash（因为以 .bin 为准）
-	mustWrite(t, filepath.Join(dir, "plugin.so"), "so content CHANGED")
-	if h2 := pluginEntryHash(dir); h2 != h1 {
-		t.Error("plugin.bin 存在时 hash 不应受 plugin.so 变化影响")
-	}
-
-	// 改 .bin 必须改变 hash
 	mustWrite(t, filepath.Join(dir, "plugin.bin"), "bin content CHANGED")
-	if h3 := pluginEntryHash(dir); h3 == h1 {
+	if h2 := pluginEntryHash(dir); h2 == h1 {
 		t.Error("plugin.bin 变化必须反映到 hash（否则增量重载失效）")
+	}
+}
+
+// C ABI 产物不再参与 hash 计算：内核已不认它，把它算进去会让
+// 「换了 .so」触发一次无意义的重载尝试。
+func TestPluginEntryHash_IgnoresLegacyCABI(t *testing.T) {
+	dir := t.TempDir()
+	mustWrite(t, filepath.Join(dir, "plugin.so"), "so content")
+	if h := pluginEntryHash(dir); h != "" {
+		t.Errorf("只有 .so 时应返回空串（C ABI 已退场），实际 %q", h)
 	}
 }
 
