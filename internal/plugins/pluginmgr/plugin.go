@@ -14,6 +14,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -23,16 +24,16 @@ import (
 	sdk "gitcode.com/JianFeeeee/HomeAgent/internal/sdk"
 )
 
-// platformBinary 按当前 OS 选择正确的插件二进制文件名。
+// platformBinary 按当前 OS/ARCH 选择正确的插件二进制文件名。
 // 返回 (zip内文件名, 安装后重命名).
+//
+// 子进程模式下各平台产物统一叫 plugin.bin（进程边界即 ABI 边界，
+// 不存在 .so/.dylib/.dll 的区分），故 zip 内按平台加后缀区分，
+// 解包时挑当前平台那一份重命名为 plugin.bin。
 func platformBinary() (zipName, canonicalName string) {
 	switch runtime.GOOS {
-	case "linux":
-		return "plugin.so", "plugin.so"
-	case "darwin":
-		return "plugin.dylib", "plugin.so" // dlopen 兼容 .so 名称
-	case "windows":
-		return "plugin.dll", "plugin.dll"
+	case "linux", "darwin", "windows", "freebsd":
+		return fmt.Sprintf("plugin.bin.%s.%s", runtime.GOOS, runtime.GOARCH), "plugin.bin"
 	default:
 		return "", ""
 	}
@@ -40,18 +41,17 @@ func platformBinary() (zipName, canonicalName string) {
 
 // validBinaries 是 .hmap 中所有可识别的文件入口（平台二进制或脚本）。
 var validBinaries = map[string]bool{
-	"plugin.so":    true,
-	"plugin.dylib": true,
-	"plugin.dll":   true,
-	"main.lua":     true,
-	"SKILL.md":     true,
+	"plugin.bin": true,
+	"main.lua":   true,
+	"SKILL.md":   true,
 }
 
-// platformBinaries 是平台特定的二进制，bundle 模式下仅当前平台的被解压。
-var platformBinaries = map[string]bool{
-	"plugin.so":    true,
-	"plugin.dylib": true,
-	"plugin.dll":   true,
+// isPlatformBinary 判断 zip 条目是否为平台特定二进制（bundle 模式下仅当前平台的被解压）。
+//
+// 形式：plugin.bin.<goos>.<goarch>。不用固定表是因为平台组合会增长
+// （linux/arm64、darwin/arm64 等），按前缀判断无需维护清单。
+func isPlatformBinary(name string) bool {
+	return strings.HasPrefix(name, "plugin.bin.")
 }
 
 var downloadClient = &http.Client{
@@ -164,13 +164,53 @@ func (p *Plugin) registerTools(s *sdk.PluginSDK) {
 
 	s.RegisterTool("plugin_list", sdk.ToolDef{
 		Name:        "plugin_list",
-		Description: "列出已安装的所有外部插件及其版本",
+		Description: "列出已安装的所有外部插件及其版本。同时返回运行状态（loaded/alive/pid/崩溃次数），子进程插件死了在此体现为 alive=false。",
 		Parameters: map[string]interface{}{
 			"type":       "object",
 			"properties": map[string]interface{}{},
 		},
 	}, func(args map[string]interface{}) (interface{}, error) {
 		return p.listPlugins()
+	})
+
+	s.RegisterTool("plugin_status", sdk.ToolDef{
+		Name: "plugin_status",
+		Description: "查看插件运行状态：进程是否存活、PID、加载通道、最近崩溃次数、当前注册的工具。" +
+			"不传 name 则返回全部插件概览。工具调不通时先用它确认插件是否还活着。",
+		Parameters: map[string]interface{}{
+			"type": "object",
+			"properties": map[string]interface{}{
+				"name": map[string]interface{}{
+					"type":        "string",
+					"description": "插件名称；缺省返回全部",
+				},
+			},
+		},
+	}, func(args map[string]interface{}) (interface{}, error) {
+		name, _ := args["name"].(string)
+		return p.pluginStatus(name)
+	})
+
+	s.RegisterTool("plugin_restart", sdk.ToolDef{
+		Name: "plugin_restart",
+		Description: "重启单个插件（停止后重新加载，保留配置）。适用于：插件进程已死但自动重启被用尽" +
+			"（plugin_status 的 crash_count 达上限），或换了 plugin.bin 需立即生效。不需重启 homed。",
+		Parameters: map[string]interface{}{
+			"type": "object",
+			"properties": map[string]interface{}{
+				"name": map[string]interface{}{
+					"type":        "string",
+					"description": "插件名称",
+				},
+			},
+			"required": []string{"name"},
+		},
+	}, func(args map[string]interface{}) (interface{}, error) {
+		name, _ := args["name"].(string)
+		if name == "" {
+			return map[string]interface{}{"error": "name is required"}, nil
+		}
+		return p.restartPlugin(name)
 	})
 
 	s.RegisterTool("plugin_remove", sdk.ToolDef{
@@ -541,6 +581,18 @@ func (p *Plugin) listPlugins() (interface{}, error) {
 		return nil, err
 	}
 
+	// 运行期状态一次取齐，避免逐个插件回内核查。
+	//
+	// 为何要带运行期：只读 plugin.json 的旧实现无法区分「已安装」与「正在跑」。
+	// 生产上 editdoc 子进程被 kill 后，plugin_list 依旧把它列为正常插件，
+	// 模型与 WebUI 都看不出异常，只能在调工具时吃一个“进程已退出”。
+	runtimes := map[string]sdk.PluginRuntimeInfo{}
+	if mgr := p.pluginMgr(); mgr != nil {
+		for _, rt := range mgr.ListPluginRuntimes() {
+			runtimes[rt.Name] = rt
+		}
+	}
+
 	var plugins []map[string]interface{}
 	for _, entry := range entries {
 		if !entry.IsDir() {
@@ -550,19 +602,110 @@ func (p *Plugin) listPlugins() (interface{}, error) {
 		if err != nil {
 			continue
 		}
-		plugins = append(plugins, map[string]interface{}{
+		item := map[string]interface{}{
 			"name":        m.Name,
 			"version":     m.Version,
 			"description": m.Description,
 			"author":      m.Author,
 			"entry":       m.Entry,
 			"deprecated":  m.Deprecated,
-		})
+		}
+		if rt, ok := runtimes[m.Name]; ok {
+			item["loaded"] = rt.Loaded
+			item["alive"] = rt.Alive
+			item["disabled"] = rt.Disabled
+			item["channel"] = rt.Channel
+			if rt.PID > 0 {
+				item["pid"] = rt.PID
+			}
+			if rt.CrashCount > 0 {
+				item["crash_count"] = rt.CrashCount
+			}
+		}
+		plugins = append(plugins, item)
 	}
 	if plugins == nil {
 		plugins = []map[string]interface{}{}
 	}
 	return plugins, nil
+}
+
+// pluginMgr 取内核插件管理面（可能为 nil：单测/未注入）。
+func (p *Plugin) pluginMgr() sdk.PluginManager {
+	if p.sdk == nil {
+		return nil
+	}
+	return p.sdk.PluginMgr()
+}
+
+// pluginStatus 返回插件运行期状态（进程存活/PID/崩溃计数/工具清单）。
+//
+// 这是子进程化后插件管理器必须补上的一块：以前插件与内核同进程，
+// “加载了”就等于“能用”；现在插件是独立进程，两者不再等价。
+func (p *Plugin) pluginStatus(name string) (interface{}, error) {
+	mgr := p.pluginMgr()
+	if mgr == nil {
+		return nil, fmt.Errorf("内核插件管理面不可用")
+	}
+	if name != "" {
+		info, ok := mgr.PluginRuntime(name)
+		if !ok {
+			return nil, fmt.Errorf("plugin %q not found", name)
+		}
+		return info, nil
+	}
+
+	all := mgr.ListPluginRuntimes()
+	// 汇总一行：让模型不用自己数就能看出“有东西挂了”。
+	var loaded, dead int
+	var unhealthy []string
+	for _, rt := range all {
+		if rt.Loaded {
+			loaded++
+		}
+		if rt.Loaded && !rt.Alive {
+			dead++
+			unhealthy = append(unhealthy, rt.Name)
+			continue
+		}
+		if rt.CrashCount > 0 {
+			unhealthy = append(unhealthy, fmt.Sprintf("%s(崩溃%d次)", rt.Name, rt.CrashCount))
+		}
+	}
+	sort.Strings(unhealthy)
+	return map[string]interface{}{
+		"total":     len(all),
+		"loaded":    loaded,
+		"dead":      dead,
+		"unhealthy": unhealthy,
+		"plugins":   all,
+	}, nil
+}
+
+// restartPlugin 重启单个插件（保留配置）。
+//
+// 与 plgreload 的区别：后者按入口文件 hash 增量重载，二进制没改就不动；
+// 而进程被 kill 时二进制正是没改的，所以一定要有一个无条件重启的入口。
+func (p *Plugin) restartPlugin(name string) (interface{}, error) {
+	mgr := p.pluginMgr()
+	if mgr == nil {
+		return nil, fmt.Errorf("内核插件管理面不可用")
+	}
+	if _, ok := mgr.PluginRuntime(name); !ok {
+		return nil, fmt.Errorf("plugin %q not found", name)
+	}
+	if mgr.IsPluginDisabled(name) {
+		return nil, fmt.Errorf("plugin %s 已被禁用，请先启用再重启", name)
+	}
+	if err := mgr.ReloadOne(name); err != nil {
+		return nil, fmt.Errorf("restart %s: %w", name, err)
+	}
+	info, _ := mgr.PluginRuntime(name)
+	return map[string]interface{}{
+		"status":  "restarted",
+		"name":    name,
+		"runtime": info,
+	}, nil
 }
 
 func (p *Plugin) removePlugin(name string) (interface{}, error) {
@@ -705,17 +848,19 @@ func validatePackage(data []byte) (*pluginPackage, error) {
 	}
 
 	if len(pkg.Platforms) > 0 {
-		// bundle mode: check each declared platform has a matching binary
+		// bundle mode：每个声明的平台都要有对应二进制。
+		// 子进程模式下条目形式为 plugin.bin.<goos>.<goarch>，
+		// 故按前缀匹配而不枚举架构（同一 OS 可能有 amd64/arm64 两份）。
 		for _, plat := range pkg.Platforms {
-			bin, ok := map[string]string{
-				"linux":   "plugin.so",
-				"darwin":  "plugin.dylib",
-				"windows": "plugin.dll",
-			}[plat]
-			if !ok {
-				return nil, fmt.Errorf("unsupported platform: %q", plat)
+			prefix := "plugin.bin." + plat + "."
+			found := false
+			for name := range zipEntries {
+				if strings.HasPrefix(name, prefix) {
+					found = true
+					break
+				}
 			}
-			if zipEntries[bin] {
+			if found {
 				hasBinary = true
 			}
 		}
@@ -795,11 +940,11 @@ func extractPackage(data []byte, pluginDir string) error {
 		}
 
 		// bundle mode: skip other platforms' platform-specific binaries
-		if isBundle && platformBinaries[f.Name] && f.Name != zipBin {
+		if isBundle && isPlatformBinary(f.Name) && f.Name != zipBin {
 			continue
 		}
 
-		// rename platform binary to canonical name (e.g. plugin.dylib → plugin.so)
+		// 平台二进制重命名为规范名（plugin.bin.linux.amd64 → plugin.bin）
 		dest := fpath
 		if isBundle && f.Name == zipBin && canonicalName != zipBin {
 			dest = filepath.Join(target, canonicalName)
@@ -807,6 +952,15 @@ func extractPackage(data []byte, pluginDir string) error {
 
 		if err := copyZipEntry(f, dest); err != nil {
 			return err
+		}
+
+		// 子进程插件必须可执行。
+		// zip 保留了原文件权限位，但经某些工具链/传输后可能丢失；
+		// 内核加载时会因缺执行位报错（带 chmod +x 提示），在此提前补上。
+		if filepath.Base(dest) == "plugin.bin" {
+			if err := os.Chmod(dest, 0o755); err != nil {
+				return fmt.Errorf("chmod %s: %w", dest, err)
+			}
 		}
 	}
 

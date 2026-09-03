@@ -65,6 +65,34 @@ type PluginMeta struct {
 	NameEn string `json:"name_en"`
 }
 
+// PluginRuntimeInfo 是插件的**运行期**状态，与 plugin.json 里的静态元数据相对。
+//
+// 为何需要：子进程插件的进程可能已经死了而注册表里还有条目（或反过来，
+// 崩溃摘除后注册表已无条目但目录还在）。此前 plugin_list / GET /plugins
+// 只读 plugin.json，无论插件死活都返回同一份内容——WebUI 与模型都看不出
+// 「已安装」与「正在运行」的区别，插件被 kill 后只表现为工具静默失败。
+type PluginRuntimeInfo struct {
+	Name string `json:"name"`
+	// Loaded 表示注册表中存在该插件实例。
+	Loaded bool `json:"loaded"`
+	// Disabled 表示插件被显式禁用（不该运行）。
+	Disabled bool `json:"disabled"`
+	// Builtin 表示编译期内置插件（无独立进程）。
+	Builtin bool `json:"builtin"`
+	// Channel 是加载通道：proc（子进程）/ lua / builtin。
+	Channel string `json:"channel"`
+	// PID 是子进程插件的进程号；非子进程或已退出为 0。
+	PID int `json:"pid"`
+	// Alive 表示子进程仍存活；非子进程插件与 Loaded 同值。
+	Alive bool `json:"alive"`
+	// CrashCount 是最近窗口内的崩溃次数（0 表示健康）。
+	CrashCount int `json:"crash_count"`
+	// AutoRestart 表示崩溃后内核是否会自动拉起。
+	AutoRestart bool `json:"auto_restart"`
+	// Tools 是该插件当前注册在内核里的工具名。
+	Tools []string `json:"tools,omitempty"`
+}
+
 type PluginManager interface {
 	ListLoadedPlugins() []string
 	ListDisabledPlugins() []DisabledPluginInfo
@@ -86,6 +114,11 @@ type PluginManager interface {
 	ReloadOne(name string) error
 	PluginMetas() map[string]PluginMeta
 	PluginDir() string
+	// PluginRuntime 返回单个插件的运行期状态（进程存活 / PID / 崩溃计数）。
+	// 未安装的插件返回零值 + false。
+	PluginRuntime(name string) (PluginRuntimeInfo, bool)
+	// ListPluginRuntimes 返回全部已加载插件的运行期状态。
+	ListPluginRuntimes() []PluginRuntimeInfo
 }
 
 type PluginSDK struct {

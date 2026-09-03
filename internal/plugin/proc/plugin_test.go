@@ -1,0 +1,393 @@
+package proc
+
+import (
+	"encoding/json"
+	"fmt"
+	"strings"
+	"sync"
+	"testing"
+
+	pubsdk "gitcode.com/JianFeeeee/homeagent-sdk/sdk"
+)
+
+// 端到端验证：内核 RunStage 并发扇出 → 真实子进程插件经共享内存读改写 → 结果回读。
+//
+// 这是**整个迁移最关键的一环闭环验证**（§4.4 风险 3.4）：
+// 机制在 shm_test.go 已被单元验证，这里验证它在真进程 + 真 RPC 下同样成立。
+
+// fakeCoreSDK 是最简 CoreSDK 实现，记录注册行为。
+type fakeCoreSDK struct {
+	mu        sync.Mutex
+	tools     map[string]pubsdk.ToolHandler
+	stages    map[pubsdk.Stage][]pubsdk.StageHandler
+	outputs   map[string]pubsdk.ToolHandler
+	settings  map[string]interface{}
+	autoStart bool
+}
+
+func newFakeCore() *fakeCoreSDK {
+	return &fakeCoreSDK{
+		tools:    map[string]pubsdk.ToolHandler{},
+		stages:   map[pubsdk.Stage][]pubsdk.StageHandler{},
+		outputs:  map[string]pubsdk.ToolHandler{},
+		settings: map[string]interface{}{},
+	}
+}
+
+func (f *fakeCoreSDK) PluginName() string                    { return "fake" }
+func (f *fakeCoreSDK) Settings() pubsdk.SettingsAPI          { return nil }
+func (f *fakeCoreSDK) Memory() pubsdk.MemoryAPI              { return nil }
+func (f *fakeCoreSDK) TextMemory() pubsdk.TextMemoryAPI      { return nil }
+func (f *fakeCoreSDK) DocMemory() pubsdk.DocMemoryAPI        { return nil }
+func (f *fakeCoreSDK) Knowledge() pubsdk.KnowledgeAPI        { return nil }
+func (f *fakeCoreSDK) LLM() pubsdk.LLMAPI                    { return nil }
+func (f *fakeCoreSDK) Social() pubsdk.SocialAPI              { return nil }
+func (f *fakeCoreSDK) PluginMgr() pubsdk.PluginMgrAPI        { return nil }
+func (f *fakeCoreSDK) RegisterPluginAPI(name string) error   { return nil }
+func (f *fakeCoreSDK) InjectText(s, c, t string)             {}
+func (f *fakeCoreSDK) InjectInterruptText(s, c, t string)    {}
+func (f *fakeCoreSDK) InjectTextNoMemory(s, c, t string)     {}
+func (f *fakeCoreSDK) InjectInputSync(s, c, t string) string { return "" }
+func (f *fakeCoreSDK) SetAutoRestart(enabled bool)           { f.autoStart = enabled }
+
+func (f *fakeCoreSDK) RegisterTool(name string, def pubsdk.ToolDef, h pubsdk.ToolHandler) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.tools[name] = h
+	return nil
+}
+
+func (f *fakeCoreSDK) RegisterStage(stage pubsdk.Stage, h pubsdk.StageHandler, scope ...pubsdk.StageScope) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.stages[stage] = append(f.stages[stage], h)
+}
+
+func (f *fakeCoreSDK) RegisterOutputChannel(name string, caps int, desc string, def pubsdk.ChannelDef, h pubsdk.ToolHandler) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.outputs[name] = h
+	return nil
+}
+
+func (f *fakeCoreSDK) RegisterInputChannel(name string, def pubsdk.ChannelDef) error { return nil }
+
+func (f *fakeCoreSDK) stageHandlers(stage pubsdk.Stage) []pubsdk.StageHandler {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	out := make([]pubsdk.StageHandler, len(f.stages[stage]))
+	copy(out, f.stages[stage])
+	return out
+}
+
+// runStageLikeKernel 复刻 internal/agent/core.StageHost.RunStage 的并发扇出语义
+// （stages.go:124 的 go func + wg.Wait），验证外部插件在同样的并发模型下正确工作。
+func runStageLikeKernel(handlers []pubsdk.StageHandler, sc *pubsdk.StageContext) []error {
+	var wg sync.WaitGroup
+	errCh := make(chan error, len(handlers))
+	for _, h := range handlers {
+		wg.Add(1)
+		go func(fn pubsdk.StageHandler) {
+			defer wg.Done()
+			if err := fn(sc); err != nil {
+				errCh <- err
+			}
+		}(h)
+	}
+	wg.Wait()
+	close(errCh)
+	var errs []error
+	for err := range errCh {
+		errs = append(errs, err)
+	}
+	return errs
+}
+
+// 单插件 stage 读改写：验证共享段 + RPC + 锁的完整链路。
+func TestPlugin_StageReadModifyWriteOverSharedMemory(t *testing.T) {
+	bin := buildTestPlugin(t, "stageplugin.go")
+	core := newFakeCore()
+
+	host, err := NewHost()
+	if err != nil {
+		t.Fatalf("NewHost: %v", err)
+	}
+	defer host.Close()
+
+	p := New("sanitizer", bin, t.TempDir(), nil, host, nil)
+	if err := p.Start(core); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	defer p.Close()
+
+	handlers := core.stageHandlers(pubsdk.StageAfterToolcall)
+	if len(handlers) != 1 {
+		t.Fatalf("插件应注册 1 个 after_toolcall handler，实际 %d", len(handlers))
+	}
+
+	dirty := "结果：\x1b[31m脏数据\x1b[0m"
+	clean := "结果：脏数据"
+	sc := &pubsdk.StageContext{
+		Phase:       pubsdk.StageAfterToolcall,
+		ToolResults: []pubsdk.ToolResult{{CallID: "c1", Name: "x_tool", Result: dirty}},
+	}
+
+	if errs := runStageLikeKernel(handlers, sc); len(errs) > 0 {
+		t.Fatalf("stage 执行失败: %v", errs)
+	}
+
+	got, _ := sc.ToolResults[0].Result.(string)
+	if got != clean {
+		t.Fatalf("插件的清洗结果未回到内核 StageContext：期望 %q，实际 %q", clean, got)
+	}
+}
+
+// **核心断言**：改写型插件 + 只读插件并发时，清洗结果不被覆盖。
+// 复刻现网 sanitizer + weather 场景（§8.6 实测 C ABI 下 1.6~4.3% 被覆盖）。
+func TestPlugin_ConcurrentWriterAndReaderNoLostUpdate(t *testing.T) {
+	bin := buildTestPlugin(t, "stageplugin.go")
+
+	// ❗ 两个插件进程**共享同一个 Host**（同一 memfd）——这是消除 lost update 的前提。
+	// 若各持一段，「内核 ctx → 段 → 插件改 → 回读 ctx」会退化成副本模型，
+	// 最后回读者覆盖前者，§8.4 的 35.8~36.8% 丢失原样复现。
+	host, err := NewHost()
+	if err != nil {
+		t.Fatalf("NewHost: %v", err)
+	}
+	defer host.Close()
+
+	writerCore := newFakeCore()
+	writer := New("sanitizer", bin, t.TempDir(), nil, host, nil)
+	if err := writer.Start(writerCore); err != nil {
+		t.Fatalf("writer Start: %v", err)
+	}
+	defer writer.Close()
+
+	readerBin := buildTestPlugin(t, "readonlyplugin.go")
+	readerCore := newFakeCore()
+	reader := New("weather", readerBin, t.TempDir(), nil, host, nil)
+	if err := reader.Start(readerCore); err != nil {
+		t.Fatalf("reader Start: %v", err)
+	}
+	defer reader.Close()
+
+	handlers := append(
+		writerCore.stageHandlers(pubsdk.StageAfterToolcall),
+		readerCore.stageHandlers(pubsdk.StageAfterToolcall)...,
+	)
+	if len(handlers) != 2 {
+		t.Fatalf("应有 2 个 handler，实际 %d", len(handlers))
+	}
+
+	dirty := "天气：晴 \x1b[31m28°C\x1b[0m"
+	clean := "天气：晴 28°C"
+	sc := &pubsdk.StageContext{
+		Phase:       pubsdk.StageAfterToolcall,
+		ToolResults: []pubsdk.ToolResult{{CallID: "c1", Name: "weather_query", Result: dirty}},
+	}
+
+	if errs := runStageLikeKernel(handlers, sc); len(errs) > 0 {
+		t.Fatalf("stage 执行失败: %v", errs)
+	}
+
+	got, _ := sc.ToolResults[0].Result.(string)
+	if got != clean {
+		t.Fatalf("只读插件覆盖了改写插件的清洗结果：期望 %q，实际 %q", clean, got)
+	}
+}
+
+// 插件注册的工具可被内核调用，并把结果带回。
+func TestPlugin_RegisteredToolInvokable(t *testing.T) {
+	bin := buildTestPlugin(t, "stageplugin.go")
+	core := newFakeCore()
+
+	host, err := NewHost()
+	if err != nil {
+		t.Fatalf("NewHost: %v", err)
+	}
+	defer host.Close()
+
+	p := New("demo", bin, t.TempDir(), nil, host, nil)
+	if err := p.Start(core); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	defer p.Close()
+
+	core.mu.Lock()
+	h, ok := core.tools["demo_upper"]
+	core.mu.Unlock()
+	if !ok {
+		t.Fatal("插件应注册 demo_upper 工具")
+	}
+
+	res, err := h(map[string]interface{}{"text": "abc"})
+	if err != nil {
+		t.Fatalf("调用工具: %v", err)
+	}
+	if res != "ABC" {
+		t.Fatalf("工具结果应为 ABC，实际 %v", res)
+	}
+}
+
+// 输出通道**同步等真实结果**：失败必须上报（§9.4 根治）。
+func TestPlugin_OutputChannelReportsRealFailure(t *testing.T) {
+	bin := buildTestPlugin(t, "stageplugin.go")
+	core := newFakeCore()
+
+	host, err := NewHost()
+	if err != nil {
+		t.Fatalf("NewHost: %v", err)
+	}
+	defer host.Close()
+
+	p := New("demo", bin, t.TempDir(), nil, host, nil)
+	if err := p.Start(core); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	defer p.Close()
+
+	core.mu.Lock()
+	h, ok := core.outputs["demo_ch"]
+	core.mu.Unlock()
+	if !ok {
+		t.Fatal("插件应注册 demo_ch 输出通道")
+	}
+
+	// 成功路径
+	res, err := h(map[string]interface{}{"payload": "hi", "type": "text"})
+	if err != nil {
+		t.Fatalf("发送应成功: %v", err)
+	}
+	m, _ := res.(map[string]interface{})
+	if m["status"] != "sent" {
+		t.Errorf("成功应返回 status=sent，实际 %v", m)
+	}
+
+	// 失败路径：插件返回错误 → 调用方必须收到 error（而非假成功）
+	_, err = h(map[string]interface{}{"payload": "fail", "type": "text"})
+	if err == nil {
+		t.Fatal("发送失败时必须上报 error（C ABI 路径此处永远假成功）")
+	}
+	if !strings.Contains(err.Error(), "缺少 user_id") {
+		t.Errorf("应透传插件的失败原因，实际: %v", err)
+	}
+}
+
+// 插件在 plugin.start 期间反向调用内核（settings/autoRestart 等）。
+func TestPlugin_ReverseCallsDuringStart(t *testing.T) {
+	bin := buildTestPlugin(t, "stageplugin.go")
+	core := newFakeCore()
+
+	host, err := NewHost()
+	if err != nil {
+		t.Fatalf("NewHost: %v", err)
+	}
+	defer host.Close()
+
+	p := New("demo", bin, t.TempDir(), nil, host, nil)
+	if err := p.Start(core); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	defer p.Close()
+
+	if !core.autoStart {
+		t.Error("插件调用 lifecycle.autoRestart 后内核状态应更新")
+	}
+}
+
+// 权限梯度显式化（§3.8）：CoreSDK 不提供内核内部机制，
+// 插件请求这些能力时必须被拒绝而非静默忽略。
+func TestCoreHandler_RejectsUnknownAndUnimplementedMethods(t *testing.T) {
+	h := &coreHandler{sdk: newFakeCore(), name: "x", locks: &lockRegistry{}}
+
+	// 未知 method
+	if _, err := h.Handle("supervisor.restart", nil); err == nil {
+		t.Error("内核内部机制不应可达（应报未知 method）")
+	}
+
+	// 事件订阅：今日 C ABI 是空实现（静默成功），这里必须明确报未实现
+	if _, err := h.Handle(MethodEventsSubscribe, json.RawMessage(`{}`)); err == nil {
+		t.Error("事件订阅未落地时应明确报错，而非静默成功后收不到事件")
+	}
+
+	// 多模态注入同理
+	if _, err := h.Handle(MethodIOSetToolBlocks, json.RawMessage(`{}`)); err == nil {
+		t.Error("多模态注入未落地时应明确报错")
+	}
+}
+
+// stage 锁在无进行中 stage 时申请应被拒绝（防止插件在 stage 外乱加锁）。
+func TestCoreHandler_StageLockOutsideStageRejected(t *testing.T) {
+	h := &coreHandler{sdk: newFakeCore(), name: "x", locks: &lockRegistry{}}
+	if _, err := h.Handle(MethodStageLock, nil); err == nil {
+		t.Error("stage 外加锁应被拒绝")
+	}
+	if !strings.Contains(fmt.Sprint(mustErr(h.Handle(MethodStageUnlock, nil))), "无进行中的 stage") {
+		t.Error("stage 外解锁的错误信息应说明原因")
+	}
+}
+
+func mustErr(_ interface{}, err error) error { return err }
+
+// **跨进程 lost update 终极验证**：5 个独立插件进程并发读-改-写同一个
+// FinalText，全部标记必须保留。
+//
+// 这是实验 8（5 进程 × 300 轮零丢失）在真实 RPC + 真实 RunStage 并发扇出
+// 下的复刻。对照今日 C ABI 副本模型实测 35.8~36.8% 丢失（§8.4）。
+func TestPlugin_FiveProcessesConcurrentAppendNoLostUpdate(t *testing.T) {
+	bin := buildTestPlugin(t, "appendplugin.go")
+
+	// 关键：全部插件共享同一个 Host（同一 memfd）
+	host, err := NewHost()
+	if err != nil {
+		t.Fatalf("NewHost: %v", err)
+	}
+	defer host.Close()
+
+	tags := []string{"A", "B", "C", "D", "E"}
+	var handlers []pubsdk.StageHandler
+	for _, tag := range tags {
+		core := newFakeCore()
+		p := New("append-"+tag, bin, t.TempDir(), nil, host, nil)
+		p.env = []string{"PLUGIN_TAG=" + tag}
+		if err := p.Start(core); err != nil {
+			t.Fatalf("插件 %s Start: %v", tag, err)
+		}
+		defer p.Close()
+		handlers = append(handlers, core.stageHandlers(pubsdk.StageAfterToolcall)...)
+	}
+	if len(handlers) != len(tags) {
+		t.Fatalf("应有 %d 个 handler，实际 %d", len(tags), len(handlers))
+	}
+
+	sc := &pubsdk.StageContext{
+		Phase:     pubsdk.StageAfterToolcall,
+		FinalText: "",
+	}
+
+	if errs := runStageLikeKernel(handlers, sc); len(errs) > 0 {
+		t.Fatalf("并发 stage 执行失败: %v", errs)
+	}
+
+	// 断言：各标记出现次数之和 == 最终长度 == 插件数 ⇒ 无丢失、无撕裂
+	total := 0
+	counts := map[string]int{}
+	for _, tag := range tags {
+		c := strings.Count(sc.FinalText, tag)
+		counts[tag] = c
+		total += c
+	}
+	if total != len(sc.FinalText) {
+		t.Fatalf("出现撕裂：各标记计数之和 %d != 最终长度 %d（final=%q counts=%v）",
+			total, len(sc.FinalText), sc.FinalText, counts)
+	}
+	if total != len(tags) {
+		t.Fatalf("出现 lost update：期望 %d 个插件的写入全部保留，实际 %d（final=%q counts=%v）",
+			len(tags), total, sc.FinalText, counts)
+	}
+	for tag, c := range counts {
+		if c != 1 {
+			t.Errorf("插件 %s 的写入丢失：期望 1 次，实际 %d 次", tag, c)
+		}
+	}
+}

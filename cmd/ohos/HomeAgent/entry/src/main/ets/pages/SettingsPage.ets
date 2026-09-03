@@ -62,6 +62,14 @@ export struct SettingsPage {
   @State editName: string = '';
   @State showAddForm: boolean = false;
   @State addFormVisible: boolean = false;
+  /**
+   * 表单当前在编辑哪条连接：空串表示新建。
+   *
+   * 之前只有"添加"入口，ConnStore.updateConnection 写好了却没有任何调用者，
+   * 于是地址填错的连接只能删掉重建（API Key 也得重敲）。同一套表单
+   * 靠这个 id 区分保存走 add 还是 update。
+   */
+  @State editingId: string = '';
   @State themeMode: string = 'system';
   @State lang: string = 'zh';
   @State bgImage: string = '';
@@ -205,11 +213,12 @@ export struct SettingsPage {
       this.showToast('名称和地址不能为空', true);
       return;
     }
+    if (this.editingId.length > 0) {
+      this.updateConnection(this.editingId, name, url, apiKey);
+      return;
+    }
     connStore.addConnection(name, url, apiKey).then(() => {
-      this.editName = '';
-      this.editUrl = '';
-      this.editApiKey = '';
-      this.showAddForm = false;
+      this.closeConnForm();
       const cur = connStore.getCurrentConnection();
       if (cur !== null) {
         apiClient.setConnection(cur);
@@ -217,6 +226,53 @@ export struct SettingsPage {
       this.loadConnections();
       this.showToast('连接已添加', false);
     });
+  }
+
+  /**
+   * 保存对已有连接的修改。
+   *
+   * 修改当前生效的连接后必须重新 setConnection：ApiClient 持有的是
+   * ConnectionConfig 的引用快照，不刷新的话后续请求还会打到旧地址。
+   */
+  private updateConnection(id: string, name: string, url: string, apiKey: string): void {
+    connStore.updateConnection(id, name, url, apiKey).then(() => {
+      this.closeConnForm();
+      const cur = connStore.getCurrentConnection();
+      if (cur !== null) {
+        apiClient.setConnection(cur);
+      }
+      this.loadConnections();
+      this.showToast('连接已更新', false);
+    });
+  }
+
+  /** 打开表单：id 为空是新建，非空是编辑并回填原值（API Key 一并带出，避免用户重敲）。 */
+  private openConnForm(conn: ConnectionConfig | null): void {
+    this.showAddForm = true;
+    this.addFormVisible = false;
+    if (conn === null) {
+      this.editingId = '';
+      this.editName = '';
+      this.editUrl = '';
+      this.editApiKey = '';
+    } else {
+      this.editingId = conn.id;
+      this.editName = conn.name;
+      this.editUrl = conn.url;
+      this.editApiKey = conn.apiKey;
+    }
+    setTimeout(() => {
+      this.addFormVisible = true;
+    }, 30);
+  }
+
+  private closeConnForm(): void {
+    this.showAddForm = false;
+    this.addFormVisible = false;
+    this.editingId = '';
+    this.editName = '';
+    this.editUrl = '';
+    this.editApiKey = '';
   }
 
   private deleteConnection(id: string): void {
@@ -840,14 +896,7 @@ export struct SettingsPage {
           .backgroundColor(this.palette().accent)
           .fontColor(Color.White)
           .onClick(() => {
-            this.showAddForm = true;
-            this.addFormVisible = false;
-            this.editName = '';
-            this.editUrl = '';
-            this.editApiKey = '';
-            setTimeout(() => {
-              this.addFormVisible = true;
-            }, 30);
+            this.openConnForm(null);
           })
       }
       .width('100%')
@@ -855,6 +904,10 @@ export struct SettingsPage {
 
       if (this.showAddForm) {
         Column() {
+          Text(this.editingId.length > 0 ? '编辑连接' : '新建连接')
+            .fontSize(12)
+            .fontColor(this.palette().textSecondary)
+            .margin({ bottom: 10 })
           TextInput({ placeholder: '名称 (如 HomeAgent)', text: this.editName })
             .height(36).fontSize(13).fontColor(this.palette().textPrimary)
             .placeholderColor(this.palette().textMuted).backgroundColor(this.palette().bgInput)
@@ -888,7 +941,7 @@ export struct SettingsPage {
               .border({ width: 1, color: this.palette().btnGhostBorder })
               .fontColor(this.palette().textSecondary)
               .onClick(() => {
-                this.showAddForm = false;
+                this.closeConnForm();
               })
             Blank()
             Button('保存')
@@ -961,6 +1014,16 @@ export struct SettingsPage {
               .backgroundColor(this.palette().accentBg)
               .margin({ right: 6 })
           }
+          Button('编辑')
+            .height(26)
+            .fontSize(11)
+            .backgroundColor(Color.Transparent)
+            .border({ width: 1, color: this.palette().btnGhostBorder })
+            .fontColor(this.palette().textSecondary)
+            .margin({ right: 6 })
+            .onClick(() => {
+              this.openConnForm(conn);
+            })
           Button('删除')
             .height(26)
             .fontSize(11)
@@ -980,7 +1043,10 @@ export struct SettingsPage {
           color: conn.id === this.currentId ? this.palette().accent : Color.Transparent,
         })
         .margin({ bottom: 6 })
-      }, (conn: ConnectionConfig) => conn.id)
+        // 键里带上 name/url：ForEach 对相同键只更新绑定、不重跑 @Builder 体，
+        // 只用 id 做键时改完地址这一行还显示旧值。行内没有 TextInput，
+        // 因此把可变字段放进键不会有"编辑时焦点被销毁"的副作用。
+      }, (conn: ConnectionConfig) => conn.id + '|' + conn.name + '|' + conn.url)
     }
   }
 

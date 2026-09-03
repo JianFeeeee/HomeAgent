@@ -13,6 +13,7 @@ type mockPluginMgr struct {
 	builtins   map[string]bool
 	disabled   []sdk.DisabledPluginInfo
 	isDisabled map[string]bool
+	runtimes   map[string]sdk.PluginRuntimeInfo
 
 	removed   []string
 	reloadN   int
@@ -57,6 +58,17 @@ func (m *mockPluginMgr) PluginMetas() map[string]sdk.PluginMeta {
 	return nil
 }
 func (m *mockPluginMgr) PluginDir() string { return "" }
+func (m *mockPluginMgr) PluginRuntime(name string) (sdk.PluginRuntimeInfo, bool) {
+	info, ok := m.runtimes[name]
+	return info, ok
+}
+func (m *mockPluginMgr) ListPluginRuntimes() []sdk.PluginRuntimeInfo {
+	out := make([]sdk.PluginRuntimeInfo, 0, len(m.runtimes))
+	for _, v := range m.runtimes {
+		out = append(out, v)
+	}
+	return out
+}
 
 // newHandlerWithMock 构造带 mock PluginManager 的 Handler（绕过 SDK 组装）。
 func newHandlerWithMock(m *mockPluginMgr) *Handler {
