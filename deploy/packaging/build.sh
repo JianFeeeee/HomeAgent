@@ -27,10 +27,15 @@ COMPONENT="${2:-all}"
 case "$TARGET" in
   native)   GOOS="" GOARCH="" ;;
   linux/amd64)  GOOS=linux   GOARCH=amd64  CC="${CC:-}" ;;
+  # arm64 刻意不设 CXX：设了会让 Go 用 aarch64 的 g++ 去链接，
+  # 而它对 host 产生的 .o 报 "file format not recognized"。
+  # gojieba 的 C++ 源仍由 CC 对应的 gcc 驱动编译（gcc 能编 C++）。
   linux/arm64)  GOOS=linux   GOARCH=arm64  CC="${CC:-aarch64-linux-gnu-gcc}" ;;
   darwin/amd64) GOOS=darwin  GOARCH=amd64  CC="${CC:-}" ;;
   darwin/arm64) GOOS=darwin  GOARCH=arm64  CC="${CC:-}" ;;
-  windows/amd64) GOOS=windows GOARCH=amd64 CC="${CC:-x86_64-w64-mingw32-gcc}" ;;
+  # Windows 必须同时给 CXX：gojieba 是 C++，缺 CXX 时 cgo 回退到宿主 g++，
+  # 而宿主 g++ 不认 mingw 的 -mthreads，报 unrecognized command-line option。
+  windows/amd64) GOOS=windows GOARCH=amd64 CC="${CC:-x86_64-w64-mingw32-gcc}" CXX="${CXX:-x86_64-w64-mingw32-g++}" ;;
   all)
     "$0" linux/amd64   "$COMPONENT"
     "$0" linux/arm64   "$COMPONENT"
@@ -59,6 +64,34 @@ fi
 export CGO_ENABLED="${CGO_ENABLED:-1}"
 
 mkdir -p "$BUILD_DIR"
+
+# ---- .syso 隔离 ----
+#
+# cmd/{homed,waiter}/*.syso 是 Windows 资源对象（COFF，含图标/版本信息）。
+# Go 会把同目录的 .syso 无条件链进任何目标，于是交叉编译到非 Windows 平台时：
+#   - linux/arm64、darwin/arm64 报 "unknown ARM64 relocation type 3"
+#   - 其他架构报 "file format not recognized"
+# package-linux.sh 有 hide_syso()，但直接调本脚本时没有那层保护——
+# 这正是 arm64 产物长期缺失的原因（曾被误判为缺 g++ 交叉编译器）。
+SYSO_HIDDEN=()
+hide_syso_for_target() {
+  [ "${GOOS:-}" = "windows" ] && return 0
+  local f
+  for f in "$PROJECT_ROOT"/cmd/homed/*.syso "$PROJECT_ROOT"/cmd/waiter/*.syso; do
+    [ -f "$f" ] || continue
+    mv "$f" "$f.hidden"
+    SYSO_HIDDEN+=("$f")
+  done
+}
+restore_syso_for_target() {
+  local f
+  for f in "${SYSO_HIDDEN[@]:-}"; do
+    [ -n "$f" ] && [ -f "$f.hidden" ] && mv "$f.hidden" "$f"
+  done
+  SYSO_HIDDEN=()
+}
+trap restore_syso_for_target EXIT
+hide_syso_for_target
 
 # ---- homed (CGO, sqlite3) ----
 build_homed() {
