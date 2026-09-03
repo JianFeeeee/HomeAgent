@@ -14,14 +14,25 @@ type StageHost struct {
 	toolDefs    []sdk.ToolDef
 	tools       map[string]sdk.ToolHandler
 	toolPlugins map[string]string
-	stages      map[sdk.Stage][]sdk.StageHandler
+	stages      map[sdk.Stage][]stageEntry
+}
+
+// stageEntry 把 stage handler 与它的归属插件绑定。
+//
+// 为何需要归属：子进程插件崩溃后，它注册的 handler 闭包仍在这张表里，
+// 每次 RunStage 都会经 RPC 打向已死进程并报 ErrProcessExited；重启后新 handler
+// 又追加进来，旧的永不退场——错误与重复执行随重启次数线性累积。
+// 有了归属才能在卸载/崩溃时成组摘除。
+type stageEntry struct {
+	plugin string
+	fn     sdk.StageHandler
 }
 
 func NewStageHost() *StageHost {
 	return &StageHost{
 		tools:       make(map[string]sdk.ToolHandler),
 		toolPlugins: make(map[string]string),
-		stages:      make(map[sdk.Stage][]sdk.StageHandler),
+		stages:      make(map[sdk.Stage][]stageEntry),
 	}
 }
 
@@ -41,9 +52,15 @@ func (h *StageHost) RegisterTool(name string, def sdk.ToolDef, handler sdk.ToolH
 }
 
 func (h *StageHost) RegisterStage(stage sdk.Stage, handler sdk.StageHandler) {
+	h.RegisterStageFor("", stage, handler)
+}
+
+// RegisterStageFor 注册带归属插件名的 stage handler。
+// plugin 为空时等同 RegisterStage（内核自身注册的 handler，不参与成组摘除）。
+func (h *StageHost) RegisterStageFor(plugin string, stage sdk.Stage, handler sdk.StageHandler) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
-	h.stages[stage] = append(h.stages[stage], handler)
+	h.stages[stage] = append(h.stages[stage], stageEntry{plugin: plugin, fn: handler})
 }
 
 func (h *StageHost) GetToolDefs() []sdk.ToolDef {
@@ -106,6 +123,36 @@ func (h *StageHost) UnregisterPluginTools(pluginName string) {
 	h.toolDefs = keepDefs
 }
 
+// UnregisterPluginStages 摘除某插件注册的全部 stage handler，返回摘除数量。
+//
+// 与 UnregisterPluginTools 成对：卸载/重载/崩溃时两者都得做，
+// 否则插件的工具没了但 stage handler 还在，继续打向不存在的插件。
+func (h *StageHost) UnregisterPluginStages(pluginName string) int {
+	if pluginName == "" {
+		return 0
+	}
+	h.mu.Lock()
+	defer h.mu.Unlock()
+
+	removed := 0
+	for stage, entries := range h.stages {
+		keep := entries[:0:0]
+		for _, e := range entries {
+			if e.plugin == pluginName {
+				removed++
+				continue
+			}
+			keep = append(keep, e)
+		}
+		if len(keep) == 0 {
+			delete(h.stages, stage)
+			continue
+		}
+		h.stages[stage] = keep
+	}
+	return removed
+}
+
 func inferToolPlugin(name string) string {
 	for i := 0; i < len(name); i++ {
 		if name[i] == '_' {
@@ -123,14 +170,15 @@ func inferToolPlugin(name string) string {
 // handler 返回的 error 会被收集到 ctx.Errors 中并记录日志，不会中断其他 handler 的执行。
 func (h *StageHost) RunStage(stage sdk.Stage, ctx *sdk.StageContext) {
 	h.mu.RLock()
-	handlers := h.stages[stage]
+	entries := make([]stageEntry, len(h.stages[stage]))
+	copy(entries, h.stages[stage])
 	h.mu.RUnlock()
-	if len(handlers) == 0 {
+	if len(entries) == 0 {
 		return
 	}
 	var wg sync.WaitGroup
-	errCh := make(chan error, len(handlers))
-	for _, handler := range handlers {
+	errCh := make(chan error, len(entries))
+	for _, entry := range entries {
 		wg.Add(1)
 		go func(fn sdk.StageHandler) {
 			defer wg.Done()
@@ -142,7 +190,7 @@ func (h *StageHost) RunStage(stage sdk.Stage, ctx *sdk.StageContext) {
 			if err := fn(ctx); err != nil {
 				errCh <- err
 			}
-		}(handler)
+		}(entry.fn)
 	}
 	wg.Wait()
 	close(errCh)
