@@ -332,3 +332,150 @@ func TestProcess_SpawnRequiresHandler(t *testing.T) {
 		t.Fatal("缺少 Handler 应报错（插件无法回调内核）")
 	}
 }
+
+// 插件死亡但孙子进程仍持有 stdout 写端时，内核必须仍能感知退出。
+//
+// 这是「EOF 不等于进程死亡」的回归测试。旧实现只在 readLoop 读到 EOF 后
+// 才 markExited，而 exec.Command 起的孙子进程默认继承插件的 stdout：
+// 插件本体退出后写端仍被孙子持有，EOF 永不到来，于是
+//   - 在途调用挂到自己的超时；
+//   - OnExit 不触发 → 崩溃计数、工具摘除、自动重启全都不发生；
+//   - 进程表里插件已是僵尸，注册表里却一切正常。
+// 生产上 browser 拉 chromium、editdoc 拉 python 正是这个形状。
+// 现在由专职 waitLoop 直接 wait4(2) 判定，不再依赖 fd 生命周期。
+func TestProcess_ExitDetectedDespiteInheritedStdout(t *testing.T) {
+	if _, err := exec.LookPath("sleep"); err != nil {
+		t.Skip("环境无 sleep，跳过")
+	}
+	bin := buildTestPlugin(t, "forkplugin.go")
+
+	exitCh := make(chan error, 1)
+	p, err := Spawn("fork", bin, Options{
+		Handler: noopHandler,
+		OnExit:  func(name string, err error) { exitCh <- err },
+	})
+	if err != nil {
+		t.Fatalf("Spawn: %v", err)
+	}
+	defer p.Kill()
+
+	// 让插件本体退出（孙子 sleep 300 仍活着，继续持有 stdout 写端）
+	if _, callErr := p.Call(MethodToolInvoke, ToolInvokeParams{Name: "die"}); callErr == nil {
+		t.Error("插件退出时在途调用应返回错误")
+	}
+
+	select {
+	case exitErr := <-exitCh:
+		if exitErr == nil {
+			t.Error("非零退出码应报告为错误（供崩溃计数使用）")
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("孙子进程持有 stdout 时未能感知插件退出——退化回只靠 EOF 判定")
+	}
+
+	if _, err := p.Call(MethodToolInvoke, ToolInvokeParams{Name: "x"}); !errors.Is(err, ErrProcessExited) {
+		t.Errorf("退出后调用应返回 ErrProcessExited，实际 %v", err)
+	}
+}
+
+// Supervisor 台账：握手成功即在册，进程退出即注销。
+func TestSupervisor_TrackAndUntrack(t *testing.T) {
+	bin := buildTestPlugin(t, "echoplugin.go")
+	sup := NewSupervisor()
+
+	p, err := Spawn("echo", bin, Options{Handler: noopHandler, Supervisor: sup})
+	if err != nil {
+		t.Fatalf("Spawn: %v", err)
+	}
+	if sup.Count() != 1 {
+		t.Fatalf("握手成功后应在册，实际 %d", sup.Count())
+	}
+	got, ok := sup.Get("echo")
+	if !ok || got.PID() != p.PID() {
+		t.Errorf("台账里的进程应是刚 spawn 的那个")
+	}
+	list := sup.List()
+	if len(list) != 1 || !list[0].Alive || list[0].PID != p.PID() {
+		t.Errorf("List 应报告存活与 PID，实际 %+v", list)
+	}
+
+	if err := p.Stop(); err != nil {
+		t.Fatalf("Stop: %v", err)
+	}
+	// 退出回调在 markExited 里注销，等它落地
+	deadline := time.Now().Add(3 * time.Second)
+	for sup.Count() != 0 && time.Now().Before(deadline) {
+		time.Sleep(10 * time.Millisecond)
+	}
+	if sup.Count() != 0 {
+		t.Errorf("进程退出后应注销，实际仍有 %d 个在册", sup.Count())
+	}
+}
+
+// StopAll 必须停掉全部在册子进程——内核关停时不留孤儿。
+func TestSupervisor_StopAllLeavesNoSurvivor(t *testing.T) {
+	bin := buildTestPlugin(t, "echoplugin.go")
+	sup := NewSupervisor()
+
+	var procs []*Process
+	for i := 0; i < 3; i++ {
+		p, err := Spawn(fmt.Sprintf("echo%d", i), bin, Options{Handler: noopHandler, Supervisor: sup})
+		if err != nil {
+			t.Fatalf("Spawn %d: %v", i, err)
+		}
+		procs = append(procs, p)
+	}
+	if sup.Count() != 3 {
+		t.Fatalf("应有 3 个在册，实际 %d", sup.Count())
+	}
+
+	sup.StopAll(5 * time.Second)
+
+	for _, p := range procs {
+		select {
+		case <-p.Exited():
+		case <-time.After(2 * time.Second):
+			t.Errorf("%s 未被 StopAll 停掉（会成为孤儿进程）", p.Name())
+		}
+	}
+}
+
+// 卡死插件（不响应 plugin.stop）必须在 StopAll 的预算内被强杀。
+func TestSupervisor_StopAllKillsUnresponsive(t *testing.T) {
+	bin := buildTestPlugin(t, "hangplugin.go")
+	sup := NewSupervisor()
+
+	p, err := Spawn("hang", bin, Options{Handler: noopHandler, Supervisor: sup})
+	if err != nil {
+		t.Fatalf("Spawn: %v", err)
+	}
+
+	// 预算给足以覆盖 stopGracePeriod，之后剩下的一律 Kill
+	sup.StopAll(500 * time.Millisecond)
+
+	select {
+	case <-p.Exited():
+	case <-time.After(10 * time.Second):
+		t.Error("不响应 plugin.stop 的插件应被强制结束，否则 homed 关停会被它拖住")
+	}
+}
+
+// 关停后完成握手的进程不得留存：立即被结束，不能活过内核。
+func TestSupervisor_TrackAfterCloseKillsProcess(t *testing.T) {
+	bin := buildTestPlugin(t, "echoplugin.go")
+	sup := NewSupervisor()
+	sup.StopAll(time.Second) // 置 closed
+
+	p, err := Spawn("late", bin, Options{Handler: noopHandler, Supervisor: sup})
+	if err != nil {
+		t.Fatalf("Spawn: %v", err)
+	}
+	if sup.Count() != 0 {
+		t.Errorf("关停后不应再纳管新进程，实际在册 %d", sup.Count())
+	}
+	select {
+	case <-p.Exited():
+	case <-time.After(3 * time.Second):
+		t.Error("关停后冒出的进程应被立即结束")
+	}
+}
