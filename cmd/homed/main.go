@@ -295,6 +295,8 @@ func main() {
 			ContextWindow: src.ContextWindow,
 			MaxConcurrent: src.MaxConcurrent,
 			Priority:      src.Priority,
+			Vision:        src.Vision,
+			Audio:         src.Audio,
 		}, luaVM, src.Name, src.Adapter)
 		providerMgr.Register(src.Name, luaProvider)
 		if src.Adapter != "" {

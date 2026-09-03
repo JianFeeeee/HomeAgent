@@ -107,6 +107,17 @@ type LLMSource struct {
 	MaxConcurrent   int    `json:"max_concurrent,omitempty"`
 	Priority        int    `json:"priority,omitempty"`
 	ThinkingEnabled bool   `json:"thinking_enabled,omitempty"`
+
+	// Vision/Audio 声明该源能否真正处理多模态内容块。
+	//
+	// 为何必须显式声明而不是探测：网关（如 llmsproxy）会把 image_url 块静默剥离后
+	// 转发给纯文本上游，请求依然 200,​​带图与不带图的 prompt_tokens 完全相同。
+	// 模型于是回答「我没有看到图片」，而内核以为注入成功——这正是 v1.0.0 之前
+	// output_send 假成功的同一类缺陷：告诉调用方成功而实际未送达。
+	// 探测需要额外一次真实调用且结果不稳定（取决于 AUTO 路由到哪个上游），
+	// 因此改为部署时声明。留空（false）按不支持处理，走文字回退链。
+	Vision bool `json:"vision,omitempty"`
+	Audio  bool `json:"audio,omitempty"`
 }
 
 type LLMConfig struct {
