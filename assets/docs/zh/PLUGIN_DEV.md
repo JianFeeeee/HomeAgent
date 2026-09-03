@@ -30,7 +30,7 @@ type Plugin interface {
 
 | 方式 | 适用场景 | 复杂度 |
 |------|---------|--------|
-| **动态 .so/.dll 插件（推荐）** | 独立分发的第三方插件 | 中等，使用 `plugindev` 工具链生成 |
+| **子进程插件（推荐）** | 独立分发的第三方插件 | 中等，使用 `plugindev` 工具链生成 |
 | **内置插件** | 随 HomeAgent 一起发布 | 简单，需合入主仓库 |
 | **Lua 脚本插件** | 轻量快速原型 | 简单，使用 `plugindev init --lua` 生成 |
 
@@ -115,7 +115,7 @@ myplugin/
 └── thirdpart/     — 外部源码存放目录（可选）
 ```
 
-编译时自动生成 C ABI bridge 文件（`z_bridge_gen.go` + `z_entry.c`），无需手动创建。
+编译时自动生成子进程运行时文件（`z_proc_gen.go` 等），无需手动创建。
 
 **Lua 插件**：
 
@@ -143,8 +143,8 @@ plugindev build --replace <mod@path> # 追加 go.mod replace 指令（可多次�
 
 执行过程：
 1. 读取 `plg.json` 的 `targets`/`bundle` 字段确定构建目标（bundle 模式优先，见下节）
-2. 自动生成 C ABI bridge 代码（`z_bridge_gen.go` + `z_entry.c`，Windows 仅 `z_bridge_gen.go`）
-3. **Go 插件**：执行 `go build -buildmode=c-shared`（生成 `.so` / `.dylib` / `.dll`）
+2. 自动生成子进程运行时代码（`z_proc_gen.go` + `z_proc_shm_unix.go` + `z_proc_shm_windows.go`）
+3. **Go 插件**：执行 `go build`（普通可执行文件，`CGO_ENABLED=0`）
 4. **Lua 插件**：直接打包源码，无需编译（打包内容：`plugin.json` + `main.lua`，以及可选的 `README.md`、`LICENSE`、`thirdpart/*.lua`）
 5. 生成 `plugin.json` 输出清单
 6. 打包为 `.hmap` 分发包（zip 格式，内含 `plugin.json` + 二进制）
@@ -156,13 +156,25 @@ plugindev build --replace <mod@path> # 追加 go.mod replace 指令（可多次�
 | `plg.json` | 项目元信息，由开发者维护 | `targets` — 单平台构建目标（如 `"linux/amd64,windows/amd64"`）；`bundle` — 多平台合集开关（默认 `true`）|
 | `plugin.json` | 构建产物清单，`plugindev build` 自动生成 | `entry` — 入口文件名；`platforms` — 声明的支持平台 |
 
-每个目标生成单独的 `.hmap`，二进制文件名由平台决定：
+每个目标生成单独的 `.hmap`。子进程插件是普通可执行文件，**不分平台后缀**：
 
 | 平台 | 二进制 |
 |------|--------|
-| Linux | `plugin.so` |
-| macOS | `plugin.dylib` |
-| Windows | `plugin.dll` |
+| Linux / macOS / Windows | `plugin.bin` |
+
+bundle 包内按 `plugin.bin.<goos>.<goarch>` 区分各平台，安装时内核挑当前平台
+那份重命名为 `plugin.bin`。
+
+> ⚠️ **v1.0.0 破坏性变更**：外部插件从 C ABI 动态库改为**子进程 + 共享内存**。
+>
+> - `plugin.so` / `plugin.dylib` / `plugin.dll` **不再被加载**。新内核遇到旧产物
+>   会跳过并报可操作错误，不崩溃。
+> - **业务代码不需要改一行**——公开 SDK 接口零改动，只需用新版 `plugindev` 重编。
+> - `plg.json` 的 `entry` 字段对 Go 插件**已无意义**（写着 `plugin.so` 也无妨），
+>   它现在只用于区分 Lua 插件。
+> - 产物不再需要 cgo，交叉编译无需目标平台 C 工具链。
+> - Windows 从「只下发 3 个 stage 字段、无写回」升级到 16 字段全可见 + 写回，
+>   与 Unix 共用同一套 RPC 实现。
 
 ### 构建目标与多平台打包（bundle）
 
@@ -269,7 +281,7 @@ func NewPlugin(name string, config map[string]interface{}) (sdk.Plugin, error) {
 }
 ```
 
-编译时 `plugindev build` 根据目标平台自动生成 C ABI bridge 代码（`z_bridge_gen.go` + `z_entry.c`），无需手动编写。Windows DLL 和 Linux/macOS .so 共享同一入口。
+编译时 `plugindev build` 自动生成子进程运行时代码（`z_proc_gen.go` 平台无关 + `z_proc_shm_unix.go` / `z_proc_shm_windows.go` 平台特定），无需手动编写。三平台共享同一入口与同一套 RPC 逻辑，仅跨进程资源传递机制不同（Unix 继承 fd，Windows 命名内核对象）。
 
 ### PluginSDK 核心 API
 
@@ -321,7 +333,7 @@ s.RegisterTool("weather_query", sdk.ToolDef{
        └── 否 → 正常记忆，无需额外处理
 ```
 
-> **注意**：`Cleaner` 是 Go `func` 类型（`json:"-"`），不能跨 C ABI 边界序列化，因此 C/C++/Rust 等远程插件无法使用。**Lua 插件不受此限**：def 表中直接传 Lua 函数即可（`cleaner = function(text) return text end`），Go 桥接层会在计算层调用时逐次回调 Lua。
+> **注意**：`Cleaner` 是 Go `func` 类型（`json:"-"`），不能跨进程序列化，因此 C/C++/Rust 等远程插件无法使用。**Lua 插件不受此限**：def 表中直接传 Lua 函数即可（`cleaner = function(text) return text end`），Go 桥接层会在计算层调用时逐次回调 Lua。
 
 #### 阶段钩子 — 干预消息处理流
 
@@ -526,7 +538,7 @@ Lua 插件运行在内核进程内的 gopher-lua 解释器中（单 Lua 状态 +
 
 - **被动回调模型**：`main.lua` 仅在加载时执行一次，此后插件的工具、阶段钩子、输出/输入通道、注册 API 全部由内核事件驱动回调 Lua 函数；插件不能自己启动后台任务。
 - **无并发/无常驻服务能力**：Lua 侧没有 goroutine、协程调度、`os`/`io` 库和 socket 监听能力，唯一主动出站通道是 `sdk.http.get/post`（同步请求）。任何阻塞循环都会持锁卡死该插件的所有调用。
-- **常驻服务（如监听端口、后台轮询、定时任务）请使用 Go 插件**（工具链编译的 `.so`/`.dll`，可自行启动 goroutine，参见 webui/cli 插件）。Lua 插件的等价做法是事件驱动：注册工具/阶段钩子/通道由内核回调，或经 `sdk.http` 与外部进程交互。
+- **常驻服务（如监听端口、后台轮询、定时任务）请使用 Go 插件**（工具链编译的 `plugin.bin`，可自行启动 goroutine，参见 webui/cli 插件）。Lua 插件的等价做法是事件驱动：注册工具/阶段钩子/通道由内核回调，或经 `sdk.http` 与外部进程交互。
 
 ### 插件结构
 
@@ -575,7 +587,7 @@ lua main.lua
 
 ### Lua SDK API
 
-Lua 插件的 `sdk.*` API 与外部插件（C ABI / 工具链编译的 `.so`/`.dll`）能力完全对齐：注册类函数调用即时报错（抛 Lua error），数据类函数统一返回 `(result, err)`，`err` 为 nil 表示成功。核心未装配的子系统（如 SocialAPI）返回空值而非报错。
+Lua 插件的 `sdk.*` API 与外部插件（工具链编译的 `plugin.bin` 子进程）能力完全对齐：注册类函数调用即时报错（抛 Lua error），数据类函数统一返回 `(result, err)`，`err` 为 nil 表示成功。核心未装配的子系统（如 SocialAPI）返回空值而非报错。
 
 **注册类**
 
@@ -593,7 +605,7 @@ Lua 插件的 `sdk.*` API 与外部插件（C ABI / 工具链编译的 `.so`/`.d
 
 `register_stage` 的 handler 收到完整上下文（与外部插件一致）：`raw_message`、`user_id`、`group_id`、`phase`、`llm_text`、`final_text`、`no_memory`、`response`（已响应时）、`tool_calls`、`tool_results`。
 
-**Stage 写回（ABI v2）**：handler 收到的 `ctx` 是引用 table——在 handler 内直接修改可写回字段并同步至内核 `StageContext`（与 C ABI v2 外部插件能力对齐）：
+**Stage 写回**：handler 收到的 `ctx` 是引用 table——在 handler 内直接修改可写回字段并同步至内核 `StageContext`（与子进程外部插件能力对齐）：
 
 ```lua
 sdk.register_stage("on_input", function(ctx)
@@ -621,7 +633,7 @@ end)
 | `sdk.inject_interrupt(source, channel, text)` | 中断投递 |
 | `sdk.inject_text_no_memory(source, channel, text)` | 免记忆投递 |
 
-**数据类（与 C ABI 对齐，均返回 `(result, err)`）**
+**数据类（与子进程外部插件对齐，均返回 `(result, err)`）**
 
 | 子表 | 函数 |
 |------|------|
