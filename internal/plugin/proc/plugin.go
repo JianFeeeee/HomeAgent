@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log"
 	"sync"
+	"sync/atomic"
 
 	pubsdk "gitcode.com/JianFeeeee/homeagent-sdk/sdk"
 )
@@ -43,6 +44,14 @@ type Plugin struct {
 	caps *capabilitySet
 
 	stopOnce sync.Once
+
+	// stopping 标记「本次退出是内核主动发起的」，用于压掉 onCrash。
+	//
+	// 必要性：Stop() 宽限期超时与 Close() 都走 Process.Kill()，
+	// 而 Kill 产生的 `signal: killed` 是非 nil 的 waitErr——若不区分，
+	// 重载/禁用/卸载这些**内核自己发起**的停止会被 handleExit 当成崩溃上报，
+	// 触发一轮多余的自动重启（重载路径下等于把刚装好的插件又推倒一次）。
+	stopping atomic.Bool
 }
 
 // New 创建子进程插件（不启动进程）。
@@ -66,6 +75,31 @@ func New(name, bin, dir string, config map[string]interface{}, host *Host, onCra
 
 // Name 实现 sdk.Plugin。
 func (p *Plugin) Name() string { return p.name }
+
+// PID 返回子进程号；未启动或已退出返回 0。
+// 供 pluginmgr 呈现「插件实际在跑哪个进程」。
+func (p *Plugin) PID() int {
+	if p.proc == nil {
+		return 0
+	}
+	if !p.Alive() {
+		return 0
+	}
+	return p.proc.PID()
+}
+
+// Alive 报告子进程是否仍存活。
+func (p *Plugin) Alive() bool {
+	if p.proc == nil {
+		return false
+	}
+	select {
+	case <-p.proc.Exited():
+		return false
+	default:
+		return true
+	}
+}
 
 // Start 启动子进程并完成注册。
 //
@@ -99,6 +133,7 @@ func (p *Plugin) Start(core CoreSDK) error {
 		EvtRingSize: evtTotalSize,
 		Handler:     p.handler.Handle,
 		OnExit:      p.handleExit,
+		Supervisor:  p.host.Supervisor(),
 	})
 	if err != nil {
 		return err
@@ -124,6 +159,7 @@ func (p *Plugin) Start(core CoreSDK) error {
 
 // Stop 优雅停止（实现 sdk.Plugin）。
 func (p *Plugin) Stop() error {
+	p.stopping.Store(true)
 	var err error
 	p.stopOnce.Do(func() {
 		if p.proc != nil {
@@ -138,6 +174,7 @@ func (p *Plugin) Stop() error {
 // **这里是真 kill + wait**——对比 cabi 路径的 Close 只做 dlclose，
 // 而 dlclose 对 Go c-shared 是 no-op（§1.1，热重载静默失效的根因）。
 func (p *Plugin) Close() error {
+	p.stopping.Store(true)
 	var err error
 	p.stopOnce.Do(func() {
 		if p.proc != nil {
@@ -155,6 +192,11 @@ func (p *Plugin) Close() error {
 func (p *Plugin) handleExit(name string, err error) {
 	if p.host != nil && p.host.ForceReleaseLock(name) {
 		log.Printf("[proc] %s 退出，内核已释放其持有的 stage 锁", name)
+	}
+	// 内核主动停止（Stop/Close，含宽限期超时后的 Kill）不算崩溃：
+	// 否则重载/禁用/卸载都会误触发自动重启。
+	if p.stopping.Load() {
+		return
 	}
 	if err != nil && p.onCrash != nil {
 		p.onCrash(name, err)

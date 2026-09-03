@@ -36,6 +36,11 @@ type Process struct {
 	stdin  *bufio.Writer
 	stdout io.ReadCloser
 
+	// stdinFile / stdoutFile 是父进程侧的管道端（手工 os.Pipe，非 cmd.StdinPipe）。
+	// 持有它们才能在退出时主动 Close，逼 readLoop 从 Scan 里出来。
+	stdinFile  *os.File
+	stdoutFile *os.File
+
 	// writeMu 串行化 stdin 写入：NDJSON 帧不能交错，否则对端解析错乱。
 	writeMu sync.Mutex
 
@@ -48,17 +53,26 @@ type Process struct {
 	// handler 处理插件反向发起的调用（51 个 core.* method）。
 	handler RequestHandler
 
-	// exited 在 readLoop 检测到 EOF/进程退出后关闭，用于唤醒所有等待者。
+	// exited 在进程被收割后关闭，用于唤醒所有等待者。
 	exited    chan struct{}
 	exitOnce  sync.Once
 	exitErr   atomic.Pointer[error]
 	readerWG  sync.WaitGroup
+	waiterWG  sync.WaitGroup
 	readyOnce sync.Once
 	ready     chan struct{}
+
+	// waitErr 由**唯一的** waitLoop 写入：cmd.Wait() 的返回值。
+	// waitDone 关闭后 waitErr 才可读。
+	waitErr  error
+	waitDone chan struct{}
 
 	// onExit 在进程退出时回调（内核用它喂 plugin_health.recordCrash，
 	// 以及 ForceRelease 释放该插件持有的 stage 锁）。
 	onExit func(name string, err error)
+
+	// sup 是内核的集中进程表（可为 nil，单测直接 Spawn 时）。
+	sup *Supervisor
 
 	// shmSize 是握手时告知插件的共享段大小（0 表示本插件不用共享段）。
 	shmSize int
@@ -87,6 +101,8 @@ type Options struct {
 	Handler RequestHandler
 	// OnExit 进程退出回调。
 	OnExit func(name string, err error)
+	// Supervisor 是内核的集中进程表；为 nil 时不纳管（单测路径）。
+	Supervisor *Supervisor
 	// HandshakeTimeout 建链超时，默认 10s。
 	HandshakeTimeout time.Duration
 }
@@ -97,6 +113,9 @@ const (
 	// stopGracePeriod 是发出 plugin.stop 后等待进程自行退出的时间。
 	// 超时则 Kill——**这是"真正的取消"**，对比 cgo 路径超时后线程永久泄漏。
 	stopGracePeriod = 5 * time.Second
+	// killReapTimeout 是 SIGKILL 后等待 waitLoop 收割的上限。
+	// 正常情况 wait4 微秒级返回；超过说明卡在不可中断的内核态。
+	killReapTimeout = 2 * time.Second
 )
 
 // ErrProcessExited 表示子进程已退出，调用无法完成。
@@ -120,35 +139,68 @@ func Spawn(name, bin string, opts Options) (*Process, error) {
 		cmd.Env = append(os.Environ(), opts.Env...)
 	}
 	cmd.ExtraFiles = opts.ExtraFiles
+	applyProcAttr(cmd)
 
-	stdinPipe, err := cmd.StdinPipe()
+	// 管道手工创建而非用 cmd.StdinPipe/StdoutPipe。
+	//
+	// 原因：cmd.Wait() 会等待并**关闭** StdinPipe/StdoutPipe 创建的管道，
+	// 且文档明确要求“读完再 Wait”。既然现在有一根专职的 waitLoop 立即
+	// Wait（不等 readLoop），就必须自己控制管道生命期，否则会与
+	// os/exec 的内部关闭竞争，在 readLoop 里读到 "file already closed"。
+	stdinR, stdinW, err := os.Pipe()
 	if err != nil {
 		return nil, fmt.Errorf("proc: %s stdin 管道: %w", name, err)
 	}
-	stdoutPipe, err := cmd.StdoutPipe()
+	stdoutR, stdoutW, err := os.Pipe()
 	if err != nil {
+		stdinR.Close()
+		stdinW.Close()
 		return nil, fmt.Errorf("proc: %s stdout 管道: %w", name, err)
 	}
+	cmd.Stdin = stdinR
+	cmd.Stdout = stdoutW
 
 	p := &Process{
 		name:        name,
 		bin:         bin,
 		dir:         opts.Dir,
 		cmd:         cmd,
-		stdin:       bufio.NewWriter(stdinPipe),
-		stdout:      stdoutPipe,
+		stdin:       bufio.NewWriter(stdinW),
+		stdout:      stdoutR,
+		stdinFile:   stdinW,
+		stdoutFile:  stdoutR,
 		pending:     make(map[uint64]chan *Response),
 		handler:     opts.Handler,
 		exited:      make(chan struct{}),
 		ready:       make(chan struct{}),
+		waitDone:    make(chan struct{}),
 		onExit:      opts.OnExit,
+		sup:         opts.Supervisor,
 		shmSize:     opts.ShmSize,
 		evtRingSize: opts.EvtRingSize,
 	}
 
 	if err := cmd.Start(); err != nil {
+		stdinR.Close()
+		stdinW.Close()
+		stdoutR.Close()
+		stdoutW.Close()
 		return nil, fmt.Errorf("proc: 启动 %s (%s): %w", name, bin, err)
 	}
+	// 子进程已继承它们，父进程侧关掉对端。
+	// stdoutW 必须关：否则子进程死后写端仍被父进程持有，readLoop 永不到 EOF。
+	stdinR.Close()
+	stdoutW.Close()
+
+	// 专职收割协程：这是 cmd.Wait() 的**唯一**调用点。
+	//
+	// 为何不能靠 readLoop 的 EOF：EOF 只说明 stdout 写端全部关闭，而插件
+	// fork 出去的孙子进程（browser 拉 chromium、editdoc 拉 python）继承着
+	// 同一个 stdout：插件本体死了但孙子还持有写端，EOF 就不来，
+	// 内核完全感知不到插件已死（进程表里是僵尸，注册表里一切正常）。
+	// wait 直接盯进程本身，不受 fd 继承影响。
+	p.waiterWG.Add(1)
+	go p.waitLoop()
 
 	p.readerWG.Add(1)
 	go p.readLoop()
@@ -159,6 +211,9 @@ func Spawn(name, bin string, opts Options) (*Process, error) {
 	if err := p.handshake(timeout); err != nil {
 		p.Kill()
 		return nil, err
+	}
+	if p.sup != nil {
+		p.sup.track(p)
 	}
 	return p, nil
 }
@@ -270,22 +325,54 @@ func (p *Process) readLoop() {
 		log.Printf("[proc] %s 读取 stdout 出错: %v", p.name, err)
 	}
 
-	// stdout 关闭（EOF）意味着进程结束——2.5ms 内即可感知（实验 6）。
+	// stdout 关闭（EOF）通常意味着进程结束——2.5ms 内即可感知（实验 6）。
+	//
+	// 但 EOF **不是**权威信号：插件 fork 的孙子进程继承同一 stdout 写端时，
+	// 插件本体死了 EOF 也不会到。真正的死亡判定在 waitLoop。
+	// 这里只等 waitLoop 的结果（若进程确实已退，它立即就给）。
+	<-p.waitDone
 	p.markExited()
 }
 
-// markExited 回收进程、唤醒所有等待者、触发 onExit 回调。
+// waitLoop 是内核侧**唯一**的 cmd.Wait() 调用点，每个子进程一根。
 //
-// 这是「把 panic 捕获换成进程退出检测」的落点（§2.3）：
-// plugin_health 的 recordCrash / 冷却 / 自愈 / pendingReloads 全部逻辑复用，
-// 只是信号源从 recover() 变成进程退出。
+// 为何需要专职协程而不是靠 readLoop 的 EOF：
+//  1. **EOF 不等于进程死**。插件用 exec.Command 拉起的孙子进程（browser 拉
+//     chromium、editdoc 拉 python）默认继承插件的 stdout。插件被 kill 后
+//     孙子还活着持有写端，readLoop 就永远阻在 Scan 上——内核根本不知道
+//     插件已经死了，工具调用一直超时，自愈也永不触发。
+//  2. **不收割就是僵尸进程**。不调 Wait 的已退出子进程以 Z 状态占着 PID 槽位。
+//  3. **反应速度**。Wait 底层是 wait4(2)，内核侧退出即返回（微秒级），
+//     比任何轮询健康检查都快，也不消耗 CPU。
+func (p *Process) waitLoop() {
+	defer p.waiterWG.Done()
+	p.waitErr = p.cmd.Wait()
+	close(p.waitDone)
+
+	// 主动拆管道：若孙子进程仍持有 stdout 写端，readLoop 不会自己退，
+	// 关掉读端逼它从 Scan 里出来（报 file already closed，已预期）。
+	if p.stdoutFile != nil {
+		_ = p.stdoutFile.Close()
+	}
+	if p.stdinFile != nil {
+		_ = p.stdinFile.Close()
+	}
+
+	p.markExited()
+}
+
+// markExited 唤醒所有等待者、触发 onExit 回调（幂等，两条路径可并发调用）。
+//
+// 这是「把 panic 捕获换成进程退出检测」的落点（§2.3）。
+// 注意：不在此处调 cmd.Wait()——它属于 waitLoop，Wait 并非并发安全，
+// 两处调会报 "wait: no child processes" 或丢失真实退出码。
 func (p *Process) markExited() {
 	p.exitOnce.Do(func() {
-		waitErr := p.cmd.Wait()
-		if waitErr != nil {
-			e := fmt.Errorf("插件进程 %s 异常退出: %w", p.name, waitErr)
+		<-p.waitDone // 保证 waitErr 可读
+		if p.waitErr != nil {
+			e := fmt.Errorf("插件进程 %s 异常退出: %w", p.name, p.waitErr)
 			p.exitErr.Store(&e)
-			log.Printf("[proc] %s 退出: %v", p.name, waitErr)
+			log.Printf("[proc] %s 退出: %v", p.name, p.waitErr)
 		} else {
 			log.Printf("[proc] %s 正常退出", p.name)
 		}
@@ -305,6 +392,9 @@ func (p *Process) markExited() {
 		}
 
 		close(p.exited)
+		if p.sup != nil {
+			p.sup.untrack(p.name)
+		}
 		if p.onExit != nil {
 			p.onExit(p.name, p.ExitError())
 		}
@@ -491,11 +581,14 @@ func (p *Process) Kill() error {
 		return nil
 	}
 	err := p.cmd.Process.Kill()
-	// 等 readLoop 观察到 EOF 并完成 Wait/清理
+	// 等 waitLoop 收割完成。不再在此兜底调 markExited：
+	// cmd.Wait 只能由 waitLoop 调一次，两处调会报 "wait: no child processes"。
 	select {
 	case <-p.exited:
-	case <-time.After(2 * time.Second):
-		p.markExited() // 兜底：极端情况下强制走清理
+	case <-time.After(killReapTimeout):
+		// SIGKILL 后仍未收割：进程卡在不可中断的内核态（D 状态，如 NFS I/O）。
+		// 不能无限等，否则重载路径整体挂死；留日志供定位。
+		log.Printf("[proc] %s SIGKILL 后 %v 仍未被收割（进程可能卡在内核态）", p.name, killReapTimeout)
 	}
 	p.readerWG.Wait()
 	if err != nil && !errors.Is(err, os.ErrProcessDone) {

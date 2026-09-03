@@ -81,6 +81,10 @@ func (f *fakePluginMgr) PluginMetas() map[string]sdk.PluginMeta {
 	return map[string]sdk.PluginMeta{}
 }
 func (f *fakePluginMgr) PluginDir() string { return "" }
+func (f *fakePluginMgr) PluginRuntime(string) (sdk.PluginRuntimeInfo, bool) {
+	return sdk.PluginRuntimeInfo{}, false
+}
+func (f *fakePluginMgr) ListPluginRuntimes() []sdk.PluginRuntimeInfo { return nil }
 
 // buildHmap 构造一个最小 .hmap 包。
 func buildHmap(t *testing.T, name, version string) []byte {

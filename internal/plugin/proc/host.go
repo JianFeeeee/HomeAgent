@@ -45,6 +45,12 @@ type Host struct {
 	stageMu sync.Mutex
 	coordMu sync.Mutex
 	coord   *stageCoordinator
+
+	// sup 是内核侧唯一的子进程台账，与共享段同生命周期。
+	//
+	// 放在 Host 而不是 registry 的理由：能拿到 Host 的地方就能拿到台账，
+	// 而 Host 本就是「全部子进程插件共享的那一份内核侧状态」。
+	sup *Supervisor
 }
 
 // NewHost 创建共享段（平台层 allocShm + 布局初始化）。
@@ -81,6 +87,7 @@ func NewHost() (*Host, error) {
 	evtRing.Init()
 
 	return &Host{
+		sup:         NewSupervisor(),
 		memfd:       memfd,
 		data:        data,
 		seg:         seg,
@@ -102,7 +109,15 @@ func NewHost() (*Host, error) {
 const shmDefaultSize = 256 * 1024
 
 // Close 释放共享段（StageContext + 事件环）。
+// Supervisor 返回子进程台账（供 registry 查询/关停）。
+func (h *Host) Supervisor() *Supervisor { return h.sup }
+
 func (h *Host) Close() error {
+	// 先停全部子进程再拆段：插件还持有映射时 unmap，
+	// 它们下一次访问共享段就是 SIGBUS。
+	if h.sup != nil {
+		h.sup.StopAll(0)
+	}
 	var firstErr error
 	if h.data != nil {
 		if err := freeShm(h.memfd, h.data); err != nil && firstErr == nil {
