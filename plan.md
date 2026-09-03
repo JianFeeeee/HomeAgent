@@ -910,3 +910,182 @@ homed RSS = 2.34 GB   RssAnon = 2.35 GB（真实驻留）
 context 累积导致的内存增长。
 
 - [ ] 单独排查 homed 主 heap 的 2.36GB 驻留来源
+
+---
+
+## 12. 子进程化迁移收尾：剩余工作与目标效果
+
+> 状态锚点（2026-09-03）：迁移主体已完成并上生产。内核 **v1.0.0**，
+> 生产 17 个外部插件全部经子进程通道运行，15 个子进程稳定存活。
+> 分支：主仓 `feature/plugin-proc-migration` @ `12259ed`（领先 main 26），
+> SDK 仓 `feature/plugin-proc-migration` @ `5ed8d65`（领先 main 4）。
+>
+> 三项合入门禁**已全部通过**：`make test` 零失败、`go vet ./...` 无告警、
+> `git diff main -- third_party/homeagent-sdk/sdk/` 为空（接口冻结不变量）。
+>
+> 详细执行记录见 `docs/zh/plugin-migration-plan.md`（Part 0~6 全部标记完成）。
+
+### 12.1 待用户决策后执行：合并到 main + 发布分支
+
+**当前卡在四个决策点**，不是技术阻塞：
+
+| # | 决策点 | 备选 | 倾向 |
+|---|---|---|---|
+| 1 | merge 方式 | `--no-ff` 保留 25 commit / squash 压成一条 | `--no-ff`——commit message 记录了「为何共享同一块 memfd」「为何 procCore 不能嵌入」等踩坑过程 |
+| 2 | 合回后是否删 feature 分支 | 删（规范要求）/ 留（8-9 周大特性） | 听用户 |
+| 3 | release 构建是否再替换生产二进制 | 换（溯源干净）/ 不换（避免停服） | 听用户 |
+| 4 | SDK 仓是否同步 main + release | 同步 / 只合 main / 暂不处理 | 同步——规范说「两仓版本对齐是第一优先级」 |
+
+**目标效果**：
+
+- `main` 含全部迁移工作且**永远可部署**（规范 §二.1）。
+- 存在 `release/v1.0.0` 分支，`v1.0.0` tag **打在 release 分支上**而非 feature。
+  ⚠️ 当前 tag 指向 `670efcd`（feature 分支中间点），需删除重打。
+- 两仓版本对齐：主仓 `internal/meta.Version` = SDK 仓 `meta.Version` = `1.0.0`，
+  且 vendored SDK 与 SDK 仓 release tag 内容一致。
+- 现网部署产物可追溯到 release tag 构建（规范 §四）。
+
+**执行序列**（决策落定后）：
+
+```bash
+# 主仓
+git checkout main && git merge --no-ff feature/plugin-proc-migration
+git checkout -b release/v1.0.0 main
+git tag -d v1.0.0 && git tag -a v1.0.0        # 重打在 release 上
+make build VERSION=1.0.0                       # 发布产物
+
+# SDK 仓（同上流程）
+cd third_party/homeagent-sdk
+git checkout main && git merge --no-ff feature/plugin-proc-migration
+git checkout -b release/v1.0.0 main && git tag -a v1.0.0
+```
+
+---
+
+### 12.2 验收清单里两项**未达成**的目标
+
+这两项在 `docs/zh/plugin-migration-plan.md` 的最终验收清单里如实标了 ⚠️，
+不是遗漏而是明确的未兑现承诺。
+
+#### 12.2.1 `SetToolBlocks` 仍是未实现（承诺未兑现）
+
+- **现状**：`io.setToolBlocks` 已在 `proc/protocol.go` 定义、已划入 `CapCore`
+  能力组，但 `corehandler.go` 的 handler 仍返回未实现。
+- **为何不算回归**：C ABI 时代它也是空实现（§1.4 / `case` 无对应逻辑），
+  能力从「给不了」变成「暂未接」，没变差。
+- **但 §3.8 承诺过**：迁移评估明确写「`SetToolBlocks` → 二进制写入 arena，
+  返回 `Slice` 描述符 ✅」。这条没做到。
+- **目标效果**：插件调用 `SetToolBlocks(blocks)` 后，多模态内容块经共享段
+  arena 传给内核，内核把它并入工具返回值；`Slice` 描述符回传避免拷贝。
+- **当前无用户**：17 个外部插件均未调用，故不阻塞发布。
+- [ ] 实现 `io.setToolBlocks` 的内核侧 handler（arena 写入 + Slice 回传）
+- [ ] 补一个真实使用它的 example 插件，否则无法验证
+
+#### 12.2.2 内存开销超出计划目标（结构性问题）
+
+- **计划目标**：迁移后常驻 ≤ 基线 +29MB（实验 5 量级）。
+- **实测**：15 个插件进程 `RSS=88.0MB` / `PSS=87.9MB`，均摊 5.87MB。
+- **根因**：每插件静态链接整个 Go runtime。15 个**不同**二进制之间无共同
+  物理页可映射，`PSS/RSS = 99.9%`（基线是 44%——那次用同一个 2.68MB 最小
+  插件复制 17 份，页可共享）。
+- **绝对数字不可比**：基线插件 2.68MB，真实插件 3.1~14.8MB（browser 最大）。
+  结构性指标（均摊线程 5.5 vs 4.9）同量级。
+- **实际开销高于 §4.3 乐观估计**，这是「每插件独立二进制」的固有代价。
+- **目标效果（若要压）**：共享一个 launcher 二进制 + 各插件只提供业务模块，
+  让 15 个进程映射同一份 runtime 物理页，把 PSS 压回 RSS 的一半以下。
+  代价是插件不再是自包含可执行文件，分发与版本管理都变复杂。
+- [ ] 决定是否值得为此改变分发模型（当前倾向：不改，88MB 可接受）
+
+---
+
+### 12.3 事件环：机制完成但**零真实负载检验**
+
+- **已完成**：内核侧 `proc/evtring.go`（写端 + 消费端 + 事件类型位编码）、
+  `internal/plugin/evtring.go`（Bus ↔ EvtRing 适配）、模板侧 `evtConsumerLoop`、
+  三平台通知机制（Linux eventfd / macOS pipe / Windows Event）。
+- **压测通过**：5000 次 Publish + 20µs 慢消费者 = 2.29ms（与实验 4 一致）；
+  订阅者 1→8 耗时不变；环溢出仍 O(1)。
+- **但**：`grep` 确认**无任何外部插件使用 `Events().Subscribe`**。
+  压测是我构造的负载，生产上这条路径从未被真实插件走过。
+- **目标效果**：至少一个真实插件订阅内核事件并正确处理，
+  验证「独立游标 + 溢出跳过 + dropped 计数」在真实时序下的行为。
+- [ ] 写一个订阅 `stage`/`tool_call` 事件的 example 插件做真实验证
+- [ ] 观察长时间运行下 `dropped` 计数是否异常增长
+
+---
+
+### 12.4 三套 ABI 只收敛了两套：Lua 仍独立
+
+- **已收敛**：C ABI（删除）+ Windows DLL（改走同一 RPC）。
+- **未收敛**：`internal/plugin/lua_plugin.go` / `dynamic_lua.go` 仍走
+  gopher-lua 解释器的独立路径。
+- **为何不阻塞本轮**：Lua 经解释器不经 C ABI，不属于本轮要消除的 6 类缺陷
+  （热重载失效、崩溃隔离缺失、stage lost update、cgo 超时泄漏、
+  output_send 假成功、能力断层）。§9.2 的「三套 ABI 收敛为单一 RPC」
+  这句话本轮只兑现了 2/3。
+- **目标效果**：Lua 插件也走 `proc` 通道（launcher 进程内嵌解释器），
+  内核侧只有一套加载逻辑与一套权限检查。
+- **收益**：Lua 插件获得崩溃隔离与共享内存 stage 全字段可见；
+  内核侧删掉 `lua_plugin.go` 的平行实现。
+- [ ] 评估 Lua 走 proc 通道的代价（解释器进程启动开销 vs 隔离收益）
+
+---
+
+### 12.5 Windows 只做了交叉编译，无真机验证
+
+- **已完成**：`shmalloc_windows.go`（`CreateFileMappingW` + `MapViewOfFile`）、
+  `evtfd_windows.go`（`CreateEventW` + `SetEvent`）、`shmpass_windows.go`
+  （名字经环境变量传递）、插件侧 `proc_shm_windows.go.tmpl`
+  （`syscall.NewLazyDLL` 绑定 `OpenFileMappingW`/`OpenEventW`）。
+- **验证程度**：仅 `GOOS=windows GOARCH=amd64 go build` 通过 + 单元测试。
+  **无 Windows 测试机，从未真机跑过**。
+- **已知的语义差异**（代码注释里记了，但未实测）：
+  Windows Event 是二元信号而非计数器，多次 `SetEvent` 只唤醒一次。
+  推理上不影响正确性（消费者按 `readSeq` 追 `writeSeq` 批量 drain），
+  但没在真机确认过。
+- **目标效果**：Windows 真机上完成一次完整的插件加载 → 工具调用 →
+  stage 改写 → 事件消费闭环，确认 16 字段全可见且写回生效
+  （这是 §9.2 声称 Windows「从受害者变受益方」的实证）。
+- [ ] 找一台 Windows 机器跑端到端验证
+- [ ] 特别验证命名对象的撞名防护（名字带 PID + 递增序号）
+
+---
+
+### 12.6 性能优化候选：stage 往返省两次 IPC
+
+- **实测**：完整 stage 往返 132µs，其中共享段编解码只占 3.7µs（2.8%）。
+- **成本构成**：一次 stage 要走 **3 次进程间往返**——`stage.invoke`
+  加上插件侧反向的 `stage.lock` / `stage.unlock`。
+- **相对 LLM 往返 2-8 秒可忽略**，故非紧急。
+- **目标效果**：把 lock/unlock 合入 `stage.invoke` 的请求/应答
+  （内核在下发 invoke 前就代插件持锁，应答时释放），
+  stage 往返从 3 次 IPC 降到 1 次，预期 132µs → ~30µs。
+- **风险**：改变锁的持有时机。当前是插件主动请求，
+  改后内核代持——插件若在 handler 里再次请求锁会死锁，需要额外防护。
+- [ ] 评估锁语义变化的影响面（哪些插件依赖显式 lock 时机）
+
+---
+
+### 12.7 无关本次迁移的遗留项
+
+- [ ] 单独排查 homed 主 heap 的 2.36GB 驻留来源（见 §11.9，与插件无关）
+- [ ] `cmd/ohos/.../SettingsPage.ets` 有 80 行未提交的鸿蒙端改动
+      （非本次迁移内容，一直未碰）
+
+---
+
+### 12.8 本次迁移**已达成**的目标（对照 §11.0 起因）
+
+留档备查——6 类 C ABI 前提缺陷的消除状态：
+
+| 缺陷 | 原状 | 现状 | 证据 |
+|---|---|---|---|
+| 热重载失效（11.6） | `DF_1_NODELETE` 让 `dlclose` 成 no-op | ✅ 换 `plugin.bin` 即生效 | 生产实测 `unloaded (config kept)` → 重载 |
+| 崩溃隔离缺失 | 插件 panic 带崩 homed | ✅ 子进程独立崩溃 | `TestRealPlugin_CrashDoesNotKillKernel` |
+| stage lost update（11.3） | 副本模型互相覆盖 35.8~36.8% | ✅ 0% | `TestPlugin_FiveProcessesConcurrentAppendNoLostUpdate` |
+| cgo 超时泄漏（11.2） | 现网泄漏 26 次 | ✅ 整套新架构零 cgo | `Process.Kill()` 真取消 |
+| output_send 假成功（11.1） | 永远返回成功 | ✅ 真实结果 | 生产实测 `map[status:sent]` |
+| 能力断层（11.5 + §3.8） | Windows 只见 3 字段、无写回 | ✅ 18 字段全可见可写回 | 生产实测 sanitizer 跨进程改写 13590 字节 |
+
+额外收益：权限梯度从「C ABI 表达能力的意外产物」变成**显式三道闸**
+（类型层 `procCore` 命名字段 + manifest 能力声明 + RPC 边界明确拒绝）。
