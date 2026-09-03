@@ -1,5 +1,3 @@
-//go:build linux || darwin
-
 package plugin
 
 import (
@@ -13,6 +11,20 @@ import (
 	"gitcode.com/JianFeeeee/HomeAgent/internal/plugin/proc"
 	sdk "gitcode.com/JianFeeeee/HomeAgent/internal/sdk"
 )
+
+// 本文件平台中立。
+//
+// 曾经拆成 dynamic_proc_unix.go + dynamic_proc_windows.go（Part 1，610e9d0），
+// 当时共享内存只有 POSIX mmap 实现，故 Windows 侧只放了个报「尚未实现」的桩。
+// 但那个桩只定义了 tryLoadProc，而平台中立的 registry.go 还在调 loadProc /
+// closeProcHost —— **Windows 下整个 homed 从那时起就编译不过**
+// （plan.md §12.5 声称「交叉编译通过」，实际只验证了 proc 子包）。
+//
+// Part 6.2（d027c96）补齐了 Windows 共享内存（CreateFileMappingW）、事件通知
+// （CreateEventW）与段传递（命名对象经环境变量），桩却没人回头删。
+//
+// 现在合回一个文件：本文件里没有任何平台专属调用，全部差异封装在 proc 包的
+// shmalloc_* / evtfd_* / shmpass_* / procattr_* 里，那些文件各自带构建标签。
 
 // tryLoadProc 只做静态校验（供双通道探测与测试），不构造插件实体。
 //
