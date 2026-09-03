@@ -139,6 +139,8 @@ func (l *llmImpl) ReloadFromConfig() error {
 			ContextWindow: src.ContextWindow,
 			MaxConcurrent: src.MaxConcurrent,
 			Priority:      src.Priority,
+			Vision:        src.Vision,
+			Audio:         src.Audio,
 		}, l.lua, src.Name, src.Adapter)
 		l.mgr.Register(src.Name, provider)
 		if src.Adapter != "" {

@@ -7,6 +7,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 
 	"gitcode.com/JianFeeeee/HomeAgent/internal/plugin"
@@ -61,7 +62,7 @@ func (p *Plugin) Start(s *sdk.PluginSDK) error {
 				},
 				"frames": map[string]interface{}{
 					"type":        "integer",
-					"description": "提取关键帧数量（默认 4，最大 10）",
+					"description": "均匀抽取的关键帧数量（默认 4，最大 10）。按视频总时长均分，不是每几秒一帧。",
 				},
 			},
 			"required": []string{"path"},
@@ -175,6 +176,21 @@ func (p *Plugin) handleSeeVideo(args map[string]interface{}) (interface{}, error
 		}
 	}
 
+	// 用 ffprobe 拿时长，才能把「抽 N 帧」翻译成 ffmpeg 的帧率。
+	//
+	// 为何不能直接写 fps=1/N：fps 是**频率**（每 N 秒一帧），不是**数量**。
+	// 20 秒视频实测：fps=1/4 → 5 帧，fps=1/10 → 2 帧，fps=1/1 → 20 帧——
+	// 要得越多拿得越少，且长视频下 frames=4 会产出时长/4 帧直接炸上下文。
+	// 正确写法是 fps=N/时长 配 -frames:v N（实测 N=1/4/10 均精确）。
+	dur := probeDuration(ffmpegPath, path)
+	var vfArgs []string
+	if dur > 0 {
+		vfArgs = []string{"-vf", fmt.Sprintf("fps=%d/%.3f", nFrames, dur)}
+	}
+	// 拿不到时长（无 ffprobe / 容器无时长元数据）：不传 -vf，只靠 -frames:v
+	// 取开头 N 帧。不能退化成 fps=1：不足 1 秒的素材一帧也抽不出来（实测
+	// 0.4s 视频 fps=1 → 0 帧），而 fps=N/dur 在 0.4s 上依然精确。
+
 	// 用 ffmpeg 提取关键帧
 	tmpDir, err := os.MkdirTemp("", "mm_video_*")
 	if err != nil {
@@ -183,36 +199,46 @@ func (p *Plugin) handleSeeVideo(args map[string]interface{}) (interface{}, error
 	defer os.RemoveAll(tmpDir)
 
 	outPattern := filepath.Join(tmpDir, "frame_%03d.jpg")
-	cmd := exec.Command(ffmpegPath, "-i", path, "-vf", fmt.Sprintf("fps=1/%d", nFrames),
-		"-q:v", "5", outPattern)
+	// -frames:v 硬封顶：即使 fps 计算因时长误差多给了帧，也不会超出请求数量。
+	ffArgs := []string{"-v", "error", "-i", path}
+	ffArgs = append(ffArgs, vfArgs...)
+	ffArgs = append(ffArgs, "-q:v", "5", "-frames:v", strconv.Itoa(nFrames), outPattern)
+	cmd := exec.Command(ffmpegPath, ffArgs...)
 	if out, err := cmd.CombinedOutput(); err != nil {
 		return fmt.Sprintf("ffmpeg 提取帧失败: %v\n%s", err, string(out)), nil
 	}
 
-	// 读取提取的帧
+	// 读取提取的帧。按 blocks 长度而非目录索引封顶：
+	// 跳过的条目（非 jpg / 读失败 / 过大）会让索引与实际帧数错位。
 	entries, _ := os.ReadDir(tmpDir)
 	var blocks []pubsdk.ContentBlock
-	for i, entry := range entries {
-		if strings.HasSuffix(entry.Name(), ".jpg") {
-			b, err := os.ReadFile(filepath.Join(tmpDir, entry.Name()))
-			if err != nil {
-				continue
-			}
-			if len(b) > 2*1024*1024 {
-				continue // 跳过过大帧
-			}
-			dURL := "data:image/jpeg;base64," + base64.StdEncoding.EncodeToString(b)
-			blocks = append(blocks, pubsdk.ContentBlock{
-				Type: "image_url",
-				ImageURL: &pubsdk.ImageURL{URL: dURL, Detail: "low"},
-			})
-			if i >= 9 { // 最多 10 帧
-				break
-			}
+	var skippedLarge int
+	for _, entry := range entries {
+		if len(blocks) >= nFrames {
+			break
 		}
+		if !strings.HasSuffix(entry.Name(), ".jpg") {
+			continue
+		}
+		b, err := os.ReadFile(filepath.Join(tmpDir, entry.Name()))
+		if err != nil {
+			continue
+		}
+		if len(b) > 2*1024*1024 {
+			skippedLarge++
+			continue
+		}
+		dURL := "data:image/jpeg;base64," + base64.StdEncoding.EncodeToString(b)
+		blocks = append(blocks, pubsdk.ContentBlock{
+			Type:     "image_url",
+			ImageURL: &pubsdk.ImageURL{URL: dURL, Detail: "low"},
+		})
 	}
 
 	if len(blocks) == 0 {
+		if skippedLarge > 0 {
+			return fmt.Sprintf("提取到 %d 帧但全部超过 2MB 单帧上限，未注入", skippedLarge), nil
+		}
 		return "视频中未提取到有效帧", nil
 	}
 
@@ -220,7 +246,37 @@ func (p *Plugin) handleSeeVideo(args map[string]interface{}) (interface{}, error
 	p.sdk.SetToolBlocks(blocks)
 
 	text := fmt.Sprintf("[已将 %d 个视频关键帧注入后续对话] %s", len(blocks), path)
+	if skippedLarge > 0 {
+		text += fmt.Sprintf("（另有 %d 帧超 2MB 已跳过）", skippedLarge)
+	}
+	if len(blocks) < nFrames {
+		text += fmt.Sprintf("（请求 %d 帧，实际只取到 %d 帧，视频可能过短）", nFrames, len(blocks))
+	}
 	return text, nil
+}
+
+// probeDuration 用 ffprobe 取视频时长（秒），拿不到返回 0。
+//
+// ffprobe 与 ffmpeg 同包同目录，所以从已找到的 ffmpeg 路径推导而非重新搜一遍。
+func probeDuration(ffmpegPath, videoPath string) float64 {
+	probe := "ffprobe"
+	if strings.Contains(ffmpegPath, "/") {
+		probe = filepath.Join(filepath.Dir(ffmpegPath), "ffprobe")
+		if _, err := os.Stat(probe); err != nil {
+			probe = "ffprobe"
+		}
+	}
+	out, err := exec.Command(probe, "-v", "error",
+		"-show_entries", "format=duration",
+		"-of", "default=nw=1:nk=1", videoPath).Output()
+	if err != nil {
+		return 0
+	}
+	d, err := strconv.ParseFloat(strings.TrimSpace(string(out)), 64)
+	if err != nil {
+		return 0
+	}
+	return d
 }
 
 // ── listen ───────────────────────────────────────────────────────

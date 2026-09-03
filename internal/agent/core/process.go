@@ -316,6 +316,9 @@ func (a *Agent) process(input string, stageCtx *sdk.StageContext) (response stri
 			// 多模态工具结果：插件通过 SDK.SetToolBlocks 注入 image_url/audio_url block，
 			// process.go 拾起并追加到 tool message 的 content 数组（OpenAI 多模态格式），
 			// 让下一轮 LLM 请求在 tool message 里看到图/音频。
+			//
+			// 主模型不支持该模态时不能直接塞：网关会把 image_url 静默剥离后仍返回 200，
+			// 模型回答「我没有看到图片」而内核以为注入成功。改走回退链转写成文字。
 			toolMsg := agentAPI.Message{Role: "tool", ToolCallID: tc.ID, Content: result}
 			if rawBlocks := a.io.ConsumeToolBlocks(); len(rawBlocks) > 0 {
 				var blocks []agentAPI.ContentBlock
@@ -333,7 +336,17 @@ func (a *Agent) process(input string, stageCtx *sdk.StageContext) (response stri
 					}
 				}
 				if len(blocks) > 0 {
-					toolMsg.Blocks = blocks
+					if native, fallbackText := a.prepareToolBlocks(blocks); len(native) > 0 {
+						toolMsg.Blocks = native
+					} else if fallbackText != "" {
+						// 回退链已把媒体转写成文字：并进 tool message 的纯文本 content，
+						// 不再挂 Blocks（挂了也会被上游剥掉）。
+						toolMsg.Content = result + "\n\n" + fallbackText
+						result = toolMsg.Content
+						if len(toolResults) > 0 {
+							toolResults[len(toolResults)-1].Output = result
+						}
+					}
 				}
 			}
 			msgs = append(msgs, toolMsg)
