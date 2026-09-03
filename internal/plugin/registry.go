@@ -11,6 +11,8 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"sync/atomic"
+	"time"
 
 	agentAPI "gitcode.com/JianFeeeee/HomeAgent/internal/agent/api"
 	agentIO "gitcode.com/JianFeeeee/HomeAgent/internal/agent/io"
@@ -21,6 +23,7 @@ import (
 	"gitcode.com/JianFeeeee/HomeAgent/internal/memory"
 	doc "gitcode.com/JianFeeeee/HomeAgent/internal/memory/document"
 	"gitcode.com/JianFeeeee/HomeAgent/internal/memory/text"
+	"gitcode.com/JianFeeeee/HomeAgent/internal/plugin/proc"
 	sdk "gitcode.com/JianFeeeee/HomeAgent/internal/sdk"
 	"gitcode.com/JianFeeeee/HomeAgent/internal/tracker"
 	"gitcode.com/JianFeeeee/HomeAgent/pkg/types"
@@ -58,9 +61,17 @@ func RegisterFactory(name string, factory NativeFactory) {
 	globalFactories.Store(name, factory)
 }
 
-// PluginToolCleaner 定义插件工具注销接口，由 StageHost 实现。
+// PluginToolCleaner 定义插件注销接口，由 StageHost 实现。
 type PluginToolCleaner interface {
 	UnregisterPluginTools(pluginName string)
+}
+
+// PluginStageCleaner 摘除插件注册的 stage handler，由 StageHost 实现。
+//
+// 与 PluginToolCleaner 分开是为了向后兼容：旧 toolCleaner 实现（测试替身）
+// 只有 UnregisterPluginTools，经类型断言取 stage 能力，取不到则跳过。
+type PluginStageCleaner interface {
+	UnregisterPluginStages(pluginName string) int
 }
 
 type Registry struct {
@@ -101,9 +112,59 @@ type Registry struct {
 	knownDisabled map[string]bool
 	allowlist     map[string]bool
 
-	// pluginHashes 记录各插件二进制(plugin.so/main.lua)的 SHA256，
+	// pluginHashes 记录各插件二进制(plugin.so/plugin.bin/main.lua)的 SHA256，
 	// 供增量重载(Reload)对比：仅重载有变更的插件，避免全量 StopAll+Load 导致重复加载。
 	pluginHashes map[string]string
+
+	// procHost 是**全部子进程插件共享的那一块** StageContext 段（§3.3/§3.4）。
+	//
+	// 懒创建（首个 .bin 插件加载时），随内核存活。共享而非每插件一段是关键：
+	// 每插件一段会让「内核 ctx → 段 → 插件改 → 回读 ctx」在多插件下退化成副本模型，
+	// lost update 原样复现（§8.4 实测 35.8~36.8%）。
+	procHostMu sync.Mutex
+	procHost   *proc.Host
+
+	// pluginChannels 记录每个插件注册过哪些 IO 通道（输出 device + 输入通道）。
+	//
+	// 不记的后果：子进程插件崩溃后它的 output device 仍在 IOManager 里，
+	// 模型依旧看到 output_send__<ch> 并调用，只能拿到 ErrProcessExited；
+	// 重启时 RegisterDevice 又因同名已存在而报 already registered，
+	// 插件回来了但通道永久指向旧进程的死闭包。
+	channelsMu     sync.Mutex
+	pluginChannels map[string]*pluginChannelSet
+
+	// procCrashes 记录子进程插件的崩溃频次，防止崩溃循环无休止重启。
+	//
+	// 与 agent 侧 plugin_health 并存而非重复：后者只能看到工具调用路径上的
+	// panic，进程级退出（signal: killed / OOM / 自身 exit）根本不经那里。
+	crashMu     sync.Mutex
+	procCrashes map[string]*procCrashRecord
+
+	// shuttingDown 在 StopAll 起始置位，用于冻结自动重启。
+	shuttingDown atomic.Bool
+}
+
+// 子进程插件自动重启策略。
+const (
+	// procMaxRestarts 是窗口内允许的自动重启次数上限。
+	// 超过则停手：再重启也只是重复同一个崩溃，得让人看日志。
+	procMaxRestarts = 3
+	// procCrashWindow 内无新崩溃则计数归零。
+	procCrashWindow = 5 * time.Minute
+	// procRestartBackoff 是线性退避步长（第 n 次重启前等 n × 此值）。
+	procRestartBackoff = time.Second
+)
+
+// procCrashRecord 是单插件的崩溃计数。
+type procCrashRecord struct {
+	count int
+	last  time.Time
+}
+
+// pluginChannelSet 是单个插件注册过的通道名集合。
+type pluginChannelSet struct {
+	outputs map[string]bool
+	inputs  map[string]bool
 }
 
 func NewRegistry() *Registry {
@@ -114,6 +175,7 @@ func NewRegistry() *Registry {
 		sdkRefs:           make(map[string]*sdk.PluginSDK),
 		knownDisabled:     make(map[string]bool),
 		pluginHashes:      make(map[string]string),
+		pluginChannels:    make(map[string]*pluginChannelSet),
 	}
 }
 
@@ -210,6 +272,13 @@ func (r *Registry) buildSDK(name string) *sdk.PluginSDK {
 	if regStage == nil {
 		regStage = func(stage sdk.Stage, handler sdk.StageHandler) {}
 	}
+	// stage handler 注册时带上归属插件名，使卸载/崩溃时能成组摘除。
+	// StageHost 实现了 RegisterStageFor；其他实现（测试替身）退回无归属注册。
+	if h, ok := r.stageRegistrarFor(); ok {
+		regStage = func(stage sdk.Stage, handler sdk.StageHandler) {
+			h(name, stage, handler)
+		}
+	}
 	regAPI := r.regAPI
 	if regAPI == nil {
 		regAPI = func(name string) error { return nil }
@@ -219,20 +288,25 @@ func (r *Registry) buildSDK(name string) *sdk.PluginSDK {
 		if r.iom == nil {
 			return nil
 		}
-		return r.iom.RegisterDevice(&channelDevice{
+		if err := r.iom.RegisterDevice(&channelDevice{
 			name:    chName,
 			caps:    agentIO.OutputCapability(caps),
 			desc:    desc,
 			handler: handler,
 			chDef:   agentIO.ChannelDef(def),
-		})
+		}); err != nil {
+			return err
+		}
+		r.noteChannel(name, chName, true)
+		return nil
 	}
 
-	regInput := func(name string, def sdk.ChannelDef) error {
+	regInput := func(chName string, def sdk.ChannelDef) error {
 		if r.iom == nil {
 			return nil
 		}
-		r.iom.RegisterInputChannel(name, agentIO.ChannelDef(def))
+		r.iom.RegisterInputChannel(chName, agentIO.ChannelDef(def))
+		r.noteChannel(name, chName, false)
 		return nil
 	}
 
@@ -360,10 +434,12 @@ func (r *Registry) isDisabled(name string) bool {
 	return r.cfgReg.IsPluginDisabled(name)
 }
 
-// pluginEntryHash 计算插件入口文件（plugin.so 或 main.lua）的 SHA256，用于增量重载对比。
+// pluginEntryHash 计算插件入口文件的 SHA256，用于增量重载对比。
 // 无入口文件（内置纯工厂插件）返回空字符串（始终视为已加载）。
+// plugin.bin 排在最前：与 detectEntryKind 保持一致的优先级，迁移期间同目录
+// 两种产物共存时以子进程产物为准。
 func pluginEntryHash(plgDir string) string {
-	for _, candidate := range []string{"plugin.so", "plugin.dll", "main.lua", "SKILL.md"} {
+	for _, candidate := range []string{binEntry, luaEntry, skillEntry} {
 		path := filepath.Join(plgDir, candidate)
 		if data, err := os.ReadFile(path); err == nil && len(data) > 0 {
 			sum := sha256.Sum256(data)
@@ -455,6 +531,92 @@ func (r *Registry) runStopHandlers(name string) {
 	}
 }
 
+// stageRegistrarFor 取带归属的 stage 注册入口。
+//
+// r.regStage 是 cmd/homed 注入的闭包（无插件名参数），而 stageHost 本体同时
+// 以 sdk.ToolSource 存在 r.stageHost 上。能取到 RegisterStageFor 时就直接用它，
+// 否则退回无归属注册（测试替身、旧集成方）。
+func (r *Registry) stageRegistrarFor() (func(plugin string, stage sdk.Stage, handler sdk.StageHandler), bool) {
+	if r.stageHost == nil {
+		return nil, false
+	}
+	if h, ok := r.stageHost.(interface {
+		RegisterStageFor(plugin string, stage sdk.Stage, handler sdk.StageHandler)
+	}); ok {
+		return h.RegisterStageFor, true
+	}
+	return nil, false
+}
+
+// noteChannel 记住插件注册了哪个通道，供卸载/崩溃时摘除。
+func (r *Registry) noteChannel(plugin, channel string, output bool) {
+	if plugin == "" || channel == "" {
+		return
+	}
+	r.channelsMu.Lock()
+	defer r.channelsMu.Unlock()
+	set := r.pluginChannels[plugin]
+	if set == nil {
+		set = &pluginChannelSet{outputs: map[string]bool{}, inputs: map[string]bool{}}
+		r.pluginChannels[plugin] = set
+	}
+	if output {
+		set.outputs[channel] = true
+	} else {
+		set.inputs[channel] = true
+	}
+}
+
+// releasePluginChannels 摘除插件注册过的全部 IO 通道，返回摘除的通道名。
+//
+// 必须做：不摘除则 ① 模型仍看得到 output_send__<ch> 却永远失败；
+// ② 插件重启时 RegisterDevice 报 already registered，新进程的通道注不上，
+// 通道永久指向已死进程的闭包。
+func (r *Registry) releasePluginChannels(plugin string) []string {
+	if plugin == "" {
+		return nil
+	}
+	r.channelsMu.Lock()
+	set := r.pluginChannels[plugin]
+	delete(r.pluginChannels, plugin)
+	r.channelsMu.Unlock()
+	if set == nil || r.iom == nil {
+		return nil
+	}
+	var released []string
+	for ch := range set.outputs {
+		r.iom.UnregisterDevice(ch)
+		released = append(released, ch)
+	}
+	for ch := range set.inputs {
+		r.iom.UnregisterInputChannel(ch)
+		if !set.outputs[ch] {
+			released = append(released, ch)
+		}
+	}
+	sort.Strings(released)
+	return released
+}
+
+// detachPlugin 把插件在内核侧的全部注册面摸干净：工具 + stage handler + IO 通道。
+//
+// 这是「卸载一个插件」的完整含义。之前各路径（Disable/Reload/Remove/
+// StopAndUnload）只调 UnregisterPluginTools，漏了 stage 与通道两项，
+// 子进程崩溃路径更是三项都没做。
+func (r *Registry) detachPlugin(name string) {
+	if r.toolCleaner != nil {
+		r.toolCleaner.UnregisterPluginTools(name)
+		if sc, ok := r.toolCleaner.(PluginStageCleaner); ok {
+			if n := sc.UnregisterPluginStages(name); n > 0 {
+				log.Printf("[plugin] %s: 摘除 %d 个 stage handler", name, n)
+			}
+		}
+	}
+	if chans := r.releasePluginChannels(name); len(chans) > 0 {
+		log.Printf("[plugin] %s: 摘除 IO 通道 %v", name, chans)
+	}
+}
+
 // runOnRemoveHandlers 执行插件注册的删除清理回调（SDK 层），插件 Stop() 之后、从注册表移除前执行。
 func (r *Registry) runOnRemoveHandlers(name string) {
 	if sdk, ok := r.sdkRefs[name]; ok {
@@ -463,8 +625,11 @@ func (r *Registry) runOnRemoveHandlers(name string) {
 }
 
 func (r *Registry) StopAll() {
+	// 关停开始即冻结自动重启：否则「Stop 触发退出 → 崩溃判定 → 重新 spawn」
+	// 会在内核正在关停时把子进程又拉起来，段已拆而进程还在，直接 SIGBUS。
+	r.shuttingDown.Store(true)
+
 	r.mu.Lock()
-	defer r.mu.Unlock()
 	for _, p := range r.instances {
 		r.runStopHandlers(p.Name())
 		if err := p.Stop(); err != nil {
@@ -475,6 +640,12 @@ func (r *Registry) StopAll() {
 	r.instances = nil
 	r.pluginAutoRestart = make(map[string]bool)
 	r.sdkRefs = make(map[string]*sdk.PluginSDK)
+	r.mu.Unlock()
+
+	// 共享段在全部子进程退出后再释放：插件还持有映射时拆段，
+	// 它们下一次访问就是 SIGBUS。在锁外调用：Close 不需 registry 锁，
+	// 而持锁调它会与 onProcCrash 路径（子进程退出回调）产生锁序风险。
+	r.closeProcHost()
 }
 
 func (r *Registry) Reload(dir string) (string, error) {
@@ -551,6 +722,11 @@ func (r *Registry) ReloadOne(name string) error {
 	}
 	r.mu.Unlock()
 
+	// 重载前必须把旧注册面摸干净。不做的后果：loadOne 重新 Start 时
+	// RegisterTool 碰上同名旧工具直接报 already registered，新实例的工具一个都注不上；
+	// stage handler 与 output device 同理——旧闭包指向已死进程，永不退场。
+	// （此前只有 agent 的 autoReloadPlugins 在外层手动摸工具，plgreload 路径漏了。）
+	r.detachPlugin(name)
 	r.closeDynamic(removed)
 
 	ok := r.loadOne(plgDir, name)
@@ -641,9 +817,7 @@ func (r *Registry) Disable(name string) error {
 	r.knownDisabled[name] = true
 	r.mu.Unlock()
 
-	if r.toolCleaner != nil {
-		r.toolCleaner.UnregisterPluginTools(name)
-	}
+	r.detachPlugin(name)
 
 	if r.cfgReg != nil {
 		r.cfgReg.AddDisabledPlugin(name, "system")
@@ -751,9 +925,7 @@ func (r *Registry) DisablePlugin(name, by string) error {
 	r.knownDisabled[name] = true
 	r.mu.Unlock()
 
-	if r.toolCleaner != nil {
-		r.toolCleaner.UnregisterPluginTools(name)
-	}
+	r.detachPlugin(name)
 
 	if r.cfgReg != nil {
 		r.cfgReg.AddDisabledPlugin(name, by)
@@ -763,6 +935,7 @@ func (r *Registry) DisablePlugin(name, by string) error {
 }
 
 func (r *Registry) EnablePlugin(name string) error { return r.Enable(name) }
+
 // StopAndUnload 停止并从注册表移除插件，但保留其配置表（config_<name>）。
 // 供插件更新/升级流程使用：换 so/文件不动配置，重装后配置原样生效。
 // 不执行 onRemove 回调（那是删除专用语义）。目录由调用方管理。
@@ -787,9 +960,7 @@ func (r *Registry) StopAndUnload(name string) error {
 	}
 	r.mu.Unlock()
 
-	if r.toolCleaner != nil {
-		r.toolCleaner.UnregisterPluginTools(name)
-	}
+	r.detachPlugin(name)
 	r.closeDynamic(unloaded)
 	log.Printf("[plugin] unloaded (config kept): %s", name)
 	return nil
@@ -820,9 +991,7 @@ func (r *Registry) RemovePlugin(name string) error {
 	r.runOnRemoveHandlers(name)
 	r.mu.Unlock()
 
-	if r.toolCleaner != nil {
-		r.toolCleaner.UnregisterPluginTools(name)
-	}
+	r.detachPlugin(name)
 	if r.cfgReg != nil {
 		r.cfgReg.RemoveDisabledPlugin(name)
 		r.cfgReg.RemovePlugin(name)
@@ -833,6 +1002,98 @@ func (r *Registry) RemovePlugin(name string) error {
 }
 
 func (r *Registry) ReloadPlugins() (string, error) { return r.Reload(r.plgDir) }
+
+// PluginRuntime 返回单个插件的运行期状态。
+//
+// 这是「插件管理器能看到真实死活」的数据源。子进程模型下，
+// 「注册表里有条目」不等于「进程还活着」；只读 plugin.json 的旧实现
+// 无法区分两者，插件被 kill 后 WebUI 仍显示“正常”。
+func (r *Registry) PluginRuntime(name string) (sdk.PluginRuntimeInfo, bool) {
+	if name == "" {
+		return sdk.PluginRuntimeInfo{}, false
+	}
+
+	r.mu.RLock()
+	plg, loaded := r.plugins[name]
+	_, hasFactory := r.factories[name]
+	r.mu.RUnlock()
+	if !hasFactory {
+		_, hasFactory = globalFactories.Load(name)
+	}
+
+	installed := loaded || hasFactory
+	var dirExists bool
+	if r.plgDir != "" {
+		if st, err := os.Stat(filepath.Join(r.plgDir, name)); err == nil && st.IsDir() {
+			dirExists = true
+			installed = true
+		}
+	}
+	if !installed {
+		return sdk.PluginRuntimeInfo{}, false
+	}
+
+	info := sdk.PluginRuntimeInfo{
+		Name:        name,
+		Loaded:      loaded,
+		Disabled:    r.isDisabled(name),
+		Builtin:     hasFactory,
+		AutoRestart: r.AutoRestartEnabled(name),
+		CrashCount:  r.crashCount(name),
+	}
+
+	switch {
+	case hasFactory:
+		info.Channel = "builtin"
+	case dirExists:
+		info.Channel = detectEntryKind(filepath.Join(r.plgDir, name)).String()
+	}
+
+	// 子进程插件报真实 PID 与存活；其余形态与 Loaded 同值（无独立进程）。
+	type procStatus interface {
+		PID() int
+		Alive() bool
+	}
+	if ps, ok := plg.(procStatus); ok && loaded {
+		info.PID = ps.PID()
+		info.Alive = ps.Alive()
+	} else {
+		info.Alive = loaded
+	}
+
+	if r.stageHost != nil {
+		for _, def := range r.stageHost.GetToolDefs() {
+			if def.Plugin == name {
+				info.Tools = append(info.Tools, def.Name)
+			}
+		}
+		sort.Strings(info.Tools)
+	}
+	return info, true
+}
+
+// ListPluginRuntimes 返回全部已知插件的运行期状态（含已安装未加载者）。
+func (r *Registry) ListPluginRuntimes() []sdk.PluginRuntimeInfo {
+	names := r.ListKnown()
+	out := make([]sdk.PluginRuntimeInfo, 0, len(names))
+	for _, name := range names {
+		if info, ok := r.PluginRuntime(name); ok {
+			out = append(out, info)
+		}
+	}
+	return out
+}
+
+// crashCount 读取窗口内的崩溃计数（过期视为 0）。
+func (r *Registry) crashCount(name string) int {
+	r.crashMu.Lock()
+	defer r.crashMu.Unlock()
+	rec := r.procCrashes[name]
+	if rec == nil || time.Since(rec.last) > procCrashWindow {
+		return 0
+	}
+	return rec.count
+}
 
 // ListKnown 返回所有已知插件（已加载 + 已禁用 + 已安装但未加载）。
 func (r *Registry) ListKnown() []string {
@@ -888,24 +1149,34 @@ func (r *Registry) PluginDir() string {
 }
 
 func (r *Registry) tryDynamic(plgDir, name string, config map[string]interface{}) (sdk.Plugin, error) {
-	// 尝试顺序：.so (Go plugin on Linux) → .dll (Windows) → .lua (跨平台)
-	for _, try := range []struct {
-		name string
-		fn   func(string, string, map[string]interface{}) (sdk.Plugin, error)
-	}{
-		{"so", tryLoadSO},
-		{"dll", tryLoadDLL},
-		{"lua", tryLoadLua},
-	} {
-		plg, err := try.fn(plgDir, name, config)
+	// 按 manifest entry 分派加载通道。
+	//
+	// C ABI 通道（.so/.dll/.dylib）已整体删除：外部插件统一走子进程，
+	// 三套独立 ABI 实现收敛为单一 RPC 实现（§9.2）。
+	if detectEntryKind(plgDir) == entryProc {
+		plg, err := r.loadProc(plgDir, name, config)
 		if err != nil {
 			return nil, err
 		}
 		if plg != nil {
+			log.Printf("[plugin] %s: 经 proc 通道加载（子进程）", name)
 			return plg, nil
 		}
+		return nil, fmt.Errorf("plugin %s: entry 声明 %s 但未找到可用二进制", name, binEntry)
 	}
-	return nil, nil
+
+	// 旧 .so/.dll 插件给明确错误，不静默跳过。
+	// 静默跳过会让「插件目录在但没加载」看起来像配置问题，
+	// 而实际原因是需要用新 plugindev 重编。
+	if hasLegacyCABIEntry(plgDir) {
+		return nil, fmt.Errorf(
+			"plugin %s: 检测到旧 C ABI 产物（plugin.so/.dll/.dylib）。"+
+				"外部插件已改为子进程模式，请用新版 plugindev 重编产出 %s"+
+				"（业务代码无需修改）", name, binEntry)
+	}
+
+	// Lua 插件仍走解释器
+	return tryLoadLua(plgDir, name, config)
 }
 
 func (r *Registry) readConfig(plgDir string) map[string]interface{} {
