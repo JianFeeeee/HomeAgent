@@ -404,54 +404,72 @@ $ git diff third_party/homeagent-sdk/sdk/
 
 ---
 
-## Part 6：迁移与收尾（阶段 5.1~5.4，~2 周）
+## Part 6：迁移与收尾（阶段 5.1~5.4，~2 周）— ✅ **已完成**（2026-09-03）
 
-> 依据：迁移评估 §4.5 双通道共存、§5 权限梯度。逐插件迁移，随时回退。
+> 依据：迁移评估 §4.5 双通道共存、§5 权限梯度。
+>
+> ⚠️ **实际执行偏离计划的一处**：原计划「逐插件迁移，随时回退」。
+> 用户决策改为**彻底舍弃 `.so` 能力，无回退通道**（不做 `--cabi` 开关），
+> 本轮直接删 `internal/plugin/cabi/`，生产全量切换。代价是某插件出问题
+> 只能紧急修复或 `git revert` 整批。因此下方【V】的「`.so` ↔ `.bin` 混跑」
+> 不再适用——新内核根本不认 `.so`。
 
 ### 修改
 
-- 【M】17 个外部插件逐个用新 plugindev 重编为 `.bin`（`plugin_install(overwrite=true)`），每个回归验证。
-- 【M】`plugins/` 目录逐个把 `entry` 从 `plugin.so` 改为 `plugin.bin`。
-- 【M】删除 `internal/plugin/cabi/`（1096 行）+ bridge 模板 `tmplLinuxBridge`/`tmplBridge`（385 行）+ `dynamic_dll_*`/`dynamic_loader_windows.go`。
-- 【M】权限梯度显式化：manifest 声明 caps + 内核侧白名单（`Selftest`/`Supervisor`/`Tracker`/`Status`/`Adapter`/`Config`/`Tool`/`Indexer`/`OutputChan`/`Publish` 确认不给）。
-- 【M】`lua_plugin.go`/`dynamic_lua.go`：统一走 RPC（收敛三套 ABI 为单一 RPC）。
-- 【M】文档：`PLUGIN_DEV.md` 更新、迁移说明。
+- ✅【M】**6.1** 工具链 entry 语义收敛（SDK 仓 `9f84412`）：`isProcEntry` 删除，Go 插件一律产出 `plugin.bin` 不看 entry 值；`templates.go` 1296→516 行。
+- ✅【M】**6.3** 17 插件全量重编（`1d7f011`）：16 个×3 平台 + qq×1；`git status example/` 无输出（业务代码零改动）。
+- ✅【M】**6.5** 生产切换（`62bdfa2`）：经 `pluginmgr` 的 hmap 正规通道安装，17/17 成功且 `config_kept=true`。
+- ✅【M】**6.6** 压测 + 版本 1.0.0 + 文档（`2572688`、`670efcd`、tag `v1.0.0`）。
+- ✅【M】**6.2** 内核侧 Windows（`d027c96`）+ 删 C ABI（`b20121f`，-3198 行）：删 `internal/plugin/cabi/`(1156)、`dynamic_dll_windows.go`(272)、`dynamic_loader_unix.go`(79) + bridge 模板；新增 `shmalloc_windows.go` + `evtfd_windows.go` + `shmpass_{unix,windows}.go`；顺带修 macOS pipe 写端被 GC 回收的真 bug。
+- ✅【M】**6.4** 权限梯度显式化（`2ebdb9a`）：54 个 method 划入 11 个 capability 组；`coreHandler.Handle` 入口强制；`withheldCapabilities` 表记录 10 项刻意不提供的内核机制及理由（`SelftestAPI`/`SupervisorAPI`/`TrackerAPI`/`StatusAPI`/`AdapterAPI`/`ConfigAPI`/`ToolAPI`/`IndexerAPI`/`OutputChanRaw`/`EventPublish`）。
+- ⏭️【M】`lua_plugin.go`/`dynamic_lua.go` 统一走 RPC —— **留待后续**。Lua 走解释器不经 C ABI，不阻塞本轮目标（消除 C ABI 前提缺陷）。收敛第三套 ABI 是独立优化。
+- ✅【M】文档：本文与 `plugin-interface-matrix.md` 更新；切换实录见下方。
 
 ### 审查
 
-- 【R】每删一个 cabi 依赖项，`go build ./...` + `go vet ./...` 干净。
-- 【R】权限梯度：外部插件无权访问的 API 在 RPC 边界被**拒绝**（非忽略）。
-- 【R】接口冻结：`sdk/` 零 diff。
+- ✅【R】每删一个 cabi 依赖项，`go build ./...` + `go vet ./...` 干净。
+- ✅【R】权限梯度：被拒 API 在 RPC 边界返回**明确错误**（非忽略）。错误消息含四要素：哪个插件、哪个调用、缺什么能力、在哪声明。`TestCapability_DeniedErrorIsActionable` 守护。
+- ✅【R】接口冻结：`git diff third_party/homeagent-sdk/sdk/` 全程为空。
 
 ### 验证（全量回归）
 
-- 【V】17 插件每个 `.bin` 独立回归（工具/设置/通道/阶段）。
-- 【V】`.so` ↔ `.bin` 混跑集群冒烟（Part 1 分派 + 双通道共存）。
-- 【V】`make test` 全量绿 + `go build ./...`。
-- 【V】内存/RSS 对比：迁移后常驻 ≤ 基线 +29MB（实验 5 量级）。
-- 【V】工具调用 RPC 延迟 p50 ≤ 20µs 量级（实验 11）。
+- ✅【V】17 插件经 `plugin_install(overwrite=true)` 加载，工具/设置/通道/阶段 e2e。
+- ⏭️【V】~~`.so` ↔ `.bin` 混跑集群冒烟~~ —— 不适用（无回退通道，见上方偏离说明）。改为验证**新内核面对旧 `.so` 给可操作错误且不崩溃**，已在真实二进制上确认。
+- ✅【V】`make test` 全量绿 + `go build ./...`。
+- ⚠️【V】内存：**未达成计划目标**。15 个插件进程 RSS=88.0MB / PSS=87.9MB，远超「基线 +29MB」。根因是每插件静态链接整个 Go runtime，15 个不同二进制无共同物理页可映射（PSS/RSS 99.9% vs 基线 44%）。这是「每插件独立二进制」的固有代价，实际开销高于 §4.3 乐观估计。压缩方向：共享 launcher 二进制 + 各自业务模块。
+- ✅【V】工具调用 RPC 延迟 24.1µs（实验 11 基线 19.6µs，同量级）。
 
-**Part 6 出口条件**：全部外部插件 `.bin` 化，cabi 删除，接口零改动，权限显式化，无回归。
+**Part 6 出口条件**：全部外部插件 `.bin` 化 ✅，cabi 删除 ✅，接口零改动 ✅，权限显式化 ✅，无回归 ✅。
 
 ---
 
 ## 最终验收清单（对照接口不变矩阵 §7 检查点）
 
-| # | 检查点 | 通过标准 |
-|---|---|---|
-| 1 | 公开 SDK 接口冻结 | `git diff third_party/homeagent-sdk/sdk/` **为空**（全程） |
-| 2 | 外部插件业务代码零改动 | 17 个 `example/*/plugin.go` 与基线逐字节可比 |
-| 3 | 17 插件 `.bin` 化 | 全部经 `plugin_install` 加载，工具/设置/通道/阶段 e2e |
-| 4 | cabi 删除 | `internal/plugin/cabi/` 与 bridge 模板不存在 |
-| 5 | 崩溃隔离 | 插件 kill 只退出自身，homed 存活 |
-| 6 | 热重载 | 同路径换 `.bin` 即生效，无需重启 |
-| 7 | 并发改写 | 跨进程 stage 丢失率 0%（对照今天 35.8~36.8%） |
-| 8 | 事件订阅 | 外部插件 `Events().Subscribe` 可用 |
-| 9 | 多模态 | `SetToolBlocks` 非空实现 |
-| 10 | 超时取消 | 工具超时可 `Process.Kill()`，零泄漏 |
-| 11 | output_send | 真实结果返回（非假成功） |
-| 12 | 权限梯度 | 内部专属 API 在 RPC 边界拒绝 |
-| 13 | 内存/延迟 | 常驻 +≤29MB，RPC p50 ≤20µs 量级 |
+| # | 检查点 | 通过标准 | 结果 |
+|---|---|---|---|
+| 1 | 公开 SDK 接口冻结 | `git diff third_party/homeagent-sdk/sdk/` **为空**（全程） | ✅ 每次审查均确认 |
+| 2 | 外部插件业务代码零改动 | 17 个 `example/*/plugin.go` 与基线逐字节可比 | ✅ `git status example/` 无输出 |
+| 3 | 17 插件 `.bin` 化 | 全部经 `plugin_install` 加载，工具/设置/通道/阶段 e2e | ✅ 17/17，`config_kept=true` |
+| 4 | cabi 删除 | `internal/plugin/cabi/` 与 bridge 模板不存在 | ✅ -3198 行（`b20121f`） |
+| 5 | 崩溃隔离 | 插件 kill 只退出自身，homed 存活 | ✅ `TestRealPlugin_CrashDoesNotKillKernel` |
+| 6 | 热重载 | 同路径换 `.bin` 即生效，无需重启 | ✅ 生产实测（`unloaded (config kept)` → 重载） |
+| 7 | 并发改写 | 跨进程 stage 丢失率 0%（对照今天 35.8~36.8%） | ✅ `TestPlugin_FiveProcessesConcurrentAppendNoLostUpdate` |
+| 8 | 事件订阅 | 外部插件 `Events().Subscribe` 可用 | ✅ 事件环已接线（当前零用户） |
+| 9 | 多模态 | `SetToolBlocks` 非空实现 | ⚠️ method 已定义并划入 core 能力，内核侧仍返回未实现 |
+| 10 | 超时取消 | 工具超时可 `Process.Kill()`，零泄漏 | ✅ 整套新架构零 cgo |
+| 11 | output_send | 真实结果返回（非假成功） | ✅ 生产实测 `map[status:sent]` |
+| 12 | 权限梯度 | 内部专属 API 在 RPC 边界拒绝 | ✅ 12 项测试（`2ebdb9a`） |
+| 13 | 内存/延迟 | 常驻 +≤29MB，RPC p50 ≤20µs 量级 | ⚠️ 延迟 24.1µs 达标；内存 88MB **未达标** |
+
+**两项未完全达标的说明**：
+
+- **#9 SetToolBlocks**：`io.setToolBlocks` 已在 protocol 定义并划入 `CapCore`，
+  但内核侧 handler 仍返回未实现。C ABI 时代它也是空实现（§1.4），
+  故**不是回归**，但也没兑现 §3.8 的承诺。当前无插件使用。
+- **#13 内存**：15 个进程 RSS=88.0MB，远超「基线 +29MB」。根因是每插件
+  静态链接整个 Go runtime，15 个不同二进制无共同物理页（PSS/RSS 99.9%
+  vs 基线 44%）。实验 5 的基线用的是 2.68MB 最小插件，而真实插件 3.1~14.8MB，
+  绝对数字不可比。结构性指标（均摊线程 5.5 vs 4.9）同量级。
 
 ---
 
@@ -468,3 +486,147 @@ $ git diff third_party/homeagent-sdk/sdk/
 ---
 
 *规划：2026-08-31，update 分支。Part 编号与其依赖的 plan.md/迁移评估阶段对应。*
+
+---
+
+## Part 6.5 生产切换实录（2026-09-03）
+
+### 执行顺序（先换二进制，再装包）
+
+```
+1. systemctl stop homeagent
+2. 换 /usr/local/bin/homed
+3. 起服务 —— 15 个 .so 插件报可操作错误被跳过，homed 与 16 个内置正常
+4. 逐个 POST 装 17 个 hmap（overwrite=true）
+5. 重启核对
+```
+
+**为何不能反过来**：若先装包，旧 homed 的 `StopAndUnload` 会停掉 qq
+消息通道，而它又无法加载 `.bin`，会卡在「插件全挂」的状态。
+
+第 3 步顺带在真实二进制上验证了 Part 6.2 的可操作错误：
+
+```
+[plugin] dynamic weather: plugin weather: 检测到旧 C ABI 产物（plugin.so/.dll/.dylib）。
+外部插件已改为子进程模式，请用新版 plugindev 重编产出 plugin.bin（业务代码无需修改）
+```
+
+不崩溃，只跳过该插件。
+
+### 走 hmap 正规通道，而非手工拷贝
+
+第一版切换脚本是手工拷 `plugin.bin` + 手改 `plugin.json` 的 entry ——
+那等于**重新实现了一遍 hmap 解包逻辑，且实现得更差**。漏掉的东西：
+
+| | 手工拷贝 | hmap 正规通道 |
+|---|---|---|
+| `platforms` 字段 | 漏了 | 包内 manifest 本来就写对 |
+| 平台二进制选择 | 硬编码 `_linux_amd64` | `platformBinary()` 按 runtime 选 |
+| `overwrite` 语义 | 无 | `StopAndUnload` **保留配置表** |
+| 失败回滚 | 无 | `os.Rename` 备份，解包失败自动恢复 |
+| 校验 | 只查文件存在 | `validatePackage` 查 manifest + 各平台二进制齐全 |
+
+配置保留那条尤其关键：生产 17 个插件都有配置（qq 账号、weather 默认城市、
+browser profile 路径）。手工脚本恰好没碰配置表所以侥幸不丢，但那是运气不是设计。
+
+最终实现：POST 到 `127.0.0.1:9876/plugins`，传 `{path, overwrite:true}`。
+保留的一个设计是**先全部校验再动手**——任一插件缺 hmap 就整批中止，
+因为新 homed 不认 `.so`，「一半装了一半没装」的中间态最难排查。
+
+### 结果
+
+```
+17/17 成功，全部 config_kept=true
+0 个残留 .so；17 个 plugin.bin 均有执行位
+17 个 manifest 的 entry 均为 plugin.bin；无 .bak 残留
+bundle 包正确挑了当前平台（weather 目录只留 8.7MB 的 linux/amd64 那份）
+```
+
+备份：`/home/newqqagent-migration-backup-20260902-214812`
+（plugins 全目录 + homed.old + homeagent.service，162MB）。
+**唯一回滚路径**是恢复该目录 + 回滚 homed 二进制。
+
+### 生产端到端验证（真实 QQ 消息）
+
+```
+input from qq → response (83293ms, tools=[qq_get_message qq_get_history
+                                          output_send__qq output_send__qq qq_mark_read])
+```
+
+逐环节：
+
+- **输入**：qq 子进程收 webhook → 经 RPC 报给内核 → agent 主循环
+- **工具调用**：5 次跨进程调用全部成功（内核反向调用进子进程执行）
+- **stage 改写生效**（最关键的一条）：
+  ```
+  [sanitizer] cleanToolCallLeakage: 2 bytes removed
+  [sanitizer] cleaned 2 bytes (before=13590 after=13588)
+  [proc] sanitizer stage post_action 改写了 1 个字段
+  ```
+  sanitizer 在**另一个进程里**改了 StageContext，内核读到了改写结果。
+  13590 字节文本经共享段传递、被改写、写回，全程未拷贝整个上下文。
+- **输出真的送达**：`tool output_send__qq result: 已通过 [qq] 通道发送: map[status:sent]`
+  —— 直接验证 Part 0.1 修的 output_send 假成功缺陷（§9.4）
+- **arena 生命周期正常**：每次 stage 结束都压实回收（单次最高 15802 字节），无泄漏累积
+
+这一次对话触发约 20 次 stage、5 次工具调用、2 次输出发送，跨越 15 个插件子进程。
+旧架构下同样流程有三处会静默出问题：stage 并发写丢字段（§8.4 实测 35.8~36.8%
+lost update）、output_send 假成功、cgo 超时泄漏 goroutine。现在这些在日志里可见且正确。
+
+---
+
+## Part 6.6 压测与延迟实测
+
+基准与压测在代码里（`internal/plugin/proc/bench_test.go` + `streaming_test.go`），
+非独立脚本——随代码演进自动跑，不会腐坏。
+
+| 项目 | 实测 | 基线 | 判断 |
+|---|---|---|---|
+| 工具调用 RPC 往返 | 24.1 µs | 实验 11: 19.6 µs | 同量级 |
+| 锁仲裁（内核侧） | 0.76 µs | — | 见下注 |
+| 事件环写入 | 95 ns | — | 亚微秒 |
+| 事件环并发写入 | 83 ns | — | 无锁竞争恶化 |
+| 完整 stage 往返 | 132 µs | — | 含 3 次进程间往返 |
+| 共享段编解码 | 3.7 µs | — | 占 stage 的 2.8% |
+
+**锁仲裁 0.76µs 不可与实验 3 的 19.40µs 对照**——测的不是同一个东西：
+实验 3 测插件经 RPC 请求锁的完整跨进程往返，本基准只测内核侧
+`lockRegistry.acquire/release`。真实成本仍在 20µs 量级。基准原名
+`BenchmarkStageLockRoundTrip` 有误导性，已改为 `BenchmarkStageLockArbitration`。
+
+**stage 往返 132µs 的成本构成**：共享段编解码只占 3.7µs，其余是
+**一次 stage 要走 3 次进程间往返**（`stage.invoke` + 插件侧反向的
+`stage.lock` / `stage.unlock`）。相对 LLM 往返 2-8 秒可忽略；
+要优化的方向是把 lock/unlock 合入 `stage.invoke` 的请求/应答。
+
+### 流式压测（§4.3 标记「风险高」的那一项）
+
+```
+5000 次 Publish + 每条睡 20µs 的慢消费者
+  实测 2.29ms，均摊 457 ns/token
+  同步语义理论下限 100ms
+
+订阅者 1 个：1.547ms（515 ns/次）
+订阅者 8 个：1.518ms（506 ns/次）   ← 无线性恶化
+
+环溢出（无消费者写 30000 次，cap=8192）：均摊 35 ns/次   ← 仍 O(1)
+```
+
+2.29ms 与实验 4 的数字完全一致（那次也是 2.29ms / 0.46µs per token），
+post-and-forget 在实现中成立。第三项的意义：消费者完全停摆时写端覆盖
+最旧 slot，这条路径仍是 O(1)，故「插件卡住」不会连带拖慢内核主循环。
+
+---
+
+## 版本号
+
+v1.0.0（tag 已打）。公开 SDK 接口零改动，但产物形态从 `plugin.so` 变为
+`plugin.bin`，0.9.x 内核不会识别——不可互操作的破坏性变化，故跃主版本号。
+
+⚠️ **Makefile 陷阱**：`VERSION ?= $(shell git describe --tags --dirty)`
+意味着实际注入值来自 git tag，`meta.go` 里的默认值只在不带 ldflags 时生效。
+打 tag 前 `make build` 注入的是 `v0.9.1-56-g2572688-dirty`。
+
+同时删掉 C ABI 时代的死常量（`ABIVersion`/`CABINum`/51 个 `Core<Method>`
+整数 ID）——随 Part 6.2 删 `internal/plugin/cabi/` 就已无使用者，
+留着会让人以为 C 层协商还在生效，或以为加 method 要同步维护那张整数表。
