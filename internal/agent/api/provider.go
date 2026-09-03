@@ -235,6 +235,31 @@ type RoutableProvider interface {
 	Priority() int // AUTO 跨源选择的优先级，大者优先
 }
 
+// ModalProvider 声明自身的多模态能力。单独抽接口而不合进 Provider：
+// 第三方 Provider 实现无需改动，未实现时按纯文本处理（保守侧）。
+type ModalProvider interface {
+	SupportsVision() bool
+	SupportsAudio() bool
+}
+
+// ProviderSupportsVision 安全判定任意 Provider 能否看图。
+// 未实现 ModalProvider 的一律返回 false：宁可多走一次文字回退，
+// 也不能把图默默扔给一个会把它剥掉的上游。
+func ProviderSupportsVision(p Provider) bool {
+	if mp, ok := p.(ModalProvider); ok {
+		return mp.SupportsVision()
+	}
+	return false
+}
+
+// ProviderSupportsAudio 安全判定任意 Provider 能否听音频。
+func ProviderSupportsAudio(p Provider) bool {
+	if mp, ok := p.(ModalProvider); ok {
+		return mp.SupportsAudio()
+	}
+	return false
+}
+
 // ModelContextWindow 返回模型的最大上下文窗口（token 数）
 // 标称窗口 ≠ 有效窗口：接近满时注意力涣散，调用方应取 70-80% 为目标利用率
 func ModelContextWindow(model string) int {
@@ -284,6 +309,11 @@ type BaseConfig struct {
 	ContextWindow int     `json:"context_window"`
 	MaxConcurrent int     `json:"max_concurrent"`
 	Priority      int     `json:"priority"`
+
+	// Vision/Audio 声明这条链路能否真正处理多模态内容块。
+	// 网关可能静默剥离 image_url 后仍返回 200，所以不能从响应推断能力。
+	Vision bool `json:"vision"`
+	Audio  bool `json:"audio"`
 }
 
 // LuaAdaptedProvider 使用 Lua 脚本做请求/响应变换，直接发起 HTTP 调用
@@ -342,6 +372,11 @@ func (p *LuaAdaptedProvider) MaxContextTokens() int {
 func (p *LuaAdaptedProvider) Name() string  { return p.name }
 func (p *LuaAdaptedProvider) Model() string { return p.cfg.Model }
 func (p *LuaAdaptedProvider) Priority() int { return p.cfg.Priority }
+
+// SupportsVision/SupportsAudio 实现 ModalProvider，值来自部署时声明
+// （core.llm.sources.<name>.vision / .audio）。
+func (p *LuaAdaptedProvider) SupportsVision() bool { return p.cfg.Vision }
+func (p *LuaAdaptedProvider) SupportsAudio() bool  { return p.cfg.Audio }
 
 func (p *LuaAdaptedProvider) Chat(ctx context.Context, req *CompletionRequest) (*CompletionResponse, error) {
 	if p.cfg.Model != "" && (req.Model == "" || req.Model == "AUTO") {
