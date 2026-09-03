@@ -63,9 +63,9 @@ install -m 755 %{_sourcedir}/homed %{buildroot}%{_bindir}/homed
 install -m 644 %{_sourcedir}/homeagent.service %{buildroot}%{_unitdir}/homeagent.service
 %endif
 
-%if "%{variant}" == "full" || "%{variant}" == "client"
+# waiter 三个变体都要：server 也含 CLI（对齐 deb 的 stage_variant
+# 与 control-server 的 "waiter: command-line client" 描述）。
 install -m 755 %{_sourcedir}/waiter %{buildroot}%{_bindir}/waiter
-%endif
 
 %if "%{variant}" == "full" || "%{variant}" == "client"
 mkdir -p %{buildroot}%{_datadir}/homeagent-gui
@@ -81,9 +81,7 @@ cp -r %{_sourcedir}/homeagent-gui-linux-*/* %{buildroot}%{_datadir}/homeagent-gu
 %dir %{_varlibdir}
 %endif
 
-%if "%{variant}" == "full" || "%{variant}" == "client"
 %{_bindir}/waiter
-%endif
 
 %if "%{variant}" == "full" || "%{variant}" == "client"
 %dir %{_datadir}/homeagent-gui

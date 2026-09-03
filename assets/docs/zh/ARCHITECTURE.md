@@ -257,12 +257,18 @@ VM 内置 `json.encode` / `json.decode` / `log` / `http_get` / `http_post`。
 | 方式 | 注册机制 | 编译 | 用途 |
 |------|----------|------|------|
 | 内置插件 | `init()` → `RegisterFactory` | `internal/plugins/` 编译进内核 | webui/cli/timer/mcp 等 |
-| 外部 `.so` | C ABI 动态加载 | `-buildmode=c-shared` + bridge | qq/browser/files 等 |
+| 外部子进程插件 | 握手 + stdio JSON-RPC 反向注册 | `plugindev build` → `plugin.bin`（普通 Go 二进制） | qq/browser/files 等 |
 | Lua 脚本插件 | 执行 `main.lua` 注册工具 | 无需编译，重启/重载生效 | luademo 等 |
 | SKILL 插件 | 解析 `SKILL.md` | Markdown 定义 | clawhubadapter 兼容加载 |
 
 内置插件注册：`internal/plugins/all.go` 空白导入 → 各插件 `init()` → `Registry.Load()` 扫描目录匹配工厂。
-外部插件加载：`internal/plugin/dynamic.go` → 复制到 SHA256 临时路径（绕过 `plugin.Open` 路径缓存）→ `Open` + `Lookup("NewPlugin")`。
+
+外部插件加载（v1.0.0 起）：`internal/plugin/dynamic_proc.go` → `exec.Command(plugin.bin)`
+→ 继承共享段 fd → 握手（比对 protocol 版本）→ `plugin.init` → `plugin.start`
+（插件在此期间反向注册工具/阶段/通道）。
+**C ABI 通道（`-buildmode=c-shared` + bridge）已在 v1.0.0 整体删除**——
+旧的 `plugin.Open` 路径缓存绕行、SHA256 临时路径复制等手法随之退场。
+
 Lua 脚本插件加载：`internal/plugin/` → gopher-lua 解释器执行 `main.lua`（加载期 `sdk.register_*` 仅暂存 handler），`Start()` 时替换为真实 SDK 实现并批量注册。脚本只在加载时读取一次，运行期通过回调执行。
 
 ### 内置插件 vs 外部插件
@@ -270,19 +276,36 @@ Lua 脚本插件加载：`internal/plugin/` → gopher-lua 解释器执行 `main
 | 维度 | 内置插件 | 外部插件 |
 |------|----------|----------|
 | 注册方式 | `init()` 调用 `plugin.RegisterFactory(name, factory)` | 实现 `NewPluginFactory(name, config) (sdk.Plugin, error)` 入口函数 |
-| 编译方式 | 编译进 `homed` 二进制，无需独立编译 | 通过 `plugindev build` 编译为 `.so`/`.dll`（`-buildmode=c-shared`），C ABI bridge 加载 |
+| 编译方式 | 编译进 `homed` 二进制，无需独立编译 | 通过 `plugindev build` 编译为 `plugin.bin`（普通 Go 二进制，零 cgo），内核 spawn 为子进程 |
 | 分发方式 | 随内核分发，不可独立安装/卸载 | `.hmap` 包（ZIP 归档），通过 WebUI 或 pluginmgr API 安装 |
-| 元数据 | 通过 `plugin.RegisterPluginMeta()` 注册显示名 | `plugin.json` manifest 文件（name, version, entry, platforms 等） |
-| 插件目录 | 无独立目录，编译进二进制 | `plugins/<name>/` 独立目录，包含 `plugin.json` + 二进制 |
-| SDK 权限 | 完整 PluginSDK（SocialAPI 读写、Publish 事件） | 受限 SDK（SocialAPI 只读、仅 Subscribe 事件） |
-| 生命周期 | 随内核启动/停止，不可单独热重载 | 独立 Start/Stop，支持热重载（ReloadOne）和禁用/启用 |
-| 崩溃恢复 | 无独立恢复机制 | 支持 `SetAutoRestart(true)` 崩溃自动重启 |
+| 元数据 | 通过 `plugin.RegisterPluginMeta()` 注册显示名 | `plugin.json` manifest 文件（name, version, entry, platforms, capabilities 等） |
+| 插件目录 | 无独立目录，编译进二进制 | `plugins/<name>/` 独立目录，包含 `plugin.json` + `plugin.bin` |
+| SDK 权限 | 完整 PluginSDK（SocialAPI 读写、Publish 事件） | 收窄的 `procCore` 能力面 + manifest capabilities 声明 + RPC 边界拒绝 |
+| 生命周期 | 随内核启动/停止，不可单独热重载 | 独立进程，换 `plugin.bin` 即生效的真热重载（ReloadOne）和禁用/启用 |
+| 崩溃恢复 | 无独立恢复机制 | 进程级隔离：崩溃不影响内核，内核摘除其注册面后按退避自动重启（`SetAutoRestart(false)` 可关） |
 
 两者的联系：
 - 内置插件的工厂函数 `RegisterFactory` 与外部插件的 `NewPluginFactory` 共用同一个 `NativeFactory` 类型签名
-- `Registry.Load()` 统一处理两者的加载：先查工厂表（内置），无工厂则尝试动态加载（外部）
-- 两者使用相同的 `Plugin` 接口和 `PluginSDK`，工具注册、阶段钩子、输出通道等 API 完全一致
+- `Registry.Load()` 统一处理两者的加载：先查工厂表（内置），无工厂则按 manifest 的 `entry` 分派到 proc / lua / skill 通道
+- 两者使用相同的 `Plugin` 接口和公开 SDK API，工具注册、阶段钩子、输出通道等完全一致
 - 两者共享同一个工具注册表（`StageHost`），LLM 调用时无差别
+
+### 子进程插件的三个通信面（v1.0.0）
+
+| 面 | 机制 | 为何这么选 |
+|---|---|---|
+| 控制面 | stdio JSON-RPC（NDJSON 帧），51 个 `core.*` method | 进程边界即 ABI 边界，无需维护三套平台特定的动态库加载代码 |
+| 数据面 | 共享内存段，**全部子进程共用一块** | 每插件一段会让「内核 ctx → 段 → 插件改 → 回读 ctx」在多插件下退化成副本模型，lost update 原样复现 |
+| 通知面 | 事件环 + 平台通知（Linux eventfd / macOS pipe / Windows Event） | 内核发事件绕不等消费者，流式输出逐 token 发布时任何等待都会造成卡顿 |
+
+**子进程生命周期管理**：
+- 每子进程一根专职 `waitLoop`（`cmd.Wait()` 唯一调用点）——不依赖 stdout EOF，
+  因为插件 fork 的孙子进程（browser 拉 chromium、editdoc 拉 python）继承同一 stdout，
+  插件本体死后 EOF 永不到来
+- 集中台账 `proc.Supervisor`：握手成功即登记，退出即注销；`Host.Close()` 先 StopAll 再拆段
+  （顺序反了插件还持有映射而段已 unmap，下次访问就是 SIGBUS）
+- 崩溃自愈：摘注册面（工具 + stage handler + IO 通道）→ 移出注册表 → 退避重启
+- Linux `Pdeathsig` 兜底 homed 被强杀时子进程不滞留为孤儿
 
 ### PluginSDK 四通道
 

@@ -12,6 +12,11 @@ Combined with a **three-layer memory architecture** (Context → Document → Gr
 homed (kernel, zero IO) ← PluginSDK → plugins (all IO capabilities)
 ```
 
+**Since v1.0.0 external plugins are independent subprocesses**, communicating with the kernel over
+stdio JSON-RPC (control plane) + a shared memory segment (data plane) + an event ring (notification
+plane). A plugin crash cannot take down the kernel and it restarts automatically; swapping
+`plugin.bin` gives true hot-reload.
+
 ## Design Principles
 
 **Separation of Core Domain and Application Domain** — The kernel's responsibilities are limited to LLM orchestration, memory management, and knowledge retrieval; all IO capabilities (message send/receive, file read/write, network requests, hardware interaction, etc.) are implemented by plugins. This separation defines domain boundaries at the Agent framework level, with distinct responsibility scopes for the kernel and plugins.
@@ -163,7 +168,7 @@ internal/
 ├── agent/api/      LLM Provider + 8 Lua adapters
 ├── memory/         Three-layer memory: Graph(SQLite) / Document(JSON+TF-IDF) / Text(JSONL) + StaticEmbedder(pretrained word embedding/TF-IDF fallback) + CleanTemplateText(de-template)
 ├── knowledge/      Knowledge base (filesystem + TF-IDF)
-├── plugin/         Plugin registry + .so/.dll dynamic loader
+├── plugin/         Plugin registry + subprocess loader (stdio RPC + shared memory segment + event ring)
 ├── plugins/        11 built-in plugins (webui/cli/timer/cmd/mcp/clawhubadapter/agentcli/healthcheck/pluginmgr/files/cfgmgr)
 ├── sdk/            PluginSDK (Tool/Stage/Event three channels)
 ├── config/         SQLite config center
@@ -174,7 +179,9 @@ External plugin development: see [homeagent-sdk](https://gitcode.com/JianFeeeee/
 
 ## Project Status
 
-**v0.9.0** — C ABI v2: external plugin Stage callbacks can now write back (`invoke_stage` gained a result out-param; plugins may mutate RawMessage/LLMText/ToolResults etc. in OnInput/AfterToolcall/PostAction and have them synced to the core). ABI version now tracks core minor releases (v0.9.x → ABIVersion=2, `version_min=1` keeps old plugins loadable). Also fixes the tool-loop zen-compat placeholder that wrongly fired on first-turn system context tail. The SDK ships an enhanced sanitizer example (bad-UTF-8 / U+FFFD / ANSI-escape scrub across the whole pipeline).
+**v1.0.0** — External plugins moved from C ABI shared libraries to **subprocess + shared memory**. The first release that no longer loads `.so`/`.dll`, and it is incompatible with 0.9.x (existing plugins must be rebuilt into `plugin.bin` with the new `plugindev`, though **business code needs zero changes**). Eliminates 6 classes of defects that had caused production incidents: hot-reload silently failing (`DF_1_NODELETE` making `dlclose` a no-op), no crash isolation (a plugin panic took down homed), stage lost updates (35.8~36.8% loss under the copy model), uncancellable cgo timeouts (linear OS-thread leaks), `output_send` reporting false success (the model was told "sent" while the message never went out), and Windows capability degradation (only 3 stage fields visible, no write-back). Three communication planes: stdio JSON-RPC (control) + shared memory segment (data) + event ring (notification); the privilege gradient is now enforced by three explicit gates. RPC round-trip p50 24.1µs; crash-to-recovery under 1s.
+
+**v0.9.0** — C ABI v2: external plugin Stage callbacks can now write back (`invoke_stage` gained a result out-param; plugins may mutate RawMessage/LLMText/ToolResults etc. in OnInput/AfterToolcall/PostAction and have them synced to the core). ABI version now tracks core minor releases (v0.9.x → ABIVersion=2, `version_min=1` keeps old plugins loadable). Also fixes the tool-loop zen-compat placeholder that wrongly fired on first-turn system context tail. The SDK ships an enhanced sanitizer example (bad-UTF-8 / U+FFFD / ANSI-escape scrub across the whole pipeline). **This ABI retired with v1.0.0.**
 
 **v0.8.0** — Core is functional, plugin system enhanced. 20+ built-in plugins. External plugin development via [homeagent-sdk](https://gitcode.com/JianFeeeee/homeagent-sdk) repo. Added input channel `NoMemory`/`Cleaner`, `ChannelDef`, plugin disable/enable system (CLI + WebUI), `plugindev` toolchain C ABI `ChannelDef` support.
 
@@ -185,6 +192,23 @@ External plugin development: see [homeagent-sdk](https://gitcode.com/JianFeeeee/
 - [Plugin Development Guide](assets/docs/en/PLUGIN_DEV.md) | [中文](assets/docs/zh/PLUGIN_DEV.md)
 - [Lua Adapter](assets/docs/en/ADAPTER.md) | [中文](assets/docs/zh/ADAPTER.md)
 - [Knowledge Base Demo](assets/knowledge/homeagent_architecture/content.md)
+
+## Downloads
+
+[Releases](https://gitcode.com/JianFeeeee/HomeAgent/releases) ship three variants:
+
+| Variant | Contents | For |
+|---|---|---|
+| **full** | homed + waiter + desktop GUI + systemd unit | Single-machine, everything |
+| **server** | homed + waiter + systemd unit | Servers (no desktop environment) |
+| **client** | waiter + desktop GUI | Connecting to a remote HomeAgent |
+
+- Linux: `.deb` (amd64/arm64), `.rpm` (x86_64), `.tar.gz`
+- Windows: `HomeAgent_v1.0.0_{Full,Server,Client}_win64.exe` (NSIS installer)
+- Portable: `homeagent-bin-<os>_<arch>.tar.gz` (homed/waiter/initconfig)
+- Verification: `SHA256SUMS`
+
+The macOS `homed` requires a native macOS build (CGO + sqlite3), so release packages ship only `waiter`/`initconfig`.
 
 ## Build
 

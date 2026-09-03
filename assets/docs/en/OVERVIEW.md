@@ -50,7 +50,10 @@ Code is in the project root, implemented in Go.
 
 **Plugin System** (`internal/plugin/`):
 - Built-in plugins: Go `init()` self-registration, compiled into kernel
-- External plugins: Go `-buildmode=c-shared` compiled to `.so`, dynamically loaded via C ABI bridge; also supports Lua script plugins
+- External plugins (since v1.0.0): compiled to an ordinary Go binary `plugin.bin`, spawned by the
+  kernel as an **independent subprocess**, communicating over stdio JSON-RPC (control plane) +
+  a shared memory segment (data plane) + an event ring (notification plane); Lua script plugins are
+  also supported (the C ABI shared-library channel, `-buildmode=c-shared`, was removed entirely in v1.0.0)
 - PluginSDK (`internal/sdk/`) defines four channels: RegisterTool / RegisterStage / Subscribe / RegisterOutputChannel
 - 7 stage hooks: on_input → pre_action → post_action → before_toolcall → after_toolcall → before_output → after_output
 
