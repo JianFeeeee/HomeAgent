@@ -2669,6 +2669,24 @@
         applyI18n();
       }
 
+      // fmtBuild 把构建身份压成一行：commit + 构建时间（日期部分）。
+      //
+      // 未注入 ldflags 的本地构建会得到 "unknown"，此时只显示 SDK 版本，
+      // 避免把 "unknown / unknown" 这种噪音摆在概览卡上。
+      function fmtBuild(b, s) {
+        var parts = [];
+        var commit = (b && b.commit) || (s && s.commit) || "";
+        if (commit && commit !== "unknown") parts.push(commit);
+        var bt = (b && b.build_time) || (s && s.build_time) || "";
+        if (bt && bt !== "unknown") {
+          // 2026-09-03T05:55:35Z → 2026-09-03
+          parts.push(String(bt).split("T")[0]);
+        }
+        var sdkv = (b && b.sdk_compatible) || (s && s.sdk_version) || "";
+        if (sdkv) parts.push("SDK " + sdkv);
+        return parts.length ? parts.join(" · ") : "-";
+      }
+
       function fmtUptime(ms) {
         var s = Math.floor(ms / 1000);
         if (s < 60) return s + "s";
@@ -2724,7 +2742,18 @@
           '<div class="kv-row"><span class="key">' +
           __("版本", "Version") +
           '</span><span class="val">' +
-          escHtml(s.version || "0.1.0") +
+          escHtml(
+            k?.build?.version
+              ? (k.build.kernel_name || "HomeAgent") + " v" + k.build.version
+              : s.version
+                ? "v" + s.version
+                : "-",
+          ) +
+          "</span></div>" +
+          '<div class="kv-row"><span class="key">' +
+          __("构建", "Build") +
+          '</span><span class="val">' +
+          escHtml(fmtBuild(k?.build, s)) +
           "</span></div></div>";
         if (k) {
           html +=

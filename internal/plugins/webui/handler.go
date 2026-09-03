@@ -22,6 +22,7 @@ import (
 	"time"
 
 	agentIO "gitcode.com/JianFeeeee/HomeAgent/internal/agent/io"
+	"gitcode.com/JianFeeeee/HomeAgent/internal/meta"
 	sdk "gitcode.com/JianFeeeee/HomeAgent/internal/sdk"
 	"gitcode.com/JianFeeeee/HomeAgent/pkg/types"
 )
@@ -943,11 +944,20 @@ func (h *Handler) handleStatus(w http.ResponseWriter, r *http.Request) {
 		agentCount = len(h.supervisor.ListAgents())
 	}
 	writeJSON(w, http.StatusOK, map[string]interface{}{
-		"status":    "running",
-		"uptime":    time.Since(h.startTime).Round(time.Second).String(),
-		"agents":    agentCount,
-		"version":   sdk.SDKVersion,
-		"startedAt": h.startTime,
+		"status": "running",
+		"uptime": time.Since(h.startTime).Round(time.Second).String(),
+		"agents": agentCount,
+		// 内核版本取 internal/meta（-ldflags 注入点）。
+		//
+		// 此前这里给的是 `sdk.SDKVersion`，那条链最终指向 **SDK 仓
+		// meta.Version 的硬编码值**，与构建时注入的内核版本无关——
+		// 两仲版本号碰巧相等时看不出问题，一旦不等就报错。
+		// SDK 版本另用 sdk_version 字段并行暴露。
+		"version":     meta.Version,
+		"commit":      meta.Commit,
+		"build_time":  meta.BuildTime,
+		"sdk_version": sdk.SDKVersion,
+		"startedAt":   h.startTime,
 	})
 }
 

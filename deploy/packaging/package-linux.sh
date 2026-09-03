@@ -6,7 +6,7 @@ BUILD_DIR="${PROJECT_ROOT}/build"
 DIST_DIR="${PROJECT_ROOT}/dist/linux"
 VERSION="${VERSION:-$(git -C "$PROJECT_ROOT" describe --tags --dirty 2>/dev/null || echo "0.8.0")}"
 PACKAGE_ROOT="${PROJECT_ROOT}/deploy/packaging/linux"
-GO="${GO:-$(command -v go 2>/dev/null || echo "/home/jianf/go1.26.5/go/bin/go")}"
+GO="${GO:-$(command -v go 2>/dev/null || echo "go")}"
 
 ARCH="${1:-amd64}"   # amd64 or arm64
 ACTION="${2:-all}"    # all, build, deb, tar, rpm
@@ -98,6 +98,9 @@ build_go() {
   }
   bash "$PROJECT_ROOT/deploy/packaging/build.sh" "linux/$ARCH" "waiter" 2>&1 || {
     echo "WARNING: waiter build failed."
+  }
+  bash "$PROJECT_ROOT/deploy/packaging/build.sh" "linux/$ARCH" "initconfig" 2>&1 || {
+    echo "WARNING: initconfig build failed（包内将缺少首次配置初始化器）。"
   }
 
   local suffix="linux_${ARCH}"
