@@ -313,13 +313,21 @@ func (a *Agent) process(input string, stageCtx *sdk.StageContext) (response stri
 			}
 			msgs = append(msgs, agentAPI.Message{Role: "assistant", Content: msgContent, ReasoningContent: resp.ReasoningContent, ToolCalls: []agentAPI.ToolCall{tc}})
 
-			// 多模态工具结果：插件通过 SDK.SetToolBlocks 注入 image_url/audio_url block，
-			// process.go 拾起并追加到 tool message 的 content 数组（OpenAI 多模态格式），
-			// 让下一轮 LLM 请求在 tool message 里看到图/音频。
+			// 多模态工具结果：插件通过 SDK.SetToolBlocks 注入 image_url/audio_url block。
 			//
-			// 主模型不支持该模态时不能直接塞：网关会把 image_url 静默剥离后仍返回 200，
-			// 模型回答「我没有看到图片」而内核以为注入成功。改走回退链转写成文字。
+			// 媒体不挂在 tool message 上，而是另起一条紧随其后的 user message——
+			// 这也是插件文案一直在说的「注入后续对话」。
+			// 为何不能挂 tool message：同一张图、同一模型、三轮实测——
+			//   图在 user message      → 3/3 读到
+			//   图在 tool message      → 0/3（模型答「没能读到这张图」）
+			//   tool 纯文本 + 后接 user → 3/3 读到
+			// tool message 那轮 prompt_tokens 反而更高（7967 vs 7089），base64 确实
+			// 进了上游，但 role=tool 上的多模态 content 数组不被当作可视内容。
+			//
+			// 主模型不支持该模态时更不能直接塞：网关会把 image_url 静默剥离后仍
+			// 返回 200，模型回答「我没有看到图片」而内核以为注入成功。改走回退链。
 			toolMsg := agentAPI.Message{Role: "tool", ToolCallID: tc.ID, Content: result}
+			var mediaMsg *agentAPI.Message
 			if rawBlocks := a.io.ConsumeToolBlocks(); len(rawBlocks) > 0 {
 				var blocks []agentAPI.ContentBlock
 				for _, b := range rawBlocks {
@@ -337,10 +345,16 @@ func (a *Agent) process(input string, stageCtx *sdk.StageContext) (response stri
 				}
 				if len(blocks) > 0 {
 					if native, fallbackText := a.prepareToolBlocks(blocks); len(native) > 0 {
-						toolMsg.Blocks = native
+						// 能直视：另起一条 user message 承载媒体，并补一句来源说明，
+						// 否则模型会把它当成用户新发的图而不是工具拉回来的。
+						mediaBlocks := append([]agentAPI.ContentBlock{{
+							Type: "text",
+							Text: fmt.Sprintf("[以下是 %s 注入的媒体内容]", tc.Name),
+						}}, native...)
+						mediaMsg = &agentAPI.Message{Role: "user", Blocks: mediaBlocks}
 					} else if fallbackText != "" {
 						// 回退链已把媒体转写成文字：并进 tool message 的纯文本 content，
-						// 不再挂 Blocks（挂了也会被上游剥掉）。
+						// 不再另起消息（文字在 tool message 里本来就能被读到）。
 						toolMsg.Content = result + "\n\n" + fallbackText
 						result = toolMsg.Content
 						if len(toolResults) > 0 {
@@ -350,6 +364,10 @@ func (a *Agent) process(input string, stageCtx *sdk.StageContext) (response stri
 				}
 			}
 			msgs = append(msgs, toolMsg)
+			if mediaMsg != nil {
+				// 必须紧跟在 toolMsg 之后：中间插入其他消息会让 tool_call_id 配对断开。
+				msgs = append(msgs, *mediaMsg)
+			}
 
 			a.publishEvent(events.EventToolCall, map[string]interface{}{
 				"tool":    tc.Name,
