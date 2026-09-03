@@ -259,12 +259,18 @@ VM built-ins: `json.encode` / `json.decode` / `log` / `http_get` / `http_post`.
 | Method | Registration Mechanism | Compilation | Usage |
 |--------|----------------------|-------------|-------|
 | Built-in | `init()` → `RegisterFactory` | `internal/plugins/` compiled into kernel | webui/cli/timer/mcp etc. |
-| External `.so` | C ABI dynamic loading | `-buildmode=c-shared` + bridge | qq/browser/files etc. |
+| External subprocess plugin | Handshake + stdio JSON-RPC reverse registration | `plugindev build` → `plugin.bin` (ordinary Go binary) | qq/browser/files etc. |
 | Lua script plugin | Execute `main.lua` to register tools | No compilation, takes effect after restart/reload | luademo etc. |
 | SKILL plugin | Parse `SKILL.md` | Markdown definition | Loaded via clawhubadapter |
 
 Built-in plugin registration: `internal/plugins/all.go` blank imports → each plugin `init()` → `Registry.Load()` scans directory to match factory.
-External plugin loading: `internal/plugin/dynamic.go` → copy to SHA256 temp path (bypass `plugin.Open` path cache) → `Open` + `Lookup("NewPlugin")`.
+
+External plugin loading (since v1.0.0): `internal/plugin/dynamic_proc.go` → `exec.Command(plugin.bin)`
+→ inherit shared-segment fds → handshake (protocol version check) → `plugin.init` → `plugin.start`
+(the plugin reverse-registers tools/stages/channels during this window).
+**The C ABI channel (`-buildmode=c-shared` + bridge) was removed entirely in v1.0.0**—
+the old `plugin.Open` path-cache workarounds (SHA256 temp-path copies) retired with it.
+
 Lua script plugin loading: `internal/plugin/` → the gopher-lua interpreter executes `main.lua` (at load time `sdk.register_*` only buffers handlers), then `Start()` swaps in the real SDK implementation and registers them in batch. The script is read only once at load time; runtime execution happens via callbacks.
 
 ### Built-in vs External Plugins
@@ -272,19 +278,38 @@ Lua script plugin loading: `internal/plugin/` → the gopher-lua interpreter exe
 | Dimension | Built-in Plugin | External Plugin |
 |-----------|----------------|-----------------|
 | Registration | `init()` calls `plugin.RegisterFactory(name, factory)` | Implements `NewPluginFactory(name, config) (sdk.Plugin, error)` entry function |
-| Compilation | Compiled into `homed` binary, no separate build | Compiled via `plugindev build` to `.so`/`.dll` (`-buildmode=c-shared`), loaded via C ABI bridge |
+| Compilation | Compiled into `homed` binary, no separate build | Compiled via `plugindev build` to `plugin.bin` (ordinary Go binary, zero cgo); the kernel spawns it as a subprocess |
 | Distribution | Bundled with kernel, not independently installable | `.hmap` package (ZIP archive), installed via WebUI or pluginmgr API |
-| Metadata | `plugin.RegisterPluginMeta()` for display name | `plugin.json` manifest file (name, version, entry, platforms, etc.) |
-| Plugin directory | No separate directory, compiled into binary | `plugins/<name>/` independent directory with `plugin.json` + binary |
-| SDK permissions | Full PluginSDK (SocialAPI read/write, Publish events) | Restricted SDK (SocialAPI read-only, Subscribe-only events) |
-| Lifecycle | Starts/stops with kernel, no individual hot-reload | Independent Start/Stop, supports hot-reload (ReloadOne) and enable/disable |
-| Crash recovery | No independent recovery | Supports `SetAutoRestart(true)` for automatic crash restart |
+| Metadata | `plugin.RegisterPluginMeta()` for display name | `plugin.json` manifest file (name, version, entry, platforms, capabilities, etc.) |
+| Plugin directory | No separate directory, compiled into binary | `plugins/<name>/` independent directory with `plugin.json` + `plugin.bin` |
+| SDK permissions | Full PluginSDK (SocialAPI read/write, Publish events) | Narrowed `procCore` surface + manifest capabilities declaration + RPC boundary rejection |
+| Lifecycle | Starts/stops with kernel, no individual hot-reload | Independent process; true hot-reload by swapping `plugin.bin` (ReloadOne) plus enable/disable |
+| Crash recovery | No independent recovery | Process-level isolation: a crash cannot take down the kernel; the kernel detaches its registrations then restarts it with backoff (`SetAutoRestart(false)` opts out) |
 
 Common ground:
 - Built-in `RegisterFactory` and external `NewPluginFactory` share the same `NativeFactory` type signature
-- `Registry.Load()` handles both uniformly: checks factory table first (built-in), falls back to dynamic loading (external)
-- Both use the same `Plugin` interface and `PluginSDK`; tool registration, stage hooks, and output channel APIs are identical
+- `Registry.Load()` handles both uniformly: checks the factory table first (built-in), otherwise dispatches by the manifest `entry` to the proc / lua / skill channel
+- Both use the same `Plugin` interface and public SDK API; tool registration, stage hooks, and output channel APIs are identical
 - Both share the same tool registry (`StageHost`); LLM invocations treat them identically
+
+### The Three Communication Planes of Subprocess Plugins (v1.0.0)
+
+| Plane | Mechanism | Why this choice |
+|---|---|---|
+| Control | stdio JSON-RPC (NDJSON frames), 51 `core.*` methods | The process boundary *is* the ABI boundary—no need to maintain three platform-specific dynamic-library loaders |
+| Data | Shared memory segment, **one segment shared by all subprocesses** | One segment per plugin would degrade "kernel ctx → segment → plugin mutates → read back" into the copy model under concurrency, reproducing lost updates exactly |
+| Notification | Event ring + platform notify (Linux eventfd / macOS pipe / Windows Event) | The kernel must never block on a consumer: streaming output publishes per token, so any wait shows up as stutter |
+
+**Subprocess lifecycle management**:
+- One dedicated `waitLoop` per subprocess (the sole `cmd.Wait()` call site)—it does not rely on
+  stdout EOF, because grandchild processes forked by a plugin (browser spawning chromium,
+  editdoc spawning python) inherit the same stdout, so EOF never arrives after the plugin itself dies
+- Central ledger `proc.Supervisor`: registered on successful handshake, unregistered on exit;
+  `Host.Close()` runs StopAll before tearing down the segment (reversing that order leaves plugins
+  holding a mapping that has been unmapped—SIGBUS on their next access)
+- Crash self-healing: detach registrations (tools + stage handlers + IO channels) → remove from
+  the registry → restart with backoff
+- Linux `Pdeathsig` is the last-resort guard so subprocesses do not linger as orphans when homed is SIGKILLed
 
 ### PluginSDK Four Channels
 

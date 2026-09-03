@@ -10,7 +10,12 @@
 
 !define PRODUCT_NAME "HomeAgent"
 !define PRODUCT_PUBLISHER "HomeAgent Team"
-!define PRODUCT_VERSION "0.8.0"
+# 版本号由 makensis -DPRODUCT_VERSION=X.Y.Z 注入；缺省值仅供本地手工构建。
+# 此前硬编码 0.8.0 而 release 已到 1.0.0，装出来的包在「添加/删除程序」里
+# 会显示错误版本（DisplayVersion 也取自这个宏）。
+!ifndef PRODUCT_VERSION
+  !define PRODUCT_VERSION "1.0.0"
+!endif
 
 !if "${VARIANT}" == "full"
   !define PRODUCT_DISPLAY_NAME "HomeAgent 完整版"
@@ -38,7 +43,7 @@
 !endif
 
 Name "${PRODUCT_DISPLAY_NAME}"
-OutFile "..\build\${OUTPUT_FILE}"
+OutFile "..\..\build\${OUTPUT_FILE}"
 InstallDir "$PROGRAMFILES64\${PRODUCT_NAME}"
 InstallDirRegKey HKLM "Software\${PRODUCT_NAME}" ""
 RequestExecutionLevel admin
@@ -217,17 +222,17 @@ Section "Install" SEC_INSTALL
   CreateDirectory "$INSTDIR\data\adapters"
 
 !if "${HAS_CORE}" == "1"
-  File "..\build\initconfig.exe"
-  File "..\build\homed.exe"
+  File "..\..\build\initconfig.exe"
+  File "..\..\build\homed.exe"
 !endif
 
 !if "${HAS_WAITER}" == "1"
-  File "..\build\waiter.exe"
+  File "..\..\build\waiter.exe"
 !endif
 
 !if "${HAS_GUI}" == "1"
   SetOutPath "$INSTDIR\homeagent-gui-win32-x64"
-  File /r "..\build\homeagent-gui-win32-x64\*.*"
+  File /r "..\..\build\homeagent-gui-win32-x64\*.*"
   SetOutPath "$INSTDIR"
 !endif
 
