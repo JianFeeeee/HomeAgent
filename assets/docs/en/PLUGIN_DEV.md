@@ -29,7 +29,7 @@ type Plugin interface {
 
 | Method | Use Case | Complexity |
 |--------|----------|------------|
-| **Dynamic .so/.dll plugin (recommended)** | Independently distributed third-party plugins | Medium, generated using `plugindev` toolchain |
+| **Subprocess plugin (recommended)** | Independently distributed third-party plugins | Medium, generated using `plugindev` toolchain |
 | **Built-in plugin** | Released with HomeAgent | Simple, requires merging into main repo |
 | **Lua script plugin** | Lightweight rapid prototyping | Simple, generated using `plugindev init --lua` |
 
@@ -114,7 +114,7 @@ myplugin/
 └── thirdpart/     — Optional external source code directory
 ```
 
-C ABI bridge files (`z_bridge_gen.go` + `z_entry.c`) are auto-generated at build time.
+Subprocess runtime files (`z_proc_gen.go` and friends) are auto-generated at build time.
 
 **Lua plugin**:
 
@@ -142,8 +142,8 @@ plugindev build --replace <mod@path> # append a go.mod replace directive (repeat
 
 Execution process:
 1. Reads `plg.json` `targets`/`bundle` fields to determine build targets (bundle takes priority, see below)
-2. Auto-generates C ABI bridge code (`z_bridge_gen.go` + `z_entry.c`; Windows only `z_bridge_gen.go`)
-3. **Go plugin**: Runs `go build -buildmode=c-shared` (produces `.so` / `.dylib` / `.dll`)
+2. Auto-generates subprocess runtime code (`z_proc_gen.go` + `z_proc_shm_unix.go` + `z_proc_shm_windows.go`)
+3. **Go plugin**: Runs `go build` (a plain executable, `CGO_ENABLED=0`)
 4. **Lua plugin**: Packages source code directly, no compilation needed (contents: `plugin.json` + `main.lua`, plus optional `README.md`, `LICENSE`, `thirdpart/*.lua`)
 5. Generates `plugin.json` output manifest
 6. Packages as `.hmap` distribution (zip format, containing `plugin.json` + binary)
@@ -155,13 +155,28 @@ Execution process:
 | `plg.json` | Project metadata, maintained by developer | `targets` — single-target build list (e.g. `"linux/amd64,windows/amd64"`); `bundle` — multi-platform bundle switch (default `true`) |
 | `plugin.json` | Build artifact manifest, auto-generated | `entry` — entry filename; `platforms` — declared platforms |
 
-Each target produces a separate `.hmap`; binary name by platform:
+Each target produces a separate `.hmap`. Subprocess plugins are plain executables with
+**no platform-specific extension**:
 
 | Platform | Binary |
 |----------|--------|
-| Linux | `plugin.so` |
-| macOS | `plugin.dylib` |
-| Windows | `plugin.dll` |
+| Linux / macOS / Windows | `plugin.bin` |
+
+Inside a bundle package the per-platform entries are named `plugin.bin.<goos>.<goarch>`;
+the kernel picks the one matching the current platform and renames it to `plugin.bin`.
+
+> ⚠️ **v1.0.0 breaking change**: external plugins moved from C ABI shared libraries to
+> **subprocess + shared memory**.
+>
+> - `plugin.so` / `plugin.dylib` / `plugin.dll` are **no longer loaded**. The new kernel
+>   skips legacy artifacts with an actionable error instead of crashing.
+> - **Business code needs no changes** — the public SDK interface is unchanged; just
+>   rebuild with the new `plugindev`.
+> - The `entry` field in `plg.json` is **meaningless for Go plugins** now (leaving
+>   `plugin.so` there is harmless); it only distinguishes Lua plugins.
+> - Artifacts no longer need cgo, so cross-compiling requires no target C toolchain.
+> - Windows went from "only 3 stage fields delivered, no writeback" to all 16 fields
+>   visible plus writeback, sharing the same RPC implementation as Unix.
 
 ### Build Targets & Multi-platform Bundle
 
@@ -269,8 +284,11 @@ func NewPlugin(name string, config map[string]interface{}) (sdk.Plugin, error) {
 }
 ```
 
-At build time, `plugindev build` auto-generates C ABI bridge code (`z_bridge_gen.go` + `z_entry.c`),
-shared by both Windows DLL and Linux/macOS .so builds. No manual bridge code needed.
+At build time, `plugindev build` auto-generates subprocess runtime code
+(`z_proc_gen.go` for the platform-independent part, plus `z_proc_shm_unix.go` /
+`z_proc_shm_windows.go`). All three platforms share the same entry point and the same
+RPC logic; only the cross-process resource-passing mechanism differs (inherited fds on
+Unix, named kernel objects on Windows). No manual bridge code needed.
 
 ### PluginSDK Core API
 
@@ -322,7 +340,7 @@ Tool output → valuable for LLM attention?
        └── No  → Normal memory, no extra handling
 ```
 
-> **Note**: `Cleaner` is a Go `func` type (`json:"-"`), cannot cross C ABI boundaries, so it is unavailable for C/C++/Rust remote plugins. **Lua plugins are not affected**: pass a Lua function in the def table (`cleaner = function(text) return text end`) — the Go bridge calls it back per invocation during memory computation.
+> **Note**: `Cleaner` is a Go `func` type (`json:"-"`), cannot be serialized across process boundaries, so it is unavailable for C/C++/Rust remote plugins. **Lua plugins are not affected**: pass a Lua function in the def table (`cleaner = function(text) return text end`) — the Go bridge calls it back per invocation during memory computation.
 
 #### Stage Hooks — Intervene in message processing flow
 
@@ -527,7 +545,7 @@ Lua plugins run inside the kernel process on a gopher-lua interpreter (single Lu
 
 - **Passive callback model**: `main.lua` executes only once at load time. Afterward, tools, stage hooks, output/input channels, and registered APIs are all invoked by the kernel via callbacks into Lua functions. Plugins cannot start background tasks on their own.
 - **No concurrency / no long-running services**: Lua has no goroutines, coroutine scheduling, `os`/`io` libraries, or socket listening. The only outbound capability is `sdk.http.get/post` (synchronous). Any blocking loop will stall every call of that plugin while holding the lock.
-- **For long-running services (listening on a port, background polling, timers) use a Go plugin** (`.so`/`.dll` built with the toolchain, which may spawn goroutines — see the webui/cli plugins). The Lua equivalent is event-driven: register tools/stage hooks/channels to be called back by the kernel, or interact with external processes via `sdk.http`.
+- **For long-running services (listening on a port, background polling, timers) use a Go plugin** (`plugin.bin` built with the toolchain, which may spawn goroutines — see the webui/cli plugins). The Lua equivalent is event-driven: register tools/stage hooks/channels to be called back by the kernel, or interact with external processes via `sdk.http`.
 
 ### Plugin Structure
 
@@ -576,7 +594,7 @@ When running inside the kernel, `sdk.*` global variables are injected by the Go 
 
 ### Lua SDK API
 
-The `sdk.*` API of Lua plugins is fully aligned with external plugins (C ABI / toolchain-built `.so`/`.dll`): registration functions raise a Lua error on failure; data functions uniformly return `(result, err)` with `err == nil` on success. Subsystems not wired by the core (e.g. SocialAPI) return empty values instead of errors.
+The `sdk.*` API of Lua plugins is fully aligned with external plugins (toolchain-built `plugin.bin` subprocesses): registration functions raise a Lua error on failure; data functions uniformly return `(result, err)` with `err == nil` on success. Subsystems not wired by the core (e.g. SocialAPI) return empty values instead of errors.
 
 **Registration**
 
@@ -594,7 +612,7 @@ The `sdk.*` API of Lua plugins is fully aligned with external plugins (C ABI / t
 
 Stage handlers receive the full context (same as external plugins): `raw_message`, `user_id`, `group_id`, `phase`, `llm_text`, `final_text`, `no_memory`, `response` (when responded), `tool_calls`, `tool_results`.
 
-**Stage writeback (ABI v2)**: the `ctx` table passed to the handler is a reference — mutating writable fields inside the handler syncs back to the core `StageContext` (aligned with the C ABI v2 external-plugin capability):
+**Stage writeback**: the `ctx` table passed to the handler is a reference — mutating writable fields inside the handler syncs back to the core `StageContext` (aligned with subprocess external-plugin capability):
 
 ```lua
 sdk.register_stage("on_input", function(ctx)
@@ -622,7 +640,7 @@ Writable fields: `raw_message`, `llm_text`, `final_text`, `user_id`, `group_id`,
 | `sdk.inject_interrupt(source, channel, text)` | Interrupt delivery |
 | `sdk.inject_text_no_memory(source, channel, text)` | Deliver without memory computation |
 
-**Data APIs (aligned with C ABI, all return `(result, err)`)**
+**Data APIs (aligned with subprocess external plugins, all return `(result, err)`)**
 
 | Sub-table | Functions |
 |-----------|-----------|

@@ -67,6 +67,17 @@ func (a *Agent) executeOutputSendTool(tc agentAPI.ToolCall) string {
 		if err != nil {
 			return fmt.Sprintf("通过 [%s] 通道发送失败: %v", channel, err)
 		}
+		// 通道可能回报「未确认」（已提交但超时未拿到发送确认）——此时不能对模型
+		// 谎报「已发送」，否则模型不会重试/核实（plan.md 11.1）。
+		if m, ok := result.(map[string]interface{}); ok {
+			if status, _ := m["status"].(string); status == "unconfirmed" || status == "queued" {
+				note, _ := m["note"].(string)
+				if note == "" {
+					note = "发送已提交但未收到通道确认，结果未知"
+				}
+				return fmt.Sprintf("[%s] 通道发送结果未确认：%s", channel, note)
+			}
+		}
 		return fmt.Sprintf("已通过 [%s] 通道发送: %v", channel, result)
 	}
 

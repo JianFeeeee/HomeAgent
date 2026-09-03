@@ -10,7 +10,6 @@ data/
 .tmp-plugins/
 .go/
 .local/
-internal/meta/
 
 *.hmap
 dev/
@@ -24,6 +23,11 @@ cmd/gui/dist/
 .gopath/
 
 # SDK 工具链 — 核心仓不追踪
+#
+# 外部插件与工具链维护在独立 SDK 仓（决策 sdk_repo_only），
+# 本仓经 go.mod 的 replace => ./third_party/homeagent-sdk 引用。
+# example/ 下已跟踪的 20 个文件（plg.json + plugin.go）早于本规则，
+# 靠「已跟踪文件不受 .gitignore 影响」保留——这是有意的，不要「修」。
 third_party/homeagent-sdk/bin/
 third_party/homeagent-sdk/tools/
 third_party/homeagent-sdk/package/
@@ -36,10 +40,15 @@ third_party/homeagent-sdk/example/
 codegraph.json
 
 # 运行时产物(不提交)
+#
+# ⚠️ 这些必须带前导斜杠。不带斜杠的模式（如 `memory/`）会匹配**任意层级**的
+# 同名目录，把 internal/memory/、internal/knowledge/、deploy/scripts/ 一起吞掉
+# ——24 + 3 + 1 个已跟踪源码文件曾因此落在 ignore 规则下，只靠「已跟踪
+# 文件不受 .gitignore 影响」这条 git 规则兜着，新增文件会默默不入库。
 /adapters/
-knowledge/
-memory/
-scripts/
+/knowledge/
+/memory/
+/scripts/
 terminal_locked_log.txt
 
 dist/
