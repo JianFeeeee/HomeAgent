@@ -10,6 +10,7 @@ import (
 	"gitcode.com/JianFeeeee/HomeAgent/internal/memory/document"
 	"gitcode.com/JianFeeeee/HomeAgent/internal/memory/social"
 	"gitcode.com/JianFeeeee/HomeAgent/internal/memory/text"
+	"gitcode.com/JianFeeeee/HomeAgent/internal/meta"
 	"gitcode.com/JianFeeeee/HomeAgent/internal/plugin"
 	sdk "gitcode.com/JianFeeeee/HomeAgent/internal/sdk"
 	"gitcode.com/JianFeeeee/HomeAgent/internal/tracker"
@@ -33,6 +34,7 @@ type LLMStatus = sdk.LLMStatus
 type ContextStatus = sdk.ContextStatus
 type RuntimeStatus = sdk.RuntimeStatus
 type TrackerStatus = sdk.TrackerStatus
+type BuildStatus = sdk.BuildStatus
 
 func channelInfoFromIO(ch agentIO.ChannelInfo) ChannelInfo {
 	return ChannelInfo{
@@ -63,6 +65,15 @@ func collectKernelStatus(
 		Uptime:    time.Since(startTime).Round(time.Second).String(),
 		StartTime: startTime.Format(time.RFC3339),
 		AgentID:   agentID,
+		// 构建身份取自内核自己的 meta（-ldflags 注入点），
+		// 而非 SDK 仓的硬编码版本。
+		Build: BuildStatus{
+			Version:       meta.Version,
+			Commit:        meta.Commit,
+			BuildTime:     meta.BuildTime,
+			SDKCompatible: meta.SDKCompatibleVersion,
+			KernelName:    meta.KernelName,
+		},
 		Runtime: RuntimeStatus{
 			Goroutines: runtime.NumGoroutine(),
 			GoVersion:  runtime.Version(),
