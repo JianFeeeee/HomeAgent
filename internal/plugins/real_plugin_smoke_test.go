@@ -213,27 +213,68 @@ func TestRealPlugin_CrashDoesNotKillKernel(t *testing.T) {
 		t.Fatal("editdoc 未加载")
 	}
 
-	// 找到插件子进程并 SIGKILL
-	pid := findPluginPID(t, "editdoc")
+	// 找插件子进程并 SIGKILL。
+	//
+	// 必须拿 plgDir 限定范围：旧实现用全系统 pgrep -f plugin.bin 后
+	// 只比“路径含 editdoc”，于是在跑着生产实例的机器上，它会把
+	// /home/newqqagent/plugins/editdoc/plugin.bin 当成目标杀掉（实测 9 次，
+	// 全部落在有人跑 go test 的时段）。更糟的是此时本测试仍会通过：
+	// 它断言的是测试内核存活，而那个内核的插件压根没死——**它在测一件
+	// 没发生的事**，同时还把生产环境打坏了。
+	pid := findPluginPID(t, plgDir, "editdoc")
 	if pid == 0 {
-		t.Skip("未找到插件子进程（进程名匹配失败）")
+		t.Skip("未找到本测试自己拉起的插件子进程")
 	}
-	t.Logf("kill 插件进程 pid=%d", pid)
+	t.Logf("kill 插件进程 pid=%d (exe 在 %s 下)", pid, plgDir)
 	if err := syscall.Kill(pid, syscall.SIGKILL); err != nil {
 		t.Fatalf("kill: %v", err)
 	}
 
-	// 内核必须存活并能继续工作
-	time.Sleep(300 * time.Millisecond)
+	// 先确认目标进程真的死了。
+	//
+	// 这步不能省：旧版直接断言“内核存活”，而内核本来就活着——
+	// 即使 SIGKILL 发错了对象（杀了生产实例的插件）测试也会结束。
+	// 先验“目标真死”再验“内核未被连带”，两步都成立才能证明隔离生效。
+	deadline := time.Now().Add(3 * time.Second)
+	dead := false
+	for time.Now().Before(deadline) {
+		if syscall.Kill(pid, 0) != nil {
+			dead = true
+			break
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	if !dead {
+		t.Fatalf("pid=%d 在 SIGKILL 后 3s 内未退出，崩溃隔离无从验证", pid)
+	}
+
+	// 内核（本测试进程）必须存活并能继续工作
 	if env.pluginReg.List() == nil {
 		t.Fatal("内核在插件崩溃后不可用")
 	}
-	t.Logf("插件崩溃后内核存活，已加载插件数=%d", len(env.pluginReg.List()))
+	t.Logf("插件进程已确认退出，内核存活，已加载插件数=%d", len(env.pluginReg.List()))
 }
 
-// findPluginPID 按二进制路径找插件子进程 pid。
-func findPluginPID(t *testing.T, name string) int {
+// findPluginPID 在**指定插件目录下**找插件子进程 pid。
+//
+// root 参数是硬约束，不是可选过滤器：本函数的唯一用途是给崩溃隔离
+// 测试提供一个“可以安全 SIGKILL 的 pid”，而安全的定义就是它必须属于
+// 本测试自己的临时目录。不带这个约束就会误杀同机生产实例的插件。
+//
+// 匹配依据是 /proc/<pid>/exe 的真实路径必须以 root 为前缀。
+// 用 exe 而不用 cmdline：cmdline 可被进程自行改写，而 exe 符链由内核维护。
+// root 先过一道 EvalSymlinks：/tmp 在部分发行版上是符链（如 macOS 的
+// /tmp -> /private/tmp），不归一化会让前缀比较永远不命中，退化成静默 Skip。
+func findPluginPID(t *testing.T, root, name string) int {
 	t.Helper()
+	if root == "" {
+		t.Fatal("findPluginPID: root 不得为空（防止误杀全系统同名插件）")
+	}
+	realRoot, err := filepath.EvalSymlinks(root)
+	if err != nil {
+		realRoot = root
+	}
+
 	out, err := exec.Command("pgrep", "-f", "plugin.bin").Output()
 	if err != nil {
 		return 0
@@ -244,15 +285,18 @@ func findPluginPID(t *testing.T, name string) int {
 		if pid == 0 {
 			continue
 		}
-		// 校验 cwd 或 cmdline 含插件名
 		exe, err := os.Readlink(fmt.Sprintf("/proc/%d/exe", pid))
-		if err == nil && strings.Contains(exe, name) {
-			return pid
+		if err != nil {
+			continue
 		}
-		cwd, err := os.Readlink(fmt.Sprintf("/proc/%d/cwd", pid))
-		if err == nil && strings.Contains(cwd, name) {
-			return pid
+		// 两道条件同时成立才算命中：在本测试的目录树内，且是目标插件
+		if !strings.HasPrefix(exe, realRoot+string(os.PathSeparator)) {
+			continue
 		}
+		if !strings.Contains(exe, name) {
+			continue
+		}
+		return pid
 	}
 	return 0
 }
