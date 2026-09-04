@@ -14,6 +14,7 @@ import (
 	"gitcode.com/JianFeeeee/HomeAgent/internal/knowledge"
 	"gitcode.com/JianFeeeee/HomeAgent/internal/memory"
 	"gitcode.com/JianFeeeee/HomeAgent/internal/memory/document"
+	"gitcode.com/JianFeeeee/HomeAgent/internal/memory/media"
 	"gitcode.com/JianFeeeee/HomeAgent/internal/memory/social"
 	"gitcode.com/JianFeeeee/HomeAgent/internal/memory/text"
 	"gitcode.com/JianFeeeee/HomeAgent/internal/plugin"
@@ -49,6 +50,11 @@ type Agent struct {
 
 	// 文本记忆（原始对话日志）
 	textMem *text.Memory
+
+	// 媒体存储（内容寻址）：对话里出现的图片/音频按 sha256 落盘去重，
+	// L0/L2/L3 只记 digest。为 nil 时全部媒体接线静默跳过——
+	// 它是记忆增强而非对话必需品，缺了不该让对话失败。
+	mediaStore *media.Store
 
 	// 人格设定
 	personality *agentPkg.Personality
@@ -106,6 +112,13 @@ type Agent struct {
 	// 当前轮次的非文本媒体数据（图片/音频），供 describe_image 等工具访问
 	pendingMedia map[string]interface{}
 
+	// pendingMediaDigests 累积本轮已落进 CAS 的媒体 digest。
+	//
+	// 需要缓存而不是当场挂到事件上：媒体在 process() 执行期间被捕获，
+	// 而承载它的 ContextEvent 要等 process() 返回后才 Append——此刻还没有 owner_id。
+	// 与 pendingMedia 同受 a.mu 保护。
+	pendingMediaDigests []string
+
 	// 当前输入是否为工具提醒/中断（以 system 角色注入，避免被当成用户消息）
 	interruptInput bool
 
@@ -119,7 +132,7 @@ type Agent struct {
 
 	// 输入去重：防 webui/GUI 断线重连导致的消息重放
 	// key=source+"|"+content, value=上次接收时间；短窗口内同内容丢弃
-	lastInput  map[string]time.Time
+	lastInput   map[string]time.Time
 	lastInputMu sync.Mutex
 
 	// 词嵌入模型，用于实体语义相似度计算
@@ -151,16 +164,17 @@ type AgentConfig struct {
 	Knowledge          *knowledge.Store
 	SocialStore        *social.SocialStore
 	TextMemory         *text.Memory
+	MediaStore         *media.Store
 	Personality        *agentPkg.Personality
 	PluginReg          *plugin.Registry
 	PluginDir          string
 	DistillInterval    time.Duration
-	ArchiveInterval    time.Duration // 冷文档归档间隔（L2→L3），0 则使用 DistillInterval
-	ReviewInterval     time.Duration // 关系复审间隔，0 则使用 DistillInterval
-	MergeInterval      time.Duration // 实体合并检测间隔，0 则使用 DistillInterval
-	MaxContextSize     int           // 活跃上下文最大条数，超出按相关性裁剪
-	ContextSavePath    string        // 上下文持久化路径，空则不持久化
-	EmbeddingModelPath string        // 预训练词嵌入模型路径（word2vec 文本格式），空则不使用
+	ArchiveInterval    time.Duration          // 冷文档归档间隔（L2→L3），0 则使用 DistillInterval
+	ReviewInterval     time.Duration          // 关系复审间隔，0 则使用 DistillInterval
+	MergeInterval      time.Duration          // 实体合并检测间隔，0 则使用 DistillInterval
+	MaxContextSize     int                    // 活跃上下文最大条数，超出按相关性裁剪
+	ContextSavePath    string                 // 上下文持久化路径，空则不持久化
+	EmbeddingModelPath string                 // 预训练词嵌入模型路径（word2vec 文本格式），空则不使用
 	Embedder           *memory.StaticEmbedder // 共享词嵌入实例；nil 时按 EmbeddingModelPath 自建
 	StageHost          *StageHost
 	EventBus           *events.Bus
@@ -227,6 +241,7 @@ func New(cfg AgentConfig) *Agent {
 		knowledge:       cfg.Knowledge,
 		social:          cfg.SocialStore,
 		textMem:         cfg.TextMemory,
+		mediaStore:      cfg.MediaStore,
 		personality:     cfg.Personality,
 		pluginReg:       cfg.PluginReg,
 		pluginDir:       cfg.PluginDir,

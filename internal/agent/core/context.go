@@ -3,6 +3,7 @@ package core
 import (
 	"encoding/json"
 	"fmt"
+	"log"
 	"os"
 	"path/filepath"
 	"sort"
@@ -12,6 +13,7 @@ import (
 
 	"gitcode.com/JianFeeeee/HomeAgent/internal/memory"
 	"gitcode.com/JianFeeeee/HomeAgent/internal/memory/document"
+	"gitcode.com/JianFeeeee/HomeAgent/internal/memory/media"
 	"gitcode.com/JianFeeeee/HomeAgent/internal/memory/vector"
 	sdk "gitcode.com/JianFeeeee/HomeAgent/internal/sdk"
 )
@@ -22,13 +24,25 @@ type ToolResultItem struct {
 }
 
 type ContextEvent struct {
-	Timestamp   time.Time         `json:"timestamp"`
-	Source      string            `json:"source"`
-	Input       string            `json:"input"`
-	Response    string            `json:"response,omitempty"`
-	ToolsUsed   []string          `json:"tools_used,omitempty"`
-	ToolResults []ToolResultItem  `json:"tool_results,omitempty"`
-	Vector      vector.Vector     `json:"-"`
+	// ID 是事件的稳定标识，媒体引用（media_refs.owner_id）挂在它上面。
+	//
+	// 惰性生成：只有真的要挂媒体时才赋值（见 bindEventMedia）。
+	// 全量生成会让每条事件都多一个字段进 context.json，而绝大多数对话没有媒体。
+	// omitempty 保证存量 context.json 读回来时该字段为空，不影响任何既有行为。
+	ID          string           `json:"id,omitempty"`
+	Timestamp   time.Time        `json:"timestamp"`
+	Source      string           `json:"source"`
+	Input       string           `json:"input"`
+	Response    string           `json:"response,omitempty"`
+	ToolsUsed   []string         `json:"tools_used,omitempty"`
+	ToolResults []ToolResultItem `json:"tool_results,omitempty"`
+	// Media 是本轮对话涉及的媒体 digest（sha256 十六进制）。
+	//
+	// 存 digest 而不存路径：路径会失效（/tmp 探针图、下载缓存、别的进程的
+	// 临时产物），digest 是内容本身的身份，配合 internal/memory/media 的 CAS
+	// 永远能取回原始字节——只要它还没被容量 GC 淘汰。
+	Media  []string      `json:"media,omitempty"`
+	Vector vector.Vector `json:"-"`
 }
 
 const contextFlushInterval = 5 * time.Second
@@ -42,6 +56,41 @@ type RelevanceContext struct {
 	dirty            bool
 	toolDefLookup    func(name string) *sdk.ToolDef
 	channelDefLookup func(name string) (sdk.ChannelDef, bool)
+
+	// mediaStore 只用于 Prune 时把媒体引用从事件转给归档文档。
+	// 为 nil 时引用转移静默跳过（媒体存储未启用）。
+	mediaStore *media.Store
+}
+
+// SetMediaStore 注入媒体存储，供 L0→L2 归档时转移媒体引用。
+func (c *RelevanceContext) SetMediaStore(s *media.Store) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.mediaStore = s
+}
+
+// transferMediaRefs 把被归档事件的媒体引用转给目标文档（调用方已持 c.mu）。
+//
+// 先挂后销：若反序，引用计数会瞬时归零，此时若后台 GC 正在跑
+// 就会把仍被记忆引用的内容当孤儿清掉。
+func (c *RelevanceContext) transferMediaRefs(archive []scoredEvent, docID string) {
+	if c.mediaStore == nil || docID == "" {
+		return
+	}
+	for _, s := range archive {
+		evt := s.event
+		if evt == nil || evt.ID == "" || len(evt.Media) == 0 {
+			continue
+		}
+		for _, d := range evt.Media {
+			if err := c.mediaStore.AddRef(d, media.OwnerDocument, docID); err != nil {
+				log.Printf("[media] 归档转移 AddRef 失败 (%s → doc %s): %v", shortDigest(d), docID, err)
+			}
+		}
+		if _, err := c.mediaStore.DropOwner(media.OwnerContext, evt.ID); err != nil {
+			log.Printf("[media] 归档转移 DropOwner 失败 (evt %s): %v", evt.ID, err)
+		}
+	}
 }
 
 func NewRelevanceContext(savePath string, embedder *memory.StaticEmbedder) *RelevanceContext {
@@ -256,6 +305,16 @@ func (c *RelevanceContext) flush() {
 	c.dirty = false
 }
 
+// scoredEvent 是 Prune 里按相关度排序的事件。
+//
+// 提为包级类型（原先是 Prune 内的局部类型）：transferMediaRefs 需要
+// 把待归档列表传进去，局部类型无法出现在方法签名上。
+type scoredEvent struct {
+	event *ContextEvent
+	score float64
+	idx   int
+}
+
 func (c *RelevanceContext) Prune(currentInput string, topK int, docStore *document.Store) int {
 	c.mu.Lock()
 	defer c.mu.Unlock()
@@ -277,15 +336,10 @@ func (c *RelevanceContext) Prune(currentInput string, topK int, docStore *docume
 
 	queryVec := c.embedder.VectorizeClean(currentInput)
 
-	type scored struct {
-		event *ContextEvent
-		score float64
-		idx   int
-	}
-	scoredEvents := make([]scored, len(candidates))
+	scoredEvents := make([]scoredEvent, len(candidates))
 	for i, evt := range candidates {
 		score := vector.CosineSimilarity(queryVec, evt.Vector)
-		scoredEvents[i] = scored{event: evt, score: score, idx: i}
+		scoredEvents[i] = scoredEvent{event: evt, score: score, idx: i}
 	}
 
 	sort.Slice(scoredEvents, func(i, j int) bool {
@@ -327,6 +381,11 @@ func (c *RelevanceContext) Prune(currentInput string, topK int, docStore *docume
 		doc, err := docStore.ContextToDoc("context_archived", entries, c.embedder, nil, c.toolOutputClean, c.channelCleanerForDoc())
 		if err == nil && doc != nil {
 			archived = len(entries)
+			// 媒体引用随事件一起从 L0 转到 L2：先把引用挂到归档文档上，
+			// 再注销原事件的引用。顺序不能反——先销后挂会让引用计数
+			// 瞬时归零，若此时 GC 正在跑（后台任务）就会把仍被记忆引用的
+			// 内容当孤儿清掉。
+			c.transferMediaRefs(archive, doc.ID)
 		}
 	}
 
@@ -385,5 +444,3 @@ func convertToolResults(items []ToolResultItem) []document.ToolResultItem {
 	}
 	return result
 }
-
-

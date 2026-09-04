@@ -32,8 +32,22 @@ import (
 	_ "github.com/mattn/go-sqlite3"
 )
 
+// OwnerKind 是 media_refs.owner_kind 的取值，对应引用媒体的记忆层。
+//
+// 定义为常量而不是让调用方写字符串：owner_kind 进了主键，
+// 拼错一个字符就是一条永远对不上的孤立引用（AddRef 不会报错，
+// DropOwner 也永远匹配不到）。
+const (
+	// OwnerContext 是 L0 对话上下文事件（ContextEvent.ID）。
+	OwnerContext = "context"
+	// OwnerDocument 是 L2 文档记忆（Doc.ID）。
+	OwnerDocument = "document"
+	// OwnerGraphSentence 是 L3 图库句子节点（sentences.id）。
+	OwnerGraphSentence = "graph_sentence"
+)
+
 // Kind 是媒体大类。刻意只分三类而不细分具体格式：
-// 记忆检索关心的是"这是张图还是段音频"，具体编码交给 MIME 字段。
+// 记忆检索关心的是“这是张图还是段音频”，具体编码交给 MIME 字段。
 type Kind string
 
 const (
