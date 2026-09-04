@@ -66,19 +66,41 @@ def put_file(url: str, headers: dict, path: str) -> tuple[int, str]:
         return 0, f"{type(e).__name__}: {e}"
 
 
+def project_root() -> str:
+    """向上找带 go.mod 的目录作为仓库根。
+
+    为何不数 dirname：本脚本初版在 scripts/（深度 1），移到 deploy/scripts/
+    （深度 2）后写死的两层 dirname 就指向了 deploy/dist/release，上传直接
+    FileNotFoundError。这正是 v0.7.2 那次 package/ → deploy/packaging/ 打断
+    PROJECT_ROOT 的同一个坑，改成按标记文件定位以后怎么挑位置都不会错。
+    """
+    d = os.path.dirname(os.path.abspath(__file__))
+    while d != os.path.dirname(d):
+        if os.path.exists(os.path.join(d, "go.mod")):
+            return d
+        d = os.path.dirname(d)
+    # 实在找不到（脚本被单独拷出仓库）就回退到 cwd，给 ASSET_DIR 一个机会
+    return os.getcwd()
+
+
 def main() -> int:
     if len(sys.argv) < 3:
         print(__doc__)
         return 2
     tag, token = sys.argv[1], sys.argv[2]
     outdir = os.environ.get("ASSET_DIR") or os.path.join(
-        os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
-        "dist",
-        "release",
+        project_root(), "dist", "release"
     )
+    if not os.path.isdir(outdir):
+        print(f"error: 资产目录不存在: {outdir}")
+        print("       用 ASSET_DIR=<目录> 显式指定，或先跑构建生成 dist/release/")
+        return 2
     files = sys.argv[3:] or sorted(
         f for f in os.listdir(outdir) if is_artifact(f)
     )
+    if not files:
+        print(f"error: {outdir} 下没有可识别的发布产物")
+        return 2
     print(f"repo={REPO} tag={tag} dir={outdir}", flush=True)
     failed = []
     for name in files:
