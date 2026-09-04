@@ -204,6 +204,14 @@ stage_linux_payload() {
 }
 
 # ---- gui (Electron) ----
+#
+# 输出目录必须用 --config.directories.output，**不能用 -o**：
+# electron-builder 的 `-o` 是 `--mac`/`--macos` 的短别名（见 --help 的 Building 段），
+# 不是 output。此前 `-o "$BUILD_DIR"` 被当成 macOS 的 target 列表，报
+#   ⨯ Unknown target: /home/program/trueagent/build
+# （路径被 lowercase 后去匹配 target 名表，所以错误信息里的路径是全小写的，
+#  这也是它看起来像「路径错」而实际是「参数位置错」的原因）。
+# v1.0.1 与 v1.0.3 两次发布都因此手工组装过 GUI。
 build_gui() {
   if [ -n "${GOOS:-}" ] && [ "$GOOS" != "$("$GO" env GOOS)" ]; then
     echo "[SKIP] gui ${GOOS}/${GOARCH} — electron-builder handles cross-platform natively; run 'all' on CI host"
@@ -221,12 +229,21 @@ build_gui() {
   # 不传 --config：electron-builder 默认从 package.json 的 "build" 键读配置。
   # 传 --config package.json 会让它把**整个** package.json 当配置校验，
   # 于是 devDependencies / build / scripts 全被判为 "unknown property" 而失败。
-  (cd "$gui_dir" && npx electron-builder \
-    --linux --win --mac \
-    --x64 --arm64 \
-    -p never \
-    -o "$BUILD_DIR")
-  echo "  OK"
+  #
+  # GUI 失败不中断整体构建：homed/waiter/initconfig 是发布的主体，
+  # 而 GUI 依赖 electron 运行时下载（离线机器、arm64 缺缓存都会失败）。
+  # set -e 下若不接住，一个可选组件会让整轮跨平台构建全废。
+  if (cd "$gui_dir" && npx electron-builder \
+      --linux --win --mac \
+      --x64 --arm64 \
+      -p never \
+      --config.directories.output="$BUILD_DIR"); then
+    echo "  OK"
+  else
+    echo "  WARN: gui 构建失败（可选组件，不影响 homed/waiter/initconfig）"
+    echo "        Linux 包可用 deploy/packaging/package-linux.sh 内置的手工组装路径"
+    return 0
+  fi
 }
 
 # ---- dispatch ----
