@@ -144,48 +144,83 @@ func (h *Host) Close() error {
 //
 // 首个进入者：获取 stageMu（独占共享段）→ 把内核 StageContext 写入段。
 // 后续进入者：仅递增 inflight。
+//
+// enter() 在 coordMu 内完成，两个原因：
+//  1. 首进者的 WriteAll 未结束前不能让后到者拿到 coord 就去读共享段
+//     （旧码的后到者 enter 立即返回，可能读到写一半的段）。
+//  2. 与 endStage 的摘除互斥，防止后到者挂进一个正在收尾的协调器
+//     （具体见 endStage 的注释）。
+//
+// 锁序：stageMu → coordMu。endStage 只解锁 stageMu、不获取，所以无环。
 func (h *Host) beginStage(sc *pubsdk.StageContext) (*stageCoordinator, error) {
 	h.coordMu.Lock()
-	first := h.coord == nil
-	if first {
-		// 独占共享段直到本次 stage 全部插件离开
+	if h.coord == nil {
+		// 首个进入者：独占共享段直到本次 stage 全部插件离开。
+		// 必须先放 coordMu 再取 stageMu，不能反序。
 		h.coordMu.Unlock()
 		h.stageMu.Lock()
 		h.coordMu.Lock()
-		// 双检：等锁期间可能已有其他插件建好协调器（它们会先拿到 stageMu）
-		if h.coord != nil {
-			first = false
-			h.stageMu.Unlock()
-		} else {
-			h.coord = newStageCoordinator(h.seg)
-		}
-	}
-	coord := h.coord
-	h.coordMu.Unlock()
-
-	if err := coord.enter(sc, first); err != nil {
-		if first {
-			h.coordMu.Lock()
-			h.coord = nil
+		if h.coord == nil {
+			coord := newStageCoordinator(h.seg)
+			h.coord = coord
+			if err := coord.enter(sc, true); err != nil {
+				// 注意：runStage 的 defer endStage(coord) 是在 beginStage
+				// 返回 err 的检查之后才注册的，所以这条路径上
+				// endStage 永远不会被调用——stageMu 必须在此自行释放，
+				// 否则整个 stage 通道永久卡死。
+				h.coord = nil
+				h.coordMu.Unlock()
+				h.stageMu.Unlock()
+				return nil, err
+			}
 			h.coordMu.Unlock()
-			h.stageMu.Unlock()
+			h.locks.bind(coord.lock)
+			return coord, nil
 		}
+		// 双检失败：等锁期间已有其他插件建好协调器，退回后到者路径。
+		h.stageMu.Unlock()
+	}
+
+	coord := h.coord
+	if err := coord.enter(sc, false); err != nil {
+		h.coordMu.Unlock()
 		return nil, err
 	}
+	h.coordMu.Unlock()
 	h.locks.bind(coord.lock)
 	return coord, nil
 }
 
 // endStage 由插件 handler 返回时调用。
 // 最后离开者：把共享段结果读回内核 StageContext → 压实 arena → 释放 stageMu。
+//
+// coordMu 必须覆盖「递减 inflight → 判定最后离开者 → 摘除 h.coord」全过程。
+// 旧码把 leave() 放在 coordMu 之外，留出了这个窗口（即 2026-09-04 06:56:18
+// 线上 fatal error: sync: unlock of unlocked mutex 的真因）：
+//
+//	A.endStage: leave() → inflight 1→0, last=true，尚未摘除 h.coord
+//	B.beginStage: 看到 h.coord != nil，以「后到者」身份 enter，inflight 0→1
+//	              （后到者不取 stageMu）
+//	A.endStage: h.coord = nil；stageMu.Unlock()            ← 第 1 次
+//	B.endStage: leave() → inflight 1→0, last=true → stageMu.Unlock()  ← 第 2 次 💥
+//
+// B 从未持有 stageMu（它是后到者），却因为挂进了一个正在收尾的协调器
+// 而成为“最后离开者”，于是对同一把锁解了两次。sync.Mutex 的双重解锁是
+// runtime fatal，**recover 捕不到**——这就是为何 stage.go / stages.go 里
+// 那两层 recover 全部失效、整个 homed 直接死掉的原因。
 func (h *Host) endStage(coord *stageCoordinator) error {
-	last, err := coord.leave()
-	if !last {
-		return err
-	}
 	h.coordMu.Lock()
-	h.coord = nil
+	last, sc, written := coord.depart()
+	if last && h.coord == coord {
+		h.coord = nil
+	}
 	h.coordMu.Unlock()
+	if !last {
+		return nil
+	}
+	// finish 必须在 stageMu.Unlock() 之前：先放锁会让下一轮 stage
+	// 在回读未完时就改写共享段。
+	err := coord.finish(sc, written)
 	h.stageMu.Unlock()
 	return err
 }
@@ -232,26 +267,38 @@ func (c *stageCoordinator) enter(sc *pubsdk.StageContext, first bool) error {
 
 // leave 登记一个插件离开；返回是否为最后一个离开者。
 //
-// 最后离开者负责把共享段结果读回内核 StageContext，并压实 arena
-// （此时无插件持锁，满足 §3.3 的压实前提）。
+// 拆成两段：depart() 只动计数（由 endStage 在 coordMu 内调用，使
+// 「递减 → 判定最后者 → 摘除 h.coord」成为原子操作），finish() 做
+// 共享段回读与压实。本方法保留给单测用。
 func (c *stageCoordinator) leave() (last bool, err error) {
-	c.mu.Lock()
-	c.inflight--
-	last = c.inflight == 0
-	sc := c.ctxRef
-	written := c.written
-	c.mu.Unlock()
-
-	if !last || !written || sc == nil {
+	last, sc, written := c.depart()
+	if !last {
 		return last, nil
 	}
+	return last, c.finish(sc, written)
+}
+
+// depart 递减 inflight 并报告是否为最后离开者。
+func (c *stageCoordinator) depart() (last bool, sc *pubsdk.StageContext, written bool) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.inflight--
+	return c.inflight == 0, c.ctxRef, c.written
+}
+
+// finish 把共享段结果读回内核 StageContext 并压实 arena
+// （此时无插件持锁，满足 §3.3 的压实前提）。
+func (c *stageCoordinator) finish(sc *pubsdk.StageContext, written bool) error {
+	if !written || sc == nil {
+		return nil
+	}
 	if rErr := c.seg.ReadInto(sc); rErr != nil {
-		return last, fmt.Errorf("回读共享段: %w", rErr)
+		return fmt.Errorf("回读共享段: %w", rErr)
 	}
 	if reclaimed := c.seg.Compact(); reclaimed > 0 {
 		log.Printf("[proc] stage 结束，arena 压实回收 %d 字节", reclaimed)
 	}
-	return last, nil
+	return nil
 }
 
 // ShmSize 返回共享段大小（供诊断/日志）。
