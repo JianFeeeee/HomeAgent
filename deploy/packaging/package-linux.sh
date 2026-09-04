@@ -122,6 +122,15 @@ build_go() {
 }
 
 # ---- build GUI (manual directory assembly, avoids electron-packager network issues) ----
+#
+# electron 运行时必须按**目标架构**取，不能用 host 的
+# node_modules/electron/dist——那里永远是 host 架构（本机 x64）。
+# v1.0.0 / v1.0.1 的 arm64 full/client 包都踩了这个坑：目录名带
+# -arm64、homed/waiter 确实是 aarch64，但里面的 electron 是 x86-64，
+# 在 arm64 机器上一启动就是 Exec format error（从未被交叉验证过）。
+#
+# 现在改为优先从 electron 缓存里取对应架构的 zip，并在最后做
+# 一道强制校验：架构不符就删掉目录并跳过 GUI，宁可不发也不发坏包。
 build_gui() {
   local gui_dir="$PROJECT_ROOT/cmd/gui"
   local gui_out="$BUILD_DIR/homeagent-gui-linux-${TAR_ARCH}"
@@ -138,17 +147,52 @@ build_gui() {
     (cd "$gui_dir" && npm install --production)
   fi
 
-  local electron_dir="$gui_dir/node_modules/electron/dist"
-  if [ ! -f "$electron_dir/electron" ]; then
-    echo "  WARNING: electron binary not found at $electron_dir. GUI will be skipped."
-    return
+  # electron 版本从已安装的包里读，保证运行时与 app 依赖一致
+  local ever
+  ever=$(python3 -c "import json;print(json.load(open('$gui_dir/node_modules/electron/package.json'))['version'])" 2>/dev/null || true)
+
+  mkdir -p "$gui_out"
+
+  # 优先：缓存里的目标架构 zip（~/.cache/electron/<hash>/electron-v<ver>-linux-<arch>.zip）
+  local zip=""
+  if [ -n "$ever" ]; then
+    zip=$(find "$HOME/.cache/electron" -name "electron-v${ever}-linux-${TAR_ARCH}.zip" 2>/dev/null | head -1)
+  fi
+  if [ -z "$zip" ]; then
+    zip=$(find "$HOME/.cache/electron" -name "electron-v*-linux-${TAR_ARCH}.zip" 2>/dev/null | head -1)
+  fi
+
+  if [ -n "$zip" ]; then
+    echo "  electron runtime: $(basename "$zip")"
+    unzip -q -o "$zip" -d "$gui_out"
+  else
+    # 回退：仅当目标架构 == host 架构时才能用 host 的 dist
+    local host_arch
+    case "$(uname -m)" in
+      x86_64) host_arch=amd64 ;;
+      aarch64|arm64) host_arch=arm64 ;;
+      *) host_arch=unknown ;;
+    esac
+    if [ "$TAR_ARCH" != "$host_arch" ]; then
+      echo "  WARNING: 缺 electron-v*-linux-${TAR_ARCH}.zip 缓存，且目标架构与 host"
+      echo "           ($host_arch) 不同——不能用 host 的 electron 冒充。跳过 GUI。"
+      echo "           解法：下载 electron-v${ever:-<ver>}-linux-${TAR_ARCH}.zip 到"
+      echo "           ~/.cache/electron/<任意子目录>/ 后重跑。"
+      rm -rf "$gui_out"
+      return
+    fi
+    local electron_dir="$gui_dir/node_modules/electron/dist"
+    if [ ! -f "$electron_dir/electron" ]; then
+      echo "  WARNING: electron binary not found at $electron_dir. GUI will be skipped."
+      rm -rf "$gui_out"
+      return
+    fi
+    echo "  electron runtime: host node_modules (同架构 $host_arch)"
+    cp -r "$electron_dir"/* "$gui_out/" 2>/dev/null
   fi
 
   mkdir -p "$gui_out/resources/app/node_modules"
   mkdir -p "$gui_out/resources/app/renderer"
-
-  # copy electron runtime (binary + shared libs)
-  cp -r "$electron_dir"/* "$gui_out/" 2>/dev/null
   rm -f "$gui_out/resources/default_app.asar" 2>/dev/null
 
   # copy app source
@@ -190,7 +234,28 @@ LAUNCHER
   chmod +x "$gui_out/homeagent-gui"
   chmod +x "$gui_out/electron"
 
-  echo "  GUI built: $gui_out ($(du -sh "$gui_out" | cut -f1))"
+  # 最后一道强制校验：electron 二进制的实际架构必须匹配目标架构。
+  # 不做这步就会重现 v1.0.0/v1.0.1 的隐形坏包：包名、目录名、
+  # homed/waiter 全对，只有 electron 是错架构，直到用户在 arm64 机器上
+  # 双击才发现 Exec format error。
+  local want_pat
+  case "$TAR_ARCH" in
+    amd64) want_pat="x86-64" ;;
+    arm64) want_pat="aarch64" ;;
+    *)     want_pat="" ;;
+  esac
+  if [ -n "$want_pat" ]; then
+    local got
+    got=$(file -b "$gui_out/electron" 2>/dev/null || echo "")
+    if ! printf '%s' "$got" | grep -q "$want_pat"; then
+      echo "  ERROR: electron 架构不符——期望 $want_pat，实际: ${got%%,*}"
+      echo "         删除 GUI 目录并跳过（宁可不发，也不发装了跑不起来的包）。"
+      rm -rf "$gui_out"
+      return
+    fi
+  fi
+
+  echo "  GUI built: $gui_out ($(du -sh "$gui_out" | cut -f1), $(file -b "$gui_out/electron" | cut -d, -f2 | tr -d ' '))"
   echo ""
 }
 
