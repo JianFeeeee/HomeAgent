@@ -25,6 +25,7 @@ import (
 	luapkg "gitcode.com/JianFeeeee/HomeAgent/internal/lua"
 	"gitcode.com/JianFeeeee/HomeAgent/internal/memory"
 	"gitcode.com/JianFeeeee/HomeAgent/internal/memory/document"
+	"gitcode.com/JianFeeeee/HomeAgent/internal/memory/media"
 	"gitcode.com/JianFeeeee/HomeAgent/internal/memory/pipeline"
 	"gitcode.com/JianFeeeee/HomeAgent/internal/memory/social"
 	"gitcode.com/JianFeeeee/HomeAgent/internal/memory/text"
@@ -324,6 +325,27 @@ func main() {
 		log.Printf("[homed] warning: document store: %v", err)
 	}
 
+	// 媒体存储（内容寻址）：对话里出现的图片/音频按 sha256 落盘去重，
+	// L0/L2/L3 只记 digest。开关默认开；关闭后全部媒体接线静默跳过，
+	// 对话行为与本特性上线前完全一致。
+	var mediaStore *media.Store
+	if cfgReg.GetBool("core.memory.media.enabled", true) {
+		mediaDir := cfgReg.GetString("core.memory.media.dir",
+			filepath.Join(cfg.Daemon.DataDir, "memory", "media"))
+		maxMB := cfgReg.GetInt("core.memory.media.max_mb", 2048)
+		ms, err := media.New(mediaDir, int64(maxMB)*1024*1024)
+		if err != nil {
+			// 媒体存储开不起来不该阻止启动——它是记忆增强，不是对话必需品
+			log.Printf("[homed] warning: media store: %v（媒体记忆已禁用）", err)
+		} else {
+			mediaStore = ms
+			defer mediaStore.Close()
+			st := mediaStore.Stats()
+			log.Printf("[homed] media store active: %v 条 / %v 字节（上限 %d MB）",
+				st["count"], st["total_bytes"], maxMB)
+		}
+	}
+
 	ks := knowledge.NewStore(filepath.Join(cfg.Daemon.DataDir, "knowledge"))
 	if err := ks.Start(); err != nil {
 		log.Printf("[homed] warning: knowledge store: %v", err)
@@ -431,6 +453,7 @@ func main() {
 		Knowledge:          ks,
 		SocialStore:        socialStore,
 		TextMemory:         textMem,
+		MediaStore:         mediaStore,
 		Personality:        personality,
 		PluginReg:          pluginReg,
 		PluginDir:          cfg.Plugin.Dir,

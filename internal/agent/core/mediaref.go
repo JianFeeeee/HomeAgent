@@ -1,0 +1,160 @@
+package core
+
+import (
+	"fmt"
+	"log"
+	"strings"
+	"time"
+
+	agentAPI "gitcode.com/JianFeeeee/HomeAgent/internal/agent/api"
+	"gitcode.com/JianFeeeee/HomeAgent/internal/memory/media"
+)
+
+// 媒体记忆接线：把对话里出现的图片/音频落进内容寻址存储（CAS），
+// 并让 L0 的 ContextEvent 记住它们的 digest。
+//
+// 为何需要这一层：媒体进入对话有两条路，两条都只把**文字**留给记忆——
+//
+//  1. 用户直接发图 → processMediaInput → mediaToBlocks
+//     ContextEvent.Input 只存 alt 文本（"[从 qq 收到了 image]"），
+//     base64 随 message 数组发给模型后就丢了。
+//  2. 插件注入 → SetToolBlocks → process.go 的 mediaMsg
+//     ToolResultItem.Output 只存那句 "[已将图片注入后续对话] /tmp/x.png"。
+//
+// 于是下一轮对话起，模型能看到的只有一句路径或一句 alt。那个文件被删、
+// 被覆盖，或者本来就是 /tmp 下的临时产物，连线索都断了。
+//
+// 现在两条路都在同一处收口：从 ContentBlock 的 data URL 取出字节存进 CAS，
+// digest 挂到当轮 ContextEvent 上；事件被 Prune 归档进 L2 时引用随之转移。
+
+// captureBlockMedia 把 blocks 里的 data URL 媒体落进 CAS，返回 digest 列表。
+//
+// 只处理 data URL：http(s) URL 拿不到字节就无法做内容寻址，
+// 而"下载它再存"会把一次对话变成一次网络请求（超时、鉴权、SSRF 全来了），
+// 不在本层解决。
+func (a *Agent) captureBlockMedia(blocks []agentAPI.ContentBlock, tool string) []string {
+	if a.mediaStore == nil || len(blocks) == 0 {
+		return nil
+	}
+
+	var digests []string
+	for _, b := range blocks {
+		var url string
+		switch {
+		case b.ImageURL != nil && b.ImageURL.URL != "":
+			url = b.ImageURL.URL
+		case b.AudioURL != nil && b.AudioURL.URL != "":
+			url = b.AudioURL.URL
+		default:
+			continue
+		}
+
+		mime, data, ok := media.ParseDataURL(url)
+		if !ok {
+			continue // http(s) URL 或格式不认，跳过
+		}
+
+		d, err := a.mediaStore.Put(data, media.Item{
+			MIME: mime,
+			Tool: tool,
+		})
+		if err != nil {
+			// 媒体存不进去不该让对话失败——它是记忆增强，不是对话必需品
+			log.Printf("[media] 落盘失败 (tool=%s mime=%s): %v", tool, mime, err)
+			continue
+		}
+		digests = append(digests, d)
+	}
+	return digests
+}
+
+// stageMediaDigests 累积本轮捕获的 digest，等 ContextEvent 建好后一起挂上。
+//
+// 为何要缓存而不是当场 AddRef：媒体在 process() 执行期间被捕获，而承载它的
+// ContextEvent 要等 process() 返回后才 Append——此刻还没有 owner_id。
+// 与既有的 a.pendingMedia 同一手法（都在 a.mu 保护下）。
+func (a *Agent) stageMediaDigests(digests ...string) {
+	if len(digests) == 0 {
+		return
+	}
+	a.pendingMediaDigests = append(a.pendingMediaDigests, digests...)
+}
+
+// drainMediaDigests 取出并清空本轮累积的 digest。
+func (a *Agent) drainMediaDigests() []string {
+	if len(a.pendingMediaDigests) == 0 {
+		return nil
+	}
+	out := a.pendingMediaDigests
+	a.pendingMediaDigests = nil
+	return out
+}
+
+// bindEventMedia 把 digest 列表登记到某个 ContextEvent 上。
+//
+// 双向落地：evt.Media 让事件自己记得引了哪些媒体（随 context.json 持久化），
+// media_refs 表让 CAS 侧知道谁在引用（GC 据此判断能不能清）。
+// 两边都写才闭环——只写一边的话，要么 GC 会误删仍被记忆引用的内容，
+// 要么孤儿永远清不掉。
+func (a *Agent) bindEventMedia(evt *ContextEvent, digests []string) {
+	if a.mediaStore == nil || evt == nil || len(digests) == 0 {
+		return
+	}
+	if evt.ID == "" {
+		evt.ID = newEventID()
+	}
+	for _, d := range digests {
+		if err := a.mediaStore.AddRef(d, media.OwnerContext, evt.ID); err != nil {
+			log.Printf("[media] AddRef 失败 (%s → %s): %v", shortDigest(d), evt.ID, err)
+			continue
+		}
+		evt.Media = append(evt.Media, d)
+	}
+}
+
+// mediaSummaryForEvent 给已有描述的媒体生成一行文字，供写进 ContextEvent.Input。
+//
+// 这是方案 C 的落点：**描述文本才是持久语义记忆，blob 只是缓存**。
+// blob 可能被容量 GC 淘汰，但描述会一直留在 L0/L2/L3 的文本里，
+// 让"那张紫蓝红三色带图"在几个月后仍然可被检索到。
+func (a *Agent) mediaSummaryForEvent(digests []string) string {
+	if a.mediaStore == nil || len(digests) == 0 {
+		return ""
+	}
+	var lines []string
+	for _, d := range digests {
+		it, err := a.mediaStore.Stat(d)
+		if err != nil || it == nil {
+			continue
+		}
+		label := string(it.Kind)
+		if it.MIME != "" {
+			label = it.MIME
+		}
+		if it.Description != "" {
+			lines = append(lines, fmt.Sprintf("[%s %s] %s", label, shortDigest(d), it.Description))
+		} else {
+			lines = append(lines, fmt.Sprintf("[%s %s] (未描述)", label, shortDigest(d)))
+		}
+	}
+	if len(lines) == 0 {
+		return ""
+	}
+	return "媒体内容：\n" + strings.Join(lines, "\n")
+}
+
+// newEventID 生成 ContextEvent 的稳定标识。
+//
+// 沿用 document.Store 的 doc_<unixnano> 手法（同一份代码库里保持一致，
+// 也避免为此引入 uuid 依赖）。纳秒精度足够：同一 Agent 的事件由
+// a.mu 串行化 Append，不存在同纳秒两条。
+func newEventID() string {
+	return fmt.Sprintf("evt_%d", time.Now().UnixNano())
+}
+
+func shortDigest(d string) string {
+	if len(d) > 12 {
+		return d[:12]
+	}
+	return d
+}
