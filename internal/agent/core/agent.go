@@ -55,6 +55,12 @@ type Agent struct {
 	// L0/L2/L3 只记 digest。为 nil 时全部媒体接线静默跳过——
 	// 它是记忆增强而非对话必需品，缺了不该让对话失败。
 	mediaStore *media.Store
+	// mediaGCInterval 为 0 时不跑 GC 循环（容量上限就仅在手动调 GC 时生效）。
+	mediaGCInterval time.Duration
+	// mediaGCMinAge 保护新入库媒体：刚 Put 还没来得及 AddRef 的项引用计数也是 0。
+	mediaGCMinAge time.Duration
+	// mediaDescribe 控制是否跑后台描述循环（要消耗视觉模型配额）。
+	mediaDescribe bool
 
 	// 人格设定
 	personality *agentPkg.Personality
@@ -165,6 +171,9 @@ type AgentConfig struct {
 	SocialStore        *social.SocialStore
 	TextMemory         *text.Memory
 	MediaStore         *media.Store
+	MediaGCInterval    time.Duration
+	MediaGCMinAge      time.Duration
+	MediaDescribe      bool
 	Personality        *agentPkg.Personality
 	PluginReg          *plugin.Registry
 	PluginDir          string
@@ -242,6 +251,9 @@ func New(cfg AgentConfig) *Agent {
 		social:          cfg.SocialStore,
 		textMem:         cfg.TextMemory,
 		mediaStore:      cfg.MediaStore,
+		mediaGCInterval: cfg.MediaGCInterval,
+		mediaGCMinAge:   cfg.MediaGCMinAge,
+		mediaDescribe:   cfg.MediaDescribe,
 		personality:     cfg.Personality,
 		pluginReg:       cfg.PluginReg,
 		pluginDir:       cfg.PluginDir,
@@ -276,6 +288,8 @@ func (a *Agent) Start() {
 	go a.archiveLoop()
 	go a.mergeLoop()
 	go a.reviewLoop()
+	go a.mediaGCLoop()
+	go a.mediaDescribeLoop()
 	log.Printf("[agent] %s started, waiting for IO interrupts", a.id)
 }
 

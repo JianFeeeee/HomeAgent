@@ -475,3 +475,39 @@ func TestReopen_PersistsAcrossRestart(t *testing.T) {
 		t.Fatalf("内容应持久化: %v / %q", err, data)
 	}
 }
+
+func TestPending_ExcludesAttemptedButUndescribable(t *testing.T) {
+	// 「已尝试但无法描述」的项必须退出待描述队列。
+	//
+	// 这些项被标记为 described_by=unsupported/content-missing 而 description
+	// 仍为空。若 Pending 只看 description，它们每轮都会被取出来重试、
+	// 永久占着 LIMIT 的名额，真正需要描述的新项永远轮不到。
+	s := newTestStore(t, 0)
+
+	fresh, _ := s.Put([]byte("needs-describe"), Item{MIME: "image/png"})
+	unsupported, _ := s.Put([]byte("cannot-describe"), Item{MIME: "application/octet-stream"})
+	described, _ := s.Put([]byte("已描述"), Item{MIME: "image/png"})
+
+	// 标记「尝试过但不支持」：description 空，described_by 非空
+	if err := s.Describe(unsupported, "", "unsupported"); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.Describe(described, "一张图", "visionllm"); err != nil {
+		t.Fatal(err)
+	}
+
+	pending, err := s.Pending(10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(pending) != 1 {
+		var names []string
+		for _, p := range pending {
+			names = append(names, shortDigest(p.Digest))
+		}
+		t.Fatalf("应只剩 1 条待描述，实际 %d 条: %v", len(pending), names)
+	}
+	if pending[0].Digest != fresh {
+		t.Fatalf("待描述的应是未处理项，实际 %s", shortDigest(pending[0].Digest))
+	}
+}
