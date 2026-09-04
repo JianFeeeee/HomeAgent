@@ -438,6 +438,13 @@ func (s *Store) Search(query string, kind Kind, limit int) ([]*Item, error) {
 }
 
 // Pending 返回尚无描述的媒体，供后台描述任务消费。
+// Pending 返回尚无描述的媒体，供后台描述任务消费。
+//
+// 不只看 description 为空，还要求 described_by 也为空。
+// 因为“已尝试但无法描述”的项（如 kind=other 的二进制、blob 已丢失）
+// 会被标记为 described_by=unsupported/content-missing 而 description 仍为空——
+// 若只看 description，这些项每轮都会被取出来重试，永远卡在队列头部，
+// 真正需要描述的新项永远轮不到（LIMIT 只取前 N 条）。
 func (s *Store) Pending(limit int) ([]*Item, error) {
 	if limit <= 0 {
 		limit = 10
@@ -447,7 +454,8 @@ func (s *Store) Pending(limit int) ([]*Item, error) {
 	rows, err := s.db.Query(`
 		SELECT digest, kind, mime, size, width, height, origin_path, tool,
 		       description, described_by, ref_count, first_seen, last_seen
-		FROM media WHERE COALESCE(description,'') = ''
+		FROM media
+		WHERE COALESCE(description,'') = '' AND COALESCE(described_by,'') = ''
 		ORDER BY last_seen DESC LIMIT ?`, limit)
 	if err != nil {
 		return nil, err
