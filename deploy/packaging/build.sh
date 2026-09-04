@@ -27,10 +27,19 @@ COMPONENT="${2:-all}"
 case "$TARGET" in
   native)   GOOS="" GOARCH="" ;;
   linux/amd64)  GOOS=linux   GOARCH=amd64  CC="${CC:-}" ;;
-  # arm64 刻意不设 CXX：设了会让 Go 用 aarch64 的 g++ 去链接，
-  # 而它对 host 产生的 .o 报 "file format not recognized"。
-  # gojieba 的 C++ 源仍由 CC 对应的 gcc 驱动编译（gcc 能编 C++）。
-  linux/arm64)  GOOS=linux   GOARCH=arm64  CC="${CC:-aarch64-linux-gnu-gcc}" ;;
+  # arm64 必须同时给 CXX：gojieba 是 C++，缺 CXX 时 cgo 用宿主 g++ 编出
+  # x86-64 的 .o，链接时报 "Relocations in generic ELF (EM: 183)"（183 = aarch64）。
+  #
+  # 此处曾有一条注释写着「arm64 刻意不设 CXX」，理由是设了会报
+  # "file format not recognized"。那个判断是错的：那个报错的真因是
+  # cmd/{homed,waiter}/*.syso（x86-64 COFF Windows 资源对象）被链进了目标，
+  # 与 CXX 无关。四组对照：
+  #   syso 在   + 无 CXX → Relocations in generic ELF (EM: 183)
+  #   syso 在   + 有 CXX → 000000.o: file format not recognized
+  #   syso 隐藏 + 无 CXX → Relocations in generic ELF (EM: 183)
+  #   syso 隐藏 + 有 CXX → 成功，ELF aarch64
+  # 本脚本的 hide_syso_for_target 已处理前一个条件，这里补上后一个。
+  linux/arm64)  GOOS=linux   GOARCH=arm64  CC="${CC:-aarch64-linux-gnu-gcc}" CXX="${CXX:-aarch64-linux-gnu-g++}" ;;
   darwin/amd64) GOOS=darwin  GOARCH=amd64  CC="${CC:-}" ;;
   darwin/arm64) GOOS=darwin  GOARCH=arm64  CC="${CC:-}" ;;
   # Windows 必须同时给 CXX：gojieba 是 C++，缺 CXX 时 cgo 回退到宿主 g++，
