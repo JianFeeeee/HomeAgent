@@ -18,10 +18,10 @@ import (
 )
 
 const (
-	DefaultTimeout      = 5 * time.Minute
-	ReadBufSize         = 4096
-	MaxOutputBuffer     = 128 * 1024
-	DefaultNotifyBytes  = 2048 // 积累 2KB 未读输出再通知
+	DefaultTimeout        = 5 * time.Minute
+	ReadBufSize           = 4096
+	MaxOutputBuffer       = 128 * 1024
+	DefaultNotifyBytes    = 2048            // 积累 2KB 未读输出再通知
 	DefaultNotifyInterval = 2 * time.Second // 同一终端两次通知的最小间隔（兜底）
 )
 
@@ -68,12 +68,12 @@ type TerminalSession struct {
 	done      chan struct{}
 
 	// 通知节流字段
-	unreadBytes  int             // 最近一次通知后积累的未读字节数
-	lastNotify   time.Time       // 最近一次通知时间
-	lastData     time.Time       // 最近一次读到的数据时间（用于判定输出停止）
-	lastFeedback time.Time       // 最近一次定时反馈时间
-	backoff      time.Duration   // 输出风暴退避：持续高速输出时通知间隔翻倍
-	watch        terminalWatch   // 该终端的提醒规则
+	unreadBytes  int           // 最近一次通知后积累的未读字节数
+	lastNotify   time.Time     // 最近一次通知时间
+	lastData     time.Time     // 最近一次读到的数据时间（用于判定输出停止）
+	lastFeedback time.Time     // 最近一次定时反馈时间
+	backoff      time.Duration // 输出风暴退避：持续高速输出时通知间隔翻倍
+	watch        terminalWatch // 该终端的提醒规则
 
 	// 实时画面推流（terminal_output 事件）
 	stream bytes.Buffer // 待推送的增量输出，由 readLoop 每 200ms flush 一次
@@ -226,7 +226,7 @@ func (p *Plugin) Start(s *sdk.PluginSDK) error {
 		Description: "创建一个新的交互式终端会话。返回终端 ID，后续通过此 ID 进行读写操作。适用于运行交互式程序如 vim、ssh、top、nano 等。" +
 			"通知模式通过 notify 参数选择（默认 exit）：exit=仅命令执行结束后提醒一次；interval=定时反馈（如 interval=30s 每 30 秒反馈一次状态摘要）；" +
 			"buffer=未读输出积累到指定字节数后提醒（如 buffer=8192）；多个模式用逗号组合（如 interval=30s,buffer=8192）。终端默认 5 分钟后自动关闭，可通过 timeout 参数调整。",
-		NoMemory:    true,
+		NoMemory: true,
 		Parameters: map[string]interface{}{
 			"type": "object",
 			"properties": map[string]interface{}{
@@ -283,7 +283,7 @@ func (p *Plugin) Start(s *sdk.PluginSDK) error {
 	})
 
 	s.RegisterTool("terminal_read", sdk.ToolDef{
-		Name: "terminal_read",
+		Name:        "terminal_read",
 		Description: "读取指定终端的输出。mode=new（默认）返回自上次读取以来的新输出并清空缓冲；mode=now 返回终端当前显示的全部屏幕内容（不清空缓冲）。如需持续监控请多次调用。",
 		NoMemory:    true,
 		Parameters: map[string]interface{}{
@@ -759,11 +759,11 @@ func (p *Plugin) handleList() (interface{}, error) {
 	defer p.mu.Unlock()
 
 	type termInfo struct {
-		ID       string `json:"id"`
-		Command  string `json:"command"`
-		Uptime   string `json:"uptime"`
+		ID        string `json:"id"`
+		Command   string `json:"command"`
+		Uptime    string `json:"uptime"`
 		ExpiresIn string `json:"expires_in"`
-		Running  bool   `json:"running"`
+		Running   bool   `json:"running"`
 	}
 
 	var terms []termInfo
@@ -787,8 +787,8 @@ func (p *Plugin) handleList() (interface{}, error) {
 	}
 
 	return map[string]interface{}{
-		"status":   "ok",
-		"count":    len(terms),
+		"status":    "ok",
+		"count":     len(terms),
 		"terminals": terms,
 	}, nil
 }
@@ -797,6 +797,9 @@ func (p *Plugin) readLoop(t *TerminalSession, s *sdk.PluginSDK) {
 	defer p.wg.Done()
 	defer close(t.done)
 
+	// reader 协程独享这个读缓冲：结果随 readResult 携带，
+	// readLoop 不再从其中做 copy（见 reader 注释，那是对共享缓冲
+	// 的并发读写，-race 实测触发）。
 	buf := make([]byte, ReadBufSize)
 	pollInterval := 200 * time.Millisecond
 
@@ -816,7 +819,7 @@ func (p *Plugin) readLoop(t *TerminalSession, s *sdk.PluginSDK) {
 	t.lastFeedback = now
 	t.mu.Unlock()
 
-// 硬上限：未读输出积累达到该值也通知一次（防大输出静默丢失），频率极低
+	// 硬上限：未读输出积累达到该值也通知一次（防大输出静默丢失），频率极低
 	hardNotifyBytes := 64 * 1024
 	hardNotifyInterval := 10 * time.Second
 	// 输出停止判定：超过该时长无新数据则视为输出停止
@@ -886,9 +889,7 @@ func (p *Plugin) readLoop(t *TerminalSession, s *sdk.PluginSDK) {
 				return
 			}
 			if r.n > 0 {
-				data := make([]byte, r.n)
-				copy(data, buf[:r.n])
-				t.appendOutput(data)
+				t.appendOutput(r.data)
 
 				// 缓冲阈值通知（仅当 agent 显式选择 buffer 模式，或未读积累达到硬上限）。
 				// 默认模式（仅 exit 提醒）下不随输出流通知，杜绝通知风暴。
@@ -951,15 +952,28 @@ func previewTail(s string, n int) string {
 }
 
 type readResult struct {
-	n   int
-	err error
+	n    int
+	data []byte
+	err  error
 }
 
+// reader 从终端读取输出并通过 channel 交给 readLoop。
+//
+// 读到的数据**随结果一起传**而不是复用外层共享的 buf：
+// reader 是唯一写 buf 的 goroutine，readLoop 又常在 reader 尚未
+// 写完下一段时就从 buf[:r.n] 做 copy——同一个 shared buf 被并发
+// 读写就是 data race（-race 实测触发）。改为每个结果自带切片后，
+// 读与拷贝天然隔离，不再共享可变状态。
 func (p *Plugin) reader(t *TerminalSession, buf []byte, ch chan<- readResult) {
 	for {
 		n, err := t.session.Read(buf)
+		var data []byte
+		if n > 0 {
+			data = make([]byte, n)
+			copy(data, buf[:n])
+		}
 		select {
-		case ch <- readResult{n, err}:
+		case ch <- readResult{n, data, err}:
 		case <-t.stopCh:
 			return
 		}
