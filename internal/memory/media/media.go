@@ -46,6 +46,9 @@ const (
 	OwnerGraphSentence = "graph_sentence"
 )
 
+// digestHexLen 是 sha256 的十六进制串长度。
+const digestHexLen = sha256.Size * 2
+
 // Kind 是媒体大类。刻意只分三类而不细分具体格式：
 // 记忆检索关心的是“这是张图还是段音频”，具体编码交给 MIME 字段。
 type Kind string
@@ -721,4 +724,57 @@ func truncate(s string, n int) string {
 		return s
 	}
 	return s[:n] + "..."
+}
+
+// ResolvePrefix 把 digest 前缀补全为完整 digest。
+//
+// 日志、事件摘要与图库句子里出现的都是 shortDigest（前 12 位），
+// 因为完整的 64 位 sha256 会把一行文字撑爆、也无助于人眼辨认。
+// 反查时需要这个补全，否则那些短标记只能看不能用。
+//
+// 前缀歧义视为错误而非"取第一个"：挂错引用会让 GC 删掉仍被引用的内容，
+// 宁可这次绑定失败。12 位十六进制的碰撞概率极低，真撞上说明该用更长前缀。
+func (s *Store) ResolvePrefix(prefix string) (string, error) {
+	prefix = strings.ToLower(strings.TrimSpace(prefix))
+	if len(prefix) < 8 {
+		return "", fmt.Errorf("digest 前缀过短（至少 8 位）: %q", prefix)
+	}
+	if len(prefix) == digestHexLen {
+		// 已是完整 digest：仍要确认存在，否则调用方会挂一条孤儿引用
+		if _, err := s.Stat(prefix); err != nil {
+			return "", err
+		}
+		return prefix, nil
+	}
+
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	rows, err := s.db.Query(
+		`SELECT digest FROM media WHERE digest LIKE ? || '%' LIMIT 2`, prefix)
+	if err != nil {
+		return "", err
+	}
+	defer rows.Close()
+
+	var found []string
+	for rows.Next() {
+		var d string
+		if err := rows.Scan(&d); err != nil {
+			return "", err
+		}
+		found = append(found, d)
+	}
+	if err := rows.Err(); err != nil {
+		return "", err
+	}
+
+	switch len(found) {
+	case 0:
+		return "", fmt.Errorf("digest 前缀 %q 未匹配到媒体", prefix)
+	case 1:
+		return found[0], nil
+	default:
+		return "", fmt.Errorf("digest 前缀 %q 有歧义（至少匹配 %s 和 %s）",
+			prefix, found[0][:16], found[1][:16])
+	}
 }
