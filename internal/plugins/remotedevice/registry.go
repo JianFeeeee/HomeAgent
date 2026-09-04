@@ -37,6 +37,24 @@ type DeviceMeta struct {
 type wconn struct {
 	deviceID string
 	w        *bufio.Writer
+	// wmu 序列化对该连接 bufio.Writer 的所有写。
+	//
+	// 两个角色会并发写同一连接：handleWS 主循环（读设备帧后的 hello_ack/
+	// bind_ack/pong 回写）与 PushJSON/PushData（agent→设备的下发路径，可能
+	// 来自任意 goroutine）。bufio.Writer 不是线程安全的，不加锁会在
+	// WriteByte/Flush 上产生 data race（生产实测触发）。
+	wmu sync.Mutex
+}
+
+// lockWrite 对 wconn 加写锁并返回 writer；调用方必须 defer unlockWrite。
+// 单独写成方法而不是直接暴露字段，避免调用方绕过锁。
+func (c *wconn) lockWrite() *bufio.Writer {
+	c.wmu.Lock()
+	return c.w
+}
+
+func (c *wconn) unlockWrite() {
+	c.wmu.Unlock()
 }
 
 // Registry 是设备接入网关的注册表：管理在线连接、设备元数据。线程安全。
@@ -319,7 +337,9 @@ func (r *Registry) PushJSON(deviceID string, payload map[string]interface{}) err
 	if !ok {
 		return fmt.Errorf("device %s not online", deviceID)
 	}
-	return writeText(c.w, mustJSON(payload))
+	w := c.lockWrite()
+	defer c.unlockWrite()
+	return writeText(w, mustJSON(payload))
 }
 
 // PushCmd 向设备发送命令执行请求。
@@ -348,7 +368,11 @@ func (r *Registry) PushData(deviceID, reqID, kind, mime string, data []byte) err
 	if !ok {
 		return fmt.Errorf("device %s not online", deviceID)
 	}
-	if err := writeText(c.w, mustJSON(map[string]interface{}{
+	// 整条下发（start + N 个 chunk + end）持锁：设备侧按协议串行聚合，
+	// 若中途被 handleWS 的 hello/pong 插帧会破坏协议顺序。
+	w := c.lockWrite()
+	defer c.unlockWrite()
+	if err := writeText(w, mustJSON(map[string]interface{}{
 		"op":     "cmd_speech_start",
 		"req_id": reqID,
 		"kind":   kind,
@@ -363,11 +387,11 @@ func (r *Registry) PushData(deviceID, reqID, kind, mime string, data []byte) err
 		if end > len(data) {
 			end = len(data)
 		}
-		if err := writeBinary(c.w, data[off:end]); err != nil {
+		if err := writeBinary(w, data[off:end]); err != nil {
 			return fmt.Errorf("push data chunk: %w", err)
 		}
 	}
-	if err := writeText(c.w, mustJSON(map[string]interface{}{
+	if err := writeText(w, mustJSON(map[string]interface{}{
 		"op":     "cmd_speech_end",
 		"req_id": reqID,
 	})); err != nil {
@@ -618,6 +642,26 @@ func (r *Registry) ServeWS(w http.ResponseWriter, req *http.Request) {
 	go r.handleWS(conn, rw)
 }
 
+// wsWriteLocked 在指定设备连接的写锁保护下执行写回调。
+//
+// handleWS 主循环与 Push* 是两条并发写同一 bufio.Writer 的路径，
+// 必须共用同一把锁。handleWS 里拿到的是 rw.Writer（与 conns 存储的是
+// 同一个对象），回写前必须经此函数取锁，否则跟 Push* 依然会撞。
+//
+// 注意设备已离线（conns 中已删除）时直接报错——设备断开后仍尝试
+// 回写没有意义，还可能在已关闭的 bufio 上写入。
+func (r *Registry) wsWriteLocked(deviceID string, fn func(w *bufio.Writer) error) error {
+	r.mu.RLock()
+	c, ok := r.conns[deviceID]
+	r.mu.RUnlock()
+	if !ok {
+		return fmt.Errorf("device %s not online", deviceID)
+	}
+	w := c.lockWrite()
+	defer c.unlockWrite()
+	return fn(w)
+}
+
 func (r *Registry) handleWS(conn net.Conn, rw *bufio.ReadWriter) {
 	defer conn.Close()
 	var curID string
@@ -635,7 +679,9 @@ func (r *Registry) handleWS(conn net.Conn, rw *bufio.ReadWriter) {
 		payload, isClose, opcode, err := readFrame(rw.Reader)
 		if err != nil {
 			if err == errPing {
-				if werr := writePong(rw.Writer); werr != nil {
+				// pong 也走写锁：它可能在 Push* 持锁推送大块数据时到达。
+				err := r.wsWriteLocked(curID, writePong)
+				if err != nil {
 					return
 				}
 				continue
@@ -679,11 +725,13 @@ func (r *Registry) handleWS(conn net.Conn, rw *bufio.ReadWriter) {
 			r.mu.Lock()
 			r.conns[meta.DeviceID] = &wconn{deviceID: meta.DeviceID, w: rw.Writer}
 			r.mu.Unlock()
-			if err := writeText(rw.Writer, mustJSON(map[string]interface{}{
-				"op":     "hello_ack",
-				"device": meta.DeviceID,
-				"online": true,
-			})); err != nil {
+			if err := r.wsWriteLocked(meta.DeviceID, func(w *bufio.Writer) error {
+				return writeText(w, mustJSON(map[string]interface{}{
+					"op":     "hello_ack",
+					"device": meta.DeviceID,
+					"online": true,
+				}))
+			}); err != nil {
 				return
 			}
 		case "bind":
@@ -694,11 +742,17 @@ func (r *Registry) handleWS(conn net.Conn, rw *bufio.ReadWriter) {
 					// 默认不授权：bind 仅验证 token + 登记设备；授权完全由用户手动
 					// （GUI 设备页 / REST /api/v1/device/auth）控制，绝不自动授权。
 				}
-				if err := writeText(rw.Writer, mustJSON(map[string]interface{}{"op": "bind_ack", "ok": true})); err != nil {
+				err := r.wsWriteLocked(curID, func(w *bufio.Writer) error {
+					return writeText(w, mustJSON(map[string]interface{}{"op": "bind_ack", "ok": true}))
+				})
+				if err != nil {
 					return
 				}
 			} else {
-				if err := writeText(rw.Writer, mustJSON(map[string]interface{}{"op": "bind_ack", "ok": false, "error": "bad token"})); err != nil {
+				err := r.wsWriteLocked(curID, func(w *bufio.Writer) error {
+					return writeText(w, mustJSON(map[string]interface{}{"op": "bind_ack", "ok": false, "error": "bad token"}))
+				})
+				if err != nil {
 					return
 				}
 			}
