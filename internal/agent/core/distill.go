@@ -10,6 +10,7 @@ import (
 	agentIO "gitcode.com/JianFeeeee/HomeAgent/internal/agent/io"
 	"gitcode.com/JianFeeeee/HomeAgent/internal/memory"
 	"gitcode.com/JianFeeeee/HomeAgent/internal/memory/document"
+	"gitcode.com/JianFeeeee/HomeAgent/internal/memory/media"
 	"gitcode.com/JianFeeeee/HomeAgent/internal/memory/vector"
 	"gitcode.com/JianFeeeee/HomeAgent/internal/nlp"
 )
@@ -181,15 +182,43 @@ func (a *Agent) archiveColdDocs() {
 		for _, doc := range coldDocs {
 			triples := docToTriples(doc, a.embedder)
 			if len(triples) > 0 {
-				ec, rc, err := a.memory.Commit(triples, string(a.id)+"_doc_archival", 0)
+				ec, rc, err := a.commitTriplesWithMedia(triples, string(a.id)+"_doc_archival", 0)
 				if err != nil {
 					log.Printf("[agent] doc→graph archival error: %v", err)
 					continue
 				}
 				log.Printf("[agent] doc→graph: %s → %d entities, %d relations", doc.ID, ec, rc)
+				// 先销媒体引用再删文档：文档一旦从 docStore 消失，
+				// 就再没有任何东西能告诉我们它曾经引用过哪些 digest，
+				// media_refs 里那条记录就永久悬空、引用计数永不归零，
+				// 导致对应 blob 永远不会被 GC 回收。
+				//
+				// 且必须在 commitTriplesWithMedia 之后：那一步已经把引用
+				// 挂到了 graph_sentence owner 上。先销后挂会让引用计数瞬时
+				// 归零，此时若后台 GC 正在跑就会把内容当孤儿清掉。
+				a.releaseDocMedia(doc.ID)
 				a.docStore.Remove(doc.ID)
 			}
 		}
+	}
+}
+
+// releaseDocMedia 注销文档持有的全部媒体引用。
+//
+// L2→L3 这一跳不再转移引用而是直接释放，因为图库存的是从描述
+// 文本里抽出的实体与关系，不再持有字节。媒体本身此时已完成使命：
+// 描述已经进了图库，blob 可以交给容量 GC 决定去留。
+func (a *Agent) releaseDocMedia(docID string) {
+	if a.mediaStore == nil || docID == "" {
+		return
+	}
+	n, err := a.mediaStore.DropOwner(media.OwnerDocument, docID)
+	if err != nil {
+		log.Printf("[media] 文档归档释放引用失败 (doc %s): %v", docID, err)
+		return
+	}
+	if n > 0 {
+		log.Printf("[media] 文档 %s 入图库，释放 %d 个媒体引用（描述已留在图库）", docID, n)
 	}
 }
 

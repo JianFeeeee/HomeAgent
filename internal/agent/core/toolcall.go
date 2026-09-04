@@ -189,7 +189,7 @@ func (a *Agent) executeMemoryTool(tc agentAPI.ToolCall) string {
 		if len(triples) == 0 {
 			return "没有有效的三元组"
 		}
-		ec, rc, err := a.memory.Commit(triples, string(a.id), 0)
+		ec, rc, err := a.commitTriplesWithMedia(triples, string(a.id), 0)
 		if err != nil {
 			return fmt.Sprintf("记忆写入失败: %v", err)
 		}
@@ -541,10 +541,10 @@ func (a *Agent) executeDocTool(tc agentAPI.ToolCall) string {
 		}
 
 		doc := &document.Doc{
-			Summary:   summary,
-			Content:   content,
-			Tags:      tags,
-			Source:    "manual",
+			Summary: summary,
+			Content: content,
+			Tags:    tags,
+			Source:  "manual",
 		}
 		if err := a.docStore.Insert(doc); err != nil {
 			return fmt.Sprintf("文档写入失败: %v", err)
