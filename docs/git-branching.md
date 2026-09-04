@@ -1,7 +1,8 @@
 # Git 分支管理规范
 
-> 生效：2026-08-31。适用：**本仓（TrueAgent/HomeAgent）与 third_party/homeagent-sdk（SDK 仓）**——两仓协作时分支策略必须一致，本规范两仓同用。
-> 核心原则一句话：**main 唯一长命、永远可部署；一切新工作在特性分支；版本发布走 release 分支 + tag；hotfix 只进 released 分支并 cherry-pick 回 main。**
+> 生效：2026-08-31，2026-09-04 修订（三级发布通道 + 单条发布分支）。
+> 适用：**本仓（TrueAgent/HomeAgent）与 third_party/homeagent-sdk（SDK 仓）**——两仓协作时分支策略必须一致，本规范两仓同用。
+> 核心原则一句话：**main 唯一长命、永远可部署；一切新工作在特性分支；一个中版本一条发布分支，alpha/beta/正式由 tag 区分；hotfix 只进发布分支并 cherry-pick 回 main。**
 
 ---
 
@@ -11,18 +12,24 @@
 |---|---|---|---|---|
 | `main` | **唯一长命分支** | — | — | ✅ **永远可部署** |
 | `feature/xxx` | 短命（本次特性完成即删） | main | 合回 main | ❌ 不部署 |
-| `release/vX.Y.Z` | 中命（从切出到下个版本发布） | main | 打 tag → 构建发布 | ✅ **发布产物来源** |
-| hotfix（直接提交 release 分支） | 随 release 分支 | release 分支 | **cherry-pick 回 main** | ✅ |
+| `release/vX.Y.x` | 中命（**整个中版本生命周期**） | main | 打 tag → 构建发布 | ✅ **发布产物来源** |
+| hotfix（直接提交发布分支） | 随发布分支 | 发布分支 | **cherry-pick 回 main** | ✅ |
 
 ```
 main ──────────────── E ──────────────── G ────────────────（永远可部署）
       │                                    ▲
-      │ feature/xxx                         │ cherry-pick（hotfix 逐个 pick 回）
+      │ feature/xxx                         │ cherry-pick（修复逐个 pick 回）
       ├── A ── B ──(合回)───────────────────┤
       │                                    │
-      └── release/v1.2.0                release/v1.2.0
-          ├─(tag v1.2.0)→ 构建发布         ├─(hotfix) F ← 版本特定严重 bug
-          └─ 退役（可删可留）                └─ F 被 separately cherry-pick 到 main
+      └── release/v1.0.x ────────────────────────────────────────────────
+          │                                │              │
+          ├─(tag v1.0.0-alpha.1) 内部验证   │              │
+          ├─(tag v1.0.0-beta.1)  小范围试用 │              │
+          ├─(tag v1.0.0)         正式发布   │              │
+          ├─(hotfix) F ─────────────────────┤              │
+          ├─(tag v1.0.1)         patch 发布 │              │
+          ├─(hotfix) H ────────────────────────────────────┤
+          └─(tag v1.0.3)         patch 发布
 ```
 
 ---
@@ -32,8 +39,9 @@ main ──────────────── E ────────
 ### 1. `main`（唯一长命分支）
 
 - **唯一长期存在且永远可部署**。任何时刻 `git checkout main` 出来都是可构建、可上线的状态。
-- 积攒**下一个版本**的功能：feature 分支完成即合回，main 持续向前。
+- 积攒**下一个中版本**的功能：feature 分支完成即合回，main 持续向前。
 - **main 上不直接开发**。所有改动经 feature 分支合入；hotfix 经 cherry-pick 注入。
+- **main 的 `internal/meta.Version` 始终是下一个未发布版本**，不随 patch 发布变动。
 - 合入门禁（**单人直推也遵守**，不强制 PR 但强制验证）：
   - `make test` 全绿
   - 涉及插件/工具链时：接口冻结检查 `git diff third_party/homeagent-sdk/sdk/` 为空
@@ -41,80 +49,122 @@ main ──────────────── E ────────
 
 ### 2. `feature/xxx`（新特性/修复）
 
-- 命名：`feature/<短横线描述>`，如 `feature/plugin-proc-migration`、`feature/webui-narrow-fix`。
+- 命名：`feature/<短横线描述>`，如 `feature/plugin-proc-migration`、`feature/memory-media`。
 - **从 main 开出**：`git checkout -b feature/xxx main`。
 - 完成后合回 main：
   - 单人：直推（`git merge --no-ff` 保留特性边界，或 squash 成一个 commit，二选一在团队内固定）。
   - 多人：走 PR（review 后合入）。
 - 合回后删除 feature 分支（避免累积）。
 
-### 3. `release/vX.Y.Z`（发布）
+### 3. `release/vX.Y.x`（发布分支：一个中版本一条）
 
-- **从 main 的某个可部署点切出**：`git checkout -b release/v1.2.0 main`。
-- 切出后**冻结功能**——release 分支上只做：版本号 bump、发布准备、bug 修复、文档。
-- 打 tag → 构建发布安装包 → 上传（附件命名规范见历史记录）。
-- **现网部署永远用 release tag 的构建产物**，不是 main 头部、更不是 feature。
+- **命名用 `x` 占位 patch 位**：`release/v1.0.x` 承载 1.0.0 → 1.0.1 → … → 1.0.N 全部发布，
+  直到 `release/v1.1.x` 切出为止。**不要按 patch 号建分支**（`release/v1.0.1`、`release/v1.0.3` 各一条会把
+  同一发布线切成互不相连的碎片，追溯时无法用一条分支看完整条线的演进）。
+- **从 main 的某个可部署点切出**：`git checkout -b release/v1.0.x main`。
+- 切出后**冻结功能**——发布分支上只做：版本号 bump、发布准备、bug 修复、文档。
+- **现网部署永远用发布分支上 tag 的构建产物**，不是 main 头部、更不是 feature。
 
-### 4. hotfix（只属于此版本的严重 bug）
+### 4. 三级发布通道（alpha / beta / 正式）
+
+通道**由 tag 区分，不由分支区分**——三者共用同一条 `release/vX.Y.x`。
+
+| 通道 | tag 形式 | 含义 | 受众 |
+|---|---|---|---|
+| alpha | `vX.Y.Z-alpha.N` | 功能齐了但未充分验证，可能有已知缺陷 | 仅内部/开发者自测 |
+| beta | `vX.Y.Z-beta.N` | alpha 问题已修，等待真实环境暴露长尾问题 | 小范围试用、愿意承担风险的用户 |
+| 正式 | `vX.Y.Z` | 通过验证，可上现网 | 所有用户 |
+
+- **推进顺序**：alpha → beta → 正式，逐级向前，**每级都是同一条分支上的新 tag**。
+  这也是 semver 的标准预发布语义（`1.1.0-alpha.1 < 1.1.0-beta.1 < 1.1.0`），
+  包管理器与版本比较逻辑天然认得，无需额外约定。
+- **允许跳级**：若改动小、验证充分（如仅一处已定位并有回归测试覆盖的内核修复），
+  可直接打正式 tag。跳级要在发布说明里写明理由。
+- alpha/beta 的构建产物**可以上传 release 附件**，但必须在 gitcode release 上勾选
+  "预发布"标记，且发布说明首行标注通道与已知风险。
+- **beta 未清零的严重问题不得进正式**：正式 tag 意味着"我们认为它能上 24/7 现网"。
+
+### 5. hotfix（发布后发现的严重 bug）
 
 - **场景**：版本已发布后，发现只存在于该版本（或该发布线）的严重 bug。
-- **动作**：直接把修复提交到 **release 分支**（不收进 main 的开发流）→ 该 release 分支重新构建、打 patch tag（如 `v1.2.1`）发布。
+- **动作**：直接把修复提交到**发布分支** → 该分支重新构建、打下一个 patch tag（如 `v1.0.4`）发布。
 - **关键：hotfix 必须 cherry-pick 回 main**：
 
   ```bash
-  # 在 release 分支上提交修复（代码部分与版本号 bump 分开提交）
+  # 在发布分支上提交修复（代码部分与版本号 bump 分开提交）
+  git checkout release/v1.0.x
   git commit -m "fix(x): ..."                    # ① 修复本身
-  git commit -m "chore: bump v1.2.1"             # ② 版本号（此 commit 不 pick 回 main）
+  git commit -m "chore(release): bump v1.0.4"    # ② 版本号（此 commit 不 pick 回 main）
+  git tag -a v1.0.4 -m "..."
 
   # 回到 main，只挑修复本身
   git checkout main
-  git cherry-pick <修复commit的sha>              # 只 pick ①，不 pick ②
+  git cherry-pick <修复①的sha>                   # 只 pick ①，不 pick ②
   ```
 
-  > **为什么 cherry-pick 而不是 merge**：release 分支只承载该版本特有的补丁，merge 会把 release 分支的版本号/发布相关改动一并带进 main 造成冲突。逐个 cherry-pick 修复 commit 让 main 精确地只获得修复本身。**版本号 bump 不要 pick 回 main**（main 的版本号应始终是下一个未发布版本）。
+  > **为什么 cherry-pick 而不是 merge**：发布分支只承载该版本特有的补丁，merge 会把
+  > 版本号/发布相关改动一并带进 main 造成冲突，并让 main 的 `meta.Version` 变成
+  > 已发布的旧版本号。逐个 cherry-pick 让 main 精确地只获得修复本身。
+  > **版本号 bump 不要 pick 回 main。**
 
-- **hotfix 已逐个 pick 回 main ⇒ main 已含全部修复 ⇒ 无需再合并 release 回 main**。这是本规范刻意为之——除非 release 分支上有 main 想要的**功能级**改动（罕见），否则 release 永不 merge 回 main。
+- **同时存在多个活跃 feature 分支时**：修复也要 pick 到那些分支，否则它们合回 main 时
+  可能带回旧代码。实践做法是修复落地当天就 pick 到全部活跃分支
+  （如 2026-09-04 的 stage 双重解锁修复同时 pick 到 `main` 与 `feature/memory-media`）。
 
-### 5. release 分支退役
+- **hotfix 已逐个 pick 回 main ⇒ main 已含全部修复 ⇒ 无需再合并发布分支回 main**。
+  这是本规范刻意为之——除非发布分支上有 main 想要的**功能级**改动（罕见），
+  否则发布分支永不 merge 回 main。
 
-- **下个版本发布 = 此 release 分支生命周期结束**（不再维护）。
+### 6. 发布分支退役
+
+- **下个中版本发布 = 上一条发布分支生命周期结束**（`release/v1.1.x` 出现即 `release/v1.0.x` 退役）。
 - 退役后可删可留：
   - 删除：保持仓库干净（tag 已保留全部历史，删分支不丢东西）。
-  - 保留：便于追溯该发布线的历史构建（对 24/7 现网友好，推荐与本仓库一样保留已打 tag 的历史分支做对照）。
-- 本仓对现网多代版本并行维护时，保留近期 release 分支是合理的。
+  - 保留：便于追溯该发布线的历史构建（对 24/7 现网友好）。
+- **按 patch 号命名的历史发布分支应当合并/删除**：它们是本规范修订前的遗留形态，
+  内容已被对应的 `release/vX.Y.x` 完全包含，保留只会让"哪条才是这条线"变得含糊。
 
 ---
 
-## 三、当前分支对齐（2026-08-31 执行）
+## 三、当前分支对齐（2026-09-04 执行）
 
 ### 主仓（TrueAgent）
 
-| 现存分支 | 状态 | 处理 |
+| 分支 | 状态 | 处理 |
 |---|---|---|
-| `main` | `48b5c24` [origin/main] | ✅ 保持不变（规范基线） |
-| `feature/plugin-proc-migration` | 原 `update`，`69a138c`（领先 main 5：文档基线 + Part 0.1/0.2 + 本规范） | ✅ **已对齐重命名**（2026-08-31） |
-| `backup-local`（SDK 仓） | `7092d15`（ahead 3, behind 14，含 `ignore example/recoverydiag` 敏感提交） | ⚠️ 遗留本地分支，功能已合入 main，**保留不删**（无远端，删除即永久丢失） |
+| `main` | 含全部 hotfix（逐个 cherry-pick），`meta.Version` = 下一个未发布版本 | ✅ 保持 |
+| `release/v1.0.x` | 承载 v1.0.0 / v1.0.1 / v1.0.3 全部 tag | ✅ **由 `release/v1.0.1` 重命名而来**（2026-09-04） |
+| `release/v1.0.0` | `9b92a04`，已被 1.0.x 线完全包含（`merge-base --is-ancestor` 验证通过） | 🗑️ **已删除**（本地 + 远端），tag `v1.0.0` 保留全部历史 |
+| `release/v1.0.1` | 旧 patch 号命名 | 🗑️ **已重命名为 `release/v1.0.x`**（远端旧名删除） |
+| `feature/memory-media` | 记忆系统媒体（多模态）支持，进行中 | ⏳ 完成后合回 main 并删除 |
+| `feature/plugin-proc-migration` | 已合入 main（`525aa1f`） | ⏳ 待删（规范要求合回后删除） |
 
-### SDK 仓（homeagent-sdk）
+### 1.0.x 发布线 tag 历史
 
-| 现存分支 | 状态 | 处理 |
-|---|---|---|
-| `main` | `61f307b` v1.2.0 | ✅ 保持不变 |
-| `update` | `5648519`（领先 main 1：Part 0.2 模板修复） | ⚠️ 与主仓 `update` 对齐重命名 |
-| `backup-local` | `7092d15`（ahead 3, behind 14，遗留调试分支） | ⚠️ 可选清理 |
+| tag | 提交 | 通道 | 说明 |
+|---|---|---|---|
+| `v1.0.0` | `9b92a04` | 正式 | 外部插件从 C ABI 迁移到子进程 + 共享内存 |
+| `v1.0.1` | `e671a8c` | 正式 | 多模态 bugfix（假成功、能力声明与回退链、see_video 帧数语义） |
+| `v1.0.3` | `26dc76f` | 正式 | 内核 stage 协调器双重解锁（直接跳正式：单点修复 + 反向验证 + 全类审计） |
 
-> `update` 整改工作分支按规范应为 `feature/plugin-proc-migration`（多进程插件化整改，8-9 周大特性）。
-> 是否重命名由执行人确认；不重命名则视为偏离规范的既有分支，须在文档记录其存在。
+> `v1.0.2` 未使用：该号从未发布也无 tag，留空以免与任何本地构建混淆。
 
 ---
 
 ## 四、现网部署与版本对应（运维纪律）
 
-- **现网 homed 永远部署 `release/vX.Y.Z` 分支打出的 tag 构建**，路径见 `Makefile`（`make build` → `build/homed`）。
-- systemd 服务（`/usr/local/bin/homed`）替换前：备份旧二进制 → 停服 → 替换 → 起服 → 健康检查（`scripts/verify_deploy.sh`）。
-- **改造期间（update 整改）现网不得部署 main 或 feature 的中间态**——只有发版才用 release。
+- **现网 homed 永远部署 `release/vX.Y.x` 分支上 tag 的构建产物**，路径见 `Makefile`（`make build` → `build/homed`）。
+- systemd 服务（`/usr/local/bin/homed`）替换流程：
+  1. 备份旧二进制（`homed.bak.pre<版本>.<时间戳>`）
+  2. 备份配置库（**用 `sqlite3 .backup`，不用 `cp`**——WAL 模式下 cp 可能拿到不一致快照）
+  3. 记录当前插件建链清单，供重启后逐项比对
+  4. `install -m 0755` 替换（原子 rename，不会写坏正在运行的进程镜像）
+  5. `systemctl restart homeagent`
+  6. 健康检查：版本号、插件清单无缺失、`/api/v1/status`、一次真实对话、`fatal error` 计数为 0
+- **改造期间现网不得部署 main 或 feature 的中间态**——只有发版才用发布分支的 tag。
+- alpha/beta tag 的产物**不上现网**（现网是 24/7 服务，预发布通道的存在就是为了不拿它冒险）。
 - 涉及 SDK 仓时：主仓 `go.mod` 的 `replace => ./third_party/homeagent-sdk` 指向本地 vendored 副本，
-  发版前确认 vendored SDK 与 SDK 仓 release tag 一致（两仓版本对齐是第一优先级）。
+  发版前确认 vendored SDK 与 SDK 仓 release tag 一致（**两仓版本对齐是第一优先级**）。
 
 ---
 
@@ -128,28 +178,36 @@ git checkout -b feature/xxx
 git checkout main && git merge --no-ff feature/xxx   # 或 squash
 git branch -d feature/xxx
 
-# 发布
-git checkout -b release/v1.2.0 main
-git commit -am "chore: bump v1.2.0"                  # 版本号
-git tag v1.2.0
-# ... 构建发布 ...
+# 开一条新中版本的发布线
+git checkout -b release/v1.1.x main
+git commit -am "chore(release): bump v1.1.0-alpha.1"
+git tag -a v1.1.0-alpha.1 -m "..."                   # alpha：内部验证
+# ... 修问题 ...
+git commit -am "chore(release): bump v1.1.0-beta.1"
+git tag -a v1.1.0-beta.1 -m "..."                    # beta：小范围试用
+# ... 真实环境验证 ...
+git commit -am "chore(release): bump v1.1.0"
+git tag -a v1.1.0 -m "..."                           # 正式
 
-# hotfix（发布后）
-git checkout release/v1.2.0
+# hotfix（发布后）——注意是同一条 release/v1.0.x，不新建分支
+git checkout release/v1.0.x
 git commit -am "fix(x): 严重 bug"                    # ① 修复
-git commit -am "chore: bump v1.2.1"                  # ② 版本号
-git tag v1.2.1
+git commit -am "chore(release): bump v1.0.4"         # ② 版本号
+git tag -a v1.0.4 -m "..."
 git checkout main
 git cherry-pick <修复①的sha>                          # ③ 只挑修复
+# 若有活跃 feature 分支，也 pick 过去
+git checkout feature/xxx && git cherry-pick <main 上那个 pick 的 sha>
 
-# release 退役（可选）
-git branch -d release/v1.2.0                          # tag 已保存历史，删分支不丢东西
+# 发布分支退役（下个中版本发布后，可选）
+git branch -d release/v1.0.x                          # tag 已保存历史，删分支不丢东西
 ```
 
 ---
 
 ## 六、本规范与「接口冻结」约束的关系
 
-- feature 分支合回 main 的门禁（`git diff sdk/` 为空）是本仓特有的硬约束，独立于 Git 流程本身。
-- 插件多进程化整改（`feature/plugin-proc-migration` 或现 `update`）**不满足接口冻结不等于不能合并**——
-  接口冻结约束的是「公开 SDK 不变」，整改若突破需走变更评审（见 `docs/zh/plugin-interface-matrix.md` §七）。
+- feature 分支合回 main 的门禁（`git diff third_party/homeagent-sdk/sdk/` 为空）是本仓特有的硬约束，独立于 Git 流程本身。
+- `internal/sdk` **不受冻结约束**，可自由扩展；冻结只针对公开 SDK 接口（`third_party/homeagent-sdk/sdk/`）。
+- 若整改确需突破公开接口，走变更评审（见 `docs/zh/plugin-interface-matrix.md` §七），
+  并同步 `SDKCompatibleVersion` 与 SDK 仓的 release tag。
