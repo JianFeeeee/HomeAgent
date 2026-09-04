@@ -193,6 +193,8 @@ internal/
 
 ## 项目状态
 
+**v1.0.4** — 两处数据竞争修复（现网 `/api/v1/device/ws` 通道与终端推流）。此前 `-race` 全仓复验即暴露：`remotedevice` 网关对同一连接的 `bufio.Writer` 由两条路径并发写（`handleWS` 主循环回写 hello_ack/绑定回执/pong，与 `PushJSON`/`PushData` 的 agent→设备下发），`bufio.Writer` 非线程安全，`TestWSPushDataAudio` 异步下发即稳定撞车；`agentcli` 终端把共享读缓冲传给 reader goroutine（OS 层持续覆写）又在 `readLoop` 里 `copy(data, buf[:r.n])`，读写并发。修法：连接级写锁（`wconn.wmu`，Push* 与 handleWS 共用同一把锁，`PushData` 整条下发持锁保证协议顺序）与「读结果随 `readResult` 自带切片传递、不再共享缓冲」。全仓 `go test ./... -race` 由 7 处 race / 5 个测试 FAIL 变为 32 包全绿。
+
 **v1.0.3** — 内核 stage 协调器双重解锁修复。现网 homed 主进程曾一次 `fatal error: sync: unlock of unlocked mutex` 整体死亡（带走全部 27 个子进程插件）：`Host.endStage` 把「递减 inflight、判定最后离开者」放在 `coordMu` 临界区之外，而摘除协调器在临界区之内，于是后到插件能挂进一个正在收尾的协调器、被误判成最后离开者，对同一把 `stageMu` 解了两次。**`sync.Mutex` 双重解锁是 runtime fatal 而非 panic，两层 `recover` 结构上拦不住**，这才让「插件崩溃不拖垮内核」的隔离设计整体失效。修法是把计数、判定、摘除收进同一临界区，并把首进者写共享段的 `enter()` 也移入锁内（此前后到者可能读到写一半的段）。配套 5 个回归用例，含把旧实现 stash 回来验证测试确实能复现 fatal 的反向验证。
 
 **v1.0.1** — 多模态 bugfix。插件 ABI/协议未变，1.0.0 编出的 `plugin.bin` 无需重编。修三类缺陷：（1）**看图假成功**——媒体块挂在 tool message 上不被模型当作可视内容（实测同一张图：tool message 0/3 读到、独立 user message 3/3），改为另起一条紧随其后的 user message 承载，落实插件文案一直在说的「注入后续对话」；（2）**新增多模态能力声明与回退链**——`core.llm.sources.<name>.vision/.audio` 声明源能否真正处理媒体（网关会静默剥离 `image_url` 后仍返回 200，带图与不带图 prompt_tokens 完全相同），不支持时自动走视觉源转写成文字，并落实了 `core.input_processing.image.fallback_provider` 这批早已注册却从未被读取的配置项；（3）**`see_video` 帧数语义反了**——`fps=1/N` 是频率不是数量，20s 视频请求 10 帧只得 2 帧、请求 1 帧反得 20 帧，改为 `ffprobe` 取时长 + `fps=N/时长` + `-frames:v` 硬封顶。
@@ -222,7 +224,7 @@ internal/
 | **client** | waiter + 桌面 GUI | 连接远程 HomeAgent |
 
 - Linux：`.deb`（amd64/arm64）、`.rpm`（x86_64）、`.tar.gz`
-- Windows：`HomeAgent_v1.0.3_{Full,Server,Client}_win64.exe`（NSIS 安装向导）
+- Windows：`HomeAgent_v1.0.4_{Full,Server,Client}_win64.exe`（NSIS 安装向导）
 - 免安装：`homeagent-bin-<os>_<arch>.tar.gz`（含 homed/waiter/initconfig）
 - 校验：`SHA256SUMS`
 

@@ -13,7 +13,7 @@ var (
 	//
 	// 1.0.1：多模态修复。仅内核与内置插件改动，插件 ABI/协议未变，
 	// 1.0.0 编出的 plugin.bin 无需重编。
-	Version = "1.0.3"
+	Version = "1.0.4"
 
 	// Commit 是构建时的 Git commit hash。
 	Commit = "unknown"
