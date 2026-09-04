@@ -179,6 +179,8 @@ External plugin development: see [homeagent-sdk](https://gitcode.com/JianFeeeee/
 
 ## Project Status
 
+**v1.0.1** — Multimodal bugfix. The plugin ABI/protocol is unchanged, so `plugin.bin` artifacts built for 1.0.0 need no rebuild. Three defects fixed: (1) **vision silently failing**—media blocks attached to a tool message are not treated as viewable content by the model (measured on one image: 0/3 read from a tool message, 3/3 from a standalone user message); media now rides its own user message placed immediately after, which is what the plugin's own wording ("injected into the following conversation") always claimed; (2) **new multimodal capability declaration + fallback chain**—`core.llm.sources.<name>.vision/.audio` declares whether a source can genuinely process media (a gateway may strip `image_url` and still return 200, with identical prompt_tokens with and without the image); when it cannot, media is transcribed to text via a vision-capable source, finally wiring up the long-registered but never-read `core.input_processing.image.fallback_provider` settings; (3) **`see_video` frame-count semantics were inverted**—`fps=1/N` is a *rate*, not a count, so a 20s video yielded 2 frames when 10 were requested and 20 frames when 1 was requested; now `ffprobe` measures duration and the filter becomes `fps=N/duration` with `-frames:v` as a hard cap.
+
 **v1.0.0** — External plugins moved from C ABI shared libraries to **subprocess + shared memory**. The first release that no longer loads `.so`/`.dll`, and it is incompatible with 0.9.x (existing plugins must be rebuilt into `plugin.bin` with the new `plugindev`, though **business code needs zero changes**). Eliminates 6 classes of defects that had caused production incidents: hot-reload silently failing (`DF_1_NODELETE` making `dlclose` a no-op), no crash isolation (a plugin panic took down homed), stage lost updates (35.8~36.8% loss under the copy model), uncancellable cgo timeouts (linear OS-thread leaks), `output_send` reporting false success (the model was told "sent" while the message never went out), and Windows capability degradation (only 3 stage fields visible, no write-back). Three communication planes: stdio JSON-RPC (control) + shared memory segment (data) + event ring (notification); the privilege gradient is now enforced by three explicit gates. RPC round-trip p50 24.1µs; crash-to-recovery under 1s.
 
 **v0.9.0** — C ABI v2: external plugin Stage callbacks can now write back (`invoke_stage` gained a result out-param; plugins may mutate RawMessage/LLMText/ToolResults etc. in OnInput/AfterToolcall/PostAction and have them synced to the core). ABI version now tracks core minor releases (v0.9.x → ABIVersion=2, `version_min=1` keeps old plugins loadable). Also fixes the tool-loop zen-compat placeholder that wrongly fired on first-turn system context tail. The SDK ships an enhanced sanitizer example (bad-UTF-8 / U+FFFD / ANSI-escape scrub across the whole pipeline). **This ABI retired with v1.0.0.**
@@ -204,7 +206,7 @@ External plugin development: see [homeagent-sdk](https://gitcode.com/JianFeeeee/
 | **client** | waiter + desktop GUI | Connecting to a remote HomeAgent |
 
 - Linux: `.deb` (amd64/arm64), `.rpm` (x86_64), `.tar.gz`
-- Windows: `HomeAgent_v1.0.0_{Full,Server,Client}_win64.exe` (NSIS installer)
+- Windows: `HomeAgent_v1.0.1_{Full,Server,Client}_win64.exe` (NSIS installer)
 - Portable: `homeagent-bin-<os>_<arch>.tar.gz` (homed/waiter/initconfig)
 - Verification: `SHA256SUMS`
 

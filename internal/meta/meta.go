@@ -10,7 +10,10 @@ var (
 	// 1.0.0：外部插件从 C ABI 动态库迁到子进程 + 共享内存。
 	// 这是首个不再加载 `.so`/`.dll` 的版本，与 0.9.x 不兼容（存量插件必须
 	// 用新版 plugindev 重编），故跃到主版本号。
-	Version = "1.0.0"
+	//
+	// 1.0.1：多模态修复。仅内核与内置插件改动，插件 ABI/协议未变，
+	// 1.0.0 编出的 plugin.bin 无需重编。
+	Version = "1.0.1"
 
 	// Commit 是构建时的 Git commit hash。
 	Commit = "unknown"

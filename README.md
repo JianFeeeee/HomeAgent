@@ -193,6 +193,8 @@ internal/
 
 ## 项目状态
 
+**v1.0.1** — 多模态 bugfix。插件 ABI/协议未变，1.0.0 编出的 `plugin.bin` 无需重编。修三类缺陷：（1）**看图假成功**——媒体块挂在 tool message 上不被模型当作可视内容（实测同一张图：tool message 0/3 读到、独立 user message 3/3），改为另起一条紧随其后的 user message 承载，落实插件文案一直在说的「注入后续对话」；（2）**新增多模态能力声明与回退链**——`core.llm.sources.<name>.vision/.audio` 声明源能否真正处理媒体（网关会静默剥离 `image_url` 后仍返回 200，带图与不带图 prompt_tokens 完全相同），不支持时自动走视觉源转写成文字，并落实了 `core.input_processing.image.fallback_provider` 这批早已注册却从未被读取的配置项；（3）**`see_video` 帧数语义反了**——`fps=1/N` 是频率不是数量，20s 视频请求 10 帧只得 2 帧、请求 1 帧反得 20 帧，改为 `ffprobe` 取时长 + `fps=N/时长` + `-frames:v` 硬封顶。
+
 **v1.0.0** — 外部插件从 C ABI 动态库迁移到**子进程 + 共享内存**。首个不再加载 `.so`/`.dll` 的版本，与 0.9.x 不兼容（存量插件须用新版 `plugindev` 重编为 `plugin.bin`，**业务代码零改动**）。消除 6 类此前在生产造成故障的缺陷：热重载失效（`DF_1_NODELETE` 让 `dlclose` 成 no-op）、崩溃隔离缺失（插件 panic 带崩 homed）、stage lost update（副本模型丢失 35.8~36.8%）、cgo 超时不可中断（线程线性泄漏）、`output_send` 假成功（模型收到「已发送」而消息未送达）、Windows 能力断层（只见 3 个 stage 字段且无法写回）。三面通信：stdio JSON-RPC（控制）+ 共享内存段（数据）+ 事件环（通知）；权限梯度显式化为三道闸。RPC 往返 p50 24.1µs，崩溃到恢复 <1s。
 
 **v0.9.0** — C ABI v2：外部插件 Stage 回调支持写回（`invoke_stage` 增加 result 输出，插件可在 OnInput/AfterToolcall/PostAction 修改 RawMessage/LLMText/ToolResults 等并同步回内核），ABI 版本随内核 minor 对齐（v0.9.x → ABIVersion=2，`version_min=1` 向后兼容旧插件）。同步修复工具循环 zen 兼容补位误伤首轮 system 上下文的问题。配套 SDK 提供增强版 sanitizer 示例（坏 UTF-8/U+FFFD/ANSI 转义全链路清洗）。**该 ABI 已随 v1.0.0 退场。**
@@ -218,7 +220,7 @@ internal/
 | **client** | waiter + 桌面 GUI | 连接远程 HomeAgent |
 
 - Linux：`.deb`（amd64/arm64）、`.rpm`（x86_64）、`.tar.gz`
-- Windows：`HomeAgent_v1.0.0_{Full,Server,Client}_win64.exe`（NSIS 安装向导）
+- Windows：`HomeAgent_v1.0.1_{Full,Server,Client}_win64.exe`（NSIS 安装向导）
 - 免安装：`homeagent-bin-<os>_<arch>.tar.gz`（含 homed/waiter/initconfig）
 - 校验：`SHA256SUMS`
 
