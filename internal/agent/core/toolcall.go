@@ -150,6 +150,14 @@ func (a *Agent) executeMemoryTool(tc agentAPI.ToolCall) string {
 			}
 			parts = append(parts, fmt.Sprintf("- %s →(%s)→ %s", r.SourceName, r.RelationType, r.TargetName))
 		}
+		// 命中的关系若挂着媒体，把媒体说明附在结果末尾。
+		//
+		// 关系行只有实体名和关系类型，看不出"这条记忆当时还带了一张图"。
+		// 媒体挂在句子上（graph_sentence owner），需经关系→句子→media_refs
+		// 反查。不附上的后果：agent 显式查了图记忆，却仍然不知道有图。
+		if mc := a.mediaContextForRelations(result.Relations); mc != "" {
+			parts = append(parts, "", "关联媒体:", mc)
+		}
 		return strings.Join(parts, "\n")
 
 	case "memory_block_merge":
@@ -189,7 +197,9 @@ func (a *Agent) executeMemoryTool(tc agentAPI.ToolCall) string {
 		if len(triples) == 0 {
 			return "没有有效的三元组"
 		}
-		ec, rc, err := a.commitTriplesWithMedia(triples, string(a.id), 0)
+		// remember 工具是用户/模型显式写入，不涉及归档删除，
+		// 因此不需要 mediaBound——没有旧引用要释放。
+		ec, rc, _, err := a.commitTriplesWithMedia(triples, string(a.id), 0)
 		if err != nil {
 			return fmt.Sprintf("记忆写入失败: %v", err)
 		}
