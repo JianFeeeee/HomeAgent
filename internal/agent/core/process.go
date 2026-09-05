@@ -344,6 +344,11 @@ func (a *Agent) process(input string, stageCtx *sdk.StageContext) (response stri
 					}
 				}
 				if len(blocks) > 0 {
+					// 先落进 CAS：无论下面走直视还是回退转写，媒体本体都该进记忆。
+					// 不存的后果是 ToolResultItem.Output 只剩那句
+					// "[已将图片注入后续对话] /tmp/x.png"，文件一删线索就断了。
+					a.stageMediaDigests(a.captureBlockMedia(blocks, tc.Name)...)
+
 					if native, fallbackText := a.prepareToolBlocks(blocks); len(native) > 0 {
 						// 能直视：另起一条 user message 承载媒体，并补一句来源说明，
 						// 否则模型会把它当成用户新发的图而不是工具拉回来的。

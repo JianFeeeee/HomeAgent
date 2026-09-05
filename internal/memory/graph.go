@@ -37,13 +37,13 @@ type Relation struct {
 }
 
 type Triple struct {
-	Subject     string  `json:"subject"`
-	Relation    string  `json:"relation"`
-	Object      string  `json:"object"`
-	Confidence  float64 `json:"confidence,omitempty"`
-	SubjectType string  `json:"subject_type,omitempty"`
-	ObjectType  string  `json:"object_type,omitempty"`
-	SentenceText string `json:"sentence_text,omitempty"` // 原始句子文本，Commit时写入sentences表
+	Subject      string  `json:"subject"`
+	Relation     string  `json:"relation"`
+	Object       string  `json:"object"`
+	Confidence   float64 `json:"confidence,omitempty"`
+	SubjectType  string  `json:"subject_type,omitempty"`
+	ObjectType   string  `json:"object_type,omitempty"`
+	SentenceText string  `json:"sentence_text,omitempty"` // 原始句子文本，Commit时写入sentences表
 }
 
 type GraphDB struct {
@@ -192,13 +192,37 @@ func (g *GraphDB) migrateRelationUnique(tx *sql.Tx) error {
 	return nil
 }
 
+// Commit 把三元组写入图库，返回新建的实体数与关系数。
 func (g *GraphDB) Commit(triples []Triple, sessionID string, turnID int) (int, int, error) {
+	_, ec, rc, err := g.commit(triples, sessionID, turnID, false)
+	return ec, rc, err
+}
+
+// CommitWithMedia 与 Commit 相同，但额外返回每条句子文本对应的 sentences.id。
+//
+// 为何单独开一个方法而不改 Commit 的签名：Commit 有十个非测试调用点
+// 加二十多个测试调用点，为了一个多数调用方都不需要的返回值去改全部签名
+// 不划算。这里让 Commit 内部转调，两者共享同一份落库逻辑。
+//
+// 返回的 map 只包含本次真正写入了 sentences 表的句子。调用方据此把媒体
+// 引用挂到 graph_sentence owner 上——句子是媒体描述在图库里的落点，
+// 关系行本身不持有媒体。
+func (g *GraphDB) CommitWithMedia(triples []Triple, sessionID string, turnID int) (map[string]int64, int, int, error) {
+	return g.commit(triples, sessionID, turnID, true)
+}
+
+func (g *GraphDB) commit(triples []Triple, sessionID string, turnID int, trackSentences bool) (map[string]int64, int, int, error) {
 	g.mu.Lock()
 	defer g.mu.Unlock()
 
+	var sentenceIDs map[string]int64
+	if trackSentences {
+		sentenceIDs = make(map[string]int64)
+	}
+
 	tx, err := g.db.Begin()
 	if err != nil {
-		return 0, 0, err
+		return nil, 0, 0, err
 	}
 	defer tx.Rollback()
 
@@ -229,24 +253,24 @@ func (g *GraphDB) Commit(triples []Triple, sessionID string, turnID int) (int, i
 
 		ec, err := g.upsertEntity(tx, t.Subject, subjType)
 		if err != nil {
-			return 0, 0, err
+			return nil, 0, 0, err
 		}
 		entitiesCreated += ec
 
 		ec, err = g.upsertEntity(tx, t.Object, objType)
 		if err != nil {
-			return 0, 0, err
+			return nil, 0, 0, err
 		}
 		entitiesCreated += ec
 
 		var sourceID, targetID int64
 		err = tx.QueryRow("SELECT id FROM entities WHERE name = ?", t.Subject).Scan(&sourceID)
 		if err != nil {
-			return 0, 0, fmt.Errorf("subject %q: %w", t.Subject, err)
+			return nil, 0, 0, fmt.Errorf("subject %q: %w", t.Subject, err)
 		}
 		err = tx.QueryRow("SELECT id FROM entities WHERE name = ?", t.Object).Scan(&targetID)
 		if err != nil {
-			return 0, 0, fmt.Errorf("object %q: %w", t.Object, err)
+			return nil, 0, 0, fmt.Errorf("object %q: %w", t.Object, err)
 		}
 
 		// 写入/查找句子
@@ -255,11 +279,13 @@ func (g *GraphDB) Commit(triples []Triple, sessionID string, turnID int) (int, i
 			_, err = tx.Exec(
 				`INSERT OR IGNORE INTO sentences (text) VALUES (?)`, t.SentenceText)
 			if err != nil {
-				return 0, 0, fmt.Errorf("insert sentence: %w", err)
+				return nil, 0, 0, fmt.Errorf("insert sentence: %w", err)
 			}
 			err = tx.QueryRow("SELECT id FROM sentences WHERE text = ?", t.SentenceText).Scan(&sentenceID)
 			if err != nil {
 				sentenceID = 0
+			} else if sentenceIDs != nil {
+				sentenceIDs[t.SentenceText] = sentenceID
 			}
 		}
 
@@ -275,11 +301,11 @@ func (g *GraphDB) Commit(triples []Triple, sessionID string, turnID int) (int, i
 				sourceID, targetID, t.Relation, confidence, sessionID, turnID, dateBucket, sentenceID,
 			)
 			if err != nil {
-				return 0, 0, err
+				return nil, 0, 0, err
 			}
 			relationsCreated++
 		} else if err != nil {
-			return 0, 0, err
+			return nil, 0, 0, err
 		} else {
 			// 同一(会话内)三元组已存在：仅刷新置信度与时间戳，不重复计数
 			_, err = tx.Exec(
@@ -288,16 +314,16 @@ func (g *GraphDB) Commit(triples []Triple, sessionID string, turnID int) (int, i
 				confidence, sourceID, targetID, t.Relation, sessionID,
 			)
 			if err != nil {
-				return 0, 0, err
+				return nil, 0, 0, err
 			}
 		}
 	}
 
 	if err := tx.Commit(); err != nil {
-		return 0, 0, err
+		return nil, 0, 0, err
 	}
 
-	return entitiesCreated, relationsCreated, nil
+	return sentenceIDs, entitiesCreated, relationsCreated, nil
 }
 
 func validEntityName(name string) bool {

@@ -174,6 +174,11 @@ func (a *Agent) processMediaInput(evt *agentIO.InputEvent) {
 
 	blocks, fallback := a.mediaToBlocks(evt.Payload, evt.Type, evt.Source)
 
+	// 用户直接发来的媒体：先落进 CAS。
+	// 不存的后果是 ContextEvent.Input 只剩一句 alt 文本
+	//（"[从 qq 收到了 image]"），base64 随 message 数组发给模型后就丢了。
+	a.stageMediaDigests(a.captureBlockMedia(blocks, "input_"+evt.Type)...)
+
 	stageCtx := a.stageCtxFromInput(fallback, evt.Source, "")
 	stageCtx.Extra = map[string]interface{}{
 		"media_blocks":   blocks,
@@ -216,14 +221,22 @@ func (a *Agent) processMediaInput(evt *agentIO.InputEvent) {
 	elapsed := time.Since(start)
 	log.Printf("[agent] %s from %s → response (%dms, tools=%v)", evt.Type, evt.Source, elapsed.Milliseconds(), toolsUsed)
 
-	a.context.Append(ContextEvent{
+	// 本轮捕获的媒体（用户发的 + 工具注入的）挂到这条事件上。
+	// 媒体描述并进 Input：描述文本才是持久语义记忆，blob 只是缓存。
+	digests := a.drainMediaDigests()
+	mediaEvt := ContextEvent{
 		Timestamp:   time.Now(),
 		Source:      "agent",
 		Input:       fallback,
 		Response:    response,
 		ToolsUsed:   toolsUsed,
 		ToolResults: toolResults,
-	})
+	}
+	a.bindEventMedia(&mediaEvt, digests)
+	if s := a.mediaSummaryForEvent(mediaEvt.Media); s != "" {
+		mediaEvt.Input = mediaEvt.Input + "\n" + s
+	}
+	a.context.Append(mediaEvt)
 
 	a.emitResponse(evt, response)
 
@@ -271,12 +284,12 @@ func (a *Agent) mediaToBlocks(payload map[string]interface{}, mediaType string, 
 		}
 		if mediaType == "image" {
 			blocks = append(blocks, agentAPI.ContentBlock{
-				Type: "image_url",
+				Type:     "image_url",
 				ImageURL: &agentAPI.ImageURL{URL: imgURL, Detail: "auto"},
 			})
 		} else if mediaType == "audio" {
 			blocks = append(blocks, agentAPI.ContentBlock{
-				Type: "audio_url",
+				Type:     "audio_url",
 				AudioURL: &agentAPI.AudioURL{URL: imgURL},
 			})
 		}
@@ -371,14 +384,21 @@ func (a *Agent) processTextInput(evt *agentIO.InputEvent, input string) {
 	elapsed := time.Since(start)
 	log.Printf("[agent] input from %s → response (%dms, tools=%v)", evt.Source, elapsed.Milliseconds(), toolsUsed)
 
-	a.context.Append(ContextEvent{
+	// 纯文本输入也可能产生媒体：模型调 multimodal_see_picture / see_video 等工具时，
+	// 插件经 SetToolBlocks 注入的块已在 process() 里被捕获。
+	textEvt := ContextEvent{
 		Timestamp:   time.Now(),
 		Source:      "agent",
 		Input:       cleanInput,
 		Response:    response,
 		ToolsUsed:   toolsUsed,
 		ToolResults: toolResults,
-	})
+	}
+	a.bindEventMedia(&textEvt, a.drainMediaDigests())
+	if s := a.mediaSummaryForEvent(textEvt.Media); s != "" {
+		textEvt.Input = textEvt.Input + "\n" + s
+	}
+	a.context.Append(textEvt)
 
 	a.emitResponse(evt, response)
 
