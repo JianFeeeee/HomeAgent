@@ -9,14 +9,20 @@ PACKAGE_ROOT="${PROJECT_ROOT}/deploy/packaging/linux"
 GO="${GO:-$(command -v go 2>/dev/null || echo "go")}"
 
 ARCH="${1:-amd64}"   # amd64 or arm64
+
+# electron 官方发布物用 x64/arm64 命名，而 Debian 用 amd64/arm64。
+# 两者在 arm64 上恰好同名，amd64 上不同——此前缓存查找统一用 TAR_ARCH
+# （amd64），于是 electron-v*-linux-x64.zip 永远命中不到，amd64 GUI 只能
+# 靠"回退到 host node_modules"这条路组装。干净 worktree 里没有完整
+# node_modules，GUI 就被静默跳过。故单独映射。
 ACTION="${2:-all}"    # all, build, deb, tar, rpm
 
 DEB_ARCH="$ARCH"
 RPM_ARCH="$ARCH"
 TAR_ARCH="$ARCH"
 case "$ARCH" in
-  amd64) DEB_ARCH="amd64"; RPM_ARCH="x86_64"; TAR_ARCH="amd64" ;;
-  arm64) DEB_ARCH="arm64"; RPM_ARCH="aarch64"; TAR_ARCH="arm64" ;;
+  amd64) DEB_ARCH="amd64"; RPM_ARCH="x86_64"; TAR_ARCH="amd64"; ELECTRON_ARCH="x64" ;;
+  arm64) DEB_ARCH="arm64"; RPM_ARCH="aarch64"; TAR_ARCH="arm64"; ELECTRON_ARCH="arm64" ;;
   *) echo "Unknown arch: $ARCH (use amd64 or arm64)"; exit 1 ;;
 esac
 
@@ -142,24 +148,48 @@ build_gui() {
 
   echo ">>> Building GUI directory for linux/$ARCH..."
 
-  if [ ! -d "$gui_dir/node_modules" ]; then
+  # 判据是 electron 包本身在不在，而不是 node_modules 目录在不在。
+  #
+  # npm install 失败（离线、网络受限）会留下一个只有一两个条目的空壳
+  # node_modules，目录存在但 electron 缺失。只看目录会以为"已安装"，
+  # 于是 ever 读不到版本、缓存匹配退化、最后走到"host dist 也没有"而
+  # 静默跳过 GUI——包名和目录名全都正确，只是没有 GUI，没有任何一步报错。
+  if [ ! -f "$gui_dir/node_modules/electron/package.json" ]; then
+    if [ -d "$gui_dir/node_modules" ]; then
+      echo "  node_modules 存在但 electron 缺失（疑似上次 npm install 未完成）"
+    fi
     echo "  npm install..."
-    (cd "$gui_dir" && npm install --production)
+    if ! (cd "$gui_dir" && npm install --production); then
+      echo "  WARNING: npm install 失败——离线环境下这是预期的。"
+      echo "           GUI 需要 cmd/gui/node_modules/electron 或 ~/.cache/electron 缓存。"
+    fi
   fi
 
-  # electron 版本从已安装的包里读，保证运行时与 app 依赖一致
+  # electron 版本优先从已安装的包里读，保证运行时与 app 依赖一致。
+  # 读不到时退而从 package.json 的依赖声明里取数字部分（它可能写成
+  # "^33.0.0" 这类范围，只用于给缓存匹配一个提示，匹配不上仍会走通配）。
   local ever
   ever=$(python3 -c "import json;print(json.load(open('$gui_dir/node_modules/electron/package.json'))['version'])" 2>/dev/null || true)
+  if [ -z "$ever" ]; then
+    ever=$(python3 -c "
+import json, re
+d = json.load(open('$gui_dir/package.json'))
+spec = (d.get('devDependencies', {}) or {}).get('electron') or (d.get('dependencies', {}) or {}).get('electron') or ''
+m = re.search(r'(\\d+(?:\\.\\d+)*)', spec)
+print(m.group(1) if m else '')
+" 2>/dev/null || true)
+    [ -n "$ever" ] && echo "  electron 版本取自 package.json 依赖声明: $ever（非精确）"
+  fi
 
   mkdir -p "$gui_out"
 
   # 优先：缓存里的目标架构 zip（~/.cache/electron/<hash>/electron-v<ver>-linux-<arch>.zip）
   local zip=""
   if [ -n "$ever" ]; then
-    zip=$(find "$HOME/.cache/electron" -name "electron-v${ever}-linux-${TAR_ARCH}.zip" 2>/dev/null | head -1)
+    zip=$(find "$HOME/.cache/electron" -name "electron-v${ever}-linux-${ELECTRON_ARCH}.zip" 2>/dev/null | head -1)
   fi
   if [ -z "$zip" ]; then
-    zip=$(find "$HOME/.cache/electron" -name "electron-v*-linux-${TAR_ARCH}.zip" 2>/dev/null | head -1)
+    zip=$(find "$HOME/.cache/electron" -name "electron-v*-linux-${ELECTRON_ARCH}.zip" 2>/dev/null | head -1)
   fi
 
   if [ -n "$zip" ]; then
@@ -174,9 +204,9 @@ build_gui() {
       *) host_arch=unknown ;;
     esac
     if [ "$TAR_ARCH" != "$host_arch" ]; then
-      echo "  WARNING: 缺 electron-v*-linux-${TAR_ARCH}.zip 缓存，且目标架构与 host"
+      echo "  WARNING: 缺 electron-v*-linux-${ELECTRON_ARCH}.zip 缓存，且目标架构与 host"
       echo "           ($host_arch) 不同——不能用 host 的 electron 冒充。跳过 GUI。"
-      echo "           解法：下载 electron-v${ever:-<ver>}-linux-${TAR_ARCH}.zip 到"
+      echo "           解法：下载 electron-v${ever:-<ver>}-linux-${ELECTRON_ARCH}.zip 到"
       echo "           ~/.cache/electron/<任意子目录>/ 后重跑。"
       rm -rf "$gui_out"
       return
