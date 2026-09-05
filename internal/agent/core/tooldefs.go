@@ -13,6 +13,24 @@ func (a *Agent) buildMemoryContext(input string, maxTokens int) string {
 	}
 	injected := a.indexer.BuildContext(input)
 	s := a.indexer.FormatContext(injected)
+
+	// 图库召回命中的实体若关联着带媒体的句子，把媒体说明一并注入。
+	//
+	// 不做这一步的后果：媒体描述进了 L3，agent 却拿不出来。图库句子里
+	// 写着 [image/png a1b2c3d4e5f6] 这样的短标记，但没有任何东西告诉
+	// 模型那份内容是否还在、能否重新查看——描述永存而 blob 可能已被
+	// 容量 GC 淘汰，两者状态不同，必须显式告知。
+	//
+	// 注意不能直接用 injected.Relations：BuildContext 刻意把它置为 nil
+	//（自动注入只给实体索引以省 token，细节留给 memory_recall）。
+	// 因此这里用命中的实体名再查一次关系，只为拿到 sentence_id。
+	if mc := a.mediaContextForInjectedEntities(injected); mc != "" {
+		if s != "" {
+			s += "\n"
+		}
+		s += "【关联媒体】\n" + mc
+	}
+
 	if maxTokens > 0 {
 		s = TruncateByTokens(s, maxTokens)
 	}
@@ -108,8 +126,8 @@ func (a *Agent) buildToolCatalog() string {
 	}
 	// 仅注入插件/通道能力摘要，避免全量工具定义污染 system prompt。
 	// 每个插件列：名称 + 能力描述 + 工具数。完整工具定义由 get_plugin_tools 按需拉取。
-	byPlugin := map[string]int{}          // plugin -> 工具数
-	pluginDesc := map[string]string{}     // plugin -> 首个工具描述(作能力概览)
+	byPlugin := map[string]int{}      // plugin -> 工具数
+	pluginDesc := map[string]string{} // plugin -> 首个工具描述(作能力概览)
 	var order []string
 	for _, t := range defs {
 		fn, ok := t.(map[string]interface{})["function"].(map[string]interface{})
@@ -302,7 +320,7 @@ func (a *Agent) buildToolDefs() []interface{} {
 				"parameters": map[string]interface{}{
 					"type": "object",
 					"properties": map[string]interface{}{
-						"name": map[string]interface{}{"type": "string", "description": "知识名称（用作目录名）"},
+						"name":    map[string]interface{}{"type": "string", "description": "知识名称（用作目录名）"},
 						"content": map[string]interface{}{"type": "string", "description": "知识内容，支持 Markdown"},
 					},
 					"required": []string{"name", "content"},
