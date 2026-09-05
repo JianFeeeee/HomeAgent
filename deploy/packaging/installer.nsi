@@ -14,7 +14,7 @@
 # 此前硬编码 0.8.0 而 release 已到 1.0.0，装出来的包在「添加/删除程序」里
 # 会显示错误版本（DisplayVersion 也取自这个宏）。
 !ifndef PRODUCT_VERSION
-  !define PRODUCT_VERSION "1.0.0"
+  !define PRODUCT_VERSION "1.1.0"
 !endif
 
 !if "${VARIANT}" == "full"

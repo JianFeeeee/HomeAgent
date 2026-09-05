@@ -193,6 +193,8 @@ internal/
 
 ## 项目状态
 
+**v1.1.0** — 记忆系统支持二进制多媒体节点。此前四层记忆（L0 活跃上下文 / L1 文本 / L2 文档 / L3 图库）全部只存文字，图片音频经视觉模型转成描述后原始字节即丢弃，"那张紫蓝红三色带图"再也取不回来。本版新增内容寻址媒体存储（CAS，`internal/memory/media`）：元数据进 SQLite、blob 按 sha256 落盘去重，L0/L2/L3 各层只记 digest 并通过 `media_refs` 维护引用计数，容量上限由后台 GC 真正兑现（被引用的内容即便超限也永不删除）。**描述文本才是持久语义记忆，blob 只是缓存**——描述随记忆各层一直留存并可检索，原始字节可被容量 GC 淘汰，因此几个月后仍能从图库句子反查到那张图（若尚在则逐字节取回）。描述由后台循环经视觉源生成（默认关闭，开启后每 30s 最多 4 条，不与对话抢配额），放在对话路径上会给每张图的回复加十几秒而收益为零——那一轮模型本来就直接看着图。同时修五个缺陷：`core.New` 漏接 `rc.SetMediaStore` 致 L0→L2 引用转移在生产静默失效；三元组全被实体名校验拒绝时仍释放引用并删除文档（数据丢失，已反向验证）；媒体入图库曾依赖 NLP 提取器碰巧提出合规三元组而时好时坏，改为按媒体标记确定性产出；L3 媒体检索一度没有任何调用方（能存进去、agent 拿不出来）；`remotedevice` 网关与 `agentcli` 终端各一处数据竞争。配套 `-tags medialive` 自动触发链实测：只注入一个图片事件，落盘/描述/归档/图库绑定/GC 保护/二轮召回七个阶段全由生产代码自行触发，真实视觉模型下 agent 在不给图的第二轮准确答出三条色带的颜色与近似 hex。插件 ABI 未变（`SDKCompatibleVersion` 仍为 1.0.0），存量 `plugin.bin` 无需重编。
+
 **v1.0.0** — 外部插件从 C ABI 动态库迁移到**子进程 + 共享内存**。首个不再加载 `.so`/`.dll` 的版本，与 0.9.x 不兼容（存量插件须用新版 `plugindev` 重编为 `plugin.bin`，**业务代码零改动**）。消除 6 类此前在生产造成故障的缺陷：热重载失效（`DF_1_NODELETE` 让 `dlclose` 成 no-op）、崩溃隔离缺失（插件 panic 带崩 homed）、stage lost update（副本模型丢失 35.8~36.8%）、cgo 超时不可中断（线程线性泄漏）、`output_send` 假成功（模型收到「已发送」而消息未送达）、Windows 能力断层（只见 3 个 stage 字段且无法写回）。三面通信：stdio JSON-RPC（控制）+ 共享内存段（数据）+ 事件环（通知）；权限梯度显式化为三道闸。RPC 往返 p50 24.1µs，崩溃到恢复 <1s。
 
 **v0.9.0** — C ABI v2：外部插件 Stage 回调支持写回（`invoke_stage` 增加 result 输出，插件可在 OnInput/AfterToolcall/PostAction 修改 RawMessage/LLMText/ToolResults 等并同步回内核），ABI 版本随内核 minor 对齐（v0.9.x → ABIVersion=2，`version_min=1` 向后兼容旧插件）。同步修复工具循环 zen 兼容补位误伤首轮 system 上下文的问题。配套 SDK 提供增强版 sanitizer 示例（坏 UTF-8/U+FFFD/ANSI 转义全链路清洗）。**该 ABI 已随 v1.0.0 退场。**
@@ -218,7 +220,7 @@ internal/
 | **client** | waiter + 桌面 GUI | 连接远程 HomeAgent |
 
 - Linux：`.deb`（amd64/arm64）、`.rpm`（x86_64）、`.tar.gz`
-- Windows：`HomeAgent_v1.0.0_{Full,Server,Client}_win64.exe`（NSIS 安装向导）
+- Windows：`HomeAgent_v1.1.0_{Full,Server,Client}_win64.exe`（NSIS 安装向导）
 - 免安装：`homeagent-bin-<os>_<arch>.tar.gz`（含 homed/waiter/initconfig）
 - 校验：`SHA256SUMS`
 
