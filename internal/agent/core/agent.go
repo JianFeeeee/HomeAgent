@@ -232,6 +232,12 @@ func New(cfg AgentConfig) *Agent {
 	if cfg.IO != nil {
 		rc.SetChannelDefLookup(cfg.IO.GetInputChannelDef)
 	}
+	// 必须把媒体存储也注给 RelevanceContext：L0→L2 归档（Prune）靠
+	// rc.transferMediaRefs 把引用从 context owner 转给 document owner。
+	// 漏了这一行的后果是静默的：rc.mediaStore 为 nil 时转移直接 return，
+	// 而携带引用的 ContextEvent 已被归档删除 → 引用永久悬空在
+	// context owner 上、计数永不归零 → 对应 blob 永远不会被 GC 回收。
+	rc.SetMediaStore(cfg.MediaStore)
 
 	return &Agent{
 		id:              cfg.ID,
