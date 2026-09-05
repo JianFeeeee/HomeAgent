@@ -388,9 +388,14 @@ func TestArchiveColdDocs_KeepsDocWhenGraphWriteEmpty(t *testing.T) {
 	// 用超长 Source 而不是指望 NLP 提取器：docToTriples 在
 	// Source != "context_archived" 时会写一条 {文档 -来源-> Source}，
 	// Source 超过 validEntityName 的 50 字符上限 → Commit 静默跳过
-	// → len(triples)==1 但 ec=0 rc=0。这正是生产上 456 字 LLM 描述
-	// 造成的同一状态，但构造是确定的，不依赖提取器的具体行为
-	//（提取器行为随版本变化，测试不该押在它身上）。
+	// → len(triples)==1 但 ec=0 rc=0。构造是确定的，不依赖提取器的
+	// 具体行为（提取器行为随版本变化，测试不该押在它身上）。
+	//
+	// 正文里刻意**不放**媒体标记：mediaTriplesFromText 会为标记产出
+	// 合规的「图片 <digest>」三元组，那样 ec/rc 就不为 0，这个用例
+	// 也就测不到「全被拒绝」这个状态了。媒体引用直接用 AddRef 挂上，
+	// 模拟「文档持有媒体但正文的媒体标记已在清洗中丢失」这一情形——
+	// 那正是最危险的组合：有引用要释放，却没有句子能承载它。
 	longSource := strings.Repeat("超长来源名", 20) // 100 字，远超 50 字符上限
 	// Summary 也必须超长：docToTriples 会为合理 summary 写一条
 	// {文档 -主题-> summary}，那条能通过校验，ec/rc 就不为 0 了。
@@ -399,7 +404,7 @@ func TestArchiveColdDocs_KeepsDocWhenGraphWriteEmpty(t *testing.T) {
 	doc := &document.Doc{
 		ID:          "doc_keep",
 		Summary:     longSummary,
-		Content:     "[image/png " + shortDigest(digest) + "] 一张图片的描述",
+		Content:     "一段没有媒体标记的正文",
 		Source:      longSource,
 		CreatedAt:   time.Now().Add(-200 * time.Hour),
 		LastAccess:  time.Now().Add(-200 * time.Hour),
