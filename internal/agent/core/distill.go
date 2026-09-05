@@ -10,6 +10,7 @@ import (
 	agentIO "gitcode.com/JianFeeeee/HomeAgent/internal/agent/io"
 	"gitcode.com/JianFeeeee/HomeAgent/internal/memory"
 	"gitcode.com/JianFeeeee/HomeAgent/internal/memory/document"
+	"gitcode.com/JianFeeeee/HomeAgent/internal/memory/media"
 	"gitcode.com/JianFeeeee/HomeAgent/internal/memory/vector"
 	"gitcode.com/JianFeeeee/HomeAgent/internal/nlp"
 )
@@ -180,16 +181,83 @@ func (a *Agent) archiveColdDocs() {
 		coldDocs := a.docStore.FindColdDocs(72*time.Hour, 2)
 		for _, doc := range coldDocs {
 			triples := docToTriples(doc, a.embedder)
-			if len(triples) > 0 {
-				ec, rc, err := a.memory.Commit(triples, string(a.id)+"_doc_archival", 0)
-				if err != nil {
-					log.Printf("[agent] doc→graph archival error: %v", err)
-					continue
-				}
-				log.Printf("[agent] doc→graph: %s → %d entities, %d relations", doc.ID, ec, rc)
-				a.docStore.Remove(doc.ID)
+			if len(triples) == 0 {
+				continue
 			}
+			ec, rc, mediaBound, err := a.commitTriplesWithMedia(triples, string(a.id)+"_doc_archival", 0)
+			if err != nil {
+				log.Printf("[agent] doc→graph archival error: %v", err)
+				continue
+			}
+
+			// 归档的实质是「信息从 L2 搬到 L3」。一条实体、一条关系都没写进
+			// 图库时，信息并没有搬过去，此时删文档等于直接丢数据。
+			//
+			// 这不是理论情形：Commit 会静默跳过实体名不合法的三元组
+			//（validEntityName 要求 2–50 字符），而 LLM 生成的长描述几乎
+			// 提不出合规实体名——实测 456 字图片描述得到 0 entities 0
+			// relations，随后文档被删、媒体引用被释放、blob 被 GC 清掉，
+			// 图片与描述彻底消失。保留文档，下一轮再试。
+			if ec == 0 && rc == 0 {
+				log.Printf("[agent] doc→graph: %s 未写入任何实体/关系，保留文档待下轮重试"+
+					"（三元组 %d 条全被实体名校验拒绝）", doc.ID, len(triples))
+				continue
+			}
+			log.Printf("[agent] doc→graph: %s → %d entities, %d relations", doc.ID, ec, rc)
+
+			// 先销媒体引用再删文档：文档一旦从 docStore 消失，就再没有任何
+			// 东西能告诉我们它曾经引用过哪些 digest，media_refs 里那条记录
+			// 就永久悬空、引用计数永不归零，导致 blob 永远不会被 GC 回收。
+			//
+			// 但只有在引用**确实**转移到 graph_sentence 之后才能释放：
+			// 图库里没有任何句子承载这些 digest 时释放旧引用，计数归零，
+			// GC 会把内容当孤儿删掉。宁可留一条悬空引用（内容还在，可由
+			// 后续一致性检查清理），也不能丢内容。
+			refs, refErr := a.docMediaRefs(doc.ID)
+			switch {
+			case refErr != nil:
+				log.Printf("[media] 查文档 %s 的媒体引用失败，保守不释放: %v", doc.ID, refErr)
+			case len(refs) == 0:
+				// 该文档本就没有媒体引用，无需释放。
+			case mediaBound == 0:
+				log.Printf("[media] 文档 %s 有 %d 个媒体引用但图库一个都没绑上，"+
+					"保留引用以免 GC 删除内容（句子正文里可能没有可反解的短 digest）",
+					doc.ID, len(refs))
+			default:
+				a.releaseDocMedia(doc.ID)
+			}
+			a.docStore.Remove(doc.ID)
 		}
+	}
+}
+
+// docMediaRefs 返回文档当前持有的媒体引用（nil store 时为空）。
+//
+// 单独取出来是为了让归档路径能在释放前先确认「有没有东西要释放」——
+// 没有引用时不必打日志，有引用但没绑上图库时必须保留。
+func (a *Agent) docMediaRefs(docID string) ([]string, error) {
+	if a.mediaStore == nil || docID == "" {
+		return nil, nil
+	}
+	return a.mediaStore.Refs(media.OwnerDocument, docID)
+}
+
+// releaseDocMedia 注销文档持有的全部媒体引用。
+//
+// L2→L3 这一跳不再转移引用而是直接释放，因为图库存的是从描述
+// 文本里抽出的实体与关系，不再持有字节。媒体本身此时已完成使命：
+// 描述已经进了图库，blob 可以交给容量 GC 决定去留。
+func (a *Agent) releaseDocMedia(docID string) {
+	if a.mediaStore == nil || docID == "" {
+		return
+	}
+	n, err := a.mediaStore.DropOwner(media.OwnerDocument, docID)
+	if err != nil {
+		log.Printf("[media] 文档归档释放引用失败 (doc %s): %v", docID, err)
+		return
+	}
+	if n > 0 {
+		log.Printf("[media] 文档 %s 入图库，释放 %d 个媒体引用（描述已留在图库）", docID, n)
 	}
 }
 
@@ -411,6 +479,15 @@ func docToTriples(doc *document.Doc, embedder nlp.Vectorizer) []memory.Triple {
 			Confidence:  1.0,
 		})
 	}
+
+	// 媒体三元组：确定性产出，先于 NLP 提取。
+	//
+	// 媒体入 L3 曾完全依赖提取器碰巧从描述文本里提出合规三元组——实测
+	// LLM 的 477 字图片描述只产出「水平 -分割-> 成」这类语法碎片，
+	// obj 仅 1 字被 validEntityName 拒掉，整条媒体记忆就进不了图库
+	//（阶段性表现是"时好时坏"，取决于提取器运气）。媒体自身的
+	// digest / mime / 描述都是确定的，直接建三元组而不经提取器。
+	triples = append(triples, mediaTriplesFromText(doc.Content)...)
 
 	// NLP 通用提取
 	e := nlp.NewExtractor(nil)
