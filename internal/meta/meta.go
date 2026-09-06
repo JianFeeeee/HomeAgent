@@ -18,7 +18,7 @@ var (
 	//
 	// ❗main 上此值始终是**下一个未发布中版本**，不随 patch 发布变动
 	//（见 docs/git-branching.md §2.1）；已发布的版本号看对应的 release/vX.Y.x 与 tag。
-	Version = "1.0.0"
+	Version = "1.2.0"
 
 	// Commit 是构建时的 Git commit hash。
 	Commit = "unknown"

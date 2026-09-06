@@ -30,7 +30,7 @@ var (
 	//
 	// ❗main 分支上此值是**下一个未发布中版本**（1.1.x 线在发布中，所以 main 是 1.2.0）；
 	// 已发布的值看对应的 release/vX.Y.x 分支与 tag（如 release/v1.1.x 上是 1.1.0）。
-	Version = "1.0.0"
+	Version = "1.2.0"
 
 	// Commit 是构建时的 Git commit hash。
 	Commit = "unknown"
