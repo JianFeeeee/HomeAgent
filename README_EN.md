@@ -12,6 +12,11 @@ Combined with a **three-layer memory architecture** (Context → Document → Gr
 homed (kernel, zero IO) ← PluginSDK → plugins (all IO capabilities)
 ```
 
+**Since v1.1.1 media reaches the plugin boundary**: plugins and the model can both read and
+write images/audio in memory (`InsertWithMedia`, `InjectInputMedia`). Media lives in plain-text
+memory as a `[<mime> <short digest>] <description>` marker — the description is the searchable
+semantic memory, the digest is the key back to the bytes.
+
 **Since v1.0.0 external plugins are independent subprocesses**, communicating with the kernel over
 stdio JSON-RPC (control plane) + a shared memory segment (data plane) + an event ring (notification
 plane). A plugin crash cannot take down the kernel and it restarts automatically; swapping
@@ -179,6 +184,28 @@ External plugin development: see [homeagent-sdk](https://gitcode.com/JianFeeeee/
 
 ## Project Status
 
+**v1.1.1** — Multimodal reaches the **plugin boundary**. v1.1.0 gave the memory system binary
+multimedia nodes, but that path was open only to the kernel itself; this release opens it to
+plugins and the model. The public SDK gains media fields and three media injection methods
+(paired with [SDK v1.1.0](https://gitcode.com/JianFeeeee/homeagent-sdk/releases/tag/v1.1.0),
+shared by the whole 1.1.x line), and the kernel implements the four matching RPCs. The bridge
+layer had been **silently dropping fields**: `Confidence`/types/`SentenceText` handed in by a
+plugin were discarded, `Doc` kept only three fields, and `Remove` never released references
+(media stayed "referenced" forever, so GC could never reclaim it). `processTextInput` and
+`processMediaInput` were unified into a single `processInput`, which finally gives the media
+path the dedup, `no_memory`, channel `Cleaner`, interrupt semantics and correct `EventRawInput`
+it had always lacked. Three real defects fixed: **user-sent images never appeared in the WebUI
+chat log** (the media path published a map while the subscriber asserted a string),
+**`memory_commit`'s `sentence_text` had never been exposed to the model** (though it is the
+mandatory link in the media binding chain), and **two data races in `PluginSDK`** (11 reported
+by `-race`; in production this showed up as sporadic nil-dereference crashes during plugin reload).
+
+**v1.1.0** — Memory system supports **binary multimedia nodes**. Content-addressed media store
+(CAS + SQLite metadata + on-disk blobs, `Get` always re-verifies the digest) wired through L0
+(context events) / L2 (documents) / L3 (graph sentences), with reference-counted GC (referenced
+items are never deleted). The description text produced by the vision model is the durable
+semantic memory; the blob is only a cache that capacity GC may evict.
+
 **v1.0.0** — External plugins moved from C ABI shared libraries to **subprocess + shared memory**. The first release that no longer loads `.so`/`.dll`, and it is incompatible with 0.9.x (existing plugins must be rebuilt into `plugin.bin` with the new `plugindev`, though **business code needs zero changes**). Eliminates 6 classes of defects that had caused production incidents: hot-reload silently failing (`DF_1_NODELETE` making `dlclose` a no-op), no crash isolation (a plugin panic took down homed), stage lost updates (35.8~36.8% loss under the copy model), uncancellable cgo timeouts (linear OS-thread leaks), `output_send` reporting false success (the model was told "sent" while the message never went out), and Windows capability degradation (only 3 stage fields visible, no write-back). Three communication planes: stdio JSON-RPC (control) + shared memory segment (data) + event ring (notification); the privilege gradient is now enforced by three explicit gates. RPC round-trip p50 24.1µs; crash-to-recovery under 1s.
 
 **v0.9.0** — C ABI v2: external plugin Stage callbacks can now write back (`invoke_stage` gained a result out-param; plugins may mutate RawMessage/LLMText/ToolResults etc. in OnInput/AfterToolcall/PostAction and have them synced to the core). ABI version now tracks core minor releases (v0.9.x → ABIVersion=2, `version_min=1` keeps old plugins loadable). Also fixes the tool-loop zen-compat placeholder that wrongly fired on first-turn system context tail. The SDK ships an enhanced sanitizer example (bad-UTF-8 / U+FFFD / ANSI-escape scrub across the whole pipeline). **This ABI retired with v1.0.0.**
@@ -204,7 +231,7 @@ External plugin development: see [homeagent-sdk](https://gitcode.com/JianFeeeee/
 | **client** | waiter + desktop GUI | Connecting to a remote HomeAgent |
 
 - Linux: `.deb` (amd64/arm64), `.rpm` (x86_64), `.tar.gz`
-- Windows: `HomeAgent_v1.0.0_{Full,Server,Client}_win64.exe` (NSIS installer)
+- Windows: `HomeAgent_v1.1.1_{Full,Server,Client}_win64.exe` (NSIS installer)
 - Portable: `homeagent-bin-<os>_<arch>.tar.gz` (homed/waiter/initconfig)
 - Verification: `SHA256SUMS`
 
