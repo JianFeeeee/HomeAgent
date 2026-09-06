@@ -3148,6 +3148,19 @@
                   '" ' +
                   'alt="image" loading="lazy" style="max-width:320px;max-height:240px;border-radius:10px;display:block;cursor:zoom-in" ' +
                   'onerror="this.parentElement.innerHTML=\'<span class=\\"att-err\\">图片加载失败</span>\'"/></a>';
+              } else if (att.type === "audio") {
+                // 音频用原生播放器：与图片同理，附件能在聊天里直接消费才算可见。
+                // preload="metadata" 只拉时长不拉全部字节，避免历史消息满屏时并发下载。
+                attHtml =
+                  '<audio class="chat-attachment-audio" controls preload="metadata" src="' +
+                  escHtml(att.url) +
+                  '" style="max-width:320px;display:block"></audio>' +
+                  '<a href="' +
+                  escHtml(att.url) +
+                  '" download style="font-size:12px;color:var(--text-muted,#888);text-decoration:none">' +
+                  escHtml(att.name || "audio") +
+                  (att.size ? " (" + formatBytes(att.size) + ")" : "") +
+                  "</a>";
               } else {
                 var sizeStr = att.size ? formatBytes(att.size) : "";
                 attHtml =
@@ -3929,7 +3942,13 @@
           role: "user",
           content: message,
           attachment: {
-            type: /^image\//.test(fileObj.type) ? "image" : "file",
+            // 与服务端的 attType 判定保持一致（image/audio/file），
+            // 否则乐观渲染的卡片会在 SSE 回流后变成另一种样式。
+            type: /^image\//.test(fileObj.type)
+              ? "image"
+              : /^audio\//.test(fileObj.type)
+                ? "audio"
+                : "file",
             url: URL.createObjectURL(fileObj),
             name: fileObj.name,
             size: fileObj.size,
@@ -4578,7 +4597,11 @@
             if (p.kind === "channel_output") {
               // 附件输出（output_type=image/file）：渲染为图片预览/下载卡片
               var att = null;
-              if (p.output_type === "image" || p.output_type === "file") {
+              if (
+                p.output_type === "image" ||
+                p.output_type === "audio" ||
+                p.output_type === "file"
+              ) {
                 att = {
                   type: p.output_type,
                   url: p.url || p.content,

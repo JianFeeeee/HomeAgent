@@ -142,6 +142,23 @@ func (c procCore) InjectInputSync(source, channel, text string) string {
 	return reply
 }
 
+// ---- 带媒体的 IO 注入 ----
+//
+// 三个方法都直接转调 internal/sdk 的同名方法：那一层已经是三参数 + blocks
+// 的公开形态，不像 InjectInputSync 需要收窄。
+
+func (c procCore) InjectInputMedia(source, channel, text string, blocks []pubsdk.ContentBlock) {
+	c.sdk.InjectInputMedia(source, channel, text, blocks)
+}
+
+func (c procCore) InjectInputMediaSync(source, channel, text string, blocks []pubsdk.ContentBlock) string {
+	return c.sdk.InjectInputMediaSync(source, channel, text, blocks)
+}
+
+func (c procCore) InjectInterruptMedia(source, channel, text string, blocks []pubsdk.ContentBlock) {
+	c.sdk.InjectInterruptMedia(source, channel, text, blocks)
+}
+
 // ---- 生命周期 ----
 
 func (c procCore) SetAutoRestart(enabled bool) { c.sdk.SetAutoRestart(enabled) }

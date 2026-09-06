@@ -374,6 +374,11 @@ func (a *Agent) buildToolDefs() []interface{} {
 							"description": "标签列表",
 							"items":       map[string]interface{}{"type": "string"},
 						},
+						"media_digests": map[string]interface{}{
+							"type":        "array",
+							"description": "可选：这篇文档关联的媒体 digest（对话或 memory_recall 的「关联媒体」里显示的十六进制串，短的即可）。填了以后检索到这篇文档就能看到并取回原图/音频。",
+							"items":       map[string]interface{}{"type": "string"},
+						},
 					},
 					"required": []string{"content"},
 				},
