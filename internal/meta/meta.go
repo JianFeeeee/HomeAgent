@@ -18,7 +18,7 @@ var (
 	//
 	// 发布分支上此值是**本条发布线当前的版本号**；main 上则是下一个未发布中版本
 	//（见 docs/git-branching.md §2.1 与 §四）。
-	Version = "1.1.0"
+	Version = "1.1.1"
 
 	// Commit 是构建时的 Git commit hash。
 	Commit = "unknown"
