@@ -1,11 +1,15 @@
 # 外部插件接口不变矩阵（多进程化整改基线）
 
-> 状态：**完成 v2**（2026-09-03）——迁移已落地并上生产，内核 v1.0.0。
+> 状态：**完成 v3**（2026-09-06）——v2 的迁移已上生产（内核 v1.0.0）；v3 记录 v1.1.1 的公开接口**扩展**。
 > 目的：钉死「暴露给外部插件的接口不变」这一约束的**合同面**——迁移前、迁移后外部插件看到/调用的 SDK 接口完全一致；
 > 所有改造落在**核心（homed 侧）+ 工具链（plugindev）**，外部插件业务代码零改动，只需用新 plugindev 重编。
 >
 > **结果（已验证）**：`git diff third_party/homeagent-sdk/sdk/` 全程为空；17 个 `example/*/plugin.go` 逐字节未改
 > （`git status example/` 无输出）；生产 17 插件全部经子进程通道运行。
+>
+> ⚠️ **v1.1.x 起冻结约束被有意解除**，因为「接口不变」这条约束本身是为**迁移期**设的：
+> 它要保的是「换运行模型不动业务代码」。迁移完成后，SDK 需要能随功能演进而扩展，
+> 否则多模态这类能力永远到不了插件手上。解除的边界见 §九：**只增不减，签名不改**。
 >
 > 维护规则：每次改动公开 SDK 接口面 `third_party/homeagent-sdk/sdk/` 或模板 `tools/plugindev/templates/` 后，
 > 必须同步更新本矩阵。
@@ -67,7 +71,7 @@ type Plugin interface {
 |---|---|---|
 | `Settings()` | `SettingsAPI` | **17 插件全部使用**（Get/Set/List/GetCore/SetCore/ListCore/DataDir/GetPlugin/SetPlugin/ListPlugin/RegisterDef/Defs/Dump/Plugins） |
 | `Memory()` | `MemoryAPI`（Recall/Commit/Introspect/MergeEntities/Purge） | 低（controllable） |
-| `DocMemory()` | `DocMemoryAPI`（Query/Insert/Remove/Stats） | 低 |
+| `DocMemory()` | `DocMemoryAPI`（Query/Insert/**InsertWithMedia**/Remove/Stats） | 低（`InsertWithMedia` v1.1.0 新增） |
 | `TextMemory()` | `TextMemoryAPI`（Append） | 0 当前 |
 | `Knowledge()` | `KnowledgeAPI`（Search/Add/List） | 2 |
 | `LLM()` | `LLMAPI`（ListSources/SetSource/CurrentSource） | 0 当前 |
@@ -85,7 +89,14 @@ type Plugin interface {
 | `InjectInterruptText` | `(source, channel, text string)` | example 使用 6 次 → case 6 |
 | `InjectTextNoMemory` | `(source, channel, text string)` | → case 7 |
 | `InjectInputSync` | `(source, channel, text string) string` | → case 47（例：qq 闭环） |
-| `SetToolBlocks` | `(blocks []ContentBlock)` | **当前空实现**（C ABI 无对应），迁移后经 arena 二进制注入可实现 |
+| `SetToolBlocks` | `(blocks []ContentBlock)` | ✅ **v1.1.1 已落地**（`io.setToolBlocks`）；同版补上 `PluginSDK` 侧一直缺失的便捷包装——接口里有、便捷方法里没有，插件此前只能自己去拿 injector |
+| `InjectInputMedia` | `(source, channel, text string, blocks []ContentBlock)` | **v1.1.0 新增** → `io.injectMedia`。与 `SetToolBlocks` 的区别见下方说明 |
+| `InjectInputMediaSync` | `(source, channel, text string, blocks []ContentBlock) string` | **v1.1.0 新增** → `io.injectMediaSync` |
+| `InjectInterruptMedia` | `(source, channel, text string, blocks []ContentBlock)` | **v1.1.0 新增** → `io.injectInterruptMedia` |
+
+**为何媒体注入不能搭 `SetToolBlocks` 的车**：后者只在**工具处理函数内部**可用，且媒体要等
+**下一条 tool message** 才到模型手上。插件主动发起一轮带媒体的对话、以及中断注入，
+需要各自的签名，且媒体在**本轮**就随消息发出，并自动落进 CAS、挂上媒体记忆引用。
 | `RegisterStopHandler` / `RunStopHandlers` | `(func())` / `()` | 已有（qq 等 1 次） |
 | `RegisterOnRemoveHandler` / `RunOnRemoveHandlers` | `(func())` / `()` | example 使用 3 次 |
 | `Set*`（SetIOInjector/SetMemoryAPI/.../SetPluginMgrAPI） | — | 供 bridge/核心启动时接线，插件不直接调 |
@@ -99,8 +110,12 @@ type Plugin interface {
 | `ChannelDef` | NoMemory/Cleaner(func) | 同上 |
 | `ToolCall` / `ToolResult` / `MemItem` | ID/Name/Plugin/Arguments；CallID/Name/Plugin/Success/Result；Role/Content/Score | 全部纯 JSON 可序列化 |
 | `ContentBlock` / `ImageURL` / `AudioURL` | Type/Text/ImageURL/AudioURL；URL/Detail；URL | 全部可偏移化（迁移评估 3.3 已核实） |
+| `MediaAttachment`（**v1.1.0 新增**） | Digest/MIME/Data/Name/Description | 一个类型服务两个方向：给 `Data`+`MIME` 是新内容（CAS 按字节去重），只给 `Digest` 是引用已有内容。**读路径不回 `Data`**——一次检索可能命中几十份媒体，全塞回去会撑爆跨进程消息 |
 | `Event` / `EventHandler` / `EventSubscriber` | Type/Source/Payload/Timestamp | 迁移后才对外部插件真正可用 |
 | `Triple` / `Entity` / `Relation` / `Doc` / `TextEvent` / `PersonProfile` / `SocialRelation` / `Knowledge` / `ConfigDef` | — | 全部 JSON 可序列化 |
+| `Triple`（**v1.1.0 扩展**） | += `SentenceText` / `MediaDigests` | 媒体引用挂在**句子**上（`SentenceText` → `sentences` → `sentence_id` → `media_refs`），所以 `MediaDigests` 非空而 `SentenceText` 为空时内核会用媒体标记本身充当句子 |
+| `Doc`（**v1.1.0 扩展**） | += `MediaDigests` / `Attachments` | `Query` 返回时由内核填充（仅元数据，不带字节） |
+| `TextEvent`（**v1.1.0 扩展**） | += `Attachments` | 写入时内核把标记并进正文；`RecentEvents` 读回时从标记反解 |
 
 **函数类型字段盘点（唯一无法跨进程序列化的东西）**：
 - `ToolDef.Cleaner func(string) string`
@@ -252,7 +267,9 @@ Part 0.2 先做了过渡补丁（只回传真正变更的字段）；Part 4 的�
 | 能力 | 迁移前 | 迁移后 | 实际结果 |
 |---|---|---|---|
 | 事件订阅 `Events().Subscribe`（case 23/24） | ❌ 空实现 | ✅ 事件环（EvtRing + eventfd + 独立游标） | ✅ 已接线（当前零用户） |
-| `SetToolBlocks` 多模态注入 | ❌ 空实现 | ✅ 二进制落 arena，Slice 描述符回传 | ⚠️ method 已定义，内核侧仍未实现 |
+| `SetToolBlocks` 多模态注入 | ❌ 空实现 | ✅ `io.setToolBlocks` | ✅ **v1.1.1 已落地**（走 JSON 而非共享段二进制通道，理由见 §九） |
+| 媒体入记忆（`InsertWithMedia`、`Triple.MediaDigests`） | ❌ 不存在 | ✅ CAS + 引用计数 GC | ✅ **v1.1.0 类型 / v1.1.1 内核实现** |
+| 插件主动发起带媒体的一轮对话（`InjectInputMedia*`） | ❌ 不存在 | ✅ 媒体在本轮就到模型手上 | ✅ **v1.1.1** |
 | `ContextMsgs`/`ReasoningContent`/`TokenUsage`/`Memory`/`Extra`/`Errors` | ❌ 看不到 | ✅ 共享内存全字段 | ✅ 18 字段全可见可写 |
 | 插件崩溃隔离 | ❌ panic 带崩 homed | ✅ 子进程独立崩溃 | ✅ 测试 + 生产验证 |
 | 热重载 `.so` | ❌ `DF_1_NODELETE` no-op | ✅ 同路径替换 `.bin` 即生效 | ✅ 生产实测 |
@@ -291,6 +308,8 @@ C 结构体不好传函数指针（那是运气，任何人给 dispatch 加个 c
 3. ✅ **阶段 5**：17 个外部插件全部 `.bin` 化、cabi 删除（-3198 行）；
    `go build ./...` 与全仓 `go test ./...` 均通过。
 4. ✅ **全程**：`git diff third_party/homeagent-sdk/sdk/` 为零——接口冻结的硬证据。
+5. ⚠️ **v1.1.x 起该检查项不再适用**：冻结是迁移期的约束，迁移完成即到期（见 §九）。
+   取代它的门禁是「存量插件零改动零重编」——见 §九的验证方式。
 
 生产端到端（2026-09-03，真实 QQ 消息）：
 
@@ -301,6 +320,61 @@ input from qq → response (83293ms, tools=[qq_get_message qq_get_history
 [proc] sanitizer stage post_action 改写了 1 个字段
 tool output_send__qq result: 已通过 [qq] 通道发送: map[status:sent]
 ```
+
+---
+
+## 九、v1.1.x 的接口扩展规则（冻结解除后的替代约束）
+
+冻结约束是为**迁移期**设的：它要保的是「换运行模型不动业务代码」。迁移完成后继续冻结，
+等于让 SDK 永远停在迁移那天的能力面——多模态这类功能永远到不了插件手上。
+
+取代它的是三条更弱但仍然硬的约束：
+
+### 1. 只增不减，签名不改
+
+新增字段、新增方法可以；**改已有方法的签名、删字段、改字段语义不行**。
+
+实例：v1.1.0 想让插件能给三元组关联媒体，两条路——改 `Commit` 的签名加一个参数，
+或新增 `CommitWithMedia`。选了后者。改签名会让每个调 `Commit` 的插件编译失败，
+而那些插件根本不关心媒体。
+
+### 2. 新增方法必须是「插件调用、内核实现」方向
+
+这是**存量插件不需要重编**的技术原因：`IOInjector` 新增三个方法后，插件只是
+*多了可以调的东西*，没有新的实现义务。反过来若在 `Plugin` 接口上加方法，
+每个存量插件都会因未实现而编译失败。
+
+因此 `SDKCompatibleVersion` 与 SDK 的 `CoreVersion` 都不必随之跃迁：
+1.1.0 的 SDK 配 1.0.0 编的插件仍然成立。
+
+### 3. 生成模板必须同步接线，否则是**全体外部插件编译失败**
+
+公开接口加方法时，`tools/plugindev/templates/proc_main.go.tmpl` 里的 `procIO` /
+`procDocMemory` 若不实现新方法，就不满足接口——**每个外部插件都编不过**，是硬失败
+不是软降级。v1.1.1 这一层是被 `go test` 抓出来的（`internal/plugin/proc` 的两个
+E2E 用例编译失败），不是靠人工检查发现的。
+
+完整接线链共六处：`protocol.go` 的 method 常量 → `capability.go` 的能力归属 →
+`corehandler.go` 的分派分支 → `proc_core.go` 的委托 → `proc_main.go.tmpl` 的模板实现 →
+测试替身（`fakeCoreSDK`、`injectCapture`、`capability_test.go` 的手工方法清单）。
+还要同步 `yaegi/mocksdk`——它没有任何代码对着编译，所以漂移不会被编译器抓到
+（v1.1.1 修的时候发现它的 `Triple` 用的是 `Predicate`，而公开 SDK 一直叫 `Relation`）。
+
+### 验证方式（取代「diff 为零」）
+
+| 检查 | 命令 | v1.1.1 结果 |
+|---|---|---|
+| 存量插件源码零改动 | `cd example/<n> && go vet ./...`（17 个） | ✅ 17/17 通过 |
+| 旧产物仍能建链 | 用 SDK 0.9.2 编的 `plugin.bin` 跑 `TestRealPlugin_*` | ✅ 4/4 通过（握手校验 `ProtocolVersion=1`，不是 SDK 版本） |
+| 模板已接线 | `cd tools/plugindev && go test ./...` | ✅ `TestProcTemplate_CoversAllCoreMethods` 含新 method |
+| 并发安全 | `go test ./sdk/ -race -count=5` | ✅ 零 DATA RACE（13 例压测） |
+
+### 为何媒体块走 JSON 而不是共享段二进制通道
+
+`SetToolBlocks` 的原设计是「二进制落 arena，Slice 描述符回传」。实际落地时改走 JSON：
+data URL 本身已是 base64 文本，包进二进制传输省不了空间，还要让这四个 method 跟其余
+51 个分道扬镳。共享段的价值在于**并发改写同一份状态**（StageContext 的 lost update），
+而媒体块是单向传递的不可变数据，没有这个问题。
 
 ---
 

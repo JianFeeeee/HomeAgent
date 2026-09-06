@@ -189,6 +189,36 @@ eventLoop() → processTextInput()
 | `doc_query` | 从 Document 搜索 |
 | `doc_commit` | 写入 Document |
 
+`memory_commit` 与 `doc_commit` 自 v1.1.1 起接受 `media_digests`，并由内核把
+`[<mime> <短digest>] <描述>` 标记补进句子/正文——**标记由内核拼，模型只给 digest**。
+要求调用方知道格式，等于让一个拼写错误静默切断引用绑定而全链路无人报错。
+`memory_commit` 同时新增 `sentence_text`：媒体引用挂在句子上，没有句子就无处可挂。
+
+### 媒体记忆（v1.1.0 起）
+
+`internal/memory/media/` — `Store`，内容寻址（CAS）
+
+| 关注点 | 做法 | 为何 |
+|---|---|---|
+| 寻址 | sha256 digest，元数据在 SQLite、blob 在磁盘 | 相同字节只存一份；元数据要可查询，blob 不该进数据库 |
+| 完整性 | 每次 `Get` 重校 digest | 磁盘损坏时静默返回脏数据比报错危险得多 |
+| 写入原子性 | `.tmp` + rename | 半个文件被当成完整内容会永久污染那个 digest |
+| 引用 | `owner_kind/owner_id/digest` 三元组主键，`AddRef` 幂等 | 三个 owner 类型：`context`（上下文事件）、`document`（文档）、`graph_sentence`（图谱句子） |
+| GC | 两阶段 + `minAge`，**有引用者绝不删** | 描述文本留在文本层，blob 可淘汰——语义记忆与字节缓存分离 |
+
+**媒体在纯文本记忆里的表示**是标记 `[<mime> <短digest>] <描述>`：
+
+```
+[image/png a1b2c3d4e5f6] 一张紫蓝红三色带图
+```
+
+之所以必须借文本承载：`Doc.Content`、`sentences.text`、文本记忆的 `Input` 全是字符串，
+没有字段能挂结构化数据。**描述文本才是持久的语义记忆**（检索靠它），digest 是回到字节的
+钥匙（反查靠它）。blob 被容量 GC 淘汰后，描述仍留在 L0/L2/L3 的文本里。
+
+媒体存储**全程可选**：`core.memory.media.enabled=false` 或未配置时，整条链路静默退化为
+纯文本行为，不报错不 panic。
+
 ### 其他记忆层
 
 - **Social** (`internal/memory/social/social.go`) — 人格特质和关系网，包装 GraphDB 实体类型
@@ -294,9 +324,13 @@ Lua 脚本插件加载：`internal/plugin/` → gopher-lua 解释器执行 `main
 
 | 面 | 机制 | 为何这么选 |
 |---|---|---|
-| 控制面 | stdio JSON-RPC（NDJSON 帧），51 个 `core.*` method | 进程边界即 ABI 边界，无需维护三套平台特定的动态库加载代码 |
+| 控制面 | stdio JSON-RPC（NDJSON 帧），55 个 `core.*` method | 进程边界即 ABI 边界，无需维护三套平台特定的动态库加载代码 |
 | 数据面 | 共享内存段，**全部子进程共用一块** | 每插件一段会让「内核 ctx → 段 → 插件改 → 回读 ctx」在多插件下退化成副本模型，lost update 原样复现 |
 | 通知面 | 事件环 + 平台通知（Linux eventfd / macOS pipe / Windows Event） | 内核发事件绕不等消费者，流式输出逐 token 发布时任何等待都会造成卡顿 |
+
+v1.1.1 新增 4 个 method（51 → 55）：`doc.insertWithMedia`、`io.injectMedia`、
+`io.injectMediaSync`、`io.injectInterruptMedia`。**媒体块走 JSON 而非共享段二进制通道**——
+data URL 本身已是 base64 文本，包进二进制传输省不了空间，还要跟其余 51 个 method 分道。
 
 **子进程生命周期管理**：
 - 每子进程一根专职 `waitLoop`（`cmd.Wait()` 唯一调用点）——不依赖 stdout EOF，
@@ -330,7 +364,19 @@ sdk.Memory().Recall/Commit
 sdk.Knowledge().Search/Create
 sdk.Settings().Get/Set/List
 sdk.RegisterOutputChannel("qq", sdk.CapText|sdk.CapAudio|sdk.CapImage, "QQ消息通道，详见 output_send__qq_help", handler)
+
+// v1.1.1 媒体接口（全部新增，无签名变更）
+sdk.DocMemory().InsertWithMedia(doc, attachments)   // 带 Data 的落进 CAS，只给 Digest 的引用已有内容
+sdk.InjectInputMedia(source, channel, text, blocks) // 媒体在「本轮」就发给模型
+sdk.InjectInputMediaSync(...)                       // 同上并同步等回复
+sdk.InjectInterruptMedia(...)                       // 带媒体的中断，可抢占当前处理
 ```
+
+媒体注入与 `SetToolBlocks` 的区别：后者只能在工具处理函数内部调用，且媒体要等**下一条**
+tool message 才到模型手上；前三个是插件**主动发起一轮带媒体的对话**，媒体随本轮消息发出，
+并自动落进 CAS、挂上媒体记忆引用。`Triple` 与 `Doc` 相应新增 `MediaDigests`、`Attachments`。
+
+`internal/sdk/` 是这层的桥接实现，不受公开接口冻结约束（见 `docs/git-branching.md` §六）。
 
 ### Plugin 接口
 
