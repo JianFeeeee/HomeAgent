@@ -34,21 +34,26 @@ func newFakeCore() *fakeCoreSDK {
 	}
 }
 
-func (f *fakeCoreSDK) PluginName() string                    { return "fake" }
-func (f *fakeCoreSDK) Settings() pubsdk.SettingsAPI          { return nil }
-func (f *fakeCoreSDK) Memory() pubsdk.MemoryAPI              { return nil }
-func (f *fakeCoreSDK) TextMemory() pubsdk.TextMemoryAPI      { return nil }
-func (f *fakeCoreSDK) DocMemory() pubsdk.DocMemoryAPI        { return nil }
-func (f *fakeCoreSDK) Knowledge() pubsdk.KnowledgeAPI        { return nil }
-func (f *fakeCoreSDK) LLM() pubsdk.LLMAPI                    { return nil }
-func (f *fakeCoreSDK) Social() pubsdk.SocialAPI              { return nil }
-func (f *fakeCoreSDK) PluginMgr() pubsdk.PluginMgrAPI        { return nil }
-func (f *fakeCoreSDK) RegisterPluginAPI(name string) error   { return nil }
-func (f *fakeCoreSDK) InjectText(s, c, t string)             {}
-func (f *fakeCoreSDK) InjectInterruptText(s, c, t string)    {}
-func (f *fakeCoreSDK) InjectTextNoMemory(s, c, t string)     {}
-func (f *fakeCoreSDK) InjectInputSync(s, c, t string) string { return "" }
-func (f *fakeCoreSDK) SetAutoRestart(enabled bool)           { f.autoStart = enabled }
+func (f *fakeCoreSDK) PluginName() string                                       { return "fake" }
+func (f *fakeCoreSDK) Settings() pubsdk.SettingsAPI                             { return nil }
+func (f *fakeCoreSDK) Memory() pubsdk.MemoryAPI                                 { return nil }
+func (f *fakeCoreSDK) TextMemory() pubsdk.TextMemoryAPI                         { return nil }
+func (f *fakeCoreSDK) DocMemory() pubsdk.DocMemoryAPI                           { return nil }
+func (f *fakeCoreSDK) Knowledge() pubsdk.KnowledgeAPI                           { return nil }
+func (f *fakeCoreSDK) LLM() pubsdk.LLMAPI                                       { return nil }
+func (f *fakeCoreSDK) Social() pubsdk.SocialAPI                                 { return nil }
+func (f *fakeCoreSDK) PluginMgr() pubsdk.PluginMgrAPI                           { return nil }
+func (f *fakeCoreSDK) RegisterPluginAPI(name string) error                      { return nil }
+func (f *fakeCoreSDK) InjectText(s, c, t string)                                {}
+func (f *fakeCoreSDK) InjectInterruptText(s, c, t string)                       {}
+func (f *fakeCoreSDK) InjectTextNoMemory(s, c, t string)                        {}
+func (f *fakeCoreSDK) InjectInputSync(s, c, t string) string                    { return "" }
+func (f *fakeCoreSDK) InjectInputMedia(s, c, t string, b []pubsdk.ContentBlock) {}
+func (f *fakeCoreSDK) InjectInputMediaSync(s, c, t string, b []pubsdk.ContentBlock) string {
+	return ""
+}
+func (f *fakeCoreSDK) InjectInterruptMedia(s, c, t string, b []pubsdk.ContentBlock) {}
+func (f *fakeCoreSDK) SetAutoRestart(enabled bool)                                  { f.autoStart = enabled }
 
 func (f *fakeCoreSDK) RegisterTool(name string, def pubsdk.ToolDef, h pubsdk.ToolHandler) error {
 	f.mu.Lock()

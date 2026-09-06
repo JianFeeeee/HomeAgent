@@ -24,5 +24,9 @@ type TextMemoryAPI interface {
 
 type TextEvent = pubsdk.TextEvent
 
+// MediaAttachment 是记忆附件（媒体）在插件边界上的表示。
+// 与公共 SDK 同一类型，内置插件与外部插件用同一套字段。
+type MediaAttachment = pubsdk.MediaAttachment
+
 type DocMemoryAPI = pubsdk.DocMemoryAPI
 type Doc = pubsdk.Doc
