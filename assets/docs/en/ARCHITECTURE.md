@@ -189,6 +189,39 @@ All vectorization unified under `StaticEmbedder` (`internal/memory/static_embedd
 | `doc_query` | Search from Document |
 | `doc_commit` | Write to Document |
 
+Since v1.1.1 `memory_commit` and `doc_commit` accept `media_digests`, and the kernel appends the
+`[<mime> <short digest>] <description>` marker into the sentence/body — **the kernel builds the
+marker, the model only supplies the digest**. Requiring the caller to know the format would mean a
+single typo silently breaks reference binding with no error anywhere in the chain. `memory_commit`
+also gained `sentence_text`: media references hang off a sentence, so with no sentence there is
+nowhere to attach them.
+
+### Media Memory (since v1.1.0)
+
+`internal/memory/media/` — `Store`, content-addressed (CAS)
+
+| Concern | Approach | Why |
+|---|---|---|
+| Addressing | sha256 digest; metadata in SQLite, blobs on disk | Identical bytes stored once; metadata must be queryable, blobs must not live in the database |
+| Integrity | Every `Get` re-verifies the digest | Silently returning corrupt data on disk damage is far worse than an error |
+| Write atomicity | `.tmp` + rename | A half-written file taken as complete content would permanently poison that digest |
+| References | `owner_kind/owner_id/digest` composite primary key, `AddRef` idempotent | Three owner kinds: `context` (context events), `document`, `graph_sentence` |
+| GC | Two-stage with `minAge`, **referenced items are never deleted** | Description text stays in the text layers while blobs may be evicted — semantic memory and byte cache are decoupled |
+
+**How media is represented in plain-text memory** is the marker `[<mime> <short digest>] <description>`:
+
+```
+[image/png a1b2c3d4e5f6] a purple-blue-red three-band chart
+```
+
+Why it must ride on text: `Doc.Content`, `sentences.text` and text memory's `Input` are all strings
+— there is no field to carry structured data. **The description text is the durable semantic
+memory** (retrieval uses it); the digest is the key back to the bytes (reverse lookup uses it).
+After capacity GC evicts a blob, the description remains in the L0/L2/L3 text.
+
+The media store is **optional throughout**: with `core.memory.media.enabled=false` or no
+configuration, the whole chain silently degrades to plain-text behaviour — no errors, no panics.
+
 ### Other Memory Layers
 
 - **Social** (`internal/memory/social/social.go`) — Persona traits and relationship network, wraps GraphDB entity types
@@ -296,7 +329,7 @@ Common ground:
 
 | Plane | Mechanism | Why this choice |
 |---|---|---|
-| Control | stdio JSON-RPC (NDJSON frames), 51 `core.*` methods | The process boundary *is* the ABI boundary—no need to maintain three platform-specific dynamic-library loaders |
+| Control | stdio JSON-RPC (NDJSON frames), 55 `core.*` methods | The process boundary *is* the ABI boundary—no need to maintain three platform-specific dynamic-library loaders |
 | Data | Shared memory segment, **one segment shared by all subprocesses** | One segment per plugin would degrade "kernel ctx → segment → plugin mutates → read back" into the copy model under concurrency, reproducing lost updates exactly |
 | Notification | Event ring + platform notify (Linux eventfd / macOS pipe / Windows Event) | The kernel must never block on a consumer: streaming output publishes per token, so any wait shows up as stutter |
 
@@ -334,7 +367,22 @@ sdk.Memory().Recall/Commit
 sdk.Knowledge().Search/Create
 sdk.Settings().Get/Set/List
 sdk.RegisterOutputChannel("qq", sdk.CapText|sdk.CapAudio|sdk.CapImage, "QQ channel, see output_send__qq_help for details", handler)
+
+// v1.1.1 media APIs (all additive, no signature changes)
+sdk.DocMemory().InsertWithMedia(doc, attachments)   // attachments with Data land in CAS; Digest-only ones reference existing content
+sdk.InjectInputMedia(source, channel, text, blocks) // media reaches the model in *this* turn
+sdk.InjectInputMediaSync(...)                       // same, and waits for the reply
+sdk.InjectInterruptMedia(...)                       // media-bearing interrupt, can preempt current processing
 ```
+
+How media injection differs from `SetToolBlocks`: the latter is only callable inside a tool handler
+and its media reaches the model with the **next** tool message; these three let a plugin
+**initiate a turn that carries media** — it goes out with this turn's message and is automatically
+stored in CAS with a memory reference attached. `Triple` and `Doc` gained `MediaDigests` /
+`Attachments` correspondingly.
+
+`internal/sdk/` is the bridge implementation for this layer and is not subject to the public
+interface freeze (see `docs/git-branching.md` §6).
 
 ### Plugin Interface
 
