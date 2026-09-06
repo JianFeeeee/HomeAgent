@@ -10,6 +10,14 @@ var (
 	// 1.0.0：外部插件从 C ABI 动态库迁到子进程 + 共享内存。
 	// 这是首个不再加载 `.so`/`.dll` 的版本，与 0.9.x 不兼容（存量插件必须
 	// 用新版 plugindev 重编），故跃到主版本号。
+	// 1.1.0：记忆系统支持二进制多媒体节点——CAS 媒体存储 + L0/L2/L3 贯通。
+	// 1.1.1：多模态贯通**插件边界**。内核实现公开 SDK 1.1.0 新增的媒体接口
+	//        （doc.insertWithMedia、io.injectMedia / injectMediaSync /
+	//        injectInterruptMedia），并把 text/image/audio 三条输入路径归一成
+	//        一条 processInput 主干。
+	//
+	// ❗main 上此值始终是**下一个未发布中版本**，不随 patch 发布变动
+	//（见 docs/git-branching.md §2.1）；已发布的版本号看对应的 release/vX.Y.x 与 tag。
 	Version = "1.0.0"
 
 	// Commit 是构建时的 Git commit hash。
@@ -22,7 +30,11 @@ var (
 	KernelName = "HomeAgent"
 
 	// SDKCompatibleVersion 是此内核可兼容的最高 SDK 版本（semver）。
-	SDKCompatibleVersion = "1.0.0"
+	//
+	// 1.1.0：本内核实现了 SDK 1.1.0 的全部新增方法。
+	// 用 SDK 1.0.0 编的存量插件照旧可用——新增方法由**插件调用、内核实现**，
+	// 不调就不受影响，无需重编。
+	SDKCompatibleVersion = "1.1.0"
 )
 
 // FullVersion 返回完整的版本字符串。

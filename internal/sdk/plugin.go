@@ -195,6 +195,57 @@ func (a ioAdapter) InjectTextNoMemory(source, channel, text string) {
 	}
 }
 
+// InjectInputMedia 注入带媒体内容块的输入。
+//
+// blocks 放在 payload 的 media_blocks 里，由 eventloop 取出转进
+// stageCtx.Extra——与用户直接发图走的是同一条通道，因此自动获得
+// CAS 落盘与媒体记忆绑定。与 SetToolBlocks 的区别：后者只能在工具
+// 调用内部用，且媒体要等到下一条 tool message 才到模型手上。
+func (a ioAdapter) InjectInputMedia(source, channel, text string, blocks []pubsdk.ContentBlock) {
+	if a.iom != nil {
+		a.iom.InjectInputTo(source, channel, "text", map[string]interface{}{
+			"content":      text,
+			"media_blocks": blocks,
+		})
+	}
+}
+
+// InjectInputMediaSync 注入带媒体内容块的输入并同步等待回复。
+func (a ioAdapter) InjectInputMediaSync(source, channel, text string, blocks []pubsdk.ContentBlock) string {
+	if a.iom == nil {
+		return ""
+	}
+	out := a.iom.InjectInputSyncTo(source, channel, "text", map[string]interface{}{
+		"content":      text,
+		"media_blocks": blocks,
+	})
+	if out == nil {
+		return ""
+	}
+	reply, _ := out.Payload["content"].(string)
+	return reply
+}
+
+// InjectInterruptMedia 注入带媒体内容块的中断，可抢占当前 LLM 处理。
+func (a ioAdapter) InjectInterruptMedia(source, channel, text string, blocks []pubsdk.ContentBlock) {
+	if a.iom != nil {
+		a.iom.InjectInterrupt(source, channel, map[string]interface{}{
+			"type":         "text",
+			"content":      text,
+			"media_blocks": blocks,
+		})
+	}
+}
+
+// ContentBlock / ImageURL / AudioURL 是多模态内容块在插件边界上的类型。
+//
+// 别名到公共 SDK 而非另建一套：内置插件（webui/multimodal 等）与外部插件必须
+// 用同一套结构，否则 resolveInput 的类型分支要认第三种类型，而漏认的后果是
+// 媒体被静默丢弃。
+type ContentBlock = pubsdk.ContentBlock
+type ImageURL = pubsdk.ImageURL
+type AudioURL = pubsdk.AudioURL
+
 // SDKConfig holds all dependencies for creating a PluginSDK.
 type SDKConfig struct {
 	IOManager  *agentIO.IOManager

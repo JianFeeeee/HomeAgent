@@ -32,7 +32,7 @@ func (tc *toolCapture) RegisterTool(name string, def sdk.ToolDef, handler sdk.To
 	return nil
 }
 func (tc *toolCapture) RegisterStage(stage sdk.Stage, handler sdk.StageHandler) {}
-func (tc *toolCapture) RegisterAPI(name string) error                          { return nil }
+func (tc *toolCapture) RegisterAPI(name string) error                           { return nil }
 
 func setupPlugin() (*Plugin, *toolCapture, error) {
 	p := New("agentcli")
@@ -421,6 +421,24 @@ func (c *injectCapture) SetToolBlocks(blocks []sdkpub.ContentBlock) {
 	// 测试桩：忽略多模态块
 }
 func (c *injectCapture) InjectInputSync(source, channel, text string) string { return "" }
+
+// 三个带媒体的注入方法同样记录文本：本测试只关心「注入了什么话」，
+// 媒体块的转发在 core 的 injectedBlocks 测试里覆盖。
+func (c *injectCapture) InjectInputMedia(source, channel, text string, blocks []sdkpub.ContentBlock) {
+	c.mu.Lock()
+	c.texts = append(c.texts, text)
+	c.mu.Unlock()
+}
+
+func (c *injectCapture) InjectInputMediaSync(source, channel, text string, blocks []sdkpub.ContentBlock) string {
+	return ""
+}
+
+func (c *injectCapture) InjectInterruptMedia(source, channel, text string, blocks []sdkpub.ContentBlock) {
+	c.mu.Lock()
+	c.texts = append(c.texts, text)
+	c.mu.Unlock()
+}
 
 func (c *injectCapture) snapshot() []string {
 	c.mu.Lock()

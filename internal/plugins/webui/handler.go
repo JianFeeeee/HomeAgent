@@ -5,6 +5,7 @@ import (
 	"context"
 	"crypto/rand"
 	"embed"
+	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
@@ -1446,6 +1447,13 @@ func parseIntDefault(s string, def int) int {
 	return n
 }
 
+// maxInlineMediaBytes 是上传媒体内联进 LLM 请求的字节上限。
+//
+// base64 会胀大 4/3，8MB 原图变成 ~11MB 文本；再加上网关的请求体上限与
+// 模型的图像 token 预算，超过这个量级多半会被上游 413 拒掉。
+// 超限时退回按路径处理（模型可用 describe_image 主动看）而不是报错。
+const maxInlineMediaBytes = 8 << 20
+
 // handleChatFile 处理用户经 webui 上传文件并附带消息注入 agent。
 // 设计对齐 qq 插件收文件模式：文件落盘到固定目录（<data>/uploads），
 // 注入文本带「文件名 + 保存路径」，agent 用 files_read 等工具按路径消费。
@@ -1511,8 +1519,45 @@ func (h *Handler) handleChatFile(w http.ResponseWriter, r *http.Request) {
 	dlURL := "/uploads/" + filepath.Base(savePath)
 	attType := "file"
 	ct := hdr.Header.Get("Content-Type")
-	if strings.HasPrefix(ct, "image/") {
+	if ct == "" {
+		// 部分客户端（curl -F、某些移动端）不带 Content-Type，退回按扩展名判定。
+		// 判错的后果不只是卡片样式：图片被当普通文件就走不进视觉链路，模型看不到图。
+		ct = contentTypeByExt(strings.ToLower(filepath.Ext(savePath)))
+	}
+	switch {
+	case strings.HasPrefix(ct, "image/"):
 		attType = "image"
+	case strings.HasPrefix(ct, "audio/"):
+		attType = "audio"
+	}
+
+	// 图片/音频直接进多模态链路：读回字节拼 data URL，随本轮 message 发给模型。
+	//
+	// 此前只注入一句「文件已保存到 <路径>」，指望模型自己调 files_read——
+	// 但 files_read 返回的是文本，图片的字节对模型永远不可见，除非它想到再调
+	// describe_image。走 InjectInputMedia 后与用户在 qq 发图走同一条统一输入主干：
+	// 自动落进 CAS、挂上媒体记忆引用，且模型「本轮」就看得到图。
+	var mediaBlocks []sdk.ContentBlock
+	if attType == "image" || attType == "audio" {
+		if sz > maxInlineMediaBytes {
+			log.Printf("[webui] %s %s 有 %s，超过 %s 内联上限，退回按路径处理",
+				attType, base, formatBytesGo(sz), formatBytesGo(maxInlineMediaBytes))
+		} else if raw, err := os.ReadFile(savePath); err != nil {
+			log.Printf("[webui] 读回上传的%s失败，退回按路径处理: %v", attType, err)
+		} else {
+			dataURL := "data:" + ct + ";base64," + base64.StdEncoding.EncodeToString(raw)
+			if attType == "image" {
+				mediaBlocks = []sdk.ContentBlock{{
+					Type:     "image_url",
+					ImageURL: &sdk.ImageURL{URL: dataURL, Detail: "auto"},
+				}}
+			} else {
+				mediaBlocks = []sdk.ContentBlock{{
+					Type:     "audio_url",
+					AudioURL: &sdk.AudioURL{URL: dataURL},
+				}}
+			}
+		}
 	}
 
 	// 注入 agent：文件元信息走 interrupt 通道（内核以 system 角色注入 LLM，
@@ -1524,8 +1569,17 @@ func (h *Handler) handleChatFile(w http.ResponseWriter, r *http.Request) {
 	if deviceID != "" {
 		source = "webui/" + deviceID
 	}
+	typeLabel := map[string]string{"image": "图片", "audio": "音频", "file": "文件"}[attType]
+	if typeLabel == "" {
+		typeLabel = "文件"
+	}
 	fileNote := fmt.Sprintf("[用户通过 webui 发送了%s: %s (%s)]\n文件已保存到: %s\n可用 files_read 等工具读取此路径处理。",
-		map[string]string{"image": "图片", "file": "文件"}[attType], base, humanSize, savePath)
+		typeLabel, base, humanSize, savePath)
+	// 媒体已随本轮发给模型时不再叫它去读文件：那只会读到一堆二进制字节。
+	if len(mediaBlocks) > 0 {
+		fileNote = fmt.Sprintf("[用户通过 webui 发送了%s: %s (%s)]\n原文件保存在: %s",
+			typeLabel, base, humanSize, savePath)
+	}
 	if message != "" {
 		text := message
 		go func() {
@@ -1538,14 +1592,15 @@ func (h *Handler) handleChatFile(w http.ResponseWriter, r *http.Request) {
 			if clientMsgID != "" {
 				payload2["client_msg_id"] = clientMsgID + "-note"
 			}
-			h.sdk.InjectInput(source, "webui", "text", func() map[string]interface{} {
-				p := payload2
-				p["upload_url"] = dlURL
-				p["upload_type"] = attType
-				p["upload_size"] = sz
-				p["upload_name"] = base
-				return p
-			}())
+			payload2["upload_url"] = dlURL
+			payload2["upload_type"] = attType
+			payload2["upload_size"] = sz
+			payload2["upload_name"] = base
+			// 媒体跟附言同一条注入：拆开会让模型先看到「帮我看看这张图」而图在下一轮才到。
+			if len(mediaBlocks) > 0 {
+				payload2["media_blocks"] = mediaBlocks
+			}
+			h.sdk.InjectInput(source, "webui", "text", payload2)
 		}()
 		time.Sleep(100 * time.Millisecond) // 保证附言先入队
 		h.sdk.InjectInterrupt(source, "webui", "text", map[string]interface{}{"content": fileNote, "no_memory": true})
@@ -1562,6 +1617,9 @@ func (h *Handler) handleChatFile(w http.ResponseWriter, r *http.Request) {
 		"upload_type": attType,
 		"upload_size": sz,
 		"upload_name": base,
+	}
+	if len(mediaBlocks) > 0 {
+		payload["media_blocks"] = mediaBlocks
 	}
 	if deviceID != "" {
 		payload["device_id"] = deviceID
