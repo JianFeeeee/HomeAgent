@@ -925,39 +925,30 @@ context 累积导致的内存增长。
 >
 > 详细执行记录见 `docs/zh/plugin-migration-plan.md`（Part 0~6 全部标记完成）。
 
-### 12.1 待用户决策后执行：合并到 main + 发布分支
+### 12.1 ✅ 已完成：合并到 main + 发布分支（2026-09-03 ~ 09-06）
 
-**当前卡在四个决策点**，不是技术阻塞：
+四个决策点均已落定并执行：
 
-| # | 决策点 | 备选 | 倾向 |
-|---|---|---|---|
-| 1 | merge 方式 | `--no-ff` 保留 25 commit / squash 压成一条 | `--no-ff`——commit message 记录了「为何共享同一块 memfd」「为何 procCore 不能嵌入」等踩坑过程 |
-| 2 | 合回后是否删 feature 分支 | 删（规范要求）/ 留（8-9 周大特性） | 听用户 |
-| 3 | release 构建是否再替换生产二进制 | 换（溯源干净）/ 不换（避免停服） | 听用户 |
-| 4 | SDK 仓是否同步 main + release | 同步 / 只合 main / 暂不处理 | 同步——规范说「两仓版本对齐是第一优先级」 |
+| # | 决策点 | 最终选择 |
+|---|---|---|
+| 1 | merge 方式 | **`--no-ff`** —— commit message 记录了「为何共享同一块 memfd」「为何 procCore 不能嵌入」等踩坑过程，压成一条就没了 |
+| 2 | 合回后是否删 feature 分支 | **删**（`feature/plugin-proc-migration`、`feature/memory-media` 均已删，本地 + 远端） |
+| 3 | release 构建是否再替换生产二进制 | **换**，且此后每个正式版都走同一流程（备份二进制 + `sqlite3 .backup` 配置库 + 记插件清单 → `install -m 0755` → restart → 健康检查） |
+| 4 | SDK 仓是否同步 main + release | **同步**，且已升级为规范条款（`docs/git-branching.md` §七） |
 
-**目标效果**：
+**tag 归属问题已修**：`v1.0.0` 曾指向 feature 分支中间点 `670efcd`，已删除重打在 `release/v1.0.x` 上（`9b92a04`）。
 
-- `main` 含全部迁移工作且**永远可部署**（规范 §二.1）。
-- 存在 `release/v1.0.0` 分支，`v1.0.0` tag **打在 release 分支上**而非 feature。
-  ⚠️ 当前 tag 指向 `670efcd`（feature 分支中间点），需删除重打。
-- 两仓版本对齐：主仓 `internal/meta.Version` = SDK 仓 `meta.Version` = `1.0.0`，
-  且 vendored SDK 与 SDK 仓 release tag 内容一致。
-- 现网部署产物可追溯到 release tag 构建（规范 §四）。
+**实际演进已超出本节当初的设想**，后续发生的事写进了 `docs/git-branching.md`：
 
-**执行序列**（决策落定后）：
+- 发布分支改为**一个中版本一条**（`release/v1.0.x` 承载 1.0.0/1.0.1/1.0.3/1.0.4，而非按 patch 号各开一条）；
+- 三级发布通道 alpha/beta/正式**由 tag 区分而非分支**；
+- SDK 版本号**跟随核心的中版本、patch 位恒为 `.0`**（整条核心 1.1.x 线共用 SDK 1.1.0）——
+  所以「两仓版本对齐」指**中版本对齐**，不是三位全等；
+- **beta 阶段不发 SDK**：接口未固定时发版会让插件开发者照着会变的接口写代码；
+- **main 永不作发版分支**，版本号 bump / 打 tag / 构建产物只在发布分支上做。
 
-```bash
-# 主仓
-git checkout main && git merge --no-ff feature/plugin-proc-migration
-git checkout -b release/v1.0.0 main
-git tag -d v1.0.0 && git tag -a v1.0.0        # 重打在 release 上
-make build VERSION=1.0.0                       # 发布产物
-
-# SDK 仓（同上流程）
-cd third_party/homeagent-sdk
-git checkout main && git merge --no-ff feature/plugin-proc-migration
-git checkout -b release/v1.0.0 main && git tag -a v1.0.0
+已发布：`v1.0.0` / `v1.0.1` / `v1.0.3` / `v1.0.4`（1.0.x 线）、`v1.1.0` / `v1.1.0-beta.1` / `v1.1.1`（1.1.x 线），
+SDK 仓 `v1.0.0` / `v1.1.0`。main 的版本路牌现为 `1.2.0`（尚无 tag）。
 ```
 
 ---
@@ -1039,6 +1030,9 @@ git checkout -b release/v1.0.0 main && git tag -a v1.0.0
   （`syscall.NewLazyDLL` 绑定 `OpenFileMappingW`/`OpenEventW`）。
 - **验证程度**：仅 `GOOS=windows GOARCH=amd64 go build` 通过 + 单元测试。
   **无 Windows 测试机，从未真机跑过**。
+  v1.0.0 起 Windows NSIS 安装器（`HomeAgent_v*_{Full,Server,Client}_win64.exe`）已作为
+  release 资产随每个正式版发布 —— 但那只证明**能打出包**，不证明包装出来的
+  共享内存/事件对象在真机上能跑通。这两件事不要混为一谈。
 - **已知的语义差异**（代码注释里记了，但未实测）：
   Windows Event 是二元信号而非计数器，多次 `SetEvent` 只唤醒一次。
   推理上不影响正确性（消费者按 `readSeq` 追 `writeSeq` 批量 drain），
