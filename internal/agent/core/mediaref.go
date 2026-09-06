@@ -15,7 +15,7 @@ import (
 //
 // 为何需要这一层：媒体进入对话有两条路，两条都只把**文字**留给记忆——
 //
-//  1. 用户直接发图 → processMediaInput → mediaToBlocks
+//  1. 用户直接发图 → processInput/resolveInput → mediaToBlocks
 //     ContextEvent.Input 只存 alt 文本（"[从 qq 收到了 image]"），
 //     base64 随 message 数组发给模型后就丢了。
 //  2. 插件注入 → SetToolBlocks → process.go 的 mediaMsg
@@ -123,24 +123,42 @@ func (a *Agent) mediaSummaryForEvent(digests []string) string {
 	}
 	var lines []string
 	for _, d := range digests {
-		it, err := a.mediaStore.Stat(d)
-		if err != nil || it == nil {
-			continue
-		}
-		label := string(it.Kind)
-		if it.MIME != "" {
-			label = it.MIME
-		}
-		if it.Description != "" {
-			lines = append(lines, fmt.Sprintf("[%s %s] %s", label, shortDigest(d), it.Description))
-		} else {
-			lines = append(lines, fmt.Sprintf("[%s %s] (未描述)", label, shortDigest(d)))
+		if line := a.mediaMarkerLine(d); line != "" {
+			lines = append(lines, line)
 		}
 	}
 	if len(lines) == 0 {
 		return ""
 	}
 	return "媒体内容：\n" + strings.Join(lines, "\n")
+}
+
+// mediaMarkerLine 为一份媒体生成一行标记文本 `[<mime> <短digest>] <描述>`。
+//
+// 这是媒体标记格式的唯一生成处。此前 mediaSummaryForEvent 与
+// mediaContextForSentences 各拼一份，改动截断长度或分隔符时只改一处，
+// 另一处写出的标记就再也解析不回来——而解析失败是静默的（引用挂不上）。
+//
+// 查不到返回空串：媒体可能已被容量 GC 淘汰，此时不该造出一条指向虚无的标记。
+func (a *Agent) mediaMarkerLine(digest string) string {
+	if a.mediaStore == nil {
+		return ""
+	}
+	it, err := a.mediaStore.Stat(digest)
+	if err != nil || it == nil {
+		return ""
+	}
+	label := string(it.Kind)
+	if it.MIME != "" {
+		label = it.MIME
+	}
+	desc := it.Description
+	if desc == "" {
+		// 「已入库但还没描述」与「压根没有媒体」必须可区分：描述由后台循环
+		// 异步补齐，占位符保证补齐前这份媒体也不会从文本里消失。
+		desc = "(未描述)"
+	}
+	return fmt.Sprintf("[%s %s] %s", label, shortDigest(digest), desc)
 }
 
 // newEventID 生成 ContextEvent 的稳定标识。

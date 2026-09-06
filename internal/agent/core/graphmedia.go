@@ -255,6 +255,130 @@ func (a *Agent) bindSentenceMedia(sentenceIDs map[string]int64) int {
 	return bound
 }
 
+// sentenceWithMediaMarkers 保证句子文本里带上这些 digest 的媒体标记。
+//
+// 存在的理由：媒体的绑定链是 SentenceText → sentences 表 → sentence_id →
+// media_refs。模型只知道 digest（从 memory_recall 的「关联媒体」或对话里的
+// 媒体标记读到），不该要求它自己按内核格式拼标记——格式写错的后果是引用
+// 静默挂不上，模型也无从察觉。
+//
+// 已出现过的 digest 不重复追加：模型可能既写了标记又填了 media_digests。
+func (a *Agent) sentenceWithMediaMarkers(sentence string, digests []string) string {
+	if a.mediaStore == nil || len(digests) == 0 {
+		return sentence
+	}
+	present := make(map[string]bool)
+	for _, d := range extractMediaDigests(sentence) {
+		present[d] = true
+	}
+
+	var add []string
+	for _, d := range digests {
+		if d == "" || present[shortDigest(d)] {
+			continue
+		}
+		// 模型给的多半是短 digest（它在上下文里看到的就是短的），补全成完整
+		// digest 才能进 media_refs 主键。补不上就跳过：内容可能已被 GC 清掉。
+		full, err := a.mediaStore.ResolvePrefix(d)
+		if err != nil {
+			log.Printf("[media] 模型提交的 digest %s 无法解析: %v", d, err)
+			continue
+		}
+		if line := a.mediaMarkerLine(full); line != "" {
+			add = append(add, line)
+			present[shortDigest(full)] = true
+		}
+	}
+	if len(add) == 0 {
+		return sentence
+	}
+	if sentence == "" {
+		return strings.Join(add, "\n")
+	}
+	return sentence + "\n" + strings.Join(add, "\n")
+}
+
+// docMediaContext 为一篇文档产出媒体说明，供 doc_query 拼进工具返回值。
+//
+// 优先读 media_refs（权威：谁挂上去的就是谁），为空时退回解析正文标记——
+// 历史文档与经旧版路径写入的文档只有标记、没有引用。
+func (a *Agent) docMediaContext(docID, content string) string {
+	if a.mediaStore == nil {
+		return ""
+	}
+	digests, err := a.mediaStore.Refs(media.OwnerDocument, docID)
+	if err != nil {
+		log.Printf("[media] 读取文档 %s 的媒体引用失败: %v", docID, err)
+	}
+	if len(digests) == 0 {
+		for _, short := range extractMediaDigests(content) {
+			full, err := a.mediaStore.ResolvePrefix(short)
+			if err != nil {
+				continue
+			}
+			digests = append(digests, full)
+		}
+	}
+	var lines []string
+	for _, d := range digests {
+		if line := a.mediaMarkerLine(d); line != "" {
+			lines = append(lines, line)
+		}
+	}
+	if len(lines) == 0 {
+		return ""
+	}
+	return strings.Join(lines, "；")
+}
+
+// resolveMediaDigests 把模型给的（多为短）digest 补全成完整 digest。
+//
+// 补不上就丢弃那一条并记日志：模型可能凭印象编了个 digest，也可能内容已被
+// 容量 GC 淘汰。挂一条对不上的引用比不挂更糟——digest 进了 media_refs 主键，
+// 错了则 DropOwner 永远匹配不到它，那是一条永久泄漏的引用。
+func (a *Agent) resolveMediaDigests(digests []string) []string {
+	if a.mediaStore == nil || len(digests) == 0 {
+		return nil
+	}
+	seen := make(map[string]bool, len(digests))
+	var out []string
+	for _, d := range digests {
+		full, err := a.mediaStore.ResolvePrefix(d)
+		if err != nil {
+			log.Printf("[media] 模型给的 digest %s 无法解析: %v", d, err)
+			continue
+		}
+		if seen[full] {
+			continue
+		}
+		seen[full] = true
+		out = append(out, full)
+	}
+	return out
+}
+
+// bindDocMedia 把一组完整 digest 挂到文档 owner 上，返回成功条数。
+//
+// 与 releaseDocMedia 成对：文档归档进 L3 时释放，文档写入时绑定。
+// 只绑不放会让磁盘只增不减，只放不绑会让 GC 误删仍被引用的内容。
+func (a *Agent) bindDocMedia(docID string, digests []string) int {
+	if a.mediaStore == nil || docID == "" || len(digests) == 0 {
+		return 0
+	}
+	bound := 0
+	for _, d := range digests {
+		if err := a.mediaStore.AddRef(d, media.OwnerDocument, docID); err != nil {
+			log.Printf("[media] 文档引用绑定失败 (%s → doc %s): %v", shortDigest(d), docID, err)
+			continue
+		}
+		bound++
+	}
+	if bound > 0 {
+		log.Printf("[media] 文档 %s 绑定 %d 个媒体引用", docID, bound)
+	}
+	return bound
+}
+
 // commitTriplesWithMedia 提交三元组并绑定句子里的媒体引用。
 //
 // 包一层是为了让所有「三元组入库」的调用点用同一条路径拿到媒体绑定，
@@ -357,19 +481,9 @@ func (a *Agent) mediaContextForSentences(sentenceIDs []int64) string {
 		}
 		var parts []string
 		for _, d := range digests {
-			it, err := a.mediaStore.Stat(d)
-			if err != nil || it == nil {
-				continue
+			if line := a.mediaMarkerLine(d); line != "" {
+				parts = append(parts, line)
 			}
-			label := string(it.Kind)
-			if it.MIME != "" {
-				label = it.MIME
-			}
-			desc := it.Description
-			if desc == "" {
-				desc = "(未描述)"
-			}
-			parts = append(parts, fmt.Sprintf("[%s %s] %s", label, shortDigest(d), desc))
 		}
 		if len(parts) > 0 {
 			lines = append(lines, fmt.Sprintf("句子 #%d 关联媒体：%s", sid, strings.Join(parts, "；")))

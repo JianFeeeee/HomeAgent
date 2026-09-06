@@ -74,6 +74,13 @@ const (
 	MethodIOInjectInterrupt = "io.injectInterrupt" // 6  CORE_INJECT_INTERRUPT_TEXT
 	MethodIOInjectTextNoMem = "io.injectTextNoMem" // 7  CORE_INJECT_TEXT_NO_MEMORY
 	MethodIOInjectSync      = "io.injectInputSync" // 47 CORE_INJECT_INPUT_SYNC
+	// 带媒体的注入：blocks 随参数 JSON 一并过来，内核侧转成
+	// payload["media_blocks"]，由 resolveInput 归一进统一输入主干。
+	// 与 SetToolBlocks 的区别：这三个是「主动发起一轮带图的对话」，
+	// 后者是「工具返回值里带图」，只能在工具调用内部用。
+	MethodIOInjectMedia          = "io.injectMedia"
+	MethodIOInjectMediaSync      = "io.injectMediaSync"
+	MethodIOInjectInterruptMedia = "io.injectInterruptMedia"
 	// MethodIOSetToolBlocks 多模态注入——今日 C ABI 侧是空实现（§1.4），
 	// 子进程下二进制落 arena、描述符回传，首次真正可用。
 	MethodIOSetToolBlocks = "io.setToolBlocks"
@@ -93,6 +100,9 @@ const (
 	MethodDocInsert = "doc.insert" // 32
 	MethodDocRemove = "doc.remove" // 33
 	MethodDocStats  = "doc.stats"  // 34
+	// MethodDocInsertMedia 写入文档并关联媒体（附件带 data 则落盘去重，
+	// 只带 digest 则引用已有内容）。
+	MethodDocInsertMedia = "doc.insertWithMedia"
 
 	// 知识库（原 case 15/35/36）
 	MethodKnowledgeSearch = "knowledge.search" // 15

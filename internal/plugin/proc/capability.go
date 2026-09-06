@@ -101,6 +101,11 @@ var methodCapability = map[string]Capability{
 	MethodIOInjectInterrupt: CapIO,
 	MethodIOInjectTextNoMem: CapIO,
 	MethodIOInjectSync:      CapIO,
+	// 带媒体的注入与纯文本注入同一权限组：能不能发起一轮对话是 IO 能力，
+	// 带不带图不改变这个判断。
+	MethodIOInjectMedia:          CapIO,
+	MethodIOInjectMediaSync:      CapIO,
+	MethodIOInjectInterruptMedia: CapIO,
 
 	// ---- 图记忆 ----
 	MethodMemoryRecall:     CapMemory,
@@ -114,6 +119,8 @@ var methodCapability = map[string]Capability{
 	MethodDocInsert: CapDocMemory,
 	MethodDocRemove: CapDocMemory,
 	MethodDocStats:  CapDocMemory,
+	// 带媒体写入与普通写入同权限：都是往文档记忆里写东西。
+	MethodDocInsertMedia: CapDocMemory,
 
 	// ---- 知识库 ----
 	MethodKnowledgeSearch: CapKnowledge,
