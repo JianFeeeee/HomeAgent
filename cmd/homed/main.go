@@ -378,6 +378,7 @@ func main() {
 	pluginReg.SetMemory(memDB)
 	pluginReg.SetTextMemory(textMem)
 	pluginReg.SetDocStore(docStore)
+	pluginReg.SetMediaStore(mediaStore) // 插件写入的记忆也走媒体链路；nil 时静默降级
 	pluginReg.SetKnowledge(ks)
 	pluginReg.SetProviderManager(providerMgr)
 	pluginReg.SetConfigRegistry(cfgReg)

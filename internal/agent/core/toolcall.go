@@ -185,9 +185,16 @@ func (a *Agent) executeMemoryTool(tc agentAPI.ToolCall) string {
 		for _, td := range triplesData {
 			if m, ok := td.(map[string]interface{}); ok {
 				t := memory.Triple{
-					Subject:  getString(m, "subject"),
-					Relation: getString(m, "relation"),
-					Object:   getString(m, "object"),
+					Subject:      getString(m, "subject"),
+					Relation:     getString(m, "relation"),
+					Object:       getString(m, "object"),
+					SentenceText: getString(m, "sentence_text"),
+				}
+				// 模型显式关联的媒体：标记由内核补进句子文本，模型不必知道格式。
+				// 没有 sentence_text 时 sentenceWithMediaMarkers 会用标记本身
+				// 充当句子——媒体必须有句子落点，否则 media_refs 无从挂起。
+				if digests := getStringSlice(m, "media_digests"); len(digests) > 0 {
+					t.SentenceText = a.sentenceWithMediaMarkers(t.SentenceText, digests)
 				}
 				if t.Subject != "" && t.Relation != "" && t.Object != "" {
 					triples = append(triples, t)
@@ -199,9 +206,12 @@ func (a *Agent) executeMemoryTool(tc agentAPI.ToolCall) string {
 		}
 		// remember 工具是用户/模型显式写入，不涉及归档删除，
 		// 因此不需要 mediaBound——没有旧引用要释放。
-		ec, rc, _, err := a.commitTriplesWithMedia(triples, string(a.id), 0)
+		ec, rc, mb, err := a.commitTriplesWithMedia(triples, string(a.id), 0)
 		if err != nil {
 			return fmt.Sprintf("记忆写入失败: %v", err)
+		}
+		if mb > 0 {
+			return fmt.Sprintf("已写入 %d 个实体和 %d 条关系，关联 %d 份媒体", ec, rc, mb)
 		}
 		return fmt.Sprintf("已写入 %d 个实体和 %d 条关系", ec, rc)
 
@@ -521,6 +531,11 @@ func (a *Agent) executeDocTool(tc agentAPI.ToolCall) string {
 			if len(content) > 2000 {
 				content = content[:2000] + "..."
 			}
+			// 媒体说明单独一行进冷存事件：正文可能被上面的 2000 字截断，
+			// 而媒体标记往往在文档末尾——截掉之后模型就不知道这篇文档带过图。
+			if mc := a.docMediaContext(d.ID, d.Content); mc != "" {
+				content = content + "\n关联媒体: " + mc
+			}
 			a.context.InsertByTimestamp(ContextEvent{
 				Timestamp: d.CreatedAt,
 				Source:    "cold_storage",
@@ -556,8 +571,20 @@ func (a *Agent) executeDocTool(tc agentAPI.ToolCall) string {
 			Tags:    tags,
 			Source:  "manual",
 		}
+
+		// 模型显式关联的媒体：标记补进正文后再写入。顺序关键——向量索引用
+		// Summary+Content 计算，标记进不去正文就检索不到这份媒体。
+		mediaDigests := a.resolveMediaDigests(getStringSlice(tc.Arguments, "media_digests"))
+		doc.Content = a.sentenceWithMediaMarkers(doc.Content, mediaDigests)
+
 		if err := a.docStore.Insert(doc); err != nil {
 			return fmt.Sprintf("文档写入失败: %v", err)
+		}
+		// 引用必须在拿到 doc.ID 之后挂：owner_id 就是文档 id。
+		// 不挂的后果是这些媒体在文档里可见却无主，下一轮 GC 会把它们清掉。
+		bound := a.bindDocMedia(doc.ID, mediaDigests)
+		if bound > 0 {
+			return fmt.Sprintf("文档已提交 (id: %s, 摘要: %s, 关联 %d 份媒体)", doc.ID, summary, bound)
 		}
 		return fmt.Sprintf("文档已提交 (id: %s, 摘要: %s)", doc.ID, summary)
 

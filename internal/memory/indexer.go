@@ -174,7 +174,9 @@ func (idx *Indexer) BuildToolPrompt() string {
 ### memory_commit
 将三元组写入图记忆。
 参数:
-- triples: [{"subject": "实体名", "relation": "关系类型", "object": "目标实体"}]
+- triples: [{"subject": "实体名", "relation": "关系类型", "object": "目标实体",
+            "sentence_text": "原始句子（可选）", "media_digests": ["图片digest（可选）"]}]
+  填了 media_digests，日后从这条记忆就能取回当时那张图/那段音频。
 
 ### memory_introspect
 查看记忆统计信息。
@@ -261,6 +263,15 @@ func (idx *Indexer) GetToolDefinitions() []map[string]interface{} {
 									"subject":  map[string]interface{}{"type": "string"},
 									"relation": map[string]interface{}{"type": "string"},
 									"object":   map[string]interface{}{"type": "string"},
+									"sentence_text": map[string]interface{}{
+										"type":        "string",
+										"description": "可选：这条三元组的原始句子。填了才能日后从图谱回到原文。",
+									},
+									"media_digests": map[string]interface{}{
+										"type":        "array",
+										"description": "可选：这条记忆关联的媒体 digest（对话或 memory_recall 的「关联媒体」里显示的十六进制串，短的即可）。填了以后从这条记忆能取回原图/音频。",
+										"items":       map[string]interface{}{"type": "string"},
+									},
 								},
 								"required": []string{"subject", "relation", "object"},
 							},
