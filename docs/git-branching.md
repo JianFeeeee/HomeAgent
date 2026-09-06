@@ -1,6 +1,6 @@
 # Git 分支管理规范
 
-> 生效：2026-08-31，2026-09-04 修订（三级发布通道 + 单条发布分支）。
+> 生效：2026-08-31，2026-09-04 修订（三级发布通道 + 单条发布分支），2026-09-06 修订（SDK 仓版本语义与发版联动，见 §七）。
 > 适用：**本仓（TrueAgent/HomeAgent）与 third_party/homeagent-sdk（SDK 仓）**——两仓协作时分支策略必须一致，本规范两仓同用。
 > 核心原则一句话：**main 唯一长命、永远可部署；一切新工作在特性分支；一个中版本一条发布分支，alpha/beta/正式由 tag 区分；hotfix 只进发布分支并 cherry-pick 回 main。**
 
@@ -83,6 +83,10 @@ main ──────────────── E ────────
 - alpha/beta 的构建产物**可以上传 release 附件**，但必须在 gitcode release 上勾选
   "预发布"标记，且发布说明首行标注通道与已知风险。
 - **beta 未清零的严重问题不得进正式**：正式 tag 意味着"我们认为它能上 24/7 现网"。
+- **发版动作只在发布分支上做**：版本号 bump、打 tag、构建产物、上传 release 附件，
+  全部发生在 `release/vX.Y.x` 上。**main 永远不是发版分支**——即使某个改动刚刚合进 main、
+  即使 main 此刻可部署，也不从 main 打 tag、不拿 main 的构建产物发布。
+  main 的版本号是「下一个未发布中版本」的路牌，不是任何一次发布的版本号。
 
 ### 5. hotfix（发布后发现的严重 bug）
 
@@ -132,12 +136,21 @@ main ──────────────── E ────────
 
 | 分支 | 状态 | 处理 |
 |---|---|---|
-| `main` | 含全部 hotfix（逐个 cherry-pick），`meta.Version` = 下一个未发布版本 | ✅ 保持 |
+| `main` | 含全部 hotfix（逐个 cherry-pick），`meta.Version` = 下一个未发布中版本（现为 `1.2.0`） | ✅ 保持 |
 | `release/v1.0.x` | 承载 v1.0.0 / v1.0.1 / v1.0.3 全部 tag | ✅ **由 `release/v1.0.1` 重命名而来**（2026-09-04） |
 | `release/v1.0.0` | `9b92a04`，已被 1.0.x 线完全包含（`merge-base --is-ancestor` 验证通过） | 🗑️ **已删除**（本地 + 远端），tag `v1.0.0` 保留全部历史 |
 | `release/v1.0.1` | 旧 patch 号命名 | 🗑️ **已重命名为 `release/v1.0.x`**（远端旧名删除） |
 | `feature/memory-media` | 记忆系统媒体（多模态）支持，进行中 | ⏳ 完成后合回 main 并删除 |
 | `feature/plugin-proc-migration` | 已合入 main（`525aa1f`） | ⏳ 待删（规范要求合回后删除） |
+| `release/v1.1.x` | 承载 v1.1.0 / v1.1.0-beta.1 / v1.1.1 全部 tag | ✅ 1.1 线的唯一发布分支 |
+
+### SDK 仓（homeagent-sdk）
+
+| 分支 | 状态 | 处理 |
+|---|---|---|
+| `main` | `meta.Version` = 下一个未发布中版本（现为 `1.2.0`） | ✅ 保持 |
+| `release/v1.1.x` | `meta.Version` = `1.1.0`，承载 tag `v1.1.0` | ✅ 与核心 `release/v1.1.x` 对应 |
+| `release/v1.0.0` | 旧 patch 号命名形态，内容已被 main 完全包含 | 📦 保留（供追溯 1.0 线构建） |
 
 ### 1.0.x 发布线 tag 历史
 
@@ -148,6 +161,18 @@ main ──────────────── E ────────
 | `v1.0.3` | `26dc76f` | 正式 | 内核 stage 协调器双重解锁（直接跳正式：单点修复 + 反向验证 + 全类审计） |
 
 > `v1.0.2` 未使用：该号从未发布也无 tag，留空以免与任何本地构建混淆。
+
+### 1.1.x 发布线 tag 历史
+
+| tag | 提交 | 通道 | SDK | 说明 |
+|---|---|---|---|---|
+| `v1.1.0` | `579d7db` | 正式 | 1.0.0 | 记忆系统支持二进制多媒体节点（CAS 媒体存储 + L0/L2/L3 贯通） |
+| `v1.1.0-beta.1` | `7a57a14` | beta | 不发 | 打包链路验证（GUI 架构污染 + 空壳 node_modules）。按 §七.2，beta 不伴随 SDK 发版 |
+| `v1.1.1` | 见发布说明 | 正式 | **1.1.0** | 多模态贯通插件边界；SDK 首次随核心正式版发布 |
+
+> `v1.1.0-beta.1` 的提交序在 `v1.1.0` **之后**（它多含一个打包修复），
+> 而 semver 预发布语义里 `1.1.0-beta.1 < 1.1.0`。这是「一条发布分支 + tag 区分通道」的
+> 已知代价：beta 是为验证**打包链路**而补打的，不代表源码更旧。发布说明里已注明。
 
 ---
 
@@ -164,7 +189,7 @@ main ──────────────── E ────────
 - **改造期间现网不得部署 main 或 feature 的中间态**——只有发版才用发布分支的 tag。
 - alpha/beta tag 的产物**不上现网**（现网是 24/7 服务，预发布通道的存在就是为了不拿它冒险）。
 - 涉及 SDK 仓时：主仓 `go.mod` 的 `replace => ./third_party/homeagent-sdk` 指向本地 vendored 副本，
-  发版前确认 vendored SDK 与 SDK 仓 release tag 一致（**两仓版本对齐是第一优先级**）。
+  发版前确认 vendored SDK 与 SDK 仓 release tag 一致（**两仓中版本对齐是第一优先级**，见 §七）。
 
 ---
 
@@ -199,6 +224,20 @@ git cherry-pick <修复①的sha>                          # ③ 只挑修复
 # 若有活跃 feature 分支，也 pick 过去
 git checkout feature/xxx && git cherry-pick <main 上那个 pick 的 sha>
 
+# 公开 SDK 接口改动（feature，不是 hotfix）：先进 main，再 pick 到发布分支
+git checkout -b feature/sdk-xxx main
+# ... 改 third_party/homeagent-sdk/sdk/ 与内核桥接层 ...
+git checkout main && git merge --no-ff feature/sdk-xxx
+git checkout release/v1.1.x
+git cherry-pick <feature 的各 sha>                    # 只挑改动，不挑 main 的版本号
+git commit -am "chore(release): bump v1.1.1"          # 发布分支自己的版本号
+git tag -a v1.1.1 -m "..."
+# SDK 仓同步（仅在核心打正式 tag 时，见 §七.2/§七.3）
+cd third_party/homeagent-sdk
+git checkout -b release/v1.1.x main
+git commit -am "chore(release): SDK 1.1.0（1.1.x 线全程共用）"
+git tag -a v1.1.0 -m "..."
+
 # 发布分支退役（下个中版本发布后，可选）
 git branch -d release/v1.0.x                          # tag 已保存历史，删分支不丢东西
 ```
@@ -211,3 +250,53 @@ git branch -d release/v1.0.x                          # tag 已保存历史，�
 - `internal/sdk` **不受冻结约束**，可自由扩展；冻结只针对公开 SDK 接口（`third_party/homeagent-sdk/sdk/`）。
 - 若整改确需突破公开接口，走变更评审（见 `docs/zh/plugin-interface-matrix.md` §七），
   并同步 `SDKCompatibleVersion` 与 SDK 仓的 release tag。
+- **公开接口的改动本身是 feature，不是发布准备**：它必须走 `feature/xxx` → 合回 main 的路径，
+  再 cherry-pick 到发布分支。不允许把接口新增当成"发布分支上的 bug 修复"直接提交进 release
+  ——发布分支冻结功能（§2.3），接口是最典型的功能面。
+
+---
+
+## 七、SDK 仓的版本语义与发版联动
+
+### 1. SDK 版本号跟随核心的中版本，patch 位恒为 `.0`
+
+| 核心版本 | 对应 SDK 版本 |
+|---|---|
+| 1.1.0 / 1.1.1 / 1.1.2 / … / 1.1.N | **1.1.0**（全线共用，不随核心 patch 变动） |
+| 1.2.0 起 | **1.2.0** |
+
+- 核心的 patch 位（`x`）专用于 **bugfix 与漏洞修复**，这类改动不触碰公开 SDK 接口，
+  因此 SDK 版本号没有理由跟着动。
+- **为什么不逐位对齐**：SDK 版本号是插件开发者的依赖声明。若核心每发一个 bugfix 就把 SDK
+  也推一个新号，开发者要么被迫跟版、要么怀疑自己版本过时，而接口其实一个字都没变。
+  让 SDK 号只在**接口可能变化的中版本边界**上跳，开发者只需关心「我在为哪个中版本写插件」。
+- 因此「两仓版本对齐」在本规范里指**中版本对齐**（核心 1.1.x ↔ SDK 1.1.0），
+  不是三位全等。核心 1.1.1 配 SDK 1.1.0 就是对齐状态。
+
+### 2. beta 阶段不发 SDK
+
+- **核心的 alpha/beta tag 不伴随 SDK 仓发版**：SDK 仓在这一阶段**不打 tag、不建 release**。
+- **为什么**：beta 是核心自己的测试阶段，此时 SDK 接口尚未固定。若此刻给 SDK 发版，
+  插件开发者会照着一个还会变的接口写代码——**那是无效开发**。接口没定就没有可依赖的契约，
+  发出去的版本号是一个假承诺。
+- 这条约束的对象是 **SDK 仓的发版动作**，不是核心二进制里有没有 SDK 代码。
+  主仓 `go.mod` 用 `replace => ./third_party/homeagent-sdk`，任何核心构建都必然含 vendored
+  SDK 源码，这是构建机制决定的，不在本条约束范围内。
+
+### 3. 正式发布时 SDK 随核心一起发
+
+核心打**正式 tag**（`vX.Y.Z`，无预发布后缀）时，SDK 仓同步执行：
+
+1. SDK 仓也有自己的 `release/vX.Y.x`（与核心同名，一个中版本一条）；
+2. 在该分支上把 `meta.Version` 定为 `X.Y.0`；
+3. 打 tag `vX.Y.0`（首次进入该中版本时），并建 gitcode release；
+4. 上传 5 平台 plugindev 产物 + `SHA256SUMS`。
+
+同一中版本内的后续核心 patch（1.1.1 → 1.1.2 …）**不重复发 SDK**——SDK 已经是 1.1.0，
+没有新东西要发。只有接口再次变化并进入下一个中版本时，SDK 才发 1.2.0。
+
+### 4. 版本号在两仓 main 上的含义
+
+两仓的 `main` 都遵守 §2.1：`meta.Version` 是**下一个未发布中版本**。
+所以在 1.1.x 线发布期间，两仓 main 上的值都是 `1.2.0`——它标记「main 正在积攒 1.2 的东西」，
+而不是「1.2.0 已经存在」。已发布的版本号一律看对应 `release/vX.Y.x` 分支与 tag。
