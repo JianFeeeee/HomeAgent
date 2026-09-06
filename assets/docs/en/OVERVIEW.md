@@ -25,6 +25,19 @@ The significance lies in clear responsibility boundaries: the kernel focuses on 
 
 Three progressive layers — context, cold archive, long-term graph memory — form an information decay and consolidation pipeline from short-term to persistent storage.
 
+**Media Memory (since v1.1.0)** — Images and audio are not attachments; they are a kind of node in all three layers:
+- **Content-addressed store (CAS)**: addressed by digest, metadata in SQLite and blobs on disk, identical bytes
+  stored once. Every `Get` re-verifies the digest (silently returning corrupt data is worse than an error).
+- **Reference-counted GC**: `owner_kind/owner_id/digest` is the primary key; context events, documents and graph
+  sentences each hold their own references. **Referenced items are never deleted** — only unowned content past
+  `minAge` is reclaimed.
+- **The description text is the durable semantic memory**: what the vision model produced is written into
+  plain-text memory as a `[<mime> <short digest>] <description>` marker and participates in vector retrieval and
+  distillation; the blob is only a cache that capacity GC may evict. Months later "that purple-blue-red
+  three-band chart" is still findable — via the description, not the bytes.
+- **Reaches the plugin boundary since v1.1.1**: plugins read and write media through `InsertWithMedia` /
+  `InjectInputMedia`; the model attaches media via the `media_digests` argument of `memory_commit` / `doc_commit`.
+
 ## What It Actually Does
 
 Code is in the project root, implemented in Go.
