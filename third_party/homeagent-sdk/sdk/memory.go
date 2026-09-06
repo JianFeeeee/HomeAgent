@@ -25,13 +25,18 @@ type Relation struct {
 }
 
 // Triple represents a subject-relation-object triple for the knowledge graph.
+//
+// SentenceText 是这条三元组的原句，会写进 sentences 表；媒体引用挂在句子上，
+// 所以 MediaDigests 非空时内核会保证句子存在（不给就自动合成一句）。
 type Triple struct {
-	Subject     string  `json:"subject"`
-	Relation    string  `json:"relation"`
-	Object      string  `json:"object"`
-	Confidence  float64 `json:"confidence,omitempty"`
-	SubjectType string  `json:"subject_type,omitempty"`
-	ObjectType  string  `json:"object_type,omitempty"`
+	Subject      string   `json:"subject"`
+	Relation     string   `json:"relation"`
+	Object       string   `json:"object"`
+	Confidence   float64  `json:"confidence,omitempty"`
+	SubjectType  string   `json:"subject_type,omitempty"`
+	ObjectType   string   `json:"object_type,omitempty"`
+	SentenceText string   `json:"sentence_text,omitempty"`
+	MediaDigests []string `json:"media_digests,omitempty"`
 }
 
 // TextMemoryAPI provides access to chronological text event storage.
@@ -40,27 +45,52 @@ type TextMemoryAPI interface {
 }
 
 // TextEvent represents a single text memory event.
+// MediaAttachment 描述一份与记忆关联的媒体。
+//
+// 两个方向共用一个类型：
+//   - 写入（InsertWithMedia）：给 Data + MIME 就是新内容；只给 Digest 则是引用已有内容。
+//   - 读出（Query）：内核只填 Digest/MIME/Description，**不回 Data**——
+//     一次检索可能命中几十张图，把字节全塞回插件会把 ABI 消息撑爆。
+//     需要字节时拿 Digest 单独取。
+type MediaAttachment struct {
+	Digest      string `json:"digest,omitempty"`
+	MIME        string `json:"mime,omitempty"`
+	Data        []byte `json:"data,omitempty"`
+	Name        string `json:"name,omitempty"`
+	Description string `json:"description,omitempty"`
+}
+
 type TextEvent struct {
-	Role      string `json:"role"`
-	Content   string `json:"content"`
-	Timestamp int64  `json:"timestamp"`
-	Channel   string `json:"channel,omitempty"`
+	Role        string            `json:"role"`
+	Content     string            `json:"content"`
+	Timestamp   int64             `json:"timestamp"`
+	Channel     string            `json:"channel,omitempty"`
+	Attachments []MediaAttachment `json:"attachments,omitempty"`
 }
 
 // DocMemoryAPI provides access to the document vector store.
 type DocMemoryAPI interface {
 	Query(text string, topK int) []*Doc
 	Insert(doc *Doc) error
+	// InsertWithMedia 写入文档并关联媒体。attachments 里带 Data 的会落进
+	// 内容寻址存储（相同字节只存一份），只带 Digest 的直接引用已有内容。
+	// 插件无需自己拼标记：内核会把 `[mime <短 digest>] <描述>` 补进 Content，
+	// 让向量检索和后续蒸馏都能看到这份媒体。
+	InsertWithMedia(doc *Doc, attachments []MediaAttachment) error
 	Remove(id string)
 	Stats() map[string]interface{}
 }
 
 // Doc represents a document in the document store.
+//
+// MediaDigests / Attachments 在 Query 返回时由内核填充（仅元数据，不带字节）。
 type Doc struct {
-	ID      string  `json:"id"`
-	Title   string  `json:"title"`
-	Content string  `json:"content"`
-	Score   float64 `json:"score,omitempty"`
+	ID           string            `json:"id"`
+	Title        string            `json:"title"`
+	Content      string            `json:"content"`
+	Score        float64           `json:"score,omitempty"`
+	MediaDigests []string          `json:"media_digests,omitempty"`
+	Attachments  []MediaAttachment `json:"attachments,omitempty"`
 }
 
 // SocialAPI provides read-only access to the social graph (person profiles and relationships).
@@ -75,9 +105,9 @@ type SocialAPI interface {
 
 // PersonProfile represents a person's complete profile (traits + social relations).
 type PersonProfile struct {
-	Name      string              `json:"name"`
-	Traits    map[string]string   `json:"traits,omitempty"`
-	Relations []SocialRelation    `json:"relations,omitempty"`
+	Name      string            `json:"name"`
+	Traits    map[string]string `json:"traits,omitempty"`
+	Relations []SocialRelation  `json:"relations,omitempty"`
 }
 
 // SocialRelation represents a social relationship between two persons.
