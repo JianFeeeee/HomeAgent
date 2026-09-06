@@ -91,6 +91,10 @@ type CoreSDK interface {
 	InjectInterruptText(source, channel, text string)
 	InjectTextNoMemory(source, channel, text string)
 	InjectInputSync(source, channel, text string) string
+	// 带媒体的注入：子进程插件也能主动发起一轮带图/音频的对话。
+	InjectInputMedia(source, channel, text string, blocks []pubsdk.ContentBlock)
+	InjectInputMediaSync(source, channel, text string, blocks []pubsdk.ContentBlock) string
+	InjectInterruptMedia(source, channel, text string, blocks []pubsdk.ContentBlock)
 
 	SetAutoRestart(enabled bool)
 }
@@ -162,6 +166,30 @@ func (h *coreHandler) Handle(method string, params json.RawMessage) (interface{}
 			return nil, err
 		}
 		return map[string]interface{}{"reply": h.sdk.InjectInputSync(p.Source, p.Channel, p.Text)}, nil
+
+	case MethodIOInjectMedia:
+		var p injectMediaParams
+		if err := unmarshal(params, &p); err != nil {
+			return nil, err
+		}
+		h.sdk.InjectInputMedia(p.Source, p.Channel, p.Text, p.Blocks)
+		return nil, nil
+
+	case MethodIOInjectMediaSync:
+		var p injectMediaParams
+		if err := unmarshal(params, &p); err != nil {
+			return nil, err
+		}
+		reply := h.sdk.InjectInputMediaSync(p.Source, p.Channel, p.Text, p.Blocks)
+		return map[string]interface{}{"reply": reply}, nil
+
+	case MethodIOInjectInterruptMedia:
+		var p injectMediaParams
+		if err := unmarshal(params, &p); err != nil {
+			return nil, err
+		}
+		h.sdk.InjectInterruptMedia(p.Source, p.Channel, p.Text, p.Blocks)
+		return nil, nil
 
 	// ---- 生命周期（原 case 8）----
 	case MethodLifecycleAutoRestart:
@@ -292,6 +320,28 @@ func (h *coreHandler) Handle(method string, params json.RawMessage) (interface{}
 			return nil, fmt.Errorf("doc.insert: 缺少 doc 字段")
 		}
 		return nil, dm.Insert(p.Doc)
+
+	case MethodDocInsertMedia:
+		dm := h.sdk.DocMemory()
+		if dm == nil {
+			return nil, errUnavailable("doc memory")
+		}
+		var p struct {
+			Doc         *pubsdk.Doc              `json:"doc"`
+			Attachments []pubsdk.MediaAttachment `json:"attachments"`
+		}
+		if err := unmarshal(params, &p); err != nil {
+			return nil, err
+		}
+		if p.Doc == nil {
+			return nil, fmt.Errorf("doc.insertWithMedia: 缺少 doc 字段")
+		}
+		if err := dm.InsertWithMedia(p.Doc, p.Attachments); err != nil {
+			return nil, err
+		}
+		// 回传内核补过的字段：ID 新建时才生成，Content 含内核补的媒体标记，
+		// MediaDigests 是附件落盘后的完整 digest——插件靠它们后续引用同一份媒体。
+		return map[string]interface{}{"doc": p.Doc}, nil
 
 	case MethodDocRemove:
 		dm := h.sdk.DocMemory()
@@ -503,6 +553,17 @@ type injectParams struct {
 	Source  string `json:"source"`
 	Channel string `json:"channel"`
 	Text    string `json:"text"`
+}
+
+// injectMediaParams 是带媒体注入的参数。
+//
+// blocks 走 JSON（而非共享段二进制通道）：data URL 已经是 base64 文本，
+// 再套一层二进制传输不会更小，而 JSON 让这条路径与其他 method 一致。
+type injectMediaParams struct {
+	Source  string                `json:"source"`
+	Channel string                `json:"channel"`
+	Text    string                `json:"text"`
+	Blocks  []pubsdk.ContentBlock `json:"blocks"`
 }
 
 func unmarshal(params json.RawMessage, out interface{}) error {

@@ -61,14 +61,18 @@ type StageContext struct {
 	Memory           []MemItem
 	NoMemory         bool
 	Extra            map[string]interface{}
-	Errors           []string               // 阶段处理过程中的错误信息
+	Errors           []string // 阶段处理过程中的错误信息
 }
 
-func (c *StageContext) RLock()                         { c.mu.RLock() }
-func (c *StageContext) RUnlock()                       { c.mu.RUnlock() }
-func (c *StageContext) Lock()                          { c.mu.Lock() }
-func (c *StageContext) Unlock()                        { c.mu.Unlock() }
-func (c *StageContext) IsResponded() bool               { c.mu.RLock(); defer c.mu.RUnlock(); return c.Response != nil }
+func (c *StageContext) RLock()   { c.mu.RLock() }
+func (c *StageContext) RUnlock() { c.mu.RUnlock() }
+func (c *StageContext) Lock()    { c.mu.Lock() }
+func (c *StageContext) Unlock()  { c.mu.Unlock() }
+func (c *StageContext) IsResponded() bool {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	return c.Response != nil
+}
 
 // MemItem represents a memory item in stage context.
 type MemItem struct {
@@ -100,8 +104,8 @@ type ToolDef struct {
 	Plugin      string                 `json:"plugin,omitempty"`
 	Description string                 `json:"description"`
 	Parameters  map[string]interface{} `json:"parameters"`
-	NoMemory    bool                   `json:"no_memory,omitempty"`  // 此工具输出不参与记忆计算，但原文保留
-	Cleaner     func(string) string    `json:"-"`                    // 计算层过滤函数，不改原文；仅在向量化/jieba/蒸馏时调用
+	NoMemory    bool                   `json:"no_memory,omitempty"` // 此工具输出不参与记忆计算，但原文保留
+	Cleaner     func(string) string    `json:"-"`                   // 计算层过滤函数，不改原文；仅在向量化/jieba/蒸馏时调用
 }
 
 // IOInjector provides methods for injecting input and interrupts into the agent pipeline.
@@ -117,6 +121,9 @@ type IOInjector interface {
 	// SetToolBlocks 插件工具注入多模态内容块（image_url/audio_url），内核在下一条
 	// tool message 的 content 数组里带上这些块，让模型在后续轮次看到图/听到音频。
 	SetToolBlocks(blocks []ContentBlock)
+	InjectInputMedia(source, channel, text string, blocks []ContentBlock)
+	InjectInputMediaSync(source, channel, text string, blocks []ContentBlock) string
+	InjectInterruptMedia(source, channel, text string, blocks []ContentBlock)
 }
 
 // EventType identifies the kind of system event.
@@ -221,6 +228,24 @@ type PluginSDK struct {
 	events    EventSubscriber
 	plgMgr    PluginMgrAPI
 
+	// apiMu 保护上面这些由内核注入的 API 字段，以及 autoRestart。
+	//
+	// 这些字段的写方与读方天然跨 goroutine：
+	//   - 写方是内核（加载/重载插件时注入 API）与插件自己（SetAutoRestart）；
+	//   - 读方是插件在 Start() 里起的后台 goroutine（轮询、监听、定时器
+	//     都要拿 injector 往管道里注消息），以及内核 registry —— 它在
+	//     另一个 goroutine 读 AutoRestart() 决定崩溃后是否重启。
+	// SetAutoRestart 的文档用法本身就是「连接建立后再决定能否自动重启」，
+	// 而连接建立通常发生在后台 goroutine 里，于是这对读写必然并发。
+	//
+	// sdk/stress_test.go 的 -race 实测确认这是真竞态，不是理论风险。
+	// 未加锁时的生产表现是偶发 nil 解引用崩溃（读到半个接口值）。
+	//
+	// 约定：只在持锁期间取字段值，取完立刻释放再调用。
+	// 持锁调用会把 InjectInputSync 这类阻塞到 agent 回复（可达数分钟）的
+	// 方法与 SetIOInjector 串到一起，让插件重载卡死。
+	apiMu sync.RWMutex
+
 	autoRestart bool
 
 	stopMu       sync.Mutex
@@ -247,28 +272,57 @@ func New(name string, sett SettingsAPI, regTool ToolRegistrar, regStage StageReg
 func (s *PluginSDK) PluginName() string { return s.name }
 
 // Settings returns the settings API for reading/writing plugin configuration.
+// sett 在 New 时一次性写入且无 setter，故不需要加锁。
 func (s *PluginSDK) Settings() SettingsAPI { return s.sett }
 
 // Memory returns the graph memory API (may be nil if not available).
-func (s *PluginSDK) Memory() MemoryAPI { return s.mem }
+func (s *PluginSDK) Memory() MemoryAPI {
+	s.apiMu.RLock()
+	defer s.apiMu.RUnlock()
+	return s.mem
+}
 
 // TextMemory returns the text memory API (may be nil if not available).
-func (s *PluginSDK) TextMemory() TextMemoryAPI { return s.textMem }
+func (s *PluginSDK) TextMemory() TextMemoryAPI {
+	s.apiMu.RLock()
+	defer s.apiMu.RUnlock()
+	return s.textMem
+}
 
 // DocMemory returns the document memory API (may be nil if not available).
-func (s *PluginSDK) DocMemory() DocMemoryAPI { return s.docMem }
+func (s *PluginSDK) DocMemory() DocMemoryAPI {
+	s.apiMu.RLock()
+	defer s.apiMu.RUnlock()
+	return s.docMem
+}
 
 // Knowledge returns the knowledge store API (may be nil if not available).
-func (s *PluginSDK) Knowledge() KnowledgeAPI { return s.know }
+func (s *PluginSDK) Knowledge() KnowledgeAPI {
+	s.apiMu.RLock()
+	defer s.apiMu.RUnlock()
+	return s.know
+}
 
 // LLM returns the LLM provider API (may be nil if not available).
-func (s *PluginSDK) LLM() LLMAPI { return s.llm }
+func (s *PluginSDK) LLM() LLMAPI {
+	s.apiMu.RLock()
+	defer s.apiMu.RUnlock()
+	return s.llm
+}
 
 // Social returns the social graph API (may be nil if not available).
-func (s *PluginSDK) Social() SocialAPI { return s.social }
+func (s *PluginSDK) Social() SocialAPI {
+	s.apiMu.RLock()
+	defer s.apiMu.RUnlock()
+	return s.social
+}
 
 // Events returns the event subscriber for listening to kernel events (may be nil if not available).
-func (s *PluginSDK) Events() EventSubscriber { return s.events }
+func (s *PluginSDK) Events() EventSubscriber {
+	s.apiMu.RLock()
+	defer s.apiMu.RUnlock()
+	return s.events
+}
 
 // RegisterTool registers a tool that the LLM can call.
 func (s *PluginSDK) RegisterTool(name string, def ToolDef, handler ToolHandler) error {
@@ -282,8 +336,9 @@ func (s *PluginSDK) RegisterTool(name string, def ToolDef, handler ToolHandler) 
 }
 
 // RegisterStage registers a handler for a pipeline stage.
-//   scope: StageScopeGlobal (default) — receives all stage events.
-//          StageScopeOwnTools — only before_toolcall/after_toolcall for this plugin's tools.
+//
+//	scope: StageScopeGlobal (default) — receives all stage events.
+//	       StageScopeOwnTools — only before_toolcall/after_toolcall for this plugin's tools.
 func (s *PluginSDK) RegisterStage(stage Stage, handler StageHandler, scope ...StageScope) {
 	if s.regStage == nil {
 		return
@@ -333,8 +388,11 @@ func (s *PluginSDK) RegisterPluginAPI(name string) error {
 // def:  通道在记忆计算层的行为（NoMemory/Cleaner）
 // handler: receives args map with keys: payload (string), type (string), meta (string|optional)
 func (s *PluginSDK) RegisterOutputChannel(name string, caps int, desc string, def ChannelDef, handler ToolHandler) error {
-	if s.regOutput != nil {
-		return s.regOutput(name, caps, desc, def, handler)
+	s.apiMu.RLock()
+	reg := s.regOutput
+	s.apiMu.RUnlock()
+	if reg != nil {
+		return reg(name, caps, desc, def, handler)
 	}
 	return nil
 }
@@ -343,57 +401,126 @@ func (s *PluginSDK) RegisterOutputChannel(name string, caps int, desc string, de
 // def.NoMemory: 此通道输入不参与记忆计算
 // def.Cleaner:  计算层对输入文本清洗后（不改原文）再向量化/提关键词
 func (s *PluginSDK) RegisterInputChannel(name string, def ChannelDef) error {
-	if s.regInput != nil {
-		return s.regInput(name, def)
+	s.apiMu.RLock()
+	reg := s.regInput
+	s.apiMu.RUnlock()
+	if reg != nil {
+		return reg(name, def)
 	}
 	return nil
 }
 
+// 以下 setter 由内核在启动/重载时调用，与插件后台 goroutine 的读并发，故加锁。
+
 // SetOutputChannelRegistrar sets the output channel registrar (called by the core at startup).
-func (s *PluginSDK) SetOutputChannelRegistrar(r OutputChannelRegistrar) { s.regOutput = r }
+func (s *PluginSDK) SetOutputChannelRegistrar(r OutputChannelRegistrar) {
+	s.apiMu.Lock()
+	s.regOutput = r
+	s.apiMu.Unlock()
+}
 
 // SetInputChannelRegistrar sets the input channel registrar (called by the core at startup).
-func (s *PluginSDK) SetInputChannelRegistrar(r InputChannelRegistrar) { s.regInput = r }
+func (s *PluginSDK) SetInputChannelRegistrar(r InputChannelRegistrar) {
+	s.apiMu.Lock()
+	s.regInput = r
+	s.apiMu.Unlock()
+}
 
 // SetIOInjector sets the IO injector (called by the core at startup).
-func (s *PluginSDK) SetIOInjector(io IOInjector) { s.io = io }
+func (s *PluginSDK) SetIOInjector(io IOInjector) {
+	s.apiMu.Lock()
+	s.io = io
+	s.apiMu.Unlock()
+}
 
 // SetMemoryAPI sets the memory API (called by the core at startup).
-func (s *PluginSDK) SetMemoryAPI(mem MemoryAPI)       { s.mem = mem }
-func (s *PluginSDK) SetTextMemoryAPI(tm TextMemoryAPI) { s.textMem = tm }
-func (s *PluginSDK) SetDocMemoryAPI(dm DocMemoryAPI)   { s.docMem = dm }
-func (s *PluginSDK) SetKnowledgeAPI(kn KnowledgeAPI)   { s.know = kn }
-func (s *PluginSDK) SetLLMAPI(llm LLMAPI)              { s.llm = llm }
-func (s *PluginSDK) SetSocialAPI(social SocialAPI)      { s.social = social }
-func (s *PluginSDK) SetEventSubscriber(es EventSubscriber) { s.events = es }
+func (s *PluginSDK) SetMemoryAPI(mem MemoryAPI) {
+	s.apiMu.Lock()
+	s.mem = mem
+	s.apiMu.Unlock()
+}
+
+func (s *PluginSDK) SetTextMemoryAPI(tm TextMemoryAPI) {
+	s.apiMu.Lock()
+	s.textMem = tm
+	s.apiMu.Unlock()
+}
+
+func (s *PluginSDK) SetDocMemoryAPI(dm DocMemoryAPI) {
+	s.apiMu.Lock()
+	s.docMem = dm
+	s.apiMu.Unlock()
+}
+
+func (s *PluginSDK) SetKnowledgeAPI(kn KnowledgeAPI) {
+	s.apiMu.Lock()
+	s.know = kn
+	s.apiMu.Unlock()
+}
+
+func (s *PluginSDK) SetLLMAPI(llm LLMAPI) {
+	s.apiMu.Lock()
+	s.llm = llm
+	s.apiMu.Unlock()
+}
+
+func (s *PluginSDK) SetSocialAPI(social SocialAPI) {
+	s.apiMu.Lock()
+	s.social = social
+	s.apiMu.Unlock()
+}
+
+func (s *PluginSDK) SetEventSubscriber(es EventSubscriber) {
+	s.apiMu.Lock()
+	s.events = es
+	s.apiMu.Unlock()
+}
 
 // SetPluginMgrAPI sets the plugin manager API (called by the bridge at startup).
-func (s *PluginSDK) SetPluginMgrAPI(pm PluginMgrAPI) { s.plgMgr = pm }
+func (s *PluginSDK) SetPluginMgrAPI(pm PluginMgrAPI) {
+	s.apiMu.Lock()
+	s.plgMgr = pm
+	s.apiMu.Unlock()
+}
 
 // PluginMgr returns the plugin manager API (ReloadOne / ReloadPlugins / list).
 // May be nil if the host did not wire it.
-func (s *PluginSDK) PluginMgr() PluginMgrAPI { return s.plgMgr }
+func (s *PluginSDK) PluginMgr() PluginMgrAPI {
+	s.apiMu.RLock()
+	defer s.apiMu.RUnlock()
+	return s.plgMgr
+}
 
 // ---- IO Convenience Methods ----
 
+// injector 取当前 injector 的快照。
+//
+// 取完即释放锁再调用：InjectInputSync 会阻塞到 agent 回复（可达数分钟），
+// 若持锁调用，插件重载时的 SetIOInjector 会一起卡住。
+func (s *PluginSDK) injector() IOInjector {
+	s.apiMu.RLock()
+	defer s.apiMu.RUnlock()
+	return s.io
+}
+
 // InjectInterruptText injects a text interrupt that can preempt current LLM processing.
 func (s *PluginSDK) InjectInterruptText(source, channel, text string) {
-	if s.io != nil {
-		s.io.InjectInterruptText(source, channel, text)
+	if io := s.injector(); io != nil {
+		io.InjectInterruptText(source, channel, text)
 	}
 }
 
 // InjectText injects a text message into the agent pipeline.
 func (s *PluginSDK) InjectText(source, channel, text string) {
-	if s.io != nil {
-		s.io.InjectText(source, channel, text)
+	if io := s.injector(); io != nil {
+		io.InjectText(source, channel, text)
 	}
 }
 
 // InjectTextNoMemory injects a text message without generating memory.
 func (s *PluginSDK) InjectTextNoMemory(source, channel, text string) {
-	if s.io != nil {
-		s.io.InjectTextNoMemory(source, channel, text)
+	if io := s.injector(); io != nil {
+		io.InjectTextNoMemory(source, channel, text)
 	}
 }
 
@@ -401,18 +528,62 @@ func (s *PluginSDK) InjectTextNoMemory(source, channel, text string) {
 // returning the reply text (empty string if none). Replies must be dispatched back
 // to the source channel by the caller.
 func (s *PluginSDK) InjectInputSync(source, channel, text string) string {
-	if s.io == nil {
+	io := s.injector()
+	if io == nil {
 		return ""
 	}
-	return s.io.InjectInputSync(source, channel, text)
+	return io.InjectInputSync(source, channel, text)
+}
+
+// InjectInputMedia 注入带媒体内容块（image_url/audio_url）的输入。
+// blocks 会落进媒体存储被记忆引用捕获，同时作为当前轮 content 数组
+// 发给 LLM，让模型在「本轮」就看到图/听到音频——区别于 SetToolBlocks
+// 的「下一轮 tool message」语义。
+func (s *PluginSDK) InjectInputMedia(source, channel, text string, blocks []ContentBlock) {
+	if io := s.injector(); io != nil {
+		io.InjectInputMedia(source, channel, text, blocks)
+	}
+}
+
+// InjectInputMediaSync 注入带媒体内容块的输入并同步等待 agent 回复。
+func (s *PluginSDK) InjectInputMediaSync(source, channel, text string, blocks []ContentBlock) string {
+	io := s.injector()
+	if io == nil {
+		return ""
+	}
+	return io.InjectInputMediaSync(source, channel, text, blocks)
+}
+
+// InjectInterruptMedia 注入带媒体内容块的中断，可抢占当前 LLM 处理。
+// blocks 随中断消息一起发给模型。
+func (s *PluginSDK) InjectInterruptMedia(source, channel, text string, blocks []ContentBlock) {
+	if io := s.injector(); io != nil {
+		io.InjectInterruptMedia(source, channel, text, blocks)
+	}
+}
+
+// SetToolBlocks 在工具处理函数内注入多模态内容块，内核在下一条 tool message
+// 的 content 数组里带上它们。需要「本轮就让模型看到」时用 InjectInputMedia。
+func (s *PluginSDK) SetToolBlocks(blocks []ContentBlock) {
+	if io := s.injector(); io != nil {
+		io.SetToolBlocks(blocks)
+	}
 }
 
 // SetAutoRestart 设置插件是否允许内核自动重启（崩溃后自动重载）。
 // 默认 true。如果插件有无法恢复的状态（如外部连接），应设为 false。
-func (s *PluginSDK) SetAutoRestart(enabled bool) { s.autoRestart = enabled }
+func (s *PluginSDK) SetAutoRestart(enabled bool) {
+	s.apiMu.Lock()
+	s.autoRestart = enabled
+	s.apiMu.Unlock()
+}
 
 // AutoRestart 返回插件是否允许自动重启。
-func (s *PluginSDK) AutoRestart() bool { return s.autoRestart }
+func (s *PluginSDK) AutoRestart() bool {
+	s.apiMu.RLock()
+	defer s.apiMu.RUnlock()
+	return s.autoRestart
+}
 
 // RegisterStopHandler 注册插件停止阶段的清理回调。
 // 注册的 handler 会在插件 Stop() 之前按"后注册先执行"的顺序调用，
