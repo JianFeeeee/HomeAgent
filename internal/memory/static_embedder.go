@@ -391,6 +391,13 @@ func (e *StaticEmbedder) Vectorize(text string) vector.Vector {
 	return vec
 }
 
+// EmbedImage 返回 ErrNotSupported：fastText 是纯文本词向量模型，
+// 没有视觉编码器。要用图像嵌入需要外部视觉模型（如 CLIP/MobileCLIP），
+// 那个由 config 里的 EmbeddingModelPath 指定的视觉模型负责。
+func (e *StaticEmbedder) EmbedImage(img []byte, mime string) (vector.Vector, error) {
+	return nil, vector.ErrNotSupported
+}
+
 func (e *StaticEmbedder) Dim() int {
 	e.mu.RLock()
 	defer e.mu.RUnlock()
