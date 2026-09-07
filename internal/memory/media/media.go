@@ -276,7 +276,8 @@ func (s *Store) Stat(digest string) (*Item, error) {
 	defer s.mu.RUnlock()
 	return s.scanOne(s.db.QueryRow(`
 		SELECT digest, kind, mime, size, width, height, origin_path, tool,
-		       description, described_by, ref_count, first_seen, last_seen
+		       description, described_by, ref_count, first_seen, last_seen,
+		       vec, vec_model
 		FROM media WHERE digest = ?`, digest))
 }
 
