@@ -1,6 +1,7 @@
 package vector
 
 import (
+	"fmt"
 	"math"
 	"sort"
 	"strings"
@@ -8,9 +9,16 @@ import (
 )
 
 // Vectorizer 接口：将文本转为向量
+//
+// 多模态嵌入新增可选的 EmbedImage：支持视觉嵌入的实现者覆写此方法，
+// 不支持的（TF-IDF 等）在默认实现里返回 ErrNotSupported。
 type Vectorizer interface {
 	Vectorize(text string) Vector
+	EmbedImage(img []byte, mime string) (Vector, error)
 }
+
+// ErrNotSupported 表示 Vectorizer 不支持图像嵌入，调用方按文本描述降级。
+var ErrNotSupported = fmt.Errorf("vectorizer does not support image embedding")
 
 // Vector 是带权特征映射：feature → weight
 type Vector map[string]float64
