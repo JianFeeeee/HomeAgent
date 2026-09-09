@@ -249,6 +249,17 @@ func New(cfg AgentConfig) *Agent {
 	// context owner 上、计数永不归零 → 对应 blob 永远不会被 GC 回收。
 	rc.SetMediaStore(cfg.MediaStore)
 
+	// 注入稠密多模态向量空间（可选）：配置后文档检索、L0 相关性裁剪、
+	// 跨模态检索全部共享同一向量空间，取代稀疏 fastText 语义路。
+	// 未配置时退化到 TF-IDF/fastText 稀疏检索，保持既有行为。
+	if cfg.MultimodalSpace != nil && cfg.MultimodalSpace.Loaded() {
+		rc.SetDenseSpace(cfg.MultimodalSpace)
+		if cfg.DocStore != nil {
+			cfg.DocStore.SetDenseSpace(cfg.MultimodalSpace)
+			cfg.DocStore.BuildDenseIndex(cfg.MultimodalSpace)
+		}
+	}
+
 	return &Agent{
 		id:              cfg.ID,
 		startTime:       time.Now(),

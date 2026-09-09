@@ -304,6 +304,21 @@ func CosineSimilarity(a, b Vector) float64 {
 	return dot / (math.Sqrt(normA) * math.Sqrt(normB))
 }
 
+// DenseCosine 计算两个 []float64 稠密向量的余弦相似度。
+// 与 CosineSimilarity（稀疏 map）数学等价，但面向稠密多模态向量。
+func DenseCosine(a, b []float64) float64 {
+	var dot, na, nb float64
+	for i := range a {
+		dot += a[i] * b[i]
+		na += a[i] * a[i]
+		nb += b[i] * b[i]
+	}
+	if na == 0 || nb == 0 {
+		return 0
+	}
+	return dot / math.Sqrt(na*nb)
+}
+
 // InvertedIndex 倒排索引，加速向量搜索
 type InvertedIndex struct {
 	mu       sync.RWMutex
