@@ -24,9 +24,9 @@ import (
 	"fmt"
 	"io"
 	"math"
-	"sort"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -644,6 +644,34 @@ func (s *Store) SetVec(digest string, vec []float64, model string) error {
 	_, err = s.db.Exec(`UPDATE media SET vec = ?, vec_model = ? WHERE digest = ?`,
 		string(vecJSON), model, digest)
 	return err
+}
+
+// StaleVecDigests 返回所有需要重新嵌入的图片 digest：
+// vec_model 不等于 currentModel（模型切换）或 vec_model 为空（从未嵌入）。
+// 调用方使用返回的 digest 列表调用 Get/EmbedImage/SetVec 完成重算。
+func (s *Store) StaleVecDigests(currentModel string) ([]string, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	rows, err := s.db.Query(`
+		SELECT digest FROM media
+		WHERE kind = 'image'
+		  AND COALESCE(description,'') != ''
+		  AND (COALESCE(vec_model,'') = '' OR vec_model != ?)
+		ORDER BY last_seen`, currentModel)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var digests []string
+	for rows.Next() {
+		var d string
+		if err := rows.Scan(&d); err == nil {
+			digests = append(digests, d)
+		}
+	}
+	return digests, rows.Err()
 }
 
 // QueryMedia 用查询向量对所有已嵌入媒体做余弦相似度检索，返回 topK 个最相似的 Item。
