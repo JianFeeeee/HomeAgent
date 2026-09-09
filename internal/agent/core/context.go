@@ -36,13 +36,13 @@ type ContextEvent struct {
 	Response    string           `json:"response,omitempty"`
 	ToolsUsed   []string         `json:"tools_used,omitempty"`
 	ToolResults []ToolResultItem `json:"tool_results,omitempty"`
-	// Media 是本轮对话涉及的媒体 digest（sha256 十六进制）。
-	//
-	// 存 digest 而不存路径：路径会失效（/tmp 探针图、下载缓存、别的进程的
-	// 临时产物），digest 是内容本身的身份，配合 internal/memory/media 的 CAS
-	// 永远能取回原始字节——只要它还没被容量 GC 淘汰。
-	Media  []string      `json:"media,omitempty"`
-	Vector vector.Vector `json:"-"`
+	// --- 原生多模态记忆（v1.2.0）---
+	// 媒体不是描述文本的附件，而是与文本同生命周期的记忆块。Vec 坐标在媒体
+	// 首次进入 L0 时计算一次并存于 CAS；L0→L2→L3 只迁移 Media digest 引用，
+	// 三层始终复用同一坐标。描述仅是可选的文本语义通道，不再决定媒体是否存在。
+	Media     []string      `json:"media,omitempty"`
+	Vector    vector.Vector `json:"-"` // 稀疏词向量（TF-IDF/fastText 空间）
+	DenseVec  []float64     `json:"-"` // 稠密多模态向量（与媒体/文档共享空间）
 }
 
 const contextFlushInterval = 5 * time.Second
@@ -51,6 +51,7 @@ type RelevanceContext struct {
 	mu               sync.Mutex
 	events           []*ContextEvent
 	embedder         *memory.StaticEmbedder
+	denseSpace       vector.MultimodalEmbedder
 	savePath         string
 	saveTimer        *time.Timer
 	dirty            bool
@@ -104,6 +105,14 @@ func NewRelevanceContext(savePath string, embedder *memory.StaticEmbedder) *Rele
 	return rc
 }
 
+// SetDenseSpace 注入稠密多模态向量空间。配置后 L0 相关性裁剪可用稠密向量
+// 余弦（与媒体检索、文档检索共享同一空间），未配置时退化到稀疏词向量。
+func (c *RelevanceContext) SetDenseSpace(ds vector.MultimodalEmbedder) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.denseSpace = ds
+}
+
 func (c *RelevanceContext) SetToolDefLookup(fn func(name string) *sdk.ToolDef) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
@@ -126,7 +135,7 @@ func (c *RelevanceContext) load() {
 		return
 	}
 	for _, evt := range events {
-		evt.Vector = c.computeVector(evt)
+		c.computeVector(evt)
 	}
 	c.events = events
 }
@@ -225,12 +234,19 @@ func (c *RelevanceContext) channelCleanerForDoc() document.ChannelCleaner {
 	}
 }
 
-func (c *RelevanceContext) computeVector(evt *ContextEvent) vector.Vector {
+func (c *RelevanceContext) computeVector(evt *ContextEvent) {
 	text := textForVector(evt, c.toolDefLookup, c.channelDefLookup)
 	if text == "" {
-		return nil
+		return
 	}
-	return c.embedder.Vectorize(text)
+	// 稀疏向量始终计算（TF-IDF/fastText，退化时仍可用）
+	evt.Vector = c.embedder.Vectorize(text)
+	// 稠密向量仅在配置了多模态空间时计算
+	if c.denseSpace != nil && c.denseSpace.Loaded() {
+		if dv, err := c.denseSpace.VectorizeDense(text); err == nil {
+			evt.DenseVec = dv
+		}
+	}
 }
 
 func (c *RelevanceContext) Save() error {
@@ -251,7 +267,7 @@ func (c *RelevanceContext) Append(evt ContextEvent) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
-	evt.Vector = c.computeVector(&evt)
+	c.computeVector(&evt)
 	c.events = append(c.events, &evt)
 
 	c.save()
@@ -261,7 +277,7 @@ func (c *RelevanceContext) InsertByTimestamp(evt ContextEvent) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
-	evt.Vector = c.computeVector(&evt)
+	c.computeVector(&evt)
 
 	idx := sort.Search(len(c.events), func(i int) bool {
 		return c.events[i].Timestamp.After(evt.Timestamp)
@@ -334,11 +350,25 @@ func (c *RelevanceContext) Prune(currentInput string, topK int, docStore *docume
 		return 0
 	}
 
+	// 优先使用稠密向量余弦（与媒体/文档共享空间）；退化到稀疏词向量。
+	var queryDense []float64
+	useDense := false
+	if c.denseSpace != nil && c.denseSpace.Loaded() {
+		if dv, err := c.denseSpace.VectorizeDense(currentInput); err == nil {
+			queryDense = dv
+			useDense = true
+		}
+	}
 	queryVec := c.embedder.VectorizeClean(currentInput)
 
 	scoredEvents := make([]scoredEvent, len(candidates))
 	for i, evt := range candidates {
-		score := vector.CosineSimilarity(queryVec, evt.Vector)
+		var score float64
+		if useDense && len(evt.DenseVec) == len(queryDense) {
+			score = vector.DenseCosine(queryDense, evt.DenseVec)
+		} else {
+			score = vector.CosineSimilarity(queryVec, evt.Vector)
+		}
 		scoredEvents[i] = scoredEvent{event: evt, score: score, idx: i}
 	}
 
@@ -376,6 +406,7 @@ func (c *RelevanceContext) Prune(currentInput string, topK int, docStore *docume
 				Content:     s.event.Input,
 				Response:    s.event.Response,
 				ToolResults: convertToolResults(s.event.ToolResults),
+				Media:       append([]string(nil), s.event.Media...),
 			}
 		}
 		doc, err := docStore.ContextToDoc("context_archived", entries, c.embedder, nil, c.toolOutputClean, c.channelCleanerForDoc())

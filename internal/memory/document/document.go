@@ -32,7 +32,11 @@ type Doc struct {
 	Meta        map[string]string `json:"meta,omitempty"`
 	AccessCount int               `json:"access_count"`    // 访问次数
 	LastAccess  time.Time         `json:"last_access"`     // 最后访问时间
-	Vector      vector.Vector     `json:"vector,omitempty"` // 预计算向量（与 context 同空间），nil 则用 TF-IDF 兜底
+	// Media 是这篇 L2 文档原生持有的多模态块 digest。坐标保存在 media.Store，
+	// 文档只持引用；被 Consume 召回到 L0 或归档到 L3 时必须随文本一起迁移。
+	Media       []string          `json:"media,omitempty"`
+	Vector      vector.Vector     `json:"vector,omitempty"` // 预计算文本向量（TF-IDF 稀疏，与 context 同空间）
+	DenseVec    []float64         `json:"dense_vec,omitempty"` // 多模态稠密向量（与媒体共享空间）
 }
 
 // Store — 文档记忆存储，包含向量索引
@@ -45,8 +49,86 @@ type Store struct {
 	docs       map[string]*Doc
 	summaries  []string // 用于训练向量化器，最大 10000 条
 	vectorizer vector.Vectorizer // 可选：与 context 同空间的向量化器
+	denseSpace vector.MultimodalEmbedder // 可选：稠密多模态向量空间
 
 	dirty bool
+}
+
+// SetDenseSpace 设置稠密多模态向量空间。配置后文档检索使用稠密余弦（brute-force），
+// 与媒体检索共享同一向量空间，实现真正的统一跨模态检索。
+func (s *Store) SetDenseSpace(ds vector.MultimodalEmbedder) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.denseSpace = ds
+}
+
+// buildDenseIndex 为所有文档计算稠密向量并建立 brute-force 索引。
+// 在启动时或配置变更后调用一次。492 篇文档 brute-force ~300ms，可接受。
+// BuildDenseIndex 为所有文档计算稠密向量并建立 brute-force 索引。
+// 在启动时或配置变更后调用一次。492 篇文档 brute-force ~300ms，可接受。
+func (s *Store) BuildDenseIndex(ds vector.MultimodalEmbedder) {
+	if ds == nil || !ds.Loaded() {
+		return
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	log.Printf("[document memory] building dense index for %d docs (dim=%d)", len(s.docs), ds.Dim())
+	count := 0
+	for _, doc := range s.docs {
+		if doc.DenseVec != nil && len(doc.DenseVec) == ds.Dim() {
+			continue // 已有向量，跳过
+		}
+		text := doc.Summary + " " + doc.Content
+		vec, err := ds.VectorizeDense(text)
+		if err != nil {
+			log.Printf("[document memory] dense embed failed %s: %v", doc.ID[:min(16, len(doc.ID))], err)
+			continue
+		}
+		doc.DenseVec = vec
+		count++
+	}
+	log.Printf("[document memory] dense index built: %d new vectors", count)
+}
+
+// denseSearchScored 对所有文档做 brute-force 余弦检索，返回 topK 个最相似的候选。
+// 仅在 denseSpace 配置后使用；未配置时退化到 TF-IDF 倒排检索。
+func (s *Store) denseSearchScored(queryVec []float64, topK int) []DocHit {
+	if len(queryVec) == 0 {
+		return nil
+	}
+	type scored struct {
+		did   string
+		score float64
+	}
+	var results []scored
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	for _, doc := range s.docs {
+		if len(doc.DenseVec) != len(queryVec) {
+			continue
+		}
+		score := vector.DenseCosine(queryVec, doc.DenseVec)
+		if score > 0.01 {
+			results = append(results, scored{doc.ID, score})
+		}
+	}
+	if len(results) == 0 {
+		return nil
+	}
+	sort.Slice(results, func(i, j int) bool { return results[i].score > results[j].score })
+	if len(results) > topK {
+		results = results[:topK]
+	}
+	out := make([]DocHit, len(results))
+	for i, r := range results {
+		out[i] = DocHit{Doc: s.docs[r.did], Score: r.score}
+	}
+	return out
+}
+
+// denseCosine 计算两个 []float64 向量的余弦相似度（已迁移到 vector.DenseCosine，此处保留兼容）。
+func denseCosine(a, b []float64) float64 {
+	return vector.DenseCosine(a, b)
 }
 
 func (s *Store) SetVectorizer(v vector.Vectorizer) {
@@ -118,6 +200,13 @@ func (s *Store) Insert(doc *Doc) error {
 	}
 	s.vec.Insert(doc.ID, doc.Summary, vec, doc.Meta)
 
+	// 若配置了稠密空间，为新文档计算稠密向量
+	if s.denseSpace != nil && s.denseSpace.Loaded() && len(doc.DenseVec) == 0 {
+		if dv, err := s.denseSpace.VectorizeDense(doc.Summary + " " + doc.Content); err == nil {
+			doc.DenseVec = dv
+		}
+	}
+
 	// 立即写盘
 	path := filepath.Join(s.dir, doc.ID+".json")
 	data, _ := json.MarshalIndent(doc, "", "  ")
@@ -171,6 +260,7 @@ func (s *Store) ContextToDoc(source string, entries []ContextEntry, vec vector.V
 			d.Summary = summary
 			d.Tags = tags
 			d.Entities = entities
+			d.Media = mediaDigestsFromEntries(entries)
 			s.dirty = true
 			s.mu.Unlock()
 			return d, nil
@@ -200,6 +290,7 @@ func (s *Store) ContextToDoc(source string, entries []ContextEntry, vec vector.V
 		AccessCount: 1,
 		Source:      source,
 		Meta:        meta,
+		Media:       mediaDigestsFromEntries(entries),
 		Vector:      docVec,
 	}
 	s.docs[id] = doc
@@ -228,6 +319,24 @@ func (s *Store) Consume(text string, topK int) []*Doc {
 		topK = 5
 	}
 
+	// 优先稠密检索（与媒体共享空间）；未配置时退化到 TF-IDF 倒排检索。
+	if s.denseSpace != nil && s.denseSpace.Loaded() {
+		queryVec, err := s.denseSpace.VectorizeDense(text)
+		if err == nil {
+			results := s.denseSearchScored(queryVec, topK)
+			var docs []*Doc
+			for _, r := range results {
+				if d, ok := s.docs[r.Doc.ID]; ok {
+					s.removeDoc(r.Doc.ID)
+					s.dirty = true
+					docs = append(docs, d)
+				}
+			}
+			return docs
+		}
+		log.Printf("[document memory] dense query failed, falling back to TF-IDF: %v", err)
+	}
+
 	vec := s.vectorizeQuery(text)
 	results := s.vec.Search(vec, topK)
 
@@ -252,6 +361,22 @@ func (s *Store) vectorizeQuery(text string) vector.Vector {
 
 // Query — 向量相似度查询文档
 func (s *Store) Query(text string, topK int) []*Doc {
+	hits := s.QueryScored(text, topK)
+	out := make([]*Doc, len(hits))
+	for i, h := range hits {
+		out[i] = h.Doc
+	}
+	return out
+}
+
+// DocHit 是一篇文档记忆的相似度候选及原始分数（供跨模态融合归一化）。
+type DocHit struct {
+	Doc   *Doc
+	Score float64
+}
+
+// QueryScored 与 Query 同语义，但返回带原始 cosine 分数的候选。
+func (s *Store) QueryScored(text string, topK int) []DocHit {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 
@@ -259,18 +384,34 @@ func (s *Store) Query(text string, topK int) []*Doc {
 		topK = 5
 	}
 
-	vec := s.vectorizeQuery(text)
-	results := s.vec.Search(vec, topK)
-
-	var docs []*Doc
-	for _, r := range results {
-		if d, ok := s.docs[r.ID]; ok {
-			d.AccessCount++
-			d.LastAccess = time.Now()
-			docs = append(docs, d)
+	// 优先稠密检索；退化到 TF-IDF。
+	if s.denseSpace != nil && s.denseSpace.Loaded() {
+		queryVec, err := s.denseSpace.VectorizeDense(text)
+		if err == nil {
+			results := s.denseSearchScored(queryVec, topK)
+			for i := range results {
+				if d, ok := s.docs[results[i].Doc.ID]; ok {
+					d.AccessCount++
+					d.LastAccess = time.Now()
+					results[i].Doc = d
+				}
+			}
+			return results
 		}
 	}
-	return docs
+
+	vec := s.vectorizeQuery(text)
+	results := s.vec.SearchScored(vec, topK)
+
+	var out []DocHit
+	for _, r := range results {
+		if d, ok := s.docs[r.Doc.ID]; ok {
+			d.AccessCount++
+			d.LastAccess = time.Now()
+			out = append(out, DocHit{Doc: d, Score: r.Score})
+		}
+	}
+	return out
 }
 
 // Reindex — 重新训练并重建向量索引
@@ -447,6 +588,22 @@ type ContextEntry struct {
 	Content     string
 	Response    string
 	ToolResults []ToolResultItem
+	Media       []string
+}
+
+func mediaDigestsFromEntries(entries []ContextEntry) []string {
+	seen := make(map[string]bool)
+	var out []string
+	for _, e := range entries {
+		for _, d := range e.Media {
+			if d == "" || seen[d] {
+				continue
+			}
+			seen[d] = true
+			out = append(out, d)
+		}
+	}
+	return out
 }
 
 func summarizeEntries(entries []ContextEntry, cleanText func(string) string, toolCleanFn func(name, output string) string, channelCleaner ChannelCleaner) string {
