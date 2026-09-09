@@ -179,5 +179,64 @@ func (a *Agent) describePendingMedia() {
 			continue
 		}
 		log.Printf("[media] 已描述 %s (%s, %d 字, 源=%s)", shortDigest(it.Digest), kind, len([]rune(desc)), srcName)
+
+		// 描述成功后，若 CLIP 嵌入器可用且是图片，计算视觉向量。
+		// 这是"描述 + 向量"两步同步完成的路径；对于历史已有描述但无向量的媒体，
+		// 由启动时的 reembedStaleMedia 补算。
+		if a.clipEmb != nil && kind == "image" && it.Kind == media.KindImage {
+			vec, err := a.clipEmb.EmbedImageDense(data, mime)
+			if err != nil {
+				log.Printf("[media] 视觉嵌入失败 %s: %v", shortDigest(it.Digest), err)
+			} else if err := a.mediaStore.SetVec(it.Digest, vec, a.clipEmb.Fingerprint()); err != nil {
+				log.Printf("[media] 写向量失败 %s: %v", shortDigest(it.Digest), err)
+			} else {
+				log.Printf("[media] 已嵌入 %s (dim=%d)", shortDigest(it.Digest), len(vec))
+			}
+		}
 	}
+}
+
+// reembedStaleMedia 在启动时为历史已有描述但无 CLIP 向量的图片补算视觉向量。
+// 避免安装 CLIP 后，旧图片永远只有描述文本、没有视觉向量，直到下次 Describe 才能写入。
+func (a *Agent) reembedStaleMedia() {
+	if a.clipEmb == nil || a.mediaStore == nil {
+		return
+	}
+	fp := a.clipEmb.Fingerprint()
+	digests, err := a.mediaStore.StaleVecDigests(fp)
+	if err != nil {
+		log.Printf("[media] 查询需重算向量的媒体失败: %v", err)
+		return
+	}
+	if len(digests) == 0 {
+		log.Printf("[media] 无历史媒体需要补算视觉向量")
+		return
+	}
+	log.Printf("[media] 启动补算视觉向量: %d 条 (fp=%s...)", len(digests), fp[:min(12, len(fp))])
+	done := 0
+	for _, d := range digests {
+		it, err := a.mediaStore.Stat(d)
+		if err != nil {
+			continue
+		}
+		data, err := a.mediaStore.Get(d)
+		if err != nil {
+			continue
+		}
+		mime := it.MIME
+		if mime == "" {
+			mime = "image/png"
+		}
+		vec, err := a.clipEmb.EmbedImageDense(data, mime)
+		if err != nil {
+			log.Printf("[media] 启动补算失败 %s: %v", shortDigest(d), err)
+			continue
+		}
+		if err := a.mediaStore.SetVec(d, vec, fp); err != nil {
+			log.Printf("[media] 启动写入向量失败 %s: %v", shortDigest(d), err)
+			continue
+		}
+		done++
+	}
+	log.Printf("[media] 启动补算完成: %d/%d", done, len(digests))
 }

@@ -17,6 +17,18 @@ type Vectorizer interface {
 	EmbedImage(img []byte, mime string) (Vector, error)
 }
 
+// MultimodalEmbedder 扩展 Vectorizer，提供直接返回 dense 向量的方法
+// 与模型生命周期管理。CLIP 等视觉向量化器实现此接口；未启用时用空 stub。
+type MultimodalEmbedder interface {
+	Vectorizer
+	VectorizeDense(text string) ([]float64, error)
+	EmbedImageDense(img []byte, mime string) ([]float64, error)
+	Fingerprint() string
+	Dim() int
+	Loaded() bool
+	Close()
+}
+
 // ErrNotSupported 表示 Vectorizer 不支持图像嵌入，调用方按文本描述降级。
 var ErrNotSupported = fmt.Errorf("vectorizer does not support image embedding")
 
@@ -256,7 +268,7 @@ func CosineSimilarity(a, b Vector) float64 {
 
 // InvertedIndex 倒排索引，加速向量搜索
 type InvertedIndex struct {
-	mu     sync.RWMutex
+	mu       sync.RWMutex
 	postings map[string]map[string]float64 // feature → {docID: weight}
 }
 
