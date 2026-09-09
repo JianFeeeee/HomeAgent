@@ -63,9 +63,33 @@ func (a *Agent) captureBlockMedia(blocks []agentAPI.ContentBlock, tool string) [
 			log.Printf("[media] 落盘失败 (tool=%s mime=%s): %v", tool, mime, err)
 			continue
 		}
+
+		// 入库即算一次多模态坐标并缓存（多模态空间可用时）。
+		// 之后 doc_query / memory_recall / 内部召回直接复用 SetVec 的缓存坐标，
+		// 不重复跑 ONNX；模型切换由启动时的 reembedStaleMedia 补算。
+		a.embedMediaOnIngest(d, mime, data)
 		digests = append(digests, d)
 	}
 	return digests
+}
+
+// embedMediaOnIngest 给刚入库的图片立即计算多模态坐标并缓存。
+// 只在 多模态空间可用且为图像时执行；音频/未配置时静默跳过（保持既有行为）。
+func (a *Agent) embedMediaOnIngest(digest, mime string, data []byte) {
+	if a.multimodalSpace == nil || !a.multimodalSpace.Loaded() {
+		return
+	}
+	if !strings.HasPrefix(mime, "image/") {
+		return
+	}
+	vec, err := a.multimodalSpace.EmbedImageDense(data, mime)
+	if err != nil {
+		log.Printf("[media] 入库嵌入失败 %s: %v", shortDigest(digest), err)
+		return
+	}
+	if err := a.mediaStore.SetVec(digest, vec, a.multimodalSpace.Fingerprint()); err != nil {
+		log.Printf("[media] 入库写向量失败 %s: %v", shortDigest(digest), err)
+	}
 }
 
 // stageMediaDigests 累积本轮捕获的 digest，等 ContextEvent 建好后一起挂上。

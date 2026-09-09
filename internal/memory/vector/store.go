@@ -17,11 +17,15 @@ type Vectorizer interface {
 	EmbedImage(img []byte, mime string) (Vector, error)
 }
 
-// MultimodalEmbedder 是稠密多模态编码器的接口（CLIP 等视觉-文本联合模型）。
+// MultimodalEmbedder 是稠密多模态编码器的接口。
 //
 // 与 Vectorizer（稀疏词向量，供 TF-IDF/倒排检索）刻意区分：多模态模型产出的
-// 是共享稠密空间（如 CLIP 512 维），直接用于 media.Store 的稠密余弦检索，
+// 是共享稠密空间，直接用于 media.Store 的稠密余弦检索，
 // **不得**塞进文档/知识层的稀疏 vector.Store（会破坏倒排剪枝与 TF-IDF 语义）。
+//
+// 实现不限：可以是内嵌 ONNX，也可以是外部 HTTP 向量服务——
+// 内核只依赖本接口，两条路径共享同一套检索/存储基础设施。Fingerprint 是模型
+// 空间标识（如模型文件指纹），作为 vec_model 持久化用于切换后重算。
 type MultimodalEmbedder interface {
 	VectorizeDense(text string) ([]float64, error)
 	EmbedImageDense(img []byte, mime string) ([]float64, error)
@@ -30,6 +34,18 @@ type MultimodalEmbedder interface {
 	Loaded() bool
 	Close()
 }
+
+// MultimodalModality 是统一向量空间支持的输入模态。
+// 现内核只消费 text/image；外部 API 路径可能扩展 audio/video，
+// 通过类型断言在接口外按需扩展，不破坏现有契约。
+type MultimodalModality string
+
+const (
+	ModalityText  MultimodalModality = "text"
+	ModalityImage MultimodalModality = "image"
+	ModalityAudio MultimodalModality = "audio"
+	ModalityVideo MultimodalModality = "video"
+)
 
 // ErrNotSupported 表示 Vectorizer 不支持图像嵌入，调用方按文本描述降级。
 var ErrNotSupported = fmt.Errorf("vectorizer does not support image embedding")
@@ -83,6 +99,26 @@ func (s *Store) Remove(id string) {
 }
 
 func (s *Store) Search(query Vector, topK int) []DocVector {
+	hits := s.SearchScored(query, topK)
+	if len(hits) == 0 {
+		return nil
+	}
+	out := make([]DocVector, len(hits))
+	for i, h := range hits {
+		out[i] = h.Doc
+	}
+	return out
+}
+
+// DocVectorHit 是一篇文档的相似度候选及其原始 cosine 分数。
+// 跨模态融合需要分数做归一化；纯排序的 Search 不暴露它。
+type DocVectorHit struct {
+	Doc   DocVector
+	Score float64
+}
+
+// SearchScored 与 Search 同语义，但返回带原始 cosine 分数的候选。
+func (s *Store) SearchScored(query Vector, topK int) []DocVectorHit {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 
@@ -122,9 +158,9 @@ func (s *Store) Search(query Vector, topK int) []DocVector {
 		results = results[:topK]
 	}
 
-	out := make([]DocVector, len(results))
+	out := make([]DocVectorHit, len(results))
 	for i, r := range results {
-		out[i] = r.doc
+		out[i] = DocVectorHit{Doc: r.doc, Score: r.score}
 	}
 	return out
 }

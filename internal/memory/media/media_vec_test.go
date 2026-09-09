@@ -149,25 +149,26 @@ func TestStaleVecDigests(t *testing.T) {
 	// 有描述但从未嵌入（vec_model 空）→ stale
 	d3, _ := s.Put([]byte("img3"), Item{MIME: "image/png", Description: "图三"})
 
-	// 无描述 → 不参与（描述流程外）
-	s.Put([]byte("img4"), Item{MIME: "image/png"})
+	// 无描述但有图片 → 也应被迁移（描述是可选语义通道，图片应独立于描述参与向量空间）
+	d4, _ := s.Put([]byte("img4"), Item{MIME: "image/png"})
 
-	// 音频不属于图片 → 不算 stale
+	// 音频不参与图片迁移（StaleVecDigests 只查 kind='image'）
 	s.Put([]byte("aud1"), Item{MIME: "audio/wav", Description: "语音"})
 
 	stale, err := s.StaleVecDigests("clip-vit-b32")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(stale) != 2 {
-		t.Fatalf("expected 2 stale digests (d2 旧模型 + d3 未嵌入), got %d: %v", len(stale), stale)
+	// d1 匹配模型 → 非 stale；d2 旧模型 + d3 未嵌入 + d4 无描述图片 = 3 stale；aud1 不算
+	if len(stale) != 3 {
+		t.Fatalf("expected 3 stale digests (d2 旧模型 + d3 未嵌入 + d4 无描述), got %d: %v", len(stale), stale)
 	}
 	got := map[string]bool{}
 	for _, d := range stale {
 		got[d] = true
 	}
-	if !got[d2] || !got[d3] {
-		t.Errorf("expected d2 and d3 stale, got %v", stale)
+	if !got[d2] || !got[d3] || !got[d4] {
+		t.Errorf("expected d2, d3, d4 stale, got %v", stale)
 	}
 	if got[d1] {
 		t.Errorf("d1 (匹配模型) 不应 stale")
