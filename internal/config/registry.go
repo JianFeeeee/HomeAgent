@@ -655,6 +655,7 @@ func (r *ConfigRegistry) seedCoreDefs(dataDir string) {
 	reg(ConfigDef{Key: "core.memory.media.gc_interval", Default: "6h", Type: "duration", DisplayName: "媒体 GC 间隔", Description: "清理无引用媒体的周期；0 表示不自动清理", Category: "memory"})
 	reg(ConfigDef{Key: "core.memory.media.gc_min_age", Default: "1h", Type: "duration", DisplayName: "媒体 GC 保护期", Description: "新入库媒体在此时长内不被清理。刚落盘还没来得及挂到记忆上的项引用计数也是 0，靠这个保护期避免被误删", Category: "memory"})
 	reg(ConfigDef{Key: "core.memory.media.describe_on_ingest", Default: "false", Type: "bool", DisplayName: "自动描述媒体", Description: "后台用视觉/音频模型给未描述的媒体生成文字描述。**描述文本才是持久语义记忆**——blob 会被容量 GC 淘汰，描述会随记忆各层一直留存并可检索。代价是消耗视觉模型配额（单张图实测约 10s），故默认关闭；开启后每 30s 最多处理 4 条，不跟对话抢额度", Category: "memory"})
+	reg(ConfigDef{Key: "core.memory.media.clip_model_dir", Default: "", Type: "string", DisplayName: "CLIP 模型目录", Description: "多模态嵌入的 CLIP ONNX 模型目录（含 text.onnx、vision.onnx、clip_config.json、tokenizer.json、merges.txt）。留空禁用多模态向量检索，只保留 fastText 文本路径；配置后图片入库时自动计算视觉向量并与文档混合检索。修改后需重启生效。", Category: "memory"})
 	reg(ConfigDef{Key: "core.knowledge.path", Default: filepath.Join(dataDir, "knowledge"), Type: "string", DisplayName: "知识库路径", Description: "知识库存储目录", Category: "paths"})
 	reg(ConfigDef{Key: "core.log.path", Default: filepath.Join(dataDir, "log"), Type: "string", DisplayName: "日志目录", Description: "日志文件输出目录", Category: "paths"})
 

@@ -13,6 +13,7 @@ import (
 	"gitcode.com/JianFeeeee/HomeAgent/internal/events"
 	"gitcode.com/JianFeeeee/HomeAgent/internal/knowledge"
 	"gitcode.com/JianFeeeee/HomeAgent/internal/memory"
+	"gitcode.com/JianFeeeee/HomeAgent/internal/memory/clip"
 	"gitcode.com/JianFeeeee/HomeAgent/internal/memory/document"
 	"gitcode.com/JianFeeeee/HomeAgent/internal/memory/media"
 	"gitcode.com/JianFeeeee/HomeAgent/internal/memory/social"
@@ -144,6 +145,9 @@ type Agent struct {
 	// 词嵌入模型，用于实体语义相似度计算
 	embedder *memory.StaticEmbedder
 
+	// clipEmb 是 CLIP 多模态嵌入（可选），nil 时跳过视觉向量计算。
+	clipEmb *clip.Embedder
+
 	// 技能索引提供者：由 skillmgr 插件实现，向 system prompt 注入轻量技能索引
 	skillIndex SkillIndexProvider
 }
@@ -174,6 +178,7 @@ type AgentConfig struct {
 	MediaGCInterval    time.Duration
 	MediaGCMinAge      time.Duration
 	MediaDescribe      bool
+	ClipEmbedder       *clip.Embedder
 	Personality        *agentPkg.Personality
 	PluginReg          *plugin.Registry
 	PluginDir          string
@@ -279,6 +284,7 @@ func New(cfg AgentConfig) *Agent {
 		thinkingEnabled: cfg.ThinkingEnabled,
 		inputCfg:        cfg.InputProcessing,
 		embedder:        embedder,
+		clipEmb:         cfg.ClipEmbedder,
 		noMergeMarkers:  make(map[string]int),
 		lastInput:       make(map[string]time.Time),
 	}
@@ -296,6 +302,7 @@ func (a *Agent) Start() {
 	go a.reviewLoop()
 	go a.mediaGCLoop()
 	go a.mediaDescribeLoop()
+	a.reembedStaleMedia()
 	log.Printf("[agent] %s started, waiting for IO interrupts", a.id)
 }
 

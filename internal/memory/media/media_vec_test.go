@@ -133,3 +133,43 @@ func TestSetVec_PersistsCorrectly(t *testing.T) {
 		}
 	}
 }
+
+func TestStaleVecDigests(t *testing.T) {
+	s := newTestStore(t, 0)
+	defer s.Close()
+
+	// 有描述且 vec_model 匹配 → 非 stale
+	d1, _ := s.Put([]byte("img1"), Item{MIME: "image/png", Description: "图一"})
+	s.SetVec(d1, []float64{0.1}, "clip-vit-b32")
+
+	// 有描述但 vec_model 旧 → stale
+	d2, _ := s.Put([]byte("img2"), Item{MIME: "image/png", Description: "图二"})
+	s.SetVec(d2, []float64{0.2}, "clip-vit-b14")
+
+	// 有描述但从未嵌入（vec_model 空）→ stale
+	d3, _ := s.Put([]byte("img3"), Item{MIME: "image/png", Description: "图三"})
+
+	// 无描述 → 不参与（描述流程外）
+	s.Put([]byte("img4"), Item{MIME: "image/png"})
+
+	// 音频不属于图片 → 不算 stale
+	s.Put([]byte("aud1"), Item{MIME: "audio/wav", Description: "语音"})
+
+	stale, err := s.StaleVecDigests("clip-vit-b32")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(stale) != 2 {
+		t.Fatalf("expected 2 stale digests (d2 旧模型 + d3 未嵌入), got %d: %v", len(stale), stale)
+	}
+	got := map[string]bool{}
+	for _, d := range stale {
+		got[d] = true
+	}
+	if !got[d2] || !got[d3] {
+		t.Errorf("expected d2 and d3 stale, got %v", stale)
+	}
+	if got[d1] {
+		t.Errorf("d1 (匹配模型) 不应 stale")
+	}
+}

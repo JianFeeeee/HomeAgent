@@ -24,6 +24,7 @@ import (
 	logpkg "gitcode.com/JianFeeeee/HomeAgent/internal/log"
 	luapkg "gitcode.com/JianFeeeee/HomeAgent/internal/lua"
 	"gitcode.com/JianFeeeee/HomeAgent/internal/memory"
+	"gitcode.com/JianFeeeee/HomeAgent/internal/memory/clip"
 	"gitcode.com/JianFeeeee/HomeAgent/internal/memory/document"
 	"gitcode.com/JianFeeeee/HomeAgent/internal/memory/media"
 	"gitcode.com/JianFeeeee/HomeAgent/internal/memory/pipeline"
@@ -346,6 +347,21 @@ func main() {
 		}
 	}
 
+	// 多模态嵌入（CLIP ONNX，可选）：配置 clip_model_dir 时启用，
+	// 图片入库/描述时计算视觉向量，供跨模态检索；未配置则退回纯 fastText 文本路径。
+	var clipEmbedder *clip.Embedder
+	if clipDir := cfgReg.GetString("core.memory.media.clip_model_dir", ""); clipDir != "" {
+		e, err := clip.New(clipDir)
+		if err != nil {
+			// 配置了但加载失败：记日志降级，不阻塞启动（媒体记忆是增强项）
+			log.Printf("[homed] warning: clip embedder load failed: %v（多模态向量检索已禁用）", err)
+		} else {
+			clipEmbedder = e
+			defer e.Close()
+			log.Printf("[homed] clip embedder active: dim=%d fp=%s", e.Dim(), e.Fingerprint()[:min(12, len(e.Fingerprint()))])
+		}
+	}
+
 	ks := knowledge.NewStore(filepath.Join(cfg.Daemon.DataDir, "knowledge"))
 	if err := ks.Start(); err != nil {
 		log.Printf("[homed] warning: knowledge store: %v", err)
@@ -468,6 +484,7 @@ func main() {
 		ContextSavePath:    filepath.Join(cfg.Daemon.DataDir, "memory", "context.json"),
 		EmbeddingModelPath: cfgReg.GetString("core.agent.embedding_model_path", ""),
 		Embedder:           embedder,
+		ClipEmbedder:       clipEmbedder,
 		StageHost:          stageHost,
 		EventBus:           evBus,
 		ThinkingEnabled:    cfg.LLM.ThinkingEnabled,
