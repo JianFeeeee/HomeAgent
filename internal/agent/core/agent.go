@@ -13,11 +13,11 @@ import (
 	"gitcode.com/JianFeeeee/HomeAgent/internal/events"
 	"gitcode.com/JianFeeeee/HomeAgent/internal/knowledge"
 	"gitcode.com/JianFeeeee/HomeAgent/internal/memory"
-	"gitcode.com/JianFeeeee/HomeAgent/internal/memory/clip"
 	"gitcode.com/JianFeeeee/HomeAgent/internal/memory/document"
 	"gitcode.com/JianFeeeee/HomeAgent/internal/memory/media"
 	"gitcode.com/JianFeeeee/HomeAgent/internal/memory/social"
 	"gitcode.com/JianFeeeee/HomeAgent/internal/memory/text"
+	"gitcode.com/JianFeeeee/HomeAgent/internal/memory/vector"
 	"gitcode.com/JianFeeeee/HomeAgent/internal/plugin"
 	"gitcode.com/JianFeeeee/HomeAgent/internal/tracker"
 	"gitcode.com/JianFeeeee/HomeAgent/pkg/types"
@@ -145,8 +145,12 @@ type Agent struct {
 	// 词嵌入模型，用于实体语义相似度计算
 	embedder *memory.StaticEmbedder
 
-	// clipEmb 是 CLIP 多模态嵌入（可选），nil 时跳过视觉向量计算。
-	clipEmb *clip.Embedder
+	// multimodalSpace 是统一多模态向量空间（可选）。实现可以是内嵌 ONNX，
+	// 也可以是外部 API 客户端；两者共享同一套 L0/L2/L3 向量缓存与检索基础设施。
+	multimodalSpace vector.MultimodalEmbedder
+
+	// fusionCfg 控制文本路与视觉路的跨模态融合权重，可按模型实测结果配置。
+	fusionCfg CrossModalFusionConfig
 
 	// 技能索引提供者：由 skillmgr 插件实现，向 system prompt 注入轻量技能索引
 	skillIndex SkillIndexProvider
@@ -178,7 +182,8 @@ type AgentConfig struct {
 	MediaGCInterval    time.Duration
 	MediaGCMinAge      time.Duration
 	MediaDescribe      bool
-	ClipEmbedder       *clip.Embedder
+	MultimodalSpace    vector.MultimodalEmbedder
+	FusionCfg          CrossModalFusionConfig // 跨模态融合权重；零值用默认
 	Personality        *agentPkg.Personality
 	PluginReg          *plugin.Registry
 	PluginDir          string
@@ -284,7 +289,8 @@ func New(cfg AgentConfig) *Agent {
 		thinkingEnabled: cfg.ThinkingEnabled,
 		inputCfg:        cfg.InputProcessing,
 		embedder:        embedder,
-		clipEmb:         cfg.ClipEmbedder,
+		multimodalSpace: cfg.MultimodalSpace,
+		fusionCfg:       cfg.FusionCfg,
 		noMergeMarkers:  make(map[string]int),
 		lastInput:       make(map[string]time.Time),
 	}
