@@ -58,12 +58,12 @@ func TestSmokeLoadAndEncode(t *testing.T) {
 		t.Errorf("cat-dog sim (%.4f) should be > cat-physics sim (%.4f)", sim12, sim13)
 	}
 
-	// 通过 Vectorizer 接口（稀疏 map）
-	sparseVec := emb.Vectorize("hello world")
-	if len(sparseVec) == 0 {
-		t.Error("sparse Vectorize should return non-empty")
+	// 稠密 VectorizeDense 再次调用验证可重复
+	vAgain, _ := emb.VectorizeDense("hello world")
+	if len(vAgain) != 512 {
+		t.Errorf("dense VectorizeDense len = %d, want 512", len(vAgain))
 	}
-	fmt.Printf("sparse len = %d\n", len(sparseVec))
+	fmt.Printf("dense len = %d\n", len(vAgain))
 }
 
 // TestCrossModalAlignment 验证图文在同一向量空间可比：

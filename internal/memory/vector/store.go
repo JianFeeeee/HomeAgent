@@ -17,10 +17,12 @@ type Vectorizer interface {
 	EmbedImage(img []byte, mime string) (Vector, error)
 }
 
-// MultimodalEmbedder 扩展 Vectorizer，提供直接返回 dense 向量的方法
-// 与模型生命周期管理。CLIP 等视觉向量化器实现此接口；未启用时用空 stub。
+// MultimodalEmbedder 是稠密多模态编码器的接口（CLIP 等视觉-文本联合模型）。
+//
+// 与 Vectorizer（稀疏词向量，供 TF-IDF/倒排检索）刻意区分：多模态模型产出的
+// 是共享稠密空间（如 CLIP 512 维），直接用于 media.Store 的稠密余弦检索，
+// **不得**塞进文档/知识层的稀疏 vector.Store（会破坏倒排剪枝与 TF-IDF 语义）。
 type MultimodalEmbedder interface {
-	Vectorizer
 	VectorizeDense(text string) ([]float64, error)
 	EmbedImageDense(img []byte, mime string) ([]float64, error)
 	Fingerprint() string

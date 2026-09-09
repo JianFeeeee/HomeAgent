@@ -1,20 +1,22 @@
 //go:build onnxruntime
 
-// Package clip 提供基于 CLIP ONNX 的多模态向量化器。
+// Package clip 提供基于 CLIP ONNX 的稠密多模态编码器。
 //
 // 构建标签 onnxruntime 控制是否编译此实现（与 internal/nlp/onnx.go 同模式）。
 // 未配置 clip_model_dir 时不会初始化 ONNX Runtime，现有 fastText/TF-IDF 行为不变。
 //
 // 支持的模型文件（统一放置于 clip_model_dir 目录）：
 //
-//	text.onnx   — CLIP 文本编码器（input_ids + attention_mask → text_features [1,512]）
-//	vision.onnx — CLIP 图像编码器（pixel_values → image_features [1,512]）
+//	text.onnx   — CLIP 文本编码器（input_ids + attention_mask → text_embed [1,512]）
+//	vision.onnx — CLIP 图像编码器（pixel_values → image_embed [1,512]）
 //	clip_config.json — 模型元数据（dimension, context_length, image_size, mean, std）
 //	tokenizer.json — HuggingFace tokenizer.json（含 vocab + merges）
-//	merges.txt     — BPE merges 文件（CLIP 使用的字节级 BPE）
+//	merges.txt     — BPE merges 文件
 //
-// 设计：同时满足 vector.Vectorizer 接口（稀疏 map，供文档检索复用）和直接返回
-// []float64 的方法（供媒体嵌入与 QueryMedia 直接调用）。
+// 设计：只产出**稠密** 512 维向量（VectorizeDense / EmbedImageDense），供媒体层
+// media.Store 的稠密余弦检索（QueryMedia）消费。刻意不实现 vector.Vectorizer
+// （稀疏词向量）——文档/知识/上下文层的文本相似度检索保留 TF-IDF 高频削弱加权 +
+// 倒排剪枝 + fastText 稀疏词向量的既有设计，CLIP 稠密空间不混入那套索引。
 package clip
 
 import (
@@ -30,11 +32,9 @@ import (
 	"math"
 	"os"
 	"path/filepath"
-	"strconv"
 	"strings"
 	"sync"
 
-	"gitcode.com/JianFeeeee/HomeAgent/internal/memory/vector"
 	ort "github.com/yalue/onnxruntime_go"
 )
 
@@ -48,7 +48,12 @@ type clipConfig struct {
 	Std           []float64 `json:"std"`
 }
 
-// Embedder 实现 vector.Vectorizer，提供文本向量化与图像向量化。
+// Embedder 是 CLIP 多模态稠密编码器，实现 vector.MultimodalEmbedder。
+// 产出 512 维共享稠密空间向量，供 media.Store 的稠密余弦检索。
+//
+// 刻意**不**实现 vector.Vectorizer（稀疏词向量）：CLIP 稠密向量若以
+// map[string]float64 稀疏形式塞进文档/知识层的 vector.Store，会破坏其
+// TF-IDF 高频削弱加权与倒排剪枝语义。文本层的相似度检索保持 TF-IDF/fastText。
 type Embedder struct {
 	mu          sync.RWMutex
 	config      clipConfig
@@ -81,25 +86,6 @@ func (e *Embedder) Loaded() bool {
 	e.mu.RLock()
 	defer e.mu.RUnlock()
 	return e.loaded
-}
-
-// Vectorize 将文本转为向量，供 vector.Vectorizer 接口使用（稀疏 map）。
-func (e *Embedder) Vectorize(text string) vector.Vector {
-	dense, err := e.VectorizeDense(text)
-	if err != nil {
-		log.Printf("[clip] Vectorize 失败: %v", err)
-		return vector.Vector{}
-	}
-	return denseToVector(dense)
-}
-
-// EmbedImage 将图像字节转为向量，供 vector.Vectorizer 接口使用（稀疏 map）。
-func (e *Embedder) EmbedImage(img []byte, mime string) (vector.Vector, error) {
-	dense, err := e.EmbedImageDense(img, mime)
-	if err != nil {
-		return nil, err
-	}
-	return denseToVector(dense), nil
 }
 
 // VectorizeDense 将文本转为归一化的 []float64 向量（CLIP 共享空间）。
@@ -376,17 +362,6 @@ func resizeImage(src image.Image, dstW, dstH int) image.Image {
 		}
 	}
 	return dst
-}
-
-// denseToVector 将 []float64 稀疏化为 vector.Vector（CLIP 维度通常 512，不会太大）。
-func denseToVector(d []float64) vector.Vector {
-	vec := make(vector.Vector, len(d))
-	for i, v := range d {
-		if v != 0 {
-			vec[strconv.Itoa(i)] = v
-		}
-	}
-	return vec
 }
 
 // ---- BPE Tokenizer ----
