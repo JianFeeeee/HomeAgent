@@ -427,7 +427,8 @@ func (s *Store) Search(query string, kind Kind, limit int) ([]*Item, error) {
 	defer s.mu.RUnlock()
 
 	q := `SELECT digest, kind, mime, size, width, height, origin_path, tool,
-	             description, described_by, ref_count, first_seen, last_seen
+	             description, described_by, ref_count, first_seen, last_seen,
+	             vec, vec_model
 	      FROM media WHERE COALESCE(description,'') != ''`
 	args := []interface{}{}
 	if strings.TrimSpace(query) != "" {
@@ -473,7 +474,8 @@ func (s *Store) Pending(limit int) ([]*Item, error) {
 	defer s.mu.RUnlock()
 	rows, err := s.db.Query(`
 		SELECT digest, kind, mime, size, width, height, origin_path, tool,
-		       description, described_by, ref_count, first_seen, last_seen
+		       description, described_by, ref_count, first_seen, last_seen,
+		       vec, vec_model
 		FROM media
 		WHERE COALESCE(description,'') = '' AND COALESCE(described_by,'') = ''
 		ORDER BY last_seen DESC LIMIT ?`, limit)
@@ -650,15 +652,36 @@ func (s *Store) SetVec(digest string, vec []float64, model string) error {
 // vec_model 不等于 currentModel（模型切换）或 vec_model 为空（从未嵌入）。
 // 调用方使用返回的 digest 列表调用 Get/EmbedImage/SetVec 完成重算。
 func (s *Store) StaleVecDigests(currentModel string) ([]string, error) {
+	return s.staleVecDigests(currentModel, "image")
+}
+
+// StaleVecDigestsAll 返回所有需要重新嵌入的媒体 digest（不限 kind），
+// 供模型切换后全量迁移向量空间（image + audio + video 等）。
+func (s *Store) StaleVecDigestsAll(currentModel string) ([]string, error) {
+	return s.staleVecDigests(currentModel, "")
+}
+
+// staleVecDigests 是 StaleVecDigests 的核心实现，kind=” 时不按 kind 过滤。
+// 废弃了"只迁移图片"的限定：模型切换后所有模态都应迁移到新向量空间。
+func (s *Store) staleVecDigests(currentModel string, kind string) ([]string, error) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 
-	rows, err := s.db.Query(`
+	query := `
 		SELECT digest FROM media
-		WHERE kind = 'image'
-		  AND COALESCE(description,'') != ''
-		  AND (COALESCE(vec_model,'') = '' OR vec_model != ?)
-		ORDER BY last_seen`, currentModel)
+		WHERE (COALESCE(vec_model,'') = '' OR vec_model != ?)`
+	if kind != "" {
+		query += ` AND kind = ?`
+	}
+	query += ` ORDER BY last_seen`
+
+	var args []interface{}
+	args = append(args, currentModel)
+	if kind != "" {
+		args = append(args, kind)
+	}
+
+	rows, err := s.db.Query(query, args...)
 	if err != nil {
 		return nil, err
 	}
@@ -681,6 +704,46 @@ func (s *Store) StaleVecDigests(currentModel string) ([]string, error) {
 // 谁的相似度更高就召回谁——不再区分「这是一张图的查询」还是「这是一段文字的查询」，
 // 由向量空间的相似度自动判断。
 func (s *Store) QueryMedia(queryVec []float64, model string, topK int) ([]*Item, error) {
+	hits, err := s.QueryMediaScored(queryVec, model, topK)
+	if err != nil {
+		return nil, err
+	}
+	if hits == nil {
+		return nil, nil
+	}
+	out := make([]*Item, len(hits))
+	for i, h := range hits {
+		out[i] = h.Item
+	}
+	return out, nil
+}
+
+// MediaHit 是一条媒体相似度候选及其分数。
+// 跨模态融合需要原始分数做归一化，仅返回 Item 会丢掉尺度信息。
+type MediaHit struct {
+	Item  *Item
+	Score float64
+}
+
+// QueryMemoryMediaScored 只检索当前仍被 L0/L2/L3 记忆块引用的媒体。
+// CAS 中 ref_count=0 的项是等待 GC 的孤儿缓存，不是可召回记忆；若把它们也查出，
+// 已从三层记忆淘汰的图片会被视觉路“复活”，破坏与文本块一致的生命周期。
+//
+// 分数只做排序，不在存储层设绝对阈值：多模态文本→图像的绝对 cosine 随模型、
+// 语言与数据域漂移，真实标定中有效命中可以低至 0.015。相关性门控在融合器中
+// 使用当前候选集合的相对分布完成。
+func (s *Store) QueryMemoryMediaScored(queryVec []float64, model string, topK int) ([]MediaHit, error) {
+	return s.queryMediaScored(queryVec, model, topK, true)
+}
+
+// QueryMediaScored 用查询向量对所有已嵌入媒体做余弦相似度检索，
+// 返回 topK 个最相似的候选及其原始 cosine 分数（供跨模态归一化）。
+// 这是媒体存储层的诊断/显式全库入口；记忆召回应调用 QueryMemoryMediaScored。
+func (s *Store) QueryMediaScored(queryVec []float64, model string, topK int) ([]MediaHit, error) {
+	return s.queryMediaScored(queryVec, model, topK, false)
+}
+
+func (s *Store) queryMediaScored(queryVec []float64, model string, topK int, referencedOnly bool) ([]MediaHit, error) {
 	if topK <= 0 {
 		topK = 20
 	}
@@ -690,10 +753,21 @@ func (s *Store) QueryMedia(queryVec []float64, model string, topK int) ([]*Item,
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 
-	rows, err := s.db.Query(`SELECT digest, kind, mime, size, width, height,
+	query := `SELECT digest, kind, mime, size, width, height,
 		origin_path, tool, description, described_by, ref_count, first_seen, last_seen,
 		vec, vec_model
-		FROM media WHERE vec IS NOT NULL AND vec != ''`)
+		FROM media WHERE vec IS NOT NULL AND vec != ''`
+	var args []interface{}
+	if model != "" {
+		query += ` AND vec_model = ?`
+		args = append(args, model)
+	}
+	if referencedOnly {
+		query += ` AND ref_count > 0 AND EXISTS (
+			SELECT 1 FROM media_refs r WHERE r.digest = media.digest
+		)`
+	}
+	rows, err := s.db.Query(query, args...)
 	if err != nil {
 		return nil, err
 	}
@@ -744,9 +818,9 @@ func (s *Store) QueryMedia(queryVec []float64, model string, topK int) ([]*Item,
 	if len(candidates) > topK {
 		candidates = candidates[:topK]
 	}
-	out := make([]*Item, len(candidates))
+	out := make([]MediaHit, len(candidates))
 	for i, c := range candidates {
-		out[i] = c.item
+		out[i] = MediaHit{Item: c.item, Score: c.score}
 	}
 	return out, nil
 }

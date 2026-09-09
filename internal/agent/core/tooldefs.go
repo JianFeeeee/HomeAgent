@@ -55,15 +55,13 @@ func (a *Agent) buildSystemPrompt(memContext string, userInput string) string {
 
 	prompt += "\n\n【记忆清理指令】当用户要求整理或清理记忆时，你必须实际调用 memory_ 工具执行操作，不能只回复文本。先用 memory_introspect 查看概况，再用 memory_recall 获取详情。有同义实体则用 memory_merge 合并（source 会被彻底删除），有无用噪音实体则用 memory_delete_entity 直接删除，也可用 memory_purge 批量清理，用 memory_edit 修正错误，用 memory_block_merge 标记不合并。如果工具执行成功，把结果告知用户；不要只描述计划而不执行。"
 
+	// 跨模态召回：文本路（fastText/TF-IDF 文档层，媒体描述文本已随记忆进入）
+	// + 视觉路（多模态文本编码 → 媒体库坐标）两路归一化融合。
+	// 未配置多模态空间时视觉路为空，等价旧的 docStore.Query。
 	if a.docStore != nil {
-		docs := a.docStore.Query(userInput, 3)
-		if len(docs) > 0 {
-			var parts []string
-			parts = append(parts, "【相关记忆文档】")
-			for i, d := range docs {
-				parts = append(parts, fmt.Sprintf("  [%d] %s", i+1, d.Summary))
-			}
-			prompt += "\n\n" + strings.Join(parts, "\n")
+		hits := a.retrieveCrossModal(userInput, 3, a.fusionCfg)
+		if md := a.crossModalMarkdown(hits); md != "" {
+			prompt += "\n\n" + md
 		}
 	}
 
@@ -75,7 +73,7 @@ func (a *Agent) buildSystemPrompt(memContext string, userInput string) string {
 	prompt += "- 同步通道（webui / cli / 终端）：直接返回纯文本，内核会把文本交给等待方显示，无需调用工具。\n"
 	prompt += "- 异步通道（qq / wechat / 群聊等）：返回纯文本**【不会】**自动送达用户，必须调用 output_send__{通道名} 工具（注意 meta 里带上正确的 user_id 或 group_id）才能真正把消息发出去。\n"
 	prompt += "- 不确定当前通道的发送方式时，先用 output_send__{通道名}_help 查看该通道的 meta 格式和 type 枚举，再决定。\n"
-	prompt += "- 同一轮对话中可多次调用输出门工具。长消息应当分多次发出，而不是一口气发完。\n"
+	prompt += "- 每轮对话**通常只需调用一次** output_send__{通道名} 即可完成回复。仅在内容确实超过单条消息长度上限（如 >4000 字）时才拆分为多条；拆分时每条应是完整段落，不要碎片化。\n"
 	prompt += "- 需要多步执行的长任务：**必须先**向当前对话通道发一条确认消息告诉用户已收到（异步通道用输出门工具，同步通道直接返回文本），**然后再**执行具体排查工具。确认消息不代表任务完成，发出后仍需继续执行实际工具并最终汇报结果。\n"
 	prompt += "- 用户从其他渠道发来「在哪里/怎么样了」这类追问时，先回忆上次任务的通道与上下文，再回同一通道。"
 

@@ -30,6 +30,7 @@ import (
 	"gitcode.com/JianFeeeee/HomeAgent/internal/memory/pipeline"
 	"gitcode.com/JianFeeeee/HomeAgent/internal/memory/social"
 	"gitcode.com/JianFeeeee/HomeAgent/internal/memory/text"
+	"gitcode.com/JianFeeeee/HomeAgent/internal/memory/vector"
 	"gitcode.com/JianFeeeee/HomeAgent/internal/meta"
 	"gitcode.com/JianFeeeee/HomeAgent/internal/nlp"
 	"gitcode.com/JianFeeeee/HomeAgent/internal/plugin"
@@ -347,20 +348,56 @@ func main() {
 		}
 	}
 
-	// 多模态嵌入（CLIP ONNX，可选）：配置 clip_model_dir 时启用，
-	// 图片入库/描述时计算视觉向量，供跨模态检索；未配置则退回纯 fastText 文本路径。
-	var clipEmbedder *clip.Embedder
-	if clipDir := cfgReg.GetString("core.memory.media.clip_model_dir", ""); clipDir != "" {
-		e, err := clip.New(clipDir)
-		if err != nil {
-			// 配置了但加载失败：记日志降级，不阻塞启动（媒体记忆是增强项）
-			log.Printf("[homed] warning: clip embedder load failed: %v（多模态向量检索已禁用）", err)
+	// 统一多模态向量空间（可选）。
+	//
+	// 两条路径共享同一套基础设施（L0/L2/L3 向量缓存、media.Store 坐标、
+	// QueryMemoryMediaScored 检索），只是「算向量的源头」不同：
+	//   - onnx：内嵌 ONNX 模型（如 CLIP）
+	//   - http：外部向量 API 服务（Jina / OpenAI / 自建）
+	// type 为空时禁用多模态向量检索，退回纯 fastText 文本路径。
+	var multimodalSpace vector.MultimodalEmbedder
+	switch mmType := cfgReg.GetString("core.memory.multimodal_space.type", ""); mmType {
+	case "onnx":
+		if clipDir := cfgReg.GetString("core.memory.media.clip_model_dir", ""); clipDir != "" {
+			e, err := clip.New(clipDir)
+			if err != nil {
+				log.Printf("[homed] warning: onnx embedder load failed: %v（多模态向量检索已禁用）", err)
+			} else {
+				multimodalSpace = e
+				defer e.Close()
+				log.Printf("[homed] multimodal space (onnx) active: dim=%d fp=%s", e.Dim(), e.Fingerprint()[:min(12, len(e.Fingerprint()))])
+			}
 		} else {
-			clipEmbedder = e
-			defer e.Close()
-			log.Printf("[homed] clip embedder active: dim=%d fp=%s", e.Dim(), e.Fingerprint()[:min(12, len(e.Fingerprint()))])
+			log.Println("[homed] multimodal_space.type=onnx 但未配置 clip_model_dir，多模态向量检索已禁用")
+		}
+	case "http":
+		dim := cfgReg.GetInt("core.memory.multimodal_space.http.dimension", 0)
+		ep := cfgReg.GetString("core.memory.multimodal_space.http.endpoint", "")
+		if dim > 0 && ep != "" {
+			e, err := vector.NewHTTPEmbedder(vector.HTTPEmbedderConfig{
+				Endpoint:    ep,
+				APIKey:     cfgReg.GetString("core.memory.multimodal_space.http.api_key", ""),
+				Model:       cfgReg.GetString("core.memory.multimodal_space.http.model", ""),
+				Dimension:   dim,
+				Timeout:     cfgReg.GetDuration("core.memory.multimodal_space.http.timeout", 30*time.Second),
+				Fingerprint: cfgReg.GetString("core.memory.multimodal_space.http.fingerprint", ""),
+			})
+			if err != nil {
+				log.Printf("[homed] warning: http embedder init failed: %v（多模态向量检索已禁用）", err)
+			} else {
+				multimodalSpace = e
+				defer e.Close()
+				log.Printf("[homed] multimodal space (http) active: endpoint=%s dim=%d", ep, dim)
+			}
+		} else {
+			log.Println("[homed] multimodal_space.type=http 但 endpoint/dimension 配置不完整，多模态向量检索已禁用")
+		}
+	default:
+		if mmType != "" {
+			log.Printf("[homed] warning: 未知 multimodal_space.type=%q，多模态向量检索已禁用", mmType)
 		}
 	}
+
 
 	ks := knowledge.NewStore(filepath.Join(cfg.Daemon.DataDir, "knowledge"))
 	if err := ks.Start(); err != nil {
@@ -484,7 +521,7 @@ func main() {
 		ContextSavePath:    filepath.Join(cfg.Daemon.DataDir, "memory", "context.json"),
 		EmbeddingModelPath: cfgReg.GetString("core.agent.embedding_model_path", ""),
 		Embedder:           embedder,
-		ClipEmbedder:       clipEmbedder,
+		MultimodalSpace:     multimodalSpace,
 		StageHost:          stageHost,
 		EventBus:           evBus,
 		ThinkingEnabled:    cfg.LLM.ThinkingEnabled,
