@@ -340,9 +340,14 @@ func (h *coreHandler) Handle(method string, params json.RawMessage) (interface{}
 			return nil, errUnavailable("doc memory")
 		}
 		var p struct {
-			Doc *pubsdk.Doc `json:"doc"`
+			Doc    *pubsdk.Doc `json:"doc,omitempty"`
+			DocRef SharedRef   `json:"doc_ref,omitempty"`
 		}
 		if err := unmarshal(params, &p); err != nil {
+			return nil, err
+		}
+		// 文档全文可达几十 KB～数 MB，优先走共享内存。
+		if err := h.resolveJSONRef(p.DocRef, &p.Doc); err != nil {
 			return nil, err
 		}
 		if p.Doc == nil {
@@ -356,10 +361,19 @@ func (h *coreHandler) Handle(method string, params json.RawMessage) (interface{}
 			return nil, errUnavailable("doc memory")
 		}
 		var p struct {
-			Doc         *pubsdk.Doc              `json:"doc"`
-			Attachments []pubsdk.MediaAttachment `json:"attachments"`
+			Doc         *pubsdk.Doc              `json:"doc,omitempty"`
+			Attachments []pubsdk.MediaAttachment `json:"attachments,omitempty"`
+			DocRef      SharedRef                `json:"doc_ref,omitempty"`
+			AttachRef   SharedRef                `json:"attachments_ref,omitempty"`
 		}
 		if err := unmarshal(params, &p); err != nil {
+			return nil, err
+		}
+		// 文档正文 + 附件（含媒体二进制/data URL）都优先走共享内存。
+		if err := h.resolveJSONRef(p.DocRef, &p.Doc); err != nil {
+			return nil, err
+		}
+		if err := h.resolveJSONRef(p.AttachRef, &p.Attachments); err != nil {
 			return nil, err
 		}
 		if p.Doc == nil {
@@ -421,10 +435,16 @@ func (h *coreHandler) Handle(method string, params json.RawMessage) (interface{}
 			return nil, errUnavailable("knowledge")
 		}
 		var p struct {
-			Name    string `json:"name"`
-			Content string `json:"content"`
+			Name       string    `json:"name"`
+			Content    string    `json:"content,omitempty"`
+			ContentRef SharedRef `json:"content_ref,omitempty"`
 		}
 		if err := unmarshal(params, &p); err != nil {
+			return nil, err
+		}
+		// 知识正文可达数十 KB，优先走共享内存。内容是 JSON 字符串，
+		// 所以从 ref 读出后需再解一层。
+		if err := h.resolveJSONRef(p.ContentRef, &p.Content); err != nil {
 			return nil, err
 		}
 		return nil, kn.Add(p.Name, p.Content)
@@ -651,18 +671,32 @@ type injectMediaParams struct {
 	BlocksRef SharedRef             `json:"blocks_ref,omitempty"`
 }
 
+// resolveJSONRef 若 ref 非零则从共享内存读取并 JSON 反序列化到 out；
+// ref 为零时不动 out（调用方已填的内联值生效）。
+//
+// 供「大 payload 优先走共享内存、否则内联」的字段对共用。
+func (h *coreHandler) resolveJSONRef(ref SharedRef, out interface{}) error {
+	if ref.IsZero() {
+		return nil
+	}
+	data, err := h.host.Arena().Read(ref, h.host.Generation())
+	if err != nil {
+		return fmt.Errorf("读取共享内容失败: %w", err)
+	}
+	if err := json.Unmarshal(data, out); err != nil {
+		return fmt.Errorf("解析共享内容失败: %w", err)
+	}
+	return nil
+}
+
 // resolveBlocks 取出媒体块：优先共享内存，否则内联。
 func (h *coreHandler) resolveBlocks(p injectMediaParams) ([]pubsdk.ContentBlock, error) {
 	if p.BlocksRef.IsZero() {
 		return p.Blocks, nil
 	}
-	data, err := h.host.Arena().Read(p.BlocksRef, h.host.Generation())
-	if err != nil {
-		return nil, fmt.Errorf("读取共享媒体块失败: %w", err)
-	}
 	var blocks []pubsdk.ContentBlock
-	if err := json.Unmarshal(data, &blocks); err != nil {
-		return nil, fmt.Errorf("解析共享媒体块失败: %w", err)
+	if err := h.resolveJSONRef(p.BlocksRef, &blocks); err != nil {
+		return nil, err
 	}
 	return blocks, nil
 }

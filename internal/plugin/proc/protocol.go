@@ -14,7 +14,15 @@ import "encoding/json"
 
 // 协议版本：与共享段版本独立演进。
 // 插件握手时上报，内核校验——不匹配显式拒绝，避免半兼容导致的诡异行为。
-const ProtocolVersion = 1
+//
+// v2（§13.6 / §13.13）：内核→插件的 payload 改为调用帧承载。
+// v1 插件只读内联 args，遇上 v2 内核会拿到空参数；v2 插件发 blocks_ref，
+// v1 内核反序列化时静默忽略（旧内核 io.setToolBlocks 还是桩）。两种错配
+// 都不会报错，只会静默失效——所以必须 bump 版本，让它在握手上就**显式**失败。
+//
+// 部署纪律：内核与全部插件必须同批重建、同批安装；改协议就要改这个常量，
+// 不得依赖“两边大致兼容”。
+const ProtocolVersion = 2
 
 // Direction 无需显式字段：靠 Method 是否为空区分请求与响应
 // （与 clawhubadapter/sidecar 的成熟做法一致）。

@@ -354,7 +354,7 @@ func main() {
 				shm = m[ctxOff : ctxOff+ctxSize]
 			}
 			send(response{ID: req.ID, Result: map[string]interface{}{
-				"protocol": 1, "sdk_version": "test", "plugin_name": "stage", "pid": os.Getpid(),
+				"protocol": 2, "sdk_version": "test", "plugin_name": "stage", "pid": os.Getpid(),
 			}})
 
 		case "plugin.init":
@@ -540,12 +540,12 @@ func main() {
 				args := p.Args
 				if !p.Frame.IsZero() {
 					if blob := frameInput(p.Frame, p.ArgsLen); len(blob) > 0 {
-					var decoded map[string]interface{}
-					if err := json.Unmarshal(blob, &decoded); err != nil {
-						send(response{ID: id, Error: "解析输出参数: " + err.Error()})
-						return
-					}
-					args = decoded
+						var decoded map[string]interface{}
+						if err := json.Unmarshal(blob, &decoded); err != nil {
+							send(response{ID: id, Error: "解析输出参数: " + err.Error()})
+							return
+						}
+						args = decoded
 					}
 				}
 				payload, _ := args["payload"].(string)

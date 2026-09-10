@@ -31,6 +31,9 @@ type fakeCoreSDK struct {
 	injected []string
 	// toolBlocks 累积 SetToolBlocks 收到的块（多模态注入通道）。
 	toolBlocks []pubsdk.ContentBlock
+	// 文档/知识：验证大正文经 doc_ref / content_ref 走共享内存。
+	docMem    *fakeDocMemory
+	knowledge *fakeKnowledge
 }
 
 func newFakeCore() *fakeCoreSDK {
@@ -49,8 +52,8 @@ func (f *fakeCoreSDK) PluginName() string                  { return "fake" }
 func (f *fakeCoreSDK) Settings() pubsdk.SettingsAPI        { return nil }
 func (f *fakeCoreSDK) Memory() pubsdk.MemoryAPI            { return nil }
 func (f *fakeCoreSDK) TextMemory() pubsdk.TextMemoryAPI    { return nil }
-func (f *fakeCoreSDK) DocMemory() pubsdk.DocMemoryAPI      { return nil }
-func (f *fakeCoreSDK) Knowledge() pubsdk.KnowledgeAPI      { return nil }
+func (f *fakeCoreSDK) DocMemory() pubsdk.DocMemoryAPI   { return f.docMem }
+func (f *fakeCoreSDK) Knowledge() pubsdk.KnowledgeAPI   { return f.knowledge }
 func (f *fakeCoreSDK) LLM() pubsdk.LLMAPI                  { return nil }
 func (f *fakeCoreSDK) Social() pubsdk.SocialAPI            { return nil }
 func (f *fakeCoreSDK) PluginMgr() pubsdk.PluginMgrAPI      { return nil }
@@ -86,6 +89,58 @@ func (f *fakeCoreSDK) toolBlockCount() int {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	return len(f.toolBlocks)
+}
+
+// fakeDocMemory 只实现测试需要的部分，记录 Insert 收到的文档。
+type fakeDocMemory struct {
+	mu  sync.Mutex
+	got *pubsdk.Doc
+}
+
+func (f *fakeDocMemory) Query(string, int) []*pubsdk.Doc { return nil }
+func (f *fakeDocMemory) Insert(doc *pubsdk.Doc) error {
+	f.mu.Lock()
+	f.got = doc
+	f.mu.Unlock()
+	return nil
+}
+func (f *fakeDocMemory) InsertWithMedia(doc *pubsdk.Doc, _ []pubsdk.MediaAttachment) error {
+	return f.Insert(doc)
+}
+func (f *fakeDocMemory) Remove(string)                 {}
+func (f *fakeDocMemory) Stats() map[string]interface{} { return nil }
+
+// fakeKnowledge 只实现测试需要的部分，记录 Add 收到的正文。
+type fakeKnowledge struct {
+	mu   sync.Mutex
+	name string
+	body string
+}
+
+func (f *fakeKnowledge) Search(string, int) ([]*pubsdk.Knowledge, error) { return nil, nil }
+func (f *fakeKnowledge) Add(name, content string) error {
+	f.mu.Lock()
+	f.name, f.body = name, content
+	f.mu.Unlock()
+	return nil
+}
+func (f *fakeKnowledge) List() ([]string, error) { return nil, nil }
+
+// arenaPutForTest 把一段字节放进 arena 并返回引用（测试用）。
+func arenaPutForTest(t *testing.T, host *Host, blob []byte) SharedRef {
+	t.Helper()
+	arena := host.Arena()
+	gen := host.Generation()
+	ref, err := arena.Alloc(OwnerHost, len(blob), gen)
+	if err != nil {
+		t.Fatalf("Alloc: %v", err)
+	}
+	area, err := arena.Read(ref, gen)
+	if err != nil {
+		t.Fatalf("Read: %v", err)
+	}
+	copy(area[:len(blob)], blob)
+	return ref
 }
 
 func (f *fakeCoreSDK) SetAutoRestart(enabled bool) { f.autoStart = enabled }
@@ -510,6 +565,99 @@ func TestCoreHandler_SetToolBlocksEmptyRejected(t *testing.T) {
 	h := &coreHandler{sdk: core, name: "x", locks: &lockRegistry{}}
 	if _, err := h.Handle(MethodIOSetToolBlocks, json.RawMessage(`{}`)); err == nil {
 		t.Error("blocks 为空应明确报错")
+	}
+}
+
+// §13.13：知识正文经共享内存（content_ref）送达内核。
+//
+// 正文可达数十 KB；内联时整份要在 RPC 报文里再编码再拷贝一遍，且内容本体
+// 不在共享段里，插件回调无法就地改写。
+func TestCoreHandler_KnowledgeAddViaArena(t *testing.T) {
+	host, err := NewHost()
+	if err != nil {
+		t.Fatalf("NewHost: %v", err)
+	}
+	defer host.Close()
+
+	core := newFakeCore()
+	kn := &fakeKnowledge{}
+	core.knowledge = kn
+	h := &coreHandler{sdk: core, name: "x", host: host, locks: &lockRegistry{}}
+
+	content := strings.Repeat("知识正文", 3000) // 12000 字节
+	blob, err := json.Marshal(content)
+	if err != nil {
+		t.Fatalf("Marshal: %v", err)
+	}
+	ref := arenaPutForTest(t, host, blob)
+	defer func() { _ = host.Arena().Free(OwnerHost, ref) }()
+
+	params, _ := json.Marshal(map[string]interface{}{"name": "n", "content_ref": ref})
+	if _, err := h.Handle(MethodKnowledgeAdd, params); err != nil {
+		t.Fatalf("knowledge.add 应成功: %v", err)
+	}
+
+	kn.mu.Lock()
+	got, gotName := kn.body, kn.name
+	kn.mu.Unlock()
+	if got != content {
+		t.Fatalf("经共享内存送达的正文不一致（got len=%d want len=%d）", len(got), len(content))
+	}
+	if gotName != "n" {
+		t.Fatalf("name 传错: %q", gotName)
+	}
+}
+
+// 内联回退仍可用（直连 RPC 调用方 / arena 不可用）。
+func TestCoreHandler_KnowledgeAddInline(t *testing.T) {
+	core := newFakeCore()
+	kn := &fakeKnowledge{}
+	core.knowledge = kn
+	h := &coreHandler{sdk: core, name: "x", locks: &lockRegistry{}}
+
+	params := json.RawMessage(`{"name":"n","content":"短正文"}`)
+	if _, err := h.Handle(MethodKnowledgeAdd, params); err != nil {
+		t.Fatalf("内联 knowledge.add 应成功: %v", err)
+	}
+	kn.mu.Lock()
+	got := kn.body
+	kn.mu.Unlock()
+	if got != "短正文" {
+		t.Fatalf("内联正文不一致: %q", got)
+	}
+}
+
+// §13.13：文档正文经共享内存（doc_ref）送达内核。
+func TestCoreHandler_DocInsertViaArena(t *testing.T) {
+	host, err := NewHost()
+	if err != nil {
+		t.Fatalf("NewHost: %v", err)
+	}
+	defer host.Close()
+
+	core := newFakeCore()
+	dm := &fakeDocMemory{}
+	core.docMem = dm
+	h := &coreHandler{sdk: core, name: "x", host: host, locks: &lockRegistry{}}
+
+	doc := &pubsdk.Doc{Title: "标题", Content: strings.Repeat("正文", 5000)}
+	blob, err := json.Marshal(doc)
+	if err != nil {
+		t.Fatalf("Marshal: %v", err)
+	}
+	ref := arenaPutForTest(t, host, blob)
+	defer func() { _ = host.Arena().Free(OwnerHost, ref) }()
+
+	params, _ := json.Marshal(map[string]interface{}{"doc_ref": ref})
+	if _, err := h.Handle(MethodDocInsert, params); err != nil {
+		t.Fatalf("doc.insert 应成功: %v", err)
+	}
+
+	dm.mu.Lock()
+	got := dm.got
+	dm.mu.Unlock()
+	if got == nil || got.Content != doc.Content {
+		t.Fatal("经共享内存送达的文档正文不一致")
 	}
 }
 
