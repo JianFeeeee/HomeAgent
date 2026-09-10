@@ -62,7 +62,16 @@ const (
 	sbOffCtxSize    = 24
 	sbOffEvtOff     = 28
 	sbOffEvtSize    = 32
+	sbOffArenaOff   = 36 // 动态 arena 起始偏移
+	sbOffArenaCap   = 40 // 动态 arena 总容量
+	sbOffArenaUsed  = 44 // 动态 arena 已用字节（原子）
+	sbOffReserved5  = 48
+	sbOffReserved6  = 52
+	sbOffReserved7  = 56
+	sbOffReserved8  = 60
 )
+
+const unifiedArenaSize = 256 * 1024 // 默认动态 arena 256KB
 
 // SharedRef 是跨进程共享内存描述符，替代内联 JSON 数据。
 //
@@ -99,6 +108,10 @@ type unifiedRegion struct {
 	ctxSize uint32
 	evtOff  uint32
 	evtSize uint32
+
+	arenaOff  uint32  // 动态 arena 起始偏移（相对 data）
+	arenaCap  uint32  // 动态 arena 总容量
+	arenaUsed *uint32 // 指向 SuperBlock 中的 arenaUsed 字段（原子 bump 游标）
 }
 
 // initUnifiedRegion 在 mmap 区域上初始化 SuperBlock + 两个 segment。
@@ -111,6 +124,8 @@ func initUnifiedRegion(data []byte, ctxTotal, evtTotal int) (*unifiedRegion, err
 
 	ctxOff := uint32(superBlockSize)
 	evtOff := ctxOff + uint32(ctxTotal)
+	arenaOff := evtOff + uint32(evtTotal)
+	arenaCap := cap - arenaOff
 
 	putU32(data[sbOffMagic:], unifiedMagic)
 	putU32(data[sbOffVersion:], unifiedVersion)
@@ -120,13 +135,21 @@ func initUnifiedRegion(data []byte, ctxTotal, evtTotal int) (*unifiedRegion, err
 	putU32(data[sbOffCtxSize:], uint32(ctxTotal))
 	putU32(data[sbOffEvtOff:], evtOff)
 	putU32(data[sbOffEvtSize:], uint32(evtTotal))
+	putU32(data[sbOffArenaOff:], arenaOff)
+	putU32(data[sbOffArenaCap:], arenaCap)
+	putU32(data[sbOffArenaUsed:], 1)
 
 	return &unifiedRegion{
-		data:    data,
-		ctxOff:  ctxOff,
-		ctxSize: uint32(ctxTotal),
-		evtOff:  evtOff,
-		evtSize: uint32(evtTotal),
+		data:     data,
+		ctxOff:   ctxOff,
+		ctxSize:  uint32(ctxTotal),
+		evtOff:   evtOff,
+		evtSize:  uint32(evtTotal),
+		arenaOff: arenaOff,
+		arenaCap: arenaCap,
+		arenaUsed: (*uint32)(unsafe.Pointer(
+			uintptr(unsafe.Pointer(&data[0])) + uintptr(sbOffArenaUsed),
+		)),
 	}, nil
 }
 
@@ -148,16 +171,24 @@ func attachUnifiedRegion(data []byte) (*unifiedRegion, error) {
 	evtOff := getU32(data[sbOffEvtOff:])
 	evtSize := getU32(data[sbOffEvtSize:])
 
+	arenaOff := getU32(data[sbOffArenaOff:])
+	arenaCap := getU32(data[sbOffArenaCap:])
+
 	if int(evtOff)+int(evtSize) > len(data) {
 		return nil, fmt.Errorf("unified: EvtRing 越界（off=%d size=%d total=%d）", evtOff, evtSize, len(data))
 	}
 
 	return &unifiedRegion{
-		data:    data,
-		ctxOff:  ctxOff,
-		ctxSize: ctxSize,
-		evtOff:  evtOff,
-		evtSize: evtSize,
+		data:     data,
+		ctxOff:   ctxOff,
+		ctxSize:  ctxSize,
+		evtOff:   evtOff,
+		evtSize:  evtSize,
+		arenaOff: arenaOff,
+		arenaCap: arenaCap,
+		arenaUsed: (*uint32)(unsafe.Pointer(
+			uintptr(unsafe.Pointer(&data[0])) + uintptr(sbOffArenaUsed),
+		)),
 	}, nil
 }
 
@@ -209,4 +240,47 @@ func putU64(b []byte, v uint64) {
 func getU64(b []byte) uint64 {
 	return uint64(b[0]) | uint64(b[1])<<8 | uint64(b[2])<<16 | uint64(b[3])<<24 |
 		uint64(b[4])<<32 | uint64(b[5])<<40 | uint64(b[6])<<48 | uint64(b[7])<<56
+}
+
+// arenaAlloc 在动态 arena 中分配 n 字节，返回相对 arenaOff 的偏移。
+// append-only，offset 0 保留给“空”语义。
+func (r *unifiedRegion) arenaAlloc(n int) (uint32, error) {
+	if n <= 0 {
+		return 0, fmt.Errorf("arena: 非法分配长度 %d", n)
+	}
+	used := atomic.LoadUint32(r.arenaUsed)
+	if used == 0 {
+		used = 1
+	}
+	end := uint64(used) + uint64(n)
+	if end > uint64(r.arenaCap) {
+		return 0, fmt.Errorf("arena: 空间不足（需 %d，剩 %d）", n, uint64(r.arenaCap)-uint64(used))
+	}
+	atomic.StoreUint32(r.arenaUsed, uint32(end))
+	return used, nil
+}
+
+// arenaWrite 把 b 写入动态 arena 并返回 SharedRef。
+func (r *unifiedRegion) arenaWrite(b []byte) (SharedRef, error) {
+	if len(b) == 0 {
+		return SharedRef{}, nil
+	}
+	off, err := r.arenaAlloc(len(b))
+	if err != nil {
+		return SharedRef{}, err
+	}
+	base := r.arenaOff + off
+	copy(r.data[base:base+uint32(len(b))], b)
+	gen := uint32(r.generation())
+	return SharedRef{Offset: base, Length: uint32(len(b)), Generation: gen}, nil
+}
+
+// arenaRead 按 SharedRef 读取数据。
+func (r *unifiedRegion) arenaRead(ref SharedRef) []byte {
+	return ref.Slice(r.data)
+}
+
+// arenaReset 压实后重置游标（仅在无活跃 slot 时调用）。
+func (r *unifiedRegion) arenaReset() {
+	atomic.StoreUint32(r.arenaUsed, 1)
 }
