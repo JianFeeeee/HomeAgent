@@ -154,7 +154,8 @@ func renderInstructionInput(instruction, text string) string {
 		"<|im_end|>\n<|im_start|>assistant\n"
 }
 
-// Encode 把文本编码为 token id 序列（不含特殊 token、不做截断）。
+// Encode 把文本编码为 token id 序列（识别输入中已有的特殊 token，
+// 但不执行 tokenizer.json 的 post_processor，也不做截断）。
 func (t *Tokenizer) Encode(text string) []int {
 	var ids []int
 	for _, seg := range t.splitSpecials(text) {
@@ -165,6 +166,27 @@ func (t *Tokenizer) Encode(text string) []int {
 		ids = append(ids, t.encodeOrdinary(seg.text)...)
 	}
 	return ids
+}
+
+// encodeModelInput 执行 TextTower 输入所需的 tokenizer post_processor。
+//
+// tokenizer.json 的 TemplateProcessing 规则是 `$A <|endoftext|>`；HuggingFace
+// 在 truncation=true 时先把 A 截到 maxLen-1，再保留末尾 post token。漏掉它不会
+// 触发 ONNX 错误，却会改变池化位置和整条嵌入向量，因此不能直接用 Encode 的结果。
+func (t *Tokenizer) encodeModelInput(text string, maxLen int) ([]int, error) {
+	postID, ok := t.SpecialID("<|endoftext|>")
+	if !ok {
+		return nil, fmt.Errorf("tokenizer.json 缺少 post token <|endoftext|>")
+	}
+	if maxLen <= 0 {
+		return nil, fmt.Errorf("maxLen 必须大于 0")
+	}
+
+	ids := t.Encode(text)
+	if len(ids) >= maxLen {
+		ids = ids[:maxLen-1]
+	}
+	return append(ids, postID), nil
 }
 
 // seg 是「普通文本」或「已识别的特殊 token」二选一。
