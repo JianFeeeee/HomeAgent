@@ -40,7 +40,7 @@ func main() {
 		switch req.Method {
 		case "handshake":
 			send(response{ID: req.ID, Result: map[string]interface{}{
-				"protocol": 1, "sdk_version": "test", "plugin_name": "crash", "pid": os.Getpid(),
+				"protocol": 2, "sdk_version": "test", "plugin_name": "crash", "pid": os.Getpid(),
 			}})
 		case "tool.invoke":
 			// 模拟插件 bug：直接 panic，进程带非零码退出
