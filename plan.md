@@ -1239,24 +1239,31 @@ SDK 仓 `v1.0.0` / `v1.1.0`。main 的版本路牌现为 `1.2.0`（尚无 tag）
 
 **目标**：输入通道消息走共享内存。
 
-**现状（核实）**：基础设施就位，但内核侧未接线——
+**现状（已核实，已实现）**：
 
-- `injectParams.TextRef SharedRef` 与 `resolveText`（corehandler.go:585）
-  在插件→内核方向可用，但内核→插件方向的 `procCore.InjectText` 仍直接传
-  字符串给 `sdk.InjectText`，从不 `Alloc/Put` 构造 `TextRef`。
-- 即只做了半边（插件回传文本），内核注入还没走共享内存。
+- 插件侧 `putInArena`（模板）做 `arena.alloc` RPC → 写入 region → 把
+  `SharedRef` 随 `io.injectText` 回传；内核侧 `coreHandler.resolveText`
+  （corehandler.go:585）从 arena 读出。
+- **分配在插件侧是符合设计的**，不是缺口：§13.2 的模型就是「插件经 RPC
+  向内核申请/归还」，内核独占分配器。`procCore.InjectText` 拿到的是普通
+  字符串，因为共享内存是跨进程的内部实现、不对插件开发者暴露。
+- 阈值 `inlinePayloadLimit = 512` 字节：小于它走内联 JSON（省一次 RPC），
+  超过才 Alloc。这是有意为之，不是残留。
 
 **实施**：
 
-1. InputChannel Slot：source/channel/text/blocks 写入 arena
+1. ✅ InputChannel Slot：source/channel/text/blocks 写入 arena
 2. 插件消费后设 DONE
-3. 同步注入仍走 RPC + SharedRef  ← 需要接线内核侧
+3. ✅ 同步注入走 RPC + SharedRef（`callWithText`）
 4. 异步注入改写 arena + eventfd
 
 **验证**：
 
-- [ ] 真实 QQ 消息注入测试
-- [ ] git commit -m "feat(shm): input channel lane"  ← 未提交，内核侧待接线
+- [x] 模板 `callWithText` 大 payload 走 `text_ref`（小 payload 走内联）
+- [ ] 真实 QQ 消息注入测试（需生产部署后验证）
+- [x] git commit -m "feat(shm): input channel lane"（2bc813b，基础设施）
+
+**遗留（与 13.5 同类的未入内存路径）**：见 §13.13。
 
 ### 13.6 OutputChannel lane
 
@@ -1360,3 +1367,43 @@ SSE Last-Event-ID → 超时 → api 状态码 → renderAll 增量 → XSS 消�
 
 - [ ] 图查询返回媒体节点
 - [ ] git commit -m "feat(l3): native multimodal nodes/edges"
+
+### 13.13 剩余内联大 payload 路径（「全量数据交互入共享内存」的尾巴）
+
+**目标**：所有**数据面**交换都走共享内存，RPC 只传偏移描述符（SharedRef）。
+共享内存是跨进程的内部实现，不对插件开发者暴露（SDK 公开 API 仍是
+string / map / slice）。
+
+**已经走共享内存的**：
+
+| 通道 | 机制 |
+| --- | --- |
+| StageContext | 区内 segment + `WriteAll/ReadInto` |
+| 事件环 | 区内 segment + eventfd 通知 |
+| tool.invoke 参数/结果 | `Frame` / `ResultRef`（§13.3） |
+| cleaner.invoke 输入/结果 | `Frame` / `TextRef`（§13.4） |
+| output.invoke 参数 | `Frame`（§13.6） |
+| io.injectText 系列 | 插件侧 `putInArena` → `text_ref`（§13.5） |
+
+**尚未入内存（按风险排序，都是数据面）**：
+
+1. **媒体块：`io.injectMedia` / `injectMediaSync` / `injectInterruptMedia`
+   / `io.setToolBlocks`**——`blocks` 内联在 RPC JSON 里，而
+   `ImageURL.URL` / `AudioURL.URL` 对本地生成的图/音频是 **base64 data URL**。
+   本地大图 base64 后可达数 MB，是目前最大的一条内联路径。
+   待做：blocks 序列化后 `putInArena`，传 `blocks_ref`；内核侧读回。
+2. **`doc.insert` / `doc.insertWithMedia`**——文档全文内联。文档可达几十 KB～
+   数 MB。待做：同 1，`doc_ref`。
+3. **`knowledge.add(name, content)`**——知识正文内联，同上。
+4. **反向工具结果（kernel → 插件）**：目前只有正向（插件→内核）有
+   `ResultRef`；插件反向调内核读大结果时仍是内联。
+
+不需入内存的：控制面小报文（`plugin.init.Config`、`tool.register` 的 def、
+`settings.*`、`lifecycle.*`、`arena.alloc/free` 自身）——它们本身就只有
+几十~几百字节，搬进共享内存反而多两次 RPC。
+
+**验证**：
+
+- [ ] 媒体块走共享内存（本地大图注入不再爆管道）
+- [ ] 文档/知识正文走共享内存
+- [ ] git commit -m "feat(shm): remaining data-plane payloads via shared refs"
