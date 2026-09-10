@@ -53,7 +53,7 @@ type Host struct {
 // （实验 2 已验证各进程 mmap 到不同虚拟地址时偏移解引用仍正确）。
 func NewHost() (*Host, error) {
 	// 统一区域大小：SuperBlock + StageContext segment + EvtRing segment
-	unifiedSize := superBlockSize + shmDefaultSize + evtTotalSize
+	unifiedSize := superBlockSize + shmDefaultSize + evtTotalSize + unifiedArenaSize
 	memfd, data, err := allocShm(unifiedSize)
 	if err != nil {
 		return nil, err
