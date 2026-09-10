@@ -38,12 +38,62 @@ var (
 	pendMu  sync.Mutex
 	pending = map[uint64]chan json.RawMessage{}
 
-	shm     []byte
-	shmSize int
-	region  []byte // 完整统一区域 mmap
+	shm      []byte
+	shmSize  int
+	region   []byte // 完整统一区域 mmap
 	arenaOff uint32
-	arenaUsed uint32
 )
+
+// ---- Exchange Arena 槽池（与内核 proc/arena.go 一致）----
+
+const (
+	arOffSlotCount = 8
+	arOffSlotSize  = 12
+	slotHeaderSize = 8
+)
+
+// arenaSlotSize 返回单个槽的总字节数（含 8 字节槽头）。
+func arenaSlotSize() uint32 {
+	return binary.LittleEndian.Uint32(region[arenaOff+arOffSlotSize:])
+}
+
+// arenaPayloadCap 返回槽可承载的最大 payload。
+func arenaPayloadCap() int { return int(arenaSlotSize()) - slotHeaderSize }
+
+// ---- 共享槽池的插件侧接口（内核 RPC，内部实现）----
+
+// SharedRef 是内核下发的共享内存描述符。
+//
+// 这是**内部实现**：真实插件不直接触碰它，模板运行时在传输层自动使用。
+// 本测试插件手写 RPC，所以需要显式声明。
+type SharedRef struct {
+	Offset     uint32 `json:"offset"`
+	Length     uint32 `json:"length"`
+	Generation uint32 `json:"generation"`
+	Flags      uint32 `json:"flags"`
+}
+
+func (r SharedRef) IsZero() bool { return r.Offset == 0 && r.Length == 0 }
+
+// arenaAlloc 向内核申请一块共享内存，内核返回偏移与大小。
+func arenaAlloc(size uint32) (SharedRef, error) {
+	raw := callKernel("arena.alloc", map[string]interface{}{"size": size})
+	var r struct {
+		Ref SharedRef `json:"ref"`
+	}
+	if err := json.Unmarshal(raw, &r); err != nil {
+		return SharedRef{}, err
+	}
+	if r.Ref.IsZero() {
+		return SharedRef{}, fmt.Errorf("内核返回空引用")
+	}
+	return r.Ref, nil
+}
+
+// arenaFree 通知内核回收先前申请的共享内存。
+func arenaFree(ref SharedRef) {
+	callKernel("arena.free", map[string]interface{}{"ref": ref})
+}
 
 func send(v interface{}) {
 	b, _ := json.Marshal(v)
@@ -255,6 +305,11 @@ func main() {
 					"def":         map[string]interface{}{"name": "demo_upper", "description": "转大写"},
 					"has_cleaner": true,
 				})
+				callKernel("tool.register", map[string]interface{}{
+					"name":        "demo_inject",
+					"def":         map[string]interface{}{"name": "demo_inject", "description": "共享内存注入"},
+					"has_cleaner": false,
+				})
 				callKernel("stage.register", map[string]interface{}{
 					"stage": "after_toolcall",
 					"scope": "global",
@@ -275,24 +330,56 @@ func main() {
 			os.Exit(0)
 
 		case "tool.invoke":
-			var p struct {
-				Name string                 `json:"name"`
-				Args map[string]interface{} `json:"args"`
-			}
-			json.Unmarshal(req.Params, &p)
-			text, _ := p.Args["text"].(string)
-			send(response{ID: req.ID, Result: map[string]interface{}{
-				"result": strings.ToUpper(text),
-			}})
+			// 必须在独立 goroutine 里处理：demo_inject 会在处理过程中反向
+			// 调用内核（arena.alloc / io.injectText / arena.free），而内核的
+			// 应答只能由主读循环接收。若同步处理就会自锁死——这也是真实
+			// 模板对每个内核请求都 `go handleKernelRequest` 的原因。
+			go func(id uint64, raw json.RawMessage) {
+				var p struct {
+					Name string                 `json:"name"`
+					Args map[string]interface{} `json:"args"`
+				}
+				json.Unmarshal(raw, &p)
+				text, _ := p.Args["text"].(string)
+
+				// demo_inject 走插件侧共享内存路径：
+				// 申请 → 写入 → 随业务 RPC 回传 → 归还。
+				if p.Name == "demo_inject" {
+					ref, err := arenaAlloc(uint32(len(text)))
+					if err != nil {
+						send(response{ID: id, Error: err.Error()})
+						return
+					}
+					copy(region[ref.Offset:ref.Offset+uint32(len(text))], text)
+					ref.Length = uint32(len(text))
+					callKernel("io.injectText", map[string]interface{}{
+						"source": "plugin", "channel": "demo", "text_ref": ref,
+					})
+					arenaFree(ref)
+					send(response{ID: id, Result: map[string]interface{}{"result": "injected"}})
+					return
+				}
+
+				send(response{ID: id, Result: map[string]interface{}{
+					"result": strings.ToUpper(text),
+				}})
+			}(req.ID, req.Params)
 
 		case "cleaner.invoke":
 			var p struct {
 				Scope   string `json:"scope"`
 				Name    string `json:"name"`
+				Text    string `json:"text"`
 				TextRef struct {
 					Offset uint32 `json:"offset"`
 					Length uint32 `json:"length"`
+					Flags  uint32 `json:"flags"`
 				} `json:"text_ref"`
+				RespRef struct {
+					Offset uint32 `json:"offset"`
+					Length uint32 `json:"length"`
+					Flags  uint32 `json:"flags"`
+				} `json:"resp_ref"`
 			}
 			json.Unmarshal(req.Params, &p)
 			valid := (p.Scope == "tool" && p.Name == "demo_upper") ||
@@ -302,23 +389,28 @@ func main() {
 				send(response{ID: req.ID, Error: "未注册 Cleaner"})
 				continue
 			}
-			// 从 arena 读文本
-			input := string(region[p.TextRef.Offset : p.TextRef.Offset+p.TextRef.Length])
-			output := p.Scope + "-cleaned:" + input
-			// 写回 arena
-			off := arenaUsed
-			if off == 0 {
-				off = 1
+
+			// 读输入：优先共享槽，否则内联。
+			input := p.Text
+			if p.TextRef.Length > 0 {
+				input = string(region[p.TextRef.Offset : p.TextRef.Offset+p.TextRef.Length])
 			}
-			end := off + uint32(len(output))
-			copy(region[arenaOff+end-uint32(len(output)):arenaOff+end], output)
-			arenaUsed = end
-			send(response{ID: req.ID, Result: map[string]interface{}{
-				"text_ref": map[string]interface{}{
-					"offset": arenaOff + off,
-					"length": uint32(len(output)),
-				},
-			}})
+			output := p.Scope + "-cleaned:" + input
+
+			// 写结果：有预分配槽且放得下就写槽，否则内联。
+			// 插件不分配任何槽（“谁分配谁释放”全部在内核侧）。
+			if p.RespRef.Offset > 0 && len(output) <= arenaPayloadCap() {
+				copy(region[p.RespRef.Offset:], output)
+				send(response{ID: req.ID, Result: map[string]interface{}{
+					"text_ref": map[string]interface{}{
+						"offset": p.RespRef.Offset,
+						"length": uint32(len(output)),
+						"flags":  p.RespRef.Flags,
+					},
+				}})
+				continue
+			}
+			send(response{ID: req.ID, Result: map[string]interface{}{"text": output}})
 
 		case "stage.invoke":
 			go func(id uint64) {

@@ -28,13 +28,17 @@ type coreHandler struct {
 	// ❗ 必须是"全部插件共享一个 Host"——每插件一段会退化成副本模型。
 	host *Host
 
+	// owner 是本插件在共享槽池里的身份。内核用它校验 arena.free 的归属，
+	// 并在插件退出时 ReclaimOwner 回收残留槽。
+	owner uint32
+
 	// locks 是 host.locks 的引用，供 stage.lock/unlock 路由。
 	locks *lockRegistry
 
 	// invokeTool/invokeCleaner/invokeStageFn/invokeOutput 反向调用插件（内核 → 插件）。
 	// 由 Plugin 注入，注册回调时用它们构造 handler。
 	invokeTool    func(name string, args map[string]interface{}) (interface{}, error)
-	invokeCleaner func(scope, name string, textRef SharedRef) (SharedRef, error)
+	invokeCleaner func(params CleanerInvokeParams) (CleanerInvokeResult, error)
 	invokeStageFn func(ctx context.Context, stage string, seq uint64) error
 	invokeOutput  func(channel string, args map[string]interface{}) (interface{}, error)
 
@@ -550,6 +554,25 @@ func (h *coreHandler) Handle(method string, params json.RawMessage) (interface{}
 		// 当前设计：子进程 Stop 时由内核统一清理其订阅。
 		return nil, nil
 
+	// ---- 共享槽池（内部传输层，见 protocol.go 注释）----
+	case MethodArenaAlloc:
+		var p ArenaAllocParams
+		if err := unmarshal(params, &p); err != nil {
+			return nil, err
+		}
+		ref, err := h.arenaAlloc(p.Size)
+		if err != nil {
+			return nil, err
+		}
+		return ArenaAllocResult{Ref: ref}, nil
+
+	case MethodArenaFree:
+		var p ArenaFreeParams
+		if err := unmarshal(params, &p); err != nil {
+			return nil, err
+		}
+		return nil, h.arenaFree(p.Ref)
+
 	// ---- 多模态注入（C ABI 侧空实现）----
 	case MethodIOSetToolBlocks:
 		// Part 4 扩展：二进制落 arena、Slice 描述符回传（§3.8）。
@@ -559,11 +582,17 @@ func (h *coreHandler) Handle(method string, params json.RawMessage) (interface{}
 	return nil, fmt.Errorf("未知 method: %s", method)
 }
 
-// resolveText 从 injectParams 中提取 text：优先使用 TextRef（SharedRef），
+// resolveText 从 injectParams 中提取 text：优先使用 TextRef（共享槽），
 // 否则使用内联 Text。兼容新旧两种协议。
+//
+// 子进程分配自己的槽并在收到应答后释放，因此这里读到的一定是 busy 槽。
 func (h *coreHandler) resolveText(p injectParams) string {
 	if !p.TextRef.IsZero() {
-		return string(h.host.unified.arenaRead(p.TextRef))
+		data, err := h.host.Arena().Read(p.TextRef, h.host.Generation())
+		if err != nil {
+			return ""
+		}
+		return string(data)
 	}
 	return p.Text
 }
@@ -610,26 +639,96 @@ func (h *coreHandler) cleanerProxy(scope, name string, enabled bool) (func(strin
 		return nil, fmt.Errorf("%s %s 声明 Cleaner，但清洗回调通道未就绪", scope, name)
 	}
 	return func(text string) string {
-		// Cleaner 输入和输出共享同一 arena。串行覆盖完整往返，保证结果读完前
-		// 不被其他调用重置；返回 string 会复制结果，随后即可回收整个临时区。
-		h.host.arenaMu.Lock()
-		defer h.host.arenaMu.Unlock()
-		defer h.host.unified.arenaReset()
-
-		ref, err := h.host.unified.arenaWrite([]byte(text))
+		out, err := h.invokeCleanerText(scope, name, text)
 		if err != nil {
 			return text
 		}
-		resultRef, err := h.invokeCleaner(scope, name, ref)
-		if err != nil {
-			return text
-		}
-		result := h.host.unified.arenaRead(resultRef)
-		if result == nil && !resultRef.IsZero() {
-			return text
-		}
-		return string(result)
+		return out
 	}, nil
+}
+
+// invokeCleanerText 完成一次 Cleaner 往返：payload 走共享槽，超限时整条链路退回内联。
+//
+// 槽的申请与归还全部由内核负责（**谁分配谁释放**）：
+//
+//	reqSlot  ──写入 input──▶ 随 RPC 把 TextRef 发给插件
+//	respSlot ──预分配────▶ 随 RPC 把 RespRef 发给插件，插件把结果写进来
+//	读取结果后两个槽一起归还
+//
+// 插件侧不申请任何槽，因此不存在跨进程分配器的竞争。
+func (h *coreHandler) invokeCleanerText(scope, name, text string) (string, error) {
+	arena := h.host.Arena()
+	gen := h.host.Generation()
+
+	params := CleanerInvokeParams{Scope: scope, Name: name}
+
+	// 请求槽：放得下就走共享内存，否则内联。
+	// 注意“放不下”不是错误，只是退化成原有正确路径。
+	var reqRef SharedRef
+	if len(text) <= arena.SlotPayloadCap() {
+		if ref, err := arena.Put(OwnerHost, []byte(text), gen); err == nil {
+			params.TextRef = ref
+			reqRef = ref
+		}
+	}
+	if reqRef.IsZero() {
+		params.Text = text
+	}
+
+	// 响应槽：预分配满容量。插件只写，不申请。
+	var respRef SharedRef
+	if ref, err := arena.Alloc(OwnerHost, arena.SlotPayloadCap()); err == nil {
+		params.RespRef = ref
+		respRef = ref
+	}
+
+	defer func() {
+		if !respRef.IsZero() {
+			_ = arena.Free(OwnerHost, respRef.Flags)
+		}
+		if !reqRef.IsZero() {
+			_ = arena.Free(OwnerHost, reqRef.Flags)
+		}
+	}()
+
+	res, err := h.invokeCleaner(params)
+	if err != nil {
+		return "", err
+	}
+
+	// 结果优先取共享槽；插件放不下时会内联返回。
+	if !res.TextRef.IsZero() {
+		data, err := arena.Read(res.TextRef, gen)
+		if err != nil {
+			return "", err
+		}
+		return string(data), nil
+	}
+	return res.Text, nil
+}
+
+// ---- 共享槽池的 syscall 风格接口（插件 RPC）----
+//
+// 共享内存是内部实现，不向插件开发者暴露；模板运行时在传输层调用它们，
+// 公开 SDK 仍是普通字符串/Map。
+
+// arenaAlloc 给本插件分配一块共享槽并返回描述符。
+func (h *coreHandler) arenaAlloc(size uint32) (SharedRef, error) {
+	if int(size) > h.host.Arena().SlotPayloadCap() {
+		return SharedRef{}, fmt.Errorf("arena.alloc: 请求 %d 字节超出槽容量 %d",
+			size, h.host.Arena().SlotPayloadCap())
+	}
+	return h.host.Arena().Alloc(h.owner, int(size))
+}
+
+// arenaFree 归还本插件申请的槽。内核校验归属，防止释放他人的槽。
+func (h *coreHandler) arenaFree(ref SharedRef) error {
+	slot, ok := h.host.Arena().SlotOf(ref)
+	if !ok {
+		return fmt.Errorf("arena.free: 非法引用（offset=%d len=%d slot=%d）",
+			ref.Offset, ref.Length, ref.Flags)
+	}
+	return h.host.Arena().Free(h.owner, slot)
 }
 
 // toolRegister 注册插件工具，handler 反向调用插件执行（原 case 1）。

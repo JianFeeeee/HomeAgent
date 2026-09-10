@@ -1147,41 +1147,56 @@ SDK 仓 `v1.0.0` / `v1.1.0`。main 的版本路牌现为 `1.2.0`（尚无 tag）
 - [ ] fd 数从 3 降到 2
 - [ ] git commit -m "feat(shm): unified shared memory region"
 
-### 13.2 共享内存扩缩容
+### 13.2 共享槽池（内核独占所有权）
 
-**目标**：ftruncate 扩展 + mremap/mmap 重映射 + generation 感知。
+**设计约束（用户明确）**：
 
-**实施**：
+> 内核应当全权管理共享内存，插件需要共享内存要向内核申请，内核给插件返回偏移与大小，使用完成后插件通知内核回收。
+> 内核暴露类似 syscall 的 RPC 接口；共享内存是内部实现，不对插件开发者暴露。
 
-1. SuperBlock 加 generation + capacity 字段
-2. Host.Grow(newSize)：ftruncate → 更新 capacity/gen → 通知子进程
-3. 子进程下次 stage 读 gen → remap
-4. Host.Shrink()：compact 后 free > 50% 且持续 5min → 缩容
-5. 无活跃 slot 时才允许缩容
+**为什么不是跨进程分配器**（前两版都被推翻）：
 
-**验证**：
-
-- [ ] Grow 后子进程正确读写
-- [ ] Shrink 不裁掉活跃 slot
-- [ ] git commit -m "feat(shm): grow/shrink with generation awareness"
-
-### 13.3 ToolCall lane
-
-**目标**：工具调用参数/结果从 JSON RPC 改为 SharedRef。
+- v1：SuperBlock 放 `arenaUsed` 游标，内核 CAS bump。但**插件模板里的 `arenaUsed` 是进程本地变量**，两个进程各自 bump，必然写到同一段内存；`arenaReset` 还会重置共享游标覆盖对方数据。
+- v2：把位图 CAS 下沉到插件模板。虽然正确，但把分配器实现细节泄漏进了插件运行时，且插件必须与内核保持位图布局同步。
+- v3（当前）：分配器只存在于**内核进程内**，一把 `sync.Mutex` 即可。插件只通过 RPC 申请/归还，不做任何分配决策。
 
 **实施**：
 
-1. ToolCall Slot 状态机：FREE→WRITING→READY→READING→DONE→FREE
-2. 内核写请求 → READY → eventfd 通知
-3. 插件读请求 → 执行 → 写结果 → DONE → eventfd 通知
-4. RPC tool.invoke 改为只传 {requestID, argsRef, resultRef}
-5. has_cleaner 保持不变
+1. `arena.go`：定长槽 + 位图，`Alloc/Put/Read/Free/ReclaimOwner`，内核独占。
+2. 槽头记录 `owner`；`Free` 校验归属，插件不能释放他人（或内核）的槽。
+3. 协议新增 `arena.alloc` / `arena.free`（`CapCore`，属基础能力）。
+4. `Plugin` 在 `Start` 领取 ownerID；`handleExit` 调 `ReclaimOwner` 回收残留槽，防崩溃把池耗尽。
+5. 插件侧不再写位图：`proc_main.go.tmpl` 删掉本地 bump 分配器，改为 `arenaAlloc`/`arenaFree` 走 RPC；SDK 公开 API 仍是普通字符串/Map，开发者无感。
+6. payload 超槽容量时**退回内联 RPC**（原有正确路径），不静默截断。
 
 **验证**：
 
-- [ ] TestPlugin_RegisteredToolInvokable 通过
-- [ ] Bench: ToolInvoke 延迟改善
-- [ ] git commit -m "feat(shm): toolcall lane with slot state machine"
+- [x] `TestArena_*`：分配/归还/归属校验/回收/并发唯一/耗尽/超限/非法引用/布局校验
+- [x] `TestPlugin_ArenaAllocFreeAcrossProcess`：真进程申请→写入→随业务 RPC 回传→归还，内核读回内容一致且池归零
+- [ ] **Grow/Shrink 未实现**：跨进程 remap 很危险（对端可能正在读，munmap 会 SIGSEGV）。当前槽池规格固定，用尽后退回内联 RPC。generation 字段已就位但只在 resize 时才会 bump。
+- [x] git commit -m "refactor(shm): kernel-owned exchange arena"
+
+### 13.3 ToolCall 数据面走共享槽
+
+**目标**：工具调用的**参数/结果**走共享内存，RPC 只传描述符。
+
+**控制面 vs 数据面**（与初版设计的差异）：
+
+初版计划用 ring 状态机（FREE→WRITING→READY→READING→DONE）把 `tool.invoke` 也搬出 RPC。实际实现后发现这是错的方向：
+
+- RPC 已经提供请求 ID 关联、错误传递、ctx 取消、崩溃唤醒（`Process.CallContext`），ring 状态机是把这些重新实现一遍。
+- ring 版本写完从未接线，属死代码，已删除。
+
+因此**控制面保留 RPC**，只把 payload 搬进共享槽：
+
+1. 小 payload 走内联 JSON（省两次 RPC）。
+2. 大 payload 走内核分配的槽，RPC 只带 `SharedRef`。
+3. 插件不需要分配：内核可预分配响应槽（如 Cleaner 路径）。
+
+**验证**：
+
+- [x] `TestPlugin_RegisteredToolInvokable` 通过
+- [ ] Bench: ToolInvoke 延迟改善（待 `tool.invoke` 接入 SharedRef 后再测）
 
 ### 13.4 Cleaner 迁移至 SharedRef
 
