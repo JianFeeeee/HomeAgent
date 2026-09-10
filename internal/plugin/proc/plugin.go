@@ -222,23 +222,23 @@ func (p *Plugin) invokeTool(name string, args map[string]interface{}) (interface
 }
 
 // invokeCleaner 在插件进程内执行工具或通道注册时提供的 Cleaner 函数。
-func (p *Plugin) invokeCleaner(scope, name, text string) (string, error) {
+func (p *Plugin) invokeCleaner(scope, name string, textRef SharedRef) (SharedRef, error) {
 	if p.proc == nil {
-		return "", ErrProcessExited
+		return SharedRef{}, ErrProcessExited
 	}
 	raw, err := p.proc.Call(MethodCleanerInvoke, CleanerInvokeParams{
-		Scope: scope,
-		Name:  name,
-		Text:  text,
+		Scope:   scope,
+		Name:    name,
+		TextRef: textRef,
 	})
 	if err != nil {
-		return "", err
+		return SharedRef{}, err
 	}
 	var res CleanerInvokeResult
 	if err := json.Unmarshal(raw, &res); err != nil {
-		return "", fmt.Errorf("proc: %s %s Cleaner %s 应答解析失败: %w", p.name, scope, name, err)
+		return SharedRef{}, fmt.Errorf("proc: %s %s Cleaner %s 应答解析失败: %w", p.name, scope, name, err)
 	}
-	return res.Text, nil
+	return res.TextRef, nil
 }
 
 func (p *Plugin) invokeStage(ctx context.Context, stage string, seq uint64) error {
