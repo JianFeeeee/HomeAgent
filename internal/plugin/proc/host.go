@@ -36,6 +36,7 @@ type Host struct {
 
 	evtSubscriber EvtRingSubscriber
 	locks         *lockRegistry
+	arenaMu       sync.Mutex // 动态 arena 跨进程调用的生命周期锁
 	stageMu       sync.Mutex
 	coordMu       sync.Mutex
 	coord         *stageCoordinator

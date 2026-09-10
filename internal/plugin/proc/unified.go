@@ -94,10 +94,11 @@ func (r SharedRef) IsZero() bool {
 
 // Slice 从共享内存中按 SharedRef 切片。data 必须是完整的 mmap 区域。
 func (r SharedRef) Slice(data []byte) []byte {
-	if r.IsZero() || int(r.Offset)+int(r.Length) > len(data) {
+	end := uint64(r.Offset) + uint64(r.Length)
+	if r.IsZero() || end > uint64(len(data)) {
 		return nil
 	}
-	return data[r.Offset : r.Offset+r.Length]
+	return data[r.Offset:uint32(end)]
 }
 
 // unifiedRegion 统一共享内存区域的内核侧视图。
@@ -171,11 +172,21 @@ func attachUnifiedRegion(data []byte) (*unifiedRegion, error) {
 	evtOff := getU32(data[sbOffEvtOff:])
 	evtSize := getU32(data[sbOffEvtSize:])
 
+	capacity := getU32(data[sbOffCapacity:])
 	arenaOff := getU32(data[sbOffArenaOff:])
 	arenaCap := getU32(data[sbOffArenaCap:])
 
-	if int(evtOff)+int(evtSize) > len(data) {
+	if capacity != uint32(len(data)) {
+		return nil, fmt.Errorf("unified: capacity 不匹配（header=%d mapped=%d）", capacity, len(data))
+	}
+	if uint64(ctxOff)+uint64(ctxSize) > uint64(len(data)) {
+		return nil, fmt.Errorf("unified: StageContext 越界（off=%d size=%d total=%d）", ctxOff, ctxSize, len(data))
+	}
+	if uint64(evtOff)+uint64(evtSize) > uint64(len(data)) {
 		return nil, fmt.Errorf("unified: EvtRing 越界（off=%d size=%d total=%d）", evtOff, evtSize, len(data))
+	}
+	if uint64(arenaOff)+uint64(arenaCap) > uint64(len(data)) {
+		return nil, fmt.Errorf("unified: arena 越界（off=%d cap=%d total=%d）", arenaOff, arenaCap, len(data))
 	}
 
 	return &unifiedRegion{
@@ -248,16 +259,19 @@ func (r *unifiedRegion) arenaAlloc(n int) (uint32, error) {
 	if n <= 0 {
 		return 0, fmt.Errorf("arena: 非法分配长度 %d", n)
 	}
-	used := atomic.LoadUint32(r.arenaUsed)
-	if used == 0 {
-		used = 1
+	for {
+		used := atomic.LoadUint32(r.arenaUsed)
+		if used == 0 {
+			used = 1
+		}
+		end := uint64(used) + uint64(n)
+		if end > uint64(r.arenaCap) {
+			return 0, fmt.Errorf("arena: 空间不足（需 %d，剩 %d）", n, uint64(r.arenaCap)-uint64(used))
+		}
+		if atomic.CompareAndSwapUint32(r.arenaUsed, used, uint32(end)) {
+			return used, nil
+		}
 	}
-	end := uint64(used) + uint64(n)
-	if end > uint64(r.arenaCap) {
-		return 0, fmt.Errorf("arena: 空间不足（需 %d，剩 %d）", n, uint64(r.arenaCap)-uint64(used))
-	}
-	atomic.StoreUint32(r.arenaUsed, uint32(end))
-	return used, nil
 }
 
 // arenaWrite 把 b 写入动态 arena 并返回 SharedRef。
@@ -275,8 +289,16 @@ func (r *unifiedRegion) arenaWrite(b []byte) (SharedRef, error) {
 	return SharedRef{Offset: base, Length: uint32(len(b)), Generation: gen}, nil
 }
 
-// arenaRead 按 SharedRef 读取数据。
+// arenaRead 按 SharedRef 读取数据。generation 不匹配或引用越出 arena 时拒绝。
 func (r *unifiedRegion) arenaRead(ref SharedRef) []byte {
+	if ref.IsZero() || ref.Generation != uint32(r.generation()) {
+		return nil
+	}
+	end := uint64(ref.Offset) + uint64(ref.Length)
+	arenaEnd := uint64(r.arenaOff) + uint64(r.arenaCap)
+	if uint64(ref.Offset) < uint64(r.arenaOff)+1 || end > arenaEnd {
+		return nil
+	}
 	return ref.Slice(r.data)
 }
 
