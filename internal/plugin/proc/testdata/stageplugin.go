@@ -243,17 +243,20 @@ func main() {
 			go func(id uint64) {
 				callKernel("lifecycle.autoRestart", map[string]interface{}{"enabled": true})
 				callKernel("tool.register", map[string]interface{}{
-					"name": "demo_upper",
-					"def":  map[string]interface{}{"name": "demo_upper", "description": "转大写"},
+					"name":        "demo_upper",
+					"def":         map[string]interface{}{"name": "demo_upper", "description": "转大写"},
+					"has_cleaner": true,
 				})
 				callKernel("stage.register", map[string]interface{}{
 					"stage": "after_toolcall",
 					"scope": "global",
 				})
+				callKernel("input.register", map[string]interface{}{
+					"name": "demo_in", "def": map[string]interface{}{}, "has_cleaner": true,
+				})
 				callKernel("output.register", map[string]interface{}{
-					"name": "demo_ch",
-					"caps": 1,
-					"desc": "测试通道",
+					"name": "demo_ch", "caps": 1, "desc": "测试通道",
+					"def": map[string]interface{}{}, "has_cleaner": true,
 				})
 				send(response{ID: id})
 			}(req.ID)
@@ -272,6 +275,24 @@ func main() {
 			text, _ := p.Args["text"].(string)
 			send(response{ID: req.ID, Result: map[string]interface{}{
 				"result": strings.ToUpper(text),
+			}})
+
+		case "cleaner.invoke":
+			var p struct {
+				Scope string `json:"scope"`
+				Name  string `json:"name"`
+				Text  string `json:"text"`
+			}
+			json.Unmarshal(req.Params, &p)
+			valid := (p.Scope == "tool" && p.Name == "demo_upper") ||
+				(p.Scope == "input" && p.Name == "demo_in") ||
+				(p.Scope == "output" && p.Name == "demo_ch")
+			if !valid {
+				send(response{ID: req.ID, Error: "未注册 Cleaner"})
+				continue
+			}
+			send(response{ID: req.ID, Result: map[string]interface{}{
+				"text": p.Scope + "-cleaned:" + p.Text,
 			}})
 
 		case "stage.invoke":

@@ -119,6 +119,7 @@ func (p *Plugin) Start(core CoreSDK) error {
 	}
 	// 反向调用闭包：注册回调时捕获，运行期经 RPC 打到插件进程。
 	p.handler.invokeTool = p.invokeTool
+	p.handler.invokeCleaner = p.invokeCleaner
 	p.handler.invokeStageFn = p.invokeStage
 	p.handler.invokeOutput = p.invokeOutput
 
@@ -218,6 +219,26 @@ func (p *Plugin) invokeTool(name string, args map[string]interface{}) (interface
 		return nil, fmt.Errorf("proc: %s 工具 %s 应答解析失败: %w", p.name, name, err)
 	}
 	return res.Result, nil
+}
+
+// invokeCleaner 在插件进程内执行工具或通道注册时提供的 Cleaner 函数。
+func (p *Plugin) invokeCleaner(scope, name, text string) (string, error) {
+	if p.proc == nil {
+		return "", ErrProcessExited
+	}
+	raw, err := p.proc.Call(MethodCleanerInvoke, CleanerInvokeParams{
+		Scope: scope,
+		Name:  name,
+		Text:  text,
+	})
+	if err != nil {
+		return "", err
+	}
+	var res CleanerInvokeResult
+	if err := json.Unmarshal(raw, &res); err != nil {
+		return "", fmt.Errorf("proc: %s %s Cleaner %s 应答解析失败: %w", p.name, scope, name, err)
+	}
+	return res.Text, nil
 }
 
 func (p *Plugin) invokeStage(ctx context.Context, stage string, seq uint64) error {

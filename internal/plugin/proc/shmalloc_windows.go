@@ -3,6 +3,7 @@
 package proc
 
 import (
+	"crypto/rand"
 	"fmt"
 	"os"
 	"sync"
@@ -64,7 +65,7 @@ var (
 // 返回的 *os.File 为 nil：Windows 不经 fd 传递段，插件按名字打开。
 // 名字通过 procEnvForShm 注入子进程环境变量。
 func allocShm(size int) (*os.File, []byte, error) {
-	name := fmt.Sprintf("%s_%d_%d", shmNamePrefix, os.Getpid(), shmNameSeq.Add(1))
+	name := shmNameForMode()
 	shm, data, err := createNamedMapping(name, size)
 	if err != nil {
 		return nil, nil, err
@@ -73,6 +74,25 @@ func allocShm(size int) (*os.File, []byte, error) {
 	shmHandles[uintptr(unsafe.Pointer(&data[0]))] = shm
 	shmHandlesMu.Unlock()
 	return nil, data, nil
+}
+
+// shmNameForMode 按安全模式生成命名段名。
+//
+// safe/debug：随机 nonce 名，防猜测；唯一在 debug 下额外暴露到 stderr。
+// full：固定后缀，便于多实例按名共享。
+func shmNameForMode() string {
+	seq := shmNameSeq.Add(1)
+	switch ShmSecurityModeOf() {
+	case ShmModeFull:
+		return fmt.Sprintf("%s_%d_%d", shmNamePrefix, os.Getpid(), seq)
+	default: // safe / debug
+		var b [12]byte
+		if _, err := cryptorand.Read(b[:]); err != nil {
+			// 退化为 PID+seq（极端情况，crypto rand 几乎不会失败）
+			return fmt.Sprintf("%s_%d_%d", shmNamePrefix, os.Getpid(), seq)
+		}
+		return fmt.Sprintf("%s_%d_%x", shmNamePrefix, os.Getpid(), b)
+	}
 }
 
 // createNamedMapping 建命名段并映射为 []byte。
