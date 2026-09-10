@@ -2,7 +2,7 @@
 
 // Package qwen 的 ONNX 推理实现（构建标签 onnxruntime，与 internal/memory/clip 同模式）。
 //
-// 加载契约（目录由 core.memory.multimodal_space.model_dir 指定）：
+// 加载契约：调用方传入模型目录，内核不硬编码模型名。
 //
 //	TextTower.onnx + 外部权重分片 — 文本塔图（input_ids/attention_mask → embedding）
 //	tokenizer.json                — 字节级 BPE 词表与 merges
@@ -28,10 +28,10 @@ import (
 
 // embedConfig 对应导出脚本产出的 embed_config.json。
 type embedConfig struct {
-	Dimension  int    `json:"dim"`
-	MaxLength  int    `json:"max_length"`
+	Dimension   int    `json:"dim"`
+	MaxLength   int    `json:"max_length"`
 	Instruction string `json:"instruction"`
-	Pooling    string `json:"pooling"`
+	Pooling     string `json:"pooling"`
 }
 
 // Embedder 是基于内嵌 ONNX 文本塔的稠密嵌入器。
@@ -119,12 +119,9 @@ func (e *Embedder) VectorizeDense(text string) ([]float64, error) {
 		return nil, fmt.Errorf("qwen embedder not loaded")
 	}
 
-	ids := e.tok.Encode(e.renderInput(text))
-	if len(ids) > e.config.MaxLength {
-		ids = ids[:e.config.MaxLength]
-	}
-	if len(ids) == 0 {
-		return nil, fmt.Errorf("qwen: 分词结果为空")
+	ids, err := e.tok.encodeModelInput(e.renderInput(text), e.config.MaxLength)
+	if err != nil {
+		return nil, err
 	}
 
 	seq := len(ids)
@@ -225,7 +222,7 @@ func computeFingerprint(modelDir string) string {
 	for _, e := range entries {
 		n := e.Name()
 		// 外部权重分片：torch 新版导出器使用 onnx__<op>_<id> 与模型张量同名文件。
-		if strings.HasPrefix(n, "onnx__") || strings.HasSuffix(n, ".weight") {
+		if strings.HasPrefix(n, "onnx__") || strings.HasSuffix(n, ".weight") || strings.HasSuffix(n, ".onnx.data") {
 			names = append(names, n)
 		}
 	}
@@ -243,6 +240,7 @@ func computeFingerprint(modelDir string) string {
 // findOnnxLib 在常见路径中查找 libonnxruntime.so。
 func findOnnxLib() string {
 	for _, p := range []string{
+		"/opt/onnxruntime/libonnxruntime.so",
 		"/opt/onnxruntime/lib/libonnxruntime.so",
 		"/usr/local/lib/libonnxruntime.so",
 		"/usr/lib/libonnxruntime.so",
