@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -170,6 +171,37 @@ func TestRenderInstructionInputMatchesTemplate(t *testing.T) {
 		return
 	}
 	t.Fatal("参考数据里缺少该模板串用例")
+}
+
+// 模型输入还要执行 tokenizer.json 的 TemplateProcessing：末尾追加
+// <|endoftext|>；超长输入先给正文留 maxLen-1 个位置，再保留 post token。
+func TestEncodeModelInputPostProcessor(t *testing.T) {
+	tok := loadTokenizer(t)
+	postID, ok := tok.SpecialID("<|endoftext|>")
+	if !ok {
+		t.Fatal("tokenizer 缺少 <|endoftext|>")
+	}
+
+	shortRaw := tok.Encode("你好")
+	short, err := tok.encodeModelInput("你好", 512)
+	if err != nil {
+		t.Fatalf("短文本 encodeModelInput: %v", err)
+	}
+	if len(short) != len(shortRaw)+1 || short[len(short)-1] != postID {
+		t.Fatalf("短文本 post-processor 异常: raw=%v model=%v", shortRaw, short)
+	}
+
+	longRaw := tok.Encode(strings.Repeat("记忆", 600))
+	long, err := tok.encodeModelInput(strings.Repeat("记忆", 600), 512)
+	if err != nil {
+		t.Fatalf("长文本 encodeModelInput: %v", err)
+	}
+	if len(long) != 512 || long[511] != postID {
+		t.Fatalf("长文本截断异常: len=%d tail=%v", len(long), long[len(long)-1:])
+	}
+	if !sameIDs(long[:511], longRaw[:511]) {
+		t.Fatal("长文本正文未按 maxLen-1 截断")
+	}
 }
 
 // byteEnc 必须是双射：256 个字节映射到 256 个互不相同的码点。
