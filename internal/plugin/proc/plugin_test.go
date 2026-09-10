@@ -500,3 +500,70 @@ func TestPlugin_ArenaAllocFreeAcrossProcess(t *testing.T) {
 		t.Fatalf("插件归还后槽池应全空，实际 used=%d/%d", used, total)
 	}
 }
+
+// 工具调用的参数/结果走共享槽（§13.3）。
+//
+// 控制面仍是 RPC（请求 ID 关联、ctx 取消、崩溃唤醒都由它承载），
+// 只有 payload 走共享内存：
+//   - 参数超过阈值时内核写入槽，把 ArgsRef 发给插件
+//   - 结果放得下时插件写入内核预分配的响应槽，回 ResultRef
+//   - 超限/池满时退回内联 JSON，不能影响功能
+//
+// demo_big 会在结果里报出它到底从哪里读到参数，因此本测试验证的是
+// “真的走了共享内存”，而不只是“返回值对”。
+func TestPlugin_ToolInvokeArgsResultViaArena(t *testing.T) {
+	bin := buildTestPlugin(t, "stageplugin.go")
+	core := newFakeCore()
+
+	host, err := NewHost()
+	if err != nil {
+		t.Fatalf("NewHost: %v", err)
+	}
+	defer host.Close()
+
+	p := New("demo", bin, t.TempDir(), nil, host, nil)
+	if err := p.Start(core); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	defer p.Close()
+
+	core.mu.Lock()
+	h, ok := core.tools["demo_big"]
+	core.mu.Unlock()
+	if !ok {
+		t.Fatal("插件应注册 demo_big 工具")
+	}
+
+	t.Run("大 payload 走共享槽", func(t *testing.T) {
+		// 4 字节 × 3 × 1000 = 12000 字节，明显超过内联阈值且能放进槽
+		big := strings.Repeat("共享内存", 1000)
+		res, err := h(map[string]interface{}{"text": big})
+		if err != nil {
+			t.Fatalf("调用 demo_big: %v", err)
+		}
+		s, _ := res.(string)
+		if !strings.HasPrefix(s, "shared:") {
+			t.Fatalf("大参数应经共享槽传递，实际结果前缀不对（len=%d, head=%.40q）", len(s), s)
+		}
+		if want := "shared:" + strings.ToUpper(big); s != want {
+			t.Fatalf("经共享槽往返的内容不一致：got len=%d want len=%d", len(s), len(want))
+		}
+		if used, total := host.Arena().Stats(); used != 0 {
+			t.Fatalf("调用结束后槽池应全空，实际 used=%d/%d", used, total)
+		}
+	})
+
+	t.Run("小 payload 同样走调用帧", func(t *testing.T) {
+		// 设计上不再有“小 payload 走内联”的按大小分支：内核总是标定调用帧。
+		res, err := h(map[string]interface{}{"text": "abc"})
+		if err != nil {
+			t.Fatalf("调用 demo_big: %v", err)
+		}
+		if res != "shared:ABC" {
+			t.Fatalf("小参数也应走内核标定的调用帧，实际 %v", res)
+		}
+		if used, total := host.Arena().Stats(); used != 0 {
+			t.Fatalf("调用结束后应全部归还，实际 used=%d/%d", used, total)
+		}
+	})
+}

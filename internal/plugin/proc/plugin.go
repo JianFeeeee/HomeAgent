@@ -221,11 +221,46 @@ func (p *Plugin) handleExit(name string, err error) {
 
 // ---- 内核 → 插件的反向调用 ----
 
+// invokeTool 在插件进程内执行工具。
+//
+// 按 **funccall 模型**：内核是 caller，为每次调用**标定一块内存帧**
+// （参数段 + 结果预算段）交给插件（callee）。参数永远写在帧里，不再有
+// “小 payload 走内联”的按大小分支。
+//
+// 结果超出预算时插件才向内核申请扩容块，并在引用上打
+// sharedRefFlagExpand，内核据此单独归还。
+//
+// 控制面仍是 RPC（请求 ID 关联、ctx 取消、崩溃唤醒都由 Process 承载）。
 func (p *Plugin) invokeTool(name string, args map[string]interface{}) (interface{}, error) {
 	if p.proc == nil {
 		return nil, ErrProcessExited
 	}
-	raw, err := p.proc.Call(MethodToolInvoke, ToolInvokeParams{Name: name, Args: args})
+	arena := p.host.Arena()
+	gen := p.host.Generation()
+
+	argJSON, err := json.Marshal(args)
+	if err != nil {
+		return nil, fmt.Errorf("proc: %s 工具 %s 参数序列化失败: %w", p.name, name, err)
+	}
+
+	// 内核标定调用帧：参数段 + 结果预算段。
+	frame, err := arena.Alloc(OwnerHost, len(argJSON)+toolResultBudget, gen)
+	if err != nil {
+		return nil, fmt.Errorf("proc: %s 工具 %s 分配调用帧失败: %w", p.name, name, err)
+	}
+	defer func() { _ = arena.Free(OwnerHost, frame) }()
+
+	area, err := arena.Read(frame, gen)
+	if err != nil {
+		return nil, fmt.Errorf("proc: %s 工具 %s 读取调用帧失败: %w", p.name, name, err)
+	}
+	copy(area[:len(argJSON)], argJSON)
+
+	raw, err := p.proc.Call(MethodToolInvoke, ToolInvokeParams{
+		Name:    name,
+		Frame:   frame,
+		ArgsLen: uint32(len(argJSON)),
+	})
 	if err != nil {
 		return nil, err
 	}
@@ -233,7 +268,22 @@ func (p *Plugin) invokeTool(name string, args map[string]interface{}) (interface
 	if err := json.Unmarshal(raw, &res); err != nil {
 		return nil, fmt.Errorf("proc: %s 工具 %s 应答解析失败: %w", p.name, name, err)
 	}
-	return res.Result, nil
+	if res.ResultRef.IsZero() {
+		return nil, fmt.Errorf("proc: %s 工具 %s 未返回结果引用", p.name, name)
+	}
+	// 插件申请了扩容块：内核负责归还。
+	if res.ResultRef.Flags&sharedRefFlagExpand != 0 {
+		defer func() { _ = arena.Free(OwnerHost, res.ResultRef) }()
+	}
+	data, err := arena.Read(res.ResultRef, gen)
+	if err != nil {
+		return nil, fmt.Errorf("proc: %s 工具 %s 读取共享结果失败: %w", p.name, name, err)
+	}
+	var out interface{}
+	if err := json.Unmarshal(data, &out); err != nil {
+		return nil, fmt.Errorf("proc: %s 工具 %s 解析共享结果失败: %w", p.name, name, err)
+	}
+	return out, nil
 }
 
 // invokeCleaner 在插件进程内执行工具或通道注册时提供的 Cleaner 函数。
