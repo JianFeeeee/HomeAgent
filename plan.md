@@ -1140,12 +1140,17 @@ SDK 仓 `v1.0.0` / `v1.1.0`。main 的版本路牌现为 `1.2.0`（尚无 tag）
 
 **验证**：
 
-- [ ] SuperBlock 写入读回一致
-- [ ] StageContext 并发改写 0 lost update
-- [ ] 事件环 post-and-forget 仍工作
-- [ ] TestPlugin_ConcurrentWriterAndReaderNoLostUpdate 通过
-- [ ] fd 数从 3 降到 2
-- [ ] git commit -m "feat(shm): unified shared memory region"
+- [x] SuperBlock 写入读回一致
+- [x] StageContext 并发改写 0 lost update
+- [x] 事件环 post-and-forget 仍工作
+- [x] TestPlugin_ConcurrentWriterAndReaderNoLostUpdate 通过
+- [x] fd 数从 3 降到 2（`procExtraFilesForShm` 只返回 memfd + evtfd）
+- [x] git commit -m "feat(shm): unified shared memory region"（ad016e4）
+
+**顺手清理**：删除 §13.1 后遗留的死代码 `allocEvtRing`（从未被调用，
+统一区域后只有操作区内切片的 `NewEvtRing` 仍在使用），并修正
+`plugin.go` 里仍写着旧 3-fd 布局（3=StageContext, 4=事件环, 5=通知）
+的过时注释。
 
 ### 13.2 内核独占的共享内存分配器
 
@@ -1209,7 +1214,7 @@ SDK 仓 `v1.0.0` / `v1.1.0`。main 的版本路牌现为 `1.2.0`（尚无 tag）
 - [x] `TestPlugin_ToolInvokeArgsResultViaArena`：大/小 payload 都经帧往返，结果内容一致且 arena 归零
 - [x] `TestE2E_RealTemplatePluginFullLifecycle`：真实 SDK 模板编译的插件跑通
 - [x] `TestProcTemplate_ToolInvokeUsesSharedRef`：模板必须处理 frame/args_len/result_ref（防漂移）
-- [ ] Bench: ToolInvoke 延迟对比（待补）
+- [x] Bench: ToolInvoke 延迟对比（inline vs frame，见 `bench_test.go`）
 
 ### 13.4 Cleaner 迁移至 SharedRef
 
@@ -1224,8 +1229,11 @@ SDK 仓 `v1.0.0` / `v1.1.0`。main 的版本路牌现为 `1.2.0`（尚无 tag）
 
 **验证**：
 
-- [ ] 三类 Cleaner 结果正确
-- [ ] git commit -m "feat(shm): cleaner invoke via shared refs"
+- [x] 三类 Cleaner 结果正确（testdata/stageplugin.go 覆盖 tool/input/output 三类 scope）
+- [x] git commit -m "feat(shm): cleaner invoke via shared refs"（5608abd）
+
+**顺带**：§13.4 的第六项（工具调用帧）同时把每批工具调用的性质写入
+`lastBatchReplyOnly`，供工具循环选择补位文案（见 `process.go`）。
 
 ### 13.5 InputChannel lane
 
@@ -1283,8 +1291,8 @@ SDK 仓 `v1.0.0` / `v1.1.0`。main 的版本路牌现为 `1.2.0`（尚无 tag）
 
 **验证**：
 
-- [ ] qq_get_message 加 prune 后上下文精简
-- [ ] git commit -m "feat(ctx): context policy for tool results"
+- [x] qq_get_message 加 prune 后上下文精简（QQ 插件已声明 `ContextPolicy: "prune"`）
+- [x] git commit -m "feat(ctx): context policy for tool results"（772a494）
 
 ### 13.9 llmsproxy 上下文溢出感知
 

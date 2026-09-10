@@ -134,8 +134,9 @@ func (p *Plugin) Start(core CoreSDK) error {
 	proc, err := Spawn(p.name, p.bin, Options{
 		Dir: p.dir,
 		// 共享段的传递机制按平台不同（shmpass_*.go）：
-		// Unix 经 ExtraFiles 传继承 fd（ 3=StageContext, 4=事件环, 5=通知）；
-		// Windows 无 fd 继承语义，改用命名内核对象，名字经环境变量传入。
+		// Unix 经 ExtraFiles 传继承 fd（3=统一共享内存区域 SuperBlock+StageContext+EvtRing，
+		// 4=事件通知 eventfd）；Windows 无 fd 继承语义，改用命名内核对象，名字经环境变量传入。
+		// 权威定义在 shmpass_unix.go 的 procExtraFilesForShm，修改时三处必须同步。
 		Env:         append(p.env, p.host.procEnvForShm()...),
 		ExtraFiles:  p.host.procExtraFilesForShm(),
 		ShmSize:     p.host.shmSize,

@@ -4,6 +4,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	pubsdk "gitcode.com/JianFeeeee/homeagent-sdk/sdk"
@@ -29,6 +30,18 @@ import (
 //	EvtRingWritePushConcurrent     83    ns/op    ← 并发不恶化
 //	StageInvokeSharedMemory       132    µs/op    ← 含 3 次进程间往返
 //	SegmentWriteAllReadInto         3.7  µs/op    ← 占 stage 的 2.8%
+//
+// Payload 承载方式对比（2026-09-10，同机；§13.3 取消按大小切内联后补测，
+// -count=3 取中位）：
+//
+//	payload      inline（RPC 报文）   frame（共享内存帧）   差
+//	16 B          26.4 µs/op           48.0 µs/op        +21.6 µs
+//	32 KiB       695.6 µs/op          391.7 µs/op       −303.9 µs
+//
+// 取舍随 payload 大小翻转：小 payload 多付 ~22µs 的帧分配/读写固定开销，
+// 大 payload 省掉整份 JSON 编解码与管道字节拷贝，快 44%。因为线上工具结果
+// 动辄几十 KB，且 22µs 相对 LLM 往返 2-8 秒可忽略，所以统一走帧而不是
+// 按大小分叉——分叉还多一条只在小 payload 上才跑的分支要维护。
 
 // buildBenchPlugin 编译 testdata 里的测试插件（benchmark 版）。
 func buildBenchPlugin(b *testing.B, srcName string) string {
@@ -46,11 +59,33 @@ func buildBenchPlugin(b *testing.B, srcName string) string {
 	return bin
 }
 
-// BenchmarkToolInvoke 测量内核 → 插件的工具调用往返。
+// BenchmarkToolInvoke 对比工具调用 payload 的两种承载方式（§13.3「延迟对比」）。
 //
-// 链路：Call 写 stdin → 插件读循环 → handler → 写 stdout →
-// 内核 readLoop → pending channel 唤醒。对照实验 11 的 19.6µs。
+//	inline — legacy 内联：参数 JSON 直接放进 RPC 报文
+//	frame  — 生产路径：内核 Alloc 帧，payload 全在共享内存，RPC 只传偏移描述符
+//
+// §13.3 取消了按大小切内联的分支，所以 frame 才是线上真实开销；inline 仅留给
+// 直连 RPC 的测试（process/bench 不建 Host，拿不到共享内存）。两者共用同一条
+// RPC 通道，差值就是「把 payload 挪进共享内存」的净成本：小 payload 会因为
+// 多几次分配/拷贝而略慢，大 payload 则省掉整份 JSON 编解码与管道字节拷贝。
+//
+// 两个尺寸都测，是因为这一改动的取舍正好随 payload 大小翻转——只看单点
+// 很容易得出相反结论。对照实验 11 的工具调用 RPC p50 = 19.6µs。
 func BenchmarkToolInvoke(b *testing.B) {
+	for _, sz := range []struct {
+		name string
+		n    int
+	}{
+		{"small", 16},
+		{"large", 32 << 10},
+	} {
+		b.Run("inline/"+sz.name, func(b *testing.B) { benchmarkToolInvokeInline(b, sz.n) })
+		b.Run("frame/"+sz.name, func(b *testing.B) { benchmarkToolInvokeFrame(b, sz.n) })
+	}
+}
+
+// benchmarkToolInvokeInline 是改造前的老路径：参数随 RPC 报文一起过管道。
+func benchmarkToolInvokeInline(b *testing.B, payloadSize int) {
 	bin := buildBenchPlugin(b, "echoplugin.go")
 
 	p, err := Spawn("echo", bin, Options{Handler: noopHandler})
@@ -59,7 +94,7 @@ func BenchmarkToolInvoke(b *testing.B) {
 	}
 	defer p.Kill()
 
-	args := map[string]interface{}{"text": "benchmark"}
+	args := map[string]interface{}{"text": strings.Repeat("a", payloadSize)}
 
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
@@ -67,6 +102,42 @@ func BenchmarkToolInvoke(b *testing.B) {
 			Name: "echo_tool",
 			Args: args,
 		}); err != nil {
+			b.Fatalf("第 %d 次调用失败: %v", i, err)
+		}
+	}
+}
+
+// benchmarkToolInvokeFrame 是 §13.3 之后的生产路径：内核 Alloc 帧 → 参数写帧
+// 前段 → RPC 只传 {frame, args_len} → 插件从帧读参数、结果写回帧结果区 →
+// 内核读回并归还整帧（调用帧模型，见 plan.md §13.3）。
+func benchmarkToolInvokeFrame(b *testing.B, payloadSize int) {
+	bin := buildBenchPlugin(b, "stageplugin.go")
+	core := newFakeCore()
+
+	host, err := NewHost()
+	if err != nil {
+		b.Fatalf("NewHost: %v", err)
+	}
+	defer host.Close()
+
+	p := New("demo", bin, b.TempDir(), nil, host, nil)
+	if err := p.Start(core); err != nil {
+		b.Fatalf("Start: %v", err)
+	}
+	defer p.Close()
+
+	core.mu.Lock()
+	h, ok := core.tools["demo_big"]
+	core.mu.Unlock()
+	if !ok {
+		b.Fatal("插件应注册 demo_big 工具")
+	}
+
+	args := map[string]interface{}{"text": strings.Repeat("a", payloadSize)}
+
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		if _, err := h(args); err != nil {
 			b.Fatalf("第 %d 次调用失败: %v", i, err)
 		}
 	}
