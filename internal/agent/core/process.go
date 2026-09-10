@@ -308,7 +308,11 @@ func (a *Agent) process(input string, stageCtx *sdk.StageContext) (response stri
 			// ContextPolicy: prune 工具调用后执行上下文裁剪（§13.8）
 			if def := a.stageHost.ToolDef(tc.Name); def != nil && def.ContextPolicy == "prune" {
 				if a.context != nil {
-					a.context.Prune(result, 20, a.docStore)
+					topK := a.maxContextSize - 1
+					if topK < 1 {
+						topK = 1
+					}
+					a.context.Prune(result, topK, a.docStore)
 				}
 			}
 

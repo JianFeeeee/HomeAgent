@@ -47,10 +47,11 @@ const (
 	toolFrameSize      = 112 // 单帧总大小
 
 	// 帧状态
-	toolFrameFree    uint32 = 0
-	toolFrameCalling uint32 = 1 // 内核写 input，插件待读
-	toolFrameReading uint32 = 2 // 插件正在执行
-	toolFrameReady   uint32 = 3 // 插件写 output，内核待读
+	toolFrameFree     uint32 = 0
+	toolFrameReserved uint32 = 1 // 内核已占帧，正在写入元数据
+	toolFrameCalling  uint32 = 2 // 内核写完 input，插件待读
+	toolFrameReading  uint32 = 3 // 插件正在执行
+	toolFrameReady    uint32 = 4 // 插件写完 output，内核待读
 )
 
 // ToolRing 头偏移（相对区域起始）
@@ -116,10 +117,19 @@ func AttachToolRing(data []byte) (*ToolCallRing, error) {
 	if magic != toolRingMagic {
 		return nil, fmt.Errorf("tool ring: 魔数不匹配（0x%x）", magic)
 	}
+	cap := getU32(data[trlOffCap:])
+	frameSize := getU32(data[trlOffFrameSize:])
+	version := getU32(data[trlOffVersion:])
+	if version != toolRingVersion {
+		return nil, fmt.Errorf("tool ring: 版本不匹配（%d，期望 %d）", version, toolRingVersion)
+	}
+	if cap == 0 || frameSize != toolFrameSize || uint64(trlOffFrameBase)+uint64(cap)*uint64(frameSize) > uint64(len(data)) {
+		return nil, fmt.Errorf("tool ring: 布局非法（cap=%d frameSize=%d total=%d）", cap, frameSize, len(data))
+	}
 	return &ToolCallRing{
 		data:       data,
-		cap:        getU32(data[trlOffCap:]),
-		frameSize:  getU32(data[trlOffFrameSize:]),
+		cap:        cap,
+		frameSize:  frameSize,
 		framesBase: trlOffFrameBase,
 	}, nil
 }
@@ -128,13 +138,11 @@ func AttachToolRing(data []byte) (*ToolCallRing, error) {
 //
 // 环形扫描：从 writeIdx 开始，绕环一圈找 FREE 帧。全部忙时背压。
 func (r *ToolCallRing) Reserve() (frameIdx uint32, err error) {
-	start := r.writeIdx.Load()
+	start := r.writeIdx.Add(1) - 1
 	for i := uint64(0); i < uint64(r.cap); i++ {
 		idx := start + i
 		fi := uint32(idx % uint64(r.cap))
-		state := atomic.LoadUint32(r.statePtr(fi))
-		if state == toolFrameFree {
-			r.writeIdx.Store(idx + 1)
+		if atomic.CompareAndSwapUint32(r.statePtr(fi), toolFrameFree, toolFrameReserved) {
 			return fi, nil
 		}
 	}
@@ -191,16 +199,20 @@ func (r *ToolCallRing) GetCallingFrame(frameIdx uint32) (name string, inputRef S
 	return
 }
 
-// SetReading 将帧状态设为 READING（插件开始执行）。
-func (r *ToolCallRing) SetReading(frameIdx uint32) {
-	atomic.StoreUint32(r.statePtr(frameIdx), toolFrameReading)
+// SetReading 将 CALLING 帧原子转为 READING（插件开始执行）。
+func (r *ToolCallRing) SetReading(frameIdx uint32) bool {
+	return atomic.CompareAndSwapUint32(r.statePtr(frameIdx), toolFrameCalling, toolFrameReading)
 }
 
-// SetReady 将帧状态设为 READY 并写入 output 描述符（插件执行完毕）。
-func (r *ToolCallRing) SetReady(frameIdx uint32, outputRef SharedRef) {
+// SetReady 将 READING 帧设为 READY 并写入 output 描述符（插件执行完毕）。
+func (r *ToolCallRing) SetReady(frameIdx uint32, outputRef SharedRef) bool {
+	if atomic.LoadUint32(r.statePtr(frameIdx)) != toolFrameReading {
+		return false
+	}
 	off := r.frameOff(frameIdx)
 	packSharedRef(r.data[off+toolFrameOffOutput:], outputRef)
 	atomic.StoreUint32(r.statePtr(frameIdx), toolFrameReady)
+	return true
 }
 
 // GetReadyFrame 读取帧的 requestID 和 output 描述符（内核消费 READY 帧）。
@@ -214,8 +226,8 @@ func (r *ToolCallRing) GetReadyFrame(frameIdx uint32) (reqID uint64, outputRef S
 // ReleaseFrame 回收帧为 FREE（内核消费完毕后调用）。
 func (r *ToolCallRing) ReleaseFrame(frameIdx uint32) {
 	off := r.frameOff(frameIdx)
-	// 清零帧内容
-	for i := uint32(0); i < r.frameSize; i++ {
+	// state 必须最后发布 FREE；否则并发 Reserve 可能在其余字段尚未清零时复用帧。
+	for i := uint32(4); i < r.frameSize; i++ {
 		r.data[off+i] = 0
 	}
 	atomic.StoreUint32(r.statePtr(frameIdx), toolFrameFree)
