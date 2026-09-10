@@ -57,6 +57,14 @@ const (
 	MethodStageInvoke = "stage.invoke"
 	// MethodOutputInvoke 经插件输出通道发送。
 	MethodOutputInvoke = "output.invoke"
+	// MethodArenaAlloc 向内核申请一块共享内存（返回偏移与大小）。
+	// MethodArenaFree 通知内核回收先前申请的共享内存。
+	//
+	// 这两个是**内部传输层接口**，不由插件开发者直接使用：共享内存是
+	// 内核的内部实现，公开 SDK 仍是普通字符串/Map，模板运行时按
+	// payload 大小自动选择内联 JSON 还是共享槽。
+	MethodArenaAlloc = "arena.alloc"
+	MethodArenaFree  = "arena.free"
 	// MethodHandshake 建链首帧：交换协议版本、SDK 版本、共享段规格。
 	MethodHandshake = "handshake"
 )
@@ -202,26 +210,40 @@ type StageInvokeResult struct {
 }
 
 // ToolInvokeParams / ToolInvokeResult：工具调用（原 go_invoke_tool）。
+//
+// ArgsRef/ResultRef 为后续 §13.3 预留：payload 走 Exchange Arena，
+// RPC 帧只带 16 字节描述符；当前仍以 Args/Result 内联为主。
 type ToolInvokeParams struct {
-	Name string                 `json:"name"`
-	Args map[string]interface{} `json:"args,omitempty"`
+	Name    string                 `json:"name"`
+	Args    map[string]interface{} `json:"args,omitempty"`
+	ArgsRef SharedRef              `json:"args_ref,omitempty"`
 }
 
 type ToolInvokeResult struct {
-	Result interface{} `json:"result,omitempty"`
+	Result    interface{} `json:"result,omitempty"`
+	ResultRef SharedRef   `json:"result_ref,omitempty"`
 }
 
 // CleanerInvokeParams / CleanerInvokeResult：跨进程计算层清洗。
 // Scope 取 tool / input / output，Name 是工具名或通道名。
-// TextRef 指向共享内存 arena 中的实际文本数据。
+//
+// 数据面走 Exchange Arena：
+//   - TextRef 指向内核写入的输入文本；payload 超过槽容量时改用内联 Text
+//   - RespRef 指向内核**预分配**的响应槽，插件把结果写进去后回 TextRef；
+//     结果放不下时插件改用内联 Text 返回
+//
+// 插件侧不做任何分配，因此不存在跨进程分配器的竞争。
 type CleanerInvokeParams struct {
 	Scope   string    `json:"scope"`
 	Name    string    `json:"name"`
-	TextRef SharedRef `json:"text_ref"`
+	Text    string    `json:"text,omitempty"`
+	TextRef SharedRef `json:"text_ref,omitempty"`
+	RespRef SharedRef `json:"resp_ref,omitempty"`
 }
 
 type CleanerInvokeResult struct {
-	TextRef SharedRef `json:"text_ref"`
+	Text    string    `json:"text,omitempty"`
+	TextRef SharedRef `json:"text_ref,omitempty"`
 }
 
 const (
@@ -239,6 +261,23 @@ const (
 type OutputInvokeParams struct {
 	Channel string                 `json:"channel"`
 	Args    map[string]interface{} `json:"args,omitempty"`
+}
+
+// ArenaAllocParams / ArenaAllocResult：插件向内核申请共享内存。
+//
+// 内核返回的 Ref.Length 是槽容量（可写上限），插件写入后自行把 Length
+// 改成实际 payload 长度再随业务 RPC 回传。
+type ArenaAllocParams struct {
+	Size uint32 `json:"size"`
+}
+
+type ArenaAllocResult struct {
+	Ref SharedRef `json:"ref"`
+}
+
+// ArenaFreeParams：插件通知内核回收共享内存。只带描述符，槽号在 Flags 里。
+type ArenaFreeParams struct {
+	Ref SharedRef `json:"ref"`
 }
 
 // PluginInitParams：插件构造参数（原 case init_plugin）。

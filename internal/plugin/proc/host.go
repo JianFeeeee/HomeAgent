@@ -5,6 +5,7 @@ import (
 	"log"
 	"os"
 	"sync"
+	"sync/atomic"
 
 	pubsdk "gitcode.com/JianFeeeee/homeagent-sdk/sdk"
 )
@@ -17,9 +18,9 @@ import (
 // 副本模型——两个插件各写各的段、各自回读，最后回读者覆盖前者，
 // lost update 原样复现（§8.4 实测 35.8~36.8%）。
 //
-// 统一区域（§13.1）：单 memfd 包含 SuperBlock + StageContext + EvtRing。
-// 子进程经 fd 3 mmap 同一 memfd → 同一份物理页，区域头 SuperBlock
-// 告知各 segment 的偏移与大小。
+// 统一区域（§13.1）：单 memfd 包含 SuperBlock + StageContext + EvtRing
+// + Exchange Arena。子进程经 fd 3 mmap 同一 memfd → 同一份物理页，
+// 区域头 SuperBlock 告知各 segment 的偏移与大小。
 //
 // fd 分配：fd 3 = 统一区域，fd 4 = eventfd。
 type Host struct {
@@ -29,6 +30,13 @@ type Host struct {
 	seg     *Segment       // StageContext segment（位于 unified ctxData）
 	shmSize int            // 统一区域总大小
 
+	// arena 是跨进程共享槽池（§13.2 重设计）。分配/释放走共享位图 CAS，
+	// 任意进程/goroutine 并发调用都安全，不需要任何锁。
+	arena *arenaRegion
+
+	// nextOwner 给每个插件进程分配一个不透明 owner ID，供 ReclaimOwner 使用。
+	nextOwner atomic.Uint32
+
 	// 事件通知（独立于共享段）
 	evtfd       *os.File // Unix：eventfd/pipe 读端（fd 4）。Windows 为 nil。
 	evtNotifyFd int      // 通知句柄的平台无关标识
@@ -36,7 +44,6 @@ type Host struct {
 
 	evtSubscriber EvtRingSubscriber
 	locks         *lockRegistry
-	arenaMu       sync.Mutex // 动态 arena 跨进程调用的生命周期锁
 	stageMu       sync.Mutex
 	coordMu       sync.Mutex
 	coord         *stageCoordinator
@@ -53,8 +60,11 @@ type Host struct {
 // 三者共同点：全部插件看到同一份物理页，段内一律用相对偏移而非指针
 // （实验 2 已验证各进程 mmap 到不同虚拟地址时偏移解引用仍正确）。
 func NewHost() (*Host, error) {
-	// 统一区域大小：SuperBlock + StageContext segment + EvtRing segment
-	unifiedSize := superBlockSize + shmDefaultSize + evtTotalSize + unifiedArenaSize
+	// 统一区域大小：SuperBlock + StageContext + EvtRing + Exchange Arena
+	//
+	// +8 是 arena 基址 8 字节对齐的 padding 余量：arenaOff 向上取整可能
+	// 吃掉最多 4 字节，预留 8 字节保证 arenaCap 不会小于 arenaPublishSize。
+	unifiedSize := superBlockSize + shmDefaultSize + evtTotalSize + int(arenaPublishSize) + 8
 	memfd, data, err := allocShm(unifiedSize)
 	if err != nil {
 		return nil, err
@@ -65,6 +75,17 @@ func NewHost() (*Host, error) {
 	if err != nil {
 		freeShm(memfd, data)
 		return nil, err
+	}
+
+	// 初始化 Exchange Arena 槽池
+	arena, err := initArena(data, ur.arenaOff, ur.arenaCap, arenaDefaultSlotCount, arenaDefaultSlotSize)
+	if err != nil {
+		freeShm(memfd, data)
+		return nil, fmt.Errorf("槽池初始化: %w", err)
+	}
+	if used, total := arena.Stats(); used != 0 || total != arenaDefaultSlotCount {
+		freeShm(memfd, data)
+		return nil, fmt.Errorf("槽池初始化异常：used=%d total=%d", used, total)
 	}
 
 	// 创建 StageContext segment（位于 SuperBlock 之后）
@@ -102,6 +123,7 @@ func NewHost() (*Host, error) {
 		unified:     ur,
 		seg:         seg,
 		shmSize:     unifiedSize,
+		arena:       arena,
 		evtfd:       evtfdReadFile(efd),
 		evtNotifyFd: efd,
 		evtRing:     evtRing,
@@ -301,6 +323,20 @@ func (c *stageCoordinator) finish(sc *pubsdk.StageContext, written bool) error {
 	}
 	return nil
 }
+
+// Arena 返回跨进程共享槽池。
+func (h *Host) Arena() *arenaRegion { return h.arena }
+
+// Generation 返回统一区域当前 generation（SharedRef 校验用）。
+func (h *Host) Generation() uint64 { return h.unified.generation() }
+
+// NextOwnerID 分配一个插件专用的槽 owner ID。
+//
+// 从 1 开始（OwnerHost=0 保留给内核），单调递增，不会重复。
+func (h *Host) NextOwnerID() uint32 { return h.nextOwner.Add(1) }
+
+// ReclaimOwner 回收某个 owner 名下所有槽（插件退出时调用）。
+func (h *Host) ReclaimOwner(owner uint32) int { return h.arena.ReclaimOwner(owner) }
 
 // ShmSize 返回共享段大小（供诊断/日志）。
 func (h *Host) ShmSize() int { return h.shmSize }

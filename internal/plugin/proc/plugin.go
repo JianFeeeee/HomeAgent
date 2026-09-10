@@ -43,6 +43,10 @@ type Plugin struct {
 	// caps 是 manifest 声明的能力集（§3.8 权限梯度）。
 	caps *capabilitySet
 
+	// ownerID 是本插件在共享槽池里的身份（由 Host 分配）。
+	// 内核用它校验 arena.free 的归属，并在插件退出时回收残留槽。
+	ownerID uint32
+
 	stopOnce sync.Once
 
 	// stopping 标记「本次退出是内核主动发起的」，用于压掉 onCrash。
@@ -109,10 +113,14 @@ func (p *Plugin) Start(core CoreSDK) error {
 		return fmt.Errorf("proc: %s 缺少共享段 Host", p.name)
 	}
 
+	// 领一个槽池身份；插件退出时用它回收残留槽。
+	p.ownerID = p.host.NextOwnerID()
+
 	p.handler = &coreHandler{
 		sdk:     core,
 		name:    p.name,
 		host:    p.host,
+		owner:   p.ownerID,
 		locks:   p.host.locks,
 		evtRing: p.host.evtSubscriber,
 		caps:    p.caps,
@@ -191,8 +199,15 @@ func (p *Plugin) Close() error {
 // 后者是"锁仲裁回内核"的自愈价值：持锁者死亡不会导致全局死锁，
 // 无需 robust pthread_mutex（实验 9）。
 func (p *Plugin) handleExit(name string, err error) {
-	if p.host != nil && p.host.ForceReleaseLock(name) {
-		log.Printf("[proc] %s 退出，内核已释放其持有的 stage 锁", name)
+	if p.host != nil {
+		if p.host.ForceReleaseLock(name) {
+			log.Printf("[proc] %s 退出，内核已释放其持有的 stage 锁", name)
+		}
+		// 回收该插件未归还的共享槽：崩溃的插件无法自己归还，
+		// 不回收会让槽池慢慢耗尽，最终所有共享内存调用退化成内联 RPC。
+		if n := p.host.ReclaimOwner(p.ownerID); n > 0 {
+			log.Printf("[proc] %s 退出，回收 %d 个残留共享槽", name, n)
+		}
 	}
 	// 内核主动停止（Stop/Close，含宽限期超时后的 Kill）不算崩溃：
 	// 否则重载/禁用/卸载都会误触发自动重启。
@@ -222,23 +237,22 @@ func (p *Plugin) invokeTool(name string, args map[string]interface{}) (interface
 }
 
 // invokeCleaner 在插件进程内执行工具或通道注册时提供的 Cleaner 函数。
-func (p *Plugin) invokeCleaner(scope, name string, textRef SharedRef) (SharedRef, error) {
+//
+// 数据面参数（输入槽 / 预分配响应槽）由内核在 params 里给出，
+// 插件只负责读输入、写结果，不做任何分配。
+func (p *Plugin) invokeCleaner(params CleanerInvokeParams) (CleanerInvokeResult, error) {
 	if p.proc == nil {
-		return SharedRef{}, ErrProcessExited
+		return CleanerInvokeResult{}, ErrProcessExited
 	}
-	raw, err := p.proc.Call(MethodCleanerInvoke, CleanerInvokeParams{
-		Scope:   scope,
-		Name:    name,
-		TextRef: textRef,
-	})
+	raw, err := p.proc.Call(MethodCleanerInvoke, params)
 	if err != nil {
-		return SharedRef{}, err
+		return CleanerInvokeResult{}, err
 	}
 	var res CleanerInvokeResult
 	if err := json.Unmarshal(raw, &res); err != nil {
-		return SharedRef{}, fmt.Errorf("proc: %s %s Cleaner %s 应答解析失败: %w", p.name, scope, name, err)
+		return CleanerInvokeResult{}, fmt.Errorf("proc: %s %s Cleaner %s 应答解析失败: %w", p.name, params.Scope, params.Name, err)
 	}
-	return res.TextRef, nil
+	return res, nil
 }
 
 func (p *Plugin) invokeStage(ctx context.Context, stage string, seq uint64) error {
