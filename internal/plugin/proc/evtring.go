@@ -4,7 +4,6 @@ import (
 	"encoding/binary"
 	"encoding/json"
 	"fmt"
-	"os"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -122,26 +121,6 @@ func NewEvtRing(data []byte) (*EvtRing, error) {
 		arenaBase: evtOffSlots + evtRingCap*evtRingSlotLen,
 		arenaCap:  evtArenaCap,
 	}, nil
-}
-
-// allocEvtRing 创建事件环共享段（memfd + mmap），返回 (段句柄, mmap数据, eventfd fd)。
-// 段句柄通过 ExtraFiles 传给子进程（fd 4）；eventfd（fd 5）也通过 ExtraFiles 传。
-func allocEvtRing() (*os.File, []byte, int, error) {
-	ringfd, ringData, err := allocShm(evtTotalSize)
-	if err != nil {
-		return nil, nil, -1, fmt.Errorf("创建事件环段: %w", err)
-	}
-	// 初始化头
-	binary.LittleEndian.PutUint32(ringData[evtOffMagic:], evtRingMagic)
-	binary.LittleEndian.PutUint32(ringData[evtOffVersion:], evtRingVersion)
-	binary.LittleEndian.PutUint32(ringData[evtOffCap:], evtRingCap)
-
-	efd, err := evtfdCreate()
-	if err != nil {
-		freeShm(ringfd, ringData)
-		return nil, nil, -1, fmt.Errorf("创建 eventfd: %w", err)
-	}
-	return ringfd, ringData, efd, nil
 }
 
 func (r *EvtRing) Init() {
