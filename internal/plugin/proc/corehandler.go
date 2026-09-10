@@ -31,9 +31,10 @@ type coreHandler struct {
 	// locks 是 host.locks 的引用，供 stage.lock/unlock 路由。
 	locks *lockRegistry
 
-	// invokeTool/invokeStageFn/invokeOutput 反向调用插件（内核 → 插件）。
+	// invokeTool/invokeCleaner/invokeStageFn/invokeOutput 反向调用插件（内核 → 插件）。
 	// 由 Plugin 注入，注册回调时用它们构造 handler。
 	invokeTool    func(name string, args map[string]interface{}) (interface{}, error)
+	invokeCleaner func(scope, name, text string) (string, error)
 	invokeStageFn func(ctx context.Context, stage string, seq uint64) error
 	invokeOutput  func(channel string, args map[string]interface{}) (interface{}, error)
 
@@ -128,15 +129,24 @@ func (h *coreHandler) Handle(method string, params json.RawMessage) (interface{}
 		return nil, h.sdk.RegisterPluginAPI(p.Name)
 	case MethodInputRegister:
 		var p struct {
-			Name string            `json:"name"`
-			Def  pubsdk.ChannelDef `json:"def"`
+			Name       string            `json:"name"`
+			Def        pubsdk.ChannelDef `json:"def"`
+			HasCleaner bool              `json:"has_cleaner"`
 		}
 		if err := unmarshal(params, &p); err != nil {
 			return nil, err
 		}
-		// 注意 ChannelDef.Cleaner 是函数，无法跨进程传递（§3.5 回调型资源）。
-		// NoMemory 可传；Cleaner 若插件需要，须在插件侧对文本预处理后再注入。
-		return nil, h.sdk.RegisterInputChannel(p.Name, pubsdk.ChannelDef{NoMemory: p.Def.NoMemory})
+		if p.Name == "" {
+			return nil, fmt.Errorf("input.register: 缺少 name")
+		}
+		cleaner, err := h.cleanerProxy(CleanerScopeInput, p.Name, p.HasCleaner)
+		if err != nil {
+			return nil, fmt.Errorf("input.register: %w", err)
+		}
+		return nil, h.sdk.RegisterInputChannel(p.Name, pubsdk.ChannelDef{
+			NoMemory: p.Def.NoMemory,
+			Cleaner:  cleaner,
+		})
 
 	// ---- IO 注入（原 case 5/6/7/47）----
 	case MethodIOInjectText:
@@ -580,11 +590,30 @@ func errUnavailable(what string) error {
 	return fmt.Errorf("%s 能力在当前内核实例中不可用", what)
 }
 
+// cleanerProxy 把进程内函数式 Cleaner 恢复成内核侧透明代理。
+// RPC 失败时返回原文：清洗是计算层优化，不能因插件暂时离线而丢失内容。
+func (h *coreHandler) cleanerProxy(scope, name string, enabled bool) (func(string) string, error) {
+	if !enabled {
+		return nil, nil
+	}
+	if h.invokeCleaner == nil {
+		return nil, fmt.Errorf("%s %s 声明 Cleaner，但清洗回调通道未就绪", scope, name)
+	}
+	return func(text string) string {
+		cleaned, err := h.invokeCleaner(scope, name, text)
+		if err != nil {
+			return text
+		}
+		return cleaned
+	}, nil
+}
+
 // toolRegister 注册插件工具，handler 反向调用插件执行（原 case 1）。
 func (h *coreHandler) toolRegister(params json.RawMessage) (interface{}, error) {
 	var p struct {
-		Name string         `json:"name"`
-		Def  pubsdk.ToolDef `json:"def"`
+		Name       string         `json:"name"`
+		Def        pubsdk.ToolDef `json:"def"`
+		HasCleaner bool           `json:"has_cleaner"`
 	}
 	if err := unmarshal(params, &p); err != nil {
 		return nil, err
@@ -593,8 +622,12 @@ func (h *coreHandler) toolRegister(params json.RawMessage) (interface{}, error) 
 		return nil, fmt.Errorf("tool.register: 缺少 name")
 	}
 	p.Def.Plugin = h.name
-	// ToolDef.Cleaner 是函数，跨进程无法传递（§3.5）——与 C ABI 路径行为一致。
-	p.Def.Cleaner = nil
+	// 函数本身不进 JSON；has_cleaner 只声明其存在，实际执行回到插件进程。
+	cleaner, err := h.cleanerProxy(CleanerScopeTool, p.Name, p.HasCleaner)
+	if err != nil {
+		return nil, fmt.Errorf("tool.register: %w", err)
+	}
+	p.Def.Cleaner = cleaner
 
 	name := p.Name
 	return nil, h.sdk.RegisterTool(name, p.Def, func(args map[string]interface{}) (interface{}, error) {
@@ -637,10 +670,11 @@ func (h *coreHandler) stageRegister(params json.RawMessage) (interface{}, error)
 // 永远返回成功（§9.4，现网 2 次消息发不出而模型以为成功）。
 func (h *coreHandler) outputRegister(params json.RawMessage) (interface{}, error) {
 	var p struct {
-		Name string            `json:"name"`
-		Caps int               `json:"caps"`
-		Desc string            `json:"desc"`
-		Def  pubsdk.ChannelDef `json:"def"`
+		Name       string            `json:"name"`
+		Caps       int               `json:"caps"`
+		Desc       string            `json:"desc"`
+		Def        pubsdk.ChannelDef `json:"def"`
+		HasCleaner bool              `json:"has_cleaner"`
 	}
 	if err := unmarshal(params, &p); err != nil {
 		return nil, err
@@ -649,8 +683,12 @@ func (h *coreHandler) outputRegister(params json.RawMessage) (interface{}, error
 		return nil, fmt.Errorf("output.register: 缺少 name")
 	}
 	channel := p.Name
+	cleaner, err := h.cleanerProxy(CleanerScopeOutput, channel, p.HasCleaner)
+	if err != nil {
+		return nil, fmt.Errorf("output.register: %w", err)
+	}
 	return nil, h.sdk.RegisterOutputChannel(channel, p.Caps, p.Desc,
-		pubsdk.ChannelDef{NoMemory: p.Def.NoMemory},
+		pubsdk.ChannelDef{NoMemory: p.Def.NoMemory, Cleaner: cleaner},
 		func(args map[string]interface{}) (interface{}, error) {
 			return h.invokeOutput(channel, args)
 		})

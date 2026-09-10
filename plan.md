@@ -736,7 +736,7 @@ goroutine 里的 `pluginInvokeOutput` 才是 cgo 调用，**不构成嵌套**。
 **现网触发点**：`AfterToolcall` 上有两个外部插件
 
 | Stage | 注册者 | 风险 |
-|---|---|---|
+| --- | --- | --- |
 | `AfterToolcall` | **sanitizer**(Global,改写 ToolResults) + **weather**(own_tools,只读) | ⚠️ 真实冲突 |
 | `PreAction` | memo(外部) + webui(内置) | ⚡ |
 | `BeforeToolcall` | qq(外部) + webui(内置) + cmd(内置) | ⚡ |
@@ -783,7 +783,7 @@ diff := changedFieldsOnly(before, stageContextWritable(sc))
 `lua_plugin.go:726` 直接读 `sc.RawMessage` 等字段，**未持 `sc.RLock()`**：
 
 | 路径 | 快照时是否持锁 |
-|---|---|
+| --- | --- |
 | cabi（`loader.go:412`） | ✅ `sc.RLock()` |
 | Lua（`lua_plugin.go:726`） | ❌ 无锁 |
 
@@ -806,7 +806,7 @@ return nil       // ← 无 resultOut，无 applyStageResult
 ```
 
 | 路径 | 下发字段 | 写回 |
-|---|---|---|
+| --- | --- | --- |
 | Linux cabi | 10 | ✅ |
 | Lua | 10 | ✅ |
 | **Windows DLL** | **3** | ❌ **完全没有** |
@@ -850,7 +850,7 @@ return nil       // ← 无 resultOut，无 applyStageResult
 **11 项可行性实验全部通过**（详见评估文档第七章）：
 
 | 验证项 | 结果 |
-|---|---|
+| --- | --- |
 | eventfd 走 netpoller | ✅ 200 等待者仅 +1 线程 |
 | 跨进程偏移解引用 | ✅ 父子 mmap 不同基址仍正确 |
 | 锁仲裁 RPC 成本 | ✅ 19.4 µs/次 |
@@ -886,7 +886,7 @@ return nil       // ← 无 resultOut，无 applyStageResult
 按「影响 × 成本」排序，前 4 项不依赖迁移决策：
 
 | 序 | 项 | 规模 | 现网影响 |
-|---|---|---|---|
+| --- | --- | --- | --- |
 | 1 | **11.1** output_send 同步等结果 | M | ❗ 用户收不到消息且模型以为成功 |
 | 2 | **11.3** stageContextWritable diff 回传 | S | ❗ 脏数据进 LLM（量级百分之几） |
 | 3 | **11.6** reload 语义修正（3 项） | S | 误导模型白跑重载 |
@@ -930,7 +930,7 @@ context 累积导致的内存增长。
 四个决策点均已落定并执行：
 
 | # | 决策点 | 最终选择 |
-|---|---|---|
+| --- | --- | --- |
 | 1 | merge 方式 | **`--no-ff`** —— commit message 记录了「为何共享同一块 memfd」「为何 procCore 不能嵌入」等踩坑过程，压成一条就没了 |
 | 2 | 合回后是否删 feature 分支 | **删**（`feature/plugin-proc-migration`、`feature/memory-media` 均已删，本地 + 远端） |
 | 3 | release 构建是否再替换生产二进制 | **换**，且此后每个正式版都走同一流程（备份二进制 + `sqlite3 .backup` 配置库 + 记插件清单 → `install -m 0755` → restart → 健康检查） |
@@ -949,6 +949,7 @@ context 累积导致的内存增长。
 
 已发布：`v1.0.0` / `v1.0.1` / `v1.0.3` / `v1.0.4`（1.0.x 线）、`v1.1.0` / `v1.1.0-beta.1` / `v1.1.1`（1.1.x 线），
 SDK 仓 `v1.0.0` / `v1.1.0`。main 的版本路牌现为 `1.2.0`（尚无 tag）。
+
 ```
 
 ---
@@ -1083,3 +1084,219 @@ SDK 仓 `v1.0.0` / `v1.1.0`。main 的版本路牌现为 `1.2.0`（尚无 tag）
 
 额外收益：权限梯度从「C ABI 表达能力的意外产物」变成**显式三道闸**
 （类型层 `procCore` 命名字段 + manifest 能力声明 + RPC 边界明确拒绝）。
+
+---
+
+## 13. 子进程化后遗留改造（逐步推进）
+
+每个步骤独立提交、独立验证，遵循「小步 → 测试 → 提交」循环。
+
+### 步骤分组
+
+| 步骤 | 内容 | 依赖 | 产出 |
+|---|---|---|---|
+| 13.1 | 统一共享内存布局 | 无 | 单一 memfd，StageContext+EvtRing 成为区内 segment |
+| 13.2 | 共享内存扩缩容 | 13.1 | ftruncate/remap，generation 感知 |
+| 13.3 | ToolCall lane | 13.1 | 跨进程工具调用走 SharedRef，RPC 退化为控制信号 |
+| 13.4 | Cleaner 迁移至 SharedRef | 13.1 | cleaner.invoke 参数/结果走 SharedRef |
+| 13.5 | InputChannel lane | 13.1 | 输入通道消息走共享内存 |
+| 13.6 | OutputChannel lane | 13.1 | 输出通道消息走共享内存 |
+| 13.7 | RuntimeManager + 分组 worker | 13.1~13.6 | 一个 RuntimeManager，少量 worker，多插件共享 transport |
+| 13.8 | ContextPolicy tool 上下文策略 | 无 | ToolDef.ContextPolicy = none/prune |
+| 13.9 | llmsproxy 上下文溢出感知 | 无 | 溢出错误归一化 + AUTO 截断放宽 |
+| 13.10 | AgentMail 三个 bug | 无 | 提示词修正 / 回信标识 / relay_key 限长 |
+| 13.11 | WebUI 修复全清单 | 无 | 11 项逐步推进 |
+| 13.12 | L3 原生多模态 | 13.1~13.7 | 媒体作为图节点/边，L2→L3 引用迁移 |
+
+### 13.1 统一共享内存布局
+
+**现状**：两块独立 memfd（StageContext 256KB + EvtRing ~320KB），fd 3/4，eventfd 占 fd 5。
+**目标**：合并为单一 memfd 占 fd 3；eventfd 占 fd 4。段内偏移表定位各 segment。
+
+```text
+┌─────────────────────────────────────────┐
+│ Unified Shared Region（单 memfd）       │
+├─────────────────────────────────────────┤
+│ [SuperBlock 64B] magic/version/cap/gen  │
+│ [StageContext segment]  布局不变         │
+│ [EvtRing segment]      布局不变         │
+│ [Reserved: ToolCall]   后续步骤填充     │
+│ [Reserved: InputCh]    后续步骤填充     │
+│ [Reserved: OutputCh]   后续步骤填充     │
+│ [Dynamic Arena]        自由分配区       │
+└─────────────────────────────────────────┘
+```
+
+**实施**：
+
+1. 定义 SuperBlock 布局（magic/version/segment 偏移表）
+2. NewHost() 一次 allocShm，内含两段
+3. Segment + EvtRing 从 SuperBlock 读偏移
+4. fd 传递从 3 个降为 2 个
+5. procExtraFilesForShm 返回 2 个 fd
+6. 插件侧模板解析 SuperBlock，自行定位两段
+7. 所有现有测试不变
+8. go test -race ./internal/plugin/proc/
+
+**验证**：
+
+- [ ] SuperBlock 写入读回一致
+- [ ] StageContext 并发改写 0 lost update
+- [ ] 事件环 post-and-forget 仍工作
+- [ ] TestPlugin_ConcurrentWriterAndReaderNoLostUpdate 通过
+- [ ] fd 数从 3 降到 2
+- [ ] git commit -m "feat(shm): unified shared memory region"
+
+### 13.2 共享内存扩缩容
+
+**目标**：ftruncate 扩展 + mremap/mmap 重映射 + generation 感知。
+
+**实施**：
+
+1. SuperBlock 加 generation + capacity 字段
+2. Host.Grow(newSize)：ftruncate → 更新 capacity/gen → 通知子进程
+3. 子进程下次 stage 读 gen → remap
+4. Host.Shrink()：compact 后 free > 50% 且持续 5min → 缩容
+5. 无活跃 slot 时才允许缩容
+
+**验证**：
+
+- [ ] Grow 后子进程正确读写
+- [ ] Shrink 不裁掉活跃 slot
+- [ ] git commit -m "feat(shm): grow/shrink with generation awareness"
+
+### 13.3 ToolCall lane
+
+**目标**：工具调用参数/结果从 JSON RPC 改为 SharedRef。
+
+**实施**：
+
+1. ToolCall Slot 状态机：FREE→WRITING→READY→READING→DONE→FREE
+2. 内核写请求 → READY → eventfd 通知
+3. 插件读请求 → 执行 → 写结果 → DONE → eventfd 通知
+4. RPC tool.invoke 改为只传 {requestID, argsRef, resultRef}
+5. has_cleaner 保持不变
+
+**验证**：
+
+- [ ] TestPlugin_RegisteredToolInvokable 通过
+- [ ] Bench: ToolInvoke 延迟改善
+- [ ] git commit -m "feat(shm): toolcall lane with slot state machine"
+
+### 13.4 Cleaner 迁移至 SharedRef
+
+**目标**：cleaner.invoke 参数/结果走 SharedRef。
+
+**实施**：
+
+1. CleanerInvokeParams 的 Text 改为 SharedRef
+2. 插件从 SharedRef 读文本、写结果
+3. 内核从 SharedRef 读结果
+4. RPC 帧从 ~200B 降到 ~16B
+
+**验证**：
+
+- [ ] 三类 Cleaner 结果正确
+- [ ] git commit -m "feat(shm): cleaner invoke via shared refs"
+
+### 13.5 InputChannel lane
+
+**目标**：输入通道消息走共享内存。
+
+**实施**：
+
+1. InputChannel Slot：source/channel/text/blocks 写入 arena
+2. 插件消费后设 DONE
+3. 同步注入仍走 RPC + SharedRef
+4. 异步注入改写 arena + eventfd
+
+**验证**：
+
+- [ ] 真实 QQ 消息注入测试
+- [ ] git commit -m "feat(shm): input channel lane"
+
+### 13.6 OutputChannel lane
+
+**目标**：输出通道消息走共享内存。
+
+**验证**：
+
+- [ ] QQ 输出正常
+- [ ] git commit -m "feat(shm): output channel lane"
+
+### 13.7 RuntimeManager + 分组 worker
+
+**目标**：一个 RuntimeManager + 少量 worker + 多插件共享 transport + 每插件独立 PluginContext。
+
+**实施**：
+
+1. RuntimeManager 类型：管理 worker 池 + 调度
+2. Worker 类型：一个进程，共享 RuntimeClient
+3. PluginContext 类型：独立身份，共享 transport
+4. manifest 新增 worker_group 字段
+5. 默认所有 proc 插件归同一 worker（兼容迁移）
+6. 高风险插件可声明独立 worker_group
+
+**验证**：
+
+- [ ] 默认分组 = 现有行为
+- [ ] git commit -m "feat(runtime): RuntimeManager with grouped workers"
+
+### 13.8 ContextPolicy tool 上下文策略
+
+**目标**：ToolDef.ContextPolicy = none/prune。
+
+**实施**：
+
+1. SDK ToolDef 加 ContextPolicy string 字段
+2. StageAfterToolcall 检查当前 tool 的 ContextPolicy
+3. prune 时执行 RelevanceContext.Prune
+4. 默认 none
+
+**验证**：
+
+- [ ] qq_get_message 加 prune 后上下文精简
+- [ ] git commit -m "feat(ctx): context policy for tool results"
+
+### 13.9 llmsproxy 上下文溢出感知
+
+**实施**：
+
+1. OVERFLOW_PATTERNS 补充 "Context window is full"
+2. AUTO 截断宽度 80→160
+
+**验证**：
+
+- [ ] go test ./internal/ai/...
+- [ ] git commit -m "fix(ai): context overflow pattern + truncation width"
+
+### 13.10 AgentMail 三个 bug
+
+**实施**：
+
+1. 提示词修正
+2. InReplyTo 字段
+3. relay_key ≤ 64 字节
+
+**验证**：
+
+- [ ] Agent→Agent 不再套话 6 轮
+- [ ] git commit -m "fix(agentmail): prompt / in-reply-to / relay key"
+
+### 13.11 WebUI 修复全清单
+
+11 项，每项独立提交：
+SSE Last-Event-ID → 超时 → api 状态码 → renderAll 增量 → XSS 消毒 → CSS → DesignSystem → handleAgents 持久化 → handleKnowledge 吞错 → GUI 重构
+
+### 13.12 L3 原生多模态
+
+**实施**：
+
+1. L3 node_type 新增 media/media_block
+2. L3 edge_type 新增 depicts/contains
+3. L2→L3 迁移时保留 media 引用边
+
+**验证**：
+
+- [ ] 图查询返回媒体节点
+- [ ] git commit -m "feat(l3): native multimodal nodes/edges"

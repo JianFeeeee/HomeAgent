@@ -39,7 +39,7 @@ type Response struct {
 	Error  string          `json:"error,omitempty"`
 }
 
-// ---- kernel → plugin（内核调用插件，对应今日 7 个 //export）----
+// ---- kernel → plugin（内核调用插件；工具执行、Cleaner、stage、输出等）----
 const (
 	// MethodPluginInit 传插件名与配置，插件构造实例但不启动。
 	MethodPluginInit = "plugin.init"
@@ -49,6 +49,10 @@ const (
 	MethodPluginStop = "plugin.stop"
 	// MethodToolInvoke 执行插件工具。
 	MethodToolInvoke = "tool.invoke"
+	// MethodCleanerInvoke 在插件进程内执行工具或通道声明的 Cleaner。
+	// Cleaner 是函数，不能随注册请求 JSON 序列化；内核保留 RPC 回调闭包，
+	// 需要参与向量化/蒸馏时把原文送回插件执行真正的 Cleaner。
+	MethodCleanerInvoke = "cleaner.invoke"
 	// MethodStageInvoke 执行阶段处理器。数据经共享段传递，参数只带阶段名与段世代号。
 	MethodStageInvoke = "stage.invoke"
 	// MethodOutputInvoke 经插件输出通道发送。
@@ -206,6 +210,24 @@ type ToolInvokeParams struct {
 type ToolInvokeResult struct {
 	Result interface{} `json:"result,omitempty"`
 }
+
+// CleanerInvokeParams / CleanerInvokeResult：跨进程计算层清洗。
+// Scope 取 tool / input / output，Name 是工具名或通道名。
+type CleanerInvokeParams struct {
+	Scope string `json:"scope"`
+	Name  string `json:"name"`
+	Text  string `json:"text"`
+}
+
+type CleanerInvokeResult struct {
+	Text string `json:"text"`
+}
+
+const (
+	CleanerScopeTool   = "tool"
+	CleanerScopeInput  = "input"
+	CleanerScopeOutput = "output"
+)
 
 // OutputInvokeParams：输出通道发送（原 go_invoke_output）。
 //
