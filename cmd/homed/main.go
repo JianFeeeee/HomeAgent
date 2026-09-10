@@ -322,7 +322,7 @@ func main() {
 	// 文档记忆 + 知识库
 	// ========================================================================
 
-	docStore := document.NewStore(filepath.Join(cfg.Daemon.DataDir, "memory", "documents"))
+	docStore := document.NewStore(filepath.Join(cfg.Daemon.DataDir, "memory", "documents"), memory.TokenizeWords)
 	if err := docStore.Start(); err != nil {
 		log.Printf("[homed] warning: document store: %v", err)
 	}

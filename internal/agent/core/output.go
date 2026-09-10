@@ -4,8 +4,8 @@ import (
 	"fmt"
 	"strings"
 
-	agentIO "gitcode.com/JianFeeeee/HomeAgent/internal/agent/io"
 	agentAPI "gitcode.com/JianFeeeee/HomeAgent/internal/agent/api"
+	agentIO "gitcode.com/JianFeeeee/HomeAgent/internal/agent/io"
 	sdk "gitcode.com/JianFeeeee/HomeAgent/internal/sdk"
 )
 
@@ -78,7 +78,10 @@ func (a *Agent) executeOutputSendTool(tc agentAPI.ToolCall) string {
 				return fmt.Sprintf("[%s] 通道发送结果未确认：%s", channel, note)
 			}
 		}
-		return fmt.Sprintf("已通过 [%s] 通道发送: %v", channel, result)
+		// 成功回执：只返回极简标记，不回传完整插件响应。
+		// 「已通过 [qq] 通道发送: map[status:sent message_id:xxx]」这类富回执
+		// 会驱动模型继续调用 output_send（回声效应），是 output loop 的根源之一。
+		return "ok"
 	}
 
 	a.io.EmitTextTo("agent_io", channel, payload)
