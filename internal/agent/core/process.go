@@ -59,6 +59,30 @@ func isContinuationPlaceholder(m agentAPI.Message) bool {
 		(m.Content == continuationPlaceholder || m.Content == replyDeliveredPlaceholder)
 }
 
+// toolOutputForQuery 返回用于相关性计算的工具输出**有效内容**。
+//
+// 为什么要过 Cleaner 而不是直接用原始 result：ContextPolicy=prune 的入参是
+// **相关性查询向量**——它决定保留/归档哪些上下文事件。原始工具输出里混着
+// ANSI 转义、base64、JSON 包装等噪声，直接拿去向量化会让打分失真。
+// 而 ToolDef.Cleaner 的契约本就写着“仅在向量化/jieba/蒸馏时调用”，裁剪正是
+// 在向量化，所以这里必须过它（此前只在构建事件向量时用了，裁剪查询漏了）。
+//
+// Cleaner 未注册或 RPC 失败时回退原文（清洗是计算层优化，不能因此丢内容）；
+// 返回空串时也回退——空串会让查询向量退化成零向量，裁剪就失去判据。
+func (a *Agent) toolOutputForQuery(toolName, raw string) string {
+	if a.stageHost == nil {
+		return raw
+	}
+	cleaner := a.stageHost.ToolDefCleaner(toolName)
+	if cleaner == nil {
+		return raw
+	}
+	if cleaned := cleaner(raw); cleaned != "" {
+		return cleaned
+	}
+	return raw
+}
+
 // dropContinuationPlaceholders 移除此前由本机制插入的 user 占位。
 //
 // 为什么必须移除而不仅仅是“不再追加”：`msgs` 在循环外创建、循环内只增不减，
@@ -393,7 +417,9 @@ func (a *Agent) process(input string, stageCtx *sdk.StageContext) (response stri
 					if topK < 1 {
 						topK = 1
 					}
-					a.context.Prune(result, topK, a.docStore)
+					// 查询向量取**清洗后**的有效内容，否则噪声（ANSI/base64/JSON
+					// 包装）会把相关性打分带偏，裁掉本该保留的事件。
+					a.context.Prune(a.toolOutputForQuery(tc.Name, result), topK, a.docStore)
 				}
 			}
 
