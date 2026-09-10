@@ -40,6 +40,9 @@ var (
 
 	shm     []byte
 	shmSize int
+	region  []byte // 完整统一区域 mmap
+	arenaOff uint32
+	arenaUsed uint32
 )
 
 func send(v interface{}) {
@@ -233,6 +236,8 @@ func main() {
 				// 统一区域：前 64B 是 SuperBlock，StageContext 段在其后
 				ctxOff := binary.LittleEndian.Uint32(m[20:])
 				ctxSize := binary.LittleEndian.Uint32(m[24:])
+				region = m
+				arenaOff = binary.LittleEndian.Uint32(m[36:])
 				shm = m[ctxOff : ctxOff+ctxSize]
 			}
 			send(response{ID: req.ID, Result: map[string]interface{}{
@@ -282,9 +287,12 @@ func main() {
 
 		case "cleaner.invoke":
 			var p struct {
-				Scope string `json:"scope"`
-				Name  string `json:"name"`
-				Text  string `json:"text"`
+				Scope   string `json:"scope"`
+				Name    string `json:"name"`
+				TextRef struct {
+					Offset uint32 `json:"offset"`
+					Length uint32 `json:"length"`
+				} `json:"text_ref"`
 			}
 			json.Unmarshal(req.Params, &p)
 			valid := (p.Scope == "tool" && p.Name == "demo_upper") ||
@@ -294,8 +302,22 @@ func main() {
 				send(response{ID: req.ID, Error: "未注册 Cleaner"})
 				continue
 			}
+			// 从 arena 读文本
+			input := string(region[p.TextRef.Offset : p.TextRef.Offset+p.TextRef.Length])
+			output := p.Scope + "-cleaned:" + input
+			// 写回 arena
+			off := arenaUsed
+			if off == 0 {
+				off = 1
+			}
+			end := off + uint32(len(output))
+			copy(region[arenaOff+end-uint32(len(output)):arenaOff+end], output)
+			arenaUsed = end
 			send(response{ID: req.ID, Result: map[string]interface{}{
-				"text": p.Scope + "-cleaned:" + p.Text,
+				"text_ref": map[string]interface{}{
+					"offset": arenaOff + off,
+					"length": uint32(len(output)),
+				},
 			}})
 
 		case "stage.invoke":
