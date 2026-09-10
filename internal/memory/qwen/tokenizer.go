@@ -136,6 +136,24 @@ func (t *Tokenizer) SpecialID(content string) (int, bool) {
 	return 0, false
 }
 
+// DefaultInstruction 是导出脚本随 embed_config.json 写入的默认指令。
+const DefaultInstruction = "Represent the user's input."
+
+// renderInstructionInput 按模型自带的对话模板拼输入（无构建标签，便于测试）。
+//
+// 必须与 HuggingFace processor 的 apply_chat_template(add_generation_prompt=True)
+// 产出完全一致：指令放 system、正文放 user、以 assistant 起始符结尾。差一个
+// 特殊 token，池化取到的「最后一个有效 token」位置就变了，嵌入也就不同——
+// 而且不会报错。参考数据集里有该模板串的用例，能逐 token 对齐验证。
+func renderInstructionInput(instruction, text string) string {
+	if instruction == "" {
+		instruction = DefaultInstruction
+	}
+	return "<|im_start|>system\n" + instruction +
+		"<|im_end|>\n<|im_start|>user\n" + text +
+		"<|im_end|>\n<|im_start|>assistant\n"
+}
+
 // Encode 把文本编码为 token id 序列（不含特殊 token、不做截断）。
 func (t *Tokenizer) Encode(text string) []int {
 	var ids []int

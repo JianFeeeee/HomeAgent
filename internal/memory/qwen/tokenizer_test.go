@@ -144,6 +144,34 @@ func TestTokenizerEdgeCases(t *testing.T) {
 	}
 }
 
+// 模板渲染必须与参考数据里的整串完全一致，且逐 token 对齐。
+//
+// 这是嵌入正确性的前提：模板差一个字符，池化取到的「最后一个有效 token」
+// 位置就变了，向量也就不同——而且不会报错。
+func TestRenderInstructionInputMatchesTemplate(t *testing.T) {
+	ref := loadRef(t)
+	tok := loadTokenizer(t)
+
+	const want = "<|im_start|>system\nRepresent the user's input.<|im_end|>\n" +
+		"<|im_start|>user\n你好<|im_end|>\n<|im_start|>assistant\n"
+
+	got := renderInstructionInput("", "你好")
+	if got != want {
+		t.Fatalf("模板渲染不一致:\n got  %q\n want %q", got, want)
+	}
+
+	for _, c := range ref.Cases {
+		if c.Text != want {
+			continue
+		}
+		if ids := tok.Encode(got); !sameIDs(ids, c.IDs) {
+			t.Fatalf("模板串 token 不一致:\n got  %v\n want %v", ids, c.IDs)
+		}
+		return
+	}
+	t.Fatal("参考数据里缺少该模板串用例")
+}
+
 // byteEnc 必须是双射：256 个字节映射到 256 个互不相同的码点。
 // 有碰撞就会让不同字节编成同一个 token，静默产生错误输入。
 func TestBytesToUnicodeBijective(t *testing.T) {
