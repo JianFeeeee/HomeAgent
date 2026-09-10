@@ -154,28 +154,28 @@ func (h *coreHandler) Handle(method string, params json.RawMessage) (interface{}
 		if err := unmarshal(params, &p); err != nil {
 			return nil, err
 		}
-		h.sdk.InjectText(p.Source, p.Channel, p.Text)
+		h.sdk.InjectText(p.Source, p.Channel, h.resolveText(p))
 		return nil, nil
 	case MethodIOInjectInterrupt:
 		var p injectParams
 		if err := unmarshal(params, &p); err != nil {
 			return nil, err
 		}
-		h.sdk.InjectInterruptText(p.Source, p.Channel, p.Text)
+		h.sdk.InjectInterruptText(p.Source, p.Channel, h.resolveText(p))
 		return nil, nil
 	case MethodIOInjectTextNoMem:
 		var p injectParams
 		if err := unmarshal(params, &p); err != nil {
 			return nil, err
 		}
-		h.sdk.InjectTextNoMemory(p.Source, p.Channel, p.Text)
+		h.sdk.InjectTextNoMemory(p.Source, p.Channel, h.resolveText(p))
 		return nil, nil
 	case MethodIOInjectSync:
 		var p injectParams
 		if err := unmarshal(params, &p); err != nil {
 			return nil, err
 		}
-		return map[string]interface{}{"reply": h.sdk.InjectInputSync(p.Source, p.Channel, p.Text)}, nil
+		return map[string]interface{}{"reply": h.sdk.InjectInputSync(p.Source, p.Channel, h.resolveText(p))}, nil
 
 	case MethodIOInjectMedia:
 		var p injectMediaParams
@@ -563,7 +563,7 @@ func (h *coreHandler) Handle(method string, params json.RawMessage) (interface{}
 // 否则使用内联 Text。兼容新旧两种协议。
 func (h *coreHandler) resolveText(p injectParams) string {
 	if !p.TextRef.IsZero() {
-		return string(p.TextRef.Slice(h.host.data))
+		return string(h.host.unified.arenaRead(p.TextRef))
 	}
 	return p.Text
 }
@@ -610,6 +610,12 @@ func (h *coreHandler) cleanerProxy(scope, name string, enabled bool) (func(strin
 		return nil, fmt.Errorf("%s %s 声明 Cleaner，但清洗回调通道未就绪", scope, name)
 	}
 	return func(text string) string {
+		// Cleaner 输入和输出共享同一 arena。串行覆盖完整往返，保证结果读完前
+		// 不被其他调用重置；返回 string 会复制结果，随后即可回收整个临时区。
+		h.host.arenaMu.Lock()
+		defer h.host.arenaMu.Unlock()
+		defer h.host.unified.arenaReset()
+
 		ref, err := h.host.unified.arenaWrite([]byte(text))
 		if err != nil {
 			return text
@@ -619,6 +625,9 @@ func (h *coreHandler) cleanerProxy(scope, name string, enabled bool) (func(strin
 			return text
 		}
 		result := h.host.unified.arenaRead(resultRef)
+		if result == nil && !resultRef.IsZero() {
+			return text
+		}
 		return string(result)
 	}, nil
 }
@@ -635,6 +644,11 @@ func (h *coreHandler) toolRegister(params json.RawMessage) (interface{}, error) 
 	}
 	if p.Name == "" {
 		return nil, fmt.Errorf("tool.register: 缺少 name")
+	}
+	switch p.Def.ContextPolicy {
+	case "", "none", "prune":
+	default:
+		return nil, fmt.Errorf("tool.register: context_policy 只允许 none/prune，实际 %q", p.Def.ContextPolicy)
 	}
 	p.Def.Plugin = h.name
 	// 函数本身不进 JSON；has_cleaner 只声明其存在，实际执行回到插件进程。

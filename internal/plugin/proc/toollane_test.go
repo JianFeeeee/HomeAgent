@@ -1,6 +1,7 @@
 package proc
 
 import (
+	"sync"
 	"testing"
 	"unsafe"
 )
@@ -151,6 +152,56 @@ func TestSharedRef_PackUnpack(t *testing.T) {
 	got := unpackSharedRef(b)
 	if got.Offset != ref.Offset || got.Length != ref.Length || got.Generation != ref.Generation || got.Flags != ref.Flags {
 		t.Fatalf("pack/unpack: got %+v, want %+v", got, ref)
+	}
+}
+
+func TestToolCallRing_ConcurrentReserveUnique(t *testing.T) {
+	data := make([]byte, int(trlOffFrameBase+toolRingCap*toolFrameSize))
+	if err := InitToolRing(data); err != nil {
+		t.Fatal(err)
+	}
+	ring, err := AttachToolRing(data)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	indices := make(chan uint32, toolRingCap)
+	var wg sync.WaitGroup
+	for i := uint32(0); i < toolRingCap; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			idx, reserveErr := ring.Reserve()
+			if reserveErr != nil {
+				t.Errorf("Reserve: %v", reserveErr)
+				return
+			}
+			indices <- idx
+		}()
+	}
+	wg.Wait()
+	close(indices)
+
+	seen := make(map[uint32]bool, toolRingCap)
+	for idx := range indices {
+		if seen[idx] {
+			t.Fatalf("并发 Reserve 重复分配帧 %d", idx)
+		}
+		seen[idx] = true
+	}
+	if len(seen) != int(toolRingCap) {
+		t.Fatalf("唯一帧数=%d，期望 %d", len(seen), toolRingCap)
+	}
+}
+
+func TestAttachToolRingRejectsInvalidLayout(t *testing.T) {
+	data := make([]byte, trlOffFrameBase)
+	putU32(data[trlOffMagic:], toolRingMagic)
+	putU32(data[trlOffVersion:], toolRingVersion)
+	putU32(data[trlOffCap:], toolRingCap)
+	putU32(data[trlOffFrameSize:], toolFrameSize)
+	if _, err := AttachToolRing(data); err == nil {
+		t.Fatal("越界布局应被拒绝")
 	}
 }
 
