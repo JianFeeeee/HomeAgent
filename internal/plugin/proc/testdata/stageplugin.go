@@ -223,14 +223,17 @@ func main() {
 			json.Unmarshal(req.Params, &hp)
 			shmSize = hp.ShmSize
 			if shmSize > 0 {
-				// fd 3 = 内核传入的共享段 memfd
+				// fd 3 = 内核传入的统一共享内存区域
 				m, err := syscall.Mmap(3, 0, shmSize,
 					syscall.PROT_READ|syscall.PROT_WRITE, syscall.MAP_SHARED)
 				if err != nil {
 					send(response{ID: req.ID, Error: fmt.Sprintf("mmap 共享段失败: %v", err)})
 					continue
 				}
-				shm = m
+				// 统一区域：前 64B 是 SuperBlock，StageContext 段在其后
+				ctxOff := binary.LittleEndian.Uint32(m[20:])
+				ctxSize := binary.LittleEndian.Uint32(m[24:])
+				shm = m[ctxOff : ctxOff+ctxSize]
 			}
 			send(response{ID: req.ID, Result: map[string]interface{}{
 				"protocol": 1, "sdk_version": "test", "plugin_name": "stage", "pid": os.Getpid(),
