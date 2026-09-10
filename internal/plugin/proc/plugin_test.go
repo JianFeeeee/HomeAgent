@@ -17,20 +17,26 @@ import (
 
 // fakeCoreSDK 是最简 CoreSDK 实现，记录注册行为。
 type fakeCoreSDK struct {
-	mu        sync.Mutex
-	tools     map[string]pubsdk.ToolHandler
-	stages    map[pubsdk.Stage][]pubsdk.StageHandler
-	outputs   map[string]pubsdk.ToolHandler
-	settings  map[string]interface{}
-	autoStart bool
+	mu         sync.Mutex
+	tools      map[string]pubsdk.ToolHandler
+	toolDefs   map[string]pubsdk.ToolDef
+	stages     map[pubsdk.Stage][]pubsdk.StageHandler
+	outputs    map[string]pubsdk.ToolHandler
+	outputDefs map[string]pubsdk.ChannelDef
+	inputDefs  map[string]pubsdk.ChannelDef
+	settings   map[string]interface{}
+	autoStart  bool
 }
 
 func newFakeCore() *fakeCoreSDK {
 	return &fakeCoreSDK{
-		tools:    map[string]pubsdk.ToolHandler{},
-		stages:   map[pubsdk.Stage][]pubsdk.StageHandler{},
-		outputs:  map[string]pubsdk.ToolHandler{},
-		settings: map[string]interface{}{},
+		tools:      map[string]pubsdk.ToolHandler{},
+		toolDefs:   map[string]pubsdk.ToolDef{},
+		stages:     map[pubsdk.Stage][]pubsdk.StageHandler{},
+		outputs:    map[string]pubsdk.ToolHandler{},
+		outputDefs: map[string]pubsdk.ChannelDef{},
+		inputDefs:  map[string]pubsdk.ChannelDef{},
+		settings:   map[string]interface{}{},
 	}
 }
 
@@ -59,6 +65,7 @@ func (f *fakeCoreSDK) RegisterTool(name string, def pubsdk.ToolDef, h pubsdk.Too
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.tools[name] = h
+	f.toolDefs[name] = def
 	return nil
 }
 
@@ -72,10 +79,16 @@ func (f *fakeCoreSDK) RegisterOutputChannel(name string, caps int, desc string, 
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.outputs[name] = h
+	f.outputDefs[name] = def
 	return nil
 }
 
-func (f *fakeCoreSDK) RegisterInputChannel(name string, def pubsdk.ChannelDef) error { return nil }
+func (f *fakeCoreSDK) RegisterInputChannel(name string, def pubsdk.ChannelDef) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.inputDefs[name] = def
+	return nil
+}
 
 func (f *fakeCoreSDK) stageHandlers(stage pubsdk.Stage) []pubsdk.StageHandler {
 	f.mu.Lock()
@@ -231,6 +244,36 @@ func TestPlugin_RegisteredToolInvokable(t *testing.T) {
 	}
 	if res != "ABC" {
 		t.Fatalf("工具结果应为 ABC，实际 %v", res)
+	}
+
+	core.mu.Lock()
+	def, ok := core.toolDefs["demo_upper"]
+	core.mu.Unlock()
+	if !ok {
+		t.Fatal("内核未保存 demo_upper 的 ToolDef")
+	}
+	if def.Cleaner == nil {
+		t.Fatal("跨进程注册后 Cleaner 不应丢失")
+	}
+	if got := def.Cleaner("raw-output"); got != "tool-cleaned:raw-output" {
+		t.Fatalf("跨进程工具 Cleaner 结果错误：got %q, want %q", got, "tool-cleaned:raw-output")
+	}
+
+	core.mu.Lock()
+	inputDef, inputOK := core.inputDefs["demo_in"]
+	outputDef, outputOK := core.outputDefs["demo_ch"]
+	core.mu.Unlock()
+	if !inputOK || inputDef.Cleaner == nil {
+		t.Fatal("跨进程注册后输入通道 Cleaner 不应丢失")
+	}
+	if got := inputDef.Cleaner("raw-input"); got != "input-cleaned:raw-input" {
+		t.Fatalf("跨进程输入 Cleaner 结果错误：got %q", got)
+	}
+	if !outputOK || outputDef.Cleaner == nil {
+		t.Fatal("跨进程注册后输出通道 Cleaner 不应丢失")
+	}
+	if got := outputDef.Cleaner("raw-output"); got != "output-cleaned:raw-output" {
+		t.Fatalf("跨进程输出 Cleaner 结果错误：got %q", got)
 	}
 }
 
