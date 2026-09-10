@@ -30,8 +30,11 @@ type Host struct {
 	seg     *Segment       // StageContext segment（位于 unified ctxData）
 	shmSize int            // 统一区域总大小
 
-	// arena 是跨进程共享槽池（§13.2 重设计）。分配/释放走共享位图 CAS，
-	// 任意进程/goroutine 并发调用都安全，不需要任何锁。
+	// arena 是跨进程共享内存分配器（§13.2 重设计），由内核独占管理：
+	// 插件通过 RPC 申请/归还，不做任何分配决策。
+	//
+	// 分配与回收都在内核进程内进行，一把 mu 即可保证安全，
+	// 不存在跨进程分配器那种“共享游标被两个进程各自更新”的竞态。
 	arena *arenaRegion
 
 	// nextOwner 给每个插件进程分配一个不透明 owner ID，供 ReclaimOwner 使用。
@@ -77,15 +80,15 @@ func NewHost() (*Host, error) {
 		return nil, err
 	}
 
-	// 初始化 Exchange Arena 槽池
-	arena, err := initArena(data, ur.arenaOff, ur.arenaCap, arenaDefaultSlotCount, arenaDefaultSlotSize)
+	// 初始化 Exchange Arena（内核独占的变长块分配器）
+	arena, err := initArena(data, ur.arenaOff, ur.arenaCap)
 	if err != nil {
 		freeShm(memfd, data)
-		return nil, fmt.Errorf("槽池初始化: %w", err)
+		return nil, fmt.Errorf("共享内存分配器初始化: %w", err)
 	}
-	if used, total := arena.Stats(); used != 0 || total != arenaDefaultSlotCount {
+	if used, total := arena.Stats(); used != 0 || total != ur.arenaCap {
 		freeShm(memfd, data)
-		return nil, fmt.Errorf("槽池初始化异常：used=%d total=%d", used, total)
+		return nil, fmt.Errorf("分配器初始化异常：used=%d total=%d", used, total)
 	}
 
 	// 创建 StageContext segment（位于 SuperBlock 之后）

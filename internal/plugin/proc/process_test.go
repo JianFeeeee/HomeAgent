@@ -341,6 +341,7 @@ func TestProcess_SpawnRequiresHandler(t *testing.T) {
 //   - 在途调用挂到自己的超时；
 //   - OnExit 不触发 → 崩溃计数、工具摘除、自动重启全都不发生；
 //   - 进程表里插件已是僵尸，注册表里却一切正常。
+//
 // 生产上 browser 拉 chromium、editdoc 拉 python 正是这个形状。
 // 现在由专职 waitLoop 直接 wait4(2) 判定，不再依赖 fd 生命周期。
 func TestProcess_ExitDetectedDespiteInheritedStdout(t *testing.T) {

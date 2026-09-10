@@ -209,42 +209,61 @@ type StageInvokeResult struct {
 	Seq uint64 `json:"seq"`
 }
 
-// ToolInvokeParams / ToolInvokeResult：工具调用（原 go_invoke_tool）。
+// ToolInvokeParams：工具调用（原 go_invoke_tool）。
 //
-// ArgsRef/ResultRef 为后续 §13.3 预留：payload 走 Exchange Arena，
-// RPC 帧只带 16 字节描述符；当前仍以 Args/Result 内联为主。
+// 按 **funccall 模型**，内核（caller）为每次调用标定一块内存帧交给插件
+// （callee），插件在这块内存里工作：
+//
+//	[0, ArgsLen)               参数 JSON
+//	[ArgsLen, Frame.Length)    结果区（内核预留的预算）
+//
+// 结果放得下就写在帧内；**不够用时插件才向内核申请扩容**（arena.alloc），
+// 并在返回引用上打 sharedRefFlagExpand，内核据此单独归还扩容块。
+//
+// 参数永远在共享内存里，不存在“小 payload 走内联”的按大小分支。
+//
+// Args 仅剩给**直连 RPC 的调用方**（process/bench 测试不建 Host，拿不到
+// 共享内存）；内核的 invokeTool 始终走 Frame。
 type ToolInvokeParams struct {
 	Name    string                 `json:"name"`
-	Args    map[string]interface{} `json:"args,omitempty"`
-	ArgsRef SharedRef              `json:"args_ref,omitempty"`
+	Frame   SharedRef              `json:"frame,omitempty"`
+	ArgsLen uint32                 `json:"args_len,omitempty"`
+	Args    map[string]interface{} `json:"args,omitempty"` // 仅直连 RPC 调用方使用
 }
 
 type ToolInvokeResult struct {
-	Result    interface{} `json:"result,omitempty"`
 	ResultRef SharedRef   `json:"result_ref,omitempty"`
+	Result    interface{} `json:"result,omitempty"` // 仅直连 RPC 调用方使用
 }
 
 // CleanerInvokeParams / CleanerInvokeResult：跨进程计算层清洗。
 // Scope 取 tool / input / output，Name 是工具名或通道名。
 //
-// 数据面走 Exchange Arena：
-//   - TextRef 指向内核写入的输入文本；payload 超过槽容量时改用内联 Text
-//   - RespRef 指向内核**预分配**的响应槽，插件把结果写进去后回 TextRef；
-//     结果放不下时插件改用内联 Text 返回
+// 与工具调用用**同一个 funccall 帧模型**：
 //
-// 插件侧不做任何分配，因此不存在跨进程分配器的竞争。
+//	[0, InputLen)               输入文本
+//	[InputLen, Frame.Length)    结果区（内核预留的预算）
+//
+// 结果放不下时插件申请扩容块，并在 TextRef 上打 sharedRefFlagExpand。
 type CleanerInvokeParams struct {
-	Scope   string    `json:"scope"`
-	Name    string    `json:"name"`
-	Text    string    `json:"text,omitempty"`
-	TextRef SharedRef `json:"text_ref,omitempty"`
-	RespRef SharedRef `json:"resp_ref,omitempty"`
+	Scope    string    `json:"scope"`
+	Name     string    `json:"name"`
+	Frame    SharedRef `json:"frame,omitempty"`
+	InputLen uint32    `json:"input_len,omitempty"`
 }
 
 type CleanerInvokeResult struct {
-	Text    string    `json:"text,omitempty"`
 	TextRef SharedRef `json:"text_ref,omitempty"`
 }
+
+// 调用帧的结果预算。
+//
+// 内核按“参数长度 + 预算”标定帧；结果超出预算不是失败，插件会申请扩容块。
+// 预算取 64KB：覆盖绝大多数工具结果，使常态调用完全免于第二次分配。
+const (
+	toolResultBudget    = 64 * 1024
+	cleanerResultBudget = 64 * 1024
+)
 
 const (
 	CleanerScopeTool   = "tool"
