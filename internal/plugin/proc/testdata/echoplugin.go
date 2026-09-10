@@ -43,7 +43,7 @@ func main() {
 		switch req.Method {
 		case "handshake":
 			send(response{ID: req.ID, Result: map[string]interface{}{
-				"protocol":    1,
+				"protocol":    2,
 				"sdk_version": "test",
 				"plugin_name": "echo",
 				"pid":         os.Getpid(),

@@ -1407,19 +1407,35 @@ settings.*、lifecycle.*、arena.alloc/free 自身）不属于此列：它们不
 2. ✅ ~~`io.injectMedia` / `injectMediaSync` / `injectInterruptMedia`~~ ——
    同上（共用 `mediaArgsOwned`）。注意同步调用不能在应答返回前释放槽，
    否则内核读到的是已释放的内存。
-3. **`doc.insert` / `doc.insertWithMedia`**——文档全文内联，且 `doc` 是可被
-   插件回调改写的内容。
-4. **`knowledge.add(name, content)`**——知识正文内联，同上。
+3. ✅ ~~`doc.insert` / `doc.insertWithMedia`~~ —— 已修。新增 `doc_ref` /
+   `attachments_ref`，模板序列化后 `putValueInArena`。
+4. ✅ ~~`knowledge.add(name, content)`~~ —— 已修。新增 `content_ref`
+   （内容是 JSON 字符串，读出后需再解一层）。
 5. **反向结果**：插件反向调内核读大结果时仍内联（正向已有 `ResultRef`）。
+   这条范围比前四条大：需要把整个内核→插件的 Rust 应答路径改成
+   “大结果写段 + 返回 ref”，涉及 `callCore` 的返回处理与所有读大结果的
+   method（`doc.query` / `llm.chat` 等）。未做。
+
+**协议版本已 bump 到 2**（§13.6/§13.13 的 payload 承载变更）。
+不再靠文档提醒，而是让错配在握手上**显式失败**：
+
+- 内核 `proc.ProtocolVersion = 2`；模板 `procProtocolVersion = 2`
+- 双方都是等值校验 → v1 插件遇上 v2 内核会在建链时报
+  “协议版本不匹配…请用配套 plugindev 重编”（带修复指令）
+- 没有这个 bump 的话：v1 插件只读内联 args，遇到 v2 内核会拿到**空参数**；
+  v2 插件发 blocks_ref，v1 内核反序列化时**静默忽略**（旧内核
+  `io.setToolBlocks` 还是桩）。两种都是静默失效，现场极难定位。
 
 **验证**：
 
-- [x] `TestCoreHandler_SetToolBlocksViaArena`：9000 字节 base64 图经 `blocks_ref`
-  送达，内容一致；`TestCoreHandler_SetToolBlocksInline` 保内联回退；
-  `TestCoreHandler_SetToolBlocksEmptyRejected` 防空块静默成功
+- [x] `TestCoreHandler_SetToolBlocksViaArena` / `Inline` / `EmptyRejected`
+- [x] `TestCoreHandler_KnowledgeAddViaArena` / `Inline`（12000 字节正文经
+  `content_ref` 送达，内容一致）
+- [x] `TestCoreHandler_DocInsertViaArena`（正文经 `doc_ref` 送达）
 - [x] `TestE2E_RealTemplateSetToolBlocksViaArena`：用**真实 SDK 模板**编译的
   插件（生产插件走的就是模板，模板不走 blocks_ref 则内核实现了也收不到）
-- [x] 工具链已同步：`/usr/local/bin/plugindev` 重建为新协议（内嵌 blocks_ref），
-  回滚副本 `plugindev.bak-20260910-224255`
-- [ ] 文档/知识正文走共享内存
+- [x] `TestProcess_ProtocolMismatchRejected` 加断言：错误必须含重编指令
+- [x] 工具链已同步：`/usr/local/bin/plugindev` = 协议 2（内嵌 blocks_ref /
+  doc_ref / content_ref），回滚副本 `plugindev.bak-20260910-232544`
+- [ ] 反向结果入内存（第 5 条）
 - [ ] git commit -m "feat(shm): remaining data-plane payloads via shared refs"
