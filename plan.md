@@ -1399,13 +1399,14 @@ settings.*、lifecycle.*、arena.alloc/free 自身）不属于此列：它们不
 
 **尚未入内存**（按“是否破坏回调语义”排序）：
 
-1. **媒体块：`io.setToolBlocks`**——工具内的媒体注入仍把 `blocks` 内联在
-   RPC JSON 里，而 `ImageURL.URL` / `AudioURL.URL` 对本地生成的图/音频是
-   **base64 data URL**（如 ai_image 生成的大图）。这条直接破坏“结果媒体
-   能被 after_toolcall 就地改写”的能力：插件只能推一份拷贝过去。
-   待做：blocks 序列化后 `putInArena`，传 `blocks_ref`，内核读回。
-2. **`io.injectMedia` / `injectMediaSync` / `injectInterruptMedia`**——同上，
-   插件主动发起带媒体的一轮对话。
+1. ✅ ~~媒体块：`io.setToolBlocks`~~ —— 已修（本轮）。之前它在本核侧根本是
+   **桩实现**（直接返回“待共享段二进制通道落地”），也就是说**子进程插件调
+   SetToolBlocks 必然失败**，只有内置插件能用。现在：内核侧真正实现该
+   method，模板把 blocks 序列化后 `putArena` 传 `blocks_ref`（小 payload 仍
+   内联），内核 `resolveBlocks` 读回。
+2. ✅ ~~`io.injectMedia` / `injectMediaSync` / `injectInterruptMedia`~~ ——
+   同上（共用 `mediaArgsOwned`）。注意同步调用不能在应答返回前释放槽，
+   否则内核读到的是已释放的内存。
 3. **`doc.insert` / `doc.insertWithMedia`**——文档全文内联，且 `doc` 是可被
    插件回调改写的内容。
 4. **`knowledge.add(name, content)`**——知识正文内联，同上。
@@ -1413,6 +1414,12 @@ settings.*、lifecycle.*、arena.alloc/free 自身）不属于此列：它们不
 
 **验证**：
 
-- [ ] 媒体块走共享内存（插件推图不再靠拷贝，且可被回调就地改写）
+- [x] `TestCoreHandler_SetToolBlocksViaArena`：9000 字节 base64 图经 `blocks_ref`
+  送达，内容一致；`TestCoreHandler_SetToolBlocksInline` 保内联回退；
+  `TestCoreHandler_SetToolBlocksEmptyRejected` 防空块静默成功
+- [x] `TestE2E_RealTemplateSetToolBlocksViaArena`：用**真实 SDK 模板**编译的
+  插件（生产插件走的就是模板，模板不走 blocks_ref 则内核实现了也收不到）
+- [x] 工具链已同步：`/usr/local/bin/plugindev` 重建为新协议（内嵌 blocks_ref），
+  回滚副本 `plugindev.bak-20260910-224255`
 - [ ] 文档/知识正文走共享内存
 - [ ] git commit -m "feat(shm): remaining data-plane payloads via shared refs"
