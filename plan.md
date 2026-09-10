@@ -1239,26 +1239,50 @@ SDK 仓 `v1.0.0` / `v1.1.0`。main 的版本路牌现为 `1.2.0`（尚无 tag）
 
 **目标**：输入通道消息走共享内存。
 
+**现状（核实）**：基础设施就位，但内核侧未接线——
+
+- `injectParams.TextRef SharedRef` 与 `resolveText`（corehandler.go:585）
+  在插件→内核方向可用，但内核→插件方向的 `procCore.InjectText` 仍直接传
+  字符串给 `sdk.InjectText`，从不 `Alloc/Put` 构造 `TextRef`。
+- 即只做了半边（插件回传文本），内核注入还没走共享内存。
+
 **实施**：
 
 1. InputChannel Slot：source/channel/text/blocks 写入 arena
 2. 插件消费后设 DONE
-3. 同步注入仍走 RPC + SharedRef
+3. 同步注入仍走 RPC + SharedRef  ← 需要接线内核侧
 4. 异步注入改写 arena + eventfd
 
 **验证**：
 
 - [ ] 真实 QQ 消息注入测试
-- [ ] git commit -m "feat(shm): input channel lane"
+- [ ] git commit -m "feat(shm): input channel lane"  ← 未提交，内核侧待接线
 
 ### 13.6 OutputChannel lane
 
 **目标**：输出通道消息走共享内存。
 
+**实施**（已完成）：
+
+1. `OutputInvokeParams` 加 `Frame SharedRef` + `ArgsLen`（`Args` 仅留给直连
+   RPC 的测试），与 `ToolInvokeParams` 同一 funccall 帧模型
+2. `invokeOutput` Alloc 帧、写 payload JSON、只传偏移描述符；插件退出/调用完
+   后内核归还整帧（`defer arena.Free`）
+3. 帧尾不预留结果区：output 应答很小（`"ok"` / status map），直接走 RPC
+   应答字段；若插件把大结果写回帧（`OutputInvokeResult.ResultRef`）也能读回，
+   并识别 `sharedRefFlagExpand` 单独归还扩容块
+4. 模板 `output.invoke` 从帧读参数（`frameInput`），无帧才回退内联 `Args`
+
 **验证**：
 
-- [ ] QQ 输出正常
-- [ ] git commit -m "feat(shm): output channel lane"
+- [x] `TestPlugin_OutputPayloadViaArena`：9000 字节 payload 经帧完整送达（插件
+  回报实收长度）+ 调用后 arena 归零
+- [x] `TestE2E_RealTemplateOutputPayloadViaFrame`：同上但用**真实 SDK 模板**
+  编译的插件（生产插件走的就是模板，模板不读帧该改动就等于没做）
+- [x] `TestPlugin_OutputChannelReportsRealFailure` 仍绿：同步等真实结果、
+  失败必须上报（§9.4）不被破坏
+- [ ] QQ 输出正常（需生产部署后验证）
+- [x] git commit -m "feat(shm): output channel lane"
 
 ### 13.7 RuntimeManager + 分组 worker
 

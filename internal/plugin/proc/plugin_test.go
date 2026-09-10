@@ -290,6 +290,54 @@ func TestPlugin_RegisteredToolInvokable(t *testing.T) {
 	}
 }
 
+// §13.6：输出通道 payload 走共享内存调用帧（与 tool.invoke 同一模型），
+// 大 payload 不再爆 stdin/stdout 管道。
+func TestPlugin_OutputPayloadViaArena(t *testing.T) {
+	bin := buildTestPlugin(t, "stageplugin.go")
+	core := newFakeCore()
+
+	host, err := NewHost()
+	if err != nil {
+		t.Fatalf("NewHost: %v", err)
+	}
+	defer host.Close()
+
+	p := New("demo", bin, t.TempDir(), nil, host, nil)
+	if err := p.Start(core); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	defer p.Close()
+
+	core.mu.Lock()
+	h, ok := core.outputs["demo_ch"]
+	core.mu.Unlock()
+	if !ok {
+		t.Fatal("插件应注册 demo_ch 输出通道")
+	}
+
+	// 9000 字节，明显超过任何内联预算
+	payload := strings.Repeat("输出", 3000)
+	res, err := h(map[string]interface{}{"payload": payload, "type": "text"})
+	if err != nil {
+		t.Fatalf("发送应成功: %v", err)
+	}
+	m, _ := res.(map[string]interface{})
+	// 插件回报它实际收到的长度：只有完整 payload 经帧送达才等于发送长度。
+	var gotLen int
+	switch v := m["payload_len"].(type) {
+	case float64:
+		gotLen = int(v)
+	case int:
+		gotLen = v
+	}
+	if gotLen != len(payload) {
+		t.Fatalf("插件收到的 payload 长度 = %d，期望 %d（帧未把完整 payload 带到插件侧）", gotLen, len(payload))
+	}
+	if used, total := host.Arena().Stats(); used != 0 {
+		t.Fatalf("调用结束后 arena 应归零，实际 used=%d/%d", used, total)
+	}
+}
+
 // 输出通道**同步等真实结果**：失败必须上报（§9.4 根治）。
 func TestPlugin_OutputChannelReportsRealFailure(t *testing.T) {
 	bin := buildTestPlugin(t, "stageplugin.go")

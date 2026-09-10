@@ -278,8 +278,22 @@ const (
 // 永远返回成功（§9.4，现网 2 次消息发不出而模型以为成功）。
 // 进程模型下 RPC 天然可等应答，该缺陷从根上消失。
 type OutputInvokeParams struct {
-	Channel string                 `json:"channel"`
-	Args    map[string]interface{} `json:"args,omitempty"`
+	Channel string `json:"channel"`
+	// Frame 是调用帧：[0, ArgsLen) 是参数 JSON；[ArgsLen, Frame.Length) 是结果区。
+	// 与 ToolInvokeParams 同一 funccall 帧模型（§13.3）。没有帧时（直连 RPC
+	// 测试）回退到 Args。大 payload 不再爆 stdin/stdout 管道——这正是同步
+	// output_send 卡住的根因之一。
+	Frame   SharedRef              `json:"frame,omitempty"`
+	ArgsLen uint32                 `json:"args_len,omitempty"`
+	Args    map[string]interface{} `json:"args,omitempty"` // 仅直连 RPC 调用方使用
+}
+
+// OutputInvokeResult 与 ToolInvokeResult 同形：结果优先写进帧结果区，
+// 放不下才申扩容块并打 sharedRefFlagExpand。标量响应（如 "ok"）直接在
+// Result 字段返回，不走共享内存。
+type OutputInvokeResult struct {
+	ResultRef SharedRef   `json:"result_ref,omitempty"`
+	Result    interface{} `json:"result,omitempty"` // 仅直连 RPC 调用方使用
 }
 
 // ArenaAllocParams / ArenaAllocResult：插件向内核申请共享内存。

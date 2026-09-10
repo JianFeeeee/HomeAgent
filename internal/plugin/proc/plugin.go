@@ -338,15 +338,65 @@ func (p *Plugin) invokeOutput(channel string, args map[string]interface{}) (inte
 	if p.proc == nil {
 		return nil, ErrProcessExited
 	}
-	raw, err := p.proc.Call(MethodOutputInvoke, OutputInvokeParams{
-		Channel: channel,
-		Args:    args,
-	})
+
+	argJSON, err := json.Marshal(args)
+	if err != nil {
+		return nil, fmt.Errorf("proc: %s 输出通道 %s 参数序列化失败: %w", p.name, channel, err)
+	}
+
+	// 与工具调用同一个 funccall 帧模型（§13.6）：payload 全在共享内存，
+	// RPC 只传偏移描述符。输出 payload 在真机上可能含图片/文件描述等大字段，
+	// 内联会撑爆 stdin/stdout 管道。
+	//
+	// 帧尾不预留结果区：output 的应答很小（"ok" 或 status map），直接走
+	// RPC 应答字段即可，不像 tool.invoke 那样需要几十 KB 的结果预算。
+	var params OutputInvokeParams
+	params.Channel = channel
+	if len(argJSON) > 0 {
+		arena := p.host.Arena()
+		gen := p.host.Generation()
+		frame, err := arena.Alloc(OwnerHost, len(argJSON), gen)
+		if err != nil {
+			return nil, fmt.Errorf("proc: %s 输出通道 %s 分配调用帧失败: %w", p.name, channel, err)
+		}
+		defer func() { _ = arena.Free(OwnerHost, frame) }()
+
+		area, err := arena.Read(frame, gen)
+		if err != nil {
+			return nil, fmt.Errorf("proc: %s 输出通道 %s 读取调用帧失败: %w", p.name, channel, err)
+		}
+		copy(area[:len(argJSON)], argJSON)
+		params.Frame = frame
+		params.ArgsLen = uint32(len(argJSON))
+	}
+
+	raw, err := p.proc.Call(MethodOutputInvoke, params)
 	if err != nil {
 		return nil, err // 真实失败上报，模型可感知并重试
 	}
 	if len(raw) == 0 {
 		return map[string]interface{}{"status": "ok"}, nil
+	}
+
+	// 结果可能在共享内存里（插件把大结果写回帧结果区）。
+	// 先按结构化应答解析；ResultRef 为零则回退到内联字段。
+	var outRes OutputInvokeResult
+	if jerr := json.Unmarshal(raw, &outRes); jerr == nil && !outRes.ResultRef.IsZero() {
+		arena := p.host.Arena()
+		gen := p.host.Generation()
+		// 插件申请了扩容块：内核负责归还（与 invokeTool 一致）。
+		if outRes.ResultRef.Flags&sharedRefFlagExpand != 0 {
+			defer func() { _ = arena.Free(OwnerHost, outRes.ResultRef) }()
+		}
+		data, err := arena.Read(outRes.ResultRef, gen)
+		if err != nil {
+			return nil, fmt.Errorf("proc: %s 输出通道 %s 读取共享结果失败: %w", p.name, channel, err)
+		}
+		var out interface{}
+		if err := json.Unmarshal(data, &out); err != nil {
+			return nil, fmt.Errorf("proc: %s 输出通道 %s 解析共享结果失败: %w", p.name, channel, err)
+		}
+		return out, nil
 	}
 
 	var res map[string]interface{}

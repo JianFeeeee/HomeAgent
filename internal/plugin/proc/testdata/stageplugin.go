@@ -526,18 +526,40 @@ func main() {
 			}(req.ID)
 
 		case "output.invoke":
-			var p struct {
-				Channel string                 `json:"channel"`
-				Args    map[string]interface{} `json:"args"`
-			}
-			json.Unmarshal(req.Params, &p)
-			payload, _ := p.Args["payload"].(string)
-			if payload == "fail" {
-				// 模拟现网 qq 插件的真实失败：meta 缺 user_id
-				send(response{ID: req.ID, Error: "meta 中缺少 user_id 字段"})
-				continue
-			}
-			send(response{ID: req.ID, Result: map[string]interface{}{"status": "sent"}})
+			// §13.6：payload 走共享内存调用帧，与 tool.invoke 同一模型。
+			// 必须在独立 goroutine 里处理：插件可能反向调用内核。
+			go func(id uint64, raw json.RawMessage) {
+				var p struct {
+					Channel string                 `json:"channel"`
+					Args    map[string]interface{} `json:"args"`
+					Frame   SharedRef              `json:"frame"`
+					ArgsLen uint32                 `json:"args_len"`
+				}
+				json.Unmarshal(raw, &p)
+
+				args := p.Args
+				if !p.Frame.IsZero() {
+					if blob := frameInput(p.Frame, p.ArgsLen); len(blob) > 0 {
+					var decoded map[string]interface{}
+					if err := json.Unmarshal(blob, &decoded); err != nil {
+						send(response{ID: id, Error: "解析输出参数: " + err.Error()})
+						return
+					}
+					args = decoded
+					}
+				}
+				payload, _ := args["payload"].(string)
+				if payload == "fail" {
+					// 模拟现网 qq 插件的真实失败：meta 缺 user_id
+					send(response{ID: id, Error: "meta 中缺少 user_id 字段"})
+					return
+				}
+				// 标量结果直接在应答字段返回（output 应答很小，无需走共享内存）。
+				// payload_len 让测试能验证共享帧把完整 payload 带到了插件侧。
+				send(response{ID: id, Result: map[string]interface{}{
+					"status": "sent", "payload_len": len(payload),
+				}})
+			}(req.ID, req.Params)
 
 		default:
 			if req.ID != 0 {
