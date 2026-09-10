@@ -50,9 +50,9 @@ const (
 // [24,28) ctxSize（StageContext segment 字节数）
 // [28,32) evtOff（EvtRing segment 偏移）
 // [32,36) evtSize（EvtRing segment 字节数）
-// [36,48) reserved（未来 lane 偏移/大小）
-// [48,56) reserved
-// [56,64) reserved（对齐到 8 字节）
+// [36,40) arenaOff（Exchange Arena 起点，8 字节对齐）
+// [40,44) arenaCap（Exchange Arena 字节数）
+// [44,64) reserved
 const (
 	sbOffMagic      = 0
 	sbOffVersion    = 4
@@ -62,16 +62,14 @@ const (
 	sbOffCtxSize    = 24
 	sbOffEvtOff     = 28
 	sbOffEvtSize    = 32
-	sbOffArenaOff   = 36 // 动态 arena 起始偏移
-	sbOffArenaCap   = 40 // 动态 arena 总容量
-	sbOffArenaUsed  = 44 // 动态 arena 已用字节（原子）
+	sbOffArenaOff   = 36 // Exchange Arena 起点
+	sbOffArenaCap   = 40 // Exchange Arena 容量
+	sbOffReserved1  = 44
 	sbOffReserved5  = 48
 	sbOffReserved6  = 52
 	sbOffReserved7  = 56
 	sbOffReserved8  = 60
 )
-
-const unifiedArenaSize = 256 * 1024 // 默认动态 arena 256KB
 
 // SharedRef 是跨进程共享内存描述符，替代内联 JSON 数据。
 //
@@ -93,6 +91,9 @@ func (r SharedRef) IsZero() bool {
 }
 
 // Slice 从共享内存中按 SharedRef 切片。data 必须是完整的 mmap 区域。
+//
+// 注意：这是**无校验**的原始切片，仅供已知安全的路径使用。
+// 跨进程引用一律走 arenaRegion.Read（校验 generation / 槽号 / 占用状态）。
 func (r SharedRef) Slice(data []byte) []byte {
 	end := uint64(r.Offset) + uint64(r.Length)
 	if r.IsZero() || end > uint64(len(data)) {
@@ -102,6 +103,9 @@ func (r SharedRef) Slice(data []byte) []byte {
 }
 
 // unifiedRegion 统一共享内存区域的内核侧视图。
+//
+// arenaOff/arenaCap 指向 Exchange Arena 段；槽池句柄由 Host 持有
+// （见 arena.go），unifiedRegion 只负责布局与 generation。
 type unifiedRegion struct {
 	data []byte
 
@@ -110,9 +114,8 @@ type unifiedRegion struct {
 	evtOff  uint32
 	evtSize uint32
 
-	arenaOff  uint32  // 动态 arena 起始偏移（相对 data）
-	arenaCap  uint32  // 动态 arena 总容量
-	arenaUsed *uint32 // 指向 SuperBlock 中的 arenaUsed 字段（原子 bump 游标）
+	arenaOff uint32 // Exchange Arena 起点（8 字节对齐）
+	arenaCap uint32 // Exchange Arena 容量
 }
 
 // initUnifiedRegion 在 mmap 区域上初始化 SuperBlock + 两个 segment。
@@ -125,7 +128,8 @@ func initUnifiedRegion(data []byte, ctxTotal, evtTotal int) (*unifiedRegion, err
 
 	ctxOff := uint32(superBlockSize)
 	evtOff := ctxOff + uint32(ctxTotal)
-	arenaOff := evtOff + uint32(evtTotal)
+	// arena 基址必须 8 字节对齐：位图用 4 字节原子操作，槽头含 uint32。
+	arenaOff := (evtOff + uint32(evtTotal) + 7) &^ 7
 	arenaCap := cap - arenaOff
 
 	putU32(data[sbOffMagic:], unifiedMagic)
@@ -138,7 +142,6 @@ func initUnifiedRegion(data []byte, ctxTotal, evtTotal int) (*unifiedRegion, err
 	putU32(data[sbOffEvtSize:], uint32(evtTotal))
 	putU32(data[sbOffArenaOff:], arenaOff)
 	putU32(data[sbOffArenaCap:], arenaCap)
-	putU32(data[sbOffArenaUsed:], 1)
 
 	return &unifiedRegion{
 		data:     data,
@@ -148,9 +151,6 @@ func initUnifiedRegion(data []byte, ctxTotal, evtTotal int) (*unifiedRegion, err
 		evtSize:  uint32(evtTotal),
 		arenaOff: arenaOff,
 		arenaCap: arenaCap,
-		arenaUsed: (*uint32)(unsafe.Pointer(
-			uintptr(unsafe.Pointer(&data[0])) + uintptr(sbOffArenaUsed),
-		)),
 	}, nil
 }
 
@@ -197,9 +197,6 @@ func attachUnifiedRegion(data []byte) (*unifiedRegion, error) {
 		evtSize:  evtSize,
 		arenaOff: arenaOff,
 		arenaCap: arenaCap,
-		arenaUsed: (*uint32)(unsafe.Pointer(
-			uintptr(unsafe.Pointer(&data[0])) + uintptr(sbOffArenaUsed),
-		)),
 	}, nil
 }
 
@@ -253,56 +250,7 @@ func getU64(b []byte) uint64 {
 		uint64(b[4])<<32 | uint64(b[5])<<40 | uint64(b[6])<<48 | uint64(b[7])<<56
 }
 
-// arenaAlloc 在动态 arena 中分配 n 字节，返回相对 arenaOff 的偏移。
-// append-only，offset 0 保留给“空”语义。
-func (r *unifiedRegion) arenaAlloc(n int) (uint32, error) {
-	if n <= 0 {
-		return 0, fmt.Errorf("arena: 非法分配长度 %d", n)
-	}
-	for {
-		used := atomic.LoadUint32(r.arenaUsed)
-		if used == 0 {
-			used = 1
-		}
-		end := uint64(used) + uint64(n)
-		if end > uint64(r.arenaCap) {
-			return 0, fmt.Errorf("arena: 空间不足（需 %d，剩 %d）", n, uint64(r.arenaCap)-uint64(used))
-		}
-		if atomic.CompareAndSwapUint32(r.arenaUsed, used, uint32(end)) {
-			return used, nil
-		}
-	}
-}
-
-// arenaWrite 把 b 写入动态 arena 并返回 SharedRef。
-func (r *unifiedRegion) arenaWrite(b []byte) (SharedRef, error) {
-	if len(b) == 0 {
-		return SharedRef{}, nil
-	}
-	off, err := r.arenaAlloc(len(b))
-	if err != nil {
-		return SharedRef{}, err
-	}
-	base := r.arenaOff + off
-	copy(r.data[base:base+uint32(len(b))], b)
-	gen := uint32(r.generation())
-	return SharedRef{Offset: base, Length: uint32(len(b)), Generation: gen}, nil
-}
-
-// arenaRead 按 SharedRef 读取数据。generation 不匹配或引用越出 arena 时拒绝。
-func (r *unifiedRegion) arenaRead(ref SharedRef) []byte {
-	if ref.IsZero() || ref.Generation != uint32(r.generation()) {
-		return nil
-	}
-	end := uint64(ref.Offset) + uint64(ref.Length)
-	arenaEnd := uint64(r.arenaOff) + uint64(r.arenaCap)
-	if uint64(ref.Offset) < uint64(r.arenaOff)+1 || end > arenaEnd {
-		return nil
-	}
-	return ref.Slice(r.data)
-}
-
-// arenaReset 压实后重置游标（仅在无活跃 slot 时调用）。
-func (r *unifiedRegion) arenaReset() {
-	atomic.StoreUint32(r.arenaUsed, 1)
-}
+// arenaReset 已移除。
+//
+// 旧实现把共享游标重置为 1，会覆盖其他进程/goroutine 仍在使用的分配。
+// 现设计用槽位图：释放是精确的 per-slot CAS，不存在"整体重置"语义。
