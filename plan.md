@@ -1368,42 +1368,51 @@ SSE Last-Event-ID → 超时 → api 状态码 → renderAll 增量 → XSS 消�
 - [ ] 图查询返回媒体节点
 - [ ] git commit -m "feat(l3): native multimodal nodes/edges"
 
-### 13.13 剩余内联大 payload 路径（「全量数据交互入共享内存」的尾巴）
+### 13.13 剩余内联 payload 路径（「全量数据交互入共享内存」的尾巴）
 
 **目标**：所有**数据面**交换都走共享内存，RPC 只传偏移描述符（SharedRef）。
 共享内存是跨进程的内部实现，不对插件开发者暴露（SDK 公开 API 仍是
 string / map / slice）。
 
-**已经走共享内存的**：
+**为什么必须入共享内存（不能只图省管道）**：
+
+.so 方案下插件回调（Cleaner / Stage / 工具）与内核同进程，可以直接就地
+改写参数与结果；多进程化后如果靠 RPC 把消息来回发，回调就只能“读一份、
+回发一份”，丢失就地改写语义。共享内存就是为了把 .so 时代的能力找回来：
+内核把内容放进段里 → 插件回调**就地改** → 只回一个描述符。
+
+**因此判据不是「payload 大不大」，而是「插件回调要能就地改写的内容有没
+留在段里」**。控制面小报文（plugin.init.Config、tool.register 的 def、
+settings.*、lifecycle.*、arena.alloc/free 自身）不属于此列：它们不被任何
+回调改写，搬进段里反而多两次 RPC。
+
+**回调就地改写——已达成（实测核实）**：
 
 | 通道 | 机制 |
 | --- | --- |
-| StageContext | 区内 segment + `WriteAll/ReadInto` |
+| StageContext | 区内 segment；`invokeStage` 只发 `{Stage, Seq}`，插件就地改写，应答只回 `DirtyFields` 计数 |
 | 事件环 | 区内 segment + eventfd 通知 |
-| tool.invoke 参数/结果 | `Frame` / `ResultRef`（§13.3） |
-| cleaner.invoke 输入/结果 | `Frame` / `TextRef`（§13.4） |
+| Cleaner | `Frame`/`InputLen` 入，`TextRef`（16B 描述符）回，内容不随 RPC 走 |
+| tool.invoke 参数/结果 | 内核标定 `Frame`，结果 `ResultRef`；`after_toolcall` 可在段内再改 |
 | output.invoke 参数 | `Frame`（§13.6） |
 | io.injectText 系列 | 插件侧 `putInArena` → `text_ref`（§13.5） |
 
-**尚未入内存（按风险排序，都是数据面）**：
+**尚未入内存**（按“是否破坏回调语义”排序）：
 
-1. **媒体块：`io.injectMedia` / `injectMediaSync` / `injectInterruptMedia`
-   / `io.setToolBlocks`**——`blocks` 内联在 RPC JSON 里，而
-   `ImageURL.URL` / `AudioURL.URL` 对本地生成的图/音频是 **base64 data URL**。
-   本地大图 base64 后可达数 MB，是目前最大的一条内联路径。
-   待做：blocks 序列化后 `putInArena`，传 `blocks_ref`；内核侧读回。
-2. **`doc.insert` / `doc.insertWithMedia`**——文档全文内联。文档可达几十 KB～
-   数 MB。待做：同 1，`doc_ref`。
-3. **`knowledge.add(name, content)`**——知识正文内联，同上。
-4. **反向工具结果（kernel → 插件）**：目前只有正向（插件→内核）有
-   `ResultRef`；插件反向调内核读大结果时仍是内联。
-
-不需入内存的：控制面小报文（`plugin.init.Config`、`tool.register` 的 def、
-`settings.*`、`lifecycle.*`、`arena.alloc/free` 自身）——它们本身就只有
-几十~几百字节，搬进共享内存反而多两次 RPC。
+1. **媒体块：`io.setToolBlocks`**——工具内的媒体注入仍把 `blocks` 内联在
+   RPC JSON 里，而 `ImageURL.URL` / `AudioURL.URL` 对本地生成的图/音频是
+   **base64 data URL**（如 ai_image 生成的大图）。这条直接破坏“结果媒体
+   能被 after_toolcall 就地改写”的能力：插件只能推一份拷贝过去。
+   待做：blocks 序列化后 `putInArena`，传 `blocks_ref`，内核读回。
+2. **`io.injectMedia` / `injectMediaSync` / `injectInterruptMedia`**——同上，
+   插件主动发起带媒体的一轮对话。
+3. **`doc.insert` / `doc.insertWithMedia`**——文档全文内联，且 `doc` 是可被
+   插件回调改写的内容。
+4. **`knowledge.add(name, content)`**——知识正文内联，同上。
+5. **反向结果**：插件反向调内核读大结果时仍内联（正向已有 `ResultRef`）。
 
 **验证**：
 
-- [ ] 媒体块走共享内存（本地大图注入不再爆管道）
+- [ ] 媒体块走共享内存（插件推图不再靠拷贝，且可被回调就地改写）
 - [ ] 文档/知识正文走共享内存
 - [ ] git commit -m "feat(shm): remaining data-plane payloads via shared refs"
