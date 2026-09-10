@@ -34,7 +34,7 @@ type coreHandler struct {
 	// invokeTool/invokeCleaner/invokeStageFn/invokeOutput 反向调用插件（内核 → 插件）。
 	// 由 Plugin 注入，注册回调时用它们构造 handler。
 	invokeTool    func(name string, args map[string]interface{}) (interface{}, error)
-	invokeCleaner func(scope, name, text string) (string, error)
+	invokeCleaner func(scope, name string, textRef SharedRef) (SharedRef, error)
 	invokeStageFn func(ctx context.Context, stage string, seq uint64) error
 	invokeOutput  func(channel string, args map[string]interface{}) (interface{}, error)
 
@@ -600,11 +600,16 @@ func (h *coreHandler) cleanerProxy(scope, name string, enabled bool) (func(strin
 		return nil, fmt.Errorf("%s %s 声明 Cleaner，但清洗回调通道未就绪", scope, name)
 	}
 	return func(text string) string {
-		cleaned, err := h.invokeCleaner(scope, name, text)
+		ref, err := h.host.unified.arenaWrite([]byte(text))
 		if err != nil {
 			return text
 		}
-		return cleaned
+		resultRef, err := h.invokeCleaner(scope, name, ref)
+		if err != nil {
+			return text
+		}
+		result := h.host.unified.arenaRead(resultRef)
+		return string(result)
 	}, nil
 }
 

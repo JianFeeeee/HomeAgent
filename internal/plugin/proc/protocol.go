@@ -213,14 +213,15 @@ type ToolInvokeResult struct {
 
 // CleanerInvokeParams / CleanerInvokeResult：跨进程计算层清洗。
 // Scope 取 tool / input / output，Name 是工具名或通道名。
+// TextRef 指向共享内存 arena 中的实际文本数据。
 type CleanerInvokeParams struct {
-	Scope string `json:"scope"`
-	Name  string `json:"name"`
-	Text  string `json:"text"`
+	Scope   string    `json:"scope"`
+	Name    string    `json:"name"`
+	TextRef SharedRef `json:"text_ref"`
 }
 
 type CleanerInvokeResult struct {
-	Text string `json:"text"`
+	TextRef SharedRef `json:"text_ref"`
 }
 
 const (
