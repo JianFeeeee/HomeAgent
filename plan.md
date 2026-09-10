@@ -1319,11 +1319,23 @@ SDK 仓 `v1.0.0` / `v1.1.0`。main 的版本路牌现为 `1.2.0`（尚无 tag）
 2. StageAfterToolcall 检查当前 tool 的 ContextPolicy
 3. prune 时执行 RelevanceContext.Prune
 4. 默认 none
+5. **prune 的查询向量必须取插件 Cleaner 清洗后的有效内容**（后补）
+
+**为什么第 5 条是必需的**：Prune 的入参是**相关性查询向量**，它决定保留/归档
+哪些上下文事件。刚上线时直接传原始 result，于是 ANSI 转义、base64、JSON 包装
+等噪声全被编进查询向量，打分失真、裁掉本该保留的事件。
+而 ToolDef.Cleaner 的契约本就写着「仅在向量化/jieba/蒸馏时调用」——裁剪正是
+在向量化，所以这是回归契约，不是新功能。
+回退规则：Cleaner 未注册 / RPC 失败 / 返回空串，都回退原文（返回空串会让查询
+向量退化成零向量，所有事件相关性相同，等于随机裁）。
 
 **验证**：
 
 - [x] qq_get_message 加 prune 后上下文精简（QQ 插件已声明 `ContextPolicy: "prune"`）
 - [x] git commit -m "feat(ctx): context policy for tool results"（772a494）
+- [x] `TestToolOutputForQueryAppliesCleaner`：Cleaner 被调用且用其结果；
+  无 Cleaner / nil stageHost 均回退原文
+- [x] `TestToolOutputForQueryEmptyCleanFallsBack`：空串回退（防零向量）
 
 ### 13.9 llmsproxy 上下文溢出感知
 
@@ -1411,10 +1423,16 @@ settings.*、lifecycle.*、arena.alloc/free 自身）不属于此列：它们不
    `attachments_ref`，模板序列化后 `putValueInArena`。
 4. ✅ ~~`knowledge.add(name, content)`~~ —— 已修。新增 `content_ref`
    （内容是 JSON 字符串，读出后需再解一层）。
-5. **反向结果**：插件反向调内核读大结果时仍内联（正向已有 `ResultRef`）。
-   这条范围比前四条大：需要把整个内核→插件的 Rust 应答路径改成
-   “大结果写段 + 返回 ref”，涉及 `callCore` 的返回处理与所有读大结果的
-   method（`doc.query` / `llm.chat` 等）。未做。
+5. **反向结果：不做（已核实为低价值）**。
+   原以为涉及 `doc.query` / `llm.chat` 等返回大结果的 method。核实后：
+   - **根本不存在 `llm.chat`**——`llm.*` 只映射 listSources/setSource/
+     currentSource（切换 LLM 源），外部插件无法调 LLM。
+   - 唯一可能返回大结果的是 `doc.query`（`CapDocMemory`），而**没有任何
+     外部插件用它**（全部 example 扫描：只有 recoverydiag 用了
+     `Knowledge().Add`）。
+   - `withheldCapabilities` 表已明确列出「刻意不给外部插件」的一批内核机制。
+   结论：它优化的是一条外部插件几乎不用、且已被能力门限制的路径，
+   投入产出不成立。**不做**，而不是留成永久 TODO。
 
 **协议版本已 bump 到 2**（§13.6/§13.13 的 payload 承载变更）。
 不再靠文档提醒，而是让错配在握手上**显式失败**：
