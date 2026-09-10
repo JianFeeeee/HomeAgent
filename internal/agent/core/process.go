@@ -15,6 +15,66 @@ import (
 	pubsdk "gitcode.com/JianFeeeee/homeagent-sdk/sdk"
 )
 
+// continuationPlaceholder 是工具轮之后补的 user 占位内容。
+//
+// zen 兼容网关要求请求最后一条必须是 user（thinking 续写模式校验），工具轮
+// 产出 assistant/tool 结尾会被 400 拒绝；首轮 system 结尾不补，否则会覆盖
+// 真实用户输入。
+//
+// 用独立常量 + 精确等值判定，是因为这条消息是**核心自己插入的**、不是用户输入，
+// 所以可以安全地按内容识别并在补位前移除上一条，保证至多一条。
+const continuationPlaceholder = "请根据以上工具结果继续。"
+
+// replyDeliveredPlaceholder 是「本批工具调用全部是输出通道发送」之后补的占位。
+//
+// 为何不能继续用通用的「请继续」：异步通道（qq/wechat）的回复**只能**经
+// output_send__* 交付（纯文本不送达，见 buildSystemPrompt 的输出规则）。于是
+// 模型「已经回复完了」的表达形式就是一个工具调用，而紧随其后的
+// 「请根据以上工具结果继续。」会被读成「还要再做一步」——能做的「一步」恰好
+// 还是再发一条消息。两者叠加成自我强化的发送循环：生产实测单轮 34 次
+// output_send__qq、持续 514 秒，直到 QQ 插件自己的循环保险拒绝发送才停下。
+//
+// 所以这里换成一条明确的终止许可：已回复完就直接返回纯文本收尾。
+const replyDeliveredPlaceholder = "若你的回复已完成，直接返回纯文本即可结束本轮，无需再调用任何工具。"
+
+// continuationFor 选择工具轮之后补位的 user 占位文案。
+// replyOnly 表示上一批工具调用全部是输出通道发送（即模型刚交付了回复）。
+func continuationFor(replyOnly bool) string {
+	if replyOnly {
+		return replyDeliveredPlaceholder
+	}
+	return continuationPlaceholder
+}
+
+// isOutputDeliveryTool 判断工具是否是「向输出通道交付内容」。
+// output_send__{channel}_help 只是查询用法，不算交付。
+func isOutputDeliveryTool(name string) bool {
+	return strings.HasPrefix(name, "output_send__") && !strings.HasSuffix(name, "_help")
+}
+
+// isContinuationPlaceholder 判断一条 user 消息是否是本机制插入的占位。
+// 只按两个常量精确匹配，不碰任何真实用户消息。
+func isContinuationPlaceholder(m agentAPI.Message) bool {
+	return m.Role == "user" &&
+		(m.Content == continuationPlaceholder || m.Content == replyDeliveredPlaceholder)
+}
+
+// dropContinuationPlaceholders 移除此前由本机制插入的 user 占位。
+//
+// 为什么必须移除而不仅仅是“不再追加”：`msgs` 在循环外创建、循环内只增不减，
+// 占位是核心自己插的、不是用户说的话。不移除的话，prompt 里就会线性叠上
+// N 条一模一样的“继续”，把前缀上下文（含记忆注入）往后挤。
+func dropContinuationPlaceholders(msgs []agentAPI.Message) []agentAPI.Message {
+	out := msgs[:0]
+	for _, m := range msgs {
+		if isContinuationPlaceholder(m) {
+			continue
+		}
+		out = append(out, m)
+	}
+	return out
+}
+
 func (a *Agent) process(input string, stageCtx *sdk.StageContext) (response string, toolsUsed []string, toolResults []ToolResultItem, err error) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
@@ -63,6 +123,9 @@ func (a *Agent) process(input string, stageCtx *sdk.StageContext) (response stri
 		}
 	}
 
+	// lastBatchReplyOnly 记录上一批工具调用是否全部是输出通道发送。
+	lastBatchReplyOnly := false
+
 	for turn := 0; ; turn++ {
 		for _, interrupt := range a.drainInterrupts() {
 			msgs = append(msgs, agentAPI.Message{
@@ -75,10 +138,17 @@ func (a *Agent) process(input string, stageCtx *sdk.StageContext) (response stri
 		// 工具轮产出的 tool/assistant 消息作结尾会被 400 拒绝,故补一条 user 占位。
 		// 注意:仅当尾部确为工具轮产物(assistant/tool)时才补位;首轮 system 上下文结尾不补,
 		// 否则会错误覆盖实际用户输入(如 injectSourceContext 追加的 system 说明)。
+		//
+		// 补位前先移除前面轮次插入的同类占位，保证占位**不随轮次线性累积**——
+		// 占位是核心插的传输层附加物，不是用户发言，不该在 prompt 里叠成 N 条。
+		//
+		// 文案分情况：上一批全是 output_send__* 时不能说“继续”，详见
+		// replyDeliveredPlaceholder 的说明。
+		msgs = dropContinuationPlaceholders(msgs)
 		if last := msgs[len(msgs)-1]; last.Role == "assistant" || last.Role == "tool" {
 			msgs = append(msgs, agentAPI.Message{
 				Role:    "user",
-				Content: "请根据以上工具结果继续。",
+				Content: continuationFor(lastBatchReplyOnly),
 			})
 		}
 
@@ -243,6 +313,17 @@ func (a *Agent) process(input string, stageCtx *sdk.StageContext) (response stri
 			return resp.Content, toolsUsed, toolResults, nil
 		}
 
+		// 本批是否全部是输出通道发送（=模型刚交付了给用户的回复）。
+		// 必须在执行前判定：执行过程中的中断/拒绝分支会 continue/break，
+		// 放在循环里统计会漏。
+		replyOnly := true
+		for _, tc := range resp.ToolCalls {
+			if !isOutputDeliveryTool(tc.Name) {
+				replyOnly = false
+				break
+			}
+		}
+
 		contentOnce := true
 		for _, tc := range resp.ToolCalls {
 			if len(a.interceptCh) > 0 {
@@ -400,6 +481,9 @@ func (a *Agent) process(input string, stageCtx *sdk.StageContext) (response stri
 				break
 			}
 		}
+
+		// 供下一轮顶部选择补位文案。
+		lastBatchReplyOnly = replyOnly
 	}
 }
 

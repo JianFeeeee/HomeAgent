@@ -98,8 +98,15 @@ type Agent struct {
 	// 子任务异步执行
 	childMu      sync.Mutex
 	childNextID  int64
-	childResults map[string]string
-	childRunning map[string]bool // 运行中的子任务（child_result 查询时区分'运行中'与'不存在'）
+	// childTasks 记录子任务状态：运行中 / 结果 / 是否已交付。
+	//
+	// 为什么保留结果而不是“读到即删”：完成通知会写进持久上下文
+	// （formatMergedTimeline 每轮都重新注入），模型之后还会再查。若读到即删，
+	// 第二次查询就得到“不存在或已过期”这个**永久失败信号**——模型据此认为
+	// 任务未完成，会无限重试/汇报（实测单轮 35 次工具调用、持续 514 秒）。
+	childTasks map[string]*childTaskState
+	// childSeq 给完成的任务排个序，用于有界淘汰。
+	childSeq int64
 
 	// 高优先级打断通道：interceptLoop 注入，process() 在工具循环轮次间非阻塞读取
 	interceptCh chan *agentIO.InputEvent
@@ -227,8 +234,7 @@ func New(cfg AgentConfig) *Agent {
 		embedder = memory.NewStaticEmbedder(strings.Split(cfg.EmbeddingModelPath, ",")...)
 	}
 	if cfg.DocStore != nil {
-		cfg.DocStore.SetVectorizer(embedder)
-		cfg.DocStore.ReindexWithVectorizer(embedder)
+		// TF-IDF 内置为 fallback，无需外部注入
 	}
 	if cfg.Knowledge != nil {
 		cfg.Knowledge.SetVectorizer(embedder)
@@ -293,8 +299,7 @@ func New(cfg AgentConfig) *Agent {
 		skillIndex:      cfg.SkillIndexProvider,
 		eventBus:        cfg.EventBus,
 		selfInputCh:     make(chan selfInputMsg, 64),
-		childResults:    make(map[string]string),
-		childRunning:    make(map[string]bool),
+		childTasks:      make(map[string]*childTaskState),
 		interceptCh:     make(chan *agentIO.InputEvent, 64),
 		pluginHealth:    newPluginHealthTracker(),
 		thinkingEnabled: cfg.ThinkingEnabled,
