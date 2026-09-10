@@ -1096,8 +1096,8 @@ SDK 仓 `v1.0.0` / `v1.1.0`。main 的版本路牌现为 `1.2.0`（尚无 tag）
 | 步骤 | 内容 | 依赖 | 产出 |
 |---|---|---|---|
 | 13.1 | 统一共享内存布局 | 无 | 单一 memfd，StageContext+EvtRing 成为区内 segment |
-| 13.2 | 共享内存扩缩容 | 13.1 | ftruncate/remap，generation 感知 |
-| 13.3 | ToolCall lane | 13.1 | 跨进程工具调用走 SharedRef，RPC 退化为控制信号 |
+| 13.2 | 共享内存分配器 | 13.1 | 内核独占的变长块分配器，插件经 RPC 申请/归还 |
+| 13.3 | 工具调用调用帧 | 13.1/13.2 | payload 始终走共享内存，内核标定帧，插件按需扩容 |
 | 13.4 | Cleaner 迁移至 SharedRef | 13.1 | cleaner.invoke 参数/结果走 SharedRef |
 | 13.5 | InputChannel lane | 13.1 | 输入通道消息走共享内存 |
 | 13.6 | OutputChannel lane | 13.1 | 输出通道消息走共享内存 |
@@ -1147,56 +1147,69 @@ SDK 仓 `v1.0.0` / `v1.1.0`。main 的版本路牌现为 `1.2.0`（尚无 tag）
 - [ ] fd 数从 3 降到 2
 - [ ] git commit -m "feat(shm): unified shared memory region"
 
-### 13.2 共享槽池（内核独占所有权）
+### 13.2 内核独占的共享内存分配器
 
 **设计约束（用户明确）**：
 
 > 内核应当全权管理共享内存，插件需要共享内存要向内核申请，内核给插件返回偏移与大小，使用完成后插件通知内核回收。
 > 内核暴露类似 syscall 的 RPC 接口；共享内存是内部实现，不对插件开发者暴露。
 
-**为什么不是跨进程分配器**（前两版都被推翻）：
+**为什么不是跨进程分配器**（前几版都被推翻）：
 
 - v1：SuperBlock 放 `arenaUsed` 游标，内核 CAS bump。但**插件模板里的 `arenaUsed` 是进程本地变量**，两个进程各自 bump，必然写到同一段内存；`arenaReset` 还会重置共享游标覆盖对方数据。
 - v2：把位图 CAS 下沉到插件模板。虽然正确，但把分配器实现细节泄漏进了插件运行时，且插件必须与内核保持位图布局同步。
-- v3（当前）：分配器只存在于**内核进程内**，一把 `sync.Mutex` 即可。插件只通过 RPC 申请/归还，不做任何分配决策。
+- v3：定长槽 + 共享位图 CAS。正确，但定长槽唯一的理由是“跨进程没法安全做变长分配”。
+- v4（当前）：分配器收回内核进程后那个约束消失，改成**变长块分配器**（first-fit + 邻块合并）。内核可以按需**标定**每块大小，大 payload 不再受固定槽容量限制。
 
 **实施**：
 
-1. `arena.go`：定长槽 + 位图，`Alloc/Put/Read/Free/ReclaimOwner`，内核独占。
-2. 槽头记录 `owner`；`Free` 校验归属，插件不能释放他人（或内核）的槽。
-3. 协议新增 `arena.alloc` / `arena.free`（`CapCore`，属基础能力）。
-4. `Plugin` 在 `Start` 领取 ownerID；`handleExit` 调 `ReclaimOwner` 回收残留槽，防崩溃把池耗尽。
-5. 插件侧不再写位图：`proc_main.go.tmpl` 删掉本地 bump 分配器，改为 `arenaAlloc`/`arenaFree` 走 RPC；SDK 公开 API 仍是普通字符串/Map，开发者无感。
-6. payload 超槽容量时**退回内联 RPC**（原有正确路径），不静默截断。
+1. `arena.go`：块头 16B（`size/state/owner/prevSize`），`Alloc/Put/Read/Free/ReclaimOwner`，内核独占一把 `sync.Mutex`。`prevSize` 让 `Free` 能 O(1) 找到前驱做向后合并。
+2. 块头记录 `owner`；`Free` 校验归属 + 走块链确认 offset 是已分配块的数据起点，**伪造引用不能改动分配器状态**。
+3. `Read` 允许块内偏移（调用帧的结果区就在帧块中间），但要求不跨越块边界。
+4. 协议新增 `arena.alloc` / `arena.free`（`CapCore`，属基础能力）。
+5. `Plugin` 在 `Start` 领取 ownerID；`handleExit` 调 `ReclaimOwner` 回收残留块，防崩溃把 arena 耗尽。
+6. 插件侧不写任何分配器状态：模板只通过 RPC 申请/归还；SDK 公开 API 仍是普通字符串/Map，开发者无感。
+7. arena 容量 4MB，但底层是 memfd：**未触碰的页不占物理内存**，所以开大无成本。
 
 **验证**：
 
-- [x] `TestArena_*`：分配/归还/归属校验/回收/并发唯一/耗尽/超限/非法引用/布局校验
-- [x] `TestPlugin_ArenaAllocFreeAcrossProcess`：真进程申请→写入→随业务 RPC 回传→归还，内核读回内容一致且池归零
-- [ ] **Grow/Shrink 未实现**：跨进程 remap 很危险（对端可能正在读，munmap 会 SIGSEGV）。当前槽池规格固定，用尽后退回内联 RPC。generation 字段已就位但只在 resize 时才会 bump。
-- [x] git commit -m "refactor(shm): kernel-owned exchange arena"
+- [x] `TestArena_*`：分配/归还/归属校验/回收/并发唯一/耗尽/超限/非法引用/伪造 offset/相邻合并/对齐/布局校验
+- [x] `TestPlugin_ArenaAllocFreeAcrossProcess`：真进程申请→写入→随业务 RPC 回传→归还，内核读回内容一致且 arena 归零
+- [ ] **Grow/Shrink 未实现**：跨进程 remap 会让正在读的对端 SIGSEGV。当前容量固定，用尽时调用失败（不再退回内联）。
+- [x] git commit -m "refactor(shm): kernel-owned variable-size arena"
 
-### 13.3 ToolCall 数据面走共享槽
+### 13.3 工具调用走 funccall 调用帧
 
-**目标**：工具调用的**参数/结果**走共享内存，RPC 只传描述符。
+**目标**：工具调用的 payload **始终**在共享内存里；内核作为 caller 标定内存块交给插件。
 
-**控制面 vs 数据面**（与初版设计的差异）：
+**模型（用户明确）**：
 
-初版计划用 ring 状态机（FREE→WRITING→READY→READING→DONE）把 `tool.invoke` 也搬出 RPC。实际实现后发现这是错的方向：
+> 工具调用的 payload 应当始终在共享内存中。因为工具调用是内核发出的，按 funccall 方式，内存块应当由内核标定后交给子进程。当内核提前给的不够用时，插件侧才请求扩容。
 
-- RPC 已经提供请求 ID 关联、错误传递、ctx 取消、崩溃唤醒（`Process.CallContext`），ring 状态机是把这些重新实现一遍。
-- ring 版本写完从未接线，属死代码，已删除。
+调用帧布局：
 
-因此**控制面保留 RPC**，只把 payload 搬进共享槽：
+```text
+[0, ArgsLen)              参数 JSON
+[ArgsLen, Frame.Length)   结果区（内核预留的预算）
+```
 
-1. 小 payload 走内联 JSON（省两次 RPC）。
-2. 大 payload 走内核分配的槽，RPC 只带 `SharedRef`。
-3. 插件不需要分配：内核可预分配响应槽（如 Cleaner 路径）。
+**为什么不用 ring 状态机**：初版计划用 FREE→WRITING→READY→READING→DONE 的 ring 把 `tool.invoke` 整个搬出 RPC。写完发现是错的方向——RPC 已经提供请求 ID 关联、错误传递、ctx 取消、崩溃唤醒（`Process.CallContext`），ring 只是把它们重新实现一遍，且从未接线（死代码，已删）。
+
+**实施**：
+
+1. 内核 `invokeTool`：序列化参数 → `Alloc(len(args)+toolResultBudget)` → 参数写帧前段 → 发 `ToolInvokeParams{Name, Frame, ArgsLen}`。
+2. 插件：从帧读参数；结果优先写帧的结果区。
+3. 结果超出预算 → 插件 `arena.alloc` 扩容块，引用上打 `sharedRefFlagExpand`；内核据此单独归还。
+4. **没有按大小切换内联的分支**：小 payload 同样走帧。
+5. Cleaner 复用同一帧模型（`Frame` + `InputLen`）。
+6. `ToolInvokeParams.Args` / `ToolInvokeResult.Result` 仅剩给**直连 RPC 的测试**（process/bench 不建 Host，拿不到共享内存）；生产路径永远走帧。
 
 **验证**：
 
-- [x] `TestPlugin_RegisteredToolInvokable` 通过
-- [ ] Bench: ToolInvoke 延迟改善（待 `tool.invoke` 接入 SharedRef 后再测）
+- [x] `TestPlugin_ToolInvokeArgsResultViaArena`：大/小 payload 都经帧往返，结果内容一致且 arena 归零
+- [x] `TestE2E_RealTemplatePluginFullLifecycle`：真实 SDK 模板编译的插件跑通
+- [x] `TestProcTemplate_ToolInvokeUsesSharedRef`：模板必须处理 frame/args_len/result_ref（防漂移）
+- [ ] Bench: ToolInvoke 延迟对比（待补）
 
 ### 13.4 Cleaner 迁移至 SharedRef
 
