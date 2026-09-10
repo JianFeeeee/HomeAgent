@@ -345,16 +345,30 @@ func (p *Plugin) invokeOutput(channel string, args map[string]interface{}) (inte
 		return nil, err // 真实失败上报，模型可感知并重试
 	}
 	if len(raw) == 0 {
-		return map[string]interface{}{"status": "sent"}, nil
+		return map[string]interface{}{"status": "ok"}, nil
 	}
+
 	var res map[string]interface{}
-	if err := json.Unmarshal(raw, &res); err != nil {
-		return map[string]interface{}{"status": "sent"}, nil
+	if err := json.Unmarshal(raw, &res); err == nil {
+		if _, ok := res["status"]; !ok {
+			res["status"] = "sent"
+		}
+		return res, nil
 	}
-	if _, ok := res["status"]; !ok {
-		res["status"] = "sent"
+
+	// 插件返回的是标量（如 "ok"）——**原样透传，不要伪造 status**。
+	//
+	// 为什么必须透传：核心 output.go 会把 map 结果格式化成富回执
+	// （"已通过 [qq] 通道发送: map[status:sent]"），模型看到"发送成功 +
+	// 详情"会把这一步当成"上一步完成、继续下一步"的信号，形成
+	// output_send 回声循环。插件（如 qq）刻意返回极简的 "ok" 就是为了
+	// 掐断这个信号；早期实现在这里把非 map 响应替换成 {status:sent}，
+	// 等于把它又变回富回执——**只改插件永远修不掉这个循环**。
+	var scalar interface{}
+	if err := json.Unmarshal(raw, &scalar); err != nil {
+		return map[string]interface{}{"status": "ok"}, nil
 	}
-	return res, nil
+	return scalar, nil
 }
 
 // 编译期确认 Plugin 具备 registry 需要的启停形状。
