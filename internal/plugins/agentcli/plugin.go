@@ -993,24 +993,28 @@ func (p *Plugin) cleanupLoop(s *sdk.PluginSDK) {
 		case <-p.stopCh:
 			return
 		case <-ticker.C:
+			// 先持锁筛选出待关闭的终终并移出 map，再在锁外逐个关闭。
+			// 旧实现在持锁期间 go func 调 term.Close()（内部会 Kill 进程并等
+			// <-t.done），临界区被拉长且与 TerminalSession 的退出路径交错。
+			var expired []*TerminalSession
 			p.mu.Lock()
 			for id, t := range p.sessions {
-				if t.IsExpired() {
+				switch {
+				case t.IsExpired():
 					log.Printf("[agentcli] cleanup: terminal %s expired", id)
-					delete(p.sessions, id)
-					go func(term *TerminalSession) {
-						term.Close()
-					}(t)
-				}
-				if !terminalRunning(t) {
+				case !terminalRunning(t):
 					log.Printf("[agentcli] cleanup: terminal %s process exited", id)
-					delete(p.sessions, id)
-					go func(term *TerminalSession) {
-						term.Close()
-					}(t)
+				default:
+					continue
 				}
+				delete(p.sessions, id)
+				expired = append(expired, t)
 			}
 			p.mu.Unlock()
+
+			for _, t := range expired {
+				go func(term *TerminalSession) { term.Close() }(t)
+			}
 		}
 	}
 }
