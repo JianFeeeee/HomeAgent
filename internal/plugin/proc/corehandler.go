@@ -101,6 +101,9 @@ type CoreSDK interface {
 	InjectInputMediaSync(source, channel, text string, blocks []pubsdk.ContentBlock) string
 	InjectInterruptMedia(source, channel, text string, blocks []pubsdk.ContentBlock)
 
+	// SetToolBlocks 注入媒体块，内核在下一条 tool message 携带（§3.8）。
+	SetToolBlocks(blocks []pubsdk.ContentBlock)
+
 	SetAutoRestart(enabled bool)
 }
 
@@ -186,7 +189,11 @@ func (h *coreHandler) Handle(method string, params json.RawMessage) (interface{}
 		if err := unmarshal(params, &p); err != nil {
 			return nil, err
 		}
-		h.sdk.InjectInputMedia(p.Source, p.Channel, p.Text, p.Blocks)
+		blocks, err := h.resolveBlocks(p)
+		if err != nil {
+			return nil, err
+		}
+		h.sdk.InjectInputMedia(p.Source, p.Channel, p.Text, blocks)
 		return nil, nil
 
 	case MethodIOInjectMediaSync:
@@ -194,7 +201,11 @@ func (h *coreHandler) Handle(method string, params json.RawMessage) (interface{}
 		if err := unmarshal(params, &p); err != nil {
 			return nil, err
 		}
-		reply := h.sdk.InjectInputMediaSync(p.Source, p.Channel, p.Text, p.Blocks)
+		blocks, err := h.resolveBlocks(p)
+		if err != nil {
+			return nil, err
+		}
+		reply := h.sdk.InjectInputMediaSync(p.Source, p.Channel, p.Text, blocks)
 		return map[string]interface{}{"reply": reply}, nil
 
 	case MethodIOInjectInterruptMedia:
@@ -202,7 +213,11 @@ func (h *coreHandler) Handle(method string, params json.RawMessage) (interface{}
 		if err := unmarshal(params, &p); err != nil {
 			return nil, err
 		}
-		h.sdk.InjectInterruptMedia(p.Source, p.Channel, p.Text, p.Blocks)
+		blocks, err := h.resolveBlocks(p)
+		if err != nil {
+			return nil, err
+		}
+		h.sdk.InjectInterruptMedia(p.Source, p.Channel, p.Text, blocks)
 		return nil, nil
 
 	// ---- 生命周期（原 case 8）----
@@ -573,10 +588,25 @@ func (h *coreHandler) Handle(method string, params json.RawMessage) (interface{}
 		}
 		return nil, h.arenaFree(p.Ref)
 
-	// ---- 多模态注入（C ABI 侧空实现）----
+	// ---- 多模态注入 ----
+	//
+	// 之前这里是桩：返回“待共享段二进制通道落地”。后果是**子进程插件调
+	// SetToolBlocks 必然失败**（模板只 log 一行），只有内置插件能用。
+	// 现在媒体块经共享内存传递，该能力对两种插件形态等价。
 	case MethodIOSetToolBlocks:
-		// Part 4 扩展：二进制落 arena、Slice 描述符回传（§3.8）。
-		return nil, fmt.Errorf("%s: 多模态注入待共享段二进制通道落地", method)
+		var p injectMediaParams
+		if err := unmarshal(params, &p); err != nil {
+			return nil, err
+		}
+		blocks, err := h.resolveBlocks(p)
+		if err != nil {
+			return nil, err
+		}
+		if len(blocks) == 0 {
+			return nil, fmt.Errorf("%s: blocks 为空", method)
+		}
+		h.sdk.SetToolBlocks(blocks)
+		return nil, nil
 	}
 
 	return nil, fmt.Errorf("未知 method: %s", method)
@@ -604,15 +634,37 @@ type injectParams struct {
 	TextRef SharedRef `json:"text_ref,omitempty"`
 }
 
-// injectMediaParams 是带媒体注入的参数。
+// injectMediaParams 是带媒体注入/工具块注入的参数。
 //
-// blocks 走 JSON（而非共享段二进制通道）：data URL 已经是 base64 文本，
-// 再套一层二进制传输不会更小，而 JSON 让这条路径与其他 method 一致。
+// blocks 优先经共享内存传递（BlocksRef）。旧的注释说“data URL 已是 base64
+// 文本、再套一层二进制不会更小，所以走 JSON”——那只算了体积，漏了两件更重要
+// 的事：① 内联时整份 base64 要在 RPC 报文里再编码/再拷贝一遍（一张本地生图
+// 可达数 MB），② 内容本体不在共享段里，插件回调就无法就地改写，只能各自
+// 持一份拷贝。共享内存的意义是后者。
+//
+// 没有 BlocksRef 时（直连 RPC 测试、arena 不可用）回退内联 Blocks。
 type injectMediaParams struct {
-	Source  string                `json:"source"`
-	Channel string                `json:"channel"`
-	Text    string                `json:"text"`
-	Blocks  []pubsdk.ContentBlock `json:"blocks"`
+	Source    string                `json:"source"`
+	Channel   string                `json:"channel"`
+	Text      string                `json:"text,omitempty"`
+	Blocks    []pubsdk.ContentBlock `json:"blocks,omitempty"`
+	BlocksRef SharedRef             `json:"blocks_ref,omitempty"`
+}
+
+// resolveBlocks 取出媒体块：优先共享内存，否则内联。
+func (h *coreHandler) resolveBlocks(p injectMediaParams) ([]pubsdk.ContentBlock, error) {
+	if p.BlocksRef.IsZero() {
+		return p.Blocks, nil
+	}
+	data, err := h.host.Arena().Read(p.BlocksRef, h.host.Generation())
+	if err != nil {
+		return nil, fmt.Errorf("读取共享媒体块失败: %w", err)
+	}
+	var blocks []pubsdk.ContentBlock
+	if err := json.Unmarshal(data, &blocks); err != nil {
+		return nil, fmt.Errorf("解析共享媒体块失败: %w", err)
+	}
+	return blocks, nil
 }
 
 func unmarshal(params json.RawMessage, out interface{}) error {
