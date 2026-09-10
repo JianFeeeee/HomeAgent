@@ -159,6 +159,12 @@ func (c procCore) InjectInterruptMedia(source, channel, text string, blocks []pu
 	c.sdk.InjectInterruptMedia(source, channel, text, blocks)
 }
 
+// SetToolBlocks 转调 internal/sdk：插件工具注入的媒体块，内核在下一轮
+// tool message 携带。
+func (c procCore) SetToolBlocks(blocks []pubsdk.ContentBlock) {
+	c.sdk.SetToolBlocks(blocks)
+}
+
 // ---- 生命周期 ----
 
 func (c procCore) SetAutoRestart(enabled bool) { c.sdk.SetAutoRestart(enabled) }

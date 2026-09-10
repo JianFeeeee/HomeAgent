@@ -75,6 +75,26 @@ func (p *e2ePlugin) Start(s *sdk.PluginSDK) error {
 
 	s.RegisterInputChannel("e2e_in", sdk.ChannelDef{})
 
+	// §13.13：媒体块注入。SetToolBlocks 在内核侧曾是桩（直接报“待共享段
+	// 二进制通道落地”），子进程插件调它必然失败。这里用大 base64 payload
+	// 验证模板真的经 blocks_ref 走共享内存。
+	s.RegisterTool("e2e_blocks", sdk.ToolDef{
+		Description: "注入媒体块",
+		Parameters: map[string]interface{}{
+			"type": "object",
+			"properties": map[string]interface{}{
+				"url": map[string]interface{}{"type": "string"},
+			},
+		},
+	}, func(args map[string]interface{}) (interface{}, error) {
+		u, _ := args["url"].(string)
+		s.SetToolBlocks([]sdk.ContentBlock{{
+			Type:     "image_url",
+			ImageURL: &sdk.ImageURL{URL: u},
+		}})
+		return "blocks-set", nil
+	})
+
 	return nil
 }
 
@@ -335,5 +355,49 @@ func TestE2E_RealTemplateOutputPayloadViaFrame(t *testing.T) {
 	}
 	if used, _ := host.Arena().Stats(); used != 0 {
 		t.Fatalf("调用结束后 arena 应归零，实际 used=%d", used)
+	}
+}
+
+// §13.13：SetToolBlocks 的媒体块经共享内存到达内核（用真实模板编译的插件）。
+//
+// 内核侧曾是桩实现，子进程插件调 SetToolBlocks 必然失败；模板又不经
+// blocks_ref 的话，即使内核实现了也收不到内容。两边必须同时到位。
+func TestE2E_RealTemplateSetToolBlocksViaArena(t *testing.T) {
+	bin := buildPluginWithRealTemplate(t, e2ePluginSource)
+
+	host, err := NewHost()
+	if err != nil {
+		t.Fatalf("NewHost: %v", err)
+	}
+	defer host.Close()
+
+	core := newFakeCore()
+	p := New("e2e", bin, t.TempDir(), nil, host, nil)
+	if err := p.Start(core); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	defer p.Close()
+
+	core.mu.Lock()
+	h, ok := core.tools["e2e_blocks"]
+	core.mu.Unlock()
+	if !ok {
+		t.Fatal("插件应注册 e2e_blocks 工具")
+	}
+
+	// 9000 字节 base64：远大于内联阈值，只有共享内存才能送到。
+	big := "data:image/png;base64," + strings.Repeat("A", 8000)
+	if _, err := h(map[string]interface{}{"url": big}); err != nil {
+		t.Fatalf("调用 e2e_blocks: %v", err)
+	}
+	if n := core.toolBlockCount(); n != 1 {
+		t.Fatalf("内核应收到 1 个媒体块，实际 %d（模板未走 blocks_ref？）", n)
+	}
+
+	core.mu.Lock()
+	got := core.toolBlocks[0]
+	core.mu.Unlock()
+	if got.ImageURL == nil || got.ImageURL.URL != big {
+		t.Fatal("经共享内存送达的媒体块内容与发送的不一致")
 	}
 }

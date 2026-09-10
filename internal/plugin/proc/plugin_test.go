@@ -29,6 +29,8 @@ type fakeCoreSDK struct {
 
 	// injected 记录经 InjectText 注入的文本（验证跨进程共享槽路径）。
 	injected []string
+	// toolBlocks 累积 SetToolBlocks 收到的块（多模态注入通道）。
+	toolBlocks []pubsdk.ContentBlock
 }
 
 func newFakeCore() *fakeCoreSDK {
@@ -72,7 +74,21 @@ func (f *fakeCoreSDK) InjectInputMediaSync(s, c, t string, b []pubsdk.ContentBlo
 	return ""
 }
 func (f *fakeCoreSDK) InjectInterruptMedia(s, c, t string, b []pubsdk.ContentBlock) {}
-func (f *fakeCoreSDK) SetAutoRestart(enabled bool)                                  { f.autoStart = enabled }
+
+// SetToolBlocks 记录收到的媒体块，供测试断言共享内存通道真的把内容带到了内核侧。
+func (f *fakeCoreSDK) SetToolBlocks(blocks []pubsdk.ContentBlock) {
+	f.mu.Lock()
+	f.toolBlocks = append(f.toolBlocks, blocks...)
+	f.mu.Unlock()
+}
+
+func (f *fakeCoreSDK) toolBlockCount() int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return len(f.toolBlocks)
+}
+
+func (f *fakeCoreSDK) SetAutoRestart(enabled bool) { f.autoStart = enabled }
 
 func (f *fakeCoreSDK) RegisterTool(name string, def pubsdk.ToolDef, h pubsdk.ToolHandler) error {
 	f.mu.Lock()
@@ -418,10 +434,82 @@ func TestCoreHandler_RejectsUnknownAndUnimplementedMethods(t *testing.T) {
 	if _, err := h.Handle(MethodEventsSubscribe, json.RawMessage(`{}`)); err == nil {
 		t.Error("事件订阅未落地时应明确报错，而非静默成功后收不到事件")
 	}
+}
 
-	// 多模态注入同理
+// §13.13：媒体块经共享内存（blocks_ref）送达内核。
+//
+// 之前 io.setToolBlocks 是桩实现（直接返回“待共享段二进制通道落地”），
+// 后果是**子进程插件调 SetToolBlocks 必然失败**，只有内置插件能用。
+func TestCoreHandler_SetToolBlocksViaArena(t *testing.T) {
+	host, err := NewHost()
+	if err != nil {
+		t.Fatalf("NewHost: %v", err)
+	}
+	defer host.Close()
+
+	core := newFakeCore()
+	h := &coreHandler{sdk: core, name: "x", host: host, locks: &lockRegistry{}}
+
+	// 一张“本地生成的图”：base64 data URL，远大于内联阈值。
+	big := "data:image/png;base64," + strings.Repeat("A", 8000)
+	blocks := []pubsdk.ContentBlock{{
+		Type:     "image_url",
+		ImageURL: &pubsdk.ImageURL{URL: big},
+	}}
+	blob, err := json.Marshal(blocks)
+	if err != nil {
+		t.Fatalf("Marshal: %v", err)
+	}
+
+	arena := host.Arena()
+	gen := host.Generation()
+	ref, err := arena.Alloc(OwnerHost, len(blob), gen)
+	if err != nil {
+		t.Fatalf("Alloc: %v", err)
+	}
+	defer func() { _ = arena.Free(OwnerHost, ref) }()
+	area, err := arena.Read(ref, gen)
+	if err != nil {
+		t.Fatalf("Read: %v", err)
+	}
+	copy(area[:len(blob)], blob)
+
+	params, _ := json.Marshal(map[string]interface{}{"blocks_ref": ref})
+	if _, err := h.Handle(MethodIOSetToolBlocks, params); err != nil {
+		t.Fatalf("setToolBlocks 应成功: %v", err)
+	}
+	if n := core.toolBlockCount(); n != 1 {
+		t.Fatalf("内核应收到 1 个媒体块，实际 %d", n)
+	}
+
+	core.mu.Lock()
+	got := core.toolBlocks[0]
+	core.mu.Unlock()
+	if got.ImageURL == nil || got.ImageURL.URL != big {
+		t.Fatal("经共享内存送达的媒体块内容与发送的不一致")
+	}
+}
+
+// 内联路径仍可用（直连 RPC 调用方 / arena 不可用时）。
+func TestCoreHandler_SetToolBlocksInline(t *testing.T) {
+	core := newFakeCore()
+	h := &coreHandler{sdk: core, name: "x", locks: &lockRegistry{}}
+
+	params := json.RawMessage(`{"blocks":[{"type":"text","text":"hi"}]}`)
+	if _, err := h.Handle(MethodIOSetToolBlocks, params); err != nil {
+		t.Fatalf("内联 blocks 应成功: %v", err)
+	}
+	if n := core.toolBlockCount(); n != 1 {
+		t.Fatalf("内核应收到 1 个块，实际 %d", n)
+	}
+}
+
+// blocks 为空必须报错，而不是静默成功——静默成功会让插件以为图已注入。
+func TestCoreHandler_SetToolBlocksEmptyRejected(t *testing.T) {
+	core := newFakeCore()
+	h := &coreHandler{sdk: core, name: "x", locks: &lockRegistry{}}
 	if _, err := h.Handle(MethodIOSetToolBlocks, json.RawMessage(`{}`)); err == nil {
-		t.Error("多模态注入未落地时应明确报错")
+		t.Error("blocks 为空应明确报错")
 	}
 }
 
