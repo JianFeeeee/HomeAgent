@@ -559,10 +559,20 @@ func (h *coreHandler) Handle(method string, params json.RawMessage) (interface{}
 	return nil, fmt.Errorf("未知 method: %s", method)
 }
 
+// resolveText 从 injectParams 中提取 text：优先使用 TextRef（SharedRef），
+// 否则使用内联 Text。兼容新旧两种协议。
+func (h *coreHandler) resolveText(p injectParams) string {
+	if !p.TextRef.IsZero() {
+		return string(p.TextRef.Slice(h.host.data))
+	}
+	return p.Text
+}
+
 type injectParams struct {
-	Source  string `json:"source"`
-	Channel string `json:"channel"`
-	Text    string `json:"text"`
+	Source  string    `json:"source"`
+	Channel string    `json:"channel"`
+	Text    string    `json:"text,omitempty"`
+	TextRef SharedRef `json:"text_ref,omitempty"`
 }
 
 // injectMediaParams 是带媒体注入的参数。
