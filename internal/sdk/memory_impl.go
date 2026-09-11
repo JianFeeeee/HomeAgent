@@ -6,6 +6,8 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+	"sync/atomic"
+	"time"
 
 	"gitcode.com/JianFeeeee/HomeAgent/internal/memory"
 	doc "gitcode.com/JianFeeeee/HomeAgent/internal/memory/document"
@@ -81,37 +83,87 @@ func sdkDigestsIn(s string) map[string]bool {
 	return out
 }
 
-// sdkBindText 把文本里引用的媒体挂到 owner 上，返回新挂上的条数。
-//
-// 短 digest 补全失败（内容已 GC、或前缀有歧义）就跳过那一条：挂一条对不上的
-// 引用比不挂更糟——owner_kind/owner_id/digest 三者进了主键，digest 错了则
-// DropOwner 永远匹配不到它，那是一条永久泄漏的引用。
-//
-// done 记录本次已处理过的 digest。AddRef 幂等，重复挂不会多出一条引用，
-// 但会让计数虚高——文档路径先按附件挂一遍、再扫正文标记挂一遍，
-// 同一份媒体会被数两次，日志里「绑定 2 个」而实际只有 1 条引用。
-func sdkBindText(ms *media.Store, text, ownerKind, ownerID string, done map[string]bool) int {
-	if ms == nil || text == "" || ownerID == "" {
-		return 0
+// sdkBlockSeq 保证块 ID 全局唯一：Graph 的 memory_blocks 以 id 为主键，
+// 不同文档里序号相同的块会在 L2→L3 迁移时相互覆盖。
+var sdkBlockSeq int64
+
+func sdkNewBlockID() string {
+	return fmt.Sprintf("blk_%d_%d", time.Now().UnixNano(), atomic.AddInt64(&sdkBlockSeq, 1))
+}
+
+// sdkBlockModality 把 CAS 的媒体大类映射为一等记忆块的模态。
+func sdkBlockModality(k media.Kind) memory.BlockModality {
+	switch k {
+	case media.KindImage:
+		return memory.BlockImage
+	case media.KindVideo:
+		return memory.BlockVideo
+	case media.KindAudio:
+		return memory.BlockAudio
+	default:
+		return memory.BlockText
 	}
-	bound := 0
+}
+
+// sdkBlockForDigest 把一份已入库的媒体变成一个一等记忆块。
+// 块自身携带 digest/向量/ fingerprint；CAS 只提供字节与元数据，不参与生命周期。
+func sdkBlockForDigest(ms *media.Store, digest string) (memory.MemoryBlock, bool) {
+	it, err := ms.Stat(digest)
+	if err != nil || it == nil {
+		return memory.MemoryBlock{}, false
+	}
+	return memory.MemoryBlock{
+		ID:            sdkNewBlockID(),
+		Modality:      sdkBlockModality(it.Kind),
+		PayloadDigest: it.Digest,
+		MIME:          it.MIME,
+		Size:          it.Size,
+		Width:         it.Width,
+		Height:        it.Height,
+		Vector:        it.Vec,
+		Fingerprint:   it.VecModel,
+		Tool:          it.Tool,
+		CreatedAt:     it.FirstSeen,
+	}, true
+}
+
+// sdkBlocksFromText 把文本标记里的媒体变成一等块（去重）。
+func sdkBlocksFromText(ms *media.Store, text string) []memory.MemoryBlock {
+	if ms == nil || text == "" {
+		return nil
+	}
+	seen := map[string]bool{}
+	var blocks []memory.MemoryBlock
 	for _, m := range sdkMarkerPattern.FindAllStringSubmatch(text, -1) {
 		full, err := ms.ResolvePrefix(m[2])
-		if err != nil {
+		if err != nil || seen[full] {
 			continue
 		}
-		if done != nil && done[full] {
-			continue
+		seen[full] = true
+		if b, ok := sdkBlockForDigest(ms, full); ok {
+			blocks = append(blocks, b)
 		}
-		if err := ms.AddRef(full, ownerKind, ownerID); err != nil {
-			continue
-		}
-		if done != nil {
-			done[full] = true
-		}
-		bound++
 	}
-	return bound
+	return blocks
+}
+
+// sdkBlocksFromDigests 为显式 digest 列表构造一等块（去重）。
+func sdkBlocksFromDigests(ms *media.Store, digests []string) []memory.MemoryBlock {
+	if ms == nil || len(digests) == 0 {
+		return nil
+	}
+	seen := map[string]bool{}
+	var blocks []memory.MemoryBlock
+	for _, d := range digests {
+		if d == "" || seen[d] {
+			continue
+		}
+		seen[d] = true
+		if b, ok := sdkBlockForDigest(ms, d); ok {
+			blocks = append(blocks, b)
+		}
+	}
+	return blocks
 }
 
 // sdkPutAttachment 把一份附件解析成完整 digest。
@@ -208,11 +260,10 @@ func (m *graphMemory) Recall(query []string, depth int) ([]Entity, []Relation, e
 	return entities, relations, nil
 }
 
-// Commit 把插件的三元组写入图库，并把三元组引用的媒体挂到句子上。
+// Commit 把插件的三元组写入图库，并把三元组句子里的媒体变成 L3 一等块。
 //
-// 媒体的绑定链是 SentenceText → sentences 表 → sentence_id → media_refs。
-// 旧实现丢掉 SentenceText 又走 Commit（不回 sentenceIDs），这条链一步都走不通：
-// 插件即便按格式写好标记，媒体也永远挂不上。
+// 媒体的落点链是 SentenceText → sentences 表 → sentence_id → 块边。
+// 旧实现丢掉 SentenceText 又走 Commit（不回 sentenceIDs），这条链一步都走不通。
 func (m *graphMemory) Commit(triples []Triple) error {
 	if m.db == nil {
 		return nil
@@ -280,9 +331,11 @@ func (m *graphMemory) sentenceWithMedia(sentence string, digests []string) strin
 	return sentence + "\n" + strings.Join(add, "\n")
 }
 
-// bindSentences 把每条句子里引用的媒体挂到该句子的 graph_sentence owner 上。
+// bindSentences 把每条句子里引用的媒体变成 L3 的一等记忆块，
+// 并建立 sentence --contains--> block 的结构边。
+// 不再写 media_refs：块本身就是图的一部分，不需要 owner 账本保活。
 func (m *graphMemory) bindSentences(sentenceIDs map[string]int64) {
-	if m.ms == nil || len(sentenceIDs) == 0 {
+	if m.ms == nil || m.db == nil || len(sentenceIDs) == 0 {
 		return
 	}
 	bound := 0
@@ -290,13 +343,20 @@ func (m *graphMemory) bindSentences(sentenceIDs map[string]int64) {
 		if sid == 0 {
 			continue
 		}
-		// 每条句子一个独立的 done 集：同一份媒体挂在不同句子上是两条
-		// 合法引用（owner_id 不同），不该被跨句子去重。
-		bound += sdkBindText(m.ms, text, media.OwnerGraphSentence,
-			strconv.FormatInt(sid, 10), map[string]bool{})
+		for _, b := range sdkBlocksFromText(m.ms, text) {
+			if err := m.db.PutMemoryBlocks([]memory.MemoryBlock{b}); err != nil {
+				log.Printf("[sdk media] 插件 %s 写入 L3 记忆块失败: %v", m.plugin, err)
+				continue
+			}
+			if err := m.db.AddMemoryBlockEdge("sentence", strconv.FormatInt(sid, 10), "block", b.ID, "contains"); err != nil {
+				log.Printf("[sdk media] 插件 %s 建立句子→块边失败: %v", m.plugin, err)
+				continue
+			}
+			bound++
+		}
 	}
 	if bound > 0 {
-		log.Printf("[sdk media] 插件 %s 的三元组绑定 %d 个媒体引用", m.plugin, bound)
+		log.Printf("[sdk media] 插件 %s 的三元组写入 %d 个 L3 记忆块", m.plugin, bound)
 	}
 }
 
@@ -345,7 +405,7 @@ func NewTextMemoryWithMedia(plugin string, tm *text.Memory, ms *media.Store) Tex
 
 // Append 追加一条文本事件；带附件时把媒体标记并进正文。
 //
-// 文本记忆是追加写 JSONL，没有稳定 owner_id 可挂 media_refs，所以媒体在这一层
+// 文本记忆是追加写 JSONL，没有结构化块存储，所以媒体在这一层
 // 只能以标记形式存在。这不是妥协——描述文本才是持久的语义记忆，blob 只是缓存。
 func (m *textMemoryImpl) Append(evt TextEvent) error {
 	if m.tm == nil {
@@ -431,40 +491,56 @@ func (m *docMemoryImpl) Query(text string, topK int) []*Doc {
 	out := make([]*Doc, len(got))
 	for i, d := range got {
 		out[i] = &Doc{ID: d.ID, Title: d.Summary, Content: d.Content}
-		m.fillMedia(out[i])
+		m.fillMedia(out[i], d)
 	}
 	return out
 }
 
 // fillMedia 填充文档的媒体字段。
 //
-// 优先用 media_refs（权威：谁挂上去的就是谁），为空时退回解析正文标记——
-// 历史文档与经旧版插件写入的文档只有标记、没有引用。
-func (m *docMemoryImpl) fillMedia(out *Doc) {
+// 优先读一等记忆块（文档直接持有），为空时退回解析正文标记——
+// 历史文档与经旧版插件写入的文档只有标记、没有块。
+func (m *docMemoryImpl) fillMedia(out *Doc, d *doc.Doc) {
 	if m.ms == nil {
 		return
 	}
-	digests, err := m.ms.Refs(media.OwnerDocument, out.ID)
-	if err != nil {
-		log.Printf("[sdk media] 读取文档 %s 的媒体引用失败: %v", out.ID, err)
-	}
-	if len(digests) == 0 {
-		out.Attachments = sdkAttachmentsFromText(m.ms, out.Content)
-		for _, a := range out.Attachments {
-			out.MediaDigests = append(out.MediaDigests, a.Digest)
+	if d != nil && len(d.Blocks) > 0 {
+		for _, b := range d.Blocks {
+			if b.PayloadDigest == "" {
+				continue
+			}
+			out.MediaDigests = append(out.MediaDigests, b.PayloadDigest)
+			att := MediaAttachment{Digest: b.PayloadDigest, MIME: b.MIME, Description: ""}
+			if it, err := m.ms.Stat(b.PayloadDigest); err == nil && it != nil {
+				att.MIME = it.MIME
+				att.Description = it.Description
+			}
+			out.Attachments = append(out.Attachments, att)
 		}
 		return
 	}
-	out.MediaDigests = digests
-	for _, d := range digests {
-		it, err := m.ms.Stat(d)
-		if err != nil || it == nil {
+	out.Attachments = sdkAttachmentsFromText(m.ms, out.Content)
+	for _, a := range out.Attachments {
+		out.MediaDigests = append(out.MediaDigests, a.Digest)
+	}
+}
+
+// appendBlocks 把新的块追加到已有块之后（按 digest 去重）。
+func appendBlocks(existing []memory.MemoryBlock, add []memory.MemoryBlock) []memory.MemoryBlock {
+	seen := make(map[string]bool, len(existing))
+	for _, b := range existing {
+		seen[b.PayloadDigest] = true
+	}
+	for _, b := range add {
+		if b.PayloadDigest != "" && seen[b.PayloadDigest] {
 			continue
 		}
-		out.Attachments = append(out.Attachments, MediaAttachment{
-			Digest: it.Digest, MIME: it.MIME, Description: it.Description,
-		})
+		existing = append(existing, b)
+		if b.PayloadDigest != "" {
+			seen[b.PayloadDigest] = true
+		}
 	}
+	return existing
 }
 
 // Insert 写入文档。正文里已有的媒体标记会被挂成文档级引用，
@@ -487,14 +563,17 @@ func (m *docMemoryImpl) InsertWithMedia(d *Doc, attachments []MediaAttachment) e
 
 	digests := m.storeAttachments(attachments, &target.Content)
 
+	// 一等记忆块：文档直接持有块本身，CAS 只提供字节与向量。
+	// 不再写 media_refs——块随文档一同存活或被删除，无需 owner 账本。
+	target.Blocks = appendBlocks(target.Blocks,
+		append(sdkBlocksFromDigests(m.ms, digests), sdkBlocksFromText(m.ms, target.Content)...))
+
 	if err := m.ds.Insert(target); err != nil {
 		return err
 	}
 	// 回填给调用方：ID 是新建时内核生成的，Content 含内核补的标记。
 	d.ID = target.ID
 	d.Content = target.Content
-
-	m.bindDocMedia(target, digests)
 	return nil
 }
 
@@ -531,51 +610,39 @@ func (m *docMemoryImpl) storeAttachments(atts []MediaAttachment, content *string
 	return digests
 }
 
-// bindDocMedia 把附件与正文标记引用的媒体一起挂到文档 owner 上。
-func (m *docMemoryImpl) bindDocMedia(target *doc.Doc, digests []string) {
-	if m.ms == nil || target.ID == "" {
-		return
-	}
-	bound := 0
-	done := make(map[string]bool, len(digests))
-	for _, full := range digests {
-		if done[full] {
-			continue
-		}
-		if err := m.ms.AddRef(full, media.OwnerDocument, target.ID); err != nil {
-			log.Printf("[sdk media] 文档引用绑定失败 (%s → doc %s): %v",
-				sdkShortDigest(full), target.ID, err)
-			continue
-		}
-		done[full] = true
-		bound++
-	}
-	// 插件手写在正文里的标记同样要挂上，否则那些媒体在文档里可见却无主。
-	// 共用 done：附件刚挂过的那些是同一份媒体（内核自己把标记补进了正文）。
-	bound += sdkBindText(m.ms, target.Content, media.OwnerDocument, target.ID, done)
-	if bound > 0 {
-		log.Printf("[sdk media] 插件 %s 写入文档 %s，绑定 %d 个媒体引用",
-			m.plugin, target.ID, bound)
-	}
-}
-
-// Remove 删除文档，同时释放它持有的媒体引用。
+// Remove 删除文档，并删除它持有的一等块所对应的内容（无其他块共享时）。
 //
-// 旧实现只删文档不解引用，于是那些媒体永久处于「被引用」状态：GC 不回收，
-// 磁盘只增不减。内核的归档路径（distill 的 releaseDocMedia）做了这一步，
-// 插件路径漏了同一步。
+// 与文本块一致：删除块即删除内容。媒体字节是块的内容存储，
+// 不单独做引用计数或 GC。
 func (m *docMemoryImpl) Remove(id string) {
 	if m.ds == nil {
 		return
 	}
-	if m.ms != nil && id != "" {
-		if n, err := m.ms.DropOwner(media.OwnerDocument, id); err != nil {
-			log.Printf("[sdk media] 释放文档 %s 的媒体引用失败: %v", id, err)
-		} else if n > 0 {
-			log.Printf("[sdk media] 文档 %s 删除，释放 %d 个媒体引用", id, n)
+	var digests []string
+	if d := m.ds.Get(id); d != nil {
+		for _, b := range d.Blocks {
+			if b.PayloadDigest != "" {
+				digests = append(digests, b.PayloadDigest)
+			}
 		}
 	}
 	m.ds.Remove(id)
+	if m.ms == nil {
+		return
+	}
+	// 仍被其它文档持有的 digest 不能删（同一份字节可能被多个块共享）。
+	stillHeld := map[string]bool{}
+	for _, b := range m.ds.Blocks() {
+		stillHeld[b.PayloadDigest] = true
+	}
+	for _, d := range digests {
+		if stillHeld[d] {
+			continue
+		}
+		if err := m.ms.Delete(d); err != nil {
+			log.Printf("[sdk media] 删除文档 %s 的内容失败 %s: %v", id, sdkShortDigest(d), err)
+		}
+	}
 }
 
 func (m *docMemoryImpl) Stats() map[string]interface{} {

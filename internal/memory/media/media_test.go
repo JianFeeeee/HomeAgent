@@ -5,12 +5,13 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
-	"time"
 )
 
-func newTestStore(t *testing.T, maxBytes int64) *Store {
+// newTestStore 建一个临时媒体存储。
+// 参数保留只为兼容旧调用点；媒体不再有容量上限（生命周期由记忆块决定）。
+func newTestStore(t *testing.T, _ ...int64) *Store {
 	t.Helper()
-	s, err := New(t.TempDir(), maxBytes)
+	s, err := New(t.TempDir())
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
@@ -109,172 +110,35 @@ func TestPut_NoPartialBlobOnDisk(t *testing.T) {
 	}
 }
 
-func TestRefCount_AddIsIdempotent(t *testing.T) {
-	s := newTestStore(t, 0)
-	d, _ := s.Put([]byte("img"), Item{MIME: "image/png"})
+func TestDelete_RemovesContentAndMetadata(t *testing.T) {
+	// 删除块即删除内容：Delete 同时清掉 blob 与元数据。
+	// 这不是 GC，也不看引用计数——调用方是记忆系统本身。
+	s := newTestStore(t)
+	d, _ := s.Put([]byte("held"), Item{MIME: "image/png"})
+	other, _ := s.Put([]byte("orphaned"), Item{MIME: "image/png"})
 
-	for i := 0; i < 3; i++ {
-		if err := s.AddRef(d, "context", "evt-1"); err != nil {
-			t.Fatal(err)
-		}
-	}
-	it, _ := s.Stat(d)
-	// 重复 AddRef 若都递增，计数会虚高，GC 永远不敢清。
-	if it.RefCount != 1 {
-		t.Fatalf("同一 owner 重复 AddRef 应只计 1，实际 %d", it.RefCount)
-	}
-
-	if err := s.AddRef(d, "document", "doc-9"); err != nil {
+	if err := s.Delete(other); err != nil {
 		t.Fatal(err)
 	}
-	it, _ = s.Stat(d)
-	if it.RefCount != 2 {
-		t.Fatalf("不同 owner 应各计一次，实际 %d", it.RefCount)
+	if _, err := s.Stat(other); err == nil {
+		t.Fatal("删除后元数据应已移除")
 	}
-}
-
-func TestRefCount_DropAndNeverNegative(t *testing.T) {
-	s := newTestStore(t, 0)
-	d, _ := s.Put([]byte("img"), Item{MIME: "image/png"})
-	s.AddRef(d, "context", "e1")
-
-	if err := s.DropRef(d, "context", "e1"); err != nil {
-		t.Fatal(err)
+	if _, err := s.Get(other); err == nil {
+		t.Fatal("删除后内容应已移除")
 	}
-	it, _ := s.Stat(d)
-	if it.RefCount != 0 {
-		t.Fatalf("应归零，实际 %d", it.RefCount)
-	}
-
-	// 多余的 DropRef 不该把计数压成负数（负数会让容量 GC 的排序失去意义）
-	for i := 0; i < 3; i++ {
-		s.DropRef(d, "context", "e1")
-	}
-	it, _ = s.Stat(d)
-	if it.RefCount != 0 {
-		t.Fatalf("重复 DropRef 后仍应为 0，实际 %d", it.RefCount)
-	}
-}
-
-func TestDropOwner_RemovesAllItsRefs(t *testing.T) {
-	s := newTestStore(t, 0)
-	d1, _ := s.Put([]byte("frame1"), Item{MIME: "image/jpeg"})
-	d2, _ := s.Put([]byte("frame2"), Item{MIME: "image/jpeg"})
-	s.AddRef(d1, "context", "evt-x")
-	s.AddRef(d2, "context", "evt-x")
-	s.AddRef(d1, "document", "doc-y") // 别的 owner 也引了 d1
-
-	n, err := s.DropOwner("context", "evt-x")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if n != 2 {
-		t.Fatalf("应注销 2 条引用，实际 %d", n)
-	}
-
-	it1, _ := s.Stat(d1)
-	it2, _ := s.Stat(d2)
-	if it1.RefCount != 1 {
-		t.Fatalf("d1 仍被 document 引用，应剩 1，实际 %d", it1.RefCount)
-	}
-	if it2.RefCount != 0 {
-		t.Fatalf("d2 应归零，实际 %d", it2.RefCount)
-	}
-}
-
-func TestRefs_ListsOwnerDigests(t *testing.T) {
-	s := newTestStore(t, 0)
-	d1, _ := s.Put([]byte("a"), Item{MIME: "image/png"})
-	d2, _ := s.Put([]byte("b"), Item{MIME: "image/png"})
-	s.AddRef(d1, "context", "e1")
-	s.AddRef(d2, "context", "e1")
-
-	got, err := s.Refs("context", "e1")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(got) != 2 {
-		t.Fatalf("应返回 2 个 digest，实际 %d", len(got))
-	}
-}
-
-func TestGC_KeepsReferencedContent(t *testing.T) {
-	// 有引用的项永不删除——那会让记忆里的 digest 变成悬空指针，
-	// 正是本包要避免的。
-	s := newTestStore(t, 0)
-	kept, _ := s.Put([]byte("referenced"), Item{MIME: "image/png"})
-	orphan, _ := s.Put([]byte("orphaned"), Item{MIME: "image/png"})
-	s.AddRef(kept, "context", "e1")
-
-	// minAge=0 让刚 Put 的都算超龄
-	removed, _, err := s.GC(0)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if removed != 1 {
-		t.Fatalf("应只清 1 条无引用项，实际 %d", removed)
-	}
-	if _, err := s.Get(kept); err != nil {
-		t.Fatalf("被引用的内容不该被清: %v", err)
-	}
-	if _, err := s.Stat(orphan); err == nil {
-		t.Fatal("无引用项的元数据应已删除")
-	}
-}
-
-func TestGC_MinAgeProtectsFreshUnreferenced(t *testing.T) {
-	// 刚 Put 还没来得及 AddRef 的项 refcount 也是 0；
-	// minAge 必须保护它们，否则「Put 完还没挂上就被 GC 清掉」。
-	s := newTestStore(t, 0)
-	d, _ := s.Put([]byte("just-arrived"), Item{MIME: "image/png"})
-
-	removed, _, err := s.GC(time.Hour)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if removed != 0 {
-		t.Fatalf("新入库项应被 minAge 保护，却清掉了 %d 条", removed)
-	}
+	// 未被删除的项不受影响
 	if _, err := s.Get(d); err != nil {
-		t.Fatalf("内容应还在: %v", err)
+		t.Fatalf("未删除的内容不该受影响: %v", err)
 	}
 }
 
-func TestGC_EnforcesCapacity(t *testing.T) {
-	// 容量上限：清完超龄项后仍超限，继续按 last_seen 从旧到新淘汰无引用项。
-	blob := make([]byte, 1024)
-	s := newTestStore(t, 2048) // 只容 2KB
-
-	var digests []string
-	for i := 0; i < 4; i++ {
-		b := append([]byte{byte(i)}, blob...) // 内容各异，避免去重
-		d, err := s.Put(b, Item{MIME: "image/png"})
-		if err != nil {
-			t.Fatal(err)
-		}
-		digests = append(digests, d)
-		time.Sleep(2 * time.Millisecond) // 拉开 last_seen
+func TestDelete_UnknownDigestIsNoop(t *testing.T) {
+	s := newTestStore(t)
+	if err := s.Delete(""); err != nil {
+		t.Fatalf("空 digest 应为无操作: %v", err)
 	}
-
-	// 保护最后一个，确认容量 GC 也不碰有引用的
-	s.AddRef(digests[3], "context", "e1")
-
-	removed, freed, err := s.GC(0)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if removed == 0 {
-		t.Fatal("超限应触发淘汰")
-	}
-	if _, err := s.Get(digests[3]); err != nil {
-		t.Fatalf("有引用项即使超限也不该删: %v", err)
-	}
-	t.Logf("removed=%d freed=%d", removed, freed)
-
-	st := s.Stats()
-	if total := st["total_bytes"].(int64); total > 2048 {
-		// 有引用项可能让总量降不到线下，这是刻意的（宁可超限也不断引用）
-		t.Logf("总量 %d 仍超 2048，因有引用项不可删（预期行为）", total)
+	if err := s.Delete("ffffffffffffffff"); err != nil {
+		t.Fatalf("不存在的 digest 应为无操作: %v", err)
 	}
 }
 
@@ -420,7 +284,6 @@ func TestStats_CountsByKindAndDescription(t *testing.T) {
 	s.Put([]byte("i2"), Item{MIME: "image/jpeg"})
 	s.Put([]byte("a1"), Item{MIME: "audio/wav"})
 	s.Describe(d1, "描述", "vis")
-	s.AddRef(d1, "context", "e1")
 
 	st := s.Stats()
 	if st["count"].(int) != 3 {
@@ -428,9 +291,6 @@ func TestStats_CountsByKindAndDescription(t *testing.T) {
 	}
 	if st["described"].(int) != 1 {
 		t.Fatalf("described 应为 1，实际 %v", st["described"])
-	}
-	if st["unreferenced"].(int) != 2 {
-		t.Fatalf("unreferenced 应为 2，实际 %v", st["unreferenced"])
 	}
 	byKind := st["by_kind"].(map[string]int)
 	if byKind["image"] != 2 || byKind["audio"] != 1 {
@@ -448,16 +308,15 @@ func TestPut_RejectsEmpty(t *testing.T) {
 func TestReopen_PersistsAcrossRestart(t *testing.T) {
 	// 记忆的意义就在于跨重启还在。
 	dir := t.TempDir()
-	s1, err := New(dir, 0)
+	s1, err := New(dir)
 	if err != nil {
 		t.Fatal(err)
 	}
 	d, _ := s1.Put([]byte("persistent-img"), Item{MIME: "image/png", OriginPath: "/tmp/x.png"})
 	s1.Describe(d, "跨重启的描述", "vis")
-	s1.AddRef(d, "context", "e1")
 	s1.Close()
 
-	s2, err := New(dir, 0)
+	s2, err := New(dir)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -467,7 +326,7 @@ func TestReopen_PersistsAcrossRestart(t *testing.T) {
 	if err != nil {
 		t.Fatalf("重开后应能查到: %v", err)
 	}
-	if it.Description != "跨重启的描述" || it.RefCount != 1 {
+	if it.Description != "跨重启的描述" {
 		t.Fatalf("元数据应持久化: %+v", it)
 	}
 	data, err := s2.Get(d)

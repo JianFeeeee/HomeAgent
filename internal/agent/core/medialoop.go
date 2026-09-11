@@ -10,15 +10,68 @@ import (
 	"gitcode.com/JianFeeeee/HomeAgent/internal/memory/media"
 )
 
-// 媒体记忆的两条后台循环。
+// 媒体记忆的后台循环。
 //
-// mediaGCLoop     清理无人引用的 blob，让容量上限真正生效。
-// mediaDescribeLoop 给未描述的媒体生成文字描述（方案 C 的另一半）。
+// mediaDescribeLoop 给未描述的媒体生成文字描述。
+//
+// 媒体不单独做生命周期管理（没有 GC、没有引用计数）：blob 是记忆块的内容，
+// 块的创建/迁移/删除由记忆系统本身决定，块被永久删除时内容随之删除
+// （见 forgetPayloads）。
 //
 // 为何描述要走后台而不是入库时同步做：视觉模型一次调用在生产实测 9.6s
 // （see_video 6 帧批量 23s）。放在对话路径上会让每张图都给回复加十几秒，
 // 而描述的价值是**几个月后还能检索到这张图**，不是这一轮对话——
 // 这一轮模型本来就直接看着图。
+
+// payloadHeld 报告某个 digest 是否仍被三层记忆中的一等块持有。
+// 这是删除前的一次活查询（不是持久化账本）：同一份字节可能同时被多个块共享。
+func (a *Agent) payloadHeld(digest string) bool {
+	if digest == "" {
+		return false
+	}
+	if a.context != nil {
+		for _, b := range a.context.Blocks() {
+			if b.PayloadDigest == digest {
+				return true
+			}
+		}
+	}
+	if a.docStore != nil {
+		for _, b := range a.docStore.Blocks() {
+			if b.PayloadDigest == digest {
+				return true
+			}
+		}
+	}
+	if a.memory != nil {
+		if blocks, err := a.memory.MemoryBlocks(); err == nil {
+			for _, b := range blocks {
+				if b.PayloadDigest == digest {
+					return true
+				}
+			}
+		}
+	}
+	return false
+}
+
+// forgetPayloads 在记忆块被永久删除后删除它们的内容。
+//
+// 与文本块一致：删除块即删除内容。只有确认没有任何存活块仍共享该 digest
+// 时才删字节（同一张图可能被多个块引用）。
+func (a *Agent) forgetPayloads(digests []string) {
+	if a.mediaStore == nil {
+		return
+	}
+	for _, d := range digests {
+		if d == "" || a.payloadHeld(d) {
+			continue
+		}
+		if err := a.mediaStore.Delete(d); err != nil {
+			log.Printf("[media] 删除内容失败 %s: %v", shortDigest(d), err)
+		}
+	}
+}
 
 const (
 	// mediaDescribeBatch 是单轮描述的媒体条数上限。
@@ -35,50 +88,11 @@ const (
 	mediaDescribeMinInterval = 30 * time.Second
 )
 
-// mediaGCLoop 周期清理无引用的媒体内容。
-//
-// 不做这件事的后果：容量上限形同虚设。CAS 的 GC 只在被显式调用时执行，
-// 而 Put 路径不触发它——一次 see_video 抽 10 帧，帧本身没人引用（工具
-// 结果被 Prune 掉之后），若无人清理就会一直堆在磁盘上。
-func (a *Agent) mediaGCLoop() {
-	defer func() {
-		if r := recover(); r != nil {
-			log.Printf("[agent] mediaGCLoop panic recovered: %v\n%s", r, debug.Stack())
-			time.Sleep(time.Second)
-			go a.mediaGCLoop()
-		}
-	}()
-	if a.mediaStore == nil || a.mediaGCInterval <= 0 {
-		return
-	}
-
-	ticker := time.NewTicker(a.mediaGCInterval)
-	defer ticker.Stop()
-
-	for {
-		select {
-		case <-ticker.C:
-			removed, freed, err := a.mediaStore.GC(a.mediaGCMinAge)
-			if err != nil {
-				log.Printf("[media] GC 失败: %v", err)
-				continue
-			}
-			if removed > 0 {
-				st := a.mediaStore.Stats()
-				log.Printf("[media] GC 清理 %d 条（释放 %d 字节），剩余 %v 条 / %v 字节",
-					removed, freed, st["count"], st["total_bytes"])
-			}
-		case <-a.ctx.Done():
-			return
-		}
-	}
-}
-
 // mediaDescribeLoop 给未描述的媒体补文字描述。
 //
-// 描述文本才是持久语义记忆：blob 会被容量 GC 淘汰，而描述留在 media 表里，
-// 并经 mediaSummaryForEvent 写进 L0 事件、随归档进 L2 文档、经蒸馏进 L3 图库。
-// 于是「那张紫蓝红三色带图」在原始字节早已被清掉之后仍然可被检索到。
+// 描述文本才是持久语义记忆：它留在 media 表里，并经 mediaSummaryForEvent
+// 写进 L0 事件、随归档进 L2 文档、经蒸馏进 L3 图库。
+// 于是「那张紫蓝红三色带图」仍然可被检索到。
 func (a *Agent) mediaDescribeLoop() {
 	defer func() {
 		if r := recover(); r != nil {

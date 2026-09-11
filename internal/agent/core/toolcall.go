@@ -150,11 +150,11 @@ func (a *Agent) executeMemoryTool(tc agentAPI.ToolCall) string {
 			}
 			parts = append(parts, fmt.Sprintf("- %s →(%s)→ %s", r.SourceName, r.RelationType, r.TargetName))
 		}
-		// 命中的关系若挂着媒体，把媒体说明附在结果末尾。
+		// 命中的关系若挂着媒体块，把媒体说明附在结果末尾。
 		//
 		// 关系行只有实体名和关系类型，看不出"这条记忆当时还带了一张图"。
-		// 媒体挂在句子上（graph_sentence owner），需经关系→句子→media_refs
-		// 反查。不附上的后果：agent 显式查了图记忆，却仍然不知道有图。
+		// 媒体块以结构边与句子相连，需经关系→句子反查。
+		// 不附上的后果：agent 显式查了图记忆，却仍然不知道有图。
 		if mc := a.mediaContextForRelations(result.Relations); mc != "" {
 			parts = append(parts, "", "关联媒体:", mc)
 		}
@@ -192,7 +192,7 @@ func (a *Agent) executeMemoryTool(tc agentAPI.ToolCall) string {
 				}
 				// 模型显式关联的媒体：标记由内核补进句子文本，模型不必知道格式。
 				// 没有 sentence_text 时 sentenceWithMediaMarkers 会用标记本身
-				// 充当句子——媒体必须有句子落点，否则 media_refs 无从挂起。
+				// 充当句子——媒体必须有句子落点，否则块边无法建立。
 				if digests := getStringSlice(m, "media_digests"); len(digests) > 0 {
 					t.SentenceText = a.sentenceWithMediaMarkers(t.SentenceText, digests)
 				}
@@ -206,7 +206,7 @@ func (a *Agent) executeMemoryTool(tc agentAPI.ToolCall) string {
 		}
 		// remember 工具是用户/模型显式写入，不涉及归档删除，
 		// 因此不需要 mediaBound——没有旧引用要释放。
-		ec, rc, mb, err := a.commitTriplesWithMedia(triples, string(a.id), 0)
+		ec, rc, mb, err := a.commitTriplesWithMedia(triples, string(a.id), 0, nil)
 		if err != nil {
 			return fmt.Sprintf("记忆写入失败: %v", err)
 		}
@@ -576,15 +576,17 @@ func (a *Agent) executeDocTool(tc agentAPI.ToolCall) string {
 		// Summary+Content 计算，标记进不去正文就检索不到这份媒体。
 		mediaDigests := a.resolveMediaDigests(getStringSlice(tc.Arguments, "media_digests"))
 		doc.Content = a.sentenceWithMediaMarkers(doc.Content, mediaDigests)
+		for _, d := range mediaDigests {
+			if b, ok := a.blockFromDigest(d); ok {
+				doc.Blocks = append(doc.Blocks, b)
+			}
+		}
 
 		if err := a.docStore.Insert(doc); err != nil {
 			return fmt.Sprintf("文档写入失败: %v", err)
 		}
-		// 引用必须在拿到 doc.ID 之后挂：owner_id 就是文档 id。
-		// 不挂的后果是这些媒体在文档里可见却无主，下一轮 GC 会把它们清掉。
-		bound := a.bindDocMedia(doc.ID, mediaDigests)
-		if bound > 0 {
-			return fmt.Sprintf("文档已提交 (id: %s, 摘要: %s, 关联 %d 份媒体)", doc.ID, summary, bound)
+		if n := len(doc.Blocks); n > 0 {
+			return fmt.Sprintf("文档已提交 (id: %s, 摘要: %s, 关联 %d 份媒体)", doc.ID, summary, n)
 		}
 		return fmt.Sprintf("文档已提交 (id: %s, 摘要: %s)", doc.ID, summary)
 
