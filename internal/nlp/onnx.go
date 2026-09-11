@@ -49,9 +49,20 @@ func NewONNXParser(cfg ONNXConfig) (*ONNXParser, error) {
 		}
 	}
 
-	ort.SetSharedLibraryPath(libPath())
-	if err := ort.InitializeEnvironment(); err != nil {
-		return nil, fmt.Errorf("init onnx env: %w", err)
+	// ORT 环境是**进程级单例**，同一进程里可能有多个消费者（多模态向量
+	// provider、本依存解析器）。onnxruntime_go 的行为是：第二次
+	// InitializeEnvironment 报「already been initialized」，而
+	// DestroyEnvironment 会把别人正在用的环境一起拆掉——先初始化的 provider
+	// 会因此拿到失效的会话。所以这里只在未初始化时初始化，并且**永不销毁**
+	// （与 providers/chineseclip、providers/qwen3vl 的约定一致）：环境随进程存活。
+	//
+	// 这个缺陷是在「发行版默认带 onnxruntime 标签」后才暴露的：不带标签时
+	// 两个消费者不会同时存在，重复初始化与误销毁都无法发生。
+	if !ort.IsInitialized() {
+		ort.SetSharedLibraryPath(libPath())
+		if err := ort.InitializeEnvironment(); err != nil {
+			return nil, fmt.Errorf("init onnx env: %w", err)
+		}
 	}
 
 	inputNames := []string{"input_ids"}
@@ -59,7 +70,7 @@ func NewONNXParser(cfg ONNXConfig) (*ONNXParser, error) {
 
 	session, err := ort.NewDynamicAdvancedSession(modelPath, inputNames, outputNames, nil)
 	if err != nil {
-		ort.DestroyEnvironment()
+		// 不在这里 DestroyEnvironment：环境是进程级的，可能正被多模态 provider 使用。
 		return nil, fmt.Errorf("create session: %w", err)
 	}
 
@@ -73,7 +84,7 @@ func NewONNXParser(cfg ONNXConfig) (*ONNXParser, error) {
 func (p *ONNXParser) Close() error {
 	p.close.Do(func() {
 		p.rt.Destroy()
-		ort.DestroyEnvironment()
+		// 不销毁进程级 ORT 环境：多模态 provider 可能仍在使用（见 NewONNXParser）。
 	})
 	return nil
 }

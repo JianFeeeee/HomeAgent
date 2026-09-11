@@ -145,7 +145,27 @@ core.memory.multimodal_space.provider = chineseclip
 core.memory.multimodal_space.options.model_dir = /home/newqqagent/models/chinese-clip-vit-b16-onnx
 ```
 
+**新装默认就是这个**（`SeedDefaults` 写入 `chineseclip` + `<dataDir>/models/chinese-clip-vit-b16-onnx`），
+发行版构建也默认带 `onnxruntime` 标签（`deploy/packaging/build.sh` 的 `HOMED_TAGS`，
+需要极简构建时显式 `HOMED_TAGS=` 关闭）。
+
+已于既有安装：`SeedDefaults` 对非空配置库直接返回（`GetString` 缺键时回落调用方默认值），
+所以老安装**不会**自动拿到这两个默认值，需要显式写配置。这是有意的：
+升级就静默加载 1.8GB 模型不是无副作用的事。
+
 同样要求 `homed` 带 `onnxruntime` build tag。
+
+#### ORT 环境是进程级单例（单主不析构）
+
+进程内可能有多个 ORT 消费者（本 provider、`qwen3vl`、`internal/nlp` 的依存解析器）。
+`onnxruntime_go` 的行为是：第二次 `InitializeEnvironment` 报错，而
+`DestroyEnvironment` 会把别人正在用的环境一起拆掉。约定：
+
+- 初始化前先 `IsInitialized()`，只有未初始化时才初始化；
+- **任何消费者都不销毁环境**（环境随进程存活），只销毁自己的会话。
+
+这个缺陷是「发行版默认带 onnxruntime 标签」后才暴露的：不带标签时多个消费者不会
+同时存在（此前 `internal/nlp` 会重复初始化并降级，失败路径还会误销毁环境）。
 
 ### 模态范围
 
