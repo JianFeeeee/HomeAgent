@@ -1,6 +1,18 @@
-# 统一多模态向量空间（Qwen3-VL-Embedding-2B）
+# 统一多模态向量空间
 
-文本、图像、**视频帧** 在同一模型、同一 2048 维、同一 fingerprint 空间里被编码。
+核心不绑定任何具体模型：它按 provider 名从公共注册表（`pkg/embedding`）打开一个
+向量空间。仓库内自带两个：
+
+| provider | 模态 | 维度 | 实测常驻 | 许可 | 适用 |
+|---|---|---|---|---|---|
+| `chineseclip` | text + image | 512 | **1.15 GB** | Apache-2.0 | 默认（内存受限 / 中文图文） |
+| `qwen3vl` | text + image（视频已实现未纳入契约） | 2048 | 9.4 GB | Apache-2.0 | 内存充足 / 需要更强文本语义或视频 |
+| `http` | 由外部服务决定 | 由外部服务决定 | 由外部服务决定 | — | 侧车部署（如 jina-v5-omni-nano，注意其 CC BY-NC 许可） |
+
+下面第一节是 Qwen3-VL（2048 维，最强但最重），第二节是 Chinese-CLIP（512 维，
+默认推荐）。两者互斥启用，改配置后重启生效。
+
+文本、图像、**视频帧** 在同一模型、同一维度、同一 fingerprint 空间里被编码。
 记忆系统用它做三件事：多模态图记忆的跨模态召回、multimodal doc 的向量融合、
 multimodal context 的相关性裁剪/淘汰。
 
@@ -75,6 +87,94 @@ axis，实际却只能用导出的那个长度运行。
 2. 用 onnxruntime 跑**导出后**的三段图，再对比完整模型前向。
 
 「能加载」不等于「算得对」：形状错、输入名错、池化位置错的图都能正常 load。
+
+## 一·补、text+image 默认空间：Chinese-CLIP ViT-B/16
+
+**为什么它是默认**：text+image 只需要一个向量空间时，同时满足「小、可商用、中文原生」
+的选项只有一个。
+
+| | Chinese-CLIP | jina-v5-omni-nano | Qwen3-VL-Emb-2B |
+|---|---|---|---|
+| 参数量 | 188M | 1.04B | 2B |
+| 产物 / 实测常驻 | **721MB / 1.15GB** | ~2GB / 2.23GB | 8GB / 9.4GB |
+| 维度 | 512 | 768 | 2048 |
+| 许可 | **Apache-2.0** | CC BY-NC（不可商用） | Apache-2.0 |
+| 中文 | 原生（~2 亿中文图文对） | 多语言 | 多语言 |
+| 文本语义 | 弱（双塔对比） | 好 | 最好 |
+| 视频 | 无 | 有 | 有 |
+
+**要诚实记录的代价**：CLIP 是双塔对比学习，text↔image 是强项，但**纯文本语义
+（text↔text）明显弱于 MLLM 型嵌入器**。文本检索仍由既有词向量/TF-IDF 路径兜底，
+本空间主要用于跨模态召回与相关性裁剪。需要更强文本语义或视频时切回 `qwen3vl`。
+
+### 产物与获取
+
+产物约 754MB，**不进仓库**；用导出脚本从官方权重导出（脚本入库，保证可复现）：
+
+```bash
+python3 scripts/export_chineseclip_onnx.py \
+    --model-dir /path/to/chinese-clip-vit-base-patch16 \
+    --out /home/newqqagent/models/chinese-clip-vit-b16-onnx
+```
+
+国内下载：本机 `huggingface.co` 走代理会被 reset，用 `hf-mirror.com` 且**不设代理**：
+
+```bash
+curl -4 -L --retry 3 -o vocab.txt \
+  https://hf-mirror.com/OFA-Sys/chinese-clip-vit-base-patch16/resolve/main/vocab.txt
+```
+
+### 产物契约（Go 侧按此读取）
+
+| 文件 | 输入 | 输出 |
+|---|---|---|
+| `TextEncoder.onnx` | `input_ids` int64 `[B,52]`、`attention_mask` int64 `[B,52]` | `text_features` float `[B,512]` |
+| `VisionEncoder.onnx` | `pixel_values` float `[B,3,224,224]` | `image_features` float `[B,512]` |
+
+外加 `embed_config.json`（维度/预处理/分词超参/文件名——provider 的唯一权威）、
+`vocab.txt`、`reference.json`（冻结参考：逐文本 token id + 逐样本向量）、`SHA256SUMS`。
+
+图像预处理：缩放到 224×224（双三次，复刻 PIL 系数）→ `(x/255 - mean) / std`，
+不裁剪。文本：BERT WordPiece，`max_length=52`，补 `[PAD]`，超长截断尾部。
+两个塔的输出**都没有在图中归一化**，归一化由 provider 负责（检索按余弦）。
+
+### 启用
+
+```bash
+core.memory.multimodal_space.provider = chineseclip
+core.memory.multimodal_space.options.model_dir = /home/newqqagent/models/chinese-clip-vit-b16-onnx
+```
+
+同样要求 `homed` 带 `onnxruntime` build tag。
+
+### 模态范围
+
+只声明 `text` 与 `image`。`audio`/`video` **明确返回 `ErrUnsupportedModality`**——
+本空间没有它们的原生编码器，用别的模型向量冒充会污染整个向量空间
+（这正是「音频明确 unsupported」那条纪律的落地）。
+
+### 验证
+
+Go 侧回归对着官方 PyTorch 参考（`reference.json`），模型目录由
+`CHINESECLIP_MODEL_DIR` 指定，缺失时 skip：
+
+```bash
+CHINESECLIP_MODEL_DIR=/home/newqqagent/models/chinese-clip-vit-b16-onnx \
+  go test -tags onnxruntime ./providers/chineseclip/ -v
+```
+
+实测结果：文本 5 个用例 `cos = 1.000000000000`（与官方逐位一致）；
+图像 4 个纯色用例 `cos = 1.000000`（自写 bicubic 与 PIL 在 6 位小数内一致）；
+另有跨模态判别、模态拒绝、指纹稳定性、产物缺失报错等用例。
+
+### 两个已踩过的坑（都在测试里钉住了）
+
+1. **分词器不能自己拼**。第一版探针用 `BertTokenizer(vocab_file=..., do_lower_case=True)`
+   手工分词，中文被整体切成 `[UNK]`，三个不同句子产出几乎相同的向量（余弦 0.98），
+   差点把「模型坏了」当成结论。官方配置是 `do_lower_case=true` + **删音标生效** +
+   **中文逐字切分**；Go 侧实现必须与官方**逐 token** 对齐（`TestTokenizerMatchesOfficialReference`）。
+2. **参考向量是未归一化的原始输出**（模长 10~36）。用「点积当余弦 + 单侧下界」判定
+   会得到 13.6 而「通过」——测试里因此改成真余弦 + 双侧容差。
 
 ## 二、启用
 
