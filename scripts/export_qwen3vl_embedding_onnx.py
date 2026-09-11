@@ -35,9 +35,11 @@ grid 固定为 (1, 48, 48)，并在导出处做 PyTorch↔ONNX 一致性校验�
 from __future__ import annotations
 
 import argparse
+import gc
 import json
 import os
 import shutil
+import subprocess
 import sys
 import time
 
@@ -49,10 +51,31 @@ IMAGE_SIZE = 768
 PATCH_SIZE = 16
 TEMPORAL_PATCH = 2
 SPATIAL_MERGE = 2
+# 每个时间组合并后的视觉 token 数：(768/16/2)^2 = 576。
+VISUAL_TOKENS_PER_GROUP = (IMAGE_SIZE // PATCH_SIZE // SPATIAL_MERGE) ** 2
 MAX_LENGTH = 1024  # 768x768 有 576 个视觉 token；512 会截断视觉占位符
 DEFAULT_MODEL_ID = "Qwen/Qwen3-VL-Embedding-2B"
 REFERENCE_TEXT = "今天天气怎么样"
 REFERENCE_IMAGE_RGB = (200, 30, 30)
+# 视频参考：4 帧、4 种颜色 → 2 个时间组。用可区分的颜色，
+# 这样帧顺序（组 g 的 tp0←帧2g、tp1←帧2g+1）写错时参考向量立刻不匹配。
+REFERENCE_VIDEO_RGB = [(10, 10, 10), (200, 20, 20), (20, 200, 20), (20, 20, 200)]
+DEFAULT_VIDEO_GROUPS = (2, 3, 4)
+
+# MAX_LENGTH 由 main() 按 --video-groups 调大；做成模块级是因为文本/图像/视频
+# 三个输入构造函数共用它。
+MAX_LENGTH = 1024
+
+
+def max_length_for(video_groups) -> int:
+    """足够容纳最大视频档的序列长度。
+
+    图像路径只需 598 token（1 组），但视频是 G×576：G=2 就要 1190，
+    G=4 要 2342。实测过：若沿用图像的 1024，处理器会因截断而报
+    「Mismatch in video token count between text and input_ids」。
+    模板文本实测约 38 token，这里留 256 余量（允许将来插入更长的指令）。
+    """
+    return max(1024, max(video_groups) * VISUAL_TOKENS_PER_GROUP + 256)
 
 
 def log(msg: str) -> None:
@@ -190,29 +213,74 @@ def text_inputs(processor, lm, text):
     return x, hidden, (zero, zero, zero), cos, sin, causal_mask(hidden.shape[1]), pos
 
 
-def image_inputs(processor, model, image):
-    conv = [{"role": "system", "content": [{"type": "text", "text": INSTRUCTION}]},
-            {"role": "user", "content": [{"type": "image", "image": image}]}]
-    rendered = processor.apply_chat_template([conv], add_generation_prompt=True, tokenize=False)
-    x = processor(text=rendered, images=[image], do_resize=False,
-                  return_tensors="pt", truncation=True, max_length=MAX_LENGTH)
+def image_inputs(processor, model, image, groups=1):
+    """构造视觉输入。
+
+    groups=1 走图像路径（<|image_pad|>）；groups>1 走视频路径
+    （<|video_pad|>，2×groups 帧，相邻两帧一个时间组）。
+    两者模板结构一致，只差占位符与组数。
+    """
     lm = model.model.language_model
-    with torch.no_grad():
-        vo = model.model.visual(x["pixel_values"], grid_thw=x["image_grid_thw"], return_dict=True)
-    pos, _ = model.model.get_rope_index(
-        x["input_ids"], x["mm_token_type_ids"],
-        image_grid_thw=x["image_grid_thw"], attention_mask=x["attention_mask"])
-    mask = x["mm_token_type_ids"] == 1
-    hidden = lm.embed_tokens(x["input_ids"])
-    hidden = hidden.clone()
-    hidden[mask] = vo.pooler_output
+    if groups == 1:
+        conv = [{"role": "system", "content": [{"type": "text", "text": INSTRUCTION}]},
+                {"role": "user", "content": [{"type": "image", "image": image}]}]
+        rendered = processor.apply_chat_template([conv], add_generation_prompt=True, tokenize=False)
+        x = processor(text=rendered, images=[image], do_resize=False,
+                      return_tensors="pt", truncation=True, max_length=MAX_LENGTH)
+        with torch.no_grad():
+            vo = model.model.visual(x["pixel_values"], grid_thw=x["image_grid_thw"], return_dict=True)
+        pos, _ = model.model.get_rope_index(
+            x["input_ids"], x["mm_token_type_ids"],
+            image_grid_thw=x["image_grid_thw"], attention_mask=x["attention_mask"])
+        visual_mask = x["mm_token_type_ids"] == 1
+    else:
+        frames = video_frames(groups)
+        conv = [{"role": "system", "content": [{"type": "text", "text": INSTRUCTION}]},
+                {"role": "user", "content": [{"type": "video", "video": frames}]}]
+        rendered = processor.apply_chat_template([conv], add_generation_prompt=True, tokenize=False)
+        # do_sample_frames=False 至关重要：处理器默认按 fps 重采样视频，
+        # 未提供 video_metadata 时回落到 fps=24，会把任何帧数都改成 grid_t=2
+        # （实测 4/6/8 帧都变成 1152 个视觉 token）。那会把「G 帧」变成
+        # 「2 帧」，且在导出阶段看起来一切正常。
+        x = processor(text=rendered, videos=[frames], do_resize=False, do_sample_frames=False,
+                      return_tensors="pt", truncation=True, max_length=MAX_LENGTH)
+        got_groups = int(x["video_grid_thw"][0][0])
+        if got_groups != groups:
+            raise SystemExit(
+                f"视频时间组数 {got_groups}，期望 {groups}（处理器重采样了帧？"
+                "确认 do_sample_frames=False 未被覆盖）")
+        with torch.no_grad():
+            vo = model.model.visual(x["pixel_values_videos"], grid_thw=x["video_grid_thw"], return_dict=True)
+        pos, _ = model.model.get_rope_index(
+            x["input_ids"], x["mm_token_type_ids"],
+            video_grid_thw=x["video_grid_thw"], attention_mask=x["attention_mask"])
+        visual_mask = x["mm_token_type_ids"] == 2
+
+    hidden = lm.embed_tokens(x["input_ids"]).clone()
+    if int(visual_mask.sum()) != groups * VISUAL_TOKENS_PER_GROUP:
+        # 截断、模板改动、占位符扩展异常都会落到这里。它能区分
+        # 「真的错了」与「只是看起来像」，比后续 scatter 报形状不符清楚得多。
+        raise SystemExit(
+            f"groups={groups} 视觉 token 数 {int(visual_mask.sum())}，期望 "
+            f"{groups * VISUAL_TOKENS_PER_GROUP}（max_length={MAX_LENGTH}；"
+            "截断会导致此错，请提高 --video-groups 推导出的 max_length）")
+    hidden[visual_mask] = vo.pooler_output
     deep = []
     for d in vo.deepstack_features:
         full = torch.zeros_like(hidden)
-        full[mask] = d
+        full[visual_mask] = d
         deep.append(full)
     cos, sin = lm.rotary_emb(hidden, pos)
     return x, hidden, tuple(deep), cos, sin, causal_mask(hidden.shape[1]), pos
+
+
+def video_frames(groups: int):
+    from PIL import Image
+
+    fps = list(REFERENCE_VIDEO_RGB)
+    while len(fps) < 2 * groups:
+        fps.append(fps[len(fps) % len(REFERENCE_VIDEO_RGB)])
+    return [Image.new("RGB", (IMAGE_SIZE, IMAGE_SIZE), c) for c in fps[: 2 * groups]]
 
 
 def causal_mask(seq: int) -> torch.Tensor:
@@ -271,21 +339,38 @@ def unit(vec):
     return v / n if n > 0 else v
 
 
-def verify_onnx(out_dir: str, model, processor) -> dict:
-    """用 onnxruntime 跑导出后的三段图，对比完整模型前向。
+RESULT_PREFIX = "@@VERIFY_RESULT@@"
 
-    返回参考向量（供 Go 侧测试冻结使用）：Go 必须复现同一套预处理与模板，
-    因此这里把同一输入下的期望向量前若干维导出。
-    """
+
+def onnx_session(path: str):
     import onnxruntime as ort
 
-    log("校验②：导出后的 ONNX 三段图 vs 完整模型")
-    ts = ort.InferenceSession(os.path.join(out_dir, "TokenEmbedding.onnx"), providers=["CPUExecutionProvider"])
-    xs = ort.InferenceSession(os.path.join(out_dir, "Transformer.onnx"), providers=["CPUExecutionProvider"])
-    vs = ort.InferenceSession(os.path.join(out_dir, "Vision.onnx"), providers=["CPUExecutionProvider"])
-    lm = model.model.language_model
+    return ort.InferenceSession(path, providers=["CPUExecutionProvider"])
 
-    reference: dict[str, object] = {}
+
+def load_model(model_dir: str):
+    """加载 FP32 CPU 全模型与处理器（导出与校验共用同一套加载参数）。"""
+    from transformers import AutoProcessor
+    from transformers.models.qwen3_vl.modeling_qwen3_vl import Qwen3VLForConditionalGeneration
+
+    processor = AutoProcessor.from_pretrained(model_dir, trust_remote_code=True, padding_side="right")
+    model = Qwen3VLForConditionalGeneration.from_pretrained(
+        model_dir, dtype=torch.float32, low_cpu_mem_usage=True).eval()
+    return model, processor
+
+
+def verify_case(case: str, out_dir: str, model, processor) -> dict:
+    """在**单个进程内**只校验一个用例，返回该用例的参考片段。
+
+    一个用例一个进程是有意的：这里必须同时驻留 PyTorch 全模型（~8GB）与
+    Transformer.onnx（~7.5GB）。若在同一进程里连着校验图像与各档视频，
+    每档新建的视觉图（~1.6GB/张）不会及时释放，峰值是它们之和——
+    在 17GB 内存的机器上会被 OOM 杀掉（实测：校验到视频档时 python3 被 kill，
+    total-vm 26GB）。拆成子进程后峰值等于单个用例，且某一档崩了不影响其余档。
+    """
+    ts = onnx_session(os.path.join(out_dir, "TokenEmbedding.onnx"))
+    xs = onnx_session(os.path.join(out_dir, "Transformer.onnx"))
+    lm = model.model.language_model
 
     def run_transform(hidden, deep, cos, sin):
         seq = hidden.shape[1]
@@ -299,43 +384,155 @@ def verify_onnx(out_dir: str, model, processor) -> dict:
             "causal_mask": causal_mask(seq).numpy(),
         })[0]
 
-    x, h, d, cos, sin, _cm, pos = text_inputs(processor, lm, REFERENCE_TEXT)
-    with torch.no_grad():
-        ref_text = model.model(input_ids=x["input_ids"], attention_mask=x["attention_mask"],
-                               position_ids=pos, use_cache=False).last_hidden_state[:, -1].numpy()
-    h_onnx = ts.run(None, {"input_ids": x["input_ids"].numpy().astype(np.int64)})[0]
-    zero = np.zeros_like(h_onnx)
-    got = run_transform(h_onnx, (zero, zero, zero), cos.numpy(), sin.numpy())
-    compare("text/onnx-vs-full", got, ref_text)
-    reference["text"] = REFERENCE_TEXT
-    reference["text_vector_prefix"] = [float(v) for v in unit(got[0])[:12]]
-    reference["text_norm_raw"] = float(np.linalg.norm(got[0]))
+    if case == "text":
+        x, _h, _d, cos, sin, _cm, pos = text_inputs(processor, lm, REFERENCE_TEXT)
+        with torch.no_grad():
+            ref = model.model(input_ids=x["input_ids"], attention_mask=x["attention_mask"],
+                              position_ids=pos, use_cache=False).last_hidden_state[:, -1].numpy()
+        hidden = ts.run(None, {"input_ids": x["input_ids"].numpy().astype(np.int64)})[0]
+        zero = np.zeros_like(hidden)
+        got = run_transform(hidden, (zero, zero, zero), cos.numpy(), sin.numpy())
+        cos_v = compare("text/onnx-vs-full", got, ref)
+        return {"case": case, "cos": cos_v, "reference": {
+            "text": REFERENCE_TEXT,
+            "text_vector_prefix": [float(v) for v in unit(got[0])[:12]],
+            "text_norm_raw": float(np.linalg.norm(got[0])),
+            "dim": int(got.shape[1]),
+        }}
 
-    img = reference_image()
-    x, _h, _d, cos, sin, _cm, _ = image_inputs(processor, model, img)
+    # 图像与视频共用同一条后半段（视觉塔 → 按掩码散射 → 语言 Transformer）：
+    # 两者的差异只在「视觉图 + 输入张量名 + token 类型 + 视觉 token 数」。
+    if case == "image":
+        x, _h, _d, cos, sin, _cm, _ = image_inputs(processor, model, reference_image())
+        pixels = x["pixel_values"]
+        visual_path = os.path.join(out_dir, "Vision.onnx")
+        token_type, want_tokens, name = 1, VISUAL_TOKENS_PER_GROUP, "image"
+        full_kwargs = {"pixel_values": x["pixel_values"], "image_grid_thw": x["image_grid_thw"]}
+        prefix_key, norm_key = "image_vector_prefix", "image_norm_raw"
+        extra: dict[str, object] = {
+            "image_rgb": list(REFERENCE_IMAGE_RGB),
+            "image_size": IMAGE_SIZE,
+        }
+    elif case.startswith("video_g"):
+        groups = int(case.split("_g", 1)[1])
+        x, _h, _d, cos, sin, _cm, _ = image_inputs(processor, model, None, groups=groups)
+        pixels = x["pixel_values_videos"]
+        visual_path = os.path.join(out_dir, f"Vision_g{groups}.onnx")
+        token_type, want_tokens, name = 2, groups * VISUAL_TOKENS_PER_GROUP, case
+        full_kwargs = {"pixel_values_videos": x["pixel_values_videos"],
+                       "video_grid_thw": x["video_grid_thw"]}
+        prefix_key, norm_key = "video_vector_prefix", "video_norm_raw"
+        extra = {
+            "video_groups": groups,
+            "video_frame_rgb": [list(c) for c in REFERENCE_VIDEO_RGB[: 2 * groups]],
+        }
+    else:
+        raise SystemExit(f"未知校验用例: {case}")
+
+    vs = onnx_session(visual_path)
     with torch.no_grad():
-        ref_img = model.model(input_ids=x["input_ids"], attention_mask=x["attention_mask"],
-                              pixel_values=x["pixel_values"], image_grid_thw=x["image_grid_thw"],
-                              mm_token_type_ids=x["mm_token_type_ids"],
-                              use_cache=False).last_hidden_state[:, -1].numpy()
-    h_onnx = ts.run(None, {"input_ids": x["input_ids"].numpy().astype(np.int64)})[0]
-    vo = vs.run(None, {"pixel_values": x["pixel_values"].numpy().astype(np.float32)})
-    mask = x["mm_token_type_ids"].numpy() == 1
-    h_onnx = h_onnx.copy()
-    h_onnx[mask] = vo[3]
+        ref = model.model(input_ids=x["input_ids"], attention_mask=x["attention_mask"],
+                          mm_token_type_ids=x["mm_token_type_ids"],
+                          use_cache=False, **full_kwargs).last_hidden_state[:, -1].numpy()
+    hidden = ts.run(None, {"input_ids": x["input_ids"].numpy().astype(np.int64)})[0]
+    vis = vs.run(None, {"pixel_values": pixels.numpy().astype(np.float32)})
+    mask = x["mm_token_type_ids"].numpy() == token_type
+    # 视觉区间长度不对，说明模板/占位符/档位三者有一处错了。单独报错比
+    # 后面 scatter 抛「形状不符」清楚得多。
+    if int(mask.sum()) != want_tokens:
+        raise SystemExit(f"{name}: 视觉 token 数 {int(mask.sum())}，期望 {want_tokens}")
+    hidden = hidden.copy()
+    hidden[mask] = vis[3]
     deep = []
-    for d in vo[:3]:
-        full = np.zeros_like(h_onnx)
+    for d in vis[:3]:
+        full = np.zeros_like(hidden)
         full[mask] = d
         deep.append(full)
-    got = run_transform(h_onnx, tuple(deep), cos.numpy(), sin.numpy())
-    compare("image/onnx-vs-full", got, ref_img)
-    reference["image_rgb"] = list(REFERENCE_IMAGE_RGB)
-    reference["image_size"] = IMAGE_SIZE
-    reference["image_vector_prefix"] = [float(v) for v in unit(got[0])[:12]]
-    reference["image_norm_raw"] = float(np.linalg.norm(got[0]))
-    reference["dim"] = int(got.shape[1])
+    got = run_transform(hidden, tuple(deep), cos.numpy(), sin.numpy())
+    cos_v = compare(f"{name}/onnx-vs-full", got, ref)
+    extra[prefix_key] = [float(v) for v in unit(got[0])[:12]]
+    extra[norm_key] = float(np.linalg.norm(got[0]))
+    extra["dim"] = int(got.shape[1])
+    return {"case": case, "cos": cos_v, "reference": extra}
+
+def verify_onnx(out_dir: str, video_groups, require_video: bool = True, model_dir: str = "") -> dict:
+    """逐用例在子进程里校验导出后的 ONNX 图，汇总冻结参考向量。
+
+    返回参考向量（供 Go 侧测试冻结使用）：Go 必须复现同一套预处理与模板，
+    因此这里把同一输入下的期望向量前若干维导出。
+    """
+    log("校验②：导出后的 ONNX 三段图 vs 完整模型（每个用例一个进程）")
+    cases = case_list(out_dir, video_groups, require_video)
+    reference: dict[str, object] = {}
+    verified: list = []
+    for case in cases:
+        # 先把子进程跑完，再决定要不要采它的参考值。
+        # 历史教训：曾经把「参考只取第一档」写成在调用前 continue，
+        # 结果 video_g3/g4 根本没被校验，而脚本仍然 exit 0 ——
+        # 一个「通过」的假象比报错危险得多。
+        res = run_verify_child(case, out_dir, model_dir)
+        verified.append(case)
+        log(f"  {case}: cos={res['cos']:.9f}")
+        if case.startswith("video_g") and "video_groups" in reference:
+            # 参考只取第一档（Go 侧回归用一档就够），但这一档本身已经真的校验过。
+            continue
+        reference.update(res["reference"])
+    # 覆盖度必须与计划一致：少跑一个用例就不算校验完成。
+    if verified != cases:
+        raise SystemExit(f"校验覆盖不完整：计划 {cases}，实际 {verified}")
+    log(f"校验覆盖 {len(verified)} 个用例: {', '.join(verified)}")
+    if "dim" not in reference:
+        raise SystemExit("校验没有产出 dim")
     return reference
+
+
+def case_list(out_dir: str, video_groups, require_video: bool) -> list:
+    """要校验的用例列表。视频档缺图时：刚导出完必须报错，校验旧目录则跳过。"""
+    cases = ["text", "image"]
+    for groups in video_groups:
+        path = os.path.join(out_dir, f"Vision_g{groups}.onnx")
+        if os.path.exists(path):
+            cases.append(f"video_g{groups}")
+        elif require_video:
+            raise SystemExit(f"缺少 {path}（--video-groups 包含 {groups} 但未导出）")
+        else:
+            log(f"跳过视频档 G={groups}：目录里没有 {os.path.basename(path)}")
+    return cases
+
+
+def run_verify_child(case: str, out_dir: str, model_dir: str) -> dict:
+    """在子进程里校验一个用例并取回它的参考片段。"""
+    cmd = [sys.executable, os.path.abspath(__file__), "--out", out_dir, "--verify-case", case]
+    if model_dir:
+        cmd += ["--model-dir", model_dir]
+    log(f"  校验 {case}（独立进程）")
+    proc = subprocess.run(cmd, capture_output=True, text=True)
+    if proc.returncode != 0:
+        out = ((proc.stderr or "") + (proc.stdout or "")).strip().splitlines()
+        raise SystemExit(f"校验 {case} 失败（exit={proc.returncode}）:\n" + "\n".join(out[-20:]))
+    for line in reversed((proc.stdout or "").splitlines()):
+        if line.startswith(RESULT_PREFIX):
+            return json.loads(line[len(RESULT_PREFIX):])
+    raise SystemExit(
+        f"校验 {case} 的子进程没有输出结果行；stdout 末尾: {(proc.stdout or '')[-300:]!r}")
+
+
+def video_groups_from_config(out_dir: str):
+    """读取产物自带的 video_groups，读不到则返回 None。
+
+    max_length 由 video_groups 推导，而推导结果必须与导出时一致，否则校验
+    会因截断而报「视觉 token 数不符」。产物自己的 config 是权威来源，
+    比让调用方记得重传 --video-groups 可靠。
+    """
+    try:
+        with open(os.path.join(out_dir, "embed_config.json")) as f:
+            cfg = json.load(f)
+    except (OSError, ValueError):
+        return None
+    groups = cfg.get("video_groups")
+    if isinstance(groups, list) and groups and all(isinstance(g, int) and g >= 2 for g in groups):
+        return sorted(groups)
+    return None
 
 
 def reference_image():
@@ -346,7 +543,7 @@ def reference_image():
 
 # ─────────────────────────── 导出 ───────────────────────────
 
-def export_graphs(out_dir: str, model, processor, model_dir: str, transformer) -> None:
+def export_graphs(out_dir: str, model, processor, model_dir: str, transformer, video_groups) -> None:
     os.makedirs(out_dir, exist_ok=True)
     # 清掉旧产物，避免 fingerprint 把死文件算进去（旧图/旧外部权重会让
     # 空间指纹变化，触发一次毫无意义的全量重算）。
@@ -383,9 +580,10 @@ def export_graphs(out_dir: str, model, processor, model_dir: str, transformer) -
             opset_version=17, do_constant_folding=True, dynamo=False,
         )
 
-    log("导出 Vision.onnx（固定 grid 1×48×48）")
+    log("导出 Vision.onnx（图像，固定 grid 1×48×48）")
     grid = torch.tensor([[1, IMAGE_SIZE // PATCH_SIZE, IMAGE_SIZE // PATCH_SIZE]], dtype=torch.long)
-    pv = x["pixel_values"]
+    xi, _h, _d, _c, _s, _cm, _p = image_inputs(processor, model, reference_image())
+    pv = xi["pixel_values"]
     with torch.no_grad():
         torch.onnx.export(
             VisionTower(model.model.visual, grid).eval(), (pv,), os.path.join(out_dir, "Vision.onnx"),
@@ -395,13 +593,31 @@ def export_graphs(out_dir: str, model, processor, model_dir: str, transformer) -
             opset_version=17, do_constant_folding=True, dynamo=False,
         )
 
+    # 视频：每个时间组数一张图。grid_thw 被 legacy tracer 固化为常量，
+    # 所以“动态时间轴”不可行（实测导出的图里根本没有 grid_thw 输入）；
+    # 反过来，每档导一张则完全可验证。
+    for groups in video_groups:
+        name = f"Vision_g{groups}.onnx"
+        log(f"导出 {name}（视频，固定 grid {groups}×48×48 ⇒ {2 * groups} 帧）")
+        vgrid = torch.tensor([[groups, IMAGE_SIZE // PATCH_SIZE, IMAGE_SIZE // PATCH_SIZE]], dtype=torch.long)
+        vx, _h, _d, _c, _s, _cm, _p = image_inputs(processor, model, None, groups=groups)
+        vpv = vx["pixel_values_videos"]
+        with torch.no_grad():
+            torch.onnx.export(
+                VisionTower(model.model.visual, vgrid).eval(), (vpv,), os.path.join(out_dir, name),
+                input_names=["pixel_values"],
+                output_names=["deepstack_feature_0", "deepstack_feature_1",
+                              "deepstack_feature_2", "vision_hidden_states"],
+                opset_version=17, do_constant_folding=True, dynamo=False,
+            )
+
     for name in ("tokenizer.json", "tokenizer_config.json", "chat_template.jinja", "added_tokens.json"):
         src = os.path.join(model_dir, name)
         if os.path.exists(src):
             shutil.copy2(src, os.path.join(out_dir, name))
 
 
-def write_config(out_dir: str, model, processor) -> None:
+def write_config(out_dir: str, model, processor, video_groups) -> None:
     cfg = model.config
     text_cfg = getattr(cfg, "text_config", cfg)
     rope_scaling = getattr(text_cfg, "rope_scaling", None) or {}
@@ -424,16 +640,18 @@ def write_config(out_dir: str, model, processor) -> None:
         "rope_theta": float(getattr(text_cfg, "rope_theta", 5000000)),
         "mrope_section": [int(v) for v in mrope_section],
         "num_layers": int(getattr(text_cfg, "num_hidden_layers", 28)),
-        "supports_native_video": False,
-        "unsupported_modalities": ["audio", "video"],
-        "notes": ("视频由上层抽帧后逐帧按图像编码（同模型/同维度/同 fingerprint）；"
-                  "音频需未来接入真正的统一音频模型。grid_thw 被 legacy tracer 固化为常量，"
-                  "故视觉塔固定 1×48×48，详见导出脚本 docstring。"),
+        "supports_native_video": True,
+        "video_groups": list(video_groups),
+        "unsupported_modalities": ["audio"],
+        "notes": ("视频每个时间组数（G）各一张 Vision 图：grid_thw 被 legacy tracer "
+                  "固化为常量，无法做成运行时输入；用错档会因维度不符报错。"
+                  "帧：相邻两帧构成一个时间组，temporal 槽 tp0←帧2g、tp1←帧2g+1。"
+                  "音频不在 Qwen3-VL 原生模态内（无 audio_token_id），需另一模型。"),
     }
     with open(os.path.join(out_dir, "embed_config.json"), "w") as f:
         json.dump(meta, f, ensure_ascii=False, indent=2)
     log(f"写出 embed_config.json dim={meta['dim']} rope_theta={meta['rope_theta']} "
-        f"mrope={meta['mrope_section']}")
+        f"mrope={meta['mrope_section']} video_groups={meta['video_groups']}")
 
 
 def main() -> int:
@@ -446,9 +664,38 @@ def main() -> int:
     ap.add_argument("--no-reference", action="store_true",
                     help="不写 <out>/qwen_reference.json（默认会写；Go 测试靠它做冻结回归）")
     ap.add_argument("--skip-verify", action="store_true", help="跳过导出后校验（仅调试用，不推荐）")
+    ap.add_argument("--video-groups", default=",".join(str(g) for g in DEFAULT_VIDEO_GROUPS),
+                    help="逗号分隔的视频时间组数，每档导一张 Vision_g{N}.onnx"
+                         f"（默认 {','.join(str(g) for g in DEFAULT_VIDEO_GROUPS)}；"
+                         "G 组合 2G 帧，即默认 4/6/8 帧）")
     ap.add_argument("--verify-only", action="store_true",
                     help="不重新导出，只校验已存在的 <out> 并（重新）写出参考向量")
+    ap.add_argument("--verify-case", default="",
+                    help=argparse.SUPPRESS)  # 内部用：单用例校验子进程
     args = ap.parse_args()
+    try:
+        video_groups = [int(g) for g in str(args.video_groups).split(",") if str(g).strip()]
+    except ValueError:
+        raise SystemExit(f"--video-groups 必须是逗号分隔的整数，得到 {args.video_groups!r}")
+    if not video_groups or any(g < 2 for g in video_groups):
+        raise SystemExit("--video-groups 需至少一个 >=2 的整数（单图档是 Vision.onnx，不用列）")
+
+    if args.verify_case or args.verify_only:
+        cfg_groups = video_groups_from_config(args.out)
+        if cfg_groups and cfg_groups != video_groups:
+            log(f"按产物 embed_config.json 使用 video_groups={cfg_groups}（命令行是 {video_groups}）")
+            video_groups = cfg_groups
+
+    global MAX_LENGTH
+    MAX_LENGTH = max_length_for(video_groups)
+    log(f"max_length={MAX_LENGTH}（按最大档 {max(video_groups)} 组×{VISUAL_TOKENS_PER_GROUP} 推导）")
+
+    if args.verify_case:
+        model_dir = args.model_dir or pull_model(args.model_id, args.model_store)
+        model, processor = load_model(model_dir)
+        res = verify_case(args.verify_case, args.out, model, processor)
+        print(RESULT_PREFIX + json.dumps(res, ensure_ascii=False), flush=True)
+        return 0
 
     if args.verify_only:
         # 校验既有产物目录：既能确认线上在用的图没坏，也能给旧目录补上参考向量。
@@ -456,14 +703,7 @@ def main() -> int:
             if not os.path.exists(os.path.join(args.out, name)):
                 raise SystemExit(f"{args.out} 下缺少 {name}，无法 --verify-only")
         model_dir = args.model_dir or pull_model(args.model_id, args.model_store)
-        from transformers import AutoProcessor
-        from transformers.models.qwen3_vl.modeling_qwen3_vl import Qwen3VLForConditionalGeneration
-
-        log("加载 processor / model（--verify-only）")
-        processor = AutoProcessor.from_pretrained(model_dir, trust_remote_code=True, padding_side="right")
-        model = Qwen3VLForConditionalGeneration.from_pretrained(
-            model_dir, dtype=torch.float32, low_cpu_mem_usage=True).eval()
-        reference = verify_onnx(args.out, model, processor)
+        reference = verify_onnx(args.out, video_groups, require_video=False, model_dir=model_dir)
         if not args.no_reference:
             path = os.path.join(args.out, "qwen_reference.json")
             with open(path, "w") as f:
@@ -480,22 +720,23 @@ def main() -> int:
     else:
         model_dir = pull_model(args.model_id, args.model_store)
 
-    # transformers 只在真正导出时才需要（拉取模型本身只用 huggingface_hub）。
-    from PIL import Image  # noqa: F401  确保依赖存在并给出清晰报错
-    from transformers import AutoProcessor
-    from transformers.models.qwen3_vl.modeling_qwen3_vl import Qwen3VLForConditionalGeneration
+    # transformers / PIL 只在真正导出时才需要（拉取模型本身只用 huggingface_hub）；
+    # 这里提前导入一次，缺依赖时给出清晰报错而不是走到深处才炸。
+    from PIL import Image  # noqa: F401
 
     log("加载 processor / model（FP32，CPU）")
-    processor = AutoProcessor.from_pretrained(model_dir, trust_remote_code=True, padding_side="right")
-    model = Qwen3VLForConditionalGeneration.from_pretrained(
-        model_dir, dtype=torch.float32, low_cpu_mem_usage=True).eval()
+    model, processor = load_model(model_dir)
     transformer = Transformer(model.model.language_model).eval()
 
     verify_split_torch(model, processor, transformer)
-    export_graphs(args.out, model, processor, model_dir, transformer)
-    write_config(args.out, model, processor)
+    export_graphs(args.out, model, processor, model_dir, transformer, video_groups)
+    write_config(args.out, model, processor, video_groups)
 
-    reference = None if args.skip_verify else verify_onnx(args.out, model, processor)
+    # 校验在子进程里跑，父进程先把模型释放掉，把内存完全让给子进程。
+    del transformer, model
+    gc.collect()
+
+    reference = None if args.skip_verify else verify_onnx(args.out, video_groups, model_dir=model_dir)
     # 参考写进产物目录本身：这样任何一个 ONNX 目录都自带「它应当给出什么输出」，
     # Go 测试无需额外配置就能找到，也不会出现「模型换了、参考还是旧的」的错配。
     if reference is not None and not args.no_reference:

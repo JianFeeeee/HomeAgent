@@ -6,6 +6,8 @@ import (
 	"sort"
 	"strings"
 	"sync"
+
+	"gitcode.com/JianFeeeee/HomeAgent/pkg/embedding"
 )
 
 // Vectorizer 接口：将文本转为向量
@@ -56,8 +58,15 @@ var ErrNotSupported = fmt.Errorf("vectorizer does not support image embedding")
 // 而不是「这次失败了、下次重试」。绝不能拿另一个模型的向量顶替——那会把
 // 两套坐标系混进同一空间，检索出来的相似度没有任何意义。
 //
-// 例：Qwen3-VL 能原生编码文本/图像，音频需要未来接入真正的统一音频模型。
-var ErrModalityUnsupported = fmt.Errorf("modality not supported by this embedding space")
+// 它是公共 provider 契约里那个哨兵值的别名，两者 errors.Is 互通：
+// provider 在自己的包内返回 embedding.ErrUnsupportedModality 即可，
+// 内核侧的判断无需改变。
+var ErrModalityUnsupported = embedding.ErrUnsupportedModality
+
+// 注：曾经这里还有一个可选的 VideoEmbedder 接口（用类型断言探测视频能力）。
+// 已删除：那让核心为每一个新模态长出一套模型专属方法，正是“核心适配模型”的
+// 坏味道。模态能力现在是数据（embedding.Info.Modalities），输入是不透明的
+// Data+MIME（见 pkg/embedding）。
 
 // Vector 是带权特征映射：feature → weight
 type Vector map[string]float64
