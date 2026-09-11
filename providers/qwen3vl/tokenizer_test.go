@@ -1,4 +1,4 @@
-package qwen
+package qwen3vl
 
 import (
 	"encoding/json"

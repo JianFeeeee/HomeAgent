@@ -1,6 +1,6 @@
 //go:build onnxruntime
 
-package qwen
+package qwen3vl
 
 import (
 	"bytes"
@@ -21,15 +21,24 @@ const (
 	qwenImagePatches    = (qwenImageSize / qwenPatchSize) * (qwenImageSize / qwenPatchSize)
 	qwenVisualTokens    = qwenImagePatches / (qwenSpatialMerge * qwenSpatialMerge)
 	qwenPatchVectorSize = 3 * qwenTemporalPatch * qwenPatchSize * qwenPatchSize
+
+	// qwenVisionScale 是视觉塔空间步长：grid_h / spatial_merge。
+	// 每个时间组消耗这么多 M-RoPE 位置（见 model_input.go 的说明）。
+	qwenVisionScale = (qwenImageSize / qwenPatchSize) / qwenSpatialMerge
+
+	// maxVideoGroupsSafety 是分配安全上限，**不是**能力上限。
+	// 真正能导出哪些档由产物目录决定（Vision_g{N}.onnx）；内核不硬编码
+	// 导出清单，否则别人导出 G=8 就会被内核莫名拒绝。
+	// 这个上限只用来防住「丢了上千帧进来」导致的巨量分配。
+	maxVideoGroupsSafety = 64
 )
 
-// preprocessImage 把任意图片转成固定 768×768 视觉塔输入。
+// fitCanvas 把任意图片解码并转成固定 768×768 画布。
 //
-// Vision.onnx 是经过 PyTorch 逐输出验证的固定 48×48 patch 图。为避免拉伸物体，
-// 这里保持宽高比缩放并在中心补中性灰（归一化后约为 0）；这与直接把长方形
-// 强拉成正方形相比更能保留 Qwen 的视觉语义。已是 768×768 的输入不做插值，
-// 便于用跨语言冻结向量精确回归 patch 排列。
-func preprocessImage(raw []byte) ([]float32, error) {
+// 保持宽高比缩放并在中心补中性灰（归一化后约为 0）；直接强拉成正方形会
+// 破坏物体形状。已是 768×768 的输入不做插值，以便用跨语言冻结向量
+// 精确回归 patch 排列。
+func fitCanvas(raw []byte) (*image.NRGBA, error) {
 	src, _, err := image.Decode(bytes.NewReader(raw))
 	if err != nil {
 		return nil, fmt.Errorf("qwen: decode image: %w", err)
@@ -61,11 +70,18 @@ func preprocessImage(raw []byte) ([]float32, error) {
 			canvas.SetNRGBA(ox+x, oy+y, resized.NRGBAAt(x, y))
 		}
 	}
+	return canvas, nil
+}
 
-	// 与 transformers Qwen2VLImageProcessor 的排列严格一致：
-	// [grid_h/merge, grid_w/merge, merge_h, merge_w, channel,
-	//  temporal_patch, patch_h, patch_w]，然后 flatten。
-	out := make([]float32, 0, qwenImagePatches*qwenPatchVectorSize)
+// appendPatches 按 Qwen2VLImageProcessor 的排列把一个时间组的两个画布写入 out。
+//
+// 排列：[grid_h/merge, grid_w/merge, merge_h, merge_w, channel,
+// temporal_patch, patch_h, patch_w]，然后 flatten。
+//
+// 图像与视频共用本函数：图像的两个时间槽传同一张画布，视频传相邻两帧。
+// 共用是刻意的——两处各写一份排列，迟早会在某次修改后漂移，
+// 而排列错了只会得到一个语义偏移的向量，不会报错。
+func appendPatches(out []float32, slots *[qwenTemporalPatch]*image.NRGBA) []float32 {
 	blocks := qwenImageSize / qwenPatchSize / qwenSpatialMerge
 	for bh := 0; bh < blocks; bh++ {
 		for bw := 0; bw < blocks; bw++ {
@@ -75,7 +91,7 @@ func preprocessImage(raw []byte) ([]float32, error) {
 					baseX := (bw*qwenSpatialMerge + mw) * qwenPatchSize
 					for c := 0; c < 3; c++ {
 						for temporal := 0; temporal < qwenTemporalPatch; temporal++ {
-							_ = temporal // 静态图复制同一图片形成 2 帧 temporal patch
+							canvas := slots[temporal]
 							for py := 0; py < qwenPatchSize; py++ {
 								for px := 0; px < qwenPatchSize; px++ {
 									p := canvas.NRGBAAt(baseX+px, baseY+py)
@@ -89,7 +105,52 @@ func preprocessImage(raw []byte) ([]float32, error) {
 			}
 		}
 	}
-	return out, nil
+	return out
+}
+
+// preprocessImage 把任意图片转成固定 768×768 视觉塔输入（单个时间组）。
+func preprocessImage(raw []byte) ([]float32, error) {
+	canvas, err := fitCanvas(raw)
+	if err != nil {
+		return nil, err
+	}
+	slots := [qwenTemporalPatch]*image.NRGBA{canvas, canvas}
+	out := make([]float32, 0, qwenImagePatches*qwenPatchVectorSize)
+	return appendPatches(out, &slots), nil
+}
+
+// preprocessVideoFrames 把已按时间排序的帧转成 G 个时间组的视觉塔输入，
+// 返回 patch 张量与时间组数 G。
+//
+// 时间组 g 的两个时间槽依次取帧 2g 与 2g+1，这与处理器实测逐字节一致
+// （纯色与异色两组对照均 torch.equal 通过）；布局整体是
+// [G, blocks_h, blocks_w, merge_h, merge_w, c, temporal, patch_h, patch_w]，
+// 即图像排列以 grid_t 为最外层堆叠。
+//
+// 帧数为奇数时不补帧：只用得上的帧参与编码，多余的一帧被丢弃，
+// 以免用重复帧伪造时序——那会改变跨帧注意力看到的运动。
+func preprocessVideoFrames(frames [][]byte) ([]float32, int, error) {
+	if len(frames) < qwenTemporalPatch {
+		return nil, 0, fmt.Errorf("qwen: video needs at least %d frames, got %d", qwenTemporalPatch, len(frames))
+	}
+	groups := len(frames) / qwenTemporalPatch
+	if groups > maxVideoGroupsSafety {
+		return nil, 0, fmt.Errorf("qwen: video groups %d exceeds safety limit %d（请先对帧采样）", groups, maxVideoGroupsSafety)
+	}
+	canvases := make([]*image.NRGBA, groups*qwenTemporalPatch)
+	for i := 0; i < groups*qwenTemporalPatch; i++ {
+		canvas, err := fitCanvas(frames[i])
+		if err != nil {
+			return nil, 0, fmt.Errorf("qwen: frame %d: %w", i, err)
+		}
+		canvases[i] = canvas
+	}
+	out := make([]float32, 0, groups*qwenImagePatches*qwenPatchVectorSize)
+	for g := 0; g < groups; g++ {
+		slots := [qwenTemporalPatch]*image.NRGBA{canvases[2*g], canvases[2*g+1]}
+		out = appendPatches(out, &slots)
+	}
+	return out, groups, nil
 }
 
 // resizeBicubic 使用半像素中心的 Catmull-Rom 三次卷积。

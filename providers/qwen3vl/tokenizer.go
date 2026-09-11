@@ -13,7 +13,7 @@
 //  2. Go 的 `\s` 只覆盖 ASCII，而 Rust regex 的 `\s` 是 Unicode
 //     `\p{White_Space}`。不换成 \p{White_Space} 的话，全角空格、NBSP、
 //     行分隔符等的切分点会与上游不一致。
-package qwen
+package qwen3vl
 
 import (
 	"encoding/json"
