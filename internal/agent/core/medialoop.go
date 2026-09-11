@@ -1,11 +1,13 @@
 package core
 
 import (
+	"errors"
 	"log"
 	"sync"
 	"sync/atomic"
 
 	"gitcode.com/JianFeeeee/HomeAgent/internal/memory"
+	"gitcode.com/JianFeeeee/HomeAgent/internal/memory/vector"
 )
 
 // 媒体与记忆块的生命周期辅助。
@@ -126,7 +128,7 @@ func (a *Agent) reembedStaleMedia() {
 		len(digests), shortFP(fp), a.multimodalSpace.Dim(), workers)
 
 	jobs := make(chan string, workers*2)
-	var done, failed int64
+	var done, failed, unsupported int64
 	var failedMu sync.Mutex
 	var wg sync.WaitGroup
 
@@ -135,13 +137,18 @@ func (a *Agent) reembedStaleMedia() {
 		go func() {
 			defer wg.Done()
 			for d := range jobs {
-				if err := a.reembedOne(d, fp); err != nil {
+				switch err := a.reembedOne(d, fp); {
+				case err == nil:
+					atomic.AddInt64(&done, 1)
+				case errors.Is(err, vector.ErrModalityUnsupported):
+					// 该模态不在本空间内（如音频）：不重试、不计失败，
+					// 也不拿另一个模型的向量顶替。
+					atomic.AddInt64(&unsupported, 1)
+				default:
 					failedMu.Lock()
 					failed++
 					failedMu.Unlock()
-					continue
 				}
-				atomic.AddInt64(&done, 1)
 			}
 		}()
 	}
@@ -155,11 +162,14 @@ func (a *Agent) reembedStaleMedia() {
 	}
 	close(jobs)
 	wg.Wait()
-	log.Printf("[media] 向量迁移完成: 成功=%d 失败=%d 总计=%d fp=%s",
-		done, failed, len(digests), shortFP(fp))
+	log.Printf("[media] 向量迁移完成: 成功=%d 失败=%d 不在本空间=%d 总计=%d fp=%s",
+		done, failed, unsupported, len(digests), shortFP(fp))
 }
 
 // reembedOne 为单条媒体重新计算向量并写入（stat/get 失败时跳过该条目）。
+//
+// 模态不在本空间覆盖范围时返回 ErrModalityUnsupported，调用方据此区分
+// 「永久无向量」与「本次失败重试」。
 func (a *Agent) reembedOne(digest, fp string) error {
 	it, err := a.mediaStore.Stat(digest)
 	if err != nil {
