@@ -53,6 +53,15 @@ type OutputChannelRegistrar = pubsdk.OutputChannelRegistrar
 type InputChannelRegistrar = pubsdk.InputChannelRegistrar
 type ChannelDef = pubsdk.ChannelDef
 
+// InjectOptions / 上下文策略常量：内置插件与外部插件必须用同一套类型与取值，
+// 否则内核要认两份，而漏认会静默丢失标志位。
+type InjectOptions = pubsdk.InjectOptions
+
+const (
+	ContextPolicyNone  = pubsdk.ContextPolicyNone
+	ContextPolicyPrune = pubsdk.ContextPolicyPrune
+)
+
 type DisabledPluginInfo struct {
 	Name       string `json:"name"`
 	DisabledAt string `json:"disabled_at"`
@@ -163,19 +172,29 @@ func (s *PluginSDK) LLM() LLMAPI               { return s.llm }
 type ioAdapter struct{ iom *agentIO.IOManager }
 
 func (a ioAdapter) InjectInterruptText(source, channel, text string) {
+	a.InjectInterruptTextOpts(source, channel, text, pubsdk.InjectOptions{})
+}
+
+// InjectInterruptTextOpts 注入可抢占当前处理的中断文本，并声明记忆/裁剪行为。
+func (a ioAdapter) InjectInterruptTextOpts(source, channel, text string, opts pubsdk.InjectOptions) {
 	if a.iom != nil {
-		a.iom.InjectInterrupt(source, channel, map[string]interface{}{"type": "text", "content": text})
+		a.iom.InjectInterruptTextOpts(source, channel, text, opts)
 	}
 }
 
 // InjectInputSync 同步注入输入并等待回复（阻塞直至 agent 处理完成），返回回复文本。
 func (a ioAdapter) InjectInputSync(source, channel, text string) string {
+	return a.InjectInputSyncOpts(source, channel, text, pubsdk.InjectOptions{})
+}
+
+// InjectInputSyncOpts 同步注入输入并声明记忆/裁剪行为。
+func (a ioAdapter) InjectInputSyncOpts(source, channel, text string, opts pubsdk.InjectOptions) string {
 	if a.iom == nil {
 		return ""
 	}
-	out := a.iom.InjectInputSyncTo(source, channel, "text", map[string]interface{}{
+	out := a.iom.InjectInputSyncToOpts(source, channel, "text", map[string]interface{}{
 		"content": text,
-	})
+	}, opts)
 	if out == nil {
 		return ""
 	}
@@ -184,15 +203,18 @@ func (a ioAdapter) InjectInputSync(source, channel, text string) string {
 }
 
 func (a ioAdapter) InjectText(source, channel, text string) {
+	a.InjectTextOpts(source, channel, text, pubsdk.InjectOptions{})
+}
+
+// InjectTextOpts 注入排队文本，并声明记忆/裁剪行为。
+func (a ioAdapter) InjectTextOpts(source, channel, text string, opts pubsdk.InjectOptions) {
 	if a.iom != nil {
-		a.iom.InjectInputTo(source, channel, "text", map[string]interface{}{"content": text})
+		a.iom.InjectTextOpts(source, channel, text, opts)
 	}
 }
 
 func (a ioAdapter) InjectTextNoMemory(source, channel, text string) {
-	if a.iom != nil {
-		a.iom.InjectInputTo(source, channel, "text", map[string]interface{}{"content": text, "no_memory": true})
-	}
+	a.InjectTextOpts(source, channel, text, pubsdk.InjectOptions{NoMemory: true})
 }
 
 // InjectInputMedia 注入带媒体内容块的输入。
@@ -202,23 +224,27 @@ func (a ioAdapter) InjectTextNoMemory(source, channel, text string) {
 // CAS 落盘与媒体记忆绑定。与 SetToolBlocks 的区别：后者只能在工具
 // 调用内部用，且媒体要等到下一条 tool message 才到模型手上。
 func (a ioAdapter) InjectInputMedia(source, channel, text string, blocks []pubsdk.ContentBlock) {
+	a.InjectInputMediaOpts(source, channel, text, blocks, pubsdk.InjectOptions{})
+}
+
+// InjectInputMediaOpts 注入带媒体块的输入，并声明记忆/裁剪行为。
+func (a ioAdapter) InjectInputMediaOpts(source, channel, text string, blocks []pubsdk.ContentBlock, opts pubsdk.InjectOptions) {
 	if a.iom != nil {
-		a.iom.InjectInputTo(source, channel, "text", map[string]interface{}{
-			"content":      text,
-			"media_blocks": blocks,
-		})
+		a.iom.InjectInputMediaOpts(source, channel, text, blocks, opts)
 	}
 }
 
 // InjectInputMediaSync 注入带媒体内容块的输入并同步等待回复。
 func (a ioAdapter) InjectInputMediaSync(source, channel, text string, blocks []pubsdk.ContentBlock) string {
+	return a.InjectInputMediaSyncOpts(source, channel, text, blocks, pubsdk.InjectOptions{})
+}
+
+// InjectInputMediaSyncOpts 注入带媒体块的输入并同步等待回复，同时声明记忆/裁剪行为。
+func (a ioAdapter) InjectInputMediaSyncOpts(source, channel, text string, blocks []pubsdk.ContentBlock, opts pubsdk.InjectOptions) string {
 	if a.iom == nil {
 		return ""
 	}
-	out := a.iom.InjectInputSyncTo(source, channel, "text", map[string]interface{}{
-		"content":      text,
-		"media_blocks": blocks,
-	})
+	out := a.iom.InjectInputMediaSyncOpts(source, channel, text, blocks, opts)
 	if out == nil {
 		return ""
 	}
@@ -228,12 +254,13 @@ func (a ioAdapter) InjectInputMediaSync(source, channel, text string, blocks []p
 
 // InjectInterruptMedia 注入带媒体内容块的中断，可抢占当前 LLM 处理。
 func (a ioAdapter) InjectInterruptMedia(source, channel, text string, blocks []pubsdk.ContentBlock) {
+	a.InjectInterruptMediaOpts(source, channel, text, blocks, pubsdk.InjectOptions{})
+}
+
+// InjectInterruptMediaOpts 注入带媒体块的中断，并声明记忆/裁剪行为。
+func (a ioAdapter) InjectInterruptMediaOpts(source, channel, text string, blocks []pubsdk.ContentBlock, opts pubsdk.InjectOptions) {
 	if a.iom != nil {
-		a.iom.InjectInterrupt(source, channel, map[string]interface{}{
-			"type":         "text",
-			"content":      text,
-			"media_blocks": blocks,
-		})
+		a.iom.InjectInterruptMediaOpts(source, channel, text, blocks, opts)
 	}
 }
 

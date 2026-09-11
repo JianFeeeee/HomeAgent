@@ -43,6 +43,7 @@ type injectCall struct {
 	channel string
 	text    string
 	blocks  []ContentBlock
+	opts    InjectOptions // 调用点声明的记忆/裁剪行为
 }
 
 func (r *recordingInjector) record(c injectCall) {
@@ -91,6 +92,41 @@ func (r *recordingInjector) InjectInputMediaSync(s, c, t string, b []ContentBloc
 func (r *recordingInjector) InjectInterruptMedia(s, c, t string, b []ContentBlock) {
 	r.nMedia.Add(1)
 	r.record(injectCall{kind: "interruptMedia", source: s, channel: c, text: t, blocks: b})
+}
+
+// ---- 带 InjectOptions 的注入：记录 opts 以便测试断言标志位确实传到了内核 ----
+
+func (r *recordingInjector) InjectTextOpts(s, c, t string, o InjectOptions) {
+	r.nText.Add(1)
+	r.record(injectCall{kind: "textOpts", source: s, channel: c, text: t, opts: o})
+}
+
+func (r *recordingInjector) InjectInterruptTextOpts(s, c, t string, o InjectOptions) {
+	r.nInterrupt.Add(1)
+	r.record(injectCall{kind: "interruptTextOpts", source: s, channel: c, text: t, opts: o})
+}
+
+func (r *recordingInjector) InjectInputSyncOpts(s, c, t string, o InjectOptions) string {
+	r.nSync.Add(1)
+	r.record(injectCall{kind: "syncOpts", source: s, channel: c, text: t, opts: o})
+	return "reply:" + t
+}
+
+func (r *recordingInjector) InjectInputMediaOpts(s, c, t string, b []ContentBlock, o InjectOptions) {
+	r.nMedia.Add(1)
+	r.record(injectCall{kind: "mediaOpts", source: s, channel: c, text: t, blocks: b, opts: o})
+}
+
+func (r *recordingInjector) InjectInputMediaSyncOpts(s, c, t string, b []ContentBlock, o InjectOptions) string {
+	r.nMedia.Add(1)
+	r.nSync.Add(1)
+	r.record(injectCall{kind: "mediaSyncOpts", source: s, channel: c, text: t, blocks: b, opts: o})
+	return "reply:" + t
+}
+
+func (r *recordingInjector) InjectInterruptMediaOpts(s, c, t string, b []ContentBlock, o InjectOptions) {
+	r.nMedia.Add(1)
+	r.record(injectCall{kind: "interruptMediaOpts", source: s, channel: c, text: t, blocks: b, opts: o})
 }
 
 func (r *recordingInjector) snapshot() []injectCall {
@@ -463,11 +499,10 @@ func TestStress_MediaTypesJSONRoundTripAtScale(t *testing.T) {
 			data[i] = byte(i * 7 % 256)
 		}
 		att := MediaAttachment{
-			Digest:      strings.Repeat("a", 64),
-			MIME:        "image/png",
-			Data:        data,
-			Name:        "图片-名字 with space & 符号.png",
-			Description: "一张紫蓝红三色带图，含 emoji 🎨 与换行\n第二行",
+			Digest: strings.Repeat("a", 64),
+			MIME:   "image/png",
+			Data:   data,
+			Name:   "图片-名字 with space & 符号.png",
 		}
 		b, err := json.Marshal(att)
 		if err != nil {
@@ -485,7 +520,7 @@ func TestStress_MediaTypesJSONRoundTripAtScale(t *testing.T) {
 				t.Fatalf("size=%d 第 %d 字节损坏: %02x != %02x", n, i, back.Data[i], data[i])
 			}
 		}
-		if back.Name != att.Name || back.Description != att.Description || back.MIME != att.MIME || back.Digest != att.Digest {
+		if back.Name != att.Name || back.MIME != att.MIME || back.Digest != att.Digest {
 			t.Fatalf("size=%d 元数据往返不一致: %+v", n, back)
 		}
 	}

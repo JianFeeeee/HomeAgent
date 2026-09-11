@@ -16,8 +16,12 @@ fi
 
 mkdir -p "$DATA_DIR"
 
-# 生成随机凭据
-API_KEY=$(cat /proc/sys/kernel/random/uuid 2>/dev/null | tr -d '-' || echo "homeagent$(date +%s)")
+# 生成随机凭据。
+#
+# 允许环境变量覆盖：安装器（包括 Windows 上的 WSL 引导安装）已经在界面上
+# 向用户收过这些值，若不接受传入就只能两个地方各生成一份，用户看到的那份
+# 与实际写入 config.db 的那份不一致——那种错会直接表现为「登录不上」。
+API_KEY="${HOMEAGENT_API_KEY:-$(cat /proc/sys/kernel/random/uuid 2>/dev/null | tr -d '-' || echo "homeagent$(date +%s)")}"
 WEBUI_USER="${WEBUI_USER:-admin}"
 WEBUI_PASS="${WEBUI_PASS:-$(openssl rand -hex 12 2>/dev/null || echo "homeagent")}"
 

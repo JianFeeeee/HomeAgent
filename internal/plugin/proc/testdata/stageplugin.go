@@ -438,8 +438,13 @@ func main() {
 					}
 					copy(region[ref.Offset:ref.Offset+uint32(len(text))], text)
 					ref.Length = uint32(len(text))
+					// 注入标志位随参数一起过 RPC：内核据此决定这次注入是否
+					// 记入记忆、是否据此裁剪上下文、用哪个已注册 cleaner 清洗。
 					callKernel("io.injectText", map[string]interface{}{
 						"source": "plugin", "channel": "demo", "text_ref": ref,
+						"no_memory":      true,
+						"context_policy": "prune",
+						"cleaner_name":   "demo_cleaner",
 					})
 					arenaFree(ref)
 

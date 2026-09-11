@@ -29,6 +29,8 @@ type fakeCoreSDK struct {
 
 	// injected 记录经 InjectText 注入的文本（验证跨进程共享槽路径）。
 	injected []string
+	// lastInjectOpts 记录最近一次带标志位注入的 opts（跨进程转发断言用）。
+	lastInjectOpts pubsdk.InjectOptions
 	// toolBlocks 累积 SetToolBlocks 收到的块（多模态注入通道）。
 	toolBlocks []pubsdk.ContentBlock
 	// 文档/知识：验证大正文经 doc_ref / content_ref 走共享内存。
@@ -64,6 +66,13 @@ func (f *fakeCoreSDK) InjectText(s, c, t string) {
 	f.mu.Unlock()
 }
 
+// lastInjectOpts 记录最近一次带标志位注入的 opts（跨进程转发断言用）。
+func (f *fakeCoreSDK) lastOpts() pubsdk.InjectOptions {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.lastInjectOpts
+}
+
 func (f *fakeCoreSDK) injectedTexts() []string {
 	f.mu.Lock()
 	defer f.mu.Unlock()
@@ -77,6 +86,33 @@ func (f *fakeCoreSDK) InjectInputMediaSync(s, c, t string, b []pubsdk.ContentBlo
 	return ""
 }
 func (f *fakeCoreSDK) InjectInterruptMedia(s, c, t string, b []pubsdk.ContentBlock) {}
+
+// ---- 带 InjectOptions 的注入（1.2.0）----
+//
+// 转发到旧方法即可：本测试关心的是「注入了什么话」，标志位的转发在
+// corehandler 与 io 层的测试里覆盖。
+func (f *fakeCoreSDK) InjectTextOpts(s, c, t string, o pubsdk.InjectOptions) {
+	// 记录 opts：跨进程测试要断言插件在调用点声明的标志位确实穿过了 RPC。
+	f.mu.Lock()
+	f.lastInjectOpts = o
+	f.mu.Unlock()
+	f.InjectText(s, c, t)
+}
+func (f *fakeCoreSDK) InjectInterruptTextOpts(s, c, t string, o pubsdk.InjectOptions) {
+	f.InjectInterruptText(s, c, t)
+}
+func (f *fakeCoreSDK) InjectInputSyncOpts(s, c, t string, o pubsdk.InjectOptions) string {
+	return f.InjectInputSync(s, c, t)
+}
+func (f *fakeCoreSDK) InjectInputMediaOpts(s, c, t string, b []pubsdk.ContentBlock, o pubsdk.InjectOptions) {
+	f.InjectInputMedia(s, c, t, b)
+}
+func (f *fakeCoreSDK) InjectInputMediaSyncOpts(s, c, t string, b []pubsdk.ContentBlock, o pubsdk.InjectOptions) string {
+	return f.InjectInputMediaSync(s, c, t, b)
+}
+func (f *fakeCoreSDK) InjectInterruptMediaOpts(s, c, t string, b []pubsdk.ContentBlock, o pubsdk.InjectOptions) {
+	f.InjectInterruptMedia(s, c, t, b)
+}
 
 // SetToolBlocks 记录收到的媒体块，供测试断言共享内存通道真的把内容带到了内核侧。
 func (f *fakeCoreSDK) SetToolBlocks(blocks []pubsdk.ContentBlock) {
@@ -777,6 +813,20 @@ func TestPlugin_ArenaAllocFreeAcrossProcess(t *testing.T) {
 	}
 	if got[0] != payload {
 		t.Fatalf("经共享槽读到的内容不一致：len(got)=%d len(want)=%d", len(got[0]), len(payload))
+	}
+
+	// 注入标志位必须穿过 RPC 到达内核：插件在调用点声明「不进记忆 / 据此裁剪 /
+	// 用哪个 cleaner」，内核得拿到才能照做。只测 SDK 侧记录不到这一点——
+	// 字段在 JSON 与参数结构之间丢掉的失败模式是静默的。
+	opts := core.lastOpts()
+	if !opts.NoMemory {
+		t.Errorf("no_memory 未穿过 RPC: %+v", opts)
+	}
+	if opts.ContextPolicy != "prune" {
+		t.Errorf("context_policy 未穿过 RPC: %+v", opts)
+	}
+	if opts.CleanerName != "demo_cleaner" {
+		t.Errorf("cleaner_name 未穿过 RPC: %+v", opts)
 	}
 
 	// 插件已归还槽：池必须回到全空，否则说明 arena.free 没生效。
