@@ -19,7 +19,7 @@ func (a *Agent) buildMemoryContext(input string, maxTokens int) string {
 	// 不做这一步的后果：媒体描述进了 L3，agent 却拿不出来。图库句子里
 	// 写着 [image/png a1b2c3d4e5f6] 这样的短标记，但没有任何东西告诉
 	// 模型那份内容是否还在、能否重新查看——描述永存而 blob 可能已被
-	// 容量 GC 淘汰，两者状态不同，必须显式告知。
+	// 删除，两者状态不同，必须显式告知。
 	//
 	// 注意不能直接用 injected.Relations：BuildContext 刻意把它置为 nil
 	//（自动注入只给实体索引以省 token，细节留给 memory_recall）。

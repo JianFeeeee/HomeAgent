@@ -1,6 +1,7 @@
 package core
 
 import (
+	"fmt"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -14,8 +15,48 @@ import (
 
 // L3 图库媒体引用测试。
 //
-// 这一层的目的只有一个：几个月后从图谱走到一条句子，要能取回当时那份字节。
-// 因此测试的重点是「反查链路是否完整」以及「引用是否会悬空或误删」。
+// 这一层的目的只有一个：几个月后从图谱走到一条句子，要能取回当时那份媒体。
+// 媒体不再靠 media_refs 挂载，而是作为一等块进入 L3，并以
+// sentence --contains--> block 的结构边与句子相连。
+
+// attachBlockToSentence 提交一条句子，把媒体变成 L3 一等块，并以
+// sentence --contains--> block 相连，返回句子 id 与块。
+// 必须走真实提交：边要求两端都是真实图节点。
+func attachBlockToSentence(t *testing.T, g *memory.GraphDB, ms *media.Store, sentenceText, digest string) (int64, memory.MemoryBlock) {
+	t.Helper()
+	ids, _, _, err := g.CommitWithMedia([]memory.Triple{{
+		Subject: "媒体载体", Relation: "包含", Object: "内容", SentenceText: sentenceText,
+	}}, "test", 0)
+	if err != nil {
+		t.Fatalf("CommitWithMedia: %v", err)
+	}
+	sid := ids[sentenceText]
+	if sid == 0 {
+		t.Fatalf("拿不到句子 id: %q", sentenceText)
+	}
+	it, err := ms.Stat(digest)
+	if err != nil || it == nil {
+		t.Fatalf("Stat(%s): %v", shortDigest(digest), err)
+	}
+	b := memory.MemoryBlock{
+		ID:            fmt.Sprintf("blk_test_%d_%s", sid, shortDigest(digest)),
+		Modality:      memory.BlockImage,
+		PayloadDigest: it.Digest,
+		MIME:          it.MIME,
+		Size:          it.Size,
+		Width:         it.Width,
+		Height:        it.Height,
+		Vector:        it.Vec,
+		Fingerprint:   it.VecModel,
+	}
+	if err := g.PutMemoryBlocks([]memory.MemoryBlock{b}); err != nil {
+		t.Fatalf("PutMemoryBlocks: %v", err)
+	}
+	if err := g.AddMemoryBlockEdge("sentence", strconv.FormatInt(sid, 10), "block", b.ID, "contains"); err != nil {
+		t.Fatalf("AddMemoryBlockEdge: %v", err)
+	}
+	return sid, b
+}
 
 func newGraphMediaAgent(t *testing.T) (*Agent, *memory.GraphDB, *media.Store) {
 	t.Helper()
@@ -27,7 +68,7 @@ func newGraphMediaAgent(t *testing.T) (*Agent, *memory.GraphDB, *media.Store) {
 	}
 	t.Cleanup(func() { g.Close() })
 
-	ms, err := media.New(filepath.Join(dir, "media"), 0)
+	ms, err := media.New(filepath.Join(dir, "media"))
 	if err != nil {
 		t.Fatalf("media.New: %v", err)
 	}
@@ -139,7 +180,7 @@ func TestBindSentenceMedia_RoundTrip(t *testing.T) {
 		Subject: "图片", Relation: "内容", Object: "三色带", SentenceText: sentence,
 	}}
 
-	if _, _, _, err := a.commitTriplesWithMedia(triples, "s1", 0); err != nil {
+	if _, _, _, err := a.commitTriplesWithMedia(triples, "s1", 0, nil); err != nil {
 		t.Fatal(err)
 	}
 
@@ -153,15 +194,15 @@ func TestBindSentenceMedia_RoundTrip(t *testing.T) {
 		t.Fatal("拿不到句子 id")
 	}
 
-	// 反查：从句子取回 digest，再取回字节
-	digests, err := a.RecallMediaForSentence(sid)
+	// 反查：从句子取回一等块，再取回字节
+	blocks, err := a.RecallBlocksForSentence(sid)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(digests) != 1 || digests[0] != digest {
-		t.Fatalf("反查应得完整 digest %s，实际 %v", shortDigest(digest), digests)
+	if len(blocks) != 1 || blocks[0].PayloadDigest != digest {
+		t.Fatalf("反查应得完整 digest %s，实际 %+v", shortDigest(digest), blocks)
 	}
-	got, err := ms.Get(digests[0])
+	got, err := ms.Get(blocks[0].PayloadDigest)
 	if err != nil {
 		t.Fatalf("取回内容失败: %v", err)
 	}
@@ -169,37 +210,33 @@ func TestBindSentenceMedia_RoundTrip(t *testing.T) {
 		t.Fatal("取回的内容与写入不一致")
 	}
 
-	// 引用计数非零 → GC 不会清它
-	if _, _, err := ms.GC(0); err != nil {
-		t.Fatal(err)
-	}
+	// 块仍被 L3 持有 → 内容应仍可读
 	if _, err := ms.Get(digest); err != nil {
-		t.Fatalf("被图库句子引用的内容不该被 GC 清掉: %v", err)
+		t.Fatalf("被 L3 记忆块持有的内容不该被清除: %v", err)
 	}
 }
 
 func TestBindSentenceMedia_SkipsUnresolvable(t *testing.T) {
-	// 文本里的 digest 在库里不存在时必须跳过，不能挂一条对不上的引用——
-	// 那条引用 DropOwner 永远匹配不到，会永久占着计数。
-	a, _, ms := newGraphMediaAgent(t)
+	// 文本里的 digest 在库里不存在时必须跳过，不能建一条指向虚无的块边。
+	a, g, _ := newGraphMediaAgent(t)
 
 	sentence := "[image/png deadbeefdead] 一张不存在的图"
 	ids := map[string]int64{sentence: 42}
-	a.bindSentenceMedia(ids)
+	a.bindSentenceBlocks(ids, nil)
 
-	refs, err := ms.Refs(media.OwnerGraphSentence, "42")
+	blocks, err := g.BlocksForNode("sentence", "42")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(refs) != 0 {
-		t.Fatalf("无法补全的 digest 不该挂引用，实际 %v", refs)
+	if len(blocks) != 0 {
+		t.Fatalf("无法补全的 digest 不该建块，实际 %+v", blocks)
 	}
 }
 
 func TestBindSentenceMedia_NilStoreNoop(t *testing.T) {
 	a := &Agent{}
-	a.bindSentenceMedia(map[string]int64{"[image aaaaaaaaaaaa] x": 1})
-	if got, err := a.RecallMediaForSentence(1); err != nil || got != nil {
+	a.bindSentenceBlocks(map[string]int64{"[image aaaaaaaaaaaa] x": 1}, nil)
+	if got, err := a.RecallBlocksForSentence(1); err != nil || got != nil {
 		t.Fatalf("媒体关闭时应静默无操作，实际 %v / %v", got, err)
 	}
 }
@@ -216,7 +253,7 @@ func TestCommitTriplesWithMedia_FallsBackWithoutStore(t *testing.T) {
 	a := &Agent{memory: g}
 	ec, rc, _, err := a.commitTriplesWithMedia([]memory.Triple{
 		{Subject: "张三", Relation: "喜欢", Object: "咖啡"},
-	}, "s1", 0)
+	}, "s1", 0, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -225,69 +262,76 @@ func TestCommitTriplesWithMedia_FallsBackWithoutStore(t *testing.T) {
 	}
 }
 
-func TestReleaseDocMedia_DropsRefsSoGCCanReclaim(t *testing.T) {
-	// L2→L3 那一跳留下的泄漏：文档被 Remove 但引用没销，
-	// 引用计数永不归零，blob 永远不会被 GC 回收。
-	a, _, ms := newGraphMediaAgent(t)
+func TestMediaBlocksHeldByDocumentSurviveGC(t *testing.T) {
+	// 文档持有的一等块把内容钉住；文档被删后块随之消失，内容才可回收。
+	a, g, ms := newGraphMediaAgent(t)
+	_ = a
 
 	digest, err := ms.Put([]byte("doc image"), media.Item{MIME: "image/png"})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := ms.AddRef(digest, media.OwnerDocument, "doc_1"); err != nil {
+	dir := t.TempDir()
+	ds := document.NewStore(filepath.Join(dir, "docs"), memory.TokenizeWords)
+	if err := ds.Start(); err != nil {
 		t.Fatal(err)
 	}
+	defer ds.Stop()
 
-	// 释放前 GC 清不掉
-	if _, _, err := ms.GC(0); err != nil {
+	it, _ := ms.Stat(digest)
+	doc := &document.Doc{
+		ID: "doc_1", Summary: "带图的文档", Content: "正文",
+		Blocks: []memory.MemoryBlock{{ID: "blk_doc_1", Modality: memory.BlockImage,
+			PayloadDigest: it.Digest, MIME: it.MIME, Size: it.Size}},
+	}
+	if err := ds.Insert(doc); err != nil {
 		t.Fatal(err)
 	}
+	_ = g
+
+	// 文档仍持有块 → 内容在
 	if _, err := ms.Stat(digest); err != nil {
-		t.Fatal("有文档引用时不该被清")
+		t.Fatal("有文档块持有内容时不该被清")
 	}
 
-	a.releaseDocMedia("doc_1")
-
-	if refs, _ := ms.Refs(media.OwnerDocument, "doc_1"); len(refs) != 0 {
-		t.Fatalf("释放后不该还有文档引用，实际 %v", refs)
+	// 删除文档 → 一并删除其内容（与文本块一致：删块即删内容）
+	ds.Remove(doc.ID)
+	if blocks := ds.Blocks(); len(blocks) != 0 {
+		t.Fatalf("删除文档后不该还有块，实际 %+v", blocks)
 	}
-	// 现在 GC 能回收了
-	removed, _, err := ms.GC(0)
-	if err != nil {
+	if err := ms.Delete(digest); err != nil {
 		t.Fatal(err)
 	}
-	if removed != 1 {
-		t.Fatalf("释放引用后 GC 应能回收，实际清理 %d 条", removed)
+	if _, err := ms.Stat(digest); err == nil {
+		t.Fatal("删除后内容应已移除")
 	}
 }
 
 func TestMediaContextForSentences(t *testing.T) {
-	a, _, ms := newGraphMediaAgent(t)
+	a, g, ms := newGraphMediaAgent(t)
 
 	digest, _ := ms.Put([]byte("img"), media.Item{MIME: "image/png"})
 	if err := ms.Describe(digest, "一张紫蓝红三色带图", "visionllm"); err != nil {
 		t.Fatal(err)
 	}
-	if err := ms.AddRef(digest, media.OwnerGraphSentence, "7"); err != nil {
-		t.Fatal(err)
-	}
+	sid, _ := attachBlockToSentence(t, g, ms, "[image/png "+shortDigest(digest)+"] 一张紫蓝红三色带图", digest)
 
-	out := a.mediaContextForSentences([]int64{7, 8})
+	out := a.mediaContextForSentences([]int64{sid, sid + 100})
 	if out == "" {
 		t.Fatal("应产出媒体说明")
 	}
-	if !contains(out, "句子 #7") || !contains(out, "一张紫蓝红三色带图") {
+	if !contains(out, fmt.Sprintf("句子 #%d", sid)) || !contains(out, "一张紫蓝红三色带图") {
 		t.Fatalf("说明内容不对: %q", out)
 	}
-	// 8 号句子没引用媒体，不该出现
-	if contains(out, "句子 #8") {
+	// 无引用的句子不该出现
+	if contains(out, fmt.Sprintf("句子 #%d", sid+100)) {
 		t.Fatalf("无引用的句子不该出现: %q", out)
 	}
 }
 
 func TestResolvePrefix(t *testing.T) {
 	dir := t.TempDir()
-	ms, err := media.New(filepath.Join(dir, "m"), 0)
+	ms, err := media.New(filepath.Join(dir, "m"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -329,7 +373,7 @@ func TestResolvePrefix_AmbiguityIsError(t *testing.T) {
 	// 因此这里退而验证「8 位前缀在大量样本下的行为是确定的」：
 	// 要么唯一命中，要么明确报歧义，绝不静默取第一个。
 	dir := t.TempDir()
-	ms, err := media.New(filepath.Join(dir, "m"), 0)
+	ms, err := media.New(filepath.Join(dir, "m"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -369,7 +413,7 @@ func TestArchiveColdDocs_KeepsDocWhenGraphWriteEmpty(t *testing.T) {
 	a, _, ms := newGraphMediaAgent(t)
 
 	dir := t.TempDir()
-	ds := document.NewStore(filepath.Join(dir, "docs"))
+	ds := document.NewStore(filepath.Join(dir, "docs"), memory.TokenizeWords)
 	if err := ds.Start(); err != nil {
 		t.Fatal(err)
 	}
@@ -401,6 +445,8 @@ func TestArchiveColdDocs_KeepsDocWhenGraphWriteEmpty(t *testing.T) {
 	// {文档 -主题-> summary}，那条能通过校验，ec/rc 就不为 0 了。
 	// 这里要的是「三元组全部被拒」这一个状态。
 	longSummary := strings.Repeat("超长摘要文本", 20) // >80 字，触发长度门槛被跳过
+	// 文档持有的一等块（模拟“文档有媒体但正文标记已在清洗中丢失”）。
+	it, _ := ms.Stat(digest)
 	doc := &document.Doc{
 		ID:          "doc_keep",
 		Summary:     longSummary,
@@ -409,6 +455,8 @@ func TestArchiveColdDocs_KeepsDocWhenGraphWriteEmpty(t *testing.T) {
 		CreatedAt:   time.Now().Add(-200 * time.Hour),
 		LastAccess:  time.Now().Add(-200 * time.Hour),
 		AccessCount: 0,
+		Blocks: []memory.MemoryBlock{{ID: "blk_keep_1", Modality: memory.BlockImage,
+			PayloadDigest: it.Digest, MIME: it.MIME, Size: it.Size}},
 	}
 	if err := ds.Insert(doc); err != nil {
 		t.Fatal(err)
@@ -422,27 +470,23 @@ func TestArchiveColdDocs_KeepsDocWhenGraphWriteEmpty(t *testing.T) {
 			d.AccessCount = 0
 		}
 	}
-	if err := ms.AddRef(digest, media.OwnerDocument, doc.ID); err != nil {
-		t.Fatal(err)
-	}
-
 	a.archiveColdDocs()
 
-	// 关键断言三连：内容在、引用在、文档在
+	// 关键断言：内容在、块在、文档在
 	if _, err := ms.Get(digest); err != nil {
 		t.Fatalf("图库未写入任何实体/关系，内容却丢了: %v", err)
 	}
-	refs, err := ms.Refs(media.OwnerDocument, doc.ID)
-	if err != nil {
-		t.Fatal(err)
+	held := false
+	for _, d := range ds.RecentDocs(10) {
+		if d.ID == doc.ID && len(d.Blocks) > 0 {
+			held = true
+		}
 	}
-	if len(refs) == 0 {
-		t.Error("引用被释放了——图库没有句子承载它，释放后 GC 会删掉内容")
+	if !held {
+		t.Error("文档或块被释放了——图库没有句子承载它，内容会被删除")
 	}
-	if removed, _, err := ms.GC(0); err != nil {
-		t.Fatal(err)
-	} else if _, err := ms.Stat(digest); err != nil {
-		t.Fatalf("GC(清 %d 条) 删掉了本该保留的内容", removed)
+	if _, err := ms.Stat(digest); err != nil {
+		t.Fatalf("未归档成功时内容不该被删: %v", err)
 	}
 }
 
@@ -460,7 +504,7 @@ func TestCommitTriplesWithMedia_ReportsBoundCount(t *testing.T) {
 	_, _, bound, err := a.commitTriplesWithMedia([]memory.Triple{{
 		Subject: "图片", Relation: "内容", Object: "三色带",
 		SentenceText: "[image/png " + short + "] 一张三色带图",
-	}}, "s1", 0)
+	}}, "s1", 0, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -472,7 +516,7 @@ func TestCommitTriplesWithMedia_ReportsBoundCount(t *testing.T) {
 	_, _, bound2, err := a.commitTriplesWithMedia([]memory.Triple{{
 		Subject: "张三", Relation: "喜欢", Object: "咖啡",
 		SentenceText: "张三喜欢咖啡",
-	}}, "s2", 0)
+	}}, "s2", 0, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -509,7 +553,7 @@ func TestMediaContextForRelations_SurfacesMediaToAgent(t *testing.T) {
 	// 第四层做完了"存和反查的能力"（RecallMediaForSentence /
 	// mediaContextForSentences），但那两个函数一度没有任何调用方——
 	// 媒体能进 L3，进去之后 agent 检索不到。这个测试守住那条接线。
-	a, _, ms := newGraphMediaAgent(t)
+	a, g, ms := newGraphMediaAgent(t)
 
 	digest, err := ms.Put([]byte("img bytes"), media.Item{MIME: "image/png"})
 	if err != nil {
@@ -518,12 +562,10 @@ func TestMediaContextForRelations_SurfacesMediaToAgent(t *testing.T) {
 	if err := ms.Describe(digest, "一张紫蓝红三色带图", "visionllm"); err != nil {
 		t.Fatal(err)
 	}
-	if err := ms.AddRef(digest, media.OwnerGraphSentence, "5"); err != nil {
-		t.Fatal(err)
-	}
+	sid, _ := attachBlockToSentence(t, g, ms, "[image/png "+shortDigest(digest)+"] 一张紫蓝红三色带图", digest)
 
-	// 命中的关系挂着 5 号句子 → 应产出媒体说明
-	out := a.mediaContextForRelations([]memory.Relation{{ID: 1, SentenceID: 5}})
+	// 命中的关系挂着该句子 → 应产出媒体说明
+	out := a.mediaContextForRelations([]memory.Relation{{ID: 1, SentenceID: sid}})
 	if out == "" {
 		t.Fatal("关系挂着有媒体的句子，却没产出媒体说明——L3 检索接线断了")
 	}
@@ -567,9 +609,7 @@ func TestBuildMemoryContext_IncludesMediaSection(t *testing.T) {
 	if sid == 0 {
 		t.Fatal("拿不到句子 id")
 	}
-	if err := ms.AddRef(digest, media.OwnerGraphSentence, strconv.FormatInt(sid, 10)); err != nil {
-		t.Fatal(err)
-	}
+	attachBlockToSentence(t, graph, ms, sentence, digest)
 
 	a.indexer = memory.NewIndexer(graph)
 	if err := a.indexer.Sync(); err != nil {

@@ -217,3 +217,40 @@ func (g *GraphDB) MemoryBlockEdges() ([]MemoryBlockEdge, error) {
 	}
 	return edges, rows.Err()
 }
+
+// BlocksForNode 返回与某个图节点通过任意边相连的一等记忆块。
+// 例：sentence --contains--> block；entity --depicts--> block。
+func (g *GraphDB) BlocksForNode(nodeKind, nodeID string) ([]MemoryBlock, error) {
+	g.mu.RLock()
+	defer g.mu.RUnlock()
+	rows, err := g.db.Query(`SELECT b.id, b.modality, b.text_content, b.payload_digest,
+		b.mime, b.size, b.width, b.height, b.vector, b.fingerprint, b.source, b.tool,
+		b.created_at, b.updated_at
+		FROM memory_block_edges e
+		JOIN memory_blocks b ON (
+			(e.source_kind = 'block' AND e.source_id = b.id AND e.target_kind = ? AND e.target_id = ?)
+			OR (e.target_kind = 'block' AND e.target_id = b.id AND e.source_kind = ? AND e.source_id = ?))
+		ORDER BY b.created_at, b.id`, nodeKind, nodeID, nodeKind, nodeID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var blocks []MemoryBlock
+	for rows.Next() {
+		var block MemoryBlock
+		var vectorJSON string
+		if err := rows.Scan(&block.ID, &block.Modality, &block.Text, &block.PayloadDigest,
+			&block.MIME, &block.Size, &block.Width, &block.Height, &vectorJSON,
+			&block.Fingerprint, &block.Source, &block.Tool, &block.CreatedAt,
+			&block.UpdatedAt); err != nil {
+			return nil, err
+		}
+		if vectorJSON != "" && vectorJSON != "null" {
+			if err := json.Unmarshal([]byte(vectorJSON), &block.Vector); err != nil {
+				return nil, fmt.Errorf("decode memory block %s vector: %w", block.ID, err)
+			}
+		}
+		blocks = append(blocks, block)
+	}
+	return blocks, rows.Err()
+}

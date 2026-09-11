@@ -25,7 +25,7 @@ func newInputTestAgent(t *testing.T) (*Agent, *media.Store) {
 	t.Helper()
 	dir := t.TempDir()
 
-	ms, err := media.New(filepath.Join(dir, "media"), 0)
+	ms, err := media.New(filepath.Join(dir, "media"))
 	if err != nil {
 		t.Fatalf("media.New: %v", err)
 	}
@@ -275,30 +275,47 @@ func TestResolveMediaDigests(t *testing.T) {
 	}
 }
 
-// ---------- bindDocMedia ----------
+// ---------- 文档持有的一等记忆块 ----------
 
-func TestBindDocMedia(t *testing.T) {
-	a, ms := newInputTestAgent(t)
+func TestDocCommit_StoresBlocks(t *testing.T) {
+	// doc_commit 带 media_digests 时，媒体应作为一等块直接存在文档上，
+	// 并随 doc 一起持久化（不再靠 media_refs 保活）。
+	dir := t.TempDir()
+	ds := document.NewStore(filepath.Join(dir, "docs"), memory.TokenizeWords)
+	if err := ds.Start(); err != nil {
+		t.Fatal(err)
+	}
+	defer ds.Stop()
+
+	ms, err := media.New(filepath.Join(dir, "media"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer ms.Close()
+
 	d1, _ := ms.Put([]byte("doc-one"), media.Item{MIME: "image/png"})
 	d2, _ := ms.Put([]byte("doc-two"), media.Item{MIME: "image/png"})
 
-	if n := a.bindDocMedia("doc_x", []string{d1, d2}); n != 2 {
-		t.Fatalf("绑定 %d 条，期望 2", n)
+	doc := &document.Doc{ID: "doc_x", Summary: "s", Content: "c"}
+	for _, d := range []string{d1, d2} {
+		if b, ok := (&Agent{mediaStore: ms}).blockFromDigest(d); ok {
+			doc.Blocks = append(doc.Blocks, b)
+		}
 	}
-	refs, err := ms.Refs(media.OwnerDocument, "doc_x")
-	if err != nil {
-		t.Fatalf("Refs: %v", err)
-	}
-	if len(refs) != 2 {
-		t.Errorf("引用 = %v，期望 2 条", refs)
+	if err := ds.Insert(doc); err != nil {
+		t.Fatal(err)
 	}
 
-	if n := a.bindDocMedia("", []string{d1}); n != 0 {
-		t.Error("空 docID 不该绑定")
+	blocks := ds.Blocks()
+	if len(blocks) != 2 {
+		t.Fatalf("文档应持有 2 个块，实际 %d", len(blocks))
 	}
-	bare := &Agent{}
-	if n := bare.bindDocMedia("doc_y", []string{d1}); n != 0 {
-		t.Error("无媒体存储时不该绑定")
+	seen := map[string]bool{}
+	for _, b := range blocks {
+		seen[b.PayloadDigest] = true
+	}
+	if !seen[d1] || !seen[d2] {
+		t.Errorf("块 digest 不对: %+v", blocks)
 	}
 }
 
@@ -310,17 +327,7 @@ func TestDocMediaContext(t *testing.T) {
 		MIME: "image/png", Description: "文档里的配图",
 	})
 
-	t.Run("优先用media_refs", func(t *testing.T) {
-		if err := ms.AddRef(digest, media.OwnerDocument, "doc_refs"); err != nil {
-			t.Fatalf("AddRef: %v", err)
-		}
-		got := a.docMediaContext("doc_refs", "正文里没有任何标记")
-		if !strings.Contains(got, "文档里的配图") {
-			t.Errorf("未从 media_refs 取到媒体说明: %q", got)
-		}
-	})
-
-	t.Run("无引用时回退解析正文标记", func(t *testing.T) {
+	t.Run("无块时解析正文标记", func(t *testing.T) {
 		content := "旧正文 [image/png " + digest[:12] + "] 文档里的配图"
 		got := a.docMediaContext("doc_legacy", content)
 		if !strings.Contains(got, "文档里的配图") {
@@ -384,13 +391,13 @@ func newToolTestAgent(t *testing.T) (*Agent, *media.Store) {
 	}
 	t.Cleanup(func() { g.Close() })
 
-	ds := document.NewStore(filepath.Join(dir, "documents"))
+	ds := document.NewStore(filepath.Join(dir, "documents"), memory.TokenizeWords)
 	if err := ds.Start(); err != nil {
 		t.Fatalf("doc store: %v", err)
 	}
 	t.Cleanup(func() { ds.Stop() })
 
-	ms, err := media.New(filepath.Join(dir, "media"), 0)
+	ms, err := media.New(filepath.Join(dir, "media"))
 	if err != nil {
 		t.Fatalf("media.New: %v", err)
 	}
@@ -438,9 +445,12 @@ func TestToolMemoryCommit_BindsMedia(t *testing.T) {
 	if len(res.Relations) == 0 || res.Relations[0].SentenceID == 0 {
 		t.Fatal("没有句子落点 —— 媒体引用无从挂起")
 	}
-	refs, _ := ms.Refs(media.OwnerGraphSentence, strconv.FormatInt(res.Relations[0].SentenceID, 10))
-	if len(refs) != 1 || refs[0] != digest {
-		t.Errorf("句子引用 = %v，期望 [%s]", refs, digest)
+	blocks, err := a.memory.BlocksForNode("sentence", strconv.FormatInt(res.Relations[0].SentenceID, 10))
+	if err != nil {
+		t.Fatalf("BlocksForNode: %v", err)
+	}
+	if len(blocks) != 1 || blocks[0].PayloadDigest != digest {
+		t.Errorf("句子块 = %+v，期望 [%s]", blocks, digest)
 	}
 }
 
@@ -515,9 +525,14 @@ func TestToolDocCommit_BindsMedia(t *testing.T) {
 	if !strings.Contains(d.Content, "笔记里的插图") {
 		t.Errorf("标记未进正文（向量索引看不到这份媒体）: %q", d.Content)
 	}
-	refs, _ := ms.Refs(media.OwnerDocument, d.ID)
-	if len(refs) != 1 || refs[0] != digest {
-		t.Errorf("文档引用 = %v，期望 [%s]", refs, digest)
+	var held bool
+	for _, b := range d.Blocks {
+		if b.PayloadDigest == digest {
+			held = true
+		}
+	}
+	if !held {
+		t.Errorf("文档应持有一等记忆块 [%s]，实际 %+v", digest, d.Blocks)
 	}
 }
 

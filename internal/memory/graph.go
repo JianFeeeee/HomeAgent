@@ -236,7 +236,7 @@ func (g *GraphDB) Commit(triples []Triple, sessionID string, turnID int) (int, i
 // 不划算。这里让 Commit 内部转调，两者共享同一份落库逻辑。
 //
 // 返回的 map 只包含本次真正写入了 sentences 表的句子。调用方据此把媒体
-// 引用挂到 graph_sentence owner 上——句子是媒体描述在图库里的落点，
+// 变成 L3 一等块，并以 sentence --contains--> block 边与句子相连；
 // 关系行本身不持有媒体。
 func (g *GraphDB) CommitWithMedia(triples []Triple, sessionID string, turnID int) (map[string]int64, int, int, error) {
 	return g.commit(triples, sessionID, turnID, true)

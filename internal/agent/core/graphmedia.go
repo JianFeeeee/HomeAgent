@@ -8,23 +8,15 @@ import (
 	"strings"
 
 	"gitcode.com/JianFeeeee/HomeAgent/internal/memory"
-	"gitcode.com/JianFeeeee/HomeAgent/internal/memory/media"
 )
 
-// L3 图库的媒体引用绑定。
+// L3 图库的媒体绑定。
 //
-// 设计定位（方案 A：只做引用，不建媒体实体节点）：
-// 图库里的实体与关系全部来自**描述文本**的 NLP 提取——媒体描述经
-// mediaSummaryForEvent 进了 L0 事件的 Input，随归档进 L2 文档的 Content，
-// 蒸馏时提取器自然会从描述文字里抽出实体和关系。
+// 媒体在 L3 是一等记忆块（memory_blocks），通过 sentence --contains--> block
+// 结构边与承载它的句子相连。不再用 media_refs / owner 账本保活。
 //
-// 为何不把媒体本身建成实体节点：节点名只能从描述里取，而描述会被重新生成
-// （换个视觉模型、补一次描述，名字就变了），于是同一张图会在图谱上留下
-// 多个语义模糊的节点。检索能力靠描述文本已经具备，多这类节点只是噪声。
-//
-// 那么图库侧还需要什么：**反查**。图库里的句子写着「[image a1b2c3d4e5f6]
-// 一张紫蓝红三色带图」，要能从这条句子找回那份字节。这就是
-// media_refs 的 graph_sentence owner 的用途，也是这一层唯一要做的事。
+// 图库里的实体与关系仍来自描述文本的 NLP 提取；媒体块只是补上
+// 「这条记忆当时带着哪份媒体」这一结构信息。
 
 // mediaDigestPattern 匹配事件摘要里的媒体标记 [<mime或kind> <短digest>]。
 //
@@ -208,20 +200,21 @@ func extractMediaDigests(text string) []string {
 	return out
 }
 
-// bindSentenceMedia 把句子文本里提到的媒体挂到对应的 sentences.id 上。
+// bindSentenceBlocks 把句子文本里提到的媒体变成 L3 的一等记忆块，
+// 并建立 sentence --contains--> block 结构边。
 //
-// sentenceIDs 来自 GraphDB.CommitWithMedia：句子文本 → sentences.id。
-// 只处理本次真正写入了 sentences 表的句子，避免给历史句子重复挂引用
-// （AddRef 幂等，重复挂不会涨计数，但白跑 SQL）。
-//
-// 返回实际绑定成功的引用数，这是调用方的安全依据：归档路径靠它判定
-// 「引用真的转移到图库了吗」，不能用「Commit 没报错」代替——Commit 会
-// 静默跳过实体名不合法（validEntityName 要求 2–50 字符）的三元组，
-// 于是「无错但一条也没写进去」是真实会发生的：LLM 生成的长描述提不出
-// 合规实体名，实测 456 字描述得到 0 entities 0 relations。
-func (a *Agent) bindSentenceMedia(sentenceIDs map[string]int64) int {
-	if a.mediaStore == nil || len(sentenceIDs) == 0 {
+// seed 是本批文档已持有的一等块：迁移时按 digest 复用它们的身份（ID 不变），
+// 真正做到“同一个块从 L2 移到 L3”，而不是另建一个同内容的新块。
+// 返回本次写入 L3 的块数。
+func (a *Agent) bindSentenceBlocks(sentenceIDs map[string]int64, seed []memory.MemoryBlock) int {
+	if a.mediaStore == nil || a.memory == nil || len(sentenceIDs) == 0 {
 		return 0
+	}
+	byDigest := make(map[string]memory.MemoryBlock, len(seed))
+	for _, b := range seed {
+		if b.PayloadDigest != "" {
+			byDigest[b.PayloadDigest] = b
+		}
 	}
 
 	bound := 0
@@ -229,38 +222,39 @@ func (a *Agent) bindSentenceMedia(sentenceIDs map[string]int64) int {
 		if sid == 0 {
 			continue
 		}
-		digests := extractMediaDigests(text)
-		if len(digests) == 0 {
-			continue
-		}
-		ownerID := strconv.FormatInt(sid, 10)
-		for _, short := range digests {
-			// 文本里是短 digest，media_refs 的主键要完整 digest。
-			// 补全失败（内容已被 GC 清掉、或前缀有歧义）就跳过——
-			// 挂一条对不上的引用比不挂更糟：DropOwner 永远匹配不到它。
+		for _, short := range extractMediaDigests(text) {
 			full, err := a.mediaStore.ResolvePrefix(short)
 			if err != nil {
 				continue
 			}
-			if err := a.mediaStore.AddRef(full, media.OwnerGraphSentence, ownerID); err != nil {
-				log.Printf("[media] 句子引用绑定失败 (%s → sentence %s): %v", short, ownerID, err)
+			b, ok := byDigest[full]
+			if !ok {
+				if b, ok = a.blockFromDigest(full); !ok {
+					continue
+				}
+			}
+			if err := a.memory.PutMemoryBlocks([]memory.MemoryBlock{b}); err != nil {
+				log.Printf("[media] L3 记忆块写入失败 (%s): %v", shortDigest(full), err)
+				continue
+			}
+			if err := a.memory.AddMemoryBlockEdge("sentence", strconv.FormatInt(sid, 10), "block", b.ID, "contains"); err != nil {
+				log.Printf("[media] 句子→块边建立失败 (%s): %v", shortDigest(full), err)
 				continue
 			}
 			bound++
 		}
 	}
 	if bound > 0 {
-		log.Printf("[media] L3 图库绑定 %d 个媒体引用", bound)
+		log.Printf("[media] L3 图库写入 %d 个一等记忆块", bound)
 	}
 	return bound
 }
 
 // sentenceWithMediaMarkers 保证句子文本里带上这些 digest 的媒体标记。
 //
-// 存在的理由：媒体的绑定链是 SentenceText → sentences 表 → sentence_id →
-// media_refs。模型只知道 digest（从 memory_recall 的「关联媒体」或对话里的
-// 媒体标记读到），不该要求它自己按内核格式拼标记——格式写错的后果是引用
-// 静默挂不上，模型也无从察觉。
+// 存在的理由：L3 的块边由句子正文里的短 digest 反解而来。模型只知道
+// digest（从 memory_recall 的「关联媒体」或对话里的媒体标记读到），
+// 不该要求它自己按内核格式拼标记——格式写错的后果是块边静默建不起来。
 //
 // 已出现过的 digest 不重复追加：模型可能既写了标记又填了 media_digests。
 func (a *Agent) sentenceWithMediaMarkers(sentence string, digests []string) string {
@@ -278,7 +272,7 @@ func (a *Agent) sentenceWithMediaMarkers(sentence string, digests []string) stri
 			continue
 		}
 		// 模型给的多半是短 digest（它在上下文里看到的就是短的），补全成完整
-		// digest 才能进 media_refs 主键。补不上就跳过：内容可能已被 GC 清掉。
+		// digest 才能定位内容。补不上就跳过：内容可能已被删除。
 		full, err := a.mediaStore.ResolvePrefix(d)
 		if err != nil {
 			log.Printf("[media] 模型提交的 digest %s 无法解析: %v", d, err)
@@ -300,24 +294,19 @@ func (a *Agent) sentenceWithMediaMarkers(sentence string, digests []string) stri
 
 // docMediaContext 为一篇文档产出媒体说明，供 doc_query 拼进工具返回值。
 //
-// 优先读 media_refs（权威：谁挂上去的就是谁），为空时退回解析正文标记——
-// 历史文档与经旧版路径写入的文档只有标记、没有引用。
+// 文档的一等记忆块随文档 JSON 持久化；这里只有正文，因此从正文标记反解。
 func (a *Agent) docMediaContext(docID, content string) string {
 	if a.mediaStore == nil {
 		return ""
 	}
-	digests, err := a.mediaStore.Refs(media.OwnerDocument, docID)
-	if err != nil {
-		log.Printf("[media] 读取文档 %s 的媒体引用失败: %v", docID, err)
-	}
-	if len(digests) == 0 {
-		for _, short := range extractMediaDigests(content) {
-			full, err := a.mediaStore.ResolvePrefix(short)
-			if err != nil {
-				continue
-			}
-			digests = append(digests, full)
+	// 文档的一等记忆块随文档 JSON 持久化；这里只有正文，退回解析标记。
+	var digests []string
+	for _, short := range extractMediaDigests(content) {
+		full, err := a.mediaStore.ResolvePrefix(short)
+		if err != nil {
+			continue
 		}
+		digests = append(digests, full)
 	}
 	var lines []string
 	for _, d := range digests {
@@ -333,9 +322,7 @@ func (a *Agent) docMediaContext(docID, content string) string {
 
 // resolveMediaDigests 把模型给的（多为短）digest 补全成完整 digest。
 //
-// 补不上就丢弃那一条并记日志：模型可能凭印象编了个 digest，也可能内容已被
-// 容量 GC 淘汰。挂一条对不上的引用比不挂更糟——digest 进了 media_refs 主键，
-// 错了则 DropOwner 永远匹配不到它，那是一条永久泄漏的引用。
+// 补不上就丢弃那一条并记日志：模型可能凭印象编了个 digest，也可能内容已被删除。
 func (a *Agent) resolveMediaDigests(digests []string) []string {
 	if a.mediaStore == nil || len(digests) == 0 {
 		return nil
@@ -359,33 +346,11 @@ func (a *Agent) resolveMediaDigests(digests []string) []string {
 
 // bindDocMedia 把一组完整 digest 挂到文档 owner 上，返回成功条数。
 //
-// 与 releaseDocMedia 成对：文档归档进 L3 时释放，文档写入时绑定。
-// 只绑不放会让磁盘只增不减，只放不绑会让 GC 误删仍被引用的内容。
-func (a *Agent) bindDocMedia(docID string, digests []string) int {
-	if a.mediaStore == nil || docID == "" || len(digests) == 0 {
-		return 0
-	}
-	bound := 0
-	for _, d := range digests {
-		if err := a.mediaStore.AddRef(d, media.OwnerDocument, docID); err != nil {
-			log.Printf("[media] 文档引用绑定失败 (%s → doc %s): %v", shortDigest(d), docID, err)
-			continue
-		}
-		bound++
-	}
-	if bound > 0 {
-		log.Printf("[media] 文档 %s 绑定 %d 个媒体引用", docID, bound)
-	}
-	return bound
-}
-
-// commitTriplesWithMedia 提交三元组并绑定句子里的媒体引用。
+// commitTriplesWithMedia 提交三元组并把句子里的媒体变成 L3 一等块。
 //
-// 包一层是为了让所有「三元组入库」的调用点用同一条路径拿到媒体绑定，
-// 而不必各自记得多调一次 bindSentenceMedia。
-// mediaBound 是本次实际挂到 graph_sentence owner 上的引用数；归档路径靠它
-// 判定能否安全释放旧引用。媒体存储关闭时恒为 0（此时也没有引用需要释放）。
-func (a *Agent) commitTriplesWithMedia(triples []memory.Triple, sessionID string, turnID int) (entities, relations, mediaBound int, err error) {
+// seed 是调用方已持有的一等块（如 L2 文档的 Blocks），用于保持块身份；
+// 普通对话路径传 nil。blocks 是本次写入 L3 的块数。
+func (a *Agent) commitTriplesWithMedia(triples []memory.Triple, sessionID string, turnID int, seed []memory.MemoryBlock) (entities, relations, blocks int, err error) {
 	if a.memory == nil {
 		return 0, 0, 0, fmt.Errorf("graph memory 未启用")
 	}
@@ -398,25 +363,23 @@ func (a *Agent) commitTriplesWithMedia(triples []memory.Triple, sessionID string
 	if err != nil {
 		return ec, rc, 0, err
 	}
-	return ec, rc, a.bindSentenceMedia(sentenceIDs), nil
+	return ec, rc, a.bindSentenceBlocks(sentenceIDs, seed), nil
 }
 
-// RecallMediaForSentence 反查某条图库句子引用的媒体。
+// RecallBlocksForSentence 反查某条图库句子持有的一等记忆块。
 //
-// 这是整层的目的：几个月后从图谱走到一条句子，要能取回当时那份字节
-// （若尚未被容量 GC 淘汰）。返回的是完整 digest，调用方用
-// mediaStore.Get 取内容、Stat 取描述与元数据。
-func (a *Agent) RecallMediaForSentence(sentenceID int64) ([]string, error) {
-	if a.mediaStore == nil {
+// 这是整层的目的：几个月后从图谱走到一条句子，要能取回当时那份媒体。
+func (a *Agent) RecallBlocksForSentence(sentenceID int64) ([]memory.MemoryBlock, error) {
+	if a.memory == nil {
 		return nil, nil
 	}
-	return a.mediaStore.Refs(media.OwnerGraphSentence, strconv.FormatInt(sentenceID, 10))
+	return a.memory.BlocksForNode("sentence", strconv.FormatInt(sentenceID, 10))
 }
 
 // sentenceIDsFromRelations 收集一批关系引用的句子 id（去重、去零）。
 //
-// 关系行本身不持有媒体，媒体挂在句子上（graph_sentence owner）。
-// 因此"这次召回涉及哪些媒体"必须经由关系 → 句子 → media_refs 这条路。
+// 关系行本身不持有媒体，媒体作为一等块以 sentence --contains--> block
+// 结构边与句子相连；因此"这次召回涉及哪些媒体"必须经由关系 → 句子这一跳。
 func sentenceIDsFromRelations(relations []memory.Relation) []int64 {
 	if len(relations) == 0 {
 		return nil
@@ -470,18 +433,18 @@ func (a *Agent) mediaContextForInjectedEntities(injected *memory.InjectedContext
 // 描述文本本就在句子里，这里补的是「内容是否还在、能否重新看图」这个信息——
 // 描述永存而字节可能已被淘汰，两者状态不同。
 func (a *Agent) mediaContextForSentences(sentenceIDs []int64) string {
-	if a.mediaStore == nil || len(sentenceIDs) == 0 {
+	if a.memory == nil || len(sentenceIDs) == 0 {
 		return ""
 	}
 	var lines []string
 	for _, sid := range sentenceIDs {
-		digests, err := a.mediaStore.Refs(media.OwnerGraphSentence, strconv.FormatInt(sid, 10))
-		if err != nil || len(digests) == 0 {
+		blocks, err := a.memory.BlocksForNode("sentence", strconv.FormatInt(sid, 10))
+		if err != nil || len(blocks) == 0 {
 			continue
 		}
 		var parts []string
-		for _, d := range digests {
-			if line := a.mediaMarkerLine(d); line != "" {
+		for _, b := range blocks {
+			if line := a.mediaMarkerLine(b.PayloadDigest); line != "" {
 				parts = append(parts, line)
 			}
 		}

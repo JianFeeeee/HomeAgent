@@ -3,7 +3,6 @@ package core
 import (
 	"encoding/json"
 	"fmt"
-	"log"
 	"os"
 	"path/filepath"
 	"sort"
@@ -13,7 +12,6 @@ import (
 
 	"gitcode.com/JianFeeeee/HomeAgent/internal/memory"
 	"gitcode.com/JianFeeeee/HomeAgent/internal/memory/document"
-	"gitcode.com/JianFeeeee/HomeAgent/internal/memory/media"
 	"gitcode.com/JianFeeeee/HomeAgent/internal/memory/vector"
 	sdk "gitcode.com/JianFeeeee/HomeAgent/internal/sdk"
 )
@@ -24,9 +22,8 @@ type ToolResultItem struct {
 }
 
 type ContextEvent struct {
-	// ID 是事件的稳定标识，媒体引用（media_refs.owner_id）挂在它上面。
+	// ID 是事件的稳定标识。惰性生成：只有真的要挂媒体块时才赋值。
 	//
-	// 惰性生成：只有真的要挂媒体时才赋值（见 bindEventMedia）。
 	// 全量生成会让每条事件都多一个字段进 context.json，而绝大多数对话没有媒体。
 	// omitempty 保证存量 context.json 读回来时该字段为空，不影响任何既有行为。
 	ID          string           `json:"id,omitempty"`
@@ -36,13 +33,11 @@ type ContextEvent struct {
 	Response    string           `json:"response,omitempty"`
 	ToolsUsed   []string         `json:"tools_used,omitempty"`
 	ToolResults []ToolResultItem `json:"tool_results,omitempty"`
-	// --- 原生多模态记忆（v1.2.0）---
-	// 媒体不是描述文本的附件，而是与文本同生命周期的记忆块。Vec 坐标在媒体
-	// 首次进入 L0 时计算一次并存于 CAS；L0→L2→L3 只迁移 Media digest 引用，
-	// 三层始终复用同一坐标。描述仅是可选的文本语义通道，不再决定媒体是否存在。
-	Media     []string      `json:"media,omitempty"`
-	Vector    vector.Vector `json:"-"` // 稀疏词向量（TF-IDF/fastText 空间）
-	DenseVec  []float64     `json:"-"` // 稠密多模态向量（与媒体/文档共享空间）
+	// --- 原生多模态记忆 ---
+	// 一等记忆块：块本身随事件在层间迁移，身份不变，不建引用计数。
+	Blocks   []memory.MemoryBlock `json:"blocks,omitempty"` // 一等记忆块（text/image/video/audio）
+	Vector   vector.Vector        `json:"-"`                // 稀疏词向量（TF-IDF/fastText 空间）
+	DenseVec []float64            `json:"-"`                // 稠密多模态向量（与媒体/文档共享空间）
 }
 
 const contextFlushInterval = 5 * time.Second
@@ -57,41 +52,6 @@ type RelevanceContext struct {
 	dirty            bool
 	toolDefLookup    func(name string) *sdk.ToolDef
 	channelDefLookup func(name string) (sdk.ChannelDef, bool)
-
-	// mediaStore 只用于 Prune 时把媒体引用从事件转给归档文档。
-	// 为 nil 时引用转移静默跳过（媒体存储未启用）。
-	mediaStore *media.Store
-}
-
-// SetMediaStore 注入媒体存储，供 L0→L2 归档时转移媒体引用。
-func (c *RelevanceContext) SetMediaStore(s *media.Store) {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	c.mediaStore = s
-}
-
-// transferMediaRefs 把被归档事件的媒体引用转给目标文档（调用方已持 c.mu）。
-//
-// 先挂后销：若反序，引用计数会瞬时归零，此时若后台 GC 正在跑
-// 就会把仍被记忆引用的内容当孤儿清掉。
-func (c *RelevanceContext) transferMediaRefs(archive []scoredEvent, docID string) {
-	if c.mediaStore == nil || docID == "" {
-		return
-	}
-	for _, s := range archive {
-		evt := s.event
-		if evt == nil || evt.ID == "" || len(evt.Media) == 0 {
-			continue
-		}
-		for _, d := range evt.Media {
-			if err := c.mediaStore.AddRef(d, media.OwnerDocument, docID); err != nil {
-				log.Printf("[media] 归档转移 AddRef 失败 (%s → doc %s): %v", shortDigest(d), docID, err)
-			}
-		}
-		if _, err := c.mediaStore.DropOwner(media.OwnerContext, evt.ID); err != nil {
-			log.Printf("[media] 归档转移 DropOwner 失败 (evt %s): %v", evt.ID, err)
-		}
-	}
 }
 
 func NewRelevanceContext(savePath string, embedder *memory.StaticEmbedder) *RelevanceContext {
@@ -323,8 +283,7 @@ func (c *RelevanceContext) flush() {
 
 // scoredEvent 是 Prune 里按相关度排序的事件。
 //
-// 提为包级类型（原先是 Prune 内的局部类型）：transferMediaRefs 需要
-// 把待归档列表传进去，局部类型无法出现在方法签名上。
+// 提为包级类型：Prune 需要把待归档列表传给后续处理。
 type scoredEvent struct {
 	event *ContextEvent
 	score float64
@@ -406,17 +365,20 @@ func (c *RelevanceContext) Prune(currentInput string, topK int, docStore *docume
 				Content:     s.event.Input,
 				Response:    s.event.Response,
 				ToolResults: convertToolResults(s.event.ToolResults),
-				Media:       append([]string(nil), s.event.Media...),
+				Blocks:      append([]memory.MemoryBlock(nil), s.event.Blocks...),
 			}
 		}
 		doc, err := docStore.ContextToDoc("context_archived", entries, c.embedder, nil, c.toolOutputClean, c.channelCleanerForDoc())
 		if err == nil && doc != nil {
 			archived = len(entries)
-			// 媒体引用随事件一起从 L0 转到 L2：先把引用挂到归档文档上，
-			// 再注销原事件的引用。顺序不能反——先销后挂会让引用计数
-			// 瞬时归零，若此时 GC 正在跑（后台任务）就会把仍被记忆引用的
-			// 内容当孤儿清掉。
-			c.transferMediaRefs(archive, doc.ID)
+			// 一等记忆块的迁移：块随归档事件离开 L0、进入 L2。
+			// 迁移的是块本身（ID 不变、只换持有层），不是复制也不是保活引用；
+			// 因此归档后清空源事件的块，确保同一块不同时留在两层。
+			for _, s := range archive {
+				if s.event != nil {
+					s.event.Blocks = nil
+				}
+			}
 		}
 	}
 
@@ -457,6 +419,18 @@ func (c *RelevanceContext) Recent(n int) []ContextEvent {
 		result[i] = *evt
 	}
 	return result
+}
+
+// Blocks 返回当前上下文持有的一等记忆块（供跨层存活判定）。
+// 迁移后源事件已被清空，因此这里只会拿到真正属于 L0 的块。
+func (c *RelevanceContext) Blocks() []memory.MemoryBlock {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	var out []memory.MemoryBlock
+	for _, e := range c.events {
+		out = append(out, e.Blocks...)
+	}
+	return out
 }
 
 func (c *RelevanceContext) Len() int {

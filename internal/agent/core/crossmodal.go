@@ -90,14 +90,11 @@ func (a *Agent) retrieveCrossModal(query string, topK int, cfg CrossModalFusionC
 	if a.docStore != nil {
 		for _, dh := range a.docStore.QueryScored(query, per) {
 			hit := CrossModalHit{Doc: dh.Doc, DocScore: dh.Score}
-			// 命中文档若关联着媒体（media_refs），把媒体作为文本路候选一并带上：
+			// 命中文档若持有一等记忆块，把首个媒体块一并带上：
 			// 描述文本命中 → 该媒体就是相关记忆，供后续展示/注入。
-			if a.mediaStore != nil {
-				refs, err := a.mediaStore.Refs(media.OwnerDocument, dh.Doc.ID)
-				if err == nil && len(refs) > 0 {
-					if it, err := a.mediaStore.Stat(refs[0]); err == nil {
-						hit.Media = it
-					}
+			if a.mediaStore != nil && len(dh.Doc.Blocks) > 0 {
+				if it, err := a.mediaStore.Stat(dh.Doc.Blocks[0].PayloadDigest); err == nil {
+					hit.Media = it
 				}
 			}
 			textHits = append(textHits, hit)
@@ -110,7 +107,7 @@ func (a *Agent) retrieveCrossModal(query string, topK int, cfg CrossModalFusionC
 		qv, err := a.multimodalSpace.VectorizeDense(query)
 		if err != nil {
 			log.Printf("[crossmodal] 多模态文本编码失败: %v", err)
-		} else if mh, err := a.mediaStore.QueryMemoryMediaScored(qv, a.multimodalSpace.Fingerprint(), per); err != nil {
+		} else if mh, err := a.mediaStore.QueryMediaScored(qv, a.multimodalSpace.Fingerprint(), per); err != nil {
 			log.Printf("[crossmodal] 媒体记忆检索失败: %v", err)
 		} else {
 			for _, h := range mh {
