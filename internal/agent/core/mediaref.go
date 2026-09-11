@@ -4,11 +4,59 @@ import (
 	"fmt"
 	"log"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	agentAPI "gitcode.com/JianFeeeee/HomeAgent/internal/agent/api"
+	"gitcode.com/JianFeeeee/HomeAgent/internal/memory"
 	"gitcode.com/JianFeeeee/HomeAgent/internal/memory/media"
 )
+
+// blockSeq 保证块 ID 全局唯一（Graph memory_blocks 以 id 为主键）。
+var blockSeq int64
+
+func newBlockID() string {
+	return fmt.Sprintf("blk_%d_%d", time.Now().UnixNano(), atomic.AddInt64(&blockSeq, 1))
+}
+
+// blockModalityOf 把 CAS 媒体大类映射为一等记忆块模态。
+func blockModalityOf(k media.Kind) memory.BlockModality {
+	switch k {
+	case media.KindImage:
+		return memory.BlockImage
+	case media.KindVideo:
+		return memory.BlockVideo
+	case media.KindAudio:
+		return memory.BlockAudio
+	default:
+		return memory.BlockText
+	}
+}
+
+// blockFromDigest 把一份已入库媒体变成一等记忆块。
+// 块携带 digest/向量/fingerprint；CAS 只提供字节与元数据，不参与生命周期。
+func (a *Agent) blockFromDigest(digest string) (memory.MemoryBlock, bool) {
+	if a.mediaStore == nil || digest == "" {
+		return memory.MemoryBlock{}, false
+	}
+	it, err := a.mediaStore.Stat(digest)
+	if err != nil || it == nil {
+		return memory.MemoryBlock{}, false
+	}
+	return memory.MemoryBlock{
+		ID:            newBlockID(),
+		Modality:      blockModalityOf(it.Kind),
+		PayloadDigest: it.Digest,
+		MIME:          it.MIME,
+		Size:          it.Size,
+		Width:         it.Width,
+		Height:        it.Height,
+		Vector:        it.Vec,
+		Fingerprint:   it.VecModel,
+		Tool:          it.Tool,
+		CreatedAt:     it.FirstSeen,
+	}, true
+}
 
 // 媒体记忆接线：把对话里出现的图片/音频落进内容寻址存储（CAS），
 // 并让 L0 的 ContextEvent 记住它们的 digest。
@@ -94,7 +142,7 @@ func (a *Agent) embedMediaOnIngest(digest, mime string, data []byte) {
 
 // stageMediaDigests 累积本轮捕获的 digest，等 ContextEvent 建好后一起挂上。
 //
-// 为何要缓存而不是当场 AddRef：媒体在 process() 执行期间被捕获，而承载它的
+// 为何要缓存而不是当场建块：媒体在 process() 执行期间被捕获，而承载它的
 // ContextEvent 要等 process() 返回后才 Append——此刻还没有 owner_id。
 // 与既有的 a.pendingMedia 同一手法（都在 a.mu 保护下）。
 func (a *Agent) stageMediaDigests(digests ...string) {
@@ -114,12 +162,10 @@ func (a *Agent) drainMediaDigests() []string {
 	return out
 }
 
-// bindEventMedia 把 digest 列表登记到某个 ContextEvent 上。
+// bindEventMedia 把本轮捕获的媒体变成一等记忆块，直接挂到 ContextEvent 上。
 //
-// 双向落地：evt.Media 让事件自己记得引了哪些媒体（随 context.json 持久化），
-// media_refs 表让 CAS 侧知道谁在引用（GC 据此判断能不能清）。
-// 两边都写才闭环——只写一边的话，要么 GC 会误删仍被记忆引用的内容，
-// 要么孤儿永远清不掉。
+// 块存储在事件自身（随 context.json 持久化），不再写 media_refs：
+// 存活与否由“三层记忆块是否持有这个 digest”决定，不维护引用账本。
 func (a *Agent) bindEventMedia(evt *ContextEvent, digests []string) {
 	if a.mediaStore == nil || evt == nil || len(digests) == 0 {
 		return
@@ -128,26 +174,27 @@ func (a *Agent) bindEventMedia(evt *ContextEvent, digests []string) {
 		evt.ID = newEventID()
 	}
 	for _, d := range digests {
-		if err := a.mediaStore.AddRef(d, media.OwnerContext, evt.ID); err != nil {
-			log.Printf("[media] AddRef 失败 (%s → %s): %v", shortDigest(d), evt.ID, err)
+		b, ok := a.blockFromDigest(d)
+		if !ok {
+			log.Printf("[media] 块构造失败 (%s)", shortDigest(d))
 			continue
 		}
-		evt.Media = append(evt.Media, d)
+		evt.Blocks = append(evt.Blocks, b)
 	}
 }
 
 // mediaSummaryForEvent 给已有描述的媒体生成一行文字，供写进 ContextEvent.Input。
 //
 // 这是方案 C 的落点：**描述文本才是持久语义记忆，blob 只是缓存**。
-// blob 可能被容量 GC 淘汰，但描述会一直留在 L0/L2/L3 的文本里，
+// blob 可能已被删除，但描述会一直留在 L0/L2/L3 的文本里，
 // 让"那张紫蓝红三色带图"在几个月后仍然可被检索到。
-func (a *Agent) mediaSummaryForEvent(digests []string) string {
-	if a.mediaStore == nil || len(digests) == 0 {
+func (a *Agent) mediaSummaryForEvent(blocks []memory.MemoryBlock) string {
+	if a.mediaStore == nil || len(blocks) == 0 {
 		return ""
 	}
 	var lines []string
-	for _, d := range digests {
-		if line := a.mediaMarkerLine(d); line != "" {
+	for _, b := range blocks {
+		if line := a.mediaMarkerLine(b.PayloadDigest); line != "" {
 			lines = append(lines, line)
 		}
 	}
@@ -163,7 +210,7 @@ func (a *Agent) mediaSummaryForEvent(digests []string) string {
 // mediaContextForSentences 各拼一份，改动截断长度或分隔符时只改一处，
 // 另一处写出的标记就再也解析不回来——而解析失败是静默的（引用挂不上）。
 //
-// 查不到返回空串：媒体可能已被容量 GC 淘汰，此时不该造出一条指向虚无的标记。
+// 查不到返回空串：媒体可能已被删除，此时不该造出一条指向虚无的标记。
 func (a *Agent) mediaMarkerLine(digest string) string {
 	if a.mediaStore == nil {
 		return ""

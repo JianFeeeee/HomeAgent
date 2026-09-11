@@ -11,7 +11,7 @@
 //   - 路径会失效。/tmp 下的探针图、下载缓存、其他进程的临时产物，记忆里留个
 //     路径等于留个悬空指针。
 //   - 同一张图往往被反复注入（用户连问几轮同一张截图、see_video 相邻帧高度
-//     相似）。按 sha256 寻址天然去重，引用计数记住被引了几次。
+//     相似）。按 sha256 寻址天然去重，同一份字节只存一遍。
 //   - 内容即身份，跟 L3 图库 `sentences.text UNIQUE` 的思路一致：文本节点用
 //     文本本身做身份，媒体节点用内容摘要做身份。
 package media
@@ -32,20 +32,6 @@ import (
 	"time"
 
 	_ "github.com/mattn/go-sqlite3"
-)
-
-// OwnerKind 是 media_refs.owner_kind 的取值，对应引用媒体的记忆层。
-//
-// 定义为常量而不是让调用方写字符串：owner_kind 进了主键，
-// 拼错一个字符就是一条永远对不上的孤立引用（AddRef 不会报错，
-// DropOwner 也永远匹配不到）。
-const (
-	// OwnerContext 是 L0 对话上下文事件（ContextEvent.ID）。
-	OwnerContext = "context"
-	// OwnerDocument 是 L2 文档记忆（Doc.ID）。
-	OwnerDocument = "document"
-	// OwnerGraphSentence 是 L3 图库句子节点（sentences.id）。
-	OwnerGraphSentence = "graph_sentence"
 )
 
 // digestHexLen 是 sha256 的十六进制串长度。
@@ -88,8 +74,6 @@ type Item struct {
 	Description string `json:"description,omitempty"`
 	// DescribedBy 记录描述来自哪个源，让后续读者能判断可靠性。
 	DescribedBy string `json:"described_by,omitempty"`
-	// RefCount 是引用计数。GC 只清理归零的项。
-	RefCount int `json:"ref_count"`
 	// FirstSeen/LastSeen 是首末次入库时间。
 	FirstSeen time.Time `json:"first_seen"`
 	LastSeen  time.Time `json:"last_seen"`
@@ -110,15 +94,11 @@ type Store struct {
 	mu      sync.RWMutex
 	db      *sql.DB
 	blobDir string
-
-	// maxBytes 是内容目录的容量上限，0 表示不限。
-	// 超限时 GC 按 LastSeen 从旧到新淘汰 RefCount=0 的项。
-	maxBytes int64
 }
 
 // New 打开（或初始化）媒体存储。
 // dir 下会建 media.db 与 blobs/ 两个条目。
-func New(dir string, maxBytes int64) (*Store, error) {
+func New(dir string) (*Store, error) {
 	if err := os.MkdirAll(filepath.Join(dir, "blobs"), 0755); err != nil {
 		return nil, fmt.Errorf("media: create blob dir: %w", err)
 	}
@@ -127,7 +107,7 @@ func New(dir string, maxBytes int64) (*Store, error) {
 	if err != nil {
 		return nil, fmt.Errorf("media: open db: %w", err)
 	}
-	s := &Store{db: db, blobDir: filepath.Join(dir, "blobs"), maxBytes: maxBytes}
+	s := &Store{db: db, blobDir: filepath.Join(dir, "blobs")}
 	if err := s.initSchema(); err != nil {
 		db.Close()
 		return nil, err
@@ -137,7 +117,7 @@ func New(dir string, maxBytes int64) (*Store, error) {
 
 func (s *Store) initSchema() error {
 	stmts := []string{
-		// digest 作主键：内容即身份，重复 Put 同一内容只递增 ref_count。
+		// digest 作主键：内容即身份，重复 Put 同一内容不重复落盘。
 		`CREATE TABLE IF NOT EXISTS media (
 			digest       TEXT PRIMARY KEY,
 			kind         TEXT NOT NULL,
@@ -149,25 +129,11 @@ func (s *Store) initSchema() error {
 			tool         TEXT,
 			description  TEXT,
 			described_by TEXT,
-			ref_count    INTEGER DEFAULT 0,
 			first_seen   TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
 			last_seen    TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 		)`,
 		`CREATE INDEX IF NOT EXISTS idx_media_kind ON media(kind)`,
-		`CREATE INDEX IF NOT EXISTS idx_media_refcount ON media(ref_count)`,
 		`CREATE INDEX IF NOT EXISTS idx_media_last_seen ON media(last_seen)`,
-		// 反向索引：哪条记忆引用了哪个媒体。
-		// owner_kind 取 context / document / graph_sentence，owner_id 是各层自己的标识。
-		// 主键含三列，同一 owner 重复挂同一媒体是幂等的。
-		`CREATE TABLE IF NOT EXISTS media_refs (
-			digest     TEXT NOT NULL,
-			owner_kind TEXT NOT NULL,
-			owner_id   TEXT NOT NULL,
-			created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-			PRIMARY KEY (digest, owner_kind, owner_id)
-		)`,
-		`CREATE INDEX IF NOT EXISTS idx_refs_owner ON media_refs(owner_kind, owner_id)`,
-		`CREATE INDEX IF NOT EXISTS idx_refs_digest ON media_refs(digest)`,
 	}
 	for _, q := range stmts {
 		if _, err := s.db.Exec(q); err != nil {
@@ -231,8 +197,8 @@ func (s *Store) Put(data []byte, meta Item) (string, error) {
 	_, err := s.db.Exec(`
 		INSERT INTO media (digest, kind, mime, size, width, height,
 		                   origin_path, tool, description, described_by,
-		                   ref_count, first_seen, last_seen)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?)
+		                   first_seen, last_seen)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 		ON CONFLICT(digest) DO UPDATE SET
 			last_seen    = excluded.last_seen,
 			-- 只在原值为空时补写：先到的描述可能来自更强的模型，
@@ -276,7 +242,7 @@ func (s *Store) Stat(digest string) (*Item, error) {
 	defer s.mu.RUnlock()
 	return s.scanOne(s.db.QueryRow(`
 		SELECT digest, kind, mime, size, width, height, origin_path, tool,
-		       description, described_by, ref_count, first_seen, last_seen,
+		       description, described_by, first_seen, last_seen,
 		       vec, vec_model
 		FROM media WHERE digest = ?`, digest))
 }
@@ -299,121 +265,6 @@ func (s *Store) Describe(digest, description, describedBy string) error {
 	return nil
 }
 
-// AddRef 登记一条引用并递增计数。幂等：同一 (digest, owner) 重复调用不重复计数。
-func (s *Store) AddRef(digest, ownerKind, ownerID string) error {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-
-	tx, err := s.db.Begin()
-	if err != nil {
-		return err
-	}
-	defer tx.Rollback()
-
-	res, err := tx.Exec(`INSERT OR IGNORE INTO media_refs (digest, owner_kind, owner_id) VALUES (?, ?, ?)`,
-		digest, ownerKind, ownerID)
-	if err != nil {
-		return fmt.Errorf("media: add ref: %w", err)
-	}
-	// 只有真的插进去才递增：否则重复调用会让计数虚高，GC 永远不敢清。
-	if n, _ := res.RowsAffected(); n > 0 {
-		if _, err := tx.Exec(`UPDATE media SET ref_count = ref_count + 1 WHERE digest = ?`, digest); err != nil {
-			return fmt.Errorf("media: bump refcount: %w", err)
-		}
-	}
-	return tx.Commit()
-}
-
-// DropRef 注销一条引用并递减计数。内容不立即删除，留给 GC。
-func (s *Store) DropRef(digest, ownerKind, ownerID string) error {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-
-	tx, err := s.db.Begin()
-	if err != nil {
-		return err
-	}
-	defer tx.Rollback()
-
-	res, err := tx.Exec(`DELETE FROM media_refs WHERE digest = ? AND owner_kind = ? AND owner_id = ?`,
-		digest, ownerKind, ownerID)
-	if err != nil {
-		return fmt.Errorf("media: drop ref: %w", err)
-	}
-	if n, _ := res.RowsAffected(); n > 0 {
-		// MAX(0, ...) 兜底：历史数据或并发意外让计数与 refs 表不一致时，
-		// 不让它掉成负数（负数会让容量 GC 的排序失去意义）。
-		if _, err := tx.Exec(`UPDATE media SET ref_count = MAX(0, ref_count - 1) WHERE digest = ?`, digest); err != nil {
-			return fmt.Errorf("media: lower refcount: %w", err)
-		}
-	}
-	return tx.Commit()
-}
-
-// DropOwner 注销某个 owner 的全部引用（该条记忆被删/被归档替换时用）。
-func (s *Store) DropOwner(ownerKind, ownerID string) (int, error) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-
-	rows, err := s.db.Query(`SELECT digest FROM media_refs WHERE owner_kind = ? AND owner_id = ?`,
-		ownerKind, ownerID)
-	if err != nil {
-		return 0, err
-	}
-	var digests []string
-	for rows.Next() {
-		var d string
-		if err := rows.Scan(&d); err == nil {
-			digests = append(digests, d)
-		}
-	}
-	rows.Close()
-	if err := rows.Err(); err != nil {
-		return 0, err
-	}
-	if len(digests) == 0 {
-		return 0, nil
-	}
-
-	tx, err := s.db.Begin()
-	if err != nil {
-		return 0, err
-	}
-	defer tx.Rollback()
-	if _, err := tx.Exec(`DELETE FROM media_refs WHERE owner_kind = ? AND owner_id = ?`, ownerKind, ownerID); err != nil {
-		return 0, err
-	}
-	for _, d := range digests {
-		if _, err := tx.Exec(`UPDATE media SET ref_count = MAX(0, ref_count - 1) WHERE digest = ?`, d); err != nil {
-			return 0, err
-		}
-	}
-	if err := tx.Commit(); err != nil {
-		return 0, err
-	}
-	return len(digests), nil
-}
-
-// Refs 返回某个 owner 引用的全部 digest。
-func (s *Store) Refs(ownerKind, ownerID string) ([]string, error) {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
-	rows, err := s.db.Query(`SELECT digest FROM media_refs WHERE owner_kind = ? AND owner_id = ? ORDER BY created_at`,
-		ownerKind, ownerID)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-	var out []string
-	for rows.Next() {
-		var d string
-		if err := rows.Scan(&d); err == nil {
-			out = append(out, d)
-		}
-	}
-	return out, rows.Err()
-}
-
 // Search 按描述文本做 LIKE 匹配，返回最近的若干条。
 //
 // 刻意不在这里做向量检索：媒体的语义检索走 L2 文档层的既有索引
@@ -427,7 +278,7 @@ func (s *Store) Search(query string, kind Kind, limit int) ([]*Item, error) {
 	defer s.mu.RUnlock()
 
 	q := `SELECT digest, kind, mime, size, width, height, origin_path, tool,
-	             description, described_by, ref_count, first_seen, last_seen,
+	             description, described_by, first_seen, last_seen,
 	             vec, vec_model
 	      FROM media WHERE COALESCE(description,'') != ''`
 	args := []interface{}{}
@@ -474,7 +325,7 @@ func (s *Store) Pending(limit int) ([]*Item, error) {
 	defer s.mu.RUnlock()
 	rows, err := s.db.Query(`
 		SELECT digest, kind, mime, size, width, height, origin_path, tool,
-		       description, described_by, ref_count, first_seen, last_seen,
+		       description, described_by, first_seen, last_seen,
 		       vec, vec_model
 		FROM media
 		WHERE COALESCE(description,'') = '' AND COALESCE(described_by,'') = ''
@@ -494,117 +345,44 @@ func (s *Store) Pending(limit int) ([]*Item, error) {
 	return out, rows.Err()
 }
 
-// GC 清理无人引用的内容。
+// GC 清理已不被任何记忆块持有的内容。
 //
-// 两段策略：
-//  1. ref_count=0 且 last_seen 早于 minAge 的一律清理。刚 Put 还没来得及
-//     AddRef 的项 refcount 也是 0，minAge 保护它们不被立刻清掉。
-//  2. 清完仍超 maxBytes 时，继续按 last_seen 从旧到新淘汰 ref_count=0 的项。
+// keep 是当前仍被 Context/Document/Graph 里一等记忆块持有的 digest 集合，
+// 由调用方从三层记忆节点计算得出；media.Store 不再自己维护引用账本。
+// 不在 keep 中且早于 minAge 的项被清理；超出 maxBytes 时也只淘汰不在 keep 中的项。
+// Delete 删除一份媒体内容（元数据 + blob）。
 //
-// 有引用的项永不删除——那会让记忆里的 digest 变成悬空指针，正是本包要避免的。
-func (s *Store) GC(minAge time.Duration) (removed int, freed int64, err error) {
+// 这不是 GC，也不看引用计数：调用方是记忆系统本身——当它把一个记忆块
+// 永久地从三层记忆中删掉（而非在层间迁移）时，媒体作为块的内容一并删除。
+// 文本块就是这么管理的：删除块即删除内容。
+func (s *Store) Delete(digest string) error {
+	if digest == "" {
+		return nil
+	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
-
-	cutoff := time.Now().Add(-minAge)
-	rows, err := s.db.Query(`
-		SELECT digest, size FROM media
-		WHERE ref_count <= 0 AND last_seen < ?
-		ORDER BY last_seen`, cutoff)
-	if err != nil {
-		return 0, 0, err
+	if err := os.Remove(s.blobPath(digest)); err != nil && !os.IsNotExist(err) {
+		return fmt.Errorf("media: remove blob %s: %w", shortDigest(digest), err)
 	}
-	type cand struct {
-		digest string
-		size   int64
+	if _, err := s.db.Exec(`DELETE FROM media WHERE digest = ?`, digest); err != nil {
+		return fmt.Errorf("media: delete meta %s: %w", shortDigest(digest), err)
 	}
-	var cands []cand
-	for rows.Next() {
-		var c cand
-		if err := rows.Scan(&c.digest, &c.size); err == nil {
-			cands = append(cands, c)
-		}
-	}
-	rows.Close()
-
-	for _, c := range cands {
-		if e := os.Remove(s.blobPath(c.digest)); e != nil && !os.IsNotExist(e) {
-			continue // 删不掉就留着元数据，下轮再试；不制造"元数据没了文件还在"的孤儿
-		}
-		if _, e := s.db.Exec(`DELETE FROM media WHERE digest = ?`, c.digest); e != nil {
-			continue
-		}
-		removed++
-		freed += c.size
-	}
-
-	if s.maxBytes > 0 {
-		r2, f2 := s.enforceCapacityLocked()
-		removed += r2
-		freed += f2
-	}
-	return removed, freed, nil
+	return nil
 }
 
-// enforceCapacityLocked 在超出 maxBytes 时继续淘汰无引用项（调用方已持锁）。
-func (s *Store) enforceCapacityLocked() (removed int, freed int64) {
-	var total int64
-	if err := s.db.QueryRow(`SELECT COALESCE(SUM(size), 0) FROM media`).Scan(&total); err != nil {
-		return 0, 0
-	}
-	if total <= s.maxBytes {
-		return 0, 0
-	}
-	need := total - s.maxBytes
-
-	rows, err := s.db.Query(`SELECT digest, size FROM media WHERE ref_count <= 0 ORDER BY last_seen`)
-	if err != nil {
-		return 0, 0
-	}
-	type cand struct {
-		digest string
-		size   int64
-	}
-	var cands []cand
-	for rows.Next() {
-		var c cand
-		if err := rows.Scan(&c.digest, &c.size); err == nil {
-			cands = append(cands, c)
-		}
-	}
-	rows.Close()
-
-	for _, c := range cands {
-		if freed >= need {
-			break
-		}
-		if e := os.Remove(s.blobPath(c.digest)); e != nil && !os.IsNotExist(e) {
-			continue
-		}
-		if _, e := s.db.Exec(`DELETE FROM media WHERE digest = ?`, c.digest); e != nil {
-			continue
-		}
-		removed++
-		freed += c.size
-	}
-	return removed, freed
-}
-
-// Stats 返回容量与条目统计，供 WebUI / healthcheck 展示。
+// Stats 返回条目统计，供 WebUI / healthcheck 展示。
 func (s *Store) Stats() map[string]interface{} {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 
-	out := map[string]interface{}{"blob_dir": s.blobDir, "max_bytes": s.maxBytes}
-	var count, described, orphan int
+	out := map[string]interface{}{"blob_dir": s.blobDir}
+	var count, described int
 	var total int64
 	s.db.QueryRow(`SELECT COUNT(*), COALESCE(SUM(size),0) FROM media`).Scan(&count, &total)
 	s.db.QueryRow(`SELECT COUNT(*) FROM media WHERE COALESCE(description,'') != ''`).Scan(&described)
-	s.db.QueryRow(`SELECT COUNT(*) FROM media WHERE ref_count <= 0`).Scan(&orphan)
 	out["count"] = count
 	out["total_bytes"] = total
 	out["described"] = described
-	out["unreferenced"] = orphan
 
 	byKind := map[string]int{}
 	rows, err := s.db.Query(`SELECT kind, COUNT(*) FROM media GROUP BY kind`)
@@ -725,25 +503,17 @@ type MediaHit struct {
 	Score float64
 }
 
-// QueryMemoryMediaScored 只检索当前仍被 L0/L2/L3 记忆块引用的媒体。
-// CAS 中 ref_count=0 的项是等待 GC 的孤儿缓存，不是可召回记忆；若把它们也查出，
-// 已从三层记忆淘汰的图片会被视觉路“复活”，破坏与文本块一致的生命周期。
+// QueryMediaScored 用查询向量对所有已嵌入媒体做余弦相似度检索，
+// 返回 topK 个最相似的候选及其原始 cosine 分数（供跨模态归一化）。
 //
 // 分数只做排序，不在存储层设绝对阈值：多模态文本→图像的绝对 cosine 随模型、
 // 语言与数据域漂移，真实标定中有效命中可以低至 0.015。相关性门控在融合器中
 // 使用当前候选集合的相对分布完成。
-func (s *Store) QueryMemoryMediaScored(queryVec []float64, model string, topK int) ([]MediaHit, error) {
-	return s.queryMediaScored(queryVec, model, topK, true)
-}
-
-// QueryMediaScored 用查询向量对所有已嵌入媒体做余弦相似度检索，
-// 返回 topK 个最相似的候选及其原始 cosine 分数（供跨模态归一化）。
-// 这是媒体存储层的诊断/显式全库入口；记忆召回应调用 QueryMemoryMediaScored。
 func (s *Store) QueryMediaScored(queryVec []float64, model string, topK int) ([]MediaHit, error) {
-	return s.queryMediaScored(queryVec, model, topK, false)
+	return s.queryMediaScored(queryVec, model, topK)
 }
 
-func (s *Store) queryMediaScored(queryVec []float64, model string, topK int, referencedOnly bool) ([]MediaHit, error) {
+func (s *Store) queryMediaScored(queryVec []float64, model string, topK int) ([]MediaHit, error) {
 	if topK <= 0 {
 		topK = 20
 	}
@@ -754,18 +524,13 @@ func (s *Store) queryMediaScored(queryVec []float64, model string, topK int, ref
 	defer s.mu.RUnlock()
 
 	query := `SELECT digest, kind, mime, size, width, height,
-		origin_path, tool, description, described_by, ref_count, first_seen, last_seen,
+		origin_path, tool, description, described_by, first_seen, last_seen,
 		vec, vec_model
 		FROM media WHERE vec IS NOT NULL AND vec != ''`
 	var args []interface{}
 	if model != "" {
 		query += ` AND vec_model = ?`
 		args = append(args, model)
-	}
-	if referencedOnly {
-		query += ` AND ref_count > 0 AND EXISTS (
-			SELECT 1 FROM media_refs r WHERE r.digest = media.digest
-		)`
 	}
 	rows, err := s.db.Query(query, args...)
 	if err != nil {
@@ -783,7 +548,7 @@ func (s *Store) queryMediaScored(queryVec []float64, model string, topK int, ref
 		var kind string
 		var origin, tool, desc, by, vecJSON, vecModel sql.NullString
 		if err := rows.Scan(&it.Digest, &kind, &it.MIME, &it.Size, &it.Width, &it.Height,
-			&origin, &tool, &desc, &by, &it.RefCount, &it.FirstSeen, &it.LastSeen,
+			&origin, &tool, &desc, &by, &it.FirstSeen, &it.LastSeen,
 			&vecJSON, &vecModel); err != nil {
 			continue
 		}
@@ -860,7 +625,7 @@ func scanItem(r rowScanner) (*Item, error) {
 	var kind string
 	var origin, tool, desc, by, vecJSON, vecModel sql.NullString
 	if err := r.Scan(&it.Digest, &kind, &it.MIME, &it.Size, &it.Width, &it.Height,
-		&origin, &tool, &desc, &by, &it.RefCount, &it.FirstSeen, &it.LastSeen,
+		&origin, &tool, &desc, &by, &it.FirstSeen, &it.LastSeen,
 		&vecJSON, &vecModel); err != nil {
 		return nil, err
 	}

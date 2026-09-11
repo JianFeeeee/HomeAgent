@@ -30,7 +30,7 @@ func newTestStores(t *testing.T) (*memory.GraphDB, *doc.Store, *text.Memory, *me
 	}
 	t.Cleanup(func() { g.Close() })
 
-	ds := doc.NewStore(filepath.Join(dir, "documents"))
+	ds := doc.NewStore(filepath.Join(dir, "documents"), memory.TokenizeWords)
 	if err := ds.Start(); err != nil {
 		t.Fatalf("doc store start: %v", err)
 	}
@@ -42,7 +42,7 @@ func newTestStores(t *testing.T) (*memory.GraphDB, *doc.Store, *text.Memory, *me
 	}
 	t.Cleanup(func() { tm.Stop() })
 
-	ms, err := media.New(filepath.Join(dir, "media"), 0)
+	ms, err := media.New(filepath.Join(dir, "media"))
 	if err != nil {
 		t.Fatalf("media.New: %v", err)
 	}
@@ -140,12 +140,12 @@ func TestGraphCommit_BindsMediaFromDigests(t *testing.T) {
 		t.Errorf("句子里没有媒体描述: %q", res.Relations[0].SentenceText)
 	}
 
-	refs, err := ms.Refs(media.OwnerGraphSentence, strconv.FormatInt(sid, 10))
+	blocks, err := g.BlocksForNode("sentence", strconv.FormatInt(sid, 10))
 	if err != nil {
-		t.Fatalf("Refs: %v", err)
+		t.Fatalf("BlocksForNode: %v", err)
 	}
-	if len(refs) != 1 || refs[0] != digest {
-		t.Errorf("句子 #%d 的媒体引用 = %v，期望 [%s]", sid, refs, digest)
+	if len(blocks) != 1 || blocks[0].PayloadDigest != digest {
+		t.Errorf("句子 #%d 的媒体块 = %+v，期望 [%s]", sid, blocks, digest)
 	}
 }
 
@@ -250,15 +250,12 @@ func TestDocInsertWithMedia_StoresAndBinds(t *testing.T) {
 		t.Errorf("正文里没有媒体标记: %q", d.Content)
 	}
 
-	refs, err := ms.Refs(media.OwnerDocument, d.ID)
-	if err != nil {
-		t.Fatalf("Refs: %v", err)
-	}
-	if len(refs) != 1 {
-		t.Fatalf("文档媒体引用 = %v，期望 1 条", refs)
+	blocks := ds.Blocks()
+	if len(blocks) != 1 || blocks[0].PayloadDigest == "" {
+		t.Fatalf("文档记忆块 = %+v，期望 1 条", blocks)
 	}
 	// 内容可读，说明真的落盘了而不只是记了个 digest。
-	got, err := ms.Get(refs[0])
+	got, err := ms.Get(blocks[0].PayloadDigest)
 	if err != nil || string(got) != "attachment-bytes" {
 		t.Errorf("媒体内容读回失败: %v / %q", err, got)
 	}
@@ -279,9 +276,9 @@ func TestDocInsertWithMedia_DigestOnlyReference(t *testing.T) {
 	if after := ms.Stats()["count"]; after != before {
 		t.Errorf("媒体条数从 %v 变成 %v —— 引用已有内容不该新增", before, after)
 	}
-	refs, _ := ms.Refs(media.OwnerDocument, d.ID)
-	if len(refs) != 1 || refs[0] != digest {
-		t.Errorf("引用 = %v，期望 [%s]", refs, digest)
+	blocks := ds.Blocks()
+	if len(blocks) != 1 || blocks[0].PayloadDigest != digest {
+		t.Errorf("引用 = %+v，期望 [%s]", blocks, digest)
 	}
 }
 
@@ -350,8 +347,8 @@ func TestDocQuery_FallsBackToMarkers(t *testing.T) {
 	}
 }
 
-// 旧实现删文档不解引用 → 媒体永久"被引用"，GC 收不掉，磁盘只增不减。
-func TestDocRemove_ReleasesMediaRefs(t *testing.T) {
+// 文档被删除时它持有的一等记忆块随之消失，媒体不再被任何记忆块持有。
+func TestDocRemove_DropsBlocks(t *testing.T) {
 	_, ds, _, ms := newTestStores(t)
 	dm := NewDocMemoryWithMedia("tester", ds, ms)
 
@@ -361,14 +358,14 @@ func TestDocRemove_ReleasesMediaRefs(t *testing.T) {
 	}}); err != nil {
 		t.Fatalf("InsertWithMedia: %v", err)
 	}
-	if refs, _ := ms.Refs(media.OwnerDocument, d.ID); len(refs) != 1 {
-		t.Fatalf("前置条件不成立，引用 = %v", refs)
+	if blocks := ds.Blocks(); len(blocks) != 1 {
+		t.Fatalf("前置条件不成立，块 = %+v", blocks)
 	}
 
 	dm.Remove(d.ID)
 
-	if refs, _ := ms.Refs(media.OwnerDocument, d.ID); len(refs) != 0 {
-		t.Errorf("删除文档后仍有 %v 条引用 —— GC 永远收不掉这份媒体", refs)
+	if blocks := ds.Blocks(); len(blocks) != 0 {
+		t.Errorf("删除文档后仍持有 %+v —— 媒体仍被记忆引用", blocks)
 	}
 }
 

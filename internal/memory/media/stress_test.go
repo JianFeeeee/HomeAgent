@@ -16,10 +16,12 @@ import (
 // 压力测试与冒烟测试。
 //
 // 关注点不是吞吐数字，而是并发下的不变量是否被破坏：
-//   1. ref_count 与 media_refs 表的行数必须始终一致（错位会让 GC 误删或永不清）
-//   2. GC 与读写并发时，有引用的内容绝不能被删
-//   3. 同内容并发 Put 只落一份磁盘、digest 一致
-//   4. SQLite 在多 goroutine 下不出现 "database is locked"
+//   1. GC 与读写并发时，被记忆块持有的内容绝不能被删
+//   2. 同内容并发 Put 只落一份磁盘、digest 一致
+//   3. SQLite 在多 goroutine 下不出现 "database is locked"
+//
+// 存活判定不再依赖 media_refs/ref_count：调用方把「三层记忆当前持有的
+// digest 集合」传给 GC，本层只做 CAS。
 
 func randBytes(t *testing.T, n int) []byte {
 	t.Helper()
@@ -28,37 +30,6 @@ func randBytes(t *testing.T, n int) []byte {
 		t.Fatalf("rand: %v", err)
 	}
 	return b
-}
-
-// checkRefIntegrity 校验核心不变量：每个 digest 的 ref_count 等于
-// media_refs 里指向它的行数。这条对不上就意味着 GC 的判断依据是错的。
-func checkRefIntegrity(t *testing.T, s *Store) {
-	t.Helper()
-	rows, err := s.db.Query(`
-		SELECT m.digest, m.ref_count, COUNT(r.digest)
-		FROM media m LEFT JOIN media_refs r ON m.digest = r.digest
-		GROUP BY m.digest, m.ref_count`)
-	if err != nil {
-		t.Fatalf("integrity query: %v", err)
-	}
-	defer rows.Close()
-	var bad int
-	for rows.Next() {
-		var d string
-		var stored, actual int
-		if err := rows.Scan(&d, &stored, &actual); err != nil {
-			continue
-		}
-		if stored != actual {
-			bad++
-			if bad <= 5 {
-				t.Errorf("ref 计数错位 %s: ref_count=%d 实际引用行=%d", shortDigest(d), stored, actual)
-			}
-		}
-	}
-	if bad > 0 {
-		t.Fatalf("共 %d 条 digest 的 ref_count 与 media_refs 不一致", bad)
-	}
 }
 
 // blobFileCount 统计 CAS 目录下的实际文件数（不含 .tmp）。
@@ -117,7 +88,6 @@ func TestStress_ConcurrentPutSameContent(t *testing.T) {
 	if got, err := s.Get(first); err != nil || !bytes.Equal(got, data) {
 		t.Fatalf("内容应可完整读回: err=%v len=%d", err, len(got))
 	}
-	checkRefIntegrity(t, s)
 }
 
 func TestStress_ConcurrentPutDistinctContent(t *testing.T) {
@@ -180,69 +150,71 @@ func TestStress_ConcurrentPutDistinctContent(t *testing.T) {
 	if st["count"].(int) != len(records) {
 		t.Fatalf("库内条目应为 %d，实际 %v", len(records), st["count"])
 	}
-	checkRefIntegrity(t, s)
 }
 
-func TestStress_ConcurrentRefChurn(t *testing.T) {
-	// 引用增删风暴：多 owner 对少量 digest 反复 AddRef/DropRef。
-	// 核心断言是最终 ref_count 与 media_refs 行数一致——错位就意味着
-	// GC 会误删（计数偏低）或永不清（计数虚高）。
-	s := newTestStore(t, 0)
+func TestStress_ConcurrentDeleteAndPut(t *testing.T) {
+	// 删除与写入并发：核心断言是被保留的内容永远可读，
+	// 删除只影响目标 digest，不误伤其他内容。
+	s := newTestStore(t)
 
-	const digestCount = 8
-	digests := make([]string, digestCount)
-	for i := range digests {
+	const heldCount = 8
+	held := make([]string, heldCount)
+	for i := range held {
 		d, err := s.Put([]byte(fmt.Sprintf("payload-%d", i)), Item{MIME: "image/png"})
 		if err != nil {
 			t.Fatal(err)
 		}
-		digests[i] = d
+		held[i] = d
 	}
 
-	const workers = 24
-	const rounds = 40
+	const workers = 16
+	const rounds = 30
 	var wg sync.WaitGroup
-	var addErr, dropErr atomic.Int64
-
 	for w := 0; w < workers; w++ {
 		wg.Add(1)
 		go func(wid int) {
 			defer wg.Done()
-			owner := fmt.Sprintf("evt-%d", wid)
 			for r := 0; r < rounds; r++ {
-				d := digests[(wid+r)%digestCount]
-				if err := s.AddRef(d, "context", owner); err != nil {
-					addErr.Add(1)
+				d, err := s.Put([]byte(fmt.Sprintf("tmp-%d-%d", wid, r)), Item{MIME: "image/png"})
+				if err != nil {
+					t.Errorf("Put: %v", err)
+					return
 				}
-				// 故意重复 AddRef：幂等性在并发下也必须成立
-				if err := s.AddRef(d, "context", owner); err != nil {
-					addErr.Add(1)
-				}
-				if r%2 == 0 {
-					if err := s.DropRef(d, "context", owner); err != nil {
-						dropErr.Add(1)
-					}
+				if err := s.Delete(d); err != nil {
+					t.Errorf("Delete: %v", err)
+					return
 				}
 			}
 		}(w)
 	}
+	// 并发读取被保留内容
+	for rdr := 0; rdr < 4; rdr++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for r := 0; r < rounds; r++ {
+				for i, d := range held {
+					if _, err := s.Get(d); err != nil {
+						t.Errorf("内容 %d 被误删: %v", i, err)
+						return
+					}
+				}
+			}
+		}()
+	}
 	wg.Wait()
 
-	if n := addErr.Load(); n > 0 {
-		t.Fatalf("AddRef 失败 %d 次", n)
+	for i, d := range held {
+		if _, err := s.Get(d); err != nil {
+			t.Fatalf("仍被保留的第 %d 项不可读: %v", i, err)
+		}
 	}
-	if n := dropErr.Load(); n > 0 {
-		t.Fatalf("DropRef 失败 %d 次", n)
-	}
-	checkRefIntegrity(t, s)
 }
 
-func TestStress_GCConcurrentWithWrites(t *testing.T) {
-	// GC 与读写并发。最重要的断言：有引用的内容在整个过程中始终可读。
-	// 这条一旦破，记忆里的 digest 就成了悬空指针。
-	s := newTestStore(t, 0)
+func TestStress_DeleteConcurrentWithReads(t *testing.T) {
+	// 删除与读取并发。最重要的断言：被保留的内容在整个过程中始终可读。
+	s := newTestStore(t)
 
-	// 一批"受保护"的内容，全程持有引用
 	const protectedCount = 10
 	protected := make([]string, protectedCount)
 	protectedData := make([][]byte, protectedCount)
@@ -252,9 +224,6 @@ func TestStress_GCConcurrentWithWrites(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if err := s.AddRef(d, "document", fmt.Sprintf("doc-%d", i)); err != nil {
-			t.Fatal(err)
-		}
 		protected[i] = d
 		protectedData[i] = data
 	}
@@ -262,10 +231,10 @@ func TestStress_GCConcurrentWithWrites(t *testing.T) {
 	stop := make(chan struct{})
 	var wg sync.WaitGroup
 	var readErr atomic.Int64
-	var gcRuns atomic.Int64
+	var deleteCount atomic.Int64
 	var putCount atomic.Int64
 
-	// 写入者：持续 Put 一次性内容（不加引用，是 GC 的正常目标）
+	// 写入者：持续 Put 一次性内容再删除（模拟块创建后又被遗忘）
 	for w := 0; w < 4; w++ {
 		wg.Add(1)
 		go func(wid int) {
@@ -278,8 +247,13 @@ func TestStress_GCConcurrentWithWrites(t *testing.T) {
 				default:
 				}
 				data := append([]byte(fmt.Sprintf("ephemeral-%d-%d-", wid, i)), randBytes(t, 128)...)
-				if _, err := s.Put(data, Item{MIME: "image/png"}); err == nil {
-					putCount.Add(1)
+				d, err := s.Put(data, Item{MIME: "image/png"})
+				if err != nil {
+					continue
+				}
+				putCount.Add(1)
+				if err := s.Delete(d); err == nil {
+					deleteCount.Add(1)
 				}
 				i++
 			}
@@ -314,33 +288,14 @@ func TestStress_GCConcurrentWithWrites(t *testing.T) {
 		}()
 	}
 
-	// GC 者：minAge=0 让所有无引用项立刻可清，最大化与写入的冲突
-	wg.Add(1)
-	go func() {
-		defer wg.Done()
-		for {
-			select {
-			case <-stop:
-				return
-			default:
-			}
-			if _, _, err := s.GC(0); err != nil {
-				t.Errorf("GC 报错: %v", err)
-				return
-			}
-			gcRuns.Add(1)
-			time.Sleep(time.Millisecond)
-		}
-	}()
-
 	time.Sleep(1500 * time.Millisecond)
 	close(stop)
 	wg.Wait()
 
 	if n := readErr.Load(); n > 0 {
-		t.Fatalf("受保护内容读取失败 %d 次——GC 误删了有引用的项", n)
+		t.Fatalf("受保护内容读取失败 %d 次", n)
 	}
-	t.Logf("并发窗口内: Put=%d GC=%d 轮", putCount.Load(), gcRuns.Load())
+	t.Logf("并发窗口内: Put=%d Delete=%d", putCount.Load(), deleteCount.Load())
 
 	// 收尾确认：受保护的一个都没少
 	for i, d := range protected {
@@ -348,12 +303,7 @@ func TestStress_GCConcurrentWithWrites(t *testing.T) {
 		if err != nil || !bytes.Equal(got, protectedData[i]) {
 			t.Fatalf("收尾检查失败 %s: %v", shortDigest(d), err)
 		}
-		it, err := s.Stat(d)
-		if err != nil || it.RefCount != 1 {
-			t.Fatalf("受保护项引用计数应为 1: %+v err=%v", it, err)
-		}
 	}
-	checkRefIntegrity(t, s)
 }
 
 func TestStress_DescribeConcurrentWithSearch(t *testing.T) {
@@ -427,61 +377,46 @@ func TestStress_DescribeConcurrentWithSearch(t *testing.T) {
 	}
 }
 
-func TestStress_CapacityGCUnderLoad(t *testing.T) {
-	// 容量上限在持续写入下必须真正生效，且不碰有引用的项。
-	const cap = 256 * 1024 // 256KB
-	s := newTestStore(t, cap)
+func TestStress_DeleteUnderLoad(t *testing.T) {
+	// 持续写入 + 删除下，被保留的项必须始终可读。
+	s := newTestStore(t)
 
-	// 先放 3 个有引用的大项（合计约 96KB），它们永不可删
 	const keepN = 3
-	keep := make([]string, keepN)
-	for i := range keep {
+	keepList := make([]string, keepN)
+	for i := range keepList {
 		data := append([]byte(fmt.Sprintf("keep-%d-", i)), randBytes(t, 32*1024)...)
 		d, err := s.Put(data, Item{MIME: "image/png"})
 		if err != nil {
 			t.Fatal(err)
 		}
-		if err := s.AddRef(d, "graph_sentence", fmt.Sprintf("sent-%d", i)); err != nil {
-			t.Fatal(err)
-		}
-		keep[i] = d
+		keepList[i] = d
 	}
 
-	// 持续写入无引用内容，交替 GC
 	for round := 0; round < 30; round++ {
 		for i := 0; i < 3; i++ {
 			data := append([]byte(fmt.Sprintf("tmp-%d-%d-", round, i)), randBytes(t, 16*1024)...)
-			if _, err := s.Put(data, Item{MIME: "image/png"}); err != nil {
+			d, err := s.Put(data, Item{MIME: "image/png"})
+			if err != nil {
 				t.Fatalf("round %d Put: %v", round, err)
 			}
-		}
-		if _, _, err := s.GC(0); err != nil {
-			t.Fatalf("round %d GC: %v", round, err)
+			if err := s.Delete(d); err != nil {
+				t.Fatalf("round %d Delete: %v", round, err)
+			}
 		}
 	}
 
-	st := s.Stats()
-	total := st["total_bytes"].(int64)
-	t.Logf("上限 %d，收尾总量 %d，条目 %v", cap, total, st["count"])
-
-	// 有引用的项必须都在
-	for _, d := range keep {
+	// 被保留的项必须都在
+	for _, d := range keepList {
 		if _, err := s.Get(d); err != nil {
-			t.Fatalf("有引用项被容量 GC 删了 %s: %v", shortDigest(d), err)
+			t.Fatalf("被保留项被误删 %s: %v", shortDigest(d), err)
 		}
 	}
-	// 无引用项应被压到上限附近：允许略超（有引用项本身可能就占了大头），
-	// 但不该无界增长——30 轮 × 3 × 16KB = 1.4MB 若全留下就是失控。
-	if total > cap*2 {
-		t.Fatalf("容量 GC 未生效：总量 %d 远超上限 %d", total, cap)
-	}
-	checkRefIntegrity(t, s)
 }
 
 func TestStress_ReopenAfterHeavyChurn(t *testing.T) {
-	// 大量写入 + GC 之后重开：元数据与磁盘不该出现互相不认的孤儿。
+	// 大量写入 + 删除之后重开：元数据与磁盘不该出现互相不认的孤儿。
 	dir := t.TempDir()
-	s1, err := New(dir, 0)
+	s1, err := New(dir)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -494,19 +429,15 @@ func TestStress_ReopenAfterHeavyChurn(t *testing.T) {
 			t.Fatal(err)
 		}
 		if i%5 == 0 {
-			if err := s1.AddRef(d, "context", fmt.Sprintf("e-%d", i)); err != nil {
-				t.Fatal(err)
-			}
 			kept = append(kept, d)
+		} else if err := s1.Delete(d); err != nil {
+			t.Fatal(err)
 		}
-	}
-	if _, _, err := s1.GC(0); err != nil {
-		t.Fatal(err)
 	}
 	beforeStats := s1.Stats()
 	s1.Close()
 
-	s2, err := New(dir, 0)
+	s2, err := New(dir)
 	if err != nil {
 		t.Fatalf("重开失败: %v", err)
 	}
@@ -547,10 +478,9 @@ func TestStress_ReopenAfterHeavyChurn(t *testing.T) {
 
 	for _, d := range kept {
 		if _, err := s2.Get(d); err != nil {
-			t.Fatalf("有引用项重开后读不到 %s: %v", shortDigest(d), err)
+			t.Fatalf("被持有项重开后读不到 %s: %v", shortDigest(d), err)
 		}
 	}
-	checkRefIntegrity(t, s2)
 }
 
 func TestStress_LargeBlob(t *testing.T) {
@@ -597,5 +527,4 @@ func TestStress_DataURLRoundTripAtScale(t *testing.T) {
 			t.Fatalf("第 %d 次入库回读不一致: %v", i, err)
 		}
 	}
-	checkRefIntegrity(t, s)
 }

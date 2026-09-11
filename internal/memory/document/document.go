@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
+	"math"
 	"os"
 	"path/filepath"
 	"sort"
@@ -13,6 +14,7 @@ import (
 
 	"gitcode.com/JianFeeeee/HomeAgent/internal/memory"
 	"gitcode.com/JianFeeeee/HomeAgent/internal/memory/vector"
+	"gitcode.com/JianFeeeee/HomeAgent/internal/tfidf"
 )
 
 // ChannelCleaner 按事件来源查找输入通道的 Cleaner 函数。
@@ -21,51 +23,97 @@ type ChannelCleaner func(source string) func(string) string
 
 // Doc — 记忆文档：由上下文提炼而来
 type Doc struct {
-	ID          string            `json:"id"`
-	Summary     string            `json:"summary"`
-	Content     string            `json:"content"`
-	Tags        []string          `json:"tags"`
-	Entities    []string          `json:"entities"`
-	CreatedAt   time.Time         `json:"created_at"`
-	UpdatedAt   time.Time         `json:"updated_at"`
-	Source      string            `json:"source"` // context / graph / manual
-	Meta        map[string]string `json:"meta,omitempty"`
-	AccessCount int               `json:"access_count"`    // 访问次数
-	LastAccess  time.Time         `json:"last_access"`     // 最后访问时间
-	// Media 是这篇 L2 文档原生持有的多模态块 digest。坐标保存在 media.Store，
-	// 文档只持引用；被 Consume 召回到 L0 或归档到 L3 时必须随文本一起迁移。
-	Media       []string          `json:"media,omitempty"`
-	Vector      vector.Vector     `json:"vector,omitempty"` // 预计算文本向量（TF-IDF 稀疏，与 context 同空间）
-	DenseVec    []float64         `json:"dense_vec,omitempty"` // 多模态稠密向量（与媒体共享空间）
+	ID          string               `json:"id"`
+	Summary     string               `json:"summary"`
+	Content     string               `json:"content"`
+	Tags        []string             `json:"tags"`
+	Entities    []string             `json:"entities"`
+	CreatedAt   time.Time            `json:"created_at"`
+	UpdatedAt   time.Time            `json:"updated_at"`
+	Source      string               `json:"source"`
+	Meta        map[string]string    `json:"meta,omitempty"`
+	AccessCount int                  `json:"access_count"`
+	LastAccess  time.Time            `json:"last_access"`
+	Blocks      []memory.MemoryBlock `json:"blocks,omitempty"`    // 一等记忆块（text/image/video/audio）
+	Vector      tfidf.Vector         `json:"vector,omitempty"`    // TF-IDF 稀疏向量（fallback 时持久化）
+	DenseVec    []float64            `json:"dense_vec,omitempty"` // 多模态稠密向量（主路径）
 }
 
-// Store — 文档记忆存储，包含向量索引
+// Store — 文档记忆存储。
+// 主路径：denseSpace（稠密多模态向量，与媒体共享空间）。
+// Fallback：tfidf（TF-IDF 倒排索引，仅稠密空间不可用时加载）。
 type Store struct {
-	dir    string
-	vec    *vector.Store
-	veczer *vector.TFIDFVectorizer
-	mu     sync.RWMutex
-
-	docs       map[string]*Doc
-	summaries  []string // 用于训练向量化器，最大 10000 条
-	vectorizer vector.Vectorizer // 可选：与 context 同空间的向量化器
-	denseSpace vector.MultimodalEmbedder // 可选：稠密多模态向量空间
-
+	dir   string
+	mu    sync.RWMutex
+	docs  map[string]*Doc
 	dirty bool
+
+	// fallback 路径（仅稠密空间不可用时加载）
+	tfidfEmb   *tfidf.Embedder
+	tfidfIdx   *tfidf.SearchableIndex
+	trainTexts []string // 缓存训练文本，延迟训练
+	tfidfOnce  sync.Once
+
+	// 主路径
+	denseSpace vector.MultimodalEmbedder
 }
 
-// SetDenseSpace 设置稠密多模态向量空间。配置后文档检索使用稠密余弦（brute-force），
-// 与媒体检索共享同一向量空间，实现真正的统一跨模态检索。
+const maxSummaries = 10000
+
+// NewStore 创建文档存储。tokenizer 由外层注入（如 jieba），核心不直接依赖分词库。
+func NewStore(dir string, tokenizer tfidf.Tokenizer) *Store {
+	return &Store{
+		dir:  dir,
+		docs: make(map[string]*Doc),
+		// tfidf 延迟初始化：只在需要 fallback 时创建
+		tfidfEmb: tfidf.NewEmbedder(tokenizer, 4096),
+	}
+}
+
+// ensureTFIDF 延迟初始化 TF-IDF 索引（仅 fallback 路径）。
+// 调用方已持有 s.mu。
+func (s *Store) ensureTFIDF() {
+	s.tfidfOnce.Do(func() {
+		s.tfidfIdx = tfidf.NewSearchableIndex(s.tfidfEmb)
+		// 延迟训练：用缓存的文本建立索引
+		texts := make(map[string]string, len(s.trainTexts)/2)
+		for i := 0; i+1 < len(s.trainTexts); i += 2 {
+			texts[s.trainTexts[i]] = s.trainTexts[i+1]
+		}
+		s.tfidfIdx.Train(texts)
+		s.trainTexts = nil // 释放缓存
+		s.tfidfEmb.Train(func() []string {
+			out := make([]string, 0, len(texts))
+			for _, t := range texts {
+				out = append(out, t)
+			}
+			return out
+		}())
+		log.Printf("[document memory] tfidf fallback loaded: %d docs", len(texts))
+	})
+}
+
+func (s *Store) Start() error {
+	if err := os.MkdirAll(s.dir, 0755); err != nil {
+		return fmt.Errorf("document store dir: %w", err)
+	}
+	if err := s.loadAll(); err != nil {
+		log.Printf("[document memory] load error: %v", err)
+	}
+	log.Printf("[document memory] started with %d docs", len(s.docs))
+	return nil
+}
+
+func (s *Store) Stop() { s.flush() }
+
+// SetDenseSpace 设置稠密多模态向量空间（主路径）。
 func (s *Store) SetDenseSpace(ds vector.MultimodalEmbedder) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.denseSpace = ds
 }
 
-// buildDenseIndex 为所有文档计算稠密向量并建立 brute-force 索引。
-// 在启动时或配置变更后调用一次。492 篇文档 brute-force ~300ms，可接受。
-// BuildDenseIndex 为所有文档计算稠密向量并建立 brute-force 索引。
-// 在启动时或配置变更后调用一次。492 篇文档 brute-force ~300ms，可接受。
+// BuildDenseIndex 为所有文档计算稠密向量。
 func (s *Store) BuildDenseIndex(ds vector.MultimodalEmbedder) {
 	if ds == nil || !ds.Loaded() {
 		return
@@ -76,7 +124,7 @@ func (s *Store) BuildDenseIndex(ds vector.MultimodalEmbedder) {
 	count := 0
 	for _, doc := range s.docs {
 		if doc.DenseVec != nil && len(doc.DenseVec) == ds.Dim() {
-			continue // 已有向量，跳过
+			continue
 		}
 		text := doc.Summary + " " + doc.Content
 		vec, err := ds.VectorizeDense(text)
@@ -90,8 +138,225 @@ func (s *Store) BuildDenseIndex(ds vector.MultimodalEmbedder) {
 	log.Printf("[document memory] dense index built: %d new vectors", count)
 }
 
-// denseSearchScored 对所有文档做 brute-force 余弦检索，返回 topK 个最相似的候选。
-// 仅在 denseSpace 配置后使用；未配置时退化到 TF-IDF 倒排检索。
+// Reindex 重建 TF-IDF 索引（fallback 路径变更时调用）。
+func (s *Store) Reindex() {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.tfidfOnce = sync.Once{} // 重置延迟初始化
+	texts := make(map[string]string, len(s.docs))
+	for _, doc := range s.docs {
+		texts[doc.ID] = doc.Summary + " " + doc.Content
+	}
+	// 缓存文本供 ensureTFIDF 延迟训练
+	s.trainTexts = make([]string, 0, len(texts)*2)
+	for id, t := range texts {
+		s.trainTexts = append(s.trainTexts, id, t)
+	}
+	s.ensureTFIDF()
+}
+
+func (s *Store) Insert(doc *Doc) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	if doc.ID == "" {
+		doc.ID = fmt.Sprintf("doc_%d", time.Now().UnixNano())
+		doc.CreatedAt = time.Now()
+	}
+	doc.UpdatedAt = time.Now()
+	doc.LastAccess = time.Now()
+	if doc.AccessCount == 0 {
+		doc.AccessCount = 1
+	}
+	s.docs[doc.ID] = doc
+
+	text := doc.Summary + " " + doc.Content
+
+	// 主路径：稠密向量
+	if s.denseSpace != nil && s.denseSpace.Loaded() && len(doc.DenseVec) == 0 {
+		if dv, err := s.denseSpace.VectorizeDense(text); err == nil {
+			doc.DenseVec = dv
+		}
+	}
+
+	// Fallback 路径：缓存文本，延迟训练
+	if s.tfidfIdx != nil {
+		s.tfidfIdx.Add(doc.ID, text)
+	} else {
+		s.trainTexts = append(s.trainTexts, doc.ID, text)
+	}
+
+	path := filepath.Join(s.dir, doc.ID+".json")
+	data, _ := json.MarshalIndent(doc, "", "  ")
+	os.WriteFile(path, data, 0644)
+	s.dirty = true
+	return nil
+}
+
+// ContextToDoc 将上下文对话历史提炼为文档。
+func (s *Store) ContextToDoc(source string, entries []ContextEntry, _ interface{}, cleanFn func(string) string, toolCleanFn func(name, output string) string, channelCleaner ChannelCleaner) (*Doc, error) {
+	if len(entries) == 0 {
+		return nil, nil
+	}
+	if cleanFn == nil {
+		cleanFn = func(text string) string { return text }
+	}
+
+	var parts []string
+	for _, e := range entries {
+		line := fmt.Sprintf("[%s] %s: %s", e.Timestamp.Format("15:04"), e.Source, e.Content)
+		if e.Response != "" {
+			line += fmt.Sprintf(" → %s", truncate(e.Response, 100))
+		}
+		for _, tr := range e.ToolResults {
+			line += fmt.Sprintf("\n  [工具] %s: %s", tr.Name, truncate(tr.Output, 200))
+		}
+		parts = append(parts, line)
+	}
+	content := strings.Join(parts, "\n")
+	contentHash := simpleHash(content)
+	summary := summarizeEntries(entries, cleanFn, toolCleanFn, channelCleaner)
+	tags := extractTags(entries, cleanFn, toolCleanFn, channelCleaner)
+	entities := extractEntities(entries, cleanFn, toolCleanFn, channelCleaner)
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	for _, d := range s.docs {
+		if d.Meta != nil && d.Meta["content_hash"] == contentHash {
+			d.UpdatedAt = time.Now()
+			d.LastAccess = time.Now()
+			d.Content = content
+			d.Source = source
+			d.Summary = summary
+			d.Tags = tags
+			d.Entities = entities
+			d.Blocks = blocksFromEntries(entries)
+			s.dirty = true
+			return d, nil
+		}
+	}
+
+	id := fmt.Sprintf("doc_%d", time.Now().UnixNano())
+	meta := map[string]string{"content_hash": contentHash}
+	if source == "context_archived" {
+		meta["is_archived_context"] = "true"
+	}
+	doc := &Doc{
+		ID: id, Summary: summary, Content: content, Tags: tags,
+		Entities: entities, CreatedAt: time.Now(), UpdatedAt: time.Now(),
+		LastAccess: time.Now(), AccessCount: 1, Source: source, Meta: meta,
+		Blocks: blocksFromEntries(entries),
+	}
+	s.docs[id] = doc
+	text := summary + " " + content
+	if s.tfidfIdx != nil {
+		s.tfidfIdx.Add(id, text)
+	} else {
+		s.trainTexts = append(s.trainTexts, id, text)
+	}
+
+	path := filepath.Join(s.dir, id+".json")
+	data, _ := json.MarshalIndent(doc, "", "  ")
+	os.WriteFile(path, data, 0644)
+	s.dirty = true
+	return doc, nil
+}
+
+// Consume 向量相似度查询并移除文档
+func (s *Store) Consume(text string, topK int) []*Doc {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if topK <= 0 {
+		topK = 5
+	}
+
+	// 主路径：稠密检索
+	if s.denseSpace != nil && s.denseSpace.Loaded() {
+		if qv, err := s.denseSpace.VectorizeDense(text); err == nil {
+			results := s.denseSearchScored(qv, topK)
+			var docs []*Doc
+			for _, r := range results {
+				if d, ok := s.docs[r.Doc.ID]; ok {
+					s.removeDoc(r.Doc.ID)
+					s.dirty = true
+					docs = append(docs, d)
+				}
+			}
+			return docs
+		}
+	}
+
+	// Fallback：TF-IDF 倒排检索（延迟初始化）
+	s.ensureTFIDF()
+	results := s.tfidfIdx.Search(text, topK)
+	var docs []*Doc
+	for _, r := range results {
+		if d, ok := s.docs[r.ID]; ok {
+			s.removeDoc(r.ID)
+			s.dirty = true
+			docs = append(docs, d)
+		}
+	}
+	return docs
+}
+
+func (s *Store) Query(text string, topK int) []*Doc {
+	hits := s.QueryScored(text, topK)
+	out := make([]*Doc, len(hits))
+	for i, h := range hits {
+		out[i] = h.Doc
+	}
+	return out
+}
+
+// DocHit 是一篇文档记忆的相似度候选及原始分数。
+type DocHit struct {
+	Doc   *Doc
+	Score float64
+}
+
+func (s *Store) QueryScored(text string, topK int) []DocHit {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	if topK <= 0 {
+		topK = 5
+	}
+
+	// 主路径
+	if s.denseSpace != nil && s.denseSpace.Loaded() {
+		if qv, err := s.denseSpace.VectorizeDense(text); err == nil {
+			results := s.denseSearchScored(qv, topK)
+			for i := range results {
+				if d, ok := s.docs[results[i].Doc.ID]; ok {
+					d.AccessCount++
+					d.LastAccess = time.Now()
+					results[i].Doc = d
+				}
+			}
+			return results
+		}
+	}
+
+	// Fallback（需要写锁来 ensureTFIDF）
+	s.mu.RUnlock()
+	s.mu.Lock()
+	s.ensureTFIDF()
+	s.mu.Unlock()
+	s.mu.RLock()
+
+	results := s.tfidfIdx.Search(text, topK)
+	var out []DocHit
+	for _, r := range results {
+		if d, ok := s.docs[r.ID]; ok {
+			d.AccessCount++
+			d.LastAccess = time.Now()
+			out = append(out, DocHit{Doc: d, Score: r.Score})
+		}
+	}
+	return out
+}
+
 func (s *Store) denseSearchScored(queryVec []float64, topK int) []DocHit {
 	if len(queryVec) == 0 {
 		return nil
@@ -101,13 +366,11 @@ func (s *Store) denseSearchScored(queryVec []float64, topK int) []DocHit {
 		score float64
 	}
 	var results []scored
-	s.mu.RLock()
-	defer s.mu.RUnlock()
 	for _, doc := range s.docs {
 		if len(doc.DenseVec) != len(queryVec) {
 			continue
 		}
-		score := vector.DenseCosine(queryVec, doc.DenseVec)
+		score := denseCosine(queryVec, doc.DenseVec)
 		if score > 0.01 {
 			results = append(results, scored{doc.ID, score})
 		}
@@ -126,332 +389,36 @@ func (s *Store) denseSearchScored(queryVec []float64, topK int) []DocHit {
 	return out
 }
 
-// denseCosine 计算两个 []float64 向量的余弦相似度（已迁移到 vector.DenseCosine，此处保留兼容）。
 func denseCosine(a, b []float64) float64 {
-	return vector.DenseCosine(a, b)
-}
-
-func (s *Store) SetVectorizer(v vector.Vectorizer) {
-	s.vectorizer = v
-}
-
-// ReindexWithVectorizer 用给定的向量化器重建所有文档的向量索引
-func (s *Store) ReindexWithVectorizer(v vector.Vectorizer) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-
-	log.Printf("[document memory] reindex with vectorizer (%d docs)", len(s.docs))
-	s.vec = vector.NewStore()
-	for _, doc := range s.docs {
-		doc.Vector = v.Vectorize(doc.Summary + " " + doc.Content)
-		s.vec.Insert(doc.ID, doc.Summary, doc.Vector, doc.Meta)
+	var dot, na, nb float64
+	for i := range a {
+		dot += a[i] * b[i]
+		na += a[i] * a[i]
+		nb += b[i] * b[i]
 	}
-	log.Printf("[document memory] reindex with vectorizer complete (%d vectors)", s.vec.Size())
-}
-
-const maxSummaries = 10000
-
-func NewStore(dir string) *Store {
-	return &Store{
-		dir:    dir,
-		vec:    vector.NewStore(),
-		veczer: vector.NewTFIDFVectorizer(memory.TokenizeWords),
-		docs:   make(map[string]*Doc),
+	if na == 0 || nb == 0 {
+		return 0
 	}
-}
-
-func (s *Store) Start() error {
-	if err := os.MkdirAll(s.dir, 0755); err != nil {
-		return fmt.Errorf("document store dir: %w", err)
-	}
-	if err := s.loadAll(); err != nil {
-		log.Printf("[document memory] load error: %v", err)
-	}
-	log.Printf("[document memory] started with %d docs, %d vectors", len(s.docs), s.vec.Size())
-	return nil
-}
-
-func (s *Store) Stop() {
-	s.flush()
-}
-
-// Insert 创建/更新文档
-func (s *Store) Insert(doc *Doc) error {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-
-	if doc.ID == "" {
-		doc.ID = fmt.Sprintf("doc_%d", time.Now().UnixNano())
-		doc.CreatedAt = time.Now()
-	}
-	doc.UpdatedAt = time.Now()
-	doc.LastAccess = time.Now()
-	if doc.AccessCount == 0 {
-		doc.AccessCount = 1
-	}
-
-	s.docs[doc.ID] = doc
-
-	// 增量训练向量化器并加入向量索引
-	s.addSummary(doc.Summary)
-	vec := doc.Vector
-	if vec == nil {
-		vec = s.veczer.Vectorize(doc.Summary + " " + doc.Content)
-	}
-	s.vec.Insert(doc.ID, doc.Summary, vec, doc.Meta)
-
-	// 若配置了稠密空间，为新文档计算稠密向量
-	if s.denseSpace != nil && s.denseSpace.Loaded() && len(doc.DenseVec) == 0 {
-		if dv, err := s.denseSpace.VectorizeDense(doc.Summary + " " + doc.Content); err == nil {
-			doc.DenseVec = dv
-		}
-	}
-
-	// 立即写盘
-	path := filepath.Join(s.dir, doc.ID+".json")
-	data, _ := json.MarshalIndent(doc, "", "  ")
-	os.WriteFile(path, data, 0644)
-
-	s.dirty = true
-	return nil
-}
-
-// ContextToDoc — 将一段上下文对话历史提炼为文档（带内容去重）
-// cleanFn 可选，在计算层前统一过滤文本，不影响原文存储。
-// toolCleanFn 可选，func(name, output string) string，按工具名对输出进行过滤/清洗：
-//   - 返回 "" → 跳过该工具输出（NoMemory）
-//   - 返回清洗后文本 → 用于计算层（Cleaner），原文不受影响
-func (s *Store) ContextToDoc(source string, entries []ContextEntry, vec vector.Vectorizer, cleanFn func(string) string, toolCleanFn func(name, output string) string, channelCleaner ChannelCleaner) (*Doc, error) {
-	if len(entries) == 0 {
-		return nil, nil
-	}
-
-	if cleanFn == nil {
-		cleanFn = func(text string) string { return text }
-	}
-
-	var parts []string
-	for _, e := range entries {
-		line := fmt.Sprintf("[%s] %s: %s", e.Timestamp.Format("15:04"), e.Source, e.Content)
-		if e.Response != "" {
-			line += fmt.Sprintf(" → %s", truncate(e.Response, 100))
-		}
-		for _, tr := range e.ToolResults {
-			line += fmt.Sprintf("\n  [工具] %s: %s", tr.Name, truncate(tr.Output, 200))
-		}
-		parts = append(parts, line)
-	}
-	content := strings.Join(parts, "\n")
-	contentHash := simpleHash(content)
-
-	summary := summarizeEntries(entries, cleanFn, toolCleanFn, channelCleaner)
-	tags := extractTags(entries, cleanFn, toolCleanFn, channelCleaner)
-	entities := extractEntities(entries, cleanFn, toolCleanFn, channelCleaner)
-
-	s.mu.Lock()
-
-	// 去重
-	for _, d := range s.docs {
-		if d.Meta != nil && d.Meta["content_hash"] == contentHash {
-			d.UpdatedAt = time.Now()
-			d.LastAccess = time.Now()
-			d.Content = content
-			d.Source = source
-			d.Summary = summary
-			d.Tags = tags
-			d.Entities = entities
-			d.Media = mediaDigestsFromEntries(entries)
-			s.dirty = true
-			s.mu.Unlock()
-			return d, nil
-		}
-	}
-
-	id := fmt.Sprintf("doc_%d", time.Now().UnixNano())
-	var docVec vector.Vector
-	if vec != nil {
-		docVec = vec.Vectorize(summary + " " + content)
-	} else {
-		docVec = s.veczer.Vectorize(summary + " " + content)
-	}
-		meta := map[string]string{"content_hash": contentHash}
-	if source == "context_archived" {
-		meta["is_archived_context"] = "true"
-	}
-	doc := &Doc{
-		ID:          id,
-		Summary:     summary,
-		Content:     content,
-		Tags:        tags,
-		Entities:    entities,
-		CreatedAt:   time.Now(),
-		UpdatedAt:   time.Now(),
-		LastAccess:  time.Now(),
-		AccessCount: 1,
-		Source:      source,
-		Meta:        meta,
-		Media:       mediaDigestsFromEntries(entries),
-		Vector:      docVec,
-	}
-	s.docs[id] = doc
-
-	// 加入向量索引
-	s.addSummary(summary)
-	s.vec.Insert(id, summary, doc.Vector, nil)
-
-	s.dirty = true
-	s.mu.Unlock()
-
-	// 立即写盘
-	path := filepath.Join(s.dir, id+".json")
-	data, _ := json.MarshalIndent(doc, "", "  ")
-	os.WriteFile(path, data, 0644)
-
-	return doc, nil
-}
-
-// Consume — 向量相似度查询并移除文档（召回后即从冷存储删除，避免重复记忆）
-func (s *Store) Consume(text string, topK int) []*Doc {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-
-	if topK <= 0 {
-		topK = 5
-	}
-
-	// 优先稠密检索（与媒体共享空间）；未配置时退化到 TF-IDF 倒排检索。
-	if s.denseSpace != nil && s.denseSpace.Loaded() {
-		queryVec, err := s.denseSpace.VectorizeDense(text)
-		if err == nil {
-			results := s.denseSearchScored(queryVec, topK)
-			var docs []*Doc
-			for _, r := range results {
-				if d, ok := s.docs[r.Doc.ID]; ok {
-					s.removeDoc(r.Doc.ID)
-					s.dirty = true
-					docs = append(docs, d)
-				}
-			}
-			return docs
-		}
-		log.Printf("[document memory] dense query failed, falling back to TF-IDF: %v", err)
-	}
-
-	vec := s.vectorizeQuery(text)
-	results := s.vec.Search(vec, topK)
-
-	var docs []*Doc
-	for _, r := range results {
-		if d, ok := s.docs[r.ID]; ok {
-			s.removeDoc(r.ID)
-			s.dirty = true
-			docs = append(docs, d)
-		}
-	}
-	return docs
-}
-
-// vectorizeQuery 用语义向量化器（首选）或 TF-IDF（兜底）处理查询文本
-func (s *Store) vectorizeQuery(text string) vector.Vector {
-	if s.vectorizer != nil {
-		return s.vectorizer.Vectorize(text)
-	}
-	return s.veczer.Vectorize(text)
-}
-
-// Query — 向量相似度查询文档
-func (s *Store) Query(text string, topK int) []*Doc {
-	hits := s.QueryScored(text, topK)
-	out := make([]*Doc, len(hits))
-	for i, h := range hits {
-		out[i] = h.Doc
-	}
-	return out
-}
-
-// DocHit 是一篇文档记忆的相似度候选及原始分数（供跨模态融合归一化）。
-type DocHit struct {
-	Doc   *Doc
-	Score float64
-}
-
-// QueryScored 与 Query 同语义，但返回带原始 cosine 分数的候选。
-func (s *Store) QueryScored(text string, topK int) []DocHit {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
-
-	if topK <= 0 {
-		topK = 5
-	}
-
-	// 优先稠密检索；退化到 TF-IDF。
-	if s.denseSpace != nil && s.denseSpace.Loaded() {
-		queryVec, err := s.denseSpace.VectorizeDense(text)
-		if err == nil {
-			results := s.denseSearchScored(queryVec, topK)
-			for i := range results {
-				if d, ok := s.docs[results[i].Doc.ID]; ok {
-					d.AccessCount++
-					d.LastAccess = time.Now()
-					results[i].Doc = d
-				}
-			}
-			return results
-		}
-	}
-
-	vec := s.vectorizeQuery(text)
-	results := s.vec.SearchScored(vec, topK)
-
-	var out []DocHit
-	for _, r := range results {
-		if d, ok := s.docs[r.Doc.ID]; ok {
-			d.AccessCount++
-			d.LastAccess = time.Now()
-			out = append(out, DocHit{Doc: d, Score: r.Score})
-		}
-	}
-	return out
-}
-
-// Reindex — 重新训练并重建向量索引
-func (s *Store) Reindex() {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-
-	log.Printf("[document memory] reindexing %d docs", len(s.docs))
-
-	s.veczer.Train(s.summaries)
-
-	s.vec = vector.NewStore()
-	for _, doc := range s.docs {
-		vec := doc.Vector
-		if vec == nil {
-			vec = s.veczer.Vectorize(doc.Summary + " " + doc.Content)
-		}
-		s.vec.Insert(doc.ID, doc.Summary, vec, doc.Meta)
-	}
-
-	log.Printf("[document memory] reindex complete (%d vectors)", s.vec.Size())
+	return dot / math.Sqrt(na*nb)
 }
 
 func (s *Store) Stats() map[string]interface{} {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
-
+	idxSize := 0
+	if s.tfidfIdx != nil {
+		idxSize = s.tfidfIdx.Size()
+	}
 	return map[string]interface{}{
-		"doc_count":     len(s.docs),
-		"vector_count":  s.vec.Size(),
-		"summary_count": len(s.summaries),
-		"dir":           s.dir,
+		"doc_count":   len(s.docs),
+		"index_count": idxSize,
+		"dir":         s.dir,
 	}
 }
 
-// FindColdDocs — 查找冷文档：超过 maxAge 未访问且访问次数 <= minAccess
 func (s *Store) FindColdDocs(maxAge time.Duration, minAccess int) []*Doc {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
-
 	cutoff := time.Now().Add(-maxAge)
 	var cold []*Doc
 	for _, d := range s.docs {
@@ -462,60 +429,53 @@ func (s *Store) FindColdDocs(maxAge time.Duration, minAccess int) []*Doc {
 	return cold
 }
 
+// Get 返回指定文档（不存在时为 nil）。
+func (s *Store) Get(id string) *Doc {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.docs[id]
+}
+
+// Blocks 返回全部文档持有的一等记忆块（供跨层存活判定）。
+func (s *Store) Blocks() []memory.MemoryBlock {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	var out []memory.MemoryBlock
+	for _, d := range s.docs {
+		out = append(out, d.Blocks...)
+	}
+	return out
+}
+
 func (s *Store) RecentDocs(n int) []*Doc {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
-
 	var list []*Doc
 	for _, d := range s.docs {
 		list = append(list, d)
 	}
-	sort.Slice(list, func(i, j int) bool {
-		return list[i].CreatedAt.After(list[j].CreatedAt)
-	})
+	sort.Slice(list, func(i, j int) bool { return list[i].CreatedAt.After(list[j].CreatedAt) })
 	if len(list) > n {
 		list = list[:n]
 	}
 	return list
 }
 
-// Remove 从文档存储中删除指定 ID 的文档
 func (s *Store) Remove(id string) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-
 	if _, ok := s.docs[id]; ok {
 		s.removeDoc(id)
 		s.dirty = true
 	}
 }
 
-// ——— internal ———
-
-// addSummary 添加一条摘要到训练集，超限时截断并触发重索引。
-// 调用方必须已持有 s.mu 写锁。
-func (s *Store) addSummary(summary string) {
-	s.summaries = append(s.summaries, summary)
-	if len(s.summaries) > maxSummaries {
-		n := maxSummaries / 2
-		copy(s.summaries, s.summaries[len(s.summaries)-n:])
-		s.summaries = s.summaries[:n]
-		s.veczer.Train(s.summaries)
-		s.vec = vector.NewStore()
-		for _, doc := range s.docs {
-			vec := s.veczer.Vectorize(doc.Summary + " " + doc.Content)
-			s.vec.Insert(doc.ID, doc.Summary, vec, nil)
-		}
-	}
-}
-
-// removeDoc 从内存索引和磁盘删除文档。
-// 调用方必须已持有 s.mu 写锁。
 func (s *Store) removeDoc(id string) {
 	delete(s.docs, id)
-	s.vec.Remove(id)
-	path := filepath.Join(s.dir, id+".json")
-	os.Remove(path)
+	if s.tfidfIdx != nil {
+		s.tfidfIdx.Remove(id)
+	}
+	os.Remove(filepath.Join(s.dir, id+".json"))
 }
 
 func (s *Store) loadAll() error {
@@ -523,63 +483,43 @@ func (s *Store) loadAll() error {
 	if err != nil {
 		return err
 	}
-
 	for _, e := range entries {
 		if !strings.HasSuffix(e.Name(), ".json") || !strings.HasPrefix(e.Name(), "doc_") {
 			continue
 		}
-		path := filepath.Join(s.dir, e.Name())
-		data, err := os.ReadFile(path)
+		data, err := os.ReadFile(filepath.Join(s.dir, e.Name()))
 		if err != nil {
 			continue
 		}
 		var doc Doc
-		if err := json.Unmarshal(data, &doc); err != nil {
+		if json.Unmarshal(data, &doc) != nil || doc.ID == "" {
 			continue
 		}
 		s.docs[doc.ID] = &doc
-		s.summaries = append(s.summaries, doc.Summary)
+		// 缓存文本，延迟训练（确保TFIDF在首次需要时才加载）
+		s.trainTexts = append(s.trainTexts, doc.ID, doc.Summary+" "+doc.Content)
 	}
-
-	// 训练向量化器
-	if len(s.summaries) > 0 {
-		s.veczer.Train(s.summaries)
-	}
-
-	// 重建向量索引
-	for _, doc := range s.docs {
-		vec := doc.Vector
-		if vec == nil {
-			vec = s.veczer.Vectorize(doc.Summary + " " + doc.Content)
-		}
-		s.vec.Insert(doc.ID, doc.Summary, vec, nil)
-	}
-
 	return nil
 }
 
 func (s *Store) flush() {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-
 	if !s.dirty {
 		return
 	}
-
 	for _, doc := range s.docs {
-		path := filepath.Join(s.dir, doc.ID+".json")
-		data, err := json.MarshalIndent(doc, "", "  ")
-		if err != nil {
-			continue
-		}
-		os.WriteFile(path, data, 0644)
+		data, _ := json.MarshalIndent(doc, "", "  ")
+		os.WriteFile(filepath.Join(s.dir, doc.ID+".json"), data, 0644)
 	}
 	s.dirty = false
 }
 
+// ——— 内部工具函数（从上下文提炼文档所需）———
+
 type ToolResultItem struct {
-	Name   string
-	Output string
+	Name   string `json:"name"`
+	Output string `json:"output"`
 }
 
 type ContextEntry struct {
@@ -588,19 +528,20 @@ type ContextEntry struct {
 	Content     string
 	Response    string
 	ToolResults []ToolResultItem
-	Media       []string
+	Blocks      []memory.MemoryBlock // 一等记忆块随事件一起迁移到文档
 }
 
-func mediaDigestsFromEntries(entries []ContextEntry) []string {
+func blocksFromEntries(entries []ContextEntry) []memory.MemoryBlock {
 	seen := make(map[string]bool)
-	var out []string
+	var out []memory.MemoryBlock
 	for _, e := range entries {
-		for _, d := range e.Media {
-			if d == "" || seen[d] {
+		for i := range e.Blocks {
+			b := e.Blocks[i]
+			if b.ID == "" || seen[b.ID] {
 				continue
 			}
-			seen[d] = true
-			out = append(out, d)
+			seen[b.ID] = true
+			out = append(out, b)
 		}
 	}
 	return out
@@ -635,14 +576,12 @@ func summarizeEntries(entries []ContextEntry, cleanText func(string) string, too
 			topics = append(topics, toolWords...)
 		}
 	}
-
 	summary := fmt.Sprintf("来自 %d 个来源的 %d 条对话", len(sources), len(entries))
 	var srcList []string
 	for s := range sources {
 		srcList = append(srcList, s)
 	}
 	summary += " (" + strings.Join(srcList, ", ") + ")"
-
 	if len(topics) > 0 {
 		seen := make(map[string]bool)
 		var uniq []string
@@ -657,7 +596,6 @@ func summarizeEntries(entries []ContextEntry, cleanText func(string) string, too
 		}
 		summary += " 涉及: " + strings.Join(uniq, ", ")
 	}
-
 	return summary
 }
 
@@ -730,25 +668,20 @@ func extractEntities(entries []ContextEntry, cleanText func(string) string, tool
 			}
 		}
 	}
-	if len(entities) > 20 {
-		entities = entities[:20]
-	}
 	return entities
 }
 
 func truncate(s string, max int) string {
-	runes := []rune(s)
-	if len(runes) > max {
-		return string(runes[:max]) + "..."
+	if len([]rune(s)) <= max {
+		return s
 	}
-	return s
+	return string([]rune(s)[:max]) + "..."
 }
 
 func simpleHash(s string) string {
-	// 简单的基于内容的哈希，用于去重
-	h := 0
-	for _, r := range s {
-		h = h*31 + int(r)
+	h := fmt.Sprintf("%x", len(s))
+	for _, c := range s {
+		h += fmt.Sprintf("%x", c)
 	}
-	return fmt.Sprintf("h%08x", h)
+	return h
 }

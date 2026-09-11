@@ -24,10 +24,10 @@ import (
 	logpkg "gitcode.com/JianFeeeee/HomeAgent/internal/log"
 	luapkg "gitcode.com/JianFeeeee/HomeAgent/internal/lua"
 	"gitcode.com/JianFeeeee/HomeAgent/internal/memory"
-	"gitcode.com/JianFeeeee/HomeAgent/internal/memory/clip"
 	"gitcode.com/JianFeeeee/HomeAgent/internal/memory/document"
 	"gitcode.com/JianFeeeee/HomeAgent/internal/memory/media"
 	"gitcode.com/JianFeeeee/HomeAgent/internal/memory/pipeline"
+	"gitcode.com/JianFeeeee/HomeAgent/internal/memory/qwen"
 	"gitcode.com/JianFeeeee/HomeAgent/internal/memory/social"
 	"gitcode.com/JianFeeeee/HomeAgent/internal/memory/text"
 	"gitcode.com/JianFeeeee/HomeAgent/internal/memory/vector"
@@ -327,15 +327,13 @@ func main() {
 		log.Printf("[homed] warning: document store: %v", err)
 	}
 
-	// 媒体存储（内容寻址）：对话里出现的图片/音频按 sha256 落盘去重，
-	// L0/L2/L3 只记 digest。开关默认开；关闭后全部媒体接线静默跳过，
-	// 对话行为与本特性上线前完全一致。
+	// 媒体存储（内容寻址）：记忆块的内容后端。
+	// 开关默认开；关闭后全部媒体接线静默跳过，对话行为与本特性上线前一致。
 	var mediaStore *media.Store
 	if cfgReg.GetBool("core.memory.media.enabled", true) {
 		mediaDir := cfgReg.GetString("core.memory.media.dir",
 			filepath.Join(cfg.Daemon.DataDir, "memory", "media"))
-		maxMB := cfgReg.GetInt("core.memory.media.max_mb", 2048)
-		ms, err := media.New(mediaDir, int64(maxMB)*1024*1024)
+		ms, err := media.New(mediaDir)
 		if err != nil {
 			// 媒体存储开不起来不该阻止启动——它是记忆增强，不是对话必需品
 			log.Printf("[homed] warning: media store: %v（媒体记忆已禁用）", err)
@@ -343,32 +341,32 @@ func main() {
 			mediaStore = ms
 			defer mediaStore.Close()
 			st := mediaStore.Stats()
-			log.Printf("[homed] media store active: %v 条 / %v 字节（上限 %d MB）",
-				st["count"], st["total_bytes"], maxMB)
+			log.Printf("[homed] media store active: %v 条 / %v 字节",
+				st["count"], st["total_bytes"])
 		}
 	}
 
 	// 统一多模态向量空间（可选）。
 	//
 	// 两条路径共享同一套基础设施（L0/L2/L3 向量缓存、media.Store 坐标、
-	// QueryMemoryMediaScored 检索），只是「算向量的源头」不同：
-	//   - onnx：内嵌 ONNX 模型（如 CLIP）
+	// QueryMediaScored 检索），只是「算向量的源头」不同：
+	//   - onnx：内嵌 Qwen3-VL 完整图文共享空间
 	//   - http：外部向量 API 服务（Jina / OpenAI / 自建）
 	// type 为空时禁用多模态向量检索，退回纯 fastText 文本路径。
 	var multimodalSpace vector.MultimodalEmbedder
 	switch mmType := cfgReg.GetString("core.memory.multimodal_space.type", ""); mmType {
 	case "onnx":
-		if clipDir := cfgReg.GetString("core.memory.media.clip_model_dir", ""); clipDir != "" {
-			e, err := clip.New(clipDir)
+		if modelDir := cfgReg.GetString("core.memory.multimodal_space.onnx.model_dir", ""); modelDir != "" {
+			e, err := qwen.New(modelDir)
 			if err != nil {
-				log.Printf("[homed] warning: onnx embedder load failed: %v（多模态向量检索已禁用）", err)
+				log.Printf("[homed] warning: qwen multimodal embedder load failed: %v（多模态向量检索已禁用）", err)
 			} else {
 				multimodalSpace = e
 				defer e.Close()
-				log.Printf("[homed] multimodal space (onnx) active: dim=%d fp=%s", e.Dim(), e.Fingerprint()[:min(12, len(e.Fingerprint()))])
+				log.Printf("[homed] multimodal space (qwen onnx) active: dim=%d fp=%s", e.Dim(), e.Fingerprint()[:min(12, len(e.Fingerprint()))])
 			}
 		} else {
-			log.Println("[homed] multimodal_space.type=onnx 但未配置 clip_model_dir，多模态向量检索已禁用")
+			log.Println("[homed] multimodal_space.type=onnx 但未配置 onnx.model_dir，多模态向量检索已禁用")
 		}
 	case "http":
 		dim := cfgReg.GetInt("core.memory.multimodal_space.http.dimension", 0)
@@ -376,7 +374,7 @@ func main() {
 		if dim > 0 && ep != "" {
 			e, err := vector.NewHTTPEmbedder(vector.HTTPEmbedderConfig{
 				Endpoint:    ep,
-				APIKey:     cfgReg.GetString("core.memory.multimodal_space.http.api_key", ""),
+				APIKey:      cfgReg.GetString("core.memory.multimodal_space.http.api_key", ""),
 				Model:       cfgReg.GetString("core.memory.multimodal_space.http.model", ""),
 				Dimension:   dim,
 				Timeout:     cfgReg.GetDuration("core.memory.multimodal_space.http.timeout", 30*time.Second),
@@ -397,7 +395,6 @@ func main() {
 			log.Printf("[homed] warning: 未知 multimodal_space.type=%q，多模态向量检索已禁用", mmType)
 		}
 	}
-
 
 	ks := knowledge.NewStore(filepath.Join(cfg.Daemon.DataDir, "knowledge"))
 	if err := ks.Start(); err != nil {
@@ -508,8 +505,6 @@ func main() {
 		SocialStore:        socialStore,
 		TextMemory:         textMem,
 		MediaStore:         mediaStore,
-		MediaGCInterval:    cfgReg.GetDuration("core.memory.media.gc_interval", 6*time.Hour),
-		MediaGCMinAge:      cfgReg.GetDuration("core.memory.media.gc_min_age", time.Hour),
 		MediaDescribe:      cfgReg.GetBool("core.memory.media.describe_on_ingest", false),
 		Personality:        personality,
 		PluginReg:          pluginReg,
@@ -521,7 +516,7 @@ func main() {
 		ContextSavePath:    filepath.Join(cfg.Daemon.DataDir, "memory", "context.json"),
 		EmbeddingModelPath: cfgReg.GetString("core.agent.embedding_model_path", ""),
 		Embedder:           embedder,
-		MultimodalSpace:     multimodalSpace,
+		MultimodalSpace:    multimodalSpace,
 		StageHost:          stageHost,
 		EventBus:           evBus,
 		ThinkingEnabled:    cfg.LLM.ThinkingEnabled,
