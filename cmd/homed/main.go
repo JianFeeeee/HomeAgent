@@ -48,6 +48,7 @@ import (
 
 	// 空白导入内置 provider：它们各自在 init 里注册到 pkg/embedding。
 	// 想把核心换成自己的模型，只需替换这一行（或另建一个发行版 main）。
+	_ "gitcode.com/JianFeeeee/HomeAgent/providers/chineseclip"
 	_ "gitcode.com/JianFeeeee/HomeAgent/providers/qwen3vl"
 )
 
