@@ -2,12 +2,15 @@ package core
 
 import (
 	"context"
+	"fmt"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"gitcode.com/JianFeeeee/HomeAgent/internal/memory"
 	"gitcode.com/JianFeeeee/HomeAgent/internal/memory/document"
 	"gitcode.com/JianFeeeee/HomeAgent/internal/memory/media"
+	"gitcode.com/JianFeeeee/HomeAgent/internal/memory/vector"
 )
 
 // 媒体与记忆块的生命周期测试。
@@ -78,6 +81,53 @@ func TestHeldMediaDigests_CollectsAcrossLayers(t *testing.T) {
 	}
 	if held[d4] {
 		t.Errorf("无人持有的 %s 不该出现在结果里", shortDigest(d4))
+	}
+}
+
+// fakeSpace 是一个只覆盖图像的假统一空间，用来验证「不在本空间」与
+// 「本次失败」必须被区分对待。
+type fakeSpace struct{}
+
+func (fakeSpace) VectorizeDense(string) ([]float64, error) { return []float64{1, 0}, nil }
+
+func (fakeSpace) EmbedImageDense(_ []byte, mime string) ([]float64, error) {
+	if strings.HasPrefix(mime, "audio/") || strings.HasPrefix(mime, "video/") {
+		return nil, fmt.Errorf("%w: %s", vector.ErrModalityUnsupported, mime)
+	}
+	return []float64{1, 0}, nil
+}
+
+func (fakeSpace) Fingerprint() string { return "fake-space" }
+func (fakeSpace) Dim() int            { return 2 }
+func (fakeSpace) Loaded() bool        { return true }
+func (fakeSpace) Close()              {}
+
+// TestReembedStaleMedia_SkipsUnsupportedWithoutFaking 验证向量迁移不会：
+//   - 把音频当失败反复重试；
+//   - 更不能拿另一个模型的向量顶替音频（那会污染统一空间且静默）。
+func TestReembedStaleMedia_SkipsUnsupportedWithoutFaking(t *testing.T) {
+	a, ms := newMediaLoopAgent(t)
+	img, _ := ms.Put([]byte("img-bytes"), media.Item{MIME: "image/png"})
+	aud, _ := ms.Put([]byte("aud-bytes"), media.Item{MIME: "audio/wav"})
+
+	a.multimodalSpace = fakeSpace{}
+	a.reembedStaleMedia()
+
+	it, err := ms.Stat(img)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(it.Vec) != 2 || it.VecModel != "fake-space" {
+		t.Fatalf("图像应拿到本空间向量，实际 vec=%v model=%q", it.Vec, it.VecModel)
+	}
+
+	audIt, err := ms.Stat(aud)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(audIt.Vec) != 0 || audIt.VecModel != "" {
+		t.Fatalf("音频不得被写入任何向量（不能用别的模型顶替），实际 vec=%v model=%q",
+			audIt.Vec, audIt.VecModel)
 	}
 }
 
