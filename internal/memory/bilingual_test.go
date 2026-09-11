@@ -7,11 +7,11 @@ import (
 )
 
 type bilingualEvent struct {
-	idx     int
-	source  string
-	topic   string
-	text    string // cleaned text for vectorization
-	label   string // short description
+	idx    int
+	source string
+	topic  string
+	text   string // cleaned text for vectorization
+	label  string // short description
 }
 
 func TestBilingualPruningAccuracy(t *testing.T) {
@@ -40,16 +40,16 @@ func TestBilingualPruningAccuracy(t *testing.T) {
 			t.Logf("%s: %d words", cfg.name, len(e.words))
 
 			type scored struct {
-				idx    int
-				topic  string
-				label  string
-				score  float64
+				idx   int
+				topic string
+				label string
+				score float64
 			}
 
 			queries := []struct {
-				q       string
-				qTopic  string
-				desc    string
+				q      string
+				qTopic string
+				desc   string
 			}{
 				{"老大说了关于 React 组件的事情", "老大私聊", "中英混合:老大+React"},
 				{"帮我查一下 Nginx 反向代理配置", "服务器运维", "中英混合:Nginx+反向代理"},
@@ -189,10 +189,10 @@ func TestBilingualVectorizeClean(t *testing.T) {
 
 func genBilingualEvents() []bilingualEvent {
 	entries := []struct {
-		topic   string
-		zh      string // Chinese description
-		en      string // English terms mixed in
-		source  string
+		topic  string
+		zh     string // Chinese description
+		en     string // English terms mixed in
+		source string
 	}{
 		{"大学招生", "河南医药大学录取分数线", "", "qq"},
 		{"大学招生", "医学院专业排名", "medical university ranking", "agent"},

@@ -70,7 +70,7 @@ func setupIntegrationWithProvider(t *testing.T, pm *agentAPI.ProviderManager) *t
 		t.Fatal(err)
 	}
 
-	docStore := doc.NewStore(filepath.Join(tmpDir, "documents"))
+	docStore := doc.NewStore(filepath.Join(tmpDir, "documents"), memory.TokenizeWords)
 	if err := docStore.Start(); err != nil {
 		t.Fatal(err)
 	}

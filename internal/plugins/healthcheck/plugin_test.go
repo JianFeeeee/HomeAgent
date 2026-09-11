@@ -322,7 +322,7 @@ func TestHealthcheckWithDocStore(t *testing.T) {
 	}
 	defer os.RemoveAll(tmpDir)
 
-	ds := doc.NewStore(tmpDir)
+	ds := doc.NewStore(tmpDir, memory.TokenizeWords)
 	if err := ds.Start(); err != nil {
 		t.Fatal(err)
 	}

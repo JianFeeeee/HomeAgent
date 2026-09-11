@@ -142,49 +142,12 @@ func TestDelete_UnknownDigestIsNoop(t *testing.T) {
 	}
 }
 
-func TestDescribe_OverwritesExplicitly(t *testing.T) {
-	s := newTestStore(t, 0)
-	d, _ := s.Put([]byte("img"), Item{MIME: "image/png"})
-
-	if err := s.Describe(d, "一只橘猫", "vis-a"); err != nil {
+func TestDescribe_Removed(t *testing.T) {
+	// 媒体不再有文字描述：描述式索引是废弃的就机制。
+	// 这里只保留一个编译期断言，确保 API 不会静默回归。
+	s := newTestStore(t)
+	if _, err := s.Put([]byte("img"), Item{MIME: "image/png"}); err != nil {
 		t.Fatal(err)
-	}
-	it, _ := s.Stat(d)
-	if it.Description != "一只橘猫" || it.DescribedBy != "vis-a" {
-		t.Fatalf("描述未写入: %+v", it)
-	}
-
-	// Describe 是显式操作，允许覆盖（换更强模型重描述）
-	if err := s.Describe(d, "一只橘色虎斑猫坐在窗台", "vis-b"); err != nil {
-		t.Fatal(err)
-	}
-	it, _ = s.Stat(d)
-	if !strings.Contains(it.Description, "虎斑") || it.DescribedBy != "vis-b" {
-		t.Fatalf("Describe 应覆盖旧描述: %+v", it)
-	}
-}
-
-func TestDescribe_UnknownDigestErrors(t *testing.T) {
-	s := newTestStore(t, 0)
-	err := s.Describe("deadbeef", "x", "y")
-	if err == nil {
-		t.Fatal("未知 digest 应报错而非静默成功")
-	}
-}
-
-func TestPut_DoesNotClobberExistingDescription(t *testing.T) {
-	// 先到的描述可能来自更强的模型；后到的空值不该把它冲掉。
-	s := newTestStore(t, 0)
-	data := []byte("img")
-	d, _ := s.Put(data, Item{MIME: "image/png", Description: "详细描述", DescribedBy: "strong-model"})
-
-	// 第二次 Put 同内容但不带描述
-	if _, err := s.Put(data, Item{MIME: "image/png"}); err != nil {
-		t.Fatal(err)
-	}
-	it, _ := s.Stat(d)
-	if it.Description != "详细描述" || it.DescribedBy != "strong-model" {
-		t.Fatalf("重复 Put 的空描述不该冲掉已有描述: %+v", it)
 	}
 }
 
@@ -206,47 +169,22 @@ func TestPut_BackfillsMissingDimensions(t *testing.T) {
 	}
 }
 
-func TestSearch_FiltersByDescriptionAndKind(t *testing.T) {
-	s := newTestStore(t, 0)
-	di, _ := s.Put([]byte("chart-img"), Item{MIME: "image/png"})
-	da, _ := s.Put([]byte("speech-aud"), Item{MIME: "audio/wav"})
-	dn, _ := s.Put([]byte("no-desc"), Item{MIME: "image/png"})
-	s.Describe(di, "一张蓝色的柱状图表", "vis")
-	s.Describe(da, "一段关于图表的讲解录音", "aud")
+func TestStats_CountsByKind(t *testing.T) {
+	s := newTestStore(t)
+	s.Put([]byte("i1"), Item{MIME: "image/png"})
+	s.Put([]byte("i2"), Item{MIME: "image/jpeg"})
+	s.Put([]byte("a1"), Item{MIME: "audio/wav"})
 
-	all, err := s.Search("图表", "", 10)
-	if err != nil {
-		t.Fatal(err)
+	st := s.Stats()
+	if st["count"].(int) != 3 {
+		t.Fatalf("count 应为 3，实际 %v", st["count"])
 	}
-	if len(all) != 2 {
-		t.Fatalf("两条描述都含「图表」，应返回 2，实际 %d", len(all))
+	if _, ok := st["described"]; ok {
+		t.Fatal("媒体已不再有描述计数")
 	}
-
-	imgs, _ := s.Search("图表", KindImage, 10)
-	if len(imgs) != 1 || imgs[0].Digest != di {
-		t.Fatalf("按 image 过滤应只剩图片，实际 %d 条", len(imgs))
-	}
-
-	// 无描述的项不该出现在语义检索结果里
-	for _, it := range all {
-		if it.Digest == dn {
-			t.Fatal("无描述的项不该被 Search 返回")
-		}
-	}
-}
-
-func TestPending_ReturnsUndescribed(t *testing.T) {
-	s := newTestStore(t, 0)
-	described, _ := s.Put([]byte("has-desc"), Item{MIME: "image/png"})
-	undescribed, _ := s.Put([]byte("needs-desc"), Item{MIME: "image/png"})
-	s.Describe(described, "已有描述", "vis")
-
-	pending, err := s.Pending(10)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(pending) != 1 || pending[0].Digest != undescribed {
-		t.Fatalf("应只返回未描述项，实际 %d 条", len(pending))
+	byKind := st["by_kind"].(map[string]int)
+	if byKind["image"] != 2 || byKind["audio"] != 1 {
+		t.Fatalf("by_kind 不对: %v", byKind)
 	}
 }
 
@@ -278,28 +216,8 @@ func TestParseDataURL(t *testing.T) {
 	}
 }
 
-func TestStats_CountsByKindAndDescription(t *testing.T) {
-	s := newTestStore(t, 4096)
-	d1, _ := s.Put([]byte("i1"), Item{MIME: "image/png"})
-	s.Put([]byte("i2"), Item{MIME: "image/jpeg"})
-	s.Put([]byte("a1"), Item{MIME: "audio/wav"})
-	s.Describe(d1, "描述", "vis")
-
-	st := s.Stats()
-	if st["count"].(int) != 3 {
-		t.Fatalf("count 应为 3，实际 %v", st["count"])
-	}
-	if st["described"].(int) != 1 {
-		t.Fatalf("described 应为 1，实际 %v", st["described"])
-	}
-	byKind := st["by_kind"].(map[string]int)
-	if byKind["image"] != 2 || byKind["audio"] != 1 {
-		t.Fatalf("by_kind 不对: %v", byKind)
-	}
-}
-
 func TestPut_RejectsEmpty(t *testing.T) {
-	s := newTestStore(t, 0)
+	s := newTestStore(t)
 	if _, err := s.Put(nil, Item{MIME: "image/png"}); err == nil {
 		t.Fatal("空内容应报错")
 	}
@@ -313,7 +231,7 @@ func TestReopen_PersistsAcrossRestart(t *testing.T) {
 		t.Fatal(err)
 	}
 	d, _ := s1.Put([]byte("persistent-img"), Item{MIME: "image/png", OriginPath: "/tmp/x.png"})
-	s1.Describe(d, "跨重启的描述", "vis")
+	s1.SetVec(d, []float64{0.1, 0.2}, "test-space")
 	s1.Close()
 
 	s2, err := New(dir)
@@ -326,8 +244,8 @@ func TestReopen_PersistsAcrossRestart(t *testing.T) {
 	if err != nil {
 		t.Fatalf("重开后应能查到: %v", err)
 	}
-	if it.Description != "跨重启的描述" {
-		t.Fatalf("元数据应持久化: %+v", it)
+	if it.OriginPath != "/tmp/x.png" || len(it.Vec) != 2 || it.VecModel != "test-space" {
+		t.Fatalf("元数据与向量应持久化: %+v", it)
 	}
 	data, err := s2.Get(d)
 	if err != nil || string(data) != "persistent-img" {
@@ -335,38 +253,26 @@ func TestReopen_PersistsAcrossRestart(t *testing.T) {
 	}
 }
 
-func TestPending_ExcludesAttemptedButUndescribable(t *testing.T) {
-	// 「已尝试但无法描述」的项必须退出待描述队列。
-	//
-	// 这些项被标记为 described_by=unsupported/content-missing 而 description
-	// 仍为空。若 Pending 只看 description，它们每轮都会被取出来重试、
-	// 永久占着 LIMIT 的名额，真正需要描述的新项永远轮不到。
-	s := newTestStore(t, 0)
+func TestStaleVecDigests_TracksModelSwitch(t *testing.T) {
+	// 模型切换后旧向量必须被重算：StaleVecDigests 是启动迁移的入口。
+	s := newTestStore(t)
+	d1, _ := s.Put([]byte("a"), Item{MIME: "image/png"})
+	d2, _ := s.Put([]byte("b"), Item{MIME: "image/png"})
+	s.SetVec(d1, []float64{0.1}, "space-a")
 
-	fresh, _ := s.Put([]byte("needs-describe"), Item{MIME: "image/png"})
-	unsupported, _ := s.Put([]byte("cannot-describe"), Item{MIME: "application/octet-stream"})
-	described, _ := s.Put([]byte("已描述"), Item{MIME: "image/png"})
-
-	// 标记「尝试过但不支持」：description 空，described_by 非空
-	if err := s.Describe(unsupported, "", "unsupported"); err != nil {
-		t.Fatal(err)
-	}
-	if err := s.Describe(described, "一张图", "visionllm"); err != nil {
-		t.Fatal(err)
-	}
-
-	pending, err := s.Pending(10)
+	stale, err := s.StaleVecDigestsAll("space-a")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(pending) != 1 {
-		var names []string
-		for _, p := range pending {
-			names = append(names, shortDigest(p.Digest))
-		}
-		t.Fatalf("应只剩 1 条待描述，实际 %d 条: %v", len(pending), names)
+	if len(stale) != 1 || stale[0] != d2 {
+		t.Fatalf("只有未嵌入的 d2 需重算，实际 %v", stale)
 	}
-	if pending[0].Digest != fresh {
-		t.Fatalf("待描述的应是未处理项，实际 %s", shortDigest(pending[0].Digest))
+
+	stale, err = s.StaleVecDigestsAll("space-b")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(stale) != 2 {
+		t.Fatalf("换空间后两条都需重算，实际 %v", stale)
 	}
 }

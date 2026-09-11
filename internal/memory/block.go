@@ -40,7 +40,7 @@ type MemoryBlock struct {
 }
 
 // MemoryBlockEdge 是 L3 中连接一等记忆节点的结构化语义边。
-// source/target kind 当前允许 block、entity、sentence。
+// source/target kind 当前允许 block、entity、sentence、document。
 type MemoryBlockEdge struct {
 	ID         int64     `json:"id"`
 	SourceKind string    `json:"source_kind"`
@@ -111,6 +111,19 @@ func (g *GraphDB) PutMemoryBlocks(blocks []MemoryBlock) error {
 	return tx.Commit()
 }
 
+// PutDocumentNode 在 L3 登记一个文档节点，作为 document --contains--> block
+// 结构边的端点。文档正文已蒸馏为实体/关系，这里只保留身份与摘要。
+func (g *GraphDB) PutDocumentNode(id, summary string) error {
+	if id == "" {
+		return fmt.Errorf("document node id is required")
+	}
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	_, err := g.db.Exec(`INSERT INTO documents (id, summary) VALUES (?, ?)
+		ON CONFLICT(id) DO UPDATE SET summary = excluded.summary`, id, summary)
+	return err
+}
+
 // MemoryBlocks 查询 Graph 层实际持有的一等记忆节点。
 func (g *GraphDB) MemoryBlocks() ([]MemoryBlock, error) {
 	g.mu.RLock()
@@ -144,7 +157,7 @@ func (g *GraphDB) MemoryBlocks() ([]MemoryBlock, error) {
 }
 
 func validGraphNodeKind(kind string) bool {
-	return kind == "block" || kind == "entity" || kind == "sentence"
+	return kind == "block" || kind == "entity" || kind == "sentence" || kind == "document"
 }
 
 func graphNodeExists(tx *sql.Tx, kind, id string) (bool, error) {
@@ -157,6 +170,8 @@ func graphNodeExists(tx *sql.Tx, kind, id string) (bool, error) {
 		err = tx.QueryRow(`SELECT COUNT(*) FROM entities WHERE CAST(id AS TEXT) = ?`, id).Scan(&n)
 	case "sentence":
 		err = tx.QueryRow(`SELECT COUNT(*) FROM sentences WHERE CAST(id AS TEXT) = ?`, id).Scan(&n)
+	case "document":
+		err = tx.QueryRow(`SELECT COUNT(*) FROM documents WHERE id = ?`, id).Scan(&n)
 	default:
 		return false, fmt.Errorf("invalid graph node kind %q", kind)
 	}

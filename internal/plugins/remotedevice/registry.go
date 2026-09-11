@@ -104,8 +104,7 @@ var capabilityTools = map[string][]string{
 
 // compatFullCaps 视为「全能力」的历史 caps 值：声明了这些的设备不参与能力裁剪。
 var compatFullCaps = map[string]bool{
-	"cmd": true, "cmdrun": true, "deviceinfo": true,
-	"status": true, "cmdresult": true,
+	"cmd": true, "cmdrun": true, "cmdresult": true,
 }
 
 // SupportsTool 判断设备是否支持某 agent 工具（基于其声明的 caps）。
@@ -400,10 +399,15 @@ func (r *Registry) PushData(deviceID, reqID, kind, mime string, data []byte) err
 	return nil
 }
 
-// AwaitResult 等待某请求的结果（带超时）。
+// AwaitResult 等待某请求的结果（带超时）。快速回执会先留在 results，
+// 因而 PushCmd 后才开始等待也不会丢失。
 func (r *Registry) AwaitResult(reqID string, timeout time.Duration) (map[string]interface{}, error) {
 	ch := make(chan map[string]interface{}, 1)
 	r.mu.Lock()
+	if e, ok := r.results[reqID]; ok {
+		r.mu.Unlock()
+		return e.Result, nil
+	}
 	r.cmdPending[reqID] = ch
 	r.mu.Unlock()
 	defer func() {
@@ -419,11 +423,15 @@ func (r *Registry) AwaitResult(reqID string, timeout time.Duration) (map[string]
 	}
 }
 
-// deliverResult 设备回执结果时由 handleWS 调用。
+// deliverResult 先留档再通知等待者，消除设备极速回执早于 AwaitResult 的竞态。
 func (r *Registry) deliverResult(reqID string, res map[string]interface{}) {
-	r.mu.RLock()
+	r.mu.Lock()
+	if r.results == nil {
+		r.results = make(map[string]resultEntry)
+	}
+	r.results[reqID] = resultEntry{Result: res, Time: time.Now()}
 	ch, ok := r.cmdPending[reqID]
-	r.mu.RUnlock()
+	r.mu.Unlock()
 	if ok {
 		select {
 		case ch <- res:
@@ -622,6 +630,9 @@ func (r *Registry) ServeWS(w http.ResponseWriter, req *http.Request) {
 	}
 	token := req.URL.Query().Get("token")
 	if token == "" {
+		token = strings.TrimSpace(req.Header.Get("X-API-Key"))
+	}
+	if token == "" {
 		for _, p := range req.Header.Values("Sec-WebSocket-Protocol") {
 			if strings.HasPrefix(p, "homeagent.") {
 				token = strings.TrimPrefix(p, "homeagent.")
@@ -629,7 +640,8 @@ func (r *Registry) ServeWS(w http.ResponseWriter, req *http.Request) {
 			}
 		}
 	}
-	if token != "" && !r.acceptBind(token) {
+	handshakeAuthorized := token != "" && r.acceptBind(token)
+	if token != "" && !handshakeAuthorized {
 		http.Error(w, "unauthorized", http.StatusUnauthorized)
 		return
 	}
@@ -639,7 +651,7 @@ func (r *Registry) ServeWS(w http.ResponseWriter, req *http.Request) {
 		return
 	}
 	log.Printf("[remotedevice] ws connected from %s", conn.RemoteAddr())
-	go r.handleWS(conn, rw)
+	go r.handleWS(conn, rw, handshakeAuthorized)
 }
 
 // wsWriteLocked 在指定设备连接的写锁保护下执行写回调。
@@ -662,12 +674,20 @@ func (r *Registry) wsWriteLocked(deviceID string, fn func(w *bufio.Writer) error
 	return fn(w)
 }
 
-func (r *Registry) handleWS(conn net.Conn, rw *bufio.ReadWriter) {
+func (r *Registry) handleWS(conn net.Conn, rw *bufio.ReadWriter, handshakeAuthorized bool) {
 	defer conn.Close()
 	var curID string
+	var pendingMeta *DeviceMeta
+	var bound bool
 	defer func() {
 		if curID != "" {
-			r.markOffline(curID)
+			if bound {
+				r.markOffline(curID)
+			} else {
+				r.mu.Lock()
+				delete(r.conns, curID)
+				r.mu.Unlock()
+			}
 		}
 	}()
 
@@ -697,9 +717,12 @@ func (r *Registry) handleWS(conn net.Conn, rw *bufio.ReadWriter) {
 				dataAccum.chunks = append(dataAccum.chunks, payload)
 				dataAccum.got += len(payload)
 				// 防滥用：超出声明 total 的 2 倍或硬上限 64MB 时放弃聚合
-				limit := int64(dataAccum.total)*2 + 1024
-				if limit < 64<<20 {
-					limit = 64 << 20
+				limit := int64(64 << 20)
+				if dataAccum.total > 0 {
+					declaredLimit := int64(dataAccum.total)*2 + 1024
+					if declaredLimit < limit {
+						limit = declaredLimit
+					}
 				}
 				if int64(dataAccum.got) > limit {
 					log.Printf("[remotedevice] data accumulation exceeded limit for req %s, dropped", dataAccum.reqID)
@@ -713,6 +736,9 @@ func (r *Registry) handleWS(conn net.Conn, rw *bufio.ReadWriter) {
 			continue
 		}
 		op, _ := msg["op"].(string)
+		if !bound && op != "hello" && op != "bind" {
+			continue
+		}
 		switch op {
 		case "hello":
 			meta := metaFromMsg(msg)
@@ -720,41 +746,35 @@ func (r *Registry) handleWS(conn net.Conn, rw *bufio.ReadWriter) {
 				continue
 			}
 			meta.RemoteAddr = conn.RemoteAddr().String()
+			pendingMeta = &meta
 			curID = meta.DeviceID
-			r.register(meta)
-			r.mu.Lock()
-			r.conns[meta.DeviceID] = &wconn{deviceID: meta.DeviceID, w: rw.Writer}
-			r.mu.Unlock()
-			if err := r.wsWriteLocked(meta.DeviceID, func(w *bufio.Writer) error {
-				return writeText(w, mustJSON(map[string]interface{}{
-					"op":     "hello_ack",
-					"device": meta.DeviceID,
-					"online": true,
-				}))
-			}); err != nil {
+			// Bind 前不把连接暴露给查询或命令下发路径；此时只有当前读循环会写。
+			if err := writeText(rw.Writer, mustJSON(map[string]interface{}{
+				"op":     "hello_ack",
+				"device": meta.DeviceID,
+				"online": false,
+			})); err != nil {
 				return
 			}
 		case "bind":
 			token, _ := msg["token"].(string)
-			if r.acceptBind(token) {
-				id, _ := msg["device_id"].(string)
-				if id != "" {
-					// 默认不授权：bind 仅验证 token + 登记设备；授权完全由用户手动
-					// （GUI 设备页 / REST /api/v1/device/auth）控制，绝不自动授权。
-				}
-				err := r.wsWriteLocked(curID, func(w *bufio.Writer) error {
-					return writeText(w, mustJSON(map[string]interface{}{"op": "bind_ack", "ok": true}))
-				})
-				if err != nil {
-					return
-				}
-			} else {
-				err := r.wsWriteLocked(curID, func(w *bufio.Writer) error {
-					return writeText(w, mustJSON(map[string]interface{}{"op": "bind_ack", "ok": false, "error": "bad token"}))
-				})
-				if err != nil {
-					return
-				}
+			id, _ := msg["device_id"].(string)
+			bindAuthorized := handshakeAuthorized || r.acceptBind(token)
+			if pendingMeta == nil || id == "" || id != pendingMeta.DeviceID || !bindAuthorized {
+				_ = writeText(rw.Writer, mustJSON(map[string]interface{}{
+					"op": "bind_ack", "ok": false, "error": "bind rejected",
+				}))
+				return
+			}
+			r.mu.Lock()
+			r.conns[id] = &wconn{deviceID: id, w: rw.Writer}
+			r.mu.Unlock()
+			bound = true
+			r.register(*pendingMeta)
+			if err := r.wsWriteLocked(curID, func(w *bufio.Writer) error {
+				return writeText(w, mustJSON(map[string]interface{}{"op": "bind_ack", "ok": true}))
+			}); err != nil {
+				return
 			}
 		case "status":
 			id, _ := msg["device_id"].(string)

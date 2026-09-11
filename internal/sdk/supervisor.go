@@ -16,10 +16,10 @@ type SupervisorAPI interface {
 
 // AgentStatus is a neutral snapshot of a supervised agent.
 type AgentStatus struct {
-	ID           types.AgentID             `json:"id"`
-	State        types.AgentState          `json:"state"`
-	Health       types.HealthStatus        `json:"health"`
-	Uptime       time.Duration             `json:"uptime,omitempty"`
-	Network      types.NetworkCheckResult  `json:"network,omitempty"`
-	TrackerStats map[string]interface{}    `json:"tracker_stats,omitempty"`
+	ID           types.AgentID            `json:"id"`
+	State        types.AgentState         `json:"state"`
+	Health       types.HealthStatus       `json:"health"`
+	Uptime       time.Duration            `json:"uptime,omitempty"`
+	Network      types.NetworkCheckResult `json:"network,omitempty"`
+	TrackerStats map[string]interface{}   `json:"tracker_stats,omitempty"`
 }

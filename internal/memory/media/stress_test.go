@@ -306,9 +306,9 @@ func TestStress_DeleteConcurrentWithReads(t *testing.T) {
 	}
 }
 
-func TestStress_DescribeConcurrentWithSearch(t *testing.T) {
-	// 描述写入与检索并发。C 部分的后台描述任务会长期这样跑。
-	s := newTestStore(t, 0)
+func TestStress_SetVecConcurrentWithQuery(t *testing.T) {
+	// 嵌入写入与向量检索并发（启动时的向量迁移就会长期这样跑）。
+	s := newTestStore(t)
 	const n = 60
 	digests := make([]string, n)
 	for i := range digests {
@@ -320,55 +320,52 @@ func TestStress_DescribeConcurrentWithSearch(t *testing.T) {
 	}
 
 	var wg sync.WaitGroup
-	var descErr, searchErr atomic.Int64
+	var writeErr, queryErr atomic.Int64
 
-	// 描述写入者
+	// 向量写入者
 	for w := 0; w < 4; w++ {
 		wg.Add(1)
 		go func(wid int) {
 			defer wg.Done()
 			for i := wid; i < n; i += 4 {
-				desc := fmt.Sprintf("第 %d 张图，含蓝色图表与文字", i)
-				if err := s.Describe(digests[i], desc, "vis-src"); err != nil {
-					descErr.Add(1)
+				vec := []float64{1, float64(i) / 100, 0}
+				if err := s.SetVec(digests[i], vec, "space"); err != nil {
+					writeErr.Add(1)
 				}
 			}
 		}(w)
 	}
 
-	// 检索者 + Pending 消费者
+	// 检索者
 	for r := 0; r < 3; r++ {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
 			for i := 0; i < 50; i++ {
-				if _, err := s.Search("图表", KindImage, 20); err != nil {
-					searchErr.Add(1)
-				}
-				if _, err := s.Pending(10); err != nil {
-					searchErr.Add(1)
+				if _, err := s.QueryMediaScored([]float64{1, 0, 0}, "space", 20); err != nil {
+					queryErr.Add(1)
 				}
 			}
 		}()
 	}
 	wg.Wait()
 
-	if v := descErr.Load(); v > 0 {
-		t.Fatalf("Describe 失败 %d 次", v)
+	if v := writeErr.Load(); v > 0 {
+		t.Fatalf("SetVec 失败 %d 次", v)
 	}
-	if v := searchErr.Load(); v > 0 {
-		t.Fatalf("Search/Pending 失败 %d 次", v)
+	if v := queryErr.Load(); v > 0 {
+		t.Fatalf("QueryMediaScored 失败 %d 次", v)
 	}
 
-	// 全部应已描述完
-	pending, err := s.Pending(1000)
+	// 全部应已嵌入，且都在同一空间
+	stale, err := s.StaleVecDigestsAll("space")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(pending) != 0 {
-		t.Fatalf("应全部描述完，仍有 %d 条未描述", len(pending))
+	if len(stale) != 0 {
+		t.Fatalf("应全部已嵌入，仍有 %d 条未嵌入", len(stale))
 	}
-	got, err := s.Search("图表", KindImage, 1000)
+	got, err := s.QueryMediaScored([]float64{1, 0, 0}, "space", 1000)
 	if err != nil {
 		t.Fatal(err)
 	}

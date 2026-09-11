@@ -12,8 +12,8 @@ import (
 
 // CrossModalHit 是跨模态检索融合后的一条候选。
 //
-// 统一的检索单元是记忆块而非 CAS 全库：媒体在 L0/L2/L3 都和文本一样有 owner，
-// 只有仍被某层记忆引用的媒体才可召回。Doc 是 L2 文档块；Media 是该块携带的
+// 统一的检索单元是记忆块而非 CAS 全库：媒体在 L0/L2/L3 都由层容器持有，
+// 只有仍被某层记忆块持有的媒体才可召回。Doc 是 L2 文档；Media 是该块携带的
 // 原生媒体坐标。两路分数尺度不同，融合前各自归一化，见 fuseCrossModal。
 type CrossModalHit struct {
 	Doc        *document.Doc // 文本路命中的文档；视觉路命中时为 nil
@@ -67,10 +67,10 @@ func (c CrossModalFusionConfig) minMaxEps() float64 {
 // retrieveCrossModal 是跨模态并行检索的统一入口。
 //
 // 策略（两路并行，召回真正最相似的）：
-//  1. 文本路：query 整段文本用现有方法（fastText/TF-IDF 稀疏 cosine）查文档层，
-//     每个命中文档再反查其关联媒体（docMediaContext）——描述文本命中即媒体命中。
-//  2. 视觉路：query 整段文本经多模态模型文本编码 → 与媒体库全部图像坐标比余弦
-//     （QueryMediaScored），覆盖描述文本没写到的视觉内容。
+//  1. 文本路：query 整段文本编码后查文档层（Doc.DenseVec 已融合其块的媒体向量），
+//     命中文档若持有媒体块，直接带上该块。
+//  2. 视觉路：query 经多模态模型文本编码 → 与媒体块向量比余弦
+//     （QueryMediaScored），覆盖文本向量没写到的视觉内容。
 //  3. 融合：两条路候选各自 min-max 归一化到 [0,1]，加权求和后降序，取 topK。
 //     同一媒体被两路同时命中视为双信号确认，额外加权。
 //
@@ -90,8 +90,7 @@ func (a *Agent) retrieveCrossModal(query string, topK int, cfg CrossModalFusionC
 	if a.docStore != nil {
 		for _, dh := range a.docStore.QueryScored(query, per) {
 			hit := CrossModalHit{Doc: dh.Doc, DocScore: dh.Score}
-			// 命中文档若持有一等记忆块，把首个媒体块一并带上：
-			// 描述文本命中 → 该媒体就是相关记忆，供后续展示/注入。
+			// 命中文档若持有一等记忆块，把首个媒体块一并带上。
 			if a.mediaStore != nil && len(dh.Doc.Blocks) > 0 {
 				if it, err := a.mediaStore.Stat(dh.Doc.Blocks[0].PayloadDigest); err == nil {
 					hit.Media = it
@@ -110,7 +109,13 @@ func (a *Agent) retrieveCrossModal(query string, topK int, cfg CrossModalFusionC
 		} else if mh, err := a.mediaStore.QueryMediaScored(qv, a.multimodalSpace.Fingerprint(), per); err != nil {
 			log.Printf("[crossmodal] 媒体记忆检索失败: %v", err)
 		} else {
+			// 只有仍被某层记忆块持有的媒体才可召回：CAS 是全库字节存储，
+			// 直接拿它的检索结果会把已无处可归的内容也从记忆里翻出来。
+			held := a.heldMediaDigests()
 			for _, h := range mh {
+				if h.Item == nil || !held[h.Item.Digest] {
+					continue
+				}
 				visualHits = append(visualHits, CrossModalHit{
 					Media: h.Item, MediaScore: h.Score,
 				})
@@ -228,8 +233,7 @@ func fuseCrossModal(textHits, visualHits []CrossModalHit, topK int, cfg CrossMod
 }
 
 // crossModalMarkdown 把融合候选渲染成注入上下文的文本。
-// 文档行对齐既有【相关记忆文档】格式；媒体行复用 mediaMarkerLine 的
-// `[<mime> <短digest>] <描述>` 格式（那是解析回媒体引用的唯一合法格式）。
+// 文档行给出摘要；媒体行只给 MIME + 短 digest（不再有生成的描述）。
 func (a *Agent) crossModalMarkdown(hits []CrossModalHit) string {
 	if len(hits) == 0 {
 		return ""
@@ -253,7 +257,7 @@ func (a *Agent) crossModalMarkdown(hits []CrossModalHit) string {
 			}
 		}
 		if h.Media != nil {
-			if line := a.mediaMarkerLine(h.Media.Digest); line != "" {
+			if line := mediaLabel(h.Media); line != "" {
 				parts = append(parts, line)
 			}
 		}

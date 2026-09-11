@@ -13,26 +13,26 @@ import (
 
 // contentPOS 有实义的词性标签：只保留名词/动词/形容词/专名等
 var contentPOS = map[string]bool{
-	"n":  true, // 普通名词
-	"nr": true, // 人名
-	"ns": true, // 地名
-	"nt": true, // 机构名
-	"nw": true, // 作品名/URL
-	"nz": true, // 其他专名
-	"v":  true, // 动词
-	"vd": true, // 副动词
-	"vn": true, // 名动词
-	"a":  true, // 形容词
-	"ad": true, // 副形词
-	"an": true, // 名形词
-	"i":  true, // 成语
-	"l":  true, // 习用语
-	"j":  true, // 简称
-	"s":  true, // 处所词
-	"f":  true, // 方位词
-	"b":  true, // 区别词
-	"z":  true, // 状态词
-	"t":  true, // 时间词
+	"n":   true, // 普通名词
+	"nr":  true, // 人名
+	"ns":  true, // 地名
+	"nt":  true, // 机构名
+	"nw":  true, // 作品名/URL
+	"nz":  true, // 其他专名
+	"v":   true, // 动词
+	"vd":  true, // 副动词
+	"vn":  true, // 名动词
+	"a":   true, // 形容词
+	"ad":  true, // 副形词
+	"an":  true, // 名形词
+	"i":   true, // 成语
+	"l":   true, // 习用语
+	"j":   true, // 简称
+	"s":   true, // 处所词
+	"f":   true, // 方位词
+	"b":   true, // 区别词
+	"z":   true, // 状态词
+	"t":   true, // 时间词
 	"eng": true, // 英文
 	"x":   true, // 非语素字
 	"zg":  true, // 其他

@@ -15,7 +15,7 @@ func TestInsertAndQuery(t *testing.T) {
 	}
 	defer os.RemoveAll(dir)
 
-	s := NewStore(dir)
+	s := NewStore(dir, memory.TokenizeWords)
 	if err := s.Start(); err != nil {
 		t.Fatal(err)
 	}
@@ -48,7 +48,7 @@ func TestQuery(t *testing.T) {
 	}
 	defer os.RemoveAll(dir)
 
-	s := NewStore(dir)
+	s := NewStore(dir, memory.TokenizeWords)
 	s.Start()
 	defer s.Stop()
 
@@ -73,7 +73,7 @@ func TestContextToDoc(t *testing.T) {
 	}
 	defer os.RemoveAll(dir)
 
-	s := NewStore(dir)
+	s := NewStore(dir, memory.TokenizeWords)
 	s.Start()
 	defer s.Stop()
 
@@ -104,7 +104,7 @@ func TestFindColdDocs(t *testing.T) {
 	}
 	defer os.RemoveAll(dir)
 
-	s := NewStore(dir)
+	s := NewStore(dir, memory.TokenizeWords)
 	s.Start()
 	defer s.Stop()
 
@@ -136,7 +136,7 @@ func TestRecentDocs(t *testing.T) {
 	}
 	defer os.RemoveAll(dir)
 
-	s := NewStore(dir)
+	s := NewStore(dir, memory.TokenizeWords)
 	s.Start()
 	defer s.Stop()
 
@@ -160,7 +160,7 @@ func TestReindex(t *testing.T) {
 	}
 	defer os.RemoveAll(dir)
 
-	s := NewStore(dir)
+	s := NewStore(dir, memory.TokenizeWords)
 	s.Start()
 	defer s.Stop()
 
@@ -211,7 +211,7 @@ func TestInsertEmptyDoc(t *testing.T) {
 	}
 	defer os.RemoveAll(dir)
 
-	s := NewStore(dir)
+	s := NewStore(dir, memory.TokenizeWords)
 	s.Start()
 	defer s.Stop()
 
@@ -232,13 +232,13 @@ func TestPersistence(t *testing.T) {
 	defer os.RemoveAll(dir)
 
 	// 写
-	s1 := NewStore(dir)
+	s1 := NewStore(dir, memory.TokenizeWords)
 	s1.Start()
 	s1.Insert(&Doc{Summary: "持久化测试", Content: "应该被保存到磁盘", Source: "manual"})
 	s1.Stop()
 
 	// 读
-	s2 := NewStore(dir)
+	s2 := NewStore(dir, memory.TokenizeWords)
 	s2.Start()
 	defer s2.Stop()
 
@@ -269,7 +269,7 @@ func TestFlushNoDirty(t *testing.T) {
 	}
 	defer os.RemoveAll(dir)
 
-	s := NewStore(dir)
+	s := NewStore(dir, memory.TokenizeWords)
 	s.Start()
 
 	// 不插任何文档，flush 不应报错
@@ -283,7 +283,7 @@ func TestRemove(t *testing.T) {
 	}
 	defer os.RemoveAll(dir)
 
-	s := NewStore(dir)
+	s := NewStore(dir, memory.TokenizeWords)
 	s.Start()
 	defer s.Stop()
 
@@ -329,7 +329,7 @@ func TestRemoveNonexistent(t *testing.T) {
 	}
 	defer os.RemoveAll(dir)
 
-	s := NewStore(dir)
+	s := NewStore(dir, memory.TokenizeWords)
 	s.Start()
 	defer s.Stop()
 
@@ -437,7 +437,7 @@ func TestContextToDocContentPreservesRawToolOutput(t *testing.T) {
 	}
 	defer os.RemoveAll(dir)
 
-	s := NewStore(dir)
+	s := NewStore(dir, memory.TokenizeWords)
 	s.Start()
 	defer s.Stop()
 

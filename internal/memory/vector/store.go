@@ -47,7 +47,7 @@ const (
 	ModalityVideo MultimodalModality = "video"
 )
 
-// ErrNotSupported 表示 Vectorizer 不支持图像嵌入，调用方按文本描述降级。
+// ErrNotSupported 表示 Vectorizer 不支持该原生模态；调用方不得以描述文本冒充其向量。
 var ErrNotSupported = fmt.Errorf("vectorizer does not support image embedding")
 
 // Vector 是带权特征映射：feature → weight

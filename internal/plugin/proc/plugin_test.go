@@ -52,8 +52,8 @@ func (f *fakeCoreSDK) PluginName() string                  { return "fake" }
 func (f *fakeCoreSDK) Settings() pubsdk.SettingsAPI        { return nil }
 func (f *fakeCoreSDK) Memory() pubsdk.MemoryAPI            { return nil }
 func (f *fakeCoreSDK) TextMemory() pubsdk.TextMemoryAPI    { return nil }
-func (f *fakeCoreSDK) DocMemory() pubsdk.DocMemoryAPI   { return f.docMem }
-func (f *fakeCoreSDK) Knowledge() pubsdk.KnowledgeAPI   { return f.knowledge }
+func (f *fakeCoreSDK) DocMemory() pubsdk.DocMemoryAPI      { return f.docMem }
+func (f *fakeCoreSDK) Knowledge() pubsdk.KnowledgeAPI      { return f.knowledge }
 func (f *fakeCoreSDK) LLM() pubsdk.LLMAPI                  { return nil }
 func (f *fakeCoreSDK) Social() pubsdk.SocialAPI            { return nil }
 func (f *fakeCoreSDK) PluginMgr() pubsdk.PluginMgrAPI      { return nil }
