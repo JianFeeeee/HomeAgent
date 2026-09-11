@@ -27,7 +27,6 @@ import (
 	"gitcode.com/JianFeeeee/HomeAgent/internal/memory/document"
 	"gitcode.com/JianFeeeee/HomeAgent/internal/memory/media"
 	"gitcode.com/JianFeeeee/HomeAgent/internal/memory/pipeline"
-	"gitcode.com/JianFeeeee/HomeAgent/internal/memory/qwen"
 	"gitcode.com/JianFeeeee/HomeAgent/internal/memory/social"
 	"gitcode.com/JianFeeeee/HomeAgent/internal/memory/text"
 	"gitcode.com/JianFeeeee/HomeAgent/internal/memory/vector"
@@ -44,7 +43,12 @@ import (
 	sdk "gitcode.com/JianFeeeee/HomeAgent/internal/sdk"
 	"gitcode.com/JianFeeeee/HomeAgent/internal/supervisor"
 	"gitcode.com/JianFeeeee/HomeAgent/internal/tracker"
+	"gitcode.com/JianFeeeee/HomeAgent/pkg/embedding"
 	"gitcode.com/JianFeeeee/HomeAgent/pkg/types"
+
+	// 空白导入内置 provider：它们各自在 init 里注册到 pkg/embedding。
+	// 想把核心换成自己的模型，只需替换这一行（或另建一个发行版 main）。
+	_ "gitcode.com/JianFeeeee/HomeAgent/providers/qwen3vl"
 )
 
 func main() {
@@ -346,53 +350,37 @@ func main() {
 		}
 	}
 
-	// 统一多模态向量空间（可选）。
+	// 统一多模态向量空间。
 	//
-	// 两条路径共享同一套基础设施（L0/L2/L3 向量缓存、media.Store 坐标、
-	// QueryMediaScored 检索），只是「算向量的源头」不同：
-	//   - onnx：内嵌 Qwen3-VL 完整图文共享空间
-	//   - http：外部向量 API 服务（Jina / OpenAI / 自建）
-	// type 为空时禁用多模态向量检索，退回纯 fastText 文本路径。
+	// 核心**不**知道任何具体模型：它只按配置里的 provider 名从公共注册表
+	// （pkg/embedding）打开一个 provider，并把 options.* 原样交给它。模型文件
+	// 布局、预处理、解码、运行时全部属于 provider 内部实现。
+	// provider 名为空时禁用多模态向量检索，退回纯 fastText 文本路径。
 	var multimodalSpace vector.MultimodalEmbedder
-	switch mmType := cfgReg.GetString("core.memory.multimodal_space.type", ""); mmType {
-	case "onnx":
-		if modelDir := cfgReg.GetString("core.memory.multimodal_space.onnx.model_dir", ""); modelDir != "" {
-			e, err := qwen.New(modelDir)
-			if err != nil {
-				log.Printf("[homed] warning: qwen multimodal embedder load failed: %v（多模态向量检索已禁用）", err)
-			} else {
-				multimodalSpace = e
-				defer e.Close()
-				log.Printf("[homed] multimodal space (qwen onnx) active: dim=%d fp=%s", e.Dim(), e.Fingerprint()[:min(12, len(e.Fingerprint()))])
-			}
-		} else {
-			log.Println("[homed] multimodal_space.type=onnx 但未配置 onnx.model_dir，多模态向量检索已禁用")
+	if mmProvider := cfgReg.GetString("core.memory.multimodal_space.provider", ""); mmProvider != "" {
+		opts := map[string]string{}
+		const optPrefix = "core.memory.multimodal_space.options."
+		for _, key := range cfgReg.List("core.memory.multimodal_space.options.") {
+			opts[strings.TrimPrefix(key, optPrefix)] = cfgReg.GetString(key, "")
 		}
-	case "http":
-		dim := cfgReg.GetInt("core.memory.multimodal_space.http.dimension", 0)
-		ep := cfgReg.GetString("core.memory.multimodal_space.http.endpoint", "")
-		if dim > 0 && ep != "" {
-			e, err := vector.NewHTTPEmbedder(vector.HTTPEmbedderConfig{
-				Endpoint:    ep,
-				APIKey:      cfgReg.GetString("core.memory.multimodal_space.http.api_key", ""),
-				Model:       cfgReg.GetString("core.memory.multimodal_space.http.model", ""),
-				Dimension:   dim,
-				Timeout:     cfgReg.GetDuration("core.memory.multimodal_space.http.timeout", 30*time.Second),
-				Fingerprint: cfgReg.GetString("core.memory.multimodal_space.http.fingerprint", ""),
-			})
-			if err != nil {
-				log.Printf("[homed] warning: http embedder init failed: %v（多模态向量检索已禁用）", err)
-			} else {
-				multimodalSpace = e
-				defer e.Close()
-				log.Printf("[homed] multimodal space (http) active: endpoint=%s dim=%d", ep, dim)
-			}
+		provider, err := embedding.Open(mmProvider, embedding.Config{Options: opts})
+		if err != nil {
+			log.Printf("[homed] warning: 多模态向量 provider %q 打开失败: %v（多模态向量检索已禁用；已注册: %s）",
+				mmProvider, err, strings.Join(embedding.Names(), ", "))
+		} else if adapted, err := vector.AdaptProvider(provider); err != nil {
+			provider.Close()
+			log.Printf("[homed] warning: 多模态向量 provider %q 元数据不合法: %v（多模态向量检索已禁用）", mmProvider, err)
 		} else {
-			log.Println("[homed] multimodal_space.type=http 但 endpoint/dimension 配置不完整，多模态向量检索已禁用")
-		}
-	default:
-		if mmType != "" {
-			log.Printf("[homed] warning: 未知 multimodal_space.type=%q，多模态向量检索已禁用", mmType)
+			multimodalSpace = adapted
+			defer adapted.Close()
+			info := provider.Info()
+			// 指纹可能很长（模型文件哈希），日志里只取前 12 个字符便于对照。
+			shortFP := info.Fingerprint
+			if len(shortFP) > 12 {
+				shortFP = shortFP[:12]
+			}
+			log.Printf("[homed] multimodal space active: provider=%s dim=%d fp=%s modalities=%v",
+				mmProvider, info.Dimension, shortFP, info.Modalities)
 		}
 	}
 
