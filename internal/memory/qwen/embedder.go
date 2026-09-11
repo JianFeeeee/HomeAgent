@@ -18,6 +18,8 @@ import (
 	"sync"
 
 	ort "github.com/yalue/onnxruntime_go"
+
+	"gitcode.com/JianFeeeee/HomeAgent/internal/memory/vector"
 )
 
 type embedConfig struct {
@@ -138,11 +140,23 @@ func (e *Embedder) VectorizeDense(text string) ([]float64, error) {
 	return e.runTransformer(hidden, deep, position, len(ids))
 }
 
-func (e *Embedder) EmbedImageDense(raw []byte, _ string) ([]float64, error) {
+// EmbedImageDense 把一张图片编码到统一空间。
+//
+// mime 决定这个模态是否在本空间的原生覆盖范围内：Qwen3-VL 能原生编码文本与
+// 图像，但**不原生支持音频**。音频（以及未抽帧的视频文件）必须返回
+// ErrModalityUnsupported，而不是拿视觉塔去编码——那会往统一空间里灌入
+// 语义错误的坐标，而错误是静默的。视频请由上层抽帧后逐帧当作图像编码。
+func (e *Embedder) EmbedImageDense(raw []byte, mime string) ([]float64, error) {
 	e.mu.RLock()
 	defer e.mu.RUnlock()
 	if !e.loaded {
 		return nil, fmt.Errorf("qwen embedder not loaded")
+	}
+	switch {
+	case strings.HasPrefix(mime, "audio/"):
+		return nil, fmt.Errorf("%w: audio (%s) 需由真正的统一音频模型扩展", vector.ErrModalityUnsupported, mime)
+	case strings.HasPrefix(mime, "video/"):
+		return nil, fmt.Errorf("%w: 视频文件请先抽帧，逐帧按图像编码 (%s)", vector.ErrModalityUnsupported, mime)
 	}
 	pixels, err := preprocessImage(raw)
 	if err != nil {

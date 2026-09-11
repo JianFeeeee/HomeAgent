@@ -50,6 +50,15 @@ const (
 // ErrNotSupported 表示 Vectorizer 不支持该原生模态；调用方不得以描述文本冒充其向量。
 var ErrNotSupported = fmt.Errorf("vectorizer does not support image embedding")
 
+// ErrModalityUnsupported 表示该模态不在本统一向量空间的原生覆盖范围内。
+//
+// 它与普通错误语义不同：调用方应把它当作「这条媒体本空间永远不会有向量」
+// 而不是「这次失败了、下次重试」。绝不能拿另一个模型的向量顶替——那会把
+// 两套坐标系混进同一空间，检索出来的相似度没有任何意义。
+//
+// 例：Qwen3-VL 能原生编码文本/图像，音频需要未来接入真正的统一音频模型。
+var ErrModalityUnsupported = fmt.Errorf("modality not supported by this embedding space")
+
 // Vector 是带权特征映射：feature → weight
 type Vector map[string]float64
 
