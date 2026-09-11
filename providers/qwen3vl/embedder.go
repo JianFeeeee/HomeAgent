@@ -194,23 +194,23 @@ func (e *Embedder) EmbedImageDense(raw []byte, mime string) ([]float64, error) {
 // 帧数为奇数时只用得上前 2×floor(n/2) 帧，多余一帧被丢弃（不补重复帧：
 // 那会改变跨帧注意力看到的运动）。
 func (e *Embedder) EmbedVideoDense(frames [][]byte, mime string) ([]float64, error) {
-	if err := checkVideoMime(mime); err != nil {
-		return nil, err
-	}
-	if len(frames) < qwenTemporalPatch {
-		return nil, fmt.Errorf("qwen: video needs at least %d frames, got %d", qwenTemporalPatch, len(frames))
-	}
-	groups := len(frames) / qwenTemporalPatch
-	// 先确认这一档的视觉图确实已导出，再去做昂贵的预处理：
-	// 不然一个未导出档位会先白算一遍（每组 2304×1536 浮点）才报错。
-	if _, err := e.visionFor(groups); err != nil {
-		return nil, err
-	}
-	pixels, groups, err := preprocessVideoFrames(frames)
-	if err != nil {
-		return nil, err
-	}
-	return e.embedVision(pixels, groups)
+	// 暂时硬失败，而不是算出一个「看起来正常但语义错」的向量。
+	//
+	// 原因：本 provider 的 Go 侧视频提示词模板与 HuggingFace processor 不等价
+	// ——processor 会按时间组插入字面时间戳文本
+	//（`<0.0 seconds>` / `<1.0 seconds>`），而 Go 侧只拼
+	// `<|vision_start|>{G×576 pads}<|vision_end|>`。实测同一输入 Python seq=1190
+	//（1152 视觉 + 38 文本）、Go 只有 22 个文本 token；而这些时间戳文本也会
+	// 占用 M-RoPE 位置。
+	//
+	// 差异的后果是向量整体偏移，**不报错**：检索出来的相似度没有任何意义，
+	// 而且看不出是谁的错。视觉图本身（Vision_g2/g3/g4）已逐档对过 PyTorch
+	//（cos≥0.999999），差的只是模板。
+	//
+	// 修复后删掉这个硬失败，并让 TestEmbedderVideoMatchesONNXReference 不再跳过。
+	return nil, fmt.Errorf("%w: Qwen3-VL 视频路径尚未完成（Go 模板缺 processor 的分组时间戳文本，"+
+		"会静默产生语义错的向量）；详见 docs/zh/multimodal-space.md 与 providers/qwen3vl/embedder_onnx_test.go",
+		embedding.ErrUnsupportedModality)
 }
 
 // checkImageMime 把「不在本空间覆盖范围内」与「参数用错」分开报。

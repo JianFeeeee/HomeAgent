@@ -126,6 +126,23 @@ func (c procCore) InjectTextNoMemory(source, channel, text string) {
 	c.sdk.InjectTextNoMemory(source, channel, text)
 }
 
+// ---- 带注入标志位（记忆/裁剪行为由插件在调用点声明）----
+
+func (c procCore) InjectTextOpts(source, channel, text string, opts pubsdk.InjectOptions) {
+	c.sdk.InjectTextOpts(source, channel, text, opts)
+}
+
+func (c procCore) InjectInterruptTextOpts(source, channel, text string, opts pubsdk.InjectOptions) {
+	c.sdk.InjectInterruptTextOpts(source, channel, text, opts)
+}
+
+func (c procCore) InjectInputSyncOpts(source, channel, text string, opts pubsdk.InjectOptions) string {
+	// 这里用公共 SDK 的三参数 + opts 形态（返回回复文本），
+	// 不用内核内部那个 (eventType, payload) → *OutputEvent 的全量签名：
+	// 它会把内核 IO 事件结构暴露给外部插件。
+	return c.sdk.InjectInputSyncOpts(source, channel, text, opts)
+}
+
 // InjectInputSync 收窄为公开 SDK 的三参数文本形态。
 //
 // internal/sdk.PluginSDK 的同名方法是 (source, channel, eventType, payload)
@@ -157,6 +174,18 @@ func (c procCore) InjectInputMediaSync(source, channel, text string, blocks []pu
 
 func (c procCore) InjectInterruptMedia(source, channel, text string, blocks []pubsdk.ContentBlock) {
 	c.sdk.InjectInterruptMedia(source, channel, text, blocks)
+}
+
+func (c procCore) InjectInputMediaOpts(source, channel, text string, blocks []pubsdk.ContentBlock, opts pubsdk.InjectOptions) {
+	c.sdk.InjectInputMediaOpts(source, channel, text, blocks, opts)
+}
+
+func (c procCore) InjectInputMediaSyncOpts(source, channel, text string, blocks []pubsdk.ContentBlock, opts pubsdk.InjectOptions) string {
+	return c.sdk.InjectInputMediaSyncOpts(source, channel, text, blocks, opts)
+}
+
+func (c procCore) InjectInterruptMediaOpts(source, channel, text string, blocks []pubsdk.ContentBlock, opts pubsdk.InjectOptions) {
+	c.sdk.InjectInterruptMediaOpts(source, channel, text, blocks, opts)
 }
 
 // SetToolBlocks 转调 internal/sdk：插件工具注入的媒体块，内核在下一轮

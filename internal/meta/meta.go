@@ -15,6 +15,12 @@ var (
 	//        （doc.insertWithMedia、io.injectMedia / injectMediaSync /
 	//        injectInterruptMedia），并把 text/image/audio 三条输入路径归一成
 	//        一条 processInput 主干。
+	// 1.2.0：模型中立的多模态 provider SPI（pkg/embedding）——内核不再适配任何
+	//        具体模型，Qwen 实现移到 providers/qwen3vl；插件运行协议升到 2
+	//        （统一共享内存区，fd3 布局改变，不支持滚动升级）；并实现 SDK 1.2.0
+	//        新增的注入行为标志位（InjectOptions：no_memory / context_policy）
+	//        与 ChannelDef.ContextPolicy，使输入/排队注入/中断注入/同步注入都能
+	//        声明「是否记入记忆」与「是否据此裁剪上下文」（默认都是否）。
 	//
 	// ❗main 上此值始终是**下一个未发布中版本**，不随 patch 发布变动
 	//（见 docs/git-branching.md §2.1）；已发布的版本号看对应的 release/vX.Y.x 与 tag。
@@ -32,9 +38,11 @@ var (
 	// SDKCompatibleVersion 是此内核可兼容的最高 SDK 版本（semver）。
 	//
 	// 1.1.0：本内核实现了 SDK 1.1.0 的全部新增方法。
-	// 用 SDK 1.0.0 编的存量插件照旧可用——新增方法由**插件调用、内核实现**，
-	// 不调就不受影响，无需重编。
-	SDKCompatibleVersion = "1.1.0"
+	// 1.2.0：本内核实现了 SDK 1.2.0 的全部新增方法（IOInjector 的六个 *Opts
+	//        注入变体、InjectOptions、ChannelDef.ContextPolicy），因此声明为
+	//        1.2.0。用 SDK 1.0.0/1.1.0 编的存量插件照旧可用——新增方法由
+	//        **插件调用、内核实现**，不调就不受影响，无需重编。
+	SDKCompatibleVersion = "1.2.0"
 )
 
 // FullVersion 返回完整的版本字符串。

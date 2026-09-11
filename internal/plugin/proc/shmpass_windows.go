@@ -3,24 +3,16 @@
 package proc
 
 import (
-	"fmt"
 	"os"
 )
 
-// procEnvForShm 返回子进程挂载共享段所需的环境变量（Windows）。
+// procEnvForShm 在 Windows 上返回空：这条路径已不可用。
 //
-// Windows 没有 fd 继承语义（os/exec 的 ExtraFiles 在 Windows 不被支持），
-// 故段与事件对象的**名字**经环境变量传给子进程，插件侧模板的
-// z_proc_shm_windows.go 按同名 OpenFileMappingW / OpenEventW 打开。
-//
-// 名字带 PID 与递增序号：多个 homed 实例并存时不能撞名。
-func (h *Host) procEnvForShm() []string {
-	return []string{
-		fmt.Sprintf("HOMEAGENT_SHM_STAGE=%s", shmNameOf(h.data)),
-		fmt.Sprintf("HOMEAGENT_SHM_EVTRING=%s", shmNameOf(h.evtData)),
-		fmt.Sprintf("HOMEAGENT_EVT_EVENT=%s", evtEventNameOf(h.evtNotifyFd)),
-	}
-}
+// 原实现传的是旧的两段布局（SHM_STAGE + SHM_EVTRING）的两个名字，
+// 而 §13.1 之后内核只有一块统一区域；名字的数量本身就是错的。
+// 真正的失败发生在更早的 allocShm（那里给出明确的「请用 WSL2」），
+// 所以这里不再返回任何东西——返回半套名字只会让人以为「只是名字没更新」。
+func (h *Host) procEnvForShm() []string { return nil }
 
 // procExtraFilesForShm 在 Windows 返回 nil：段不经 fd 传递。
 func (h *Host) procExtraFilesForShm() []*os.File { return nil }

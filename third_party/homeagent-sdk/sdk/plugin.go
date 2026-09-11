@@ -35,12 +35,63 @@ const (
 	StageAfterOutput    Stage = "after_output"
 )
 
+// 上下文策略：决定一次工具调用/输入/注入是否依据其内容裁剪上下文。
+//
+// 默认（空串或 ContextPolicyNone）**不裁剪**：裁剪会归档丢弃低相关事件，
+// 必须由工具/通道/注入点显式声明才发生——否则一个只想往上下文里塞内容的
+// 插件会在背后把别人的内容挤掉，且看不出是谁干的。
+const (
+	ContextPolicyNone  = "none"
+	ContextPolicyPrune = "prune"
+)
+
+// ValidContextPolicy 校验策略取值；空串等价于 ContextPolicyNone。
+func ValidContextPolicy(policy string) bool {
+	switch policy {
+	case "", ContextPolicyNone, ContextPolicyPrune:
+		return true
+	}
+	return false
+}
+
+// InjectOptions 声明一次注入行为在记忆层与上下文层的表现。
+//
+// 零值 = 记入记忆 + 不裁剪上下文，与历史行为（三参数注入方法）完全一致，
+// 因此调用方只有在确实需要改变行为时才需要填它。
+//
+// 为什么注入也要这两个标志：注入的内容来源千差万别——轮询到的频道消息
+// 属于真实对话（该记），而“任务还在跑”“连接已重连”这类提醒不该污染记忆，
+// 也不该把上下文按它的内容裁一遍。按调用点声明比按通道一刀切准确。
+//
+// NoMemory:       此次注入不参与记忆计算（向量化/关键词提取/蒸馏），原文仍留在上下文
+// ContextPolicy:  此次注入后是否依据（清洗后的）内容裁剪上下文；默认不裁剪。
+//
+//	中断注入也允许声明 prune——它同样会携带内容进入上下文。
+//
+// CleanerName:    此次注入的内容用哪个**已注册的通道 cleaner** 清洗。
+//
+//	空串 = 按注入的 source 查通道定义（既有行为）。
+//	为什么要能显式指定：注入的 source 未必是注册过的输入通道名，
+//	而注入内容往往带 ANSI/JSON 包装，需要清洗后才是有效内容；
+//	不指定就只能退到「按 source 查不到就不清洗」。
+type InjectOptions struct {
+	NoMemory      bool
+	ContextPolicy string
+	CleanerName   string
+}
+
 // ChannelDef 描述通道在记忆计算层的行为，与 ToolDef.NoMemory/Cleaner 语义一致。
 // NoMemory: 此通道输入/输出不参与记忆计算（向量化/关键词提取/蒸馏），但原文保留在上下文中
 // Cleaner:  计算层过滤函数，不改原文；仅在向量化/jieba/蒸馏/存档提取关键词时调用
+// ContextPolicy: 此通道的输入到达后是否据此裁剪上下文，默认 none（不裁剪）
+//
+// JSON tag 是必需的：通道定义要跨进程传给内核，而 Cleaner 是函数（必须忽略）。
+// 没有 tag 时既无法整体 marshal（func 不支持），又会诱使调用方手写字段白名单——
+// 那样新增字段会被静默丢掉。
 type ChannelDef struct {
-	NoMemory bool
-	Cleaner  func(string) string
+	NoMemory      bool                `json:"no_memory,omitempty"`
+	Cleaner       func(string) string `json:"-"`
+	ContextPolicy string              `json:"context_policy,omitempty"`
 }
 
 // StageContext provides context for stage handlers.
@@ -100,13 +151,13 @@ type ToolResult struct {
 
 // ToolDef describes a tool that the plugin exposes.
 type ToolDef struct {
-	Name        string                 `json:"name"`
-	Plugin      string                 `json:"plugin,omitempty"`
-	Description string                 `json:"description"`
-	Parameters  map[string]interface{} `json:"parameters"`
-	NoMemory    bool                   `json:"no_memory,omitempty"` // 此工具输出不参与记忆计算，但原文保留
-	Cleaner     func(string) string    `json:"-"`                   // 计算层过滤函数，不改原文；仅在向量化/jieba/蒸馏时调用
-	ContextPolicy string               `json:"context_policy,omitempty"` // 工具上下文策略："none"(默认) / "prune"
+	Name          string                 `json:"name"`
+	Plugin        string                 `json:"plugin,omitempty"`
+	Description   string                 `json:"description"`
+	Parameters    map[string]interface{} `json:"parameters"`
+	NoMemory      bool                   `json:"no_memory,omitempty"`      // 此工具输出不参与记忆计算，但原文保留
+	Cleaner       func(string) string    `json:"-"`                        // 计算层过滤函数，不改原文；仅在向量化/jieba/蒸馏时调用
+	ContextPolicy string                 `json:"context_policy,omitempty"` // 上下文策略：""(默认，不裁剪) / ContextPolicyNone / ContextPolicyPrune
 }
 
 // IOInjector provides methods for injecting input and interrupts into the agent pipeline.
@@ -125,6 +176,17 @@ type IOInjector interface {
 	InjectInputMedia(source, channel, text string, blocks []ContentBlock)
 	InjectInputMediaSync(source, channel, text string, blocks []ContentBlock) string
 	InjectInterruptMedia(source, channel, text string, blocks []ContentBlock)
+
+	// 以下 Opts 变体让调用点在**这一次注入**上声明记忆与裁剪行为。
+	//
+	// 上面那些不带 opts 的方法等价于传零值 InjectOptions（记入记忆 + 不裁剪），
+	// 保留它们是为了不破坏已有插件；新代码应当用 Opts 变体把意图写清楚。
+	InjectTextOpts(source, channel, text string, opts InjectOptions)
+	InjectInterruptTextOpts(source, channel, text string, opts InjectOptions)
+	InjectInputSyncOpts(source, channel, text string, opts InjectOptions) string
+	InjectInputMediaOpts(source, channel, text string, blocks []ContentBlock, opts InjectOptions)
+	InjectInputMediaSyncOpts(source, channel, text string, blocks []ContentBlock, opts InjectOptions) string
+	InjectInterruptMediaOpts(source, channel, text string, blocks []ContentBlock, opts InjectOptions)
 }
 
 // EventType identifies the kind of system event.
@@ -505,54 +567,94 @@ func (s *PluginSDK) injector() IOInjector {
 }
 
 // InjectInterruptText injects a text interrupt that can preempt current LLM processing.
+// 等价于 InjectInterruptTextOpts(..., InjectOptions{})：记入记忆、不裁剪。
 func (s *PluginSDK) InjectInterruptText(source, channel, text string) {
-	if io := s.injector(); io != nil {
-		io.InjectInterruptText(source, channel, text)
-	}
+	s.InjectInterruptTextOpts(source, channel, text, InjectOptions{})
 }
 
 // InjectText injects a text message into the agent pipeline.
+// 等价于 InjectTextOpts(..., InjectOptions{})：记入记忆、不裁剪。
 func (s *PluginSDK) InjectText(source, channel, text string) {
-	if io := s.injector(); io != nil {
-		io.InjectText(source, channel, text)
-	}
+	s.InjectTextOpts(source, channel, text, InjectOptions{})
 }
 
 // InjectTextNoMemory injects a text message without generating memory.
+// 等价于 InjectTextOpts(..., InjectOptions{NoMemory: true})。
 func (s *PluginSDK) InjectTextNoMemory(source, channel, text string) {
-	if io := s.injector(); io != nil {
-		io.InjectTextNoMemory(source, channel, text)
-	}
+	s.InjectTextOpts(source, channel, text, InjectOptions{NoMemory: true})
 }
 
 // InjectInputSync injects a text message and synchronously waits for the agent reply,
 // returning the reply text (empty string if none). Replies must be dispatched back
 // to the source channel by the caller.
 func (s *PluginSDK) InjectInputSync(source, channel, text string) string {
-	io := s.injector()
-	if io == nil {
-		return ""
-	}
-	return io.InjectInputSync(source, channel, text)
+	return s.InjectInputSyncOpts(source, channel, text, InjectOptions{})
 }
 
 // InjectInputMedia 注入带媒体内容块（image_url/audio_url）的输入。
 // blocks 会落进媒体存储被记忆引用捕获，同时作为当前轮 content 数组
 // 发给 LLM，让模型在「本轮」就看到图/听到音频——区别于 SetToolBlocks
 // 的「下一轮 tool message」语义。
+// 等价于 InjectInputMediaOpts(..., InjectOptions{})。
 func (s *PluginSDK) InjectInputMedia(source, channel, text string, blocks []ContentBlock) {
-	if io := s.injector(); io != nil {
-		io.InjectInputMedia(source, channel, text, blocks)
-	}
+	s.InjectInputMediaOpts(source, channel, text, blocks, InjectOptions{})
 }
 
 // InjectInputMediaSync 注入带媒体内容块的输入并同步等待 agent 回复。
+// 等价于 InjectInputMediaSyncOpts(..., InjectOptions{})。
 func (s *PluginSDK) InjectInputMediaSync(source, channel, text string, blocks []ContentBlock) string {
+	return s.InjectInputMediaSyncOpts(source, channel, text, blocks, InjectOptions{})
+}
+
+// ---- 带 InjectOptions 的注入（声明记忆/裁剪行为）----
+
+// InjectTextOpts 注入文本到 agent，并在这一次注入上声明记忆与裁剪行为。
+func (s *PluginSDK) InjectTextOpts(source, channel, text string, opts InjectOptions) {
+	if io := s.injector(); io != nil {
+		io.InjectTextOpts(source, channel, text, opts)
+	}
+}
+
+// InjectInterruptTextOpts 注入可抢占当前处理的中断文本。
+//
+// 中断也允许声明 ContextPolicyPrune：中断同样携带内容进入上下文，
+// 是否需要据此裁剪由调用方决定（默认不裁剪）。
+func (s *PluginSDK) InjectInterruptTextOpts(source, channel, text string, opts InjectOptions) {
+	if io := s.injector(); io != nil {
+		io.InjectInterruptTextOpts(source, channel, text, opts)
+	}
+}
+
+// InjectInputSyncOpts 注入输入并同步等待回复，同时在这次注入上声明记忆/裁剪行为。
+func (s *PluginSDK) InjectInputSyncOpts(source, channel, text string, opts InjectOptions) string {
 	io := s.injector()
 	if io == nil {
 		return ""
 	}
-	return io.InjectInputMediaSync(source, channel, text, blocks)
+	return io.InjectInputSyncOpts(source, channel, text, opts)
+}
+
+// InjectInputMediaOpts 注入带媒体块的输入，并声明记忆/裁剪行为。
+func (s *PluginSDK) InjectInputMediaOpts(source, channel, text string, blocks []ContentBlock, opts InjectOptions) {
+	if io := s.injector(); io != nil {
+		io.InjectInputMediaOpts(source, channel, text, blocks, opts)
+	}
+}
+
+// InjectInputMediaSyncOpts 注入带媒体块的输入并同步等待回复，同时声明记忆/裁剪行为。
+func (s *PluginSDK) InjectInputMediaSyncOpts(source, channel, text string, blocks []ContentBlock, opts InjectOptions) string {
+	io := s.injector()
+	if io == nil {
+		return ""
+	}
+	return io.InjectInputMediaSyncOpts(source, channel, text, blocks, opts)
+}
+
+// InjectInterruptMediaOpts 注入带媒体块的中断，并声明记忆/裁剪行为。
+func (s *PluginSDK) InjectInterruptMediaOpts(source, channel, text string, blocks []ContentBlock, opts InjectOptions) {
+	if io := s.injector(); io != nil {
+		io.InjectInterruptMediaOpts(source, channel, text, blocks, opts)
+	}
 }
 
 // InjectInterruptMedia 注入带媒体内容块的中断，可抢占当前 LLM 处理。

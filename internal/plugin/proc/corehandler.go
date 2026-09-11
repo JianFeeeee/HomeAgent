@@ -101,6 +101,15 @@ type CoreSDK interface {
 	InjectInputMediaSync(source, channel, text string, blocks []pubsdk.ContentBlock) string
 	InjectInterruptMedia(source, channel, text string, blocks []pubsdk.ContentBlock)
 
+	// 带标志位的注入：声明这一次注入是否记入记忆、是否据此裁剪上下文。
+	// 上面的三参数方法是它们的零值糖。
+	InjectTextOpts(source, channel, text string, opts pubsdk.InjectOptions)
+	InjectInterruptTextOpts(source, channel, text string, opts pubsdk.InjectOptions)
+	InjectInputSyncOpts(source, channel, text string, opts pubsdk.InjectOptions) string
+	InjectInputMediaOpts(source, channel, text string, blocks []pubsdk.ContentBlock, opts pubsdk.InjectOptions)
+	InjectInputMediaSyncOpts(source, channel, text string, blocks []pubsdk.ContentBlock, opts pubsdk.InjectOptions) string
+	InjectInterruptMediaOpts(source, channel, text string, blocks []pubsdk.ContentBlock, opts pubsdk.InjectOptions)
+
 	// SetToolBlocks 注入媒体块，内核在下一条 tool message 携带（§3.8）。
 	SetToolBlocks(blocks []pubsdk.ContentBlock)
 
@@ -150,50 +159,75 @@ func (h *coreHandler) Handle(method string, params json.RawMessage) (interface{}
 		if err != nil {
 			return nil, fmt.Errorf("input.register: %w", err)
 		}
-		return nil, h.sdk.RegisterInputChannel(p.Name, pubsdk.ChannelDef{
-			NoMemory: p.Def.NoMemory,
-			Cleaner:  cleaner,
-		})
+		if err := validateContextPolicy("input.register", p.Def.ContextPolicy); err != nil {
+			return nil, err
+		}
+		// 整体传 p.Def（只是把函数型的 Cleaner 换成代理），不要手写字段白名单：
+		// 白名单会让新增字段静默丢失。
+		def := p.Def
+		def.Cleaner = cleaner
+		return nil, h.sdk.RegisterInputChannel(p.Name, def)
 
 	// ---- IO 注入（原 case 5/6/7/47）----
+	//
+	// 注入标志位（no_memory / context_policy）由插件在调用点声明，默认
+	// 记入记忆 + 不裁剪。策略值在入口校验：静默降级成 none 会让调用方
+	// 以为自己声明的裁剪在生效。
 	case MethodIOInjectText:
 		var p injectParams
 		if err := unmarshal(params, &p); err != nil {
 			return nil, err
 		}
-		h.sdk.InjectText(p.Source, p.Channel, h.resolveText(p))
+		if err := validateContextPolicy("io.injectText", p.ContextPolicy); err != nil {
+			return nil, err
+		}
+		h.sdk.InjectTextOpts(p.Source, p.Channel, h.resolveText(p), pubSdkInjectOpts(p.NoMemory, p.ContextPolicy, p.CleanerName))
 		return nil, nil
 	case MethodIOInjectInterrupt:
 		var p injectParams
 		if err := unmarshal(params, &p); err != nil {
 			return nil, err
 		}
-		h.sdk.InjectInterruptText(p.Source, p.Channel, h.resolveText(p))
+		if err := validateContextPolicy("io.injectInterrupt", p.ContextPolicy); err != nil {
+			return nil, err
+		}
+		h.sdk.InjectInterruptTextOpts(p.Source, p.Channel, h.resolveText(p), pubSdkInjectOpts(p.NoMemory, p.ContextPolicy, p.CleanerName))
 		return nil, nil
 	case MethodIOInjectTextNoMem:
 		var p injectParams
 		if err := unmarshal(params, &p); err != nil {
 			return nil, err
 		}
-		h.sdk.InjectTextNoMemory(p.Source, p.Channel, h.resolveText(p))
+		if err := validateContextPolicy("io.injectTextNoMem", p.ContextPolicy); err != nil {
+			return nil, err
+		}
+		// 旧 RPC 语义就是「不进记忆」，显式标志位只可能再叠上 context_policy。
+		h.sdk.InjectTextOpts(p.Source, p.Channel, h.resolveText(p), pubSdkInjectOpts(true, p.ContextPolicy, p.CleanerName))
 		return nil, nil
 	case MethodIOInjectSync:
 		var p injectParams
 		if err := unmarshal(params, &p); err != nil {
 			return nil, err
 		}
-		return map[string]interface{}{"reply": h.sdk.InjectInputSync(p.Source, p.Channel, h.resolveText(p))}, nil
+		if err := validateContextPolicy("io.injectInputSync", p.ContextPolicy); err != nil {
+			return nil, err
+		}
+		reply := h.sdk.InjectInputSyncOpts(p.Source, p.Channel, h.resolveText(p), pubSdkInjectOpts(p.NoMemory, p.ContextPolicy, p.CleanerName))
+		return map[string]interface{}{"reply": reply}, nil
 
 	case MethodIOInjectMedia:
 		var p injectMediaParams
 		if err := unmarshal(params, &p); err != nil {
 			return nil, err
 		}
+		if err := validateContextPolicy("io.injectMedia", p.ContextPolicy); err != nil {
+			return nil, err
+		}
 		blocks, err := h.resolveBlocks(p)
 		if err != nil {
 			return nil, err
 		}
-		h.sdk.InjectInputMedia(p.Source, p.Channel, p.Text, blocks)
+		h.sdk.InjectInputMediaOpts(p.Source, p.Channel, p.Text, blocks, pubSdkInjectOpts(p.NoMemory, p.ContextPolicy, p.CleanerName))
 		return nil, nil
 
 	case MethodIOInjectMediaSync:
@@ -201,11 +235,14 @@ func (h *coreHandler) Handle(method string, params json.RawMessage) (interface{}
 		if err := unmarshal(params, &p); err != nil {
 			return nil, err
 		}
+		if err := validateContextPolicy("io.injectMediaSync", p.ContextPolicy); err != nil {
+			return nil, err
+		}
 		blocks, err := h.resolveBlocks(p)
 		if err != nil {
 			return nil, err
 		}
-		reply := h.sdk.InjectInputMediaSync(p.Source, p.Channel, p.Text, blocks)
+		reply := h.sdk.InjectInputMediaSyncOpts(p.Source, p.Channel, p.Text, blocks, pubSdkInjectOpts(p.NoMemory, p.ContextPolicy, p.CleanerName))
 		return map[string]interface{}{"reply": reply}, nil
 
 	case MethodIOInjectInterruptMedia:
@@ -213,11 +250,14 @@ func (h *coreHandler) Handle(method string, params json.RawMessage) (interface{}
 		if err := unmarshal(params, &p); err != nil {
 			return nil, err
 		}
+		if err := validateContextPolicy("io.injectInterruptMedia", p.ContextPolicy); err != nil {
+			return nil, err
+		}
 		blocks, err := h.resolveBlocks(p)
 		if err != nil {
 			return nil, err
 		}
-		h.sdk.InjectInterruptMedia(p.Source, p.Channel, p.Text, blocks)
+		h.sdk.InjectInterruptMediaOpts(p.Source, p.Channel, p.Text, blocks, pubSdkInjectOpts(p.NoMemory, p.ContextPolicy, p.CleanerName))
 		return nil, nil
 
 	// ---- 生命周期（原 case 8）----
@@ -648,10 +688,13 @@ func (h *coreHandler) resolveText(p injectParams) string {
 }
 
 type injectParams struct {
-	Source  string    `json:"source"`
-	Channel string    `json:"channel"`
-	Text    string    `json:"text,omitempty"`
-	TextRef SharedRef `json:"text_ref,omitempty"`
+	Source        string    `json:"source"`
+	Channel       string    `json:"channel"`
+	Text          string    `json:"text,omitempty"`
+	TextRef       SharedRef `json:"text_ref,omitempty"`
+	NoMemory      bool      `json:"no_memory,omitempty"`
+	ContextPolicy string    `json:"context_policy,omitempty"`
+	CleanerName   string    `json:"cleaner_name,omitempty"`
 }
 
 // injectMediaParams 是带媒体注入/工具块注入的参数。
@@ -664,11 +707,33 @@ type injectParams struct {
 //
 // 没有 BlocksRef 时（直连 RPC 测试、arena 不可用）回退内联 Blocks。
 type injectMediaParams struct {
-	Source    string                `json:"source"`
-	Channel   string                `json:"channel"`
-	Text      string                `json:"text,omitempty"`
-	Blocks    []pubsdk.ContentBlock `json:"blocks,omitempty"`
-	BlocksRef SharedRef             `json:"blocks_ref,omitempty"`
+	Source        string                `json:"source"`
+	Channel       string                `json:"channel"`
+	Text          string                `json:"text,omitempty"`
+	Blocks        []pubsdk.ContentBlock `json:"blocks,omitempty"`
+	BlocksRef     SharedRef             `json:"blocks_ref,omitempty"`
+	NoMemory      bool                  `json:"no_memory,omitempty"`
+	ContextPolicy string                `json:"context_policy,omitempty"`
+	CleanerName   string                `json:"cleaner_name,omitempty"`
+}
+
+// pubSdkInjectOpts 把 RPC 报文里的三个字段转成公开 SDK 的 InjectOptions。
+//
+// 单独提一个转换函数是为了让「默认值」只有一个出处：零值即记入记忆 + 不裁剪，
+// 与旧三参数注入等价。
+func pubSdkInjectOpts(noMemory bool, policy, cleanerName string) pubsdk.InjectOptions {
+	return pubsdk.InjectOptions{NoMemory: noMemory, ContextPolicy: policy, CleanerName: cleanerName}
+}
+
+// validateContextPolicy 校验上下文策略取值，与 tool.register 同一套规则。
+//
+// 空串等价于 none（不裁剪）。非法值必须报错而不是当成 none：把拼写错误
+// 静默降级成「不裁剪」会让调用方以为自己声明的裁剪在生效。
+func validateContextPolicy(where, policy string) error {
+	if !pubsdk.ValidContextPolicy(policy) {
+		return fmt.Errorf("%s: context_policy 只允许 none/prune，实际 %q", where, policy)
+	}
+	return nil
 }
 
 // resolveJSONRef 若 ref 非零则从共享内存读取并 JSON 反序列化到 out；
@@ -812,10 +877,8 @@ func (h *coreHandler) toolRegister(params json.RawMessage) (interface{}, error) 
 	if p.Name == "" {
 		return nil, fmt.Errorf("tool.register: 缺少 name")
 	}
-	switch p.Def.ContextPolicy {
-	case "", "none", "prune":
-	default:
-		return nil, fmt.Errorf("tool.register: context_policy 只允许 none/prune，实际 %q", p.Def.ContextPolicy)
+	if err := validateContextPolicy("tool.register", p.Def.ContextPolicy); err != nil {
+		return nil, err
 	}
 	p.Def.Plugin = h.name
 	// 函数本身不进 JSON；has_cleaner 只声明其存在，实际执行回到插件进程。

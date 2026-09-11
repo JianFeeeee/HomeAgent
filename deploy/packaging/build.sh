@@ -55,7 +55,7 @@ case "$TARGET" in
     ;;
   *)
     echo "Unknown target: $TARGET"
-    echo "Usage: $0 [native|linux/amd64|linux/arm64|darwin/amd64|darwin/arm64|windows/amd64|all]"
+    echo "Usage: $0 [native|linux/amd64|linux/arm64|darwin/amd64|darwin/arm64|windows/amd64|all] [all|homed|waiter|initconfig|gui|payload]"
     echo "       [all|homed|waiter|initconfig|gui]"
     exit 1
 esac
@@ -152,6 +152,39 @@ build_initconfig() {
   echo "  OK ($(du -h "$out" | cut -f1))"
 }
 
+# ---- linux-payload（给 Windows 安装器用的 Linux 包）----
+#
+# Windows 不再安装 homed.exe：homed 依赖 fd 继承 + 统一共享内存区的段内偏移
+# 解引用，Windows 句柄模型无法表达（见 cmd/homed/platform_windows.go）。
+# Windows 安装器改为引导到 WSL2，并把 **Linux 包**送进发行版里安装。
+# 因此 Windows 安装包必须带上 Linux 产物——这一段就是把它暂存到
+# build/linux-payload/（installer.nsi 从这里 File /r 打进安装包）。
+#
+# 复用 package-linux.sh 的产物，而不是在这里另行编译：WSL 里跑的就是普通
+# linux/amd64，安装内容必须与 Linux 原生安装**完全一致**，否则又变成两个平台。
+stage_linux_payload() {
+  local src="$PROJECT_ROOT/dist/linux"
+  local out="$BUILD_DIR/linux-payload"
+
+  rm -rf "$out"
+  mkdir -p "$out"
+
+  local found=0
+  for f in "$src"/*.deb "$src"/*.tar.gz; do
+    [ -f "$f" ] || continue
+    cp "$f" "$out/"
+    found=$((found + 1))
+  done
+
+  if [ "$found" -eq 0 ]; then
+    echo "[FAIL] build/linux-payload 为空：先运行 package-linux.sh 产出 dist/linux/*.deb|*.tar.gz" >&2
+    echo "       （Windows 安装器会把这里的包送进 WSL 安装；空包等于装不上）" >&2
+    return 1
+  fi
+  echo "[BUILD] linux-payload ← $found 个包"
+  ls -1 "$out" | sed 's/^/  /'
+}
+
 # ---- gui (Electron) ----
 build_gui() {
   if [ -n "${GOOS:-}" ] && [ "$GOOS" != "$("$GO" env GOOS)" ]; then
@@ -179,13 +212,34 @@ build_gui() {
 }
 
 # ---- dispatch ----
-case "$COMPONENT" in
-  all)   build_homed; build_waiter; build_initconfig; build_gui ;;
-  homed) build_homed ;;
-  waiter) build_waiter ;;
-  initconfig) build_initconfig ;;
-  gui)   build_gui ;;
-  *)
-    echo "Unknown component: $COMPONENT"
-    exit 1
-esac
+if [ "${GOOS:-}" = "windows" ]; then
+  # Windows 目标：构建的**不是** homed——它已放弃 Windows 原生支持。
+  # 需要的是：Linux 包（送进 WSL 安装）+ Windows 侧客户端（waiter CLI / GUI）。
+  case "$COMPONENT" in
+    all)   build_waiter; stage_linux_payload; build_gui ;;
+    waiter) build_waiter ;;
+    payload) stage_linux_payload ;;
+    gui)   build_gui ;;
+    homed|initconfig)
+      echo "homed/initconfig 不再提供 Windows 原生构建：请用 WSL2（或用 linux/amd64 目标）。" >&2
+      echo "原因见 cmd/homed/platform_windows.go。" >&2
+      exit 1
+      ;;
+    *)
+      echo "Unknown component: $COMPONENT"
+      exit 1
+      ;;
+  esac
+else
+  case "$COMPONENT" in
+    all)   build_homed; build_waiter; build_initconfig; build_gui ;;
+    homed) build_homed ;;
+    waiter) build_waiter ;;
+    initconfig) build_initconfig ;;
+    gui)   build_gui ;;
+    *)
+      echo "Unknown component: $COMPONENT"
+      exit 1
+      ;;
+  esac
+fi
