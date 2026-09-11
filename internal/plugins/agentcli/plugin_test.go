@@ -440,6 +440,27 @@ func (c *injectCapture) InjectInterruptMedia(source, channel, text string, block
 	c.mu.Unlock()
 }
 
+// ---- 带 InjectOptions 的注入（1.2.0）：同样只记文本 ----
+
+func (c *injectCapture) InjectTextOpts(source, channel, text string, opts sdkpub.InjectOptions) {
+	c.InjectText(source, channel, text)
+}
+func (c *injectCapture) InjectInterruptTextOpts(source, channel, text string, opts sdkpub.InjectOptions) {
+	c.InjectInterruptText(source, channel, text)
+}
+func (c *injectCapture) InjectInputSyncOpts(source, channel, text string, opts sdkpub.InjectOptions) string {
+	return ""
+}
+func (c *injectCapture) InjectInputMediaOpts(source, channel, text string, blocks []sdkpub.ContentBlock, opts sdkpub.InjectOptions) {
+	c.InjectInputMedia(source, channel, text, blocks)
+}
+func (c *injectCapture) InjectInputMediaSyncOpts(source, channel, text string, blocks []sdkpub.ContentBlock, opts sdkpub.InjectOptions) string {
+	return ""
+}
+func (c *injectCapture) InjectInterruptMediaOpts(source, channel, text string, blocks []sdkpub.ContentBlock, opts sdkpub.InjectOptions) {
+	c.InjectInterruptMedia(source, channel, text, blocks)
+}
+
 func (c *injectCapture) snapshot() []string {
 	c.mu.Lock()
 	defer c.mu.Unlock()

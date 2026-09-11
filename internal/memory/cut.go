@@ -53,7 +53,7 @@ func GetJieba() *gojieba.Jieba {
 		}()
 		d := jiebaDictDir()
 		if d == "" {
-			log.Printf("[jieba] no dictionary directory found, jieba disabled")
+			log.Printf("[jieba] 未找到词库目录（内嵌落盘失败且模块缓存也不存在），jieba disabled")
 			return
 		}
 		jiebaInst = gojieba.NewJieba(
@@ -68,9 +68,24 @@ func GetJieba() *gojieba.Jieba {
 }
 
 func jiebaDictDir() string {
+	// 首选内嵌词库：它是产物的一部分，与二进制同版本、不依赖宿主环境。
+	//
+	// 以前这里只猜 GOMODCACHE/GOPATH/~/go/pkg/mod，部署机上通常没有 Go 模块缓存，
+	// 于是分词与关键词提取会**静默退回空列表**（详见 jieba_embed.go 的说明）。
+	if dir, err := materializeJiebaDict(); err == nil && dir != "" {
+		return dir
+	}
+	log.Printf("[jieba] 内嵌词库落盘失败，回退到模块缓存查找（内嵌失败通常意味着缓存目录不可写）")
+
+	// 回退：开发机上存在的模块缓存（仅作为兵底，不应依赖它）。
+	//
 	// GOMODCACHE is typically $GOPATH/pkg/mod. When set, Go writes modules
 	// under <GOMODCACHE>/github.com/... . Look first at GOMODCACHE, then
 	// derive from GOPATH, then try common locations.
+	return jiebaDictDirFromModuleCache()
+}
+
+func jiebaDictDirFromModuleCache() string {
 	candidates := []string{
 		os.Getenv("GOMODCACHE"),
 	}

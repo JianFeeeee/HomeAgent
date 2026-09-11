@@ -52,6 +52,11 @@ import (
 )
 
 func main() {
+	// 平台门放在最前面：比 flag 解析还早，因为原生 Windows 上根本不应进入任何
+	// 初始化路径（会去建共享段、拉插件进程）。理由与 WSL 指引见
+	// platform_windows.go。
+	requireSupportedPlatform()
+
 	dataDir := flag.String("data", "", "data directory (default: auto-detect next to binary)")
 	httpAddr := flag.String("webui", "", "webui listen address (default: webui.listen_addr from config)")
 	cliSocket := flag.String("socket", "", "cli unix socket path (default: <data>/cli.sock)")

@@ -2253,7 +2253,11 @@ func (h *Handler) handleOpenAICompletions(w http.ResponseWriter, r *http.Request
 
 	respCh := make(chan *agentIO.OutputEvent, 1)
 	go func() {
-		respCh <- h.sdk.InjectTextSync("http", "http", lastMsg.Content)
+		// NoMemory：本端点（OpenAI 兼容 /v1/chat/completions）的调用方是
+		// IDE、工具与脚本，送来的是**固定的提示词模板**（"请分析这段代码"之类），
+		// 不是人类在对话。记进记忆会把真实对话挤掉，而且同一模板会反复刷屏。
+		// 原文仍进上下文，模型照旧看得到；只是不参与向量化/关键词提取/蒸馏。
+		respCh <- h.sdk.InjectTextSyncNoMemory("http", "http", lastMsg.Content)
 	}()
 
 	var response *agentIO.OutputEvent

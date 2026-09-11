@@ -25,11 +25,11 @@ const (
 type OutputCapability int
 
 const (
-	CapText      OutputCapability = 1 << iota // 文本
-	CapFile                                   // 文件
-	CapImage                                  // 图片
-	CapAudio                                  // 音频
-	CapStructured                             // 结构化数据（JSON/卡片）
+	CapText       OutputCapability = 1 << iota // 文本
+	CapFile                                    // 文件
+	CapImage                                   // 图片
+	CapAudio                                   // 音频
+	CapStructured                              // 结构化数据（JSON/卡片）
 )
 
 func (c OutputCapability) Supports(cap OutputCapability) bool {
@@ -242,6 +242,52 @@ func (m *IOManager) InjectInputSyncTo(source, outputChannel, eventType string, p
 	return <-ch
 }
 
+// InjectOptions 声明一次注入在记忆层与上下文层的表现。
+//
+// 零值 = 记入记忆 + 不裁剪上下文，与历史的三参数注入方法完全一致。
+// 别名到公共 SDK 而非另建一套：内置插件与外部插件必须用同一套结构，
+// 否则内核要认两种类型，而漏认会静默丢失标志位。
+type InjectOptions = pubsdk.InjectOptions
+
+// applyInjectOpts 把注入标志位写进事件 payload。
+//
+// 只在非零时写：零值与旧 payload 逐字节一致，事件订阅方与旧内核
+// （不认识这两个键）都不会受影响。
+//
+// 为什么不把标志位当独立参数传到底：eventloop 与各注入路径都按 payload 取字段
+// （no_memory 本来就是这么走的），payload 是这里唯一已有的携带面。
+func applyInjectOpts(payload map[string]interface{}, opts InjectOptions) {
+	if opts.NoMemory {
+		payload["no_memory"] = true
+	}
+	if opts.ContextPolicy != "" {
+		payload["context_policy"] = opts.ContextPolicy
+	}
+	if opts.CleanerName != "" {
+		payload["cleaner_name"] = opts.CleanerName
+	}
+}
+
+func (m *IOManager) InjectInputOpts(source, eventType string, payload map[string]interface{}, opts InjectOptions) {
+	applyInjectOpts(payload, opts)
+	m.InjectInput(source, eventType, payload)
+}
+
+func (m *IOManager) InjectInputToOpts(source, outputChannel, eventType string, payload map[string]interface{}, opts InjectOptions) {
+	applyInjectOpts(payload, opts)
+	m.InjectInputTo(source, outputChannel, eventType, payload)
+}
+
+func (m *IOManager) InjectInputSyncToOpts(source, outputChannel, eventType string, payload map[string]interface{}, opts InjectOptions) *OutputEvent {
+	applyInjectOpts(payload, opts)
+	return m.InjectInputSyncTo(source, outputChannel, eventType, payload)
+}
+
+func (m *IOManager) InjectInterruptOpts(source, channel string, payload map[string]interface{}, opts InjectOptions) {
+	applyInjectOpts(payload, opts)
+	m.InjectInterrupt(source, channel, payload)
+}
+
 func (m *IOManager) InjectText(source string, text string) {
 	m.InjectInput(source, "text", map[string]interface{}{
 		"content": text,
@@ -293,10 +339,31 @@ func (m *IOManager) InjectInterrupt(source, channel string, payload map[string]i
 }
 
 func (m *IOManager) InjectInterruptText(source, channel, text string) {
-	m.InjectInterrupt(source, channel, map[string]interface{}{
+	m.InjectInterruptTextOpts(source, channel, text, InjectOptions{})
+}
+
+// InjectInterruptTextOpts 注入中断文本，并声明本次注入的记忆/裁剪行为。
+//
+// 中断也允许声明 ContextPolicyPrune：中断同样携带内容进入上下文。
+func (m *IOManager) InjectInterruptTextOpts(source, channel, text string, opts InjectOptions) {
+	m.InjectInterruptOpts(source, channel, map[string]interface{}{
 		"type":    "text",
 		"content": text,
-	})
+	}, opts)
+}
+
+// InjectTextOpts 注入排队文本，并声明本次注入的记忆/裁剪行为。
+func (m *IOManager) InjectTextOpts(source, channel, text string, opts InjectOptions) {
+	m.InjectInputToOpts(source, channel, "text", map[string]interface{}{
+		"content": text,
+	}, opts)
+}
+
+// InjectTextSyncOpts 同步注入文本并声明记忆/裁剪行为。
+func (m *IOManager) InjectTextSyncOpts(source, outputChannel, text string, opts InjectOptions) *OutputEvent {
+	return m.InjectInputSyncToOpts(source, outputChannel, "text", map[string]interface{}{
+		"content": text,
+	}, opts)
 }
 
 func (m *IOManager) InputInterruptChan() <-chan *InputEvent { return m.interruptCh }
@@ -306,6 +373,33 @@ func (m *IOManager) InjectTextSyncTo(source, outputChannel, text string) *Output
 	return m.InjectInputSyncTo(source, outputChannel, "text", map[string]interface{}{
 		"content": text,
 	})
+}
+
+// ---- 带标志位的注入（记忆/裁剪行为由调用点声明）----
+
+// InjectInputMediaOpts 注入带媒体块的输入，并声明记忆/裁剪行为。
+func (m *IOManager) InjectInputMediaOpts(source, outputChannel, text string, blocks []pubsdk.ContentBlock, opts InjectOptions) {
+	m.InjectInputToOpts(source, outputChannel, "text", map[string]interface{}{
+		"content":      text,
+		"media_blocks": blocks,
+	}, opts)
+}
+
+// InjectInputMediaSyncOpts 注入带媒体块的输入并同步等待回复，同时声明记忆/裁剪行为。
+func (m *IOManager) InjectInputMediaSyncOpts(source, outputChannel, text string, blocks []pubsdk.ContentBlock, opts InjectOptions) *OutputEvent {
+	return m.InjectInputSyncToOpts(source, outputChannel, "text", map[string]interface{}{
+		"content":      text,
+		"media_blocks": blocks,
+	}, opts)
+}
+
+// InjectInterruptMediaOpts 注入带媒体块的中断，并声明记忆/裁剪行为。
+func (m *IOManager) InjectInterruptMediaOpts(source, channel, text string, blocks []pubsdk.ContentBlock, opts InjectOptions) {
+	m.InjectInterruptOpts(source, channel, map[string]interface{}{
+		"type":         "text",
+		"content":      text,
+		"media_blocks": blocks,
+	}, opts)
 }
 
 func (m *IOManager) EmitOutput(target string, outputType string, payload map[string]interface{}) {
@@ -343,7 +437,7 @@ func (m *IOManager) EmitTextTo(target, outputChannel, text string) {
 	})
 }
 
-func (m *IOManager) InputChan() <-chan *InputEvent  { return m.inputCh }
+func (m *IOManager) InputChan() <-chan *InputEvent   { return m.inputCh }
 func (m *IOManager) OutputChan() <-chan *OutputEvent { return m.outputCh }
 
 // RegisterInputChannel 注册输入通道的记忆行为
@@ -463,12 +557,14 @@ func NewMicrophone(name string, sampleRate int, io *IOManager) *Microphone {
 	return &Microphone{name: name, sampleRate: sampleRate, io: io}
 }
 
-func (d *Microphone) Name() string             { return d.name }
-func (d *Microphone) Type() DeviceType         { return DeviceInput }
+func (d *Microphone) Name() string                         { return d.name }
+func (d *Microphone) Type() DeviceType                     { return DeviceInput }
 func (d *Microphone) OutputCapabilities() OutputCapability { return 0 } // 纯输入
-func (d *Microphone) Description() string { return fmt.Sprintf("麦克风 (%s, %dHz)", d.name, d.sampleRate) }
-func (d *Microphone) Start() error        { return nil }
-func (d *Microphone) Stop() error         { return nil }
+func (d *Microphone) Description() string {
+	return fmt.Sprintf("麦克风 (%s, %dHz)", d.name, d.sampleRate)
+}
+func (d *Microphone) Start() error           { return nil }
+func (d *Microphone) Stop() error            { return nil }
 func (d *Microphone) ChannelDef() ChannelDef { return ChannelDef{} }
 
 func (d *Microphone) Tools() []ToolDef {
@@ -498,13 +594,13 @@ func NewSpeaker(name string, io *IOManager) *Speaker {
 	return &Speaker{name: name, io: io}
 }
 
-func (d *Speaker) Name() string        { return d.name }
-func (d *Speaker) Type() DeviceType    { return DeviceOutput }
+func (d *Speaker) Name() string                         { return d.name }
+func (d *Speaker) Type() DeviceType                     { return DeviceOutput }
 func (d *Speaker) OutputCapabilities() OutputCapability { return CapText | CapAudio }
-func (d *Speaker) Description() string { return fmt.Sprintf("扬声器 (%s)", d.name) }
-func (d *Speaker) Start() error        { return nil }
-func (d *Speaker) Stop() error         { return nil }
-func (d *Speaker) ChannelDef() ChannelDef { return ChannelDef{} }
+func (d *Speaker) Description() string                  { return fmt.Sprintf("扬声器 (%s)", d.name) }
+func (d *Speaker) Start() error                         { return nil }
+func (d *Speaker) Stop() error                          { return nil }
+func (d *Speaker) ChannelDef() ChannelDef               { return ChannelDef{} }
 
 func (d *Speaker) Tools() []ToolDef {
 	return []ToolDef{{
@@ -535,13 +631,13 @@ func NewCamera(name string, io *IOManager) *Camera {
 	return &Camera{name: name, io: io}
 }
 
-func (d *Camera) Name() string        { return d.name }
-func (d *Camera) Type() DeviceType    { return DeviceInput }
+func (d *Camera) Name() string                         { return d.name }
+func (d *Camera) Type() DeviceType                     { return DeviceInput }
 func (d *Camera) OutputCapabilities() OutputCapability { return CapImage } // 可返回图片
-func (d *Camera) Description() string { return fmt.Sprintf("摄像头 (%s)", d.name) }
-func (d *Camera) Start() error        { return nil }
-func (d *Camera) Stop() error         { return nil }
-func (d *Camera) ChannelDef() ChannelDef { return ChannelDef{} }
+func (d *Camera) Description() string                  { return fmt.Sprintf("摄像头 (%s)", d.name) }
+func (d *Camera) Start() error                         { return nil }
+func (d *Camera) Stop() error                          { return nil }
+func (d *Camera) ChannelDef() ChannelDef               { return ChannelDef{} }
 
 func (d *Camera) Tools() []ToolDef {
 	return []ToolDef{
@@ -583,13 +679,13 @@ func NewRobotArm(name string, io *IOManager) *RobotArm {
 	return &RobotArm{name: name, io: io}
 }
 
-func (d *RobotArm) Name() string        { return d.name }
-func (d *RobotArm) Type() DeviceType    { return DeviceIO }
+func (d *RobotArm) Name() string                         { return d.name }
+func (d *RobotArm) Type() DeviceType                     { return DeviceIO }
 func (d *RobotArm) OutputCapabilities() OutputCapability { return CapStructured }
-func (d *RobotArm) Description() string { return fmt.Sprintf("机械臂 (%s)", d.name) }
-func (d *RobotArm) Start() error        { return nil }
-func (d *RobotArm) Stop() error         { return nil }
-func (d *RobotArm) ChannelDef() ChannelDef { return ChannelDef{} }
+func (d *RobotArm) Description() string                  { return fmt.Sprintf("机械臂 (%s)", d.name) }
+func (d *RobotArm) Start() error                         { return nil }
+func (d *RobotArm) Stop() error                          { return nil }
+func (d *RobotArm) ChannelDef() ChannelDef               { return ChannelDef{} }
 
 func (d *RobotArm) Tools() []ToolDef {
 	return []ToolDef{
@@ -635,13 +731,13 @@ func NewGPIODevice(name string, pins []int, io *IOManager) *GPIODevice {
 	return &GPIODevice{name: name, pins: pins, io: io}
 }
 
-func (d *GPIODevice) Name() string        { return d.name }
-func (d *GPIODevice) Type() DeviceType    { return DeviceIO }
+func (d *GPIODevice) Name() string                         { return d.name }
+func (d *GPIODevice) Type() DeviceType                     { return DeviceIO }
 func (d *GPIODevice) OutputCapabilities() OutputCapability { return CapStructured }
-func (d *GPIODevice) Description() string { return "GPIO 通用引脚" }
-func (d *GPIODevice) Start() error        { return nil }
-func (d *GPIODevice) Stop() error         { return nil }
-func (d *GPIODevice) ChannelDef() ChannelDef { return ChannelDef{} }
+func (d *GPIODevice) Description() string                  { return "GPIO 通用引脚" }
+func (d *GPIODevice) Start() error                         { return nil }
+func (d *GPIODevice) Stop() error                          { return nil }
+func (d *GPIODevice) ChannelDef() ChannelDef               { return ChannelDef{} }
 
 func (d *GPIODevice) Tools() []ToolDef {
 	return []ToolDef{

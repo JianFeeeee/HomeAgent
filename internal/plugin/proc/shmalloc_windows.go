@@ -15,19 +15,19 @@ import (
 
 // Windows 侧共享段：命名 FileMapping + 命名 Event。
 //
-// 与 Unix 的机制差异（不是能力差异）：
-// Windows 没有 fd 继承语义——os/exec 的 ExtraFiles 在 Windows 实现里不被支持。
-// 等价机制是命名内核对象：父进程 CreateFileMappingW 建带名字的段，
-// 子进程 OpenFileMappingW 按同名打开，拿到同一份物理页。
+// ⚠️ 本文件**已不是可用路径**：homed 已放弃 Windows 原生支持
+// （见 cmd/homed/platform_windows.go）。原因：插件体系依赖「继承的 fd」与
+// 「统一共享内存区的段内偏移解引用」，而 Windows 既没有 fd 继承语义
+// （os/exec 的 ExtraFiles 在 Windows 不支持），本文件描述的也仍是**旧的**
+// 两段布局（StageContext 段 + 事件环段），跟不上 §13.1 的单块统一区域。
 //
-// **这是 §9.2 的正解**。C ABI 时代 Windows 是第三套独立 ABI 实现
-// （dynamic_dll_windows.go），stage 只下发 3 字段且完全没有写回，
-// sanitizer 这类改写型插件静默失效。三套 ABI 收敛为单一 RPC 后，
-// Windows 与 Unix 共用同一份 stage 逻辑与同一份共享段布局，
-// 平台差异只剩本文件的创建端 + 插件侧模板的打开端。
+// 保留本文件只为让 GOOS=windows 仍能编译：否则平台门根本跑不起来，
+// 用户看到的会是「产物缺失」而不是一句「请用 WSL」。
+// allocShm 因此在入口直接报错，不返回一个「看起来能用」的段——
+// 让它跑起来只会得到无法解释的握手失败，这比启动失败难查得多
+// （与 shmalloc_other.go 的处理方式一致）。
 //
-// 名字带 PID 与递增序号：多个 homed 实例并存时不能撞名，
-// 同一实例内 StageContext 段与事件环段也必须分开。
+// Windows 用户的正确路径：WSL2（在 WSL 里就是普通 linux/amd64）。
 var shmNameSeq atomic.Uint64
 
 const (
@@ -60,20 +60,15 @@ var (
 	shmHandlesMu sync.Mutex
 )
 
-// allocShm 创建命名共享段并映射。
+// allocShm 在 Windows 上明确报错：homed 不支持 Windows 原生运行。
 //
-// 返回的 *os.File 为 nil：Windows 不经 fd 传递段，插件按名字打开。
-// 名字通过 procEnvForShm 注入子进程环境变量。
+// 不返回「能用的段」：本文件实现的是 §13.1 之前的**两段**布局，
+// 与当前内核的单块统一区域不兼容。静默返回只会在握手阶段变成一句
+// 无法解释的魔数不匹配。报错文案直接给出行动：用 WSL2。
 func allocShm(size int) (*os.File, []byte, error) {
-	name := shmNameForMode()
-	shm, data, err := createNamedMapping(name, size)
-	if err != nil {
-		return nil, nil, err
-	}
-	shmHandlesMu.Lock()
-	shmHandles[uintptr(unsafe.Pointer(&data[0]))] = shm
-	shmHandlesMu.Unlock()
-	return nil, data, nil
+	return nil, nil, fmt.Errorf("proc: homed 不支持 Windows 原生运行" +
+		"（插件体系依赖 fd 继承与统一共享内存区的段内偏移解引用）——请使用 WSL2；" +
+		"详见 cmd/homed/platform_windows.go")
 }
 
 // shmNameForMode 按安全模式生成命名段名。
@@ -87,7 +82,7 @@ func shmNameForMode() string {
 		return fmt.Sprintf("%s_%d_%d", shmNamePrefix, os.Getpid(), seq)
 	default: // safe / debug
 		var b [12]byte
-		if _, err := cryptorand.Read(b[:]); err != nil {
+		if _, err := rand.Read(b[:]); err != nil {
 			// 退化为 PID+seq（极端情况，crypto rand 几乎不会失败）
 			return fmt.Sprintf("%s_%d_%d", shmNamePrefix, os.Getpid(), seq)
 		}
