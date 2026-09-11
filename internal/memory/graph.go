@@ -2,6 +2,7 @@ package memory
 
 import (
 	"database/sql"
+	"encoding/json"
 	"fmt"
 	"strings"
 	"sync"
@@ -107,6 +108,36 @@ func (g *GraphDB) initSchema() error {
 			FOREIGN KEY (target_id) REFERENCES entities(id),
 			UNIQUE(source_id, target_id, relation_type, session_id)
 		)`,
+		`CREATE TABLE IF NOT EXISTS memory_blocks (
+			id TEXT PRIMARY KEY,
+			modality TEXT NOT NULL,
+			text_content TEXT DEFAULT '',
+			payload_digest TEXT DEFAULT '',
+			mime TEXT DEFAULT '',
+			size INTEGER DEFAULT 0,
+			width INTEGER DEFAULT 0,
+			height INTEGER DEFAULT 0,
+			vector TEXT DEFAULT '',
+			fingerprint TEXT DEFAULT '',
+			source TEXT DEFAULT '',
+			tool TEXT DEFAULT '',
+			created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+			updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+		)`,
+		`CREATE TABLE IF NOT EXISTS memory_block_edges (
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			source_kind TEXT NOT NULL,
+			source_id TEXT NOT NULL,
+			target_kind TEXT NOT NULL,
+			target_id TEXT NOT NULL,
+			edge_type TEXT NOT NULL,
+			created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+			UNIQUE(source_kind, source_id, target_kind, target_id, edge_type)
+		)`,
+		`CREATE INDEX IF NOT EXISTS idx_memory_blocks_modality ON memory_blocks(modality)`,
+		`CREATE INDEX IF NOT EXISTS idx_memory_blocks_digest ON memory_blocks(payload_digest)`,
+		`CREATE INDEX IF NOT EXISTS idx_memory_block_edges_source ON memory_block_edges(source_kind, source_id)`,
+		`CREATE INDEX IF NOT EXISTS idx_memory_block_edges_target ON memory_block_edges(target_kind, target_id)`,
 		`CREATE INDEX IF NOT EXISTS idx_entity_name ON entities(name)`,
 		`CREATE INDEX IF NOT EXISTS idx_entity_type ON entities(type)`,
 		`CREATE INDEX IF NOT EXISTS idx_relation_source ON relations(source_id)`,
@@ -714,9 +745,58 @@ func (g *GraphDB) GraphData() (map[string]interface{}, error) {
 		return nil, err
 	}
 
+	brows, err := g.db.Query(`SELECT id, modality, text_content, payload_digest, mime,
+		size, width, height, vector, fingerprint, source, tool, created_at, updated_at
+		FROM memory_blocks ORDER BY created_at, id`)
+	if err != nil {
+		return nil, err
+	}
+	defer brows.Close()
+	var blocks []MemoryBlock
+	for brows.Next() {
+		var block MemoryBlock
+		var vectorJSON string
+		if err := brows.Scan(&block.ID, &block.Modality, &block.Text, &block.PayloadDigest,
+			&block.MIME, &block.Size, &block.Width, &block.Height, &vectorJSON,
+			&block.Fingerprint, &block.Source, &block.Tool, &block.CreatedAt,
+			&block.UpdatedAt); err != nil {
+			return nil, err
+		}
+		if vectorJSON != "" && vectorJSON != "null" {
+			if err := json.Unmarshal([]byte(vectorJSON), &block.Vector); err != nil {
+				return nil, fmt.Errorf("decode memory block %s vector: %w", block.ID, err)
+			}
+		}
+		blocks = append(blocks, block)
+	}
+	if err := brows.Err(); err != nil {
+		return nil, err
+	}
+
+	berows, err := g.db.Query(`SELECT id, source_kind, source_id, target_kind, target_id,
+		edge_type, created_at FROM memory_block_edges ORDER BY id`)
+	if err != nil {
+		return nil, err
+	}
+	defer berows.Close()
+	var blockEdges []MemoryBlockEdge
+	for berows.Next() {
+		var edge MemoryBlockEdge
+		if err := berows.Scan(&edge.ID, &edge.SourceKind, &edge.SourceID,
+			&edge.TargetKind, &edge.TargetID, &edge.Type, &edge.CreatedAt); err != nil {
+			return nil, err
+		}
+		blockEdges = append(blockEdges, edge)
+	}
+	if err := berows.Err(); err != nil {
+		return nil, err
+	}
+
 	return map[string]interface{}{
-		"nodes": entities,
-		"edges": relations,
+		"nodes":              entities,
+		"edges":              relations,
+		"memory_blocks":      blocks,
+		"memory_block_edges": blockEdges,
 	}, nil
 }
 
