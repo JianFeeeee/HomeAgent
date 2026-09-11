@@ -505,7 +505,6 @@ func main() {
 		SocialStore:        socialStore,
 		TextMemory:         textMem,
 		MediaStore:         mediaStore,
-		MediaDescribe:      cfgReg.GetBool("core.memory.media.describe_on_ingest", false),
 		Personality:        personality,
 		PluginReg:          pluginReg,
 		PluginDir:          cfg.Plugin.Dir,

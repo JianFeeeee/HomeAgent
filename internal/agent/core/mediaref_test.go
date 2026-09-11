@@ -106,8 +106,8 @@ func TestCaptureBlockMedia_NilStoreIsNoop(t *testing.T) {
 	if len(evt.Blocks) != 0 || evt.ID != "" {
 		t.Fatalf("nil store 时不该改动事件: %+v", evt)
 	}
-	if s := a.mediaSummaryForEvent(nil); s != "" {
-		t.Fatalf("nil store 时摘要应为空，得到 %q", s)
+	if s := mediaLabel(nil); s != "" {
+		t.Fatalf("nil 媒体应产出空标签，得到 %q", s)
 	}
 }
 
@@ -183,31 +183,27 @@ func TestBindEventMedia_LazyIDOnlyWhenNeeded(t *testing.T) {
 	}
 }
 
-func TestMediaSummary_DescriptionIsThePersistentMemory(t *testing.T) {
-	// 方案 C 的核心：描述文本才是持久语义记忆，blob 只是缓存。
-	// blob 被容量 GC 淘汰后，描述仍留在 L0/L2/L3 的文本里可被检索。
+func TestMediaLabel_NoGeneratedDescription(t *testing.T) {
+	// 标签只用来告诉模型「这条记忆带着哪份媒体、可用该 digest 取回字节」。
+	// 它不包含任何生成的描述：描述式索引是把就机制，已彻底废弃。
 	a, ms := newTestAgentWithMedia(t)
 
 	d, _ := ms.Put([]byte("img"), media.Item{MIME: "image/png"})
-	b, ok := a.blockFromDigest(d)
-	if !ok {
-		t.Fatal("blockFromDigest 失败")
+	it, err := ms.Stat(d)
+	if err != nil {
+		t.Fatal(err)
 	}
-	if s := a.mediaSummaryForEvent([]memory.MemoryBlock{b}); s == "" {
-		t.Fatal("未描述项也应产出一行（标注未描述）")
-	}
-
-	ms.Describe(d, "一张紫蓝红三色带图", "visionllm")
-	s := a.mediaSummaryForEvent([]memory.MemoryBlock{b})
+	s := mediaLabel(it)
 	if s == "" {
-		t.Fatal("应产出摘要")
-	}
-	if !strings.Contains(s, "紫蓝红三色带图") {
-		t.Fatalf("摘要应含描述文本: %q", s)
+		t.Fatal("应产出标签")
 	}
 	if !strings.Contains(s, "image/png") {
-		t.Fatalf("摘要应含 MIME 标注: %q", s)
+		t.Fatalf("标签应含 MIME 标注: %q", s)
 	}
+	if !strings.Contains(s, shortDigest(d)) {
+		t.Fatalf("标签应含短 digest 供反查: %q", s)
+	}
+	_ = a
 }
 
 func TestPrune_NilMediaStoreStillArchives(t *testing.T) {

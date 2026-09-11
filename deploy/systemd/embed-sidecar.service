@@ -1,0 +1,20 @@
+[Unit]
+Description=Jina v5-omni-nano Embedding Sidecar for HomeAgent
+After=network.target
+
+[Service]
+Type=simple
+User=root
+WorkingDirectory=/home/newqqagent
+ExecStart=/usr/local/bin/python3 /home/program/TrueAgent/scripts/embed_sidecar.py
+Restart=on-failure
+RestartSec=5
+Environment=JINA_MODEL_DIR=/home/newqqagent/models/jina-v5-omni-nano
+Environment=JINA_PORT=18999
+Environment=JINA_DIMENSION=768
+Environment=OMP_NUM_THREADS=8
+Environment=MKL_NUM_THREADS=8
+Environment=TOKENIZERS_PARALLELISM=false
+
+[Install]
+WantedBy=multi-user.target

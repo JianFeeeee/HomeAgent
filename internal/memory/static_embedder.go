@@ -14,8 +14,8 @@ import (
 	"sync"
 	"unicode/utf8"
 
-	"github.com/yanyiwu/gojieba"
 	"gitcode.com/JianFeeeee/HomeAgent/internal/memory/vector"
+	"github.com/yanyiwu/gojieba"
 )
 
 const downloadMaxWords = 200000

@@ -56,8 +56,6 @@ type Agent struct {
 	// 它是记忆块的内容存储，不单独做生命周期管理：块的创建/迁移/删除
 	// 由记忆系统本身决定。为 nil 时全部媒体接线静默跳过。
 	mediaStore *media.Store
-	// mediaDescribe 控制是否跑后台描述循环（要消耗视觉模型配额）。
-	mediaDescribe bool
 
 	// 人格设定
 	personality *agentPkg.Personality
@@ -182,7 +180,6 @@ type AgentConfig struct {
 	SocialStore        *social.SocialStore
 	TextMemory         *text.Memory
 	MediaStore         *media.Store
-	MediaDescribe      bool
 	MultimodalSpace    vector.MultimodalEmbedder
 	FusionCfg          CrossModalFusionConfig // 跨模态融合权重；零值用默认
 	Personality        *agentPkg.Personality
@@ -271,7 +268,6 @@ func New(cfg AgentConfig) *Agent {
 		social:          cfg.SocialStore,
 		textMem:         cfg.TextMemory,
 		mediaStore:      cfg.MediaStore,
-		mediaDescribe:   cfg.MediaDescribe,
 		personality:     cfg.Personality,
 		pluginReg:       cfg.PluginReg,
 		pluginDir:       cfg.PluginDir,
@@ -307,8 +303,8 @@ func (a *Agent) Start() {
 	go a.archiveLoop()
 	go a.mergeLoop()
 	go a.reviewLoop()
-	go a.mediaDescribeLoop()
 	a.reembedStaleMedia()
+	a.migrateLegacyGraphMedia()
 	log.Printf("[agent] %s started, waiting for IO interrupts", a.id)
 }
 

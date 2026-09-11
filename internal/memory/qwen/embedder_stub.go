@@ -4,7 +4,7 @@ package qwen
 
 import "fmt"
 
-// Embedder 在未启用 onnxruntime 时为 no-op 实现（与 internal/memory/clip 同模式）。
+// Embedder 在未启用 onnxruntime 时为 no-op 实现。
 // 默认构建不链接 onnxruntime，保持原有 fastText/TF-IDF 行为不变。
 type Embedder struct {
 	loaded bool
