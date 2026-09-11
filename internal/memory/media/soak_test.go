@@ -39,7 +39,7 @@ func TestSoak_SustainedMixedLoad(t *testing.T) {
 
 	stop := make(chan struct{})
 	var wg sync.WaitGroup
-	var puts, gets, deletes, describes, searches atomic.Int64
+	var puts, gets, deletes, embeds, searches atomic.Int64
 	var fatal atomic.Int64
 
 	worker := func(name string, fn func(iter int) error) {
@@ -109,25 +109,26 @@ func TestSoak_SustainedMixedLoad(t *testing.T) {
 		return nil
 	})
 
-	// 描述者
-	worker("describe", func(i int) error {
-		pend, err := s.Pending(5)
+	// 向量写入者：持续给新内容嵌入并删除（模拟启动迁移/短命媒体）
+	worker("embed", func(i int) error {
+		b := make([]byte, 1024)
+		rand.Read(b)
+		b = append([]byte(fmt.Sprintf("emb-%d-", i)), b...)
+		d, err := s.Put(b, Item{MIME: "image/png", Tool: "cmd_run"})
 		if err != nil {
 			return err
 		}
-		for _, it := range pend {
-			// 忽略 unknown digest：GC 可能在 Pending 与 Describe 之间清掉它，
-			// 这是正常竞态而非缺陷。
-			_ = s.Describe(it.Digest, fmt.Sprintf("描述 %d 含图表与文字", i), "vis")
-			describes.Add(1)
+		if err := s.SetVec(d, []float64{1, float64(i % 7)}, "soak-space"); err != nil {
+			return err
 		}
-		time.Sleep(2 * time.Millisecond)
+		embeds.Add(1)
+		time.Sleep(time.Millisecond)
 		return nil
 	})
 
 	// 检索者
 	worker("search", func(i int) error {
-		if _, err := s.Search("图表", KindImage, 20); err != nil {
+		if _, err := s.QueryMediaScored([]float64{1, 0}, "soak-space", 20); err != nil {
 			return err
 		}
 		if _, err := s.Stat(keep[i%keepN]); err != nil {
@@ -146,8 +147,8 @@ func TestSoak_SustainedMixedLoad(t *testing.T) {
 		t.Fatalf("%d 个 worker 报致命错误", n)
 	}
 
-	t.Logf("%v 内: put=%d get=%d delete=%d describe=%d search=%d",
-		dur, puts.Load(), gets.Load(), deletes.Load(), describes.Load(), searches.Load())
+	t.Logf("%v 内: put=%d get=%d delete=%d embed=%d search=%d",
+		dur, puts.Load(), gets.Load(), deletes.Load(), embeds.Load(), searches.Load())
 
 	// 收尾断言
 	for i, d := range keep {
@@ -161,6 +162,5 @@ func TestSoak_SustainedMixedLoad(t *testing.T) {
 	}
 
 	st := s.Stats()
-	t.Logf("收尾: 条目=%v 字节=%v 已描述=%v",
-		st["count"], st["total_bytes"], st["described"])
+	t.Logf("收尾: 条目=%v 字节=%v 类型=%v", st["count"], st["total_bytes"], st["by_kind"])
 }

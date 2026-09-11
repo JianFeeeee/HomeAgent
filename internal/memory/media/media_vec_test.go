@@ -10,9 +10,9 @@ func TestQueryMedia_BasicSimilarity(t *testing.T) {
 	defer s.Close()
 
 	// 入库三张带向量的媒体：两张图、一段音频
-	d1, _ := s.Put([]byte("img1"), Item{MIME: "image/png", Description: "紫蓝红三色带"})
-	d2, _ := s.Put([]byte("img2"), Item{MIME: "image/jpeg", Description: "蓝紫红渐变"})
-	d3, _ := s.Put([]byte("aud1"), Item{MIME: "audio/wav", Description: "一段语音"})
+	d1, _ := s.Put([]byte("img1"), Item{MIME: "image/png"})
+	d2, _ := s.Put([]byte("img2"), Item{MIME: "image/jpeg"})
+	d3, _ := s.Put([]byte("aud1"), Item{MIME: "audio/wav"})
 
 	// 模拟视觉嵌入：img1 和 img2 向量接近，aud1 远离
 	vec1 := []float64{0.9, 0.1, 0.0, 0.0}
@@ -138,24 +138,24 @@ func TestStaleVecDigests(t *testing.T) {
 	s := newTestStore(t, 0)
 	defer s.Close()
 
-	// 有描述且 vec_model 匹配 → 非 stale
-	d1, _ := s.Put([]byte("img1"), Item{MIME: "image/png", Description: "图一"})
-	s.SetVec(d1, []float64{0.1}, "clip-vit-b32")
+	// 有向量且 vec_model 匹配 → 非 stale
+	d1, _ := s.Put([]byte("img1"), Item{MIME: "image/png"})
+	s.SetVec(d1, []float64{0.1}, "space-a")
 
-	// 有描述但 vec_model 旧 → stale
-	d2, _ := s.Put([]byte("img2"), Item{MIME: "image/png", Description: "图二"})
-	s.SetVec(d2, []float64{0.2}, "clip-vit-b14")
+	// 有向量但 vec_model 旧 → stale
+	d2, _ := s.Put([]byte("img2"), Item{MIME: "image/png"})
+	s.SetVec(d2, []float64{0.2}, "space-old")
 
-	// 有描述但从未嵌入（vec_model 空）→ stale
-	d3, _ := s.Put([]byte("img3"), Item{MIME: "image/png", Description: "图三"})
+	// 从未嵌入（vec_model 空）→ stale
+	d3, _ := s.Put([]byte("img3"), Item{MIME: "image/png"})
 
-	// 无描述但有图片 → 也应被迁移（描述是可选语义通道，图片应独立于描述参与向量空间）
+	// 与向量/描述无关的图片同样应被迁移：图片独立参与向量空间
 	d4, _ := s.Put([]byte("img4"), Item{MIME: "image/png"})
 
 	// 音频不参与图片迁移（StaleVecDigests 只查 kind='image'）
-	s.Put([]byte("aud1"), Item{MIME: "audio/wav", Description: "语音"})
+	s.Put([]byte("aud1"), Item{MIME: "audio/wav"})
 
-	stale, err := s.StaleVecDigests("clip-vit-b32")
+	stale, err := s.StaleVecDigests("space-a")
 	if err != nil {
 		t.Fatal(err)
 	}

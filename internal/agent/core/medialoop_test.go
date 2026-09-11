@@ -4,18 +4,18 @@ import (
 	"context"
 	"path/filepath"
 	"testing"
-	"time"
 
 	"gitcode.com/JianFeeeee/HomeAgent/internal/memory"
+	"gitcode.com/JianFeeeee/HomeAgent/internal/memory/document"
 	"gitcode.com/JianFeeeee/HomeAgent/internal/memory/media"
 )
 
-// 媒体后台循环测试。
+// 媒体与记忆块的生命周期测试。
 //
 // 媒体没有独立生命周期管理（没有 GC、没有引用计数）：blob 是记忆块的内容，
-// 块的创建/迁移/删除由记忆系统决定。这里只测描述循环与删除语义。
+// 块的创建/迁移/删除由记忆系统决定。图片也不靠文本描述索引。
 
-func newMediaLoopAgent(t *testing.T, describe bool) (*Agent, *media.Store) {
+func newMediaLoopAgent(t *testing.T) (*Agent, *media.Store) {
 	t.Helper()
 	dir := t.TempDir()
 	ms, err := media.New(filepath.Join(dir, "media"))
@@ -24,73 +24,81 @@ func newMediaLoopAgent(t *testing.T, describe bool) (*Agent, *media.Store) {
 	}
 	t.Cleanup(func() { ms.Close() })
 
-	a := &Agent{
-		mediaStore:    ms,
-		mediaDescribe: describe,
-	}
+	a := &Agent{mediaStore: ms}
 	a.ctx, a.cancel = context.WithCancel(context.Background())
 	t.Cleanup(a.cancel)
 	return a, ms
 }
 
-func TestMediaDescribeLoop_ExitsWhenDisabled(t *testing.T) {
-	// describe 关闭时必须立即返回（默认就是关闭，绝大多数部署走这条路）
-	a, _ := newMediaLoopAgent(t, false)
-	done := make(chan struct{})
-	go func() { a.mediaDescribeLoop(); close(done) }()
-	select {
-	case <-done:
-	case <-time.After(2 * time.Second):
-		t.Fatal("describe 关闭时 mediaDescribeLoop 未立即返回")
+// heldMediaDigests 汇总三层记忆持有的媒体：只有这些才可被召回。
+func TestHeldMediaDigests_CollectsAcrossLayers(t *testing.T) {
+	a, ms := newMediaLoopAgent(t)
+	d1, _ := ms.Put([]byte("ctx-layer"), media.Item{MIME: "image/png"})
+	d2, _ := ms.Put([]byte("doc-layer"), media.Item{MIME: "image/png"})
+	d3, _ := ms.Put([]byte("graph-layer"), media.Item{MIME: "image/png"})
+	d4, _ := ms.Put([]byte("orphan"), media.Item{MIME: "image/png"})
+
+	a.context = NewRelevanceContext("", memory.NewStaticEmbedder(""))
+	a.context.Append(ContextEvent{Input: "带图的一轮", Blocks: []memory.MemoryBlock{
+		{ID: "blk_ctx", Modality: memory.BlockImage, PayloadDigest: d1},
+	}})
+
+	dir := t.TempDir()
+	bo, ok := a.blockFromDigest(d2)
+	if !ok {
+		t.Fatal("blockFromDigest 失败")
 	}
-}
+	ds := document.NewStore(filepath.Join(dir, "docs"), memory.TokenizeWords)
+	if err := ds.Start(); err != nil {
+		t.Fatal(err)
+	}
+	defer ds.Stop()
+	if err := ds.Insert(&document.Doc{ID: "doc_1", Summary: "s", Blocks: []memory.MemoryBlock{bo}}); err != nil {
+		t.Fatal(err)
+	}
+	a.docStore = ds
 
-func TestDescribePendingMedia_NoProviderLeavesUndescribed(t *testing.T) {
-	// 没有声明视觉能力的源时整轮跳过，且**不能**把项标记成已处理——
-	// 配置好之后必须还能被捡起来。
-	a, ms := newMediaLoopAgent(t, true)
-	d, _ := ms.Put([]byte("img"), media.Item{MIME: "image/png"})
-
-	// providerManager 为 nil → resolveModalFallback 返回 nil
-	a.describePendingMedia()
-
-	it, err := ms.Stat(d)
+	g, err := memory.NewGraphDB(filepath.Join(dir, "graph.db"))
 	if err != nil {
 		t.Fatal(err)
 	}
-	if it.Description != "" || it.DescribedBy != "" {
-		t.Fatalf("无可用源时不该写描述: %+v", it)
-	}
-	pending, _ := ms.Pending(10)
-	if len(pending) != 1 {
-		t.Fatalf("项应仍在待描述队列里，实际 %d 条", len(pending))
-	}
-}
-
-func TestDescribePendingMedia_MarksUnsupportedKind(t *testing.T) {
-	// video/other 大类没有可用的描述通道，必须标记掉，
-	// 否则每轮 Pending 都把它取出来重试，永远卡住队列头部。
-	a, ms := newMediaLoopAgent(t, true)
-
-	other, _ := ms.Put([]byte("blob"), media.Item{MIME: "application/octet-stream"})
-	a.describePendingMedia()
-
-	it, err := ms.Stat(other)
-	if err != nil {
+	defer g.Close()
+	if err := g.PutMemoryBlocks([]memory.MemoryBlock{
+		{ID: "blk_g", Modality: memory.BlockImage, PayloadDigest: d3},
+	}); err != nil {
 		t.Fatal(err)
 	}
-	if it.DescribedBy != "unsupported" {
-		t.Fatalf("不可描述的大类应被标记，实际 DescribedBy=%q", it.DescribedBy)
+	a.memory = g
+
+	held := a.heldMediaDigests()
+	for _, want := range []string{d1, d2, d3} {
+		if !held[want] {
+			t.Errorf("层次持有 %s 却不在结果里: %v", shortDigest(want), held)
+		}
 	}
-	pending, _ := ms.Pending(10)
-	if len(pending) != 0 {
-		t.Fatalf("标记 unsupported 后应退出待描述队列，仍有 %d 条", len(pending))
+	if held[d4] {
+		t.Errorf("无人持有的 %s 不该出现在结果里", shortDigest(d4))
 	}
 }
 
-func TestDescribePendingMedia_EmptyQueueIsNoop(t *testing.T) {
-	a, _ := newMediaLoopAgent(t, true)
-	a.describePendingMedia() // 不该 panic
+// payloadHeld 是删除前的活查询。
+func TestPayloadHeld(t *testing.T) {
+	a, ms := newMediaLoopAgent(t)
+	d, _ := ms.Put([]byte("held"), media.Item{MIME: "image/png"})
+	if a.payloadHeld(d) {
+		t.Fatal("尚无块持有时不该报已持有")
+	}
+
+	a.context = NewRelevanceContext("", memory.NewStaticEmbedder(""))
+	a.context.Append(ContextEvent{Input: "x", Blocks: []memory.MemoryBlock{
+		{ID: "blk_1", Modality: memory.BlockImage, PayloadDigest: d},
+	}})
+	if !a.payloadHeld(d) {
+		t.Fatal("L0 持有却报未持有")
+	}
+	if a.payloadHeld("") {
+		t.Fatal("空 digest 应为 false")
+	}
 }
 
 // TestForgetPayloads_DeletesOnlyUnheldContent 验证删除语义：

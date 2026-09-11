@@ -37,6 +37,7 @@ type Doc struct {
 	Blocks      []memory.MemoryBlock `json:"blocks,omitempty"`    // 一等记忆块（text/image/video/audio）
 	Vector      tfidf.Vector         `json:"vector,omitempty"`    // TF-IDF 稀疏向量（fallback 时持久化）
 	DenseVec    []float64            `json:"dense_vec,omitempty"` // 多模态稠密向量（主路径）
+	DenseFP     string               `json:"dense_fp,omitempty"`  // DenseVec 所属统一空间指纹，变化时触发重算
 }
 
 // Store — 文档记忆存储。
@@ -113,7 +114,7 @@ func (s *Store) SetDenseSpace(ds vector.MultimodalEmbedder) {
 	s.denseSpace = ds
 }
 
-// BuildDenseIndex 为所有文档计算稠密向量。
+// BuildDenseIndex 为所有文档计算稠密向量（文本 ⊕ 媒体块）。
 func (s *Store) BuildDenseIndex(ds vector.MultimodalEmbedder) {
 	if ds == nil || !ds.Loaded() {
 		return
@@ -123,19 +124,40 @@ func (s *Store) BuildDenseIndex(ds vector.MultimodalEmbedder) {
 	log.Printf("[document memory] building dense index for %d docs (dim=%d)", len(s.docs), ds.Dim())
 	count := 0
 	for _, doc := range s.docs {
-		if doc.DenseVec != nil && len(doc.DenseVec) == ds.Dim() {
+		if doc.DenseVec != nil && len(doc.DenseVec) == ds.Dim() && doc.DenseFP == ds.Fingerprint() {
 			continue
 		}
-		text := doc.Summary + " " + doc.Content
-		vec, err := ds.VectorizeDense(text)
-		if err != nil {
-			log.Printf("[document memory] dense embed failed %s: %v", doc.ID[:min(16, len(doc.ID))], err)
+		vec := s.denseFor(doc)
+		if vec == nil {
 			continue
 		}
 		doc.DenseVec = vec
+		doc.DenseFP = ds.Fingerprint()
 		count++
 	}
 	log.Printf("[document memory] dense index built: %d new vectors", count)
+}
+
+// denseFor 计算文档的稠密向量：文本向量与其一等记忆块的媒体向量融合。
+//
+// 只有与当前统一空间同指纹的块向量才参与融合：不同模型/维度的旧向量
+// 属于另一个坐标系，混进去会算出一个两边都不像的方向。
+// 任意一路缺失时退化为另一路；都不可用返回 nil。
+func (s *Store) denseFor(doc *Doc) []float64 {
+	if s.denseSpace == nil || !s.denseSpace.Loaded() {
+		return nil
+	}
+	fp := s.denseSpace.Fingerprint()
+	var parts [][]float64
+	if tv, err := s.denseSpace.VectorizeDense(doc.Summary + " " + doc.Content); err == nil && len(tv) > 0 {
+		parts = append(parts, tv)
+	}
+	for _, b := range doc.Blocks {
+		if len(b.Vector) > 0 && b.Fingerprint == fp {
+			parts = append(parts, b.Vector)
+		}
+	}
+	return vector.FuseVectors(parts...)
 }
 
 // Reindex 重建 TF-IDF 索引（fallback 路径变更时调用）。
@@ -172,11 +194,10 @@ func (s *Store) Insert(doc *Doc) error {
 
 	text := doc.Summary + " " + doc.Content
 
-	// 主路径：稠密向量
+	// 主路径：稠密向量（文本 ⊕ 媒体块）
 	if s.denseSpace != nil && s.denseSpace.Loaded() && len(doc.DenseVec) == 0 {
-		if dv, err := s.denseSpace.VectorizeDense(text); err == nil {
-			doc.DenseVec = dv
-		}
+		doc.DenseVec = s.denseFor(doc)
+		doc.DenseFP = s.denseSpace.Fingerprint()
 	}
 
 	// Fallback 路径：缓存文本，延迟训练
@@ -232,6 +253,10 @@ func (s *Store) ContextToDoc(source string, entries []ContextEntry, _ interface{
 			d.Tags = tags
 			d.Entities = entities
 			d.Blocks = blocksFromEntries(entries)
+			d.DenseVec = s.denseFor(d)
+			if s.denseSpace != nil {
+				d.DenseFP = s.denseSpace.Fingerprint()
+			}
 			s.dirty = true
 			return d, nil
 		}
@@ -249,6 +274,10 @@ func (s *Store) ContextToDoc(source string, entries []ContextEntry, _ interface{
 		Blocks: blocksFromEntries(entries),
 	}
 	s.docs[id] = doc
+	doc.DenseVec = s.denseFor(doc)
+	if s.denseSpace != nil {
+		doc.DenseFP = s.denseSpace.Fingerprint()
+	}
 	text := summary + " " + content
 	if s.tfidfIdx != nil {
 		s.tfidfIdx.Add(id, text)

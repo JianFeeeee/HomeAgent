@@ -204,8 +204,15 @@ func (a *Agent) archiveColdDocs() {
 			}
 			log.Printf("[agent] doc→graph: %s → %d entities, %d relations, %d blocks", doc.ID, ec, rc, blocks)
 
-			// 文档的一等记忆块已随句子写进 L3（身份不变，由 bindSentenceBlocks
-			// 复用 doc.Blocks 的 ID）；块不再挂在文档上，删除文档即完成迁移。
+			// 文档持有的一等块写入 L3，并以 document --contains--> block 边关联；
+			// 块 ID 原样保留（迁移而非重建）。块迁走后删除文档即完成迁移。
+			if len(doc.Blocks) > 0 {
+				if bound := a.linkBlocksToDocument(doc.ID, doc.Blocks); bound != len(doc.Blocks) {
+					log.Printf("[agent] doc→graph: %s 块迁移不完整 (%d/%d)，保留文档待下轮重试",
+						doc.ID, bound, len(doc.Blocks))
+					continue
+				}
+			}
 			a.docStore.Remove(doc.ID)
 		}
 	}
@@ -430,14 +437,9 @@ func docToTriples(doc *document.Doc, embedder nlp.Vectorizer) []memory.Triple {
 		})
 	}
 
-	// 媒体三元组：确定性产出，先于 NLP 提取。
-	//
-	// 媒体入 L3 曾完全依赖提取器碰巧从描述文本里提出合规三元组——实测
-	// LLM 的 477 字图片描述只产出「水平 -分割-> 成」这类语法碎片，
-	// obj 仅 1 字被 validEntityName 拒掉，整条媒体记忆就进不了图库
-	//（阶段性表现是"时好时坏"，取决于提取器运气）。媒体自身的
-	// digest / mime / 描述都是确定的，直接建三元组而不经提取器。
-	triples = append(triples, mediaTriplesFromText(doc.Content)...)
+	// 媒体不再参与三元组：它作为一等块由 linkBlocksToDocument
+	// 写入 L3 并以 document --contains--> block 边关联，
+	// 不经过文本描述与 NLP 提取器。
 
 	// NLP 通用提取
 	e := nlp.NewExtractor(nil)

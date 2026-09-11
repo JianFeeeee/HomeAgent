@@ -69,11 +69,6 @@ type Item struct {
 	OriginPath string `json:"origin_path,omitempty"`
 	// Tool 是注入这条媒体的工具名（如 multimodal_see_picture）。
 	Tool string `json:"tool,omitempty"`
-	// Description 是视觉/音频模型生成的文字描述，供 L2/L3 检索。
-	// 空表示未描述（未开启描述、模型不可用或描述失败）。
-	Description string `json:"description,omitempty"`
-	// DescribedBy 记录描述来自哪个源，让后续读者能判断可靠性。
-	DescribedBy string `json:"described_by,omitempty"`
 	// FirstSeen/LastSeen 是首末次入库时间。
 	FirstSeen time.Time `json:"first_seen"`
 	LastSeen  time.Time `json:"last_seen"`
@@ -127,8 +122,6 @@ func (s *Store) initSchema() error {
 			height       INTEGER DEFAULT 0,
 			origin_path  TEXT,
 			tool         TEXT,
-			description  TEXT,
-			described_by TEXT,
 			first_seen   TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
 			last_seen    TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 		)`,
@@ -196,20 +189,15 @@ func (s *Store) Put(data []byte, meta Item) (string, error) {
 	}
 	_, err := s.db.Exec(`
 		INSERT INTO media (digest, kind, mime, size, width, height,
-		                   origin_path, tool, description, described_by,
-		                   first_seen, last_seen)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+		                   origin_path, tool, first_seen, last_seen)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 		ON CONFLICT(digest) DO UPDATE SET
 			last_seen    = excluded.last_seen,
-			-- 只在原值为空时补写：先到的描述可能来自更强的模型，
-			-- 后到的空值不该把它冲掉。
-			description  = CASE WHEN COALESCE(media.description,'')  = '' THEN excluded.description  ELSE media.description  END,
-			described_by = CASE WHEN COALESCE(media.described_by,'') = '' THEN excluded.described_by ELSE media.described_by END,
 			width        = CASE WHEN media.width  = 0 THEN excluded.width  ELSE media.width  END,
 			height       = CASE WHEN media.height = 0 THEN excluded.height ELSE media.height END,
 			tool         = CASE WHEN COALESCE(media.tool,'') = '' THEN excluded.tool ELSE media.tool END
 	`, digest, string(meta.Kind), meta.MIME, int64(len(data)), meta.Width, meta.Height,
-		meta.OriginPath, meta.Tool, meta.Description, meta.DescribedBy, now, now)
+		meta.OriginPath, meta.Tool, now, now)
 	if err != nil {
 		return "", fmt.Errorf("media: upsert meta: %w", err)
 	}
@@ -242,115 +230,12 @@ func (s *Store) Stat(digest string) (*Item, error) {
 	defer s.mu.RUnlock()
 	return s.scanOne(s.db.QueryRow(`
 		SELECT digest, kind, mime, size, width, height, origin_path, tool,
-		       description, described_by, first_seen, last_seen,
+		       first_seen, last_seen,
 		       vec, vec_model
 		FROM media WHERE digest = ?`, digest))
 }
 
-// Describe 写入（或覆盖）文字描述。
-//
-// 与 Put 的"只在空时补写"不同：Describe 是显式操作，调用方明确想要这份
-// 描述生效（例如换了更强的视觉模型重新描述）。
-func (s *Store) Describe(digest, description, describedBy string) error {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	res, err := s.db.Exec(`UPDATE media SET description = ?, described_by = ? WHERE digest = ?`,
-		description, describedBy, digest)
-	if err != nil {
-		return fmt.Errorf("media: describe: %w", err)
-	}
-	if n, _ := res.RowsAffected(); n == 0 {
-		return fmt.Errorf("media: describe: unknown digest %s", shortDigest(digest))
-	}
-	return nil
-}
-
-// Search 按描述文本做 LIKE 匹配，返回最近的若干条。
-//
-// 刻意不在这里做向量检索：媒体的语义检索走 L2 文档层的既有索引
-// （描述文字随记忆条目一起进 Doc.Content，复用那套 TF-IDF/embedding），
-// 本方法只是"按关键词直接翻媒体库"的补充入口。
-func (s *Store) Search(query string, kind Kind, limit int) ([]*Item, error) {
-	if limit <= 0 {
-		limit = 20
-	}
-	s.mu.RLock()
-	defer s.mu.RUnlock()
-
-	q := `SELECT digest, kind, mime, size, width, height, origin_path, tool,
-	             description, described_by, first_seen, last_seen,
-	             vec, vec_model
-	      FROM media WHERE COALESCE(description,'') != ''`
-	args := []interface{}{}
-	if strings.TrimSpace(query) != "" {
-		q += ` AND description LIKE ?`
-		args = append(args, "%"+query+"%")
-	}
-	if kind != "" {
-		q += ` AND kind = ?`
-		args = append(args, string(kind))
-	}
-	q += ` ORDER BY last_seen DESC LIMIT ?`
-	args = append(args, limit)
-
-	rows, err := s.db.Query(q, args...)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-	var out []*Item
-	for rows.Next() {
-		it, err := s.scanRows(rows)
-		if err != nil {
-			continue
-		}
-		out = append(out, it)
-	}
-	return out, rows.Err()
-}
-
-// Pending 返回尚无描述的媒体，供后台描述任务消费。
-// Pending 返回尚无描述的媒体，供后台描述任务消费。
-//
-// 不只看 description 为空，还要求 described_by 也为空。
-// 因为“已尝试但无法描述”的项（如 kind=other 的二进制、blob 已丢失）
-// 会被标记为 described_by=unsupported/content-missing 而 description 仍为空——
-// 若只看 description，这些项每轮都会被取出来重试，永远卡在队列头部，
-// 真正需要描述的新项永远轮不到（LIMIT 只取前 N 条）。
-func (s *Store) Pending(limit int) ([]*Item, error) {
-	if limit <= 0 {
-		limit = 10
-	}
-	s.mu.RLock()
-	defer s.mu.RUnlock()
-	rows, err := s.db.Query(`
-		SELECT digest, kind, mime, size, width, height, origin_path, tool,
-		       description, described_by, first_seen, last_seen,
-		       vec, vec_model
-		FROM media
-		WHERE COALESCE(description,'') = '' AND COALESCE(described_by,'') = ''
-		ORDER BY last_seen DESC LIMIT ?`, limit)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-	var out []*Item
-	for rows.Next() {
-		it, err := s.scanRows(rows)
-		if err != nil {
-			continue
-		}
-		out = append(out, it)
-	}
-	return out, rows.Err()
-}
-
-// GC 清理已不被任何记忆块持有的内容。
-//
-// keep 是当前仍被 Context/Document/Graph 里一等记忆块持有的 digest 集合，
-// 由调用方从三层记忆节点计算得出；media.Store 不再自己维护引用账本。
-// 不在 keep 中且早于 minAge 的项被清理；超出 maxBytes 时也只淘汰不在 keep 中的项。
-// Delete 删除一份媒体内容（元数据 + blob）。
+// Stat 返回元数据，不读内容。
 //
 // 这不是 GC，也不看引用计数：调用方是记忆系统本身——当它把一个记忆块
 // 永久地从三层记忆中删掉（而非在层间迁移）时，媒体作为块的内容一并删除。
@@ -376,13 +261,11 @@ func (s *Store) Stats() map[string]interface{} {
 	defer s.mu.RUnlock()
 
 	out := map[string]interface{}{"blob_dir": s.blobDir}
-	var count, described int
+	var count int
 	var total int64
 	s.db.QueryRow(`SELECT COUNT(*), COALESCE(SUM(size),0) FROM media`).Scan(&count, &total)
-	s.db.QueryRow(`SELECT COUNT(*) FROM media WHERE COALESCE(description,'') != ''`).Scan(&described)
 	out["count"] = count
 	out["total_bytes"] = total
-	out["described"] = described
 
 	byKind := map[string]int{}
 	rows, err := s.db.Query(`SELECT kind, COUNT(*) FROM media GROUP BY kind`)
@@ -524,7 +407,7 @@ func (s *Store) queryMediaScored(queryVec []float64, model string, topK int) ([]
 	defer s.mu.RUnlock()
 
 	query := `SELECT digest, kind, mime, size, width, height,
-		origin_path, tool, description, described_by, first_seen, last_seen,
+		origin_path, tool, first_seen, last_seen,
 		vec, vec_model
 		FROM media WHERE vec IS NOT NULL AND vec != ''`
 	var args []interface{}
@@ -546,17 +429,15 @@ func (s *Store) queryMediaScored(queryVec []float64, model string, topK int) ([]
 	for rows.Next() {
 		var it Item
 		var kind string
-		var origin, tool, desc, by, vecJSON, vecModel sql.NullString
+		var origin, tool, vecJSON, vecModel sql.NullString
 		if err := rows.Scan(&it.Digest, &kind, &it.MIME, &it.Size, &it.Width, &it.Height,
-			&origin, &tool, &desc, &by, &it.FirstSeen, &it.LastSeen,
+			&origin, &tool, &it.FirstSeen, &it.LastSeen,
 			&vecJSON, &vecModel); err != nil {
 			continue
 		}
 		it.Kind = Kind(kind)
 		it.OriginPath = origin.String
 		it.Tool = tool.String
-		it.Description = desc.String
-		it.DescribedBy = by.String
 		if !vecJSON.Valid || vecJSON.String == "" {
 			continue
 		}
@@ -623,17 +504,15 @@ func (s *Store) scanRows(r rowScanner) (*Item, error) { return scanItem(r) }
 func scanItem(r rowScanner) (*Item, error) {
 	var it Item
 	var kind string
-	var origin, tool, desc, by, vecJSON, vecModel sql.NullString
+	var origin, tool, vecJSON, vecModel sql.NullString
 	if err := r.Scan(&it.Digest, &kind, &it.MIME, &it.Size, &it.Width, &it.Height,
-		&origin, &tool, &desc, &by, &it.FirstSeen, &it.LastSeen,
+		&origin, &tool, &it.FirstSeen, &it.LastSeen,
 		&vecJSON, &vecModel); err != nil {
 		return nil, err
 	}
 	it.Kind = Kind(kind)
 	it.OriginPath = origin.String
 	it.Tool = tool.String
-	it.Description = desc.String
-	it.DescribedBy = by.String
 	if vecJSON.Valid && vecJSON.String != "" {
 		var v []float64
 		if err := json.Unmarshal([]byte(vecJSON.String), &v); err == nil {

@@ -63,7 +63,7 @@ func (v *VirtualInstance) initLocked() error {
 	}
 	v.Knowledge = NewKnowledge(ks)
 
-	ds := doc.NewStore(filepath.Join(v.dir, "documents"))
+	ds := doc.NewStore(filepath.Join(v.dir, "documents"), memory.TokenizeWords)
 	if err := ds.Start(); err != nil {
 		return fmt.Errorf("virtual doc store: %w", err)
 	}

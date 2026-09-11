@@ -123,31 +123,44 @@ func TestSmoke_VideoFramesDistinct(t *testing.T) {
 	}
 }
 
-func TestSmoke_DescribeThenRetrieve(t *testing.T) {
-	// 场景 C：视觉模型描述落库后，描述文字成为可检索的语义入口。
-	// 这是本方案最关键的一环——blob 可能被淘汰，描述会长期留在记忆里。
-	s := newTestStore(t, 50*1024*1024)
+func TestSmoke_NearestNeighborVectorRetrieve(t *testing.T) {
+	// 场景 C：图片只按自己的原生向量被检索。
+	// 没有描述文本参与——描述式索引是废弃的就机制。
+	s := newTestStore(t)
 
 	pic, _ := s.Put(makePNG(400, 400, 0), Item{MIME: "image/png", Tool: "multimodal_see_picture"})
-	if err := s.Describe(pic, "一张 400x400 的三色带图：上红、中绿、下蓝", "visionllm"); err != nil {
-		t.Fatal(err)
-	}
+	s.SetVec(pic, []float64{1, 0, 0, 0}, "space")
+	var frames []string
 	for i := 0; i < 6; i++ {
 		d, _ := s.Put(makePNG(320, 240, i), Item{MIME: "image/jpeg", Tool: "multimodal_see_video"})
-		if err := s.Describe(d, fmt.Sprintf("视频第 %d 帧：测试图卡，含彩条与计数器", i+1), "visionllm"); err != nil {
-			t.Fatal(err)
-		}
+		s.SetVec(d, []float64{1, 1, float64(i) / 10, 0}, "space")
+		frames = append(frames, d)
 	}
 
-	if hits, _ := s.Search("三色带", KindImage, 10); len(hits) != 1 {
-		t.Fatalf("搜「三色带」应命中 1 条，实际 %d", len(hits))
+	hits, err := s.QueryMediaScored([]float64{1, 0, 0, 0}, "space", 10)
+	if err != nil {
+		t.Fatal(err)
 	}
-	if hits, _ := s.Search("计数器", KindImage, 10); len(hits) != 6 {
-		t.Fatalf("搜「计数器」应命中 6 帧，实际 %d", len(hits))
+	if len(hits) != 7 {
+		t.Fatalf("7 份媒体都有同空间向量，应全部可召，实际 %d", len(hits))
 	}
-	pend, _ := s.Pending(100)
-	if len(pend) != 0 {
-		t.Fatalf("应全部已描述，仍有 %d 条待描述", len(pend))
+	if hits[0].Item.Digest != pic {
+		t.Fatalf("与查询同向的应是第一命中，实际 %s", shortDigest(hits[0].Item.Digest))
+	}
+
+	// 不同向量空间/模型的条目不得参与：坐标系不同，余弦无意义。
+	foreign := frames[0]
+	if err := s.SetVec(foreign, []float64{1, 0, 0, 0}, "other-space"); err != nil {
+		t.Fatal(err)
+	}
+	hits, err = s.QueryMediaScored([]float64{1, 0, 0, 0}, "space", 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, h := range hits {
+		if h.Item.Digest == foreign {
+			t.Fatal("另一套空间（other-space）的向量不该被 space 查询召回")
+		}
 	}
 }
 
@@ -204,7 +217,7 @@ func TestSmoke_DeleteRemovesOnlyThatContent(t *testing.T) {
 }
 
 func TestSmoke_FullLifecycleAcrossRestart(t *testing.T) {
-	// 端到端：入库 → 描述 → 删除一些内容 → 重启 → 检索，
+	// 端到端：入库 → 嵌入 → 删除一些内容 → 重启 → 向量检索，
 	// 并确认磁盘与元数据不出现双向孤儿。记忆的意义就在于跨重启还在。
 	dir := t.TempDir()
 	s, err := New(dir)
@@ -214,10 +227,10 @@ func TestSmoke_FullLifecycleAcrossRestart(t *testing.T) {
 
 	png := makePNG(400, 400, 0)
 	pic, _ := s.Put(png, Item{MIME: "image/png", Width: 400, Height: 400, Tool: "multimodal_see_picture"})
-	s.Describe(pic, "一张 400x400 的三色带图：上红、中绿、下蓝", "visionllm")
+	s.SetVec(pic, []float64{1, 0, 0}, "space")
 	for i := 0; i < 6; i++ {
 		d, _ := s.Put(makePNG(320, 240, i), Item{MIME: "image/jpeg", Tool: "multimodal_see_video"})
-		s.Describe(d, fmt.Sprintf("视频第 %d 帧", i+1), "visionllm")
+		s.SetVec(d, []float64{0, 1, float64(i)}, "space")
 	}
 	for i := 0; i < 10; i++ {
 		d, _ := s.Put(makePNG(64, 64, 2000+i), Item{MIME: "image/png", Tool: "cmd_run"})
@@ -241,20 +254,24 @@ func TestSmoke_FullLifecycleAcrossRestart(t *testing.T) {
 	if err != nil {
 		t.Fatalf("重开后查不到: %v", err)
 	}
-	if it.Description == "" {
-		t.Fatalf("元数据未持久化: %+v", it)
+	if len(it.Vec) != 3 || it.VecModel != "space" {
+		t.Fatalf("向量未持久化: %+v", it)
 	}
 	data, err := s2.Get(pic)
 	if err != nil || !bytes.Equal(data, png) {
 		t.Fatalf("重开后内容不一致: %v", err)
 	}
-	if hits, _ := s2.Search("三色带", KindImage, 10); len(hits) != 1 {
-		t.Fatal("重开后描述应仍可检索")
+	hits, err := s2.QueryMediaScored([]float64{1, 0, 0}, "space", 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(hits) == 0 || hits[0].Item.Digest != pic {
+		t.Fatal("重开后向量检索应仍能命中")
 	}
 
 	// 磁盘文件数 == 元数据条数：无「元数据在文件没了」也无「文件在元数据没了」
 	if n := blobFileCount(t, s2); n != beforeCount {
 		t.Fatalf("磁盘 blob=%d 与元数据=%d 不一致", n, beforeCount)
 	}
-	t.Logf("跨重启：%d 条目、描述与内容全部完好", beforeCount)
+	t.Logf("跨重启：%d 条目、向量与内容全部完好", beforeCount)
 }

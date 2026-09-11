@@ -108,7 +108,7 @@ func TestStaticEmbedderSemanticSimilarity(t *testing.T) {
 	e := newSynthEmbedder(t, 300)
 
 	pairs := []struct {
-		a, b  string
+		a, b    string
 		related bool
 	}{
 		{"今天天气怎么样", "明天会不会下雨", true},

@@ -38,6 +38,7 @@ type ContextEvent struct {
 	Blocks   []memory.MemoryBlock `json:"blocks,omitempty"` // 一等记忆块（text/image/video/audio）
 	Vector   vector.Vector        `json:"-"`                // 稀疏词向量（TF-IDF/fastText 空间）
 	DenseVec []float64            `json:"-"`                // 稠密多模态向量（与媒体/文档共享空间）
+	DenseFP  string               `json:"-"`                // DenseVec 所属统一空间指纹（缓存字段，不持久化）
 }
 
 const contextFlushInterval = 5 * time.Second
@@ -196,16 +197,29 @@ func (c *RelevanceContext) channelCleanerForDoc() document.ChannelCleaner {
 
 func (c *RelevanceContext) computeVector(evt *ContextEvent) {
 	text := textForVector(evt, c.toolDefLookup, c.channelDefLookup)
-	if text == "" {
-		return
-	}
 	// 稀疏向量始终计算（TF-IDF/fastText，退化时仍可用）
-	evt.Vector = c.embedder.Vectorize(text)
-	// 稠密向量仅在配置了多模态空间时计算
+	if text != "" {
+		evt.Vector = c.embedder.Vectorize(text)
+	}
+	// 稠密向量：文本向量 ⊕ 本事件持有的一等记忆块媒体向量（同一统一空间）。
+	// 只有媒体的输入（无文本）也要有可比较的坐标，因此不再按 text=="" 提前返回。
 	if c.denseSpace != nil && c.denseSpace.Loaded() {
-		if dv, err := c.denseSpace.VectorizeDense(text); err == nil {
-			evt.DenseVec = dv
+		fp := c.denseSpace.Fingerprint()
+		var parts [][]float64
+		if text != "" {
+			if dv, err := c.denseSpace.VectorizeDense(text); err == nil && len(dv) > 0 {
+				parts = append(parts, dv)
+			}
 		}
+		for _, b := range evt.Blocks {
+			// 只融合同指纹的块向量：另一套坐标系的向量混进来会算出
+			// 两边都不像的方向。
+			if len(b.Vector) > 0 && b.Fingerprint == fp {
+				parts = append(parts, b.Vector)
+			}
+		}
+		evt.DenseVec = vector.FuseVectors(parts...)
+		evt.DenseFP = fp
 	}
 }
 
@@ -312,9 +326,11 @@ func (c *RelevanceContext) Prune(currentInput string, topK int, docStore *docume
 	// 优先使用稠密向量余弦（与媒体/文档共享空间）；退化到稀疏词向量。
 	var queryDense []float64
 	useDense := false
+	queryFP := ""
 	if c.denseSpace != nil && c.denseSpace.Loaded() {
 		if dv, err := c.denseSpace.VectorizeDense(currentInput); err == nil {
 			queryDense = dv
+			queryFP = c.denseSpace.Fingerprint()
 			useDense = true
 		}
 	}
@@ -323,7 +339,9 @@ func (c *RelevanceContext) Prune(currentInput string, topK int, docStore *docume
 	scoredEvents := make([]scoredEvent, len(candidates))
 	for i, evt := range candidates {
 		var score float64
-		if useDense && len(evt.DenseVec) == len(queryDense) {
+		// 只在同一统一空间内比稠密余弦：换了模型/维度后旧事件的向量
+		// 属于另一个坐标系，拿来比会得到无意义的分数。
+		if useDense && evt.DenseFP == queryFP && len(evt.DenseVec) == len(queryDense) {
 			score = vector.DenseCosine(queryDense, evt.DenseVec)
 		} else {
 			score = vector.CosineSimilarity(queryVec, evt.Vector)

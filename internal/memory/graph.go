@@ -45,6 +45,10 @@ type Triple struct {
 	SubjectType  string  `json:"subject_type,omitempty"`
 	ObjectType   string  `json:"object_type,omitempty"`
 	SentenceText string  `json:"sentence_text,omitempty"` // 原始句子文本，Commit时写入sentences表
+	// MediaDigests 是该三元组显式携带的媒体 digest（完整或前缀）。
+	// 媒体不再靠正文 marker 反解：结构化字段直接给出归属，
+	// 由调用方（core）把它变成 L3 一等块并与句子建立结构边。
+	MediaDigests []string `json:"media_digests,omitempty"`
 }
 
 type GraphDB struct {
@@ -133,6 +137,11 @@ func (g *GraphDB) initSchema() error {
 			edge_type TEXT NOT NULL,
 			created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
 			UNIQUE(source_kind, source_id, target_kind, target_id, edge_type)
+		)`,
+		`CREATE TABLE IF NOT EXISTS documents (
+			id         TEXT PRIMARY KEY,
+			summary    TEXT DEFAULT '',
+			created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 		)`,
 		`CREATE INDEX IF NOT EXISTS idx_memory_blocks_modality ON memory_blocks(modality)`,
 		`CREATE INDEX IF NOT EXISTS idx_memory_blocks_digest ON memory_blocks(payload_digest)`,
@@ -979,17 +988,42 @@ func (g *GraphDB) ClearSentenceID(relationID int64) error {
 	return err
 }
 
-// CleanupOrphanedSentences 删除没有任何关系引用的句子，返回删除数
+// CleanupOrphanedSentences 删除既无关系引用、也无媒体块边的句子，返回删除数。
+//
+// 两个条件都必须看：旧媒体实体被迁移成原生块后，那些句子可能只靠
+// sentence --contains--> block 存活，若只看 relations 引用就会被误删，
+// 连带把块边变成悬空引用。
 func (g *GraphDB) CleanupOrphanedSentences() (int, error) {
-	result, err := g.db.Exec(
-		`DELETE FROM sentences WHERE id NOT IN (
-			SELECT DISTINCT sentence_id FROM relations WHERE sentence_id != 0
-		)`,
-	)
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	tx, err := g.db.Begin()
 	if err != nil {
 		return 0, err
 	}
-	n, _ := result.RowsAffected()
+	defer tx.Rollback()
+
+	// 先清掉指向将被删除句子的块边，避免留下悬空端点。
+	if _, err := tx.Exec(`DELETE FROM memory_block_edges
+		WHERE source_kind = 'sentence' AND source_id NOT IN (
+			SELECT CAST(id AS TEXT) FROM sentences
+			WHERE id IN (SELECT DISTINCT sentence_id FROM relations WHERE sentence_id != 0)
+			   OR id IN (SELECT CAST(source_id AS INTEGER) FROM memory_block_edges WHERE source_kind = 'sentence')
+		)`); err != nil {
+		return 0, err
+	}
+
+	res, err := tx.Exec(`DELETE FROM sentences WHERE id NOT IN (
+			SELECT DISTINCT sentence_id FROM relations WHERE sentence_id != 0
+		) AND id NOT IN (
+			SELECT CAST(source_id AS INTEGER) FROM memory_block_edges WHERE source_kind = 'sentence'
+		)`)
+	if err != nil {
+		return 0, err
+	}
+	n, _ := res.RowsAffected()
+	if err := tx.Commit(); err != nil {
+		return 0, err
+	}
 	return int(n), nil
 }
 

@@ -437,9 +437,6 @@ func (a *Agent) processInput(evt *agentIO.InputEvent) {
 		ToolResults: toolResults,
 	}
 	a.bindEventMedia(&turnEvt, a.drainMediaDigests())
-	if s := a.mediaSummaryForEvent(turnEvt.Blocks); s != "" {
-		turnEvt.Input = turnEvt.Input + "\n" + s
-	}
 	a.context.Append(turnEvt)
 
 	a.emitResponse(evt, response)

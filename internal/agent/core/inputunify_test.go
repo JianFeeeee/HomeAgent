@@ -192,61 +192,82 @@ func TestResolveInput_UnifiesAllModalities(t *testing.T) {
 	})
 }
 
-// ---------- 模型工具侧：sentenceWithMediaMarkers ----------
+// ---------- 模型工具侧：memory_digests 结构化传递 ----------
 
-// 模型只知道 digest（从对话或 memory_recall 的「关联媒体」读到），
-// 不该要求它自己按内核格式拼标记——格式写错的后果是引用静默挂不上。
-func TestSentenceWithMediaMarkers(t *testing.T) {
+// 模型只知道 digest（从对话或 memory_recall 的「关联媒体」读到）。
+// 它不再需要自己拼任何标记：digest 作为结构化字段随三元组提交。
+func TestResolveMediaDigestsAndNoMarkerText(t *testing.T) {
 	a, ms := newInputTestAgent(t)
-	digest, err := ms.Put([]byte("marker-bytes"), media.Item{
-		MIME: "image/png", Description: "一张紫蓝红三色带图",
-	})
+	digest, err := ms.Put([]byte("marker-bytes"), media.Item{MIME: "image/png"})
 	if err != nil {
 		t.Fatalf("Put: %v", err)
 	}
 
-	t.Run("短digest补全并生成标记", func(t *testing.T) {
-		got := a.sentenceWithMediaMarkers("用户发来一张图。", []string{digest[:12]})
-		if !strings.Contains(got, "三色带图") {
-			t.Errorf("描述未并入句子: %q", got)
-		}
-		if !strings.Contains(got, digest[:12]) {
-			t.Errorf("digest 未并入句子（反查会失效）: %q", got)
-		}
-		// 反解必须成功，否则 bindSentenceMedia 挂不上引用
-		if got := extractMediaDigests(got); len(got) != 1 {
-			t.Errorf("生成的标记无法被 extractMediaDigests 反解: %v", got)
+	t.Run("短digest补全", func(t *testing.T) {
+		got := a.resolveMediaDigests([]string{digest[:12]})
+		if len(got) != 1 || got[0] != digest {
+			t.Fatalf("短 digest 应补全为完整 digest，得到 %v", got)
 		}
 	})
 
-	t.Run("模型已写标记时不重复追加", func(t *testing.T) {
-		sentence := "看这个 [image/png " + digest[:12] + "] 三色带图"
-		got := a.sentenceWithMediaMarkers(sentence, []string{digest[:12]})
-		if n := strings.Count(got, digest[:12]); n != 1 {
-			t.Errorf("digest 出现 %d 次，期望 1 次: %q", n, got)
+	t.Run("无法解析的digest被丢弃", func(t *testing.T) {
+		if got := a.resolveMediaDigests([]string{"ffffffffffff"}); len(got) != 0 {
+			t.Errorf("不存在的 digest 不该保留: %v", got)
 		}
 	})
 
-	t.Run("空句子时标记本身充当句子", func(t *testing.T) {
-		got := a.sentenceWithMediaMarkers("", []string{digest})
-		if got == "" {
-			t.Error("媒体必须有句子落点，否则 media_refs 无从挂起")
-		}
-	})
-
-	t.Run("无法解析的digest被跳过", func(t *testing.T) {
-		got := a.sentenceWithMediaMarkers("原句。", []string{"ffffffffffff"})
-		if got != "原句。" {
-			t.Errorf("不存在的 digest 不该造出标记: %q", got)
-		}
-	})
-
-	t.Run("无媒体存储时原样返回", func(t *testing.T) {
+	t.Run("无媒体存储时返回nil", func(t *testing.T) {
 		bare := &Agent{}
-		if got := bare.sentenceWithMediaMarkers("原句。", []string{digest}); got != "原句。" {
-			t.Errorf("无媒体存储时应原样返回: %q", got)
+		if got := bare.resolveMediaDigests([]string{digest}); got != nil {
+			t.Errorf("无媒体存储时应返回 nil: %v", got)
 		}
 	})
+}
+
+// 句子文本必须保持原样：媒体归属走结构化块边，不往文本里贴 marker。
+func TestMemoryCommit_DoesNotPolluteSentenceText(t *testing.T) {
+	dir := t.TempDir()
+	g, err := memory.NewGraphDB(filepath.Join(dir, "graph.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer g.Close()
+	ms, err := media.New(filepath.Join(dir, "media"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer ms.Close()
+	a := &Agent{memory: g, mediaStore: ms}
+
+	digest, _ := ms.Put([]byte("clean-sentence"), media.Item{MIME: "image/png"})
+
+	sentence := "用户发来一张图。"
+	triples := []memory.Triple{{
+		Subject: "用户", Relation: "发来", Object: "图片",
+		SentenceText: sentence,
+		MediaDigests: a.resolveMediaDigests([]string{digest[:12]}),
+	}}
+	if _, _, _, err := a.commitTriplesWithMedia(triples, "s1", 0, nil); err != nil {
+		t.Fatal(err)
+	}
+
+	res, err := a.memory.Recall([]string{"用户"}, nil, 2, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(res.Relations) == 0 {
+		t.Fatal("召回为空")
+	}
+	if res.Relations[0].SentenceText != sentence {
+		t.Errorf("句子文本被污染: %q", res.Relations[0].SentenceText)
+	}
+	blocks, err := a.memory.BlocksForNode("sentence", strconv.FormatInt(res.Relations[0].SentenceID, 10))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(blocks) != 1 || blocks[0].PayloadDigest != digest {
+		t.Errorf("块应挂到句子，实际 %+v", blocks)
+	}
 }
 
 // ---------- resolveMediaDigests ----------
@@ -319,63 +340,61 @@ func TestDocCommit_StoresBlocks(t *testing.T) {
 	}
 }
 
-// ---------- docMediaContext ----------
+// ---------- 文档持有块标签（doc_query 展示用） ----------
 
-func TestDocMediaContext(t *testing.T) {
+func TestBlockLabelsForDoc(t *testing.T) {
 	a, ms := newInputTestAgent(t)
-	digest, _ := ms.Put([]byte("ctx-bytes"), media.Item{
-		MIME: "image/png", Description: "文档里的配图",
-	})
+	digest, _ := ms.Put([]byte("ctx-bytes"), media.Item{MIME: "image/png"})
+	b, ok := a.blockFromDigest(digest)
+	if !ok {
+		t.Fatal("blockFromDigest 失败")
+	}
 
-	t.Run("无块时解析正文标记", func(t *testing.T) {
-		content := "旧正文 [image/png " + digest[:12] + "] 文档里的配图"
-		got := a.docMediaContext("doc_legacy", content)
-		if !strings.Contains(got, "文档里的配图") {
-			t.Errorf("历史文档只有标记时应回退解析: %q", got)
+	t.Run("从文档持有的一等块渲染", func(t *testing.T) {
+		got := a.blockLabelsForDoc(&document.Doc{ID: "doc_1", Blocks: []memory.MemoryBlock{b}})
+		if !strings.Contains(got, shortDigest(digest)) {
+			t.Errorf("标签应含短 digest: %q", got)
+		}
+		if !strings.Contains(got, "image/png") {
+			t.Errorf("标签应含 MIME: %q", got)
 		}
 	})
 
-	t.Run("既无引用也无标记", func(t *testing.T) {
-		if got := a.docMediaContext("doc_empty", "普通正文"); got != "" {
+	t.Run("无块时为空", func(t *testing.T) {
+		if got := a.blockLabelsForDoc(&document.Doc{ID: "doc_x", Content: "普通正文"}); got != "" {
 			t.Errorf("应返回空串，实际 %q", got)
 		}
 	})
 
 	t.Run("无媒体存储", func(t *testing.T) {
 		bare := &Agent{}
-		if got := bare.docMediaContext("doc_x", "任意"); got != "" {
+		if got := bare.blockLabelsForDoc(&document.Doc{ID: "doc_x"}); got != "" {
 			t.Errorf("无媒体存储时应返回空串，实际 %q", got)
 		}
 	})
 }
 
-// ---------- mediaMarkerLine ----------
+// ---------- mediaLabel ----------
 
-// 标记格式的唯一生成处。此前 mediaSummaryForEvent 与 mediaContextForSentences
-// 各拼一份，改动截断长度或分隔符时只改一处，另一处写出的标记就再也解析不回来。
-func TestMediaMarkerLine(t *testing.T) {
+// 媒体标签的唯一生成处：只含 MIME 与短 digest，不含任何生成的描述。
+func TestMediaLabel(t *testing.T) {
 	a, ms := newInputTestAgent(t)
+	_ = a
 
-	described, _ := ms.Put([]byte("with-desc"), media.Item{
-		MIME: "image/png", Description: "已描述的图",
-	})
-	if got := a.mediaMarkerLine(described); !strings.Contains(got, "已描述的图") {
-		t.Errorf("有描述时应带描述: %q", got)
+	digest, _ := ms.Put([]byte("labelled"), media.Item{MIME: "image/png"})
+	it, err := ms.Stat(digest)
+	if err != nil {
+		t.Fatal(err)
 	}
-
-	// 「已入库但还没描述」与「压根没有媒体」必须可区分
-	bare, _ := ms.Put([]byte("no-desc"), media.Item{MIME: "image/png"})
-	got := a.mediaMarkerLine(bare)
-	if !strings.Contains(got, "(未描述)") {
-		t.Errorf("无描述时应有占位符: %q", got)
+	got := mediaLabel(it)
+	if !strings.Contains(got, "image/png") {
+		t.Errorf("标签应含 MIME: %q", got)
 	}
-	if !strings.Contains(got, shortDigest(bare)) {
+	if !strings.Contains(got, shortDigest(digest)) {
 		t.Errorf("必须带短 digest 供反查: %q", got)
 	}
-
-	// 查不到返回空串：媒体可能已被容量 GC 淘汰，此时不该造出指向虚无的标记
-	if got := a.mediaMarkerLine("ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"); got != "" {
-		t.Errorf("查不到的 digest 应返回空串，实际 %q", got)
+	if got := mediaLabel(nil); got != "" {
+		t.Errorf("nil 应返回空串，实际 %q", got)
 	}
 }
 
@@ -417,9 +436,7 @@ func newToolTestAgent(t *testing.T) (*Agent, *media.Store) {
 // memory_commit 带 media_digests：三元组入库后必须能从句子反查回那份字节。
 func TestToolMemoryCommit_BindsMedia(t *testing.T) {
 	a, ms := newToolTestAgent(t)
-	digest, _ := ms.Put([]byte("commit-bytes"), media.Item{
-		MIME: "image/png", Description: "提交时关联的图",
-	})
+	digest, _ := ms.Put([]byte("commit-bytes"), media.Item{MIME: "image/png"})
 
 	out := a.executeMemoryTool(agentAPI.ToolCall{
 		Name: "memory_commit",
@@ -498,12 +515,10 @@ func TestToolMemoryCommit_CarriesSentenceText(t *testing.T) {
 	}
 }
 
-// doc_commit 带 media_digests：标记进正文（否则检索不到）+ 引用挂文档 owner（否则 GC 会清）。
+// doc_commit 带 media_digests：媒体成为文档直接持有的一等块；正文保持原样。
 func TestToolDocCommit_BindsMedia(t *testing.T) {
 	a, ms := newToolTestAgent(t)
-	digest, _ := ms.Put([]byte("doc-commit-bytes"), media.Item{
-		MIME: "image/png", Description: "笔记里的插图",
-	})
+	digest, _ := ms.Put([]byte("doc-commit-bytes"), media.Item{MIME: "image/png"})
 
 	out := a.executeDocTool(agentAPI.ToolCall{
 		Name: "doc_commit",
@@ -522,8 +537,8 @@ func TestToolDocCommit_BindsMedia(t *testing.T) {
 		t.Fatal("文档未写入")
 	}
 	d := docs[0]
-	if !strings.Contains(d.Content, "笔记里的插图") {
-		t.Errorf("标记未进正文（向量索引看不到这份媒体）: %q", d.Content)
+	if strings.Contains(d.Content, "image/png") {
+		t.Errorf("正文不该被媒体标记污染: %q", d.Content)
 	}
 	var held bool
 	for _, b := range d.Blocks {
@@ -539,9 +554,7 @@ func TestToolDocCommit_BindsMedia(t *testing.T) {
 // doc_query 必须把媒体说明附在返回值里，否则模型检索到带图文档也不知道有图。
 func TestToolDocQuery_ShowsMedia(t *testing.T) {
 	a, ms := newToolTestAgent(t)
-	digest, _ := ms.Put([]byte("query-bytes"), media.Item{
-		MIME: "image/png", Description: "检索命中的配图",
-	})
+	digest, _ := ms.Put([]byte("query-bytes"), media.Item{MIME: "image/png"})
 
 	a.executeDocTool(agentAPI.ToolCall{
 		Name: "doc_commit",
@@ -560,7 +573,7 @@ func TestToolDocQuery_ShowsMedia(t *testing.T) {
 	// 正文进的是 cold_storage 事件（工具返回值只给引用编号），媒体说明也在那里。
 	var found bool
 	for _, e := range a.context.Recent(10) {
-		if strings.Contains(e.Response, "检索命中的配图") {
+		if strings.Contains(e.Response, shortDigest(digest)) {
 			found = true
 		}
 	}
