@@ -118,8 +118,21 @@ build_homed() {
   # Go 用 CC 驱动 CGO 编译与链接，用 CC 指定的交叉工具链来决定目标架构。
   # 必须同时 export CC 给 Go 的 CGO 代码生成器，否则 CGO_ENABLED=1 下的
   # 目标文件与 host 的 ld 不兼容（如 arm64 的 .o 给了 x86_64 的 ld）。
+  #
+  # HOMED_TAGS 默认带 onnxruntime：发行版**默认启用**本地向量空间。
+  # 不带这个标签时 providers/chineseclip 与 providers/qwen3vl 仍会注册，
+  # 但打开时报「requires build tag」并优雅降级（不静默假装成功）。
+  # 需要极简构建时可显式 HOMED_TAGS= 关掉。
+  #
+  # 运行期还需要 libonnxruntime.so（provider 按 /opt/onnxruntime、
+  # /usr/local/lib、/usr/lib 顺序查找）；缺失时同样是「日志里的明确错误 +
+  # 降级」，不会假装启用。
   local _cc="${CC:-cc}"
+  local _tags="${HOMED_TAGS-onnxruntime}"
+  local -a _tagargs=()
+  if [ -n "$_tags" ]; then _tagargs=(-tags "$_tags"); fi
   CGO_ENABLED=1 CC="$_cc" "$GO" build -trimpath -installsuffix dynlink \
+    ${_tagargs[@]+"${_tagargs[@]}"} \
     -ldflags "$LDFLAGS" -o "$out" ./cmd/homed/
   echo "  OK ($(file "$out" | sed 's/.*: //') | $(du -h "$out" | cut -f1))"
 }
