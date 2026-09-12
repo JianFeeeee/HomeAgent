@@ -13,25 +13,11 @@ import (
 	pubsdk "gitcode.com/JianFeeeee/homeagent-sdk/sdk"
 )
 
-func (a *Agent) eventLoop() {
-	defer func() {
-		if r := recover(); r != nil {
-			log.Printf("[agent] eventLoop panic recovered: %v\n%s", r, debug.Stack())
-			time.Sleep(time.Second)
-			go a.eventLoop()
-		}
-	}()
-	for {
-		select {
-		case evt := <-a.io.InputChan():
-			a.handleInput(evt)
-		case msg := <-a.selfInputCh:
-			a.handleSelfInput(msg)
-		case <-a.ctx.Done():
-			return
-		}
-	}
-}
+// eventLoop 已由 scheduler.go 的 schedulerLoop 取代（M2）。
+//
+// 原实现直接在 select 里处理 inputCh/selfInputCh，没有任何可枚举的队列、
+// 无法承载优先级与抢占；现在任务先入就绪队列，由选择函数 pickTaskIndex 决定下一个。
+// 兼容性说明：M2 全部任务为 LevelBackground，因此行为等价于原先的 FIFO。
 
 func (a *Agent) interceptLoop() {
 	defer func() {
