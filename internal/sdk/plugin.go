@@ -53,6 +53,15 @@ type OutputChannelRegistrar = pubsdk.OutputChannelRegistrar
 type InputChannelRegistrar = pubsdk.InputChannelRegistrar
 type ChannelDef = pubsdk.ChannelDef
 
+// 中断优先级的取值再导出：内置插件用 sdk.PriorityL4 声明“立即打断”，
+// 外部插件同名常量会被内核夹到 L3（见 core.interruptLevel / proc 桥）。
+const (
+	PriorityL1 = pubsdk.PriorityL1
+	PriorityL2 = pubsdk.PriorityL2
+	PriorityL3 = pubsdk.PriorityL3
+	PriorityL4 = pubsdk.PriorityL4
+)
+
 // InjectOptions / 上下文策略常量：内置插件与外部插件必须用同一套类型与取值，
 // 否则内核要认两份，而漏认会静默丢失标志位。
 type InjectOptions = pubsdk.InjectOptions

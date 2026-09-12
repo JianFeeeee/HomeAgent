@@ -14,7 +14,9 @@ package core
 //
 // 级别只属于中断：
 //   - L1..L3 由插件在 InjectOptions.Priority 里声明（见 clampPluginLevel）；
-//   - L4 由内核独占，只能经 raiseKernelInterrupt 产生（panic / selfip）。
+//   - L4 给“立即打断”能力：内核自身（raiseKernelInterrupt：panic / selfip）
+//     与**内核级插件**（编译期内置插件，如 WebUI 终止按钮）可声明；
+//     外部插件经 proc 桥被夹到 L3，core 里也再判一次来源。
 //
 // # 选择顺序
 //
@@ -33,6 +35,7 @@ import (
 	"fmt"
 	"log"
 	"runtime/debug"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -69,8 +72,10 @@ const (
 // 取最低级是刻意的：**显式才是特权**，新插件不会默认拿到抢占权。
 const DefaultLevel = LevelBackground
 
-// clampPluginLevel 把插件声明的级别夹到允许范围（L1..L3）。
-// L4 是内核的调度内部属性，不接受外部越权。
+// clampPluginLevel 把**非内核级**来源声明的级别夹到 L1..L3。
+//
+// L4 是“立即打断”能力（panic / 内核事件 / 内核级插件的终止按钮），
+// 只给内核与编译期内置插件；外部插件声明 L4 会被夹到 L3。
 func clampPluginLevel(l Level) Level {
 	if l < LevelBackground {
 		return DefaultLevel
@@ -521,8 +526,12 @@ func (s *scheduler) enqueueInterruptLocked(t *Task) {
 //
 // 临界区（如记忆整理）内不 arm、不取消：中断只入队，等临界区结束后的安全点处理，
 // 这是设计 §4.3 的硬要求——那个位置的“不抢占”不能只是不让位，还必须不取消。
+// level 必须是**已解析好**的中断级别（含特权判定）：
+// 生产路径只有 interruptLoop，它用 (*Agent).interruptLevel 得出 level；
+// 内核自身用 requestKernelPreempt（固定 L4）。本函数不再夹取，
+// 否则内核级插件的 L4 会被无辜削掉。
 func (s *scheduler) requestPreempt(evt *agentIO.InputEvent, level Level) bool {
-	return s.registerInterrupt(newInterruptTask(evt, clampPluginLevel(level)))
+	return s.registerInterrupt(newInterruptTask(evt, level))
 }
 
 // requestKernelPreempt 是**内核**中断入口（panic / 内核事件 selfip）。
@@ -624,13 +633,15 @@ func (s *scheduler) done(t *Task) {
 // 用于在 prepare 段把级别写进帧（抢占比较的基准）。
 // interruptLevel 返回一次**中断注入**的级别。
 //
-// 级别是“这项工作有多不能等”，由插件在 InjectOptions.Priority 里声明
+// 级别是“这项工作有多不能等”，由来源在 InjectOptions.Priority 里声明
 // （排队注入没有级别，它们的 TaskClass 是 TaskQueued）。
 //
-// 取值域 L1..L3；空/非法一律降到 DefaultLevel（L1）。
-// **L4 不在此处产生**：它由内核独占，经 raiseKernelInterrupt 直接给出
-// （panic / 内核事件 selfip），因此 clampPluginLevel 会把越权声明夹回 L3。
-func interruptLevel(evt *agentIO.InputEvent) Level {
+// privileged 表示来源是**内核级插件**（编译期内置插件，见 isKernelLevelSource）：
+//   - privileged=true  → 可用到 L4（实现“立即打断”，如 WebUI 终止按钮）
+//   - privileged=false → 夹到 L1..L3；空/非法一律降级为 DefaultLevel（L1）
+//
+// 另有完全绕过本函数的 L4 来源：内核自身的 raiseKernelInterrupt（panic / selfip）。
+func interruptLevel(evt *agentIO.InputEvent, privileged bool) Level {
 	if evt == nil || evt.Payload == nil {
 		return DefaultLevel
 	}
@@ -639,7 +650,27 @@ func interruptLevel(evt *agentIO.InputEvent) Level {
 	if !ok {
 		return DefaultLevel
 	}
+	if privileged {
+		return l
+	}
 	return clampPluginLevel(l)
+}
+
+// isKernelLevelSource 报告某来源是否是**内核级插件**（编译期内置插件）。
+//
+// 只有它们能声明 L4（见 interruptLevel）。判据是插件注册表里的“内置工厂”，
+// 而不是插件自报的名字本身——外部插件经 proc 桥时已被夹到 L3，这里是第二道闸。
+//
+// source 的约定是 `插件名` 或 `插件名/实例`（如 webui/<deviceID>），故取第一段。
+func (a *Agent) isKernelLevelSource(source string) bool {
+	if source == "" || a.pluginReg == nil {
+		return false
+	}
+	name := source
+	if i := strings.IndexByte(name, '/'); i > 0 {
+		name = name[:i]
+	}
+	return a.pluginReg.IsBuiltinPlugin(name)
 }
 
 // parseInterruptLevel 解析插件声明的级别字符串（"L1".."L3"）。
