@@ -11,7 +11,9 @@ import { ThemePalette, DARK_PALETTE, LIGHT_PALETTE, WIDE_MIN_WIDTH, WIDE_NAV_BAR
 import { ANIM_NORMAL, ANIM_SLOW } from '../common/Constants';
 import { MotionBase } from '../components/MotionBase';
 import { GradientBackground } from '../components/GradientBackground';
-import { registerScreensueHandler, installCmdRouter } from '../common/BridgeRouter';
+import { ScreensuePage } from '../components/ScreensuePage';
+import { registerScreensueHandler } from '../common/BridgeRouter';
+import { markForegroundBridgeUIReady } from '../common/DeviceBridgeSession';
 import { ScreensuePayload, snapshotComponentId } from '../common/BridgeCaps';
 import { window, display } from '@kit.ArkUI';
 import { common } from '@kit.AbilityKit';
@@ -110,14 +112,14 @@ struct Index {
     this.syncSystemBar();
     // 动态读取状态栏/导航栏避让区，实现真正的沉浸式布局（替换硬编码 top:44）
     this.resolveSafeArea();
-    // 设备桥：注册命令路由与 screensue 悬浮层回调
-    installCmdRouter();
+    // 根 UI 只负责 screensue 呈现；命令路由由前台全局设备桥安装。
     registerScreensueHandler((payload: ScreensuePayload) => {
       this.showScreensue(payload);
     });
+    markForegroundBridgeUIReady(getContext(this) as common.UIAbilityContext);
   }
 
-  /** agent 下发的 screensue 内容展示（悬浮卡片，倒计时自动关闭；0=常驻）。 */
+  /** agent 下发的 screensue 内容展示（窄屏整页、宽屏右栏；0=常驻）。 */
   private showScreensue(payload: ScreensuePayload): void {
     this.screensueText = payload.content;
     this.screensueCountdown = payload.duration;
@@ -218,7 +220,7 @@ struct Index {
   private updateWideScreen(w: number): void {
     const wide: boolean = w >= WIDE_MIN_WIDTH;
     if (wide !== this.isWide) {
-      AppStorage.setOrCreate<boolean>('isWideScreen', wide);
+      AppStorage.set<boolean>('isWideScreen', wide);
     }
   }
 
@@ -230,6 +232,10 @@ struct Index {
    * 的根因。这里按 currentTab 显式选栈，行为对所有页面一致。
    */
   onBackPress(): boolean {
+    if (this.screensueVisible) {
+      this.closeScreensue();
+      return true;
+    }
     return handleBackPress(this.currentTab, this.isWide);
   }
 
@@ -339,51 +345,42 @@ struct Index {
       // 导航栏本身不吃触摸空白区，避免遮住下层内容点击
       .hitTestBehavior(HitTestMode.Transparent)
 
-      // screensue 悬浮层：agent 推送给用户看的内容（置顶展示）
+      // screensue 是前台内容页：窄屏覆盖整页；宽屏仅覆盖右侧内容栏，
+      // 左侧一级页面与主导航保持可见、可操作。
       if (this.screensueVisible) {
-        Column() {
+        if (this.isWide) {
           Row() {
-            Circle({ width: 8, height: 8 })
-              .fill(this.palette().accent)
-            Text('agent 推送')
-              .fontSize(12)
-              .fontWeight(FontWeight.Medium)
-              .fontColor(this.palette().textSecondary)
-              .margin({ left: 8 })
-            Blank()
-            if (this.screensueCountdown > 0) {
-              Text(this.screensueCountdown.toString() + 's')
-                .fontSize(11)
-                .fontColor(this.palette().textMuted)
-            }
-            Text('关闭')
-              .fontSize(12)
-              .fontColor(this.palette().accent)
-              .padding({ left: 10, right: 2, top: 4, bottom: 4 })
-              .onClick(() => {
+            Column()
+              .width(WIDE_NAV_BAR_WIDTH)
+              .height('100%')
+              .hitTestBehavior(HitTestMode.None)
+
+            ScreensuePage({
+              pushedText: this.screensueText,
+              countdown: this.screensueCountdown,
+              onClose: () => {
                 this.closeScreensue();
-              })
+              },
+            })
+              .layoutWeight(1)
+              .height('100%')
+              .padding({ top: this.topInset })
           }
           .width('100%')
-          .margin({ bottom: 10 })
-
-          Scroll() {
-            Text(this.screensueText)
-              .fontSize(15)
-              .fontColor(this.palette().textPrimary)
-              .width('100%')
-          }
-          .constraintSize({ maxHeight: 320 })
-          .scrollBar(BarState.Auto)
-          .align(Alignment.Top)
+          .height('100%')
+          .hitTestBehavior(HitTestMode.Transparent)
+        } else {
+          ScreensuePage({
+            pushedText: this.screensueText,
+            countdown: this.screensueCountdown,
+            onClose: () => {
+              this.closeScreensue();
+            },
+          })
+            .width('100%')
+            .height('100%')
+            .padding({ top: this.topInset })
         }
-        .width('86%')
-        .padding(18)
-        .borderRadius(18)
-        .backgroundColor(this.palette().bgCard)
-
-        .border({ width: 1, color: this.palette().glassBorder })
-        .shadow({ radius: 32, color: this.palette().shadow, offsetY: 10 })
       }
     }
     .width('100%')

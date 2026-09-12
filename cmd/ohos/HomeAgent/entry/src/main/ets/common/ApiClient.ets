@@ -32,6 +32,10 @@ export class ApiClient {
     this.conn = conn;
   }
 
+  clearConnection(): void {
+    this.conn = null;
+  }
+
   getConnection(): ConnectionConfig | null {
     return this.conn;
   }

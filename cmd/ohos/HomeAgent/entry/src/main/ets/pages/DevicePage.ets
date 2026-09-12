@@ -1,27 +1,14 @@
 import { deviceBridge } from '../common/DeviceBridge';
-import { installCmdRouter, registerScreensueHandler, setBridgeAppContext } from '../common/BridgeRouter';
 import { connStore } from '../common/ConnStore';
 import { apiClient } from '../common/ApiClient';
-import { noConnectionMessage } from '../common/UserError';
 import { handleNavOnScroll } from '../common/NavBarController';
 import { registerNavStack, unregisterNavStack } from '../common/NavStackRegistry';
 import { DeviceInfo } from '../model/Model';
 import { ThemePalette, DARK_PALETTE, LIGHT_PALETTE, WIDE_NAV_BAR_WIDTH, WIDE_MIN_CONTENT, ANIM_FAST, ANIM_NORMAL, ANIM_ENTER } from '../common/Constants';
 import { MotionBase } from '../components/MotionBase';
-import { common } from '@kit.AbilityKit';
 import { PageTopBar, NavFloatOverlay, NavFloatRow, FloatIconButton } from '../components/PageTopBar';
 import { SubPageLayer, NavGroup, NavRow, PlainCard, markSubPageOpen, subPageParam } from '../components/SubPage';
-
-// 本机声明的能力（与 BridgeRouter 支持的命令一一对应）
-const LOCAL_CAPS: string[] = [
-  'status',
-  'deviceinfo',
-  'screensee',
-  'screensue',
-  'clipboardsee',
-  'clipboardsue',
-  'speakeruse',
-];
+import { LOCAL_DEVICE_CAPS, deviceGatewayUrl } from '../common/DeviceBridgeSession';
 
 /** 二级页面标识 */
 const SUB_NONE: string = '';
@@ -39,19 +26,17 @@ export struct DevicePage {
   @StorageProp('isWideScreen') private isWide: boolean = false;
   /** 当前右栏展示的二级页面 id，用于宽屏下高亮左侧入口行 */
   @State activeSub: string = SUB_NONE;
-  @State bridgeConnected: boolean = false;
+  @StorageProp('deviceBridgeConnected') private bridgeConnected: boolean = false;
   @State bridgeUrl: string = '';
   @State bridgeToken: string = '';
   @State deviceId: string = '';
   @State authorized: boolean = false;
   @State devices: DeviceInfo[] = [];
   @State loadingDevices: boolean = false;
-  @State lastError: string = '';
   @State toastMsg: string = '';
   @State toastIsError: boolean = false;
   /** 二级页面导航栈：系统返回手势/三键返回直接作用于它 */
   private navStack: NavPathStack = new NavPathStack();
-  private autoConnectTried: boolean = false;
 
   aboutToAppear(): void {
     this.deviceId = deviceBridge.getDeviceId();
@@ -70,25 +55,9 @@ export struct DevicePage {
     // Gateway URL derives from current connection
     const cur = connStore.getCurrentConnection();
     if (cur !== null) {
-      this.bridgeUrl = this.gatewayUrlOf(cur.url);
+      this.bridgeUrl = deviceGatewayUrl(cur.url);
       this.bridgeToken = cur.apiKey;
     }
-    installCmdRouter();
-    try {
-      setBridgeAppContext(getContext(this) as common.UIAbilityContext);
-    } catch (e) {
-      // ignore context errors
-    }
-    deviceBridge.setStateListener((open: boolean) => {
-      this.getUIContext().animateTo({ duration: ANIM_NORMAL, curve: Curve.EaseOut }, () => {
-        this.bridgeConnected = open;
-      });
-      if (open) {
-        this.lastError = '';
-        this.showToast('设备网关已连接', false);
-        this.refreshDevices();
-      }
-    });
     this.refreshDevices();
     // 登记导航栈：返回手势由 Index.onBackPress 按当前 Tab 精确派发过来
     registerNavStack(2, this.navStack, () => {
@@ -102,37 +71,6 @@ export struct DevicePage {
 
   private palette(): ThemePalette {
     return this.isDark ? DARK_PALETTE : LIGHT_PALETTE;
-  }
-
-  /**
-   * 把后端 HTTP 地址转成设备桥的 WebSocket 地址。
-   *
-   * 关键：@ohos.net.webSocket 只接受 ws:// / wss:// 协议头，
-   * 直接把 http:// 传进 connect() 会在 native 层报
-   * "protocol failed" + "ParseUrl failed"（NETSTACK websocket_exec.cpp），
-   * 表现为设备通道永远连不上。所以这里必须做协议替换。
-   */
-  private gatewayUrlOf(base: string): string {
-    let trimmed: string = base.trim();
-    while (trimmed.length > 0 && trimmed.charAt(trimmed.length - 1) === '/') {
-      trimmed = trimmed.substring(0, trimmed.length - 1);
-    }
-    let scheme: string = 'ws://';
-    let rest: string = trimmed;
-    if (trimmed.startsWith('https://')) {
-      scheme = 'wss://';
-      rest = trimmed.substring('https://'.length);
-    } else if (trimmed.startsWith('http://')) {
-      scheme = 'ws://';
-      rest = trimmed.substring('http://'.length);
-    } else if (trimmed.startsWith('wss://')) {
-      scheme = 'wss://';
-      rest = trimmed.substring('wss://'.length);
-    } else if (trimmed.startsWith('ws://')) {
-      scheme = 'ws://';
-      rest = trimmed.substring('ws://'.length);
-    }
-    return scheme + rest + '/api/v1/device/ws';
   }
 
   /**
@@ -170,43 +108,7 @@ export struct DevicePage {
       // ignore persist failure
     }
     deviceBridge.updateAuthorized(on);
-    if (!this.bridgeConnected) {
-      this.connectBridge();
-    }
     this.showToast(on ? '已授权，agent 可下发能力命令' : '已取消授权', false);
-  }
-
-  // ===================== gateway connection =====================
-
-  private async connectBridge(): Promise<void> {
-    if (this.bridgeUrl.length === 0 || this.bridgeToken.length === 0) {
-      this.lastError = noConnectionMessage();
-      return;
-    }
-    this.lastError = '';
-    if (this.deviceId.length === 0) {
-      this.deviceId = 'ohos-' + Date.now().toString(36);
-    }
-    try {
-      connStore.saveDeviceId(this.deviceId);
-    } catch (e) {
-      // ignore
-    }
-    const name: string = 'HomeAgent OHOS';
-    await deviceBridge.connect(
-      this.bridgeUrl, this.bridgeToken, this.deviceId,
-      LOCAL_CAPS, 'ohos-phone', this.authorized, name);
-  }
-
-  /** 首次进入自动尝试连接（静默，失败不打扰）。 */
-  private maybeAutoConnect(): void {
-    if (this.autoConnectTried || this.bridgeConnected) {
-      return;
-    }
-    this.autoConnectTried = true;
-    if (this.bridgeUrl.length > 0 && this.bridgeToken.length > 0) {
-      this.connectBridge();
-    }
   }
 
   private showToast(msg: string, isError: boolean): void {
@@ -286,9 +188,6 @@ export struct DevicePage {
           .align(Alignment.Top)
           .onDidScroll((xOffset: number, yOffset: number, state: ScrollState) => {
             handleNavOnScroll(state);
-          })
-          .onAppear(() => {
-            this.maybeAutoConnect();
           })
         }
         .width('100%')
@@ -479,7 +378,7 @@ export struct DevicePage {
   }
 
   private capsCount(): number {
-    return LOCAL_CAPS.length;
+    return LOCAL_DEVICE_CAPS.length;
   }
 
   // ===================== 二级：本机设备 =====================
@@ -542,7 +441,7 @@ export struct DevicePage {
         .margin({ bottom: 10 })
 
       Flex({ wrap: FlexWrap.Wrap }) {
-        ForEach(LOCAL_CAPS, (cap: string) => {
+        ForEach(LOCAL_DEVICE_CAPS, (cap: string) => {
           Text(cap)
             .fontSize(11)
             .fontColor(this.palette().accent)
@@ -567,39 +466,8 @@ export struct DevicePage {
       this.KvRow('状态', this.bridgeConnected ? '已连接' : '未连接')
     }
 
-    if (this.lastError.length > 0) {
-      Text(this.lastError)
-        .fontSize(12)
-        .fontColor('#E84026')
-        .padding({ left: 4 })
-        .transition(TransitionEffect.OPACITY
-          .combine(TransitionEffect.translate({ y: -8 }))
-          .animation({ duration: ANIM_NORMAL, curve: Curve.EaseOut }))
-    }
-
     PlainCard({ caption: '操作' }) {
       Row() {
-        // 缩放反馈由 MotionBase 统一；连接态的底色/字色切换仍需按钮自己缓动，
-        // 因为父容器的 .animation() 到不了子节点。
-        MotionBase({ pressEnabled: true, fillWidth: false }) {
-          Button(this.bridgeConnected ? '断开' : '连接网关')
-            .height(34)
-            .fontSize(12)
-            .backgroundColor(this.bridgeConnected ? Color.Transparent : this.palette().accent)
-            .fontColor(this.bridgeConnected ? this.palette().textSecondary : Color.White)
-            .animation({ duration: ANIM_FAST, curve: Curve.EaseOut })
-            .border({
-              width: this.bridgeConnected ? 1 : 0,
-              color: this.palette().btnGhostBorder,
-            })
-            .onClick(() => {
-              if (this.bridgeConnected) {
-                deviceBridge.disconnect();
-              } else {
-                this.connectBridge();
-              }
-            })
-        }
         Blank()
         MotionBase({ pressEnabled: true, fillWidth: false }) {
           Button('刷新设备')
@@ -615,7 +483,7 @@ export struct DevicePage {
       }
       .width('100%')
 
-      Text('进入本页自动连接；断开后每 5 秒自动重连。hello 登记能力与授权状态，bind 携带 Token 完成身份绑定。')
+      Text('设备通道由应用前台生命周期统一管理；切换连接配置后会自动使用新地址和 Token。')
         .fontSize(11)
         .fontColor(this.palette().textMuted)
         .margin({ top: 10 })

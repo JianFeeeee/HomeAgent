@@ -13,6 +13,7 @@ import { PageTopBar, NavFloatOverlay, NavFloatRow, FloatIconButton } from '../co
 import { SubPageLayer, NavGroup, NavRow, PlainCard, markSubPageOpen, subPageParam } from '../components/SubPage';
 import { StatusSummaryCard, StatusDetailContent } from '../components/StatusCards';
 import { statusStore } from '../common/StatusStore';
+import { restartForegroundBridge } from '../common/DeviceBridgeSession';
 
 /** One settings key card rendered in the editor list. */
 interface SettingEntry {
@@ -201,6 +202,7 @@ export struct SettingsPage {
         apiClient.setConnection(cur);
       }
       this.loadConnections();
+      restartForegroundBridge(getContext(this) as common.UIAbilityContext);
       this.showToast('已切换连接', false);
     });
   }
@@ -224,6 +226,7 @@ export struct SettingsPage {
         apiClient.setConnection(cur);
       }
       this.loadConnections();
+      restartForegroundBridge(getContext(this) as common.UIAbilityContext);
       this.showToast('连接已添加', false);
     });
   }
@@ -242,6 +245,7 @@ export struct SettingsPage {
         apiClient.setConnection(cur);
       }
       this.loadConnections();
+      restartForegroundBridge(getContext(this) as common.UIAbilityContext);
       this.showToast('连接已更新', false);
     });
   }
@@ -278,10 +282,13 @@ export struct SettingsPage {
   private deleteConnection(id: string): void {
     connStore.deleteConnection(id).then(() => {
       this.loadConnections();
-      const cur = connStore.getCurrentConnection();
+      const cur: ConnectionConfig | null = connStore.getCurrentConnection();
       if (cur !== null) {
         apiClient.setConnection(cur);
+      } else {
+        apiClient.clearConnection();
       }
+      restartForegroundBridge(getContext(this) as common.UIAbilityContext);
       this.showToast('连接已删除', false);
     });
   }

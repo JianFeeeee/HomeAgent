@@ -67,8 +67,11 @@ class StatusStore {
       this.fail(noConnectionMessage());
       return;
     }
-    AppStorage.setOrCreate<boolean>(K_LOADING, true);
-    AppStorage.setOrCreate<string>(K_ERR, '');
+    // setOrCreate 只负责首次建键，键已存在时不会覆盖旧值。
+    // init() 已把所有键种好，刷新阶段必须用 set，否则摘要卡会永远停在
+    // 版本 "-"、插件 0 的初始状态。
+    AppStorage.set<boolean>(K_LOADING, true);
+    AppStorage.set<string>(K_ERR, '');
     try {
       const resp = await apiClient.getWithTimeout('/status', 8000);
       const obj: Record<string, Object> = JSON.parse(resp.body) as Record<string, Object>;
@@ -79,10 +82,10 @@ class StatusStore {
       const agents: number = obj['agents'] as number ?? 0;
       const startedAt: string = obj['startedAt'] as string ?? '';
 
-      AppStorage.setOrCreate<boolean>(K_UP, true);
-      AppStorage.setOrCreate<string>(K_VERSION, version);
-      AppStorage.setOrCreate<number>(K_AGENTS, agents);
-      AppStorage.setOrCreate<string>(K_STARTED, startedAt);
+      AppStorage.set<boolean>(K_UP, true);
+      AppStorage.set<string>(K_VERSION, version);
+      AppStorage.set<number>(K_AGENTS, agents);
+      AppStorage.set<string>(K_STARTED, startedAt);
 
       const systemFields: StatField[] = [
         { label: '版本', value: version },
@@ -103,7 +106,7 @@ class StatusStore {
     } catch (e) {
       this.fail(userMessage('status.refresh', e));
     }
-    AppStorage.setOrCreate<boolean>(K_LOADING, false);
+    AppStorage.set<boolean>(K_LOADING, false);
   }
 
   /** /kernel 可能不存在（旧后端），失败不影响 /status 已取到的部分 */
@@ -119,8 +122,8 @@ class StatusStore {
       const pluginCount: number = pluginsArr !== undefined ? pluginsArr.length : 0;
       const toolCount: number = toolsArr !== undefined ? toolsArr.length : 0;
 
-      AppStorage.setOrCreate<number>(K_PLUGINS, pluginCount);
-      AppStorage.setOrCreate<number>(K_TOOLS, toolCount);
+      AppStorage.set<number>(K_PLUGINS, pluginCount);
+      AppStorage.set<number>(K_TOOLS, toolCount);
 
       const kernelFields: StatField[] = [
         { label: 'Agent ID', value: agentId },
@@ -219,9 +222,9 @@ class StatusStore {
   }
 
   private fail(msg: string): void {
-    AppStorage.setOrCreate<string>(K_ERR, msg);
-    AppStorage.setOrCreate<boolean>(K_UP, false);
-    AppStorage.setOrCreate<boolean>(K_LOADING, false);
+    AppStorage.set<string>(K_ERR, msg);
+    AppStorage.set<boolean>(K_UP, false);
+    AppStorage.set<boolean>(K_LOADING, false);
     this.groups = [];
     this.bump();
   }
@@ -229,7 +232,7 @@ class StatusStore {
   /** 明细数组不进 AppStorage，用一个自增版本号触发订阅组件重取 */
   private bump(): void {
     const cur: number = AppStorage.get<number>(K_REV) ?? 0;
-    AppStorage.setOrCreate<number>(K_REV, cur + 1);
+    AppStorage.set<number>(K_REV, cur + 1);
   }
 }
 

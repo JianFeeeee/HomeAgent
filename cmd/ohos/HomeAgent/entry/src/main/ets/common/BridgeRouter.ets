@@ -1,4 +1,4 @@
-import { deviceBridge, CmdReply } from './DeviceBridge';
+import { deviceBridge } from './DeviceBridge';
 import {
   CapResult,
   capScreensee,
@@ -6,12 +6,14 @@ import {
   capClipboardsue,
   capSpeakerUse,
   capDeviceInfo,
+  capStatus,
   parseScreensue,
   ScreensuePayload,
 } from './BridgeCaps';
+import { connStore } from './ConnStore';
 import { common } from '@kit.AbilityKit';
 
-// screensue 展示回调由 UI 层注册（Index 挂全局悬浮层）
+// screensue 展示回调由根 UI 注册：窄屏整页，宽屏右侧内容栏。
 export type ScreensueHandler = (payload: ScreensuePayload) => void;
 
 let screensueHandler: ScreensueHandler | null = null;
@@ -25,10 +27,23 @@ export function setBridgeAppContext(ctx: common.UIAbilityContext): void {
   appContext = ctx;
 }
 
-/** 解析 homeagent-* 命令：返回能力名与参数串。 */
+/** 解析裸能力名或过渡期 homeagent-* 命令；参数正文不裁剪，避免改变推送内容。 */
 function splitCapability(command: string): string[] {
-  const cmd: string = command.trim();
-  const idx: number = cmd.indexOf(' ');
+  let start: number = 0;
+  while (start < command.length && isCommandSpace(command.charAt(start))) {
+    start = start + 1;
+  }
+  let cmd: string = command.substring(start);
+  if (cmd.startsWith('homeagent-')) {
+    cmd = cmd.substring('homeagent-'.length);
+  }
+  let idx: number = -1;
+  for (let i: number = 0; i < cmd.length; i++) {
+    if (isCommandSpace(cmd.charAt(i))) {
+      idx = i;
+      break;
+    }
+  }
   if (idx < 0) {
     return [cmd];
   }
@@ -36,51 +51,73 @@ function splitCapability(command: string): string[] {
   return out;
 }
 
+function isCommandSpace(ch: string): boolean {
+  return ch === ' ' || ch === '\t' || ch === '\n' || ch === '\r';
+}
+
+function hasArgs(args: string): boolean {
+  return args.trim().length > 0;
+}
+
 async function executeCommand(reqId: string, command: string): Promise<CapResult> {
   const parts: string[] = splitCapability(command);
   const name: string = parts[0];
   const args: string = parts.length > 1 ? parts[1] : '';
 
-  // screensee 截屏回传（data URL 走文本结果，服务端兼容）
   if (name === 'screensee') {
+    if (hasArgs(args)) {
+      return errRes('screensee 不接受额外参数');
+    }
     return capScreensee();
   }
   if (name === 'screensue') {
+    if (!hasArgs(args)) {
+      return errRes('screensue 需要展示内容');
+    }
     const payload: ScreensuePayload = parseScreensue(args);
+    if (payload.content.length === 0) {
+      return errRes('screensue 需要展示内容');
+    }
     if (screensueHandler !== null) {
       screensueHandler(payload);
-      return okRes('shown');
+      return okRes('内容已显示');
     }
-    return errRes('screensue: display layer not ready');
+    return errRes('展示界面尚未就绪，请保持应用在前台后重试');
   }
   if (name === 'clipboardsee') {
+    if (hasArgs(args)) {
+      return errRes('clipboardsee 不接受额外参数');
+    }
     if (appContext === null) {
-      return errRes('clipboardsee: app context missing');
+      return errRes('应用界面尚未就绪，请保持应用在前台后重试');
     }
     return capClipboardSee(appContext);
   }
   if (name === 'clipboardsue') {
-    if (args.length === 0) {
-      return errRes('clipboardsue: empty text');
+    if (!hasArgs(args)) {
+      return errRes('clipboardsue 需要写入文字');
     }
     return capClipboardsue(args);
   }
   if (name === 'speakeruse') {
-    if (args.length === 0) {
-      return errRes('speakeruse: empty text');
+    if (!hasArgs(args)) {
+      return errRes('speakeruse 需要朗读文字');
     }
     return capSpeakerUse(args);
   }
-  if (name === 'deviceinfo' || name === 'status') {
-    return capDeviceInfo();
+  if (name === 'status') {
+    if (hasArgs(args)) {
+      return errRes('status 不接受额外参数');
+    }
+    return capStatus(connStore.getDeviceId());
   }
-  if (name === 'camerasue') {
-    return errRes('camerasue: camera capture not supported on this build');
+  if (name === 'deviceinfo') {
+    if (hasArgs(args)) {
+      return errRes('deviceinfo 不接受额外参数');
+    }
+    return capDeviceInfo(connStore.getDeviceId(), connStore.getDeviceName());
   }
-  if (name === 'computeruse') {
-    return errRes('computeruse: not applicable to touch-only device');
-  }
-  return errRes('unsupported homeagent capability: ' + name);
+  return errRes('不支持的本机能力：' + name);
 }
 
 function okRes(output: string): CapResult {
