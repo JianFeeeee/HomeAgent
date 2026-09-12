@@ -198,6 +198,14 @@ func (a *Agent) GetKernelStatus() *KernelStatus {
 		trk = a.tracker
 	}
 
+	// 注意：knowledge 在 collectKernelStatus 里是**接口**参数，
+	// 而 (*knowledge.Store)(nil) 塞进接口后 `ks != nil` 仍为真 → 调 List() 直接 panic。
+	// 所以这里必须先判具体指针再进行接口赋值（healthcheck_kernel 会走到这条路径）。
+	var knowledgeLister interface{ List() []string }
+	if a.knowledge != nil {
+		knowledgeLister = a.knowledge
+	}
+
 	ks := collectKernelStatus(
 		a.startTime,
 		string(a.id),
@@ -207,14 +215,42 @@ func (a *Agent) GetKernelStatus() *KernelStatus {
 		a.io,
 		a.pluginReg,
 		a.memory,
-		a.knowledge,
+		knowledgeLister,
 		a.docStore,
 		textMem,
 		socialStore,
 		trk,
 	)
+	ks.ONNX = a.onnxStatus()
 
 	return ks
+}
+
+// onnxStatus 汇总统一多模态向量空间（ONNX 模型）的启用状态。
+//
+// 判据是 Loaded()（provider 真正打开且元数据合法），**不是**「配置里写了 provider」——
+// 后者在模型缺失 / 运行时缺失时也为真，拿它当判据就是假绿。
+func (a *Agent) onnxStatus() sdk.ONNXStatus {
+	st := sdk.ONNXStatus{Provider: a.embeddingProvider}
+	if a.multimodalSpace != nil && a.multimodalSpace.Loaded() {
+		st.Enabled = true
+		st.Dim = a.multimodalSpace.Dim()
+		st.Fingerprint = a.multimodalSpace.Fingerprint()
+		// 模态是可选能力：只有底层 provider 报出来时才带出。
+		if mr, ok := a.multimodalSpace.(interface{ Modalities() []string }); ok {
+			st.Modalities = mr.Modalities()
+		}
+		return st
+	}
+	switch {
+	case a.embeddingError != "":
+		st.Reason = "打开失败: " + a.embeddingError
+	case a.embeddingProvider == "":
+		st.Reason = "未配置统一向量空间 provider（走词嵌入/TF-IDF 回退路径）"
+	default:
+		st.Reason = "provider 未加载"
+	}
+	return st
 }
 
 var _ StatusProvider = (*Agent)(nil)

@@ -65,6 +65,18 @@ func (a *ProviderAdapter) embed(input embedding.Input) ([]float64, error) {
 func (a *ProviderAdapter) Fingerprint() string { return a.info.Fingerprint }
 func (a *ProviderAdapter) Dim() int            { return a.info.Dimension }
 
+// Modalities 报告该空间支持的输入模态（text/image/...）。
+//
+// 模态是**可选能力**：MultimodalEmbedder 契约里没有它，状态查询按接口断言取用，
+// 所以这里既不改公开接口，也不影响其它实现（核心也不硬编码任何模型名）。
+func (a *ProviderAdapter) Modalities() []string {
+	out := make([]string, 0, len(a.info.Modalities))
+	for _, m := range a.info.Modalities {
+		out = append(out, string(m))
+	}
+	return out
+}
+
 func (a *ProviderAdapter) Loaded() bool {
 	a.mu.RLock()
 	defer a.mu.RUnlock()
