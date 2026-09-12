@@ -184,6 +184,40 @@ External plugin development: see [homeagent-sdk](https://gitcode.com/JianFeeeee/
 
 ## Project Status
 
+**v1.2.0** — unified multimodal vector space, media promoted to first-class graph memory, and the whole data plane moved into shared memory.
+
+- **Model-neutral unified embedding space**: the kernel no longer adapts to any specific model.
+  It exposes only a public provider SPI (`pkg/embedding`: `Modality` / `Input{Data,MIME}` /
+  `Info{Dimension,Fingerprint,Modalities}` + a name registry), with implementations under
+  `providers/*`. Default: **Chinese-CLIP ViT-B/16** — text and image land in the **same space**
+  (512-dim, fingerprint `cd2a495cf990`, Apache-2.0, ~1.15GB RSS measured standalone);
+  `qwen3vl` is kept (2048-dim, ~9.4GB) for machines with headroom or future video. Text search
+  still falls back to the existing word-vector / TF-IDF path — a CLIP dual tower's pure-text
+  semantics are **weaker than an MLLM-style embedder**, a cost documented rather than hidden.
+- **Media are first-class nodes and edges in the graph DB**: the "index images via generated
+  text descriptions" stopgap, `media_refs` and media reference counting are **removed**.
+  Memory blocks follow a single-layer invariant — Context → Document → Graph is a **migration**,
+  not a copy, and not kept alive by references.
+- **The entire data plane goes through shared memory** (tool-call frames, Cleaners, input/output
+  lanes, media blocks, document and knowledge bodies); RPC carries only offset descriptors.
+  **RPC protocol is now 2**: the fd3 layout changed and there is **no rolling upgrade** —
+  kernel and all plugins must be rebuilt and installed together.
+- Injections can declare `InjectOptions{NoMemory, ContextPolicy}` (**defaults: still recorded,
+  not pruned**); pruning must be requested explicitly and goes through the plugin's registered
+  `Cleaner`. SDK 1.2.0 is **purely additive** over 1.1.0.
+- **Release packages enable the ONNX space by default** and bundle the model (754MB) plus
+  ONNX Runtime (24MB) in the server/full packages; `homed` drops native Windows support in
+  favour of WSL2; the jieba dictionary is embedded in the binary.
+- Fixed three **silent install-chain failures**: `initconfig` was a no-op (`CGO_ENABLED=0` stub)
+  that printed credentials without writing any, fresh installs were misdetected as "already
+  configured" so default seeding was skipped entirely (0 plugins installed), and the deb
+  `postinst` looked for the unit in the wrong path so `enable` never ran.
+- Licensed **AGPL-3.0-only** from this version on (network clause included; statically linked
+  plugins must match — see License).
+
+> The historical entries below are kept verbatim to show the evolution; two mechanisms in them
+> were **removed in v1.2.0**: text-description-based media indexing, and reference-counted media GC.
+
 **v1.1.1** — Multimodal reaches the **plugin boundary**. v1.1.0 gave the memory system binary
 multimedia nodes, but that path was open only to the kernel itself; this release opens it to
 plugins and the model. The public SDK gains media fields and three media injection methods
@@ -231,7 +265,7 @@ semantic memory; the blob is only a cache that capacity GC may evict.
 | **client** | waiter + desktop GUI | Connecting to a remote HomeAgent |
 
 - Linux: `.deb` (amd64/arm64), `.rpm` (x86_64), `.tar.gz`
-- Windows: `HomeAgent_v1.1.1_{Full,Server,Client}_win64.exe` (NSIS installer)
+- Windows: `HomeAgent_v1.2.0_{Full,Server,Client}_win64.exe` (NSIS installer, includes the AGPL license page). Since v1.2.0 `homed` no longer supports native Windows (it relies on fd inheritance and in-segment offset dereferencing), so the installer bootstraps **WSL2** and installs the Linux packages inside the distribution the same way a Linux host would.
 - Portable: `homeagent-bin-<os>_<arch>.tar.gz` (homed/waiter/initconfig)
 - Verification: `SHA256SUMS`
 
