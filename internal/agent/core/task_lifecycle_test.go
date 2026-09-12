@@ -51,7 +51,7 @@ func TestLifecycle_NormalCommitsOnceAndReplies(t *testing.T) {
 	a := newLifecycleAgent(t, sp, bus, NewStageHost())
 
 	evt, respCh := textEvent("cli", "你好")
-	if _, out := a.runInputTask(evt, nil); out != outcomeDone {
+	if _, out := a.runInputTask(evt); out != outcomeDone {
 		t.Fatalf("runInputTask=%v，期望 outcomeDone", out)
 	}
 
@@ -90,13 +90,13 @@ func TestLifecycle_DuplicateSkippedHasTerminal(t *testing.T) {
 	a := newLifecycleAgent(t, sp, bus, NewStageHost())
 
 	e1, _ := textEvent("webui", "同样的消息")
-	if _, out := a.runInputTask(e1, nil); out != outcomeDone {
+	if _, out := a.runInputTask(e1); out != outcomeDone {
 		t.Fatalf("首次输入=%v，期望 outcomeDone", out)
 	}
 	after1, outputs1 := a.context.Len(), outputs
 
 	e2, ch2 := textEvent("webui", "同样的消息")
-	if _, out := a.runInputTask(e2, nil); out != outcomeDone {
+	if _, out := a.runInputTask(e2); out != outcomeDone {
 		t.Fatalf("去重输入应正常返回（不挂起），实际 %v", out)
 	}
 	if a.context.Len() != after1 {
@@ -130,7 +130,7 @@ func TestLifecycle_OnInputShortCircuit(t *testing.T) {
 	a := newLifecycleAgent(t, sp, events.NewBus(), sh)
 
 	evt, respCh := textEvent("cli", "任意")
-	if _, out := a.runInputTask(evt, nil); out != outcomeDone {
+	if _, out := a.runInputTask(evt); out != outcomeDone {
 		t.Fatalf("短路任务=%v，期望 outcomeDone", out)
 	}
 	select {
@@ -159,7 +159,7 @@ func TestLifecycle_ErrorPathTerminal(t *testing.T) {
 	a := newLifecycleAgent(t, sp, bus, NewStageHost())
 
 	evt, respCh := textEvent("cli", "会失败")
-	if _, out := a.runInputTask(evt, nil); out != outcomeFailed {
+	if _, out := a.runInputTask(evt); out != outcomeFailed {
 		t.Fatalf("runInputTask=%v，期望 outcomeFailed", out)
 	}
 	select {
@@ -196,7 +196,7 @@ func TestLifecycle_ConsolidationRouted(t *testing.T) {
 
 	evt, respCh := textEvent("system", "整理任务")
 	evt.OutputChannel = channelConsolidation
-	if _, out := a.runInputTask(evt, nil); out != outcomeDone {
+	if _, out := a.runInputTask(evt); out != outcomeDone {
 		t.Fatalf("consolidation=%v，期望 outcomeDone", out)
 	}
 	if len(respCh) != 0 {

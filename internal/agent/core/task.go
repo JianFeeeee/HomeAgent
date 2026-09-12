@@ -128,9 +128,11 @@ type TaskFrame struct {
 	Terminal    taskTerminal
 	Level       Level
 
-	// SeedMsgs 非空时，stepPrepare 不重建 system prompt / 记忆上下文，
-	// 而是以它为前缀继续（D1=A：抢占式中断任务继承被打断任务的**只读前缀**）。
-	SeedMsgs []agentAPI.Message
+	// PrefixLen 是 stepPrepare 构建的**基础前缀**长度（system + timeline + 用户输入）。
+	// 恢复时用它把「本任务自己的现场」接回重建后的前缀之上（见 rebaseFramePrefix）。
+	PrefixLen int
+	// InputBlocks 是本轮输入携带的多模态块；重建前缀时要重新挂回。
+	InputBlocks []agentAPI.ContentBlock
 }
 
 func (a *Agent) newTaskFrame(input string, stageCtx *sdk.StageContext) *TaskFrame {
@@ -202,7 +204,7 @@ func (a *Agent) process(input string, stageCtx *sdk.StageContext) (response stri
 // 而 finish 段（上下文提交与回执）只在任务真正结束时执行一次。
 //
 // M3a 还没有抢占，因此 outcomeSuspended 只会由 M3b 的抢占检查产生。
-func (a *Agent) runInputTask(evt *agentIO.InputEvent, seed []agentAPI.Message) (*TaskFrame, stepOutcome) {
+func (a *Agent) runInputTask(evt *agentIO.InputEvent) (*TaskFrame, stepOutcome) {
 	// 临界区标记由调度器 goroutine 维护，任务结束（含挂起）即清。
 	// interceptLoop 读它来决定“能不能取消”，因此必须是原子的。
 	defer a.sched.setCritical(false)
@@ -212,7 +214,6 @@ func (a *Agent) runInputTask(evt *agentIO.InputEvent, seed []agentAPI.Message) (
 	case terminalSkipped, terminalStageShortCircuit, terminalConsolidation:
 		return nil, outcomeDone
 	}
-	f.SeedMsgs = seed
 
 	out := a.runTaskSteps(f)
 	if out == outcomeSuspended {
@@ -221,6 +222,43 @@ func (a *Agent) runInputTask(evt *agentIO.InputEvent, seed []agentAPI.Message) (
 	}
 	a.finishInputTask(f, out)
 	return f, out
+}
+
+// rebaseFramePrefix 把被挂起任务的上下文现场「加载回中断任务之上」。
+//
+// 语义（用户明确）：
+//   - 中断打断时，被挂起任务自到达以来累积的全部现场（含 toolcall）被保护；
+//   - 中断在上一个任务之前的**完整状态**上开始运行（所以中断看不到本任务的部分进展）；
+//   - 中断结束后，把被挂起任务与其现场加载回中断任务**之上**再继续——
+//     即中断已提交的那段上下文留在下面（前缀），本任务自己的现场落回其上。
+//
+// 实现：重建基础前缀（system + timeline + 用户输入）；由于中断结束时已把它的
+// 输入/输出提交进 a.context，重建出的 timeline 已含中断的效果；再把本任务
+// 自己的尾部（Stage 上下文 + 工具轮产物 + 占位）原样接回。
+func (a *Agent) rebaseFramePrefix(f *TaskFrame) {
+	if f == nil || f.PrefixLen <= 0 || f.PrefixLen > len(f.Msgs) {
+		return
+	}
+	tail := append([]agentAPI.Message(nil), f.Msgs[f.PrefixLen:]...)
+
+	budget := ComputeTokenBudget(a.provider, a.systemPrompt)
+	memContext := a.buildMemoryContext(f.Input, budget.MemoryTokens)
+	sysPrompt := a.buildSystemPrompt(memContext, f.Input)
+	prefix := a.buildMessages(sysPrompt, f.Input, budget.ContextTokens)
+
+	// 重建会丢掉 prepare 段对尾部消息的两处改写，这里等价地补回。
+	if f.IsInterrupt && len(prefix) > 0 {
+		last := prefix[len(prefix)-1]
+		last.Role = "system"
+		last.Content = "[中断消息] " + last.Content
+		prefix[len(prefix)-1] = last
+	}
+	if len(f.InputBlocks) > 0 && len(prefix) > 0 {
+		prefix[len(prefix)-1].Blocks = f.InputBlocks
+	}
+
+	f.Msgs = append(prefix, tail...)
+	f.PrefixLen = len(prefix)
 }
 
 // prepareInputTask 执行 processInput 的前半段（去重、通道解析、阶段、裁剪、
@@ -416,18 +454,6 @@ func (a *Agent) step(f *TaskFrame) stepOutcome {
 
 // stepPrepare 构建本轮任务的初始帧。
 func (a *Agent) stepPrepare(f *TaskFrame) stepOutcome {
-	// 抢占式中断任务：继承被打断任务的只读前缀（D1=A），不重建上下文。
-	if len(f.SeedMsgs) > 0 {
-		f.Tools = a.buildToolDefs()
-		f.Msgs = append([]agentAPI.Message(nil), f.SeedMsgs...)
-		f.Msgs = append(f.Msgs, agentAPI.Message{Role: "user", Content: f.Input})
-		// 前缀路径不重写尾部消息（那是「同行注入」的旧形态）；
-		// 必须消费掉标志位，否则下一个普通任务的尾部会被误改。
-		a.interruptInput = false
-		f.Step = StepLLM
-		return outcomeContinue
-	}
-
 	budget := ComputeTokenBudget(a.provider, a.systemPrompt)
 
 	memContext := a.buildMemoryContext(f.Input, budget.MemoryTokens)
@@ -447,7 +473,11 @@ func (a *Agent) stepPrepare(f *TaskFrame) stepOutcome {
 		if len(f.Msgs) > 0 {
 			f.Msgs[len(f.Msgs)-1].Blocks = blocks
 		}
+		f.InputBlocks = blocks
 	}
+	// 基础前缀到此为止（system + timeline + 用户输入）；其后的 Stage 上下文
+	// 与工具轮产物都属于“本任务自己的现场”，恢复时要接回重建后的前缀之上。
+	f.PrefixLen = len(f.Msgs)
 
 	log.Printf("[agent] tool call loop start, max_ctx=%d target=%d fixed=%d mem=%d ctx=%d %d tools, %d events, personality=%t, docs=%d",
 		budget.MaxContext, budget.TargetUsage, budget.FixedTokens, budget.MemoryTokens, budget.ContextTokens,

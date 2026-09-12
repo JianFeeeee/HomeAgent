@@ -9,6 +9,7 @@ package core
 
 import (
 	"context"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -148,16 +149,21 @@ func TestPreempt_HigherPreemptsAndResumes(t *testing.T) {
 	if k != nextPending || it.Level != LevelCritical {
 		t.Fatalf("应取到 pending 中断，kind=%v level=%v", k, it.Level)
 	}
-	// D1=A：抢占式中断任务继承被打断任务的只读前缀。
-	if len(it.SeedMsgs) == 0 {
-		t.Fatal("抢占式中断任务必须继承只读前缀（D1=A）")
+	// D1=B：中断任务在**上一个任务之前的完整状态**上开始运行，不继承本任务的现场。
+	// 因此它能看到的唯一输入就是它自己携带的内容。
+	if it.Event == nil {
+		t.Fatal("中断任务必须携带自己的输入事件")
+	}
+	if got, _ := it.Event.Payload["content"].(string); got != "紧急打断" {
+		t.Fatalf("中断任务输入=%q，期望 紧急打断", got)
 	}
 	a.executeNewTask(it)
 	if len(a.DumpScheduler().PendingInterrupts) != 0 {
 		t.Fatal("中断任务执行后 pendingInterrupts 应清空")
 	}
 
-	// R1：恢复被抢占任务；msgs 与被抢占前逐字节一致（长度不变），并从 S_LLM 重发。
+	// R1：恢复被抢占任务。基础前缀被重建到「中断任务之上」（含中断已提交的上下文），
+	// 本任务自己的现场接回其后，然后从 S_LLM 重发。
 	rt, rf, k2 := a.sched.nextRef()
 	if k2 != nextSuspended || rt != lowTask {
 		t.Fatalf("应恢复被抢占任务，kind=%v", k2)
@@ -165,10 +171,16 @@ func TestPreempt_HigherPreemptsAndResumes(t *testing.T) {
 	if rf.Step != StepLLM {
 		t.Fatalf("恢复游标=%v，期望 StepLLM", rf.Step)
 	}
-	if len(rf.Msgs) != msgsBefore {
-		t.Fatalf("恢复后 msgs 长度=%d，期望 %d（不得被中断污染）", len(rf.Msgs), msgsBefore)
-	}
 	a.resumeTask(rt, rf)
+
+	// 「加载回中断之上」的判据：恢复后的消息序列里必须出现中断任务的上下文。
+	if !msgsContain(rf.Msgs, "紧急打断") {
+		t.Fatal("恢复后的任务应看见中断任务的上下文（现场未加载回中断之上）")
+	}
+	// 本任务自己的现场（工具轮产物）仍然在。
+	if len(rf.Msgs) < msgsBefore {
+		t.Fatalf("恢复后消息数=%d，不应少于被抢占前的 %d", len(rf.Msgs), msgsBefore)
+	}
 
 	if sp.callCount() != 3 {
 		t.Fatalf("LLM 总调用=%d，期望 3（丢弃 1 + 中断 1 + 恢复 1）", sp.callCount())
@@ -273,25 +285,48 @@ func TestPreempt_IdleInterruptIsQueuedNotLost(t *testing.T) {
 	}
 }
 
-// 带媒体/中断标记的输入走新任务路径时不得污染下一个任务的尾部消息。
-func TestPreempt_SeedPathDoesNotLeakInterruptFlag(t *testing.T) {
+// msgsContain 报告消息序列里是否出现过某段文本（用于“现场是否合回”的断言）。
+func msgsContain(msgs []agentAPI.Message, sub string) bool {
+	for _, m := range msgs {
+		if strings.Contains(m.Content, sub) {
+			return true
+		}
+	}
+	return false
+}
+
+// 恢复时的重建必须把 prepare 段对尾部消息的两处改写补回：
+// 中断标记（IsInterrupt）与多模态块（InputBlocks）。
+func TestPreempt_ResumeRebaseRestoresTailDecorations(t *testing.T) {
 	sp := &scriptProvider{script: []*agentAPI.CompletionResponse{{Content: "ok"}}}
 	a := newPreemptAgent(t, sp)
 
+	block := agentAPI.ContentBlock{Type: "text", Text: "图"}
 	f := a.newTaskFrame("打断文本", a.stageCtxFromInput("打断文本", "", ""))
-	f.SeedMsgs = []agentAPI.Message{{Role: "system", Content: "S"}, {Role: "user", Content: "U"}}
-	a.interruptInput = true
-	if out := a.stepPrepare(f); out != outcomeContinue {
-		t.Fatalf("seed 路径应继续，实际 %v", out)
+	f.IsInterrupt = true
+	f.InputBlocks = []agentAPI.ContentBlock{block}
+	// 模拟 prepare 后的形状：基础前缀 + 一段“本任务自己的现场”
+	f.Msgs = []agentAPI.Message{
+		{Role: "system", Content: "S"},
+		{Role: "user", Content: "[中断消息] 打断文本"},
+		{Role: "assistant", Content: "进行中"},
 	}
-	if a.interruptInput {
-		t.Fatal("seed 路径必须消费 interruptInput，否则下一个任务尾部会被误改")
+	f.PrefixLen = 2
+
+	a.rebaseFramePrefix(f)
+
+	if f.PrefixLen <= 0 || f.PrefixLen >= len(f.Msgs) {
+		t.Fatalf("重建后 PrefixLen=%d，消息数=%d，前缀应短于总数", f.PrefixLen, len(f.Msgs))
 	}
-	last := f.Msgs[len(f.Msgs)-1]
-	if last.Role != "user" || last.Content != "打断文本" {
-		t.Fatalf("seed 路径尾部应为中断输入本身，实际 %+v", last)
+	// 尾部现场（assistant 进行中）必须还在最后。
+	if last := f.Msgs[len(f.Msgs)-1]; last.Content != "进行中" {
+		t.Fatalf("本任务现场应接回最后，实际 %+v", last)
 	}
-	if f.Step != StepLLM {
-		t.Fatalf("seed 路径应直接进入 StepLLM，实际 %v", f.Step)
+	prefixLast := f.Msgs[f.PrefixLen-1]
+	if prefixLast.Role != "system" || !strings.HasPrefix(prefixLast.Content, "[中断消息]") {
+		t.Fatalf("中断标记未补回：%+v", prefixLast)
+	}
+	if len(prefixLast.Blocks) != 1 || prefixLast.Blocks[0].Text != "图" {
+		t.Fatalf("多模态块未补回：%+v", prefixLast.Blocks)
 	}
 }
