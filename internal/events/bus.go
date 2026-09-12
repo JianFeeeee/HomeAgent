@@ -9,12 +9,15 @@ import (
 type EventType string
 
 const (
-	EventRawInput       EventType = "raw_input"
-	EventAgentOutput    EventType = "agent_output"
-	EventAgentLLMChain  EventType = "agent_llm_chain"
-	EventToolCall       EventType = "tool_call"
-	EventReasoning      EventType = "reasoning"
-	EventStage          EventType = "stage"
+	EventRawInput      EventType = "raw_input"
+	EventAgentOutput   EventType = "agent_output"
+	EventAgentLLMChain EventType = "agent_llm_chain"
+	EventToolCall      EventType = "tool_call"
+	EventReasoning     EventType = "reasoning"
+	EventStage         EventType = "stage"
+	// EventScheduler 是输入调度器的状态变更事件（抢占/挂起/恢复），
+	// 供状态页与诊断订阅（设计文档 §11 O2）。
+	EventScheduler      EventType = "scheduler"
 	EventSystem         EventType = "system"
 	EventTerminalOutput EventType = "terminal_output"
 
