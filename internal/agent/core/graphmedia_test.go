@@ -481,7 +481,7 @@ func TestArchiveColdDocs_KeepsDocWhenGraphWriteEmpty(t *testing.T) {
 	// 精确构造「三元组非空 + Commit 全部拒绝」这个状态：
 	// Source/Summary 都超过 validEntityName 的 50 字符上限，
 	// 于是 docToTriples 产出的两条元数据三元组都被跳过。
-	longSource := strings.Repeat("超长来源名", 20)  // 100 字
+	longSource := strings.Repeat("超长来源名", 20)   // 100 字
 	longSummary := strings.Repeat("超长摘要文本", 20) // >80 字触发长度门槛被跳过
 	it, _ := ms.Stat(digest)
 	doc := &document.Doc{
