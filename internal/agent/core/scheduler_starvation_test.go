@@ -111,7 +111,7 @@ func TestStarvation_SelectionUsesEffectiveLevel(t *testing.T) {
 
 	// 提升不改变调度器自身的排序稳定性：同为有效级时按入队时刻。
 	a := &Task{ID: 3, Level: LevelBackground, PreemptCount: 1, EnqueuedAt: base.Add(2 * time.Second)} // 有效 L2
-	b := &Task{ID: 4, Level: LevelMessage, EnqueuedAt: base.Add(time.Second)}                          // L2，更早
+	b := &Task{ID: 4, Level: LevelMessage, EnqueuedAt: base.Add(time.Second)}                         // L2，更早
 	if !taskBefore(b, a) {
 		t.Fatal("同有效级时应先到先服务")
 	}

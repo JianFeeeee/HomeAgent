@@ -105,13 +105,13 @@ func selfEvent(msg selfInputMsg) *agentIO.InputEvent {
 }
 
 func (a *Agent) handleSelfInput(msg selfInputMsg) {
-	_, _ = a.runInputTask(selfEvent(msg), nil)
+	_, _ = a.runInputTask(selfEvent(msg))
 }
 
 func (a *Agent) handleInput(evt *agentIO.InputEvent) {
 	switch evt.Type {
 	case "text", "image", "audio":
-		_, _ = a.runInputTask(evt, nil)
+		_, _ = a.runInputTask(evt)
 
 	case "event":
 		log.Printf("[agent] event from %s: %v", evt.Source, evt.Payload)
