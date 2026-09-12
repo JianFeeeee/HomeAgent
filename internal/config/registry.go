@@ -482,9 +482,30 @@ func (r *ConfigRegistry) SeedDefaults(dataDir string) {
 }
 
 func (r *ConfigRegistry) seedDBValues(dataDir string) {
-	var count int
-	r.db.QueryRow(`SELECT COUNT(*) FROM config`).Scan(&count)
-	if count > 0 {
+	// 新鲜度判据不能是「config 表非空」。
+	//
+	// 发行包的 postinst 会先跑 setup.sh → initconfig，而 initconfig 会写一行
+	// webui.listen_addr。于是**全新安装**的 DB 看上去"已经有内容"，整个默认值
+	// 播种被跳过：core.plugin.dir、core.memory.*、多模态 provider 一个都没写。
+	// 现场表现是装完 0 个插件、随包的模型与运行库成死重量。
+	//
+	// 也不能改成"每次都补缺键"：老安装升级时被注进新默认值，会让它突然
+	// 去加载一个 1.8GB 的模型——那是刻意要避免的行为（静默变重）。
+	//
+	// 故用显式标记区分三种情形：
+	//   有标记               → 已经播过种，直接返回
+	//   无标记但有 core.daemon.data_dir → 老安装（本键历来由播种写入），
+	//                        只补标记、不播种
+	//   两者都没有           → 全新安装，播种并打标记
+	const markerKey = "core.internal.seed_version"
+	var hasMarker, hasLegacy int
+	r.db.QueryRow(`SELECT COUNT(*) FROM config WHERE key = ?`, markerKey).Scan(&hasMarker)
+	if hasMarker > 0 {
+		return
+	}
+	r.db.QueryRow(`SELECT COUNT(*) FROM config WHERE key = 'core.daemon.data_dir'`).Scan(&hasLegacy)
+	if hasLegacy > 0 {
+		r.db.Exec(`INSERT OR IGNORE INTO config (key, value) VALUES (?, ?)`, markerKey, "1")
 		return
 	}
 
@@ -603,6 +624,8 @@ WebUI 概览页展示你的立绘，可通过 /mascot.webp 直接访问。如输
 	set("core.input_processing.audio.fallback_provider", "")
 	set("core.input_processing.audio.fallback_model", "")
 	set("core.input_processing.audio.describe_prompt", "请转写这段音频的内容。")
+
+	set(markerKey, "1")
 
 	tx.Commit()
 }

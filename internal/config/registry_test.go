@@ -188,6 +188,65 @@ func TestSeedDefaultsToConfig(t *testing.T) {
 	r.Close()
 }
 
+// 发行包全新安装：postinst 先跑 setup.sh → initconfig，而 initconfig 只写
+// webui.listen_addr。于是 config 表已经非空，旧实现据此判定“已有配置”并整体
+// 跳过播种——装完没有 core.plugin.dir（0 个插件）、也没有随包模型对应的
+// 多模态 provider（754MB 产物 + 24MB 运行库全成死重量）。
+func TestSeedDefaultsAfterInitconfigPrepopulate(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.db")
+
+	r := NewConfigRegistry(path)
+	// 精确复现 initconfig 的唯一一笔写入
+	if _, err := r.db.Exec(`INSERT INTO config (key, value) VALUES ('webui.listen_addr', ':8080')`); err != nil {
+		t.Fatalf("预置 initconfig 行: %v", err)
+	}
+
+	r.SeedDefaults(dir)
+
+	for _, k := range []string{"core.daemon.data_dir", "core.plugin.dir", "core.memory.multimodal_space.provider"} {
+		if r.GetString(k, "") == "" {
+			t.Fatalf("全新安装（initconfig 已写 webui.listen_addr）后 %s 仍为空：默认值播种被跳过", k)
+		}
+	}
+	if got := r.GetString("core.memory.multimodal_space.provider", ""); got != "chineseclip" {
+		t.Fatalf("随包默认 provider 应为 chineseclip，实为 %q", got)
+	}
+	r.Close()
+}
+
+// 老安装升级：绝不能因为新版本加了默认值就把它注进现有 DB——那会让升级即
+// 静默加载一个 1.8GB 的模型。判据是 core.daemon.data_dir 在场（老安装由播种
+// 写入）而 seed 标记缺失。
+func TestSeedDefaultsDoesNotInjectIntoLegacyInstall(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.db")
+
+	r := NewConfigRegistry(path)
+	if _, err := r.db.Exec(`INSERT INTO config (key, value) VALUES ('core.daemon.data_dir', ?)`, dir); err != nil {
+		t.Fatalf("预置老安装行: %v", err)
+	}
+
+	r.SeedDefaults(dir)
+
+	if got := r.GetString("core.memory.multimodal_space.provider", ""); got != "" {
+		t.Fatalf("老安装升级被注入新默认值 provider=%q（升级后会静默加载大模型）", got)
+	}
+	if got := r.GetString("core.plugin.dir", ""); got != "" {
+		t.Fatalf("老安装升级被注入新默认值 core.plugin.dir=%q", got)
+	}
+
+	// 但标记必须补上，否则每次启动都会重走判断
+	var n int
+	if err := r.db.QueryRow(`SELECT COUNT(*) FROM config WHERE key = 'core.internal.seed_version'`).Scan(&n); err != nil {
+		t.Fatalf("查 seed 标记: %v", err)
+	}
+	if n != 1 {
+		t.Fatalf("老安装应补上 seed 标记，实际 count=%d", n)
+	}
+	r.Close()
+}
+
 func TestGetHelpers(t *testing.T) {
 	r := NewConfigRegistry("")
 	r.Set("str_key", "hello")
