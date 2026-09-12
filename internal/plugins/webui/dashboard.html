@@ -2750,6 +2750,18 @@
                 : "-",
           ) +
           "</span></div>" +
+          // AGPL-3.0 §13：向网络使用者提供取得对应源码的入口。
+          // 地址来自内核 meta.SourceURL（构建时可 -ldflags 覆盖），
+          // 修改后对外部署的分支必须把它指向自己的源码仓库。
+          (k?.build?.source_url
+            ? '<div class="kv-row"><span class="key">' +
+              __("源码", "Source") +
+              '</span><span class="val"><a href="' +
+              escHtml(k.build.source_url) +
+              '" target="_blank" rel="noopener noreferrer">' +
+              escHtml(k.build.source_url) +
+              "</a></span></div>"
+            : "") +
           '<div class="kv-row"><span class="key">' +
           __("构建", "Build") +
           '</span><span class="val">' +
