@@ -4,6 +4,7 @@ import { BusinessError } from '@kit.BasicServicesKit';
 import { connStore } from '../common/ConnStore';
 import { apiClient } from '../common/ApiClient';
 import { themeIsDark, seedTheme, seedSystemIsDark, resolveIsDark, applyThemeMode } from '../common/Constants';
+import { startForegroundBridge, stopForegroundBridge } from '../common/DeviceBridgeSession';
 
 /** Read the persisted theme mode ('system'|'dark'|'light'), defaulting to 'system'. */
 function storedThemeMode(): string {
@@ -31,6 +32,7 @@ export default class EntryAbility extends UIAbility {
   }
 
   onDestroy(): void {
+    stopForegroundBridge();
     console.info('[HomeAgent] ability onDestroy');
   }
 
@@ -86,6 +88,7 @@ export default class EntryAbility extends UIAbility {
             apiClient.setConnection(cur);
           }
           this.reapplyStoredTheme();
+          startForegroundBridge(this.context);
           startUI();
         }).catch(() => {
           startUI();
@@ -107,6 +110,7 @@ export default class EntryAbility extends UIAbility {
         // init 之后持久化的主题模式才可读，这里按存量设置重新解析并刷新系统栏
         this.reapplyStoredTheme();
         this.applySystemBar();
+        startForegroundBridge(this.context);
         startUI();
       }).catch((e: Error) => {
         console.error('[HomeAgent] connStore init failed: ' + e.message);
@@ -129,10 +133,12 @@ export default class EntryAbility extends UIAbility {
   }
 
   onForeground(): void {
+    startForegroundBridge(this.context);
     console.info('[HomeAgent] ability onForeground');
   }
 
   onBackground(): void {
+    stopForegroundBridge();
     console.info('[HomeAgent] ability onBackground');
   }
 }
