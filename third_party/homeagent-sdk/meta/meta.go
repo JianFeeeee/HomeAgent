@@ -50,7 +50,7 @@ var (
 	// 1.2.0 就归发布线所有，main 立刻推进到 1.3.0；而 SDK 因为要等正式 tag，
 	// 它的 main 在 v1.2.0 打出来之前不得越过 1.2.0。
 	// （曾误按 §七.4 把这里推到 1.3.0，等于宣称 1.2.0 已发布。）
-	Version = "1.2.0"
+	Version = "1.3.0"
 
 	// Commit 是构建时的 Git commit hash。
 	Commit = "unknown"
@@ -61,7 +61,7 @@ var (
 	// SDKName 是 SDK 名称。
 	SDKName = "HomeAgent SDK"
 
-	// CoreModule 是核心仓的 Go module path，供 plugindev 生成 go.mod 时使用。
+	// CoreModule 是核心仓的 Go module path，供 hmapdev 生成 go.mod 时使用。
 	CoreModule = "gitcode.com/JianFeeeee/HomeAgent"
 
 	// CoreVersion 是此 SDK 所兼容的最低核心版本。

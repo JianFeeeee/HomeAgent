@@ -45,20 +45,20 @@ type Plugin struct {
 	// 登录态/cookies 跨 agent、跨会话、跨插件重启保留），每个 start 创建一个
 	// 新标签页（CDP Target）。同 source 复用自己的标签页。浏览器进程在
 	// 最后一个标签页关闭后保留（避免反复冷启动），仅插件 Stop 时回收。
-	sharedAllocCtx  context.Context
+	sharedAllocCtx    context.Context
 	sharedAllocCancel context.CancelFunc
-	sharedMu        sync.Mutex
+	sharedMu          sync.Mutex
 }
 
 type BrowserSession struct {
-	id        string
-	allocCtx  context.Context // 共享浏览器进程上下文（shared=true 时指向全局单例）
-	cancel    context.CancelFunc
-	ctx       context.Context // 本会话的 Target 上下文（一个标签页）
-	createdAt time.Time
-	timeout   time.Duration
-	closed    bool
-	mu        sync.Mutex
+	id         string
+	allocCtx   context.Context // 共享浏览器进程上下文（shared=true 时指向全局单例）
+	cancel     context.CancelFunc
+	ctx        context.Context // 本会话的 Target 上下文（一个标签页）
+	createdAt  time.Time
+	timeout    time.Duration
+	closed     bool
+	mu         sync.Mutex
 	currentURL string
 	shared     bool   // true=共享浏览器的一个标签页；false=独占浏览器实例
 	profileDir string // 非空表示使用持久化 profile（关闭时不删目录）
@@ -157,6 +157,18 @@ func readArg[T string | int64 | float64](args map[string]interface{}, key string
 
 func errResult(msg string) map[string]interface{} {
 	return map[string]interface{}{"isError": true, "content": msg}
+}
+
+func parseBrowserSessionTimeout(args map[string]interface{}) (time.Duration, error) {
+	raw := strings.TrimSpace(readArg(args, "timeout", ""))
+	if raw == "" {
+		return 0, fmt.Errorf("timeout is required；创建浏览器会话时必须明确指定关闭时长，如 15m 或 2h")
+	}
+	timeout, err := time.ParseDuration(raw)
+	if err != nil || timeout <= 0 {
+		return 0, fmt.Errorf("invalid timeout %q；请使用大于 0 的时长，如 15m 或 2h", raw)
+	}
+	return timeout, nil
 }
 
 func newHTTPClient(timeout int, proxyURL string) *http.Client {
@@ -276,14 +288,15 @@ func (p *Plugin) Start(s *sdk.PluginSDK) error {
 
 	s.RegisterTool(tp+"start", sdk.ToolDef{
 		Name:        tp + "start",
-		Description: "启动交互式浏览器会话。优先连接 systemd 托管的共享浏览器后端（登录态全机共享、各 agent 独立标签页）；后端未安装时返回 need_install 引导（调 browser_install）；无法安装时自动降级本地临时模式。同来源复用已有标签页。",
+		Description: "启动交互式浏览器会话。Agent 必须在创建时明确指定 timeout；到期后插件关闭标签页。同来源复用已有标签页时，也按本次 timeout 重新设定关闭时间。",
 		Parameters: map[string]interface{}{
 			"type": "object",
 			"properties": map[string]interface{}{
 				"url":     map[string]interface{}{"type": "string", "description": "初始导航 URL（可选）"},
-				"timeout": map[string]interface{}{"type": "string", "description": "会话超时(如 5m, 10m，默认 10m)"},
+				"timeout": map[string]interface{}{"type": "string", "description": "必填，会话关闭前的存活时长，如 15m、2h；必须大于 0"},
 				"profile": map[string]interface{}{"type": "string", "description": "持久化档案名（可选，如 main）。同名档案共享登录态与浏览历史；不指定则为一次性临时会话"},
 			},
+			"required": []string{"timeout"},
 		},
 	}, p.handleBrowserStart)
 
@@ -881,10 +894,9 @@ func (p *Plugin) localSpawnFailback() (context.Context, context.CancelFunc, cont
 }
 
 func (p *Plugin) handleBrowserStart(args map[string]interface{}) (interface{}, error) {
-	timeoutStr := readArg(args, "timeout", "10m")
-	timeout, err := time.ParseDuration(timeoutStr)
+	timeout, err := parseBrowserSessionTimeout(args)
 	if err != nil {
-		timeout = 10 * time.Minute
+		return errResult(err.Error()), nil
 	}
 
 	source := readArg(args, "source", "")
@@ -899,13 +911,19 @@ func (p *Plugin) handleBrowserStart(args map[string]interface{}) (interface{}, e
 			s.mu.Lock()
 			id := s.id
 			cur := s.currentURL
+			s.createdAt = time.Now()
+			s.timeout = timeout
+			closesAt := s.createdAt.Add(timeout)
 			s.mu.Unlock()
 			p.mu.Unlock()
+			log.Printf("[%s] reused browser session %s: timeout=%v closes_at=%s source=%s", p.name, id, timeout, closesAt.Format(time.RFC3339), source)
 			return map[string]interface{}{
-				"id":     id,
-				"status": "reused",
-				"url":    cur,
-				"note":   "已复用本来源的现有标签页（登录态全机共享）",
+				"id":        id,
+				"status":    "reused",
+				"url":       cur,
+				"timeout":   timeout.String(),
+				"closes_at": closesAt.Format(time.RFC3339),
+				"note":      "已复用本来源的现有标签页，并按本次 timeout 重新设定关闭时间",
 			}, nil
 		}
 	}
@@ -942,7 +960,7 @@ func (p *Plugin) handleBrowserStart(args map[string]interface{}) (interface{}, e
 			"插件会注册 homeagent-browser.service 并启动。" +
 			"若本机无法联网安装 chromium，可继续用本地临时模式（重试 browser_start 即自动降级）。"
 		return map[string]interface{}{
-			"error":       "backend not installed",
+			"error":        "backend not installed",
 			"need_install": true,
 			"guide":        guide,
 		}, nil
@@ -972,13 +990,15 @@ func (p *Plugin) handleBrowserStart(args map[string]interface{}) (interface{}, e
 		session.currentURL = initURL
 	}
 
-	log.Printf("[%s] created browser session %s: url=%s timeout=%v source=%s", p.name, id, initURL, timeout, source)
+	closesAt := session.createdAt.Add(timeout)
+	log.Printf("[%s] created browser session %s: url=%s timeout=%v closes_at=%s source=%s", p.name, id, initURL, timeout, closesAt.Format(time.RFC3339), source)
 	return map[string]interface{}{
-		"id":      id,
-		"status":  "created",
-		"mode":    "shared-backend",
-		"url":     initURL,
-		"timeout": timeout.String(),
+		"id":        id,
+		"status":    "created",
+		"mode":      "shared-backend",
+		"url":       initURL,
+		"timeout":   timeout.String(),
+		"closes_at": closesAt.Format(time.RFC3339),
 	}, nil
 }
 
@@ -1044,11 +1064,11 @@ func (p *Plugin) handleScreenshot(args map[string]interface{}) (interface{}, err
 	}
 	b64 := base64.StdEncoding.EncodeToString(buf)
 	return map[string]interface{}{
-		"status":    "ok",
-		"format":    format,
-		"size":      len(buf),
-		"base64":    b64,
-		"data_uri":  fmt.Sprintf("data:image/png;base64,%s", b64),
+		"status":   "ok",
+		"format":   format,
+		"size":     len(buf),
+		"base64":   b64,
+		"data_uri": fmt.Sprintf("data:image/png;base64,%s", b64),
 	}, nil
 }
 
@@ -1079,11 +1099,11 @@ func (p *Plugin) handleHTML(args map[string]interface{}) (interface{}, error) {
 		html = html[:maxChars] + "\n\n[HTML truncated]"
 	}
 	return map[string]interface{}{
-		"status":  "ok",
-		"title":   title,
-		"url":     currentURL,
-		"html":    html,
-		"length":  len(html),
+		"status": "ok",
+		"title":  title,
+		"url":    currentURL,
+		"html":   html,
+		"length": len(html),
 	}, nil
 }
 
@@ -1204,13 +1224,20 @@ func (p *Plugin) cleanupLoop() {
 		case <-p.stopCh:
 			return
 		case <-ticker.C:
+			now := time.Now()
 			p.mu.Lock()
 			for id, s := range p.sessions {
-				if time.Since(s.createdAt) >= s.timeout {
-					log.Printf("[%s] cleanup: browser session %s expired", p.name, id)
-				delete(p.sessions, id)
-				s.Close()
-				p.sdk.InjectInterruptText(p.name, p.name, fmt.Sprintf("[浏览器会话 %s 已超时关闭]", id))
+				s.mu.Lock()
+				closesAt := s.createdAt.Add(s.timeout)
+				expired := !now.Before(closesAt)
+				s.mu.Unlock()
+				if expired {
+					log.Printf("[%s] cleanup: browser session %s reached agent-specified close time %s", p.name, id, closesAt.Format(time.RFC3339))
+					delete(p.sessions, id)
+					s.Close()
+					// NoMemory：会话生命周期通知，不是记忆内容。
+					p.sdk.InjectInterruptTextOpts(p.name, p.name,
+						fmt.Sprintf("[浏览器会话 %s 已按指定时间关闭]", id), sdk.InjectOptions{NoMemory: true})
 				}
 			}
 			p.mu.Unlock()
@@ -1310,7 +1337,7 @@ WantedBy=multi-user.target
 			return map[string]interface{}{
 				"status":   "installed",
 				"endpoint": cdpEndpoint,
-				"chrome":    chromePath,
+				"chrome":   chromePath,
 				"profile":  profileDir,
 				"guide":    guide,
 			}, nil
