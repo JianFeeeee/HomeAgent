@@ -195,6 +195,33 @@ internal/
 
 ## 项目状态
 
+**v1.2.0** — 统一多模态向量空间 + 媒体升为图记忆一等节点 + 数据面全量迁到共享内存。
+
+- **模型中立的统一向量空间**：内核不再适配任何具体模型，只提供公共 provider SPI
+  （`pkg/embedding`：`Modality` / `Input{Data,MIME}` / `Info{Dimension,Fingerprint,Modalities}`
+  + 名字注册表），实现在 `providers/*`。默认 **Chinese-CLIP ViT-B/16** —— text 与 image
+  落在**同一空间**（512 维、指纹 `cd2a495cf990`、Apache-2.0、独立实测常驻约 1.15GB）；
+  `qwen3vl` 保留（2048 维、常驻约 9.4GB，供内存充足或将来要视频的机器切回）。
+  文本检索仍由既有词向量 / TF-IDF 兜底：CLIP 双塔的**纯文本语义弱于 MLLM 型嵌入器**，
+  这是已知并写进文档的代价。
+- **媒体是图数据库的一等节点与边**：**彻底删除**「用文本描述式索引图片」这套将就机制，
+  以及 `media_refs` 与媒体引用计数。记忆块遵循单层不变量——Context → Document → Graph
+  是块的**迁移**，不是复制、也不靠引用保活。
+- **数据面全部走共享内存**（工具调用帧 / Cleaner / 输入输出通道 / 媒体块 / 文档与知识正文），
+  RPC 只传偏移描述符；**RPC 协议升到 2**，fd3 布局改变，**不支持滚动升级**——
+  内核与全部插件必须同批重建、同批安装，存量插件须用新版 `plugindev` 重编。
+- 注入可声明 `InjectOptions{NoMemory, ContextPolicy}`（**默认仍记入记忆、默认不裁剪**）；
+  裁剪必须显式声明，且先经插件注册的 `Cleaner`。SDK 1.2.0 相对 1.1.0 **纯追加**。
+- **发行包默认启用** ONNX 向量空间，并把模型（754MB）与 ONNX Runtime（24MB）随
+  server/full 包发布；`homed` 放弃 Windows 原生支持改走 WSL2；jieba 词库内嵌进二进制。
+- 修掉三个**安装链静默失败**：`initconfig` 因 `CGO_ENABLED=0` 是空操作（打印凭据却一个字节
+  没写）、全新安装被误判「已有配置」而整体跳过默认值播种（装完 0 插件）、deb 的 `postinst`
+  查错 unit 路径导致 `enable` 从未执行。
+- 自本版起以 **AGPL-3.0-only** 发布（含网络条款；插件静态链接 SDK 故须同许可，见「许可」）。
+
+> 以下历史条目保留原文以呈现演进，其中两条机制**已在 v1.2.0 移除**：
+> 「媒体以 `[<mime> <短digest>] <描述>` 标记参与检索」（描述式索引）与「媒体引用计数式 GC」。
+
 **v1.1.1** — 多模态贯通**插件边界**。v1.1.0 让记忆系统支持了二进制多媒体节点，但那条链路只对内核自己开放；本版打通到插件与模型。公开 SDK 新增媒体字段与三个媒体注入接口（配套 [SDK v1.1.0](https://gitcode.com/JianFeeeee/homeagent-sdk/releases/tag/v1.1.0)，整条 1.1.x 线共用），内核实现对应四个 RPC。桥接层此前在**静默裁字段**：插件交进来的 `Confidence`/类型/`SentenceText` 全被丢弃、`Doc` 只留三个字段、`Remove` 不解引用（媒体永久算「被引用」，GC 收不掉）。`processTextInput`/`processMediaInput` 归一成一条 `processInput`，媒体路径由此获得它一直缺的去重、`no_memory`、通道 `Cleaner`、中断语义、`EventRawInput`。修掉三处真实缺陷：**用户发的图从来没出现在 WebUI 聊天记录里**（媒体路径发布 map 而订阅方断言 string）、**`memory_commit` 的 `sentence_text` 从未暴露给模型**（而它是媒体绑定链的必经环节）、**`PluginSDK` 两处并发竞态**（`-race` 实测 11 处，插件重载瞬间偶发 nil 解引用崩溃）。
 
 **v1.1.0** — 记忆系统支持**二进制多媒体节点**。内容寻址媒体存储（CAS + SQLite 元数据 + 磁盘 blob，`Get` always 重校 digest），贯通 L0（上下文事件）/L2（文档）/L3（图谱句子）三层，引用计数式 GC（有引用者绝不删）。视觉模型生成的描述文本是持久语义记忆，blob 只是可被容量 GC 淘汰的缓存。
@@ -224,7 +251,7 @@ internal/
 | **client** | waiter + 桌面 GUI | 连接远程 HomeAgent |
 
 - Linux：`.deb`（amd64/arm64）、`.rpm`（x86_64）、`.tar.gz`
-- Windows：`HomeAgent_v1.1.1_{Full,Server,Client}_win64.exe`（NSIS 安装向导）
+- Windows：`HomeAgent_v1.2.0_{Full,Server,Client}_win64.exe`（NSIS 安装向导，含 AGPL 许可页）。自 v1.2.0 起因 `homed` 不再支持 Windows 原生（依赖 fd 继承与共享内存段内偏移解引用），安装器改为引导到 **WSL2**，并把 Linux 包送进发行版里按 Linux 方式安装。
 - 免安装：`homeagent-bin-<os>_<arch>.tar.gz`（含 homed/waiter/initconfig）
 - 校验：`SHA256SUMS`
 
