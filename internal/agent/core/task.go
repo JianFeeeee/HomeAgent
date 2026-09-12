@@ -191,6 +191,10 @@ func (a *Agent) process(input string, stageCtx *sdk.StageContext) (response stri
 //
 // M3a 还没有抢占，因此 outcomeSuspended 只会由 M3b 的抢占检查产生。
 func (a *Agent) runInputTask(evt *agentIO.InputEvent, seed []agentAPI.Message) (*TaskFrame, stepOutcome) {
+	// 临界区标记由调度器 goroutine 维护，任务结束（含挂起）即清。
+	// interceptLoop 读它来决定“能不能取消”，因此必须是原子的。
+	defer a.sched.setCritical(false)
+
 	f, term := a.prepareInputTask(evt)
 	switch term {
 	case terminalSkipped, terminalStageShortCircuit, terminalConsolidation:
@@ -234,6 +238,9 @@ func (a *Agent) prepareInputTask(evt *agentIO.InputEvent) (*TaskFrame, taskTermi
 	if a.currentOutputChannel == "" {
 		a.currentOutputChannel = evt.Source
 	}
+	// 进入本任务的临界区属性（记忆整理整任务不可抢占）。
+	// 必须在 processConsolidation 之前设置——它就在下面同步执行。
+	a.sched.setCritical(a.inCriticalSection())
 
 	if evt.OutputChannel == channelConsolidation {
 		a.processConsolidation(evt, in.text)

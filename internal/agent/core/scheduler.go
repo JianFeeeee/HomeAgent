@@ -21,6 +21,7 @@ import (
 	"log"
 	"runtime/debug"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	agentAPI "gitcode.com/JianFeeeee/HomeAgent/internal/agent/api"
@@ -197,6 +198,12 @@ type scheduler struct {
 	// interruptLoop 只写这两个字段与 pendingInterrupts；帧永远只由调度器读写。
 	preemptArmed bool
 	preemptLevel Level
+	// critical 报告运行任务是否在不可抢占临界区（如记忆整理）。
+	// 由于 interceptLoop 要读它，必须是原子的：帧仍只由调度器读写。
+	critical atomic.Bool
+	// wake 用于把空闲的调度器叫醒：pendingInterrupts 不是 channel，
+	// 没有这个信号时“空闲时到达的中断”会一直等下一次输入（设计 §5.1 ③）。
+	wake chan struct{}
 	// maxSuspendDepth：suspendPool 深度上限（设计文档 §6.3，默认 4）。
 	maxSuspendDepth int
 }
@@ -221,8 +228,22 @@ func newScheduler(maxQueue int) *scheduler {
 	if maxQueue <= 0 {
 		maxQueue = 256
 	}
-	return &scheduler{maxQueue: maxQueue, maxSuspendDepth: 4}
+	return &scheduler{maxQueue: maxQueue, maxSuspendDepth: 4, wake: make(chan struct{}, 1)}
 }
+
+// signalWake 非阻塞地唤醒调度器。
+func (s *scheduler) signalWake() {
+	select {
+	case s.wake <- struct{}{}:
+	default:
+	}
+}
+
+// setCritical 由调度器 goroutine 在任务进入/离开临界区时设置。
+func (s *scheduler) setCritical(v bool) { s.critical.Store(v) }
+
+// inCritical 报告运行任务是否在不可抢占临界区。
+func (s *scheduler) inCritical() bool { return s.critical.Load() }
 
 // hasRoom 报告就绪队列是否还能接收任务。泵入侧据此节流：
 // 队列满则停止从 channel 取，让背压落回 channel 本身。
@@ -329,6 +350,7 @@ func (s *scheduler) enqueueInterrupt(t *Task) {
 		s.stats.Rejected++
 	}
 	s.pendingInterrupts = append(s.pendingInterrupts, t)
+	s.signalWake()
 }
 
 // requestPreempt 登记一次中断请求。
@@ -339,11 +361,15 @@ func (s *scheduler) enqueueInterrupt(t *Task) {
 // 就正常结束，中断也不会丢（它会被 nextRef 按优先级选出）。
 //
 // 判据用**有效**优先级（饥饿防护），并受抢占冷却约束。
+//
+// 临界区（如记忆整理）内不 arm、不取消：中断只入队，等临界区结束后的安全点处理，
+// 这是设计 §4.3 的硬要求——那个位置的“不抢占”不能只是不让位，还必须不取消。
 func (s *scheduler) requestPreempt(evt *agentIO.InputEvent, level Level) bool {
 	s.mu.Lock()
 	running := s.running
+	critical := s.critical.Load()
 	canPreempt := false
-	if running != nil && level > effectiveLevel(running) {
+	if !critical && running != nil && level > effectiveLevel(running) {
 		if running.LastPreemptAt.IsZero() || time.Since(running.LastPreemptAt) >= preemptCooldown {
 			canPreempt = true
 			s.preemptArmed = true
@@ -549,12 +575,14 @@ func (a *Agent) schedulerLoop() {
 
 		t, f, kind := a.sched.nextRef()
 		if kind == nextNone {
-			// 无待办：阻塞等新输入或退出。
+			// 无待办：阻塞等新输入、新中断（wake）或退出。
 			select {
 			case evt := <-a.io.InputChan():
 				a.sched.enqueue(newInputTask(evt))
 			case msg := <-a.selfInputCh:
 				a.sched.enqueue(newSelfTask(msg))
+			case <-a.sched.wake:
+				// 中断已入 pendingInterrupts，回到循环顶部重新挑选。
 			case <-a.ctx.Done():
 				return
 			}
