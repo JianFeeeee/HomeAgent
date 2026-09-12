@@ -50,48 +50,31 @@ func (a *Agent) interceptLoop() {
 			clone.Payload["interrupt_source"] = evt.Source
 			clone.Payload["interrupt_channel"] = evt.OutputChannel
 
-			a.llmMu.Lock()
-			hasActiveLLM := a.cancelLLM != nil
-			if hasActiveLLM {
-				a.cancelLLM()
-				log.Printf("[agent] LLM request cancelled by interrupt")
-			}
-			a.llmMu.Unlock()
-
-			if hasActiveLLM {
-				if a.currentOutputChannel == "_consolidation_" {
-					log.Printf("[agent] consolidation interrupted, re-injecting input for %s/%s", evt.Source, evt.OutputChannel)
-					a.io.InjectInputTo(evt.Source, evt.OutputChannel, "text", map[string]interface{}{
-						"content":           text,
-						"interrupt":         true,
-						"interrupt_source":  evt.Source,
-						"interrupt_channel": evt.OutputChannel,
-					})
-				} else {
-					select {
-					case a.interceptCh <- clone:
-					default:
-						log.Printf("[agent] intercept channel full, queuing input for %s", evt.Source)
-						a.io.InjectInputTo(evt.Source, evt.OutputChannel, "text", map[string]interface{}{
-							"content":           text,
-							"interrupt":         true,
-							"interrupt_source":  evt.Source,
-							"interrupt_channel": evt.OutputChannel,
-						})
-					}
-				}
-			} else {
-				a.io.InjectInputTo(evt.Source, evt.OutputChannel, "text", map[string]interface{}{
-					"content":           text,
-					"interrupt":         true,
-					"interrupt_source":  evt.Source,
-					"interrupt_channel": evt.OutputChannel,
-				})
+			// 决策交给调度器：requestPreempt 总是登记中断（进 pendingInterrupts，
+			// 因而不会丢），仅当它会真抢占时才告诉我“该取消可取消的步骤”。
+			// 本 goroutine 不碰任何帧——只写 pendingInterrupts 与让位信号。
+			level := a.taskLevel(evt.Source, evt.OutputChannel)
+			if a.sched.requestPreempt(clone, level) {
+				a.cancelCurrentLLM()
 			}
 
 		case <-a.ctx.Done():
 			return
 		}
+	}
+}
+
+// cancelCurrentLLM 取消正在进行的 LLM 请求（若有）。
+//
+// 只有 LLM 流式步骤是可取消的；工具 RPC / ONNX / CAS 在 v1 是临界区，
+// 取消对它们无效——让位信号会等它们自然结束后的安全点（设计文档 D2）。
+func (a *Agent) cancelCurrentLLM() {
+	a.llmMu.Lock()
+	cancel := a.cancelLLM
+	a.llmMu.Unlock()
+	if cancel != nil {
+		cancel()
+		log.Printf("[agent] LLM request cancelled by preemption")
 	}
 }
 
@@ -108,22 +91,27 @@ type selfInputMsg struct {
 	channel string
 }
 
-func (a *Agent) handleSelfInput(msg selfInputMsg) {
+// selfEvent 把内核自循环消息归一成输入事件。
+func selfEvent(msg selfInputMsg) *agentIO.InputEvent {
 	if msg.channel == "" {
 		msg.channel = channelConsolidation // 兼容空值：默认走整理路径
 	}
-	a.processInput(&agentIO.InputEvent{
+	return &agentIO.InputEvent{
 		Source:        "system",
 		Type:          "text",
 		Payload:       map[string]interface{}{"content": msg.text},
 		OutputChannel: msg.channel,
-	})
+	}
+}
+
+func (a *Agent) handleSelfInput(msg selfInputMsg) {
+	_, _ = a.runInputTask(selfEvent(msg), nil)
 }
 
 func (a *Agent) handleInput(evt *agentIO.InputEvent) {
 	switch evt.Type {
 	case "text", "image", "audio":
-		a.processInput(evt)
+		_, _ = a.runInputTask(evt, nil)
 
 	case "event":
 		log.Printf("[agent] event from %s: %v", evt.Source, evt.Payload)
@@ -281,155 +269,6 @@ func (a *Agent) mediaToBlocks(payload map[string]interface{}, mediaType string, 
 	}
 
 	return blocks, alt
-}
-
-// processInput 是全部模态输入的唯一主干。
-//
-// 文本、用户上传的图/音频、插件注入的多模态块走同一条路径，因此去重、
-// no_memory、通道 Cleaner、中断语义、EventRawInput、媒体入 CAS、媒体记忆绑定
-// 对所有模态一致——不会再出现「文本路径加了功能、媒体路径没跟上」。
-func (a *Agent) processInput(evt *agentIO.InputEvent) {
-	start := time.Now()
-
-	in, ok := a.resolveInput(evt)
-	if !ok {
-		return
-	}
-
-	// 去重按文本做：webui/GUI 断线重连会重放未确认消息。
-	// 带媒体时跳过——媒体输入的 alt 文案（"[从 qq 收到了 image]"）对不同图片
-	// 是同一句，拿它去重会把连发的两张图误判成重复。
-	if len(in.blocks) == 0 && a.isDuplicateInput(evt.Source, in.text) {
-		log.Printf("[agent] dropped duplicate input from %s: %s", evt.Source, truncateStr(in.text, 60))
-		return
-	}
-
-	a.currentOutputChannel = evt.OutputChannel
-	if a.currentOutputChannel == "" {
-		a.currentOutputChannel = evt.Source
-	}
-
-	if evt.OutputChannel == "_consolidation_" {
-		a.processConsolidation(evt, in.text)
-		return
-	}
-
-	// pendingMedia 让 describe_image / transcribe_audio / ocr_image 拿到本轮媒体的
-	// 原始 data/url，也是这三个工具是否出现在工具表里的开关。仅对用户直接上传成立
-	//（payload 里才有 data/url）；插件注入的是成品 block，取不到原始数据。
-	if evt.Type == "image" || evt.Type == "audio" {
-		a.pendingMedia = evt.Payload
-		defer func() { a.pendingMedia = nil }()
-	}
-
-	// 媒体先落进 CAS。不存的后果是 ContextEvent.Input 只剩一句 alt 文本，
-	// base64 随 message 数组发给模型后就丢了。
-	if len(in.blocks) > 0 {
-		a.stageMediaDigests(a.captureBlockMedia(in.blocks, in.captureTool)...)
-	}
-
-	noMemory := false
-	if v, ok := evt.Payload["no_memory"].(bool); ok {
-		noMemory = v
-	}
-	if !noMemory && a.io != nil {
-		if chDef, ok := a.io.GetInputChannelDef(evt.Source); ok && chDef.NoMemory {
-			noMemory = true
-		}
-	}
-
-	// 工具提醒/中断（terminal_watch、timer 等）不是用户发言：
-	// 以 system 角色注入 LLM，且不写入用户对话履历。
-	isInterrupt, _ := evt.Payload["interrupt"].(bool)
-	a.mu.Lock()
-	a.interruptInput = isInterrupt
-	a.mu.Unlock()
-	if isInterrupt {
-		noMemory = true
-	}
-
-	stageCtx := a.stageCtxFromInput(in.text, evt.Source, "")
-	stageCtx.Extra["input_source"] = evt.Source
-	stageCtx.Extra["output_channel"] = evt.OutputChannel
-	if len(in.blocks) > 0 {
-		stageCtx.Extra["media_blocks"] = in.blocks
-		stageCtx.Extra["media_type"] = in.mediaType
-	}
-	if noMemory {
-		stageCtx.NoMemory = true
-	}
-	a.injectSourceContext(stageCtx, evt)
-
-	if a.runStage(sdk.StageOnInput, stageCtx) {
-		a.emitResponse(evt, *stageCtx.Response)
-		return
-	}
-
-	input := stageCtx.RawMessage
-
-	// 计算层用的清洗文本（不改原文）：通道 Cleaner 提取语义内容后用于向量化/提关键词
-	cleanInput := input
-	if a.io != nil {
-		if chDef, ok := a.io.GetInputChannelDef(evt.Source); ok && chDef.Cleaner != nil {
-			cleanInput = chDef.Cleaner(input)
-		}
-	}
-
-	// upload_* 字段一并转发：webui 的 EventRawInput 订阅方靠它们还原附件卡片。
-	// 媒体路径此前把整个 payload 塞进 content（一个 map），订阅方按 string 断言
-	// 直接失败 → 用户发的图从不出现在聊天记录里。
-	rawPayload := map[string]interface{}{"content": input, "source": evt.Source}
-	for _, k := range []string{"upload_url", "upload_type", "upload_size", "upload_name"} {
-		if v, ok := evt.Payload[k]; ok {
-			rawPayload[k] = v
-		}
-	}
-	a.publishEvent(events.EventRawInput, rawPayload)
-
-	archived := a.pruneOnInput(evt, cleanInput)
-	if archived > 0 {
-		log.Printf("[agent] pruned %d low-relevance events to document memory", archived)
-	}
-
-	if !isInterrupt {
-		a.context.Append(ContextEvent{
-			Timestamp: start,
-			Source:    evt.Source,
-			Input:     input,
-		})
-	}
-
-	response, toolsUsed, toolResults, err := a.process(input, stageCtx)
-	if err != nil {
-		log.Printf("[agent] process %s error: %v", evt.Type, err)
-		resp := fmt.Sprintf("处理错误: %v", err)
-		a.emitResponse(evt, resp)
-		a.context.Append(ContextEvent{Timestamp: time.Now(), Source: "agent", Input: input, Response: resp})
-		return
-	}
-
-	elapsed := time.Since(start)
-	log.Printf("[agent] %s from %s → response (%dms, tools=%v)", evt.Type, evt.Source, elapsed.Milliseconds(), toolsUsed)
-
-	// 本轮捕获的媒体一起挂到这条事件上：用户上传的、插件注入的，以及模型调
-	// multimodal_see_picture / see_video 时经 SetToolBlocks 注入的（后者在
-	// process() 里被捕获，纯文本输入也会有）。
-	turnEvt := ContextEvent{
-		Timestamp:   time.Now(),
-		Source:      "agent",
-		Input:       cleanInput,
-		Response:    response,
-		ToolsUsed:   toolsUsed,
-		ToolResults: toolResults,
-	}
-	a.bindEventMedia(&turnEvt, a.drainMediaDigests())
-	a.context.Append(turnEvt)
-
-	a.emitResponse(evt, response)
-
-	if !stageCtx.NoMemory {
-		a.emitMemoryCandidate(evt.Source, cleanInput, response, toolResults, toolsUsed)
-	}
 }
 
 func (a *Agent) emitResponse(evt *agentIO.InputEvent, response string) {
