@@ -39,7 +39,7 @@ type msgEntry struct {
 
 type daemonHandler struct {
 	// homed 连接
-	homeMu  sync.Mutex
+	homeMu   sync.Mutex
 	homeConn net.Conn
 	homeR    *bufio.Reader
 	homeCfg  *Config
@@ -304,14 +304,14 @@ func startDaemonDeviceBridge(cfg *Config) {
 	if dg == "" || dt == "" {
 		return
 	}
-	// 设备桥重连循环：WS 断开时自动重连
-	go runDeviceBridgeLoop(dg, dt)
+	// 设备桥重连循环：WS 断开时自动重连，并保留配置中的本地授权状态。
+	go runDeviceBridgeLoop(dg, dt, cfg.DeviceAuthorized)
 }
 
 // runDeviceBridgeLoop 无限重连循环：建立设备桥 → 等待断开 → 重连。
-func runDeviceBridgeLoop(gateway, token string) {
+func runDeviceBridgeLoop(gateway, token string, authorized bool) {
 	for {
-		bridge, err := connectDeviceBridge(gateway, token)
+		bridge, err := connectDeviceBridge(gateway, token, authorized)
 		if err != nil {
 			log.Printf("[daemon] device bridge connect failed: %v, retrying in 5s", err)
 			time.Sleep(5 * time.Second)
@@ -325,7 +325,7 @@ func runDeviceBridgeLoop(gateway, token string) {
 }
 
 // connectDeviceBridge 创建并启动一次设备桥，返回 bridge 实例供 Wait()。
-func connectDeviceBridge(gateway, token string) (*client.Bridge, error) {
+func connectDeviceBridge(gateway, token string, authorized bool) (*client.Bridge, error) {
 	hostname, _ := os.Hostname()
 	if hostname == "" {
 		hostname = "local"
@@ -355,12 +355,17 @@ func connectDeviceBridge(gateway, token string) (*client.Bridge, error) {
 	}
 
 	bridge := client.New(gw, token, deviceID, hostname, caps, info)
+	bridge.SetAuthorized(authorized)
 
-	// 注册命令处理器
+	// 注册命令处理器：cmd_type 是主信号，同时兼容旧版 homeagent-* 文本前缀。
 	cr := client.NewCmdRouter()
 	cr.Handle("homeagent-", handleHomeagentCmd)
 	cr.HandleDefault(handleShellCmd)
-	bridge.OnCmd(func(reqID, command string) {
+	bridge.OnCmd(func(reqID, command, cmdType string) {
+		if cmdType == "homeagent" {
+			handleHomeagentCmd(reqID, command)
+			return
+		}
 		cr.Dispatch(reqID, command)
 	})
 
@@ -371,8 +376,6 @@ func connectDeviceBridge(gateway, token string) (*client.Bridge, error) {
 	// 设置全局变量供 sendBridgeResult 使用
 	deviceBridge = bridge
 	deviceBridgeID = deviceID
-	auth := true // daemon 模式默认授权（配置已指定）
-	bridge.SetAuthorized(auth)
 
 	return bridge, nil
 }
