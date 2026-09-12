@@ -57,8 +57,12 @@ type Agent struct {
 	// 由记忆系统本身决定。为 nil 时全部媒体接线静默跳过。
 	mediaStore *media.Store
 
-	// 人格设定
+	// 人格设定（内容来自启动时载入的人格文件/配置项）
 	personality *agentPkg.Personality
+
+	// 人格落库面：首启门禁与 persona_set 工具使用（见 persona.go）。
+	// 为 nil 时门禁与工具都静默关闭（例如单测里不接配置的场景）。
+	personaStore PersonaStore
 
 	// 插件注册表（用于 plgreload）
 	pluginReg *plugin.Registry
@@ -183,6 +187,7 @@ type AgentConfig struct {
 	MultimodalSpace    vector.MultimodalEmbedder
 	FusionCfg          CrossModalFusionConfig // 跨模态融合权重；零值用默认
 	Personality        *agentPkg.Personality
+	PersonaStore       PersonaStore // 人格设定的读写面（首启门禁 + persona_set 工具）
 	PluginReg          *plugin.Registry
 	PluginDir          string
 	DistillInterval    time.Duration
@@ -269,6 +274,7 @@ func New(cfg AgentConfig) *Agent {
 		textMem:         cfg.TextMemory,
 		mediaStore:      cfg.MediaStore,
 		personality:     cfg.Personality,
+		personaStore:    cfg.PersonaStore,
 		pluginReg:       cfg.PluginReg,
 		pluginDir:       cfg.PluginDir,
 		distillInterval: cfg.DistillInterval,
