@@ -1369,11 +1369,16 @@ SSE Last-Event-ID → 超时 → api 状态码 → renderAll 增量 → XSS 消�
 
 ### 13.12 L3 原生多模态
 
+**目标纠正**：现有 `media_refs` 与 `graph_sentence` 只是挂载/反查机制；从文本标记生成普通 `Media` 三元组也不是一等多模态图节点。目标是媒体拥有独立身份、模态、MIME、原生向量、模型 fingerprint 与生命周期，并通过结构化边直接参与图检索、文档检索和 context 语义淘汰。
+
 **实施**：
 
-1. L3 node_type 新增 media/media_block
-2. L3 edge_type 新增 depicts/contains
-3. L2→L3 迁移时保留 media 引用边
+1. L3 建立结构化 media/media_block 一等节点（不从描述文本反解）
+2. L3 建立 contains/depicts/derived_from 原生边，可连接 document/context/entity/media
+3. L2→L3 迁移时把文档及其媒体变成节点与边，不只迁移 `media_refs`
+4. multimodal doc 的向量由文本及其媒体块在同一 Qwen fingerprint 空间共同参与
+5. multimodal context 的裁剪查询与事件向量同时融合 text/image/video，而非只算文本字段
+6. text/image/video 必须来自同一个 Qwen 空间；音频在该模型下明确 unsupported
 
 **验证**：
 
