@@ -85,6 +85,34 @@ type DownloadTask struct {
 	CreatedAt string `json:"created_at"`
 }
 
+type qqAuthContext struct {
+	active     bool
+	owner      bool
+	messageID  int64
+	userID     int64
+	groupID    int64
+	isGroup    bool
+	generation uint64
+}
+
+var qqMessageIDRe = regexp.MustCompile(`message_id=(-?\d+)`)
+
+// 默认只开放公共信息与当前 QQ 会话所需能力。日历、邮件、记忆、知识库、
+// 主机文件/命令、设备、配置、插件管理及 QQ 联系人/跨会话列表均不在白名单中。
+const defaultPublicToolAllowlist = `["output_send__qq","output_list_channels","qq_get_message","qq_get_history","qq_mark_read","qq_get_group_member_info","qq_get_group_files","qq_video_download","weather_*","browser_search","browser_fetch","browser_render","ocr_*","multimodal_*","bili_*","music_*","ai_image_*"]`
+
+const defaultGroupToolAllowlists = `{"*":["output_send__qq","output_list_channels","qq_get_message","qq_get_history","qq_mark_read","qq_get_group_member_info","qq_get_group_files","qq_video_download","weather_*","browser_search","browser_fetch","browser_render","ocr_*","multimodal_*","bili_*","music_*","ai_image_*"]}`
+
+const (
+	// 单轮 QQ 触发的工具调用总数上限（0 = 不限制）。只作跑飞兜底，
+	// 不应拦下正常的长时间多步任务。
+	defaultMaxQQToolCalls = 200
+	// 单轮 QQ 主动发送的不同消息条数上限（0 = 不限制）。
+	defaultMaxQQOutputCalls = 20
+	// 单轮内同一条消息（参数完全相同）允许重复发送的次数（0 = 不限制）。
+	defaultMaxDuplicateSend = 1
+)
+
 type Plugin struct {
 	name           string
 	sdk            *sdk.PluginSDK
@@ -93,7 +121,7 @@ type Plugin struct {
 	remoteDir      string
 	filesDir       string
 	webhookToken   string
-	adminIDs       []int64
+	ownerIDs       []int64
 	botID          int64
 	botNickname    string
 	dmPolicy       string
@@ -108,12 +136,26 @@ type Plugin struct {
 	typingMu       sync.Mutex
 	typingMap      map[int64]*typingState
 
-	// msg_id → peer 映射 + 会话最新状态（<7 天兜底 get_history + list_chats）
-	msgMu   sync.Mutex
-	msgMap  map[int64]msgRef   // message_id → {peer, time}
-	chats   map[int64]*chatMeta // peerID → 会话状态（群号或 QQ 号）
-}
+	authMu               sync.RWMutex
+	auth                 qqAuthContext
+	authGeneration       uint64
+	authByMessageID      map[int64]qqAuthContext
+	lastDenial           string
+	denialLocked         bool
+	toolCallCount        int
+	outputCallCount      int
+	outputSignatures     map[string]int
+	maxQQToolCalls       int
+	maxQQOutputCalls     int
+	maxDuplicateSend     int
+	groupToolAllowlists  map[int64][]string // 0 表示通配配置 "*"
+	privateToolAllowlist []string
 
+	// msg_id → peer 映射 + 会话最新状态（<7 天兜底 get_history + list_chats）
+	msgMu  sync.Mutex
+	msgMap map[int64]msgRef    // message_id → {peer, time}
+	chats  map[int64]*chatMeta // peerID → 会话状态（群号或 QQ 号）
+}
 
 type typingState struct {
 	userID int64
@@ -258,7 +300,13 @@ func (p *Plugin) Start(s *sdk.PluginSDK) error {
 
 	s.Settings().RegisterDef(sdk.ConfigDef{Key: "listen", Default: "0.0.0.0:25580", Type: "string", DisplayName: "监听地址", Description: "Webhook HTTP 监听地址", Category: "qq"})
 	s.Settings().RegisterDef(sdk.ConfigDef{Key: "napcat_url", Default: "http://127.0.0.1:3000", Type: "string", DisplayName: "NapCat 地址", Description: "NapCat HTTP API 基础 URL", Category: "qq"})
-	s.Settings().RegisterDef(sdk.ConfigDef{Key: "admin", Default: "", Type: "string", DisplayName: "管理员 QQ", Description: "管理员 QQ 号列表，逗号分隔。收到其消息时标记【重要！老大消息】", Category: "qq"})
+	s.Settings().RegisterDef(sdk.ConfigDef{Key: "owner", Default: "", Type: "string", DisplayName: "Bot 所有者 QQ", Description: "Bot 所有者 QQ 号列表，逗号分隔。所有者无论私聊或群聊均拥有完整工具权限", Category: "qq"})
+	s.Settings().RegisterDef(sdk.ConfigDef{Key: "admin", Default: "", Type: "string", DisplayName: "Bot 所有者 QQ（旧配置）", Description: "兼容旧版 admin 配置；owner 为空时作为 Bot 所有者列表", Category: "qq"})
+	s.Settings().RegisterDef(sdk.ConfigDef{Key: "group_tool_allowlists", Default: defaultGroupToolAllowlists, Type: "string", DisplayName: "群聊工具白名单", Description: "JSON 对象：群号到允许工具名/前缀*的数组；* 为未单独配置群的默认白名单。Bot 所有者不受限制", Category: "qq"})
+	s.Settings().RegisterDef(sdk.ConfigDef{Key: "private_tool_allowlist", Default: defaultPublicToolAllowlist, Type: "string", DisplayName: "非所有者私聊工具白名单", Description: "JSON 数组，支持工具精确名和尾部 * 前缀。硬性私人资源工具不能由此白名单放行；Bot 所有者不受权限限制", Category: "qq"})
+	s.Settings().RegisterDef(sdk.ConfigDef{Key: "max_qq_tool_calls", Default: defaultMaxQQToolCalls, Type: "int", DisplayName: "单轮 QQ 工具调用上限", Description: "QQ 输入触发的单轮推理最多调用工具次数（0=不限制）；仅作跑飞兜底，不拦参数不同的必需调用", Category: "qq"})
+	s.Settings().RegisterDef(sdk.ConfigDef{Key: "max_qq_output_calls", Default: defaultMaxQQOutputCalls, Type: "int", DisplayName: "单轮 QQ 发送上限", Description: "单轮最多主动发送的不同消息条数（0=不限制）；参数不同的消息不视为重复", Category: "qq"})
+	s.Settings().RegisterDef(sdk.ConfigDef{Key: "max_duplicate_qq_send", Default: defaultMaxDuplicateSend, Type: "int", DisplayName: "单轮相同 QQ 发送上限", Description: "单轮内参数完全相同的 output_send__qq 允许重复的次数（0=不限制）；这才是循环保险的真正触发条件", Category: "qq"})
 	s.Settings().RegisterDef(sdk.ConfigDef{Key: "dm_policy", Default: "open", Type: "string", DisplayName: "私聊策略", Description: "open / allowlist / disabled", Category: "qq", Options: []string{"open", "allowlist", "disabled"}})
 	s.Settings().RegisterDef(sdk.ConfigDef{Key: "allow_from", Default: "", Type: "string", DisplayName: "私聊白名单", Description: "允许私聊机器人的 QQ 号列表，逗号分隔", Category: "qq"})
 	s.Settings().RegisterDef(sdk.ConfigDef{Key: "group_policy", Default: "open", Type: "string", DisplayName: "群聊策略", Description: "open / allowlist / disabled", Category: "qq", Options: []string{"open", "allowlist", "disabled"}})
@@ -274,7 +322,16 @@ func (p *Plugin) Start(s *sdk.PluginSDK) error {
 	p.listenAddr = getSetting[string](settings, "listen", "0.0.0.0:25580")
 	p.webhookToken = getSetting[string](settings, "webhook_token", "")
 	p.napcatURL = strings.TrimRight(getSetting[string](settings, "napcat_url", "http://127.0.0.1:3000"), "/")
-	p.adminIDs = parseIDList(getSetting[string](settings, "admin", ""))
+	ownerRaw := getSetting[string](settings, "owner", "")
+	if strings.TrimSpace(ownerRaw) == "" {
+		ownerRaw = getSetting[string](settings, "admin", "")
+	}
+	p.ownerIDs = parseIDList(ownerRaw)
+	p.groupToolAllowlists = parseGroupToolAllowlists(getSetting[string](settings, "group_tool_allowlists", defaultGroupToolAllowlists))
+	p.privateToolAllowlist = parseToolAllowlist(getSetting[string](settings, "private_tool_allowlist", defaultPublicToolAllowlist))
+	p.maxQQToolCalls = nonNegativeOrDefault(int(getSetting[int64](settings, "max_qq_tool_calls", int64(defaultMaxQQToolCalls))), defaultMaxQQToolCalls)
+	p.maxQQOutputCalls = nonNegativeOrDefault(int(getSetting[int64](settings, "max_qq_output_calls", int64(defaultMaxQQOutputCalls))), defaultMaxQQOutputCalls)
+	p.maxDuplicateSend = nonNegativeOrDefault(int(getSetting[int64](settings, "max_duplicate_qq_send", int64(defaultMaxDuplicateSend))), defaultMaxDuplicateSend)
 	p.dmPolicy = normalizePolicy(getSetting[string](settings, "dm_policy", "open"))
 	p.groupPolicy = normalizePolicy(getSetting[string](settings, "group_policy", "open"))
 	p.allowFrom = parseIDSet(getSetting[string](settings, "allow_from", ""))
@@ -312,10 +369,11 @@ func (p *Plugin) Start(s *sdk.PluginSDK) error {
 		`发送QQ群聊/私聊消息，支持文字、语音、图片、文件。
 meta JSON 格式：
 {
-  "group_id": 123456,       // 群号（与 user_id 二选一）
-  "user_id": 123456,        // QQ号（与 group_id 二选一）
+  "group_id": 123456,       // 群号
+  "user_id": 123456,        // QQ号
   "reply_to": 12345         // 可选，回复指定消息 ID
 }
+路由规则：仅 group_id 发群；仅 user_id 发私聊；两者同时存在时发到 group_id，并在消息头 @user_id。
 type 枚举: text（文字）/ voice（语音转文字后发送）/ image（图片URL）/ file（文件URL）`,
 		sdk.ChannelDef{}, p.handleChannelOutput)
 
@@ -354,6 +412,10 @@ type 枚举: text（文字）/ voice（语音转文字后发送）/ image（图�
 		Name: tp + "get_message", Description: botInfo + "通过 message_id 从 NapCat 实时获取消息正文、发送者、附件等信息。message_id 从中断消息的 message_id=N 获取，或从 reply_to 的 message_id 获取。",
 		NoMemory: false,
 		Cleaner:  cleaner,
+		// 消息正文只在当轮需要（决策怎么回复）；用完即裁剪。
+		// 不裁的后果是每条 QQ 消息的完整正文都留在 L0 上下文里，
+		// 长会话下持续挤占 token 预算（§13.8）。
+		ContextPolicy: "prune",
 		Parameters: map[string]interface{}{
 			"type": "object", "properties": map[string]interface{}{
 				"message_id": map[string]interface{}{"type": "integer", "description": "NapCat消息ID（从中断消息的 message_id=N 或 reply_to.message_id 获取）"},
@@ -599,7 +661,13 @@ type 枚举: text（文字）/ voice（语音转文字后发送）/ image（图�
 		NoMemory: true,
 	}, p.handleSendLike)
 
-	s.RegisterStage(sdk.StageBeforeToolcall, p.beforeOwnToolcall, sdk.StageScopeOwnTools)
+	// 全局权限门：只有 QQ 当前输入需要受此插件约束；Bot 所有者始终完整放行。
+	s.RegisterStage(sdk.StageOnInput, p.onInputAuthContext, sdk.StageScopeGlobal)
+	s.RegisterStage(sdk.StageBeforeToolcall, p.beforeToolcall, sdk.StageScopeGlobal)
+	// before_toolcall 的 Response 只用于拒绝当前工具。下一次模型补全到达时必须清掉，
+	// 否则内核会把它误当作“结束整个推理”的最终响应。
+	s.RegisterStage(sdk.StagePostAction, p.clearDeniedResponse, sdk.StageScopeGlobal)
+	s.RegisterStage(sdk.StageAfterOutput, p.afterOutputAuthContext, sdk.StageScopeGlobal)
 
 	// ---- HTTP server for NapCat webhook ----
 	mux := http.NewServeMux()
@@ -757,13 +825,268 @@ func parseIDList(raw string) []int64 {
 	return out
 }
 
-func (p *Plugin) isAdmin(userID int64) bool {
-	for _, id := range p.adminIDs {
+func (p *Plugin) isOwner(userID int64) bool {
+	for _, id := range p.ownerIDs {
 		if id == userID {
 			return true
 		}
 	}
 	return false
+}
+
+func parseToolAllowlist(raw string) []string {
+	var patterns []string
+	if json.Unmarshal([]byte(raw), &patterns) != nil {
+		return nil
+	}
+	out := make([]string, 0, len(patterns))
+	for _, pattern := range patterns {
+		if pattern = strings.TrimSpace(pattern); pattern != "" {
+			out = append(out, pattern)
+		}
+	}
+	return out
+}
+
+func parseGroupToolAllowlists(raw string) map[int64][]string {
+	var encoded map[string][]string
+	if json.Unmarshal([]byte(raw), &encoded) != nil {
+		return map[int64][]string{}
+	}
+	out := make(map[int64][]string, len(encoded))
+	for key, patterns := range encoded {
+		var groupID int64
+		if key != "*" {
+			parsed, err := strconv.ParseInt(strings.TrimSpace(key), 10, 64)
+			if err != nil || parsed <= 0 {
+				continue
+			}
+			groupID = parsed
+		}
+		clean := make([]string, 0, len(patterns))
+		for _, pattern := range patterns {
+			if pattern = strings.TrimSpace(pattern); pattern != "" {
+				clean = append(clean, pattern)
+			}
+		}
+		out[groupID] = clean
+	}
+	return out
+}
+
+func matchesToolAllowlist(name string, patterns []string) bool {
+	for _, pattern := range patterns {
+		if pattern == name {
+			return true
+		}
+		if strings.HasSuffix(pattern, "*") && strings.HasPrefix(name, strings.TrimSuffix(pattern, "*")) {
+			return true
+		}
+	}
+	return false
+}
+
+// nonNegativeOrDefault 保留 0（表示“不限制”），仅把负数纠正为默认值。
+func nonNegativeOrDefault(value, fallback int) int {
+	if value < 0 {
+		return fallback
+	}
+	return value
+}
+
+// isHardPrivateTool 是不可由群/私聊白名单覆盖的私人资源边界。
+// output_send__qq 及 QQ 当前会话工具在参数级另行约束，不在此处按名称误杀。
+func isHardPrivateTool(name string) bool {
+	for _, prefix := range []string{
+		"calendar_", "email_", "mail_", "agentmail_", "memory_", "knowledge_",
+		"device_", "devicectl_", "terminal_", "shell_", "command_", "exec_",
+		"filesystem_", "agentfs_", "config_", "settings_", "plugin_", "plugins_",
+	} {
+		if strings.HasPrefix(name, prefix) {
+			return true
+		}
+	}
+	return matchesToolAllowlist(name, []string{
+		"read_file", "write_file", "edit_file", "delete_file", "list_files", "run_command",
+		"homeagent_config", "homeagent_restart", "output_send__email", "output_send__mail",
+	})
+}
+
+func argInt64(args map[string]interface{}, key string) (int64, bool) {
+	value, exists := args[key]
+	if !exists || value == nil {
+		return 0, false
+	}
+	parsed, err := convInt64(value)
+	return parsed, err == nil && parsed != 0
+}
+
+func (p *Plugin) sessionToolArgsAllowed(name string, args map[string]interface{}, auth qqAuthContext) (bool, string) {
+	if !auth.active || auth.owner {
+		return true, ""
+	}
+	currentPeer := auth.userID
+	if auth.isGroup {
+		currentPeer = auth.groupID
+	}
+	if currentPeer == 0 {
+		return false, "可信 QQ 会话身份不完整"
+	}
+	matchCurrentPeer := func() bool {
+		groupID, hasGroup := argInt64(args, "group_id")
+		userID, hasUser := argInt64(args, "user_id")
+		if auth.isGroup {
+			return hasGroup && groupID == auth.groupID && !hasUser
+		}
+		return hasUser && userID == auth.userID && !hasGroup
+	}
+
+	switch name {
+	case p.name + "_get_history", p.name + "_mark_read":
+		if !matchCurrentPeer() {
+			return false, "只能访问当前 QQ 会话"
+		}
+	case p.name + "_get_message":
+		messageID, ok := argInt64(args, "message_id")
+		if !ok {
+			return false, "缺少有效 message_id"
+		}
+		if messageID == auth.messageID {
+			return true, ""
+		}
+		peerID, isGroup, _, found := p.lookupMsgRef(messageID)
+		if !found || isGroup != auth.isGroup || peerID != currentPeer {
+			return false, "message_id 不属于当前 QQ 会话"
+		}
+	case p.name + "_get_group_member_info", p.name + "_get_group_files":
+		groupID, ok := argInt64(args, "group_id")
+		if !auth.isGroup || !ok || groupID != auth.groupID {
+			return false, "只能访问当前 QQ 群的数据"
+		}
+	}
+	return true, ""
+}
+
+// activateAuthContext 只接收 OneBot 事件中的可信 ID。多个中断在同一推理轮合并时
+// 采用最小权限合并，防止“非所有者请求 + 随后所有者消息”意外提升前一请求权限。
+// message_id 映射供排队输入在 StageOnInput 精确恢复身份，不依赖昵称或用户正文。
+func (p *Plugin) activateAuthContext(messageID, userID, groupID int64, isGroup bool) {
+	p.authMu.Lock()
+	defer p.authMu.Unlock()
+	if p.authByMessageID == nil {
+		p.authByMessageID = make(map[int64]qqAuthContext)
+	}
+	p.authGeneration++
+	next := qqAuthContext{
+		active: true, owner: p.isOwner(userID), messageID: messageID, userID: userID,
+		groupID: groupID, isGroup: isGroup, generation: p.authGeneration,
+	}
+	if messageID != 0 {
+		p.authByMessageID[messageID] = next
+		if len(p.authByMessageID) > 2048 {
+			cutoff := p.authGeneration - 1024
+			for id, auth := range p.authByMessageID {
+				if auth.generation < cutoff {
+					delete(p.authByMessageID, id)
+				}
+			}
+		}
+	}
+	if !p.auth.active {
+		p.auth = next
+		return
+	}
+	if p.auth.userID == userID && p.auth.groupID == groupID && p.auth.isGroup == isGroup {
+		p.auth.owner = p.auth.owner && next.owner
+		p.auth.messageID = next.messageID
+		p.auth.generation = next.generation
+		return
+	}
+	// 不同可信来源被内核合并到同一推理时，只在双方都是所有者时保留完整权限。
+	bothOwners := p.auth.owner && next.owner
+	sameGroup := p.auth.isGroup && next.isGroup && p.auth.groupID == groupID
+	p.auth.owner = bothOwners
+	p.auth.messageID = 0
+	p.auth.userID = 0
+	p.auth.isGroup = sameGroup
+	if sameGroup {
+		p.auth.groupID = groupID
+	} else {
+		p.auth.groupID = 0
+	}
+	p.auth.generation = next.generation
+}
+
+func messageIDFromInput(raw string) int64 {
+	match := qqMessageIDRe.FindStringSubmatch(raw)
+	if len(match) != 2 {
+		return 0
+	}
+	id, _ := strconv.ParseInt(match[1], 10, 64)
+	return id
+}
+
+func (p *Plugin) onInputAuthContext(ctx *sdk.StageContext) error {
+	ctx.RLock()
+	source, _ := ctx.Extra["input_source"].(string)
+	raw := ctx.RawMessage
+	ctx.RUnlock()
+	p.authMu.Lock()
+	defer p.authMu.Unlock()
+	if source != p.name {
+		p.auth = qqAuthContext{}
+		p.resetTurnGuardLocked()
+		return nil
+	}
+	if messageID := messageIDFromInput(raw); messageID != 0 {
+		if auth, ok := p.authByMessageID[messageID]; ok {
+			p.auth = auth
+			delete(p.authByMessageID, messageID)
+			p.resetTurnGuardLocked()
+			return nil
+		}
+	}
+	// QQ 来源却无法精确匹配可信 OneBot 事件时必须强制降权，不能复用上一条消息的身份。
+	p.auth = qqAuthContext{active: true}
+	p.resetTurnGuardLocked()
+	return nil
+}
+
+func (p *Plugin) resetTurnGuardLocked() {
+	p.lastDenial = ""
+	p.denialLocked = false
+	p.toolCallCount = 0
+	p.outputCallCount = 0
+	p.outputSignatures = make(map[string]int)
+}
+
+func (p *Plugin) afterOutputAuthContext(ctx *sdk.StageContext) error {
+	p.authMu.Lock()
+	p.auth = qqAuthContext{}
+	p.resetTurnGuardLocked()
+	p.authMu.Unlock()
+	return nil
+}
+
+func (p *Plugin) currentToolAllowed(name string) (bool, qqAuthContext) {
+	p.authMu.RLock()
+	auth := p.auth
+	var patterns []string
+	if auth.active && !auth.owner {
+		if auth.isGroup {
+			patterns, _ = p.groupToolAllowlists[auth.groupID]
+			if patterns == nil {
+				patterns = p.groupToolAllowlists[0]
+			}
+		} else {
+			patterns = p.privateToolAllowlist
+		}
+	}
+	p.authMu.RUnlock()
+	if !auth.active || auth.owner {
+		return true, auth
+	}
+	return matchesToolAllowlist(name, patterns), auth
 }
 
 // isAtBot checks if the message contains an @-mention of the bot.
@@ -824,19 +1147,110 @@ func (p *Plugin) isGroupAllowed(groupID int64) bool {
 	}
 }
 
-func (p *Plugin) beforeOwnToolcall(ctx *sdk.StageContext) error {
+func (p *Plugin) setDenial(ctx *sdk.StageContext, message string) {
+	ctx.Response = &message
+	p.authMu.Lock()
+	p.lastDenial = message
+	p.authMu.Unlock()
+}
+
+func (p *Plugin) clearPreviousDenial(ctx *sdk.StageContext) {
+	p.authMu.Lock()
+	last := p.lastDenial
+	p.lastDenial = ""
+	p.authMu.Unlock()
+	if last != "" && ctx.Response != nil && *ctx.Response == last {
+		ctx.Response = nil
+	}
+}
+
+func (p *Plugin) clearDeniedResponse(ctx *sdk.StageContext) error {
 	ctx.Lock()
 	defer ctx.Unlock()
+	p.clearPreviousDenial(ctx)
+	return nil
+}
+
+func (p *Plugin) beforeToolcall(ctx *sdk.StageContext) error {
+	ctx.Lock()
+	defer ctx.Unlock()
+	p.clearPreviousDenial(ctx)
 	if len(ctx.ToolCalls) == 0 {
 		return nil
 	}
 	tc := &ctx.ToolCalls[0]
+	allowed, auth := p.currentToolAllowed(tc.Name)
+	if !auth.active {
+		return nil
+	}
+
+	p.authMu.Lock()
+	p.toolCallCount++
+	toolCount := p.toolCallCount
+	denialLocked := p.denialLocked
+	if tc.Name == "output_send__"+p.name {
+		p.outputCallCount++
+		signatureBytes, _ := json.Marshal(tc.Arguments)
+		signature := string(signatureBytes)
+		p.outputSignatures[signature]++
+		duplicateCount := p.outputSignatures[signature]
+		distinctCount := len(p.outputSignatures)
+		// 循环保险只拦“参数完全相同的重复调用”。参数不同的必需调用一律放行，
+		// 否则多次 cmd_run / update_schedule / 多条不同消息都会被误杀。
+		if p.maxDuplicateSend > 0 && duplicateCount > p.maxDuplicateSend {
+			p.authMu.Unlock()
+			msg := fmt.Sprintf("QQ 循环保险已阻止重复发送：本轮第 %d 次出现参数完全相同的消息；请勿重复发送同一内容", duplicateCount)
+			p.setDenial(ctx, msg)
+			return nil
+		}
+		if p.maxQQOutputCalls > 0 && distinctCount > p.maxQQOutputCalls {
+			p.authMu.Unlock()
+			msg := fmt.Sprintf("QQ 循环保险已阻止本次发送：单轮主动发送的不同消息数已达上限 %d（0=不限制，可在插件配置调整）", p.maxQQOutputCalls)
+			p.setDenial(ctx, msg)
+			return nil
+		}
+	}
+	if p.maxQQToolCalls > 0 && toolCount > p.maxQQToolCalls {
+		p.authMu.Unlock()
+		msg := fmt.Sprintf("QQ 循环保险已阻止工具调用：单轮工具调用总数已达上限 %d（0=不限制，可在插件配置调整）", p.maxQQToolCalls)
+		p.setDenial(ctx, msg)
+		return nil
+	}
+	p.authMu.Unlock()
+
+	if denialLocked && tc.Name != "output_send__"+p.name {
+		msg := fmt.Sprintf("QQ 权限策略已锁止本轮后续工具 %s；仅允许发送一次权限说明", tc.Name)
+		p.setDenial(ctx, msg)
+		return nil
+	}
+	if !auth.owner && isHardPrivateTool(tc.Name) {
+		p.authMu.Lock()
+		p.denialLocked = true
+		p.authMu.Unlock()
+		msg := fmt.Sprintf("QQ 权限策略拒绝私人资源工具 %s；该限制不能由群聊或私聊白名单覆盖，请不要重试", tc.Name)
+		p.setDenial(ctx, msg)
+		return nil
+	}
+	if !allowed {
+		scope := "非所有者私聊"
+		if auth.isGroup {
+			scope = fmt.Sprintf("群聊 %d", auth.groupID)
+		}
+		msg := fmt.Sprintf("QQ 权限策略拒绝工具 %s：%s 的工具白名单未包含该工具；请不要重试，改为直接说明权限限制", tc.Name, scope)
+		p.setDenial(ctx, msg)
+		return nil
+	}
+	if argsAllowed, reason := p.sessionToolArgsAllowed(tc.Name, tc.Arguments, auth); !argsAllowed {
+		msg := fmt.Sprintf("QQ 权限策略拒绝工具 %s：%s；请不要改用其他会话 ID 重试", tc.Name, reason)
+		p.setDenial(ctx, msg)
+		return nil
+	}
 	if tc.Name == p.name+"_group_manage" {
 		cmd, _ := tc.Arguments["command"].(string)
 		if requiresConfirmGroupCommand(cmd) {
 			if ok, _ := tc.Arguments["confirm"].(bool); !ok {
 				msg := fmt.Sprintf("QQ群管理命令 %s 属于高风险操作，必须显式传入 confirm=true 后才能执行", cmd)
-				ctx.Response = &msg
+				p.setDenial(ctx, msg)
 				return nil
 			}
 		}
@@ -846,7 +1260,7 @@ func (p *Plugin) beforeOwnToolcall(ctx *sdk.StageContext) error {
 		if requiresConfirmFriendCommand(cmd) {
 			if ok, _ := tc.Arguments["confirm"].(bool); !ok {
 				msg := fmt.Sprintf("QQ好友管理命令 %s 属于高风险操作，必须显式传入 confirm=true 后才能执行", cmd)
-				ctx.Response = &msg
+				p.setDenial(ctx, msg)
 				return nil
 			}
 		}
@@ -978,8 +1392,8 @@ func (p *Plugin) handleWebhook(w http.ResponseWriter, r *http.Request) {
 	} else {
 		interrupt = fmt.Sprintf("来自「%s」的私聊消息(message_id=%d, user_id=%d)。先用%sget_message(message_id=%d)取正文；若取不到（消息已过期），改用%sget_history(user_id=%d)按会话拉取上下文，或用%slist_chats 查看未读会话。用%s回复对方", nickname, evt.MessageID, evt.UserID, tp, evt.MessageID, tp, evt.UserID, tp, outputTool)
 	}
-	if p.isAdmin(evt.UserID) {
-		interrupt = "【重要！老大消息】" + interrupt
+	if p.isOwner(evt.UserID) {
+		interrupt = "【重要！Bot 所有者消息】" + interrupt
 	}
 
 	if text != "" {
@@ -1012,12 +1426,16 @@ func (p *Plugin) handleWebhook(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	// 必须在注入前记录 OneBot 可信来源；权限判断绝不依赖昵称、正文或模型参数。
+	p.activateAuthContext(evt.MessageID, evt.UserID, evt.GroupID, evt.MessageType == "group")
+
 	if evt.MessageType == "private" {
 		p.startTyping(evt.UserID)
 	}
 
 	if p.sdk != nil {
-		p.sdk.InjectInterruptText(p.name, p.name, interrupt)
+		// NoMemory：HTTP 侧来的中断提示，不是对话内容。
+		p.sdk.InjectInterruptTextOpts(p.name, p.name, interrupt, sdk.InjectOptions{NoMemory: true})
 	}
 	w.WriteHeader(http.StatusOK)
 }
@@ -1320,6 +1738,8 @@ func (p *Plugin) getMsgFromNapcat(msgID int64) (interface{}, error) {
 
 // handleChannelOutput — output_send(channel="qq") 的处理器
 // args 包含 payload, type, (可选 meta)
+// 成功时只返回极简标记，不回传 NapCat 完整响应——避免"已发送"类富回执喂给模型
+// 造成"看到成功→继续发下一条"的回声循环（issue: output loop echo）。
 func (p *Plugin) handleChannelOutput(args map[string]interface{}) (interface{}, error) {
 	payload, _ := args["payload"].(string)
 	rawType, _ := args["type"].(string)
@@ -1352,10 +1772,15 @@ func (p *Plugin) handleChannelOutput(args map[string]interface{}) (interface{}, 
 		p.stopTyping(userID)
 	}
 
+	var sendErr error
 	switch rawType {
 	case "text":
 		text := p.sensitiveFilter(payload)
-		msg := map[string]interface{}{"message": text}
+		message := interface{}(text)
+		if groupID != 0 && userID != 0 {
+			message = messageWithMention(userID, map[string]interface{}{"type": "text", "data": map[string]interface{}{"text": text}})
+		}
+		msg := map[string]interface{}{"message": message}
 		if groupID != 0 {
 			msg["group_id"] = groupID
 		} else {
@@ -1365,9 +1790,10 @@ func (p *Plugin) handleChannelOutput(args map[string]interface{}) (interface{}, 
 			msg["reply_to"] = replyTo
 		}
 		if groupID != 0 {
-			return p.napcat("send_group_msg", msg)
+			_, sendErr = p.napcat("send_group_msg", msg)
+		} else {
+			_, sendErr = p.napcat("send_private_msg", msg)
 		}
-		return p.napcat("send_private_msg", msg)
 
 	case "voice", "audio":
 		text := p.sensitiveFilter(payload)
@@ -1387,21 +1813,23 @@ func (p *Plugin) handleChannelOutput(args map[string]interface{}) (interface{}, 
 		os.Remove(audioFile)
 		uri := fmt.Sprintf("file:///app/files/%s", filepath.Base(dest))
 		cqMsg := fmt.Sprintf("[CQ:record,file=%s]", uri)
-		msg := map[string]interface{}{"message": cqMsg}
+		message := interface{}(cqMsg)
+		if groupID != 0 && userID != 0 {
+			message = messageWithMention(userID, map[string]interface{}{"type": "record", "data": map[string]interface{}{"file": uri}})
+		}
+		msg := map[string]interface{}{"message": message}
 		if groupID != 0 {
 			msg["group_id"] = groupID
 		} else {
 			msg["user_id"] = userID
 		}
 		if groupID != 0 {
-			return p.napcat("send_group_msg", msg)
+			_, sendErr = p.napcat("send_group_msg", msg)
+		} else {
+			_, sendErr = p.napcat("send_private_msg", msg)
 		}
-		return p.napcat("send_private_msg", msg)
 
 	case "image", "file":
-		// 收敛到 output 通道：payload 支持本地路径或 http(s) URL。
-		// 本地路径拷入 NapCat 共享目录转 file:// URI（与 voice 分支同模式），
-		// 此后 agent 发本地文件不再需要单独的 upload_group_file 工具。
 		uri := payload
 		if !strings.HasPrefix(payload, "http://") && !strings.HasPrefix(payload, "https://") &&
 			!strings.HasPrefix(payload, "file://") {
@@ -1423,34 +1851,48 @@ func (p *Plugin) handleChannelOutput(args map[string]interface{}) (interface{}, 
 		if rawType == "image" {
 			cqTag = "image"
 		}
-		msg := map[string]interface{}{"message": fmt.Sprintf("[CQ:%s,file=%s]", cqTag, uri)}
+		message := interface{}(fmt.Sprintf("[CQ:%s,file=%s]", cqTag, uri))
+		if groupID != 0 && userID != 0 {
+			message = messageWithMention(userID, map[string]interface{}{"type": cqTag, "data": map[string]interface{}{"file": uri}})
+		}
+		msg := map[string]interface{}{"message": message}
 		if groupID != 0 {
 			msg["group_id"] = groupID
 		} else {
 			msg["user_id"] = userID
 		}
 		if groupID != 0 {
-			return p.napcat("send_group_msg", msg)
+			_, sendErr = p.napcat("send_group_msg", msg)
+		} else {
+			_, sendErr = p.napcat("send_private_msg", msg)
 		}
-		return p.napcat("send_private_msg", msg)
 
 	default:
 		return nil, fmt.Errorf("不支持的 type: %s（枚举值: text/voice/image/file）", rawType)
 	}
+
+	if sendErr != nil {
+		return nil, sendErr
+	}
+	// 成功：返回极简标记。不再回传 NapCat 原始响应（含 message_id 等）给模型，
+	// 避免模型把"发送成功"当成"上一步完成，继续下一步"的信号驱动循环。
+	return "ok", nil
 }
 
 func (p *Plugin) buildOutputHelp() string {
 	return `【参数】
 payload — 消息载荷。type=text时直接填文字，type=voice时填文字（自动转语音），type=image/file时填URL
-meta    — JSON 元数据，必含 group_id（群聊）或 user_id（私聊），可选 reply_to
+meta    — JSON 元数据，含 group_id（群聊）和/或 user_id（私聊或群内@），可选 reply_to
 type    — text / voice / image / file
 
 【示例】
 群聊文字：output_send__qq(payload="你好", meta="{\"group_id\":123456789}", type="text")
 私聊语音：output_send__qq(payload="你好", meta="{\"user_id\":123456789}", type="voice")
+群内@用户：output_send__qq(payload="你好", meta="{\"group_id\":123456789,\"user_id\":987654321}", type="text")
 发送图片：output_send__qq(payload="https://example.com/img.jpg", meta="{\"group_id\":123456789}", type="image")
 
 【注意】
+- group_id 与 user_id 同时存在时始终发送到 group_id，并在消息头 @user_id
 - type=text 时 payload 直接是文字，无需 JSON 包裹
 - type=voice 时 payload 是文字内容，自动转语音发送
 - type=image/file 时 payload 是 URL 或路径`
@@ -2088,8 +2530,10 @@ func (p *Plugin) handleDownloadFile(args map[string]interface{}) (interface{}, e
 			p.updateDownloadTask(t, "done", savePath, "")
 			log.Printf("[qq] 文件下载完成: %s", savePath)
 			if p.sdk != nil {
-				p.sdk.InjectInterruptText(p.name, p.name,
-					fmt.Sprintf("文件下载完成: %s，保存在 %s", filepath.Base(savePath), savePath))
+				// NoMemory：下载完成的状态通知，不是记忆内容。
+				p.sdk.InjectInterruptTextOpts(p.name, p.name,
+					fmt.Sprintf("文件下载完成: %s，保存在 %s", filepath.Base(savePath), savePath),
+					sdk.InjectOptions{NoMemory: true})
 			}
 		} else {
 			errMsg = "下载失败，文件可能已过期"
@@ -2557,6 +3001,13 @@ func (p *Plugin) handleVideoDownload(args map[string]interface{}) (interface{}, 
 
 // ======== NapCat HTTP Client ========
 
+func messageWithMention(userID int64, content interface{}) []interface{} {
+	return []interface{}{
+		map[string]interface{}{"type": "at", "data": map[string]interface{}{"qq": strconv.FormatInt(userID, 10)}},
+		content,
+	}
+}
+
 func (p *Plugin) napcat(action string, params map[string]interface{}) (interface{}, error) {
 	data, _ := json.Marshal(params)
 	url := fmt.Sprintf("%s/%s", p.napcatURL, action)
@@ -2675,12 +3126,19 @@ func convInt64(v interface{}) (int64, error) {
 
 func NewPluginFactory(name string, config map[string]interface{}) (sdk.Plugin, error) {
 	return &Plugin{
-		name:           name,
-		allowFrom:      make(map[int64]struct{}),
-		groupAllowFrom: make(map[int64]struct{}),
-		downloadTasks:  make([]*DownloadTask, 0),
-		typingMap:      make(map[int64]*typingState),
-		dmPolicy:       "open",
-		groupPolicy:    "open",
+		name:                 name,
+		allowFrom:            make(map[int64]struct{}),
+		groupAllowFrom:       make(map[int64]struct{}),
+		authByMessageID:      make(map[int64]qqAuthContext),
+		outputSignatures:     make(map[string]int),
+		maxQQToolCalls:       defaultMaxQQToolCalls,
+		maxQQOutputCalls:     defaultMaxQQOutputCalls,
+		maxDuplicateSend:     defaultMaxDuplicateSend,
+		groupToolAllowlists:  parseGroupToolAllowlists(defaultGroupToolAllowlists),
+		privateToolAllowlist: parseToolAllowlist(defaultPublicToolAllowlist),
+		downloadTasks:        make([]*DownloadTask, 0),
+		typingMap:            make(map[int64]*typingState),
+		dmPolicy:             "open",
+		groupPolicy:          "open",
 	}, nil
 }
