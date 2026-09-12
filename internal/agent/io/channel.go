@@ -266,6 +266,10 @@ func applyInjectOpts(payload map[string]interface{}, opts InjectOptions) {
 	if opts.CleanerName != "" {
 		payload["cleaner_name"] = opts.CleanerName
 	}
+	// priority 只对中断注入有意义；排队路径会忽略它（内核侧只读不写）。
+	if opts.Priority != "" {
+		payload["priority"] = opts.Priority
+	}
 }
 
 func (m *IOManager) InjectInputOpts(source, eventType string, payload map[string]interface{}, opts InjectOptions) {

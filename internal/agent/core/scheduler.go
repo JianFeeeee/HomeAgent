@@ -1,23 +1,36 @@
 package core
 
-// 输入调度器（M2：骨架）。
+// 输入调度器：四级中断优先级 · 可抢占 · 现场保存/恢复。
 //
 // 设计依据 docs/zh/input-scheduler-design.md。
 //
-// M2 只建立结构，不引入抢占：
-//   - 显式的 readyQueue 与 Task 抽象（取代 eventLoop 里隐式的 channel 排队）；
-//   - 统一的排序键 (-Level, EnqueuedAt, ID)（设计文档 §4.1）；
-//   - 原子快照 DumpScheduler() 与计数（可观测性）；
-//   - **每任务 panic 隔离**：panic 只使该任务失败，调度器本身存活（不变量 I6）。
+// # 模型（两类别 + 四级）
 //
-// M2 全部任务都是 LevelBackground（默认级），因此排序结果等价于 FIFO——
-// 与改造前的 channel 语义逐条一致。抢占、中断栈、pendingInterrupts、
-// 任务级回执在 M3–M6 加入。
+// 类别由**用哪个注入 API**决定，与通道名无关：
+//   - TaskInterrupt：InjectInterrupt* 注入。带级别 L1..L4，可抢占，
+//     可被更高级中断打断（被打断的现场压入**中断栈**）。
+//   - TaskQueued：InjectText*/InjectInputSync* 与内核自循环。**无级别**，
+//     用于“不需及时处理”的场景，可被**任何**中断打断。
 //
-// 并发模型（不变量 I2）：readyQueue/running/stats 只由 schedulerLoop 写，
-// 外部只读——读取一律经 DumpScheduler() 加锁取快照。
+// 级别只属于中断：
+//   - L1..L3 由插件在 InjectOptions.Priority 里声明（见 clampPluginLevel）；
+//   - L4 由内核独占，只能经 raiseKernelInterrupt 产生（panic / selfip）。
+//
+// # 选择顺序
+//
+//	1. immediate —— 刚抢占成功的中断（抢占必须立即生效）
+//	2. 中断队列 L4→L1（同级 FIFO）
+//	3. 中断栈顶（与 2 的队头比级别，取高者；栈顶无级别时中断必胜）
+//	4. 排队队列（FIFO）
+//
+// # 并发模型（不变量 I2）
+//
+// queue/running/栈/stats 只由 schedulerLoop 与调度 goroutine 写；
+// interruptLoop 只写中断登记与让位信号，**从不碰帧**。外部读取一律经
+// DumpScheduler() 加锁取快照。
 
 import (
+	"fmt"
 	"log"
 	"runtime/debug"
 	"sync"
@@ -29,26 +42,44 @@ import (
 	sdk "gitcode.com/JianFeeeee/HomeAgent/internal/sdk"
 )
 
-// Level 是任务优先级，由内核预定义四级（设计文档 §3.1）。
+// Level 是**中断**的优先级，由内核预定义四级。
 //
-// 取值域刻意只有四档：不引入任意整数，避免"9 级比 4 级大但没人知道怎么排"。
+// 语义：它衡量“这项工作有多不能等”，与具体通道名无关。
+// 插件在中断注入时通过 InjectOptions.Priority 声明 L1..L3；
+// **L4 由内核独占**（panic、内核事件 selfip），插件声明 L4 会被夹到 L3。
+//
+// 排队输入（InjectText* / InjectInputSync*）**没有级别**：它们本就是
+// “不需及时处理”的那一类，可被任何中断打断（见 TaskClass）。
 type Level int
 
 const (
-	// LevelBackground 后台维护：心跳蒸馏/归档/合并/复审、子任务、consolidation。
+	// LevelBackground L1：完全可等。例：QQ/微信这类异步消息、批量通知。
 	LevelBackground Level = 1
-	// LevelMessage 异步消息：QQ/微信等入站消息、插件通知。
+	// LevelMessage L2：一般提醒。例：插件希望尽快看到、但不紧急的提示。
 	LevelMessage Level = 2
-	// LevelInteractive 人机交互：用户在 CLI/WebUI 的直接对话。
+	// LevelInteractive L3：需及时处理。例：时钟/定时器到达、终端输出、交互输入。
 	LevelInteractive Level = 3
-	// LevelCritical 紧急打断：显式打断、系统告警、安全类中断。
+	// LevelCritical L4：**内核独占**。panic 中断、内核事件中断（selfip）。
+	// 插件不得声明此级。
 	LevelCritical Level = 4
 )
 
-// DefaultLevel 是未显式声明时的优先级。
+// DefaultLevel 是未显式声明时的中断级别。
 //
 // 取最低级是刻意的：**显式才是特权**，新插件不会默认拿到抢占权。
 const DefaultLevel = LevelBackground
+
+// clampPluginLevel 把插件声明的级别夹到允许范围（L1..L3）。
+// L4 是内核的调度内部属性，不接受外部越权。
+func clampPluginLevel(l Level) Level {
+	if l < LevelBackground {
+		return DefaultLevel
+	}
+	if l > LevelInteractive {
+		return LevelInteractive
+	}
+	return l
+}
 
 func (l Level) String() string {
 	switch l {
@@ -67,10 +98,37 @@ func (l Level) String() string {
 
 // ParseLevel 已删除。
 //
-// 为何不保留：优先级是**内核内部属性**，不是配置项——内核预定义四级
-// （L1 后台 / L2 消息 / L3 交互 / L4 紧急），由内核按内部规则为任务与中断定级。
-// 曾一度做成 `core.agent.priority.<channel>` 这种“策略表 + 字符串解析”，
-// 那等于把内核的内部属性外化成运维配置，与设计意图相反。
+// 为何不保留：优先级是**内核内部属性**，不是配置项。
+// 曾一度做成 `core.agent.priority.<channel>`（配置中心可见），
+// 那等于把内核的调度内部属性外化成运维配置，与设计意图相反。
+//
+// 现在级别的来源只有两个（见 Task/Level 注释）：
+//   - 插件在中断注入时声明（InjectOptions.Priority，L1..L3）；
+//   - 内核内部产生 L4（panic / selfip）。
+
+// TaskClass 是任务的两大类别——**由“用哪个注入 API”决定，与通道名无关**。
+//
+// 这是模型的核心区分：
+//   - InjectInterrupt*  → TaskInterrupt：带级别，可抢占，可被更高级中断打断（→ 中断栈）
+//   - InjectText* / InjectInputSync* / 内核自循环 → TaskQueued：无级别，
+//     可被**任何**中断打断（“用于不需要及时处理的场景”）
+type TaskClass int
+
+const (
+	TaskQueued TaskClass = iota
+	TaskInterrupt
+)
+
+func (c TaskClass) String() string {
+	switch c {
+	case TaskQueued:
+		return "queued"
+	case TaskInterrupt:
+		return "interrupt"
+	default:
+		return "unknown"
+	}
+}
 
 // TaskKind 区分任务来源。
 type TaskKind int
@@ -94,11 +152,10 @@ func (k TaskKind) String() string {
 }
 
 // Task 是调度器的最小单位。
-//
-// M2 只承载"一份待处理的输入"；M3 起把 TaskFrame（现场）挂上来，
-// 使其成为可挂起/可恢复的执行单元。
 type Task struct {
-	ID         uint64
+	ID    uint64
+	Class TaskClass
+	// Level 仅对 TaskInterrupt 有意义；TaskQueued 恒为 0（无级别）。
 	Level      Level
 	Kind       TaskKind
 	EnqueuedAt time.Time
@@ -120,11 +177,17 @@ const preemptPromotionCap = 2
 // 避免高优先级流把同一任务反复打断到永不完结。
 const preemptCooldown = 2 * time.Second
 
-// effectiveLevel 返回任务的**有效**优先级（设计文档 §9 饥饿防护）。
+// effectiveLevel 返回任务的**有效**级别。
 //
-// 被抢占越多的任务越“值钱”，从而逐步追上抢占它的流；封顶 L4，
-// 因此它永远不会反过来抢占真正的紧急输入。
+// 排队输入恒为 0（无级别）：任何中断（≥ L1）都大于它——这正好实现
+// “排队输入可被任何中断打断”。
+//
+// 中断则叠加饥饿防护：被抢占越多的中断越“值钱”，逐步追上抢占它的流；
+// 封顶 L4，因此它永远不会反过来抢占内核紧急中断。
 func effectiveLevel(t *Task) Level {
+	if t.Class != TaskInterrupt {
+		return 0
+	}
 	p := t.PreemptCount
 	if p > preemptPromotionCap {
 		p = preemptPromotionCap
@@ -134,6 +197,21 @@ func effectiveLevel(t *Task) Level {
 		l = LevelCritical
 	}
 	return l
+}
+
+// canPreempt 是唯一的抢占判据。
+//
+// 由于 effectiveLevel(排队)=0，这一个比较同时覆盖两条规则：
+//   - running 是排队任务 → 任何中断（≥L1）都能抢占；
+//   - running 是中断 Li    → 只有 Lj > Li 的中断能抢占（严格大于）。
+func canPreempt(incoming, running *Task) bool {
+	if incoming == nil || running == nil {
+		return false
+	}
+	if incoming.Class != TaskInterrupt {
+		return false // 排队输入从不抢占
+	}
+	return effectiveLevel(incoming) > effectiveLevel(running)
 }
 
 // SchedulerStats 是调度器的累计计数（可观测性，设计文档 §11 O2）。
@@ -149,13 +227,20 @@ type SchedulerStats struct {
 
 // SchedulerSnapshot 是调度器的原子快照。
 type SchedulerSnapshot struct {
-	Running           *Task
-	Queue             []*Task
+	Running *Task
+	// Queue 是排队输入队列（无级别，FIFO）。
+	Queue []*Task
+	// InterruptQueues[level] 是四条中断队列（下标 1..4，同级 FIFO）。
+	InterruptQueues [5][]*Task
+	// Immediate 是刚抢占成功、将在下一个安全点立即运行的中断（最多一个）。
+	Immediate *Task
+	// PendingInterrupts = 四条中断队列 + Immediate（对外的待处理中断总数视图）。
 	PendingInterrupts []*Task
 	// SuspendStack：中断栈（含嵌套抢占的多个现场），**栈顶**优先恢复。
-	SuspendStack    []*suspendedTask
-	Stats           SchedulerStats
-	MaxSuspendDepth int
+	SuspendStack []*suspendedTask
+	Stats        SchedulerStats
+	// MaxInterruptFrames 是中断栈帧数的结构上界（= 中断级数，不是配置项）。
+	MaxInterruptFrames int
 }
 
 // schedulerStatus 把快照转成对外的状态 DTO（不暴露帧内容）。
@@ -168,7 +253,7 @@ func (a *Agent) schedulerStatus() sdk.SchedulerStatus {
 		ReadyQueueDepth:   len(snap.Queue),
 		PendingInterrupts: len(snap.PendingInterrupts),
 		SuspendStack:      len(snap.SuspendStack),
-		MaxSuspendDepth:   snap.MaxSuspendDepth,
+		MaxSuspendDepth:   snap.MaxInterruptFrames,
 		Enqueued:          snap.Stats.Enqueued,
 		Executed:          snap.Stats.Executed,
 		Rejected:          snap.Stats.Rejected,
@@ -192,9 +277,14 @@ type scheduler struct {
 	stats    SchedulerStats
 	maxQueue int
 
-	// pendingInterrupts：因优先级不足（或运行任务在临界区）而未立即抢占的中断请求。
-	// 与 readyQueue 分离：取出时以中断语义启动（设计文档 D3）。
-	pendingInterrupts []*Task
+	// interruptQueues[level]：四条**中断队列**（level 1..4），同级 FIFO。
+	// 未能立即抢占的中断（级别不足，或运行任务在临界区）按级别入队，
+	// nextRef 从 L4 到 L1 依次扫描。
+	interruptQueues [5][]*Task
+	// immediate：刚抢占成功的中断。抢占必须**立即生效**，所以它不经队列，
+	// 在下一个安全点直接运行。这也消除了“抢占者与被抢占者同级”的比较问题——
+	// 抢占者根本不需要和栈顶比。
+	immediate *Task
 	// suspendStack：**中断栈**。被抢占后保存现场的任务压栈（LIFO），
 	// 用于“中断被中断”的嵌套场景：只有**栈顶**参与恢复选择，栈内不做优先级重排。
 	suspendStack []*suspendedTask
@@ -208,8 +298,12 @@ type scheduler struct {
 	// wake 用于把空闲的调度器叫醒：pendingInterrupts 不是 channel，
 	// 没有这个信号时“空闲时到达的中断”会一直等下一次输入（设计 §5.1 ③）。
 	wake chan struct{}
-	// maxSuspendDepth：中断栈深度上限（设计文档 §6.3，默认 4）。
-	maxSuspendDepth int
+	// maxInterruptFrames：中断栈帧数的**结构上界**，不是配置项。
+	//
+	// 链条 = 排队(L0) ← I(L1) ← I(L2) ← I(L3) ← I(L4 运行中)，
+	// 被挂起 4 帧；L4 之上没有更高级别，链到此为止。超限只可能是内核 bug，
+	// 因此这里只做防御性计数，**不降级、不丢弃帧**。
+	maxInterruptFrames int
 }
 
 // suspendedTask 是一个被抢占任务的现场。
@@ -224,7 +318,8 @@ type nextSelection int
 const (
 	nextNone nextSelection = iota
 	nextReady
-	nextPending
+	nextInterrupt
+	nextImmediate
 	nextSuspended
 )
 
@@ -232,7 +327,11 @@ func newScheduler(maxQueue int) *scheduler {
 	if maxQueue <= 0 {
 		maxQueue = 256
 	}
-	return &scheduler{maxQueue: maxQueue, maxSuspendDepth: 4, wake: make(chan struct{}, 1)}
+	return &scheduler{
+		maxQueue:           maxQueue,
+		maxInterruptFrames: int(LevelCritical), // 结构推论：= 中断级数
+		wake:               make(chan struct{}, 1),
+	}
 }
 
 // signalWake 非阻塞地唤醒调度器。
@@ -249,7 +348,7 @@ func (s *scheduler) setCritical(v bool) { s.critical.Store(v) }
 // inCritical 报告运行任务是否在不可抢占临界区。
 func (s *scheduler) inCritical() bool { return s.critical.Load() }
 
-// hasRoom 报告就绪队列是否还能接收任务。泵入侧据此节流：
+// hasRoom 报告排队队列是否还能接收任务。泵入侧据此节流：
 // 队列满则停止从 channel 取，让背压落回 channel 本身。
 func (s *scheduler) hasRoom() bool {
 	s.mu.Lock()
@@ -257,7 +356,16 @@ func (s *scheduler) hasRoom() bool {
 	return len(s.queue) < s.maxQueue
 }
 
-// enqueue 入队；队列满返回 false（调用方负责计数）。
+// allocateIDLocked 分配任务 ID 与入队时刻（调用方持锁）。
+func (s *scheduler) allocateIDLocked(t *Task) {
+	s.seq++
+	t.ID = s.seq
+	if t.EnqueuedAt.IsZero() {
+		t.EnqueuedAt = time.Now()
+	}
+}
+
+// enqueue 把一个**排队输入**入队；队列满返回 false（调用方负责计数）。
 func (s *scheduler) enqueue(t *Task) bool {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -265,11 +373,7 @@ func (s *scheduler) enqueue(t *Task) bool {
 		s.stats.Rejected++
 		return false
 	}
-	s.seq++
-	t.ID = s.seq
-	if t.EnqueuedAt.IsZero() {
-		t.EnqueuedAt = time.Now()
-	}
+	s.allocateIDLocked(t)
 	s.stats.Enqueued++
 	s.queue = append(s.queue, t)
 	return true
@@ -283,74 +387,94 @@ func (s *scheduler) next() *Task {
 	return t
 }
 
-// nextRef 从三个集合中按统一排序键取出下一个任务。
+// nextRef 选出下一个任务。优先顺序：
 //
-// 设计文档 §4.1：高有效级先；同级先到先服务。挂起任务保留其**原始**入队时刻，
-// 因此同级时天然倾向“先把旧任务做完”，抑制饥饿。
+//  1. immediate —— 刚抢占成功的中断（抢占必须立即生效）
+//  2. 中断队列 L4→L1（同级 FIFO）
+//  3. 中断栈顶（与 2 比级别取高者；栈顶是排队任务时视为最低）
+//  4. 排队队列（FIFO）
 func (s *scheduler) nextRef() (*Task, *TaskFrame, nextSelection) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	var bestTask *Task
-	var bestFrame *TaskFrame
-	bestKind := nextNone
-	consider := func(t *Task, k nextSelection, fr *TaskFrame) {
-		if bestTask == nil {
-			bestTask, bestKind, bestFrame = t, k, fr
-			return
-		}
-		lt, lb := effectiveLevel(t), effectiveLevel(bestTask)
-		if lt != lb {
-			if lt > lb {
-				bestTask, bestKind, bestFrame = t, k, fr
-			}
-			return
-		}
-		// 同级时 **pending 中断优先**。
-		//
-		// 为何必需：一次抢占生效后，被挂起的原任务会因饥饿防护提升有效级，
-		// 于是与抢占者同级；若此时按“先到先服务”，原任务（入队更早）会被
-		// 立刻选回，抢占者永远排不到——抢占变成空转。
-		if k == nextPending && bestKind != nextPending {
-			bestTask, bestKind, bestFrame = t, k, fr
-			return
-		}
-		if bestKind == nextPending && k != nextPending {
-			return
-		}
-		// 同级同类：先到先服务（ID 兜底保证确定性）。
-		if t.EnqueuedAt.Before(bestTask.EnqueuedAt) ||
-			(t.EnqueuedAt.Equal(bestTask.EnqueuedAt) && t.ID < bestTask.ID) {
-			bestTask, bestKind, bestFrame = t, k, fr
-		}
-	}
-	for _, t := range s.queue {
-		consider(t, nextReady, nil)
-	}
-	for _, t := range s.pendingInterrupts {
-		consider(t, nextPending, nil)
-	}
-	// 中断栈：只比**栈顶**（严格 LIFO）。栈内不做优先级重排——
-	// 嵌套抢占天然使栈自底向上优先级递增，且“后被打断的先恢复”才是栈语义。
-	if n := len(s.suspendStack); n > 0 {
-		top := s.suspendStack[n-1]
-		consider(top.Task, nextSuspended, top.Frame)
-	}
-	if bestTask == nil {
-		return nil, nil, nextNone
+	if s.immediate != nil {
+		t := s.immediate
+		s.immediate = nil
+		s.running = t
+		return t, nil, nextImmediate
 	}
 
-	switch bestKind {
-	case nextReady:
-		s.queue = removeTask(s.queue, bestTask)
-	case nextPending:
-		s.pendingInterrupts = removeTask(s.pendingInterrupts, bestTask)
-	case nextSuspended:
-		// 只有栈顶可能被选中，故弹出即截断末位。
-		s.suspendStack = s.suspendStack[:len(s.suspendStack)-1]
+	qTask, qLevel := s.highestInterruptLocked()
+
+	// 中断栈：只比**栈顶**（严格 LIFO）。栈内不做优先级重排——
+	// 嵌套抢占天然使栈自底向上级别递增，且“后被打断的先恢复”才是栈语义。
+	if n := len(s.suspendStack); n > 0 {
+		top := s.suspendStack[n-1]
+		// 栈顶 vs 最高级待处理中断：取高者（持平归栈顶，维持 LIFO 与公平）。
+		if qTask == nil || effectiveLevel(top.Task) >= qLevel {
+			s.suspendStack = s.suspendStack[:n-1]
+			s.stats.Resumed++
+			s.running = top.Task
+			return top.Task, top.Frame, nextSuspended
+		}
 	}
-	s.running = bestTask
-	return bestTask, bestFrame, bestKind
+
+	if qTask != nil {
+		s.popInterruptLocked(qLevel)
+		s.running = qTask
+		return qTask, nil, nextInterrupt
+	}
+
+	if len(s.queue) > 0 {
+		t := s.queue[0]
+		s.queue = s.queue[1:]
+		s.running = t
+		return t, nil, nextReady
+	}
+	return nil, nil, nextNone
+}
+
+// highestInterruptLocked 返回当前最高级非空中断队列的队头及其级别。
+func (s *scheduler) highestInterruptLocked() (*Task, Level) {
+	for lv := LevelCritical; lv >= LevelBackground; lv-- {
+		if q := s.interruptQueues[lv]; len(q) > 0 {
+			return q[0], lv
+		}
+	}
+	return nil, 0
+}
+
+// popInterruptLocked 弹出某级别中断队列的队头（调用方已确认非空）。
+func (s *scheduler) popInterruptLocked(lv Level) {
+	s.interruptQueues[lv] = s.interruptQueues[lv][1:]
+}
+
+// interruptCountLocked 统计所有待处理中断（含 immediate 槽）。
+func (s *scheduler) interruptCountLocked() int {
+	n := 0
+	for lv := LevelBackground; lv <= LevelCritical; lv++ {
+		n += len(s.interruptQueues[lv])
+	}
+	if s.immediate != nil {
+		n++
+	}
+	return n
+}
+
+// setImmediateLocked 登记一个应“立即运行”的抢占者。
+//
+// 槽只有一格：若已有抢占者且新的级别更高，旧的降级入队；否则新的入队。
+func (s *scheduler) setImmediateLocked(t *Task) {
+	if s.immediate != nil && effectiveLevel(t) <= effectiveLevel(s.immediate) {
+		s.enqueueInterruptLocked(t)
+		return
+	}
+	if s.immediate != nil {
+		s.enqueueInterruptLocked(s.immediate)
+	}
+	s.allocateIDLocked(t)
+	s.stats.Enqueued++
+	s.immediate = t
 }
 
 func removeTask(list []*Task, target *Task) []*Task {
@@ -362,52 +486,75 @@ func removeTask(list []*Task, target *Task) []*Task {
 	return list
 }
 
-// enqueueInterrupt 把一个未立即抢占的中断请求放进 pendingInterrupts。
+// enqueueInterruptLocked 把一个未立即抢占的中断按其级别入队（调用方持锁）。
 //
 // 有界：满了丢**最老**的一条并计数（中断是提示性输入，宁可丢旧保新）。
-func (s *scheduler) enqueueInterrupt(t *Task) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	s.seq++
-	t.ID = s.seq
-	if t.EnqueuedAt.IsZero() {
-		t.EnqueuedAt = time.Now()
+func (s *scheduler) enqueueInterruptLocked(t *Task) {
+	s.allocateIDLocked(t)
+	if s.interruptCountLocked() >= s.maxQueue {
+		for lv := LevelBackground; lv <= LevelCritical; lv++ {
+			if len(s.interruptQueues[lv]) > 0 {
+				s.popInterruptLocked(lv)
+				s.stats.Rejected++
+				break
+			}
+		}
 	}
-	if len(s.pendingInterrupts) >= s.maxQueue {
-		s.pendingInterrupts = s.pendingInterrupts[1:]
-		s.stats.Rejected++
+	lv := t.Level
+	if lv < LevelBackground || lv > LevelCritical {
+		lv = DefaultLevel
 	}
-	s.pendingInterrupts = append(s.pendingInterrupts, t)
-	s.signalWake()
+	s.interruptQueues[lv] = append(s.interruptQueues[lv], t)
+	s.stats.Enqueued++
 }
 
-// requestPreempt 登记一次中断请求。
+// requestPreempt 登记一次中断请求（class=TaskInterrupt）。
 //
 // 返回 true 表示“应该尝试取消运行任务正在进行的可取消步骤（LLM 流式）”。
 //
-// 无论能否抢占，中断请求都进 pendingInterrupts——这样即使运行任务在抢占生效前
-// 就正常结束，中断也不会丢（它会被 nextRef 按优先级选出）。
+// 判据是 canPreempt（由优先级级别系统一承担），并受抢占冷却约束：
+//   - running 是排队任务 → 任何中断都抢占；
+//   - running 是中断 Li    → 仅 Lj > Li 的中断抢占。
 //
-// 判据用**有效**优先级（饥饿防护），并受抢占冷却约束。
+// 能抢占时把中断放进 immediate（立即生效）；否则按其级别入队，等当前任务
+// 结束或下一个安全点再处理——无论哪种，中断都不会丢。
 //
 // 临界区（如记忆整理）内不 arm、不取消：中断只入队，等临界区结束后的安全点处理，
 // 这是设计 §4.3 的硬要求——那个位置的“不抢占”不能只是不让位，还必须不取消。
 func (s *scheduler) requestPreempt(evt *agentIO.InputEvent, level Level) bool {
+	return s.registerInterrupt(newInterruptTask(evt, clampPluginLevel(level)))
+}
+
+// requestKernelPreempt 是**内核**中断入口（panic / 内核事件 selfip）。
+//
+// 级别固定 L4，且**不夹取**——这是 L4 的唯一来源，插件永远够不到。
+func (s *scheduler) requestKernelPreempt(evt *agentIO.InputEvent) bool {
+	return s.registerInterrupt(newKernelInterruptTask(evt))
+}
+
+// registerInterrupt 是登记中断的公共实现（任务已带好 Class/Level）。
+func (s *scheduler) registerInterrupt(t *Task) bool {
 	s.mu.Lock()
 	running := s.running
 	critical := s.critical.Load()
-	canPreempt := false
-	if !critical && running != nil && level > effectiveLevel(running) {
+	arm := false
+	if !critical && canPreempt(t, running) {
 		if running.LastPreemptAt.IsZero() || time.Since(running.LastPreemptAt) >= preemptCooldown {
-			canPreempt = true
+			arm = true
 			s.preemptArmed = true
-			s.preemptLevel = level
+			s.preemptLevel = t.Level
+			s.setImmediateLocked(t)
 		}
+	}
+	if !arm {
+		s.enqueueInterruptLocked(t)
 	}
 	s.mu.Unlock()
 
-	s.enqueueInterrupt(newInterruptTask(evt, level))
-	return canPreempt
+	if !arm {
+		s.signalWake()
+	}
+	return arm
 }
 
 // preemptGrantedFor 报告运行任务是否应在当前安全点让位。
@@ -429,12 +576,12 @@ func (s *scheduler) clearPreempt() {
 
 // suspend 保存现场。
 //
-// 深度上限（设计文档 §6.3）：安全点上的 canSuspend 已提前拦下超限情况，
-// 此处仅在竞态下兜底计数——绝不丢弃帧（帧丢了会丢副作用记录）。
+// 深度上界是**结构推论**（= 中断级数），不是配置项：安全点上的 canSuspend 已提前
+// 拦下超限情况，此处仅在竞态下兜底计数——绝不丢弃帧（帧丢了会丢副作用记录）。
 func (s *scheduler) suspend(t *Task, f *TaskFrame) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if len(s.suspendStack) >= s.maxSuspendDepth {
+	if len(s.suspendStack) >= s.maxInterruptFrames {
 		s.stats.Rejected++
 	}
 	s.suspendStack = append(s.suspendStack, &suspendedTask{Task: t, Frame: f})
@@ -456,7 +603,7 @@ func (s *scheduler) suspend(t *Task, f *TaskFrame) {
 func (s *scheduler) canSuspend() bool {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	return len(s.suspendStack) < s.maxSuspendDepth
+	return len(s.suspendStack) < s.maxInterruptFrames
 }
 
 // done 标记任务执行结束。
@@ -466,7 +613,7 @@ func (s *scheduler) done(t *Task) {
 	if s.running == t {
 		s.running = nil
 	}
-	// 任务正常结束：让位信号不再有意义（中断已在 pendingInterrupts 里）。
+	// 任务正常结束：让位信号不再有意义（中断已在中断队列/immediate 里）。
 	s.preemptArmed = false
 	s.preemptLevel = 0
 	s.stats.Executed++
@@ -475,37 +622,42 @@ func (s *scheduler) done(t *Task) {
 // currentLevel 返回当前正在执行任务的级别；无 running 时为默认级。
 //
 // 用于在 prepare 段把级别写进帧（抢占比较的基准）。
-func (s *scheduler) currentLevel() Level {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	if s.running != nil {
-		return s.running.Level
+// interruptLevel 返回一次**中断注入**的级别。
+//
+// 级别是“这项工作有多不能等”，由插件在 InjectOptions.Priority 里声明
+// （排队注入没有级别，它们的 TaskClass 是 TaskQueued）。
+//
+// 取值域 L1..L3；空/非法一律降到 DefaultLevel（L1）。
+// **L4 不在此处产生**：它由内核独占，经 raiseKernelInterrupt 直接给出
+// （panic / 内核事件 selfip），因此 clampPluginLevel 会把越权声明夹回 L3。
+func interruptLevel(evt *agentIO.InputEvent) Level {
+	if evt == nil || evt.Payload == nil {
+		return DefaultLevel
 	}
-	return DefaultLevel
+	raw, _ := evt.Payload["priority"].(string)
+	l, ok := parseInterruptLevel(raw)
+	if !ok {
+		return DefaultLevel
+	}
+	return clampPluginLevel(l)
 }
 
-// taskLevel 是内核为任务定级的内部规则。
-//
-// ❗优先级是**内核内部属性**，不做成配置项：内核预定义四级，并按内部规则
-// 为任务与中断定级。下方规则只是 v1 的内部缺省值——它决定“谁能让位于谁”，
-// 属于内核自己的隐私，不对外暴露为运维可调项。
-//
-// 缺省：cli/webui/http 为人机交互（L3），system/_consolidation_ 为后台（L1），
-// 其余一律默认级（L1）。
-func (a *Agent) taskLevel(source, channel string) Level {
-	switch channel {
-	case "cli", "webui", "http":
-		return LevelInteractive
-	case channelConsolidation, "system":
-		return LevelBackground
+// parseInterruptLevel 解析插件声明的级别字符串（"L1".."L3"）。
+// 只认字面量：拼写错误必须降级成默认级而不是被静默当成别的级别。
+func parseInterruptLevel(s string) (Level, bool) {
+	switch s {
+	case "L1", "l1":
+		return LevelBackground, true
+	case "L2", "l2":
+		return LevelMessage, true
+	case "L3", "l3":
+		return LevelInteractive, true
+	case "L4", "l4":
+		// 内核级：解析出来但会被 clamp 夹到 L3。
+		return LevelCritical, true
+	default:
+		return 0, false
 	}
-	switch source {
-	case "cli", "webui":
-		return LevelInteractive
-	case "system":
-		return LevelBackground
-	}
-	return DefaultLevel
 }
 
 // inCriticalSection 报告运行任务是否处于不可抢占区。
@@ -517,43 +669,28 @@ func (a *Agent) inCriticalSection() bool {
 	return a.currentOutputChannel == channelConsolidation
 }
 
-// pickTaskIndex 返回下一个要执行的任务下标（设计文档 §4.1 的选择函数）。
-//
-// 排序键：优先级降序 → 入队时刻升序 → ID 升序。
-// 纯函数：便于对抢占/优先级矩阵做确定性单测。
-func pickTaskIndex(q []*Task) int {
-	best := 0
-	for i := 1; i < len(q); i++ {
-		if taskBefore(q[i], q[best]) {
-			best = i
-		}
-	}
-	return best
-}
-
-// taskBefore 报告 x 是否应先于 y 执行（按**有效**优先级）。
-func taskBefore(x, y *Task) bool {
-	lx, ly := effectiveLevel(x), effectiveLevel(y)
-	if lx != ly {
-		return lx > ly
-	}
-	if !x.EnqueuedAt.Equal(y.EnqueuedAt) {
-		return x.EnqueuedAt.Before(y.EnqueuedAt)
-	}
-	return x.ID < y.ID
-}
-
+// newInputTask 把一个**排队输入**包装成任务（无级别）。
 func newInputTask(evt *agentIO.InputEvent) *Task {
-	return &Task{Kind: TaskKindInput, Level: DefaultLevel, Event: evt, EnqueuedAt: time.Now()}
+	return &Task{Class: TaskQueued, Kind: TaskKindInput, Event: evt, EnqueuedAt: time.Now()}
 }
 
-// newInterruptTask 把一个中断请求包装成任务。
+// newInterruptTask 把一个中断请求包装成任务（带级别）。
 func newInterruptTask(evt *agentIO.InputEvent, level Level) *Task {
-	return &Task{Kind: TaskKindInput, Level: level, Event: evt, EnqueuedAt: time.Now()}
+	return &Task{Class: TaskInterrupt, Kind: TaskKindInput, Level: level, Event: evt, EnqueuedAt: time.Now()}
 }
 
+// newSelfTask 包装内核自循环输入——它是**排队任务**：记忆整理/子任务通知
+// 不需要及时处理，可被任何中断打断。
 func newSelfTask(msg selfInputMsg) *Task {
-	return &Task{Kind: TaskKindSelf, Level: DefaultLevel, Self: msg, EnqueuedAt: time.Now()}
+	return &Task{Class: TaskQueued, Kind: TaskKindSelf, Self: msg, EnqueuedAt: time.Now()}
+}
+
+// newKernelInterruptTask 构造一个**内核级中断**（L4）。
+//
+// 这是 L4 的唯一来源：panic 中断、内核事件中断（selfip）。
+// 插件永远拿不到这个入口——它不经 InjectOptions，也不经 proc 桥。
+func newKernelInterruptTask(evt *agentIO.InputEvent) *Task {
+	return &Task{Class: TaskInterrupt, Kind: TaskKindInput, Level: LevelCritical, Event: evt, EnqueuedAt: time.Now()}
 }
 
 // DumpScheduler 返回调度器的原子快照（供状态页/测试断言）。
@@ -565,9 +702,16 @@ func (a *Agent) DumpScheduler() SchedulerSnapshot {
 	defer a.sched.mu.Unlock()
 	snap := SchedulerSnapshot{Running: a.sched.running, Stats: a.sched.stats}
 	snap.Queue = append(snap.Queue, a.sched.queue...)
-	snap.PendingInterrupts = append(snap.PendingInterrupts, a.sched.pendingInterrupts...)
+	snap.Immediate = a.sched.immediate
+	for lv := LevelBackground; lv <= LevelCritical; lv++ {
+		snap.InterruptQueues[lv] = append(snap.InterruptQueues[lv], a.sched.interruptQueues[lv]...)
+		snap.PendingInterrupts = append(snap.PendingInterrupts, a.sched.interruptQueues[lv]...)
+	}
+	if a.sched.immediate != nil {
+		snap.PendingInterrupts = append(snap.PendingInterrupts, a.sched.immediate)
+	}
 	snap.SuspendStack = append(snap.SuspendStack, a.sched.suspendStack...)
-	snap.MaxSuspendDepth = a.sched.maxSuspendDepth
+	snap.MaxInterruptFrames = a.sched.maxInterruptFrames
 	return snap
 }
 
@@ -630,6 +774,46 @@ func (a *Agent) pumpInbox() {
 }
 
 // executeTask 执行一个任务（测试与旧调用方的入口）；见 executeNewTask。
+// raiseKernelInterrupt 是 **L4 的唯一入口**：panic 中断与内核事件中断（selfip）。
+//
+// 它不经 io.InputChan（那是外部/插件输入），而是直接向调度器登记一条内核中断：
+// 级别固定 L4、不夹取、不受插件声明影响。这正是“L4 只有内核持有”的落点。
+//
+// 能否抢占由调度器按统一判据决定；若会抢占，则顺手取消可取消的 LLM 流式步骤
+// （与 interceptLoop 对插件中断的处理完全一致）。
+func (a *Agent) raiseKernelInterrupt(source, channel, text string) {
+	if a.sched == nil {
+		return
+	}
+	evt := &agentIO.InputEvent{
+		Source:        source,
+		Type:          "interrupt",
+		OutputChannel: channel,
+		Payload: map[string]interface{}{
+			"content":           text,
+			"interrupt":         true,
+			"interrupt_source":  source,
+			"interrupt_channel": channel,
+			"kernel":            true,
+		},
+	}
+	if a.sched.requestKernelPreempt(evt) {
+		a.cancelCurrentLLM()
+	}
+}
+
+// reportTaskPanic 把一个任务 panic 报告成内核 L4 中断。
+//
+// 递归保护是**结构性**的：若 panic 的任务本身就是 L4 内核中断，则不再产生新的
+// L4——否则同一个 panic 会自我放大成中断风暴，与“内核事件”应有的语义相反。
+func (a *Agent) reportTaskPanic(t *Task, r interface{}) {
+	if t.Class == TaskInterrupt && t.Level >= LevelCritical {
+		return
+	}
+	a.raiseKernelInterrupt("kernel", "kernel",
+		fmt.Sprintf("内核事件：任务 #%d 发生 panic：%v（该任务已被丢弃，调度器存活）", t.ID, r))
+}
+
 func (a *Agent) executeTask(t *Task) {
 	a.executeNewTask(t)
 }
@@ -647,6 +831,7 @@ func (a *Agent) executeNewTask(t *Task) {
 			if r := recover(); r != nil {
 				log.Printf("[agent] task#%d (%s) panic recovered: %v\n%s",
 					t.ID, t.Level, r, debug.Stack())
+				a.reportTaskPanic(t, r)
 			}
 		}()
 		switch t.Kind {
@@ -686,6 +871,7 @@ func (a *Agent) resumeTask(t *Task, f *TaskFrame) {
 		if r := recover(); r != nil {
 			log.Printf("[agent] resume task#%d panic recovered: %v\n%s",
 				t.ID, r, debug.Stack())
+			a.reportTaskPanic(t, r)
 			a.sched.done(t)
 		}
 	}()

@@ -126,7 +126,6 @@ type TaskFrame struct {
 	IsInterrupt bool
 	StartedAt   time.Time
 	Terminal    taskTerminal
-	Level       Level
 
 	// PrefixLen 是 stepPrepare 构建的**基础前缀**长度（system + timeline + 用户输入）。
 	// 恢复时用它把「本任务自己的现场」接回重建后的前缀之上（见 rebaseFramePrefix）。
@@ -382,7 +381,6 @@ func (a *Agent) prepareInputTask(evt *agentIO.InputEvent) (*TaskFrame, taskTermi
 	f.CleanInput = cleanInput
 	f.IsInterrupt = isInterrupt
 	f.StartedAt = start
-	f.Level = a.sched.currentLevel()
 	return f, terminalNone
 }
 

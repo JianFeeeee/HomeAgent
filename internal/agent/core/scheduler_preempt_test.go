@@ -75,14 +75,35 @@ func newPreemptAgent(t *testing.T, sp agentAPI.Provider) *Agent {
 	})
 }
 
-func enqueueTask(t *testing.T, a *Agent, level Level, source, content string) (*Task, *agentIO.InputEvent) {
+// enqueueQueued 入队一个**排队任务**（无级别）——对应 InjectText*/InjectInputSync*。
+func enqueueQueued(t *testing.T, a *Agent, source, content string) (*Task, *agentIO.InputEvent) {
 	t.Helper()
 	evt, _ := textEvent(source, content)
-	task := &Task{Kind: TaskKindInput, Level: level, Event: evt, EnqueuedAt: time.Now()}
+	task := newInputTask(evt)
 	if !a.sched.enqueue(task) {
 		t.Fatal("入队失败")
 	}
 	return task, evt
+}
+
+// enqueueInterrupt 登记一次**中断**（走 requestPreempt：能抢占则进 immediate 槽，
+// 否则按级别进中断队列），返回被登记的任务。
+func enqueueInterrupt(t *testing.T, a *Agent, level Level, source, content string) (*Task, *agentIO.InputEvent) {
+	t.Helper()
+	evt, _ := textEvent(source, content)
+	evt.Payload["interrupt"] = true
+	a.sched.requestPreempt(evt, level)
+	snap := a.DumpScheduler()
+	if snap.Immediate != nil && snap.Immediate.Event == evt {
+		return snap.Immediate, evt
+	}
+	q := snap.InterruptQueues[clampPluginLevel(level)]
+	for i := len(q) - 1; i >= 0; i-- {
+		if q[i].Event == evt {
+			return q[i], evt
+		}
+	}
+	return nil, evt
 }
 
 // P1 + R1 + R5 + D1=A：高优先级抢占 → 挂起在 S_LLM → 中断任务带只读前缀 →
@@ -91,7 +112,7 @@ func TestPreempt_HigherPreemptsAndResumes(t *testing.T) {
 	sp := newPreemptProvider("intr-done", "low-done")
 	a := newPreemptAgent(t, sp)
 
-	lowTask, _ := enqueueTask(t, a, LevelBackground, "qq", "低优先级任务")
+	lowTask, _ := enqueueQueued(t, a, "qq", "低优先级任务")
 	lt, _, kind := a.sched.nextRef()
 	if kind != nextReady || lt != lowTask {
 		t.Fatalf("应取到低优先级任务，kind=%v", kind)
@@ -109,7 +130,7 @@ func TestPreempt_HigherPreemptsAndResumes(t *testing.T) {
 	// 注入 L4 中断（cli）
 	intrEvt, _ := textEvent("cli", "紧急打断")
 	intrEvt.Payload["interrupt"] = true
-	if !a.sched.requestPreempt(intrEvt, LevelCritical) {
+	if !a.sched.requestKernelPreempt(intrEvt) {
 		t.Fatal("L4 应请求抢占并返回 true（应取消 LLM）")
 	}
 	a.cancelCurrentLLM()
@@ -146,7 +167,7 @@ func TestPreempt_HigherPreemptsAndResumes(t *testing.T) {
 
 	// Q3：三集合统一比较 → 下一轮取中断（L4 > L1）。
 	it, _, k := a.sched.nextRef()
-	if k != nextPending || it.Level != LevelCritical {
+	if k != nextImmediate || it.Level != LevelCritical {
 		t.Fatalf("应取到 pending 中断，kind=%v level=%v", k, it.Level)
 	}
 	// D1=B：中断任务在**上一个任务之前的完整状态**上开始运行，不继承本任务的现场。
@@ -194,14 +215,17 @@ func TestPreempt_HigherPreemptsAndResumes(t *testing.T) {
 	}
 }
 
-// P2/P3：同级与更低级都不得抢占，请求进 pendingInterrupts。
+// P2/P3：同级与更低级都不得抢占，请求进中断队列。
+//
+// 注意：能比“同级/更低不得抢占”的只可能是**中断之间**——排队任务无级别，
+// 任何中断都能打断它（这是模型的规定，不是漏洞）。
 func TestPreempt_LowerOrEqualDoesNotPreempt(t *testing.T) {
 	sp := newPreemptProvider("low-done", "intr-done")
 	a := newPreemptAgent(t, sp)
 
-	lowTask, _ := enqueueTask(t, a, LevelInteractive, "cli", "运行中的 L3")
-	if _, _, kind := a.sched.nextRef(); kind != nextReady {
-		t.Fatal("应取到运行任务")
+	lowTask, _ := enqueueInterrupt(t, a, LevelInteractive, "cli", "运行中的 L3")
+	if _, _, kind := a.sched.nextRef(); kind != nextInterrupt {
+		t.Fatal("应取到运行中的 L3 中断")
 	}
 
 	done := make(chan struct{})
@@ -234,7 +258,7 @@ func TestPreempt_LowerOrEqualDoesNotPreempt(t *testing.T) {
 		t.Fatal("运行任务未结束")
 	}
 	if len(a.DumpScheduler().PendingInterrupts) != 2 {
-		t.Fatalf("两条未抢占中断都应保留在 pendingInterrupts，实际 %d",
+		t.Fatalf("两条未抢占中断都应保留在中断队列，实际 %d",
 			len(a.DumpScheduler().PendingInterrupts))
 	}
 }
@@ -243,23 +267,23 @@ func TestPreempt_LowerOrEqualDoesNotPreempt(t *testing.T) {
 func TestPreempt_DepthCapBlocksSuspension(t *testing.T) {
 	a := newPreemptAgent(t, newPreemptProvider())
 
-	if a.sched.maxSuspendDepth != 4 {
-		t.Fatalf("默认深度上限=%d，期望 4", a.sched.maxSuspendDepth)
+	if a.sched.maxInterruptFrames != 4 {
+		t.Fatalf("默认栈深上界=%d，期望 4（= 中断级数，结构推论）", a.sched.maxInterruptFrames)
 	}
 	frame := func() *TaskFrame { return a.newTaskFrame("x", a.stageCtxFromInput("x", "", "")) }
-	for i := 0; i < a.sched.maxSuspendDepth; i++ {
-		a.sched.suspend(&Task{ID: uint64(i + 1), Level: LevelBackground}, frame())
+	for i := 0; i < a.sched.maxInterruptFrames; i++ {
+		a.sched.suspend(&Task{ID: uint64(i + 1), Class: TaskInterrupt, Level: LevelBackground}, frame())
 	}
 	if a.sched.canSuspend() {
 		t.Fatal("深度已达上限，canSuspend 应为 false")
 	}
 	// 超限兜底：仍保留帧（不丢副作用记录），但计数 Rejected。
 	before := a.DumpScheduler().Stats.Rejected
-	a.sched.suspend(&Task{ID: 99, Level: LevelBackground}, frame())
+	a.sched.suspend(&Task{ID: 99, Class: TaskInterrupt, Level: LevelBackground}, frame())
 	if a.DumpScheduler().Stats.Rejected != before+1 {
 		t.Fatal("超限挂起必须计数 Rejected")
 	}
-	if len(a.DumpScheduler().SuspendStack) != a.sched.maxSuspendDepth+1 {
+	if len(a.DumpScheduler().SuspendStack) != a.sched.maxInterruptFrames+1 {
 		t.Fatal("兜底路径必须保留帧而不是丢弃")
 	}
 }
@@ -273,10 +297,10 @@ func TestPreempt_IdleInterruptIsQueuedNotLost(t *testing.T) {
 		t.Fatal("空闲时不应请求取消 LLM（没有运行任务）")
 	}
 	if len(a.DumpScheduler().PendingInterrupts) != 1 {
-		t.Fatal("空闲时的中断必须进 pendingInterrupts")
+		t.Fatal("空闲时的中断必须进中断队列（不能丢）")
 	}
 	task, _, kind := a.sched.nextRef()
-	if kind != nextPending || task.Level != LevelMessage {
+	if kind != nextInterrupt || task.Level != LevelMessage {
 		t.Fatalf("应取到待处理中断，kind=%v", kind)
 	}
 	a.executeNewTask(task)

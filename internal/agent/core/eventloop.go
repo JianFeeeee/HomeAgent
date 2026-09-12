@@ -50,10 +50,13 @@ func (a *Agent) interceptLoop() {
 			clone.Payload["interrupt_source"] = evt.Source
 			clone.Payload["interrupt_channel"] = evt.OutputChannel
 
-			// 决策交给调度器：requestPreempt 总是登记中断（进 pendingInterrupts，
+			// 决策交给调度器：requestPreempt 总会登记中断（进中断队列或 immediate，
 			// 因而不会丢），仅当它会真抢占时才告诉我“该取消可取消的步骤”。
-			// 本 goroutine 不碰任何帧——只写 pendingInterrupts 与让位信号。
-			level := a.taskLevel(evt.Source, evt.OutputChannel)
+			// 本 goroutine 不碰任何帧——只写中断队列与让位信号。
+			//
+			// 级别由插件声明（InjectOptions.Priority → payload["priority"]，L1..L3）；
+			// 未声明一律 L1。L4 只能由内核的 raiseKernelInterrupt 产生。
+			level := interruptLevel(evt)
 			if a.sched.requestPreempt(clone, level) {
 				a.cancelCurrentLLM()
 			}

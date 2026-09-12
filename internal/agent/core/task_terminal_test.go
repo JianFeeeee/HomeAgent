@@ -22,7 +22,7 @@ func TestTerminal_TaskScopedReplyNotMisrouted(t *testing.T) {
 	a := newPreemptAgent(t, sp)
 
 	lowEvt, lowCh := textEvent("qq", "低优先级任务")
-	lowTask := &Task{Kind: TaskKindInput, Level: LevelBackground, Event: lowEvt, EnqueuedAt: time.Now()}
+	lowTask := newInputTask(lowEvt)
 	if !a.sched.enqueue(lowTask) {
 		t.Fatal("入队失败")
 	}
@@ -38,8 +38,8 @@ func TestTerminal_TaskScopedReplyNotMisrouted(t *testing.T) {
 
 	intrEvt, intrCh := textEvent("cli", "紧急打断")
 	intrEvt.Payload["interrupt"] = true
-	if !a.sched.requestPreempt(intrEvt, LevelCritical) {
-		t.Fatal("L4 应抢占 L1")
+	if !a.sched.requestKernelPreempt(intrEvt) {
+		t.Fatal("内核 L4 应抢占排队任务")
 	}
 	a.cancelCurrentLLM()
 	select {
@@ -50,8 +50,8 @@ func TestTerminal_TaskScopedReplyNotMisrouted(t *testing.T) {
 
 	// 执行中断任务 → 只应写它自己的回执通道。
 	it, _, k := a.sched.nextRef()
-	if k != nextPending {
-		t.Fatalf("应取到 pending 中断，kind=%v", k)
+	if k != nextImmediate {
+		t.Fatalf("应取到立即运行的中断，kind=%v", k)
 	}
 	a.executeNewTask(it)
 	if len(intrCh) != 1 {
