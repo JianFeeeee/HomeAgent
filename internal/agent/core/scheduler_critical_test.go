@@ -61,7 +61,7 @@ func TestPreempt_DeferredDuringToolExec(t *testing.T) {
 		t.Fatal("L4 应 arm 让位信号")
 	}
 	// 关键断言：信号已 arm，但任务仍在工具里 —— 绝不能挂起。
-	if !a.sched.preemptGrantedFor(LevelBackground) {
+	if !a.sched.preemptGrantedFor() {
 		t.Fatal("让位信号应已 arm")
 	}
 	if a.DumpScheduler().Running == nil {

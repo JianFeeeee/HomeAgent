@@ -121,13 +121,12 @@ type TaskFrame struct {
 	// 这些字段让帧覆盖 prepare → step… → finish 全生命周期：挂起发生在 run 段的
 	// 安全点，恢复后由 finish 段统一提交（context.Append + emitResponse +
 	// emitMemoryCandidate），因此挂起不会重复提交。
-	Evt          *agentIO.InputEvent
-	CleanInput   string
-	IsInterrupt  bool
-	StartedAt    time.Time
-	Terminal     taskTerminal
-	Level        Level
-	PreemptCount int
+	Evt         *agentIO.InputEvent
+	CleanInput  string
+	IsInterrupt bool
+	StartedAt   time.Time
+	Terminal    taskTerminal
+	Level       Level
 
 	// SeedMsgs 非空时，stepPrepare 不重建 system prompt / 记忆上下文，
 	// 而是以它为前缀继续（D1=A：抢占式中断任务继承被打断任务的**只读前缀**）。
@@ -148,7 +147,7 @@ func (a *Agent) runTaskSteps(f *TaskFrame) stepOutcome {
 	for i := 0; i < maxSteps; i++ {
 		// 安全点：只在 step 之间检查让位。临界区（StepToolExec）不在此列，
 		// 因为让位信号由 interruptLoop 置位、而本循环是唯一读帧者。
-		if !a.inCriticalSection() && a.sched.preemptGrantedFor(f.Level) && a.sched.canSuspend() {
+		if !a.inCriticalSection() && a.sched.preemptGrantedFor() && a.sched.canSuspend() {
 			return outcomeSuspended
 		}
 		switch a.step(f) {

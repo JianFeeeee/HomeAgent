@@ -210,7 +210,7 @@ func TestPreempt_LowerOrEqualDoesNotPreempt(t *testing.T) {
 	if a.sched.requestPreempt(e2, LevelBackground) {
 		t.Fatal("更低级不得抢占")
 	}
-	if a.sched.preemptGrantedFor(LevelInteractive) {
+	if a.sched.preemptGrantedFor() {
 		t.Fatal("未 arm 让位信号，preemptGrantedFor 应为 false")
 	}
 
