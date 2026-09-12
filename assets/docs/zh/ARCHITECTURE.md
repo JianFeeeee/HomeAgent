@@ -90,8 +90,8 @@ eventLoop() → processTextInput()
    RelevanceContext — 内存 events[] + JSON持久化
    Append: 每次输入, CleanText → 三分支向量(textForVector)
             agent事件→Response, 用户事件→Input, cold_storage→Input+Response
-            StaticEmbedder 预训练词嵌入 / TF-IDF 回退
-   Prune:  StaticEmbedder CosineSimilarity, 保留 topK + 最近10条
+            向量层级：统一多模态空间（主，带 fingerprint）→ StaticEmbedder 词嵌入 → TF-IDF（回退）
+   Prune:  DenseCosine（仅同指纹才比较）→ 退化 StaticEmbedder CosineSimilarity；保留 topK + 最近10条
        ├── 保留 → timeline → 按时间排序 → system prompt
        └── 低分 → Document 层归档 (原始时间戳)
    Save: 5s debounce 写盘
@@ -99,7 +99,7 @@ eventLoop() → processTextInput()
          ↓ Prune 归档                          ↑ LLM 主动召回
 
 ② Document (文件记忆)
-   DocStore — JSON文件 + 与 Context 共享的 StaticEmbedder 向量空间（兜底: TF-IDF InvertedIndex）
+   DocStore — JSON文件 + 稠密向量（统一多模态空间；dense_fp 须与当前空间同指纹，不符即重算；兜底: StaticEmbedder / TF-IDF InvertedIndex）
    写入: Prune归档 / doc_commit / Graph快照(syncGraphToDocs)
    读取:
        ├── 自动注入: Query(input, top3) → 同一向量空间下相似度摘要 → 【相关记忆文档】→ system prompt (只读)

@@ -90,8 +90,8 @@ Setting `ctx.Response` at any stage jumps to `after_output`.
    RelevanceContext — In-memory events[] + JSON persistence
    Append: Each input, CleanTemplateText → three-branch vector(textForVector)
            agent→Response, user→Input, cold_storage→Input+Response
-           StaticEmbedder pretrained word embedding / TF-IDF fallback
-   Prune:  StaticEmbedder CosineSimilarity, keep topK + last 10
+           Vector layers: unified multimodal space (primary, with fingerprint) → StaticEmbedder word embedding → TF-IDF (fallback)
+   Prune:  DenseCosine (compared only within the same fingerprint) → StaticEmbedder CosineSimilarity fallback; keep topK + last 10
        ├── Keep → timeline → chronologically sorted → system prompt
        └── Low score → Document layer archive (original timestamp)
    Save: 5s debounce write to disk
@@ -99,7 +99,7 @@ Setting `ctx.Response` at any stage jumps to `after_output`.
          ↓ Prune archive                       ↑ LLM active recall
 
 ② Document (File Memory)
-   DocStore — JSON files + shared StaticEmbedder vector space with Context (fallback: TF-IDF InvertedIndex)
+   DocStore — JSON files + dense vectors (unified multimodal space; dense_fp must match the current space fingerprint or the doc is recomputed; fallback: StaticEmbedder / TF-IDF InvertedIndex)
    Write: Prune archive / doc_commit / Graph snapshot (syncGraphToDocs)
    Read:
        ├── Auto-inject: Query(input, top3) → similarity summary under same vector space → [Related Memory Docs] → system prompt (read-only)
