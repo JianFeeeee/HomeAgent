@@ -49,7 +49,7 @@ type KernelStatus struct {
 
 	// Scheduler 是输入调度器的运行时快照（可观测性，设计文档 §11 O1/O2）。
 	// M2 起输入不再直接排队在 channel 上，而是经 readyQueue/pendingInterrupts/
-	// suspendPool 三集合按优先级调度；这里把这些状态暴露出来。
+	// suspendStack 三集合按优先级调度；这里把这些状态暴露出来。
 	Scheduler SchedulerStatus `json:"scheduler"`
 }
 
@@ -57,10 +57,10 @@ type KernelStatus struct {
 type SchedulerStatus struct {
 	// Running 是当前执行的任务（空表示空闲）。
 	Running *SchedulerTask `json:"running,omitempty"`
-	// ReadyQueueDepth / PendingInterrupts / SuspendPool 是三个集合的深度。
+	// ReadyQueueDepth / PendingInterrupts / SuspendStack 是三个集合的深度。
 	ReadyQueueDepth   int `json:"ready_queue_depth"`
 	PendingInterrupts int `json:"pending_interrupts"`
-	SuspendPool       int `json:"suspend_pool"`
+	SuspendStack      int `json:"suspend_stack"`
 	MaxSuspendDepth   int `json:"max_suspend_depth"`
 
 	Enqueued  uint64 `json:"enqueued"`

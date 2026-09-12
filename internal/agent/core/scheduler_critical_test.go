@@ -67,8 +67,8 @@ func TestPreempt_DeferredDuringToolExec(t *testing.T) {
 	if a.DumpScheduler().Running == nil {
 		t.Fatal("工具执行中不得挂起（StepToolExec 是临界区）")
 	}
-	if len(a.DumpScheduler().SuspendPool) != 0 {
-		t.Fatal("工具执行中 suspendPool 应为空")
+	if len(a.DumpScheduler().SuspendStack) != 0 {
+		t.Fatal("工具执行中 suspendStack 应为空")
 	}
 
 	// 放行工具 → 工具返回后的安全点才挂起。
@@ -80,11 +80,11 @@ func TestPreempt_DeferredDuringToolExec(t *testing.T) {
 	}
 
 	snap := a.DumpScheduler()
-	if len(snap.SuspendPool) != 1 {
-		t.Fatalf("工具返回后 suspendPool=%d，期望 1", len(snap.SuspendPool))
+	if len(snap.SuspendStack) != 1 {
+		t.Fatalf("工具返回后 suspendStack=%d，期望 1", len(snap.SuspendStack))
 	}
-	if snap.SuspendPool[0].Frame.Step != StepToolAfter {
-		t.Fatalf("应在工具执行后的安全点挂起（StepToolAfter），实际 %v", snap.SuspendPool[0].Frame.Step)
+	if snap.SuspendStack[0].Frame.Step != StepToolAfter {
+		t.Fatalf("应在工具执行后的安全点挂起（StepToolAfter），实际 %v", snap.SuspendStack[0].Frame.Step)
 	}
 	if len(snap.PendingInterrupts) != 1 {
 		t.Fatalf("中断请求不得丢失，pendingInterrupts=%d", len(snap.PendingInterrupts))
@@ -142,7 +142,7 @@ func TestBatch_NotAbandonedWithoutPreemption(t *testing.T) {
 		t.Fatalf("同批工具应全部按序执行，实际 %v", ran)
 	}
 	snap := a.DumpScheduler()
-	if len(snap.SuspendPool) != 0 || len(snap.PendingInterrupts) != 0 {
+	if len(snap.SuspendStack) != 0 || len(snap.PendingInterrupts) != 0 {
 		t.Fatalf("无抢占时不应有挂起或待处理中断：%+v", snap)
 	}
 	if snap.Stats.Executed != 1 {
