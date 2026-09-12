@@ -503,6 +503,12 @@ v1 采纳：**`S_TOOL_EXEC` / ONNX / CAS 属于临界区，调度器在这些 st
 | E1 | 真实 provider + 假长工具 | 启动内核，用一个会阻塞 5s 的假工具跑 L1 任务，途中经 `interceptCh` 注入 L4 中断 | 中断**在工具执行期间不被处理**；工具返回后立即抢占；中断任务先完成；原任务恢复并完成 |
 | E2 | LLM 流式中断 | 假 Provider 慢速流式返回 | 中断后当前流被 cancel，任务挂起，中断任务完成，原任务恢复并重新请求 |
 | E3 | 现有 e2e 回归 | 跑 `internal/plugins/integration_test.go`、`real_plugin_smoke_test.go` | 行为不变（除文档化的语义变化） |
+| **E4** | **优先级压力（用户指定形状）** | 固定内容假 provider（**记延迟，且被取消时立刻返回**），100 条排队输入 + 100 条中断（L1/L2/L3/L4 各 25）混合打入；每条中断都等到“该被它打断的受害者正在跑”时才注入 | 200 个任务全部到达终态；`Rejected=0`；各级登记数 = 25；**各级抢占数都 > 0**；排空后 `Suspended == Resumed`；每次“取消流式段”都换来一次挂起 |
+| **E5** | **嵌套到结构上限并 LIFO 展开** | 排队任务运行中依次注入 L1→L2→L3→L4（每级都等上一级在跑） | 栈深峰值恰好 **4**（= 结构上限，`canSuspend()==false`）；恢复顺序严格 LIFO `[L3, L2, L1, 排队]`；`Suspended==Resumed==4` |
+
+> E4/E5 的 provider 必须**感知 ctx 取消**：否则抢占只能等任务自然结束，
+> 测到的全是"步骤之间让位"，流式段的取消路径（真正的现场保存/恢复）压不到。
+> 实测：不感知取消时 `LLM完成 == 任务数`、挂起接近 0；感知后取消次数与挂起次数一一对应。
 
 ---
 
@@ -587,7 +593,10 @@ go test -race -count=1 ./internal/agent/... ./internal/plugin/... ./internal/sdk
 | L4 内核独占 | `raiseKernelInterrupt`（panic/selfip）；`requestKernelPreempt` 不夹取；panic 报告为 L4 且带递归保护 | P10、`TestKernel_PanicRaisesL4Interrupt` |
 | 选择结构 | `immediate` + 四条中断队列 + 排队 FIFO + 中断栈；删除统一比较器 `pickTaskIndex`/`taskBefore` 与“同级 pending 优先”补丁 | Q1–Q3、Q6 |
 | 栈上界 | `maxSuspendDepth`（配置语义）→ `maxInterruptFrames = int(LevelCritical)`（结构推论）；删除“超限转 pending”降级 | D1T |
-| 公开 SDK | `InjectOptions.Priority` + `PriorityL1/L2/L3`；io/proc 桥/插件模板同步透传；`example/qq` 声明 L1 | `go test ./...` 全绿 |
+| 公开 SDK | `InjectOptions.Priority` + `PriorityL1..L4`；io/proc 桥/插件模板同步透传；`example/qq` 声明 L1、`timer` 声明 L3、`webui` 终止按钮声明 L4 | `go test ./...` 全绿 |
+| 分级可观测 | `SchedulerStats.InterruptsByLevel[1..4]` / `PreemptsByLevel[1..4]`（按级别分桶，见 §11.6 E4） | 压力测试按级别断言 |
+| 计数修正 | `Resumed` 原本在 `nextRef` 与 `resumeTask` **各计一次**（双计），使"排空后 Suspended==Resumed"失真；现只在 `resumeTask` 计 | E4 断言 |
+| 压力测试 | `scheduler_stress_test.go`：100 排队 + 100 中断（各级 25）混合；另加嵌套到 4 帧上限并验证 LIFO | E4/E5 |
 
 实现期与设计的差异（均已回写本文档）：
 
