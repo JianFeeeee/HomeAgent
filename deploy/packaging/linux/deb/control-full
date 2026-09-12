@@ -3,7 +3,7 @@ Version: VERSION_PLACEHOLDER
 Architecture: ARCH_PLACEHOLDER
 Maintainer: HomeAgent Team <team@homeagent.ai>
 Installed-Size: INSTALLED_SIZE_PLACEHOLDER
-Depends: libc6 (>= 2.28)
+Depends: libc6 (>= 2.28), libstdc++6, libgcc-s1
 Section: utils
 Priority: optional
 Homepage: https://github.com/trueagent/HomeAgent

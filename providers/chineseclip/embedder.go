@@ -269,11 +269,19 @@ func computeFingerprint(modelDir string, cfg embedConfig) string {
 }
 
 func findOnnxLib() string {
-	for _, p := range []string{
+	var candidates []string
+	for _, env := range []string{"ONNXRUNTIME_DIR", "ONNX_ML_DIR"} {
+		if dir := strings.TrimSpace(os.Getenv(env)); dir != "" {
+			candidates = append(candidates, filepath.Join(dir, "libonnxruntime.so"))
+		}
+	}
+	candidates = append(candidates,
+		"/usr/lib/homeagent/onnxruntime/libonnxruntime.so", // 发行包内置位置
 		"/opt/onnxruntime/libonnxruntime.so",
 		"/usr/local/lib/libonnxruntime.so",
 		"/usr/lib/libonnxruntime.so",
-	} {
+	)
+	for _, p := range candidates {
 		if _, err := os.Stat(p); err == nil {
 			return p
 		}

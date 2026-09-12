@@ -8,8 +8,20 @@ CRED_FILE="${DATA_DIR}/credentials.txt"
 CONFIG_DB="${DATA_DIR}/config.db"
 WAITER_CONF="${DATA_DIR}/waiter.yaml"
 INITCONFIG_BIN="/usr/bin/initconfig"
+BUNDLED_MODEL_DIR="/usr/lib/homeagent/models/chinese-clip-vit-b16-onnx"
+MODEL_LINK="${DATA_DIR}/models/chinese-clip-vit-b16-onnx"
 
-# 如果已经初始化过，跳过
+# 模型随 server/full 包安装到只读的 /usr/lib；配置默认仍指向 dataDir/models。
+# 用符号链接把两者接起来，既不复制 754MB，也保持 dataDir 可迁移语义。
+# 用户已有自定义目录时绝不覆盖；升级时既有链接自然指向新版包内容。
+if [ -d "$BUNDLED_MODEL_DIR" ]; then
+  mkdir -p "${DATA_DIR}/models"
+  if [ ! -e "$MODEL_LINK" ] && [ ! -L "$MODEL_LINK" ]; then
+    ln -s "$BUNDLED_MODEL_DIR" "$MODEL_LINK"
+  fi
+fi
+
+# 如果已经初始化过，只跳过凭据/数据库生成；上面的模型链接仍须在升级时补齐。
 if [ -f "$CONFIG_DB" ] && [ -f "$CRED_FILE" ]; then
   exit 0
 fi

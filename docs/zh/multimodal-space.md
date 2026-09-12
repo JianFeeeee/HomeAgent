@@ -149,11 +149,44 @@ core.memory.multimodal_space.options.model_dir = /home/newqqagent/models/chinese
 发行版构建也默认带 `onnxruntime` 标签（`deploy/packaging/build.sh` 的 `HOMED_TAGS`，
 需要极简构建时显式 `HOMED_TAGS=` 关闭）。
 
-已于既有安装：`SeedDefaults` 对非空配置库直接返回（`GetString` 缺键时回落调用方默认值），
-所以老安装**不会**自动拿到这两个默认值，需要显式写配置。这是有意的：
-升级就静默加载 1.8GB 模型不是无副作用的事。
+**老安装不会自动拿到**：播种判据是显式标记 `core.internal.seed_version`。
+老安装（已播种过）下次启动只会被补上标记，**不会**被注入新默认值——
+升级就静默加载 1.8GB 模型不是无副作用的事。要启用请显式写上面两个键。
+
+> 这个判据曾经是「`config` 表为空才播种」。而发行包的 postinst 会先跑
+> `initconfig`，它写一行 `webui.listen_addr` ——于是**全新安装**被误判为
+> "已有配置"，整个播种被跳过：没有 `core.plugin.dir`（装完 0 个插件）、
+> 也没有多模态 provider（随包的模型与运行库成了死重量）。回归测试
+> `TestSeedDefaultsAfterInitconfigPrepopulate` 与
+> `TestSeedDefaultsDoesNotInjectIntoLegacyInstall` 钉住了这两种情形。
 
 同样要求 `homed` 带 `onnxruntime` build tag。
+
+### 随包分发（server / full 包自带模型与运行库）
+
+模型与运行库是发行版能力的一部分，不做成「可选下载」：
+
+| 内容 | 包内路径 |
+|---|---|
+| Chinese-CLIP 产物（754MB） | `/usr/lib/homeagent/models/chinese-clip-vit-b16-onnx/` |
+| ONNX Runtime（24MB） | `/usr/lib/homeagent/onnxruntime/libonnxruntime.so` |
+| 许可证 | `/usr/share/doc/homeagent/licenses/`（Apache-2.0、MIT、ThirdPartyNotices、模型来源） |
+
+- `deploy/packaging/package-linux.sh` 的 `stage_multimodal_assets()` 在打 server/full 前
+  会校验产物 `SHA256SUMS`、逐文件非空、运行库架构与目标一致；**缺一即失败**，
+  不生成「默认启用但装完不能用」的假包。`client` 包不含（它不跑 homed）。
+- 安装时 `setup.sh` 把包内模型目录软链到 `<dataDir>/models/chinese-clip-vit-b16-onnx`
+  （既不复制 754MB，也保持 dataDir 可迁移；已存在的自定义目录绝不覆盖）。
+- 服务单元设 `Environment=ONNXRUNTIME_DIR=/usr/lib/homeagent/onnxruntime`；
+  provider 的查找顺序是 `ONNXRUNTIME_DIR` → `ONNX_ML_DIR` → 包内路径 →
+  `/opt/onnxruntime` → `/usr/local/lib` → `/usr/lib`。
+- 构建机需自备产物：`build/model-assets/chinese-clip-vit-b16-onnx/` 与
+  `build/runtime-assets/<arch>/{libonnxruntime.so,LICENSE,ThirdPartyNotices.txt}`
+  （可用 `CHINESECLIP_BUNDLE_DIR` / `ONNXRUNTIME_ASSET_DIR` 覆盖）。
+
+实测（从真实 deb 解包、按 postinst 顺序跑 `setup.sh`、再冷启动包内 homed）：
+`multimodal space active: provider=chineseclip dim=512 fp=cd2a495cf990 modalities=[text image]`，
+并完成一次真实对话；`homeagent-server` 包 722MB（旧版 17MB），差额即模型与运行库。
 
 #### ORT 环境是进程级单例（单主不析构）
 
