@@ -132,11 +132,22 @@ Setting `ctx.Response` at any stage jumps to `after_output`.
      → triples → GraphDB.Commit
 ```
 
-### Vectorization: Pretrained Word Embedding + TF-IDF Fallback
+### Vectorization: Unified Multimodal Space (primary) → Word Embedding → TF-IDF (fallback)
 
-All vectorization unified under `StaticEmbedder` (`internal/memory/static_embedder.go`):
+Vectorization degrades through three layers by availability; **each missing layer reports an explicit
+error and never pretends to succeed**:
 
-**Primary Strategy — Pretrained Word Embedding (aligned 300d)**
+**① Unified multimodal space (primary path, since v1.2.0)**
+Text and images share **one model, one dimension, one fingerprint** (default `chineseclip`: 512d,
+Apache-2.0, Chinese-native; `qwen3vl` or an external `http` provider are alternatives).
+Providers register through the public `pkg/embedding` SPI — **the kernel hardcodes no model**.
+Vectors persist together with their fingerprint (`dense_fp` / `vec_model`); any mismatch with the
+current fingerprint triggers recomputation, and only blocks with the **same fingerprint and the same
+dimension** participate in fusion (mixing coordinate systems yields a direction resembling neither).
+
+**② Word embedding (text fallback)** — `StaticEmbedder` (`internal/memory/static_embedder.go`):
+
+**Model sources** (aligned 300d)
 - Model sources: ConceptNet Numberbatch (77-language aligned) / fastText Chinese / fastText English
 - Configured via `core.agent.embedding_model_path` (comma-separated multi-model)
 - Path containing `numberbatch` → auto-download ConceptNet; `cc.zh.` → fastText Chinese; `cc.en.` → fastText English
@@ -196,28 +207,32 @@ single typo silently breaks reference binding with no error anywhere in the chai
 also gained `sentence_text`: media references hang off a sentence, so with no sentence there is
 nowhere to attach them.
 
-### Media Memory (since v1.1.0)
+### Media Memory (since v1.2.0: first-class memory blocks)
 
-`internal/memory/media/` — `Store`, content-addressed (CAS)
+Media is not attached content but a **first-class memory node**: `internal/memory/media/` is a
+content-addressed store (CAS), and graph `block` nodes carry its digest plus its own vector, while
+structural edges (e.g. `sentence --contains--> block`) express ownership.
 
 | Concern | Approach | Why |
 |---|---|---|
-| Addressing | sha256 digest; metadata in SQLite, blobs on disk | Identical bytes stored once; metadata must be queryable, blobs must not live in the database |
+| Addressing | sha256 digest; metadata in SQLite, blobs on disk (`blobs/<first2>/<rest>`, two-level fanout) | Identical bytes stored once; metadata must be queryable, blobs must not live in the database |
 | Integrity | Every `Get` re-verifies the digest | Silently returning corrupt data on disk damage is far worse than an error |
 | Write atomicity | `.tmp` + rename | A half-written file taken as complete content would permanently poison that digest |
-| References | `owner_kind/owner_id/digest` composite primary key, `AddRef` idempotent | Three owner kinds: `context` (context events), `document`, `graph_sentence` |
-| GC | Two-stage with `minAge`, **referenced items are never deleted** | Description text stays in the text layers while blobs may be evicted — semantic memory and byte cache are decoupled |
+| Retrieval | Blocks carry **their own multimodal vector and fingerprint** and are searched directly | No description text is needed as an intermediary |
+| Lifecycle | **No separate GC, no refcounts, no keep-set**; deleting the block deletes the content | Media is a memory node, not a cache that needs keeping alive |
 
-**How media is represented in plain-text memory** is the marker `[<mime> <short digest>] <description>`:
+**Description-based indexing is gone**: the old implementation embedded a
+`[<mime> <short digest>] <description>` marker in the body and treated the description as the
+semantic memory (retrieval used it). That path was removed wholesale in v1.2.0: a description is
+second-hand model output, and retrieving "someone else's paraphrase of an image" is strictly worse
+than retrieving the image's own vector. Images are now retrieved only by their own vector in the
+unified space, and no media marker is written into the body.
 
-```
-[image/png a1b2c3d4e5f6] a purple-blue-red three-band chart
-```
-
-Why it must ride on text: `Doc.Content`, `sentences.text` and text memory's `Input` are all strings
-— there is no field to carry structured data. **The description text is the durable semantic
-memory** (retrieval uses it); the digest is the key back to the bytes (reverse lookup uses it).
-After capacity GC evicts a blob, the description remains in the L0/L2/L3 text.
+**Cross-space vector migration**: media rows store their vector together with `vec_model` (the space
+fingerprint). At startup `reembedStaleMedia()` recomputes and **writes back** every row whose
+`vec_model` is empty (never embedded) or differs from the current space (model/dimension switched).
+Modalities outside the space return `ErrModalityUnsupported` — the kernel **never substitutes
+another model's vector**.
 
 The media store is **optional throughout**: with `core.memory.media.enabled=false` or no
 configuration, the whole chain silently degrades to plain-text behaviour — no errors, no panics.
@@ -292,7 +307,7 @@ VM built-ins: `json.encode` / `json.decode` / `log` / `http_get` / `http_post`.
 | Method | Registration Mechanism | Compilation | Usage |
 |--------|----------------------|-------------|-------|
 | Built-in | `init()` → `RegisterFactory` | `internal/plugins/` compiled into kernel | webui/cli/timer/mcp etc. |
-| External subprocess plugin | Handshake + stdio JSON-RPC reverse registration | `plugindev build` → `plugin.bin` (ordinary Go binary) | qq/browser/files etc. |
+| External subprocess plugin | Handshake + stdio JSON-RPC reverse registration | `hmapdev build` → `plugin.bin` (ordinary Go binary) | qq/browser/files etc. |
 | Lua script plugin | Execute `main.lua` to register tools | No compilation, takes effect after restart/reload | luademo etc. |
 | SKILL plugin | Parse `SKILL.md` | Markdown definition | Loaded via clawhubadapter |
 
@@ -311,7 +326,7 @@ Lua script plugin loading: `internal/plugin/` → the gopher-lua interpreter exe
 | Dimension | Built-in Plugin | External Plugin |
 |-----------|----------------|-----------------|
 | Registration | `init()` calls `plugin.RegisterFactory(name, factory)` | Implements `NewPluginFactory(name, config) (sdk.Plugin, error)` entry function |
-| Compilation | Compiled into `homed` binary, no separate build | Compiled via `plugindev build` to `plugin.bin` (ordinary Go binary, zero cgo); the kernel spawns it as a subprocess |
+| Compilation | Compiled into `homed` binary, no separate build | Compiled via `hmapdev build` to `plugin.bin` (ordinary Go binary, zero cgo); the kernel spawns it as a subprocess |
 | Distribution | Bundled with kernel, not independently installable | `.hmap` package (ZIP archive), installed via WebUI or pluginmgr API |
 | Metadata | `plugin.RegisterPluginMeta()` for display name | `plugin.json` manifest file (name, version, entry, platforms, capabilities, etc.) |
 | Plugin directory | No separate directory, compiled into binary | `plugins/<name>/` independent directory with `plugin.json` + `plugin.bin` |

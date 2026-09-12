@@ -24,7 +24,7 @@ import (
 // 所以选择：**原生 Windows 不提供 homed**。Windows 用户跑 WSL2——
 // WSL2 里就是普通 linux/amd64，走与我们测试矩阵完全相同的那条路径。
 //
-// 注意范围：只有 homed 如此。plugindev 工具链仍可在 Windows 上运行
+// 注意范围：只有 homed 如此。hmapdev 工具链仍可在 Windows 上运行
 // （在 Windows 上开发、为 WSL 构建 linux 插件是合理工作流）。
 func requireSupportedPlatform() {
 	fmt.Fprintln(os.Stderr, "homed 不支持 Windows 原生运行。")

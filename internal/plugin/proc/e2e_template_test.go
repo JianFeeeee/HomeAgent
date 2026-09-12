@@ -10,11 +10,11 @@ import (
 	pubsdk "gitcode.com/JianFeeeee/homeagent-sdk/sdk"
 )
 
-// 端到端：用**真实 plugindev 模板**编译的插件，经内核 proc 通道加载运行。
+// 端到端：用**真实 hmapdev 模板**编译的插件，经内核 proc 通道加载运行。
 //
 // 与 plugin_test.go 中 testdata/*.go 假插件的区别：
 // 那些是手写的最简 RPC 实现，只验证内核侧逻辑；
-// 这里用的是 tools/plugindev/templates/proc_main.go.tmpl —— 外部插件作者
+// 这里用的是 tools/hmapdev/templates/proc_main.go.tmpl —— 外部插件作者
 // 真正会拿到的那份运行时。它验证的是「模板 ↔ 内核」两侧协议/布局真的对齐，
 // 而不只是内核自己跟自己对齐。
 //
@@ -101,9 +101,9 @@ func (p *e2ePlugin) Start(s *sdk.PluginSDK) error {
 func (p *e2ePlugin) Stop() error { return nil }
 `
 
-// procRuntimeTemplates 列出 plugindev 会生成到插件目录的运行时文件。
+// procRuntimeTemplates 列出 hmapdev 会生成到插件目录的运行时文件。
 //
-// 必须与 SDK 仓 tools/plugindev/proc_runtime.go 的 procRuntimeFiles 一致：
+// 必须与 SDK 仓 tools/hmapdev/proc_runtime.go 的 procRuntimeFiles 一致：
 // 共享段与事件通知的传递机制按平台不同（Unix 继承 fd，Windows 命名
 // 内核对象），故拆成带 build tag 的文件；只写主模板会编译失败。
 var procRuntimeTemplates = []struct {
@@ -115,15 +115,21 @@ var procRuntimeTemplates = []struct {
 	{"proc_shm_windows.go.tmpl", "z_proc_shm_windows.go"},
 }
 
-// buildPluginWithRealTemplate 用 plugindev 的真实模板编译一个插件二进制。
+// buildPluginWithRealTemplate 用 hmapdev 的真实模板编译一个插件二进制。
 func buildPluginWithRealTemplate(t *testing.T, businessCode string) string {
 	t.Helper()
 	if _, err := exec.LookPath("go"); err != nil {
 		t.Skip("环境无 go 工具链，跳过端到端测试")
 	}
 
+	// 工具链在 SDK 1.2.0 起改名 hmapdev（原 plugindev）。两个目录都接受：
+	// 旧检出（软链或旧版 SDK 仓）仍能跑本测试，新检出走新路径。
 	tmplDir := filepath.Join("..", "..", "..",
-		"third_party", "homeagent-sdk", "tools", "plugindev", "templates")
+		"third_party", "homeagent-sdk", "tools", "hmapdev", "templates")
+	if _, err := os.Stat(tmplDir); err != nil {
+		tmplDir = filepath.Join("..", "..", "..",
+			"third_party", "homeagent-sdk", "tools", "plugindev", "templates")
+	}
 
 	dir := t.TempDir()
 	mustWriteFile(t, filepath.Join(dir, "plugin.go"), businessCode)
@@ -131,7 +137,7 @@ func buildPluginWithRealTemplate(t *testing.T, businessCode string) string {
 	for _, rt := range procRuntimeTemplates {
 		data, err := os.ReadFile(filepath.Join(tmplDir, rt.tmpl))
 		if err != nil {
-			t.Skipf("plugindev 模板 %s 不可读（SDK 仓可能未就位）: %v", rt.tmpl, err)
+			t.Skipf("hmapdev 模板 %s 不可读（SDK 仓可能未就位）: %v", rt.tmpl, err)
 		}
 		mustWriteFile(t, filepath.Join(dir, rt.out), string(data))
 	}

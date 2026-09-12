@@ -132,11 +132,20 @@ eventLoop() → processTextInput()
      → 三元组 → GraphDB.Commit
 ```
 
-### 向量化：预训练词嵌入 + TF-IDF 回退
+### 向量化：统一多模态空间（主）→ 词嵌入 → TF-IDF（回退）
 
-所有向量化统一使用 `StaticEmbedder`（`internal/memory/static_embedder.go`）：
+向量化按可用性分三层降级，**每一层缺位都明确报错，不静默假装成功**：
 
-**主策略 — 预训练词嵌入（词对齐 300 维）**
+**① 统一多模态空间（主路径，v1.2.0 起）**
+文本与图像共用**同一模型、同一维度、同一指纹**（默认 `chineseclip`：512 维、Apache-2.0、中文原生；
+亦可选 `qwen3vl` 或外部 `http` provider）。provider 经 `pkg/embedding` 公共 SPI 注册，
+**内核不硬编码任何模型**。向量与指纹一起持久化（`dense_fp` / `vec_model`），
+与当前指纹不一致即触发重算；融合时只接受**同指纹且同维度**的块向量
+（跨坐标系的向量混进去会算出两边都不像的方向）。
+
+**② 词嵌入（文本兜底）** — `StaticEmbedder`（`internal/memory/static_embedder.go`）：
+
+**模型来源**（词对齐 300 维）
 - 模型来源：ConceptNet Numberbatch（77 语对齐）/ fastText 中文 / fastText 英文
 - 通过 `core.agent.embedding_model_path` 配置（逗号分隔多模型）
 - 路径名含 `numberbatch` → 自动下载 ConceptNet，含 `cc.zh.` → fastText 中文，含 `cc.en.` → fastText 英文
@@ -194,30 +203,31 @@ eventLoop() → processTextInput()
 要求调用方知道格式，等于让一个拼写错误静默切断引用绑定而全链路无人报错。
 `memory_commit` 同时新增 `sentence_text`：媒体引用挂在句子上，没有句子就无处可挂。
 
-### 媒体记忆（v1.1.0 起）
+### 媒体记忆（v1.2.0 起：一等记忆块）
 
-`internal/memory/media/` — `Store`，内容寻址（CAS）
+媒体不是外挂内容，而是**记忆的一等节点**：`internal/memory/media/` 是内容寻址仓储（CAS），
+图数据库里的 block 节点携带它的 digest 与向量，结构边（如 `sentence --contains--> block`）表达归属。
 
 | 关注点 | 做法 | 为何 |
 |---|---|---|
-| 寻址 | sha256 digest，元数据在 SQLite、blob 在磁盘 | 相同字节只存一份；元数据要可查询，blob 不该进数据库 |
+| 寻址 | sha256 digest；元数据在 SQLite，blob 在磁盘（`blobs/<前2位>/<其余>` 两级分桶） | 相同字节只存一份；元数据要可查询，blob 不该进数据库 |
 | 完整性 | 每次 `Get` 重校 digest | 磁盘损坏时静默返回脏数据比报错危险得多 |
 | 写入原子性 | `.tmp` + rename | 半个文件被当成完整内容会永久污染那个 digest |
-| 引用 | `owner_kind/owner_id/digest` 三元组主键，`AddRef` 幂等 | 三个 owner 类型：`context`（上下文事件）、`document`（文档）、`graph_sentence`（图谱句子） |
-| GC | 两阶段 + `minAge`，**有引用者绝不删** | 描述文本留在文本层，blob 可淘汰——语义记忆与字节缓存分离 |
+| 检索 | 块携带**自己的多模态向量与指纹**，直接参与向量检索 | 不需要描述文本做中介 |
+| 生命周期 | **无独立 GC、无引用计数、无 keep-set**；删除块即删内容 | 媒体是记忆节点，不是需要保活的缓存 |
 
-**媒体在纯文本记忆里的表示**是标记 `[<mime> <短digest>] <描述>`：
+**不再有描述式索引**：旧实现在正文里写 `[<mime> <短digest>] <描述>` 标记，并把描述文本当作语义记忆
+（检索靠描述）。该机制已在 v1.2.0 整体拆除：描述是模型生成的二手信息，
+检索“别人转述的图片”不如检索图片自己的向量。现在图片只按自己的统一空间向量被检索，
+正文里不再有 media marker。
 
-```
-[image/png a1b2c3d4e5f6] 一张紫蓝红三色带图
-```
+**跨空间向量迁移**：媒体行的向量带 `vec_model`（空间指纹）。启动时
+`reembedStaleMedia()` 把 `vec_model` 为空（从未嵌入）或与当前空间不一致（换过模型/维度）的行
+批量重算并**写回库**；模态不在本空间覆盖范围时返回 `ErrModalityUnsupported`，
+**绝不拿别的模型的向量顶替**。
 
-之所以必须借文本承载：`Doc.Content`、`sentences.text`、文本记忆的 `Input` 全是字符串，
-没有字段能挂结构化数据。**描述文本才是持久的语义记忆**（检索靠它），digest 是回到字节的
-钥匙（反查靠它）。blob 被容量 GC 淘汰后，描述仍留在 L0/L2/L3 的文本里。
-
-媒体存储**全程可选**：`core.memory.media.enabled=false` 或未配置时，整条链路静默退化为
-纯文本行为，不报错不 panic。
+媒体存储全程可选：`core.memory.media.enabled=false` 或未配置时，整条链路静默退化为纯文本行为，
+不报错不 panic。
 
 ### 其他记忆层
 
@@ -287,7 +297,7 @@ VM 内置 `json.encode` / `json.decode` / `log` / `http_get` / `http_post`。
 | 方式 | 注册机制 | 编译 | 用途 |
 |------|----------|------|------|
 | 内置插件 | `init()` → `RegisterFactory` | `internal/plugins/` 编译进内核 | webui/cli/timer/mcp 等 |
-| 外部子进程插件 | 握手 + stdio JSON-RPC 反向注册 | `plugindev build` → `plugin.bin`（普通 Go 二进制） | qq/browser/files 等 |
+| 外部子进程插件 | 握手 + stdio JSON-RPC 反向注册 | `hmapdev build` → `plugin.bin`（普通 Go 二进制） | qq/browser/files 等 |
 | Lua 脚本插件 | 执行 `main.lua` 注册工具 | 无需编译，重启/重载生效 | luademo 等 |
 | SKILL 插件 | 解析 `SKILL.md` | Markdown 定义 | clawhubadapter 兼容加载 |
 
@@ -306,7 +316,7 @@ Lua 脚本插件加载：`internal/plugin/` → gopher-lua 解释器执行 `main
 | 维度 | 内置插件 | 外部插件 |
 |------|----------|----------|
 | 注册方式 | `init()` 调用 `plugin.RegisterFactory(name, factory)` | 实现 `NewPluginFactory(name, config) (sdk.Plugin, error)` 入口函数 |
-| 编译方式 | 编译进 `homed` 二进制，无需独立编译 | 通过 `plugindev build` 编译为 `plugin.bin`（普通 Go 二进制，零 cgo），内核 spawn 为子进程 |
+| 编译方式 | 编译进 `homed` 二进制，无需独立编译 | 通过 `hmapdev build` 编译为 `plugin.bin`（普通 Go 二进制，零 cgo），内核 spawn 为子进程 |
 | 分发方式 | 随内核分发，不可独立安装/卸载 | `.hmap` 包（ZIP 归档），通过 WebUI 或 pluginmgr API 安装 |
 | 元数据 | 通过 `plugin.RegisterPluginMeta()` 注册显示名 | `plugin.json` manifest 文件（name, version, entry, platforms, capabilities 等） |
 | 插件目录 | 无独立目录，编译进二进制 | `plugins/<name>/` 独立目录，包含 `plugin.json` + `plugin.bin` |
