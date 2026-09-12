@@ -95,15 +95,20 @@ Step（枚举，顺序执行，步与步之间是安全点）：
 - **默认级 = `L1`**：未显式声明一律最低级（"显式才是特权"，避免新插件默认获得抢占权）。
 - **取值域仅这四档**，不引入任意整数，避免"9 级比 4 级大但没人知道怎么排"。
 
-### 3.2 优先级从哪来（v1：内核策略表）
+### 3.2 优先级从哪来（内核内部属性，**不做成配置项**）
 
-v1 **不**在公开 SDK 上加字段，来源有三，按优先级取：
+优先级是**内核内部属性**：内核预定义四级，并按**内核自己的规则**为任务与中断定级。
 
-1. 内核策略表：`core.agent.priority.<channel>`（新增 ConfigDef，值 `L1..L4`）；
-2. `ChannelDef` 的内核侧扩展（仅 `internal/sdk` 可用，内置插件可声明）；
-3. 未命中 → `L1`。
+- ❌ **不是运维可调项**。不引入 `core.agent.priority.<channel>` 这类配置键，
+  也不把 `PriorityLookup` 做成可注入的策略表——那等于把内核的调度内部属性
+  外化成配置，与“谁能打断谁”的内部语义相反。
+- ❌ 也不暴露给插件声明（这个方向曾写入 v2 计划，已删除）。
+- ✅ v1 的内部缺省规则（仅为实现缺省值，语义上是内核自己的事）：
+  `cli`/`webui`/`http` → `L3`；`system` / `_consolidation_` → `L1`；其余 → `L1`（默认级）。
+- 定级规则可随内核演进调整，但**始终不对外暴露**。
 
-> v2 再把 `ChannelDef.Priority` / `InjectOptions.Priority` 加入公开 SDK（纯追加），见 §13。
+> 具体“哪类工作算哪一级”的完整规则由内核定义；本稿只固定四级语义与定级位置
+> （`(*Agent).taskLevel`），不承诺配置面。
 
 ### 3.3 抢占判据
 
@@ -475,7 +480,9 @@ go test -race -count=1 ./internal/agent/... ./internal/plugin/... ./internal/sdk
 ## 15. 开放问题（后续版本）
 
 1. 异步 step + `tool.cancel`（真正让工具可抢占）。
-2. `ChannelDef.Priority` / `InjectOptions.Priority` 进入公开 SDK。
-3. 帧落盘（跨进程/崩溃恢复）。
-4. 多 agent 并行调度。
-5. 与 `plan.md` §13.7 的 `RuntimeManager + 分组 worker` 合并（本设计是其前置）。
+2. 帧落盘（跨进程/崩溃恢复）。
+3. 多 agent 并行调度。
+4. 与 `plan.md` §13.7 的 `RuntimeManager + 分组 worker` 合并（本设计是其前置）。
+
+> 已删除：“`ChannelDef.Priority` / `InjectOptions.Priority` 进入公开 SDK”——
+> 优先级是内核内部属性（§3.2），不应由插件声明。
