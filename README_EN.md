@@ -246,3 +246,30 @@ make install            # Install to system
 ```
 
 Dependencies: Go 1.25+, CGo (go-sqlite3), Linux/Windows.
+
+## License
+
+This project is released under the **GNU Affero General Public License, version 3
+(AGPL-3.0-only)** — see [LICENSE](LICENSE).
+
+This is the strongest copyleft in the GPL family: besides shipping the complete corresponding
+source when you distribute the software, **you must also offer the source to users who interact
+with it over a network** (§13, Remote Network Interaction). Anyone running a modified HomeAgent
+as a network service therefore has to make the modified source available to that service's users.
+
+Plugins are **statically linked** against this project through the public SDK (the SDK source
+ends up inside the plugin binary), so plugins are derivative works and must be released under
+the same license. Process isolation does not change this — what is linked is the SDK code itself.
+
+### Third-party components shipped with the packages
+
+| Component | License | Location |
+|---|---|---|
+| Chinese-CLIP ViT-B/16 (ONNX artifacts) | Apache-2.0 | `/usr/lib/homeagent/models/chinese-clip-vit-b16-onnx/` |
+| ONNX Runtime (`libonnxruntime.so`) | MIT | `/usr/lib/homeagent/onnxruntime/` |
+| jieba dictionary (embedded in the binary) | MIT | `internal/memory/jiebadict/` |
+| Go dependencies (go-sqlite3, gojieba, bubbletea, …) | MIT / BSD-3 / Apache-2.0 | permissive, AGPL-3.0-compatible |
+
+These components keep their own licenses and are not relicensed by this project. Full texts are
+shipped in `/usr/share/doc/homeagent/licenses/`, and the package metadata declares this package
+as `AGPL-3.0-only`.
