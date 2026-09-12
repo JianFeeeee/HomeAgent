@@ -11,7 +11,7 @@ package core
 //   - **每任务 panic 隔离**：panic 只使该任务失败，调度器本身存活（不变量 I6）。
 //
 // M2 全部任务都是 LevelBackground（默认级），因此排序结果等价于 FIFO——
-// 与改造前的 channel 语义逐条一致。抢占、suspendPool、pendingInterrupts、
+// 与改造前的 channel 语义逐条一致。抢占、中断栈、pendingInterrupts、
 // 任务级回执在 M3–M6 加入。
 //
 // 并发模型（不变量 I2）：readyQueue/running/stats 只由 schedulerLoop 写，
@@ -152,9 +152,10 @@ type SchedulerSnapshot struct {
 	Running           *Task
 	Queue             []*Task
 	PendingInterrupts []*Task
-	SuspendPool       []*suspendedTask
-	Stats             SchedulerStats
-	MaxSuspendDepth   int
+	// SuspendStack：中断栈（含嵌套抢占的多个现场），**栈顶**优先恢复。
+	SuspendStack    []*suspendedTask
+	Stats           SchedulerStats
+	MaxSuspendDepth int
 }
 
 // schedulerStatus 把快照转成对外的状态 DTO（不暴露帧内容）。
@@ -166,7 +167,7 @@ func (a *Agent) schedulerStatus() sdk.SchedulerStatus {
 	out := sdk.SchedulerStatus{
 		ReadyQueueDepth:   len(snap.Queue),
 		PendingInterrupts: len(snap.PendingInterrupts),
-		SuspendPool:       len(snap.SuspendPool),
+		SuspendStack:      len(snap.SuspendStack),
 		MaxSuspendDepth:   snap.MaxSuspendDepth,
 		Enqueued:          snap.Stats.Enqueued,
 		Executed:          snap.Stats.Executed,
@@ -194,8 +195,9 @@ type scheduler struct {
 	// pendingInterrupts：因优先级不足（或运行任务在临界区）而未立即抢占的中断请求。
 	// 与 readyQueue 分离：取出时以中断语义启动（设计文档 D3）。
 	pendingInterrupts []*Task
-	// suspendPool：被抢占后保存了现场、等待恢复的任务（**不是栈**，按优先级取）。
-	suspendPool []*suspendedTask
+	// suspendStack：**中断栈**。被抢占后保存现场的任务压栈（LIFO），
+	// 用于“中断被中断”的嵌套场景：只有**栈顶**参与恢复选择，栈内不做优先级重排。
+	suspendStack []*suspendedTask
 	// preemptArmed/preemptLevel：运行任务的“让位信号”。
 	// interruptLoop 只写这两个字段与 pendingInterrupts；帧永远只由调度器读写。
 	preemptArmed bool
@@ -206,7 +208,7 @@ type scheduler struct {
 	// wake 用于把空闲的调度器叫醒：pendingInterrupts 不是 channel，
 	// 没有这个信号时“空闲时到达的中断”会一直等下一次输入（设计 §5.1 ③）。
 	wake chan struct{}
-	// maxSuspendDepth：suspendPool 深度上限（设计文档 §6.3，默认 4）。
+	// maxSuspendDepth：中断栈深度上限（设计文档 §6.3，默认 4）。
 	maxSuspendDepth int
 }
 
@@ -293,7 +295,32 @@ func (s *scheduler) nextRef() (*Task, *TaskFrame, nextSelection) {
 	var bestFrame *TaskFrame
 	bestKind := nextNone
 	consider := func(t *Task, k nextSelection, fr *TaskFrame) {
-		if bestTask == nil || taskBefore(t, bestTask) {
+		if bestTask == nil {
+			bestTask, bestKind, bestFrame = t, k, fr
+			return
+		}
+		lt, lb := effectiveLevel(t), effectiveLevel(bestTask)
+		if lt != lb {
+			if lt > lb {
+				bestTask, bestKind, bestFrame = t, k, fr
+			}
+			return
+		}
+		// 同级时 **pending 中断优先**。
+		//
+		// 为何必需：一次抢占生效后，被挂起的原任务会因饥饿防护提升有效级，
+		// 于是与抢占者同级；若此时按“先到先服务”，原任务（入队更早）会被
+		// 立刻选回，抢占者永远排不到——抢占变成空转。
+		if k == nextPending && bestKind != nextPending {
+			bestTask, bestKind, bestFrame = t, k, fr
+			return
+		}
+		if bestKind == nextPending && k != nextPending {
+			return
+		}
+		// 同级同类：先到先服务（ID 兜底保证确定性）。
+		if t.EnqueuedAt.Before(bestTask.EnqueuedAt) ||
+			(t.EnqueuedAt.Equal(bestTask.EnqueuedAt) && t.ID < bestTask.ID) {
 			bestTask, bestKind, bestFrame = t, k, fr
 		}
 	}
@@ -303,8 +330,11 @@ func (s *scheduler) nextRef() (*Task, *TaskFrame, nextSelection) {
 	for _, t := range s.pendingInterrupts {
 		consider(t, nextPending, nil)
 	}
-	for _, st := range s.suspendPool {
-		consider(st.Task, nextSuspended, st.Frame)
+	// 中断栈：只比**栈顶**（严格 LIFO）。栈内不做优先级重排——
+	// 嵌套抢占天然使栈自底向上优先级递增，且“后被打断的先恢复”才是栈语义。
+	if n := len(s.suspendStack); n > 0 {
+		top := s.suspendStack[n-1]
+		consider(top.Task, nextSuspended, top.Frame)
 	}
 	if bestTask == nil {
 		return nil, nil, nextNone
@@ -316,12 +346,8 @@ func (s *scheduler) nextRef() (*Task, *TaskFrame, nextSelection) {
 	case nextPending:
 		s.pendingInterrupts = removeTask(s.pendingInterrupts, bestTask)
 	case nextSuspended:
-		for i, st := range s.suspendPool {
-			if st.Task == bestTask {
-				s.suspendPool = append(s.suspendPool[:i], s.suspendPool[i+1:]...)
-				break
-			}
-		}
+		// 只有栈顶可能被选中，故弹出即截断末位。
+		s.suspendStack = s.suspendStack[:len(s.suspendStack)-1]
 	}
 	s.running = bestTask
 	return bestTask, bestFrame, bestKind
@@ -408,10 +434,10 @@ func (s *scheduler) clearPreempt() {
 func (s *scheduler) suspend(t *Task, f *TaskFrame) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if len(s.suspendPool) >= s.maxSuspendDepth {
+	if len(s.suspendStack) >= s.maxSuspendDepth {
 		s.stats.Rejected++
 	}
-	s.suspendPool = append(s.suspendPool, &suspendedTask{Task: t, Frame: f})
+	s.suspendStack = append(s.suspendStack, &suspendedTask{Task: t, Frame: f})
 	s.stats.Suspended++
 	// 饥饿防护：抢占计数 +1（提升有效级）并记录冷却起点。
 	t.PreemptCount++
@@ -430,7 +456,7 @@ func (s *scheduler) suspend(t *Task, f *TaskFrame) {
 func (s *scheduler) canSuspend() bool {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	return len(s.suspendPool) < s.maxSuspendDepth
+	return len(s.suspendStack) < s.maxSuspendDepth
 }
 
 // done 标记任务执行结束。
@@ -540,7 +566,7 @@ func (a *Agent) DumpScheduler() SchedulerSnapshot {
 	snap := SchedulerSnapshot{Running: a.sched.running, Stats: a.sched.stats}
 	snap.Queue = append(snap.Queue, a.sched.queue...)
 	snap.PendingInterrupts = append(snap.PendingInterrupts, a.sched.pendingInterrupts...)
-	snap.SuspendPool = append(snap.SuspendPool, a.sched.suspendPool...)
+	snap.SuspendStack = append(snap.SuspendStack, a.sched.suspendStack...)
 	snap.MaxSuspendDepth = a.sched.maxSuspendDepth
 	return snap
 }

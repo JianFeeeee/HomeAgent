@@ -42,14 +42,14 @@ func waitQuiescent(t *testing.T, a *Agent, wantExecuted uint64, timeout time.Dur
 	for {
 		snap := a.DumpScheduler()
 		if snap.Running == nil && len(snap.Queue) == 0 &&
-			len(snap.PendingInterrupts) == 0 && len(snap.SuspendPool) == 0 &&
+			len(snap.PendingInterrupts) == 0 && len(snap.SuspendStack) == 0 &&
 			snap.Stats.Executed >= wantExecuted {
 			return snap
 		}
 		if time.Now().After(deadline) {
 			t.Fatalf("未在 %v 内排空：running=%v queue=%d pending=%d suspend=%d executed=%d",
 				timeout, snap.Running != nil, len(snap.Queue), len(snap.PendingInterrupts),
-				len(snap.SuspendPool), snap.Stats.Executed)
+				len(snap.SuspendStack), snap.Stats.Executed)
 		}
 		time.Sleep(20 * time.Millisecond)
 	}
@@ -147,7 +147,7 @@ func TestObservability_SchedulerEventsAndStatus(t *testing.T) {
 
 	// 状态快照（供状态页/诊断）：计数一致、三集合为空。
 	st := a.GetKernelStatus().Scheduler
-	if st.SuspendPool != 0 || st.PendingInterrupts != 0 || st.ReadyQueueDepth != 0 {
+	if st.SuspendStack != 0 || st.PendingInterrupts != 0 || st.ReadyQueueDepth != 0 {
 		t.Fatalf("排空后状态非空：%+v", st)
 	}
 	if st.Suspended == 0 || st.Resumed == 0 {
