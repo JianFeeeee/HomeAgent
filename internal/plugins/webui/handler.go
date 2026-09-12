@@ -981,12 +981,7 @@ func (h *Handler) handleKernel(w http.ResponseWriter, r *http.Request) {
 // 为什么需要向导：人格曾经只有 <dataDir>/personal/personal.md 一个来源且无人维护，
 // 里面写死的旧版本号反过来让实例自述旧版本（v1.2.0 压测发现）。
 // 现在人格是配置项（默认模板不含任何版本号），首启问一次，之后不再打扰。
-const (
-	personaPromptKey  = "core.agent.personal_prompt"
-	personaInitMarker = "core.internal.persona_initialized"
-)
-
-// handlePersona 是首启人格向导的后端。
+// handlePersona 是首启人格向导的后端（与内核 persona_set 工具共用 internal/config 的实现）。
 //
 //	GET  → {initialized, current_prompt, file_override}
 //	POST → {"mode":"default"|"custom"|"later","content":"..."}
@@ -995,6 +990,9 @@ const (
 // 生效时机：人格在 homed 启动时载入（以【人格设定】块拼进系统提示词），
 // 所以**自定义内容需重启生效**；选「默认」或「稍后」（保持当前默认）无需重启。
 // 不回答就是「稍后」：保留默认并打标记，不阻塞任何流程。
+//
+// 跨通道：这里只是 WebUI 侧的入口；任何通道的消息到来时，内核都会检查同一枚标记，
+// 未确认则在提示词里要求模型主动询问（见 internal/agent/core 的首启门禁）。
 func (h *Handler) handlePersona(w http.ResponseWriter, r *http.Request) {
 	if h.settings == nil {
 		writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "settings not available"})
@@ -1002,24 +1000,9 @@ func (h *Handler) handlePersona(w http.ResponseWriter, r *http.Request) {
 	}
 	switch r.Method {
 	case http.MethodGet:
-		initialized := false
-		if v, err := h.settings.GetCore(personaInitMarker); err == nil {
-			if s, ok := v.(string); ok && strings.TrimSpace(s) != "" {
-				initialized = true
-			}
-		}
-		cur := ""
-		if v, err := h.settings.GetCore(personaPromptKey); err == nil {
-			if s, ok := v.(string); ok {
-				cur = s
-			}
-		}
-		if cur == "" {
-			cur = internalConfig.DefaultPersonaPrompt
-		}
 		writeJSON(w, http.StatusOK, map[string]interface{}{
-			"initialized":    initialized,
-			"current_prompt": cur,
+			"initialized":    internalConfig.PersonaInitializedKV(h.settings),
+			"current_prompt": internalConfig.CurrentPersonaKV(h.settings),
 			"file_override":  h.personaFileExists(),
 		})
 	case http.MethodPost:
@@ -1031,31 +1014,14 @@ func (h *Handler) handlePersona(w http.ResponseWriter, r *http.Request) {
 			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid request"})
 			return
 		}
-		restart := false
-		switch req.Mode {
-		case "default":
-			if err := h.settings.SetCore(personaPromptKey, internalConfig.DefaultPersonaPrompt); err != nil {
-				writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
-				return
+		restart, err := internalConfig.SetPersonaKV(h.settings, req.Mode, req.Content)
+		if err != nil {
+			// 非法 mode / 空内容 → 400；落库失败 → 500。两者都不打标记。
+			code := http.StatusInternalServerError
+			if strings.Contains(err.Error(), "unknown mode") || strings.Contains(err.Error(), "content required") {
+				code = http.StatusBadRequest
 			}
-		case "custom":
-			if strings.TrimSpace(req.Content) == "" {
-				writeJSON(w, http.StatusBadRequest, map[string]string{"error": "content required for custom mode"})
-				return
-			}
-			if err := h.settings.SetCore(personaPromptKey, req.Content); err != nil {
-				writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
-				return
-			}
-			restart = true // 人格在启动时载入
-		case "later":
-			// 保持当前（默认）人格，只打标记，不再问
-		default:
-			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "unknown mode"})
-			return
-		}
-		if err := h.settings.SetCore(personaInitMarker, "1"); err != nil {
-			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+			writeJSON(w, code, map[string]string{"error": err.Error()})
 			return
 		}
 		writeJSON(w, http.StatusOK, map[string]interface{}{
