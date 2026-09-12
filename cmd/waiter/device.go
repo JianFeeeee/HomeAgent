@@ -61,10 +61,14 @@ func startDeviceBridge(addr, token string) error {
 	bridge := client.New(gateway, token, deviceID, "HomeAgent CLI", caps, info)
 	cmdRouter = client.NewCmdRouter()
 
-	// 注册命令处理器
+	// cmd_type 是主路由信号；保留 homeagent-* 文本前缀兼容旧服务端。
 	cmdRouter.Handle("homeagent-", handleHomeagentCmd)
 	cmdRouter.HandleDefault(handleShellCmd)
-	bridge.OnCmd(func(reqID, command string) {
+	bridge.OnCmd(func(reqID, command, cmdType string) {
+		if cmdType == "homeagent" {
+			handleHomeagentCmd(reqID, command)
+			return
+		}
 		cmdRouter.Dispatch(reqID, command)
 	})
 

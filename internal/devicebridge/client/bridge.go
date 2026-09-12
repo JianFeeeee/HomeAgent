@@ -10,9 +10,11 @@ import (
 	"time"
 )
 
-// CmdHandler 是命令处理回调类型。
-// 当收到 remotedevice 下发的 cmd 时调用，reqID 用于回执，command 是命令内容。
+// CmdHandler 是本地命令路由回调类型。
 type CmdHandler func(reqID, command string)
+
+// BridgeCmdHandler 接收服务端明确下发的路由信号（shell 或 homeagent）。
+type BridgeCmdHandler func(reqID, command, cmdType string)
 
 // CmdResult 是命令执行结果回调（用于异步通知 GUI 层）。
 type CmdResultHandler func(reqID, status, output, errMsg string)
@@ -41,7 +43,7 @@ type Bridge struct {
 	started bool
 
 	// 回调
-	cmdHandler    CmdHandler
+	cmdHandler    BridgeCmdHandler
 	resultHandler CmdResultHandler
 	dataHandler   DataHandler
 
@@ -135,7 +137,7 @@ func (b *Bridge) Authorized() bool {
 }
 
 // OnCmd 注册命令处理器。当收到 remotedevice 下发的 cmd 时调用。
-func (b *Bridge) OnCmd(handler CmdHandler) {
+func (b *Bridge) OnCmd(handler BridgeCmdHandler) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	b.cmdHandler = handler
@@ -436,7 +438,7 @@ func (b *Bridge) handleMessage(msg map[string]interface{}) {
 		log.Printf("[devicebridge] cmd req=%s type=%s cmd=%s", reqID, cmdType, truncateString(command, 60))
 
 		if handler != nil {
-			handler(reqID, command)
+			handler(reqID, command, cmdType)
 		}
 
 	case "hello_ack", "bind_ack":
