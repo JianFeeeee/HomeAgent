@@ -149,18 +149,23 @@ build_waiter() {
   echo "  OK ($(du -h "$out" | cut -f1))"
 }
 
-# ---- initconfig (CGO-free 配置初始化器) ----
+# ---- initconfig（必须 cgo：写 config.db 用的是 go-sqlite3）----
 #
-# NSIS 安装包（installer.nsi:220 File "..\build\initconfig.exe"）与
-# package-linux.sh 的 stage_variant 都引用它，但此前 build.sh 从不构建它——
-# Windows 安装包构建会直接失败在缺文件上。
+# 这里**必须** CGO_ENABLED=1。此前写的是 CGO_ENABLED=0，而 cmd/initconfig 通过
+# database/sql 使用 mattn/go-sqlite3：CGO_ENABLED=0 时该库退化成 static_mock.go
+# 里的桩，sql.Open 是懒的所以不报错、第一次 Exec 才失败；而 main.go 当时忽略
+# 了所有错误——于是 initconfig 打印凭据、退出码 0、一个字节都没写进 config.db。
+# 安装脚本把这份凭据写进 credentials.txt，用户照它登录必然失败，全程无报错。
+#
+# NSIS 安装包（installer.nsi）与 package-linux.sh 的 stage_variant 都引用它，
+# 但此前 build.sh 从不构建它——Windows 安装包构建会直接失败在缺文件上。
 build_initconfig() {
   local plat="${GOOS:-linux}/${GOARCH:-amd64}"
   local out="$BUILD_DIR/initconfig${SUFFIX:+_$SUFFIX}"
   if [ "$GOOS" = "windows" ]; then out="${out}.exe"; fi
 
   echo "[BUILD] initconfig ${plat} → $out"
-  CGO_ENABLED=0 "$GO" build -trimpath -installsuffix dynlink \
+  CGO_ENABLED=1 "$GO" build -trimpath -installsuffix dynlink \
     -ldflags "$LDFLAGS" -o "$out" ./cmd/initconfig/
   echo "  OK ($(du -h "$out" | cut -f1))"
 }
