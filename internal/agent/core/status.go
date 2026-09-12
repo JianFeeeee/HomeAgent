@@ -73,6 +73,8 @@ func collectKernelStatus(
 			BuildTime:     meta.BuildTime,
 			SDKCompatible: meta.SDKCompatibleVersion,
 			KernelName:    meta.KernelName,
+			// AGPL-3.0 §13：状态页向网络使用者展示取得源码的入口。
+			SourceURL: meta.SourceURL,
 		},
 		Runtime: RuntimeStatus{
 			Goroutines: runtime.NumGoroutine(),
