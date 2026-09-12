@@ -89,6 +89,16 @@ func (a *Agent) buildSystemPrompt(memContext string, userInput string) string {
 		}
 	}
 
+	// 首启人格门禁（跨通道唯一闸口）：人格未确认时，要求模型主动询问用户。
+	// 系统提示词每轮重建，因此 WebUI / QQ / CLI / ACP / 邮件等所有通道都会带上它；
+	// 模型调用 persona_set（或用户在 WebUI 向导里选）落地后，标记置位，本段消失。
+	if a.personaStore != nil && !a.personaStore.PersonaInitialized() {
+		prompt += "\n\n【首启人格设定】你的**人格设定尚未确认**。请在本轮回复里先问用户一句：" +
+			"要用默认人格，还是自定义一个？拿到明确答复后**必须调用 persona_set 工具**落库：" +
+			"用户选默认 → mode=default；自定义 → mode=custom 且把内容写进 content；" +
+			"用户说以后再说 → mode=later。用户答复前不要假设已设置，也不要反复追问同一件事。"
+	}
+
 	prompt += a.buildToolCatalog()
 
 	return prompt
@@ -195,6 +205,24 @@ func (a *Agent) buildToolDefs() []interface{} {
 		for _, td := range a.indexer.GetToolDefinitions() {
 			tools = append(tools, td)
 		}
+	}
+
+	if a.personaStore != nil {
+		tools = append(tools, map[string]interface{}{
+			"type": "function",
+			"function": map[string]interface{}{
+				"name":        "persona_set",
+				"description": "【首启人格】落地用户的人格选择并记录「已经问过」。仅在用户明确答复后调用：默认用 mode=default；自定义用 mode=custom 并把人格内容放进 content；用户说以后再说用 mode=later。",
+				"parameters": map[string]interface{}{
+					"type": "object",
+					"properties": map[string]interface{}{
+						"mode":    map[string]interface{}{"type": "string", "description": "default | custom | later"},
+						"content": map[string]interface{}{"type": "string", "description": "自定义人格内容（mode=custom 时必填）"},
+					},
+					"required": []string{"mode"},
+				},
+			},
+		})
 	}
 
 	if a.memory != nil {
