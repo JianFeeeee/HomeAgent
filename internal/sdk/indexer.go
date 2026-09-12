@@ -10,7 +10,7 @@ type IndexerAPI interface {
 
 // IndexContext is a neutral snapshot of the injected memory context.
 type IndexContext struct {
-	Entities      []Entity `json:"entities"`
+	Entities      []Entity   `json:"entities"`
 	Relations     []Relation `json:"relations"`
 	Summary       string     `json:"summary"`
 	TokenEstimate int        `json:"token_estimate"`

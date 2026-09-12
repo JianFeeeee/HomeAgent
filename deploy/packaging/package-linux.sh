@@ -5,10 +5,36 @@ PROJECT_ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
 BUILD_DIR="${PROJECT_ROOT}/build"
 DIST_DIR="${PROJECT_ROOT}/dist/linux"
 VERSION="${VERSION:-$(git -C "$PROJECT_ROOT" describe --tags --dirty 2>/dev/null || echo "0.8.0")}"
+
+# git describe 给出的是 v1.0.0-68-gba0b5a1-dirty 这类描述串，它不是合法的包版本：
+# deb 的 Version 必须以数字开头，rpm 的 Version 不允许 '-'（那是版本/发布的分隔符）。
+# 以前只有显式传 VERSION=1.0.3 才打得出来，默认路径一跑就死在 dpkg-deb 上——
+# 而且死在 stage 之后，前面每条日志都是真的，只有最后一个产物没生成。
+PKG_VERSION="${VERSION#v}"
+case "$PKG_VERSION" in
+  [0-9]*) ;;
+  *) echo "ERROR: 包版本必须以数字开头（得到 '$VERSION'）。请显式设置 VERSION=x.y.z 后重试。" >&2; exit 1 ;;
+esac
+PKG_VERSION="$(printf '%s' "$PKG_VERSION" | sed -e 's/-/+/g')"
 PACKAGE_ROOT="${PROJECT_ROOT}/deploy/packaging/linux"
 GO="${GO:-$(command -v go 2>/dev/null || echo "go")}"
 
 ARCH="${1:-amd64}"   # amd64 or arm64
+
+# server/full 发行包默认带 Chinese-CLIP ONNX 产物与 ONNX Runtime。
+# 二进制大资产不进 git：发布环境通过这两个目录提供已验证的产物；若缺失，
+# server/full 打包必须明确失败，不能生成一个「默认启用但装完不能用」的假包。
+CHINESECLIP_BUNDLE_DIR="${CHINESECLIP_BUNDLE_DIR:-$BUILD_DIR/model-assets/chinese-clip-vit-b16-onnx}"
+ONNXRUNTIME_ASSET_DIR="${ONNXRUNTIME_ASSET_DIR:-$BUILD_DIR/runtime-assets/$ARCH}"
+ONNXRUNTIME_LIB="${ONNXRUNTIME_LIB:-$ONNXRUNTIME_ASSET_DIR/libonnxruntime.so}"
+ONNXRUNTIME_LICENSE="${ONNXRUNTIME_LICENSE:-$ONNXRUNTIME_ASSET_DIR/LICENSE}"
+ONNXRUNTIME_NOTICES="${ONNXRUNTIME_NOTICES:-$ONNXRUNTIME_ASSET_DIR/ThirdPartyNotices.txt}"
+
+# 打包 staging 会把 719MB 模型真的复制一份，临时目录必须落在构建目录所在的磁盘，
+# 不能落在系统临时目录：本机 /tmp 是 9.8GB tmpfs，一次 full 包 staging 就能写满，
+# 而且失败发生在 cp 进行到一半，报出来是 "No space left on device"——看上去像
+# 资产／版本有问题，实际只是临时目录选错了文件系统。
+STAGE_TMP="${BUILD_DIR}/.stage-tmp"
 
 # electron 官方发布物用 x64/arm64 命名，而 Debian 用 amd64/arm64。
 # 两者在 arm64 上恰好同名，amd64 上不同——此前缓存查找统一用 TAR_ARCH
@@ -28,6 +54,7 @@ esac
 
 echo "=== HomeAgent Linux Packager ==="
 echo "Version: $VERSION"
+[ "$PKG_VERSION" = "$VERSION" ] || echo "Package: $PKG_VERSION (normalized for deb/rpm)"
 echo "Arch:    $ARCH"
 echo ""
 
@@ -89,7 +116,7 @@ restore_syso() {
 }
 
 # ensure both are always restored on exit
-restore_all() { restore_gomod; restore_syso; }
+restore_all() { restore_gomod; restore_syso; rmdir "$STAGE_TMP" 2>/dev/null || true; }
 trap restore_all EXIT
 
 # ---- build Go binaries via existing build.sh ----
@@ -99,31 +126,29 @@ build_go() {
   prepare_gomod || true
   hide_syso
 
-  bash "$PROJECT_ROOT/deploy/packaging/build.sh" "linux/$ARCH" "homed" 2>&1 || {
-    echo "WARNING: homed build failed (CGO/sqlite3 issue). Server/full packages may be incomplete."
-  }
-  bash "$PROJECT_ROOT/deploy/packaging/build.sh" "linux/$ARCH" "waiter" 2>&1 || {
-    echo "WARNING: waiter build failed."
-  }
-  bash "$PROJECT_ROOT/deploy/packaging/build.sh" "linux/$ARCH" "initconfig" 2>&1 || {
-    echo "WARNING: initconfig build failed（包内将缺少首次配置初始化器）。"
-  }
-
   local suffix="linux_${ARCH}"
   local homed_bin="$BUILD_DIR/homed_$suffix"
   local waiter_bin="$BUILD_DIR/waiter_$suffix"
+  local initconfig_bin="$BUILD_DIR/initconfig_$suffix"
 
-  if [ ! -f "$homed_bin" ]; then
-    echo "ERROR: homed binary not found at $homed_bin"
-    exit 1
-  fi
-  if [ ! -f "$waiter_bin" ]; then
-    echo "ERROR: waiter binary not found at $waiter_bin"
-    exit 1
+  # 先删旧产物：否则本次构建失败后，残留文件会让「产物存在」判据假绿。
+  rm -f "$homed_bin" "$waiter_bin" "$initconfig_bin"
+
+  bash "$PROJECT_ROOT/deploy/packaging/build.sh" "linux/$ARCH" "homed"
+  test -x "$homed_bin"
+  if ! go version -m "$homed_bin" | grep -Eq 'build[[:space:]]+-tags=.*onnxruntime'; then
+    echo "ERROR: homed 不是 onnxruntime 构建，拒绝打 server/full 包：$homed_bin" >&2
+    return 1
   fi
 
-  echo "  homed:  $homed_bin ($(du -h "$homed_bin" | cut -f1))"
-  echo "  waiter: $waiter_bin ($(du -h "$waiter_bin" | cut -f1))"
+  bash "$PROJECT_ROOT/deploy/packaging/build.sh" "linux/$ARCH" "waiter"
+  test -x "$waiter_bin"
+  bash "$PROJECT_ROOT/deploy/packaging/build.sh" "linux/$ARCH" "initconfig"
+  test -x "$initconfig_bin"
+
+  echo "  homed:      $homed_bin ($(du -h "$homed_bin" | cut -f1), onnxruntime)"
+  echo "  waiter:     $waiter_bin ($(du -h "$waiter_bin" | cut -f1))"
+  echo "  initconfig: $initconfig_bin ($(du -h "$initconfig_bin" | cut -f1))"
   echo ""
 }
 
@@ -310,6 +335,7 @@ stage_variant() {
       cp "$PROJECT_ROOT/deploy/homeagent.service" "$staging/etc/systemd/system/homeagent.service"
       [ -f "$initconfig_bin" ] && cp "$initconfig_bin" "$staging/usr/bin/initconfig"
       stage_setup "$staging"
+      stage_multimodal_assets "$staging"
       stage_gui "$staging"
       ;;
     server)
@@ -318,6 +344,7 @@ stage_variant() {
       cp "$PROJECT_ROOT/deploy/homeagent.service" "$staging/etc/systemd/system/homeagent.service"
       [ -f "$initconfig_bin" ] && cp "$initconfig_bin" "$staging/usr/bin/initconfig"
       stage_setup "$staging"
+      stage_multimodal_assets "$staging"
       ;;
     client)
       cp "$BUILD_DIR/waiter_$suffix" "$staging/usr/bin/waiter"
@@ -355,6 +382,75 @@ stage_setup() {
   fi
 }
 
+# server/full 的 ONNX 资产。模型与运行库是发行版能力的一部分，不是可选下载：
+# 只要打 server/full 包，两者缺一就失败。client 包不运行 homed，故不携带。
+stage_multimodal_assets() {
+  local staging="$1"
+  local model_dst="$staging/usr/lib/homeagent/models/chinese-clip-vit-b16-onnx"
+  local ort_dst="$staging/usr/lib/homeagent/onnxruntime"
+  local licenses="$staging/usr/share/doc/homeagent/licenses"
+
+  if [ ! -d "$CHINESECLIP_BUNDLE_DIR" ]; then
+    echo "ERROR: Chinese-CLIP 产物目录不存在：$CHINESECLIP_BUNDLE_DIR" >&2
+    echo "先运行 scripts/export_chineseclip_onnx.py，再通过 CHINESECLIP_BUNDLE_DIR 指向产物。" >&2
+    return 1
+  fi
+  for f in TextEncoder.onnx VisionEncoder.onnx embed_config.json vocab.txt reference.json SHA256SUMS; do
+    if [ ! -s "$CHINESECLIP_BUNDLE_DIR/$f" ]; then
+      echo "ERROR: Chinese-CLIP 产物缺少或为空：$CHINESECLIP_BUNDLE_DIR/$f" >&2
+      return 1
+    fi
+  done
+  if ! (cd "$CHINESECLIP_BUNDLE_DIR" && sha256sum -c SHA256SUMS); then
+    echo "ERROR: Chinese-CLIP SHA256SUMS 校验失败，拒绝打包。" >&2
+    return 1
+  fi
+
+  if [ ! -s "$ONNXRUNTIME_LIB" ]; then
+    echo "ERROR: ONNX Runtime 不存在：$ONNXRUNTIME_LIB" >&2
+    echo "通过 ONNXRUNTIME_ASSET_DIR 或 ONNXRUNTIME_LIB 指向与目标架构匹配的资产。" >&2
+    return 1
+  fi
+  for notice in "$ONNXRUNTIME_LICENSE" "$ONNXRUNTIME_NOTICES"; do
+    if [ ! -s "$notice" ]; then
+      echo "ERROR: ONNX Runtime 许可证资产缺失：$notice" >&2
+      return 1
+    fi
+  done
+  local runtime_desc
+  runtime_desc=$(file -b "$ONNXRUNTIME_LIB")
+  case "$ARCH" in
+    amd64) printf '%s' "$runtime_desc" | grep -qE 'x86-64|x86_64' || {
+      echo "ERROR: ONNX Runtime 架构不是 amd64：$runtime_desc" >&2; return 1; } ;;
+    arm64) printf '%s' "$runtime_desc" | grep -qE 'aarch64|ARM aarch64' || {
+      echo "ERROR: ONNX Runtime 架构不是 arm64：$runtime_desc" >&2; return 1; } ;;
+  esac
+
+  mkdir -p "$model_dst" "$ort_dst" "$licenses"
+  cp -a "$CHINESECLIP_BUNDLE_DIR/." "$model_dst/"
+  install -m 0755 "$ONNXRUNTIME_LIB" "$ort_dst/libonnxruntime.so"
+
+  # 许可证随二进制分发：Chinese-CLIP = Apache-2.0；ONNX Runtime = MIT，
+  # 同时携带其 ThirdPartyNotices（含 MKL/protobuf/zlib 等第三方条款）。
+  cp /usr/share/common-licenses/Apache-2.0 "$licenses/Chinese-CLIP-Apache-2.0.txt"
+  cp "$ONNXRUNTIME_LICENSE" "$licenses/ONNX-Runtime-MIT.txt"
+  cp "$ONNXRUNTIME_NOTICES" "$licenses/ONNX-Runtime-ThirdPartyNotices.txt"
+  cat > "$licenses/MODEL-SOURCES.txt" <<EOF
+Chinese-CLIP ViT-B/16
+  upstream: https://huggingface.co/OFA-Sys/chinese-clip-vit-base-patch16
+  license: Apache-2.0
+  exported-by: scripts/export_chineseclip_onnx.py
+  dimensions: 512
+  modalities: text,image
+
+ONNX Runtime
+  upstream: https://github.com/microsoft/onnxruntime
+  license: MIT (see ONNX-Runtime-MIT.txt and ONNX-Runtime-ThirdPartyNotices.txt)
+EOF
+
+  echo "  ONNX assets: model=$(du -sh "$model_dst" | cut -f1) runtime=$(du -h "$ort_dst/libonnxruntime.so" | cut -f1)"
+}
+
 # ---- create .deb ----
 build_deb() {
   local variant="$1"
@@ -362,9 +458,9 @@ build_deb() {
   local deb_dir="${DIST_DIR}/deb"
   mkdir -p "$deb_dir"
 
-  local pkg_name="homeagent-${variant}_${VERSION}_${DEB_ARCH}.deb"
+  local pkg_name="homeagent-${variant}_${PKG_VERSION}_${DEB_ARCH}.deb"
   local deb_root
-  deb_root="$(mktemp -d)"
+  deb_root="$(mktemp -d "$STAGE_TMP/deb.XXXXXX")"
 
   mkdir -p "$deb_root/DEBIAN"
 
@@ -372,7 +468,7 @@ build_deb() {
   local installed_size_kb
   installed_size_kb=$(du -sk "$staging" | cut -f1)
 
-  sed -e "s/VERSION_PLACEHOLDER/$VERSION/g" \
+  sed -e "s/VERSION_PLACEHOLDER/$PKG_VERSION/g" \
       -e "s/ARCH_PLACEHOLDER/$DEB_ARCH/g" \
       -e "s/INSTALLED_SIZE_PLACEHOLDER/$installed_size_kb/g" \
       "$control_file" > "$deb_root/DEBIAN/control"
@@ -401,13 +497,13 @@ build_tar() {
   local tar_dir="${DIST_DIR}/tar"
   mkdir -p "$tar_dir"
 
-  local archive_name="homeagent_${VERSION}_linux_${TAR_ARCH}.tar.gz"
-  local archive_dir="homeagent-${VERSION}-linux-${TAR_ARCH}"
+  local archive_name="homeagent_${PKG_VERSION}_linux_${TAR_ARCH}.tar.gz"
+  local archive_dir="homeagent-${PKG_VERSION}-linux-${TAR_ARCH}"
 
   # build combined staging
   local staging
-  staging="$(mktemp -d)"
-  mkdir -p "$staging/usr/bin" "$staging/usr/lib/homeagent"
+  staging="$(mktemp -d "$STAGE_TMP/tar.XXXXXX")"
+  mkdir -p "$staging/usr/bin" "$staging/usr/lib/homeagent" "$staging/etc/systemd/system"
 
   # copy all available binaries
   for bin in homed waiter initconfig; do
@@ -418,6 +514,8 @@ build_tar() {
   # setup script
   local setup_src="$PROJECT_ROOT/deploy/packaging/linux/setup.sh"
   [ -f "$setup_src" ] && cp "$setup_src" "$staging/usr/lib/homeagent/setup.sh"
+  cp "$PROJECT_ROOT/deploy/homeagent.service" "$staging/etc/systemd/system/homeagent.service"
+  stage_multimodal_assets "$staging"
 
   # GUI if available
   local gui_src="$BUILD_DIR/homeagent-gui-linux-${TAR_ARCH}"
@@ -446,7 +544,7 @@ build_rpm() {
   local rpm_dir="${DIST_DIR}/rpm"
   mkdir -p "$rpm_dir"
 
-  local pkg_name="homeagent-${variant}-${VERSION}-1.${RPM_ARCH}.rpm"
+  local pkg_name="homeagent-${variant}-${PKG_VERSION}-1.${RPM_ARCH}.rpm"
 
   # find fpm
   local fpm_bin="$(command -v fpm 2>/dev/null || true)"
@@ -506,7 +604,7 @@ build_rpm() {
 main() {
   local target_arch="$ARCH"
 
-  mkdir -p "$BUILD_DIR"
+  mkdir -p "$BUILD_DIR" "$STAGE_TMP"
 
   case "$ACTION" in
     all|build)
@@ -523,6 +621,10 @@ main() {
 
   mkdir -p "$DIST_DIR"
 
+  # 上次成功构建留下的校验和必须在本次开工前删掉：本次若中途失败，脚本直接退出、
+  # 不重算 SHA256SUMS，旧的它会一直躺在 dist 里，看上去像在为这一批残缺产物背书。
+  rm -f "$DIST_DIR/SHA256SUMS"
+
   for variant in full server client; do
     echo ""
     echo "=============================================="
@@ -530,7 +632,7 @@ main() {
     echo "=============================================="
 
     local staging
-    staging=$(mktemp -d)
+    staging=$(mktemp -d "$STAGE_TMP/stage.XXXXXX")
     stage_variant "$variant" "$staging"
 
     case "$ACTION" in
@@ -552,9 +654,19 @@ main() {
   echo "=== Done! Packages in: $DIST_DIR ==="
   echo ""
   echo "Summary:"
-  find "$DIST_DIR" -type f \( -name "*.deb" -o -name "homeagent_*.tar.gz" -o -name "*.rpm" \) 2>/dev/null | sort | while read -r f; do
+  mapfile -t release_files < <(find "$DIST_DIR" -type f \( -name "*.deb" -o -name "homeagent_*.tar.gz" -o -name "*.rpm" \) 2>/dev/null | sort)
+  for f in "${release_files[@]}"; do
     echo "  $(du -h "$f" | cut -f1)  $f"
   done
+  # 全部包生成之后一次计算，避免边打边算漏掉后生成的产物。
+  if [ ${#release_files[@]} -gt 0 ]; then
+    (
+      cd "$DIST_DIR"
+      find . -type f \( -name "*.deb" -o -name "homeagent_*.tar.gz" -o -name "*.rpm" \) \
+        -print0 | sort -z | xargs -0 sha256sum > SHA256SUMS
+    )
+    echo "  SHA256SUMS: $DIST_DIR/SHA256SUMS"
+  fi
 }
 
 main

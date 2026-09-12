@@ -400,7 +400,7 @@ func (a *Agent) processInput(evt *agentIO.InputEvent) {
 	}
 	a.publishEvent(events.EventRawInput, rawPayload)
 
-	archived := a.context.Prune(cleanInput, a.maxContextSize-1, a.docStore)
+	archived := a.pruneOnInput(evt, cleanInput)
 	if archived > 0 {
 		log.Printf("[agent] pruned %d low-relevance events to document memory", archived)
 	}
@@ -437,9 +437,6 @@ func (a *Agent) processInput(evt *agentIO.InputEvent) {
 		ToolResults: toolResults,
 	}
 	a.bindEventMedia(&turnEvt, a.drainMediaDigests())
-	if s := a.mediaSummaryForEvent(turnEvt.Media); s != "" {
-		turnEvt.Input = turnEvt.Input + "\n" + s
-	}
 	a.context.Append(turnEvt)
 
 	a.emitResponse(evt, response)
@@ -524,4 +521,67 @@ func (a *Agent) drainInterrupts() []string {
 			return out
 		}
 	}
+}
+
+// pruneOnInput 按声明的上下文策略裁剪上下文，返回归档的事件数。
+//
+// 默认**不裁剪**：ContextPolicy 必须在注入点（payload 的 context_policy）
+// 或通道定义（ChannelDef.ContextPolicy）上显式声明为 prune 才会裁剪。
+//
+// 为什么把无条件裁剪改成需声明：裁剪会把低相关事件归档到文档记忆并从上下文里
+// 移走，是破坏性的。此前每条输入都裁一次，于是「谁把上下文裁了」在排查时无从
+// 得知；而插件注入的内容也会被不相关的内容挤掉。按来源/注入点声明后，触发条件
+// 是可枚举、可审计的。
+//
+// 查询向量取**清洗后**的输入（通道 Cleaner 的输出），与工具侧同一套语义：
+// 原始输入里的 ANSI/base64/JSON 包装会把相关性打分带偏，裁掉本该保留的事件。
+func (a *Agent) pruneOnInput(evt *agentIO.InputEvent, cleanInput string) int {
+	if a.context == nil || !a.pruneDeclared(evt) {
+		return 0
+	}
+	topK := a.maxContextSize - 1
+	if topK < 1 {
+		topK = 1
+	}
+	return a.context.Prune(cleanInput, topK, a.docStore)
+}
+
+// pruneDeclared 判定这次输入是否显式声明了裁剪。
+//
+// 优先级：注入点声明的（payload）> 通道声明的（ChannelDef）> 默认不裁剪。
+// 注入点是更窄的声明面，同一通道下的不同注入可以有不同意图。
+func (a *Agent) pruneDeclared(evt *agentIO.InputEvent) bool {
+	if p, ok := evt.Payload["context_policy"].(string); ok && p != "" {
+		return p == pubsdk.ContextPolicyPrune
+	}
+	if a.io != nil {
+		if chDef, ok := a.io.GetInputChannelDef(evt.Source); ok {
+			return chDef.ContextPolicy == pubsdk.ContextPolicyPrune
+		}
+	}
+	return false
+}
+
+// cleanInputFor 解析这条输入在计算层应当使用的清洗文本。
+//
+// 优先级：注入点声明的 cleaner（payload.cleaner_name，引用某个已注册的通道
+// cleaner）> 按 source 查到的通道 cleaner > 原文。
+//
+// 声明的 cleaner 名字查不到时**记日志并回退**，而不是静默当没声明：
+// 注入是 fire-and-forget 的，插件那边看不到错误；至少要在内核日志里留下
+// 「你声明的清洗没生效」的痕迹，否则排查时只能看到「记忆里的内容很脏」。
+func (a *Agent) cleanInputFor(evt *agentIO.InputEvent, input string) string {
+	if a.io == nil {
+		return input
+	}
+	if name, ok := evt.Payload["cleaner_name"].(string); ok && name != "" {
+		if chDef, ok := a.io.GetInputChannelDef(name); ok && chDef.Cleaner != nil {
+			return chDef.Cleaner(input)
+		}
+		log.Printf("[agent] 注入声明了 cleaner_name=%q 但没有注册过该通道的 Cleaner，已回退", name)
+	}
+	if chDef, ok := a.io.GetInputChannelDef(evt.Source); ok && chDef.Cleaner != nil {
+		return chDef.Cleaner(input)
+	}
+	return input
 }

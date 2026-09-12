@@ -15,14 +15,14 @@ type mockOutputDevice struct {
 	toolFn func(string, map[string]interface{}) (interface{}, error)
 }
 
-func (d *mockOutputDevice) Name() string                          { return d.name }
-func (d *mockOutputDevice) Type() agentIO.DeviceType              { return agentIO.DeviceOutput }
-func (d *mockOutputDevice) Description() string                   { return "mock " + d.name }
-func (d *mockOutputDevice) Tools() []agentIO.ToolDef              { return d.tools }
-func (d *mockOutputDevice) Start() error                          { return nil }
-func (d *mockOutputDevice) Stop() error                           { return nil }
+func (d *mockOutputDevice) Name() string                                 { return d.name }
+func (d *mockOutputDevice) Type() agentIO.DeviceType                     { return agentIO.DeviceOutput }
+func (d *mockOutputDevice) Description() string                          { return "mock " + d.name }
+func (d *mockOutputDevice) Tools() []agentIO.ToolDef                     { return d.tools }
+func (d *mockOutputDevice) Start() error                                 { return nil }
+func (d *mockOutputDevice) Stop() error                                  { return nil }
 func (d *mockOutputDevice) OutputCapabilities() agentIO.OutputCapability { return d.caps }
-func (d *mockOutputDevice) ChannelDef() agentIO.ChannelDef { return agentIO.ChannelDef{} }
+func (d *mockOutputDevice) ChannelDef() agentIO.ChannelDef               { return agentIO.ChannelDef{} }
 func (d *mockOutputDevice) Execute(tool string, args map[string]interface{}) (interface{}, error) {
 	if d.toolFn != nil {
 		return d.toolFn(tool, args)
@@ -67,8 +67,8 @@ func TestExecuteOutputSendTool(t *testing.T) {
 		"type":    "text",
 	}}
 	result := a.executeOutputSendTool(tc)
-	if !strings.Contains(result, "screen") {
-		t.Errorf("unexpected result: %s", result)
+	if result != "ok" {
+		t.Errorf("expected ok, got: %s", result)
 	}
 }
 

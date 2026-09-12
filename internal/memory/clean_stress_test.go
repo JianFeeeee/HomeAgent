@@ -28,13 +28,13 @@ func cleanQQTemplate(text string) string {
 }
 
 type cleanTestEvent struct {
-	idx     int
-	source  string
-	input   string
-	response string
-	rawText string
+	idx         int
+	source      string
+	input       string
+	response    string
+	rawText     string
 	cleanedText string
-	topic  string
+	topic       string
 }
 
 func TestCleanStressPrecision(t *testing.T) {
@@ -59,53 +59,53 @@ func TestCleanStressPrecision(t *testing.T) {
 			}
 			t.Logf("topics: %v, events: %d", usedTopics, len(events))
 
-	for _, qTopic := range usedTopics {
-		query := queryForTopic(qTopic)
-		qVec := e.Vectorize(query)
+			for _, qTopic := range usedTopics {
+				query := queryForTopic(qTopic)
+				qVec := e.Vectorize(query)
 
-		type scored struct {
-			idx   int
-			topic string
-			text  string
-			score float64
-		}
-		all := make([]scored, len(events))
-		for i, ev := range events {
-			text := ev.rawText
-			if cleanMode {
-				text = ev.cleanedText
+				type scored struct {
+					idx   int
+					topic string
+					text  string
+					score float64
+				}
+				all := make([]scored, len(events))
+				for i, ev := range events {
+					text := ev.rawText
+					if cleanMode {
+						text = ev.cleanedText
+					}
+					vec := e.Vectorize(text)
+					all[i] = scored{idx: i, topic: ev.topic, text: text, score: cosineSim(qVec, vec)}
+				}
+				sort.Slice(all, func(i, j int) bool { return all[i].score > all[j].score })
+
+				topK := len(usedTopics) * 2
+				if topK > len(all) {
+					topK = len(all)
+				}
+
+				intraHits := 0
+				for _, s := range all[:topK] {
+					if s.topic == qTopic {
+						intraHits++
+					}
+				}
+				expected := countTopicEvents(events, qTopic)
+				if expected > topK {
+					expected = topK
+				}
+				recall := float64(intraHits) / float64(expected)
+
+				if recall < 0.3 {
+					t.Logf("  [LOW] query=%q topK=%d intra=%d/%d recall=%.2f", qTopic, topK, intraHits, expected, recall)
+					for _, s := range all[:8] {
+						t.Logf("    [%.4f] %s", s.score, trimLen(s.text, 60))
+					}
+				} else {
+					t.Logf("  [OK] query=%q topK=%d intra=%d/%d recall=%.2f", qTopic, topK, intraHits, expected, recall)
+				}
 			}
-			vec := e.Vectorize(text)
-			all[i] = scored{idx: i, topic: ev.topic, text: text, score: cosineSim(qVec, vec)}
-		}
-		sort.Slice(all, func(i, j int) bool { return all[i].score > all[j].score })
-
-		topK := len(usedTopics) * 2
-		if topK > len(all) {
-			topK = len(all)
-		}
-
-		intraHits := 0
-		for _, s := range all[:topK] {
-			if s.topic == qTopic {
-				intraHits++
-			}
-		}
-		expected := countTopicEvents(events, qTopic)
-		if expected > topK {
-			expected = topK
-		}
-		recall := float64(intraHits) / float64(expected)
-
-		if recall < 0.3 {
-			t.Logf("  [LOW] query=%q topK=%d intra=%d/%d recall=%.2f", qTopic, topK, intraHits, expected, recall)
-			for _, s := range all[:8] {
-				t.Logf("    [%.4f] %s", s.score, trimLen(s.text, 60))
-			}
-		} else {
-			t.Logf("  [OK] query=%q topK=%d intra=%d/%d recall=%.2f", qTopic, topK, intraHits, expected, recall)
-		}
-	}
 		})
 	}
 }
@@ -252,11 +252,11 @@ func genStressEvents(n int) []cleanTestEvent {
 		keywords []string
 		sources  []string
 	}{
-		"大学招生": {[]string{"河南医药大学", "录取分数线", "专业排名", "高考志愿", "招生简章"}, []string{"qq", "qq", "agent"}},
-		"老大私聊": {[]string{"老大私聊消息", "回复老大", "任务安排", "汇报工作", "收到"}, []string{"qq", "agent", "agent"}},
-		"前端开发": {[]string{"前端组件封装", "页面路由配置", "界面布局设计", "交互逻辑开发", "代码调试优化"}, []string{"cli", "cli", "agent"}},
+		"大学招生":  {[]string{"河南医药大学", "录取分数线", "专业排名", "高考志愿", "招生简章"}, []string{"qq", "qq", "agent"}},
+		"老大私聊":  {[]string{"老大私聊消息", "回复老大", "任务安排", "汇报工作", "收到"}, []string{"qq", "agent", "agent"}},
+		"前端开发":  {[]string{"前端组件封装", "页面路由配置", "界面布局设计", "交互逻辑开发", "代码调试优化"}, []string{"cli", "cli", "agent"}},
 		"服务器运维": {[]string{"反向代理配置", "容器部署方案", "证书续期", "数据库备份恢复", "监控告警处理"}, []string{"cli", "agent", "agent"}},
-		"股票基金": {[]string{"基金定投策略", "股票涨跌分析", "理财收益计算", "市场行情分析", "投资风险管理"}, []string{"qq", "qq", "agent"}},
+		"股票基金":  {[]string{"基金定投策略", "股票涨跌分析", "理财收益计算", "市场行情分析", "投资风险管理"}, []string{"qq", "qq", "agent"}},
 	}
 
 	for i := 0; i < n; i++ {
@@ -292,13 +292,13 @@ func genStressEvents(n int) []cleanTestEvent {
 		cleaned := cleanEventText(src, input, response)
 		raw := rawEventText(src, input, response)
 		events = append(events, cleanTestEvent{
-			idx:     i,
-			source:  src,
-			input:   input,
-			response: response,
-			rawText: raw,
+			idx:         i,
+			source:      src,
+			input:       input,
+			response:    response,
+			rawText:     raw,
 			cleanedText: cleaned,
-			topic:  tp,
+			topic:       tp,
 		})
 	}
 	return events

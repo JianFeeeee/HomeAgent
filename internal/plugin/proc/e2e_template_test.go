@@ -62,6 +62,39 @@ func (p *e2ePlugin) Start(s *sdk.PluginSDK) error {
 		ctx.FinalText = ctx.FinalText + "|stage-touched"
 		return nil
 	})
+
+	// §13.5/13.6 输入/输出 lane：text 不再内联在 RPC 报文里，而是经共享内存
+	// TextRef 传递（大 payload 不爆 stdin/stdout 管道）。插件侧只调公开 API，
+	// 内核侧负责 Alloc/Put/Free。
+	s.RegisterOutputChannel("e2e_out", 1, "测试输出通道", sdk.ChannelDef{},
+		func(args map[string]interface{}) (interface{}, error) {
+			payload, _ := args["payload"].(string)
+			// 回报实际收到的长度：只有完整 payload 经共享帧送达才等于发送长度。
+			return map[string]interface{}{"status": "sent", "payload_len": len(payload)}, nil
+		})
+
+	s.RegisterInputChannel("e2e_in", sdk.ChannelDef{})
+
+	// §13.13：媒体块注入。SetToolBlocks 在内核侧曾是桩（直接报“待共享段
+	// 二进制通道落地”），子进程插件调它必然失败。这里用大 base64 payload
+	// 验证模板真的经 blocks_ref 走共享内存。
+	s.RegisterTool("e2e_blocks", sdk.ToolDef{
+		Description: "注入媒体块",
+		Parameters: map[string]interface{}{
+			"type": "object",
+			"properties": map[string]interface{}{
+				"url": map[string]interface{}{"type": "string"},
+			},
+		},
+	}, func(args map[string]interface{}) (interface{}, error) {
+		u, _ := args["url"].(string)
+		s.SetToolBlocks([]sdk.ContentBlock{{
+			Type:     "image_url",
+			ImageURL: &sdk.ImageURL{URL: u},
+		}})
+		return "blocks-set", nil
+	})
+
 	return nil
 }
 
@@ -271,5 +304,100 @@ func (p *readerPlugin) Stop() error { return nil }
 	}
 	if !strings.Contains(sc.FinalText, "stage-touched") {
 		t.Errorf("FinalText 改写被覆盖：实际 %q", sc.FinalText)
+	}
+}
+
+// §13.6：输出通道 payload 走共享内存调用帧。
+//
+// 用**真实 SDK 模板**编译的插件验证，而不是手写 testdata——因为生产插件
+// （如 qq）走的就是模板，模板不读帧的话这个改动等于没做。
+// 链路：内核 Alloc 帧 → 写 payload → RPC 只传偏移描述符 → 模板 frameInput
+// 读出 → 交给插件的输出 handler。
+func TestE2E_RealTemplateOutputPayloadViaFrame(t *testing.T) {
+	bin := buildPluginWithRealTemplate(t, e2ePluginSource)
+
+	host, err := NewHost()
+	if err != nil {
+		t.Fatalf("NewHost: %v", err)
+	}
+	defer host.Close()
+
+	core := newFakeCore()
+	p := New("e2e", bin, t.TempDir(), nil, host, nil)
+	if err := p.Start(core); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	defer p.Close()
+
+	core.mu.Lock()
+	h, ok := core.outputs["e2e_out"]
+	core.mu.Unlock()
+	if !ok {
+		t.Fatal("插件应注册 e2e_out 输出通道")
+	}
+
+	// 9000 字节：超过任何内联预算，只有走帧才可能完整送达。
+	payload := strings.Repeat("输出", 3000)
+	res, err := h(map[string]interface{}{"payload": payload, "type": "text"})
+	if err != nil {
+		t.Fatalf("发送应成功: %v", err)
+	}
+	m, _ := res.(map[string]interface{})
+	var gotLen int
+	switch v := m["payload_len"].(type) {
+	case float64:
+		gotLen = int(v)
+	case int:
+		gotLen = v
+	}
+	if gotLen != len(payload) {
+		t.Fatalf("模板插件收到的 payload 长度 = %d，期望 %d（模板未从帧读参数？）", gotLen, len(payload))
+	}
+	if used, _ := host.Arena().Stats(); used != 0 {
+		t.Fatalf("调用结束后 arena 应归零，实际 used=%d", used)
+	}
+}
+
+// §13.13：SetToolBlocks 的媒体块经共享内存到达内核（用真实模板编译的插件）。
+//
+// 内核侧曾是桩实现，子进程插件调 SetToolBlocks 必然失败；模板又不经
+// blocks_ref 的话，即使内核实现了也收不到内容。两边必须同时到位。
+func TestE2E_RealTemplateSetToolBlocksViaArena(t *testing.T) {
+	bin := buildPluginWithRealTemplate(t, e2ePluginSource)
+
+	host, err := NewHost()
+	if err != nil {
+		t.Fatalf("NewHost: %v", err)
+	}
+	defer host.Close()
+
+	core := newFakeCore()
+	p := New("e2e", bin, t.TempDir(), nil, host, nil)
+	if err := p.Start(core); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	defer p.Close()
+
+	core.mu.Lock()
+	h, ok := core.tools["e2e_blocks"]
+	core.mu.Unlock()
+	if !ok {
+		t.Fatal("插件应注册 e2e_blocks 工具")
+	}
+
+	// 9000 字节 base64：远大于内联阈值，只有共享内存才能送到。
+	big := "data:image/png;base64," + strings.Repeat("A", 8000)
+	if _, err := h(map[string]interface{}{"url": big}); err != nil {
+		t.Fatalf("调用 e2e_blocks: %v", err)
+	}
+	if n := core.toolBlockCount(); n != 1 {
+		t.Fatalf("内核应收到 1 个媒体块，实际 %d（模板未走 blocks_ref？）", n)
+	}
+
+	core.mu.Lock()
+	got := core.toolBlocks[0]
+	core.mu.Unlock()
+	if got.ImageURL == nil || got.ImageURL.URL != big {
+		t.Fatal("经共享内存送达的媒体块内容与发送的不一致")
 	}
 }

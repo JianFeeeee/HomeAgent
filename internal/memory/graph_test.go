@@ -2,8 +2,8 @@ package memory
 
 import (
 	"database/sql"
-	"path/filepath"
 	"os"
+	"path/filepath"
 	"testing"
 )
 
@@ -431,6 +431,84 @@ func TestMergeEntitiesNonexistent(t *testing.T) {
 	_, err := g.MergeEntities("不存在", "张三")
 	if err == nil {
 		t.Error("expected error for nonexistent source")
+	}
+}
+
+func TestMemoryBlocksAreFirstClassGraphNodes(t *testing.T) {
+	g := newTestGraph(t)
+	defer os.Remove(g.dbPath)
+	defer g.Close()
+
+	image := MemoryBlock{
+		ID: "block_image_1", Modality: BlockImage,
+		PayloadDigest: "0123456789abcdef", MIME: "image/png", Size: 1234,
+		Width: 768, Height: 512, Vector: []float64{0.1, 0.2, 0.3},
+		Fingerprint: "qwen:test", Source: "qq", Tool: "upload",
+	}
+	text := MemoryBlock{ID: "block_text_1", Modality: BlockText, Text: "用户上传了一张架构图"}
+	if err := g.PutMemoryBlocks([]MemoryBlock{image, text}); err != nil {
+		t.Fatalf("PutMemoryBlocks: %v", err)
+	}
+	if err := g.AddMemoryBlockEdge("block", text.ID, "block", image.ID, "contains"); err != nil {
+		t.Fatalf("AddMemoryBlockEdge: %v", err)
+	}
+
+	blocks, err := g.MemoryBlocks()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(blocks) != 2 {
+		t.Fatalf("memory blocks=%d, want 2", len(blocks))
+	}
+	var gotImage *MemoryBlock
+	for i := range blocks {
+		if blocks[i].ID == image.ID {
+			gotImage = &blocks[i]
+		}
+	}
+	if gotImage == nil || gotImage.Modality != BlockImage || gotImage.PayloadDigest != image.PayloadDigest || gotImage.Fingerprint != image.Fingerprint || len(gotImage.Vector) != 3 {
+		t.Fatalf("image block not round-tripped: %+v", gotImage)
+	}
+
+	edges, err := g.MemoryBlockEdges()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(edges) != 1 || edges[0].Type != "contains" || edges[0].SourceID != text.ID || edges[0].TargetID != image.ID {
+		t.Fatalf("memory block edges=%+v", edges)
+	}
+
+	graph, err := g.GraphData()
+	if err != nil {
+		t.Fatal(err)
+	}
+	graphBlocks, ok := graph["memory_blocks"].([]MemoryBlock)
+	if !ok || len(graphBlocks) != 2 {
+		t.Fatalf("GraphData memory_blocks=%T %+v", graph["memory_blocks"], graph["memory_blocks"])
+	}
+	graphEdges, ok := graph["memory_block_edges"].([]MemoryBlockEdge)
+	if !ok || len(graphEdges) != 1 {
+		t.Fatalf("GraphData memory_block_edges=%T %+v", graph["memory_block_edges"], graph["memory_block_edges"])
+	}
+}
+
+func TestMemoryBlockEdgeRejectsMissingEndpoint(t *testing.T) {
+	g := newTestGraph(t)
+	defer os.Remove(g.dbPath)
+	defer g.Close()
+
+	if err := g.PutMemoryBlocks([]MemoryBlock{{ID: "known", Modality: BlockText, Text: "known"}}); err != nil {
+		t.Fatal(err)
+	}
+	if err := g.AddMemoryBlockEdge("block", "known", "block", "missing", "derived_from"); err == nil {
+		t.Fatal("edge to missing node must fail")
+	}
+	edges, err := g.MemoryBlockEdges()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(edges) != 0 {
+		t.Fatalf("failed transaction left edges: %+v", edges)
 	}
 }
 

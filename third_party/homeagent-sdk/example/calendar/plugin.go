@@ -520,7 +520,8 @@ func (p *Plugin) checkReminders() {
 	p.mu.Unlock()
 
 	for _, msg := range injectMsgs {
-		p.sdk.InjectInterruptText("calendar", "calendar", msg)
+		// NoMemory：日程到点提醒，不是记忆内容。
+		p.sdk.InjectInterruptTextOpts("calendar", "calendar", msg, sdk.InjectOptions{NoMemory: true})
 	}
 }
 

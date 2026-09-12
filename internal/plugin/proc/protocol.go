@@ -14,7 +14,15 @@ import "encoding/json"
 
 // 协议版本：与共享段版本独立演进。
 // 插件握手时上报，内核校验——不匹配显式拒绝，避免半兼容导致的诡异行为。
-const ProtocolVersion = 1
+//
+// v2（§13.6 / §13.13）：内核→插件的 payload 改为调用帧承载。
+// v1 插件只读内联 args，遇上 v2 内核会拿到空参数；v2 插件发 blocks_ref，
+// v1 内核反序列化时静默忽略（旧内核 io.setToolBlocks 还是桩）。两种错配
+// 都不会报错，只会静默失效——所以必须 bump 版本，让它在握手上就**显式**失败。
+//
+// 部署纪律：内核与全部插件必须同批重建、同批安装；改协议就要改这个常量，
+// 不得依赖“两边大致兼容”。
+const ProtocolVersion = 2
 
 // Direction 无需显式字段：靠 Method 是否为空区分请求与响应
 // （与 clawhubadapter/sidecar 的成熟做法一致）。
@@ -39,7 +47,7 @@ type Response struct {
 	Error  string          `json:"error,omitempty"`
 }
 
-// ---- kernel → plugin（内核调用插件，对应今日 7 个 //export）----
+// ---- kernel → plugin（内核调用插件；工具执行、Cleaner、stage、输出等）----
 const (
 	// MethodPluginInit 传插件名与配置，插件构造实例但不启动。
 	MethodPluginInit = "plugin.init"
@@ -49,10 +57,22 @@ const (
 	MethodPluginStop = "plugin.stop"
 	// MethodToolInvoke 执行插件工具。
 	MethodToolInvoke = "tool.invoke"
+	// MethodCleanerInvoke 在插件进程内执行工具或通道声明的 Cleaner。
+	// Cleaner 是函数，不能随注册请求 JSON 序列化；内核保留 RPC 回调闭包，
+	// 需要参与向量化/蒸馏时把原文送回插件执行真正的 Cleaner。
+	MethodCleanerInvoke = "cleaner.invoke"
 	// MethodStageInvoke 执行阶段处理器。数据经共享段传递，参数只带阶段名与段世代号。
 	MethodStageInvoke = "stage.invoke"
 	// MethodOutputInvoke 经插件输出通道发送。
 	MethodOutputInvoke = "output.invoke"
+	// MethodArenaAlloc 向内核申请一块共享内存（返回偏移与大小）。
+	// MethodArenaFree 通知内核回收先前申请的共享内存。
+	//
+	// 这两个是**内部传输层接口**，不由插件开发者直接使用：共享内存是
+	// 内核的内部实现，公开 SDK 仍是普通字符串/Map，模板运行时按
+	// payload 大小自动选择内联 JSON 还是共享槽。
+	MethodArenaAlloc = "arena.alloc"
+	MethodArenaFree  = "arena.free"
 	// MethodHandshake 建链首帧：交换协议版本、SDK 版本、共享段规格。
 	MethodHandshake = "handshake"
 )
@@ -197,15 +217,67 @@ type StageInvokeResult struct {
 	Seq uint64 `json:"seq"`
 }
 
-// ToolInvokeParams / ToolInvokeResult：工具调用（原 go_invoke_tool）。
+// ToolInvokeParams：工具调用（原 go_invoke_tool）。
+//
+// 按 **funccall 模型**，内核（caller）为每次调用标定一块内存帧交给插件
+// （callee），插件在这块内存里工作：
+//
+//	[0, ArgsLen)               参数 JSON
+//	[ArgsLen, Frame.Length)    结果区（内核预留的预算）
+//
+// 结果放得下就写在帧内；**不够用时插件才向内核申请扩容**（arena.alloc），
+// 并在返回引用上打 sharedRefFlagExpand，内核据此单独归还扩容块。
+//
+// 参数永远在共享内存里，不存在“小 payload 走内联”的按大小分支。
+//
+// Args 仅剩给**直连 RPC 的调用方**（process/bench 测试不建 Host，拿不到
+// 共享内存）；内核的 invokeTool 始终走 Frame。
 type ToolInvokeParams struct {
-	Name string                 `json:"name"`
-	Args map[string]interface{} `json:"args,omitempty"`
+	Name    string                 `json:"name"`
+	Frame   SharedRef              `json:"frame,omitempty"`
+	ArgsLen uint32                 `json:"args_len,omitempty"`
+	Args    map[string]interface{} `json:"args,omitempty"` // 仅直连 RPC 调用方使用
 }
 
 type ToolInvokeResult struct {
-	Result interface{} `json:"result,omitempty"`
+	ResultRef SharedRef   `json:"result_ref,omitempty"`
+	Result    interface{} `json:"result,omitempty"` // 仅直连 RPC 调用方使用
 }
+
+// CleanerInvokeParams / CleanerInvokeResult：跨进程计算层清洗。
+// Scope 取 tool / input / output，Name 是工具名或通道名。
+//
+// 与工具调用用**同一个 funccall 帧模型**：
+//
+//	[0, InputLen)               输入文本
+//	[InputLen, Frame.Length)    结果区（内核预留的预算）
+//
+// 结果放不下时插件申请扩容块，并在 TextRef 上打 sharedRefFlagExpand。
+type CleanerInvokeParams struct {
+	Scope    string    `json:"scope"`
+	Name     string    `json:"name"`
+	Frame    SharedRef `json:"frame,omitempty"`
+	InputLen uint32    `json:"input_len,omitempty"`
+}
+
+type CleanerInvokeResult struct {
+	TextRef SharedRef `json:"text_ref,omitempty"`
+}
+
+// 调用帧的结果预算。
+//
+// 内核按“参数长度 + 预算”标定帧；结果超出预算不是失败，插件会申请扩容块。
+// 预算取 64KB：覆盖绝大多数工具结果，使常态调用完全免于第二次分配。
+const (
+	toolResultBudget    = 64 * 1024
+	cleanerResultBudget = 64 * 1024
+)
+
+const (
+	CleanerScopeTool   = "tool"
+	CleanerScopeInput  = "input"
+	CleanerScopeOutput = "output"
+)
 
 // OutputInvokeParams：输出通道发送（原 go_invoke_output）。
 //
@@ -214,8 +286,39 @@ type ToolInvokeResult struct {
 // 永远返回成功（§9.4，现网 2 次消息发不出而模型以为成功）。
 // 进程模型下 RPC 天然可等应答，该缺陷从根上消失。
 type OutputInvokeParams struct {
-	Channel string                 `json:"channel"`
-	Args    map[string]interface{} `json:"args,omitempty"`
+	Channel string `json:"channel"`
+	// Frame 是调用帧：[0, ArgsLen) 是参数 JSON；[ArgsLen, Frame.Length) 是结果区。
+	// 与 ToolInvokeParams 同一 funccall 帧模型（§13.3）。没有帧时（直连 RPC
+	// 测试）回退到 Args。大 payload 不再爆 stdin/stdout 管道——这正是同步
+	// output_send 卡住的根因之一。
+	Frame   SharedRef              `json:"frame,omitempty"`
+	ArgsLen uint32                 `json:"args_len,omitempty"`
+	Args    map[string]interface{} `json:"args,omitempty"` // 仅直连 RPC 调用方使用
+}
+
+// OutputInvokeResult 与 ToolInvokeResult 同形：结果优先写进帧结果区，
+// 放不下才申扩容块并打 sharedRefFlagExpand。标量响应（如 "ok"）直接在
+// Result 字段返回，不走共享内存。
+type OutputInvokeResult struct {
+	ResultRef SharedRef   `json:"result_ref,omitempty"`
+	Result    interface{} `json:"result,omitempty"` // 仅直连 RPC 调用方使用
+}
+
+// ArenaAllocParams / ArenaAllocResult：插件向内核申请共享内存。
+//
+// 内核返回的 Ref.Length 是槽容量（可写上限），插件写入后自行把 Length
+// 改成实际 payload 长度再随业务 RPC 回传。
+type ArenaAllocParams struct {
+	Size uint32 `json:"size"`
+}
+
+type ArenaAllocResult struct {
+	Ref SharedRef `json:"ref"`
+}
+
+// ArenaFreeParams：插件通知内核回收共享内存。只带描述符，槽号在 Flags 里。
+type ArenaFreeParams struct {
+	Ref SharedRef `json:"ref"`
 }
 
 // PluginInitParams：插件构造参数（原 case init_plugin）。

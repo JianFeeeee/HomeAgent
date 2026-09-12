@@ -114,7 +114,7 @@ func (p *Plugin) Start(s *sdk.PluginSDK) error {
 
 	// ── clipboardsee ──
 	s.RegisterTool("local_clipboardsee", sdk.ToolDef{
-		Name: "local_clipboardsee",
+		Name:        "local_clipboardsee",
 		Description: "读取本机剪切板当前内容（用户最近复制/剪切的文字）。",
 		Parameters: map[string]interface{}{
 			"type":       "object",
@@ -124,7 +124,7 @@ func (p *Plugin) Start(s *sdk.PluginSDK) error {
 
 	// ── clipboardsue ──
 	s.RegisterTool("local_clipboardsue", sdk.ToolDef{
-		Name: "local_clipboardsue",
+		Name:        "local_clipboardsue",
 		Description: "将文字写入本机剪切板（用户随后可 Ctrl+V 粘贴）。",
 		Parameters: map[string]interface{}{
 			"type": "object",
@@ -173,6 +173,24 @@ func (p *Plugin) Stop() error { return nil }
 
 // ── screensee ──────────────────────────────────────────────────────────────
 
+// psSingleQuote 生成 PowerShell **单引号字符串**的字面量内容。
+//
+// 单引号串里只有单引号本身需要写成两个连续单引号；反斜杠是普通字符，
+// **不能加倍**（PowerShell 的转义字符是反引号而不是反斜杠）。早期代码把
+// Windows 临时路径的反斜杠写成双写，会让截图保存到错误路径。
+func psSingleQuote(s string) string {
+	return strings.ReplaceAll(s, "'", "''")
+}
+
+// escapeAppleScriptString 转义 AppleScript 双引号字符串字面量。
+//
+// 顺序关键：**先转义反斜杠再转义双引号**。若反过来，刚插入的 `\"` 中的
+// 反斜杠会被再转义一遍变成 `\\"`（反斜杠 + 未转义引号），内容可越出字符串。
+func escapeAppleScriptString(s string) string {
+	s = strings.ReplaceAll(s, `\`, `\\`)
+	return strings.ReplaceAll(s, `"`, `\"`)
+}
+
 func (p *Plugin) handleScreensee(args map[string]interface{}) (interface{}, error) {
 	platform := runtime.GOOS
 	tmpDir := os.TempDir()
@@ -203,7 +221,7 @@ func (p *Plugin) handleScreensee(args map[string]interface{}) (interface{}, erro
 			$bitmap.Save('%s', [Drawing.Imaging.ImageFormat]::Png)
 			$graphics.Dispose()
 			$bitmap.Dispose()
-		`, strings.ReplaceAll(outFile, "\\", "\\\\"))
+		`, psSingleQuote(outFile))
 		cmd = exec.Command("powershell", "-NoProfile", "-Command", psScript)
 	default:
 		return map[string]interface{}{"isError": true, "content": "不支持的平台: " + platform}, nil
@@ -361,7 +379,7 @@ func (p *Plugin) handleSpeakeruse(args map[string]interface{}) (interface{}, err
 			Add-Type -AssemblyName System.Speech
 			$synthesizer = New-Object System.Speech.Synthesis.SpeechSynthesizer
 			$synthesizer.Speak('%s')
-		`, strings.ReplaceAll(text, "'", "''"))
+		`, psSingleQuote(text))
 		cmd = exec.Command("powershell", "-NoProfile", "-Command", psScript)
 	default:
 		return map[string]interface{}{"isError": true, "content": "speakeruse 不支持平台: " + platform}, nil
@@ -394,12 +412,12 @@ func (p *Plugin) handleScreensue(args map[string]interface{}) (interface{}, erro
 		return p.screensueLinux(content, duration)
 	case "darwin":
 		// macOS 用 osascript 弹窗
-		psScript := fmt.Sprintf(`display dialog "%s" with title "HomeAgent" buttons {"OK"} default button "OK giving up after %d"`, strings.ReplaceAll(content, `"`, `\"`), duration)
+		psScript := fmt.Sprintf(`display dialog "%s" with title "HomeAgent" buttons {"OK"} default button "OK giving up after %d"`, escapeAppleScriptString(content), duration)
 		cmd := exec.Command("osascript", "-e", psScript)
 		_ = cmd.Run()
 		return map[string]interface{}{"content": "屏幕显示已触发"}, nil
 	case "windows":
-		escContent := strings.ReplaceAll(content, "\x27", "\x27\x27")
+		escContent := psSingleQuote(content)
 		psScript := fmt.Sprintf(`
 			Add-Type -AssemblyName System.Windows.Forms
 			$form = New-Object System.Windows.Forms.Form
@@ -504,7 +522,7 @@ func (p *Plugin) handleClipboardsue(args map[string]interface{}) (interface{}, e
 		return map[string]interface{}{"content": "剪切板已写入"}, nil
 	case "windows":
 		ps := fmt.Sprintf(`Add-Type -AssemblyName System.Windows.Forms; [Windows.Forms.Clipboard]::SetText('%s')`,
-			strings.ReplaceAll(text, "'", "''"))
+			psSingleQuote(text))
 		_ = exec.Command("powershell", "-NoProfile", "-Command", ps).Run()
 		return map[string]interface{}{"content": "剪切板已写入"}, nil
 	default:
@@ -582,7 +600,7 @@ func (p *Plugin) computeruseWindows(action string, args map[string]interface{}) 
 		_ = exec.Command("powershell", "-NoProfile", "-Command", ps).Run()
 	case "type":
 		text, _ := args["text"].(string)
-		ps := fmt.Sprintf(`$w = New-Object -ComObject wscript.shell; $w.SendKeys('%s')`, strings.ReplaceAll(text, "'", "''"))
+		ps := fmt.Sprintf(`$w = New-Object -ComObject wscript.shell; $w.SendKeys('%s')`, psSingleQuote(text))
 		_ = exec.Command("powershell", "-NoProfile", "-Command", ps).Run()
 	default:
 		return map[string]interface{}{"isError": true, "content": "Windows computeruse 暂不支持 " + action}, nil

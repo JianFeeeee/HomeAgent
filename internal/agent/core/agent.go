@@ -17,6 +17,7 @@ import (
 	"gitcode.com/JianFeeeee/HomeAgent/internal/memory/media"
 	"gitcode.com/JianFeeeee/HomeAgent/internal/memory/social"
 	"gitcode.com/JianFeeeee/HomeAgent/internal/memory/text"
+	"gitcode.com/JianFeeeee/HomeAgent/internal/memory/vector"
 	"gitcode.com/JianFeeeee/HomeAgent/internal/plugin"
 	"gitcode.com/JianFeeeee/HomeAgent/internal/tracker"
 	"gitcode.com/JianFeeeee/HomeAgent/pkg/types"
@@ -51,16 +52,10 @@ type Agent struct {
 	// 文本记忆（原始对话日志）
 	textMem *text.Memory
 
-	// 媒体存储（内容寻址）：对话里出现的图片/音频按 sha256 落盘去重，
-	// L0/L2/L3 只记 digest。为 nil 时全部媒体接线静默跳过——
-	// 它是记忆增强而非对话必需品，缺了不该让对话失败。
+	// 媒体存储（内容寻址）：对话里出现的图片/音频按 sha256 落盘去重。
+	// 它是记忆块的内容存储，不单独做生命周期管理：块的创建/迁移/删除
+	// 由记忆系统本身决定。为 nil 时全部媒体接线静默跳过。
 	mediaStore *media.Store
-	// mediaGCInterval 为 0 时不跑 GC 循环（容量上限就仅在手动调 GC 时生效）。
-	mediaGCInterval time.Duration
-	// mediaGCMinAge 保护新入库媒体：刚 Put 还没来得及 AddRef 的项引用计数也是 0。
-	mediaGCMinAge time.Duration
-	// mediaDescribe 控制是否跑后台描述循环（要消耗视觉模型配额）。
-	mediaDescribe bool
 
 	// 人格设定
 	personality *agentPkg.Personality
@@ -95,10 +90,17 @@ type Agent struct {
 	selfInputCh chan selfInputMsg
 
 	// 子任务异步执行
-	childMu      sync.Mutex
-	childNextID  int64
-	childResults map[string]string
-	childRunning map[string]bool // 运行中的子任务（child_result 查询时区分'运行中'与'不存在'）
+	childMu     sync.Mutex
+	childNextID int64
+	// childTasks 记录子任务状态：运行中 / 结果 / 是否已交付。
+	//
+	// 为什么保留结果而不是“读到即删”：完成通知会写进持久上下文
+	// （formatMergedTimeline 每轮都重新注入），模型之后还会再查。若读到即删，
+	// 第二次查询就得到“不存在或已过期”这个**永久失败信号**——模型据此认为
+	// 任务未完成，会无限重试/汇报（实测单轮 35 次工具调用、持续 514 秒）。
+	childTasks map[string]*childTaskState
+	// childSeq 给完成的任务排个序，用于有界淘汰。
+	childSeq int64
 
 	// 高优先级打断通道：interceptLoop 注入，process() 在工具循环轮次间非阻塞读取
 	interceptCh chan *agentIO.InputEvent
@@ -144,6 +146,13 @@ type Agent struct {
 	// 词嵌入模型，用于实体语义相似度计算
 	embedder *memory.StaticEmbedder
 
+	// multimodalSpace 是统一多模态向量空间（可选）。实现可以是内嵌 ONNX，
+	// 也可以是外部 API 客户端；两者共享同一套 L0/L2/L3 向量缓存与检索基础设施。
+	multimodalSpace vector.MultimodalEmbedder
+
+	// fusionCfg 控制文本路与视觉路的跨模态融合权重，可按模型实测结果配置。
+	fusionCfg CrossModalFusionConfig
+
 	// 技能索引提供者：由 skillmgr 插件实现，向 system prompt 注入轻量技能索引
 	skillIndex SkillIndexProvider
 }
@@ -171,9 +180,8 @@ type AgentConfig struct {
 	SocialStore        *social.SocialStore
 	TextMemory         *text.Memory
 	MediaStore         *media.Store
-	MediaGCInterval    time.Duration
-	MediaGCMinAge      time.Duration
-	MediaDescribe      bool
+	MultimodalSpace    vector.MultimodalEmbedder
+	FusionCfg          CrossModalFusionConfig // 跨模态融合权重；零值用默认
 	Personality        *agentPkg.Personality
 	PluginReg          *plugin.Registry
 	PluginDir          string
@@ -217,8 +225,7 @@ func New(cfg AgentConfig) *Agent {
 		embedder = memory.NewStaticEmbedder(strings.Split(cfg.EmbeddingModelPath, ",")...)
 	}
 	if cfg.DocStore != nil {
-		cfg.DocStore.SetVectorizer(embedder)
-		cfg.DocStore.ReindexWithVectorizer(embedder)
+		// TF-IDF 内置为 fallback，无需外部注入
 	}
 	if cfg.Knowledge != nil {
 		cfg.Knowledge.SetVectorizer(embedder)
@@ -232,12 +239,16 @@ func New(cfg AgentConfig) *Agent {
 	if cfg.IO != nil {
 		rc.SetChannelDefLookup(cfg.IO.GetInputChannelDef)
 	}
-	// 必须把媒体存储也注给 RelevanceContext：L0→L2 归档（Prune）靠
-	// rc.transferMediaRefs 把引用从 context owner 转给 document owner。
-	// 漏了这一行的后果是静默的：rc.mediaStore 为 nil 时转移直接 return，
-	// 而携带引用的 ContextEvent 已被归档删除 → 引用永久悬空在
-	// context owner 上、计数永不归零 → 对应 blob 永远不会被 GC 回收。
-	rc.SetMediaStore(cfg.MediaStore)
+	// 注入稠密多模态向量空间（可选）：配置后文档检索、L0 相关性裁剪、
+	// 跨模态检索全部共享同一向量空间，取代稀疏 fastText 语义路。
+	// 未配置时退化到 TF-IDF/fastText 稀疏检索，保持既有行为。
+	if cfg.MultimodalSpace != nil && cfg.MultimodalSpace.Loaded() {
+		rc.SetDenseSpace(cfg.MultimodalSpace)
+		if cfg.DocStore != nil {
+			cfg.DocStore.SetDenseSpace(cfg.MultimodalSpace)
+			cfg.DocStore.BuildDenseIndex(cfg.MultimodalSpace)
+		}
+	}
 
 	return &Agent{
 		id:              cfg.ID,
@@ -257,9 +268,6 @@ func New(cfg AgentConfig) *Agent {
 		social:          cfg.SocialStore,
 		textMem:         cfg.TextMemory,
 		mediaStore:      cfg.MediaStore,
-		mediaGCInterval: cfg.MediaGCInterval,
-		mediaGCMinAge:   cfg.MediaGCMinAge,
-		mediaDescribe:   cfg.MediaDescribe,
 		personality:     cfg.Personality,
 		pluginReg:       cfg.PluginReg,
 		pluginDir:       cfg.PluginDir,
@@ -272,13 +280,14 @@ func New(cfg AgentConfig) *Agent {
 		skillIndex:      cfg.SkillIndexProvider,
 		eventBus:        cfg.EventBus,
 		selfInputCh:     make(chan selfInputMsg, 64),
-		childResults:    make(map[string]string),
-		childRunning:    make(map[string]bool),
+		childTasks:      make(map[string]*childTaskState),
 		interceptCh:     make(chan *agentIO.InputEvent, 64),
 		pluginHealth:    newPluginHealthTracker(),
 		thinkingEnabled: cfg.ThinkingEnabled,
 		inputCfg:        cfg.InputProcessing,
 		embedder:        embedder,
+		multimodalSpace: cfg.MultimodalSpace,
+		fusionCfg:       cfg.FusionCfg,
 		noMergeMarkers:  make(map[string]int),
 		lastInput:       make(map[string]time.Time),
 	}
@@ -294,8 +303,8 @@ func (a *Agent) Start() {
 	go a.archiveLoop()
 	go a.mergeLoop()
 	go a.reviewLoop()
-	go a.mediaGCLoop()
-	go a.mediaDescribeLoop()
+	a.reembedStaleMedia()
+	a.migrateLegacyGraphMedia()
 	log.Printf("[agent] %s started, waiting for IO interrupts", a.id)
 }
 

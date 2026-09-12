@@ -736,7 +736,7 @@ goroutine 里的 `pluginInvokeOutput` 才是 cgo 调用，**不构成嵌套**。
 **现网触发点**：`AfterToolcall` 上有两个外部插件
 
 | Stage | 注册者 | 风险 |
-|---|---|---|
+| --- | --- | --- |
 | `AfterToolcall` | **sanitizer**(Global,改写 ToolResults) + **weather**(own_tools,只读) | ⚠️ 真实冲突 |
 | `PreAction` | memo(外部) + webui(内置) | ⚡ |
 | `BeforeToolcall` | qq(外部) + webui(内置) + cmd(内置) | ⚡ |
@@ -783,7 +783,7 @@ diff := changedFieldsOnly(before, stageContextWritable(sc))
 `lua_plugin.go:726` 直接读 `sc.RawMessage` 等字段，**未持 `sc.RLock()`**：
 
 | 路径 | 快照时是否持锁 |
-|---|---|
+| --- | --- |
 | cabi（`loader.go:412`） | ✅ `sc.RLock()` |
 | Lua（`lua_plugin.go:726`） | ❌ 无锁 |
 
@@ -806,7 +806,7 @@ return nil       // ← 无 resultOut，无 applyStageResult
 ```
 
 | 路径 | 下发字段 | 写回 |
-|---|---|---|
+| --- | --- | --- |
 | Linux cabi | 10 | ✅ |
 | Lua | 10 | ✅ |
 | **Windows DLL** | **3** | ❌ **完全没有** |
@@ -850,7 +850,7 @@ return nil       // ← 无 resultOut，无 applyStageResult
 **11 项可行性实验全部通过**（详见评估文档第七章）：
 
 | 验证项 | 结果 |
-|---|---|
+| --- | --- |
 | eventfd 走 netpoller | ✅ 200 等待者仅 +1 线程 |
 | 跨进程偏移解引用 | ✅ 父子 mmap 不同基址仍正确 |
 | 锁仲裁 RPC 成本 | ✅ 19.4 µs/次 |
@@ -886,7 +886,7 @@ return nil       // ← 无 resultOut，无 applyStageResult
 按「影响 × 成本」排序，前 4 项不依赖迁移决策：
 
 | 序 | 项 | 规模 | 现网影响 |
-|---|---|---|---|
+| --- | --- | --- | --- |
 | 1 | **11.1** output_send 同步等结果 | M | ❗ 用户收不到消息且模型以为成功 |
 | 2 | **11.3** stageContextWritable diff 回传 | S | ❗ 脏数据进 LLM（量级百分之几） |
 | 3 | **11.6** reload 语义修正（3 项） | S | 误导模型白跑重载 |
@@ -930,7 +930,7 @@ context 累积导致的内存增长。
 四个决策点均已落定并执行：
 
 | # | 决策点 | 最终选择 |
-|---|---|---|
+| --- | --- | --- |
 | 1 | merge 方式 | **`--no-ff`** —— commit message 记录了「为何共享同一块 memfd」「为何 procCore 不能嵌入」等踩坑过程，压成一条就没了 |
 | 2 | 合回后是否删 feature 分支 | **删**（`feature/plugin-proc-migration`、`feature/memory-media` 均已删，本地 + 远端） |
 | 3 | release 构建是否再替换生产二进制 | **换**，且此后每个正式版都走同一流程（备份二进制 + `sqlite3 .backup` 配置库 + 记插件清单 → `install -m 0755` → restart → 健康检查） |
@@ -949,6 +949,7 @@ context 累积导致的内存增长。
 
 已发布：`v1.0.0` / `v1.0.1` / `v1.0.3` / `v1.0.4`（1.0.x 线）、`v1.1.0` / `v1.1.0-beta.1` / `v1.1.1`（1.1.x 线），
 SDK 仓 `v1.0.0` / `v1.1.0`。main 的版本路牌现为 `1.2.0`（尚无 tag）。
+
 ```
 
 ---
@@ -1083,3 +1084,376 @@ SDK 仓 `v1.0.0` / `v1.1.0`。main 的版本路牌现为 `1.2.0`（尚无 tag）
 
 额外收益：权限梯度从「C ABI 表达能力的意外产物」变成**显式三道闸**
 （类型层 `procCore` 命名字段 + manifest 能力声明 + RPC 边界明确拒绝）。
+
+---
+
+## 13. 子进程化后遗留改造（逐步推进）
+
+每个步骤独立提交、独立验证，遵循「小步 → 测试 → 提交」循环。
+
+### 步骤分组
+
+| 步骤 | 内容 | 依赖 | 产出 |
+|---|---|---|---|
+| 13.1 | 统一共享内存布局 | 无 | 单一 memfd，StageContext+EvtRing 成为区内 segment |
+| 13.2 | 共享内存分配器 | 13.1 | 内核独占的变长块分配器，插件经 RPC 申请/归还 |
+| 13.3 | 工具调用调用帧 | 13.1/13.2 | payload 始终走共享内存，内核标定帧，插件按需扩容 |
+| 13.4 | Cleaner 迁移至 SharedRef | 13.1 | cleaner.invoke 参数/结果走 SharedRef |
+| 13.5 | InputChannel lane | 13.1 | 输入通道消息走共享内存 |
+| 13.6 | OutputChannel lane | 13.1 | 输出通道消息走共享内存 |
+| 13.7 | RuntimeManager + 分组 worker | 13.1~13.6 | 一个 RuntimeManager，少量 worker，多插件共享 transport |
+| 13.8 | ContextPolicy tool 上下文策略 | 无 | ToolDef.ContextPolicy = none/prune |
+| 13.9 | llmsproxy 上下文溢出感知 | 无 | 溢出错误归一化 + AUTO 截断放宽 |
+| 13.10 | AgentMail 三个 bug | 无 | 提示词修正 / 回信标识 / relay_key 限长 |
+| 13.11 | WebUI 修复全清单 | 无 | 11 项逐步推进 |
+| 13.12 | L3 原生多模态 | 13.1~13.7 | 媒体作为图节点/边，L2→L3 引用迁移 |
+
+### 13.1 统一共享内存布局
+
+**现状**：两块独立 memfd（StageContext 256KB + EvtRing ~320KB），fd 3/4，eventfd 占 fd 5。
+**目标**：合并为单一 memfd 占 fd 3；eventfd 占 fd 4。段内偏移表定位各 segment。
+
+```text
+┌─────────────────────────────────────────┐
+│ Unified Shared Region（单 memfd）       │
+├─────────────────────────────────────────┤
+│ [SuperBlock 64B] magic/version/cap/gen  │
+│ [StageContext segment]  布局不变         │
+│ [EvtRing segment]      布局不变         │
+│ [Reserved: ToolCall]   后续步骤填充     │
+│ [Reserved: InputCh]    后续步骤填充     │
+│ [Reserved: OutputCh]   后续步骤填充     │
+│ [Dynamic Arena]        自由分配区       │
+└─────────────────────────────────────────┘
+```
+
+**实施**：
+
+1. 定义 SuperBlock 布局（magic/version/segment 偏移表）
+2. NewHost() 一次 allocShm，内含两段
+3. Segment + EvtRing 从 SuperBlock 读偏移
+4. fd 传递从 3 个降为 2 个
+5. procExtraFilesForShm 返回 2 个 fd
+6. 插件侧模板解析 SuperBlock，自行定位两段
+7. 所有现有测试不变
+8. go test -race ./internal/plugin/proc/
+
+**验证**：
+
+- [x] SuperBlock 写入读回一致
+- [x] StageContext 并发改写 0 lost update
+- [x] 事件环 post-and-forget 仍工作
+- [x] TestPlugin_ConcurrentWriterAndReaderNoLostUpdate 通过
+- [x] fd 数从 3 降到 2（`procExtraFilesForShm` 只返回 memfd + evtfd）
+- [x] git commit -m "feat(shm): unified shared memory region"（ad016e4）
+
+**顺手清理**：删除 §13.1 后遗留的死代码 `allocEvtRing`（从未被调用，
+统一区域后只有操作区内切片的 `NewEvtRing` 仍在使用），并修正
+`plugin.go` 里仍写着旧 3-fd 布局（3=StageContext, 4=事件环, 5=通知）
+的过时注释。
+
+### 13.2 内核独占的共享内存分配器
+
+**设计约束（用户明确）**：
+
+> 内核应当全权管理共享内存，插件需要共享内存要向内核申请，内核给插件返回偏移与大小，使用完成后插件通知内核回收。
+> 内核暴露类似 syscall 的 RPC 接口；共享内存是内部实现，不对插件开发者暴露。
+
+**为什么不是跨进程分配器**（前几版都被推翻）：
+
+- v1：SuperBlock 放 `arenaUsed` 游标，内核 CAS bump。但**插件模板里的 `arenaUsed` 是进程本地变量**，两个进程各自 bump，必然写到同一段内存；`arenaReset` 还会重置共享游标覆盖对方数据。
+- v2：把位图 CAS 下沉到插件模板。虽然正确，但把分配器实现细节泄漏进了插件运行时，且插件必须与内核保持位图布局同步。
+- v3：定长槽 + 共享位图 CAS。正确，但定长槽唯一的理由是“跨进程没法安全做变长分配”。
+- v4（当前）：分配器收回内核进程后那个约束消失，改成**变长块分配器**（first-fit + 邻块合并）。内核可以按需**标定**每块大小，大 payload 不再受固定槽容量限制。
+
+**实施**：
+
+1. `arena.go`：块头 16B（`size/state/owner/prevSize`），`Alloc/Put/Read/Free/ReclaimOwner`，内核独占一把 `sync.Mutex`。`prevSize` 让 `Free` 能 O(1) 找到前驱做向后合并。
+2. 块头记录 `owner`；`Free` 校验归属 + 走块链确认 offset 是已分配块的数据起点，**伪造引用不能改动分配器状态**。
+3. `Read` 允许块内偏移（调用帧的结果区就在帧块中间），但要求不跨越块边界。
+4. 协议新增 `arena.alloc` / `arena.free`（`CapCore`，属基础能力）。
+5. `Plugin` 在 `Start` 领取 ownerID；`handleExit` 调 `ReclaimOwner` 回收残留块，防崩溃把 arena 耗尽。
+6. 插件侧不写任何分配器状态：模板只通过 RPC 申请/归还；SDK 公开 API 仍是普通字符串/Map，开发者无感。
+7. arena 容量 4MB，但底层是 memfd：**未触碰的页不占物理内存**，所以开大无成本。
+
+**验证**：
+
+- [x] `TestArena_*`：分配/归还/归属校验/回收/并发唯一/耗尽/超限/非法引用/伪造 offset/相邻合并/对齐/布局校验
+- [x] `TestPlugin_ArenaAllocFreeAcrossProcess`：真进程申请→写入→随业务 RPC 回传→归还，内核读回内容一致且 arena 归零
+- [ ] **Grow/Shrink 未实现**：跨进程 remap 会让正在读的对端 SIGSEGV。当前容量固定，用尽时调用失败（不再退回内联）。
+- [x] git commit -m "refactor(shm): kernel-owned variable-size arena"
+
+### 13.3 工具调用走 funccall 调用帧
+
+**目标**：工具调用的 payload **始终**在共享内存里；内核作为 caller 标定内存块交给插件。
+
+**模型（用户明确）**：
+
+> 工具调用的 payload 应当始终在共享内存中。因为工具调用是内核发出的，按 funccall 方式，内存块应当由内核标定后交给子进程。当内核提前给的不够用时，插件侧才请求扩容。
+
+调用帧布局：
+
+```text
+[0, ArgsLen)              参数 JSON
+[ArgsLen, Frame.Length)   结果区（内核预留的预算）
+```
+
+**为什么不用 ring 状态机**：初版计划用 FREE→WRITING→READY→READING→DONE 的 ring 把 `tool.invoke` 整个搬出 RPC。写完发现是错的方向——RPC 已经提供请求 ID 关联、错误传递、ctx 取消、崩溃唤醒（`Process.CallContext`），ring 只是把它们重新实现一遍，且从未接线（死代码，已删）。
+
+**实施**：
+
+1. 内核 `invokeTool`：序列化参数 → `Alloc(len(args)+toolResultBudget)` → 参数写帧前段 → 发 `ToolInvokeParams{Name, Frame, ArgsLen}`。
+2. 插件：从帧读参数；结果优先写帧的结果区。
+3. 结果超出预算 → 插件 `arena.alloc` 扩容块，引用上打 `sharedRefFlagExpand`；内核据此单独归还。
+4. **没有按大小切换内联的分支**：小 payload 同样走帧。
+5. Cleaner 复用同一帧模型（`Frame` + `InputLen`）。
+6. `ToolInvokeParams.Args` / `ToolInvokeResult.Result` 仅剩给**直连 RPC 的测试**（process/bench 不建 Host，拿不到共享内存）；生产路径永远走帧。
+
+**验证**：
+
+- [x] `TestPlugin_ToolInvokeArgsResultViaArena`：大/小 payload 都经帧往返，结果内容一致且 arena 归零
+- [x] `TestE2E_RealTemplatePluginFullLifecycle`：真实 SDK 模板编译的插件跑通
+- [x] `TestProcTemplate_ToolInvokeUsesSharedRef`：模板必须处理 frame/args_len/result_ref（防漂移）
+- [x] Bench: ToolInvoke 延迟对比（inline vs frame，见 `bench_test.go`）
+
+### 13.4 Cleaner 迁移至 SharedRef
+
+**目标**：cleaner.invoke 参数/结果走 SharedRef。
+
+**实施**：
+
+1. CleanerInvokeParams 的 Text 改为 SharedRef
+2. 插件从 SharedRef 读文本、写结果
+3. 内核从 SharedRef 读结果
+4. RPC 帧从 ~200B 降到 ~16B
+
+**验证**：
+
+- [x] 三类 Cleaner 结果正确（testdata/stageplugin.go 覆盖 tool/input/output 三类 scope）
+- [x] git commit -m "feat(shm): cleaner invoke via shared refs"（5608abd）
+
+**顺带**：§13.4 的第六项（工具调用帧）同时把每批工具调用的性质写入
+`lastBatchReplyOnly`，供工具循环选择补位文案（见 `process.go`）。
+
+### 13.5 InputChannel lane
+
+**目标**：输入通道消息走共享内存。
+
+**现状（已核实，已实现）**：
+
+- 插件侧 `putInArena`（模板）做 `arena.alloc` RPC → 写入 region → 把
+  `SharedRef` 随 `io.injectText` 回传；内核侧 `coreHandler.resolveText`
+  （corehandler.go:585）从 arena 读出。
+- **分配在插件侧是符合设计的**，不是缺口：§13.2 的模型就是「插件经 RPC
+  向内核申请/归还」，内核独占分配器。`procCore.InjectText` 拿到的是普通
+  字符串，因为共享内存是跨进程的内部实现、不对插件开发者暴露。
+- 阈值 `inlinePayloadLimit = 512` 字节：小于它走内联 JSON（省一次 RPC），
+  超过才 Alloc。这是有意为之，不是残留。
+
+**实施**：
+
+1. ✅ InputChannel Slot：source/channel/text/blocks 写入 arena
+2. 插件消费后设 DONE
+3. ✅ 同步注入走 RPC + SharedRef（`callWithText`）
+4. 异步注入改写 arena + eventfd
+
+**验证**：
+
+- [x] 模板 `callWithText` 大 payload 走 `text_ref`（小 payload 走内联）
+- [ ] 真实 QQ 消息注入测试（需生产部署后验证）
+- [x] git commit -m "feat(shm): input channel lane"（2bc813b，基础设施）
+
+**遗留（与 13.5 同类的未入内存路径）**：见 §13.13。
+
+### 13.6 OutputChannel lane
+
+**目标**：输出通道消息走共享内存。
+
+**实施**（已完成）：
+
+1. `OutputInvokeParams` 加 `Frame SharedRef` + `ArgsLen`（`Args` 仅留给直连
+   RPC 的测试），与 `ToolInvokeParams` 同一 funccall 帧模型
+2. `invokeOutput` Alloc 帧、写 payload JSON、只传偏移描述符；插件退出/调用完
+   后内核归还整帧（`defer arena.Free`）
+3. 帧尾不预留结果区：output 应答很小（`"ok"` / status map），直接走 RPC
+   应答字段；若插件把大结果写回帧（`OutputInvokeResult.ResultRef`）也能读回，
+   并识别 `sharedRefFlagExpand` 单独归还扩容块
+4. 模板 `output.invoke` 从帧读参数（`frameInput`），无帧才回退内联 `Args`
+
+**验证**：
+
+- [x] `TestPlugin_OutputPayloadViaArena`：9000 字节 payload 经帧完整送达（插件
+  回报实收长度）+ 调用后 arena 归零
+- [x] `TestE2E_RealTemplateOutputPayloadViaFrame`：同上但用**真实 SDK 模板**
+  编译的插件（生产插件走的就是模板，模板不读帧该改动就等于没做）
+- [x] `TestPlugin_OutputChannelReportsRealFailure` 仍绿：同步等真实结果、
+  失败必须上报（§9.4）不被破坏
+- [ ] QQ 输出正常（需生产部署后验证）
+- [x] git commit -m "feat(shm): output channel lane"
+
+### 13.7 RuntimeManager + 分组 worker
+
+**目标**：一个 RuntimeManager + 少量 worker + 多插件共享 transport + 每插件独立 PluginContext。
+
+**实施**：
+
+1. RuntimeManager 类型：管理 worker 池 + 调度
+2. Worker 类型：一个进程，共享 RuntimeClient
+3. PluginContext 类型：独立身份，共享 transport
+4. manifest 新增 worker_group 字段
+5. 默认所有 proc 插件归同一 worker（兼容迁移）
+6. 高风险插件可声明独立 worker_group
+
+**验证**：
+
+- [ ] 默认分组 = 现有行为
+- [ ] git commit -m "feat(runtime): RuntimeManager with grouped workers"
+
+### 13.8 ContextPolicy tool 上下文策略
+
+**目标**：ToolDef.ContextPolicy = none/prune。
+
+**实施**：
+
+1. SDK ToolDef 加 ContextPolicy string 字段
+2. StageAfterToolcall 检查当前 tool 的 ContextPolicy
+3. prune 时执行 RelevanceContext.Prune
+4. 默认 none
+5. **prune 的查询向量必须取插件 Cleaner 清洗后的有效内容**（后补）
+
+**为什么第 5 条是必需的**：Prune 的入参是**相关性查询向量**，它决定保留/归档
+哪些上下文事件。刚上线时直接传原始 result，于是 ANSI 转义、base64、JSON 包装
+等噪声全被编进查询向量，打分失真、裁掉本该保留的事件。
+而 ToolDef.Cleaner 的契约本就写着「仅在向量化/jieba/蒸馏时调用」——裁剪正是
+在向量化，所以这是回归契约，不是新功能。
+回退规则：Cleaner 未注册 / RPC 失败 / 返回空串，都回退原文（返回空串会让查询
+向量退化成零向量，所有事件相关性相同，等于随机裁）。
+
+**验证**：
+
+- [x] qq_get_message 加 prune 后上下文精简（QQ 插件已声明 `ContextPolicy: "prune"`）
+- [x] git commit -m "feat(ctx): context policy for tool results"（772a494）
+- [x] `TestToolOutputForQueryAppliesCleaner`：Cleaner 被调用且用其结果；
+  无 Cleaner / nil stageHost 均回退原文
+- [x] `TestToolOutputForQueryEmptyCleanFallsBack`：空串回退（防零向量）
+
+### 13.9 llmsproxy 上下文溢出感知
+
+**实施**：
+
+1. OVERFLOW_PATTERNS 补充 "Context window is full"
+2. AUTO 截断宽度 80→160
+
+**验证**：
+
+- [ ] go test ./internal/ai/...
+- [ ] git commit -m "fix(ai): context overflow pattern + truncation width"
+
+### 13.10 AgentMail 三个 bug
+
+**实施**：
+
+1. 提示词修正
+2. InReplyTo 字段
+3. relay_key ≤ 64 字节
+
+**验证**：
+
+- [ ] Agent→Agent 不再套话 6 轮
+- [ ] git commit -m "fix(agentmail): prompt / in-reply-to / relay key"
+
+### 13.11 WebUI 修复全清单
+
+11 项，每项独立提交：
+SSE Last-Event-ID → 超时 → api 状态码 → renderAll 增量 → XSS 消毒 → CSS → DesignSystem → handleAgents 持久化 → handleKnowledge 吞错 → GUI 重构
+
+### 13.12 L3 原生多模态
+
+**实施**：
+
+1. L3 node_type 新增 media/media_block
+2. L3 edge_type 新增 depicts/contains
+3. L2→L3 迁移时保留 media 引用边
+
+**验证**：
+
+- [ ] 图查询返回媒体节点
+- [ ] git commit -m "feat(l3): native multimodal nodes/edges"
+
+### 13.13 剩余内联 payload 路径（「全量数据交互入共享内存」的尾巴）
+
+**目标**：所有**数据面**交换都走共享内存，RPC 只传偏移描述符（SharedRef）。
+共享内存是跨进程的内部实现，不对插件开发者暴露（SDK 公开 API 仍是
+string / map / slice）。
+
+**为什么必须入共享内存（不能只图省管道）**：
+
+.so 方案下插件回调（Cleaner / Stage / 工具）与内核同进程，可以直接就地
+改写参数与结果；多进程化后如果靠 RPC 把消息来回发，回调就只能“读一份、
+回发一份”，丢失就地改写语义。共享内存就是为了把 .so 时代的能力找回来：
+内核把内容放进段里 → 插件回调**就地改** → 只回一个描述符。
+
+**因此判据不是「payload 大不大」，而是「插件回调要能就地改写的内容有没
+留在段里」**。控制面小报文（plugin.init.Config、tool.register 的 def、
+settings.*、lifecycle.*、arena.alloc/free 自身）不属于此列：它们不被任何
+回调改写，搬进段里反而多两次 RPC。
+
+**回调就地改写——已达成（实测核实）**：
+
+| 通道 | 机制 |
+| --- | --- |
+| StageContext | 区内 segment；`invokeStage` 只发 `{Stage, Seq}`，插件就地改写，应答只回 `DirtyFields` 计数 |
+| 事件环 | 区内 segment + eventfd 通知 |
+| Cleaner | `Frame`/`InputLen` 入，`TextRef`（16B 描述符）回，内容不随 RPC 走 |
+| tool.invoke 参数/结果 | 内核标定 `Frame`，结果 `ResultRef`；`after_toolcall` 可在段内再改 |
+| output.invoke 参数 | `Frame`（§13.6） |
+| io.injectText 系列 | 插件侧 `putInArena` → `text_ref`（§13.5） |
+
+**尚未入内存**（按“是否破坏回调语义”排序）：
+
+1. ✅ ~~媒体块：`io.setToolBlocks`~~ —— 已修（本轮）。之前它在本核侧根本是
+   **桩实现**（直接返回“待共享段二进制通道落地”），也就是说**子进程插件调
+   SetToolBlocks 必然失败**，只有内置插件能用。现在：内核侧真正实现该
+   method，模板把 blocks 序列化后 `putArena` 传 `blocks_ref`（小 payload 仍
+   内联），内核 `resolveBlocks` 读回。
+2. ✅ ~~`io.injectMedia` / `injectMediaSync` / `injectInterruptMedia`~~ ——
+   同上（共用 `mediaArgsOwned`）。注意同步调用不能在应答返回前释放槽，
+   否则内核读到的是已释放的内存。
+3. ✅ ~~`doc.insert` / `doc.insertWithMedia`~~ —— 已修。新增 `doc_ref` /
+   `attachments_ref`，模板序列化后 `putValueInArena`。
+4. ✅ ~~`knowledge.add(name, content)`~~ —— 已修。新增 `content_ref`
+   （内容是 JSON 字符串，读出后需再解一层）。
+5. **反向结果：不做（已核实为低价值）**。
+   原以为涉及 `doc.query` / `llm.chat` 等返回大结果的 method。核实后：
+   - **根本不存在 `llm.chat`**——`llm.*` 只映射 listSources/setSource/
+     currentSource（切换 LLM 源），外部插件无法调 LLM。
+   - 唯一可能返回大结果的是 `doc.query`（`CapDocMemory`），而**没有任何
+     外部插件用它**（全部 example 扫描：只有 recoverydiag 用了
+     `Knowledge().Add`）。
+   - `withheldCapabilities` 表已明确列出「刻意不给外部插件」的一批内核机制。
+   结论：它优化的是一条外部插件几乎不用、且已被能力门限制的路径，
+   投入产出不成立。**不做**，而不是留成永久 TODO。
+
+**协议版本已 bump 到 2**（§13.6/§13.13 的 payload 承载变更）。
+不再靠文档提醒，而是让错配在握手上**显式失败**：
+
+- 内核 `proc.ProtocolVersion = 2`；模板 `procProtocolVersion = 2`
+- 双方都是等值校验 → v1 插件遇上 v2 内核会在建链时报
+  “协议版本不匹配…请用配套 plugindev 重编”（带修复指令）
+- 没有这个 bump 的话：v1 插件只读内联 args，遇到 v2 内核会拿到**空参数**；
+  v2 插件发 blocks_ref，v1 内核反序列化时**静默忽略**（旧内核
+  `io.setToolBlocks` 还是桩）。两种都是静默失效，现场极难定位。
+
+**验证**：
+
+- [x] `TestCoreHandler_SetToolBlocksViaArena` / `Inline` / `EmptyRejected`
+- [x] `TestCoreHandler_KnowledgeAddViaArena` / `Inline`（12000 字节正文经
+  `content_ref` 送达，内容一致）
+- [x] `TestCoreHandler_DocInsertViaArena`（正文经 `doc_ref` 送达）
+- [x] `TestE2E_RealTemplateSetToolBlocksViaArena`：用**真实 SDK 模板**编译的
+  插件（生产插件走的就是模板，模板不走 blocks_ref 则内核实现了也收不到）
+- [x] `TestProcess_ProtocolMismatchRejected` 加断言：错误必须含重编指令
+- [x] 工具链已同步：`/usr/local/bin/plugindev` = 协议 2（内嵌 blocks_ref /
+  doc_ref / content_ref），回滚副本 `plugindev.bak-20260910-232544`
+- [ ] 反向结果入内存（第 5 条）
+- [ ] git commit -m "feat(shm): remaining data-plane payloads via shared refs"

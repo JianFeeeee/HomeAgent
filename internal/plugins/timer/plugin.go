@@ -107,7 +107,9 @@ func (p *Plugin) Start(s *sdk.PluginSDK) error {
 			select {
 			case <-time.After(dur):
 				log.Printf("[timer] firing: %s (%s later)", message, dur)
-				s.InjectInterruptText("timer", "timer", fmt.Sprintf("timer: %s", message))
+				// NoMemory：定时提醒是系统通知，不是记忆内容。
+				s.InjectInterruptTextOpts("timer", "timer", fmt.Sprintf("timer: %s", message),
+					sdk.InjectOptions{NoMemory: true})
 			case <-p.stopCh:
 				log.Printf("[timer] cancelled: %s", message)
 			}

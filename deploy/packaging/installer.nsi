@@ -216,17 +216,26 @@ FunctionEnd
 
 Section "Install" SEC_INSTALL
   SetOutPath "$INSTDIR"
+  ; WSL 引导脚本随安装包分发（它负责检测/引导 WSL 并把 Linux 包装进发行版）
+  File "..\..\deploy\packaging\windows\install-via-wsl.ps1"
   CreateDirectory "$INSTDIR\data"
   CreateDirectory "$INSTDIR\data\log"
   CreateDirectory "$INSTDIR\data\plugins"
   CreateDirectory "$INSTDIR\data\adapters"
 
+; homed **不再装到 Windows**：插件体系依赖 fd 继承与统一共享内存区的段内偏移
+; 解引用，Windows 的句柄模型无法表达（见 cmd/homed/platform_windows.go）。
+; Windows 侧改为引导到 WSL2，把 **Linux 包**送进发行版里按 Linux 的方式安装。
+; 所以这里带的是 linux/amd64 的 payload，不是 homed.exe。
 !if "${HAS_CORE}" == "1"
-  File "..\..\build\initconfig.exe"
-  File "..\..\build\homed.exe"
+  SetOutPath "$PLUGINSDIR\linux-payload"
+  File /r "..\..\build\linux-payload\*.*"
+  SetOutPath "$INSTDIR"
 !endif
 
 !if "${HAS_WAITER}" == "1"
+  ; waiter 是 CLI 客户端：WSL 侧会装上 Linux 版；Windows 侧仍可保留原生版
+  ; （它只是个客户端，不走插件体系）。
   File "..\..\build\waiter.exe"
 !endif
 
@@ -237,11 +246,24 @@ Section "Install" SEC_INSTALL
 !endif
 
 !if "${HAS_CORE}" == "1"
-  DetailPrint "初始化配置数据库..."
-  nsExec::Exec '"$INSTDIR\initconfig.exe" -data "$INSTDIR\data" -username "$webuiUsername" -password "$webuiPassword" -apikey "$apiKey"'
+  ; 在 WSL2 里安装 homed。凭据（页面上收的那三个）透传进去，避免
+  ; 「界面显示一份、config.db 里另一份」导致登录不上。
+  DetailPrint "检测 WSL 并在其中安装 HomeAgent..."
+  nsExec::ExecToStack 'powershell -NoProfile -ExecutionPolicy Bypass -File "$INSTDIR\install-via-wsl.ps1" -PayloadDir "$PLUGINSDIR\linux-payload" -ApiKey "$apiKey" -WebUIUser "$webuiUsername" -WebUIPass "$webuiPassword"'
   Pop $0
+  Pop $1
   ${If} $0 != 0
-    DetailPrint "警告: 数据库初始化可能未成功完成"
+    ; 退出码含义见 install-via-wsl.ps1：20/21 是「WSL 或发行版缺失，需要先装」，
+    ; 属于可指引的用户动作，不当成安装失败来恐吓人。
+    ${If} $0 == 20
+      MessageBox MB_ICONINFORMATION|MB_OK "未检测到 WSL。$\r$\n$\r$\n请在管理员 PowerShell 中执行：$\r$\n    wsl --install$\r$\n$\r$\n然后重启 Windows，再重新运行本安装程序。"
+    ${ElseIf} $0 == 21
+      MessageBox MB_ICONINFORMATION|MB_OK "WSL 已安装，但还没有发行版。$\r$\n$\r$\n请先执行：$\r$\n    wsl --install -d Ubuntu$\r$\n$\r$\n完成首次初始化后再重新运行本安装程序。"
+    ${Else}
+      MessageBox MB_ICONEXCLAMATION|MB_OK "WSL 内安装失败（退出码 $0）。$\r$\n$\r$\n可进入 WSL 手动排查：wsl -d Ubuntu$\r$\n安装脚本输出见上方日志。"
+    ${EndIf}
+  ${Else}
+    DetailPrint "HomeAgent 已在 WSL2 内安装完成"
   ${EndIf}
 !endif
 

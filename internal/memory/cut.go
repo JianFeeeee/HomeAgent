@@ -13,26 +13,26 @@ import (
 
 // contentPOS 有实义的词性标签：只保留名词/动词/形容词/专名等
 var contentPOS = map[string]bool{
-	"n":  true, // 普通名词
-	"nr": true, // 人名
-	"ns": true, // 地名
-	"nt": true, // 机构名
-	"nw": true, // 作品名/URL
-	"nz": true, // 其他专名
-	"v":  true, // 动词
-	"vd": true, // 副动词
-	"vn": true, // 名动词
-	"a":  true, // 形容词
-	"ad": true, // 副形词
-	"an": true, // 名形词
-	"i":  true, // 成语
-	"l":  true, // 习用语
-	"j":  true, // 简称
-	"s":  true, // 处所词
-	"f":  true, // 方位词
-	"b":  true, // 区别词
-	"z":  true, // 状态词
-	"t":  true, // 时间词
+	"n":   true, // 普通名词
+	"nr":  true, // 人名
+	"ns":  true, // 地名
+	"nt":  true, // 机构名
+	"nw":  true, // 作品名/URL
+	"nz":  true, // 其他专名
+	"v":   true, // 动词
+	"vd":  true, // 副动词
+	"vn":  true, // 名动词
+	"a":   true, // 形容词
+	"ad":  true, // 副形词
+	"an":  true, // 名形词
+	"i":   true, // 成语
+	"l":   true, // 习用语
+	"j":   true, // 简称
+	"s":   true, // 处所词
+	"f":   true, // 方位词
+	"b":   true, // 区别词
+	"z":   true, // 状态词
+	"t":   true, // 时间词
 	"eng": true, // 英文
 	"x":   true, // 非语素字
 	"zg":  true, // 其他
@@ -53,7 +53,7 @@ func GetJieba() *gojieba.Jieba {
 		}()
 		d := jiebaDictDir()
 		if d == "" {
-			log.Printf("[jieba] no dictionary directory found, jieba disabled")
+			log.Printf("[jieba] 未找到词库目录（内嵌落盘失败且模块缓存也不存在），jieba disabled")
 			return
 		}
 		jiebaInst = gojieba.NewJieba(
@@ -68,9 +68,24 @@ func GetJieba() *gojieba.Jieba {
 }
 
 func jiebaDictDir() string {
+	// 首选内嵌词库：它是产物的一部分，与二进制同版本、不依赖宿主环境。
+	//
+	// 以前这里只猜 GOMODCACHE/GOPATH/~/go/pkg/mod，部署机上通常没有 Go 模块缓存，
+	// 于是分词与关键词提取会**静默退回空列表**（详见 jieba_embed.go 的说明）。
+	if dir, err := materializeJiebaDict(); err == nil && dir != "" {
+		return dir
+	}
+	log.Printf("[jieba] 内嵌词库落盘失败，回退到模块缓存查找（内嵌失败通常意味着缓存目录不可写）")
+
+	// 回退：开发机上存在的模块缓存（仅作为兵底，不应依赖它）。
+	//
 	// GOMODCACHE is typically $GOPATH/pkg/mod. When set, Go writes modules
 	// under <GOMODCACHE>/github.com/... . Look first at GOMODCACHE, then
 	// derive from GOPATH, then try common locations.
+	return jiebaDictDirFromModuleCache()
+}
+
+func jiebaDictDirFromModuleCache() string {
 	candidates := []string{
 		os.Getenv("GOMODCACHE"),
 	}

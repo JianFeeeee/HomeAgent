@@ -125,6 +125,53 @@ func (c *testWSClient) readMsg() (byte, []byte, error) {
 
 func (c *testWSClient) close() { c.conn.Close() }
 
+func (c *testWSClient) bindDevice(t *testing.T, deviceID, token string) {
+	t.Helper()
+	c.sendText(mustJSON(map[string]interface{}{
+		"op": "bind", "device_id": deviceID, "token": token,
+	}))
+	op, payload, err := c.readMsg()
+	if err != nil {
+		t.Fatalf("read bind_ack: %v", err)
+	}
+	if op != 0x1 {
+		t.Fatalf("expected bind_ack text frame, got %x", op)
+	}
+	var ack map[string]interface{}
+	if err := json.Unmarshal(payload, &ack); err != nil {
+		t.Fatalf("decode bind_ack: %v", err)
+	}
+	if ack["op"] != "bind_ack" || ack["ok"] != true {
+		t.Fatalf("bind rejected: %v", ack)
+	}
+}
+
+func (c *testWSClient) readHelloAck(t *testing.T) string {
+	t.Helper()
+	op, payload, err := c.readMsg()
+	if err != nil {
+		t.Fatalf("read hello_ack: %v", err)
+	}
+	if op != 0x1 {
+		t.Fatalf("expected hello_ack text frame, got %x", op)
+	}
+	var ack map[string]interface{}
+	if err := json.Unmarshal(payload, &ack); err != nil {
+		t.Fatalf("decode hello_ack: %v", err)
+	}
+	deviceID, _ := ack["device"].(string)
+	if ack["op"] != "hello_ack" || deviceID == "" {
+		t.Fatalf("expected hello_ack with device id, got %v", ack)
+	}
+	return deviceID
+}
+
+func (c *testWSClient) readHelloAckAndBind(t *testing.T, token string) {
+	t.Helper()
+	deviceID := c.readHelloAck(t)
+	c.bindDevice(t, deviceID, token)
+}
+
 // ===== 端到端：hello/bind/cmd + 二进制分块回传（录像协议）=====
 
 func TestWSBinaryChunkUpload(t *testing.T) {
@@ -139,20 +186,9 @@ func TestWSBinaryChunkUpload(t *testing.T) {
 	cli := dialTestWS(t, url, token)
 	defer cli.close()
 
-	// hello 登记
+	// hello 后必须完成 bind，设备才会注册并开始处理数据。
 	cli.sendText([]byte(`{"op":"hello","device":{"device_id":"gui-test","name":"测试机","kind":"computer","caps":["cmd"]}}`))
-	op, payload, err := cli.readMsg()
-	if err != nil {
-		t.Fatalf("read hello_ack: %v", err)
-	}
-	if op != 0x1 {
-		t.Fatalf("expected text frame, got %x", op)
-	}
-	var ack map[string]interface{}
-	json.Unmarshal(payload, &ack)
-	if ack["op"] != "hello_ack" {
-		t.Fatalf("expected hello_ack, got %v", ack)
-	}
+	cli.readHelloAckAndBind(t, token)
 
 	// 模拟设备收到 cmd 后以二进制分块回传（cmd_data_start → 0x2×N → cmd_data_end）
 	videoData := make([]byte, 20000) // 跨多个 8KB 块
@@ -224,9 +260,7 @@ func TestWSBinaryMediaToFile(t *testing.T) {
 	defer cli.close()
 
 	cli.sendText([]byte(`{"op":"hello","device":{"device_id":"gui-media","name":"媒体机","kind":"computer","caps":["cmd"]}}`))
-	if _, _, err := cli.readMsg(); err != nil { // hello_ack
-		t.Fatalf("read hello_ack: %v", err)
-	}
+	cli.readHelloAckAndBind(t, token)
 
 	videoData := make([]byte, 30000)
 	for i := range videoData {
@@ -290,9 +324,7 @@ func TestWSPushDataAudio(t *testing.T) {
 	defer cli.close()
 
 	cli.sendText([]byte(`{"op":"hello","device":{"device_id":"audio-dev","name":"音频机","kind":"speaker"}}`))
-	if _, _, err := cli.readMsg(); err != nil {
-		t.Fatalf("read hello_ack: %v", err)
-	}
+	cli.readHelloAckAndBind(t, token)
 
 	audioData := []byte("RIFF....fake-wav-audio-data-for-testing....")
 
@@ -388,9 +420,7 @@ func TestScreenseeEndToEnd(t *testing.T) {
 
 	// 设备 hello + bind（bind 需 token 才能被授权流程识别，这里直接手动授权）
 	cli.sendText([]byte(`{"op":"hello","device":{"device_id":"see-dev","name":"屏幕机","kind":"computer","caps":["cmd"]}}`))
-	if _, _, err := cli.readMsg(); err != nil {
-		t.Fatalf("read hello_ack: %v", err)
-	}
+	cli.readHelloAckAndBind(t, token)
 
 	// 设备侧循环收命令并回执（模拟 GUI screensee 实现）
 	go func() {
@@ -454,9 +484,7 @@ func TestComputeruseEndToEnd(t *testing.T) {
 	defer cli.close()
 
 	cli.sendText([]byte(`{"op":"hello","device":{"device_id":"cu-dev","name":"操控机","kind":"computer","caps":["cmd","computeruse"]}}`))
-	if _, _, err := cli.readMsg(); err != nil {
-		t.Fatalf("read hello_ack: %v", err)
-	}
+	cli.readHelloAckAndBind(t, token)
 
 	// 设备侧收 computeruse 命令并回执
 	var receivedCmd string
@@ -544,9 +572,7 @@ func TestClipboardEndToEnd(t *testing.T) {
 	defer cli.close()
 
 	cli.sendText([]byte(`{"op":"hello","device":{"device_id":"clip-dev","name":"剪贴板机","kind":"computer","caps":["cmd"]}}`))
-	if _, _, err := cli.readMsg(); err != nil {
-		t.Fatalf("read hello_ack: %v", err)
-	}
+	cli.readHelloAckAndBind(t, token)
 
 	// 设备侧响应剪贴板命令
 	go func() {
@@ -666,9 +692,7 @@ func TestCapabilityMatrix(t *testing.T) {
 	defer cli.close()
 
 	cli.sendText([]byte(`{"op":"hello","device":{"device_id":"cam-only","name":"纯摄像头","kind":"camera","caps":["camera"]}}`))
-	if _, _, err := cli.readMsg(); err != nil {
-		t.Fatalf("read hello_ack: %v", err)
-	}
+	cli.readHelloAckAndBind(t, token)
 
 	if _, err := dev.Execute("screensee", map[string]interface{}{"device_id": "cam-only"}); err == nil {
 		t.Fatal("camera-only device should not support screensee")
@@ -698,9 +722,7 @@ func TestDeviceEventReport(t *testing.T) {
 	defer cli.close()
 
 	cli.sendText([]byte(`{"op":"hello","device":{"device_id":"cam-watch","name":"监控摄像头","kind":"camera","caps":["camera"]}}`))
-	if _, _, err := cli.readMsg(); err != nil {
-		t.Fatalf("read hello_ack: %v", err)
-	}
+	cli.readHelloAckAndBind(t, token)
 
 	// 设备主动上报：识别到未知人员驻留
 	cli.sendText(mustJSON(map[string]interface{}{
@@ -736,5 +758,107 @@ func TestDeviceEventReport(t *testing.T) {
 	}
 	if events[1]["type"] != "motion" {
 		t.Fatalf("unexpected second event: %v", events[1])
+	}
+}
+
+func TestWSDoesNotExposeDeviceBeforeBind(t *testing.T) {
+	reg := NewRegistry()
+	token := "prebind-token"
+	reg.SetAcceptToken(func(provided string) bool { return provided == token })
+
+	srv := httptest.NewServer(http.HandlerFunc(reg.ServeWS))
+	defer srv.Close()
+	cli := dialTestWS(t, srv.URL, token)
+	defer cli.close()
+
+	cli.sendText([]byte(`{"op":"hello","device":{"device_id":"prebind-dev","name":"待绑定设备","kind":"computer","caps":["cmd"]}}`))
+	deviceID := cli.readHelloAck(t)
+	if deviceID != "prebind-dev" {
+		t.Fatalf("unexpected device id: %s", deviceID)
+	}
+	if _, ok := reg.Get(deviceID); ok {
+		t.Fatal("device must not be registered before bind")
+	}
+	if reg.Online(deviceID) {
+		t.Fatal("device must not be online before bind")
+	}
+	if err := reg.PushJSON(deviceID, map[string]interface{}{"op": "cmd"}); err == nil {
+		t.Fatal("command push must fail before bind")
+	}
+
+	cli.sendText(mustJSON(map[string]interface{}{
+		"op": "cmd_result", "req_id": "prebind-result", "status": "ok",
+	}))
+	time.Sleep(20 * time.Millisecond)
+	if _, ok := reg.GetResult("prebind-result"); ok {
+		t.Fatal("result must be ignored before bind")
+	}
+}
+
+func TestWSRejectedBindDoesNotRegister(t *testing.T) {
+	reg := NewRegistry()
+	reg.SetAcceptToken(func(provided string) bool { return provided == "expected-token" })
+
+	srv := httptest.NewServer(http.HandlerFunc(reg.ServeWS))
+	defer srv.Close()
+	cli := dialTestWS(t, srv.URL, "")
+	defer cli.close()
+
+	cli.sendText([]byte(`{"op":"hello","device":{"device_id":"rejected-dev","name":"拒绝设备","kind":"computer"}}`))
+	deviceID := cli.readHelloAck(t)
+	cli.sendText(mustJSON(map[string]interface{}{
+		"op": "bind", "device_id": deviceID, "token": "wrong-token",
+	}))
+	op, payload, err := cli.readMsg()
+	if err != nil {
+		t.Fatalf("read rejected bind_ack: %v", err)
+	}
+	if op != 0x1 {
+		t.Fatalf("expected rejected bind_ack text frame, got %x", op)
+	}
+	var ack map[string]interface{}
+	if err := json.Unmarshal(payload, &ack); err != nil {
+		t.Fatalf("decode rejected bind_ack: %v", err)
+	}
+	if ack["op"] != "bind_ack" || ack["ok"] != false {
+		t.Fatalf("expected rejected bind_ack, got %v", ack)
+	}
+	if _, ok := reg.Get(deviceID); ok {
+		t.Fatal("rejected device must not be registered")
+	}
+	if reg.Online(deviceID) {
+		t.Fatal("rejected device must not be online")
+	}
+}
+
+func TestWSHandshakeAuthorizationAllowsUnrelatedBindToken(t *testing.T) {
+	reg := NewRegistry()
+	transportToken := "transport-token"
+	reg.SetAcceptToken(func(provided string) bool { return provided == transportToken })
+
+	srv := httptest.NewServer(http.HandlerFunc(reg.ServeWS))
+	defer srv.Close()
+	cli := dialTestWS(t, srv.URL, transportToken)
+	defer cli.close()
+
+	cli.sendText([]byte(`{"op":"hello","device":{"device_id":"transport-dev","name":"代理设备","kind":"computer"}}`))
+	deviceID := cli.readHelloAck(t)
+	cli.bindDevice(t, deviceID, "unrelated-body-token")
+	if !reg.Online(deviceID) {
+		t.Fatal("handshake-authorized device should be online after bind")
+	}
+}
+
+func TestAwaitResultReturnsResultDeliveredBeforeWaiter(t *testing.T) {
+	reg := NewRegistry()
+	want := map[string]interface{}{"status": "ok", "value": "early"}
+	reg.deliverResult("early-result", want)
+
+	got, err := reg.AwaitResult("early-result", 50*time.Millisecond)
+	if err != nil {
+		t.Fatalf("await early result: %v", err)
+	}
+	if got["status"] != want["status"] || got["value"] != want["value"] {
+		t.Fatalf("unexpected early result: %v", got)
 	}
 }
