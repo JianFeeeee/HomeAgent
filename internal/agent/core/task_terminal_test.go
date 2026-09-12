@@ -87,7 +87,7 @@ func TestTerminal_EmptyInputGetsSkippedReply(t *testing.T) {
 		OutputChannel: "cli",
 		ResponseCh:    ch,
 	}
-	if _, out := a.runInputTask(evt, nil); out != outcomeDone {
+	if _, out := a.runInputTask(evt); out != outcomeDone {
 		t.Fatalf("空输入应正常返回，实际 %v", out)
 	}
 	if len(ch) != 1 {
@@ -111,7 +111,7 @@ func TestTerminal_NoTimeoutSyncCallerDoesNotHang(t *testing.T) {
 
 	// 第一次成功
 	e1, ch1 := textEvent("cli", "重复内容")
-	if _, out := a.runInputTask(e1, nil); out != outcomeDone {
+	if _, out := a.runInputTask(e1); out != outcomeDone {
 		t.Fatalf("首次=%v", out)
 	}
 	if len(ch1) != 1 {
@@ -120,7 +120,7 @@ func TestTerminal_NoTimeoutSyncCallerDoesNotHang(t *testing.T) {
 
 	// 第二次（去重命中）：模拟同步调用方阻塞等待——必须在 1s 内拿到终态。
 	e2, ch2 := textEvent("cli", "重复内容")
-	go a.runInputTask(e2, nil)
+	go a.runInputTask(e2)
 	select {
 	case r := <-ch2:
 		if skipped, _ := r.Payload["skipped"].(bool); !skipped {

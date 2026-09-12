@@ -24,7 +24,6 @@ import (
 	"sync/atomic"
 	"time"
 
-	agentAPI "gitcode.com/JianFeeeee/HomeAgent/internal/agent/api"
 	agentIO "gitcode.com/JianFeeeee/HomeAgent/internal/agent/io"
 	"gitcode.com/JianFeeeee/HomeAgent/internal/events"
 	sdk "gitcode.com/JianFeeeee/HomeAgent/internal/sdk"
@@ -106,10 +105,6 @@ type Task struct {
 
 	Event *agentIO.InputEvent // Kind == TaskKindInput
 	Self  selfInputMsg        // Kind == TaskKindSelf
-
-	// SeedMsgs 是抢占式中断任务的只读前缀（D1=A）：由被打断的任务在挂起时
-	// 附上，使中断任务看得见「进行到哪一步」，但其产出不合并回原任务。
-	SeedMsgs []agentAPI.Message
 
 	// PreemptCount 是本任务被抢占的次数，用于饥饿防护：
 	// effectiveLevel = min(L4, Level + min(PreemptCount, 2))。
@@ -425,23 +420,8 @@ func (s *scheduler) suspend(t *Task, f *TaskFrame) {
 		s.running = nil
 	}
 
-	// D1=A：把被抢占任务的只读前缀交给造成本次抢占的中断任务。
-	// 选最高优先级的待处理中断；若它已有前缀（嵌套抢占）则不覆盖。
-	if s.preemptArmed {
-		var victim *Task
-		for _, it := range s.pendingInterrupts {
-			if it.Level < s.preemptLevel {
-				continue
-			}
-			if victim == nil || taskBefore(victim, it) {
-				victim = it
-			}
-		}
-		if victim != nil && len(victim.SeedMsgs) == 0 {
-			victim.SeedMsgs = append([]agentAPI.Message(nil), f.Msgs...)
-		}
-	}
-
+	// D1=B：中断任务在上一个任务之前的完整状态上开始运行，
+	// 因此这里**不**把被打断任务的任何内容交给它。
 	s.preemptArmed = false
 	s.preemptLevel = 0
 }
@@ -645,9 +625,9 @@ func (a *Agent) executeNewTask(t *Task) {
 		}()
 		switch t.Kind {
 		case TaskKindInput:
-			f, out = a.runInputTask(t.Event, t.SeedMsgs)
+			f, out = a.runInputTask(t.Event)
 		case TaskKindSelf:
-			f, out = a.runInputTask(selfEvent(t.Self), nil)
+			f, out = a.runInputTask(selfEvent(t.Self))
 		}
 	}()
 
@@ -664,6 +644,10 @@ func (a *Agent) executeNewTask(t *Task) {
 // resumeTask 从保存的现场继续一个被抢占的任务。
 //
 // 关键：不重建帧、不重跑 prepare 段——否则会重复提交上下文与事件。
+// resumeTask 从保存的现场继续一个被抢占的任务。
+//
+// 关键：不重跑 prepare 段（否则会重复提交上下文与事件），而是先把基础前缀
+// 重建到「中断任务之上」，再把本任务自己的现场接回去（见 rebaseFramePrefix）。
 func (a *Agent) resumeTask(t *Task, f *TaskFrame) {
 	a.sched.mu.Lock()
 	a.sched.stats.Resumed++
@@ -671,6 +655,7 @@ func (a *Agent) resumeTask(t *Task, f *TaskFrame) {
 	a.publishEvent(events.EventScheduler, map[string]interface{}{
 		"action": "resume", "task": t.ID, "level": int(t.Level),
 	})
+	a.rebaseFramePrefix(f)
 	defer func() {
 		if r := recover(); r != nil {
 			log.Printf("[agent] resume task#%d panic recovered: %v\n%s",
