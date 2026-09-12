@@ -1,5 +1,4 @@
 import { webSocket } from '@kit.NetworkKit';
-import { DeviceInfo } from '../model/Model';
 import { CapResult } from './BridgeCaps';
 
 // ===== 协议消息（与 remotedevice 插件对齐）=====
@@ -31,13 +30,6 @@ interface BindMessage {
   op: string;
   device_id: string;
   token: string;
-}
-
-interface CmdMessage {
-  op: string;
-  req_id: string;
-  command: string;
-  cmd_type: string;
 }
 
 export interface CmdReply {
@@ -81,14 +73,15 @@ export class DeviceBridgeClient {
   private caps: string[] = [];
   private hostname: string = 'ohos';
   private connected: boolean = false;
-  private everConnected: boolean = false;
+  private bound: boolean = false;
   private manualClose: boolean = false;
   private reconnectTimer: number = -1;
+  private connectionGeneration: number = 0;
   private cmdHandler: BridgeCmdHandler | null = null;
   private onStateChange: ((open: boolean) => void) | null = null;
 
   isConnected(): boolean {
-    return this.connected;
+    return this.connected && this.bound;
   }
 
   getDeviceId(): string {
@@ -117,37 +110,40 @@ export class DeviceBridgeClient {
   }
 
   private async openAndRegister(authorized: boolean): Promise<void> {
-    // 每次连接使用新的 WebSocket 实例，避免旧实例事件残留
     try {
       this.ws.off('open');
       this.ws.off('message');
       this.ws.off('close');
       this.ws.off('error');
+      this.ws.close().catch(() => {
+        // ignore stale socket close failure
+      });
     } catch (e) {
-      // ignore
+      // ignore stale socket cleanup failure
     }
-    this.ws = webSocket.createWebSocket();
-    this.bindWsEvents(authorized);
-    // 鉴权必须走请求头，不能拼 ?token= ：
-    //   1) webui 的 /api/v1/device/* 反代包在 requireAPI 里，
-    //      validAPIKey 只认 X-API-Key 头或 Authorization: Bearer，
-    //      查询参数一律视为未授权 → 握手被 401 顶掉，
-    //      表现为 NETSTACK 日志 "Lws client connection error HS: ws upgrade unauthorized"。
-    //   2) 反代到 remotedevice 时会自行注入网关的 ws_token；
-    //      如果我们再带 ?token=<webui apiKey>，remotedevice 的 ServeWS
-    //      会拿它和 ws_token 比对并 401。留空反而放行。
+    this.connectionGeneration = this.connectionGeneration + 1;
+    const generation: number = this.connectionGeneration;
+    const socket: webSocket.WebSocket = webSocket.createWebSocket();
+    this.ws = socket;
+    this.connected = false;
+    this.bound = false;
+    this.bindWsEvents(socket, authorized, generation);
     const opts: webSocket.WebSocketRequestOptions = {
       header: this.authHeader(),
     };
     try {
-      await this.ws.connect(this.url, opts);
+      await socket.connect(this.url, opts);
     } catch (e) {
-      this.connected = false;
-      this.scheduleReconnect();
+      if (generation === this.connectionGeneration && !this.manualClose) {
+        this.connected = false;
+        this.bound = false;
+        this.notifyState(false);
+        this.scheduleReconnect();
+      }
     }
   }
 
-  /** 握手请求头：X-API-Key + Authorization 双写，兼容不同后端校验实现。 */
+  /** WebUI 用 API key 验证外层连接，并由反代向设备网关注入其内部 token。 */
   private authHeader(): Record<string, string> {
     const h: Record<string, string> = {};
     if (this.token.length > 0) {
@@ -157,36 +153,46 @@ export class DeviceBridgeClient {
     return h;
   }
 
-  private bindWsEvents(authorized: boolean): void {
-    this.ws.on('open', (err: Error, value: Object) => {
+  private bindWsEvents(socket: webSocket.WebSocket, authorized: boolean, generation: number): void {
+    socket.on('open', (err: Error, value: Object) => {
+      if (generation !== this.connectionGeneration || this.manualClose) {
+        socket.close().catch(() => {
+          // ignore stale socket close failure
+        });
+        return;
+      }
       this.connected = true;
-      this.everConnected = true;
-      this.cancelReconnect();
+      this.bound = false;
       this.sendHello(authorized);
       this.sendBind();
-      if (this.onStateChange !== null) {
-        this.onStateChange(true);
-      }
     });
-    this.ws.on('message', (err: Error, value: string | ArrayBuffer) => {
-      if (typeof value === 'string') {
+    socket.on('message', (err: Error, value: string | ArrayBuffer) => {
+      if (generation === this.connectionGeneration && typeof value === 'string') {
         this.handleTextFrame(value);
       }
     });
-    this.ws.on('close', (err: Error, value: webSocket.CloseResult) => {
-      this.connected = false;
-      if (this.onStateChange !== null) {
-        this.onStateChange(false);
-      }
-      this.scheduleReconnect();
+    socket.on('close', (err: Error, value: webSocket.CloseResult) => {
+      this.handleSocketEnd(generation);
     });
-    this.ws.on('error', (err: Error) => {
-      this.connected = false;
-      if (this.onStateChange !== null) {
-        this.onStateChange(false);
-      }
-      this.scheduleReconnect();
+    socket.on('error', (err: Error) => {
+      this.handleSocketEnd(generation);
     });
+  }
+
+  private handleSocketEnd(generation: number): void {
+    if (generation !== this.connectionGeneration) {
+      return;
+    }
+    this.connected = false;
+    this.bound = false;
+    this.notifyState(false);
+    this.scheduleReconnect();
+  }
+
+  private notifyState(open: boolean): void {
+    if (this.onStateChange !== null) {
+      this.onStateChange(open);
+    }
   }
 
   private scheduleReconnect(): void {
@@ -211,18 +217,20 @@ export class DeviceBridgeClient {
     }
   }
 
-  /** 更新本地授权状态并立即重新 hello 同步到服务端。 */
+  /** 更新本地授权状态并在已绑定连接上同步到服务端。 */
   updateAuthorized(authorized: boolean): void {
     this.lastAuthorized = authorized;
-    if (this.connected) {
+    if (this.connected && this.bound) {
       this.sendHello(authorized);
     }
   }
 
   disconnect(): void {
     this.manualClose = true;
+    this.connectionGeneration = this.connectionGeneration + 1;
     this.cancelReconnect();
     this.connected = false;
+    this.bound = false;
     try {
       this.ws.off('open');
       this.ws.off('message');
@@ -234,9 +242,7 @@ export class DeviceBridgeClient {
     } catch (e) {
       // ignore
     }
-    if (this.onStateChange !== null) {
-      this.onStateChange(false);
-    }
+    this.notifyState(false);
   }
 
   private sendHello(authorized: boolean): void {
@@ -246,7 +252,7 @@ export class DeviceBridgeClient {
       platform: 'OpenHarmony',
       arch: '',
       os_release: '',
-      version: '1.1.0',
+      version: '1.1.1',
       cpus: 0,
     };
     const device: HelloDevice = {
@@ -280,37 +286,50 @@ export class DeviceBridgeClient {
       return;
     }
     const op: string = obj['op'] as string ?? '';
-    if (op === 'cmd') {
-      const reqId: string = obj['req_id'] as string ?? '';
-      const command: string = obj['command'] as string ?? '';
-      if (reqId.length === 0 || command.length === 0) {
-        return;
+    if (op === 'bind_ack') {
+      const accepted: boolean = obj['ok'] === true;
+      if (accepted && this.connected && !this.manualClose) {
+        this.bound = true;
+        this.cancelReconnect();
+        this.notifyState(true);
+      } else {
+        this.bound = false;
+        this.notifyState(false);
+        try {
+          this.ws.close().catch(() => {
+            // ignore bind rejection close failure
+          });
+        } catch (e) {
+          this.scheduleReconnect();
+        }
       }
-      if (!this.lastAuthorized) {
-        this.sendResult(reqId, 'error', '', '设备未授权：请在设备页开启远程控制授权');
-        return;
-      }
-      this.dispatchCommand(reqId, command);
-    } else if (op === 'hello_ack' || op === 'bind_ack') {
-      if (this.onAck !== null) {
-        this.onAck(op);
-      }
+      return;
     }
+    if (op !== 'cmd' || !this.bound) {
+      return;
+    }
+    const reqId: string = obj['req_id'] as string ?? '';
+    const command: string = obj['command'] as string ?? '';
+    if (reqId.length === 0 || command.length === 0) {
+      return;
+    }
+    if (!this.lastAuthorized) {
+      this.sendResult(reqId, 'error', '', '设备未授权：请在设备页开启远程控制授权');
+      return;
+    }
+    this.dispatchCommand(reqId, command);
   }
-
-  onAck: ((op: string) => void) | null = null;
 
   private dispatchCommand(reqId: string, command: string): void {
     if (this.cmdHandler === null) {
-      this.sendResult(reqId, 'error', '', 'no capability handler registered');
+      this.sendResult(reqId, 'error', '', '本机能力尚未就绪，请保持应用在前台后重试');
       return;
     }
     const handler: BridgeCmdHandler = this.cmdHandler;
     handler(reqId, command).then((res: CapResult) => {
       this.sendResult(reqId, res.status, res.output, res.error);
     }).catch((e: Object) => {
-      const msg: string = e instanceof Error ? e.message : String(e);
-      this.sendResult(reqId, 'error', '', msg);
+      this.sendResult(reqId, 'error', '', '本机能力执行失败，请稍后重试');
     });
   }
 
@@ -388,7 +407,3 @@ export class DeviceBridgeClient {
 }
 
 export const deviceBridge: DeviceBridgeClient = new DeviceBridgeClient();
-
-export function parseDevicesPayload(jsonStr: string): DeviceInfo[] {
-  return [];
-}

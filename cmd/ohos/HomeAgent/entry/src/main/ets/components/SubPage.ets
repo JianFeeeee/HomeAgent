@@ -13,7 +13,11 @@ import { GradientBackground } from './GradientBackground';
 export const KEY_SUBPAGE_OPEN: string = 'subPageOpen';
 
 export function markSubPageOpen(open: boolean): void {
-  AppStorage.setOrCreate<boolean>(KEY_SUBPAGE_OPEN, open);
+  if (AppStorage.has(KEY_SUBPAGE_OPEN)) {
+    AppStorage.set<boolean>(KEY_SUBPAGE_OPEN, open);
+  } else {
+    AppStorage.setOrCreate<boolean>(KEY_SUBPAGE_OPEN, open);
+  }
 }
 
 /** pushPathByName 的参数载体：ArkTS 不允许把 string 断言成 object */
