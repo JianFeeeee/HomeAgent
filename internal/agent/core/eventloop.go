@@ -321,33 +321,6 @@ func (a *Agent) emitResponse(evt *agentIO.InputEvent, response string) {
 	a.runStage(sdk.StageAfterOutput, stageCtx)
 }
 
-func (a *Agent) drainInterrupts() []string {
-	var out []string
-	for {
-		select {
-		case evt := <-a.interceptCh:
-			if evt == nil {
-				continue
-			}
-			text, _ := evt.Payload["content"].(string)
-			if text == "" {
-				continue
-			}
-			source := evt.Source
-			if source == "" {
-				source = "unknown"
-			}
-			channel := evt.OutputChannel
-			if channel == "" {
-				channel = source
-			}
-			out = append(out, fmt.Sprintf("[打断消息][来源:%s][输出通道:%s] %s", source, channel, text))
-		default:
-			return out
-		}
-	}
-}
-
 // pruneOnInput 按声明的上下文策略裁剪上下文，返回归档的事件数。
 //
 // 默认**不裁剪**：ContextPolicy 必须在注入点（payload 的 context_policy）
