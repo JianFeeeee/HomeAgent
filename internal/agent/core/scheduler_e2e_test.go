@@ -74,8 +74,12 @@ func TestScheduler_StressMixedLoad(t *testing.T) {
 	for i := 0; i < nInputs; i++ {
 		a.io.InjectInput("cli", "text", map[string]interface{}{"content": fmt.Sprintf("msg-%d", i)})
 	}
+	// 中断按 L1/L2/L3 轮转：把“四条中断队列按级别高→低扫描”真正压上，
+	// 而不只是排空一条队列。
+	levels := []string{"L1", "L2", "L3"}
 	for i := 0; i < nInterrupts; i++ {
-		a.io.InjectInterruptText("qq", "cli", fmt.Sprintf("intr-%d", i))
+		a.io.InjectInterruptTextOpts("qq", "cli", fmt.Sprintf("intr-%d", i),
+			agentIO.InjectOptions{Priority: levels[i%len(levels)]})
 	}
 
 	snap := waitQuiescent(t, a, nInputs+nInterrupts, 30*time.Second)
@@ -129,7 +133,7 @@ func TestObservability_SchedulerEventsAndStatus(t *testing.T) {
 
 	intrEvt, _ := textEvent("cli", "紧急")
 	intrEvt.Payload["interrupt"] = true
-	a.sched.requestPreempt(intrEvt, LevelCritical)
+	a.sched.requestKernelPreempt(intrEvt)
 	a.cancelCurrentLLM()
 	<-done
 
@@ -185,16 +189,18 @@ func TestE2E_RealLoopPreemption(t *testing.T) {
 	a.Start()
 	defer a.Stop()
 
-	// L1：qq 入站消息 → 阻塞在第一次 LLM 调用
-	a.io.InjectInput("qq", "text", map[string]interface{}{"content": "低优先级长任务"})
+	// 排队输入：qq 入站消息 → 阻塞在第一次 LLM 调用（排队任务无级别）
+	a.io.InjectInput("qq", "text", map[string]interface{}{"content": "长任务"})
 	select {
 	case <-sp.entered:
 	case <-time.After(5 * time.Second):
 		t.Fatal("低优先级任务未进入 LLM")
 	}
 
-	// L4：cli 紧急打断 → interceptLoop 应取消 LLM、登记抢占
-	a.io.InjectInterruptText("cli", "cli", "紧急打断")
+	// 插件声明的 L3 中断：interceptLoop 应取消 LLM 并登记抢占。
+	// 注意它能打断**排队任务**不是因为级别高，而是因为排队任务无级别——
+	// 任何中断都大于它。
+	a.io.InjectInterruptTextOpts("cli", "cli", "紧急打断", agentIO.InjectOptions{Priority: "L3"})
 	a.io.InjectInput("cli", "text", map[string]interface{}{"content": "后续常规输入"})
 
 	// 排空：中断任务 + 被恢复的原任务 + 后续常规输入

@@ -42,7 +42,7 @@ func TestPreempt_DeferredDuringToolExec(t *testing.T) {
 		StageHost:       sh,
 	})
 
-	if _, _ = enqueueTask(t, a, LevelBackground, "qq", "低优先级任务"); true {
+	if _, _ = enqueueQueued(t, a, "qq", "低优先级任务"); true {
 	}
 	lt, _, _ := a.sched.nextRef()
 	done := make(chan struct{})
@@ -57,7 +57,7 @@ func TestPreempt_DeferredDuringToolExec(t *testing.T) {
 	// 工具执行中注入 L4 中断。
 	intrEvt, _ := textEvent("cli", "紧急打断")
 	intrEvt.Payload["interrupt"] = true
-	if !a.sched.requestPreempt(intrEvt, LevelCritical) {
+	if !a.sched.requestKernelPreempt(intrEvt) {
 		t.Fatal("L4 应 arm 让位信号")
 	}
 	// 关键断言：信号已 arm，但任务仍在工具里 —— 绝不能挂起。
@@ -133,7 +133,7 @@ func TestBatch_NotAbandonedWithoutPreemption(t *testing.T) {
 		StageHost:       sh,
 	})
 
-	if _, _ = enqueueTask(t, a, LevelBackground, "cli", "跑两个工具"); true {
+	if _, _ = enqueueQueued(t, a, "cli", "跑两个工具"); true {
 	}
 	tt, _, _ := a.sched.nextRef()
 	a.executeNewTask(tt)

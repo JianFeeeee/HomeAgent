@@ -1435,7 +1435,12 @@ func (p *Plugin) handleWebhook(w http.ResponseWriter, r *http.Request) {
 
 	if p.sdk != nil {
 		// NoMemory：HTTP 侧来的中断提示，不是对话内容。
-		p.sdk.InjectInterruptTextOpts(p.name, p.name, interrupt, sdk.InjectOptions{NoMemory: true})
+		// Priority：QQ 消息是**低级别中断**——既不是时钟那样的实时工作，
+		// 也不是紧急工作，所以声明 L1（完全可等）。
+		p.sdk.InjectInterruptTextOpts(p.name, p.name, interrupt, sdk.InjectOptions{
+			NoMemory: true,
+			Priority: sdk.PriorityL1,
+		})
 	}
 	w.WriteHeader(http.StatusOK)
 }
@@ -2531,9 +2536,10 @@ func (p *Plugin) handleDownloadFile(args map[string]interface{}) (interface{}, e
 			log.Printf("[qq] 文件下载完成: %s", savePath)
 			if p.sdk != nil {
 				// NoMemory：下载完成的状态通知，不是记忆内容。
+				// Priority：同上，QQ 侧一律低级别中断（L1）。
 				p.sdk.InjectInterruptTextOpts(p.name, p.name,
 					fmt.Sprintf("文件下载完成: %s，保存在 %s", filepath.Base(savePath), savePath),
-					sdk.InjectOptions{NoMemory: true})
+					sdk.InjectOptions{NoMemory: true, Priority: sdk.PriorityL1})
 			}
 		} else {
 			errMsg = "下载失败，文件可能已过期"

@@ -5,83 +5,120 @@ package core
 // 设计依据 docs/zh/input-scheduler-design.md §11.4（Q1/Q4）与 §11.5（O1/K1）。
 
 import (
+	"fmt"
 	"testing"
-	"time"
 
 	agentAPI "gitcode.com/JianFeeeee/HomeAgent/internal/agent/api"
 	agentIO "gitcode.com/JianFeeeee/HomeAgent/internal/agent/io"
 )
 
-func mkTask(id uint64, level Level, at time.Time) *Task {
-	return &Task{ID: id, Level: level, EnqueuedAt: at}
-}
+// 新模型的选择顺序：immediate → 中断队列 L4→L1 → 栈顶(与队头比级别) → 排队 FIFO。
+func TestScheduler_SelectionOrder(t *testing.T) {
+	s := newScheduler(16)
 
-// Q1：选择函数的排序键是 (-Level, EnqueuedAt, ID)。
-func TestPickTaskIndex_Ordering(t *testing.T) {
-	base := time.Date(2026, 9, 12, 12, 0, 0, 0, time.UTC)
+	// 四条中断队列各放一个，入队顺序与级别相反 —— 验证“按级别扫”而非 FIFO。
+	for _, lv := range []Level{LevelBackground, LevelMessage, LevelInteractive, LevelCritical} {
+		evt, _ := textEvent("qq", "中断")
+		s.registerInterrupt(newInterruptTask(evt, lv))
+	}
+	// 排队任务两条（无级别，FIFO）。
+	s.enqueue(newSelfTask(selfInputMsg{text: "q1"}))
+	s.enqueue(newSelfTask(selfInputMsg{text: "q2"}))
 
-	cases := []struct {
-		name  string
-		queue []*Task
-		want  []uint64
-	}{
-		{
-			name: "高优先级先执行，与入队先后无关",
-			queue: []*Task{
-				mkTask(1, LevelBackground, base),
-				mkTask(2, LevelCritical, base.Add(time.Second)),
-				mkTask(3, LevelMessage, base.Add(2*time.Second)),
-			},
-			want: []uint64{2, 3, 1},
-		},
-		{
-			name: "同优先级先到先服务",
-			queue: []*Task{
-				mkTask(1, LevelInteractive, base.Add(3*time.Second)),
-				mkTask(2, LevelInteractive, base.Add(time.Second)),
-				mkTask(3, LevelInteractive, base.Add(2*time.Second)),
-			},
-			want: []uint64{2, 3, 1},
-		},
-		{
-			name: "同优先级同入队时刻用 ID 兜底（保证确定性）",
-			queue: []*Task{
-				mkTask(7, LevelMessage, base),
-				mkTask(3, LevelMessage, base),
-				mkTask(5, LevelMessage, base),
-			},
-			want: []uint64{3, 5, 7},
-		},
-		{
-			name: "四级全覆盖",
-			queue: []*Task{
-				mkTask(1, LevelBackground, base),
-				mkTask(2, LevelMessage, base),
-				mkTask(3, LevelInteractive, base),
-				mkTask(4, LevelCritical, base),
-			},
-			want: []uint64{4, 3, 2, 1},
-		},
+	var order []Level
+	for i := 0; i < 4; i++ {
+		task, _, kind := s.nextRef()
+		if kind != nextInterrupt {
+			t.Fatalf("第 %d 个应来自中断队列，kind=%v", i+1, kind)
+		}
+		order = append(order, task.Level)
+		s.done(task)
+	}
+	want := []Level{LevelCritical, LevelInteractive, LevelMessage, LevelBackground}
+	for i := range want {
+		if order[i] != want[i] {
+			t.Fatalf("中断执行顺序=%v，期望 %v", order, want)
+		}
 	}
 
-	for _, c := range cases {
-		t.Run(c.name, func(t *testing.T) {
-			q := append([]*Task(nil), c.queue...)
-			var got []uint64
-			for len(q) > 0 {
-				i := pickTaskIndex(q)
-				got = append(got, q[i].ID)
-				q = append(q[:i], q[i+1:]...)
-			}
-			if len(got) != len(c.want) {
-				t.Fatalf("取出的任务数=%d，期望 %d", len(got), len(c.want))
-			}
-			for i := range got {
-				if got[i] != c.want[i] {
-					t.Fatalf("执行顺序=%v，期望 %v", got, c.want)
-				}
-			}
+	// 中断耗尽后才是排队任务，且保持 FIFO。
+	for i := 1; i <= 2; i++ {
+		task, _, kind := s.nextRef()
+		if kind != nextReady {
+			t.Fatalf("中断耗尽后应取排队任务，kind=%v", kind)
+		}
+		if task.Self.text != fmt.Sprintf("q%d", i) {
+			t.Fatalf("排队任务应 FIFO，第 %d 个=%q", i, task.Self.text)
+		}
+		s.done(task)
+	}
+	if _, _, kind := s.nextRef(); kind != nextNone {
+		t.Fatal("全空后应返回 nextNone")
+	}
+}
+
+// immediate（刚抢占成功的中断）必须最先运行——哪怕队列里有更高级别的待处理中断。
+// 这是“抢占立即生效”的实现方式，也是它不需要和栈顶比级别的原因。
+func TestScheduler_ImmediateWins(t *testing.T) {
+	s := newScheduler(16)
+	evt1, _ := textEvent("cli", "L4 待处理")
+	s.registerInterrupt(newKernelInterruptTask(evt1))
+
+	evt2, _ := textEvent("qq", "抢占者")
+	preemptor := newInterruptTask(evt2, LevelBackground)
+	s.mu.Lock()
+	s.setImmediateLocked(preemptor)
+	s.mu.Unlock()
+
+	task, _, kind := s.nextRef()
+	if kind != nextImmediate || task != preemptor {
+		t.Fatalf("immediate 必须先运行，kind=%v", kind)
+	}
+}
+
+// 中断队列头与中断栈顶比级别，取高者；栈顶是排队任务（无级别）时任何中断都赢。
+func TestScheduler_StackTopVsInterruptQueue(t *testing.T) {
+	s := newScheduler(16)
+	// 直接构造挂起现场：不走 suspend()，避免 PreemptCount/冷却干扰本用例
+	// （本用例只测“选择顺序”这一件事）。
+	pushSuspended := func(id uint64, class TaskClass, lv Level) {
+		s.mu.Lock()
+		s.suspendStack = append(s.suspendStack, &suspendedTask{
+			Task: &Task{ID: id, Class: class, Level: lv}, Frame: &TaskFrame{},
 		})
+		s.mu.Unlock()
+	}
+	// 每次选取后清掉 running，让下一次 registerInterrupt 不把它当成运行任务。
+	clearRunning := func() {
+		s.mu.Lock()
+		s.running = nil
+		s.mu.Unlock()
+	}
+
+	// 栈顶 L3，队列只有 L2 → 恢复栈顶。
+	pushSuspended(1, TaskInterrupt, LevelInteractive)
+	evt, _ := textEvent("qq", "L2 待处理")
+	s.registerInterrupt(newInterruptTask(evt, LevelMessage))
+	if _, _, kind := s.nextRef(); kind != nextSuspended {
+		t.Fatalf("栈顶 L3 > 队头 L2 → 应恢复栈顶，kind=%v", kind)
+	}
+	clearRunning()
+
+	// 栈顶 L3，队列来了 L4 → 队头优先。
+	pushSuspended(2, TaskInterrupt, LevelInteractive)
+	evt2, _ := textEvent("cli", "L4 待处理")
+	s.registerInterrupt(newKernelInterruptTask(evt2))
+	if _, _, kind := s.nextRef(); kind != nextInterrupt {
+		t.Fatalf("队头 L4 > 栈顶 L3 → 应先取中断，kind=%v", kind)
+	}
+	clearRunning()
+
+	// 栈顶是排队任务（无级别）→ 任何中断都赢。
+	pushSuspended(3, TaskQueued, 0)
+	evt3, _ := textEvent("qq", "L1 待处理")
+	s.registerInterrupt(newInterruptTask(evt3, LevelBackground))
+	if _, _, kind := s.nextRef(); kind != nextInterrupt {
+		t.Fatalf("排队栈顶可被任何中断打断，kind=%v", kind)
 	}
 }
 

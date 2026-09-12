@@ -14,7 +14,7 @@ import (
 )
 
 func TestStarvation_EffectiveLevelPromotion(t *testing.T) {
-	base := &Task{Level: LevelBackground}
+	base := &Task{Class: TaskInterrupt, Level: LevelBackground}
 	if got := effectiveLevel(base); got != LevelBackground {
 		t.Fatalf("未抢占时有效级=%v，期望 L1", got)
 	}
@@ -33,7 +33,7 @@ func TestStarvation_EffectiveLevelPromotion(t *testing.T) {
 	}
 
 	// 封顶 L4：L3 任务被多次抢占也不会超过紧急级。
-	high := &Task{Level: LevelInteractive, PreemptCount: 99}
+	high := &Task{Class: TaskInterrupt, Level: LevelInteractive, PreemptCount: 99}
 	if got := effectiveLevel(high); got != LevelCritical {
 		t.Fatalf("L3 提升后应封顶为 L4，实际 %v", got)
 	}
@@ -42,8 +42,8 @@ func TestStarvation_EffectiveLevelPromotion(t *testing.T) {
 func TestStarvation_CooldownBlocksImmediateRepreempt(t *testing.T) {
 	a := newPreemptAgent(t, newPreemptProvider())
 
-	low := &Task{ID: 1, Level: LevelBackground, EnqueuedAt: time.Now()}
-	a.sched.enqueue(low)
+	low := &Task{ID: 1, Class: TaskInterrupt, Level: LevelBackground, EnqueuedAt: time.Now()}
+	a.sched.immediate = low
 	a.sched.nextRef() // running = low
 
 	e1, _ := textEvent("qq", "第一次打断")
@@ -64,7 +64,7 @@ func TestStarvation_CooldownBlocksImmediateRepreempt(t *testing.T) {
 	a.sched.mu.Unlock()
 
 	e2, _ := textEvent("cli", "冷却期内的紧急打断")
-	if a.sched.requestPreempt(e2, LevelCritical) {
+	if a.sched.requestKernelPreempt(e2) {
 		t.Fatal("抢占冷却期内不得再抢占")
 	}
 	if a.sched.preemptGrantedFor() {
@@ -75,8 +75,8 @@ func TestStarvation_CooldownBlocksImmediateRepreempt(t *testing.T) {
 func TestStarvation_PromotionBlocksSameLevelPreempt(t *testing.T) {
 	a := newPreemptAgent(t, newPreemptProvider())
 
-	low := &Task{ID: 1, Level: LevelBackground, EnqueuedAt: time.Now()}
-	a.sched.enqueue(low)
+	low := &Task{ID: 1, Class: TaskInterrupt, Level: LevelBackground, EnqueuedAt: time.Now()}
+	a.sched.immediate = low
 	a.sched.nextRef()
 	// 模拟「已被抢占过一次」：有效级 = L2。
 	low.PreemptCount = 1
@@ -96,23 +96,29 @@ func TestStarvation_PromotionBlocksSameLevelPreempt(t *testing.T) {
 	}
 }
 
-// 选择函数必须用有效级：被抢占过的任务在排队时应当优先于同级/更低的任务。
-func TestStarvation_SelectionUsesEffectiveLevel(t *testing.T) {
-	base := time.Now()
-	promoted := &Task{ID: 1, Level: LevelBackground, PreemptCount: 2, EnqueuedAt: base} // 有效 L3
-	normal := &Task{ID: 2, Level: LevelMessage, EnqueuedAt: base.Add(time.Second)}      // L2
+// 提升必须真的进入抢占判据，而不只是一个数学性质：
+// 被抢占过一次的 L1 中断（有效 L2）应当顶住同级 L2 流的再次抢占。
+func TestStarvation_PromotionIsVisibleInSelection(t *testing.T) {
+	a := newPreemptAgent(t, newPreemptProvider())
 
-	if !taskBefore(promoted, normal) {
-		t.Fatal("被抢占 2 次的 L1（有效 L3）应先于 L2 执行")
-	}
-	if taskBefore(normal, promoted) {
-		t.Fatal("选择函数不得只看基础级")
+	// 栈里放一个「被抢占过一次的 L1」：有效级 L2。
+	a.sched.suspend(&Task{ID: 1, Class: TaskInterrupt, Level: LevelBackground, PreemptCount: 1},
+		a.newTaskFrame("A", a.stageCtxFromInput("A", "", "")))
+
+	// 队列里来一个 L2：有效级持平（2 vs 2）→ 不得越过栈顶。
+	evt, _ := textEvent("qq", "L2 中断")
+	a.sched.registerInterrupt(newInterruptTask(evt, LevelMessage))
+	if _, _, kind := a.sched.nextRef(); kind != nextSuspended {
+		t.Fatalf("有效级持平应恢复栈顶，kind=%v", kind)
 	}
 
-	// 提升不改变调度器自身的排序稳定性：同为有效级时按入队时刻。
-	a := &Task{ID: 3, Level: LevelBackground, PreemptCount: 1, EnqueuedAt: base.Add(2 * time.Second)} // 有效 L2
-	b := &Task{ID: 4, Level: LevelMessage, EnqueuedAt: base.Add(time.Second)}                         // L2，更早
-	if !taskBefore(b, a) {
-		t.Fatal("同有效级时应先到先服务")
+	// 队列里来一个 L3：严格大于 → 队头优先。
+	// PreemptCount 从 0 起：suspend 内部会 +1 → 有效级 L2（正好用来卡 L2 持平）。
+	a.sched.suspend(&Task{ID: 2, Class: TaskInterrupt, Level: LevelBackground},
+		a.newTaskFrame("B", a.stageCtxFromInput("B", "", "")))
+	evt2, _ := textEvent("cli", "L3 中断")
+	a.sched.registerInterrupt(newInterruptTask(evt2, LevelInteractive))
+	if _, _, kind := a.sched.nextRef(); kind != nextInterrupt {
+		t.Fatalf("L3 > 有效 L2 应取中断队列，kind=%v", kind)
 	}
 }

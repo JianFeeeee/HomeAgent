@@ -78,7 +78,23 @@ type InjectOptions struct {
 	NoMemory      bool
 	ContextPolicy string
 	CleanerName   string
+
+	// Priority 声明**中断注入**的优先级（仅 InjectInterrupt* 有意义）。
+	//
+	// 取值 "L1"/"L2"/"L3"；空等同 L1。L4 由内核独占（panic / 内核事件 selfip），
+	// 插件声明 L4 会被内核夹到 L3——内核的调度内部属性不接受外部越权。
+	//
+	// 排队注入（InjectText*/InjectInputSync）没有级别：它们本就是“不需及时处理”
+	// 的那一类，可被任何中断打断。
+	Priority string
 }
+
+// 中断优先级取值（插件可用范围）。L4 不在其中：它由内核保留。
+const (
+	PriorityL1 = "L1"
+	PriorityL2 = "L2"
+	PriorityL3 = "L3"
+)
 
 // ChannelDef 描述通道在记忆计算层的行为，与 ToolDef.NoMemory/Cleaner 语义一致。
 // NoMemory: 此通道输入/输出不参与记忆计算（向量化/关键词提取/蒸馏），但原文保留在上下文中
