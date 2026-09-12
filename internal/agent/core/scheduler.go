@@ -220,14 +220,34 @@ func canPreempt(incoming, running *Task) bool {
 }
 
 // SchedulerStats 是调度器的累计计数（可观测性，设计文档 §11 O2）。
+//
+// InterruptsByLevel / PreemptsByLevel 按**中断级别**分桶（下标 1..4）：
+// “各级中断各登记了多少、各真正抢断了多少次”。按级别验收（而不是只看总数）
+// 是这套调度器的核心判据——总数相同、级别分布不同，行为完全不同。
 type SchedulerStats struct {
 	Enqueued uint64
 	Executed uint64
 	// Rejected 是因队列满（或深度超限）而未被接纳的次数。
 	Rejected uint64
 	// Suspended / Resumed 是挂起与恢复的次数。
+	// 不变量：系统排空后 Suspended == Resumed（挂起必然被恢复），
+	// 因此两者各自只在**一处**计数（suspend / resumeTask）。
 	Suspended uint64
 	Resumed   uint64
+	// InterruptsByLevel[1..4]：各级中断被**登记**的次数（含未抢占成功的）。
+	InterruptsByLevel [5]uint64
+	// PreemptsByLevel[1..4]：各级中断**判定为可抢占并进入 immediate**的次数。
+	// 注意它与 Suspended 不等价：受害者可能在让位信号生效前就自行结束，
+	// 此时抢占者仍然"下一个运行"，但没有挂起发生。
+	PreemptsByLevel [5]uint64
+}
+
+// bumpInterruptLevel 按级别累加（级别必须落在 1..4，否则忽略——
+// 排队任务没有级别，不该出现在中断计数里）。
+func (st *SchedulerStats) bumpInterruptLevel(dst *[5]uint64, lv Level) {
+	if lv >= LevelBackground && lv <= LevelCritical {
+		dst[lv]++
+	}
 }
 
 // SchedulerSnapshot 是调度器的原子快照。
@@ -417,8 +437,9 @@ func (s *scheduler) nextRef() (*Task, *TaskFrame, nextSelection) {
 		top := s.suspendStack[n-1]
 		// 栈顶 vs 最高级待处理中断：取高者（持平归栈顶，维持 LIFO 与公平）。
 		if qTask == nil || effectiveLevel(top.Task) >= qLevel {
+			// 这里只负责“选出”；Resumed 由 resumeTask 计一次（否则会双计，
+			// 使“排空后 Suspended == Resumed”这条不变量失真）。
 			s.suspendStack = s.suspendStack[:n-1]
-			s.stats.Resumed++
 			s.running = top.Task
 			return top.Task, top.Frame, nextSuspended
 		}
@@ -546,12 +567,14 @@ func (s *scheduler) registerInterrupt(t *Task) bool {
 	s.mu.Lock()
 	running := s.running
 	critical := s.critical.Load()
+	s.stats.bumpInterruptLevel(&s.stats.InterruptsByLevel, t.Level)
 	arm := false
 	if !critical && canPreempt(t, running) {
 		if running.LastPreemptAt.IsZero() || time.Since(running.LastPreemptAt) >= preemptCooldown {
 			arm = true
 			s.preemptArmed = true
 			s.preemptLevel = t.Level
+			s.stats.bumpInterruptLevel(&s.stats.PreemptsByLevel, t.Level)
 			s.setImmediateLocked(t)
 		}
 	}
