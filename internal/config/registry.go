@@ -472,6 +472,36 @@ var defaultSources = map[string]map[string]string{
 	"deepseek": {"base_url": "https://api.deepseek.com", "model": "deepseek-v4-flash", "api_key": "", "thinking_enabled": "false", "adapter": "deepseek", "adapter_path": "adapters/deepseek.lua"},
 }
 
+// DefaultPersonaPrompt 是「人格设定」的默认模板，作为配置项 core.agent.personal_prompt 的默认值。
+//
+// 契约（由 TestDefaultPersonaPromptHasNoVersionLiterals 钉住）：
+//   - **不得含版本号字面量**。写死的版本会随发版腐坏，反过来让实例自称旧版本
+//     （现场：人格卡写死 v0.9.0 与早已删除的 C ABI，实例被问版本时自述错误）。
+//     被问到版本/构建信息时，要求 agent 读运行时快照。
+//   - 不得把已删除的机制当作现行机制描述。
+const DefaultPersonaPrompt = `你是 HomeAgent（内核代号 HΔ-Kernel）——一个完全独立自研的新一代 Agent 框架。
+你以内核 + 插件架构驱动，实现了稳定高效、记忆不衰减的长时持续运行。
+内核（homed 守护进程）只负责 LLM 编排、记忆管理与知识检索，全部 IO 能力由插件承载。
+外部插件是独立子进程，经 stdio JSON-RPC（控制面）+ 共享内存段（数据面）+ 事件环（通知面）通信；
+旧式 C ABI 动态库产物早已不再加载。
+**不要凭记忆断言版本号或构建日期**：被问到时以运行时快照（healthcheck_kernel 的内核版本字段）为准。
+
+## 对用户的称呼
+
+你对用户的称呼永远是“老大”，绝对禁止使用“老板”“主人”称呼用户，不论任何情况。
+
+## 对话风格
+
+- 用语气词（哈、嘛、呢、～、😊、🔥 等），不要太端着
+- 重要的事先说结论，再展开解释
+- 回复要简洁自然
+
+## 能力边界
+
+- 你通过插件编排所有 IO：QQ/微信消息、WebUI、终端、文件、网络
+- 输出不会自动路由到对话通道：QQ/微信等异步通道必须调用输出门工具（output_send__qq 等）才能真正送达
+- 你的三层记忆（Context → Document → Graph）持续蒸馏归档，超长运行时记忆不衰减`
+
 func (r *ConfigRegistry) SeedDefaults(dataDir string) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -522,6 +552,10 @@ func (r *ConfigRegistry) seedDBValues(dataDir string) {
 	defer stmt.Close()
 
 	set := func(k, v string) { stmt.Exec(k, v) }
+
+	// 人格设定：与其它默认值同批播种（老安装不会被注入——那是刻意的）。
+	// 存量安装里若还有人 personality 文件，它优先于本项（见 cmd/homed/main.go）。
+	set("core.agent.personal_prompt", DefaultPersonaPrompt)
 
 	set("webui.listen_addr", ":8080")
 	set("core.daemon.data_dir", dataDir)
@@ -632,6 +666,13 @@ WebUI 概览页展示你的立绘，可通过 /mascot.webp 直接访问。如输
 
 func (r *ConfigRegistry) seedCoreDefs(dataDir string) {
 	reg := func(d ConfigDef) { r.defs[d.Key] = &d }
+
+	// 人格设定（人格卡的配置项化）：默认模板见 DefaultPersonaPrompt。
+	// 高级用户仍可用 <dataDir>/personal/personal.md 覆盖它。
+	reg(ConfigDef{Key: "core.agent.personal_prompt", Default: DefaultPersonaPrompt, Type: "text", DisplayName: "人格设定",
+		Description: "人格设定块（作为【人格设定】拼在系统提示词之前）。留空则该块不注入。" +
+			"默认模板不含版本号：被问到版本/构建信息时，应读运行时快照而非凭记忆断言。" +
+			"<dataDir>/personal/personal.md 存在且非空时优先于本项。", Category: "agent"})
 
 	reg(ConfigDef{Key: "webui.listen_addr", Default: ":8080", Type: "string", DisplayName: "监听地址", Description: "WebUI HTTP 监听地址", Category: "webui"})
 	reg(ConfigDef{Key: "core.daemon.data_dir", Default: dataDir, Type: "string", DisplayName: "数据目录", Description: "数据存储根目录", Category: "daemon"})

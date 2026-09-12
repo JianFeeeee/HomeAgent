@@ -405,13 +405,29 @@ func main() {
 	// 人格设定
 	// ========================================================================
 
+	// 人格来源优先级：personal/personal.md（高级覆盖，存在且非空才生效）
+	// > 配置项 core.agent.personal_prompt（默认模板 = config.DefaultPersonaPrompt）。
+	//
+	// 曾经只有「文件」一个来源且无人维护，导致人格卡写死旧版本号与已删除的 C ABI、
+	// 反过来让实例自称旧版本（v1.2.0 压测发现）。故：
+	//   - 配置项化 + 内置默认模板（不含版本号字面量）
+	//   - 文件仍在时生效，但扫到腐坏内容就在启动日志里明确告警
 	personalPath := filepath.Join(cfg.Daemon.DataDir, "personal", "personal.md")
 	personality, err := agentPkg.LoadPersonality(personalPath)
 	if err != nil {
 		log.Printf("[homed] warning: load personality: %v", err)
 	}
 	if personality != nil && personality.Content != "" {
-		log.Printf("[homed] personality loaded (%d bytes)", len(personality.Content))
+		log.Printf("[homed] 人格来源=文件 %s（优先于配置项），%d 字节", personalPath, len(personality.Content))
+		if hints := agentPkg.PersonaStaleHints(personality.Content); len(hints) > 0 {
+			log.Printf("[homed] warning: 人格文件含会腐坏的内容 %v — 建议迁到配置项 core.agent.personal_prompt"+
+				"（默认模板不含版本号，被问版本时以运行时快照为准）", hints)
+		}
+	} else if pv := cfgReg.GetString("core.agent.personal_prompt", internalConfig.DefaultPersonaPrompt); strings.TrimSpace(pv) != "" {
+		personality = &agentPkg.Personality{Content: pv, Path: "(core.agent.personal_prompt)"}
+		log.Printf("[homed] 人格来源=配置项 core.agent.personal_prompt，%d 字节", len(pv))
+	} else {
+		log.Printf("[homed] 人格来源=无（配置项为空且无人格文件）")
 	}
 
 	// ========================================================================
