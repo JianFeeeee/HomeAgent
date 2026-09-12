@@ -1124,6 +1124,33 @@
         justify-content: flex-end;
         gap: 8px;
       }
+
+      /* 首启人格向导（复用 confirm-* 弹窗）*/
+      .persona-ta {
+        width: 100%;
+        display: none;
+        margin-bottom: 12px;
+        font: 12px/1.5 var(--font-mono, monospace);
+        padding: 8px;
+        border-radius: var(--radius-md, 8px);
+        border: 1px solid var(--glass-border);
+        background: var(--glass-bg);
+        color: var(--text-primary);
+        box-sizing: border-box;
+      }
+      .persona-warn {
+        display: none;
+        font-size: 12px;
+        line-height: 1.5;
+        color: var(--text-secondary);
+        margin-bottom: 10px;
+      }
+      .persona-actions {
+        display: flex;
+        justify-content: flex-end;
+        gap: 8px;
+        flex-wrap: wrap;
+      }
       .empty-state {
         text-align: center;
         padding: 48px 24px;
@@ -2521,8 +2548,87 @@
         if (card) card.style.transform = "";
       });
 
-      // ===== API =====
-      async function api(p, o) {
+        // ===== 首启人格向导 =====
+        // 人格是配置项（core.agent.personal_prompt，默认模板不含任何版本号）。
+        // 首次启动问一次「默认 / 自定义 / 稍后」，之后不再打扰；
+        // 不回答 = 稍后 = 保留默认人格，绝不阻塞启动。
+        async function maybeShowPersonaWizard() {
+          var st;
+          try {
+            st = await api("/persona");
+          } catch (e) {
+            return; // 拿不到状态就不打扰用户
+          }
+          if (!st || st.initialized) return;
+          var ov = document.createElement("div");
+          ov.className = "confirm-overlay";
+          ov.style.display = "flex";
+          ov.innerHTML =
+            '<div class="confirm-box">' +
+            "<h3>" + escHtml(__("人格设定", "Persona")) + "</h3>" +
+            "<p>" + escHtml(__(
+              "首次启动：选一下助手的人格。选「使用默认」即可（之后可在设置里修改）；自定义内容在下次重启后生效。",
+              "First run: pick your assistant's persona. \"Use default\" is fine (change it later in Settings); custom content takes effect after the next restart."
+            )) + "</p>" +
+            '<div class="persona-warn"></div>' +
+            '<textarea class="persona-ta" rows="6"></textarea>' +
+            '<div class="persona-actions">' +
+            '<button class="btn btn-ghost btn-sm" data-mode="later">' + escHtml(__("稍后再说", "Later")) + "</button>" +
+            '<button class="btn btn-ghost btn-sm" data-mode="custom">' + escHtml(__("自定义…", "Custom…")) + "</button>" +
+            '<button class="btn btn-sm" data-mode="default">' + escHtml(__("使用默认", "Use default")) + "</button>" +
+            "</div></div>";
+          document.body.appendChild(ov);
+          var ta = ov.querySelector(".persona-ta");
+          var warn = ov.querySelector(".persona-warn");
+          var customOpen = false;
+          if (st.file_override) {
+            warn.style.display = "block";
+            warn.textContent = __(
+              "注意：检测到 personal/personal.md，它优先于这里的设置。",
+              "Note: personal/personal.md exists and takes precedence over this choice."
+            );
+          }
+          function close() {
+            ov.remove();
+          }
+          async function submit(mode, content) {
+            try {
+              var r = await api("/persona", {
+                method: "POST",
+                body: JSON.stringify({ mode: mode, content: content || "" }),
+              });
+              if (r && r.restart_required) toast(__("已保存，重启后生效", "Saved; takes effect after restart"));
+              else toast(__("已保存", "Saved"));
+            } catch (e) {
+              toast(__("保存失败：", "Save failed: ") + e, true);
+            }
+            close();
+          }
+          ov.querySelectorAll("button[data-mode]").forEach(function (b) {
+            b.onclick = function () {
+              var mode = b.getAttribute("data-mode");
+              if (mode !== "custom") {
+                submit(mode);
+                return;
+              }
+              if (!customOpen) { // 第一次点：展开文本域并预填当前人格
+                customOpen = true;
+                ta.style.display = "block";
+                ta.value = st.current_prompt || "";
+                ta.focus();
+                return;
+              }
+              if (!ta.value.trim()) {
+                toast(__("内容不能为空", "Content cannot be empty"), true);
+                return;
+              }
+              submit("custom", ta.value);
+            };
+          });
+        }
+
+        // ===== API =====
+        async function api(p, o) {
         var opts = {
           credentials: "include",
           headers: { "Content-Type": "application/json", ...o?.headers },
@@ -6516,6 +6622,7 @@
         renderAll();
         connectSSE();
         startUptimeTicker();
+        maybeShowPersonaWizard();
       })();
       setInterval(renderAll, 15000);
       // 消息同步轮询兜底：每30秒增量同步 chatHistory，补偿 SSE 断连窗口期
