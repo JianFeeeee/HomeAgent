@@ -445,6 +445,31 @@ go build ./... && go vet ./...
 go test -race -count=1 ./internal/agent/... ./internal/plugin/... ./internal/sdk/...
 ```
 
+### 实现状态（2026-09-13 完成）
+
+| 里程碑 | 提交 | 验收结果 |
+|---|---|---|
+| M1 | `9a58878` | ✅ agent 全量 + `-race`；新增 `task_test.go` 4 项 |
+| M2 | `7082a50` | ✅ 新增 `scheduler_test.go` 6 组（含 O1/K1） |
+| M3a+M3b | `c69a1f1` | ✅ 新增 `task_lifecycle_test.go` 5 项、`scheduler_preempt_test.go` 5 项 |
+| M4 | `7565248` | ✅ 新增 `scheduler_critical_test.go` 3 项 |
+| M5 | `a971fc8` | ✅ 新增 `scheduler_starvation_test.go` 4 项 |
+| M6 | `4e4e0ad` | ✅ 新增 `task_terminal_test.go` 3 项 |
+| M7 | `f11de37` | ✅ 新增 `scheduler_e2e_test.go` 3 项（压力/可观测/端到端） |
+
+实现期与设计的差异（均已回写本文档）：
+
+1. **M3 拆为 M3a/M3b**：真正挂起要求帧跨 `prepare→run→finish`，否则 `processInput`
+   会在挂起返回后继续提交。
+2. **`a.mu` 整体移除**：它原本只包住整轮 `process()`（同一 goroutine），
+   移除后所有任务状态由 schedulerLoop 独占（不变量 I2/I3 可落地）。
+3. **`interceptCh` 被删除**：M3b 起中断一律走 `pendingInterrupts`，旧的
+   “同行注入 + 三处 drain + 批次放弃” 已无写入者，属死代码（M4 清理）。
+4. **v1 未做 M0 的伪时钟**：所有抢占测试用“单次调用阻塞到 ctx 取消”的
+   provider 达到确定性，无需注入时钟。时序型判据（老化式提升）留待需要时。
+5. **工具执行中不可抢占是被结构保证的**：让位检查只在 step 之间；
+   不需要在 step 内部再判一次。
+
 ---
 
 ## 15. 开放问题（后续版本）
