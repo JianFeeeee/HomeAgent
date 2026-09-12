@@ -29,75 +29,80 @@ type Plugin interface {
 
 | Method | Use Case | Complexity |
 |--------|----------|------------|
-| **Subprocess plugin (recommended)** | Independently distributed third-party plugins | Medium, generated using `plugindev` toolchain |
+| **Subprocess plugin (recommended)** | Independently distributed third-party plugins | Medium, generated using `hmapdev` toolchain |
 | **Built-in plugin** | Released with HomeAgent | Simple, requires merging into main repo |
-| **Lua script plugin** | Lightweight rapid prototyping | Simple, generated using `plugindev init --lua` |
+| **Lua script plugin** | Lightweight rapid prototyping | Simple, generated using `hmapdev init --lua` |
 
 ---
 
 <img src="../../assets/branding/mascot-xiaozhai.webp" width="20" style="border-radius:50%;vertical-align:middle"> :
 
-## 1. Quick Start: Using the plugindev Toolchain
+## 1. Quick Start: Using the hmapdev Toolchain
 
-`plugindev` is the unified plugin development toolchain provided in the SDK repository, supporting both Go and Lua plugin types.
+`hmapdev` is the unified plugin development toolchain provided in the SDK repository, supporting both Go and Lua
+plugin types, and producing `.hmap` plugin bundles (the tool is named after that package format).
+
+> Rename note: as of 1.2.0 the toolchain was renamed from `plugindev` to `hmapdev`; the SDK store moved from
+> `~/.homeagent/plugindev/sdk` to `~/.homeagent/hmapdev/sdk` (the old directory keeps working automatically).
 
 ### Installation
 
 ```bash
-cd homeagent-sdk/tools/plugindev
-go build -o plugindev
-# Add plugindev to PATH or use directly
+cd homeagent-sdk/tools/hmapdev
+go build -o hmapdev
+# Add hmapdev to PATH or use directly
+# Prebuilt binaries also ship as release assets (hmapdev_linux_amd64, ...)
 ```
 
 ### SDK Version Management
 
-`plugindev sdk` manages local SDK versions:
+`hmapdev sdk` manages local SDK versions:
 
 ```bash
-plugindev sdk list       # list installed SDK versions
-plugindev sdk current    # show current SDK version
-plugindev sdk latest     # show latest available version
-plugindev sdk install v0.8.0  # install a specific version
-plugindev sdk use v0.8.0      # switch to a version
-plugindev sdk path       # show current SDK path
+hmapdev sdk list       # list installed SDK versions
+hmapdev sdk current    # show current SDK version
+hmapdev sdk latest     # show latest available version
+hmapdev sdk install v1.2.0  # install a specific version
+hmapdev sdk use v1.2.0      # switch to a version
+hmapdev sdk path       # show current SDK path
 ```
 
-SDK is stored at `~/.homeagent/plugindev/sdk/<version>/`; `plugindev init` reads the current SDK version for `go.mod`.
+SDK is stored at `~/.homeagent/hmapdev/sdk/<version>/`; `hmapdev init` reads the current SDK version for `go.mod`.
 
 ### Source Debugging
 
-`plugindev debug` interprets plugin source and prints a call trace, no compilation environment needed:
+`hmapdev debug` interprets plugin source and prints a call trace, no compilation environment needed:
 
 ```bash
-plugindev debug [dir]   # dir defaults to the current directory
+hmapdev debug [dir]   # dir defaults to the current directory
 ```
 
 ### Creating a Go Plugin
 
 ```bash
-plugindev init myplugin
+hmapdev init myplugin
 cd myplugin
 # Edit plugin code
 vim plugin.go
 # Build and package (default is a multi-platform bundle, see below)
-plugindev build
+hmapdev build
 # Output: dist/myplugin_bundle.hmap
 # Single-platform build:
-plugindev build --no-bundle
+hmapdev build --no-bundle
 # Output: dist/myplugin_linux_amd64.hmap (or windows_amd64)
 ```
 
 ### Creating a Lua Plugin
 
 ```bash
-plugindev init myluaplugin --lua
+hmapdev init myluaplugin --lua
 cd myluaplugin
 # Edit plugin code
 vim main.lua
 # Local test
 lua main.lua
 # Build and package
-plugindev build
+hmapdev build
 # Output: dist/myluaplugin_lua.hmap
 ```
 
@@ -128,16 +133,16 @@ myluaplugin/
 
 ### Build & Package
 
-`plugindev build` automatically handles compilation and packaging:
+`hmapdev build` automatically handles compilation and packaging:
 
 ```bash
 cd myplugin
-plugindev build                      # default bundle mode (multi-platform)
-plugindev build --no-bundle          # single-target build (per plg.json targets)
-plugindev build --target linux/amd64 # append a target on top of plg.json targets
-plugindev build --outdir dist        # output directory (default: dist)
-plugindev build --sdk-path <path>    # SDK path override (go.mod replace)
-plugindev build --replace <mod@path> # append a go.mod replace directive (repeatable)
+hmapdev build                      # default bundle mode (multi-platform)
+hmapdev build --no-bundle          # single-target build (per plg.json targets)
+hmapdev build --target linux/amd64 # append a target on top of plg.json targets
+hmapdev build --outdir dist        # output directory (default: dist)
+hmapdev build --sdk-path <path>    # SDK path override (go.mod replace)
+hmapdev build --replace <mod@path> # append a go.mod replace directive (repeatable)
 ```
 
 Execution process:
@@ -171,7 +176,7 @@ the kernel picks the one matching the current platform and renames it to `plugin
 > - `plugin.so` / `plugin.dylib` / `plugin.dll` are **no longer loaded**. The new kernel
 >   skips legacy artifacts with an actionable error instead of crashing.
 > - **Business code needs no changes** — the public SDK interface is unchanged; just
->   rebuild with the new `plugindev`.
+>   rebuild with the new `hmapdev` (formerly `plugindev`).
 > - The `entry` field in `plg.json` is **meaningless for Go plugins** now (leaving
 >   `plugin.so` there is harmless); it only distinguishes Lua plugins.
 > - Artifacts no longer need cgo, so cross-compiling requires no target C toolchain.
@@ -180,12 +185,12 @@ the kernel picks the one matching the current platform and renames it to `plugin
 
 ### Build Targets & Multi-platform Bundle
 
-**`plugindev build` defaults to bundle mode** (unless `plg.json` explicitly sets `"bundle": false`): it builds linux/amd64 + darwin/amd64 + windows/amd64 in one pass, producing a single `.hmap` with all platform binaries. The output manifest includes a `platforms` field. The kernel auto-selects the correct binary during installation.
+**`hmapdev build` defaults to bundle mode** (unless `plg.json` explicitly sets `"bundle": false`): it builds linux/amd64 + darwin/amd64 + windows/amd64 in one pass, producing a single `.hmap` with all platform binaries. The output manifest includes a `platforms` field. The kernel auto-selects the correct binary during installation.
 
 ```bash
-plugindev build              # default bundle, outputs dist/myplugin_bundle.hmap
-plugindev build --bundle     # explicitly enable bundle (same as above)
-plugindev build --no-bundle  # disable bundle, build per plg.json targets
+hmapdev build              # default bundle, outputs dist/myplugin_bundle.hmap
+hmapdev build --bundle     # explicitly enable bundle (same as above)
+hmapdev build --no-bundle  # disable bundle, build per plg.json targets
 ```
 
 Notes:
@@ -275,7 +280,7 @@ func NewPluginFactory(name string, config map[string]interface{}) (sdk.Plugin, e
 
 ### Entry Point
 
-`plugindev init` generates `plugin.go` with the `NewPlugin` export function directly,
+`hmapdev init` generates `plugin.go` with the `NewPlugin` export function directly,
 which is the entry point when the kernel loads the plugin:
 
 ```go
@@ -284,7 +289,7 @@ func NewPlugin(name string, config map[string]interface{}) (sdk.Plugin, error) {
 }
 ```
 
-At build time, `plugindev build` auto-generates subprocess runtime code
+At build time, `hmapdev build` auto-generates subprocess runtime code
 (`z_proc_gen.go` for the platform-independent part, plus `z_proc_shm_unix.go` /
 `z_proc_shm_windows.go`). All three platforms share the same entry point and the same
 RPC logic; only the cross-process resource-passing mechanism differs (inherited fds on

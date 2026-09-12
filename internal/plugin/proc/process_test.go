@@ -331,7 +331,7 @@ func TestProcess_ProtocolMismatchRejected(t *testing.T) {
 	}
 	// 运维可读性：光报“不匹配”不能定位到行动。生产上碰到它的现场是
 	// “只更新了内核没重编插件”，所以错误里必须带出这条修复指令。
-	if !strings.Contains(err.Error(), "plugindev") || !strings.Contains(err.Error(), "重编") {
+	if !strings.Contains(err.Error(), "hmapdev") || !strings.Contains(err.Error(), "重编") {
 		t.Errorf("错误应给出重编插件的修复指令，实际: %v", err)
 	}
 }

@@ -30,75 +30,80 @@ type Plugin interface {
 
 | 方式 | 适用场景 | 复杂度 |
 |------|---------|--------|
-| **子进程插件（推荐）** | 独立分发的第三方插件 | 中等，使用 `plugindev` 工具链生成 |
+| **子进程插件（推荐）** | 独立分发的第三方插件 | 中等，使用 `hmapdev` 工具链生成 |
 | **内置插件** | 随 HomeAgent 一起发布 | 简单，需合入主仓库 |
-| **Lua 脚本插件** | 轻量快速原型 | 简单，使用 `plugindev init --lua` 生成 |
+| **Lua 脚本插件** | 轻量快速原型 | 简单，使用 `hmapdev init --lua` 生成 |
 
 ---
 
 <img src="../../assets/branding/mascot-xiaozhai.webp" width="20" style="border-radius:50%;vertical-align:middle"> :
 
-## 一、快速开始：使用 plugindev 工具链
+## 一、快速开始：使用 hmapdev 工具链
 
-`plugindev` 是 SDK 仓库提供的统一插件开发工具链，支持 Go 和 Lua 两种插件类型。
+`hmapdev` 是 SDK 仓库提供的统一插件开发工具链，支持 Go 和 Lua 两种插件类型，
+最终产出 `.hmap` 插件包（工具名即来自这个包格式）。
+
+> 改名说明：1.2.0 起工具链由 `plugindev` 更名为 `hmapdev`；SDK 存储目录同时由
+> `~/.homeagent/plugindev/sdk` 迁到 `~/.homeagent/hmapdev/sdk`（旧目录会自动继续沿用）。
 
 ### 安装
 
 ```bash
-cd homeagent-sdk/tools/plugindev
-go build -o plugindev
-# 将 plugindev 加入 PATH 或直接使用
+cd homeagent-sdk/tools/hmapdev
+go build -o hmapdev
+# 将 hmapdev 加入 PATH 或直接使用
+# 也可从 SDK 的 release 附件下载预编译二进制（hmapdev_linux_amd64 等）
 ```
 
 ### SDK 版本管理
 
-`plugindev sdk` 子命令管理本地 SDK 版本：
+`hmapdev sdk` 子命令管理本地 SDK 版本：
 
 ```bash
-plugindev sdk list       # 列出已安装的 SDK 版本
-plugindev sdk current    # 显示当前使用的 SDK 版本
-plugindev sdk latest     # 显示最新可用版本
-plugindev sdk install v0.8.0  # 安装指定版本
-plugindev sdk use v0.8.0      # 切换使用版本
-plugindev sdk path       # 显示当前 SDK 路径
+hmapdev sdk list       # 列出已安装的 SDK 版本
+hmapdev sdk current    # 显示当前使用的 SDK 版本
+hmapdev sdk latest     # 显示最新可用版本
+hmapdev sdk install v1.2.0  # 安装指定版本
+hmapdev sdk use v1.2.0      # 切换使用版本
+hmapdev sdk path       # 显示当前 SDK 路径
 ```
 
-SDK 存储在 `~/.homeagent/plugindev/sdk/<version>/`，`plugindev init` 自动读取当前 SDK 版本填充 `go.mod`。
+SDK 存储在 `~/.homeagent/hmapdev/sdk/<version>/`，`hmapdev init` 自动读取当前 SDK 版本填充 `go.mod`。
 
 ### 源码调试
 
-`plugindev debug` 直接用解释器执行插件源码并输出调用轨迹，无需编译环境：
+`hmapdev debug` 直接用解释器执行插件源码并输出调用轨迹，无需编译环境：
 
 ```bash
-plugindev debug [dir]   # dir 默认当前目录
+hmapdev debug [dir]   # dir 默认当前目录
 ```
 
 ### 创建 Go 插件
 
 ```bash
-plugindev init myplugin
+hmapdev init myplugin
 cd myplugin
 # 编辑插件代码
 vim plugin.go
 # 编译打包
-plugindev build          # 默认多平台 bundle（见下节）
+hmapdev build          # 默认多平台 bundle（见下节）
 # 输出: dist/myplugin_bundle.hmap
 # 单平台构建：
-plugindev build --no-bundle
+hmapdev build --no-bundle
 # 输出: dist/myplugin_linux_amd64.hmap (或 windows_amd64)
 ```
 
 ### 创建 Lua 插件
 
 ```bash
-plugindev init myluaplugin --lua
+hmapdev init myluaplugin --lua
 cd myluaplugin
 # 编辑插件代码
 vim main.lua
 # 本地测试
 lua main.lua
 # 编译打包
-plugindev build
+hmapdev build
 # 输出: dist/myluaplugin_lua.hmap
 ```
 
@@ -129,16 +134,16 @@ myluaplugin/
 
 ### 编译打包
 
-`plugindev build` 会自动完成编译和打包：
+`hmapdev build` 会自动完成编译和打包：
 
 ```bash
 cd myplugin
-plugindev build                      # 默认 bundle 模式（多平台合集）
-plugindev build --no-bundle          # 单平台构建（仅当前 plg.json targets）
-plugindev build --target linux/amd64 # 在 targets 基础上追加一个目标
-plugindev build --outdir dist        # 指定输出目录（默认 dist）
-plugindev build --sdk-path <path>    # 指定 SDK 路径（覆盖 go.mod replace）
-plugindev build --replace <mod@path> # 追加 go.mod replace 指令（可多次）
+hmapdev build                      # 默认 bundle 模式（多平台合集）
+hmapdev build --no-bundle          # 单平台构建（仅当前 plg.json targets）
+hmapdev build --target linux/amd64 # 在 targets 基础上追加一个目标
+hmapdev build --outdir dist        # 指定输出目录（默认 dist）
+hmapdev build --sdk-path <path>    # 指定 SDK 路径（覆盖 go.mod replace）
+hmapdev build --replace <mod@path> # 追加 go.mod replace 指令（可多次）
 ```
 
 执行过程：
@@ -154,7 +159,7 @@ plugindev build --replace <mod@path> # 追加 go.mod replace 指令（可多次�
 | 文件 | 用途 | 关键字段 |
 |------|------|---------|
 | `plg.json` | 项目元信息，由开发者维护 | `targets` — 单平台构建目标（如 `"linux/amd64,windows/amd64"`）；`bundle` — 多平台合集开关（默认 `true`）|
-| `plugin.json` | 构建产物清单，`plugindev build` 自动生成 | `entry` — 入口文件名；`platforms` — 声明的支持平台 |
+| `plugin.json` | 构建产物清单，`hmapdev build` 自动生成 | `entry` — 入口文件名；`platforms` — 声明的支持平台 |
 
 每个目标生成单独的 `.hmap`。子进程插件是普通可执行文件，**不分平台后缀**：
 
@@ -169,7 +174,7 @@ bundle 包内按 `plugin.bin.<goos>.<goarch>` 区分各平台，安装时内核�
 >
 > - `plugin.so` / `plugin.dylib` / `plugin.dll` **不再被加载**。新内核遇到旧产物
 >   会跳过并报可操作错误，不崩溃。
-> - **业务代码不需要改一行**——公开 SDK 接口零改动，只需用新版 `plugindev` 重编。
+> - **业务代码不需要改一行**——公开 SDK 接口零改动，只需用新版 `hmapdev`（原 `plugindev`）重编。
 > - `plg.json` 的 `entry` 字段对 Go 插件**已无意义**（写着 `plugin.so` 也无妨），
 >   它现在只用于区分 Lua 插件。
 > - 产物不再需要 cgo，交叉编译无需目标平台 C 工具链。
@@ -178,12 +183,12 @@ bundle 包内按 `plugin.bin.<goos>.<goarch>` 区分各平台，安装时内核�
 
 ### 构建目标与多平台打包（bundle）
 
-**`plugindev build` 默认就是 bundle 模式**（`plg.json` 未显式写 `"bundle": false` 时）：一次编译 linux/amd64 + darwin/amd64 + windows/amd64，生成包含所有平台二进制的单 `.hmap`，输出清单自动添加 `platforms` 字段。安装时核心自动选择当前平台的二进制，跳过其他平台。
+**`hmapdev build` 默认就是 bundle 模式**（`plg.json` 未显式写 `"bundle": false` 时）：一次编译 linux/amd64 + darwin/amd64 + windows/amd64，生成包含所有平台二进制的单 `.hmap`，输出清单自动添加 `platforms` 字段。安装时核心自动选择当前平台的二进制，跳过其他平台。
 
 ```bash
-plugindev build              # 默认 bundle，输出 dist/myplugin_bundle.hmap
-plugindev build --bundle     # 显式开启 bundle（同上）
-plugindev build --no-bundle  # 关闭 bundle，按 plg.json 的 targets 逐平台构建
+hmapdev build              # 默认 bundle，输出 dist/myplugin_bundle.hmap
+hmapdev build --bundle     # 显式开启 bundle（同上）
+hmapdev build --no-bundle  # 关闭 bundle，按 plg.json 的 targets 逐平台构建
 ```
 
 注意：
@@ -273,7 +278,7 @@ func NewPluginFactory(name string, config map[string]interface{}) (sdk.Plugin, e
 
 ### 入口点
 
-`plugindev init` 生成的 `plugin.go` 中直接包含 `NewPlugin` 导出函数，它是内核加载插件时的入口：
+`hmapdev init` 生成的 `plugin.go` 中直接包含 `NewPlugin` 导出函数，它是内核加载插件时的入口：
 
 ```go
 func NewPlugin(name string, config map[string]interface{}) (sdk.Plugin, error) {
@@ -281,7 +286,7 @@ func NewPlugin(name string, config map[string]interface{}) (sdk.Plugin, error) {
 }
 ```
 
-编译时 `plugindev build` 自动生成子进程运行时代码（`z_proc_gen.go` 平台无关 + `z_proc_shm_unix.go` / `z_proc_shm_windows.go` 平台特定），无需手动编写。三平台共享同一入口与同一套 RPC 逻辑，仅跨进程资源传递机制不同（Unix 继承 fd，Windows 命名内核对象）。
+编译时 `hmapdev build` 自动生成子进程运行时代码（`z_proc_gen.go` 平台无关 + `z_proc_shm_unix.go` / `z_proc_shm_windows.go` 平台特定），无需手动编写。三平台共享同一入口与同一套 RPC 逻辑，仅跨进程资源传递机制不同（Unix 继承 fd，Windows 命名内核对象）。
 
 ### PluginSDK 核心 API
 

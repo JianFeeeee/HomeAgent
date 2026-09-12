@@ -17,7 +17,7 @@ const (
 //
 // 保留这张表只为**给出明确错误**：插件目录里躺着 plugin.so 而内核不再认它时，
 // 静默跳过会让「目录在但插件没加载」看起来像配置问题，而实际原因是需要用
-// 新版 plugindev 重编。
+// 新版 hmapdev 重编。
 var legacyCABIEntries = []string{"plugin.so", "plugin.dll", "plugin.dylib"}
 
 // entryKind 描述插件入口归属的加载通道。
