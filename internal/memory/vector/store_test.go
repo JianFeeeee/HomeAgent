@@ -210,3 +210,29 @@ func BenchmarkExtractNGrams(b *testing.B) {
 		extractNGrams(text, 2)
 	}
 }
+
+// 候选中选阈值必须**按向量空间标定**：词向量/多模态余弦通常在 0.3~0.9，
+// 而 TF-IDF 余弦只有 0.0~0.2。用同一个阈值会把词法路的有效候选静默砍掉
+// （知识库自检索 MRR 0.307→0.193 就是这么掉的，且当时看不出任何报错）。
+func TestSearchScoredRespectsMinScore(t *testing.T) {
+	// 构造一个低余弦候选：共享特征 "a"，但两个向量几乎正交 → cosine ≈ 0.02
+	st := NewStore()
+	st.Insert("doc", "", Vector{"a": 1, "b": 1}, nil) // |doc| = √2
+	query := Vector{"a": 0.02, "c": 100}              // 与 doc 的点积 0.02
+
+	hits := st.SearchScored(query, 10)
+	for _, h := range hits {
+		if h.Score < DefaultMinScore {
+			t.Fatalf("默认阈值 %.2f 不该返回 %.5f 的候选", DefaultMinScore, h.Score)
+		}
+	}
+	if len(hits) != 0 {
+		t.Fatalf("该查询在默认阈值下应被过滤，实际返回 %d 条", len(hits))
+	}
+
+	st.SetMinScore(0)
+	hits = st.SearchScored(query, 10)
+	if len(hits) != 1 || hits[0].Doc.ID != "doc" {
+		t.Fatalf("阈值设为 0 后应召回低余弦候选，实际 %+v", hits)
+	}
+}
