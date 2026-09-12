@@ -279,6 +279,11 @@ interruptLoop（不持有任何帧）
 
 ### 8.2 关于"调度器不被阻塞"（**待确认 D2**）
 
+> **M3 拆分的理由**：真正的挂起要求帧跨越 `prepare → step… → finish` 全生命周期。
+> 若只把 `process()` 改成可挂起，`processInput` 会在挂起返回后继续执行
+> `context.Append` 与 `emitResponse`——造成重复提交。故 M3 分为 M3a（所有权重构，
+> 行为等价）与 M3b（抢占语义）两步。
+
 v1 采纳：**`S_TOOL_EXEC` / ONNX / CAS 属于临界区，调度器在这些 step 上会阻塞进插件 RPC / 原生调用。** 这是有意的取舍：
 
 - 好处：与"两个 goroutine 就够"一致，实现简单，无临时 goroutine。
@@ -424,7 +429,8 @@ v1 采纳：**`S_TOOL_EXEC` / ONNX / CAS 属于临界区，调度器在这些 st
 | **M0** | 测试基础设施：`Clock` 接口、假 Provider、假工具、`waitFor`、`Dump()` 骨架 | 新测试可运行；`go vet` 干净 |
 | **M1** | **纯重构**：把 `process()` 拆成显式 step 状态机 + `TaskFrame`；仍由现有 `eventLoop` 驱动，无优先级/无抢占 | R3、X3 通过；既有全部 agent 测试通过（行为等价） |
 | **M2** | 调度器骨架：单 `schedulerLoop` + `readyQueue`，取代 `eventLoop` 的输入处理；无优先级（全部 L1，纯 FIFO） | Q1/Q4 通过；integration 测试通过 |
-| **M3** | `interruptLoop` 重写 + 四级优先级 + 严格大于抢占 + `suspendPool`；只支持 `S_LLM` 抢占 | P1–P4、R1、R5、K1–K2 通过 |
+| **M3a** | **前置重构（本次拆分引入）**：把一轮对话的所有权从 `processInput` 移到调度器——帧覆盖 `prepare → step… → finish`；同时移除 `process()` 整轮持有的 `a.mu`（挂起不能持锁） | 既有全部 agent 测试 + 既有 e2e 通过（行为等价）；`-race` 干净 |
+| **M3b** | `interruptLoop` 重写 + 四级优先级 + 严格大于抢占 + `suspendPool`；只支持 `S_LLM` 抢占 | P1–P4、R1、R5、K1–K2 通过 |
 | **M4** | 临界区 + `S_TOOL_EXEC` 声明 + `pendingInterrupts` + 深度上限 | P5–P6、D1T、Q3、Q5 通过 |
 | **M5** | 饥饿防护（抢占计数提升 + 冷却） | G1–G2 通过 |
 | **M6** | 任务级 `responseCh` + 断链点统一为终态事件 | X1–X4 通过；`cli`/`clawhub` 不再挂起 |
