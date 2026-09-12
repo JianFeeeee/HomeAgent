@@ -28,17 +28,17 @@ type Knowledge struct {
 // IndexItem — 索引条目，包含向量特征和内容摘要
 type IndexItem struct {
 	Name    string             `json:"name"`
-	Preview string             `json:"preview"`          // 前 200 字摘要
+	Preview string             `json:"preview"` // 前 200 字摘要
 	Tags    []string           `json:"tags"`
-	Vector  map[string]float64 `json:"vector"`           // TF-IDF 特征向量（top-N 特征）
-	Size    int                `json:"size"`             // 内容总字节数
+	Vector  map[string]float64 `json:"vector"` // TF-IDF 特征向量（top-N 特征）
+	Size    int                `json:"size"`   // 内容总字节数
 }
 
 // TreeIndex — 树状索引节点
 type TreeIndex struct {
-	Name     string              `json:"name"`
+	Name     string                `json:"name"`
 	Children map[string]*TreeIndex `json:"children,omitempty"`
-	Items    []IndexItem         `json:"items,omitempty"` // 此节点下的知识条目（含向量）
+	Items    []IndexItem           `json:"items,omitempty"` // 此节点下的知识条目（含向量）
 }
 
 func newTreeIndex(name string) *TreeIndex {
@@ -80,11 +80,20 @@ type Store struct {
 	root   string
 	vec    *vector.Store
 	veczer *vector.TFIDFVectorizer
-	mu     sync.RWMutex
-	items  map[string]*Knowledge
+
+	// lex 是**词法路**索引（TF-IDF），与 vec（稠密路：词向量/多模态空间）相互独立。
+	//
+	// 为何要两路：词向量取平均后各向异性明显——所有文档都挤在语料均值方向附近，
+	// 真实 KB（33 条）上自检索 top-1 只有 15%、前两名平均只差 0.013，排序基本是噪声。
+	// 融合后 MRR 0.271→0.376、前两名差距 0.013→0.128（同一份数据实测），
+	// 且「词都在停用词里」的查询（稠密路给空向量）能靠词法路救回来。
+	lex *vector.Store
+
+	mu        sync.RWMutex
+	items     map[string]*Knowledge
+	summaries []string
 
 	indexPath  string
-	summaries  []string
 	vectorizer vector.Vectorizer // 可选：词嵌入向量化器，优先于 TF-IDF
 }
 
@@ -93,9 +102,18 @@ func NewStore(root string) *Store {
 		root:      root,
 		indexPath: filepath.Join(root, ".index.json"),
 		vec:       vector.NewStore(),
+		lex:       newLexicalStore(),
 		veczer:    vector.NewTFIDFVectorizer(memory.TokenizeWords),
 		items:     make(map[string]*Knowledge),
 	}
+}
+
+// newLexicalStore 造词法路存储。阈值设为 0：TF-IDF 余弦量级只有 0.0~0.2，
+// 沿用稠密路的 0.05 会把大量有效候选静默砍掉（实测 MRR 0.307→0.193）。
+func newLexicalStore() *vector.Store {
+	st := vector.NewStore()
+	st.SetMinScore(0)
+	return st
 }
 
 // SetVectorizer 设置词嵌入向量化器，优先于 TF-IDF
@@ -110,13 +128,19 @@ func (s *Store) ReindexWithVectorizer(v vector.Vectorizer) {
 
 	log.Printf("[knowledge] reindex with vectorizer (%d items)", len(s.items))
 	s.vec = vector.NewStore()
+	s.lex = newLexicalStore()
+	// 词法路的 IDF 必须建在全语料上（否则 IDF 没意义）
+	if len(s.summaries) > 0 {
+		s.veczer.Train(s.summaries)
+	}
 	for _, k := range s.items {
-		vec := v.Vectorize(k.Name + " " + k.Content)
-		s.vec.Insert(k.Name, k.Name+": "+k.Content, vec, map[string]string{
+		text := k.Name + " " + k.Content
+		s.vec.Insert(k.Name, k.Name+": "+k.Content, v.Vectorize(text), map[string]string{
 			"name": k.Name, "path": k.Path,
 		})
+		s.lex.Insert(k.Name, k.Name+": "+k.Content, s.veczer.Vectorize(text), nil)
 	}
-	log.Printf("[knowledge] reindex with vectorizer complete (%d vectors)", s.vec.Size())
+	log.Printf("[knowledge] reindex complete (dense=%d lex=%d)", s.vec.Size(), s.lex.Size())
 }
 
 // vectorize 优先使用词嵌入向量化器，不可用时回退到 TF-IDF
@@ -144,6 +168,17 @@ func (s *Store) Start() error {
 
 func (s *Store) Stop() {}
 
+// 融合权重：稠密路（词向量）与词法路（TF-IDF）。
+// 取值由真实 KB 上的权重扫描定（rankdiag_test.go 的 KB_DIAG_SWEEP）：
+// 1.0 = 修复前的「只用稠密路」行为，作为对照基线。
+var densePathWeight = 0.5
+
+// Search 融合两路召回：稠密路（词向量/多模态空间）+ 词法路（TF-IDF）。
+//
+// 为何不能只用稠密路：词向量取平均后各向异性明显，真实 KB 上自检索 top-1 只有 15%，
+// 前两名平均只差 0.013（等于没区分度）；且全为停用词的查询会得到**空向量**，
+// 直接搜不出任何东西（"最近更新" 就撞上这个）。词法路对专名/术语/短查询强，
+// 两路各自**按查询内最大值归一化**后加权融合，排序才可信。
 func (s *Store) Search(query string, topK int) []*Knowledge {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
@@ -151,14 +186,57 @@ func (s *Store) Search(query string, topK int) []*Knowledge {
 	if topK <= 0 {
 		topK = 5
 	}
+	if s.vec.Size() == 0 && s.lex.Size() == 0 {
+		return nil
+	}
+	// 两路各自对**全部**文档打分：
+	//  - 稠密路的特征是维索引，几乎每篇都命中，"候选"就是全量；
+	//  - 词法路只召回与查询共词的文档（这正是它的长处：专名/术语）。
+	// 为何不先截候选再融合：截断后只能拿**候选内**最大值归一化，路与路之间的
+	// 相对权重就随候选集漂移——实测同一份 KB 上自检索 MRR 从 0.376 掉到 0.197。
+	// KB 规模下全量 cosine 的代价可忽略；真到数万条再上 ANN 也不迟。
+	denseHits := s.vec.SearchScored(s.vectorize(query), s.vec.Size())
+	lexHits := s.lex.SearchScored(s.veczer.Vectorize(query), s.lex.Size())
+	if len(denseHits) == 0 && len(lexHits) == 0 {
+		return nil
+	}
 
-	vec := s.vectorize(query)
-	results := s.vec.Search(vec, topK)
+	scores := make(map[string]float64, len(denseHits)+len(lexHits))
+	addPath := func(hits []vector.DocVectorHit, weight float64) {
+		max := 0.0
+		for _, h := range hits {
+			if h.Score > max {
+				max = h.Score
+			}
+		}
+		if max <= 0 {
+			return // 该路对这条查询没有信号（如空向量），全量让给另一路
+		}
+		for _, h := range hits {
+			scores[h.Doc.ID] += weight * h.Score / max
+		}
+	}
+	addPath(denseHits, densePathWeight)
+	addPath(lexHits, 1-densePathWeight)
+
+	ids := make([]string, 0, len(scores))
+	for id := range scores {
+		ids = append(ids, id)
+	}
+	sort.Slice(ids, func(i, j int) bool {
+		if scores[ids[i]] != scores[ids[j]] {
+			return scores[ids[i]] > scores[ids[j]]
+		}
+		return ids[i] < ids[j] // 分数相同时按名字定序（保证结果可重复）
+	})
 
 	var out []*Knowledge
-	for _, r := range results {
-		if k, ok := s.items[r.ID]; ok {
+	for _, id := range ids {
+		if k, ok := s.items[id]; ok {
 			out = append(out, k)
+		}
+		if len(out) >= topK {
+			break
 		}
 	}
 	return out
@@ -208,17 +286,19 @@ func (s *Store) Add(name, content string) error {
 	// 是对的，只有向量数比条目数多——而检索可能因此命中已被替换掉的旧内容。
 	s.vec.Remove(id)
 
-	vec := s.vectorize(name + " " + content)
+	text := name + " " + content
+	vec := s.vectorize(text)
 	s.vec.Insert(id, name+": "+content, vec, map[string]string{
 		"name": name, "path": path,
 	})
+	// 词法路同样去重后重建这条；IDF 统计沿用现有语料（重启时 scanAll 会全量重训）
+	s.lex.Remove(id)
+	s.lex.Insert(id, name+": "+content, s.veczer.Vectorize(text), nil)
 	s.summaries = append(s.summaries, name+" "+content)
 
-	go func() {
-		if err := s.writeIndex(); err != nil {
-			log.Printf("[knowledge] write index error after adding %s: %v", name, err)
-		}
-	}()
+	if err := s.writeIndexLocked(); err != nil {
+		log.Printf("[knowledge] write index error after adding %s: %v", name, err)
+	}
 	log.Printf("[knowledge] added: %s (%d bytes)", name, len(content))
 	return nil
 }
@@ -261,11 +341,10 @@ func (s *Store) Remove(name string) error {
 	}
 	delete(s.items, id)
 	s.vec.Remove(id)
-	go func() {
-		if err := s.writeIndex(); err != nil {
-			log.Printf("[knowledge] write index error after removing %s: %v", name, err)
-		}
-	}()
+	s.lex.Remove(id)
+	if err := s.writeIndexLocked(); err != nil {
+		log.Printf("[knowledge] write index error after removing %s: %v", name, err)
+	}
 	return nil
 }
 
@@ -295,6 +374,14 @@ func (s *Store) List() []string {
 func (s *Store) BuildTree() *TreeIndex {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
+	return s.buildTreeLocked()
+}
+
+// buildTreeLocked 与 BuildTree 同义，但**不取锁**——供已持写锁的路径调用。
+// 为什么需要：writeIndex 会走 BuildTree（RLock），而 Add/Remove 持的是写锁，
+// 直接调用会死锁；此前就是因此把索引写丢进了无追踪的 goroutine 里，
+// 结果是「失败只打日志」+ 与调用方（含测试的临时目录清理）竞态。
+func (s *Store) buildTreeLocked() *TreeIndex {
 	root := newTreeIndex("root")
 	for _, k := range s.items {
 		node := root
@@ -366,7 +453,14 @@ func (s *Store) SearchTree(query string, topK int) map[string][]*Knowledge {
 
 // writeIndex 写入 .index.json 树状索引文件（含向量和摘要）
 func (s *Store) writeIndex() error {
-	tree := s.BuildTree()
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.writeIndexLocked()
+}
+
+// writeIndexLocked 与 writeIndex 同义但**不取锁**（调用方已持锁）。
+func (s *Store) writeIndexLocked() error {
+	tree := s.buildTreeLocked()
 	data, err := json.MarshalIndent(tree, "", "  ")
 	if err != nil {
 		return err
@@ -397,11 +491,13 @@ func (s *Store) scanAll() error {
 		s.veczer.Train(s.summaries)
 	}
 
+	s.lex = newLexicalStore()
 	for _, k := range s.items {
-		vec := s.vectorize(k.Name + " " + k.Content)
-		s.vec.Insert(k.Name, k.Name+": "+k.Content, vec, map[string]string{
+		text := k.Name + " " + k.Content
+		s.vec.Insert(k.Name, k.Name+": "+k.Content, s.vectorize(text), map[string]string{
 			"name": k.Name, "path": k.Path,
 		})
+		s.lex.Insert(k.Name, k.Name+": "+k.Content, s.veczer.Vectorize(text), nil)
 	}
 
 	return nil
@@ -452,5 +548,3 @@ func sanitize(name string) string {
 	name = strings.ReplaceAll(name, "\\", "_")
 	return name
 }
-
-
