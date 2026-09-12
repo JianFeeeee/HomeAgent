@@ -138,7 +138,7 @@ func (a *Agent) embedMediaOnIngest(digest, mime string, data []byte) {
 //
 // 为何要缓存而不是当场建块：媒体在 process() 执行期间被捕获，而承载它的
 // ContextEvent 要等 process() 返回后才 Append——此刻还没有 owner_id。
-// 与既有的 a.pendingMedia 同一手法（都在 a.mu 保护下）。
+// 与既有的 a.pendingMedia 同一手法（均由 schedulerLoop goroutine 独占读写）。
 func (a *Agent) stageMediaDigests(digests ...string) {
 	if len(digests) == 0 {
 		return
@@ -197,7 +197,7 @@ func mediaLabel(it *media.Item) string {
 //
 // 沿用 document.Store 的 doc_<unixnano> 手法（同一份代码库里保持一致，
 // 也避免为此引入 uuid 依赖）。纳秒精度足够：同一 Agent 的事件由
-// a.mu 串行化 Append，不存在同纳秒两条。
+// schedulerLoop 单 goroutine 串行 Append，不存在同纳秒两条。
 func newEventID() string {
 	return fmt.Sprintf("evt_%d", time.Now().UnixNano())
 }

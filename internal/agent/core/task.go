@@ -28,6 +28,7 @@ import (
 	"time"
 
 	agentAPI "gitcode.com/JianFeeeee/HomeAgent/internal/agent/api"
+	agentIO "gitcode.com/JianFeeeee/HomeAgent/internal/agent/io"
 	"gitcode.com/JianFeeeee/HomeAgent/internal/events"
 	sdk "gitcode.com/JianFeeeee/HomeAgent/internal/sdk"
 	pubsdk "gitcode.com/JianFeeeee/homeagent-sdk/sdk"
@@ -61,6 +62,28 @@ const (
 	outcomeDone
 	// outcomeFailed 任务失败结束，错误在 frame.Err。
 	outcomeFailed
+	// outcomeSuspended 任务在安全点被抢占挂起，帧已保存（M3b 起使用）。
+	outcomeSuspended
+)
+
+// taskTerminal 是任务的终态种类（设计文档 §7：每个任务恰有一个终态）。
+type taskTerminal int
+
+const (
+	// terminalNone 任务尚未结束，需进入 run 段。
+	terminalNone taskTerminal = iota
+	// terminalOK 正常完成（已提交上下文并回执）。
+	terminalOK
+	// terminalError 执行出错（已提交错误响应）。
+	terminalError
+	// terminalStageShortCircuit 被 on_input 阶段短路（响应已发出）。
+	terminalStageShortCircuit
+	// terminalSkipped 未进入执行：解析失败或被去重。
+	terminalSkipped
+	// terminalConsolidation 走记忆整理专用路径，已处理完毕。
+	terminalConsolidation
+	// terminalSuspended 被抢占挂起，等待恢复（M3b 起使用）。
+	terminalSuspended
 )
 
 // TaskFrame 承载一个任务在安全点之间必须存活的所有状态。
@@ -92,37 +115,259 @@ type TaskFrame struct {
 	Step     Step
 	Response string
 	Err      error
+
+	// ---- 任务层现场（原 processInput 的局部变量）----
+	//
+	// 这些字段让帧覆盖 prepare → step… → finish 全生命周期：挂起发生在 run 段的
+	// 安全点，恢复后由 finish 段统一提交（context.Append + emitResponse +
+	// emitMemoryCandidate），因此挂起不会重复提交。
+	Evt          *agentIO.InputEvent
+	CleanInput   string
+	IsInterrupt  bool
+	StartedAt    time.Time
+	Terminal     taskTerminal
+	Level        Level
+	PreemptCount int
+
+	// SeedMsgs 非空时，stepPrepare 不重建 system prompt / 记忆上下文，
+	// 而是以它为前缀继续（D1=A：抢占式中断任务继承被打断任务的**只读前缀**）。
+	SeedMsgs []agentAPI.Message
 }
 
 func (a *Agent) newTaskFrame(input string, stageCtx *sdk.StageContext) *TaskFrame {
 	return &TaskFrame{Input: input, StageCtx: stageCtx, Step: StepPrepare}
 }
 
-// process 驱动状态机直到任务结束，返回与原实现完全相同的四元组。
+// runTaskSteps 驱动状态机直到任务结束或被抢占挂起。
 //
-// 保留该签名是为了让 M1 成为纯内部重构：所有调用方（processInput /
-// processConsolidation / 测试）无需改动。
-func (a *Agent) process(input string, stageCtx *sdk.StageContext) (response string, toolsUsed []string, toolResults []ToolResultItem, err error) {
-	a.mu.Lock()
-	defer a.mu.Unlock()
-
-	if a.provider == nil {
-		return "", nil, nil, fmt.Errorf("agent: no LLM provider configured")
-	}
-
-	f := a.newTaskFrame(input, stageCtx)
+// 这是 M1 的驱动循环，M3a 从 process() 抽出来，使调用方可以拿到
+// outcomeSuspended 并把帧留给调度器保存。
+func (a *Agent) runTaskSteps(f *TaskFrame) stepOutcome {
 	// 步数上限只是防"转移缺失导致死循环"的护栏；正常任务远达不到。
 	const maxSteps = 1 << 20
 	for i := 0; i < maxSteps; i++ {
+		// 安全点：只在 step 之间检查让位。临界区（StepToolExec）不在此列，
+		// 因为让位信号由 interruptLoop 置位、而本循环是唯一读帧者。
+		if !a.inCriticalSection() && a.sched.preemptGrantedFor(f.Level) && a.sched.canSuspend() {
+			return outcomeSuspended
+		}
 		switch a.step(f) {
 		case outcomeDone:
-			return f.Response, f.ToolsUsed, f.ToolResults, nil
+			return outcomeDone
 		case outcomeFailed:
-			return "", f.ToolsUsed, f.ToolResults, f.Err
+			return outcomeFailed
+		case outcomeSuspended:
+			return outcomeSuspended
 		}
 	}
-	return "", f.ToolsUsed, f.ToolResults,
-		fmt.Errorf("agent: task step budget exhausted（状态机未收敛，疑似转移缺失）")
+	f.Err = fmt.Errorf("agent: task step budget exhausted（状态机未收敛，疑似转移缺失）")
+	return outcomeFailed
+}
+
+// process 是保留给 processConsolidation 与测试的薄壳，返回与原实现相同的四元组。
+//
+// 注意：M3a 起**不再持 a.mu**——调度器是唯一执行者，而挂起不能持锁。
+func (a *Agent) process(input string, stageCtx *sdk.StageContext) (response string, toolsUsed []string, toolResults []ToolResultItem, err error) {
+	if a.provider == nil {
+		return "", nil, nil, fmt.Errorf("agent: no LLM provider configured")
+	}
+	f := a.newTaskFrame(input, stageCtx)
+	switch a.runTaskSteps(f) {
+	case outcomeDone:
+		return f.Response, f.ToolsUsed, f.ToolResults, nil
+	case outcomeFailed:
+		return "", f.ToolsUsed, f.ToolResults, f.Err
+	default:
+		// 不该发生：process() 不参与挂起（只有 runInputTask 会）。
+		return "", f.ToolsUsed, f.ToolResults,
+			fmt.Errorf("agent: task suspended outside scheduler")
+	}
+}
+
+// runInputTask 是一个输入任务的完整生命周期：prepare → run → finish。
+//
+// 它是原 processInput 的全部职责，被拆成三段而不是一个大函数，目的只有一个：
+// 让帧可以跨安全点被挂起——挂起后由调度器保存，恢复时接着 run 段继续，
+// 而 finish 段（上下文提交与回执）只在任务真正结束时执行一次。
+//
+// M3a 还没有抢占，因此 outcomeSuspended 只会由 M3b 的抢占检查产生。
+func (a *Agent) runInputTask(evt *agentIO.InputEvent, seed []agentAPI.Message) (*TaskFrame, stepOutcome) {
+	f, term := a.prepareInputTask(evt)
+	switch term {
+	case terminalSkipped, terminalStageShortCircuit, terminalConsolidation:
+		return nil, outcomeDone
+	}
+	f.SeedMsgs = seed
+
+	out := a.runTaskSteps(f)
+	if out == outcomeSuspended {
+		f.Terminal = terminalSuspended
+		return f, outcomeSuspended
+	}
+	a.finishInputTask(f, out)
+	return f, out
+}
+
+// prepareInputTask 执行 processInput 的前半段（去重、通道解析、阶段、裁剪、
+// 输入事件落上下文）。返回终态不为 terminalNone 时调用方不得进入 run 段。
+func (a *Agent) prepareInputTask(evt *agentIO.InputEvent) (*TaskFrame, taskTerminal) {
+	start := time.Now()
+
+	in, ok := a.resolveInput(evt)
+	if !ok {
+		return nil, terminalSkipped
+	}
+
+	// 去重按文本做：webui/GUI 断线重连会重放未确认消息。
+	// 带媒体时跳过——媒体输入的 alt 文案（"[从 qq 收到了 image]"）对不同图片
+	// 是同一句，拿它去重会把连发的两张图误判成重复。
+	if len(in.blocks) == 0 && a.isDuplicateInput(evt.Source, in.text) {
+		log.Printf("[agent] dropped duplicate input from %s: %s", evt.Source, truncateStr(in.text, 60))
+		return nil, terminalSkipped
+	}
+
+	a.currentOutputChannel = evt.OutputChannel
+	if a.currentOutputChannel == "" {
+		a.currentOutputChannel = evt.Source
+	}
+
+	if evt.OutputChannel == channelConsolidation {
+		a.processConsolidation(evt, in.text)
+		return nil, terminalConsolidation
+	}
+
+	// pendingMedia 让 describe_image / transcribe_audio / ocr_image 拿到本轮媒体的
+	// 原始 data/url，也是这三个工具是否出现在工具表里的开关。仅对用户直接上传成立
+	//（payload 里才有 data/url）；插件注入的是成品 block，取不到原始数据。
+	if evt.Type == "image" || evt.Type == "audio" {
+		a.pendingMedia = evt.Payload
+	}
+
+	// 媒体先落进 CAS。不存的后果是 ContextEvent.Input 只剩一句 alt 文本，
+	// base64 随 message 数组发给模型后就丢了。
+	if len(in.blocks) > 0 {
+		a.stageMediaDigests(a.captureBlockMedia(in.blocks, in.captureTool)...)
+	}
+
+	noMemory := false
+	if v, ok := evt.Payload["no_memory"].(bool); ok {
+		noMemory = v
+	}
+	if !noMemory && a.io != nil {
+		if chDef, ok := a.io.GetInputChannelDef(evt.Source); ok && chDef.NoMemory {
+			noMemory = true
+		}
+	}
+
+	// 工具提醒/中断（terminal_watch、timer 等）不是用户发言：
+	// 以 system 角色注入 LLM，且不写入用户对话履历。
+	isInterrupt, _ := evt.Payload["interrupt"].(bool)
+	a.interruptInput = isInterrupt
+	if isInterrupt {
+		noMemory = true
+	}
+
+	stageCtx := a.stageCtxFromInput(in.text, evt.Source, "")
+	stageCtx.Extra["input_source"] = evt.Source
+	stageCtx.Extra["output_channel"] = evt.OutputChannel
+	if len(in.blocks) > 0 {
+		stageCtx.Extra["media_blocks"] = in.blocks
+		stageCtx.Extra["media_type"] = in.mediaType
+	}
+	if noMemory {
+		stageCtx.NoMemory = true
+	}
+	a.injectSourceContext(stageCtx, evt)
+
+	if a.runStage(sdk.StageOnInput, stageCtx) {
+		a.emitResponse(evt, *stageCtx.Response)
+		return nil, terminalStageShortCircuit
+	}
+
+	input := stageCtx.RawMessage
+
+	// 计算层用的清洗文本（不改原文）：通道 Cleaner 提取语义内容后用于向量化/提关键词
+	cleanInput := input
+	if a.io != nil {
+		if chDef, ok := a.io.GetInputChannelDef(evt.Source); ok && chDef.Cleaner != nil {
+			cleanInput = chDef.Cleaner(input)
+		}
+	}
+
+	// upload_* 字段一并转发：webui 的 EventRawInput 订阅方靠它们还原附件卡片。
+	rawPayload := map[string]interface{}{"content": input, "source": evt.Source}
+	for _, k := range []string{"upload_url", "upload_type", "upload_size", "upload_name"} {
+		if v, ok := evt.Payload[k]; ok {
+			rawPayload[k] = v
+		}
+	}
+	a.publishEvent(events.EventRawInput, rawPayload)
+
+	archived := a.pruneOnInput(evt, cleanInput)
+	if archived > 0 {
+		log.Printf("[agent] pruned %d low-relevance events to document memory", archived)
+	}
+
+	if !isInterrupt {
+		a.context.Append(ContextEvent{
+			Timestamp: start,
+			Source:    evt.Source,
+			Input:     input,
+		})
+	}
+
+	f := a.newTaskFrame(input, stageCtx)
+	f.Evt = evt
+	f.CleanInput = cleanInput
+	f.IsInterrupt = isInterrupt
+	f.StartedAt = start
+	f.Level = a.sched.currentLevel()
+	return f, terminalNone
+}
+
+// finishInputTask 执行 processInput 的后半段（日志、上下文提交、回执、记忆候选）。
+//
+// 只在任务真正结束时调用一次——这正是不变量 I5（每任务恰一次终态）的落点。
+func (a *Agent) finishInputTask(f *TaskFrame, out stepOutcome) {
+	evt := f.Evt
+
+	// pendingMedia 是「本轮」语义：任务结束即清（挂起时保留，见 runInputTask）。
+	if evt != nil && (evt.Type == "image" || evt.Type == "audio") {
+		a.pendingMedia = nil
+	}
+
+	if out == outcomeFailed {
+		log.Printf("[agent] process %s error: %v", evt.Type, f.Err)
+		resp := fmt.Sprintf("处理错误: %v", f.Err)
+		a.emitResponse(evt, resp)
+		a.context.Append(ContextEvent{Timestamp: time.Now(), Source: "agent", Input: f.Input, Response: resp})
+		f.Terminal = terminalError
+		return
+	}
+
+	elapsed := time.Since(f.StartedAt)
+	log.Printf("[agent] %s from %s → response (%dms, tools=%v)",
+		evt.Type, evt.Source, elapsed.Milliseconds(), f.ToolsUsed)
+
+	// 本轮捕获的媒体一起挂到这条事件上：用户上传的、插件注入的，以及模型调
+	// multimodal_see_picture / see_video 时经 SetToolBlocks 注入的。
+	turnEvt := ContextEvent{
+		Timestamp:   time.Now(),
+		Source:      "agent",
+		Input:       f.CleanInput,
+		Response:    f.Response,
+		ToolsUsed:   f.ToolsUsed,
+		ToolResults: f.ToolResults,
+	}
+	a.bindEventMedia(&turnEvt, a.drainMediaDigests())
+	a.context.Append(turnEvt)
+
+	a.emitResponse(evt, f.Response)
+
+	if !f.StageCtx.NoMemory {
+		a.emitMemoryCandidate(evt.Source, f.CleanInput, f.Response, f.ToolResults, f.ToolsUsed)
+	}
+	f.Terminal = terminalOK
 }
 
 // step 执行恰好一个 step。
@@ -148,6 +393,18 @@ func (a *Agent) step(f *TaskFrame) stepOutcome {
 
 // stepPrepare 构建本轮任务的初始帧。
 func (a *Agent) stepPrepare(f *TaskFrame) stepOutcome {
+	// 抢占式中断任务：继承被打断任务的只读前缀（D1=A），不重建上下文。
+	if len(f.SeedMsgs) > 0 {
+		f.Tools = a.buildToolDefs()
+		f.Msgs = append([]agentAPI.Message(nil), f.SeedMsgs...)
+		f.Msgs = append(f.Msgs, agentAPI.Message{Role: "user", Content: f.Input})
+		// 前缀路径不重写尾部消息（那是「同行注入」的旧形态）；
+		// 必须消费掉标志位，否则下一个普通任务的尾部会被误改。
+		a.interruptInput = false
+		f.Step = StepLLM
+		return outcomeContinue
+	}
+
 	budget := ComputeTokenBudget(a.provider, a.systemPrompt)
 
 	memContext := a.buildMemoryContext(f.Input, budget.MemoryTokens)
