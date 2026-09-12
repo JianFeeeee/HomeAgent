@@ -77,6 +77,12 @@ type Store struct {
 	docs  []DocVector
 	dim   int
 	index *InvertedIndex
+
+	// minScore 是候选分数下限。**必须按向量空间标定**：
+	// 词向量/多模态余弦通常在 0.3~0.9，而 TF-IDF 余弦只有 0.0~0.2 ——
+	// 用同一个阈值会把词法路的大量有效候选静默砍掉
+	// （实测：知识库自检索 MRR 0.307 → 0.193 就是这么掉的）。
+	minScore float64
 }
 
 type DocVector struct {
@@ -86,9 +92,27 @@ type DocVector struct {
 	Meta   map[string]string
 }
 
+// DefaultMinScore 是默认候选中选阈值（沿用历史行为）。
+const DefaultMinScore = 0.05
+
+// MinScore 返回当前候选中选阈值（供接线处自证用的是哪个阈值）。
+func (s *Store) MinScore() float64 {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.minScore
+}
+
+// SetMinScore 调整候选中选阈值（按向量空间标定，见 minScore 字段注释）。
+func (s *Store) SetMinScore(v float64) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.minScore = v
+}
+
 func NewStore() *Store {
 	return &Store{
-		index: NewInvertedIndex(),
+		index:    NewInvertedIndex(),
+		minScore: DefaultMinScore,
 	}
 }
 
@@ -160,7 +184,7 @@ func (s *Store) SearchScored(query Vector, topK int) []DocVectorHit {
 		for _, d := range s.docs {
 			if d.ID == id {
 				score := CosineSimilarity(query, d.Vector)
-				if score > 0.05 {
+				if score > s.minScore {
 					results = append(results, scored{d, score})
 				}
 				break
