@@ -25,6 +25,8 @@ import (
 
 	agentAPI "gitcode.com/JianFeeeee/HomeAgent/internal/agent/api"
 	agentIO "gitcode.com/JianFeeeee/HomeAgent/internal/agent/io"
+	"gitcode.com/JianFeeeee/HomeAgent/internal/events"
+	sdk "gitcode.com/JianFeeeee/HomeAgent/internal/sdk"
 )
 
 // Level 是任务优先级，由内核预定义四级（设计文档 §3.1）。
@@ -72,6 +74,17 @@ const (
 	// TaskKindSelf 来自 selfInputCh（内核自循环：记忆整理、子任务通知）。
 	TaskKindSelf
 )
+
+func (k TaskKind) String() string {
+	switch k {
+	case TaskKindInput:
+		return "input"
+	case TaskKindSelf:
+		return "self"
+	default:
+		return "unknown"
+	}
+}
 
 // Task 是调度器的最小单位。
 //
@@ -124,9 +137,11 @@ func effectiveLevel(t *Task) Level {
 type SchedulerStats struct {
 	Enqueued uint64
 	Executed uint64
-	// Rejected 是因队列满而未入队的次数。M2 由泵入侧节流，正常为 0；
-	// 出现非 0 说明消费端长期慢于生产端。
+	// Rejected 是因队列满（或深度超限）而未被接纳的次数。
 	Rejected uint64
+	// Suspended / Resumed 是挂起与恢复的次数。
+	Suspended uint64
+	Resumed   uint64
 }
 
 // SchedulerSnapshot 是调度器的原子快照。
@@ -136,6 +151,33 @@ type SchedulerSnapshot struct {
 	PendingInterrupts []*Task
 	SuspendPool       []*suspendedTask
 	Stats             SchedulerStats
+	MaxSuspendDepth   int
+}
+
+// schedulerStatus 把快照转成对外的状态 DTO（不暴露帧内容）。
+func (a *Agent) schedulerStatus() sdk.SchedulerStatus {
+	if a.sched == nil {
+		return sdk.SchedulerStatus{}
+	}
+	snap := a.DumpScheduler()
+	out := sdk.SchedulerStatus{
+		ReadyQueueDepth:   len(snap.Queue),
+		PendingInterrupts: len(snap.PendingInterrupts),
+		SuspendPool:       len(snap.SuspendPool),
+		MaxSuspendDepth:   snap.MaxSuspendDepth,
+		Enqueued:          snap.Stats.Enqueued,
+		Executed:          snap.Stats.Executed,
+		Rejected:          snap.Stats.Rejected,
+		Suspended:         snap.Stats.Suspended,
+		Resumed:           snap.Stats.Resumed,
+		Preempted:         snap.Stats.Suspended,
+	}
+	if snap.Running != nil {
+		out.Running = &sdk.SchedulerTask{
+			ID: snap.Running.ID, Level: int(snap.Running.Level), Kind: snap.Running.Kind.String(),
+		}
+	}
+	return out
 }
 
 type scheduler struct {
@@ -342,6 +384,7 @@ func (s *scheduler) suspend(t *Task, f *TaskFrame) {
 		s.stats.Rejected++
 	}
 	s.suspendPool = append(s.suspendPool, &suspendedTask{Task: t, Frame: f})
+	s.stats.Suspended++
 	// 饥饿防护：抢占计数 +1（提升有效级）并记录冷却起点。
 	t.PreemptCount++
 	t.LastPreemptAt = time.Now()
@@ -487,6 +530,7 @@ func (a *Agent) DumpScheduler() SchedulerSnapshot {
 	snap.Queue = append(snap.Queue, a.sched.queue...)
 	snap.PendingInterrupts = append(snap.PendingInterrupts, a.sched.pendingInterrupts...)
 	snap.SuspendPool = append(snap.SuspendPool, a.sched.suspendPool...)
+	snap.MaxSuspendDepth = a.sched.maxSuspendDepth
 	return snap
 }
 
@@ -576,6 +620,9 @@ func (a *Agent) executeNewTask(t *Task) {
 
 	if out == outcomeSuspended && f != nil {
 		a.sched.suspend(t, f)
+		a.publishEvent(events.EventScheduler, map[string]interface{}{
+			"action": "suspend", "task": t.ID, "level": int(t.Level),
+		})
 		return
 	}
 	a.sched.done(t)
@@ -585,6 +632,12 @@ func (a *Agent) executeNewTask(t *Task) {
 //
 // 关键：不重建帧、不重跑 prepare 段——否则会重复提交上下文与事件。
 func (a *Agent) resumeTask(t *Task, f *TaskFrame) {
+	a.sched.mu.Lock()
+	a.sched.stats.Resumed++
+	a.sched.mu.Unlock()
+	a.publishEvent(events.EventScheduler, map[string]interface{}{
+		"action": "resume", "task": t.ID, "level": int(t.Level),
+	})
 	defer func() {
 		if r := recover(); r != nil {
 			log.Printf("[agent] resume task#%d panic recovered: %v\n%s",

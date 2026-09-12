@@ -46,6 +46,36 @@ type KernelStatus struct {
 	ONNX ONNXStatus `json:"onnx"`
 
 	Tracker TrackerStatus `json:"tracker"`
+
+	// Scheduler 是输入调度器的运行时快照（可观测性，设计文档 §11 O1/O2）。
+	// M2 起输入不再直接排队在 channel 上，而是经 readyQueue/pendingInterrupts/
+	// suspendPool 三集合按优先级调度；这里把这些状态暴露出来。
+	Scheduler SchedulerStatus `json:"scheduler"`
+}
+
+// SchedulerStatus 是调度器的原子快照 DTO。
+type SchedulerStatus struct {
+	// Running 是当前执行的任务（空表示空闲）。
+	Running *SchedulerTask `json:"running,omitempty"`
+	// ReadyQueueDepth / PendingInterrupts / SuspendPool 是三个集合的深度。
+	ReadyQueueDepth   int `json:"ready_queue_depth"`
+	PendingInterrupts int `json:"pending_interrupts"`
+	SuspendPool       int `json:"suspend_pool"`
+	MaxSuspendDepth   int `json:"max_suspend_depth"`
+
+	Enqueued  uint64 `json:"enqueued"`
+	Executed  uint64 `json:"executed"`
+	Rejected  uint64 `json:"rejected"`
+	Suspended uint64 `json:"suspended"`
+	Resumed   uint64 `json:"resumed"`
+	Preempted uint64 `json:"preempted"`
+}
+
+// SchedulerTask 是任务的最小标识（不暴露帧内容）。
+type SchedulerTask struct {
+	ID    uint64 `json:"id"`
+	Level int    `json:"level"`
+	Kind  string `json:"kind"`
 }
 
 // ONNXStatus 是统一多模态向量空间（ONNX 模型）的启用状态与身份。
