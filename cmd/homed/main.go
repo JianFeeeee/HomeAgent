@@ -367,7 +367,11 @@ func main() {
 	// 布局、预处理、解码、运行时全部属于 provider 内部实现。
 	// provider 名为空时禁用多模态向量检索，退回纯 fastText 文本路径。
 	var multimodalSpace vector.MultimodalEmbedder
+	// 这两个值只用于状态报告（healthcheck_kernel 的 onnx 段）：
+	// 「配了哪个 provider」与「为什么没启用」，避免只能看到 false 却不知原因。
+	var mmProviderName, mmErr string
 	if mmProvider := cfgReg.GetString("core.memory.multimodal_space.provider", ""); mmProvider != "" {
+		mmProviderName = mmProvider
 		opts := map[string]string{}
 		const optPrefix = "core.memory.multimodal_space.options."
 		for _, key := range cfgReg.List("core.memory.multimodal_space.options.") {
@@ -375,10 +379,12 @@ func main() {
 		}
 		provider, err := embedding.Open(mmProvider, embedding.Config{Options: opts})
 		if err != nil {
+			mmErr = err.Error()
 			log.Printf("[homed] warning: 多模态向量 provider %q 打开失败: %v（多模态向量检索已禁用；已注册: %s）",
 				mmProvider, err, strings.Join(embedding.Names(), ", "))
 		} else if adapted, err := vector.AdaptProvider(provider); err != nil {
 			provider.Close()
+			mmErr = err.Error()
 			log.Printf("[homed] warning: 多模态向量 provider %q 元数据不合法: %v（多模态向量检索已禁用）", mmProvider, err)
 		} else {
 			multimodalSpace = adapted
@@ -533,6 +539,8 @@ func main() {
 		EmbeddingModelPath: cfgReg.GetString("core.agent.embedding_model_path", ""),
 		Embedder:           embedder,
 		MultimodalSpace:    multimodalSpace,
+		EmbeddingProvider:  mmProviderName,
+		EmbeddingError:     mmErr,
 		StageHost:          stageHost,
 		EventBus:           evBus,
 		ThinkingEnabled:    cfg.LLM.ThinkingEnabled,

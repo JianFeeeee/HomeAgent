@@ -38,7 +38,27 @@ type KernelStatus struct {
 
 	Runtime RuntimeStatus `json:"runtime"`
 
+	// ONNX 报告统一多模态向量空间（ONNX 模型）是否**真的在用**。
+	//
+	// 为何单列：内核的向量能力是三层降级（统一多模态空间 → 词嵌入 → TF-IDF），
+	// 只报「向量可用/不可用」分不清「ONNX 模型已加载」与「退回了纯文本路径」。
+	// 模型缺失 / 运行时缺失 / provider 打开失败时这里是 enabled=false + reason。
+	ONNX ONNXStatus `json:"onnx"`
+
 	Tracker TrackerStatus `json:"tracker"`
+}
+
+// ONNXStatus 是统一多模态向量空间（ONNX 模型）的启用状态与身份。
+type ONNXStatus struct {
+	// Enabled 是 provider 真正打开且元数据合法（不是「配置里写了 provider」）。
+	Enabled bool `json:"enabled"`
+	// Provider 是配置指定的 provider 名（如 chineseclip / qwen3vl / http）。
+	Provider    string   `json:"provider,omitempty"`
+	Dim         int      `json:"dim,omitempty"`
+	Fingerprint string   `json:"fingerprint,omitempty"`
+	Modalities  []string `json:"modalities,omitempty"`
+	// Reason 是未启用时的原因（未配置 / 打开失败的具体错误 / 其它）。
+	Reason string `json:"reason,omitempty"`
 }
 
 type PluginInfo struct {
