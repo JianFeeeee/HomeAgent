@@ -76,6 +76,10 @@ Function GenKey
 FunctionEnd
 
 !insertmacro MUI_PAGE_WELCOME
+; 许可页：AGPL-3.0-only（全文在仓库根 LICENSE）。
+; NSIS 的 File/!insertmacro 相对路径以**本 .nsi 所在目录**为基准解析，
+; 而本文件在 deploy/packaging/，故仓库根是 ..\..\ 。
+!insertmacro MUI_PAGE_LICENSE "..\..\LICENSE"
 !insertmacro MUI_PAGE_DIRECTORY
 
 !if "${HAS_CREDENTIALS}" == "1"

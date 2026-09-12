@@ -335,6 +335,7 @@ stage_variant() {
       cp "$PROJECT_ROOT/deploy/homeagent.service" "$staging/etc/systemd/system/homeagent.service"
       [ -f "$initconfig_bin" ] && cp "$initconfig_bin" "$staging/usr/bin/initconfig"
       stage_setup "$staging"
+      stage_license "$staging"
       stage_multimodal_assets "$staging"
       stage_gui "$staging"
       ;;
@@ -344,10 +345,12 @@ stage_variant() {
       cp "$PROJECT_ROOT/deploy/homeagent.service" "$staging/etc/systemd/system/homeagent.service"
       [ -f "$initconfig_bin" ] && cp "$initconfig_bin" "$staging/usr/bin/initconfig"
       stage_setup "$staging"
+      stage_license "$staging"
       stage_multimodal_assets "$staging"
       ;;
     client)
       cp "$BUILD_DIR/waiter_$suffix" "$staging/usr/bin/waiter"
+      stage_license "$staging"
       stage_gui "$staging"
       ;;
   esac
@@ -380,6 +383,58 @@ stage_setup() {
     cp "$setup_src" "$staging/usr/lib/homeagent/setup.sh"
     chmod 755 "$staging/usr/lib/homeagent/setup.sh"
   fi
+}
+
+# 项目自身的许可：**所有变体**都要带（client 也分发 waiter 与 GUI）。
+#
+# deb 按 Debian 惯例给 /usr/share/doc/homeagent/copyright（DEP-5 机器可读格式），
+# 同时把 LICENSE 全文放进去；rpm 的许可走 fpm 的 --license 元数据。
+# 与 stage_multimodal_assets 的 licenses/ 分工：那里放**第三方**（模型/运行库）的
+# 许可全文，这里放本项目自己的。
+stage_license() {
+  local staging="$1"
+  local docdir="$staging/usr/share/doc/homeagent"
+  mkdir -p "$docdir"
+  cp "$PROJECT_ROOT/LICENSE" "$docdir/LICENSE"
+  cat > "$docdir/copyright" <<'EOF'
+Format: https://www.debian.org/doc/packaging-manuals/copyright-format/1.0/
+Upstream-Name: HomeAgent
+Source: https://gitcode.com/JianFeeeee/HomeAgent
+
+Files: *
+Copyright: HomeAgent contributors
+License: AGPL-3.0-only
+ This program is free software: you can redistribute it and/or modify it under
+ the terms of the GNU Affero General Public License as published by the Free
+ Software Foundation, version 3 of the License.
+ .
+ This program is distributed in the hope that it will be useful, but WITHOUT
+ ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or FITNESS
+ FOR A PARTICULAR PURPOSE.  See the GNU Affero General Public License for more
+ details.
+ .
+ You should have received a copy of the GNU Affero General Public License along
+ with this program.  If not, see <https://www.gnu.org/licenses/>.
+ .
+ The license is AGPL-3.0-only: no later version may be chosen. Note the network
+ clause (§13 Remote Network Interaction) — offering modified versions of this
+ software to users over a network also requires offering them the source.
+ .
+ Full text: /usr/share/doc/homeagent/LICENSE
+
+Files: usr/lib/homeagent/models/chinese-clip-vit-b16-onnx/*
+Copyright: OFA-Sys / Chinese-CLIP authors
+License: Apache-2.0
+ Full text: /usr/share/doc/homeagent/licenses/Chinese-CLIP-Apache-2.0.txt
+ Comment: pre-trained model artifacts; NOT covered by this package's AGPL grant
+
+Files: usr/lib/homeagent/onnxruntime/*
+Copyright: Microsoft Corporation
+License: MIT
+ Full text: /usr/share/doc/homeagent/licenses/ONNX-Runtime-MIT.txt
+ Comment: license texts and third-party notices under licenses/ONNX-Runtime-*
+EOF
+  chmod 644 "$docdir/LICENSE" "$docdir/copyright"
 }
 
 # server/full 的 ONNX 资产。模型与运行库是发行版能力的一部分，不是可选下载：
@@ -515,6 +570,7 @@ build_tar() {
   local setup_src="$PROJECT_ROOT/deploy/packaging/linux/setup.sh"
   [ -f "$setup_src" ] && cp "$setup_src" "$staging/usr/lib/homeagent/setup.sh"
   cp "$PROJECT_ROOT/deploy/homeagent.service" "$staging/etc/systemd/system/homeagent.service"
+  stage_license "$staging"
   stage_multimodal_assets "$staging"
 
   # GUI if available
@@ -593,7 +649,7 @@ build_rpm() {
     -a "$RPM_ARCH" \
     --description "HomeAgent ${variant^} package" \
     --url "https://github.com/trueagent/HomeAgent" \
-    --license "Proprietary" \
+    --license "AGPL-3.0-only" \
     -C "$staging" \
     -p "$rpm_dir/$pkg_name" \
     . 2>&1
