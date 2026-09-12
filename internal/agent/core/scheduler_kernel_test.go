@@ -15,12 +15,14 @@ import (
 
 	agentAPI "gitcode.com/JianFeeeee/HomeAgent/internal/agent/api"
 	agentIO "gitcode.com/JianFeeeee/HomeAgent/internal/agent/io"
+	"gitcode.com/JianFeeeee/HomeAgent/internal/plugin"
+	sdk "gitcode.com/JianFeeeee/HomeAgent/internal/sdk"
 )
 
-// 插件声明 L4 必须被夹到 L3：L4 是内核的调度内部属性，不接受外部越权。
-func TestKernel_PluginCannotClaimL4(t *testing.T) {
+// 非内核级来源声明 L4 必须被夹到 L3；内核级来源（内置插件）可用到 L4。
+func TestKernel_L4RequiresKernelLevelSource(t *testing.T) {
 	if got := clampPluginLevel(LevelCritical); got != LevelInteractive {
-		t.Fatalf("插件声明 L4 应被夹到 L3，实际 %v", got)
+		t.Fatalf("非特权声明 L4 应被夹到 L3，实际 %v", got)
 	}
 	cases := []struct {
 		declared string
@@ -30,7 +32,7 @@ func TestKernel_PluginCannotClaimL4(t *testing.T) {
 		{"L2", LevelMessage},
 		{"L3", LevelInteractive},
 		{"l2", LevelMessage},
-		{"L4", LevelInteractive}, // 越权 → 夹到 L3
+		{"L4", LevelInteractive}, // 非特权 → 夹到 L3
 		{"L7", DefaultLevel},     // 未知 → 默认级
 		{"", DefaultLevel},       // 未声明 → 默认级
 		{"紧急", DefaultLevel},     // 拼写错误 → 默认级（不得被静默当成别的级别）
@@ -40,12 +42,61 @@ func TestKernel_PluginCannotClaimL4(t *testing.T) {
 		if c.declared != "" {
 			evt.Payload["priority"] = c.declared
 		}
-		if got := interruptLevel(evt); got != c.want {
-			t.Fatalf("声明 %q → 级别 %v，期望 %v", c.declared, got, c.want)
+		if got := interruptLevel(evt, false); got != c.want {
+			t.Fatalf("非特权声明 %q → 级别 %v，期望 %v", c.declared, got, c.want)
 		}
 	}
-	if got := interruptLevel(nil); got != DefaultLevel {
+	if got := interruptLevel(nil, false); got != DefaultLevel {
 		t.Fatalf("无事件应为默认级，实际 %v", got)
+	}
+
+	// 特权（内核级插件）：L4 被承认，其余待遇不变。
+	for _, c := range []struct {
+		declared string
+		want     Level
+	}{
+		{"L4", LevelCritical},
+		{"L3", LevelInteractive},
+		{"L1", LevelBackground},
+		{"", DefaultLevel},
+		{"L9", DefaultLevel},
+	} {
+		evt := &agentIO.InputEvent{Payload: map[string]interface{}{}}
+		if c.declared != "" {
+			evt.Payload["priority"] = c.declared
+		}
+		if got := interruptLevel(evt, true); got != c.want {
+			t.Fatalf("特权声明 %q → 级别 %v，期望 %v", c.declared, got, c.want)
+		}
+	}
+}
+
+// 内核级 = 插件注册表里的**内置工厂**（编译期自注册），与插件自报名无关；
+// source 约定 `插件名` 或 `插件名/实例`（如 webui/<deviceID>）。
+func TestKernel_KernelLevelSource(t *testing.T) {
+	plugin.RegisterFactory("core_test_builtin", func(string, map[string]interface{}) (sdk.Plugin, error) {
+		return nil, nil
+	})
+	a := &Agent{pluginReg: plugin.NewRegistry()}
+
+	cases := []struct {
+		source string
+		want   bool
+	}{
+		{"core_test_builtin", true},
+		{"core_test_builtin/dev-1", true}, // 插件名/实例
+		{"core_test_external", false},
+		{"webui", false}, // 本测试注册表里没有 webui 工厂
+		{"", false},
+		{"core_test_builtinX", false}, // 不做前缀匹配
+	}
+	for _, c := range cases {
+		if got := a.isKernelLevelSource(c.source); got != c.want {
+			t.Fatalf("source=%q → %v，期望 %v", c.source, got, c.want)
+		}
+	}
+	if (&Agent{}).isKernelLevelSource("core_test_builtin") {
+		t.Fatal("没有插件注册表时不得授予内核级")
 	}
 }
 
@@ -178,10 +229,10 @@ func TestKernel_PriorityFlowsThroughIOLayer(t *testing.T) {
 
 	select {
 	case evt := <-ioM.InputInterruptChan():
-		if got := interruptLevel(evt); got != LevelInteractive {
+		if got := interruptLevel(evt, false); got != LevelInteractive {
 			t.Fatalf("经 io 层后的级别=%v，期望 L3（payload=%v）", got, evt.Payload)
 		}
-		task := newInterruptTask(evt, interruptLevel(evt))
+		task := newInterruptTask(evt, interruptLevel(evt, false))
 		if task.Class != TaskInterrupt || task.Level != LevelInteractive {
 			t.Fatalf("中断任务类别/级别=%v/%v，期望 interrupt/L3", task.Class, task.Level)
 		}
@@ -202,5 +253,42 @@ func TestKernel_PriorityFlowsThroughIOLayer(t *testing.T) {
 		}
 	case <-time.After(2 * time.Second):
 		t.Fatal("排队输入未到达 inputCh")
+	}
+}
+
+// 内核级插件声明的 L4 必须一路到达调度器（“立即打断”能力，如 WebUI 终止按钮）。
+func TestKernel_KernelLevelPluginCanRaiseL4(t *testing.T) {
+	plugin.RegisterFactory("core_test_l4", func(string, map[string]interface{}) (sdk.Plugin, error) {
+		return nil, nil
+	})
+	a := newPreemptAgent(t, &scriptProvider{})
+	a.pluginReg = plugin.NewRegistry()
+
+	// 先让一个排队任务跑起来（无级别），才能看到“抢占”。
+	evt, _ := textEvent("qq", "长任务")
+	if !a.sched.enqueue(newInputTask(evt)) {
+		t.Fatal("入队失败")
+	}
+	a.sched.nextRef()
+
+	// 内核级插件（内置）声明 L4 的终止通知。
+	kevt, _ := textEvent("core_test_l4", "用户按了终止按钮")
+	kevt.Payload["priority"] = "L4"
+	level := interruptLevel(kevt, a.isKernelLevelSource(kevt.Source))
+	if level != LevelCritical {
+		t.Fatalf("内核级插件声明 L4 应得 L4，实际 %v", level)
+	}
+	if !a.sched.requestPreempt(kevt, level) {
+		t.Fatal("L4 应能打断排队任务")
+	}
+	if a.sched.immediate == nil || a.sched.immediate.Level != LevelCritical {
+		t.Fatalf("应有一条 L4 中断在 immediate，实际 %+v", a.sched.immediate)
+	}
+
+	// 反例：同样的声明来自外部插件 → 夹到 L3。
+	eevt, _ := textEvent("core_test_external", "外部插件也想立即打断")
+	eevt.Payload["priority"] = "L4"
+	if got := interruptLevel(eevt, a.isKernelLevelSource(eevt.Source)); got != LevelInteractive {
+		t.Fatalf("外部插件声明 L4 应被夹到 L3，实际 %v", got)
 	}
 }

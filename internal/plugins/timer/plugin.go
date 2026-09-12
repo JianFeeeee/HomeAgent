@@ -108,8 +108,10 @@ func (p *Plugin) Start(s *sdk.PluginSDK) error {
 			case <-time.After(dur):
 				log.Printf("[timer] firing: %s (%s later)", message, dur)
 				// NoMemory：定时提醒是系统通知，不是记忆内容。
+				// PriorityL3：定时器是“时钟那种实时工作”——到点就该处理，
+				// 比 QQ 那类可无限等待的异步消息高（L3 vs L1）。
 				s.InjectInterruptTextOpts("timer", "timer", fmt.Sprintf("timer: %s", message),
-					sdk.InjectOptions{NoMemory: true})
+					sdk.InjectOptions{NoMemory: true, Priority: sdk.PriorityL3})
 			case <-p.stopCh:
 				log.Printf("[timer] cancelled: %s", message)
 			}

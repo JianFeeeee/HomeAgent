@@ -81,19 +81,25 @@ type InjectOptions struct {
 
 	// Priority 声明**中断注入**的优先级（仅 InjectInterrupt* 有意义）。
 	//
-	// 取值 "L1"/"L2"/"L3"；空等同 L1。L4 由内核独占（panic / 内核事件 selfip），
-	// 插件声明 L4 会被内核夹到 L3——内核的调度内部属性不接受外部越权。
+	// 取值 PriorityL1..PriorityL4；空等同 L1（默认级）。
+	// L4 只有**内核级插件**能用（见 PriorityL4 注释）；外部插件的 L4 会被夹到 L3。
 	//
 	// 排队注入（InjectText*/InjectInputSync）没有级别：它们本就是“不需及时处理”
 	// 的那一类，可被任何中断打断。
 	Priority string
 }
 
-// 中断优先级取值（插件可用范围）。L4 不在其中：它由内核保留。
+// 中断优先级取值。
+//
+// L1..L3 任何插件都可声明；**L4 只有内核级插件**（编译期内置插件，
+// 如 cli/webui/timer）才能声明——它用于实现真正的“立即打断”能力，
+// 例如 WebUI 的终止按钮。外部插件（走 proc 桥）声明 L4 会被内核夹到 L3。
 const (
 	PriorityL1 = "L1"
 	PriorityL2 = "L2"
 	PriorityL3 = "L3"
+	// PriorityL4 仅内核级（内置）插件可用；外部插件声明会被夹到 L3。
+	PriorityL4 = "L4"
 )
 
 // ChannelDef 描述通道在记忆计算层的行为，与 ToolDef.NoMemory/Cleaner 语义一致。

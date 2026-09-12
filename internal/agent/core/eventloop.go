@@ -54,9 +54,10 @@ func (a *Agent) interceptLoop() {
 			// 因而不会丢），仅当它会真抢占时才告诉我“该取消可取消的步骤”。
 			// 本 goroutine 不碰任何帧——只写中断队列与让位信号。
 			//
-			// 级别由插件声明（InjectOptions.Priority → payload["priority"]，L1..L3）；
-			// 未声明一律 L1。L4 只能由内核的 raiseKernelInterrupt 产生。
-			level := interruptLevel(evt)
+			// 级别由来源声明（InjectOptions.Priority → payload["priority"]）；
+			// 未声明一律 L1。L4（“立即打断”）只有内核级插件能声明，
+			// 外部插件即便报了 L4 也会被夹到 L3；内核自身另有 raiseKernelInterrupt。
+			level := interruptLevel(evt, a.isKernelLevelSource(evt.Source))
 			if a.sched.requestPreempt(clone, level) {
 				a.cancelCurrentLLM()
 			}
