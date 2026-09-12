@@ -2,7 +2,7 @@
   "name": "browser",
   "name_zh": "浏览器",
   "name_en": "Browser",
-  "version": "2.4.0",
+  "version": "2.4.1",
   "description": "统一浏览器插件：搜索、HTTP抓取(quick)、无头渲染(normal)、交互式浏览器(interactive/CDP)",
   "author": "HomeAgent",
   "entry": "plugin.so",
