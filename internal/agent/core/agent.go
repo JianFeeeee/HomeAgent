@@ -114,8 +114,8 @@ type Agent struct {
 	// M2 起取代 eventLoop 的隐式 channel 排队。
 	sched *scheduler
 
-	// 优先级策略表（可空）；见 AgentConfig.PriorityLookup。
-	priorityLookup func(source, channel string) Level
+	// 工具轮次硬上限（0 = 不限）；见 AgentConfig.MaxToolTurns。
+	maxToolTurns int
 
 	// 进行中的 LLM 请求取消函数，interceptLoop 可调用以在请求中打断
 	cancelLLM context.CancelFunc
@@ -224,9 +224,9 @@ type AgentConfig struct {
 
 	InputProcessing types.InputProcessingConfig // 非文本输入处理配置
 
-	// PriorityLookup 是内核的优先级策略表（设计文档 §3.2）。
-	// 返回 L1..L4；返回 0 或越界值表示“无策略”，由 Agent 的通道名兜底决定。
-	PriorityLookup func(source, channel string) Level
+	// MaxToolTurns 是单个任务允许的工具轮次上限（0 = 不限）。
+	// 设计文档 D6：主循环必须有硬上限，否则模型不停调用就永不完结。
+	MaxToolTurns int
 }
 
 func New(cfg AgentConfig) *Agent {
@@ -310,7 +310,7 @@ func New(cfg AgentConfig) *Agent {
 		selfInputCh:       make(chan selfInputMsg, 64),
 		childTasks:        make(map[string]*childTaskState),
 		sched:             newScheduler(256),
-		priorityLookup:    cfg.PriorityLookup,
+		maxToolTurns:      cfg.MaxToolTurns,
 		pluginHealth:      newPluginHealthTracker(),
 		thinkingEnabled:   cfg.ThinkingEnabled,
 		inputCfg:          cfg.InputProcessing,
