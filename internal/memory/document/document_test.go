@@ -467,3 +467,188 @@ func TestContextToDocContentPreservesRawToolOutput(t *testing.T) {
 		t.Error("summary should not be empty")
 	}
 }
+
+// ———— 回归：向量迁移的落盘与维度一致性 ————
+//
+// 以下四条来自 v1.2.0-beta.2 的压测（报告 /var/tmp/stress/REPORT.md）：
+// 迁移结果不落盘（每次启动白算一遍）、块指纹对但维度错时污染文档向量、
+// 以及 Insert 与 loadAll 的 ID 约定不对称。
+
+// fakeSpace 是可控的统一向量空间；calls 记录被真正要求算向量的次数，
+// 用来直接证明「已对齐的文档不再重算」——比读日志断言可靠。
+type fakeSpace struct {
+	fp    string
+	dim   int
+	calls int
+}
+
+func (f *fakeSpace) VectorizeDense(string) ([]float64, error) {
+	f.calls++
+	v := make([]float64, f.dim)
+	for i := range v {
+		v[i] = float64(i + 1)
+	}
+	return v, nil
+}
+func (f *fakeSpace) EmbedImageDense([]byte, string) ([]float64, error) { return f.VectorizeDense("") }
+func (f *fakeSpace) Fingerprint() string                               { return f.fp }
+func (f *fakeSpace) Dim() int                                          { return f.dim }
+func (f *fakeSpace) Loaded() bool                                      { return true }
+func (f *fakeSpace) Close()                                            {}
+
+// 迁移结果必须落盘：迁移后换一个 Store 实例（模拟重启）读到的应是新空间向量，
+// 且再跑一次迁移不应重算任何文档。
+func TestBuildDenseIndexPersistsAcrossRestart(t *testing.T) {
+	dir := t.TempDir()
+	sp := &fakeSpace{fp: "space-NEW-8", dim: 8}
+
+	s1 := NewStore(dir, memory.TokenizeWords)
+	if err := s1.Start(); err != nil {
+		t.Fatal(err)
+	}
+	// 模拟上个向量空间留下的状态：维度与指纹都对不上
+	stale := make([]float64, 999)
+	for i := range stale {
+		stale[i] = 0.01
+	}
+	if err := s1.Insert(&Doc{ID: "doc_persist", Summary: "迁移", Content: "落盘",
+		DenseVec: stale, DenseFP: "space-OLD-999"}); err != nil {
+		t.Fatal(err)
+	}
+	s1.SetDenseSpace(sp)
+	s1.BuildDenseIndex(sp)
+	if got := s1.Get("doc_persist"); got == nil || len(got.DenseVec) != 8 || got.DenseFP != sp.fp {
+		t.Fatalf("迁移未在内存生效: %+v", got)
+	}
+	// 不调用 Stop 就另开一个实例：体现「迁移当场落盘」，不依赖关停
+	s2 := NewStore(dir, memory.TokenizeWords)
+	if err := s2.Start(); err != nil {
+		t.Fatal(err)
+	}
+	defer s2.Stop()
+	loaded := s2.Get("doc_persist")
+	if loaded == nil {
+		t.Fatal("重启后文档不见了")
+	}
+	if len(loaded.DenseVec) != 8 || loaded.DenseFP != sp.fp {
+		t.Fatalf("迁移结果未落盘：期望 dim=8 fp=%q，实际 dim=%d fp=%q"+
+			"（后果：每次启动都重算同一批文档，磁盘状态永不收敛）",
+			sp.fp, len(loaded.DenseVec), loaded.DenseFP)
+	}
+	// 已对齐 → 一次向量计算都不该发生
+	sp2 := &fakeSpace{fp: sp.fp, dim: 8}
+	s2.SetDenseSpace(sp2)
+	s2.BuildDenseIndex(sp2)
+	if sp2.calls != 0 {
+		t.Fatalf("已对齐的文档被重算了 %d 次（期望 0）", sp2.calls)
+	}
+}
+
+// 块向量维度与当前空间不符时不得参与融合：否则 512 维文本 + 2048 维块
+// 会被 FuseVectors 按最大维度拼成 2048 维、并带上当前指纹，导致该文档在
+// 检索侧被长度守卫永久跳过且每次启动重算。
+func TestDenseForIgnoresBlockWithMismatchedDim(t *testing.T) {
+	dir := t.TempDir()
+	sp := &fakeSpace{fp: "space-NEW-8", dim: 8}
+	s := NewStore(dir, memory.TokenizeWords)
+	if err := s.Start(); err != nil {
+		t.Fatal(err)
+	}
+	defer s.Stop()
+
+	bad := make([]float64, 2048)
+	for i := range bad {
+		bad[i] = 0.02
+	}
+	good := make([]float64, 8)
+	for i := range good {
+		good[i] = 0.5
+	}
+	doc := &Doc{ID: "doc_bad", Summary: "坏块", Content: "文本向量应当生效",
+		Blocks: []memory.MemoryBlock{
+			{ID: "blk_bad", Vector: bad, Fingerprint: sp.fp},   // 指纹对、维度错 → 必须忽略
+			{ID: "blk_good", Vector: good, Fingerprint: sp.fp}, // 指纹与维度都对 → 参与融合
+		}}
+	if err := s.Insert(doc); err != nil {
+		t.Fatal(err)
+	}
+	s.SetDenseSpace(sp)
+	s.BuildDenseIndex(sp)
+
+	got := s.Get("doc_bad")
+	if got == nil {
+		t.Fatal("文档未加载")
+	}
+	if len(got.DenseVec) != 8 {
+		t.Fatalf("坏块污染了文档向量：期望 %d 维，实际 %d 维（指纹 %q）",
+			8, len(got.DenseVec), got.DenseFP)
+	}
+	// 同维度的正常块仍须参与融合：不应因为这次修复而整体失效
+	textOnly := &fakeSpace{fp: sp.fp, dim: 8}
+	textVec, _ := textOnly.VectorizeDense(doc.Summary + " " + doc.Content)
+	if equalFloats(got.DenseVec, textVec) {
+		t.Fatal("同维度的媒体块没有参与融合（修复过度）")
+	}
+}
+
+func equalFloats(a, b []float64) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if a[i] != b[i] {
+			return false
+		}
+	}
+	return true
+}
+
+// Insert 接受任意 ID，loadAll 就必须把它读回来，否则自定义 ID 的文档
+// 重启后静默消失。
+func TestLoadAllLoadsCustomID(t *testing.T) {
+	dir := t.TempDir()
+	s1 := NewStore(dir, memory.TokenizeWords)
+	if err := s1.Start(); err != nil {
+		t.Fatal(err)
+	}
+	if err := s1.Insert(&Doc{ID: "my-notes", Summary: "自定义 ID", Content: "内容"}); err != nil {
+		t.Fatal(err)
+	}
+	s1.Stop()
+
+	s2 := NewStore(dir, memory.TokenizeWords)
+	if err := s2.Start(); err != nil {
+		t.Fatal(err)
+	}
+	defer s2.Stop()
+	if s2.Get("my-notes") == nil {
+		t.Fatal("自定义 ID 的文档重启后消失（Insert 与 loadAll 的 ID 约定不对称）")
+	}
+}
+
+// Stop 必须把内存态变更写盘（关停链上没有它时 flush 形同虚设）。
+func TestStopFlushesDirtyDocs(t *testing.T) {
+	dir := t.TempDir()
+	s1 := NewStore(dir, memory.TokenizeWords)
+	if err := s1.Start(); err != nil {
+		t.Fatal(err)
+	}
+	if err := s1.Insert(&Doc{ID: "doc_flush", Summary: "关停落盘", Content: "内容"}); err != nil {
+		t.Fatal(err)
+	}
+	// 直接改内存并置脏，模拟「只在内存里发生的变更」
+	s1.mu.Lock()
+	s1.docs["doc_flush"].Summary = "关停落盘（已改）"
+	s1.dirty = true
+	s1.mu.Unlock()
+	s1.Stop()
+
+	s2 := NewStore(dir, memory.TokenizeWords)
+	if err := s2.Start(); err != nil {
+		t.Fatal(err)
+	}
+	defer s2.Stop()
+	if got := s2.Get("doc_flush"); got == nil || got.Summary != "关停落盘（已改）" {
+		t.Fatalf("Stop 未落盘: %+v", got)
+	}
+}
