@@ -115,7 +115,7 @@ func TestHasLegacyCABIEntry(t *testing.T) {
 	})
 }
 
-// 旧 .so 插件必须报「用新 plugindev 重编」而非静默跳过。
+// 旧 .so 插件必须报「用新 hmapdev 重编」而非静默跳过。
 func TestTryDynamic_LegacyCABIGivesActionableError(t *testing.T) {
 	r := NewRegistry()
 	defer r.closeProcHost()
@@ -129,7 +129,7 @@ func TestTryDynamic_LegacyCABIGivesActionableError(t *testing.T) {
 	}
 	// 错误消息须指向解决办法，且明确业务代码无需改
 	msg := err.Error()
-	for _, want := range []string{"plugindev", "plugin.bin", "业务代码"} {
+	for _, want := range []string{"hmapdev", "plugin.bin", "业务代码"} {
 		if !strings.Contains(msg, want) {
 			t.Errorf("错误消息应含 %q，实际: %v", want, err)
 		}

@@ -1175,11 +1175,11 @@ func (r *Registry) tryDynamic(plgDir, name string, config map[string]interface{}
 
 	// 旧 .so/.dll 插件给明确错误，不静默跳过。
 	// 静默跳过会让「插件目录在但没加载」看起来像配置问题，
-	// 而实际原因是需要用新 plugindev 重编。
+	// 而实际原因是需要用新 hmapdev 重编。
 	if hasLegacyCABIEntry(plgDir) {
 		return nil, fmt.Errorf(
 			"plugin %s: 检测到旧 C ABI 产物（plugin.so/.dll/.dylib）。"+
-				"外部插件已改为子进程模式，请用新版 plugindev 重编产出 %s"+
+				"外部插件已改为子进程模式，请用新版 hmapdev 重编产出 %s"+
 				"（业务代码无需修改）", name, binEntry)
 	}
 
