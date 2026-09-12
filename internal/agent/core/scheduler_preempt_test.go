@@ -1,6 +1,6 @@
 package core
 
-// M3b 验收测试：四级优先级 + 严格大于抢占 + 现场保存/恢复 + suspendPool。
+// M3b 验收测试：四级优先级 + 严格大于抢占 + 现场保存/恢复 + suspendStack。
 //
 // 设计依据 docs/zh/input-scheduler-design.md §11（P1–P4、R1、R5、D1T、Q3）。
 //
@@ -124,13 +124,13 @@ func TestPreempt_HigherPreemptsAndResumes(t *testing.T) {
 	if snap.Running != nil {
 		t.Fatal("挂起后不应还有 running")
 	}
-	if len(snap.SuspendPool) != 1 {
-		t.Fatalf("suspendPool=%d，期望 1", len(snap.SuspendPool))
+	if len(snap.SuspendStack) != 1 {
+		t.Fatalf("suspendStack=%d，期望 1", len(snap.SuspendStack))
 	}
 	if len(snap.PendingInterrupts) != 1 {
 		t.Fatalf("pendingInterrupts=%d，期望 1", len(snap.PendingInterrupts))
 	}
-	sf := snap.SuspendPool[0].Frame
+	sf := snap.SuspendStack[0].Frame
 	if sf.Terminal != terminalSuspended {
 		t.Fatalf("挂起任务终态=%v，期望 terminalSuspended", sf.Terminal)
 	}
@@ -186,7 +186,7 @@ func TestPreempt_HigherPreemptsAndResumes(t *testing.T) {
 		t.Fatalf("LLM 总调用=%d，期望 3（丢弃 1 + 中断 1 + 恢复 1）", sp.callCount())
 	}
 	snap = a.DumpScheduler()
-	if len(snap.SuspendPool) != 0 || snap.Running != nil {
+	if len(snap.SuspendStack) != 0 || snap.Running != nil {
 		t.Fatalf("全部结束后应无挂起与运行任务：%+v", snap)
 	}
 	if snap.Stats.Executed != 2 {
@@ -239,7 +239,7 @@ func TestPreempt_LowerOrEqualDoesNotPreempt(t *testing.T) {
 	}
 }
 
-// D1T：suspendPool 满时不再下潜（canSuspend=false），让位信号也不会 arm。
+// D1T：suspendStack 满时不再下潜（canSuspend=false），让位信号也不会 arm。
 func TestPreempt_DepthCapBlocksSuspension(t *testing.T) {
 	a := newPreemptAgent(t, newPreemptProvider())
 
@@ -259,7 +259,7 @@ func TestPreempt_DepthCapBlocksSuspension(t *testing.T) {
 	if a.DumpScheduler().Stats.Rejected != before+1 {
 		t.Fatal("超限挂起必须计数 Rejected")
 	}
-	if len(a.DumpScheduler().SuspendPool) != a.sched.maxSuspendDepth+1 {
+	if len(a.DumpScheduler().SuspendStack) != a.sched.maxSuspendDepth+1 {
 		t.Fatal("兜底路径必须保留帧而不是丢弃")
 	}
 }
