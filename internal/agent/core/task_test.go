@@ -26,11 +26,17 @@ type scriptProvider struct {
 	script []*agentAPI.CompletionResponse
 	idx    int
 	reqs   []*agentAPI.CompletionRequest
+	// err 非空时 Chat 直接返回它（用于错误路径测试）。
+	// 配合 ProviderError(401) 可跳过 2s 瞬时重试，让测试保持快速。
+	err error
 }
 
 func (s *scriptProvider) Name() string { return "script" }
 func (s *scriptProvider) Chat(ctx context.Context, req *agentAPI.CompletionRequest) (*agentAPI.CompletionResponse, error) {
 	s.reqs = append(s.reqs, req)
+	if s.err != nil {
+		return nil, s.err
+	}
 	if s.idx >= len(s.script) {
 		return &agentAPI.CompletionResponse{Content: ""}, nil
 	}

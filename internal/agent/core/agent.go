@@ -26,8 +26,12 @@ import (
 // ContextEvent 和 RelevanceContext 定义在 context.go
 
 // Agent — 单 agent，不区分会话/实例
+//
+// 并发现状（M3a 起）：所有任务状态只由 **schedulerLoop goroutine** 独占读写，
+// 因此不再有保护整轮执行的互斥量——挂起不能持锁（见 docs/zh/input-scheduler-design.md §8.1 I3）。
+// 仍需跨 goroutine 保护的是：childMu/llmMu/lastInputMu/noMergeMu 与各子系统自己的锁；
+// interceptLoop 只允许触碰 preemptionRequest 与 cancelLLM（经 llmMu）。
 type Agent struct {
-	mu              sync.Mutex
 	id              types.AgentID
 	provider        agentAPI.Provider
 	providerManager *agentAPI.ProviderManager
@@ -113,6 +117,9 @@ type Agent struct {
 	// M2 起取代 eventLoop 的隐式 channel 排队。
 	sched *scheduler
 
+	// 优先级策略表（可空）；见 AgentConfig.PriorityLookup。
+	priorityLookup func(source, channel string) Level
+
 	// 进行中的 LLM 请求取消函数，interceptLoop 可调用以在请求中打断
 	cancelLLM context.CancelFunc
 	llmMu     sync.Mutex
@@ -132,7 +139,7 @@ type Agent struct {
 	//
 	// 需要缓存而不是当场挂到事件上：媒体在 process() 执行期间被捕获，
 	// 而承载它的 ContextEvent 要等 process() 返回后才 Append——此刻还没有 owner_id。
-	// 与 pendingMedia 同受 a.mu 保护。
+	// 由 schedulerLoop goroutine 独占读写。
 	pendingMediaDigests []string
 
 	// 当前输入是否为工具提醒/中断（以 system 角色注入，避免被当成用户消息）
@@ -219,6 +226,10 @@ type AgentConfig struct {
 	SkillIndexProvider SkillIndexProvider
 
 	InputProcessing types.InputProcessingConfig // 非文本输入处理配置
+
+	// PriorityLookup 是内核的优先级策略表（设计文档 §3.2）。
+	// 返回 L1..L4；返回 0 或越界值表示“无策略”，由 Agent 的通道名兜底决定。
+	PriorityLookup func(source, channel string) Level
 }
 
 func New(cfg AgentConfig) *Agent {
@@ -303,6 +314,7 @@ func New(cfg AgentConfig) *Agent {
 		childTasks:        make(map[string]*childTaskState),
 		interceptCh:       make(chan *agentIO.InputEvent, 64),
 		sched:             newScheduler(256),
+		priorityLookup:    cfg.PriorityLookup,
 		pluginHealth:      newPluginHealthTracker(),
 		thinkingEnabled:   cfg.ThinkingEnabled,
 		inputCfg:          cfg.InputProcessing,
