@@ -45,6 +45,8 @@ func (a *Agent) executeToolCall(tc agentAPI.ToolCall) (ret string) {
 
 func (a *Agent) executeToolCallInner(tc agentAPI.ToolCall) string {
 	switch {
+	case tc.Name == "persona_set":
+		return a.executePersonaTool(tc)
 	case strings.HasPrefix(tc.Name, "memory_"):
 		return a.executeMemoryTool(tc)
 	case strings.HasPrefix(tc.Name, "social_"):

@@ -69,10 +69,10 @@ func TestPersonaWizardFlow(t *testing.T) {
 	if w.Code != http.StatusOK {
 		t.Fatalf("later 状态码 %d: %s", w.Code, w.Body.String())
 	}
-	if v := cfgReg.GetString(personaInitMarker, ""); v == "" {
+	if v := cfgReg.GetString(internalConfig.PersonaInitMarkerKey, ""); v == "" {
 		t.Fatal("later 也必须打一次性标记（否则每次启动都问）")
 	}
-	if v := cfgReg.GetString(personaPromptKey, ""); v != internalConfig.DefaultPersonaPrompt {
+	if v := cfgReg.GetString(internalConfig.PersonaPromptKey, ""); v != internalConfig.DefaultPersonaPrompt {
 		t.Fatalf("later 不应改动人格，实际 %q", v)
 	}
 
@@ -97,7 +97,7 @@ func TestPersonaWizardFlow(t *testing.T) {
 	if !pr.RestartRequired {
 		t.Fatal("自定义人格应提示需要重启才生效")
 	}
-	if v := cfgReg2.GetString(personaPromptKey, ""); v != "你是测试人格" {
+	if v := cfgReg2.GetString(internalConfig.PersonaPromptKey, ""); v != "你是测试人格" {
 		t.Fatalf("自定义内容未写库: %q", v)
 	}
 
@@ -111,12 +111,12 @@ func TestPersonaWizardFlow(t *testing.T) {
 		t.Fatalf("未知 mode 应 400，实际 %d", w.Code)
 	}
 	// 7. 被拒的请求不得打标记（否则向导会被跳过）
-	if v := cfgReg2.GetString(personaInitMarker, ""); v == "" {
+	if v := cfgReg2.GetString(internalConfig.PersonaInitMarkerKey, ""); v == "" {
 		t.Fatal("前置条件：第 4 步已打标记")
 	}
 	h4, cfgReg4 := newPersonaHandler(t)
 	_ = doPersona(t, h4, http.MethodPost, `{"mode":"nope"}`)
-	if v := cfgReg4.GetString(personaInitMarker, ""); v != "" {
+	if v := cfgReg4.GetString(internalConfig.PersonaInitMarkerKey, ""); v != "" {
 		t.Fatal("被拒的请求不应打标记")
 	}
 }
