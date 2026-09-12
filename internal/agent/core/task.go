@@ -214,6 +214,8 @@ func (a *Agent) prepareInputTask(evt *agentIO.InputEvent) (*TaskFrame, taskTermi
 
 	in, ok := a.resolveInput(evt)
 	if !ok {
+		// 空输入（文本与媒体都空）：没有可处理内容，但同步调用方仍在等回执。
+		a.emitSkippedReply(evt, "empty_input")
 		return nil, terminalSkipped
 	}
 
@@ -222,6 +224,9 @@ func (a *Agent) prepareInputTask(evt *agentIO.InputEvent) (*TaskFrame, taskTermi
 	// 是同一句，拿它去重会把连发的两张图误判成重复。
 	if len(in.blocks) == 0 && a.isDuplicateInput(evt.Source, in.text) {
 		log.Printf("[agent] dropped duplicate input from %s: %s", evt.Source, truncateStr(in.text, 60))
+		// 去重是「不处理」而不是「不回」，否则同步调用方（cli/clawhub 无超时）
+		// 会永久挂起（设计文档 §7 不变量 I5、§11.3 X2/X4）。
+		a.emitSkippedReply(evt, "duplicate")
 		return nil, terminalSkipped
 	}
 
