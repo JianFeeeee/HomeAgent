@@ -15,6 +15,13 @@ BUILD_TIME="${BUILD_TIME:-$(date -u '+%Y-%m-%dT%H:%M:%SZ')}"
 GO="${GO:-$(command -v go 2>/dev/null || echo "go")}"
 LDFLAGS="-X gitcode.com/JianFeeeee/HomeAgent/internal/meta.Version=${VERSION} -X gitcode.com/JianFeeeee/HomeAgent/internal/meta.Commit=${COMMIT} -X gitcode.com/JianFeeeee/HomeAgent/internal/meta.BuildTime=${BUILD_TIME}"
 
+# 版本与提交的**权威来源**是上面注入的 meta.Version / meta.Commit，不是 Go 自带的
+# VCS 戳。后者不进 build cache key（Go 文档明确说明 VCS 变化不会触发重建），
+# 命中缓存时会把上一次的 revision 一并带回来——实测发布分支的产物上就出现了
+# 1715b5c（本机任何仓库都不存在的提交），用 `go version -m` 溯源会指向幽灵提交。
+# 统一 -buildvcs=false：宁可没有这个信号，也不要一个错的。
+# 溯源请用：`strings homed | grep -m1 '^<短 hash>$'`（meta.Commit 是字符串常量）。
+
 TARGET="${1:-native}"
 COMPONENT="${2:-all}"
 
@@ -131,7 +138,7 @@ build_homed() {
   local _tags="${HOMED_TAGS-onnxruntime}"
   local -a _tagargs=()
   if [ -n "$_tags" ]; then _tagargs=(-tags "$_tags"); fi
-  CGO_ENABLED=1 CC="$_cc" "$GO" build -trimpath -installsuffix dynlink \
+  CGO_ENABLED=1 CC="$_cc" "$GO" build -buildvcs=false -trimpath -installsuffix dynlink \
     ${_tagargs[@]+"${_tagargs[@]}"} \
     -ldflags "$LDFLAGS" -o "$out" ./cmd/homed/
   echo "  OK ($(file "$out" | sed 's/.*: //') | $(du -h "$out" | cut -f1))"
@@ -144,7 +151,7 @@ build_waiter() {
   if [ "$GOOS" = "windows" ]; then out="${out}.exe"; fi
 
   echo "[BUILD] waiter ${plat} → $out"
-  CGO_ENABLED=0 "$GO" build -trimpath -installsuffix dynlink \
+  CGO_ENABLED=0 "$GO" build -buildvcs=false -trimpath -installsuffix dynlink \
     -ldflags "$LDFLAGS" -o "$out" ./cmd/waiter/
   echo "  OK ($(du -h "$out" | cut -f1))"
 }
@@ -165,7 +172,7 @@ build_initconfig() {
   if [ "$GOOS" = "windows" ]; then out="${out}.exe"; fi
 
   echo "[BUILD] initconfig ${plat} → $out"
-  CGO_ENABLED=1 "$GO" build -trimpath -installsuffix dynlink \
+  CGO_ENABLED=1 "$GO" build -buildvcs=false -trimpath -installsuffix dynlink \
     -ldflags "$LDFLAGS" -o "$out" ./cmd/initconfig/
   echo "  OK ($(du -h "$out" | cut -f1))"
 }
