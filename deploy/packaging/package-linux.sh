@@ -710,18 +710,25 @@ main() {
   echo "=== Done! Packages in: $DIST_DIR ==="
   echo ""
   echo "Summary:"
-  mapfile -t release_files < <(find "$DIST_DIR" -type f \( -name "*.deb" -o -name "homeagent_*.tar.gz" -o -name "*.rpm" \) 2>/dev/null | sort)
+  # 只列**本批**产物：dist/ 会跨多次构建累积，用 find 全目录会让清单／SHA256SUMS
+  # 带上历史版本的文件名——用户下载那种清单后 `sha256sum -c` 必然报缺失。
+  # （v1.2.2 构建时就出现过：清单里混进了 1.2.0/1.2.1 的包名。）按本批版本号过滤。
+  mapfile -t release_files < <(find "$DIST_DIR" -type f \( -name "*${PKG_VERSION}*.deb" -o -name "homeagent_${PKG_VERSION}_*.tar.gz" -o -name "*${PKG_VERSION}*.rpm" \) 2>/dev/null | sort)
   for f in "${release_files[@]}"; do
     echo "  $(du -h "$f" | cut -f1)  $f"
   done
   # 全部包生成之后一次计算，避免边打边算漏掉后生成的产物。
+  # 名字用**平铺名**（basename）：下载页的附件名就是平铺的，
+  # 清单里若写 ./deb/xxx.deb，用户下载后 `sha256sum -c` 会找不到文件。
   if [ ${#release_files[@]} -gt 0 ]; then
     (
       cd "$DIST_DIR"
-      find . -type f \( -name "*.deb" -o -name "homeagent_*.tar.gz" -o -name "*.rpm" \) \
-        -print0 | sort -z | xargs -0 sha256sum > SHA256SUMS
+      # 哈希取**真实路径**，标签用**平铺名**：两者不能混（直接对 basename 求哈希会找不到文件）。
+      for f in "${release_files[@]}"; do
+        printf '%s  ./%s\n' "$(sha256sum "$f" | awk '{print $1}')" "$(basename "$f")"
+      done | sort -k2 > SHA256SUMS
     )
-    echo "  SHA256SUMS: $DIST_DIR/SHA256SUMS"
+    echo "  SHA256SUMS: $DIST_DIR/SHA256SUMS  （仅本批 ${#release_files[@]} 个产物，平铺名）"
   fi
 }
 
