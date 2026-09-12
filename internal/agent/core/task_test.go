@@ -152,54 +152,6 @@ func TestTaskFrame_X3_TerminatesWithinBudget(t *testing.T) {
 	}
 }
 
-// 中断（interceptCh）在工具批中途到达时：本批**剩余工具被放弃**，直接进入下一轮。
-//
-// 这是原实现的 `break` 语义（process.go 旧版工具循环尾部），必须保持。
-func TestTaskFrame_InterruptAbandonsRemainingBatch(t *testing.T) {
-	sh := NewStageHost()
-	var a *Agent
-	sh.RegisterTool("t_first", sdk.ToolDef{Name: "t_first", Plugin: "t"}, func(args map[string]interface{}) (interface{}, error) {
-		// 工具执行期间产生一次中断（模拟插件在工具里注入打断）。
-		a.interceptCh <- &agentIO.InputEvent{Source: "t", Payload: map[string]interface{}{"content": "新的用户输入"}}
-		return "first-out", nil
-	})
-	sh.RegisterTool("t_second", sdk.ToolDef{Name: "t_second", Plugin: "t"}, func(args map[string]interface{}) (interface{}, error) {
-		t.Fatal("批内第二个工具不应被执行：中断必须放弃剩余批次")
-		return nil, nil
-	})
-
-	sp := &scriptProvider{script: []*agentAPI.CompletionResponse{
-		{Content: "", ToolCalls: []agentAPI.ToolCall{tc("c1", "t_first"), tc("c2", "t_second")}},
-		{Content: "处理完中断后的答复"},
-	}}
-	a = newTaskTestAgent(t, sp, sh)
-
-	resp, toolsUsed, toolResults, err := a.process("开始", a.stageCtxFromInput("开始", "", ""))
-	if err != nil {
-		t.Fatalf("process 返回错误: %v", err)
-	}
-	if resp != "处理完中断后的答复" {
-		t.Fatalf("响应=%q", resp)
-	}
-	if len(toolsUsed) != 1 || toolsUsed[0] != "t_first" {
-		t.Fatalf("toolsUsed=%v，期望只有 t_first", toolsUsed)
-	}
-	if len(toolResults) != 1 || toolResults[0].Output != "first-out" {
-		t.Fatalf("toolResults=%+v，期望只有 t_first 的结果", toolResults)
-	}
-
-	// 第二轮请求里必须出现被打断内容（system 角色、[中断消息] 前缀）。
-	found := false
-	for _, m := range sp.reqs[1].Messages {
-		if m.Role == "system" && len(m.Content) > 0 && m.Content[0:len("[中断消息]")] == "[中断消息]" {
-			found = true
-		}
-	}
-	if !found {
-		t.Fatalf("第二轮请求缺少 [中断消息] system 消息")
-	}
-}
-
 // 状态机对未知 step 必须失败退出而不是空转。
 func TestTaskFrame_UnknownStepFails(t *testing.T) {
 	sp := &scriptProvider{}

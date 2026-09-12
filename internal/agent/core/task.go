@@ -455,13 +455,6 @@ func (a *Agent) stepPrepare(f *TaskFrame) stepOutcome {
 // 取消（context.Canceled 且 agent 未退出）时**留在本 step 并 Turn++**——等价于
 // 原实现的 `continue`：重新排空中断、补占位、重新请求。抢占挂起将在 M3 从这里接管。
 func (a *Agent) stepLLM(f *TaskFrame) stepOutcome {
-	for _, interrupt := range a.drainInterrupts() {
-		f.Msgs = append(f.Msgs, agentAPI.Message{
-			Role:    "system",
-			Content: "[中断消息] " + interrupt,
-		})
-	}
-
 	// zen 兼容网关要求请求的最后一条消息必须是 user(thinking 续写模式校验),
 	// 工具轮产出的 tool/assistant 消息作结尾会被 400 拒绝,故补一条 user 占位。
 	f.Msgs = dropContinuationPlaceholders(f.Msgs)
@@ -568,22 +561,6 @@ func (a *Agent) stepToolBegin(f *TaskFrame) stepOutcome {
 		return outcomeContinue
 	}
 	tc := f.PendingTools[f.ToolIdx]
-
-	if len(a.interceptCh) > 0 {
-		for _, interrupt := range a.drainInterrupts() {
-			f.Msgs = append(f.Msgs, agentAPI.Message{Role: "system", Content: "[中断消息] " + interrupt})
-		}
-		a.publishEvent(events.EventToolCall, map[string]interface{}{
-			"tool":    tc.Name,
-			"plugin":  a.resolveToolPlugin(tc.Name),
-			"args":    tc.Arguments,
-			"status":  "interrupted",
-			"reason":  "user interrupt before execution",
-			"channel": a.currentOutputChannel,
-		})
-		f.Step = StepTurnEnd
-		return outcomeContinue
-	}
 
 	f.ToolsUsed = append(f.ToolsUsed, tc.Name)
 	pluginName := a.resolveToolPlugin(tc.Name)
@@ -744,13 +721,6 @@ func (a *Agent) stepToolAfter(f *TaskFrame) stepOutcome {
 	})
 
 	f.ToolIdx++
-	if len(a.interceptCh) > 0 {
-		for _, interrupt := range a.drainInterrupts() {
-			f.Msgs = append(f.Msgs, agentAPI.Message{Role: "system", Content: "[中断消息] " + interrupt})
-		}
-		f.Step = StepTurnEnd
-		return outcomeContinue
-	}
 	f.Step = StepToolBegin
 	return outcomeContinue
 }
