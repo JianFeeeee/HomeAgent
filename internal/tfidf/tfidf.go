@@ -26,12 +26,12 @@ type Vector map[string]float64
 
 // Embedder 实现 vector.MultimodalEmbedder，将 TF-IDF 稀疏向量投射为固定维度稠密向量。
 type Embedder struct {
-	mu        sync.RWMutex
-	tokenizer Tokenizer
-	docFreq   map[string]int
-	totalDocs int
-	dim       int
-	loaded    bool
+	mu          sync.RWMutex
+	tokenizer   Tokenizer
+	docFreq     map[string]int
+	totalDocs   int
+	dim         int
+	loaded      bool
 	fingerprint string
 }
 
