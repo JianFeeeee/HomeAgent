@@ -239,3 +239,26 @@ make install            # 安装到系统
 ```
 
 依赖：Go 1.25+, CGo (go-sqlite3), Linux/Windows。
+
+## 许可
+
+本项目以 **GNU Affero 通用公共许可证第 3 版（AGPL-3.0-only）** 发布，全文见 [LICENSE](LICENSE)。
+
+它是 GPL 家族里**传染性最强**的一档：不仅分发时须提供完整对应源码，
+**通过网络提供服务时也要向使用者提供源码**（§13 Remote Network Interaction）。
+即：任何人把改过的 HomeAgent 对外提供网络服务，都必须让该服务的使用者拿到改动后的源码。
+
+插件与本项目通过公开 SDK **静态链接**（SDK 源码会进入插件二进制），因此插件是本项目的
+衍生作品，需以相同许可发布；子进程隔离不改变这一点，因为被链接的是 SDK 代码本身。
+
+### 随包分发的第三方组件
+
+| 组件 | 许可 | 位置 |
+|---|---|---|
+| Chinese-CLIP ViT-B/16（ONNX 产物） | Apache-2.0 | `/usr/lib/homeagent/models/chinese-clip-vit-b16-onnx/` |
+| ONNX Runtime（`libonnxruntime.so`） | MIT | `/usr/lib/homeagent/onnxruntime/` |
+| jieba 词库（内嵌进二进制） | MIT | 源码 `internal/memory/jiebadict/` |
+| Go 依赖（go-sqlite3、gojieba、bubbletea 等） | MIT / BSD-3 / Apache-2.0 | 均为宽松许可，与 AGPL-3.0 兼容 |
+
+这些组件**保持各自原有许可**，不在本项目的 AGPL 授权范围内；发行包把它们的许可全文放在
+`/usr/share/doc/homeagent/licenses/`，并在 dep/rpm 元数据里声明本包许可为 `AGPL-3.0-only`。
