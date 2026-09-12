@@ -109,6 +109,10 @@ type Agent struct {
 	// 高优先级打断通道：interceptLoop 注入，process() 在工具循环轮次间非阻塞读取
 	interceptCh chan *agentIO.InputEvent
 
+	// 输入调度器：就绪队列、任务抽象与快照（见 scheduler.go）。
+	// M2 起取代 eventLoop 的隐式 channel 排队。
+	sched *scheduler
+
 	// 进行中的 LLM 请求取消函数，interceptLoop 可调用以在请求中打断
 	cancelLLM context.CancelFunc
 	llmMu     sync.Mutex
@@ -298,6 +302,7 @@ func New(cfg AgentConfig) *Agent {
 		selfInputCh:       make(chan selfInputMsg, 64),
 		childTasks:        make(map[string]*childTaskState),
 		interceptCh:       make(chan *agentIO.InputEvent, 64),
+		sched:             newScheduler(256),
 		pluginHealth:      newPluginHealthTracker(),
 		thinkingEnabled:   cfg.ThinkingEnabled,
 		inputCfg:          cfg.InputProcessing,
@@ -315,7 +320,7 @@ func New(cfg AgentConfig) *Agent {
 func (a *Agent) SetSkillIndexProvider(p SkillIndexProvider) { a.skillIndex = p }
 
 func (a *Agent) Start() {
-	go a.eventLoop()
+	go a.schedulerLoop()
 	go a.interceptLoop()
 	go a.distillLoop()
 	go a.archiveLoop()
