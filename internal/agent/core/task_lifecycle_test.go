@@ -102,8 +102,15 @@ func TestLifecycle_DuplicateSkippedHasTerminal(t *testing.T) {
 	if a.context.Len() != after1 {
 		t.Fatalf("去重命中不得提交上下文：%d → %d", after1, a.context.Len())
 	}
-	if len(ch2) != 0 {
-		t.Fatal("去重命中不得回执（原实现静默 return）")
+	if len(ch2) != 1 {
+		t.Fatal("去重命中必须回一个 skipped 终态，否则同步调用方永久挂起")
+	}
+	r := <-ch2
+	if skipped, _ := r.Payload["skipped"].(bool); !skipped {
+		t.Fatalf("去重回执必须带 skipped=true，实际 %+v", r.Payload)
+	}
+	if reason, _ := r.Payload["reason"].(string); reason != "duplicate" {
+		t.Fatalf("reason=%q，期望 duplicate", reason)
 	}
 	if outputs != outputs1 {
 		t.Fatalf("去重命中不得发输出事件：%d → %d", outputs1, outputs)
