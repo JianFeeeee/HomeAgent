@@ -154,6 +154,12 @@ type Agent struct {
 	// 也可以是外部 API 客户端；两者共享同一套 L0/L2/L3 向量缓存与检索基础设施。
 	multimodalSpace vector.MultimodalEmbedder
 
+	// embeddingProvider 是配置里指定的统一向量空间 provider 名；
+	// embeddingError 是打开/适配失败的原因（成功时为空）。
+	// 二者只用于状态报告：区分「没配」「配了但打不开」「已启用」。
+	embeddingProvider string
+	embeddingError    string
+
 	// fusionCfg 控制文本路与视觉路的跨模态融合权重，可按模型实测结果配置。
 	fusionCfg CrossModalFusionConfig
 
@@ -179,12 +185,16 @@ type AgentConfig struct {
 	Indexer         *memory.Indexer
 	Tracker         *tracker.Tracker
 
-	DocStore           *document.Store
-	Knowledge          *knowledge.Store
-	SocialStore        *social.SocialStore
-	TextMemory         *text.Memory
-	MediaStore         *media.Store
-	MultimodalSpace    vector.MultimodalEmbedder
+	DocStore        *document.Store
+	Knowledge       *knowledge.Store
+	SocialStore     *social.SocialStore
+	TextMemory      *text.Memory
+	MediaStore      *media.Store
+	MultimodalSpace vector.MultimodalEmbedder
+	// EmbeddingProvider / EmbeddingError 是向量空间的配置身份与打开失败原因，
+	// 供 healthcheck_kernel 状态报告区分「未配置 / 打开失败 / 已启用」。
+	EmbeddingProvider  string
+	EmbeddingError     string
 	FusionCfg          CrossModalFusionConfig // 跨模态融合权重；零值用默认
 	Personality        *agentPkg.Personality
 	PersonaStore       PersonaStore // 人格设定的读写面（首启门禁 + persona_set 工具）
@@ -256,46 +266,48 @@ func New(cfg AgentConfig) *Agent {
 	}
 
 	return &Agent{
-		id:              cfg.ID,
-		startTime:       time.Now(),
-		provider:        cfg.Provider,
-		providerManager: cfg.ProviderManager,
-		io:              cfg.IO,
-		memory:          cfg.Memory,
-		indexer:         cfg.Indexer,
-		tracker:         cfg.Tracker,
-		context:         rc,
-		systemPrompt:    cfg.SystemPrompt,
-		ctx:             ctx,
-		cancel:          cancel,
-		docStore:        cfg.DocStore,
-		knowledge:       cfg.Knowledge,
-		social:          cfg.SocialStore,
-		textMem:         cfg.TextMemory,
-		mediaStore:      cfg.MediaStore,
-		personality:     cfg.Personality,
-		personaStore:    cfg.PersonaStore,
-		pluginReg:       cfg.PluginReg,
-		pluginDir:       cfg.PluginDir,
-		distillInterval: cfg.DistillInterval,
-		archiveInterval: cfg.ArchiveInterval,
-		reviewInterval:  cfg.ReviewInterval,
-		mergeInterval:   cfg.MergeInterval,
-		maxContextSize:  cfg.MaxContextSize,
-		stageHost:       cfg.StageHost,
-		skillIndex:      cfg.SkillIndexProvider,
-		eventBus:        cfg.EventBus,
-		selfInputCh:     make(chan selfInputMsg, 64),
-		childTasks:      make(map[string]*childTaskState),
-		interceptCh:     make(chan *agentIO.InputEvent, 64),
-		pluginHealth:    newPluginHealthTracker(),
-		thinkingEnabled: cfg.ThinkingEnabled,
-		inputCfg:        cfg.InputProcessing,
-		embedder:        embedder,
-		multimodalSpace: cfg.MultimodalSpace,
-		fusionCfg:       cfg.FusionCfg,
-		noMergeMarkers:  make(map[string]int),
-		lastInput:       make(map[string]time.Time),
+		id:                cfg.ID,
+		startTime:         time.Now(),
+		provider:          cfg.Provider,
+		providerManager:   cfg.ProviderManager,
+		io:                cfg.IO,
+		memory:            cfg.Memory,
+		indexer:           cfg.Indexer,
+		tracker:           cfg.Tracker,
+		context:           rc,
+		systemPrompt:      cfg.SystemPrompt,
+		ctx:               ctx,
+		cancel:            cancel,
+		docStore:          cfg.DocStore,
+		knowledge:         cfg.Knowledge,
+		social:            cfg.SocialStore,
+		textMem:           cfg.TextMemory,
+		mediaStore:        cfg.MediaStore,
+		personality:       cfg.Personality,
+		personaStore:      cfg.PersonaStore,
+		pluginReg:         cfg.PluginReg,
+		pluginDir:         cfg.PluginDir,
+		distillInterval:   cfg.DistillInterval,
+		archiveInterval:   cfg.ArchiveInterval,
+		reviewInterval:    cfg.ReviewInterval,
+		mergeInterval:     cfg.MergeInterval,
+		maxContextSize:    cfg.MaxContextSize,
+		stageHost:         cfg.StageHost,
+		skillIndex:        cfg.SkillIndexProvider,
+		eventBus:          cfg.EventBus,
+		selfInputCh:       make(chan selfInputMsg, 64),
+		childTasks:        make(map[string]*childTaskState),
+		interceptCh:       make(chan *agentIO.InputEvent, 64),
+		pluginHealth:      newPluginHealthTracker(),
+		thinkingEnabled:   cfg.ThinkingEnabled,
+		inputCfg:          cfg.InputProcessing,
+		embedder:          embedder,
+		multimodalSpace:   cfg.MultimodalSpace,
+		embeddingProvider: cfg.EmbeddingProvider,
+		embeddingError:    cfg.EmbeddingError,
+		fusionCfg:         cfg.FusionCfg,
+		noMergeMarkers:    make(map[string]int),
+		lastInput:         make(map[string]time.Time),
 	}
 }
 
