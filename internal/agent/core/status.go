@@ -156,7 +156,6 @@ func collectKernelStatus(
 		}
 	}
 
-
 	// Tracker
 	if trk != nil {
 		status.Tracker.Available = true
@@ -192,7 +191,6 @@ func (a *Agent) GetKernelStatus() *KernelStatus {
 		socialStore = a.social
 	}
 
-
 	var trk *tracker.Tracker
 	if a.tracker != nil {
 		trk = a.tracker
@@ -222,6 +220,7 @@ func (a *Agent) GetKernelStatus() *KernelStatus {
 		trk,
 	)
 	ks.ONNX = a.onnxStatus()
+	ks.Scheduler = a.schedulerStatus()
 
 	return ks
 }
