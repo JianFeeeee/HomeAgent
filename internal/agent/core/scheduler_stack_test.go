@@ -74,7 +74,7 @@ func TestStack_NestedPreemptionResumesLIFO(t *testing.T) {
 	a := newPreemptAgent(t, sp)
 
 	// A（L1）开始运行
-	if _, _ = enqueueTask(t, a, LevelBackground, "qq", "任务A"); true {
+	if _, _ = enqueueQueued(t, a, "qq", "任务A"); true {
 	}
 	at, _, _ := a.sched.nextRef()
 	doneA := make(chan struct{})
@@ -94,7 +94,7 @@ func TestStack_NestedPreemptionResumesLIFO(t *testing.T) {
 
 	// B 开始运行
 	bt, _, k := a.sched.nextRef()
-	if k != nextPending || bt.Level != LevelMessage {
+	if k != nextImmediate || bt.Level != LevelMessage {
 		t.Fatalf("应取到 B（pending），kind=%v level=%v", k, bt.Level)
 	}
 	doneB := make(chan struct{})
@@ -113,8 +113,8 @@ func TestStack_NestedPreemptionResumesLIFO(t *testing.T) {
 	if len(snap.SuspendStack) != 2 {
 		t.Fatalf("嵌套后栈深=%d，期望 2", len(snap.SuspendStack))
 	}
-	if snap.SuspendStack[0].Task.Level != LevelBackground {
-		t.Fatalf("栈底应为 A(L1)，实际 %v", snap.SuspendStack[0].Task.Level)
+	if snap.SuspendStack[0].Task.Class != TaskQueued {
+		t.Fatalf("栈底应为排队任务 A（无级别），实际 %v", snap.SuspendStack[0].Task.Class)
 	}
 	if snap.SuspendStack[1].Task.Level != LevelMessage {
 		t.Fatalf("栈顶应为 B(L2)，实际 %v", snap.SuspendStack[1].Task.Level)
@@ -122,7 +122,7 @@ func TestStack_NestedPreemptionResumesLIFO(t *testing.T) {
 
 	// C 运行完毕（第三次调用，不阻塞）
 	ct, _, k := a.sched.nextRef()
-	if k != nextPending || ct.Level != LevelInteractive {
+	if k != nextImmediate || ct.Level != LevelInteractive {
 		t.Fatalf("应取到 C，kind=%v level=%v", k, ct.Level)
 	}
 	a.executeNewTask(ct)
@@ -141,8 +141,8 @@ func TestStack_NestedPreemptionResumesLIFO(t *testing.T) {
 	if k2 != nextSuspended {
 		t.Fatalf("应继续恢复 A，kind=%v", k2)
 	}
-	if rt2.Level != LevelBackground {
-		t.Fatalf("最后应恢复 A(L1)，实际 %v", rt2.Level)
+	if rt2.Class != TaskQueued {
+		t.Fatalf("最后应恢复排队的 A（无级别），实际 %v", rt2.Class)
 	}
 	a.resumeTask(rt2, rf2)
 
@@ -159,9 +159,9 @@ func TestStack_TopOnlyWinsOverHigherPrioritySuspended(t *testing.T) {
 	// （栈自底向上基础级递增），这里专门用来区分两种实现：
 	//   · 只比栈顶  → 取 B
 	//   · 全栈扫最优 → 取 A（L3 > L2）
-	a.sched.suspend(&Task{ID: 1, Level: LevelInteractive, EnqueuedAt: time.Now()},
+	a.sched.suspend(&Task{ID: 1, Class: TaskInterrupt, Level: LevelInteractive, EnqueuedAt: time.Now()},
 		a.newTaskFrame("A", a.stageCtxFromInput("A", "", "")))
-	a.sched.suspend(&Task{ID: 2, Level: LevelMessage, EnqueuedAt: time.Now()},
+	a.sched.suspend(&Task{ID: 2, Class: TaskInterrupt, Level: LevelMessage, EnqueuedAt: time.Now()},
 		a.newTaskFrame("B", a.stageCtxFromInput("B", "", "")))
 
 	rt, _, k := a.sched.nextRef()
@@ -180,13 +180,13 @@ func TestStack_TopOnlyWinsOverHigherPrioritySuspended(t *testing.T) {
 func TestStack_DepthCapDuringNesting(t *testing.T) {
 	a := newPreemptAgent(t, &scriptProvider{})
 	frame := func() *TaskFrame { return a.newTaskFrame("x", a.stageCtxFromInput("x", "", "")) }
-	for i := 0; i < a.sched.maxSuspendDepth; i++ {
-		a.sched.suspend(&Task{ID: uint64(i + 1), Level: Level(i + 1)}, frame())
+	for i := 0; i < a.sched.maxInterruptFrames; i++ {
+		a.sched.suspend(&Task{ID: uint64(i + 1), Class: TaskInterrupt, Level: Level(i + 1)}, frame())
 	}
 	if a.sched.canSuspend() {
 		t.Fatal("栈已满，canSuspend 应为 false")
 	}
-	if n := len(a.DumpScheduler().SuspendStack); n != a.sched.maxSuspendDepth {
-		t.Fatalf("栈深=%d，期望上限 %d", n, a.sched.maxSuspendDepth)
+	if n := len(a.DumpScheduler().SuspendStack); n != a.sched.maxInterruptFrames {
+		t.Fatalf("栈深=%d，期望上界 %d", n, a.sched.maxInterruptFrames)
 	}
 }

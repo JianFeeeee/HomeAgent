@@ -1,4 +1,21 @@
-# 输入调度器设计（四级优先级 · 可抢占 · 现场保存）
+# 输入调度器设计（四级中断优先级 · 两类别 · 可抢占 · 现场保存）
+
+> **模型更正（2026-09-13，据用户澄清重写 §2/§3/§4.1/§6.3/§9/§11/§12）**
+>
+> 本稿早期版本把「四级优先级」当成了**所有任务**的通用优先级，并按通道名
+> （qq→L2、cli→L3）由内核推断级别。那是错的。正确模型是**两类别 + 四级**：
+>
+> | | 中断输入（interrupt） | 排队输入（queued） |
+> |---|---|---|
+> | 注入 API | `InjectInterrupt*` | `InjectText*` / `InjectInputSync*` / 内核自循环 |
+> | 级别 | L1–L4 | **无级别** |
+> | 定位 | 需要及时处理 | 不需要及时处理 |
+> | 可被谁打断 | 仅**严格更高级**的中断 | **任何**中断 |
+>
+> 级别（“这项工作有多不能等”）由插件在 `InjectOptions.Priority` 里声明 L1–L3；
+> **L4 由内核独占**，只经 panic 与内核事件中断（selfip）产生。
+> 类别由**用哪个注入 API**决定，与通道名无关——QQ 走的是 `InjectInterruptTextOpts`，
+> 所以它是**低级别中断（L1）**，不是排队输入。
 
 > 分支：`feature/input-semantics`
 > 状态：**设计稿 v1**（待确认项见 §12，未确认处按 §12 的「默认取值」推进）
@@ -33,7 +50,11 @@
 ## 2. 术语与模型
 
 ```
-Task = { id, level, origin, frame, state, enqueueAt, preemptCount, responseCh }
+Task = { id, class, level, origin, frame, state, enqueueAt, preemptCount, responseCh }
+  class: queued | interrupt       // **类别由注入 API 决定，与通道名无关**
+    queued    —— 无级别；用于“不需及时处理”的场景；可被**任何**中断打断
+    interrupt —— 带级别 L1..L4；仅被**严格更高级**的中断打断（被打断则压入中断栈）
+  level: 仅 interrupt 有意义（queued 恒无级别，effectiveLevel 视作 0）
   state:  ready | running | suspended | done
 
 TaskFrame = {
@@ -69,80 +90,103 @@ Step（枚举，顺序执行，步与步之间是安全点）：
   S_FINISH      写 responseCh、发事件
 ```
 
-三集合：
+四个容器（**不是**“三集合并成一个比较器”）：
 
-| 集合 | 内容 | 语义 |
+| 容器 | 内容 | 取出规则 |
 |---|---|---|
-| `readyQueue` | 排队输入形成的新任务 | 按 `(level desc, enqueueAt asc)` 排序 |
-| `pendingInterrupts` | **因优先级不足或临界区而未能抢占**的中断请求 | 同上排序；被取出时以中断语义启动 |
-| `suspendStack`（**中断栈**） | 被打断、保存了现场的任务，用于“中断被中断”的嵌套 | **LIFO**：只有栈顶参与选择；被取出时从 `frame.step` 继续 |
+| `interruptQueues[1..4]` | **中断队列**，每条队列一个级别 | 从 L4 到 L1 依次扫描；同级 FIFO |
+| `immediate` | 刚抢占成功的那一条中断（**至多一个**） | 最先取出——抢占必须**立即生效** |
+| `queue` | **排队输入**形成的新任务 | 纯 FIFO（无级别可比） |
+| `suspendStack`（**中断栈**） | 被打断、保存了现场的任务 | **LIFO，只比栈顶**；栈内不做重排 |
 
 > 用词（已更正）：它**就是中断栈**。用户明确存在「中断被中断」的场景，被打断的现场必须压栈；
 > 因此恢复纪律是**严格 LIFO（只比栈顶）**，栈内不做优先级重排。
 > 早期稿把它写成“不是栈、按优先级取”是错的。
+>
+> 早期稿还让 `immediate` 与别的容器共用同一个比较器，于是出现“抢占成功后，
+> 抢占者与被挂起者同级 → 原任务被立刻选回 → 抢占空转”——为此打的
+> “同级 pending 优先”补丁已删除：抢占者根本不进队列。
 
 ---
 
-## 3. 优先级
+## 3. 优先级（只属于中断）
 
-### 3.1 四级（内核预定义）
+### 3.1 两类别 + 四级
+
+**类别（`TaskClass`）由注入 API 决定，与通道名无关**：
+
+| 类别 | 注入入口 | 级别 | 可被谁打断 |
+|---|---|---|---|
+| `queued` 排队 | `InjectText*` / `InjectInputSync*` / `InjectInputMedia*` / 内核自循环（`selfInputCh`） | **无** | **任何**中断（L1 也能） |
+| `interrupt` 中断 | `InjectInterrupt*` | L1–L4 | 仅**严格更高级**的中断 |
+
+**级别（`Level`）语义是“这项工作有多不能等”**：
 
 | Level | 名称 | 语义 | 典型来源 |
 |---|---|---|---|
-| `L4` | CRITICAL | 紧急打断 | CLI/WebUI 的显式打断、系统告警、安全类中断 |
-| `L3` | INTERACTIVE | 人机交互 | 用户在 CLI/WebUI 的直接对话 |
-| `L2` | MESSAGE | 异步消息 | QQ/微信等入站消息、插件通知 |
-| `L1` | BACKGROUND | 后台维护 | 心跳蒸馏/归档/合并/复审、`spawn_child` 子任务、consolidation、healthcheck |
+| `L4` | CRITICAL | 内核紧急 | **内核独占**：panic 中断、内核事件中断（selfip） |
+| `L3` | INTERACTIVE | 需及时处理 | 时钟/定时器到达、终端输出、交互输入 |
+| `L2` | MESSAGE | 一般提醒 | 插件希望尽快看到、但不紧急的提示 |
+| `L1` | BACKGROUND | 完全可等 | 异步消息（QQ/微信）、批量通知 |
 
-- **默认级 = `L1`**：未显式声明一律最低级（"显式才是特权"，避免新插件默认获得抢占权）。
-- **取值域仅这四档**，不引入任意整数，避免"9 级比 4 级大但没人知道怎么排"。
+- **`queued` 没有级别**：它本就是“不需及时处理”的那一类，
+  所以“可被任何中断打断”不是漏洞而是定义（`effectiveLevel(queued) == 0`）。
+- **默认级 = `L1`**：未声明一律最低级（“显式才是特权”，新插件不会默认拿到抢占权）。
 
-### 3.2 优先级从哪来（内核内部属性，**不做成配置项**）
+### 3.2 级别从哪来
 
-优先级是**内核内部属性**：内核预定义四级，并按**内核自己的规则**为任务与中断定级。
+| 来源 | 可达级别 | 入口 |
+|---|---|---|
+| 插件声明 | L1–L3 | `InjectOptions.Priority`（空/非法 → L1；声明 L4 被夹到 L3） |
+| 内核 | L4（唯一来源） | `(*Agent).raiseKernelInterrupt`（panic / selfip） |
 
 - ❌ **不是运维可调项**。不引入 `core.agent.priority.<channel>` 这类配置键，
-  也不把 `PriorityLookup` 做成可注入的策略表——那等于把内核的调度内部属性
-  外化成配置，与“谁能打断谁”的内部语义相反。
-- ❌ 也不暴露给插件声明（这个方向曾写入 v2 计划，已删除）。
-- ✅ v1 的内部缺省规则（仅为实现缺省值，语义上是内核自己的事）：
-  `cli`/`webui`/`http` → `L3`；`system` / `_consolidation_` → `L1`；其余 → `L1`（默认级）。
-- 定级规则可随内核演进调整，但**始终不对外暴露**。
-
-> 具体“哪类工作算哪一级”的完整规则由内核定义；本稿只固定四级语义与定级位置
-> （`(*Agent).taskLevel`），不承诺配置面。
+  也不把 `PriorityLookup` 做成可注入的策略表。
+- ✅ 插件**可以声明**自己中断的级别（这不是“把内核内部属性外化”，
+  而是调用方声明它自己那件事有多不能等），但**内核独占 L4**：
+  `clampPluginLevel` 把越权声明夹到 L3，`L4` 在插件可达路径上不存在。
+- 定级规则可随内核演进调整，但插件可声明域**始终不含 L4**。
 
 ### 3.3 抢占判据
 
-```
-incoming.level > running.level   → 请求抢占
-incoming.level == running.level  → 入 readyQueue（或 pendingInterrupts，见 §5），FIFO
-incoming.level <  running.level  → 入 pendingInterrupts
+```go
+effectiveLevel(queued) == 0
+canPreempt(incoming, running) = incoming.Class == TaskInterrupt
+                              && effectiveLevel(incoming) > effectiveLevel(running)
 ```
 
-**严格大于才抢占**；相等一律排队——这条保证确定性，也是"较低无法打断较高"的字面实现。
+因为 `queued` 的有效级恒为 0，这一个比较同时覆盖两条规则：
 
----
+```
+running 是排队任务      → 任何中断（≥L1）都抢占
+running 是中断 Li       → 只有 Lj > Li 的中断抢占（严格大于）
+incoming 是排队输入     → 永不抢占
+```
+
+**严格大于才抢占**；相等一律入队——这条保证确定性，也是“较低无法打断较高”的字面实现。
 
 ## 4. 调度规则
 
-### 4.1 选择函数（统一三集合）
+### 4.1 选择函数（四容器 · 固定次序）
 
 任务结束、或运行任务到达安全点且存在待处理抢占请求时，执行：
 
 ```
-candidates = readyQueue ∪ pendingInterrupts ∪ { suspendStack.top }   // 栈只出栈顶
-pick = argmin over candidates by (-effectiveLevel(t), kind, t.enqueueAt)
+1. immediate 非空           → 取它（刚抢占成功的中断，抢占必须立即生效）
+2. 中断队列非空             → 取 L4→L1 中最高级非空队列的队头（同级 FIFO）
+3. 中断栈非空（与 2 比高）  → 栈顶有效级 ≥ 队头级别 ? 弹栈顶 : 取队头
+4. queue 非空              → 取队头（纯 FIFO）
+5. 都没有                  → 空闲（阻塞等新输入 / 新中断）
 ```
 
-- **中断栈只把栈顶**放进候选（严格 LIFO）——栈内更老的任务即使因饥饿防护提升了
-  有效级，也不得越过栈顶；“后被打断的先恢复”才是栈语义。
-- 高有效级先；
-- **同级时 `pendingInterrupts` 优先于其它两类**。
-  为何必需：抢占生效后，被挂起的原任务会因饥饿防护提升有效级，于是与抢占者同级；
-  若同级按“先到先服务”，原任务（入队更早）会被立刻选回，抢占者永远排不到——
-  抢占变成空转。
-- 同级同类：先到先服务（`enqueueAt` 为首次入队时刻；挂起任务保留其原始入队时刻）。
+- **中断栈只把栈顶**放进比较（严格 LIFO）——栈内更老的任务即使因饥饿防护
+  提升了有效级，也不得越过栈顶；“后被打断的先恢复”才是栈语义。
+- 第 3 步就是用户给的规则：“先判断中断队列是否为空，同时判断中断栈中任务的
+  优先级，哪个优先级高取出哪个”。栈顶是 `queued`（有效级 0）时，任何中断都赢。
+- 第 1 步的存在，使“抢占者与被抢占者同级”这个比较**根本不会发生**：
+  抢占者不经队列。这是删除早期“同级 pending 优先”补丁后的正确形态。
+- 排队任务只在中断与挂起现场都处理完后才执行——这正对应“排队输入用于
+  不需要及时处理的场景”。
 
 ### 4.2 安全点（可切换点）
 
@@ -169,14 +213,14 @@ CriticalSection：step 标记 nonPreemptible = true，或任务进入声明区�
 | 媒体 CAS 落盘 | 同上 |
 | 显式声明的 `_consolidation_` 类任务 | 记忆一致性 |
 
-- 临界区期间到达的抢占请求**不丢失**：进入 `pendingInterrupts`，在临界区结束后的第一个安全点重新求值。
+- 临界区期间到达的抢占请求**不丢失**：按级别进入中断队列，在临界区结束后的第一个安全点重新求值。
 
 ### 4.4 背压（v1 统一为一种）
 
 - `readyQueue` 有界（默认 256，可配）。
 - 满时：**阻塞发送方**（与现状 `inputCh` 一致，避免静默丢用户输入），但必须**计数并打日志**。
-- `pendingInterrupts` 有界（默认 64）；满时**丢弃最老的 pending 中断并计数**（中断是提示性输入，宁可丢旧保新）。
-- 中断栈深度上限默认 4（见 §6.3）。
+- 中断队列合计有界（默认同 `maxQueue`）；满时**丢弃最低级别里最老的一条并计数**（中断是提示性输入，宁可丢旧保新）。
+- 中断栈帧数上界是**结构推论 = 4**（见 §6.3），不是配置项。
 
 ---
 
@@ -187,29 +231,29 @@ CriticalSection：step 标记 nonPreemptible = true，或任务进入声明区�
 `interruptLoop` 只做三件事，**绝不触碰任何 TaskFrame**：
 
 ```
-① 从 io.interruptCh 收中断 → 定级
-② 决策：
-     incoming.level > running.level 且 running 不在临界区
-        → 置 preemptionRequest = {incoming, requestedAt}，并调用 running 当前 step 的 cancel（若可取消）
-     incoming.level > running.level 但 running 在临界区
-        → 入 pendingInterrupts
-     incoming.level <= running.level
-        → 入 pendingInterrupts
-③ 唤醒调度器（向 schedulerInbox 投一个 wake 信号）
+① 从 io.interruptCh 收中断 → 定级（读 payload["priority"]，插件声明 L1..L3）
+② 决策（scheduler.registerInterrupt 内）：
+     canPreempt(incoming, running) 且 running 不在临界区
+        → 置让位信号 + 把 incoming 放进 immediate 槽，并返回 true（调用方据此
+          取消当前可取消的 step，即 LLM 流式）
+     否则
+        → 按级别进入对应的中断队列
+③ 唤醒调度器（scheduler.wake，cap 1）
 ```
 
-共享面仅两处：`preemptionRequest`（原子指针）与 `running.stepCancel`（原子读）。**帧的保存与恢复只能由调度器做。**
+共享面仅三处：让位信号（`preemptArmed`/`preemptLevel`）、中断队列、`critical` 原子标志。
+**帧的保存与恢复只能由调度器做。**
 
 ### 5.2 三种情形的统一
 
 现状的三条降级路径在新模型里不再需要特殊分支：
 
-| 情形 | 现状 | 新模型 |
-|---|---|---|
+| 情形 | 旧模型 | 新模型 |
+|---|---|---|---|
 | LLM 在跑，正常 | 真抢占（同轮 continue） | 真抢占：`S_LLM` 取消，任务 A **压入中断栈**，中断任务 B 从 `S_PREPARE` 启动 |
-| LLM 没在跑 | 降级为排队 | B 入 `pendingInterrupts`（或直接成为 ready 任务），调度器立即选出 |
-| `_consolidation_` 中 | 降级为排队 | `_consolidation_` 是后台临界区 → B 入 `pendingInterrupts`，临界区结束后求值 |
-| `a.interceptCh` 满 | 降级为排队 | 不存在该队列；`pendingInterrupts` 有界丢弃 |
+| LLM 没在跑 | 降级为排队 | B 按其级别入中断队列（空闲时即被 `wake` 唤醒并选出） |
+| `_consolidation_` 中 | 降级为排队 | `_consolidation_` 是后台**临界区**（且它是排队任务）→ B 入中断队列，临界区结束后求值 |
+| `a.interceptCh` 满 | 降级为排队 | 不存在该队列；中断队列有界，满则丢最低级别里最老的一条 |
 
 ### 5.3 中断任务与被打断任务的关系（**已定：D1 = 方案 B**）
 
@@ -273,12 +317,15 @@ running.state = done_for_now
 
 ### 6.3 嵌套
 
-- 允许中断任务自身被更高优先级抢占（嵌套）。
-- **中断栈深度上限 = 4**（与优先级档数一致，可配）；嵌套时逐层压栈，恢复逐层弹出。
+- 允许中断任务自身被更高级中断抢占（嵌套）。
+- **中断栈帧数上界 = 4，是结构推论而不是配置项**：
+  链条 = `排队(L0) ← I(L1) ← I(L2) ← I(L3) ← I(L4 运行中)`，
+  被挂起 4 帧；L4 之上没有更高级别，链到此为止。
+  （插件可达级别只到 L3，所以插件链最多挂起 3 帧 + 底层排队任务；
+  第 4 帧只能由内核 L4 制造。）
 - 栈自底向上的**基础级**天然递增（能被抢占者必然级别更高），因此栈顶通常就是最高级任务。
-- 超限策略：**不继续下潜**——新的抢占请求转为 `pendingInterrupts`。超限丢弃/拒绝必须计数。
-
----
+- 超限在正确模型下不可达：`susp` 处只做**防御性计数**（`Rejected++`），
+  **不降级、不丢弃帧**——帧丢了会丢副作用记录。早期稿写的“超限转 pendingInterrupts”已删除。
 
 ## 7. 回执路由（任务级）
 
@@ -333,9 +380,13 @@ v1 采纳：**`S_TOOL_EXEC` / ONNX / CAS 属于临界区，调度器在这些 st
 - 代价：这些临界区期间**中断只能排队，不能抢占**。换言之，**中断的有效窗口 = `S_LLM`**（与今天的实际行为相同，但现在是显式声明而非隐式结果）。
 - 演进（v2）：把 `S_TOOL_EXEC` 改成异步 step（临时 goroutine + 完成事件），并给插件协议加 `tool.cancel`。此路径在文档保留，不在 v1 实现。
 
-### 8.3 panic 隔离
+### 8.3 panic 隔离与 panic 中断
 
 - `runOneStep` 外包 `recover`：panic → 当前任务标记 `failed`，**调度器继续**。
+- panic 同时**产生一条内核 L4 中断**（`reportTaskPanic` → `raiseKernelInterrupt`）：
+  内核把自己发生了 panic 这件事作为最高级中断通知给调度器，让 agent 能知情/善后。
+- 递归保护是**结构性**的：若 panic 的任务本身就是 L4 内核中断，不再产生新的 L4——
+  否则同一个 panic 会自我放大成中断风暴。
 - 取代现有 `eventLoop`/`interceptLoop` 的 `recover → sleep 1s → go loop()` 无退避重启（`eventloop.go:19-22,38-42`）。
 
 ---
@@ -344,9 +395,9 @@ v1 采纳：**`S_TOOL_EXEC` / ONNX / CAS 属于临界区，调度器在这些 st
 
 | 失效 | 防御 |
 |---|---|
-| 饥饿（高优先级流反复抢占） | `preemptCount` 提升有效级：`effectiveLevel = min(4, baseLevel + min(preemptCount, 2))`；被抢占 +1 |
-| 无界下潜 | 中断栈深度上限 4，超限转 `pendingInterrupts` |
-| 中断请求堆积 | `pendingInterrupts` 有界 64，满则丢最老并计数 |
+| 饥饿（高优先级流反复抢占） | `preemptCount` 提升有效级：`effectiveLevel = min(4, baseLevel + min(preemptCount, 2))`；被抢占 +1。**只对中断生效**——排队任务无级别，按定义可被任何中断打断 |
+| 无界下潜 | 中断栈帧数上界 4（结构推论 = 中断级数）；超限只做防御性计数，**不降级不丢帧** |
+| 中断请求堆积 | 中断队列合计有界，满则丢最低级别里最老的一条并计数 |
 | 就绪队列满 | 阻塞发送方 + 计数（不静默丢） |
 | 同一任务反复被打断 | `preemptCount` 达阈值后有效级提升；另设**抢占冷却**：刚被抢占的任务在 `cooldown` 内不再被同级/更低级抢占 |
 | 任务永不结束 | 每任务 `maxTurns`（主循环目前缺失，见审查 P0）+ 每步超时 |
@@ -372,18 +423,22 @@ v1 采纳：**`S_TOOL_EXEC` / ONNX / CAS 属于临界区，调度器在这些 st
 - **假 Provider**：实现 `agentAPI.Provider`，返回脚本化的 `tool_calls` 序列（支持"第 N 次调用时挂起直到放行"）。
 - **假工具**：测试内 `StageHost.RegisterTool` 注册，可控制每次执行耗时、是否返回错误、是否触发中断注入。
 - **同步栅栏**：测试通过 `scheduler.Inbox` 注入中断并用 `runtime.Gosched` + 显式 `waitFor(state)` 断言，不用 sleep 猜时序。
-- **快照断言**：`scheduler.Dump()` 返回 `{running, readyQueue, pendingInterrupts, suspendStack, counters}`，测试对纯数据断言。
+- **快照断言**：`scheduler.Dump()` 返回 `{running, queue, interruptQueues[1..4], immediate, suspendStack, counters}`，测试对纯数据断言。
 
 ### 11.1 优先级与抢占
 
 | 编号 | 测试点 | 方式 | 预期结果 |
 |---|---|---|---|
-| P1 | 高优先级抢占低优先级 | running=L2 在 `S_LLM`；注入 L3 中断 | L2 压入中断栈（step=S_LLM）；L3 变 running；`preemptionCount==1` |
-| P2 | 相等优先级不抢占 | running=L2 在 `S_LLM`；注入 L2 | 不抢占；请求入 `pendingInterrupts`（或 readyQueue，按 D3）；running 不变 |
-| P3 | 低优先级不抢占 | running=L3；注入 L2 | 同上，不抢占 |
-| P4 | 四级逐级抢占嵌套 | 依次注入 L4→L3→L2，均在 `S_LLM` | 中断栈深度 3；running 为最新注入者；每层 step 均为 S_LLM |
-| P5 | 抢占后在安全点才生效 | running=L1 在 `S_TOOL_EXEC`；注入 L4 | 抢占**不立即生效**；工具返回后才保存/切换；`deferredPreemptions==1` |
-| P6 | 临界区不可抢占 | running=L1 声明临界区；注入 L4 | 同上；L4 请求留在 `pendingInterrupts`，临界区结束立即被选中 |
+| P1 | 更高中断抢占中断 | running=L2 在 `S_LLM`；注入 L3 中断 | L2 压入中断栈（step=S_LLM）；L3 进 `immediate` 并变 running |
+| P2 | 相等级别不抢占 | running=L2 中断在 `S_LLM`；注入 L2 | 不抢占；请求入 L2 中断队列；running 不变 |
+| P3 | 更低级别不抢占 | running=L3 中断；注入 L2 | 同上，不抢占 |
+| P4 | 逐级抢占嵌套 | 排队任务 → L1 → L2 → L3 → L4，均在 `S_LLM` | 中断栈深度依次 1/2/3/4；每层 step 均为 S_LLM |
+| P5 | 抢占后在安全点才生效 | running=排队任务在 `S_TOOL_EXEC`；注入 L4 | 抢占**不立即生效**；工具返回后才保存/切换；`deferredPreemptions==1` |
+| P6 | 临界区不可抢占 | running 声明临界区；注入 L4 | 同上；L4 请求留在中断队列，临界区结束立即被选中 |
+| **P7** | **排队任务被任何中断打断** | running=排队任务；注入 **L1** 中断 | L1 也抢占成功（排队任务有效级 0） |
+| **P8** | **排队输入永不抢占** | running=任意任务；注入排队输入 | 不抢占，入排队队列 |
+| **P9** | **插件不能声明 L4** | `InjectOptions.Priority="L4"` | 级别被夹到 L3；`payload["priority"]` 走同一条路 |
+| **P10** | **panic 产生 L4 中断** | 任务 panic | 产生一条带 `kernel=true` 的 L4 中断；L4 自身 panic 不再递归 |
 
 ### 11.2 保存现场与恢复
 
@@ -408,19 +463,21 @@ v1 采纳：**`S_TOOL_EXEC` / ONNX / CAS 属于临界区，调度器在这些 st
 
 | 编号 | 测试点 | 方式 | 预期结果 |
 |---|---|---|---|
-| Q1 | 选择函数排序 | 同时放入不同 level 与不同 `enqueueAt` 的三个集合成员 | 取值 = `(-effectiveLevel, kind, enqueueAt)` 最小者；同级 pending 优先，其次先到先服务 |
-| Q2 | 挂起任务优先恢复（同优先级） | A 挂起（早入队）+ B 就绪（晚入队），同级 | A 先被选中 |
-| Q3 | 三类集合联动 | 结束 running 时 `pendingInterrupts` 与中断栈顶同时非空 | 高有效级者先；同级时 `pendingInterrupts` 优先（与 §4.1 一致） |
-| Q4 | 就绪队列背压 | readyQueue 满（256）后注入 | 发送方阻塞（或按 D4 返回错误）；计数 +1；不静默丢弃 |
-| Q5 | pending 队列溢出 | pendingInterrupts 满（64）后注入更多 | 丢最老的 + 计数；其余保持 |
+| Q1 | 中断队列按级别扫 | 四条中断队列各放一个，入队顺序与级别相反 | 取出顺序 L4→L3→L2→L1；中断耗尽后才是排队任务（FIFO） |
+| Q2 | 挂起现场优先于新排队工作 | A 被抢占挂起 + B 为新排队输入 | A（栈顶）先被选中 |
+| Q3 | 栈顶 vs 中断队头 | 栈顶 L3 + 队头 L2 / 栈顶 L3 + 队头 L4 / 栈顶为排队任务 + 队头 L1 | 分别取 栈顶 / 队头 / 队头 |
+| Q4 | 就绪队列背压 | readyQueue 满后注入排队输入 | 发送方阻塞 + 计数 +1；不静默丢弃 |
+| Q5 | 中断队列溢出 | 中断队列合计满后注入更多 | 丢**最低级别里最老**的一条 + 计数；其余保持 |
+| **Q6** | **immediate 最优先** | `immediate` 非空且中断队列里有更高级别 | 取 `immediate`（抢占必须立即生效） |
 
 ### 11.5 深度、饥饿与并发
 
 | 编号 | 测试点 | 方式 | 预期结果 |
 |---|---|---|---|
-| D1T | 下潜深度上限 | 连续注入 6 个逐级更高的中断 | 中断栈深度 ≤ 4；超出部分在 `pendingInterrupts`；`depthRejections` 计数正确 |
-| G1 | 饥饿防护（抢占提升） | 对同一 L1 任务连续抢占 5 次（同级/高级交替） | `effectiveLevel` 提升至 `min(4, 1+2)=3`；第 3 次后不再被 L1/L2 抢占 |
-| G2 | 冷却生效 | 同一任务刚被抢占后立刻再注入同级中断 | 冷却期内不抢占，请求入 pending |
+| D1T | 下潜深度上界（结构推论） | 挂起 3 帧后继续注入；再挂起到 4 帧 | 3 帧时 `canSuspend()==true`；4 帧（全链：排队+L1+L2+L3，L4 运行中）时为 `false` |
+| G1 | 饥饿防护（抢占提升） | 对同一 **L1 中断**连续抢占 5 次（同级/高级交替） | `effectiveLevel` 提升至 `min(4, 1+2)=3`；第 3 次后不再被 L1/L2 抢占 |
+| G2 | 冷却生效 | 同一中断刚被抢占后立刻再注入同级中断 | 冷却期内不抢占，请求入中断队列 |
+| **G3** | **提升也必须只在中断间生效** | 排队任务被连续抢占 | 排队任务有效级恒 0（不被提升；它按定义可被任何中断打断） |
 | K1 | panic 隔离 | 假工具 panic | 只有该任务变 `failed`；调度器存活；后续任务正常执行 |
 | K2 | 竞态检查 | 全部调度用例加 `-race` | 无数据竞争报告 |
 | O1 | 快照一致性 | 在任意 step 边界调 `Dump()` | 返回的 `running/ready/pending/suspend` 三集合互不重叠且总数守恒 |
@@ -444,7 +501,12 @@ v1 采纳：**`S_TOOL_EXEC` / ONNX / CAS 属于临界区，调度器在这些 st
 |---|---|---|
 | **D1** | 中断任务的上下文 | **方案 B（已定）**：中断从上一个任务之前的完整状态开始；恢复时把被挂起任务的现场加载回中断之上 |
 | **D2** | 阻塞 step 处置：v1 全部声明为临界区（调度器可被阻塞）还是引入异步 step | **v1 = 临界区**；异步 step 留到 v2 |
-| **D3** | `pendingInterrupts` 与 `readyQueue` 是否合一 | **保持分离**（中断请求带 interrupt 语义，取出时以中断语义启动）；但**共用同一个排序键** |
+| **D3** | 中断队列与排队队列是否合一 | **完全分离**：中断按级别分四条队列（L4→L1 扫描），排队队列纯 FIFO，两者不共用比较器 |
+| **D7** | 任务类别怎么定 | **由注入 API 决定**（`InjectInterrupt*` = 中断；`InjectText*`/`InjectInputSync*`/自循环 = 排队），**不按通道名推断** |
+| **D8** | L4 归谁 | **内核独占**。唯一入口 `(*Agent).raiseKernelInterrupt`（panic / selfip）；`clampPluginLevel` 把插件声明夹到 L3 |
+| **D9** | L1–L3 归谁 | **插件在 `InjectOptions.Priority` 里声明**（纯追加字段）；空/非法降级到 L1 |
+| **D10** | 抢占者进入队列还是立即运行 | **立即运行**（`immediate` 槽）。这消除“抢占者与被挂起者同级”的比较，删除了早期的“同级 pending 优先”补丁 |
+| **D11** | 中断栈帧数上界 | **结构推论 = 4**（排队 L0 + I1 + I2 + I3 挂起，I4 运行中），不是配置项；超限只计防御性计数 |
 | **D4** | readyQueue 满时：阻塞发送方 or 返回错误 | **阻塞发送方 + 计数**（与现状一致，避免丢用户输入） |
 | **D5** | 饥饿防护：抢占计数提升 or 时间老化 | **抢占计数提升**（确定性、易测）；时间老化留待需要时 |
 | **D6** | 主循环 `max_tool_turns` 是否在本特性一并落地 | **是**（审查 P0，且调度器需要"任务可终止"这一前提） |
@@ -454,16 +516,17 @@ v1 采纳：**`S_TOOL_EXEC` / ONNX / CAS 属于临界区，调度器在这些 st
 ## 13. 与发布纪律的关系
 
 - 本特性在 `feature/input-semantics` 上开发，完成后合回 `main`，**不碰 `release/v1.2.x`**。
-- **公开 SDK 冻结**：v1 不改 `third_party/homeagent-sdk/sdk/`。验收命令：
-  ```bash
-  git diff main -- third_party/homeagent-sdk/sdk/ | wc -l    # 必须为 0
-  ```
-- 若 v2 需要 `ChannelDef.Priority`（纯追加），需：
+- **公开 SDK 在本特性上有意新增**（feature 分支不受 rel 分支的接口冻结约束）：
+  `sdk.InjectOptions.Priority` 与 `sdk.PriorityL1/L2/L3`。这是为了让插件能声明
+  自己中断的级别（§3.2）。
+- **追加是唯一的形态**：不改既有字段、不改签名、不改语义；`Priority` 的零值
+  等价于旧行为（L1）。
+- 合回 `main` 前需完成的发布动作：
   1. 同步更新 `docs/zh/plugin-interface-matrix.md`；
   2. 与 SDK 仓协同升 SDK 中版本；
-  3. 遵守"只增不减、签名不改"边界。
-
----
+  3. 遵守“只增不减、签名不改”边界。
+- 内核侧接口（`internal/agent/io`、proc 桥的 `injectParams`/`injectMediaParams`）
+  同步追加 `priority`，与公开 SDK 字段一一对应。
 
 ## 14. 实现里程碑（逐个实现，每个 = 一个可独立验收的提交）
 
@@ -474,7 +537,7 @@ v1 采纳：**`S_TOOL_EXEC` / ONNX / CAS 属于临界区，调度器在这些 st
 | **M2** | 调度器骨架：单 `schedulerLoop` + `readyQueue`，取代 `eventLoop` 的输入处理；无优先级（全部 L1，纯 FIFO） | Q1/Q4 通过；integration 测试通过 |
 | **M3a** | **前置重构（本次拆分引入）**：把一轮对话的所有权从 `processInput` 移到调度器——帧覆盖 `prepare → step… → finish`；同时移除 `process()` 整轮持有的 `a.mu`（挂起不能持锁） | 既有全部 agent 测试 + 既有 e2e 通过（行为等价）；`-race` 干净 |
 | **M3b** | `interruptLoop` 重写 + 四级优先级 + 严格大于抢占 + 中断栈 LIFO；只支持 `S_LLM` 抢占 | P1–P4、R1、R5、K1–K2 通过；嵌套 LIFO 判据通过 |
-| **M4** | 临界区 + `S_TOOL_EXEC` 声明 + `pendingInterrupts` + 深度上限 | P5–P6、D1T、Q3、Q5 通过 |
+| **M4** | 临界区 + `S_TOOL_EXEC` 声明 + 中断队列 + 深度上界（**后经模型更正重做，见下**） | P5–P6、D1T、Q3、Q5 通过 |
 | **M5** | 饥饿防护（抢占计数提升 + 冷却） | G1–G2 通过 |
 | **M6** | 任务级 `responseCh` + 断链点统一为终态事件 | X1–X4 通过；`cli`/`clawhub` 不再挂起 |
 | **M7** | 可观测性（`Dump()`/事件/状态页）+ 既有回归 | O1–O2、E1–E3 通过；`go test -race ./internal/agent/... ./internal/plugin/...` 全绿 |
@@ -500,13 +563,26 @@ go test -race -count=1 ./internal/agent/... ./internal/plugin/... ./internal/sdk
 | M6 | `4e4e0ad` | ✅ 新增 `task_terminal_test.go` 3 项 |
 | M7 | `f11de37` | ✅ 新增 `scheduler_e2e_test.go` 3 项（压力/可观测/端到端） |
 
+#### 模型更正后的重构（2026-09-13，同一特性分支）
+
+用户逐条澄清后重做调度核心（**行为有意的语义变化**，非等价重构）：
+
+| 项 | 内容 | 验收 |
+|---|---|---|
+| 类别化 | `TaskClass{queued,interrupt}`；类别由注入 API 决定；`newInputTask`/`newSelfTask` 为 queued，`newInterruptTask` 为 interrupt | `scheduler_kernel_test.go` P7/P8 |
+| 级别归位 | `Level` 语义改为“中断级别”；`taskLevel()`（按通道名推断）删除，改为 `interruptLevel(evt)` 读 `payload["priority"]` | P9、Q1 |
+| L4 内核独占 | `raiseKernelInterrupt`（panic/selfip）；`requestKernelPreempt` 不夹取；panic 报告为 L4 且带递归保护 | P10、`TestKernel_PanicRaisesL4Interrupt` |
+| 选择结构 | `immediate` + 四条中断队列 + 排队 FIFO + 中断栈；删除统一比较器 `pickTaskIndex`/`taskBefore` 与“同级 pending 优先”补丁 | Q1–Q3、Q6 |
+| 栈上界 | `maxSuspendDepth`（配置语义）→ `maxInterruptFrames = int(LevelCritical)`（结构推论）；删除“超限转 pending”降级 | D1T |
+| 公开 SDK | `InjectOptions.Priority` + `PriorityL1/L2/L3`；io/proc 桥/插件模板同步透传；`example/qq` 声明 L1 | `go test ./...` 全绿 |
+
 实现期与设计的差异（均已回写本文档）：
 
 1. **M3 拆为 M3a/M3b**：真正挂起要求帧跨 `prepare→run→finish`，否则 `processInput`
    会在挂起返回后继续提交。
 2. **`a.mu` 整体移除**：它原本只包住整轮 `process()`（同一 goroutine），
    移除后所有任务状态由 schedulerLoop 独占（不变量 I2/I3 可落地）。
-3. **`interceptCh` 被删除**：M3b 起中断一律走 `pendingInterrupts`，旧的
+3. **`interceptCh` 被删除**：M3b 起中断一律走中断队列（当时叫 `pendingInterrupts`），旧的
    “同行注入 + 三处 drain + 批次放弃” 已无写入者，属死代码（M4 清理）。
 4. **v1 未做 M0 的伪时钟**：所有抢占测试用“单次调用阻塞到 ctx 取消”的
    provider 达到确定性，无需注入时钟。时序型判据（老化式提升）留待需要时。
@@ -522,5 +598,10 @@ go test -race -count=1 ./internal/agent/... ./internal/plugin/... ./internal/sdk
 3. 多 agent 并行调度。
 4. 与 `plan.md` §13.7 的 `RuntimeManager + 分组 worker` 合并（本设计是其前置）。
 
-> 已删除：“`ChannelDef.Priority` / `InjectOptions.Priority` 进入公开 SDK”——
-> 优先级是内核内部属性（§3.2），不应由插件声明。
+> **已更正**：早期稿写“`InjectOptions.Priority` 进入公开 SDK 已被删除”，
+> 前提是“优先级是内核内部属性、不应由插件声明”。用户澄清后该前提被推翻：
+> **L1–L3 就是给插件声明使用的**，只有 L4 归内核独占（panic / selfip）。
+> 因此 `InjectOptions.Priority` 已落地（§3.2/§13）。
+>
+> 仍**不做**的是“运维可调的策略表”（`core.agent.priority.<channel>`）——
+> 那是把调度内部属性外化成配置，与“由调用方声明自己那件事有多不能等”不同。

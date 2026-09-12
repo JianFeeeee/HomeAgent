@@ -181,7 +181,7 @@ func (h *coreHandler) Handle(method string, params json.RawMessage) (interface{}
 		if err := validateContextPolicy("io.injectText", p.ContextPolicy); err != nil {
 			return nil, err
 		}
-		h.sdk.InjectTextOpts(p.Source, p.Channel, h.resolveText(p), pubSdkInjectOpts(p.NoMemory, p.ContextPolicy, p.CleanerName))
+		h.sdk.InjectTextOpts(p.Source, p.Channel, h.resolveText(p), pubSdkInjectOpts(p.NoMemory, p.ContextPolicy, p.CleanerName, p.Priority))
 		return nil, nil
 	case MethodIOInjectInterrupt:
 		var p injectParams
@@ -191,7 +191,7 @@ func (h *coreHandler) Handle(method string, params json.RawMessage) (interface{}
 		if err := validateContextPolicy("io.injectInterrupt", p.ContextPolicy); err != nil {
 			return nil, err
 		}
-		h.sdk.InjectInterruptTextOpts(p.Source, p.Channel, h.resolveText(p), pubSdkInjectOpts(p.NoMemory, p.ContextPolicy, p.CleanerName))
+		h.sdk.InjectInterruptTextOpts(p.Source, p.Channel, h.resolveText(p), pubSdkInjectOpts(p.NoMemory, p.ContextPolicy, p.CleanerName, p.Priority))
 		return nil, nil
 	case MethodIOInjectTextNoMem:
 		var p injectParams
@@ -202,7 +202,7 @@ func (h *coreHandler) Handle(method string, params json.RawMessage) (interface{}
 			return nil, err
 		}
 		// 旧 RPC 语义就是「不进记忆」，显式标志位只可能再叠上 context_policy。
-		h.sdk.InjectTextOpts(p.Source, p.Channel, h.resolveText(p), pubSdkInjectOpts(true, p.ContextPolicy, p.CleanerName))
+		h.sdk.InjectTextOpts(p.Source, p.Channel, h.resolveText(p), pubSdkInjectOpts(true, p.ContextPolicy, p.CleanerName, p.Priority))
 		return nil, nil
 	case MethodIOInjectSync:
 		var p injectParams
@@ -212,7 +212,7 @@ func (h *coreHandler) Handle(method string, params json.RawMessage) (interface{}
 		if err := validateContextPolicy("io.injectInputSync", p.ContextPolicy); err != nil {
 			return nil, err
 		}
-		reply := h.sdk.InjectInputSyncOpts(p.Source, p.Channel, h.resolveText(p), pubSdkInjectOpts(p.NoMemory, p.ContextPolicy, p.CleanerName))
+		reply := h.sdk.InjectInputSyncOpts(p.Source, p.Channel, h.resolveText(p), pubSdkInjectOpts(p.NoMemory, p.ContextPolicy, p.CleanerName, p.Priority))
 		return map[string]interface{}{"reply": reply}, nil
 
 	case MethodIOInjectMedia:
@@ -227,7 +227,7 @@ func (h *coreHandler) Handle(method string, params json.RawMessage) (interface{}
 		if err != nil {
 			return nil, err
 		}
-		h.sdk.InjectInputMediaOpts(p.Source, p.Channel, p.Text, blocks, pubSdkInjectOpts(p.NoMemory, p.ContextPolicy, p.CleanerName))
+		h.sdk.InjectInputMediaOpts(p.Source, p.Channel, p.Text, blocks, pubSdkInjectOpts(p.NoMemory, p.ContextPolicy, p.CleanerName, p.Priority))
 		return nil, nil
 
 	case MethodIOInjectMediaSync:
@@ -242,7 +242,7 @@ func (h *coreHandler) Handle(method string, params json.RawMessage) (interface{}
 		if err != nil {
 			return nil, err
 		}
-		reply := h.sdk.InjectInputMediaSyncOpts(p.Source, p.Channel, p.Text, blocks, pubSdkInjectOpts(p.NoMemory, p.ContextPolicy, p.CleanerName))
+		reply := h.sdk.InjectInputMediaSyncOpts(p.Source, p.Channel, p.Text, blocks, pubSdkInjectOpts(p.NoMemory, p.ContextPolicy, p.CleanerName, p.Priority))
 		return map[string]interface{}{"reply": reply}, nil
 
 	case MethodIOInjectInterruptMedia:
@@ -257,7 +257,7 @@ func (h *coreHandler) Handle(method string, params json.RawMessage) (interface{}
 		if err != nil {
 			return nil, err
 		}
-		h.sdk.InjectInterruptMediaOpts(p.Source, p.Channel, p.Text, blocks, pubSdkInjectOpts(p.NoMemory, p.ContextPolicy, p.CleanerName))
+		h.sdk.InjectInterruptMediaOpts(p.Source, p.Channel, p.Text, blocks, pubSdkInjectOpts(p.NoMemory, p.ContextPolicy, p.CleanerName, p.Priority))
 		return nil, nil
 
 	// ---- 生命周期（原 case 8）----
@@ -695,6 +695,8 @@ type injectParams struct {
 	NoMemory      bool      `json:"no_memory,omitempty"`
 	ContextPolicy string    `json:"context_policy,omitempty"`
 	CleanerName   string    `json:"cleaner_name,omitempty"`
+	// Priority 声明中断注入的优先级（L1..L3）；L4 内核独占，见 InjectOptions。
+	Priority string `json:"priority,omitempty"`
 }
 
 // injectMediaParams 是带媒体注入/工具块注入的参数。
@@ -715,14 +717,17 @@ type injectMediaParams struct {
 	NoMemory      bool                  `json:"no_memory,omitempty"`
 	ContextPolicy string                `json:"context_policy,omitempty"`
 	CleanerName   string                `json:"cleaner_name,omitempty"`
+	Priority      string                `json:"priority,omitempty"`
 }
 
 // pubSdkInjectOpts 把 RPC 报文里的三个字段转成公开 SDK 的 InjectOptions。
 //
 // 单独提一个转换函数是为了让「默认值」只有一个出处：零值即记入记忆 + 不裁剪，
 // 与旧三参数注入等价。
-func pubSdkInjectOpts(noMemory bool, policy, cleanerName string) pubsdk.InjectOptions {
-	return pubsdk.InjectOptions{NoMemory: noMemory, ContextPolicy: policy, CleanerName: cleanerName}
+func pubSdkInjectOpts(noMemory bool, policy, cleanerName, priority string) pubsdk.InjectOptions {
+	return pubsdk.InjectOptions{
+		NoMemory: noMemory, ContextPolicy: policy, CleanerName: cleanerName, Priority: priority,
+	}
 }
 
 // validateContextPolicy 校验上下文策略取值，与 tool.register 同一套规则。
