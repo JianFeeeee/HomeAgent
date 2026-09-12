@@ -6,6 +6,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
+	"html"
 	"io"
 	"log"
 	"net"
@@ -484,7 +485,9 @@ type searchResult struct {
 }
 
 func (p *Plugin) bingSearch(query string, count int) ([]searchResult, error) {
-	u := fmt.Sprintf("https://www.bing.com/search?q=%s&count=%d", url.QueryEscape(query), count)
+	// 用 cn.bing.com：www.bing.com 对程序化请求常回 302（同意/重定向页），拿不到结果块。
+	// 另：Bing 忽略 count 参数，翻页靠 first=，这里保留 count 只为兼容旧调用语义。
+	u := fmt.Sprintf("https://cn.bing.com/search?q=%s&first=1&count=%d&setlang=zh-CN", url.QueryEscape(query), count)
 	req, _ := http.NewRequest("GET", u, nil)
 	req.Header.Set("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36")
 	req.Header.Set("Accept-Language", "zh-CN,zh;q=0.9,en;q=0.8")
@@ -494,36 +497,110 @@ func (p *Plugin) bingSearch(query string, count int) ([]searchResult, error) {
 	}
 	defer resp.Body.Close()
 	body, _ := io.ReadAll(resp.Body)
-	return parseBingResults(string(body), count), nil
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("Bing 返回 HTTP %d（%d 字节）", resp.StatusCode, len(body))
+	}
+	results := parseBingResults(string(body), count)
+	if len(results) == 0 {
+		// 关键：把「解析不出来」与「真的没结果」区分开。
+		// 以前两者都变成 "No results found."，版式一变就静默退化成「搜不到」。
+		return nil, fmt.Errorf("Bing 返回 %d 字节但未解析出结果（可能被反爬或版式变更，可改用 deepsearch 插件）", len(body))
+	}
+	return results, nil
 }
 
-func parseBingResults(html string, count int) []searchResult {
+var (
+	bingBlockRe   = regexp.MustCompile(`<li class="b_algo"`)
+	bingTitleRe   = regexp.MustCompile(`(?s)<h2[^>]*>\s*<a[^>]+href="([^"]+)"[^>]*>(.*?)</a>`)
+	bingAnyLinkRe = regexp.MustCompile(`(?s)<a[^>]+href="([^"]+)"[^>]*>(.*?)</a>`)
+	bingSnipRe    = regexp.MustCompile(`(?s)<p class="b_lineclamp[^"]*"[^>]*>(.*?)</p>`)
+	bingCaptionRe = regexp.MustCompile(`(?s)<div class="b_caption"[^>]*>(.*?)</div>`)
+)
+
+// splitBingBlocks 按块标记切分，每块内容延伸到下一个块标记为止。
+//
+// 不用 `<li class="b_algo"(?s)(.*?)</li>`：结果块内部可能嵌套 <li>（deep links），
+// 非贪婪匹配会在错误位置截断；而且块内第一个 <a> 往往是 Bing 的「来源行」，
+// 取到的是 `deepin.orghttps://www.deepin.org` 这种垃圾标题。
+func splitBingBlocks(pageHTML string) []string {
+	locs := bingBlockRe.FindAllStringIndex(pageHTML, -1)
+	if len(locs) == 0 {
+		return nil
+	}
+	blocks := make([]string, 0, len(locs))
+	for i, loc := range locs {
+		end := len(pageHTML)
+		if i+1 < len(locs) {
+			end = locs[i+1][0]
+		}
+		blocks = append(blocks, pageHTML[loc[1]:end])
+	}
+	return blocks
+}
+
+func parseBingResults(pageHTML string, count int) []searchResult {
+	if count <= 0 {
+		count = 5
+	}
 	var results []searchResult
-	re := regexp.MustCompile(`<li class="b_algo"(?s)(.*?)</li>`)
-	matches := re.FindAllStringSubmatch(html, -1)
-	for _, m := range matches {
+	for _, block := range splitBingBlocks(pageHTML) {
 		if len(results) >= count {
 			break
 		}
-		block := m[1]
-		var r searchResult
-		hrefRe := regexp.MustCompile(`<a[^>]+href="([^"]+)"[^>]*>`)
-		if hm := hrefRe.FindStringSubmatch(block); len(hm) > 1 {
-			r.URL = hm[1]
+		// 标题：现代 Bing 是 <h2><a href=...>标题</a></h2>；没有 h2 时才退回到块内第一个链接。
+		var href, title string
+		if m := bingTitleRe.FindStringSubmatch(block); m != nil {
+			href, title = m[1], html.UnescapeString(stripTags(m[2]))
+		} else if m := bingAnyLinkRe.FindStringSubmatch(block); m != nil {
+			href, title = m[1], html.UnescapeString(stripTags(m[2]))
 		}
-		titleRe := regexp.MustCompile(`<a[^>]+href="[^"]+"[^>]*>(.*?)</a>`)
-		if tm := titleRe.FindStringSubmatch(block); len(tm) > 1 {
-			r.Title = stripTags(tm[1])
+		href = bingRealURL(html.UnescapeString(href))
+
+		// 摘要：新版在 p.b_lineclamp*，旧版在 div.b_caption > p
+		var snippet string
+		if m := bingSnipRe.FindStringSubmatch(block); m != nil {
+			snippet = html.UnescapeString(stripTags(m[1]))
+		} else if m := bingCaptionRe.FindStringSubmatch(block); m != nil {
+			snippet = html.UnescapeString(stripTags(m[1]))
 		}
-		snipRe := regexp.MustCompile(`<div class="b_caption">.*?<p>(.*?)</p>`)
-		if sm := snipRe.FindStringSubmatch(block); len(sm) > 1 {
-			r.Snippet = stripTags(sm[1])
+
+		title, snippet = strings.TrimSpace(title), strings.TrimSpace(snippet)
+		if href == "" || title == "" || !strings.HasPrefix(href, "http") {
+			continue
 		}
-		if r.URL != "" && r.Title != "" {
-			results = append(results, r)
-		}
+		results = append(results, searchResult{Title: title, URL: href, Snippet: snippet})
 	}
 	return results
+}
+
+// bingRealURL 解开 Bing 的跳转包装：/ck/a?...&u=a1<base64url>&... → 真实 URL。
+// 不解的话模型拿到的是 `https://cn.bing.com/ck/a?...` 这种不可读地址。
+func bingRealURL(href string) string {
+	href = strings.TrimSpace(href)
+	if href == "" {
+		return ""
+	}
+	if !strings.Contains(href, "/ck/a") && !strings.Contains(href, "u=a1") {
+		return href
+	}
+	u, err := url.Parse(href)
+	if err != nil {
+		return href
+	}
+	raw := u.Query().Get("u")
+	if !strings.HasPrefix(raw, "a1") {
+		return href
+	}
+	b64 := raw[2:]
+	for _, enc := range []*base64.Encoding{base64.RawURLEncoding, base64.URLEncoding, base64.RawStdEncoding} {
+		if dec, err := enc.DecodeString(b64); err == nil {
+			s := string(dec)
+			if strings.HasPrefix(s, "http://") || strings.HasPrefix(s, "https://") {
+				return s
+			}
+		}
+	}
+	return href
 }
 
 func (p *Plugin) handleSearch(args map[string]interface{}) (interface{}, error) {
