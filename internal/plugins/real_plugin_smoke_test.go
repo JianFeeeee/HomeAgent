@@ -23,7 +23,7 @@ import (
 // 这里用 **example/ 里真实的 17 个插件产物**，验证「业务代码零改动 + 重编即可」
 // 这一迁移承诺在完整内核装配下成立。
 //
-// 前置：插件需已用新版 plugindev 重编（scripts/rebuild-plugins.sh）。
+// 前置：插件需已用新版 hmapdev 重编（scripts/rebuild-plugins.sh）。
 // 未重编时测试 skip 而非 fail——CI 上不强制要求先跑重编脚本。
 
 // realPluginDir 返回某个 example 插件的 linux 产物路径。

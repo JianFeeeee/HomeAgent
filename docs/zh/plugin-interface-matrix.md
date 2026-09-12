@@ -2,7 +2,7 @@
 
 > 状态：**完成 v3**（2026-09-06）——v2 的迁移已上生产（内核 v1.0.0）；v3 记录 v1.1.1 的公开接口**扩展**。
 > 目的：钉死「暴露给外部插件的接口不变」这一约束的**合同面**——迁移前、迁移后外部插件看到/调用的 SDK 接口完全一致；
-> 所有改造落在**核心（homed 侧）+ 工具链（plugindev）**，外部插件业务代码零改动，只需用新 plugindev 重编。
+> 所有改造落在**核心（homed 侧）+ 工具链（hmapdev，当时名为 plugindev）**，外部插件业务代码零改动，只需用新工具链重编。
 >
 > **结果（已验证）**：`git diff third_party/homeagent-sdk/sdk/` 全程为空；17 个 `example/*/plugin.go` 逐字节未改
 > （`git status example/` 无输出）；生产 17 插件全部经子进程通道运行。
@@ -11,7 +11,7 @@
 > 它要保的是「换运行模型不动业务代码」。迁移完成后，SDK 需要能随功能演进而扩展，
 > 否则多模态这类能力永远到不了插件手上。解除的边界见 §九：**只增不减，签名不改**。
 >
-> 维护规则：每次改动公开 SDK 接口面 `third_party/homeagent-sdk/sdk/` 或模板 `tools/plugindev/templates/` 后，
+> 维护规则：每次改动公开 SDK 接口面 `third_party/homeagent-sdk/sdk/` 或模板 `tools/hmapdev/templates/` 后，
 > 必须同步更新本矩阵。
 >
 > 权威编号：plan.md 第 11 节（11.1~11.9）。本文档只做接口面盘点，不做实现。
@@ -21,9 +21,9 @@
 ## 一、迁移的形状（一句话）
 
 ```
-今天：  外部插件 = example/*/plugin.go（纯 Go） ──plugindev c-shared──> plugin.so
+今天：  外部插件 = example/*/plugin.go（纯 Go） ──hmapdev c-shared──> plugin.so
         homed ──dlopen──> plugin.so（C ABI bridge：51 个整数 method id）
-之后：  外部插件 = example/*/plugin.go（纯 Go，一行不改） ──plugindev go build──> plugin.bin
+之后：  外部插件 = example/*/plugin.go（纯 Go，一行不改） ──hmapdev go build──> plugin.bin
         homed ──spawn──> plugin.bin（stdio JSON-RPC + shm + eventfd）
 ```
 
@@ -33,8 +33,8 @@
 |---|---|---|
 | 公开 SDK `third_party/homeagent-sdk/sdk/*.go` | ❌ 纯 Go | **不动**（接口面 = 合同） |
 | 外部插件业务代码 `example/*/plugin.go` | ❌ 纯 Go（只 import 公开 SDK） | **不动**（只重编） |
-| bridge 模板 `tools/plugindev/templates.go` 的 `tmplLinuxBridge`/`tmplBridge` | ✅ cgo | **删除/替换**为 `tmplProcMain` |
-| `plugindev` 构建命令 | c-shared | 改普通 `go build` |
+| bridge 模板 `tools/hmapdev/templates.go` 的 `tmplLinuxBridge`/`tmplBridge` | ✅ cgo | **删除/替换**为 `tmplProcMain` |
+| `hmapdev` 构建命令 | c-shared | 改普通 `go build` |
 | homed `internal/plugin/cabi/`（1096 行） | cgo | 删（已归入 plan 迁移收尾 5.2） |
 | homed `internal/plugin/registry.go` 加载分派 | — | 改：按 `entry` 分派 `.so`/`.bin` |
 
@@ -300,7 +300,7 @@ C 结构体不好传函数指针（那是运气，任何人给 dispatch 加个 c
 
 ## 七、接口冻结检查点（全部已通过）
 
-1. ✅ **阶段 2（子进程通道原型）**：`plugindev` 重编 weather → `plugin.bin` → 端到端跑通。
+1. ✅ **阶段 2（子进程通道原型）**：`hmapdev` 重编 weather → `plugin.bin` → 端到端跑通。
    验收：weather 业务代码逐字节未改（`git status example/` 无输出）。
 2. ✅ **阶段 3（共享内存）**：子进程并发改写 StageContext 丢失率 = 0%
    （`TestPlugin_FiveProcessesConcurrentAppendNoLostUpdate` 与
@@ -349,7 +349,7 @@ tool output_send__qq result: 已通过 [qq] 通道发送: map[status:sent]
 
 ### 3. 生成模板必须同步接线，否则是**全体外部插件编译失败**
 
-公开接口加方法时，`tools/plugindev/templates/proc_main.go.tmpl` 里的 `procIO` /
+公开接口加方法时，`tools/hmapdev/templates/proc_main.go.tmpl` 里的 `procIO` /
 `procDocMemory` 若不实现新方法，就不满足接口——**每个外部插件都编不过**，是硬失败
 不是软降级。v1.1.1 这一层是被 `go test` 抓出来的（`internal/plugin/proc` 的两个
 E2E 用例编译失败），不是靠人工检查发现的。
@@ -366,7 +366,7 @@ E2E 用例编译失败），不是靠人工检查发现的。
 |---|---|---|
 | 存量插件源码零改动 | `cd example/<n> && go vet ./...`（17 个） | ✅ 17/17 通过 |
 | 旧产物仍能建链 | 用 SDK 0.9.2 编的 `plugin.bin` 跑 `TestRealPlugin_*` | ✅ 4/4 通过（握手校验 `ProtocolVersion=1`，不是 SDK 版本） |
-| 模板已接线 | `cd tools/plugindev && go test ./...` | ✅ `TestProcTemplate_CoversAllCoreMethods` 含新 method |
+| 模板已接线 | `cd tools/hmapdev && go test ./...` | ✅ `TestProcTemplate_CoversAllCoreMethods` 含新 method |
 | 并发安全 | `go test ./sdk/ -race -count=5` | ✅ 零 DATA RACE（13 例压测） |
 
 ### v1.2.x 的接口扩展（2026-09-12）
@@ -426,5 +426,5 @@ data URL 本身已是 base64 文本，包进二进制传输省不了空间，还
 - `internal/plugin/proc/protocol.go` — 合同面 B 的代码实现（`Method*` 常量，取代已删的 bridge 模板）
 - `internal/plugin/proc/shm.go` — 合同面 C 的代码实现（共享段布局与 18 字段枚举）
 - `internal/plugin/proc/capability.go` — 权限梯度（capability 组 + `withheldCapabilities`）
-- `third_party/homeagent-sdk/tools/plugindev/templates/` — 子进程运行时模板（三文件）
+- `third_party/homeagent-sdk/tools/hmapdev/templates/` — 子进程运行时模板（三文件）
 - `docs/zh/experiments/plugin-arch/` — 18 项可行性实验 + `19-migration-verify/` 迁移执行期工具

@@ -143,7 +143,7 @@ func AttachSegment(data []byte) (*Segment, error) {
 		return nil, fmt.Errorf("proc: 共享段魔数不匹配（0x%x，期望 0x%x）", got, shmMagic)
 	}
 	if got := binary.LittleEndian.Uint32(data[offVersion:]); got != shmVersion {
-		return nil, fmt.Errorf("proc: 共享段版本不匹配（%d，本内核 %d）——插件需用配套 plugindev 重编",
+		return nil, fmt.Errorf("proc: 共享段版本不匹配（%d，本内核 %d）——插件需用配套 hmapdev 重编",
 			got, shmVersion)
 	}
 	return &Segment{data: data}, nil

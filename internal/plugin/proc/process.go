@@ -260,7 +260,7 @@ func (p *Process) handshake(timeout time.Duration) error {
 		return fmt.Errorf("proc: %s 握手应答解析失败: %w", p.name, err)
 	}
 	if res.Protocol != ProtocolVersion {
-		return fmt.Errorf("proc: %s 协议版本不匹配（插件 %d，内核 %d）——请用配套 plugindev 重编",
+		return fmt.Errorf("proc: %s 协议版本不匹配（插件 %d，内核 %d）——请用配套 hmapdev 重编",
 			p.name, res.Protocol, ProtocolVersion)
 	}
 	log.Printf("[proc] %s 已建链（pid=%d protocol=%d sdk=%s）",

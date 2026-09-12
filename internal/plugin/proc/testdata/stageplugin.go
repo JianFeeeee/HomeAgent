@@ -4,7 +4,7 @@
 // stage 处理经共享内存读改写（模拟 sanitizer 的清洗行为）。
 //
 // 它手写 RPC 与共享段访问，不依赖公开 SDK——因为 SDK 侧的 proc 支持
-// 属于 Part 3（plugindev 工具链）的内容。这里只验证内核侧机制。
+// 属于 Part 3（hmapdev 工具链）的内容。这里只验证内核侧机制。
 package main
 
 import (
