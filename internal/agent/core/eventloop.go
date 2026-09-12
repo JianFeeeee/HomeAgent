@@ -271,6 +271,40 @@ func (a *Agent) mediaToBlocks(payload map[string]interface{}, mediaType string, 
 	return blocks, alt
 }
 
+// emitSkippedReply 给被跳过任务的**同步**调用方一个终态。
+//
+// 为什么要单独一条路径而不是复用 emitResponse：跳过意味着“我们没有处理这条输入”，
+// 不应对外发 agent_output 事件（否则 WebUI 聊天记录会凭空多出一条空消息），
+// 但必须写 ResponseCh——否则 cli/clawhub 这类无超时的同步注入会永久挂起。
+//
+// 非阻塞写：ResponseCh 由同步调用方以 cap=1 创建，调用方超时离开后仍可写入。
+func (a *Agent) emitSkippedReply(evt *agentIO.InputEvent, reason string) {
+	if evt == nil || evt.ResponseCh == nil {
+		return
+	}
+	ch := evt.OutputChannel
+	if ch == "" {
+		ch = evt.Source
+	}
+	payload := map[string]interface{}{
+		"content":    "",
+		"request_id": evt.RequestID,
+		"skipped":    true,
+		"reason":     reason,
+	}
+	select {
+	case evt.ResponseCh <- &agentIO.OutputEvent{
+		RequestID:     evt.RequestID,
+		Target:        evt.Source,
+		Type:          "text",
+		Payload:       payload,
+		Done:          true,
+		OutputChannel: ch,
+	}:
+	default:
+	}
+}
+
 func (a *Agent) emitResponse(evt *agentIO.InputEvent, response string) {
 	stageCtx := &sdk.StageContext{
 		FinalText: response,
