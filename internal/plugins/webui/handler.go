@@ -23,6 +23,7 @@ import (
 	"time"
 
 	agentIO "gitcode.com/JianFeeeee/HomeAgent/internal/agent/io"
+	internalConfig "gitcode.com/JianFeeeee/HomeAgent/internal/config"
 	"gitcode.com/JianFeeeee/HomeAgent/internal/meta"
 	sdk "gitcode.com/JianFeeeee/HomeAgent/internal/sdk"
 	"gitcode.com/JianFeeeee/HomeAgent/pkg/types"
@@ -865,6 +866,7 @@ func (h *Handler) RegisterRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("/api/v1/terminals", h.requireAPI(h.handleTerminals))
 	mux.HandleFunc("/api/v1/cmd/history", h.requireAPI(h.handleCmdHistory))
 	mux.HandleFunc("/api/v1/kernel", h.requireAPI(h.handleKernel))
+	mux.HandleFunc("/api/v1/persona", h.requireAPI(h.handlePersona))
 	mux.HandleFunc("/api/v1/plugins", h.requireAPI(h.handlePlugins))
 	mux.HandleFunc("/api/v1/plugins/", h.requireAPI(h.handlePluginByID))
 	// 设备网关（可配置反代到 remotedevice；默认禁用，未启用时返回 404）
@@ -972,6 +974,111 @@ func (h *Handler) handleKernel(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, h.status.GetKernelStatus())
+}
+
+// 人格设定：配置项键，以及「首启向导已经问过」的一次性标记。
+//
+// 为什么需要向导：人格曾经只有 <dataDir>/personal/personal.md 一个来源且无人维护，
+// 里面写死的旧版本号反过来让实例自述旧版本（v1.2.0 压测发现）。
+// 现在人格是配置项（默认模板不含任何版本号），首启问一次，之后不再打扰。
+const (
+	personaPromptKey  = "core.agent.personal_prompt"
+	personaInitMarker = "core.internal.persona_initialized"
+)
+
+// handlePersona 是首启人格向导的后端。
+//
+//	GET  → {initialized, current_prompt, file_override}
+//	POST → {"mode":"default"|"custom"|"later","content":"..."}
+//	       写入 core.agent.personal_prompt 并打一次性标记，返回 restart_required
+//
+// 生效时机：人格在 homed 启动时载入（以【人格设定】块拼进系统提示词），
+// 所以**自定义内容需重启生效**；选「默认」或「稍后」（保持当前默认）无需重启。
+// 不回答就是「稍后」：保留默认并打标记，不阻塞任何流程。
+func (h *Handler) handlePersona(w http.ResponseWriter, r *http.Request) {
+	if h.settings == nil {
+		writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "settings not available"})
+		return
+	}
+	switch r.Method {
+	case http.MethodGet:
+		initialized := false
+		if v, err := h.settings.GetCore(personaInitMarker); err == nil {
+			if s, ok := v.(string); ok && strings.TrimSpace(s) != "" {
+				initialized = true
+			}
+		}
+		cur := ""
+		if v, err := h.settings.GetCore(personaPromptKey); err == nil {
+			if s, ok := v.(string); ok {
+				cur = s
+			}
+		}
+		if cur == "" {
+			cur = internalConfig.DefaultPersonaPrompt
+		}
+		writeJSON(w, http.StatusOK, map[string]interface{}{
+			"initialized":    initialized,
+			"current_prompt": cur,
+			"file_override":  h.personaFileExists(),
+		})
+	case http.MethodPost:
+		var req struct {
+			Mode    string `json:"mode"`
+			Content string `json:"content"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid request"})
+			return
+		}
+		restart := false
+		switch req.Mode {
+		case "default":
+			if err := h.settings.SetCore(personaPromptKey, internalConfig.DefaultPersonaPrompt); err != nil {
+				writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+				return
+			}
+		case "custom":
+			if strings.TrimSpace(req.Content) == "" {
+				writeJSON(w, http.StatusBadRequest, map[string]string{"error": "content required for custom mode"})
+				return
+			}
+			if err := h.settings.SetCore(personaPromptKey, req.Content); err != nil {
+				writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+				return
+			}
+			restart = true // 人格在启动时载入
+		case "later":
+			// 保持当前（默认）人格，只打标记，不再问
+		default:
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "unknown mode"})
+			return
+		}
+		if err := h.settings.SetCore(personaInitMarker, "1"); err != nil {
+			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]interface{}{
+			"status": "ok", "mode": req.Mode, "restart_required": restart,
+		})
+	default:
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+	}
+}
+
+// personaFileExists 报告是否存在会覆盖配置项的人格文件（存在时它优先）。
+// 数据目录取自 core.daemon.data_dir（由播种写入）。
+func (h *Handler) personaFileExists() bool {
+	v, err := h.settings.GetCore("core.daemon.data_dir")
+	if err != nil {
+		return false
+	}
+	dir, _ := v.(string)
+	if dir == "" {
+		return false
+	}
+	_, err = os.Stat(filepath.Join(dir, "personal", "personal.md"))
+	return err == nil
 }
 
 func (h *Handler) handleAgents(w http.ResponseWriter, r *http.Request) {
