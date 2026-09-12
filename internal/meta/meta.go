@@ -43,6 +43,19 @@ var (
 	//        1.2.0。用 SDK 1.0.0/1.1.0 编的存量插件照旧可用——新增方法由
 	//        **插件调用、内核实现**，不调就不受影响，无需重编。
 	SDKCompatibleVersion = "1.2.0"
+
+	// SourceURL 是本内核构建所对应的源码地址。
+	//
+	// AGPL-3.0 §13（Remote Network Interaction）要求：当你把修改过的版本
+	// 作为网络服务提供出去时，必须给使用者提供取得 Corresponding Source 的机会。
+	// WebUI 的状态页会把这个值渲染成可见链接，所以：
+	//
+	// ❗**修改后对外部署的分支必须把它改指向自己的源码仓库**，否则链接指向的
+	// 不是你实际运行的那份代码，§13 的提供义务并未履行。
+	//
+	// 构建时可用 -ldflags 覆盖，无需改源码：
+	//   -X gitcode.com/JianFeeeee/HomeAgent/internal/meta.SourceURL=<你的仓库>
+	SourceURL = "https://gitcode.com/JianFeeeee/HomeAgent"
 )
 
 // FullVersion 返回完整的版本字符串。
