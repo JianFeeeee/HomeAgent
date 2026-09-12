@@ -201,6 +201,13 @@ func (s *Store) Add(name, content string) error {
 	}
 	s.items[id] = k
 
+	// 覆盖同名条目时必须先摘掉旧向量。
+	//
+	// vector.Store.Insert 是**追加**语义（s.docs = append + index.Add），不按 id
+	// 去重。少了这一步，更新一条知识会在向量索引里留下上一版的副本：条目数看起来
+	// 是对的，只有向量数比条目数多——而检索可能因此命中已被替换掉的旧内容。
+	s.vec.Remove(id)
+
 	vec := s.vectorize(name + " " + content)
 	s.vec.Insert(id, name+": "+content, vec, map[string]string{
 		"name": name, "path": path,

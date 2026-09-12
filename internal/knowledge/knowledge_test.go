@@ -44,6 +44,51 @@ func TestAddAndSearch(t *testing.T) {
 	}
 }
 
+// 覆盖同名条目必须把旧向量摘掉，而不是再插一份。
+//
+// 这条是从一次真实的知识库更新里发现的：在线上实例更新一个已有条目后，
+// knowledge_count=32 但 vector_count=33 ——多出来的那一条是上一版的副本。
+// 成因是 vector.Store.Insert 为追加语义（s.docs = append + index.Add），不按 id 去重。
+// 危害不在于多占一份内存：检索可能命中**已被替换掉的旧内容**。
+func TestAddOverwriteReplacesVector(t *testing.T) {
+	dir, err := os.MkdirTemp("", "know_overwrite_*")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer os.RemoveAll(dir)
+
+	s := NewStore(dir)
+	s.Start()
+	defer s.Stop()
+
+	if err := s.Add("recent", "第一版内容：旧的多模态描述式索引"); err != nil {
+		t.Fatal(err)
+	}
+	if got := s.Stats()["vector_count"].(int); got != 1 {
+		t.Fatalf("首次写入后 vector_count 应为 1，实为 %d", got)
+	}
+
+	if err := s.Add("recent", "第二版内容：媒体已成为图记忆的一等节点"); err != nil {
+		t.Fatal(err)
+	}
+
+	if n := s.Stats()["knowledge_count"].(int); n != 1 {
+		t.Fatalf("同名覆盖后 knowledge_count 应为 1，实为 %d", n)
+	}
+	if n := s.Stats()["vector_count"].(int); n != 1 {
+		t.Fatalf("同名覆盖后 vector_count 应为 1（多了就是旧版没被摘掉），实为 %d", n)
+	}
+
+	// 目录里也只应有一份内容，且是新的那份
+	b, err := os.ReadFile(dir + "/recent/content.md")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(b) != "第二版内容：媒体已成为图记忆的一等节点" {
+		t.Fatalf("content.md 未被新内容覆盖，实为 %q", string(b))
+	}
+}
+
 func TestList(t *testing.T) {
 	dir, err := os.MkdirTemp("", "know_list_*")
 	if err != nil {
