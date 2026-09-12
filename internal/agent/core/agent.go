@@ -110,9 +110,6 @@ type Agent struct {
 	// childSeq 给完成的任务排个序，用于有界淘汰。
 	childSeq int64
 
-	// 高优先级打断通道：interceptLoop 注入，process() 在工具循环轮次间非阻塞读取
-	interceptCh chan *agentIO.InputEvent
-
 	// 输入调度器：就绪队列、任务抽象与快照（见 scheduler.go）。
 	// M2 起取代 eventLoop 的隐式 channel 排队。
 	sched *scheduler
@@ -312,7 +309,6 @@ func New(cfg AgentConfig) *Agent {
 		eventBus:          cfg.EventBus,
 		selfInputCh:       make(chan selfInputMsg, 64),
 		childTasks:        make(map[string]*childTaskState),
-		interceptCh:       make(chan *agentIO.InputEvent, 64),
 		sched:             newScheduler(256),
 		priorityLookup:    cfg.PriorityLookup,
 		pluginHealth:      newPluginHealthTracker(),
