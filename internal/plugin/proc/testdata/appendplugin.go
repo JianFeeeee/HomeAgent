@@ -181,10 +181,13 @@ func main() {
 					send(response{ID: req.ID, Error: fmt.Sprintf("mmap: %v", err)})
 					continue
 				}
-				shm = m
+				// 统一区域：前 64B 是 SuperBlock，StageContext 段在其后
+				ctxOff := binary.LittleEndian.Uint32(m[20:])
+				ctxSize := binary.LittleEndian.Uint32(m[24:])
+				shm = m[ctxOff : ctxOff+ctxSize]
 			}
 			send(response{ID: req.ID, Result: map[string]interface{}{
-				"protocol": 1, "sdk_version": "test",
+				"protocol": 2, "sdk_version": "test",
 				"plugin_name": "append-" + tag, "pid": os.Getpid(),
 			}})
 

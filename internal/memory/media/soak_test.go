@@ -12,14 +12,16 @@ import (
 
 // TestSoak_SustainedMixedLoad 长稳测试：持续混合负载下不变量不破。
 // 用 -run TestSoak -timeout 300s 单独跑，默认 short 模式跳过。
+//
+// 媒体没有独立生命周期管理：blob 是记忆块的内容，块被删除时内容随之删除。
 func TestSoak_SustainedMixedLoad(t *testing.T) {
 	if testing.Short() {
 		t.Skip("long soak test; run with -run TestSoak")
 	}
 	dur := 60 * time.Second
-	s := newTestStore(t, 8*1024*1024) // 8MB 上限，逼 GC 频繁工作
+	s := newTestStore(t)
 
-	// 常驻受保护集
+	// 常驻受保护区：全程被记忆块持有，模拟 Graph L3 中的块
 	const keepN = 20
 	keep := make([]string, keepN)
 	keepData := make([][]byte, keepN)
@@ -31,16 +33,13 @@ func TestSoak_SustainedMixedLoad(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if err := s.AddRef(dg, "graph_sentence", fmt.Sprintf("s-%d", i)); err != nil {
-			t.Fatal(err)
-		}
 		keep[i] = dg
 		keepData[i] = d
 	}
 
 	stop := make(chan struct{})
 	var wg sync.WaitGroup
-	var puts, gets, gcs, describes, searches, refOps atomic.Int64
+	var puts, gets, deletes, embeds, searches atomic.Int64
 	var fatal atomic.Int64
 
 	worker := func(name string, fn func(iter int) error) {
@@ -62,29 +61,17 @@ func TestSoak_SustainedMixedLoad(t *testing.T) {
 		}()
 	}
 
-	// 写入者 ×3
+	// 写入者 ×3：持续写入一次性内容（无人持有）
 	for w := 0; w < 3; w++ {
 		wid := w
 		worker(fmt.Sprintf("put-%d", wid), func(i int) error {
 			b := make([]byte, 2048)
 			rand.Read(b)
 			b = append([]byte(fmt.Sprintf("eph-%d-%d-", wid, i)), b...)
-			d, err := s.Put(b, Item{MIME: "image/png", Tool: "cmd_run"})
-			if err != nil {
+			if _, err := s.Put(b, Item{MIME: "image/png", Tool: "cmd_run"}); err != nil {
 				return err
 			}
 			puts.Add(1)
-			// 三分之一挂上引用再立刻注销，模拟短命引用
-			if i%3 == 0 {
-				own := fmt.Sprintf("tmp-%d-%d", wid, i)
-				if err := s.AddRef(d, "context", own); err != nil {
-					return err
-				}
-				if err := s.DropRef(d, "context", own); err != nil {
-					return err
-				}
-				refOps.Add(2)
-			}
 			return nil
 		})
 	}
@@ -105,35 +92,43 @@ func TestSoak_SustainedMixedLoad(t *testing.T) {
 		})
 	}
 
-	// GC 者
-	worker("gc", func(i int) error {
-		if _, _, err := s.GC(0); err != nil {
-			return err
-		}
-		gcs.Add(1)
-		time.Sleep(5 * time.Millisecond)
-		return nil
-	})
-
-	// 描述者
-	worker("describe", func(i int) error {
-		pend, err := s.Pending(5)
+	// 删除者：持续删除一次性内容（模拟块创建后又被遗忘）
+	worker("delete", func(i int) error {
+		b := make([]byte, 2048)
+		rand.Read(b)
+		b = append([]byte(fmt.Sprintf("del-%d-", i)), b...)
+		d, err := s.Put(b, Item{MIME: "image/png", Tool: "cmd_run"})
 		if err != nil {
 			return err
 		}
-		for _, it := range pend {
-			// 忽略 unknown digest：GC 可能在 Pending 与 Describe 之间清掉它，
-			// 这是正常竞态而非缺陷。
-			_ = s.Describe(it.Digest, fmt.Sprintf("描述 %d 含图表与文字", i), "vis")
-			describes.Add(1)
+		if err := s.Delete(d); err != nil {
+			return err
 		}
-		time.Sleep(2 * time.Millisecond)
+		deletes.Add(1)
+		time.Sleep(time.Millisecond)
+		return nil
+	})
+
+	// 向量写入者：持续给新内容嵌入并删除（模拟启动迁移/短命媒体）
+	worker("embed", func(i int) error {
+		b := make([]byte, 1024)
+		rand.Read(b)
+		b = append([]byte(fmt.Sprintf("emb-%d-", i)), b...)
+		d, err := s.Put(b, Item{MIME: "image/png", Tool: "cmd_run"})
+		if err != nil {
+			return err
+		}
+		if err := s.SetVec(d, []float64{1, float64(i % 7)}, "soak-space"); err != nil {
+			return err
+		}
+		embeds.Add(1)
+		time.Sleep(time.Millisecond)
 		return nil
 	})
 
 	// 检索者
 	worker("search", func(i int) error {
-		if _, err := s.Search("图表", KindImage, 20); err != nil {
+		if _, err := s.QueryMediaScored([]float64{1, 0}, "soak-space", 20); err != nil {
 			return err
 		}
 		if _, err := s.Stat(keep[i%keepN]); err != nil {
@@ -152,8 +147,8 @@ func TestSoak_SustainedMixedLoad(t *testing.T) {
 		t.Fatalf("%d 个 worker 报致命错误", n)
 	}
 
-	t.Logf("%v 内: put=%d get=%d gc=%d describe=%d search=%d refOps=%d",
-		dur, puts.Load(), gets.Load(), gcs.Load(), describes.Load(), searches.Load(), refOps.Load())
+	t.Logf("%v 内: put=%d get=%d delete=%d embed=%d search=%d",
+		dur, puts.Load(), gets.Load(), deletes.Load(), embeds.Load(), searches.Load())
 
 	// 收尾断言
 	for i, d := range keep {
@@ -164,17 +159,8 @@ func TestSoak_SustainedMixedLoad(t *testing.T) {
 		if !bytes.Equal(got, keepData[i]) {
 			t.Fatalf("受保护项内容变了 %s", shortDigest(d))
 		}
-		it, err := s.Stat(d)
-		if err != nil || it.RefCount != 1 {
-			t.Fatalf("受保护项引用计数应为 1: %+v", it)
-		}
 	}
-	checkRefIntegrity(t, s)
 
 	st := s.Stats()
-	t.Logf("收尾: 条目=%v 字节=%v 未引用=%v 已描述=%v",
-		st["count"], st["total_bytes"], st["unreferenced"], st["described"])
-	if total := st["total_bytes"].(int64); total > 8*1024*1024*3 {
-		t.Fatalf("容量失控: %d 远超上限", total)
-	}
+	t.Logf("收尾: 条目=%v 字节=%v 类型=%v", st["count"], st["total_bytes"], st["by_kind"])
 }

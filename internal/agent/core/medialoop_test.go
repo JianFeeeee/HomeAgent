@@ -2,175 +2,186 @@ package core
 
 import (
 	"context"
+	"fmt"
 	"path/filepath"
+	"strings"
 	"testing"
-	"time"
 
+	"gitcode.com/JianFeeeee/HomeAgent/internal/memory"
+	"gitcode.com/JianFeeeee/HomeAgent/internal/memory/document"
 	"gitcode.com/JianFeeeee/HomeAgent/internal/memory/media"
+	"gitcode.com/JianFeeeee/HomeAgent/internal/memory/vector"
 )
 
-// 媒体后台循环测试。
+// 媒体与记忆块的生命周期测试。
 //
-// 两条循环都要能在「未启用」时干净退出——它们随 Agent.Start() 无条件启动，
-// 若不早退就会在每个没配媒体存储的部署上空转一个 goroutine。
+// 媒体没有独立生命周期管理（没有 GC、没有引用计数）：blob 是记忆块的内容，
+// 块的创建/迁移/删除由记忆系统决定。图片也不靠文本描述索引。
 
-func newMediaLoopAgent(t *testing.T, gcInterval, minAge time.Duration, describe bool) (*Agent, *media.Store) {
+func newMediaLoopAgent(t *testing.T) (*Agent, *media.Store) {
 	t.Helper()
 	dir := t.TempDir()
-	ms, err := media.New(filepath.Join(dir, "media"), 0)
+	ms, err := media.New(filepath.Join(dir, "media"))
 	if err != nil {
 		t.Fatalf("media.New: %v", err)
 	}
 	t.Cleanup(func() { ms.Close() })
 
-	a := &Agent{
-		mediaStore:      ms,
-		mediaGCInterval: gcInterval,
-		mediaGCMinAge:   minAge,
-		mediaDescribe:   describe,
-	}
+	a := &Agent{mediaStore: ms}
 	a.ctx, a.cancel = context.WithCancel(context.Background())
 	t.Cleanup(a.cancel)
 	return a, ms
 }
 
-func TestMediaGCLoop_ExitsWhenDisabled(t *testing.T) {
-	// 两种禁用形态都必须立刻返回，不留空转 goroutine：
-	//   1. mediaStore 为 nil（媒体记忆整体关闭）
-	//   2. gcInterval 为 0（显式不自动清理）
-	cases := []struct {
-		name  string
-		agent *Agent
-	}{
-		{"nil store", func() *Agent {
-			a := &Agent{mediaGCInterval: time.Hour}
-			a.ctx, a.cancel = context.WithCancel(context.Background())
-			return a
-		}()},
-		{"zero interval", func() *Agent {
-			dir := t.TempDir()
-			ms, _ := media.New(filepath.Join(dir, "m"), 0)
-			t.Cleanup(func() { ms.Close() })
-			a := &Agent{mediaStore: ms, mediaGCInterval: 0}
-			a.ctx, a.cancel = context.WithCancel(context.Background())
-			return a
-		}()},
+// heldMediaDigests 汇总三层记忆持有的媒体：只有这些才可被召回。
+func TestHeldMediaDigests_CollectsAcrossLayers(t *testing.T) {
+	a, ms := newMediaLoopAgent(t)
+	d1, _ := ms.Put([]byte("ctx-layer"), media.Item{MIME: "image/png"})
+	d2, _ := ms.Put([]byte("doc-layer"), media.Item{MIME: "image/png"})
+	d3, _ := ms.Put([]byte("graph-layer"), media.Item{MIME: "image/png"})
+	d4, _ := ms.Put([]byte("orphan"), media.Item{MIME: "image/png"})
+
+	a.context = NewRelevanceContext("", memory.NewStaticEmbedder(""))
+	a.context.Append(ContextEvent{Input: "带图的一轮", Blocks: []memory.MemoryBlock{
+		{ID: "blk_ctx", Modality: memory.BlockImage, PayloadDigest: d1},
+	}})
+
+	dir := t.TempDir()
+	bo, ok := a.blockFromDigest(d2)
+	if !ok {
+		t.Fatal("blockFromDigest 失败")
 	}
-
-	for _, c := range cases {
-		done := make(chan struct{})
-		go func(a *Agent) { a.mediaGCLoop(); close(done) }(c.agent)
-		select {
-		case <-done:
-		case <-time.After(2 * time.Second):
-			t.Fatalf("%s: mediaGCLoop 未立即返回（会空转 goroutine）", c.name)
-		}
-		c.agent.cancel()
-	}
-}
-
-func TestMediaGCLoop_ClearsOrphansKeepsReferenced(t *testing.T) {
-	a, ms := newMediaLoopAgent(t, 50*time.Millisecond, 0, false)
-
-	kept, _ := ms.Put([]byte("referenced"), media.Item{MIME: "image/png"})
-	if err := ms.AddRef(kept, media.OwnerContext, "evt-1"); err != nil {
+	ds := document.NewStore(filepath.Join(dir, "docs"), memory.TokenizeWords)
+	if err := ds.Start(); err != nil {
 		t.Fatal(err)
 	}
-	orphan, _ := ms.Put([]byte("orphaned"), media.Item{MIME: "image/png"})
-
-	go a.mediaGCLoop()
-
-	deadline := time.Now().Add(3 * time.Second)
-	for time.Now().Before(deadline) {
-		if _, err := ms.Stat(orphan); err != nil {
-			break // 孤儿已被清
-		}
-		time.Sleep(20 * time.Millisecond)
+	defer ds.Stop()
+	if err := ds.Insert(&document.Doc{ID: "doc_1", Summary: "s", Blocks: []memory.MemoryBlock{bo}}); err != nil {
+		t.Fatal(err)
 	}
-	a.cancel()
+	a.docStore = ds
 
-	if _, err := ms.Stat(orphan); err == nil {
-		t.Fatal("无引用项应被 GC 清理")
-	}
-	// 关键不变量：有引用的内容永不被删，否则记忆里的 digest 成悬空指针
-	if _, err := ms.Get(kept); err != nil {
-		t.Fatalf("被引用的内容不该被清: %v", err)
-	}
-}
-
-func TestMediaGCLoop_MinAgeProtectsFresh(t *testing.T) {
-	// minAge 保护刚 Put 还没来得及 AddRef 的项——它们 refcount 也是 0
-	a, ms := newMediaLoopAgent(t, 30*time.Millisecond, time.Hour, false)
-
-	d, _ := ms.Put([]byte("just-arrived"), media.Item{MIME: "image/png"})
-
-	go a.mediaGCLoop()
-	time.Sleep(400 * time.Millisecond) // 足够跑十几轮 GC
-	a.cancel()
-
-	if _, err := ms.Get(d); err != nil {
-		t.Fatalf("minAge 内的新项不该被清: %v", err)
-	}
-}
-
-func TestMediaDescribeLoop_ExitsWhenDisabled(t *testing.T) {
-	// describe 关闭时必须立即返回（默认就是关闭，绝大多数部署走这条路）
-	a, _ := newMediaLoopAgent(t, 0, 0, false)
-	done := make(chan struct{})
-	go func() { a.mediaDescribeLoop(); close(done) }()
-	select {
-	case <-done:
-	case <-time.After(2 * time.Second):
-		t.Fatal("describe 关闭时 mediaDescribeLoop 未立即返回")
-	}
-}
-
-func TestDescribePendingMedia_NoProviderLeavesUndescribed(t *testing.T) {
-	// 没有声明视觉能力的源时整轮跳过，且**不能**把项标记成已处理——
-	// 配置好之后必须还能被捡起来。
-	a, ms := newMediaLoopAgent(t, 0, 0, true)
-	d, _ := ms.Put([]byte("img"), media.Item{MIME: "image/png"})
-
-	// providerManager 为 nil → resolveModalFallback 返回 nil
-	a.describePendingMedia()
-
-	it, err := ms.Stat(d)
+	g, err := memory.NewGraphDB(filepath.Join(dir, "graph.db"))
 	if err != nil {
 		t.Fatal(err)
 	}
-	if it.Description != "" || it.DescribedBy != "" {
-		t.Fatalf("无可用源时不该写描述: %+v", it)
+	defer g.Close()
+	if err := g.PutMemoryBlocks([]memory.MemoryBlock{
+		{ID: "blk_g", Modality: memory.BlockImage, PayloadDigest: d3},
+	}); err != nil {
+		t.Fatal(err)
 	}
-	pending, _ := ms.Pending(10)
-	if len(pending) != 1 {
-		t.Fatalf("项应仍在待描述队列里，实际 %d 条", len(pending))
+	a.memory = g
+
+	held := a.heldMediaDigests()
+	for _, want := range []string{d1, d2, d3} {
+		if !held[want] {
+			t.Errorf("层次持有 %s 却不在结果里: %v", shortDigest(want), held)
+		}
+	}
+	if held[d4] {
+		t.Errorf("无人持有的 %s 不该出现在结果里", shortDigest(d4))
 	}
 }
 
-func TestDescribePendingMedia_MarksUnsupportedKind(t *testing.T) {
-	// video/other 大类没有可用的描述通道，必须标记掉，
-	// 否则每轮 Pending 都把它取出来重试，永远卡住队列头部。
-	a, ms := newMediaLoopAgent(t, 0, 0, true)
+// fakeSpace 是一个只覆盖图像的假统一空间，用来验证「不在本空间」与
+// 「本次失败」必须被区分对待。
+type fakeSpace struct{}
 
-	other, _ := ms.Put([]byte("blob"), media.Item{MIME: "application/octet-stream"})
-	a.describePendingMedia()
+func (fakeSpace) VectorizeDense(string) ([]float64, error) { return []float64{1, 0}, nil }
 
-	it, err := ms.Stat(other)
+func (fakeSpace) EmbedImageDense(_ []byte, mime string) ([]float64, error) {
+	if strings.HasPrefix(mime, "audio/") || strings.HasPrefix(mime, "video/") {
+		return nil, fmt.Errorf("%w: %s", vector.ErrModalityUnsupported, mime)
+	}
+	return []float64{1, 0}, nil
+}
+
+func (fakeSpace) Fingerprint() string { return "fake-space" }
+func (fakeSpace) Dim() int            { return 2 }
+func (fakeSpace) Loaded() bool        { return true }
+func (fakeSpace) Close()              {}
+
+// TestReembedStaleMedia_SkipsUnsupportedWithoutFaking 验证向量迁移不会：
+//   - 把音频当失败反复重试；
+//   - 更不能拿另一个模型的向量顶替音频（那会污染统一空间且静默）。
+func TestReembedStaleMedia_SkipsUnsupportedWithoutFaking(t *testing.T) {
+	a, ms := newMediaLoopAgent(t)
+	img, _ := ms.Put([]byte("img-bytes"), media.Item{MIME: "image/png"})
+	aud, _ := ms.Put([]byte("aud-bytes"), media.Item{MIME: "audio/wav"})
+
+	a.multimodalSpace = fakeSpace{}
+	a.reembedStaleMedia()
+
+	it, err := ms.Stat(img)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if it.DescribedBy != "unsupported" {
-		t.Fatalf("不可描述的大类应被标记，实际 DescribedBy=%q", it.DescribedBy)
+	if len(it.Vec) != 2 || it.VecModel != "fake-space" {
+		t.Fatalf("图像应拿到本空间向量，实际 vec=%v model=%q", it.Vec, it.VecModel)
 	}
-	// 标记后必须退出待描述队列，否则每轮都被取出来重试、永久占着
-	// LIMIT 的名额，真正需要描述的新项永远轮不到。
-	pending, _ := ms.Pending(10)
-	if len(pending) != 0 {
-		t.Fatalf("标记 unsupported 后应退出待描述队列，仍有 %d 条", len(pending))
+
+	audIt, err := ms.Stat(aud)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(audIt.Vec) != 0 || audIt.VecModel != "" {
+		t.Fatalf("音频不得被写入任何向量（不能用别的模型顶替），实际 vec=%v model=%q",
+			audIt.Vec, audIt.VecModel)
 	}
 }
 
-func TestDescribePendingMedia_EmptyQueueIsNoop(t *testing.T) {
-	a, _ := newMediaLoopAgent(t, 0, 0, true)
-	a.describePendingMedia() // 不该 panic
+// payloadHeld 是删除前的活查询。
+func TestPayloadHeld(t *testing.T) {
+	a, ms := newMediaLoopAgent(t)
+	d, _ := ms.Put([]byte("held"), media.Item{MIME: "image/png"})
+	if a.payloadHeld(d) {
+		t.Fatal("尚无块持有时不该报已持有")
+	}
+
+	a.context = NewRelevanceContext("", memory.NewStaticEmbedder(""))
+	a.context.Append(ContextEvent{Input: "x", Blocks: []memory.MemoryBlock{
+		{ID: "blk_1", Modality: memory.BlockImage, PayloadDigest: d},
+	}})
+	if !a.payloadHeld(d) {
+		t.Fatal("L0 持有却报未持有")
+	}
+	if a.payloadHeld("") {
+		t.Fatal("空 digest 应为 false")
+	}
+}
+
+// TestForgetPayloads_DeletesOnlyUnheldContent 验证删除语义：
+// 块被删除后内容才被删；仍被其它记忆块共享的 digest 不会被误删。
+func TestForgetPayloads_DeletesOnlyUnheldContent(t *testing.T) {
+	dir := t.TempDir()
+	ms, err := media.New(filepath.Join(dir, "media"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer ms.Close()
+
+	d1, _ := ms.Put([]byte("held-by-graph"), media.Item{MIME: "image/png"})
+	d2, _ := ms.Put([]byte("being-forgotten"), media.Item{MIME: "image/png"})
+
+	g, err := memory.NewGraphDB(filepath.Join(dir, "graph.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer g.Close()
+	if err := g.PutMemoryBlocks([]memory.MemoryBlock{
+		{ID: "blk_keep", Modality: memory.BlockImage, PayloadDigest: d1},
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	a := &Agent{mediaStore: ms, memory: g}
+	a.forgetPayloads([]string{d1, d2})
+
+	if _, err := ms.Stat(d1); err != nil {
+		t.Fatalf("仍被 L3 块持有的内容不该被删: %v", err)
+	}
+	if _, err := ms.Stat(d2); err == nil {
+		t.Fatal("无人持有的内容应被删除")
+	}
 }

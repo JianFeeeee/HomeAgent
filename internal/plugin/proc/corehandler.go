@@ -28,12 +28,17 @@ type coreHandler struct {
 	// ❗ 必须是"全部插件共享一个 Host"——每插件一段会退化成副本模型。
 	host *Host
 
+	// owner 是本插件在共享槽池里的身份。内核用它校验 arena.free 的归属，
+	// 并在插件退出时 ReclaimOwner 回收残留槽。
+	owner uint32
+
 	// locks 是 host.locks 的引用，供 stage.lock/unlock 路由。
 	locks *lockRegistry
 
-	// invokeTool/invokeStageFn/invokeOutput 反向调用插件（内核 → 插件）。
+	// invokeTool/invokeCleaner/invokeStageFn/invokeOutput 反向调用插件（内核 → 插件）。
 	// 由 Plugin 注入，注册回调时用它们构造 handler。
 	invokeTool    func(name string, args map[string]interface{}) (interface{}, error)
+	invokeCleaner func(params CleanerInvokeParams) (CleanerInvokeResult, error)
 	invokeStageFn func(ctx context.Context, stage string, seq uint64) error
 	invokeOutput  func(channel string, args map[string]interface{}) (interface{}, error)
 
@@ -96,6 +101,18 @@ type CoreSDK interface {
 	InjectInputMediaSync(source, channel, text string, blocks []pubsdk.ContentBlock) string
 	InjectInterruptMedia(source, channel, text string, blocks []pubsdk.ContentBlock)
 
+	// 带标志位的注入：声明这一次注入是否记入记忆、是否据此裁剪上下文。
+	// 上面的三参数方法是它们的零值糖。
+	InjectTextOpts(source, channel, text string, opts pubsdk.InjectOptions)
+	InjectInterruptTextOpts(source, channel, text string, opts pubsdk.InjectOptions)
+	InjectInputSyncOpts(source, channel, text string, opts pubsdk.InjectOptions) string
+	InjectInputMediaOpts(source, channel, text string, blocks []pubsdk.ContentBlock, opts pubsdk.InjectOptions)
+	InjectInputMediaSyncOpts(source, channel, text string, blocks []pubsdk.ContentBlock, opts pubsdk.InjectOptions) string
+	InjectInterruptMediaOpts(source, channel, text string, blocks []pubsdk.ContentBlock, opts pubsdk.InjectOptions)
+
+	// SetToolBlocks 注入媒体块，内核在下一条 tool message 携带（§3.8）。
+	SetToolBlocks(blocks []pubsdk.ContentBlock)
+
 	SetAutoRestart(enabled bool)
 }
 
@@ -128,51 +145,89 @@ func (h *coreHandler) Handle(method string, params json.RawMessage) (interface{}
 		return nil, h.sdk.RegisterPluginAPI(p.Name)
 	case MethodInputRegister:
 		var p struct {
-			Name string            `json:"name"`
-			Def  pubsdk.ChannelDef `json:"def"`
+			Name       string            `json:"name"`
+			Def        pubsdk.ChannelDef `json:"def"`
+			HasCleaner bool              `json:"has_cleaner"`
 		}
 		if err := unmarshal(params, &p); err != nil {
 			return nil, err
 		}
-		// 注意 ChannelDef.Cleaner 是函数，无法跨进程传递（§3.5 回调型资源）。
-		// NoMemory 可传；Cleaner 若插件需要，须在插件侧对文本预处理后再注入。
-		return nil, h.sdk.RegisterInputChannel(p.Name, pubsdk.ChannelDef{NoMemory: p.Def.NoMemory})
+		if p.Name == "" {
+			return nil, fmt.Errorf("input.register: 缺少 name")
+		}
+		cleaner, err := h.cleanerProxy(CleanerScopeInput, p.Name, p.HasCleaner)
+		if err != nil {
+			return nil, fmt.Errorf("input.register: %w", err)
+		}
+		if err := validateContextPolicy("input.register", p.Def.ContextPolicy); err != nil {
+			return nil, err
+		}
+		// 整体传 p.Def（只是把函数型的 Cleaner 换成代理），不要手写字段白名单：
+		// 白名单会让新增字段静默丢失。
+		def := p.Def
+		def.Cleaner = cleaner
+		return nil, h.sdk.RegisterInputChannel(p.Name, def)
 
 	// ---- IO 注入（原 case 5/6/7/47）----
+	//
+	// 注入标志位（no_memory / context_policy）由插件在调用点声明，默认
+	// 记入记忆 + 不裁剪。策略值在入口校验：静默降级成 none 会让调用方
+	// 以为自己声明的裁剪在生效。
 	case MethodIOInjectText:
 		var p injectParams
 		if err := unmarshal(params, &p); err != nil {
 			return nil, err
 		}
-		h.sdk.InjectText(p.Source, p.Channel, p.Text)
+		if err := validateContextPolicy("io.injectText", p.ContextPolicy); err != nil {
+			return nil, err
+		}
+		h.sdk.InjectTextOpts(p.Source, p.Channel, h.resolveText(p), pubSdkInjectOpts(p.NoMemory, p.ContextPolicy, p.CleanerName))
 		return nil, nil
 	case MethodIOInjectInterrupt:
 		var p injectParams
 		if err := unmarshal(params, &p); err != nil {
 			return nil, err
 		}
-		h.sdk.InjectInterruptText(p.Source, p.Channel, p.Text)
+		if err := validateContextPolicy("io.injectInterrupt", p.ContextPolicy); err != nil {
+			return nil, err
+		}
+		h.sdk.InjectInterruptTextOpts(p.Source, p.Channel, h.resolveText(p), pubSdkInjectOpts(p.NoMemory, p.ContextPolicy, p.CleanerName))
 		return nil, nil
 	case MethodIOInjectTextNoMem:
 		var p injectParams
 		if err := unmarshal(params, &p); err != nil {
 			return nil, err
 		}
-		h.sdk.InjectTextNoMemory(p.Source, p.Channel, p.Text)
+		if err := validateContextPolicy("io.injectTextNoMem", p.ContextPolicy); err != nil {
+			return nil, err
+		}
+		// 旧 RPC 语义就是「不进记忆」，显式标志位只可能再叠上 context_policy。
+		h.sdk.InjectTextOpts(p.Source, p.Channel, h.resolveText(p), pubSdkInjectOpts(true, p.ContextPolicy, p.CleanerName))
 		return nil, nil
 	case MethodIOInjectSync:
 		var p injectParams
 		if err := unmarshal(params, &p); err != nil {
 			return nil, err
 		}
-		return map[string]interface{}{"reply": h.sdk.InjectInputSync(p.Source, p.Channel, p.Text)}, nil
+		if err := validateContextPolicy("io.injectInputSync", p.ContextPolicy); err != nil {
+			return nil, err
+		}
+		reply := h.sdk.InjectInputSyncOpts(p.Source, p.Channel, h.resolveText(p), pubSdkInjectOpts(p.NoMemory, p.ContextPolicy, p.CleanerName))
+		return map[string]interface{}{"reply": reply}, nil
 
 	case MethodIOInjectMedia:
 		var p injectMediaParams
 		if err := unmarshal(params, &p); err != nil {
 			return nil, err
 		}
-		h.sdk.InjectInputMedia(p.Source, p.Channel, p.Text, p.Blocks)
+		if err := validateContextPolicy("io.injectMedia", p.ContextPolicy); err != nil {
+			return nil, err
+		}
+		blocks, err := h.resolveBlocks(p)
+		if err != nil {
+			return nil, err
+		}
+		h.sdk.InjectInputMediaOpts(p.Source, p.Channel, p.Text, blocks, pubSdkInjectOpts(p.NoMemory, p.ContextPolicy, p.CleanerName))
 		return nil, nil
 
 	case MethodIOInjectMediaSync:
@@ -180,7 +235,14 @@ func (h *coreHandler) Handle(method string, params json.RawMessage) (interface{}
 		if err := unmarshal(params, &p); err != nil {
 			return nil, err
 		}
-		reply := h.sdk.InjectInputMediaSync(p.Source, p.Channel, p.Text, p.Blocks)
+		if err := validateContextPolicy("io.injectMediaSync", p.ContextPolicy); err != nil {
+			return nil, err
+		}
+		blocks, err := h.resolveBlocks(p)
+		if err != nil {
+			return nil, err
+		}
+		reply := h.sdk.InjectInputMediaSyncOpts(p.Source, p.Channel, p.Text, blocks, pubSdkInjectOpts(p.NoMemory, p.ContextPolicy, p.CleanerName))
 		return map[string]interface{}{"reply": reply}, nil
 
 	case MethodIOInjectInterruptMedia:
@@ -188,7 +250,14 @@ func (h *coreHandler) Handle(method string, params json.RawMessage) (interface{}
 		if err := unmarshal(params, &p); err != nil {
 			return nil, err
 		}
-		h.sdk.InjectInterruptMedia(p.Source, p.Channel, p.Text, p.Blocks)
+		if err := validateContextPolicy("io.injectInterruptMedia", p.ContextPolicy); err != nil {
+			return nil, err
+		}
+		blocks, err := h.resolveBlocks(p)
+		if err != nil {
+			return nil, err
+		}
+		h.sdk.InjectInterruptMediaOpts(p.Source, p.Channel, p.Text, blocks, pubSdkInjectOpts(p.NoMemory, p.ContextPolicy, p.CleanerName))
 		return nil, nil
 
 	// ---- 生命周期（原 case 8）----
@@ -311,9 +380,14 @@ func (h *coreHandler) Handle(method string, params json.RawMessage) (interface{}
 			return nil, errUnavailable("doc memory")
 		}
 		var p struct {
-			Doc *pubsdk.Doc `json:"doc"`
+			Doc    *pubsdk.Doc `json:"doc,omitempty"`
+			DocRef SharedRef   `json:"doc_ref,omitempty"`
 		}
 		if err := unmarshal(params, &p); err != nil {
+			return nil, err
+		}
+		// 文档全文可达几十 KB～数 MB，优先走共享内存。
+		if err := h.resolveJSONRef(p.DocRef, &p.Doc); err != nil {
 			return nil, err
 		}
 		if p.Doc == nil {
@@ -327,10 +401,19 @@ func (h *coreHandler) Handle(method string, params json.RawMessage) (interface{}
 			return nil, errUnavailable("doc memory")
 		}
 		var p struct {
-			Doc         *pubsdk.Doc              `json:"doc"`
-			Attachments []pubsdk.MediaAttachment `json:"attachments"`
+			Doc         *pubsdk.Doc              `json:"doc,omitempty"`
+			Attachments []pubsdk.MediaAttachment `json:"attachments,omitempty"`
+			DocRef      SharedRef                `json:"doc_ref,omitempty"`
+			AttachRef   SharedRef                `json:"attachments_ref,omitempty"`
 		}
 		if err := unmarshal(params, &p); err != nil {
+			return nil, err
+		}
+		// 文档正文 + 附件（含媒体二进制/data URL）都优先走共享内存。
+		if err := h.resolveJSONRef(p.DocRef, &p.Doc); err != nil {
+			return nil, err
+		}
+		if err := h.resolveJSONRef(p.AttachRef, &p.Attachments); err != nil {
 			return nil, err
 		}
 		if p.Doc == nil {
@@ -392,10 +475,16 @@ func (h *coreHandler) Handle(method string, params json.RawMessage) (interface{}
 			return nil, errUnavailable("knowledge")
 		}
 		var p struct {
-			Name    string `json:"name"`
-			Content string `json:"content"`
+			Name       string    `json:"name"`
+			Content    string    `json:"content,omitempty"`
+			ContentRef SharedRef `json:"content_ref,omitempty"`
 		}
 		if err := unmarshal(params, &p); err != nil {
+			return nil, err
+		}
+		// 知识正文可达数十 KB，优先走共享内存。内容是 JSON 字符串，
+		// 所以从 ref 读出后需再解一层。
+		if err := h.resolveJSONRef(p.ContentRef, &p.Content); err != nil {
 			return nil, err
 		}
 		return nil, kn.Add(p.Name, p.Content)
@@ -540,30 +629,141 @@ func (h *coreHandler) Handle(method string, params json.RawMessage) (interface{}
 		// 当前设计：子进程 Stop 时由内核统一清理其订阅。
 		return nil, nil
 
-	// ---- 多模态注入（C ABI 侧空实现）----
+	// ---- 共享槽池（内部传输层，见 protocol.go 注释）----
+	case MethodArenaAlloc:
+		var p ArenaAllocParams
+		if err := unmarshal(params, &p); err != nil {
+			return nil, err
+		}
+		ref, err := h.arenaAlloc(p.Size)
+		if err != nil {
+			return nil, err
+		}
+		return ArenaAllocResult{Ref: ref}, nil
+
+	case MethodArenaFree:
+		var p ArenaFreeParams
+		if err := unmarshal(params, &p); err != nil {
+			return nil, err
+		}
+		return nil, h.arenaFree(p.Ref)
+
+	// ---- 多模态注入 ----
+	//
+	// 之前这里是桩：返回“待共享段二进制通道落地”。后果是**子进程插件调
+	// SetToolBlocks 必然失败**（模板只 log 一行），只有内置插件能用。
+	// 现在媒体块经共享内存传递，该能力对两种插件形态等价。
 	case MethodIOSetToolBlocks:
-		// Part 4 扩展：二进制落 arena、Slice 描述符回传（§3.8）。
-		return nil, fmt.Errorf("%s: 多模态注入待共享段二进制通道落地", method)
+		var p injectMediaParams
+		if err := unmarshal(params, &p); err != nil {
+			return nil, err
+		}
+		blocks, err := h.resolveBlocks(p)
+		if err != nil {
+			return nil, err
+		}
+		if len(blocks) == 0 {
+			return nil, fmt.Errorf("%s: blocks 为空", method)
+		}
+		h.sdk.SetToolBlocks(blocks)
+		return nil, nil
 	}
 
 	return nil, fmt.Errorf("未知 method: %s", method)
 }
 
-type injectParams struct {
-	Source  string `json:"source"`
-	Channel string `json:"channel"`
-	Text    string `json:"text"`
+// resolveText 从 injectParams 中提取 text：优先使用 TextRef（共享槽），
+// 否则使用内联 Text。兼容新旧两种协议。
+//
+// 子进程分配自己的槽并在收到应答后释放，因此这里读到的一定是 busy 槽。
+func (h *coreHandler) resolveText(p injectParams) string {
+	if !p.TextRef.IsZero() {
+		data, err := h.host.Arena().Read(p.TextRef, h.host.Generation())
+		if err != nil {
+			return ""
+		}
+		return string(data)
+	}
+	return p.Text
 }
 
-// injectMediaParams 是带媒体注入的参数。
+type injectParams struct {
+	Source        string    `json:"source"`
+	Channel       string    `json:"channel"`
+	Text          string    `json:"text,omitempty"`
+	TextRef       SharedRef `json:"text_ref,omitempty"`
+	NoMemory      bool      `json:"no_memory,omitempty"`
+	ContextPolicy string    `json:"context_policy,omitempty"`
+	CleanerName   string    `json:"cleaner_name,omitempty"`
+}
+
+// injectMediaParams 是带媒体注入/工具块注入的参数。
 //
-// blocks 走 JSON（而非共享段二进制通道）：data URL 已经是 base64 文本，
-// 再套一层二进制传输不会更小，而 JSON 让这条路径与其他 method 一致。
+// blocks 优先经共享内存传递（BlocksRef）。旧的注释说“data URL 已是 base64
+// 文本、再套一层二进制不会更小，所以走 JSON”——那只算了体积，漏了两件更重要
+// 的事：① 内联时整份 base64 要在 RPC 报文里再编码/再拷贝一遍（一张本地生图
+// 可达数 MB），② 内容本体不在共享段里，插件回调就无法就地改写，只能各自
+// 持一份拷贝。共享内存的意义是后者。
+//
+// 没有 BlocksRef 时（直连 RPC 测试、arena 不可用）回退内联 Blocks。
 type injectMediaParams struct {
-	Source  string                `json:"source"`
-	Channel string                `json:"channel"`
-	Text    string                `json:"text"`
-	Blocks  []pubsdk.ContentBlock `json:"blocks"`
+	Source        string                `json:"source"`
+	Channel       string                `json:"channel"`
+	Text          string                `json:"text,omitempty"`
+	Blocks        []pubsdk.ContentBlock `json:"blocks,omitempty"`
+	BlocksRef     SharedRef             `json:"blocks_ref,omitempty"`
+	NoMemory      bool                  `json:"no_memory,omitempty"`
+	ContextPolicy string                `json:"context_policy,omitempty"`
+	CleanerName   string                `json:"cleaner_name,omitempty"`
+}
+
+// pubSdkInjectOpts 把 RPC 报文里的三个字段转成公开 SDK 的 InjectOptions。
+//
+// 单独提一个转换函数是为了让「默认值」只有一个出处：零值即记入记忆 + 不裁剪，
+// 与旧三参数注入等价。
+func pubSdkInjectOpts(noMemory bool, policy, cleanerName string) pubsdk.InjectOptions {
+	return pubsdk.InjectOptions{NoMemory: noMemory, ContextPolicy: policy, CleanerName: cleanerName}
+}
+
+// validateContextPolicy 校验上下文策略取值，与 tool.register 同一套规则。
+//
+// 空串等价于 none（不裁剪）。非法值必须报错而不是当成 none：把拼写错误
+// 静默降级成「不裁剪」会让调用方以为自己声明的裁剪在生效。
+func validateContextPolicy(where, policy string) error {
+	if !pubsdk.ValidContextPolicy(policy) {
+		return fmt.Errorf("%s: context_policy 只允许 none/prune，实际 %q", where, policy)
+	}
+	return nil
+}
+
+// resolveJSONRef 若 ref 非零则从共享内存读取并 JSON 反序列化到 out；
+// ref 为零时不动 out（调用方已填的内联值生效）。
+//
+// 供「大 payload 优先走共享内存、否则内联」的字段对共用。
+func (h *coreHandler) resolveJSONRef(ref SharedRef, out interface{}) error {
+	if ref.IsZero() {
+		return nil
+	}
+	data, err := h.host.Arena().Read(ref, h.host.Generation())
+	if err != nil {
+		return fmt.Errorf("读取共享内容失败: %w", err)
+	}
+	if err := json.Unmarshal(data, out); err != nil {
+		return fmt.Errorf("解析共享内容失败: %w", err)
+	}
+	return nil
+}
+
+// resolveBlocks 取出媒体块：优先共享内存，否则内联。
+func (h *coreHandler) resolveBlocks(p injectMediaParams) ([]pubsdk.ContentBlock, error) {
+	if p.BlocksRef.IsZero() {
+		return p.Blocks, nil
+	}
+	var blocks []pubsdk.ContentBlock
+	if err := h.resolveJSONRef(p.BlocksRef, &blocks); err != nil {
+		return nil, err
+	}
+	return blocks, nil
 }
 
 func unmarshal(params json.RawMessage, out interface{}) error {
@@ -580,11 +780,96 @@ func errUnavailable(what string) error {
 	return fmt.Errorf("%s 能力在当前内核实例中不可用", what)
 }
 
+// cleanerProxy 把进程内函数式 Cleaner 恢复成内核侧透明代理。
+// RPC 失败时返回原文：清洗是计算层优化，不能因插件暂时离线而丢失内容。
+func (h *coreHandler) cleanerProxy(scope, name string, enabled bool) (func(string) string, error) {
+	if !enabled {
+		return nil, nil
+	}
+	if h.invokeCleaner == nil {
+		return nil, fmt.Errorf("%s %s 声明 Cleaner，但清洗回调通道未就绪", scope, name)
+	}
+	return func(text string) string {
+		out, err := h.invokeCleanerText(scope, name, text)
+		if err != nil {
+			return text
+		}
+		return out
+	}, nil
+}
+
+// invokeCleanerText 完成一次 Cleaner 往返，使用与工具调用相同的 funccall 帧模型。
+//
+// 内核（caller）标定帧：输入段 + 结果预算段，插件在帧内写结果；
+// 只有结果超出预算时插件才向内核申请扩容块（插件只申请，回收由内核做）。
+func (h *coreHandler) invokeCleanerText(scope, name, text string) (string, error) {
+	arena := h.host.Arena()
+	gen := h.host.Generation()
+
+	frame, err := arena.Alloc(OwnerHost, len(text)+cleanerResultBudget, gen)
+	if err != nil {
+		return "", fmt.Errorf("%s %s Cleaner 分配调用帧失败: %w", scope, name, err)
+	}
+	defer func() { _ = arena.Free(OwnerHost, frame) }()
+
+	area, err := arena.Read(frame, gen)
+	if err != nil {
+		return "", err
+	}
+	copy(area[:len(text)], text)
+
+	params := CleanerInvokeParams{
+		Scope:    scope,
+		Name:     name,
+		Frame:    frame,
+		InputLen: uint32(len(text)),
+	}
+
+	res, err := h.invokeCleaner(params)
+	if err != nil {
+		return "", err
+	}
+
+	// 插件申请了扩容块：内核负责归还（插件只会申请，回收由内核做）。
+	if res.TextRef.IsZero() {
+		return "", fmt.Errorf("%s %s Cleaner 未返回结果引用", scope, name)
+	}
+	if res.TextRef.Flags&sharedRefFlagExpand != 0 {
+		defer func() { _ = arena.Free(OwnerHost, res.TextRef) }()
+	}
+	data, err := arena.Read(res.TextRef, gen)
+	if err != nil {
+		return "", err
+	}
+	return string(data), nil
+}
+
+// ---- 共享内存的 syscall 风格接口（插件 RPC）----
+//
+// 共享内存是内部实现，不向插件开发者暴露；模板运行时在传输层调用它们，
+// 公开 SDK 仍是普通字符串/Map。
+
+// arenaAlloc 给本插件分配一块共享内存。
+//
+// 用途：结果超出内核标定帧的预算时，插件据此申请扩容块。
+func (h *coreHandler) arenaAlloc(size uint32) (SharedRef, error) {
+	return h.host.Arena().Alloc(h.owner, int(size), h.host.Generation())
+}
+
+// arenaFree 归还本插件申请的块。
+//
+// 内核会走块链校验 offset 确实是某个已分配块的数据起点、owner 匹配，
+// 伪造引用不能改动分配器状态。
+func (h *coreHandler) arenaFree(ref SharedRef) error {
+	return h.host.Arena().Free(h.owner, ref)
+}
+
 // toolRegister 注册插件工具，handler 反向调用插件执行（原 case 1）。
 func (h *coreHandler) toolRegister(params json.RawMessage) (interface{}, error) {
 	var p struct {
-		Name string         `json:"name"`
-		Def  pubsdk.ToolDef `json:"def"`
+		Name       string         `json:"name"`
+		Def        pubsdk.ToolDef `json:"def"`
+		HasCleaner bool           `json:"has_cleaner"`
 	}
 	if err := unmarshal(params, &p); err != nil {
 		return nil, err
@@ -592,9 +877,16 @@ func (h *coreHandler) toolRegister(params json.RawMessage) (interface{}, error) 
 	if p.Name == "" {
 		return nil, fmt.Errorf("tool.register: 缺少 name")
 	}
+	if err := validateContextPolicy("tool.register", p.Def.ContextPolicy); err != nil {
+		return nil, err
+	}
 	p.Def.Plugin = h.name
-	// ToolDef.Cleaner 是函数，跨进程无法传递（§3.5）——与 C ABI 路径行为一致。
-	p.Def.Cleaner = nil
+	// 函数本身不进 JSON；has_cleaner 只声明其存在，实际执行回到插件进程。
+	cleaner, err := h.cleanerProxy(CleanerScopeTool, p.Name, p.HasCleaner)
+	if err != nil {
+		return nil, fmt.Errorf("tool.register: %w", err)
+	}
+	p.Def.Cleaner = cleaner
 
 	name := p.Name
 	return nil, h.sdk.RegisterTool(name, p.Def, func(args map[string]interface{}) (interface{}, error) {
@@ -637,10 +929,11 @@ func (h *coreHandler) stageRegister(params json.RawMessage) (interface{}, error)
 // 永远返回成功（§9.4，现网 2 次消息发不出而模型以为成功）。
 func (h *coreHandler) outputRegister(params json.RawMessage) (interface{}, error) {
 	var p struct {
-		Name string            `json:"name"`
-		Caps int               `json:"caps"`
-		Desc string            `json:"desc"`
-		Def  pubsdk.ChannelDef `json:"def"`
+		Name       string            `json:"name"`
+		Caps       int               `json:"caps"`
+		Desc       string            `json:"desc"`
+		Def        pubsdk.ChannelDef `json:"def"`
+		HasCleaner bool              `json:"has_cleaner"`
 	}
 	if err := unmarshal(params, &p); err != nil {
 		return nil, err
@@ -649,8 +942,12 @@ func (h *coreHandler) outputRegister(params json.RawMessage) (interface{}, error
 		return nil, fmt.Errorf("output.register: 缺少 name")
 	}
 	channel := p.Name
+	cleaner, err := h.cleanerProxy(CleanerScopeOutput, channel, p.HasCleaner)
+	if err != nil {
+		return nil, fmt.Errorf("output.register: %w", err)
+	}
 	return nil, h.sdk.RegisterOutputChannel(channel, p.Caps, p.Desc,
-		pubsdk.ChannelDef{NoMemory: p.Def.NoMemory},
+		pubsdk.ChannelDef{NoMemory: p.Def.NoMemory, Cleaner: cleaner},
 		func(args map[string]interface{}) (interface{}, error) {
 			return h.invokeOutput(channel, args)
 		})

@@ -84,6 +84,9 @@ var methodCapability = map[string]Capability{
 	MethodInputRegister:  CapCore,
 	MethodStageLock:      CapCore,
 	MethodStageUnlock:    CapCore,
+	// 共享槽池申请/归还：内部传输层能力，等同于核心基础能力。
+	MethodArenaAlloc: CapCore,
+	MethodArenaFree:  CapCore,
 	// 自身配置读写与元信息属基础能力
 	MethodSettingsGet:         CapCore,
 	MethodSettingsSet:         CapCore,

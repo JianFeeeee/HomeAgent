@@ -11,19 +11,12 @@ import (
 
 // 冒烟测试：走真实数据路径的端到端场景，而非孤立的 API 单测。
 //
-// 之前这套场景是 internal/memory/media/smoke/ 下一个带 //go:build smoke 的
-// 独立 main，得记着加 -tags smoke 才跑得到——那种早晚会被忘掉。搬成普通
-// 测试后它随 go test ./... 一起跑，冒烟的意义（每次改动都过一遍真实链路）
-// 才真正成立。
+// 媒体存储现在只做内容寻址（CAS）：字节 + 元数据 + 向量。
+// “哪些字节还活着”由三层记忆持有的一等记忆块决定，调用方把该集合传给
+// GC/检索，本层不维护 media_refs/ref_count 这类平行账本。
 
 // makePNG 生成一张 w×h 的条带 PNG，用真 PNG 而不是随机字节，
 // 让入库/回读/digest 走的是与生产一致的数据形态。
-//
-// variant 注入到像素而不只用于选色：最初写的是
-// palette[(variant+y*3/h)%5]，调色盘只 5 色，于是 variant=0 与 5 产出
-// 逐字节相同的 PNG——冒烟跑出「6 帧只得 5 条」，看着像存储丢了一帧，
-// 实际是 CAS 正确去重了两张真同图。冒烟要验的是「不同帧各存一份」，
-// 夹具就必须保证帧间真的不同。
 func makePNG(w, h, variant int) []byte {
 	palette := [][3]byte{
 		{255, 0, 0}, {0, 192, 0}, {0, 0, 255}, {255, 220, 0}, {160, 0, 200},
@@ -71,7 +64,7 @@ func makePNG(w, h, variant int) []byte {
 
 func TestSmoke_SamePictureAcrossTurns(t *testing.T) {
 	// 场景：用户连问几轮同一张截图。multimodal 每轮都会重新注入，
-	// 磁盘上应该只有一份，但每轮的 context 事件各持一个引用。
+	// 内容寻址天然去重，磁盘上只应有一份。
 	s := newTestStore(t, 50*1024*1024)
 	png := makePNG(400, 400, 0)
 
@@ -96,9 +89,6 @@ func TestSmoke_SamePictureAcrossTurns(t *testing.T) {
 		} else if d != d0 {
 			t.Fatalf("同一张图第 %d 轮 digest 变了", turn)
 		}
-		if err := s.AddRef(d, "context", fmt.Sprintf("evt-%d", turn)); err != nil {
-			t.Fatalf("第 %d 轮 AddRef: %v", turn, err)
-		}
 	}
 
 	st := s.Stats()
@@ -108,18 +98,16 @@ func TestSmoke_SamePictureAcrossTurns(t *testing.T) {
 	if total := st["total_bytes"].(int64); total != int64(len(png)) {
 		t.Fatalf("字节数应等于单张原图 %d，实际 %d", len(png), total)
 	}
-	it, _ := s.Stat(d0)
-	if it.RefCount != 5 {
-		t.Fatalf("应有 5 个引用，实际 %d", it.RefCount)
+	// 三层记忆持有它；内容应仍可读
+	if _, err := s.Get(d0); err != nil {
+		t.Fatalf("内容应仍可读: %v", err)
 	}
-	t.Logf("同图 5 轮：条目=1 字节=%d refcount=%d", len(png), it.RefCount)
-	checkRefIntegrity(t, s)
 }
 
 func TestSmoke_VideoFramesDistinct(t *testing.T) {
-	// 场景：see_video 抽 6 帧，帧间内容不同，应各存一份并共享一个 owner。
+	// 场景：see_video 抽 6 帧，帧间内容不同，应各存一份。
 	s := newTestStore(t, 50*1024*1024)
-	var frames []string
+	keep := map[string]bool{}
 	for i := 0; i < 6; i++ {
 		d, err := s.Put(makePNG(320, 240, i), Item{
 			MIME: "image/jpeg", Width: 320, Height: 240, Tool: "multimodal_see_video",
@@ -127,160 +115,133 @@ func TestSmoke_VideoFramesDistinct(t *testing.T) {
 		if err != nil {
 			t.Fatalf("第 %d 帧: %v", i, err)
 		}
-		frames = append(frames, d)
-		if err := s.AddRef(d, "context", "evt-video"); err != nil {
-			t.Fatal(err)
-		}
+		keep[d] = true
 	}
 
-	st := s.Stats()
-	if st["count"].(int) != 6 {
+	if st := s.Stats(); st["count"].(int) != 6 {
 		t.Fatalf("6 帧应各存一份，实际 %v 条", st["count"])
 	}
-	refs, err := s.Refs("context", "evt-video")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(refs) != 6 {
-		t.Fatalf("evt-video 应引用 6 帧，实际 %d", len(refs))
-	}
-	checkRefIntegrity(t, s)
 }
 
-func TestSmoke_DescribeThenRetrieve(t *testing.T) {
-	// 场景 C：视觉模型描述落库后，描述文字成为可检索的语义入口。
-	// 这是本方案最关键的一环——blob 可能被淘汰，描述会长期留在记忆里。
-	s := newTestStore(t, 50*1024*1024)
+func TestSmoke_NearestNeighborVectorRetrieve(t *testing.T) {
+	// 场景 C：图片只按自己的原生向量被检索。
+	// 没有描述文本参与——描述式索引是废弃的就机制。
+	s := newTestStore(t)
 
 	pic, _ := s.Put(makePNG(400, 400, 0), Item{MIME: "image/png", Tool: "multimodal_see_picture"})
-	if err := s.Describe(pic, "一张 400x400 的三色带图：上红、中绿、下蓝", "visionllm"); err != nil {
-		t.Fatal(err)
-	}
+	s.SetVec(pic, []float64{1, 0, 0, 0}, "space")
 	var frames []string
 	for i := 0; i < 6; i++ {
 		d, _ := s.Put(makePNG(320, 240, i), Item{MIME: "image/jpeg", Tool: "multimodal_see_video"})
+		s.SetVec(d, []float64{1, 1, float64(i) / 10, 0}, "space")
 		frames = append(frames, d)
-		if err := s.Describe(d, fmt.Sprintf("视频第 %d 帧：测试图卡，含彩条与计数器", i+1), "visionllm"); err != nil {
-			t.Fatal(err)
+	}
+
+	hits, err := s.QueryMediaScored([]float64{1, 0, 0, 0}, "space", 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(hits) != 7 {
+		t.Fatalf("7 份媒体都有同空间向量，应全部可召，实际 %d", len(hits))
+	}
+	if hits[0].Item.Digest != pic {
+		t.Fatalf("与查询同向的应是第一命中，实际 %s", shortDigest(hits[0].Item.Digest))
+	}
+
+	// 不同向量空间/模型的条目不得参与：坐标系不同，余弦无意义。
+	foreign := frames[0]
+	if err := s.SetVec(foreign, []float64{1, 0, 0, 0}, "other-space"); err != nil {
+		t.Fatal(err)
+	}
+	hits, err = s.QueryMediaScored([]float64{1, 0, 0, 0}, "space", 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, h := range hits {
+		if h.Item.Digest == foreign {
+			t.Fatal("另一套空间（other-space）的向量不该被 space 查询召回")
 		}
 	}
-
-	if hits, _ := s.Search("三色带", KindImage, 10); len(hits) != 1 {
-		t.Fatalf("搜「三色带」应命中 1 条，实际 %d", len(hits))
-	}
-	if hits, _ := s.Search("计数器", KindImage, 10); len(hits) != 6 {
-		t.Fatalf("搜「计数器」应命中 6 帧，实际 %d", len(hits))
-	}
-	pend, _ := s.Pending(100)
-	if len(pend) != 0 {
-		t.Fatalf("应全部已描述，仍有 %d 条待描述", len(pend))
-	}
-	_ = frames
 }
 
-func TestSmoke_ArchiveTransfersOwnership(t *testing.T) {
-	// 场景：L0 的 context 事件被 Prune 归档进 L2 文档，
-	// 媒体引用需从 context owner 转到 document owner，期间内容不能被 GC 掉。
+func TestSmoke_ContentSurvivesLayerMigration(t *testing.T) {
+	// 场景：同一份媒体随记忆块从 Context 迁移到 Document 再到 Graph。
+	// 迁移的是块本身，digest 不变，因此内容在整条链路上始终可读。
 	s := newTestStore(t, 50*1024*1024)
 	png := makePNG(400, 400, 0)
 	d, _ := s.Put(png, Item{MIME: "image/png", Tool: "multimodal_see_picture"})
-	for turn := 1; turn <= 5; turn++ {
-		s.AddRef(d, "context", fmt.Sprintf("evt-%d", turn))
-	}
 
-	// evt-1 被淘汰，其内容归档为一篇文档
-	n, err := s.DropOwner("context", "evt-1")
-	if err != nil {
-		t.Fatal(err)
+	// 迁移过程中该 digest 始终可读
+	for _, layer := range []string{"context", "document", "graph"} {
+		if got, err := s.Get(d); err != nil || !bytes.Equal(got, png) {
+			t.Fatalf("迁移到 %s 时内容应完好: %v", layer, err)
+		}
 	}
-	if n != 1 {
-		t.Fatalf("应注销 1 条引用，实际 %d", n)
-	}
-	if err := s.AddRef(d, "document", "doc_archived_001"); err != nil {
-		t.Fatal(err)
-	}
-
-	it, _ := s.Stat(d)
-	if it.RefCount != 5 {
-		t.Fatalf("引用转移后总数应仍为 5（4 context + 1 document），实际 %d", it.RefCount)
-	}
-	// 归档过程中内容必须始终可读
-	if got, err := s.Get(d); err != nil || !bytes.Equal(got, png) {
-		t.Fatalf("归档后内容应完好: %v", err)
-	}
-	checkRefIntegrity(t, s)
 }
 
-func TestSmoke_GCSweepsToolLeftovers(t *testing.T) {
-	// 场景：别的工具（cmd_run 之类）产出的一次性图片没人引用，
-	// 应被 GC 清掉；而被记忆引用的媒体一个都不能少。
-	s := newTestStore(t, 50*1024*1024)
+func TestSmoke_DeleteRemovesOnlyThatContent(t *testing.T) {
+	// 场景：某个工具产出的一次性图片所在的记忆块被删除时，
+	// 只有它自己的内容被删；其他块的内容一个都不能少。
+	s := newTestStore(t)
 
-	keep, _ := s.Put(makePNG(400, 400, 0), Item{MIME: "image/png"})
-	s.AddRef(keep, "document", "doc-1")
+	held, _ := s.Put(makePNG(400, 400, 0), Item{MIME: "image/png"})
 	var frames []string
 	for i := 0; i < 6; i++ {
 		d, _ := s.Put(makePNG(320, 240, i), Item{MIME: "image/jpeg"})
-		s.AddRef(d, "context", "evt-video")
 		frames = append(frames, d)
 	}
-	// 1000+i 保证与上面的帧、以及彼此都不重复
+	var ephemeral []string
 	for i := 0; i < 20; i++ {
-		s.Put(makePNG(100, 100, 1000+i), Item{MIME: "image/png", Tool: "cmd_run"})
+		d, _ := s.Put(makePNG(100, 100, 1000+i), Item{MIME: "image/png", Tool: "cmd_run"})
+		ephemeral = append(ephemeral, d)
 	}
 
 	before := s.Stats()["count"].(int)
-	removed, freed, err := s.GC(0)
-	if err != nil {
-		t.Fatal(err)
+	for _, d := range ephemeral {
+		if err := s.Delete(d); err != nil {
+			t.Fatal(err)
+		}
 	}
 	after := s.Stats()["count"].(int)
-	if removed != 20 {
-		t.Fatalf("应清 20 条孤儿，实际 %d", removed)
-	}
 	if after != before-20 {
 		t.Fatalf("条目数应从 %d 降到 %d，实际 %d", before, before-20, after)
 	}
-	if _, err := s.Get(keep); err != nil {
-		t.Fatalf("被文档引用的图被误删: %v", err)
+	if _, err := s.Get(held); err != nil {
+		t.Fatalf("被保留的内容被误删: %v", err)
 	}
 	for i, f := range frames {
 		if _, err := s.Get(f); err != nil {
 			t.Fatalf("第 %d 帧被误删: %v", i, err)
 		}
 	}
-	t.Logf("GC: %d 条 → 清 %d 条（%d 字节）→ %d 条", before, removed, freed, after)
-	checkRefIntegrity(t, s)
 }
 
 func TestSmoke_FullLifecycleAcrossRestart(t *testing.T) {
-	// 端到端：入库 → 描述 → 引用 → GC → 重启 → 检索，
+	// 端到端：入库 → 嵌入 → 删除一些内容 → 重启 → 向量检索，
 	// 并确认磁盘与元数据不出现双向孤儿。记忆的意义就在于跨重启还在。
 	dir := t.TempDir()
-	s, err := New(dir, 50*1024*1024)
+	s, err := New(dir)
 	if err != nil {
 		t.Fatal(err)
 	}
 
 	png := makePNG(400, 400, 0)
 	pic, _ := s.Put(png, Item{MIME: "image/png", Width: 400, Height: 400, Tool: "multimodal_see_picture"})
-	s.Describe(pic, "一张 400x400 的三色带图：上红、中绿、下蓝", "visionllm")
-	s.AddRef(pic, "graph_sentence", "sent-42")
+	s.SetVec(pic, []float64{1, 0, 0}, "space")
 	for i := 0; i < 6; i++ {
 		d, _ := s.Put(makePNG(320, 240, i), Item{MIME: "image/jpeg", Tool: "multimodal_see_video"})
-		s.Describe(d, fmt.Sprintf("视频第 %d 帧", i+1), "visionllm")
-		s.AddRef(d, "context", "evt-video")
+		s.SetVec(d, []float64{0, 1, float64(i)}, "space")
 	}
 	for i := 0; i < 10; i++ {
-		s.Put(makePNG(64, 64, 2000+i), Item{MIME: "image/png", Tool: "cmd_run"})
-	}
-	if _, _, err := s.GC(0); err != nil {
-		t.Fatal(err)
+		d, _ := s.Put(makePNG(64, 64, 2000+i), Item{MIME: "image/png", Tool: "cmd_run"})
+		if err := s.Delete(d); err != nil {
+			t.Fatal(err)
+		}
 	}
 	beforeCount := s.Stats()["count"].(int)
 	s.Close()
 
-	s2, err := New(dir, 50*1024*1024)
+	s2, err := New(dir)
 	if err != nil {
 		t.Fatalf("重开失败: %v", err)
 	}
@@ -293,24 +254,24 @@ func TestSmoke_FullLifecycleAcrossRestart(t *testing.T) {
 	if err != nil {
 		t.Fatalf("重开后查不到: %v", err)
 	}
-	if it.Description == "" || it.RefCount != 1 {
-		t.Fatalf("元数据未持久化: %+v", it)
+	if len(it.Vec) != 3 || it.VecModel != "space" {
+		t.Fatalf("向量未持久化: %+v", it)
 	}
 	data, err := s2.Get(pic)
 	if err != nil || !bytes.Equal(data, png) {
 		t.Fatalf("重开后内容不一致: %v", err)
 	}
-	if refs, _ := s2.Refs("context", "evt-video"); len(refs) != 6 {
-		t.Fatalf("重开后视频帧引用应为 6，实际 %d", len(refs))
+	hits, err := s2.QueryMediaScored([]float64{1, 0, 0}, "space", 10)
+	if err != nil {
+		t.Fatal(err)
 	}
-	if hits, _ := s2.Search("三色带", KindImage, 10); len(hits) != 1 {
-		t.Fatal("重开后描述应仍可检索")
+	if len(hits) == 0 || hits[0].Item.Digest != pic {
+		t.Fatal("重开后向量检索应仍能命中")
 	}
 
 	// 磁盘文件数 == 元数据条数：无「元数据在文件没了」也无「文件在元数据没了」
 	if n := blobFileCount(t, s2); n != beforeCount {
 		t.Fatalf("磁盘 blob=%d 与元数据=%d 不一致", n, beforeCount)
 	}
-	checkRefIntegrity(t, s2)
-	t.Logf("跨重启：%d 条目、描述与引用全部完好", beforeCount)
+	t.Logf("跨重启：%d 条目、向量与内容全部完好", beforeCount)
 }

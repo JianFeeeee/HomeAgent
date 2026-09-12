@@ -292,8 +292,9 @@ func (p *Plugin) periodicCheck() {
 				continue
 			}
 			if p.sdk != nil {
-				p.sdk.InjectInterruptText(p.name, p.name,
-					fmt.Sprintf("注意，你还有%d条待办未完成，请检查", n))
+				// NoMemory：这是定时提醒，不是记忆内容。
+				p.sdk.InjectInterruptTextOpts(p.name, p.name,
+					fmt.Sprintf("注意，你还有%d条待办未完成，请检查", n), sdk.InjectOptions{NoMemory: true})
 			}
 		}
 	}

@@ -9,6 +9,42 @@ import (
 	agentAPI "gitcode.com/JianFeeeee/HomeAgent/internal/agent/api"
 )
 
+// childTaskState 是一个子任务的生命周期状态。
+//
+// delivered 代替了早期的“读到即删”：完成通知会写进持久上下文
+// （formatMergedTimeline 每轮重新注入），模型之后还会再查。读一次就删的
+// 话，第二次查询返回“不存在或已过期”——那是一个**永远不会成功的可操作
+// 信号**，模型只能一遍遍地重试/汇报，循环永不结束。
+type childTaskState struct {
+	running   bool
+	result    string
+	delivered bool  // 结果是否已交付过（用于幂等应答）
+	seq       int64 // 完成顺序，用于有界淘汰
+}
+
+// maxRetainedChildTasks 是保留的已完成子任务上限（防结果无限占用内存）。
+const maxRetainedChildTasks = 20
+
+// evictChildTasksLocked 淘汰最旧的已完成子任务。调用方必须持有 childMu。
+func (a *Agent) evictChildTasksLocked() {
+	for len(a.childTasks) > maxRetainedChildTasks {
+		oldestID := ""
+		var oldestSeq int64
+		for id, st := range a.childTasks {
+			if st.running {
+				continue
+			}
+			if oldestID == "" || st.seq < oldestSeq {
+				oldestID, oldestSeq = id, st.seq
+			}
+		}
+		if oldestID == "" {
+			return // 剩下全是运行中的，不淘汰
+		}
+		delete(a.childTasks, oldestID)
+	}
+}
+
 func (a *Agent) executeSpawnChild(tc agentAPI.ToolCall) string {
 	task, _ := tc.Arguments["task"].(string)
 	if task == "" {
@@ -41,11 +77,11 @@ func (a *Agent) executeSpawnChild(tc agentAPI.ToolCall) string {
 	}
 
 	a.childMu.Lock()
-	a.childRunning[taskID] = true
+	a.childTasks[taskID] = &childTaskState{running: true}
 	a.childMu.Unlock()
 	go a.runChildTask(taskID, task, parentChannel, maxTurns)
 
-	return fmt.Sprintf("子任务已启动（ID: %s，最多 %d 轮），完成后会自动通知你，届时请使用 child_result 工具查看输出", taskID, maxTurns)
+	return fmt.Sprintf("子任务已启动（ID: %s，最多 %d 轮）。完成后会自动通知你，届时用 child_result 查看输出即可（**只需查询一次**）", taskID, maxTurns)
 }
 
 // defaultChildMaxTurns 子 Agent 默认工具轮数（可被 spawn_child 的 max_turns 参数覆盖）。
@@ -126,19 +162,30 @@ func (a *Agent) runChildTask(taskID, task string, parentChannel string, maxTurns
 	}
 
 	a.childMu.Lock()
-	a.childResults[taskID] = finalResult
-	delete(a.childRunning, taskID)
+	if st := a.childTasks[taskID]; st != nil {
+		st.running = false
+		st.result = finalResult
+		a.childSeq++
+		st.seq = a.childSeq
+	}
+	a.evictChildTasksLocked()
 	a.childMu.Unlock()
 
 	log.Printf("[child] %s done: %s", taskID, truncateStr(finalResult, 100))
 
-	notification := fmt.Sprintf("子任务 %s 已完成，请调用 child_result 工具查看输出", taskID)
+	notification := fmt.Sprintf("子任务 %s 已完成。请用 child_result 工具查看输出（只需查询一次；重复查询不会返回失败）。", taskID)
 	a.injectSelfChannel(selfInputMsg{
 		text:    notification,
 		channel: parentChannel, // 回到父对话通道，正常处理（写入上下文 + emit 响应）
 	})
 }
 
+// executeChildResultTool 取回子任务结果。
+//
+// **幂等**：结果不会被“读到即删”，重复查询返回同一结果或一条明确提示。
+// 这一点至关重要——完成通知会长期留在持久上下文里（formatMergedTimeline
+// 每轮重新注入），如果重复查询返回“不存在”这种失败信号，模型会认定任务
+// 未完成而无限重试（实测单轮 35 次工具调用、持续 514 秒）。
 func (a *Agent) executeChildResultTool(tc agentAPI.ToolCall) string {
 	taskID, _ := tc.Arguments["task_id"].(string)
 	if taskID == "" {
@@ -146,18 +193,25 @@ func (a *Agent) executeChildResultTool(tc agentAPI.ToolCall) string {
 	}
 
 	a.childMu.Lock()
-	result, ok := a.childResults[taskID]
-	if ok {
-		delete(a.childResults, taskID)
+	st, ok := a.childTasks[taskID]
+	if !ok {
 		a.childMu.Unlock()
-		return fmt.Sprintf("【子任务 %s 结果】\n%s", taskID, result)
+		return fmt.Sprintf("子任务 %s 不存在：从未创建该 ID（请核对 spawn_child 返回的 ID 拼写）", taskID)
 	}
-	if a.childRunning[taskID] {
+	if st.running {
 		a.childMu.Unlock()
 		return fmt.Sprintf("子任务 %s 仍在运行中，尚未完成。请等待完成通知后再查询。", taskID)
 	}
+	first := !st.delivered
+	st.delivered = true
+	result := st.result
 	a.childMu.Unlock()
-	return fmt.Sprintf("子任务 %s 不存在或已过期", taskID)
+
+	if first {
+		return fmt.Sprintf("【子任务 %s 结果】\n%s", taskID, result)
+	}
+	// 重复查询不是失败：明确告诉模型“任务已完成、结果已给过”，让它停止重试。
+	return fmt.Sprintf("【子任务 %s 已完成】结果已在上文提供（见先前的 child_result 工具结果），无需重复查询；请直接基于上文结果继续。", taskID)
 }
 
 func (a *Agent) executeLLMTool(tc agentAPI.ToolCall) string {

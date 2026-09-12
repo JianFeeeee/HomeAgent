@@ -5,52 +5,52 @@ import (
 	"log"
 	"os"
 	"sync"
+	"sync/atomic"
 
 	pubsdk "gitcode.com/JianFeeeee/homeagent-sdk/sdk"
 )
 
-// Host 持有**被全部子进程插件共享的一块 StageContext 段**，是共享内存数据面的
+// Host 持有**被全部子进程插件共享的统一内存区域**，是共享数据面的
 // 所有权中心（§3.3/§3.4）。
 //
-// ❗ 为什么必须共享一块段（这是一个容易走错的关键点）：
-// 若每个插件各持一块段，则「内核 ctx → 段 → 插件改 → 回读 ctx」在多插件下退化成
+// ❗ 为什么必须共享一块区域：
+// 若每个插件各持一块段，则「内核 ctx → 段 → 插件改 → 回读 ctx」退化成
 // 副本模型——两个插件各写各的段、各自回读，最后回读者覆盖前者，
 // lost update 原样复现（§8.4 实测 35.8~36.8%）。
-// 实验 8 的做法是 5 个 worker 进程 mmap **同一个 memfd**，本实现与之一致。
 //
-// 生命周期：Host 由 registry 创建一次，随内核存活；每个插件 spawn 时经
-// ExtraFiles 拿到同一 memfd（fd 3），mmap 后即看到同一份物理页。
+// 统一区域（§13.1）：单 memfd 包含 SuperBlock + StageContext + EvtRing
+// + Exchange Arena。子进程经 fd 3 mmap 同一 memfd → 同一份物理页，
+// 区域头 SuperBlock 告知各 segment 的偏移与大小。
 //
-// 另外持有事件环段（§3.6）：独立于 StageContext 的事件通知通道，
-// 子进程从 eventfd 感知新事件并从 mmap 读 slot。
-// fd 分配：fd 3 = StageContext，fd 4 = 事件环，fd 5 = eventfd。
+// fd 分配：fd 3 = 统一区域，fd 4 = eventfd。
 type Host struct {
 	memfd   *os.File
-	data    []byte
-	seg     *Segment
-	shmSize int
+	data    []byte         // 统一区域完整 mmap
+	unified *unifiedRegion // SuperBlock 解析结果
+	seg     *Segment       // StageContext segment（位于 unified ctxData）
+	shmSize int            // 统一区域总大小
 
-	// 事件环段（独立于 StageContext）
-	evtfd       *os.File // Unix：eventfd/pipe 读端（fd 5）。Windows 为 nil，用 evtNotifyFd 。
-	evtNotifyFd int      // 通知句柄的平台无关标识（Unix 是真 fd，Windows 是伪 fd）
-	evtRing     *EvtRing // 内核侧事件环句柄
-	evtRingFd   *os.File // Unix：事件环段 memfd（fd 4）。Windows 为 nil（命名段）。
-	evtData     []byte   // 事件环段 mmap 数据
-
-	// evtSubscriber 由 internal/plugin 注入，coreHandler 用它接子进程的 events.subscribe 请求。
-	// proc 包不依赖 internal/plugin（循环依赖），故用接口类型存储。
-	evtSubscriber EvtRingSubscriber
-
-	locks   *lockRegistry
-	stageMu sync.Mutex
-	coordMu sync.Mutex
-	coord   *stageCoordinator
-
-	// sup 是内核侧唯一的子进程台账，与共享段同生命周期。
+	// arena 是跨进程共享内存分配器（§13.2 重设计），由内核独占管理：
+	// 插件通过 RPC 申请/归还，不做任何分配决策。
 	//
-	// 放在 Host 而不是 registry 的理由：能拿到 Host 的地方就能拿到台账，
-	// 而 Host 本就是「全部子进程插件共享的那一份内核侧状态」。
-	sup *Supervisor
+	// 分配与回收都在内核进程内进行，一把 mu 即可保证安全，
+	// 不存在跨进程分配器那种“共享游标被两个进程各自更新”的竞态。
+	arena *arenaRegion
+
+	// nextOwner 给每个插件进程分配一个不透明 owner ID，供 ReclaimOwner 使用。
+	nextOwner atomic.Uint32
+
+	// 事件通知（独立于共享段）
+	evtfd       *os.File // Unix：eventfd/pipe 读端（fd 4）。Windows 为 nil。
+	evtNotifyFd int      // 通知句柄的平台无关标识
+	evtRing     *EvtRing // 内核侧事件环句柄（位于 unified evtData）
+
+	evtSubscriber EvtRingSubscriber
+	locks         *lockRegistry
+	stageMu       sync.Mutex
+	coordMu       sync.Mutex
+	coord         *stageCoordinator
+	sup           *Supervisor
 }
 
 // NewHost 创建共享段（平台层 allocShm + 布局初始化）。
@@ -63,22 +63,48 @@ type Host struct {
 // 三者共同点：全部插件看到同一份物理页，段内一律用相对偏移而非指针
 // （实验 2 已验证各进程 mmap 到不同虚拟地址时偏移解引用仍正确）。
 func NewHost() (*Host, error) {
-	memfd, data, err := allocShm(shmDefaultSize)
+	// 统一区域大小：SuperBlock + StageContext + EvtRing + Exchange Arena
+	//
+	// +8 是 arena 基址 8 字节对齐的 padding 余量：arenaOff 向上取整可能
+	// 吃掉最多 4 字节，预留 8 字节保证 arenaCap 不会小于 arenaPublishSize。
+	unifiedSize := superBlockSize + shmDefaultSize + evtTotalSize + int(arenaPublishSize) + 8
+	memfd, data, err := allocShm(unifiedSize)
 	if err != nil {
 		return nil, err
 	}
-	seg, err := NewSegment(data)
+
+	// 初始化 SuperBlock + 两个 segment
+	ur, err := initUnifiedRegion(data, shmDefaultSize, evtTotalSize)
 	if err != nil {
 		freeShm(memfd, data)
 		return nil, err
 	}
 
-	// 创建事件环段（独立于 StageContext）
-	evtRingFd, evtData, efd, err := allocEvtRing()
+	// 初始化 Exchange Arena（内核独占的变长块分配器）
+	arena, err := initArena(data, ur.arenaOff, ur.arenaCap)
 	if err != nil {
 		freeShm(memfd, data)
-		return nil, fmt.Errorf("事件环: %w", err)
+		return nil, fmt.Errorf("共享内存分配器初始化: %w", err)
 	}
+	if used, total := arena.Stats(); used != 0 || total != ur.arenaCap {
+		freeShm(memfd, data)
+		return nil, fmt.Errorf("分配器初始化异常：used=%d total=%d", used, total)
+	}
+
+	// 创建 StageContext segment（位于 SuperBlock 之后）
+	seg, err := NewSegment(ur.ctxData())
+	if err != nil {
+		freeShm(memfd, data)
+		return nil, err
+	}
+
+	// 初始化 EvtRing 子区域头部（magic/version/cap）
+	evtData := ur.evtData()
+	putU32(evtData[evtOffMagic:], evtRingMagic)
+	putU32(evtData[evtOffVersion:], evtRingVersion)
+	putU32(evtData[evtOffCap:], evtRingCap)
+
+	// 创建 EvtRing segment（位于 StageContext 之后）
 	evtRing, err := NewEvtRing(evtData)
 	if err != nil {
 		freeShm(memfd, data)
@@ -86,17 +112,24 @@ func NewHost() (*Host, error) {
 	}
 	evtRing.Init()
 
+	// eventfd 独立于共享段，仍为单独 fd
+	efd, err := evtfdCreate()
+	if err != nil {
+		freeShm(memfd, data)
+		return nil, fmt.Errorf("创建 eventfd: %w", err)
+	}
+
 	return &Host{
 		sup:         NewSupervisor(),
 		memfd:       memfd,
 		data:        data,
+		unified:     ur,
 		seg:         seg,
-		shmSize:     shmDefaultSize,
+		shmSize:     unifiedSize,
+		arena:       arena,
 		evtfd:       evtfdReadFile(efd),
 		evtNotifyFd: efd,
 		evtRing:     evtRing,
-		evtRingFd:   evtRingFd,
-		evtData:     evtData,
 		locks:       &lockRegistry{},
 	}, nil
 }
@@ -123,14 +156,7 @@ func (h *Host) Close() error {
 		if err := freeShm(h.memfd, h.data); err != nil && firstErr == nil {
 			firstErr = err
 		}
-		h.data, h.memfd = nil, nil
-	}
-	if h.evtData != nil {
-		if h.evtRingFd != nil {
-			h.evtRingFd.Close()
-			h.evtRingFd = nil
-		}
-		h.evtData = nil
+		h.data, h.memfd, h.unified = nil, nil, nil
 	}
 	if h.evtfd != nil {
 		h.evtfd.Close()
@@ -301,6 +327,20 @@ func (c *stageCoordinator) finish(sc *pubsdk.StageContext, written bool) error {
 	return nil
 }
 
+// Arena 返回跨进程共享槽池。
+func (h *Host) Arena() *arenaRegion { return h.arena }
+
+// Generation 返回统一区域当前 generation（SharedRef 校验用）。
+func (h *Host) Generation() uint64 { return h.unified.generation() }
+
+// NextOwnerID 分配一个插件专用的槽 owner ID。
+//
+// 从 1 开始（OwnerHost=0 保留给内核），单调递增，不会重复。
+func (h *Host) NextOwnerID() uint32 { return h.nextOwner.Add(1) }
+
+// ReclaimOwner 回收某个 owner 名下所有槽（插件退出时调用）。
+func (h *Host) ReclaimOwner(owner uint32) int { return h.arena.ReclaimOwner(owner) }
+
 // ShmSize 返回共享段大小（供诊断/日志）。
 func (h *Host) ShmSize() int { return h.shmSize }
 
@@ -321,7 +361,7 @@ func (h *Host) EvtNotifyFd() int { return h.evtNotifyFd }
 func (h *Host) SetEvtSubscriber(sub EvtRingSubscriber) { h.evtSubscriber = sub }
 
 // EvtData 返回事件环段 mmap 数据（子进程消费者用）。
-func (h *Host) EvtData() []byte { return h.evtData }
+func (h *Host) EvtData() []byte { return h.unified.evtData() }
 
 // EvtfdReadFile 返回 eventfd 的 *os.File（供子进程读取消费）。
 func (h *Host) EvtfdReadFile() *os.File { return h.evtfd }

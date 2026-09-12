@@ -482,9 +482,30 @@ func (r *ConfigRegistry) SeedDefaults(dataDir string) {
 }
 
 func (r *ConfigRegistry) seedDBValues(dataDir string) {
-	var count int
-	r.db.QueryRow(`SELECT COUNT(*) FROM config`).Scan(&count)
-	if count > 0 {
+	// 新鲜度判据不能是「config 表非空」。
+	//
+	// 发行包的 postinst 会先跑 setup.sh → initconfig，而 initconfig 会写一行
+	// webui.listen_addr。于是**全新安装**的 DB 看上去"已经有内容"，整个默认值
+	// 播种被跳过：core.plugin.dir、core.memory.*、多模态 provider 一个都没写。
+	// 现场表现是装完 0 个插件、随包的模型与运行库成死重量。
+	//
+	// 也不能改成"每次都补缺键"：老安装升级时被注进新默认值，会让它突然
+	// 去加载一个 1.8GB 的模型——那是刻意要避免的行为（静默变重）。
+	//
+	// 故用显式标记区分三种情形：
+	//   有标记               → 已经播过种，直接返回
+	//   无标记但有 core.daemon.data_dir → 老安装（本键历来由播种写入），
+	//                        只补标记、不播种
+	//   两者都没有           → 全新安装，播种并打标记
+	const markerKey = "core.internal.seed_version"
+	var hasMarker, hasLegacy int
+	r.db.QueryRow(`SELECT COUNT(*) FROM config WHERE key = ?`, markerKey).Scan(&hasMarker)
+	if hasMarker > 0 {
+		return
+	}
+	r.db.QueryRow(`SELECT COUNT(*) FROM config WHERE key = 'core.daemon.data_dir'`).Scan(&hasLegacy)
+	if hasLegacy > 0 {
+		r.db.Exec(`INSERT OR IGNORE INTO config (key, value) VALUES (?, ?)`, markerKey, "1")
 		return
 	}
 
@@ -545,6 +566,13 @@ func (r *ConfigRegistry) seedDBValues(dataDir string) {
 	set("core.memory.text", filepath.Join(dataDir, "memory", "text"))
 	set("core.memory.documents", filepath.Join(dataDir, "memory", "documents"))
 	set("core.memory.media.dir", filepath.Join(dataDir, "memory", "media"))
+	// 发行版默认启用本地向量空间。用 chineseclip（text+image、512 维、实测
+	// 常驻 1.15GB、Apache-2.0）而不是 qwen3vl（9.4GB）：多数机器装不下后者。
+	// 产物不在仓库里，用 scripts/export_chineseclip_onnx.py 生成到这个路径；
+	// 产物缺失时 homed 会打印明确错误并退回 fastText 文本路径（不静默假装启用）。
+	set("core.memory.multimodal_space.provider", "chineseclip")
+	set("core.memory.multimodal_space.options.model_dir",
+		filepath.Join(dataDir, "models", "chinese-clip-vit-b16-onnx"))
 	set("core.knowledge.path", filepath.Join(dataDir, "knowledge"))
 	set("core.log.path", filepath.Join(dataDir, "log"))
 
@@ -596,6 +624,8 @@ WebUI 概览页展示你的立绘，可通过 /mascot.webp 直接访问。如输
 	set("core.input_processing.audio.fallback_provider", "")
 	set("core.input_processing.audio.fallback_model", "")
 	set("core.input_processing.audio.describe_prompt", "请转写这段音频的内容。")
+
+	set(markerKey, "1")
 
 	tx.Commit()
 }
@@ -649,12 +679,16 @@ func (r *ConfigRegistry) seedCoreDefs(dataDir string) {
 	reg(ConfigDef{Key: "core.memory.graph", Default: filepath.Join(dataDir, "memory", "graph.db"), Type: "string", DisplayName: "图数据库路径", Description: "长期记忆（图数据库）存储路径", Category: "paths"})
 	reg(ConfigDef{Key: "core.memory.text", Default: filepath.Join(dataDir, "memory", "text"), Type: "string", DisplayName: "文本记忆路径", Description: "短期文本记忆存储目录", Category: "paths"})
 	reg(ConfigDef{Key: "core.memory.documents", Default: filepath.Join(dataDir, "memory", "documents"), Type: "string", DisplayName: "文档记忆路径", Description: "文档记忆存储目录", Category: "paths"})
-	reg(ConfigDef{Key: "core.memory.media.enabled", Default: "true", Type: "bool", DisplayName: "媒体记忆", Description: "把对话里出现的图片/音频按内容摘要（sha256）落盘去重，记忆各层只记 digest。关闭后媒体仅在当前对话内可见，下一轮起只剩路径或 alt 文本", Category: "memory"})
+	reg(ConfigDef{Key: "core.memory.media.enabled", Default: "true", Type: "bool", DisplayName: "媒体记忆", Description: "把对话里出现的图片/音频变成一等记忆块，内容按 sha256 落盘去重。关闭后媒体仅在当前对话内可见，下一轮起只剩路径或 alt 文本", Category: "memory"})
 	reg(ConfigDef{Key: "core.memory.media.dir", Default: filepath.Join(dataDir, "memory", "media"), Type: "string", DisplayName: "媒体存储路径", Description: "媒体内容寻址存储目录（内含 media.db 与 blobs/）", Category: "paths"})
-	reg(ConfigDef{Key: "core.memory.media.max_mb", Default: "2048", Type: "int", DisplayName: "媒体容量上限(MB)", Description: "超限时按最后访问时间淘汰无引用的媒体；被记忆引用的内容即使超限也不会删除（宁可超限也不断引用）。描述文本不受此限，淘汰后仍可检索", Category: "memory"})
-	reg(ConfigDef{Key: "core.memory.media.gc_interval", Default: "6h", Type: "duration", DisplayName: "媒体 GC 间隔", Description: "清理无引用媒体的周期；0 表示不自动清理", Category: "memory"})
-	reg(ConfigDef{Key: "core.memory.media.gc_min_age", Default: "1h", Type: "duration", DisplayName: "媒体 GC 保护期", Description: "新入库媒体在此时长内不被清理。刚落盘还没来得及挂到记忆上的项引用计数也是 0，靠这个保护期避免被误删", Category: "memory"})
-	reg(ConfigDef{Key: "core.memory.media.describe_on_ingest", Default: "false", Type: "bool", DisplayName: "自动描述媒体", Description: "后台用视觉/音频模型给未描述的媒体生成文字描述。**描述文本才是持久语义记忆**——blob 会被容量 GC 淘汰，描述会随记忆各层一直留存并可检索。代价是消耗视觉模型配额（单张图实测约 10s），故默认关闭；开启后每 30s 最多处理 4 条，不跟对话抢额度", Category: "memory"})
+	reg(ConfigDef{Key: "core.memory.multimodal_space.provider", Default: "chineseclip", Type: "string", DisplayName: "多模态向量 provider", Description: "从公共 provider 注册表（pkg/embedding）按名字打开的多模态向量空间。内置：chineseclip（默认，text+image，512 维，实测常驻 1.15GB，Apache-2.0）、qwen3vl（text+image，2048 维，常驻 9.4GB；视频已实现但未纳入契约）、http（外部向量 API）。也可是第三方注册的名字。两者均需 onnxruntime 构建标签。留空禁用多模态向量检索，只保留 fastText 文本路径。provider 的模型文件、预处理与运行时全在 provider 内部，核心不做任何模型假设。修改后需重启生效。", Category: "memory"})
+	reg(ConfigDef{Key: "core.memory.multimodal_space.options.model_dir", Default: filepath.Join(dataDir, "models", "chinese-clip-vit-b16-onnx"), Type: "string", DisplayName: "provider 模型目录", Description: "provider 自定义选项（以 options. 开头的键会去掉前缀后原样传给 provider，核心不解释其含义）。对内置 chineseclip：Chinese-CLIP 产物目录（用 scripts/export_chineseclip_onnx.py 生成）。对内置 qwen3vl：Qwen3-VL ONNX 产物目录（用 scripts/export_qwen3vl_embedding_onnx.py 生成）。", Category: "memory"})
+	reg(ConfigDef{Key: "core.memory.multimodal_space.options.endpoint", Default: "", Type: "string", DisplayName: "provider 服务端点", Description: "provider 自定义选项。对内置 http：外部多模态向量服务的端点 URL（POST，接受 modality/side/text/data/mime，返回 embedding）。", Category: "memory"})
+	reg(ConfigDef{Key: "core.memory.multimodal_space.options.api_key", Default: "", Type: "password", DisplayName: "provider 服务密钥", Description: "provider 自定义选项。对内置 http：作为 Bearer token 发送。可选。", Category: "memory"})
+	reg(ConfigDef{Key: "core.memory.multimodal_space.options.model", Default: "", Type: "string", DisplayName: "provider 模型标识", Description: "provider 自定义选项。对内置 http：外部服务使用的模型名，作为 vec_model 持久化。", Category: "memory"})
+	reg(ConfigDef{Key: "core.memory.multimodal_space.options.dimension", Default: "0", Type: "int", DisplayName: "provider 向量维度", Description: "provider 自定义选项。对内置 http：服务返回的特征向量维度，必须与实际返回值一致。", Category: "memory"})
+	reg(ConfigDef{Key: "core.memory.multimodal_space.options.timeout", Default: "30s", Type: "duration", DisplayName: "provider 请求超时", Description: "provider 自定义选项。对内置 http：单次向量请求的超时时间。", Category: "memory"})
+	reg(ConfigDef{Key: "core.memory.multimodal_space.options.fingerprint", Default: "", Type: "string", DisplayName: "provider 空间指纹", Description: "provider 自定义选项。对内置 http：向量空间版本标识（留空时根据 model+dim 自动生成）。指纹变化会触发历史向量重算。", Category: "memory"})
 	reg(ConfigDef{Key: "core.knowledge.path", Default: filepath.Join(dataDir, "knowledge"), Type: "string", DisplayName: "知识库路径", Description: "知识库存储目录", Category: "paths"})
 	reg(ConfigDef{Key: "core.log.path", Default: filepath.Join(dataDir, "log"), Type: "string", DisplayName: "日志目录", Description: "日志文件输出目录", Category: "paths"})
 

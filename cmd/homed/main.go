@@ -29,6 +29,7 @@ import (
 	"gitcode.com/JianFeeeee/HomeAgent/internal/memory/pipeline"
 	"gitcode.com/JianFeeeee/HomeAgent/internal/memory/social"
 	"gitcode.com/JianFeeeee/HomeAgent/internal/memory/text"
+	"gitcode.com/JianFeeeee/HomeAgent/internal/memory/vector"
 	"gitcode.com/JianFeeeee/HomeAgent/internal/meta"
 	"gitcode.com/JianFeeeee/HomeAgent/internal/nlp"
 	"gitcode.com/JianFeeeee/HomeAgent/internal/plugin"
@@ -42,10 +43,21 @@ import (
 	sdk "gitcode.com/JianFeeeee/HomeAgent/internal/sdk"
 	"gitcode.com/JianFeeeee/HomeAgent/internal/supervisor"
 	"gitcode.com/JianFeeeee/HomeAgent/internal/tracker"
+	"gitcode.com/JianFeeeee/HomeAgent/pkg/embedding"
 	"gitcode.com/JianFeeeee/HomeAgent/pkg/types"
+
+	// 空白导入内置 provider：它们各自在 init 里注册到 pkg/embedding。
+	// 想把核心换成自己的模型，只需替换这一行（或另建一个发行版 main）。
+	_ "gitcode.com/JianFeeeee/HomeAgent/providers/chineseclip"
+	_ "gitcode.com/JianFeeeee/HomeAgent/providers/qwen3vl"
 )
 
 func main() {
+	// 平台门放在最前面：比 flag 解析还早，因为原生 Windows 上根本不应进入任何
+	// 初始化路径（会去建共享段、拉插件进程）。理由与 WSL 指引见
+	// platform_windows.go。
+	requireSupportedPlatform()
+
 	dataDir := flag.String("data", "", "data directory (default: auto-detect next to binary)")
 	httpAddr := flag.String("webui", "", "webui listen address (default: webui.listen_addr from config)")
 	cliSocket := flag.String("socket", "", "cli unix socket path (default: <data>/cli.sock)")
@@ -320,20 +332,18 @@ func main() {
 	// 文档记忆 + 知识库
 	// ========================================================================
 
-	docStore := document.NewStore(filepath.Join(cfg.Daemon.DataDir, "memory", "documents"))
+	docStore := document.NewStore(filepath.Join(cfg.Daemon.DataDir, "memory", "documents"), memory.TokenizeWords)
 	if err := docStore.Start(); err != nil {
 		log.Printf("[homed] warning: document store: %v", err)
 	}
 
-	// 媒体存储（内容寻址）：对话里出现的图片/音频按 sha256 落盘去重，
-	// L0/L2/L3 只记 digest。开关默认开；关闭后全部媒体接线静默跳过，
-	// 对话行为与本特性上线前完全一致。
+	// 媒体存储（内容寻址）：记忆块的内容后端。
+	// 开关默认开；关闭后全部媒体接线静默跳过，对话行为与本特性上线前一致。
 	var mediaStore *media.Store
 	if cfgReg.GetBool("core.memory.media.enabled", true) {
 		mediaDir := cfgReg.GetString("core.memory.media.dir",
 			filepath.Join(cfg.Daemon.DataDir, "memory", "media"))
-		maxMB := cfgReg.GetInt("core.memory.media.max_mb", 2048)
-		ms, err := media.New(mediaDir, int64(maxMB)*1024*1024)
+		ms, err := media.New(mediaDir)
 		if err != nil {
 			// 媒体存储开不起来不该阻止启动——它是记忆增强，不是对话必需品
 			log.Printf("[homed] warning: media store: %v（媒体记忆已禁用）", err)
@@ -341,8 +351,42 @@ func main() {
 			mediaStore = ms
 			defer mediaStore.Close()
 			st := mediaStore.Stats()
-			log.Printf("[homed] media store active: %v 条 / %v 字节（上限 %d MB）",
-				st["count"], st["total_bytes"], maxMB)
+			log.Printf("[homed] media store active: %v 条 / %v 字节",
+				st["count"], st["total_bytes"])
+		}
+	}
+
+	// 统一多模态向量空间。
+	//
+	// 核心**不**知道任何具体模型：它只按配置里的 provider 名从公共注册表
+	// （pkg/embedding）打开一个 provider，并把 options.* 原样交给它。模型文件
+	// 布局、预处理、解码、运行时全部属于 provider 内部实现。
+	// provider 名为空时禁用多模态向量检索，退回纯 fastText 文本路径。
+	var multimodalSpace vector.MultimodalEmbedder
+	if mmProvider := cfgReg.GetString("core.memory.multimodal_space.provider", ""); mmProvider != "" {
+		opts := map[string]string{}
+		const optPrefix = "core.memory.multimodal_space.options."
+		for _, key := range cfgReg.List("core.memory.multimodal_space.options.") {
+			opts[strings.TrimPrefix(key, optPrefix)] = cfgReg.GetString(key, "")
+		}
+		provider, err := embedding.Open(mmProvider, embedding.Config{Options: opts})
+		if err != nil {
+			log.Printf("[homed] warning: 多模态向量 provider %q 打开失败: %v（多模态向量检索已禁用；已注册: %s）",
+				mmProvider, err, strings.Join(embedding.Names(), ", "))
+		} else if adapted, err := vector.AdaptProvider(provider); err != nil {
+			provider.Close()
+			log.Printf("[homed] warning: 多模态向量 provider %q 元数据不合法: %v（多模态向量检索已禁用）", mmProvider, err)
+		} else {
+			multimodalSpace = adapted
+			defer adapted.Close()
+			info := provider.Info()
+			// 指纹可能很长（模型文件哈希），日志里只取前 12 个字符便于对照。
+			shortFP := info.Fingerprint
+			if len(shortFP) > 12 {
+				shortFP = shortFP[:12]
+			}
+			log.Printf("[homed] multimodal space active: provider=%s dim=%d fp=%s modalities=%v",
+				mmProvider, info.Dimension, shortFP, info.Modalities)
 		}
 	}
 
@@ -455,9 +499,6 @@ func main() {
 		SocialStore:        socialStore,
 		TextMemory:         textMem,
 		MediaStore:         mediaStore,
-		MediaGCInterval:    cfgReg.GetDuration("core.memory.media.gc_interval", 6*time.Hour),
-		MediaGCMinAge:      cfgReg.GetDuration("core.memory.media.gc_min_age", time.Hour),
-		MediaDescribe:      cfgReg.GetBool("core.memory.media.describe_on_ingest", false),
 		Personality:        personality,
 		PluginReg:          pluginReg,
 		PluginDir:          cfg.Plugin.Dir,
@@ -468,6 +509,7 @@ func main() {
 		ContextSavePath:    filepath.Join(cfg.Daemon.DataDir, "memory", "context.json"),
 		EmbeddingModelPath: cfgReg.GetString("core.agent.embedding_model_path", ""),
 		Embedder:           embedder,
+		MultimodalSpace:    multimodalSpace,
 		StageHost:          stageHost,
 		EventBus:           evBus,
 		ThinkingEnabled:    cfg.LLM.ThinkingEnabled,

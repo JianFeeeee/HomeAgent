@@ -26,18 +26,26 @@ func TestStreaming_SlowConsumerDoesNotBlockPublish(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewHost: %v", err)
 	}
-	defer host.Close()
 
 	ring := host.EvtRing()
 
 	var consumed atomic.Int64
 	consumer := NewEvtConsumer(host.EvtData(), host.EvtfdReadFile(), 0,
 		func(evt *pubsdk.Event) error {
-			time.Sleep(20 * time.Microsecond) // 刻意的慢订阅者
+			time.Sleep(20 * time.Microsecond)
 			consumed.Add(1)
 			return nil
 		})
-	go consumer.Run()
+	var wg sync.WaitGroup
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		consumer.Run()
+	}()
+	// defer LIFO：Stop → 关 evtfd 打断 Read → 等协程退出 → Close host
+	defer host.Close()
+	defer wg.Wait()
+	defer host.EvtfdReadFile().Close()
 	defer consumer.Stop()
 
 	const tokens = 5000
@@ -71,7 +79,9 @@ func TestStreaming_PublishLatencyFlatAcrossSubscribers(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewHost: %v", err)
 	}
+	// defer LIFO：先停消费者再 Close host
 	defer host.Close()
+	defer host.EvtfdReadFile().Close()
 
 	ring := host.EvtRing()
 	payload := []byte(`{"type":"content_delta","payload":{"text":"t"}}`)
@@ -93,13 +103,14 @@ func TestStreaming_PublishLatencyFlatAcrossSubscribers(t *testing.T) {
 				cc.Run()
 			}(c)
 		}
+		// defer LIFO：Stop → 等协程退出
+		defer wg.Wait()
 		defer func() {
 			for _, c := range active {
 				c.Stop()
 			}
 		}()
 
-		// 让消费者先就位
 		time.Sleep(10 * time.Millisecond)
 
 		start := time.Now()

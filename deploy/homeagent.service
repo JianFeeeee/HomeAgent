@@ -6,9 +6,11 @@ Wants=network-online.target
 
 [Service]
 Type=simple
-ExecStart=/usr/local/bin/homed -data /var/lib/homeagent
+ExecStart=/usr/bin/homed -data /var/lib/homeagent
 Restart=always
 RestartSec=10
+Environment=ONNXRUNTIME_DIR=/usr/lib/homeagent/onnxruntime
+StateDirectory=homeagent
 StartLimitBurst=3
 StartLimitInterval=60s
 
@@ -26,7 +28,9 @@ DeviceAllow=/dev/dsp rw
 # Resource limits
 LimitNOFILE=65536
 LimitNPROC=256
-MemoryMax=2G
+# Chinese-CLIP 本身实测约 1.15GB；加文档稠密索引、词向量、插件与
+# ORT arena 后生产实例约 4.5GB。2GB 会在首次全量建索引时被 cgroup OOM。
+MemoryMax=8G
 CPUQuota=100%
 
 [Install]

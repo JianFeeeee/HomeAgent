@@ -43,6 +43,10 @@ type Plugin struct {
 	// caps 是 manifest 声明的能力集（§3.8 权限梯度）。
 	caps *capabilitySet
 
+	// ownerID 是本插件在共享槽池里的身份（由 Host 分配）。
+	// 内核用它校验 arena.free 的归属，并在插件退出时回收残留槽。
+	ownerID uint32
+
 	stopOnce sync.Once
 
 	// stopping 标记「本次退出是内核主动发起的」，用于压掉 onCrash。
@@ -109,24 +113,30 @@ func (p *Plugin) Start(core CoreSDK) error {
 		return fmt.Errorf("proc: %s 缺少共享段 Host", p.name)
 	}
 
+	// 领一个槽池身份；插件退出时用它回收残留槽。
+	p.ownerID = p.host.NextOwnerID()
+
 	p.handler = &coreHandler{
 		sdk:     core,
 		name:    p.name,
 		host:    p.host,
+		owner:   p.ownerID,
 		locks:   p.host.locks,
 		evtRing: p.host.evtSubscriber,
 		caps:    p.caps,
 	}
 	// 反向调用闭包：注册回调时捕获，运行期经 RPC 打到插件进程。
 	p.handler.invokeTool = p.invokeTool
+	p.handler.invokeCleaner = p.invokeCleaner
 	p.handler.invokeStageFn = p.invokeStage
 	p.handler.invokeOutput = p.invokeOutput
 
 	proc, err := Spawn(p.name, p.bin, Options{
 		Dir: p.dir,
 		// 共享段的传递机制按平台不同（shmpass_*.go）：
-		// Unix 经 ExtraFiles 传继承 fd（ 3=StageContext, 4=事件环, 5=通知）；
-		// Windows 无 fd 继承语义，改用命名内核对象，名字经环境变量传入。
+		// Unix 经 ExtraFiles 传继承 fd（3=统一共享内存区域 SuperBlock+StageContext+EvtRing，
+		// 4=事件通知 eventfd）；Windows 无 fd 继承语义，改用命名内核对象，名字经环境变量传入。
+		// 权威定义在 shmpass_unix.go 的 procExtraFilesForShm，修改时三处必须同步。
 		Env:         append(p.env, p.host.procEnvForShm()...),
 		ExtraFiles:  p.host.procExtraFilesForShm(),
 		ShmSize:     p.host.shmSize,
@@ -190,8 +200,15 @@ func (p *Plugin) Close() error {
 // 后者是"锁仲裁回内核"的自愈价值：持锁者死亡不会导致全局死锁，
 // 无需 robust pthread_mutex（实验 9）。
 func (p *Plugin) handleExit(name string, err error) {
-	if p.host != nil && p.host.ForceReleaseLock(name) {
-		log.Printf("[proc] %s 退出，内核已释放其持有的 stage 锁", name)
+	if p.host != nil {
+		if p.host.ForceReleaseLock(name) {
+			log.Printf("[proc] %s 退出，内核已释放其持有的 stage 锁", name)
+		}
+		// 回收该插件未归还的共享槽：崩溃的插件无法自己归还，
+		// 不回收会让槽池慢慢耗尽，最终所有共享内存调用退化成内联 RPC。
+		if n := p.host.ReclaimOwner(p.ownerID); n > 0 {
+			log.Printf("[proc] %s 退出，回收 %d 个残留共享槽", name, n)
+		}
 	}
 	// 内核主动停止（Stop/Close，含宽限期超时后的 Kill）不算崩溃：
 	// 否则重载/禁用/卸载都会误触发自动重启。
@@ -205,11 +222,46 @@ func (p *Plugin) handleExit(name string, err error) {
 
 // ---- 内核 → 插件的反向调用 ----
 
+// invokeTool 在插件进程内执行工具。
+//
+// 按 **funccall 模型**：内核是 caller，为每次调用**标定一块内存帧**
+// （参数段 + 结果预算段）交给插件（callee）。参数永远写在帧里，不再有
+// “小 payload 走内联”的按大小分支。
+//
+// 结果超出预算时插件才向内核申请扩容块，并在引用上打
+// sharedRefFlagExpand，内核据此单独归还。
+//
+// 控制面仍是 RPC（请求 ID 关联、ctx 取消、崩溃唤醒都由 Process 承载）。
 func (p *Plugin) invokeTool(name string, args map[string]interface{}) (interface{}, error) {
 	if p.proc == nil {
 		return nil, ErrProcessExited
 	}
-	raw, err := p.proc.Call(MethodToolInvoke, ToolInvokeParams{Name: name, Args: args})
+	arena := p.host.Arena()
+	gen := p.host.Generation()
+
+	argJSON, err := json.Marshal(args)
+	if err != nil {
+		return nil, fmt.Errorf("proc: %s 工具 %s 参数序列化失败: %w", p.name, name, err)
+	}
+
+	// 内核标定调用帧：参数段 + 结果预算段。
+	frame, err := arena.Alloc(OwnerHost, len(argJSON)+toolResultBudget, gen)
+	if err != nil {
+		return nil, fmt.Errorf("proc: %s 工具 %s 分配调用帧失败: %w", p.name, name, err)
+	}
+	defer func() { _ = arena.Free(OwnerHost, frame) }()
+
+	area, err := arena.Read(frame, gen)
+	if err != nil {
+		return nil, fmt.Errorf("proc: %s 工具 %s 读取调用帧失败: %w", p.name, name, err)
+	}
+	copy(area[:len(argJSON)], argJSON)
+
+	raw, err := p.proc.Call(MethodToolInvoke, ToolInvokeParams{
+		Name:    name,
+		Frame:   frame,
+		ArgsLen: uint32(len(argJSON)),
+	})
 	if err != nil {
 		return nil, err
 	}
@@ -217,7 +269,41 @@ func (p *Plugin) invokeTool(name string, args map[string]interface{}) (interface
 	if err := json.Unmarshal(raw, &res); err != nil {
 		return nil, fmt.Errorf("proc: %s 工具 %s 应答解析失败: %w", p.name, name, err)
 	}
-	return res.Result, nil
+	if res.ResultRef.IsZero() {
+		return nil, fmt.Errorf("proc: %s 工具 %s 未返回结果引用", p.name, name)
+	}
+	// 插件申请了扩容块：内核负责归还。
+	if res.ResultRef.Flags&sharedRefFlagExpand != 0 {
+		defer func() { _ = arena.Free(OwnerHost, res.ResultRef) }()
+	}
+	data, err := arena.Read(res.ResultRef, gen)
+	if err != nil {
+		return nil, fmt.Errorf("proc: %s 工具 %s 读取共享结果失败: %w", p.name, name, err)
+	}
+	var out interface{}
+	if err := json.Unmarshal(data, &out); err != nil {
+		return nil, fmt.Errorf("proc: %s 工具 %s 解析共享结果失败: %w", p.name, name, err)
+	}
+	return out, nil
+}
+
+// invokeCleaner 在插件进程内执行工具或通道注册时提供的 Cleaner 函数。
+//
+// 数据面参数（输入槽 / 预分配响应槽）由内核在 params 里给出，
+// 插件只负责读输入、写结果，不做任何分配。
+func (p *Plugin) invokeCleaner(params CleanerInvokeParams) (CleanerInvokeResult, error) {
+	if p.proc == nil {
+		return CleanerInvokeResult{}, ErrProcessExited
+	}
+	raw, err := p.proc.Call(MethodCleanerInvoke, params)
+	if err != nil {
+		return CleanerInvokeResult{}, err
+	}
+	var res CleanerInvokeResult
+	if err := json.Unmarshal(raw, &res); err != nil {
+		return CleanerInvokeResult{}, fmt.Errorf("proc: %s %s Cleaner %s 应答解析失败: %w", p.name, params.Scope, params.Name, err)
+	}
+	return res, nil
 }
 
 func (p *Plugin) invokeStage(ctx context.Context, stage string, seq uint64) error {
@@ -252,24 +338,88 @@ func (p *Plugin) invokeOutput(channel string, args map[string]interface{}) (inte
 	if p.proc == nil {
 		return nil, ErrProcessExited
 	}
-	raw, err := p.proc.Call(MethodOutputInvoke, OutputInvokeParams{
-		Channel: channel,
-		Args:    args,
-	})
+
+	argJSON, err := json.Marshal(args)
+	if err != nil {
+		return nil, fmt.Errorf("proc: %s 输出通道 %s 参数序列化失败: %w", p.name, channel, err)
+	}
+
+	// 与工具调用同一个 funccall 帧模型（§13.6）：payload 全在共享内存，
+	// RPC 只传偏移描述符。输出 payload 在真机上可能含图片/文件描述等大字段，
+	// 内联会撑爆 stdin/stdout 管道。
+	//
+	// 帧尾不预留结果区：output 的应答很小（"ok" 或 status map），直接走
+	// RPC 应答字段即可，不像 tool.invoke 那样需要几十 KB 的结果预算。
+	var params OutputInvokeParams
+	params.Channel = channel
+	if len(argJSON) > 0 {
+		arena := p.host.Arena()
+		gen := p.host.Generation()
+		frame, err := arena.Alloc(OwnerHost, len(argJSON), gen)
+		if err != nil {
+			return nil, fmt.Errorf("proc: %s 输出通道 %s 分配调用帧失败: %w", p.name, channel, err)
+		}
+		defer func() { _ = arena.Free(OwnerHost, frame) }()
+
+		area, err := arena.Read(frame, gen)
+		if err != nil {
+			return nil, fmt.Errorf("proc: %s 输出通道 %s 读取调用帧失败: %w", p.name, channel, err)
+		}
+		copy(area[:len(argJSON)], argJSON)
+		params.Frame = frame
+		params.ArgsLen = uint32(len(argJSON))
+	}
+
+	raw, err := p.proc.Call(MethodOutputInvoke, params)
 	if err != nil {
 		return nil, err // 真实失败上报，模型可感知并重试
 	}
 	if len(raw) == 0 {
-		return map[string]interface{}{"status": "sent"}, nil
+		return map[string]interface{}{"status": "ok"}, nil
 	}
+
+	// 结果可能在共享内存里（插件把大结果写回帧结果区）。
+	// 先按结构化应答解析；ResultRef 为零则回退到内联字段。
+	var outRes OutputInvokeResult
+	if jerr := json.Unmarshal(raw, &outRes); jerr == nil && !outRes.ResultRef.IsZero() {
+		arena := p.host.Arena()
+		gen := p.host.Generation()
+		// 插件申请了扩容块：内核负责归还（与 invokeTool 一致）。
+		if outRes.ResultRef.Flags&sharedRefFlagExpand != 0 {
+			defer func() { _ = arena.Free(OwnerHost, outRes.ResultRef) }()
+		}
+		data, err := arena.Read(outRes.ResultRef, gen)
+		if err != nil {
+			return nil, fmt.Errorf("proc: %s 输出通道 %s 读取共享结果失败: %w", p.name, channel, err)
+		}
+		var out interface{}
+		if err := json.Unmarshal(data, &out); err != nil {
+			return nil, fmt.Errorf("proc: %s 输出通道 %s 解析共享结果失败: %w", p.name, channel, err)
+		}
+		return out, nil
+	}
+
 	var res map[string]interface{}
-	if err := json.Unmarshal(raw, &res); err != nil {
-		return map[string]interface{}{"status": "sent"}, nil
+	if err := json.Unmarshal(raw, &res); err == nil {
+		if _, ok := res["status"]; !ok {
+			res["status"] = "sent"
+		}
+		return res, nil
 	}
-	if _, ok := res["status"]; !ok {
-		res["status"] = "sent"
+
+	// 插件返回的是标量（如 "ok"）——**原样透传，不要伪造 status**。
+	//
+	// 为什么必须透传：核心 output.go 会把 map 结果格式化成富回执
+	// （"已通过 [qq] 通道发送: map[status:sent]"），模型看到"发送成功 +
+	// 详情"会把这一步当成"上一步完成、继续下一步"的信号，形成
+	// output_send 回声循环。插件（如 qq）刻意返回极简的 "ok" 就是为了
+	// 掐断这个信号；早期实现在这里把非 map 响应替换成 {status:sent}，
+	// 等于把它又变回富回执——**只改插件永远修不掉这个循环**。
+	var scalar interface{}
+	if err := json.Unmarshal(raw, &scalar); err != nil {
+		return map[string]interface{}{"status": "ok"}, nil
 	}
-	return res, nil
+	return scalar, nil
 }
 
 // 编译期确认 Plugin 具备 registry 需要的启停形状。

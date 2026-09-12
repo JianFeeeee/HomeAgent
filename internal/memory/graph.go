@@ -2,6 +2,7 @@ package memory
 
 import (
 	"database/sql"
+	"encoding/json"
 	"fmt"
 	"strings"
 	"sync"
@@ -44,6 +45,10 @@ type Triple struct {
 	SubjectType  string  `json:"subject_type,omitempty"`
 	ObjectType   string  `json:"object_type,omitempty"`
 	SentenceText string  `json:"sentence_text,omitempty"` // 原始句子文本，Commit时写入sentences表
+	// MediaDigests 是该三元组显式携带的媒体 digest（完整或前缀）。
+	// 媒体不再靠正文 marker 反解：结构化字段直接给出归属，
+	// 由调用方（core）把它变成 L3 一等块并与句子建立结构边。
+	MediaDigests []string `json:"media_digests,omitempty"`
 }
 
 type GraphDB struct {
@@ -107,6 +112,41 @@ func (g *GraphDB) initSchema() error {
 			FOREIGN KEY (target_id) REFERENCES entities(id),
 			UNIQUE(source_id, target_id, relation_type, session_id)
 		)`,
+		`CREATE TABLE IF NOT EXISTS memory_blocks (
+			id TEXT PRIMARY KEY,
+			modality TEXT NOT NULL,
+			text_content TEXT DEFAULT '',
+			payload_digest TEXT DEFAULT '',
+			mime TEXT DEFAULT '',
+			size INTEGER DEFAULT 0,
+			width INTEGER DEFAULT 0,
+			height INTEGER DEFAULT 0,
+			vector TEXT DEFAULT '',
+			fingerprint TEXT DEFAULT '',
+			source TEXT DEFAULT '',
+			tool TEXT DEFAULT '',
+			created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+			updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+		)`,
+		`CREATE TABLE IF NOT EXISTS memory_block_edges (
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			source_kind TEXT NOT NULL,
+			source_id TEXT NOT NULL,
+			target_kind TEXT NOT NULL,
+			target_id TEXT NOT NULL,
+			edge_type TEXT NOT NULL,
+			created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+			UNIQUE(source_kind, source_id, target_kind, target_id, edge_type)
+		)`,
+		`CREATE TABLE IF NOT EXISTS documents (
+			id         TEXT PRIMARY KEY,
+			summary    TEXT DEFAULT '',
+			created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+		)`,
+		`CREATE INDEX IF NOT EXISTS idx_memory_blocks_modality ON memory_blocks(modality)`,
+		`CREATE INDEX IF NOT EXISTS idx_memory_blocks_digest ON memory_blocks(payload_digest)`,
+		`CREATE INDEX IF NOT EXISTS idx_memory_block_edges_source ON memory_block_edges(source_kind, source_id)`,
+		`CREATE INDEX IF NOT EXISTS idx_memory_block_edges_target ON memory_block_edges(target_kind, target_id)`,
 		`CREATE INDEX IF NOT EXISTS idx_entity_name ON entities(name)`,
 		`CREATE INDEX IF NOT EXISTS idx_entity_type ON entities(type)`,
 		`CREATE INDEX IF NOT EXISTS idx_relation_source ON relations(source_id)`,
@@ -205,7 +245,7 @@ func (g *GraphDB) Commit(triples []Triple, sessionID string, turnID int) (int, i
 // 不划算。这里让 Commit 内部转调，两者共享同一份落库逻辑。
 //
 // 返回的 map 只包含本次真正写入了 sentences 表的句子。调用方据此把媒体
-// 引用挂到 graph_sentence owner 上——句子是媒体描述在图库里的落点，
+// 变成 L3 一等块，并以 sentence --contains--> block 边与句子相连；
 // 关系行本身不持有媒体。
 func (g *GraphDB) CommitWithMedia(triples []Triple, sessionID string, turnID int) (map[string]int64, int, int, error) {
 	return g.commit(triples, sessionID, turnID, true)
@@ -714,9 +754,58 @@ func (g *GraphDB) GraphData() (map[string]interface{}, error) {
 		return nil, err
 	}
 
+	brows, err := g.db.Query(`SELECT id, modality, text_content, payload_digest, mime,
+		size, width, height, vector, fingerprint, source, tool, created_at, updated_at
+		FROM memory_blocks ORDER BY created_at, id`)
+	if err != nil {
+		return nil, err
+	}
+	defer brows.Close()
+	var blocks []MemoryBlock
+	for brows.Next() {
+		var block MemoryBlock
+		var vectorJSON string
+		if err := brows.Scan(&block.ID, &block.Modality, &block.Text, &block.PayloadDigest,
+			&block.MIME, &block.Size, &block.Width, &block.Height, &vectorJSON,
+			&block.Fingerprint, &block.Source, &block.Tool, &block.CreatedAt,
+			&block.UpdatedAt); err != nil {
+			return nil, err
+		}
+		if vectorJSON != "" && vectorJSON != "null" {
+			if err := json.Unmarshal([]byte(vectorJSON), &block.Vector); err != nil {
+				return nil, fmt.Errorf("decode memory block %s vector: %w", block.ID, err)
+			}
+		}
+		blocks = append(blocks, block)
+	}
+	if err := brows.Err(); err != nil {
+		return nil, err
+	}
+
+	berows, err := g.db.Query(`SELECT id, source_kind, source_id, target_kind, target_id,
+		edge_type, created_at FROM memory_block_edges ORDER BY id`)
+	if err != nil {
+		return nil, err
+	}
+	defer berows.Close()
+	var blockEdges []MemoryBlockEdge
+	for berows.Next() {
+		var edge MemoryBlockEdge
+		if err := berows.Scan(&edge.ID, &edge.SourceKind, &edge.SourceID,
+			&edge.TargetKind, &edge.TargetID, &edge.Type, &edge.CreatedAt); err != nil {
+			return nil, err
+		}
+		blockEdges = append(blockEdges, edge)
+	}
+	if err := berows.Err(); err != nil {
+		return nil, err
+	}
+
 	return map[string]interface{}{
-		"nodes": entities,
-		"edges": relations,
+		"nodes":              entities,
+		"edges":              relations,
+		"memory_blocks":      blocks,
+		"memory_block_edges": blockEdges,
 	}, nil
 }
 
@@ -899,17 +988,42 @@ func (g *GraphDB) ClearSentenceID(relationID int64) error {
 	return err
 }
 
-// CleanupOrphanedSentences 删除没有任何关系引用的句子，返回删除数
+// CleanupOrphanedSentences 删除既无关系引用、也无媒体块边的句子，返回删除数。
+//
+// 两个条件都必须看：旧媒体实体被迁移成原生块后，那些句子可能只靠
+// sentence --contains--> block 存活，若只看 relations 引用就会被误删，
+// 连带把块边变成悬空引用。
 func (g *GraphDB) CleanupOrphanedSentences() (int, error) {
-	result, err := g.db.Exec(
-		`DELETE FROM sentences WHERE id NOT IN (
-			SELECT DISTINCT sentence_id FROM relations WHERE sentence_id != 0
-		)`,
-	)
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	tx, err := g.db.Begin()
 	if err != nil {
 		return 0, err
 	}
-	n, _ := result.RowsAffected()
+	defer tx.Rollback()
+
+	// 先清掉指向将被删除句子的块边，避免留下悬空端点。
+	if _, err := tx.Exec(`DELETE FROM memory_block_edges
+		WHERE source_kind = 'sentence' AND source_id NOT IN (
+			SELECT CAST(id AS TEXT) FROM sentences
+			WHERE id IN (SELECT DISTINCT sentence_id FROM relations WHERE sentence_id != 0)
+			   OR id IN (SELECT CAST(source_id AS INTEGER) FROM memory_block_edges WHERE source_kind = 'sentence')
+		)`); err != nil {
+		return 0, err
+	}
+
+	res, err := tx.Exec(`DELETE FROM sentences WHERE id NOT IN (
+			SELECT DISTINCT sentence_id FROM relations WHERE sentence_id != 0
+		) AND id NOT IN (
+			SELECT CAST(source_id AS INTEGER) FROM memory_block_edges WHERE source_kind = 'sentence'
+		)`)
+	if err != nil {
+		return 0, err
+	}
+	n, _ := res.RowsAffected()
+	if err := tx.Commit(); err != nil {
+		return 0, err
+	}
 	return int(n), nil
 }
 

@@ -49,15 +49,17 @@ type TextMemoryAPI interface {
 //
 // 两个方向共用一个类型：
 //   - 写入（InsertWithMedia）：给 Data + MIME 就是新内容；只给 Digest 则是引用已有内容。
-//   - 读出（Query）：内核只填 Digest/MIME/Description，**不回 Data**——
+//   - 读出（Query）：内核只填 Digest/MIME，**不回 Data**——
 //     一次检索可能命中几十张图，把字节全塞回插件会把 ABI 消息撑爆。
 //     需要字节时拿 Digest 单独取。
+//
+// 刻意没有 Description 字段：媒体不作为文本被索引，也不带任何生成的描述。
+// 它只按自己的原生向量被检索与召回；附加文字请写在文档 / 三元组的文本里。
 type MediaAttachment struct {
-	Digest      string `json:"digest,omitempty"`
-	MIME        string `json:"mime,omitempty"`
-	Data        []byte `json:"data,omitempty"`
-	Name        string `json:"name,omitempty"`
-	Description string `json:"description,omitempty"`
+	Digest string `json:"digest,omitempty"`
+	MIME   string `json:"mime,omitempty"`
+	Data   []byte `json:"data,omitempty"`
+	Name   string `json:"name,omitempty"`
 }
 
 type TextEvent struct {
@@ -74,8 +76,8 @@ type DocMemoryAPI interface {
 	Insert(doc *Doc) error
 	// InsertWithMedia 写入文档并关联媒体。attachments 里带 Data 的会落进
 	// 内容寻址存储（相同字节只存一份），只带 Digest 的直接引用已有内容。
-	// 插件无需自己拼标记：内核会把 `[mime <短 digest>] <描述>` 补进 Content，
-	// 让向量检索和后续蒸馏都能看到这份媒体。
+	// 媒体成为文档直接持有的一等记忆块：文档向量会融合它们的原生向量，
+	// 因此图片按自己的向量被召回，不依赖任何生成的描述文本。
 	InsertWithMedia(doc *Doc, attachments []MediaAttachment) error
 	Remove(id string)
 	Stats() map[string]interface{}
