@@ -369,6 +369,45 @@ E2E 用例编译失败），不是靠人工检查发现的。
 | 模板已接线 | `cd tools/plugindev && go test ./...` | ✅ `TestProcTemplate_CoversAllCoreMethods` 含新 method |
 | 并发安全 | `go test ./sdk/ -race -count=5` | ✅ 零 DATA RACE（13 例压测） |
 
+### v1.2.x 的接口扩展（2026-09-12）
+
+1.2.0 把「记不记入记忆 / 要不要据此裁剪上下文」从**只有工具与通道能声明**，扩到**注入侧也能声明**：
+
+| 新增 | 方向 | 说明 |
+|---|---|---|
+| `InjectOptions{NoMemory, ContextPolicy, CleanerName}` | 新增类型 | 单次注入的行为声明 |
+| `ContextPolicyNone` / `ContextPolicyPrune` + `ValidContextPolicy` | 新增常量/函数 | 取值只有 `""` / `none` / `prune`；`prune` 必须显式声明 |
+| 六个 `*Opts` 变体（Text / InterruptText / InputSync / InputMedia / InputMediaSync / InterruptMedia） | 插件调用、内核实现 | 旧的三参数方法保留为**零值糖**，与 `InjectOptions{}` 逐键等价 |
+| `ChannelDef.ContextPolicy` + `ChannelDef` 的 JSON tag | 结构体字段 | 通道也可声明裁剪；补 tag 是因为通道定义要跨进程传给内核，而 `Cleaner` 是函数必须忽略——无 tag 时新增字段会被**静默丢掉** |
+
+签名层面零变更（六个方法全是新增），满足第 1、2 条。
+
+**但「接口纯追加」不等于「无需重编」**：1.2.0 同时把插件运行协议升到 2
+（fd3 布局改变，不支持滚动升级），`ProtocolVersion` 不匹配会在握手时被明确拒绝
+并提示用配套 plugindev 重编。两件事必须分开说，否则会被误读成「既然纯追加就还能用旧产物」。
+
+#### 这次扩展自己抓出来的两处漂移（都是本节第 3 条要防的那类）
+
+1. **模板接线守卫红了**：`TestProcTemplate_CoversAllCoreMethods` 要求模板出现内核提供的
+   每一个 method id，而注入标志位落地后模板不再发 `io.injectTextNoMem`（旧模板发它，
+   现在走 `io.injectText` + `NoMemory` 标志位）。内核保留该 id 是**刻意的向后兼容面**
+   （用那时模板编出的二进制仍在外面），不是漏接线——所以改的是判据：把它移入显式的
+   `deprecated` 表，并加**反向保护**（条目一旦重新出现在模板里就报错，避免这张表
+   退化成「永久豁免」的垃圾抽屉）。
+2. **mocksdk 缺一个方法**：拿公共 SDK `IOInjector` 的 14 个方法名与 mock 的方法集
+   **机械求差**，差集恰好是旧的三参数 `InjectInputSync`——通道类插件（qq / a2a）完成
+   「入站 → agent 处理 → 回复取回」闭环要调的那个。`git log -S` 证实它**从来就缺**，
+   不是本次引入；补齐后差集为空。（上次漂的是 `Triple.Predicate` vs `Relation`，同一类问题。）
+
+#### 验证（1.2.0，本机实测）
+
+| 检查 | 命令 | 结果 |
+|---|---|---|
+| 存量插件源码零改动 | 逐个 `cd example/<n> && go vet ./...` | ✅ 17/17 通过（`luademo` 是 Lua、无 `go.mod`，跳过） |
+| 模板已接线 | `cd tools/plugindev && go test ./...` | ✅ 全绿（修复前为红；反向保护另用「把 id 塞回模板」验证过会报错） |
+| 并发安全 | `go test -race -count=5 ./sdk/` | ✅ ok |
+| mocksdk 未漂移 | 方法集求差（14 个方法） | ✅ 差集为空 |
+
 ### 为何媒体块走 JSON 而不是共享段二进制通道
 
 `SetToolBlocks` 的原设计是「二进制落 arena，Slice 描述符回传」。实际落地时改走 JSON：
