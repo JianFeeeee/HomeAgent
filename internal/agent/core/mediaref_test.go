@@ -24,7 +24,7 @@ import (
 func newTestAgentWithMedia(t *testing.T) (*Agent, *media.Store) {
 	t.Helper()
 	dir := t.TempDir()
-	ms, err := media.New(filepath.Join(dir, "media"), 0)
+	ms, err := media.New(filepath.Join(dir, "media"))
 	if err != nil {
 		t.Fatalf("media.New: %v", err)
 	}
@@ -35,7 +35,6 @@ func newTestAgentWithMedia(t *testing.T) (*Agent, *media.Store) {
 		mediaStore: ms,
 		context:    NewRelevanceContext(filepath.Join(dir, "context.json"), emb),
 	}
-	a.context.SetMediaStore(ms)
 	return a, ms
 }
 
@@ -104,11 +103,11 @@ func TestCaptureBlockMedia_NilStoreIsNoop(t *testing.T) {
 	// bindEventMedia 对 nil store 也必须安全
 	evt := &ContextEvent{}
 	a.bindEventMedia(evt, []string{"deadbeef"})
-	if len(evt.Media) != 0 || evt.ID != "" {
+	if len(evt.Blocks) != 0 || evt.ID != "" {
 		t.Fatalf("nil store 时不该改动事件: %+v", evt)
 	}
-	if s := a.mediaSummaryForEvent([]string{"deadbeef"}); s != "" {
-		t.Fatalf("nil store 时摘要应为空，得到 %q", s)
+	if s := mediaLabel(nil); s != "" {
+		t.Fatalf("nil 媒体应产出空标签，得到 %q", s)
 	}
 }
 
@@ -152,7 +151,7 @@ func TestStageDrainMediaDigests(t *testing.T) {
 	}
 }
 
-func TestBindEventMedia_CreatesIDAndRefs(t *testing.T) {
+func TestBindEventMedia_CreatesBlocks(t *testing.T) {
 	a, ms := newTestAgentWithMedia(t)
 
 	d, err := ms.Put([]byte("img"), media.Item{MIME: "image/png"})
@@ -166,17 +165,11 @@ func TestBindEventMedia_CreatesIDAndRefs(t *testing.T) {
 	if evt.ID == "" {
 		t.Fatal("应懒生成事件 ID")
 	}
-	if len(evt.Media) != 1 || evt.Media[0] != d {
-		t.Fatalf("事件应记住 digest: %+v", evt.Media)
+	if len(evt.Blocks) != 1 || evt.Blocks[0].PayloadDigest != d {
+		t.Fatalf("事件应持有一等记忆块: %+v", evt.Blocks)
 	}
-	// 双向落地：CAS 侧也要知道谁在引用，否则 GC 会误删
-	it, _ := ms.Stat(d)
-	if it.RefCount != 1 {
-		t.Fatalf("引用计数应为 1，实际 %d", it.RefCount)
-	}
-	refs, _ := ms.Refs(media.OwnerContext, evt.ID)
-	if len(refs) != 1 {
-		t.Fatalf("media_refs 应有 1 条，实际 %d", len(refs))
+	if evt.Blocks[0].Modality != memory.BlockImage || evt.Blocks[0].MIME != "image/png" {
+		t.Fatalf("块元数据不对: %+v", evt.Blocks[0])
 	}
 }
 
@@ -190,120 +183,38 @@ func TestBindEventMedia_LazyIDOnlyWhenNeeded(t *testing.T) {
 	}
 }
 
-func TestMediaSummary_DescriptionIsThePersistentMemory(t *testing.T) {
-	// 方案 C 的核心：描述文本才是持久语义记忆，blob 只是缓存。
-	// blob 被容量 GC 淘汰后，描述仍留在 L0/L2/L3 的文本里可被检索。
+func TestMediaLabel_NoGeneratedDescription(t *testing.T) {
+	// 标签只用来告诉模型「这条记忆带着哪份媒体、可用该 digest 取回字节」。
+	// 它不包含任何生成的描述：描述式索引是把就机制，已彻底废弃。
 	a, ms := newTestAgentWithMedia(t)
 
 	d, _ := ms.Put([]byte("img"), media.Item{MIME: "image/png"})
-	if s := a.mediaSummaryForEvent([]string{d}); s == "" {
-		t.Fatal("未描述项也应产出一行（标注未描述）")
-	}
-
-	ms.Describe(d, "一张紫蓝红三色带图", "visionllm")
-	s := a.mediaSummaryForEvent([]string{d})
-	if s == "" {
-		t.Fatal("应产出摘要")
-	}
-	if !strings.Contains(s, "紫蓝红三色带图") {
-		t.Fatalf("摘要应含描述文本: %q", s)
-	}
-	if !strings.Contains(s, "image/png") {
-		t.Fatalf("摘要应含 MIME 标注: %q", s)
-	}
-}
-
-func TestPrune_TransfersMediaRefsToDocument(t *testing.T) {
-	// L0→L2 归档：媒体引用从 context 事件转到归档文档，
-	// 且转移期间内容必须始终可读（先挂后销，不留归零窗口）。
-	dir := t.TempDir()
-	ms, err := media.New(filepath.Join(dir, "media"), 0)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer ms.Close()
-
-	emb := memory.NewStaticEmbedder()
-	docStore := document.NewStore(filepath.Join(dir, "docs"))
-	if err := docStore.Start(); err != nil {
-		t.Fatal(err)
-	}
-	rc := NewRelevanceContext(filepath.Join(dir, "context.json"), emb)
-	rc.SetMediaStore(ms)
-
-	a := &Agent{mediaStore: ms, context: rc}
-
-	// 造一张被引用的图，挂到一条会被淘汰的老事件上
-	payload := []byte("archived-image")
-	d, _ := ms.Put(payload, media.Item{MIME: "image/png"})
-	oldEvt := ContextEvent{
-		Timestamp: time.Now().Add(-time.Hour),
-		Source:    "qq",
-		Input:     "很久以前的一张图",
-	}
-	a.bindEventMedia(&oldEvt, []string{d})
-	oldEvtID := oldEvt.ID
-	rc.Append(oldEvt)
-
-	// 再塞满 12 条新事件，逼 Prune 把老事件淘汰
-	// （Prune 保护最近 10 条，topK 传 5 使候选全部进归档）
-	for i := 0; i < 12; i++ {
-		rc.Append(ContextEvent{
-			Timestamp: time.Now().Add(time.Duration(i) * time.Second),
-			Source:    "qq",
-			Input:     "无关内容",
-		})
-	}
-
-	archived := rc.Prune("完全不相关的查询", 5, docStore)
-	if archived == 0 {
-		t.Fatal("应有事件被归档")
-	}
-
-	// 关键断言：内容仍可读（引用被转走而非归零后被清）
-	got, err := ms.Get(d)
-	if err != nil {
-		t.Fatalf("归档后内容应仍可读: %v", err)
-	}
-	if string(got) != string(payload) {
-		t.Fatal("内容被改")
-	}
-
 	it, err := ms.Stat(d)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if it.RefCount < 1 {
-		t.Fatalf("引用应转移而非归零，实际 refcount=%d", it.RefCount)
+	s := mediaLabel(it)
+	if s == "" {
+		t.Fatal("应产出标签")
 	}
-	// 原 context 引用应已注销
-	if refs, _ := ms.Refs(media.OwnerContext, oldEvtID); len(refs) != 0 {
-		t.Fatalf("原事件引用应已注销，仍有 %d 条", len(refs))
+	if !strings.Contains(s, "image/png") {
+		t.Fatalf("标签应含 MIME 标注: %q", s)
 	}
-	// 应挂到某个 document owner 上
-	var docOwned bool
-	docs := docStore.RecentDocs(10)
-	for _, doc := range docs {
-		if refs, _ := ms.Refs(media.OwnerDocument, doc.ID); len(refs) > 0 {
-			docOwned = true
-			break
-		}
+	if !strings.Contains(s, shortDigest(d)) {
+		t.Fatalf("标签应含短 digest 供反查: %q", s)
 	}
-	if !docOwned {
-		t.Fatal("引用应已挂到归档文档上")
-	}
+	_ = a
 }
 
 func TestPrune_NilMediaStoreStillArchives(t *testing.T) {
 	// 媒体存储未启用时归档链路必须照常工作
 	dir := t.TempDir()
 	emb := memory.NewStaticEmbedder()
-	docStore := document.NewStore(filepath.Join(dir, "docs"))
+	docStore := document.NewStore(filepath.Join(dir, "docs"), memory.TokenizeWords)
 	if err := docStore.Start(); err != nil {
 		t.Fatal(err)
 	}
 	rc := NewRelevanceContext(filepath.Join(dir, "context.json"), emb)
-	// 刻意不 SetMediaStore
 
 	for i := 0; i < 15; i++ {
 		rc.Append(ContextEvent{
@@ -317,13 +228,13 @@ func TestPrune_NilMediaStoreStillArchives(t *testing.T) {
 	}
 }
 
-func TestContextEvent_MediaFieldRoundTrip(t *testing.T) {
-	// context.json 加字段必须向后兼容：存量文件读回来 Media 为空、ID 为空，
+func TestContextEvent_BlocksFieldRoundTrip(t *testing.T) {
+	// context.json 加字段必须向后兼容：存量文件读回来 Blocks 为空、ID 为空，
 	// 不影响任何既有行为。
 	dir := t.TempDir()
 	path := filepath.Join(dir, "context.json")
 
-	// 写一份"存量格式"（无 id / media 字段）
+	// 写一份"存量格式"（无 id / blocks 字段）
 	legacy := `[{"timestamp":"2026-09-04T10:00:00Z","source":"qq","input":"老数据","response":"回复"}]`
 	if err := os.WriteFile(path, []byte(legacy), 0644); err != nil {
 		t.Fatal(err)
@@ -335,8 +246,8 @@ func TestContextEvent_MediaFieldRoundTrip(t *testing.T) {
 		t.Fatalf("应读回 1 条，实际 %d", rc.Len())
 	}
 
-	// 新写入带媒体的事件，再读回
-	ms, err := media.New(filepath.Join(dir, "media"), 0)
+	// 新写入带记忆块的事件，再读回
+	ms, err := media.New(filepath.Join(dir, "media"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -351,5 +262,72 @@ func TestContextEvent_MediaFieldRoundTrip(t *testing.T) {
 	rc2 := NewRelevanceContext(path, emb)
 	if rc2.Len() != 2 {
 		t.Fatalf("应有 2 条，实际 %d", rc2.Len())
+	}
+	var persisted int
+	for _, e := range rc2.Recent(10) {
+		persisted += len(e.Blocks)
+	}
+	if persisted != 1 {
+		t.Fatalf("块应随 context.json 持久化，实际 %d 个", persisted)
+	}
+}
+
+func TestPruneMigratesBlocksToDocument(t *testing.T) {
+	// 一等记忆块的 L0→L2 迁移：块随事件离开 Context、进入 Document，
+	// 身份（ID/模态/digest/向量）原样保留；同一块不能同时留在两层。
+	// 这条路径不依赖 media_refs/ref_count。
+	dir := t.TempDir()
+	emb := memory.NewStaticEmbedder()
+	docStore := document.NewStore(filepath.Join(dir, "docs"), memory.TokenizeWords)
+	if err := docStore.Start(); err != nil {
+		t.Fatal(err)
+	}
+	rc := NewRelevanceContext(filepath.Join(dir, "context.json"), emb)
+
+	block := memory.MemoryBlock{
+		ID: "blk_migrate_1", Modality: memory.BlockImage,
+		PayloadDigest: "deadbeef", MIME: "image/png", Size: 42,
+		Vector: []float64{0.1, 0.2, 0.3}, Fingerprint: "qwen:test",
+	}
+	rc.Append(ContextEvent{
+		Timestamp: time.Now().Add(-time.Hour),
+		Source:    "qq", Input: "很久以前的一张图",
+		Blocks: []memory.MemoryBlock{block},
+	})
+	for i := 0; i < 12; i++ {
+		rc.Append(ContextEvent{
+			Timestamp: time.Now().Add(time.Duration(i) * time.Second),
+			Source:    "qq", Input: "无关内容",
+		})
+	}
+
+	if n := rc.Prune("完全不相关的查询", 5, docStore); n == 0 {
+		t.Fatal("应有事件被归档")
+	}
+
+	// 块应已到达 L2，且身份不变。
+	var found *document.Doc
+	for _, d := range docStore.RecentDocs(20) {
+		if len(d.Blocks) > 0 {
+			found = d
+			break
+		}
+	}
+	if found == nil {
+		t.Fatal("归档文档应持有一等记忆块")
+	}
+	if len(found.Blocks) != 1 {
+		t.Fatalf("文档应有 1 个块，实际 %d", len(found.Blocks))
+	}
+	got := found.Blocks[0]
+	if got.ID != block.ID || got.Modality != block.Modality || got.PayloadDigest != block.PayloadDigest || got.Fingerprint != block.Fingerprint || len(got.Vector) != len(block.Vector) {
+		t.Fatalf("块身份应原样迁移:\n got  %+v\n want %+v", got, block)
+	}
+
+	// 同一块不能同时留在 L0。
+	for _, e := range rc.Recent(100) {
+		if len(e.Blocks) > 0 {
+			t.Fatalf("块仍留在 L0（同一块同时存在于两层）: %+v", e.Blocks)
+		}
 	}
 }

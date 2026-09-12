@@ -2,24 +2,63 @@
 set -e
 
 SERVICE_NAME="homeagent"
-SERVICE_FILE="/lib/systemd/system/${SERVICE_NAME}.service"
 HOMED_BIN="/usr/bin/homed"
 DATA_DIR="/var/lib/homeagent"
+SETUP_SH="/usr/lib/homeagent/setup.sh"
+
+# unit 由本包装到 /etc/systemd/system/，而旧 postinst 只查
+# /lib/systemd/system/（merged-usr 下等于 /usr/lib/systemd/system，那里没有
+# 这个文件）——于是 daemon-reload 与 enable **从未执行过**：装完不会开机自启，
+# 而 postinst 全程无报错。这里三个候选位置都看一下。
+find_unit() {
+  for p in "/etc/systemd/system/${SERVICE_NAME}.service" \
+           "/usr/lib/systemd/system/${SERVICE_NAME}.service" \
+           "/lib/systemd/system/${SERVICE_NAME}.service"; do
+    if [ -f "$p" ]; then
+      printf '%s' "$p"
+      return 0
+    fi
+  done
+  return 1
+}
 
 case "$1" in
   configure)
     if [ -f "$HOMED_BIN" ]; then
       mkdir -p "$DATA_DIR"
 
-      # 初始化凭据和数据库
-      if [ -x /usr/lib/homeagent/setup.sh ]; then
-        HOMEAGENT_DATA="$DATA_DIR" /usr/lib/homeagent/setup.sh || true
+      # 初始化凭据和数据库。
+      #
+      # 这里不能再用 `|| true` 吞失败：setup.sh 靠 initconfig 写 config.db，
+      # 而 initconfig 曾因 CGO_ENABLED=0 静默空操作（凭据只进了
+      # credentials.txt、没进数据库），用户拿它登录必然失败，安装却一声不响。
+      # 失败必须看得见，并给出可直接执行的补救命令。
+      if [ -x "$SETUP_SH" ]; then
+        if ! HOMEAGENT_DATA="$DATA_DIR" "$SETUP_SH"; then
+          echo "E: homeagent 初始化失败——凭据可能未写入 config.db。" >&2
+          echo "E: 请手动重试：HOMEAGENT_DATA=$DATA_DIR $SETUP_SH" >&2
+        fi
+      else
+        echo "W: 未找到 $SETUP_SH，跳过凭据初始化。" >&2
       fi
 
       # 注册 systemd 服务
-      if [ -f "$SERVICE_FILE" ]; then
-        systemctl daemon-reload 2>/dev/null || true
-        systemctl enable "$SERVICE_NAME" 2>/dev/null || true
+      if command -v systemctl >/dev/null 2>&1; then
+        if find_unit >/dev/null; then
+          systemctl daemon-reload 2>/dev/null || true
+          systemctl enable "$SERVICE_NAME" 2>/dev/null || true
+          # 首次安装就拉起来，装完即可用；升级时重启以真正加载新二进制
+          # （仅 enable 不会让已在运行的进程换用新文件）。
+          if [ -z "${2:-}" ]; then
+            systemctl start "$SERVICE_NAME" 2>/dev/null || \
+              echo "W: homeagent 服务未能启动，请检查：systemctl status $SERVICE_NAME" >&2
+          else
+            systemctl restart "$SERVICE_NAME" 2>/dev/null || \
+              echo "W: homeagent 服务未能重启，请检查：systemctl status $SERVICE_NAME" >&2
+          fi
+        else
+          echo "W: 未找到 ${SERVICE_NAME}.service，未启用服务。" >&2
+        fi
       fi
     fi
     ;;

@@ -316,6 +316,10 @@ func TestProcess_ConcurrentCallsRouteCorrectly(t *testing.T) {
 }
 
 // 协议版本不匹配必须显式拒绝，不能半兼容运行。
+//
+// v2 引入的必要性就靠这条：v1 插件（只读内联 args）遇上 v2 内核，跟 v2 插件
+// 发 blocks_ref 给 v1 内核，都会静默失效、不报任何错。只有在这里显式拦下，
+// 那双错配才会变成一条带修复指令的启动失败。
 func TestProcess_ProtocolMismatchRejected(t *testing.T) {
 	bin := buildTestPlugin(t, "badprotoplugin.go")
 	_, err := Spawn("badproto", bin, Options{Handler: noopHandler})
@@ -324,6 +328,11 @@ func TestProcess_ProtocolMismatchRejected(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "协议版本不匹配") {
 		t.Errorf("错误应说明版本不匹配，实际: %v", err)
+	}
+	// 运维可读性：光报“不匹配”不能定位到行动。生产上碰到它的现场是
+	// “只更新了内核没重编插件”，所以错误里必须带出这条修复指令。
+	if !strings.Contains(err.Error(), "plugindev") || !strings.Contains(err.Error(), "重编") {
+		t.Errorf("错误应给出重编插件的修复指令，实际: %v", err)
 	}
 }
 
@@ -341,6 +350,7 @@ func TestProcess_SpawnRequiresHandler(t *testing.T) {
 //   - 在途调用挂到自己的超时；
 //   - OnExit 不触发 → 崩溃计数、工具摘除、自动重启全都不发生；
 //   - 进程表里插件已是僵尸，注册表里却一切正常。
+//
 // 生产上 browser 拉 chromium、editdoc 拉 python 正是这个形状。
 // 现在由专职 waitLoop 直接 wait4(2) 判定，不再依赖 fd 生命周期。
 func TestProcess_ExitDetectedDespiteInheritedStdout(t *testing.T) {

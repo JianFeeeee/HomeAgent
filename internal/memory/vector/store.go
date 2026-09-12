@@ -1,16 +1,72 @@
 package vector
 
 import (
+	"fmt"
 	"math"
 	"sort"
 	"strings"
 	"sync"
+
+	"gitcode.com/JianFeeeee/HomeAgent/pkg/embedding"
 )
 
 // Vectorizer 接口：将文本转为向量
+//
+// 多模态嵌入新增可选的 EmbedImage：支持视觉嵌入的实现者覆写此方法，
+// 不支持的（TF-IDF 等）在默认实现里返回 ErrNotSupported。
 type Vectorizer interface {
 	Vectorize(text string) Vector
+	EmbedImage(img []byte, mime string) (Vector, error)
 }
+
+// MultimodalEmbedder 是稠密多模态编码器的接口。
+//
+// 与 Vectorizer（稀疏词向量，供 TF-IDF/倒排检索）刻意区分：多模态模型产出的
+// 是共享稠密空间，直接用于 media.Store 的稠密余弦检索，
+// **不得**塞进文档/知识层的稀疏 vector.Store（会破坏倒排剪枝与 TF-IDF 语义）。
+//
+// 实现不限：可以是内嵌 ONNX，也可以是外部 HTTP 向量服务——
+// 内核只依赖本接口，两条路径共享同一套检索/存储基础设施。Fingerprint 是模型
+// 空间标识（如模型文件指纹），作为 vec_model 持久化用于切换后重算。
+type MultimodalEmbedder interface {
+	VectorizeDense(text string) ([]float64, error)
+	EmbedImageDense(img []byte, mime string) ([]float64, error)
+	Fingerprint() string
+	Dim() int
+	Loaded() bool
+	Close()
+}
+
+// MultimodalModality 是统一向量空间支持的输入模态。
+// 现内核只消费 text/image；外部 API 路径可能扩展 audio/video，
+// 通过类型断言在接口外按需扩展，不破坏现有契约。
+type MultimodalModality string
+
+const (
+	ModalityText  MultimodalModality = "text"
+	ModalityImage MultimodalModality = "image"
+	ModalityAudio MultimodalModality = "audio"
+	ModalityVideo MultimodalModality = "video"
+)
+
+// ErrNotSupported 表示 Vectorizer 不支持该原生模态；调用方不得以描述文本冒充其向量。
+var ErrNotSupported = fmt.Errorf("vectorizer does not support image embedding")
+
+// ErrModalityUnsupported 表示该模态不在本统一向量空间的原生覆盖范围内。
+//
+// 它与普通错误语义不同：调用方应把它当作「这条媒体本空间永远不会有向量」
+// 而不是「这次失败了、下次重试」。绝不能拿另一个模型的向量顶替——那会把
+// 两套坐标系混进同一空间，检索出来的相似度没有任何意义。
+//
+// 它是公共 provider 契约里那个哨兵值的别名，两者 errors.Is 互通：
+// provider 在自己的包内返回 embedding.ErrUnsupportedModality 即可，
+// 内核侧的判断无需改变。
+var ErrModalityUnsupported = embedding.ErrUnsupportedModality
+
+// 注：曾经这里还有一个可选的 VideoEmbedder 接口（用类型断言探测视频能力）。
+// 已删除：那让核心为每一个新模态长出一套模型专属方法，正是“核心适配模型”的
+// 坏味道。模态能力现在是数据（embedding.Info.Modalities），输入是不透明的
+// Data+MIME（见 pkg/embedding）。
 
 // Vector 是带权特征映射：feature → weight
 type Vector map[string]float64
@@ -61,6 +117,26 @@ func (s *Store) Remove(id string) {
 }
 
 func (s *Store) Search(query Vector, topK int) []DocVector {
+	hits := s.SearchScored(query, topK)
+	if len(hits) == 0 {
+		return nil
+	}
+	out := make([]DocVector, len(hits))
+	for i, h := range hits {
+		out[i] = h.Doc
+	}
+	return out
+}
+
+// DocVectorHit 是一篇文档的相似度候选及其原始 cosine 分数。
+// 跨模态融合需要分数做归一化；纯排序的 Search 不暴露它。
+type DocVectorHit struct {
+	Doc   DocVector
+	Score float64
+}
+
+// SearchScored 与 Search 同语义，但返回带原始 cosine 分数的候选。
+func (s *Store) SearchScored(query Vector, topK int) []DocVectorHit {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 
@@ -100,9 +176,9 @@ func (s *Store) Search(query Vector, topK int) []DocVector {
 		results = results[:topK]
 	}
 
-	out := make([]DocVector, len(results))
+	out := make([]DocVectorHit, len(results))
 	for i, r := range results {
-		out[i] = r.doc
+		out[i] = DocVectorHit{Doc: r.doc, Score: r.score}
 	}
 	return out
 }
@@ -246,9 +322,24 @@ func CosineSimilarity(a, b Vector) float64 {
 	return dot / (math.Sqrt(normA) * math.Sqrt(normB))
 }
 
+// DenseCosine 计算两个 []float64 稠密向量的余弦相似度。
+// 与 CosineSimilarity（稀疏 map）数学等价，但面向稠密多模态向量。
+func DenseCosine(a, b []float64) float64 {
+	var dot, na, nb float64
+	for i := range a {
+		dot += a[i] * b[i]
+		na += a[i] * a[i]
+		nb += b[i] * b[i]
+	}
+	if na == 0 || nb == 0 {
+		return 0
+	}
+	return dot / math.Sqrt(na*nb)
+}
+
 // InvertedIndex 倒排索引，加速向量搜索
 type InvertedIndex struct {
-	mu     sync.RWMutex
+	mu       sync.RWMutex
 	postings map[string]map[string]float64 // feature → {docID: weight}
 }
 

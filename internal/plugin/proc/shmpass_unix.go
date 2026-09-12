@@ -11,11 +11,10 @@ func (h *Host) procEnvForShm() []string { return nil }
 //
 // 顺序即 fd 编号（cmd.ExtraFiles[0] → 子进程 fd 3）：
 //
-//	fd 3 = StageContext 段
-//	fd 4 = 事件环段
-//	fd 5 = 事件通知（eventfd / pipe 读端）
+//	fd 3 = 统一共享内存区域（SuperBlock + StageContext + EvtRing）
+//	fd 4 = 事件通知（eventfd / pipe 读端）
 //
 // 插件侧模板 z_proc_shm_unix.go 的常量与此严格对应。
 func (h *Host) procExtraFilesForShm() []*os.File {
-	return []*os.File{h.memfd, h.evtRingFd, h.evtfd}
+	return []*os.File{h.memfd, h.evtfd}
 }

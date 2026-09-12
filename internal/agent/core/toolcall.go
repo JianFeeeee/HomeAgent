@@ -150,11 +150,11 @@ func (a *Agent) executeMemoryTool(tc agentAPI.ToolCall) string {
 			}
 			parts = append(parts, fmt.Sprintf("- %s →(%s)→ %s", r.SourceName, r.RelationType, r.TargetName))
 		}
-		// 命中的关系若挂着媒体，把媒体说明附在结果末尾。
+		// 命中的关系若挂着媒体块，把媒体说明附在结果末尾。
 		//
 		// 关系行只有实体名和关系类型，看不出"这条记忆当时还带了一张图"。
-		// 媒体挂在句子上（graph_sentence owner），需经关系→句子→media_refs
-		// 反查。不附上的后果：agent 显式查了图记忆，却仍然不知道有图。
+		// 媒体块以结构边与句子相连，需经关系→句子反查。
+		// 不附上的后果：agent 显式查了图记忆，却仍然不知道有图。
 		if mc := a.mediaContextForRelations(result.Relations); mc != "" {
 			parts = append(parts, "", "关联媒体:", mc)
 		}
@@ -190,11 +190,16 @@ func (a *Agent) executeMemoryTool(tc agentAPI.ToolCall) string {
 					Object:       getString(m, "object"),
 					SentenceText: getString(m, "sentence_text"),
 				}
-				// 模型显式关联的媒体：标记由内核补进句子文本，模型不必知道格式。
-				// 没有 sentence_text 时 sentenceWithMediaMarkers 会用标记本身
-				// 充当句子——媒体必须有句子落点，否则 media_refs 无从挂起。
+				// 模型显式关联的媒体：结构化字段随三元组一起提交，
+				// 由 commitTriplesWithMedia 变成 L3 一等块并与句子建边——
+				// 不再把 marker 写进句子文本。
 				if digests := getStringSlice(m, "media_digests"); len(digests) > 0 {
-					t.SentenceText = a.sentenceWithMediaMarkers(t.SentenceText, digests)
+					t.MediaDigests = a.resolveMediaDigests(digests)
+					// 块边需要句子作端点。模型没给原句时用三元组本身拼一句
+					// 自然语言——不能造一段 marker 文本，那正是被废弃的东西。
+					if t.SentenceText == "" && len(t.MediaDigests) > 0 {
+						t.SentenceText = fmt.Sprintf("%s%s%s。", t.Subject, t.Relation, t.Object)
+					}
 				}
 				if t.Subject != "" && t.Relation != "" && t.Object != "" {
 					triples = append(triples, t)
@@ -206,7 +211,7 @@ func (a *Agent) executeMemoryTool(tc agentAPI.ToolCall) string {
 		}
 		// remember 工具是用户/模型显式写入，不涉及归档删除，
 		// 因此不需要 mediaBound——没有旧引用要释放。
-		ec, rc, mb, err := a.commitTriplesWithMedia(triples, string(a.id), 0)
+		ec, rc, mb, err := a.commitTriplesWithMedia(triples, string(a.id), 0, nil)
 		if err != nil {
 			return fmt.Sprintf("记忆写入失败: %v", err)
 		}
@@ -531,10 +536,10 @@ func (a *Agent) executeDocTool(tc agentAPI.ToolCall) string {
 			if len(content) > 2000 {
 				content = content[:2000] + "..."
 			}
-			// 媒体说明单独一行进冷存事件：正文可能被上面的 2000 字截断，
-			// 而媒体标记往往在文档末尾——截掉之后模型就不知道这篇文档带过图。
-			if mc := a.docMediaContext(d.ID, d.Content); mc != "" {
-				content = content + "\n关联媒体: " + mc
+			// 媒体块标签单独一行进冷存事件：正文可能被上面的 2000 字截断，
+			// 截掉之后模型就不知道这篇文档带过图。
+			if labels := a.blockLabelsForDoc(d); labels != "" {
+				content = content + "\n关联媒体: " + labels
 			}
 			a.context.InsertByTimestamp(ContextEvent{
 				Timestamp: d.CreatedAt,
@@ -572,19 +577,20 @@ func (a *Agent) executeDocTool(tc agentAPI.ToolCall) string {
 			Source:  "manual",
 		}
 
-		// 模型显式关联的媒体：标记补进正文后再写入。顺序关键——向量索引用
-		// Summary+Content 计算，标记进不去正文就检索不到这份媒体。
-		mediaDigests := a.resolveMediaDigests(getStringSlice(tc.Arguments, "media_digests"))
-		doc.Content = a.sentenceWithMediaMarkers(doc.Content, mediaDigests)
+		// 模型显式关联的媒体：直接变成文档持有的一等块。
+		// 不再往正文写 marker——文档向量会融合这些块的媒体向量，
+		// 图片按自己的向量被检索。
+		for _, d := range a.resolveMediaDigests(getStringSlice(tc.Arguments, "media_digests")) {
+			if b, ok := a.blockFromDigest(d); ok {
+				doc.Blocks = append(doc.Blocks, b)
+			}
+		}
 
 		if err := a.docStore.Insert(doc); err != nil {
 			return fmt.Sprintf("文档写入失败: %v", err)
 		}
-		// 引用必须在拿到 doc.ID 之后挂：owner_id 就是文档 id。
-		// 不挂的后果是这些媒体在文档里可见却无主，下一轮 GC 会把它们清掉。
-		bound := a.bindDocMedia(doc.ID, mediaDigests)
-		if bound > 0 {
-			return fmt.Sprintf("文档已提交 (id: %s, 摘要: %s, 关联 %d 份媒体)", doc.ID, summary, bound)
+		if n := len(doc.Blocks); n > 0 {
+			return fmt.Sprintf("文档已提交 (id: %s, 摘要: %s, 关联 %d 份媒体)", doc.ID, summary, n)
 		}
 		return fmt.Sprintf("文档已提交 (id: %s, 摘要: %s)", doc.ID, summary)
 

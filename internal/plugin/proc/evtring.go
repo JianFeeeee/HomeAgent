@@ -4,9 +4,9 @@ import (
 	"encoding/binary"
 	"encoding/json"
 	"fmt"
-	"os"
 	"sync"
 	"sync/atomic"
+	"time"
 
 	pubsdk "gitcode.com/JianFeeeee/homeagent-sdk/sdk"
 )
@@ -123,26 +123,6 @@ func NewEvtRing(data []byte) (*EvtRing, error) {
 	}, nil
 }
 
-// allocEvtRing 创建事件环共享段（memfd + mmap），返回 (段句柄, mmap数据, eventfd fd)。
-// 段句柄通过 ExtraFiles 传给子进程（fd 4）；eventfd（fd 5）也通过 ExtraFiles 传。
-func allocEvtRing() (*os.File, []byte, int, error) {
-	ringfd, ringData, err := allocShm(evtTotalSize)
-	if err != nil {
-		return nil, nil, -1, fmt.Errorf("创建事件环段: %w", err)
-	}
-	// 初始化头
-	binary.LittleEndian.PutUint32(ringData[evtOffMagic:], evtRingMagic)
-	binary.LittleEndian.PutUint32(ringData[evtOffVersion:], evtRingVersion)
-	binary.LittleEndian.PutUint32(ringData[evtOffCap:], evtRingCap)
-
-	efd, err := evtfdCreate()
-	if err != nil {
-		freeShm(ringfd, ringData)
-		return nil, nil, -1, fmt.Errorf("创建 eventfd: %w", err)
-	}
-	return ringfd, ringData, efd, nil
-}
-
 func (r *EvtRing) Init() {
 	binary.LittleEndian.PutUint32(r.data[evtOffMagic:], evtRingMagic)
 	binary.LittleEndian.PutUint32(r.data[evtOffVersion:], evtRingVersion)
@@ -182,10 +162,24 @@ type EvtConsumer struct {
 	mu       sync.Mutex
 	running  bool
 	stop     chan struct{}
+	stopOnce sync.Once
+	done     chan struct{}
 }
 
 type evtfdReader interface {
 	Read(b []byte) (int, error)
+}
+
+// evtfdFder 是可取出原始 fd 的通知句柄（*os.File 满足）。
+//
+// 有它才能用 poll(2) 加超时等待可读。**为什么不能用 SetReadDeadline**：
+// eventfd/pipe 经 os.NewFile 包装后不会注册进 Go netpoller（os.NewFile 对
+// 非 open 得到的 fd 一律按非 pollable 处理），Read 退化成阻塞 syscall，
+// SetReadDeadline 返回错误且不生效——Run 会永久卡在 syscall.Read，
+// 此时调用方若已 munmap 区域（host.Close），恢复后的 drainEvents 就是
+// 读已解除映射的内存：SIGSEGV，recover 捕不到。
+type evtfdFder interface {
+	Fd() uintptr
 }
 
 func NewEvtConsumer(ringData []byte, evtfd evtfdReader, mask uint32, handler func(*pubsdk.Event) error) *EvtConsumer {
@@ -195,8 +189,12 @@ func NewEvtConsumer(ringData []byte, evtfd evtfdReader, mask uint32, handler fun
 		handler:  handler,
 		typeMask: mask,
 		stop:     make(chan struct{}),
+		done:     make(chan struct{}),
 	}
 }
+
+// readWakeInterval 是 poll 超时间隔：保证 Run 至少这么频繁地检查 stop。
+const readWakeInterval = 100 * time.Millisecond
 
 func (c *EvtConsumer) Run() {
 	c.mu.Lock()
@@ -210,6 +208,7 @@ func (c *EvtConsumer) Run() {
 		c.mu.Lock()
 		c.running = false
 		c.mu.Unlock()
+		close(c.done)
 	}()
 
 	buf := make([]byte, 8)
@@ -219,8 +218,25 @@ func (c *EvtConsumer) Run() {
 			return
 		default:
 		}
+
+		// 显式 poll(2) 加超时：只有它能打破阻塞 Read，让 Stop 真正生效。
+		if f, ok := c.evtfd.(evtfdFder); ok {
+			ready, err := pollEvtfd(int(f.Fd()), int(readWakeInterval/time.Millisecond))
+			if err != nil {
+				return // 通知句柄已失效，退出以免空转
+			}
+			if !ready {
+				continue // 超时：回到顶部检查 stop
+			}
+		}
+
 		// 阻塞等待内核通知（走 netpoller，只 park goroutine）
 		if _, err := c.evtfd.Read(buf); err != nil {
+			select {
+			case <-c.stop:
+				return
+			default:
+			}
 			continue
 		}
 		c.drainEvents()
@@ -231,6 +247,13 @@ func (c *EvtConsumer) drainEvents() {
 	writeSeq := binary.LittleEndian.Uint64(c.ringData[evtOffWriteSeq:])
 	cap := uint64(evtRingCap)
 	for c.readSeq < writeSeq {
+		// 每处理一条就检查一次 stop：handler 可能很慢，
+		// 不加这个检查的话 Stop 要等整轮 drain 完才生效。
+		select {
+		case <-c.stop:
+			return
+		default:
+		}
 		if writeSeq-c.readSeq > cap {
 			c.readSeq = writeSeq - cap
 		}
@@ -268,10 +291,14 @@ func (c *EvtConsumer) drainEvents() {
 	}
 }
 
+// Stop 请求消费者退出。
+//
+// 非阻塞：Stop 返回**不代表** Run 已退出（最多 readWakeInterval 后退出）。
+// 若要在 Stop 之后释放 ringData（host.Close 会 munmap 整个区域），
+// 必须先 Stop() 再 Wait()。
 func (c *EvtConsumer) Stop() {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	if c.running {
-		close(c.stop)
-	}
+	c.stopOnce.Do(func() { close(c.stop) })
 }
+
+// Wait 阻塞至 Run 退出。返回后 drainEvents 保证不会再访问 ringData。
+func (c *EvtConsumer) Wait() { <-c.done }

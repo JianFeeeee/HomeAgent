@@ -19,12 +19,13 @@ func TestCapability_AllMethodsClassified(t *testing.T) {
 	// 与 protocol.go 的 method 常量对齐。内核→插件的 7 个调用不经 Handle，
 	// 故不需要能力归属。
 	kernelToPlugin := map[string]bool{
-		MethodPluginInit:   true,
-		MethodPluginStart:  true,
-		MethodPluginStop:   true,
-		MethodToolInvoke:   true,
-		MethodStageInvoke:  true,
-		MethodOutputInvoke: true,
+		MethodPluginInit:    true,
+		MethodPluginStart:   true,
+		MethodPluginStop:    true,
+		MethodToolInvoke:    true,
+		MethodCleanerInvoke: true,
+		MethodStageInvoke:   true,
+		MethodOutputInvoke:  true,
 	}
 
 	// 插件→内核的全部 method（手工清单，与 protocol.go 对照）

@@ -34,6 +34,9 @@ func TestEventRing_BasicWriteAndConsume(t *testing.T) {
 		},
 	)
 	go consumer.Run()
+	// LIFO：先 Stop（打断阻塞的 Read）再 Wait（等 Run 退出），
+	// 两者都必须在 host.Close（munmap 整个区域）之前完成。
+	defer consumer.Wait()
 	defer consumer.Stop()
 
 	// 订阅 agent_output 事件
@@ -85,11 +88,18 @@ func TestEventRing_OverflowStillDelivers(t *testing.T) {
 		host.EvtfdReadFile(),
 		0,
 		func(evt *pubsdk.Event) error {
-			received <- evt
+			// 非阻塞投递：本用例写入了 8292 条事件，若这里阻塞在
+			// channel 上，drainEvents 会卡在 handler 里，Stop 就无法
+			// 让 Run 退出。
+			select {
+			case received <- evt:
+			default:
+			}
 			return nil
 		},
 	)
 	go consumer.Run()
+	defer consumer.Wait()
 	defer consumer.Stop()
 
 	select {
@@ -125,6 +135,7 @@ func TestEventRing_TypeMaskFiltering(t *testing.T) {
 		},
 	)
 	go consumer.Run()
+	defer consumer.Wait()
 	defer consumer.Stop()
 
 	unsub := er.Subscribe(pubsdk.EventToolCall)

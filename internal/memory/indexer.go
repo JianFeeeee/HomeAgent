@@ -10,19 +10,19 @@ import (
 )
 
 type Indexer struct {
-	db     *GraphDB
-	vec    *vector.Store
-	veczer *vector.TFIDFVectorizer
-	mu     sync.RWMutex
-	trained     bool
-	recalled    map[string]bool // 已通过工具调用显式召回的实体名，自动注入时跳过
+	db       *GraphDB
+	vec      *vector.Store
+	veczer   *vector.TFIDFVectorizer
+	mu       sync.RWMutex
+	trained  bool
+	recalled map[string]bool // 已通过工具调用显式召回的实体名，自动注入时跳过
 }
 
 func NewIndexer(db *GraphDB) *Indexer {
 	return &Indexer{
-		db:      db,
-		vec:     vector.NewStore(),
-		veczer:  vector.NewTFIDFVectorizer(TokenizeWords),
+		db:       db,
+		vec:      vector.NewStore(),
+		veczer:   vector.NewTFIDFVectorizer(TokenizeWords),
 		recalled: make(map[string]bool),
 	}
 }

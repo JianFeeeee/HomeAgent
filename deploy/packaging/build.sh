@@ -55,7 +55,7 @@ case "$TARGET" in
     ;;
   *)
     echo "Unknown target: $TARGET"
-    echo "Usage: $0 [native|linux/amd64|linux/arm64|darwin/amd64|darwin/arm64|windows/amd64|all]"
+    echo "Usage: $0 [native|linux/amd64|linux/arm64|darwin/amd64|darwin/arm64|windows/amd64|all] [all|homed|waiter|initconfig|gui|payload]"
     echo "       [all|homed|waiter|initconfig|gui]"
     exit 1
 esac
@@ -118,8 +118,21 @@ build_homed() {
   # Go 用 CC 驱动 CGO 编译与链接，用 CC 指定的交叉工具链来决定目标架构。
   # 必须同时 export CC 给 Go 的 CGO 代码生成器，否则 CGO_ENABLED=1 下的
   # 目标文件与 host 的 ld 不兼容（如 arm64 的 .o 给了 x86_64 的 ld）。
+  #
+  # HOMED_TAGS 默认带 onnxruntime：发行版**默认启用**本地向量空间。
+  # 不带这个标签时 providers/chineseclip 与 providers/qwen3vl 仍会注册，
+  # 但打开时报「requires build tag」并优雅降级（不静默假装成功）。
+  # 需要极简构建时可显式 HOMED_TAGS= 关掉。
+  #
+  # 运行期还需要 libonnxruntime.so（provider 按 /opt/onnxruntime、
+  # /usr/local/lib、/usr/lib 顺序查找）；缺失时同样是「日志里的明确错误 +
+  # 降级」，不会假装启用。
   local _cc="${CC:-cc}"
+  local _tags="${HOMED_TAGS-onnxruntime}"
+  local -a _tagargs=()
+  if [ -n "$_tags" ]; then _tagargs=(-tags "$_tags"); fi
   CGO_ENABLED=1 CC="$_cc" "$GO" build -trimpath -installsuffix dynlink \
+    ${_tagargs[@]+"${_tagargs[@]}"} \
     -ldflags "$LDFLAGS" -o "$out" ./cmd/homed/
   echo "  OK ($(file "$out" | sed 's/.*: //') | $(du -h "$out" | cut -f1))"
 }
@@ -136,20 +149,58 @@ build_waiter() {
   echo "  OK ($(du -h "$out" | cut -f1))"
 }
 
-# ---- initconfig (CGO-free 配置初始化器) ----
+# ---- initconfig（必须 cgo：写 config.db 用的是 go-sqlite3）----
 #
-# NSIS 安装包（installer.nsi:220 File "..\build\initconfig.exe"）与
-# package-linux.sh 的 stage_variant 都引用它，但此前 build.sh 从不构建它——
-# Windows 安装包构建会直接失败在缺文件上。
+# 这里**必须** CGO_ENABLED=1。此前写的是 CGO_ENABLED=0，而 cmd/initconfig 通过
+# database/sql 使用 mattn/go-sqlite3：CGO_ENABLED=0 时该库退化成 static_mock.go
+# 里的桩，sql.Open 是懒的所以不报错、第一次 Exec 才失败；而 main.go 当时忽略
+# 了所有错误——于是 initconfig 打印凭据、退出码 0、一个字节都没写进 config.db。
+# 安装脚本把这份凭据写进 credentials.txt，用户照它登录必然失败，全程无报错。
+#
+# NSIS 安装包（installer.nsi）与 package-linux.sh 的 stage_variant 都引用它，
+# 但此前 build.sh 从不构建它——Windows 安装包构建会直接失败在缺文件上。
 build_initconfig() {
   local plat="${GOOS:-linux}/${GOARCH:-amd64}"
   local out="$BUILD_DIR/initconfig${SUFFIX:+_$SUFFIX}"
   if [ "$GOOS" = "windows" ]; then out="${out}.exe"; fi
 
   echo "[BUILD] initconfig ${plat} → $out"
-  CGO_ENABLED=0 "$GO" build -trimpath -installsuffix dynlink \
+  CGO_ENABLED=1 "$GO" build -trimpath -installsuffix dynlink \
     -ldflags "$LDFLAGS" -o "$out" ./cmd/initconfig/
   echo "  OK ($(du -h "$out" | cut -f1))"
+}
+
+# ---- linux-payload（给 Windows 安装器用的 Linux 包）----
+#
+# Windows 不再安装 homed.exe：homed 依赖 fd 继承 + 统一共享内存区的段内偏移
+# 解引用，Windows 句柄模型无法表达（见 cmd/homed/platform_windows.go）。
+# Windows 安装器改为引导到 WSL2，并把 **Linux 包**送进发行版里安装。
+# 因此 Windows 安装包必须带上 Linux 产物——这一段就是把它暂存到
+# build/linux-payload/（installer.nsi 从这里 File /r 打进安装包）。
+#
+# 复用 package-linux.sh 的产物，而不是在这里另行编译：WSL 里跑的就是普通
+# linux/amd64，安装内容必须与 Linux 原生安装**完全一致**，否则又变成两个平台。
+stage_linux_payload() {
+  local src="$PROJECT_ROOT/dist/linux"
+  local out="$BUILD_DIR/linux-payload"
+
+  rm -rf "$out"
+  mkdir -p "$out"
+
+  local found=0
+  for f in "$src"/*.deb "$src"/*.tar.gz; do
+    [ -f "$f" ] || continue
+    cp "$f" "$out/"
+    found=$((found + 1))
+  done
+
+  if [ "$found" -eq 0 ]; then
+    echo "[FAIL] build/linux-payload 为空：先运行 package-linux.sh 产出 dist/linux/*.deb|*.tar.gz" >&2
+    echo "       （Windows 安装器会把这里的包送进 WSL 安装；空包等于装不上）" >&2
+    return 1
+  fi
+  echo "[BUILD] linux-payload ← $found 个包"
+  ls -1 "$out" | sed 's/^/  /'
 }
 
 # ---- gui (Electron) ----
@@ -179,13 +230,34 @@ build_gui() {
 }
 
 # ---- dispatch ----
-case "$COMPONENT" in
-  all)   build_homed; build_waiter; build_initconfig; build_gui ;;
-  homed) build_homed ;;
-  waiter) build_waiter ;;
-  initconfig) build_initconfig ;;
-  gui)   build_gui ;;
-  *)
-    echo "Unknown component: $COMPONENT"
-    exit 1
-esac
+if [ "${GOOS:-}" = "windows" ]; then
+  # Windows 目标：构建的**不是** homed——它已放弃 Windows 原生支持。
+  # 需要的是：Linux 包（送进 WSL 安装）+ Windows 侧客户端（waiter CLI / GUI）。
+  case "$COMPONENT" in
+    all)   build_waiter; stage_linux_payload; build_gui ;;
+    waiter) build_waiter ;;
+    payload) stage_linux_payload ;;
+    gui)   build_gui ;;
+    homed|initconfig)
+      echo "homed/initconfig 不再提供 Windows 原生构建：请用 WSL2（或用 linux/amd64 目标）。" >&2
+      echo "原因见 cmd/homed/platform_windows.go。" >&2
+      exit 1
+      ;;
+    *)
+      echo "Unknown component: $COMPONENT"
+      exit 1
+      ;;
+  esac
+else
+  case "$COMPONENT" in
+    all)   build_homed; build_waiter; build_initconfig; build_gui ;;
+    homed) build_homed ;;
+    waiter) build_waiter ;;
+    initconfig) build_initconfig ;;
+    gui)   build_gui ;;
+    *)
+      echo "Unknown component: $COMPONENT"
+      exit 1
+      ;;
+  esac
+fi

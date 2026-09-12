@@ -28,6 +28,16 @@ var (
 	//        存量插件不需要改一行也不需要重编：新增方法由**插件调用、内核实现**，
 	//        不调就不受影响。想用新字段的插件重编即可。
 	//
+	// 1.2.0：注入行为的记忆/裁剪标志位。**全部是新增，无签名变更**：
+	//          - InjectOptions{NoMemory, ContextPolicy}
+	//          - IOInjector 的六个 *Opts 变体（排队/中断/同步/带媒体各一对）
+	//          - ChannelDef.ContextPolicy（顺带给 ChannelDef 补上 JSON tag：
+	//            它要跨进程传给内核，而 Cleaner 是函数必须忽略；无 tag 时只能
+	//            手写字段白名单，新增字段会被静默丢掉）
+	//        语义：零值 InjectOptions 与旧的三参数方法完全等价（记入记忆 +
+	//        不裁剪），因此存量插件不需要改一行也不需要重编。
+	//        裁剪（ContextPolicy=prune）必须显式声明——它会归档丢弃低相关事件。
+	//
 	// ❗main 分支上此值是**下一个未发布中版本**；已发布的值看对应的
 	// release/vX.Y.x 分支与 tag（见 核心仓 docs/git-branching.md §2.1 与 §七.1）。
 	//
@@ -56,6 +66,10 @@ var (
 	// doc.insertWithMedia / io.injectMedia* 这些 RPC，调用会返回 unknown method）。
 	// 这里仍写 1.0.0，因为它是「SDK 能在其上运行」的下限；
 	// 媒体接口是可选能力，不用就不受影响。
+	//
+	// ⚠️ 1.2.0 新增的注入标志位同理需要核心 **1.2.0+**：内核在 1.2.0 之前会
+	// 忽略注入参数里的 no_memory/context_policy 字段（不会报错，但不生效）。
+	// 想用这些标志位的插件应当要求核心 1.2.0+；不用就不受影响。
 	CoreVersion = "1.0.0"
 )
 

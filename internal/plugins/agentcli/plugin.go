@@ -810,8 +810,11 @@ func (p *Plugin) readLoop(t *TerminalSession, s *sdk.PluginSDK) {
 	flushTicker := time.NewTicker(200 * time.Millisecond)
 	defer flushTicker.Stop()
 
-	// 立即发送首次"终端已启动"通知，让 agent 感知存在
-	s.InjectText("agentcli", "agentcli", fmt.Sprintf("[终端 %s 已启动]", t.id))
+	// 立即发送首次"终端已启动"通知，让 agent 感知存在。
+	// 用 NoMemory：这是状态提示，不是对话内容。不关掉的话每开一个终端都会
+	// 在记忆里留下一条"[终端 X 已启动]"，把真实内容挤掉。
+	s.InjectTextOpts("agentcli", "agentcli", fmt.Sprintf("[终端 %s 已启动]", t.id),
+		sdk.InjectOptions{NoMemory: true})
 	now := time.Now()
 	t.mu.Lock()
 	t.lastNotify = now
@@ -828,7 +831,8 @@ func (p *Plugin) readLoop(t *TerminalSession, s *sdk.PluginSDK) {
 	for {
 		if t.IsExpired() {
 			log.Printf("[agentcli] terminal %s expired after %v", t.id, t.timeout)
-			s.InjectText("agentcli", "agentcli", fmt.Sprintf("[终端 %s 已超时关闭（%s）]", t.id, t.timeout))
+			s.InjectTextOpts("agentcli", "agentcli", fmt.Sprintf("[终端 %s 已超时关闭（%s）]", t.id, t.timeout),
+				sdk.InjectOptions{NoMemory: true})
 			p.mu.Lock()
 			delete(p.sessions, t.id)
 			p.mu.Unlock()
@@ -837,9 +841,11 @@ func (p *Plugin) readLoop(t *TerminalSession, s *sdk.PluginSDK) {
 
 		if !terminalRunning(t) {
 			if t.watch.onExit {
-				s.InjectText("agentcli", "agentcli", fmt.Sprintf("[终端 %s 中的命令已执行结束]", t.id))
+				s.InjectTextOpts("agentcli", "agentcli", fmt.Sprintf("[终端 %s 中的命令已执行结束]", t.id),
+					sdk.InjectOptions{NoMemory: true})
 			} else {
-				s.InjectText("agentcli", "agentcli", fmt.Sprintf("[终端 %s 中的进程已退出]", t.id))
+				s.InjectTextOpts("agentcli", "agentcli", fmt.Sprintf("[终端 %s 中的进程已退出]", t.id),
+					sdk.InjectOptions{NoMemory: true})
 			}
 			p.mu.Lock()
 			delete(p.sessions, t.id)
@@ -857,6 +863,8 @@ func (p *Plugin) readLoop(t *TerminalSession, s *sdk.PluginSDK) {
 			preview := previewTail(t.buf.String(), 120)
 			t.mu.Unlock()
 			s.InjectText("agentcli", "agentcli",
+				// 刻意**不**用 NoMemory：这条带上终端真实输出（preview），
+				// 属于该记的内容。只有纯状态通知才关记忆。
 				fmt.Sprintf("[终端 %s 定时反馈: 运行中, 期间新输出约 %d 字节]\n%s", t.id, unread, preview))
 			continue
 		}
@@ -885,7 +893,8 @@ func (p *Plugin) readLoop(t *TerminalSession, s *sdk.PluginSDK) {
 		case r := <-readCh:
 			if r.err != nil {
 				// 读取错误/EOF → 立即通知（进程可能已结束）
-				s.InjectText("agentcli", "agentcli", fmt.Sprintf("[终端 %s 读取结束: %v]", t.id, r.err))
+				s.InjectTextOpts("agentcli", "agentcli", fmt.Sprintf("[终端 %s 读取结束: %v]", t.id, r.err),
+					sdk.InjectOptions{NoMemory: true})
 				return
 			}
 			if r.n > 0 {
@@ -927,6 +936,7 @@ func (p *Plugin) readLoop(t *TerminalSession, s *sdk.PluginSDK) {
 					preview := previewTail(t.buf.String(), 200)
 					t.mu.Unlock()
 					s.InjectText("agentcli", "agentcli",
+						// 同样刻意保留记忆：preview 是终端新输出，是真实内容。
 						fmt.Sprintf("[终端 %s 有新输出]\n%s", t.id, preview))
 				} else {
 					t.mu.Unlock()
@@ -993,24 +1003,28 @@ func (p *Plugin) cleanupLoop(s *sdk.PluginSDK) {
 		case <-p.stopCh:
 			return
 		case <-ticker.C:
+			// 先持锁筛选出待关闭的终终并移出 map，再在锁外逐个关闭。
+			// 旧实现在持锁期间 go func 调 term.Close()（内部会 Kill 进程并等
+			// <-t.done），临界区被拉长且与 TerminalSession 的退出路径交错。
+			var expired []*TerminalSession
 			p.mu.Lock()
 			for id, t := range p.sessions {
-				if t.IsExpired() {
+				switch {
+				case t.IsExpired():
 					log.Printf("[agentcli] cleanup: terminal %s expired", id)
-					delete(p.sessions, id)
-					go func(term *TerminalSession) {
-						term.Close()
-					}(t)
-				}
-				if !terminalRunning(t) {
+				case !terminalRunning(t):
 					log.Printf("[agentcli] cleanup: terminal %s process exited", id)
-					delete(p.sessions, id)
-					go func(term *TerminalSession) {
-						term.Close()
-					}(t)
+				default:
+					continue
 				}
+				delete(p.sessions, id)
+				expired = append(expired, t)
 			}
 			p.mu.Unlock()
+
+			for _, t := range expired {
+				go func(term *TerminalSession) { term.Close() }(t)
+			}
 		}
 	}
 }

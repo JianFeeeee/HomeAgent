@@ -48,7 +48,12 @@ codegraph.json
 /adapters/
 /knowledge/
 /memory/
-/scripts/
+# 注：/scripts/ **不**忽略。它是作者维护的工具目录（模型导出、侧车、部署校验），
+# 不是运行期产物：deploy/systemd/embed-sidecar.service 直接引用
+# scripts/embed_sidecar.py，忽略它会让那份 unit 在别人的机器上指向不存在的文件。
+# 只忽略其中的缓存。
+/scripts/__pycache__/
+__pycache__/
 terminal_locked_log.txt
 
 dist/

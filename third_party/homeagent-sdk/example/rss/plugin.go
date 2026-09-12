@@ -300,7 +300,10 @@ func (p *Plugin) checkFeed(sub FeedSub) {
 		lines = append(lines, line)
 	}
 
-	p.sdk.InjectInterruptText("rss", "rss", strings.Join(lines, "\n"))
+	// 中断注入是「系统通知」，NoMemory 写明意图：这类提醒不参与记忆计算，
+	// 原文仍进上下文（模型当轮看得到）。
+	p.sdk.InjectInterruptTextOpts("rss", "rss", strings.Join(lines, "\n"),
+		sdk.InjectOptions{NoMemory: true})
 	p.saveData()
 }
 
