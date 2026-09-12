@@ -3,6 +3,7 @@
 package plugins
 
 import (
+	"bytes"
 	"fmt"
 	"os"
 	"os/exec"
@@ -26,6 +27,47 @@ import (
 // 前置：插件需已用新版 hmapdev 重编（scripts/rebuild-plugins.sh）。
 // 未重编时测试 skip 而非 fail——CI 上不强制要求先跑重编脚本。
 
+// hostExecutableKind 按魔数判断产物是不是**本机**可执行文件，返回可读格式名。
+//
+// 为何需要：以前只按文件名找候选（plugin.bin_<os>_<arch> → plugin.bin），拿到
+// darwin/windows 产物就直接 exec，报的是 "exec format error"——看起来像插件坏了，
+// 实际上只是**开发环境里的产物平台不对**。本轮就踩了：跨平台示例构建把
+// build/plugin.bin 覆盖成 Mach-O arm64，internal/plugins 6 个测试全红，排查半小时。
+func hostExecutableKind(path string) (string, bool) {
+	f, err := os.Open(path)
+	if err != nil {
+		return "无法读取", false
+	}
+	defer f.Close()
+	head := make([]byte, 4)
+	n, _ := f.Read(head)
+	if n < 2 {
+		return "文件过短", false
+	}
+	switch runtime.GOOS {
+	case "linux":
+		if n >= 4 && head[0] == 0x7f && head[1] == 'E' && head[2] == 'L' && head[3] == 'F' {
+			return "ELF（本机）", true
+		}
+		if n >= 4 && head[0] == 0xcf && head[1] == 0xfa && head[2] == 0xed && head[3] == 0xfe {
+			return "Mach-O 64 little-endian（macOS，不是本机）", false
+		}
+		if n >= 2 && head[0] == 'M' && head[1] == 'Z' {
+			return "PE（Windows，不是本机）", false
+		}
+		return "未知格式（不是本机可执行文件）", false
+	case "darwin":
+		for _, m := range [][]byte{{0xcf, 0xfa, 0xed, 0xfe}, {0xca, 0xfe, 0xba, 0xbe}} {
+			if n >= 4 && bytes.Equal(head, m) {
+				return "Mach-O（本机）", true
+			}
+		}
+		return "不是本机可执行文件", false
+	default:
+		return "未知平台（默认放行）", true
+	}
+}
+
 // realPluginDir 返回某个 example 插件的 linux 产物路径。
 func realPluginBinary(t *testing.T, name string) string {
 	t.Helper()
@@ -39,9 +81,14 @@ func realPluginBinary(t *testing.T, name string) string {
 		filepath.Join(root, "build", "plugin.bin"),
 	}
 	for _, c := range candidates {
-		if st, err := os.Stat(c); err == nil && !st.IsDir() {
-			return c
+		if st, err := os.Stat(c); err != nil || st.IsDir() {
+			continue
 		}
+		if kind, ok := hostExecutableKind(c); !ok {
+			t.Skipf("插件 %s 的产物 %s 不是本机可执行格式（%s）；重建：cd %s && hmapdev build --target %s/%s --no-bundle",
+				name, c, kind, root, runtime.GOOS, runtime.GOARCH)
+		}
+		return c
 	}
 	t.Skipf("插件 %s 未重编（先跑 scripts/rebuild-plugins.sh）", name)
 	return ""
