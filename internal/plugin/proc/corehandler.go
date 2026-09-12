@@ -726,7 +726,25 @@ type injectMediaParams struct {
 // 与旧三参数注入等价。
 func pubSdkInjectOpts(noMemory bool, policy, cleanerName, priority string) pubsdk.InjectOptions {
 	return pubsdk.InjectOptions{
-		NoMemory: noMemory, ContextPolicy: policy, CleanerName: cleanerName, Priority: priority,
+		NoMemory: noMemory, ContextPolicy: policy, CleanerName: cleanerName,
+		Priority: clampExternalPriority(priority),
+	}
+}
+
+// clampExternalPriority 把外部插件声明的优先级夹到 L1..L3。
+//
+// 走本桥的必然是外部插件（独立进程/动态库），它们**不是内核级插件**，
+// 因此不能声明 L4——“立即打断”那类能力只属于编译期内置插件（如 WebUI 终止按钮）。
+//
+// 为什么在这里夹而不是只在内核里按 source 判：source 是插件自报的字段，
+// 外部插件可以冒用 "webui" 之名；而本函数所在的位置能确知“这来自外部进程”。
+// 内核侧的 isKernelLevelSource 是第二道闸（纵深防御）。
+func clampExternalPriority(priority string) string {
+	switch priority {
+	case "L4", "l4":
+		return pubsdk.PriorityL3
+	default:
+		return priority
 	}
 }
 

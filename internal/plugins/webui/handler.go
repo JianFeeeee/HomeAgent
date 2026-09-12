@@ -1812,8 +1812,12 @@ func (h *Handler) handleChatInterrupt(w http.ResponseWriter, r *http.Request) {
 	if body.DeviceID != "" {
 		source = "webui/" + body.DeviceID
 	}
+	// PriorityL4：终止按钮必须能立即打断当前任务（内核级插件才有的能力）。
+	// agent 正卡在工具执行里时按不下手——那是临界区，由内核在安全点生效；
+	// 但 LLM 流式段会被立刻取消。
 	h.sdk.InjectInterrupt(source, "webui", "text", map[string]interface{}{
-		"content": body.Message,
+		"content":  body.Message,
+		"priority": sdk.PriorityL4,
 	})
 	writeJSON(w, http.StatusOK, map[string]string{"status": "interrupted"})
 }

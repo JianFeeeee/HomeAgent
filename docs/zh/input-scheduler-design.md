@@ -12,8 +12,10 @@
 > | 定位 | 需要及时处理 | 不需要及时处理 |
 > | 可被谁打断 | 仅**严格更高级**的中断 | **任何**中断 |
 >
-> 级别（“这项工作有多不能等”）由插件在 `InjectOptions.Priority` 里声明 L1–L3；
-> **L4 由内核独占**，只经 panic 与内核事件中断（selfip）产生。
+> 级别（“这项工作有多不能等”）由来源在 `InjectOptions.Priority` 里声明。
+> L1–L3 任何插件可声明；**L4 是“立即打断”能力**，只有**内核自身**（panic /
+> 内核事件 selfip，经 `raiseKernelInterrupt`）与**内核级插件**（编译期内置插件，
+> 如 WebUI 的终止按钮）能用。外部插件的 L4 会被夹到 L3。
 > 类别由**用哪个注入 API**决定，与通道名无关——QQ 走的是 `InjectInterruptTextOpts`，
 > 所以它是**低级别中断（L1）**，不是排队输入。
 
@@ -137,15 +139,25 @@ Step（枚举，顺序执行，步与步之间是安全点）：
 
 | 来源 | 可达级别 | 入口 |
 |---|---|---|
-| 插件声明 | L1–L3 | `InjectOptions.Priority`（空/非法 → L1；声明 L4 被夹到 L3） |
-| 内核 | L4（唯一来源） | `(*Agent).raiseKernelInterrupt`（panic / selfip） |
+| 普通插件（外部，独立进程/动态库） | L1–L3 | `InjectOptions.Priority`（空/非法 → L1；L4 被夹到 L3） |
+| **内核级插件**（编译期内置，`init()` 自注册） | L1–**L4** | 同上；L4 用于实现**中断能力**，例如 WebUI 的终止按钮 |
+| 内核自身 | L4 | `(*Agent).raiseKernelInterrupt`（panic / selfip） |
 
 - ❌ **不是运维可调项**。不引入 `core.agent.priority.<channel>` 这类配置键，
   也不把 `PriorityLookup` 做成可注入的策略表。
 - ✅ 插件**可以声明**自己中断的级别（这不是“把内核内部属性外化”，
-  而是调用方声明它自己那件事有多不能等），但**内核独占 L4**：
-  `clampPluginLevel` 把越权声明夹到 L3，`L4` 在插件可达路径上不存在。
-- 定级规则可随内核演进调整，但插件可声明域**始终不含 L4**。
+  而是调用方声明它自己那件事有多不能等）。
+- ✅ **L4 给“立即打断”能力**：内核自身（panic / selfip）与**内核级插件**
+  （编译期内置插件，如 WebUI 终止按钮）可声明。为什么必须给内置插件：
+  用户按下终止按钮时，内核需要一条能立刻打断当前任务的中断；这条能力不能给
+  外部插件，否则任何第三方插件都能随时打断用户的一切工作。
+- **判据是“这个插件是不是编译期内置”，不是它自报的名字**：
+  - 第一道闸在 **proc 桥**（外部进程的唯一入口）：走它的一律把 L4 夹到 L3。
+    在这里夹而不是只按 `source` 判，是因为 `source` 是插件自报字段、可以冒名。
+  - 第二道闸在 **core**：`isKernelLevelSource(source)` 查
+    `pluginReg.IsBuiltinPlugin`，只有内置工厂才承认 L4（纵深防御）。
+  - `source` 的约定是 `插件名` 或 `插件名/实例`（如 `webui/<deviceID>`），
+    判据取第一段——否则带设备身份的 WebUI 来源会被误判成外部插件。
 
 ### 3.3 抢占判据
 
@@ -437,7 +449,8 @@ v1 采纳：**`S_TOOL_EXEC` / ONNX / CAS 属于临界区，调度器在这些 st
 | P6 | 临界区不可抢占 | running 声明临界区；注入 L4 | 同上；L4 请求留在中断队列，临界区结束立即被选中 |
 | **P7** | **排队任务被任何中断打断** | running=排队任务；注入 **L1** 中断 | L1 也抢占成功（排队任务有效级 0） |
 | **P8** | **排队输入永不抢占** | running=任意任务；注入排队输入 | 不抢占，入排队队列 |
-| **P9** | **插件不能声明 L4** | `InjectOptions.Priority="L4"` | 级别被夹到 L3；`payload["priority"]` 走同一条路 |
+| **P9** | **外部插件不能声明 L4** | 外部来源声明 `Priority="L4"` | 被夹到 L3（proc 桥 + core 双重） |
+| **P11** | **内核级插件可用 L4** | 内置插件（如 webui）声明 `L4` | 得到 L4 并立即打断当前任务（终止按钮） |
 | **P10** | **panic 产生 L4 中断** | 任务 panic | 产生一条带 `kernel=true` 的 L4 中断；L4 自身 panic 不再递归 |
 
 ### 11.2 保存现场与恢复
@@ -570,7 +583,7 @@ go test -race -count=1 ./internal/agent/... ./internal/plugin/... ./internal/sdk
 | 项 | 内容 | 验收 |
 |---|---|---|
 | 类别化 | `TaskClass{queued,interrupt}`；类别由注入 API 决定；`newInputTask`/`newSelfTask` 为 queued，`newInterruptTask` 为 interrupt | `scheduler_kernel_test.go` P7/P8 |
-| 级别归位 | `Level` 语义改为“中断级别”；`taskLevel()`（按通道名推断）删除，改为 `interruptLevel(evt)` 读 `payload["priority"]` | P9、Q1 |
+| 级别归位 | `Level` 语义改为“中断级别”；`taskLevel()`（按通道名推断）删除，改为 `interruptLevel(evt, privileged)` 读 `payload["priority"]` | P9、P11、Q1 |
 | L4 内核独占 | `raiseKernelInterrupt`（panic/selfip）；`requestKernelPreempt` 不夹取；panic 报告为 L4 且带递归保护 | P10、`TestKernel_PanicRaisesL4Interrupt` |
 | 选择结构 | `immediate` + 四条中断队列 + 排队 FIFO + 中断栈；删除统一比较器 `pickTaskIndex`/`taskBefore` 与“同级 pending 优先”补丁 | Q1–Q3、Q6 |
 | 栈上界 | `maxSuspendDepth`（配置语义）→ `maxInterruptFrames = int(LevelCritical)`（结构推论）；删除“超限转 pending”降级 | D1T |
@@ -600,8 +613,10 @@ go test -race -count=1 ./internal/agent/... ./internal/plugin/... ./internal/sdk
 
 > **已更正**：早期稿写“`InjectOptions.Priority` 进入公开 SDK 已被删除”，
 > 前提是“优先级是内核内部属性、不应由插件声明”。用户澄清后该前提被推翻：
-> **L1–L3 就是给插件声明使用的**，只有 L4 归内核独占（panic / selfip）。
-> 因此 `InjectOptions.Priority` 已落地（§3.2/§13）。
+> **L1–L3 就是给插件声明使用的**。L4 的归属后来也明确了——不是“只有
+> panic/selfip”，而是**内核 + 内核级插件**（编译期内置）都能用，用于实现
+> “立即打断”（panic、内核事件、WebUI 终止按钮）。因此公开 SDK 同时导出了
+> `PriorityL4`（附“仅内核级插件”的说明）。
 >
 > 仍**不做**的是“运维可调的策略表”（`core.agent.priority.<channel>`）——
 > 那是把调度内部属性外化成配置，与“由调用方声明自己那件事有多不能等”不同。
