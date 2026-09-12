@@ -135,6 +135,14 @@ func (s *Store) BuildDenseIndex(ds vector.MultimodalEmbedder) {
 		doc.DenseFP = ds.Fingerprint()
 		count++
 	}
+	if count > 0 {
+		// 迁移结果必须落盘。否则磁盘上的 DenseFP 永远对不上当前空间，
+		// 判定条件永远成立：每次启动都重算同一批文档，磁盘状态永不收敛。
+		// 迁移是一次性的昂贵操作（实测 200 篇约 7s），所以当场写盘，
+		// 而不是只依赖关停时的 flush——被 kill -9 也不会白算。
+		s.dirty = true
+		s.flushLocked()
+	}
 	log.Printf("[document memory] dense index built: %d new vectors", count)
 }
 
@@ -148,12 +156,17 @@ func (s *Store) denseFor(doc *Doc) []float64 {
 		return nil
 	}
 	fp := s.denseSpace.Fingerprint()
+	dim := s.denseSpace.Dim()
 	var parts [][]float64
 	if tv, err := s.denseSpace.VectorizeDense(doc.Summary + " " + doc.Content); err == nil && len(tv) > 0 {
 		parts = append(parts, tv)
 	}
 	for _, b := range doc.Blocks {
-		if len(b.Vector) > 0 && b.Fingerprint == fp {
+		// 只比指纹不够：指纹相同但**维度不同**的块会被 FuseVectors 按
+		// 「最大维度」拼成错维度向量（并覆盖掉文本向量），而结果又被
+		// 标上当前指纹——于是该文档在检索侧被长度守卫永久跳过，
+		// 且每次启动都会重算。维度不符的块一律不参与融合。
+		if len(b.Vector) == dim && b.Fingerprint == fp {
 			parts = append(parts, b.Vector)
 		}
 	}
@@ -513,7 +526,10 @@ func (s *Store) loadAll() error {
 		return err
 	}
 	for _, e := range entries {
-		if !strings.HasSuffix(e.Name(), ".json") || !strings.HasPrefix(e.Name(), "doc_") {
+		// 只要求 .json：Insert 接受任意 ID 并落盘为 <id>.json，若这里再按
+		// doc_ 前缀过滤，传自定义 ID 的文档重启后会静默消失。
+		// 空 ID 仍会被下面的校验跳过。
+		if !strings.HasSuffix(e.Name(), ".json") {
 			continue
 		}
 		data, err := os.ReadFile(filepath.Join(s.dir, e.Name()))
@@ -534,6 +550,11 @@ func (s *Store) loadAll() error {
 func (s *Store) flush() {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	s.flushLocked()
+}
+
+// flushLocked 是 flush 的核心，调用方必须已持有 s.mu。
+func (s *Store) flushLocked() {
 	if !s.dirty {
 		return
 	}

@@ -336,6 +336,10 @@ func main() {
 	if err := docStore.Start(); err != nil {
 		log.Printf("[homed] warning: document store: %v", err)
 	}
+	// 关停时落盘。文档记忆的内存态变更（迁移结果、访问计数等）只在 flush
+	// 里写盘，而 flush 的唯一入口是 Stop()——此前全仓无人调用它，
+	// 于是迁移结果永不落盘、每次启动白算一遍。
+	defer docStore.Stop()
 
 	// 媒体存储（内容寻址）：记忆块的内容后端。
 	// 开关默认开；关闭后全部媒体接线静默跳过，对话行为与本特性上线前一致。
