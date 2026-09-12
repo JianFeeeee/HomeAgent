@@ -111,6 +111,10 @@ type BuildStatus struct {
 	SDKCompatible string `json:"sdk_compatible"`
 	// KernelName 是内核名（HomeAgent）。
 	KernelName string `json:"kernel_name"`
+	// SourceURL 是本次构建对应的源码地址。AGPL-3.0 §13 要求：向使用者提供网络
+	// 服务时，要给他们拿到 Corresponding Source 的机会——WebUI 状态页会把它渲染成
+	// 可见链接，所以**修改后对外部署的分支必须把这个值改指向自己的源码仓库**。
+	SourceURL string `json:"source_url,omitempty"`
 }
 
 type TrackerStatus struct {
