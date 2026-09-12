@@ -165,3 +165,74 @@ func TestTaskFrame_UnknownStepFails(t *testing.T) {
 		t.Fatal("未知 step 必须带错误信息")
 	}
 }
+
+// D6：工具轮次硬上限——模型不停调用工具时，必须在有限步内收尾。
+//
+// 这是审查里定位的 P0（core.agent.max_tool_turns 只定义、从没被读过），
+// 也是调度器的前提：任务必须可终止。
+func TestMaxToolTurns_CapsRunawayLoop(t *testing.T) {
+	sh := NewStageHost()
+	sh.RegisterTool("t_loop", sdk.ToolDef{Name: "t_loop", Plugin: "t"}, func(args map[string]interface{}) (interface{}, error) {
+		return "again", nil
+	})
+
+	// 脚本远长于上限：provider 每轮都给下一批工具调用，模拟“永不停止”。
+	script := make([]*agentAPI.CompletionResponse, 0, 20)
+	for i := 0; i < 20; i++ {
+		script = append(script, &agentAPI.CompletionResponse{
+			Content:   "继续",
+			ToolCalls: []agentAPI.ToolCall{tc("c1", "t_loop")},
+		})
+	}
+	sp := &scriptProvider{script: script}
+	a := New(AgentConfig{
+		ID:              "cap",
+		Provider:        sp,
+		ProviderManager: agentAPI.NewProviderManager(),
+		IO:              agentIO.NewIOManager(),
+		StageHost:       sh,
+		MaxToolTurns:    3,
+	})
+
+	resp, toolsUsed, toolResults, err := a.process("循环", a.stageCtxFromInput("循环", "", ""))
+	if err != nil {
+		t.Fatalf("process 返回错误: %v", err)
+	}
+	if len(toolsUsed) != 3 || len(toolResults) != 3 {
+		t.Fatalf("工具批=%d/%d，期望恰好 3（到上限即止，不多跑第 4 轮）", len(toolsUsed), len(toolResults))
+	}
+	if len(sp.reqs) != 3 {
+		t.Fatalf("LLM 调用=%d，期望 3（上限后不再发起新请求）", len(sp.reqs))
+	}
+	if resp != "继续" {
+		t.Fatalf("响应=%q，期望返回最近一次 LLM 文本", resp)
+	}
+}
+
+// 上限为 0 表示不限（显式退出机制）。
+func TestMaxToolTurns_ZeroMeansUnlimited(t *testing.T) {
+	sh := NewStageHost()
+	sh.RegisterTool("t_loop", sdk.ToolDef{Name: "t_loop", Plugin: "t"}, func(args map[string]interface{}) (interface{}, error) {
+		return "again", nil
+	})
+	sp := &scriptProvider{script: []*agentAPI.CompletionResponse{
+		{Content: "a", ToolCalls: []agentAPI.ToolCall{tc("c1", "t_loop")}},
+		{Content: "b", ToolCalls: []agentAPI.ToolCall{tc("c2", "t_loop")}},
+		{Content: "c"},
+	}}
+	a := New(AgentConfig{
+		ID:              "nocap",
+		Provider:        sp,
+		ProviderManager: agentAPI.NewProviderManager(),
+		IO:              agentIO.NewIOManager(),
+		StageHost:       sh,
+		MaxToolTurns:    0,
+	})
+	resp, toolsUsed, _, err := a.process("x", a.stageCtxFromInput("x", "", ""))
+	if err != nil {
+		t.Fatalf("process 返回错误: %v", err)
+	}
+	if len(toolsUsed) != 2 || resp != "c" {
+		t.Fatalf("不限时应跑完脚本：tools=%d resp=%q", len(toolsUsed), resp)
+	}
+}

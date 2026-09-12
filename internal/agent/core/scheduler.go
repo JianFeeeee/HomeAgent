@@ -66,6 +66,13 @@ func (l Level) String() string {
 	}
 }
 
+// ParseLevel 已删除。
+//
+// 为何不保留：优先级是**内核内部属性**，不是配置项——内核预定义四级
+// （L1 后台 / L2 消息 / L3 交互 / L4 紧急），由内核按内部规则为任务与中断定级。
+// 曾一度做成 `core.agent.priority.<channel>` 这种“策略表 + 字符串解析”，
+// 那等于把内核的内部属性外化成运维配置，与设计意图相反。
+
 // TaskKind 区分任务来源。
 type TaskKind int
 
@@ -471,17 +478,15 @@ func (s *scheduler) currentLevel() Level {
 	return DefaultLevel
 }
 
-// taskLevel 是内核的优先级策略：四级的来源（设计文档 §3.2）。
+// taskLevel 是内核为任务定级的内部规则。
 //
-// 优先走注入的查找函数（配置表）；未命中则用通道名兜底：
-// cli/webui/http 为人机交互（L3），system/_consolidation_ 为后台（L1），
-// 其余一律默认级（L1）。显式才是特权：没有策略就不给抢占权。
+// ❗优先级是**内核内部属性**，不做成配置项：内核预定义四级，并按内部规则
+// 为任务与中断定级。下方规则只是 v1 的内部缺省值——它决定“谁能让位于谁”，
+// 属于内核自己的隐私，不对外暴露为运维可调项。
+//
+// 缺省：cli/webui/http 为人机交互（L3），system/_consolidation_ 为后台（L1），
+// 其余一律默认级（L1）。
 func (a *Agent) taskLevel(source, channel string) Level {
-	if a.priorityLookup != nil {
-		if l := a.priorityLookup(source, channel); l >= LevelBackground && l <= LevelCritical {
-			return l
-		}
-	}
 	switch channel {
 	case "cli", "webui", "http":
 		return LevelInteractive
