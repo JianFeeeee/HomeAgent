@@ -47,6 +47,9 @@ func (p *Plugin) Start(s *sdk.PluginSDK) error {
 	s.SetAutoRestart(true)
 	p.sdk = s
 	p.sessions = make(map[string]*sessionState)
+	// 入站通道：本插件用 p.name 通道注入输入（见 InjectInputSync 调用），
+	// 输入侧必须显式登记 —— 否则"把该 inputch 划给驻留子"会报 `inputch 未注册`。
+	_ = s.RegisterInputChannel(p.name, sdk.ChannelDef{})
 	tp := p.name + "_"
 
 	// 注册自身为输出通道：agent 回复 emit 到本通道时有落点。
