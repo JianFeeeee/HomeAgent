@@ -2,7 +2,7 @@
   "name": "acp",
   "name_zh": "ACP 代理通信",
   "name_en": "ACP Agent Client Protocol",
-  "version": "1.2.0",
+  "version": "1.2.1",
   "description": "Agent Client Protocol 通信插件：充当 ACP 服务端接受其他 Agent 的任务请求，同时提供客户端工具向远程 ACP Agent（如 opencode）发起会话并读取回复",
   "author": "HomeAgent",
   "entry": "plugin.so",

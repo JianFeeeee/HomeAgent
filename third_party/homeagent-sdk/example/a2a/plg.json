@@ -2,7 +2,7 @@
   "name": "a2a",
   "name_zh": "A2A 代理通信",
   "name_en": "A2A Agent Communication",
-  "version": "1.3.0",
+  "version": "1.3.1",
   "description": "Agent-to-Agent 协议通信插件，支持双向 A2A 通信：可查询其他 Agent 并回复其请求。提供 HTTP 服务端暴露本 Agent 能力。",
   "author": "HomeAgent",
   "entry": "plugin.so",
