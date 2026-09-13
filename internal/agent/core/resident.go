@@ -198,8 +198,13 @@ func (a *Agent) SpawnResident(opts ResidentOptions) (ResidentInfo, error) {
 func (a *Agent) residentParentSource() string { return "parent/" + string(a.id) }
 
 // residentInboundChannel 是"父接收某个子的消息"的 inputch 名（登记进登记表可见）。
+//
+// inboundChannelName 只拼名字，不产生副作用（注销路径要用它算出同一个名字，
+// 不能再去调 residentInboundChannel——那会顺手把刚摘掉的登记又写回去）。
+func inboundChannelName(childID string) string { return "child/" + childID }
+
 func (a *Agent) residentInboundChannel(childID string) string {
-	ch := "child/" + childID
+	ch := inboundChannelName(childID)
 	if reg := a.io.ChannelRegistry(); reg != nil {
 		// 归属父自己：它是父的入站 inputch。
 		_ = reg.Register(agentIO.InputChannel{Name: ch, Plugin: "resident", Owner: string(a.id)})
@@ -246,6 +251,14 @@ func (a *Agent) teardownResident(rc *residentChild) {
 		for _, ch := range rc.inputChs {
 			_ = reg.Assign(ch, "", 0)
 		}
+		// 注销"父接收该子消息"的入站 inputch（child/<id>）。
+		//
+		// 它由 residentInboundChannel 在 create 时登记（Owner=父），销毁时必须
+		// 一并摘掉：登记表是共享的、按 name 全局唯一，残留会随 create/destroy
+		// 次数单调累积脏数据。实测：destroy 后 child/<id> 仍挂在根 agent 名下，
+		// 而外部没有任何工具能单独注销 inputch，只能重启 homed 清。
+		// 注意用纯函数算名字，不要再走 residentInboundChannel（会重新登记）。
+		reg.Unregister(inboundChannelName(rc.id))
 	}
 }
 
