@@ -104,6 +104,20 @@ type IOManager struct {
 	nextReqID   int64
 	channelReg  *ChannelRegistry
 
+	// parent 是"上级 IOManager"（驻留子的轻量内核指向父的内核）。
+	//
+	// 为什么需要：**输出通道在 io 层就是 Device**，而它们是由插件登记在**父**的
+	// io 上的。驻留子有自己的 IOManager（自己的输入入口、自己的 outputCh），
+	// 若只看自己那张空表，`output_send__<通道>` 会被判"通道不存在或不可用"，
+	// `output_list_channels` 是空的，`output_send__*` 工具也不会生成
+	// —— 现场表现就是"驻留子不会说话/不会发消息"（联调实录：父侧通道装载完整、
+	// 子侧 childIO 空壳）。
+	//
+	// 用**实时回退**而不是创建时复制快照：设备会随资源生灭（远程设备上线/掉线
+	// 以分钟计），复制出来的表转瞬就过期。授权由各自的 AllowedOutputs 白名单把关，
+	// 回退只解决"看得见"，不解决"能不能用"。
+	parent *IOManager
+
 	// toolBlocks：插件工具注入多模态内容块，process.go 在下一条 tool message 时消费。
 	// 用 interface{}[] 避免 import api.ContentBlock 导致的循环依赖。
 	toolBlocksMu      sync.Mutex
@@ -118,6 +132,31 @@ func NewIOManager() *IOManager {
 		outputCh:    make(chan *OutputEvent, 256),
 		channelReg:  NewChannelRegistry(),
 	}
+}
+
+// SetParentIO 设置上级 IOManager（nil 表示无上级，行为与以前完全一致）。
+// 见 parent 字段的说明：用于驻留子继承父的输出通道/设备视图。
+func (m *IOManager) SetParentIO(p *IOManager) {
+	m.mu.Lock()
+	m.parent = p
+	m.mu.Unlock()
+}
+
+// lookupDevice 查设备：自己的登记优先，其次回退到上级。
+//
+// 先在自己锁内取快照再查上级，**不跨锁调用**（避免锁序问题）。
+func (m *IOManager) lookupDevice(name string) Device {
+	m.mu.RLock()
+	dev, ok := m.devices[name]
+	parent := m.parent
+	m.mu.RUnlock()
+	if ok {
+		return dev
+	}
+	if parent != nil {
+		return parent.GetDevice(name)
+	}
+	return nil
 }
 
 func (m *IOManager) UnregisterDevice(name string) {
@@ -158,9 +197,7 @@ func (m *IOManager) RegisterDevice(dev Device) error {
 }
 
 func (m *IOManager) GetDevice(name string) Device {
-	m.mu.RLock()
-	defer m.mu.RUnlock()
-	return m.devices[name]
+	return m.lookupDevice(name)
 }
 
 func (m *IOManager) StartAll() error {
@@ -542,6 +579,15 @@ func (m *IOManager) ExecuteTool(name string, args map[string]interface{}) (ret i
 	m.mu.RUnlock()
 
 	if len(candidates) == 0 {
+		// 自己没这个设备工具 → 看上级（驻留子的设备工具都在父的 io 上）。
+		m.mu.RLock()
+		parent := m.parent
+		m.mu.RUnlock()
+		if parent != nil {
+			if ret, err := parent.ExecuteTool(name, args); err == nil {
+				return ret, nil
+			}
+		}
 		return nil, fmt.Errorf("tool %s not found", name)
 	}
 	defer func() {
@@ -574,10 +620,22 @@ type ChannelInfo struct {
 
 func (m *IOManager) ListChannels() []ChannelInfo {
 	m.mu.RLock()
-	defer m.mu.RUnlock()
+	own := make(map[string]Device, len(m.devices))
+	for name, dev := range m.devices {
+		own[name] = dev
+	}
+	parent := m.parent
+	m.mu.RUnlock()
 
+	// 自己的登记优先（子侧可覆盖/屏蔽同名通道），随后并入上级的可见通道。
+	// 去重按**名字**：同名即视为同一个通道，不重复列举。
+	seen := make(map[string]bool, len(own))
 	var list []ChannelInfo
-	for _, dev := range m.devices {
+	appendDev := func(dev Device) {
+		if seen[dev.Name()] {
+			return
+		}
+		seen[dev.Name()] = true
 		list = append(list, ChannelInfo{
 			Name:        dev.Name(),
 			Type:        dev.Type(),
@@ -586,13 +644,23 @@ func (m *IOManager) ListChannels() []ChannelInfo {
 			OutputCaps:  dev.OutputCapabilities(),
 		})
 	}
+	for _, dev := range own {
+		appendDev(dev)
+	}
+	if parent != nil {
+		for _, ch := range parent.ListChannels() {
+			if seen[ch.Name] {
+				continue
+			}
+			seen[ch.Name] = true
+			list = append(list, ch)
+		}
+	}
 	return list
 }
 
 func (m *IOManager) GetChannelCapabilities(channel string) OutputCapability {
-	m.mu.RLock()
-	defer m.mu.RUnlock()
-	if dev, ok := m.devices[channel]; ok {
+	if dev := m.lookupDevice(channel); dev != nil {
 		return dev.OutputCapabilities()
 	}
 	return 0
