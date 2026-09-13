@@ -43,6 +43,11 @@ func (a *Agent) buildSystemPrompt(memContext string, userInput string) string {
 		prompt = "你是小宅，HomeAgent 的看板娘，一个家政型 AI 管家助手。绝不用 Unicode emoji，只用颜文字表达情感，句尾带语气词。WebUI 概览页展示你的立绘。"
 	}
 
+	// 驻留子：在**固定提示词之上**注入任务提示词（设计 §7「创建」）。
+	if a.taskPrompt != "" {
+		prompt += "\n\n【任务】" + a.taskPrompt
+	}
+
 	if a.personality != nil {
 		if pp := a.personality.InjectPrompt(); pp != "" {
 			prompt += "\n\n" + pp
@@ -641,6 +646,66 @@ func (a *Agent) buildToolDefs() []interface{} {
 			},
 		},
 	})
+
+	// 父侧：驻留子控制面（单工具多动作，见设计 §7）。
+	if a.parentID == "" {
+		tools = append(tools, map[string]interface{}{
+			"type": "function",
+			"function": map[string]interface{}{
+				"name": "resident_agents",
+				"description": "管理驻留子 agent（长期派驻的下属）：list 列出 / create 创建（划入 inputch + " +
+					"授权输出通道 + 注入任务提示词）/ send 发送消息（对子而言是 L4 中断，取消其当前状态并插入新消息）" +
+					"/ inspect 查看其 inputch 处理表（不打断它）/ compress 压缩其上下文（保留语义，子继续存在）" +
+					"/ reclaim 回收（父选哪些纳入主记忆，然后取消该子）/ destroy 立刻销毁并移除。",
+				"parameters": map[string]interface{}{
+					"type": "object",
+					"properties": map[string]interface{}{
+						"action": map[string]interface{}{
+							"type": "string",
+							"enum": []string{"list", "create", "send", "inspect", "compress", "reclaim", "destroy"},
+						},
+						"id":              map[string]interface{}{"type": "string", "description": "驻留子 id"},
+						"task_prompt":     map[string]interface{}{"type": "string", "description": "create：在固定提示词之上注入的任务提示词"},
+						"input_chs":       map[string]interface{}{"type": "string", "description": "create：划入的 inputch（逗号分隔）"},
+						"allowed_outputs": map[string]interface{}{"type": "string", "description": "create：授权的输出通道（逗号分隔；留空=完整授权）"},
+						"capacity":        map[string]interface{}{"type": "number", "description": "create：划入 inputch 的队列容量"},
+						"temp_path":       map[string]interface{}{"type": "string", "description": "create：temp 图记忆路径（留空则用 data_dir/residents/<id>/graph.db）"},
+						"text":            map[string]interface{}{"type": "string", "description": "send：要发给子 agent 的消息"},
+					},
+					"required": []string{"action"},
+				},
+			},
+		})
+	}
+
+	// 子侧（驻留子）：主动汇报（L3）与主动写处理表。
+	if a.parentID != "" {
+		tools = append(tools, map[string]interface{}{
+			"type": "function",
+			"function": map[string]interface{}{
+				"name":        "notify_parent",
+				"description": "向主 agent 汇报（以 L3 中断投给它）。用于主动报告进展/结论，而不是等它来问。",
+				"parameters": map[string]interface{}{
+					"type":       "object",
+					"properties": map[string]interface{}{"text": map[string]interface{}{"type": "string", "description": "汇报内容"}},
+					"required":   []string{"text"},
+				},
+			},
+		})
+		tools = append(tools, map[string]interface{}{
+			"type": "function",
+			"function": map[string]interface{}{
+				"name": "inputch_note",
+				"description": "为**本轮** inputch 主动写入处理信息（主 agent 会查这张表判断你的进度）。" +
+					"写了就不会再被系统自动记录；不写则本轮结束时系统自动写。",
+				"parameters": map[string]interface{}{
+					"type":       "object",
+					"properties": map[string]interface{}{"text": map[string]interface{}{"type": "string", "description": "本轮处理信息摘要"}},
+					"required":   []string{"text"},
+				},
+			},
+		})
+	}
 
 	tools = append(tools, map[string]interface{}{
 		"type": "function",

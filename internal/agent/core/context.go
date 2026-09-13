@@ -451,6 +451,29 @@ func (c *RelevanceContext) Blocks() []memory.MemoryBlock {
 	return out
 }
 
+// TrimKeepRecent 只保留最近 n 条事件，丢弃更旧的（返回丢弃条数）。
+//
+// 这是**压缩上下文**（保留语义）的机械原语：不归档、不写任何记忆，直接丢弃旧事件。
+// 用于轻量内核（驻留子）：它没有 doc 记忆与记忆整理流水线，压缩只能是"保留最近的"。
+func (c *RelevanceContext) TrimKeepRecent(n int) int {
+	c.mu.Lock()
+	if n < 1 {
+		n = 1
+	}
+	if len(c.events) <= n {
+		c.mu.Unlock()
+		return 0
+	}
+	dropped := len(c.events) - n
+	kept := make([]*ContextEvent, n)
+	copy(kept, c.events[dropped:])
+	c.events = kept
+	c.dirty = true
+	c.mu.Unlock()
+	c.save()
+	return dropped
+}
+
 func (c *RelevanceContext) Len() int {
 	c.mu.Lock()
 	defer c.mu.Unlock()
