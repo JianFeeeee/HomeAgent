@@ -28,6 +28,7 @@ var (
 	//
 	// ❗main 上此值始终是**下一个未发布中版本**，不随 patch 发布变动
 	//（见 docs/git-branching.md §2.1）；已发布的版本号看对应的 release/vX.Y.x 与 tag。
+	// 1.3.10：去掉提示词里"每轮只能发一次 output_send"的凭空限制；type 缺省即 text。
 	// 1.3.9：驻留子的「轮次」不再是恒 0（info() 此前没填 Rounds）。
 	// 1.3.8：inputch 划给子后输入只流向子（补上"进内核之前"的输入路由）。
 	// 1.3.7：驻留子继承父的输出通道（此前子侧 childIO 空壳 ⇒ 子不会发消息）。
@@ -36,7 +37,7 @@ var (
 	// 1.3.5：系统提示词（人格卡）支持版本占位符 —— 人格卡是配置项，写死版本号
 	//        会随发版说谎（线上写 v1.0.3、内核 1.3.x，agent 就自报 1.0.3）。
 	//        支持 {{kernel_version}} / {{kernel_commit}} / {{sdk_version}}。
-	Version = "1.3.9"
+	Version = "1.3.10"
 
 	// Commit 是构建时的 Git commit hash。
 	Commit = "unknown"
