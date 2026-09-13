@@ -152,8 +152,12 @@ func (p *Plugin) Start(s *sdk.PluginSDK) error {
 
 		log.Printf("[remotedevice] event from %s: %s", deviceID, evtType)
 		if p.sdk != nil {
+			// 设备通道 device/<id> 是动态的：设备首次上报时**懒登记** inputch
+			// （Register 幂等），父 agent 才能把它划给驻留子。
+			devCh := "device/" + deviceID
+			_ = p.sdk.RegisterInputChannel(devCh, sdk.ChannelDef{})
 			// 异步注入：不阻塞 WS 读循环；回复路由回 device/{id} 输出通道
-			p.sdk.InjectInput("device/"+deviceID, "device/"+deviceID, "text", map[string]interface{}{"content": text})
+			p.sdk.InjectInput(devCh, devCh, "text", map[string]interface{}{"content": text})
 		}
 	})
 

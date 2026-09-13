@@ -7,6 +7,7 @@ package core
 
 import (
 	"fmt"
+	"log"
 	"path/filepath"
 	"strings"
 
@@ -57,10 +58,20 @@ func (a *Agent) executeResidentAgents(tc agentAPI.ToolCall) string {
 		id := strArg(tc, "id")
 		tempPath := strArg(tc, "temp_path")
 		if tempPath == "" {
-			if a.dataDir == "" {
-				return "创建驻留子需要 data_dir 或显式 temp_path"
+			anchor := a.dataDir
+			if anchor == "" {
+				// 兜底：从**主图库路径**推导（<data>/memory/graph.db ⇒ <data>）。
+				// 为什么不静默失败：这条路径只在"配置漏接线"时走到，
+				// 静默报错会让线上表现为"工具能调但永远建不出来"（实测就是这样）。
+				if a.memory != nil && a.memory.Path() != "" {
+					anchor = filepath.Dir(filepath.Dir(a.memory.Path()))
+					log.Printf("[resident] data_dir 未接线，回退到主图库目录: %s", anchor)
+				}
 			}
-			tempPath = filepath.Join(a.dataDir, "residents", id, "graph.db")
+			if anchor == "" {
+				return "创建驻留子需要 data_dir 或显式 temp_path（内核未接线 DataDir）"
+			}
+			tempPath = filepath.Join(anchor, "residents", id, "graph.db")
 		}
 		info, err := a.SpawnResident(ResidentOptions{
 			ID:             id,

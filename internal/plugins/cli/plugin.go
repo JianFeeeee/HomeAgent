@@ -59,6 +59,9 @@ func (p *Plugin) Name() string { return p.name }
 func (p *Plugin) Start(s *sdk.PluginSDK) error {
 	s.SetAutoRestart(true)
 
+	// inputch 先登记：本插件既用 "cli" 作输出目标，也用它注入输入（终端行）。
+	// 输入侧必须显式登记，否则"把 inputch 划给驻留子"会找不到它。
+	_ = s.RegisterInputChannel("cli", sdk.ChannelDef{})
 	s.RegisterOutputChannel("cli", 1, "CLI 终端", sdk.ChannelDef{}, func(args map[string]interface{}) (interface{}, error) {
 		payload, _ := args["payload"].(string)
 		if payload != "" {

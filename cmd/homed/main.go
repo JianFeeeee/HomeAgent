@@ -528,9 +528,12 @@ func main() {
 		Personality:     personality,
 		// 人格落库面：首启门禁（任何通道都问一次）与 persona_set 工具用。
 		// 与 WebUI 向导共用 internal/config 的同一份落库逻辑。
-		PersonaStore:       internalConfig.RegistryPersonaStore{Reg: cfgReg},
-		PluginReg:          pluginReg,
-		PluginDir:          cfg.Plugin.Dir,
+		PersonaStore: internalConfig.RegistryPersonaStore{Reg: cfgReg},
+		PluginReg:    pluginReg,
+		PluginDir:    cfg.Plugin.Dir,
+		// DataDir：驻留子的 temp 图库锚点（<data>/residents/<id>/graph.db）。
+		// 漏接时的现象是"工具存在、可调用、但创建必失败"——只有真实二进制才看得出来。
+		DataDir:            cfg.Daemon.DataDir,
 		DistillInterval:    cfgReg.GetDuration("core.agent.distill_interval", 30*time.Minute),
 		ArchiveInterval:    cfgReg.GetDuration("core.agent.archive_interval", 60*time.Minute),
 		ReviewInterval:     cfgReg.GetDuration("core.agent.review_interval", 120*time.Minute),

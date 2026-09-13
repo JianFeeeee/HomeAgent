@@ -148,6 +148,10 @@ func (p *Plugin) Start(s *sdk.PluginSDK) error {
 	}
 
 	// 能力位 7 = CapText|CapFile|CapImage；旧值 1 仅文本，agent 无法向 webui 发文件/图片
+	// 入站通道：webui（控制台对话）与 http（外部 HTTP 注入），都由本插件注入输入。
+	// http 通道还声明 NoMemory：外部抓来的内容不进记忆计算（见 handler 里的 NoMemory 注入）。
+	_ = s.RegisterInputChannel("webui", sdk.ChannelDef{})
+	_ = s.RegisterInputChannel("http", sdk.ChannelDef{NoMemory: true})
 	s.RegisterOutputChannel("webui", 7, "Web 控制台（支持文字/图片/文件，图片内联展示、文件可下载）", sdk.ChannelDef{}, func(args map[string]interface{}) (interface{}, error) {
 		payload, _ := args["payload"].(string)
 		rawType, _ := args["type"].(string)

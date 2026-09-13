@@ -221,6 +221,8 @@ func (p *Plugin) Start(s *sdk.PluginSDK) error {
 		p.notifyInterval = DefaultNotifyInterval
 	}
 
+	// agentcli 通道：终端生命周期/输出事件经它注入 agent（见本文件 InjectText* 调用）。
+	_ = s.RegisterInputChannel("agentcli", sdk.ChannelDef{})
 	s.RegisterTool("terminal_create", sdk.ToolDef{
 		Name: "terminal_create",
 		Description: "创建一个新的交互式终端会话。返回终端 ID，后续通过此 ID 进行读写操作。适用于运行交互式程序如 vim、ssh、top、nano 等。" +
