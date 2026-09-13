@@ -592,23 +592,26 @@ lua main.lua
 
 ### Lua SDK API
 
-Lua 插件的 `sdk.*` API 与外部插件（工具链编译的 `plugin.bin` 子进程）能力完全对齐：注册类函数调用即时报错（抛 Lua error），数据类函数统一返回 `(result, err)`，`err` 为 nil 表示成功。核心未装配的子系统（如 SocialAPI）返回空值而非报错。
+Lua 插件的 `sdk.*` API 与外部插件（工具链编译的 `plugin.bin` 子进程）能力对齐至 **SDK 1.3.0**（需内核 **1.4.0+**，也在 `v1.3.11` 的 Lua 对齐补丁中回填）：注册类函数调用即时报错（抛 Lua error），数据类函数统一返回 `(result, err)`，`err` 为 nil 表示成功。核心未装配的子系统（如 SocialAPI）返回空值而非报错。
+
+> 历史提醒：1.1–1.3 的媒体/注入标志位/优先级能力曾长期只在 Go 侧，Lua 侧静默缺失。现已全量对齐，并由 `internal/plugin/lua_surface_test.go` 的契约测试守住「mock 承诺的每个函数都有运行时绑定」。
 
 **注册类**
 
 | 函数 | 说明 |
 |------|------|
 | `sdk.log(level, msg)` | 日志输出 |
-| `sdk.register_tool(name, def, handler)` | 注册工具；`def` 支持 `description`、`parameters`、`no_memory`、`cleaner` |
+| `sdk.register_tool(name, def, handler)` | 注册工具；`def` 支持 `description`、`parameters`、`no_memory`、`context_policy`（`"none"`/`"prune"`）、`cleaner` |
 | `sdk.register_stage(stage, handler, scope)` | 注册阶段钩子；`scope` 为 `nil`/`"global"`（默认）或 `"own_tools"`（仅 `before_toolcall`/`after_toolcall` 且工具属于本插件时触发） |
 | `sdk.register_api(name)` | 注册 API |
-| `sdk.register_output_channel(name, caps, desc, def, handler)` | 注册输出通道；`def` 支持 `no_memory`、`cleaner` |
+| `sdk.register_output_channel(name, caps, desc, def, handler)` | 注册输出通道；`def` 支持 `no_memory`、`context_policy`、`cleaner` |
 | `sdk.register_input_channel(name, def)` | 注册输入通道；`def` 同上 |
+| `sdk.unregister_output_channel(name)` | 注销输出通道（随资源生灭的动态通道，如远程设备）；返回 `(nil, err)` |
 | `sdk.set_auto_restart(enabled)` | 崩溃时内核自动拉起插件 |
 
 **阶段钩子上下文**
 
-`register_stage` 的 handler 收到完整上下文（与外部插件一致）：`raw_message`、`user_id`、`group_id`、`phase`、`llm_text`、`final_text`、`no_memory`、`response`（已响应时）、`tool_calls`、`tool_results`。
+`register_stage` 的 handler 收到完整上下文（与外部插件一致）：`raw_message`、`user_id`、`group_id`、`phase`、`llm_text`、`reasoning_content`、`final_text`、`no_memory`、`context_msgs`、`token_usage`、`memory`、`extra`、`errors`、`response`（已响应时）、`tool_calls`、`tool_results`。
 
 **Stage 写回**：handler 收到的 `ctx` 是引用 table——在 handler 内直接修改可写回字段并同步至内核 `StageContext`（与子进程外部插件能力对齐）：
 
@@ -637,19 +640,36 @@ end)
 | `sdk.inject_text(source, channel, text)` | 投递文本消息 |
 | `sdk.inject_interrupt(source, channel, text)` | 中断投递 |
 | `sdk.inject_text_no_memory(source, channel, text)` | 免记忆投递 |
+| `sdk.inject_text_opts` / `sdk.inject_interrupt_opts(source, channel, text, opts)` | 带标志位投递；`opts = { no_memory=bool, context_policy="none"|"prune", cleaner_name=string, priority="L1".."L3" }` |
+| `sdk.inject_input_sync(source, channel, text)` | 同步注入并等本轮回复；返回 `(reply, err)`，无回复时 reply 为 nil |
+| `sdk.inject_input_sync_opts(source, channel, text, opts)` | 同上带标志位 |
+| `sdk.inject_input_media(source, channel, text, blocks)` | 注入文本 + 多模态内容块 |
+| `sdk.inject_input_media_opts(source, channel, text, blocks, opts)` | 同上带标志位 |
+| `sdk.inject_input_media_sync` / `..._sync_opts(...)` | 带媒体的同步注入；返回 `(reply, err)` |
+| `sdk.inject_interrupt_media(source, channel, text, blocks)` | 带媒体的中断注入 |
+| `sdk.inject_interrupt_media_opts(source, channel, text, blocks, opts)` | 同上带标志位 |
+| `sdk.set_tool_blocks(blocks)` | 设置下一轮 tool message 携带的多模态内容块（模型据此看图/听音频） |
+
+`blocks` 每项形如：`{ type="text", text="..." }`、`{ type="image_url", image_url={ url="...", detail="high" } }`、`{ type="audio_url", audio_url={ url="..." } }`。`opts` 缺省即零值（记入记忆 + 不裁剪），与三参数版本等价。
 
 **数据类（与子进程外部插件对齐，均返回 `(result, err)`）**
 
 | 子表 | 函数 |
 |------|------|
-| `sdk.memory.*` | `recall(query, depth)`、`commit({triples})`、`introspect()`、`merge(source, target)`、`purge(criteria, hard)` |
-| `sdk.doc.*` | `query(text, top_k)`、`insert({id,title,content})`、`remove(id)`、`stats()` |
+| `sdk.memory.*` | `recall(query, depth)`、`commit({triples})`（triple 支持 `subject/relation/object/confidence/subject_type/object_type/sentence_text/media_digests`）、`introspect()`、`merge(source, target)`、`purge(criteria, hard)` |
+| `sdk.doc.*` | `query(text, top_k)`、`insert({id,title,content})`、`insert_with_media(doc, attachments)`、`remove(id)`、`stats()` |
 | `sdk.knowledge.*` | `search(query, limit)`、`add(tag, content)`、`list()` |
-| `sdk.text_memory.*` | `append({role,content,timestamp,channel})` |
+| `sdk.text_memory.*` | `append({role,content,timestamp,channel,attachments})` |
 | `sdk.llm.*` | `list_sources()`、`set_source(name)`、`current_source()` |
 | `sdk.social.*`（只读） | `get_person(name)`、`get_network(name, depth)`、`get_trait(name, trait)`、`get_relations(name)`、`list_persons()` |
+| `sdk.events.*` | `subscribe(event_type, handler)` → 返回取消订阅函数；handler 收到 `{type,source,timestamp,payload}` |
+| `sdk.plugin_mgr.*` | `reload_one(name)`、`list_loaded()`、`is_disabled(name)` |
 | `sdk.json.*` | `encode(val)`、`decode(str)` |
 | `sdk.http.*` | `get(url)`、`post(url, body, content_type)` |
+
+`attachments` 每项：`{ digest=, mime=, name=, data=<base64> }`；带 `data` 是新内容（落进内容寻址存储），只带 `digest` 是引用已有内容。
+
+> `sdk.events.subscribe` 的回调在内核事件发布 goroutine 上执行，且 Lua 是单状态 + 互斥锁——**回调内只做轻量转发，不可阻塞**，否则会卡死本插件的全部调用。
 
 ---
 

@@ -31,6 +31,7 @@ cmd/gui/dist/
 third_party/homeagent-sdk/bin/
 third_party/homeagent-sdk/tools/
 third_party/homeagent-sdk/package/
+third_party/homeagent-sdk/scripts/
 third_party/homeagent-sdk/.gitignore
 third_party/homeagent-sdk/README*
 third_party/homeagent-sdk/example/

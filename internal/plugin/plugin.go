@@ -15,7 +15,7 @@ import (
 type PluginType string
 
 const (
-	PluginTypeSKILL  PluginType = "skill"
+	PluginTypeSKILL PluginType = "skill"
 )
 
 type IOConfig struct {
@@ -78,18 +78,28 @@ func LoadSKILL(path string) (*SKILLPlugin, error) {
 		metaFile := filepath.Join(path, "skill.json")
 		if data, err := os.ReadFile(metaFile); err == nil {
 			var meta struct {
-				Name        string   `json:"name"`
-				Description string   `json:"description"`
-				Version     string   `json:"version"`
-				Author      string   `json:"author"`
+				Name        string    `json:"name"`
+				Description string    `json:"description"`
+				Version     string    `json:"version"`
+				Author      string    `json:"author"`
 				IO          *IOConfig `json:"io,omitempty"`
 			}
 			if err := json.Unmarshal(data, &meta); err == nil {
-				if meta.Name != "" { p.name = meta.Name }
-				if meta.Description != "" { p.description = meta.Description }
-				if meta.Version != "" { p.version = meta.Version }
-				if meta.Author != "" { p.author = meta.Author }
-				if meta.IO != nil { p.ioConfig = meta.IO }
+				if meta.Name != "" {
+					p.name = meta.Name
+				}
+				if meta.Description != "" {
+					p.description = meta.Description
+				}
+				if meta.Version != "" {
+					p.version = meta.Version
+				}
+				if meta.Author != "" {
+					p.author = meta.Author
+				}
+				if meta.IO != nil {
+					p.ioConfig = meta.IO
+				}
 			}
 		}
 	} else if filepath.Ext(path) == ".md" {
@@ -198,7 +208,9 @@ func extractToolDefs(content string) []ToolDef {
 			inCodeBlock = !inCodeBlock
 			continue
 		}
-		if inCodeBlock { continue }
+		if inCodeBlock {
+			continue
+		}
 
 		if strings.HasPrefix(trimmed, "## ") && !strings.HasPrefix(trimmed, "### ") {
 			if currentTool != nil && currentTool.Name != "" {
@@ -232,7 +244,9 @@ func extractToolDefs(content string) []ToolDef {
 			continue
 		}
 
-		if currentTool == nil || currentTool.Name == "" { continue }
+		if currentTool == nil || currentTool.Name == "" {
+			continue
+		}
 
 		if currentTool.Description == "" && trimmed != "" &&
 			!strings.HasPrefix(trimmed, "- ") && !strings.HasPrefix(trimmed, "#") {
@@ -280,7 +294,9 @@ func isNonToolSection(name string) bool {
 
 func extractIOConfig(content string) *IOConfig {
 	ioType := extractField(content, "io_type")
-	if ioType == "" { return nil }
+	if ioType == "" {
+		return nil
+	}
 	cfg := &IOConfig{
 		Type:       ioType,
 		InputRoute: extractField(content, "io_input_route"),
