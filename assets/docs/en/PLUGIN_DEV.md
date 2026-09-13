@@ -648,11 +648,11 @@ Writable fields: `raw_message`, `llm_text`, `final_text`, `user_id`, `group_id`,
 | `sdk.inject_interrupt(source, channel, text)` | Interrupt delivery |
 | `sdk.inject_text_no_memory(source, channel, text)` | Deliver without memory computation |
 | `sdk.inject_text_opts` / `sdk.inject_interrupt_opts(source, channel, text, opts)` | Delivery with flags; `opts = { no_memory=bool, context_policy="none"|"prune", cleaner_name=string, priority="L1".."L3" }` |
-| `sdk.inject_input_sync(source, channel, text)` | Inject synchronously and wait for this turn's reply; returns `(reply, err)`, reply is nil when there is none |
-| `sdk.inject_input_sync_opts(source, channel, text, opts)` | Same, with flags |
+| `sdk.inject_input_sync(source, channel, text)` | ⚠️ **Unavailable in Lua**: always returns `(nil, err)`. It waits for this turn's reply while a Lua callback holds the plugin lock, so it would self-deadlock. Use a Go plugin for synchronous waits, or the async injectors below |
+| `sdk.inject_input_sync_opts(source, channel, text, opts)` | Same (unavailable) |
 | `sdk.inject_input_media(source, channel, text, blocks)` | Inject text + multimodal content blocks |
 | `sdk.inject_input_media_opts(source, channel, text, blocks, opts)` | Same, with flags |
-| `sdk.inject_input_media_sync` / `..._sync_opts(...)` | Synchronous media injection; returns `(reply, err)` |
+| `sdk.inject_input_media_sync` / `..._sync_opts(...)` | ⚠️ **Unavailable in Lua** (same as `inject_input_sync`) |
 | `sdk.inject_interrupt_media(source, channel, text, blocks)` | Interrupt delivery with media |
 | `sdk.inject_interrupt_media_opts(source, channel, text, blocks, opts)` | Same, with flags |
 | `sdk.set_tool_blocks(blocks)` | Set multimodal blocks carried by the next tool message (lets the model see images / hear audio) |

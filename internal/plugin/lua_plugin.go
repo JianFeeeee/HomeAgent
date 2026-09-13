@@ -298,16 +298,15 @@ func replaceSDKReal(L *lua.LState, t *lua.LTable, plg *luaPlugin, s *sdk.PluginS
 		return 0
 	}))
 
-	// pushReply 统一同步注入的返回约定：非空回复返回 (reply, nil)，
-	// 无回复返回 (nil, nil)，与数据类 API 的 (result, err) 约定一致。
-	pushReply := func(reply string) int {
-		if reply == "" {
-			L.Push(lua.LNil)
-			L.Push(lua.LNil)
-			return 2
-		}
-		L.Push(lua.LString(reply))
+	// 同步注入（文本/媒体）在 Lua 中**不可用**：Lua 代码只在 Start / 工具 /
+	// 阶段 / 输出通道 / 事件回调里执行，这些路径都持有 plg.mu；而 InjectInputSync
+	// 要等本轮回复，本轮回复的处理（以及回复路径上的阶段/工具回调）又需要同一把
+	// 锁 ⇒ 必然自锁。返回明确错误，而不是让插件在 30 分钟后超时。
+	// 需要同步等待的场景请改用 Go 插件（可在自己的 goroutine 里调），
+	// 或用 inject_text / inject_interrupt 异步投递。
+	luaSyncUnavailable := func(L *lua.LState) int {
 		L.Push(lua.LNil)
+		L.Push(lua.LString("同步注入在 Lua 插件中不可用：它要等本轮回复，而本轮正持有插件锁 ⇒ 必然自锁。请在事件回调/外部入口用 inject_text / inject_interrupt 异步投递；确需同步等待请改用 Go 插件。"))
 		return 2
 	}
 
@@ -334,15 +333,9 @@ func replaceSDKReal(L *lua.LState, t *lua.LTable, plg *luaPlugin, s *sdk.PluginS
 		return 0
 	}))
 
-	// ---- 同步注入：注入后等待本轮回复，返回 (reply, err) ----
-	// 注意：内置 SDK 的同名 InjectInputSync 是 (eventType, payload) 形态并遮蔽了
-	// 公共 SDK 的三参文本版本，故这里显式走 PluginSDK 的公共方法。
-	t.RawSetString("inject_input_sync", L.NewFunction(func(L *lua.LState) int {
-		return pushReply(s.PluginSDK.InjectInputSync(L.CheckString(1), L.CheckString(2), L.CheckString(3)))
-	}))
-	t.RawSetString("inject_input_sync_opts", L.NewFunction(func(L *lua.LState) int {
-		return pushReply(s.InjectInputSyncOpts(L.CheckString(1), L.CheckString(2), L.CheckString(3), parseInjectOptions(L, 4)))
-	}))
+	// ---- 同步注入：Lua 中不可用，统一返回明确错误（见 luaSyncUnavailable）----
+	t.RawSetString("inject_input_sync", L.NewFunction(luaSyncUnavailable))
+	t.RawSetString("inject_input_sync_opts", L.NewFunction(luaSyncUnavailable))
 
 	// ---- 多模态注入（1.1.0）：内容块随下一次 LLM 请求送达 ----
 	t.RawSetString("set_tool_blocks", L.NewFunction(func(L *lua.LState) int {
@@ -357,12 +350,8 @@ func replaceSDKReal(L *lua.LState, t *lua.LTable, plg *luaPlugin, s *sdk.PluginS
 		s.InjectInputMediaOpts(L.CheckString(1), L.CheckString(2), L.CheckString(3), luaToContentBlocks(L, 4), parseInjectOptions(L, 5))
 		return 0
 	}))
-	t.RawSetString("inject_input_media_sync", L.NewFunction(func(L *lua.LState) int {
-		return pushReply(s.InjectInputMediaSync(L.CheckString(1), L.CheckString(2), L.CheckString(3), luaToContentBlocks(L, 4)))
-	}))
-	t.RawSetString("inject_input_media_sync_opts", L.NewFunction(func(L *lua.LState) int {
-		return pushReply(s.InjectInputMediaSyncOpts(L.CheckString(1), L.CheckString(2), L.CheckString(3), luaToContentBlocks(L, 4), parseInjectOptions(L, 5)))
-	}))
+	t.RawSetString("inject_input_media_sync", L.NewFunction(luaSyncUnavailable))
+	t.RawSetString("inject_input_media_sync_opts", L.NewFunction(luaSyncUnavailable))
 	t.RawSetString("inject_interrupt_media", L.NewFunction(func(L *lua.LState) int {
 		s.InjectInterruptMedia(L.CheckString(1), L.CheckString(2), L.CheckString(3), luaToContentBlocks(L, 4))
 		return 0

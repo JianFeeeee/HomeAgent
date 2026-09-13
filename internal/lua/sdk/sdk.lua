@@ -82,11 +82,16 @@ function sdk.inject_interrupt_opts(source, channel, text, opts)
 end
 
 -- !impl
--- 同步注入：等待本轮回复 -> (reply, err)；无回复时 reply 为 nil。
-function sdk.inject_input_sync(source, channel, text) return nil, nil end
+-- 同步注入在 Lua 插件中**不可用**：会等本轮回复，而本轮正持有插件锁 ⇒ 必然自锁。
+-- 真实内核里恒返回 (nil, err)；这里返回同样的错误，避免离线测试误以为可用。
+function sdk.inject_input_sync(source, channel, text)
+    return nil, "同步注入在 Lua 插件中不可用：请在事件回调/外部入口用 inject_text/inject_interrupt；确需同步等待请改用 Go 插件。"
+end
 
 -- !impl
-function sdk.inject_input_sync_opts(source, channel, text, opts) return nil, nil end
+function sdk.inject_input_sync_opts(source, channel, text, opts)
+    return nil, "同步注入在 Lua 插件中不可用：请在事件回调/外部入口用 inject_text/inject_interrupt；确需同步等待请改用 Go 插件。"
+end
 
 -- !impl
 -- blocks: ContentBlock 数组，见 sdk.inject_input_media。
@@ -109,10 +114,15 @@ function sdk.inject_input_media_opts(source, channel, text, blocks, opts)
 end
 
 -- !impl
-function sdk.inject_input_media_sync(source, channel, text, blocks) return nil, nil end
+-- 同 sdk.inject_input_sync：Lua 中不可用。
+function sdk.inject_input_media_sync(source, channel, text, blocks)
+    return nil, "同步注入在 Lua 插件中不可用：请在事件回调/外部入口用 inject_input_media；确需同步等待请改用 Go 插件。"
+end
 
 -- !impl
-function sdk.inject_input_media_sync_opts(source, channel, text, blocks, opts) return nil, nil end
+function sdk.inject_input_media_sync_opts(source, channel, text, blocks, opts)
+    return nil, "同步注入在 Lua 插件中不可用：请在事件回调/外部入口用 inject_input_media_opts；确需同步等待请改用 Go 插件。"
+end
 
 -- !impl
 function sdk.inject_interrupt_media(source, channel, text, blocks)
