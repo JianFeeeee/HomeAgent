@@ -6,6 +6,7 @@ import (
 	"testing"
 
 	internalConfig "gitcode.com/JianFeeeee/HomeAgent/internal/config"
+	"gitcode.com/JianFeeeee/HomeAgent/internal/events"
 	sdk "gitcode.com/JianFeeeee/HomeAgent/internal/sdk"
 	lua "github.com/yuin/gopher-lua"
 )
@@ -596,4 +597,67 @@ return plugin
 	if sc2.LLMText != "模型输出[尾部标记]" {
 		t.Errorf("llm_text writeback: got %q, want %q", sc2.LLMText, "模型输出[尾部标记]")
 	}
+}
+
+// TestLuaEventsSubscribeAndStopCleanup 覆盖 sdk.events.subscribe：
+//  1. 订阅真的能收到内核事件（走内部 SDK 的 Subscribe，不是永远为 nil 的公共 Events()）；
+//  2. Stop 会取消订阅，之后 Publish 不得再触碰已 Close 的 LState。
+func TestLuaEventsSubscribeAndStopCleanup(t *testing.T) {
+	dir := t.TempDir()
+
+	os.WriteFile(filepath.Join(dir, "plugin.json"), []byte(`{"name":"evlua","entry":"main.lua"}`), 0644)
+	os.WriteFile(filepath.Join(dir, "main.lua"), []byte(`
+local plugin = { name = "evlua" }
+
+function plugin.start(sdk)
+  _G.hits = 0
+  local unsub, err = sdk.events.subscribe("agent_output", function(evt)
+    _G.hits = _G.hits + 1
+    _G.last_type = evt.type
+    _G.last_source = evt.source
+  end)
+  _G.sub_err = err
+  _G.unsub_type = type(unsub)
+end
+
+function plugin.stop() end
+return plugin
+`), 0644)
+
+	plg, err := tryLoadLua(dir, "evlua", nil)
+	if err != nil {
+		t.Fatalf("tryLoadLua failed: %v", err)
+	}
+	lp := plg.(*luaPlugin)
+
+	bus := events.NewBus()
+	reg := internalConfig.NewConfigRegistry("")
+	sett := sdk.NewSettings("evlua", reg)
+	s := sdk.New("evlua", sdk.SDKConfig{EventBus: bus, Settings: sett})
+
+	if err := plg.Start(s); err != nil {
+		t.Fatalf("Start failed: %v", err)
+	}
+
+	L := lp.L
+	if errStr := L.GetGlobal("sub_err").String(); errStr != "nil" {
+		t.Fatalf("subscribe returned error: %s", errStr)
+	}
+	if got := L.GetGlobal("unsub_type").String(); got != "function" {
+		t.Fatalf("subscribe should return an unsubscribe function, got %s", got)
+	}
+
+	bus.Publish(&events.Event{Type: events.EventAgentOutput, Source: "test-src"})
+	if hits := int(lua.LVAsNumber(L.GetGlobal("hits"))); hits != 1 {
+		t.Fatalf("event handler hits = %d, want 1", hits)
+	}
+	if got := L.GetGlobal("last_source").String(); got != "test-src" {
+		t.Fatalf("event source = %q, want test-src", got)
+	}
+
+	// Stop 取消订阅 + 关 L；此后再 Publish 不得 panic / use-after-close。
+	if err := plg.Stop(); err != nil {
+		t.Fatalf("Stop failed: %v", err)
+	}
+	bus.Publish(&events.Event{Type: events.EventAgentOutput, Source: "after-stop"})
 }
