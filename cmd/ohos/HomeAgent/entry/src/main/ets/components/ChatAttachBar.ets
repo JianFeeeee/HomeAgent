@@ -8,7 +8,7 @@
 import { ThemePalette, DARK_PALETTE, LIGHT_PALETTE, RADIUS_MD, RADIUS_PILL,
   ANIM_NORMAL } from '../common/Constants';
 import { MotionBase } from './MotionBase';
-import { formatBytes } from './Attachment';
+import { formatBytes } from '../common/AttachmentMeta';
 
 /** 加号菜单：两枚独立的玻璃胶囊，和输入区其他组件同一套视觉语言 */
 @Component
