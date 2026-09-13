@@ -174,8 +174,22 @@ func (a *Agent) SpawnResident(opts ResidentOptions) (ResidentInfo, error) {
 	a.residentMu.Unlock()
 
 	child.Start()
+
+	// ⑥ create 即开工：把任务提示词作为**第一条排队输入**投给子。
+	//
+	// 为什么必须在这里投：TaskPrompt 只进子的系统提示词（"你是谁、要做什么"），
+	// 而**不会**让子跑起来 —— 实测现象是子启动后 rounds=0、永远待机
+	// （日志 `[agent] r1 started, waiting for IO interrupts` 之后无事发生）。
+	// 走排队输入（非中断）：创建是"安排工作"，不是"打断它正在做的事"。
+	if strings.TrimSpace(opts.TaskPrompt) != "" {
+		child.io.InjectInputTo(a.residentParentSource(), parentInCh, "text",
+			map[string]interface{}{"content": opts.TaskPrompt})
+	}
 	return rc.info(), nil
 }
+
+// residentParentSource 是"父给子投递"的输入来源名（子的视角里能看出是谁发的）。
+func (a *Agent) residentParentSource() string { return "parent/" + string(a.id) }
 
 // residentInboundChannel 是"父接收某个子的消息"的 inputch 名（登记进登记表可见）。
 func (a *Agent) residentInboundChannel(childID string) string {

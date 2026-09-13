@@ -303,6 +303,17 @@ func (r *Registry) buildSDK(name string) *sdk.PluginSDK {
 		}); err != nil {
 			return err
 		}
+		// **兼容网**：插件应当显式 RegisterInputChannel 声明自己的入站通道；
+		// 但历史插件常常只用 RegisterOutputChannel 声明（却用同一个名字注入输入，
+		// 例：cli 只声明输出 "cli" 就用 InjectTextSync("cli", ...) 注入）。
+		// 不兜底的话 inputch 登记表里没有它，"把 inputch 划给驻留子"直接失败
+		// （实测报 `划入 inputch cli: inputch 未注册`）。兜底要**留痕**，
+		// 否则插件作者永远不知道该补一行 RegisterInputChannel。
+		if _, ok := r.iom.LookupInputChannel(chName); !ok {
+			_ = r.iom.RegisterInputChannelFrom(name, chName, agentIO.ChannelDef(def))
+			log.Printf("[plugin] %s 只声明了输出通道 %q，已按双向通道兜底登记 inputch；"+
+				"若要明确意图请显式 RegisterInputChannel", name, chName)
+		}
 		r.noteChannel(name, chName, true)
 		return nil
 	}
