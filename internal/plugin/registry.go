@@ -307,12 +307,15 @@ func (r *Registry) buildSDK(name string) *sdk.PluginSDK {
 		// 但历史插件常常只用 RegisterOutputChannel 声明（却用同一个名字注入输入，
 		// 例：cli 只声明输出 "cli" 就用 InjectTextSync("cli", ...) 注入）。
 		// 不兜底的话 inputch 登记表里没有它，"把 inputch 划给驻留子"直接失败
-		// （实测报 `划入 inputch cli: inputch 未注册`）。兜底要**留痕**，
-		// 否则插件作者永远不知道该补一行 RegisterInputChannel。
+		// （实测报 `划入 inputch cli: inputch 未注册`）。
+		//
+		// ❗这里**不能**判"是否声明过入站通道"并告警：声明顺序是自由的，
+		// 先 RegisterOutputChannel 再 RegisterInputChannel 是常见写法（qq 就是），
+		// 按此刻的状态判会对它误报（实测：把 qq 报成"只声明了输出通道"）。
+		// 真正该问的问题是"插件 Start 结束后，这个出站通道有没有对应的入站声明" ——
+		// 那在 load 完成后统一判（见 warnOutputOnlyChannels）。
 		if _, ok := r.iom.LookupInputChannel(chName); !ok {
 			_ = r.iom.RegisterInputChannelFrom(name, chName, agentIO.ChannelDef(def))
-			log.Printf("[plugin] %s 只声明了输出通道 %q，已按双向通道兜底登记 inputch；"+
-				"若要明确意图请显式 RegisterInputChannel", name, chName)
 		}
 		r.noteChannel(name, chName, true)
 		return nil
@@ -452,6 +455,7 @@ func (r *Registry) Load(dir string) error {
 		r.pluginAutoRestart[name] = plgSDK.AutoRestart()
 		r.instances = append(r.instances, p)
 		r.mu.Unlock()
+		r.warnOutputOnlyChannels(name)
 		log.Printf("[plugin] loaded: %s", name)
 	}
 
@@ -545,6 +549,7 @@ func (r *Registry) loadOne(plgDir, name string) bool {
 	r.pluginAutoRestart[name] = plgSDK.AutoRestart()
 	r.sdkRefs[name] = plgSDK
 	r.instances = append(r.instances, plg)
+	r.warnOutputOnlyChannels(name)
 	if h := pluginEntryHash(plgDir); h != "" {
 		r.pluginHashes[name] = h
 	} else {
@@ -577,6 +582,31 @@ func (r *Registry) stageRegistrarFor() (func(plugin string, stage sdk.Stage, han
 		return h.RegisterStageFor, true
 	}
 	return nil, false
+}
+
+// warnOutputOnlyChannels 在插件 Start 结束后，报告"只声明了出站、没有入站声明"的通道。
+//
+// 为什么放在 Start 之后：声明顺序自由（先出站后入站很常见），注册时刻的状态
+// 判不出意图。这里看的是**插件最终声明了什么**，因此不会误报 qq 这种写法。
+//
+// 注：这类通道内核已兜底登记 inputch（功能可用），告警只是提醒插件作者把意图写明。
+func (r *Registry) warnOutputOnlyChannels(plugin string) {
+	r.channelsMu.Lock()
+	set := r.pluginChannels[plugin]
+	var only []string
+	if set != nil {
+		for ch := range set.outputs {
+			if !set.inputs[ch] {
+				only = append(only, ch)
+			}
+		}
+	}
+	r.channelsMu.Unlock()
+	sort.Strings(only)
+	for _, ch := range only {
+		log.Printf("[plugin] %s 只声明了出站通道 %q（未 RegisterInputChannel）；"+
+			"内核已兜底登记 inputch，若这是有意为之可忽略", plugin, ch)
+	}
 }
 
 // noteChannel 记住插件注册了哪个通道，供卸载/崩溃时摘除。
