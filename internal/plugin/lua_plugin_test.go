@@ -661,3 +661,46 @@ return plugin
 	}
 	bus.Publish(&events.Event{Type: events.EventAgentOutput, Source: "after-stop"})
 }
+
+// TestLuaSyncInjectUnavailable 钉住「Lua 同步注入必须立即返回明确错误、不能挂死」。
+// 背景：同步注入要等本轮回复，而 Lua 回调持有插件锁 ⇒ 原实现必然自锁。
+func TestLuaSyncInjectUnavailable(t *testing.T) {
+	dir := t.TempDir()
+	os.WriteFile(filepath.Join(dir, "plugin.json"), []byte(`{"name":"synclua","entry":"main.lua"}`), 0644)
+	os.WriteFile(filepath.Join(dir, "main.lua"), []byte(`
+local plugin = { name = "synclua" }
+function plugin.start(sdk)
+  local r, err = sdk.inject_input_sync("src", "ch", "hello")
+  _G.sync_reply = r
+  _G.sync_err = err
+  local _, err2 = sdk.inject_input_sync_opts("src", "ch", "hello", { no_memory = true })
+  _G.sync_err2 = err2
+  local _, err3 = sdk.inject_input_media_sync("src", "ch", "hi", {})
+  _G.sync_media_err = err3
+end
+function plugin.stop() end
+return plugin
+`), 0644)
+
+	plg, err := tryLoadLua(dir, "synclua", nil)
+	if err != nil {
+		t.Fatalf("tryLoadLua failed: %v", err)
+	}
+	reg := internalConfig.NewConfigRegistry("")
+	sett := sdk.NewSettings("synclua", reg)
+	s := sdk.New("synclua", sdk.SDKConfig{Settings: sett})
+	if err := plg.Start(s); err != nil {
+		t.Fatalf("Start failed: %v", err)
+	}
+	defer plg.Stop()
+
+	L := plg.(*luaPlugin).L
+	if L.GetGlobal("sync_reply").Type() != lua.LTNil {
+		t.Errorf("sync inject should return nil reply, got %v", L.GetGlobal("sync_reply"))
+	}
+	for _, k := range []string{"sync_err", "sync_err2", "sync_media_err"} {
+		if L.GetGlobal(k).Type() != lua.LTString {
+			t.Errorf("%s should be an error string (unavailable), got %v", k, L.GetGlobal(k))
+		}
+	}
+}

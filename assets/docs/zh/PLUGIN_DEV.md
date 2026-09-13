@@ -641,11 +641,11 @@ end)
 | `sdk.inject_interrupt(source, channel, text)` | 中断投递 |
 | `sdk.inject_text_no_memory(source, channel, text)` | 免记忆投递 |
 | `sdk.inject_text_opts` / `sdk.inject_interrupt_opts(source, channel, text, opts)` | 带标志位投递；`opts = { no_memory=bool, context_policy="none"|"prune", cleaner_name=string, priority="L1".."L3" }` |
-| `sdk.inject_input_sync(source, channel, text)` | 同步注入并等本轮回复；返回 `(reply, err)`，无回复时 reply 为 nil |
-| `sdk.inject_input_sync_opts(source, channel, text, opts)` | 同上带标志位 |
+| `sdk.inject_input_sync(source, channel, text)` | ⚠️ **Lua 中不可用**：恒返回 `(nil, err)`。它要等本轮回复而 Lua 回调持有插件锁，必然自锁。需要同步等待请用 Go 插件，或用下面的异步注入 |
+| `sdk.inject_input_sync_opts(source, channel, text, opts)` | 同上（不可用） |
 | `sdk.inject_input_media(source, channel, text, blocks)` | 注入文本 + 多模态内容块 |
 | `sdk.inject_input_media_opts(source, channel, text, blocks, opts)` | 同上带标志位 |
-| `sdk.inject_input_media_sync` / `..._sync_opts(...)` | 带媒体的同步注入；返回 `(reply, err)` |
+| `sdk.inject_input_media_sync` / `..._sync_opts(...)` | ⚠️ **Lua 中不可用**（同 `inject_input_sync`） |
 | `sdk.inject_interrupt_media(source, channel, text, blocks)` | 带媒体的中断注入 |
 | `sdk.inject_interrupt_media_opts(source, channel, text, blocks, opts)` | 同上带标志位 |
 | `sdk.set_tool_blocks(blocks)` | 设置下一轮 tool message 携带的多模态内容块（模型据此看图/听音频） |
