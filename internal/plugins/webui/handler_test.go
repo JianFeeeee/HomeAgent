@@ -1292,3 +1292,43 @@ func TestChatPersistenceIsThrottled(t *testing.T) {
 	// Close 幂等
 	h.Close()
 }
+
+// TestDashboardAssetsSplit 钉住前端的拆分方式：
+// 外壳 dashboard.html 只留两个占位符，样式与脚本分别在 dashboard.css / dashboard.js，
+// 启动时组装回**与拆分前逐字节一致**的页面（拆分当日已用 git 里的原文件比对通过）。
+func TestDashboardAssetsSplit(t *testing.T) {
+	shell, err := dashboardFS.ReadFile("dashboard.html")
+	if err != nil {
+		t.Fatalf("读 dashboard.html: %v", err)
+	}
+	for _, ph := range []string{"{{DASHBOARD_CSS}}", "{{DASHBOARD_JS}}"} {
+		if !strings.Contains(string(shell), ph) {
+			t.Fatalf("外壳里应保留占位符 %s", ph)
+		}
+	}
+	// 样式/脚本不能又塞回外壳（否则拆分名存实亡）
+	if strings.Contains(string(shell), "--sakura-300") {
+		t.Fatal("dashboard.html 里仍内联着样式，拆分未生效")
+	}
+	if strings.Contains(string(shell), "function saveSetting") {
+		t.Fatal("dashboard.html 里仍内联着脚本，拆分未生效")
+	}
+	css, err := dashboardFS.ReadFile("dashboard.css")
+	if err != nil || len(css) == 0 {
+		t.Fatalf("读 dashboard.css: %v (%d 字节)", err, len(css))
+	}
+	js, err := dashboardFS.ReadFile("dashboard.js")
+	if err != nil || len(js) == 0 {
+		t.Fatalf("读 dashboard.js: %v (%d 字节)", err, len(js))
+	}
+	// 组装结果：占位符必须都被替换掉，且样式/脚本内容都在里面
+	if strings.Contains(dashboardHTML, "{{DASHBOARD_") {
+		t.Fatal("组装后的页面仍残留占位符")
+	}
+	if !strings.Contains(dashboardHTML, "--sakura-300") {
+		t.Fatal("组装后的页面缺样式")
+	}
+	if !strings.Contains(dashboardHTML, "function saveSetting") {
+		t.Fatal("组装后的页面缺脚本")
+	}
+}
