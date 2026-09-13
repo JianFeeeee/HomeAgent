@@ -96,6 +96,18 @@ func (a *Agent) executeToolCallInner(tc agentAPI.ToolCall, channel string) strin
 		}
 	}
 
+	// 设备类工具的**授权闸**（最小授权的缺口在这里）。
+	//
+	// 设备指令类工具（device_ctl_cmdrun/screensee/computeruse/...）走的是工具面，
+	// 而 AllowedOutputs 只作用于 output_send__<通道> —— 于是"授权"对指令类工具完全无效：
+	// 驻留子只要拿到 device_ctl_cmdrun 就能指挥**任意**设备。
+	// 这里按目标设备的通道名 device/<id> 查同一道闸：父授权了哪台设备，才允许指挥哪台。
+	if _, isDeviceTool := a.io.DeviceOfTool(tc.Name); isDeviceTool {
+		if id, _ := tc.Arguments["device_id"].(string); id != "" && !a.IsOutputAllowed("device/"+id) {
+			return fmt.Sprintf("设备 [%s] 未授权给本 agent（可用设备见 output_list_channels 的 device/<id> 通道，或 devicedetect）", id)
+		}
+	}
+
 	if a.tracker != nil {
 		a.tracker.PreAction(tc.Name)
 	}

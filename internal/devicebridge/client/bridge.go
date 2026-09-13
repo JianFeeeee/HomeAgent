@@ -22,6 +22,15 @@ type CmdResultHandler func(reqID, status, output, errMsg string)
 // DataHandler 是二进制数据接收回调（如 TTS 音频）。
 type DataHandler func(reqID, kind, mime string, data []byte)
 
+// PushHandler 接收 agent **主动投递**给本设备的内容。
+//
+// 与 cmd 的区别：cmd 是"让设备做一件事"（请求-响应，结果要回传），
+// push 是"把这段内容交给设备"（agent 经 output_send__device/<id> 发起，
+// 一种单向投递）。宿主按自己的形态落地：终端打出来、音箱念出来、屏幕显示。
+//
+// typ: text / structured / image / file / audio（二进制走 DataHandler，不走这里）
+type PushHandler func(reqID, typ, payload, meta string)
+
 // Bridge 是设备桥客户端核心结构体。
 // 管理 WebSocket 连接、消息路由、心跳保活和命令分发。
 // 授权状态由设备端本地存储（客户端鉴权），服务端不存储；
@@ -46,6 +55,7 @@ type Bridge struct {
 	cmdHandler    BridgeCmdHandler
 	resultHandler CmdResultHandler
 	dataHandler   DataHandler
+	pushHandler   PushHandler
 
 	// 二进制数据聚合（服务端→设备，如 TTS 音频）
 	speechAccum *speechBuffer
@@ -155,6 +165,13 @@ func (b *Bridge) OnData(handler DataHandler) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	b.dataHandler = handler
+}
+
+// OnPush 注册 agent 主动投递内容的回调（服务端 op=push）。
+func (b *Bridge) OnPush(handler PushHandler) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	b.pushHandler = handler
 }
 
 // SetPingInterval 设置心跳间隔（默认 30 秒）。
@@ -476,6 +493,25 @@ func (b *Bridge) handleMessage(msg map[string]interface{}) {
 		b.mu.RUnlock()
 		if dh != nil {
 			dh(reqID, acc.kind, acc.mime, data)
+		}
+
+	case "push":
+		// agent 主动投递（output_send__device/<id>）。二进制负载走
+		// cmd_speech_* → DataHandler，这里只处理文本/结构化。
+		reqID, _ := msg["req_id"].(string)
+		typ, _ := msg["type"].(string)
+		payload, _ := msg["payload"].(string)
+		meta, _ := msg["meta"].(string)
+		if typ == "" {
+			typ = "text"
+		}
+		b.mu.RLock()
+		ph := b.pushHandler
+		b.mu.RUnlock()
+		if ph != nil {
+			ph(reqID, typ, payload, meta)
+		} else {
+			log.Printf("[devicebridge] push req=%s type=%s payload=%s", reqID, typ, truncateString(payload, 120))
 		}
 
 	default:
