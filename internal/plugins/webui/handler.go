@@ -2153,6 +2153,16 @@ func (h *Handler) handleConfig(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
+// isInternalSetting 判断某个插件的配置键是不是**内部数据**（不是用户设置项）。
+//
+// chathistory 是 webui 自己持久化的整段聊天记录（生产实例实测 5.2MB）。它躺在
+// 插件配置表里，于是会被设置接口当成普通配置项整块吐出：GET /api/v1/settings
+// 因此返回 8MB+，并且前端把它渲染成一个巨大的文本框。它只应由 chat 相关
+// 接口的 handleChatHistory 读，不进设置面。
+func isInternalSetting(plugin, key string) bool {
+	return plugin == "webui" && key == "chathistory"
+}
+
 func (h *Handler) handleSettings(w http.ResponseWriter, r *http.Request) {
 	if h.settings == nil {
 		writeJSON(w, http.StatusNotFound, map[string]string{"error": "config registry not available"})
@@ -2169,6 +2179,9 @@ func (h *Handler) handleSettings(w http.ResponseWriter, r *http.Request) {
 			pluginName := prefix[7:]
 			keys, _ := h.settings.ListPlugin(pluginName, "")
 			for _, k := range keys {
+				if isInternalSetting(pluginName, k) {
+					continue
+				}
 				v, _ := h.settings.GetPlugin(pluginName, k)
 				fullKey := prefix + "." + k
 				values[fullKey] = v
@@ -2205,6 +2218,9 @@ func (h *Handler) handleSettings(w http.ResponseWriter, r *http.Request) {
 					}
 					pkeys, _ := h.settings.ListPlugin(p, "")
 					for _, k := range pkeys {
+						if isInternalSetting(p, k) {
+							continue
+						}
 						v, _ := h.settings.GetPlugin(p, k)
 						fullKey := "plugin." + p + "." + k
 						values[fullKey] = v
@@ -2257,6 +2273,10 @@ func (h *Handler) handleSettings(w http.ResponseWriter, r *http.Request) {
 		if strings.HasPrefix(body.Key, "plugin.") {
 			parts := strings.SplitN(body.Key, ".", 3)
 			if len(parts) >= 3 {
+				if isInternalSetting(parts[1], parts[2]) {
+					writeJSON(w, http.StatusBadRequest, map[string]string{"error": "该键属于插件内部数据，不经设置接口读写"})
+					return
+				}
 				var err error
 				if deleting {
 					err = h.settings.RemovePlugin(parts[1], parts[2])

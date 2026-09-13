@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"net"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -51,6 +52,35 @@ var webFilesDir string
 // uploadsDir 是用户经 webui 上传文件的存储目录（<data>/uploads）。
 // handleChatFile 落盘、handleUploads 下载共用；参考 qq 插件 files_dir 收文件设计。
 var uploadsDir string
+
+// listenOverride 是内核在插件加载前给出的监听地址覆盖（CLI --webui，
+// 或核心配置 webui.listen_addr 被显式改成非默认值）。
+//
+// 为什么需要这个旁路：内核曾在插件加载前写 settings["addr"]，但那时
+// config_<name> 表还没建，PluginSettings.Set 的 INSERT 会失败且错误被忽略；
+// 随后 plugin Start 里 RegisterDef 才建表并写入默认值 :8080。结果是
+// CLI --webui 与 webui.listen_addr **一直是死配置**。这里改为插件自己
+// 接受一个显式覆盖值，优先级高于 settings["addr"]（后者是 Web 设置页的持久值）。
+var listenOverride string
+
+// SetListenOverride 设置监听地址覆盖（空值表示不覆盖）。
+// 由 cmd/homed 在插件加载前调用，见 resolveWebUIOverride。
+func SetListenOverride(addr string) {
+	listenOverride = strings.TrimSpace(addr)
+}
+
+// resolveListenAddr 决定最终监听地址：覆盖值 > 插件设置 > 内置默认。
+// 抽成纯函数是为了能被单测直接钉住优先级。
+func resolveListenAddr(setting string) string {
+	addr := ":8080"
+	if setting != "" {
+		addr = setting
+	}
+	if listenOverride != "" {
+		addr = listenOverride
+	}
+	return addr
+}
 
 // stageWebFile 把 agent 要发送的本地文件拷贝到 webui_files 中转目录，
 // 返回可下载 URL 路径与字节数。image/file 的 payload 支持本地路径或 http(s) URL
@@ -146,6 +176,7 @@ func (p *Plugin) Start(s *sdk.PluginSDK) error {
 			addr = s2
 		}
 	}
+	addr = resolveListenAddr(addr)
 
 	// 能力位 7 = CapText|CapFile|CapImage；旧值 1 仅文本，agent 无法向 webui 发文件/图片
 	// 入站通道：webui（控制台对话）与 http（外部 HTTP 注入），都由本插件注入输入。
@@ -238,13 +269,22 @@ func (p *Plugin) Start(s *sdk.PluginSDK) error {
 
 	// 最外层套 logged 中间件：记录每个请求的来源 IP / 方法 / 路径 / 认证方式 / 状态码。
 	// 用于排查“谁调用了什么接口”（如插件禁用等变更操作）。
-	p.server = &http.Server{Addr: addr, Handler: p.handler.logged(p.mux)}
+	//
+	// 同步 Listen：端口被占时必须**在这里**失败并把错误交回加载器，
+	// 而不是“后台 goroutine 里报一行日志、插件仍被当成加载成功”。
+	// 修复前 Start 总是返回 nil，于是 :8080 被占时 WebUI 静默死亡，
+	// 调用方看不到任何失败信号。
+	ln, err := net.Listen("tcp", addr)
+	if err != nil {
+		return fmt.Errorf("webui: 监听 %s 失败: %w", addr, err)
+	}
+	p.server = &http.Server{Handler: p.handler.logged(p.mux)}
 	go func() {
-		log.Printf("[webui] HTTP server listening on %s", addr)
-		if err := p.server.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+		if err := p.server.Serve(ln); err != nil && err != http.ErrServerClosed {
 			log.Printf("[webui] server error: %v", err)
 		}
 	}()
+	log.Printf("[webui] HTTP server listening on %s", ln.Addr())
 	return nil
 }
 
