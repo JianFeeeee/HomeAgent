@@ -4,19 +4,25 @@ import { apiClient } from '../common/ApiClient';
 import { handleNavOnScroll } from '../common/NavBarController';
 import { registerNavStack, unregisterNavStack } from '../common/NavStackRegistry';
 import { DeviceInfo } from '../model/Model';
-import { ThemePalette, DARK_PALETTE, LIGHT_PALETTE, WIDE_NAV_BAR_WIDTH, WIDE_MIN_CONTENT, ANIM_FAST, ANIM_NORMAL, ANIM_ENTER } from '../common/Constants';
-import { MotionBase } from '../components/MotionBase';
+import { ThemePalette, DARK_PALETTE, LIGHT_PALETTE, WIDE_NAV_BAR_WIDTH,
+  WIDE_MIN_CONTENT, ANIM_NORMAL, ANIM_ENTER } from '../common/Constants';
+import { deviceGatewayUrl } from '../common/DeviceBridgeSession';
+import { DeviceRootEntries } from '../components/DeviceRootEntries';
+import { DeviceLocalPane, DeviceCapsPane, DeviceGatewayPane, DeviceListPane } from '../components/DevicePanes';
 import { PageTopBar, NavFloatOverlay, NavFloatRow, FloatIconButton } from '../components/PageTopBar';
-import { SubPageLayer, NavGroup, NavRow, PlainCard, markSubPageOpen, subPageParam } from '../components/SubPage';
-import { LOCAL_DEVICE_CAPS, deviceGatewayUrl } from '../common/DeviceBridgeSession';
+import { markSubPageOpen, subPageParam } from '../components/SubPage';
+import { parseOnlineDevices, resolveDeviceId, SUB_CAPS, SUB_GATEWAY, SUB_LIST,
+  SUB_LOCAL, SUB_NONE } from '../common/DeviceModel';
 
-/** 二级页面标识 */
-const SUB_NONE: string = '';
-const SUB_LOCAL: string = 'local';
-const SUB_CAPS: string = 'caps';
-const SUB_GATEWAY: string = 'gateway';
-const SUB_LIST: string = 'list';
-
+/**
+ * 设备页：只做"页面壳"。
+ *
+ * 拆分后的分工（拆分前这里是 560 行的单文件）：
+ *  - 一级入口列表（本机/通道两组）        → components/DeviceRootEntries.ets
+ *  - 四个二级页面内容（本机/能力/通道/列表）→ components/DevicePanes.ets
+ *  - device_id 兜底与在线设备解析          → common/DeviceModel.ets（路由 id 也在那）
+ * 本文件保留：导航栈与二级页分发、授权开关、toast、设备列表拉取与生命周期。
+ */
 @Component
 export struct DevicePage {
   @StorageProp('themeIsDark') private isDark: boolean = true;
@@ -39,18 +45,8 @@ export struct DevicePage {
   private navStack: NavPathStack = new NavPathStack();
 
   aboutToAppear(): void {
-    this.deviceId = deviceBridge.getDeviceId();
-    if (this.deviceId.length === 0) {
-      this.deviceId = connStore.getDeviceId();
-    }
-    if (this.deviceId.length === 0) {
-      this.deviceId = 'ohos-' + Date.now().toString(36);
-      try {
-        connStore.saveDeviceId(this.deviceId);
-      } catch (e) {
-        // ignore
-      }
-    }
+    // id 判定顺序：桥里的 id 优先于持久化的 id，都没有才生成并落盘
+    this.deviceId = resolveDeviceId(deviceBridge.getDeviceId());
     this.authorized = connStore.getDeviceAuth();
     // Gateway URL derives from current connection
     const cur = connStore.getCurrentConnection();
@@ -133,31 +129,7 @@ export struct DevicePage {
       const resp = await apiClient.get('/device/online');
       if (resp.status >= 200 && resp.status < 300) {
         const parsed: Record<string, Object> = JSON.parse(resp.body) as Record<string, Object>;
-        const devs: Object = parsed['devices'];
-        const list: DeviceInfo[] = [];
-        if (devs !== undefined && devs !== null) {
-          const arr: Object[] = devs as Object[];
-          for (let i = 0; i < arr.length; i++) {
-            const d: Record<string, Object> = arr[i] as Record<string, Object>;
-            const capsArr: Object = d['caps'];
-            const caps: string[] = [];
-            if (capsArr !== undefined && capsArr !== null) {
-              const cArr: Object[] = capsArr as Object[];
-              for (let j = 0; j < cArr.length; j++) {
-                caps.push(cArr[j] as string);
-              }
-            }
-            const info: DeviceInfo = {
-              deviceId: d['device_id'] as string ?? '',
-              name: d['name'] as string ?? '',
-              kind: d['kind'] as string ?? '',
-              online: true,
-              authorized: d['authorized'] as boolean ?? false,
-              caps: caps,
-            };
-            list.push(info);
-          }
-        }
+        const list: DeviceInfo[] = parseOnlineDevices(parsed);
         this.getUIContext().animateTo({ duration: ANIM_ENTER, curve: Curve.EaseOut }, () => {
           this.devices = list;
         });
@@ -177,7 +149,17 @@ export struct DevicePage {
         Column() {
           Scroll() {
             Column() {
-              this.RootEntries()
+              DeviceRootEntries({
+                activeSub: this.activeSub,
+                deviceId: this.deviceId,
+                bridgeConnected: this.bridgeConnected,
+                bridgeUrl: this.bridgeUrl,
+                loadingDevices: this.loadingDevices,
+                deviceCount: this.devices.length,
+                onOpen: (id: string) => {
+                  this.openSub(id);
+                },
+              })
             }
             .width('100%')
             .padding({ left: 16, right: 16, top: 76, bottom: 174 })
@@ -248,60 +230,57 @@ export struct DevicePage {
     })
   }
 
-  /** 二级页面路由表 */
+  /**
+   * 二级页面路由表。
+   * 每个面板自带 SubPageLayer 外壳（标题/所属 Tab/返回/刷新），这里只做分发。
+   */
   @Builder
   SubDestination(name: string, param: object) {
     NavDestination() {
       if (name === SUB_LOCAL) {
-        SubPageLayer({
-          title: '本机设备',
-          tab: 2,
+        DeviceLocalPane({
+          deviceId: this.deviceId,
+          authorized: this.authorized,
           onBack: () => {
             this.closeSub();
           },
-        }) {
-          this.LocalDeviceContent()
-        }
+          onToggleAuth: (on: boolean) => {
+            this.toggleAuthorized(on);
+          },
+        })
       } else if (name === SUB_CAPS) {
-        SubPageLayer({
-          title: '设备能力',
-          tab: 2,
+        DeviceCapsPane({
           onBack: () => {
             this.closeSub();
           },
-        }) {
-          this.CapsContent()
-        }
+        })
       } else if (name === SUB_GATEWAY) {
-        SubPageLayer({
-          title: '设备通道',
-          tab: 2,
+        DeviceGatewayPane({
+          bridgeUrl: this.bridgeUrl,
+          bridgeToken: this.bridgeToken,
+          bridgeConnected: this.bridgeConnected,
           onBack: () => {
             this.closeSub();
           },
-        }) {
-          this.GatewayContent()
-        }
-      } else if (name === SUB_LIST) {
-        SubPageLayer({
-          title: '接入的设备',
-          tab: 2,
-          onBack: () => {
-            this.closeSub();
-          },
-          showRefresh: true,
           onRefresh: () => {
             this.refreshDevices();
           },
-        }) {
-          this.OnlineDevicesContent()
-        }
+        })
+      } else if (name === SUB_LIST) {
+        DeviceListPane({
+          devices: this.devices,
+          onBack: () => {
+            this.closeSub();
+          },
+          onRefresh: () => {
+            this.refreshDevices();
+          },
+        })
       }
     }
     .hideTitleBar(true)
     .backgroundColor(Color.Transparent)
   }
-
 
   @Builder
   Toast() {
@@ -322,238 +301,6 @@ export struct DevicePage {
         .combine(TransitionEffect.translate({ y: 12 }))
         .animation({ duration: ANIM_NORMAL, curve: Curve.EaseOut }))
     }
-  }
-
-  // ===================== 一级入口列表 =====================
-
-  @Builder
-  RootEntries() {
-    NavGroup({ caption: '本机' }) {
-      NavRow({
-        icon: $r('app.media.ic_phone'),
-        title: '本机设备',
-        subtitle: this.deviceId.length > 0 ? this.deviceId : '未注册',
-        value: this.bridgeConnected ? '在线' : '离线',
-        selected: this.isWide && this.activeSub === SUB_LOCAL,
-        onTap: () => {
-          this.openSub(SUB_LOCAL);
-        },
-      })
-      NavRow({
-        icon: $r('app.media.ic_bolt'),
-        title: '设备能力',
-        subtitle: this.capsCount().toString() + ' 项能力',
-        value: '',
-        showDivider: false,
-        selected: this.isWide && this.activeSub === SUB_CAPS,
-        onTap: () => {
-          this.openSub(SUB_CAPS);
-        },
-      })
-    }
-
-    NavGroup({ caption: '通道' }) {
-      NavRow({
-        icon: $r('app.media.ic_gateway'),
-        title: '设备通道',
-        subtitle: this.bridgeUrl.length > 0 ? '网关已配置' : '未配置',
-        value: this.bridgeConnected ? '已连接' : '未连接',
-        selected: this.isWide && this.activeSub === SUB_GATEWAY,
-        onTap: () => {
-          this.openSub(SUB_GATEWAY);
-        },
-      })
-      NavRow({
-        icon: $r('app.media.ic_devices_multi'),
-        title: '接入的设备',
-        subtitle: this.loadingDevices ? '加载中...' : '当前在线',
-        value: this.devices.length.toString() + ' 台',
-        showDivider: false,
-        selected: this.isWide && this.activeSub === SUB_LIST,
-        onTap: () => {
-          this.openSub(SUB_LIST);
-        },
-      })
-    }
-  }
-
-  private capsCount(): number {
-    return LOCAL_DEVICE_CAPS.length;
-  }
-
-  // ===================== 二级：本机设备 =====================
-
-  @Builder
-  LocalDeviceContent() {
-    PlainCard({ caption: '基本信息' }) {
-      this.KvRow('设备 ID', this.deviceId.length > 0 ? this.deviceId : '未注册')
-      this.KvRow('名称', 'HomeAgent OHOS')
-      this.KvRow('类型', 'phone')
-    }
-
-    PlainCard({ caption: '权限控制' }) {
-      Row() {
-        Column({ space: 2 }) {
-          Text('允许 agent 控制本机')
-            .fontSize(14)
-            .fontColor(this.palette().textPrimary)
-          Text('授权后 agent 可调用下方能力；截屏仅捕获本应用画面，剪贴板读取需系统弹窗确认。')
-            .fontSize(11)
-            .fontColor(this.palette().textMuted)
-            .margin({ top: 4 })
-        }
-        .layoutWeight(1)
-        .alignItems(HorizontalAlign.Start)
-
-        Toggle({ type: ToggleType.Switch, isOn: this.authorized })
-          .selectedColor(this.palette().accent)
-          .onChange((on: boolean) => {
-            this.toggleAuthorized(on);
-          })
-      }
-      .width('100%')
-      .alignItems(VerticalAlign.Center)
-
-      Row() {
-        Circle({ width: 8, height: 8 })
-          .fill(this.authorized ? '#17A964' : '#E84026')
-          .animation({ duration: ANIM_NORMAL, curve: Curve.EaseOut })
-          .margin({ right: 8 })
-        Text(this.authorized ? '已授权 — agent 可远程调用能力' : '未授权 — agent 将拒绝远程命令')
-          .fontSize(12)
-          .fontColor(this.authorized ? '#17A964' : this.palette().textMuted)
-          .animation({ duration: ANIM_NORMAL, curve: Curve.EaseOut })
-      }
-      .width('100%')
-      .margin({ top: 12 })
-      .padding({ left: 4 })
-    }
-  }
-
-  // ===================== 二级：设备能力 =====================
-
-  @Builder
-  CapsContent() {
-    PlainCard({ caption: '能力清单' }) {
-      Text('agent 通过设备桥可调用的本机能力：')
-        .fontSize(12)
-        .fontColor(this.palette().textMuted)
-        .margin({ bottom: 10 })
-
-      Flex({ wrap: FlexWrap.Wrap }) {
-        ForEach(LOCAL_DEVICE_CAPS, (cap: string) => {
-          Text(cap)
-            .fontSize(11)
-            .fontColor(this.palette().accent)
-            .padding({ left: 8, right: 8, top: 4, bottom: 4 })
-            .borderRadius(999)
-            .backgroundColor(this.palette().bgHover)
-            .border({ width: 1, color: this.palette().glassBorder })
-            .margin({ right: 6, bottom: 6 })
-        }, (cap: string) => cap)
-      }
-      .width('100%')
-    }
-  }
-
-  // ===================== 二级：设备通道 =====================
-
-  @Builder
-  GatewayContent() {
-    PlainCard({ caption: '连接信息' }) {
-      this.KvRow('网关地址', this.bridgeUrl.length > 0 ? this.bridgeUrl : '-')
-      this.KvRow('Token', this.bridgeToken.length > 0 ? '已从连接继承' : '未配置')
-      this.KvRow('状态', this.bridgeConnected ? '已连接' : '未连接')
-    }
-
-    PlainCard({ caption: '操作' }) {
-      Row() {
-        Blank()
-        MotionBase({ pressEnabled: true, fillWidth: false }) {
-          Button('刷新设备')
-            .height(34)
-            .fontSize(12)
-            .backgroundColor(Color.Transparent)
-            .border({ width: 1, color: this.palette().btnGhostBorder })
-            .fontColor(this.palette().textSecondary)
-            .onClick(() => {
-              this.refreshDevices();
-            })
-        }
-      }
-      .width('100%')
-
-      Text('设备通道由应用前台生命周期统一管理；切换连接配置后会自动使用新地址和 Token。')
-        .fontSize(11)
-        .fontColor(this.palette().textMuted)
-        .margin({ top: 10 })
-    }
-  }
-
-  // ===================== 二级：接入的设备 =====================
-
-  @Builder
-  OnlineDevicesContent() {
-    if (this.devices.length === 0) {
-      Text('暂无其他设备。电脑 GUI 或 CLI 连接同一网关后会出现在这里。')
-        .fontSize(12)
-        .fontColor(this.palette().textMuted)
-        .padding({ left: 4 })
-        .transition(TransitionEffect.OPACITY.animation({ duration: ANIM_FAST, curve: Curve.EaseOut }))
-    }
-
-    ForEach(this.devices, (dev: DeviceInfo) => {
-      // PlainCard 是自定义组件，transition 不能直接挂在它上面（会生成 __Common__ 包装），
-      // 所以用一个无 padding、满宽的 Column 承载入场动画，布局不受影响。
-      Column() {
-        PlainCard({ caption: '' }) {
-          Row() {
-            Circle({ width: 8, height: 8 })
-              .fill(dev.online ? '#17A964' : '#77809A')
-              .margin({ right: 10 })
-            Column() {
-              Text(dev.name.length > 0 ? dev.name : dev.deviceId)
-                .fontSize(14)
-                .fontColor(this.palette().textPrimary)
-              Text(dev.kind + (dev.authorized ? ' · 已授权' : ' · 未授权'))
-                .fontSize(11)
-                .fontColor(dev.authorized ? '#17A964' : this.palette().textMuted)
-            }
-            .layoutWeight(1)
-            .alignItems(HorizontalAlign.Start)
-
-            Text(dev.caps.length.toString() + ' 能力')
-              .fontSize(10)
-              .fontColor(this.palette().textMuted)
-          }
-          .width('100%')
-        }
-      }
-      .width('100%')
-      .transition(TransitionEffect.OPACITY
-        .combine(TransitionEffect.translate({ y: 12 }))
-        .animation({ duration: ANIM_ENTER, curve: Curve.EaseOut }))
-    }, (dev: DeviceInfo) => dev.deviceId + dev.online.toString())
-  }
-
-  // ===================== 通用 KV 行 =====================
-
-  @Builder
-  KvRow(k: string, v: string) {
-    Row() {
-      Text(k)
-        .fontSize(13)
-        .fontColor(this.palette().textSecondary)
-      Blank()
-      Text(v)
-        .fontSize(13)
-        .fontColor(this.palette().textPrimary)
-        .maxLines(1)
-        .textOverflow({ overflow: TextOverflow.Ellipsis })
-    }
-    .width('100%')
-    .padding({ top: 8, bottom: 8 })
-    .border({ width: { bottom: 1 }, color: this.palette().kvBorder })
   }
 }
 
