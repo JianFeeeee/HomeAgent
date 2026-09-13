@@ -132,11 +132,17 @@ func (a *Agent) SpawnResident(opts ResidentOptions) (ResidentInfo, error) {
 		}
 	}
 
-	// ③ 子的 io：**独立**的 IOManager（自己的输入通道入口），但共享通道登记表。
+	// ③ 子的 io：**独立**的 IOManager（自己的输入通道入口），但共享通道登记表，
+	// 并把父的 io 挂成"上级"——**输出通道（io 里的 Device）由插件登记在父的 io 上**，
+	// 子若不继承这张视图，`output_send__<通道>` 一律被判"通道不存在或不可用"、
+	// `output_list_channels` 为空、连 `output_send__*` 工具都不会生成
+	// （现场联调：父侧通道装载完整、子侧 childIO 空壳）。
+	// 回退是实时的（设备随资源生灭），授权仍由 opts.AllowedOutputs 白名单把关。
 	childIO := agentIO.NewIOManager()
 	if reg := a.io.ChannelRegistry(); reg != nil {
 		childIO.SetChannelRegistry(reg)
 	}
+	childIO.SetParentIO(a.io)
 
 	parentID := string(a.id)
 	child := New(AgentConfig{
