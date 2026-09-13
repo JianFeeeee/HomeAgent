@@ -1,6 +1,6 @@
 # Git 分支管理规范
 
-> 生效：2026-08-31，2026-09-04 修订（三级发布通道 + 单条发布分支），2026-09-06 修订（SDK 仓版本语义与发版联动，见 §七）。
+> 生效：2026-08-31，2026-09-04 修订（三级发布通道 + 单条发布分支），2026-09-06 修订（SDK 仓版本语义与发版联动，见 §七），2026-09-13 修订（发布线路牌随 patch 推进 + 版本号不得固化落库）。
 > 适用：**本仓（TrueAgent/HomeAgent）与 third_party/homeagent-sdk（SDK 仓）**——两仓协作时分支策略必须一致，本规范两仓同用。
 > 核心原则一句话：**main 唯一长命、永远可部署；一切新工作在特性分支；一个中版本一条发布分支，alpha/beta/正式由 tag 区分；hotfix 只进发布分支并 cherry-pick 回 main。**
 
@@ -63,6 +63,11 @@ main ──────────────── E ────────
   同一发布线切成互不相连的碎片，追溯时无法用一条分支看完整条线的演进）。
 - **从 main 的某个可部署点切出**：`git checkout -b release/v1.0.x main`。
 - 切出后**冻结功能**——发布分支上只做：版本号 bump、发布准备、bug 修复、文档。
+- **发布线的 `meta.Version` 必须跟着该线已发的最后一个 patch 走**（`release/v1.1.x` 末态
+  `1.1.1`、`release/v1.2.x` 末态 `1.2.2`、`release/v1.3.x` 末态 `1.3.6`）。
+  ⚠️ **不要只用构建参数（`-ldflags -X ...meta.Version`）打版本号而不改源码**：
+  二进制自称 1.3.4、源码路牌还停在 1.3.0，追溯时对不上账（2026-09-13 真实踩过，
+  1.3.1–1.3.4 四个 patch 都是这么打的，`release/v1.3.x` 的路牌一直没动）。
 - **现网部署永远用发布分支上 tag 的构建产物**，不是 main 头部、更不是 feature。
 
 ### 4. 三级发布通道（alpha / beta / 正式）
@@ -162,35 +167,49 @@ git switch main && git cherry-pick <sha>   # 遵守 §三：只 pick，不 merge
 | 人格卡写死 `v0.9.0（C ABI v2）` | 内核接口/日志报 1.2.0，agent 却向用户自述旧版本（且该机制 v1.0.0 已删除） |
 | 架构文档在 1.2.0 后仍把“描述式索引 + 引用计数 GC”写成现行机制 | 读者按已删除的设计理解现行行为 |
 | README 停在 v1.1.1 并描述已被删除的机制 | 同上 |
+| 人格文本在**播种时**就把 `meta.Version` 插值写进配置库 | 装机那天即冻住版本号：内核 1.3.x 的实例仍向用户自称 `v1.0.3`（2026-09-13 用户当场发现） |
+| 发布线只用 `-ldflags -X` 打版本、源码 `meta.Version` 不动 | 二进制自称 1.3.4、源码路牌仍是 1.3.0，溯源对不上账；同类还有给 SDK 误发 patch tag（§七.1 要求 patch 位恒为 `.0`） |
 
 配套硬约束：**任何“模型或用户会当作事实”的文本，都不得写死版本号**——
-要么用 `meta.Version` 插值，要么要求读运行时快照，并用测试钉住
-（如 `TestDefaultPersonaPromptHasNoVersionLiterals`）。
+要么**在渲染时**用 `meta.Version` 插值（系统提示词占位符 `{{kernel_version}}` 即此机制），
+要么要求读运行时快照，并用测试钉住（如 `TestDefaultPersonaPromptHasNoVersionLiterals`）。
+**"插值"指的是每次组装时现算，不是把算好的结果固化进配置库/文档** ——
+固化过的版本号与写死没有区别，而且更难发现。
 
 ---
 
-## 三、当前分支对齐（2026-09-12 更新）
+## 三、当前分支对齐（2026-09-13 更新）
 
 ### 主仓（TrueAgent）
 
 | 分支 | 状态 | 处理 |
 |---|---|---|
-| `main` | 含全部回流修复；`meta.Version` = 下一个未发布中版本（现为 `1.3.0`） | ✅ 保持 |
-| `release/v1.2.x` | **本条发布线**，`meta.Version` = `1.2.0`，vendored SDK 定版 `1.2.0`；已载入两个发布前修复（GUI 输出目录、知识库同名覆盖） | 🆕 2026-09-12 从 main 切出；**尚无 tag** |
-| `release/v1.1.x` | 承载 `v1.1.0-beta.1` / `v1.1.0` / `v1.1.1` | 📦 已退役（§2.6：下个中版本发布即退役），保留供追溯 |
+| `main` | 含全部回流修复；`meta.Version` = 下一个未发布中版本（现为 **`1.4.0`** —— `1.3.0` 已归发布线所有） | ✅ 保持 |
+| `release/v1.3.x` | **本条发布线**，`meta.Version` = **`1.3.6`**（该线最后一个 patch）；承载 `v1.3.1`…`v1.3.6`；vendored SDK 定版 `1.3.0` | ✅ 保持 |
+| `release/v1.2.x` | 承载 `v1.2.0` / `v1.2.1` / `v1.2.2`，末态 `meta.Version` = `1.2.2` | 📦 已退役（§2.6），保留供追溯 |
+| `release/v1.1.x` | 承载 `v1.1.0-beta.1` / `v1.1.0` / `v1.1.1`，末态 `meta.Version` = `1.1.1` | 📦 已退役，保留供追溯 |
 | `release/v1.0.x` | 承载 1.0.x 全部 tag | 📦 保留 |
-| `feature/multimodal-embedding` | 已合入 main（`eb4762a`，43 提交，`--no-ff`） | ⏳ 待删（删远端分支需用户确认，§执行守则 3） |
 
-> `feature/memory-media`、`feature/plugin-proc-migration` 均已从远端删除（旧表里的待删项已处理）。
+> - `v1.3.0` 是**已撤回**的坏 tag：设备输出通道名 `device/<id>` 里的 `/` 拼进 LLM 函数名
+>   `output_send__device/<id>`，上游按**整条请求** 400，全量对话不可用（修复见 `v1.3.1`）。
+> - `feature/*` 分支（`input-semantics`、`multimodal-embedding`、`memory-media`、`plugin-proc-migration`）
+>   均已合入并删除。
 
 ### SDK 仓（homeagent-sdk）
 
 | 分支 | 状态 | 处理 |
 |---|---|---|
-| `main` | `meta.Version` = 下一个未发布中版本（现为 **`1.2.0`**）——SDK **不跟 beta 发版**（§七.2），1.2.0 要等核心的**正式** tag 才定版（§七.3），在那之前路牌不得越过它。此阶段与核心 main（`1.3.0`）**故意不对称**，详见 §七.4 | ✅ 保持 |
-| `release/v1.1.x` | `meta.Version` = `1.1.0`，承载 tag `v1.1.0` | ✅ 与核心对应 |
-| `release/v1.2.x` | **尚未创建** | ⏳ 随核心**正式** tag 一起建（§七.3：分支上把版本定为 `1.2.0` 再打 `v1.2.0`；beta 阶段不发 SDK） |
+| `main` | `meta.Version` = 下一个未发布中版本（现为 **`1.4.0`**）——`1.3.0` 已随核心**正式** tag 定版（§七.3），故路牌推进 | ✅ 保持 |
+| `release/v1.3.x` | `meta.Version` = `1.3.0`，承载 tag `v1.3.0`（5 平台 `hmapdev` + `SHA256SUMS` + 4 个源码归档） | ✅ 与核心对应 |
+| `release/v1.2.x` | `meta.Version` = `1.2.0`，承载 tag `v1.2.0`；同线的 `v1.2.1` 属**误发的 patch tag**（§七.1 违规），其 gitcode 条目标题已标注「（已撤回）」 | 📦 已退役 |
+| `release/v1.1.x` | `meta.Version` = `1.1.0`，承载 tag `v1.1.0` | ✅ 与核心对应（已退役） |
 | `release/v1.0.0` | 旧 patch 号命名形态，内容已被 main 完全包含 | 📦 保留（供追溯 1.0 线构建） |
+
+> ❗**SDK 仓不发 patch tag**（§七.1）：一个中版本只发一次 `vX.Y.0`。
+> 2026-09-13 曾误发 `v1.3.1`（文档用），**已撤回**（远端 tag 已删，本地 commit `05b7a20` 可恢复）；
+> `v1.2.1` 是同一类历史遗留。
+> ❗**现网 SDK store 例外**：本机 `hmapdev` store 用 `--from` 装的是 SDK 源码构建的 1.3.0，
+> 与 tag 内容一致。
 
 ### 1.0.x 发布线 tag 历史
 
@@ -342,10 +361,42 @@ git branch -d release/v1.0.x                          # tag 已保存历史，�
 1. SDK 仓也有自己的 `release/vX.Y.x`（与核心同名，一个中版本一条）；
 2. 在该分支上把 `meta.Version` 定为 `X.Y.0`；
 3. 打 tag `vX.Y.0`（首次进入该中版本时），并建 gitcode release；
-4. 上传 5 平台 plugindev 产物 + `SHA256SUMS`。
+4. 上传 5 平台 `hmapdev`（插件开发工具链）产物 + `SHA256SUMS`。
 
 同一中版本内的后续核心 patch（1.1.1 → 1.1.2 …）**不重复发 SDK**——SDK 已经是 1.1.0，
 没有新东西要发。只有接口再次变化并进入下一个中版本时，SDK 才发 1.2.0。
+
+### 5. 发版产物清单（可复现）
+
+**推 tag ≠ 完成发版**：还要打包产物、建 gitcode release 条目、上传附件。
+2026-09-13 出现过"tag 推了、release 条目和产物都没有"的情况（`v1.3.1`–`v1.3.6`），
+事后才补 —— 记录在此以免重犯。
+
+**核心仓**（在 tag 的**干净 worktree** 里构建，不要用带其它会话改动的工作区）：
+
+| 产物 | 生成方式 |
+|---|---|
+| `homeagent_<版本>_linux_amd64.tar.gz` | `VERSION=<版本> bash deploy/packaging/package-linux.sh amd64` |
+| `homeagent-client_<版本>_amd64.deb`、`-server`、`-full` | 同上；server/full 需要 Chinese-CLIP 与 ONNX Runtime 资产目录（`build/model-assets/`、`build/runtime-assets/`） |
+| `SHA256SUMS` | **全部产物生成完毕之后**统一计算（边打边算会漏掉后生成的包） |
+| 4 个源码归档（`.zip` / `.tar.gz` / `.tar.bz2` / `.tar`） | gitcode 打 tag 时自动生成，无需上传 |
+
+**SDK 仓**：`VERSION=<版本> bash package/build.sh all hmapdev` ⇒
+`hmapdev_{linux,darwin}_{amd64,arm64}` + `hmapdev_windows_amd64.exe` + `SHA256SUMS`。
+
+**上传**（两仓同一个脚本）：
+
+```bash
+# 核心仓
+python3 deploy/scripts/upload_assets.py <tag> <token>                # 默认上传 dist/release 下可识别的产物
+# SDK 仓（hmapdev_* 没有扩展名，不会被自动识别 ⇒ 必须显式列文件名）
+GITCODE_REPO=JianFeeeee/homeagent-sdk ASSET_DIR=<sdk>/dist/release \
+  python3 deploy/scripts/upload_assets.py <tag> <token> hmapdev_linux_amd64 ...
+```
+
+- 脚本先向 `releases/<tag>/upload_url` 取 **OBS 预签名 URL** 再 PUT ⇒ **release 条目必须先存在**；
+- alpha/beta 的产物可以上传，但必须在 release 条目上勾选**预发布**标志（§2.4）；
+- 校验和必须覆盖**全部**附件，否则等于没有校验。
 
 ### 4. 版本号在两仓 main 上的含义
 
