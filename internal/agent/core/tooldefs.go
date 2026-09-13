@@ -102,7 +102,14 @@ func (a *Agent) buildSystemPrompt(memContext string, userInput string) string {
 	prompt += "- 同步通道（webui / cli / 终端）：直接返回纯文本，内核会把文本交给等待方显示，无需调用工具。\n"
 	prompt += "- 异步通道（qq / wechat / 群聊等）：返回纯文本**【不会】**自动送达用户，必须调用 output_send__{通道名} 工具（注意 meta 里带上正确的 user_id 或 group_id）才能真正把消息发出去。\n"
 	prompt += "- 不确定当前通道的发送方式时，先用 output_send__{通道名}_help 查看该通道的 meta 格式和 type 枚举，再决定。\n"
-	prompt += "- 每轮对话**通常只需调用一次** output_send__{通道名} 即可完成回复。仅在内容确实超过单条消息长度上限（如 >4000 字）时才拆分为多条；拆分时每条应是完整段落，不要碎片化。\n"
+	// ❗这里**不得**限制"一轮只能发一次"。设计上输出是 agent 的**主动调用**：
+	// 收到一次输入后，可以往**任意（已授权的）通道**发**任意多次**（分段播报、
+	// 先回执后结论、同时通知多个通道都合法）。此前这里写着"每轮对话通常只需调用
+	// 一次 output_send"——那是一条**凭空的限制**，会让模型自己收起合理的多次输出。
+	// 真正需要提醒的只有两件事：单条长度上限（超长拆成完整段落）与"别反复重发
+	// 完全相同的内容"（自律，不是判据）。
+	prompt += "- **输出次数与目标通道由你自己决定**：一次输入可以对同一通道发多条（先回执后结论、分步播报、分段长文），也可以同时发到多个通道（例如同时通知 webui 与 qq）。**没有任何「一轮只能发一次」的限制。**\n"
+	prompt += "- 输出时只需注意两点：单条消息的长度上限（超长就拆成完整段落，不要碎片化）；别反复重发**完全相同**的内容（那是浪费，不是限制）。\n"
 	prompt += "- 需要多步执行的长任务：**必须先**向当前对话通道发一条确认消息告诉用户已收到（异步通道用输出门工具，同步通道直接返回文本），**然后再**执行具体排查工具。确认消息不代表任务完成，发出后仍需继续执行实际工具并最终汇报结果。\n"
 	prompt += "- 用户从其他渠道发来「在哪里/怎么样了」这类追问时，先回忆上次任务的通道与上下文，再回同一通道。"
 
@@ -624,7 +631,7 @@ func (a *Agent) buildToolDefs() []interface{} {
 			"type": "function",
 			"function": map[string]interface{}{
 				"name":        "output_send__" + ch.Name,
-				"description": desc + "。能力: " + capStr + "。payload 为消息载荷，meta 为 JSON 发送元数据，type 为载荷类型。用 _help 查看 meta 格式和 type 枚举。",
+				"description": desc + "。能力: " + capStr + "。payload 为消息载荷（type 默认 text，可省略），meta 为 JSON 发送元数据。用 _help 查看 meta 格式与 type 枚举。",
 				"parameters": map[string]interface{}{
 					"type": "object",
 					"properties": map[string]interface{}{
@@ -638,10 +645,10 @@ func (a *Agent) buildToolDefs() []interface{} {
 						},
 						"type": map[string]interface{}{
 							"type":        "string",
-							"description": "载荷类型，用 channel._help 查看支持的枚举值",
+							"description": "载荷类型，默认 text；其它枚举用 channel._help 查看",
 						},
 					},
-					"required": []string{"payload", "type"},
+					"required": []string{"payload"},
 				},
 			},
 		})
