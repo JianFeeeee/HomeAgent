@@ -925,6 +925,19 @@ func (p *Plugin) sessionToolArgsAllowed(name string, args map[string]interface{}
 	if !auth.active || auth.owner {
 		return true, ""
 	}
+	// 输出工具**不受"当前会话"身份限制**（先于身份判据返回）。
+	//
+	// 为什么：输出是 agent 的**主动调用**，发到哪个会话由它自己给的 meta
+	// （group_id / user_id）决定 —— handleChannelOutput 会强制要求该字段存在，
+	// 缺了会得到明确的报错。这里再要求"本轮能精确匹配可信 OneBot 事件"是多余的门，
+	// 而且会把合法发送一起拒掉：现场（被子的中断唤醒的一轮）父带齐 meta 也发不出去，
+	// 报「可信 QQ 会话身份不完整」。
+	// 「只能访问当前会话」这类限制只对**读取类**工具（get_history / mark_read /
+	// get_message）成立 —— 那才是真的不能跨会话读。
+	if name == "output_send__"+p.name {
+		return true, ""
+	}
+
 	currentPeer := auth.userID
 	if auth.isGroup {
 		currentPeer = auth.groupID

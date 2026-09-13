@@ -2,7 +2,7 @@
   "name": "qq",
   "name_zh": "QQ消息",
   "name_en": "qq",
-  "version": "1.4.0",
+  "version": "1.4.1",
   "description": "QQ 消息收发插件，通过 NapCat 协议桥接",
   "author": "HomeAgent",
   "entry": "plugin.so",
