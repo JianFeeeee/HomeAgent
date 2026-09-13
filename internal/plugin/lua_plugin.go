@@ -10,9 +10,9 @@ import (
 	"strings"
 	"sync"
 
+	agentEvents "gitcode.com/JianFeeeee/HomeAgent/internal/events"
 	luaSDK "gitcode.com/JianFeeeee/HomeAgent/internal/lua/sdk"
 	sdk "gitcode.com/JianFeeeee/HomeAgent/internal/sdk"
-	pubsdk "gitcode.com/JianFeeeee/homeagent-sdk/sdk"
 	lua "github.com/yuin/gopher-lua"
 )
 
@@ -42,7 +42,16 @@ type luaPlugin struct {
 	stages    map[sdk.Stage]*stageReg
 	outputChs map[string]*outputChReg
 	inputDefs map[string]sdk.ChannelDef
-	mu        sync.Mutex
+	// subs 是本插件注册的事件订阅取消函数；Stop 时兜底取消，
+	// 避免 L 已 Close 后残留回调被触发（use-after-close）。
+	// 用独立的 subsMu 而非 mu：subscribe 会在 Lua 的 start 回调里被调，
+	// 而 Start 正持着 mu —— 用 mu 就是不可重入的自死锁。
+	subs   []func()
+	subsMu sync.Mutex
+	// closed 在 Stop 里置位（持 mu）；事件回调持 mu 后先查它，
+	// 防止“回调已通过取消订阅检查、但等锁期间 L 被 Close”的竞态。
+	closed bool
+	mu     sync.Mutex
 }
 
 func newLuaPlugin(luaPath, name string) (*luaPlugin, error) {
@@ -791,20 +800,25 @@ func replaceSDKReal(L *lua.LState, t *lua.LTable, plg *luaPlugin, s *sdk.PluginS
 		return pushVal([]interface{}{})
 	}))
 
-	// ---- sdk.events.*（只读事件订阅，与外部插件的 Events() 对齐）----
-	// 回调在内核事件发布 goroutine 上执行，必须只做轻量转发（Lua 单状态 + 互斥锁）；
-	// 阻塞会卡死本插件的全部调用。返回一个取消订阅函数。
+	// ---- sdk.events.*（只读事件订阅）----
+	//
+	// 用内部 SDK 的 Subscribe（内置插件用的是同一条路径）；
+	// 不用公共 SDK 的 Events()——那个 subscriber 在本内核里从未被注入
+	// （SetEventSubscriber 无调用点），拿到的永远是 nil。
+	//
+	// 回调用内核事件发布 goroutine 上执行，必须只做轻量转发（Lua 单状态 + 互斥锁）；
+	// 阻塞会卡死本插件的全部调用。返回一个取消订阅函数，并在 Stop 时兜底取消
+	// （否则插件停掉/重载后 L 已 Close，残留回调再触发就是 use-after-close）。
 	evTbl := subTable("events")
 	evTbl.RawSetString("subscribe", L.NewFunction(func(L *lua.LState) int {
 		eventType := L.CheckString(1)
 		fn := L.CheckFunction(2)
-		sub := s.Events()
-		if sub == nil {
-			return pushErr(fmt.Errorf("events unavailable"))
-		}
-		unsub := sub.Subscribe(pubsdk.EventType(eventType), func(evt *pubsdk.Event) {
+		unsub := s.Subscribe(agentEvents.EventType(eventType), func(evt *agentEvents.Event) {
 			plg.mu.Lock()
 			defer plg.mu.Unlock()
+			if plg.closed {
+				return
+			}
 			L2 := plg.L
 			tbl := L2.NewTable()
 			tbl.RawSetString("type", lua.LString(string(evt.Type)))
@@ -817,8 +831,11 @@ func replaceSDKReal(L *lua.LState, t *lua.LTable, plg *luaPlugin, s *sdk.PluginS
 				fmt.Printf("[lua-plugin/%s] event handler error: %v\n", plg.name, err)
 			}
 		})
+		plg.subsMu.Lock()
+		plg.subs = append(plg.subs, unsub)
+		plg.subsMu.Unlock()
 		L.Push(L.NewFunction(func(L *lua.LState) int {
-			unsub()
+			unsub() // 事件总线的取消订阅是幂等的（重复调用只会匹配不到）
 			return 0
 		}))
 		L.Push(lua.LNil)
@@ -826,18 +843,31 @@ func replaceSDKReal(L *lua.LState, t *lua.LTable, plg *luaPlugin, s *sdk.PluginS
 	}))
 
 	// ---- sdk.plugin_mgr.*（插件管理，与外部插件的 PluginMgrAPI 对齐）----
+	// PluginMgr 可能未装配（如部分单测的 SDK 构造），此时返回"不可用"而不是 panic。
 	pmTbl := subTable("plugin_mgr")
 	pmTbl.RawSetString("reload_one", L.NewFunction(func(L *lua.LState) int {
-		if err := s.PluginMgr().ReloadOne(L.CheckString(1)); err != nil {
+		pm := s.PluginMgr()
+		if pm == nil {
+			return pushErr(fmt.Errorf("plugin manager unavailable"))
+		}
+		if err := pm.ReloadOne(L.CheckString(1)); err != nil {
 			return pushErr(err)
 		}
 		return pushNil()
 	}))
 	pmTbl.RawSetString("list_loaded", L.NewFunction(func(L *lua.LState) int {
-		return pushList(s.PluginMgr().ListLoadedPlugins())
+		pm := s.PluginMgr()
+		if pm == nil {
+			return pushList([]interface{}{})
+		}
+		return pushList(pm.ListLoadedPlugins())
 	}))
 	pmTbl.RawSetString("is_disabled", L.NewFunction(func(L *lua.LState) int {
-		return pushVal(s.PluginMgr().IsPluginDisabled(L.CheckString(1)))
+		pm := s.PluginMgr()
+		if pm == nil {
+			return pushVal(false)
+		}
+		return pushVal(pm.IsPluginDisabled(L.CheckString(1)))
 	}))
 }
 
@@ -1207,8 +1237,21 @@ func (p *luaPlugin) Start(s *sdk.PluginSDK) error {
 }
 
 func (p *luaPlugin) Stop() error {
+	// ① 先取消事件订阅。**不持 p.mu**：Bus.Publish 持总线锁回调 handler，
+	// 而 handler 要 p.mu；若此处持 p.mu 再取总线锁，就是锁序反转死锁。
+	p.subsMu.Lock()
+	subs := p.subs
+	p.subs = nil
+	p.subsMu.Unlock()
+	for _, unsub := range subs {
+		unsub()
+	}
+
+	// ② 置 closed 并关 L。置位在持锁下完成：已进入但等锁的 event 回调
+	// 拿到锁后会先看到 closed 而直接返回，不会碰已关的 L。
 	p.mu.Lock()
 	defer p.mu.Unlock()
+	p.closed = true
 
 	if p.tbl != nil {
 		fn := p.tbl.RawGetString("stop")
