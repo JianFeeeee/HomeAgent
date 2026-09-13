@@ -1,67 +1,8 @@
 import { webSocket } from '@kit.NetworkKit';
 import { CapResult } from './BridgeCaps';
-
-// ===== 协议消息（与 remotedevice 插件对齐）=====
-
-interface HelloDeviceInfo {
-  hostname: string;
-  platform: string;
-  arch: string;
-  os_release: string;
-  version: string;
-  cpus: number;
-}
-
-interface HelloDevice {
-  device_id: string;
-  name: string;
-  kind: string;
-  authorized: boolean;
-  caps: string[];
-  info: HelloDeviceInfo;
-}
-
-interface HelloMessage {
-  op: string;
-  device: HelloDevice;
-}
-
-interface BindMessage {
-  op: string;
-  device_id: string;
-  token: string;
-}
-
-export interface CmdReply {
-  op: string; // 'cmd_result'
-  req_id: string;
-  status: string;
-  output: string;
-  error: string;
-}
-
-interface DataStartMessage {
-  op: string;
-  req_id: string;
-  kind: string;
-  mime: string;
-  total: number;
-  chunk_size: number;
-}
-
-interface DataEndMessage {
-  op: string;
-  req_id: string;
-  status: string;
-  total?: number;
-  error?: string;
-}
-
-const CHUNK_SIZE: number = 8192;
-
-// ===== 命令处理器回调 =====
-// 返回 CapResult；二进制大结果通过 dataHandler 分块回传。
-export type BridgeCmdHandler = (reqId: string, command: string) => Promise<CapResult>;
+import { BridgeCmdHandler, bridgeHelloFrame, bridgeBindFrame, bridgeResultFrame,
+  bridgeDataStartFrame, bridgeDataEndFrame, bridgeEventFrame, bridgeStatusFrame,
+  bridgeChunkSlices } from './BridgeProtocol';
 
 export class DeviceBridgeClient {
   private ws: webSocket.WebSocket = webSocket.createWebSocket();
@@ -247,33 +188,12 @@ export class DeviceBridgeClient {
 
   private sendHello(authorized: boolean): void {
     this.lastAuthorized = authorized;
-    const info: HelloDeviceInfo = {
-      hostname: this.hostname,
-      platform: 'OpenHarmony',
-      arch: '',
-      os_release: '',
-      version: '1.1.1',
-      cpus: 0,
-    };
-    const device: HelloDevice = {
-      device_id: this.deviceId,
-      name: this.name,
-      kind: this.kind,
-      authorized: authorized,
-      caps: this.caps,
-      info: info,
-    };
-    const hello: HelloMessage = { op: 'hello', device: device };
-    this.send(JSON.stringify(hello));
+    this.send(bridgeHelloFrame(this.deviceId, this.name, this.kind, this.caps,
+      this.hostname, authorized));
   }
 
   private sendBind(): void {
-    const bind: BindMessage = {
-      op: 'bind',
-      device_id: this.deviceId,
-      token: this.token,
-    };
-    this.send(JSON.stringify(bind));
+    this.send(bridgeBindFrame(this.deviceId, this.token));
   }
 
   // ===== 命令处理 =====
@@ -334,32 +254,16 @@ export class DeviceBridgeClient {
   }
 
   sendResult(reqId: string, status: string, output: string, errMsg: string): void {
-    const result: CmdReply = {
-      op: 'cmd_result',
-      req_id: reqId,
-      status: status,
-      output: output,
-      error: errMsg,
-    };
-    this.send(JSON.stringify(result));
+    this.send(bridgeResultFrame(reqId, status, output, errMsg));
   }
 
   // ===== 二进制分块回传（协议与 GUI 客户端一致）=====
 
   sendDataChunked(reqId: string, kind: string, mime: string, bytes: Uint8Array): void {
-    const startMsg: DataStartMessage = {
-      op: 'cmd_data_start',
-      req_id: reqId,
-      kind: kind,
-      mime: mime,
-      total: bytes.byteLength,
-      chunk_size: CHUNK_SIZE,
-    };
-    this.send(JSON.stringify(startMsg));
-    for (let off: number = 0; off < bytes.byteLength; off += CHUNK_SIZE) {
-      const end: number = Math.min(off + CHUNK_SIZE, bytes.byteLength);
-      const view: Uint8Array = bytes.slice(off, end);
-      const ab: ArrayBuffer = view.buffer as ArrayBuffer;
+    this.send(bridgeDataStartFrame(reqId, kind, mime, bytes.byteLength));
+    const chunks: Uint8Array[] = bridgeChunkSlices(bytes);
+    for (let i = 0; i < chunks.length; i++) {
+      const ab: ArrayBuffer = chunks[i].buffer as ArrayBuffer;
       try {
         this.ws.send(ab).catch(() => {
           // ignore per-chunk failure; end frame reports error below
@@ -368,32 +272,15 @@ export class DeviceBridgeClient {
         break;
       }
     }
-    const endMsg: DataEndMessage = {
-      op: 'cmd_data_end',
-      req_id: reqId,
-      status: 'ok',
-    };
-    this.send(JSON.stringify(endMsg));
+    this.send(bridgeDataEndFrame(reqId));
   }
 
   sendEvent(eventType: string, detail: string): void {
-    const payload: Record<string, string> = { 'detail': detail };
-    const msg: Record<string, Object> = {
-      'op': 'event',
-      'device_id': this.deviceId,
-      'type': eventType,
-      'payload': payload,
-    };
-    this.send(JSON.stringify(msg));
+    this.send(bridgeEventFrame(this.deviceId, eventType, detail));
   }
 
   sendStatus(status: string): void {
-    const msg: Record<string, Object> = {
-      'op': 'status',
-      'device_id': this.deviceId,
-      'status': status,
-    };
-    this.send(JSON.stringify(msg));
+    this.send(bridgeStatusFrame(this.deviceId, status));
   }
 
   send(text: string): void {
