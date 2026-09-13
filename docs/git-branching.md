@@ -397,6 +397,11 @@ GITCODE_REPO=JianFeeeee/homeagent-sdk ASSET_DIR=<sdk>/dist/release \
 - 脚本先向 `releases/<tag>/upload_url` 取 **OBS 预签名 URL** 再 PUT ⇒ **release 条目必须先存在**；
 - alpha/beta 的产物可以上传，但必须在 release 条目上勾选**预发布**标志（§2.4）；
 - 校验和必须覆盖**全部**附件，否则等于没有校验。
+- ❗**分批上传时，后一轮必须在全量产物上重算 `SHA256SUMS`**，不能只算本轮那几个文件：
+  同名附件会**覆盖**前一轮的校验和（实测：先传 amd64 的 9 个资产，后补 arm64 时
+  只算了 arm64 的 4 个，结果 amd64 的校验和从 release 上消失 ⇒ 已下载的包失去校验依据，
+  只能把产物全部下回来重算）。要么一次打包全部平台再算，要么后一轮把**已上传的**
+  也纳入计算。
 
 ### 4. 版本号在两仓 main 上的含义
 
