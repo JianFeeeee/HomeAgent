@@ -34,6 +34,11 @@ func TestResident_InputchRoutingIsExclusive(t *testing.T) {
 	if got := parent.DumpScheduler().Stats.Enqueued; got != before {
 		t.Fatalf("划给子的 inputch，父不应再入队（before=%d after=%d）", before, got)
 	}
+	// 轮次必须真的涨：此前 info() 根本没填 Rounds ⇒ 父永远读到 0
+	// （现场：子处理表已有 2 条，轮次却显示 0，被误判成"子没干活"）。
+	if got := parent.residents["r-route"].info().Rounds; got <= 0 {
+		t.Fatalf("子处理的轮次应 > 0，实际 %d", got)
+	}
 }
 
 // 归属到一个不存在（或已销毁）的 agent 时**不吞输入**：父兜底处理。

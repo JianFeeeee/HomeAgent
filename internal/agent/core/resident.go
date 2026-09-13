@@ -504,6 +504,13 @@ func (rc *residentChild) info() ResidentInfo {
 		ID: rc.id, State: state, InputChs: append([]string(nil), rc.inputChs...),
 		AllowedOutputs: append([]string(nil), rc.allowed...),
 		ContextFull:    full, CreatedAt: rc.createdAt, TableSize: len(table),
+		// Rounds = 子**已执行的轮次数**（调度器的执行计数，单调不减）。
+		//
+		// 此前这里根本没填这个字段 ⇒ 父看到的永远是 `轮次=0`，与"处理表已有 N 条"
+		// 自相矛盾（现场：子明明处理了两轮，父读到 rounds=0，误判成"子没干活"）。
+		// 注意它**不等于** len(table)：处理表记的是"当前上下文窗口内"的轮次，
+		// 压缩会清空（§8.3），所以窗口内的条数会被重置，而轮次总数不会。
+		Rounds: rc.agent.roundsExecuted(),
 	}
 	if len(table) > 0 {
 		info.Table = table
