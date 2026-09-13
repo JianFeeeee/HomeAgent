@@ -52,7 +52,7 @@ func (m *mockPluginMgr) ReloadPlugins() (string, error) {
 	m.reloadN++
 	return "reloaded", nil
 }
-func (m *mockPluginMgr) ReloadOne(name string) error { return nil }
+func (m *mockPluginMgr) ReloadOne(name string) error     { return nil }
 func (m *mockPluginMgr) StopAndUnload(name string) error { return nil }
 func (m *mockPluginMgr) PluginMetas() map[string]sdk.PluginMeta {
 	return nil
