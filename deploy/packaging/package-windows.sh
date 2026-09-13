@@ -16,8 +16,11 @@
 set -euo pipefail
 
 PROJECT_ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
+# 三个目录都可覆盖：发布件常在 tag 的干净 worktree 里构建，而这个脚本本身
+# 可能只存在于 main（例如刚补的驱动脚本还没进 tag）——那种情况下用主仓的脚本 +
+# DIST_LINUX/BUILD_DIR/DIST_RELEASE 指向 worktree，避免"脚本不存在"或产物错位。
 BUILD_DIR="${BUILD_DIR:-$PROJECT_ROOT/build}"
-DIST_LINUX="$PROJECT_ROOT/dist/linux"
+DIST_LINUX="${DIST_LINUX:-$PROJECT_ROOT/dist/linux}"
 DIST_RELEASE="${DIST_RELEASE:-$PROJECT_ROOT/dist/release}"
 
 VARIANT="${1:-server}"
