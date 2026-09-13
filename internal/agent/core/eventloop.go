@@ -370,6 +370,11 @@ func (a *Agent) pruneOnInput(evt *agentIO.InputEvent, cleanInput string) int {
 	if a.context == nil || !a.pruneDeclared(evt) {
 		return 0
 	}
+	// **动态上下文**是父 agent 专属能力：轻量内核（驻留子）用传统上下文，
+	// 不做按相关度的裁剪与向 doc 记忆的归档（子也没有 doc 记忆）。
+	if a.isLightKernel() {
+		return 0
+	}
 	topK := a.maxContextSize - 1
 	if topK < 1 {
 		topK = 1

@@ -273,7 +273,7 @@ func (a *Agent) rebaseFramePrefix(f *TaskFrame) {
 	budget := ComputeTokenBudget(a.provider, a.systemPrompt)
 	memContext := a.buildMemoryContext(f.Input, budget.MemoryTokens)
 	sysPrompt := a.buildSystemPrompt(memContext, f.Input)
-	prefix := a.buildMessages(sysPrompt, f.Input, budget.ContextTokens)
+	prefix := a.buildMessages(sysPrompt, f.Input, a.contextTokenBudget(budget))
 
 	// 重建会丢掉 prepare 段对尾部消息的两处改写，这里等价地补回。
 	if f.IsInterrupt && len(prefix) > 0 {
@@ -497,7 +497,7 @@ func (a *Agent) stepPrepare(f *TaskFrame) stepOutcome {
 	sysPrompt := a.buildSystemPrompt(memContext, f.Input)
 	f.Tools = a.buildToolDefs()
 
-	f.Msgs = a.buildMessages(sysPrompt, f.Input, budget.ContextTokens)
+	f.Msgs = a.buildMessages(sysPrompt, f.Input, a.contextTokenBudget(budget))
 	// 工具提醒（interrupt）：以 system 角色注入，不让模型误认为用户发言
 	if a.interruptInput {
 		last := f.Msgs[len(f.Msgs)-1]
