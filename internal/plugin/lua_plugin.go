@@ -226,7 +226,92 @@ func replaceSDKStubs(L *lua.LState, t *lua.LTable, plg *luaPlugin) {
 
 // replaceSDKReal 用真实 SDK 实现替换 sdk 表。
 // 此时 plg.handlers/stages 已存有加载期间注册的 handler。
+// luaSyncUnavailable 是同步注入（文本/媒体）在 Lua 里的统一应答：立即返回明确错误。
+//
+// 为何不可用：Lua 代码只在 Start / 工具 / 阶段 / 输出通道 / 事件回调里执行，
+// 这些路径都持有 plg.mu；而 InjectInputSync 要等本轮回复，本轮回复的处理
+// （以及回复路径上的阶段/工具回调）又需要同一把锁 ⇒ 必然自锁。
+// 与其让插件挂死到超时，不如明确报错：需要同步等待请改用 Go 插件。
+func luaSyncUnavailable(L *lua.LState) int {
+	L.Push(lua.LNil)
+	L.Push(lua.LString("同步注入在 Lua 插件中不可用：它要等本轮回复，而本轮正持有插件锁 ⇒ 必然自锁。请在事件回调/外部入口用 inject_text / inject_interrupt 异步投递；确需同步等待请改用 Go 插件。"))
+	return 2
+}
+
+// luaReg 承载一次 replaceSDKReal 的注册上下文。
+//
+// 抽它出来是为了把原来 600+ 行的单函数按 SDK 子表拆开：各子表注册函数
+// 共享同一组 push/取表助手，且把 L/t/s/plg 作为局部别名注入，使被移动的
+// 代码体可以逐字保留（零改写 = 零行为漂移）。
+type luaReg struct {
+	L   *lua.LState
+	t   *lua.LTable
+	plg *luaPlugin
+	s   *sdk.PluginSDK
+}
+
+func (c *luaReg) subTable(name string) *lua.LTable {
+	if v := c.t.RawGetString(name); v != nil {
+		if st, ok := v.(*lua.LTable); ok {
+			return st
+		}
+	}
+	st := c.L.NewTable()
+	c.t.RawSetString(name, st)
+	return st
+}
+
+func (c *luaReg) pushVal(val interface{}) int {
+	c.L.Push(jsonToLuaValue(c.L, val))
+	c.L.Push(lua.LNil)
+	return 2
+}
+
+// pushList 归一化 nil/空 切片与 map 为 Lua 空表。
+func (c *luaReg) pushList(val interface{}) int {
+	if val == nil {
+		return c.pushVal([]interface{}{})
+	}
+	v := reflect.ValueOf(val)
+	switch v.Kind() {
+	case reflect.Slice, reflect.Array, reflect.Map:
+		if v.Len() == 0 {
+			return c.pushVal([]interface{}{})
+		}
+	}
+	return c.pushVal(val)
+}
+
+func (c *luaReg) pushErr(err error) int {
+	c.L.Push(lua.LNil)
+	c.L.Push(lua.LString(err.Error()))
+	return 2
+}
+
+func (c *luaReg) pushNil() int {
+	c.L.Push(lua.LNil)
+	c.L.Push(lua.LNil)
+	return 2
+}
+
+// replaceSDKReal 用真实 SDK 实现替换 sdk 表。
+// 此时 plg 已存有加载期注册的 handler。本函数只做分发，各子表见 register*。
 func replaceSDKReal(L *lua.LState, t *lua.LTable, plg *luaPlugin, s *sdk.PluginSDK) {
+	c := &luaReg{L: L, t: t, plg: plg, s: s}
+	c.registerRegistrars()
+	c.registerInjectors()
+	c.registerDataAPIs()
+	c.registerSettings()
+	c.registerEventsAndMgr()
+}
+
+// registerRegistrars 注册工具/阶段/API/输入输出通道与基础配置读写。
+func (c *luaReg) registerRegistrars() {
+	L, t, s, plg := c.L, c.t, c.s, c.plg
+	_, _, _, _ = L, t, s, plg
+	subTable, pushVal, pushList, pushErr, pushNil := c.subTable, c.pushVal, c.pushList, c.pushErr, c.pushNil
+	_, _, _, _, _ = subTable, pushVal, pushList, pushErr, pushNil
+
 	t.RawSetString("register_tool", L.NewFunction(func(L *lua.LState) int {
 		toolName := L.CheckString(1)
 		defTbl := L.CheckTable(2)
@@ -298,17 +383,7 @@ func replaceSDKReal(L *lua.LState, t *lua.LTable, plg *luaPlugin, s *sdk.PluginS
 		return 0
 	}))
 
-	// 同步注入（文本/媒体）在 Lua 中**不可用**：Lua 代码只在 Start / 工具 /
-	// 阶段 / 输出通道 / 事件回调里执行，这些路径都持有 plg.mu；而 InjectInputSync
-	// 要等本轮回复，本轮回复的处理（以及回复路径上的阶段/工具回调）又需要同一把
-	// 锁 ⇒ 必然自锁。返回明确错误，而不是让插件在 30 分钟后超时。
-	// 需要同步等待的场景请改用 Go 插件（可在自己的 goroutine 里调），
-	// 或用 inject_text / inject_interrupt 异步投递。
-	luaSyncUnavailable := func(L *lua.LState) int {
-		L.Push(lua.LNil)
-		L.Push(lua.LString("同步注入在 Lua 插件中不可用：它要等本轮回复，而本轮正持有插件锁 ⇒ 必然自锁。请在事件回调/外部入口用 inject_text / inject_interrupt 异步投递；确需同步等待请改用 Go 插件。"))
-		return 2
-	}
+	// 同步注入（文本/媒体）在 Lua 中**不可用**，统一返回明确错误：见 luaSyncUnavailable。
 
 	t.RawSetString("inject_text", L.NewFunction(func(L *lua.LState) int {
 		s.InjectText(L.CheckString(1), L.CheckString(2), L.CheckString(3))
@@ -322,6 +397,15 @@ func replaceSDKReal(L *lua.LState, t *lua.LTable, plg *luaPlugin, s *sdk.PluginS
 		s.InjectTextNoMemory(L.CheckString(1), L.CheckString(2), L.CheckString(3))
 		return 0
 	}))
+
+}
+
+// registerInjectors 注册全部注入接口（文本/中断/媒体/标志位）与通道注销。
+func (c *luaReg) registerInjectors() {
+	L, t, s, plg := c.L, c.t, c.s, c.plg
+	_, _, _, _ = L, t, s, plg
+	subTable, pushVal, pushList, pushErr, pushNil := c.subTable, c.pushVal, c.pushList, c.pushErr, c.pushNil
+	_, _, _, _, _ = subTable, pushVal, pushList, pushErr, pushNil
 
 	// ---- 1.2.0 注入标志位（no_memory / context_policy / cleaner_name / priority）----
 	t.RawSetString("inject_text_opts", L.NewFunction(func(L *lua.LState) int {
@@ -374,48 +458,14 @@ func replaceSDKReal(L *lua.LState, t *lua.LTable, plg *luaPlugin, s *sdk.PluginS
 		return 2
 	}))
 
-	// ---- 数据类 API（与 C ABI 外部插件面完全对齐）----
-	// 约定：结果型返回 (result, err)，void 型返回 (nil, err)，成功时 err 为 nil。
+}
 
-	subTable := func(name string) *lua.LTable {
-		if v := t.RawGetString(name); v != nil {
-			if st, ok := v.(*lua.LTable); ok {
-				return st
-			}
-		}
-		st := L.NewTable()
-		t.RawSetString(name, st)
-		return st
-	}
-	pushVal := func(val interface{}) int {
-		L.Push(jsonToLuaValue(L, val))
-		L.Push(lua.LNil)
-		return 2
-	}
-	// pushList 归一化 nil/空 切片与 map 为 Lua 空表。
-	pushList := func(val interface{}) int {
-		if val == nil {
-			return pushVal([]interface{}{})
-		}
-		v := reflect.ValueOf(val)
-		switch v.Kind() {
-		case reflect.Slice, reflect.Array, reflect.Map:
-			if v.Len() == 0 {
-				return pushVal([]interface{}{})
-			}
-		}
-		return pushVal(val)
-	}
-	pushErr := func(err error) int {
-		L.Push(lua.LNil)
-		L.Push(lua.LString(err.Error()))
-		return 2
-	}
-	pushNil := func() int {
-		L.Push(lua.LNil)
-		L.Push(lua.LNil)
-		return 2
-	}
+// registerDataAPIs 注册 memory/doc/knowledge/text_memory/llm/social 与 set_auto_restart。
+func (c *luaReg) registerDataAPIs() {
+	L, t, s, plg := c.L, c.t, c.s, c.plg
+	_, _, _, _ = L, t, s, plg
+	subTable, pushVal, pushList, pushErr, pushNil := c.subTable, c.pushVal, c.pushList, c.pushErr, c.pushNil
+	_, _, _, _, _ = subTable, pushVal, pushList, pushErr, pushNil
 
 	// sdk.set_auto_restart(enabled)
 	t.RawSetString("set_auto_restart", L.NewFunction(func(L *lua.LState) int {
@@ -675,6 +725,15 @@ func replaceSDKReal(L *lua.LState, t *lua.LTable, plg *luaPlugin, s *sdk.PluginS
 		return pushVal([]interface{}{})
 	}))
 
+}
+
+// registerSettings 注册 sdk.settings.*（作用域变体与配置项定义）。
+func (c *luaReg) registerSettings() {
+	L, t, s, plg := c.L, c.t, c.s, c.plg
+	_, _, _, _ = L, t, s, plg
+	subTable, pushVal, pushList, pushErr, pushNil := c.subTable, c.pushVal, c.pushList, c.pushErr, c.pushNil
+	_, _, _, _, _ = subTable, pushVal, pushList, pushErr, pushNil
+
 	// ---- sdk.settings.* (作用域变体，对齐 CORE_SETTINGS_*) ----
 	settTbl := subTable("settings")
 	settTbl.RawSetString("get_core", L.NewFunction(func(L *lua.LState) int {
@@ -788,6 +847,15 @@ func replaceSDKReal(L *lua.LState, t *lua.LTable, plg *luaPlugin, s *sdk.PluginS
 		}
 		return pushVal([]interface{}{})
 	}))
+
+}
+
+// registerEventsAndMgr 注册事件订阅与插件管理面。
+func (c *luaReg) registerEventsAndMgr() {
+	L, t, s, plg := c.L, c.t, c.s, c.plg
+	_, _, _, _ = L, t, s, plg
+	subTable, pushVal, pushList, pushErr, pushNil := c.subTable, c.pushVal, c.pushList, c.pushErr, c.pushNil
+	_, _, _, _, _ = subTable, pushVal, pushList, pushErr, pushNil
 
 	// ---- sdk.events.*（只读事件订阅）----
 	//
