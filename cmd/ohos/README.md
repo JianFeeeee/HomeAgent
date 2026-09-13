@@ -74,6 +74,14 @@ HomeAgent/
 约定：**单个 `.ets` 不超过 400 行**，页面只做页面壳（导航栈 + 数据编排），
 可复用结构进 `components/`，无 UI 的逻辑进 `common/`。
 
+这条约定有一个边界，别用反了：
+
+> **不到 400 行的文件不要为了拆分而拆分。** `@Component` 的 `build()` 只允许一个根节点，
+> 把原来多节点的 `@Builder` 改成组件时会多出一层 `Column` 包裹 —— 布局等价是**推理**出来的、
+> 不是看出来的，每拆一次都要付一次"未上机验证"的账。所以拆分只用来解决真实的可读性/维护性
+> 问题（超长文件、职责混杂），而不是凑行数。`pages/Index.ets` 目前 396 行就属于"不动"的一类：
+> 没越线，余量本身也是有用的缓冲；等它真越线了再拆，并且优先看是不是又长出了大 `@Builder`。
+
 ## 编译
 
 需要 DevEco Studio 或 [command-line-tools](https://developer.huawei.com/consumer/cn/deveco-studio/)。
@@ -111,11 +119,16 @@ HomeAgent/
 
    产物在 `entry/build/default/outputs/default/entry-default-signed.hap`。
 
-3. **安装到设备**：
+3. **安装到设备**（`entry/build/` 是纯构建产物、不入库，所以**必须先跑完第 2 步**，
+   否则下面这个路径不存在）：
 
    ```bash
    hdc install entry/build/default/outputs/default/entry-default-signed.hap
    ```
+
+   路径里的目录名随构建模式而变：默认是 `default/`，若用 `-p product=<名字>` 则是该产品名。
+   拿不准就先 `find entry/build -name '*.hap'` 找一下。同目录还有 `entry-default-unsigned.hap`，
+   `hdc install` 要用带 `-signed` 的那个。
 
 ## 连接 homed
 
