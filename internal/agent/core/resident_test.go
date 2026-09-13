@@ -5,11 +5,13 @@ package core
 // 设计 docs/zh/resident-subagent-design.md §6/§7/§8/§9/§10。
 
 import (
+	"context"
 	"fmt"
 	"os"
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -376,4 +378,97 @@ func TestResident_E2EAndStress(t *testing.T) {
 	}
 	t.Logf("压力通过：%d 个驻留子 × %d 轮（父→子 L4 与普通输入各半）+ 双向汇报",
 		nResidents, roundsEach)
+}
+
+// ---- 传统上下文：轻量内核不做动态上下文的裁剪 ----
+
+// captureProvider 记录模型**实际收到**的消息。
+//
+// 为什么不直接看 TaskFrame：`prepareInputTask` 只做前半段（去重/通道/阶段/落上下文），
+// 消息是在 `runTaskSteps` 的 stepPrepare 里才拼出来的；而且断言"模型看到了什么"
+// 本来就比断言内核内部字段更接近事实。
+type captureProvider struct {
+	countingProvider
+	mu       sync.Mutex
+	calls    int
+	messages []agentAPI.Message
+}
+
+func (p *captureProvider) Chat(ctx context.Context, req *agentAPI.CompletionRequest) (*agentAPI.CompletionResponse, error) {
+	p.mu.Lock()
+	p.calls++
+	if req != nil {
+		p.messages = append([]agentAPI.Message(nil), req.Messages...)
+	}
+	p.mu.Unlock()
+	return &agentAPI.CompletionResponse{Content: "ok"}, nil
+}
+
+func (p *captureProvider) chatText() (int, string) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	var b strings.Builder
+	for _, m := range p.messages {
+		b.WriteString(m.Content)
+		b.WriteString("\n")
+	}
+	return p.calls, b.String()
+}
+
+// 子 agent 的上下文是**传统上下文**：累积的事件全部交给模型，
+// 内核**不得**按动态上下文的预算静默丢弃（那是父 agent 的能力）。
+// 装不下时由 contextfull 上报父决策，而不是自己丢。
+func TestLightKernel_TraditionalContextNoTrimming(t *testing.T) {
+	provider := &captureProvider{}
+	parent, _, dir := newRootWith(t, provider)
+	spawnTestResident(t, parent, dir, "child-1")
+	child := parent.residents["child-1"].agent
+
+	if !child.isLightKernel() {
+		t.Fatal("驻留子必须被识别为轻量内核")
+	}
+
+	// 前提：动态上下文的份额 < 窗口（否则测不出区别）。
+	b := ComputeTokenBudget(child.provider, child.systemPrompt)
+	if b.MaxContext <= b.ContextTokens {
+		t.Fatalf("前提不成立：窗口(%d) 应大于动态上下文份额(%d)", b.MaxContext, b.ContextTokens)
+	}
+	// 填充量：**超过动态份额、但仍在窗口内**。
+	// ⇒ 完整内核会因预算把最早那条裁掉；轻量内核不该裁（只受窗口硬上限约束）。
+	filler := strings.Repeat("填", b.ContextTokens/2+200)
+	if EstimateTokens(filler) <= b.ContextTokens {
+		t.Fatalf("测试前提不成立：填充(%d token) 应超过动态份额(%d)", EstimateTokens(filler), b.ContextTokens)
+	}
+	child.context.Append(ContextEvent{Timestamp: time.Now(), Source: "sub/in", Input: "最早的事件标记EARLY"})
+	child.context.Append(ContextEvent{Timestamp: time.Now(), Source: "sub/in", Input: filler})
+	child.context.Append(ContextEvent{Timestamp: time.Now(), Source: "sub/in", Input: "最新的事件标记LATE"})
+
+	child.io.InjectInput("sub/in", "text", map[string]interface{}{"content": "本轮输入"})
+
+	waitFor(t, "子发出 LLM 请求", func() bool {
+		n, _ := provider.chatText()
+		return n >= 1
+	})
+	_, got := provider.chatText()
+	if !strings.Contains(got, "最早的事件标记EARLY") {
+		t.Fatalf("传统上下文：更早的事件不得被预算裁掉（属于父 agent 的动态上下文能力）；实收消息长度=%d", len(got))
+	}
+	if !strings.Contains(got, "最新的事件标记LATE") {
+		t.Fatal("最新事件必须在内")
+	}
+}
+
+// 对照：完整内核（根 agent）仍走动态上下文（按预算裁时间线）。
+func TestFullKernel_StillUsesDynamicContext(t *testing.T) {
+	parent, _, _ := newRootForResidents(t)
+	if parent.isLightKernel() {
+		t.Fatal("根 agent 不是轻量内核")
+	}
+	b := ComputeTokenBudget(parent.provider, "sys")
+	if got := parent.contextTokenBudget(b); got != b.ContextTokens {
+		t.Fatalf("完整内核应使用动态上下文的 ContextTokens(%d)，实际 %d", b.ContextTokens, got)
+	}
+	if b.MaxContext <= b.ContextTokens {
+		t.Fatalf("前提不成立：窗口(%d) 应大于动态上下文份额(%d)", b.MaxContext, b.ContextTokens)
+	}
 }
