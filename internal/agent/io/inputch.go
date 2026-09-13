@@ -102,10 +102,20 @@ func (r *ChannelRegistry) Register(ch InputChannel) error {
 }
 
 // Unregister 注销一个 inputch。
+//
+// 同时清理指向它的输出目标登记（outputTargets）：否则通道被注销后，
+// ResolveOutputTarget 仍会把它解析成一个已不存在的 inputch。
+// 两种指向都要清：显式绑定到该 inputch 的，以及“回退到同名通道”的
+// （InputCh == "" 表示与输出通道同名）。
 func (r *ChannelRegistry) Unregister(name string) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	delete(r.channels, name)
+	for out, t := range r.outputTargets {
+		if t.InputCh == name || (t.InputCh == "" && out == name) {
+			delete(r.outputTargets, out)
+		}
+	}
 }
 
 // Lookup 查询一个 inputch。
@@ -173,6 +183,18 @@ func (r *ChannelRegistry) BindOutputTarget(output, agentID, inputCh string) erro
 	}
 	r.outputTargets[output] = OutputTarget{AgentID: agentID, InputCh: inputCh}
 	return nil
+}
+
+// UnbindOutputTarget 取消一个输出通道的目标登记。
+//
+// 与 BindOutputTarget 成对：输出通道可能是**随资源生灭**的（如远程设备
+// 一台设备一个通道），设备掉线后必须解绑，否则 ResolveOutputTarget 会一直
+// 把消息路由到一个已不存在的 agent/inputch 上——与 inputch 登记泄漏同一类问题。
+// 未登记时是 no-op（幂等），方便清理路径无脑调用。
+func (r *ChannelRegistry) UnbindOutputTarget(output string) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	delete(r.outputTargets, output)
 }
 
 // ResolveOutputTarget 解析一个输出通道的目标；未登记时 ok=false
