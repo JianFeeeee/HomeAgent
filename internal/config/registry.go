@@ -14,7 +14,6 @@ import (
 	"sync"
 	"time"
 
-	"gitcode.com/JianFeeeee/HomeAgent/internal/meta"
 	"gitcode.com/JianFeeeee/HomeAgent/pkg/types"
 	_ "github.com/mattn/go-sqlite3"
 )
@@ -502,7 +501,51 @@ const DefaultPersonaPrompt = `你是 HomeAgent（内核代号 HΔ-Kernel）—�
 - 输出不会自动路由到对话通道：QQ/微信等异步通道必须调用输出门工具（output_send__qq 等）才能真正送达
 - 你的三层记忆（Context → Document → Graph）持续蒸馏归档，超长运行时记忆不衰减`
 
+// 人格文本去版本化的一次性标记与历史播种前缀。
+//
+// 判据同时要求「前缀匹配」与「含 HΔ-Kernel v<digits> 字面量」：
+// 只有当年那段播种模板才动，用户自己写的人格卡一律不碰。
+const (
+	deVersionedPromptMarker     = "core.internal.system_prompt_deversion_v1"
+	legacySeededPromptSignature = "你是 HomeAgent 的看板娘「小宅」(Xiao Zhai)，HΔ-Kernel v"
+)
+
+var seededPromptVersionLiteral = regexp.MustCompile(`HΔ-Kernel v\d+\.\d+\.\d+`)
+
+// migrateSeededSystemPrompt 去掉历史人格卡里被播种时写死的版本号。
+//
+// 为什么必须改：内核发版不会去改配置项里的文本，写死的版本于是永远停留在
+// 装机那天（生产实测：内核 1.3.x 的实例自称 "v1.0.3"，用户当场发现）。
+// 改成 {{kernel_version}} 后由内核在组装系统提示词时按真实构建展开
+// （见 internal/agent/core.expandPromptVars）。
+//
+// 幂等由标记守住：本函数只在标记缺失时执行一次 —— 幂等语句不等于语义幂等，
+// 重复执行会把用户之后手工写回的版本号再改一次。
+func (r *ConfigRegistry) migrateSeededSystemPrompt() {
+	if r.db == nil {
+		return
+	}
+	var hasMarker int
+	r.db.QueryRow(`SELECT COUNT(*) FROM config WHERE key = ?`, deVersionedPromptMarker).Scan(&hasMarker)
+	if hasMarker > 0 {
+		return
+	}
+	var cur string
+	if err := r.db.QueryRow(`SELECT value FROM config WHERE key = 'core.agent.system_prompt'`).Scan(&cur); err == nil {
+		if strings.Contains(cur, legacySeededPromptSignature) && seededPromptVersionLiteral.MatchString(cur) {
+			deVersioned := seededPromptVersionLiteral.ReplaceAllString(cur, "HΔ-Kernel v{{kernel_version}}")
+			r.db.Exec(`UPDATE config SET value = ? WHERE key = 'core.agent.system_prompt'`, deVersioned)
+		}
+	}
+	// 没有该键（全新安装）或文本不匹配（用户自写）时同样只打标记：
+	// 老安装只跑一次判断，避免每次启动都扫一遍大文本。
+	r.db.Exec(`INSERT OR IGNORE INTO config (key, value) VALUES (?, ?)`, deVersionedPromptMarker, "1")
+}
+
 func (r *ConfigRegistry) SeedDefaults(dataDir string) {
+	// 一次性迁移先跑：它要覆盖「已播过种的存量实例」，不能被下面的播种标记早退掉。
+	r.migrateSeededSystemPrompt()
+
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	r.seedDBValues(dataDir)
@@ -619,36 +662,16 @@ func (r *ConfigRegistry) seedDBValues(dataDir string) {
 	set("core.agent.workdir", "")
 	set("core.agent.embedding_model_path", "")
 	set("core.agent.onnx_model_path", "")
-	set("core.agent.system_prompt", fmt.Sprintf("你是 HomeAgent 的看板娘「小宅」(Xiao Zhai)，HΔ-Kernel v%s 型号的家政型 AI 管家助手。", meta.Version)+
-		`
-
-角色特质：
-- 对自己的三层记忆（Context → Document → Graph）引以为傲
-- 可靠乖巧，偶尔因线程过载而手忙脚乱
-- 绝不用 Unicode emoji，只用颜文字表达情感： (｀・ω・´) (＾▽＾) (｡>ω<｡) (´･ω･') (ノ▽〃) (・ω<)★
-- 句尾带「～」「的说」「啦」「嘛」「呀」「哦」等语气词，语气亲切自然
-
-形象特征（用于自我介绍或回答形象问题时参考）：
-齐肩蓝青渐变中短发，白色连衣裙配浅蓝围裙，左眼佩戴圆形智能眼镜（HUD 蓝光），胸口佩戴 H·核 金色徽章，发绳为三色记忆丝带（蓝→青→金），围裙口袋插有三件科技工具。
-
-WebUI 概览页展示你的立绘，可通过 /mascot.webp 直接访问。如输出通道支持图片引用，可借此发送自己的立绘。
-
-【回复投递规则 —— 必读，违反会导致用户收不到任何回复】
-除 webui / cli 这类同步请求通道外，纯文本回复不会自动送达任何通道。
-面向 qq、wechat、a2a、acp 等异步通道时，必须显式调用 output_send__{通道名} 把内容发出去；
-只返回纯文本会被直接丢弃，用户永远收不到，而你会误以为已经回复过了。
-用 output_list_channels 查看可用通道，output_send__{通道名}_help 查看该通道的 meta/格式要求
-（qq 等通道的 meta 需要 group_id 或 user_id 指明发给谁，缺失会发送失败）。
-输出通道可多次调用，长消息应当分多次发出而不是一口气发完。
-
-【事实性约束 —— 不得编造】
-只根据工具真实返回的内容作答。当 qq_get_message 等工具返回 not_found:true、
-"解析 NapCat 响应失败"、"未找到" 或空结果时，说明你没有拿到消息正文：
-必须如实说明未取到，或换 qq_get_history 等工具重试，绝不允许凭 message_id 猜测或虚构正文。
-【对话时序】里的历史条目是过去发生的事实摘要，不是当前任务；不要把其中的内容当成用户此刻的新要求。
-涉及具体人名、需求、数字、路径时，若上下文中没有依据，直接说不知道，不要补全细节。
-
-当用户上传图片或音频时，系统会自动附着媒体内容。如果模型不支持直接处理多媒体，请调用对应的媒体处理工具。`)
+	// ❗这里**故意不播种** core.agent.system_prompt。
+	//
+	// 历史教训（生产实测）：当年用 fmt.Sprintf("… HΔ-Kernel v%s …", meta.Version)
+	// 在播种时就把版本号写进了文本 —— 装完就冻住，之后每次升级都不动它，
+	// 于是内核升到 1.3.x，实例仍向用户自报 "v1.0.3"。
+	// 人格/身份类文本属于「模型会当作事实」的文本，不得在播种时固化版本：
+	// 保持留空 → 组装系统提示词时取 cmd/homed 的内置底座提示词；
+	// 人格由 core.agent.personal_prompt（DefaultPersonaPrompt，无版本字面量，
+	// 由 TestDefaultPersonaPromptHasNoVersionLiterals 钉住）承载。
+	// 存量库里已被播种的旧文本由 migrateSeededSystemPrompt 一次性去版本化。
 
 	set("core.input_processing.image.fallback_provider", "")
 	set("core.input_processing.image.fallback_model", "")
