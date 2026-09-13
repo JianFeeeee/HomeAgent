@@ -1,6 +1,7 @@
 package plugin
 
 import (
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -9,9 +10,10 @@ import (
 	"strings"
 	"sync"
 
-	lua "github.com/yuin/gopher-lua"
 	luaSDK "gitcode.com/JianFeeeee/HomeAgent/internal/lua/sdk"
 	sdk "gitcode.com/JianFeeeee/HomeAgent/internal/sdk"
+	pubsdk "gitcode.com/JianFeeeee/homeagent-sdk/sdk"
+	lua "github.com/yuin/gopher-lua"
 )
 
 type toolReg struct {
@@ -287,6 +289,19 @@ func replaceSDKReal(L *lua.LState, t *lua.LTable, plg *luaPlugin, s *sdk.PluginS
 		return 0
 	}))
 
+	// pushReply 统一同步注入的返回约定：非空回复返回 (reply, nil)，
+	// 无回复返回 (nil, nil)，与数据类 API 的 (result, err) 约定一致。
+	pushReply := func(reply string) int {
+		if reply == "" {
+			L.Push(lua.LNil)
+			L.Push(lua.LNil)
+			return 2
+		}
+		L.Push(lua.LString(reply))
+		L.Push(lua.LNil)
+		return 2
+	}
+
 	t.RawSetString("inject_text", L.NewFunction(func(L *lua.LState) int {
 		s.InjectText(L.CheckString(1), L.CheckString(2), L.CheckString(3))
 		return 0
@@ -298,6 +313,67 @@ func replaceSDKReal(L *lua.LState, t *lua.LTable, plg *luaPlugin, s *sdk.PluginS
 	t.RawSetString("inject_text_no_memory", L.NewFunction(func(L *lua.LState) int {
 		s.InjectTextNoMemory(L.CheckString(1), L.CheckString(2), L.CheckString(3))
 		return 0
+	}))
+
+	// ---- 1.2.0 注入标志位（no_memory / context_policy / cleaner_name / priority）----
+	t.RawSetString("inject_text_opts", L.NewFunction(func(L *lua.LState) int {
+		s.InjectTextOpts(L.CheckString(1), L.CheckString(2), L.CheckString(3), parseInjectOptions(L, 4))
+		return 0
+	}))
+	t.RawSetString("inject_interrupt_opts", L.NewFunction(func(L *lua.LState) int {
+		s.InjectInterruptTextOpts(L.CheckString(1), L.CheckString(2), L.CheckString(3), parseInjectOptions(L, 4))
+		return 0
+	}))
+
+	// ---- 同步注入：注入后等待本轮回复，返回 (reply, err) ----
+	// 注意：内置 SDK 的同名 InjectInputSync 是 (eventType, payload) 形态并遮蔽了
+	// 公共 SDK 的三参文本版本，故这里显式走 PluginSDK 的公共方法。
+	t.RawSetString("inject_input_sync", L.NewFunction(func(L *lua.LState) int {
+		return pushReply(s.PluginSDK.InjectInputSync(L.CheckString(1), L.CheckString(2), L.CheckString(3)))
+	}))
+	t.RawSetString("inject_input_sync_opts", L.NewFunction(func(L *lua.LState) int {
+		return pushReply(s.InjectInputSyncOpts(L.CheckString(1), L.CheckString(2), L.CheckString(3), parseInjectOptions(L, 4)))
+	}))
+
+	// ---- 多模态注入（1.1.0）：内容块随下一次 LLM 请求送达 ----
+	t.RawSetString("set_tool_blocks", L.NewFunction(func(L *lua.LState) int {
+		s.SetToolBlocks(luaToContentBlocks(L, 1))
+		return 0
+	}))
+	t.RawSetString("inject_input_media", L.NewFunction(func(L *lua.LState) int {
+		s.InjectInputMedia(L.CheckString(1), L.CheckString(2), L.CheckString(3), luaToContentBlocks(L, 4))
+		return 0
+	}))
+	t.RawSetString("inject_input_media_opts", L.NewFunction(func(L *lua.LState) int {
+		s.InjectInputMediaOpts(L.CheckString(1), L.CheckString(2), L.CheckString(3), luaToContentBlocks(L, 4), parseInjectOptions(L, 5))
+		return 0
+	}))
+	t.RawSetString("inject_input_media_sync", L.NewFunction(func(L *lua.LState) int {
+		return pushReply(s.InjectInputMediaSync(L.CheckString(1), L.CheckString(2), L.CheckString(3), luaToContentBlocks(L, 4)))
+	}))
+	t.RawSetString("inject_input_media_sync_opts", L.NewFunction(func(L *lua.LState) int {
+		return pushReply(s.InjectInputMediaSyncOpts(L.CheckString(1), L.CheckString(2), L.CheckString(3), luaToContentBlocks(L, 4), parseInjectOptions(L, 5)))
+	}))
+	t.RawSetString("inject_interrupt_media", L.NewFunction(func(L *lua.LState) int {
+		s.InjectInterruptMedia(L.CheckString(1), L.CheckString(2), L.CheckString(3), luaToContentBlocks(L, 4))
+		return 0
+	}))
+	t.RawSetString("inject_interrupt_media_opts", L.NewFunction(func(L *lua.LState) int {
+		s.InjectInterruptMediaOpts(L.CheckString(1), L.CheckString(2), L.CheckString(3), luaToContentBlocks(L, 4), parseInjectOptions(L, 5))
+		return 0
+	}))
+
+	// ---- 1.3.0 动态输出通道注销：随资源生灭的通道（如远程设备）必须能注销，
+	// 否则 output_list_channels 会一直列着死通道骗模型。 ----
+	t.RawSetString("unregister_output_channel", L.NewFunction(func(L *lua.LState) int {
+		if err := s.UnregisterOutputChannel(L.CheckString(1)); err != nil {
+			L.Push(lua.LNil)
+			L.Push(lua.LString(err.Error()))
+			return 2
+		}
+		L.Push(lua.LNil)
+		L.Push(lua.LNil)
+		return 2
 	}))
 
 	// ---- 数据类 API（与 C ABI 外部插件面完全对齐）----
@@ -373,13 +449,21 @@ func replaceSDKReal(L *lua.LState, t *lua.LTable, plg *luaPlugin, s *sdk.PluginS
 		if tbl := L.OptTable(1, nil); tbl != nil {
 			tbl.ForEach(func(_, v lua.LValue) {
 				if t2, ok := v.(*lua.LTable); ok {
+					// sentence_text / media_digests 是媒体绑定链的必经环节：
+					// 媒体引用挂在句子上，漏掉这两个字段会让图片永远绑不上记忆。
+					var digests []string
+					if mt, ok := t2.RawGetString("media_digests").(*lua.LTable); ok {
+						mt.ForEach(func(_, e lua.LValue) { digests = append(digests, e.String()) })
+					}
 					triples = append(triples, sdk.Triple{
-						Subject:     t2.RawGetString("subject").String(),
-						Relation:    t2.RawGetString("relation").String(),
-						Object:      t2.RawGetString("object").String(),
-						Confidence:  float64(lua.LVAsNumber(t2.RawGetString("confidence"))),
-						SubjectType: t2.RawGetString("subject_type").String(),
-						ObjectType:  t2.RawGetString("object_type").String(),
+						Subject:      t2.RawGetString("subject").String(),
+						Relation:     t2.RawGetString("relation").String(),
+						Object:       t2.RawGetString("object").String(),
+						Confidence:   float64(lua.LVAsNumber(t2.RawGetString("confidence"))),
+						SubjectType:  t2.RawGetString("subject_type").String(),
+						ObjectType:   t2.RawGetString("object_type").String(),
+						SentenceText: t2.RawGetString("sentence_text").String(),
+						MediaDigests: digests,
 					})
 				}
 			})
@@ -442,12 +526,17 @@ func replaceSDKReal(L *lua.LState, t *lua.LTable, plg *luaPlugin, s *sdk.PluginS
 	}))
 	docTbl.RawSetString("insert", L.NewFunction(func(L *lua.LState) int {
 		if dm := s.DocMemory(); dm != nil {
-			tbl := L.CheckTable(1)
-			if err := dm.Insert(&sdk.Doc{
-				ID:      tbl.RawGetString("id").String(),
-				Title:   tbl.RawGetString("title").String(),
-				Content: tbl.RawGetString("content").String(),
-			}); err != nil {
+			if err := dm.Insert(docFromLua(L.CheckTable(1))); err != nil {
+				return pushErr(err)
+			}
+		}
+		return pushNil()
+	}))
+	// insert_with_media（1.1.0）：文档直接持有媒体块，文档向量融合其原生向量，
+	// 图片按自己的向量被召回，不依赖任何生成的描述文本。
+	docTbl.RawSetString("insert_with_media", L.NewFunction(func(L *lua.LState) int {
+		if dm := s.DocMemory(); dm != nil {
+			if err := dm.InsertWithMedia(docFromLua(L.CheckTable(1)), luaToAttachments(L, L.Get(2))); err != nil {
 				return pushErr(err)
 			}
 		}
@@ -503,10 +592,11 @@ func replaceSDKReal(L *lua.LState, t *lua.LTable, plg *luaPlugin, s *sdk.PluginS
 		if tmem := s.TextMemory(); tmem != nil {
 			tbl := L.CheckTable(1)
 			if err := tmem.Append(sdk.TextEvent{
-				Role:      tbl.RawGetString("role").String(),
-				Content:   tbl.RawGetString("content").String(),
-				Timestamp: int64(lua.LVAsNumber(tbl.RawGetString("timestamp"))),
-				Channel:   tbl.RawGetString("channel").String(),
+				Role:        tbl.RawGetString("role").String(),
+				Content:     tbl.RawGetString("content").String(),
+				Timestamp:   int64(lua.LVAsNumber(tbl.RawGetString("timestamp"))),
+				Channel:     tbl.RawGetString("channel").String(),
+				Attachments: luaToAttachments(L, tbl.RawGetString("attachments")),
 			}); err != nil {
 				return pushErr(err)
 			}
@@ -700,6 +790,55 @@ func replaceSDKReal(L *lua.LState, t *lua.LTable, plg *luaPlugin, s *sdk.PluginS
 		}
 		return pushVal([]interface{}{})
 	}))
+
+	// ---- sdk.events.*（只读事件订阅，与外部插件的 Events() 对齐）----
+	// 回调在内核事件发布 goroutine 上执行，必须只做轻量转发（Lua 单状态 + 互斥锁）；
+	// 阻塞会卡死本插件的全部调用。返回一个取消订阅函数。
+	evTbl := subTable("events")
+	evTbl.RawSetString("subscribe", L.NewFunction(func(L *lua.LState) int {
+		eventType := L.CheckString(1)
+		fn := L.CheckFunction(2)
+		sub := s.Events()
+		if sub == nil {
+			return pushErr(fmt.Errorf("events unavailable"))
+		}
+		unsub := sub.Subscribe(pubsdk.EventType(eventType), func(evt *pubsdk.Event) {
+			plg.mu.Lock()
+			defer plg.mu.Unlock()
+			L2 := plg.L
+			tbl := L2.NewTable()
+			tbl.RawSetString("type", lua.LString(string(evt.Type)))
+			tbl.RawSetString("source", lua.LString(evt.Source))
+			tbl.RawSetString("timestamp", lua.LNumber(evt.Timestamp))
+			tbl.RawSetString("payload", goValueToLua(L2, evt.Payload))
+			L2.Push(fn)
+			L2.Push(tbl)
+			if err := L2.PCall(1, 0, nil); err != nil {
+				fmt.Printf("[lua-plugin/%s] event handler error: %v\n", plg.name, err)
+			}
+		})
+		L.Push(L.NewFunction(func(L *lua.LState) int {
+			unsub()
+			return 0
+		}))
+		L.Push(lua.LNil)
+		return 2
+	}))
+
+	// ---- sdk.plugin_mgr.*（插件管理，与外部插件的 PluginMgrAPI 对齐）----
+	pmTbl := subTable("plugin_mgr")
+	pmTbl.RawSetString("reload_one", L.NewFunction(func(L *lua.LState) int {
+		if err := s.PluginMgr().ReloadOne(L.CheckString(1)); err != nil {
+			return pushErr(err)
+		}
+		return pushNil()
+	}))
+	pmTbl.RawSetString("list_loaded", L.NewFunction(func(L *lua.LState) int {
+		return pushList(s.PluginMgr().ListLoadedPlugins())
+	}))
+	pmTbl.RawSetString("is_disabled", L.NewFunction(func(L *lua.LState) int {
+		return pushVal(s.PluginMgr().IsPluginDisabled(L.CheckString(1)))
+	}))
 }
 
 func makeToolHandler(plg *luaPlugin, name string, fn *lua.LFunction) sdk.ToolHandler {
@@ -724,13 +863,29 @@ func makeStageHandler(plg *luaPlugin, stage sdk.Stage, fn *lua.LFunction) sdk.St
 		defer plg.mu.Unlock()
 		L := plg.L
 		ctx := map[string]interface{}{
-			"raw_message": sc.RawMessage,
-			"user_id":     sc.UserID,
-			"group_id":    sc.GroupID,
-			"phase":       string(sc.Phase),
-			"llm_text":    sc.LLMText,
-			"final_text":  sc.FinalText,
-			"no_memory":   sc.NoMemory,
+			"raw_message":       sc.RawMessage,
+			"user_id":           sc.UserID,
+			"group_id":          sc.GroupID,
+			"phase":             string(sc.Phase),
+			"llm_text":          sc.LLMText,
+			"reasoning_content": sc.ReasoningContent,
+			"final_text":        sc.FinalText,
+			"no_memory":         sc.NoMemory,
+		}
+		if len(sc.ContextMsgs) > 0 {
+			ctx["context_msgs"] = jsonToIface(sc.ContextMsgs)
+		}
+		if len(sc.TokenUsage) > 0 {
+			ctx["token_usage"] = jsonToIface(sc.TokenUsage)
+		}
+		if len(sc.Memory) > 0 {
+			ctx["memory"] = jsonToIface(sc.Memory)
+		}
+		if len(sc.Extra) > 0 {
+			ctx["extra"] = jsonToIface(sc.Extra)
+		}
+		if len(sc.Errors) > 0 {
+			ctx["errors"] = jsonToIface(sc.Errors)
 		}
 		if sc.Response != nil {
 			ctx["response"] = *sc.Response
@@ -815,6 +970,7 @@ func parseToolDef(L *lua.LState, defTbl *lua.LTable, plg *luaPlugin, name string
 	if v := defTbl.RawGetString("no_memory"); v != nil {
 		goDef.NoMemory = lua.LVAsBool(v)
 	}
+	goDef.ContextPolicy = defTbl.RawGetString("context_policy").String()
 	if v := defTbl.RawGetString("cleaner"); v != nil && v.Type() == lua.LTFunction {
 		goDef.Cleaner = makeLuaCleaner(plg, v.(*lua.LFunction))
 	}
@@ -834,10 +990,102 @@ func parseChannelDef(L *lua.LState, defTbl *lua.LTable, plg *luaPlugin) sdk.Chan
 	if v := defTbl.RawGetString("no_memory"); v != nil {
 		chDef.NoMemory = lua.LVAsBool(v)
 	}
+	chDef.ContextPolicy = defTbl.RawGetString("context_policy").String()
 	if v := defTbl.RawGetString("cleaner"); v != nil && v.Type() == lua.LTFunction {
 		chDef.Cleaner = makeLuaCleaner(plg, v.(*lua.LFunction))
 	}
 	return chDef
+}
+
+// parseInjectOptions 解析 Lua 侧 options table 为 SDK InjectOptions。
+// 支持的键：no_memory(bool)、context_policy(string)、cleaner_name(string)、priority(string)。
+// 缺省/非表等价于零值（记入记忆 + 不裁剪），与旧的三参数注入完全等价。
+func parseInjectOptions(L *lua.LState, idx int) sdk.InjectOptions {
+	opts := sdk.InjectOptions{}
+	tbl, ok := L.Get(idx).(*lua.LTable)
+	if !ok {
+		return opts
+	}
+	if v := tbl.RawGetString("no_memory"); v != nil {
+		opts.NoMemory = lua.LVAsBool(v)
+	}
+	opts.ContextPolicy = tbl.RawGetString("context_policy").String()
+	opts.CleanerName = tbl.RawGetString("cleaner_name").String()
+	opts.Priority = tbl.RawGetString("priority").String()
+	return opts
+}
+
+// luaToContentBlocks 把 Lua 的 blocks 数组解析为 SDK ContentBlock。
+// 每项形如：
+//
+//	{ type = "text", text = "..." }
+//	{ type = "image_url", image_url = { url = "...", detail = "high" } }
+//	{ type = "audio_url", audio_url = { url = "..." } }
+func luaToContentBlocks(L *lua.LState, idx int) []sdk.ContentBlock {
+	tbl, ok := L.Get(idx).(*lua.LTable)
+	if !ok {
+		return nil
+	}
+	var blocks []sdk.ContentBlock
+	tbl.ForEach(func(_, v lua.LValue) {
+		bt, ok := v.(*lua.LTable)
+		if !ok {
+			return
+		}
+		b := sdk.ContentBlock{
+			Type: bt.RawGetString("type").String(),
+			Text: bt.RawGetString("text").String(),
+		}
+		if iu, ok := bt.RawGetString("image_url").(*lua.LTable); ok {
+			b.ImageURL = &sdk.ImageURL{
+				URL:    iu.RawGetString("url").String(),
+				Detail: iu.RawGetString("detail").String(),
+			}
+		}
+		if au, ok := bt.RawGetString("audio_url").(*lua.LTable); ok {
+			b.AudioURL = &sdk.AudioURL{URL: au.RawGetString("url").String()}
+		}
+		blocks = append(blocks, b)
+	})
+	return blocks
+}
+
+// luaToAttachments 把 Lua 附件数组解析为 SDK MediaAttachment。
+// 每项：{ digest=, mime=, name=, data=<base64 字符串> }。
+// 带 data 的是新内容（内核落进内容寻址存储），只带 digest 的是引用已有内容。
+// base64 解码失败时忽略 data（不整单失败）——坏附件不应阻断一条记忆写入。
+func luaToAttachments(L *lua.LState, val lua.LValue) []sdk.MediaAttachment {
+	tbl, ok := val.(*lua.LTable)
+	if !ok {
+		return nil
+	}
+	var out []sdk.MediaAttachment
+	tbl.ForEach(func(_, v lua.LValue) {
+		at, ok := v.(*lua.LTable)
+		if !ok {
+			return
+		}
+		a := sdk.MediaAttachment{
+			Digest: at.RawGetString("digest").String(),
+			MIME:   at.RawGetString("mime").String(),
+			Name:   at.RawGetString("name").String(),
+		}
+		if s := at.RawGetString("data").String(); s != "" {
+			if b, err := base64.StdEncoding.DecodeString(s); err == nil {
+				a.Data = b
+			}
+		}
+		out = append(out, a)
+	})
+	return out
+}
+
+func docFromLua(tbl *lua.LTable) *sdk.Doc {
+	return &sdk.Doc{
+		ID:      tbl.RawGetString("id").String(),
+		Title:   tbl.RawGetString("title").String(),
+		Content: tbl.RawGetString("content").String(),
+	}
 }
 
 // jsonToIface 通过 JSON 往返把任意 Go 值转换为 JSON 兼容的 interface{} 树。
