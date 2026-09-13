@@ -37,12 +37,15 @@ type Agent struct {
 	providerManager *agentAPI.ProviderManager
 	io              *agentIO.IOManager
 	memory          *memory.GraphDB
-	indexer         *memory.Indexer
-	tracker         *tracker.Tracker
-	context         *RelevanceContext
-	systemPrompt    string
-	ctx             context.Context
-	cancel          context.CancelFunc
+	// graph 是本 agent 的**图记忆共同面**（根 = 同一个 GraphDB；驻留子 = LightMemory）。
+	// 整理面仍走 memory 字段（子为 nil ⇒ 既有的 nil 关卡自动禁用整理面）。
+	graph        GraphMemory
+	indexer      *memory.Indexer
+	tracker      *tracker.Tracker
+	context      *RelevanceContext
+	systemPrompt string
+	ctx          context.Context
+	cancel       context.CancelFunc
 
 	// 文档记忆（第二层）
 	docStore *document.Store
@@ -192,8 +195,13 @@ type AgentConfig struct {
 	ProviderManager *agentAPI.ProviderManager
 	IO              *agentIO.IOManager
 	Memory          *memory.GraphDB
-	Indexer         *memory.Indexer
-	Tracker         *tracker.Tracker
+	// LightMemory 是**轻量内核**的图记忆装配（驻留子用；读 temp∪main，只写 temp）。
+	//
+	// 给了它就意味着这是轻量内核：`Memory` 必须为 nil，
+	// 于是记忆整理面（块/媒体/流水线/整理工具）全部不可达（见 memoryface.go）。
+	LightMemory *memory.LightMemory
+	Indexer     *memory.Indexer
+	Tracker     *tracker.Tracker
 
 	DocStore        *document.Store
 	Knowledge       *knowledge.Store
@@ -291,6 +299,7 @@ func New(cfg AgentConfig) *Agent {
 		providerManager:   cfg.ProviderManager,
 		io:                cfg.IO,
 		memory:            cfg.Memory,
+		graph:             graphMemoryOf(cfg),
 		indexer:           cfg.Indexer,
 		tracker:           cfg.Tracker,
 		context:           rc,
@@ -349,6 +358,36 @@ func (a *Agent) Start() {
 
 func (a *Agent) Stop() {
 	a.cancel()
+}
+
+// graphMemoryOf 决定本 agent 的图记忆共同面实现。
+//
+//   - 轻量内核（给了 LightMemory）：用 LightMemory，**整理面保持 nil**；
+//   - 完整内核：直接用主图库（*memory.GraphDB 天然满足 GraphMemory）。
+func graphMemoryOf(cfg AgentConfig) GraphMemory {
+	if cfg.LightMemory != nil {
+		return cfg.LightMemory
+	}
+	if cfg.Memory == nil {
+		return nil
+	}
+	return cfg.Memory
+}
+
+// graphMem 返回本 agent 的图记忆**共同面**。
+//
+// `graph` 显式为 nil 时回落到 `memory` —— 这样"只设 memory 的构造"
+// （大量既有测试直接用 Agent 字面量）照常工作，不需要同时维护两个字段。
+// 轻量内核则显式设 graph=LightMemory 且 memory=nil：共同面走 LightMemory，
+// 整理面因 memory==nil 而全部不可达。
+func (a *Agent) graphMem() GraphMemory {
+	if a.graph != nil {
+		return a.graph
+	}
+	if a.memory == nil {
+		return nil
+	}
+	return a.memory
 }
 
 func (a *Agent) ID() types.AgentID { return a.id }

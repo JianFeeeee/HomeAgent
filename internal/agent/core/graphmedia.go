@@ -107,11 +107,14 @@ func (a *Agent) linkBlocksToDocument(docID string, blocks []memory.MemoryBlock) 
 // seed 是调用方已持有的一等块（如 L2 文档的 Blocks），用于保持块身份；
 // 普通对话路径传 nil。blocks 是本次写入 L3 的块数。
 func (a *Agent) commitTriplesWithMedia(triples []memory.Triple, sessionID string, turnID int, seed []memory.MemoryBlock) (entities, relations, blocks int, err error) {
-	if a.memory == nil {
+	g := a.graphMem()
+	if g == nil {
 		return 0, 0, 0, fmt.Errorf("graph memory 未启用")
 	}
-	if a.mediaStore == nil {
-		ec, rc, cErr := a.memory.Commit(triples, sessionID, turnID)
+	// 轻量内核（memory == nil，子只有图记忆）或没有媒体库时：只写图记忆。
+	// 写目标由 a.graph 决定 —— 根落 main，子落自己的 temp。
+	if a.memory == nil || a.mediaStore == nil {
+		ec, rc, cErr := g.Commit(triples, sessionID, turnID)
 		return ec, rc, 0, cErr
 	}
 	sentenceIDs, ec, rc, err := a.memory.CommitWithMedia(triples, sessionID, turnID)

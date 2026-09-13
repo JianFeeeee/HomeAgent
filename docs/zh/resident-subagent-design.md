@@ -545,11 +545,11 @@ type GraphMemory interface {
 | **N0** | **无状态化**：删 `Agent.currentOutputChannel`、删提示词里的通道预设 | S18；既有全部测试通过（这是纯收敛，不含新能力） |
 | **N1a** | **通道登记层**：inputch 一等化（归属插件 / 归属 agent / 容量 / 共享登记表）+ **单工具多视图总览** | S21–S23 |
 | **N1b** | 输出通道授权过滤 + 目标解析（outputch → 目标 agent 的 inputch） | S1–S3 |
-| **N2a** | **作用域对象 + 图记忆 space 维度**：`memory.Scope{Write string; Read []string}`；`entities/sentences/relations` 加 `space` 列（默认 `main`，老数据迁移视为 main）；写落 `Write`、查询过滤 `space IN Read` | 同 space 可见、跨 space 不可见 |
-| **N2b** | **图记忆的向量检索**接入同一 space 过滤（子能按 space 语义检索） | 检索不跨 space 越界 |
+| **N2a** | ~~作用域对象 + 图记忆 space 维度~~ **已完成（改为独立存储实例）**：`OpenGraphDBReadOnly`（query_only 受限句柄）+ `LightMemory`（temp 可写 / 主库只读 / 并集查询 + 应用层合并） | S13–S15 ✅ |
+| **N2b** | 图记忆的向量检索在并集下的排序/去重（当前按实体名/三元组合并，检索排序沿用单库语义） | 待做（非阻塞） |
 | — | 其余记忆面（doc 记忆 / 动态上下文 / 知识库 / 文本 / 媒体 / 社交）：**v1 不加 space**（子不可达） | 由 S13/S14 隐含 |
-| **N2c** | **Agent 级 profile（轻量内核接线）**：见下方施工方案 | S13–S15 |
-| **N2d** | **晋升与丢弃**：`Promote(space, records)`（回收时父把选中的 temp 记录写进 main）+ `DropSpace(space)`（回收/销毁时丢弃 temp） | S11 的数据面 |
+| **N2c** | ~~Agent 级 profile~~ **已完成**：`GraphMemory` 窄接口（Recall/Commit）+ `a.graph` 共同面；子 `a.memory = nil` ⇒ 22 处既有关卡自动禁用整理面 | S13–S15 ✅ |
+| **N2d** | ~~晋升与丢弃~~ **数据面已完成**：`GraphDB.ExportTriples` + 复用 `Commit` 合入（父选哪几条）；`LightMemory.Close()` 丢弃 temp | S11 数据面 ✅ |
 | **N3** | **驻留子生命周期**：创建 / 销毁 / 登记表 / 父退出清理 | S12、S16 |
 | **N4** | **跨 agent 投递**：子→父 L3、父→子 L4（+ `isKernelLevelSource` 分层） | S4、S6、S17 |
 | **N5** | **inputch 处理表**：主动写入工具 + 自动写兜底 + 生命周期 | S8、S9 |
