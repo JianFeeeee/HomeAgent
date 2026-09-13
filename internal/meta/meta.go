@@ -41,7 +41,11 @@ var (
 	//        注入标志位、中断优先级、事件订阅、动态输出通道注销补进 Lua 侧
 	//        （此前只在 Go 侧存在而文档宣称“完全对齐”）。公开 Go SDK 接口
 	//        零变更，故 SDK 保持 1.3.0。
-	Version = "1.3.11"
+	// 1.3.12：修 1.3.11 引入的两个真问题 —— ① 驻留子销毁后残留入站 inputch
+	//        child/<id>（改用纯函数名并 Unregister，覆盖 destroy/reclaim/StopResidents）；
+	//        ② sdk.events.subscribe 用了从未注入的公共 Events()，且订阅生命周期
+	//        管理会自死锁/use-after-close（改用内部 Subscribe + 独立 subsMu + Stop 取消）。
+	Version = "1.3.12"
 
 	// Commit 是构建时的 Git commit hash。
 	Commit = "unknown"
