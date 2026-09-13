@@ -467,6 +467,11 @@ func (s *PluginSDK) RegisterPluginAPI(name string) error {
 }
 
 // RegisterOutputChannel registers an output channel that the output_send tool can route to.
+//
+// 与 RegisterInputChannel 的分工：本函数声明**出站**（output_send__<name> 的回复发给谁）；
+// 入站（谁会往 <name> 注入输入）是另一件事，用 RegisterInputChannel 声明。
+// 若该通道同时也是你的注入入口，两个都要登记。
+//
 // name: channel name (e.g. "qq", "webui")
 // caps: bitmask of supported output capabilities (CapText, CapFile, etc.)
 // desc: description of the channel, expected meta format, and type enum
@@ -483,6 +488,15 @@ func (s *PluginSDK) RegisterOutputChannel(name string, caps int, desc string, de
 }
 
 // RegisterInputChannel registers an input channel with its memory behavior.
+//
+// 契约：**凡是用 InjectText*/InjectInput*/InjectInterrupt*(source, "<name>", ...)
+// 注入的通道名，都应当在这里登记**。inputch 是内核里最基本的**输入路由单位**：
+// 只有登记过的通道才能在 inputch 登记表里出现，父 agent 才能"把某个 inputch 划给驻留子"；
+// 没登记就划分会直接失败（`inputch 未注册`）。
+//
+// 只登记输出通道（RegisterOutputChannel）而没登记输入通道时，内核会兜底登记同名
+// inputch 并打告警日志 —— 兜底只为兼容老插件，新插件请显式登记。
+//
 // def.NoMemory: 此通道输入不参与记忆计算
 // def.Cleaner:  计算层对输入文本清洗后（不改原文）再向量化/提关键词
 func (s *PluginSDK) RegisterInputChannel(name string, def ChannelDef) error {

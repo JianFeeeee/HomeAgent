@@ -104,6 +104,9 @@ func (p *Plugin) Start(s *sdk.PluginSDK) error {
 	s.SetAutoRestart(true)
 	p.sdk = s
 	p.client = &http.Client{Timeout: 30 * time.Second}
+	// 入站通道：本插件用 "rss" 通道注入输入（见 Inject* 调用），
+	// 输入侧必须显式登记 —— 否则"把该 inputch 划给驻留子"会报 `inputch 未注册`。
+	_ = s.RegisterInputChannel("rss", sdk.ChannelDef{NoMemory: true})
 	p.fp = gofeed.NewParser()
 	p.stopCh = make(chan struct{})
 	p.seenGUIDs = make(map[string]bool)
@@ -158,7 +161,7 @@ func (p *Plugin) Start(s *sdk.PluginSDK) error {
 	s.RegisterTool(tp+"list", sdk.ToolDef{
 		Name: tp + "list", Description: "List all subscribed feeds",
 		Parameters: map[string]interface{}{
-			"type": "object",
+			"type":       "object",
 			"properties": map[string]interface{}{},
 		},
 	}, p.handleList)
@@ -167,7 +170,7 @@ func (p *Plugin) Start(s *sdk.PluginSDK) error {
 		Name: tp + "check_now", Description: "Manually check all feeds for new articles now",
 		NoMemory: true,
 		Parameters: map[string]interface{}{
-			"type": "object",
+			"type":       "object",
 			"properties": map[string]interface{}{},
 		},
 	}, p.handleCheckNow)
@@ -445,7 +448,7 @@ func (p *Plugin) loadData() {
 		return
 	}
 	var data struct {
-		Feeds     []FeedSub      `json:"feeds"`
+		Feeds     []FeedSub       `json:"feeds"`
 		SeenGUIDs map[string]bool `json:"seen"`
 	}
 	if json.Unmarshal(b, &data) != nil {
@@ -463,7 +466,7 @@ func (p *Plugin) saveData() {
 	p.mu.RLock()
 	defer p.mu.RUnlock()
 	data := struct {
-		Feeds     []FeedSub      `json:"feeds"`
+		Feeds     []FeedSub       `json:"feeds"`
 		SeenGUIDs map[string]bool `json:"seen"`
 	}{
 		Feeds:     p.feeds,
@@ -487,8 +490,6 @@ func (p *Plugin) cleanupData() {
 		}
 	}
 }
-
-
 
 // atomicWriteJSON 原子写 JSON：先写临时文件再 rename，避免进程崩溃截断数据文件。
 func atomicWriteJSON(path string, data []byte) error {

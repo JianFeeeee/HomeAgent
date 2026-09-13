@@ -204,6 +204,9 @@ func newHTTPClient(timeout int, proxyURL string) *http.Client {
 func (p *Plugin) Start(s *sdk.PluginSDK) error {
 	p.sdk = s
 	s.SetAutoRestart(true)
+	// 入站通道：本插件用 p.name 通道注入输入（见 InjectInputSync 调用），
+	// 输入侧必须显式登记 —— 否则"把该 inputch 划给驻留子"会报 `inputch 未注册`。
+	_ = s.RegisterInputChannel(p.name, sdk.ChannelDef{})
 
 	s.Settings().RegisterDef(sdk.ConfigDef{
 		Key: "timeout", Default: "30", Type: "int",
