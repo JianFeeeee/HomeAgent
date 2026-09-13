@@ -112,7 +112,23 @@
   - **子 → 主**：子直接打到主（经输出通道投进主的 inputch）；
   - **主 → 指定某个子**：父经输出通道投进**指定子**的 inputch。
 
-### 4.5 通道的一等化（实现要求）
+### 4.5 已经落地/待落地的两件事
+
+**已落地（N1a）**：inputch 登记表（归属插件 / 归属 agent / 容量 / 默认回程 / 策略）+ 共享登记表
++ 单工具多视图总览（`input_channels`，见 §4.6）。
+
+**已落地（N1b）**：
+- **输出通道授权集合**［已定：默认完整授权，父可收窄］：
+  `AgentConfig.AllowedOutputs`（nil/空 = 全部）。三处过滤点必须一致，
+  否则会出现"列表里看不到、按名字还能调"的裂缝：
+  1. **工具表**：不为未授权的通道生成 `output_send__X`（模型看不到就不会调）；
+  2. **列表工具**：`output_list_channels` 只列授权的（已登记目标的会标出"目标: agent / inputch"）；
+  3. **调用点**：凭名字直调未授权的输出门**必须被拒**（纵深防御）。
+- **输出通道 → 目标 agent 的 inputch 解析**：`ChannelRegistry.BindOutputTarget` /
+  `ResolveOutputTarget`（未登记的通道由传输层 device 自行处理，如 qq/webui）。
+  这是"输出可寻址到具体 agent"的数据面；真正的跨 agent 投递在 N4。
+
+### 4.5.1 通道的一等化（后续要求）
 
 现在 `Source` / `OutputChannel` 只是字符串标签，`IOManager.inputCh` 是**一条全局 channel**，
 `inputChannels` 只是策略表（`ChannelDef`：NoMemory / Cleaner / ContextPolicy），
