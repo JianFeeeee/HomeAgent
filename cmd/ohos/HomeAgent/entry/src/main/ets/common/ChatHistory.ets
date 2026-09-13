@@ -6,7 +6,7 @@
  */
 
 import { ChatMessage, ToolCallInfo, ChatAttachment } from '../model/Model';
-import { parseAttachment } from '../components/Attachment';
+import { parseAttachment } from './AttachmentMeta';
 import { stringifyField } from './ChatFormat';
 
 /** 分页历史解析结果：消息列表 + 服务端分页元数据 */

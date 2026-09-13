@@ -10,7 +10,7 @@ import { apiClient } from './ApiClient';
 import { connStore } from './ConnStore';
 import { userMessage, isTimeout } from './UserError';
 import { chatStore } from './ChatStore';
-import { parseAttachment } from '../components/Attachment';
+import { parseAttachment } from './AttachmentMeta';
 import { http } from '@kit.NetworkKit';
 
 interface SendChatBody {
