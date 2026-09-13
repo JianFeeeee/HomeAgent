@@ -276,6 +276,98 @@ func (h *Handler) subscribeChatEvents() {
 
 // pendingAssistantLocked 返回 chatHistory 中当前进行中的 assistant 消息（已持有 chatMu）。
 // 仅当最后一条是 assistant 且尚未产出最终内容时视为进行中，避免跨轮次误合并。
+// chatSaveThrottle 控制写盘频率：变更后延迟这么久落盘，合并连续更新。
+const chatSaveThrottle = 3 * time.Second
+
+// chatSaveMaxDelay 是连续写入时的强制落盘上限：聊天再密也不超过这么久。
+const chatSaveMaxDelay = 10 * time.Second
+
+// persistChatLocked 标记聊天记录待写盘（调用方已持 chatMu）。
+//
+// 真正的写盘在 chatPersistLoop 里做，并带节流：原先这里是**每条消息都整段
+// 重写一次记录文件**，而一轮对话会触发多次（用户消息、每个工具事件、收尾消息）——
+// 200 条上限下文件可达数 MB，于是单轮就放大出几十 MB 写。
+func (h *Handler) persistChatLocked() {
+	if h.history == nil {
+		return
+	}
+	if !h.chatDirty {
+		h.chatDirtySince = time.Now()
+	}
+	h.chatDirty = true
+	select {
+	case h.chatSaveWake <- struct{}{}:
+	default: // 已有待处理信号，合并即可
+	}
+}
+
+// chatPersistLoop 把聊天记录按节流节奏落盘，直到 Close。
+func (h *Handler) chatPersistLoop() {
+	defer close(h.chatLoopDone)
+	timer := time.NewTimer(chatSaveThrottle)
+	timer.Stop()
+	defer timer.Stop()
+	for {
+		select {
+		case <-h.chatStop:
+			h.flushChat() // 关停前把最后一次变更写下去
+			return
+		case <-h.chatSaveWake:
+			delay := chatSaveThrottle
+			h.chatMu.Lock()
+			if !h.chatDirtySince.IsZero() {
+				if left := chatSaveMaxDelay - time.Since(h.chatDirtySince); left < delay {
+					if left < 0 {
+						left = 0
+					}
+					delay = left
+				}
+			}
+			h.chatMu.Unlock()
+			timer.Reset(delay)
+		case <-timer.C:
+			h.flushChat()
+		}
+	}
+}
+
+// flushChat 把当前聊天记录快照写盘。文件 IO 不持 chatMu（快照拷出来再写），
+// 写失败则重新标脏，等下一轮重试。
+func (h *Handler) flushChat() {
+	if h.history == nil {
+		return
+	}
+	h.chatMu.Lock()
+	if !h.chatDirty {
+		h.chatMu.Unlock()
+		return
+	}
+	h.chatDirty = false
+	h.chatDirtySince = time.Time{}
+	msgs := make([]ChatMsg, len(h.chatHistory))
+	copy(msgs, h.chatHistory)
+	h.chatMu.Unlock()
+
+	if err := h.history.Save(msgs); err != nil {
+		log.Printf("[webui] 写聊天记录 %s 失败（稍后重试）: %v", h.history.Path(), err)
+		h.chatMu.Lock()
+		h.chatDirty = true
+		if h.chatDirtySince.IsZero() {
+			h.chatDirtySince = time.Now()
+		}
+		h.chatMu.Unlock()
+	}
+}
+
+// Close 停掉写盘协程并把最后一次变更落盘（幂等）。
+// 由插件 Stop 调用；不这样做会丢掉最后一轮对话。
+func (h *Handler) Close() {
+	h.chatCloseOnce.Do(func() {
+		close(h.chatStop)
+		<-h.chatLoopDone
+	})
+}
+
 func (h *Handler) pendingAssistantLocked() *ChatMsg {
 	if h.pendingIdx < 0 || h.pendingIdx >= len(h.chatHistory) {
 		return nil
@@ -285,16 +377,6 @@ func (h *Handler) pendingAssistantLocked() *ChatMsg {
 		return nil
 	}
 	return msg
-}
-
-func (h *Handler) persistChatLocked() {
-	if h.history == nil {
-		return
-	}
-	// 写独立文件（原子替换）。失败只告警：聊天记录不该影响对话主流程。
-	if err := h.history.Save(h.chatHistory); err != nil {
-		log.Printf("[webui] 写聊天记录 %s 失败: %v", h.history.Path(), err)
-	}
 }
 
 func (h *Handler) handleToolEvent(ev *sdk.Event) {
@@ -370,9 +452,6 @@ func (h *Handler) handleToolEvent(ev *sdk.Event) {
 		}
 	}
 }
-
-// chatSaveThrottle 控制写盘频率：最多每 3 秒写一次
-const chatSaveThrottle = 3 * time.Second
 
 func (h *Handler) addChatMsg(msg ChatMsg) {
 	h.chatMu.Lock()

@@ -92,6 +92,16 @@ type Handler struct {
 	// 插件设置 history_file 可改）。
 	history *historyStore
 
+	// 聊天记录写盘节流：chatDirty 由 persistChatLocked 置位，
+	// chatPersistLoop 合并连续变更后落盘（chatSaveThrottle 去抖 +
+	// chatSaveMaxDelay 兜底），Close 前强制落最后一次。
+	chatDirty      bool
+	chatDirtySince time.Time
+	chatSaveWake   chan struct{}
+	chatStop       chan struct{}
+	chatLoopDone   chan struct{}
+	chatCloseOnce  sync.Once
+
 	chatMsgMu    sync.Mutex
 	chatMsgCache map[string]*chatMsgEntry // client_msg_id -> 首次处理结果
 	chatMsgOrder []string                 // FIFO 淘汰序
@@ -146,7 +156,12 @@ func NewHandler(s *sdk.PluginSDK) *Handler {
 		// 聊天记录独立存储：默认 <data>/webui_chat_history.json，
 		// 插件设置 history_file 可改（相对路径按 data 目录解析）。
 		history: newHistoryStore(resolveHistoryFile(settingString(se, "history_file"), webDataDir)),
+
+		chatSaveWake: make(chan struct{}, 1),
+		chatStop:     make(chan struct{}),
+		chatLoopDone: make(chan struct{}),
 	}
+	go h.chatPersistLoop()
 	h.loadChatHistory()
 	if s != nil {
 		go h.trackToolEvents()
