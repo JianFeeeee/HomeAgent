@@ -2,6 +2,7 @@ package config
 
 import (
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 )
@@ -392,4 +393,62 @@ func TestSetLLMSnapshotFile(t *testing.T) {
 	if got["core.llm.sources.main.model"] != "m0" {
 		t.Fatalf("snapshot missing untouched key model: %v", got)
 	}
+}
+
+// TestPluginDefsAreNamespaced 锁住两件曾经一起坏掉的事：
+//
+//  1. PluginConfig(name).ListDefs 必须只返回**该插件**的 def，且 Key 是插件内
+//     局部键。修复前它把 prefix 直接透传给全局 ListDefs，于是返回全仓所有 def
+//     （WebUI 设置页因此把每个 def 复制进每个插件命名空间，5208 条里 96% 是重复）。
+//  2. ListCoreDefs 必须排除 "plugin.<name>." 命名空间，否则核心列表里会混进
+//     插件 def 的副本。
+func TestPluginDefsAreNamespaced(t *testing.T) {
+	r := NewConfigRegistry("")
+	r.RegisterDef(ConfigDef{Key: "core.agent.max_tool_turns", Default: "10"})
+	r.RegisterDef(ConfigDef{Key: "core.llm.model", Default: "m"})
+
+	a := r.PluginConfig("a")
+	a.RegisterDef(ConfigDef{Key: "addr", Default: ":1"})
+	a.RegisterDef(ConfigDef{Key: "token", Default: ""})
+	b := r.PluginConfig("b")
+	b.RegisterDef(ConfigDef{Key: "secret", Default: ""})
+
+	da := a.ListDefs("")
+	if len(da) != 2 {
+		t.Fatalf("插件 a 应只有 2 个自己的 def，实际 %d：%v", len(da), keysOf(da))
+	}
+	for _, d := range da {
+		if d.Key != "addr" && d.Key != "token" {
+			t.Fatalf("插件 a 看到了不属于自己的 def：%q", d.Key)
+		}
+	}
+	// 局部键前缀过滤（"a" 只匹配插件内以 a 开头的键 → addr）
+	if got := a.ListDefs("a"); len(got) != 1 || got[0].Key != "addr" {
+		t.Fatalf("插件内前缀过滤失效：%v", keysOf(got))
+	}
+	db := b.ListDefs("")
+	if len(db) != 1 || db[0].Key != "secret" {
+		t.Fatalf("插件 b 应只有 secret，实际 %v", keysOf(db))
+	}
+
+	core := r.ListCoreDefs("")
+	if len(core) != 2 {
+		t.Fatalf("核心 def 应为 2 个，实际 %d：%v", len(core), keysOf(core))
+	}
+	for _, d := range core {
+		if strings.HasPrefix(d.Key, "plugin.") {
+			t.Fatalf("核心列表混入了插件 def：%q", d.Key)
+		}
+	}
+	if got := r.ListCoreDefs("core.llm"); len(got) != 1 || got[0].Key != "core.llm.model" {
+		t.Fatalf("核心前缀过滤失效：%v", keysOf(got))
+	}
+}
+
+func keysOf(defs []*ConfigDef) []string {
+	out := make([]string, len(defs))
+	for i, d := range defs {
+		out[i] = d.Key
+	}
+	return out
 }
