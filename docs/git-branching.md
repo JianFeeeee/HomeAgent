@@ -384,6 +384,23 @@ git branch -d release/v1.0.x                          # tag 已保存历史，�
 **SDK 仓**：`VERSION=<版本> bash package/build.sh all hmapdev` ⇒
 `hmapdev_{linux,darwin}_{amd64,arm64}` + `hmapdev_windows_amd64.exe` + `SHA256SUMS`。
 
+**Windows 安装器（WSL 安装型）**：`homed` **不再装到 Windows**（插件体系依赖 fd 继承与
+共享内存区段内偏移解引用，Windows 句柄模型表达不了），安装器的职责是**引导 WSL2 并把
+Linux 包送进发行版里安装**。产物 `HomeAgent_v<版本>_{Server,Client,Full}_win64.exe`：
+
+```bash
+# 先有 Linux 包（安装器送进 WSL 的就是它），再打安装器
+VERSION=<版本> bash deploy/packaging/package-linux.sh amd64
+VERSION=<版本> bash deploy/packaging/package-windows.sh server amd64   # 只装内核+CLI 的 WSL 场景
+VERSION=<版本> bash deploy/packaging/package-windows.sh client amd64   # 需要 Windows GUI payload
+```
+
+- `package-windows.sh` 会按**变体只放对应的那一个 deb** 进 payload。为什么：WSL 侧脚本只取
+  payload 里第一个 `.deb`（`install-via-wsl.ps1`），而 server/full 的 deb 各带 ~719MB 模型 ——
+  照 `build.sh` 的 `stage_linux_payload`（把所有 deb+tar 全塞）打出来会是 ~2.4GB 的安装器。
+- `client`/`full` 变体还带 Windows GUI，需要 electron-builder 产出
+  `build/homeagent-gui-win32-x64/`；缺它就**明确失败**，不产出"装完没有界面"的半残包。
+
 **上传**（两仓同一个脚本）：
 
 ```bash
