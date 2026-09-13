@@ -13,8 +13,13 @@ func (a *Agent) executeOutputSendTool(tc agentAPI.ToolCall) string {
 	channel := strings.TrimPrefix(tc.Name, "output_send__")
 	payload, _ := tc.Arguments["payload"].(string)
 	rawType, _ := tc.Arguments["type"].(string)
-	if channel == "" || payload == "" || rawType == "" {
-		return "工具名称格式: output_send__{channel}，payload 和 type 不能为空"
+	if channel == "" || payload == "" {
+		return "工具名称格式: output_send__{channel}，payload 不能为空"
+	}
+	// type 缺省按 text 处理：绝大多数输出就是文本，让模型为"省略一个默认值"付一次
+	// 失败重试没有意义（判据该拦的是"不知道发什么"，不是"没写众所周知的默认值"）。
+	if rawType == "" {
+		rawType = "text"
 	}
 	// 授权闸（纵深防御）：模型可能凭名字直接调未授权的输出门。
 	if !a.IsOutputAllowed(channel) {
