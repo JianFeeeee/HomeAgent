@@ -34,11 +34,15 @@ type StaticEmbedder struct {
 	jieba     *gojieba.Jieba
 	stopWords map[string]bool
 
-	words  map[string][]float64
+	// words 是词向量表。**用 float32 存**：源文件（fastText 文本格式）本身就是 float32，
+	// 用 float64 存等于把 578 万……不，是 57.8 万词 × 300 维的常驻内存凭空翻倍
+	// （实测生产：float64 → 1.29GB，float32 → 0.65GB）。相似度计算仍在 float64 里累加，
+	// 精度不受影响。改回 float64 会被 TestStaticEmbedder_VectorMemIsFloat32 拦住。
+	words  map[string][]float32
 	dim    int
 	loaded bool
 
-	unkVec  []float64
+	unkVec  []float32
 	unkNorm float64
 }
 
@@ -150,7 +154,7 @@ func NewStaticEmbedder(modelPaths ...string) *StaticEmbedder {
 	e := &StaticEmbedder{
 		jieba:     GetJieba(),
 		stopWords: sw,
-		words:     make(map[string][]float64),
+		words:     make(map[string][]float32),
 	}
 
 	if len(modelPaths) == 0 {
@@ -254,15 +258,16 @@ func (e *StaticEmbedder) load(spec string, primary bool) error {
 			continue
 		}
 
-		vec := make([]float64, dim)
+		vec := make([]float32, dim)
 		for i := 0; i < dim; i++ {
-			v, _ := strconv.ParseFloat(fields[i+1], 64)
-			vec[i] = v
+			// 源文件是 float32 精度的文本向量：用 32 位解析，与源数据一致。
+			v, _ := strconv.ParseFloat(fields[i+1], 32)
+			vec[i] = float32(v)
 		}
 		e.words[word] = vec
 		if primary {
 			for i := range vecSum {
-				vecSum[i] += vec[i]
+				vecSum[i] += float64(vec[i])
 			}
 			count++
 		}
@@ -276,11 +281,13 @@ func (e *StaticEmbedder) load(spec string, primary bool) error {
 		for i := range vecSum {
 			vecSum[i] /= float64(count)
 		}
-		e.unkVec = make([]float64, dim)
-		copy(e.unkVec, vecSum)
+		e.unkVec = make([]float32, dim)
+		for i, v := range vecSum {
+			e.unkVec[i] = float32(v)
+		}
 		var normSq float64
 		for _, v := range e.unkVec {
-			normSq += v * v
+			normSq += float64(v) * float64(v)
 		}
 		e.unkNorm = float64(math.Sqrt(normSq))
 		e.loaded = true
@@ -366,11 +373,11 @@ func (e *StaticEmbedder) Vectorize(text string) vector.Vector {
 
 		if !ok {
 			for i, v := range unkVec {
-				sum[i] += w * v
+				sum[i] += w * float64(v)
 			}
 		} else {
 			for i, v := range vec {
-				sum[i] += w * v
+				sum[i] += w * float64(v)
 			}
 		}
 		weightSum += w
