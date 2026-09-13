@@ -61,3 +61,14 @@ fmt:
 
 lint:
 	$(GO) vet ./...
+
+# lint-full：在 vet 之外跑 golangci-lint（阈值见 .golangci.yml，起步 warn-only）。
+# 未安装时给出可执行的安装提示与跳过原因，而不是静默成功。
+.PHONY: lint-full
+lint-full:
+	@if command -v golangci-lint >/dev/null 2>&1; then \
+		golangci-lint run; \
+	else \
+		echo "golangci-lint 未安装，跳过（阈值见 .golangci.yml）"; \
+		echo "  go install github.com/golangci/golangci-lint/cmd/golangci-lint@latest"; \
+	fi

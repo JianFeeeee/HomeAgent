@@ -1,0 +1,46 @@
+# golangci-lint 配置 —— 「超大函数/超大文件」治理的防复发闸门。
+#
+# 背景：main 上曾有 4 个 ≥300 行函数、12 个 ≥200 行函数（见审查报告）。
+# 没有复杂度 linter 是它们能长期存活的直接原因。本配置先以 **warn-only**
+# 起步：`issues.exit-code: 0`，只产出清单、不阻断构建。等历史债降到可接受
+# 水位后，再把 exit-code 改成 1 收成硬门禁。
+#
+# 运行：make lint-full（需先 `go install github.com/golangci/golangci-lint/cmd/golangci-lint@latest`）
+# 注意：这是 golangci-lint v1 的配置格式（v2 的 `linters.default` 写法不同）。
+run:
+  timeout: 5m
+  tests: true
+
+linters:
+  disable-all: true
+  enable:
+    - funlen   # 函数长度
+    - gocyclo  # 圈复杂度
+    - lll      # 行宽
+    - dupl     # 重复代码
+    - govet    # 与 make lint 对齐的基线
+
+linters-settings:
+  funlen:
+    lines: 150
+    statements: 100
+  gocyclo:
+    min-complexity: 30
+  lll:
+    line-length: 140
+  dupl:
+    threshold: 200
+
+issues:
+  # 起步阶段不阻断（warn-only）。收紧后改为 1。
+  exit-code: 0
+  max-issues-per-linter: 0
+  max-same-issues: 0
+  exclude-rules:
+    # 测试与生成/夹具代码不受长度类规则约束。
+    - path: _test\.go
+      linters: [funlen, dupl, gocyclo]
+    - path: internal/plugin/proc/testdata
+      linters: [funlen, dupl]
+    - path: third_party/
+      linters: [funlen, dupl, gocyclo, lll]
