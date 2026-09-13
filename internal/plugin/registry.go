@@ -318,6 +318,15 @@ func (r *Registry) buildSDK(name string) *sdk.PluginSDK {
 		return nil
 	}
 
+	regOutputUnreg := func(chName string) error {
+		if r.iom == nil {
+			return nil
+		}
+		r.iom.UnregisterDevice(chName)
+		r.forgetChannel(name, chName)
+		return nil
+	}
+
 	regInput := func(chName string, def sdk.ChannelDef) error {
 		if r.iom == nil {
 			return nil
@@ -334,18 +343,19 @@ func (r *Registry) buildSDK(name string) *sdk.PluginSDK {
 		EventBus:  r.evBus,
 		// 带 media 的包装：插件提交的三元组/文档/文本事件里的媒体会落进 CAS
 		// 并挂上引用。传入插件名仅用于日志溯源（哪个插件写的媒体）。
-		Memory:     sdk.NewGraphMemoryWithMedia(name, r.memDB, r.mediaStore),
-		TextMemory: sdk.NewTextMemoryWithMedia(name, r.textMem, r.mediaStore),
-		DocMemory:  sdk.NewDocMemoryWithMedia(name, r.docStore, r.mediaStore),
-		Knowledge:  sdk.NewKnowledge(r.ks),
-		LLM:        sdk.NewLLM(r.mgr, r.cfgReg, r.lua, r.baseKey),
-		Settings:   sett,
-		RegTool:    regTool,
-		RegStage:   regStage,
-		RegAPI:     regAPI,
-		RegOutput:  regOutput,
-		RegInput:   regInput,
-		PluginMgr:  r,
+		Memory:         sdk.NewGraphMemoryWithMedia(name, r.memDB, r.mediaStore),
+		TextMemory:     sdk.NewTextMemoryWithMedia(name, r.textMem, r.mediaStore),
+		DocMemory:      sdk.NewDocMemoryWithMedia(name, r.docStore, r.mediaStore),
+		Knowledge:      sdk.NewKnowledge(r.ks),
+		LLM:            sdk.NewLLM(r.mgr, r.cfgReg, r.lua, r.baseKey),
+		Settings:       sett,
+		RegTool:        regTool,
+		RegStage:       regStage,
+		RegAPI:         regAPI,
+		RegOutput:      regOutput,
+		RegOutputUnreg: regOutputUnreg,
+		RegInput:       regInput,
+		PluginMgr:      r,
 
 		Status:     r.status,
 		Supervisor: r.sup,
@@ -570,6 +580,24 @@ func (r *Registry) stageRegistrarFor() (func(plugin string, stage sdk.Stage, han
 }
 
 // noteChannel 记住插件注册了哪个通道，供卸载/崩溃时摘除。
+// forgetChannel 把某个通道从"本插件注册过哪些通道"的记账里摘掉（注销通道时用）。
+//
+// 不摘的话 status 的 channels 列表与 input_channels 视图会一直列着已死通道，
+// 模型会以为它还在（远程设备掉线后尤其明显）。
+func (r *Registry) forgetChannel(plugin, channel string) {
+	if plugin == "" || channel == "" {
+		return
+	}
+	r.channelsMu.Lock()
+	defer r.channelsMu.Unlock()
+	set := r.pluginChannels[plugin]
+	if set == nil {
+		return
+	}
+	delete(set.outputs, channel)
+	delete(set.inputs, channel)
+}
+
 func (r *Registry) noteChannel(plugin, channel string, output bool) {
 	if plugin == "" || channel == "" {
 		return

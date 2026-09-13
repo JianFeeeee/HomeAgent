@@ -60,10 +60,14 @@ func (c *wconn) unlockWrite() {
 // Registry 是设备接入网关的注册表：管理在线连接、设备元数据。线程安全。
 // 鉴权在设备端执行，服务端不存储授权状态。
 type Registry struct {
-	mu         sync.RWMutex
-	devices    map[string]*DeviceMeta // deviceID -> meta（在线/历史）
-	conns      map[string]*wconn      // deviceID -> 活跃连接（支持 push）
-	onlineCh   chan string
+	mu       sync.RWMutex
+	devices  map[string]*DeviceMeta // deviceID -> meta（在线/历史）
+	conns    map[string]*wconn      // deviceID -> 活跃连接（支持 push）
+	onlineCh chan string
+
+	// onOnline/onOffline：设备上下线的同步回调（见 SetPresenceHandler）。
+	onOnline   func(DeviceMeta)
+	onOffline  func(string)
 	onStatus   func(msg map[string]interface{})
 	onEvent    func(deviceID string, msg map[string]interface{})
 	acceptFn   func(token string) bool
@@ -281,7 +285,12 @@ func (r *Registry) register(meta DeviceMeta) {
 	meta.LastSeen = time.Now().Unix()
 	// 保留设备自报的授权状态（客户端鉴权，服务端不覆盖）
 	r.devices[meta.DeviceID] = &meta
+	onOnline := r.onOnline
 	r.mu.Unlock()
+	// 先回调（可能注册 device/<id> 输出通道），再发变更通知。
+	if onOnline != nil {
+		onOnline(meta)
+	}
 	r.notifyChange(meta.DeviceID)
 }
 
@@ -291,8 +300,25 @@ func (r *Registry) markOffline(id string) {
 		m.Online = false
 	}
 	delete(r.conns, id)
+	onOffline := r.onOffline
 	r.mu.Unlock()
+	if onOffline != nil {
+		onOffline(id)
+	}
 	r.notifyChange(id)
+}
+
+// SetPresenceHandler 注册设备上线/下线回调。
+//
+// 为什么不用 ChangeChan：那是 `select { case ch <- id: default: }`，缓冲满了会**丢事件**
+// （设备上下线是要跟"注册/注销输出通道"绑定的，丢一次就会留下一个死通道或漏注册）。
+// 这里同步调用，且在**释放锁之后**调 —— 回调内部会回查 registry（Get/List），
+// 持锁调用会自己锁死自己。
+func (r *Registry) SetPresenceHandler(onOnline func(DeviceMeta), onOffline func(string)) {
+	r.mu.Lock()
+	r.onOnline = onOnline
+	r.onOffline = onOffline
+	r.mu.Unlock()
 }
 
 func (r *Registry) notifyChange(id string) {

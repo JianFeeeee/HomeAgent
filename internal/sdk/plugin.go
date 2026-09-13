@@ -50,6 +50,7 @@ const (
 
 type APIRegistrar = pubsdk.APIRegistrar
 type OutputChannelRegistrar = pubsdk.OutputChannelRegistrar
+type OutputChannelUnregistrar = pubsdk.OutputChannelUnregistrar
 type InputChannelRegistrar = pubsdk.InputChannelRegistrar
 type ChannelDef = pubsdk.ChannelDef
 
@@ -284,20 +285,21 @@ type AudioURL = pubsdk.AudioURL
 
 // SDKConfig holds all dependencies for creating a PluginSDK.
 type SDKConfig struct {
-	IOManager  *agentIO.IOManager
-	EventBus   *events.Bus
-	Memory     MemoryAPI
-	TextMemory TextMemoryAPI
-	DocMemory  DocMemoryAPI
-	Knowledge  KnowledgeAPI
-	LLM        LLMAPI
-	Settings   SettingsAPI
-	RegTool    ToolRegistrar
-	RegStage   StageRegistrar
-	RegAPI     APIRegistrar
-	RegOutput  OutputChannelRegistrar
-	RegInput   InputChannelRegistrar
-	PluginMgr  PluginManager
+	IOManager      *agentIO.IOManager
+	EventBus       *events.Bus
+	Memory         MemoryAPI
+	TextMemory     TextMemoryAPI
+	DocMemory      DocMemoryAPI
+	Knowledge      KnowledgeAPI
+	LLM            LLMAPI
+	Settings       SettingsAPI
+	RegTool        ToolRegistrar
+	RegStage       StageRegistrar
+	RegAPI         APIRegistrar
+	RegOutput      OutputChannelRegistrar
+	RegOutputUnreg OutputChannelUnregistrar
+	RegInput       InputChannelRegistrar
+	PluginMgr      PluginManager
 
 	Status     StatusAPI
 	Supervisor SupervisorAPI
@@ -315,6 +317,9 @@ func New(name string, cfg SDKConfig) *PluginSDK {
 	}
 	if cfg.RegInput != nil {
 		base.SetInputChannelRegistrar(cfg.RegInput)
+	}
+	if cfg.RegOutputUnreg != nil {
+		base.SetOutputChannelUnregistrar(cfg.RegOutputUnreg)
 	}
 	base.SetMemoryAPI(cfg.Memory)
 	base.SetTextMemoryAPI(cfg.TextMemory)
