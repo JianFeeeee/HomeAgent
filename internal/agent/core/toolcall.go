@@ -61,6 +61,8 @@ func (a *Agent) executeToolCallInner(tc agentAPI.ToolCall, channel string) strin
 		return a.executeOutputSendTool(tc)
 	case tc.Name == "output_list_channels":
 		return a.executeOutputListChannels()
+	case tc.Name == "input_channels":
+		return a.executeInputChannels(tc)
 	case tc.Name == "plgreload":
 		return a.executePluginReload()
 	case tc.Name == "get_plugin_tools":

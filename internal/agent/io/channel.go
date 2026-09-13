@@ -96,13 +96,13 @@ type OutputEvent struct {
 }
 
 type IOManager struct {
-	mu            sync.RWMutex
-	devices       map[string]Device
-	inputCh       chan *InputEvent
-	interruptCh   chan *InputEvent
-	outputCh      chan *OutputEvent
-	nextReqID     int64
-	inputChannels map[string]ChannelDef
+	mu          sync.RWMutex
+	devices     map[string]Device
+	inputCh     chan *InputEvent
+	interruptCh chan *InputEvent
+	outputCh    chan *OutputEvent
+	nextReqID   int64
+	channelReg  *ChannelRegistry
 
 	// toolBlocks：插件工具注入多模态内容块，process.go 在下一条 tool message 时消费。
 	// 用 interface{}[] 避免 import api.ContentBlock 导致的循环依赖。
@@ -112,11 +112,11 @@ type IOManager struct {
 
 func NewIOManager() *IOManager {
 	return &IOManager{
-		devices:       make(map[string]Device),
-		inputCh:       make(chan *InputEvent, 256),
-		interruptCh:   make(chan *InputEvent, 64),
-		outputCh:      make(chan *OutputEvent, 256),
-		inputChannels: make(map[string]ChannelDef),
+		devices:     make(map[string]Device),
+		inputCh:     make(chan *InputEvent, 256),
+		interruptCh: make(chan *InputEvent, 64),
+		outputCh:    make(chan *OutputEvent, 256),
+		channelReg:  NewChannelRegistry(),
 	}
 }
 
@@ -444,26 +444,57 @@ func (m *IOManager) EmitTextTo(target, outputChannel, text string) {
 func (m *IOManager) InputChan() <-chan *InputEvent   { return m.inputCh }
 func (m *IOManager) OutputChan() <-chan *OutputEvent { return m.outputCh }
 
-// RegisterInputChannel 注册输入通道的记忆行为
+// RegisterInputChannel 注册一个 inputch（不带插件归属，兼容旧调用）。
+//
+// inputch 是**最基本的输入路由单位**；一个插件可以注册多个。
+// 新代码请用 RegisterInputChannelFrom 以便登记归属插件（可追溯）。
 func (m *IOManager) RegisterInputChannel(name string, def ChannelDef) {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	m.inputChannels[name] = def
+	_ = m.RegisterInputChannelFrom("", name, def)
 }
 
-// UnregisterInputChannel 注销输入通道
+// RegisterInputChannelFrom 注册一个 inputch 并登记归属插件。
+func (m *IOManager) RegisterInputChannelFrom(plugin, name string, def ChannelDef) error {
+	return m.channelReg.Register(InputChannel{Name: name, Plugin: plugin, Def: def})
+}
+
+// UnregisterInputChannel 注销一个 inputch。
 func (m *IOManager) UnregisterInputChannel(name string) {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	delete(m.inputChannels, name)
+	m.channelReg.Unregister(name)
 }
 
-// GetInputChannelDef 查询输入通道的记忆行为定义
+// AssignInputChannel 把一个 inputch 划给某个 agent（见 ChannelRegistry.Assign）。
+func (m *IOManager) AssignInputChannel(name, agentID string, capacity int) error {
+	return m.channelReg.Assign(name, agentID, capacity)
+}
+
+// SetChannelRegistry 注入一份**共享的**登记表（根 agent 与驻留子共用同一份）。
+func (m *IOManager) SetChannelRegistry(r *ChannelRegistry) {
+	if r == nil {
+		return
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.channelReg = r
+}
+
+// ChannelRegistry 返回底层登记表（只读用途；可直接读 Views）。
+func (m *IOManager) ChannelRegistry() *ChannelRegistry { return m.channelReg }
+
+// InputChannels 返回全部已注册 inputch（按名字排序）。
+func (m *IOManager) InputChannels() []InputChannel { return m.channelReg.List() }
+
+// LookupInputChannel 查询单个 inputch 的完整登记记录。
+func (m *IOManager) LookupInputChannel(name string) (InputChannel, bool) {
+	return m.channelReg.Lookup(name)
+}
+
+// GetInputChannelDef 查询 inputch 的记忆行为定义。
 func (m *IOManager) GetInputChannelDef(name string) (ChannelDef, bool) {
-	m.mu.RLock()
-	defer m.mu.RUnlock()
-	def, ok := m.inputChannels[name]
-	return def, ok
+	ch, ok := m.channelReg.Lookup(name)
+	if !ok {
+		return ChannelDef{}, false
+	}
+	return ch.Def, true
 }
 
 func (m *IOManager) GetAllTools() []ToolDef {
