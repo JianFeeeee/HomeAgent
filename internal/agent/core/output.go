@@ -16,6 +16,11 @@ func (a *Agent) executeOutputSendTool(tc agentAPI.ToolCall) string {
 	if channel == "" || payload == "" || rawType == "" {
 		return "工具名称格式: output_send__{channel}，payload 和 type 不能为空"
 	}
+	// 授权闸（纵深防御）：模型可能凭名字直接调未授权的输出门。
+	if !a.IsOutputAllowed(channel) {
+		return fmt.Sprintf("通道 [%s] 未授权给本 agent。可用通道见 output_list_channels", channel)
+	}
+
 	meta, _ := tc.Arguments["meta"].(string)
 
 	caps := a.io.GetChannelCapabilities(channel)
@@ -146,7 +151,14 @@ func (a *Agent) executeOutputListChannels() string {
 		if ch.OutputCaps == 0 {
 			continue
 		}
-		parts = append(parts, fmt.Sprintf("  - %s: [%s] %s", ch.Name, ch.OutputCaps.String(), ch.Description))
+		if !a.IsOutputAllowed(ch.Name) {
+			continue
+		}
+		line := fmt.Sprintf("  - %s: [%s] %s", ch.Name, ch.OutputCaps.String(), ch.Description)
+		if t, ok := a.ResolveOutputTarget(ch.Name); ok {
+			line += fmt.Sprintf("（目标: %s / inputch %s）", orDash(t.AgentID), orDash(t.InputCh))
+		}
+		parts = append(parts, line)
 		for _, t := range ch.Tools {
 			parts = append(parts, fmt.Sprintf("     工具: %s - %s", t.Name, t.Description))
 		}

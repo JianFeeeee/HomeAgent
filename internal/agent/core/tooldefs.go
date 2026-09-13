@@ -580,6 +580,11 @@ func (a *Agent) buildToolDefs() []interface{} {
 		if ch.Type != agentIO.DeviceOutput && ch.Type != agentIO.DeviceIO {
 			continue
 		}
+		// 输出通道授权（设计 §4.4/R2）：默认完整授权；父可用白名单收窄子的输出能力。
+		// 未授权就不生成 output_send__X —— 模型看不到它，自然不会调。
+		if !a.IsOutputAllowed(ch.Name) {
+			continue
+		}
 		capStr := a.io.GetChannelCapabilities(ch.Name).String()
 		desc := ch.Description
 		if desc == "" {

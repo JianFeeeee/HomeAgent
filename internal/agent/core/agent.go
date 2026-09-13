@@ -68,6 +68,9 @@ type Agent struct {
 	// 为 nil 时门禁与工具都静默关闭（例如单测里不接配置的场景）。
 	personaStore PersonaStore
 
+	// 被授权的输出通道集合（空 = 完整授权，见 AgentConfig.AllowedOutputs）。
+	allowedOutputs []string
+
 	// 插件注册表（用于 plgreload）
 	pluginReg *plugin.Registry
 	pluginDir string
@@ -200,12 +203,17 @@ type AgentConfig struct {
 	MultimodalSpace vector.MultimodalEmbedder
 	// EmbeddingProvider / EmbeddingError 是向量空间的配置身份与打开失败原因，
 	// 供 healthcheck_kernel 状态报告区分「未配置 / 打开失败 / 已启用」。
-	EmbeddingProvider  string
-	EmbeddingError     string
-	FusionCfg          CrossModalFusionConfig // 跨模态融合权重；零值用默认
-	Personality        *agentPkg.Personality
-	PersonaStore       PersonaStore // 人格设定的读写面（首启门禁 + persona_set 工具）
-	PluginReg          *plugin.Registry
+	EmbeddingProvider string
+	EmbeddingError    string
+	FusionCfg         CrossModalFusionConfig // 跨模态融合权重；零值用默认
+	Personality       *agentPkg.Personality
+	PersonaStore      PersonaStore // 人格设定的读写面（首启门禁 + persona_set 工具）
+	PluginReg         *plugin.Registry
+	// AllowedOutputs 是本 agent **被授权的输出通道集合**（设计 §4.4 / R2）。
+	//
+	// nil 或空 = **完整授权**（默认）；非空 = 白名单，只允许列出的输出通道。
+	// 父 agent 创建驻留子时用它收窄子的输出能力。
+	AllowedOutputs     []string
 	PluginDir          string
 	DistillInterval    time.Duration
 	ArchiveInterval    time.Duration          // 冷文档归档间隔（L2→L3），0 则使用 DistillInterval
@@ -296,6 +304,7 @@ func New(cfg AgentConfig) *Agent {
 		mediaStore:        cfg.MediaStore,
 		personality:       cfg.Personality,
 		personaStore:      cfg.PersonaStore,
+		allowedOutputs:    cfg.AllowedOutputs,
 		pluginReg:         cfg.PluginReg,
 		pluginDir:         cfg.PluginDir,
 		distillInterval:   cfg.DistillInterval,
@@ -343,6 +352,31 @@ func (a *Agent) Stop() {
 }
 
 func (a *Agent) ID() types.AgentID { return a.id }
+
+// IsOutputAllowed 报告某个输出通道是否被授权给本 agent。
+//
+// 默认（未配置白名单）= **完整授权**；这是"默认完整授权、父可收窄"的落点。
+func (a *Agent) IsOutputAllowed(channel string) bool {
+	if len(a.allowedOutputs) == 0 {
+		return true
+	}
+	for _, c := range a.allowedOutputs {
+		if c == channel {
+			return true
+		}
+	}
+	return false
+}
+
+// ResolveOutputTarget 解析输出通道的投递目标（agent + inputch）。
+//
+// ok=false 表示该输出通道由传输层（device 通道，如 qq/webui）自行处理。
+func (a *Agent) ResolveOutputTarget(channel string) (agentIO.OutputTarget, bool) {
+	if a.io == nil || a.io.ChannelRegistry() == nil {
+		return agentIO.OutputTarget{}, false
+	}
+	return a.io.ChannelRegistry().ResolveOutputTarget(channel)
+}
 
 // isDuplicateInput 判断是否为短窗口内的重复输入（防 webui/GUI 断线重连消息重放）。
 // key=source+"|"+content；窗口内重复返回 true 并刷新时间戳（持续轰炸时保持拦截）。
