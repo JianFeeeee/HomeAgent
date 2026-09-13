@@ -742,7 +742,7 @@ func (r *ConfigRegistry) seedCoreDefs(dataDir string) {
 	reg(ConfigDef{Key: "core.agent.workdir", Default: "", Type: "string", DisplayName: "工作目录", Description: "Agent 命令执行的默认工作目录（如 cmd_run 工具的 fallback），留空使用内核所在目录", Category: "agent"})
 	reg(ConfigDef{Key: "core.agent.embedding_model_path", Default: "", Type: "string", DisplayName: "预训练词嵌入模型路径", Description: "预训练词嵌入模型路径（word2vec 文本格式），支持逗号分隔多个模型。路径后可加 #topN 规格只加载前 N 个词向量（如 /data/cc.zh.300.vec#top50000）以控制常驻内存，词频降序命中覆盖绝大部分文本。空则使用 TF-IDF 回退。修改后需重启生效。", Category: "agent"})
 	reg(ConfigDef{Key: "core.agent.onnx_model_path", Default: "", Type: "string", DisplayName: "ONNX 模型路径", Description: "依存句法分析 ONNX 模型文件路径。留空使用二进制内嵌模型/规则引擎。修改后需重启生效。", Category: "agent"})
-	reg(ConfigDef{Key: "core.agent.system_prompt", Default: "", Type: "text", DisplayName: "系统身份提示词", Description: "Agent 的系统提示词，定义身份和行为规则。留空则使用编译时内置默认值。修改后需重启生效。", Category: "agent"})
+	reg(ConfigDef{Key: "core.agent.system_prompt", Default: "", Type: "text", DisplayName: "系统身份提示词", Description: "Agent 的系统提示词，定义身份和行为规则。留空则使用编译时内置默认值。支持版本占位符（随构建实时展开，避免写死版本号随发版说谎）：{{kernel_version}}、{{kernel_commit}}、{{sdk_version}}。修改后需重启生效。", Category: "agent"})
 
 	reg(ConfigDef{Key: "core.input_processing.image.fallback_provider", Default: "", Type: "string", DisplayName: "图片回退提供商", Description: "当主 LLM 不支持图片处理时使用的提供商（留空则自动降级为文字描述）", Category: "input"})
 	reg(ConfigDef{Key: "core.input_processing.image.fallback_model", Default: "", Type: "string", DisplayName: "图片回退模型", Description: "图片回退提供商使用的模型名", Category: "input"})
