@@ -1,9 +1,9 @@
 package remotedevice
 
-// 设备输出通道：把"agent 主动发给设备"做成**每设备一个输出通道** `device/<id>`。
+// 设备输出通道：把"agent 主动发给设备"做成**每设备一个输出通道** `device-<id>`。
 //
 // 为什么是输出通道而不是再加一批工具：
-//   - **寻址**：`output_send__device/<id>` 直接指名道姓；模型看 `output_list_channels`
+//   - **寻址**：`output_send__device-<id>` 直接指名道姓；模型看 `output_list_channels`
 //     就知道当前有哪些设备在线，不必先 `devicedetect` 再往参数里塞 device_id。
 //   - **能力**：caps 由设备声明的 caps 映射，**内核**在发送前就按 caps 拦
 //     （把图片发给只支持文本的音箱会被拒，而不是等设备侧报错）。
@@ -15,7 +15,9 @@ package remotedevice
 // 它们的返回值（图像/命令输出/状态）必须进模型上下文，做成通道会丢掉这个语义。
 
 import (
+	"crypto/sha1"
 	"encoding/base64"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"log"
@@ -76,14 +78,75 @@ func deviceOutputCaps(caps []string, kind string) agentIO.OutputCapability {
 	return out
 }
 
-// deviceChannelName 是设备输出（也是输入）通道名：`device/<id>`。
+// deviceChannelName 由**设备自报的 id** 派生一个合规且唯一的通道名：`device-<派生值>`。
 //
 // 入站与出站**同名**：两者指的是同一台设备，分成两个名字只会让模型与授权表更难对。
-func deviceChannelName(id string) string { return "device/" + id }
+//
+// 为什么不能直接用 id：通道名会被内核拼进 LLM 的**函数名**（`output_send__<通道名>`），
+// 上游规范是 `^[a-zA-Z0-9_-]{1,64}$`；而设备 id 是**外部输入**（设备自己声明），
+// 可能含空格/非 ASCII/超长。违规的后果不是"这个工具不能用"，而是**整条请求被 400 拒绝** ——
+// 实测把生产打挂：`Invalid 'tools[299].function.name'`，网关 auto tier 全链条失败，
+// 内核只能报"所有 provider 都失败"，表现成"整个 agent 不说话了"。
+//
+// 派生规则（确定性，同一 id 永远同名）：
+//  1. 保留 [A-Za-z0-9_-]，其它字符折成 '-'；折叠后为空则用 "dev"
+//  2. 截断到 maxDeviceChannelSuffix 字符（给 "device-" 与短哈希留余量）
+//  3. 若发生截断，或该名字已被**另一个** id 占用，则追加 id 的 6 位短哈希
+//
+// 设备 id 本身仍用于路由与日志（真名不丢），通道名只是它派生的标识符。
+func (p *Plugin) deviceChannelName(id string) string {
+	p.devChansMu.Lock()
+	defer p.devChansMu.Unlock()
+	if p.devChans == nil {
+		p.devChans = make(map[string]string)
+	}
+	if name, ok := p.devChans[id]; ok {
+		return name
+	}
+	var b strings.Builder
+	for _, r := range id {
+		switch {
+		case r >= 'a' && r <= 'z', r >= 'A' && r <= 'Z', r >= '0' && r <= '9', r == '_', r == '-':
+			b.WriteRune(r)
+		default:
+			b.WriteByte('-')
+		}
+	}
+	base := b.String()
+	if base == "" {
+		base = "dev"
+	}
+	truncated := false
+	if len(base) > maxDeviceChannelSuffix {
+		base = base[:maxDeviceChannelSuffix]
+		truncated = true
+	}
+	name := "device-" + base
+	// 撞名检查：不同 id 折出同一个名字时必须可区分
+	for otherID, otherName := range p.devChans {
+		if otherName == name && otherID != id {
+			truncated = true
+			break
+		}
+	}
+	if truncated {
+		sum := sha1.Sum([]byte(id))
+		name += "-" + hex.EncodeToString(sum[:3])
+	}
+	p.devChans[id] = name
+	return name
+}
+
+const (
+	// maxDeviceChannelSuffix 是通道名主体的长度上限。
+	// 预算：上游函数名上限 64 = "output_send__"(13) + "device-"(7) + 主体 + "-"+短哈希(7)
+	// ⇒ 主体最多 37；取 32 留余量（改名/前缀变动不会立刻越界）。
+	maxDeviceChannelSuffix = 32
+)
 
 // wireDeviceChannels 把"设备上下线"接到通道的登记/注销上。
 //
-// 一台设备 = 一对**同名**通道 `device/<id>`：入站（设备上报 → agent）与出站
+// 一台设备 = 一对**同名**通道 `device-<id>`：入站（设备上报 → agent）与出站
 // （agent → 设备）。用**同步回调**而不是 ChangeChan（后者是 select+default，
 // 缓冲满会丢事件；丢一次就留下死通道或漏注册）。
 //
@@ -92,14 +155,14 @@ func deviceChannelName(id string) string { return "device/" + id }
 func (p *Plugin) wireDeviceChannels() {
 	p.registry.SetPresenceHandler(
 		func(meta DeviceMeta) {
-			_ = p.sdk.RegisterInputChannel(deviceChannelName(meta.DeviceID), sdk.ChannelDef{})
+			_ = p.sdk.RegisterInputChannel(p.deviceChannelName(meta.DeviceID), sdk.ChannelDef{})
 			p.ensureDeviceOutputChannel(meta.DeviceID)
 		},
 		func(id string) { p.dropDeviceOutputChannel(id) },
 	)
 }
 
-// ensureDeviceOutputChannel 给在线设备注册输出通道 device/<id>（幂等）。
+// ensureDeviceOutputChannel 给在线设备注册输出通道 device-<id>（幂等）。
 func (p *Plugin) ensureDeviceOutputChannel(id string) {
 	if p.sdk == nil || id == "" {
 		return
@@ -108,7 +171,7 @@ func (p *Plugin) ensureDeviceOutputChannel(id string) {
 	if !ok || !meta.Online {
 		return
 	}
-	ch := deviceChannelName(id)
+	ch := p.deviceChannelName(id)
 	caps := deviceOutputCaps(meta.Caps, meta.Kind)
 	desc := fmt.Sprintf("远程设备 %s（%s）：agent 主动向该设备发送内容；能力位 %s",
 		id, fallback(meta.Name, meta.Kind), agentIO.OutputCapability(caps).String())
@@ -130,7 +193,7 @@ func (p *Plugin) dropDeviceOutputChannel(id string) {
 	if p.sdk == nil || id == "" {
 		return
 	}
-	ch := deviceChannelName(id)
+	ch := p.deviceChannelName(id)
 	if err := p.sdk.UnregisterOutputChannel(ch); err != nil {
 		p.logf("unregister output channel %s: %v", ch, err)
 		return
@@ -247,9 +310,9 @@ func (d *devicectlDevice) output(args map[string]interface{}) (interface{}, erro
 			ids = append(ids, m.DeviceID)
 		}
 		if len(ids) == 0 {
-			return nil, fmt.Errorf("devicectl 需要 meta.device_id 才能投递；当前没有在线设备（device_list_channels 可看每台设备的 device/<id> 通道）")
+			return nil, fmt.Errorf("devicectl 需要 meta.device_id 才能投递；当前没有在线设备（device_list_channels 可看每台设备的 device-<id> 通道）")
 		}
-		return nil, fmt.Errorf("devicectl 需要 meta.device_id（或直接用通道 device/<id>）；当前在线设备: %s", strings.Join(ids, ", "))
+		return nil, fmt.Errorf("devicectl 需要 meta.device_id（或直接用通道 device-<id>）；当前在线设备: %s", strings.Join(ids, ", "))
 	}
 	return pushToDevice(d.reg, deviceID, args)
 }

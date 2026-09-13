@@ -37,6 +37,11 @@ type Plugin struct {
 	token    string
 	sdk      *sdk.PluginSDK
 	dev      *devicectlDevice
+
+	// devChansMu/devChans 维护"设备自报 id → 派生的通道名"。
+	// 设备 id 是外部输入，不能直接进通道名（见 outputch.go 的 deviceChannelName）。
+	devChansMu sync.Mutex
+	devChans   map[string]string
 }
 
 func New(name string) *Plugin {
@@ -124,7 +129,7 @@ func (p *Plugin) Start(s *sdk.PluginSDK) error {
 	//
 	// **注意**：agent 的输出**不会**被自动转回设备 —— 主动转发只有 webui 与 cli 两个
 	// 交互界面（它们把最终回复渲染成对话气泡是本职）。设备要走
-	// `output_send__device/<id>`（agent 主动调用），这才与"输出是 agent 的主动调用"一致。
+	// `output_send__device-<id>`（agent 主动调用），这才与"输出是 agent 的主动调用"一致。
 	// 节流：同设备同类型事件 10s 内去重，防传感器风暴。
 	lastEventAt := map[string]time.Time{}
 	var eventMu sync.Mutex
@@ -159,9 +164,10 @@ func (p *Plugin) Start(s *sdk.PluginSDK) error {
 
 		log.Printf("[remotedevice] event from %s: %s", deviceID, evtType)
 		if p.sdk != nil {
-			// 设备通道 device/<id> 是动态的：设备首次上报时**懒登记** inputch
-			// （Register 幂等），父 agent 才能把它划给驻留子。
-			devCh := "device/" + deviceID
+			// 设备通道 device-<id> 是动态的（分隔符用 - 而非 /，见 deviceChannelName 的说明：
+			// 通道名会进 LLM 函数名，必须满足 ^[a-zA-Z0-9_-]{1,64}$）。
+			// 首次上报时**懒登记** inputch（Register 幂等），父 agent 才能把它划给驻留子。
+			devCh := p.deviceChannelName(deviceID)
 			_ = p.sdk.RegisterInputChannel(devCh, sdk.ChannelDef{})
 			// 异步注入：不阻塞 WS 读循环；回复路由回 device/{id} 输出通道
 			p.sdk.InjectInput(devCh, devCh, "text", map[string]interface{}{"content": text})
