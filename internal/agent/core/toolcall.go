@@ -63,6 +63,12 @@ func (a *Agent) executeToolCallInner(tc agentAPI.ToolCall, channel string) strin
 		return a.executeOutputListChannels()
 	case tc.Name == "input_channels":
 		return a.executeInputChannels(tc)
+	case tc.Name == "resident_agents":
+		return a.executeResidentAgents(tc)
+	case tc.Name == "notify_parent":
+		return a.executeNotifyParent(tc)
+	case tc.Name == "inputch_note":
+		return a.executeInputchNote(tc)
 	case tc.Name == "plgreload":
 		return a.executePluginReload()
 	case tc.Name == "get_plugin_tools":

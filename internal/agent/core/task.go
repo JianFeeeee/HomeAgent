@@ -396,6 +396,11 @@ func (a *Agent) prepareInputTask(evt *agentIO.InputEvent) (*TaskFrame, taskTermi
 		log.Printf("[agent] pruned %d low-relevance events to document memory", archived)
 	}
 
+	// 本轮 inputch（处理表按它记账）+ contextfull 检测（只有驻留子设了钩子）。
+	a.tableMu.Lock()
+	a.currentInputch = outputChannelOf(evt)
+	a.tableMu.Unlock()
+
 	if !isInterrupt {
 		a.context.Append(ContextEvent{
 			Timestamp: start,
@@ -433,6 +438,10 @@ func (a *Agent) finishInputTask(f *TaskFrame, out stepOutcome) {
 		f.Terminal = terminalError
 		return
 	}
+
+	// inputch 处理表：本轮**未主动写入**时由系统自动写（保证每轮必有记录）。
+	// 只有驻留子会用到（根 agent 的 children 为 0 时这只是几个空操作）。
+	a.autoRecordInputch(f)
 
 	elapsed := time.Since(f.StartedAt)
 	log.Printf("[agent] %s from %s → response (%dms, tools=%v)",
@@ -526,6 +535,10 @@ func (a *Agent) stepPrepare(f *TaskFrame) stepOutcome {
 			}
 		}
 	}
+
+	// 上下文占满检测：此刻 f.Msgs 已建好（含 system + timeline + 本轮输入）。
+	// 只有驻留子设了 onContextFull ⇒ 对根 agent 是 no-op。
+	a.checkContextFull(f)
 
 	f.Step = StepLLM
 	return outcomeContinue

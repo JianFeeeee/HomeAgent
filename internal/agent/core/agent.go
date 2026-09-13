@@ -39,13 +39,34 @@ type Agent struct {
 	memory          *memory.GraphDB
 	// graph 是本 agent 的**图记忆共同面**（根 = 同一个 GraphDB；驻留子 = LightMemory）。
 	// 整理面仍走 memory 字段（子为 nil ⇒ 既有的 nil 关卡自动禁用整理面）。
-	graph        GraphMemory
-	indexer      *memory.Indexer
-	tracker      *tracker.Tracker
-	context      *RelevanceContext
-	systemPrompt string
-	ctx          context.Context
-	cancel       context.CancelFunc
+	graph GraphMemory
+
+	// kernelSource/parentID/taskPrompt/dataDir：驻留子相关的层级信息（见 AgentConfig）。
+	kernelSource string
+	parentID     string
+	taskPrompt   string
+	dataDir      string
+
+	// 驻留子（父侧）：登记表 + 子侧钩子。
+	residentMu sync.Mutex
+	residents  map[string]*residentChild
+
+	// 子侧：向父发消息（L3）与 contextfull 上报（父侧内核级事件）的钩子。
+	notifyParent    func(text string)
+	onContextFull   func()
+	ctxFullSignaled bool
+
+	// 子侧：inputch 处理表（子持有，父 pull）。
+	tableMu        sync.Mutex
+	inputchTable   []InputchRecord
+	inputchPending *InputchRecord
+	currentInputch string
+	indexer        *memory.Indexer
+	tracker        *tracker.Tracker
+	context        *RelevanceContext
+	systemPrompt   string
+	ctx            context.Context
+	cancel         context.CancelFunc
 
 	// 文档记忆（第二层）
 	docStore *document.Store
@@ -217,6 +238,18 @@ type AgentConfig struct {
 	Personality       *agentPkg.Personality
 	PersonaStore      PersonaStore // 人格设定的读写面（首启门禁 + persona_set 工具）
 	PluginReg         *plugin.Registry
+	// KernelSource 是本 agent 的"上级"（驻留子的父）。
+	//
+	// 设计 §6.1：某个 agent 的 L4 只属于它的**内核** —— 根 agent 的内核是内核自身与
+	// 内核级插件；驻留子的内核是**父 agent**。因此子的 KernelSource = 父 ⇒ 只有父
+	// 能在子的阶梯上产生 L4（父的"发送消息"）。
+	KernelSource string
+	// ParentID 是父 agent 的 id（空 = 根 agent）。子用它判断自己是不是驻留子。
+	ParentID string
+	// DataDir 是本 agent 的数据目录；创建驻留子时用它派生 temp 图记忆路径。
+	DataDir string
+	// TaskPrompt 是在固定提示词之上注入的**任务提示词**（驻留子创建时给定）。
+	TaskPrompt string
 	// AllowedOutputs 是本 agent **被授权的输出通道集合**（设计 §4.4 / R2）。
 	//
 	// nil 或空 = **完整授权**（默认）；非空 = 白名单，只允许列出的输出通道。
@@ -300,6 +333,10 @@ func New(cfg AgentConfig) *Agent {
 		io:                cfg.IO,
 		memory:            cfg.Memory,
 		graph:             graphMemoryOf(cfg),
+		kernelSource:      cfg.KernelSource,
+		parentID:          cfg.ParentID,
+		taskPrompt:        cfg.TaskPrompt,
+		dataDir:           cfg.DataDir,
 		indexer:           cfg.Indexer,
 		tracker:           cfg.Tracker,
 		context:           rc,
@@ -357,6 +394,8 @@ func (a *Agent) Start() {
 }
 
 func (a *Agent) Stop() {
+	// 父退出**必须**销毁全部驻留子（设计 §10 硬约束：子不得比父活得久、不留孤儿）。
+	a.StopResidents()
 	a.cancel()
 }
 

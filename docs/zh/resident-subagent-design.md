@@ -456,6 +456,16 @@ type GraphMemory interface {
 - 轻量 profile 另外不接线的装配：doc 记忆 / context 动态上下文（`pruneOnInput` 等）/
   蒸馏 / 归档 / 关系复审 / 实体合并定时器 / consolidation / 人格门禁。
 
+### 16.0.1 工具面（已实现）
+
+| 工具 | 谁用 | 作用 |
+|---|---|---|
+| `resident_agents` | 父 | **单工具多动作**：`list` / `create`（划入 inputch + 授权输出通道 + 注入任务提示词）/ `send`（对子 = L4）/ `inspect`（pull 处理表，不打断）/ `compress`（保留）/ `reclaim`（取消 + 合入）/ `destroy` |
+| `notify_parent` | 子 | 主动汇报（父侧 = **L3 中断**） |
+| `inputch_note` | 子 | 主动写本轮 inputch 处理信息（写了就不自动写） |
+
+> 声明是条件式的：父（`parentID == ""`）才有 `resident_agents`；子才有 `notify_parent` / `inputch_note`。
+
 ### 16.1 N2 的记忆面清单（现状）
 
 `internal/memory/` 下需要加 space 维度的面：
@@ -550,11 +560,11 @@ type GraphMemory interface {
 | — | 其余记忆面（doc 记忆 / 动态上下文 / 知识库 / 文本 / 媒体 / 社交）：**v1 不加 space**（子不可达） | 由 S13/S14 隐含 |
 | **N2c** | ~~Agent 级 profile~~ **已完成**：`GraphMemory` 窄接口（Recall/Commit）+ `a.graph` 共同面；子 `a.memory = nil` ⇒ 22 处既有关卡自动禁用整理面 | S13–S15 ✅ |
 | **N2d** | ~~晋升与丢弃~~ **数据面已完成**：`GraphDB.ExportTriples` + 复用 `Commit` 合入（父选哪几条）；`LightMemory.Close()` 丢弃 temp | S11 数据面 ✅ |
-| **N3** | **驻留子生命周期**：创建 / 销毁 / 登记表 / 父退出清理 | S12、S16 |
-| **N4** | **跨 agent 投递**：子→父 L3、父→子 L4（+ `isKernelLevelSource` 分层） | S4、S6、S17 |
-| **N5** | **inputch 处理表**：主动写入工具 + 自动写兜底 + 生命周期 | S8、S9 |
-| **N6** | **contextfull**：检测 + L4 通知（带子标识）+ 三处置（压缩/回收/销毁） | S5、S10、S11 |
-| **N7** | **e2e + 压力**：父子互中断、contextfull 处置矩阵、多子并发、父退出清理 | S1–S18 全绿；`-race` 干净 |
+| **N3** | ~~驻留子生命周期~~ **已完成**：`SpawnResident` / `DestroyResident` / `Residents()`（登记表）/ `Stop()` 内 `StopResidents()`（父退出不留孤儿）/ 归还划入的 inputch / 丢弃 temp 目录 | S12、S16 ✅ |
+| **N4** | ~~跨 agent 投递~~ **已完成**：子→父 `notify_parent`（L3，投父的 `child/<id>` inputch）；父→子 `SendToResident`（L4，`KernelSource` 分层使父在子的阶梯上是唯一 L4 来源）；子的 contextfull 经 `raiseKernelInterrupt` 以 L4 上报父 | S4、S6、S17、S19、S20 ✅ |
+| **N5** | ~~inputch 处理表~~ **已完成**：`inputch_note`（主动写优先）+ `autoRecordInputch`（轮末兜底）+ `CompressResident` 清表 + 父 `ResidentTable(id)` pull 查看 | S8、S9 ✅ |
+| **N6** | ~~contextfull~~ **已完成**：判据 = **未裁剪的积累上下文**超过窗口 90%（不能用拼好的 `f.Msgs`——它被 token 预算封在 ~80% 窗口内，是永不成立的判据）；通知 = 父侧 L4（`child/<id>`）；三处置 = `CompressResident`（保留：`TrimKeepRecent` + 清表）/ `ReclaimResident`（取消：`ExportTriples` 选出后 `Commit` 进 main）/ `DestroyResident` | S5、S10、S11 ✅ |
+| **N7** | ~~e2e + 压力~~ **已完成**：`resident_test.go` 五项（生命周期/双向投递/处理表/contextfull 三处置/8 子×12 轮压力 + 双向汇报），`-race -count=3` 干净 | S1–S20 覆盖 ✅ |
 
 每步收尾命令：
 

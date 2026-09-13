@@ -686,14 +686,20 @@ func interruptLevel(evt *agentIO.InputEvent, privileged bool) Level {
 //
 // source 的约定是 `插件名` 或 `插件名/实例`（如 webui/<deviceID>），故取第一段。
 func (a *Agent) isKernelLevelSource(source string) bool {
-	if source == "" || a.pluginReg == nil {
+	if source == "" {
 		return false
 	}
 	name := source
 	if i := strings.IndexByte(name, '/'); i > 0 {
 		name = name[:i]
 	}
-	return a.pluginReg.IsBuiltinPlugin(name)
+	// ① 编译期内置插件（根 agent 的 L4 来源之一）。
+	if a.pluginReg != nil && a.pluginReg.IsBuiltinPlugin(name) {
+		return true
+	}
+	// ② **本 agent 的上级**（驻留子的父）—— 设计 §6.1 的 L4 通则：
+	//    子的阶梯上只有父能产生 L4，所以父的"发送消息"一定能打断子。
+	return a.kernelSource != "" && name == a.kernelSource
 }
 
 // parseInterruptLevel 解析插件声明的级别字符串（"L1".."L3"）。
