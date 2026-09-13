@@ -637,6 +637,30 @@ func (a *Agent) buildToolDefs() []interface{} {
 		},
 	})
 
+	tools = append(tools, map[string]interface{}{
+		"type": "function",
+		"function": map[string]interface{}{
+			"name": "input_channels",
+			"description": "查看 inputch（最基本的输入路由单位）：哪些已注册、谁注册的、" +
+				"各自划给了哪个 agent、容量与记忆策略。单工具多视图。",
+			"parameters": map[string]interface{}{
+				"type": "object",
+				"properties": map[string]interface{}{
+					"view": map[string]interface{}{
+						"type": "string",
+						"description": "all=全部已注册（默认）| mine=划给本 agent 的 | " +
+							"unassigned=尚未划出的 | by_agent=按归属分组的划分总览 | detail=单个详情",
+						"enum": []string{"all", "mine", "unassigned", "by_agent", "detail"},
+					},
+					"name": map[string]interface{}{
+						"type":        "string",
+						"description": "view=detail 时必填：inputch 名",
+					},
+				},
+			},
+		},
+	})
+
 	if a.pendingMedia != nil {
 		tools = append(tools, map[string]interface{}{
 			"type": "function",

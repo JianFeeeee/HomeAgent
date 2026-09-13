@@ -311,7 +311,9 @@ func (r *Registry) buildSDK(name string) *sdk.PluginSDK {
 		if r.iom == nil {
 			return nil
 		}
-		r.iom.RegisterInputChannel(chName, agentIO.ChannelDef(def))
+		// inputch 是最基本的输入路由单位：登记**归属插件**，便于父 agent 看清
+		// "哪个插件的哪个 inputch 划给了谁"（一个插件可注册多个 inputch）。
+		_ = r.iom.RegisterInputChannelFrom(name, chName, agentIO.ChannelDef(def))
 		r.noteChannel(name, chName, false)
 		return nil
 	}
