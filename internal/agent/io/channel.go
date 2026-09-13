@@ -507,6 +507,23 @@ func (m *IOManager) GetAllTools() []ToolDef {
 	return tools
 }
 
+// DeviceOfTool 返回提供该工具的**设备/输出通道名**（设备类工具才有）。
+//
+// 用途：设备类工具（device_ctl_*/screensee/computeruse/...）需要按"目标设备"
+// 做授权判断，调用方得先知道这个工具属于哪个设备通道。
+func (m *IOManager) DeviceOfTool(name string) (string, bool) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	for _, dev := range m.devices {
+		for _, t := range dev.Tools() {
+			if t.Name == name {
+				return dev.Name(), true
+			}
+		}
+	}
+	return "", false
+}
+
 func (m *IOManager) ExecuteTool(name string, args map[string]interface{}) (ret interface{}, err error) {
 	m.mu.RLock()
 	type nameDevice struct {

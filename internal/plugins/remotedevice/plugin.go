@@ -114,10 +114,17 @@ func (p *Plugin) Start(s *sdk.PluginSDK) error {
 		}
 	}
 
+	// ---- 设备通道随在线状态生灭（见 outputch.go 的 wireDeviceChannels）----
+	p.wireDeviceChannels()
+
 	// ---- 设备主动上报事件 → agent 注入 ----------------
 	// 摄像头发现异常/传感器报警等场景：设备经 WS op=event 上报，
-	// 插件将其格式化为文本经 SDK InjectText 异步注入 agent（source=device/{id}，
-	// 回复路由回 device/{id} 通道），同时发 EventBus 供 WebUI 展示。
+	// 插件将其格式化为文本经 SDK InjectText 异步注入 agent（source=device/{id}），
+	// 同时发 EventBus 供 WebUI 展示。
+	//
+	// **注意**：agent 的输出**不会**被自动转回设备 —— 主动转发只有 webui 与 cli 两个
+	// 交互界面（它们把最终回复渲染成对话气泡是本职）。设备要走
+	// `output_send__device/<id>`（agent 主动调用），这才与"输出是 agent 的主动调用"一致。
 	// 节流：同设备同类型事件 10s 内去重，防传感器风暴。
 	lastEventAt := map[string]time.Time{}
 	var eventMu sync.Mutex
@@ -299,6 +306,13 @@ func (p *Plugin) describeScreen(dataURL string, provider string) string {
 }
 
 func (p *Plugin) Stop() error {
+	// 注销全部设备通道：插件卸载/重载后这些通道不再有实现，
+	// 留着会让 output_list_channels 骗模型。
+	if p.sdk != nil {
+		for _, m := range p.registry.List() {
+			p.dropDeviceOutputChannel(m.DeviceID)
+		}
+	}
 	if p.server != nil {
 		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 		defer cancel()

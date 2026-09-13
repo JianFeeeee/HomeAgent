@@ -284,6 +284,13 @@ type InputChannelRegistrar func(name string, def ChannelDef) error
 // OutputChannelRegistrar registers an output channel that the output_send tool can use.
 type OutputChannelRegistrar func(name string, caps int, desc string, def ChannelDef, handler ToolHandler) error
 
+// OutputChannelUnregistrar 注销一个输出通道。
+//
+// 为什么需要它：输出通道不止有"启动时注册一次"的静态通道，还有**随外部资源生灭**的
+// 动态通道 —— 典型是远程设备：`device/<id>` 只在设备在线期间存在，设备掉线后
+// 必须注销，否则 output_list_channels 会一直列着它、模型会往一个死通道发消息。
+type OutputChannelUnregistrar func(name string) error
+
 // Output capability flags
 const (
 	CapText       = 1
@@ -296,22 +303,23 @@ const (
 // PluginSDK is the main API surface provided to plugins at runtime.
 // It wraps tool registration, settings, memory, knowledge, LLM, and IO injection.
 type PluginSDK struct {
-	name      string
-	regTool   ToolRegistrar
-	regStage  StageRegistrar
-	regAPI    APIRegistrar
-	regOutput OutputChannelRegistrar
-	regInput  InputChannelRegistrar
-	io        IOInjector
-	mem       MemoryAPI
-	textMem   TextMemoryAPI
-	docMem    DocMemoryAPI
-	know      KnowledgeAPI
-	llm       LLMAPI
-	sett      SettingsAPI
-	social    SocialAPI
-	events    EventSubscriber
-	plgMgr    PluginMgrAPI
+	name           string
+	regTool        ToolRegistrar
+	regStage       StageRegistrar
+	regAPI         APIRegistrar
+	regOutput      OutputChannelRegistrar
+	regOutputUnreg OutputChannelUnregistrar
+	regInput       InputChannelRegistrar
+	io             IOInjector
+	mem            MemoryAPI
+	textMem        TextMemoryAPI
+	docMem         DocMemoryAPI
+	know           KnowledgeAPI
+	llm            LLMAPI
+	sett           SettingsAPI
+	social         SocialAPI
+	events         EventSubscriber
+	plgMgr         PluginMgrAPI
 
 	// apiMu 保护上面这些由内核注入的 API 字段，以及 autoRestart。
 	//
@@ -487,6 +495,17 @@ func (s *PluginSDK) RegisterOutputChannel(name string, caps int, desc string, de
 	return nil
 }
 
+// UnregisterOutputChannel 注销一个输出通道（动态通道随资源生灭时必须调用）。
+func (s *PluginSDK) UnregisterOutputChannel(name string) error {
+	s.apiMu.RLock()
+	reg := s.regOutputUnreg
+	s.apiMu.RUnlock()
+	if reg != nil {
+		return reg(name)
+	}
+	return nil
+}
+
 // RegisterInputChannel registers an input channel with its memory behavior.
 //
 // 契约：**凡是用 InjectText*/InjectInput*/InjectInterrupt*(source, "<name>", ...)
@@ -515,6 +534,13 @@ func (s *PluginSDK) RegisterInputChannel(name string, def ChannelDef) error {
 func (s *PluginSDK) SetOutputChannelRegistrar(r OutputChannelRegistrar) {
 	s.apiMu.Lock()
 	s.regOutput = r
+	s.apiMu.Unlock()
+}
+
+// SetOutputChannelUnregistrar sets the output channel unregistrar (called by the core at startup).
+func (s *PluginSDK) SetOutputChannelUnregistrar(r OutputChannelUnregistrar) {
+	s.apiMu.Lock()
+	s.regOutputUnreg = r
 	s.apiMu.Unlock()
 }
 

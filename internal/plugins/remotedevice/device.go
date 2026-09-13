@@ -182,6 +182,9 @@ func (d *devicectlDevice) Tools() []agentIO.ToolDef {
 
 func (d *devicectlDevice) Execute(tool string, args map[string]interface{}) (interface{}, error) {
 	switch tool {
+	case "output":
+		// 出站：见 outputch.go。声明了 CapStructured 就必须真的能收输出。
+		return d.output(args)
 	case "devicedetect":
 		return d.detect(args)
 	case "device_ctl_status":

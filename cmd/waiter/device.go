@@ -72,6 +72,11 @@ func startDeviceBridge(addr, token string) error {
 		cmdRouter.Dispatch(reqID, command)
 	})
 
+	// agent 主动投递（output_send__device/<id>）→ 终端显示。
+	// 设备侧参考实现：文本/结构化直接打出来；二进制负载走 OnData（TTS 音频等）。
+	bridge.OnPush(func(reqID, typ, payload, meta string) {
+		printlnC("cyan", fmt.Sprintf("[push:%s] %s", typ, payload))
+	})
 	if err := bridge.Start(); err != nil {
 		return fmt.Errorf("device bridge: %w", err)
 	}

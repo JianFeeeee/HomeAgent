@@ -46,6 +46,30 @@ export KCLI_KEY=$(sqlite3 $DATA/config.db "select value from config_webui where 
 ./stress.py $DATA/cli.sock "$KCLI_KEY" 1 1 0 0 resident 0.0    # 驻留子全链路（mock 见 !resident 标记）
 ```
 
+## 远程设备（agent ↔ 设备）端到端
+
+设备网关在实例的 netns 内监听 `127.0.0.1:9890`，所以设备客户端要**进同一个 netns** 跑：
+
+```bash
+TOKEN=$(sqlite3 $DATA/config.db "select value from config_remotedevice where key='ws_token';")
+nsenter -t $(cat $DATA/pid) -n python3 ./devclient.py --port 9890 --token "$TOKEN" \
+    --id pydev-1 --caps cmd --seconds 30 --out /var/tmp/push.txt
+```
+
+然后让 agent 主动发一条（mock 里 `!push` 会回一个 `output_send__device/pydev-1` 的工具调用）：
+
+```bash
+# 经 CLI socket 发 "!push"，设备侧应收到 {"op":"push", ...}
+```
+
+设备上线/下线会在内核里登记/注销输出通道 `device/<id>`，可用 `/kernel` 的 channels 观察
+（在线时出现、掉线后消失）。
+
+> **设计口径**：agent → 设备**必须**是 agent 的主动调用（`output_send__device/<id>`）；
+> 设备的上报（`op=event`）虽然会被注入成输入，但 agent 的回复**不会**被插件自动转回设备
+> —— 全仓只有 **webui 与 cli** 两个交互界面"主动转发"（把最终回复渲染成气泡/终端输出），
+> 其它通道（qq、设备等）一律要求显式 `output_send__<通道>`。
+
 ## 读结果
 
 | 指标 | 含义 |
