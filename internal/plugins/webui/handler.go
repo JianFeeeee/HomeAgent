@@ -141,6 +141,10 @@ type Handler struct {
 	chatHistory []ChatMsg
 	pendingIdx  int // chatHistory 中正在进行的 assistant 消息索引，-1 表示无
 
+	// history 是聊天记录的独立存储（默认 <data>/webui_chat_history.json，
+	// 插件设置 history_file 可改）。
+	history *historyStore
+
 	chatMsgMu    sync.Mutex
 	chatMsgCache map[string]*chatMsgEntry // client_msg_id -> 首次处理结果
 	chatMsgOrder []string                 // FIFO 淘汰序
@@ -278,6 +282,9 @@ func NewHandler(s *sdk.PluginSDK) *Handler {
 		pendingIdx:   -1,
 		chatMsgCache: make(map[string]*chatMsgEntry),
 		sseEvents:    newSSEEventRing(200),
+		// 聊天记录独立存储：默认 <data>/webui_chat_history.json，
+		// 插件设置 history_file 可改（相对路径按 data 目录解析）。
+		history: newHistoryStore(resolveHistoryFile(settingString(se, "history_file"), webDataDir)),
 	}
 	h.loadChatHistory()
 	if s != nil {
@@ -325,19 +332,11 @@ func (h *Handler) subscribeTerminalStream() {
 }
 
 func (h *Handler) loadChatHistory() {
-	if h.settings == nil {
+	if h.history == nil {
 		return
 	}
-	v, err := h.settings.Get("chathistory")
-	if err != nil || v == nil {
-		return
-	}
-	s, ok := v.(string)
-	if !ok || s == "" {
-		return
-	}
-	var msgs []ChatMsg
-	if err := json.Unmarshal([]byte(s), &msgs); err != nil {
+	msgs := h.history.LoadWithMigration(h.settings)
+	if len(msgs) == 0 {
 		return
 	}
 	h.chatMu.Lock()
@@ -538,11 +537,13 @@ func (h *Handler) pendingAssistantLocked() *ChatMsg {
 }
 
 func (h *Handler) persistChatLocked() {
-	if h.settings == nil {
+	if h.history == nil {
 		return
 	}
-	b, _ := json.Marshal(h.chatHistory)
-	_ = h.settings.Set("chathistory", string(b))
+	// 写独立文件（原子替换）。失败只告警：聊天记录不该影响对话主流程。
+	if err := h.history.Save(h.chatHistory); err != nil {
+		log.Printf("[webui] 写聊天记录 %s 失败: %v", h.history.Path(), err)
+	}
 }
 
 func (h *Handler) handleToolEvent(ev *sdk.Event) {

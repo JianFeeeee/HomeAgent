@@ -49,6 +49,9 @@ func randomSecret(n int) string {
 // 由插件 Start 时从 daemon.data_dir 推导注入。
 var webFilesDir string
 
+// webDataDir 是 <data> 根目录（同上推导），供聊天记录等路径解析使用。
+var webDataDir string
+
 // uploadsDir 是用户经 webui 上传文件的存储目录（<data>/uploads）。
 // handleChatFile 落盘、handleUploads 下载共用；参考 qq 插件 files_dir 收文件设计。
 var uploadsDir string
@@ -165,6 +168,7 @@ func (p *Plugin) Start(s *sdk.PluginSDK) error {
 	// 中转目录：<data>/webui_files，agent 发送 image/file 时拷贝至此
 	if dd, err := s.Settings().GetCore("daemon.data_dir"); err == nil {
 		if s2, ok := dd.(string); ok && s2 != "" {
+			webDataDir = s2
 			webFilesDir = filepath.Join(s2, "webui_files")
 			uploadsDir = filepath.Join(s2, "uploads")
 		}
@@ -222,6 +226,7 @@ func (p *Plugin) Start(s *sdk.PluginSDK) error {
 	})
 
 	s.Settings().RegisterDef(sdk.ConfigDef{Key: "addr", Default: ":8080", Type: "string", DisplayName: "监听地址", Description: "Web 控制台监听地址", Category: "webui"})
+	s.Settings().RegisterDef(sdk.ConfigDef{Key: "history_file", Default: "", Type: "string", DisplayName: "聊天记录文件", Description: "聊天记录存放路径。留空 = <data>/webui_chat_history.json；相对路径按 data 目录解析（可指向独立挂载盘）", Category: "webui"})
 	s.Settings().RegisterDef(sdk.ConfigDef{Key: "api_key", Default: "", Type: "password", DisplayName: "API 密钥", Description: "访问 API 时需要的密钥", Category: "webui"})
 	s.Settings().RegisterDef(sdk.ConfigDef{Key: "username", Default: "admin", Type: "string", DisplayName: "登录用户名", Description: "Web 控制台登录用户名", Category: "webui"})
 	s.Settings().RegisterDef(sdk.ConfigDef{Key: "password", Default: "", Type: "password", DisplayName: "Web 控制台登录密码", Description: "Web 控制台登录密码", Category: "webui"})
