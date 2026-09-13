@@ -5,9 +5,9 @@ import (
 	"path/filepath"
 	"testing"
 
-	lua "github.com/yuin/gopher-lua"
 	internalConfig "gitcode.com/JianFeeeee/HomeAgent/internal/config"
 	sdk "gitcode.com/JianFeeeee/HomeAgent/internal/sdk"
+	lua "github.com/yuin/gopher-lua"
 )
 
 func TestTryLoadLua_Basic(t *testing.T) {
