@@ -626,6 +626,46 @@ func (g *GraphDB) Recall(keywords []string, seedEntities []string, depth int, se
 	return result, nil
 }
 
+// ExportTriples 导出库中的**活跃**三元组（供父 agent 在回收阶段收割子的 temp）。
+//
+// 设计 docs/zh/resident-subagent-design.md §9（回收 = 父读 temp → 选记录 → 合入 main）。
+// 只导出 `status='active'` 的关系，并把实体名一并带出（Relation 已含 SourceName/TargetName），
+// 于是合入侧可以直接复用 Commit —— 它按实体名 upsert、按
+// (source, relation, target) 幂等，因此"重复收割"不会造成重复条目。
+//
+// limit <= 0 表示不限量。
+func (g *GraphDB) ExportTriples(limit int) ([]Triple, error) {
+	g.mu.RLock()
+	defer g.mu.RUnlock()
+
+	q := `SELECT s.name, r.relation_type, t.name, r.confidence
+	        FROM relations r
+	        JOIN entities s ON s.id = r.source_id
+	        JOIN entities t ON t.id = r.target_id
+	       WHERE r.status = 'active'
+	       ORDER BY r.id`
+	args := []interface{}{}
+	if limit > 0 {
+		q += " LIMIT ?"
+		args = append(args, limit)
+	}
+	rows, err := g.db.Query(q, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var out []Triple
+	for rows.Next() {
+		var tr Triple
+		if err := rows.Scan(&tr.Subject, &tr.Relation, &tr.Object, &tr.Confidence); err != nil {
+			return nil, err
+		}
+		out = append(out, tr)
+	}
+	return out, rows.Err()
+}
+
 func (g *GraphDB) Purge(criteria map[string]string, mode string) (int, error) {
 	g.mu.Lock()
 	defer g.mu.Unlock()
