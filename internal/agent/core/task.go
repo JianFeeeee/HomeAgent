@@ -126,12 +126,42 @@ type TaskFrame struct {
 	IsInterrupt bool
 	StartedAt   time.Time
 	Terminal    taskTerminal
+	// OutputChannel 是本任务的输出通道（来源通道的稳定副本）。
+	//
+	// 这是本任务通道的**唯一**来源：内核不持有"当前通道"可变状态（N0 已删除
+	// Agent.currentOutputChannel）。那类字段会被后来的任务覆盖，而被打断任务
+	// 恢复时不重新 prepare（resumeTask 只 rebase 前缀），于是两任务串台——
+	// 被打断任务的回复发到中断任务的通道上（见
+	// TestPreempt_ResumeKeepsOwnOutputChannel）。
+	OutputChannel string
 
 	// PrefixLen 是 stepPrepare 构建的**基础前缀**长度（system + timeline + 用户输入）。
 	// 恢复时用它把「本任务自己的现场」接回重建后的前缀之上（见 rebaseFramePrefix）。
 	PrefixLen int
 	// InputBlocks 是本轮输入携带的多模态块；重建前缀时要重新挂回。
 	InputBlocks []agentAPI.ContentBlock
+}
+
+// outputChannelOf 从**输入事件**推导本次输出应走的通道。
+//
+// 内核不持有"当前通道"可变状态：那类字段会被后来的任务（中断任务）覆盖，
+// 使被打断任务恢复后的提示词/事件标签串台。通道只跟着事件与帧走。
+func outputChannelOf(evt *agentIO.InputEvent) string {
+	if evt == nil {
+		return ""
+	}
+	if evt.OutputChannel != "" {
+		return evt.OutputChannel
+	}
+	return evt.Source
+}
+
+// isCriticalChannel 报告某个通道是否是**整任务不可抢占**的临界区。
+//
+// 目前只有 `_consolidation_`（记忆整理直接改图库）。工具执行/ONNX/CAS 属于
+// **单步**临界区，由"只在 step 之间检查让位"天然保护，不在这里列。
+func isCriticalChannel(channel string) bool {
+	return channel == channelConsolidation
 }
 
 func (a *Agent) newTaskFrame(input string, stageCtx *sdk.StageContext) *TaskFrame {
@@ -148,7 +178,7 @@ func (a *Agent) runTaskSteps(f *TaskFrame) stepOutcome {
 	for i := 0; i < maxSteps; i++ {
 		// 安全点：只在 step 之间检查让位。临界区（StepToolExec）不在此列，
 		// 因为让位信号由 interruptLoop 置位、而本循环是唯一读帧者。
-		if !a.inCriticalSection() && a.sched.preemptGrantedFor() && a.sched.canSuspend() {
+		if !isCriticalChannel(f.OutputChannel) && a.sched.preemptGrantedFor() && a.sched.canSuspend() {
 			return outcomeSuspended
 		}
 		// 工具轮次硬上限（设计文档 D6）：在发起下一轮 LLM 前收尾。
@@ -283,13 +313,11 @@ func (a *Agent) prepareInputTask(evt *agentIO.InputEvent) (*TaskFrame, taskTermi
 		return nil, terminalSkipped
 	}
 
-	a.currentOutputChannel = evt.OutputChannel
-	if a.currentOutputChannel == "" {
-		a.currentOutputChannel = evt.Source
-	}
+	// 通道只从**输入事件**推导，内核不持有"当前通道"可变状态
+	// （见 outputChannelOf；这消除了中断任务覆盖它导致被打断任务串台的整类问题）。
 	// 进入本任务的临界区属性（记忆整理整任务不可抢占）。
 	// 必须在 processConsolidation 之前设置——它就在下面同步执行。
-	a.sched.setCritical(a.inCriticalSection())
+	a.sched.setCritical(isCriticalChannel(outputChannelOf(evt)))
 
 	if evt.OutputChannel == channelConsolidation {
 		a.processConsolidation(evt, in.text)
@@ -381,6 +409,8 @@ func (a *Agent) prepareInputTask(evt *agentIO.InputEvent) (*TaskFrame, taskTermi
 	f.CleanInput = cleanInput
 	f.IsInterrupt = isInterrupt
 	f.StartedAt = start
+	// 通道记进帧：恢复时用它把 agent 级字段改回来（见 TaskFrame.OutputChannel）。
+	f.OutputChannel = outputChannelOf(evt)
 	return f, terminalNone
 }
 
@@ -525,11 +555,11 @@ func (a *Agent) stepLLM(f *TaskFrame) stepOutcome {
 	}
 
 	providers := a.resolveProviders(req)
-	resp, llmErr := a.callLLMWithFallback(req, providers)
+	resp, llmErr := a.callLLMWithFallback(req, providers, f.OutputChannel)
 
 	if llmErr != nil {
 		if errors.Is(llmErr, context.Canceled) && a.ctx.Err() == nil {
-			if a.currentOutputChannel == "_consolidation_" {
+			if f.OutputChannel == channelConsolidation {
 				f.Err = fmt.Errorf("interrupted by user input")
 				return outcomeFailed
 			}
@@ -579,7 +609,7 @@ func (a *Agent) stepLLM(f *TaskFrame) stepOutcome {
 	if resp.ReasoningContent != "" {
 		a.publishEvent(events.EventReasoning, map[string]interface{}{
 			"content": resp.ReasoningContent,
-			"channel": a.currentOutputChannel,
+			"channel": f.OutputChannel,
 		})
 	}
 
@@ -633,7 +663,7 @@ func (a *Agent) stepToolBegin(f *TaskFrame) stepOutcome {
 			"args":    tc.Arguments,
 			"result":  result,
 			"status":  "denied",
-			"channel": a.currentOutputChannel,
+			"channel": f.OutputChannel,
 		})
 		f.ToolIdx++
 		return outcomeContinue
@@ -657,7 +687,7 @@ func (a *Agent) stepToolBegin(f *TaskFrame) stepOutcome {
 
 // stepToolExec 执行工具。**临界区**：见设计文档 §4.3。
 func (a *Agent) stepToolExec(f *TaskFrame) stepOutcome {
-	result := a.executeToolCall(f.CurTool)
+	result := a.executeToolCall(f.CurTool, f.OutputChannel)
 	f.CurResult = result
 	f.ToolResults = append(f.ToolResults, ToolResultItem{Name: f.CurTool.Name, Output: result})
 	log.Printf("[agent] tool %s result: %s", f.CurTool.Name, truncateStr(result, 100))
@@ -768,7 +798,7 @@ func (a *Agent) stepToolAfter(f *TaskFrame) stepOutcome {
 		"args":    tc.Arguments,
 		"result":  result,
 		"status":  "ok",
-		"channel": a.currentOutputChannel,
+		"channel": f.OutputChannel,
 	})
 
 	f.ToolIdx++
@@ -810,7 +840,7 @@ func (a *Agent) resolveProviders(req *agentAPI.CompletionRequest) []agentAPI.Pro
 
 // callLLMWithFallback 在候选 provider 间回退，并把同源瞬时错误重试一次。
 // 逐行等价于原 process() 内的双层循环。
-func (a *Agent) callLLMWithFallback(req *agentAPI.CompletionRequest, providers []agentAPI.Provider) (*agentAPI.CompletionResponse, error) {
+func (a *Agent) callLLMWithFallback(req *agentAPI.CompletionRequest, providers []agentAPI.Provider, channel string) (*agentAPI.CompletionResponse, error) {
 	var resp *agentAPI.CompletionResponse
 	var llmErr error
 
@@ -843,7 +873,7 @@ func (a *Agent) callLLMWithFallback(req *agentAPI.CompletionRequest, providers [
 			a.cancelLLM = fCancel
 			a.llmMu.Unlock()
 
-			resp, llmErr = chatStreamWithFallback(fCtx, fbProvider, req, a)
+			resp, llmErr = chatStreamWithFallback(fCtx, fbProvider, req, a, channel)
 
 			a.llmMu.Lock()
 			a.cancelLLM = nil

@@ -310,20 +310,15 @@ func (a *Agent) emitSkippedReply(evt *agentIO.InputEvent, reason string) {
 }
 
 func (a *Agent) emitResponse(evt *agentIO.InputEvent, response string) {
+	// 通道一律从**输入事件**推导（内核不持有"当前通道"）。
+	ch := outputChannelOf(evt)
 	stageCtx := &sdk.StageContext{
 		FinalText: response,
 		Phase:     sdk.StageBeforeOutput,
+		Extra:     map[string]interface{}{"output_channel": ch},
 	}
 	a.runStage(sdk.StageBeforeOutput, stageCtx)
 	response = stageCtx.FinalText
-
-	ch := a.currentOutputChannel
-	if ch == "" {
-		ch = evt.OutputChannel
-	}
-	if ch == "" {
-		ch = evt.Source
-	}
 
 	payload := map[string]interface{}{
 		"content":    response,

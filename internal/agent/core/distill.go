@@ -495,7 +495,6 @@ func (a *Agent) emitMemoryCandidate(source, input, response string, toolResults 
 
 func (a *Agent) processConsolidation(evt *agentIO.InputEvent, input string) {
 	start := time.Now()
-	a.currentOutputChannel = "_consolidation_"
 
 	stageCtx := a.stageCtxFromInput(input, evt.Source, "")
 	stageCtx.Extra["output_channel"] = evt.OutputChannel

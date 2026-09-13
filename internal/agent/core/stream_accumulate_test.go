@@ -26,7 +26,7 @@ func TestAccumulateStreamToolCalls(t *testing.T) {
 		close(ch)
 	}()
 
-	resp, err := accumulateStream(context.Background(), ch, nil)
+	resp, err := accumulateStream(context.Background(), ch, nil, "cli")
 	if err != nil {
 		t.Fatalf("accumulateStream: %v", err)
 	}
@@ -56,7 +56,7 @@ func TestAccumulateStreamContent(t *testing.T) {
 		ch <- agentAPI.StreamChunk{Done: true, FinishReason: "stop"}
 		close(ch)
 	}()
-	resp, err := accumulateStream(context.Background(), ch, nil)
+	resp, err := accumulateStream(context.Background(), ch, nil, "cli")
 	if err != nil {
 		t.Fatalf("accumulateStream: %v", err)
 	}
