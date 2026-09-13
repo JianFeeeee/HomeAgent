@@ -7,6 +7,8 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -1076,9 +1078,14 @@ func TestSettingsNoCrossPluginLeak(t *testing.T) {
 	if pw.Code != http.StatusBadRequest {
 		t.Fatalf("写内部键应被拒（400），实际 %d", pw.Code)
 	}
-	got, _ := webuiCfg.Get("chathistory")
-	if got != `[{"role":"assistant","content":"secret blob"}]` {
+	// 迁移已把这条记录搬去独立文件并从配置表移除；若仍在，则必须是原值（未被改写）
+	if got, _ := webuiCfg.Get("chathistory"); got != nil && got != `[{"role":"assistant","content":"secret blob"}]` {
 		t.Fatalf("内部数据被改写：%v", got)
+	}
+	// 记录本身必须没有丢：迁移后的文件里应能找到它
+	msgs := h.history.Load()
+	if len(msgs) != 1 || msgs[0].Content != "secret blob" {
+		t.Fatalf("迁移后记录不应丢失，实际 %+v（文件 %s）", msgs, h.history.Path())
 	}
 }
 
@@ -1151,5 +1158,91 @@ func TestResolveListenAddrPrecedence(t *testing.T) {
 	SetListenOverride("127.0.0.1:9002")
 	if got := resolveListenAddr(":9001"); got != "127.0.0.1:9002" {
 		t.Fatalf("覆盖值应优先，得到 %q", got)
+	}
+}
+
+// TestResolveHistoryFile 钉住聊天记录路径的解析规则：
+// 插件设置优先、相对路径按 data 目录解析、绝对路径原样、留空走默认。
+func TestResolveHistoryFile(t *testing.T) {
+	cases := []struct{ setting, dataDir, want string }{
+		{"", "/data", "/data/webui_chat_history.json"},
+		{"chat.json", "/data", "/data/chat.json"},
+		{"sub/chat.json", "/data", "/data/sub/chat.json"},
+		{"/mnt/ssd/chat.json", "/data", "/mnt/ssd/chat.json"},
+		{"  ", "/data", "/data/webui_chat_history.json"},
+	}
+	for _, c := range cases {
+		if got := resolveHistoryFile(c.setting, c.dataDir); got != c.want {
+			t.Errorf("resolveHistoryFile(%q, %q) = %q, want %q", c.setting, c.dataDir, got, c.want)
+		}
+	}
+	// data 目录未知时不得落到进程 CWD（测试/嵌入场景会污染工作目录）
+	if got := resolveHistoryFile("", ""); filepath.Dir(got) != strings.TrimRight(os.TempDir(), "/") {
+		t.Errorf("data 目录未知时应落到临时目录，实际 %q", got)
+	}
+}
+
+// TestHistoryStoreMigratesFromConfig 钉住从「配置项存整段记录」到「独立文件」的迁移：
+// 记录必须完好搬到文件、老配置项必须从配置表消失（它正是 config.db 膨胀与设置接口
+// 大响应的来源），且第二次加载不再重复迁移。
+func TestHistoryStoreMigratesFromConfig(t *testing.T) {
+	dir := t.TempDir()
+	file := filepath.Join(dir, "chat.json")
+
+	cfgReg := internalConfig.NewConfigRegistry("")
+	webuiCfg := cfgReg.PluginConfig("webui")
+	webuiCfg.RegisterDef(internalConfig.ConfigDef{Key: "chathistory", Default: ""})
+	legacy := []ChatMsg{
+		{Role: "user", Content: "老记录 1", Time: "2026-01-01T00:00:00Z"},
+		{Role: "assistant", Content: "老记录 2", Time: "2026-01-01T00:00:01Z"},
+	}
+	b, _ := json.Marshal(legacy)
+	webuiCfg.Set("chathistory", string(b))
+
+	settings := sdk.NewSettings("webui", cfgReg)
+	hs := newHistoryStore(file)
+
+	got := hs.LoadWithMigration(settings)
+	if len(got) != 2 || got[0].Content != "老记录 1" || got[1].Content != "老记录 2" {
+		t.Fatalf("迁移后应拿到 2 条老记录，实际 %+v", got)
+	}
+	// 文件已落盘
+	onDisk := newHistoryStore(file).Load()
+	if len(onDisk) != 2 {
+		t.Fatalf("记录应写入 %s，实际 %+v", file, onDisk)
+	}
+	// 老配置项必须消失（否则 config.db 里那 5MB 还在）
+	if v, _ := webuiCfg.Get("chathistory"); v != nil {
+		t.Fatalf("迁移后老配置项应被删除，实际仍为 %v", v)
+	}
+	// 二次加载：直接读文件，不重复迁移
+	hs2 := newHistoryStore(file)
+	if again := hs2.LoadWithMigration(settings); len(again) != 2 {
+		t.Fatalf("二次加载应仍为 2 条，实际 %+v", again)
+	}
+	// 文件损坏时按空历史处理，不得 panic
+	if err := os.WriteFile(file, []byte("{不是 JSON"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if broken := newHistoryStore(file).Load(); len(broken) != 0 {
+		t.Fatalf("损坏文件应按空历史处理，实际 %+v", broken)
+	}
+}
+
+// TestHistoryStoreSaveIsAtomicAndRoundTrips 钉住原子写：不留 .tmp、内容可回读。
+func TestHistoryStoreSaveIsAtomicAndRoundTrips(t *testing.T) {
+	dir := t.TempDir()
+	file := filepath.Join(dir, "sub", "chat.json") // 目录不存在，Save 需自建
+	hs := newHistoryStore(file)
+	msgs := []ChatMsg{{Role: "user", Content: "你好", Time: "2026-01-01T00:00:00Z"}}
+	if err := hs.Save(msgs); err != nil {
+		t.Fatalf("Save: %v", err)
+	}
+	if _, err := os.Stat(file + ".tmp"); !os.IsNotExist(err) {
+		t.Fatalf("不应残留 %s.tmp", file)
+	}
+	got := hs.Load()
+	if len(got) != 1 || got[0].Content != "你好" {
+		t.Fatalf("回读不一致：%+v", got)
 	}
 }
