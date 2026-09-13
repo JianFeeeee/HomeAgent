@@ -414,6 +414,13 @@ GITCODE_REPO=JianFeeeee/homeagent-sdk ASSET_DIR=<sdk>/dist/release \
 - 脚本先向 `releases/<tag>/upload_url` 取 **OBS 预签名 URL** 再 PUT ⇒ **release 条目必须先存在**；
 - alpha/beta 的产物可以上传，但必须在 release 条目上勾选**预发布**标志（§2.4）；
 - 校验和必须覆盖**全部**附件，否则等于没有校验。
+- ❗**流水线脚本必须 `set -e`（或显式检查每步）**：否则某一步失败（例如驱动脚本在 tag 里
+  不存在）之后它仍会继续跑到上传，把**半成品校验和**推上去覆盖全量的那份。
+  （实测：v1.3.10 的校验和被 4 项覆盖掉，只能重建。）
+- ❗**在 tag 的 worktree 里构建时，驱动脚本要么已进该 tag，要么支持目录覆盖**：
+  新补的脚本只存在于 main，去 tag 的 worktree 里调就是 `No such file or directory`。
+  现 `package-windows.sh` 支持 `DIST_LINUX` / `BUILD_DIR` / `DIST_RELEASE` 覆盖，
+  可以"用主仓的脚本 + 产物目录指向 worktree"。
 - ❗**分批上传时，后一轮必须在全量产物上重算 `SHA256SUMS`**，不能只算本轮那几个文件：
   同名附件会**覆盖**前一轮的校验和（实测：先传 amd64 的 9 个资产，后补 arm64 时
   只算了 arm64 的 4 个，结果 amd64 的校验和从 release 上消失 ⇒ 已下载的包失去校验依据，
