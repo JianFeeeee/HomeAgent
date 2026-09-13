@@ -379,6 +379,23 @@
 | 内核不持有"当前通道" | ❌ `currentOutputChannel` + 提示词预设 | 删字段、删预设 |
 | 工作式轻量子 | ✅ | **不动** |
 
+### 16.1 N2 的记忆面清单（现状）
+
+`internal/memory/` 下需要加 space 维度的面：
+
+| 面 | 载体 | 表 |
+|---|---|---|
+| 图记忆 | `memory.GraphDB` | `entities` / `sentences` / `relations` |
+| 向量索引 | `memory.Indexer` | （索引侧，与图记忆同步） |
+| 文档记忆 | `document.Store` | `documents` |
+| 知识库 | `knowledge.Store` | 各自表 |
+| 文本记忆 | `text.Memory` | 各自表 |
+| 媒体 | `media.Store` | 落盘 + 索引 |
+| 社交 | `social` | 各自表 |
+
+⇒ N2a 先做**图记忆**这一条纵切（它是最核心、也是"子写 temp / 父 promote 进 main"的主战场），
+验证 space 维度可行后再逐面铺开（N2b）。
+
 ---
 
 ## 13. 非目标（本文明确不做）
@@ -448,7 +465,10 @@
 | **N0** | **无状态化**：删 `Agent.currentOutputChannel`、删提示词里的通道预设 | S18；既有全部测试通过（这是纯收敛，不含新能力） |
 | **N1a** | **通道登记层**：inputch 一等化（归属插件 / 归属 agent / 容量 / 共享登记表）+ **单工具多视图总览** | S21–S23 |
 | **N1b** | 输出通道授权过滤 + 目标解析（outputch → 目标 agent 的 inputch） | S1–S3 |
-| **N2** | **轻量内核 + 记忆作用域**：记忆子系统加 space 维度；`AgentConfig` 加作用域参数（写 temp、读 temp∪main） | S13–S15 |
+| **N2a** | **作用域对象 + 图记忆 space 维度**：`memory.Scope{Write string; Read []string}`；`entities/sentences/relations` 加 `space` 列（默认 `main`，老数据迁移视为 main）；写落 `Write`、查询过滤 `space IN Read` | 同 space 可见、跨 space 不可见 |
+| **N2b** | **其余记忆面加 space**：text memory / documents / knowledge / media / 向量索引 | 同上（逐面验收） |
+| **N2c** | **Agent 级作用域接线**：`AgentConfig.MemoryScope`；根 = `{Write:main, Read:[main]}`；驻留子 = `{Write:sub/<id>, Read:[sub/<id>,main]}`；所有记忆读写经 scope | S13–S15 |
+| **N2d** | **晋升与丢弃**：`Promote(space, records)`（回收时父把选中的 temp 记录写进 main）+ `DropSpace(space)`（回收/销毁时丢弃 temp） | S11 的数据面 |
 | **N3** | **驻留子生命周期**：创建 / 销毁 / 登记表 / 父退出清理 | S12、S16 |
 | **N4** | **跨 agent 投递**：子→父 L3、父→子 L4（+ `isKernelLevelSource` 分层） | S4、S6、S17 |
 | **N5** | **inputch 处理表**：主动写入工具 + 自动写兜底 + 生命周期 | S8、S9 |
