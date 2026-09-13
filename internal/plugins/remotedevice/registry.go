@@ -287,7 +287,7 @@ func (r *Registry) register(meta DeviceMeta) {
 	r.devices[meta.DeviceID] = &meta
 	onOnline := r.onOnline
 	r.mu.Unlock()
-	// 先回调（可能注册 device/<id> 输出通道），再发变更通知。
+	// 先回调（可能注册 device-<id> 输出通道），再发变更通知。
 	if onOnline != nil {
 		onOnline(meta)
 	}

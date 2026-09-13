@@ -9,6 +9,8 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"regexp"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -130,7 +132,7 @@ func TestDeviceChannelLifecycleAndPush(t *testing.T) {
 	cli.sendText([]byte(`{"op":"hello","device":{"device_id":"spk-1","name":"音箱","kind":"speaker","caps":["speaker"]}}`))
 	cli.readHelloAckAndBind(t, token)
 
-	ch := deviceChannelName("spk-1")
+	ch := p.deviceChannelName("spk-1")
 	deadline := time.Now().Add(3 * time.Second)
 	caps, ok := rec.caps(ch)
 	for !ok && time.Now().Before(deadline) {
@@ -253,5 +255,33 @@ func TestDevicectlAggregateOutputAddressing(t *testing.T) {
 		"payload": "hi", "type": "text", "device_id": "ghost",
 	}); err == nil {
 		t.Fatal("不存在的设备应报错")
+	}
+}
+
+// 通道名合规性：设备通道名会被内核拼进 LLM **函数名**（output_send__<通道名>），
+// 而上游函数名规范是 ^[a-zA-Z0-9_-]{1,64}$ —— 违规会让**整条请求**被 400 拒绝
+// （实测把生产打挂：device/<id> 里的 `/` 触发 Invalid 'tools[299].function.name'，
+// 网关 auto tier 全链条失败，整个 agent 不说话了）。
+//
+// 通道名是**插件自己的声明**，所以这条判据钉在插件侧。
+func TestDeviceChannelNameIsLLMFunctionNameSafe(t *testing.T) {
+	re := regexp.MustCompile(`^[a-zA-Z0-9_-]{1,64}$`)
+	// 含**恶意/异常** id：空格、符号、非 ASCII、超长、以及会折成同一个名字的两个 id
+	ids := []string{"waiter-fnnas", "1", "a b!c", "中文设备", strings.Repeat("x", 120), "a b", "a-b"}
+	p := &Plugin{}
+	seen := map[string]string{}
+	for _, id := range ids {
+		ch := p.deviceChannelName(id)
+		if prev, dup := seen[ch]; dup {
+			t.Errorf("不同设备 id（%q 与 %q）派生出同一个通道名 %q", prev, id, ch)
+		}
+		seen[ch] = id
+		if !re.MatchString(ch) {
+			t.Errorf("设备通道名 %q 违反上游函数名规范 %s", ch, re)
+		}
+		toolName := "output_send__" + ch
+		if !re.MatchString(toolName) {
+			t.Errorf("派生出的工具名 %q 违反上游函数名规范 %s", toolName, re)
+		}
 	}
 }
