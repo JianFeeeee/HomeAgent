@@ -7,7 +7,7 @@
  */
 
 import { ChatMessage, ToolCallInfo, ChatAttachment } from '../model/Model';
-import { attachmentFromChannelOutput } from '../components/Attachment';
+import { attachmentFromChannelOutput } from './AttachmentMeta';
 import { SseEvent } from './SseClient';
 import { stringifyField } from './ChatFormat';
 import { hilog } from '@kit.PerformanceAnalysisKit';

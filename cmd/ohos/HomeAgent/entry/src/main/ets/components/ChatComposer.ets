@@ -16,7 +16,7 @@ import { ThemePalette, DARK_PALETTE, LIGHT_PALETTE, ANIM_FAST, ANIM_NORMAL } fro
 import { mimeOf } from '../common/ChatFormat';
 import { chatStore, K_CHAT_LOADING } from '../common/ChatStore';
 import { sendChatText, sendChatFile, interruptChat } from '../common/ChatSession';
-import { fileNameOf } from './Attachment';
+import { fileNameOf } from '../common/AttachmentMeta';
 import { ChatAttachMenu, ChatPendingChip } from './ChatAttachBar';
 import { NavFloatOverlay, FloatIconButton } from './PageTopBar';
 import { picker, fileIo } from '@kit.CoreFileKit';
