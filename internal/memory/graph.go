@@ -256,6 +256,9 @@ func (g *GraphDB) migrateRelationUnique(tx *sql.Tx) error {
 }
 
 // Commit 把三元组写入图库，返回新建的实体数与关系数。
+// Path 返回本库的存储路径（父 agent 用它为驻留子打开**受限句柄**）。
+func (g *GraphDB) Path() string { return g.dbPath }
+
 func (g *GraphDB) Commit(triples []Triple, sessionID string, turnID int) (int, int, error) {
 	_, ec, rc, err := g.commit(triples, sessionID, turnID, false)
 	return ec, rc, err
