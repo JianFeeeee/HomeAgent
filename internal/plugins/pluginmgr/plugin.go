@@ -138,28 +138,39 @@ func (p *Plugin) Stop() error {
 func (p *Plugin) registerTools(s *sdk.PluginSDK) {
 	s.RegisterTool("plugin_install", sdk.ToolDef{
 		Name:        "plugin_install",
-		Description: "从 URL 安装 HomeAgent 插件包（.hmap 文件）。插件已存在时传 overwrite=true 原地更新（升级/降级/重装，保留配置表，无需卸载重装）。更新后需调用 plgreload 或重启生效。",
+		Description: "安装 HomeAgent 插件包（.hmap）。两种来源：url（http/https 下载）或 path（本机路径，配合 plugindev_build 的产物用这个）。插件已存在时传 overwrite=true 原地更新（升级/降级/重装，保留配置表，无需卸载重装）。更新后需调用 plgreload 或重启生效。",
 		Parameters: map[string]interface{}{
 			"type": "object",
 			"properties": map[string]interface{}{
 				"url": map[string]interface{}{
 					"type":        "string",
-					"description": "插件包的下载 URL",
+					"description": "插件包的下载 URL（http/https）",
+				},
+				"path": map[string]interface{}{
+					"type":        "string",
+					"description": "插件包在**本机**的路径（.hmap）。与 url 二选一；同时给出时以 path 为准",
 				},
 				"overwrite": map[string]interface{}{
 					"type":        "boolean",
 					"description": "已存在时原地更新（保留配置）。默认 false",
 				},
 			},
-			"required": []string{"url"},
 		},
 	}, func(args map[string]interface{}) (interface{}, error) {
-		url, _ := args["url"].(string)
-		if url == "" {
-			return map[string]interface{}{"error": "url is required"}, nil
-		}
 		overwrite, _ := args["overwrite"].(bool)
-		return p.installFromURL(url, overwrite)
+		// path 优先：它对应"agent 自己构建出产物再装"的场景（plugindev_build → plugin_install）。
+		if path, _ := args["path"].(string); strings.TrimSpace(path) != "" {
+			pth := strings.TrimSpace(path)
+			if st, err := os.Stat(pth); err != nil || st.IsDir() {
+				return map[string]interface{}{"error": fmt.Sprintf("path 无效（必须是存在的 .hmap 文件）: %s", pth)}, nil
+			}
+			return p.installFromPath(pth, overwrite)
+		}
+		url, _ := args["url"].(string)
+		if strings.TrimSpace(url) == "" {
+			return map[string]interface{}{"error": "需要 url 或 path（二选一）"}, nil
+		}
+		return p.installFromURL(strings.TrimSpace(url), overwrite)
 	})
 
 	s.RegisterTool("plugin_list", sdk.ToolDef{
@@ -455,12 +466,12 @@ func (p *Plugin) installFromData(data []byte, overwrite bool) (interface{}, erro
 
 	if existing && !overwrite {
 		return map[string]interface{}{
-			"error":    "plugin already exists",
-			"name":     pkg.Name,
-			"version":  pkg.Version,
-			"current":  oldVersion,
-			"action":   "remove_first",
-			"hint":     `传 "overwrite": true 可原地更新（保留配置）`,
+			"error":   "plugin already exists",
+			"name":    pkg.Name,
+			"version": pkg.Version,
+			"current": oldVersion,
+			"action":  "remove_first",
+			"hint":    `传 "overwrite": true 可原地更新（保留配置）`,
 		}, nil
 	}
 
@@ -475,7 +486,7 @@ func (p *Plugin) installFromData(data []byte, overwrite bool) (interface{}, erro
 		os.RemoveAll(backup)
 		if err := os.Rename(target, backup); err != nil {
 			return map[string]interface{}{
-				"error": "backup old plugin dir failed",
+				"error":   "backup old plugin dir failed",
 				"details": err.Error(),
 			}, nil
 		}
@@ -484,8 +495,8 @@ func (p *Plugin) installFromData(data []byte, overwrite bool) (interface{}, erro
 			os.RemoveAll(target)
 			if rbErr := os.Rename(backup, target); rbErr != nil {
 				return map[string]interface{}{
-					"error":   "extract failed AND rollback failed",
-					"details": err.Error(),
+					"error":    "extract failed AND rollback failed",
+					"details":  err.Error(),
 					"rollback": rbErr.Error(),
 				}, nil
 			}
@@ -507,15 +518,15 @@ func (p *Plugin) installFromData(data []byte, overwrite bool) (interface{}, erro
 			action = "reinstalled"
 		}
 		return map[string]interface{}{
-			"status":          "installed",
-			"name":            pkg.Name,
-			"version":         pkg.Version,
+			"status":           "installed",
+			"name":             pkg.Name,
+			"version":          pkg.Version,
 			"previous_version": oldVersion,
-			"entry":           pkg.Entry,
-			"checksum":        checksum,
-			"action":          action,
-			"reload_required": true,
-			"config_kept":     true,
+			"entry":            pkg.Entry,
+			"checksum":         checksum,
+			"action":           action,
+			"reload_required":  true,
+			"config_kept":      true,
 		}, nil
 	}
 
