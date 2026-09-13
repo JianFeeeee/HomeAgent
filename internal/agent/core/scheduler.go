@@ -745,6 +745,18 @@ func newKernelInterruptTask(evt *agentIO.InputEvent) *Task {
 }
 
 // DumpScheduler 返回调度器的原子快照（供状态页/测试断言）。
+// roundsExecuted 返回本 agent 已执行的轮次数（供驻留子状态面展示）。
+//
+// 一轮 = 一次被执行的输入（排队与中断都算）。为什么不用 inputch 处理表的条数：
+// 那张表记的是"当前上下文窗口内"的轮次，压缩会清空（设计 §8.3）——
+// 拿它当轮次会让父看到轮次倒退。
+func (a *Agent) roundsExecuted() int {
+	if a.sched == nil {
+		return 0
+	}
+	return int(a.DumpScheduler().Stats.Executed)
+}
+
 func (a *Agent) DumpScheduler() SchedulerSnapshot {
 	if a.sched == nil {
 		return SchedulerSnapshot{}
