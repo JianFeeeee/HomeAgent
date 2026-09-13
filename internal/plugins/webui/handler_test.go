@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"io"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -983,5 +984,172 @@ func TestAgentDuplicateInputDedup(t *testing.T) {
 	}
 	if agent.IsDuplicateInput("qq", "重复消息") {
 		t.Fatal("different source should not be duplicate")
+	}
+}
+
+// TestSettingsNoCrossPluginLeak 锁住设置接口的两类泄漏：
+//
+//  1. meta 不得把别家插件的 def 复制进来（曾经 28 插件 × ~186 def = 5208 条，
+//     96% 重复），也不得出现 plugin.<a>.plugin.<b>.<key> 这种幻影键——
+//     按幻影键写回会落到错误插件的配置表里。
+//  2. chathistory 是内部数据（生产实测 5.2MB），不得出现在设置响应里，
+//     也不得经设置接口写入。
+func TestSettingsNoCrossPluginLeak(t *testing.T) {
+	cfgReg := internalConfig.NewConfigRegistry("")
+	cfgReg.RegisterDef(internalConfig.ConfigDef{Key: "core.agent.max_tool_turns", Default: "10"})
+
+	webuiCfg := cfgReg.PluginConfig("webui")
+	webuiCfg.RegisterDef(internalConfig.ConfigDef{Key: "addr", Default: ":8080"})
+	webuiCfg.Set("addr", ":8080")
+	webuiCfg.Set("chathistory", `[{"role":"assistant","content":"secret blob"}]`)
+
+	qqCfg := cfgReg.PluginConfig("qq")
+	qqCfg.RegisterDef(internalConfig.ConfigDef{Key: "access_token", Default: ""})
+	qqCfg.Set("access_token", "qq-token")
+
+	sup := supervisor.New(&types.Config{Daemon: types.DaemonConfig{
+		CheckInterval: time.Minute, HeartbeatInterval: 30 * time.Second,
+	}})
+	sup.Start()
+	defer sup.Shutdown()
+
+	s := testSDK(sdk.SDKConfig{
+		Supervisor: supervisor.NewSDKAdapter(sup),
+		Settings:   sdk.NewSettings("webui", cfgReg),
+		Config:     sdk.NewConfig(&types.Config{}),
+	})
+	h := NewHandler(s)
+
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/settings", nil)
+	w := httptest.NewRecorder()
+	h.handleSettings(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d", w.Code)
+	}
+	var resp struct {
+		Settings map[string]interface{}            `json:"settings"`
+		Meta     map[string]map[string]interface{} `json:"meta"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+
+	// 1) meta 里每个键只能出现一次 "plugin." 前缀，且内容与键同源
+	for k, v := range resp.Meta {
+		if strings.Count(k, "plugin.") > 1 {
+			t.Fatalf("meta 出现幻影键：%q", k)
+		}
+		if inner, ok := v["key"].(string); ok && strings.HasPrefix(inner, "plugin.") {
+			t.Fatalf("meta[%q].key 带命名空间前缀（会造成双重前缀）：%q", k, inner)
+		}
+	}
+	// 2) webui 不能看到 qq 的 def，反之亦然
+	if _, ok := resp.Meta["plugin.webui.addr"]; !ok {
+		t.Fatalf("meta 缺少 plugin.webui.addr：%v", resp.Meta)
+	}
+	if _, ok := resp.Meta["plugin.webui.access_token"]; ok {
+		t.Fatal("meta 里出现了别家插件的 def：plugin.webui.access_token")
+	}
+	if _, ok := resp.Meta["plugin.qq.access_token"]; !ok {
+		t.Fatal("meta 缺少 plugin.qq.access_token")
+	}
+	if _, ok := resp.Meta["plugin.qq.addr"]; ok {
+		t.Fatal("meta 里出现了别家插件的 def：plugin.qq.addr")
+	}
+	// 3) 内部数据不进设置面
+	if _, ok := resp.Settings["plugin.webui.chathistory"]; ok {
+		t.Fatal("settings 泄露了 chathistory 内部数据")
+	}
+	if _, ok := resp.Meta["plugin.webui.chathistory"]; ok {
+		t.Fatal("meta 泄露了 chathistory")
+	}
+	if _, ok := resp.Settings["plugin.qq.access_token"]; !ok {
+		t.Fatal("普通插件配置项应照常返回")
+	}
+
+	// 4) 内部数据也不可经设置接口写入
+	body := `{"key":"plugin.webui.chathistory","value":"tampered"}`
+	preq := httptest.NewRequest(http.MethodPut, "/api/v1/settings", strings.NewReader(body))
+	preq.Header.Set("Content-Type", "application/json")
+	pw := httptest.NewRecorder()
+	h.handleSettings(pw, preq)
+	if pw.Code != http.StatusBadRequest {
+		t.Fatalf("写内部键应被拒（400），实际 %d", pw.Code)
+	}
+	got, _ := webuiCfg.Get("chathistory")
+	if got != `[{"role":"assistant","content":"secret blob"}]` {
+		t.Fatalf("内部数据被改写：%v", got)
+	}
+}
+
+// TestListenOverrideAndBindFailure 钉住两个曾经静默的缺陷：
+//
+//  1. CLI --webui / webui.listen_addr 的覆盖必须真的生效（优先级高于插件 settings["addr"]）。
+//     修复前内核只在插件设置键为空时才写，而 REGISTERDEF 建表时写的是默认 :8080，
+//     覆盖因此永远是死配置。
+//  2. 端口被占时 Start 必须返回错误。修复前监听在后台 goroutine 里做，
+//     Start 永远返回 nil，WebUI 静默死亡而插件仍被当成加载成功。
+func TestListenOverrideAndBindFailure(t *testing.T) {
+	// 取一个确定空闲的地址
+	probe, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("probe listen: %v", err)
+	}
+	addr := probe.Addr().String()
+	probe.Close()
+
+	cfgReg := internalConfig.NewConfigRegistry("")
+	seedWebUIConfig(cfgReg)
+	// 插件设置里故意放一个别的地址，用来证明覆盖的优先级
+	cfgReg.PluginConfig("webui").Set("addr", "127.0.0.1:1")
+
+	s := testSDK(sdk.SDKConfig{
+		Settings:  sdk.NewSettings("webui", cfgReg),
+		Config:    sdk.NewConfig(&types.Config{}),
+		EventBus:  events.NewBus(),
+		IOManager: agentIO.NewIOManager(),
+	})
+
+	SetListenOverride(addr)
+	defer SetListenOverride("")
+
+	p1 := New("webui")
+	if err := p1.Start(s); err != nil {
+		t.Fatalf("Start with override: %v", err)
+	}
+	defer p1.Stop()
+
+	// 覆盖值必须真的在监听
+	cli := &http.Client{Timeout: 2 * time.Second}
+	resp, err := cli.Get("http://" + addr + "/login")
+	if err != nil {
+		t.Fatalf("覆盖地址未监听（%s）：%v", addr, err)
+	}
+	resp.Body.Close()
+
+	// 同一地址再来一个插件实例 → 必须同步报错
+	p2 := New("webui")
+	err = p2.Start(s)
+	if err == nil {
+		p2.Stop()
+		t.Fatal("端口被占用时 Start 应返回错误，而不是静默成功")
+	}
+	if !strings.Contains(err.Error(), "监听") {
+		t.Fatalf("错误信息应说明监听失败，实际：%v", err)
+	}
+}
+
+func TestResolveListenAddrPrecedence(t *testing.T) {
+	SetListenOverride("")
+	defer SetListenOverride("")
+	if got := resolveListenAddr(""); got != ":8080" {
+		t.Fatalf("默认应为 :8080，得到 %q", got)
+	}
+	if got := resolveListenAddr(":9001"); got != ":9001" {
+		t.Fatalf("插件设置应生效，得到 %q", got)
+	}
+	SetListenOverride("127.0.0.1:9002")
+	if got := resolveListenAddr(":9001"); got != "127.0.0.1:9002" {
+		t.Fatalf("覆盖值应优先，得到 %q", got)
 	}
 }

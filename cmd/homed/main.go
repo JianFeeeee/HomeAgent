@@ -14,7 +14,7 @@ import (
 	cli "gitcode.com/JianFeeeee/HomeAgent/internal/plugins/cli"
 	_ "gitcode.com/JianFeeeee/HomeAgent/internal/plugins/healthcheck"
 	_ "gitcode.com/JianFeeeee/HomeAgent/internal/plugins/pluginmgr"
-	_ "gitcode.com/JianFeeeee/HomeAgent/internal/plugins/webui"
+	webui "gitcode.com/JianFeeeee/HomeAgent/internal/plugins/webui"
 
 	// 空白导入内置 provider：它们各自在 init 里注册到 pkg/embedding。
 	// 想把核心换成自己的模型，只需替换这一行（或另建一个发行版 main）。
@@ -153,7 +153,8 @@ func main() {
 
 	// 为内置插件注入内核依赖（各插件通过 init() 自注册工厂）
 	cli.DefaultSocket = opt.cliSocket
-	configureWebUIAddr(cfgReg, opt.httpAddr)
+	// webui 监听地址覆盖：必须在 loadPlugins 之前设置，插件 Start 时会读它。
+	webui.SetListenOverride(resolveWebUIOverride(cfgReg, opt.httpAddr))
 
 	// ---- 依存句法分析器（内嵌 ONNX 模型 / 规则引擎） ----
 

@@ -802,20 +802,26 @@ func wirePluginSDK(pluginReg *plugin.Registry, luaVM *luapkg.VM, baseAPIKey stri
 	pluginReg.SetStatusProvider(agent)
 }
 
-// configureWebUIAddr 把 CLI --webui 落到 webui 插件的 settings["addr"]。
+// resolveWebUIOverride 解析 webui 监听地址的覆盖值，空串表示不覆盖。
 //
-// webui 插件作为内置插件经 Registry 启动，读取自身 settings["addr"]（默认 :8080）；
-// CLI 与 webui.listen_addr 配置只在这条键还空着时覆盖它。
-func configureWebUIAddr(cfgReg *internalConfig.ConfigRegistry, httpAddr string) {
-	webuiListenAddr := httpAddr
-	if webuiListenAddr == "" {
-		webuiListenAddr = cfgReg.GetString("webui.listen_addr", ":8080")
+// 优先级：CLI --webui > 核心配置 webui.listen_addr（仅当它被改成非内置默认值）。
+// 两者都不给时由 webui 插件自己的 settings["addr"] 决定。
+//
+// 为什么不写成“内核在插件加载前 Set 插件 settings['addr']”：那时
+// config_webui 表还没建（表只在插件注册 def 时创建），PluginSettings.Set 的
+// INSERT 会失败而错误被忽略，随后插件 Start 里 RegisterDef 才建表并写入默认
+// :8080 —— 于是 CLI --webui 与 webui.listen_addr **一直是死配置**，
+// 无论怎么传都监听 :8080。覆盖值改由插件自己接收（webui.SetListenOverride）。
+func resolveWebUIOverride(cfgReg *internalConfig.ConfigRegistry, httpAddr string) string {
+	if strings.TrimSpace(httpAddr) != "" {
+		return strings.TrimSpace(httpAddr)
 	}
-	if ps := cfgReg.PluginConfig("webui"); ps != nil {
-		if v, _ := ps.Get("addr"); v == nil {
-			_ = ps.Set("addr", webuiListenAddr)
-		}
+	// webui.listen_addr 的播种默认值就是 ":8080"；与默认值相同视为“未配置”，
+	// 否则会把用户在设置页里改过的插件 addr 顶掉。
+	if v := strings.TrimSpace(cfgReg.GetString("webui.listen_addr", ":8080")); v != "" && v != ":8080" {
+		return v
 	}
+	return ""
 }
 
 // options 是 worker 的命令行参数。
