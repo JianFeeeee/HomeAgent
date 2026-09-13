@@ -843,3 +843,27 @@ func parseFlags() options {
 	flag.Parse()
 	return options{dataDir: *dataDir, httpAddr: *httpAddr, cliSocket: *cliSocket, role: *role, boot: *boot}
 }
+
+// compactConfigDB 在空闲页够多时压缩配置库；失败只告警（不影响启动）。
+//
+// 触发条件（见 internal/config.MaybeCompact）：空闲页 >= 1MB 且占页数 >= 25%。
+// 放在插件加载之后调用——迁移/清理大值发生在插件 Start 里，之前调用没有意义。
+func compactConfigDB(cfgReg *internalConfig.ConfigRegistry) {
+	before := int64(-1)
+	if st, err := os.Stat(cfgReg.DBPath()); err == nil {
+		before = st.Size()
+	}
+	done, err := cfgReg.MaybeCompact(1<<20, 0.25)
+	if err != nil {
+		log.Printf("[homed] warning: 配置库压缩失败: %v", err)
+		return
+	}
+	if !done {
+		return
+	}
+	after := before
+	if st, err := os.Stat(cfgReg.DBPath()); err == nil {
+		after = st.Size()
+	}
+	log.Printf("[homed] 配置库已压缩: %d -> %d 字节", before, after)
+}

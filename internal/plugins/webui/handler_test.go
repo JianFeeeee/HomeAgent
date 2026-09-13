@@ -1246,3 +1246,49 @@ func TestHistoryStoreSaveIsAtomicAndRoundTrips(t *testing.T) {
 		t.Fatalf("回读不一致：%+v", got)
 	}
 }
+
+// TestChatPersistenceIsThrottled 钉住聊天记录写盘节流：
+// 连续变更不得每条都整段重写文件，但 Close 前必须把最后一次落盘（否则丢对话）。
+func TestChatPersistenceIsThrottled(t *testing.T) {
+	dir := t.TempDir()
+	file := filepath.Join(dir, "chat.json")
+
+	cfgReg := internalConfig.NewConfigRegistry("")
+	webuiCfg := cfgReg.PluginConfig("webui")
+	webuiCfg.RegisterDef(internalConfig.ConfigDef{Key: "history_file", Default: ""})
+	webuiCfg.Set("history_file", file)
+
+	s := testSDK(sdk.SDKConfig{
+		Settings: sdk.NewSettings("webui", cfgReg),
+		Config:   sdk.NewConfig(&types.Config{}),
+		EventBus: events.NewBus(),
+	})
+	h := NewHandler(s)
+	if h.history.Path() != file {
+		t.Fatalf("history 路径应为 %s，实际 %s", file, h.history.Path())
+	}
+
+	// 模拟一轮对话里的连续变更（用户消息 + 多个工具事件 + 收尾）
+	base := time.Now()
+	for i := 0; i < 20; i++ {
+		h.chatMu.Lock()
+		h.chatHistory = append(h.chatHistory, ChatMsg{
+			Role: "assistant", Content: "消息", Time: base.Add(time.Duration(i) * time.Second).Format(time.RFC3339),
+		})
+		h.persistChatLocked()
+		h.chatMu.Unlock()
+	}
+	// 节流窗口内不应落盘
+	if _, err := os.Stat(file); err == nil {
+		t.Fatal("节流窗口（3s）内不应已经写盘")
+	}
+
+	// Close 必须把最后一次变更落下去
+	h.Close()
+	msgs := newHistoryStore(file).Load()
+	if len(msgs) != 20 {
+		t.Fatalf("Close 后应有 20 条记录，实际 %d", len(msgs))
+	}
+	// Close 幂等
+	h.Close()
+}
