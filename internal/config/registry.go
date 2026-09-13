@@ -246,11 +246,38 @@ func (r *ConfigRegistry) defsLockedRegisterSource(name string) {
 	}
 }
 
+// pluginDefPrefix 是插件级配置定义在全局 def 表里的命名空间前缀。
+const pluginDefPrefix = "plugin."
+
+// ListDefs 返回全局 def 表中匹配前缀的定义（含插件命名空间）。
+// 需要「只看核心」时用 ListCoreDefs，需要「只看某个插件」时用
+// PluginConfig(name).ListDefs。
 func (r *ConfigRegistry) ListDefs(prefix string) []*ConfigDef {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
 	var result []*ConfigDef
 	for _, def := range r.defs {
+		if strings.HasPrefix(def.Key, prefix) {
+			result = append(result, def)
+		}
+	}
+	sort.Slice(result, func(i, j int) bool { return result[i].Key < result[j].Key })
+	return result
+}
+
+// ListCoreDefs 返回**核心命名空间**（非 plugin.*）下匹配前缀的定义。
+//
+// 插件 def 注册时被限定到 "plugin.<name>."，所以这里必须显式排除；
+// 否则 DefsCore("") 会把插件 def 一并当成核心 def 返回，WebUI 设置页的 meta
+// 里就会出现 plugin.<name>.<key> 的「核心侧副本」。
+func (r *ConfigRegistry) ListCoreDefs(prefix string) []*ConfigDef {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	var result []*ConfigDef
+	for _, def := range r.defs {
+		if strings.HasPrefix(def.Key, pluginDefPrefix) {
+			continue
+		}
 		if strings.HasPrefix(def.Key, prefix) {
 			result = append(result, def)
 		}
@@ -1114,5 +1141,24 @@ func (p *PluginSettings) RegisterDef(def ConfigDef) {
 }
 
 func (p *PluginSettings) ListDefs(prefix string) []*ConfigDef {
-	return p.registry.ListDefs(prefix)
+	// 只返回**本插件命名空间下**的定义，并把 Key 剥回插件内局部键。
+	//
+	// 注册时 def.Key 被限定成 "plugin.<name>.<key>" 以保证全局唯一；
+	// 而调用方（插件自身、WebUI 设置页）看到的键必须与 Set/Get/ListPlugin
+	// 使用的局部键一致，所以这里必须反向剥掉命名空间。
+	//
+	// 修复前这里把 prefix 直接透传给全局 ListDefs，等价于「返回全仓所有 def」：
+	// WebUI 设置页于是把每个 def 复制进每个插件命名空间
+	// （28 插件 × ~186 def = 5208 条，96% 是重复），并派生出
+	// plugin.<a>.plugin.<b>.<key> 这类幻影键——按幻影键写回会落到**错误插件**
+	// 的配置表里。
+	qualified := "plugin." + p.name + "."
+	defs := p.registry.ListDefs(qualified + prefix)
+	out := make([]*ConfigDef, 0, len(defs))
+	for _, d := range defs {
+		clone := *d
+		clone.Key = strings.TrimPrefix(d.Key, qualified)
+		out = append(out, &clone)
+	}
+	return out
 }

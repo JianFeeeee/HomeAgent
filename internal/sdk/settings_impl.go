@@ -152,7 +152,8 @@ func (s *settingsImpl) DefsCore(prefix string) []*ConfigDef {
 	if s.reg == nil {
 		return nil
 	}
-	return mapDefs(s.reg.ListDefs(prefix))
+	// 只取核心命名空间：插件 def 已限定在 "plugin.<name>."，不能当核心 def 返回。
+	return mapDefs(s.reg.ListCoreDefs(prefix))
 }
 func (s *settingsImpl) DefsPlugin(plugin, prefix string) []*ConfigDef {
 	if s.reg == nil {
