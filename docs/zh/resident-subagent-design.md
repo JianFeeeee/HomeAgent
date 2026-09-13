@@ -416,6 +416,46 @@
 | 内核不持有"当前通道" | ❌ `currentOutputChannel` + 提示词预设 | 删字段、删预设 |
 | 工作式轻量子 | ✅ | **不动** |
 
+### 16.0 N2c 施工方案（轻量内核接线）［已定方案：**窄接口 + nil 即禁用**］
+
+**先按"谁在调"把 `a.memory` 的 42 处使用分类**（`grep` 实测，非估计）：
+
+| 分组 | 位置 | 方法 | 谁用 |
+|---|---|---|---|
+| **A 记忆整理流水线** | `distill.go`（10）：`archiveLoop` / `reviewLoop` / `mergeLoop` / `detectEntityMerge` / `reviewRelations` / `archiveColdDocs` | `Recall`, `ClearSentenceID`, `CleanupOrphanedSentences` | **root-only**（后台定时器） |
+| **B 记忆块 + 媒体桥** | `graphmedia.go`（18）、`medialoop.go`（4） | `PutMemoryBlocks`, `AddMemoryBlockEdge`, `BlocksForNode`, `PutDocumentNode`, `MemoryBlocks`, `MigrateLegacyMediaEntities`, `mediaContextFor*` | **root-only** |
+| **C 记忆整理工具** | `toolcall.go::executeMemoryTool`（8） | `Introspect`, `MergeEntities`, `DeleteEntity`, `Purge`, `Commit` | **root-only**（`memory_merge`/`memory_delete_entity`/`memory_block_merge`/`memory_purge`/`memory_edit`/`memory_stats`） |
+| **D 共同面** | `graphmedia.go:114`（自动写入）、`toolcall.go:130`（`memory_recall`） | **只有 `Recall` + `Commit`** | 根与子都要 |
+| **E 判空/状态** | 22 处 `if a.memory != nil` + `GetKernelStatus` + `buildToolDefs` | — | 既有关卡 |
+
+⇒ **子 agent 需要的记忆面只有 `Recall` + `Commit`**；其余全是"整理记忆 / 记忆整理流水线"
+（用户指出的关键点），**子根本不该有那些代码路径**。
+
+#### 设计：窄接口 + nil 即禁用（不写"18 个方法返回错误"的受限包装）
+
+```go
+// core 内部：共同面（根与子都要）
+type GraphMemory interface {
+    Recall(keywords, seedEntities []string, depth int, sessionFilter string) (*memory.RecallResult, error)
+    Commit(triples []memory.Triple, sessionID string, turnID int) (int, int, error)
+}
+```
+
+| | `a.graph`（共同面） | `a.memory`（整理面：块/媒体/流水线/整理工具） |
+|---|---|---|
+| **根 agent** | 同一个 `*GraphDB` | `*GraphDB` |
+| **驻留子** | `*LightMemory` | **`nil`** |
+
+- 子把 `a.memory` 设为 `nil` ⇒ **既有的 22 处 nil 关卡自动禁掉全部 root-only 路径**
+  （`executeMemoryTool` 开头已经是 `if a.memory == nil { return "图记忆系统不可用" }`）。
+- 唯一要拆的是**自动写入路径** `commitTriplesWithMedia`：
+  图部分 → `a.graph.Commit`；块/媒体部分 → 由 `a.memory != nil` 守卫。
+- 工具表：`memory_recall`（读）对子开放；整理类
+  （`memory_merge`/`memory_delete_entity`/`memory_block_merge`/`memory_purge`/`memory_edit`/`memory_stats`）
+  **不进子的工具表**（而不是让它们进去再报"不可用"）。
+- 轻量 profile 另外不接线的装配：doc 记忆 / context 动态上下文（`pruneOnInput` 等）/
+  蒸馏 / 归档 / 关系复审 / 实体合并定时器 / consolidation / 人格门禁。
+
 ### 16.1 N2 的记忆面清单（现状）
 
 `internal/memory/` 下需要加 space 维度的面：
@@ -508,7 +548,7 @@
 | **N2a** | **作用域对象 + 图记忆 space 维度**：`memory.Scope{Write string; Read []string}`；`entities/sentences/relations` 加 `space` 列（默认 `main`，老数据迁移视为 main）；写落 `Write`、查询过滤 `space IN Read` | 同 space 可见、跨 space 不可见 |
 | **N2b** | **图记忆的向量检索**接入同一 space 过滤（子能按 space 语义检索） | 检索不跨 space 越界 |
 | — | 其余记忆面（doc 记忆 / 动态上下文 / 知识库 / 文本 / 媒体 / 社交）：**v1 不加 space**（子不可达） | 由 S13/S14 隐含 |
-| **N2c** | **Agent 级作用域接线**：`AgentConfig.MemoryScope`；根 = `{Write:main, Read:[main]}`；驻留子 = `{Write:sub/<id>, Read:[sub/<id>,main]}`；所有记忆读写经 scope | S13–S15 |
+| **N2c** | **Agent 级 profile（轻量内核接线）**：见下方施工方案 | S13–S15 |
 | **N2d** | **晋升与丢弃**：`Promote(space, records)`（回收时父把选中的 temp 记录写进 main）+ `DropSpace(space)`（回收/销毁时丢弃 temp） | S11 的数据面 |
 | **N3** | **驻留子生命周期**：创建 / 销毁 / 登记表 / 父退出清理 | S12、S16 |
 | **N4** | **跨 agent 投递**：子→父 L3、父→子 L4（+ `isKernelLevelSource` 分层） | S4、S6、S17 |
