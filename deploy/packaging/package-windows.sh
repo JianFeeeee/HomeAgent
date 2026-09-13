@@ -22,6 +22,15 @@ PROJECT_ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
 BUILD_DIR="${BUILD_DIR:-$PROJECT_ROOT/build}"
 DIST_LINUX="${DIST_LINUX:-$PROJECT_ROOT/dist/linux}"
 DIST_RELEASE="${DIST_RELEASE:-$PROJECT_ROOT/dist/release}"
+# ❗NSIS 的 `File` 路径是**相对 .nsi 所在目录**解析的：在 tag 的 worktree 里构建时，
+# 必须用**该 tag 里的** installer.nsi，否则它会去主仓的 build/linux-payload 找载荷
+# （实测报 `File: "..\..\build\linux-payload\*.*" -> no files found`）。
+# 用 tag 里的 .nsi 也正是"发布件与当时的脚本同源"的正确做法。
+NSI="${NSI:-$PROJECT_ROOT/deploy/packaging/installer.nsi}"
+if [ ! -f "$NSI" ]; then
+  echo "[FAIL] 找不到 NSIS 脚本: $NSI" >&2
+  exit 1
+fi
 
 VARIANT="${1:-server}"
 ARCH="${2:-amd64}"
@@ -67,9 +76,12 @@ mkdir -p "$BUILD_DIR/linux-payload"
 cp "$DEB" "$BUILD_DIR/linux-payload/"
 echo "[STAGE] payload ← $(basename "$DEB")（$(du -h "$DEB" | cut -f1)）"
 
-echo "[BUILD] makensis -DVARIANT=$VARIANT -DPRODUCT_VERSION=$VERSION"
-makensis -V2 -DVARIANT="$VARIANT" -DPRODUCT_VERSION="$VERSION" \
-  "$PROJECT_ROOT/deploy/packaging/installer.nsi"
+if [ -z "$(ls -1 "$BUILD_DIR/linux-payload" 2>/dev/null | head -1 || true)" ]; then
+  echo "[FAIL] payload 为空：$BUILD_DIR/linux-payload" >&2
+  exit 1
+fi
+echo "[BUILD] makensis -DVARIANT=$VARIANT -DPRODUCT_VERSION=$VERSION（nsi: $NSI）"
+makensis -V2 -DVARIANT="$VARIANT" -DPRODUCT_VERSION="$VERSION" "$NSI"
 
 OUT="$BUILD_DIR/HomeAgent_v${VERSION}_${SUFFIX}_win64.exe"
 if [ ! -f "$OUT" ]; then
