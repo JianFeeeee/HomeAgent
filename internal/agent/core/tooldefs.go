@@ -5,6 +5,8 @@ import (
 	"strings"
 
 	agentIO "gitcode.com/JianFeeeee/HomeAgent/internal/agent/io"
+	"gitcode.com/JianFeeeee/HomeAgent/internal/meta"
+	sdkmeta "gitcode.com/JianFeeeee/homeagent-sdk/meta"
 )
 
 func (a *Agent) buildMemoryContext(input string, maxTokens int) string {
@@ -37,8 +39,30 @@ func (a *Agent) buildMemoryContext(input string, maxTokens int) string {
 	return s
 }
 
+// expandPromptVars 展开自定义提示词（人格卡）里的版本占位符。
+//
+// 为什么需要：人格卡是**配置项**，一旦写死版本号就会随内核发版而说谎 ——
+// 实测线上人格卡写着 "HΔ-Kernel v1.0.3 型号"，内核早已 1.3.x，agent 向用户
+// 自报版本时就照抄 1.0.3。占位符让这类文本永远跟随真实构建：
+//
+//	{{kernel_version}}  → 内核版本（如 1.3.5）
+//	{{kernel_commit}}   → 构建 commit
+//	{{sdk_version}}     → 所兼容的 SDK 版本（如 1.3.0）
+//
+// 未知占位符**原样保留**：写错了要看得见，而不是被静默换成空串。
+func expandPromptVars(s string) string {
+	if !strings.Contains(s, "{{") {
+		return s
+	}
+	return strings.NewReplacer(
+		"{{kernel_version}}", meta.Version,
+		"{{kernel_commit}}", meta.Commit,
+		"{{sdk_version}}", sdkmeta.Version,
+	).Replace(s)
+}
+
 func (a *Agent) buildSystemPrompt(memContext string, userInput string) string {
-	prompt := a.systemPrompt
+	prompt := expandPromptVars(a.systemPrompt)
 	if prompt == "" {
 		prompt = "你是小宅，HomeAgent 的看板娘，一个家政型 AI 管家助手。绝不用 Unicode emoji，只用颜文字表达情感，句尾带语气词。WebUI 概览页展示你的立绘。"
 	}
