@@ -109,14 +109,14 @@ func dropContinuationPlaceholders(msgs []agentAPI.Message) []agentAPI.Message {
 //
 // 超时收益：首包 ~1-3s 到达即建立活性，后续只要 token 在流动就不会触发
 // 空闲超时；总生成时长不再受限於 180s 整体超时。
-func chatStreamWithFallback(ctx context.Context, p agentAPI.Provider, req *agentAPI.CompletionRequest, a *Agent) (*agentAPI.CompletionResponse, error) {
+func chatStreamWithFallback(ctx context.Context, p agentAPI.Provider, req *agentAPI.CompletionRequest, a *Agent, channel string) (*agentAPI.CompletionResponse, error) {
 	ch, err := p.ChatStream(ctx, req)
 	if err != nil {
 		log.Printf("[agent] stream connect failed (%v), falling back to non-stream chat", err)
 		return p.Chat(ctx, req)
 	}
 
-	resp, accErr := accumulateStream(ctx, ch, a)
+	resp, accErr := accumulateStream(ctx, ch, a, channel)
 
 	// 中断/超时取消必须保持取消语义传给调用方（与原 Chat() 行为一致：
 	// 被 cancel 时丢弃已收内容返回 err），让 process() 的 continue 分支
@@ -127,7 +127,7 @@ func chatStreamWithFallback(ctx context.Context, p agentAPI.Provider, req *agent
 		if a != nil {
 			a.publishEvent(events.EventContentDelta, map[string]interface{}{
 				"content": "",
-				"channel": a.currentOutputChannel,
+				"channel": channel,
 				"reset":   true,
 			})
 		}
@@ -157,7 +157,7 @@ type toolCallAcc struct {
 
 // accumulateStream 消费 chunk channel，累积为完整 CompletionResponse，
 // 同时发布增量事件。返回的 response 与非流式 Chat() 的返回等价。
-func accumulateStream(ctx context.Context, ch <-chan agentAPI.StreamChunk, a *Agent) (*agentAPI.CompletionResponse, error) {
+func accumulateStream(ctx context.Context, ch <-chan agentAPI.StreamChunk, a *Agent, channel string) (*agentAPI.CompletionResponse, error) {
 	resp := &agentAPI.CompletionResponse{
 		ToolCalls: make([]agentAPI.ToolCall, 0),
 	}
@@ -209,7 +209,7 @@ func accumulateStream(ctx context.Context, ch <-chan agentAPI.StreamChunk, a *Ag
 				if a != nil {
 					a.publishEvent(events.EventReasoningDelta, map[string]interface{}{
 						"content": ck.ReasoningContent,
-						"channel": a.currentOutputChannel,
+						"channel": channel,
 					})
 				}
 			}
@@ -218,7 +218,7 @@ func accumulateStream(ctx context.Context, ch <-chan agentAPI.StreamChunk, a *Ag
 				if a != nil {
 					a.publishEvent(events.EventContentDelta, map[string]interface{}{
 						"content": ck.Content,
-						"channel": a.currentOutputChannel,
+						"channel": channel,
 					})
 				}
 			}

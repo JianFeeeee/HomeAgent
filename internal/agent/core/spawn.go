@@ -45,7 +45,7 @@ func (a *Agent) evictChildTasksLocked() {
 	}
 }
 
-func (a *Agent) executeSpawnChild(tc agentAPI.ToolCall) string {
+func (a *Agent) executeSpawnChild(tc agentAPI.ToolCall, parentChannel string) string {
 	task, _ := tc.Arguments["task"].(string)
 	if task == "" {
 		if b, _ := json.Marshal(tc.Arguments); len(b) > 2 {
@@ -69,9 +69,8 @@ func (a *Agent) executeSpawnChild(tc agentAPI.ToolCall) string {
 	taskID := fmt.Sprintf("child_%d", a.childNextID)
 	a.childMu.Unlock()
 
-	// 捕获父 Agent 当前输出通道：子任务完成通知需回到发起对话的通道，
-	// 让父 Agent 正常感知并可回复用户（而非走无记忆整理路径丢失通知）。
-	parentChannel := a.currentOutputChannel
+	// parentChannel 由调用方（任务帧）传入：子任务完成通知要回到**发起这次
+	// spawn 的那个任务**的通道，而不是"内核当前通道"（那个概念已删除）。
 	if parentChannel == "" || parentChannel == channelConsolidation {
 		parentChannel = "cli"
 	}
@@ -150,7 +149,7 @@ func (a *Agent) runChildTask(taskID, task string, parentChannel string, maxTurns
 			case ct.Name == "spawn_child" || ct.Name == "plgreload":
 				result = fmt.Sprintf("子 Agent 不允许调用系统工具: %s", ct.Name)
 			default:
-				result = a.executeToolCall(ct)
+				result = a.executeToolCall(ct, parentChannel)
 			}
 			msgs = append(msgs, agentAPI.Message{Role: "assistant", Content: resp.Content, ToolCalls: []agentAPI.ToolCall{ct}})
 			msgs = append(msgs, agentAPI.Message{Role: "tool", ToolCallID: ct.ID, Content: result})
@@ -249,5 +248,3 @@ func (a *Agent) executeLLMTool(tc agentAPI.ToolCall) string {
 		return fmt.Sprintf("未知的 LLM 工具: %s", tc.Name)
 	}
 }
-
-

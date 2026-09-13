@@ -13,7 +13,7 @@ import (
 	"gitcode.com/JianFeeeee/HomeAgent/internal/memory/text"
 )
 
-func (a *Agent) executeToolCall(tc agentAPI.ToolCall) (ret string) {
+func (a *Agent) executeToolCall(tc agentAPI.ToolCall, channel string) (ret string) {
 	defer func() {
 		if r := recover(); r != nil {
 			stack := debug.Stack()
@@ -31,7 +31,7 @@ func (a *Agent) executeToolCall(tc agentAPI.ToolCall) (ret string) {
 
 	done := make(chan string, 1)
 	go func() {
-		done <- a.executeToolCallInner(tc)
+		done <- a.executeToolCallInner(tc, channel)
 	}()
 
 	select {
@@ -43,7 +43,7 @@ func (a *Agent) executeToolCall(tc agentAPI.ToolCall) (ret string) {
 	}
 }
 
-func (a *Agent) executeToolCallInner(tc agentAPI.ToolCall) string {
+func (a *Agent) executeToolCallInner(tc agentAPI.ToolCall, channel string) string {
 	switch {
 	case tc.Name == "persona_set":
 		return a.executePersonaTool(tc)
@@ -67,7 +67,7 @@ func (a *Agent) executeToolCallInner(tc agentAPI.ToolCall) string {
 		pluginName, _ := tc.Arguments["plugin_name"].(string)
 		return a.executeGetPluginTools(pluginName)
 	case tc.Name == "spawn_child":
-		return a.executeSpawnChild(tc)
+		return a.executeSpawnChild(tc, channel)
 	case tc.Name == "child_result":
 		return a.executeChildResultTool(tc)
 	case strings.HasPrefix(tc.Name, "llm_"):

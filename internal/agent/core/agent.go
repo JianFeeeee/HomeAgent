@@ -84,7 +84,6 @@ type Agent struct {
 	maxContextSize int
 
 	// 当前请求的输出通道（mutex 保护，process() 内独占）
-	currentOutputChannel string
 
 	// 阶段管道：插件消息流编辑
 	stageHost    *StageHost

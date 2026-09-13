@@ -12,9 +12,14 @@ import (
 )
 
 func (a *Agent) runStage(stage sdk.Stage, ctx *sdk.StageContext) bool {
+	// 通道从 stage ctx 上取（由发起方写入）——内核不持有"当前通道"。
+	ch := ""
+	if ctx != nil && ctx.Extra != nil {
+		ch, _ = ctx.Extra["output_channel"].(string)
+	}
 	payload := map[string]interface{}{
 		"phase":   string(stage),
-		"channel": a.currentOutputChannel,
+		"channel": ch,
 	}
 	if ctx != nil && len(ctx.ToolCalls) > 0 {
 		payload["tool"] = ctx.ToolCalls[0].Name
