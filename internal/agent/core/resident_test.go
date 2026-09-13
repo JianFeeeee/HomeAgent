@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -301,14 +302,25 @@ func TestResident_ContextFullAndDispositions(t *testing.T) {
 	}
 }
 
+func envInt(key string, def int) int {
+	if v := os.Getenv(key); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n > 0 {
+			return n
+		}
+	}
+	return def
+}
+
 // ---- N7：端到端 + 压力 ----
 
 func TestResident_E2EAndStress(t *testing.T) {
 	parent, _, dir := newRootForResidents(t)
 	reg := parent.io.ChannelRegistry()
 
-	const nResidents = 8
-	const roundsEach = 12
+	// 压力规模可用环境变量放大（默认 8 子 × 12 轮）：
+	//   RESIDENT_STRESS_N / RESIDENT_STRESS_ROUNDS
+	nResidents := envInt("RESIDENT_STRESS_N", 8)
+	roundsEach := envInt("RESIDENT_STRESS_ROUNDS", 12)
 	ids := make([]string, 0, nResidents)
 	for i := 0; i < nResidents; i++ {
 		id := "sub-" + string(rune('a'+i))
