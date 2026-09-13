@@ -15,31 +15,31 @@ import (
 )
 
 const (
-	RepeatNone      = "none"
-	RepeatDaily     = "daily"
-	RepeatWeekday   = "weekday"
-	RepeatWeekly    = "weekly"
-	RepeatBiweekly  = "biweekly"
-	RepeatMonthly   = "monthly"
-	RepeatYearly    = "yearly"
+	RepeatNone        = "none"
+	RepeatDaily       = "daily"
+	RepeatWeekday     = "weekday"
+	RepeatWeekly      = "weekly"
+	RepeatBiweekly    = "biweekly"
+	RepeatMonthly     = "monthly"
+	RepeatYearly      = "yearly"
 	RepeatLunarYearly = "lunar_yearly"
 )
 
 type CalendarEvent struct {
-	ID         string   `json:"id"`
-	Title      string   `json:"title"`
-	StartTime  string   `json:"start_time"`
-	EndTime    string   `json:"end_time,omitempty"`
-	AllDay     bool     `json:"all_day,omitempty"`
-	Location   string   `json:"location,omitempty"`
-	Note       string   `json:"note,omitempty"`
-	Reminds    []int    `json:"reminds,omitempty"`
-	RemindAt   []int64  `json:"remind_at,omitempty"`
-	Repeat     string   `json:"repeat,omitempty"`
-	ParentID   string   `json:"parent_id,omitempty"`
-	Lunar      bool     `json:"lunar,omitempty"`
-	LunarMonth int      `json:"lunar_month,omitempty"`
-	LunarDay   int      `json:"lunar_day,omitempty"`
+	ID         string  `json:"id"`
+	Title      string  `json:"title"`
+	StartTime  string  `json:"start_time"`
+	EndTime    string  `json:"end_time,omitempty"`
+	AllDay     bool    `json:"all_day,omitempty"`
+	Location   string  `json:"location,omitempty"`
+	Note       string  `json:"note,omitempty"`
+	Reminds    []int   `json:"reminds,omitempty"`
+	RemindAt   []int64 `json:"remind_at,omitempty"`
+	Repeat     string  `json:"repeat,omitempty"`
+	ParentID   string  `json:"parent_id,omitempty"`
+	Lunar      bool    `json:"lunar,omitempty"`
+	LunarMonth int     `json:"lunar_month,omitempty"`
+	LunarDay   int     `json:"lunar_day,omitempty"`
 }
 
 type Plugin struct {
@@ -276,6 +276,9 @@ func nextLunarYearly(targetMonth, targetDay int, after time.Time) (time.Time, bo
 func (p *Plugin) Start(s *sdk.PluginSDK) error {
 	p.sdk = s
 
+	// 入站通道：本插件用 "calendar" 通道注入输入（见 Inject* 调用），
+	// 输入侧必须显式登记 —— 否则"把该 inputch 划给驻留子"会报 `inputch 未注册`。
+	_ = s.RegisterInputChannel("calendar", sdk.ChannelDef{NoMemory: true})
 	dataDirVal, err := s.Settings().GetCore("core.daemon.data_dir")
 	if err != nil || dataDirVal == "" {
 		dataDirVal = "."
@@ -359,7 +362,7 @@ func (p *Plugin) Start(s *sdk.PluginSDK) error {
 	s.RegisterTool(tp+"today", sdk.ToolDef{
 		Name: tp + "today", Description: "Show today's events with countdown.",
 		Parameters: map[string]interface{}{
-			"type": "object",
+			"type":       "object",
 			"properties": map[string]interface{}{},
 		},
 	}, p.handleToday)
@@ -367,7 +370,7 @@ func (p *Plugin) Start(s *sdk.PluginSDK) error {
 	s.RegisterTool(tp+"week", sdk.ToolDef{
 		Name: tp + "week", Description: "Show this week's events grouped by day.",
 		Parameters: map[string]interface{}{
-			"type": "object",
+			"type":       "object",
 			"properties": map[string]interface{}{},
 		},
 	}, p.handleWeek)

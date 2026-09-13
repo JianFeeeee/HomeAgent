@@ -48,6 +48,9 @@ func (p *Plugin) Start(s *sdk.PluginSDK) error {
 	s.SetAutoRestart(true)
 	p.sdk = s
 	p.tp = p.name + "_"
+	// 入站通道：本插件用 p.name 通道注入输入（见 Inject* 调用），
+	// 输入侧必须显式登记 —— 否则"把该 inputch 划给驻留子"会报 `inputch 未注册`。
+	_ = s.RegisterInputChannel(p.name, sdk.ChannelDef{NoMemory: true})
 
 	dataDirVal, err := s.Settings().GetCore("core.daemon.data_dir")
 	if err != nil || dataDirVal == "" {

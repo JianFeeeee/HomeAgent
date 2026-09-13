@@ -24,8 +24,8 @@ type Plugin struct {
 
 	// 会话表：session_id → 上下文前缀。A2A 无状态协议下由插件侧维护
 	// 多轮上下文：同 session 的后续请求会把之前的对话拼进注入文本。
-	sessMu    sync.Mutex
-	sessions  map[string]*a2aSession
+	sessMu   sync.Mutex
+	sessions map[string]*a2aSession
 }
 
 // a2aSession 记录一个会话的轮次历史，用于延续上下文。
@@ -47,6 +47,9 @@ func (p *Plugin) Start(s *sdk.PluginSDK) error {
 	s.SetAutoRestart(true)
 	p.sdk = s
 	p.sessions = make(map[string]*a2aSession)
+	// 入站通道：本插件用 p.name 通道注入输入（见 InjectInputSync 调用），
+	// 输入侧必须显式登记 —— 否则"把该 inputch 划给驻留子"会报 `inputch 未注册`。
+	_ = s.RegisterInputChannel(p.name, sdk.ChannelDef{})
 	tp := p.name + "_"
 
 	// 注册自身为输出通道：agent 回复 emit 到本通道时有落点，
@@ -66,7 +69,7 @@ func (p *Plugin) Start(s *sdk.PluginSDK) error {
 		Key: "listen", Default: "127.0.0.1:12000",
 		Type: "string", DisplayName: "监听地址",
 		Description: "A2A 服务端监听地址，设为空可禁用 HTTP 服务",
-		Category: p.name,
+		Category:    p.name,
 	})
 
 	// Outbound: query + discover
@@ -75,10 +78,10 @@ func (p *Plugin) Start(s *sdk.PluginSDK) error {
 		Parameters: map[string]interface{}{
 			"type": "object",
 			"properties": map[string]interface{}{
-				"agent_url": map[string]interface{}{"type": "string", "description": "目标 Agent 的 A2A 端点 URL"},
-				"query":     map[string]interface{}{"type": "string", "description": "发送给目标 Agent 的文本查询"},
+				"agent_url":  map[string]interface{}{"type": "string", "description": "目标 Agent 的 A2A 端点 URL"},
+				"query":      map[string]interface{}{"type": "string", "description": "发送给目标 Agent 的文本查询"},
 				"session_id": map[string]interface{}{"type": "string", "description": "可选。上次调用返回的 session_id，传入可延续与该 agent 的多轮对话上下文"},
-				"timeout":   map[string]interface{}{"type": "integer", "description": "超时时间（秒），默认 60"},
+				"timeout":    map[string]interface{}{"type": "integer", "description": "超时时间（秒），默认 60"},
 			},
 			"required": []string{"agent_url", "query"},
 		},
@@ -287,7 +290,7 @@ func (p *Plugin) handleIncomingA2A(w http.ResponseWriter, r *http.Request) {
 			Query     string `json:"query,omitempty"`
 			SessionID string `json:"session_id,omitempty"`
 			Limit     int    `json:"limit,omitempty"`
-			Message *struct {
+			Message   *struct {
 				Role  string `json:"role"`
 				Parts []struct {
 					Text string `json:"text,omitempty"`
@@ -347,7 +350,7 @@ func (p *Plugin) handleIncomingA2A(w http.ResponseWriter, r *http.Request) {
 		if sess := p.sessions[sessionID]; sess != nil {
 			sess.History = append(sess.History, "用户: "+queryText, "助手: "+reply)
 			if len(sess.History) > maxSessionTurns*2 {
-				sess.History = sess.History[len(sess.History)-maxSessionTurns*2 :]
+				sess.History = sess.History[len(sess.History)-maxSessionTurns*2:]
 			}
 			sess.LastUsed = time.Now()
 		}
@@ -357,11 +360,11 @@ func (p *Plugin) handleIncomingA2A(w http.ResponseWriter, r *http.Request) {
 			"jsonrpc": "2.0",
 			"id":      req.ID,
 			"result": map[string]interface{}{
-				"id":     fmt.Sprintf("task_%d", time.Now().UnixNano()),
-				"status": "completed",
+				"id":         fmt.Sprintf("task_%d", time.Now().UnixNano()),
+				"status":     "completed",
 				"session_id": sessionID,
 				"message": map[string]interface{}{
-					"role": "agent",
+					"role":  "agent",
 					"parts": []map[string]string{{"type": "text", "text": reply}},
 				},
 			},
@@ -457,10 +460,10 @@ type A2AResponse struct {
 }
 
 type A2AResult struct {
-	TaskID    string       `json:"id,omitempty"`
-	Status    string       `json:"status,omitempty"`
-	SessionID string       `json:"session_id,omitempty"`
-	Message   *A2AMessage  `json:"message,omitempty"`
+	TaskID    string        `json:"id,omitempty"`
+	Status    string        `json:"status,omitempty"`
+	SessionID string        `json:"session_id,omitempty"`
+	Message   *A2AMessage   `json:"message,omitempty"`
 	AgentCard *A2AAgentCard `json:"agent_card,omitempty"`
 }
 
