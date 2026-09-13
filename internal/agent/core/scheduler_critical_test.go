@@ -95,13 +95,29 @@ func TestPreempt_DeferredDuringToolExec(t *testing.T) {
 func TestCriticalSection_ConsolidationMarked(t *testing.T) {
 	a := newPreemptAgent(t, newPreemptProvider())
 
-	a.currentOutputChannel = "cli"
-	if a.inCriticalSection() {
+	// 判定：只有记忆整理通道是整任务临界区。
+	if isCriticalChannel("cli") {
 		t.Fatal("普通通道不应被判为临界区")
 	}
-	a.currentOutputChannel = channelConsolidation
-	if !a.inCriticalSection() {
+	if !isCriticalChannel(channelConsolidation) {
 		t.Fatal("记忆整理必须是不可抢占临界区")
+	}
+
+	// 集成：标志的推导链「输入事件 → 通道 → isCriticalChannel → scheduler.critical」
+	// 必须成立（N0 之后通道只从事件推导，不再有内核可变字段）。
+	for _, c := range []struct {
+		channel string
+		want    bool
+	}{
+		{"cli", false},
+		{channelConsolidation, true},
+	} {
+		evt, _ := textEvent("tc", "x")
+		evt.OutputChannel = c.channel
+		a.sched.setCritical(isCriticalChannel(outputChannelOf(evt)))
+		if got := a.sched.inCritical(); got != c.want {
+			t.Fatalf("通道 %q → critical=%v，期望 %v", c.channel, got, c.want)
+		}
 	}
 }
 

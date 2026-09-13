@@ -714,15 +714,6 @@ func parseInterruptLevel(s string) (Level, bool) {
 	}
 }
 
-// inCriticalSection 报告运行任务是否处于不可抢占区。
-//
-// M3b 只处理「整个任务不可抢占」的情形（记忆整理）。工具执行、ONNX、
-// CAS 落盘属于**单步**临界区——它们由「只在 step 之间检查让位」天然保护，
-// 不需要在这里列（M4 会把清单显式化）。
-func (a *Agent) inCriticalSection() bool {
-	return a.currentOutputChannel == channelConsolidation
-}
-
 // newInputTask 把一个**排队输入**包装成任务（无级别）。
 func newInputTask(evt *agentIO.InputEvent) *Task {
 	return &Task{Class: TaskQueued, Kind: TaskKindInput, Event: evt, EnqueuedAt: time.Now()}

@@ -68,8 +68,8 @@ func (a *Agent) buildSystemPrompt(memContext string, userInput string) string {
 	prompt += "\n\n【中断消息】长任务执行期间，工具/插件/定时器等会通过中断机制向你发送提醒（如 QQ 新消息、终端输出到达、定时器到点等）。中断消息以 system 角色注入，内容带 [中断消息] 前缀，**不是用户发言，但也必须认真处理**：优先停下当前长任务，针对中断内容作出响应或决定继续执行。不要忽略带 [中断消息] 前缀的 system 消息。"
 
 	prompt += "\n\n【输出规则】消息不会自动发送到对话来源通道，你必须自己决定如何回复：\n"
-	prompt += "- 当前输入来自哪个通道，就优先用哪个通道回复；不要串到其他通道（除非用户明确要求）。\n"
-	prompt += "- 当前输入来源通道（即对话发生的通道）是：" + a.currentOutputChannel + "。对应输出门工具是 output_send__{该通道名}。\n"
+	prompt += "- **不要假设当前通道是某个固定值**：同一会话里可能同时有多个来源（多设备、多通道、子任务）。\n"
+	prompt += "  先看这条消息本身与上下文里的来源信息，再决定往哪里回；不确定有哪些通道时先调 output_list_channels。\n"
 	prompt += "- 同步通道（webui / cli / 终端）：直接返回纯文本，内核会把文本交给等待方显示，无需调用工具。\n"
 	prompt += "- 异步通道（qq / wechat / 群聊等）：返回纯文本**【不会】**自动送达用户，必须调用 output_send__{通道名} 工具（注意 meta 里带上正确的 user_id 或 group_id）才能真正把消息发出去。\n"
 	prompt += "- 不确定当前通道的发送方式时，先用 output_send__{通道名}_help 查看该通道的 meta 格式和 type 枚举，再决定。\n"
