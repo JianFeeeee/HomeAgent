@@ -325,7 +325,7 @@ func New(cfg AgentConfig) *Agent {
 		}
 	}
 
-	return &Agent{
+	a := &Agent{
 		id:                cfg.ID,
 		startTime:         time.Now(),
 		provider:          cfg.Provider,
@@ -376,6 +376,14 @@ func New(cfg AgentConfig) *Agent {
 		noMergeMarkers:    make(map[string]int),
 		lastInput:         make(map[string]time.Time),
 	}
+
+	// 输入路由：inputch 是可分配资源，划给某个 agent 后输入**只**流向那个 agent
+	// （设计 §4.1「路由发生在进内核之前」）。io 层不认识 agent，所以在这里把路由器
+	// 注入进去：插件注入输入时先问它，被别的 agent 接管就不再进本内核队列。
+	if a.io != nil {
+		a.io.SetInputRouter(a.routeInputByOwner)
+	}
+	return a
 }
 
 // SetSkillIndexProvider 注入技能索引提供者（skillmgr 插件加载后由 main 接线）。
