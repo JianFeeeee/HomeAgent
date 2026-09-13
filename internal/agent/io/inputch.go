@@ -49,11 +49,25 @@ type InputChannel struct {
 type ChannelRegistry struct {
 	mu       sync.RWMutex
 	channels map[string]InputChannel
+	// outputTargets 把**输出通道**解析成"目标 agent 的哪个 inputch"。
+	// 这是"输出可寻址到具体 agent"的依据（子→父、父→指定子）。
+	outputTargets map[string]OutputTarget
+}
+
+// OutputTarget 是一个输出通道的投递目标。
+type OutputTarget struct {
+	// AgentID 是目标 agent（"" = 本 agent / 由传输层通道 device 自行处理）。
+	AgentID string `json:"agent_id,omitempty"`
+	// InputCh 是目标 agent 上接收它的 inputch（"" = 与输出通道同名）。
+	InputCh string `json:"inputch,omitempty"`
 }
 
 // NewChannelRegistry 构造一个空的 inputch 登记表。
 func NewChannelRegistry() *ChannelRegistry {
-	return &ChannelRegistry{channels: make(map[string]InputChannel)}
+	return &ChannelRegistry{
+		channels:      make(map[string]InputChannel),
+		outputTargets: make(map[string]OutputTarget),
+	}
 }
 
 // Register 登记/更新一个 inputch。
@@ -140,6 +154,43 @@ func (r *ChannelRegistry) ListByOwner(agentID string) []InputChannel {
 		if ch.Owner == agentID {
 			out = append(out, ch)
 		}
+	}
+	return out
+}
+
+// BindOutputTarget 登记"输出通道 → 目标 agent 的 inputch"的解析。
+//
+// 例：父把子用的输出通道 "to-child-1" 绑到 (child-1, "sub/in")，
+// 于是子经该通道发出的消息会投进 child-1 的 sub/in。
+func (r *ChannelRegistry) BindOutputTarget(output, agentID, inputCh string) error {
+	if output == "" {
+		return errors.New("输出通道名不能为空")
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.outputTargets == nil {
+		r.outputTargets = make(map[string]OutputTarget)
+	}
+	r.outputTargets[output] = OutputTarget{AgentID: agentID, InputCh: inputCh}
+	return nil
+}
+
+// ResolveOutputTarget 解析一个输出通道的目标；未登记时 ok=false
+// （意味着由传输层通道自行处理，如 qq/webui 这类 device 通道）。
+func (r *ChannelRegistry) ResolveOutputTarget(output string) (OutputTarget, bool) {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	t, ok := r.outputTargets[output]
+	return t, ok
+}
+
+// ListOutputTargets 返回全部已登记的目标解析（按输出通道名排序）。
+func (r *ChannelRegistry) ListOutputTargets() map[string]OutputTarget {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	out := make(map[string]OutputTarget, len(r.outputTargets))
+	for k, v := range r.outputTargets {
+		out[k] = v
 	}
 	return out
 }
