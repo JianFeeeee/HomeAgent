@@ -162,6 +162,10 @@ func main() {
 
 	loadPlugins(cfg, cfgReg, pluginReg, stageHost, opt.boot, opt.dataDir)
 
+	// 插件加载完成后再回收空闲页：大值（如老版聊天记录）可能在这一步被搬走/删除，
+	// 而 SQLite 的 DELETE 不会缩小文件。
+	compactConfigDB(cfgReg)
+
 	stopRuntime := startAgentRuntime(cfgReg, pluginReg, agent, logDir, ctx)
 	defer stopRuntime()
 

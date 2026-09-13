@@ -1,6 +1,7 @@
 package config
 
 import (
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -451,4 +452,52 @@ func keysOf(defs []*ConfigDef) []string {
 		out[i] = d.Key
 	}
 	return out
+}
+
+// TestMaybeCompactReclaimsFreePages 钉住「删除大值后文件要真的缩回去」。
+// SQLite 的 DELETE 只把页标空闲，文件体积不变；v1.3.12 之前那条 5MB 的
+// plugin.webui.chathistory 就是这样让 config.db 一直占着几 MB。
+func TestMaybeCompactReclaimsFreePages(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.db")
+	r := NewConfigRegistry(path)
+	r.RegisterDef(ConfigDef{Key: "plugin.webui.chathistory", Default: ""})
+
+	big := strings.Repeat("x", 512*1024)
+	r.Set("plugin.webui.chathistory", big)
+	if err := r.Flush(); err != nil {
+		t.Fatalf("Flush: %v", err)
+	}
+	before, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// 阈值远比这次写入小 → 搬走大值后应触发压缩
+	if err := r.Delete("plugin.webui.chathistory"); err != nil {
+		t.Fatalf("Remove: %v", err)
+	}
+	done, err := r.MaybeCompact(1, 0.1)
+	if err != nil {
+		t.Fatalf("MaybeCompact: %v", err)
+	}
+	if !done {
+		t.Fatal("空闲页远大于阈值时应执行 VACUUM")
+	}
+	after, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if after.Size() >= before.Size() {
+		t.Fatalf("压缩后文件应变小：%d -> %d", before.Size(), after.Size())
+	}
+	// 数据仍在（压缩不能破坏内容）
+	r.Set("core.llm.model", "m1")
+	if v, err := r.Get("core.llm.model"); err != nil || v != "m1" {
+		t.Fatalf("压缩后读写异常: %v %v", v, err)
+	}
+	// 没有空闲页时不应白做功
+	if done2, err := r.MaybeCompact(1<<30, 0.9); err != nil || done2 {
+		t.Fatalf("阈值很高时不应压缩，得到 done=%v err=%v", done2, err)
+	}
+	r.Close()
 }

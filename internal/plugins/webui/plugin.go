@@ -294,6 +294,11 @@ func (p *Plugin) Start(s *sdk.PluginSDK) error {
 }
 
 func (p *Plugin) Stop() error {
+	// 先停聊天记录写盘协程并落最后一次，再关服务器：
+	// 写盘是节流的（chatSaveThrottle），不显式关会丢掉最后一轮对话。
+	if p.handler != nil {
+		p.handler.Close()
+	}
 	if p.server != nil {
 		return p.server.Close()
 	}

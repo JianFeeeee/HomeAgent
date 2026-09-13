@@ -494,6 +494,49 @@ func (r *ConfigRegistry) Close() error {
 	return r.db.Close()
 }
 
+// MaybeCompact 在「空闲页占比高且绝对量够大」时做一次 VACUUM，把文件真正缩回去。
+//
+// 为什么需要：SQLite 的 DELETE 只把页标成空闲（进 freelist），文件体积不变。
+// 典型场景是聊天记录那类大值被搬走/删除后，config.db 仍占着几 MB。
+// 只在空闲页超过 minFreeBytes 且占比 >= minRatio 时动手，避免每次启动都重写整个库。
+// 返回是否真的执行了 VACUUM。
+func (r *ConfigRegistry) MaybeCompact(minFreeBytes int64, minRatio float64) (bool, error) {
+	if r.dbPath == "" || r.dbPath == ":memory:" {
+		return false, nil
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	var pageCount, freeCount, pageSize int64
+	if err := r.db.QueryRow("PRAGMA page_count").Scan(&pageCount); err != nil {
+		return false, err
+	}
+	if err := r.db.QueryRow("PRAGMA freelist_count").Scan(&freeCount); err != nil {
+		return false, err
+	}
+	if err := r.db.QueryRow("PRAGMA page_size").Scan(&pageSize); err != nil {
+		return false, err
+	}
+	if pageCount == 0 {
+		return false, nil
+	}
+	freeBytes := freeCount * pageSize
+	if freeBytes < minFreeBytes || float64(freeCount)/float64(pageCount) < minRatio {
+		return false, nil
+	}
+	if _, err := r.db.Exec("VACUUM"); err != nil {
+		return false, err
+	}
+	// 库是 WAL 模式：VACUUM 的结果先落进 -wal，必须再 checkpoint(TRUNCATE)
+	// 才会真正回写主库文件并缩小它（否则文件大小看着没变）。
+	if _, err := r.db.Exec("PRAGMA wal_checkpoint(TRUNCATE)"); err != nil {
+		return true, err
+	}
+	return true, nil
+}
+
+// DBPath 返回配置库路径（空/内存库时为空串）。
+func (r *ConfigRegistry) DBPath() string { return r.dbPath }
+
 var defaultSources = map[string]map[string]string{
 	"deepseek": {"base_url": "https://api.deepseek.com", "model": "deepseek-v4-flash", "api_key": "", "thinking_enabled": "false", "adapter": "deepseek", "adapter_path": "adapters/deepseek.lua"},
 }
