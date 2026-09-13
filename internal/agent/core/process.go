@@ -331,11 +331,13 @@ func (a *Agent) formatMergedTimeline(maxTokens int) string {
 	include := 0
 	for i := len(events) - 1; i >= 0; i-- {
 		e := events[i]
-		est := len(e.Source) + len(e.Input) + 40
+		// ❗单位必须与 EstimateTokens 一致（rune×2）。这里曾用 `len()`（**字节**）再 ×2：
+		// CJK 一字 3 字节 ⇒ 中文事件被高估 3 倍，窗口还有余量也会提前 break，
+		// 把更早的事件整段丢掉（实测：2384 字的中文事件被估成 14398 token > 8192）。
+		estTokens := EstimateTokens(e.Source) + EstimateTokens(e.Input) + 40
 		if e.Response != "" {
-			est += 120
+			estTokens += 120
 		}
-		estTokens := est * 2
 		if remaining-estTokens < 0 && include > 0 {
 			break
 		}

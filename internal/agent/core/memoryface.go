@@ -20,6 +20,29 @@ package core
 
 import "gitcode.com/JianFeeeee/HomeAgent/internal/memory"
 
+// isLightKernel 报告本 agent 是不是**轻量内核**（驻留子）。
+//
+// 轻量内核 = 传统上下文 + 图记忆（作用域化）：它**没有**动态上下文能力
+// （预算裁剪 / 按相关度裁剪并向 doc 记忆归档），那些是父 agent 专属的。
+func (a *Agent) isLightKernel() bool { return a != nil && a.parentID != "" }
+
+// contextTokenBudget 返回拼装时间线时可用的 token 预算。
+//
+//	完整内核：用动态上下文算出来的 ContextTokens（按相关度/预算**策略性**裁时间线）
+//	轻量内核：**用整个窗口** —— 传统上下文只受"模型能收多少"这个**硬上限**约束，
+//	          不做任何策略性裁剪（不按相关度挑、不向 doc 记忆归档）；
+//	          而且在撞到硬上限之前，contextfull（90% 窗口）已按 L4 上报父 agent
+//	          决策（压缩/回收/销毁）—— 丢事件的决定权在父，不在内核。
+func (a *Agent) contextTokenBudget(b TokenBudget) int {
+	if a.isLightKernel() {
+		if b.MaxContext > 0 {
+			return b.MaxContext
+		}
+		return defaultMaxContextTokens
+	}
+	return b.ContextTokens
+}
+
 // GraphMemory 是任意 agent 都能用的图记忆面。
 //
 // 实现者：

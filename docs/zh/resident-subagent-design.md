@@ -456,6 +456,25 @@ type GraphMemory interface {
 - 轻量 profile 另外不接线的装配：doc 记忆 / context 动态上下文（`pruneOnInput` 等）/
   蒸馏 / 归档 / 关系复审 / 实体合并定时器 / consolidation / 人格门禁。
 
+### 16.0.0 传统上下文的实现口径（子 vs 父）
+
+"传统上下文"不是一句口号，它对应三处**代码闸门**（都按 `isLightKernel()` 判）：
+
+| 能力 | 父（完整内核） | 子（轻量内核） | 闸门位置 |
+|---|---|---|---|
+| 时间线拼装预算 | `budget.ContextTokens`（动态上下文算出的份额，≈窗口 32%~53%） | **整个窗口** `budget.MaxContext` | `contextTokenBudget()`（`stepPrepare` 与 `rebaseFramePrefix` 两处） |
+| 按相关度裁剪 + 向 doc 记忆归档 | 通道/注入点声明 `context_policy=prune` 时执行 | **不执行** | `pruneOnInput()` 前置返回 |
+| doc 记忆 / 记忆整理流水线 | 有 | 无（`a.memory == nil` ⇒ 既有 22 处关卡自动关闭） | `memoryface.go` / `tooldefs.go` |
+
+**"不裁"的准确含义**：不做**策略性**裁剪（不按相关度挑、不归档），只受"模型能收多少"这个
+**硬上限**约束；而且在撞到硬上限之前，contextfull（90% 窗口）已按 L4 上报父 agent —— 
+**丢事件的决定权在父，不在内核**（父可压缩/回收/销毁）。
+
+**顺带修掉的既有 bug**：`formatMergedTimeline` 逐事件估算原用 `len()`（**字节**）再 ×2，
+而 `EstimateTokens` 是 rune×2 ⇒ 中文事件被高估 3 倍，窗口还有余量也提前 break、
+把更早事件整段丢掉（实测 2384 字中文事件被估成 14398 token > 8192）。已改为统一的
+`EstimateTokens`。这条 bug 对父同样有效（中文长会话会被过早裁剪）。
+
 ### 16.0.1 工具面（已实现）
 
 | 工具 | 谁用 | 作用 |
