@@ -28,6 +28,7 @@ type testPluginEnv struct {
 	memDB     *memory.GraphDB
 	ks        *knowledge.Store
 	docStore  *doc.Store
+	cfgReg    *internalConfig.ConfigRegistry
 }
 
 func setupIntegration(t *testing.T) *testPluginEnv {
@@ -101,6 +102,7 @@ func setupIntegrationWithProvider(t *testing.T, pm *agentAPI.ProviderManager) *t
 		memDB:     memDB,
 		ks:        ks,
 		docStore:  docStore,
+		cfgReg:    cfgReg,
 	}
 }
 
