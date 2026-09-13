@@ -118,6 +118,15 @@ type IOManager struct {
 	// 回退只解决"看得见"，不解决"能不能用"。
 	parent *IOManager
 
+	// inputRouter 决定一条输入是否被"别的 agent"接管（返回 true = 已接管）。
+	//
+	// 为什么放在 io：inputch 是**最基本的输入路由单位**，而**路由发生在进内核之前**
+	// （docs/zh/resident-subagent-design.md §4.1）。插件注入输入的收口就在这里，
+	// 所以路由必须在这里生效 —— inputch 划给某个 agent 后，输入**只流向那个 agent**，
+	// 本内核根本看不到它。io 层不认识 agent，路由器由内核注入
+	// （见 core.Agent.routeInputByOwner）。
+	inputRouter InputRouter
+
 	// toolBlocks：插件工具注入多模态内容块，process.go 在下一条 tool message 时消费。
 	// 用 interface{}[] 避免 import api.ContentBlock 导致的循环依赖。
 	toolBlocksMu      sync.Mutex
@@ -132,6 +141,47 @@ func NewIOManager() *IOManager {
 		outputCh:    make(chan *OutputEvent, 256),
 		channelReg:  NewChannelRegistry(),
 	}
+}
+
+// InputRouter 是输入路由器的签名。
+//
+//	evt        待投递的输入事件（OutputChannel 即它的 inputch）
+//	isInterrupt 该输入是中断还是排队（两者都要按归属路由）
+//	返回 true  = 已被别的 agent 接管，本内核不再处理
+type InputRouter func(evt *InputEvent, isInterrupt bool) bool
+
+// SetInputRouter 注入输入路由器（nil = 不路由，行为与以前完全一致）。
+func (m *IOManager) SetInputRouter(r InputRouter) {
+	m.mu.Lock()
+	m.inputRouter = r
+	m.mu.Unlock()
+}
+
+// deliverInput 是**本内核**接收一条外部输入的收口：先按 inputch 归属路由，
+// 被别的 agent 接管就不进本内核队列（划给子的 inputch，父不再收到 —— 这是「划拨」
+// 的语义，不是"父也顺便看一眼"）。
+func (m *IOManager) deliverInput(evt *InputEvent, isInterrupt bool) {
+	m.mu.RLock()
+	router := m.inputRouter
+	m.mu.RUnlock()
+	if router != nil && router(evt, isInterrupt) {
+		return
+	}
+	m.pushLocal(evt, isInterrupt)
+}
+
+// DeliverRouted 把**已被路由**的事件放进本内核队列（不再二次路由）。
+// 由路由器实现调用：父把输入交给持有该 inputch 的子。
+func (m *IOManager) DeliverRouted(evt *InputEvent, isInterrupt bool) {
+	m.pushLocal(evt, isInterrupt)
+}
+
+func (m *IOManager) pushLocal(evt *InputEvent, isInterrupt bool) {
+	if isInterrupt {
+		m.interruptCh <- evt
+		return
+	}
+	m.inputCh <- evt
 }
 
 // SetParentIO 设置上级 IOManager（nil 表示无上级，行为与以前完全一致）。
@@ -232,50 +282,52 @@ func (m *IOManager) StopAll() {
 }
 
 func (m *IOManager) InjectInput(source string, eventType string, payload map[string]interface{}) {
-	m.inputCh <- &InputEvent{
+	m.deliverInput(&InputEvent{
 		RequestID:     m.nextRequestID(),
 		Source:        source,
 		Type:          eventType,
 		Payload:       payload,
 		OutputChannel: source,
-	}
+	}, false)
 }
 
 func (m *IOManager) InjectInputSync(source string, eventType string, payload map[string]interface{}) *OutputEvent {
 	ch := make(chan *OutputEvent, 1)
-	m.inputCh <- &InputEvent{
+	m.deliverInput(&InputEvent{
 		RequestID:     m.nextRequestID(),
 		Source:        source,
 		Type:          eventType,
 		Payload:       payload,
 		ResponseCh:    ch,
 		OutputChannel: source,
-	}
+	}, false)
+	// 被路由走时，回答由持有该 inputch 的 agent 写进同一个 ResponseCh
+	//（§4.3：同步输入的回程是事前定好的）——所以这里照常等待。
 	return <-ch
 }
 
 // InjectInputTo 注入输入事件并指定输出通道
 func (m *IOManager) InjectInputTo(source, outputChannel, eventType string, payload map[string]interface{}) {
-	m.inputCh <- &InputEvent{
+	m.deliverInput(&InputEvent{
 		RequestID:     m.nextRequestID(),
 		Source:        source,
 		Type:          eventType,
 		Payload:       payload,
 		OutputChannel: outputChannel,
-	}
+	}, false)
 }
 
 // InjectInputSyncTo 注入输入事件（同步等待）并指定输出通道
 func (m *IOManager) InjectInputSyncTo(source, outputChannel, eventType string, payload map[string]interface{}) *OutputEvent {
 	ch := make(chan *OutputEvent, 1)
-	m.inputCh <- &InputEvent{
+	m.deliverInput(&InputEvent{
 		RequestID:     m.nextRequestID(),
 		Source:        source,
 		Type:          eventType,
 		Payload:       payload,
 		ResponseCh:    ch,
 		OutputChannel: outputChannel,
-	}
+	}, false)
 	return <-ch
 }
 
@@ -370,13 +422,13 @@ func (m *IOManager) InjectInterrupt(source, channel string, payload map[string]i
 		payload = map[string]interface{}{}
 	}
 	evtType, _ := payload["type"].(string)
-	m.interruptCh <- &InputEvent{
+	m.deliverInput(&InputEvent{
 		RequestID:     m.nextRequestID(),
 		Source:        source,
 		Type:          evtType,
 		Payload:       payload,
 		OutputChannel: channel,
-	}
+	}, true)
 }
 
 func (m *IOManager) InjectInterruptText(source, channel, text string) {
