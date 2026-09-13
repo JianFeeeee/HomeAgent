@@ -21,7 +21,7 @@ import (
 // 本文件是 WebUI 的骨架：嵌入式前端资源、Handler 结构、构造、路由表、
 // 鉴权/会话/日志中间件与静态页。各资源的具体 handler 见同包 handler_*.go。
 
-//go:embed dashboard.html mascot.webp logo.svg
+//go:embed dashboard.html dashboard.css dashboard.js mascot.webp logo.svg
 var dashboardFS embed.FS
 
 var dashboardHTML string
@@ -56,11 +56,30 @@ document.getElementById('login-form').addEventListener('submit',async(e)=>{e.pre
 document.getElementById('password').addEventListener('keydown',function(e){if(e.key==='Enter')document.getElementById('login-form').dispatchEvent(new Event('submit'))});
 </script></body></html>`
 
+// dashboardHTML 是组装好的控制台页面：dashboard.html 外壳 + dashboard.css + dashboard.js。
+//
+// 前端刻意没有构建链，所以拆分的办法是：外壳里留 {{DASHBOARD_CSS}} / {{DASHBOARD_JS}}
+// 两个占位符，启动时把两个资产原样填回去——**发出的 HTML 与拆分前逐字节一致**，
+// 但 6637 行的单文件变成「外壳 + 样式 + 脚本」三份，便于编辑与评审。
 func init() {
-	data, err := dashboardFS.ReadFile("dashboard.html")
-	if err == nil {
-		dashboardHTML = string(data)
+	html, err := dashboardFS.ReadFile("dashboard.html")
+	if err != nil {
+		return
 	}
+	out := string(html)
+	for _, a := range []struct{ placeholder, file string }{
+		{"{{DASHBOARD_CSS}}", "dashboard.css"},
+		{"{{DASHBOARD_JS}}", "dashboard.js"},
+	} {
+		body, err := dashboardFS.ReadFile(a.file)
+		if err != nil {
+			log.Printf("[webui] 读取前端资产 %s 失败: %v", a.file, err)
+			continue
+		}
+		// 资产文件末尾的换行由占位符所在行自己的换行承担，避免多出空行。
+		out = strings.Replace(out, a.placeholder, strings.TrimRight(string(body), "\n"), 1)
+	}
+	dashboardHTML = out
 }
 
 type Handler struct {
