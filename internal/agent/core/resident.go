@@ -168,6 +168,19 @@ func (a *Agent) SpawnResident(opts ResidentOptions) (ResidentInfo, error) {
 
 	// ④ 子 → 父的主动消息（**L3 中断**，带子标识）：投进父的 inputch。
 	parentInCh := a.residentInboundChannel(opts.ID)
+	// 登记了入站 inputch 就必须有回滚路径：注册点与 residents 登记之间
+	// 当前无可失败步骤，但一旦将来插入（或 child.Start 变更），早退会把这条
+	// 登记留在共享表里——就是 child/<id> 残留那只 bug 的另一条入口。
+	// defer 保证“只要没走到成功返回，就注销这条登记”。
+	registered := false
+	defer func() {
+		if registered {
+			return
+		}
+		if reg := a.io.ChannelRegistry(); reg != nil {
+			reg.Unregister(inboundChannelName(opts.ID))
+		}
+	}()
 	child.notifyParent = func(text string) {
 		a.io.InjectInterruptTextOpts(opts.ID, parentInCh, text,
 			agentIO.InjectOptions{Priority: "L3"})
@@ -191,6 +204,7 @@ func (a *Agent) SpawnResident(opts ResidentOptions) (ResidentInfo, error) {
 		child.io.InjectInputTo(a.residentParentSource(), parentInCh, "text",
 			map[string]interface{}{"content": opts.TaskPrompt})
 	}
+	registered = true
 	return rc.info(), nil
 }
 
