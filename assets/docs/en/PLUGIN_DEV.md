@@ -599,23 +599,26 @@ When running inside the kernel, `sdk.*` global variables are injected by the Go 
 
 ### Lua SDK API
 
-The `sdk.*` API of Lua plugins is fully aligned with external plugins (toolchain-built `plugin.bin` subprocesses): registration functions raise a Lua error on failure; data functions uniformly return `(result, err)` with `err == nil` on success. Subsystems not wired by the core (e.g. SocialAPI) return empty values instead of errors.
+The `sdk.*` API of Lua plugins is aligned with external plugins (toolchain-built `plugin.bin` subprocesses) up to **SDK 1.3.0** (requires kernel **1.4.0+**, also backfilled by the Lua-alignment patch `v1.3.11`): registration functions raise a Lua error on failure; data functions uniformly return `(result, err)` with `err == nil` on success. Subsystems not wired by the core (e.g. SocialAPI) return empty values instead of errors.
+
+> Historical note: the 1.1–1.3 media / inject-flags / priority capabilities were long available only on the Go side and were silently missing on the Lua side. They are now fully aligned, guarded by the contract test in `internal/plugin/lua_surface_test.go` (every function promised by the mock has a runtime binding).
 
 **Registration**
 
 | Function | Description |
 |----------|-------------|
 | `sdk.log(level, msg)` | Log output |
-| `sdk.register_tool(name, def, handler)` | Register tool; `def` supports `description`, `parameters`, `no_memory`, `cleaner` |
+| `sdk.register_tool(name, def, handler)` | Register tool; `def` supports `description`, `parameters`, `no_memory`, `context_policy` (`"none"`/`"prune"`), `cleaner` |
 | `sdk.register_stage(stage, handler, scope)` | Register stage hook; `scope` is `nil`/`"global"` (default) or `"own_tools"` (fires only for `before_toolcall`/`after_toolcall` when the tool belongs to this plugin) |
 | `sdk.register_api(name)` | Register API |
-| `sdk.register_output_channel(name, caps, desc, def, handler)` | Register output channel; `def` supports `no_memory`, `cleaner` |
+| `sdk.register_output_channel(name, caps, desc, def, handler)` | Register output channel; `def` supports `no_memory`, `context_policy`, `cleaner` |
 | `sdk.register_input_channel(name, def)` | Register input channel; `def` as above |
+| `sdk.unregister_output_channel(name)` | Unregister an output channel (for resource-bound channels, e.g. remote devices); returns `(nil, err)` |
 | `sdk.set_auto_restart(enabled)` | Auto-restart the plugin after a crash |
 
 **Stage hook context**
 
-Stage handlers receive the full context (same as external plugins): `raw_message`, `user_id`, `group_id`, `phase`, `llm_text`, `final_text`, `no_memory`, `response` (when responded), `tool_calls`, `tool_results`.
+Stage handlers receive the full context (same as external plugins): `raw_message`, `user_id`, `group_id`, `phase`, `llm_text`, `reasoning_content`, `final_text`, `no_memory`, `context_msgs`, `token_usage`, `memory`, `extra`, `errors`, `response` (when responded), `tool_calls`, `tool_results`.
 
 **Stage writeback**: the `ctx` table passed to the handler is a reference — mutating writable fields inside the handler syncs back to the core `StageContext` (aligned with subprocess external-plugin capability):
 
@@ -644,19 +647,36 @@ Writable fields: `raw_message`, `llm_text`, `final_text`, `user_id`, `group_id`,
 | `sdk.inject_text(source, channel, text)` | Deliver text message |
 | `sdk.inject_interrupt(source, channel, text)` | Interrupt delivery |
 | `sdk.inject_text_no_memory(source, channel, text)` | Deliver without memory computation |
+| `sdk.inject_text_opts` / `sdk.inject_interrupt_opts(source, channel, text, opts)` | Delivery with flags; `opts = { no_memory=bool, context_policy="none"|"prune", cleaner_name=string, priority="L1".."L3" }` |
+| `sdk.inject_input_sync(source, channel, text)` | Inject synchronously and wait for this turn's reply; returns `(reply, err)`, reply is nil when there is none |
+| `sdk.inject_input_sync_opts(source, channel, text, opts)` | Same, with flags |
+| `sdk.inject_input_media(source, channel, text, blocks)` | Inject text + multimodal content blocks |
+| `sdk.inject_input_media_opts(source, channel, text, blocks, opts)` | Same, with flags |
+| `sdk.inject_input_media_sync` / `..._sync_opts(...)` | Synchronous media injection; returns `(reply, err)` |
+| `sdk.inject_interrupt_media(source, channel, text, blocks)` | Interrupt delivery with media |
+| `sdk.inject_interrupt_media_opts(source, channel, text, blocks, opts)` | Same, with flags |
+| `sdk.set_tool_blocks(blocks)` | Set multimodal blocks carried by the next tool message (lets the model see images / hear audio) |
+
+Each `blocks` item: `{ type="text", text="..." }`, `{ type="image_url", image_url={ url="...", detail="high" } }`, or `{ type="audio_url", audio_url={ url="..." } }`. An absent `opts` is the zero value (recorded in memory + no pruning), equivalent to the three-argument form.
 
 **Data APIs (aligned with subprocess external plugins, all return `(result, err)`)**
 
 | Sub-table | Functions |
 |-----------|-----------|
-| `sdk.memory.*` | `recall(query, depth)`, `commit({triples})`, `introspect()`, `merge(source, target)`, `purge(criteria, hard)` |
-| `sdk.doc.*` | `query(text, top_k)`, `insert({id,title,content})`, `remove(id)`, `stats()` |
+| `sdk.memory.*` | `recall(query, depth)`, `commit({triples})` (triple supports `subject/relation/object/confidence/subject_type/object_type/sentence_text/media_digests`), `introspect()`, `merge(source, target)`, `purge(criteria, hard)` |
+| `sdk.doc.*` | `query(text, top_k)`, `insert({id,title,content})`, `insert_with_media(doc, attachments)`, `remove(id)`, `stats()` |
 | `sdk.knowledge.*` | `search(query, limit)`, `add(tag, content)`, `list()` |
-| `sdk.text_memory.*` | `append({role,content,timestamp,channel})` |
+| `sdk.text_memory.*` | `append({role,content,timestamp,channel,attachments})` |
 | `sdk.llm.*` | `list_sources()`, `set_source(name)`, `current_source()` |
 | `sdk.social.*` (read-only) | `get_person(name)`, `get_network(name, depth)`, `get_trait(name, trait)`, `get_relations(name)`, `list_persons()` |
+| `sdk.events.*` | `subscribe(event_type, handler)` → returns an unsubscribe function; handler receives `{type,source,timestamp,payload}` |
+| `sdk.plugin_mgr.*` | `reload_one(name)`, `list_loaded()`, `is_disabled(name)` |
 | `sdk.json.*` | `encode(val)`, `decode(str)` |
 | `sdk.http.*` | `get(url)`, `post(url, body, content_type)` |
+
+Each `attachments` item: `{ digest=, mime=, name=, data=<base64> }`; with `data` it is new content (stored in the content-addressed store), with only `digest` it references existing content.
+
+> The `sdk.events.subscribe` callback runs on the kernel's event-publishing goroutine, and Lua is single-state + mutex-guarded — **do only lightweight forwarding inside the callback; never block**, or every call of this plugin will stall.
 
 ---
 
