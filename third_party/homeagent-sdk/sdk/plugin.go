@@ -480,7 +480,15 @@ func (s *PluginSDK) RegisterPluginAPI(name string) error {
 // 入站（谁会往 <name> 注入输入）是另一件事，用 RegisterInputChannel 声明。
 // 若该通道同时也是你的注入入口，两个都要登记。
 //
-// name: channel name (e.g. "qq", "webui")
+// name: channel name (e.g. "qq", "webui")。
+//
+// ❗**命名约束**：内核会把通道名拼进 LLM 的函数名（`output_send__<name>`），
+// 而上游对函数名的规范是 `^[a-zA-Z0-9_-]{1,64}$`。违反的后果不是"这个工具不可用"，
+// 而是**整条请求被上游 400 拒绝**（`Invalid 'tools[N].function.name'`），
+// 网关的 auto tier 会全链条失败 —— 表现成"整个 agent 不说话了"。
+// 所以通道名只能用 `[A-Za-z0-9_-]`，且总长要留出 `output_send__`（13 字符）的余量。
+// 若通道名来自外部输入（设备自报 id 之类），请**在插件侧派生一个合规且唯一的名字**，
+// 而不是把原始值直接当通道名。
 // caps: bitmask of supported output capabilities (CapText, CapFile, etc.)
 // desc: description of the channel, expected meta format, and type enum
 // def:  通道在记忆计算层的行为（NoMemory/Cleaner）
