@@ -201,18 +201,30 @@ func TestResident_InputchTableAutoAndProactive(t *testing.T) {
 	spawnTestResident(t, parent, dir, "child-1")
 	child := parent.residents["child-1"].agent
 
+	// 说明：create 会把任务提示词作为**第一条输入**投给子（"create 即开工"），
+	// 所以这里先等那一轮写完 —— 表里每多一轮就多一条，正是"每轮必有记录"。
+	waitFor(t, "任务提示词那一轮写入", func() bool {
+		table, err := parent.ResidentTable("child-1")
+		return err == nil && len(table) >= 1
+	})
+	base, err := parent.ResidentTable("child-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	n := len(base)
+
 	// ① 子不主动写 ⇒ 系统自动写（每一轮必有记录）。
 	child.io.InjectInput("sub/in", "text", map[string]interface{}{"content": "干活"})
 	waitFor(t, "自动写处理表", func() bool {
 		table, err := parent.ResidentTable("child-1")
-		return err == nil && len(table) == 1 && !table[0].Proactive
+		return err == nil && len(table) == n+1 && !table[n].Proactive
 	})
 	table, err := parent.ResidentTable("child-1")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if table[0].InputCh != "sub/in" {
-		t.Fatalf("处理表应记本轮 inputch，实际 %q", table[0].InputCh)
+	if table[n].InputCh != "sub/in" {
+		t.Fatalf("处理表应记本轮 inputch，实际 %q", table[n].InputCh)
 	}
 
 	// ② 子主动写 ⇒ 本轮不再自动写。
@@ -222,7 +234,7 @@ func TestResident_InputchTableAutoAndProactive(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(table) != 2 || !table[1].Proactive || !strings.Contains(table[1].Text, "第一阶段") {
+	if len(table) != n+2 || !table[n+1].Proactive || !strings.Contains(table[n+1].Text, "第一阶段") {
 		t.Fatalf("主动写优先的语义不成立：%+v", table)
 	}
 }
@@ -428,6 +440,12 @@ func TestLightKernel_TraditionalContextNoTrimming(t *testing.T) {
 		t.Fatal("驻留子必须被识别为轻量内核")
 	}
 
+	// 先等"create 即开工"那一轮（任务提示词）跑完，否则下面抓到的是它的请求，
+	// 而不是我们注入了大段上下文之后的那一轮。
+	waitFor(t, "任务提示词那一轮结束", func() bool {
+		table, err := parent.ResidentTable("child-1")
+		return err == nil && len(table) >= 1
+	})
 	// 前提：动态上下文的份额 < 窗口（否则测不出区别）。
 	b := ComputeTokenBudget(child.provider, child.systemPrompt)
 	if b.MaxContext <= b.ContextTokens {
@@ -445,9 +463,10 @@ func TestLightKernel_TraditionalContextNoTrimming(t *testing.T) {
 
 	child.io.InjectInput("sub/in", "text", map[string]interface{}{"content": "本轮输入"})
 
-	waitFor(t, "子发出 LLM 请求", func() bool {
+	// 等**新的一轮**请求（首轮可能已经发过，必须严格等到注入之后那次）。
+	waitFor(t, "子发出新一轮 LLM 请求", func() bool {
 		n, _ := provider.chatText()
-		return n >= 1
+		return n >= 2
 	})
 	_, got := provider.chatText()
 	if !strings.Contains(got, "最早的事件标记EARLY") {

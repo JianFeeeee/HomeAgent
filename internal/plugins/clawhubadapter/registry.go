@@ -192,6 +192,9 @@ func (r *ChannelRegistry) Dispatch(data json.RawMessage, pluginName string, sp *
 		caps = 1
 	}
 	desc := fmt.Sprintf("OC channel %s (from %s)", chName, pn)
+	// 通道名来自外部 OC 配置（动态）：声明处**同时**登记 inputch ——
+	// 该通道既收（InjectInputSync 见 plugin.go）又发（output_send__<通道>）。
+	_ = s.RegisterInputChannel(chName, sdk.ChannelDef{})
 	s.RegisterOutputChannel(chName, caps, desc, sdk.ChannelDef{}, func(args map[string]interface{}) (interface{}, error) {
 		return sp.CallTool(chName, args)
 	})

@@ -63,6 +63,8 @@ func (p *Plugin) Start(s *sdk.PluginSDK) error {
 		}
 	}
 
+	// timer 通道：定时器到点经它注入 agent（见本文件 InjectInterruptTextOpts 调用）。
+	_ = s.RegisterInputChannel("timer", sdk.ChannelDef{})
 	s.RegisterTool("timer_set", sdk.ToolDef{
 		Name:        "timer_set",
 		Description: "设置一个定时提醒。倒计时结束后通过中断通道通知 agent。",
