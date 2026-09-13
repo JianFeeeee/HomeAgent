@@ -132,3 +132,46 @@ func TestChannelRegistry_DefLookupCompat(t *testing.T) {
 		t.Fatal("未注册的 inputch 不应有策略")
 	}
 }
+
+// TestOutputTarget_UnbindAndUnregisterCleanup 守住 outputTargets 的清理：
+//   - UnbindOutputTarget 幂等解绑；
+//   - Unregister(inputch) 顺手清掉指向它的目标登记（显式绑定 + 同名回退两种）。
+//
+// 背景：outputTargets 只增不减是漏项（审查发现）——通道随资源生灭时会留下
+// 指向已不存在 agent/inputch 的路由。
+func TestOutputTarget_UnbindAndUnregisterCleanup(t *testing.T) {
+	r := NewChannelRegistry()
+
+	if err := r.Register(InputChannel{Name: "sub/in"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := r.Register(InputChannel{Name: "same"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := r.BindOutputTarget("to-child", "child-1", "sub/in"); err != nil {
+		t.Fatal(err)
+	}
+	// InputCh=="" 表示"与输出通道同名"的回退。
+	if err := r.BindOutputTarget("same", "child-2", ""); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, ok := r.ResolveOutputTarget("to-child"); !ok {
+		t.Fatal("绑定后应能解析")
+	}
+	r.UnbindOutputTarget("to-child")
+	if _, ok := r.ResolveOutputTarget("to-child"); ok {
+		t.Fatal("解绑后不应再解析")
+	}
+	r.UnbindOutputTarget("to-child") // 幂等：重复解绑不 panic
+
+	// 注销 inputch：显式绑定到它的、以及同名回退的，都要一起清。
+	r.Unregister("sub/in")
+	if _, ok := r.ResolveOutputTarget("to-child"); ok {
+		t.Fatal("显式绑定到已注销 inputch 的目标应被清理")
+	}
+	r.Unregister("same")
+	if _, ok := r.ResolveOutputTarget("same"); ok {
+		t.Fatal("同名回退目标应随该 inputch 注销被清理")
+	}
+}
