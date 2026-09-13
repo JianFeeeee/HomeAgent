@@ -21,6 +21,10 @@ var (
 	//        新增的注入行为标志位（InjectOptions：no_memory / context_policy）
 	//        与 ChannelDef.ContextPolicy，使输入/排队注入/中断注入/同步注入都能
 	//        声明「是否记入记忆」与「是否据此裁剪上下文」（默认都是否）。
+	// 1.3.0：注入优先级贯通（SDK 1.3.0 的 InjectOptions.Priority 与
+	//        PriorityL1-L4）——插件可声明自己中断的级别，内核按四级中断阶梯调度；
+	//        并实现 UnregisterOutputChannel，使动态通道（远程设备 device/<id>）
+	//        能随资源生灭，而不是留下死通道骗模型。
 	//
 	// ❗main 上此值始终是**下一个未发布中版本**，不随 patch 发布变动
 	//（见 docs/git-branching.md §2.1）；已发布的版本号看对应的 release/vX.Y.x 与 tag。
@@ -42,7 +46,10 @@ var (
 	//        注入变体、InjectOptions、ChannelDef.ContextPolicy），因此声明为
 	//        1.2.0。用 SDK 1.0.0/1.1.0 编的存量插件照旧可用——新增方法由
 	//        **插件调用、内核实现**，不调就不受影响，无需重编。
-	SDKCompatibleVersion = "1.2.0"
+	// 1.3.0：内核实现了 SDK 1.3.0 的全部新增面 —— InjectOptions.Priority 的
+	//        分级中断调度、PriorityL1-L4 常量的语义，以及 UnregisterOutputChannel
+	//        在通道登记表 + io 设备表上的注销。同样：不调新面就不受影响。
+	SDKCompatibleVersion = "1.3.0"
 
 	// SourceURL 是本内核构建所对应的源码地址。
 	//
