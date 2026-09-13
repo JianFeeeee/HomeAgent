@@ -106,11 +106,20 @@ func (a *Agent) executeToolCallInner(tc agentAPI.ToolCall, channel string) strin
 }
 
 func (a *Agent) executeMemoryTool(tc agentAPI.ToolCall) string {
-	if a.memory == nil {
+	g := a.graphMem()
+	if g == nil {
 		if tc.Name == "memory_document_query" {
 			return a.executeDocTool(tc)
 		}
 		return "图记忆系统不可用"
+	}
+	// 整理类工具需要**完整内核**的记忆整理面（块/媒体/结构操作）。
+	// 轻量内核（驻留子）只有图记忆共同面 ⇒ 这些操作明确不可用，不静默降级。
+	requireFull := func() string {
+		if a.memory == nil {
+			return "本 agent 是轻量内核：只能读写图记忆，记忆整理（合并/删除/清理/编辑/统计）不可用"
+		}
+		return ""
 	}
 	switch tc.Name {
 	case "memory_recall":
@@ -127,7 +136,7 @@ func (a *Agent) executeMemoryTool(tc agentAPI.ToolCall) string {
 		if len(keywords) == 1 {
 			keywords = memory.ExtractKeywords(query)
 		}
-		result, err := a.memory.Recall(keywords, nil, int(depth), "")
+		result, err := g.Recall(keywords, nil, int(depth), "")
 		if err != nil {
 			return fmt.Sprintf("记忆检索失败: %v", err)
 		}
@@ -165,6 +174,9 @@ func (a *Agent) executeMemoryTool(tc agentAPI.ToolCall) string {
 		return strings.Join(parts, "\n")
 
 	case "memory_block_merge":
+		if msg := requireFull(); msg != "" {
+			return msg
+		}
 		entityA, _ := tc.Arguments["entity_a"].(string)
 		entityB, _ := tc.Arguments["entity_b"].(string)
 		rounds, _ := tc.Arguments["rounds"].(float64)
@@ -225,6 +237,9 @@ func (a *Agent) executeMemoryTool(tc agentAPI.ToolCall) string {
 		return fmt.Sprintf("已写入 %d 个实体和 %d 条关系", ec, rc)
 
 	case "memory_introspect":
+		if msg := requireFull(); msg != "" {
+			return msg
+		}
 		stats, err := a.memory.Introspect()
 		if err != nil {
 			return fmt.Sprintf("查询失败: %v", err)
@@ -235,6 +250,9 @@ func (a *Agent) executeMemoryTool(tc agentAPI.ToolCall) string {
 		return a.executeDocTool(tc)
 
 	case "memory_merge":
+		if msg := requireFull(); msg != "" {
+			return msg
+		}
 		source, _ := tc.Arguments["source"].(string)
 		target, _ := tc.Arguments["target"].(string)
 		if source == "" || target == "" {
@@ -247,6 +265,9 @@ func (a *Agent) executeMemoryTool(tc agentAPI.ToolCall) string {
 		return fmt.Sprintf("已将「%s」合并到「%s」，source 已彻底删除，%d 条关系已重定向", source, target, count)
 
 	case "memory_delete_entity":
+		if msg := requireFull(); msg != "" {
+			return msg
+		}
 		name, _ := tc.Arguments["name"].(string)
 		if name == "" {
 			return "name 不能为空"
@@ -257,6 +278,9 @@ func (a *Agent) executeMemoryTool(tc agentAPI.ToolCall) string {
 		return fmt.Sprintf("已彻底删除实体「%s」及其所有关联关系", name)
 
 	case "memory_purge":
+		if msg := requireFull(); msg != "" {
+			return msg
+		}
 		criteria := make(map[string]string)
 		if v, ok := tc.Arguments["subject_contains"].(string); ok && v != "" {
 			criteria["subject_contains"] = v
@@ -291,6 +315,9 @@ func (a *Agent) executeMemoryTool(tc agentAPI.ToolCall) string {
 		return strings.Join(parts, "，")
 
 	case "memory_edit":
+		if msg := requireFull(); msg != "" {
+			return msg
+		}
 		oldSubject, _ := tc.Arguments["old_subject"].(string)
 		oldRelation, _ := tc.Arguments["old_relation"].(string)
 		oldObject, _ := tc.Arguments["old_object"].(string)
