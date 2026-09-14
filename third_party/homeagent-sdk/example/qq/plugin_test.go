@@ -7,6 +7,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	"gitcode.com/JianFeeeee/homeagent-sdk/sdk"
 )
@@ -233,5 +234,81 @@ func TestDowngradedAuthStillAllowsQQOutput(t *testing.T) {
 	}
 	if ctx2.Response == nil || !strings.Contains(*ctx2.Response, "可信 QQ 会话身份不完整") {
 		t.Fatalf("读取类工具在降权时应被当前会话限制挡住: %#v", ctx2.Response)
+	}
+}
+
+// ---- 消息合并（debounce）----
+
+// collectInterrupts 用注入钩子收集中断文本（避免测试依赖真实 SDK）。
+func collectInterrupts(p *Plugin) *[]string {
+	got := []string{}
+	p.injectHook = func(s string) { got = append(got, s) }
+	return &got
+}
+
+func TestConsecutiveMessagesFromSameSenderAreBatched(t *testing.T) {
+	p := newPermissionTestPlugin(t)
+	got := collectInterrupts(p)
+	p.batchWindow = 20 * time.Millisecond
+	p.batchMax = time.Second
+
+	for i := 0; i < 3; i++ {
+		p.enqueueInterrupt("private", 10001, 0, int64(100+i), "小明", "单条", false, false)
+	}
+	time.Sleep(120 * time.Millisecond)
+
+	if len(*got) != 1 {
+		t.Fatalf("同一发送者连发 3 条应合并成 1 次中断，实际 %d 次: %#v", len(*got), *got)
+	}
+	if !strings.Contains((*got)[0], "3 条消息") {
+		t.Fatalf("合并中断应说明一共几条，实际: %s", (*got)[0])
+	}
+	// 三个 message_id 都要带上，模型才能取全
+	for _, id := range []string{"100", "101", "102"} {
+		if !strings.Contains((*got)[0], id) {
+			t.Fatalf("合并中断漏了 message_id=%s: %s", id, (*got)[0])
+		}
+	}
+}
+
+func TestDifferentSendersAreNotBatchedTogether(t *testing.T) {
+	p := newPermissionTestPlugin(t)
+	got := collectInterrupts(p)
+	p.batchWindow = 20 * time.Millisecond
+	p.batchMax = time.Second
+
+	p.enqueueInterrupt("private", 10001, 0, 1, "小明", "a", false, false)
+	p.enqueueInterrupt("private", 10002, 0, 2, "小红", "b", false, false)
+	time.Sleep(120 * time.Millisecond)
+
+	if len(*got) != 2 {
+		t.Fatalf("不同发送者不该合并，应有 2 次中断，实际 %d: %#v", len(*got), *got)
+	}
+}
+
+func TestBatchWindowZeroFallsBackToPerMessage(t *testing.T) {
+	p := newPermissionTestPlugin(t)
+	got := collectInterrupts(p)
+	p.batchWindow = 0
+
+	for i := 0; i < 3; i++ {
+		p.enqueueInterrupt("private", 10001, 0, int64(i), "小明", "原文", false, false)
+	}
+	if len(*got) != 3 {
+		t.Fatalf("关闭合并时应逐条投递（3 次），实际 %d: %#v", len(*got), *got)
+	}
+}
+
+func TestSingleMessageKeepsOriginalText(t *testing.T) {
+	p := newPermissionTestPlugin(t)
+	got := collectInterrupts(p)
+	p.batchWindow = 20 * time.Millisecond
+	p.batchMax = time.Second
+
+	p.enqueueInterrupt("group", 10001, 20002, 7, "小明", "单条原文", true, false)
+	time.Sleep(120 * time.Millisecond)
+
+	if len(*got) != 1 || (*got)[0] != "单条原文" {
+		t.Fatalf("单条消息应沿用原文（含所有者前缀），实际 %#v", *got)
 	}
 }
