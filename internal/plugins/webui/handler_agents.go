@@ -265,5 +265,8 @@ func (h *Handler) handleRuntime(w http.ResponseWriter, r *http.Request) {
 		"scheduler": ks.Scheduler,
 		"residents": ks.Residents,
 		"channels":  ks.Channels,
+		// inputch 的登记与归属（谁注册、划给了哪个 agent、容量、默认回程）。
+		// 只给设备能力（channels）无法回答「这条输入归谁」——驻留子存在时这就是缺口。
+		"input_channels": ks.InputChannels,
 	})
 }

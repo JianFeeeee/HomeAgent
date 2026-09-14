@@ -2262,6 +2262,135 @@
       background: rgba(136, 192, 208, 0.16);
       color: var(--frost-300);
     }
+    /* —— 通道分配（按归属）：容器 + 容量滑块 ——
+       为什么用容器而不是一排文字：归属是“分组”语义，只有把同一 owner 的
+       inputch 画进同一个盒子，才能一眼看出“这条输入被划给了哪个驻留子”。 */
+    .rt-owner {
+      border: 1px solid var(--border-color);
+      border-left: 3px solid var(--frost-300);
+      border-radius: 8px;
+      padding: 7px 9px;
+      margin-bottom: 7px;
+      background: rgba(255, 255, 255, 0.03);
+    }
+    .rt-owner.rt-owner-child {
+      border-left-color: #b48ead;
+      background: rgba(180, 142, 173, 0.07);
+    }
+    .rt-owner-head {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 8px;
+      margin-bottom: 4px;
+    }
+    .rt-owner-name {
+      font-size: 11px;
+      font-weight: 600;
+    }
+    .rt-owner-meta {
+      font-size: 10px;
+      color: var(--text-muted);
+    }
+    .rt-assign {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      padding: 4px 0;
+      border-top: 1px dashed rgba(255, 255, 255, 0.06);
+      font-size: 11px;
+    }
+    .rt-assign .rt-chan-name {
+      font-weight: 600;
+      min-width: 84px;
+    }
+    .rt-assign .rt-chan-sub {
+      font-size: 10px;
+      color: var(--text-muted);
+      margin-left: auto;
+    }
+    .rt-chip {
+      font-size: 9px;
+      padding: 1px 6px;
+      border-radius: 999px;
+      background: rgba(163, 190, 140, 0.16);
+      color: var(--text-secondary, var(--text-muted));
+      white-space: nowrap;
+    }
+    .rt-badge-warn {
+      font-size: 9px;
+      padding: 1px 6px;
+      border-radius: 999px;
+      background: rgba(191, 97, 106, 0.22);
+      color: #d08770;
+    }
+    /* 容量滑块：轨道 + 填充 + 把手 + 读数。 */
+    .rt-slider {
+      display: inline-flex;
+      align-items: center;
+      gap: 5px;
+      flex: 0 0 auto;
+    }
+    .rt-slider-label {
+      font-size: 9px;
+      color: var(--text-muted);
+    }
+    .rt-slider-track {
+      position: relative;
+      display: inline-block;
+      width: 64px;
+      height: 6px;
+      border-radius: 999px;
+      background: rgba(255, 255, 255, 0.10);
+      overflow: visible;
+    }
+    .rt-slider-track > i {
+      position: absolute;
+      left: 0;
+      top: 0;
+      bottom: 0;
+      border-radius: 999px;
+      background: var(--frost-300);
+    }
+    .rt-slider-track > b {
+      position: absolute;
+      top: 50%;
+      width: 9px;
+      height: 9px;
+      margin-left: -4.5px;
+      margin-top: -4.5px;
+      border-radius: 50%;
+      background: #fff;
+      box-shadow: 0 0 0 1px rgba(0, 0, 0, 0.25);
+    }
+    .rt-slider-val {
+      font-size: 10px;
+      min-width: 34px;
+      color: var(--text-muted);
+    }
+    /* 行内迷你条（登记 / 抢占并排） */
+    .rt-mini {
+      display: inline-flex;
+      align-items: center;
+      gap: 3px;
+      margin-left: 6px;
+      font-size: 10px;
+    }
+    .rt-mini-track {
+      display: inline-block;
+      width: 30px;
+      height: 4px;
+      border-radius: 999px;
+      background: rgba(255, 255, 255, 0.10);
+      overflow: hidden;
+      vertical-align: middle;
+    }
+    .rt-mini-track > i {
+      display: block;
+      height: 100%;
+      border-radius: 999px;
+      background: var(--frost-300);
+    }
     .rt-core {
       width: 74px;
       height: 74px;
