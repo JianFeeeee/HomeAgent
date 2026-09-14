@@ -261,7 +261,11 @@ func (h *Handler) handleRuntime(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]interface{}{
-		"uptime":    ks.Uptime,
+		"uptime": ks.Uptime,
+		// agent_id 是**根 agent 的 id**。前端靠它把 inputch 的 owner 归类：
+		// 归属登记表里根 agent 的 id（如 "main"）与驻留子 id 长得一样，
+		// 不区分就会把根自己的通道标成「驻留子 main」。
+		"agent_id":  ks.AgentID,
 		"scheduler": ks.Scheduler,
 		"residents": ks.Residents,
 		"channels":  ks.Channels,
