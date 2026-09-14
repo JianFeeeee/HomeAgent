@@ -697,6 +697,10 @@ async function refreshDataOnly() {
     state.kernel = await api("/kernel");
   } catch (e) {}
   try {
+    // 运行态快照：只给指标与队列/阶段展示用，不影响其他卡片。
+    state.runtime = await api("/runtime");
+  } catch (e) {}
+  try {
     var s = await api("/settings");
     state.settings = s.settings || {};
     state.meta = s.meta || {};
@@ -774,6 +778,10 @@ async function refreshAll() {
   } catch (e) {}
   try {
     state.kernel = await api("/kernel");
+  } catch (e) {}
+  try {
+    // 运行态快照（调度器/驻留子/通道），供总览的运行态面板使用。
+    state.runtime = await api("/runtime");
   } catch (e) {}
   try {
     var s = await api("/settings");
@@ -1004,6 +1012,223 @@ function statCard(l, v) {
   );
 }
 
+// ===== 运行态面板：阶段管道 + 中断队列 =====
+//
+// 与 WebUI 总览**同一套设计语言：等大表框**。此前桌面版总览只有四个数字卡，
+// 既看不到「这一轮走到哪一步」，也看不到四级中断队列的积压。
+// 数据来自 /api/v1/runtime（KernelStatus 的运行态子集）。
+var RT_LEVELS = [
+  { lv: 4, name: "L4", zh: "内核独占", en: "kernel only", cls: "rt-lv-4" },
+  { lv: 3, name: "L3", zh: "交互", en: "interactive", cls: "rt-lv-3" },
+  { lv: 2, name: "L2", zh: "消息", en: "message", cls: "rt-lv-2" },
+  { lv: 1, name: "L1", zh: "后台", en: "background", cls: "rt-lv-1" },
+];
+// 七阶段归并成五格（与内核 sdk.Stage 的顺序一致）：
+// 一轮里工具调用会反复回到「行动后」，线性滑块本身就是错的表述，
+// 所以画成 输入 → 行动 ⇄(工具) → 输出 → 结束，工具那格带循环标记。
+var RT_PIPE_GROUPS = [
+  { zh: "输入", en: "in", ico: "in" },
+  { zh: "行动", en: "act", ico: "act" },
+  { zh: "工具", en: "tool", ico: "tool", loop: true },
+  { zh: "输出", en: "out", ico: "out" },
+  { zh: "结束", en: "done", ico: "done" },
+];
+// 图标一律内联 SVG（24x24 / currentColor），不用 emoji/符号字符充当图标。
+var RT_ICO = {
+  in: '<svg class="rt-ico" viewBox="0 0 24 24"><path d="M21 12H8"/><path d="M13 6l-6 6 6 6"/></svg>',
+  act: '<svg class="rt-ico" viewBox="0 0 24 24"><circle cx="12" cy="12" r="3.2"/><path d="M12 2v3M12 19v3M2 12h3M19 12h3M5.5 5.5l2.1 2.1M16.4 16.4l2.1 2.1M18.5 5.5l-2.1 2.1M7.6 16.4l-2.1 2.1"/></svg>',
+  tool: '<svg class="rt-ico" viewBox="0 0 24 24"><path d="M14.5 6.5a3.8 3.8 0 0 1 5 5L10 21l-5-5z"/><path d="M14.5 6.5 17.5 9.5"/></svg>',
+  out: '<svg class="rt-ico" viewBox="0 0 24 24"><path d="M4 12h13"/><path d="M13 6l6 6-6 6"/></svg>',
+  done: '<svg class="rt-ico" viewBox="0 0 24 24"><path d="M20 6 9 17l-5-5"/></svg>',
+  loop: '<svg class="rt-ico" viewBox="0 0 24 24"><path d="M20.5 12a8.5 8.5 0 1 1-2.5-6"/><path d="M21 3.5V9h-5.5"/></svg>',
+};
+
+function rtPhaseGroup(phase) {
+  switch (phase) {
+    case "on_input":
+      return 0;
+    case "pre_action":
+    case "post_action":
+      return 1;
+    case "before_toolcall":
+    case "after_toolcall":
+      return 2;
+    case "before_output":
+      return 3;
+    case "after_output":
+      return 4;
+  }
+  return -1;
+}
+function rtShortTool(name) {
+  var n = String(name || "");
+  var i = n.lastIndexOf("__");
+  if (i >= 0) n = n.slice(i + 2);
+  return n.length > 14 ? n.slice(0, 13) + "…" : n;
+}
+// rtSlots 画一组「车位」式格槽：槽位数量固定可见，被占用的点亮。
+// 为什么不用进度条：队列为 0 时进度条宽度就是 0，整行只剩文字，看上去就是「这块空着」。
+function rtSlots(depth, slots, cls) {
+  var n = Math.max(5, Math.min(16, slots || 5));
+  var d = depth || 0;
+  var out = '<span class="rt-slots ' + (cls || "") + '">';
+  for (var i = 0; i < n; i++) out += '<i class="' + (i < d ? "on" : "") + '"></i>';
+  // 溢出计数必须留在 .rt-slots 内：格槽是 flex 行，多一个兄弟节点会被挤出去
+  if (d > n) out += '<b class="rt-slots-more">+' + (d - n) + "</b>";
+  return out + "</span>";
+}
+// rtTrailPush 把一条「本轮发生过的事」落到它实际发生的阶段列里；
+// 同一阶段重复的同一条（如同一工具连调 3 次）只累加计数，不刷屏。
+function rtTrailPush(g, kind, label, short) {
+  if (!state.stageTrail) state.stageTrail = [];
+  var arr = state.stageTrail;
+  var last = arr.length ? arr[arr.length - 1] : null;
+  if (last && last.g === g && last.kind === kind && last.short === short) {
+    last.n = (last.n || 1) + 1;
+    return;
+  }
+  arr.push({ g: g, kind: kind, label: label, short: short, n: 1 });
+  if (arr.length > 24) arr.shift();
+}
+
+function renderRuntimePanel() {
+  var title = __("运行态", "Runtime");
+  var rt = state.runtime;
+  if (!rt) {
+    return (
+      '<div class="card"><h2>' + title + '</h2><p class="rt-empty">' +
+      __("运行态数据不可用", "runtime unavailable") + "</p></div>"
+    );
+  }
+  var sc = rt.scheduler || {};
+  var q = sc.interrupt_queues || [0, 0, 0, 0, 0];
+  var pending = sc.pending_interrupts || 0;
+  var ready = sc.ready_queue_depth || 0;
+  var stack = sc.suspend_stack || 0;
+  var maxStack = sc.max_suspend_depth || 4;
+  var residents = rt.residents || [];
+  var byLv = sc.interrupts_by_level || [];
+  var preLv = sc.preempts_by_level || [];
+  var maxQ = Math.max(1, ready, q[1] || 0, q[2] || 0, q[3] || 0, q[4] || 0);
+  // 至少 5 格：0 时也有可见形状
+  var qSlots = Math.max(5, Math.min(16, maxQ));
+
+  var html = '<div class="card"><h2>' + title + "</h2>";
+  // 四个数字块（沿用本 app 的 statCard 风格）
+  html +=
+    '<div class="grid-4">' +
+    statCard(__("排队", "Ready"), ready, "") +
+    statCard(__("中断", "Pending"), pending, "") +
+    statCard(__("栈", "Stack"), stack + "/" + maxStack, "") +
+    statCard(__("子代理", "Subagents"), residents.length, "") +
+    "</div>";
+
+  // ---- 阶段管道：五个等大表框 ----
+  var g = rtPhaseGroup(state.pipelinePhase || "");
+  html +=
+    '<div class="rt-section-title">' + __("阶段管道", "Stage pipeline") +
+    (g < 0 ? "　" + __("（空闲）", "(idle)") : "") + "</div>";
+  html += '<div class="rt-pipe-row' + (g < 0 ? " rt-pipe-idle" : "") + '">';
+  html += RT_PIPE_GROUPS.map(function (s, i) {
+    var items = (state.stageTrail || []).filter(function (t) {
+      return (t.g | 0) === i;
+    });
+    var body = items.length
+      ? items
+          .map(function (t) {
+            var kind = t.kind || "stage";
+            var ico =
+              kind === "output" ? RT_ICO.out : kind === "tool" ? RT_ICO.tool : "";
+            return (
+              '<span class="rt-chip rt-chip-' + kind + '" title="' +
+              escHtml(t.label) + '">' + ico +
+              escHtml(t.short || t.label) +
+              (t.n > 1 ? '<i class="rt-chip-n">x' + t.n + "</i>" : "") +
+              "</span>"
+            );
+          })
+          .join("")
+      : '<span class="rt-chip rt-chip-none">' + __("无", "none") + "</span>";
+    return (
+      '<div class="rt-pipe-cell' + (i === g ? " active" : "") + '">' +
+      '<div class="rt-pipe-head">' + RT_ICO[s.ico] +
+      "<b>" + __(s.zh, s.en) + "</b>" +
+      (s.loop
+        ? '<em class="rt-loop" title="' +
+          __("工具调用会回到行动后，可多次", "tool calls loop back; may repeat") +
+          '">' + RT_ICO.loop + "</em>"
+        : "") +
+      '</div><div class="rt-pipe-events">' + body + "</div></div>"
+    );
+  }).join("");
+  html += "</div>";
+
+  // ---- 中断队列：五个等大表框（L4/L3/L2/L1 + 排队）----
+  html += '<div class="rt-section-title">' + __("队列", "Queues") + "</div>";
+  html += '<div class="rt-queues">';
+  RT_LEVELS.forEach(function (L) {
+    var depth = q[L.lv] || 0;
+    var reg = byLv[L.lv] || 0;
+    var pre = preLv[L.lv] || 0;
+    var desc = __(L.zh, L.en);
+    html +=
+      '<div class="rt-qcell ' + L.cls + (depth ? " rt-active" : "") +
+      '" title="' + escHtml(desc) + '">' +
+      '<div class="rt-qhead"><b>' + L.name + "</b><span>" + escHtml(desc) + "</span></div>" +
+      '<div class="rt-qnum">' + depth + "</div>" +
+      rtSlots(depth, qSlots, L.cls) +
+      '<div class="rt-qmeta">' + reg + " " + __("登记", "reg") + " · " +
+      pre + " " + __("抢占", "pre") + "</div></div>";
+  });
+  // 排队队列无级别：用虚线框与四级中断区分（另一**类别**，不是另一优先级）
+  html +=
+    '<div class="rt-qcell rt-qcell-queued rt-lv-q' + (ready ? " rt-active" : "") +
+    '" title="' + __("排队（无级别，纯 FIFO）", "queued (no priority, FIFO)") + '">' +
+    '<div class="rt-qhead"><b>' + __("排队", "queued") + "</b><span>FIFO</span></div>" +
+    '<div class="rt-qnum">' + ready + "</div>" +
+    rtSlots(ready, qSlots, "rt-lv-q") +
+    '<div class="rt-qmeta">' + __("无级别", "no priority") + "</div></div>";
+  html += "</div></div>";
+  return html;
+}
+
+// 开源许可卡：协议标识 + 协议全文 + 源码仓库。
+// AGPL-3.0 §13 的义务是「向网络使用者提供取得 Corresponding Source 的机会」——
+// 只给一个仓库链接、不写协议名，使用者看不出这受什么许可约束。
+function renderLegalCard() {
+  var b = ((state.kernel || {}).build) || {};
+  var src = b.source_url || "";
+  var lic = b.license || "";
+  var licURL = b.license_url || "";
+  if (!lic && !src) return "";
+  function row(key, val) {
+    return (
+      '<div class="kv-row"><span class="key">' + escHtml(key) +
+      '</span><span class="val">' + val + "</span></div>"
+    );
+  }
+  function a(href, text) {
+    return (
+      '<a href="' + escHtml(href) +
+      '" target="_blank" rel="noopener noreferrer">' + escHtml(text) + "</a>"
+    );
+  }
+  var rows = "";
+  if (lic) rows += row(__("许可协议", "License"), licURL ? a(licURL, lic) : escHtml(lic));
+  if (src) rows += row(__("源码仓库", "Source"), a(src, src));
+  // 网络条款只在 AGPL 系的许可下才成立，所以按标识判断，不硬写协议名。
+  var note =
+    lic && lic.toUpperCase().indexOf("AGPL") >= 0
+      ? '<p class="rt-empty">' +
+        __(
+          "网络服务条款（§13）：把修改后的版本作为网络服务对外提供时，必须向使用者提供取得对应源码的途径。",
+          "Network clause (section 13): offering a modified version as a network service requires giving users a way to obtain the Corresponding Source.",
+        ) +
+        "</p>"
+      : "";
+  return '<div class="card"><h2>' + __("开源许可", "License") + "</h2>" + rows + note + "</div>";
+}
+
 function renderOverview() {
   var s = state.status || {};
   var k = state.kernel;
@@ -1018,7 +1243,25 @@ function renderOverview() {
       "uptime",
     ) +
     statCard(__("插件", "Plugins"), (k?.plugins || []).length || 0, "plugin") +
-    statCard(__("版本", "Version"), s.version || "0.1.0", "version") +
+    statCard(
+      __("版本", "Version"),
+      (function () {
+        // 构建身份取自 /kernel 的 build（-ldflags 注入的真实版本/commit）。
+        // 旧实现用的是 /status 的 version 加一个凭空写死的 "0.1.0" 兑底 ——
+        // 拿不到数据时会向用户展示一个不存在的版本号。
+        var b = (k && k.build) || {};
+        var v = b.version || s.version || "";
+        if (!v) return "-";
+        var sha =
+          b.commit && b.commit !== "unknown" ? String(b.commit).slice(0, 7) : "";
+        return (
+          "v" + escHtml(v) +
+          '<div class="stat-sub">' + escHtml(b.kernel_name || "HomeAgent") +
+          (sha ? " · " + escHtml(sha) : "") + "</div>"
+        );
+      })(),
+      "version",
+    ) +
     "</div>";
   if (k) {
     html +=
@@ -1082,6 +1325,7 @@ function renderOverview() {
       "</span></div>" +
       "</div></div>";
   }
+  html += renderRuntimePanel();
   html +=
     '<div class="card"><h2>' +
     __("运行时", "Runtime") +
@@ -1094,6 +1338,7 @@ function renderOverview() {
     ) +
     statCard("Go " + __("版本", "Version"), k?.runtime?.go_version || "-", "") +
     "</div></div>";
+  html += renderLegalCard();
   document.getElementById("view-overview").innerHTML = html;
 }
 
@@ -5211,17 +5456,47 @@ async function connectFetchSSE(url) {
           var phase = p.phase || "";
           var tool = p.tool || "";
           if (p.channel !== "_consolidation_") {
-            if (phase === "pre_action")
+            // 阶段轨迹：本轮真实发生过什么，按阶段落到运行态面板的对应框里。
+            // 与 WebUI 同一套 g（阶段组）编号，见 rtPhaseGroup。
+            if (phase === "on_input") {
+              state.stageTrail = [];
+              rtTrailPush(0, "stage", __("输入", "input"), __("输入", "input"));
+            } else if (phase === "pre_action") {
+              rtTrailPush(
+                1,
+                "stage",
+                __("组装上下文并思考", "assemble context and think"),
+                __("思考", "think"),
+              );
               state.chatStage = __("AI 思考中...", "AI thinking...");
-            else if (phase === "before_toolcall") {
+            } else if (phase === "before_toolcall") {
+              if (tool)
+                rtTrailPush(
+                  2,
+                  tool.indexOf("output_") === 0 ? "output" : "tool",
+                  tool,
+                  rtShortTool(tool),
+                );
               state.chatStage = __("工具调用: ", "Tool: ") + (tool || "");
               if (tool && (state.pendingTools || []).indexOf(tool) === -1) {
                 if (!state.pendingTools) state.pendingTools = [];
                 state.pendingTools.push(tool);
                 rerenderChatIfActive();
               }
-            } else if (phase === "before_output")
+            } else if (phase === "before_output") {
+              rtTrailPush(3, "stage", __("生成回复", "generate reply"), __("生成", "gen"));
               state.chatStage = __("生成回复中...", "Generating response...");
+            } else if (phase === "after_output") {
+              rtTrailPush(4, "stage", __("本轮完成", "turn complete"), __("完成", "done"));
+            }
+            state.pipelinePhase = phase;
+            // 阶段停留一会儿就回空闲，避免留下一个永远停在 after_output 的假状态。
+            if (state.pipelineTimer) clearTimeout(state.pipelineTimer);
+            state.pipelineTimer = setTimeout(function () {
+              state.pipelinePhase = "";
+              if (state.currentView === "overview") renderOverview();
+            }, 2500);
+            if (state.currentView === "overview") renderOverview();
           }
           var badge = document.getElementById("chat-stage");
           if (badge) {

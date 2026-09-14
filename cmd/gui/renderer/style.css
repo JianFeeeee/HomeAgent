@@ -2191,3 +2191,243 @@ td .switch {
 .kv-row .val .switch {
   margin-right: 4px;
 }
+
+/* ===== 运行态面板：阶段管道 + 中断队列（与 WebUI 总览同一套设计语言）=====
+   两块都统一成**等大表框**，与 KPI 卡同一种骨架。
+   此前桌面版总览只有四个数字卡：既看不到「这一轮走到哪一步」，
+   也看不到四级中断队列的积压。 */
+.stat-card .stat-sub {
+  margin-top: 4px;
+  font-size: 11px;
+  font-weight: 500;
+  color: var(--text-muted);
+  font-variant-numeric: tabular-nums;
+}
+.rt-section-title {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--text-secondary);
+  letter-spacing: 0.3px;
+  margin: 14px 0 8px;
+  text-transform: uppercase;
+}
+.rt-empty {
+  font-size: 12px;
+  color: var(--text-muted);
+  padding: 4px 0;
+}
+/* 行内小图标：一律 SVG，不使用 emoji/符号字符。 */
+.rt-ico {
+  width: 12px;
+  height: 12px;
+  flex: 0 0 auto;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 2;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+  vertical-align: -1.5px;
+}
+.rt-pipe-row {
+  display: grid;
+  /* 100px 下限：容器再窄也要保证 5 个框一行，不留「4 个 + 1 个」的孤行 */
+  grid-template-columns: repeat(auto-fit, minmax(100px, 1fr));
+  gap: 10px;
+  margin: 2px 0 8px;
+  transition: opacity 0.3s var(--ease-out);
+}
+.rt-pipe-idle {
+  opacity: 0.55;
+}
+.rt-pipe-cell {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 11px 12px 10px;
+  border-radius: var(--radius-md);
+  background: var(--bg-input);
+  border: 1px solid var(--border-color);
+  min-width: 0;
+  transition:
+    border-color 0.25s var(--ease-out),
+    box-shadow 0.25s var(--ease-out),
+    background 0.25s var(--ease-out);
+}
+.rt-pipe-cell.active {
+  border-color: var(--accent);
+  background: var(--accent-bg);
+  box-shadow: var(--shadow-md);
+}
+.rt-pipe-head {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+}
+.rt-pipe-head > b {
+  font-size: 13.5px;
+  font-weight: 700;
+  color: var(--text-secondary);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.rt-pipe-head .rt-ico {
+  width: 15px;
+  height: 15px;
+  color: var(--text-secondary);
+}
+.rt-pipe-cell.active .rt-pipe-head > b,
+.rt-pipe-cell.active .rt-pipe-head .rt-ico {
+  color: var(--accent);
+}
+.rt-pipe-events {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  min-height: 23px;
+}
+.rt-loop {
+  display: inline-flex;
+  color: var(--accent);
+  font-weight: 700;
+}
+.rt-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  min-width: 0;
+  max-width: 170px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 11px;
+  padding: 2px 8px;
+  border-radius: var(--radius-pill);
+  background: var(--bg-hover);
+  border: 1px solid var(--border-color);
+  color: var(--text-secondary);
+}
+.rt-chip-tool {
+  border-color: rgba(136, 192, 208, 0.42);
+  color: var(--frost-300);
+}
+.rt-chip-output {
+  border-color: var(--accent);
+  color: var(--accent);
+}
+.rt-chip-stage {
+  opacity: 0.7;
+}
+.rt-chip-none {
+  opacity: 0.35;
+  border-style: dashed;
+}
+.rt-chip-n {
+  font-style: normal;
+  opacity: 0.75;
+  font-variant-numeric: tabular-nums;
+}
+/* 队列：5 个等大框（L4/L3/L2/L1 + 排队），一行排开 */
+.rt-queues {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(100px, 1fr));
+  gap: 10px;
+  margin-bottom: 4px;
+}
+.rt-qcell {
+  display: flex;
+  flex-direction: column;
+  gap: 7px;
+  padding: 11px 12px 10px;
+  border-radius: var(--radius-md);
+  background: var(--bg-input);
+  border: 1px solid var(--border-color);
+  min-width: 0;
+  transition:
+    border-color 0.25s var(--ease-out),
+    box-shadow 0.25s var(--ease-out);
+}
+.rt-qhead {
+  display: flex;
+  align-items: baseline;
+  gap: 7px;
+  min-width: 0;
+}
+.rt-qhead > b {
+  font-size: 16px;
+  font-weight: 800;
+  line-height: 1;
+  letter-spacing: -0.02em;
+}
+.rt-qhead > span {
+  font-size: 10.5px;
+  color: var(--text-muted);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.rt-qnum {
+  font-size: 26px;
+  font-weight: 800;
+  line-height: 1;
+  letter-spacing: -0.02em;
+  font-variant-numeric: tabular-nums;
+}
+.rt-qmeta {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 4px 8px;
+  font-size: 10.5px;
+  color: var(--text-muted);
+  font-variant-numeric: tabular-nums;
+}
+.rt-qcell.rt-lv-4 .rt-qhead > b { color: #ff5c7a; }
+.rt-qcell.rt-lv-3 .rt-qhead > b { color: #ffa657; }
+.rt-qcell.rt-lv-2 .rt-qhead > b { color: var(--sakura-400); }
+.rt-qcell.rt-lv-1 .rt-qhead > b { color: var(--frost-300); }
+.rt-qcell.rt-lv-q .rt-qhead > b { color: #a3be8c; }
+/* 有积压时整个框描边点亮：一眼看出哪条队列在堵 */
+.rt-qcell.rt-lv-4.rt-active { border-color: rgba(255, 92, 122, 0.55); }
+.rt-qcell.rt-lv-3.rt-active { border-color: rgba(255, 166, 87, 0.55); }
+.rt-qcell.rt-lv-2.rt-active { border-color: var(--sakura-400); }
+.rt-qcell.rt-lv-1.rt-active { border-color: var(--frost-300); }
+.rt-qcell.rt-lv-q.rt-active { border-color: #a3be8c; }
+/* 排队队列无级别：虚线框与四级中断区分（另一**类别**，不是另一优先级） */
+.rt-qcell.rt-qcell-queued {
+  border-style: dashed;
+}
+/* 队列格槽：固定可见的「车位」，占用多少一眼可数。
+   用进度条时队列为 0 宽度就是 0，整行只剩文字，看上去就是「这块空着」。 */
+.rt-slots {
+  display: flex;
+  align-items: stretch;
+  gap: 3px;
+  height: 16px;
+  min-width: 0;
+}
+.rt-slots > i {
+  flex: 1 1 0;
+  min-width: 3px;
+  border-radius: 3px;
+  background: rgba(255, 255, 255, 0.06);
+  border: 1px solid rgba(255, 255, 255, 0.05);
+  transition:
+    background 0.25s var(--ease-out),
+    box-shadow 0.25s var(--ease-out);
+}
+.rt-slots.rt-lv-4 > i.on { background: #ff5c7a; box-shadow: 0 0 6px rgba(255, 92, 122, 0.45); }
+.rt-slots.rt-lv-3 > i.on { background: #ffa657; box-shadow: 0 0 6px rgba(255, 166, 87, 0.4); }
+.rt-slots.rt-lv-2 > i.on { background: var(--sakura-400); box-shadow: 0 0 6px rgba(255, 127, 172, 0.4); }
+.rt-slots.rt-lv-1 > i.on { background: var(--frost-300); box-shadow: 0 0 6px rgba(136, 192, 208, 0.4); }
+.rt-slots.rt-lv-q > i.on { background: #a3be8c; box-shadow: 0 0 6px rgba(163, 190, 140, 0.4); }
+.rt-slots-more {
+  flex: 0 0 auto;
+  align-self: center;
+  margin-left: 4px;
+  font-size: 10px;
+  font-weight: 600;
+  color: var(--text-muted);
+  font-variant-numeric: tabular-nums;
+}
