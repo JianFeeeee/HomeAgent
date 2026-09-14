@@ -197,6 +197,28 @@ func (a *Agent) mediaContextForRelations(relations []memory.Relation) string {
 	return a.mediaContextForSentences(sentenceIDsFromRelations(relations))
 }
 
+// formatRecallRelations 渲染 memory_recall 的关系行，超 max 条截断。
+//
+// 带上原始句子（截断到 60 字）：三元组只是「A 关系 B」，脱离原句往往看不出
+// 语气、条件与指代——`sentence_text` 的存在意义就是「日后从图谱回到原文」，
+// 而 Recall 已经把句子 JOIN 出来了。此前只回显实体名与关系类型，导致模型
+// 填了 sentence_text 也永远拿不回来，这个能力形同虚设。
+func formatRecallRelations(relations []memory.Relation, max int) []string {
+	var out []string
+	for i, r := range relations {
+		if max > 0 && i >= max {
+			out = append(out, "...更多关系被截断")
+			break
+		}
+		line := fmt.Sprintf("- %s →(%s)→ %s", r.SourceName, r.RelationType, r.TargetName)
+		if s := strings.TrimSpace(r.SentenceText); s != "" {
+			line += "  原句: \"" + truncateStr(s, 60) + "\""
+		}
+		out = append(out, line)
+	}
+	return out
+}
+
 // mediaContextForInjectedEntities 为自动注入路径产出媒体说明。
 //
 // Indexer.BuildContext 刻意不返回关系（只给实体索引以省 token），

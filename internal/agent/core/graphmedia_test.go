@@ -759,3 +759,39 @@ func TestMediaBlocksHeldByDocumentSurviveDeletion(t *testing.T) {
 		t.Fatal("删除后内容应已移除")
 	}
 }
+
+// TestFormatRecallRelations_SurfacesSentence 锁死「从图谱回到原文」：
+// memory_recall 的关系行必须带上 sentence_text（截断），否则模型按工具
+// schema 填了原始句子也永远取不回，该字段形同虚设。
+func TestFormatRecallRelations_SurfacesSentence(t *testing.T) {
+	rels := []memory.Relation{
+		{SourceName: "张三", RelationType: "喜欢", TargetName: "咖啡", SentenceText: "张三说他每天早上一定要喝一杯手冲咖啡。"},
+		{SourceName: "张三", RelationType: "住在", TargetName: "北京"}, // 无原句：不应出现空的原句字段
+	}
+	lines := formatRecallRelations(rels, 10)
+	if len(lines) != 2 {
+		t.Fatalf("应渲染 2 行，实际 %d: %v", len(lines), lines)
+	}
+	if !strings.Contains(lines[0], "张三 →(喜欢)→ 咖啡") || !strings.Contains(lines[0], "原句:") {
+		t.Errorf("第一条应带原句，实际 %q", lines[0])
+	}
+	if strings.Contains(lines[1], "原句") {
+		t.Errorf("无 sentence_text 的关系不应出现原句字段，实际 %q", lines[1])
+	}
+}
+
+// TestFormatRecallRelations_Truncates 锁死关系条数上限：
+// 超过 max 时截断并明确告知，避免刷屏。
+func TestFormatRecallRelations_Truncates(t *testing.T) {
+	var rels []memory.Relation
+	for i := 0; i < 15; i++ {
+		rels = append(rels, memory.Relation{SourceName: "A", RelationType: "连", TargetName: "B"})
+	}
+	lines := formatRecallRelations(rels, 10)
+	if len(lines) != 11 {
+		t.Fatalf("10 条关系 + 1 条截断提示，实际 %d: %v", len(lines), lines)
+	}
+	if !strings.Contains(lines[10], "截断") {
+		t.Errorf("最后一行应为截断提示，实际 %q", lines[10])
+	}
+}

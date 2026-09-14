@@ -260,6 +260,22 @@ func TestRecallWithDepth(t *testing.T) {
 	if len(result.Relations) == 0 {
 		t.Error("expected relations with depth search")
 	}
+
+	// 逐层查邻接会把已访问实体之间的关系反复查回。不跨层去重时，
+	// 小明→小红 会在 depth=2 出现两次，memory_recall 的 10 条关系预算
+	// 被同一句话刷屏、真正的新关系（小红→小刚）被截断。
+	seen := map[int64]int{}
+	for _, r := range result.Relations {
+		seen[r.ID]++
+	}
+	for id, n := range seen {
+		if n > 1 {
+			t.Errorf("关系 id=%d 在深度遍历中重复 %d 次", id, n)
+		}
+	}
+	if len(result.Relations) != 2 {
+		t.Errorf("depth=2 应得 2 条关系（小明→小红、小红→小刚），实际 %d", len(result.Relations))
+	}
 }
 
 func TestPurgeHard(t *testing.T) {
