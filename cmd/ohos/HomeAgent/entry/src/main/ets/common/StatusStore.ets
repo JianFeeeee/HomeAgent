@@ -27,6 +27,68 @@ export interface StatGroup {
   fields: StatField[];
 }
 
+// ===== 运行态快照（/runtime）=====
+//
+// 与 StatGroup 的分工：明细卡回答「内核有哪些东西、多少」，
+// 运行态回答「现在在干什么」——四级中断队列积压多少、有几个驻留子。
+// 两者数据源不同（/kernel vs /runtime），所以分开取、分开存。
+
+/** 一条队列（四级中断之一，或排队队列） */
+export interface RuntimeQueue {
+  /** 4/3/2/1；0 表示排队队列（无级别） */
+  lv: number;
+  name: string;
+  desc: string;
+  depth: number;
+  registered: number;
+  preempted: number;
+}
+
+/** 一次刷新的运行态快照 */
+export interface RuntimeSnapshot {
+  /** 排队队列深度（无级别，纯 FIFO） */
+  ready: number;
+  pending: number;
+  stack: number;
+  maxStack: number;
+  subagents: number;
+  /** 格槽数（按全场最大深度缩放，至少 5） */
+  slots: number;
+  /** 五条队列：L4/L3/L2/L1 + 排队 */
+  queues: RuntimeQueue[];
+}
+
+interface LevelDef {
+  lv: number;
+  name: string;
+  desc: string;
+}
+
+/** 四级中断的定义（顺序即 L4→L1） */
+const LEVEL_DEFS: LevelDef[] = [
+  { lv: 4, name: 'L4', desc: '内核独占' },
+  { lv: 3, name: 'L3', desc: '交互' },
+  { lv: 2, name: 'L2', desc: '消息' },
+  { lv: 1, name: 'L1', desc: '后台' },
+];
+
+/** JSON 数组里按下标取数：越界/类型不符都当 0 */
+function numAt(arr: Object[] | undefined, i: number): number {
+  if (arr === undefined || arr === null || i < 0 || i >= arr.length) {
+    return 0;
+  }
+  const v: number = arr[i] as number;
+  return isNaN(v) ? 0 : v;
+}
+
+/** 格槽数：按全场最大深度缩放，至少 5 格（0 时也要有可见形状）、最多 16 格 */
+function clampSlots(maxQ: number): number {
+  if (maxQ < 5) {
+    return 5;
+  }
+  return maxQ > 16 ? 16 : maxQ;
+}
+
 // ===== AppStorage 键：摘要卡与明细页共用 =====
 export const K_UP: string = 'statUp';
 export const K_VERSION: string = 'statVersion';
@@ -43,6 +105,8 @@ export const K_BUILD: string = 'statBuildSub';
 class StatusStore {
   /** 明细分组：只有明细页读它，不进 AppStorage（数组同步语义太脆） */
   private groups: StatGroup[] = [];
+  /** 运行态快照：同上，靠 K_REV 触发订阅组件重取 */
+  private runtimeSnapshot: RuntimeSnapshot | undefined = undefined;
 
   init(): void {
     AppStorage.setOrCreate<boolean>(K_UP, false);
@@ -59,6 +123,10 @@ class StatusStore {
 
   getGroups(): StatGroup[] {
     return this.groups;
+  }
+
+  getRuntime(): RuntimeSnapshot | undefined {
+    return this.runtimeSnapshot;
   }
 
   isUp(): boolean {
@@ -104,6 +172,7 @@ class StatusStore {
       ];
 
       await this.collectKernel(groups);
+      await this.collectRuntime();
       this.groups = groups;
       this.bump();
     } catch (e) {
@@ -282,11 +351,91 @@ class StatusStore {
     }
   }
 
+  /**
+   * 取运行态快照（/runtime）。失败不影响已经取到的明细分组：
+   * 旧后端可能没有这个端点，那时面板显示「运行态数据不可用」即可。
+   */
+  private async collectRuntime(): Promise<void> {
+    try {
+      const resp = await apiClient.getWithTimeout('/runtime', 8000);
+      const r: Record<string, Object> = JSON.parse(resp.body) as Record<string, Object>;
+
+      const sc: Record<string, Object> | undefined = r['scheduler'] as Record<string, Object>;
+      const residents: Object[] | undefined = r['residents'] as Object[];
+
+      let ready: number = 0;
+      let pending: number = 0;
+      let stack: number = 0;
+      let maxStack: number = 4;
+      let qArr: Object[] | undefined = undefined;
+      let regArr: Object[] | undefined = undefined;
+      let preArr: Object[] | undefined = undefined;
+      if (sc !== undefined && sc !== null) {
+        ready = sc['ready_queue_depth'] as number ?? 0;
+        pending = sc['pending_interrupts'] as number ?? 0;
+        stack = sc['suspend_stack'] as number ?? 0;
+        maxStack = sc['max_suspend_depth'] as number ?? 4;
+        qArr = sc['interrupt_queues'] as Object[];
+        regArr = sc['interrupts_by_level'] as Object[];
+        preArr = sc['preempts_by_level'] as Object[];
+      }
+
+      // 四级语义引用内核的定义（internal/agent/core/scheduler.go），
+      // 前端只负责把它们画出来，不自己起名字。
+      const queues: RuntimeQueue[] = [];
+      let maxQ: number = 1;
+      for (let i = 0; i < LEVEL_DEFS.length; i++) {
+        const d: LevelDef = LEVEL_DEFS[i];
+        const depth: number = numAt(qArr, d.lv);
+        if (depth > maxQ) {
+          maxQ = depth;
+        }
+        queues.push({
+          lv: d.lv,
+          name: d.name,
+          desc: d.desc,
+          depth: depth,
+          registered: numAt(regArr, d.lv),
+          preempted: numAt(preArr, d.lv),
+        });
+      }
+      if (ready > maxQ) {
+        maxQ = ready;
+      }
+      // 第五条：排队队列。它不是优先级，而是另一**类别**（排队 vs 中断），
+      // 所以 lv 用 0 标记「无级别」。
+      queues.push({
+        lv: 0,
+        name: '排队',
+        desc: 'FIFO',
+        depth: ready,
+        registered: 0,
+        preempted: 0,
+      });
+
+      const subagents: number = residents !== undefined && residents !== null
+        ? residents.length : 0;
+
+      this.runtimeSnapshot = {
+        ready: ready,
+        pending: pending,
+        stack: stack,
+        maxStack: maxStack,
+        subagents: subagents,
+        slots: clampSlots(maxQ),
+        queues: queues,
+      };
+    } catch (e) {
+      // /runtime 不可用（旧后端）：保留上一次快照，不清空
+    }
+  }
+
   private fail(msg: string): void {
     AppStorage.set<string>(K_ERR, msg);
     AppStorage.set<boolean>(K_UP, false);
     AppStorage.set<boolean>(K_LOADING, false);
     this.groups = [];
+    this.runtimeSnapshot = undefined;
     this.bump();
   }
 
