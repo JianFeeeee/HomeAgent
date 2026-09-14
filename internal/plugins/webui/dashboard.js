@@ -786,8 +786,15 @@
         });
         var owners = [];
         var byOwner = {};
+        // 根 agent 的 id：登记表里根自己的 owner 就是它（如 "main"）。
+        // 不把它跟驻留子分开，根自己的通道会被标成「驻留子 main」——实测踩过。
+        var rootID = rt.agent_id || "";
+        var isChild = function (o) { return o !== "" && o !== rootID; };
         inputs.forEach(function (c) {
+          // owner == 根 agent id 与 owner == "" 是同一件事（都是归根 agent / 内核默认），
+          // 归一成一组，否则同一个根会画出两个容器。
           var o = c.owner || "";
+          if (o === rootID) o = "";
           if (!byOwner[o]) {
             byOwner[o] = [];
             owners.push(o);
@@ -798,14 +805,14 @@
         // 与「子不存在」无法区分。
         residents.forEach(function (r) {
           var o = r.id || "";
-          if (o && !byOwner[o]) {
+          if (o && o !== rootID && !byOwner[o]) {
             byOwner[o] = [];
             owners.push(o);
           }
         });
         owners.sort(function (a, b) {
-          if (a === "") return -1;
-          if (b === "") return 1;
+          if (a === "" || a === rootID) return -1;
+          if (b === "" || b === rootID) return 1;
           return a < b ? -1 : 1;
         });
         if (!owners.length) {
@@ -819,10 +826,13 @@
               if (r.id === o) res = r;
             });
           }
-          h += '<div class="rt-owner' + (o ? " rt-owner-child" : "") + '">';
+          var child = isChild(o);
+          h += '<div class="rt-owner' + (child ? " rt-owner-child" : "") + '">';
           h += '<div class="rt-owner-head"><span class="rt-owner-name">' +
-            (o ? "▸ " : "◆ ") +
-            (o ? __("驻留子 ", "resident ") + escHtml(o) : __("根 agent / 内核默认", "root agent / kernel default")) +
+            (child ? "▸ " : "◆ ") +
+            (child
+              ? __("驻留子 ", "resident ") + escHtml(o)
+              : __("根 agent", "root agent") + (o ? " " + escHtml(o) : "") + __(" / 内核默认", " / kernel default")) +
             '</span><span class="rt-owner-meta">' + list.length + " " + __("条通道", "channels") +
             (res ? " · " + __("轮次", "rounds") + " " + (res.rounds || 0) : "") +
             (res && res.context_full ? ' <span class="rt-badge-warn">' + __("上下文已满", "ctx full") + "</span>" : "") +
