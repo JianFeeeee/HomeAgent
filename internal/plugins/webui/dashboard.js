@@ -782,12 +782,25 @@
       //   输入 → 行动 ⇄(工具) → 输出 → 结束
       // （工具那格带循环标记），下面再用一排 chip 记下**本轮真实发生过什么**：
       // 普通工具与 output_* 输出通道调用用不同配色区分开来。
+      // 页面上**任何位置都不用 emoji/符号字符充当图标** —— 一律内联 SVG，
+      // 24x24 viewBox + currentColor stroke，随主题与状态变色，不额外引资源。
+      var RT_ICO = {
+        in: '<svg class="rt-ico" viewBox="0 0 24 24"><path d="M21 12H8"/><path d="M13 6l-6 6 6 6"/></svg>',
+        act: '<svg class="rt-ico" viewBox="0 0 24 24"><circle cx="12" cy="12" r="3.2"/><path d="M12 2v3M12 19v3M2 12h3M19 12h3M5.5 5.5l2.1 2.1M16.4 16.4l2.1 2.1M18.5 5.5l-2.1 2.1M7.6 16.4l-2.1 2.1"/></svg>',
+        tool: '<svg class="rt-ico" viewBox="0 0 24 24"><path d="M14.5 6.5a3.8 3.8 0 0 1 5 5L10 21l-5-5z"/><path d="M14.5 6.5 17.5 9.5"/></svg>',
+        out: '<svg class="rt-ico" viewBox="0 0 24 24"><path d="M4 12h13"/><path d="M13 6l6 6-6 6"/></svg>',
+        done: '<svg class="rt-ico" viewBox="0 0 24 24"><path d="M20 6 9 17l-5-5"/></svg>',
+        loop: '<svg class="rt-ico" viewBox="0 0 24 24"><path d="M20.5 12a8.5 8.5 0 1 1-2.5-6"/><path d="M21 3.5V9h-5.5"/></svg>',
+        bolt: '<svg class="rt-ico" viewBox="0 0 24 24"><path d="M13 2 4.5 13.5H11l-1 8.5L18.5 10H12z"/></svg>',
+        caret: '<svg class="rt-ico rt-ico-sm" viewBox="0 0 24 24"><path d="M6 9l6 6 6-6"/></svg>',
+      };
+
       var RT_PIPE_GROUPS = [
-        { zh: "输入", en: "in" },
-        { zh: "行动", en: "act" },
-        { zh: "工具", en: "tool" },
-        { zh: "输出", en: "out" },
-        { zh: "结束", en: "done" },
+        { zh: "输入", en: "in", ico: "in" },
+        { zh: "行动", en: "act", ico: "act" },
+        { zh: "工具", en: "tool", ico: "tool", loop: true },
+        { zh: "输出", en: "out", ico: "out" },
+        { zh: "结束", en: "done", ico: "done" },
       ];
       function rtPhaseGroup(phase) {
         switch (phase) {
@@ -813,25 +826,60 @@
         if (i >= 0) n = n.slice(i + 2);
         return n.length > 14 ? n.slice(0, 13) + "…" : n;
       }
+      // rtSlots 画一组「车位」式格槽：槽位数量固定可见，被占用的点亮。
+      //
+      // 为什么不用进度条：队列为 0 时进度条宽度就是 0，整行只剩一串文字，
+      // 看上去就是「这块空着」。格槽在 0 时仍有形状，占用多少一眼可数，
+      // 也不用为了「看得见」而给 0 画一条假进度。
+      function rtSlots(depth, slots, extraCls) {
+        var n = Math.max(5, Math.min(16, slots || 5));
+        var d = depth || 0;
+        var out = '<span class="rt-slots ' + (extraCls || "") + '">';
+        for (var i = 0; i < n; i++) out += '<i class="' + (i < d ? "on" : "") + '"></i>';
+        // 溢出计数必须留在 .rt-slots 内：.rt-level 是 3 列栅格，
+        // 多一个兄弟节点会被挤到下一行，整块队列就串了。
+        if (d > n) out += '<b class="rt-slots-more">+' + (d - n) + "</b>";
+        return out + "</span>";
+      }
       function rtPipelineHtml(phase, trail) {
         var g = rtPhaseGroup(phase);
         var nodes = RT_PIPE_GROUPS.map(function (s, i) {
           var cls = "rt-pipe-node" + (i === g ? " active" : "");
           return (
             '<span class="' + cls + '"><i></i><b>' +
-            __(s.zh, s.en) +
-            (i === 2 ? ' <em class="rt-loop" title="' +
-              __("工具调用会回到行动后，可多次", "tool calls loop back; may repeat") + '">↻</em>' : "") +
+            RT_ICO[s.ico] +
+            "<u>" + __(s.zh, s.en) + "</u>" +
+            (s.loop
+              ? ' <em class="rt-loop" title="' +
+                __("工具调用会回到行动后，可多次", "tool calls loop back; may repeat") +
+                '">' + RT_ICO.loop + "</em>"
+              : "") +
             "</b></span>"
           );
         }).join("");
-        var chips = (trail || []).map(function (t) {
-          var kind = t.kind || "stage";
-          return (
-            '<span class="rt-chip rt-chip-' + kind + '" title="' + escHtml(t.label) + '">' +
-            (kind === "output" ? "⇥ " : kind === "tool" ? "⚙ " : "") +
-            escHtml(t.short || t.label) + "</span>"
-          );
+        // 事件按**发生它的阶段**分列，列的横向位置与上面的阶段节点对齐
+        // （同为 5 等分栅格），所以「这一步发生了什么」不需要靠颜色去猜。
+        var cols = RT_PIPE_GROUPS.map(function (s, i) {
+          var items = (trail || []).filter(function (t) {
+            return (t.g | 0) === i;
+          });
+          var body = items.length
+            ? items
+                .map(function (t) {
+                  var kind = t.kind || "stage";
+                  var ico =
+                    kind === "output" ? RT_ICO.out : kind === "tool" ? RT_ICO.tool : "";
+                  return (
+                    '<span class="rt-chip rt-chip-' + kind + '" title="' +
+                    escHtml(t.label) + '">' + ico +
+                    escHtml(t.short || t.label) +
+                    (t.n > 1 ? '<i class="rt-chip-n">x' + t.n + "</i>" : "") +
+                    "</span>"
+                  );
+                })
+                .join("")
+            : '<span class="rt-chip rt-chip-none">' + __("无", "none") + "</span>";
+          return '<div class="rt-pipe-col">' + body + "</div>";
         }).join("");
         return (
           '<div class="rt-section-title">' +
@@ -841,8 +889,22 @@
           '<div class="rt-pipe' + (g < 0 ? " rt-pipe-idle" : "") + '">' +
           '<div class="rt-pipe-nodes">' + nodes + "</div>" +
           "</div>" +
-          (chips ? '<div class="rt-trail">' + chips + "</div>" : "")
+          '<div class="rt-pipe-cols">' + cols + "</div>"
         );
+      }
+
+      // rtTrailPush 把一条「本轮发生过的事」落到它实际发生的阶段列里。
+      // 同一阶段重复出现同一条（如同一工具连调 3 次）只累加计数，不刷屏。
+      function rtTrailPush(g, kind, label, short) {
+        if (!state.stageTrail) state.stageTrail = [];
+        var arr = state.stageTrail;
+        var last = arr.length ? arr[arr.length - 1] : null;
+        if (last && last.g === g && last.kind === kind && last.short === short) {
+          last.n = (last.n || 1) + 1;
+          return;
+        }
+        arr.push({ g: g, kind: kind, label: label, short: short, n: 1 });
+        if (arr.length > 24) arr.shift();
       }
 
       // ---- per-agent 负载 ----
@@ -1096,7 +1158,7 @@
         // 数据没变 → 早退 → 滑块不动，只能等下一次 /runtime 轮询才追上。
         var sig = JSON.stringify([
           sc, residents, channels, inputs, state.pipelinePhase,
-          (state.stageTrail || []).map(function (t) { return t.kind + ":" + (t.short || t.label); }).join(","),
+          (state.stageTrail || []).map(function (t) { return t.g + ":" + t.kind + ":" + (t.short || t.label) + "x" + (t.n || 1); }).join(","),
         ]);
         if (sig === _rtSig) return;
         _rtSig = sig;
@@ -1161,6 +1223,8 @@
           maxReg = Math.max(maxReg, byLv[L.lv] || 0);
           maxPre = Math.max(maxPre, preLv[L.lv] || 0);
         });
+        // 槽位数按全场最大深度缩放（且至少 5 格）：0 时也有可见形状，不空着。
+        var qSlots = Math.max(5, Math.min(16, maxQ));
         h += '<div class="rt-levels">';
         RT_LEVELS.forEach(function (L) {
           var depth = q[L.lv] || 0;
@@ -1168,24 +1232,23 @@
           var pre = preLv[L.lv] || 0;
           h +=
             '<div class="rt-level" title="' + escHtml(L.desc) + '"><span class="rt-lv-name">' + L.name + "</span>" +
-            '<span class="rt-lv-track ' + L.cls + '"><i style="width:' +
-            (depth ? Math.max(4, (depth / maxQ) * 100) : 0) +
-            '%"></i></span>' +
+            rtSlots(depth, qSlots, L.cls) +
             '<span class="rt-lv-meta">' + depth + " · " +
             rtMini(reg, maxReg, __("登记", "registered")) +
             rtMini(pre, maxPre, __("抢占", "preempted")) +
             "</span></div>";
         });
-        h += "</div>";
-        // 第五条：排队队列（无级别，纯 FIFO）
-        h += '<div class="rt-level rt-level-queued" title="' + __("排队（无级别，纯 FIFO）", "queued (no priority, FIFO)") + '"><span class="rt-lv-name">' +
+        // 第五条：排队队列（无级别，纯 FIFO）。
+        // 注意：它必须在 .rt-levels **之内**：早前它被写在容器闭合之后，下面又多一个
+        // </div>，多出来的闭合标签会把祖先节点提前关掉，整块布局被撞歪。
+        h +=
+          '<div class="rt-level rt-level-queued" title="' + __("排队（无级别，纯 FIFO）", "queued (no priority, FIFO)") + '"><span class="rt-lv-name">' +
           __("排队", "queued") + "</span>" +
-          '<span class="rt-lv-track rt-lv-q"><i style="width:' +
-          (ready ? Math.max(4, (ready / maxQ) * 100) : 0) + '%"></i></span>' +
+          rtSlots(ready, qSlots, "rt-lv-q") +
           '<span class="rt-lv-meta">' + ready + " · FIFO</span></div>";
         h += "</div>";
         if (sc.immediate) {
-          h += '<div class="rt-frame">⚡ ' + __("立即运行", "immediate") + "：" +
+          h += '<div class="rt-frame">' + RT_ICO.bolt + " " + __("立即运行", "immediate") + "：" +
             escHtml(sc.immediate.kind || "") + " #" + sc.immediate.id +
             '<span class="rt-frame-top">L' + (sc.immediate.level || 0) + "</span></div>";
         }
@@ -1290,7 +1353,9 @@
           icon +
           '</span><span class="ov-val">' +
           (dot ? '<i class="ov-dot" id="ov-' + id + '-dot"></i>' : "") +
-          '<b id="ov-' + id + '">—</b></span><span class="ov-lab">' +
+          '<b id="ov-' + id + '">—</b></span>' +
+          '<span class="ov-sub" id="ov-' + id + '-sub"></span>' +
+          '<span class="ov-lab">' +
           label +
           "</span></div>"
         );
@@ -1336,13 +1401,19 @@
         ovDot("ov-status-dot", "ov-dot " + (running ? "ok" : "warn"));
         ovSet("ov-uptime", state.startedAt ? fmtUptime(Date.now() - state.startedAt) : "-");
         ovSet("ov-plugins", ((k && k.plugins) || []).length || 0);
+        // 内核身份：光有版本号分不清是哪个内核、哪次构建 —— 补上内核名与 commit。
+        // 之前 36b577b 改图标 KPI 时把 kernel_name 丢了，只剩余 "v1.4.0"。
+        var kb = (k && k.build) || {};
+        var kv = kb.version || s.version || "";
+        ovSet("ov-version", kv ? "v" + kv : "—");
         ovSet(
-          "ov-version",
-          k && k.build && k.build.version
-            ? "v" + k.build.version
-            : s.version
-              ? "v" + s.version
-              : "—",
+          "ov-version-sub",
+          kv
+            ? (kb.kernel_name || "HomeAgent") +
+                (kb.commit && kb.commit !== "unknown"
+                  ? " · " + String(kb.commit).slice(0, 7)
+                  : "")
+            : "",
         );
         var llm = (k && k.llm) || {};
         ovDot("ov-llm-dot", "ov-dot " + (llm.available ? "ok" : "bad"));
@@ -1850,7 +1921,7 @@
                   "</span>" +
                   pluginHtml +
                   statusHtml +
-                  '<span class="tc-caret">▾</span></div>' +
+                  '<span class="tc-caret">' + RT_ICO.caret + "</span></div>" +
                   '<div class="tc-detail" style="display:none">' +
                   (argsStr && argsStr !== "{}"
                     ? '<div class="tc-args"><div class="tc-detail-label">' +
@@ -2077,7 +2148,7 @@
             ? __("思考中...", "Thinking...")
             : __("思考", "Thinking")) +
           "</span>" +
-          '<span class="rc-chev">▾</span></div>' +
+          '<span class="rc-chev">' + RT_ICO.caret + "</span></div>" +
           '<div class="reasoning-body" style="display:' +
           (isStreaming ? "block" : "none") +
           '">' +
@@ -3567,17 +3638,17 @@
             // 阶段轨迹：本轮真实发生过什么，交给阶段管道画成 chip 序列。
             // 工具调用会反复出现（多轮 toolcall），output_* 单独配色。
             if (phase === "on_input") {
-              state.stageTrail = [{ kind: "stage", label: __("输入", "input"), short: __("输入", "input") }];
+              state.stageTrail = [];
+              rtTrailPush(0, "stage", __("输入", "input"), __("输入", "input"));
+            } else if (phase === "pre_action") {
+              rtTrailPush(1, "stage", __("组装上下文并思考", "assemble context and think"), __("思考", "think"));
             } else if (phase === "before_toolcall" && tool) {
-              state.stageTrail.push({
-                kind: tool.indexOf("output_") === 0 ? "output" : "tool",
-                label: tool,
-                short: rtShortTool(tool),
-              });
-              if (state.stageTrail.length > 24) state.stageTrail.shift();
+              var isOut = tool.indexOf("output_") === 0;
+              rtTrailPush(2, isOut ? "output" : "tool", tool, rtShortTool(tool));
+            } else if (phase === "before_output") {
+              rtTrailPush(3, "stage", __("生成回复", "generate reply"), __("生成", "gen"));
             } else if (phase === "after_output") {
-              state.stageTrail.push({ kind: "stage", label: __("完成", "done"), short: __("完成", "done") });
-              if (state.stageTrail.length > 24) state.stageTrail.shift();
+              rtTrailPush(4, "stage", __("本轮完成", "turn complete"), __("完成", "done"));
             }
             state.pipelinePhase = phase;
             if (state.pipelineTimer) clearTimeout(state.pipelineTimer);
@@ -4171,7 +4242,45 @@
             "</p></div>";
           return;
         }
+        var b = k.build || {};
         var html =
+          '<div class="card"><h2>' +
+          __("构建", "Build") +
+          "</h2>" +
+          '<div class="kv-row"><span class="key">' +
+          __("内核", "Kernel") +
+          '</span><span class="val">' +
+          escHtml(b.kernel_name || "HomeAgent") +
+          "</span></div>" +
+          '<div class="kv-row"><span class="key">' +
+          __("内核版本", "Kernel version") +
+          '</span><span class="val">' +
+          escHtml(b.version ? "v" + b.version : "-") +
+          "</span></div>" +
+          '<div class="kv-row"><span class="key">Commit</span><span class="val">' +
+          escHtml(b.commit || "-") +
+          "</span></div>" +
+          '<div class="kv-row"><span class="key">' +
+          __("构建时间", "Build time") +
+          '</span><span class="val">' +
+          escHtml(b.build_time || "-") +
+          "</span></div>" +
+          '<div class="kv-row"><span class="key">' +
+          __("SDK 兼容", "SDK compat") +
+          '</span><span class="val">' +
+          escHtml(b.sdk_compatible || "-") +
+          "</span></div>" +
+          (b.source_url
+            ? '<div class="kv-row"><span class="key">' +
+              __("源码", "Source") +
+              '</span><span class="val"><a href="' +
+              escHtml(b.source_url) +
+              '" target="_blank" rel="noopener noreferrer">' +
+              escHtml(b.source_url) +
+              "</a></span></div>"
+            : "") +
+          "</div>";
+        html +=
           '<div class="card"><h2>' +
           __("运行时", "Runtime") +
           "</h2>" +
