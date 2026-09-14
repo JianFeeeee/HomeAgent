@@ -411,7 +411,12 @@ func (b *Bridge) readLoop() {
 				_ = ws.writePong()
 				continue
 			}
-			// 超时或其他错误，退出
+			// 超时或其他错误，退出。
+			//
+			// **必须记日志**：此前这里静默 return，设备断线的真因（读超时 / 对端
+			// 关闭 / 帧错）在设备侧完全不可见，只能靠对端日志倒推。
+			// 2 倍 ping 间隔内的读超时通常是“心跳没人回”——查服务端 writePong 是否真发出。
+			log.Printf("[devicebridge] read loop exit (opcode=%#x, close=%v): %v", opcode, isClose, err)
 			return
 		}
 		if isClose {
