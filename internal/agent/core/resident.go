@@ -61,6 +61,17 @@ type ResidentInfo struct {
 	CreatedAt      time.Time       `json:"created_at"`
 	TableSize      int             `json:"table_size"`
 	Table          []InputchRecord `json:"table,omitempty"`
+
+	// Sched* 是这个驻留子**自己的**输入调度器积压摘要（排队 / 待处理中断 /
+	// 中断栈 / 四级中断队列）。
+	//
+	// 为什么必须单列：每个驻留子是独立 agent，跑自己的事件循环与调度器
+	// （见 agent.go 的 newScheduler）。KernelStatus.Scheduler 只是**根**那份，
+	// 拿它代表全部子会让界面把「某个子堵死」显示成「一切正常」。
+	SchedReady   int    `json:"sched_ready"`
+	SchedPending int    `json:"sched_pending"`
+	SchedStack   int    `json:"sched_stack"`
+	SchedQueues  [5]int `json:"sched_queues"`
 }
 
 type residentChild struct {
@@ -527,10 +538,17 @@ func (rc *residentChild) info() ResidentInfo {
 	state, full := rc.state, rc.state == "contextfull"
 	rc.mu.Unlock()
 	table := rc.agent.inputchTableSnapshot()
+	// 子自己的调度器积压（per-agent 负载展示用）。schedulerStatus 只读快照，
+	// 每次状态轮询为每个子算一次，成本可忽略（驻留子数量是个位数）。
+	sc := rc.agent.schedulerStatus()
 	info := ResidentInfo{
 		ID: rc.id, State: state, InputChs: append([]string(nil), rc.inputChs...),
 		AllowedOutputs: append([]string(nil), rc.allowed...),
 		ContextFull:    full, CreatedAt: rc.createdAt, TableSize: len(table),
+		SchedReady:   sc.ReadyQueueDepth,
+		SchedPending: sc.PendingInterrupts,
+		SchedStack:   sc.SuspendStack,
+		SchedQueues:  sc.InterruptQueues,
 		// Rounds = 子**已执行的轮次数**（调度器的执行计数，单调不减）。
 		//
 		// 此前这里根本没填这个字段 ⇒ 父看到的永远是 `轮次=0`，与"处理表已有 N 条"

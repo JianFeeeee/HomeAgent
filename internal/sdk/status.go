@@ -121,6 +121,15 @@ type ResidentStatus struct {
 	AllowedOutputs []string `json:"allowed_outputs,omitempty"`
 	InputChTable   int      `json:"input_ch_table"`
 	CreatedAt      string   `json:"created_at,omitempty"`
+
+	// 以下四项是该驻留子**自己的**调度器积压摘要，用于 per-agent 负载环形图。
+	//
+	// 根 agent 的积压看 KernelStatus.Scheduler；每个驻留子是独立 agent、
+	// 各跑各的调度器，必须分别给，否则「哪个子忙」在界面无从判断。
+	ReadyQueueDepth   int    `json:"ready_queue_depth"`
+	PendingInterrupts int    `json:"pending_interrupts"`
+	SuspendStack      int    `json:"suspend_stack"`
+	InterruptQueues   [5]int `json:"interrupt_queues"`
 }
 
 // SchedulerTask 是任务的最小标识（不暴露帧内容）。

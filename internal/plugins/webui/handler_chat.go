@@ -771,6 +771,29 @@ func (h *Handler) handleChatEvents(w http.ResponseWriter, r *http.Request) {
 		})
 		unsubs = append(unsubs, unsub)
 	}
+
+	// channel_input：把「哪条输入通道刚进来一条消息、由哪个 agent 接手」单独推一条
+	// **轻量**事件，供总览页拓扑画「光点进入 agent」的动画。
+	//
+	// 为什么不直接把 raw_input 放进 subTypes：那条事件的 payload 带整条输入正文
+	// （用户消息，可能几 KB），而拓扑只需要 `source`（通道名）与发出者的 agent id。
+	// 全量转发会让每次用户说话都在 SSE 上多背一份正文。
+	unsubInput := h.sdk.Subscribe(sdk.EventRawInput, func(evt *sdk.Event) {
+		src, _ := evt.Payload["source"].(string)
+		if src == "" {
+			return
+		}
+		data, _ := json.Marshal(map[string]interface{}{
+			"type":      "channel_input",
+			"source":    src,
+			"agent":     evt.Source,
+			"timestamp": evt.Timestamp,
+		})
+		seq++
+		id := fmt.Sprintf("%d-%d", evt.Timestamp, seq)
+		sendSSE(writeCh, id, "channel_input", string(data))
+	})
+	unsubs = append(unsubs, unsubInput)
 	defer func() {
 		for _, unsub := range unsubs {
 			unsub()
