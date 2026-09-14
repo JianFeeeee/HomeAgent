@@ -4,7 +4,7 @@ import { COLOR_ACCENT, COLOR_SUCCESS, COLOR_CYAN, COLOR_ERROR } from '../common/
 import { MotionBase } from './MotionBase';
 import {
   statusStore, StatGroup, StatField, compactDuration,
-  K_UP, K_VERSION, K_STARTED, K_AGENTS, K_PLUGINS, K_TOOLS, K_ERR, K_LOADING, K_REV,
+  K_UP, K_VERSION, K_STARTED, K_AGENTS, K_PLUGINS, K_TOOLS, K_ERR, K_LOADING, K_REV, K_BUILD,
 } from '../common/StatusStore';
 
 /**
@@ -19,6 +19,8 @@ export struct StatusSummaryCard {
   @StorageProp('themeIsDark') private isDark: boolean = true;
   @StorageProp(K_UP) private up: boolean = false;
   @StorageProp(K_VERSION) private version: string = '-';
+  /** 内核名 · commit。与版本号分开一行：版本号本身没有内核身份。 */
+  @StorageProp(K_BUILD) private buildSub: string = '';
   @StorageProp(K_STARTED) private startedAt: string = '';
   @StorageProp(K_AGENTS) private agents: number = 0;
   @StorageProp(K_PLUGINS) private plugins: number = 0;
@@ -130,14 +132,24 @@ export struct StatusSummaryCard {
           Text('版本')
             .fontSize(12)
             .fontColor(this.palette().textMuted)
-          Text(this.version)
-            .fontSize(12)
-            .fontWeight(FontWeight.Medium)
-            .fontColor(this.palette().textSecondary)
-            .layoutWeight(1)
-            .maxLines(1)
-            .textOverflow({ overflow: TextOverflow.Ellipsis })
-            .margin({ left: 10 })
+          Column() {
+            Text(this.version)
+              .fontSize(12)
+              .fontWeight(FontWeight.Medium)
+              .fontColor(this.palette().textSecondary)
+              .maxLines(1)
+              .textOverflow({ overflow: TextOverflow.Ellipsis })
+            // 内核名 + commit：光有版本号会分不清是哪个内核、哪次构建
+            Text(this.buildSub)
+              .fontSize(10)
+              .fontColor(this.palette().textMuted)
+              .maxLines(1)
+              .textOverflow({ overflow: TextOverflow.Ellipsis })
+              .visibility(this.buildSub.length > 0 ? Visibility.Visible : Visibility.None)
+          }
+          .alignItems(HorizontalAlign.Start)
+          .layoutWeight(1)
+          .margin({ left: 10 })
           Text('明细')
             .fontSize(12)
             .fontColor(this.palette().accent)
