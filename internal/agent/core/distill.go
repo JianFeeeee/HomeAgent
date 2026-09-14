@@ -468,7 +468,11 @@ func docToTriples(doc *document.Doc, embedder nlp.Vectorizer) []memory.Triple {
 		})
 	}
 
-	return triples
+	// 噪音闸门：NLP 提取器不认常用词（「结果 / 什么 / 待命」都能当主语），
+	// 而落库闸门 validEntityName 只管名字像不像名字。这一层是防止
+	// 「每个文档的常用词都变成实体」的唯一防线（CutExact 时代的那层已随
+	// 提取器换代丢失，见 memory.IsNoiseEntity 的说明）。
+	return memory.FilterNoiseTriples(triples)
 }
 
 // isTemplateSummary 识别 summarizeEntries 生成的模板化摘要

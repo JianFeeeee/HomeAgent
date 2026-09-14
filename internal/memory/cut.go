@@ -191,6 +191,18 @@ var stopWords = map[string]bool{
 	"人": true, "人们": true, "东西": true, "事情": true,
 	"问题": true, "情况": true, "时候": true, "地方": true,
 	"方式": true, "方法": true, "原因": true, "结果": true,
+	// ── 人称代词补全（我们/你们/他们 早有，咱俩/咱们 漏了）──
+	"咱俩": true, "咱们": true,
+	// ── 限定/指代类：本身没有独立的指称对象 ──
+	"任何": true, "此": true, "本": true, "其中": true, "以及": true,
+	"那么": true, "这样": true, "那样": true, "一样": true,
+	"还有": true, "还要": true, "只是": true, "老是": true,
+	// ── 方位/整体类泛指 ──
+	"全部": true, "所有": true, "有些": true, "一些": true,
+	"别的": true, "其他": true, "其余": true, "各自": true, "本身": true,
+	"上面": true, "下面": true, "里面": true, "外面": true,
+	"前面": true, "后面": true, "左边": true, "右边": true,
+	"中间": true, "附近": true, "周围": true, "部分": true, "方面": true,
 	// ── 高频语气组合 ──
 	"好的": true, "好吧": true, "好": true,
 	"好了": true, "对了": true, "行了": true,

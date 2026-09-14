@@ -416,6 +416,11 @@ func extractKeyTriples(userContent, assistantContent string, embedder nlp.Vector
 		}
 	}
 
+	// 注意：这里**不**做噪音过滤。对话蒸馏的抽取器（与 doc→graph 共用一个
+	// NLP 提取器）历史上就没有常用词闸门：CutExact 那层当年只挂在 doc→graph 上。
+	// 而且 pipeline_test 明确断言「我 --读书--> 杭州」必须被抽出（代词作主语是
+	// 该路的既定行为）。要不要在对话路也拦常用词是行为决策，不在此处擅改，
+	// 参见 memory.IsNoiseEntity 的说明。
 	return triples
 }
 
