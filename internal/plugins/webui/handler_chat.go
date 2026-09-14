@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"log"
+	"strconv"
 	"strings"
 	"time"
 
@@ -24,6 +25,13 @@ type ChatMsg struct {
 	ToolCalls        []ChatToolCall `json:"tool_calls,omitempty"`
 	Source           string         `json:"source,omitempty"`
 	Time             string         `json:"time"`
+	// Seq 是服务端分配的**单调递增**序号，作为增量查询游标
+	// （GET /chat/history?after=<seq>）与前端列表的稳定 key。
+	//
+	// 为什么不能用下标：chatHistory 有上限（maxChatHistory=200），超出从头丢，
+	// 下标会整体前移 —— 拿它当游标要么重复要么漏消息。seq 只增不减，且随
+	// 记录一起落盘，重启后编号不重置。
+	Seq int64 `json:"seq"`
 	// Attachment 附件输出（output_send__webui type=image/file）：
 	// image 前端内联展示，file 渲染下载卡片。nil 表示纯文本消息。
 	Attachment *Attachment `json:"attachment,omitempty"`
@@ -95,6 +103,22 @@ func (h *Handler) loadChatHistory() {
 	}
 	h.chatMu.Lock()
 	h.chatHistory = msgs
+	// 老记录没有 seq（本字段是后加的）：补成 1..n 并把计数器顶到最大。
+	// 只补缺失的，已有序号原样保留 —— 重启不能重编号，否则客户端的 after 游标
+	// 会指向另一条消息。
+	var maxSeq int64
+	for i := range h.chatHistory {
+		if h.chatHistory[i].Seq > maxSeq {
+			maxSeq = h.chatHistory[i].Seq
+		}
+	}
+	for i := range h.chatHistory {
+		if h.chatHistory[i].Seq == 0 {
+			maxSeq++
+			h.chatHistory[i].Seq = maxSeq
+		}
+	}
+	h.chatSeq = maxSeq
 	h.chatMu.Unlock()
 }
 
@@ -169,7 +193,7 @@ func (h *Handler) subscribeChatEvents() {
 		h.chatMu.Lock()
 		msg := h.pendingAssistantLocked()
 		if msg == nil {
-			h.chatHistory = append(h.chatHistory, ChatMsg{Role: "assistant", Time: time.Now().Format(time.RFC3339)})
+			h.chatHistory = append(h.chatHistory, ChatMsg{Role: "assistant", Seq: h.bumpSeqLocked(), Time: time.Now().Format(time.RFC3339)})
 			h.pendingIdx = len(h.chatHistory) - 1
 			msg = &h.chatHistory[h.pendingIdx]
 		}
@@ -189,7 +213,7 @@ func (h *Handler) subscribeChatEvents() {
 		h.chatMu.Lock()
 		msg := h.pendingAssistantLocked()
 		if msg == nil {
-			h.chatHistory = append(h.chatHistory, ChatMsg{Role: "assistant", Time: time.Now().Format(time.RFC3339)})
+			h.chatHistory = append(h.chatHistory, ChatMsg{Role: "assistant", Seq: h.bumpSeqLocked(), Time: time.Now().Format(time.RFC3339)})
 			h.pendingIdx = len(h.chatHistory) - 1
 			msg = &h.chatHistory[h.pendingIdx]
 		}
@@ -226,6 +250,7 @@ func (h *Handler) subscribeChatEvents() {
 			}
 			m := ChatMsg{
 				Role:       "assistant",
+				Seq:        h.bumpSeqLocked(),
 				Source:     channel,
 				Time:       time.Unix(ev.Timestamp, 0).Format(time.RFC3339),
 				Attachment: att,
@@ -456,8 +481,16 @@ func (h *Handler) handleToolEvent(ev *sdk.Event) {
 	}
 }
 
+// bumpSeqLocked 分配下一个聊天序号（调用方须持 chatMu）。
+// 序号单调递增、随记录落盘，作为 /chat/history?after= 的增量游标。
+func (h *Handler) bumpSeqLocked() int64 {
+	h.chatSeq++
+	return h.chatSeq
+}
+
 func (h *Handler) addChatMsg(msg ChatMsg) {
 	h.chatMu.Lock()
+	msg.Seq = h.bumpSeqLocked()
 	h.chatHistory = append(h.chatHistory, msg)
 	if len(h.chatHistory) > maxChatHistory {
 		drop := len(h.chatHistory) - maxChatHistory
@@ -497,6 +530,46 @@ func (h *Handler) handleChatHistory(w http.ResponseWriter, r *http.Request) {
 		limit = maxChatHistory
 	}
 
+	// after：**增量游标**。只返回 seq > after 的消息，按 seq 升序。
+	//
+	// 这是给「轮询查询数据再更新视图」用的：客户端存下 last_seq，下次带回来，
+	// 只拿新增/变化的部分去 patch 视图，不做整块重建（重建的闪烁消不掉）。
+	// 与 before（向上翻页）互斥，after 优先。
+	//
+	// 返回的是新增里**最旧的一批**（最多 limit 条），last_seq 是这批最后一条 ——
+	// 客户端据此继续追下一批。若改成返回最新一批，被挤掉的旧的那几条就永远
+	// 追不回来了。
+	if raw := strings.TrimSpace(q.Get("after")); raw != "" {
+		after, err := strconv.ParseInt(raw, 10, 64)
+		if err != nil || after < 0 {
+			http.Error(w, "invalid after", http.StatusBadRequest)
+			return
+		}
+		h.chatMu.Lock()
+		total := len(h.chatHistory)
+		out := make([]ChatMsg, 0, 16)
+		for i := range h.chatHistory {
+			if h.chatHistory[i].Seq > after {
+				out = append(out, h.chatHistory[i])
+			}
+		}
+		h.chatMu.Unlock()
+		if limit > 0 && len(out) > limit {
+			out = out[:limit]
+		}
+		lastSeq := after
+		if len(out) > 0 {
+			lastSeq = out[len(out)-1].Seq
+		}
+		writeJSON(w, http.StatusOK, map[string]interface{}{
+			"messages": out,
+			"total":    total,
+			"after":    after,
+			"last_seq": lastSeq,
+		})
+		return
+	}
+
 	h.chatMu.Lock()
 	total := len(h.chatHistory)
 	// before 游标：默认取到末尾（最新）
@@ -510,13 +583,20 @@ func (h *Handler) handleChatHistory(w http.ResponseWriter, r *http.Request) {
 	}
 	result := make([]ChatMsg, end-start)
 	copy(result, h.chatHistory[start:end])
+	// last_seq 在锁内取：放锁后再读 h.chatHistory 是数据竞争。
+	var lastSeq int64
+	if total > 0 {
+		lastSeq = h.chatHistory[total-1].Seq
+	}
 	h.chatMu.Unlock()
 
+	// last_seq 一并下发：客户端首次全量加载后据此初始化增量游标。
 	writeJSON(w, http.StatusOK, map[string]interface{}{
 		"messages": result,
 		"total":    total,
 		"offset":   start,
 		"has_more": start > 0,
+		"last_seq": lastSeq,
 	})
 }
 

@@ -29,6 +29,7 @@
         chatOffset: 0, // 分段历史：当前已加载消息在服务端全量中的起始下标
         chatTotal: 0, // 服务端历史总条数
         chatHasMore: false, // 是否还有更早历史可向上加载
+        chatLastSeq: 0, // 增量轮询游标：已合并到本地的最大消息 seq
         lang: localStorage.getItem("ha-lang") || "zh",
       };
 
@@ -604,6 +605,58 @@
       // 视觉效果就是“首页一闪一闪”。签名相同就一个字节也不动。
       var _rtSig = null;
 
+      // morph：把容器的 DOM 就地「形变」成 html 描述的样子。
+      //
+      // 为什么不用 innerHTML = html：整块重建会把**没变的**节点也换掉 ——
+      // SVG 过渡从头播、图片重解码、展开态丢失、滚动锚点重置。运行态每几秒
+      // 刷一次，未变节点占绝大多数，那些闪烁就是这么来的。
+      //
+      // 做法：按「子节点位置 + nodeName」递归对账。同名元素复用同一个 DOM 节点，
+      // 只同步发生变化的属性与文本；只有标签真的不同才替换。元素身份不变 ⇒
+      // CSS 过渡继续、不闪。
+      function morph(container, html) {
+        var tpl = document.createElement("div");
+        tpl.innerHTML = html;
+        morphChildren(container, tpl);
+      }
+      function morphChildren(oldParent, newParent) {
+        var olds = Array.prototype.slice.call(oldParent.childNodes);
+        var news = Array.prototype.slice.call(newParent.childNodes);
+        var n = Math.max(olds.length, news.length);
+        for (var i = 0; i < n; i++) {
+          var o = olds[i], x = news[i];
+          if (!o && x) {
+            oldParent.appendChild(x);
+            continue;
+          }
+          if (o && !x) {
+            oldParent.removeChild(o);
+            continue;
+          }
+          if (o.nodeType !== x.nodeType || o.nodeName !== x.nodeName) {
+            oldParent.replaceChild(x, o);
+            continue;
+          }
+          if (o.nodeType === 3 || o.nodeType === 8) {
+            if (o.nodeValue !== x.nodeValue) o.nodeValue = x.nodeValue;
+            continue;
+          }
+          morphAttrs(o, x);
+          morphChildren(o, x);
+        }
+      }
+      function morphAttrs(o, x) {
+        var i, a;
+        for (i = o.attributes.length - 1; i >= 0; i--) {
+          a = o.attributes[i];
+          if (!x.hasAttribute(a.name)) o.removeAttribute(a.name);
+        }
+        for (i = 0; i < x.attributes.length; i++) {
+          a = x.attributes[i];
+          if (o.getAttribute(a.name) !== a.value) o.setAttribute(a.name, a.value);
+        }
+      }
+
       // rtSlider 把“值 / 上限”画成轨道 + 滑块 + 读数（比纯文本数字直观）。
       function rtSlider(value, max, label, display) {
         var pct = max > 0 ? Math.max(0, Math.min(100, (value / max) * 100)) : 0;
@@ -984,7 +1037,8 @@
           var n = document.getElementById("rt-sec-" + sec);
           if (!n || n.__sig === html) return; // 该段没变：一个字节都不动
           n.__sig = html;
-          n.innerHTML = html;
+          // 变了也只「形变」到新样子：复用未变的子节点，而不是整块重建。
+          morph(n, html);
         }
 
         var q = sc.interrupt_queues || [0, 0, 0, 0, 0];
@@ -1103,6 +1157,19 @@
 
       // startRuntimeTicker 起 3s 轮询：运行态只在总览页可见时才有意义，
       // 其它页签上不浪费请求。切回总览时 renderAll 会立刻再拉一次，不必等下一拍。
+      // startChatTicker：聊天页可见时 3s 轮询一次增量（与运行态同一节奏）。
+      // SSE 仍在（token 级流式靠它），轮询是「数据查询 api」那条腿：
+      // 界面最终状态由轮询拉到的数据决定，SSE 只负责让流式看起来即时。
+      function startChatTicker() {
+        if (state._chatTicker) return;
+        state._chatTicker = setInterval(function () {
+          var tab = document.querySelector("#tab-chat");
+          if (tab && tab.classList.contains("active")) {
+            syncChatFromHistory().catch(function () {});
+          }
+        }, 3000);
+      }
+
       function startRuntimeTicker() {
         if (state._runtimeTicker) return;
         state._runtimeTicker = setInterval(function () {
@@ -1425,6 +1492,61 @@
         return /[A-Za-z0-9]/.test(ch) ? ch : "C";
       }
 
+      // ===== 列表对账（keyed reconcile）=====
+      //
+      // 为什么必须对账而不是 innerHTML 整块重建：整块重建会把**没变的**那些消息
+      // 节点也推倒重来 —— 图片重新解码闪一下、工具卡片的展开态丢失、CSS 过渡从
+      // 头播、滚动锚点被重置。这些闪烁几乎无法用"重建后再还原"消除。
+      //
+      // 做法：新 HTML 先在游离容器里解析成节点，然后按 data-key 逐个对账：
+      //   - key 命中且内容一致 → 复用原节点（一个字节都不动）；
+      //   - key 命中但内容变了 → 只替换这一个节点；
+      //   - key 未命中 → 作为新节点插入；
+      // 最后把多出来的旧节点删掉。未变节点因此完全不受影响。
+      var _localKeySeq = 0;
+
+      // chatMsgKey 给一条消息一个**稳定**的 key。
+      //   - 服务端消息用 seq（单调、落盘、重启不重编号）；
+      //   - 本地乐观消息（用户刚发的 / 正在流式的）第一次渲染时分配一个进程内
+      //     自增 key 并挂在对象上，后续渲染不变。
+      function chatMsgKey(m) {
+        if (m && m.seq) return "s" + m.seq;
+        if (m && !m._k) m._k = "L" + ++_localKeySeq;
+        return (m && m._k) || "L0";
+      }
+
+      function commitChatList(container, html) {
+        var tpl = document.createElement("div");
+        tpl.innerHTML = html;
+        var next = Array.prototype.slice.call(tpl.children);
+        var existing = {};
+        Array.prototype.forEach.call(container.children, function (n) {
+          var k = n.getAttribute && n.getAttribute("data-key");
+          if (k) existing[k] = n;
+        });
+        for (var i = 0; i < next.length; i++) {
+          var fresh = next[i];
+          var key = fresh.getAttribute && fresh.getAttribute("data-key");
+          var node = fresh;
+          if (key && existing[key]) {
+            var old = existing[key];
+            // 内容逐字节相同 → 复用旧节点（不触碰它，保存动画/展开/图片状态）；
+            // 否则只替换这一个。outerHTML 比较对消息节点足够（含 tool_calls 状态）。
+            if (old.outerHTML === fresh.outerHTML) {
+              node = old;
+            } else {
+              old.remove();
+            }
+          }
+          var cur = container.children[i];
+          if (cur !== node) container.insertBefore(node, cur || null);
+        }
+        // 多出来的旧节点（本轮新列表里没有的）从尾部清掉
+        while (container.children.length > next.length) {
+          container.removeChild(container.lastElementChild);
+        }
+      }
+
       function renderChat() {
         if (!_chatLayoutBuilt) {
           buildChatLayout();
@@ -1540,6 +1662,7 @@
             "</p></div>";
         } else {
           msgs.forEach(function (m, i) {
+            var _k = chatMsgKey(m);
             var role = m.role || "user";
             var c = m.content || "";
             // 附件消息：agent 经 output_send__webui 发送，或用户上传。
@@ -1595,7 +1718,7 @@
               html +=
                 '<div class="msg ' +
                 (isUserAtt ? "user" : "assistant") +
-                '"><div class="msg-bubble"><div class="att-wrap">' +
+                '" data-key="' + _k + '"><div class="msg-bubble"><div class="att-wrap">' +
                 '<div style="font-size:11px;opacity:0.65;margin-bottom:4px">' +
                 srcLabel +
                 "</div>" +
@@ -1721,12 +1844,12 @@
             }
             if (role === "system") {
               html +=
-                '<div class="msg msg-system"><div class="msg-bubble">' +
+                '<div class="msg msg-system" data-key="' + _k + '"><div class="msg-bubble">' +
                 (c || "") +
                 "</div></div>";
             } else if (isChan) {
               html +=
-                '<div class="msg msg-channel">' +
+                '<div class="msg msg-channel" data-key="' + _k + '">' +
                 '<div class="msg-avatar chan-avatar" style="background:' +
                 chanColor(m.source) +
                 '">' +
@@ -1744,7 +1867,7 @@
               html +=
                 '<div class="msg msg-' +
                 role +
-                '">' +
+                '" data-key="' + _k + '">' +
                 '<div class="msg-avatar">' +
                 (role === "user" ? userAvatar : aiAvatar) +
                 "</div>" +
@@ -1758,7 +1881,7 @@
         if (state.chatLoading && !streamingLast) {
           var aiAvatarL = '<img src="/mascot.webp" alt="小宅">';
           html +=
-            '<div class="msg msg-assistant"><div class="msg-avatar">' +
+            '<div class="msg msg-assistant" data-key="pending"><div class="msg-avatar">' +
             aiAvatarL +
             '</div><div class="msg-content"><div class="msg-bubble">' +
             '<span class="live-spinner"></span>' +
@@ -1770,7 +1893,7 @@
         // 重建前记住阅读位置：非粘底（用户正向上翻）时，innerHTML 重建后必须把位置还回去，
         // 否则视口会被重置——这就是"聊天记录跳到顶部"的直接来源。
         var prevTop = msgsEl.scrollTop;
-        msgsEl.innerHTML = html;
+        commitChatList(msgsEl, html);
         if (state.chatStick !== false) {
           msgsEl.scrollTop = msgsEl.scrollHeight;
         } else {
@@ -2683,8 +2806,112 @@
             state.chatOffset = typeof data.offset === "number" ? data.offset : 0;
             state.chatTotal = typeof data.total === "number" ? data.total : data.messages.length;
             state.chatHasMore = !!data.has_more;
+            state.chatLastSeq = historyLastSeq(data);
           }
         } catch (e) {}
+      }
+
+      // historyLastSeq 从一次 /chat/history 响应里取出「已见到的最大 seq」：
+      // 优先用服务端给的 last_seq，缺了就取消息里的最大值。
+      function historyLastSeq(data) {
+        if (!data) return 0;
+        if (typeof data.last_seq === "number") return data.last_seq;
+        var mx = 0;
+        (data.messages || []).forEach(function (m) {
+          if (m && m.seq > mx) mx = m.seq;
+        });
+        return mx;
+      }
+
+      // applyServerMessages 把服务端消息并进 state.messages，按 seq 对账：
+      //   - 同 seq 已存在 → 原地替换（工具调用/最终文本是原地更新）；
+      //   - 不存在 → 追加（若末尾是无 seq 的乐观消息且 role+content 一致，则替换它，
+      //     避免"自己刚发的那条"重复成两条）。
+      // tailOnly=true 时只做原地更新与"比本地新才追加"，不把尾探测当成新消息。
+      // @returns {boolean} 是否真的改动了 state.messages
+      function applyServerMessages(list, tailOnly) {
+        if (!list || !list.length) return false;
+        var msgs = state.messages;
+        var changed = false;
+        function carry(prev, sm) {
+          if (prev && prev._final) sm._final = true;
+          if (prev && prev._grow) sm._grow = true;
+          return sm;
+        }
+        list.forEach(function (sm) {
+          if (!sm) return;
+          var seq = sm.seq;
+          var found = -1;
+          for (var j = msgs.length - 1; j >= 0 && j >= msgs.length - 12; j--) {
+            if (seq && msgs[j] && msgs[j].seq === seq) {
+              found = j;
+              break;
+            }
+          }
+          if (found >= 0) {
+            if (JSON.stringify(msgs[found]) !== JSON.stringify(sm)) {
+              msgs[found] = carry(msgs[found], sm);
+              changed = true;
+            }
+            return;
+          }
+          if (tailOnly) {
+            var lastS = msgs.length ? msgs[msgs.length - 1].seq : 0;
+            if (seq && (!lastS || seq > lastS)) {
+              msgs.push(sm);
+              changed = true;
+            }
+            return;
+          }
+          if (msgs.length) {
+            var last = msgs[msgs.length - 1];
+            if (
+              !last.seq &&
+              (last.role || "") === (sm.role || "") &&
+              (last.content || "") === (sm.content || "")
+            ) {
+              msgs[msgs.length - 1] = carry(last, sm);
+              changed = true;
+              return;
+            }
+          }
+          msgs.push(sm);
+          changed = true;
+        });
+        list.forEach(function (sm) {
+          if (sm && sm.seq > (state.chatLastSeq || 0)) state.chatLastSeq = sm.seq;
+        });
+        if (changed) rerenderChat();
+        return changed;
+      }
+
+      // pollChatIncremental 轮询「自上次以来新增了什么」。
+      //
+      // 这就是「暴露数据查询 api，前端轮询后 patch 视图」那条路：after=游标
+      // 只拿增量，再单独探一次尾部做原地更新（工具调用/最终文本是原地改的，
+      // 不会产生新 seq，只靠 after 拿不到）。视图更新走 commitChatList 的
+      // keyed 对账，未变消息节点一个字节都不动 —— 闪烁由此消失。
+      function pollChatIncremental() {
+        var after = state.chatLastSeq || 0;
+        if (!after) {
+          // 还没建立游标（首次 / 本地为空）：退回一次性全量，交给已有一致性逻辑
+          return api("/chat/history?limit=" + CHAT_PAGE_SIZE).then(function (data) {
+            state.chatLastSeq = historyLastSeq(data);
+            return mergeChatFromHistory(data);
+          });
+        }
+        return api("/chat/history?after=" + after)
+          .then(function (data) {
+            if (!data) return;
+            state.chatLastSeq = historyLastSeq(data) || after;
+            applyServerMessages(data.messages || [], false);
+            return api("/chat/history?limit=1");
+          })
+          .then(function (tail) {
+            if (tail && tail.messages && tail.messages.length) {
+              applyServerMessages(tail.messages.slice(-1), true);
+            }
+          });
       }
 
       // loadOlderChat 向上翻页：拉 offset 之前的一页，前置到 messages 头部。
@@ -2730,27 +2957,11 @@
       // 生产消息更大时可达 ~1MB —— 这是"每次都在发完整聊天记录"的观感来源。
       // 探测只需 1 条（约几 KB），尾巴一致就直接跳过。
       var _syncingChat = false;
+      // syncChatFromHistory 保留旧名（多处调用点）：内部改走游标增量轮询。
       function syncChatFromHistory() {
         if (_syncingChat) return Promise.resolve();
         _syncingChat = true;
-        return api("/chat/history?limit=1")
-          .then(function (tail) {
-            var t = tail && tail.messages && tail.messages[0];
-            var local = state.messages.length
-              ? state.messages[state.messages.length - 1]
-              : null;
-            var same =
-              t &&
-              local &&
-              t.role === (local.role || local.Role) &&
-              (t.content || "") === (local.content || local.Content || "");
-            if (same) return null; // 尾巴一致：无需拉整页
-            return api("/chat/history?limit=" + CHAT_PAGE_SIZE);
-          })
-          .then(function (data) {
-            if (!data) return;
-            return mergeChatFromHistory(data);
-          })
+        return pollChatIncremental()
           .catch(function () {})
           .then(function () {
             _syncingChat = false;
@@ -5046,6 +5257,7 @@
         connectSSE();
         startUptimeTicker();
         startRuntimeTicker();
+        startChatTicker();
         maybeShowPersonaWizard();
       })();
       setInterval(renderAll, 15000);
