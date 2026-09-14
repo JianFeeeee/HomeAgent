@@ -1002,6 +1002,12 @@ func TestSettingsNoCrossPluginLeak(t *testing.T) {
 
 	webuiCfg := cfgReg.PluginConfig("webui")
 	webuiCfg.RegisterDef(internalConfig.ConfigDef{Key: "addr", Default: ":8080"})
+	// 隔离聊天记录文件：不设的话会落到 os.TempDir()/webui_chat_history.json，
+	// 与其它用例串味（迁移用例会把自己的数据写进去）。
+	webuiCfg.RegisterDef(internalConfig.ConfigDef{Key: "history_file", Default: ""})
+	if err := webuiCfg.Set("history_file", filepath.Join(t.TempDir(), "chat.json")); err != nil {
+		t.Fatalf("set history_file: %v", err)
+	}
 	webuiCfg.Set("addr", ":8080")
 	webuiCfg.Set("chathistory", `[{"role":"assistant","content":"secret blob"}]`)
 
@@ -1330,5 +1336,54 @@ func TestDashboardAssetsSplit(t *testing.T) {
 	}
 	if !strings.Contains(dashboardHTML, "function saveSetting") {
 		t.Fatal("组装后的页面缺脚本")
+	}
+}
+
+// TestChatHistoryDefaultIsPaged 钉住 /chat/history 的默认页大小。
+//
+// 原先缺省 limit=0 表示"不限制"，于是任何不带 limit 的调用每次都拿到完整聊天记录
+// （生产实测 ~5MB；本地 126 条 635KB）——这正是"每次都在发完整聊天记录"的来源。
+// 现在默认只回一页；想整取必须显式 limit=0。
+func TestChatHistoryDefaultIsPaged(t *testing.T) {
+	h, _ := newTestHandler(t)
+	// 清空可能从临时目录共享文件加载进来的历史，让用例只依赖自己播的数据
+	h.chatMu.Lock()
+	h.chatHistory = nil
+	for i := 0; i < maxChatHistory; i++ {
+		h.chatHistory = append(h.chatHistory, ChatMsg{Role: "user", Content: "消息", Time: "t"})
+	}
+	h.chatMu.Unlock()
+
+	get := func(q string) map[string]interface{} {
+		req := httptest.NewRequest(http.MethodGet, "/api/v1/chat/history"+q, nil)
+		w := httptest.NewRecorder()
+		h.handleChatHistory(w, req)
+		if w.Code != http.StatusOK {
+			t.Fatalf("GET %q: %d", q, w.Code)
+		}
+		var out map[string]interface{}
+		if err := json.Unmarshal(w.Body.Bytes(), &out); err != nil {
+			t.Fatalf("unmarshal: %v", err)
+		}
+		return out
+	}
+	// 不带 limit → 只回一页，且明确告知还有更早的
+	def := get("")
+	if n := len(def["messages"].([]interface{})); n != defaultChatHistoryLimit {
+		t.Fatalf("默认应回 %d 条，实际 %d", defaultChatHistoryLimit, n)
+	}
+	if def["has_more"] != true {
+		t.Fatal("还有更早内容时 has_more 应为 true")
+	}
+	// 显式 limit=0 → 整取（逃生口）：返回条数应等于 total
+	all := get("?limit=0")
+	total := int(all["total"].(float64))
+	if n := len(all["messages"].([]interface{})); n != total {
+		t.Fatalf("limit=0 应整取 total=%d 条，实际 %d", total, n)
+	}
+	// 显式分页仍然照旧
+	page := get("?limit=5")
+	if n := len(page["messages"].([]interface{})); n != 5 {
+		t.Fatalf("limit=5 应回 5 条，实际 %d", n)
 	}
 }

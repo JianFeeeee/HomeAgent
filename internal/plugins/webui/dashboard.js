@@ -1209,9 +1209,14 @@
               : "") +
             "</div></div></div>";
         }
+        // 重建前记住阅读位置：非粘底（用户正向上翻）时，innerHTML 重建后必须把位置还回去，
+        // 否则视口会被重置——这就是"聊天记录跳到顶部"的直接来源。
+        var prevTop = msgsEl.scrollTop;
         msgsEl.innerHTML = html;
         if (state.chatStick !== false) {
           msgsEl.scrollTop = msgsEl.scrollHeight;
+        } else {
+          msgsEl.scrollTop = prevTop;
         }
         updateChatBadge();
       }
@@ -2161,10 +2166,44 @@
         }
       }
 
-      // syncChatFromHistory 增量同步：对比服务端历史，仅追加新消息 DOM 节点，
-      // 不重建已有消息 → 无闪烁。用于 SSE 断连恢复期间的轮询兜底。
+      // syncChatFromHistory 增量同步：先做一次极轻的"尾巴探测"，只有尾巴变了才拉整页。
+      //
+      // 原先每 30s（以及每次 SSE 报错）都直接拉一页 40 条：本地实测 180KB、
+      // 生产消息更大时可达 ~1MB —— 这是"每次都在发完整聊天记录"的观感来源。
+      // 探测只需 1 条（约几 KB），尾巴一致就直接跳过。
+      var _syncingChat = false;
       function syncChatFromHistory() {
-        return api("/chat/history?limit=" + CHAT_PAGE_SIZE).then(function (data) {
+        if (_syncingChat) return Promise.resolve();
+        _syncingChat = true;
+        return api("/chat/history?limit=1")
+          .then(function (tail) {
+            var t = tail && tail.messages && tail.messages[0];
+            var local = state.messages.length
+              ? state.messages[state.messages.length - 1]
+              : null;
+            var same =
+              t &&
+              local &&
+              t.role === (local.role || local.Role) &&
+              (t.content || "") === (local.content || local.Content || "");
+            if (same) return null; // 尾巴一致：无需拉整页
+            return api("/chat/history?limit=" + CHAT_PAGE_SIZE);
+          })
+          .then(function (data) {
+            if (!data) return;
+            return mergeChatFromHistory(data);
+          })
+          .catch(function () {})
+          .then(function () {
+            _syncingChat = false;
+          });
+      }
+
+      // mergeChatFromHistory 把服务端的一页历史并进本地：只追加新消息，不重建已有节点。
+      // 关键约束：**绝不**用更短的服务端页替换更长的本地列表（那会让用户翻上来的旧页
+      // 凭空消失、视口跳回顶部）。
+      function mergeChatFromHistory(data) {
+        {
           if (!data || !data.messages || data.messages.length === 0) return;
           var serverMsgs = data.messages;
           var localMsgs = state.messages;
@@ -2215,9 +2254,14 @@
             newMsgs = serverMsgs.slice(serverMsgs.length - overlap);
             if (newMsgs.length === 0) return; // 无新增（内容改写走上面的分支）
           } else {
-            // 找不到重含点（本地领先太多，超出服务端页）→ 无法精确差异，安全退化为全量刷新
-            state.messages = serverMsgs;
-            rerenderChat(true);
+            // 找不到重合点：**不能**直接拿服务端页覆盖本地。
+            // 服务端只回一页，本地翻上来的旧页更长；覆盖会同时造成两个后果：
+            // 用户翻过的旧消息凭空消失、容器变矮后视口被夹回顶部。
+            // 只有在服务端页不短于本地时才整体替换（那种情况下不丢内容）。
+            if (serverMsgs.length >= localMsgs.length) {
+              state.messages = serverMsgs;
+              rerenderChat(true);
+            }
             return;
           }
           var msgsEl = document.getElementById("chat-msgs");
@@ -2246,7 +2290,7 @@
           Array.prototype.push.apply(state.messages, newMsgs);
           // 同步聊天占位符（如果有新消息但最后一条非 assistant → 显示流式占位）
           syncStreamingPlaceholder();
-        }).catch(function () {});
+        }
       }
       // syncStreamingPlaceholder：同步聊天占位符的可见性
       function syncStreamingPlaceholder() {
