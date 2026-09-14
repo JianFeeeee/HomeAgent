@@ -12,6 +12,8 @@
         messages: [],
         chatLoading: false,
         chatStage: "",
+        pipelinePhase: "", // 当前阶段（SSE stage 事件驱动总览页的滑块）
+        pipelineTimer: null,
         healthResult: null,
         starmapInit: false,
         starmapLoading: false,
@@ -570,9 +572,9 @@
       // 数据来自 /api/v1/runtime（内核 internal/sdk 暴露的 KernelStatus 子集），
       // 每 3 秒刷一次——运行态要"实时"，而 /kernel 是 30KB 级的全量状态，不适合秒级轮询。
       //
-      // 四个数字块回答"现在忙不忙"：排队任务、待处理中断、中断栈深度、驻留子数量；
-      // 下面的四级条形回答"堵在哪一级"；中断栈图回答"谁打断了谁"；
-      // 通道拓扑回答"消息从哪儿进、能往哪儿出"。
+      // 面板从上到下：四个数字块回答"现在忙不忙"；阶段管道滑块回答"这一轮走到哪"；
+      // 五条队列条形 + 中断栈回答"堵在哪一级/压了几层"；最后的分带拓扑回答
+      // "哪条输入喂给哪个 agent、哪个 agent 往哪条输出写、各自负载多高"。
       // 四级语义直接照抄内核（internal/agent/core/scheduler.go 的 Level 定义），
       // 别自己起名字——前端叫法一旦和内核不一致，看板就成了误导。
       var RT_LEVELS = [
@@ -691,117 +693,235 @@
         });
       }
 
-      // rtTopologySvg 把「通道 + 归属 + 路由」画成**一张图**：
-      // 左侧按归属框出输入通道 → 汇集母线 → 内核 → 输出母线 → 右侧输出通道。
-      // 连线即路由；归属是容器与配色；容量是节点里的细条；输出能力是彩色圆点。
-      // 为什么合进拓扑而不是单开一项：通道属于谁是**拓扑的一部分**
-      // （左边这些输入口分别被谁接管），拆两张表反而看不出关系。
-      function rtTopologySvg(groups, channels) {
-        var ROW = 24, HEAD = 18, GPAD = 8, GAP = 10;
-        var W = 660;
-        var LX = 6, LW = 226;
-        var KX = 292, KW = 76;
-        var RX = 408, RW = 246;
-        var BUS_IN = 262, BUS_OUT = 396;
-        var top = 6;
+      // ---- 阶段管道滑块 ----
+      //
+      // 七阶段与内核 sdk.Stage 一一对应（顺序即执行顺序），由 SSE `stage` 事件驱动：
+      // 哪个阶段在执行，滑块就滑到哪一格。空闲时整条管道降透明度，不做假动画。
+      //
+      // 为什么放进总览：阶段管道回答"这一轮走到哪一步"，总览其余图形回答"积压了多少"，
+      // 两者合起来才是运行态。此前它只是对话页一个 10px 的角标，等于看不见。
+      var RT_PIPE = [
+        { k: "on_input", zh: "输入", en: "input" },
+        { k: "pre_action", zh: "行动前", en: "pre-action" },
+        { k: "post_action", zh: "行动后", en: "post-action" },
+        { k: "before_toolcall", zh: "工具前", en: "pre-tool" },
+        { k: "after_toolcall", zh: "工具后", en: "post-tool" },
+        { k: "before_output", zh: "输出前", en: "pre-output" },
+        { k: "after_output", zh: "输出后", en: "post-output" },
+      ];
+
+      function rtPipelineHtml(phase) {
+        var idx = -1;
+        for (var i = 0; i < RT_PIPE.length; i++) if (RT_PIPE[i].k === phase) idx = i;
+        var n = RT_PIPE.length;
+        var pct = idx < 0 ? 0 : idx / (n - 1);
+        var nodes = RT_PIPE.map(function (s, i) {
+          var cls = "rt-pipe-node";
+          if (i === idx) cls += " active";
+          else if (idx >= 0 && i < idx) cls += " done";
+          return '<span class="' + cls + '"><i></i><b>' + __(s.zh, s.en) + "</b></span>";
+        }).join("");
+        return (
+          '<div class="rt-section-title">' +
+          __("阶段管道", "Stage pipeline") +
+          (idx < 0 ? "　" + __("（空闲）", "(idle)") : "") +
+          "</div>" +
+          '<div class="rt-pipe' + (idx < 0 ? " rt-pipe-idle" : "") + '">' +
+          '<span class="rt-pipe-track"></span>' +
+          '<span class="rt-pipe-knob" style="left:calc(22px + (100% - 44px) * ' + pct.toFixed(4) + ')"></span>' +
+          '<div class="rt-pipe-nodes">' + nodes + "</div>" +
+          "</div>"
+        );
+      }
+
+      // ---- per-agent 负载 ----
+      //
+      // 负载 = 该 agent **自己的**调度器积压折算成的百分比。
+      //
+      // 为什么按级别加权：四级中断里 L4 是内核独占、L3 是交互，堵在 L4 一条比堵在
+      // L1 五条更严重；中断栈深度意味着有现场被压着。权重是启发式的（"满载"没有
+      // 硬定义），因此函数做成饱和式 backlog/(backlog+K)：单调、上界 100、不越界。
+      // context_full 单独加分：子上下文满了以后每轮都要压缩，本身就是高负载。
+      function rtLoadPct(sc, ctxFull) {
+        sc = sc || {};
+        var q = sc.interrupt_queues || [0, 0, 0, 0, 0];
+        var backlog =
+          (sc.ready_queue_depth || 0) +
+          (sc.pending_interrupts || 0) * 1.5 +
+          (sc.suspend_stack || 0) * 2 +
+          (q[1] || 0) * 1 +
+          (q[2] || 0) * 1.2 +
+          (q[3] || 0) * 1.5 +
+          (q[4] || 0) * 2;
+        var pct = 100 * (backlog / (backlog + 8));
+        if (ctxFull) pct += 15;
+        return Math.max(0, Math.min(100, Math.round(pct)));
+      }
+
+      // rtAgents 把「inputch 归属 + 驻留子 + 各自的调度器积压」整理成每个 agent 一行。
+      // 根 agent 的积压来自 rt.scheduler；驻留子的来自它自己的 ResidentStatus
+      // （见 internal/sdk/status.go 的 ReadyQueueDepth 等四项）。
+      function rtAgents(rt) {
+        var rootID = rt.agent_id || "";
+        var groups = rtOwnerGroups(rt.input_channels || [], rt.residents || [], rootID);
+        var outChans = (rt.channels || []).filter(function (c) {
+          return c.direction === "out" || c.direction === "io";
+        });
+        return groups.map(function (g) {
+          var id = g.owner || rootID;
+          var outputs = [];
+          var seen = {};
+          function add(name) {
+            if (!name || seen[name]) return;
+            seen[name] = 1;
+            outputs.push(name);
+          }
+          if (g.child) {
+            // 驻留子：优先用父显式授权的输出；没有授权登记时退回它自己 inputch 的
+            // 默认回程（`output` 字段）。
+            ((g.res && g.res.allowed_outputs) || []).forEach(add);
+            if (!outputs.length) g.list.forEach(function (c) { add(c.output); });
+          } else {
+            // 根 agent 可以写任何输出通道；上限交给渲染侧截断。
+            outChans.forEach(function (c) { add(c.name); });
+          }
+          var load = g.child
+            ? rtLoadPct(
+                {
+                  ready_queue_depth: g.res && g.res.ready_queue_depth,
+                  pending_interrupts: g.res && g.res.pending_interrupts,
+                  suspend_stack: g.res && g.res.suspend_stack,
+                  interrupt_queues: (g.res && g.res.interrupt_queues) || [],
+                },
+                g.res && g.res.context_full,
+              )
+            : rtLoadPct(rt.scheduler || {}, false);
+          return {
+            id: id, child: g.child, label: g.label, color: g.color,
+            inputs: g.list, outputs: outputs, load: load, res: g.res || null,
+          };
+        });
+      }
+
+      // 连线路径表：通道名 → path d。光点动画靠它把「哪个通道」翻成一条曲线。
+      var _rtEdgeIn = {};
+      var _rtEdgeOut = {};
+      var RT_SVGNS = "http://www.w3.org/2000/svg";
+
+      // rtAgentTopology 画「通道 → agent → 通道」的分带拓扑。
+      //
+      // 每个 agent 一条横带：左边是归它的 inputch，中间是它自己（圆环 = 负载），
+      // 右边是它能写的 outputch。连线即路由；光点沿连线跑表示消息正在流动。
+      // 与旧版「归属框 → 单个内核盒」的差别：内核盒只有一个，看不出"这条输入到底
+      // 喂给了哪个子"，而子 agent 才是运行态里最该看清的东西。
+      function rtAgentTopology(agents) {
+        var ROW = 26, GAP = 16, NODE_R = 19, W = 640, MAX_OUT = 8;
+        var IN_X = 6, IN_W = 176, NX = 272, OUT_X = 344, OUT_W = 244;
         var out = [];
+        _rtEdgeIn = {};
+        _rtEdgeOut = {};
         function esc(s) {
           return String(s == null ? "" : s).replace(/[<>&]/g, function (m) {
             return m === "<" ? "&lt;" : m === ">" ? "&gt;" : "&amp;";
           });
         }
-
-        // ---- 左：归属容器 + 通道行 ----
-        var y = top;
-        var inRows = [];
-        groups.forEach(function (g) {
-          var boxH = HEAD + g.list.length * ROW + GPAD;
-          out.push(
-            '<rect x="' + LX + '" y="' + y + '" width="' + LW + '" height="' + boxH +
-              '" rx="9" fill="none" stroke="' + g.color + '" stroke-opacity="0.5"' +
-              (g.child ? "" : ' stroke-dasharray="4 3"') + "/>"
-          );
-          out.push(
-            '<text x="' + (LX + 10) + '" y="' + (y + 13) + '" font-size="10" fill="' + g.color + '">' +
-              esc((g.child ? "▸ " : "◆ ") + g.label) +
-              (g.res ? "　" + __("轮次", "rounds") + " " + (g.res.rounds || 0) : "") +
-              (g.res && g.res.context_full ? "　" + __("上下文已满", "ctx full") : "") +
-              "</text>"
-          );
-          g.list.forEach(function (c, i) {
-            var ry = y + HEAD + i * ROW;
-            inRows.push({ y: ry + ROW / 2, color: g.color });
-            out.push('<text x="' + (LX + 12) + '" y="' + (ry + 15) + '" font-size="11">' + esc(c.name) + "</text>");
-            var cap = c.capacity || 0;
-            var tx = LX + LW - 76;
-            out.push('<rect x="' + tx + '" y="' + (ry + 8) + '" width="46" height="6" rx="3" fill="rgba(255,255,255,0.10)"/>');
-            if (cap > 0) {
-              var wpx = Math.max(3, Math.min(46, (46 * Math.min(cap, 64)) / 64));
-              out.push('<rect x="' + tx + '" y="' + (ry + 8) + '" width="' + wpx + '" height="6" rx="3" fill="' + g.color + '"/>');
-              // 只有**非默认**容量才写数字：默认容量用空轨表达，
-              // 否则整张图会排满十几行「默认」，与“少文字”背道而驰。
-              out.push('<text x="' + (LX + LW - 24) + '" y="' + (ry + 15) + '" font-size="9" fill="#8b90a5">' + esc(cap) + "</text>");
-            }
-          });
-          y += boxH + GAP;
-        });
-        var leftBottom = Math.max(y - GAP, top + 40);
-
-        // ---- 右：输出通道 ----
-        var outs = (channels || []).filter(function (c) {
-          return c.direction === "out" || c.direction === "io";
-        });
-        var outRows = [];
-        var oy = top;
-        var CAPS = [[1, "#88c0d0"], [2, "#a3be8c"], [4, "#ebcb8b"], [8, "#d08770"], [16, "#b48ead"]];
-        outs.forEach(function (c) {
-          outRows.push({ y: oy + ROW / 2 });
-          out.push('<rect x="' + RX + '" y="' + oy + '" width="' + RW + '" height="' + (ROW - 4) + '" rx="6" fill="rgba(255,255,255,0.05)"/>');
-          out.push('<text x="' + (RX + 10) + '" y="' + (oy + 15) + '" font-size="11">' + esc(c.name) + "</text>");
-          var cx = RX + RW - 76;
-          CAPS.forEach(function (b) {
-            if ((c.output_caps || 0) & b[0]) {
-              out.push('<circle cx="' + cx + '" cy="' + (oy + 10) + '" r="4" fill="' + b[1] + '"/>');
-            }
-            cx += 14;
-          });
-          oy += ROW;
-        });
-        var rightBottom = Math.max(oy, top + 40);
-
-        var H = Math.max(leftBottom, rightBottom) + 10;
-        var ky = Math.round((Math.min(leftBottom, rightBottom) + Math.max(leftBottom, rightBottom)) / 2) - 14;
-
-        // ---- 输入母线 ----
-        if (inRows.length) {
-          var iy0 = inRows[0].y;
-          var iy1 = inRows[inRows.length - 1].y;
-          out.push('<line x1="' + BUS_IN + '" y1="' + iy0 + '" x2="' + BUS_IN + '" y2="' + iy1 + '" stroke="#4c5163" stroke-width="1.5"/>');
-          inRows.forEach(function (r) {
-            out.push('<line x1="' + (LX + LW) + '" y1="' + r.y + '" x2="' + BUS_IN + '" y2="' + r.y + '" stroke="' + r.color + '" stroke-width="1.2" stroke-opacity="0.55"/>');
-          });
-          out.push('<line x1="' + BUS_IN + '" y1="' + ((iy0 + iy1) / 2) + '" x2="' + KX + '" y2="' + (ky + 14) + '" stroke="#4c5163" stroke-width="1.5"/>');
+        function pathD(x1, y1, x2, y2) {
+          var mx = (x1 + x2) / 2;
+          return "M" + x1 + " " + y1 + " C" + mx + " " + y1 + " " + mx + " " + y2 + " " + x2 + " " + y2;
         }
-        // ---- 内核 ----
-        out.push('<rect x="' + KX + '" y="' + ky + '" width="' + KW + '" height="28" rx="14" fill="rgba(136,192,208,0.18)" stroke="#88c0d0" stroke-opacity="0.6"/>');
-        out.push('<text x="' + (KX + KW / 2) + '" y="' + (ky + 19) + '" font-size="11" text-anchor="middle" fill="#cfe6ea">' + __("内核", "Kernel") + "</text>");
-        // ---- 输出母线 ----
-        if (outRows.length) {
-          var oy0 = outRows[0].y;
-          var oy1 = outRows[outRows.length - 1].y;
-          out.push('<line x1="' + BUS_OUT + '" y1="' + oy0 + '" x2="' + BUS_OUT + '" y2="' + oy1 + '" stroke="#4c5163" stroke-width="1.5"/>');
-          outRows.forEach(function (r) {
-            out.push('<line x1="' + BUS_OUT + '" y1="' + r.y + '" x2="' + RX + '" y2="' + r.y + '" stroke="#4c5163" stroke-width="1.2"/>');
-          });
-          out.push('<line x1="' + (KX + KW) + '" y1="' + (ky + 14) + '" x2="' + BUS_OUT + '" y2="' + ((oy0 + oy1) / 2) + '" stroke="#4c5163" stroke-width="1.5"/>');
+        var y = 8;
+        if (!agents.length) {
+          out.push('<text x="8" y="24" font-size="11" fill="#8b90a5">' + __("暂无通道 / agent", "no channels / agents") + "</text>");
+          y = 44;
         }
+        agents.forEach(function (a) {
+          var rows = Math.max(a.inputs.length, a.outputs.length, 1);
+          var bandH = rows * ROW + GAP;
+          var cy = y + (rows * ROW) / 2;
+          out.push('<rect x="0" y="' + (y - 3) + '" width="' + W + '" height="' + (bandH - 4) + '" rx="10" fill="' + a.color + '" fill-opacity="0.05"/>');
+          out.push('<rect x="0" y="' + (y - 3) + '" width="3" height="' + (bandH - 4) + '" rx="1.5" fill="' + a.color + '" fill-opacity="0.7"/>');
 
+          // 输入通道 → agent
+          a.inputs.forEach(function (c, i) {
+            var ry = y + i * ROW + ROW / 2;
+            out.push('<rect x="' + IN_X + '" y="' + (ry - 9) + '" width="' + IN_W + '" height="18" rx="6" fill="rgba(255,255,255,0.05)" stroke="' + a.color + '" stroke-opacity="0.35"/>');
+            out.push('<text x="' + (IN_X + 9) + '" y="' + (ry + 4) + '" font-size="11">' + esc(c.name) + "</text>");
+            if (c.capacity) {
+              out.push('<text x="' + (IN_X + IN_W - 8) + '" y="' + (ry + 4) + '" font-size="9" text-anchor="end" fill="#8b90a5">' + esc(c.capacity) + "</text>");
+            }
+            var d = pathD(IN_X + IN_W, ry, NX - NODE_R - 2, cy);
+            _rtEdgeIn[c.name] = d;
+            out.push('<path d="' + d + '" fill="none" stroke="' + a.color + '" stroke-opacity="0.45" stroke-width="1.2"/>');
+          });
+
+          // agent 节点：两圈 + 一段负载弧（stroke-dasharray 画进度）
+          var C = 2 * Math.PI * (NODE_R - 3);
+          out.push('<circle cx="' + NX + '" cy="' + cy + '" r="' + NODE_R + '" fill="rgba(13,13,22,0.72)" stroke="' + a.color + '" stroke-opacity="0.55"/>');
+          out.push('<circle cx="' + NX + '" cy="' + cy + '" r="' + (NODE_R - 3) + '" fill="none" stroke="rgba(255,255,255,0.10)" stroke-width="3.5"/>');
+          out.push(
+            '<circle cx="' + NX + '" cy="' + cy + '" r="' + (NODE_R - 3) + '" fill="none" stroke="' + a.color +
+            '" stroke-width="3.5" stroke-linecap="round" stroke-dasharray="' + ((a.load / 100) * C).toFixed(1) + " " + C.toFixed(1) +
+            '" transform="rotate(-90 ' + NX + " " + cy + ')"/>',
+          );
+          out.push('<text x="' + NX + '" y="' + (cy + 4) + '" font-size="11" font-weight="700" text-anchor="middle">' + a.load + "</text>");
+          out.push('<text x="' + NX + '" y="' + (cy + NODE_R + 13) + '" font-size="10" text-anchor="middle" fill="' + a.color + '">' + esc(a.child ? a.id : __("根 agent", "root")) + "</text>");
+          if (a.res && a.res.context_full) {
+            out.push('<text x="' + NX + '" y="' + (cy + NODE_R + 25) + '" font-size="9" text-anchor="middle" fill="#ffb86b">' + __("上下文已满", "ctx full") + "</text>");
+          }
+
+          // agent → 输出通道
+          a.outputs.slice(0, MAX_OUT).forEach(function (name, i) {
+            var ry = y + i * ROW + ROW / 2;
+            out.push('<rect x="' + OUT_X + '" y="' + (ry - 9) + '" width="' + OUT_W + '" height="18" rx="6" fill="rgba(255,255,255,0.04)" stroke="rgba(255,255,255,0.12)"/>');
+            out.push('<text x="' + (OUT_X + 9) + '" y="' + (ry + 4) + '" font-size="11">' + esc(name) + "</text>");
+            var d = pathD(NX + NODE_R + 2, cy, OUT_X, ry);
+            _rtEdgeOut[a.id + "\u0000" + name] = d;
+            out.push('<path d="' + d + '" fill="none" stroke="' + a.color + '" stroke-opacity="0.35" stroke-width="1.1"/>');
+          });
+          if (a.outputs.length > MAX_OUT) {
+            out.push('<text x="' + OUT_X + '" y="' + (y + MAX_OUT * ROW + 12) + '" font-size="9" fill="#8b90a5">+' + (a.outputs.length - MAX_OUT) + " " + __("更多", "more") + "</text>");
+          }
+          y += bandH;
+        });
+        var H = Math.max(60, y);
         return (
-          '<div class="rt-section-title">' + __("通道拓扑（连线即路由；左框 = 归属）", "Channel topology (edges = routing; boxes = owner)") + "</div>" +
-          '<div class="rt-svg-wrap"><svg class="rt-svg" viewBox="0 0 ' + W + " " + H + '" preserveAspectRatio="xMinYMin meet" width="100%" height="' + H + '">' +
+          '<div class="rt-section-title">' + __("Agent 拓扑（通道 → agent → 通道；圆环 = 负载）", "Agent topology (channel → agent → channel; ring = load)") + "</div>" +
+          '<div class="rt-svg-wrap"><svg id="rt-topo-svg" class="rt-svg" viewBox="0 0 ' + W + " " + H + '" preserveAspectRatio="xMinYMin meet" width="100%" height="' + H + '">' +
           out.join("") +
           "</svg></div>"
         );
+      }
+
+      // rtSpark 让一个光点沿一条连线跑一趟。
+      //
+      // 用 SMIL <animateMotion> 而不是 CSS offset-path / rAF：它由浏览器自己按
+      // SVG 用户坐标跑，不需要前端维护动画循环，也没有 path() 在缩放 viewBox 下
+      // 的坐标换算问题。跑完把节点摘掉，避免 DOM 累积。
+      function rtSpark(pathD, color) {
+        if (!pathD) return;
+        var svg = document.getElementById("rt-topo-svg");
+        if (!svg) return;
+        var c = document.createElementNS(RT_SVGNS, "circle");
+        c.setAttribute("r", "3.2");
+        c.setAttribute("fill", color || "#ffffff");
+        c.setAttribute("class", "rt-spark");
+        var am = document.createElementNS(RT_SVGNS, "animateMotion");
+        am.setAttribute("dur", "0.85s");
+        am.setAttribute("path", pathD);
+        am.setAttribute("fill", "freeze");
+        am.setAttribute("begin", "0s");
+        c.appendChild(am);
+        svg.appendChild(c);
+        setTimeout(function () { if (c.parentNode) c.parentNode.removeChild(c); }, 950);
+      }
+      // 输入：某条 inputch 来消息了（SSE channel_input）。
+      function rtSparkInput(source) {
+        rtSpark(_rtEdgeIn[source], "#88c0d0");
+      }
+      // 输出：某个 agent 往某条 outputch 写了东西（SSE agent_output）。
+      function rtSparkOutput(agentID, channel) {
+        if (!channel || !agentID) return;
+        rtSpark(_rtEdgeOut[agentID + "\u0000" + channel], "#ff7fac");
       }
 
       function renderRuntime() {
@@ -819,7 +939,9 @@
         var inputs = rt.input_channels || [];
 
         // 数据签名（**不含 uptime**——它每秒都变，带上就等于没缓存）：整体没变就整块跳过。
-        var sig = JSON.stringify([sc, residents, channels, inputs]);
+        // 签名里必须带 pipelinePhase：否则 SSE 把阶段推到下一格时，
+        // 数据没变 → 早退 → 滑块不动，只能等下一次 /runtime 轮询才追上。
+        var sig = JSON.stringify([sc, residents, channels, inputs, state.pipelinePhase]);
         if (sig === _rtSig) return;
         _rtSig = sig;
 
@@ -832,6 +954,7 @@
           el.innerHTML =
             '<div class="card"><h2>' + __("运行态", "Runtime") + "</h2>" +
             '<div id="rt-sec-tiles"></div>' +
+            '<div id="rt-sec-pipe"></div>' +
             '<div id="rt-sec-levels"></div>' +
             '<div id="rt-sec-stack"></div>' +
             '<div id="rt-sec-topo"></div>' +
@@ -871,7 +994,10 @@
           __("背压", "backpressure") + " " + (sc.backpressure || 0) + "</div>";
         put("tiles", h);
 
-        // ---- 段 2：队列（四级中断 + 一条排队）----
+        // ---- 段 2：阶段管道（滑块，SSE stage 事件驱动）----
+        put("pipe", rtPipelineHtml(state.pipelinePhase));
+
+        // ---- 段 3：队列（四级中断 + 一条排队）----
         //
         // 设计是「四条中断队列（L1–L4）+ 一条排队队列」共五个，所以必须画五行：
         // 只画四条会让「排队输入」这条线在运行态里凭空消失，而它正是
@@ -914,8 +1040,10 @@
         }
         put("levels", h);
 
-        // ---- 段 3：中断栈 ----
-        h = '<div class="rt-section-title">' + __("中断栈（栈顶在上）", "Interrupt stack (top first)") + "</div>";
+        // ---- 段 4：中断栈 ----
+        h = '<div class="rt-section-title">' + __("中断栈", "Interrupt stack") + "</div>";
+        // 深度先给一条进度条（"压了几层 / 上限几层"一眼可读），下面再列具体帧。
+        h += rtSlider(stack, maxStack, __("深度", "depth"), stack + " / " + maxStack);
         if (frames.length) {
           h += '<div class="rt-stack">';
           frames.forEach(function (f, i) {
@@ -934,15 +1062,12 @@
         }
         put("stack", h);
 
-        // ---- 段 4：拓扑（通道 + 归属 + 路由 画在同一张图上）----
+        // ---- 段 5：Agent 拓扑 ----
         //
-        // 归属不再单开一项：通道属于谁是**拓扑的一部分**（左边这些输入口
-        // 分别被谁接管），拆成两张表反而看不出关系。整张图用 SVG 画，
-        // 文字只保留通道名与分组名，其余信息全部用图形编码：
-        // 归属=容器/配色、容量=节点内细条、输出能力=彩色圆点、路由=连线。
-        var rootID = rt.agent_id || "";
-        var ownerGroups = rtOwnerGroups(inputs, residents, rootID);
-        put("topo", rtTopologySvg(ownerGroups, channels));
+        // 每个 agent 一条横带：左是归它的 inputch、中间是它自己（圆环 = 负载）、
+        // 右是它能写的 outputch，连线即路由。归属、路由、容量、负载全部画进
+        // 同一张 SVG，不再单开"通道分配"一节——那本来就是这个拓扑的一部分。
+        put("topo", rtAgentTopology(rtAgents(rt)));
       }
 
       // loadRuntime 拉运行态小快照并就地重绘面板（约 2KB，可秒级轮询）。
@@ -2901,6 +3026,9 @@
           try {
             var ev = JSON.parse(e.data);
             var p = ev.payload || {};
+            // 光点：agent → 输出通道。总览页拓扑靠它做"消息出去了"的动画；
+            // 其它页没有该 SVG，rtSparkOutput 查不到元素就是 no-op。
+            if (p.channel) rtSparkOutput(ev.source || "", p.channel);
             console.log(
               "[SSE] agent_output received",
               p.content ? p.content.substring(0, 50) : "(empty)",
@@ -3145,6 +3273,15 @@
             var tool = p.tool || "";
             if (p.channel === "_consolidation_") return;
             console.log("[SSE] stage event", phase, tool);
+            // 驱动总览页的"阶段管道"滑块：滑到当前阶段；一轮跑完（或 2.5s 无新
+            // 事件）自动回到空闲，避免留下一个永远停在 after_output 的假状态。
+            state.pipelinePhase = phase;
+            if (state.pipelineTimer) clearTimeout(state.pipelineTimer);
+            state.pipelineTimer = setTimeout(function () {
+              state.pipelinePhase = "";
+              if (document.getElementById("rt-sec-pipe")) renderRuntime();
+            }, 2500);
+            if (document.getElementById("rt-sec-pipe")) renderRuntime();
             if (phase === "pre_action") {
               state.chatStage = __("AI 思考中...", "AI thinking...");
             } else if (phase === "before_toolcall") {
@@ -3164,6 +3301,17 @@
             }
           } catch (ex) {
             console.error("[SSE] stage error", ex);
+          }
+        });
+        // channel_input：内核在输入进来时另发的一条轻量事件（只带通道名与 agent
+        // id，不带正文）。总览页拓扑靠它画"光点进入 agent"。
+        es.addEventListener("channel_input", function (e) {
+          try {
+            var d = JSON.parse(e.data);
+            var src = d.source || "";
+            if (src) rtSparkInput(src);
+          } catch (ex) {
+            console.error("[SSE] channel_input error", ex);
           }
         });
         es.onopen = function () {

@@ -312,6 +312,11 @@ func residentStatuses(list []ResidentInfo) []ResidentStatus {
 			InputChs:       r.InputChs,
 			AllowedOutputs: r.AllowedOutputs,
 			InputChTable:   r.TableSize,
+			// 子自己的调度器积压：per-agent 负载图靠这四项，缺了就只能画根。
+			ReadyQueueDepth:   r.SchedReady,
+			PendingInterrupts: r.SchedPending,
+			SuspendStack:      r.SchedStack,
+			InterruptQueues:   r.SchedQueues,
 		}
 		if !r.CreatedAt.IsZero() {
 			st.CreatedAt = r.CreatedAt.Format(time.RFC3339)

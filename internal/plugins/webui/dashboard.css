@@ -895,8 +895,8 @@
       select {
         background: var(--bg-input);
         border: 1px solid var(--border-color);
-        border-radius: var(--radius-sm);
-        padding: 8px 12px;
+        border-radius: var(--radius-md);
+        padding: 9px 12px;
         color: var(--text-primary);
         font-size: 13px;
         width: 100%;
@@ -1216,20 +1216,29 @@
         min-height: 60vh;
       }
       .chat-tabs {
-        display: flex;
-        gap: 4px;
+        /* 分段控件（segmented control）而不是一排药丸 chip：
+           四个页签是同一组互斥选项，「一个容器 + 一个高亮块」比「四个各自带边框的胶囊」
+           更准确地表达了这层关系，也少四道描边噪声。 */
+        display: inline-flex;
+        gap: 3px;
+        padding: 3px;
         flex-wrap: wrap;
-        border-bottom: 1px solid var(--border-color);
-        padding-bottom: 10px;
+        align-self: flex-start;
+        border-radius: var(--radius-md);
+        background: var(--bg-input);
+        border: 1px solid var(--border-color);
       }
       .chat-tabs span {
         padding: 6px 14px;
-        font-size: 13px;
+        font-size: 12.5px;
+        font-weight: 500;
         cursor: pointer;
         color: var(--text-muted);
-        border-radius: var(--radius-pill);
-        border: 1px solid transparent;
-        transition: all 0.15s;
+        border-radius: 7px;
+        border: none;
+        transition:
+          background var(--dur-micro) var(--ease-out),
+          color var(--dur-micro) var(--ease-out);
       }
       .chat-tabs span:hover {
         color: var(--text-primary);
@@ -1238,7 +1247,8 @@
       .chat-tabs span.active {
         color: var(--accent);
         background: var(--accent-bg);
-        border-color: rgba(255, 127, 172, 0.35);
+        font-weight: 600;
+        box-shadow: inset 0 0 0 1px rgba(255, 127, 172, 0.28);
       }
       .chat-panel {
         display: none;
@@ -1274,17 +1284,19 @@
       .chat-messages {
         flex: 1;
         overflow-y: auto;
-        padding: 18px 18px 26px;
+        padding: 20px 20px 28px;
         margin-bottom: 0;
         display: flex;
         flex-direction: column;
-        gap: 6px;
+        /* 消息间距从 6px 拉到 14px：原来每条贴在一起，一屏十几条像一堵墙，
+           分不清哪句是哪句。 */
+        gap: 14px;
         min-height: 0;
       }
       .msg {
         display: flex;
-        gap: 8px;
-        margin-bottom: 2px;
+        gap: 10px;
+        margin-bottom: 0;
         align-items: flex-start;
         max-width: 100%;
       }
@@ -1300,8 +1312,8 @@
         max-width: 90%;
       }
       .msg-avatar {
-        width: 28px;
-        height: 28px;
+        width: 30px;
+        height: 30px;
         border-radius: 50%;
         overflow: hidden;
         display: flex;
@@ -1309,6 +1321,8 @@
         justify-content: center;
         font-size: 12px;
         flex-shrink: 0;
+        /* 细描边把头像从同色背景里“拓”出来，否则暗色下就是一团 */
+        box-shadow: 0 0 0 1px var(--glass-border);
       }
       .msg-avatar img {
         width: 100%;
@@ -1337,7 +1351,10 @@
       }
       .msg-content {
         min-width: 0;
-        flex: 1;
+        flex: 1 1 auto;
+        /* 行长上限：整屏宽的一行文字没人读得下去（~78ch 是舒适区），
+           也让「同一侧连续多条」自然堆成一列而不是横铺开。 */
+        max-width: min(78ch, 86%);
       }
       .msg-content .msg-bubble + .msg-bubble {
         margin-top: 6px;
@@ -1367,25 +1384,27 @@
         box-shadow: 0 2px 8px rgba(0, 0, 0, 0.28);
       }
       .msg-bubble {
-        padding: 9px 14px;
-        border-radius: var(--radius-md);
-        font-size: 15px;
-        line-height: 1.62;
+        padding: 10px 14px;
+        border-radius: 12px;
+        font-size: 14.5px;
+        line-height: 1.65;
         word-break: break-word;
         position: relative;
         border: 1px solid transparent;
         transition: box-shadow var(--dur-normal) var(--ease-out);
       }
       .msg-user .msg-bubble {
-        background: var(--msg-bubble-bg);
-        color: var(--msg-bubble-color);
-        border-bottom-right-radius: 4px;
-        border-color: var(--msg-bubble-border);
+        /* 用户与助手必须**看得出不一样**：原来两侧同底色、只差一个圆角，
+           整段对话读下来分不清谁说的。用户侧用 accent 渲染，助手侧保持中性面。 */
+        background: var(--msg-user-bg);
+        color: var(--text-primary);
+        border-bottom-right-radius: 5px;
+        border-color: rgba(255, 127, 172, 0.26);
       }
       .msg-assistant .msg-bubble {
         background: var(--msg-bubble-bg);
         color: var(--msg-bubble-color);
-        border-bottom-left-radius: 4px;
+        border-bottom-left-radius: 5px;
         border-color: var(--msg-bubble-border);
         box-shadow: 0 2px 10px rgba(0, 0, 0, 0.3);
       }
@@ -1817,7 +1836,11 @@
         display: flex;
         gap: 8px;
         flex-shrink: 0;
-        padding-top: 10px;
+        padding-top: 14px;
+        margin-top: 4px;
+        /* 输入区与消息流之间加一道分隔：否则最后一条消息与输入框糊在一起，
+           看不出“消息到头了”。 */
+        border-top: 1px solid var(--border-color);
       }
       .chat-input-row input {
         flex: 1;
@@ -2518,4 +2541,91 @@
       letter-spacing: 0.4px;
       margin: 12px 0 6px;
       text-transform: uppercase;
+    }
+
+    /* ===== 阶段管道滑块（总览）=====
+       七个阶段各一格，滑块停在当前阶段；空闲时整条降透明度，不做假动画。
+       滑块用绝对定位 + left 过渡实现"滑过去"（内联 left 由 rtPipelineHtml 给）。 */
+    .rt-pipe {
+      position: relative;
+      padding: 4px 0 2px;
+      margin: 2px 0 8px;
+      transition: opacity 0.3s var(--ease-out);
+    }
+    .rt-pipe-idle {
+      opacity: 0.5;
+    }
+    .rt-pipe-track {
+      position: absolute;
+      left: 22px;
+      right: 22px;
+      top: 9px;
+      height: 2px;
+      border-radius: 999px;
+      background: rgba(255, 255, 255, 0.12);
+    }
+    .rt-pipe-nodes {
+      position: relative;
+      display: flex;
+      justify-content: space-between;
+    }
+    .rt-pipe-node {
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      gap: 6px;
+      width: 44px;
+    }
+    .rt-pipe-node > i {
+      width: 11px;
+      height: 11px;
+      border-radius: 50%;
+      background: var(--bg-input);
+      border: 2px solid var(--border-color);
+      position: relative;
+      z-index: 1;
+      transition:
+        background 0.25s var(--ease-out),
+        border-color 0.25s var(--ease-out),
+        box-shadow 0.25s var(--ease-out);
+    }
+    .rt-pipe-node > b {
+      font-size: 9px;
+      font-weight: 500;
+      color: var(--text-muted);
+      white-space: nowrap;
+    }
+    .rt-pipe-node.done > i {
+      background: var(--frost-300);
+      border-color: var(--frost-300);
+    }
+    .rt-pipe-node.active > i {
+      background: var(--sakura-400);
+      border-color: var(--sakura-400);
+      box-shadow: 0 0 0 4px rgba(255, 127, 172, 0.18);
+    }
+    .rt-pipe-node.active > b {
+      color: var(--text-primary);
+      font-weight: 600;
+    }
+    .rt-pipe-knob {
+      position: absolute;
+      top: 4px;
+      width: 11px;
+      height: 11px;
+      margin-left: -5.5px;
+      border-radius: 50%;
+      background: #fff;
+      box-shadow: 0 0 10px rgba(255, 127, 172, 0.85);
+      transition: left 0.45s var(--ease-out);
+      z-index: 2;
+    }
+    .rt-pipe-idle .rt-pipe-knob {
+      box-shadow: none;
+      opacity: 0.5;
+    }
+    /* 拓扑光点：沿 animateMotion 给的路径跑；不吃鼠标事件，跑完由 JS 摘掉。 */
+    .rt-spark {
+      pointer-events: none;
+      filter: drop-shadow(0 0 4px rgba(255, 255, 255, 0.8));
     }
