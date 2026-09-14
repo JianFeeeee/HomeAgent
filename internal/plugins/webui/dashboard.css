@@ -2767,6 +2767,44 @@
       gap: 4px;
       min-height: 23px;
     }
+    /* 「工具」格的滚动视口：固定一行高，只露最新一条。
+       工具调用一轮内可能几十次，全部追加会把这一格撑成长条，反而看不出
+       「现在在调什么」；这里让旧条向上滚出视口，留下最新那条。 */
+    .rt-pipe-scroll {
+      flex-wrap: nowrap;
+      height: 23px;
+      min-height: 23px;
+      overflow: hidden;
+      align-items: center;
+    }
+    /* 名称可缩、计数不可缩：窄框里先截断工具名，累计次数始终看得见。 */
+    .rt-pipe-scroll .rt-chip {
+      flex: 0 1 auto;
+      min-width: 0;
+      max-width: none;
+    }
+    /* rtFlashLatestTool 每来一条新调用就重加一次，重置动画时间轴。 */
+    .rt-chip-enter {
+      animation: rt-chip-scroll-in 0.3s var(--ease-out);
+    }
+    @keyframes rt-chip-scroll-in {
+      from {
+        transform: translateY(115%);
+        opacity: 0;
+      }
+      to {
+        transform: translateY(0);
+        opacity: 1;
+      }
+    }
+    .rt-scroll-count {
+      flex: 0 0 auto;
+      margin-left: auto;
+      font-style: normal;
+      font-size: 10.5px;
+      opacity: 0.6;
+      font-variant-numeric: tabular-nums;
+    }
     /* 拓扑光点：沿 animateMotion 给的路径跑；不吃鼠标事件，跑完由 JS 摘掉。 */
     .rt-spark {
       pointer-events: none;
@@ -2922,6 +2960,14 @@
       background: rgba(255, 255, 255, 0.05);
       border: 1px solid var(--border-color);
       color: var(--text-secondary);
+    }
+    .rt-chip-t {
+      /* font-weight 继承，不因为换成 <b> 而变粗；省略号靠它生效 */
+      font-weight: inherit;
+      min-width: 0;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
     }
     .rt-chip-tool {
       border-color: rgba(136, 192, 208, 0.42);

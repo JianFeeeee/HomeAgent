@@ -15,6 +15,7 @@
         pipelinePhase: "", // 当前阶段（SSE stage 事件驱动总览页）
         pipelineTimer: null,
         stageTrail: [], // 本轮已发生的事件轨迹（工具/输出调用，供阶段管道展示循环）
+        toolFlash: false, // 本轮新到一条工具调用：本轮渲染后给「工具」格放一次滑入动画
         healthResult: null,
         starmapInit: false,
         starmapLoading: false,
@@ -841,6 +842,19 @@
         if (d > n) out += '<b class="rt-slots-more">+' + (d - n) + "</b>";
         return out + "</span>";
       }
+      // rtChipEl 画一枚事件 chip。工具与输出通道调用各有配色；名称包进
+      // .rt-chip-t，让窄框里由它做省略号截断（.rt-chip 本身是 flex 容器，
+      // text-overflow 对直接子文本不生效，会被硬切掉半截）。
+      function rtChipEl(t) {
+        var kind = t.kind || "stage";
+        var ico = kind === "output" ? RT_ICO.out : kind === "tool" ? RT_ICO.tool : "";
+        return (
+          '<span class="rt-chip rt-chip-' + kind + '" title="' + escHtml(t.label) + '">' + ico +
+          '<b class="rt-chip-t">' + escHtml(t.short || t.label) + "</b>" +
+          (t.n > 1 ? '<i class="rt-chip-n">x' + t.n + "</i>" : "") +
+          "</span>"
+        );
+      }
       // rtPipelineHtml 画阶段管道：**五个等大的表框**，每框里是本阶段本轮发生的事。
       //
       // 为什么不是「小圆点 + 连接线 + 9px 小字」：那种画法在总览里几乎读不出
@@ -853,22 +867,25 @@
           var items = (trail || []).filter(function (t) {
             return (t.g | 0) === i;
           });
-          var body = items.length
-            ? items
-                .map(function (t) {
-                  var kind = t.kind || "stage";
-                  var ico =
-                    kind === "output" ? RT_ICO.out : kind === "tool" ? RT_ICO.tool : "";
-                  return (
-                    '<span class="rt-chip rt-chip-' + kind + '" title="' +
-                    escHtml(t.label) + '">' + ico +
-                    escHtml(t.short || t.label) +
-                    (t.n > 1 ? '<i class="rt-chip-n">x' + t.n + "</i>" : "") +
-                    "</span>"
-                  );
-                })
-                .join("")
-            : '<span class="rt-chip rt-chip-none">' + __("无", "none") + "</span>";
+          // 「工具」格是**循环**格：一轮里可能调几十次工具/输出通道。把每一次都
+          // 追加成 chip，这格会被撑成一长条，读者反而看不出「现在正在调什么」。
+          // 所以它只保留**最新一条**，旧条在同一行视口里向上滚走
+          // （rtFlashLatestTool 触发滑入），右侧另给本轮累计次数。
+          var cls = "rt-pipe-events";
+          var body;
+          if (!items.length) {
+            body = '<span class="rt-chip rt-chip-none">' + __("无", "none") + "</span>";
+          } else if (s.loop) {
+            cls += " rt-pipe-scroll";
+            var total = 0;
+            for (var k = 0; k < items.length; k++) total += items[k].n || 1;
+            body =
+              rtChipEl(items[items.length - 1]) +
+              '<i class="rt-scroll-count" title="' +
+              __("本轮工具调用累计次数", "tool calls this turn") + '">x' + total + "</i>";
+          } else {
+            body = items.map(rtChipEl).join("");
+          }
           return (
             '<div class="rt-pipe-cell' + (i === g ? " active" : "") + '">' +
             '<div class="rt-pipe-head">' + RT_ICO[s.ico] +
@@ -879,7 +896,7 @@
                 '">' + RT_ICO.loop + "</em>"
               : "") +
             "</div>" +
-            '<div class="rt-pipe-events">' + body + "</div>" +
+            '<div class="' + cls + '">' + body + "</div>" +
             "</div>"
           );
         }).join("");
@@ -904,6 +921,21 @@
         }
         arr.push({ g: g, kind: kind, label: label, short: short, n: 1 });
         if (arr.length > 24) arr.shift();
+      }
+
+      // rtFlashLatestTool 让「工具」格里最新那条做一次「向上滚入」。
+      //
+      // morph 是就地改文本：新工具到来时 chip 节点不会被替换，纯 CSS 的
+      // animation 因此不会自动重放。这里摘类 → 强制 reflow → 重加类，重置动画
+      // 时间轴。prefers-reduced-motion 由样式表统一压到 0.01ms，无需在此判断。
+      function rtFlashLatestTool() {
+        var box = document.querySelector(".rt-pipe-events.rt-pipe-scroll");
+        if (!box) return;
+        var chip = box.querySelector(".rt-chip");
+        if (!chip) return;
+        chip.classList.remove("rt-chip-enter");
+        void chip.offsetWidth; // 强制 reflow：少了这句，重加类不会重启动画
+        chip.classList.add("rt-chip-enter");
       }
 
       // ---- per-agent 负载 ----
@@ -3686,6 +3718,7 @@
             } else if (phase === "before_toolcall" && tool) {
               var isOut = tool.indexOf("output_") === 0;
               rtTrailPush(2, isOut ? "output" : "tool", tool, rtShortTool(tool));
+              state.toolFlash = true;
             } else if (phase === "before_output") {
               rtTrailPush(3, "stage", __("生成回复", "generate reply"), __("生成", "gen"));
             } else if (phase === "after_output") {
@@ -3698,6 +3731,11 @@
               if (document.getElementById("rt-sec-pipe")) renderRuntime();
             }, 2500);
             if (document.getElementById("rt-sec-pipe")) renderRuntime();
+            // 渲染后再放动画：morph 已经把 chip 文本更新成最新那条。
+            if (state.toolFlash) {
+              state.toolFlash = false;
+              rtFlashLatestTool();
+            }
             if (phase === "pre_action") {
               state.chatStage = __("AI 思考中...", "AI thinking...");
             } else if (phase === "before_toolcall") {
