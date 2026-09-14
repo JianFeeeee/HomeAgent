@@ -738,8 +738,10 @@
             if (cap > 0) {
               var wpx = Math.max(3, Math.min(46, (46 * Math.min(cap, 64)) / 64));
               out.push('<rect x="' + tx + '" y="' + (ry + 8) + '" width="' + wpx + '" height="6" rx="3" fill="' + g.color + '"/>');
+              // 只有**非默认**容量才写数字：默认容量用空轨表达，
+              // 否则整张图会排满十几行「默认」，与“少文字”背道而驰。
+              out.push('<text x="' + (LX + LW - 24) + '" y="' + (ry + 15) + '" font-size="9" fill="#8b90a5">' + esc(cap) + "</text>");
             }
-            out.push('<text x="' + (LX + LW - 24) + '" y="' + (ry + 15) + '" font-size="9" fill="#8b90a5">' + esc(cap || __("默认", "def")) + "</text>");
           });
           y += boxH + GAP;
         });
