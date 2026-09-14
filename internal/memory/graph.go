@@ -1097,6 +1097,12 @@ func (g *GraphDB) ClearSentenceID(relationID int64) error {
 func (g *GraphDB) CleanupOrphanedSentences() (int, error) {
 	g.mu.Lock()
 	defer g.mu.Unlock()
+	return g.cleanupOrphanedSentencesLocked()
+}
+
+// cleanupOrphanedSentencesLocked 是 CleanupOrphanedSentences 的加锁内联版，
+// 供已在写锁内的调用方（PurgeNoise）复用，避免自锁死。
+func (g *GraphDB) cleanupOrphanedSentencesLocked() (int, error) {
 	tx, err := g.db.Begin()
 	if err != nil {
 		return 0, err
