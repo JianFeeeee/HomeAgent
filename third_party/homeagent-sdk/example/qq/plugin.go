@@ -165,7 +165,7 @@ type Plugin struct {
 	batchMax    time.Duration // 一批最长等多久（防持续刷屏时永远不投）
 
 	// injectHook 仅供测试：非 nil 时 injectInterrupt 走它而不是真实 SDK。
-	injectHook func(text string)
+	injectHook func(text, level string)
 }
 
 // pendingBatch 是一批待投递的消息（同一会话、同一发送者、短时间内的连续消息）。
@@ -1356,7 +1356,7 @@ func (p *Plugin) enqueueInterrupt(msgType string, userID, groupID, messageID int
 		return
 	}
 	if p.batchWindow <= 0 {
-		p.injectInterrupt(single)
+		p.injectInterrupt(single, p.interruptLevel(owner))
 		return
 	}
 	key := qqBatchKey(msgType, groupID, userID)
@@ -1392,14 +1392,32 @@ func (p *Plugin) enqueueInterrupt(msgType string, userID, groupID, messageID int
 	p.batchMu.Unlock()
 }
 
-// injectInterrupt 投递一条中断提示（NoMemory：HTTP 侧来的不是对话内容；
-// Priority L1：QQ 消息是低级别中断，既非实时工作也非紧急工作，完全可等）。
-func (p *Plugin) injectInterrupt(text string) {
+// interruptLevel 决定一条 QQ 消息的中断级别。
+//
+//   - Bot 所有者/管理员的消息 → **L2**（一般提醒）；
+//   - 其他人的消息 → L1（后台，完全可等）。
+//
+// 为什么不能一律 L1：L1 之间可以随时互相抢占、也可以被任何更高一级打断，
+// 于是「老板发的话」会被路人的闲聊挤到后面，甚至对方持续刷屏时一直排在队尾。
+// 为什么也不该给 L3：L3 是时钟/终端那类"需要及时处理"的实时工作，QQ 是异步
+// 消息，抬到 L3 会反过来打断真正实时的事情。
+func (p *Plugin) interruptLevel(owner bool) string {
+	if owner {
+		return sdk.PriorityL2
+	}
+	return sdk.PriorityL1
+}
+
+// injectInterrupt 投递一条中断提示（NoMemory：HTTP 侧来的不是对话内容）。
+func (p *Plugin) injectInterrupt(text, level string) {
 	if text == "" {
 		return
 	}
+	if level == "" {
+		level = sdk.PriorityL1
+	}
 	if p.injectHook != nil {
-		p.injectHook(text)
+		p.injectHook(text, level)
 		return
 	}
 	if p.sdk == nil {
@@ -1407,7 +1425,7 @@ func (p *Plugin) injectInterrupt(text string) {
 	}
 	p.sdk.InjectInterruptTextOpts(p.name, p.name, text, sdk.InjectOptions{
 		NoMemory: true,
-		Priority: sdk.PriorityL1,
+		Priority: level,
 	})
 }
 
@@ -1424,7 +1442,8 @@ func (p *Plugin) flushBatch(key string) {
 	if len(b.msgIDs) > 1 {
 		text = p.buildBatchInterrupt(b)
 	}
-	p.injectInterrupt(text)
+	// 一批里只要有一条来自 Bot 所有者，整批按 L2 投递（不因混入路人消息而降低）。
+	p.injectInterrupt(text, p.interruptLevel(b.owner))
 }
 
 // flushAllBatches 停机前把未到点的批次立刻投出去（best effort）。

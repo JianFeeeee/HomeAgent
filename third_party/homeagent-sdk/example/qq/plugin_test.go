@@ -242,7 +242,7 @@ func TestDowngradedAuthStillAllowsQQOutput(t *testing.T) {
 // collectInterrupts 用注入钩子收集中断文本（避免测试依赖真实 SDK）。
 func collectInterrupts(p *Plugin) *[]string {
 	got := []string{}
-	p.injectHook = func(s string) { got = append(got, s) }
+	p.injectHook = func(s, _ string) { got = append(got, s) }
 	return &got
 }
 
@@ -310,5 +310,27 @@ func TestSingleMessageKeepsOriginalText(t *testing.T) {
 
 	if len(*got) != 1 || (*got)[0] != "单条原文" {
 		t.Fatalf("单条消息应沿用原文（含所有者前缀），实际 %#v", *got)
+	}
+}
+
+// Bot 所有者/管理员的消息给 L2，普通人的给 L1 —— 否则所有者的话会被路人
+// 的 L1 闲聊抢占/挤到队尾。
+func TestOwnerMessagesGetHigherInterruptLevel(t *testing.T) {
+	p := newPermissionTestPlugin(t)
+	got := []string{}
+	p.injectHook = func(text, level string) { got = append(got, text+"|"+level) }
+	p.batchWindow = 20 * time.Millisecond
+	p.batchMax = time.Second
+
+	p.enqueueInterrupt("private", 1, 0, 1, "owner", "owner-msg", true, false)
+	p.enqueueInterrupt("private", 2, 0, 2, "someone", "other-msg", false, false)
+	time.Sleep(120 * time.Millisecond)
+
+	joined := strings.Join(got, ",")
+	if !strings.Contains(joined, "owner-msg|L2") {
+		t.Fatalf("所有者消息应为 L2，实际 %q", joined)
+	}
+	if !strings.Contains(joined, "other-msg|L1") {
+		t.Fatalf("普通人消息应为 L1，实际 %q", joined)
 	}
 }
