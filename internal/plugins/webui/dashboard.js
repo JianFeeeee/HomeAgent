@@ -12,8 +12,9 @@
         messages: [],
         chatLoading: false,
         chatStage: "",
-        pipelinePhase: "", // 当前阶段（SSE stage 事件驱动总览页的滑块）
+        pipelinePhase: "", // 当前阶段（SSE stage 事件驱动总览页）
         pipelineTimer: null,
+        stageTrail: [], // 本轮已发生的事件轨迹（工具/输出调用，供阶段管道展示循环）
         healthResult: null,
         starmapInit: false,
         starmapLoading: false,
@@ -591,10 +592,10 @@
       // 四级语义直接照抄内核（internal/agent/core/scheduler.go 的 Level 定义），
       // 别自己起名字——前端叫法一旦和内核不一致，看板就成了误导。
       var RT_LEVELS = [
-        { lv: 4, name: "L4 内核独占", cls: "rt-lv-4" },
-        { lv: 3, name: "L3 交互", cls: "rt-lv-3" },
-        { lv: 2, name: "L2 消息", cls: "rt-lv-2" },
-        { lv: 1, name: "L1 后台", cls: "rt-lv-1" },
+        { lv: 4, name: "L4", desc: "内核独占", cls: "rt-lv-4" },
+        { lv: 3, name: "L3", desc: "交互", cls: "rt-lv-3" },
+        { lv: 2, name: "L2", desc: "消息", cls: "rt-lv-2" },
+        { lv: 1, name: "L1", desc: "后台", cls: "rt-lv-1" },
       ];
       var RT_CAP_NAMES = { 1: "text", 2: "file", 4: "image", 8: "audio", 16: "structured" };
 
@@ -773,37 +774,74 @@
       //
       // 为什么放进总览：阶段管道回答"这一轮走到哪一步"，总览其余图形回答"积压了多少"，
       // 两者合起来才是运行态。此前它只是对话页一个 10px 的角标，等于看不见。
-      var RT_PIPE = [
-        { k: "on_input", zh: "输入", en: "input" },
-        { k: "pre_action", zh: "行动前", en: "pre-action" },
-        { k: "post_action", zh: "行动后", en: "post-action" },
-        { k: "before_toolcall", zh: "工具前", en: "pre-tool" },
-        { k: "after_toolcall", zh: "工具后", en: "post-tool" },
-        { k: "before_output", zh: "输出前", en: "pre-output" },
-        { k: "after_output", zh: "输出后", en: "post-output" },
+      // 阶段管道：**循环流程 + 本轮轨迹**，不是单向滑块。
+      //
+      // 一轮里工具调用会反复回到「行动后」再接下一个工具（post_action →
+      // before_toolcall → after_toolcall → post_action …），还可能中途多次
+      // 输出，所以线性滑块本身就是错的表述。这里画成
+      //   输入 → 行动 ⇄(工具) → 输出 → 结束
+      // （工具那格带循环标记），下面再用一排 chip 记下**本轮真实发生过什么**：
+      // 普通工具与 output_* 输出通道调用用不同配色区分开来。
+      var RT_PIPE_GROUPS = [
+        { zh: "输入", en: "in" },
+        { zh: "行动", en: "act" },
+        { zh: "工具", en: "tool" },
+        { zh: "输出", en: "out" },
+        { zh: "结束", en: "done" },
       ];
-
-      function rtPipelineHtml(phase) {
-        var idx = -1;
-        for (var i = 0; i < RT_PIPE.length; i++) if (RT_PIPE[i].k === phase) idx = i;
-        var n = RT_PIPE.length;
-        var pct = idx < 0 ? 0 : idx / (n - 1);
-        var nodes = RT_PIPE.map(function (s, i) {
-          var cls = "rt-pipe-node";
-          if (i === idx) cls += " active";
-          else if (idx >= 0 && i < idx) cls += " done";
-          return '<span class="' + cls + '"><i></i><b>' + __(s.zh, s.en) + "</b></span>";
+      function rtPhaseGroup(phase) {
+        switch (phase) {
+          case "on_input":
+            return 0;
+          case "pre_action":
+          case "post_action":
+            return 1;
+          case "before_toolcall":
+          case "after_toolcall":
+            return 2;
+          case "before_output":
+            return 3;
+          case "after_output":
+            return 4;
+        }
+        return -1;
+      }
+      // rtShortTool 把 `qq_get_message` / `output_send__qq` 压成尾段短名。
+      function rtShortTool(name) {
+        var n = String(name || "");
+        var i = n.lastIndexOf("__");
+        if (i >= 0) n = n.slice(i + 2);
+        return n.length > 14 ? n.slice(0, 13) + "…" : n;
+      }
+      function rtPipelineHtml(phase, trail) {
+        var g = rtPhaseGroup(phase);
+        var nodes = RT_PIPE_GROUPS.map(function (s, i) {
+          var cls = "rt-pipe-node" + (i === g ? " active" : "");
+          return (
+            '<span class="' + cls + '"><i></i><b>' +
+            __(s.zh, s.en) +
+            (i === 2 ? ' <em class="rt-loop" title="' +
+              __("工具调用会回到行动后，可多次", "tool calls loop back; may repeat") + '">↻</em>' : "") +
+            "</b></span>"
+          );
+        }).join("");
+        var chips = (trail || []).map(function (t) {
+          var kind = t.kind || "stage";
+          return (
+            '<span class="rt-chip rt-chip-' + kind + '" title="' + escHtml(t.label) + '">' +
+            (kind === "output" ? "⇥ " : kind === "tool" ? "⚙ " : "") +
+            escHtml(t.short || t.label) + "</span>"
+          );
         }).join("");
         return (
           '<div class="rt-section-title">' +
           __("阶段管道", "Stage pipeline") +
-          (idx < 0 ? "　" + __("（空闲）", "(idle)") : "") +
+          (g < 0 ? "　" + __("（空闲）", "(idle)") : "") +
           "</div>" +
-          '<div class="rt-pipe' + (idx < 0 ? " rt-pipe-idle" : "") + '">' +
-          '<span class="rt-pipe-track"></span>' +
-          '<span class="rt-pipe-knob" style="left:calc(22px + (100% - 44px) * ' + pct.toFixed(4) + ')"></span>' +
+          '<div class="rt-pipe' + (g < 0 ? " rt-pipe-idle" : "") + '">' +
           '<div class="rt-pipe-nodes">' + nodes + "</div>" +
-          "</div>"
+          "</div>" +
+          (chips ? '<div class="rt-trail">' + chips + "</div>" : "")
         );
       }
 
@@ -958,7 +996,7 @@
         });
         var H = Math.max(60, y);
         return (
-          '<div class="rt-section-title">' + __("Agent 拓扑（通道 → agent → 通道；圆环 = 负载）", "Agent topology (channel → agent → channel; ring = load)") + "</div>" +
+          '<div class="rt-section-title">' + __("拓扑（圆环 = 负载）", "Topology (ring = load)") + "</div>" +
           '<div class="rt-svg-wrap"><svg id="rt-topo-svg" class="rt-svg" viewBox="0 0 ' + W + " " + H + '" preserveAspectRatio="xMinYMin meet" width="100%" height="' + H + '">' +
           out.join("") +
           "</svg></div>"
@@ -1014,7 +1052,10 @@
         // 数据签名（**不含 uptime**——它每秒都变，带上就等于没缓存）：整体没变就整块跳过。
         // 签名里必须带 pipelinePhase：否则 SSE 把阶段推到下一格时，
         // 数据没变 → 早退 → 滑块不动，只能等下一次 /runtime 轮询才追上。
-        var sig = JSON.stringify([sc, residents, channels, inputs, state.pipelinePhase]);
+        var sig = JSON.stringify([
+          sc, residents, channels, inputs, state.pipelinePhase,
+          (state.stageTrail || []).map(function (t) { return t.kind + ":" + (t.short || t.label); }).join(","),
+        ]);
         if (sig === _rtSig) return;
         _rtSig = sig;
 
@@ -1052,31 +1093,25 @@
 
         // ---- 段 1：四个数字块 ----
         var h = '<div class="rt-grid">';
-        h += rtTile(ready, __("排队任务", "Ready queue"), "", ready ? Math.min(100, ready * 20) : 0, ready > 0);
-        h += rtTile(pending, __("待处理中断", "Pending interrupts"), "", pending ? Math.min(100, pending * 25) : 0, pending > 0, pending > 0);
-        h += rtTile(stack + "/" + maxStack, __("中断栈", "Interrupt stack"), "", (stack / (maxStack || 4)) * 100, stack > 0);
+        h += rtTile(ready, __("排队", "Ready"), "", ready ? Math.min(100, ready * 20) : 0, ready > 0);
+        h += rtTile(pending, __("中断", "Pending"), "", pending ? Math.min(100, pending * 25) : 0, pending > 0, pending > 0);
+        h += rtTile(stack + "/" + maxStack, __("栈", "Stack"), "", (stack / (maxStack || 4)) * 100, stack > 0);
         var rFull = residents.filter(function (r) { return r.context_full; }).length;
-        h += rtTile(residents.length, __("驻留子 Agent", "Resident agents"), rFull ? rFull + __(" 满", " full") : "", residents.length ? Math.min(100, residents.length * 20) : 0, residents.length > 0, rFull > 0);
+        h += rtTile(residents.length, __("子代理", "Subagents"), rFull ? rFull + __("满", " full") : "", residents.length ? Math.min(100, residents.length * 20) : 0, residents.length > 0, rFull > 0);
         h += "</div>";
-        // 抢占/背压计数（设计 §11.6 E4 的按级别口径）
-        h += '<div class="rt-chan-sub">' + __("累计", "totals") + "： " +
-          __("入队", "enqueued") + " " + (sc.enqueued || 0) + " · " +
-          __("执行", "executed") + " " + (sc.executed || 0) + " · " +
-          __("抢占", "preempted") + " " + (sc.preempted || 0) + " · " +
-          __("挂起/恢复", "susp/res") + " " + (sc.suspended || 0) + "/" + (sc.resumed || 0) + " · " +
-          __("拒绝", "rejected") + " " + (sc.rejected || 0) + " · " +
-          __("背压", "backpressure") + " " + (sc.backpressure || 0) + "</div>";
+        // 「累计：入队 … 执行 … 抢占 …」那一整行纯文字被去掉了：它对"现在忙不忙"
+        // 没有帮助，却占掉一整行，是总览里最大的一坨文字。
         put("tiles", h);
 
         // ---- 段 2：阶段管道（滑块，SSE stage 事件驱动）----
-        put("pipe", rtPipelineHtml(state.pipelinePhase));
+        put("pipe", rtPipelineHtml(state.pipelinePhase, state.stageTrail));
 
         // ---- 段 3：队列（四级中断 + 一条排队）----
         //
         // 设计是「四条中断队列（L1–L4）+ 一条排队队列」共五个，所以必须画五行：
         // 只画四条会让「排队输入」这条线在运行态里凭空消失，而它正是
         // 「不需要及时处理」的那一半输入。排队队列**无级别**，故用不同配色 + 虚线。
-        h = '<div class="rt-section-title">' + __("队列（四级中断 + 排队）", "Queues (4 interrupt levels + queued)") + "</div>";
+        h = '<div class="rt-section-title">' + __("队列", "Queues") + "</div>";
         var maxQ = Math.max(1, ready, q[1] || 0, q[2] || 0, q[3] || 0, q[4] || 0);
         var maxReg = 1;
         var maxPre = 1;
@@ -1090,7 +1125,7 @@
           var reg = byLv[L.lv] || 0;
           var pre = preLv[L.lv] || 0;
           h +=
-            '<div class="rt-level"><span class="rt-lv-name">' + L.name + "</span>" +
+            '<div class="rt-level" title="' + escHtml(L.desc) + '"><span class="rt-lv-name">' + L.name + "</span>" +
             '<span class="rt-lv-track ' + L.cls + '"><i style="width:' +
             (depth ? Math.max(4, (depth / maxQ) * 100) : 0) +
             '%"></i></span>' +
@@ -1101,8 +1136,8 @@
         });
         h += "</div>";
         // 第五条：排队队列（无级别，纯 FIFO）
-        h += '<div class="rt-level rt-level-queued"><span class="rt-lv-name">' +
-          __("排队（无级别）", "queued (no level)") + "</span>" +
+        h += '<div class="rt-level rt-level-queued" title="' + __("排队（无级别，纯 FIFO）", "queued (no priority, FIFO)") + '"><span class="rt-lv-name">' +
+          __("排队", "queued") + "</span>" +
           '<span class="rt-lv-track rt-lv-q"><i style="width:' +
           (ready ? Math.max(4, (ready / maxQ) * 100) : 0) + '%"></i></span>' +
           '<span class="rt-lv-meta">' + ready + " · FIFO</span></div>";
@@ -1115,7 +1150,7 @@
         put("levels", h);
 
         // ---- 段 4：中断栈 ----
-        h = '<div class="rt-section-title">' + __("中断栈", "Interrupt stack") + "</div>";
+        h = '<div class="rt-section-title">' + __("栈", "Stack") + "</div>";
         // 深度先给一条进度条（"压了几层 / 上限几层"一眼可读），下面再列具体帧。
         h += rtSlider(stack, maxStack, __("深度", "depth"), stack + " / " + maxStack);
         if (frames.length) {
@@ -3487,6 +3522,21 @@
             console.log("[SSE] stage event", phase, tool);
             // 驱动总览页的"阶段管道"滑块：滑到当前阶段；一轮跑完（或 2.5s 无新
             // 事件）自动回到空闲，避免留下一个永远停在 after_output 的假状态。
+            // 阶段轨迹：本轮真实发生过什么，交给阶段管道画成 chip 序列。
+            // 工具调用会反复出现（多轮 toolcall），output_* 单独配色。
+            if (phase === "on_input") {
+              state.stageTrail = [{ kind: "stage", label: __("输入", "input"), short: __("输入", "input") }];
+            } else if (phase === "before_toolcall" && tool) {
+              state.stageTrail.push({
+                kind: tool.indexOf("output_") === 0 ? "output" : "tool",
+                label: tool,
+                short: rtShortTool(tool),
+              });
+              if (state.stageTrail.length > 24) state.stageTrail.shift();
+            } else if (phase === "after_output") {
+              state.stageTrail.push({ kind: "stage", label: __("完成", "done"), short: __("完成", "done") });
+              if (state.stageTrail.length > 24) state.stageTrail.shift();
+            }
             state.pipelinePhase = phase;
             if (state.pipelineTimer) clearTimeout(state.pipelineTimer);
             state.pipelineTimer = setTimeout(function () {
