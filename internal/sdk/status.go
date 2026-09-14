@@ -25,6 +25,13 @@ type KernelStatus struct {
 	Plugins  []PluginInfo  `json:"plugins"`
 	Tools    []ToolDef     `json:"tools"`
 	Channels []ChannelInfo `json:"channels"`
+	// InputChannels 是 inputch 的**登记与归属**视图（谁注册、划给了哪个 agent、
+	// 容量、默认回程输出）。
+	//
+	// 为何单列：Channels 只描述设备侧能力，回答不了「这条输入归谁」。驻留子 agent
+	// 出现之后，归属才是运行态里最该看见的东西——只画设备能力，等于把
+	// 「输入路由发生在进内核之前」这条设计事实藏了起来。
+	InputChannels []InputChannelInfo `json:"input_channels"`
 
 	Memory     MemoryStatus     `json:"memory"`
 	Knowledge  KnowledgeStatus  `json:"knowledge"`
@@ -154,6 +161,22 @@ type ChannelInfo struct {
 	Tools       []string `json:"tools,omitempty"`
 	OutputCaps  int      `json:"output_caps"`
 	CapsText    string   `json:"caps_text,omitempty"`
+}
+
+// InputChannelInfo 是一条 inputch 的登记与归属视图。
+//
+// 字段取自 agent/io 的 ChannelRegistry（根 agent 与驻留子**共用同一份**登记表），
+// 因此它天然覆盖驻留子的通道分配。
+type InputChannelInfo struct {
+	Name string `json:"name"`
+	// Plugin 是注册它的插件名（归属可追溯）。
+	Plugin string `json:"plugin,omitempty"`
+	// Owner 是被划给的 agent id；"" = 未分配，归根 agent / 内核默认。
+	Owner string `json:"owner,omitempty"`
+	// Capacity 是该 inputch 的队列容量；0 = 用内核默认值。
+	Capacity int `json:"capacity,omitempty"`
+	// Output 是该 inputch 的默认回程输出通道；"" = 由来源决定。
+	Output string `json:"output,omitempty"`
 }
 
 type MemoryStatus struct {

@@ -583,6 +583,38 @@
       ];
       var RT_CAP_NAMES = { 1: "text", 2: "file", 4: "image", 8: "audio", 16: "structured" };
 
+      // _rtSig 缓存上一次渲染的数据签名。
+      //
+      // 为什么必须缓存：运行态每 3s 轮询一次，数据绝大多数时候是**没变**的；
+      // 无条件 `innerHTML =` 会把整块 DOM（含各级条的 transition）每 3s 重建一遍，
+      // 视觉效果就是“首页一闪一闪”。签名相同就一个字节也不动。
+      var _rtSig = null;
+
+      // rtSlider 把“值 / 上限”画成轨道 + 滑块 + 读数（比纯文本数字直观）。
+      function rtSlider(value, max, label, display) {
+        var pct = max > 0 ? Math.max(0, Math.min(100, (value / max) * 100)) : 0;
+        return (
+          '<span class="rt-slider"><span class="rt-slider-label">' +
+          escHtml(label) +
+          '</span><span class="rt-slider-track"><i style="width:' + pct + '%"></i><b style="left:' + pct + '%"></b></span>' +
+          '<span class="rt-slider-val">' +
+          escHtml(String(display === undefined ? value : display)) +
+          "</span></span>"
+        );
+      }
+
+      // rtMini 是行内迷你条（登记/抢占这类要并排两个的量）。
+      function rtMini(value, max, label) {
+        var pct = max > 0 ? Math.max(0, Math.min(100, (value / max) * 100)) : 0;
+        return (
+          '<span class="rt-mini" title="' +
+          escHtml(label) + " " + value +
+          '"><span class="rt-mini-track"><i style="width:' + pct + '%"></i></span>' +
+          value +
+          "</span>"
+        );
+      }
+
       function rtTile(num, label, sub, pct, active, warn) {
         return (
           '<div class="rt-tile' +
@@ -616,11 +648,18 @@
         var rt = state.runtime;
         if (!rt) {
           el.innerHTML = '<div class="rt-empty">' + __("运行态数据不可用", "runtime unavailable") + "</div>";
+          _rtSig = null;
           return;
         }
         var sc = rt.scheduler || {};
         var residents = rt.residents || [];
         var channels = rt.channels || [];
+        var inputs = rt.input_channels || [];
+        // 数据签名（**不含 uptime**——它每秒都变，带上就等于没缓存）：
+        // 与上次相同则直接返回，一个字节都不动（“首页一闪一闪”的根因）。
+        var sig = JSON.stringify([sc, residents, channels, inputs]);
+        if (sig === _rtSig) return;
+        _rtSig = sig;
         var q = sc.interrupt_queues || [0, 0, 0, 0, 0];
         var pending = sc.pending_interrupts || 0;
         var ready = sc.ready_queue_depth || 0;
@@ -643,6 +682,12 @@
         // 四级中断队列
         html += '<div class="rt-section-title">' + __("中断队列（按级别）", "Interrupt queues by level") + "</div>";
         var maxQ = Math.max(1, q[1] || 0, q[2] || 0, q[3] || 0, q[4] || 0);
+        var maxReg = 1;
+        var maxPre = 1;
+        RT_LEVELS.forEach(function (L) {
+          maxReg = Math.max(maxReg, byLv[L.lv] || 0);
+          maxPre = Math.max(maxPre, preLv[L.lv] || 0);
+        });
         html += '<div class="rt-levels">';
         RT_LEVELS.forEach(function (L) {
           var depth = q[L.lv] || 0;
@@ -654,7 +699,8 @@
             (depth ? Math.max(4, (depth / maxQ) * 100) : 0) +
             '%"></i></span>' +
             '<span class="rt-lv-meta">' + depth + " · " +
-            __("登记", "reg") + " " + reg + " / " + __("抢占", "pre") + " " + pre +
+            rtMini(reg, maxReg, __("登记", "registered")) +
+            rtMini(pre, maxPre, __("抢占", "preempted")) +
             "</span></div>";
         });
         html += "</div>";
@@ -683,7 +729,82 @@
             escHtml(sc.running.kind || "") + " #" + sc.running.id + " (L" + (sc.running.level || 0) + ")</div>";
         }
 
-        // 通道拓扑
+        // 通道**分配（按归属）**：inputch 是输入路由单位，而登记表由根 agent 与
+        // 驻留子**共用同一份**——所以“这条输入归谁”必须画出来。只画设备能力
+        // （下面的拓扑）等于把“路由发生在进内核之前”这条设计事实藏起来，
+        // 于是驻留子的通道分配在界面上完全不可见。
+        html += '<div class="rt-section-title">' + __("通道分配（按归属）", "Input channels by owner") + "</div>";
+        var maxCap = 1;
+        inputs.forEach(function (c) {
+          if ((c.capacity || 0) > maxCap) maxCap = c.capacity;
+        });
+        var owners = [];
+        var byOwner = {};
+        inputs.forEach(function (c) {
+          var o = c.owner || "";
+          if (!byOwner[o]) {
+            byOwner[o] = [];
+            owners.push(o);
+          }
+          byOwner[o].push(c);
+        });
+        // 驻留子即使一条 inputch 也没划到，也要出现在分配图里——
+        // 否则“子存在但界面上看不见”与“子不存在”无法区分。
+        residents.forEach(function (r) {
+          var o = r.id || "";
+          if (o && !byOwner[o]) {
+            byOwner[o] = [];
+            owners.push(o);
+          }
+        });
+        owners.sort(function (a, b) {
+          if (a === "") return -1;
+          if (b === "") return 1;
+          return a < b ? -1 : 1;
+        });
+        if (!owners.length) {
+          html += '<div class="rt-empty">' + __("暂无通道登记", "no channel registered") + "</div>";
+        }
+        owners.forEach(function (o) {
+          var list = byOwner[o] || [];
+          var res = null;
+          if (o) {
+            residents.forEach(function (r) {
+              if (r.id === o) res = r;
+            });
+          }
+          html += '<div class="rt-owner' + (o ? " rt-owner-child" : "") + '">';
+          html += '<div class="rt-owner-head"><span class="rt-owner-name">' +
+            (o ? "▸ " : "◆ ") +
+            (o ? __("驻留子 ", "resident ") + escHtml(o) : __("根 agent / 内核默认", "root agent / kernel default")) +
+            '</span><span class="rt-owner-meta">' + list.length + " " + __("条通道", "channels") +
+            (res ? " · " + __("轮次", "rounds") + " " + (res.rounds || 0) : "") +
+            (res && res.context_full ? ' <span class="rt-badge-warn">' + __("上下文已满", "ctx full") + "</span>" : "") +
+            "</span></div>";
+          if (list.length) {
+            list.forEach(function (c) {
+              var cap = c.capacity || 0;
+              html += '<div class="rt-assign">' +
+                '<span class="rt-chan-name">' + escHtml(c.name) + "</span>" +
+                (c.plugin ? '<span class="rt-chip">' + escHtml(c.plugin) + "</span>" : "") +
+                rtSlider(cap, maxCap, __("容量", "cap"), cap ? String(cap) : __("默认", "default")) +
+                '<span class="rt-chan-sub">' +
+                (c.output ? __("回程 ", "out ") + escHtml(c.output) : __("回程由来源决定", "out by source")) +
+                "</span></div>";
+            });
+          } else {
+            var allowed = (res && res.allowed_outputs) || [];
+            html += '<div class="rt-chan-sub">' +
+              (allowed.length
+                ? __("可发往输出通道：", "allowed outputs: ") +
+                  allowed.map(function (x) { return '<span class="rt-chip">' + escHtml(x) + "</span>"; }).join("")
+                : __("未划入任何 inputch", "no input channel assigned")) +
+              "</div>";
+          }
+          html += "</div>";
+        });
+
+        // 通道拓扑（设备能力面：能收什么、能发什么、有哪些工具）
         html += '<div class="rt-section-title">' + __("通道拓扑", "Channel topology") + "</div>";
         var ins = channels.filter(function (c) { return c.direction === "in" || c.direction === "io"; });
         var outs = channels.filter(function (c) { return c.direction === "out" || c.direction === "io"; });
@@ -730,6 +851,9 @@
       }
 
       function renderOverview() {
+        // 总览页会整块重建 #rt-panel（面板本身是空的），所以必须让运行态的
+        // 数据签名失效，否则 renderRuntime 会以为“没变化”而不去填这块空面板。
+        _rtSig = null;
         var s = state.status || {};
         var k = state.kernel;
         var html =

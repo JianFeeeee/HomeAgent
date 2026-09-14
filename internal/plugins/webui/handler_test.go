@@ -1409,6 +1409,13 @@ func TestRuntimeEndpoint(t *testing.T) {
 		},
 		Residents: []sdk.ResidentStatus{{ID: "r1", State: "running", Rounds: 3}},
 		Channels:  []sdk.ChannelInfo{{Name: "webui", Type: "1", Direction: "out", Ready: true, OutputCaps: 7, CapsText: "[text file image]"}},
+		// inputch 的登记与归属：必须带出**驻留子划走的那条**（owner=子 id）——
+		// 只回设备能力（channels）就无法回答「这条输入归谁」，驻留子的通道分配
+		// 在界面上完全不可见（本次修的缺口）。
+		InputChannels: []sdk.InputChannelInfo{
+			{Name: "qq", Plugin: "qq", Capacity: 32, Output: "qq"},
+			{Name: "timer", Plugin: "timer", Owner: "r1", Capacity: 8},
+		},
 	}
 	s := testSDK(sdk.SDKConfig{
 		Settings: sdk.NewSettings("webui", internalConfig.NewConfigRegistry("")),
@@ -1424,9 +1431,10 @@ func TestRuntimeEndpoint(t *testing.T) {
 		t.Fatalf("expected 200, got %d", w.Code)
 	}
 	var out struct {
-		Scheduler sdk.SchedulerStatus  `json:"scheduler"`
-		Residents []sdk.ResidentStatus `json:"residents"`
-		Channels  []sdk.ChannelInfo    `json:"channels"`
+		Scheduler     sdk.SchedulerStatus    `json:"scheduler"`
+		Residents     []sdk.ResidentStatus   `json:"residents"`
+		Channels      []sdk.ChannelInfo      `json:"channels"`
+		InputChannels []sdk.InputChannelInfo `json:"input_channels"`
 	}
 	if err := json.Unmarshal(w.Body.Bytes(), &out); err != nil {
 		t.Fatalf("unmarshal: %v", err)
@@ -1445,6 +1453,25 @@ func TestRuntimeEndpoint(t *testing.T) {
 	}
 	if len(out.Channels) != 1 || out.Channels[0].Direction != "out" {
 		t.Fatalf("通道方向丢失：%+v", out.Channels)
+	}
+	// 通道分配：既要带归属，也要带**驻留子划走的那条**
+	if len(out.InputChannels) != 2 {
+		t.Fatalf("input_channels 应回 2 条，实际 %+v", out.InputChannels)
+	}
+	var childCh, rootCh *sdk.InputChannelInfo
+	for i := range out.InputChannels {
+		switch out.InputChannels[i].Owner {
+		case "":
+			rootCh = &out.InputChannels[i]
+		case "r1":
+			childCh = &out.InputChannels[i]
+		}
+	}
+	if rootCh == nil || rootCh.Name != "qq" || rootCh.Capacity != 32 || rootCh.Output != "qq" {
+		t.Fatalf("根 agent 的 inputch 归属/容量/回程丢失：%+v", rootCh)
+	}
+	if childCh == nil || childCh.Name != "timer" || childCh.Capacity != 8 {
+		t.Fatalf("驻留子划走的 inputch 未带出（这正是本次修的缺口）：%+v", childCh)
 	}
 	// 只回运行态：不该把 tools/plugins 这类大块带上
 	if strings.Contains(w.Body.String(), "\"tools\"") || strings.Contains(w.Body.String(), "\"plugins\"") {
