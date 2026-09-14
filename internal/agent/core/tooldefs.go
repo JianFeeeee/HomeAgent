@@ -44,27 +44,49 @@ func (a *Agent) buildMemoryContext(input string, maxTokens int) string {
 //
 // 默认 auto（保持“每条输入都召回”的既有行为）；输入/注入声明
 // recall_policy=none 时返回空串，从而不注入记忆。策略与裁剪（ContextPolicy）正交。
+//
+// query 取**清洗后**的输入（通道 Cleaner 的输出），与裁剪侧同一套语义：
+// 原始输入里的 ANSI/base64/JSON 包装会把相关性打分带偏。清洗为空时回退原文。
 func (a *Agent) buildTaskMemoryContext(f *TaskFrame, input string, maxTokens int) string {
-	if f != nil && !a.recallDeclared(f.Evt) {
+	if f == nil {
+		return a.recallText(input, "input", maxTokens)
+	}
+	if !a.recallDeclared(f.Evt) {
 		return ""
 	}
-	return a.buildMemoryContext(input, maxTokens)
+	query := strings.TrimSpace(f.CleanInput)
+	if query == "" {
+		query = input
+	}
+	trigger := "input"
+	if f.Evt != nil && f.Evt.Source != "" {
+		trigger = "input:" + f.Evt.Source
+	}
+	return a.recallText(query, trigger, maxTokens)
 }
 
-// recallTextFor 以 query 触发一次记忆召回，返回可注入的文本（空串表示无）。
+// recallTextFor 以 query 触发一次记忆召回，按当前预算截断，返回可注入的文本。
 //
 // 这是“召回”侧的单一入口：与 Prune 共用同一份**清洗后**的 query，
 // 使“取进来”（召回）与“踢出去”（裁剪）落在同一个相关性过程上。
 // trigger 仅用于日志溯源（如 "tool:qq_get_message"）。
 func (a *Agent) recallTextFor(query, trigger string) string {
-	if query == "" || a.indexer == nil {
-		return ""
-	}
 	memTokens := 0 // 0 = 不截断
-	if a.provider != nil {
+	if a != nil && a.provider != nil {
 		memTokens = ComputeTokenBudget(a.provider, a.systemPrompt).MemoryTokens
 	}
-	text := a.buildMemoryContext(query, memTokens)
+	return a.recallText(query, trigger, memTokens)
+}
+
+// recallText 是召回侧的共同实现：query → 记忆索引文本（空串表示无）。
+//
+// 输入侧的 buildTaskMemoryContext 与工具侧的 recallTextFor 都收敛到这里，
+// 使“同一份 query、同一次预算、同一条审计日志”只写一遍。
+func (a *Agent) recallText(query, trigger string, maxTokens int) string {
+	if a == nil || query == "" || a.indexer == nil {
+		return ""
+	}
+	text := a.buildMemoryContext(query, maxTokens)
 	if text == "" {
 		return ""
 	}

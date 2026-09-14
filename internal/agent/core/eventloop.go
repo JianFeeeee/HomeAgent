@@ -373,20 +373,13 @@ func (a *Agent) emitResponse(evt *agentIO.InputEvent, response string) {
 //
 // 查询向量取**清洗后**的输入（通道 Cleaner 的输出），与工具侧同一套语义：
 // 原始输入里的 ANSI/base64/JSON 包装会把相关性打分带偏，裁掉本该保留的事件。
+//
+// 实际执行交由 memoryPass（与召回共用入口、query、预算与审计）。
 func (a *Agent) pruneOnInput(evt *agentIO.InputEvent, cleanInput string) int {
-	if a.context == nil || !a.pruneDeclared(evt) {
+	if !a.pruneDeclared(evt) {
 		return 0
 	}
-	// **动态上下文**是父 agent 专属能力：轻量内核（驻留子）用传统上下文，
-	// 不做按相关度的裁剪与向 doc 记忆的归档（子也没有 doc 记忆）。
-	if a.isLightKernel() {
-		return 0
-	}
-	topK := a.maxContextSize - 1
-	if topK < 1 {
-		topK = 1
-	}
-	return a.context.Prune(cleanInput, topK, a.docStore)
+	return a.memoryPass(cleanInput, "input:"+evt.Source, true, false).Archived
 }
 
 // pruneDeclared 判定这次输入是否显式声明了裁剪。
