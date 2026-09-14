@@ -334,3 +334,100 @@ func TestOwnerMessagesGetHigherInterruptLevel(t *testing.T) {
 		t.Fatalf("普通人消息应为 L1，实际 %q", joined)
 	}
 }
+
+// 身份必须绑在帧上：中断抢占当前轮、中断轮收尾清空插件全局身份之后，
+// 外层轮被恢复（resumeTask 复用同一帧、不重跑 onInput）时权限门不能整体失效。
+func TestAuthSurvivesInterruptPreemptionOfAnotherTurn(t *testing.T) {
+	p := newPermissionTestPlugin(t)
+
+	// 中断轮（Bot 所有者）跑完：afterOutput 会清掉插件全局身份。
+	inner := &sdk.StageContext{Extra: map[string]interface{}{
+		qqAuthExtraKey: qqAuthContext{active: true, owner: true, userID: 2198972886},
+	}}
+	if err := p.afterOutputAuthContext(inner); err != nil {
+		t.Fatal(err)
+	}
+	if p.auth.active {
+		t.Fatal("收尾后插件全局身份应为空（复现恢复前状态）")
+	}
+
+	// 外层轮（非所有者群成员）恢复后继续调工具：仍须按非所有者拦下私人资源工具。
+	frame := &sdk.StageContext{
+		Extra:     map[string]interface{}{qqAuthExtraKey: qqAuthContext{active: true, userID: 10001, groupID: 20002, isGroup: true}},
+		ToolCalls: []sdk.ToolCall{{Name: "calendar_list"}},
+	}
+	if err := p.beforeToolcall(frame); err != nil {
+		t.Fatal(err)
+	}
+	if frame.Response == nil || !strings.Contains(*frame.Response, "私人资源工具") {
+		t.Fatalf("中断恢复后权限门失效（整体放行）: %#v", frame.Response)
+	}
+}
+
+// 运行中到达的新消息会改写插件全局身份；正在跑的那一轮必须不受影响。
+func TestMidTurnMessageDoesNotChangeRunningTurnAuth(t *testing.T) {
+	p := newPermissionTestPlugin(t)
+
+	frame := &sdk.StageContext{
+		Extra:     map[string]interface{}{qqAuthExtraKey: qqAuthContext{active: true, owner: true, userID: 2198972886}},
+		ToolCalls: []sdk.ToolCall{{Name: "calendar_list"}},
+	}
+	// 路人的群消息在所有者轮运行中到达。
+	p.activateAuthContext(4242, 10001, 20002, true)
+	if p.auth.owner {
+		t.Fatal("到达事件应改写全局身份（复现场景）")
+	}
+
+	if err := p.beforeToolcall(frame); err != nil {
+		t.Fatal(err)
+	}
+	if frame.Response != nil {
+		t.Fatalf("在跑的所有者轮被到达消息篡改: %s", *frame.Response)
+	}
+}
+
+// 合并中断正文里的整批 message_id 都要消费掉，并在帧上绑定身份。
+func TestBatchInterruptConsumesAllMessageIDs(t *testing.T) {
+	p := newPermissionTestPlugin(t)
+	p.authByMessageID = map[int64]qqAuthContext{
+		100: {active: true, owner: true, userID: 2198972886},
+		101: {active: true, owner: true, userID: 2198972886},
+	}
+	ctx := &sdk.StageContext{
+		RawMessage: "来自「老板」的私聊短时间内连续发来 2 条消息(message_id=100,101, user_id=2198972886)。",
+		Extra:      map[string]interface{}{"input_source": "qq"},
+	}
+	if err := p.onInputAuthContext(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if !p.auth.owner {
+		t.Fatalf("合并中断未恢复所有者身份: %+v", p.auth)
+	}
+	if len(p.authByMessageID) != 0 {
+		t.Fatalf("同批 message_id 未全部清理: %v", p.authByMessageID)
+	}
+	if auth, ok := authOnFrame(ctx); !ok || !auth.owner {
+		t.Fatalf("身份未绑定到帧上: %+v ok=%v", auth, ok)
+	}
+}
+
+// 非 QQ 来源（webui/timer 等）的帧上绑空身份：权限门对这些轮整体关闭。
+func TestNonQQFrameBindsInactiveAuth(t *testing.T) {
+	p := newPermissionTestPlugin(t)
+	p.auth = qqAuthContext{active: true, owner: true, userID: 2198972886}
+
+	ctx := &sdk.StageContext{
+		RawMessage: "webui 里的提问",
+		Extra:      map[string]interface{}{"input_source": "webui"},
+		ToolCalls:  []sdk.ToolCall{{Name: "calendar_list"}},
+	}
+	if err := p.onInputAuthContext(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if err := p.beforeToolcall(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if ctx.Response != nil {
+		t.Fatalf("非 QQ 轮不应被 QQ 权限门拦: %s", *ctx.Response)
+	}
+}
