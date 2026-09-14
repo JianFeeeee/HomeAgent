@@ -567,12 +567,12 @@
       function startUptimeTicker() {
         if (uptimeTick) clearInterval(uptimeTick);
         uptimeTick = setInterval(function () {
-          var el = document.querySelector("#uptime-val");
+          var el = document.querySelector("#ov-uptime");
           if (el && state.startedAt) {
             var now = Date.now();
             el.textContent = fmtUptime(now - state.startedAt);
           } else if (!state.startedAt) {
-            var el2 = document.querySelector("#uptime-val");
+            var el2 = document.querySelector("#ov-uptime");
             if (el2) el2.textContent = "-";
           }
         }, 1000);
@@ -1180,140 +1180,121 @@
         }, 3000);
       }
 
+      // ===== Overview =====
+      //
+      // 总览页是**静态骨架 + 数据绑定**：DOM 只在首帧建一次，之后所有刷新只改
+      // 文本/类名，绝不重建节点。此前 renderAll 每 15s 把整个总览（含运行态面板）
+      // innerHTML 重建一遍 —— 那是页面上最刺眼的周期性闪烁的来源。
+      //
+      // 文字也压到最少：状态用彩色圆点表达，其余只留数字与两字标签，不再堆
+      // 「未初始化 / 不可用」这类整句描述。
+      var OV_ICONS = {
+        activity:
+          '<svg viewBox="0 0 24 24"><path d="M22 12h-4l-3 9L9 3l-3 9H2"/></svg>',
+        clock:
+          '<svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2"/></svg>',
+        puzzle:
+          '<svg viewBox="0 0 24 24"><path d="M4 7h4a2 2 0 1 1 4 0h4v4a2 2 0 1 0 0 4v4h-4a2 2 0 1 0-4 0H4v-4a2 2 0 1 1 0-4z"/></svg>',
+        tag:
+          '<svg viewBox="0 0 24 24"><path d="M20 12l-8 8-9-9V3h8z"/><circle cx="7.5" cy="7.5" r="1.3"/></svg>',
+        brain:
+          '<svg viewBox="0 0 24 24"><path d="M9 3a3 3 0 0 0-3 3 3 3 0 0 0-1 5.8V15a3 3 0 0 0 4 2.8V21"/><path d="M15 3a3 3 0 0 1 3 3 3 3 0 0 1 1 5.8V15a3 3 0 0 1-4 2.8V21"/></svg>',
+        db:
+          '<svg viewBox="0 0 24 24"><ellipse cx="12" cy="6" rx="8" ry="3"/><path d="M4 6v12c0 1.7 3.6 3 8 3s8-1.3 8-3V6"/><path d="M4 12c0 1.7 3.6 3 8 3s8-1.3 8-3"/></svg>',
+        file:
+          '<svg viewBox="0 0 24 24"><path d="M14 3H7a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V8z"/><path d="M14 3v5h5"/></svg>',
+        cpu:
+          '<svg viewBox="0 0 24 24"><rect x="6" y="6" width="12" height="12" rx="2"/><path d="M9 2v3M15 2v3M9 19v3M15 19v3M2 9h3M2 15h3M19 9h3M19 15h3"/></svg>',
+      };
+
+      function ovKpi(id, icon, label, dot) {
+        return (
+          '<div class="ov-kpi"><span class="ov-ico">' +
+          icon +
+          '</span><span class="ov-val">' +
+          (dot ? '<i class="ov-dot" id="ov-' + id + '-dot"></i>' : "") +
+          '<b id="ov-' + id + '">—</b></span><span class="ov-lab">' +
+          label +
+          "</span></div>"
+        );
+      }
+
       function renderOverview() {
-        // 总览页会整块重建 #rt-panel（面板本身是空的），所以必须让运行态的
-        // 数据签名失效，否则 renderRuntime 会以为“没变化”而不去填这块空面板。
-        _rtSig = null;
+        var host = document.getElementById("tab-overview");
+        if (!host) return;
+        // 只在首帧建骨架；之后（renderAll 每 15s 一次）只 updateOverview。
+        // 一个节点都不重建，所以不会闪。
+        if (!document.getElementById("ov-kpis")) {
+          host.innerHTML =
+            '<div id="rt-panel"></div>' +
+            '<div class="card"><div class="ov-kpis" id="ov-kpis">' +
+            ovKpi("status", OV_ICONS.activity, __("状态", "Status"), true) +
+            ovKpi("uptime", OV_ICONS.clock, __("运行", "Uptime")) +
+            ovKpi("plugins", OV_ICONS.puzzle, __("插件", "Plugins")) +
+            ovKpi("version", OV_ICONS.tag, __("版本", "Version")) +
+            ovKpi("llm", OV_ICONS.brain, "LLM", true) +
+            ovKpi("memory", OV_ICONS.db, __("记忆", "Memory")) +
+            ovKpi("docs", OV_ICONS.file, __("文档", "Docs")) +
+            ovKpi("runtime", OV_ICONS.cpu, __("运行时", "Runtime")) +
+            '</div><div class="ov-foot" id="ov-foot"></div></div>';
+        }
+        updateOverview();
+      }
+
+      function ovSet(id, text) {
+        var el = document.getElementById(id);
+        if (el && el.textContent !== String(text)) el.textContent = String(text);
+      }
+      function ovDot(id, cls) {
+        var el = document.getElementById(id);
+        if (el && el.className !== cls) el.className = cls;
+      }
+
+      // updateOverview 只写值与类名，从不改结构。
+      function updateOverview() {
         var s = state.status || {};
         var k = state.kernel;
-        var html =
-          '<div id="rt-panel"></div>' +
-          '<div class="card"><h2>' +
-          __("系统概览", "System Overview") +
-          "</h2>" +
-          '<div class="kv-row"><span class="key">' +
-          __("运行状态", "Status") +
-          '</span><span class="val"><span class="status-dot ' +
-          (s.status === "running" ? "dot-green" : "dot-yellow") +
-          '"></span>' +
-          escHtml(s.status || "unknown") +
-          "</span></div>" +
-          '<div class="kv-row"><span class="key">' +
-          __("运行时间", "Uptime") +
-          '</span><span class="val"><span id="uptime-val">' +
-          (state.startedAt ? fmtUptime(Date.now() - state.startedAt) : "-") +
-          "</span></span></div>" +
-          '<div class="kv-row"><span class="key">' +
-          __("插件", "Plugins") +
-          '</span><span class="val">' +
-          ((k?.plugins || []).length || 0) +
-          "</span></div>" +
-          '<div class="kv-row"><span class="key">' +
-          __("版本", "Version") +
-          '</span><span class="val">' +
-          escHtml(
-            k?.build?.version
-              ? (k.build.kernel_name || "HomeAgent") + " v" + k.build.version
-              : s.version
-                ? "v" + s.version
-                : "-",
-          ) +
-          "</span></div>" +
-          // AGPL-3.0 §13：向网络使用者提供取得对应源码的入口。
-          // 地址来自内核 meta.SourceURL（构建时可 -ldflags 覆盖），
-          // 修改后对外部署的分支必须把它指向自己的源码仓库。
-          (k?.build?.source_url
-            ? '<div class="kv-row"><span class="key">' +
-              __("源码", "Source") +
-              '</span><span class="val"><a href="' +
-              escHtml(k.build.source_url) +
+        var running = s.status === "running";
+        ovSet("ov-status", running ? __("运行中", "running") : s.status || "unknown");
+        ovDot("ov-status-dot", "ov-dot " + (running ? "ok" : "warn"));
+        ovSet("ov-uptime", state.startedAt ? fmtUptime(Date.now() - state.startedAt) : "-");
+        ovSet("ov-plugins", ((k && k.plugins) || []).length || 0);
+        ovSet(
+          "ov-version",
+          k && k.build && k.build.version
+            ? "v" + k.build.version
+            : s.version
+              ? "v" + s.version
+              : "—",
+        );
+        var llm = (k && k.llm) || {};
+        ovDot("ov-llm-dot", "ov-dot " + (llm.available ? "ok" : "bad"));
+        ovSet("ov-llm", llm.provider || "—");
+        var mem = (k && k.memory) || {};
+        ovSet("ov-memory", mem.available ? mem.entity_count + "/" + mem.relation_count : "—");
+        var docs = (k && k.documents) || {};
+        ovSet("ov-docs", docs.available ? docs.doc_count : "—");
+        var rt = (k && k.runtime) || {};
+        ovSet(
+          "ov-runtime",
+          rt.goroutines ? rt.goroutines + (rt.memory_mb ? " · " + rt.memory_mb + "M" : "") : "—",
+        );
+        // 源码链接（AGPL §13）：静态文本，第一次填好后不参与轮询刷新。
+        var foot = document.getElementById("ov-foot");
+        if (foot) {
+          var src = k && k.build && k.build.source_url;
+          var want = src
+            ? '<a href="' +
+              escHtml(src) +
               '" target="_blank" rel="noopener noreferrer">' +
-              escHtml(k.build.source_url) +
-              "</a></span></div>"
-            : "") +
-          '<div class="kv-row"><span class="key">' +
-          __("构建", "Build") +
-          '</span><span class="val">' +
-          escHtml(fmtBuild(k?.build, s)) +
-          "</span></div></div>";
-        if (k) {
-          html +=
-            '<div class="card"><h2>' +
-            __("LLM 状态", "LLM Status") +
-            "</h2>" +
-            '<div class="kv-row"><span class="key">Provider</span><span class="val">' +
-            (k.llm?.provider || __("未配置", "Not configured")) +
-            "</span></div>" +
-            '<div class="kv-row"><span class="key">' +
-            __("可用源", "Sources") +
-            '</span><span class="val">' +
-            (k.llm?.sources || 0) +
-            "</span></div>" +
-            '<div class="kv-row"><span class="key">' +
-            __("状态", "Status") +
-            '</span><span class="val"><span class="status-dot ' +
-            (k.llm?.available ? "dot-green" : "dot-red") +
-            '"></span>' +
-            (k.llm?.available
-              ? __("运行中", "Running")
-              : __("不可用", "Unavailable")) +
-            "</span></div></div>";
-          html +=
-            '<div class="card"><h2>' +
-            __("记忆状态", "Memory Status") +
-            "</h2>" +
-            '<div class="kv-row"><span class="key">' +
-            __("图记忆", "Graph Memory") +
-            '</span><span class="val"><span class="status-dot ' +
-            (k.memory?.available ? "dot-green" : "dot-gray") +
-            '"></span>' +
-            (k.memory?.available
-              ? k.memory.entity_count +
-                __(" 实体, ", " entities, ") +
-                k.memory.relation_count +
-                __(" 关系", " relations")
-              : __("未初始化", "Uninitialized")) +
-            "</span></div>" +
-            '<div class="kv-row"><span class="key">' +
-            __("文档记忆", "Document Memory") +
-            '</span><span class="val">' +
-            (k.documents?.available
-              ? k.documents.doc_count + __(" 文档", " docs")
-              : __("未初始化", "Uninitialized")) +
-            "</span></div>" +
-            '<div class="kv-row"><span class="key">' +
-            __("文本记忆", "Text Memory") +
-            '</span><span class="val">' +
-            (k.text_memory?.available
-              ? k.text_memory.file_count + __(" 文件", " files")
-              : __("未初始化", "Uninitialized")) +
-            "</span></div>" +
-            '<div class="kv-row"><span class="key">' +
-            __("知识库", "Knowledge") +
-            '</span><span class="val">' +
-            (k.knowledge?.available
-              ? k.knowledge.item_count + __(" 项", " items")
-              : __("未初始化", "Uninitialized")) +
-            "</span></div></div>";
-          html +=
-            '<div class="card"><h2>' +
-            __("运行时", "Runtime") +
-            "</h2>" +
-            '<div class="kv-row"><span class="key">Goroutines</span><span class="val">' +
-            (k.runtime?.goroutines || "-") +
-            "</span></div>" +
-            '<div class="kv-row"><span class="key">' +
-            __("内存", "Memory") +
-            '</span><span class="val">' +
-            (k.runtime?.memory_mb ? k.runtime.memory_mb + " MB" : "-") +
-            "</span></div>" +
-            '<div class="kv-row"><span class="key">Go ' +
-            __("版本", "Version") +
-            '</span><span class="val">' +
-            escHtml(k.runtime?.go_version || "-") +
-            "</span></div></div>";
+              __("源码", "Source") +
+              "</a>"
+            : "";
+          if (foot.__html !== want) {
+            foot.__html = want;
+            foot.innerHTML = want;
+          }
         }
-        document.getElementById("tab-overview").innerHTML = html;
       }
 
       // ===== Chat =====
