@@ -2,6 +2,7 @@ package core
 
 import (
 	"os"
+	"path/filepath"
 	"testing"
 	"time"
 
@@ -235,6 +236,41 @@ func containsStr(s, substr string) bool {
 		}
 	}
 	return false
+}
+
+// TestSetDenseSpaceBackfillsExistingEvents 锁死 L0 稠密回填：
+//
+// NewRelevanceContext 先 load()（此时 denseSpace 仍为 nil，旧事件只算了稀疏
+// 向量），SetDenseSpace 才注入稠密空间。若不回填已有事件，它们的 DenseFP
+// 为空、DenseVec 长度不符，Prune 里旧事件走稀疏余弦、新事件走稠密余弦——
+// 同一次排序里混排两种尺度，谁留下只取决于事件新旧。
+func TestSetDenseSpaceBackfillsExistingEvents(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "context.json")
+
+	// run1：写入事件并落盘（不注入稠密空间）。
+	c1 := NewRelevanceContext(path, memory.NewStaticEmbedder(""))
+	c1.Append(ContextEvent{Timestamp: time.Now(), Source: "user", Input: "昨天的决定"})
+	c1.Append(ContextEvent{Timestamp: time.Now(), Source: "agent", Response: "记为待办"})
+	if err := c1.Save(); err != nil {
+		t.Fatal(err)
+	}
+
+	// run2：模拟重启——load() 发生在 SetDenseSpace 之前。
+	c2 := NewRelevanceContext(path, memory.NewStaticEmbedder(""))
+	if c2.Len() == 0 {
+		t.Fatal("重启后未读回任何事件")
+	}
+	c2.SetDenseSpace(fakeSpace{})
+
+	events := c2.Recent(c2.Len())
+	if len(events) == 0 {
+		t.Fatal("no events")
+	}
+	for i, e := range events {
+		if e.DenseFP != "fake-space" || len(e.DenseVec) != 2 {
+			t.Errorf("event %d 未回填稠密向量: fp=%q len=%d", i, e.DenseFP, len(e.DenseVec))
+		}
+	}
 }
 
 func splitLines(s string) []string {
