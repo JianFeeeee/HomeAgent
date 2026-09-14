@@ -96,6 +96,8 @@
       }
 
       var PALETTES = {
+        // mono 放第一位：它现在是默认配色（黑白单调），也应当是选择器里最显眼那个。
+        mono: "#c2c7d0",
         sakura: "#ff7fac",
         cyan: "#2dd4bf",
         violet: "#a78bfa",
@@ -107,6 +109,14 @@
       function setColor(name) {
         document.documentElement.setAttribute("data-color", name);
         localStorage.setItem("ha-color", name);
+        // 配色变了要强制重画运行态：拓扑的归属配色跟着 data-color 走，
+        // 而数据签名没变，不置空 _rtSig 的话图会一直停在旧色。
+        _rtSig = null;
+        if (document.getElementById("rt-sec-topo")) {
+          try {
+            renderRuntime();
+          } catch (e) {}
+        }
         var pop = document.getElementById("palette-pop");
         if (!pop) return;
         var btns = pop.querySelectorAll("button.cdot");
@@ -145,7 +155,7 @@
         if (!pop) return;
         var on = pop.classList.contains("on");
         if (!pop.querySelector("button.cdot")) {
-          var cur = localStorage.getItem("ha-color") || "sakura";
+          var cur = localStorage.getItem("ha-color") || "mono";
           var img = localStorage.getItem("ha-bg-img") || "";
           var blur = localStorage.getItem("ha-bg-blur") || "0";
           var dots = "";
@@ -199,8 +209,10 @@
       (function () {
         var saved = localStorage.getItem("ha-theme");
         setTheme(saved || "light");
-        var savedColor = localStorage.getItem("ha-color");
-        if (savedColor) setColor(savedColor);
+        // 默认配色 = 黑白：必须**主动** setColor 一次。只设 data-theme 时
+        // base 主题仍是樱粉（:root 的 --accent 就是粉色），不写 data-color 就
+        // 会默认花。用户选过别的颜色时以 localStorage 为准。
+        setColor(localStorage.getItem("ha-color") || "mono");
         var sb = localStorage.getItem("ha-sidebar");
         if (sb === "1" || (!sb && window.innerWidth <= 768)) {
           document.body.classList.add("sidebar-collapsed");
@@ -646,6 +658,13 @@
 
       // 归属配色：根用青色，驻留子轮转其余颜色（同一张图里能一眼分清谁是谁）。
       var RT_OWNER_COLORS = ["#88c0d0", "#b48ead", "#a3be8c", "#ebcb8b", "#d08770", "#8fbcbb"];
+      // 黑白配色下，拓扑归属也用灰阶 —— 否则整页只剩这张图还是一片彩。
+      var RT_OWNER_COLORS_MONO = ["#e6e9ef", "#c2c7d0", "#9aa0ad", "#7b818d", "#5f6570", "#454a55"];
+      function rtOwnerColors() {
+        return document.documentElement.getAttribute("data-color") === "mono"
+          ? RT_OWNER_COLORS_MONO
+          : RT_OWNER_COLORS;
+      }
 
       // rtOwnerGroups 把 inputch 按**归属**分组（owner == 根 agent id 与 "" 归一为根）。
       function rtOwnerGroups(inputs, residents, rootID) {
@@ -675,6 +694,7 @@
           return a < b ? -1 : 1;
         });
         var ci = 0;
+        var OW = rtOwnerColors();
         return order.map(function (o) {
           var res = null;
           residents.forEach(function (r) {
@@ -685,7 +705,7 @@
             owner: o,
             child: o !== "",
             label: o === "" ? __("根 agent / 内核默认", "root agent / kernel default") : __("驻留子 ", "resident ") + o,
-            color: o === "" ? RT_OWNER_COLORS[0] : RT_OWNER_COLORS[1 + (ci++ % (RT_OWNER_COLORS.length - 1))],
+            color: o === "" ? OW[0] : OW[1 + (ci++ % (OW.length - 1))],
             list: list,
             count: list.length,
             res: res,
@@ -4172,6 +4192,15 @@
         var el = document.querySelector(".settings-tabs");
         if (!el) return;
         el.innerHTML = "";
+        // 「外观」不是插件设置，但它是 webui 自己的配置，放在设置页最前面。
+        var ap = document.createElement("span");
+        ap.textContent = __("外观", "Appearance");
+        if (state.selectedSection === "appearance") ap.className = "active";
+        ap.onclick = function () {
+          state.selectedSection = "appearance";
+          renderOneSettings();
+        };
+        el.appendChild(ap);
         state.settingsPlugins.forEach(function (p) {
           var a = document.createElement("span");
           a.textContent = pluginDisplayName(p);
@@ -4184,7 +4213,58 @@
         });
       }
 
+      // 外观设置区：主题（浅/深）+ 配色 + 背景图。与侧栏那个 palette-pop 同一套
+      // setColor/applyBgImg/applyBgBlur，只是给它一个正式的、可发现的落点
+      // （原来只有侧栏底部一个调色盘图标，找不到）。
+      function appearanceHtml() {
+        var theme = document.documentElement.getAttribute("data-theme") || "light";
+        var color = localStorage.getItem("ha-color") || "mono";
+        var dots = "";
+        Object.keys(PALETTES).forEach(function (k) {
+          dots +=
+            '<button class="ap-dot' + (k === color ? " on" : "") + '" data-c="' + k +
+            '" title="' + k + '" style="background:' + PALETTES[k] + '" onclick="pickColor(\'' + k + '\')"></button>';
+        });
+        var img = localStorage.getItem("ha-bg-img") || "";
+        var blur = localStorage.getItem("ha-bg-blur") || "0";
+        return (
+          '<div class="card"><h2>' + __("外观", "Appearance") + "</h2>" +
+          '<div class="kv-row"><span class="key">' + __("主题", "Theme") + '</span><span class="val">' +
+          '<button class="btn btn-sm' + (theme === "light" ? "" : " btn-ghost") + '" onclick="pickTheme(\'light\')">' + __("浅色", "Light") + "</button> " +
+          '<button class="btn btn-sm' + (theme === "dark" ? "" : " btn-ghost") + '" onclick="pickTheme(\'dark\')">' + __("深色", "Dark") + "</button>" +
+          "</span></div>" +
+          '<div class="kv-row"><span class="key">' + __("配色", "Color") + '</span><span class="val"><span class="ap-dots">' + dots + "</span></span></div>" +
+          "<label>" + __("背景图片 URL", "Background image URL") + "</label>" +
+          '<input type="text" id="ap-bg-img" value="' + escHtml(img) + '" placeholder="https://...jpg / png">' +
+          '<div style="display:flex;gap:8px;margin-top:8px">' +
+          '<button class="btn btn-sm" onclick="applyBgImg(document.getElementById(\'ap-bg-img\').value)">' + __("应用", "Apply") + "</button>" +
+          '<button class="btn btn-ghost btn-sm" onclick="applyBgImg(\'\');document.getElementById(\'ap-bg-img\').value=\'\'">' + __("清除", "Clear") + "</button>" +
+          "</div>" +
+          '<label style="margin-top:12px">' + __("背景模糊", "Background blur") + '：<span id="ap-blur-val">' + blur + "px</span></label>" +
+          '<input type="range" id="ap-blur-range" min="0" max="30" value="' + blur + '" oninput="applyBgBlur(this.value);var v=document.getElementById(\'ap-blur-val\');if(v)v.textContent=this.value+\'px\'">' +
+          '<p style="color:var(--text-muted);font-size:12px;margin-top:10px">' +
+          __("配色只影响本站点界面的强调色，不改动 Agent 的人格或数据。", "Colors only affect this dashboard's accent; agent behavior and data are unchanged.") +
+          "</p></div>"
+        );
+      }
+      function pickTheme(name) {
+        saveTheme(name);
+        renderOneSettings();
+      }
+      function pickColor(name) {
+        setColor(name);
+        renderOneSettings();
+      }
+
       function renderOneSettings() {
+        if (state.selectedSection === "appearance") {
+          document.getElementById("tab-settings").innerHTML =
+            '<div class="settings-layout"><div class="settings-tabs"></div><div class="settings-content">' +
+            appearanceHtml() +
+            "</div></div>";
+          renderSettingsSidebar();
+          return;
+        }
         var prefix = state.selectedSection + ".";
         var allKeys = Object.keys(state.settings || {});
         var filtered = allKeys.filter(function (k) {
