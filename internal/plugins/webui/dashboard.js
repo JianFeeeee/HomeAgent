@@ -655,11 +655,34 @@
         var residents = rt.residents || [];
         var channels = rt.channels || [];
         var inputs = rt.input_channels || [];
-        // 数据签名（**不含 uptime**——它每秒都变，带上就等于没缓存）：
-        // 与上次相同则直接返回，一个字节都不动（“首页一闪一闪”的根因）。
+
+        // 数据签名（**不含 uptime**——它每秒都变，带上就等于没缓存）：整体没变就整块跳过。
         var sig = JSON.stringify([sc, residents, channels, inputs]);
         if (sig === _rtSig) return;
         _rtSig = sig;
+
+        // 外壳只建一次；随后**逐段**更新。
+        //
+        // 为什么不是整块 innerHTML：设备通道列表这类数据本来就会来回变（实测远程设备
+        // 通道 11→9 条），整块重建会把没变的段落（含条形 transition）也推倒重来，
+        // 视觉上就是「一闪一闪」。逐段比较后只替换真正变了的那一段。
+        if (!document.getElementById("rt-sec-tiles")) {
+          el.innerHTML =
+            '<div class="card"><h2>' + __("运行态", "Runtime") + "</h2>" +
+            '<div id="rt-sec-tiles"></div>' +
+            '<div id="rt-sec-levels"></div>' +
+            '<div id="rt-sec-stack"></div>' +
+            '<div id="rt-sec-owners"></div>' +
+            '<div id="rt-sec-topo"></div>' +
+            "</div>";
+        }
+        function put(sec, html) {
+          var n = document.getElementById("rt-sec-" + sec);
+          if (!n || n.__sig === html) return; // 该段没变：一个字节都不动
+          n.__sig = html;
+          n.innerHTML = html;
+        }
+
         var q = sc.interrupt_queues || [0, 0, 0, 0, 0];
         var pending = sc.pending_interrupts || 0;
         var ready = sc.ready_queue_depth || 0;
@@ -669,31 +692,43 @@
         var byLv = sc.interrupts_by_level || [];
         var preLv = sc.preempts_by_level || [];
 
-        var html = '<div class="card"><h2>' + __("运行态", "Runtime") + "</h2>";
-        // 四个数字块
-        html += '<div class="rt-grid">';
-        html += rtTile(ready, __("排队任务", "Ready queue"), __("等待执行的输入", "inputs waiting"), ready ? Math.min(100, ready * 20) : 0, ready > 0);
-        html += rtTile(pending, __("待处理中断", "Pending interrupts"), __("四级队列 + 立即抢占", "queued + immediate"), pending ? Math.min(100, pending * 25) : 0, pending > 0, pending > 0);
-        html += rtTile(stack + "/" + maxStack, __("中断栈", "Interrupt stack"), __("嵌套抢占的现场", "nested frames"), (stack / (maxStack || 4)) * 100, stack > 0);
+        // ---- 段 1：四个数字块 ----
+        var h = '<div class="rt-grid">';
+        h += rtTile(ready, __("排队任务", "Ready queue"), __("等待执行的输入", "inputs waiting"), ready ? Math.min(100, ready * 20) : 0, ready > 0);
+        h += rtTile(pending, __("待处理中断", "Pending interrupts"), __("四级队列 + 立即抢占", "queued + immediate"), pending ? Math.min(100, pending * 25) : 0, pending > 0, pending > 0);
+        h += rtTile(stack + "/" + maxStack, __("中断栈", "Interrupt stack"), __("嵌套抢占的现场", "nested frames"), (stack / (maxStack || 4)) * 100, stack > 0);
         var rFull = residents.filter(function (r) { return r.context_full; }).length;
-        html += rtTile(residents.length, __("驻留子 Agent", "Resident agents"), rFull ? rFull + __(" 个上下文已满", " context-full") : __("常驻子任务", "long-lived children"), residents.length ? Math.min(100, residents.length * 20) : 0, residents.length > 0, rFull > 0);
-        html += "</div>";
+        h += rtTile(residents.length, __("驻留子 Agent", "Resident agents"), rFull ? rFull + __(" 个上下文已满", " context-full") : __("常驻子任务", "long-lived children"), residents.length ? Math.min(100, residents.length * 20) : 0, residents.length > 0, rFull > 0);
+        h += "</div>";
+        // 抢占/背压计数（设计 §11.6 E4 的按级别口径）
+        h += '<div class="rt-chan-sub">' + __("累计", "totals") + "： " +
+          __("入队", "enqueued") + " " + (sc.enqueued || 0) + " · " +
+          __("执行", "executed") + " " + (sc.executed || 0) + " · " +
+          __("抢占", "preempted") + " " + (sc.preempted || 0) + " · " +
+          __("挂起/恢复", "susp/res") + " " + (sc.suspended || 0) + "/" + (sc.resumed || 0) + " · " +
+          __("拒绝", "rejected") + " " + (sc.rejected || 0) + " · " +
+          __("背压", "backpressure") + " " + (sc.backpressure || 0) + "</div>";
+        put("tiles", h);
 
-        // 四级中断队列
-        html += '<div class="rt-section-title">' + __("中断队列（按级别）", "Interrupt queues by level") + "</div>";
-        var maxQ = Math.max(1, q[1] || 0, q[2] || 0, q[3] || 0, q[4] || 0);
+        // ---- 段 2：队列（四级中断 + 一条排队）----
+        //
+        // 设计是「四条中断队列（L1–L4）+ 一条排队队列」共五个，所以必须画五行：
+        // 只画四条会让「排队输入」这条线在运行态里凭空消失，而它正是
+        // 「不需要及时处理」的那一半输入。排队队列**无级别**，故用不同配色 + 虚线。
+        h = '<div class="rt-section-title">' + __("队列（四级中断 + 排队）", "Queues (4 interrupt levels + queued)") + "</div>";
+        var maxQ = Math.max(1, ready, q[1] || 0, q[2] || 0, q[3] || 0, q[4] || 0);
         var maxReg = 1;
         var maxPre = 1;
         RT_LEVELS.forEach(function (L) {
           maxReg = Math.max(maxReg, byLv[L.lv] || 0);
           maxPre = Math.max(maxPre, preLv[L.lv] || 0);
         });
-        html += '<div class="rt-levels">';
+        h += '<div class="rt-levels">';
         RT_LEVELS.forEach(function (L) {
           var depth = q[L.lv] || 0;
           var reg = byLv[L.lv] || 0;
           var pre = preLv[L.lv] || 0;
-          html +=
+          h +=
             '<div class="rt-level"><span class="rt-lv-name">' + L.name + "</span>" +
             '<span class="rt-lv-track ' + L.cls + '"><i style="width:' +
             (depth ? Math.max(4, (depth / maxQ) * 100) : 0) +
@@ -703,37 +738,48 @@
             rtMini(pre, maxPre, __("抢占", "preempted")) +
             "</span></div>";
         });
-        html += "</div>";
+        h += "</div>";
+        // 第五条：排队队列（无级别，纯 FIFO）
+        h += '<div class="rt-level rt-level-queued"><span class="rt-lv-name">' +
+          __("排队（无级别）", "queued (no level)") + "</span>" +
+          '<span class="rt-lv-track rt-lv-q"><i style="width:' +
+          (ready ? Math.max(4, (ready / maxQ) * 100) : 0) + '%"></i></span>' +
+          '<span class="rt-lv-meta">' + ready + " · " +
+          __("FIFO，可被任何中断打断", "FIFO, preempted by any interrupt") + "</span></div>";
+        h += "</div>";
         if (sc.immediate) {
-          html += '<div class="rt-frame">⚡ ' + __("立即运行", "immediate") + "：" +
+          h += '<div class="rt-frame">⚡ ' + __("立即运行", "immediate") + "：" +
             escHtml(sc.immediate.kind || "") + " #" + sc.immediate.id +
             '<span class="rt-frame-top">L' + (sc.immediate.level || 0) + "</span></div>";
         }
+        put("levels", h);
 
-        // 中断栈（栈顶在上 → 用 column-reverse）
-        html += '<div class="rt-section-title">' + __("中断栈（栈顶在上）", "Interrupt stack (top first)") + "</div>";
+        // ---- 段 3：中断栈 ----
+        h = '<div class="rt-section-title">' + __("中断栈（栈顶在上）", "Interrupt stack (top first)") + "</div>";
         if (frames.length) {
-          html += '<div class="rt-stack">';
+          h += '<div class="rt-stack">';
           frames.forEach(function (f, i) {
             var t = (f && f.task) || {};
-            html += '<div class="rt-frame">' + escHtml(t.kind || "") + " #" + (t.id || "?") +
+            h += '<div class="rt-frame">' + escHtml(t.kind || "") + " #" + (t.id || "?") +
               '<span class="rt-frame-top">L' + (t.level || 0) +
               (i === frames.length - 1 ? " · " + __("栈顶", "top") : "") + "</span></div>";
           });
-          html += "</div>";
+          h += "</div>";
         } else {
-          html += '<div class="rt-empty">' + __("中断栈为空（当前无被抢占的现场）", "stack empty (nothing preempted)") + "</div>";
+          h += '<div class="rt-empty">' + __("中断栈为空（当前无被抢占的现场）", "stack empty (nothing preempted)") + "</div>";
         }
         if (sc.running) {
-          html += '<div class="rt-empty">' + __("正在运行", "running") + "：" +
+          h += '<div class="rt-empty">' + __("正在运行", "running") + "：" +
             escHtml(sc.running.kind || "") + " #" + sc.running.id + " (L" + (sc.running.level || 0) + ")</div>";
         }
+        put("stack", h);
 
-        // 通道**分配（按归属）**：inputch 是输入路由单位，而登记表由根 agent 与
-        // 驻留子**共用同一份**——所以“这条输入归谁”必须画出来。只画设备能力
-        // （下面的拓扑）等于把“路由发生在进内核之前”这条设计事实藏起来，
-        // 于是驻留子的通道分配在界面上完全不可见。
-        html += '<div class="rt-section-title">' + __("通道分配（按归属）", "Input channels by owner") + "</div>";
+        // ---- 段 4：通道分配（按归属）----
+        //
+        // inputch 是输入路由单位，登记表由根 agent 与驻留子**共用同一份**——
+        // 「这条输入归谁」必须画出来。只画设备能力（段 5）等于把「路由发生在
+        // 进内核之前」这条设计事实藏起来，驻留子的通道分配就完全不可见。
+        h = '<div class="rt-section-title">' + __("通道分配（按归属）", "Input channels by owner") + "</div>";
         var maxCap = 1;
         inputs.forEach(function (c) {
           if ((c.capacity || 0) > maxCap) maxCap = c.capacity;
@@ -748,8 +794,8 @@
           }
           byOwner[o].push(c);
         });
-        // 驻留子即使一条 inputch 也没划到，也要出现在分配图里——
-        // 否则“子存在但界面上看不见”与“子不存在”无法区分。
+        // 驻留子即使一条 inputch 都没划到也要出现在图里——否则「子存在但看不见」
+        // 与「子不存在」无法区分。
         residents.forEach(function (r) {
           var o = r.id || "";
           if (o && !byOwner[o]) {
@@ -763,7 +809,7 @@
           return a < b ? -1 : 1;
         });
         if (!owners.length) {
-          html += '<div class="rt-empty">' + __("暂无通道登记", "no channel registered") + "</div>";
+          h += '<div class="rt-empty">' + __("暂无通道登记", "no channel registered") + "</div>";
         }
         owners.forEach(function (o) {
           var list = byOwner[o] || [];
@@ -773,8 +819,8 @@
               if (r.id === o) res = r;
             });
           }
-          html += '<div class="rt-owner' + (o ? " rt-owner-child" : "") + '">';
-          html += '<div class="rt-owner-head"><span class="rt-owner-name">' +
+          h += '<div class="rt-owner' + (o ? " rt-owner-child" : "") + '">';
+          h += '<div class="rt-owner-head"><span class="rt-owner-name">' +
             (o ? "▸ " : "◆ ") +
             (o ? __("驻留子 ", "resident ") + escHtml(o) : __("根 agent / 内核默认", "root agent / kernel default")) +
             '</span><span class="rt-owner-meta">' + list.length + " " + __("条通道", "channels") +
@@ -784,7 +830,7 @@
           if (list.length) {
             list.forEach(function (c) {
               var cap = c.capacity || 0;
-              html += '<div class="rt-assign">' +
+              h += '<div class="rt-assign">' +
                 '<span class="rt-chan-name">' + escHtml(c.name) + "</span>" +
                 (c.plugin ? '<span class="rt-chip">' + escHtml(c.plugin) + "</span>" : "") +
                 rtSlider(cap, maxCap, __("容量", "cap"), cap ? String(cap) : __("默认", "default")) +
@@ -794,18 +840,19 @@
             });
           } else {
             var allowed = (res && res.allowed_outputs) || [];
-            html += '<div class="rt-chan-sub">' +
+            h += '<div class="rt-chan-sub">' +
               (allowed.length
                 ? __("可发往输出通道：", "allowed outputs: ") +
                   allowed.map(function (x) { return '<span class="rt-chip">' + escHtml(x) + "</span>"; }).join("")
                 : __("未划入任何 inputch", "no input channel assigned")) +
               "</div>";
           }
-          html += "</div>";
+          h += "</div>";
         });
+        put("owners", h);
 
-        // 通道拓扑（设备能力面：能收什么、能发什么、有哪些工具）
-        html += '<div class="rt-section-title">' + __("通道拓扑", "Channel topology") + "</div>";
+        // ---- 段 5：通道拓扑（设备能力面）----
+        h = '<div class="rt-section-title">' + __("通道拓扑", "Channel topology") + "</div>";
         var ins = channels.filter(function (c) { return c.direction === "in" || c.direction === "io"; });
         var outs = channels.filter(function (c) { return c.direction === "out" || c.direction === "io"; });
         function chanHtml(c) {
@@ -816,16 +863,13 @@
             escHtml((c.tools || []).length ? (c.tools || []).length + " " + __("个工具", "tools") : (c.description || "").slice(0, 26)) +
             "</div></div>";
         }
-        html += '<div class="rt-topo">';
-        html += '<div class="rt-topo-col">' + (ins.length ? ins.map(chanHtml).join("") : '<div class="rt-empty">' + __("无输入通道", "no input channel") + "</div>") + "</div>";
-        html += '<div class="rt-core">' + __("内核", "Kernel") + "</div>";
-        html += '<div class="rt-topo-col rt-right">' + (outs.length ? outs.map(chanHtml).join("") : '<div class="rt-empty">' + __("无输出通道", "no output channel") + "</div>") + "</div>";
-        html += "</div>";
-
-        html += "</div>";
-        el.innerHTML = html;
+        h += '<div class="rt-topo">';
+        h += '<div class="rt-topo-col">' + (ins.length ? ins.map(chanHtml).join("") : '<div class="rt-empty">' + __("无输入通道", "no input channel") + "</div>") + "</div>";
+        h += '<div class="rt-core">' + __("内核", "Kernel") + "</div>";
+        h += '<div class="rt-topo-col rt-right">' + (outs.length ? outs.map(chanHtml).join("") : '<div class="rt-empty">' + __("无输出通道", "no output channel") + "</div>") + "</div>";
+        h += "</div>";
+        put("topo", h);
       }
-
 
       // loadRuntime 拉运行态小快照并就地重绘面板（约 2KB，可秒级轮询）。
       async function loadRuntime() {
