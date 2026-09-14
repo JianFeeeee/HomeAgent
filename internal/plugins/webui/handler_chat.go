@@ -46,6 +46,9 @@ type ChatToolCall struct {
 	Plugin string      `json:"plugin,omitempty"`
 }
 
+// defaultChatHistoryLimit 是 /chat/history 不带 limit 时默认返回的页大小。
+const defaultChatHistoryLimit = 40
+
 const maxChatHistory = 200
 
 // ===== client_msg_id 去重（防 GUI 断线重连/超时重试导致的消息重放）=====
@@ -481,9 +484,14 @@ func (h *Handler) addChatMsg(msg ChatMsg) {
 // 上下文还原的关键信息，必须完整下发；瘦身只通过分页控制条数。
 func (h *Handler) handleChatHistory(w http.ResponseWriter, r *http.Request) {
 	q := r.URL.Query()
-	limit := parseIntDefault(q.Get("limit"), 0)
+	// 默认只给**一页**，不是整段历史。
+	//
+	// 原先缺省值 0 = 不限制，于是任何不带 limit 的客户端每次都会拿到完整聊天记录
+	// （生产实例上 ~5MB；本地 126 条实测 635KB）。WebUI/GUI 都显式带 limit，
+	// 所以把默认收到一页不会影响它们；想整取的调用方显式传 limit=0。
+	limit := parseIntDefault(q.Get("limit"), defaultChatHistoryLimit)
 	if limit < 0 {
-		limit = 0
+		limit = defaultChatHistoryLimit
 	}
 	if limit > maxChatHistory {
 		limit = maxChatHistory
