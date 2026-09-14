@@ -395,10 +395,8 @@ func (a *Agent) prepareInputTask(evt *agentIO.InputEvent) (*TaskFrame, taskTermi
 	}
 	a.publishEvent(events.EventRawInput, rawPayload)
 
-	archived := a.pruneOnInput(evt, cleanInput)
-	if archived > 0 {
-		log.Printf("[agent] pruned %d low-relevance events to document memory", archived)
-	}
+	// 裁剪与审计统一在 memoryPass 内（日志已带 trigger）。
+	a.pruneOnInput(evt, cleanInput)
 
 	// 本轮 inputch（处理表按它记账）+ contextfull 检测（只有驻留子设了钩子）。
 	a.tableMu.Lock()
@@ -746,7 +744,8 @@ func (a *Agent) stepToolAfter(f *TaskFrame) stepOutcome {
 	// 工具后处理：一次相关性过程，两个**正交**声明——
 	//   ContextPolicy=prune → 裁剪（踢出去，归档低相关 L0 事件）
 	//   RecallPolicy=auto   → 召回（取进来，注入 L2/L3 相关记忆）
-	// 两者共用同一份**清洗后**的 query：查询向量取清洗后的有效内容，否则噪声
+	// 两者共用同一份**清洗后**的 query，并统一走 memoryPass（同一入口、
+	// 同一次预算与审计）。查询向量取清洗后的有效内容，否则噪声
 	// （ANSI/base64/JSON 包装）会把相关性打分带偏，裁错事件、召回错记忆。
 	var recallText string
 	if def := a.stageHost.ToolDef(tc.Name); def != nil {
@@ -754,16 +753,7 @@ func (a *Agent) stepToolAfter(f *TaskFrame) stepOutcome {
 		needRecall := def.RecallPolicy == sdk.RecallPolicyAuto
 		if needPrune || needRecall {
 			query := a.toolOutputForQuery(tc.Name, result)
-			if needPrune && a.context != nil {
-				topK := a.maxContextSize - 1
-				if topK < 1 {
-					topK = 1
-				}
-				a.context.Prune(query, topK, a.docStore)
-			}
-			if needRecall {
-				recallText = a.recallTextFor(query, "tool:"+tc.Name)
-			}
+			recallText = a.memoryPass(query, "tool:"+tc.Name, needPrune, needRecall).RecallText
 		}
 	}
 
