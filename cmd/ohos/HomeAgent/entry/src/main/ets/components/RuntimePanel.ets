@@ -11,6 +11,8 @@ import {
 
 /** 四级中断 + 排队的配色：与 WebUI 总览同一套（级别色贯穿框头、槽位、描边） */
 const LV_COLORS: string[] = ['#A3BE8C', '#4A90D9', '#0A59F7', '#FFA657', '#FF5C7A'];
+/** 阶段管道里的「工具」格（循环格）：一轮内可能调几十次，只露最新一条 */
+const TOOL_GROUP: number = 2;
 /** 索引 = lv（0 排队 / 1 L1 / 2 L2 / 3 L3 / 4 L4） */
 function lvColor(lv: number): string {
   if (lv < 0 || lv > 4) {
@@ -86,6 +88,30 @@ export struct RuntimePanel {
     return out;
   }
 
+  /** 该阶段本轮事件的**最后一条**（最新）。没有则 undefined。 */
+  private latestEvent(group: number): StageEvent | undefined {
+    let out: StageEvent | undefined = undefined;
+    for (let i = 0; i < this.trail.length; i++) {
+      const e: StageEvent = this.trail[i];
+      if (e.group === group) {
+        out = e;
+      }
+    }
+    return out;
+  }
+
+  /** 该阶段本轮事件条数合计（同一工具连调会累加到 count 上） */
+  private totalCount(group: number): number {
+    let n: number = 0;
+    for (let i = 0; i < this.trail.length; i++) {
+      const e: StageEvent = this.trail[i];
+      if (e.group === group) {
+        n += e.count;
+      }
+    }
+    return n;
+  }
+
   @Builder
   tile(label: string, value: string, warn: boolean) {
     Column({ space: 2 }) {
@@ -128,30 +154,57 @@ export struct RuntimePanel {
       }
       .width('100%')
 
-      // 本阶段本轮发生的事件；没有就给一个弱化的「无」，让框不空着
+      // 本阶段本轮发生的事件；没有就给一个弱化的「无」，让框不空着。
+      //
+      // 「工具」格是循环格：一轮里可能调几十次工具/输出通道。把每一次都追加成
+      // 一行，这格会被撑成长条，反而看不出「现在在调什么」。所以它只保留**最新
+      // 一条**，右侧给本轮累计次数（与 WebUI/桌面版同一口径）。
       Column({ space: 3 }) {
-        ForEach(this.eventsOf(g.group), (e: StageEvent) => {
-          Row({ space: 3 }) {
-            Text(e.short)
-              .fontSize(9)
-              .fontColor(e.kind === 'output' ? this.palette().accent
-                : (e.kind === 'tool' ? COLOR_FROST_300 : this.palette().textSecondary))
-              .maxLines(1)
-              .textOverflow({ overflow: TextOverflow.Ellipsis })
-            if (e.count > 1) {
-              Text('x' + e.count.toString())
+        if (g.group === TOOL_GROUP) {
+          if (this.eventsOf(g.group).length > 0) {
+            Row({ space: 3 }) {
+              Text(this.latestEvent(g.group)?.short ?? '')
+                .fontSize(9)
+                .fontColor(this.latestEvent(g.group)?.kind === 'output' ? this.palette().accent
+                  : (this.latestEvent(g.group)?.kind === 'tool' ? COLOR_FROST_300 : this.palette().textSecondary))
+                .maxLines(1)
+                .textOverflow({ overflow: TextOverflow.Ellipsis })
+                .layoutWeight(1)
+              Text('x' + this.totalCount(g.group).toString())
                 .fontSize(9)
                 .fontColor(this.palette().textMuted)
             }
+            .width('100%')
+          } else {
+            Text('无')
+              .fontSize(9)
+              .fontColor(this.palette().textMuted)
+              .opacity(0.5)
           }
-          .width('100%')
-        }, (e: StageEvent, i: number) => i.toString() + ':' + e.short)
+        } else {
+          ForEach(this.eventsOf(g.group), (e: StageEvent) => {
+            Row({ space: 3 }) {
+              Text(e.short)
+                .fontSize(9)
+                .fontColor(e.kind === 'output' ? this.palette().accent
+                  : (e.kind === 'tool' ? COLOR_FROST_300 : this.palette().textSecondary))
+                .maxLines(1)
+                .textOverflow({ overflow: TextOverflow.Ellipsis })
+              if (e.count > 1) {
+                Text('x' + e.count.toString())
+                  .fontSize(9)
+                  .fontColor(this.palette().textMuted)
+              }
+            }
+            .width('100%')
+          }, (e: StageEvent, i: number) => i.toString() + ':' + e.short)
 
-        if (this.eventsOf(g.group).length === 0) {
-          Text('无')
-            .fontSize(9)
-            .fontColor(this.palette().textMuted)
-            .opacity(0.5)
+          if (this.eventsOf(g.group).length === 0) {
+            Text('无')
+              .fontSize(9)
+              .fontColor(this.palette().textMuted)
+              .opacity(0.5)
+          }
         }
       }
       .width('100%')
