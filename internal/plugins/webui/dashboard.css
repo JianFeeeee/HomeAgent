@@ -1596,7 +1596,8 @@
       }
       .reasoning-card .rc-chev {
         margin-left: auto;
-        font-size: 10px;
+        display: inline-flex;
+        align-items: center;
         color: var(--text-muted);
         transition: transform 0.2s var(--ease-out);
       }
@@ -1725,7 +1726,8 @@
         display: inline-block;
       }
       .tool-card .tc-caret {
-        font-size: 10px;
+        display: inline-flex;
+        align-items: center;
         color: var(--text-muted);
         transition: transform 0.15s var(--ease-out);
       }
@@ -2362,27 +2364,45 @@
       color: var(--text-secondary);
       white-space: nowrap;
     }
-    .rt-level .rt-lv-track {
-      height: 14px;
-      border-radius: 4px;
-      background: rgba(255, 255, 255, 0.06);
-      overflow: hidden;
+    /* 队列格槽：固定可见的「车位」，占用多少一眼可数。
+       此前是宽度百分比进度条 —— 队列为 0 时宽度为 0，整行只剩文字，
+       看上去就是「这块空着」。 */
+    .rt-level .rt-slots {
       display: flex;
+      align-items: stretch;
+      gap: 3px;
+      height: 14px;
+      min-width: 0;
     }
-    .rt-level .rt-lv-track > i {
-      display: block;
-      height: 100%;
-      transition: width 0.35s var(--ease-out);
+    .rt-level .rt-slots > i {
+      flex: 1 1 0;
+      min-width: 3px;
+      border-radius: 3px;
+      background: rgba(255, 255, 255, 0.06);
+      border: 1px solid rgba(255, 255, 255, 0.05);
+      transition:
+        background 0.25s var(--ease-out),
+        box-shadow 0.25s var(--ease-out);
+    }
+    .rt-level .rt-slots.rt-lv-4 > i.on { background: #ff5c7a; box-shadow: 0 0 6px rgba(255, 92, 122, 0.45); }
+    .rt-level .rt-slots.rt-lv-3 > i.on { background: #ffa657; box-shadow: 0 0 6px rgba(255, 166, 87, 0.4); }
+    .rt-level .rt-slots.rt-lv-2 > i.on { background: var(--sakura-400); box-shadow: 0 0 6px rgba(var(--accent-rgb), 0.4); }
+    .rt-level .rt-slots.rt-lv-1 > i.on { background: var(--frost-300); box-shadow: 0 0 6px rgba(136, 192, 208, 0.4); }
+    .rt-level .rt-slots.rt-lv-q > i.on { background: #a3be8c; box-shadow: 0 0 6px rgba(163, 190, 140, 0.4); }
+    .rt-slots-more {
+      flex: 0 0 auto;
+      align-self: center;
+      margin-left: 4px;
+      font-size: 10px;
+      font-weight: 400;
+      color: var(--text-muted);
+      font-variant-numeric: tabular-nums;
     }
     .rt-level .rt-lv-meta {
       text-align: right;
       color: var(--text-muted);
       font-variant-numeric: tabular-nums;
     }
-    .rt-lv-4 > i { background: #ff5c7a; }
-    .rt-lv-3 > i { background: #ffa657; }
-    .rt-lv-2 > i { background: var(--sakura-400); }
-    .rt-lv-1 > i { background: var(--frost-300); }
     /* 拓扑图：整张图为 SVG，文字降到最少，其余信息用图形编码
        （归属=容器/配色、容量=细条、输出能力=圆点、路由=连线）。 */
     .rt-svg-wrap {
@@ -2416,9 +2436,6 @@
       border-top: 1px dashed rgba(255, 255, 255, 0.14);
       margin-top: 5px;
       padding-top: 7px;
-    }
-    .rt-level .rt-lv-track.rt-lv-q > i {
-      background: #a3be8c;
     }
     /* 中断栈：栈顶在上，做出"层叠现场"的观感 */
     .rt-stack {
@@ -2666,15 +2683,15 @@
     }
     .rt-pipe-nodes {
       position: relative;
-      display: flex;
-      justify-content: space-between;
+      display: grid;
+      grid-template-columns: repeat(5, minmax(0, 1fr));
     }
     .rt-pipe-node {
       display: flex;
       flex-direction: column;
       align-items: center;
       gap: 6px;
-      width: 44px;
+      min-width: 0;
     }
     .rt-pipe-node > i {
       width: 11px;
@@ -2690,10 +2707,19 @@
         box-shadow 0.25s var(--ease-out);
     }
     .rt-pipe-node > b {
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      gap: 3px;
+      max-width: 100%;
       font-size: 9px;
       font-weight: 500;
       color: var(--text-muted);
       white-space: nowrap;
+    }
+    /* 图标自带 stroke，标签文字不能用下划线（<u> 只为分组） */
+    .rt-pipe-node > b > u {
+      text-decoration: none;
     }
     .rt-pipe-node.done > i {
       background: var(--frost-300);
@@ -2796,6 +2822,16 @@
       text-overflow: ellipsis;
       white-space: nowrap;
     }
+    /* 副行：内核名 + commit。总览只给版本号会分不清是哪个内核、哪次构建。 */
+    .ov-sub {
+      font-size: 10px;
+      color: var(--text-muted);
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      min-height: 12px;
+      font-variant-numeric: tabular-nums;
+    }
     .ov-lab {
       font-size: 10px;
       letter-spacing: 0.05em;
@@ -2825,20 +2861,49 @@
       color: var(--text-muted);
     }
 
-    /* 阶段管道的循环标记与「本轮轨迹」chip 序列。
-       轨迹用不同配色区分：普通工具（⚙）与 output_* 输出通道调用（⇥）。 */
+    /* 阶段管道下方的「每阶段事件」分列。
+       与上面的节点同为 5 等分栅格，所以每一列正好落在它对应阶段的下面；
+       列内 chip 用不同配色区分普通工具与 output_* 输出通道。 */
+    .rt-pipe-cols {
+      display: grid;
+      grid-template-columns: repeat(5, minmax(0, 1fr));
+      gap: 6px;
+      margin: 4px 0 10px;
+      padding-top: 6px;
+      border-top: 1px dashed rgba(255, 255, 255, 0.09);
+    }
+    .rt-pipe-col {
+      display: flex;
+      flex-wrap: wrap;
+      align-content: flex-start;
+      gap: 4px;
+      min-width: 0;
+    }
+    /* 行内小图标：一律 SVG，不使用 emoji/符号字符。 */
+    .rt-ico {
+      width: 12px;
+      height: 12px;
+      flex: 0 0 auto;
+      fill: none;
+      stroke: currentColor;
+      stroke-width: 2;
+      stroke-linecap: round;
+      stroke-linejoin: round;
+      vertical-align: -1.5px;
+    }
+    .rt-ico-sm {
+      width: 11px;
+      height: 11px;
+    }
     .rt-loop {
-      font-style: normal;
+      display: inline-flex;
       color: var(--accent);
       font-weight: 700;
     }
-    .rt-trail {
-      display: flex;
-      flex-wrap: wrap;
-      gap: 4px;
-      margin: 2px 0 8px;
-    }
     .rt-chip {
+      display: inline-flex;
+      align-items: center;
+      gap: 3px;
       max-width: 170px;
       overflow: hidden;
       text-overflow: ellipsis;
@@ -2860,4 +2925,13 @@
     }
     .rt-chip-stage {
       opacity: 0.7;
+    }
+    .rt-chip-none {
+      opacity: 0.35;
+      border-style: dashed;
+    }
+    .rt-chip-n {
+      font-style: normal;
+      opacity: 0.75;
+      font-variant-numeric: tabular-nums;
     }

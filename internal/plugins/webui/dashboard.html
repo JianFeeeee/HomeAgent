@@ -53,7 +53,7 @@
           导航项：图标 + 标签。
           为什么把 data-i18n 挪到内层 span：切语言时那段代码是 `el.textContent = …`，
           挂在 <a> 上会把图标一起抹掉 —— 只有把标签单独包起来才两全。
-          图标一律 24×24 stroke（currentColor），跟随 active/hover 变色，不额外加一套资源。
+          图标一律 24x24 stroke（currentColor），跟随 active/hover 变色，不额外加一套资源。
         -->
         <a class="active" onclick="switchTab('overview')">
           <svg class="nav-ico" viewBox="0 0 24 24"><path d="M3 3h7v7H3zM14 3h7v5h-7zM14 12h7v9h-7zM3 14h7v7H3z"/></svg>
