@@ -16,7 +16,17 @@ type Indexer struct {
 	mu       sync.RWMutex
 	trained  bool
 	recalled map[string]bool // 已通过工具调用显式召回的实体名，自动注入时跳过
+
+	// recalledOrder 记录 recalled 的插入顺序，用于超限时按 FIFO 淘汰。
+	recalledOrder []string
 }
+
+// maxRecalledEntities 是「已召回实体」去重集的上限。
+//
+// 无上限时它只增不减：进程活得越久，被永久跳过的实体越多，自动注入
+// 越来越「沉默」——一个只在长跑进程里才暴露的隐蔽退化。超限后淘汰最旧的
+// 名字（允许重新注入），而不是丢弃整个集合。
+const maxRecalledEntities = 1024
 
 func NewIndexer(db *GraphDB) *Indexer {
 	return &Indexer{
@@ -32,7 +42,16 @@ func (idx *Indexer) MarkRecalled(names ...string) {
 	idx.mu.Lock()
 	defer idx.mu.Unlock()
 	for _, name := range names {
+		if idx.recalled[name] {
+			continue
+		}
 		idx.recalled[name] = true
+		idx.recalledOrder = append(idx.recalledOrder, name)
+	}
+	for len(idx.recalledOrder) > maxRecalledEntities {
+		oldest := idx.recalledOrder[0]
+		idx.recalledOrder = idx.recalledOrder[1:]
+		delete(idx.recalled, oldest)
 	}
 }
 

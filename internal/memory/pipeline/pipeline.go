@@ -24,6 +24,12 @@ type RawRecord struct {
 	Content   string    `json:"content"`
 	CreatedAt time.Time `json:"created_at"`
 	Distilled bool      `json:"distilled"`
+
+	// persisted 表示该记录已经写在磁盘 raw 文件里。
+	// 未导出：只影响本进程的落盘行为，不进 JSON。
+	// 作用：flush 只写**尚未落盘**的记录，否则 loadExisting 载入的记录
+	// 会被再写一份，重启后同一批记录从新旧两个文件各读回一次。
+	persisted bool
 }
 
 type DistillerConfig struct {
@@ -33,16 +39,16 @@ type DistillerConfig struct {
 }
 
 type Distiller struct {
-	mu        sync.Mutex
-	db        *memory.GraphDB
-	rawPath   string
-	records   []RawRecord
-	nextID    int64
-	cfg       DistillerConfig
-	ctx       context.Context
-	cancel    context.CancelFunc
-	onMemory  func(input, response string)
-	embedder  nlp.Vectorizer
+	mu       sync.Mutex
+	db       *memory.GraphDB
+	rawPath  string
+	records  []RawRecord
+	nextID   int64
+	cfg      DistillerConfig
+	ctx      context.Context
+	cancel   context.CancelFunc
+	onMemory func(input, response string)
+	embedder nlp.Vectorizer
 }
 
 func (d *Distiller) SetEmbedder(ev nlp.Vectorizer) { d.embedder = ev }
@@ -76,6 +82,22 @@ func (d *Distiller) Stop() {
 	d.flush()
 }
 
+// Stopped 报告蒸馏循环是否已被 Stop() 取消。
+//
+// Stop() 里的 cancel() 是同步生效的，所以本方法在 Stop() 返回后立即为 true，
+// 不受循环 goroutine 何时退出的影响。启动自检、健康检查用它确认
+// 「Start 之后没有被立即 Stop 掉」——历史回归：main() 拆分时
+// initMemoryStack 里残留一句 defer distiller.Stop()，函数一返回就把刚起的
+// 循环杀了，10min 心跳从不运行。Start() 之前返回 false（尚未被停）。
+func (d *Distiller) Stopped() bool {
+	select {
+	case <-d.ctx.Done():
+		return true
+	default:
+		return false
+	}
+}
+
 func (d *Distiller) Append(sessionID string, role string, content string) {
 	d.mu.Lock()
 	defer d.mu.Unlock()
@@ -89,19 +111,35 @@ func (d *Distiller) Append(sessionID string, role string, content string) {
 func (d *Distiller) flush() {
 	d.mu.Lock()
 	defer d.mu.Unlock()
-	if len(d.records) == 0 {
+	d.flushLocked()
+}
+
+// flushLocked 把**尚未落盘**的记录追加写入一个新的 raw 文件（原子写）。
+//
+// 只写 !persisted 的记录：loadExisting 载入的记录已经在磁盘上，若 flush 再把
+// 它们整体重写一份，重启后同一批记录会同时从旧文件与新文件被读回，
+// 实体 mention_count 与关系被重复蒸馏。
+func (d *Distiller) flushLocked() {
+	var pending []RawRecord
+	for _, r := range d.records {
+		if !r.persisted {
+			pending = append(pending, r)
+		}
+	}
+	if len(pending) == 0 {
 		return
 	}
 	path := filepath.Join(d.rawPath, fmt.Sprintf("raw_%d.tsv", time.Now().UnixNano()))
-	f, err := os.Create(path)
-	if err != nil {
+	var sb strings.Builder
+	for _, r := range pending {
+		fmt.Fprintf(&sb, "%d\t%s\t%s\t%s\t%d\n", r.ID, r.SessionID, r.Role, r.Content, r.CreatedAt.Unix())
+	}
+	if err := writeFileAtomic(path, []byte(sb.String())); err != nil {
 		log.Printf("[memory] flush error: %v", err)
 		return
 	}
-	defer f.Close()
-	for _, r := range d.records {
-		line := fmt.Sprintf("%d\t%s\t%s\t%s\t%d\n", r.ID, r.SessionID, r.Role, r.Content, r.CreatedAt.Unix())
-		f.WriteString(line)
+	for i := range d.records {
+		d.records[i].persisted = true
 	}
 }
 
@@ -167,6 +205,7 @@ func (d *Distiller) loadExisting() {
 				}
 				d.records = append(d.records, RawRecord{
 					ID: d.nextID, SessionID: parts[1], Role: parts[2], Content: parts[3], CreatedAt: createdAt,
+					persisted: true,
 				})
 				d.nextID++
 				loaded++
@@ -222,6 +261,9 @@ func (d *Distiller) distillOnce() {
 		}
 		if d.distillBatch(toDistill[i:end]) {
 			distilled += end - i
+			// 成功即从磁盘 raw 文件里删除这些行，否则重启后 loadExisting
+			// 会把它们当未蒸馏记录重新读回，每次启动重蒸同一批历史。
+			d.removeRawRecords(toDistill[i:end])
 		} else {
 			// 蒸馏失败：记录写回待处理队列，下次 tick 重试
 			d.mu.Lock()
@@ -279,6 +321,80 @@ func (d *Distiller) cleanupRawFiles() {
 	}
 }
 
+// writeFileAtomic 写临时文件再 rename，避免进程在写一半时崩溃留下半个文件。
+func writeFileAtomic(path string, data []byte) error {
+	tmp := path + ".tmp"
+	if err := os.WriteFile(tmp, data, 0644); err != nil {
+		return err
+	}
+	return os.Rename(tmp, path)
+}
+
+// rawKey 唯一标识一条原始记录，用于在 raw 文件里按内容定位并删除。
+//
+// 为什么按内容而不是 ID：loadExisting 读回记录时会重新分配连续 ID，
+// 文件里的 ID 与内存 ID 并不一一对应。
+func rawKey(session, role, content string, ts int64) string {
+	return session + "\x00" + role + "\x00" + content + "\x00" + strconv.FormatInt(ts, 10)
+}
+
+// removeRawRecords 从磁盘 raw 文件中删除已成功蒸馏的记录。
+//
+// 蒸馏成功后记录若只从内存移除、磁盘文件不动，下次启动 loadExisting 会把
+// 它们当未蒸馏记录重新读回，导致每次重启都重蒸同一批历史（实体
+// mention_count 膨胀，且 distillBatch 的 sessionID 取自 map 首个键，
+// 不确定性会放大重复）。
+func (d *Distiller) removeRawRecords(batch []RawRecord) {
+	if len(batch) == 0 {
+		return
+	}
+	drop := make(map[string]bool, len(batch))
+	for _, r := range batch {
+		drop[rawKey(r.SessionID, r.Role, r.Content, r.CreatedAt.Unix())] = true
+	}
+	entries, err := os.ReadDir(d.rawPath)
+	if err != nil {
+		return
+	}
+	for _, entry := range entries {
+		ext := filepath.Ext(entry.Name())
+		if ext != ".tsv" && ext != ".jsonl" {
+			continue
+		}
+		path := filepath.Join(d.rawPath, entry.Name())
+		data, err := os.ReadFile(path)
+		if err != nil {
+			continue
+		}
+		var kept []string
+		removed := false
+		for _, line := range strings.Split(strings.TrimRight(string(data), "\n"), "\n") {
+			if line == "" {
+				continue
+			}
+			parts := splitLine(line)
+			if len(parts) >= 5 {
+				if ts, err := strconv.ParseInt(parts[4], 10, 64); err == nil &&
+					drop[rawKey(parts[1], parts[2], parts[3], ts)] {
+					removed = true
+					continue
+				}
+			}
+			kept = append(kept, line)
+		}
+		if !removed {
+			continue
+		}
+		if len(kept) == 0 {
+			os.Remove(path)
+			continue
+		}
+		if err := writeFileAtomic(path, []byte(strings.Join(kept, "\n")+"\n")); err != nil {
+			log.Printf("[memory] rewrite raw %s: %v", entry.Name(), err)
+		}
+	}
+}
+
 func extractKeyTriples(userContent, assistantContent string, embedder nlp.Vectorizer) []memory.Triple {
 	var triples []memory.Triple
 
@@ -308,13 +424,6 @@ func truncate(s string, max int) string {
 		return s[:max] + "..."
 	}
 	return s
-}
-
-func parseLines(data string) []string {
-	if data == "" {
-		return nil
-	}
-	return strings.Split(strings.TrimRight(data, "\n"), "\n")
 }
 
 func splitLine(line string) []string {

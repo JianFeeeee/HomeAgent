@@ -4,12 +4,18 @@ import (
 	"database/sql"
 	"encoding/json"
 	"fmt"
+	"log"
 	"strings"
 	"sync"
 	"time"
 
 	_ "github.com/mattn/go-sqlite3"
 )
+
+// maxFullRecallEntities 是「无关键词全量读取」路径的实体上限。
+// 该路径只服务于内部整备（Indexer.Sync / 实体合并检测），并非用户检索；
+// 无上限时一张大图会被整表 read 进内存。超限时 GraphDB.Recall 会记日志。
+const maxFullRecallEntities = 10000
 
 type Entity struct {
 	ID           int64     `json:"id"`
@@ -255,10 +261,14 @@ func (g *GraphDB) migrateRelationUnique(tx *sql.Tx) error {
 	return nil
 }
 
-// Commit 把三元组写入图库，返回新建的实体数与关系数。
 // Path 返回本库的存储路径（父 agent 用它为驻留子打开**受限句柄**）。
 func (g *GraphDB) Path() string { return g.dbPath }
 
+// Commit 把三元组写入图库，返回通过实体名校验并写入/刷新的实体数与**新建**的关系数。
+//
+// 两个计数的语义刻意不同，因为上游只用它们判断「有没有东西写进去」：
+// 实体计数含已存在实体的 mention_count 刷新（见 upsertEntity），
+// 关系计数只统计真正新建的关系（已存在则仅刷新 confidence）。
 func (g *GraphDB) Commit(triples []Triple, sessionID string, turnID int) (int, int, error) {
 	_, ec, rc, err := g.commit(triples, sessionID, turnID, false)
 	return ec, rc, err
@@ -409,6 +419,12 @@ func validEntityName(name string) bool {
 	return hasLetter
 }
 
+// upsertEntity 写入/刷新一个实体，返回 1 表示该实体**通过名校验并被写入或刷新**，
+// 0 表示名校验未通过。
+//
+// 注意返回值语义不是「新建数」：`ON CONFLICT DO UPDATE` 在更新时
+// RowsAffected 同样为 1，所以返回值等于「通过校验的 upsert 次数」。
+// 调用方（Commit）把它当「写入了几个实体」用，不是「新建了几个」。
 func (g *GraphDB) upsertEntity(tx *sql.Tx, name string, entityType string) (int, error) {
 	if !validEntityName(name) {
 		return 0, nil
@@ -442,9 +458,12 @@ func (g *GraphDB) Recall(keywords []string, seedEntities []string, depth int, se
 	result := &RecallResult{}
 
 	if len(keywords) == 0 && len(seedEntities) == 0 {
+		// 全量读取仅用于内部整备（Indexer.Sync / 实体合并检测），
+		// 必须加限额：无 LIMIT 时大图会被整表读进内存。
 		rows, err := g.db.Query(
 			`SELECT id, name, type, mention_count, created_at, updated_at
-			 FROM entities ORDER BY mention_count DESC`,
+			 FROM entities ORDER BY mention_count DESC LIMIT ?`,
+			maxFullRecallEntities,
 		)
 		if err != nil {
 			return nil, err
@@ -457,6 +476,9 @@ func (g *GraphDB) Recall(keywords []string, seedEntities []string, depth int, se
 				return nil, err
 			}
 			result.Entities = append(result.Entities, e)
+		}
+		if len(result.Entities) >= maxFullRecallEntities {
+			log.Printf("[graph] full recall 命中实体上限 %d，可能有实体未纳入", maxFullRecallEntities)
 		}
 
 		relRows, err := g.db.Query(
@@ -1047,6 +1069,8 @@ func (g *GraphDB) Archive(days int) (int, error) {
 
 // ClearSentenceID 清除指定关系的 sentence_id（LLM复审后解除句子引用）
 func (g *GraphDB) ClearSentenceID(relationID int64) error {
+	g.mu.Lock()
+	defer g.mu.Unlock()
 	_, err := g.db.Exec(
 		`UPDATE relations SET sentence_id = 0, updated_at = CURRENT_TIMESTAMP WHERE id = ?`,
 		relationID,

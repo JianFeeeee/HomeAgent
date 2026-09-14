@@ -3,6 +3,7 @@ package core
 import (
 	"encoding/json"
 	"fmt"
+	"log"
 	"os"
 	"path/filepath"
 	"sort"
@@ -68,10 +69,38 @@ func NewRelevanceContext(savePath string, embedder *memory.StaticEmbedder) *Rele
 
 // SetDenseSpace 注入稠密多模态向量空间。配置后 L0 相关性裁剪可用稠密向量
 // 余弦（与媒体检索、文档检索共享同一空间），未配置时退化到稀疏词向量。
+//
+// 注入时**回填已有事件**的稠密向量。为什么必须回填：NewRelevanceContext 先
+// load()、再 SetDenseSpace，载入时 c.denseSpace 还是 nil，旧事件只算了稀疏
+// 向量；若这里只赋值不回填，Prune 里旧事件因 DenseFP 为空、长度不符而全部
+// 走稀疏余弦，新事件走稠密余弦 —— 同一次排序里两种尺度混排，谁留下谁归档
+// 取决于事件新旧而非相关性。对齐 DocStore.BuildDenseIndex 的做法。
+//
+// 注意 DenseVec/DenseFP 刻意不持久化（json:"-"）：这是每次启动一次性重算的
+// 缓存，不落盘，因此这里也不需要 Save。
 func (c *RelevanceContext) SetDenseSpace(ds vector.MultimodalEmbedder) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	c.denseSpace = ds
+	if ds == nil || !ds.Loaded() {
+		return
+	}
+	fp := ds.Fingerprint()
+	dim := ds.Dim()
+	filled := 0
+	for _, evt := range c.events {
+		if evt == nil {
+			continue
+		}
+		if evt.DenseFP == fp && len(evt.DenseVec) == dim {
+			continue
+		}
+		c.computeVector(evt)
+		filled++
+	}
+	if filled > 0 {
+		log.Printf("[agent] context dense backfill: %d events", filled)
+	}
 }
 
 func (c *RelevanceContext) SetToolDefLookup(fn func(name string) *sdk.ToolDef) {
