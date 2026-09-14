@@ -404,7 +404,28 @@ func (a *Agent) Start() {
 func (a *Agent) Stop() {
 	// 父退出**必须**销毁全部驻留子（设计 §10 硬约束：子不得比父活得久、不留孤儿）。
 	a.StopResidents()
+	// 停机前给待办任务补终态。运行中的任务会经 cancel → LLM 失败 → emitResponse
+	// 自然拿到终态，但**从未运行**（排队/待处理）与**已挂起**的任务不会有任何人
+	// 回它们；带 ResponseCh 的同步注入方（cli / clawhubadapter 均无超时）会永久挂起
+	// （设计 §7 I5、§11.3 X2/X4）。必须在 cancel 之前做：cancel 会让调度器直接 return。
+	a.drainPendingInterrupts("agent_stopped")
 	a.cancel()
+}
+
+// drainPendingInterrupts 给排队/待处理/已挂起任务中带同步回执通道的调用方补一条
+// skipped 终态（复用 emitSkippedReply：非阻塞写，不对外发 agent_output 事件）。
+func (a *Agent) drainPendingInterrupts(reason string) {
+	if a.sched == nil {
+		return
+	}
+	pending := a.sched.pendingEvents()
+	if len(pending) == 0 {
+		return
+	}
+	for _, evt := range pending {
+		a.emitSkippedReply(evt, reason)
+	}
+	log.Printf("[agent] %s: 停机，%d 条待办任务已补 skipped 终态", a.id, len(pending))
 }
 
 // graphMemoryOf 决定本 agent 的图记忆共同面实现。
