@@ -10,6 +10,7 @@ import { ChatMessage, ToolCallInfo, ChatAttachment } from '../model/Model';
 import { attachmentFromChannelOutput } from './AttachmentMeta';
 import { SseEvent } from './SseClient';
 import { stringifyField } from './ChatFormat';
+import { stageTrail } from './StageTrail';
 import { hilog } from '@kit.PerformanceAnalysisKit';
 
 /** 聊天流状态机对外暴露的最小写入面（由 common/ChatStore.ets 实现） */
@@ -168,6 +169,9 @@ export function applyChatSse(ev: SseEvent, sink: ChatStreamSink): void {
       const channel: string = payload['channel'] as string ?? '';
       const stageTool: string = payload['tool'] as string ?? '';
       if (channel !== '_consolidation_') {
+        // 运行态面板的阶段管道靠这条轨迹活着：先喂轨迹，再管聊天侧的角标。
+        // 两者是独立消费者，轨迹不依赖任何聊天状态。
+        stageTrail.onStage(phase, stageTool);
         if (phase === 'pre_action') {
           sink.setStage('AI 思考中...');
         } else if (phase === 'before_toolcall') {

@@ -17,6 +17,7 @@ import {
   SUB_NONE, SUB_STATUS, SUB_CONNECTIONS, SUB_APPEARANCE, SUB_BACKEND, SUB_SECTION,
 } from '../common/SettingsModel';
 import { statusStore } from '../common/StatusStore';
+import { stageTrail } from '../common/StageTrail';
 
 interface SaveSettingBody {
   key: string;
@@ -72,6 +73,8 @@ export struct SettingsPage {
     this.loadBackendSettings();
     // 状态 Tab 已删除，运行状态并入本页：顶部摘要卡 + 二级明细页
     statusStore.init();
+    // 阶段轨迹由 SSE 喂入，与状态轮询是两条独立的数据源
+    stageTrail.init();
     statusStore.refresh();
   }
 
