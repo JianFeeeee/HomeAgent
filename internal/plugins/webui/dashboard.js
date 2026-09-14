@@ -642,6 +642,166 @@
         return out ? '<span class="rt-caps">' + out + "</span>" : "";
       }
 
+      // 归属配色：根用青色，驻留子轮转其余颜色（同一张图里能一眼分清谁是谁）。
+      var RT_OWNER_COLORS = ["#88c0d0", "#b48ead", "#a3be8c", "#ebcb8b", "#d08770", "#8fbcbb"];
+
+      // rtOwnerGroups 把 inputch 按**归属**分组（owner == 根 agent id 与 "" 归一为根）。
+      function rtOwnerGroups(inputs, residents, rootID) {
+        var order = [];
+        var map = {};
+        inputs.forEach(function (c) {
+          var o = c.owner || "";
+          if (o === rootID) o = "";
+          if (!map[o]) {
+            map[o] = [];
+            order.push(o);
+          }
+          map[o].push(c);
+        });
+        // 驻留子即使一条 inputch 都没划到也要出现——否则「子存在但看不见」
+        // 与「子不存在」无法区分。
+        residents.forEach(function (r) {
+          var o = r.id || "";
+          if (o && o !== rootID && !map[o]) {
+            map[o] = [];
+            order.push(o);
+          }
+        });
+        order.sort(function (a, b) {
+          if (a === "") return -1;
+          if (b === "") return 1;
+          return a < b ? -1 : 1;
+        });
+        var ci = 0;
+        return order.map(function (o) {
+          var res = null;
+          residents.forEach(function (r) {
+            if (r.id === o) res = r;
+          });
+          var list = map[o] || [];
+          return {
+            owner: o,
+            child: o !== "",
+            label: o === "" ? __("根 agent / 内核默认", "root agent / kernel default") : __("驻留子 ", "resident ") + o,
+            color: o === "" ? RT_OWNER_COLORS[0] : RT_OWNER_COLORS[1 + (ci++ % (RT_OWNER_COLORS.length - 1))],
+            list: list,
+            count: list.length,
+            res: res,
+          };
+        });
+      }
+
+      // rtTopologySvg 把「通道 + 归属 + 路由」画成**一张图**：
+      // 左侧按归属框出输入通道 → 汇集母线 → 内核 → 输出母线 → 右侧输出通道。
+      // 连线即路由；归属是容器与配色；容量是节点里的细条；输出能力是彩色圆点。
+      // 为什么合进拓扑而不是单开一项：通道属于谁是**拓扑的一部分**
+      // （左边这些输入口分别被谁接管），拆两张表反而看不出关系。
+      function rtTopologySvg(groups, channels) {
+        var ROW = 24, HEAD = 18, GPAD = 8, GAP = 10;
+        var W = 660;
+        var LX = 6, LW = 226;
+        var KX = 292, KW = 76;
+        var RX = 408, RW = 246;
+        var BUS_IN = 262, BUS_OUT = 396;
+        var top = 6;
+        var out = [];
+        function esc(s) {
+          return String(s == null ? "" : s).replace(/[<>&]/g, function (m) {
+            return m === "<" ? "&lt;" : m === ">" ? "&gt;" : "&amp;";
+          });
+        }
+
+        // ---- 左：归属容器 + 通道行 ----
+        var y = top;
+        var inRows = [];
+        groups.forEach(function (g) {
+          var boxH = HEAD + g.list.length * ROW + GPAD;
+          out.push(
+            '<rect x="' + LX + '" y="' + y + '" width="' + LW + '" height="' + boxH +
+              '" rx="9" fill="none" stroke="' + g.color + '" stroke-opacity="0.5"' +
+              (g.child ? "" : ' stroke-dasharray="4 3"') + "/>"
+          );
+          out.push(
+            '<text x="' + (LX + 10) + '" y="' + (y + 13) + '" font-size="10" fill="' + g.color + '">' +
+              esc((g.child ? "▸ " : "◆ ") + g.label) +
+              (g.res ? "　" + __("轮次", "rounds") + " " + (g.res.rounds || 0) : "") +
+              (g.res && g.res.context_full ? "　" + __("上下文已满", "ctx full") : "") +
+              "</text>"
+          );
+          g.list.forEach(function (c, i) {
+            var ry = y + HEAD + i * ROW;
+            inRows.push({ y: ry + ROW / 2, color: g.color });
+            out.push('<text x="' + (LX + 12) + '" y="' + (ry + 15) + '" font-size="11">' + esc(c.name) + "</text>");
+            var cap = c.capacity || 0;
+            var tx = LX + LW - 76;
+            out.push('<rect x="' + tx + '" y="' + (ry + 8) + '" width="46" height="6" rx="3" fill="rgba(255,255,255,0.10)"/>');
+            if (cap > 0) {
+              var wpx = Math.max(3, Math.min(46, (46 * Math.min(cap, 64)) / 64));
+              out.push('<rect x="' + tx + '" y="' + (ry + 8) + '" width="' + wpx + '" height="6" rx="3" fill="' + g.color + '"/>');
+            }
+            out.push('<text x="' + (LX + LW - 24) + '" y="' + (ry + 15) + '" font-size="9" fill="#8b90a5">' + esc(cap || __("默认", "def")) + "</text>");
+          });
+          y += boxH + GAP;
+        });
+        var leftBottom = Math.max(y - GAP, top + 40);
+
+        // ---- 右：输出通道 ----
+        var outs = (channels || []).filter(function (c) {
+          return c.direction === "out" || c.direction === "io";
+        });
+        var outRows = [];
+        var oy = top;
+        var CAPS = [[1, "#88c0d0"], [2, "#a3be8c"], [4, "#ebcb8b"], [8, "#d08770"], [16, "#b48ead"]];
+        outs.forEach(function (c) {
+          outRows.push({ y: oy + ROW / 2 });
+          out.push('<rect x="' + RX + '" y="' + oy + '" width="' + RW + '" height="' + (ROW - 4) + '" rx="6" fill="rgba(255,255,255,0.05)"/>');
+          out.push('<text x="' + (RX + 10) + '" y="' + (oy + 15) + '" font-size="11">' + esc(c.name) + "</text>");
+          var cx = RX + RW - 76;
+          CAPS.forEach(function (b) {
+            if ((c.output_caps || 0) & b[0]) {
+              out.push('<circle cx="' + cx + '" cy="' + (oy + 10) + '" r="4" fill="' + b[1] + '"/>');
+            }
+            cx += 14;
+          });
+          oy += ROW;
+        });
+        var rightBottom = Math.max(oy, top + 40);
+
+        var H = Math.max(leftBottom, rightBottom) + 10;
+        var ky = Math.round((Math.min(leftBottom, rightBottom) + Math.max(leftBottom, rightBottom)) / 2) - 14;
+
+        // ---- 输入母线 ----
+        if (inRows.length) {
+          var iy0 = inRows[0].y;
+          var iy1 = inRows[inRows.length - 1].y;
+          out.push('<line x1="' + BUS_IN + '" y1="' + iy0 + '" x2="' + BUS_IN + '" y2="' + iy1 + '" stroke="#4c5163" stroke-width="1.5"/>');
+          inRows.forEach(function (r) {
+            out.push('<line x1="' + (LX + LW) + '" y1="' + r.y + '" x2="' + BUS_IN + '" y2="' + r.y + '" stroke="' + r.color + '" stroke-width="1.2" stroke-opacity="0.55"/>');
+          });
+          out.push('<line x1="' + BUS_IN + '" y1="' + ((iy0 + iy1) / 2) + '" x2="' + KX + '" y2="' + (ky + 14) + '" stroke="#4c5163" stroke-width="1.5"/>');
+        }
+        // ---- 内核 ----
+        out.push('<rect x="' + KX + '" y="' + ky + '" width="' + KW + '" height="28" rx="14" fill="rgba(136,192,208,0.18)" stroke="#88c0d0" stroke-opacity="0.6"/>');
+        out.push('<text x="' + (KX + KW / 2) + '" y="' + (ky + 19) + '" font-size="11" text-anchor="middle" fill="#cfe6ea">' + __("内核", "Kernel") + "</text>");
+        // ---- 输出母线 ----
+        if (outRows.length) {
+          var oy0 = outRows[0].y;
+          var oy1 = outRows[outRows.length - 1].y;
+          out.push('<line x1="' + BUS_OUT + '" y1="' + oy0 + '" x2="' + BUS_OUT + '" y2="' + oy1 + '" stroke="#4c5163" stroke-width="1.5"/>');
+          outRows.forEach(function (r) {
+            out.push('<line x1="' + BUS_OUT + '" y1="' + r.y + '" x2="' + RX + '" y2="' + r.y + '" stroke="#4c5163" stroke-width="1.2"/>');
+          });
+          out.push('<line x1="' + (KX + KW) + '" y1="' + (ky + 14) + '" x2="' + BUS_OUT + '" y2="' + ((oy0 + oy1) / 2) + '" stroke="#4c5163" stroke-width="1.5"/>');
+        }
+
+        return (
+          '<div class="rt-section-title">' + __("通道拓扑（连线即路由；左框 = 归属）", "Channel topology (edges = routing; boxes = owner)") + "</div>" +
+          '<div class="rt-svg-wrap"><svg class="rt-svg" viewBox="0 0 ' + W + " " + H + '" preserveAspectRatio="xMinYMin meet" width="100%" height="' + H + '">' +
+          out.join("") +
+          "</svg></div>"
+        );
+      }
+
       function renderRuntime() {
         var el = document.getElementById("rt-panel");
         if (!el) return;
@@ -672,7 +832,6 @@
             '<div id="rt-sec-tiles"></div>' +
             '<div id="rt-sec-levels"></div>' +
             '<div id="rt-sec-stack"></div>' +
-            '<div id="rt-sec-owners"></div>' +
             '<div id="rt-sec-topo"></div>' +
             "</div>";
         }
@@ -694,11 +853,11 @@
 
         // ---- 段 1：四个数字块 ----
         var h = '<div class="rt-grid">';
-        h += rtTile(ready, __("排队任务", "Ready queue"), __("等待执行的输入", "inputs waiting"), ready ? Math.min(100, ready * 20) : 0, ready > 0);
-        h += rtTile(pending, __("待处理中断", "Pending interrupts"), __("四级队列 + 立即抢占", "queued + immediate"), pending ? Math.min(100, pending * 25) : 0, pending > 0, pending > 0);
-        h += rtTile(stack + "/" + maxStack, __("中断栈", "Interrupt stack"), __("嵌套抢占的现场", "nested frames"), (stack / (maxStack || 4)) * 100, stack > 0);
+        h += rtTile(ready, __("排队任务", "Ready queue"), "", ready ? Math.min(100, ready * 20) : 0, ready > 0);
+        h += rtTile(pending, __("待处理中断", "Pending interrupts"), "", pending ? Math.min(100, pending * 25) : 0, pending > 0, pending > 0);
+        h += rtTile(stack + "/" + maxStack, __("中断栈", "Interrupt stack"), "", (stack / (maxStack || 4)) * 100, stack > 0);
         var rFull = residents.filter(function (r) { return r.context_full; }).length;
-        h += rtTile(residents.length, __("驻留子 Agent", "Resident agents"), rFull ? rFull + __(" 个上下文已满", " context-full") : __("常驻子任务", "long-lived children"), residents.length ? Math.min(100, residents.length * 20) : 0, residents.length > 0, rFull > 0);
+        h += rtTile(residents.length, __("驻留子 Agent", "Resident agents"), rFull ? rFull + __(" 满", " full") : "", residents.length ? Math.min(100, residents.length * 20) : 0, residents.length > 0, rFull > 0);
         h += "</div>";
         // 抢占/背压计数（设计 §11.6 E4 的按级别口径）
         h += '<div class="rt-chan-sub">' + __("累计", "totals") + "： " +
@@ -744,8 +903,7 @@
           __("排队（无级别）", "queued (no level)") + "</span>" +
           '<span class="rt-lv-track rt-lv-q"><i style="width:' +
           (ready ? Math.max(4, (ready / maxQ) * 100) : 0) + '%"></i></span>' +
-          '<span class="rt-lv-meta">' + ready + " · " +
-          __("FIFO，可被任何中断打断", "FIFO, preempted by any interrupt") + "</span></div>";
+          '<span class="rt-lv-meta">' + ready + " · FIFO</span></div>";
         h += "</div>";
         if (sc.immediate) {
           h += '<div class="rt-frame">⚡ ' + __("立即运行", "immediate") + "：" +
@@ -774,111 +932,15 @@
         }
         put("stack", h);
 
-        // ---- 段 4：通道分配（按归属）----
+        // ---- 段 4：拓扑（通道 + 归属 + 路由 画在同一张图上）----
         //
-        // inputch 是输入路由单位，登记表由根 agent 与驻留子**共用同一份**——
-        // 「这条输入归谁」必须画出来。只画设备能力（段 5）等于把「路由发生在
-        // 进内核之前」这条设计事实藏起来，驻留子的通道分配就完全不可见。
-        h = '<div class="rt-section-title">' + __("通道分配（按归属）", "Input channels by owner") + "</div>";
-        var maxCap = 1;
-        inputs.forEach(function (c) {
-          if ((c.capacity || 0) > maxCap) maxCap = c.capacity;
-        });
-        var owners = [];
-        var byOwner = {};
-        // 根 agent 的 id：登记表里根自己的 owner 就是它（如 "main"）。
-        // 不把它跟驻留子分开，根自己的通道会被标成「驻留子 main」——实测踩过。
+        // 归属不再单开一项：通道属于谁是**拓扑的一部分**（左边这些输入口
+        // 分别被谁接管），拆成两张表反而看不出关系。整张图用 SVG 画，
+        // 文字只保留通道名与分组名，其余信息全部用图形编码：
+        // 归属=容器/配色、容量=节点内细条、输出能力=彩色圆点、路由=连线。
         var rootID = rt.agent_id || "";
-        var isChild = function (o) { return o !== "" && o !== rootID; };
-        inputs.forEach(function (c) {
-          // owner == 根 agent id 与 owner == "" 是同一件事（都是归根 agent / 内核默认），
-          // 归一成一组，否则同一个根会画出两个容器。
-          var o = c.owner || "";
-          if (o === rootID) o = "";
-          if (!byOwner[o]) {
-            byOwner[o] = [];
-            owners.push(o);
-          }
-          byOwner[o].push(c);
-        });
-        // 驻留子即使一条 inputch 都没划到也要出现在图里——否则「子存在但看不见」
-        // 与「子不存在」无法区分。
-        residents.forEach(function (r) {
-          var o = r.id || "";
-          if (o && o !== rootID && !byOwner[o]) {
-            byOwner[o] = [];
-            owners.push(o);
-          }
-        });
-        owners.sort(function (a, b) {
-          if (a === "" || a === rootID) return -1;
-          if (b === "" || b === rootID) return 1;
-          return a < b ? -1 : 1;
-        });
-        if (!owners.length) {
-          h += '<div class="rt-empty">' + __("暂无通道登记", "no channel registered") + "</div>";
-        }
-        owners.forEach(function (o) {
-          var list = byOwner[o] || [];
-          var res = null;
-          if (o) {
-            residents.forEach(function (r) {
-              if (r.id === o) res = r;
-            });
-          }
-          var child = isChild(o);
-          h += '<div class="rt-owner' + (child ? " rt-owner-child" : "") + '">';
-          h += '<div class="rt-owner-head"><span class="rt-owner-name">' +
-            (child ? "▸ " : "◆ ") +
-            (child
-              ? __("驻留子 ", "resident ") + escHtml(o)
-              : __("根 agent", "root agent") + (o ? " " + escHtml(o) : "") + __(" / 内核默认", " / kernel default")) +
-            '</span><span class="rt-owner-meta">' + list.length + " " + __("条通道", "channels") +
-            (res ? " · " + __("轮次", "rounds") + " " + (res.rounds || 0) : "") +
-            (res && res.context_full ? ' <span class="rt-badge-warn">' + __("上下文已满", "ctx full") + "</span>" : "") +
-            "</span></div>";
-          if (list.length) {
-            list.forEach(function (c) {
-              var cap = c.capacity || 0;
-              h += '<div class="rt-assign">' +
-                '<span class="rt-chan-name">' + escHtml(c.name) + "</span>" +
-                (c.plugin ? '<span class="rt-chip">' + escHtml(c.plugin) + "</span>" : "") +
-                rtSlider(cap, maxCap, __("容量", "cap"), cap ? String(cap) : __("默认", "default")) +
-                '<span class="rt-chan-sub">' +
-                (c.output ? __("回程 ", "out ") + escHtml(c.output) : __("回程由来源决定", "out by source")) +
-                "</span></div>";
-            });
-          } else {
-            var allowed = (res && res.allowed_outputs) || [];
-            h += '<div class="rt-chan-sub">' +
-              (allowed.length
-                ? __("可发往输出通道：", "allowed outputs: ") +
-                  allowed.map(function (x) { return '<span class="rt-chip">' + escHtml(x) + "</span>"; }).join("")
-                : __("未划入任何 inputch", "no input channel assigned")) +
-              "</div>";
-          }
-          h += "</div>";
-        });
-        put("owners", h);
-
-        // ---- 段 5：通道拓扑（设备能力面）----
-        h = '<div class="rt-section-title">' + __("通道拓扑", "Channel topology") + "</div>";
-        var ins = channels.filter(function (c) { return c.direction === "in" || c.direction === "io"; });
-        var outs = channels.filter(function (c) { return c.direction === "out" || c.direction === "io"; });
-        function chanHtml(c) {
-          return '<div class="rt-chan" title="' + escHtml(c.description || "") + '">' +
-            '<span class="rt-chan-name">' + escHtml(c.name) + "</span>" +
-            rtCapsHtml(c.output_caps || 0) +
-            '<div class="rt-chan-sub">' +
-            escHtml((c.tools || []).length ? (c.tools || []).length + " " + __("个工具", "tools") : (c.description || "").slice(0, 26)) +
-            "</div></div>";
-        }
-        h += '<div class="rt-topo">';
-        h += '<div class="rt-topo-col">' + (ins.length ? ins.map(chanHtml).join("") : '<div class="rt-empty">' + __("无输入通道", "no input channel") + "</div>") + "</div>";
-        h += '<div class="rt-core">' + __("内核", "Kernel") + "</div>";
-        h += '<div class="rt-topo-col rt-right">' + (outs.length ? outs.map(chanHtml).join("") : '<div class="rt-empty">' + __("无输出通道", "no output channel") + "</div>") + "</div>";
-        h += "</div>";
-        put("topo", h);
+        var ownerGroups = rtOwnerGroups(inputs, residents, rootID);
+        put("topo", rtTopologySvg(ownerGroups, channels));
       }
 
       // loadRuntime 拉运行态小快照并就地重绘面板（约 2KB，可秒级轮询）。
