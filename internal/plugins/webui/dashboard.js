@@ -4,6 +4,7 @@
         kernel: null,
         settings: {},
         meta: {},
+        runtime: null, // /api/v1/runtime 的运行态小快照（调度器/驻留子/通道）
         pluginMeta: {},
         disabledPlugins: [],
         settingsPlugins: ["core"],
@@ -465,6 +466,11 @@
           console.error("renderOverview", e);
         }
         try {
+          await loadRuntime();
+        } catch (e) {
+          console.error("loadRuntime", e);
+        }
+        try {
           renderChat();
         } catch (e) {
           console.error("renderChat", e);
@@ -559,10 +565,175 @@
 
       // ===== Overview =====
 
+      // ===== 运行态面板：把内核的调度器/驻留子/通道画出来 =====
+      //
+      // 数据来自 /api/v1/runtime（内核 internal/sdk 暴露的 KernelStatus 子集），
+      // 每 3 秒刷一次——运行态要"实时"，而 /kernel 是 30KB 级的全量状态，不适合秒级轮询。
+      //
+      // 四个数字块回答"现在忙不忙"：排队任务、待处理中断、中断栈深度、驻留子数量；
+      // 下面的四级条形回答"堵在哪一级"；中断栈图回答"谁打断了谁"；
+      // 通道拓扑回答"消息从哪儿进、能往哪儿出"。
+      // 四级语义直接照抄内核（internal/agent/core/scheduler.go 的 Level 定义），
+      // 别自己起名字——前端叫法一旦和内核不一致，看板就成了误导。
+      var RT_LEVELS = [
+        { lv: 4, name: "L4 内核独占", cls: "rt-lv-4" },
+        { lv: 3, name: "L3 交互", cls: "rt-lv-3" },
+        { lv: 2, name: "L2 消息", cls: "rt-lv-2" },
+        { lv: 1, name: "L1 后台", cls: "rt-lv-1" },
+      ];
+      var RT_CAP_NAMES = { 1: "text", 2: "file", 4: "image", 8: "audio", 16: "structured" };
+
+      function rtTile(num, label, sub, pct, active, warn) {
+        return (
+          '<div class="rt-tile' +
+          (active ? " rt-active" : "") +
+          (warn ? " rt-warn" : "") +
+          '"><div class="rt-num">' +
+          num +
+          '</div><div class="rt-label">' +
+          label +
+          "</div>" +
+          (sub ? '<div class="rt-sub">' + sub + "</div>" : "") +
+          '<div class="rt-bar"><i style="width:' +
+          Math.max(0, Math.min(100, pct || 0)) +
+          '%"></i></div></div>'
+        );
+      }
+
+      function rtCapsHtml(caps) {
+        var out = "";
+        Object.keys(RT_CAP_NAMES).forEach(function (bit) {
+          if (caps & Number(bit)) {
+            out += '<span class="rt-cap">' + RT_CAP_NAMES[bit] + "</span>";
+          }
+        });
+        return out ? '<span class="rt-caps">' + out + "</span>" : "";
+      }
+
+      function renderRuntime() {
+        var el = document.getElementById("rt-panel");
+        if (!el) return;
+        var rt = state.runtime;
+        if (!rt) {
+          el.innerHTML = '<div class="rt-empty">' + __("运行态数据不可用", "runtime unavailable") + "</div>";
+          return;
+        }
+        var sc = rt.scheduler || {};
+        var residents = rt.residents || [];
+        var channels = rt.channels || [];
+        var q = sc.interrupt_queues || [0, 0, 0, 0, 0];
+        var pending = sc.pending_interrupts || 0;
+        var ready = sc.ready_queue_depth || 0;
+        var stack = sc.suspend_stack || 0;
+        var maxStack = sc.max_suspend_depth || 4;
+        var frames = sc.suspend_frames || [];
+        var byLv = sc.interrupts_by_level || [];
+        var preLv = sc.preempts_by_level || [];
+
+        var html = '<div class="card"><h2>' + __("运行态", "Runtime") + "</h2>";
+        // 四个数字块
+        html += '<div class="rt-grid">';
+        html += rtTile(ready, __("排队任务", "Ready queue"), __("等待执行的输入", "inputs waiting"), ready ? Math.min(100, ready * 20) : 0, ready > 0);
+        html += rtTile(pending, __("待处理中断", "Pending interrupts"), __("四级队列 + 立即抢占", "queued + immediate"), pending ? Math.min(100, pending * 25) : 0, pending > 0, pending > 0);
+        html += rtTile(stack + "/" + maxStack, __("中断栈", "Interrupt stack"), __("嵌套抢占的现场", "nested frames"), (stack / (maxStack || 4)) * 100, stack > 0);
+        var rFull = residents.filter(function (r) { return r.context_full; }).length;
+        html += rtTile(residents.length, __("驻留子 Agent", "Resident agents"), rFull ? rFull + __(" 个上下文已满", " context-full") : __("常驻子任务", "long-lived children"), residents.length ? Math.min(100, residents.length * 20) : 0, residents.length > 0, rFull > 0);
+        html += "</div>";
+
+        // 四级中断队列
+        html += '<div class="rt-section-title">' + __("中断队列（按级别）", "Interrupt queues by level") + "</div>";
+        var maxQ = Math.max(1, q[1] || 0, q[2] || 0, q[3] || 0, q[4] || 0);
+        html += '<div class="rt-levels">';
+        RT_LEVELS.forEach(function (L) {
+          var depth = q[L.lv] || 0;
+          var reg = byLv[L.lv] || 0;
+          var pre = preLv[L.lv] || 0;
+          html +=
+            '<div class="rt-level"><span class="rt-lv-name">' + L.name + "</span>" +
+            '<span class="rt-lv-track ' + L.cls + '"><i style="width:' +
+            (depth ? Math.max(4, (depth / maxQ) * 100) : 0) +
+            '%"></i></span>' +
+            '<span class="rt-lv-meta">' + depth + " · " +
+            __("登记", "reg") + " " + reg + " / " + __("抢占", "pre") + " " + pre +
+            "</span></div>";
+        });
+        html += "</div>";
+        if (sc.immediate) {
+          html += '<div class="rt-frame">⚡ ' + __("立即运行", "immediate") + "：" +
+            escHtml(sc.immediate.kind || "") + " #" + sc.immediate.id +
+            '<span class="rt-frame-top">L' + (sc.immediate.level || 0) + "</span></div>";
+        }
+
+        // 中断栈（栈顶在上 → 用 column-reverse）
+        html += '<div class="rt-section-title">' + __("中断栈（栈顶在上）", "Interrupt stack (top first)") + "</div>";
+        if (frames.length) {
+          html += '<div class="rt-stack">';
+          frames.forEach(function (f, i) {
+            var t = (f && f.task) || {};
+            html += '<div class="rt-frame">' + escHtml(t.kind || "") + " #" + (t.id || "?") +
+              '<span class="rt-frame-top">L' + (t.level || 0) +
+              (i === frames.length - 1 ? " · " + __("栈顶", "top") : "") + "</span></div>";
+          });
+          html += "</div>";
+        } else {
+          html += '<div class="rt-empty">' + __("中断栈为空（当前无被抢占的现场）", "stack empty (nothing preempted)") + "</div>";
+        }
+        if (sc.running) {
+          html += '<div class="rt-empty">' + __("正在运行", "running") + "：" +
+            escHtml(sc.running.kind || "") + " #" + sc.running.id + " (L" + (sc.running.level || 0) + ")</div>";
+        }
+
+        // 通道拓扑
+        html += '<div class="rt-section-title">' + __("通道拓扑", "Channel topology") + "</div>";
+        var ins = channels.filter(function (c) { return c.direction === "in" || c.direction === "io"; });
+        var outs = channels.filter(function (c) { return c.direction === "out" || c.direction === "io"; });
+        function chanHtml(c) {
+          return '<div class="rt-chan" title="' + escHtml(c.description || "") + '">' +
+            '<span class="rt-chan-name">' + escHtml(c.name) + "</span>" +
+            rtCapsHtml(c.output_caps || 0) +
+            '<div class="rt-chan-sub">' +
+            escHtml((c.tools || []).length ? (c.tools || []).length + " " + __("个工具", "tools") : (c.description || "").slice(0, 26)) +
+            "</div></div>";
+        }
+        html += '<div class="rt-topo">';
+        html += '<div class="rt-topo-col">' + (ins.length ? ins.map(chanHtml).join("") : '<div class="rt-empty">' + __("无输入通道", "no input channel") + "</div>") + "</div>";
+        html += '<div class="rt-core">' + __("内核", "Kernel") + "</div>";
+        html += '<div class="rt-topo-col rt-right">' + (outs.length ? outs.map(chanHtml).join("") : '<div class="rt-empty">' + __("无输出通道", "no output channel") + "</div>") + "</div>";
+        html += "</div>";
+
+        html += "</div>";
+        el.innerHTML = html;
+      }
+
+
+      // loadRuntime 拉运行态小快照并就地重绘面板（约 2KB，可秒级轮询）。
+      async function loadRuntime() {
+        try {
+          var rt = await api("/runtime");
+          state.runtime = rt;
+          renderRuntime();
+        } catch (e) {
+          state.runtime = null;
+        }
+      }
+
+      // startRuntimeTicker 起 3s 轮询：运行态只在总览页可见时才有意义，
+      // 其它页签上不浪费请求。切回总览时 renderAll 会立刻再拉一次，不必等下一拍。
+      function startRuntimeTicker() {
+        if (state._runtimeTicker) return;
+        state._runtimeTicker = setInterval(function () {
+          var tab = document.querySelector("#tab-overview");
+          if (tab && tab.classList.contains("active")) {
+            loadRuntime();
+          }
+        }, 3000);
+      }
+
       function renderOverview() {
         var s = state.status || {};
         var k = state.kernel;
         var html =
+          '<div id="rt-panel"></div>' +
           '<div class="card"><h2>' +
           __("系统概览", "System Overview") +
           "</h2>" +
@@ -4404,6 +4575,7 @@
         renderAll();
         connectSSE();
         startUptimeTicker();
+        startRuntimeTicker();
         maybeShowPersonaWizard();
       })();
       setInterval(renderAll, 15000);

@@ -238,3 +238,32 @@ func (h *Handler) handleAgentAction(w http.ResponseWriter, r *http.Request, agen
 	}
 	writeJSON(w, http.StatusNotImplemented, map[string]string{"error": fmt.Sprintf("agent %s action not implemented by supervisor", action)})
 }
+
+// handleRuntime 返回**只含运行态**的小快照：调度器（排队/四级中断队列/中断栈）、
+// 驻留子 agent、通道拓扑。
+//
+// 为什么不复用 /api/v1/kernel：那份是 30KB 级的全量状态（工具、插件、记忆、LLM…），
+// 拿它做秒级刷新既费带宽也费端上算力。运行态要能「实时看」，所以单开一条
+// 只读通道，字段直接来自内核暴露的 KernelStatus（internal/sdk），
+// 这样任何应用（WebUI / GUI / ArkTS）都能拿同一份数据做展示。
+func (h *Handler) handleRuntime(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	if h.status == nil {
+		writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "kernel status not available"})
+		return
+	}
+	ks := h.status.GetKernelStatus()
+	if ks == nil {
+		writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "kernel status not available"})
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]interface{}{
+		"uptime":    ks.Uptime,
+		"scheduler": ks.Scheduler,
+		"residents": ks.Residents,
+		"channels":  ks.Channels,
+	})
+}

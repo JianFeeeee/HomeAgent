@@ -25,6 +25,9 @@ type StatusProvider interface {
 type KernelStatus = sdk.KernelStatus
 type PluginInfo = sdk.PluginInfo
 type ChannelInfo = sdk.ChannelInfo
+
+// ResidentStatus 是驻留式子 agent 的运行时视图（见 internal/sdk/status.go）。
+type ResidentStatus = sdk.ResidentStatus
 type MemoryStatus = sdk.MemoryStatus
 type KnowledgeStatus = sdk.KnowledgeStatus
 type DocumentStatus = sdk.DocumentStatus
@@ -37,10 +40,32 @@ type TrackerStatus = sdk.TrackerStatus
 type BuildStatus = sdk.BuildStatus
 
 func channelInfoFromIO(ch agentIO.ChannelInfo) ChannelInfo {
+	tools := make([]string, 0, len(ch.Tools))
+	for _, t := range ch.Tools {
+		tools = append(tools, t.Name)
+	}
 	return ChannelInfo{
-		Name:  ch.Name,
-		Type:  fmt.Sprintf("%d", ch.Type),
-		Ready: true,
+		Name:        ch.Name,
+		Type:        fmt.Sprintf("%d", ch.Type),
+		Direction:   channelDirection(ch.Type),
+		Ready:       true,
+		Description: ch.Description,
+		Tools:       tools,
+		OutputCaps:  int(ch.OutputCaps),
+		CapsText:    ch.OutputCaps.String(),
+	}
+}
+
+// channelDirection 把 DeviceType 翻成可读方向（前端画拓扑用）。
+// 未知取值落到 "io"：宁可当作双向，也不要把它画成只进或只出。
+func channelDirection(t agentIO.DeviceType) string {
+	switch t {
+	case agentIO.DeviceInput:
+		return "in"
+	case agentIO.DeviceOutput:
+		return "out"
+	default:
+		return "io"
 	}
 }
 
@@ -221,6 +246,7 @@ func (a *Agent) GetKernelStatus() *KernelStatus {
 	)
 	ks.ONNX = a.onnxStatus()
 	ks.Scheduler = a.schedulerStatus()
+	ks.Residents = residentStatuses(a.Residents())
 
 	return ks
 }
@@ -254,3 +280,28 @@ func (a *Agent) onnxStatus() sdk.ONNXStatus {
 
 var _ StatusProvider = (*Agent)(nil)
 var _ sdk.StatusAPI = (*Agent)(nil)
+
+// residentStatuses 把内核的驻留子视图映射成 SDK DTO。
+//
+// 刻意**不带** ResidentInfo.Table（那是每个驻留子的 inputch 登记明细）：状态面
+// 是给所有应用轮询的，把它塞进来会让每次 /status 都背上几十 KB。
+// 只给表的大小（InputChTable），要看明细走专门的接口。
+func residentStatuses(list []ResidentInfo) []ResidentStatus {
+	out := make([]ResidentStatus, 0, len(list))
+	for _, r := range list {
+		st := ResidentStatus{
+			ID:             r.ID,
+			State:          r.State,
+			Rounds:         r.Rounds,
+			ContextFull:    r.ContextFull,
+			InputChs:       r.InputChs,
+			AllowedOutputs: r.AllowedOutputs,
+			InputChTable:   r.TableSize,
+		}
+		if !r.CreatedAt.IsZero() {
+			st.CreatedAt = r.CreatedAt.Format(time.RFC3339)
+		}
+		out = append(out, st)
+	}
+	return out
+}

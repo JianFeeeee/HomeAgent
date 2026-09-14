@@ -165,3 +165,96 @@ func TestBatch_NotAbandonedWithoutPreemption(t *testing.T) {
 		t.Fatalf("Executed=%d，期望 1", snap.Stats.Executed)
 	}
 }
+
+// TestSchedulerStatusExposesLevelsAndStack 钉住调度器状态面**按级别可读**：
+// 四级队列深度、各级累计计数、立即抢占项、中断栈帧。
+//
+// 起因：此前 SchedulerStatus 只给 total（pending_interrupts / suspend_stack），
+// 看不出"堵在 L1 还是 L4"、"栈里压的是谁"。WebUI 想画运行态就无数据可用。
+//
+// 这个用例直接摆好调度器内部状态、只验**映射**（同包白盒）：调度行为本身
+// 由 scheduler_e2e_test / scheduler_critical_test 覆盖，这里不该重复它们的时序。
+func TestSchedulerStatusExposesLevelsAndStack(t *testing.T) {
+	a := New(AgentConfig{ID: "rt", ProviderManager: agentAPI.NewProviderManager(), IO: agentIO.NewIOManager()})
+	if a.sched == nil {
+		t.Fatal("agent 应带调度器")
+	}
+	a.sched.mu.Lock()
+	a.sched.queue = append(a.sched.queue, &Task{ID: 1, Class: TaskQueued, Kind: TaskKindInput})
+	a.sched.interruptQueues[LevelCritical] = append(a.sched.interruptQueues[LevelCritical],
+		&Task{ID: 2, Class: TaskInterrupt, Level: LevelCritical, Kind: TaskKindInput},
+		&Task{ID: 3, Class: TaskInterrupt, Level: LevelCritical, Kind: TaskKindInput})
+	a.sched.interruptQueues[LevelBackground] = append(a.sched.interruptQueues[LevelBackground],
+		&Task{ID: 4, Class: TaskInterrupt, Level: LevelBackground, Kind: TaskKindSelf})
+	a.sched.immediate = &Task{ID: 5, Class: TaskInterrupt, Level: LevelCritical, Kind: TaskKindInput}
+	a.sched.suspendStack = append(a.sched.suspendStack, &suspendedTask{
+		Task:  &Task{ID: 6, Class: TaskInterrupt, Level: LevelInteractive, Kind: TaskKindInput},
+		Frame: &TaskFrame{},
+	})
+	a.sched.stats.InterruptsByLevel[LevelCritical] = 7
+	a.sched.stats.PreemptsByLevel[LevelCritical] = 3
+	a.sched.mu.Unlock()
+
+	got := a.schedulerStatus()
+	if got.ReadyQueueDepth != 1 {
+		t.Fatalf("ready_queue_depth 应为 1，实际 %d", got.ReadyQueueDepth)
+	}
+	// 按级别的队列深度：下标即级别，下标 0 恒为 0
+	if got.InterruptQueues[LevelCritical] != 2 || got.InterruptQueues[LevelBackground] != 1 {
+		t.Fatalf("按级别队列深度不对：%v", got.InterruptQueues)
+	}
+	if got.InterruptQueues[0] != 0 {
+		t.Fatalf("下标 0（无级别）必须恒为 0，实际 %v", got.InterruptQueues)
+	}
+	// pending = 两条队列 + immediate
+	if got.PendingInterrupts != 4 {
+		t.Fatalf("pending_interrupts 应为 4，实际 %d", got.PendingInterrupts)
+	}
+	// 立即抢占项要能单独看到
+	if got.Immediate == nil || got.Immediate.ID != 5 || got.Immediate.Level != int(LevelCritical) {
+		t.Fatalf("immediate 未正确映射：%+v", got.Immediate)
+	}
+	// 中断栈帧（栈底→栈顶）要带任务标识
+	if len(got.SuspendFrames) != 1 || got.SuspendFrames[0].Task.ID != 6 ||
+		got.SuspendFrames[0].Task.Level != int(LevelInteractive) {
+		t.Fatalf("中断栈帧未正确映射：%+v", got.SuspendFrames)
+	}
+	// 累计计数按级别透传
+	if got.InterruptsByLevel[LevelCritical] != 7 || got.PreemptsByLevel[LevelCritical] != 3 {
+		t.Fatalf("各级计数未透传：interrupts=%v preempts=%v", got.InterruptsByLevel, got.PreemptsByLevel)
+	}
+	// 未使用的级别必须是 0（不能把别的级别串进来）
+	if got.InterruptQueues[LevelMessage] != 0 || got.InterruptQueues[LevelInteractive] != 0 {
+		t.Fatalf("未使用的级别应为 0：%v", got.InterruptQueues)
+	}
+}
+
+// TestChannelInfoCarriesTopology 钉住通道状态面不再丢信息：
+// 方向、描述、工具名、输出能力都要能被前端画出来。
+func TestChannelInfoCarriesTopology(t *testing.T) {
+	ch := channelInfoFromIO(agentIO.ChannelInfo{
+		Name:        "webui",
+		Type:        agentIO.DeviceOutput,
+		Description: "Web 控制台",
+		Tools:       []agentIO.ToolDef{{Name: "output_send"}},
+		OutputCaps:  agentIO.CapText | agentIO.CapImage,
+	})
+	if ch.Direction != "out" {
+		t.Fatalf("方向应为 out，实际 %q", ch.Direction)
+	}
+	if ch.Description != "Web 控制台" {
+		t.Fatalf("描述丢失：%q", ch.Description)
+	}
+	if len(ch.Tools) != 1 || ch.Tools[0] != "output_send" {
+		t.Fatalf("工具名丢失：%v", ch.Tools)
+	}
+	if ch.OutputCaps != int(agentIO.CapText|agentIO.CapImage) || ch.CapsText == "" {
+		t.Fatalf("输出能力丢失：caps=%d text=%q", ch.OutputCaps, ch.CapsText)
+	}
+	if d := channelInfoFromIO(agentIO.ChannelInfo{Name: "mic", Type: agentIO.DeviceInput}).Direction; d != "in" {
+		t.Fatalf("输入通道方向应为 in，实际 %q", d)
+	}
+	if d := channelInfoFromIO(agentIO.ChannelInfo{Name: "both", Type: agentIO.DeviceIO}).Direction; d != "io" {
+		t.Fatalf("双向通道方向应为 io，实际 %q", d)
+	}
+}
