@@ -671,7 +671,7 @@ func (a *Agent) stepToolBegin(f *TaskFrame) stepOutcome {
 	f.StageCtx.ToolCalls = []sdk.ToolCall{sdkTC}
 	f.StageCtx.ToolResults = nil
 	if a.runStage(sdk.StageBeforeToolcall, f.StageCtx) {
-		result := fmt.Sprintf("工具 %s 已被插件拒绝", tc.Name)
+		result := denialResultText(f.StageCtx, tc.Name)
 		f.Msgs = append(f.Msgs, agentAPI.Message{Role: "assistant", ToolCalls: []agentAPI.ToolCall{tc}})
 		f.Msgs = append(f.Msgs, agentAPI.Message{Role: "tool", ToolCallID: tc.ID, Content: result})
 		a.publishEvent(events.EventToolCall, map[string]interface{}{
@@ -700,6 +700,20 @@ func (a *Agent) stepToolBegin(f *TaskFrame) stepOutcome {
 	f.CurToolPlugin = pluginName
 	f.Step = StepToolExec
 	return outcomeContinue
+}
+
+// denialResultText 返回「工具被插件拒绝」时交给模型的工具结果。
+//
+// 插件在 before_toolcall 里用 ctx.Response 写的是**拒绝理由**（为什么被拒、
+// 能不能重试）。此前这里一律丢成通用文案，模型看不到原因就会反复重试同一个
+// 调用——权限门精心写的"请不要重试"等于白写。有理由就用理由。
+func denialResultText(ctx *sdk.StageContext, toolName string) string {
+	if ctx != nil && ctx.Response != nil {
+		if reason := strings.TrimSpace(*ctx.Response); reason != "" {
+			return reason
+		}
+	}
+	return fmt.Sprintf("工具 %s 已被插件拒绝", toolName)
 }
 
 // stepToolExec 执行工具。**临界区**：见设计文档 §4.3。
