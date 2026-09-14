@@ -1339,6 +1339,40 @@ func TestDashboardAssetsSplit(t *testing.T) {
 	}
 }
 
+// TestStagePipelineToolCellShowsLatestOnly 钉住总览「阶段管道」里工具格的展示口径：
+// 只显示**最新一条**工具/输出调用（单行视口 + 滑入动画），而不是把本轮每一次
+// 都追加成 chip —— 后者在几十次工具调用的一轮里会把这一格撑成长条，
+// 反而看不出「现在正在调什么」。
+//
+// 前端没有 JS 测试运行器，这里按仓库既有做法（见 TestDashboardAssetsSplit）
+// 直接对产物做字符串钉桩：若日后有人把这条口径改回「不断追加」，用例会红。
+func TestStagePipelineToolCellShowsLatestOnly(t *testing.T) {
+	js, err := dashboardFS.ReadFile("dashboard.js")
+	if err != nil {
+		t.Fatalf("读 dashboard.js: %v", err)
+	}
+	css, err := dashboardFS.ReadFile("dashboard.css")
+	if err != nil {
+		t.Fatalf("读 dashboard.css: %v", err)
+	}
+	sjs, scss := string(js), string(css)
+	for _, want := range []string{
+		"items[items.length - 1]", // 工具格只取末条（最新）
+		"rt-pipe-scroll",          // 单行滚动视口
+		"rtFlashLatestTool",       // 新调用到来时重放滑入动画
+		"rt-scroll-count",         // 右侧本轮累计次数
+	} {
+		if !strings.Contains(sjs, want) {
+			t.Errorf("dashboard.js 缺 %q：工具格应只滚动展示最新一条调用", want)
+		}
+	}
+	for _, want := range []string{".rt-pipe-scroll", "@keyframes rt-chip-scroll-in"} {
+		if !strings.Contains(scss, want) {
+			t.Errorf("dashboard.css 缺 %q：工具格的滚动视口/滑入动画样式", want)
+		}
+	}
+}
+
 // TestChatHistoryDefaultIsPaged 钉住 /chat/history 的默认页大小。
 //
 // 原先缺省 limit=0 表示"不限制"，于是任何不带 limit 的调用每次都拿到完整聊天记录
