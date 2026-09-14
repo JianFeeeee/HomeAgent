@@ -47,6 +47,7 @@ func TestInjectTextOpts_CarriesFlags(t *testing.T) {
 	m.InjectTextOpts("src", "chan", "hello", InjectOptions{
 		NoMemory:      true,
 		ContextPolicy: "prune",
+		RecallPolicy:  "none",
 		CleanerName:   "clean_me",
 	})
 	evt := drainOne(t, m.InputChan())
@@ -56,6 +57,9 @@ func TestInjectTextOpts_CarriesFlags(t *testing.T) {
 	}
 	if evt.Payload["context_policy"] != "prune" {
 		t.Errorf("context_policy 未传递: %v", evt.Payload["context_policy"])
+	}
+	if evt.Payload["recall_policy"] != "none" {
+		t.Errorf("recall_policy 未传递: %v", evt.Payload["recall_policy"])
 	}
 	if evt.Payload["cleaner_name"] != "clean_me" {
 		t.Errorf("cleaner_name 未传递: %v", evt.Payload["cleaner_name"])
@@ -71,11 +75,14 @@ func TestInjectTextOpts_CarriesFlags(t *testing.T) {
 // 中断注入走另一条队列，标志位同样要带上（用户已确认中断允许声明 prune）。
 func TestInjectInterruptTextOpts_CarriesFlags(t *testing.T) {
 	m := NewIOManager()
-	m.InjectInterruptTextOpts("src", "chan", "alert", InjectOptions{ContextPolicy: "prune"})
+	m.InjectInterruptTextOpts("src", "chan", "alert", InjectOptions{ContextPolicy: "prune", RecallPolicy: "none"})
 	evt := drainOne(t, m.InputInterruptChan())
 
 	if evt.Payload["context_policy"] != "prune" {
 		t.Errorf("中断注入的 context_policy 未传递: %v", evt.Payload)
+	}
+	if evt.Payload["recall_policy"] != "none" {
+		t.Errorf("中断注入的 recall_policy 未传递: %v", evt.Payload)
 	}
 	if evt.Payload["type"] != "text" || evt.Payload["content"] != "alert" {
 		t.Errorf("中断注入的基本字段不对: %v", evt.Payload)

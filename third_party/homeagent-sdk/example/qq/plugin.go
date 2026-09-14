@@ -439,7 +439,9 @@ type 枚举: text（文字）/ voice（语音转文字后发送）/ image（图�
 		}
 		return cleaned
 	}
-	s.RegisterInputChannel("qq", sdk.ChannelDef{NoMemory: true, Cleaner: inputCleaner})
+	// qq 通道到达的是**中断通知（meta）**，不是用户正文，不据它召回；
+	// 真实正文由 qq_get_message 取回后由该工具声明 RecallPolicy=auto 触发召回。
+	s.RegisterInputChannel("qq", sdk.ChannelDef{NoMemory: true, Cleaner: inputCleaner, RecallPolicy: sdk.RecallPolicyNone})
 
 	// 查询类工具输出清洗器：提取 JSON 中的 content/文本字段参与向量化
 	cleaner := func(output string) string {
@@ -459,6 +461,9 @@ type 枚举: text（文字）/ voice（语音转文字后发送）/ image（图�
 		// 不裁的后果是每条 QQ 消息的完整正文都留在 L0 上下文里，
 		// 长会话下持续挤占 token 预算（§13.8）。
 		ContextPolicy: "prune",
+		// 正文才是真实内容：取回后用**正文**触发一次召回，
+		// 而不是用中断通知的 meta 文本去召回（那是无关词）。
+		RecallPolicy: "auto",
 		Parameters: map[string]interface{}{
 			"type": "object", "properties": map[string]interface{}{
 				"message_id": map[string]interface{}{"type": "integer", "description": "NapCat消息ID（从中断消息的 message_id=N 或 reply_to.message_id 获取）"},
@@ -1482,6 +1487,8 @@ func (p *Plugin) injectInterrupt(text, level string) {
 	p.sdk.InjectInterruptTextOpts(p.name, p.name, text, sdk.InjectOptions{
 		NoMemory: true,
 		Priority: level,
+		// 中断文本是路由/取正文的指令，不是对话内容，不据它召回。
+		RecallPolicy: sdk.RecallPolicyNone,
 	})
 }
 
@@ -2802,7 +2809,7 @@ func (p *Plugin) handleDownloadFile(args map[string]interface{}) (interface{}, e
 				// Priority：同上，QQ 侧一律低级别中断（L1）。
 				p.sdk.InjectInterruptTextOpts(p.name, p.name,
 					fmt.Sprintf("文件下载完成: %s，保存在 %s", filepath.Base(savePath), savePath),
-					sdk.InjectOptions{NoMemory: true, Priority: sdk.PriorityL1})
+					sdk.InjectOptions{NoMemory: true, Priority: sdk.PriorityL1, RecallPolicy: sdk.RecallPolicyNone})
 			}
 		} else {
 			errMsg = "下载失败，文件可能已过期"

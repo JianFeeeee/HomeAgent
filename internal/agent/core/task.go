@@ -275,7 +275,7 @@ func (a *Agent) rebaseFramePrefix(f *TaskFrame) {
 	tail := append([]agentAPI.Message(nil), f.Msgs[f.PrefixLen:]...)
 
 	budget := ComputeTokenBudget(a.provider, a.systemPrompt)
-	memContext := a.buildMemoryContext(f.Input, budget.MemoryTokens)
+	memContext := a.buildTaskMemoryContext(f, f.Input, budget.MemoryTokens)
 	sysPrompt := a.buildSystemPrompt(memContext, f.Input)
 	prefix := a.buildMessages(sysPrompt, f.Input, a.contextTokenBudget(budget))
 
@@ -497,7 +497,7 @@ func (a *Agent) step(f *TaskFrame) stepOutcome {
 func (a *Agent) stepPrepare(f *TaskFrame) stepOutcome {
 	budget := ComputeTokenBudget(a.provider, a.systemPrompt)
 
-	memContext := a.buildMemoryContext(f.Input, budget.MemoryTokens)
+	memContext := a.buildTaskMemoryContext(f, f.Input, budget.MemoryTokens)
 	sysPrompt := a.buildSystemPrompt(memContext, f.Input)
 	f.Tools = a.buildToolDefs()
 
@@ -743,16 +743,27 @@ func (a *Agent) stepToolAfter(f *TaskFrame) stepOutcome {
 			result = r
 		}
 	}
-	// ContextPolicy: prune 工具调用后执行上下文裁剪（§13.8）
-	if def := a.stageHost.ToolDef(tc.Name); def != nil && def.ContextPolicy == "prune" {
-		if a.context != nil {
-			topK := a.maxContextSize - 1
-			if topK < 1 {
-				topK = 1
+	// 工具后处理：一次相关性过程，两个**正交**声明——
+	//   ContextPolicy=prune → 裁剪（踢出去，归档低相关 L0 事件）
+	//   RecallPolicy=auto   → 召回（取进来，注入 L2/L3 相关记忆）
+	// 两者共用同一份**清洗后**的 query：查询向量取清洗后的有效内容，否则噪声
+	// （ANSI/base64/JSON 包装）会把相关性打分带偏，裁错事件、召回错记忆。
+	var recallText string
+	if def := a.stageHost.ToolDef(tc.Name); def != nil {
+		needPrune := def.ContextPolicy == sdk.ContextPolicyPrune
+		needRecall := def.RecallPolicy == sdk.RecallPolicyAuto
+		if needPrune || needRecall {
+			query := a.toolOutputForQuery(tc.Name, result)
+			if needPrune && a.context != nil {
+				topK := a.maxContextSize - 1
+				if topK < 1 {
+					topK = 1
+				}
+				a.context.Prune(query, topK, a.docStore)
 			}
-			// 查询向量取**清洗后**的有效内容，否则噪声（ANSI/base64/JSON 包装）
-			// 会把相关性打分带偏，裁掉本该保留的事件。
-			a.context.Prune(a.toolOutputForQuery(tc.Name, result), topK, a.docStore)
+			if needRecall {
+				recallText = a.recallTextFor(query, "tool:"+tc.Name)
+			}
 		}
 	}
 
@@ -821,6 +832,10 @@ func (a *Agent) stepToolAfter(f *TaskFrame) stepOutcome {
 	if mediaMsg != nil {
 		// 必须紧跟在 toolMsg 之后：中间插入其他消息会让 tool_call_id 配对断开。
 		f.Msgs = append(f.Msgs, *mediaMsg)
+	}
+	// 召回作为 system 消息挂在末尾（tool/assistant 配对已完成，插入此处不断链）。
+	if recallText != "" {
+		f.Msgs = appendOrReplaceRecall(f.Msgs, recallText)
 	}
 
 	a.publishEvent(events.EventToolCall, map[string]interface{}{
