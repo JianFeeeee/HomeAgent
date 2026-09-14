@@ -2097,3 +2097,190 @@
         scrollbar-width: thin;
         scrollbar-color: rgba(255, 127, 172, 0.35) transparent;
       }
+
+    /* ===== 运行态面板（图形化总览）=====
+       目标是"一眼看懂内核现在在干什么"：排队/中断/中断栈/驻留子四个数字，
+       四级中断队列的条形，中断栈的层叠图，以及通道拓扑。全部用纯 CSS + 内联 SVG，
+       不引入任何依赖（前端刻意没有构建链）。 */
+    .rt-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(132px, 1fr));
+      gap: 10px;
+      margin: 4px 0 14px;
+    }
+    .rt-tile {
+      position: relative;
+      padding: 12px 14px 10px;
+      border-radius: var(--radius-md);
+      background: var(--bg-input);
+      border: 1px solid var(--border-color);
+      overflow: hidden;
+    }
+    .rt-tile .rt-num {
+      font-size: 28px;
+      font-weight: 700;
+      line-height: 1.1;
+      letter-spacing: -0.5px;
+    }
+    .rt-tile .rt-label {
+      font-size: 11px;
+      color: var(--text-muted);
+      margin-top: 2px;
+    }
+    .rt-tile .rt-sub {
+      font-size: 10px;
+      color: var(--text-muted);
+      opacity: 0.85;
+    }
+    .rt-tile.rt-active {
+      border-color: var(--sakura-400);
+      box-shadow: var(--shadow-glow);
+    }
+    .rt-tile.rt-warn .rt-num {
+      color: #ffb86b;
+    }
+    /* 底部细条：把"占了多少"用长度表达，比纯数字更快读懂 */
+    .rt-bar {
+      height: 4px;
+      border-radius: 999px;
+      background: rgba(255, 255, 255, 0.08);
+      margin-top: 8px;
+      overflow: hidden;
+    }
+    .rt-bar > i {
+      display: block;
+      height: 100%;
+      background: linear-gradient(90deg, var(--sakura-400), var(--frost-300));
+      transition: width 0.35s var(--ease-out);
+    }
+    .rt-levels {
+      display: flex;
+      flex-direction: column;
+      gap: 6px;
+      margin-bottom: 6px;
+    }
+    .rt-level {
+      display: grid;
+      grid-template-columns: 74px 1fr 96px;
+      align-items: center;
+      gap: 8px;
+      font-size: 11px;
+    }
+    .rt-level .rt-lv-name {
+      color: var(--text-secondary);
+      white-space: nowrap;
+    }
+    .rt-level .rt-lv-track {
+      height: 14px;
+      border-radius: 4px;
+      background: rgba(255, 255, 255, 0.06);
+      overflow: hidden;
+      display: flex;
+    }
+    .rt-level .rt-lv-track > i {
+      display: block;
+      height: 100%;
+      transition: width 0.35s var(--ease-out);
+    }
+    .rt-level .rt-lv-meta {
+      text-align: right;
+      color: var(--text-muted);
+      font-variant-numeric: tabular-nums;
+    }
+    .rt-lv-4 > i { background: #ff5c7a; }
+    .rt-lv-3 > i { background: #ffa657; }
+    .rt-lv-2 > i { background: var(--sakura-400); }
+    .rt-lv-1 > i { background: var(--frost-300); }
+    /* 中断栈：栈顶在上，做出"层叠现场"的观感 */
+    .rt-stack {
+      display: flex;
+      flex-direction: column-reverse;
+      gap: 4px;
+      margin: 2px 0 6px;
+    }
+    .rt-frame {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      padding: 5px 9px;
+      border-radius: 8px;
+      font-size: 11px;
+      background: rgba(255, 255, 255, 0.05);
+      border-left: 3px solid var(--sakura-400);
+    }
+    .rt-frame .rt-frame-top {
+      margin-left: auto;
+      font-size: 10px;
+      color: var(--text-muted);
+    }
+    .rt-empty {
+      font-size: 11px;
+      color: var(--text-muted);
+      padding: 4px 0;
+    }
+    /* 通道拓扑：输入 → 内核 → 输出 */
+    .rt-topo {
+      display: grid;
+      grid-template-columns: 1fr auto 1fr;
+      gap: 10px;
+      align-items: center;
+      margin-top: 6px;
+    }
+    .rt-topo-col {
+      display: flex;
+      flex-direction: column;
+      gap: 6px;
+    }
+    .rt-topo-col.rt-right {
+      text-align: right;
+    }
+    .rt-chan {
+      padding: 6px 9px;
+      border-radius: 8px;
+      background: rgba(255, 255, 255, 0.05);
+      border: 1px solid var(--border-color);
+      font-size: 11px;
+      cursor: default;
+    }
+    .rt-chan .rt-chan-name {
+      font-weight: 600;
+    }
+    .rt-chan .rt-chan-sub {
+      font-size: 10px;
+      color: var(--text-muted);
+    }
+    .rt-chan .rt-caps {
+      display: inline-flex;
+      gap: 3px;
+      margin-left: 6px;
+      vertical-align: middle;
+    }
+    .rt-cap {
+      font-size: 9px;
+      padding: 1px 5px;
+      border-radius: 999px;
+      background: rgba(136, 192, 208, 0.16);
+      color: var(--frost-300);
+    }
+    .rt-core {
+      width: 74px;
+      height: 74px;
+      border-radius: 50%;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      font-size: 11px;
+      font-weight: 600;
+      text-align: center;
+      line-height: 1.2;
+      background: radial-gradient(circle at 50% 40%, rgba(243, 59, 124, 0.35), rgba(24, 24, 38, 0.9));
+      border: 1px solid var(--glass-border);
+      box-shadow: var(--shadow-glow);
+    }
+    .rt-section-title {
+      font-size: 11px;
+      color: var(--text-muted);
+      letter-spacing: 0.4px;
+      margin: 12px 0 6px;
+      text-transform: uppercase;
+    }

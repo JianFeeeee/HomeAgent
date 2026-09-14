@@ -1387,3 +1387,75 @@ func TestChatHistoryDefaultIsPaged(t *testing.T) {
 		t.Fatalf("limit=5 应回 5 条，实际 %d", n)
 	}
 }
+
+// fakeStatus 是给 /runtime 用的最小内核状态桩。
+type fakeStatus struct{ ks *sdk.KernelStatus }
+
+func (f fakeStatus) GetKernelStatus() *sdk.KernelStatus { return f.ks }
+
+// TestRuntimeEndpoint 钉住运行态小接口的形状：
+// 只回运行态三件事（调度器/驻留子/通道），且体积远小于 /kernel ——
+// 前端靠它做秒级刷新，字段一丢图就画不出来。
+func TestRuntimeEndpoint(t *testing.T) {
+	ks := &sdk.KernelStatus{
+		Uptime: "1m",
+		Scheduler: sdk.SchedulerStatus{
+			ReadyQueueDepth:   2,
+			PendingInterrupts: 1,
+			SuspendStack:      1,
+			MaxSuspendDepth:   4,
+			InterruptQueues:   [5]int{0, 0, 0, 0, 1},
+			SuspendFrames:     []sdk.SchedulerFrame{{Task: sdk.SchedulerTask{ID: 9, Level: 3, Kind: "input"}}},
+		},
+		Residents: []sdk.ResidentStatus{{ID: "r1", State: "running", Rounds: 3}},
+		Channels:  []sdk.ChannelInfo{{Name: "webui", Type: "1", Direction: "out", Ready: true, OutputCaps: 7, CapsText: "[text file image]"}},
+	}
+	s := testSDK(sdk.SDKConfig{
+		Settings: sdk.NewSettings("webui", internalConfig.NewConfigRegistry("")),
+		Config:   sdk.NewConfig(&types.Config{}),
+		Status:   fakeStatus{ks: ks},
+	})
+	h := NewHandler(s)
+
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/runtime", nil)
+	w := httptest.NewRecorder()
+	h.handleRuntime(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d", w.Code)
+	}
+	var out struct {
+		Scheduler sdk.SchedulerStatus  `json:"scheduler"`
+		Residents []sdk.ResidentStatus `json:"residents"`
+		Channels  []sdk.ChannelInfo    `json:"channels"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &out); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if out.Scheduler.ReadyQueueDepth != 2 || out.Scheduler.PendingInterrupts != 1 {
+		t.Fatalf("调度器字段丢失：%+v", out.Scheduler)
+	}
+	if out.Scheduler.InterruptQueues[4] != 1 {
+		t.Fatalf("四级队列深度丢失：%v", out.Scheduler.InterruptQueues)
+	}
+	if len(out.Scheduler.SuspendFrames) != 1 || out.Scheduler.SuspendFrames[0].Task.ID != 9 {
+		t.Fatalf("中断栈帧丢失：%+v", out.Scheduler.SuspendFrames)
+	}
+	if len(out.Residents) != 1 || out.Residents[0].ID != "r1" {
+		t.Fatalf("驻留子丢失：%+v", out.Residents)
+	}
+	if len(out.Channels) != 1 || out.Channels[0].Direction != "out" {
+		t.Fatalf("通道方向丢失：%+v", out.Channels)
+	}
+	// 只回运行态：不该把 tools/plugins 这类大块带上
+	if strings.Contains(w.Body.String(), "\"tools\"") || strings.Contains(w.Body.String(), "\"plugins\"") {
+		t.Fatal("/runtime 不应携带 tools/plugins（那是 /kernel 的内容）")
+	}
+	// 没有内核状态时给 503，而不是空对象
+	s2 := testSDK(sdk.SDKConfig{Settings: sdk.NewSettings("webui", internalConfig.NewConfigRegistry(""))})
+	h2 := NewHandler(s2)
+	w2 := httptest.NewRecorder()
+	h2.handleRuntime(w2, httptest.NewRequest(http.MethodGet, "/api/v1/runtime", nil))
+	if w2.Code != http.StatusServiceUnavailable {
+		t.Fatalf("无状态源应回 503，实际 %d", w2.Code)
+	}
+}

@@ -437,6 +437,9 @@ func (h *Handler) RegisterRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("/api/v1/terminals", h.requireAPI(h.handleTerminals))
 	mux.HandleFunc("/api/v1/cmd/history", h.requireAPI(h.handleCmdHistory))
 	mux.HandleFunc("/api/v1/kernel", h.requireAPI(h.handleKernel))
+	// 运行态小快照：调度器（排队/四级中断队列/中断栈）+ 驻留子 + 通道拓扑。
+	// 单独一条是为了让前端能秒级刷新而不必反复拉 30KB 的 /kernel。
+	mux.HandleFunc("/api/v1/runtime", h.requireAPI(h.handleRuntime))
 	mux.HandleFunc("/api/v1/persona", h.requireAPI(h.handlePersona))
 	mux.HandleFunc("/api/v1/plugins", h.requireAPI(h.handlePlugins))
 	mux.HandleFunc("/api/v1/plugins/", h.requireAPI(h.handlePluginByID))

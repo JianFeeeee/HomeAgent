@@ -47,6 +47,9 @@ type KernelStatus struct {
 
 	Tracker TrackerStatus `json:"tracker"`
 
+	// Residents 是驻留式子 agent 的运行时视图（数量 = len(Residents)）。
+	Residents []ResidentStatus `json:"residents"`
+
 	// Scheduler 是输入调度器的运行时快照（可观测性，设计文档 §11 O1/O2）。
 	// M2 起输入不再直接排队在 channel 上，而是经 readyQueue/pendingInterrupts/
 	// suspendStack 三集合按优先级调度；这里把这些状态暴露出来。
@@ -57,11 +60,29 @@ type KernelStatus struct {
 type SchedulerStatus struct {
 	// Running 是当前执行的任务（空表示空闲）。
 	Running *SchedulerTask `json:"running,omitempty"`
+	// Immediate 是刚抢占成功、将在下一个安全点立即运行的中断（最多一个）。
+	Immediate *SchedulerTask `json:"immediate,omitempty"`
 	// ReadyQueueDepth / PendingInterrupts / SuspendStack 是三个集合的深度。
 	ReadyQueueDepth   int `json:"ready_queue_depth"`
 	PendingInterrupts int `json:"pending_interrupts"`
 	SuspendStack      int `json:"suspend_stack"`
 	MaxSuspendDepth   int `json:"max_suspend_depth"`
+
+	// InterruptQueues 是**四条中断队列各自的深度**，下标即中断级别（1..4）；
+	// 下标 0 恒为 0，这样 level 可以直接当数组下标用，省掉调用方 ±1 的翻译。
+	//
+	// 为什么单列：PendingInterrupts 只是总数，看不清"堵在哪一级"——
+	// 四级中断是抢占优先级，堵在 L1 还是 L4 是完全不同的运行状态。
+	InterruptQueues [5]int `json:"interrupt_queues"`
+
+	// SuspendFrames 是中断栈的帧，**栈底 → 栈顶**（只暴露任务标识，不含帧内容）。
+	// 深度见 SuspendStack；帧的顺序回答了"谁被谁打断"。
+	SuspendFrames []SchedulerFrame `json:"suspend_frames,omitempty"`
+
+	// InterruptsByLevel / PreemptsByLevel 是各级中断的累计计数（下标 1..4）：
+	// 前者=被登记次数（含没抢成的），后者=判定可抢占并进入 immediate 的次数。
+	InterruptsByLevel [5]uint64 `json:"interrupts_by_level"`
+	PreemptsByLevel   [5]uint64 `json:"preempts_by_level"`
 
 	Enqueued  uint64 `json:"enqueued"`
 	Executed  uint64 `json:"executed"`
@@ -69,6 +90,26 @@ type SchedulerStatus struct {
 	Suspended uint64 `json:"suspended"`
 	Resumed   uint64 `json:"resumed"`
 	Preempted uint64 `json:"preempted"`
+}
+
+// SchedulerFrame 是中断栈里的一帧（供图形化展示"压了几层现场"）。
+type SchedulerFrame struct {
+	Task SchedulerTask `json:"task"`
+}
+
+// ResidentStatus 是驻留式子 agent 的运行时视图。
+//
+// 为什么进状态面：驻留子是"常驻的独立 agent"，它们的数量、轮次与上下文占用
+// 是运行态里最需要一眼看到的东西（此前只在日志里，WebUI 只能显示文字）。
+type ResidentStatus struct {
+	ID             string   `json:"id"`
+	State          string   `json:"state"`
+	Rounds         int      `json:"rounds"`
+	ContextFull    bool     `json:"context_full"`
+	InputChs       []string `json:"input_channels,omitempty"`
+	AllowedOutputs []string `json:"allowed_outputs,omitempty"`
+	InputChTable   int      `json:"input_ch_table"`
+	CreatedAt      string   `json:"created_at,omitempty"`
 }
 
 // SchedulerTask 是任务的最小标识（不暴露帧内容）。
@@ -97,9 +138,18 @@ type PluginInfo struct {
 }
 
 type ChannelInfo struct {
-	Name  string `json:"name"`
-	Type  string `json:"type"`
-	Ready bool   `json:"ready"`
+	Name string `json:"name"`
+	// Type 保持为 DeviceType 的数字字符串（历史字段，别改语义）。
+	Type string `json:"type"`
+	// Direction 是方向的可读名：in（只进）/ out（只出）/ io（双向）。
+	Direction string `json:"direction"`
+	Ready     bool   `json:"ready"`
+	// 以下三项供通道拓扑展示：此前 collectKernelStatus 只透传了 Name/Type，
+	// 把 Description/Tools/OutputCaps 全丢了，前端只能画出一排光秃秃的名字。
+	Description string   `json:"description,omitempty"`
+	Tools       []string `json:"tools,omitempty"`
+	OutputCaps  int      `json:"output_caps"`
+	CapsText    string   `json:"caps_text,omitempty"`
 }
 
 type MemoryStatus struct {

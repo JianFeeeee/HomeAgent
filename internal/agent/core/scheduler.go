@@ -279,6 +279,8 @@ func (a *Agent) schedulerStatus() sdk.SchedulerStatus {
 		PendingInterrupts: len(snap.PendingInterrupts),
 		SuspendStack:      len(snap.SuspendStack),
 		MaxSuspendDepth:   snap.MaxInterruptFrames,
+		InterruptsByLevel: snap.Stats.InterruptsByLevel,
+		PreemptsByLevel:   snap.Stats.PreemptsByLevel,
 		Enqueued:          snap.Stats.Enqueued,
 		Executed:          snap.Stats.Executed,
 		Rejected:          snap.Stats.Rejected,
@@ -290,6 +292,26 @@ func (a *Agent) schedulerStatus() sdk.SchedulerStatus {
 		out.Running = &sdk.SchedulerTask{
 			ID: snap.Running.ID, Level: int(snap.Running.Level), Kind: snap.Running.Kind.String(),
 		}
+	}
+	if snap.Immediate != nil {
+		out.Immediate = &sdk.SchedulerTask{
+			ID: snap.Immediate.ID, Level: int(snap.Immediate.Level), Kind: snap.Immediate.Kind.String(),
+		}
+	}
+	// 四级队列深度：下标即级别（1..4），下标 0 留 0。
+	for lv := LevelBackground; lv <= LevelCritical; lv++ {
+		out.InterruptQueues[lv] = len(snap.InterruptQueues[lv])
+	}
+	// 中断栈帧：栈底 → 栈顶（谁先被压进去、谁又打断了它）。
+	for _, f := range snap.SuspendStack {
+		if f == nil || f.Task == nil {
+			continue
+		}
+		out.SuspendFrames = append(out.SuspendFrames, sdk.SchedulerFrame{
+			Task: sdk.SchedulerTask{
+				ID: f.Task.ID, Level: int(f.Task.Level), Kind: f.Task.Kind.String(),
+			},
+		})
 	}
 	return out
 }
