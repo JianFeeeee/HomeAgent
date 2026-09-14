@@ -178,6 +178,10 @@ func (a *Agent) runTaskSteps(f *TaskFrame) stepOutcome {
 	for i := 0; i < maxSteps; i++ {
 		// 安全点：只在 step 之间检查让位。临界区（StepToolExec）不在此列，
 		// 因为让位信号由 interruptLoop 置位、而本循环是唯一读帧者。
+		//
+		// 先「重新求值」再判让位：临界区（或抢占冷却期）内被拦成入队的中断，
+		// 必须在这里重新武装——否则它只能等当前任务自然结束（设计 §4.3/§5.2）。
+		a.sched.rearmPending()
 		if !isCriticalChannel(f.OutputChannel) && a.sched.preemptGrantedFor() && a.sched.canSuspend() {
 			return outcomeSuspended
 		}
