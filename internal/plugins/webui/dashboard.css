@@ -339,14 +339,19 @@
           border 0.2s;
       }
       nav h1 {
-        font-size: 16px;
+        font-size: 16.5px;
         font-weight: 700;
-        color: var(--accent);
-        margin: 4px 12px 16px;
+        /* 品牌字用 sakura→frost 渐变：比纯色更像「产品」，也不跟导航选中态抢颜色 */
+        background: linear-gradient(100deg, var(--sakura-300), var(--frost-300));
+        -webkit-background-clip: text;
+        background-clip: text;
+        -webkit-text-fill-color: transparent;
+        margin: 2px 10px 18px;
         white-space: nowrap;
-        letter-spacing: -0.01em;
+        letter-spacing: -0.015em;
         display: flex;
         align-items: center;
+        gap: 8px;
       }
       .nav-links {
         display: flex;
@@ -355,27 +360,47 @@
         flex: 1;
       }
       nav a {
+        display: flex;
+        align-items: center;
+        gap: 10px;
         padding: 10px 12px;
         color: var(--text-secondary);
         text-decoration: none;
-        font-size: 13px;
+        font-size: 13.5px;
+        font-weight: 500;
         cursor: pointer;
         border-radius: var(--radius-md);
-        border-left: 3px solid transparent;
+        /* 选中条用 inset 阴影而不是 border-left：border 会把整行文字右推 3px，
+           hover 时图标跟着跳一下 —— 这种「一像素级不稳」正是廉价感的来源。 */
+        box-shadow: inset 2px 0 0 transparent;
         transition:
-          all var(--dur-micro) var(--ease-out),
-          transform var(--dur-micro) var(--ease-out);
+          background var(--dur-micro) var(--ease-out),
+          color var(--dur-micro) var(--ease-out),
+          box-shadow var(--dur-micro) var(--ease-out);
+      }
+      .nav-ico {
+        width: 17px;
+        height: 17px;
+        flex-shrink: 0;
+        fill: none;
+        stroke: currentColor;
+        stroke-width: 1.7;
+        stroke-linecap: round;
+        stroke-linejoin: round;
+        opacity: 0.8;
       }
       nav a:hover {
         color: var(--text-primary);
         background: var(--glass-hover);
-        transform: translateX(2px);
       }
       nav a.active {
         color: var(--accent);
         background: var(--accent-bg);
-        border-left-color: var(--accent);
-        text-shadow: 0 0 14px rgba(255, 127, 172, 0.45);
+        box-shadow: inset 2px 0 0 var(--accent);
+        font-weight: 600;
+      }
+      nav a.active .nav-ico {
+        opacity: 1;
       }
       .nav-footer {
         border-top: 1px solid var(--glass-border);
@@ -400,11 +425,11 @@
         position: sticky;
         top: 0;
         z-index: 90;
-        height: 48px;
+        height: 56px;
         display: flex;
         align-items: center;
-        gap: 10px;
-        padding: 0 20px;
+        gap: 12px;
+        padding: 0 24px;
         background: var(--bg-secondary);
         backdrop-filter: blur(var(--glass-blur)) saturate(1.4);
         -webkit-backdrop-filter: blur(var(--glass-blur)) saturate(1.4);
@@ -432,9 +457,22 @@
         display: flex;
         align-items: center;
         gap: 8px;
-        font-size: 13px;
+        font-size: 12.5px;
         color: var(--text-muted);
         animation: breadcrumbIn var(--dur-normal) var(--ease-out);
+      }
+      /* 当前页在顶栏里当标题用：字号/字重/颜色都要跟「面包屑碎片」拉开，
+         否则整条顶栏就是一行灰字，页面没有入口感。 */
+      .breadcrumb .crumb-current {
+        font-size: 15px;
+        font-weight: 650;
+        color: var(--text-primary);
+        letter-spacing: -0.01em;
+      }
+      .breadcrumb .crumb-home,
+      .breadcrumb .crumb-sep {
+        font-size: 12.5px;
+        opacity: 0.7;
       }
       @keyframes breadcrumbIn {
         from {
@@ -580,8 +618,12 @@
         vertical-align: middle;
       }
       .container {
-        padding: 24px;
-        max-width: none;
+        /* 1240px 是「卡片网格 + 图表」都能读的最宽值；再宽就变成一片空旷的留白。
+           居中而不是靠左铺满 —— 超宽屏上摊满整个屏幕是「后台模板」的典型观感。 */
+        padding: 22px 24px 56px;
+        max-width: 1240px;
+        margin: 0 auto;
+        width: 100%;
       }
       .card {
         position: relative;
@@ -590,19 +632,19 @@
         -webkit-backdrop-filter: blur(var(--glass-blur)) saturate(1.3);
         border: 1px solid var(--glass-border);
         border-radius: var(--radius-lg);
-        padding: 20px;
-        margin-bottom: 16px;
+        padding: 22px;
+        margin-bottom: 18px;
         box-shadow: var(--shadow-sm);
         transition:
           background 0.2s,
           border 0.2s,
-          box-shadow var(--dur-normal) var(--ease-out),
-          transform var(--dur-normal) var(--ease-out);
+          box-shadow var(--dur-normal) var(--ease-out);
       }
+      /* hover 只提亮阴影与描边，**不再 translateY**：
+         整页十几张卡一起「上下浮」，视线扫过时像在抖，是廉价感最明显的一处。 */
       .card:hover {
         box-shadow: var(--shadow-md);
-        transform: translateY(-1px);
-        border-color: rgba(255, 127, 172, 0.25);
+        border-color: rgba(255, 127, 172, 0.22);
       }
       .card.tilt {
         transform-style: preserve-3d;
@@ -636,11 +678,28 @@
         }
       }
       .card h2 {
-        font-size: 15px;
-        font-weight: 600;
-        margin-bottom: 12px;
+        /* 标题左侧加一道 accent 短竖：卡片之间就有了同一套「章节起点」信号，
+           不必靠加粗/变大去抢，长页面翻起来也不迷路。 */
+        display: flex;
+        align-items: center;
+        gap: 9px;
+        font-size: 15.5px;
+        font-weight: 650;
+        margin-bottom: 14px;
         color: var(--text-primary);
-        letter-spacing: -0.01em;
+        letter-spacing: -0.012em;
+      }
+      .card h2::before {
+        content: "";
+        width: 3px;
+        height: 14px;
+        border-radius: 2px;
+        background: linear-gradient(
+          180deg,
+          var(--sakura-300),
+          var(--frost-300)
+        );
+        flex-shrink: 0;
       }
       .card h3 {
         font-size: 13px;
@@ -761,15 +820,20 @@
         color: var(--text-secondary);
       }
       .btn {
-        padding: 6px 16px;
-        border-radius: var(--radius-pill);
+        /* 药丸形换成与卡片同一套圆角：满屏药丸按钮是「玩具感」的主要来源之一 */
+        padding: 7px 14px;
+        border-radius: var(--radius-md);
         border: none;
-        font-size: 12px;
+        font-size: 12.5px;
         cursor: pointer;
         font-weight: 600;
-        letter-spacing: 0.01em;
+        letter-spacing: 0.005em;
+        line-height: 1.35;
         transition:
-          all var(--dur-micro) var(--ease-out),
+          background var(--dur-micro) var(--ease-out),
+          color var(--dur-micro) var(--ease-out),
+          border-color var(--dur-micro) var(--ease-out),
+          box-shadow var(--dur-micro) var(--ease-out),
           transform var(--dur-micro) var(--ease-out);
       }
       .btn:active {
@@ -796,8 +860,8 @@
         filter: brightness(1.1);
       }
       .btn-sm {
-        padding: 4px 12px;
-        font-size: 11px;
+        padding: 4px 10px;
+        font-size: 11.5px;
       }
       .btn-ghost {
         background: transparent;
@@ -1785,19 +1849,37 @@
         border-radius: 6px;
       }
       .kv-row {
-        display: flex;
-        padding: 6px 0;
+        display: grid;
+        grid-template-columns: minmax(110px, 180px) 1fr;
+        gap: 12px;
+        align-items: baseline;
+        padding: 8px;
+        /* 负外边距让 hover 高亮能满宽，而不把内容挤窄 */
+        margin: 0 -8px;
         border-bottom: 1px solid var(--kv-border);
         font-size: 13px;
+        border-radius: var(--radius-sm);
+        transition: background var(--dur-micro) var(--ease-out);
+      }
+      .kv-row:hover {
+        background: var(--glass-hover);
+      }
+      .kv-row:last-child {
+        border-bottom: none;
       }
       .kv-row .key {
         color: var(--text-muted);
-        width: 180px;
+        /* 键列不再硬编码 180px 宽度：窄屏/长键名时能自己收，避免把值挤成竖排 */
+        width: auto;
         flex-shrink: 0;
+        font-size: 12.5px;
       }
       .kv-row .val {
         color: var(--text-primary);
         word-break: break-all;
+        /* 数字等宽：端口/计数/内存这类值上下对齐才好扫 */
+        font-variant-numeric: tabular-nums;
+        min-width: 0;
       }
       .tool-badge {
         display: inline-block;
