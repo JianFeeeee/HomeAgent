@@ -2353,9 +2353,10 @@
        同一套视觉语言），深度用大字报出来，下面是可见的格槽。 */
     .rt-queues {
       display: grid;
-      /* 118px 而不是 150px：容器 640–740px（窄屏侧栏收起后就是这个宽度）时
-         5 个框仍能排成一行，不会出现「4 个 + 1 个」的孤行。 */
-      grid-template-columns: repeat(auto-fit, minmax(118px, 1fr));
+      /* 100px 而不是 150px：两块都要保证「5 个一行」。
+         否则容器 540px（小窗口侧栏展开时就是这个宽度）会排成「4 个 + 1 个」——
+         第二行四个空位，看着就是一块坑。宁可框窄一点，也不留孤行。 */
+      grid-template-columns: repeat(auto-fit, minmax(100px, 1fr));
       gap: 10px;
       margin-bottom: 8px;
     }
@@ -2401,7 +2402,8 @@
     .rt-qmeta {
       display: flex;
       align-items: center;
-      gap: 8px;
+      flex-wrap: wrap;
+      gap: 4px 8px;
       font-size: 10.5px;
       color: var(--text-muted);
       font-variant-numeric: tabular-nums;
@@ -2708,7 +2710,7 @@
     .rt-pipe-row {
       display: grid;
       /* 与 .rt-queues 同一套列宽规则：两块的框宽、换行点保持一致 */
-      grid-template-columns: repeat(auto-fit, minmax(118px, 1fr));
+      grid-template-columns: repeat(auto-fit, minmax(100px, 1fr));
       gap: 10px;
       margin: 2px 0 8px;
       transition: opacity 0.3s var(--ease-out);
