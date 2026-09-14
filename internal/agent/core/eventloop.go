@@ -331,13 +331,20 @@ func (a *Agent) emitResponse(evt *agentIO.InputEvent, response string) {
 		payload["usage"] = stageCtx.TokenUsage
 	}
 	if evt.ResponseCh != nil {
-		evt.ResponseCh <- &agentIO.OutputEvent{
+		// 非阻塞写：ResponseCh 由同步调用方以 cap=1 创建。按不变量 I5（每任务恰一次
+		// 终态）这里永远写得进去；但一旦哪天写出第二次，阻塞会卡死**调度器 goroutine**
+		// （整个 agent 停摆），而丢弃只是丢一条回执——与 emitSkippedReply 对称。
+		select {
+		case evt.ResponseCh <- &agentIO.OutputEvent{
 			RequestID:     evt.RequestID,
 			Target:        evt.Source,
 			Type:          "text",
 			Payload:       payload,
 			Done:          true,
 			OutputChannel: ch,
+		}:
+		default:
+			log.Printf("[agent] ResponseCh 已满，终态回执被丢弃（request=%s，可能违反不变量 I5）", evt.RequestID)
 		}
 	}
 
