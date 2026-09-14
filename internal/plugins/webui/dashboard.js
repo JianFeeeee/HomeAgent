@@ -836,30 +836,20 @@
         var d = depth || 0;
         var out = '<span class="rt-slots ' + (extraCls || "") + '">';
         for (var i = 0; i < n; i++) out += '<i class="' + (i < d ? "on" : "") + '"></i>';
-        // 溢出计数必须留在 .rt-slots 内：.rt-level 是 3 列栅格，
+        // 溢出计数必须留在 .rt-slots 内：格槽是 flex 行，多一个兄弟节点会被挤出去，
         // 多一个兄弟节点会被挤到下一行，整块队列就串了。
         if (d > n) out += '<b class="rt-slots-more">+' + (d - n) + "</b>";
         return out + "</span>";
       }
+      // rtPipelineHtml 画阶段管道：**五个等大的表框**，每框里是本阶段本轮发生的事。
+      //
+      // 为什么不是「小圆点 + 连接线 + 9px 小字」：那种画法在总览里几乎读不出
+      // 「现在走到哪一步」，尺寸也远小于旁边的 KPI 框。现在与中断队列、KPI 用同
+      // 一套视觉语言（等大框 + 大号加粗标题），并且事件直接落在它所属的框里，
+      // 所以「这一步发生了什么」不需要靠颜色或图例去猜。
       function rtPipelineHtml(phase, trail) {
         var g = rtPhaseGroup(phase);
-        var nodes = RT_PIPE_GROUPS.map(function (s, i) {
-          var cls = "rt-pipe-node" + (i === g ? " active" : "");
-          return (
-            '<span class="' + cls + '"><i></i><b>' +
-            RT_ICO[s.ico] +
-            "<u>" + __(s.zh, s.en) + "</u>" +
-            (s.loop
-              ? ' <em class="rt-loop" title="' +
-                __("工具调用会回到行动后，可多次", "tool calls loop back; may repeat") +
-                '">' + RT_ICO.loop + "</em>"
-              : "") +
-            "</b></span>"
-          );
-        }).join("");
-        // 事件按**发生它的阶段**分列，列的横向位置与上面的阶段节点对齐
-        // （同为 5 等分栅格），所以「这一步发生了什么」不需要靠颜色去猜。
-        var cols = RT_PIPE_GROUPS.map(function (s, i) {
+        var cells = RT_PIPE_GROUPS.map(function (s, i) {
           var items = (trail || []).filter(function (t) {
             return (t.g | 0) === i;
           });
@@ -879,17 +869,26 @@
                 })
                 .join("")
             : '<span class="rt-chip rt-chip-none">' + __("无", "none") + "</span>";
-          return '<div class="rt-pipe-col">' + body + "</div>";
+          return (
+            '<div class="rt-pipe-cell' + (i === g ? " active" : "") + '">' +
+            '<div class="rt-pipe-head">' + RT_ICO[s.ico] +
+            "<b>" + __(s.zh, s.en) + "</b>" +
+            (s.loop
+              ? '<em class="rt-loop" title="' +
+                __("工具调用会回到行动后，可多次", "tool calls loop back; may repeat") +
+                '">' + RT_ICO.loop + "</em>"
+              : "") +
+            "</div>" +
+            '<div class="rt-pipe-events">' + body + "</div>" +
+            "</div>"
+          );
         }).join("");
         return (
           '<div class="rt-section-title">' +
           __("阶段管道", "Stage pipeline") +
           (g < 0 ? "　" + __("（空闲）", "(idle)") : "") +
           "</div>" +
-          '<div class="rt-pipe' + (g < 0 ? " rt-pipe-idle" : "") + '">' +
-          '<div class="rt-pipe-nodes">' + nodes + "</div>" +
-          "</div>" +
-          '<div class="rt-pipe-cols">' + cols + "</div>"
+          '<div class="rt-pipe-row' + (g < 0 ? " rt-pipe-idle" : "") + '">' + cells + "</div>"
         );
       }
 
@@ -1225,27 +1224,31 @@
         });
         // 槽位数按全场最大深度缩放（且至少 5 格）：0 时也有可见形状，不空着。
         var qSlots = Math.max(5, Math.min(16, maxQ));
-        h += '<div class="rt-levels">';
+        // 五个**等大表框**（四级中断 + 一条排队），与阶段管道同一套视觉语言。
+        // 此前是五行扁条，四级中断全为 0 时四行几乎全是空白，又占高度又难看。
+        h += '<div class="rt-queues">';
         RT_LEVELS.forEach(function (L) {
           var depth = q[L.lv] || 0;
           var reg = byLv[L.lv] || 0;
           var pre = preLv[L.lv] || 0;
           h +=
-            '<div class="rt-level" title="' + escHtml(L.desc) + '"><span class="rt-lv-name">' + L.name + "</span>" +
+            '<div class="rt-qcell ' + L.cls + (depth ? " rt-active" : "") + '" title="' + escHtml(L.desc) + '">' +
+            '<div class="rt-qhead"><b>' + L.name + "</b><span>" + escHtml(L.desc) + "</span></div>" +
+            '<div class="rt-qnum">' + depth + "</div>" +
             rtSlots(depth, qSlots, L.cls) +
-            '<span class="rt-lv-meta">' + depth + " · " +
+            '<div class="rt-qmeta">' +
             rtMini(reg, maxReg, __("登记", "registered")) +
             rtMini(pre, maxPre, __("抢占", "preempted")) +
-            "</span></div>";
+            "</div></div>";
         });
         // 第五条：排队队列（无级别，纯 FIFO）。
-        // 注意：它必须在 .rt-levels **之内**：早前它被写在容器闭合之后，下面又多一个
-        // </div>，多出来的闭合标签会把祖先节点提前关掉，整块布局被撞歪。
+        // 它不是优先级而是另一**类别**（排队 vs 中断），所以用虚线框区分。
         h +=
-          '<div class="rt-level rt-level-queued" title="' + __("排队（无级别，纯 FIFO）", "queued (no priority, FIFO)") + '"><span class="rt-lv-name">' +
-          __("排队", "queued") + "</span>" +
+          '<div class="rt-qcell rt-qcell-queued rt-lv-q' + (ready ? " rt-active" : "") + '" title="' + __("排队（无级别，纯 FIFO）", "queued (no priority, FIFO)") + '">' +
+          '<div class="rt-qhead"><b>' + __("排队", "queued") + "</b><span>FIFO</span></div>" +
+          '<div class="rt-qnum">' + ready + "</div>" +
           rtSlots(ready, qSlots, "rt-lv-q") +
-          '<span class="rt-lv-meta">' + ready + " · FIFO</span></div>";
+          '<div class="rt-qmeta">' + __("无级别", "no priority") + "</div></div>";
         h += "</div>";
         if (sc.immediate) {
           h += '<div class="rt-frame">' + RT_ICO.bolt + " " + __("立即运行", "immediate") + "：" +
