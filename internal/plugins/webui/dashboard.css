@@ -2191,6 +2191,20 @@
     .rt-lv-3 > i { background: #ffa657; }
     .rt-lv-2 > i { background: var(--sakura-400); }
     .rt-lv-1 > i { background: var(--frost-300); }
+    /* 拓扑图：整张图为 SVG，文字降到最少，其余信息用图形编码
+       （归属=容器/配色、容量=细条、输出能力=圆点、路由=连线）。 */
+    .rt-svg-wrap {
+      overflow-x: auto;
+      padding: 4px 0 8px;
+    }
+    .rt-svg {
+      min-width: 560px;
+      font-family: inherit;
+      display: block;
+    }
+    .rt-svg text {
+      fill: var(--text-primary);
+    }
     /* 第五条：排队队列（无级别）。用虚线分隔 + 中性色，与“有级别”的四条区分开——
        它不是优先级，而是另一**类别**（排队 vs 中断），同一套配色会误导。 */
     .rt-level.rt-level-queued {
