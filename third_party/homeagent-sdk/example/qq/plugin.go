@@ -489,6 +489,12 @@ type 枚举: text（文字）/ voice（语音转文字后发送）/ image（图�
 		Name: tp + "get_history", Description: "获取QQ群聊/私聊最近历史消息。当收到引用回复消息或需要了解对话上下文时应优先调用此工具查看前后文。返回值每条格式为 [时间] 发送者: 消息内容。如果消息包含文件，会额外返回 files 字段（含 file_id 和 name），可用 qq_download_file 工具下载。",
 		NoMemory: false,
 		Cleaner:  cleaner,
+		// 与 get_message 同理：返回的是**真实聊天正文**，不只当轮需要，
+		// 还可能牵出与这些正文相关的长期记忆。故取回后既裁剪（用完不长期占
+		// L0）又据正文召回（取进来）。不声明 recall 的话就是「记忆里有、但
+		// 拉回历史消息时不注入」的盲区。
+		ContextPolicy: "prune",
+		RecallPolicy:  "auto",
 		Parameters: map[string]interface{}{
 			"type": "object", "properties": map[string]interface{}{
 				"group_id": map[string]interface{}{"type": "integer", "description": "群号（与user_id二选一）"},
