@@ -1094,6 +1094,10 @@ function rtTrailPush(g, kind, label, short) {
 function renderRuntimePanel() {
   var title = __("运行态", "Runtime");
   var rt = state.runtime;
+  // 工具格的滑入动画只在「新到一条工具调用」那一次播放：overview 是整块
+  // innerHTML 重建，节点每次都是新的；若无条件带动画类，任何重渲染都会闪一下。
+  var toolFlash = !!state.toolFlash;
+  state.toolFlash = false;
   if (!rt) {
     return (
       '<div class="card"><h2>' + title + '</h2><p class="rt-empty">' +
@@ -1133,22 +1137,44 @@ function renderRuntimePanel() {
     var items = (state.stageTrail || []).filter(function (t) {
       return (t.g | 0) === i;
     });
-    var body = items.length
-      ? items
-          .map(function (t) {
-            var kind = t.kind || "stage";
-            var ico =
-              kind === "output" ? RT_ICO.out : kind === "tool" ? RT_ICO.tool : "";
-            return (
-              '<span class="rt-chip rt-chip-' + kind + '" title="' +
-              escHtml(t.label) + '">' + ico +
-              escHtml(t.short || t.label) +
-              (t.n > 1 ? '<i class="rt-chip-n">x' + t.n + "</i>" : "") +
-              "</span>"
-            );
-          })
-          .join("")
-      : '<span class="rt-chip rt-chip-none">' + __("无", "none") + "</span>";
+    // 「工具」是循环格：一轮里可能调几十次工具/输出通道，全部追加会把这一格
+    // 撑成长条，反而看不出「现在在调什么」。只留**最新一条**，右侧给本轮累计
+    // 次数（与 WebUI 同一口径，见 internal/plugins/webui/dashboard.js）。
+    var cls = "rt-pipe-events";
+    var body;
+    if (!items.length) {
+      body = '<span class="rt-chip rt-chip-none">' + __("无", "none") + "</span>";
+    } else if (s.loop) {
+      cls += " rt-pipe-scroll";
+      var total = 0;
+      for (var k = 0; k < items.length; k++) total += items[k].n || 1;
+      var latest = items[items.length - 1];
+      var lkind = latest.kind || "stage";
+      var lico = lkind === "output" ? RT_ICO.out : lkind === "tool" ? RT_ICO.tool : "";
+      body =
+        '<span class="rt-chip rt-chip-' + lkind + (toolFlash ? " rt-chip-enter" : "") +
+        '" title="' + escHtml(latest.label) + '">' + lico +
+        '<b class="rt-chip-t">' + escHtml(latest.short || latest.label) + "</b>" +
+        (latest.n > 1 ? '<i class="rt-chip-n">x' + latest.n + "</i>" : "") +
+        "</span>" +
+        '<i class="rt-scroll-count" title="' +
+        __("本轮工具调用累计次数", "tool calls this turn") + '">x' + total + "</i>";
+    } else {
+      body = items
+        .map(function (t) {
+          var kind = t.kind || "stage";
+          var ico =
+            kind === "output" ? RT_ICO.out : kind === "tool" ? RT_ICO.tool : "";
+          return (
+            '<span class="rt-chip rt-chip-' + kind + '" title="' +
+            escHtml(t.label) + '">' + ico +
+            '<b class="rt-chip-t">' + escHtml(t.short || t.label) + "</b>" +
+            (t.n > 1 ? '<i class="rt-chip-n">x' + t.n + "</i>" : "") +
+            "</span>"
+          );
+        })
+        .join("");
+    }
     return (
       '<div class="rt-pipe-cell' + (i === g ? " active" : "") + '">' +
       '<div class="rt-pipe-head">' + RT_ICO[s.ico] +
@@ -1158,7 +1184,7 @@ function renderRuntimePanel() {
           __("工具调用会回到行动后，可多次", "tool calls loop back; may repeat") +
           '">' + RT_ICO.loop + "</em>"
         : "") +
-      '</div><div class="rt-pipe-events">' + body + "</div></div>"
+      '</div><div class="' + cls + '">' + body + "</div></div>"
     );
   }).join("");
   html += "</div>";
@@ -5477,6 +5503,7 @@ async function connectFetchSSE(url) {
                   tool,
                   rtShortTool(tool),
                 );
+              if (tool) state.toolFlash = true;
               state.chatStage = __("工具调用: ", "Tool: ") + (tool || "");
               if (tool && (state.pendingTools || []).indexOf(tool) === -1) {
                 if (!state.pendingTools) state.pendingTools = [];
