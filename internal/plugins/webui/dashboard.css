@@ -2740,3 +2740,74 @@
       border-color: var(--text-primary);
       box-shadow: 0 0 0 2px var(--accent-bg);
     }
+
+    /* ===== 总览 KPI（图标 + 数字，静态骨架）=====
+       节点只在首帧建一次，刷新只改值与类名 —— 这是总览页不再闪的前提。 */
+    .ov-kpis {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(118px, 1fr));
+      gap: 10px;
+    }
+    .ov-kpi {
+      display: flex;
+      flex-direction: column;
+      gap: 5px;
+      padding: 12px 14px 11px;
+      border-radius: var(--radius-md);
+      background: var(--bg-input);
+      border: 1px solid var(--border-color);
+      min-width: 0;
+    }
+    .ov-ico svg {
+      width: 18px;
+      height: 18px;
+      fill: none;
+      stroke: var(--accent);
+      stroke-width: 1.7;
+      stroke-linecap: round;
+      stroke-linejoin: round;
+      display: block;
+    }
+    .ov-val {
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      font-size: 18px;
+      font-weight: 700;
+      line-height: 1.15;
+      min-width: 0;
+    }
+    .ov-val b {
+      font-weight: 700;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+    .ov-lab {
+      font-size: 10px;
+      letter-spacing: 0.05em;
+      text-transform: uppercase;
+      color: var(--text-muted);
+    }
+    .ov-dot {
+      flex: 0 0 auto;
+      width: 8px;
+      height: 8px;
+      border-radius: 50%;
+      background: var(--text-muted);
+    }
+    .ov-dot.ok {
+      background: var(--success);
+      box-shadow: 0 0 8px rgba(23, 169, 100, 0.55);
+    }
+    .ov-dot.warn {
+      background: var(--warning);
+    }
+    .ov-dot.bad {
+      background: var(--error);
+    }
+    .ov-foot {
+      margin-top: 10px;
+      font-size: 11px;
+      color: var(--text-muted);
+    }
