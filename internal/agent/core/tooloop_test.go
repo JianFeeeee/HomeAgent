@@ -5,6 +5,7 @@ import (
 	"testing"
 
 	agentAPI "gitcode.com/JianFeeeee/HomeAgent/internal/agent/api"
+	sdk "gitcode.com/JianFeeeee/homeagent-sdk/sdk"
 )
 
 // appendPlaceholder 复刻 process() 循环顶部的补位逻辑。
@@ -113,5 +114,25 @@ func TestIsOutputDeliveryTool(t *testing.T) {
 		if got := isOutputDeliveryTool(name); got != want {
 			t.Errorf("isOutputDeliveryTool(%q) = %v, want %v", name, got, want)
 		}
+	}
+}
+
+// 插件在 before_toolcall 里给出的拒绝理由必须原样进入工具结果。
+// 若被通用文案覆盖，模型不知道「为什么被拒 / 能不能重试」，会反复重试同一个调用。
+func TestDenialReasonReachesModel(t *testing.T) {
+	reason := "QQ 权限策略拒绝私人资源工具 calendar_list；请不要重试"
+	ctx := &sdk.StageContext{Response: &reason}
+	if got := denialResultText(ctx, "calendar_list"); got != reason {
+		t.Fatalf("拒绝理由被丢弃，实际: %q", got)
+	}
+
+	// 插件没给理由时退回通用文案（保持既有行为）。
+	if got := denialResultText(&sdk.StageContext{}, "calendar_list"); !strings.Contains(got, "已被插件拒绝") {
+		t.Fatalf("无理由时应退回通用文案，实际: %q", got)
+	}
+	// 空白理由不算理由。
+	blank := "   "
+	if got := denialResultText(&sdk.StageContext{Response: &blank}, "x"); !strings.Contains(got, "已被插件拒绝") {
+		t.Fatalf("空白理由应退回通用文案，实际: %q", got)
 	}
 }
