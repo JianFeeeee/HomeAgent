@@ -348,8 +348,11 @@ func (p *Plugin) cmdInterrupt(conn net.Conn, parts []string, s *sdk.PluginSDK) {
 	if alias := strings.TrimSpace(strings.TrimPrefix(line2(parts), "/interrupt")); alias != "" {
 		msg = alias
 	}
+	// PriorityL3（交互）：/stop 是人在终端上当场下的指令，属于"需要及时处理"，
+	// 不该用默认的 L1（后台）——那样它会被排在其它后台注入后面，停得不及时。
 	s.InjectInterrupt(cliSource, cliChannel, "text", map[string]interface{}{
-		"content": msg,
+		"content":  msg,
+		"priority": sdk.PriorityL3,
 	})
 	writeLine(conn, map[string]interface{}{
 		"type":    "response",
