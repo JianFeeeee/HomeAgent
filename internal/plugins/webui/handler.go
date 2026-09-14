@@ -105,7 +105,8 @@ type Handler struct {
 
 	chatMu      sync.Mutex
 	chatHistory []ChatMsg
-	pendingIdx  int // chatHistory 中正在进行的 assistant 消息索引，-1 表示无
+	pendingIdx  int   // chatHistory 中正在进行的 assistant 消息索引，-1 表示无
+	chatSeq     int64 // 已分配的最大序号；单调递增，作增量查询游标
 
 	// history 是聊天记录的独立存储（默认 <data>/webui_chat_history.json，
 	// 插件设置 history_file 可改）。

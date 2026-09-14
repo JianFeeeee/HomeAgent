@@ -1388,6 +1388,75 @@ func TestChatHistoryDefaultIsPaged(t *testing.T) {
 	}
 }
 
+// TestChatHistoryIncrementalAfterCursor 钉住增量游标 API（前端轮询只拿增量、
+// 不做整块重建的根据）。
+//
+// 三条不变量：
+//   - after=<seq> 只回 seq 更大的消息，按 seq 升序；
+//   - 响应带 last_seq，续取不重不漏；
+//   - 一批超过 limit 时返回**最旧的一批**并把 last_seq 停在返回的最后一条
+//     （若返回最新一批，被挤掉的旧几条就永远追不回来了）。
+func TestChatHistoryIncrementalAfterCursor(t *testing.T) {
+	h, _ := newTestHandler(t)
+	h.chatMu.Lock()
+	h.chatHistory = nil
+	h.chatSeq = 0
+	for i := 0; i < 5; i++ {
+		h.chatHistory = append(h.chatHistory, ChatMsg{Seq: h.bumpSeqLocked(), Role: "user", Content: "m", Time: "t"})
+	}
+	h.chatMu.Unlock()
+
+	get := func(q string) map[string]interface{} {
+		req := httptest.NewRequest(http.MethodGet, "/api/v1/chat/history"+q, nil)
+		w := httptest.NewRecorder()
+		h.handleChatHistory(w, req)
+		if w.Code != http.StatusOK {
+			t.Fatalf("GET %q: %d", q, w.Code)
+		}
+		var out map[string]interface{}
+		if err := json.Unmarshal(w.Body.Bytes(), &out); err != nil {
+			t.Fatalf("unmarshal: %v", err)
+		}
+		return out
+	}
+
+	first := get("?after=0&limit=2")
+	if n := len(first["messages"].([]interface{})); n != 2 {
+		t.Fatalf("after=0&limit=2 应回 2 条，实际 %d", n)
+	}
+	if got := first["last_seq"].(float64); got != 2 {
+		t.Fatalf("截断时 last_seq 必须停在返回的最后一条（2），实际 %v", got)
+	}
+
+	second := get("?after=2&limit=2")
+	if got := second["last_seq"].(float64); got != 4 {
+		t.Fatalf("续取 last_seq 应为 4，实际 %v", got)
+	}
+	third := get("?after=4&limit=2")
+	if n := len(third["messages"].([]interface{})); n != 1 {
+		t.Fatalf("after=4 应只剩 1 条，实际 %d", n)
+	}
+	if got := third["last_seq"].(float64); got != 5 {
+		t.Fatalf("追平后 last_seq 应为 5，实际 %v", got)
+	}
+
+	none := get("?after=5")
+	if n := len(none["messages"].([]interface{})); n != 0 {
+		t.Fatalf("无新增应回 0 条，实际 %d", n)
+	}
+	if got := none["last_seq"].(float64); got != 5 {
+		t.Fatalf("无新增时 last_seq 应保持传入值 5，实际 %v", got)
+	}
+
+	// 非数字游标 → 400（而不是静默当成 0 全量重投）
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/chat/history?after=abc", nil)
+	w := httptest.NewRecorder()
+	h.handleChatHistory(w, req)
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("非法 after 应为 400，实际 %d", w.Code)
+	}
+}
+
 // fakeStatus 是给 /runtime 用的最小内核状态桩。
 type fakeStatus struct{ ks *sdk.KernelStatus }
 
