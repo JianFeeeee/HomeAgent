@@ -65,6 +65,22 @@ var (
 	// 构建时可用 -ldflags 覆盖，无需改源码：
 	//   -X gitcode.com/JianFeeeee/HomeAgent/internal/meta.SourceURL=<你的仓库>
 	SourceURL = "https://gitcode.com/JianFeeeee/HomeAgent"
+
+	// License 是本项目的开源许可标识（SPDX 表达式）。
+	//
+	// AGPL-3.0-only 带**网络条款**：把修改过的版本作为网络服务对外提供时，
+	// 必须给使用者提供取得 Corresponding Source 的机会（§13）。所以 WebUI
+	// 总览底部把「许可标识 + 许可全文 + 源码仓库」三者一起渲染成可见的许可卡——
+	// 只给一个源码链接、不标明协议名，使用者在界面上根本看不出这是什么许可。
+	License = "AGPL-3.0-only"
+
+	// LicenseURL 是上述许可的全文地址。
+	//
+	// 默认指向 GNU 官方的 AGPL-3.0 全文页：与仓库托管方、分支名、文件路径都
+	// 无关，换仓库/换分支都不会失效。若你的发行版把 LICENSE 放在别处，
+	// 用 -ldflags 覆盖即可：
+	//   -X gitcode.com/JianFeeeee/HomeAgent/internal/meta.LicenseURL=<你的链接>
+	LicenseURL = "https://www.gnu.org/licenses/agpl-3.0.html"
 )
 
 // FullVersion 返回完整的版本字符串。

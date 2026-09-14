@@ -2855,9 +2855,15 @@
     .ov-dot.bad {
       background: var(--error);
     }
-    .ov-foot {
-      margin-top: 10px;
+    /* 开源许可卡：协议标识 + 协议全文 + 源码仓库。
+       此前只是 KPI 卡底部一行小链接（.ov-foot），在长页面里基本看不见。 */
+    .ov-legal h2 {
+      margin-bottom: 6px;
+    }
+    .ov-legal-note {
+      margin: 10px 0 0;
       font-size: 11px;
+      line-height: 1.55;
       color: var(--text-muted);
     }
 

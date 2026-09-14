@@ -103,6 +103,9 @@ func collectKernelStatus(
 			KernelName:    meta.KernelName,
 			// AGPL-3.0 §13：状态页向网络使用者展示取得源码的入口。
 			SourceURL: meta.SourceURL,
+			// 许可标识与全文：与源码链接一起构成「这是什么许可 + 怎么拿到源码」。
+			License:    meta.License,
+			LicenseURL: meta.LicenseURL,
 		},
 		Runtime: RuntimeStatus{
 			Goroutines: runtime.NumGoroutine(),
