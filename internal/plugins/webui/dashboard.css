@@ -2347,34 +2347,92 @@
       background: linear-gradient(90deg, var(--sakura-400), var(--frost-300));
       transition: width 0.35s var(--ease-out);
     }
-    .rt-levels {
+    /* ===== 队列：五个等大表框 =====
+       此前是五行「名字 | 进度条 | 元数据」的扁条：四级中断全为 0 时，
+       四行几乎全是空白，既占高度又难看。改成五个等大的框（与 KPI、阶段管道
+       同一套视觉语言），深度用大字报出来，下面是可见的格槽。 */
+    .rt-queues {
+      display: grid;
+      /* 118px 而不是 150px：容器 640–740px（窄屏侧栏收起后就是这个宽度）时
+         5 个框仍能排成一行，不会出现「4 个 + 1 个」的孤行。 */
+      grid-template-columns: repeat(auto-fit, minmax(118px, 1fr));
+      gap: 10px;
+      margin-bottom: 8px;
+    }
+    .rt-qcell {
       display: flex;
       flex-direction: column;
-      gap: 6px;
-      margin-bottom: 6px;
+      gap: 7px;
+      padding: 11px 12px 10px;
+      border-radius: var(--radius-md);
+      background: var(--bg-input);
+      border: 1px solid var(--border-color);
+      min-width: 0;
+      transition:
+        border-color 0.25s var(--ease-out),
+        box-shadow 0.25s var(--ease-out);
     }
-    .rt-level {
-      display: grid;
-      grid-template-columns: 74px 1fr 96px;
+    .rt-qhead {
+      display: flex;
+      align-items: baseline;
+      gap: 7px;
+      min-width: 0;
+    }
+    .rt-qhead > b {
+      font-size: 16px;
+      font-weight: 800;
+      line-height: 1;
+      letter-spacing: -0.02em;
+    }
+    .rt-qhead > span {
+      font-size: 10.5px;
+      color: var(--text-muted);
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }
+    .rt-qnum {
+      font-size: 26px;
+      font-weight: 800;
+      line-height: 1;
+      letter-spacing: -0.02em;
+      font-variant-numeric: tabular-nums;
+    }
+    .rt-qmeta {
+      display: flex;
       align-items: center;
       gap: 8px;
-      font-size: 11px;
+      font-size: 10.5px;
+      color: var(--text-muted);
+      font-variant-numeric: tabular-nums;
     }
-    .rt-level .rt-lv-name {
-      color: var(--text-secondary);
-      white-space: nowrap;
+    /* 级别配色：框头与格槽点亮共用同一套色 */
+    .rt-qcell.rt-lv-4 .rt-qhead > b { color: #ff5c7a; }
+    .rt-qcell.rt-lv-3 .rt-qhead > b { color: #ffa657; }
+    .rt-qcell.rt-lv-2 .rt-qhead > b { color: var(--sakura-400); }
+    .rt-qcell.rt-lv-1 .rt-qhead > b { color: var(--frost-300); }
+    .rt-qcell.rt-lv-q .rt-qhead > b { color: #a3be8c; }
+    /* 有积压时整个框描边点亮：一眼看出哪条队列在堵 */
+    .rt-qcell.rt-lv-4.rt-active { border-color: rgba(255, 92, 122, 0.55); box-shadow: 0 0 0 1px rgba(255, 92, 122, 0.18); }
+    .rt-qcell.rt-lv-3.rt-active { border-color: rgba(255, 166, 87, 0.55); box-shadow: 0 0 0 1px rgba(255, 166, 87, 0.18); }
+    .rt-qcell.rt-lv-2.rt-active { border-color: rgba(var(--accent-rgb), 0.55); box-shadow: 0 0 0 1px rgba(var(--accent-rgb), 0.18); }
+    .rt-qcell.rt-lv-1.rt-active { border-color: rgba(136, 192, 208, 0.55); box-shadow: 0 0 0 1px rgba(136, 192, 208, 0.18); }
+    .rt-qcell.rt-lv-q.rt-active { border-color: rgba(163, 190, 140, 0.55); box-shadow: 0 0 0 1px rgba(163, 190, 140, 0.18); }
+    /* 排队队列无级别：用虚线框与四级中断区分开 */
+    .rt-qcell.rt-qcell-queued {
+      border-style: dashed;
     }
     /* 队列格槽：固定可见的「车位」，占用多少一眼可数。
        此前是宽度百分比进度条 —— 队列为 0 时宽度为 0，整行只剩文字，
        看上去就是「这块空着」。 */
-    .rt-level .rt-slots {
+    .rt-slots {
       display: flex;
       align-items: stretch;
       gap: 3px;
-      height: 14px;
+      height: 16px;
       min-width: 0;
     }
-    .rt-level .rt-slots > i {
+    .rt-slots > i {
       flex: 1 1 0;
       min-width: 3px;
       border-radius: 3px;
@@ -2384,22 +2442,17 @@
         background 0.25s var(--ease-out),
         box-shadow 0.25s var(--ease-out);
     }
-    .rt-level .rt-slots.rt-lv-4 > i.on { background: #ff5c7a; box-shadow: 0 0 6px rgba(255, 92, 122, 0.45); }
-    .rt-level .rt-slots.rt-lv-3 > i.on { background: #ffa657; box-shadow: 0 0 6px rgba(255, 166, 87, 0.4); }
-    .rt-level .rt-slots.rt-lv-2 > i.on { background: var(--sakura-400); box-shadow: 0 0 6px rgba(var(--accent-rgb), 0.4); }
-    .rt-level .rt-slots.rt-lv-1 > i.on { background: var(--frost-300); box-shadow: 0 0 6px rgba(136, 192, 208, 0.4); }
-    .rt-level .rt-slots.rt-lv-q > i.on { background: #a3be8c; box-shadow: 0 0 6px rgba(163, 190, 140, 0.4); }
+    .rt-slots.rt-lv-4 > i.on { background: #ff5c7a; box-shadow: 0 0 6px rgba(255, 92, 122, 0.45); }
+    .rt-slots.rt-lv-3 > i.on { background: #ffa657; box-shadow: 0 0 6px rgba(255, 166, 87, 0.4); }
+    .rt-slots.rt-lv-2 > i.on { background: var(--sakura-400); box-shadow: 0 0 6px rgba(var(--accent-rgb), 0.4); }
+    .rt-slots.rt-lv-1 > i.on { background: var(--frost-300); box-shadow: 0 0 6px rgba(136, 192, 208, 0.4); }
+    .rt-slots.rt-lv-q > i.on { background: #a3be8c; box-shadow: 0 0 6px rgba(163, 190, 140, 0.4); }
     .rt-slots-more {
       flex: 0 0 auto;
       align-self: center;
       margin-left: 4px;
       font-size: 10px;
-      font-weight: 400;
-      color: var(--text-muted);
-      font-variant-numeric: tabular-nums;
-    }
-    .rt-level .rt-lv-meta {
-      text-align: right;
+      font-weight: 600;
       color: var(--text-muted);
       font-variant-numeric: tabular-nums;
     }
@@ -2430,13 +2483,7 @@
     .rt-topo-svg .tp-edge { fill: none; }
     .rt-topo-svg .tp-edge-in { stroke-opacity: 0.45; stroke-width: 1.4; }
     .rt-topo-svg .tp-edge-out { stroke-opacity: 0.35; stroke-width: 1.2; }
-    /* 第五条：排队队列（无级别）。用虚线分隔 + 中性色，与“有级别”的四条区分开——
-       它不是优先级，而是另一**类别**（排队 vs 中断），同一套配色会误导。 */
-    .rt-level.rt-level-queued {
-      border-top: 1px dashed rgba(255, 255, 255, 0.14);
-      margin-top: 5px;
-      padding-top: 7px;
-    }
+    /* 排队队列无级别：虚线框已在 .rt-qcell.rt-qcell-queued 处理 */
     /* 中断栈：栈顶在上，做出"层叠现场"的观感 */
     .rt-stack {
       display: flex;
@@ -2555,14 +2602,6 @@
       color: var(--text-muted);
       margin-left: auto;
     }
-    .rt-chip {
-      font-size: 9px;
-      padding: 1px 6px;
-      border-radius: 999px;
-      background: rgba(163, 190, 140, 0.16);
-      color: var(--text-secondary, var(--text-muted));
-      white-space: nowrap;
-    }
     .rt-badge-warn {
       font-size: 9px;
       padding: 1px 6px;
@@ -2653,102 +2692,78 @@
       box-shadow: var(--shadow-glow);
     }
     .rt-section-title {
-      font-size: 11px;
-      color: var(--text-muted);
-      letter-spacing: 0.4px;
-      margin: 12px 0 6px;
+      font-size: 12px;
+      font-weight: 600;
+      color: var(--text-secondary);
+      letter-spacing: 0.3px;
+      margin: 14px 0 8px;
       text-transform: uppercase;
     }
 
-    /* ===== 阶段管道滑块（总览）=====
-       七个阶段各一格，滑块停在当前阶段；空闲时整条降透明度，不做假动画。
-       滑块用绝对定位 + left 过渡实现"滑过去"（内联 left 由 rtPipelineHtml 给）。 */
-    .rt-pipe {
-      position: relative;
-      padding: 4px 0 2px;
+    /* ===== 阶段管道：五个等大表框 =====
+       与中断队列、KPI 同一套视觉语言（等大框 + 大号加粗标题）。
+       此前是「小圆点 + 一条连接线 + 9px 小字」，在总览里几乎读不出
+       「现在走到哪一步」，尺寸也远小于旁边的 KPI 框。
+       现在事件直接落在它所属的框里，不需要靠颜色或图例去猜。 */
+    .rt-pipe-row {
+      display: grid;
+      /* 与 .rt-queues 同一套列宽规则：两块的框宽、换行点保持一致 */
+      grid-template-columns: repeat(auto-fit, minmax(118px, 1fr));
+      gap: 10px;
       margin: 2px 0 8px;
       transition: opacity 0.3s var(--ease-out);
     }
     .rt-pipe-idle {
-      opacity: 0.5;
+      opacity: 0.55;
     }
-    .rt-pipe-track {
-      position: absolute;
-      left: 22px;
-      right: 22px;
-      top: 9px;
-      height: 2px;
-      border-radius: 999px;
-      background: rgba(255, 255, 255, 0.12);
-    }
-    .rt-pipe-nodes {
-      position: relative;
-      display: grid;
-      grid-template-columns: repeat(5, minmax(0, 1fr));
-    }
-    .rt-pipe-node {
+    .rt-pipe-cell {
       display: flex;
       flex-direction: column;
+      gap: 8px;
+      padding: 11px 12px 10px;
+      border-radius: var(--radius-md);
+      background: var(--bg-input);
+      border: 1px solid var(--border-color);
+      min-width: 0;
+      transition:
+        border-color 0.25s var(--ease-out),
+        box-shadow 0.25s var(--ease-out),
+        background 0.25s var(--ease-out);
+    }
+    .rt-pipe-cell.active {
+      border-color: var(--accent);
+      background: rgba(var(--accent-rgb), 0.08);
+      box-shadow: 0 0 0 1px rgba(var(--accent-rgb), 0.22);
+    }
+    .rt-pipe-head {
+      display: flex;
       align-items: center;
       gap: 6px;
       min-width: 0;
     }
-    .rt-pipe-node > i {
-      width: 11px;
-      height: 11px;
-      border-radius: 50%;
-      background: var(--bg-input);
-      border: 2px solid var(--border-color);
-      position: relative;
-      z-index: 1;
-      transition:
-        background 0.25s var(--ease-out),
-        border-color 0.25s var(--ease-out),
-        box-shadow 0.25s var(--ease-out);
-    }
-    .rt-pipe-node > b {
-      display: flex;
-      align-items: center;
-      justify-content: center;
-      gap: 3px;
-      max-width: 100%;
-      font-size: 9px;
-      font-weight: 500;
-      color: var(--text-muted);
+    .rt-pipe-head > b {
+      font-size: 13.5px;
+      font-weight: 700;
+      letter-spacing: 0.01em;
+      color: var(--text-secondary);
       white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
     }
-    /* 图标自带 stroke，标签文字不能用下划线（<u> 只为分组） */
-    .rt-pipe-node > b > u {
-      text-decoration: none;
+    .rt-pipe-head .rt-ico {
+      width: 15px;
+      height: 15px;
+      color: var(--text-secondary);
     }
-    .rt-pipe-node.done > i {
-      background: var(--frost-300);
-      border-color: var(--frost-300);
+    .rt-pipe-cell.active .rt-pipe-head > b,
+    .rt-pipe-cell.active .rt-pipe-head .rt-ico {
+      color: var(--accent);
     }
-    .rt-pipe-node.active > i {
-      background: var(--sakura-400);
-      border-color: var(--sakura-400);
-      box-shadow: 0 0 0 4px rgba(var(--accent-rgb), 0.18);
-    }
-    .rt-pipe-node.active > b {
-      color: var(--text-primary);
-      font-weight: 600;
-    }
-    .rt-pipe-knob {
-      position: absolute;
-      top: 4px;
-      width: 11px;
-      height: 11px;
-      margin-left: -5.5px;
-      border-radius: 50%;
-      background: #fff;
-      box-shadow: 0 0 10px rgba(var(--accent-rgb), 0.85);
-      transition: left 0.45s var(--ease-out);
-      z-index: 2;
-    }
-    .rt-pipe-idle .rt-pipe-knob {
-      box-shadow: none;
-      opacity: 0.5;
+    .rt-pipe-events {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 4px;
+      min-height: 23px;
     }
     /* 拓扑光点：沿 animateMotion 给的路径跑；不吃鼠标事件，跑完由 JS 摘掉。 */
     .rt-spark {
@@ -2867,25 +2882,8 @@
       color: var(--text-muted);
     }
 
-    /* 阶段管道下方的「每阶段事件」分列。
-       与上面的节点同为 5 等分栅格，所以每一列正好落在它对应阶段的下面；
-       列内 chip 用不同配色区分普通工具与 output_* 输出通道。 */
-    .rt-pipe-cols {
-      display: grid;
-      grid-template-columns: repeat(5, minmax(0, 1fr));
-      gap: 6px;
-      margin: 4px 0 10px;
-      padding-top: 6px;
-      border-top: 1px dashed rgba(255, 255, 255, 0.09);
-    }
-    .rt-pipe-col {
-      display: flex;
-      flex-wrap: wrap;
-      align-content: flex-start;
-      gap: 4px;
-      min-width: 0;
-    }
-    /* 行内小图标：一律 SVG，不使用 emoji/符号字符。 */
+    /* 行内小图标：一律 SVG，不使用 emoji/符号字符。
+       事件 chip 用它区分普通工具与 output_* 输出通道。 */
     .rt-ico {
       width: 12px;
       height: 12px;
@@ -2910,12 +2908,14 @@
       display: inline-flex;
       align-items: center;
       gap: 3px;
+      /* min-width:0 + overflow:hidden：框窄时 chip 跟着缩，而不是把框撞破 */
+      min-width: 0;
       max-width: 170px;
       overflow: hidden;
       text-overflow: ellipsis;
       white-space: nowrap;
-      font-size: 10px;
-      padding: 2px 7px;
+      font-size: 11px;
+      padding: 2px 8px;
       border-radius: 999px;
       background: rgba(255, 255, 255, 0.05);
       border: 1px solid var(--border-color);
