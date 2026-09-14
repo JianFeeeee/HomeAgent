@@ -925,9 +925,41 @@
       // 右边是它能写的 outputch。连线即路由；光点沿连线跑表示消息正在流动。
       // 与旧版「归属框 → 单个内核盒」的差别：内核盒只有一个，看不出"这条输入到底
       // 喂给了哪个子"，而子 agent 才是运行态里最该看清的东西。
+      // rtTopoWidth 用**实测容器宽**当 viewBox 宽：viewBox 宽与渲染宽一致时缩放才是
+      // 1:1。此前固定 640 而容器 ~920，浏览器按 "meet" 把内容顶在左上、右侧空出一大块，
+      // 观感就是"间距不对"。
+      function rtTopoWidth() {
+        var host = document.getElementById("rt-sec-topo");
+        var w = host ? host.clientWidth : 0;
+        if (!w) {
+          var panel = document.getElementById("rt-panel");
+          w = panel ? panel.clientWidth : 0;
+        }
+        if (!w || w < 360) w = 900;
+        return Math.round(w) - 4;
+      }
+
+      // rtClip 按估算宽度截断长通道名（SVG 没有 text-overflow，只能自己量）。
+      // 全角按 1em、其余按 0.56em 估宽：只求不越界，不求像素级精确。
+      function rtClip(text, maxPx, fontPx) {
+        var s = String(text == null ? "" : text);
+        var w = 0;
+        var i = 0;
+        for (; i < s.length; i++) {
+          var cw = s.charCodeAt(i) > 0x2e80 ? fontPx : fontPx * 0.56;
+          if (w + cw > maxPx) break;
+          w += cw;
+        }
+        if (i >= s.length) return s;
+        return s.slice(0, Math.max(1, i - 1)) + "…";
+      }
+
       function rtAgentTopology(agents) {
-        var ROW = 26, GAP = 16, NODE_R = 19, W = 640, MAX_OUT = 8;
-        var IN_X = 6, IN_W = 176, NX = 272, OUT_X = 344, OUT_W = 244;
+        var W = rtTopoWidth();
+        var ROW = 30, BOX_H = 20, GAP = 14, NODE_R = 20, MAX_OUT = 8;
+        // 三列按比例分：输入 0~32%，节点居中在 44%，输出 56%~100%，两侧留白对称。
+        var IN_X = 0, IN_W = Math.round(W * 0.32);
+        var NX = Math.round(W * 0.44), OUT_X = Math.round(W * 0.56), OUT_W = W - Math.round(W * 0.56) - 2;
         var out = [];
         _rtEdgeIn = {};
         _rtEdgeOut = {};
@@ -942,27 +974,37 @@
         }
         var y = 8;
         if (!agents.length) {
-          out.push('<text x="8" y="24" font-size="11" fill="#8b90a5">' + __("暂无通道 / agent", "no channels / agents") + "</text>");
+          out.push('<text class="tp-hint" x="8" y="24">' + __("暂无通道 / agent", "no channels / agents") + "</text>");
           y = 44;
         }
         agents.forEach(function (a) {
-          var rows = Math.max(a.inputs.length, a.outputs.length, 1);
-          var bandH = rows * ROW + GAP;
-          var cy = y + (rows * ROW) / 2;
+          var nin = a.inputs.length;
+          var nout = Math.min(a.outputs.length, MAX_OUT);
+          var rows = Math.max(nin, nout, 1);
+          var truncated = a.outputs.length > MAX_OUT;
+          // 内容高必须**容得下节点块**（圆环 + 下方标签一行），否则单行带里节点和它的
+          // 名字会溢出到上/下一个带上（"间距不对"的一个来源）。
+          var nodeBlock = NODE_R * 2 + (a.res && a.res.context_full ? 52 : 20);
+          var contentH = Math.max(rows * ROW, nodeBlock, truncated ? nout * ROW + 18 : 0);
+          var bandH = contentH + GAP;
+          var cy = y + contentH / 2;
+          // 短的一列在带内**居中**：连线短而对称，不再出现"左边挤在上半、右边铺满"的错位感。
+          var inTop = y + (contentH - nin * ROW) / 2;
+          var outTop = y + (contentH - nout * ROW) / 2;
           out.push('<rect x="0" y="' + (y - 3) + '" width="' + W + '" height="' + (bandH - 4) + '" rx="10" fill="' + a.color + '" fill-opacity="0.05"/>');
           out.push('<rect x="0" y="' + (y - 3) + '" width="3" height="' + (bandH - 4) + '" rx="1.5" fill="' + a.color + '" fill-opacity="0.7"/>');
 
           // 输入通道 → agent
           a.inputs.forEach(function (c, i) {
-            var ry = y + i * ROW + ROW / 2;
-            out.push('<rect x="' + IN_X + '" y="' + (ry - 9) + '" width="' + IN_W + '" height="18" rx="6" fill="rgba(255,255,255,0.05)" stroke="' + a.color + '" stroke-opacity="0.35"/>');
-            out.push('<text x="' + (IN_X + 9) + '" y="' + (ry + 4) + '" font-size="11">' + esc(c.name) + "</text>");
+            var ry = inTop + i * ROW + ROW / 2;
+            out.push('<rect x="' + IN_X + '" y="' + (ry - BOX_H / 2) + '" width="' + IN_W + '" height="' + BOX_H + '" rx="7" fill="rgba(255,255,255,0.05)" stroke="' + a.color + '" stroke-opacity="0.35"/>');
+            out.push('<text class="tp-name" x="' + (IN_X + 10) + '" y="' + (ry + 4) + '">' + esc(rtClip(c.name, IN_W - 44, 12)) + "<title>" + esc(c.name) + "</title></text>");
             if (c.capacity) {
-              out.push('<text x="' + (IN_X + IN_W - 8) + '" y="' + (ry + 4) + '" font-size="9" text-anchor="end" fill="#8b90a5">' + esc(c.capacity) + "</text>");
+              out.push('<text class="tp-sub" x="' + (IN_X + IN_W - 9) + '" y="' + (ry + 4) + '" text-anchor="end">' + esc(c.capacity) + "</text>");
             }
             var d = pathD(IN_X + IN_W, ry, NX - NODE_R - 2, cy);
             _rtEdgeIn[c.name] = d;
-            out.push('<path d="' + d + '" fill="none" stroke="' + a.color + '" stroke-opacity="0.45" stroke-width="1.2"/>');
+            out.push('<path class="tp-edge tp-edge-in" d="' + d + '" stroke="' + a.color + '"/>');
           });
 
           // agent 节点：两圈 + 一段负载弧（stroke-dasharray 画进度）
@@ -974,30 +1016,30 @@
             '" stroke-width="3.5" stroke-linecap="round" stroke-dasharray="' + ((a.load / 100) * C).toFixed(1) + " " + C.toFixed(1) +
             '" transform="rotate(-90 ' + NX + " " + cy + ')"/>',
           );
-          out.push('<text x="' + NX + '" y="' + (cy + 4) + '" font-size="11" font-weight="700" text-anchor="middle">' + a.load + "</text>");
-          out.push('<text x="' + NX + '" y="' + (cy + NODE_R + 13) + '" font-size="10" text-anchor="middle" fill="' + a.color + '">' + esc(a.child ? a.id : __("根 agent", "root")) + "</text>");
+          out.push('<text class="tp-val" x="' + NX + '" y="' + (cy + 4) + '" text-anchor="middle">' + a.load + "</text>");
+          out.push('<text class="tp-lab" x="' + NX + '" y="' + (cy + NODE_R + 15) + '" text-anchor="middle" fill="' + a.color + '">' + esc(rtClip(a.child ? a.id : __("根 agent", "root"), 140, 11)) + "</text>");
           if (a.res && a.res.context_full) {
-            out.push('<text x="' + NX + '" y="' + (cy + NODE_R + 25) + '" font-size="9" text-anchor="middle" fill="#ffb86b">' + __("上下文已满", "ctx full") + "</text>");
+            out.push('<text class="tp-warn" x="' + NX + '" y="' + (cy + NODE_R + 30) + '" text-anchor="middle">' + __("上下文已满", "ctx full") + "</text>");
           }
 
           // agent → 输出通道
           a.outputs.slice(0, MAX_OUT).forEach(function (name, i) {
-            var ry = y + i * ROW + ROW / 2;
-            out.push('<rect x="' + OUT_X + '" y="' + (ry - 9) + '" width="' + OUT_W + '" height="18" rx="6" fill="rgba(255,255,255,0.04)" stroke="rgba(255,255,255,0.12)"/>');
-            out.push('<text x="' + (OUT_X + 9) + '" y="' + (ry + 4) + '" font-size="11">' + esc(name) + "</text>");
+            var ry = outTop + i * ROW + ROW / 2;
+            out.push('<rect x="' + OUT_X + '" y="' + (ry - BOX_H / 2) + '" width="' + OUT_W + '" height="' + BOX_H + '" rx="7" fill="rgba(255,255,255,0.04)" stroke="rgba(255,255,255,0.12)"/>');
+            out.push('<text class="tp-name" x="' + (OUT_X + 10) + '" y="' + (ry + 4) + '">' + esc(rtClip(name, OUT_W - 20, 12)) + "<title>" + esc(name) + "</title></text>");
             var d = pathD(NX + NODE_R + 2, cy, OUT_X, ry);
             _rtEdgeOut[a.id + "\u0000" + name] = d;
-            out.push('<path d="' + d + '" fill="none" stroke="' + a.color + '" stroke-opacity="0.35" stroke-width="1.1"/>');
+            out.push('<path class="tp-edge tp-edge-out" d="' + d + '" stroke="' + a.color + '"/>');
           });
           if (a.outputs.length > MAX_OUT) {
-            out.push('<text x="' + OUT_X + '" y="' + (y + MAX_OUT * ROW + 12) + '" font-size="9" fill="#8b90a5">+' + (a.outputs.length - MAX_OUT) + " " + __("更多", "more") + "</text>");
+            out.push('<text class="tp-hint" x="' + OUT_X + '" y="' + (y + nout * ROW + 13) + '">+' + (a.outputs.length - MAX_OUT) + " " + __("更多", "more") + "</text>");
           }
           y += bandH;
         });
         var H = Math.max(60, y);
         return (
           '<div class="rt-section-title">' + __("拓扑（圆环 = 负载）", "Topology (ring = load)") + "</div>" +
-          '<div class="rt-svg-wrap"><svg id="rt-topo-svg" class="rt-svg" viewBox="0 0 ' + W + " " + H + '" preserveAspectRatio="xMinYMin meet" width="100%" height="' + H + '">' +
+          '<div class="rt-svg-wrap"><svg id="rt-topo-svg" class="rt-svg rt-topo-svg" viewBox="0 0 ' + W + " " + H + '" preserveAspectRatio="xMinYMin meet" width="' + W + '" height="' + H + '">' +
           out.join("") +
           "</svg></div>"
         );

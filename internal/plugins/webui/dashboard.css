@@ -2397,6 +2397,19 @@
     .rt-svg text {
       fill: var(--text-primary);
     }
+    /* 拓扑图的文字全部走类（不用 font-size/fill 属性）：
+       1) 字号统一可读（原来 9–11px 且低对比度，实机很难看清）；
+       2) 颜色交给主题变量，切主题/配色时不用重算 SVG。
+       长名截断由 JS 的 rtClip 负责（SVG 没有 text-overflow）。 */
+    .rt-topo-svg .tp-name { font-size: 12px; fill: var(--text-primary); }
+    .rt-topo-svg .tp-sub { font-size: 10.5px; fill: var(--text-muted); font-variant-numeric: tabular-nums; }
+    .rt-topo-svg .tp-val { font-size: 12.5px; font-weight: 700; fill: var(--text-primary); }
+    .rt-topo-svg .tp-lab { font-size: 11px; font-weight: 600; }
+    .rt-topo-svg .tp-warn { font-size: 10.5px; fill: #ffb86b; }
+    .rt-topo-svg .tp-hint { font-size: 10.5px; fill: var(--text-muted); }
+    .rt-topo-svg .tp-edge { fill: none; }
+    .rt-topo-svg .tp-edge-in { stroke-opacity: 0.45; stroke-width: 1.4; }
+    .rt-topo-svg .tp-edge-out { stroke-opacity: 0.35; stroke-width: 1.2; }
     /* 第五条：排队队列（无级别）。用虚线分隔 + 中性色，与“有级别”的四条区分开——
        它不是优先级，而是另一**类别**（排队 vs 中断），同一套配色会误导。 */
     .rt-level.rt-level-queued {
