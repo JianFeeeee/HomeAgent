@@ -26,6 +26,9 @@ type KernelStatus = sdk.KernelStatus
 type PluginInfo = sdk.PluginInfo
 type ChannelInfo = sdk.ChannelInfo
 
+// InputChannelInfo 是 inputch 的登记与归属视图（见 internal/sdk/status.go）。
+type InputChannelInfo = sdk.InputChannelInfo
+
 // ResidentStatus 是驻留式子 agent 的运行时视图（见 internal/sdk/status.go）。
 type ResidentStatus = sdk.ResidentStatus
 type MemoryStatus = sdk.MemoryStatus
@@ -129,6 +132,18 @@ func collectKernelStatus(
 	if iom != nil {
 		for _, ch := range iom.ListChannels() {
 			status.Channels = append(status.Channels, channelInfoFromIO(ch))
+		}
+		// inputch 登记与归属：与 Channels（设备能力）互补——那条回答「能做什么」，
+		// 这条回答「这条输入归谁」。登记表是根 agent 与驻留子共用的，所以驻留子
+		// 划走的 inputch（owner=子 id）也会出现在这里。
+		for _, ic := range iom.InputChannels() {
+			status.InputChannels = append(status.InputChannels, InputChannelInfo{
+				Name:     ic.Name,
+				Plugin:   ic.Plugin,
+				Owner:    ic.Owner,
+				Capacity: ic.Capacity,
+				Output:   ic.Output,
+			})
 		}
 	}
 
