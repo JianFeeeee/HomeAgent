@@ -606,7 +606,13 @@ func writeFrame(w *bufio.Writer, opcode byte, payload []byte) error {
 }
 
 func writePong(w *bufio.Writer) error {
-	return writeFrameHeader(w, 0xa, 0)
+	// 必须走 writeFrame（它 Flush）。
+	//
+	// 回归的 bug：这里原先是裸的 writeFrameHeader，**不 Flush**。设备空闲时
+	// 没有任何别的写会顺带把 bufio 缓冲刷出去，于是 pong 永远留在服务端缓冲里，
+	// 客户端等 2 倍 ping 间隔（默认 30s×2 = 60s）读超时断开、重连——
+	// 实测表现就是「设备通道每 60 秒掉线一次」，连带着 outputch 反复注销/注册。
+	return writeFrame(w, 0xa, nil)
 }
 
 func writeFrameHeader(w *bufio.Writer, opcode byte, length int) error {
