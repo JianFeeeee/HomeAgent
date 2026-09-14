@@ -2191,6 +2191,16 @@
     .rt-lv-3 > i { background: #ffa657; }
     .rt-lv-2 > i { background: var(--sakura-400); }
     .rt-lv-1 > i { background: var(--frost-300); }
+    /* 第五条：排队队列（无级别）。用虚线分隔 + 中性色，与“有级别”的四条区分开——
+       它不是优先级，而是另一**类别**（排队 vs 中断），同一套配色会误导。 */
+    .rt-level.rt-level-queued {
+      border-top: 1px dashed rgba(255, 255, 255, 0.14);
+      margin-top: 5px;
+      padding-top: 7px;
+    }
+    .rt-level .rt-lv-track.rt-lv-q > i {
+      background: #a3be8c;
+    }
     /* 中断栈：栈顶在上，做出"层叠现场"的观感 */
     .rt-stack {
       display: flex;
