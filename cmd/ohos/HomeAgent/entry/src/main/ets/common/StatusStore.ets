@@ -37,6 +37,8 @@ export const K_TOOLS: string = 'statTools';
 export const K_ERR: string = 'statErr';
 export const K_LOADING: string = 'statLoading';
 export const K_REV: string = 'statRev';
+/** 内核身份副行：内核名 · commit。版本号光有一个号码分不清是哪个内核、哪次构建。 */
+export const K_BUILD: string = 'statBuildSub';
 
 class StatusStore {
   /** 明细分组：只有明细页读它，不进 AppStorage（数组同步语义太脆） */
@@ -52,6 +54,7 @@ class StatusStore {
     AppStorage.setOrCreate<string>(K_ERR, '');
     AppStorage.setOrCreate<boolean>(K_LOADING, false);
     AppStorage.setOrCreate<number>(K_REV, 0);
+    AppStorage.setOrCreate<string>(K_BUILD, '');
   }
 
   getGroups(): StatGroup[] {
@@ -133,7 +136,65 @@ class StatusStore {
       if (startTime.length > 0) {
         kernelFields.push({ label: '内核启动', value: formatTime(startTime) });
       }
+
+      // 构建身份：版本 / commit / SDK 兼容都取自 /kernel 的 build（-ldflags 注入）。
+      // 为何不能只用 /status 的 version：那里只有一个版本号，分不清是哪个内核、
+      // 哪次构建；许可标识更是完全没有。
+      const build: Record<string, Object> | undefined = k['build'] as Record<string, Object>;
+      let lic: string = '';
+      let licURL: string = '';
+      let srcURL: string = '';
+      if (build !== undefined && build !== null) {
+        const bVer: string = build['version'] as string ?? '';
+        const bCommit: string = build['commit'] as string ?? '';
+        const bName: string = build['kernel_name'] as string ?? 'HomeAgent';
+        const bSdk: string = build['sdk_compatible'] as string ?? '';
+        const bTime: string = build['build_time'] as string ?? '';
+        lic = build['license'] as string ?? '';
+        licURL = build['license_url'] as string ?? '';
+        srcURL = build['source_url'] as string ?? '';
+        if (bVer.length > 0) {
+          AppStorage.set<string>(K_VERSION, 'v' + bVer);
+          kernelFields.push({ label: '内核版本', value: 'v' + bVer });
+        }
+        let sub: string = bName;
+        if (bCommit.length > 0 && bCommit !== 'unknown') {
+          sub = sub + ' · ' + bCommit.substring(0, 7);
+        }
+        AppStorage.set<string>(K_BUILD, sub);
+        if (bCommit.length > 0) {
+          kernelFields.push({ label: 'Commit', value: bCommit });
+        }
+        if (bSdk.length > 0) {
+          kernelFields.push({ label: 'SDK 兼容', value: bSdk });
+        }
+        if (bTime.length > 0 && bTime !== 'unknown') {
+          kernelFields.push({ label: '构建时间', value: formatTime(bTime) });
+        }
+      }
       groups.push({ title: '内核', fields: kernelFields });
+
+      // 开源许可：只给一个源码链接、不写协议名，使用者看不出这受什么许可约束，
+      // 也看不出网络服务场景下的 §13 义务。
+      const legalFields: StatField[] = [];
+      if (lic.length > 0) {
+        legalFields.push({ label: '许可协议', value: lic });
+      }
+      if (licURL.length > 0) {
+        legalFields.push({ label: '协议全文', value: licURL });
+      }
+      if (srcURL.length > 0) {
+        legalFields.push({ label: '源码仓库', value: srcURL });
+      }
+      if (legalFields.length > 0) {
+        if (lic.toUpperCase().indexOf('AGPL') >= 0) {
+          legalFields.push({
+            label: '网络条款',
+            value: '把修改后的版本作为网络服务对外提供时，必须向使用者提供取得对应源码的途径（§13）',
+          });
+        }
+        groups.push({ title: '开源许可', fields: legalFields });
+      }
 
       // LLM：provider / 可用源 / 是否可用
       const llm: Record<string, Object> | undefined = k['llm'] as Record<string, Object>;
