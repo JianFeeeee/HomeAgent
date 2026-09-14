@@ -2,6 +2,7 @@ import { ThemePalette, DARK_PALETTE, LIGHT_PALETTE, RADIUS_LG, RADIUS_SM,
   ANIM_FAST, ANIM_NORMAL, ANIM_ENTER } from '../common/Constants';
 import { COLOR_ACCENT, COLOR_SUCCESS, COLOR_CYAN, COLOR_ERROR } from '../common/Constants';
 import { MotionBase } from './MotionBase';
+import { RuntimePanel } from './RuntimePanel';
 import {
   statusStore, StatGroup, StatField, compactDuration,
   K_UP, K_VERSION, K_STARTED, K_AGENTS, K_PLUGINS, K_TOOLS, K_ERR, K_LOADING, K_REV, K_BUILD,
@@ -282,6 +283,11 @@ export struct StatusDetailContent {
       // 后端并不存在"插件上限/工具上限"这种容量概念，分母是两者取大值，
       // 于是 31 个插件在 203 个工具旁边只剩一条短线 —— 读数没有意义。
       // 数量本身已在摘要卡上以图标+数字直观呈现，这里不再重复。
+
+      // 运行态面板（阶段管道 + 中断队列）放在明细页最前：
+      // 明细卡回答「内核有哪些东西、多少」，运行态回答「现在在干什么」，
+      // 后者是进这个页面最先想看的。
+      RuntimePanel()
 
       ForEach(this.groups, (g: StatGroup) => {
         Column() {
