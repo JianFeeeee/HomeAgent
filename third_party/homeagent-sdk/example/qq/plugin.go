@@ -1029,6 +1029,40 @@ func (p *Plugin) sessionToolArgsAllowed(name string, args map[string]interface{}
 	return true, ""
 }
 
+// qqAuthExtraKey 是本轮（帧）QQ 身份挂在 StageContext.Extra 上的键。
+//
+// 身份必须**绑帧**，不能只存插件全局：
+//   - 中断会抢占当前轮并把现场压栈（scheduler 的 suspendStack），中断轮收尾时
+//     afterOutput 把插件全局身份清空；随后外层被恢复（resumeTask 复用同一帧、
+//     不重跑 StageOnInput），若身份只存全局，恢复后的外层就是"无身份"——
+//     beforeToolcall 会在 !auth.active 处直接返回，权限门整体失效。
+//   - 运行中到达的新消息会调 activateAuthContext 改写全局身份，把**正在跑的那一轮**
+//     换成另一方的身份（换高=越权，换低=误拒）。
+//
+// 帧上的 Extra 随帧一起压栈/恢复，正好是"这一轮的身份"。
+const qqAuthExtraKey = "qq_auth"
+
+// authOnFrame 读取本帧绑定的身份；ok=false 表示本帧未绑定过 QQ 身份。
+// 调用方需持有 ctx 的读（或写）锁。
+func authOnFrame(ctx *sdk.StageContext) (qqAuthContext, bool) {
+	if ctx == nil || ctx.Extra == nil {
+		return qqAuthContext{}, false
+	}
+	auth, ok := ctx.Extra[qqAuthExtraKey].(qqAuthContext)
+	return auth, ok
+}
+
+// bindAuthOnFrame 把身份绑到本帧上。调用方需持有 ctx 的写锁。
+func bindAuthOnFrame(ctx *sdk.StageContext, auth qqAuthContext) {
+	if ctx == nil {
+		return
+	}
+	if ctx.Extra == nil {
+		ctx.Extra = make(map[string]interface{})
+	}
+	ctx.Extra[qqAuthExtraKey] = auth
+}
+
 // activateAuthContext 只接收 OneBot 事件中的可信 ID。多个中断在同一推理轮合并时
 // 采用最小权限合并，防止“非所有者请求 + 随后所有者消息”意外提升前一请求权限。
 // message_id 映射供排队输入在 StageOnInput 精确恢复身份，不依赖昵称或用户正文。
@@ -1079,13 +1113,28 @@ func (p *Plugin) activateAuthContext(messageID, userID, groupID int64, isGroup b
 	p.auth.generation = next.generation
 }
 
-func messageIDFromInput(raw string) int64 {
-	match := qqMessageIDRe.FindStringSubmatch(raw)
-	if len(match) != 2 {
-		return 0
+var qqMessageIDsRe = regexp.MustCompile(`message_id=(-?\d+(?:,-?\d+)*)`)
+
+// messageIDsFromInput 取出一段输入里出现的全部 message_id。
+//
+// 合并中继的正文是 `(message_id=100,101,102)`：只取第一个会留下同批其余 id 永不清理；
+// 身份表用 id 做键，泄漏的条目要等 generation 回收才会消失。
+func messageIDsFromInput(raw string) []int64 {
+	matches := qqMessageIDsRe.FindAllStringSubmatch(raw, -1)
+	ids := make([]int64, 0, len(matches))
+	for _, match := range matches {
+		if len(match) != 2 {
+			continue
+		}
+		for _, part := range strings.Split(match[1], ",") {
+			id, err := strconv.ParseInt(strings.TrimSpace(part), 10, 64)
+			if err != nil || id == 0 {
+				continue
+			}
+			ids = append(ids, id)
+		}
 	}
-	id, _ := strconv.ParseInt(match[1], 10, 64)
-	return id
+	return ids
 }
 
 func (p *Plugin) onInputAuthContext(ctx *sdk.StageContext) error {
@@ -1093,24 +1142,27 @@ func (p *Plugin) onInputAuthContext(ctx *sdk.StageContext) error {
 	source, _ := ctx.Extra["input_source"].(string)
 	raw := ctx.RawMessage
 	ctx.RUnlock()
+
 	p.authMu.Lock()
-	defer p.authMu.Unlock()
-	if source != p.name {
-		p.auth = qqAuthContext{}
-		p.resetTurnGuardLocked()
-		return nil
-	}
-	if messageID := messageIDFromInput(raw); messageID != 0 {
-		if auth, ok := p.authByMessageID[messageID]; ok {
-			p.auth = auth
-			delete(p.authByMessageID, messageID)
-			p.resetTurnGuardLocked()
-			return nil
+	// 默认降权：QQ 来源却对不上可信事件时绝不复用上一条消息的身份。
+	next := qqAuthContext{active: source == p.name}
+	ids := messageIDsFromInput(raw)
+	if source == p.name && len(ids) > 0 {
+		if auth, ok := p.authByMessageID[ids[0]]; ok {
+			next = auth
+			for _, id := range ids {
+				delete(p.authByMessageID, id)
+			}
 		}
 	}
-	// QQ 来源却无法精确匹配可信 OneBot 事件时必须强制降权，不能复用上一条消息的身份。
-	p.auth = qqAuthContext{active: true}
+	// p.auth 只作为"帧上没绑身份"时的兜底（单测/异常帧），权威副本在帧上。
+	p.auth = next
 	p.resetTurnGuardLocked()
+	p.authMu.Unlock()
+
+	ctx.Lock()
+	bindAuthOnFrame(ctx, next)
+	ctx.Unlock()
 	return nil
 }
 
@@ -1130,9 +1182,13 @@ func (p *Plugin) afterOutputAuthContext(ctx *sdk.StageContext) error {
 	return nil
 }
 
-func (p *Plugin) currentToolAllowed(name string) (bool, qqAuthContext) {
+func (p *Plugin) currentToolAllowed(ctx *sdk.StageContext, name string) (bool, qqAuthContext) {
+	// 身份以本帧为准（中断恢复后全局身份可能已属于别的轮）。
+	auth, onFrame := authOnFrame(ctx)
 	p.authMu.RLock()
-	auth := p.auth
+	if !onFrame {
+		auth = p.auth
+	}
 	var patterns []string
 	if auth.active && !auth.owner {
 		if auth.isGroup {
@@ -1241,7 +1297,7 @@ func (p *Plugin) beforeToolcall(ctx *sdk.StageContext) error {
 		return nil
 	}
 	tc := &ctx.ToolCalls[0]
-	allowed, auth := p.currentToolAllowed(tc.Name)
+	allowed, auth := p.currentToolAllowed(ctx, tc.Name)
 	if !auth.active {
 		return nil
 	}
