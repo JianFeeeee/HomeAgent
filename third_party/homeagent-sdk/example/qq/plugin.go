@@ -155,6 +155,41 @@ type Plugin struct {
 	msgMu  sync.Mutex
 	msgMap map[int64]msgRef    // message_id → {peer, time}
 	chats  map[int64]*chatMeta // peerID → 会话状态（群号或 QQ 号）
+
+	// 消息合并（debounce）：同一会话、同一发送者在 batchWindow 内连续到达的消息
+	// 合并成一次中断。同一个人连发「在吗」「帮我看看」「报错是这个」三条，
+	// 逐条注入会把 Agent 唤醒三次，且前两次拿到的信息都不完整。
+	batchMu     sync.Mutex
+	batches     map[string]*pendingBatch
+	batchWindow time.Duration // 最后一条到达后再等多久（<=0 = 关闭合并，逐条投递）
+	batchMax    time.Duration // 一批最长等多久（防持续刷屏时永远不投）
+
+	// injectHook 仅供测试：非 nil 时 injectInterrupt 走它而不是真实 SDK。
+	injectHook func(text string)
+}
+
+// pendingBatch 是一批待投递的消息（同一会话、同一发送者、短时间内的连续消息）。
+type pendingBatch struct {
+	key      string
+	isGroup  bool
+	userID   int64
+	groupID  int64
+	nickname string
+	msgIDs   []int64
+	single   string // 单条时沿用的原文（含所有者/高危前缀），保证 n==1 行为不变
+	owner    bool
+	highRisk bool
+	first    time.Time
+	timer    *time.Timer
+}
+
+// qqBatchKey 同一会话 + 同一发送者 = 一组。私聊按 QQ 号；群聊按 (群号, QQ 号)——
+// 群里不同人各发各的，不该并成一条。
+func qqBatchKey(msgType string, groupID, userID int64) string {
+	if msgType == "group" {
+		return fmt.Sprintf("g:%d:%d", groupID, userID)
+	}
+	return fmt.Sprintf("p:%d", userID)
 }
 
 type typingState struct {
@@ -316,6 +351,8 @@ func (p *Plugin) Start(s *sdk.PluginSDK) error {
 	s.Settings().RegisterDef(sdk.ConfigDef{Key: "remote_dir", Default: "/home/program/qq-workspace/remote", Type: "string", DisplayName: "NapCat容器共享目录", Description: "与NapCat容器共享的文件目录，主机路径。发文件时文件会复制到此目录，NapCat内部映射为/app/files/", Category: "qq"})
 	s.Settings().RegisterDef(sdk.ConfigDef{Key: "webhook_token", Default: "", Type: "string", DisplayName: "Webhook 令牌", Description: "NapCat 上报请求头 X-Webhook-Token 校验值，留空则不校验", Category: "qq"})
 	s.Settings().RegisterDef(sdk.ConfigDef{Key: "agentfs_dir", Default: "/home/newqqagent/agentfs/merged", Type: "string", DisplayName: "AgentFS目录", Description: "文件读写的工作目录，read_document/video_download 等工具的默认工作目录", Category: "qq"})
+	s.Settings().RegisterDef(sdk.ConfigDef{Key: "batch_window_ms", Default: "1500", Type: "int", DisplayName: "消息合并窗口(毫秒)", Description: "同一会话同一发送者的连续消息在该窗口内合并成一次中断并告知共几条；0=关闭合并（逐条投递）", Category: "qq"})
+	s.Settings().RegisterDef(sdk.ConfigDef{Key: "batch_max_ms", Default: "30000", Type: "int", DisplayName: "消息合并上限(毫秒)", Description: "一批消息最长等这么久就投递，避免对方持续刷屏时一直不唤醒 Agent", Category: "qq"})
 
 	settings := s.Settings()
 
@@ -339,12 +376,18 @@ func (p *Plugin) Start(s *sdk.PluginSDK) error {
 	p.filesDir = strings.TrimRight(getSetting[string](settings, "files_dir", "/home/newqqagent/agentfs/merged/qq_files"), "/")
 	p.agentfsDir = strings.TrimRight(getSetting[string](settings, "agentfs_dir", "/home/newqqagent/agentfs/merged"), "/")
 	p.remoteDir = strings.TrimRight(getSetting[string](settings, "remote_dir", "/home/program/qq-workspace/remote"), "/")
+	p.batchWindow = time.Duration(getSetting[int64](settings, "batch_window_ms", 1500)) * time.Millisecond
+	p.batchMax = time.Duration(getSetting[int64](settings, "batch_max_ms", 30000)) * time.Millisecond
+	if p.batchWindow < 0 {
+		p.batchWindow = 0
+	}
 	os.MkdirAll(p.remoteDir, 0755)
 
 	p.httpClient = &http.Client{Timeout: 30 * time.Second}
 
 	// msg_id → peer 映射 + 会话状态（不缓存正文）
 	p.msgMap = make(map[int64]msgRef)
+	p.batches = make(map[string]*pendingBatch)
 	p.chats = make(map[int64]*chatMeta)
 
 	// 从 NapCat 获取 Bot 身份（阻塞等待，最多 5s）
@@ -697,6 +740,8 @@ func (p *Plugin) Stop() error {
 		}
 	}
 	p.typingMu.Unlock()
+	// 停机前把未到点的合并批次立刻投出去，别把对方的消息吞掉。
+	p.flushAllBatches()
 	if p.srv != nil {
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
@@ -761,6 +806,10 @@ func getSetting[T string | int64 | float64](s sdk.SettingsAPI, key string, fallb
 		}
 	case int64:
 		switch val := v.(type) {
+		case int:
+			return any(int64(val)).(T)
+		case int64:
+			return any(val).(T)
 		case float64:
 			return any(int64(val)).(T)
 		case string:
@@ -1299,6 +1348,136 @@ func requiresConfirmFriendCommand(cmd string) bool {
 	}
 }
 
+// enqueueInterrupt 把一条已通过策略/@ 检查的消息并入待投批次，并重置 debounce 计时。
+//
+// batchWindow<=0 时退回逐条投递（合并前行为）。
+func (p *Plugin) enqueueInterrupt(msgType string, userID, groupID, messageID int64, nickname, single string, owner, highRisk bool) {
+	if p.sdk == nil && p.injectHook == nil {
+		return
+	}
+	if p.batchWindow <= 0 {
+		p.injectInterrupt(single)
+		return
+	}
+	key := qqBatchKey(msgType, groupID, userID)
+	p.batchMu.Lock()
+	if p.batches == nil {
+		p.batches = make(map[string]*pendingBatch)
+	}
+	b := p.batches[key]
+	if b == nil {
+		b = &pendingBatch{key: key, first: time.Now()}
+		p.batches[key] = b
+	}
+	b.isGroup = msgType == "group"
+	b.userID, b.groupID, b.nickname = userID, groupID, nickname
+	b.msgIDs = append(b.msgIDs, messageID)
+	b.single = single
+	b.owner = b.owner || owner
+	b.highRisk = b.highRisk || highRisk
+	// debounce：每来一条就推迟；但整体不超过 batchMax（否则持续刷屏会一直不投）。
+	delay := p.batchWindow
+	if p.batchMax > 0 {
+		if remain := p.batchMax - time.Since(b.first); remain < delay {
+			delay = remain
+		}
+	}
+	if delay < 0 {
+		delay = 0
+	}
+	if b.timer != nil {
+		b.timer.Stop()
+	}
+	b.timer = time.AfterFunc(delay, func() { p.flushBatch(key) })
+	p.batchMu.Unlock()
+}
+
+// injectInterrupt 投递一条中断提示（NoMemory：HTTP 侧来的不是对话内容；
+// Priority L1：QQ 消息是低级别中断，既非实时工作也非紧急工作，完全可等）。
+func (p *Plugin) injectInterrupt(text string) {
+	if text == "" {
+		return
+	}
+	if p.injectHook != nil {
+		p.injectHook(text)
+		return
+	}
+	if p.sdk == nil {
+		return
+	}
+	p.sdk.InjectInterruptTextOpts(p.name, p.name, text, sdk.InjectOptions{
+		NoMemory: true,
+		Priority: sdk.PriorityL1,
+	})
+}
+
+// flushBatch 投递一批：n==1 沿用单条原文；n>1 生成「共几条」的合并中断。
+func (p *Plugin) flushBatch(key string) {
+	p.batchMu.Lock()
+	b := p.batches[key]
+	delete(p.batches, key)
+	p.batchMu.Unlock()
+	if b == nil {
+		return
+	}
+	text := b.single
+	if len(b.msgIDs) > 1 {
+		text = p.buildBatchInterrupt(b)
+	}
+	p.injectInterrupt(text)
+}
+
+// flushAllBatches 停机前把未到点的批次立刻投出去（best effort）。
+func (p *Plugin) flushAllBatches() {
+	p.batchMu.Lock()
+	keys := make([]string, 0, len(p.batches))
+	for k := range p.batches {
+		keys = append(keys, k)
+	}
+	p.batchMu.Unlock()
+	for _, k := range keys {
+		p.flushBatch(k)
+	}
+}
+
+// buildBatchInterrupt 生成合并中断：说清「一共几条」「分别是哪些 message_id」，
+// 并给出一次拿全上下文的建议（get_history），避免模型逐条 get_message。
+func (p *Plugin) buildBatchInterrupt(b *pendingBatch) string {
+	tp := p.name + "_"
+	outputTool := "output_send__" + p.name
+	n := len(b.msgIDs)
+	ids := formatMsgIDs(b.msgIDs)
+	var s string
+	if b.isGroup {
+		s = fmt.Sprintf("来自「%s」在群里短时间内连续发来 %d 条消息(message_id=%s)。建议先用%sget_history(group_id=%d, count=%d)一次拉取这几条上下文再统一回复；也可用%sget_message 取单条。用%s回复群聊",
+			b.nickname, n, ids, tp, b.groupID, n+5, tp, outputTool)
+	} else {
+		s = fmt.Sprintf("来自「%s」的私聊短时间内连续发来 %d 条消息(message_id=%s, user_id=%d)。建议先用%sget_history(user_id=%d, count=%d)一次拉取这几条上下文再统一回复；也可用%sget_message 取单条。用%s回复对方",
+			b.nickname, n, ids, b.userID, tp, b.userID, n+5, tp, outputTool)
+	}
+	if b.highRisk {
+		s = "【⚠️ 高危信息，谨慎处理】" + s
+	}
+	if b.owner {
+		s = "【重要！Bot 所有者消息】" + s
+	}
+	return s
+}
+
+// formatMsgIDs 把 message_id 列表压成一行；过多时截断，避免中断文字过长。
+func formatMsgIDs(ids []int64) string {
+	const capN = 12
+	parts := make([]string, 0, len(ids)+1)
+	for i, id := range ids {
+		if i >= capN {
+			parts = append(parts, "…")
+			break
+		}
+		parts = append(parts, strconv.FormatInt(id, 10))
+	}
+	return strings.Join(parts, ",")
+}
+
 func (p *Plugin) handleWebhook(w http.ResponseWriter, r *http.Request) {
 	if r.Method != "POST" {
 		http.Error(w, "", http.StatusMethodNotAllowed)
@@ -1417,7 +1596,9 @@ func (p *Plugin) handleWebhook(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)
 		return
 	}
+	highRisk := false
 	if highRiskRe.MatchString(text) {
+		highRisk = true
 		interrupt = "【⚠️ 高危信息，谨慎处理】" + interrupt
 	}
 
@@ -1446,15 +1627,9 @@ func (p *Plugin) handleWebhook(w http.ResponseWriter, r *http.Request) {
 		p.startTyping(evt.UserID)
 	}
 
-	if p.sdk != nil {
-		// NoMemory：HTTP 侧来的中断提示，不是对话内容。
-		// Priority：QQ 消息是**低级别中断**——既不是时钟那样的实时工作，
-		// 也不是紧急工作，所以声明 L1（完全可等）。
-		p.sdk.InjectInterruptTextOpts(p.name, p.name, interrupt, sdk.InjectOptions{
-			NoMemory: true,
-			Priority: sdk.PriorityL1,
-		})
-	}
+	// 合并投递：同一会话同一发送者在 batchWindow 内的连续消息并成一次中断。
+	p.enqueueInterrupt(evt.MessageType, evt.UserID, evt.GroupID, evt.MessageID, nickname, interrupt, p.isOwner(evt.UserID), highRisk)
+
 	w.WriteHeader(http.StatusOK)
 }
 
