@@ -25,8 +25,8 @@
         --shadow-md: 0 4px 16px rgba(0, 0, 0, 0.28);
         --shadow-lg: 0 12px 36px rgba(0, 0, 0, 0.38);
         --shadow-glow:
-          0 0 0 1px rgba(255, 127, 172, 0.4),
-          0 4px 20px rgba(255, 127, 172, 0.18);
+          0 0 0 1px rgba(var(--accent-rgb), 0.4),
+          0 4px 20px rgba(var(--accent-rgb), 0.18);
         --radius-sm: 6px;
         --radius-md: 10px;
         --radius-lg: 14px;
@@ -51,8 +51,12 @@
         --text-secondary: #a7b0c4;
         --text-muted: #77809a;
         --border-color: rgba(255, 255, 255, 0.09);
+        /* accent 的 rgb 分量：所有 hardcoded rgba(255,127,172,x) 都改用它，
+           这样换配色（尤其 monochrome）时连阴影/描边一起换，不会残留粉色。 */
+        --accent-rgb: 255, 127, 172;
+        --accent-strong-rgb: 243, 59, 124;
         --accent: #ff7fac;
-        --accent-bg: rgba(255, 127, 172, 0.14);
+        --accent-bg: rgba(var(--accent-rgb), 0.14);
         --toast-bg: rgba(23, 169, 100, 0.16);
         --toast-color: #6ee7a8;
         --toast-error-bg: rgba(219, 54, 148, 0.18);
@@ -60,7 +64,7 @@
         --pre-color: #cdd3f5;
         --pre-bg: rgba(10, 14, 28, 0.85);
         --chat-bg: rgba(10, 14, 28, 0.7);
-        --msg-user-bg: rgba(255, 127, 172, 0.16);
+        --msg-user-bg: rgba(var(--accent-rgb), 0.16);
         --msg-user-color: #ffb9d0;
         --msg-assistant-bg: rgba(136, 192, 208, 0.14);
         --msg-assistant-color: #a9d6e3;
@@ -75,9 +79,9 @@
         --save-btn-border: #d99a2b;
         --loading-border: rgba(255, 255, 255, 0.12);
         --loading-top: #ff7fac;
-        --grad-a: rgba(255, 127, 172, 0.14);
+        --grad-a: rgba(var(--accent-rgb), 0.14);
         --grad-b: rgba(136, 192, 208, 0.12);
-        --grad-c: rgba(243, 59, 124, 0.1);
+        --grad-c: rgba(var(--accent-strong-rgb), 0.1);
         --c-sakura: #ff7fac;
         --c-cyan: #2dd4bf;
         --c-violet: #a78bfa;
@@ -88,18 +92,18 @@
       [data-theme="light"] {
         --glass-bg: rgba(255, 255, 255, 0.66);
         --glass-bg-strong: rgba(255, 255, 255, 0.88);
-        --glass-border: rgba(255, 127, 172, 0.22);
-        --glass-hover: rgba(255, 127, 172, 0.07);
+        --glass-border: rgba(var(--accent-rgb), 0.22);
+        --glass-hover: rgba(var(--accent-rgb), 0.07);
         --shadow-sm: 0 1px 3px rgba(153, 27, 75, 0.08);
         --shadow-md: 0 6px 20px rgba(153, 27, 75, 0.1);
         --shadow-lg: 0 16px 40px rgba(153, 27, 75, 0.14);
         --shadow-glow:
-          0 0 0 1px rgba(243, 59, 124, 0.3), 0 6px 22px rgba(243, 59, 124, 0.14);
+          0 0 0 1px rgba(var(--accent-strong-rgb), 0.3), 0 6px 22px rgba(var(--accent-strong-rgb), 0.14);
         --bg-primary: #ffffff;
         --bg-secondary: rgba(255, 255, 255, 0.78);
         --bg-card: rgba(255, 255, 255, 0.72);
         --bg-input: rgba(255, 224, 233, 0.55);
-        --bg-hover: rgba(255, 127, 172, 0.08);
+        --bg-hover: rgba(var(--accent-rgb), 0.08);
         --text-primary: #3b2030;
         --text-secondary: #7a5c6b;
         --text-muted: #a48a96;
@@ -128,22 +132,26 @@
         --save-btn-border: #d99a2b;
         --loading-border: rgba(201, 36, 98, 0.18);
         --loading-top: #c92462;
-        --grad-a: rgba(255, 127, 172, 0.16);
+        --grad-a: rgba(var(--accent-rgb), 0.16);
         --grad-b: rgba(136, 192, 208, 0.12);
-        --grad-c: rgba(243, 59, 124, 0.12);
+        --grad-c: rgba(var(--accent-strong-rgb), 0.12);
       }
       [data-color="sakura"][data-theme="light"] {
+        --accent-rgb: 201, 36, 98;
+        --accent-strong-rgb: 153, 27, 75;
         --bg-primary: #ffffff;
         --bg-input: rgba(255, 224, 233, 0.55);
-        --bg-hover: rgba(255, 127, 172, 0.08);
+        --bg-hover: rgba(var(--accent-rgb), 0.08);
         --pre-bg: #fff0f5;
         --chat-bg: #fff0f5;
         --msg-bubble-border: rgba(201, 36, 98, 0.14);
         --btn-ghost-hover-bg: #ffe4e9;
-        --grad-a: rgba(255, 127, 172, 0.14);
-        --grad-c: rgba(243, 59, 124, 0.09);
+        --grad-a: rgba(var(--accent-rgb), 0.14);
+        --grad-c: rgba(var(--accent-strong-rgb), 0.09);
       }
       [data-color="cyan"] {
+        --accent-rgb: 45, 212, 191;
+        --accent-strong-rgb: 13, 148, 136;
         --accent: #2dd4bf;
         --accent-bg: rgba(45, 212, 191, 0.14);
         --msg-user-bg: rgba(45, 212, 191, 0.16);
@@ -153,6 +161,8 @@
         --grad-c: rgba(45, 212, 191, 0.1);
       }
       [data-color="cyan"][data-theme="light"] {
+        --accent-rgb: 15, 118, 110;
+        --accent-strong-rgb: 15, 118, 110;
         --accent: #0f766e;
         --accent-bg: #ccfbf1;
         --msg-user-bg: #ccfbf1;
@@ -169,6 +179,8 @@
         --grad-c: rgba(13, 148, 136, 0.09);
       }
       [data-color="violet"] {
+        --accent-rgb: 167, 139, 250;
+        --accent-strong-rgb: 124, 58, 237;
         --accent: #a78bfa;
         --accent-bg: rgba(167, 139, 250, 0.14);
         --msg-user-bg: rgba(167, 139, 250, 0.16);
@@ -178,6 +190,8 @@
         --grad-c: rgba(167, 139, 250, 0.1);
       }
       [data-color="violet"][data-theme="light"] {
+        --accent-rgb: 124, 58, 237;
+        --accent-strong-rgb: 109, 40, 217;
         --accent: #7c3aed;
         --accent-bg: #ede9fe;
         --msg-user-bg: #ede9fe;
@@ -194,6 +208,8 @@
         --grad-c: rgba(124, 58, 237, 0.08);
       }
       [data-color="emerald"] {
+        --accent-rgb: 52, 211, 153;
+        --accent-strong-rgb: 5, 150, 105;
         --accent: #34d399;
         --accent-bg: rgba(52, 211, 153, 0.14);
         --msg-user-bg: rgba(52, 211, 153, 0.16);
@@ -203,6 +219,8 @@
         --grad-c: rgba(52, 211, 153, 0.1);
       }
       [data-color="emerald"][data-theme="light"] {
+        --accent-rgb: 5, 150, 105;
+        --accent-strong-rgb: 4, 120, 87;
         --accent: #059669;
         --accent-bg: #d1fae5;
         --msg-user-bg: #d1fae5;
@@ -219,6 +237,8 @@
         --grad-c: rgba(5, 150, 105, 0.09);
       }
       [data-color="amber"] {
+        --accent-rgb: 251, 191, 36;
+        --accent-strong-rgb: 217, 119, 6;
         --accent: #fbbf24;
         --accent-bg: rgba(251, 191, 36, 0.14);
         --msg-user-bg: rgba(251, 191, 36, 0.16);
@@ -228,6 +248,8 @@
         --grad-c: rgba(251, 191, 36, 0.1);
       }
       [data-color="amber"][data-theme="light"] {
+        --accent-rgb: 217, 119, 6;
+        --accent-strong-rgb: 180, 83, 9;
         --accent: #d97706;
         --accent-bg: #fef3c7;
         --msg-user-bg: #fef3c7;
@@ -244,6 +266,8 @@
         --grad-c: rgba(217, 119, 6, 0.08);
       }
       [data-color="blue"] {
+        --accent-rgb: 96, 165, 250;
+        --accent-strong-rgb: 37, 99, 235;
         --accent: #60a5fa;
         --accent-bg: rgba(96, 165, 250, 0.14);
         --msg-user-bg: rgba(96, 165, 250, 0.16);
@@ -253,6 +277,8 @@
         --grad-c: rgba(96, 165, 250, 0.1);
       }
       [data-color="blue"][data-theme="light"] {
+        --accent-rgb: 37, 99, 235;
+        --accent-strong-rgb: 29, 78, 216;
         --accent: #2563eb;
         --accent-bg: #dbeafe;
         --msg-user-bg: #dbeafe;
@@ -267,6 +293,67 @@
         --btn-ghost-hover-bg: #dbeafe;
         --grad-a: rgba(37, 99, 235, 0.13);
         --grad-c: rgba(37, 99, 235, 0.08);
+      }
+      [data-color="mono"] {
+        --accent-rgb: 205, 210, 220;
+        --accent-strong-rgb: 150, 156, 168;
+        --accent: #cdd2dc;
+        --accent-bg: rgba(205, 210, 220, 0.12);
+        --sakura-300: #b9bfcc;
+        --sakura-400: #cdd2dc;
+        --sakura-500: #e6e9ef;
+        --frost-300: #a8aeba;
+        --frost-400: #8b919d;
+        --msg-user-bg: rgba(205, 210, 220, 0.12);
+        --msg-user-color: #e6e9ef;
+        --msg-assistant-bg: rgba(205, 210, 220, 0.09);
+        --msg-assistant-color: #c9ced9;
+        --loading-top: #cdd2dc;
+        --grad-a: rgba(205, 210, 220, 0.12);
+        --grad-b: rgba(205, 210, 220, 0.09);
+        --grad-c: rgba(205, 210, 220, 0.07);
+        --c-sakura: #cdd2dc;
+        --shadow-glow:
+          0 0 0 1px rgba(205, 210, 220, 0.2), 0 4px 20px rgba(0, 0, 0, 0.3);
+      }
+      [data-color="mono"][data-theme="light"] {
+        --accent-rgb: 60, 64, 72;
+        --accent-strong-rgb: 30, 32, 38;
+        --accent: #2f333b;
+        --accent-bg: #ececf0;
+        --sakura-300: #6b7280;
+        --sakura-400: #3f434c;
+        --sakura-500: #23262c;
+        --frost-300: #7c828e;
+        --frost-400: #5f6570;
+        --text-primary: #1f2126;
+        --text-secondary: #5b5f66;
+        --text-muted: #8b8f97;
+        --border-color: rgba(0, 0, 0, 0.1);
+        --kv-border: rgba(0, 0, 0, 0.08);
+        --btn-ghost-border: rgba(0, 0, 0, 0.16);
+        --glass-border: rgba(0, 0, 0, 0.1);
+        --glass-hover: rgba(0, 0, 0, 0.04);
+        --shadow-sm: 0 1px 3px rgba(0, 0, 0, 0.06);
+        --shadow-md: 0 6px 20px rgba(0, 0, 0, 0.08);
+        --shadow-lg: 0 16px 40px rgba(0, 0, 0, 0.1);
+        --shadow-glow:
+          0 0 0 1px rgba(0, 0, 0, 0.1), 0 4px 20px rgba(0, 0, 0, 0.08);
+        --msg-user-bg: #ececf0;
+        --msg-user-color: #23262c;
+        --msg-assistant-bg: #f0f0f2;
+        --msg-assistant-color: #3f434c;
+        --loading-top: #2f333b;
+        --bg-primary: #ffffff;
+        --bg-input: rgba(0, 0, 0, 0.045);
+        --bg-hover: rgba(0, 0, 0, 0.05);
+        --pre-bg: #f5f5f7;
+        --chat-bg: #f5f5f7;
+        --msg-bubble-border: rgba(0, 0, 0, 0.1);
+        --btn-ghost-hover-bg: #ececf0;
+        --grad-a: rgba(0, 0, 0, 0.05);
+        --grad-b: rgba(0, 0, 0, 0.04);
+        --grad-c: rgba(0, 0, 0, 0.03);
       }
       * {
         margin: 0;
@@ -450,7 +537,7 @@
       }
       .sidebar-toggle:hover {
         color: var(--accent);
-        border-color: rgba(255, 127, 172, 0.5);
+        border-color: rgba(var(--accent-rgb), 0.5);
         transform: scale(1.05);
       }
       .breadcrumb {
@@ -513,7 +600,7 @@
       }
       .theme-btn:hover {
         color: var(--accent);
-        border-color: rgba(255, 127, 172, 0.5);
+        border-color: rgba(var(--accent-rgb), 0.5);
         box-shadow: var(--shadow-glow);
         transform: scale(1.06);
       }
@@ -644,7 +731,7 @@
          整页十几张卡一起「上下浮」，视线扫过时像在抖，是廉价感最明显的一处。 */
       .card:hover {
         box-shadow: var(--shadow-md);
-        border-color: rgba(255, 127, 172, 0.22);
+        border-color: rgba(var(--accent-rgb), 0.22);
       }
       .card.tilt {
         transform-style: preserve-3d;
@@ -661,7 +748,7 @@
         transition: opacity 0.3s ease-out;
         background: radial-gradient(
           240px circle at var(--mx, 50%) var(--my, 50%),
-          rgba(255, 127, 172, 0.12),
+          rgba(var(--accent-rgb), 0.12),
           transparent 70%
         );
         mix-blend-mode: normal;
@@ -846,11 +933,11 @@
           var(--sakura-500)
         );
         color: #fff;
-        box-shadow: 0 2px 12px rgba(255, 127, 172, 0.35);
+        box-shadow: 0 2px 12px rgba(var(--accent-rgb), 0.35);
       }
       .btn-primary:hover {
         filter: brightness(1.08);
-        box-shadow: 0 4px 18px rgba(255, 127, 172, 0.45);
+        box-shadow: 0 4px 18px rgba(var(--accent-rgb), 0.45);
       }
       .btn-danger {
         background: var(--error);
@@ -871,7 +958,7 @@
       .btn-ghost:hover {
         background: var(--btn-ghost-hover-bg);
         color: var(--text-primary);
-        border-color: rgba(255, 127, 172, 0.4);
+        border-color: rgba(var(--accent-rgb), 0.4);
       }
       .tab-content {
         display: none;
@@ -979,7 +1066,7 @@
       .settings-tabs span.active {
         background: var(--accent-bg);
         color: var(--accent);
-        border-color: rgba(255, 127, 172, 0.35);
+        border-color: rgba(var(--accent-rgb), 0.35);
       }
       .settings-content {
         flex: 1;
@@ -1206,7 +1293,7 @@
         font-size: 40px;
         margin-bottom: 12px;
         opacity: 0.6;
-        filter: drop-shadow(0 4px 10px rgba(255, 127, 172, 0.3));
+        filter: drop-shadow(0 4px 10px rgba(var(--accent-rgb), 0.3));
       }
       .chat-layout {
         display: flex;
@@ -1248,7 +1335,7 @@
         color: var(--accent);
         background: var(--accent-bg);
         font-weight: 600;
-        box-shadow: inset 0 0 0 1px rgba(255, 127, 172, 0.28);
+        box-shadow: inset 0 0 0 1px rgba(var(--accent-rgb), 0.28);
       }
       .chat-panel {
         display: none;
@@ -1399,7 +1486,7 @@
         background: var(--msg-user-bg);
         color: var(--text-primary);
         border-bottom-right-radius: 5px;
-        border-color: rgba(255, 127, 172, 0.26);
+        border-color: rgba(var(--accent-rgb), 0.26);
       }
       .msg-assistant .msg-bubble {
         background: var(--msg-bubble-bg);
@@ -1954,7 +2041,7 @@
           background var(--dur-micro);
       }
       .health-item:hover {
-        border-color: rgba(255, 127, 172, 0.25);
+        border-color: rgba(var(--accent-rgb), 0.25);
       }
       .health-item .check-name {
         flex: 1;
@@ -2168,7 +2255,7 @@
         border-radius: var(--radius-sm);
       }
       ::selection {
-        background: rgba(255, 127, 172, 0.35);
+        background: rgba(var(--accent-rgb), 0.35);
       }
       @media (prefers-reduced-motion: reduce) {
         *,
@@ -2188,19 +2275,19 @@
         background: transparent;
       }
       ::-webkit-scrollbar-thumb {
-        background: rgba(255, 127, 172, 0.25);
+        background: rgba(var(--accent-rgb), 0.25);
         border-radius: var(--radius-pill);
         border: 2px solid transparent;
         background-clip: content-box;
       }
       ::-webkit-scrollbar-thumb:hover {
-        background: rgba(255, 127, 172, 0.45);
+        background: rgba(var(--accent-rgb), 0.45);
         background-clip: content-box;
         border: 2px solid transparent;
       }
       * {
         scrollbar-width: thin;
-        scrollbar-color: rgba(255, 127, 172, 0.35) transparent;
+        scrollbar-color: rgba(var(--accent-rgb), 0.35) transparent;
       }
 
     /* ===== 运行态面板（图形化总览）=====
@@ -2531,7 +2618,7 @@
       font-weight: 600;
       text-align: center;
       line-height: 1.2;
-      background: radial-gradient(circle at 50% 40%, rgba(243, 59, 124, 0.35), rgba(24, 24, 38, 0.9));
+      background: radial-gradient(circle at 50% 40%, rgba(var(--accent-strong-rgb), 0.35), rgba(24, 24, 38, 0.9));
       border: 1px solid var(--glass-border);
       box-shadow: var(--shadow-glow);
     }
@@ -2602,7 +2689,7 @@
     .rt-pipe-node.active > i {
       background: var(--sakura-400);
       border-color: var(--sakura-400);
-      box-shadow: 0 0 0 4px rgba(255, 127, 172, 0.18);
+      box-shadow: 0 0 0 4px rgba(var(--accent-rgb), 0.18);
     }
     .rt-pipe-node.active > b {
       color: var(--text-primary);
@@ -2616,7 +2703,7 @@
       margin-left: -5.5px;
       border-radius: 50%;
       background: #fff;
-      box-shadow: 0 0 10px rgba(255, 127, 172, 0.85);
+      box-shadow: 0 0 10px rgba(var(--accent-rgb), 0.85);
       transition: left 0.45s var(--ease-out);
       z-index: 2;
     }
@@ -2628,4 +2715,28 @@
     .rt-spark {
       pointer-events: none;
       filter: drop-shadow(0 0 4px rgba(255, 255, 255, 0.8));
+    }
+
+    /* ===== 设置页「外观」区 ===== */
+    .ap-dots {
+      display: inline-flex;
+      gap: 8px;
+      flex-wrap: wrap;
+      align-items: center;
+    }
+    .ap-dot {
+      width: 22px;
+      height: 22px;
+      border-radius: 50%;
+      border: 2px solid var(--border-color);
+      cursor: pointer;
+      padding: 0;
+      transition: transform 0.12s var(--ease-out);
+    }
+    .ap-dot:hover {
+      transform: scale(1.12);
+    }
+    .ap-dot.on {
+      border-color: var(--text-primary);
+      box-shadow: 0 0 0 2px var(--accent-bg);
     }
