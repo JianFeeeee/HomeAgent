@@ -54,6 +54,26 @@ func ValidContextPolicy(policy string) bool {
 	return false
 }
 
+// 召回策略：决定一次工具调用/输入/注入是否据其内容**召回**（注入）相关记忆。
+//
+// 与 ContextPolicy **正交**：ContextPolicy 管「裁剪」（把低相关 L0 事件归档），
+// RecallPolicy 管「召回」（把 L2/L3 的相关记忆注入本轮）。两者默认值刻意相反——
+// 裁剪是破坏性的，默认关（必须显式声明）；召回是只读增量、日常对话本就需要，
+// 默认 auto（输入/注入），仅**工具**默认 none（工具输出多为噪声，按需声明）。
+const (
+	RecallPolicyNone = "none"
+	RecallPolicyAuto = "auto"
+)
+
+// ValidRecallPolicy 校验召回策略取值；空串按调用面取默认值。
+func ValidRecallPolicy(policy string) bool {
+	switch policy {
+	case "", RecallPolicyNone, RecallPolicyAuto:
+		return true
+	}
+	return false
+}
+
 // InjectOptions 声明一次注入行为在记忆层与上下文层的表现。
 //
 // 零值 = 记入记忆 + 不裁剪上下文，与历史行为（三参数注入方法）完全一致，
@@ -65,6 +85,7 @@ func ValidContextPolicy(policy string) bool {
 //
 // NoMemory:       此次注入不参与记忆计算（向量化/关键词提取/蒸馏），原文仍留在上下文
 // ContextPolicy:  此次注入后是否依据（清洗后的）内容裁剪上下文；默认不裁剪。
+// RecallPolicy:   此次注入是否依据（清洗后的）内容召回相关记忆；默认 auto（召回）。
 //
 //	中断注入也允许声明 prune——它同样会携带内容进入上下文。
 //
@@ -77,7 +98,11 @@ func ValidContextPolicy(policy string) bool {
 type InjectOptions struct {
 	NoMemory      bool
 	ContextPolicy string
-	CleanerName   string
+	// RecallPolicy 声明此次注入是否据其内容召回相关记忆。
+	// 空串 = 默认（输入/注入 auto，即保持既有「每条输入都召回」的行为）；
+	// RecallPolicyNone 显式关闭（如中断通知的 meta 文本不该据它召回）。
+	RecallPolicy string
+	CleanerName  string
 
 	// Priority 声明**中断注入**的优先级（仅 InjectInterrupt* 有意义）。
 	//
@@ -106,6 +131,7 @@ const (
 // NoMemory: 此通道输入/输出不参与记忆计算（向量化/关键词提取/蒸馏），但原文保留在上下文中
 // Cleaner:  计算层过滤函数，不改原文；仅在向量化/jieba/蒸馏/存档提取关键词时调用
 // ContextPolicy: 此通道的输入到达后是否据此裁剪上下文，默认 none（不裁剪）
+// RecallPolicy:  此通道的输入到达后是否据此召回相关记忆，默认 auto（召回）
 //
 // JSON tag 是必需的：通道定义要跨进程传给内核，而 Cleaner 是函数（必须忽略）。
 // 没有 tag 时既无法整体 marshal（func 不支持），又会诱使调用方手写字段白名单——
@@ -114,6 +140,8 @@ type ChannelDef struct {
 	NoMemory      bool                `json:"no_memory,omitempty"`
 	Cleaner       func(string) string `json:"-"`
 	ContextPolicy string              `json:"context_policy,omitempty"`
+	// RecallPolicy 见 InjectOptions.RecallPolicy；空串等价 auto（保持既有行为）。
+	RecallPolicy string `json:"recall_policy,omitempty"`
 }
 
 // StageContext provides context for stage handlers.
@@ -180,6 +208,10 @@ type ToolDef struct {
 	NoMemory      bool                   `json:"no_memory,omitempty"`      // 此工具输出不参与记忆计算，但原文保留
 	Cleaner       func(string) string    `json:"-"`                        // 计算层过滤函数，不改原文；仅在向量化/jieba/蒸馏时调用
 	ContextPolicy string                 `json:"context_policy,omitempty"` // 上下文策略：""(默认，不裁剪) / ContextPolicyNone / ContextPolicyPrune
+	// RecallPolicy 声明此工具输出是否触发一次记忆召回（注入）。
+	// ""(默认 none) / RecallPolicyNone / RecallPolicyAuto。
+	// 默认 none：多数工具输出是噪声；需要「取回真实内容后据它召回」的工具（如 qq_get_message）应显式声明 auto。
+	RecallPolicy string `json:"recall_policy,omitempty"`
 }
 
 // IOInjector provides methods for injecting input and interrupts into the agent pipeline.

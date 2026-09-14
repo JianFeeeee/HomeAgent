@@ -72,6 +72,12 @@ const (
 	ContextPolicyPrune = pubsdk.ContextPolicyPrune
 )
 
+// 召回策略取值：与 ContextPolicy 正交（裁剪 vs 召回）。
+const (
+	RecallPolicyNone = pubsdk.RecallPolicyNone
+	RecallPolicyAuto = pubsdk.RecallPolicyAuto
+)
+
 type DisabledPluginInfo struct {
 	Name       string `json:"name"`
 	DisabledAt string `json:"disabled_at"`

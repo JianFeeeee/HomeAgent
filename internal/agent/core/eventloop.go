@@ -405,6 +405,29 @@ func (a *Agent) pruneDeclared(evt *agentIO.InputEvent) bool {
 	return false
 }
 
+// recallDeclared 判定这次输入是否要触发记忆召回（注入）。
+//
+// 与 pruneDeclared **正交**：prune 管“踢出去”（归档低相关 L0 事件），
+// recall 管“取进来”（把 L2/L3 相关记忆注入本轮）。
+//
+// 默认值与 prune 刻意相反：召回是只读增量、日常对话本就需要，所以**默认 auto**；
+// 只有显式声明 recall_policy=none（如中断通知的 meta 文本）才关闭。
+// 优先级同 prune：注入点（payload）> 通道（ChannelDef）> 默认 auto。
+func (a *Agent) recallDeclared(evt *agentIO.InputEvent) bool {
+	if evt == nil {
+		return true
+	}
+	if p, ok := evt.Payload["recall_policy"].(string); ok && p != "" {
+		return p != pubsdk.RecallPolicyNone
+	}
+	if a.io != nil {
+		if chDef, ok := a.io.GetInputChannelDef(evt.Source); ok && chDef.RecallPolicy != "" {
+			return chDef.RecallPolicy != pubsdk.RecallPolicyNone
+		}
+	}
+	return true
+}
+
 // cleanInputFor 解析这条输入在计算层应当使用的清洗文本。
 //
 // 优先级：注入点声明的 cleaner（payload.cleaner_name，引用某个已注册的通道

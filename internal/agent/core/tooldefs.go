@@ -2,6 +2,7 @@ package core
 
 import (
 	"fmt"
+	"log"
 	"strings"
 
 	agentIO "gitcode.com/JianFeeeee/HomeAgent/internal/agent/io"
@@ -37,6 +38,38 @@ func (a *Agent) buildMemoryContext(input string, maxTokens int) string {
 		s = TruncateByTokens(s, maxTokens)
 	}
 	return s
+}
+
+// buildTaskMemoryContext 按本任务声明的召回策略决定是否注入记忆索引。
+//
+// 默认 auto（保持“每条输入都召回”的既有行为）；输入/注入声明
+// recall_policy=none 时返回空串，从而不注入记忆。策略与裁剪（ContextPolicy）正交。
+func (a *Agent) buildTaskMemoryContext(f *TaskFrame, input string, maxTokens int) string {
+	if f != nil && !a.recallDeclared(f.Evt) {
+		return ""
+	}
+	return a.buildMemoryContext(input, maxTokens)
+}
+
+// recallTextFor 以 query 触发一次记忆召回，返回可注入的文本（空串表示无）。
+//
+// 这是“召回”侧的单一入口：与 Prune 共用同一份**清洗后**的 query，
+// 使“取进来”（召回）与“踢出去”（裁剪）落在同一个相关性过程上。
+// trigger 仅用于日志溯源（如 "tool:qq_get_message"）。
+func (a *Agent) recallTextFor(query, trigger string) string {
+	if query == "" || a.indexer == nil {
+		return ""
+	}
+	memTokens := 0 // 0 = 不截断
+	if a.provider != nil {
+		memTokens = ComputeTokenBudget(a.provider, a.systemPrompt).MemoryTokens
+	}
+	text := a.buildMemoryContext(query, memTokens)
+	if text == "" {
+		return ""
+	}
+	log.Printf("[agent] memory recall (%s): injected %d chars", trigger, len(text))
+	return text
 }
 
 // expandPromptVars 展开自定义提示词（人格卡）里的版本占位符。
