@@ -251,6 +251,13 @@ type BuildStatus struct {
 	// 服务时，要给他们拿到 Corresponding Source 的机会——WebUI 状态页会把它渲染成
 	// 可见链接，所以**修改后对外部署的分支必须把这个值改指向自己的源码仓库**。
 	SourceURL string `json:"source_url,omitempty"`
+	// License 是开源许可标识（SPDX，如 AGPL-3.0-only）。
+	//
+	// 为何与 SourceURL 分开：只看一个源码链接，使用者没法从界面上看出这是什么
+	// 许可、网络服务场景下有哪些义务。许可名与许可全文地址是两个独立事实。
+	License string `json:"license,omitempty"`
+	// LicenseURL 是 License 对应的全文地址。
+	LicenseURL string `json:"license_url,omitempty"`
 }
 
 type TrackerStatus struct {
