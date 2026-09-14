@@ -89,7 +89,11 @@ type SchedulerStatus struct {
 	Rejected  uint64 `json:"rejected"`
 	Suspended uint64 `json:"suspended"`
 	Resumed   uint64 `json:"resumed"`
+	// Preempted = Σ PreemptsByLevel[1..4]，即「真正抢占成功」的次数。
+	// 它与 Suspended 不等价（受害者可能先自行结束），因此不是 Suspended 的别名。
 	Preempted uint64 `json:"preempted"`
+	// Backpressure 是就绪队列满、输入被挡回 channel 的次数（暂时不收，不是丢弃）。
+	Backpressure uint64 `json:"backpressure"`
 }
 
 // SchedulerFrame 是中断栈里的一帧（供图形化展示"压了几层现场"）。
