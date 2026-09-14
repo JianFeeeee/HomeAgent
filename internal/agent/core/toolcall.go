@@ -174,13 +174,7 @@ func (a *Agent) executeMemoryTool(tc agentAPI.ToolCall) string {
 			parts = append(parts, fmt.Sprintf("- %s (提及%d次, 类型:%s)", e.Name, e.MentionCount, e.Type))
 		}
 		parts = append(parts, fmt.Sprintf("找到 %d 条关系:", len(result.Relations)))
-		for i, r := range result.Relations {
-			if i >= 10 {
-				parts = append(parts, "...更多关系被截断")
-				break
-			}
-			parts = append(parts, fmt.Sprintf("- %s →(%s)→ %s", r.SourceName, r.RelationType, r.TargetName))
-		}
+		parts = append(parts, formatRecallRelations(result.Relations, 10)...)
 		// 命中的关系若挂着媒体块，把媒体说明附在结果末尾。
 		//
 		// 关系行只有实体名和关系类型，看不出"这条记忆当时还带了一张图"。
