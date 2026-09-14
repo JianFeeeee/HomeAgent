@@ -1032,7 +1032,7 @@
             out.push('<path class="tp-edge tp-edge-out" d="' + d + '" stroke="' + a.color + '"/>');
           });
           if (a.outputs.length > MAX_OUT) {
-            out.push('<text class="tp-hint" x="' + OUT_X + '" y="' + (y + nout * ROW + 13) + '">+' + (a.outputs.length - MAX_OUT) + " " + __("更多", "more") + "</text>");
+            out.push('<text class="tp-hint" x="' + OUT_X + '" y="' + (outTop + nout * ROW + 11) + '">+' + (a.outputs.length - MAX_OUT) + " " + __("更多", "more") + "</text>");
           }
           y += bandH;
         });
