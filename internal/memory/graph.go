@@ -554,6 +554,14 @@ func (g *GraphDB) Recall(keywords []string, seedEntities []string, depth int, se
 		return result, nil
 	}
 
+	// seenRel 跨层去重。
+	//
+	// 每层都用**已累积的** entityIDs 查邻接关系，因此上一层刚产出、以及
+	// 两个已访问实体之间的关系会在下一层被重复查回并再次 append。
+	// 深度 2、稠密图上重复会淹没 memory_recall 的 10 条关系预算——
+	// 模型看到的是同一句话刷屏，真正的新关系被截断。
+	seenRel := make(map[int64]bool)
+
 	for depthLevel := 0; depthLevel < depth; depthLevel++ {
 		ids := make([]interface{}, 0, len(entityIDs))
 		for id := range entityIDs {
@@ -600,7 +608,10 @@ func (g *GraphDB) Recall(keywords []string, seedEntities []string, depth int, se
 				relRows.Close()
 				return nil, err
 			}
-			result.Relations = append(result.Relations, rel)
+			if !seenRel[rel.ID] {
+				seenRel[rel.ID] = true
+				result.Relations = append(result.Relations, rel)
+			}
 
 			if !entityIDs[rel.SourceID] {
 				newIDs[rel.SourceID] = true
