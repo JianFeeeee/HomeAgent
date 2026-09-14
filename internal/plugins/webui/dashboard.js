@@ -1378,7 +1378,10 @@
             ovKpi("memory", OV_ICONS.db, __("记忆", "Memory")) +
             ovKpi("docs", OV_ICONS.file, __("文档", "Docs")) +
             ovKpi("runtime", OV_ICONS.cpu, __("运行时", "Runtime")) +
-            '</div><div class="ov-foot" id="ov-foot"></div></div>';
+            '</div></div>' +
+            // 开源许可单独成框：之前在 KPI 卡底部只是一行小链接（.ov-foot），
+            // 几乎看不见，也看不出是许可证还是别的什么。
+            '<div class="card" id="ov-legal"></div>';
         }
         updateOverview();
       }
@@ -1427,20 +1430,55 @@
           "ov-runtime",
           rt.goroutines ? rt.goroutines + (rt.memory_mb ? " · " + rt.memory_mb + "M" : "") : "—",
         );
-        // 源码链接（AGPL §13）：静态文本，第一次填好后不参与轮询刷新。
-        var foot = document.getElementById("ov-foot");
-        if (foot) {
-          var src = k && k.build && k.build.source_url;
-          var want = src
-            ? '<a href="' +
+        // 开源许可卡：协议标识 + 协议全文 + 源码仓库。
+        //
+        // 为什么单独成框、且三者都给：AGPL-3.0 §13 的义务是「向网络使用者提供
+        // 取得 Corresponding Source 的机会」——只给一个仓库链接、不写协议名，
+        // 使用者看不出这受什么许可约束，也看不出网络服务场景下还有 §13 的义务。
+        // 内容对一次构建是常量，所以填一次就够（__html 比对避免重复重建）。
+        var legal = document.getElementById("ov-legal");
+        if (legal) {
+          var lb = (k && k.build) || {};
+          var src = lb.source_url || "";
+          var lic = lb.license || "";
+          var licURL = lb.license_url || "";
+          var rows = "";
+          if (lic) {
+            rows +=
+              '<div class="kv-row"><span class="key">' +
+              __("许可协议", "License") +
+              '</span><span class="val">' +
+              (licURL
+                ? '<a href="' + escHtml(licURL) + '" target="_blank" rel="noopener noreferrer">' + escHtml(lic) + "</a>"
+                : escHtml(lic)) +
+              "</span></div>";
+          }
+          if (src) {
+            rows +=
+              '<div class="kv-row"><span class="key">' +
+              __("源码仓库", "Source") +
+              '</span><span class="val"><a href="' +
               escHtml(src) +
               '" target="_blank" rel="noopener noreferrer">' +
-              __("源码", "Source") +
-              "</a>"
+              escHtml(src) +
+              "</a></span></div>";
+          }
+          // 网络条款只在 AGPL 系的许可下才成立，所以按标识判断，不硬写协议名。
+          var note =
+            lic && lic.toUpperCase().indexOf("AGPL") >= 0
+              ? '<p class="ov-legal-note">' +
+                __(
+                  "网络服务条款（§13）：把修改后的版本作为网络服务对外提供时，必须向使用者提供取得对应源码的途径。",
+                  "Network clause (section 13): offering a modified version as a network service requires giving users a way to obtain the Corresponding Source.",
+                ) +
+                "</p>"
+              : "";
+          var want = rows
+            ? '<h2>' + __("开源许可", "License") + "</h2>" + rows + note
             : "";
-          if (foot.__html !== want) {
-            foot.__html = want;
-            foot.innerHTML = want;
+          if (legal.__html !== want) {
+            legal.__html = want;
+            legal.innerHTML = want;
           }
         }
       }
