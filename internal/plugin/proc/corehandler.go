@@ -215,6 +215,7 @@ type injectParams struct {
 	TextRef       SharedRef `json:"text_ref,omitempty"`
 	NoMemory      bool      `json:"no_memory,omitempty"`
 	ContextPolicy string    `json:"context_policy,omitempty"`
+	RecallPolicy  string    `json:"recall_policy,omitempty"`
 	CleanerName   string    `json:"cleaner_name,omitempty"`
 	// Priority 声明中断注入的优先级（L1..L3）；L4 内核独占，见 InjectOptions。
 	Priority string `json:"priority,omitempty"`
@@ -237,6 +238,7 @@ type injectMediaParams struct {
 	BlocksRef     SharedRef             `json:"blocks_ref,omitempty"`
 	NoMemory      bool                  `json:"no_memory,omitempty"`
 	ContextPolicy string                `json:"context_policy,omitempty"`
+	RecallPolicy  string                `json:"recall_policy,omitempty"`
 	CleanerName   string                `json:"cleaner_name,omitempty"`
 	Priority      string                `json:"priority,omitempty"`
 }
@@ -245,10 +247,11 @@ type injectMediaParams struct {
 //
 // 单独提一个转换函数是为了让「默认值」只有一个出处：零值即记入记忆 + 不裁剪，
 // 与旧三参数注入等价。
-func pubSdkInjectOpts(noMemory bool, policy, cleanerName, priority string) pubsdk.InjectOptions {
+func pubSdkInjectOpts(noMemory bool, policy, recallPolicy, cleanerName, priority string) pubsdk.InjectOptions {
 	return pubsdk.InjectOptions{
-		NoMemory: noMemory, ContextPolicy: policy, CleanerName: cleanerName,
-		Priority: clampExternalPriority(priority),
+		NoMemory: noMemory, ContextPolicy: policy, RecallPolicy: recallPolicy,
+		CleanerName: cleanerName,
+		Priority:    clampExternalPriority(priority),
 	}
 }
 
@@ -276,6 +279,14 @@ func clampExternalPriority(priority string) string {
 func validateContextPolicy(where, policy string) error {
 	if !pubsdk.ValidContextPolicy(policy) {
 		return fmt.Errorf("%s: context_policy 只允许 none/prune，实际 %q", where, policy)
+	}
+	return nil
+}
+
+// validateRecallPolicy 校验召回策略取值，与 context_policy 同一套规则。
+func validateRecallPolicy(where, policy string) error {
+	if !pubsdk.ValidRecallPolicy(policy) {
+		return fmt.Errorf("%s: recall_policy 只允许 none/auto，实际 %q", where, policy)
 	}
 	return nil
 }
@@ -422,6 +433,9 @@ func (h *coreHandler) toolRegister(params json.RawMessage) (interface{}, error) 
 		return nil, fmt.Errorf("tool.register: 缺少 name")
 	}
 	if err := validateContextPolicy("tool.register", p.Def.ContextPolicy); err != nil {
+		return nil, err
+	}
+	if err := validateRecallPolicy("tool.register", p.Def.RecallPolicy); err != nil {
 		return nil, err
 	}
 	p.Def.Plugin = h.name

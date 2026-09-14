@@ -139,6 +139,9 @@ func policySuffix(ch agentIO.InputChannel) string {
 	if ch.Def.ContextPolicy != "" && ch.Def.ContextPolicy != "none" {
 		m = append(m, "裁剪:"+ch.Def.ContextPolicy)
 	}
+	if ch.Def.RecallPolicy != "" && ch.Def.RecallPolicy != "auto" {
+		m = append(m, "召回:"+ch.Def.RecallPolicy)
+	}
 	if len(m) == 0 {
 		return ""
 	}
