@@ -5,6 +5,8 @@ import { deviceInfo } from '@kit.BasicServicesKit';
 import { textToSpeech } from '@kit.CoreSpeechKit';
 import { componentSnapshot } from '@kit.ArkUI';
 import { abilityAccessCtrl, common, PermissionRequestResult, Permissions } from '@kit.AbilityKit';
+import { camera, cameraPicker } from '@kit.CameraKit';
+import { fileIo, fileUri } from '@kit.CoreFileKit';
 import { appVersion } from './AppVersion';
 
 // ===== 能力结果 =====
@@ -18,6 +20,7 @@ export const LOCAL_DEVICE_CAPS: string[] = [
   'clipboardsee',
   'clipboardsue',
   'speakeruse',
+  'camerasue',
 ];
 
 export interface CapResult {
@@ -127,6 +130,82 @@ export async function capScreensee(): Promise<CapResult> {
     if (full !== null) {
       full.release();
     }
+  }
+}
+
+// ===== camerasue：系统相机抓拍 =====
+//
+// 与桌面/CLI 端的实现路径不同：鸿蒙三方应用不能无界面地直接驱动摄像头
+// （CameraKit 需要预览 surface + CAMERA 权限，且后台采集受限），能拿到
+// “用户正在拍的这一张”的合规路径是系统相机选择器 cameraPicker —— 由系统
+// 相机完成采集，本应用只取回结果文件。语义与桌面端一致：现在给 agent 拍一张。
+//
+// 结果落在应用沙箱（saveUri 指向 filesDir），不写系统媒体库，也就不需要
+// READ_IMAGEVIDEO 这类受限权限。
+const CAMERASUE_MAX_B64: number = 950000;
+
+/**
+ * camerasue 实现。
+ *
+ * 参数语义与 homeagent-cmdrun 的说明一致：无参数 = 抓拍单张；
+ * `<N秒>` = 录 N 秒视频。录像回传暂未接二进制分块（DeviceBridge 已具备
+ * sendDataChunked，接线待做）——这里明确拒掉，而不是回一个超长 base64
+ * 把模型上下文和 bridge 都撑爆。
+ */
+export async function capCamerasue(context: common.UIAbilityContext,
+                                  rawArgs: string): Promise<CapResult> {
+  const raw: string = rawArgs.trim();
+  if (raw.length > 0) {
+    const digits: RegExp = new RegExp('^\\d+$');
+    if (digits.test(raw)) {
+      return errResult('鸿蒙端暂不支持录像回传，请用 camerasue 抓拍单张');
+    }
+  }
+
+  const filePath: string = context.filesDir + '/camerasue_' + Date.now().toString() + '.jpg';
+  try {
+    // cameraPicker 要求 saveUri 指向的文件存在且可写，先建空文件占位
+    const f: fileIo.File = fileIo.openSync(filePath,
+      fileIo.OpenMode.READ_WRITE | fileIo.OpenMode.CREATE);
+    fileIo.closeSync(f);
+  } catch (e) {
+    return errResult('无法创建相机输出文件');
+  }
+
+  try {
+    const profile: cameraPicker.PickerProfile = {
+      cameraPosition: camera.CameraPosition.CAMERA_POSITION_BACK,
+      saveUri: fileUri.getUriFromPath(filePath),
+    };
+    const res: cameraPicker.PickerResult =
+      await cameraPicker.pick(context, [cameraPicker.PickerMediaType.PHOTO], profile);
+    if (res.resultCode !== 0 || res.resultUri.length === 0) {
+      return errResult('未获取到照片（可能被取消）');
+    }
+  } catch (e) {
+    return errResult('相机不可用或未授权，请确认应用在前台并允许使用相机');
+  }
+
+  let fd: number = -1;
+  try {
+    const stat: fileIo.Stat = fileIo.statSync(filePath);
+    const buf: ArrayBuffer = new ArrayBuffer(stat.size);
+    const rf: fileIo.File = fileIo.openSync(filePath, fileIo.OpenMode.READ_ONLY);
+    fd = rf.fd;
+    fileIo.readSync(fd, buf);
+    fileIo.closeSync(rf);
+    fd = -1;
+    const helper: util.Base64Helper = new util.Base64Helper();
+    const b64: string = helper.encodeToStringSync(new Uint8Array(buf));
+    if (b64.length > CAMERASUE_MAX_B64) {
+      return errResult('照片数据过大，请降低分辨率后重试');
+    }
+    return okResult('data:image/jpeg;base64,' + b64);
+  } catch (e) {
+    if (fd >= 0) {
+      try { fileIo.closeSync(fd); } catch (ignore) {}
+    }
+    return errResult('照片读取失败，请重试');
   }
 }
 
