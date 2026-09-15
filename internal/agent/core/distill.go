@@ -172,6 +172,19 @@ func (a *Agent) archiveColdDocs() {
 		}
 	}
 
+	// 场景记忆的「用进废退」：久未重现的关联按半衰期淡出。
+	//
+	// 不做衰减的后果不是"多记一点"，而是**注入预算被一次性巧合吃光**——
+	// 场景是每轮都要注入的常驻内容，关联只增不减时，越老的库注入越糊。
+	// 半衰期取 30 天：比"这个月没做过这类事"更久，避免把季节性的事误删。
+	if a.memory != nil {
+		if n, err := a.memory.DecaySceneRefs(30*24*time.Hour, 0.05); err != nil {
+			log.Printf("[agent] scene decay error: %v", err)
+		} else if n > 0 {
+			log.Printf("[agent] 场景关联衰减：清理 %d 条长期未重现的引用", n)
+		}
+	}
+
 	if a.docStore != nil {
 		a.docStore.Reindex()
 	}

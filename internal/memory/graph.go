@@ -114,6 +114,10 @@ func (g *GraphDB) initSchema() error {
 	}
 	defer tx.Rollback()
 
+	// scene_features 是场面指纹的特征集合：场景 = 一组反复共现的可观察特征，
+	// 相似度按加权 Jaccard 算（权重由特征种类决定，chan/peer 最强）。
+	// situation_evidence 记录一次性指纹的足迹：同类指纹重复出现到
+	// minSceneEvidence 次才长出场景。
 	schemas := []string{
 		`CREATE TABLE IF NOT EXISTS entities (
 			id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -186,9 +190,27 @@ func (g *GraphDB) initSchema() error {
 		`CREATE TABLE IF NOT EXISTS scenes (
 			id INTEGER PRIMARY KEY AUTOINCREMENT,
 			key TEXT UNIQUE NOT NULL,
+			-- strength 是场景被重现的次数：场景不是被声明出来的，是被反复遇到
+			-- 长出来的（见 EnterScene / minSceneEvidence）。
+			strength INTEGER DEFAULT 1,
 			created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
 			updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 		)`,
+		`CREATE TABLE IF NOT EXISTS scene_features (
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			scene_id INTEGER NOT NULL,
+			feature TEXT NOT NULL,
+			weight REAL DEFAULT 1.0,
+			created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+			UNIQUE(scene_id, feature)
+		)`,
+		`CREATE TABLE IF NOT EXISTS situation_evidence (
+			label TEXT PRIMARY KEY,
+			count INTEGER DEFAULT 1,
+			updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+		)`,
+		`CREATE INDEX IF NOT EXISTS idx_scene_features_scene ON scene_features(scene_id)`,
+		`CREATE INDEX IF NOT EXISTS idx_scene_features_feature ON scene_features(feature)`,
 		// ref_id 的解释由 kind 决定（relation / entity）。这里不用外键：
 		// 节点可能先于引用被清理（PurgeNoise/PurgeOrphans），悬空引用由
 		// 读取侧的 JOIN 自然过滤掉，而级联删除会把清理变成一个跨表事务。
@@ -232,6 +254,8 @@ func (g *GraphDB) initSchema() error {
 	tx.Exec(`ALTER TABLE relations ADD COLUMN sentence_id INTEGER DEFAULT 0`)
 	// 迁移4：记忆块加场景列（旧表已存在时 CREATE TABLE IF NOT EXISTS 不会补列）
 	tx.Exec(`ALTER TABLE memory_blocks ADD COLUMN scene TEXT DEFAULT ''`)
+	// 迁移6：旧 scenes 表加 strength 列（涌现侧的强度计数）
+	tx.Exec(`ALTER TABLE scenes ADD COLUMN strength INTEGER DEFAULT 1`)
 	// 迁移5：场景引用加 ref_text（块/文档的 id 是字符串）。
 	//
 	// 不能只 `ALTER TABLE ADD COLUMN`：REF_TEXT 同时参与唯一约束

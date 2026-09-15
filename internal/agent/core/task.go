@@ -111,6 +111,12 @@ type TaskFrame struct {
 	CurResult     string
 	Resp          *agentAPI.CompletionResponse
 
+	// Scene 是本轮**涌现**出来的场景键（由场面指纹聚类得到，无人声明），
+	// sceneDone 标记是否已解析过——一轮只解析一次：多解析一次就多给场景
+	// 加一次强度，「工具调得多」会被误当成「这个场面更常出现」。
+	Scene     string
+	sceneDone bool
+
 	// 游标与终态
 	Step     Step
 	Response string
@@ -716,7 +722,7 @@ func denialResultText(ctx *sdk.StageContext, toolName string) string {
 
 // stepToolExec 执行工具。**临界区**：见设计文档 §4.3。
 func (a *Agent) stepToolExec(f *TaskFrame) stepOutcome {
-	result := a.executeToolCall(f.CurTool, f.OutputChannel)
+	result := a.executeToolCall(f.CurTool, f.OutputChannel, f.Scene)
 	f.CurResult = result
 	f.ToolResults = append(f.ToolResults, ToolResultItem{Name: f.CurTool.Name, Output: result})
 	log.Printf("[agent] tool %s result: %s", f.CurTool.Name, truncateStr(result, 100))
@@ -757,6 +763,9 @@ func (a *Agent) stepToolAfter(f *TaskFrame) stepOutcome {
 			// 与这一步工具本身（如 tool:qq_get_message）。带上工具场景，
 			// 才能让「凡是要回 QQ 消息」这类规则在该步被取回。
 			scenes := sceneKeysFor(f.Evt, tc.Name)
+			if s := a.resolveTurnScene(f, tc.Name); s != "" {
+				scenes = append(scenes, s)
+			}
 			recallText = a.memoryPass(query, "tool:"+tc.Name, needPrune, needRecall, scenes).RecallText
 		}
 	}
