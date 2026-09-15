@@ -753,7 +753,11 @@ func (a *Agent) stepToolAfter(f *TaskFrame) stepOutcome {
 		needRecall := def.RecallPolicy == sdk.RecallPolicyAuto
 		if needPrune || needRecall {
 			query := a.toolOutputForQuery(tc.Name, result)
-			recallText = a.memoryPass(query, "tool:"+tc.Name, needPrune, needRecall).RecallText
+			// 工具路召回的场景有两个来源：本轮输入的场面（如 chan:qq）
+			// 与这一步工具本身（如 tool:qq_get_message）。带上工具场景，
+			// 才能让「凡是要回 QQ 消息」这类规则在该步被取回。
+			scenes := sceneKeysFor(f.Evt, tc.Name)
+			recallText = a.memoryPass(query, "tool:"+tc.Name, needPrune, needRecall, scenes).RecallText
 		}
 	}
 

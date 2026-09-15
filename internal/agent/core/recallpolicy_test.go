@@ -90,15 +90,15 @@ func TestBuildTaskMemoryContext_RespectsPolicy(t *testing.T) {
 // 工具触发的召回：以（清洗后的）工具输出为 query，产出可注入的记忆文本。
 func TestRecallTextFor_UsesQuery(t *testing.T) {
 	a := &Agent{indexer: newTestIndexer(t, "咖啡", "张三")}
-	got := a.recallTextFor("咖啡", "tool:test")
+	got := a.recallTextFor("咖啡", "tool:test", nil)
 	if !strings.Contains(got, "【记忆索引】") {
 		t.Fatalf("应产出记忆索引文本，实际 %q", got)
 	}
 	// 空 query 或无 indexer 时不产出、不 panic。
-	if got := a.recallTextFor("", "tool:test"); got != "" {
+	if got := a.recallTextFor("", "tool:test", nil); got != "" {
 		t.Fatalf("空 query 应返回空串，实际 %q", got)
 	}
-	if got := (&Agent{}).recallTextFor("咖啡", "tool:test"); got != "" {
+	if got := (&Agent{}).recallTextFor("咖啡", "tool:test", nil); got != "" {
 		t.Fatalf("无 indexer 应返回空串，实际 %q", got)
 	}
 }

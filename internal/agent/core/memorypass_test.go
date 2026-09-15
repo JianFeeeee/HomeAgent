@@ -22,7 +22,7 @@ func TestMemoryPass_NoPolicyIsNoOp(t *testing.T) {
 		maxContextSize: 4,
 		indexer:        newTestIndexer(t, "咖啡", "张三"),
 	}
-	out := a.memoryPass("咖啡", "test", false, false)
+	out := a.memoryPass("咖啡", "test", false, false, nil)
 	if out.Archived != 0 || out.RecallText != "" {
 		t.Fatalf("未声明任何策略时不应有任何输出，实际 %+v", out)
 	}
@@ -31,7 +31,7 @@ func TestMemoryPass_NoPolicyIsNoOp(t *testing.T) {
 func TestMemoryPass_PruneAndRecallTogether(t *testing.T) {
 	a := newMemoryPassAgent(t)
 	before := a.context.Len()
-	out := a.memoryPass("咖啡", "tool:test", true, true)
+	out := a.memoryPass("咖啡", "tool:test", true, true, nil)
 	if out.Archived == 0 {
 		t.Fatal("声明 prune 应归档低相关事件")
 	}
@@ -50,7 +50,7 @@ func TestMemoryPass_PoliciesAreOrthogonal(t *testing.T) {
 		maxContextSize: 4,
 		indexer:        newTestIndexer(t, "咖啡", "张三"),
 	}
-	if out := onlyPrune.memoryPass("咖啡", "test", true, false); out.RecallText != "" {
+	if out := onlyPrune.memoryPass("咖啡", "test", true, false, nil); out.RecallText != "" {
 		t.Fatalf("只声明 prune 不应召回，实际 %q", out.RecallText)
 	}
 	// 只召回不裁剪：输出只有召回文本，上下文条数不变。
@@ -60,7 +60,7 @@ func TestMemoryPass_PoliciesAreOrthogonal(t *testing.T) {
 		indexer:        newTestIndexer(t, "咖啡", "张三"),
 	}
 	before := onlyRecall.context.Len()
-	out := onlyRecall.memoryPass("咖啡", "test", false, true)
+	out := onlyRecall.memoryPass("咖啡", "test", false, true, nil)
 	if out.Archived != 0 {
 		t.Fatalf("只声明 recall 不应裁剪，实际归档 %d", out.Archived)
 	}
