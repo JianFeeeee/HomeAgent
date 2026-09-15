@@ -29,6 +29,9 @@ func main() {
 	path := flag.String("db", "", "graph.db 路径（必填）")
 	apply := flag.Bool("apply", false, "真正删除；不加则只 dry-run 打印")
 	orphans := flag.Bool("orphans", false, "同时处理「零关系孤立实体」（先被清理的噪音在另一端留下的空节点）")
+	tagScene := flag.String("tag-scene", "", "存量引导：把实体名匹配 -entity-glob 的活跃关系标进该场景键（如 chan:qq）")
+	entityGlob := flag.String("entity-glob", "", "配合 -tag-scene 的 GLOB 模式（如 *QQ*）。GLOB 区分大小写，避免把 /home/newqqagent 这类路径卷进场景")
+	sceneStats := flag.Bool("scene-stats", false, "只打印场景规模摘要")
 	flag.Parse()
 
 	if *path == "" {
@@ -41,6 +44,37 @@ func main() {
 		log.Fatalf("memgc: open %s: %v", *path, err)
 	}
 	defer g.Close()
+
+	if *sceneStats {
+		stats, err := g.SceneStats()
+		if err != nil {
+			log.Fatalf("memgc: scene stats: %v", err)
+		}
+		fmt.Printf("场景 %d 个：\n", len(stats))
+		for _, st := range stats {
+			fmt.Printf("  %-40s refs=%-5d relations=%-5d entities=%-5d updated=%s\n",
+				st.Key, st.Refs, st.Relations, st.Entities, st.UpdatedAt.Format("2006-01-02 15:04"))
+		}
+		return
+	}
+
+	// 存量引导：场景是后引入的维度，老库里的规则（那批 QQ 规则就是典型）
+	// 没有任何场景引用，不补挂就永远吃不到场景召回。
+	if *tagScene != "" {
+		if *entityGlob == "" {
+			log.Fatal("memgc: -tag-scene 需要配套 -entity-glob（如 '*QQ*'）；不做自动猜测")
+		}
+		n, err := g.TagSceneByEntityGlob(*tagScene, *entityGlob, !*apply)
+		if err != nil {
+			log.Fatalf("memgc: tag scene: %v", err)
+		}
+		if *apply {
+			fmt.Printf("[APPLIED] 已把 %d 条关系标进场景 %q\n", n, *tagScene)
+		} else {
+			fmt.Printf("[DRY-RUN] 将把 %d 条关系标进场景 %q（未写库）\n", n, *tagScene)
+		}
+		return
+	}
 
 	junk, err := g.NoiseEntities()
 	if err != nil {

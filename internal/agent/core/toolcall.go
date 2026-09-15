@@ -209,6 +209,11 @@ func (a *Agent) executeMemoryTool(tc agentAPI.ToolCall) string {
 		if !ok {
 			return "参数格式错误，需要 triples 数组"
 		}
+		// 场景键：模型可以在三元组里逐条给（scene 字段），也可以在工具参数
+		// 顶层给一次（scene 参数），后者作为本批次的默认场景。
+		// 两条路都为空则这条记忆不参与场景召回——不做猜测：猜错的场景会把
+		// 无关记忆钉死，之后每次进入该场面都会被注入，比漏标更难发现。
+		batchScene := getString(tc.Arguments, "scene")
 		var triples []memory.Triple
 		for _, td := range triplesData {
 			if m, ok := td.(map[string]interface{}); ok {
@@ -217,6 +222,10 @@ func (a *Agent) executeMemoryTool(tc agentAPI.ToolCall) string {
 					Relation:     getString(m, "relation"),
 					Object:       getString(m, "object"),
 					SentenceText: getString(m, "sentence_text"),
+					Scene:        getString(m, "scene"),
+				}
+				if t.Scene == "" {
+					t.Scene = batchScene
 				}
 				// 模型显式关联的媒体：结构化字段随三元组一起提交，
 				// 由 commitTriplesWithMedia 变成 L3 一等块并与句子建边——

@@ -55,6 +55,10 @@ type Triple struct {
 	// 媒体不再靠正文 marker 反解：结构化字段直接给出归属，
 	// 由调用方（core）把它变成 L3 一等块并与句子建立结构边。
 	MediaDigests []string `json:"media_digests,omitempty"`
+	// Scene 是这条记忆所属的**场景键**（可空）。写完后该三元组的两个实体
+	// 与这条关系都会被挂到这个场景上，场景重现时按场景召回。
+	// 约定见 memory.NormalizeSceneKey：`chan:qq`、`chan:qq/peer:group_123`。
+	Scene string `json:"scene,omitempty"`
 }
 
 type GraphDB struct {
@@ -172,6 +176,32 @@ func (g *GraphDB) initSchema() error {
 			summary    TEXT DEFAULT '',
 			created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 		)`,
+		// 场景引用：给「记忆节点」再赋一层**触发条件**。
+		//
+		// 为什么需要它：词法/向量召回都靠「字面或语义相似」，而带条件的规则
+		// （「回 QQ 消息不要用 Markdown」「老大消息优先」）在措辞不重合时根本
+		// 召不回来。场景是这类记忆的**索引键**：节点记住自己「属于哪个场面」，
+		// 场面重现（又来一条 QQ 消息）时直接按场景取回，不靠字面命中。
+		`CREATE TABLE IF NOT EXISTS scenes (
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			key TEXT UNIQUE NOT NULL,
+			created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+			updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+		)`,
+		// ref_id 的解释由 kind 决定（relation / entity）。这里不用外键：
+		// 节点可能先于引用被清理（PurgeNoise/PurgeOrphans），悬空引用由
+		// 读取侧的 JOIN 自然过滤掉，而级联删除会把清理变成一个跨表事务。
+		`CREATE TABLE IF NOT EXISTS scene_refs (
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			scene_id INTEGER NOT NULL,
+			kind TEXT NOT NULL,
+			ref_id INTEGER NOT NULL,
+			weight REAL DEFAULT 1.0,
+			created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+			UNIQUE(scene_id, kind, ref_id)
+		)`,
+		`CREATE INDEX IF NOT EXISTS idx_scene_refs_scene ON scene_refs(scene_id, kind)`,
+		`CREATE INDEX IF NOT EXISTS idx_scene_refs_ref ON scene_refs(kind, ref_id)`,
 		`CREATE INDEX IF NOT EXISTS idx_memory_blocks_modality ON memory_blocks(modality)`,
 		`CREATE INDEX IF NOT EXISTS idx_memory_blocks_digest ON memory_blocks(payload_digest)`,
 		`CREATE INDEX IF NOT EXISTS idx_memory_block_edges_source ON memory_block_edges(source_kind, source_id)`,
@@ -365,24 +395,27 @@ func (g *GraphDB) commit(triples []Triple, sessionID string, turnID int, trackSe
 			}
 		}
 
-		var existing int
+		var existing int64
 		err = tx.QueryRow(
-			`SELECT 1 FROM relations WHERE source_id = ? AND target_id = ? AND relation_type = ? AND session_id = ?`,
+			`SELECT id FROM relations WHERE source_id = ? AND target_id = ? AND relation_type = ? AND session_id = ?`,
 			sourceID, targetID, t.Relation, sessionID,
 		).Scan(&existing)
+		var relID int64
 		if err == sql.ErrNoRows {
-			_, err = tx.Exec(
+			res, ierr := tx.Exec(
 				`INSERT INTO relations (source_id, target_id, relation_type, confidence, session_id, turn_id, date_bucket, sentence_id)
 				 VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
 				sourceID, targetID, t.Relation, confidence, sessionID, turnID, dateBucket, sentenceID,
 			)
-			if err != nil {
-				return nil, 0, 0, err
+			if ierr != nil {
+				return nil, 0, 0, ierr
 			}
+			relID, _ = res.LastInsertId()
 			relationsCreated++
 		} else if err != nil {
 			return nil, 0, 0, err
 		} else {
+			relID = existing
 			// 同一(会话内)三元组已存在：仅刷新置信度与时间戳，不重复计数
 			_, err = tx.Exec(
 				`UPDATE relations SET confidence = ?, updated_at = CURRENT_TIMESTAMP
@@ -390,6 +423,15 @@ func (g *GraphDB) commit(triples []Triple, sessionID string, turnID int, trackSe
 				confidence, sourceID, targetID, t.Relation, sessionID,
 			)
 			if err != nil {
+				return nil, 0, 0, err
+			}
+		}
+
+		// 场景引用：写完关系立即把「关系 + 两端实体」挂到这个场景上。
+		// 同一事务内完成，避免出现「关系写进去了但场景引用丢了」——
+		// 那会让这条记忆在后来的场景里永远召不回来，且无声无息。
+		if t.Scene != "" && relID != 0 {
+			if err := tagSceneTx(tx, t.Scene, relID, []int64{sourceID, targetID}, confidence); err != nil {
 				return nil, 0, 0, err
 			}
 		}

@@ -379,7 +379,7 @@ func (a *Agent) pruneOnInput(evt *agentIO.InputEvent, cleanInput string) int {
 	if !a.pruneDeclared(evt) {
 		return 0
 	}
-	return a.memoryPass(cleanInput, "input:"+evt.Source, true, false).Archived
+	return a.memoryPass(cleanInput, "input:"+evt.Source, true, false, sceneKeysFor(evt, "")).Archived
 }
 
 // pruneDeclared 判定这次输入是否显式声明了裁剪。

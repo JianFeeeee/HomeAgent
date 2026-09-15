@@ -376,7 +376,7 @@ func TestBuildMemoryContext_IncludesMediaSection(t *testing.T) {
 		t.Fatalf("indexer sync: %v", err)
 	}
 
-	out := a.buildMemoryContext("测试图片", 0)
+	out := a.buildMemoryContext("测试图片", 0, nil)
 	if out == "" {
 		t.Skip("图库召回未命中（indexer 检索策略所致），无法验证媒体段注入")
 	}
