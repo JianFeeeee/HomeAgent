@@ -261,6 +261,11 @@ git switch main && git cherry-pick <sha>   # 遵守 §三：只 pick，不 merge
 - alpha/beta tag 的产物**不上现网**（现网是 24/7 服务，预发布通道的存在就是为了不拿它冒险）。
 - 涉及 SDK 仓时：主仓 `go.mod` 的 `replace => ./third_party/homeagent-sdk` 指向本地 vendored 副本，
   发版前确认 vendored SDK 与 SDK 仓 release tag 一致（**两仓中版本对齐是第一优先级**，见 §七）。
+- **客户端版本必须与内核同步**（GUI / 鸿蒙 / waiter 同一个号，当前皆为 `internal/meta.Version`）：
+  内核版本是唯一事实源，客户端不得各写一个。拉齐用 `make sync-client-versions`，
+  发版前跑 `make check-client-versions` 做漂移门禁。waiter 直接引用 `internal/meta`（无第二份字段）；
+  鸿蒙的 `versionName/versionCode` 由脚本写 `AppScope/app.json5`，运行时代码从 `bundleManager` 读，
+  不再硬编码。
 
 ---
 
