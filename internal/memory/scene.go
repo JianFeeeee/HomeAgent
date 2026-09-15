@@ -475,6 +475,8 @@ func (g *GraphDB) SceneStats() ([]SceneStat, error) {
 		        COUNT(sr.id),
 		        SUM(CASE WHEN sr.kind = 'relation' THEN 1 ELSE 0 END),
 		        SUM(CASE WHEN sr.kind = 'entity' THEN 1 ELSE 0 END),
+		        COALESCE(s.strength, 1),
+		        (SELECT COUNT(*) FROM scene_features f WHERE f.scene_id = s.id),
 		        s.updated_at
 		 FROM scenes s LEFT JOIN scene_refs sr ON sr.scene_id = s.id
 		 GROUP BY s.id ORDER BY COUNT(sr.id) DESC, s.key`)
@@ -487,7 +489,7 @@ func (g *GraphDB) SceneStats() ([]SceneStat, error) {
 	for rows.Next() {
 		var st SceneStat
 		var rels, ents sql.NullInt64
-		if err := rows.Scan(&st.Key, &st.Refs, &rels, &ents, &st.UpdatedAt); err != nil {
+		if err := rows.Scan(&st.Key, &st.Refs, &rels, &ents, &st.Strength, &st.Features, &st.UpdatedAt); err != nil {
 			return nil, err
 		}
 		st.Relations = int(rels.Int64)
