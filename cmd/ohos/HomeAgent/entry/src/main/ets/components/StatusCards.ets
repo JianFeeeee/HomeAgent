@@ -120,10 +120,15 @@ export struct StatusSummaryCard {
         .alignItems(VerticalAlign.Center)
         .transition(TransitionEffect.OPACITY.combine(TransitionEffect.translate({ y: 12 })).animation({ duration: ANIM_ENTER, curve: Curve.EaseOut }))
 
-        // 能力计数：图标 + 数字，只保留真正会变的两项（插件 / 工具）
+        // 能力计数：图标 + 数字，只保留真正会变的两项（插件 / 工具）。
+        //
+        // 必须是**子组件**（@Prop 单向下发）而不是本组件里的 @Builder：
+        // ArkUI 的 @Builder 按值传参是“快照”语义，父组件重渲染时
+        // 不会用新值重跑 builder —— 实测：K_PLUGINS 已经是 35，
+        // 但 @Builder 里画的还是首次的 0，永远显示 '-'。
         Row({ space: 10 }) {
-          this.kpiTile($r('app.media.ic_plug'), '插件', this.plugins, COLOR_ACCENT)
-          this.kpiTile($r('app.media.ic_tool'), '工具', this.tools, COLOR_CYAN)
+          KpiTile({ icon: $r('app.media.ic_plug'), label: '插件', value: this.plugins, tint: COLOR_ACCENT })
+          KpiTile({ icon: $r('app.media.ic_tool'), label: '工具', value: this.tools, tint: COLOR_CYAN })
         }
         .width('100%')
         .margin({ top: 14 })
@@ -197,6 +202,51 @@ export struct StatusSummaryCard {
           .fontWeight(FontWeight.Bold)
           .fontColor(this.palette().textPrimary)
         Text(label)
+          .fontSize(11)
+          .fontColor(this.palette().textMuted)
+      }
+      .alignItems(HorizontalAlign.Start)
+    }
+    .layoutWeight(1)
+    .padding({ left: 12, right: 12, top: 10, bottom: 10 })
+    .borderRadius(RADIUS_SM)
+    .backgroundColor(this.palette().bgHover)
+    .alignItems(VerticalAlign.Center)
+  }
+
+  private palette(): ThemePalette {
+    return this.isDark ? DARK_PALETTE : LIGHT_PALETTE;
+  }
+}
+
+/**
+ * 能力计数小卡（插件 / 工具）。
+ *
+ * 单独成组件而非 @Builder：@Builder 的按值参数不会随父组件重渲染而刷新，
+ * 数值会永远停在首次渲染的 0。@Prop 是单向下发，父组件因 @StorageProp
+ * 变化重渲染时，子组件拿到新值并重绘。
+ */
+@Component
+struct KpiTile {
+  @StorageProp('themeIsDark') private isDark: boolean = true;
+  @Prop icon: Resource = $r('app.media.ic_plug');
+  @Prop label: string = '';
+  @Prop value: number = 0;
+  @Prop tint: string = '';
+
+  build() {
+    Row({ space: 8 }) {
+      Image(this.icon)
+        .width(16)
+        .height(16)
+        .fillColor(this.tint)
+        .draggable(false)
+      Column({ space: 1 }) {
+        Text(this.value > 0 ? this.value.toString() : '-')
+          .fontSize(17)
+          .fontWeight(FontWeight.Bold)
+          .fontColor(this.palette().textPrimary)
+        Text(this.label)
           .fontSize(11)
           .fontColor(this.palette().textMuted)
       }

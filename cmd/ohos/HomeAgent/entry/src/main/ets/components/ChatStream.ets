@@ -69,14 +69,20 @@ export struct ChatStream {
 
   private scrollToBottom(): void {
     this.autoScrolling = true;
+    // 滚两次：内容高度是在消息数组更新后的若干帧内才逐步确定的。
+    // 长历史/长思考卡布局慢，只滚一次会落在“当时”的底部 —— 实测初次加载
+    // 历史时最后一条被输入区挡住，再手动上滑还能露出更多内容。
     setTimeout(() => {
       this.scroller.scrollEdge(Edge.Bottom);
     }, 50);
     setTimeout(() => {
+      this.scroller.scrollEdge(Edge.Bottom);
+    }, 260);
+    setTimeout(() => {
       this.autoScrolling = false;
       this.navHidden = false;
       navBar.setVisible(true);
-    }, 450);
+    }, 480);
   }
 
   /**
