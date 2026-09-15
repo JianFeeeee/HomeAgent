@@ -4,8 +4,10 @@ import (
 	"bufio"
 	"encoding/json"
 	"fmt"
+	"io"
 	"log"
 	"net"
+	"net/http"
 	"os"
 	"path/filepath"
 	"sort"
@@ -532,10 +534,24 @@ func (p *Plugin) cmdPlugin(conn net.Conn, parts []string, s *sdk.PluginSDK) {
 			writeLine(conn, map[string]interface{}{"type": "response", "content": "用法: /plugin install <url>"})
 			return
 		}
-		writeLine(conn, map[string]interface{}{
-			"type":    "response",
-			"content": "安装插件需要网络，本环境可能受限。请通过 WebUI 或使用 agent 对话安装。",
-		})
+		// 与 WebUI 同一实现：插件安装/升级逻辑在 pluginmgr 插件里，它监听一个
+		// 回环 HTTP 地址（默认 127.0.0.1:9876，无鉴权）。WebUI 也是转发到它，
+		// 这里直连同一端点，不再只打印一句“请去 WebUI”。
+		addr := "127.0.0.1:9876"
+		if v, err := s.Settings().GetPlugin("pluginmgr", "http_addr"); err == nil {
+			if str, ok := v.(string); ok && str != "" {
+				addr = str
+			}
+		}
+		reqBody, _ := json.Marshal(map[string]interface{}{"url": parts[2]})
+		resp, err := http.Post("http://"+addr+"/plugins", "application/json", strings.NewReader(string(reqBody)))
+		if err != nil {
+			writeLine(conn, map[string]interface{}{"type": "error", "error": "无法连接 pluginmgr(" + addr + "): " + err.Error()})
+			return
+		}
+		defer resp.Body.Close()
+		data, _ := io.ReadAll(resp.Body)
+		writeLine(conn, map[string]interface{}{"type": "response", "content": string(data)})
 
 	case "remove":
 		if len(parts) < 3 {
