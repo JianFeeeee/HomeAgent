@@ -117,10 +117,14 @@ func ToolScene(tool string) string {
 
 // SceneStat 是单个场景的规模摘要（供 introspection / 运维观察）。
 type SceneStat struct {
-	Key       string    `json:"key"`
-	Refs      int       `json:"refs"`
-	Relations int       `json:"relations"`
-	Entities  int       `json:"entities"`
+	Key       string `json:"key"`
+	Refs      int    `json:"refs"`
+	Relations int    `json:"relations"`
+	Entities  int    `json:"entities"`
+	// Strength 是该场景被重现（强化）的次数；Features 是它长出的特征数。
+	// 两者一起说明「这个场景是不是真的在涌现」，而不是被一次性写出来的。
+	Strength  int       `json:"strength"`
+	Features  int       `json:"features"`
 	UpdatedAt time.Time `json:"updated_at"`
 }
 

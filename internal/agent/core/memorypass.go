@@ -2,6 +2,8 @@ package core
 
 import (
 	"log"
+	"strconv"
+	"time"
 
 	agentIO "gitcode.com/JianFeeeee/HomeAgent/internal/agent/io"
 	"gitcode.com/JianFeeeee/HomeAgent/internal/memory"
@@ -117,4 +119,132 @@ func (a *Agent) pruneByQuery(query string) int {
 		topK = 1
 	}
 	return a.context.Prune(query, topK, a.docStore)
+}
+
+// ──────────────────────────────────────────────
+// 场面指纹：场景**涌现**的原料
+//
+// 场景不是谁声明的，而是从交互流里长出来的。长出来的原料就是每轮可观察的
+// 场面指纹——在哪个通道、跟谁、在做什么、聊什么、什么时段。全部取自运行时
+// 已有量，不需要模型配合，也不需要人工标注。
+// ──────────────────────────────────────────────
+
+// situationFeaturesFor 采集一轮交互的场面指纹。
+//
+// 特征权重由种类决定（见 memory.SituationFeature.Weight）：通道与对象是
+// 「同一个场面」最强的同一性信号，工具是行为信号，话题是软信号。
+func situationFeaturesFor(evt *agentIO.InputEvent, cleanInput, tool string) []memory.SituationFeature {
+	var feats []memory.SituationFeature
+	if evt != nil {
+		if evt.Source != "" {
+			feats = append(feats, memory.SituationFeature{Kind: "chan", Value: evt.Source})
+		}
+		// 对话对象：插件在 payload 里给的群/用户标识（有则用，无则退化为仅有通道）
+		for _, k := range []string{"peer", "peer_id", "group_id", "user_id", "chat_id"} {
+			if v, ok := evt.Payload[k]; ok {
+				if s := payloadString(v); s != "" {
+					// 群与私聊要能区分：同一 id 在两种场景下不是同一个对象
+					kind := "peer"
+					if k == "group_id" {
+						kind = "peer_group"
+					}
+					feats = append(feats, memory.SituationFeature{Kind: kind, Value: s})
+					break
+				}
+			}
+		}
+		// 时段：弱信号。人的记忆确实带时间气味（「早上那件事」），
+		// 但它不该主导场面判定，所以权重最低。
+		feats = append(feats, memory.SituationFeature{Kind: "part", Value: partOfDay(time.Now())})
+	}
+	if tool != "" {
+		feats = append(feats, memory.SituationFeature{Kind: "tool", Value: tool})
+	}
+	// 话题：取清洗后输入的内容词做软特征（最多 3 个）。
+	if cleanInput != "" {
+		for i, kw := range memory.ExtractKeywords(memory.CleanText(cleanInput)) {
+			if i >= 3 {
+				break
+			}
+			feats = append(feats, memory.SituationFeature{Kind: "topic", Value: kw})
+		}
+	}
+	return feats
+}
+
+// payloadString 从 payload 值里取字符串（可能是 string / float64 / json.Number）。
+func payloadString(v interface{}) string {
+	switch t := v.(type) {
+	case string:
+		return t
+	case float64:
+		if t == float64(int64(t)) {
+			return strconv.FormatInt(int64(t), 10)
+		}
+		return strconv.FormatFloat(t, 'f', -1, 64)
+	case int64:
+		return strconv.FormatInt(t, 10)
+	case int:
+		return strconv.Itoa(t)
+	default:
+		return ""
+	}
+}
+
+// partOfDay 把时刻归成时段（场面指纹里最弱的一维）。
+func partOfDay(t time.Time) string {
+	switch h := t.Hour(); {
+	case h < 6:
+		return "night"
+	case h < 12:
+		return "morning"
+	case h < 18:
+		return "afternoon"
+	default:
+		return "evening"
+	}
+}
+
+// resolveTurnScene 解析本轮所属的**涌现场景**，一轮只解析一次。
+//
+// 与「声明场景」（sceneKeysFor：注入点 > 通道 > 工具）的关系：两者并存且都被
+// 用于召回。声明是"我知道这是哪个场面"，涌现是"这轮看起来像哪个场面"——
+// 后者不需要任何人知道场景这回事。
+//
+// 解析会**写库**（场景强化/长出），所以必须一轮一次：多调一次就多给场景记
+// 一次强度，"工具调得多"会被误读成"这个场面更常出现"。
+func (a *Agent) resolveTurnScene(f *TaskFrame, tool string) string {
+	if a == nil || a.memory == nil {
+		return ""
+	}
+	if f == nil {
+		return a.emergentSceneFor(nil, "", tool)
+	}
+	if f.sceneDone {
+		return f.Scene
+	}
+	f.Scene = a.emergentSceneFor(f.Evt, f.CleanInput, tool)
+	f.sceneDone = true
+	return f.Scene
+}
+
+// emergentSceneFor 采集指纹并交给图库做「归属或长出」。
+func (a *Agent) emergentSceneFor(evt *agentIO.InputEvent, cleanInput, tool string) string {
+	feats := situationFeaturesFor(evt, cleanInput, tool)
+	if len(feats) == 0 {
+		return ""
+	}
+	sig := memory.NewSituation(feats...)
+	if sig.Empty() {
+		return ""
+	}
+	key, created, err := a.memory.EnterScene(sig)
+	if err != nil {
+		log.Printf("[agent] scene enter failed: %v", err)
+		return ""
+	}
+	if created {
+		log.Printf("[agent] 场景涌现: %q（由场面指纹 %v 长出）", key, sig.Keys())
+	}
+	return key
 }

@@ -450,7 +450,7 @@ func TestToolMemoryCommit_BindsMedia(t *testing.T) {
 				},
 			},
 		},
-	})
+	}, "")
 	if !strings.Contains(out, "关联") {
 		t.Errorf("返回值应告知模型媒体已关联: %q", out)
 	}
@@ -481,7 +481,7 @@ func TestToolMemoryCommit_WithoutMedia(t *testing.T) {
 				map[string]interface{}{"subject": "甲方", "relation": "签署", "object": "合同"},
 			},
 		},
-	})
+	}, "")
 	if strings.Contains(out, "失败") {
 		t.Errorf("普通提交不该失败: %q", out)
 	}
@@ -505,7 +505,7 @@ func TestToolMemoryCommit_CarriesSentenceText(t *testing.T) {
 				},
 			},
 		},
-	})
+	}, "")
 	res, _ := a.memory.Recall([]string{"李四"}, nil, 2, "")
 	if len(res.Relations) == 0 {
 		t.Fatal("召回为空")
@@ -597,7 +597,7 @@ func TestTools_NilMediaStoreDegrades(t *testing.T) {
 				},
 			},
 		},
-	})
+	}, "")
 	if strings.Contains(out, "失败") {
 		t.Errorf("无媒体存储时提交不该失败: %q", out)
 	}
