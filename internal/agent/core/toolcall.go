@@ -13,7 +13,7 @@ import (
 	"gitcode.com/JianFeeeee/HomeAgent/internal/memory/text"
 )
 
-func (a *Agent) executeToolCall(tc agentAPI.ToolCall, channel string) (ret string) {
+func (a *Agent) executeToolCall(tc agentAPI.ToolCall, channel string, turnScene ...string) (ret string) {
 	defer func() {
 		if r := recover(); r != nil {
 			stack := debug.Stack()
@@ -31,7 +31,7 @@ func (a *Agent) executeToolCall(tc agentAPI.ToolCall, channel string) (ret strin
 
 	done := make(chan string, 1)
 	go func() {
-		done <- a.executeToolCallInner(tc, channel)
+		done <- a.executeToolCallInner(tc, channel, firstOr(turnScene))
 	}()
 
 	select {
@@ -43,12 +43,21 @@ func (a *Agent) executeToolCall(tc agentAPI.ToolCall, channel string) (ret strin
 	}
 }
 
-func (a *Agent) executeToolCallInner(tc agentAPI.ToolCall, channel string) string {
+// firstOr 取可选参数的首个值（工具执行路径只有调用方知道本轮场景，
+// 用变参是为了不让「不关心场景」的调用点（spawn/测试）被迫传空串）。
+func firstOr(v []string) string {
+	if len(v) == 0 {
+		return ""
+	}
+	return v[0]
+}
+
+func (a *Agent) executeToolCallInner(tc agentAPI.ToolCall, channel string, scene string) string {
 	switch {
 	case tc.Name == "persona_set":
 		return a.executePersonaTool(tc)
 	case strings.HasPrefix(tc.Name, "memory_"):
-		return a.executeMemoryTool(tc)
+		return a.executeMemoryTool(tc, scene)
 	case strings.HasPrefix(tc.Name, "social_"):
 		return a.executeSocialTool(tc)
 	case strings.HasPrefix(tc.Name, "knowledge_"):
@@ -123,7 +132,7 @@ func (a *Agent) executeToolCallInner(tc agentAPI.ToolCall, channel string) strin
 	return fmt.Sprintf("%v", result)
 }
 
-func (a *Agent) executeMemoryTool(tc agentAPI.ToolCall) string {
+func (a *Agent) executeMemoryTool(tc agentAPI.ToolCall, turnScene string) string {
 	g := a.graphMem()
 	if g == nil {
 		if tc.Name == "memory_document_query" {
@@ -214,6 +223,11 @@ func (a *Agent) executeMemoryTool(tc agentAPI.ToolCall) string {
 		// 两条路都为空则这条记忆不参与场景召回——不做猜测：猜错的场景会把
 		// 无关记忆钉死，之后每次进入该场面都会被注入，比漏标更难发现。
 		batchScene := getString(tc.Arguments, "scene")
+		// 没有显式声明时，落到本轮**涌现**出来的场景上：模型不需要知道场景
+		// 这回事，记忆也会因为「是在什么场面里写下的」而自动获得唤起入口。
+		if batchScene == "" {
+			batchScene = turnScene
+		}
 		var triples []memory.Triple
 		for _, td := range triplesData {
 			if m, ok := td.(map[string]interface{}); ok {
