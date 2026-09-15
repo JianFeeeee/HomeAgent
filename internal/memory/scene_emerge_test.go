@@ -2,6 +2,7 @@ package memory
 
 import (
 	"os"
+	"strings"
 	"testing"
 	"time"
 )
@@ -199,5 +200,123 @@ func TestSceneRefDecay(t *testing.T) {
 	}
 	if left, _ := g.RecallByScene([]string{"chan:webui"}, 8); len(left.Relations) != 1 {
 		t.Errorf("刚用过的场景不该被衰减掉: %+v", left.Relations)
+	}
+}
+
+// TestDeclaredAndEmergentBothLearn 钉住「主动 + 被动两条路」的相互长进：
+//   - 主动：声明即建场景（不等第二次涌现），并把指纹喂给它
+//   - 被动：指纹聚类自己长出场景；声明场景学会特征后**即使没人再声明**
+//     也能被相似度命中
+//   - 第一次交互（涌现场景还没长出来）由声明场景兜底
+func TestDeclaredAndEmergentBothLearn(t *testing.T) {
+	g := newTestGraph(t)
+	defer os.Remove(g.dbPath)
+	defer g.Close()
+
+	// 第 1 轮：声明了 chan:qq。此刻还没有涌现场景 → Primary 必须兜底到声明场景
+	turn, err := g.EnterSceneWithHint(mkSig("qq", "group_1027", "qq_get_message", "排班"), []string{"chan:qq"})
+	if err != nil {
+		t.Fatalf("EnterSceneWithHint: %v", err)
+	}
+	if turn.Primary != "chan:qq" {
+		t.Fatalf("首次交互应兜底到声明场景，得到 %q", turn.Primary)
+	}
+	if turn.Emergent {
+		t.Error("首次交互不该有涌现场景")
+	}
+	if len(turn.DeclaredCreated) != 1 || turn.DeclaredCreated[0] != "chan:qq" {
+		t.Errorf("声明即建场景（不等第二次涌现）: %+v", turn.DeclaredCreated)
+	}
+
+	// 第 2 轮同类场面：涌现场景长出来，且它比声明场景**更优先**用于写入
+	turn2, err := g.EnterSceneWithHint(mkSig("qq", "group_1027", "qq_get_message", "排班表"), []string{"chan:qq"})
+	if err != nil {
+		t.Fatalf("EnterSceneWithHint: %v", err)
+	}
+	if !turn2.Emergent || !strings.HasPrefix(turn2.Primary, "auto:") {
+		t.Fatalf("第 2 轮应涌现出细粒度场景并优先: %+v", turn2)
+	}
+	if len(turn2.Keys) < 2 {
+		t.Fatalf("两条路都要进召回集合: %+v", turn2.Keys)
+	}
+
+	// 在声明场景里写上一条（模拟首次交互时写的记忆）
+	if _, _, err := g.Commit([]Triple{{
+		Subject: "群规", Relation: "禁止", Object: "Markdown排版", Confidence: 1.0,
+		Scenes: []string{"chan:qq"},
+	}}, "main", 0); err != nil {
+		t.Fatalf("commit: %v", err)
+	}
+	// 在涌现场景里写上一条
+	if _, _, err := g.Commit([]Triple{{
+		Subject: "排班表", Relation: "格式", Object: "纯文本", Confidence: 1.0,
+		Scenes: []string{turn2.Primary},
+	}}, "main", 0); err != nil {
+		t.Fatalf("commit: %v", err)
+	}
+
+	// **没人声明**的同场面提问：被动路按相似度命中涌现场景；
+	// 声明场景不在相似度空间里（否则它会吃掉被动路），靠声明/前缀路命中。
+	sig := mkSig("qq", "group_1027", "qq_get_message", "统计")
+	r, err := g.RecallBySituation(sig, 8)
+	if err != nil {
+		t.Fatalf("RecallBySituation: %v", err)
+	}
+	got := map[string]bool{}
+	for _, rel := range r.Relations {
+		got[rel.TargetName] = true
+	}
+	if !got["纯文本"] {
+		t.Errorf("涌现场景应被被动命中: %+v", r.Relations)
+	}
+	if got["Markdown排版"] {
+		t.Errorf("声明场景不该进相似度空间（会压死被动路）: %+v", r.Relations)
+	}
+	// 声明场景走声明键，照样取回
+	byKey, err := g.RecallByScene([]string{"chan:qq"}, 8)
+	if err != nil {
+		t.Fatalf("RecallByScene: %v", err)
+	}
+	if len(byKey.Relations) != 1 || byKey.Relations[0].TargetName != "Markdown排版" {
+		t.Errorf("声明路应取回声明场景的记忆: %+v", byKey.Relations)
+	}
+	// 而完整的一轮（声明+涌现）两条路都进召回集合
+	full, err := g.EnterSceneWithHint(mkSig("qq", "group_1027", "qq_get_message", "统计"), []string{"chan:qq"})
+	if err != nil {
+		t.Fatalf("EnterSceneWithHint: %v", err)
+	}
+	if len(full.Keys) < 2 {
+		t.Errorf("两条路都应进召回集合: %+v", full.Keys)
+	}
+	// 声明键从自身解析特征（不含整轮指纹）
+	feats := FeaturesFromSceneKey("chan:qq/peer:group_1027")
+	if len(feats) != 2 || feats[0].Key() != "chan:qq" || feats[1].Key() != "peer:group_1027" {
+		t.Errorf("声明键特征解析失败: %+v", feats)
+	}
+	if len(FeaturesFromSceneKey("老大2026-09-04_12:27_qq私聊图片")) != 0 {
+		t.Error("无 kind:value 结构的键不该硬猜特征")
+	}
+
+	// 声明场景不该被覆盖成涌现键：两者的身份各自保留
+	if _, err := g.EnsureScene("chan:qq", Situation{}); err != nil {
+		t.Fatalf("EnsureScene: %v", err)
+	}
+	var n int
+	if err := g.db.QueryRow(`SELECT COUNT(*) FROM scenes WHERE key = 'chan:qq'`).Scan(&n); err != nil {
+		t.Fatal(err)
+	}
+	if n != 1 {
+		t.Errorf("声明场景应保持独立存在，得到 %d", n)
+	}
+}
+
+// TestEffectiveScenes 覆盖「单值声明 + 多值」合并去重。
+func TestEffectiveScenes(t *testing.T) {
+	got := effectiveScenes(Triple{Scene: "chan:qq", Scenes: []string{"auto:a", "chan:qq", ""}})
+	if len(got) != 2 || got[0] != "auto:a" || got[1] != "chan:qq" {
+		t.Errorf("合并去重保序失败: %v", got)
+	}
+	if effectiveScenes(Triple{}) != nil {
+		t.Error("无场景应返回 nil")
 	}
 }

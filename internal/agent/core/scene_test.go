@@ -102,3 +102,20 @@ func TestSituationFeaturesFor(t *testing.T) {
 		t.Errorf("仅工具场景应有 1 个特征: %+v", feats)
 	}
 }
+
+// TestWritePathAttachesBothPaths 钉住写侧的「两条路都挂」：
+// 显式声明优先；否则挂本轮声明的 + 涌现的场景集合。
+func TestTurnSceneKeysBothPaths(t *testing.T) {
+	// 声明的通道场景与工具场景都在，涌现键（若有）追加在后
+	evt := &agentIO.InputEvent{Source: "qq", Payload: map[string]interface{}{"scene": "chan:qq/peer:group_1"}}
+	got := sceneKeysFor(evt, "qq_get_message")
+	want := []string{"chan:qq/peer:group_1", "chan:qq", "tool:qq_get_message"}
+	if len(got) != len(want) {
+		t.Fatalf("声明侧场景数不对: %v want %v", got, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Errorf("声明侧[%d] = %q want %q", i, got[i], want[i])
+		}
+	}
+}

@@ -123,8 +123,10 @@ type SceneStat struct {
 	Entities  int    `json:"entities"`
 	// Strength 是该场景被重现（强化）的次数；Features 是它长出的特征数。
 	// 两者一起说明「这个场景是不是真的在涌现」，而不是被一次性写出来的。
-	Strength  int       `json:"strength"`
-	Features  int       `json:"features"`
+	Strength int `json:"strength"`
+	Features int `json:"features"`
+	// Origin 是这条场景来自哪条路：declared（主动声明）或 emergent（被动涌现）。
+	Origin    string    `json:"origin"`
 	UpdatedAt time.Time `json:"updated_at"`
 }
 
@@ -477,6 +479,7 @@ func (g *GraphDB) SceneStats() ([]SceneStat, error) {
 		        SUM(CASE WHEN sr.kind = 'entity' THEN 1 ELSE 0 END),
 		        COALESCE(s.strength, 1),
 		        (SELECT COUNT(*) FROM scene_features f WHERE f.scene_id = s.id),
+		        COALESCE(s.origin, 'emergent'),
 		        s.updated_at
 		 FROM scenes s LEFT JOIN scene_refs sr ON sr.scene_id = s.id
 		 GROUP BY s.id ORDER BY COUNT(sr.id) DESC, s.key`)
@@ -489,7 +492,7 @@ func (g *GraphDB) SceneStats() ([]SceneStat, error) {
 	for rows.Next() {
 		var st SceneStat
 		var rels, ents sql.NullInt64
-		if err := rows.Scan(&st.Key, &st.Refs, &rels, &ents, &st.Strength, &st.Features, &st.UpdatedAt); err != nil {
+		if err := rows.Scan(&st.Key, &st.Refs, &rels, &ents, &st.Strength, &st.Features, &st.Origin, &st.UpdatedAt); err != nil {
 			return nil, err
 		}
 		st.Relations = int(rels.Int64)

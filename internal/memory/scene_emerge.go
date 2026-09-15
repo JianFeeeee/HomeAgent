@@ -1,6 +1,7 @@
 package memory
 
 import (
+	"database/sql"
 	"fmt"
 	"sort"
 	"strings"
@@ -238,9 +239,14 @@ func (g *GraphDB) EnterScene(sig Situation) (string, bool, error) {
 	return key, true, nil
 }
 
-// loadEmergentScenesLocked 读入全部场景及其特征权重。
+// loadEmergentScenesLocked 读入参与**被动聚类**的场景（origin='emergent'）及其特征权重。
+//
+// 为什么不带上声明场景：声明场景若也进相似度空间，它一旦吸收了整轮指纹就会
+// 以接近 1.0 的相似度吃掉后续所有同类轮次，被动路再也长不出更细的场面。
+// 声明路的泛化靠**层级键前缀**（chan:qq 覆盖 chan:qq/peer:x），各有各的机制。
 func (g *GraphDB) loadEmergentScenesLocked() ([]emergentScene, error) {
-	rows, err := g.db.Query(`SELECT id, key, COALESCE(strength, 1) FROM scenes`)
+	rows, err := g.db.Query(`SELECT id, key, COALESCE(strength, 1) FROM scenes
+		WHERE COALESCE(origin, 'emergent') = 'emergent'`)
 	if err != nil {
 		return nil, err
 	}
@@ -338,7 +344,7 @@ func (g *GraphDB) createSceneLocked(sig Situation) (string, error) {
 		key = fmt.Sprintf("%s#%d", base, i)
 	}
 
-	res, err := tx.Exec(`INSERT INTO scenes (key, strength) VALUES (?, 1)`, key)
+	res, err := tx.Exec(`INSERT INTO scenes (key, strength, origin) VALUES (?, 1, 'emergent')`, key)
 	if err != nil {
 		return "", err
 	}
@@ -467,7 +473,7 @@ func (g *GraphDB) EmergentScenes() ([]SceneStat, error) {
 		`SELECT s.key, COALESCE(s.strength,1),
 		        (SELECT COUNT(*) FROM scene_refs sr WHERE sr.scene_id = s.id),
 		        (SELECT COUNT(*) FROM scene_features f WHERE f.scene_id = s.id),
-		        s.updated_at
+		        COALESCE(s.origin, 'emergent'), s.updated_at
 		 FROM scenes s ORDER BY COALESCE(s.strength,1) DESC, s.updated_at DESC`)
 	if err != nil {
 		return nil, err
@@ -476,10 +482,158 @@ func (g *GraphDB) EmergentScenes() ([]SceneStat, error) {
 	var out []SceneStat
 	for rows.Next() {
 		var st SceneStat
-		if err := rows.Scan(&st.Key, &st.Strength, &st.Refs, &st.Features, &st.UpdatedAt); err != nil {
+		if err := rows.Scan(&st.Key, &st.Strength, &st.Refs, &st.Features, &st.Origin, &st.UpdatedAt); err != nil {
 			return nil, err
 		}
 		out = append(out, st)
 	}
 	return out, rows.Err()
+}
+
+// TurnScene 是一轮交互解析出来的场景集合。
+type TurnScene struct {
+	// Primary 是本轮写记忆时的**首选**场景：优先用涌现出来的（细粒度、
+	// 与措辞无关），没有（首次出现、场景还没长出来）时退到第一个声明场景。
+	Primary string
+	// Keys 是声明场景 + 涌现场景的全集（去重保序），供召回并集使用。
+	Keys []string
+	// Emergent 标记 Primary 是否来自涌现。
+	Emergent bool
+	// DeclaredCreated 是本次**新建**的声明场景（此前不存在，因声明而成立）。
+	DeclaredCreated []string
+}
+
+// EnterSceneWithHint 同时走**主动声明**与**被动涌现**两条路。
+//
+// 主动路（declaredKeys 非空）：确保这些场景存在，并把本轮的场面指纹喂给它，
+// 强度 +1。这样声明出来的场景会**慢慢学会自己认自己**——同一个场面以后
+// 即使没人声明，也能被 RecallBySituation 按相似度命中。
+// 声明即建场景，不等第二次：人明确说了"这是哪个场面"，就不该再等它自己涌现。
+//
+// 被动路（始终执行）：EnterScene 的聚类，指纹重复到 minSceneEvidence 次时
+// 自己长出场景。首次交互这里返回空，此时 Primary 落到声明场景兜底——
+// 这正是"只挂一条会丢东西"的那一半。
+func (g *GraphDB) EnterSceneWithHint(sig Situation, declaredKeys []string) (TurnScene, error) {
+	out := TurnScene{}
+
+	// 主动路：声明场景存在化 + 学特征 + 强化
+	seen := make(map[string]bool)
+	for _, raw := range declaredKeys {
+		key := NormalizeSceneKey(raw)
+		if key == "" || seen[key] {
+			continue
+		}
+		seen[key] = true
+		learned, err := g.EnsureScene(key, sig)
+		if err != nil {
+			return out, err
+		}
+		if learned {
+			out.DeclaredCreated = append(out.DeclaredCreated, key)
+		}
+		out.Keys = append(out.Keys, key)
+	}
+	if len(out.Keys) > 0 {
+		out.Primary = out.Keys[0]
+	}
+
+	// 被动路：指纹聚类（可能返回已聚合的场景、也可能首次为空）
+	if !sig.Empty() {
+		key, created, err := g.EnterScene(sig)
+		if err != nil {
+			return out, err
+		}
+		if key != "" {
+			if !seen[key] {
+				out.Keys = append(out.Keys, key)
+			}
+			out.Primary = key
+			out.Emergent = true
+		} else if created {
+			out.Emergent = true
+		}
+	}
+	return out, nil
+}
+
+// EnsureScene 让一个**声明出来的**场景存在（不存在则建），并给它记一次强度。
+//
+// 特征只从**键自身**解析（`chan:qq/peer:group_1` → {chan:qq, peer:group_1}），
+// 不吸收本轮的整轮指纹。这条边界很关键：声明场景若吸收整轮指纹，它会在相似度
+// 上压过一切，被动聚类再也长不出更细的场面（实测过，见 loadEmergentScenesLocked）。
+// 声明路的泛化靠层级键前缀，不需要靠学指纹。
+func (g *GraphDB) EnsureScene(key string, _ Situation) (bool, error) {
+	key = NormalizeSceneKey(key)
+	if key == "" {
+		return false, nil
+	}
+	g.mu.Lock()
+	defer g.mu.Unlock()
+
+	var sceneID int64
+	err := g.db.QueryRow(`SELECT id FROM scenes WHERE key = ?`, key).Scan(&sceneID)
+	created := false
+	if err == sql.ErrNoRows {
+		res, ierr := g.db.Exec(`INSERT INTO scenes (key, strength, origin) VALUES (?, 1, 'declared')`, key)
+		if ierr != nil {
+			return false, ierr
+		}
+		sceneID, _ = res.LastInsertId()
+		created = true
+	} else if err != nil {
+		return false, err
+	}
+
+	if _, err := g.db.Exec(
+		`UPDATE scenes SET strength = COALESCE(strength,1) + 1, updated_at = CURRENT_TIMESTAMP WHERE id = ?`,
+		sceneID); err != nil {
+		return created, err
+	}
+	for _, f := range FeaturesFromSceneKey(key) {
+		if _, err := g.db.Exec(
+			`INSERT INTO scene_features (scene_id, feature, weight) VALUES (?, ?, ?)
+			 ON CONFLICT(scene_id, feature) DO UPDATE SET weight = MAX(weight, excluded.weight)`,
+			sceneID, f.Key(), f.Weight()); err != nil {
+			return created, err
+		}
+	}
+	return created, nil
+}
+
+// FeaturesFromSceneKey 从场景键解析它自身蕴含的场面特征。
+//
+//	chan:qq                          → {chan:qq}
+//	chan:qq/peer:group_1027          → {chan:qq, peer:group_1027}
+//	老大2026-09-04_12:27_qq私聊图片   → {}（无 kind:value 结构，不猜）
+//
+// 只有 `kind:value` 形态的层才算特征——猜不出结构的键宁可留空，
+// 也不要往特征空间里灌进会污染相似度的东西。
+func FeaturesFromSceneKey(key string) []SituationFeature {
+	parts := strings.Split(NormalizeSceneKey(key), "/")
+	var out []SituationFeature
+	for _, p := range parts {
+		i := strings.Index(p, ":")
+		if i <= 0 || i == len(p)-1 {
+			continue
+		}
+		kind, val := p[:i], p[i+1:]
+		// 白名单，不猜：`老大2026-09-04_12:27_qq私聊图片` 里的 `12:27` 也是
+		// `kind:value` 形态，放进特征空间就是往相似度里灌垃圾。
+		if !knownFeatureKinds[kind] {
+			continue
+		}
+		feat := SituationFeature{Kind: kind, Value: val}
+		if feat.Key() == "" {
+			continue
+		}
+		out = append(out, feat)
+	}
+	return out
+}
+
+// knownFeatureKinds 是允许进入场面指纹的特征种类（新的种类在这里登记，
+// 并在 SituationFeature.Weight 里给权重）。
+var knownFeatureKinds = map[string]bool{
+	"chan": true, "peer": true, "peer_group": true,
+	"tool": true, "topic": true, "part": true,
 }
