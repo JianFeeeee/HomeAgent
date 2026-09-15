@@ -8,7 +8,8 @@
  */
 
 import { ChatMessage } from '../model/Model';
-import { ThemePalette, DARK_PALETTE, LIGHT_PALETTE, ANIM_FAST } from '../common/Constants';
+import { ThemePalette, DARK_PALETTE, LIGHT_PALETTE, ANIM_FAST, K_HAS_CONN, K_REQUESTED_TAB, K_SETTINGS_SUB } from '../common/Constants';
+import { SUB_CONNECTIONS } from '../common/SettingsModel';
 import { navBar } from '../common/NavBarController';
 import { ChatAttachment } from '../model/Model';
 import { chatStore, K_CHAT_REV, K_CHAT_SCROLL_REV, K_CHAT_LOADING, K_CHAT_STAGE } from '../common/ChatStore';
@@ -20,6 +21,8 @@ import { PageTopBar } from './PageTopBar';
 @Component
 export struct ChatStream {
   @StorageProp('themeIsDark') private isDark: boolean = true;
+  /** 是否已配置后端连接（决定空态是引导连接还是引导开聊） */
+  @StorageProp(K_HAS_CONN) private hasConn: boolean = false;
   @StorageProp(K_CHAT_LOADING) private loading: boolean = false;
   @StorageProp(K_CHAT_STAGE) private stage: string = '';
   /** 数组快照的订阅信号 */
@@ -185,6 +188,50 @@ export struct ChatStream {
       }
       .width('100%')
       .height('100%')
+
+      // 层1.05：空态 —— 未连接后端时给出明确的“去设置连接”入口。
+      //
+      // 为什么必须有：全新安装时聊天页只有一条空列表 + 输入框，用户看不到
+      // 任何连后端的入口（入口在设置页的二级页里，很容易找不到）。
+      if (this.messages.length === 0 && !this.loading) {
+        Column({ space: 10 }) {
+          Image($r('app.media.ic_link'))
+            .width(34)
+            .height(34)
+            .fillColor(this.palette().textMuted)
+            .draggable(false)
+          Text(this.hasConn ? '开始新的对话' : '尚未连接后端服务')
+            .fontSize(15)
+            .fontWeight(FontWeight.Medium)
+            .fontColor(this.palette().textPrimary)
+          Text(this.hasConn
+            ? '在下方输入框发送第一条消息'
+            : '请先在“后端连接”里填写服务地址与 API Key')
+            .fontSize(12)
+            .fontColor(this.palette().textMuted)
+            .textAlign(TextAlign.Center)
+          if (!this.hasConn) {
+            Button('去设置连接')
+              .height(34)
+              .fontSize(13)
+              .backgroundColor(this.palette().accent)
+              .fontColor(Color.White)
+              .margin({ top: 4 })
+              .onClick(() => {
+                // 跨页信号：切到设置 Tab，并让设置页直接打开连接二级页
+                AppStorage.setOrCreate<string>(K_SETTINGS_SUB, SUB_CONNECTIONS);
+                AppStorage.setOrCreate<number>(K_REQUESTED_TAB, 3);
+              })
+          }
+        }
+        .width('100%')
+        .height('100%')
+        .padding({ left: 44, right: 44 })
+        .justifyContent(FlexAlign.Center)
+        .alignItems(HorizontalAlign.Center)
+        // 自身不吃触摸（空白处仍可滑列表），但子节点（按钮）正常响应
+        .hitTestBehavior(HitTestMode.Transparent)
+      }
 
       // 层1.5：顶栏遮罩（自身撑满并顶部对齐，全链路 hitTest None，触摸完全穿透）
       PageTopBar({ title: '聊天' })
