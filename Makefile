@@ -1,4 +1,4 @@
-.PHONY: all build build-plain build-cli build-gui clean install test run build-static build-linux-arm64 lint fmt
+.PHONY: all build build-plain build-cli build-gui clean install test run build-static build-linux-arm64 lint fmt sync-client-versions check-client-versions
 
 # HOMED_TAGS 默认带 onnxruntime：发行版**默认启用**本地向量空间（与
 # deploy/packaging/build.sh 保持一致）。
@@ -37,8 +37,8 @@ build:
 
 build-cli:
 	@mkdir -p $(BUILD_DIR)
-	CGO_ENABLED=0 $(GO) build -installsuffix dynlink -o $(BUILD_DIR)/$(CLI_BINARY) ./cmd/waiter/
-	@echo "Built: $(BUILD_DIR)/$(CLI_BINARY)"
+	CGO_ENABLED=0 $(GO) build -installsuffix dynlink -ldflags '$(LDFLAGS)' -o $(BUILD_DIR)/$(CLI_BINARY) ./cmd/waiter/
+	@echo "Built: $(BUILD_DIR)/$(CLI_BINARY) ($(VERSION))"
 
 build-gui:
 	@cd cmd/gui && npm install --production && npx electron-packager . $(GUI_BINARY) --out=../../$(BUILD_DIR) --overwrite --no-sandbox
@@ -76,6 +76,14 @@ fmt:
 
 lint:
 	$(GO) vet ./...
+
+# 客户端版本与内核版本同步（唯一事实源 internal/meta.Version）。
+# GUI/鸿蒙各有自版本字段，手工改必漂——用脚本拉齐，check 版给门禁用。
+sync-client-versions:
+	@bash deploy/scripts/sync-client-versions.sh
+
+check-client-versions:
+	@bash deploy/scripts/sync-client-versions.sh --check
 
 # lint-full：在 vet 之外跑 golangci-lint（阈值见 .golangci.yml，起步 warn-only）。
 # 未安装时给出可执行的安装提示与跳过原因，而不是静默成功。
