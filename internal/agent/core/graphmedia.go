@@ -92,6 +92,13 @@ func (a *Agent) linkBlocksToDocument(docID string, blocks []memory.MemoryBlock, 
 		log.Printf("[media] 写入 L3 文档节点失败 (%s): %v", docID, err)
 		return 0
 	}
+	// 文档层与场景模型兼容：文档节点也进场景，好让「这个场面有哪些文档」
+	// 可枚举、可统计（场景贯穿流水线的 doc 层落地）。
+	if scene != "" {
+		if err := a.memory.TagSceneDocument(scene, docID); err != nil {
+			log.Printf("[media] 文档挂场景失败 (%s): %v", docID, err)
+		}
+	}
 	// 文档层把场景传给块：归档进图库的块属于该文档的来源场面（QQ 归档的图
 	// 就该挂在 chan:qq 上），否则 L3 里这批块在场景召回中不可见。
 	for i := range blocks {

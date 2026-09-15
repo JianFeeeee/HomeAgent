@@ -134,6 +134,8 @@ type SceneRecall struct {
 	// 为什么场景要能取回块：块是流水线里最细的子项目，而「那场对话里发过来的
 	// 那张图」只记住名字是没用的——场面重现时要把块本身带回来。
 	Blocks []MemoryBlock `json:"blocks,omitempty"`
+	// Documents 是该场景下的 L3 文档节点 id（文档的场景由来源派生，见 TagSceneDocument）。
+	Documents []string `json:"documents,omitempty"`
 }
 
 // tagSceneTx 在事务内把「关系 + 实体」挂到场景上（幂等 upsert）。
@@ -434,7 +436,29 @@ func (g *GraphDB) RecallByScene(scenes []string, limit int) (*SceneRecall, error
 		}
 		out.Blocks = append(out.Blocks, b)
 	}
-	return out, brows.Err()
+	if err := brows.Err(); err != nil {
+		return nil, err
+	}
+
+	docQuery := `SELECT sr.ref_text, MAX(sr.weight) AS w
+		FROM scene_refs sr JOIN scenes s ON sr.scene_id = s.id
+		WHERE ` + where + ` AND sr.kind = 'document'
+		GROUP BY sr.ref_text ORDER BY w DESC LIMIT ?`
+	docArgs := append(append([]interface{}{}, args...), limit)
+	drows, err := g.db.Query(docQuery, docArgs...)
+	if err != nil {
+		return nil, err
+	}
+	defer drows.Close()
+	for drows.Next() {
+		var id string
+		var w float64
+		if err := drows.Scan(&id, &w); err != nil {
+			return nil, err
+		}
+		out.Documents = append(out.Documents, id)
+	}
+	return out, drows.Err()
 }
 
 // SceneStats 返回各场景的规模，按引用数降序。
@@ -520,4 +544,30 @@ func (g *GraphDB) ScenesOfRelation(relationID int64) ([]string, error) {
 		keys = append(keys, k)
 	}
 	return keys, rows.Err()
+}
+
+// TagSceneDocument 把 L3 文档节点挂到场景上（document 层与场景模型兼容）。
+//
+// 文档的「场景」不由存储字段决定，而由**来源**派生（chan:<source>）——存一份
+// 冗余的 Doc.Scene 会随来源改名而说谎，是同一事实的第二份真相。
+// 这里只登记「这份文档属于哪些场面」，供 scene 侧枚举与统计。
+func (g *GraphDB) TagSceneDocument(sceneKey, docID string) error {
+	if docID == "" {
+		return nil
+	}
+	key := NormalizeSceneKey(sceneKey)
+	if key == "" {
+		return nil
+	}
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	tx, err := g.db.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	if err := tagSceneRefTx(tx, key, "document", 0, docID, 1.0); err != nil {
+		return err
+	}
+	return tx.Commit()
 }
