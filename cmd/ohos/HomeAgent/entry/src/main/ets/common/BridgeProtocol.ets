@@ -10,6 +10,7 @@
  */
 
 import { CapResult } from './BridgeCaps';
+import { appVersion } from './AppVersion';
 
 // ===== 协议消息（与 remotedevice 插件对齐）=====
 
@@ -83,7 +84,7 @@ export function bridgeHelloFrame(deviceId: string, name: string, kind: string,
     platform: 'OpenHarmony',
     arch: '',
     os_release: '',
-    version: '1.1.1',
+    version: appVersion(),
     cpus: 0,
   };
   const device: HelloDevice = {

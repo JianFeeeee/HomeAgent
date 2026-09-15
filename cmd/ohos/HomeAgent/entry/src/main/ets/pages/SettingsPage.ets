@@ -3,7 +3,7 @@ import { userMessage, noConnectionMessage } from '../common/UserError';
 import { connStore } from '../common/ConnStore';
 import { registerNavStack, unregisterNavStack } from '../common/NavStackRegistry';
 import { ConnectionConfig, AppSettings } from '../model/Model';
-import { ThemePalette, DARK_PALETTE, LIGHT_PALETTE, WIDE_NAV_BAR_WIDTH, WIDE_MIN_CONTENT } from '../common/Constants';
+import { ThemePalette, DARK_PALETTE, LIGHT_PALETTE, WIDE_NAV_BAR_WIDTH, WIDE_MIN_CONTENT, K_HAS_CONN, K_SETTINGS_SUB } from '../common/Constants';
 import { RADIUS_MD, ANIM_NORMAL, ANIM_ENTER } from '../common/Constants';
 import { SubPageLayer, markSubPageOpen, subPageParam } from '../components/SubPage';
 import { StatusDetailContent } from '../components/StatusCards';
@@ -42,6 +42,10 @@ export struct SettingsPage {
 
   /** 二级页面导航栈：系统返回手势/三键返回直接作用于它 */
   private navStack: NavPathStack = new NavPathStack();
+  /** 未连接时是否已自动弹过连接页——避免用户关掉后又被 onNavigationModeChange 弹回来 */
+  private autoOpenedConn: boolean = false;
+  /** 外部请求打开某个二级页（聊天空态的“去设置连接”用） */
+  @StorageProp(K_SETTINGS_SUB) @Watch('onSubRequest') private subRequest: string = '';
 
   // ===== backend key/value editor state =====
   @State sections: SettingsSection[] = [];
@@ -86,6 +90,39 @@ export struct SettingsPage {
     this.connections = connStore.getConnections();
     const cur = connStore.getCurrentConnection();
     this.currentId = cur !== null ? cur.id : '';
+    // 广播连接状态：聊天空态据此显示“去设置连接”
+    AppStorage.setOrCreate<boolean>(K_HAS_CONN, apiClient.hasConnection());
+    // 可能从聊天空态带着“打开连接页”的请求进来（本页尚未挂载时请求已写入）
+    const pending: string = AppStorage.get<string>(K_SETTINGS_SUB) ?? '';
+    if (pending.length > 0) {
+      AppStorage.set<string>(K_SETTINGS_SUB, '');
+      this.autoOpenedConn = true;
+      setTimeout(() => {
+        this.openSub(pending);
+      }, 0);
+    }
+  }
+
+  /**
+   * 宽屏右栏默认该展示哪一页：没连上就把“后端连接”给出来。
+   *
+   * 为什么不能只靠一级入口行：入口行在列表里，用户很容易略过；
+   * 而“未连接”恰恰是最需要直接看到连接表单的时刻。窄屏同理，
+   * 在 onNavigationModeChange(Stack) 里会把连接页直接推到面前。
+   */
+  private initialSub(): string {
+    return apiClient.hasConnection() ? SUB_STATUS : SUB_CONNECTIONS;
+  }
+
+  /** 外部请求打开二级页（“去设置连接”） */
+  private onSubRequest(): void {
+    const id: string = this.subRequest;
+    if (id.length === 0) {
+      return;
+    }
+    AppStorage.set<string>(K_SETTINGS_SUB, '');
+    this.autoOpenedConn = true;
+    this.openSub(id);
   }
 
   private palette(): ThemePalette {
@@ -287,12 +324,17 @@ export struct SettingsPage {
       if (mode === NavigationMode.Split) {
         markSubPageOpen(true);
         if (this.navStack.size() === 0) {
-          this.openSub(SUB_STATUS);
+          this.openSub(this.initialSub());
         }
       } else {
         this.navStack.clear(false);
         this.activeSub = SUB_NONE;
         markSubPageOpen(false);
+        // 窄屏：未配置后端时直接推连接页，保证“设置里一定能找到连后端的入口”。
+        if (!this.autoOpenedConn && !apiClient.hasConnection()) {
+          this.autoOpenedConn = true;
+          this.openSub(SUB_CONNECTIONS);
+        }
       }
     })
   }

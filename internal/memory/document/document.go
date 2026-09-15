@@ -59,8 +59,6 @@ type Store struct {
 	denseSpace vector.MultimodalEmbedder
 }
 
-const maxSummaries = 10000
-
 // NewStore 创建文档存储。tokenizer 由外层注入（如 jieba），核心不直接依赖分词库。
 func NewStore(dir string, tokenizer tfidf.Tokenizer) *Store {
 	return &Store{
@@ -359,44 +357,63 @@ type DocHit struct {
 }
 
 func (s *Store) QueryScored(text string, topK int) []DocHit {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
 	if topK <= 0 {
 		topK = 5
 	}
 
-	// 主路径
+	var hits []DocHit
+
+	// 主路径：稠密检索。只读，持读锁。
+	s.mu.RLock()
 	if s.denseSpace != nil && s.denseSpace.Loaded() {
 		if qv, err := s.denseSpace.VectorizeDense(text); err == nil {
-			results := s.denseSearchScored(qv, topK)
-			for i := range results {
-				if d, ok := s.docs[results[i].Doc.ID]; ok {
-					d.AccessCount++
-					d.LastAccess = time.Now()
-					results[i].Doc = d
-				}
-			}
-			return results
+			hits = s.denseSearchScored(qv, topK)
 		}
 	}
+	s.mu.RUnlock()
 
 	// Fallback（需要写锁来 ensureTFIDF）
-	s.mu.RUnlock()
-	s.mu.Lock()
-	s.ensureTFIDF()
-	s.mu.Unlock()
-	s.mu.RLock()
+	if hits == nil {
+		s.mu.Lock()
+		s.ensureTFIDF()
+		results := s.tfidfIdx.Search(text, topK)
+		for _, r := range results {
+			if d, ok := s.docs[r.ID]; ok {
+				hits = append(hits, DocHit{Doc: d, Score: r.Score})
+			}
+		}
+		s.mu.Unlock()
+	}
 
-	results := s.tfidfIdx.Search(text, topK)
-	var out []DocHit
-	for _, r := range results {
-		if d, ok := s.docs[r.ID]; ok {
+	// 访问计数是**写**：必须离开读锁后再取写锁更新。
+	//
+	// 此前在 RLock 下直接 `d.AccessCount++` / `d.LastAccess = time.Now()`，
+	// 与 FindColdDocs / flush 的读并发构成数据竞争（-race 实测），且不置脏 ——
+	// 计数只在内存里涨，优雅关停也不落盘，FindColdDocs 的「≤2 次访问」
+	// 冷度判据跨重启失真。
+	s.markAccess(hits)
+	return hits
+}
+
+// markAccess 记录一次检索命中：累加访问计数、刷新最后访问时间并置脏等待落盘。
+// 调用方不得持有 s.mu。
+func (s *Store) markAccess(hits []DocHit) {
+	if len(hits) == 0 {
+		return
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	now := time.Now()
+	for _, h := range hits {
+		if h.Doc == nil {
+			continue
+		}
+		if d, ok := s.docs[h.Doc.ID]; ok {
 			d.AccessCount++
-			d.LastAccess = time.Now()
-			out = append(out, DocHit{Doc: d, Score: r.Score})
+			d.LastAccess = now
 		}
 	}
-	return out
+	s.dirty = true
 }
 
 func (s *Store) denseSearchScored(queryVec []float64, topK int) []DocHit {

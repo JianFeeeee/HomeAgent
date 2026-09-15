@@ -147,9 +147,6 @@ func initMemoryStack(dataDir string) (*memoryStack, func()) {
 	} else {
 		log.Printf("[homed] graph memory initialized")
 	}
-	if memDB != nil {
-	}
-
 	memIdx := memory.NewIndexer(memDB)
 	memIdx.Sync() // 启动时立即同步，避免前30分钟空窗
 	socialStore := social.New(memDB)
@@ -160,8 +157,11 @@ func initMemoryStack(dataDir string) (*memoryStack, func()) {
 		BatchSize:     50,
 	})
 	if memDB != nil {
+		// 这里**故意不写 defer distiller.Stop()**：本函数在 return 时即触发
+		// defer，而 Stop() → cancel() 会让刚启动的 distillLoop 立刻退出，
+		// 规则蒸馏管线启动即死、10min 心跳从不运行（旧 main() 拆分时的残留）。
+		// 停机由调用点注册的 cleanup 负责（见下方返回值）。
 		distiller.Start()
-		defer distiller.Stop()
 	}
 
 	return &memoryStack{db: memDB, indexer: memIdx, social: socialStore, distiller: distiller},

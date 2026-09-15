@@ -194,7 +194,7 @@ func TestCommitTriplesWithMedia_RoundTrip(t *testing.T) {
 func TestAttachBlocksToSentence_SkipsUnresolvable(t *testing.T) {
 	// digest 在库里不存在时必须跳过，不能建一条指向虚无的块边。
 	a, g, _ := newGraphMediaAgent(t)
-	if n := a.attachBlocksToSentence(42, []string{"deadbeefdead"}, nil); n != 0 {
+	if n := a.attachBlocksToSentence(42, []string{"deadbeefdead"}, nil, ""); n != 0 {
 		t.Fatalf("无法补全的 digest 不该建块，实际绑定 %d", n)
 	}
 	blocks, err := g.BlocksForNode("sentence", "42")
@@ -208,7 +208,7 @@ func TestAttachBlocksToSentence_SkipsUnresolvable(t *testing.T) {
 
 func TestAttachBlocksToSentence_NilStoreNoop(t *testing.T) {
 	a := &Agent{}
-	if n := a.attachBlocksToSentence(1, []string{"aaaaaaaaaaaa"}, nil); n != 0 {
+	if n := a.attachBlocksToSentence(1, []string{"aaaaaaaaaaaa"}, nil, ""); n != 0 {
 		t.Fatalf("媒体关闭时应静默无操作，实际 %d", n)
 	}
 	if got, err := a.RecallBlocksForSentence(1); err != nil || got != nil {
@@ -234,7 +234,7 @@ func TestAttachBlocksToSentence_ReusesSeedIdentity(t *testing.T) {
 	sid := ids["迁移测试句。"]
 
 	byDigest := map[string]memory.MemoryBlock{digest: seedBlock}
-	if n := a.attachBlocksToSentence(sid, []string{digest}, byDigest); n != 1 {
+	if n := a.attachBlocksToSentence(sid, []string{digest}, byDigest, ""); n != 1 {
 		t.Fatalf("应绑定 1 个块，实际 %d", n)
 	}
 	blocks, err := g.BlocksForNode("sentence", strconv.FormatInt(sid, 10))
@@ -256,7 +256,7 @@ func TestLinkBlocksToDocument_CreatesDocumentNodeEdge(t *testing.T) {
 		t.Fatal("blockFromDigest 失败")
 	}
 
-	if n := a.linkBlocksToDocument("doc_42", []memory.MemoryBlock{b}); n != 1 {
+	if n := a.linkBlocksToDocument("doc_42", []memory.MemoryBlock{b}, ""); n != 1 {
 		t.Fatalf("应建立 1 条文档→块边，实际 %d", n)
 	}
 	blocks, err := g.BlocksForNode("document", "doc_42")
@@ -376,7 +376,7 @@ func TestBuildMemoryContext_IncludesMediaSection(t *testing.T) {
 		t.Fatalf("indexer sync: %v", err)
 	}
 
-	out := a.buildMemoryContext("测试图片", 0)
+	out := a.buildMemoryContext("测试图片", 0, nil)
 	if out == "" {
 		t.Skip("图库召回未命中（indexer 检索策略所致），无法验证媒体段注入")
 	}
@@ -757,5 +757,41 @@ func TestMediaBlocksHeldByDocumentSurviveDeletion(t *testing.T) {
 	}
 	if _, err := ms.Stat(digest); err == nil {
 		t.Fatal("删除后内容应已移除")
+	}
+}
+
+// TestFormatRecallRelations_SurfacesSentence 锁死「从图谱回到原文」：
+// memory_recall 的关系行必须带上 sentence_text（截断），否则模型按工具
+// schema 填了原始句子也永远取不回，该字段形同虚设。
+func TestFormatRecallRelations_SurfacesSentence(t *testing.T) {
+	rels := []memory.Relation{
+		{SourceName: "张三", RelationType: "喜欢", TargetName: "咖啡", SentenceText: "张三说他每天早上一定要喝一杯手冲咖啡。"},
+		{SourceName: "张三", RelationType: "住在", TargetName: "北京"}, // 无原句：不应出现空的原句字段
+	}
+	lines := formatRecallRelations(rels, 10)
+	if len(lines) != 2 {
+		t.Fatalf("应渲染 2 行，实际 %d: %v", len(lines), lines)
+	}
+	if !strings.Contains(lines[0], "张三 →(喜欢)→ 咖啡") || !strings.Contains(lines[0], "原句:") {
+		t.Errorf("第一条应带原句，实际 %q", lines[0])
+	}
+	if strings.Contains(lines[1], "原句") {
+		t.Errorf("无 sentence_text 的关系不应出现原句字段，实际 %q", lines[1])
+	}
+}
+
+// TestFormatRecallRelations_Truncates 锁死关系条数上限：
+// 超过 max 时截断并明确告知，避免刷屏。
+func TestFormatRecallRelations_Truncates(t *testing.T) {
+	var rels []memory.Relation
+	for i := 0; i < 15; i++ {
+		rels = append(rels, memory.Relation{SourceName: "A", RelationType: "连", TargetName: "B"})
+	}
+	lines := formatRecallRelations(rels, 10)
+	if len(lines) != 11 {
+		t.Fatalf("10 条关系 + 1 条截断提示，实际 %d: %v", len(lines), lines)
+	}
+	if !strings.Contains(lines[10], "截断") {
+		t.Errorf("最后一行应为截断提示，实际 %q", lines[10])
 	}
 }

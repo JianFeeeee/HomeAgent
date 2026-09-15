@@ -88,7 +88,7 @@ func TestLightProfile_MemoryFaceWiring(t *testing.T) {
 	got := a.executeMemoryTool(agentAPI.ToolCall{
 		ID: "c1", Name: "memory_recall",
 		Arguments: map[string]interface{}{"query_intent": "主记忆实体,子独有实体"},
-	})
+	}, nil)
 	if !strings.Contains(got, "主记忆实体") {
 		t.Fatalf("子应看得到主记忆：%s", got)
 	}
@@ -132,7 +132,7 @@ func TestLightProfile_OrganizeToolsAbsentAndRefused(t *testing.T) {
 			Arguments: map[string]interface{}{
 				"name": "任意", "source": "a", "target": "b", "criteria": map[string]interface{}{},
 			},
-		})
+		}, nil)
 		if !strings.Contains(got, "轻量内核") {
 			t.Fatalf("%s 在轻量内核里必须明确报不支持，实际 %q", tool, got)
 		}

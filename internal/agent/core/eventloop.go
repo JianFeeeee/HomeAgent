@@ -373,20 +373,13 @@ func (a *Agent) emitResponse(evt *agentIO.InputEvent, response string) {
 //
 // 查询向量取**清洗后**的输入（通道 Cleaner 的输出），与工具侧同一套语义：
 // 原始输入里的 ANSI/base64/JSON 包装会把相关性打分带偏，裁掉本该保留的事件。
+//
+// 实际执行交由 memoryPass（与召回共用入口、query、预算与审计）。
 func (a *Agent) pruneOnInput(evt *agentIO.InputEvent, cleanInput string) int {
-	if a.context == nil || !a.pruneDeclared(evt) {
+	if !a.pruneDeclared(evt) {
 		return 0
 	}
-	// **动态上下文**是父 agent 专属能力：轻量内核（驻留子）用传统上下文，
-	// 不做按相关度的裁剪与向 doc 记忆的归档（子也没有 doc 记忆）。
-	if a.isLightKernel() {
-		return 0
-	}
-	topK := a.maxContextSize - 1
-	if topK < 1 {
-		topK = 1
-	}
-	return a.context.Prune(cleanInput, topK, a.docStore)
+	return a.memoryPass(cleanInput, "input:"+evt.Source, true, false, sceneKeysFor(evt, "")).Archived
 }
 
 // pruneDeclared 判定这次输入是否显式声明了裁剪。
@@ -403,6 +396,29 @@ func (a *Agent) pruneDeclared(evt *agentIO.InputEvent) bool {
 		}
 	}
 	return false
+}
+
+// recallDeclared 判定这次输入是否要触发记忆召回（注入）。
+//
+// 与 pruneDeclared **正交**：prune 管“踢出去”（归档低相关 L0 事件），
+// recall 管“取进来”（把 L2/L3 相关记忆注入本轮）。
+//
+// 默认值与 prune 刻意相反：召回是只读增量、日常对话本就需要，所以**默认 auto**；
+// 只有显式声明 recall_policy=none（如中断通知的 meta 文本）才关闭。
+// 优先级同 prune：注入点（payload）> 通道（ChannelDef）> 默认 auto。
+func (a *Agent) recallDeclared(evt *agentIO.InputEvent) bool {
+	if evt == nil {
+		return true
+	}
+	if p, ok := evt.Payload["recall_policy"].(string); ok && p != "" {
+		return p != pubsdk.RecallPolicyNone
+	}
+	if a.io != nil {
+		if chDef, ok := a.io.GetInputChannelDef(evt.Source); ok && chDef.RecallPolicy != "" {
+			return chDef.RecallPolicy != pubsdk.RecallPolicyNone
+		}
+	}
+	return true
 }
 
 // cleanInputFor 解析这条输入在计算层应当使用的清洗文本。

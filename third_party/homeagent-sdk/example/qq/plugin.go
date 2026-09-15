@@ -439,7 +439,9 @@ type 枚举: text（文字）/ voice（语音转文字后发送）/ image（图�
 		}
 		return cleaned
 	}
-	s.RegisterInputChannel("qq", sdk.ChannelDef{NoMemory: true, Cleaner: inputCleaner})
+	// qq 通道到达的是**中断通知（meta）**，不是用户正文，不据它召回；
+	// 真实正文由 qq_get_message 取回后由该工具声明 RecallPolicy=auto 触发召回。
+	s.RegisterInputChannel("qq", sdk.ChannelDef{NoMemory: true, Cleaner: inputCleaner, RecallPolicy: sdk.RecallPolicyNone})
 
 	// 查询类工具输出清洗器：提取 JSON 中的 content/文本字段参与向量化
 	cleaner := func(output string) string {
@@ -459,6 +461,9 @@ type 枚举: text（文字）/ voice（语音转文字后发送）/ image（图�
 		// 不裁的后果是每条 QQ 消息的完整正文都留在 L0 上下文里，
 		// 长会话下持续挤占 token 预算（§13.8）。
 		ContextPolicy: "prune",
+		// 正文才是真实内容：取回后用**正文**触发一次召回，
+		// 而不是用中断通知的 meta 文本去召回（那是无关词）。
+		RecallPolicy: "auto",
 		Parameters: map[string]interface{}{
 			"type": "object", "properties": map[string]interface{}{
 				"message_id": map[string]interface{}{"type": "integer", "description": "NapCat消息ID（从中断消息的 message_id=N 或 reply_to.message_id 获取）"},
@@ -484,6 +489,12 @@ type 枚举: text（文字）/ voice（语音转文字后发送）/ image（图�
 		Name: tp + "get_history", Description: "获取QQ群聊/私聊最近历史消息。当收到引用回复消息或需要了解对话上下文时应优先调用此工具查看前后文。返回值每条格式为 [时间] 发送者: 消息内容。如果消息包含文件，会额外返回 files 字段（含 file_id 和 name），可用 qq_download_file 工具下载。",
 		NoMemory: false,
 		Cleaner:  cleaner,
+		// 与 get_message 同理：返回的是**真实聊天正文**，不只当轮需要，
+		// 还可能牵出与这些正文相关的长期记忆。故取回后既裁剪（用完不长期占
+		// L0）又据正文召回（取进来）。不声明 recall 的话就是「记忆里有、但
+		// 拉回历史消息时不注入」的盲区。
+		ContextPolicy: "prune",
+		RecallPolicy:  "auto",
 		Parameters: map[string]interface{}{
 			"type": "object", "properties": map[string]interface{}{
 				"group_id": map[string]interface{}{"type": "integer", "description": "群号（与user_id二选一）"},
@@ -1482,6 +1493,8 @@ func (p *Plugin) injectInterrupt(text, level string) {
 	p.sdk.InjectInterruptTextOpts(p.name, p.name, text, sdk.InjectOptions{
 		NoMemory: true,
 		Priority: level,
+		// 中断文本是路由/取正文的指令，不是对话内容，不据它召回。
+		RecallPolicy: sdk.RecallPolicyNone,
 	})
 }
 
@@ -2802,7 +2815,7 @@ func (p *Plugin) handleDownloadFile(args map[string]interface{}) (interface{}, e
 				// Priority：同上，QQ 侧一律低级别中断（L1）。
 				p.sdk.InjectInterruptTextOpts(p.name, p.name,
 					fmt.Sprintf("文件下载完成: %s，保存在 %s", filepath.Base(savePath), savePath),
-					sdk.InjectOptions{NoMemory: true, Priority: sdk.PriorityL1})
+					sdk.InjectOptions{NoMemory: true, Priority: sdk.PriorityL1, RecallPolicy: sdk.RecallPolicyNone})
 			}
 		} else {
 			errMsg = "下载失败，文件可能已过期"

@@ -1,4 +1,17 @@
-.PHONY: all build build-cli build-gui clean install test run build-static build-linux-arm64 lint fmt
+.PHONY: all build build-plain build-cli build-gui clean install test run build-static build-linux-arm64 lint fmt sync-client-versions check-client-versions
+
+# HOMED_TAGS 默认带 onnxruntime：发行版**默认启用**本地向量空间（与
+# deploy/packaging/build.sh 保持一致）。
+#
+# 曾经这里是空 tags，实测的后果（2026-09-15 热部署）：`make build` 产出的
+# homed 只有 33MB，而 onnxruntime 版是 84MB；启动日志里
+# 「multimodal space active: provider=chineseclip」整行消失，少加载一个插件，
+# 静态词向量也退化成 fallback——而打包脚本会直接**拒收**这种二进制
+# （package-linux.sh 检查 `-tags=.*onnxruntime`）。即「本地随手 make build」
+# 与「发行构建」不是同一个东西，部署时无从察觉。
+# 需要极简构建时显式 HOMED_TAGS= 关掉。
+HOMED_TAGS ?= onnxruntime
+TAG_ARGS = $(if $(HOMED_TAGS),-tags $(HOMED_TAGS),)
 
 BINARY=homed
 CLI_BINARY=waiter
@@ -17,13 +30,15 @@ all: build build-cli
 
 build:
 	@mkdir -p $(BUILD_DIR)
-	CGO_ENABLED=1 $(GO) build -trimpath -installsuffix dynlink -ldflags '$(LDFLAGS)' -o $(BUILD_DIR)/$(BINARY) ./cmd/homed/
-	@echo "Built: $(BUILD_DIR)/$(BINARY) ($(VERSION))"
+	CGO_ENABLED=1 $(GO) build $(TAG_ARGS) -trimpath -installsuffix dynlink -ldflags '$(LDFLAGS)' -o $(BUILD_DIR)/$(BINARY) ./cmd/homed/
+	@echo "Built: $(BUILD_DIR)/$(BINARY) ($(VERSION), tags='$(HOMED_TAGS)')"
+	@go version -m $(BUILD_DIR)/$(BINARY) | grep -q 'onnxruntime' \
+		|| echo "WARN: 本次构建不含 onnxruntime，本地向量空间不可用（HOMED_TAGS= 显式关掉时才符合预期）"
 
 build-cli:
 	@mkdir -p $(BUILD_DIR)
-	CGO_ENABLED=0 $(GO) build -installsuffix dynlink -o $(BUILD_DIR)/$(CLI_BINARY) ./cmd/waiter/
-	@echo "Built: $(BUILD_DIR)/$(CLI_BINARY)"
+	CGO_ENABLED=0 $(GO) build -installsuffix dynlink -ldflags '$(LDFLAGS)' -o $(BUILD_DIR)/$(CLI_BINARY) ./cmd/waiter/
+	@echo "Built: $(BUILD_DIR)/$(CLI_BINARY) ($(VERSION))"
 
 build-gui:
 	@cd cmd/gui && npm install --production && npx electron-packager . $(GUI_BINARY) --out=../../$(BUILD_DIR) --overwrite --no-sandbox
@@ -61,6 +76,14 @@ fmt:
 
 lint:
 	$(GO) vet ./...
+
+# 客户端版本与内核版本同步（唯一事实源 internal/meta.Version）。
+# GUI/鸿蒙各有自版本字段，手工改必漂——用脚本拉齐，check 版给门禁用。
+sync-client-versions:
+	@bash deploy/scripts/sync-client-versions.sh
+
+check-client-versions:
+	@bash deploy/scripts/sync-client-versions.sh --check
 
 # lint-full：在 vet 之外跑 golangci-lint（阈值见 .golangci.yml，起步 warn-only）。
 # 未安装时给出可执行的安装提示与跳过原因，而不是静默成功。

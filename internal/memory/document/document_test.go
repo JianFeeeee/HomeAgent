@@ -1,7 +1,9 @@
 package document
 
 import (
+	"fmt"
 	"os"
+	"sync"
 	"testing"
 	"time"
 
@@ -650,5 +652,57 @@ func TestStopFlushesDirtyDocs(t *testing.T) {
 	defer s2.Stop()
 	if got := s2.Get("doc_flush"); got == nil || got.Summary != "关停落盘（已改）" {
 		t.Fatalf("Stop 未落盘: %+v", got)
+	}
+}
+
+// TestQueryScoredConcurrentAndDirty 锁死两点：
+//  1. QueryScored 更新访问计数必须离开读锁（旧实现在 RLock 下写，-race 会报）；
+//  2. 更新后必须置脏，否则优雅关停也不落盘、FindColdDocs 的冷度判据跨重启失真。
+func TestQueryScoredConcurrentAndDirty(t *testing.T) {
+	dir := t.TempDir()
+	s := NewStore(dir, memory.TokenizeWords)
+	if err := s.Start(); err != nil {
+		t.Fatal(err)
+	}
+	defer s.Stop()
+
+	for i := 0; i < 8; i++ {
+		// 文档必须互相区分：若 8 篇文本完全相同，查询词出现在每一篇里，
+		// IDF = log(N/df) = 0，词向量全零、检索恒为空，测试就成了假阴性。
+		summary, content := "无关的天气与散步记录", "今天适合出门"
+		if i < 3 {
+			summary, content = "并发检索目标", "并发内容"
+		}
+		if err := s.Insert(&Doc{ID: fmt.Sprintf("d%d", i), Summary: summary, Content: content}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	// 清掉 Insert 置的脏位，验证 QueryScored 自己会置脏。
+	s.mu.Lock()
+	s.dirty = false
+	s.mu.Unlock()
+
+	var wg sync.WaitGroup
+	for g := 0; g < 8; g++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for k := 0; k < 30; k++ {
+				s.QueryScored("并发检索目标", 5)
+				s.FindColdDocs(72*time.Hour, 2)
+			}
+		}()
+	}
+	wg.Wait()
+
+	s.mu.RLock()
+	dirty := s.dirty
+	access := s.docs["d0"].AccessCount
+	s.mu.RUnlock()
+	if access <= 1 {
+		t.Errorf("AccessCount 未随检索累加: %d", access)
+	}
+	if !dirty {
+		t.Error("QueryScored 更新访问计数后未置脏")
 	}
 }
