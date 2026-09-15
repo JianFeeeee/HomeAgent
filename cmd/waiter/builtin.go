@@ -47,6 +47,9 @@ Server commands (local 与 remote 行为一致):
   /adapters remove <name>  remove a Lua adapter
   /network                 network status + LLM endpoints
   /runtime                 scheduler / residents / channel topology
+  /terminals               list terminal sessions
+  /cmd/history             command execution history
+  /terminal create|write|read|close …  (local mode; calls agentcli tools)
   /persona                 show persona (/persona set default|custom|later [text])
   /agents                  list agents
   /chat <text>             send to agent
@@ -348,6 +351,34 @@ Any other text is sent to the agent directly.`)
 				d, _ := rc.DoAPI("GET", "/api/v1/persona", "")
 				printJSON(out, d)
 			}
+		} else {
+			state.Send(cmd)
+		}
+		return true
+
+	case cmd == "/terminals":
+		if rc := state.RemoteConn(); rc != nil {
+			d, _ := rc.DoAPI("GET", "/api/v1/terminals", "")
+			printJSON(out, d)
+		} else {
+			state.Send("/terminals")
+		}
+		return true
+
+	case cmd == "/cmd/history":
+		if rc := state.RemoteConn(); rc != nil {
+			d, _ := rc.DoAPI("GET", "/api/v1/cmd/history", "")
+			printJSON(out, d)
+		} else {
+			state.Send("/cmd/history")
+		}
+		return true
+
+	case cmd == "/terminal" || strings.HasPrefix(cmd, "/terminal "):
+		if rc := state.RemoteConn(); rc != nil {
+			// 远端 WebUI 没有“开终端”的 REST 端点（终端由 agentcli 工具创建），
+			// 不静默当聊天发出去，直接说明。
+			fmt.Fprintln(out, "remote 模式暂不支持终端操作；请在 local 模式或让 agent 调 terminal_* 工具")
 		} else {
 			state.Send(cmd)
 		}
