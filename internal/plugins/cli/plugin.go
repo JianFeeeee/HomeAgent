@@ -315,6 +315,8 @@ func (p *Plugin) handleBuiltin(conn net.Conn, line string, s *sdk.PluginSDK) boo
 		p.cmdAdapters(conn, parts, s)
 	case "/network":
 		p.cmdNetwork(conn, s)
+	case "/runtime":
+		p.cmdRuntime(conn, s)
 	default:
 		return false
 	}
@@ -351,6 +353,7 @@ func (p *Plugin) cmdHelp(conn net.Conn) {
   /adapters                    列出已加载的 Lua 适配器
   /adapters remove <name>      卸载适配器
   /network                     网络状态与 LLM 端点
+  /runtime                     调度器/驻留子/通道拓扑快照
   /agents                      当前 Agent 信息
 
 其他文本直接发送给 Agent 处理。`,
@@ -821,6 +824,34 @@ func (p *Plugin) cmdAdapters(conn net.Conn, parts []string, s *sdk.PluginSDK) {
 		return
 	}
 	writeJSONContent(conn, map[string]interface{}{"adapters": ad.List()})
+}
+
+// ======== /runtime ========
+
+// cmdRuntime 与 WebUI 的 GET /api/v1/runtime 同口径。
+//
+// 数据来自 SDK 已经对内部插件开放的 KernelStatus（s.Status().GetKernelStatus()），
+// 不是 WebUI 专属：Scheduler / Residents / Channels / InputChannels 都在里面。
+// 之前 CLI 没接这一条，是漏接，不是没开放。
+func (p *Plugin) cmdRuntime(conn net.Conn, s *sdk.PluginSDK) {
+	st := s.Status()
+	if st == nil {
+		writeLine(conn, map[string]interface{}{"type": "error", "error": "status provider not available"})
+		return
+	}
+	ks := st.GetKernelStatus()
+	if ks == nil {
+		writeLine(conn, map[string]interface{}{"type": "error", "error": "kernel status not available"})
+		return
+	}
+	writeJSONContent(conn, map[string]interface{}{
+		"uptime":         ks.Uptime,
+		"agent_id":       ks.AgentID,
+		"scheduler":      ks.Scheduler,
+		"residents":      ks.Residents,
+		"channels":       ks.Channels,
+		"input_channels": ks.InputChannels,
+	})
 }
 
 // ======== /network ========

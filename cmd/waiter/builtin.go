@@ -46,6 +46,7 @@ Server commands (local 与 remote 行为一致):
   /adapters                list loaded Lua adapters
   /adapters remove <name>  remove a Lua adapter
   /network                 network status + LLM endpoints
+  /runtime                 scheduler / residents / channel topology
   /agents                  list agents
   /chat <text>             send to agent
 
@@ -326,6 +327,15 @@ Any other text is sent to the agent directly.`)
 			}
 		} else {
 			state.Send(cmd)
+		}
+		return true
+
+	case cmd == "/runtime":
+		if rc := state.RemoteConn(); rc != nil {
+			d, _ := rc.DoAPI("GET", "/api/v1/runtime", "")
+			printJSON(out, d)
+		} else {
+			state.Send("/runtime")
 		}
 		return true
 
