@@ -5,6 +5,7 @@ import { deviceInfo } from '@kit.BasicServicesKit';
 import { textToSpeech } from '@kit.CoreSpeechKit';
 import { componentSnapshot } from '@kit.ArkUI';
 import { abilityAccessCtrl, common, PermissionRequestResult, Permissions } from '@kit.AbilityKit';
+import { appVersion } from './AppVersion';
 
 // ===== 能力结果 =====
 
@@ -249,7 +250,7 @@ export function capDeviceInfo(deviceId: string, deviceName: string): CapResult {
     platform: 'OpenHarmony',
     arch: deviceInfo.abiList,
     os_release: deviceInfo.osFullName,
-    version: '1.1.1',
+    version: appVersion(),
     cpus: 0,
     brand: deviceInfo.brand,
     manufacturer: deviceInfo.manufacture,

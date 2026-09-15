@@ -11,6 +11,8 @@ import (
 	"sync"
 	"syscall"
 	"time"
+
+	"gitcode.com/JianFeeeee/HomeAgent/internal/meta"
 )
 
 const (
@@ -129,7 +131,14 @@ func main() {
 	daemonMode := flag.Bool("daemon", false, "后台驻留模式：维持 homed 连接 + 设备桥，等待 TUI 实例接入")
 	testCap := flag.String("test-cap", "", "测试本地能力（screensue/speakeruse/screensee/clipboardsee/clipboardsue/computeruse/camerasue），如 --test-cap screensue")
 	testCapArgs := flag.String("test-cap-args", "", "测试能力的参数")
+	showVersion := flag.Bool("version", false, "打印版本并退出")
 	flag.Parse()
+
+	// 版本号直接来自 internal/meta（与 homed 同一事实源，不可能各写一个）。
+	if *showVersion {
+		fmt.Printf("waiter %s (commit %s, built %s)\n", meta.Version, meta.Commit, meta.BuildTime)
+		return
+	}
 
 	// 本地能力测试模式（无需连接服务器）
 	if *testCap != "" {
@@ -270,9 +279,9 @@ func runLineMode(state *State, cfg *Config, history *History) {
 		addrLabel = cfg.Remote
 	}
 	if colors {
-		fmt.Printf("%sHomeAgent CLI%s %s(%s://%s)%s\n", colorBold, colorReset, colorDim, modeLabel, addrLabel, colorReset)
+		fmt.Printf("%sHomeAgent CLI%s %s%s (%s://%s)%s\n", colorBold, colorReset, colorDim, "v"+meta.Version, modeLabel, addrLabel, colorReset)
 	} else {
-		fmt.Printf("HomeAgent CLI (%s://%s)\n", modeLabel, addrLabel)
+		fmt.Printf("HomeAgent CLI v%s (%s://%s)\n", meta.Version, modeLabel, addrLabel)
 	}
 	fmt.Println("Type /help for commands.")
 
