@@ -423,6 +423,11 @@ func docToTriples(doc *document.Doc, embedder nlp.Vectorizer) []memory.Triple {
 		return nil
 	}
 
+	// 文档归档的知识是有**来源场面**的：来自 QQ 的对话归档，其三元组就该
+	// 钉在 chan:qq 上。这样「又来一条 QQ 消息」时，这批知识靠场景就能取回，
+	// 不必指望本轮措辞与它们字面重合。
+	docScene := memory.ChannelScene(doc.Source)
+
 	isArchivedContext := doc.Meta != nil && doc.Meta["is_archived_context"] == "true"
 
 	// 文档元数据:仅当 summary 合理(非空、非模板化、长度适中)时才写「主题」
@@ -434,6 +439,7 @@ func docToTriples(doc *document.Doc, embedder nlp.Vectorizer) []memory.Triple {
 			Object:      doc.Summary,
 			ObjectType:  "Topic",
 			Confidence:  1.0,
+			Scene:       docScene,
 		})
 	}
 
@@ -451,6 +457,7 @@ func docToTriples(doc *document.Doc, embedder nlp.Vectorizer) []memory.Triple {
 		for _, nt := range result.Triples {
 			mt := nlp.ToMemoryTriple(nt)
 			if mt.Subject != "" && mt.Relation != "" && mt.Object != "" {
+				mt.Scene = docScene
 				triples = append(triples, mt)
 			}
 		}
@@ -465,6 +472,7 @@ func docToTriples(doc *document.Doc, embedder nlp.Vectorizer) []memory.Triple {
 			Object:      doc.Source,
 			ObjectType:  "Source",
 			Confidence:  1.0,
+			Scene:       docScene,
 		})
 	}
 

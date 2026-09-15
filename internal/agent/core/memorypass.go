@@ -1,6 +1,61 @@
 package core
 
-import "log"
+import (
+	"log"
+
+	agentIO "gitcode.com/JianFeeeee/HomeAgent/internal/agent/io"
+	"gitcode.com/JianFeeeee/HomeAgent/internal/memory"
+)
+
+// sceneKeysFor 推导本轮输入的**当前场景**。
+//
+// 场景是“这场面正在发生”的机器可读描述，用于把带条件的记忆（规则/约定）
+// 取回来。优先级：
+//  1. 注入点显式声明（payload.scene）——插件最清楚自己在什么场面里
+//  2. 通道（evt.Source → chan:qq）
+//  3. 工具（tool:qq_get_message）——工具输出触发的召回只知道这一步
+//
+// 多个场景是**并列命中**（取回任一场景的记忆），不是交集：
+// 「在 QQ 上」与「刚取回消息正文」是两个都能独立成立的触发条件。
+func sceneKeysFor(evt *agentIO.InputEvent, toolName string) []string {
+	var keys []string
+	seen := make(map[string]bool)
+	add := func(k string) {
+		// 显式声明的场景键来自插件，大小写/空白/标点都不可控；归一化后再去重，
+		// 否则「chan:QQ」与「chan:qq」会变成两个场景，各自只召回一半记忆。
+		k = memory.NormalizeSceneKey(k)
+		if k == "" || seen[k] {
+			return
+		}
+		seen[k] = true
+		keys = append(keys, k)
+	}
+
+	if evt != nil && evt.Payload != nil {
+		switch v := evt.Payload["scene"].(type) {
+		case string:
+			add(v)
+		case []string:
+			for _, s := range v {
+				add(s)
+			}
+		case []interface{}:
+			for _, item := range v {
+				if s, ok := item.(string); ok {
+					add(s)
+				}
+			}
+		}
+	}
+
+	if evt != nil {
+		add(memory.ChannelScene(evt.Source))
+	}
+	if toolName != "" {
+		add(memory.ToolScene(toolName))
+	}
+	return keys
+}
 
 // memoryPassOut 是一次记忆操作（取进来 / 踢出去）的结果。
 type memoryPassOut struct {
@@ -26,7 +81,7 @@ type memoryPassOut struct {
 // 稠密/词向量给已有事件打分，recall 用图 + TF-IDF 实体索引）。真正的
 // 「一次打分」要先统一打分空间（后续步骤）；这里统一的是**入口、query、
 // 预算与审计**——这已是「一个过程」的可审计外壳，剩下的差在打分空间。
-func (a *Agent) memoryPass(query, trigger string, prune, recall bool) memoryPassOut {
+func (a *Agent) memoryPass(query, trigger string, prune, recall bool, scenes []string) memoryPassOut {
 	var out memoryPassOut
 	if a == nil || (!prune && !recall) {
 		return out
@@ -35,7 +90,7 @@ func (a *Agent) memoryPass(query, trigger string, prune, recall bool) memoryPass
 		out.Archived = a.pruneByQuery(query)
 	}
 	if recall && query != "" {
-		out.RecallText = a.recallTextFor(query, trigger)
+		out.RecallText = a.recallTextFor(query, trigger, scenes)
 	}
 	if out.Archived > 0 || out.RecallText != "" {
 		log.Printf("[agent] memory pass (%s): archived=%d recalled=%d chars",

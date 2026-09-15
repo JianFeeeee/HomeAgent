@@ -180,6 +180,10 @@ func (g *GraphDB) PurgeNoise(dryRun bool) (int, int, error) {
 	if _, err := g.cleanupOrphanedSentencesLocked(); err != nil {
 		return len(junk), relCount, err
 	}
+	// 节点没了，场景引用必须跟着对齐：残留引用会让场景看着大、召回却是空的。
+	if _, err := g.purgeStaleSceneRefsLocked(); err != nil {
+		return len(junk), relCount, err
+	}
 	return len(junk), relCount, nil
 }
 
@@ -250,6 +254,9 @@ func (g *GraphDB) PurgeOrphans(dryRun bool) (int, error) {
 	}
 	if _, err := g.db.Exec(
 		`DELETE FROM entities WHERE id IN (`+placeholders(len(ids))+`)`, ids...); err != nil {
+		return 0, err
+	}
+	if _, err := g.purgeStaleSceneRefsLocked(); err != nil {
 		return 0, err
 	}
 	return len(orphans), nil

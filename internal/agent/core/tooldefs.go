@@ -10,11 +10,11 @@ import (
 	sdkmeta "gitcode.com/JianFeeeee/homeagent-sdk/meta"
 )
 
-func (a *Agent) buildMemoryContext(input string, maxTokens int) string {
+func (a *Agent) buildMemoryContext(input string, maxTokens int, scenes []string) string {
 	if a.indexer == nil {
 		return ""
 	}
-	injected := a.indexer.BuildContext(input)
+	injected := a.indexer.BuildContextInScene(input, scenes)
 	s := a.indexer.FormatContext(injected)
 
 	// 图库召回命中的实体若关联着带媒体的句子，把媒体说明一并注入。
@@ -48,8 +48,9 @@ func (a *Agent) buildMemoryContext(input string, maxTokens int) string {
 // query 取**清洗后**的输入（通道 Cleaner 的输出），与裁剪侧同一套语义：
 // 原始输入里的 ANSI/base64/JSON 包装会把相关性打分带偏。清洗为空时回退原文。
 func (a *Agent) buildTaskMemoryContext(f *TaskFrame, input string, maxTokens int) string {
+	scenes := sceneKeysFor(evtOf(f), "")
 	if f == nil {
-		return a.recallText(input, "input", maxTokens)
+		return a.recallText(input, "input", maxTokens, scenes)
 	}
 	if !a.recallDeclared(f.Evt) {
 		return ""
@@ -62,7 +63,15 @@ func (a *Agent) buildTaskMemoryContext(f *TaskFrame, input string, maxTokens int
 	if f.Evt != nil && f.Evt.Source != "" {
 		trigger = "input:" + f.Evt.Source
 	}
-	return a.recallText(query, trigger, maxTokens)
+	return a.recallText(query, trigger, maxTokens, scenes)
+}
+
+// evtOf 安全取出 TaskFrame 的事件（f 为 nil 时返回 nil）。
+func evtOf(f *TaskFrame) *agentIO.InputEvent {
+	if f == nil {
+		return nil
+	}
+	return f.Evt
 }
 
 // recallTextFor 以 query 触发一次记忆召回，按当前预算截断，返回可注入的文本。
@@ -70,27 +79,27 @@ func (a *Agent) buildTaskMemoryContext(f *TaskFrame, input string, maxTokens int
 // 这是“召回”侧的单一入口：与 Prune 共用同一份**清洗后**的 query，
 // 使“取进来”（召回）与“踢出去”（裁剪）落在同一个相关性过程上。
 // trigger 仅用于日志溯源（如 "tool:qq_get_message"）。
-func (a *Agent) recallTextFor(query, trigger string) string {
+func (a *Agent) recallTextFor(query, trigger string, scenes []string) string {
 	memTokens := 0 // 0 = 不截断
 	if a != nil && a.provider != nil {
 		memTokens = ComputeTokenBudget(a.provider, a.systemPrompt).MemoryTokens
 	}
-	return a.recallText(query, trigger, memTokens)
+	return a.recallText(query, trigger, memTokens, scenes)
 }
 
 // recallText 是召回侧的共同实现：query → 记忆索引文本（空串表示无）。
 //
 // 输入侧的 buildTaskMemoryContext 与工具侧的 recallTextFor 都收敛到这里，
 // 使“同一份 query、同一次预算、同一条审计日志”只写一遍。
-func (a *Agent) recallText(query, trigger string, maxTokens int) string {
+func (a *Agent) recallText(query, trigger string, maxTokens int, scenes []string) string {
 	if a == nil || query == "" || a.indexer == nil {
 		return ""
 	}
-	text := a.buildMemoryContext(query, maxTokens)
+	text := a.buildMemoryContext(query, maxTokens, scenes)
 	if text == "" {
 		return ""
 	}
-	log.Printf("[agent] memory recall (%s): injected %d chars", trigger, len(text))
+	log.Printf("[agent] memory recall (%s): injected %d chars (scenes=%v)", trigger, len(text), scenes)
 	return text
 }
 

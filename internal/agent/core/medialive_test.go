@@ -440,7 +440,7 @@ func TestMediaLive_AutoTriggerChain(t *testing.T) {
 	if err := a.indexer.Sync(); err != nil {
 		t.Fatalf("indexer sync: %v", err)
 	}
-	if mc := a.buildMemoryContext("测试图片", 0); mc != "" {
+	if mc := a.buildMemoryContext("测试图片", 0, nil); mc != "" {
 		t.Logf("注入的记忆上下文: %s", truncRunes(mc, 200))
 	} else {
 		t.Log("图库召回为空（本测试不再依赖文本描述，仅记录现状）")
