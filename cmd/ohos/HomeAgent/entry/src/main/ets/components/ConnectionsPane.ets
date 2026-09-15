@@ -13,7 +13,7 @@ import { apiClient } from '../common/ApiClient';
 import { connStore } from '../common/ConnStore';
 import { restartForegroundBridge } from '../common/DeviceBridgeSession';
 import { ConnectionConfig } from '../model/Model';
-import { ThemePalette, DARK_PALETTE, LIGHT_PALETTE, RADIUS_MD, RADIUS_SM } from '../common/Constants';
+import { ThemePalette, DARK_PALETTE, LIGHT_PALETTE, RADIUS_MD, RADIUS_SM, K_HAS_CONN } from '../common/Constants';
 import { SubPageLayer, PlainCard } from './SubPage';
 import { common } from '@kit.AbilityKit';
 
@@ -49,6 +49,11 @@ export struct ConnectionsPane {
     }
   }
 
+  /** 连接变更后广播状态：聊天空态据此隐藏“去设置连接”入口。 */
+  private syncConnFlag(): void {
+    AppStorage.setOrCreate<boolean>(K_HAS_CONN, apiClient.hasConnection());
+  }
+
   private currentConnName(): string {
     for (let i = 0; i < this.connections.length; i++) {
       if (this.connections[i].id === this.currentId) {
@@ -64,6 +69,7 @@ export struct ConnectionsPane {
       if (cur !== null) {
         apiClient.setConnection(cur);
       }
+      this.syncConnFlag();
       this.connections = connStore.getConnections();
       restartForegroundBridge(getContext(this) as common.UIAbilityContext);
       this.toast('已切换连接', false);
@@ -88,6 +94,7 @@ export struct ConnectionsPane {
       if (cur !== null) {
         apiClient.setConnection(cur);
       }
+      this.syncConnFlag();
       this.connections = connStore.getConnections();
       restartForegroundBridge(getContext(this) as common.UIAbilityContext);
       this.toast('连接已添加', false);
@@ -107,6 +114,7 @@ export struct ConnectionsPane {
       if (cur !== null) {
         apiClient.setConnection(cur);
       }
+      this.syncConnFlag();
       this.connections = connStore.getConnections();
       restartForegroundBridge(getContext(this) as common.UIAbilityContext);
       this.toast('连接已更新', false);
@@ -151,6 +159,7 @@ export struct ConnectionsPane {
       } else {
         apiClient.clearConnection();
       }
+      this.syncConnFlag();
       restartForegroundBridge(getContext(this) as common.UIAbilityContext);
       this.toast('连接已删除', false);
     });
