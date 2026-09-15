@@ -235,7 +235,7 @@ func (s *Store) Stat(digest string) (*Item, error) {
 		FROM media WHERE digest = ?`, digest))
 }
 
-// Stat 返回元数据，不读内容。
+// Delete 删除媒体内容与元数据。
 //
 // 这不是 GC，也不看引用计数：调用方是记忆系统本身——当它把一个记忆块
 // 永久地从三层记忆中删掉（而非在层间迁移）时，媒体作为块的内容一并删除。

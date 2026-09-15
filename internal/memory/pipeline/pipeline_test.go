@@ -185,9 +185,9 @@ func TestDistillOnceBatchLimit(t *testing.T) {
 
 func TestExtractKeyTriples(t *testing.T) {
 	tests := []struct {
-		user     string
+		user      string
 		assistant string
-		check    func([]memory.Triple) bool
+		check     func([]memory.Triple) bool
 	}{
 		{
 			user: "我住在北京",
@@ -201,7 +201,7 @@ func TestExtractKeyTriples(t *testing.T) {
 			},
 		},
 		{
-			user: "我在杭州读书",
+			user:      "我在杭州读书",
 			assistant: "好的",
 			check: func(triples []memory.Triple) bool {
 				for _, tr := range triples {
@@ -262,5 +262,27 @@ func TestTruncate(t *testing.T) {
 	}
 	if truncate("hi", 10) != "hi" {
 		t.Errorf("expected 'hi', got %q", truncate("hi", 10))
+	}
+}
+
+// TestStartKeepsLoopRunningUntilStop 锁死 Start/Stop 的接线契约：
+// Start 之后蒸馏循环必须处于运行态，只有显式 Stop 才退出。
+//
+// 这条回归的直接来源：main() 拆分时 initMemoryStack 里残留一句
+// defer distiller.Stop()，函数返回即 cancel，循环启动即死——而
+// TestDistillOnce* 直接调 distillOnce，绕过了 Start/Stop，照不出这个洞。
+func TestStartKeepsLoopRunningUntilStop(t *testing.T) {
+	d := NewDistiller(nil, t.TempDir(), DistillerConfig{
+		Interval:      time.Hour, // 不依赖 tick，只验证循环存活
+		RetentionDays: 7,
+		BatchSize:     50,
+	})
+	d.Start()
+	if d.Stopped() {
+		t.Fatal("Start 之后蒸馏循环必须处于运行态（不可被 defer Stop 杀掉）")
+	}
+	d.Stop()
+	if !d.Stopped() {
+		t.Fatal("Stop 之后应处于已停止态")
 	}
 }

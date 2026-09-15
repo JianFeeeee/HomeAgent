@@ -13,7 +13,7 @@ import (
 	"gitcode.com/JianFeeeee/HomeAgent/internal/memory/text"
 )
 
-func (a *Agent) executeToolCall(tc agentAPI.ToolCall, channel string) (ret string) {
+func (a *Agent) executeToolCall(tc agentAPI.ToolCall, channel string, turnScenes ...string) (ret string) {
 	defer func() {
 		if r := recover(); r != nil {
 			stack := debug.Stack()
@@ -31,7 +31,7 @@ func (a *Agent) executeToolCall(tc agentAPI.ToolCall, channel string) (ret strin
 
 	done := make(chan string, 1)
 	go func() {
-		done <- a.executeToolCallInner(tc, channel)
+		done <- a.executeToolCallInner(tc, channel, turnScenes)
 	}()
 
 	select {
@@ -43,12 +43,12 @@ func (a *Agent) executeToolCall(tc agentAPI.ToolCall, channel string) (ret strin
 	}
 }
 
-func (a *Agent) executeToolCallInner(tc agentAPI.ToolCall, channel string) string {
+func (a *Agent) executeToolCallInner(tc agentAPI.ToolCall, channel string, turnScenes []string) string {
 	switch {
 	case tc.Name == "persona_set":
 		return a.executePersonaTool(tc)
 	case strings.HasPrefix(tc.Name, "memory_"):
-		return a.executeMemoryTool(tc)
+		return a.executeMemoryTool(tc, turnScenes)
 	case strings.HasPrefix(tc.Name, "social_"):
 		return a.executeSocialTool(tc)
 	case strings.HasPrefix(tc.Name, "knowledge_"):
@@ -123,7 +123,7 @@ func (a *Agent) executeToolCallInner(tc agentAPI.ToolCall, channel string) strin
 	return fmt.Sprintf("%v", result)
 }
 
-func (a *Agent) executeMemoryTool(tc agentAPI.ToolCall) string {
+func (a *Agent) executeMemoryTool(tc agentAPI.ToolCall, turnScenes []string) string {
 	g := a.graphMem()
 	if g == nil {
 		if tc.Name == "memory_document_query" {
@@ -174,13 +174,7 @@ func (a *Agent) executeMemoryTool(tc agentAPI.ToolCall) string {
 			parts = append(parts, fmt.Sprintf("- %s (提及%d次, 类型:%s)", e.Name, e.MentionCount, e.Type))
 		}
 		parts = append(parts, fmt.Sprintf("找到 %d 条关系:", len(result.Relations)))
-		for i, r := range result.Relations {
-			if i >= 10 {
-				parts = append(parts, "...更多关系被截断")
-				break
-			}
-			parts = append(parts, fmt.Sprintf("- %s →(%s)→ %s", r.SourceName, r.RelationType, r.TargetName))
-		}
+		parts = append(parts, formatRecallRelations(result.Relations, 10)...)
 		// 命中的关系若挂着媒体块，把媒体说明附在结果末尾。
 		//
 		// 关系行只有实体名和关系类型，看不出"这条记忆当时还带了一张图"。
@@ -215,6 +209,20 @@ func (a *Agent) executeMemoryTool(tc agentAPI.ToolCall) string {
 		if !ok {
 			return "参数格式错误，需要 triples 数组"
 		}
+		// 场景键：模型可以在三元组里逐条给（scene 字段），也可以在工具参数
+		// 顶层给一次（scene 参数），后者作为本批次的默认场景。
+		// 两条路都为空则这条记忆不参与场景召回——不做猜测：猜错的场景会把
+		// 无关记忆钉死，之后每次进入该场面都会被注入，比漏标更难发现。
+		batchScene := getString(tc.Arguments, "scene")
+		// 写侧的场景是**两条路都挂**：
+		//   显式声明（模型在参数里点名）优先；
+		//   否则挂本轮解析出的场景集合——主动声明的 + 被动涌现的。
+		// 只挂一条会丢东西：只挂声明则细粒度唤起丢失，只挂涌现则首次交互
+		// （场景还没长出来）没有兜底。
+		var batchScenes []string
+		if batchScene == "" {
+			batchScenes = turnScenes
+		}
 		var triples []memory.Triple
 		for _, td := range triplesData {
 			if m, ok := td.(map[string]interface{}); ok {
@@ -223,6 +231,13 @@ func (a *Agent) executeMemoryTool(tc agentAPI.ToolCall) string {
 					Relation:     getString(m, "relation"),
 					Object:       getString(m, "object"),
 					SentenceText: getString(m, "sentence_text"),
+					Scene:        getString(m, "scene"),
+				}
+				if t.Scene == "" {
+					t.Scene = batchScene
+				}
+				if len(t.Scenes) == 0 {
+					t.Scenes = batchScenes
 				}
 				// 模型显式关联的媒体：结构化字段随三元组一起提交，
 				// 由 commitTriplesWithMedia 变成 L3 一等块并与句子建边——
@@ -357,6 +372,20 @@ func (a *Agent) executeMemoryTool(tc agentAPI.ToolCall) string {
 		if newObject == "" {
 			newObject = oldObject
 		}
+		// 编辑前先精确取回旧关系：Purge 是「删旧写新」，中间那一步会把
+		// 置信度、场景引用、原句一起丢掉。复审心跳（reviewLoop）正是走这条路，
+		// 于是每次复审都把置信度重置成默认 1.0、把场景钉死的记忆打散成无场景，
+		// 而且没有任何日志——这类「静默降级」比报错难查得多。
+		var carriedConf float64
+		var carriedSentence, carriedScene string
+		if olds, ferr := a.memory.FindRelations(oldSubject, oldRelation, oldObject); ferr == nil && len(olds) > 0 {
+			carriedConf = olds[0].Confidence
+			carriedSentence = olds[0].SentenceText
+			if keys, serr := a.memory.ScenesOfRelation(olds[0].ID); serr == nil && len(keys) > 0 {
+				carriedScene = keys[0]
+			}
+		}
+
 		n, err := a.memory.Purge(map[string]string{
 			"subject_contains": oldSubject,
 			"relation_type":    oldRelation,
@@ -366,9 +395,12 @@ func (a *Agent) executeMemoryTool(tc agentAPI.ToolCall) string {
 			return fmt.Sprintf("编辑图记忆失败（删除旧记录）: %v", err)
 		}
 		triples := []memory.Triple{{
-			Subject:  newSubject,
-			Relation: newRelation,
-			Object:   newObject,
+			Subject:      newSubject,
+			Relation:     newRelation,
+			Object:       newObject,
+			Confidence:   carriedConf,
+			SentenceText: carriedSentence,
+			Scene:        carriedScene,
 		}}
 		ec, rc, err := a.memory.Commit(triples, string(a.id), 0)
 		if err != nil {

@@ -47,6 +47,9 @@ func (h *coreHandler) handleRegister(method string, params json.RawMessage) (int
 		if err := validateContextPolicy("input.register", p.Def.ContextPolicy); err != nil {
 			return nil, err
 		}
+		if err := validateRecallPolicy("input.register", p.Def.RecallPolicy); err != nil {
+			return nil, err
+		}
 		// 整体传 p.Def（只是把函数型的 Cleaner 换成代理），不要手写字段白名单：
 		// 白名单会让新增字段静默丢失。
 		def := p.Def

@@ -24,7 +24,10 @@ func (h *coreHandler) handleInject(method string, params json.RawMessage) (inter
 		if err := validateContextPolicy("io.injectText", p.ContextPolicy); err != nil {
 			return nil, err
 		}
-		h.sdk.InjectTextOpts(p.Source, p.Channel, h.resolveText(p), pubSdkInjectOpts(p.NoMemory, p.ContextPolicy, p.CleanerName, p.Priority))
+		if err := validateRecallPolicy("io.injectText", p.RecallPolicy); err != nil {
+			return nil, err
+		}
+		h.sdk.InjectTextOpts(p.Source, p.Channel, h.resolveText(p), pubSdkInjectOpts(p.NoMemory, p.ContextPolicy, p.RecallPolicy, p.CleanerName, p.Priority))
 		return nil, nil
 	case MethodIOInjectInterrupt:
 		var p injectParams
@@ -34,7 +37,10 @@ func (h *coreHandler) handleInject(method string, params json.RawMessage) (inter
 		if err := validateContextPolicy("io.injectInterrupt", p.ContextPolicy); err != nil {
 			return nil, err
 		}
-		h.sdk.InjectInterruptTextOpts(p.Source, p.Channel, h.resolveText(p), pubSdkInjectOpts(p.NoMemory, p.ContextPolicy, p.CleanerName, p.Priority))
+		if err := validateRecallPolicy("io.injectInterrupt", p.RecallPolicy); err != nil {
+			return nil, err
+		}
+		h.sdk.InjectInterruptTextOpts(p.Source, p.Channel, h.resolveText(p), pubSdkInjectOpts(p.NoMemory, p.ContextPolicy, p.RecallPolicy, p.CleanerName, p.Priority))
 		return nil, nil
 	case MethodIOInjectTextNoMem:
 		var p injectParams
@@ -44,8 +50,11 @@ func (h *coreHandler) handleInject(method string, params json.RawMessage) (inter
 		if err := validateContextPolicy("io.injectTextNoMem", p.ContextPolicy); err != nil {
 			return nil, err
 		}
+		if err := validateRecallPolicy("io.injectTextNoMem", p.RecallPolicy); err != nil {
+			return nil, err
+		}
 		// 旧 RPC 语义就是「不进记忆」，显式标志位只可能再叠上 context_policy。
-		h.sdk.InjectTextOpts(p.Source, p.Channel, h.resolveText(p), pubSdkInjectOpts(true, p.ContextPolicy, p.CleanerName, p.Priority))
+		h.sdk.InjectTextOpts(p.Source, p.Channel, h.resolveText(p), pubSdkInjectOpts(true, p.ContextPolicy, p.RecallPolicy, p.CleanerName, p.Priority))
 		return nil, nil
 	case MethodIOInjectSync:
 		var p injectParams
@@ -55,7 +64,10 @@ func (h *coreHandler) handleInject(method string, params json.RawMessage) (inter
 		if err := validateContextPolicy("io.injectInputSync", p.ContextPolicy); err != nil {
 			return nil, err
 		}
-		reply := h.sdk.InjectInputSyncOpts(p.Source, p.Channel, h.resolveText(p), pubSdkInjectOpts(p.NoMemory, p.ContextPolicy, p.CleanerName, p.Priority))
+		if err := validateRecallPolicy("io.injectInputSync", p.RecallPolicy); err != nil {
+			return nil, err
+		}
+		reply := h.sdk.InjectInputSyncOpts(p.Source, p.Channel, h.resolveText(p), pubSdkInjectOpts(p.NoMemory, p.ContextPolicy, p.RecallPolicy, p.CleanerName, p.Priority))
 		return map[string]interface{}{"reply": reply}, nil
 
 	case MethodIOInjectMedia:
@@ -66,11 +78,14 @@ func (h *coreHandler) handleInject(method string, params json.RawMessage) (inter
 		if err := validateContextPolicy("io.injectMedia", p.ContextPolicy); err != nil {
 			return nil, err
 		}
+		if err := validateRecallPolicy("io.injectMedia", p.RecallPolicy); err != nil {
+			return nil, err
+		}
 		blocks, err := h.resolveBlocks(p)
 		if err != nil {
 			return nil, err
 		}
-		h.sdk.InjectInputMediaOpts(p.Source, p.Channel, p.Text, blocks, pubSdkInjectOpts(p.NoMemory, p.ContextPolicy, p.CleanerName, p.Priority))
+		h.sdk.InjectInputMediaOpts(p.Source, p.Channel, p.Text, blocks, pubSdkInjectOpts(p.NoMemory, p.ContextPolicy, p.RecallPolicy, p.CleanerName, p.Priority))
 		return nil, nil
 
 	case MethodIOInjectMediaSync:
@@ -81,11 +96,14 @@ func (h *coreHandler) handleInject(method string, params json.RawMessage) (inter
 		if err := validateContextPolicy("io.injectMediaSync", p.ContextPolicy); err != nil {
 			return nil, err
 		}
+		if err := validateRecallPolicy("io.injectMediaSync", p.RecallPolicy); err != nil {
+			return nil, err
+		}
 		blocks, err := h.resolveBlocks(p)
 		if err != nil {
 			return nil, err
 		}
-		reply := h.sdk.InjectInputMediaSyncOpts(p.Source, p.Channel, p.Text, blocks, pubSdkInjectOpts(p.NoMemory, p.ContextPolicy, p.CleanerName, p.Priority))
+		reply := h.sdk.InjectInputMediaSyncOpts(p.Source, p.Channel, p.Text, blocks, pubSdkInjectOpts(p.NoMemory, p.ContextPolicy, p.RecallPolicy, p.CleanerName, p.Priority))
 		return map[string]interface{}{"reply": reply}, nil
 
 	case MethodIOInjectInterruptMedia:
@@ -96,11 +114,14 @@ func (h *coreHandler) handleInject(method string, params json.RawMessage) (inter
 		if err := validateContextPolicy("io.injectInterruptMedia", p.ContextPolicy); err != nil {
 			return nil, err
 		}
+		if err := validateRecallPolicy("io.injectInterruptMedia", p.RecallPolicy); err != nil {
+			return nil, err
+		}
 		blocks, err := h.resolveBlocks(p)
 		if err != nil {
 			return nil, err
 		}
-		h.sdk.InjectInterruptMediaOpts(p.Source, p.Channel, p.Text, blocks, pubSdkInjectOpts(p.NoMemory, p.ContextPolicy, p.CleanerName, p.Priority))
+		h.sdk.InjectInterruptMediaOpts(p.Source, p.Channel, p.Text, blocks, pubSdkInjectOpts(p.NoMemory, p.ContextPolicy, p.RecallPolicy, p.CleanerName, p.Priority))
 		return nil, nil
 
 	// ---- 多模态注入 ----

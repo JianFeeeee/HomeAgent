@@ -35,8 +35,15 @@ type MemoryBlock struct {
 	Fingerprint   string        `json:"fingerprint,omitempty"`
 	Source        string        `json:"source,omitempty"`
 	Tool          string        `json:"tool,omitempty"`
-	CreatedAt     time.Time     `json:"created_at"`
-	UpdatedAt     time.Time     `json:"updated_at"`
+	// Scene 是这个块所属的场景键（可空）。
+	//
+	// 块是记忆流水线里最细的「子项目」：一段转写、一张图的描述、一份附件。
+	// 场景要贯穿到流水线底，就得从块开始——否则「QQ 那场对话里发过来的那张图」
+	// 在场面重现时永远拿不回来。块进 L3 时按 Scene 挂 scene_refs(kind='block')，
+	// 场景召回即可把它取回（见 GraphDB.RecallByScene）。
+	Scene     string    `json:"scene,omitempty"`
+	CreatedAt time.Time `json:"created_at"`
+	UpdatedAt time.Time `json:"updated_at"`
 }
 
 // MemoryBlockEdge 是 L3 中连接一等记忆节点的结构化语义边。
@@ -86,8 +93,8 @@ func (g *GraphDB) PutMemoryBlocks(blocks []MemoryBlock) error {
 		}
 		_, err = tx.Exec(`INSERT INTO memory_blocks (
 			id, modality, text_content, payload_digest, mime, size, width, height,
-			vector, fingerprint, source, tool, created_at, updated_at
-		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+			vector, fingerprint, source, tool, scene, created_at, updated_at
+		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 		ON CONFLICT(id) DO UPDATE SET
 			modality = excluded.modality,
 			text_content = excluded.text_content,
@@ -100,12 +107,21 @@ func (g *GraphDB) PutMemoryBlocks(blocks []MemoryBlock) error {
 			fingerprint = excluded.fingerprint,
 			source = excluded.source,
 			tool = excluded.tool,
+			-- 场景只在本次给了值时才覆盖：块可能先被写入、后被归档路径补挂场景，
+			-- 反过来「已挂场景的块被一次无场景的重写抹掉」是不可接受的静默降级。
+			scene = CASE WHEN excluded.scene != '' THEN excluded.scene ELSE memory_blocks.scene END,
 			updated_at = excluded.updated_at`,
 			block.ID, block.Modality, block.Text, block.PayloadDigest, block.MIME,
 			block.Size, block.Width, block.Height, string(vectorJSON), block.Fingerprint,
-			block.Source, block.Tool, block.CreatedAt, now)
+			block.Source, block.Tool, block.Scene, block.CreatedAt, now)
 		if err != nil {
 			return fmt.Errorf("put memory block %s: %w", block.ID, err)
+		}
+		// 场景引用与块同事务：块写进去了、引用丢了，这个块在场景里就永远取不回。
+		if block.Scene != "" {
+			if err := tagSceneRefTx(tx, block.Scene, "block", 0, block.ID, 1.0); err != nil {
+				return fmt.Errorf("tag scene for block %s: %w", block.ID, err)
+			}
 		}
 	}
 	return tx.Commit()

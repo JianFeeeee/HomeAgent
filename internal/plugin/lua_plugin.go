@@ -1058,6 +1058,7 @@ func parseToolDef(L *lua.LState, defTbl *lua.LTable, plg *luaPlugin, name string
 		goDef.NoMemory = lua.LVAsBool(v)
 	}
 	goDef.ContextPolicy = defTbl.RawGetString("context_policy").String()
+	goDef.RecallPolicy = defTbl.RawGetString("recall_policy").String()
 	if v := defTbl.RawGetString("cleaner"); v != nil && v.Type() == lua.LTFunction {
 		goDef.Cleaner = makeLuaCleaner(plg, v.(*lua.LFunction))
 	}
@@ -1078,6 +1079,7 @@ func parseChannelDef(L *lua.LState, defTbl *lua.LTable, plg *luaPlugin) sdk.Chan
 		chDef.NoMemory = lua.LVAsBool(v)
 	}
 	chDef.ContextPolicy = defTbl.RawGetString("context_policy").String()
+	chDef.RecallPolicy = defTbl.RawGetString("recall_policy").String()
 	if v := defTbl.RawGetString("cleaner"); v != nil && v.Type() == lua.LTFunction {
 		chDef.Cleaner = makeLuaCleaner(plg, v.(*lua.LFunction))
 	}
@@ -1085,8 +1087,9 @@ func parseChannelDef(L *lua.LState, defTbl *lua.LTable, plg *luaPlugin) sdk.Chan
 }
 
 // parseInjectOptions 解析 Lua 侧 options table 为 SDK InjectOptions。
-// 支持的键：no_memory(bool)、context_policy(string)、cleaner_name(string)、priority(string)。
-// 缺省/非表等价于零值（记入记忆 + 不裁剪），与旧的三参数注入完全等价。
+// 支持的键：no_memory(bool)、context_policy(string)、recall_policy(string)、
+// cleaner_name(string)、priority(string)。
+// 缺省/非表等价于零值（记入记忆 + 不裁剪 + 召回），与旧的三参数注入完全等价。
 func parseInjectOptions(L *lua.LState, idx int) sdk.InjectOptions {
 	opts := sdk.InjectOptions{}
 	tbl, ok := L.Get(idx).(*lua.LTable)
@@ -1097,6 +1100,7 @@ func parseInjectOptions(L *lua.LState, idx int) sdk.InjectOptions {
 		opts.NoMemory = lua.LVAsBool(v)
 	}
 	opts.ContextPolicy = tbl.RawGetString("context_policy").String()
+	opts.RecallPolicy = tbl.RawGetString("recall_policy").String()
 	opts.CleanerName = tbl.RawGetString("cleaner_name").String()
 	opts.Priority = tbl.RawGetString("priority").String()
 	return opts

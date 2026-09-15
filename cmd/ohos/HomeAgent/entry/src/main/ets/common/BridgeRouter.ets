@@ -2,6 +2,7 @@ import { deviceBridge } from './DeviceBridge';
 import {
   CapResult,
   capScreensee,
+  capCamerasue,
   capClipboardSee,
   capClipboardsue,
   capSpeakerUse,
@@ -83,6 +84,12 @@ async function executeCommand(reqId: string, command: string): Promise<CapResult
       return okRes('内容已显示');
     }
     return errRes('展示界面尚未就绪，请保持应用在前台后重试');
+  }
+  if (name === 'camerasue') {
+    if (appContext === null) {
+      return errRes('相机能力尚未就绪，请保持应用在前台后重试');
+    }
+    return capCamerasue(appContext, args);
   }
   if (name === 'clipboardsee') {
     if (hasArgs(args)) {

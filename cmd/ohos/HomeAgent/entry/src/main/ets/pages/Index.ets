@@ -7,7 +7,7 @@ import { apiClient } from '../common/ApiClient';
 import { navBar } from '../common/NavBarController';
 import { handleBackPress } from '../common/NavStackRegistry';
 import { ConnectionConfig } from '../model/Model';
-import { ThemePalette, DARK_PALETTE, LIGHT_PALETTE, WIDE_MIN_WIDTH, WIDE_NAV_BAR_WIDTH } from '../common/Constants';
+import { ThemePalette, DARK_PALETTE, LIGHT_PALETTE, WIDE_MIN_WIDTH, WIDE_NAV_BAR_WIDTH, K_HAS_CONN, K_REQUESTED_TAB, K_SETTINGS_SUB } from '../common/Constants';
 import { ANIM_NORMAL, ANIM_SLOW } from '../common/Constants';
 import { MotionBase } from '../components/MotionBase';
 import { GradientBackground } from '../components/GradientBackground';
@@ -83,6 +83,8 @@ struct Index {
   /** 底部手势条高度（vp） */
   @State bottomGesture: number = 16;
   @StorageProp('themeIsDark') @Watch('onThemeChanged') private isDark: boolean = true;
+  /** 外部请求切换主 Tab（未连接时聊天空态的“去设置连接”用） */
+  @StorageProp(K_REQUESTED_TAB) @Watch('onRequestedTab') private requestedTab: number = -1;
   private swiper: SwiperController = new SwiperController();
   private screensueTimer: number = -1;
   private snapshotBuilder: CustomBuilder = (): void => { }; // 由 @Builder 传入的实际锚点
@@ -101,6 +103,12 @@ struct Index {
     if (cur !== null) {
       apiClient.setConnection(cur);
     }
+    // 后端连接状态广播：聊天空态根据它决定是否显示“去设置连接”。
+    // Index.aboutToAppear 在 EntryAbility 等 connStore.init 之后才跑，
+    // 所以此处读到的连接状态就是真实的启动态。
+    AppStorage.setOrCreate<boolean>(K_HAS_CONN, apiClient.hasConnection());
+    AppStorage.setOrCreate<number>(K_REQUESTED_TAB, -1);
+    AppStorage.setOrCreate<string>(K_SETTINGS_SUB, '');
     // 种子化自定义背景图状态到 AppStorage，GradientBackground 响应读取
     const st = connStore.getSettings();
     AppStorage.setOrCreate<string>('bgImage', st.bgImage ?? '');
@@ -189,6 +197,23 @@ struct Index {
 
   private onTabChanged(): void {
     AppStorage.set<number>('currentTab', this.currentTab);
+  }
+
+  /**
+   * 响应外部切 Tab 请求（聊天空态的“去设置连接”）。
+   *
+   * 为什么不能直接改 AppStorage 的 currentTab：Index 的 currentTab 是
+   * @State，Swiper.index() 只认它；外部写 AppStorage 不会驱动 Swiper。
+   * 所以用独立请求键 + @Watch 把请求转成自己的状态变更。
+   */
+  private onRequestedTab(): void {
+    const t: number = this.requestedTab;
+    AppStorage.set<number>(K_REQUESTED_TAB, -1);
+    if (t < 0 || t >= this.tabs.length) {
+      return;
+    }
+    this.currentTab = t;
+    navBar.setVisible(true);
   }
 
   private syncSystemBar(): void {

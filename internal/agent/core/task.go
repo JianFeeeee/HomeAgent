@@ -30,6 +30,7 @@ import (
 	agentAPI "gitcode.com/JianFeeeee/HomeAgent/internal/agent/api"
 	agentIO "gitcode.com/JianFeeeee/HomeAgent/internal/agent/io"
 	"gitcode.com/JianFeeeee/HomeAgent/internal/events"
+	"gitcode.com/JianFeeeee/HomeAgent/internal/memory"
 	sdk "gitcode.com/JianFeeeee/HomeAgent/internal/sdk"
 	pubsdk "gitcode.com/JianFeeeee/homeagent-sdk/sdk"
 )
@@ -110,6 +111,13 @@ type TaskFrame struct {
 	CurToolPlugin string
 	CurResult     string
 	Resp          *agentAPI.CompletionResponse
+
+	// Scene 是本轮**涌现**出来的场景键（由场面指纹聚类得到，无人声明），
+	// sceneDone 标记是否已解析过——一轮只解析一次：多解析一次就多给场景
+	// 加一次强度，「工具调得多」会被误当成「这个场面更常出现」。
+	Scene     string
+	turnScene memory.TurnScene
+	sceneDone bool
 
 	// 游标与终态
 	Step     Step
@@ -275,7 +283,7 @@ func (a *Agent) rebaseFramePrefix(f *TaskFrame) {
 	tail := append([]agentAPI.Message(nil), f.Msgs[f.PrefixLen:]...)
 
 	budget := ComputeTokenBudget(a.provider, a.systemPrompt)
-	memContext := a.buildMemoryContext(f.Input, budget.MemoryTokens)
+	memContext := a.buildTaskMemoryContext(f, f.Input, budget.MemoryTokens)
 	sysPrompt := a.buildSystemPrompt(memContext, f.Input)
 	prefix := a.buildMessages(sysPrompt, f.Input, a.contextTokenBudget(budget))
 
@@ -395,10 +403,8 @@ func (a *Agent) prepareInputTask(evt *agentIO.InputEvent) (*TaskFrame, taskTermi
 	}
 	a.publishEvent(events.EventRawInput, rawPayload)
 
-	archived := a.pruneOnInput(evt, cleanInput)
-	if archived > 0 {
-		log.Printf("[agent] pruned %d low-relevance events to document memory", archived)
-	}
+	// 裁剪与审计统一在 memoryPass 内（日志已带 trigger）。
+	a.pruneOnInput(evt, cleanInput)
 
 	// 本轮 inputch（处理表按它记账）+ contextfull 检测（只有驻留子设了钩子）。
 	a.tableMu.Lock()
@@ -497,7 +503,7 @@ func (a *Agent) step(f *TaskFrame) stepOutcome {
 func (a *Agent) stepPrepare(f *TaskFrame) stepOutcome {
 	budget := ComputeTokenBudget(a.provider, a.systemPrompt)
 
-	memContext := a.buildMemoryContext(f.Input, budget.MemoryTokens)
+	memContext := a.buildTaskMemoryContext(f, f.Input, budget.MemoryTokens)
 	sysPrompt := a.buildSystemPrompt(memContext, f.Input)
 	f.Tools = a.buildToolDefs()
 
@@ -718,7 +724,10 @@ func denialResultText(ctx *sdk.StageContext, toolName string) string {
 
 // stepToolExec 执行工具。**临界区**：见设计文档 §4.3。
 func (a *Agent) stepToolExec(f *TaskFrame) stepOutcome {
-	result := a.executeToolCall(f.CurTool, f.OutputChannel)
+	// 执行工具前先解析本轮场景：写侧要用它给记忆自动挂场景（主动+被动两条路），
+	// 而工具步不一定走到下面的召回分支，所以不能等那里再解析。
+	turn := a.resolveTurnScenes(f, f.CurTool.Name)
+	result := a.executeToolCall(f.CurTool, f.OutputChannel, turn.Keys...)
 	f.CurResult = result
 	f.ToolResults = append(f.ToolResults, ToolResultItem{Name: f.CurTool.Name, Output: result})
 	log.Printf("[agent] tool %s result: %s", f.CurTool.Name, truncateStr(result, 100))
@@ -743,16 +752,28 @@ func (a *Agent) stepToolAfter(f *TaskFrame) stepOutcome {
 			result = r
 		}
 	}
-	// ContextPolicy: prune 工具调用后执行上下文裁剪（§13.8）
-	if def := a.stageHost.ToolDef(tc.Name); def != nil && def.ContextPolicy == "prune" {
-		if a.context != nil {
-			topK := a.maxContextSize - 1
-			if topK < 1 {
-				topK = 1
+	// 工具后处理：一次相关性过程，两个**正交**声明——
+	//   ContextPolicy=prune → 裁剪（踢出去，归档低相关 L0 事件）
+	//   RecallPolicy=auto   → 召回（取进来，注入 L2/L3 相关记忆）
+	// 两者共用同一份**清洗后**的 query，并统一走 memoryPass（同一入口、
+	// 同一次预算与审计）。查询向量取清洗后的有效内容，否则噪声
+	// （ANSI/base64/JSON 包装）会把相关性打分带偏，裁错事件、召回错记忆。
+	var recallText string
+	if def := a.stageHost.ToolDef(tc.Name); def != nil {
+		needPrune := def.ContextPolicy == sdk.ContextPolicyPrune
+		needRecall := def.RecallPolicy == sdk.RecallPolicyAuto
+		if needPrune || needRecall {
+			query := a.toolOutputForQuery(tc.Name, result)
+			// 工具路召回的场景有两个来源：本轮输入的场面（如 chan:qq）
+			// 与这一步工具本身（如 tool:qq_get_message）。带上工具场景，
+			// 才能让「凡是要回 QQ 消息」这类规则在该步被取回。
+			// 召回用两条路的并集：声明场景（注入点/通道/工具）+ 涌现场景
+			scenes := sceneKeysFor(f.Evt, tc.Name)
+			turn := a.resolveTurnScenes(f, tc.Name)
+			for _, k := range turn.Keys {
+				scenes = append(scenes, k)
 			}
-			// 查询向量取**清洗后**的有效内容，否则噪声（ANSI/base64/JSON 包装）
-			// 会把相关性打分带偏，裁掉本该保留的事件。
-			a.context.Prune(a.toolOutputForQuery(tc.Name, result), topK, a.docStore)
+			recallText = a.memoryPass(query, "tool:"+tc.Name, needPrune, needRecall, scenes).RecallText
 		}
 	}
 
@@ -821,6 +842,10 @@ func (a *Agent) stepToolAfter(f *TaskFrame) stepOutcome {
 	if mediaMsg != nil {
 		// 必须紧跟在 toolMsg 之后：中间插入其他消息会让 tool_call_id 配对断开。
 		f.Msgs = append(f.Msgs, *mediaMsg)
+	}
+	// 召回作为 system 消息挂在末尾（tool/assistant 配对已完成，插入此处不断链）。
+	if recallText != "" {
+		f.Msgs = appendOrReplaceRecall(f.Msgs, recallText)
 	}
 
 	a.publishEvent(events.EventToolCall, map[string]interface{}{

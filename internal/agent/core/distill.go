@@ -172,6 +172,19 @@ func (a *Agent) archiveColdDocs() {
 		}
 	}
 
+	// 场景记忆的「用进废退」：久未重现的关联按半衰期淡出。
+	//
+	// 不做衰减的后果不是"多记一点"，而是**注入预算被一次性巧合吃光**——
+	// 场景是每轮都要注入的常驻内容，关联只增不减时，越老的库注入越糊。
+	// 半衰期取 30 天：比"这个月没做过这类事"更久，避免把季节性的事误删。
+	if a.memory != nil {
+		if n, err := a.memory.DecaySceneRefs(30*24*time.Hour, 0.05); err != nil {
+			log.Printf("[agent] scene decay error: %v", err)
+		} else if n > 0 {
+			log.Printf("[agent] 场景关联衰减：清理 %d 条长期未重现的引用", n)
+		}
+	}
+
 	if a.docStore != nil {
 		a.docStore.Reindex()
 	}
@@ -207,7 +220,7 @@ func (a *Agent) archiveColdDocs() {
 			// 文档持有的一等块写入 L3，并以 document --contains--> block 边关联；
 			// 块 ID 原样保留（迁移而非重建）。块迁走后删除文档即完成迁移。
 			if len(doc.Blocks) > 0 {
-				if bound := a.linkBlocksToDocument(doc.ID, doc.Blocks); bound != len(doc.Blocks) {
+				if bound := a.linkBlocksToDocument(doc.ID, doc.Blocks, memory.ChannelScene(doc.Source)); bound != len(doc.Blocks) {
 					log.Printf("[agent] doc→graph: %s 块迁移不完整 (%d/%d)，保留文档待下轮重试",
 						doc.ID, bound, len(doc.Blocks))
 					continue
@@ -423,6 +436,11 @@ func docToTriples(doc *document.Doc, embedder nlp.Vectorizer) []memory.Triple {
 		return nil
 	}
 
+	// 文档归档的知识是有**来源场面**的：来自 QQ 的对话归档，其三元组就该
+	// 钉在 chan:qq 上。这样「又来一条 QQ 消息」时，这批知识靠场景就能取回，
+	// 不必指望本轮措辞与它们字面重合。
+	docScene := memory.ChannelScene(doc.Source)
+
 	isArchivedContext := doc.Meta != nil && doc.Meta["is_archived_context"] == "true"
 
 	// 文档元数据:仅当 summary 合理(非空、非模板化、长度适中)时才写「主题」
@@ -434,6 +452,7 @@ func docToTriples(doc *document.Doc, embedder nlp.Vectorizer) []memory.Triple {
 			Object:      doc.Summary,
 			ObjectType:  "Topic",
 			Confidence:  1.0,
+			Scene:       docScene,
 		})
 	}
 
@@ -451,6 +470,7 @@ func docToTriples(doc *document.Doc, embedder nlp.Vectorizer) []memory.Triple {
 		for _, nt := range result.Triples {
 			mt := nlp.ToMemoryTriple(nt)
 			if mt.Subject != "" && mt.Relation != "" && mt.Object != "" {
+				mt.Scene = docScene
 				triples = append(triples, mt)
 			}
 		}
@@ -465,10 +485,15 @@ func docToTriples(doc *document.Doc, embedder nlp.Vectorizer) []memory.Triple {
 			Object:      doc.Source,
 			ObjectType:  "Source",
 			Confidence:  1.0,
+			Scene:       docScene,
 		})
 	}
 
-	return triples
+	// 噪音闸门：NLP 提取器不认常用词（「结果 / 什么 / 待命」都能当主语），
+	// 而落库闸门 validEntityName 只管名字像不像名字。这一层是防止
+	// 「每个文档的常用词都变成实体」的唯一防线（CutExact 时代的那层已随
+	// 提取器换代丢失，见 memory.IsNoiseEntity 的说明）。
+	return memory.FilterNoiseTriples(triples)
 }
 
 // isTemplateSummary 识别 summarizeEntries 生成的模板化摘要
