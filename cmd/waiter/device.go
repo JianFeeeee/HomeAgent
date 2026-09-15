@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"gitcode.com/JianFeeeee/HomeAgent/internal/devicebridge/client"
+	"gitcode.com/JianFeeeee/HomeAgent/internal/meta"
 )
 
 // ===== 设备桥管理 =====
@@ -46,6 +47,9 @@ func startDeviceBridge(addr, token string) error {
 		"platform": runtime.GOOS,
 		"arch":     runtime.GOARCH,
 		"cpus":     runtime.NumCPU(),
+		// 客户端版本与内核同源（internal/meta），deviceinfo 回显的软件版本
+		// 因此与 homed 一致，不再是一个空缺字段。
+		"version": meta.Version,
 	}
 
 	// 确保 gateway URL 格式正确
