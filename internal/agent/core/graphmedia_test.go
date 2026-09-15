@@ -194,7 +194,7 @@ func TestCommitTriplesWithMedia_RoundTrip(t *testing.T) {
 func TestAttachBlocksToSentence_SkipsUnresolvable(t *testing.T) {
 	// digest 在库里不存在时必须跳过，不能建一条指向虚无的块边。
 	a, g, _ := newGraphMediaAgent(t)
-	if n := a.attachBlocksToSentence(42, []string{"deadbeefdead"}, nil); n != 0 {
+	if n := a.attachBlocksToSentence(42, []string{"deadbeefdead"}, nil, ""); n != 0 {
 		t.Fatalf("无法补全的 digest 不该建块，实际绑定 %d", n)
 	}
 	blocks, err := g.BlocksForNode("sentence", "42")
@@ -208,7 +208,7 @@ func TestAttachBlocksToSentence_SkipsUnresolvable(t *testing.T) {
 
 func TestAttachBlocksToSentence_NilStoreNoop(t *testing.T) {
 	a := &Agent{}
-	if n := a.attachBlocksToSentence(1, []string{"aaaaaaaaaaaa"}, nil); n != 0 {
+	if n := a.attachBlocksToSentence(1, []string{"aaaaaaaaaaaa"}, nil, ""); n != 0 {
 		t.Fatalf("媒体关闭时应静默无操作，实际 %d", n)
 	}
 	if got, err := a.RecallBlocksForSentence(1); err != nil || got != nil {
@@ -234,7 +234,7 @@ func TestAttachBlocksToSentence_ReusesSeedIdentity(t *testing.T) {
 	sid := ids["迁移测试句。"]
 
 	byDigest := map[string]memory.MemoryBlock{digest: seedBlock}
-	if n := a.attachBlocksToSentence(sid, []string{digest}, byDigest); n != 1 {
+	if n := a.attachBlocksToSentence(sid, []string{digest}, byDigest, ""); n != 1 {
 		t.Fatalf("应绑定 1 个块，实际 %d", n)
 	}
 	blocks, err := g.BlocksForNode("sentence", strconv.FormatInt(sid, 10))
@@ -256,7 +256,7 @@ func TestLinkBlocksToDocument_CreatesDocumentNodeEdge(t *testing.T) {
 		t.Fatal("blockFromDigest 失败")
 	}
 
-	if n := a.linkBlocksToDocument("doc_42", []memory.MemoryBlock{b}); n != 1 {
+	if n := a.linkBlocksToDocument("doc_42", []memory.MemoryBlock{b}, ""); n != 1 {
 		t.Fatalf("应建立 1 条文档→块边，实际 %d", n)
 	}
 	blocks, err := g.BlocksForNode("document", "doc_42")

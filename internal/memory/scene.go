@@ -129,6 +129,11 @@ type SceneRecall struct {
 	Scenes    []string   `json:"scenes"`
 	Relations []Relation `json:"relations"`
 	Entities  []Entity   `json:"entities"`
+	// Blocks 是该场景下的一等记忆块（图/音/文）。
+	//
+	// 为什么场景要能取回块：块是流水线里最细的子项目，而「那场对话里发过来的
+	// 那张图」只记住名字是没用的——场面重现时要把块本身带回来。
+	Blocks []MemoryBlock `json:"blocks,omitempty"`
 }
 
 // tagSceneTx 在事务内把「关系 + 实体」挂到场景上（幂等 upsert）。
@@ -137,6 +142,36 @@ type SceneRecall struct {
 // 质量信号。重复写入同一节点只刷新 weight 与时间，不产生重复引用。
 func tagSceneTx(tx *sql.Tx, sceneKey string, relationID int64, entityIDs []int64, weight float64) error {
 	key := NormalizeSceneKey(sceneKey)
+	if key == "" {
+		return nil
+	}
+	if relationID != 0 {
+		if err := tagSceneRefTx(tx, key, "relation", relationID, "", weight); err != nil {
+			return err
+		}
+	}
+	for _, eid := range entityIDs {
+		if eid != 0 {
+			if err := tagSceneRefTx(tx, key, "entity", eid, "", weight); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
+}
+
+// tagSceneRefTx 在事务内把一个节点挂到场景上（幂等 upsert）。
+//
+// kind ∈ relation | entity | block | document。textID 供非数值主键的节点使用
+// （块与文档的 id 是字符串），数值型节点传 0 并用 id。
+//
+// 为什么 weight 取 MAX 而不是覆盖：场景内的记忆也要能排序，置信度是目前唯一
+// 现成的质量信号；同一节点被低置信度的重复写入命中的，不该把它从场景前排挤下去。
+func tagSceneRefTx(tx *sql.Tx, sceneKey, kind string, id int64, textID string, weight float64) error {
+	key := NormalizeSceneKey(sceneKey)
+	if kind == "" || (id == 0 && textID == "") {
+		return nil
+	}
 	if key == "" {
 		return nil
 	}
@@ -152,34 +187,12 @@ func tagSceneTx(tx *sql.Tx, sceneKey string, relationID int64, entityIDs []int64
 	if weight <= 0 {
 		weight = 1.0
 	}
-
-	refs := make([]struct {
-		kind string
-		id   int64
-	}, 0, len(entityIDs)+1)
-	if relationID != 0 {
-		refs = append(refs, struct {
-			kind string
-			id   int64
-		}{"relation", relationID})
-	}
-	for _, eid := range entityIDs {
-		if eid != 0 {
-			refs = append(refs, struct {
-				kind string
-				id   int64
-			}{"entity", eid})
-		}
-	}
-
-	for _, r := range refs {
-		if _, err := tx.Exec(
-			`INSERT INTO scene_refs (scene_id, kind, ref_id, weight) VALUES (?, ?, ?, ?)
-			 ON CONFLICT(scene_id, kind, ref_id)
-			 DO UPDATE SET weight = MAX(weight, excluded.weight)`,
-			sceneID, r.kind, r.id, weight); err != nil {
-			return fmt.Errorf("upsert scene ref %s/%d: %w", r.kind, r.id, err)
-		}
+	if _, err := tx.Exec(
+		`INSERT INTO scene_refs (scene_id, kind, ref_id, ref_text, weight) VALUES (?, ?, ?, ?, ?)
+		 ON CONFLICT(scene_id, kind, ref_id, ref_text)
+		 DO UPDATE SET weight = MAX(weight, excluded.weight)`,
+		sceneID, kind, id, textID, weight); err != nil {
+		return fmt.Errorf("upsert scene ref %s/%d%s: %w", kind, id, textID, err)
 	}
 	return nil
 }
@@ -391,7 +404,37 @@ func (g *GraphDB) RecallByScene(scenes []string, limit int) (*SceneRecall, error
 		out.Entities = append(out.Entities, e)
 	}
 	erows.Close()
-	return out, erows.Err()
+	if err := erows.Err(); err != nil {
+		return nil, err
+	}
+
+	blockQuery := `SELECT b.id, b.modality, b.text_content, b.payload_digest, b.mime,
+			b.size, b.width, b.height, b.fingerprint, b.source, b.tool,
+			COALESCE(b.scene, ''), b.created_at, b.updated_at, MAX(sr.weight) AS w
+		FROM scene_refs sr
+		JOIN scenes s ON sr.scene_id = s.id
+		JOIN memory_blocks b ON sr.kind = 'block' AND b.id = sr.ref_text
+		WHERE ` + where + `
+		GROUP BY b.id
+		ORDER BY w DESC, b.created_at DESC
+		LIMIT ?`
+	blockArgs := append(append([]interface{}{}, args...), limit)
+	brows, err := g.db.Query(blockQuery, blockArgs...)
+	if err != nil {
+		return nil, err
+	}
+	defer brows.Close()
+	for brows.Next() {
+		var b MemoryBlock
+		var w float64
+		if err := brows.Scan(&b.ID, &b.Modality, &b.Text, &b.PayloadDigest, &b.MIME,
+			&b.Size, &b.Width, &b.Height, &b.Fingerprint, &b.Source, &b.Tool,
+			&b.Scene, &b.CreatedAt, &b.UpdatedAt, &w); err != nil {
+			return nil, err
+		}
+		out.Blocks = append(out.Blocks, b)
+	}
+	return out, brows.Err()
 }
 
 // SceneStats 返回各场景的规模，按引用数降序。
@@ -444,10 +487,37 @@ func (g *GraphDB) PurgeStaleSceneRefs() (int, error) {
 func (g *GraphDB) purgeStaleSceneRefsLocked() (int, error) {
 	res, err := g.db.Exec(`DELETE FROM scene_refs WHERE
 		(kind = 'relation' AND ref_id NOT IN (SELECT id FROM relations))
-		OR (kind = 'entity' AND ref_id NOT IN (SELECT id FROM entities))`)
+		OR (kind = 'entity' AND ref_id NOT IN (SELECT id FROM entities))
+		OR (kind = 'block' AND ref_text NOT IN (SELECT id FROM memory_blocks))
+		OR (kind = 'document' AND ref_text NOT IN (SELECT id FROM documents))`)
 	if err != nil {
 		return 0, err
 	}
 	n, _ := res.RowsAffected()
 	return int(n), nil
+}
+
+// ScenesOfRelation 取回一条关系当前所属的全部场景键。
+//
+// 用途：memory_edit 是「删旧写新」——旧关系的 scene_refs 会随节点一起失效，
+// 新关系若不重新挂上场景，这条记忆就**静默地脱离场景**，此后场面重现也召不回。
+func (g *GraphDB) ScenesOfRelation(relationID int64) ([]string, error) {
+	g.mu.RLock()
+	defer g.mu.RUnlock()
+	rows, err := g.db.Query(
+		`SELECT s.key FROM scene_refs sr JOIN scenes s ON sr.scene_id = s.id
+		 WHERE sr.kind = 'relation' AND sr.ref_id = ?`, relationID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var keys []string
+	for rows.Next() {
+		var k string
+		if err := rows.Scan(&k); err != nil {
+			return nil, err
+		}
+		keys = append(keys, k)
+	}
+	return keys, rows.Err()
 }

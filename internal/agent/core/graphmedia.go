@@ -47,7 +47,7 @@ func (a *Agent) migrateLegacyGraphMedia() {
 
 // attachBlocksToSentence 把一组 digest 变成 L3 一等块并挂到句子上。
 // seed 允许复用已持有块的 ID（L2→L3 迁移保持块身份不变）。
-func (a *Agent) attachBlocksToSentence(sentenceID int64, digests []string, seed map[string]memory.MemoryBlock) int {
+func (a *Agent) attachBlocksToSentence(sentenceID int64, digests []string, seed map[string]memory.MemoryBlock, scene string) int {
 	if a.mediaStore == nil || a.memory == nil || sentenceID == 0 {
 		return 0
 	}
@@ -64,6 +64,11 @@ func (a *Agent) attachBlocksToSentence(sentenceID int64, digests []string, seed 
 				continue
 			}
 		}
+		// 块继承承载它的三元组的场景：块是流水线里最细的子项目，场景要落到它身上，
+		// 否则「那场对话里发过来的那张图」在场面重现时永远取不回来。
+		if b.Scene == "" {
+			b.Scene = scene
+		}
 		if err := a.memory.PutMemoryBlocks([]memory.MemoryBlock{b}); err != nil {
 			log.Printf("[media] L3 块写入失败 (%s): %v", shortDigest(full), err)
 			continue
@@ -79,13 +84,20 @@ func (a *Agent) attachBlocksToSentence(sentenceID int64, digests []string, seed 
 
 // linkBlocksToDocument 把文档持有的块写入 L3，并建立
 // document --contains--> block 边。块的 ID 原样保留（迁移而非重建）。
-func (a *Agent) linkBlocksToDocument(docID string, blocks []memory.MemoryBlock) int {
+func (a *Agent) linkBlocksToDocument(docID string, blocks []memory.MemoryBlock, scene string) int {
 	if a.memory == nil || docID == "" || len(blocks) == 0 {
 		return 0
 	}
 	if err := a.memory.PutDocumentNode(docID, ""); err != nil {
 		log.Printf("[media] 写入 L3 文档节点失败 (%s): %v", docID, err)
 		return 0
+	}
+	// 文档层把场景传给块：归档进图库的块属于该文档的来源场面（QQ 归档的图
+	// 就该挂在 chan:qq 上），否则 L3 里这批块在场景召回中不可见。
+	for i := range blocks {
+		if blocks[i].Scene == "" {
+			blocks[i].Scene = scene
+		}
 	}
 	if err := a.memory.PutMemoryBlocks(blocks); err != nil {
 		log.Printf("[media] 写入 L3 记忆块失败 (doc %s): %v", docID, err)
@@ -135,7 +147,7 @@ func (a *Agent) commitTriplesWithMedia(triples []memory.Triple, sessionID string
 		if sid == 0 {
 			continue
 		}
-		blocks += a.attachBlocksToSentence(sid, t.MediaDigests, byDigest)
+		blocks += a.attachBlocksToSentence(sid, t.MediaDigests, byDigest, t.Scene)
 	}
 	return ec, rc, blocks, nil
 }

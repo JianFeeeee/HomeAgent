@@ -360,6 +360,20 @@ func (a *Agent) executeMemoryTool(tc agentAPI.ToolCall) string {
 		if newObject == "" {
 			newObject = oldObject
 		}
+		// 编辑前先精确取回旧关系：Purge 是「删旧写新」，中间那一步会把
+		// 置信度、场景引用、原句一起丢掉。复审心跳（reviewLoop）正是走这条路，
+		// 于是每次复审都把置信度重置成默认 1.0、把场景钉死的记忆打散成无场景，
+		// 而且没有任何日志——这类「静默降级」比报错难查得多。
+		var carriedConf float64
+		var carriedSentence, carriedScene string
+		if olds, ferr := a.memory.FindRelations(oldSubject, oldRelation, oldObject); ferr == nil && len(olds) > 0 {
+			carriedConf = olds[0].Confidence
+			carriedSentence = olds[0].SentenceText
+			if keys, serr := a.memory.ScenesOfRelation(olds[0].ID); serr == nil && len(keys) > 0 {
+				carriedScene = keys[0]
+			}
+		}
+
 		n, err := a.memory.Purge(map[string]string{
 			"subject_contains": oldSubject,
 			"relation_type":    oldRelation,
@@ -369,9 +383,12 @@ func (a *Agent) executeMemoryTool(tc agentAPI.ToolCall) string {
 			return fmt.Sprintf("编辑图记忆失败（删除旧记录）: %v", err)
 		}
 		triples := []memory.Triple{{
-			Subject:  newSubject,
-			Relation: newRelation,
-			Object:   newObject,
+			Subject:      newSubject,
+			Relation:     newRelation,
+			Object:       newObject,
+			Confidence:   carriedConf,
+			SentenceText: carriedSentence,
+			Scene:        carriedScene,
 		}}
 		ec, rc, err := a.memory.Commit(triples, string(a.id), 0)
 		if err != nil {
