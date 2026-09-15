@@ -207,7 +207,7 @@ func (a *Agent) archiveColdDocs() {
 			// 文档持有的一等块写入 L3，并以 document --contains--> block 边关联；
 			// 块 ID 原样保留（迁移而非重建）。块迁走后删除文档即完成迁移。
 			if len(doc.Blocks) > 0 {
-				if bound := a.linkBlocksToDocument(doc.ID, doc.Blocks); bound != len(doc.Blocks) {
+				if bound := a.linkBlocksToDocument(doc.ID, doc.Blocks, memory.ChannelScene(doc.Source)); bound != len(doc.Blocks) {
 					log.Printf("[agent] doc→graph: %s 块迁移不完整 (%d/%d)，保留文档待下轮重试",
 						doc.ID, bound, len(doc.Blocks))
 					continue

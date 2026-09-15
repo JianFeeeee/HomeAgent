@@ -1,4 +1,17 @@
-.PHONY: all build build-cli build-gui clean install test run build-static build-linux-arm64 lint fmt
+.PHONY: all build build-plain build-cli build-gui clean install test run build-static build-linux-arm64 lint fmt
+
+# HOMED_TAGS 默认带 onnxruntime：发行版**默认启用**本地向量空间（与
+# deploy/packaging/build.sh 保持一致）。
+#
+# 曾经这里是空 tags，实测的后果（2026-09-15 热部署）：`make build` 产出的
+# homed 只有 33MB，而 onnxruntime 版是 84MB；启动日志里
+# 「multimodal space active: provider=chineseclip」整行消失，少加载一个插件，
+# 静态词向量也退化成 fallback——而打包脚本会直接**拒收**这种二进制
+# （package-linux.sh 检查 `-tags=.*onnxruntime`）。即「本地随手 make build」
+# 与「发行构建」不是同一个东西，部署时无从察觉。
+# 需要极简构建时显式 HOMED_TAGS= 关掉。
+HOMED_TAGS ?= onnxruntime
+TAG_ARGS = $(if $(HOMED_TAGS),-tags $(HOMED_TAGS),)
 
 BINARY=homed
 CLI_BINARY=waiter
@@ -17,8 +30,10 @@ all: build build-cli
 
 build:
 	@mkdir -p $(BUILD_DIR)
-	CGO_ENABLED=1 $(GO) build -trimpath -installsuffix dynlink -ldflags '$(LDFLAGS)' -o $(BUILD_DIR)/$(BINARY) ./cmd/homed/
-	@echo "Built: $(BUILD_DIR)/$(BINARY) ($(VERSION))"
+	CGO_ENABLED=1 $(GO) build $(TAG_ARGS) -trimpath -installsuffix dynlink -ldflags '$(LDFLAGS)' -o $(BUILD_DIR)/$(BINARY) ./cmd/homed/
+	@echo "Built: $(BUILD_DIR)/$(BINARY) ($(VERSION), tags='$(HOMED_TAGS)')"
+	@go version -m $(BUILD_DIR)/$(BINARY) | grep -q 'onnxruntime' \
+		|| echo "WARN: 本次构建不含 onnxruntime，本地向量空间不可用（HOMED_TAGS= 显式关掉时才符合预期）"
 
 build-cli:
 	@mkdir -p $(BUILD_DIR)

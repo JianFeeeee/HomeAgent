@@ -158,6 +158,7 @@ func (g *GraphDB) initSchema() error {
 			fingerprint TEXT DEFAULT '',
 			source TEXT DEFAULT '',
 			tool TEXT DEFAULT '',
+			scene TEXT DEFAULT '',
 			created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
 			updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 		)`,
@@ -196,9 +197,12 @@ func (g *GraphDB) initSchema() error {
 			scene_id INTEGER NOT NULL,
 			kind TEXT NOT NULL,
 			ref_id INTEGER NOT NULL,
+			-- ref_text 承载非数值主键的节点 id（块/文档的 id 是字符串），
+			-- 数值型节点（relation/entity）为空串。
+			ref_text TEXT NOT NULL DEFAULT '',
 			weight REAL DEFAULT 1.0,
 			created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-			UNIQUE(scene_id, kind, ref_id)
+			UNIQUE(scene_id, kind, ref_id, ref_text)
 		)`,
 		`CREATE INDEX IF NOT EXISTS idx_scene_refs_scene ON scene_refs(scene_id, kind)`,
 		`CREATE INDEX IF NOT EXISTS idx_scene_refs_ref ON scene_refs(kind, ref_id)`,
@@ -226,6 +230,40 @@ func (g *GraphDB) initSchema() error {
 	tx.Exec(`ALTER TABLE relations ADD COLUMN sentence_ref TEXT DEFAULT ''`)
 	// 迁移2：为新表添加 sentence_id 列（必须放在索引创建之前，否则旧表无此列导致索引创建失败）
 	tx.Exec(`ALTER TABLE relations ADD COLUMN sentence_id INTEGER DEFAULT 0`)
+	// 迁移4：记忆块加场景列（旧表已存在时 CREATE TABLE IF NOT EXISTS 不会补列）
+	tx.Exec(`ALTER TABLE memory_blocks ADD COLUMN scene TEXT DEFAULT ''`)
+	// 迁移5：场景引用加 ref_text（块/文档的 id 是字符串）。
+	//
+	// 不能只 `ALTER TABLE ADD COLUMN`：REF_TEXT 同时参与唯一约束
+	// （scene_id, kind, ref_id, ref_text），而 ALTER 改不了已有约束。旧约束
+	// (scene_id, kind, ref_id) 会让「同一场景下的第 2 个块」直接冲突——
+	// 表现是块写不进场景、且只在有多个块时才出现。
+	// 因此按需整表重建（表小、操作幂等）：判定依据是 ref_text 列是否存在。
+	if !columnExists(tx, "scene_refs", "ref_text") {
+		migrate := []string{
+			`CREATE TABLE scene_refs_new (
+				id INTEGER PRIMARY KEY AUTOINCREMENT,
+				scene_id INTEGER NOT NULL,
+				kind TEXT NOT NULL,
+				ref_id INTEGER NOT NULL,
+				ref_text TEXT NOT NULL DEFAULT '',
+				weight REAL DEFAULT 1.0,
+				created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+				UNIQUE(scene_id, kind, ref_id, ref_text)
+			)`,
+			`INSERT INTO scene_refs_new (id, scene_id, kind, ref_id, ref_text, weight, created_at)
+			 SELECT id, scene_id, kind, ref_id, '', weight, created_at FROM scene_refs`,
+			`DROP TABLE scene_refs`,
+			`ALTER TABLE scene_refs_new RENAME TO scene_refs`,
+			`CREATE INDEX IF NOT EXISTS idx_scene_refs_scene ON scene_refs(scene_id, kind)`,
+			`CREATE INDEX IF NOT EXISTS idx_scene_refs_ref ON scene_refs(kind, ref_id)`,
+		}
+		for _, m := range migrate {
+			if _, err := tx.Exec(m); err != nil {
+				return fmt.Errorf("migrate scene_refs: %w", err)
+			}
+		}
+	}
 	// 迁移3：将现有 sentence_ref 数据迁移到 sentences 表
 	tx.Exec(`INSERT OR IGNORE INTO sentences (text) SELECT DISTINCT sentence_ref FROM relations WHERE sentence_ref != ''`)
 	tx.Exec(`UPDATE relations SET sentence_id = (SELECT id FROM sentences WHERE text = relations.sentence_ref) WHERE sentence_ref != ''`)
@@ -822,6 +860,10 @@ func (g *GraphDB) Purge(criteria map[string]string, mode string) (int, error) {
 			SELECT DISTINCT source_id FROM relations
 			UNION SELECT DISTINCT target_id FROM relations)`)
 
+		// 关系没了，它的场景引用必须跟着对齐：残留引用会让场景看着很大、
+		// 召回却是空的（SceneStats 也跟着说谎）。
+		g.purgeStaleSceneRefsLocked()
+
 		return int(n), nil
 	}
 
@@ -833,6 +875,9 @@ func (g *GraphDB) Purge(criteria map[string]string, mode string) (int, error) {
 		return 0, err
 	}
 	n, _ := result.RowsAffected()
+	// 软删除也要摘掉场景引用：RecallByScene 只返回 status='active'，
+	// 留着引用只会在场景里挂一条永远召不回的幽灵。
+	g.purgeStaleSceneRefsLocked()
 	return int(n), nil
 }
 
@@ -1192,4 +1237,59 @@ func placeholders(n int) string {
 		b = append(b, '?')
 	}
 	return string(b)
+}
+
+// FindRelations 按实体名与关系类型**精确**查找活跃关系（带原句）。
+//
+// 为什么需要精确查找：memory_edit 走的是「按包含匹配 Purge + 写入新三元组」，
+// 中间那一步会把旧关系的附加信息（置信度、场景、原句）一起丢掉。
+// 编辑前先精确取回这条关系，才能把这些信息带过去。
+func (g *GraphDB) FindRelations(subject, relationType, object string) ([]Relation, error) {
+	g.mu.RLock()
+	defer g.mu.RUnlock()
+	rows, err := g.db.Query(
+		`SELECT r.id, r.source_id, r.target_id, e1.name, e2.name,
+		        r.relation_type, r.confidence, r.status, r.session_id,
+		        r.turn_id, r.created_at, COALESCE(r.date_bucket, ''),
+		        COALESCE(r.sentence_id, 0), COALESCE(sn.text, '')
+		 FROM relations r
+		 JOIN entities e1 ON r.source_id = e1.id
+		 JOIN entities e2 ON r.target_id = e2.id
+		 LEFT JOIN sentences sn ON r.sentence_id = sn.id
+		 WHERE r.status = 'active' AND e1.name = ? AND r.relation_type = ? AND e2.name = ?
+		 ORDER BY r.id DESC`, subject, relationType, object)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []Relation
+	for rows.Next() {
+		var rel Relation
+		if err := rows.Scan(&rel.ID, &rel.SourceID, &rel.TargetID, &rel.SourceName, &rel.TargetName,
+			&rel.RelationType, &rel.Confidence, &rel.Status, &rel.SessionID,
+			&rel.TurnID, &rel.CreatedAt, &rel.DateBucket, &rel.SentenceID, &rel.SentenceText); err != nil {
+			return nil, err
+		}
+		out = append(out, rel)
+	}
+	return out, rows.Err()
+}
+
+// columnExists 判断表里是否已有某列（SQLite 的 ALTER 无法改约束，只能按列探测后重建）。
+func columnExists(tx *sql.Tx, table, column string) bool {
+	rows, err := tx.Query(`SELECT name FROM pragma_table_info(?)`, table)
+	if err != nil {
+		return false
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var name string
+		if err := rows.Scan(&name); err != nil {
+			return false
+		}
+		if name == column {
+			return true
+		}
+	}
+	return false
 }
