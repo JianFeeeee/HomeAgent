@@ -63,9 +63,10 @@ func (a *Agent) buildTaskMemoryContext(f *TaskFrame, input string, maxTokens int
 	if f.Evt != nil && f.Evt.Source != "" {
 		trigger = "input:" + f.Evt.Source
 	}
-	// 涌现场景：不是谁声明的，而是这轮的场面指纹与既有场景簇匹配出来的。
-	if s := a.resolveTurnScene(f, ""); s != "" {
-		scenes = append(scenes, s)
+	// 场景集合 = 声明（主动）+ 涌现（被动）两条路的并集。
+	turn := a.resolveTurnScenes(f, "")
+	for _, k := range turn.Keys {
+		scenes = append(scenes, k)
 	}
 	return a.recallText(query, trigger, maxTokens, scenes)
 }

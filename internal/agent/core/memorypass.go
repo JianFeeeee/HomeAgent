@@ -205,46 +205,56 @@ func partOfDay(t time.Time) string {
 	}
 }
 
-// resolveTurnScene 解析本轮所属的**涌现场景**，一轮只解析一次。
+// resolveTurnScenes 解析本轮的场景集合，**同时走主动与被动两条路**：
 //
-// 与「声明场景」（sceneKeysFor：注入点 > 通道 > 工具）的关系：两者并存且都被
-// 用于召回。声明是"我知道这是哪个场面"，涌现是"这轮看起来像哪个场面"——
-// 后者不需要任何人知道场景这回事。
+//	主动（声明）：注入点/通道/工具声明了"这是哪个场面" → 场景存在化并喂入
+//	              本轮指纹（声明场景因此慢慢学会自己认自己）
+//	被动（涌现）：场面指纹聚类 → 同类指纹重复出现时自己长出场景
+//
+// 返回结果的 Primary 用于**写**（优先细粒度的涌现场景，首次交互退到声明场景
+// 兜底），Keys 用于**读**（两条路的并集，去重）。
 //
 // 解析会**写库**（场景强化/长出），所以必须一轮一次：多调一次就多给场景记
 // 一次强度，"工具调得多"会被误读成"这个场面更常出现"。
-func (a *Agent) resolveTurnScene(f *TaskFrame, tool string) string {
+func (a *Agent) resolveTurnScenes(f *TaskFrame, tool string) memory.TurnScene {
+	var out memory.TurnScene
 	if a == nil || a.memory == nil {
-		return ""
+		return out
 	}
-	if f == nil {
-		return a.emergentSceneFor(nil, "", tool)
+	if f != nil && f.sceneDone {
+		return f.turnScene
 	}
-	if f.sceneDone {
-		return f.Scene
-	}
-	f.Scene = a.emergentSceneFor(f.Evt, f.CleanInput, tool)
-	f.sceneDone = true
-	return f.Scene
-}
 
-// emergentSceneFor 采集指纹并交给图库做「归属或长出」。
-func (a *Agent) emergentSceneFor(evt *agentIO.InputEvent, cleanInput, tool string) string {
-	feats := situationFeaturesFor(evt, cleanInput, tool)
-	if len(feats) == 0 {
-		return ""
-	}
+	declared := sceneKeysFor(evtOf(f), tool)
+	feats := situationFeaturesFor(evtOf(f), cleanInputOf(f), tool)
 	sig := memory.NewSituation(feats...)
-	if sig.Empty() {
-		return ""
-	}
-	key, created, err := a.memory.EnterScene(sig)
+
+	turn, err := a.memory.EnterSceneWithHint(sig, declared)
 	if err != nil {
 		log.Printf("[agent] scene enter failed: %v", err)
+		// 出错时至少把声明场景交给召回，不让整条召回链一起失效
+		turn = memory.TurnScene{Keys: declared}
+		if len(declared) > 0 {
+			turn.Primary = declared[0]
+		}
+	}
+	if turn.Emergent {
+		log.Printf("[agent] 场景涌现/命中: %q（指纹 %v）", turn.Primary, sig.Keys())
+	} else if len(turn.DeclaredCreated) > 0 {
+		log.Printf("[agent] 声明场景成立: %v（指纹 %v）", turn.DeclaredCreated, sig.Keys())
+	}
+	if f != nil {
+		f.turnScene = turn
+		f.Scene = turn.Primary
+		f.sceneDone = true
+	}
+	return turn
+}
+
+// cleanInputOf 安全取出清洗后输入（f 为 nil 时为空）。
+func cleanInputOf(f *TaskFrame) string {
+	if f == nil {
 		return ""
 	}
-	if created {
-		log.Printf("[agent] 场景涌现: %q（由场面指纹 %v 长出）", key, sig.Keys())
-	}
-	return key
+	return f.CleanInput
 }

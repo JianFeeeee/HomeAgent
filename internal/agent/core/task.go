@@ -30,6 +30,7 @@ import (
 	agentAPI "gitcode.com/JianFeeeee/HomeAgent/internal/agent/api"
 	agentIO "gitcode.com/JianFeeeee/HomeAgent/internal/agent/io"
 	"gitcode.com/JianFeeeee/HomeAgent/internal/events"
+	"gitcode.com/JianFeeeee/HomeAgent/internal/memory"
 	sdk "gitcode.com/JianFeeeee/HomeAgent/internal/sdk"
 	pubsdk "gitcode.com/JianFeeeee/homeagent-sdk/sdk"
 )
@@ -115,6 +116,7 @@ type TaskFrame struct {
 	// sceneDone 标记是否已解析过——一轮只解析一次：多解析一次就多给场景
 	// 加一次强度，「工具调得多」会被误当成「这个场面更常出现」。
 	Scene     string
+	turnScene memory.TurnScene
 	sceneDone bool
 
 	// 游标与终态
@@ -722,7 +724,10 @@ func denialResultText(ctx *sdk.StageContext, toolName string) string {
 
 // stepToolExec 执行工具。**临界区**：见设计文档 §4.3。
 func (a *Agent) stepToolExec(f *TaskFrame) stepOutcome {
-	result := a.executeToolCall(f.CurTool, f.OutputChannel, f.Scene)
+	// 执行工具前先解析本轮场景：写侧要用它给记忆自动挂场景（主动+被动两条路），
+	// 而工具步不一定走到下面的召回分支，所以不能等那里再解析。
+	turn := a.resolveTurnScenes(f, f.CurTool.Name)
+	result := a.executeToolCall(f.CurTool, f.OutputChannel, turn.Keys...)
 	f.CurResult = result
 	f.ToolResults = append(f.ToolResults, ToolResultItem{Name: f.CurTool.Name, Output: result})
 	log.Printf("[agent] tool %s result: %s", f.CurTool.Name, truncateStr(result, 100))
@@ -762,9 +767,11 @@ func (a *Agent) stepToolAfter(f *TaskFrame) stepOutcome {
 			// 工具路召回的场景有两个来源：本轮输入的场面（如 chan:qq）
 			// 与这一步工具本身（如 tool:qq_get_message）。带上工具场景，
 			// 才能让「凡是要回 QQ 消息」这类规则在该步被取回。
+			// 召回用两条路的并集：声明场景（注入点/通道/工具）+ 涌现场景
 			scenes := sceneKeysFor(f.Evt, tc.Name)
-			if s := a.resolveTurnScene(f, tc.Name); s != "" {
-				scenes = append(scenes, s)
+			turn := a.resolveTurnScenes(f, tc.Name)
+			for _, k := range turn.Keys {
+				scenes = append(scenes, k)
 			}
 			recallText = a.memoryPass(query, "tool:"+tc.Name, needPrune, needRecall, scenes).RecallText
 		}
