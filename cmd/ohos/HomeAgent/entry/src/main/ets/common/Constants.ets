@@ -17,6 +17,18 @@ export const DEFAULT_WS_PORT: number = 9890;
 /** 聊天历史首屏条数：只拉最新 N 条，向上滚动触顶再加载更早的 */
 export const CHAT_PAGE_SIZE: number = 40;
 
+// ===== AppStorage 跨页面信号键 =====
+//
+// 未连接后端时的“入口可达性”靠这三个键串起来：聊天空态按钮 → 切主 Tab →
+// 设置页打开连接二级页。不用组件回调是因为按钮与目标分属不同的 Swiper 子页，
+// 中间还隔着 Index，逐层传回调会把两个无关页面耦在一起。
+/** 当前是否已配置并激活后端连接（空态/入口的响应式判断） */
+export const K_HAS_CONN: string = 'hasConn';
+/** 外部请求切换主 Tab（-1 = 无请求），由 Index 监听 */
+export const K_REQUESTED_TAB: string = 'requestedTab';
+/** 请求设置页打开某个二级页（空串 = 无请求），由 SettingsPage 监听 */
+export const K_SETTINGS_SUB: string = 'settingsSubRequest';
+
 // ===== sakura / frost palette (style.css :root) =====
 export const COLOR_SAKURA_100: string = 'rgba(10, 89, 247, 0.1)';
 export const COLOR_SAKURA_200: string = 'rgba(10, 89, 247, 0.16)';

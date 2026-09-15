@@ -81,6 +81,29 @@ func (a *Agent) toolOutputForQuery(toolName, raw string) string {
 	return raw
 }
 
+// recallMsgMarker 是工具触发召回时注入的 system 消息前缀。
+// 用它做去重与替换的识别标（与用户/中断的 system 消息区分开）。
+const recallMsgMarker = "【记忆召回】"
+
+// appendOrReplaceRecall 把一段召回文本作为 system 消息挂到消息末尾。
+//
+// 同一任务内多次触发（如模型多次调用 qq_get_message）时**替换**上一条召回，
+// 而不是累加：否则召回会线性叠进 prompt，把上下文与 token 预算越挤越紧。
+// 替换位置固定在末尾，不影响 tool/assistant 消息的配对。
+func appendOrReplaceRecall(msgs []agentAPI.Message, recallText string) []agentAPI.Message {
+	if recallText == "" {
+		return msgs
+	}
+	full := recallMsgMarker + "\n" + recallText
+	for i := len(msgs) - 1; i >= 0; i-- {
+		if msgs[i].Role == "system" && strings.HasPrefix(msgs[i].Content, recallMsgMarker) {
+			msgs[i].Content = full
+			return msgs
+		}
+	}
+	return append(msgs, agentAPI.Message{Role: "system", Content: full})
+}
+
 // dropContinuationPlaceholders 移除此前由本机制插入的 user 占位。
 //
 // 为什么必须移除而不仅仅是“不再追加”：`msgs` 在循环外创建、循环内只增不减，

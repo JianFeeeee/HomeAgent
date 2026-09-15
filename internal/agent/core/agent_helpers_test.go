@@ -235,3 +235,58 @@ func TestGetFloatInt(t *testing.T) {
 		t.Errorf("expected 5.0, got %f", got)
 	}
 }
+
+// TestDocToTriplesDropsNoiseEntities 钉住 doc→graph 的噪音闸门。
+//
+// 背景：doc→graph 在 1cb3e87 从「CutExact 滑窗词链」换成 NLP 依存提取器后，
+// 唯一还拦常用词的那层（CutExact：去停用词 + validEntityName）失去调用点，
+// 闸门只剩 validEntityName——它只管名字像不像名字，不管名字是不是常用词。
+// 实测生产库里因此攒下「文档 --主题--> 来自 N 个来源的 M 条对话 …」这类
+// 模板回声，以及 context_archived 这个内部标记。
+func TestDocToTriplesDropsNoiseEntities(t *testing.T) {
+	doc := &document.Doc{
+		Summary: "来自 1 个来源的 2 条对话 (agent) 涉及: qq, 通道",
+		Content: "",
+		Source:  "context_archived",
+	}
+	triples := docToTriples(doc, nil)
+
+	for _, tr := range triples {
+		if memory.IsNoiseEntity(tr.Subject) || memory.IsNoiseEntity(tr.Object) {
+			t.Errorf("docToTriples 漏出噪音实体: %+v", tr)
+		}
+	}
+
+	// 模板摘要不当「主题」、context_archived 不当「来源」：两条模板三元组都该被拦下。
+	for _, tr := range triples {
+		if tr.Relation == "主题" {
+			t.Errorf("模板摘要被写成主题: %+v", tr)
+		}
+		if tr.Relation == "来源" && tr.Object == "context_archived" {
+			t.Errorf("归档内部标记被写成来源: %+v", tr)
+		}
+	}
+}
+
+// TestDocToTriplesKeepsTemplateAnchors 保证闸门没把正常的模板三元组一起误杀。
+func TestDocToTriplesKeepsTemplateAnchors(t *testing.T) {
+	doc := &document.Doc{
+		Summary: "多轮对话",
+		Content: "",
+		Source:  "qq",
+	}
+	triples := docToTriples(doc, nil)
+
+	var hasTopic, hasSource bool
+	for _, tr := range triples {
+		if tr.Subject == "文档" && tr.Relation == "主题" && tr.Object == "多轮对话" {
+			hasTopic = true
+		}
+		if tr.Subject == "文档" && tr.Relation == "来源" && tr.Object == "qq" {
+			hasSource = true
+		}
+	}
+	if !hasTopic || !hasSource {
+		t.Errorf("正常模板三元组被误杀: topic=%v source=%v, triples=%+v", hasTopic, hasSource, triples)
+	}
+}

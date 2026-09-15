@@ -110,7 +110,7 @@ flowchart TB
     end
     subgraph D[② Document 文件记忆]
         DS[DocStore JSON+TF-IDF]
-        Q1[Query 摘要自动注入] -->|【相关记忆文档】| SP
+        Q1[QueryScored+crossModalMarkdown] -->|【跨模态相关记忆】| SP
         Q2[doc_query LLM主动召回] -->|Consume+删除源| DS
         Q2 -->|原始时间戳写入上下文| RC
         CD[FindColdDocs 72h] -->|docToTriples| G

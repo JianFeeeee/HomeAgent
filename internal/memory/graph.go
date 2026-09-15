@@ -4,12 +4,27 @@ import (
 	"database/sql"
 	"encoding/json"
 	"fmt"
+	"log"
 	"strings"
 	"sync"
 	"time"
 
 	_ "github.com/mattn/go-sqlite3"
 )
+
+// maxKeywordEntities 是单个关键词能取回的实体上限。
+//
+// 无上限时，一个宽关键词（"QQ"）会命中上百个实体并逐个参与深度扩展，
+// 把一次召回变成一次全表扫描。
+const maxKeywordEntities = 50
+
+// maxAdjacentRelations 是深度扩展里**每层**读取的关系上限。
+const maxAdjacentRelations = 200
+
+// maxFullRecallEntities 是「无关键词全量读取」路径的实体上限。
+// 该路径只服务于内部整备（Indexer.Sync / 实体合并检测），并非用户检索；
+// 无上限时一张大图会被整表 read 进内存。超限时 GraphDB.Recall 会记日志。
+const maxFullRecallEntities = 10000
 
 type Entity struct {
 	ID           int64     `json:"id"`
@@ -49,6 +64,18 @@ type Triple struct {
 	// 媒体不再靠正文 marker 反解：结构化字段直接给出归属，
 	// 由调用方（core）把它变成 L3 一等块并与句子建立结构边。
 	MediaDigests []string `json:"media_digests,omitempty"`
+	// Scene 是这条记忆所属的**场景键**（可空）。写完后该三元组的两个实体
+	// 与这条关系都会被挂到这个场景上，场景重现时按场景召回。
+	// 约定见 memory.NormalizeSceneKey：`chan:qq`、`chan:qq/peer:group_123`。
+	Scene string `json:"scene,omitempty"`
+	// Scenes 是同一批多场景挂载（可空）：主动**声明**的场景（如 chan:qq）
+	// 与被动**涌现**出来的场景（如 auto:chan:qq+peer_group:1027）可以同时挂。
+	//
+	// 为什么要两条都挂：声明路是"我知道这是哪个场面"，稳定、可读、可兜底；
+	// 涌现路是"这轮看起来像哪个场面"，细粒度、不需要任何人声明。
+	// 只挂一条的代价：只挂声明则细粒度唤起丢失，只挂涌现则首次交互（场景
+	// 还没长出来）没有兜底。
+	Scenes []string `json:"scenes,omitempty"`
 }
 
 type GraphDB struct {
@@ -104,6 +131,10 @@ func (g *GraphDB) initSchema() error {
 	}
 	defer tx.Rollback()
 
+	// scene_features 是场面指纹的特征集合：场景 = 一组反复共现的可观察特征，
+	// 相似度按加权 Jaccard 算（权重由特征种类决定，chan/peer 最强）。
+	// situation_evidence 记录一次性指纹的足迹：同类指纹重复出现到
+	// minSceneEvidence 次才长出场景。
 	schemas := []string{
 		`CREATE TABLE IF NOT EXISTS entities (
 			id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -148,6 +179,7 @@ func (g *GraphDB) initSchema() error {
 			fingerprint TEXT DEFAULT '',
 			source TEXT DEFAULT '',
 			tool TEXT DEFAULT '',
+			scene TEXT DEFAULT '',
 			created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
 			updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 		)`,
@@ -166,18 +198,71 @@ func (g *GraphDB) initSchema() error {
 			summary    TEXT DEFAULT '',
 			created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 		)`,
+		// 场景引用：给「记忆节点」再赋一层**触发条件**。
+		//
+		// 为什么需要它：词法/向量召回都靠「字面或语义相似」，而带条件的规则
+		// （「回 QQ 消息不要用 Markdown」「老大消息优先」）在措辞不重合时根本
+		// 召不回来。场景是这类记忆的**索引键**：节点记住自己「属于哪个场面」，
+		// 场面重现（又来一条 QQ 消息）时直接按场景取回，不靠字面命中。
+		`CREATE TABLE IF NOT EXISTS scenes (
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			key TEXT UNIQUE NOT NULL,
+			-- strength 是场景被重现的次数：场景不是被声明出来的，是被反复遇到
+			-- 长出来的（见 EnterScene / minSceneEvidence）。
+			strength INTEGER DEFAULT 1,
+			-- origin 区分两条路：'declared' 是主动声明出来的（键由人/插件给，
+			-- 召走精确+前缀匹配），'emergent' 是被动涌现的（召走相似度）。
+			-- 两者刻意**分开**参与匹配：若让声明场景也吸收整轮指纹，
+			-- 它会在相似度上压过一切，被动路就再也长不出更细的场面了。
+			origin TEXT NOT NULL DEFAULT 'emergent',
+			created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+			updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+		)`,
+		`CREATE TABLE IF NOT EXISTS scene_features (
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			scene_id INTEGER NOT NULL,
+			feature TEXT NOT NULL,
+			weight REAL DEFAULT 1.0,
+			created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+			UNIQUE(scene_id, feature)
+		)`,
+		`CREATE TABLE IF NOT EXISTS situation_evidence (
+			label TEXT PRIMARY KEY,
+			count INTEGER DEFAULT 1,
+			updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+		)`,
+		`CREATE INDEX IF NOT EXISTS idx_scene_features_scene ON scene_features(scene_id)`,
+		`CREATE INDEX IF NOT EXISTS idx_scene_features_feature ON scene_features(feature)`,
+		// ref_id 的解释由 kind 决定（relation / entity）。这里不用外键：
+		// 节点可能先于引用被清理（PurgeNoise/PurgeOrphans），悬空引用由
+		// 读取侧的 JOIN 自然过滤掉，而级联删除会把清理变成一个跨表事务。
+		`CREATE TABLE IF NOT EXISTS scene_refs (
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			scene_id INTEGER NOT NULL,
+			kind TEXT NOT NULL,
+			ref_id INTEGER NOT NULL,
+			-- ref_text 承载非数值主键的节点 id（块/文档的 id 是字符串），
+			-- 数值型节点（relation/entity）为空串。
+			ref_text TEXT NOT NULL DEFAULT '',
+			weight REAL DEFAULT 1.0,
+			-- decayed_at 是半衰期衰减的计时起点：每个引用至多每 halfLife
+			-- 衰减一次（见 DecaySceneRefs）。重复写入/强化会把它刷成当前时刻。
+			decayed_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+			created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+			UNIQUE(scene_id, kind, ref_id, ref_text)
+		)`,
+		`CREATE INDEX IF NOT EXISTS idx_scene_refs_scene ON scene_refs(scene_id, kind)`,
+		`CREATE INDEX IF NOT EXISTS idx_scene_refs_ref ON scene_refs(kind, ref_id)`,
 		`CREATE INDEX IF NOT EXISTS idx_memory_blocks_modality ON memory_blocks(modality)`,
 		`CREATE INDEX IF NOT EXISTS idx_memory_blocks_digest ON memory_blocks(payload_digest)`,
 		`CREATE INDEX IF NOT EXISTS idx_memory_block_edges_source ON memory_block_edges(source_kind, source_id)`,
 		`CREATE INDEX IF NOT EXISTS idx_memory_block_edges_target ON memory_block_edges(target_kind, target_id)`,
-		`CREATE INDEX IF NOT EXISTS idx_entity_name ON entities(name)`,
 		`CREATE INDEX IF NOT EXISTS idx_entity_type ON entities(type)`,
 		`CREATE INDEX IF NOT EXISTS idx_relation_source ON relations(source_id)`,
 		`CREATE INDEX IF NOT EXISTS idx_relation_target ON relations(target_id)`,
 		`CREATE INDEX IF NOT EXISTS idx_relation_type ON relations(relation_type)`,
 		`CREATE INDEX IF NOT EXISTS idx_relation_status ON relations(status)`,
 		`CREATE INDEX IF NOT EXISTS idx_relation_session ON relations(session_id)`,
-		`CREATE INDEX IF NOT EXISTS idx_sentences_text ON sentences(text)`,
 	}
 
 	for _, s := range schemas {
@@ -190,6 +275,59 @@ func (g *GraphDB) initSchema() error {
 	tx.Exec(`ALTER TABLE relations ADD COLUMN sentence_ref TEXT DEFAULT ''`)
 	// 迁移2：为新表添加 sentence_id 列（必须放在索引创建之前，否则旧表无此列导致索引创建失败）
 	tx.Exec(`ALTER TABLE relations ADD COLUMN sentence_id INTEGER DEFAULT 0`)
+	// 迁移4：记忆块加场景列（旧表已存在时 CREATE TABLE IF NOT EXISTS 不会补列）
+	tx.Exec(`ALTER TABLE memory_blocks ADD COLUMN scene TEXT DEFAULT ''`)
+	// 迁移6：旧 scenes 表加 strength 列（涌现侧的强度计数）
+	tx.Exec(`ALTER TABLE scenes ADD COLUMN strength INTEGER DEFAULT 1`)
+	// 迁移7：旧 scenes 表加 origin。既有行都是声明/存量引导来的（建表时还没有
+	// 涌现机制），标成 declared；新建的涌现场景在 createSceneLocked 里写 emergent。
+	if !columnExists(tx, "scenes", "origin") {
+		tx.Exec(`ALTER TABLE scenes ADD COLUMN origin TEXT NOT NULL DEFAULT 'emergent'`)
+		tx.Exec(`UPDATE scenes SET origin = 'declared'`)
+	}
+	// 迁移5：场景引用加 ref_text（块/文档的 id 是字符串）。
+	//
+	// 不能只 `ALTER TABLE ADD COLUMN`：REF_TEXT 同时参与唯一约束
+	// （scene_id, kind, ref_id, ref_text），而 ALTER 改不了已有约束。旧约束
+	// (scene_id, kind, ref_id) 会让「同一场景下的第 2 个块」直接冲突——
+	// 表现是块写不进场景、且只在有多个块时才出现。
+	// 因此按需整表重建（表小、操作幂等）：判定依据是 ref_text 列是否存在。
+	if !columnExists(tx, "scene_refs", "ref_text") {
+		migrate := []string{
+			`CREATE TABLE scene_refs_new (
+				id INTEGER PRIMARY KEY AUTOINCREMENT,
+				scene_id INTEGER NOT NULL,
+				kind TEXT NOT NULL,
+				ref_id INTEGER NOT NULL,
+				ref_text TEXT NOT NULL DEFAULT '',
+				weight REAL DEFAULT 1.0,
+				created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+				UNIQUE(scene_id, kind, ref_id, ref_text)
+			)`,
+			`INSERT INTO scene_refs_new (id, scene_id, kind, ref_id, ref_text, weight, created_at)
+			 SELECT id, scene_id, kind, ref_id, '', weight, created_at FROM scene_refs`,
+			`DROP TABLE scene_refs`,
+			`ALTER TABLE scene_refs_new RENAME TO scene_refs`,
+			`CREATE INDEX IF NOT EXISTS idx_scene_refs_scene ON scene_refs(scene_id, kind)`,
+			`CREATE INDEX IF NOT EXISTS idx_scene_refs_ref ON scene_refs(kind, ref_id)`,
+		}
+		for _, m := range migrate {
+			if _, err := tx.Exec(m); err != nil {
+				return fmt.Errorf("migrate scene_refs: %w", err)
+			}
+		}
+	}
+	// 迁移8：scene_refs 加 decayed_at（半衰期衰减的计时起点）。
+	// ALTER 不接受非常量默认值，先加可空列再用 created_at 回填，
+	// 于是既有引用的「上一次衰减」就定在它被写入的时刻，不会被立即清掉。
+	if !columnExists(tx, "scene_refs", "decayed_at") {
+		tx.Exec(`ALTER TABLE scene_refs ADD COLUMN decayed_at TIMESTAMP`)
+		tx.Exec(`UPDATE scene_refs SET decayed_at = created_at WHERE decayed_at IS NULL`)
+	}
+	// 冗余索引清理：entities.name 与 sentences.text 上的 UNIQUE 已隐含等价索引
+	// （sqlite_autoindex_*），再建一个同列索引只增加写放大，查询不会用到。
+	tx.Exec(`DROP INDEX IF EXISTS idx_entity_name`)
+	tx.Exec(`DROP INDEX IF EXISTS idx_sentences_text`)
 	// 迁移3：将现有 sentence_ref 数据迁移到 sentences 表
 	tx.Exec(`INSERT OR IGNORE INTO sentences (text) SELECT DISTINCT sentence_ref FROM relations WHERE sentence_ref != ''`)
 	tx.Exec(`UPDATE relations SET sentence_id = (SELECT id FROM sentences WHERE text = relations.sentence_ref) WHERE sentence_ref != ''`)
@@ -255,10 +393,14 @@ func (g *GraphDB) migrateRelationUnique(tx *sql.Tx) error {
 	return nil
 }
 
-// Commit 把三元组写入图库，返回新建的实体数与关系数。
 // Path 返回本库的存储路径（父 agent 用它为驻留子打开**受限句柄**）。
 func (g *GraphDB) Path() string { return g.dbPath }
 
+// Commit 把三元组写入图库，返回通过实体名校验并写入/刷新的实体数与**新建**的关系数。
+//
+// 两个计数的语义刻意不同，因为上游只用它们判断「有没有东西写进去」：
+// 实体计数含已存在实体的 mention_count 刷新（见 upsertEntity），
+// 关系计数只统计真正新建的关系（已存在则仅刷新 confidence）。
 func (g *GraphDB) Commit(triples []Triple, sessionID string, turnID int) (int, int, error) {
 	_, ec, rc, err := g.commit(triples, sessionID, turnID, false)
 	return ec, rc, err
@@ -355,24 +497,27 @@ func (g *GraphDB) commit(triples []Triple, sessionID string, turnID int, trackSe
 			}
 		}
 
-		var existing int
+		var existing int64
 		err = tx.QueryRow(
-			`SELECT 1 FROM relations WHERE source_id = ? AND target_id = ? AND relation_type = ? AND session_id = ?`,
+			`SELECT id FROM relations WHERE source_id = ? AND target_id = ? AND relation_type = ? AND session_id = ?`,
 			sourceID, targetID, t.Relation, sessionID,
 		).Scan(&existing)
+		var relID int64
 		if err == sql.ErrNoRows {
-			_, err = tx.Exec(
+			res, ierr := tx.Exec(
 				`INSERT INTO relations (source_id, target_id, relation_type, confidence, session_id, turn_id, date_bucket, sentence_id)
 				 VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
 				sourceID, targetID, t.Relation, confidence, sessionID, turnID, dateBucket, sentenceID,
 			)
-			if err != nil {
-				return nil, 0, 0, err
+			if ierr != nil {
+				return nil, 0, 0, ierr
 			}
+			relID, _ = res.LastInsertId()
 			relationsCreated++
 		} else if err != nil {
 			return nil, 0, 0, err
 		} else {
+			relID = existing
 			// 同一(会话内)三元组已存在：仅刷新置信度与时间戳，不重复计数
 			_, err = tx.Exec(
 				`UPDATE relations SET confidence = ?, updated_at = CURRENT_TIMESTAMP
@@ -381,6 +526,17 @@ func (g *GraphDB) commit(triples []Triple, sessionID string, turnID int, trackSe
 			)
 			if err != nil {
 				return nil, 0, 0, err
+			}
+		}
+
+		// 场景引用：写完关系立即把「关系 + 两端实体」挂到**每个**场景上
+		// （主动声明的 + 被动涌现的）。同一事务内完成，避免出现「关系写进去了
+		// 但场景引用丢了」——那会让这条记忆在后来的场景里永远召不回来，且无声无息。
+		if relID != 0 {
+			for _, sc := range effectiveScenes(t) {
+				if err := tagSceneTx(tx, sc, relID, []int64{sourceID, targetID}, confidence); err != nil {
+					return nil, 0, 0, err
+				}
 			}
 		}
 	}
@@ -409,6 +565,12 @@ func validEntityName(name string) bool {
 	return hasLetter
 }
 
+// upsertEntity 写入/刷新一个实体，返回 1 表示该实体**通过名校验并被写入或刷新**，
+// 0 表示名校验未通过。
+//
+// 注意返回值语义不是「新建数」：`ON CONFLICT DO UPDATE` 在更新时
+// RowsAffected 同样为 1，所以返回值等于「通过校验的 upsert 次数」。
+// 调用方（Commit）把它当「写入了几个实体」用，不是「新建了几个」。
 func (g *GraphDB) upsertEntity(tx *sql.Tx, name string, entityType string) (int, error) {
 	if !validEntityName(name) {
 		return 0, nil
@@ -442,9 +604,12 @@ func (g *GraphDB) Recall(keywords []string, seedEntities []string, depth int, se
 	result := &RecallResult{}
 
 	if len(keywords) == 0 && len(seedEntities) == 0 {
+		// 全量读取仅用于内部整备（Indexer.Sync / 实体合并检测），
+		// 必须加限额：无 LIMIT 时大图会被整表读进内存。
 		rows, err := g.db.Query(
 			`SELECT id, name, type, mention_count, created_at, updated_at
-			 FROM entities ORDER BY mention_count DESC`,
+			 FROM entities ORDER BY mention_count DESC LIMIT ?`,
+			maxFullRecallEntities,
 		)
 		if err != nil {
 			return nil, err
@@ -457,6 +622,9 @@ func (g *GraphDB) Recall(keywords []string, seedEntities []string, depth int, se
 				return nil, err
 			}
 			result.Entities = append(result.Entities, e)
+		}
+		if len(result.Entities) >= maxFullRecallEntities {
+			log.Printf("[graph] full recall 命中实体上限 %d，可能有实体未纳入", maxFullRecallEntities)
 		}
 
 		relRows, err := g.db.Query(
@@ -492,10 +660,25 @@ func (g *GraphDB) Recall(keywords []string, seedEntities []string, depth int, se
 	entityIDs := make(map[int64]bool)
 
 	for _, kw := range keywords {
+		// 相关度排序 + 限额。
+		//
+		// 此前这里既没有 ORDER BY 也没有 LIMIT：拿回来的顺序就是建表顺序
+		// （rowid 升序），于是注入进 prompt 的"前 5 个实体"是**最早创建的**，
+		// 越新越准的记忆越排后面被截掉（实测：输入「QQ回复格式」命中 148 个，
+		// 规则实体排第 32，前 5 里根本没有它）。
+		//
+		// 相关度分三层：完全相等 > 前缀命中 > 包含命中；同层按提及次数、
+		// 再按名字长度（短名更可能是实体本身而不是长描述）。
 		rows, err := g.db.Query(
 			`SELECT id, name, type, mention_count, created_at, updated_at
-			 FROM entities WHERE LOWER(name) LIKE ?`,
-			"%"+kw+"%",
+			 FROM entities WHERE LOWER(name) LIKE ?
+			 ORDER BY CASE
+			     WHEN LOWER(name) = LOWER(?) THEN 0
+			     WHEN LOWER(name) LIKE LOWER(?) || '%' THEN 1
+			     ELSE 2 END,
+			   mention_count DESC, LENGTH(name) ASC
+			 LIMIT ?`,
+			"%"+kw+"%", kw, kw, maxKeywordEntities,
 		)
 		if err != nil {
 			return nil, err
@@ -532,6 +715,14 @@ func (g *GraphDB) Recall(keywords []string, seedEntities []string, depth int, se
 		return result, nil
 	}
 
+	// seenRel 跨层去重。
+	//
+	// 每层都用**已累积的** entityIDs 查邻接关系，因此上一层刚产出、以及
+	// 两个已访问实体之间的关系会在下一层被重复查回并再次 append。
+	// 深度 2、稠密图上重复会淹没 memory_recall 的 10 条关系预算——
+	// 模型看到的是同一句话刷屏，真正的新关系被截断。
+	seenRel := make(map[int64]bool)
+
 	for depthLevel := 0; depthLevel < depth; depthLevel++ {
 		ids := make([]interface{}, 0, len(entityIDs))
 		for id := range entityIDs {
@@ -562,6 +753,11 @@ func (g *GraphDB) Recall(keywords []string, seedEntities []string, depth int, se
 			query += " AND r.session_id = ?"
 			allIDs = append(allIDs, sessionFilter)
 		}
+		// 每层限额：热实体（"文档"这类）的邻接可能是上千条，无上限时每层都
+		// 整片读进内存，而调用方（memory_recall 注入 10 条、自动注入只要实体名）
+		// 根本用不到。按置信度取最相关的一批。
+		query += " ORDER BY r.confidence DESC, r.updated_at DESC LIMIT ?"
+		allIDs = append(allIDs, maxAdjacentRelations)
 
 		relRows, err := g.db.Query(query, allIDs...)
 		if err != nil {
@@ -578,7 +774,10 @@ func (g *GraphDB) Recall(keywords []string, seedEntities []string, depth int, se
 				relRows.Close()
 				return nil, err
 			}
-			result.Relations = append(result.Relations, rel)
+			if !seenRel[rel.ID] {
+				seenRel[rel.ID] = true
+				result.Relations = append(result.Relations, rel)
+			}
 
 			if !entityIDs[rel.SourceID] {
 				newIDs[rel.SourceID] = true
@@ -743,9 +942,16 @@ func (g *GraphDB) Purge(criteria map[string]string, mode string) (int, error) {
 		}
 		n, _ := result.RowsAffected()
 
-		g.db.Exec(`DELETE FROM entities WHERE id NOT IN (
-			SELECT DISTINCT source_id FROM relations
-			UNION SELECT DISTINCT target_id FROM relations)`)
+		// 这里**不再**顺手全局删孤儿实体。
+		//
+		// 原来那句 `DELETE FROM entities WHERE id NOT IN (relations 两端)` 是与
+		// 调用方意图无关的全局副作用：memory_edit 只想去掉一条关系，却可能把
+		// 图里其它孤零零的实体一并清掉。孤儿清理交给 PurgeOrphans
+		// （显式、可 dry-run、有计数与审计），一次改动只做一件事。
+		//
+		// 关系没了，它的场景引用必须跟着对齐：残留引用会让场景看着很大、
+		// 召回却是空的（SceneStats 也跟着说谎）。
+		g.purgeStaleSceneRefsLocked()
 
 		return int(n), nil
 	}
@@ -758,6 +964,9 @@ func (g *GraphDB) Purge(criteria map[string]string, mode string) (int, error) {
 		return 0, err
 	}
 	n, _ := result.RowsAffected()
+	// 软删除也要摘掉场景引用：RecallByScene 只返回 status='active'，
+	// 留着引用只会在场景里挂一条永远召不回的幽灵。
+	g.purgeStaleSceneRefsLocked()
 	return int(n), nil
 }
 
@@ -1047,6 +1256,8 @@ func (g *GraphDB) Archive(days int) (int, error) {
 
 // ClearSentenceID 清除指定关系的 sentence_id（LLM复审后解除句子引用）
 func (g *GraphDB) ClearSentenceID(relationID int64) error {
+	g.mu.Lock()
+	defer g.mu.Unlock()
 	_, err := g.db.Exec(
 		`UPDATE relations SET sentence_id = 0, updated_at = CURRENT_TIMESTAMP WHERE id = ?`,
 		relationID,
@@ -1062,6 +1273,12 @@ func (g *GraphDB) ClearSentenceID(relationID int64) error {
 func (g *GraphDB) CleanupOrphanedSentences() (int, error) {
 	g.mu.Lock()
 	defer g.mu.Unlock()
+	return g.cleanupOrphanedSentencesLocked()
+}
+
+// cleanupOrphanedSentencesLocked 是 CleanupOrphanedSentences 的加锁内联版，
+// 供已在写锁内的调用方（PurgeNoise）复用，避免自锁死。
+func (g *GraphDB) cleanupOrphanedSentencesLocked() (int, error) {
 	tx, err := g.db.Begin()
 	if err != nil {
 		return 0, err
@@ -1109,4 +1326,84 @@ func placeholders(n int) string {
 		b = append(b, '?')
 	}
 	return string(b)
+}
+
+// FindRelations 按实体名与关系类型**精确**查找活跃关系（带原句）。
+//
+// 为什么需要精确查找：memory_edit 走的是「按包含匹配 Purge + 写入新三元组」，
+// 中间那一步会把旧关系的附加信息（置信度、场景、原句）一起丢掉。
+// 编辑前先精确取回这条关系，才能把这些信息带过去。
+func (g *GraphDB) FindRelations(subject, relationType, object string) ([]Relation, error) {
+	g.mu.RLock()
+	defer g.mu.RUnlock()
+	rows, err := g.db.Query(
+		`SELECT r.id, r.source_id, r.target_id, e1.name, e2.name,
+		        r.relation_type, r.confidence, r.status, r.session_id,
+		        r.turn_id, r.created_at, COALESCE(r.date_bucket, ''),
+		        COALESCE(r.sentence_id, 0), COALESCE(sn.text, '')
+		 FROM relations r
+		 JOIN entities e1 ON r.source_id = e1.id
+		 JOIN entities e2 ON r.target_id = e2.id
+		 LEFT JOIN sentences sn ON r.sentence_id = sn.id
+		 WHERE r.status = 'active' AND e1.name = ? AND r.relation_type = ? AND e2.name = ?
+		 ORDER BY r.id DESC`, subject, relationType, object)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []Relation
+	for rows.Next() {
+		var rel Relation
+		if err := rows.Scan(&rel.ID, &rel.SourceID, &rel.TargetID, &rel.SourceName, &rel.TargetName,
+			&rel.RelationType, &rel.Confidence, &rel.Status, &rel.SessionID,
+			&rel.TurnID, &rel.CreatedAt, &rel.DateBucket, &rel.SentenceID, &rel.SentenceText); err != nil {
+			return nil, err
+		}
+		out = append(out, rel)
+	}
+	return out, rows.Err()
+}
+
+// columnExists 判断表里是否已有某列（SQLite 的 ALTER 无法改约束，只能按列探测后重建）。
+func columnExists(tx *sql.Tx, table, column string) bool {
+	rows, err := tx.Query(`SELECT name FROM pragma_table_info(?)`, table)
+	if err != nil {
+		return false
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var name string
+		if err := rows.Scan(&name); err != nil {
+			return false
+		}
+		if name == column {
+			return true
+		}
+	}
+	return false
+}
+
+// effectiveScenes 合并一条三元组的场景键（Scenes 多值 + Scene 单值），去重且保序。
+//
+// 单值 Scene 保留是为了兼容既有调用方与 memory_commit 的模型参数；
+// 多值 Scenes 是"声明 + 涌现"两条路同时挂载的载体。
+func effectiveScenes(t Triple) []string {
+	if len(t.Scenes) == 0 && t.Scene == "" {
+		return nil
+	}
+	seen := make(map[string]bool, len(t.Scenes)+1)
+	out := make([]string, 0, len(t.Scenes)+1)
+	add := func(k string) {
+		k = NormalizeSceneKey(k)
+		if k == "" || seen[k] {
+			return
+		}
+		seen[k] = true
+		out = append(out, k)
+	}
+	for _, k := range t.Scenes {
+		add(k)
+	}
+	add(t.Scene)
+	return out
 }

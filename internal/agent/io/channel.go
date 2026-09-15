@@ -352,6 +352,9 @@ func applyInjectOpts(payload map[string]interface{}, opts InjectOptions) {
 	if opts.ContextPolicy != "" {
 		payload["context_policy"] = opts.ContextPolicy
 	}
+	if opts.RecallPolicy != "" {
+		payload["recall_policy"] = opts.RecallPolicy
+	}
 	if opts.CleanerName != "" {
 		payload["cleaner_name"] = opts.CleanerName
 	}

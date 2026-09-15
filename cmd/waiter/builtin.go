@@ -24,7 +24,7 @@ func handleBuiltin(cmd string, cfg *Config, state *State, reconnect func(), out 
   /conn use <name>         switch to saved connection
   /conn del <name>         delete saved connection
 
-Server commands (sent to agent):
+Server commands (local 与 remote 行为一致):
   /status                  system status
   /kernel                  kernel status
   /settings [prefix]       list settings
@@ -32,6 +32,8 @@ Server commands (sent to agent):
   /plugin list             list installed plugins
   /plugin install <url>    install plugin
   /plugin remove <name>    remove plugin
+  /plugin disable <name>   disable plugin
+  /plugin enable <name>    enable plugin
   /plugin info <name>      plugin details
   /memory query <text>     query graph memory
   /knowledge               list knowledge base
@@ -52,6 +54,26 @@ Any other text is sent to the agent directly.`)
 	case cmd == "/reconnect":
 		printlnC(colorYellow, "reconnecting...")
 		reconnect()
+		return true
+
+	// /stop 与 /interrupt：取消当前生成（可附带一句新指令）。
+	// 之前 /help 里写着这条命令，但 handleBuiltin 根本没有对应 case，
+	// 于是它像普通文本一样被发给了 Agent。
+	// 本地交给 CLI 插件（内核优先级 L3），远端走 WebUI 的 chat/interrupt
+	// （内核优先级 L4）。两条路都是“真中断”，不是发一句话。
+	case cmd == "/stop" || cmd == "/interrupt" ||
+		strings.HasPrefix(cmd, "/stop ") || strings.HasPrefix(cmd, "/interrupt "):
+		msg := stopMessage(cmd)
+		if rc := state.RemoteConn(); rc != nil {
+			body := fmt.Sprintf(`{"message":%q}`, msg)
+			if _, err := rc.DoAPI("POST", "/api/v1/chat/interrupt", body); err != nil {
+				fmt.Fprintf(out, "interrupt failed: %v\n", err)
+			} else {
+				fmt.Fprintln(out, "interrupt sent")
+			}
+		} else {
+			state.Send(cmd)
+		}
 		return true
 
 	case strings.HasPrefix(cmd, "/connect "):
@@ -143,7 +165,7 @@ Any other text is sent to the agent directly.`)
 			rc.DoAPI("PUT", "/api/v1/settings", body)
 			fmt.Fprintln(out, "ok")
 		} else {
-			state.Send(cmd[1:])
+			state.Send(cmd)
 		}
 		return true
 
@@ -152,7 +174,7 @@ Any other text is sent to the agent directly.`)
 			d, _ := rc.DoAPI("GET", "/api/v1/settings", "")
 			printJSON(out, d)
 		} else {
-			state.Send(cmd[1:])
+			state.Send(cmd)
 		}
 		return true
 
@@ -172,7 +194,7 @@ Any other text is sent to the agent directly.`)
 			d, _ := rc.DoAPI("POST", "/api/v1/plugins", body)
 			printJSON(out, d)
 		} else {
-			state.Send(cmd[1:])
+			state.Send(cmd)
 		}
 		return true
 
@@ -182,7 +204,7 @@ Any other text is sent to the agent directly.`)
 			d, _ := rc.DoAPI("DELETE", "/api/v1/plugins/"+name, "")
 			printJSON(out, d)
 		} else {
-			state.Send(cmd[1:])
+			state.Send(cmd)
 		}
 		return true
 
@@ -192,7 +214,27 @@ Any other text is sent to the agent directly.`)
 			d, _ := rc.DoAPI("GET", "/api/v1/plugins/"+name, "")
 			printJSON(out, d)
 		} else {
-			state.Send(cmd[1:])
+			state.Send(cmd)
+		}
+		return true
+
+	// disable/enable：本地由 CLI 插件处理，远端走插件管理 REST 动作接口。
+	case strings.HasPrefix(cmd, "/plugin disable ") || strings.HasPrefix(cmd, "/plugin enable "):
+		verb := "disable"
+		name := strings.TrimSpace(cmd[16:])
+		if strings.HasPrefix(cmd, "/plugin enable ") {
+			verb = "enable"
+			name = strings.TrimSpace(cmd[15:])
+		}
+		if name == "" {
+			fmt.Fprintln(out, "usage: /plugin disable|enable <name>")
+			return true
+		}
+		if rc := state.RemoteConn(); rc != nil {
+			d, _ := rc.DoAPI("POST", "/api/v1/plugins/"+name+"/"+verb, "")
+			printJSON(out, d)
+		} else {
+			state.Send(cmd)
 		}
 		return true
 
@@ -202,7 +244,7 @@ Any other text is sent to the agent directly.`)
 			d, _ := rc.DoAPI("GET", "/api/v1/memory?query="+q, "")
 			printJSON(out, d)
 		} else {
-			state.Send(cmd[1:])
+			state.Send(cmd)
 		}
 		return true
 
@@ -212,7 +254,7 @@ Any other text is sent to the agent directly.`)
 			d, _ := rc.DoAPI("DELETE", "/api/v1/knowledge/"+name, "")
 			printJSON(out, d)
 		} else {
-			state.Send(cmd[1:])
+			state.Send(cmd)
 		}
 		return true
 
@@ -237,6 +279,16 @@ Any other text is sent to the agent directly.`)
 	default:
 		return false
 	}
+}
+
+// stopMessage 从 /stop 或 /interrupt 行里取出可选的中断附带消息（空串=纯取消）。
+func stopMessage(cmd string) string {
+	for _, prefix := range []string{"/interrupt", "/stop"} {
+		if strings.HasPrefix(cmd, prefix) {
+			return strings.TrimSpace(strings.TrimPrefix(cmd, prefix))
+		}
+	}
+	return ""
 }
 
 func printJSON(out io.Writer, d map[string]interface{}) {
