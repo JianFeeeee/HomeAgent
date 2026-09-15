@@ -15,6 +15,7 @@ import (
 	"strings"
 	"sync"
 
+	"gitcode.com/JianFeeeee/HomeAgent/internal/config"
 	"gitcode.com/JianFeeeee/HomeAgent/internal/plugin"
 	sdk "gitcode.com/JianFeeeee/HomeAgent/internal/sdk"
 )
@@ -317,6 +318,8 @@ func (p *Plugin) handleBuiltin(conn net.Conn, line string, s *sdk.PluginSDK) boo
 		p.cmdNetwork(conn, s)
 	case "/runtime":
 		p.cmdRuntime(conn, s)
+	case "/persona":
+		p.cmdPersona(conn, parts, s)
 	default:
 		return false
 	}
@@ -354,7 +357,8 @@ func (p *Plugin) cmdHelp(conn net.Conn) {
   /adapters remove <name>      卸载适配器
   /network                     网络状态与 LLM 端点
   /runtime                     调度器/驻留子/通道拓扑快照
-  /agents                      当前 Agent 信息
+  /persona                     当前人格设定（/persona set <mode> [内容] 修改）
+  /agents                      列出 Agent
 
 其他文本直接发送给 Agent 处理。`,
 	})
@@ -826,6 +830,52 @@ func (p *Plugin) cmdAdapters(conn net.Conn, parts []string, s *sdk.PluginSDK) {
 	writeJSONContent(conn, map[string]interface{}{"adapters": ad.List()})
 }
 
+// ======== /persona ========
+
+// cmdPersona 与 WebUI 的 GET/POST /api/v1/persona 同口径。
+//
+// 人格的读写落在 core.agent.personal_prompt / core.internal.persona_initialized
+// 两个配置键上，而插件 SDK 的 Settings() 恰好满足 internal/config.PersonaKV
+// （GetCore/SetCore）—— WebUI 也是直接把 settings 传进去的，所以内部插件同样能做。
+func (p *Plugin) cmdPersona(conn net.Conn, parts []string, s *sdk.PluginSDK) {
+	sett := s.Settings()
+	if sett == nil {
+		writeLine(conn, map[string]interface{}{"type": "error", "error": "settings not available"})
+		return
+	}
+	if len(parts) >= 2 && parts[1] == "set" {
+		if len(parts) < 3 {
+			writeLine(conn, map[string]interface{}{"type": "response", "content": "用法: /persona set default|custom|later [内容]"})
+			return
+		}
+		mode := parts[2]
+		content := strings.Join(parts[3:], " ")
+		restart, err := config.SetPersonaKV(sett, mode, content)
+		if err != nil {
+			writeLine(conn, map[string]interface{}{"type": "error", "error": err.Error()})
+			return
+		}
+		writeJSONContent(conn, map[string]interface{}{
+			"status": "ok", "mode": mode, "restart_required": restart,
+		})
+		return
+	}
+	// 存在人格文件时它优先（与 WebUI 一致，路径取 core.daemon.data_dir）
+	fileOverride := false
+	if v, err := sett.GetCore("core.daemon.data_dir"); err == nil {
+		if dir, ok := v.(string); ok && dir != "" {
+			if _, statErr := os.Stat(filepath.Join(dir, "personal", "personal.md")); statErr == nil {
+				fileOverride = true
+			}
+		}
+	}
+	writeJSONContent(conn, map[string]interface{}{
+		"initialized":    config.PersonaInitializedKV(sett),
+		"current_prompt": config.CurrentPersonaKV(sett),
+		"file_override":  fileOverride,
+	})
+}
+
 // ======== /runtime ========
 
 // cmdRuntime 与 WebUI 的 GET /api/v1/runtime 同口径。
@@ -872,15 +922,24 @@ func (p *Plugin) cmdNetwork(conn net.Conn, s *sdk.PluginSDK) {
 
 // ======== /agents ========
 
+// cmdAgents 与 WebUI 的 GET /api/v1/agents 同口径：返回受监管的 agent 列表。
+// 之前只回了内核自己的 agent_id，驻留子信息全丢——而这正是 supervisor 对插件
+// 已经开放的 ListAgents()。
 func (p *Plugin) cmdAgents(conn net.Conn, s *sdk.PluginSDK) {
+	if sup := s.Supervisor(); sup != nil {
+		if agents := sup.ListAgents(); len(agents) > 0 {
+			writeJSONContent(conn, map[string]interface{}{"agents": agents})
+			return
+		}
+	}
+	// 退化：supervisor 不可用时至少给出内核 agent_id
 	st := s.Status()
 	if st == nil {
 		writeLine(conn, map[string]interface{}{"type": "error", "error": "status provider not available"})
 		return
 	}
 	ks := st.GetKernelStatus()
-	data, _ := json.MarshalIndent(map[string]string{"agent_id": ks.AgentID}, "", "  ")
-	writeLine(conn, map[string]interface{}{"type": "response", "content": string(data)})
+	writeJSONContent(conn, map[string]interface{}{"agents": []interface{}{map[string]string{"id": ks.AgentID, "state": "running"}}})
 }
 
 // ======== helpers ========

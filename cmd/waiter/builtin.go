@@ -47,6 +47,7 @@ Server commands (local 与 remote 行为一致):
   /adapters remove <name>  remove a Lua adapter
   /network                 network status + LLM endpoints
   /runtime                 scheduler / residents / channel topology
+  /persona                 show persona (/persona set default|custom|later [text])
   /agents                  list agents
   /chat <text>             send to agent
 
@@ -323,6 +324,28 @@ Any other text is sent to the agent directly.`)
 				printJSON(out, d)
 			} else {
 				d, _ := rc.DoAPI("GET", "/api/v1/adapters", "")
+				printJSON(out, d)
+			}
+		} else {
+			state.Send(cmd)
+		}
+		return true
+
+	case cmd == "/persona" || strings.HasPrefix(cmd, "/persona set "):
+		if rc := state.RemoteConn(); rc != nil {
+			if strings.HasPrefix(cmd, "/persona set ") {
+				rest := strings.TrimSpace(cmd[13:])
+				mode := rest
+				content := ""
+				if idx := strings.IndexByte(rest, ' '); idx > 0 {
+					mode = rest[:idx]
+					content = strings.TrimSpace(rest[idx+1:])
+				}
+				body := fmt.Sprintf(`{"mode":%q,"content":%q}`, mode, content)
+				d, _ := rc.DoAPI("POST", "/api/v1/persona", body)
+				printJSON(out, d)
+			} else {
+				d, _ := rc.DoAPI("GET", "/api/v1/persona", "")
 				printJSON(out, d)
 			}
 		} else {
