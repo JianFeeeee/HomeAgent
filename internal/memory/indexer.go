@@ -106,8 +106,9 @@ type InjectedContext struct {
 	// Scenes 是本轮识别出的当前场景；SceneRelations 是被钉在这些场景上的
 	// 记忆（带 relation_type 与原句）。两者都进注入文本——场景记忆是
 	// **带条件的规则**，只给实体名等于没召回。
-	Scenes         []string   `json:"scenes,omitempty"`
-	SceneRelations []Relation `json:"scene_relations,omitempty"`
+	Scenes         []string      `json:"scenes,omitempty"`
+	SceneRelations []Relation    `json:"scene_relations,omitempty"`
+	SceneBlocks    []MemoryBlock `json:"scene_blocks,omitempty"`
 }
 
 // BuildContext 不带场景的召回（保持既有行为：词法 + 实体名向量）。
@@ -181,6 +182,7 @@ func (idx *Indexer) BuildContextInScene(userInput string, scenes []string) *Inje
 	if sceneRecall != nil {
 		ctx.Scenes = sceneRecall.Scenes
 		ctx.SceneRelations = sceneRecall.Relations
+		ctx.SceneBlocks = sceneRecall.Blocks
 	}
 
 	if len(filtered) > 0 {
@@ -251,7 +253,7 @@ func (idx *Indexer) BuildToolPrompt() string {
 }
 
 func (idx *Indexer) FormatContext(ctx *InjectedContext) string {
-	if ctx == nil || (len(ctx.Entities) == 0 && len(ctx.SceneRelations) == 0) {
+	if ctx == nil || (len(ctx.Entities) == 0 && len(ctx.SceneRelations) == 0 && len(ctx.SceneBlocks) == 0) {
 		return ""
 	}
 
@@ -271,6 +273,28 @@ func (idx *Indexer) FormatContext(ctx *InjectedContext) string {
 				b.WriteString("（")
 				b.WriteString(truncateRunes(rel.SentenceText, sceneSentenceMaxRunes))
 				b.WriteString("）")
+			}
+			b.WriteString("\n")
+		}
+		// 场景块：块是流水线里最细的子项目（一段转写、一张图的描述）。
+		// 只给 id 没用，要给能判断「这是什么」的短文本。
+		if len(ctx.SceneBlocks) > 0 {
+			b.WriteString("场景素材: ")
+			for i, blk := range ctx.SceneBlocks {
+				if i >= maxSceneRecallBlocks {
+					b.WriteString("…")
+					break
+				}
+				if i > 0 {
+					b.WriteString(" | ")
+				}
+				b.WriteString(string(blk.Modality))
+				b.WriteString(" ")
+				if blk.Text != "" {
+					b.WriteString(truncateRunes(blk.Text, sceneSentenceMaxRunes))
+				} else {
+					b.WriteString(shortBlockDigest(blk.PayloadDigest))
+				}
 			}
 			b.WriteString("\n")
 		}
@@ -315,6 +339,17 @@ const maxSceneRecallRelations = 8
 
 // sceneSentenceMaxRunes 是场景关系后附原句的截断长度。
 const sceneSentenceMaxRunes = 60
+
+// maxSceneRecallBlocks 是场景块在注入文本里的条数上限（同为常驻内容，要封顶）。
+const maxSceneRecallBlocks = 3
+
+// shortBlockDigest 取 digest 前 12 位做展示（与 L3 里引用媒体的写法一致）。
+func shortBlockDigest(d string) string {
+	if len(d) <= 12 {
+		return d
+	}
+	return d[:12]
+}
 
 func truncateRunes(s string, max int) string {
 	r := []rune(s)
