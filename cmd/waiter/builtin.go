@@ -36,8 +36,16 @@ Server commands (local 与 remote 行为一致):
   /plugin enable <name>    enable plugin
   /plugin info <name>      plugin details
   /memory query <text>     query graph memory
-  /knowledge               list knowledge base
+  /memory graph            dump full graph memory snapshot
+  /memory text [n]         recent text-memory events + stats
+  /knowledge               list knowledge base (+stats)
   /knowledge delete <name> delete knowledge item
+  /config                  dump kernel config (JSON)
+  /tracker                 change-tracking stats
+  /tracker rollback        roll back this session's file changes
+  /adapters                list loaded Lua adapters
+  /adapters remove <name>  remove a Lua adapter
+  /network                 network status + LLM endpoints
   /agents                  list agents
   /chat <text>             send to agent
 
@@ -238,11 +246,23 @@ Any other text is sent to the agent directly.`)
 		}
 		return true
 
-	case strings.HasPrefix(cmd, "/memory query "):
-		q := strings.TrimSpace(cmd[14:])
+	case strings.HasPrefix(cmd, "/memory "):
+		sub := strings.TrimSpace(cmd[8:])
 		if rc := state.RemoteConn(); rc != nil {
-			d, _ := rc.DoAPI("GET", "/api/v1/memory?query="+q, "")
-			printJSON(out, d)
+			switch {
+			case strings.HasPrefix(sub, "query "):
+				q := strings.TrimSpace(strings.TrimPrefix(sub, "query "))
+				d, _ := rc.DoAPI("GET", "/api/v1/memory?query="+q, "")
+				printJSON(out, d)
+			case sub == "graph":
+				d, _ := rc.DoAPI("GET", "/api/v1/memory/graph", "")
+				printJSON(out, d)
+			case sub == "text" || strings.HasPrefix(sub, "text "):
+				d, _ := rc.DoAPI("GET", "/api/v1/memory/text", "")
+				printJSON(out, d)
+			default:
+				fmt.Fprintln(out, "usage: /memory query <text> | /memory graph | /memory text [n]")
+			}
 		} else {
 			state.Send(cmd)
 		}
@@ -258,12 +278,63 @@ Any other text is sent to the agent directly.`)
 		}
 		return true
 
-	case cmd == "/knowledge":
+	case cmd == "/knowledge" || cmd == "/knowledge list" || cmd == "/knowledge stats":
 		if rc := state.RemoteConn(); rc != nil {
 			d, _ := rc.DoAPI("GET", "/api/v1/knowledge", "")
 			printJSON(out, d)
 		} else {
-			state.Send("/knowledge")
+			state.Send(cmd)
+		}
+		return true
+
+	case cmd == "/config":
+		if rc := state.RemoteConn(); rc != nil {
+			d, _ := rc.DoAPI("GET", "/api/v1/config", "")
+			printJSON(out, d)
+		} else {
+			state.Send("/config")
+		}
+		return true
+
+	case cmd == "/tracker":
+		if rc := state.RemoteConn(); rc != nil {
+			d, _ := rc.DoAPI("GET", "/api/v1/tracker", "")
+			printJSON(out, d)
+		} else {
+			state.Send("/tracker")
+		}
+		return true
+
+	case cmd == "/tracker rollback":
+		if rc := state.RemoteConn(); rc != nil {
+			d, _ := rc.DoAPI("POST", "/api/v1/tracker/rollback", "")
+			printJSON(out, d)
+		} else {
+			state.Send("/tracker rollback")
+		}
+		return true
+
+	case cmd == "/adapters" || strings.HasPrefix(cmd, "/adapters remove "):
+		if rc := state.RemoteConn(); rc != nil {
+			if strings.HasPrefix(cmd, "/adapters remove ") {
+				name := strings.TrimSpace(cmd[17:])
+				d, _ := rc.DoAPI("DELETE", "/api/v1/adapters/"+name, "")
+				printJSON(out, d)
+			} else {
+				d, _ := rc.DoAPI("GET", "/api/v1/adapters", "")
+				printJSON(out, d)
+			}
+		} else {
+			state.Send(cmd)
+		}
+		return true
+
+	case cmd == "/network":
+		if rc := state.RemoteConn(); rc != nil {
+			d, _ := rc.DoAPI("GET", "/api/v1/network", "")
+			printJSON(out, d)
+		} else {
+			state.Send("/network")
 		}
 		return true
 
