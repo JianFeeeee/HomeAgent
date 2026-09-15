@@ -59,6 +59,14 @@ type Triple struct {
 	// 与这条关系都会被挂到这个场景上，场景重现时按场景召回。
 	// 约定见 memory.NormalizeSceneKey：`chan:qq`、`chan:qq/peer:group_123`。
 	Scene string `json:"scene,omitempty"`
+	// Scenes 是同一批多场景挂载（可空）：主动**声明**的场景（如 chan:qq）
+	// 与被动**涌现**出来的场景（如 auto:chan:qq+peer_group:1027）可以同时挂。
+	//
+	// 为什么要两条都挂：声明路是"我知道这是哪个场面"，稳定、可读、可兜底；
+	// 涌现路是"这轮看起来像哪个场面"，细粒度、不需要任何人声明。
+	// 只挂一条的代价：只挂声明则细粒度唤起丢失，只挂涌现则首次交互（场景
+	// 还没长出来）没有兜底。
+	Scenes []string `json:"scenes,omitempty"`
 }
 
 type GraphDB struct {
@@ -193,6 +201,11 @@ func (g *GraphDB) initSchema() error {
 			-- strength 是场景被重现的次数：场景不是被声明出来的，是被反复遇到
 			-- 长出来的（见 EnterScene / minSceneEvidence）。
 			strength INTEGER DEFAULT 1,
+			-- origin 区分两条路：'declared' 是主动声明出来的（键由人/插件给，
+			-- 召走精确+前缀匹配），'emergent' 是被动涌现的（召走相似度）。
+			-- 两者刻意**分开**参与匹配：若让声明场景也吸收整轮指纹，
+			-- 它会在相似度上压过一切，被动路就再也长不出更细的场面了。
+			origin TEXT NOT NULL DEFAULT 'emergent',
 			created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
 			updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 		)`,
@@ -256,6 +269,12 @@ func (g *GraphDB) initSchema() error {
 	tx.Exec(`ALTER TABLE memory_blocks ADD COLUMN scene TEXT DEFAULT ''`)
 	// 迁移6：旧 scenes 表加 strength 列（涌现侧的强度计数）
 	tx.Exec(`ALTER TABLE scenes ADD COLUMN strength INTEGER DEFAULT 1`)
+	// 迁移7：旧 scenes 表加 origin。既有行都是声明/存量引导来的（建表时还没有
+	// 涌现机制），标成 declared；新建的涌现场景在 createSceneLocked 里写 emergent。
+	if !columnExists(tx, "scenes", "origin") {
+		tx.Exec(`ALTER TABLE scenes ADD COLUMN origin TEXT NOT NULL DEFAULT 'emergent'`)
+		tx.Exec(`UPDATE scenes SET origin = 'declared'`)
+	}
 	// 迁移5：场景引用加 ref_text（块/文档的 id 是字符串）。
 	//
 	// 不能只 `ALTER TABLE ADD COLUMN`：REF_TEXT 同时参与唯一约束
@@ -489,12 +508,14 @@ func (g *GraphDB) commit(triples []Triple, sessionID string, turnID int, trackSe
 			}
 		}
 
-		// 场景引用：写完关系立即把「关系 + 两端实体」挂到这个场景上。
-		// 同一事务内完成，避免出现「关系写进去了但场景引用丢了」——
-		// 那会让这条记忆在后来的场景里永远召不回来，且无声无息。
-		if t.Scene != "" && relID != 0 {
-			if err := tagSceneTx(tx, t.Scene, relID, []int64{sourceID, targetID}, confidence); err != nil {
-				return nil, 0, 0, err
+		// 场景引用：写完关系立即把「关系 + 两端实体」挂到**每个**场景上
+		// （主动声明的 + 被动涌现的）。同一事务内完成，避免出现「关系写进去了
+		// 但场景引用丢了」——那会让这条记忆在后来的场景里永远召不回来，且无声无息。
+		if relID != 0 {
+			for _, sc := range effectiveScenes(t) {
+				if err := tagSceneTx(tx, sc, relID, []int64{sourceID, targetID}, confidence); err != nil {
+					return nil, 0, 0, err
+				}
 			}
 		}
 	}
@@ -1316,4 +1337,29 @@ func columnExists(tx *sql.Tx, table, column string) bool {
 		}
 	}
 	return false
+}
+
+// effectiveScenes 合并一条三元组的场景键（Scenes 多值 + Scene 单值），去重且保序。
+//
+// 单值 Scene 保留是为了兼容既有调用方与 memory_commit 的模型参数；
+// 多值 Scenes 是"声明 + 涌现"两条路同时挂载的载体。
+func effectiveScenes(t Triple) []string {
+	if len(t.Scenes) == 0 && t.Scene == "" {
+		return nil
+	}
+	seen := make(map[string]bool, len(t.Scenes)+1)
+	out := make([]string, 0, len(t.Scenes)+1)
+	add := func(k string) {
+		k = NormalizeSceneKey(k)
+		if k == "" || seen[k] {
+			return
+		}
+		seen[k] = true
+		out = append(out, k)
+	}
+	for _, k := range t.Scenes {
+		add(k)
+	}
+	add(t.Scene)
+	return out
 }

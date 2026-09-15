@@ -52,8 +52,8 @@ func main() {
 		}
 		fmt.Printf("场景 %d 个：\n", len(stats))
 		for _, st := range stats {
-			fmt.Printf("  %-44s refs=%-5d rel=%-5d ent=%-4d strength=%-4d features=%-3d updated=%s\n",
-				st.Key, st.Refs, st.Relations, st.Entities, st.Strength, st.Features,
+			fmt.Printf("  [%-9s] %-40s refs=%-5d rel=%-5d ent=%-4d strength=%-4d features=%-3d updated=%s\n",
+				st.Origin, st.Key, st.Refs, st.Relations, st.Entities, st.Strength, st.Features,
 				st.UpdatedAt.Format("2006-01-02 15:04"))
 		}
 		return

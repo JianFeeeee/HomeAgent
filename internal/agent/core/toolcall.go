@@ -13,7 +13,7 @@ import (
 	"gitcode.com/JianFeeeee/HomeAgent/internal/memory/text"
 )
 
-func (a *Agent) executeToolCall(tc agentAPI.ToolCall, channel string, turnScene ...string) (ret string) {
+func (a *Agent) executeToolCall(tc agentAPI.ToolCall, channel string, turnScenes ...string) (ret string) {
 	defer func() {
 		if r := recover(); r != nil {
 			stack := debug.Stack()
@@ -31,7 +31,7 @@ func (a *Agent) executeToolCall(tc agentAPI.ToolCall, channel string, turnScene 
 
 	done := make(chan string, 1)
 	go func() {
-		done <- a.executeToolCallInner(tc, channel, firstOr(turnScene))
+		done <- a.executeToolCallInner(tc, channel, turnScenes)
 	}()
 
 	select {
@@ -43,21 +43,12 @@ func (a *Agent) executeToolCall(tc agentAPI.ToolCall, channel string, turnScene 
 	}
 }
 
-// firstOr 取可选参数的首个值（工具执行路径只有调用方知道本轮场景，
-// 用变参是为了不让「不关心场景」的调用点（spawn/测试）被迫传空串）。
-func firstOr(v []string) string {
-	if len(v) == 0 {
-		return ""
-	}
-	return v[0]
-}
-
-func (a *Agent) executeToolCallInner(tc agentAPI.ToolCall, channel string, scene string) string {
+func (a *Agent) executeToolCallInner(tc agentAPI.ToolCall, channel string, turnScenes []string) string {
 	switch {
 	case tc.Name == "persona_set":
 		return a.executePersonaTool(tc)
 	case strings.HasPrefix(tc.Name, "memory_"):
-		return a.executeMemoryTool(tc, scene)
+		return a.executeMemoryTool(tc, turnScenes)
 	case strings.HasPrefix(tc.Name, "social_"):
 		return a.executeSocialTool(tc)
 	case strings.HasPrefix(tc.Name, "knowledge_"):
@@ -132,7 +123,7 @@ func (a *Agent) executeToolCallInner(tc agentAPI.ToolCall, channel string, scene
 	return fmt.Sprintf("%v", result)
 }
 
-func (a *Agent) executeMemoryTool(tc agentAPI.ToolCall, turnScene string) string {
+func (a *Agent) executeMemoryTool(tc agentAPI.ToolCall, turnScenes []string) string {
 	g := a.graphMem()
 	if g == nil {
 		if tc.Name == "memory_document_query" {
@@ -223,10 +214,14 @@ func (a *Agent) executeMemoryTool(tc agentAPI.ToolCall, turnScene string) string
 		// 两条路都为空则这条记忆不参与场景召回——不做猜测：猜错的场景会把
 		// 无关记忆钉死，之后每次进入该场面都会被注入，比漏标更难发现。
 		batchScene := getString(tc.Arguments, "scene")
-		// 没有显式声明时，落到本轮**涌现**出来的场景上：模型不需要知道场景
-		// 这回事，记忆也会因为「是在什么场面里写下的」而自动获得唤起入口。
+		// 写侧的场景是**两条路都挂**：
+		//   显式声明（模型在参数里点名）优先；
+		//   否则挂本轮解析出的场景集合——主动声明的 + 被动涌现的。
+		// 只挂一条会丢东西：只挂声明则细粒度唤起丢失，只挂涌现则首次交互
+		// （场景还没长出来）没有兜底。
+		var batchScenes []string
 		if batchScene == "" {
-			batchScene = turnScene
+			batchScenes = turnScenes
 		}
 		var triples []memory.Triple
 		for _, td := range triplesData {
@@ -240,6 +235,9 @@ func (a *Agent) executeMemoryTool(tc agentAPI.ToolCall, turnScene string) string
 				}
 				if t.Scene == "" {
 					t.Scene = batchScene
+				}
+				if len(t.Scenes) == 0 {
+					t.Scenes = batchScenes
 				}
 				// 模型显式关联的媒体：结构化字段随三元组一起提交，
 				// 由 commitTriplesWithMedia 变成 L3 一等块并与句子建边——
