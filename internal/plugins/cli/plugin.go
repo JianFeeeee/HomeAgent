@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 
@@ -301,9 +302,17 @@ func (p *Plugin) handleBuiltin(conn net.Conn, line string, s *sdk.PluginSDK) boo
 	case "/memory":
 		p.cmdMemory(conn, parts, s)
 	case "/knowledge":
-		p.cmdKnowledge(conn, s)
+		p.cmdKnowledge(conn, parts, s)
 	case "/agents":
 		p.cmdAgents(conn, s)
+	case "/config":
+		p.cmdConfig(conn, s)
+	case "/tracker":
+		p.cmdTracker(conn, parts, s)
+	case "/adapters":
+		p.cmdAdapters(conn, parts, s)
+	case "/network":
+		p.cmdNetwork(conn, s)
 	default:
 		return false
 	}
@@ -327,9 +336,20 @@ func (p *Plugin) cmdHelp(conn net.Conn) {
   /plugin disable <name>       禁用插件
   /plugin enable <name>        启用插件
   /plugin info <name>          查看插件详情
+  /plugin reload               重载插件
   /memory query <关键词>        查询图记忆
+  /memory graph                导出整张图记忆快照
+  /memory text [n]             最近 n 条文本记忆事件 + 统计
   /knowledge                   列出知识库
-  /agents                      列出 Agent
+  /knowledge delete <name>     删除一条知识
+  /knowledge stats             知识库统计
+  /config [prefix]             导出内核配置（可按前缀筛选）
+  /tracker                     变更追踪统计
+  /tracker rollback            回滚本次会话的文件变更
+  /adapters                    列出已加载的 Lua 适配器
+  /adapters remove <name>      卸载适配器
+  /network                     网络状态与 LLM 端点
+  /agents                      当前 Agent 信息
 
 其他文本直接发送给 Agent 处理。`,
 	})
@@ -621,50 +641,186 @@ func (p *Plugin) cmdPlugin(conn net.Conn, parts []string, s *sdk.PluginSDK) {
 
 // ======== /memory ========
 
-func (p *Plugin) cmdMemory(conn net.Conn, parts []string, s *sdk.PluginSDK) {
-	if len(parts) < 3 || parts[1] != "query" {
-		writeLine(conn, map[string]interface{}{"type": "response", "content": "用法: /memory query <关键词>"})
-		return
-	}
-	q := strings.Join(parts[2:], " ")
-
-	mem := s.Memory()
-	if mem == nil {
-		writeLine(conn, map[string]interface{}{"type": "error", "error": "memory not available"})
-		return
-	}
-	entities, relations, err := mem.Recall([]string{q}, 2)
+// writeJSONContent 把一个结构以缩进 JSON 写入 response 帧。
+// CLI 与 WebUI 对齐的口径：结构化数据一律 JSON（带缩进便于人读），
+// 不再每个子命令各拼一种文本格式。
+func writeJSONContent(conn net.Conn, v interface{}) {
+	data, err := json.MarshalIndent(v, "", "  ")
 	if err != nil {
 		writeLine(conn, map[string]interface{}{"type": "error", "error": err.Error()})
 		return
 	}
-	result := map[string]interface{}{
-		"entities":  entities,
-		"relations": relations,
-	}
-	data, _ := json.MarshalIndent(result, "", "  ")
 	writeLine(conn, map[string]interface{}{"type": "response", "content": string(data)})
+}
+
+func (p *Plugin) cmdMemory(conn net.Conn, parts []string, s *sdk.PluginSDK) {
+	sub := ""
+	if len(parts) >= 2 {
+		sub = parts[1]
+	}
+	switch sub {
+	case "query":
+		if len(parts) < 3 {
+			writeLine(conn, map[string]interface{}{"type": "response", "content": "用法: /memory query <关键词>"})
+			return
+		}
+		q := strings.Join(parts[2:], " ")
+		mem := s.Memory()
+		if mem == nil {
+			writeLine(conn, map[string]interface{}{"type": "error", "error": "memory not available"})
+			return
+		}
+		entities, relations, err := mem.Recall([]string{q}, 2)
+		if err != nil {
+			writeLine(conn, map[string]interface{}{"type": "error", "error": err.Error()})
+			return
+		}
+		writeJSONContent(conn, map[string]interface{}{
+			"entities":  entities,
+			"relations": relations,
+		})
+	case "graph":
+		mem := s.Memory()
+		if mem == nil {
+			writeLine(conn, map[string]interface{}{"type": "error", "error": "memory not available"})
+			return
+		}
+		data, err := mem.GraphData()
+		if err != nil {
+			writeLine(conn, map[string]interface{}{"type": "error", "error": err.Error()})
+			return
+		}
+		writeJSONContent(conn, data)
+	case "text":
+		tm := s.TextMemory()
+		if tm == nil {
+			writeLine(conn, map[string]interface{}{"type": "error", "error": "text memory not available"})
+			return
+		}
+		n := 20
+		if len(parts) >= 3 {
+			if v, err := strconv.Atoi(parts[2]); err == nil && v > 0 {
+				n = v
+			}
+		}
+		events, err := tm.RecentEvents(n)
+		if err != nil {
+			writeLine(conn, map[string]interface{}{"type": "error", "error": err.Error()})
+			return
+		}
+		writeJSONContent(conn, map[string]interface{}{
+			"events": events,
+			"stats":  tm.Stats(),
+		})
+	default:
+		writeLine(conn, map[string]interface{}{"type": "response", "content": "用法: /memory query <关键词> | /memory graph | /memory text [n]"})
+	}
 }
 
 // ======== /knowledge ========
 
-func (p *Plugin) cmdKnowledge(conn net.Conn, s *sdk.PluginSDK) {
+func (p *Plugin) cmdKnowledge(conn net.Conn, parts []string, s *sdk.PluginSDK) {
 	ks := s.Knowledge()
 	if ks == nil {
 		writeLine(conn, map[string]interface{}{"type": "error", "error": "knowledge not available"})
 		return
 	}
-	items, err := ks.List()
-	if err != nil {
-		writeLine(conn, map[string]interface{}{"type": "error", "error": err.Error()})
+	sub := "list"
+	if len(parts) >= 2 {
+		sub = parts[1]
+	}
+	switch sub {
+	case "list":
+		items, err := ks.List()
+		if err != nil {
+			writeLine(conn, map[string]interface{}{"type": "error", "error": err.Error()})
+			return
+		}
+		writeJSONContent(conn, items)
+	case "delete", "remove":
+		if len(parts) < 3 {
+			writeLine(conn, map[string]interface{}{"type": "response", "content": "用法: /knowledge delete <name>"})
+			return
+		}
+		if err := ks.Remove(parts[2]); err != nil {
+			writeLine(conn, map[string]interface{}{"type": "error", "error": err.Error()})
+			return
+		}
+		writeLine(conn, map[string]interface{}{"type": "response", "content": "已删除知识: " + parts[2]})
+	case "stats":
+		writeJSONContent(conn, ks.Stats())
+	default:
+		writeLine(conn, map[string]interface{}{"type": "response", "content": "用法: /knowledge | /knowledge delete <name> | /knowledge stats"})
+	}
+}
+
+// ======== /config ========
+
+func (p *Plugin) cmdConfig(conn net.Conn, s *sdk.PluginSDK) {
+	cfg := s.Config()
+	if cfg == nil {
+		writeLine(conn, map[string]interface{}{"type": "error", "error": "config not available"})
 		return
 	}
-	if len(items) == 0 {
-		writeLine(conn, map[string]interface{}{"type": "response", "content": "知识库为空"})
+	writeJSONContent(conn, cfg.Get())
+}
+
+// ======== /tracker ========
+
+func (p *Plugin) cmdTracker(conn net.Conn, parts []string, s *sdk.PluginSDK) {
+	tr := s.Tracker()
+	if tr == nil {
+		writeLine(conn, map[string]interface{}{"type": "error", "error": "tracker not available"})
 		return
 	}
-	data, _ := json.MarshalIndent(items, "", "  ")
-	writeLine(conn, map[string]interface{}{"type": "response", "content": string(data)})
+	if len(parts) >= 2 && parts[1] == "rollback" {
+		if err := tr.Rollback(); err != nil {
+			writeLine(conn, map[string]interface{}{"type": "error", "error": err.Error()})
+			return
+		}
+		writeLine(conn, map[string]interface{}{"type": "response", "content": "已回滚文件变更"})
+		return
+	}
+	writeJSONContent(conn, map[string]interface{}{
+		"stats":       tr.Stats(),
+		"has_changes": tr.HasChanges(),
+		"changesets":  tr.ChangeSets(),
+	})
+}
+
+// ======== /adapters ========
+
+func (p *Plugin) cmdAdapters(conn net.Conn, parts []string, s *sdk.PluginSDK) {
+	ad := s.Adapter()
+	if ad == nil {
+		writeLine(conn, map[string]interface{}{"type": "error", "error": "lua adapter not available"})
+		return
+	}
+	if len(parts) >= 3 && (parts[1] == "remove" || parts[1] == "delete") {
+		if err := ad.Remove(parts[2]); err != nil {
+			writeLine(conn, map[string]interface{}{"type": "error", "error": err.Error()})
+			return
+		}
+		writeLine(conn, map[string]interface{}{"type": "response", "content": "已卸载适配器: " + parts[2]})
+		return
+	}
+	writeJSONContent(conn, map[string]interface{}{"adapters": ad.List()})
+}
+
+// ======== /network ========
+
+// cmdNetwork 与 WebUI 的 GET /api/v1/network 同口径：网络状态 + LLM 端点。
+func (p *Plugin) cmdNetwork(conn net.Conn, s *sdk.PluginSDK) {
+	var endpoints interface{}
+	if cfg := s.Config(); cfg != nil {
+		if c := cfg.Get(); c != nil {
+			endpoints = c.Defaults.LLMEndpoints
+		}
+	}
+	writeJSONContent(conn, map[string]interface{}{
+		"network_status": "monitoring",
+		"endpoints":      endpoints,
+	})
 }
 
 // ======== /agents ========
