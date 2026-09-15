@@ -35,6 +35,36 @@ export const K_CHAT_CONNECTED: string = 'chatSseUp';
 
 const SSE_RECONNECT_MS: number = 5000;
 
+/**
+ * 把服务端历史与本地消息合并：历史是权威，但本地刚发出、尚未被服务端
+ * 回显的消息不能丢。
+ *
+ * 保留两类本地消息，追加在历史末尾：
+ *   - user 且 source 为空（本地乐观消息），且内容未出现在历史里；
+ *   - assistant 且 !isFinal（仍在流式输出）。
+ */
+function mergeHistoryWithLocal(history: ChatMessage[], local: ChatMessage[]): ChatMessage[] {
+  const merged: ChatMessage[] = history.slice();
+  for (let i = 0; i < local.length; i++) {
+    const m: ChatMessage = local[i];
+    if (m.role === 'user' && (m.source ?? '').length === 0) {
+      let dup: boolean = false;
+      for (let j = 0; j < history.length; j++) {
+        if (history[j].role === 'user' && history[j].content === m.content) {
+          dup = true;
+          break;
+        }
+      }
+      if (!dup) {
+        merged.push(m);
+      }
+    } else if (m.role === 'assistant' && m.isFinal !== true) {
+      merged.push(m);
+    }
+  }
+  return merged;
+}
+
 class ChatStore implements ChatStreamSink {
   private msgs: ChatMessage[] = [];
   private nextId: number = 1;
@@ -287,7 +317,13 @@ class ChatStore implements ChatStreamSink {
       if (parsed.msgs.length === 0) {
         return;
       }
-      this.msgs = parsed.msgs;
+      // 与本地未回显的消息合并，而不是整表替换。
+      //
+      // 为什么：sync_required 触发的 reloadHistory 会与刚发出的 POST 竞争；
+      // 若历史快照里还没有这条 user 消息，整表替换会让它凭空消失
+      // （“客户端侧发出的消息不显示”）。同理，仍在流的助消息也不能被
+      // 快照截断。
+      this.msgs = mergeHistoryWithLocal(parsed.msgs, this.msgs);
       this.offset = parsed.offset;
       this.hasEarlier = parsed.hasMore;
       this.forceRefresh();
