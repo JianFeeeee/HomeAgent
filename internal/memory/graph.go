@@ -12,6 +12,15 @@ import (
 	_ "github.com/mattn/go-sqlite3"
 )
 
+// maxKeywordEntities 是单个关键词能取回的实体上限。
+//
+// 无上限时，一个宽关键词（"QQ"）会命中上百个实体并逐个参与深度扩展，
+// 把一次召回变成一次全表扫描。
+const maxKeywordEntities = 50
+
+// maxAdjacentRelations 是深度扩展里**每层**读取的关系上限。
+const maxAdjacentRelations = 200
+
 // maxFullRecallEntities 是「无关键词全量读取」路径的实体上限。
 // 该路径只服务于内部整备（Indexer.Sync / 实体合并检测），并非用户检索；
 // 无上限时一张大图会被整表 read 进内存。超限时 GraphDB.Recall 会记日志。
@@ -236,6 +245,9 @@ func (g *GraphDB) initSchema() error {
 			-- 数值型节点（relation/entity）为空串。
 			ref_text TEXT NOT NULL DEFAULT '',
 			weight REAL DEFAULT 1.0,
+			-- decayed_at 是半衰期衰减的计时起点：每个引用至多每 halfLife
+			-- 衰减一次（见 DecaySceneRefs）。重复写入/强化会把它刷成当前时刻。
+			decayed_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
 			created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
 			UNIQUE(scene_id, kind, ref_id, ref_text)
 		)`,
@@ -245,14 +257,12 @@ func (g *GraphDB) initSchema() error {
 		`CREATE INDEX IF NOT EXISTS idx_memory_blocks_digest ON memory_blocks(payload_digest)`,
 		`CREATE INDEX IF NOT EXISTS idx_memory_block_edges_source ON memory_block_edges(source_kind, source_id)`,
 		`CREATE INDEX IF NOT EXISTS idx_memory_block_edges_target ON memory_block_edges(target_kind, target_id)`,
-		`CREATE INDEX IF NOT EXISTS idx_entity_name ON entities(name)`,
 		`CREATE INDEX IF NOT EXISTS idx_entity_type ON entities(type)`,
 		`CREATE INDEX IF NOT EXISTS idx_relation_source ON relations(source_id)`,
 		`CREATE INDEX IF NOT EXISTS idx_relation_target ON relations(target_id)`,
 		`CREATE INDEX IF NOT EXISTS idx_relation_type ON relations(relation_type)`,
 		`CREATE INDEX IF NOT EXISTS idx_relation_status ON relations(status)`,
 		`CREATE INDEX IF NOT EXISTS idx_relation_session ON relations(session_id)`,
-		`CREATE INDEX IF NOT EXISTS idx_sentences_text ON sentences(text)`,
 	}
 
 	for _, s := range schemas {
@@ -307,6 +317,17 @@ func (g *GraphDB) initSchema() error {
 			}
 		}
 	}
+	// 迁移8：scene_refs 加 decayed_at（半衰期衰减的计时起点）。
+	// ALTER 不接受非常量默认值，先加可空列再用 created_at 回填，
+	// 于是既有引用的「上一次衰减」就定在它被写入的时刻，不会被立即清掉。
+	if !columnExists(tx, "scene_refs", "decayed_at") {
+		tx.Exec(`ALTER TABLE scene_refs ADD COLUMN decayed_at TIMESTAMP`)
+		tx.Exec(`UPDATE scene_refs SET decayed_at = created_at WHERE decayed_at IS NULL`)
+	}
+	// 冗余索引清理：entities.name 与 sentences.text 上的 UNIQUE 已隐含等价索引
+	// （sqlite_autoindex_*），再建一个同列索引只增加写放大，查询不会用到。
+	tx.Exec(`DROP INDEX IF EXISTS idx_entity_name`)
+	tx.Exec(`DROP INDEX IF EXISTS idx_sentences_text`)
 	// 迁移3：将现有 sentence_ref 数据迁移到 sentences 表
 	tx.Exec(`INSERT OR IGNORE INTO sentences (text) SELECT DISTINCT sentence_ref FROM relations WHERE sentence_ref != ''`)
 	tx.Exec(`UPDATE relations SET sentence_id = (SELECT id FROM sentences WHERE text = relations.sentence_ref) WHERE sentence_ref != ''`)
@@ -639,10 +660,25 @@ func (g *GraphDB) Recall(keywords []string, seedEntities []string, depth int, se
 	entityIDs := make(map[int64]bool)
 
 	for _, kw := range keywords {
+		// 相关度排序 + 限额。
+		//
+		// 此前这里既没有 ORDER BY 也没有 LIMIT：拿回来的顺序就是建表顺序
+		// （rowid 升序），于是注入进 prompt 的"前 5 个实体"是**最早创建的**，
+		// 越新越准的记忆越排后面被截掉（实测：输入「QQ回复格式」命中 148 个，
+		// 规则实体排第 32，前 5 里根本没有它）。
+		//
+		// 相关度分三层：完全相等 > 前缀命中 > 包含命中；同层按提及次数、
+		// 再按名字长度（短名更可能是实体本身而不是长描述）。
 		rows, err := g.db.Query(
 			`SELECT id, name, type, mention_count, created_at, updated_at
-			 FROM entities WHERE LOWER(name) LIKE ?`,
-			"%"+kw+"%",
+			 FROM entities WHERE LOWER(name) LIKE ?
+			 ORDER BY CASE
+			     WHEN LOWER(name) = LOWER(?) THEN 0
+			     WHEN LOWER(name) LIKE LOWER(?) || '%' THEN 1
+			     ELSE 2 END,
+			   mention_count DESC, LENGTH(name) ASC
+			 LIMIT ?`,
+			"%"+kw+"%", kw, kw, maxKeywordEntities,
 		)
 		if err != nil {
 			return nil, err
@@ -717,6 +753,11 @@ func (g *GraphDB) Recall(keywords []string, seedEntities []string, depth int, se
 			query += " AND r.session_id = ?"
 			allIDs = append(allIDs, sessionFilter)
 		}
+		// 每层限额：热实体（"文档"这类）的邻接可能是上千条，无上限时每层都
+		// 整片读进内存，而调用方（memory_recall 注入 10 条、自动注入只要实体名）
+		// 根本用不到。按置信度取最相关的一批。
+		query += " ORDER BY r.confidence DESC, r.updated_at DESC LIMIT ?"
+		allIDs = append(allIDs, maxAdjacentRelations)
 
 		relRows, err := g.db.Query(query, allIDs...)
 		if err != nil {
@@ -901,10 +942,13 @@ func (g *GraphDB) Purge(criteria map[string]string, mode string) (int, error) {
 		}
 		n, _ := result.RowsAffected()
 
-		g.db.Exec(`DELETE FROM entities WHERE id NOT IN (
-			SELECT DISTINCT source_id FROM relations
-			UNION SELECT DISTINCT target_id FROM relations)`)
-
+		// 这里**不再**顺手全局删孤儿实体。
+		//
+		// 原来那句 `DELETE FROM entities WHERE id NOT IN (relations 两端)` 是与
+		// 调用方意图无关的全局副作用：memory_edit 只想去掉一条关系，却可能把
+		// 图里其它孤零零的实体一并清掉。孤儿清理交给 PurgeOrphans
+		// （显式、可 dry-run、有计数与审计），一次改动只做一件事。
+		//
 		// 关系没了，它的场景引用必须跟着对齐：残留引用会让场景看着很大、
 		// 召回却是空的（SceneStats 也跟着说谎）。
 		g.purgeStaleSceneRefsLocked()

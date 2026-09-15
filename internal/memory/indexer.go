@@ -3,8 +3,10 @@ package memory
 import (
 	"fmt"
 	"log"
+	"sort"
 	"strings"
 	"sync"
+	"time"
 
 	"gitcode.com/JianFeeeee/HomeAgent/internal/memory/vector"
 )
@@ -19,7 +21,20 @@ type Indexer struct {
 
 	// recalledOrder 记录 recalled 的插入顺序，用于超限时按 FIFO 淘汰。
 	recalledOrder []string
+
+	// 增量同步状态：运行中新增的实体此前要等下一个归档心跳（Indexer.Sync）
+	// 才进向量索引，在那之前只能靠关键词路命中——"刚记住的东西过一会儿才想得
+	// 起来"就是这么来的。这里记下上次同步的实体数，召回前发现数量变了就补一次。
+	lastSyncCount int
+	lastSyncAt    time.Time
 }
+
+// retrainInterval 是增量重训的最小间隔。
+//
+// 为什么不每次都重训：TF-IDF 向量器是**全局**重训（词表与 idf 都变），
+// 一次是 O(实体数)。没有下限时，密集写入的场景下每轮召回都触发一次全量重训，
+// 把一个读操作变成写放大的热点。心跳（30min）+ 这个下限，够快也够稳。
+const retrainInterval = 30 * time.Second
 
 // maxRecalledEntities 是「已召回实体」去重集的上限。
 //
@@ -76,6 +91,10 @@ func (idx *Indexer) Sync() error {
 	}
 
 	if len(names) == 0 {
+		// 没有实体也是一次成功的同步：记下基线，否则 syncIfStale 会在
+		// 「基线还停在旧值」与「本轮无实体」之间反复误判、每 30s 重跑一次。
+		idx.lastSyncCount = 0
+		idx.lastSyncAt = time.Now()
 		return nil
 	}
 
@@ -93,8 +112,47 @@ func (idx *Indexer) Sync() error {
 	}
 
 	idx.trained = true
+	idx.lastSyncCount = len(names)
+	idx.lastSyncAt = time.Now()
 	log.Printf("[indexer] synced %d entities to vector index", len(names))
 	return nil
+}
+
+// syncIfStale 在实体数发生变化时补一次重建（调用方必须**不持锁**）。
+//
+// 返回是否发生了重建。计数查询走 idx_count 索引，成本可忽略；
+// 只有真的变了、且离上次同步超过 retrainInterval 才重训。
+func (idx *Indexer) syncIfStale() bool {
+	if idx.db == nil {
+		return false
+	}
+	var count int
+	if err := idx.db.db.QueryRow(`SELECT COUNT(*) FROM entities`).Scan(&count); err != nil {
+		return false
+	}
+	// 基线口径必须与 Sync 一致：Sync 走的是「无关键词全量召回」，实体数被
+	// maxFullRecallEntities 封顶。直接拿 COUNT(*) 比会在实体数超过上限的大图上
+	// 永远不相等——每 30s 全量重训一次，把一条读路径变成写放大热点。
+	expected := count
+	if expected > maxFullRecallEntities {
+		expected = maxFullRecallEntities
+	}
+
+	idx.mu.RLock()
+	known, last := idx.lastSyncCount, idx.lastSyncAt
+	idx.mu.RUnlock()
+	if expected == known {
+		return false
+	}
+	if !last.IsZero() && time.Since(last) < retrainInterval {
+		return false
+	}
+	if err := idx.Sync(); err != nil {
+		log.Printf("[indexer] 增量同步失败（沿用旧索引）: %v", err)
+		return false
+	}
+	log.Printf("[indexer] 实体数 %d→%d，已增量重建实体名向量索引", known, count)
+	return true
 }
 
 type InjectedContext struct {
@@ -129,6 +187,9 @@ func (idx *Indexer) BuildContextInScene(userInput string, scenes []string) *Inje
 	}
 
 	input := CleanText(userInput)
+
+	// 0. 索引保鲜：运行中新增的实体不该等到下一个心跳才可被召回
+	idx.syncIfStale()
 
 	// 1. 向量搜索：从实体名向量索引中找到相关实体
 	vectorEntities := idx.vectorSearchEntities(input)
@@ -444,16 +505,30 @@ func buildIndexSummary(entities []Entity) string {
 	var b strings.Builder
 	b.WriteString(fmt.Sprintf("关联 %d 个记忆实体", len(entities)))
 
+	// 「高频」必须真的按提及次数排。
+	//
+	// 此前取的是 entities[0..2]，也就是 Recall 的返回顺序（旧实现下等于建表
+	// 顺序），却写着"高频"两个字：给模型的暗示是"这几条最重要"，实际是
+	// "这几条建得最早"。名不副实的标签比没有标签更坏——它会稳定地误导。
+	byMentions := make([]Entity, len(entities))
+	copy(byMentions, entities)
+	sort.SliceStable(byMentions, func(i, j int) bool {
+		if byMentions[i].MentionCount != byMentions[j].MentionCount {
+			return byMentions[i].MentionCount > byMentions[j].MentionCount
+		}
+		return byMentions[i].Name < byMentions[j].Name
+	})
+
 	topN := 3
-	if len(entities) < topN {
-		topN = len(entities)
+	if len(byMentions) < topN {
+		topN = len(byMentions)
 	}
 	b.WriteString("，高频：")
 	for i := 0; i < topN; i++ {
 		if i > 0 {
 			b.WriteString("、")
 		}
-		b.WriteString(entities[i].Name)
+		b.WriteString(byMentions[i].Name)
 	}
 
 	return b.String()
