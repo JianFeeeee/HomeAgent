@@ -3,6 +3,7 @@ package memory
 import (
 	"path/filepath"
 	"testing"
+	"time"
 )
 
 func TestNewIndexer(t *testing.T) {
@@ -45,6 +46,52 @@ func TestIndexerSync(t *testing.T) {
 	}
 	if idx.vec.Size() != ec {
 		t.Errorf("expected %d vectors, got %d", ec, idx.vec.Size())
+	}
+}
+
+// TestSyncIfStaleBaseline 钉住增量同步的基线口径：
+//   - 实体数未变 → 不重训
+//   - 实体数变了但不足 retrainInterval → 先不重训（避免密集写入时写放大）
+//   - 实体数变了且间隔已过 → 重训，并把基线追到新值
+func TestSyncIfStaleBaseline(t *testing.T) {
+	db, err := NewGraphDB(filepath.Join(t.TempDir(), "test.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+
+	if _, _, err := db.Commit([]Triple{
+		{Subject: "张三", Relation: "喜欢", Object: "篮球"},
+	}, "test", 0); err != nil {
+		t.Fatal(err)
+	}
+
+	idx := NewIndexer(db)
+	if !idx.syncIfStale() {
+		t.Fatal("首次应建立索引")
+	}
+	if idx.syncIfStale() {
+		t.Error("实体数未变不该重训")
+	}
+
+	if _, _, err := db.Commit([]Triple{
+		{Subject: "李四", Relation: "喜欢", Object: "足球"},
+	}, "test", 0); err != nil {
+		t.Fatal(err)
+	}
+	if idx.syncIfStale() {
+		t.Error("retrainInterval 内不该重训（避免写放大）")
+	}
+
+	// 把上次同步时刻推老，计数变化才该触发重训
+	idx.mu.Lock()
+	idx.lastSyncAt = time.Now().Add(-2 * retrainInterval)
+	idx.mu.Unlock()
+	if !idx.syncIfStale() {
+		t.Error("计数变化且间隔已过应重训")
+	}
+	if idx.syncIfStale() {
+		t.Error("重训后基线应追上，不该再重训")
 	}
 }
 

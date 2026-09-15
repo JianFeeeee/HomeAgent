@@ -198,7 +198,7 @@ func tagSceneRefTx(tx *sql.Tx, sceneKey, kind string, id int64, textID string, w
 	if _, err := tx.Exec(
 		`INSERT INTO scene_refs (scene_id, kind, ref_id, ref_text, weight) VALUES (?, ?, ?, ?, ?)
 		 ON CONFLICT(scene_id, kind, ref_id, ref_text)
-		 DO UPDATE SET weight = MAX(weight, excluded.weight)`,
+		 DO UPDATE SET weight = MAX(weight, excluded.weight), decayed_at = CURRENT_TIMESTAMP`,
 		sceneID, kind, id, textID, weight); err != nil {
 		return fmt.Errorf("upsert scene ref %s/%d%s: %w", kind, id, textID, err)
 	}
