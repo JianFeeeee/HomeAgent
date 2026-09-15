@@ -65,9 +65,9 @@ func TestSceneEmergesFromRepetition(t *testing.T) {
 		t.Fatalf("webui 场面应自己长出独立场景: key=%q created=%v", k2, c2)
 	}
 
-	scenes, err := g.EmergentScenes()
+	scenes, err := g.SceneStats()
 	if err != nil {
-		t.Fatalf("EmergentScenes: %v", err)
+		t.Fatalf("SceneStats: %v", err)
 	}
 	if len(scenes) != 2 {
 		t.Fatalf("应长出 2 个场景，得到 %d: %+v", len(scenes), scenes)
@@ -132,6 +132,9 @@ func TestSceneRecallsBySituationNotWording(t *testing.T) {
 }
 
 // TestSceneRefDecay 钉住「用进废退」：久未重现的关联会淡出并被清掉。
+//
+// 半衰期的语义是「每个引用至多每 halfLife 衰减一次」：衰减计时起点在
+// scene_refs.decayed_at 上，同一半衰期内重复跑心跳不会再砍。
 func TestSceneRefDecay(t *testing.T) {
 	g := newTestGraph(t)
 	defer os.Remove(g.dbPath)
@@ -147,13 +150,13 @@ func TestSceneRefDecay(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	// 把时间推旧：模拟长期未重现
-	if _, err := g.db.Exec(`UPDATE scene_refs SET created_at = ?`,
-		time.Now().Add(-48*time.Hour).Format("2006-01-02 15:04:05")); err != nil {
+	// 把时间推旧：模拟长期未重现（上次衰减也在同一时刻）。用 SQLite 的
+	// datetime('now') 与 CURRENT_TIMESTAMP 同一时间基准（UTC）。
+	if _, err := g.db.Exec(`UPDATE scene_refs
+		SET created_at = datetime('now','-48 hours'), decayed_at = datetime('now','-48 hours')`); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := g.db.Exec(`UPDATE scenes SET updated_at = ?`,
-		time.Now().Add(-48*time.Hour).Format("2006-01-02 15:04:05")); err != nil {
+	if _, err := g.db.Exec(`UPDATE scenes SET updated_at = datetime('now','-48 hours')`); err != nil {
 		t.Fatal(err)
 	}
 
@@ -169,9 +172,21 @@ func TestSceneRefDecay(t *testing.T) {
 		t.Errorf("一个半衰期后权重应减半: %v → %v", before, after)
 	}
 
-	// 再推旧一次：第二个半衰期后低于 floor，关联已无信息量，清掉
-	if _, err := g.db.Exec(`UPDATE scene_refs SET created_at = ?`,
-		time.Now().Add(-48*time.Hour).Format("2006-01-02 15:04:05")); err != nil {
+	// 同一半衰期内再跑：decayed_at 已刷新，不该再砍一次
+	// （否则心跳频率就成了实际半衰期，30 天的关联几小时就被清空）
+	if _, err := g.DecaySceneRefs(time.Hour, 0.4); err != nil {
+		t.Fatalf("DecaySceneRefs: %v", err)
+	}
+	var same float64
+	if err := g.db.QueryRow(`SELECT weight FROM scene_refs LIMIT 1`).Scan(&same); err != nil {
+		t.Fatal(err)
+	}
+	if same != after {
+		t.Errorf("同一半衰期内不该重复衰减: %v → %v", after, same)
+	}
+
+	// 进入第二个半衰期：再推旧 decayed_at，权重低于 floor，清掉
+	if _, err := g.db.Exec(`UPDATE scene_refs SET decayed_at = datetime('now','-48 hours')`); err != nil {
 		t.Fatal(err)
 	}
 	n, err := g.DecaySceneRefs(time.Hour, 0.4)
@@ -204,9 +219,8 @@ func TestSceneRefDecay(t *testing.T) {
 }
 
 // TestDeclaredAndEmergentBothLearn 钉住「主动 + 被动两条路」的相互长进：
-//   - 主动：声明即建场景（不等第二次涌现），并把指纹喂给它
-//   - 被动：指纹聚类自己长出场景；声明场景学会特征后**即使没人再声明**
-//     也能被相似度命中
+//   - 主动：声明即建场景（不等第二次涌现），特征只从键自身解析
+//   - 被动：指纹聚类自己长出场景；声明场景**不**进相似度空间，靠声明/前缀键取回
 //   - 第一次交互（涌现场景还没长出来）由声明场景兜底
 func TestDeclaredAndEmergentBothLearn(t *testing.T) {
 	g := newTestGraph(t)
@@ -298,7 +312,7 @@ func TestDeclaredAndEmergentBothLearn(t *testing.T) {
 	}
 
 	// 声明场景不该被覆盖成涌现键：两者的身份各自保留
-	if _, err := g.EnsureScene("chan:qq", Situation{}); err != nil {
+	if _, err := g.EnsureScene("chan:qq"); err != nil {
 		t.Fatalf("EnsureScene: %v", err)
 	}
 	var n int
@@ -307,6 +321,18 @@ func TestDeclaredAndEmergentBothLearn(t *testing.T) {
 	}
 	if n != 1 {
 		t.Errorf("声明场景应保持独立存在，得到 %d", n)
+	}
+}
+
+// TestPeerGroupWeight 钉住群身份是**强**同一性信号：peer_group 与 peer 同为
+// wFeatPeer。漏掉 peer_group 会让它在 Weight 里落到 default（话题级 0.4），
+// 群聊场面被降级成软信号。
+func TestPeerGroupWeight(t *testing.T) {
+	if got := (SituationFeature{Kind: "peer_group", Value: "group_1"}).Weight(); got != wFeatPeer {
+		t.Errorf("peer_group 权重应为 %v，得到 %v", wFeatPeer, got)
+	}
+	if got := (SituationFeature{Kind: "peer", Value: "user_1"}).Weight(); got != wFeatPeer {
+		t.Errorf("peer 权重应为 %v，得到 %v", wFeatPeer, got)
 	}
 }
 

@@ -80,7 +80,10 @@ func (f SituationFeature) Weight() float64 {
 	switch NormalizeSceneKey(f.Kind) {
 	case "chan":
 		return wFeatChan
-	case "peer":
+	case "peer", "peer_group":
+		// 群与私聊都是「对话对象」这一维：都是最强的同一性信号。
+		// 分开 kind 是为了让 `peer:group_1` 与 `peer:user_1` 不互相命中，
+		// 不是让群身份降级成软信号（漏掉这里它就只剩 topic 权重 0.4）。
 		return wFeatPeer
 	case "tool":
 		return wFeatTool
@@ -387,7 +390,9 @@ func (g *GraphDB) recordSituationEvidenceLocked(sig Situation) (int, error) {
 
 // RecallBySituation 按**场面相似**取回记忆：不是键相等，而是「像不像同一个场面」。
 //
-// 命中多个场景时按相似度 × 权重合并，跨场景去重（同一关系只出现一次）。
+// 命中多个场景时取并集，跨场景去重（同一关系只出现一次）；命中的场景先按
+// 相似度排序再交给 RecallByScene。最终顺序以**场景内引用权重**（写入时的
+// 置信度）为准，相似度只决定哪些场景参与、不参与每条关系的排序。
 // 这正是「类似的场景自动唤起对应的记忆」那一下。
 func (g *GraphDB) RecallBySituation(sig Situation, limit int) (*SceneRecall, error) {
 	if sig.Empty() {
@@ -427,7 +432,7 @@ func (g *GraphDB) RecallBySituation(sig Situation, limit int) (*SceneRecall, err
 	for _, h := range hits {
 		keys = append(keys, h.key)
 	}
-	// 复用按场景键的取回逻辑（前缀语义 + weight 排序），再按相似度加权重排
+	// 复用按场景键的取回逻辑（前缀语义 + weight 排序）
 	out, err := g.RecallByScene(keys, limit)
 	if err != nil {
 		return nil, err
@@ -440,6 +445,11 @@ func (g *GraphDB) RecallBySituation(sig Situation, limit int) (*SceneRecall, err
 // 人的记忆是靠「用进废退」维持秩序的：不做衰减，一次性的巧合关联会
 // 永远留在场景里，每次路过都被注入，越攒越多直到注入预算被吃光。
 // 权重按半衰期折半；低于 floor 的引用直接删除（关联已无信息量）。
+//
+// 关键在「按半衰期」：每个引用**至多每 halfLife 衰减一次**，计时起点记在
+// scene_refs.decayed_at 上。只按 created_at 判龄会在每次心跳都把老引用对半
+// 砍——archive 心跳默认 60 分钟、halfLife 传 30 天，于是 30 天前的关联会在
+// 几小时内被砍到 floor 以下清空。那不是半衰期，是骤死。
 func (g *GraphDB) DecaySceneRefs(halfLife time.Duration, floor float64) (int, error) {
 	if halfLife <= 0 {
 		return 0, nil
@@ -449,12 +459,15 @@ func (g *GraphDB) DecaySceneRefs(halfLife time.Duration, floor float64) (int, er
 	}
 	g.mu.Lock()
 	defer g.mu.Unlock()
-	cut := time.Now().Add(-halfLife).Format("2006-01-02 15:04:05")
+	// 时间基准必须与 CURRENT_TIMESTAMP 一致（SQLite 用 UTC）：如果在 Go 侧用
+	// 本地时间拼字符串比较，东八区会凭空多出 8 小时的“年龄”，刚刷新的
+	// decayed_at 会被判定为还没到点。这里交给 SQLite 的 datetime('now', …)。
+	mod := fmt.Sprintf("-%d seconds", int(halfLife.Seconds()))
 	if _, err := g.db.Exec(
-		`UPDATE scene_refs SET weight = weight * 0.5
-		 WHERE created_at < ? AND id NOT IN (
+		`UPDATE scene_refs SET weight = weight * 0.5, decayed_at = CURRENT_TIMESTAMP
+		 WHERE decayed_at < datetime('now', ?) AND id NOT IN (
 			SELECT sr.id FROM scene_refs sr JOIN scenes s ON sr.scene_id = s.id
-			WHERE s.updated_at >= ?)`, cut, cut); err != nil {
+			WHERE s.updated_at >= datetime('now', ?))`, mod, mod); err != nil {
 		return 0, err
 	}
 	res, err := g.db.Exec(`DELETE FROM scene_refs WHERE weight < ?`, floor)
@@ -463,31 +476,6 @@ func (g *GraphDB) DecaySceneRefs(halfLife time.Duration, floor float64) (int, er
 	}
 	n, _ := res.RowsAffected()
 	return int(n), nil
-}
-
-// EmergentScenes 列出当前长出来的场景（按强度降序），供观察「涌现」是否在发生。
-func (g *GraphDB) EmergentScenes() ([]SceneStat, error) {
-	g.mu.RLock()
-	defer g.mu.RUnlock()
-	rows, err := g.db.Query(
-		`SELECT s.key, COALESCE(s.strength,1),
-		        (SELECT COUNT(*) FROM scene_refs sr WHERE sr.scene_id = s.id),
-		        (SELECT COUNT(*) FROM scene_features f WHERE f.scene_id = s.id),
-		        COALESCE(s.origin, 'emergent'), s.updated_at
-		 FROM scenes s ORDER BY COALESCE(s.strength,1) DESC, s.updated_at DESC`)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-	var out []SceneStat
-	for rows.Next() {
-		var st SceneStat
-		if err := rows.Scan(&st.Key, &st.Strength, &st.Refs, &st.Features, &st.Origin, &st.UpdatedAt); err != nil {
-			return nil, err
-		}
-		out = append(out, st)
-	}
-	return out, rows.Err()
 }
 
 // TurnScene 是一轮交互解析出来的场景集合。
@@ -505,10 +493,10 @@ type TurnScene struct {
 
 // EnterSceneWithHint 同时走**主动声明**与**被动涌现**两条路。
 //
-// 主动路（declaredKeys 非空）：确保这些场景存在，并把本轮的场面指纹喂给它，
-// 强度 +1。这样声明出来的场景会**慢慢学会自己认自己**——同一个场面以后
-// 即使没人声明，也能被 RecallBySituation 按相似度命中。
-// 声明即建场景，不等第二次：人明确说了"这是哪个场面"，就不该再等它自己涌现。
+// 主动路（declaredKeys 非空）：确保这些场景存在（不存在即建，不等第二次涌现
+// ——人明确说了"这是哪个场面"，就不该再等它自己涌现），强度 +1，并给它记下
+// 从**键自身**解析出的特征。声明路刻意**不吸收本轮整场指纹**：一旦吸收，它
+// 会在相似度上压过一切，被动聚类再也长不出更细的场面（见 EnsureScene）。
 //
 // 被动路（始终执行）：EnterScene 的聚类，指纹重复到 minSceneEvidence 次时
 // 自己长出场景。首次交互这里返回空，此时 Primary 落到声明场景兜底——
@@ -524,7 +512,7 @@ func (g *GraphDB) EnterSceneWithHint(sig Situation, declaredKeys []string) (Turn
 			continue
 		}
 		seen[key] = true
-		learned, err := g.EnsureScene(key, sig)
+		learned, err := g.EnsureScene(key)
 		if err != nil {
 			return out, err
 		}
@@ -538,8 +526,11 @@ func (g *GraphDB) EnterSceneWithHint(sig Situation, declaredKeys []string) (Turn
 	}
 
 	// 被动路：指纹聚类（可能返回已聚合的场景、也可能首次为空）
+	//
+	// EnterScene 只在真的命中/新建时返回非空键；返回空键时 created 必为
+	// false（首次只登记足迹），所以这里无需再判 created。
 	if !sig.Empty() {
-		key, created, err := g.EnterScene(sig)
+		key, _, err := g.EnterScene(sig)
 		if err != nil {
 			return out, err
 		}
@@ -548,8 +539,6 @@ func (g *GraphDB) EnterSceneWithHint(sig Situation, declaredKeys []string) (Turn
 				out.Keys = append(out.Keys, key)
 			}
 			out.Primary = key
-			out.Emergent = true
-		} else if created {
 			out.Emergent = true
 		}
 	}
@@ -562,7 +551,7 @@ func (g *GraphDB) EnterSceneWithHint(sig Situation, declaredKeys []string) (Turn
 // 不吸收本轮的整轮指纹。这条边界很关键：声明场景若吸收整轮指纹，它会在相似度
 // 上压过一切，被动聚类再也长不出更细的场面（实测过，见 loadEmergentScenesLocked）。
 // 声明路的泛化靠层级键前缀，不需要靠学指纹。
-func (g *GraphDB) EnsureScene(key string, _ Situation) (bool, error) {
+func (g *GraphDB) EnsureScene(key string) (bool, error) {
 	key = NormalizeSceneKey(key)
 	if key == "" {
 		return false, nil
