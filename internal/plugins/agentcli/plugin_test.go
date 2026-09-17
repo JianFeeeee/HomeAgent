@@ -227,7 +227,12 @@ func TestCreateTerminalMissingArgs(t *testing.T) {
 		t.Fatalf("expected status created, got %v", resp["status"])
 	}
 	id := resp["id"].(string)
-	p.handleClose(map[string]interface{}{"id": id})
+	// 经注册的 handler 关闭（handler 内部会带上 sdk）；
+	// 直接调 p.handleClose 需自备 sdk 参数。
+	closeHandler := tc.handlers["terminal_close"]
+	if _, err := closeHandler(map[string]interface{}{"id": id}); err != nil {
+		t.Fatal(err)
+	}
 }
 
 func TestWriteToNonexistentTerminal(t *testing.T) {

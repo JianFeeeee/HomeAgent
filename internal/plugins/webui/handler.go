@@ -96,6 +96,7 @@ type Handler struct {
 	settings   sdk.SettingsAPI
 	pluginMgr  sdk.PluginManager
 	status     sdk.StatusAPI
+	term       sdk.TerminalAPI
 	llm        sdk.LLMAPI
 
 	sessionMu sync.Mutex
@@ -125,26 +126,23 @@ type Handler struct {
 	chatMsgMu    sync.Mutex
 	chatMsgCache map[string]*chatMsgEntry // client_msg_id -> 首次处理结果
 	chatMsgOrder []string                 // FIFO 淘汰序
-	cmdMu        sync.Mutex
-	cmdHistory   []CmdExec
-	termMu       sync.Mutex
-	termStates   map[string]*termState
 }
 
 func NewHandler(s *sdk.PluginSDK) *Handler {
 	var (
-		sup sdk.SupervisorAPI
-		mem sdk.MemoryAPI
-		idx sdk.IndexerAPI
-		ad  sdk.AdapterAPI
-		cfg sdk.ConfigAPI
-		tm  sdk.TextMemoryAPI
-		ks  sdk.KnowledgeAPI
-		tr  sdk.TrackerAPI
-		se  sdk.SettingsAPI
-		pm  sdk.PluginManager
-		st  sdk.StatusAPI
-		llm sdk.LLMAPI
+		sup  sdk.SupervisorAPI
+		mem  sdk.MemoryAPI
+		idx  sdk.IndexerAPI
+		ad   sdk.AdapterAPI
+		cfg  sdk.ConfigAPI
+		tm   sdk.TextMemoryAPI
+		ks   sdk.KnowledgeAPI
+		tr   sdk.TrackerAPI
+		se   sdk.SettingsAPI
+		pm   sdk.PluginManager
+		st   sdk.StatusAPI
+		term sdk.TerminalAPI
+		llm  sdk.LLMAPI
 	)
 	if s != nil {
 		sup, mem, idx = s.Supervisor(), s.Memory(), s.Indexer()
@@ -152,6 +150,7 @@ func NewHandler(s *sdk.PluginSDK) *Handler {
 		tm, ks, tr = s.TextMemory(), s.Knowledge(), s.Tracker()
 		se, pm = s.Settings(), s.PluginMgr()
 		st, llm = s.Status(), s.LLM()
+		term = s.Terminal()
 	}
 	h := &Handler{
 		sdk:          s,
@@ -167,9 +166,9 @@ func NewHandler(s *sdk.PluginSDK) *Handler {
 		settings:     se,
 		pluginMgr:    pm,
 		status:       st,
+		term:         term,
 		llm:          llm,
 		sessions:     make(map[string]time.Time),
-		termStates:   make(map[string]*termState),
 		pendingIdx:   -1,
 		chatMsgCache: make(map[string]*chatMsgEntry),
 		sseEvents:    newSSEEventRing(200),
@@ -184,19 +183,9 @@ func NewHandler(s *sdk.PluginSDK) *Handler {
 	go h.chatPersistLoop()
 	h.loadChatHistory()
 	if s != nil {
-		go h.trackToolEvents()
 		h.subscribeChatEvents()
-		h.subscribeTerminalStream()
 	}
 	return h
-}
-
-func getStr(m map[string]interface{}, key string) string {
-	if m == nil {
-		return ""
-	}
-	v, _ := m[key].(string)
-	return v
 }
 
 func (h *Handler) getWebUIConfig() (apiKey, username, password string, ttl time.Duration) {

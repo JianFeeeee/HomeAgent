@@ -167,6 +167,7 @@ type PluginSDK struct {
 	config     ConfigAPI
 	tool       ToolAPI
 	indexer    IndexerAPI
+	terminal   TerminalAPI
 
 	selftestMu sync.Mutex
 	selftest   *VirtualInstance
@@ -314,6 +315,7 @@ type SDKConfig struct {
 	Config     ConfigAPI
 	Tool       ToolAPI
 	Indexer    IndexerAPI
+	Terminal   TerminalAPI
 }
 
 func New(name string, cfg SDKConfig) *PluginSDK {
@@ -353,6 +355,7 @@ func New(name string, cfg SDKConfig) *PluginSDK {
 		config:     cfg.Config,
 		tool:       cfg.Tool,
 		indexer:    cfg.Indexer,
+		terminal:   cfg.Terminal,
 	}
 }
 
@@ -399,6 +402,7 @@ func (s *PluginSDK) Tracker() TrackerAPI       { return s.tracker }
 func (s *PluginSDK) Config() ConfigAPI         { return s.config }
 func (s *PluginSDK) Tool() ToolAPI             { return s.tool }
 func (s *PluginSDK) Indexer() IndexerAPI       { return s.indexer }
+func (s *PluginSDK) Terminal() TerminalAPI     { return s.terminal }
 
 func (s *PluginSDK) InjectInput(source, channel, eventType string, payload map[string]interface{}) {
 	if s.iom != nil {

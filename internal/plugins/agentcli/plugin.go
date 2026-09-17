@@ -351,7 +351,7 @@ func (p *Plugin) Start(s *sdk.PluginSDK) error {
 			"required": []string{"id"},
 		},
 	}, func(args map[string]interface{}) (interface{}, error) {
-		return p.handleClose(args)
+		return p.handleClose(s, args)
 	})
 
 	s.RegisterTool("terminal_list", sdk.ToolDef{
@@ -492,6 +492,10 @@ func (p *Plugin) handleCreate(s *sdk.PluginSDK, args map[string]interface{}) (in
 
 	p.wg.Add(1)
 	go p.readLoop(session, s)
+
+	// 生命周期事件：终端创建即时上报（带 command），让内核权威视图与所有
+	// 订阅者（WebUI/CLI）即使在该终端无输出的情况下也能知道它的存在。
+	emitTermState(s, session, true)
 
 	log.Printf("[agentcli] created terminal %s: command=%q timeout=%v rows=%d cols=%d", id, command, timeout, rows, cols)
 
@@ -681,7 +685,7 @@ func (p *Plugin) handleResize(args map[string]interface{}) (interface{}, error) 
 	}, nil
 }
 
-func (p *Plugin) handleClose(args map[string]interface{}) (interface{}, error) {
+func (p *Plugin) handleClose(s *sdk.PluginSDK, args map[string]interface{}) (interface{}, error) {
 	id, _ := args["id"].(string)
 	if id == "" {
 		return map[string]interface{}{"error": "id is required"}, nil
@@ -700,6 +704,9 @@ func (p *Plugin) handleClose(args map[string]interface{}) (interface{}, error) {
 
 	session.Close()
 	log.Printf("[agentcli] closed terminal %s", id)
+
+	// 生命周期事件：显式上报关闭（readLoop 退出时也会发，幂等）。
+	emitTermState(s, session, false)
 
 	return map[string]interface{}{
 		"status":   "closed",
@@ -795,6 +802,25 @@ func (p *Plugin) handleList() (interface{}, error) {
 	}, nil
 }
 
+// emitTermState 把终端存活状态作为 EventTerminalOutput 事件上报。
+//
+// 生命周期事件（创建/关闭/退出/超时）必须显式发：终端无输出时 ticker
+// 不会发事件，内核的终端权威视图与所有插件（WebUI/CLI）都依赖这些事件
+// 才能知道终端的存在与终止。payload 带 command 供无 ToolCall 事件的
+// 直调路径（CLI /terminal create 经 ToolAPI.ExecuteTool）回填命令名。
+// 幂等：重复发同一 running 值不会产生状态跳变。
+func emitTermState(s *sdk.PluginSDK, t *TerminalSession, running bool) {
+	if s == nil || t == nil {
+		return
+	}
+	s.Publish(&sdk.Event{
+		Type:      sdk.EventTerminalOutput,
+		Source:    "agentcli",
+		Payload:   map[string]interface{}{"terminal_id": t.id, "command": t.command, "running": running},
+		Timestamp: time.Now().UnixMilli(),
+	})
+}
+
 func (p *Plugin) readLoop(t *TerminalSession, s *sdk.PluginSDK) {
 	defer p.wg.Done()
 	defer close(t.done)
@@ -811,6 +837,9 @@ func (p *Plugin) readLoop(t *TerminalSession, s *sdk.PluginSDK) {
 	// 实时画面推流 ticker：每 200ms 批量发布一次 terminal_output 事件
 	flushTicker := time.NewTicker(200 * time.Millisecond)
 	defer flushTicker.Stop()
+
+	// 退出时确保内核权威视图标记该终端为已停止（readLoop 的所有 return 点）。
+	defer emitTermState(s, t, false)
 
 	// 立即发送首次"终端已启动"通知，让 agent 感知存在。
 	// 用 NoMemory：这是状态提示，不是对话内容。不关掉的话每开一个终端都会
@@ -888,7 +917,7 @@ func (p *Plugin) readLoop(t *TerminalSession, s *sdk.PluginSDK) {
 				s.Publish(&sdk.Event{
 					Type:      sdk.EventTerminalOutput,
 					Source:    "agentcli",
-					Payload:   map[string]interface{}{"terminal_id": t.id, "output": streamData, "running": terminalRunning(t)},
+					Payload:   map[string]interface{}{"terminal_id": t.id, "command": t.command, "output": streamData, "running": terminalRunning(t)},
 					Timestamp: time.Now().UnixMilli(),
 				})
 			}

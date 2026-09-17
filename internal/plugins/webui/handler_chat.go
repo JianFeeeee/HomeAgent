@@ -122,15 +122,6 @@ func (h *Handler) loadChatHistory() {
 	h.chatMu.Unlock()
 }
 
-func (h *Handler) trackToolEvents() {
-	if h.sdk == nil {
-		return
-	}
-	h.sdk.Subscribe(sdk.EventToolCall, func(ev *sdk.Event) {
-		h.handleToolEvent(ev)
-	})
-}
-
 // subscribeChatEvents 捕获所有通道（cli/qq/webui 等）的对话轮次，
 // 与 handleChat 的注入一起构成完整的全通道对话历史。
 func (h *Handler) subscribeChatEvents() {
@@ -405,80 +396,6 @@ func (h *Handler) pendingAssistantLocked() *ChatMsg {
 		return nil
 	}
 	return msg
-}
-
-func (h *Handler) handleToolEvent(ev *sdk.Event) {
-	payload := ev.Payload
-	tool, _ := payload["tool"].(string)
-	args, _ := payload["args"].(map[string]interface{})
-	status, _ := payload["status"].(string)
-	ts := time.Now()
-
-	switch tool {
-	case "cmd_run":
-		exec := CmdExec{
-			Command: getStr(args, "command"),
-			Status:  status,
-			Time:    ts.Format(time.RFC3339),
-		}
-		h.cmdMu.Lock()
-		h.cmdHistory = append(h.cmdHistory, exec)
-		if len(h.cmdHistory) > maxCmdHistory {
-			h.cmdHistory = h.cmdHistory[len(h.cmdHistory)-maxCmdHistory:]
-		}
-		h.cmdMu.Unlock()
-
-	case "terminal_create":
-		id := getStr(args, "id")
-		if id == "" {
-			// agent 调用时不知道生成的 id，从工具结果中回填
-			if res, ok := payload["result"].(map[string]interface{}); ok {
-				id = getStr(res, "id")
-			}
-		}
-		if id == "" {
-			break
-		}
-		cmd := getStr(args, "command")
-		if cmd == "" {
-			if res, ok := payload["result"].(map[string]interface{}); ok {
-				cmd = getStr(res, "command")
-			}
-		}
-		now := time.Now()
-		term := &termState{
-			ID:        id,
-			Command:   cmd,
-			Running:   true,
-			CreatedAt: now.Format(time.RFC3339),
-			created:   now,
-		}
-		h.termMu.Lock()
-		if old, ok := h.termStates[id]; ok {
-			old.Command = cmd
-			old.Running = true
-			old.created = now
-		} else {
-			h.termStates[id] = term
-		}
-		if len(h.termStates) > maxTerminals {
-			for k := range h.termStates {
-				delete(h.termStates, k)
-				break
-			}
-		}
-		h.termMu.Unlock()
-
-	case "terminal_close":
-		id := getStr(args, "id")
-		if id != "" {
-			h.termMu.Lock()
-			if t, ok := h.termStates[id]; ok {
-				t.Running = false
-			}
-			h.termMu.Unlock()
-		}
-	}
 }
 
 // bumpSeqLocked 分配下一个聊天序号（调用方须持 chatMu）。
