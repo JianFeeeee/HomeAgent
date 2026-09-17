@@ -800,6 +800,7 @@ func wirePluginSDK(pluginReg *plugin.Registry, luaVM *luapkg.VM, baseAPIKey stri
 	pluginReg.SetStageHost(stageHost)
 	pluginReg.SetIndexer(memIdx)
 	pluginReg.SetStatusProvider(agent)
+	pluginReg.SetTerminalAPI(agent)
 }
 
 // resolveWebUIOverride 解析 webui 监听地址的覆盖值，空串表示不覆盖。
