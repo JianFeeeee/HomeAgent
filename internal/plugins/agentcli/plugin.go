@@ -802,6 +802,36 @@ func (p *Plugin) handleList() (interface{}, error) {
 	}, nil
 }
 
+// flushTermStream 把终端待推送的增量输出作为 terminal_output 事件发布。
+//
+// 必须抽成公共函数：退出路径（进程结束/超时/读取错误/stopCh）与常规 200ms
+// ticker 都要走同一条推送路径。否则短命令（echo/ls 这类在首个 ticker 之前
+// 就结束的）残留在 stream 里的输出永远发不出事件，只留在 buf 里——
+// agent 用 terminal_read 能看到，但内核权威视图的 output 恒为空。
+// 返回是否真的发布了（无残留时为 false）。
+func flushTermStream(s *sdk.PluginSDK, t *TerminalSession) bool {
+	if s == nil || t == nil {
+		return false
+	}
+	var streamData string
+	t.mu.Lock()
+	if t.stream.Len() > 0 {
+		streamData = t.stream.String()
+		t.stream.Reset()
+	}
+	t.mu.Unlock()
+	if streamData == "" {
+		return false
+	}
+	s.Publish(&sdk.Event{
+		Type:      sdk.EventTerminalOutput,
+		Source:    "agentcli",
+		Payload:   map[string]interface{}{"terminal_id": t.id, "command": t.command, "output": streamData, "running": terminalRunning(t)},
+		Timestamp: time.Now().UnixMilli(),
+	})
+	return true
+}
+
 // emitTermState 把终端存活状态作为 EventTerminalOutput 事件上报。
 //
 // 生命周期事件（创建/关闭/退出/超时）必须显式发：终端无输出时 ticker
@@ -838,8 +868,14 @@ func (p *Plugin) readLoop(t *TerminalSession, s *sdk.PluginSDK) {
 	flushTicker := time.NewTicker(200 * time.Millisecond)
 	defer flushTicker.Stop()
 
-	// 退出时确保内核权威视图标记该终端为已停止（readLoop 的所有 return 点）。
+	// 退出时先把残留输出推出去，再报停止。
+	//
+	// defer 是 LIFO：下面这两行声明顺序决定执行顺序——先 flush 后 emit。
+	// 若反了，停止事件会先于最后一段输出到达，内核会先把 running 置 false
+	// 再追加输出（状态看着对但顺序错）；更重要的是短命令的输出
+	// 只存在于 stream 里，不 flush 就彻底丢了。
 	defer emitTermState(s, t, false)
+	defer flushTermStream(s, t)
 
 	// 立即发送首次"终端已启动"通知，让 agent 感知存在。
 	// 用 NoMemory：这是状态提示，不是对话内容。不关掉的话每开一个终端都会
@@ -906,21 +942,7 @@ func (p *Plugin) readLoop(t *TerminalSession, s *sdk.PluginSDK) {
 			return
 		case <-flushTicker.C:
 			// 批量推送终端实时画面增量（独立 ticker，避免被高密度数据饿死）
-			var streamData string
-			t.mu.Lock()
-			if t.stream.Len() > 0 {
-				streamData = t.stream.String()
-				t.stream.Reset()
-			}
-			t.mu.Unlock()
-			if streamData != "" {
-				s.Publish(&sdk.Event{
-					Type:      sdk.EventTerminalOutput,
-					Source:    "agentcli",
-					Payload:   map[string]interface{}{"terminal_id": t.id, "command": t.command, "output": streamData, "running": terminalRunning(t)},
-					Timestamp: time.Now().UnixMilli(),
-				})
-			}
+			flushTermStream(s, t)
 		case r := <-readCh:
 			if r.err != nil {
 				// 读取错误/EOF → 立即通知（进程可能已结束）
