@@ -75,6 +75,11 @@ type TerminalSession struct {
 	backoff      time.Duration // 输出风暴退避：持续高速输出时通知间隔翻倍
 	watch        terminalWatch // 该终端的提醒规则
 
+	// resourcesReleased 标记 releaseResources 是否已执行（幂等保护）。
+	// 不与 closed 合用：closed 语义是「用户主动要求关闭」，releaseResources
+	// 是「后端资源已释放」，readLoop 自然退出时只后者为真。
+	resourcesReleased bool
+
 	// 实时画面推流（terminal_output 事件）
 	stream bytes.Buffer // 待推送的增量输出，由 readLoop 每 200ms flush 一次
 }
@@ -101,12 +106,9 @@ func (t *TerminalSession) Close() {
 	t.mu.Unlock()
 
 	close(t.stopCh)
-	// 先终止进程（各平台实现：Linux 信号 / Windows TerminateProcess，幂等），再释放资源。
-	// 不能依赖 cmd.Process.Kill()：Windows 后端 cmd.Process 为占位（仅 Pid）。
-	if t.session != nil {
-		_ = t.session.Kill()
-	}
-	t.session.Close()
+	// 终止进程并释放 PTY（幂等；readLoop 自然退出时已调过就直接返回）。
+	t.releaseResources()
+	// 等 readLoop 走完退出流程（它会发最后的 output/停止事件）。
 	<-t.done
 }
 
@@ -158,6 +160,7 @@ type Plugin struct {
 	mu             sync.Mutex
 	wg             sync.WaitGroup
 	stopCh         chan struct{}
+	stopOnce       sync.Once
 	sessions       map[string]*TerminalSession
 	nextID         int
 	defaultTimeout time.Duration
@@ -415,17 +418,38 @@ func (p *Plugin) Start(s *sdk.PluginSDK) error {
 }
 
 func (p *Plugin) Stop() error {
-	close(p.stopCh)
-	p.wg.Wait()
+	// 幂等：Stop 可能被多条路径调到（StopAndUnload 后再 StopAll、
+	// 停机与热重载交错）。close 一个已关闭的 channel 会 panic，
+	// 故用 Once 兜住。
+	p.stopOnce.Do(func() {
+		close(p.stopCh)
+		p.shutdown()
+	})
+	return nil
+}
 
+func (p *Plugin) shutdown() {
+	// 必须**先**关掉活跃终端，再等 wg。
+	//
+	// 为什么顺序不能反：readLoop 自己也记在 p.wg 上，而它的退出条件
+	// 是「t.stopCh 收到信号」或「进程自行结束／超时」——它不监 p.stopCh。
+	// 旧实现在这里先 p.wg.Wait() 才 Close 终端：只要还有任何一个终端开着，
+	// readLoop 永远等不到 t.stopCh，wg.Wait() 就永返回不了。
+	// 后果是插件卸载 / 热重载（StopAndUnload / ReloadOne）与停机全挂在
+	// 这一步，且持有 registry 锁时就是全内核一起挂。
 	p.mu.Lock()
+	sessions := make([]*TerminalSession, 0, len(p.sessions))
 	for _, t := range p.sessions {
-		t.Close()
+		sessions = append(sessions, t)
 	}
 	p.sessions = nil
 	p.mu.Unlock()
 
-	return nil
+	for _, t := range sessions {
+		t.Close()
+	}
+
+	p.wg.Wait()
 }
 
 func (p *Plugin) nextIDLocked() string {
@@ -851,9 +875,45 @@ func emitTermState(s *sdk.PluginSDK, t *TerminalSession, running bool) {
 	})
 }
 
+// releaseResources 幂等地释放终端后端：杀进程 + 关 PTY。
+//
+// 为何需要单独一个方法：readLoop 是终端自然的退出点（超时/进程结束/
+// 读取错误/插件停机），但 close(t.done) 的时机意味着它**不能**调
+// TerminalSession.Close()——后者会 <-t.done 等 readLoop 退出，而 readLoop
+// 正在自己里面，直接死锁。所以这里只做「不再需要 readLoop 配合」的那半：
+// 终止进程与释放 fd。
+func (t *TerminalSession) releaseResources() {
+	t.mu.Lock()
+	if t.resourcesReleased {
+		t.mu.Unlock()
+		return
+	}
+	t.resourcesReleased = true
+	t.mu.Unlock()
+
+	if t.session != nil {
+		_ = t.session.Kill()
+		// 回收子进程（避免僵尸）。后端可选实现：Linux PTY 在 Kill 后
+		// 必须 Wait 才能把 <defunct> 清掉；不实现的后端（如 Windows
+		// ConPTY）跳过即可。
+		if reaper, ok := t.session.(interface{ Wait() error }); ok {
+			_ = reaper.Wait()
+		}
+		_ = t.session.Close()
+	}
+}
+
 func (p *Plugin) readLoop(t *TerminalSession, s *sdk.PluginSDK) {
 	defer p.wg.Done()
 	defer close(t.done)
+
+	// 无论从哪个分支退出，都释放进程与 PTY。
+	//
+	// 旧实现只在「超时」和「进程退出」两个分支 delete(sessions) 后直接
+	// return：超时分支完全不碰 session，一个 sleep 999 超时后进程、PTY fd
+	// 与 reader 協程全数泄漏（readLoop 已经从 sessions 里删掉了，cleanupLoop
+	// 也再看不到它，没人能回收）。defer 保证「只要退出就释放」。
+	defer t.releaseResources()
 
 	// reader 协程独享这个读缓冲：结果随 readResult 携带，
 	// readLoop 不再从其中做 copy（见 reader 注释，那是对共享缓冲
@@ -896,6 +956,14 @@ func (p *Plugin) readLoop(t *TerminalSession, s *sdk.PluginSDK) {
 	quietLatency := 2 * time.Second
 
 	for {
+		// p.stopCh：插件停机。readLoop 记在 p.wg 上，若不在此退出，
+		// Stop() 的 wg.Wait() 就只能等终端自己超时（最长 30 分钟）。
+		select {
+		case <-p.stopCh:
+			return
+		default:
+		}
+
 		if t.IsExpired() {
 			log.Printf("[agentcli] terminal %s expired after %v", t.id, t.timeout)
 			s.InjectTextOpts("agentcli", "agentcli", fmt.Sprintf("[终端 %s 已超时关闭（%s）]", t.id, t.timeout),
