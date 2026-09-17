@@ -14,7 +14,6 @@ import (
 	"strconv"
 	"strings"
 	"sync"
-	"time"
 
 	"gitcode.com/JianFeeeee/HomeAgent/internal/config"
 	"gitcode.com/JianFeeeee/HomeAgent/internal/plugin"
@@ -50,32 +49,6 @@ type Plugin struct {
 	ln     net.Listener
 	mu     sync.Mutex
 	wg     sync.WaitGroup
-
-	// 终端会话与命令历史：订阅内核事件攒出来的，与 WebUI 同源同口径。
-	// 不是 WebUI 私有数据——它也是订 EventToolCall/EventTerminalOutput 自己攒的。
-	termMu     sync.Mutex
-	termStates map[string]*cliTermState
-	cmdMu      sync.Mutex
-	cmdHistory []cliCmdExec
-}
-
-// cliTermState 与 webui 的 termState 同字段（/terminals 输出口径）。
-type cliTermState struct {
-	ID        string `json:"id"`
-	Command   string `json:"command"`
-	Running   bool   `json:"running"`
-	Output    string `json:"output"`
-	CreatedAt string `json:"created_at"`
-}
-
-// cliCmdExec 与 webui 的 CmdExec 同字段（/cmd/history 输出口径）。
-type cliCmdExec struct {
-	Command  string `json:"command"`
-	Stdout   string `json:"stdout"`
-	Stderr   string `json:"stderr"`
-	ExitCode int    `json:"exit_code"`
-	Status   string `json:"status"`
-	Time     string `json:"time"`
 }
 
 func New(name, socketPath string) *Plugin {
@@ -89,8 +62,9 @@ func (p *Plugin) Name() string { return p.name }
 
 func (p *Plugin) Start(s *sdk.PluginSDK) error {
 	s.SetAutoRestart(true)
-	p.termStates = make(map[string]*cliTermState)
-	p.subscribeToolEvents(s)
+	// 终端与命令历史的权威视图在内核（「内核开，两个插件接」），
+	// /terminals 与 /cmd/history 直接从 s.Status().GetKernelStatus() 读，
+	// 无需在此订阅事件自攒。
 
 	// inputch 先登记：本插件既用 "cli" 作输出目标，也用它注入输入（终端行）。
 	// 输入侧必须显式登记，否则"把 inputch 划给驻留子"会找不到它。
@@ -350,9 +324,9 @@ func (p *Plugin) handleBuiltin(conn net.Conn, line string, s *sdk.PluginSDK) boo
 	case "/persona":
 		p.cmdPersona(conn, parts, s)
 	case "/terminals":
-		p.cmdTerminals(conn)
+		p.cmdTerminals(conn, s)
 	case "/cmd/history":
-		p.cmdCmdHistory(conn)
+		p.cmdCmdHistory(conn, s)
 	case "/terminal":
 		p.cmdTerminal(conn, parts, s)
 	default:
@@ -982,124 +956,41 @@ func (p *Plugin) cmdAgents(conn net.Conn, s *sdk.PluginSDK) {
 
 // ======== /terminals /cmd/history /terminal ========
 
-// subscribeToolEvents 订阅内核工具与终端事件，维护命令历史与终端会话视图。
+// 终端与命令历史的权威视图在内核（「内核开，两个插件接」）。
 //
-// 这两份数据不是 WebUI 插件私有的：WebUI 也是订阅同样的 EventToolCall /
-// EventTerminalOutput 自己攒出来的（见 handler_chat.go 的 handleToolEvent、
-// handler_terminal.go 的 subscribeTerminalStream）。事件面本就是 SDK 对内部
-// 插件开放的，所以 CLI 能做到同口径，不需要新增内核接口。
-func (p *Plugin) subscribeToolEvents(s *sdk.PluginSDK) {
-	s.Subscribe(sdk.EventToolCall, func(ev *sdk.Event) {
-		payload := ev.Payload
-		tool, _ := payload["tool"].(string)
-		args, _ := payload["args"].(map[string]interface{})
-		status, _ := payload["status"].(string)
-		switch tool {
-		case "cmd_run":
-			cmd := ""
-			if args != nil {
-				cmd, _ = args["command"].(string)
-			}
-			p.cmdMu.Lock()
-			p.cmdHistory = append(p.cmdHistory, cliCmdExec{
-				Command: cmd, Status: status, Time: time.Now().Format(time.RFC3339),
-			})
-			if len(p.cmdHistory) > 100 {
-				p.cmdHistory = p.cmdHistory[len(p.cmdHistory)-100:]
-			}
-			p.cmdMu.Unlock()
-		case "terminal_create":
-			id := ""
-			if args != nil {
-				id, _ = args["id"].(string)
-			}
-			if id == "" {
-				// agent 调用时不知道生成的 id，从工具结果中回填（同 WebUI）
-				if res, ok := payload["result"].(map[string]interface{}); ok {
-					id, _ = res["id"].(string)
-				}
-			}
-			if id == "" {
-				return
-			}
-			cmd := ""
-			if args != nil {
-				cmd, _ = args["command"].(string)
-			}
-			p.termMu.Lock()
-			if old, ok := p.termStates[id]; ok {
-				old.Command = cmd
-				old.Running = true
-			} else {
-				p.termStates[id] = &cliTermState{
-					ID: id, Command: cmd, Running: true,
-					CreatedAt: time.Now().Format(time.RFC3339),
-				}
-			}
-			p.termMu.Unlock()
-		case "terminal_close":
-			id := ""
-			if args != nil {
-				id, _ = args["id"].(string)
-			}
-			if id != "" {
-				p.termMu.Lock()
-				if t, ok := p.termStates[id]; ok {
-					t.Running = false
-				}
-				p.termMu.Unlock()
-			}
-		}
-	})
-	s.Subscribe(sdk.EventTerminalOutput, func(ev *sdk.Event) {
-		payload := ev.Payload
-		id, _ := payload["terminal_id"].(string)
-		if id == "" {
-			return
-		}
-		output, _ := payload["output"].(string)
-		running, _ := payload["running"].(bool)
-		p.termMu.Lock()
-		ts, ok := p.termStates[id]
-		if !ok {
-			ts = &cliTermState{ID: id, CreatedAt: time.Now().Format(time.RFC3339)}
-			p.termStates[id] = ts
-		}
-		ts.Running = running
-		if output != "" {
-			const maxTermOutput = 64 * 1024
-			if len(ts.Output)+len(output) > maxTermOutput {
-				excess := len(ts.Output) + len(output) - maxTermOutput
-				if len(ts.Output) > excess {
-					ts.Output = ts.Output[excess:]
-				} else {
-					ts.Output = ""
-				}
-			}
-			ts.Output += output
-		}
-		p.termMu.Unlock()
-	})
-}
+// 内核订自己的事件总线归并 EventToolCall（terminal_create/close、cmd_run）
+// 与 EventTerminalOutput（agentcli 生命周期 + 输出），产出唯一真相挂在
+// TerminalAPI（见 internal/agent/core/terminal_registry.go）。
+// WebUI 与 CLI 都从 s.Status().GetKernelStatus() 读同一份，不再各自订阅推导——
+// 之前两份推导还各自踩过同一个坑：工具 result 是 Go map 文本，断言成
+// map[string]interface{} 永远失败 → /terminals 空空如也。
 
-// cmdTerminals 与 WebUI 的 GET /api/v1/terminals 同口径。
-func (p *Plugin) cmdTerminals(conn net.Conn) {
-	p.termMu.Lock()
-	list := make([]*cliTermState, 0, len(p.termStates))
-	for _, t := range p.termStates {
-		list = append(list, t)
+// cmdTerminals 读内核权威快照，与 WebUI 的 GET /api/v1/terminals 同源。
+func (p *Plugin) cmdTerminals(conn net.Conn, s *sdk.PluginSDK) {
+	t := s.Terminal()
+	if t == nil {
+		writeJSONContent(conn, map[string]interface{}{"terminals": []interface{}{}})
+		return
 	}
-	p.termMu.Unlock()
-	writeJSONContent(conn, map[string]interface{}{"terminals": list})
+	terms := t.ListTerminals()
+	if terms == nil {
+		terms = []sdk.TerminalStatus{}
+	}
+	writeJSONContent(conn, map[string]interface{}{"terminals": terms})
 }
 
-// cmdCmdHistory 与 WebUI 的 GET /api/v1/cmd/history 同口径。
-func (p *Plugin) cmdCmdHistory(conn net.Conn) {
-	p.cmdMu.Lock()
-	out := make([]cliCmdExec, len(p.cmdHistory))
-	copy(out, p.cmdHistory)
-	p.cmdMu.Unlock()
-	writeJSONContent(conn, map[string]interface{}{"history": out})
+// cmdCmdHistory 读内核权威快照，与 WebUI 的 GET /api/v1/cmd/history 同源。
+func (p *Plugin) cmdCmdHistory(conn net.Conn, s *sdk.PluginSDK) {
+	t := s.Terminal()
+	if t == nil {
+		writeJSONContent(conn, map[string]interface{}{"history": []interface{}{}})
+		return
+	}
+	cmds := t.CmdHistory()
+	if cmds == nil {
+		cmds = []sdk.CmdExecStatus{}
+	}
+	writeJSONContent(conn, map[string]interface{}{"history": cmds})
 }
 
 // cmdTerminal 通过 ToolAPI.ExecuteTool 调 agentcli 的终端工具。

@@ -113,6 +113,7 @@ type Registry struct {
 	cfg       *types.Config
 	stageHost sdk.ToolSource
 	idx       *memory.Indexer
+	termAPI   sdk.TerminalAPI
 
 	knownDisabled map[string]bool
 	allowlist     map[string]bool
@@ -207,6 +208,7 @@ func (r *Registry) SetTracker(trk *tracker.Tracker)                         { r.
 func (r *Registry) SetConfig(cfg *types.Config)                             { r.cfg = cfg }
 func (r *Registry) SetStageHost(sh sdk.ToolSource)                          { r.stageHost = sh }
 func (r *Registry) SetIndexer(idx *memory.Indexer)                          { r.idx = idx }
+func (r *Registry) SetTerminalAPI(t sdk.TerminalAPI)                        { r.termAPI = t }
 
 // SetLoadAllowlist 限制 Load 仅装载指定插件名（failback 受限启动用）。
 // 空/未设置 = 装载全部。违反白名单的插件（含已注册工厂）一律跳过。
@@ -367,6 +369,7 @@ func (r *Registry) buildSDK(name string) *sdk.PluginSDK {
 		Config:     sdk.NewConfig(r.cfg),
 		Tool:       sdk.NewTool(r.stageHost, r.iom),
 		Indexer:    sdk.NewIndexer(r.idx),
+		Terminal:   r.termAPI,
 	})
 }
 

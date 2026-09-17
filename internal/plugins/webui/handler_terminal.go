@@ -1,88 +1,44 @@
 package webui
 
 import (
-	"time"
+	"net/http"
 
 	sdk "gitcode.com/JianFeeeee/HomeAgent/internal/sdk"
-	"net/http"
 )
 
-// 终端面：持久终端会话状态、终端接口、命令历史。
+// 终端面：终端会话列表与命令历史接口。
+//
+// 「内核开，两个插件接」后，终端会话与命令历史的权威视图在内核
+// （internal/agent/core/terminal_registry.go）：内核订阅自己的事件总线
+// 归并 EventToolCall（terminal_create/close、cmd_run）与 EventTerminalOutput
+// （agentcli 生命周期 + 输出）。WebUI 不再自己订阅事件攒一份——直接读内核
+// 开放的 TerminalAPI（s.Terminal()），与 CLI 同源同口径。
+//
+// 为什么不塞进 KernelStatus：那是全量快照，前端每 3 秒轮询 /kernel，
+// 把每终端最多 64KB 的输出缓冲背进去会让轮询成本爆炸。
 
-type CmdExec struct {
-	Command  string `json:"command"`
-	Stdout   string `json:"stdout"`
-	Stderr   string `json:"stderr"`
-	ExitCode int    `json:"exit_code"`
-	Status   string `json:"status"`
-	Time     string `json:"time"`
-}
-
-type termState struct {
-	ID        string `json:"id"`
-	Command   string `json:"command"`
-	Running   bool   `json:"running"`
-	Output    string `json:"output"`
-	CreatedAt string `json:"created_at"`
-	Uptime    string `json:"uptime"`
-	created   time.Time
-}
-
-const maxCmdHistory = 100
-
-const maxTerminals = 50
-
-// subscribeTerminalStream 常驻订阅终端实时画面推流（terminal_output 事件），
-// 维护 termStates 的 Running 状态与全量输出缓冲，供 /api/v1/terminals 与前端轮询使用。
-func (h *Handler) subscribeTerminalStream() {
-	if h.sdk == nil {
+// handleTerminals 返回内核权威的终端会话快照。
+func (h *Handler) handleTerminals(w http.ResponseWriter, r *http.Request) {
+	if h.term == nil {
+		writeJSON(w, http.StatusOK, map[string]interface{}{"terminals": []interface{}{}})
 		return
 	}
-	h.sdk.Subscribe(sdk.EventTerminalOutput, func(ev *sdk.Event) {
-		id, _ := ev.Payload["terminal_id"].(string)
-		if id == "" {
-			return
-		}
-		output, _ := ev.Payload["output"].(string)
-		running, _ := ev.Payload["running"].(bool)
-		h.termMu.Lock()
-		ts, ok := h.termStates[id]
-		if !ok {
-			ts = &termState{ID: id, created: time.Now()}
-			h.termStates[id] = ts
-		}
-		ts.Running = running
-		if output != "" {
-			const maxTermOutput = 64 * 1024
-			if len(ts.Output)+len(output) > maxTermOutput {
-				excess := len(ts.Output) + len(output) - maxTermOutput
-				if len(ts.Output) > excess {
-					ts.Output = ts.Output[excess:]
-				} else {
-					ts.Output = ""
-				}
-			}
-			ts.Output += output
-		}
-		h.termMu.Unlock()
-	})
-}
-
-func (h *Handler) handleTerminals(w http.ResponseWriter, r *http.Request) {
-	h.termMu.Lock()
-	terms := make([]*termState, 0, len(h.termStates))
-	for _, ts := range h.termStates {
-		ts.Uptime = time.Since(ts.created).Round(time.Second).String()
-		terms = append(terms, ts)
+	terms := h.term.ListTerminals()
+	if terms == nil {
+		terms = []sdk.TerminalStatus{}
 	}
-	h.termMu.Unlock()
 	writeJSON(w, http.StatusOK, map[string]interface{}{"terminals": terms})
 }
 
+// handleCmdHistory 返回内核权威的命令执行历史快照。
 func (h *Handler) handleCmdHistory(w http.ResponseWriter, r *http.Request) {
-	h.cmdMu.Lock()
-	result := make([]CmdExec, len(h.cmdHistory))
-	copy(result, h.cmdHistory)
-	h.cmdMu.Unlock()
-	writeJSON(w, http.StatusOK, map[string]interface{}{"history": result})
+	if h.term == nil {
+		writeJSON(w, http.StatusOK, map[string]interface{}{"history": []interface{}{}})
+		return
+	}
+	cmds := h.term.CmdHistory()
+	if cmds == nil {
+		cmds = []sdk.CmdExecStatus{}
+	}
+	writeJSON(w, http.StatusOK, map[string]interface{}{"history": cmds})
 }
