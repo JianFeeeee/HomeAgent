@@ -26,6 +26,14 @@ export interface ChatMessage {
   toolCalls?: ToolCallInfo[];
   /** 消息来源通道：'webui' | 'channel' | 'webui/<device_id>' 等；用于区分设备/渠道消息 */
   source?: string;
+  /**
+   * 服务端单调递增序号（后端 ChatMsg.seq）。
+   *
+   * 它是与后端增量查询（/chat/history?after=<seq>）对账的唯一定位符：
+   * 本地乐观消息没有 seq，服务端回显后靠 seq 认领并去重。
+   * 没有它就只能拿“正文内容”去重，一旦同一句话发两次就会误删。
+   */
+  seq?: number;
   /** 图片/文件附件（后端 ChatMsg.attachment） */
   attachment?: ChatAttachment;
 }
