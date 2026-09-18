@@ -247,6 +247,11 @@ export class DeviceBridgeClient {
     }
     const handler: BridgeCmdHandler = this.cmdHandler;
     handler(reqId, command).then((res: CapResult) => {
+      // res.chunked 时结果已由能力自己用二进制分块发完（如录像）：
+      // 此时再发 cmd_result 会让网关把一条已完成请求与后续分块错配。
+      if (res.chunked === true) {
+        return;
+      }
       this.sendResult(reqId, res.status, res.output, res.error);
     }).catch((e: Object) => {
       this.sendResult(reqId, 'error', '', '本机能力执行失败，请稍后重试');

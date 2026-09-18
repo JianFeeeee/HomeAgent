@@ -27,6 +27,10 @@ export interface CapResult {
   status: string; // 'ok' | 'error'
   output: string;
   error: string;
+  // chunked 为 true 时表示结果**已由能力内部经二进制分块回传**（如录像），
+  // DeviceBridge 不要再发 cmd_result；否则网关会把后续分块挂在一条已完成的
+  // 请求上，或先用 cmd_result 结束、再来的 cmd_data_start 找不到归属。
+  chunked?: boolean;
 }
 
 interface DeviceStatusPayload {
@@ -72,6 +76,19 @@ function okResult(output: string): CapResult {
 
 function errResult(errMsg: string): CapResult {
   const r: CapResult = { status: 'error', output: '', error: errMsg };
+  return r;
+}
+
+/**
+ * 二进制分块发送回调。由 BridgeRouter 注入（它持有 deviceBridge + reqId），
+ * BridgeCaps 因此不必 import DeviceBridge —— 否则 DeviceBridge 为取 CapResult
+ * 而 import BridgeCaps，两边成环。分层也更干净：能力实现不碰 socket。
+ */
+export type DataChunkSender = (kind: string, mime: string, bytes: Uint8Array) => void;
+
+// chunkedResult：结果已由能力自己分块发出，不再回 cmd_result。
+function chunkedResult(output: string): CapResult {
+  const r: CapResult = { status: 'ok', output: output, error: '', chunked: true };
   return r;
 }
 
@@ -144,25 +161,40 @@ export async function capScreensee(): Promise<CapResult> {
 // READ_IMAGEVIDEO 这类受限权限。
 const CAMERASUE_MAX_B64: number = 950000;
 
+/** 录像回传上限：与网关 mediaDir 落盘模式配合，避免把设备内存/WS 打爆。 */
+const CAMERASUE_MAX_VIDEO: number = 64 * 1024 * 1024;
+
 /**
  * camerasue 实现。
  *
  * 参数语义与 homeagent-cmdrun 的说明一致：无参数 = 抓拍单张；
- * `<N秒>` = 录 N 秒视频。录像回传暂未接二进制分块（DeviceBridge 已具备
- * sendDataChunked，接线待做）——这里明确拒掉，而不是回一个超长 base64
- * 把模型上下文和 bridge 都撑爆。
+ * `<N秒>` = 录 N 秒视频。
+ *
+ * 视频为什么要走二进制分块：一段 10s 录像动辄数 MB，base64 后还要再膨胀
+ * 1/3，既撑爆模型上下文也撑爆 WS 单帧。cameraPicker 本身支持 VIDEO
+ * 模式（系统相机会直接进录像界面），取回文件后用 sendDataChunked 按
+ * cmd_data_start/分块/cmd_data_end 回传——网关侧聚合后落盘成文件，agent 拿路径。
+ * 这与 GUI/CLI 客户端的 camerasue 录像路径一致。
  */
 export async function capCamerasue(context: common.UIAbilityContext,
-                                  rawArgs: string): Promise<CapResult> {
+                                  rawArgs: string,
+                                  sendChunked: DataChunkSender | null): Promise<CapResult> {
   const raw: string = rawArgs.trim();
+  let videoSeconds: number = 0;
   if (raw.length > 0) {
     const digits: RegExp = new RegExp('^\\d+$');
-    if (digits.test(raw)) {
-      return errResult('鸿蒙端暂不支持录像回传，请用 camerasue 抓拍单张');
+    if (!digits.test(raw)) {
+      return errResult('camerasue 参数只接受纯数字秒数，如 camerasue 5');
+    }
+    videoSeconds = parseInt(raw, 10);
+    if (videoSeconds <= 0 || videoSeconds > 300) {
+      return errResult('录像时长需在 1~300 秒之间');
     }
   }
+  const isVideo: boolean = videoSeconds > 0;
 
-  const filePath: string = context.filesDir + '/camerasue_' + Date.now().toString() + '.jpg';
+  const ext: string = isVideo ? '.mp4' : '.jpg';
+  const filePath: string = context.filesDir + '/camerasue_' + Date.now().toString() + ext;
   try {
     // cameraPicker 要求 saveUri 指向的文件存在且可写，先建空文件占位
     const f: fileIo.File = fileIo.openSync(filePath,
@@ -177,15 +209,60 @@ export async function capCamerasue(context: common.UIAbilityContext,
       cameraPosition: camera.CameraPosition.CAMERA_POSITION_BACK,
       saveUri: fileUri.getUriFromPath(filePath),
     };
+    if (isVideo) {
+      profile.videoDuration = videoSeconds;
+    }
+    const mediaType: cameraPicker.PickerMediaType = isVideo
+      ? cameraPicker.PickerMediaType.VIDEO
+      : cameraPicker.PickerMediaType.PHOTO;
     const res: cameraPicker.PickerResult =
-      await cameraPicker.pick(context, [cameraPicker.PickerMediaType.PHOTO], profile);
+      await cameraPicker.pick(context, [mediaType], profile);
     if (res.resultCode !== 0 || res.resultUri.length === 0) {
-      return errResult('未获取到照片（可能被取消）');
+      return errResult(isVideo ? '未获取到录像（可能被取消）' : '未获取到照片（可能被取消）');
     }
   } catch (e) {
     return errResult('相机不可用或未授权，请确认应用在前台并允许使用相机');
   }
 
+  if (isVideo) {
+    return readAndSendVideo(filePath, sendChunked);
+  }
+  return readPhotoAsBase64(filePath);
+}
+
+/** 读回录像并以二进制分块回传；网关聚合后落盘，agent 拿文件路径。 */
+function readAndSendVideo(filePath: string, sendChunked: DataChunkSender | null): CapResult {
+  let fd: number = -1;
+  try {
+    const stat: fileIo.Stat = fileIo.statSync(filePath);
+    if (stat.size <= 0) {
+      return errResult('录像文件为空，请重试');
+    }
+    if (stat.size > CAMERASUE_MAX_VIDEO) {
+      return errResult('录像文件过大（超过 64MB），请缩短时长');
+    }
+    const buf: ArrayBuffer = new ArrayBuffer(stat.size);
+    const rf: fileIo.File = fileIo.openSync(filePath, fileIo.OpenMode.READ_ONLY);
+    fd = rf.fd;
+    fileIo.readSync(fd, buf);
+    fileIo.closeSync(rf);
+    fd = -1;
+    if (sendChunked === null) {
+      return errResult('录像回传通道未就绪，请重试');
+    }
+    sendChunked('camera_video', 'video/mp4', new Uint8Array(buf));
+    // 分块已代表本次请求的完整结果，DeviceBridge 不再回 cmd_result。
+    return chunkedResult('录像已回传（' + stat.size.toString() + ' 字节）');
+  } catch (e) {
+    if (fd >= 0) {
+      try { fileIo.closeSync(fd); } catch (ignore) {}
+    }
+    return errResult('录像读取失败，请重试');
+  }
+}
+
+/** 照片仍走小体积 base64 内联（图片不大，不必分块）。 */
+function readPhotoAsBase64(filePath: string): CapResult {
   let fd: number = -1;
   try {
     const stat: fileIo.Stat = fileIo.statSync(filePath);
