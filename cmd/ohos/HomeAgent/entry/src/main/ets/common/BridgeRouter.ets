@@ -9,9 +9,8 @@ import {
   capSpeakerUse,
   capDeviceInfo,
   capStatus,
-  parseScreensue,
-  ScreensuePayload,
 } from './BridgeCaps';
+import { parseScreensue, ScreensuePayload } from './ScreensueHtml';
 import { connStore } from './ConnStore';
 import { common } from '@kit.AbilityKit';
 
