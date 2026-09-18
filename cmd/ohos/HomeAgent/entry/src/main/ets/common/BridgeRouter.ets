@@ -1,6 +1,7 @@
 import { deviceBridge } from './DeviceBridge';
 import {
   CapResult,
+  DataChunkSender,
   capScreensee,
   capCamerasue,
   capClipboardSee,
@@ -89,7 +90,12 @@ async function executeCommand(reqId: string, command: string): Promise<CapResult
     if (appContext === null) {
       return errRes('相机能力尚未就绪，请保持应用在前台后重试');
     }
-    return capCamerasue(appContext, args);
+    // 录像走二进制分块：把「往本请求回传字节」的能力注入能力实现，
+    // 避免 BridgeCaps 反向 import DeviceBridge 形成循环依赖。
+    const sender: DataChunkSender = (kind: string, mime: string, bytes: Uint8Array) => {
+      deviceBridge.sendDataChunked(reqId, kind, mime, bytes);
+    };
+    return capCamerasue(appContext, args, sender);
   }
   if (name === 'clipboardsee') {
     if (hasArgs(args)) {

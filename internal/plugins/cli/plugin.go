@@ -356,6 +356,8 @@ func (p *Plugin) cmdHelp(conn net.Conn) {
   /memory query <关键词>        查询图记忆
   /memory graph                导出整张图记忆快照
   /memory text [n]             最近 n 条文本记忆事件 + 统计
+  /memory context [q]          组装后的记忆上下文（会注入什么）
+  /memory tools                记忆工具定义 + 工具提示词
   /knowledge                   列出知识库
   /knowledge delete <name>     删除一条知识
   /knowledge stats             知识库统计
@@ -747,8 +749,42 @@ func (p *Plugin) cmdMemory(conn net.Conn, parts []string, s *sdk.PluginSDK) {
 			"events": events,
 			"stats":  tm.Stats(),
 		})
+	case "context":
+		// 与 WebUI GET /api/v1/memory/context 同源：都走 IndexerAPI。
+		// 打印“输进去会拼成什么上下文”，是排查召回质量最直接的一眼。
+		idx := s.Indexer()
+		if idx == nil {
+			writeLine(conn, map[string]interface{}{"type": "error", "error": "indexer not available"})
+			return
+		}
+		q := ""
+		if len(parts) >= 3 {
+			q = strings.Join(parts[2:], " ")
+		}
+		injected, err := idx.BuildContext(q)
+		if err != nil {
+			writeLine(conn, map[string]interface{}{"type": "error", "error": err.Error()})
+			return
+		}
+		writeJSONContent(conn, map[string]interface{}{
+			"context":        idx.FormatContext(injected),
+			"summary":        injected.Summary,
+			"entities":       injected.Entities,
+			"token_estimate": injected.TokenEstimate,
+		})
+	case "tools":
+		// 与 WebUI GET /api/v1/memory/tools 同源。
+		idx := s.Indexer()
+		if idx == nil {
+			writeLine(conn, map[string]interface{}{"type": "error", "error": "indexer not available"})
+			return
+		}
+		writeJSONContent(conn, map[string]interface{}{
+			"tools":       idx.GetToolDefinitions(),
+			"tool_prompt": idx.BuildToolPrompt(),
+		})
 	default:
-		writeLine(conn, map[string]interface{}{"type": "response", "content": "用法: /memory query <关键词> | /memory graph | /memory text [n]"})
+		writeLine(conn, map[string]interface{}{"type": "response", "content": "用法: /memory query <关键词> | /memory graph | /memory text [n] | /memory context [q] | /memory tools"})
 	}
 }
 
