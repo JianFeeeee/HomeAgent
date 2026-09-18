@@ -53,7 +53,14 @@ func (a *Agent) interceptLoop() {
 				// 这个 `||` 在 queued=0 时会短路到 takeStop()，把标记先消费掉，
 				// 于是 stepLLM 永远看不到它 → 取消后照样重跑一轮。
 				// 实测：停止被正确记录（`stop requested ... queued=0`）但生成仍跑到自然结束。
-				n := a.sched.armStop()
+				// pending 必须算上**停在输入 channel 里**的那一段：停止时
+				// 调度器多在半路忙当前任务，其余消息还没被 pumpInbox 搬进队列，
+				// 只数 sched.queue 会得到 0，配额随之失效（实测过）。
+				pending := 0
+				if a.io != nil {
+					pending = a.io.PendingInputs()
+				}
+				n := a.sched.armStop(pending)
 				log.Printf("[agent] stop requested by %s/%s (queued=%d will be short-circuited at pre-action)",
 					evt.Source, evt.OutputChannel, n)
 				a.cancelCurrentLLM()

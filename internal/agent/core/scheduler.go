@@ -590,19 +590,18 @@ func (s *scheduler) setImmediateLocked(t *Task) bool {
 // 停止之后新到的输入不受影响（否则停止会变成一个永远生效的“黑洞”）。
 //
 // 多次按停止取**较大值**而不是累加：两个客户端同时按下时配额不应翻倍。
-func (s *scheduler) armStop() int {
+func (s *scheduler) armStop(pending int) int {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if n := s.pendingQueueLenLocked(); n > s.cancelBudget {
-		s.cancelBudget = n
+	// pending 是**还没被 pumpInbox 搬进队列**的那一段（停在输入 channel 里）。
+	// 用户按下停止时，调度器通常正忙于当前任务，其它消息基本都停在 channel；
+	// 只数 s.queue 会得到 0（实测），配额随之失效。
+	queued := len(s.queue) + pending
+	if queued > s.cancelBudget {
+		s.cancelBudget = queued
 	}
 	s.stopArmed = true
 	return s.cancelBudget
-}
-
-// pendingQueueLenLocked 统计**尚未执行**的排队输入数量（不含中断队列/挂起）。
-func (s *scheduler) pendingQueueLenLocked() int {
-	return len(s.queue)
 }
 
 // takeStop 消费「当前任务应被立即结束而不是重试」这一次标记。
