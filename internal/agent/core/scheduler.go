@@ -364,6 +364,16 @@ type scheduler struct {
 	// 被挂起 4 帧；L4 之上没有更高级别，链到此为止。超限只可能是内核 bug，
 	// 因此这里只做防御性计数，**不降级、不丢弃帧**。
 	maxInterruptFrames int
+
+	// cancelBudget 是「停止」剩下的短路配额（见 Agent.RequestStop）。
+	//
+	// 语义（用户明确的设计）：停止 = ①立即结束当前 LLM 推理；②对**停止那一刻
+	// 已排队**的 x 条消息，后续依次在 pre-action 阶段短路，而不是把它们当
+	// 中断/新输入再跑一遍。配额是快照值：停止之后**新到**的输入不受影响。
+	cancelBudget int
+	// stopArmed 标记“下一条待收尾的任务是因为用户按了停止”。
+	// 取消 LLM 后 stepLLM 默认重跑本步；用户停止时必须改为直接收尾。
+	stopArmed bool
 }
 
 // suspendedTask 是一个被抢占任务的现场。
@@ -570,6 +580,53 @@ func (s *scheduler) setImmediateLocked(t *Task) bool {
 	s.allocateIDLocked(t)
 	s.stats.Enqueued++
 	s.immediate = t
+	return true
+}
+
+// armStop 处理一次「停止」指令：登记短路配额并返回**停止那一刻的排队深度**。
+//
+// 语义（用户明确的设计）：停止 = ①立即结束当前 LLM 推理；②对停止那一刻
+// 已排队的 x 条消息，后续依次在 pre-action 阶段短路。配额是**快照值**：
+// 停止之后新到的输入不受影响（否则停止会变成一个永远生效的“黑洞”）。
+//
+// 多次按停止取**较大值**而不是累加：两个客户端同时按下时配额不应翻倍。
+func (s *scheduler) armStop() int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if n := s.pendingQueueLenLocked(); n > s.cancelBudget {
+		s.cancelBudget = n
+	}
+	s.stopArmed = true
+	return s.cancelBudget
+}
+
+// pendingQueueLenLocked 统计**尚未执行**的排队输入数量（不含中断队列/挂起）。
+func (s *scheduler) pendingQueueLenLocked() int {
+	return len(s.queue)
+}
+
+// takeStop 消费「当前任务应被立即结束而不是重试」这一次标记。
+//
+// 取消 LLM 后 stepLLM 会看到 context.Canceled 并 outcomeContinue 重跑；
+// 若这是用户按下的停止，重跑就是错的——应该直接收尾。
+func (s *scheduler) takeStop() bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if !s.stopArmed {
+		return false
+	}
+	s.stopArmed = false
+	return true
+}
+
+// consumeCancel 消费一格短路配额；true 表示本任务在 pre-action 阶段直接收尾。
+func (s *scheduler) consumeCancel() bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.cancelBudget <= 0 {
+		return false
+	}
+	s.cancelBudget--
 	return true
 }
 

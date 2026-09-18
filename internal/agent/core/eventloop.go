@@ -31,8 +31,31 @@ func (a *Agent) interceptLoop() {
 		select {
 		case evt := <-a.io.InputInterruptChan():
 			text, _ := evt.Payload["content"].(string)
-			if text == "" {
+			stop, _ := evt.Payload["stop"].(bool)
+			if text == "" && !stop {
+				// 没有内容也不是停止指令：没有可处理的东西（旧行为）。
+				//
+				// 注意：**不能**把“空内容”一律当成空操作。客户端停止按钮
+				// 本来就不带消息（/chat/interrupt 收 body 空的 {}），
+				// 旧代码在这里 continue 掉，于是停止按钮毫无反应，
+				// 而且接口还回 200 骗调用方——已实测：HTTP 200 但内核零日志、
+				// 生成继续跑到自然结束。
 				continue
+			}
+			if stop {
+				// 停止：①立即结束当前 LLM 推理；②登记短路配额。
+				if n := a.sched.armStop(); n > 0 || a.sched.takeStop() {
+					log.Printf("[agent] stop requested by %s/%s (queued=%d will be short-circuited at pre-action)",
+						evt.Source, evt.OutputChannel, n)
+				}
+				a.cancelCurrentLLM()
+				if text == "" {
+					// 纯停止：不进中断队列、不产生新任务。旧实现把空停止当成一条
+					// 中断入队，取消后会以空内容重跑一轮，停下之后又“活着”。
+					continue
+				}
+				// 带注释的停止（/stop 说句话）：注释本身仍作为中断处理，
+				// 走下面的正常路径——用户想看模型对被停下话题的回应。
 			}
 			log.Printf("[agent] interrupt from %s/%s: %s", evt.Source, evt.OutputChannel, truncateStr(text, 80))
 

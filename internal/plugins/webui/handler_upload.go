@@ -296,13 +296,15 @@ func (h *Handler) handleUploads(w http.ResponseWriter, r *http.Request) {
 	http.ServeContent(w, r, name, st.ModTime(), f)
 }
 
-// handleChatInterrupt 注入用户中断：取消正在进行的 LLM 生成并/或发送打断消息。
-// 核心拦截语义（interceptLoop）：
-//   - 有 LLM 在跑：cancelLLM 取消当前请求 + 中断入队，process() 以
-//     [中断消息] 重启轮次，模型看到被打断的上下文和用户新输入；
-//   - 无 LLM 在跑：作为普通输入处理（等同发了一条消息）。
+// handleChatInterrupt 注入用户中断或「停止」。
 //
-// message 可选：空则纯取消（仍会注入空内容中断触发取消）。
+// 两种语义分开（用户明确的设计）：
+//   - **停止**（message 为空，即停止按钮）：①立即结束当前 LLM 推理（不重试）；
+//     ②对停止那一刻已排队的 x 条消息，后续依次在 pre-action 阶段短路。
+//     只传 stop=true，不入中断队列——旧实现把空停止当普通中断入队，取消后
+//     还会以空内容重跑一轮，表现为“停了又活”。
+//   - **中断/补充指令**（message 非空）：取消当前流式请求 + 中断入队，
+//     模型看到被打断的上下文与用户新输入。
 func (h *Handler) handleChatInterrupt(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
@@ -324,12 +326,18 @@ func (h *Handler) handleChatInterrupt(w http.ResponseWriter, r *http.Request) {
 	if body.DeviceID != "" {
 		source = "webui/" + body.DeviceID
 	}
-	// PriorityL4：终止按钮必须能立即打断当前任务（内核级插件才有的能力）。
+	// PriorityL4：终止/停止必须能立即打断当前任务（内核级插件才有的能力）。
 	// agent 正卡在工具执行里时按不下手——那是临界区，由内核在安全点生效；
 	// 但 LLM 流式段会被立刻取消。
-	h.sdk.InjectInterrupt(source, "webui", "text", map[string]interface{}{
+	payload := map[string]interface{}{
 		"content":  body.Message,
 		"priority": sdk.PriorityL4,
-	})
+	}
+	if strings.TrimSpace(body.Message) == "" {
+		// 空消息 = 停止。必须带 stop 标记，否则空内容会被 interceptLoop
+		// 当成空操作丢掉（旧行为：接口回 200，实际什么都没发生）。
+		payload["stop"] = true
+	}
+	h.sdk.InjectInterrupt(source, "webui", "text", payload)
 	writeJSON(w, http.StatusOK, map[string]string{"status": "interrupted"})
 }

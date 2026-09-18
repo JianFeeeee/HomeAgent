@@ -2,12 +2,17 @@ import { ThemePalette, DARK_PALETTE, LIGHT_PALETTE, ANIM_NORMAL } from '../commo
 import { GradientBackground } from './GradientBackground';
 import { PageTopBar } from './PageTopBar';
 import { MotionBase } from './MotionBase';
+import { looksLikeHtml, screensueHtml } from '../common/BridgeCaps';
 
 /**
  * agent 主动推送的前台内容页。
  *
  * 调用方负责决定页面宽度：窄屏占满窗口，宽屏只占右侧内容栏，
  * 从而让左侧一级页面和主导航保持可见、可操作。
+ *
+ * 内容可能是纯文本，也可能是 HTML（服务端两侧协议都允许，见 BridgeCaps 的
+ * screensueHtml）。HTML 用 RichText 渲染：它只解析 HTML 子集、无脚本、无网络，
+ * 对 agent 下发的远端内容比 Web 组件安全（Web 默认带 JS 与网络能力）。
  */
 @Component
 export struct ScreensuePage {
@@ -16,6 +21,11 @@ export struct ScreensuePage {
   @Prop countdown: number = 0;
   onClose: () => void = () => {
   };
+
+  /** 本轮内容是不是 HTML（决定走 RichText 还是 Text）。 */
+  private htmlMode(): boolean {
+    return looksLikeHtml(this.pushedText);
+  }
 
   build() {
     Stack({ alignContent: Alignment.Bottom }) {
@@ -44,13 +54,19 @@ export struct ScreensuePage {
           .width('100%')
 
           Column() {
-            Text(this.pushedText)
-              .fontSize(16)
-              .lineHeight(25)
-              .fontColor(this.palette().textPrimary)
-              .width('100%')
-              .textAlign(TextAlign.Start)
-              .copyOption(CopyOptions.LocalDevice)
+            if (this.htmlMode()) {
+              // HTML：RichText 自己排版，外层用带主题背景的卡片承载。
+              RichText(screensueHtml(this.pushedText, this.isDark))
+                .width('100%')
+            } else {
+              Text(this.pushedText)
+                .fontSize(16)
+                .lineHeight(25)
+                .fontColor(this.palette().textPrimary)
+                .width('100%')
+                .textAlign(TextAlign.Start)
+                .copyOption(CopyOptions.LocalDevice)
+            }
           }
           .width('100%')
           .padding(18)
