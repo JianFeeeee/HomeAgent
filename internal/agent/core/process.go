@@ -135,6 +135,20 @@ func dropContinuationPlaceholders(msgs []agentAPI.Message) []agentAPI.Message {
 func chatStreamWithFallback(ctx context.Context, p agentAPI.Provider, req *agentAPI.CompletionRequest, a *Agent, channel string) (*agentAPI.CompletionResponse, error) {
 	ch, err := p.ChatStream(ctx, req)
 	if err != nil {
+		// 上下文已取消/超时：**绝不能**回退到非流式 Chat。
+		//
+		// 回退意味着再发一次完整请求，而这时用户已经按了停止（或请求已超时），
+		// 结果是“按了停止又跑了一遍”——停止按钮看起来毫无反应的一个真实成因。
+		//
+		// 判据取 **ctx.Err()** 而不是“错误是不是 context.Canceled”：很多 provider
+		// 不支持流式时也回 Canceled 表示“请走非流式”（仓里大量假 provider 即如此），
+		// 那种情况必须继续回退，否则会把“不支持流式”误当成“已被取消”。
+		if ctx.Err() != nil {
+			if err == nil {
+				err = ctx.Err()
+			}
+			return nil, err
+		}
 		log.Printf("[agent] stream connect failed (%v), falling back to non-stream chat", err)
 		return p.Chat(ctx, req)
 	}
@@ -161,10 +175,15 @@ func chatStreamWithFallback(ctx context.Context, p agentAPI.Provider, req *agent
 		return resp, nil
 	}
 
-	// 其他错误（网络中断等）：已累积到实质内容则返回部分结果，否则回退非流式
+	// 其他错误（网络中断等）：已累积到实质内容则返回部分结果，否则回退非流式。
 	if resp != nil && (resp.Content != "" || len(resp.ToolCalls) > 0) {
 		log.Printf("[agent] stream interrupted mid-way (%v), returning partial result", accErr)
 		return resp, nil
+	}
+	// 取消类错误不能回退（否则等于再跑一遍完整的非流式请求）。
+	// 同样以 ctx.Err() 为准：真取消才拦，provider 探活不算。
+	if ctx.Err() != nil {
+		return resp, accErr
 	}
 	log.Printf("[agent] stream failed before content (%v), falling back to non-stream chat", accErr)
 	return p.Chat(ctx, req)

@@ -393,10 +393,16 @@ func (p *Plugin) cmdInterrupt(conn net.Conn, parts []string, s *sdk.PluginSDK) {
 	}
 	// PriorityL3（交互）：/stop 是人在终端上当场下的指令，属于"需要及时处理"，
 	// 不该用默认的 L1（后台）——那样它会被排在其它后台注入后面，停得不及时。
-	s.InjectInterrupt(cliSource, cliChannel, "text", map[string]interface{}{
+	payload := map[string]interface{}{
 		"content":  msg,
 		"priority": sdk.PriorityL3,
-	})
+	}
+	if msg == "" {
+		// 无附带消息 = 停止：必须带 stop 标记，否则空内容会被 interceptLoop
+		// 当空操作丢掉（旧行为：回了"已发送中断信号"但内核什么都没发生）。
+		payload["stop"] = true
+	}
+	s.InjectInterrupt(cliSource, cliChannel, "text", payload)
 	writeLine(conn, map[string]interface{}{
 		"type":    "response",
 		"content": "已发送中断信号",

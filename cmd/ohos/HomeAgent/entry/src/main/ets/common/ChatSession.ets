@@ -21,6 +21,14 @@ interface SendChatBody {
   device_name?: string;
 }
 
+/** POST /chat/interrupt 的请求体。 */
+interface InterruptBody {
+  /** true = 停止（立即结束当前推理 + 短路已排队消息）；false/省略 = 普通中断。 */
+  stop: boolean;
+  /** 可选：中断时附带给模型的一句话；停止时为 undefined。 */
+  message?: string;
+}
+
 /**
  * 纯文本发送：POST /chat。
  * 带附件的情况走 sendChatFile（后端收下附件后自己写会话并触发 agent）。
@@ -167,10 +175,32 @@ export async function sendChatFile(text: string, path: string, name: string,
   chatStore.requestScroll();
 }
 
+/**
+ * 停止当前生成（停止按钮）。
+ *
+ * 发送 **`stop: true`**，与「带一句话的中断」区分开：
+ *   - stop:true（无 message）= ①立即结束当前 LLM 推理（不重试）；
+ *     ②对停止那一刻已排队的消息，后端在 pre-action 逐个短路。
+ *   - message 非空 = 普通中断，模型看到被打断的上下文 + 新输入。
+ *
+ * 为什么必须带 stop：此前这里 POST 的是 null（空 body），后端把空内容当成
+ * “无事发生”直接丢掉了——接口回 200 但生成继续跑到自然结束，也就是“按了没反应”。
+ * 带中文字段比空 body 多不了几个字节，就把语义说清楚了。
+ */
 export async function interruptChat(): Promise<void> {
-  try {
-    await apiClient.post('/chat/interrupt', null);
-  } catch (e) {
-    // ignore
+  if (connStore.getCurrentConnection() === null) {
+    return;
   }
+  try {
+    const body: InterruptBody = { stop: true };
+    await apiClient.post('/chat/interrupt', body);
+  } catch (e) {
+    // 停止是“减少工作”的指令，失败不需打断用户；但状态必须复位，
+    // 否则按钮会一直停在“停止”态，用户以为没生效。
+  }
+  // 即时反馈：不等 SSE 的终态事件，先把本地忙态清掉。
+  // 若后端稍后真的推来终态，SSE 处理器会再刷一次（幂等）。
+  chatStore.setLoading(false);
+  chatStore.setStage('已停止');
+  chatStore.forceRefresh();
 }
