@@ -536,6 +536,19 @@ func (m *IOManager) EmitTextTo(target, outputChannel, text string) {
 func (m *IOManager) InputChan() <-chan *InputEvent   { return m.inputCh }
 func (m *IOManager) OutputChan() <-chan *OutputEvent { return m.outputCh }
 
+// PendingInputs 返回**尚未被调度器取走**的输入条数（排队队列之外的那一段）。
+//
+// 为何需要单独一个口径：输入先进 inputCh，再由 pumpInbox 搬进调度器就绪队列。
+// “停止”要统计的是“用户按下停止时还没被处理的消息”，而它们大多还躺在
+// inputCh 里（调度器正忙于处理当前任务）。只数 sched.queue 会得到 0，
+// 于是短路配额失效——实测就是这个现象：停止后排队消息照旧逐条跑完。
+func (m *IOManager) PendingInputs() int {
+	if m == nil {
+		return 0
+	}
+	return len(m.inputCh)
+}
+
 // RegisterInputChannel 注册一个 inputch（不带插件归属，兼容旧调用）。
 //
 // inputch 是**最基本的输入路由单位**；一个插件可以注册多个。
