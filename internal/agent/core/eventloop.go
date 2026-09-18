@@ -44,10 +44,18 @@ func (a *Agent) interceptLoop() {
 			}
 			if stop {
 				// 停止：①立即结束当前 LLM 推理；②登记短路配额。
-				if n := a.sched.armStop(); n > 0 || a.sched.takeStop() {
-					log.Printf("[agent] stop requested by %s/%s (queued=%d will be short-circuited at pre-action)",
-						evt.Source, evt.OutputChannel, n)
-				}
+				//
+				// 注意这里**只 arm、不 take**：takeStop 必须由 stepLLM 去消费，
+				// 它才是决定“取消后不重跑”的那个人。曾经写成
+				//
+				//	if n := armStop(); n > 0 || takeStop() { ... }
+				//
+				// 这个 `||` 在 queued=0 时会短路到 takeStop()，把标记先消费掉，
+				// 于是 stepLLM 永远看不到它 → 取消后照样重跑一轮。
+				// 实测：停止被正确记录（`stop requested ... queued=0`）但生成仍跑到自然结束。
+				n := a.sched.armStop()
+				log.Printf("[agent] stop requested by %s/%s (queued=%d will be short-circuited at pre-action)",
+					evt.Source, evt.OutputChannel, n)
 				a.cancelCurrentLLM()
 				if text == "" {
 					// 纯停止：不进中断队列、不产生新任务。旧实现把空停止当成一条

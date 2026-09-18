@@ -188,3 +188,66 @@ func mustTextEvent(source, text string) *agentIO.InputEvent {
 	evt, _ := textEvent(source, text)
 	return evt
 }
+
+// 停止必须经**真实的 interceptLoop** 被消费，而不是测试自己 arm。
+//
+// 这条用例专门镇一个已经发生过的自伤：曾经在 interceptLoop 里写成
+//
+//	if n := armStop(); n > 0 || takeStop() { ... }
+//
+// queued=0 时 `||` 短路到 takeStop()，把标记先吃掉了，stepLLM 再也看不到它。
+// 症状与旧 bug 一模一样（停止被记录、但生成跑到自然结束）。
+//
+// 关键：必须 a.Start() —— 只调 New() 的话 interceptLoop 根本没跑，
+// 测试会自己绕过被测代码（第一版就是这么写的，假绿）。
+func TestStop_ConsumedByRealInterceptLoop(t *testing.T) {
+	sp := newStopProvider()
+	a := New(AgentConfig{
+		ID:              "stop",
+		Provider:        sp,
+		ProviderManager: agentAPI.NewProviderManager(),
+		IO:              agentIO.NewIOManager(),
+		StageHost:       NewStageHost(),
+	})
+	a.Start()
+	defer a.Stop()
+
+	evt, _ := textEvent("webui", "写一篇很长的文章")
+	if !a.sched.enqueue(newInputTask(evt)) {
+		t.Fatal("入队失败")
+	}
+	a.sched.signalWake()
+
+	select {
+	case <-sp.entered:
+	case <-time.After(5 * time.Second):
+		t.Fatal("provider 未被调用")
+	}
+
+	// 完全按停止按钮的注入形状走 io → interceptLoop。
+	a.io.InjectInterrupt("webui", "webui", map[string]interface{}{
+		"content": "", "stop": true, "priority": "L4", "type": "text",
+	})
+
+	// 停止后必须排空且不再有新的 LLM 调用。
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		snap := a.DumpScheduler()
+		if snap.Running == nil && len(snap.Queue) == 0 {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("停止后未排空：running=%v queue=%d", snap.Running != nil, len(snap.Queue))
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+
+	// 给潜在的“重跑”留出时间窗口；停止若被吃掉，这里会看到第 2 次调用。
+	time.Sleep(500 * time.Millisecond)
+	if n := sp.callCount(); n != 1 {
+		t.Fatalf("停止后 LLM 调用次数=%d，期望 1（stop 标记必须留给 stepLLM 消费）", n)
+	}
+	if a.sched.takeStop() {
+		t.Fatal("stop 标记应已被 stepLLM 消费，不应残留（残留会误杀下一个任务）")
+	}
+}
