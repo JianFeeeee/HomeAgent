@@ -105,7 +105,7 @@ func TestStop_TerminatesCurrentTaskWithoutRetry(t *testing.T) {
 	a.io.InjectInterrupt(stopEvt.Source, stopEvt.OutputChannel, stopEvt.Payload)
 	// interceptLoop 才是 armStop 的调用点；这里模拟它已消费该指令（只 arm，
 	// 不 takeStop——takeStop 必须由 stepLLM 去消费，那正是被测行为）。
-	a.sched.armStop()
+	a.sched.armStop(0)
 	a.cancelCurrentLLM()
 
 	select {
@@ -135,7 +135,7 @@ func TestStop_CancelBudgetIsSnapshot(t *testing.T) {
 	// 停止那一刻队列里有 2 条。
 	a.sched.enqueue(newInputTask(mustTextEvent("qq", "一")))
 	a.sched.enqueue(newInputTask(mustTextEvent("qq", "二")))
-	n := a.sched.armStop()
+	n := a.sched.armStop(0)
 	if n != 2 {
 		t.Fatalf("停止时排队深度=%d，期望 2", n)
 	}
@@ -170,10 +170,10 @@ func TestStop_ArmTwiceTakesMaxNotSum(t *testing.T) {
 	a := newPreemptAgent(t, newPreemptProvider())
 	a.sched.enqueue(newInputTask(mustTextEvent("qq", "一")))
 	a.sched.enqueue(newInputTask(mustTextEvent("qq", "二")))
-	if n := a.sched.armStop(); n != 2 {
+	if n := a.sched.armStop(0); n != 2 {
 		t.Fatalf("首次 armStop=%d，期望 2", n)
 	}
-	if n := a.sched.armStop(); n != 2 {
+	if n := a.sched.armStop(0); n != 2 {
 		t.Fatalf("重复 armStop=%d，期望仍为 2（取 max 不累加）", n)
 	}
 	if !a.sched.consumeCancel() || !a.sched.consumeCancel() {
@@ -187,6 +187,37 @@ func TestStop_ArmTwiceTakesMaxNotSum(t *testing.T) {
 func mustTextEvent(source, text string) *agentIO.InputEvent {
 	evt, _ := textEvent(source, text)
 	return evt
+}
+
+// 停止时必须把**停在输入 channel 里**的待处理消息也计入配额。
+//
+// 这是实测踩到的坑：用户按下停止时调度器正忙于当前任务，其它消息大多还没被
+// pumpInbox 搬进就绪队列，仍然停在 inputCh。只数 sched.queue 会得到 queued=0，
+// 配额归零，停止后排队消息照旧逐条跑完。
+func TestStop_ArmCountsPendingChannelInputs(t *testing.T) {
+	a := newPreemptAgent(t, newPreemptProvider())
+
+	// 两条消息只进 channel，不入队（模拟 pumpInbox 尚未搬运）。
+	for _, txt := range []string{"一", "二"} {
+		evt, _ := textEvent("webui", txt)
+		a.io.InjectInput("webui", "text", map[string]interface{}{"content": txt})
+		_ = evt
+	}
+	pending := a.io.PendingInputs()
+	if pending != 2 {
+		t.Fatalf("channel 待处理=%d，期望 2", pending)
+	}
+
+	n := a.sched.armStop(pending)
+	if n != 2 {
+		t.Fatalf("armStop(2)=%d，期望 2（配额须包含 channel 中的待处理）", n)
+	}
+	if !a.sched.consumeCancel() || !a.sched.consumeCancel() {
+		t.Fatal("两条配额都应可消费")
+	}
+	if a.sched.consumeCancel() {
+		t.Fatal("不应有多余配额")
+	}
 }
 
 // 停止必须经**真实的 interceptLoop** 被消费，而不是测试自己 arm。
