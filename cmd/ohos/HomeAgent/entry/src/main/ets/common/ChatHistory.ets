@@ -16,6 +16,15 @@ export interface ParsedHistory {
   offset: number;
   /** 服务端是否还有更早的历史 */
   hasMore: boolean;
+  /**
+   * 服务端下发的增量游标（响应里的 last_seq）。
+   *
+   * 为什么必须带回来：/chat/history?after=<seq> 只回 seq 更大的消息，
+   * 客户端存下游标下次带上，才能只拿增量而不重新拉整页
+   * （jianf 说的“暴露数据查询 api，前端轮询后 patch 视图”那条路）。
+   * 缺了它就只能每次全量拉，也就无法发现“别人发来的新消息”。
+   */
+  lastSeq: number;
 }
 
 /** 解析后端 /chat/history 的响应体（含分页元数据），供首屏与翻页复用。 */
@@ -23,7 +32,7 @@ export function parseHistoryPayload(
   obj: Record<string, Object>, alloc: () => number): ParsedHistory {
   const rawList: Object | undefined = obj['messages'] as Object | undefined;
   if (rawList === undefined || rawList === null) {
-    return { msgs: [], offset: 0, hasMore: false };
+    return { msgs: [], offset: 0, hasMore: false, lastSeq: 0 };
   }
   const arr: Object[] = rawList as Object[];
   const msgs: ChatMessage[] = [];
@@ -42,6 +51,12 @@ export function parseHistoryPayload(
       content: content,
       isFinal: true,
     };
+    // seq：服务端单调递增序号，增量游标与 keyed 对账的定位符。
+    // 缺失（旧后端/本地乐观消息）时保持 undefined，不编造。
+    const seqVal: Object | undefined = item['seq'];
+    if (typeof seqVal === 'number' && (seqVal as number) > 0) {
+      msg.seq = seqVal as number;
+    }
     if (att !== undefined) {
       msg.attachment = att;
     }
@@ -64,7 +79,15 @@ export function parseHistoryPayload(
   }
   const offset: number = typeof obj['offset'] === 'number' ? obj['offset'] as number : 0;
   const hasMore: boolean = obj['has_more'] === true;
-  return { msgs: msgs, offset: offset, hasMore: hasMore };
+  // last_seq：增量游标。缺失时回退到本页最大 seq，保证游标不会倒退。
+  let lastSeq: number = typeof obj['last_seq'] === 'number' ? obj['last_seq'] as number : 0;
+  for (let i = 0; i < msgs.length; i++) {
+    const sq: number | undefined = msgs[i].seq;
+    if (sq !== undefined && sq > lastSeq) {
+      lastSeq = sq;
+    }
+  }
+  return { msgs: msgs, offset: offset, hasMore: hasMore, lastSeq: lastSeq };
 }
 
 /** 后端 tool_calls 条目带 tool 和 name 两份；args/result 可能是对象也可能是字符串。 */
