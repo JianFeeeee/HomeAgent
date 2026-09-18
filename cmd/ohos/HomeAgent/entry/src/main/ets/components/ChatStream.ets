@@ -36,10 +36,22 @@ export struct ChatStream {
 
   private scroller: Scroller = new Scroller();
   private autoScrolling: boolean = false;
+  /** 滚动世代号：scrollRev 每次变化自增，旧一轮的延迟滚动据此作废 */
+  private scrollGen: number = 0;
   private navHidden: boolean = false;
 
   aboutToAppear(): void {
     this.messages = chatStore.messages();
+    // 首帧如果已经有消息（历史加载先于本组件挂载完成），必须自己滚到底。
+    //
+    // 为何必须补这一下：@Watch 只在值**变化**时触发，不触发初始值。
+    // ChatPage.aboutToAppear 里 loadHistory() 是异步的，若它在 ChatStream
+    // 构造之前就完成了，requestScroll 递增的 chatScrollRev 就成了“挂载前
+    // 已经发生的变化”——本组件的 onScrollReq 永远不会被调到，表现就是
+    // “消息加载好了却停在顶部/中间，不滚到最新”。
+    if (this.messages.length > 0) {
+      this.scrollToBottom();
+    }
   }
 
   private onChatRev(): void {
@@ -69,20 +81,30 @@ export struct ChatStream {
 
   private scrollToBottom(): void {
     this.autoScrolling = true;
-    // 滚两次：内容高度是在消息数组更新后的若干帧内才逐步确定的。
-    // 长历史/长思考卡布局慢，只滚一次会落在“当时”的底部 —— 实测初次加载
-    // 历史时最后一条被输入区挡住，再手动上滑还能露出更多内容。
+    // 多次重试：内容高度是消息数组更新后**若干帧内**才逐步确定的，
+    // 长历史 / Markdown / 思考卡 / 工具卡布局都慢。旧实现只重试到 260ms，
+    // 长历史下那一次仍落在“当时”的底部（用户看到的是加载完停在中间）。
+    // 用递增间隔重试到 ~1s，让后几帧的布局增长也跟得上。
+    //
+    // scrollRev 变化时旧一轮的定时器不能继续干预新滚动，用世代号作废。
+    const gen: number = ++this.scrollGen;
+    const delays: number[] = [50, 120, 220, 360, 550, 800];
+    for (let i = 0; i < delays.length; i++) {
+      setTimeout(() => {
+        if (gen !== this.scrollGen) {
+          return;
+        }
+        this.scroller.scrollEdge(Edge.Bottom);
+      }, delays[i]);
+    }
     setTimeout(() => {
-      this.scroller.scrollEdge(Edge.Bottom);
-    }, 50);
-    setTimeout(() => {
-      this.scroller.scrollEdge(Edge.Bottom);
-    }, 260);
-    setTimeout(() => {
+      if (gen !== this.scrollGen) {
+        return;
+      }
       this.autoScrolling = false;
       this.navHidden = false;
       navBar.setVisible(true);
-    }, 480);
+    }, 900);
   }
 
   /**
