@@ -38,6 +38,8 @@ Server commands (local 与 remote 行为一致):
   /memory query <text>     query graph memory
   /memory graph            dump full graph memory snapshot
   /memory text [n]         recent text-memory events + stats
+  /memory context [q]      assembled memory context (what gets injected)
+  /memory tools            memory tool definitions + tool prompt
   /knowledge               list knowledge base (+stats)
   /knowledge delete <name> delete knowledge item
   /config                  dump kernel config (JSON)
@@ -265,8 +267,15 @@ Any other text is sent to the agent directly.`)
 			case sub == "text" || strings.HasPrefix(sub, "text "):
 				d, _ := rc.DoAPI("GET", "/api/v1/memory/text", "")
 				printJSON(out, d)
+			case sub == "context" || strings.HasPrefix(sub, "context "):
+				q := strings.TrimSpace(strings.TrimPrefix(sub, "context"))
+				d, _ := rc.DoAPI("GET", "/api/v1/memory/context?q="+q, "")
+				printJSON(out, d)
+			case sub == "tools":
+				d, _ := rc.DoAPI("GET", "/api/v1/memory/tools", "")
+				printJSON(out, d)
 			default:
-				fmt.Fprintln(out, "usage: /memory query <text> | /memory graph | /memory text [n]")
+				fmt.Fprintln(out, "usage: /memory query <text> | /memory graph | /memory text [n] | /memory context [q] | /memory tools")
 			}
 		} else {
 			state.Send(cmd)
