@@ -536,6 +536,14 @@ func (a *Agent) stepPrepare(f *TaskFrame) stepOutcome {
 		f.Response = *f.StageCtx.Response
 		return outcomeDone
 	}
+	// 停止的第二个半边（用户明确的设计）：对**停止那一刻已排队**的消息，
+	// 依次在这里短路——不进 LLM、不执行工具，直接以一条说明收尾。
+	// 配额是停止时的快照，消费完即止；停止之后新到的输入不受影响。
+	if a.sched.consumeCancel() {
+		log.Printf("[agent] cancelled queued task at pre-action (input=%q)", truncateStr(f.Input, 40))
+		f.Response = "已取消（用户停止）。"
+		return outcomeDone
+	}
 	if len(f.StageCtx.ContextMsgs) > 0 {
 		for _, m := range f.StageCtx.ContextMsgs {
 			role, _ := m["role"].(string)
@@ -585,6 +593,18 @@ func (a *Agent) stepLLM(f *TaskFrame) stepOutcome {
 			if f.OutputChannel == channelConsolidation {
 				f.Err = fmt.Errorf("interrupted by user input")
 				return outcomeFailed
+			}
+			// 用户按下的「停止」：取消必须**终结本任务**，不是重跑。
+			//
+			// 默认行为（下面的 outcomeContinue 重跑本步）是给「被更高中断抢占」用的：
+			// 取消只是把现场交出去，稍后还要继续。而停止是用户明确的“不要了”，
+			// 重跑会让停止按钮看起来没反应（已实测：取消后又发了一次完整请求）。
+			if a.sched.takeStop() {
+				log.Printf("[agent] stop: LLM cancelled, task terminated without retry")
+				if strings.TrimSpace(f.Response) == "" {
+					f.Response = "已停止生成。"
+				}
+				return outcomeDone
 			}
 			f.Turn++
 			return outcomeContinue // 重跑 StepLLM
