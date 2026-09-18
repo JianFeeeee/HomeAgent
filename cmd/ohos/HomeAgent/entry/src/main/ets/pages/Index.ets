@@ -14,7 +14,8 @@ import { GradientBackground } from '../components/GradientBackground';
 import { ScreensuePage } from '../components/ScreensuePage';
 import { registerScreensueHandler } from '../common/BridgeRouter';
 import { markForegroundBridgeUIReady } from '../common/DeviceBridgeSession';
-import { ScreensuePayload, snapshotComponentId } from '../common/BridgeCaps';
+import { snapshotComponentId } from '../common/BridgeCaps';
+import { ScreensuePayload } from '../common/ScreensueHtml';
 import { window, display } from '@kit.ArkUI';
 import { common } from '@kit.AbilityKit';
 
