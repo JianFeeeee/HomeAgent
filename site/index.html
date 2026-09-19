@@ -316,27 +316,246 @@
       .l-doc h3 span.mark { color: var(--brand-cyan); }
       .l-gph h3 span.mark { color: var(--brand-gold); }
 
-      /* ── 消息流程 ── */
+      /* ── 消息流程图 ──
+         不用 ASCII：那只能表达"上下关系"，工具循环与分支都画不出来。
+         语义化结构 + CSS，深浅主题跟着走，窄屏也能重排。 */
       .flow {
+        position: relative;
         background: var(--bg-card);
         border: 1px solid var(--border);
         border-radius: var(--radius-lg);
-        padding: 1.4rem;
-        overflow-x: auto;
+        padding: 1.6rem 1.5rem 1.3rem;
       }
-      .flow pre {
-        margin: 0;
+      /* 注：这里原来有一条贯穿全图的 ::before 轴线。
+         但节点背景是半透明令牌（--bg-card-hi），轴线会直接透出来——
+         实测在「处理管道」里穿过整个编号列表，看着像画错了。
+         连接线 .lnk 本身就是那条主轴，不需要再来一条。 */
+
+      /* ── 节点 ── */
+      .n {
+        position: relative;
+        z-index: 1;
+        display: grid;
+        grid-template-columns: 1.9rem auto;
+        grid-template-areas: "ico t" "ico s";
+        align-items: center;
+        gap: 0 0.7rem;
+        width: 100%;
+        max-width: 34rem;
+        margin: 0 auto;
+        padding: 0.6rem 1.1rem 0.6rem 0.75rem;
+        background: var(--bg-card-hi);
+        border: 1px solid var(--border-hi);
+        border-radius: var(--radius-md);
+        box-shadow: var(--shadow-md);
+      }
+      .n-ico {
+        grid-area: ico;
+        display: grid;
+        place-items: center;
+        width: 1.9rem; height: 1.9rem;
+        border-radius: 50%;
+        font-size: 0.85rem;
+        background: rgba(59, 130, 246, 0.14);
+        color: var(--brand-blue);
+      }
+      .n-t {
+        grid-area: t;
+        font-weight: 700;
+        font-size: 0.95rem;
+        color: var(--text);
+        line-height: 1.35;
+      }
+      .n-s {
+        grid-area: s;
+        font-size: 0.78rem;
+        color: var(--text-muted);
         font-family: var(--font-mono);
-        font-size: 0.82rem;
-        line-height: 1.7;
-        color: var(--text-dim);
-        white-space: pre;
+        line-height: 1.45;
       }
-      .flow .k-blue { color: var(--brand-blue); }
-      .flow .k-cyan { color: var(--brand-cyan); }
-      .flow .k-gold { color: var(--brand-gold); }
-      .flow .k-violet { color: var(--brand-violet); }
-      .flow .k-dim { color: var(--text-muted); }
+      /* 各类节点用颜色区分：与三层记忆的三色一致 */
+      .n-in .n-ico    { background: rgba(119, 128, 154, 0.16); color: var(--text-dim); }
+      .n-sched .n-ico { background: rgba(56, 189, 248, 0.16);  color: var(--brand-sky); }
+      .n-pipe         { border-color: rgba(6, 182, 212, 0.45); }
+      .n-pipe .n-ico  { background: rgba(6, 182, 212, 0.16);   color: var(--brand-cyan); }
+      .n-mem          { border-color: rgba(245, 158, 11, 0.45); }
+      .n-mem .n-ico   { background: rgba(245, 158, 11, 0.16);  color: var(--brand-gold); }
+      .n-out .n-ico   { background: rgba(59, 130, 246, 0.16);  color: var(--brand-blue); }
+
+      /* ── 连接线：中轴上的一小段，带流动感 ── */
+      .lnk {
+        position: relative;
+        height: 2.1rem;
+        width: 2px;
+        margin: 0 auto;
+        background: var(--border-hi);
+      }
+      .lnk::before {
+        /* 静态箭头：reduce 下动画停了，方向也要看得出来 */
+        content: "";
+        position: absolute;
+        left: 50%; bottom: -1px;
+        width: 7px; height: 7px;
+        margin-left: -3.5px;
+        border-right: 2px solid var(--border-hi);
+        border-bottom: 2px solid var(--border-hi);
+        transform: rotate(45deg);
+      }
+      .lnk::after {
+        /* 下行的光点 */
+        content: "";
+        position: absolute;
+        left: 50%; top: 0;
+        width: 6px; height: 6px;
+        margin-left: -3px;
+        border-radius: 50%;
+        background: var(--brand-sky);
+        box-shadow: 0 0 8px var(--brand-sky);
+        animation: dotDown 2.4s var(--ease) infinite;
+        animation-delay: var(--d, 0s);
+      }
+      @keyframes dotDown {
+        0%   { top: 0;    opacity: 0; }
+        18%  {             opacity: 1; }
+        82%  {             opacity: 1; }
+        100% { top: 100%; opacity: 0; }
+      }
+
+      /* ── 调度分支 ── */
+      .br {
+        position: relative;
+        z-index: 1;
+        list-style: none;
+        max-width: 34rem;
+        margin: 0.55rem auto 0;
+        padding: 0;
+        display: grid;
+        gap: 0.28rem;
+      }
+      .br li {
+        position: relative;
+        font-size: 0.78rem;
+        color: var(--text-dim);
+        padding: 0.3rem 0.7rem 0.3rem 1.6rem;
+        border-left: 2px solid var(--border);
+        border-radius: 0 var(--radius-sm) var(--radius-sm) 0;
+        background: rgba(119, 128, 154, 0.06);
+      }
+      .br li::before {
+        content: "└";
+        position: absolute;
+        left: 0.42rem;
+        color: var(--text-muted);
+        font-family: var(--font-mono);
+      }
+      .br li b { color: var(--text); font-weight: 600; }
+      .br li i   { font-style: normal; font-weight: 600; }
+      .br-que i, .br-que b { color: var(--text-dim); }
+      .br-pre { border-left-color: rgba(245, 158, 11, 0.55); }
+      .br-pre i { color: var(--brand-gold); }
+      .br-off { border-left-color: rgba(139, 92, 246, 0.55); }
+      .br-off i { color: var(--brand-violet); }
+
+      /* ── 工具循环 ── */
+      .loop {
+        position: relative;
+        z-index: 1;
+        max-width: 34rem;
+        margin: 0.75rem auto 0;
+        padding: 2.4rem 1rem 2.6rem;
+        border: 1px dashed rgba(6, 182, 212, 0.4);
+        border-radius: var(--radius-md);
+        background: rgba(6, 182, 212, 0.045);
+      }
+      .loop-tag {
+        position: absolute;
+        top: -0.68rem; left: 1rem;
+        padding: 0.12rem 0.55rem;
+        font-size: 0.7rem;
+        font-family: var(--font-mono);
+        color: var(--brand-cyan);
+        background: var(--bg);
+        border: 1px solid rgba(6, 182, 212, 0.4);
+        border-radius: var(--radius-pill);
+      }
+      .seq {
+        list-style: none;
+        margin: 0;
+        padding: 0;
+        display: grid;
+        gap: 0.34rem;
+      }
+      .seq-item {
+        display: grid;
+        grid-template-columns: 1.5rem 1fr;
+        gap: 0.6rem;
+        align-items: baseline;
+      }
+      .seq-n {
+        display: grid;
+        place-items: center;
+        width: 1.5rem; height: 1.5rem;
+        border-radius: 50%;
+        font-size: 0.7rem;
+        font-family: var(--font-mono);
+        color: var(--brand-cyan);
+        background: rgba(6, 182, 212, 0.14);
+        border: 1px solid rgba(6, 182, 212, 0.3);
+      }
+      .seq-b { font-size: 0.82rem; color: var(--text); line-height: 1.5; }
+      .seq-b b { font-weight: 600; }
+      .seq-b code { font-size: 0.78rem; }
+      .seq-b em {
+        display: block;
+        font-style: normal;
+        font-size: 0.74rem;
+        color: var(--text-muted);
+      }
+      /* 循环回边：内嵌徽标。
+         曾试过从框底绕出去的弧线，但它会压到下一条连接线，看着像画错了。 */
+      .loop-back {
+        position: absolute;
+        right: 0.7rem; bottom: 0.7rem;
+        display: flex;
+        align-items: center;
+        gap: 0.34rem;
+        padding: 0.2rem 0.6rem;
+        font-size: 0.7rem;
+        font-family: var(--font-mono);
+        color: var(--brand-cyan);
+        background: rgba(6, 182, 212, 0.12);
+        border: 1px solid rgba(6, 182, 212, 0.35);
+        border-radius: var(--radius-pill);
+        white-space: nowrap;
+        pointer-events: none;
+      }
+      .loop-back::before {
+        content: "↻";
+        font-size: 0.85rem;
+        line-height: 1;
+      }
+
+      .flow-note {
+        position: relative;
+        z-index: 1;
+        margin: 1.1rem auto 0;
+        max-width: 34rem;
+        text-align: center;
+        font-size: 0.76rem;
+        color: var(--text-muted);
+        line-height: 1.6;
+      }
+      .flow-note code { font-size: 0.74rem; }
+
+      /* 窄屏：中轴线收边，节点撑满 */
+      @media (max-width: 620px) {
+        .flow { padding: 1.2rem 1rem 1.1rem; }
+        .flow::before { display: none; }
+        .n { width: auto; max-width: none; }
+        .br, .flow-note { max-width: none; }
+        .loop { max-width: none; padding: 2.2rem 0.8rem 2.4rem; }
+        .lnk { height: 1.6rem; }
+      }
 
       /* ── 代码块 ── */
       .code {
@@ -861,35 +1080,31 @@
       .layer.l-doc .bar { color: var(--brand-cyan); }
       .layer.l-gph .bar { color: var(--brand-gold); }
 
-      /* ── 架构图的「数据流动」：一条光带缓缓下行 ── */
-      .flow { position: relative; overflow-y: hidden; }
-      .flow::after {
-        content: "";
-        position: absolute;
-        left: 0; right: 0; top: -30%;
-        height: 30%;
-        background: linear-gradient(
-          to bottom, transparent,
-          rgba(56, 189, 248, 0.10) 45%,
-          rgba(56, 189, 248, 0.16) 50%,
-          transparent);
-        animation: flowSweep 5.5s linear infinite;
-        pointer-events: none;
+      /* ── 流程图的「数据流动」──
+         光带扫描会盖住节点，改成让节点自己的图标呼吸。 */
+      .js-fx .flow .n-ico {
+        animation: nodePulse 4.5s ease-in-out infinite;
       }
-      @keyframes flowSweep {
-        0%   { top: -30%; }
-        100% { top: 100%; }
-      }
-      /* 节点标签的脉冲 */
-      .flow .k-blue, .flow .k-cyan, .flow .k-gold, .flow .k-violet {
-        animation: nodePulse 4s ease-in-out infinite;
-      }
-      .flow .k-cyan   { animation-delay: 0.6s; }
-      .flow .k-gold   { animation-delay: 1.2s; }
-      .flow .k-violet { animation-delay: 1.8s; }
+      .js-fx .flow .n:nth-of-type(1) .n-ico { animation-delay: 0s; }
+      .js-fx .flow .n .n-ico { animation-delay: 0.9s; }
+      .js-fx .flow .n-mem .n-ico { animation-delay: 1.8s; }
       @keyframes nodePulse {
-        0%, 100% { filter: brightness(1); }
-        50%      { filter: brightness(1.45); }
+        0%, 100% { box-shadow: 0 0 0 0 transparent; }
+        50%      { box-shadow: 0 0 0 4px rgba(56, 189, 248, 0.10); }
+      }
+      /* 序号依次点亮，跟着流程走 */
+      .js-fx .flow .seq-n {
+        animation: seqPulse 4.5s ease-in-out infinite;
+      }
+      .js-fx .flow .seq-item:nth-child(1) .seq-n { animation-delay: 0s; }
+      .js-fx .flow .seq-item:nth-child(2) .seq-n { animation-delay: 0.35s; }
+      .js-fx .flow .seq-item:nth-child(3) .seq-n { animation-delay: 0.7s; }
+      .js-fx .flow .seq-item:nth-child(4) .seq-n { animation-delay: 1.05s; }
+      .js-fx .flow .seq-item:nth-child(5) .seq-n { animation-delay: 1.4s; }
+      .js-fx .flow .seq-item:nth-child(6) .seq-n { animation-delay: 1.75s; }
+      @keyframes seqPulse {
+        0%, 70%, 100% { border-color: rgba(6, 182, 212, 0.3); color: var(--brand-cyan); }
+        12%           { border-color: var(--brand-cyan); color: var(--text); }
       }
 
       /* ── 数字卡片：数值滚动到位 ── */
@@ -959,6 +1174,8 @@
           transition-duration: 0.001ms !important;
         }
         .js-fx .rise, .js-fx .rise-zoom, .js-fx .badge { opacity: 1; transform: none; }
+        .js-fx .flow .n-ico, .js-fx .flow .seq-n, .lnk::after { animation: none; }
+        .lnk::after { opacity: 0; }
         .layer .bar { transform: scaleY(1); }
         section > .wrap > h2::after { transform: scaleX(1); }
         #progress { display: none; }
@@ -1152,23 +1369,94 @@
           </p>
 
           <div class="flow reveal rise">
-            <pre>
-  <span class="k-dim">外部输入（QQ / WebUI / CLI / 邮件 / 设备 …）</span>
-        │
-        ▼
-  <span class="k-blue">输入调度器</span>  <span class="k-dim">两类别 · 四级中断 L1–L4</span>
-        │   ├─ 同级不抢占 → 入队列
-        │   ├─ 更高级     → <span class="k-gold">抢占</span>（现场压入中断栈，稍后恢复）
-        │   └─ 忙太久     → <span class="k-violet">转投</span> 临时分诊助手
-        ▼
-  <span class="k-cyan">处理管道</span>  <span class="k-dim">on_input → pre_action → post_action → before/after_toolcall → before/after_output</span>
-        │   记忆召回 + 人格注入 + LLM 调用 + 工具循环
-        ▼
-  <span class="k-gold">三层记忆</span>  <span class="k-dim">Context → Document → Graph</span>
-        │
-        ▼
-  <span class="k-blue">输出通道</span>  <span class="k-dim">可寻址到具体 agent（父 ↔ 驻留子）</span>
-</pre>
+            <!-- 输入 -->
+            <div class="n n-in">
+              <span class="n-ico">↘</span>
+              <span class="n-t">外部输入</span>
+              <span class="n-s">QQ / WebUI / CLI / 邮件 / 设备</span>
+            </div>
+            <div class="lnk" style="--d:0.00s" aria-hidden="true"></div>
+
+            <!-- 调度器 -->
+            <div class="n n-sched">
+              <span class="n-ico">⇅</span>
+              <span class="n-t">输入调度器</span>
+              <span class="n-s">两类别 · 四级中断 L1–L4</span>
+            </div>
+            <ul class="br" aria-label="调度器的三种去向">
+              <li class="br-que"><b>同级不抢占</b> → 入队列排队</li>
+              <li class="br-pre"><b>更高级别</b> → <i>抢占</i>，现场压入中断栈，稍后恢复</li>
+              <li class="br-off"><b>忙得太久</b> → <i>转投</i>临时分诊助手</li>
+            </ul>
+            <div class="lnk" style="--d:0.55s" aria-hidden="true"></div>
+
+            <!-- 处理管道 -->
+            <div class="n n-pipe">
+              <span class="n-ico">⇄</span>
+              <span class="n-t">处理管道</span>
+              <span class="n-s">记忆召回 + 人格注入 + LLM 调用 + 工具循环</span>
+            </div>
+
+            <!-- 循环体 -->
+            <div class="loop">
+              <span class="loop-tag">每轮复用</span>
+              <ol class="seq">
+                <li class="seq-item">
+                  <span class="seq-n">1</span>
+                  <div class="seq-b"><code>pre_action</code>
+                    <em>构建消息与工具表 · 插件可在此短路</em></div>
+                </li>
+                <li class="seq-item">
+                  <span class="seq-n">2</span>
+                  <div class="seq-b"><b>LLM 调用</b>
+                    <em>provider 回退 + 瞬时错误重试 · 流式累积</em></div>
+                </li>
+                <li class="seq-item">
+                  <span class="seq-n">3</span>
+                  <div class="seq-b"><code>post_action</code>
+                    <em>插件可改写最终文本</em></div>
+                </li>
+                <li class="seq-item">
+                  <span class="seq-n">4</span>
+                  <div class="seq-b"><code>before_toolcall</code>
+                    <em>逐个工具执行前 · 可拒</em></div>
+                </li>
+                <li class="seq-item">
+                  <span class="seq-n">5</span>
+                  <div class="seq-b"><b>执行工具</b>
+                    <em>临界区：副作用不可回滚</em></div>
+                </li>
+                <li class="seq-item">
+                  <span class="seq-n">6</span>
+                  <div class="seq-b"><code>after_toolcall</code>
+                    <em>上下文裁剪 · 相关记忆召回 · 结果入消息</em></div>
+                </li>
+              </ol>
+              <div class="loop-back" aria-hidden="true">
+                <span>有工具调用则回到 ①</span>
+              </div>
+            </div>
+
+            <div class="lnk" style="--d:1.10s" aria-hidden="true"></div>
+
+            <!-- 三层记忆 -->
+            <div class="n n-mem">
+              <span class="n-ico">◈</span>
+              <span class="n-t">三层记忆</span>
+              <span class="n-s">Context → Document → Graph</span>
+            </div>
+            <div class="lnk" style="--d:1.65s" aria-hidden="true"></div>
+
+            <!-- 输出 -->
+            <div class="n n-out">
+              <span class="n-ico">↗</span>
+              <span class="n-t">输出通道</span>
+              <span class="n-s">before_output · after_output · 可寻址到具体 agent</span>
+            </div>
+
+            <p class="flow-note">
+              <code>on_input</code> 在进管道之前跑；<code>before_output</code> / <code>after_output</code> 在全部轮次结束后跑一次。
+            </p>
           </div>
 
           <h2 class="reveal" style="margin-top: 3rem">核心组件</h2>
