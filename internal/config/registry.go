@@ -186,6 +186,15 @@ var sourceFieldDefs = []struct {
 	{"adapter", "string", "适配器"},
 	{"adapter_path", "string", "适配器路径"},
 	{"max_concurrent", "int", "并发上限"},
+	// context_window 必须显式声明：它已被 readInt 读进 LLMSource 并透传到 provider，
+	// 但早先没进这张表 ⇒ WebUI 里看不见、也改不了，内核就一直在用
+	// ModelContextWindow(model) 的推断值。模型名是 AUTO 时那个函数匹配不到任何
+	// 分支、掉进 default 32768，而真实窗口是 1M（实测 990,034 token 的 prompt 通过）
+	// ⇒ 整个预算比真实小 30 倍。声明后它才是个可配的挡位。
+	//
+	// 注：per-source 的 max_tokens 不在这里—— LLMSource 没有该字段（输出上限
+	// 是全局 core.llm.max_tokens）。别加一个读不到的旋钮。
+	{"context_window", "int", "上下文窗口（token；留空按模型名推断）"},
 	{"priority", "int", "AUTO 优先级（大者优先）"},
 	{"vision", "bool", "支持图片"},
 	{"audio", "bool", "支持音频"},

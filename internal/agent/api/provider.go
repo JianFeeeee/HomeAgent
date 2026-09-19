@@ -8,9 +8,9 @@ import (
 	"fmt"
 	"io"
 	"log"
-	"os"
 	"net"
 	"net/http"
+	"os"
 	"sort"
 	"strings"
 	"sync"
@@ -260,11 +260,21 @@ func ProviderSupportsAudio(p Provider) bool {
 	return false
 }
 
+// defaultInferredContextWindow 是模型名无法推断窗口时的兜底。
+//
+// 32768 是个保守值，但它属于**静默降级**：模型名写 AUTO（网关自己选上游）时
+// ModelContextWindow 匹配不到任何分支，内核就会拿着一份比真实小得多的窗口
+// 去算全部预算（实测：deepseek-v4.1-flash 能吞 990,034 token，而预算按 32768 算）。
+// 因此推断不出来时留一条日志，并让部署方用 per-source context_window 显式声明。
+const defaultInferredContextWindow = 32768
+
 // ModelContextWindow 返回模型的最大上下文窗口（token 数）
 // 标称窗口 ≠ 有效窗口：接近满时注意力涣散，调用方应取 70-80% 为目标利用率
 func ModelContextWindow(model string) int {
 	model = strings.ToLower(model)
 	switch {
+	case strings.Contains(model, "deepseek-v4") || strings.Contains(model, "deepseek-v3"):
+		return 1048576
 	case strings.Contains(model, "deepseek-r1") || strings.Contains(model, "deepseek-chat"):
 		return 65536
 	case strings.Contains(model, "gpt-4") && (strings.Contains(model, "turbo") || strings.Contains(model, "mini") || strings.Contains(model, "omni")):
@@ -296,7 +306,13 @@ func ModelContextWindow(model string) int {
 	case strings.Contains(model, "moonshot") || strings.Contains(model, "kimi"):
 		return 131072
 	default:
-		return 32768
+		// 模型名推断不出窗口（如 "AUTO"）：不要静静退回一个比真实小得多的值。
+		// 报一行日志，让“窗口被低估”这件事可见；部署方用 per-source
+		// core.llm.sources.<name>.context_window 声明真实值即可覆盖。
+		log.Printf("[provider] 模型 %q 无法推断上下文窗口，回退 %d；"+
+			"若真实窗口更大，请设置 core.llm.sources.<name>.context_window",
+			model, defaultInferredContextWindow)
+		return defaultInferredContextWindow
 	}
 }
 
@@ -1268,8 +1284,8 @@ func getFloat(m map[string]interface{}, key string) float64 {
 // ToolOutput 是工具 handler 返回的结构化结果，支持多模态内容。
 // 返回 string 时等价于 ToolOutput{Text: result}。
 type ToolOutput struct {
-	Text   string         `json:"text"`                         // LLM 看到的文字描述
-	Blocks []ContentBlock `json:"blocks,omitempty"`             // 附加的多模态块（image_url/audio_url），追加到 tool message
+	Text   string         `json:"text"`             // LLM 看到的文字描述
+	Blocks []ContentBlock `json:"blocks,omitempty"` // 附加的多模态块（image_url/audio_url），追加到 tool message
 }
 
 func (t ToolOutput) String() string { return t.Text }
