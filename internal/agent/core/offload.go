@@ -94,6 +94,32 @@ type offloadCandidate struct {
 	Event *agentIO.InputEvent
 }
 
+// drainInboxToQueue 把 io 输入 channel 里**已经到达但尚未被搬运**的输入
+// 搬进就绪队列（非阻塞；取空为止）。
+//
+// 它与 pumpInbox 做的事一样，但**不要求 hasRoom**：pumpInbox 在队列满时
+// 会停下以保留背压，而转投场景恰恰是「队列空/不满、但输入堵在 channel 里」
+// （因为调度器正忙于执行任务、根本回不到 pumpInbox）。
+//
+// 队列上限仍由 enqueue 把关：满了就停下，超出的输入留在 channel 里。
+func (a *Agent) drainInboxToQueue() {
+	for {
+		select {
+		case evt := <-a.io.InputChan():
+			if !a.sched.enqueue(newInputTask(evt)) {
+				// 队列满：放不进去。不能丢，也不能阻塞（我们是后台 goroutine，
+				// 阻塞会把这个循环永远卡住）——给同步调用方一个终态后丢弃，
+				// 与 pumpInbox 的 queue_full 处置一致。
+				a.sched.noteBackpressure()
+				a.emitSkippedReply(evt, "queue_full")
+				return
+			}
+		default:
+			return
+		}
+	}
+}
+
 // residentInputChannel 返回"父给某个子投递输入"用的 inputch 名。
 //
 // 与 SendToResident 用的是同一个（sub/<id>）：子是**不配插件 inputch** 的
@@ -124,7 +150,19 @@ func (a *Agent) offloadPendingTasks(opts OffloadOptions) int {
 		return 0
 	}
 
-	// ② 收集可转投的排队任务；不够量就不值得拉起一个 agent。
+	// ② 先把积压从 io 的输入 channel **搬进就绪队列**。
+	//
+	// ！！这是本特性最容易写错的一步（我第一版就错了，写完后线上实测永不触发）：
+	// schedulerLoop 是**同步执行**任务的，所以「正忙」期间它根本不会回到循环顶部
+	// 去调 pumpInbox —— 这时后到的输入全部堆在 io.inputCh（容量 256）里，
+	// **压根没进 sched.queue**。只数 s.queue 会得到 0，转投就永远不触发。
+	//
+	// 仓库里早记过同一个坑：armStop 的注释写着「pending 是还没被 pumpInbox 搬进
+	// 队列的那一段……只数 s.queue 会得到 0（实测），配额随之失效」。
+	// 这里必须在同一层把这件事做对，而不是重犯。
+	a.drainInboxToQueue()
+
+	// ③ 收集可转投的排队任务；不够量就不值得拉起一个 agent。
 	cands := a.sched.takeQueuedInputs(opts.MinPending)
 	if len(cands) == 0 {
 		return 0
