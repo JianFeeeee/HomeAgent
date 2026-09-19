@@ -7,7 +7,7 @@ import (
 	"testing"
 )
 
-// entry 分派（见 docs/zh/架构迁移评估.md 的入口双通道章节）。
+// entry 分派：按 manifest 的 entry 把插件分派到 proc / lua / skill 三条通道。
 //
 // C ABI 通道（.so/.dll/.dylib）已整体退场：外部插件统一走子进程 + stdio RPC。
 // 这些测试守住的是「旧产物给明确错误」而非「静默跳过」——后者会让

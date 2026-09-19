@@ -1,6 +1,7 @@
 // Package proc 实现外部插件的子进程加载通道（plugin.bin）。
 //
-// 设计依据：docs/zh/架构迁移评估.md 第三章
+// 数据面设计：定长头 + arena，变长数据用相对基址的 {off,len} 描述符
+//（相对偏移是关键：各进程 mmap 到不同虚拟地址也能正确解引用）。
 //
 //	homed ──spawn──> plugin（纯 Go 二进制，无 cgo）
 //	  ├── stdio JSON-RPC   控制面：51 个 method id 平移为 method 名（§3.2）

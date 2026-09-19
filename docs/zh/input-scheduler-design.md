@@ -541,9 +541,9 @@ v1 采纳：**`S_TOOL_EXEC` / ONNX / CAS 属于临界区，调度器在这些 st
 - **追加是唯一的形态**：不改既有字段、不改签名、不改语义；`Priority` 的零值
   等价于旧行为（L1）。
 - 合回 `main` 前需完成的发布动作：
-  1. 同步更新 `docs/zh/plugin-interface-matrix.md`；
-  2. 与 SDK 仓协同升 SDK 中版本；
-  3. 遵守“只增不减、签名不改”边界。
+  1. 与 SDK 仓协同升 SDK 中版本（`docs/git-branching.md` §七）；
+  2. 遵守“只增不减、签名不改”，并同步 hmapdev 模板接线
+     （`docs/git-branching.md` §八）。
 - 内核侧接口（`internal/agent/io`、proc 桥的 `injectParams`/`injectMediaParams`）
   同步追加 `priority`，与公开 SDK 字段一一对应。
 

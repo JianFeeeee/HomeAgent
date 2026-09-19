@@ -322,10 +322,15 @@ git branch -d release/v1.0.x                          # tag 已保存历史，�
 
 ## 六、本规范与「接口冻结」约束的关系
 
-- feature 分支合回 main 的门禁（`git diff third_party/homeagent-sdk/sdk/` 为空）是本仓特有的硬约束，独立于 Git 流程本身。
-- `internal/sdk` **不受冻结约束**，可自由扩展；冻结只针对公开 SDK 接口（`third_party/homeagent-sdk/sdk/`）。
-- 若整改确需突破公开接口，走变更评审（见 `docs/zh/plugin-interface-matrix.md` §七），
-  并同步 `SDKCompatibleVersion` 与 SDK 仓的 release tag。
+> **接口冻结已到期（v1.1.x 起）**。冻结是**迁移期**的约束——它要保的是
+> 「换运行模型不动业务代码」，靠 `git diff third_party/homeagent-sdk/sdk/` 为空来守。
+> 迁移完成（v1.0.0 上生产）后该约束按时失效，取而代之的是 §八的三条演进规则。
+> 本节保留历史条款，但**不再作为合回门禁**。
+
+- ~~feature 分支合回 main 的门禁（`git diff third_party/homeagent-sdk/sdk/` 为空）~~
+  —— **已失效**。现改为：公开接口的改动必须满足 §八（只增不减、签名不改、模板接线）。
+- `internal/sdk` **不受冻结约束**，可自由扩展（此条仍成立）；
+  公开 SDK 接口指 `third_party/homeagent-sdk/sdk/`。
 - **公开接口的改动本身是 feature，不是发布准备**：它必须走 `feature/xxx` → 合回 main 的路径，
   再 cherry-pick 到发布分支。不允许把接口新增当成"发布分支上的 bug 修复"直接提交进 release
   ——发布分支冻结功能（§2.3），接口是最典型的功能面。
@@ -456,3 +461,52 @@ GITCODE_REPO=JianFeeeee/homeagent-sdk ASSET_DIR=<sdk>/dist/release \
 
 → 因此在这一阶段，**核心 main = `1.3.0` 而 SDK main = `1.2.0` 是正确的**，
 不是遗漏同步。（曾按本节的例子把 SDK main 也推到 1.3.0，等于宣称 SDK 1.2.0 已发布。）
+
+---
+
+## 八、公开 SDK 接口的演进规则
+
+> 本节原在《外部插件接口不变矩阵》（迁移期临时文档，已随迁移完成删除）§九。
+> 那份文档记的是**迁移期**的约束（"换运行模型不动业务代码"，靠
+> `git diff third_party/homeagent-sdk/sdk/` 为空来守）。迁移完成后该约束**到期**——
+> 继续冻结等于让 SDK 永远停在迁移那天的能力面，多模态这类功能永远到不了插件手上。
+> 取代它的是下面三条更弱、但仍然硬的规则。
+
+### 1. 只增不减，签名不改
+
+新增字段、新增方法可以；**改已有方法的签名、删字段、改字段语义不行**。
+
+实例：v1.1.0 想让插件能给三元组关联媒体，两条路——改 `Commit` 的签名加一个参数，
+或新增 `CommitWithMedia`。选了后者。改签名会让每个调 `Commit` 的插件编译失败，
+而那些插件根本不关心媒体。
+
+### 2. 新增方法必须是「插件调用、内核实现」方向
+
+这是**存量插件不需要重编**的技术原因：`IOInjector` 新增方法后，插件只是
+*多了可以调的东西*，没有新的实现义务。反过来若在 `Plugin` 接口上加方法，
+每个存量插件都会因未实现而编译失败。
+
+### 3. 生成模板必须同步接线，否则是**全体外部插件编译失败**
+
+公开接口加方法时，`tools/hmapdev/templates/proc_main.go.tmpl` 里的实现若不满足新接口，
+每个外部插件都**编不过**——是硬失败，不是软降级。
+
+完整接线链共六处：`protocol.go` 的 method 常量 → `capability.go` 的能力归属 →
+`corehandler.go` 的分派分支 → `proc_core.go` 的委托 → `proc_main.go.tmpl` 的模板实现 →
+测试替身（`fakeCoreSDK`、`injectCapture`、`capability_test.go` 的手工方法清单）。
+还要同步 `yaegi/mocksdk`——它没有任何代码对着编译，漂移**不会被编译器抓到**。
+
+### 4. 「接口纯追加」不等于「无需重编」
+
+插件运行协议版本（`ProtocolVersion`）与 SDK 接口版本是**两件事**。
+协议升级（如 1.2.0 的 fd3 布局变更，不支持滚动升级）时，`ProtocolVersion` 不匹配
+会在握手时被明确拒绝并提示用配套 `hmapdev` 重编。
+必须把两者分开说，否则会被误读成"既然纯追加就还能用旧产物"。
+
+### 5. 合回 main 前要同步的东西
+
+1. 改动公开 SDK 接口面后，同步 SDK 仓的版本（§七）与 `SDKCompatibleVersion`；
+2. 生成模板已接线（跑 `cd tools/hmapdev && go test ./...`，含
+   `TestProcTemplate_CoversAllCoreMethods`）；
+3. 存量插件源码零改动（逐个 `cd example/<n> && go vet ./...`）；
+4. 并发安全（`go test -race -count=5 ./sdk/`）。
