@@ -137,7 +137,8 @@ func TestRequeueFrontKeepsAllTasks(t *testing.T) {
 // 唯一能解释这件事的就是这句话本身。
 func TestOffloadNoticeExplainsItself(t *testing.T) {
 	msg := offloadNotice(3, "offload-123")
-	for _, want := range []string{"系统", "3 条", "offload-123", "转投"} {
+	// 用词按用户口径：这是**分诊**（及时反馈），不是"内核替父决定"。
+	for _, want := range []string{"系统", "3 条", "offload-123", "分诊", "不需要你再处理"} {
 		if !strings.Contains(msg, want) {
 			t.Errorf("说明缺少 %q：%s", want, msg)
 		}
@@ -232,7 +233,7 @@ func TestOffloadMovesTasksToResidentEndToEnd(t *testing.T) {
 		t.Fatalf("留下的应是内核说明，实际 %+v", notice.Event)
 	}
 	content, _ := notice.Event.Payload["content"].(string)
-	for _, want := range []string{"2 条", resident.ID, "转投"} {
+	for _, want := range []string{"2 条", resident.ID, "分诊"} {
 		if !strings.Contains(content, want) {
 			t.Errorf("说明缺少 %q：%s", want, content)
 		}
@@ -406,5 +407,176 @@ func TestForwardKeepsResponseCh(t *testing.T) {
 		}
 	case <-time.After(10 * time.Second):
 		t.Fatal("★ 同步调用方没收到回执：转投丢了 ResponseCh（线上表现为 HTTP 挂起 504）")
+	}
+}
+
+// ★★ 回归：转投子必须拿到**分诊职责**提示词。
+//
+// 我第一版没给 TaskPrompt，于是子完全不知道自己为什么存在（只知道自己叫小宅）。
+// 用户对这个特性的定位是**及时反馈**：主 agent 忙时不能让用户干等十几分钟
+// （实测现场 785,951ms）。子的职责是分诊 —— 简单的直接办，需要主 agent 的
+// 立刻回「忙碌中，请稍候」，而不是勉强作答。
+func TestOffloadResidentGetsTriagePrompt(t *testing.T) {
+	p := offloadTaskPrompt()
+	for _, want := range []string{"分诊", "直接办", "忙碌中", "output_send"} {
+		if !strings.Contains(p, want) {
+			t.Errorf("分诊提示词缺少 %q", want)
+		}
+	}
+	// 拿不准时的默认动作必须是保守的那条（报忙碌），不能是"勉强作答"
+	if !strings.Contains(p, "选【报忙碌】") {
+		t.Error("必须写明拿不准时选报忙碌（避免给用户错误答复）")
+	}
+}
+
+// ★★ 回归：驻留子必须**继承父的 SystemPrompt**。
+//
+// 我第一版没传 SystemPrompt，子只能用 buildSystemPrompt 的一句兜底文案。
+// 而父的提示词里有「回复投递规则」：面向 qq/wechat 等**异步**通道时，
+// 纯文本返回会被静默丢弃，必须显式 output_send__{通道名}。
+// 缺了它，子处理完 QQ 积压却发不出去，且自己不会意识到（实测：webui 这类
+// **同步**通道能回是因为走 ResponseCh，掩盖了这个缺陷）。
+func TestResidentInheritsParentSystemPrompt(t *testing.T) {
+	root, main := newRootWithoutSchedulerLoop(t)
+	defer main.Close()
+	root.systemPrompt = "父的提示词：异步通道必须显式 output_send"
+
+	info, err := root.SpawnResident(ResidentOptions{
+		ID: "inherit-test", TempPath: root.residentTempPath("inherit-test"),
+	})
+	if err != nil {
+		t.Fatalf("创建驻留子失败: %v", err)
+	}
+	root.residentMu.Lock()
+	rc := root.residents[info.ID]
+	root.residentMu.Unlock()
+	if rc == nil || rc.agent == nil {
+		t.Fatal("驻留子不可用")
+	}
+	if rc.agent.systemPrompt != root.systemPrompt {
+		t.Fatalf("★ 驻留子未继承父的 SystemPrompt：子=%q 父=%q",
+			rc.agent.systemPrompt, root.systemPrompt)
+	}
+	// 真正要看的是提示词里确实带上了投递规则
+	built := rc.agent.buildSystemPrompt("", "x")
+	if !strings.Contains(built, "output_send") {
+		t.Errorf("子拼出的系统提示词里没有投递规则：%s", built)
+	}
+}
+
+// ★★ 残余任务必须由父**显式**决定保留还是丢弃（用户 2026-09-19 要求）。
+//
+// 现场问题：回收/销毁驻留子时它手头可能还有没处理的消息。异步通道（qq）
+// 没有 ResponseCh，静默丢弃时用户零反馈、日志也无痕迹 —— 消息就像没发过一样。
+// 所以内核只负责「把残余任务列清楚」，处置由父的模型决定（设计 §7）。
+func TestResidualKeepReturnsTasksToParent(t *testing.T) {
+	root, main := newRootWithoutSchedulerLoop(t)
+	defer main.Close()
+
+	info, err := root.SpawnResident(ResidentOptions{
+		ID: "res-keep", TempPath: root.residentTempPath("res-keep"),
+	})
+	if err != nil {
+		t.Fatalf("创建驻留子失败: %v", err)
+	}
+	root.residentMu.Lock()
+	child := root.residents[info.ID].agent
+	root.residentMu.Unlock()
+
+	// 给子塞两条尚未处理的残余任务（一条带同步回执、一条不带=模拟 qq）
+	syncCh := make(chan *agentIO.OutputEvent, 1)
+	child.sched.enqueue(newInputTask(&agentIO.InputEvent{
+		RequestID: "r1", Source: "webui", OutputChannel: "webui",
+		Payload: map[string]interface{}{"content": "a"}, ResponseCh: syncCh,
+	}))
+	child.sched.enqueue(newInputTask(&agentIO.InputEvent{
+		RequestID: "r2", Source: "qq", OutputChannel: "qq",
+		Payload: map[string]interface{}{"content": "b"},
+	}))
+
+	n, msg, err := root.ApplyResidual(info.ID, ResidualKeep)
+	if err != nil {
+		t.Fatalf("ApplyResidual(keep): %v", err)
+	}
+	if n != 2 {
+		t.Fatalf("应处置 2 条，实际 %d（msg=%s）", n, msg)
+	}
+	// keep = 转回父自己：两条都要出现在父的队列里，且**带 ResponseCh 的那条仍带**
+	if len(root.sched.queue) != 2 {
+		t.Fatalf("两条残余任务应转回父队列，实际 %d", len(root.sched.queue))
+	}
+	var hasResponseCh bool
+	for _, task := range root.sched.queue {
+		if task.Event != nil && task.Event.ResponseCh != nil {
+			hasResponseCh = true
+		}
+	}
+	if !hasResponseCh {
+		t.Error("★ keep 丢了 ResponseCh：同步调用方会永久挂起")
+	}
+	// keep 后子队列应清空（已交出去）：再取一次应为空
+	if left, _ := root.TakeResidual(info.ID); len(left) != 0 {
+		t.Errorf("交接后子队列应清空，实际剩 %d", len(left))
+	}
+}
+
+// drop 也必须给同步调用方一个终态，否则 cli/a2a 会永久挂起。
+func TestResidualDropNotifiesSyncCaller(t *testing.T) {
+	root, main := newRootWithoutSchedulerLoop(t)
+	defer main.Close()
+
+	info, err := root.SpawnResident(ResidentOptions{
+		ID: "res-drop", TempPath: root.residentTempPath("res-drop"),
+	})
+	if err != nil {
+		t.Fatalf("创建驻留子失败: %v", err)
+	}
+	root.residentMu.Lock()
+	child := root.residents[info.ID].agent
+	root.residentMu.Unlock()
+
+	respCh := make(chan *agentIO.OutputEvent, 1)
+	child.sched.enqueue(newInputTask(&agentIO.InputEvent{
+		RequestID: "d1", Source: "cli", OutputChannel: "cli",
+		Payload: map[string]interface{}{"content": "x"}, ResponseCh: respCh,
+	}))
+
+	n, _, err := root.ApplyResidual(info.ID, ResidualDrop)
+	if err != nil {
+		t.Fatalf("ApplyResidual(drop): %v", err)
+	}
+	if n != 1 {
+		t.Fatalf("应处置 1 条，实际 %d", n)
+	}
+	select {
+	case out := <-respCh:
+		if out == nil || !out.Done {
+			t.Error("drop 应给同步调用方一个终态")
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("★ drop 未通知同步调用方：cli/a2a 会永久挂起")
+	}
+	// drop 后父队列不应多出东西
+	if len(root.sched.queue) != 0 {
+		t.Errorf("drop 不应把任务转回父队列，实际 %d", len(root.sched.queue))
+	}
+}
+
+// 无残余任务时应明确说"无"，而不是让父以为丢了什么。
+func TestResidualEmptyIsReported(t *testing.T) {
+	root, main := newRootWithoutSchedulerLoop(t)
+	defer main.Close()
+	info, err := root.SpawnResident(ResidentOptions{
+		ID: "res-empty", TempPath: root.residentTempPath("res-empty"),
+	})
+	if err != nil {
+		t.Fatalf("创建驻留子失败: %v", err)
+	}
+	n, msg, err := root.ApplyResidual(info.ID, ResidualKeep)
+	if err != nil {
+		t.Fatalf("ApplyResidual: %v", err)
+	}
+	if n != 0 || msg != "无残余任务" {
+		t.Errorf("应报告无残余任务，实际 n=%d msg=%q", n, msg)
 	}
 }

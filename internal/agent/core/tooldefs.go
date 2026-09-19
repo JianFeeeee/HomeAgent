@@ -508,7 +508,9 @@ func (a *Agent) buildToolDefs() []interface{} {
 		tools = append(tools, toolDef("resident_agents", "管理驻留子 agent（长期派驻的下属）：list 列出 / create 创建（划入 inputch + "+
 			"授权输出通道 + 注入任务提示词）/ send 发送消息（对子而言是 L4 中断，取消其当前状态并插入新消息）"+
 			"/ inspect 查看其 inputch 处理表（不打断它）/ compress 压缩其上下文（保留语义，子继续存在）"+
-			"/ reclaim 回收（父选哪些纳入主记忆，然后取消该子）/ destroy 立刻销毁并移除。", map[string]interface{}{
+			"/ reclaim 回收（父选哪些纳入主记忆，然后取消该子）/ destroy 立刻销毁并移除。"+
+			"reclaim/destroy 时它手头**尚未处理的消息**（残余任务）由你用 residual 决定："+
+			"keep=转回你自己的队列（默认）/ drop=明确丢弃，两者都会逐条记日志。", map[string]interface{}{
 			"action": map[string]interface{}{
 				"type": "string",
 				"enum": []string{"list", "create", "send", "inspect", "compress", "reclaim", "destroy"},
@@ -520,6 +522,13 @@ func (a *Agent) buildToolDefs() []interface{} {
 			"capacity":        map[string]interface{}{"type": "number", "description": "create：划入 inputch 的队列容量"},
 			"temp_path":       map[string]interface{}{"type": "string", "description": "create：temp 图记忆路径（留空则用 data_dir/residents/<id>/graph.db）"},
 			"text":            map[string]interface{}{"type": "string", "description": "send：要发给子 agent 的消息"},
+			"residual": map[string]interface{}{
+				"type": "string",
+				"description": "reclaim/destroy：该子手头未处理消息的处置。" +
+					"keep=转回主 agent 队列（默认，宁可多做一件不可默默丢一条）/ drop=丢弃（已确认不要）。" +
+					"无论哪种都会逐条记日志；异步通道（如 qq）被丢时用户收不到任何回复，请慎重选 drop。",
+				"enum": []string{"keep", "drop"},
+			},
 		}, "action"))
 	}
 

@@ -77,12 +77,16 @@ func (o OffloadOptions) normalized() OffloadOptions {
 //
 // 它必须**自己说清是系统做的**：用户看到队列里出现一条没人发过的消息时，
 // 唯一能解释这件事的就是这句话本身。
+//
+// 同时要说清"不必重复处理"：那些消息已由子 agent 回复（或已回复"忙碌中"），
+// 主 agent 再处理一遍会让用户收到重复回复。
 func offloadNotice(count int, residentID string) string {
 	return fmt.Sprintf(
-		"[系统] %d 条积压任务已转投给驻留子 agent %s 处理（主 agent 正忙于长任务，"+
-			"内核为它们拉起了独立 agent 并行执行）。它们的回复会由 %s 直接发到对应通道；"+
-			"本提示仅用于说明「那几条消息不会再由你处理」，无需为它们采取任何行动。",
-		count, residentID, residentID)
+		"[系统] %d 条积压消息已在主 agent 忙期间交由临时助手 %s 先行分诊"+
+			"（简单的已直接处理并回复，需要你的那些已告知用户「忙碌中，请稍候」）。"+
+			"它们**不需要你再处理**了；若其中有需要你后续跟进的，请查看上述通道的会话记录。"+
+			"本提示仅用于说明情况，无需回复。",
+		count, residentID)
 }
 
 // offloadCandidate 是一条可被转投的排队任务。
@@ -283,18 +287,55 @@ func (a *Agent) ensureOffloadResident(opts OffloadOptions) (string, error) {
 	info, err := a.SpawnResident(ResidentOptions{
 		ID: id,
 		// 不配 inputch：它是内核的**干活** agent，不接收任何插件的用户输入
-		// （用户要求"不配输入通道"）。它只由父经 sub/<id> 投喂任务。
+		// （用户要求"不配输入通道"）。它只由父经转投拿到任务。
 		InputChs: nil,
 		// 全部输出通道：它要能把结果发回 qq/webui 等正确通道
 		// （用户要求"持有全部输出通道"）。nil = 完整授权。
 		AllowedOutputs: nil,
 		TempPath:       a.residentTempPath(id),
 		OffloadOwned:   true,
+		TaskPrompt:     offloadTaskPrompt(),
 	})
 	if err != nil {
 		return "", err
 	}
 	return info.ID, nil
+}
+
+// offloadTaskPrompt 是转投专用驻留子的**分诊职责**说明。
+//
+// 为什么必须给：不给的话子完全不知道自己为什么存在（只知道自己是"小宅"），
+// 拿到一条转投消息时不知道它是"用户正在等回复的请求"，
+// 也不知道自己只有两条路可走（直接办 / 报忙碌）。
+//
+// 用户的定位（2026-09-19 明确）：这不是"内核替父决定"，而是**及时反馈** ——
+// 主 agent 忙时不该让用户干等（实测有 13 分钟的现场）。
+// 子的职责是**分诊**（triage）：
+//   - 简单、不需主 agent 介入的 → 直接办完并回复；
+//   - 需要主 agent 介入的 → 立刻回「忙碌中，请稍候」，**不要勉强做**。
+func offloadTaskPrompt() string {
+	return `你是主 agent 的临时助手，负责在主 agent 忙不过来时**分诊**它的积压消息。
+
+背景：主 agent 正在执行一个长任务，短时间无法处理新消息。你被临时拉起，
+专门承接这些积压的请求，**避免用户干等**（此前用户可能要等十几分钟）。
+
+对每一条消息，你只有两条路：
+
+1. 【直接办】如果这件事简单、明确、不需要主 agent 的全局上下文或长期规划
+   （例如：查个信息、跑个小命令、读个文件、简单问答）——
+   **直接做完，并把结果发回原通道**。
+
+2. 【报忙碌】如果这件事需要主 agent 介入（需要它的长期记忆、正在进行的任务上下文、
+   需要它做多步决策，或你无法确定怎么做）——
+   **不要勉强尝试**。立刻回复用户：主 agent 当前忙碌中，请稍候。
+
+重要约束：
+- **必须把回复发到用户原本的通道**。面向 qq、wechat 等异步通道时，
+  纯文本返回会被丢弃 —— 必须显式调用 output_send__{通道名}，否则用户收不到，
+  而你会以为已经回过了。
+- 不要向用户暴露"我是被临时拉起的助手"这类内部细节，用主 agent 的口吻回复。
+- 拿不准属于哪一类时，选【报忙碌】。宁可让用户稍后得到准确答复，
+  也不要给出错误的直接回答。`
 }
 
 // residentTempPath 计算某个驻留子的 temp 图记忆路径（与既有约定一致）。

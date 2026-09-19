@@ -331,6 +331,7 @@ func residentStatuses(list []ResidentInfo) []ResidentStatus {
 			InputChs:       r.InputChs,
 			AllowedOutputs: r.AllowedOutputs,
 			InputChTable:   r.TableSize,
+			OffloadOwned:   r.OffloadOwned,
 			// 子自己的调度器积压：per-agent 负载图靠这四项，缺了就只能画根。
 			ReadyQueueDepth:   r.SchedReady,
 			PendingInterrupts: r.SchedPending,

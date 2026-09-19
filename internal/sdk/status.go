@@ -122,6 +122,13 @@ type ResidentStatus struct {
 	InputChTable   int      `json:"input_ch_table"`
 	CreatedAt      string   `json:"created_at,omitempty"`
 
+	// OffloadOwned 标记这是**内核为承接积压而拉起**的临时助手（见 core/offload.go）。
+	//
+	// 为什么要暴露给状态面/工具面：父的模型需要分清"我建的子"与
+	// "内核临时拉的分诊助手" —— 前者该按需回收，后者在空闲、无积压时
+	// 可以安全回收，而**正忙时不该回收**（会让用户的消息再次无声丢失）。
+	OffloadOwned bool `json:"offload_owned,omitempty"`
+
 	// 以下四项是该驻留子**自己的**调度器积压摘要，用于 per-agent 负载环形图。
 	//
 	// 根 agent 的积压看 KernelStatus.Scheduler；每个驻留子是独立 agent、
