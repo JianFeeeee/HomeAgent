@@ -1,0 +1,28 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 400 400" width="400" height="400">
+  <rect width="400" height="400" fill="#F8FAFC"/>
+
+  <g transform="translate(200,200)">
+    <circle cx="0" cy="0" r="105" fill="none" stroke="#E2E8F0" stroke-width="2.5" stroke-dasharray="8,6"/>
+    <rect x="-130" y="-170" width="36" height="340" rx="8" fill="#3B82F6"/>
+    <rect x="94" y="-170" width="36" height="140" rx="8" fill="#CBD5E1"/>
+    <rect x="94" y="70" width="36" height="100" rx="8" fill="#CBD5E1"/>
+
+    <rect x="-94" y="-18" width="188" height="36" rx="8" fill="#38BDF8"/>
+
+    <polygon points="0,-28 24.2,14 -24.2,14" fill="#F59E0B" stroke="#F59E0B" stroke-width="8" stroke-linejoin="round"/>
+
+    <circle cx="74" cy="-74" r="14" fill="#DBEAFE" stroke="#3B82F6" stroke-width="2.5"/>
+    <line x1="28" y1="-28" x2="63" y2="-63" stroke="#3B82F6" stroke-width="3" stroke-dasharray="6,4" opacity="0.6"/>
+
+    <circle cx="-74" cy="-74" r="14" fill="#EDE9FE" stroke="#8B5CF6" stroke-width="2.5"/>
+    <line x1="-28" y1="-28" x2="-63" y2="-63" stroke="#8B5CF6" stroke-width="3" stroke-dasharray="6,4" opacity="0.6"/>
+
+    <circle cx="74" cy="74" r="14" fill="#CFFAFE" stroke="#06B6D4" stroke-width="2.5"/>
+    <line x1="28" y1="28" x2="63" y2="63" stroke="#06B6D4" stroke-width="3" stroke-dasharray="6,4" opacity="0.6"/>
+
+    <circle cx="-74" cy="74" r="14" fill="#FEF3C7" stroke="#F59E0B" stroke-width="2.5"/>
+    <line x1="-28" y1="28" x2="-63" y2="63" stroke="#F59E0B" stroke-width="3" stroke-dasharray="6,4" opacity="0.6"/>
+
+    <circle cx="0" cy="0" r="42" fill="none" stroke="#F59E0B" stroke-width="4"/>
+  </g>
+</svg>
