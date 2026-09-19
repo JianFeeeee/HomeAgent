@@ -48,6 +48,12 @@ type ResidentOptions struct {
 	Capacity int
 	// TempPath 是它 temp 图记忆的存储路径（必填；与子同生共死）。
 	TempPath string
+	// OffloadOwned 标记这是**内核为转投而拉起**的驻留子（见 offload.go）。
+	//
+	// 为什么要区分：自动转投会复用、也会按上限限制自己拉起的子，
+	// 但**绝不能**把人（父的模型）建的子算进去或拿去复用 ——
+	// 那会把人工安排的工作负载搬到一个本来在做别的事的 agent 上。
+	OffloadOwned bool
 }
 
 // ResidentInfo 是父对某个驻留子的可查询状态（登记表条目 + 状态面摘要）。
@@ -83,7 +89,9 @@ type residentChild struct {
 	dir       string
 	inputChs  []string
 	allowed   []string
-	createdAt time.Time
+	createdAt    time.Time
+	// offloadOwned 标记这是内核为转投拉起的子（见 offload.go）。
+	offloadOwned bool
 
 	mu    sync.Mutex
 	state string // running | contextfull | stopped
@@ -175,6 +183,7 @@ func (a *Agent) SpawnResident(opts ResidentOptions) (ResidentInfo, error) {
 		inputChs:  append([]string(nil), opts.InputChs...),
 		allowed:   append([]string(nil), opts.AllowedOutputs...),
 		createdAt: time.Now(), state: "running",
+		offloadOwned: opts.OffloadOwned,
 	}
 
 	// ④ 子 → 父的主动消息（**L3 中断**，带子标识）：投进父的 inputch。

@@ -734,6 +734,12 @@ func (r *ConfigRegistry) seedDBValues(dataDir string) {
 
 	set("core.agent.max_tool_turns", "10")
 	set("core.agent.max_context_size", "30")
+	// 积压转投默认**关闭**（false）：它让内核替父做决策（设计 §7 的刻意例外），
+	// 所以必须由部署方显式打开，而不是默默改变系统行为。
+	set("core.agent.offload_enabled", "false")
+	set("core.agent.offload_busy_after", "5m")
+	set("core.agent.offload_min_pending", "3")
+	set("core.agent.offload_max_residents", "2")
 	set("core.agent.distill_interval", "30m")
 	set("core.agent.archive_interval", "60m")
 	set("core.agent.review_interval", "120m")
@@ -836,6 +842,10 @@ func (r *ConfigRegistry) seedCoreDefs(dataDir string) {
 	reg(ConfigDef{Key: "core.log.path", Default: filepath.Join(dataDir, "log"), Type: "string", DisplayName: "日志目录", Description: "日志文件输出目录", Category: "paths"})
 
 	reg(ConfigDef{Key: "core.agent.max_tool_turns", Default: "10", Type: "int", DisplayName: "最大工具轮次", Description: "单次请求允许的最大工具调用轮数", Category: "agent"})
+	reg(ConfigDef{Key: "core.agent.offload_enabled", Default: "false", Type: "bool", DisplayName: "积压任务自动转投", Description: "主 agent 长时间忙时，把积压任务自动转投给内核拉起的驻留子（需重启生效）", Category: "agent"})
+	reg(ConfigDef{Key: "core.agent.offload_busy_after", Default: "5m", Type: "string", DisplayName: "转投触发忙时长", Description: "运行任务持续超过该时长才考虑转投（如 5m）", Category: "agent"})
+	reg(ConfigDef{Key: "core.agent.offload_min_pending", Default: "3", Type: "int", DisplayName: "转投最少积压条数", Description: "积压少于该条数时不值得拉起驻留子", Category: "agent"})
+	reg(ConfigDef{Key: "core.agent.offload_max_residents", Default: "2", Type: "int", DisplayName: "转投驻留子上限", Description: "自动转投最多拉起几个驻留子（人工创建的不计）", Category: "agent"})
 	reg(ConfigDef{Key: "core.agent.max_context_size", Default: "30", Type: "int", DisplayName: "最大上下文", Description: "上下文窗口中保留的最大消息条数", Category: "agent"})
 	reg(ConfigDef{Key: "core.agent.distill_interval", Default: "30m", Type: "duration", DisplayName: "蒸馏间隔", Description: "记忆蒸馏的执行间隔", Category: "agent"})
 	reg(ConfigDef{Key: "core.agent.archive_interval", Default: "60m", Type: "duration", DisplayName: "冷文档归档间隔", Description: "冷文档归档（L2→L3）的执行间隔", Category: "agent"})
