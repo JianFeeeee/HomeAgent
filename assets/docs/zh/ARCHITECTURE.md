@@ -444,7 +444,64 @@ type Plugin interface {
 - Relation 扩展：Confidence
 
 
-## 中断机制
+## 输入调度器与中断机制
+
+输入不直接进 LLM —— 它们先进**输入调度器**（`internal/agent/core/scheduler.go`）。
+设计全文见 [`docs/zh/input-scheduler-design.md`](../../../docs/zh/input-scheduler-design.md)。
+
+### 两类任务
+
+| 类别 | 级别 | 语义 |
+|------|------|------|
+| `TaskQueued` 排队输入 | 无级别（恒 0） | 待办工作。任何中断（≥ L1）都能抢它 |
+| `TaskInterrupt` 中断 | L1~L4 | "这件事有多不能等"，由来源在 `InjectOptions.Priority` 声明 |
+
+### 四级中断
+
+| 级别 | 含义 | 典型来源 |
+|------|------|----------|
+| L1 背景 | 完全可等 | QQ/微信消息、批量通知 |
+| L2 消息 | 一般提醒 | 插件希望尽快看到但不紧急的提示 |
+| L3 交互 | 需及时处理 | 定时器到达、终端输出、子 agent 汇报 |
+| L4 关键 | **内核独占** | panic、内核事件、内核级插件的终止按钮 |
+
+未声明级别时取 **L1**（`DefaultLevel`）——「显式才是特权」，新插件不会默认拿到抢占权。
+外部插件声明 L4 会被**夹到 L3**（`clampPluginLevel`）。
+
+### 抢占与挂起
+
+- **同级不能抢占同级**（`canPreempt` 要求严格大于）——这是日常"消息排队等前面跑完"的成因。
+- 被抢占的任务压入**中断栈**（LIFO），用 `suspendStack` 保存现场，稍后恢复；
+  栈内不做优先级重排（"后被打断的先恢复"才是栈语义）。
+- **饥饿防护**：被抢占次数会提升有效级别（`effectiveLevel = Level + min(PreemptCount, 2)`，
+  封顶 L4），确保低级别流不会被困。
+- **抢占冷却**：刚被抢占过的任务在 `preemptCooldown`（2s）内不再被抢，
+  避免高优先级流把同一个任务反复打断到永不完结。
+- 中断栈帧数有**结构上界**（链条 = 排队 ← L1 ← L2 ← L3 ← L4，最多挂起 4 帧）。
+
+### 停止（用户按停止按钮 / `/stop`）
+
+停止 ≠ 空中断。它做两件事：① 立即结束当前 LLM 推理；② 对**停止那一刻已排队**
+的 x 条消息依次在 pre-action 阶段短路（`cancelBudget` 快照配额），而不是把它们
+当新输入再跑一遍。停止之后**新到**的输入不受影响。
+
+`PendingInputs()` 必须把"还停在 `io.inputCh`、没被 `pumpInbox` 搬进队列"的那一段
+算进来 —— 停止时调度器多半正忙于当前任务，只数 `sched.queue` 会得到 0。
+
+### 驻留式子 agent 与及时反馈
+
+设计见 [`docs/zh/resident-subagent-design.md`](../../../docs/zh/resident-subagent-design.md)。
+
+- **驻留子**是轻量内核的独立 agent：自己的调度器、自己的 temp 图记忆、共享的通道登记表。
+- 父对子的控制面：`resident_agents`（list / create / send / inspect / compress / reclaim / destroy）。
+- **积压及时反馈**：主 agent 长时间忙时（默认 > 5m，可配），内核把排队输入交给
+  一个临时**分诊助手**（`offload_*` 配置）：简单的直接处理并回复，需要主 agent 的
+  立刻回「忙碌中，请稍候」。这样用户不会干等十几分钟。
+- 分诊助手**不配 inputch**（不接收插件用户输入）、**持有全部输出通道**（结果要能发回原通道）。
+- 回收/销毁时它手头的**残余任务由父显式决定**：`residual=keep`（转回父队列，默认）
+  或 `drop`（明确丢弃，逐条记日志）。
+
+### 旧版三路径（仍存在，但已是调度器之下的一层）
 
 ```
 interceptLoop (goroutine)
@@ -454,15 +511,26 @@ interceptLoop (goroutine)
   └── (c) InjectInput() → 空闲时触发新处理
 ```
 
-三种投递路径：
+代码：`internal/agent/core/scheduler.go`（调度器）、`eventloop.go`（拦截循环）。
 
-| 路径 | 效果 | 时机 |
-|------|------|------|
-| cancelLLM | 取消当前 HTTP 请求 | 收到 context.Canceled |
-| interceptCh | process() 中插入 `[打断消息]` | 每个 LLM call 前 |
-| InjectInput | eventLoop 空闲时触发新处理 | 无进行中请求 |
+## 上下文预算
 
-代码：`internal/agent/core/eventloop.go` — `interceptLoop` / `drainInterrupts`
+`internal/agent/core/tokenbudget.go` — `ComputeTokenBudget`：
+
+```
+maxCtx        = provider.MaxContextTokens()      // 声明窗口（per-source context_window 优先）
+targetUsage   = min(maxCtx × 0.8, 600000)        // 工作面：封顶 600K
+  ├── 记忆召回预算  = (targetUsage - 固定开销) / 3
+  └── 上下文事件预算 = 其余 2/3
+```
+
+★ **窗口 ≠ 工作面**：源的真实窗口可能到 1M，但接近满窗口时注意力涣散、
+成本与延迟线性上升，因此 `maxTargetTokens=600000` 把工作面单独封顶。
+若模型名（如 `AUTO`）推断不出窗口，`ModelContextWindow` 会**打日志提醒**并回退保守值，
+部署方应用 `core.llm.sources.<name>.context_window` 显式声明。
+
+**预算都是上限而非填充目标**：记忆按相关度召回（没相关就停），时间线按预算从新到旧取。
+实测：预算 400K 时实际注入仍只有几百字符。
 
 
 ## 配置系统
