@@ -662,6 +662,9 @@ func (rc *residentChild) info() ResidentInfo {
 		// 注意它**不等于** len(table)：处理表记的是"当前上下文窗口内"的轮次，
 		// 压缩会清空（§8.3），所以窗口内的条数会被重置，而轮次总数不会。
 		Rounds: rc.agent.roundsExecuted(),
+		// OffloadOwned：让父分清"我建的子"与"内核临时拉的分诊助手"。
+		// 父据此决定回收策略（临时的可以空闲时回收，正式的按需保留）。
+		OffloadOwned: rc.offloadOwned,
 	}
 	if len(table) > 0 {
 		info.Table = table
