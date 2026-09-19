@@ -41,7 +41,7 @@ func tryLoadProc(dir, name string, config map[string]interface{}) (sdk.Plugin, e
 // 子进程插件加载（plugin.bin）——外部插件多进程化的加载入口。
 //
 // 设计依据：docs/zh/架构迁移评估.md §3（stdio JSON-RPC 控制面 + shm 数据面 + eventfd 通知面）
-// 实施计划：docs/zh/plugin-migration-plan.md Part 2/3
+// 实施记录见 docs/zh/架构迁移评估.md（子进程化论证与实验数据）
 
 // validateProcBinary 校验 plugin.bin 是否存在且可执行。
 // 返回 ("", nil) 表示该目录不是 proc 插件。

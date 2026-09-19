@@ -1,5 +1,11 @@
 # HomeAgent 生产问题修复计划
 
+> **文档定位（2026-09-19 核）**：本文是**历史工单 + 仍活跃路线图**的混合档。
+> 开头 §0.1/§0.2 的两个「紧急」项与 §1~§11 的历史条目**均已解决**（见各节勾选），
+> 下方 §13 是**仍活跃**的推进路线图。想知道当前架构请读
+> `assets/docs/zh/ARCHITECTURE.md`；想知道当前调度/驻留子设计请读
+> `docs/zh/input-scheduler-design.md` 与 `docs/zh/resident-subagent-design.md`。
+
 ## 设计意图备忘（核心架构原则）
 
 本框架的两大核心设计意图，贯穿所有插件/记忆/工具设计，**所有改动必须符合**：
@@ -14,9 +20,13 @@
 
 ---
 
-## 0.1 紧急：healthcheck 健康检查污染真实存储 ⚠️ 正在持续污染
+## 0.1 ~~紧急~~ 已解决：healthcheck 健康检查污染真实存储
 
-**现象**（2026-08-11 22:02 起，每 30 分钟一次）：日志反复出现
+> **状态：已修复（2026-09-19 实测确认）**。本文保留为定位过程记录。
+> 验证方式：`ls /home/newqqagent/knowledge/ | grep -c _hc_` = 0；
+> `memory/graph.db` 内 `_hc_` 表/行 = 0（用 sqlite3 查 sqlite_master）。
+
+**当时的现象**（2026-08-11 22:02 起，每 30 分钟一次）：日志反复出现
 `[knowledge] added: _hc_knowledge_test_<ts>`，且知识库出现 `gotest`、`luatest`、`_hc_knowledge_test_*` 等测试残留。
 
 **根因**：`internal/plugins/healthcheck/plugin.go` 的三个"写入通道"自检**全部在真实生产存储上写入再删除**：
@@ -41,7 +51,7 @@
 
 ---
 
-## 0.2 紧急：QQ 消息被无视（agentcli 幽灵终端自喂送风暴）⚠️ 优先处理
+## 0.2 ~~紧急~~ 已解决：QQ 消息被无视（agentcli 幽灵终端自喂送风暴）
 
 **现象**（2026-08-11 20:4x）：用户发 QQ 私聊消息，agent 不回应。日志显示 agent 被 `agentcli` 终端 echo 洪水完全阻塞。
 
@@ -923,7 +933,8 @@ context 累积导致的内存增长。
 > 三项合入门禁**已全部通过**：`make test` 零失败、`go vet ./...` 无告警、
 > `git diff main -- third_party/homeagent-sdk/sdk/` 为空（接口冻结不变量）。
 >
-> 详细执行记录见 `docs/zh/plugin-migration-plan.md`（Part 0~6 全部标记完成）。
+> 迁移的执行记录（Part 0~6 过程稿）已随迁移完成而删除；论证与实验数据仍见
+> `docs/zh/架构迁移评估.md`。
 
 ### 12.1 ✅ 已完成：合并到 main + 发布分支（2026-09-03 ~ 09-06）
 
@@ -956,8 +967,7 @@ SDK 仓 `v1.0.0` / `v1.1.0`。main 的版本路牌现为 `1.2.0`（尚无 tag）
 
 ### 12.2 验收清单里两项**未达成**的目标
 
-这两项在 `docs/zh/plugin-migration-plan.md` 的最终验收清单里如实标了 ⚠️，
-不是遗漏而是明确的未兑现承诺。
+这两项在迁移过程稿的最终验收清单里如实标了 ⚠️，不是遗漏而是明确的未兑现承诺。
 
 #### 12.2.1 `SetToolBlocks` 仍是未实现（承诺未兑现）
 

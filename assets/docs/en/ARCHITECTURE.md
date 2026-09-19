@@ -455,7 +455,74 @@ Extended fields:
 - Relation extension: Confidence
 
 
-## Interrupt Mechanism
+## Input Scheduler & Interrupt Mechanism
+
+Inputs do not go straight to the LLM — they first enter the **input scheduler**
+(`internal/agent/core/scheduler.go`). Full design:
+[`docs/zh/input-scheduler-design.md`](../../../docs/zh/input-scheduler-design.md).
+
+### Two task classes
+
+| Class | Level | Meaning |
+|-------|-------|---------|
+| `TaskQueued` | none (always 0) | Pending work. Any interrupt (≥ L1) preempts it |
+| `TaskInterrupt` | L1–L4 | "How urgent is this", declared by the source via `InjectOptions.Priority` |
+
+### Four interrupt levels
+
+| Level | Meaning | Typical source |
+|-------|---------|----------------|
+| L1 Background | Fully deferrable | QQ/WeChat messages, bulk notifications |
+| L2 Message | General notice | Plugin hints that should be seen soon but aren't urgent |
+| L3 Interactive | Needs timely handling | Timer expiry, terminal output, resident-agent reports |
+| L4 Critical | **Kernel-exclusive** | panic, kernel events, kernel-level plugin stop button |
+
+When no level is declared it defaults to **L1** — "explicit is a privilege", so a new
+plugin never gets preemption rights by accident. L4 declared by an external plugin is
+**clamped to L3** (`clampPluginLevel`).
+
+### Preemption and suspension
+
+- **Same level never preempts same level** (`canPreempt` requires strictly greater) —
+  this is why messages normally wait for the running task to finish.
+- A preempted task is pushed onto the **interrupt stack** (LIFO) with its frame saved,
+  and resumed later; the stack is never re-sorted by priority.
+- **Starvation guard**: preemption count raises the effective level
+  (`effectiveLevel = Level + min(PreemptCount, 2)`, capped at L4).
+- **Preemption cooldown**: a just-preempted task cannot be preempted again for
+  `preemptCooldown` (2s), so a high-priority stream cannot interrupt the same task forever.
+- The interrupt stack depth is structurally bounded (chain = queued ← L1 ← L2 ← L3 ← L4).
+
+### Stop (user presses stop / `/stop`)
+
+Stop is not an empty interrupt. It does two things: ① cancel the current LLM inference;
+② short-circuit the x messages **already queued at the moment of stop** during their
+pre-action phase (`cancelBudget` snapshot), instead of running them as new input.
+Inputs arriving **after** the stop are unaffected.
+
+`PendingInputs()` must include the segment still sitting in `io.inputCh` (not yet moved
+into the queue by `pumpInbox`) — during a stop the scheduler is usually busy running a
+task, and counting only `sched.queue` yields 0.
+
+### Resident sub-agents and timely feedback
+
+Design: [`docs/zh/resident-subagent-design.md`](../../../docs/zh/resident-subagent-design.md).
+
+- A **resident** is an independent lightweight-kernel agent: its own scheduler, its own
+  temp graph memory, sharing the channel registry.
+- Parent→child control plane: `resident_agents`
+  (list / create / send / inspect / compress / reclaim / destroy).
+- **Backlog feedback**: when the main agent is busy for a long time (default > 5m,
+  configurable), the kernel hands queued inputs to a temporary **triage assistant**
+  (`offload_*` config): simple ones are handled directly, ones needing the main agent
+  get an immediate "busy, please wait". Users no longer wait 10+ minutes in silence.
+- The triage assistant gets **no inputch** (it receives no plugin user input) and
+  **all output channels** (results must reach the original channel).
+- On reclaim/destroy, its **residual tasks are decided explicitly by the parent**:
+  `residual=keep` (returned to the parent queue, default) or `drop` (explicitly
+  discarded with a per-item log entry).
+
+### Legacy three-path view (still present, now a layer beneath the scheduler)
 
 ```
 interceptLoop (goroutine)
@@ -465,15 +532,28 @@ interceptLoop (goroutine)
   └── (c) InjectInput() → Trigger new processing when idle
 ```
 
-Three delivery paths:
+Code: `internal/agent/core/scheduler.go` (scheduler), `eventloop.go` (intercept loop).
 
-| Path | Effect | Timing |
-|------|--------|--------|
-| cancelLLM | Cancel current HTTP request | On context.Canceled |
-| interceptCh | Insert `[interrupt message]` in process() | Before each LLM call |
-| InjectInput | Trigger new processing when eventLoop is idle | No ongoing request |
+## Context Budget
 
-Code: `internal/agent/core/eventloop.go` — `interceptLoop` / `drainInterrupts`
+`internal/agent/core/tokenbudget.go` — `ComputeTokenBudget`:
+
+```
+maxCtx        = provider.MaxContextTokens()      // declared window (per-source context_window wins)
+targetUsage   = min(maxCtx × 0.8, 600000)        // working band, capped at 600K
+  ├── memory recall budget = (targetUsage - fixed) / 3
+  └── context events budget = remaining 2/3
+```
+
+★ **Window ≠ working band**: a source's real window may reach 1M, but near-full windows
+lose attention and cost/latency rise linearly, so `maxTargetTokens=600000` caps the
+working band separately. If the model name (e.g. `AUTO`) yields no window,
+`ModelContextWindow` **logs a warning** and falls back conservatively; operators should
+declare `core.llm.sources.<name>.context_window` explicitly.
+
+**Budgets are ceilings, not fill targets**: memory is recall-ranked (it stops when nothing
+is relevant) and the timeline is taken newest-first within budget. Measured: with a 400K
+budget, actual injection was still a few hundred characters.
 
 
 ## Configuration System

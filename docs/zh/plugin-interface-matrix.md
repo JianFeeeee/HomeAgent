@@ -420,7 +420,6 @@ data URL 本身已是 base64 文本，包进二进制传输省不了空间，还
 ## 八、关联文档
 
 - `docs/zh/架构迁移评估.md` — 完整论证（§3.2 method id 平移、§3.3 数据面、§3.4 SDK 封装、§3.5 回调型资源、§3.8 能力对齐）
-- `docs/zh/plugin-migration-plan.md` — Part 0~6 执行计划与完成实录（含 Part 6.5 生产切换、Part 6.6 压测）
 - `plan.md` §11 — 11.1~11.9 修复清单（唯一权威编号）
 - `third_party/homeagent-sdk/sdk/` — 合同面 A 的代码实现（全程零 diff）
 - `internal/plugin/proc/protocol.go` — 合同面 B 的代码实现（`Method*` 常量，取代已删的 bridge 模板）
