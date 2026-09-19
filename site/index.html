@@ -9,22 +9,30 @@
     <meta property="og:title" content="HomeAgent — 常驻型个人 Agent 框架" />
     <meta property="og:description" content="内核零 IO · 三层记忆 · 四级中断调度 · 驻留式子 agent" />
     <meta property="og:type" content="website" />
+    <script>
+      /* 在首次绘制前定主题，避免浅/深闪一下。
+         优先级：localStorage 手动选择 > 系统偏好。 */
+      (function () {
+        try {
+          var saved = localStorage.getItem("ha-theme");
+          var sys = window.matchMedia && window.matchMedia("(prefers-color-scheme: light)").matches
+            ? "light" : "dark";
+          document.documentElement.setAttribute("data-theme", saved || sys);
+        } catch (e) {
+          document.documentElement.setAttribute("data-theme", "dark");
+        }
+      })();
+    </script>
     <style>
-      /* ── 设计令牌：取自品牌指南的配色（三色对应三层记忆）── */
+      /* ── 设计令牌 ──
+         品牌色两主题共用（蓝/青/金 = 三层记忆）；语义色按主题覆盖。
+         默认跟随系统，可用导航栏按钮手动切换（存 localStorage）。 */
       :root {
         --brand-blue: #3b82f6;   /* Context 层 */
         --brand-cyan: #06b6d4;   /* Document 层 */
         --brand-gold: #f59e0b;   /* Graph / Kernel */
         --brand-violet: #8b5cf6;
         --brand-sky: #38bdf8;
-
-        --bg: #0b1020;
-        --bg-soft: rgba(17, 24, 44, 0.72);
-        --bg-card: rgba(17, 24, 44, 0.6);
-        --border: rgba(255, 255, 255, 0.09);
-        --text: #eef1f8;
-        --text-dim: #a7b0c4;
-        --text-muted: #77809a;
 
         --radius-sm: 6px;
         --radius-md: 10px;
@@ -36,17 +44,73 @@
         --font-mono: "SF Mono", "JetBrains Mono", Menlo, Consolas, monospace;
 
         --ease: cubic-bezier(0.22, 1, 0.36, 1);
+        --ease-back: cubic-bezier(0.34, 1.56, 0.64, 1);
         --dur: 300ms;
 
+        /* 深色（默认） */
+        --bg: #070b16;
+        --bg-soft: rgba(17, 24, 44, 0.72);
+        --bg-card: rgba(17, 24, 44, 0.58);
+        --bg-card-hi: rgba(23, 32, 58, 0.72);
+        --border: rgba(255, 255, 255, 0.09);
+        --border-hi: rgba(59, 130, 246, 0.38);
+        --text: #eef1f8;
+        --text-dim: #a7b0c4;
+        --text-muted: #77809a;
+        --code-bg: rgba(6, 10, 22, 0.85);
+        --code-fg: #cdd3f5;
+        --nav-bg: rgba(7, 11, 22, 0.72);
+        --aurora-a: rgba(59, 130, 246, 0.22);
+        --aurora-b: rgba(6, 182, 212, 0.18);
+        --aurora-c: rgba(139, 92, 246, 0.16);
+        --aurora-d: rgba(245, 158, 11, 0.10);
+        --particle: 148, 190, 255;
+        --grid-line: rgba(255, 255, 255, 0.035);
+        --spot: rgba(255, 255, 255, 0.07);
+        --hover: rgba(255, 255, 255, 0.06);
+        --sheen: rgba(255, 255, 255, 0.38);
         --shadow-md: 0 4px 16px rgba(0, 0, 0, 0.28);
         --shadow-lg: 0 12px 36px rgba(0, 0, 0, 0.38);
         --shadow-glow: 0 0 0 1px rgba(59, 130, 246, 0.22),
           0 8px 32px rgba(59, 130, 246, 0.18);
       }
 
+      /* 浅色：同一套语义变量，另一组取值 */
+      :root[data-theme="light"] {
+        --bg: #f4f7fc;
+        --bg-soft: rgba(255, 255, 255, 0.82);
+        --bg-card: rgba(255, 255, 255, 0.72);
+        --bg-card-hi: rgba(255, 255, 255, 0.9);
+        --border: rgba(15, 23, 42, 0.10);
+        --border-hi: rgba(37, 99, 235, 0.45);
+        --text: #0d1526;
+        --text-dim: #48546c;
+        --text-muted: #78849a;
+        --code-bg: #f1f5fb;
+        --code-fg: #1e293b;
+        --nav-bg: rgba(244, 247, 252, 0.78);
+        --aurora-a: rgba(59, 130, 246, 0.22);
+        --aurora-b: rgba(6, 182, 212, 0.18);
+        --aurora-c: rgba(139, 92, 246, 0.14);
+        --aurora-d: rgba(245, 158, 11, 0.14);
+        --particle: 37, 99, 235;
+        --grid-line: rgba(15, 23, 42, 0.045);
+        --spot: rgba(15, 23, 42, 0.05);
+        --hover: rgba(15, 23, 42, 0.05);
+        --sheen: rgba(15, 23, 42, 0.16);
+        --shadow-md: 0 4px 16px rgba(15, 23, 42, 0.08);
+        --shadow-lg: 0 12px 36px rgba(15, 23, 42, 0.12);
+        --shadow-glow: 0 0 0 1px rgba(37, 99, 235, 0.16),
+          0 8px 28px rgba(37, 99, 235, 0.14);
+      }
+
       * { box-sizing: border-box; }
 
       html { scroll-behavior: smooth; }
+
+      /* 防横向溢出：装饰层（极光/粒子）永远不该产生滚动条。
+         实测 canvas 曾因按 innerWidth 铺开而多出 15px，故这里兜一层。 */
+      body { overflow-x: clip; }
 
       body {
         margin: 0;
@@ -78,7 +142,7 @@
         top: 0;
         z-index: 50;
         backdrop-filter: blur(14px);
-        background: rgba(11, 16, 32, 0.78);
+        background: var(--nav-bg);
         border-bottom: 1px solid var(--border);
       }
       nav {
@@ -112,19 +176,14 @@
       }
 
       /* ── Hero ── */
-      .hero { padding: 5.5rem 0 4rem; }
-      .hero-grid {
-        display: grid;
-        grid-template-columns: 1.35fr 1fr;
-        gap: 3rem;
-        align-items: center;
-      }
+      .hero { padding: 6rem 0 4.5rem; }
+      .hero-grid { display: grid; grid-template-columns: 1fr; }
+      .hero-copy { max-width: 46rem; }
       @media (max-width: 860px) {
         .hero { padding: 3rem 0 2rem; }
-        .hero-grid { grid-template-columns: 1fr; gap: 2rem; text-align: center; }
+        .hero-grid { gap: 2rem; text-align: center; }
+        .hero-copy { margin: 0 auto; }
         .hero .cta { justify-content: center; }
-        .hero .mascot { order: -1; }
-        .hero .mascot img { width: 168px; }
       }
 
       .tagline {
@@ -184,38 +243,9 @@
         color: var(--text);
         border-color: var(--border);
       }
-      .btn-ghost:hover { background: rgba(255, 255, 255, 0.06); }
+      .btn-ghost:hover { background: var(--hover); }
 
-      .mascot { position: relative; }
-      .mascot img {
-        width: 100%;
-        max-width: 272px;
-        display: block;
-        margin: 0 auto;
-        border-radius: 22px;
-        /* 立绘自带蓝紫渐变底，正好在主题蓝系里 —— 当成有意的圆角卡面，
-           而不是硬抠背景（原图是白底 + 蓝边，抠图会连带毁掉白裙子与发丝高光）。 */
-        border: 1px solid rgba(139, 92, 246, 0.35);
-        box-shadow: 0 18px 48px rgba(6, 182, 212, 0.24),
-          0 0 0 1px rgba(255, 255, 255, 0.06) inset;
-        animation: float 6s ease-in-out infinite;
-      }
-      /* 底部渐隐：让方形图与深色页面自然衔接 */
-      .mascot::after {
-        content: "";
-        position: absolute;
-        left: 0; right: 0; bottom: -1px;
-        height: 34%;
-        border-radius: 0 0 22px 22px;
-        background: linear-gradient(to bottom, transparent, rgba(11, 16, 32, 0.55));
-        pointer-events: none;
-      }
-      @keyframes float {
-        0%, 100% { transform: translateY(0); }
-        50% { transform: translateY(-9px); }
-      }
       @media (prefers-reduced-motion: reduce) {
-        .mascot img { animation: none; }
         html { scroll-behavior: auto; }
       }
 
@@ -310,18 +340,23 @@
 
       /* ── 代码块 ── */
       .code {
-        background: rgba(6, 10, 22, 0.85);
+        background: var(--code-bg);
         border: 1px solid var(--border);
         border-radius: var(--radius-md);
         padding: 1rem 1.15rem;
         font-family: var(--font-mono);
         font-size: 0.86rem;
-        color: #cdd3f5;
+        color: var(--code-fg);
         overflow-x: auto;
         line-height: 1.7;
+        /* ❗必须显式声明：HTML 源码里的换行默认会被折叠成一个空格，
+           实测不写这行整段命令会挤成一行（“make build build-cli # 启动…
+           ./build/homed” 全连在一起）。 */
+        white-space: pre;
       }
       .code .c { color: var(--text-muted); }
-      .code .s { color: #c3e88d; }
+      .code .s { color: #7cb342; }
+      :root:not([data-theme="light"]) .code .s { color: #c3e88d; }
 
       /* ── 数字 ── */
       .stats { display: grid; grid-template-columns: repeat(4, 1fr); gap: 1rem; }
@@ -351,7 +386,7 @@
         font-size: 0.8rem;
         padding: 0.32rem 0.65rem;
         border-radius: var(--radius-pill);
-        background: rgba(255, 255, 255, 0.05);
+        background: var(--hover);
         border: 1px solid var(--border);
         color: var(--text-dim);
         transition: border-color var(--dur) var(--ease), color var(--dur) var(--ease);
@@ -446,9 +481,330 @@
       @media (prefers-reduced-motion: reduce) {
         .js-reveal { opacity: 1; transform: none; transition: none; }
       }
+
+      /* ═══════════════════════════════════════════════════
+         动效层。全部遵守 prefers-reduced-motion（见文件末脚本）。
+         原则：**内容默认可读**，动效只是增强，JS 挂了也不影响阅读。
+         ═══════════════════════════════════════════════════ */
+
+      /* ── 极光背景：四团光斑各自漂移 ── */
+      .aurora {
+        position: fixed;
+        inset: -20%;
+        z-index: -2;
+        pointer-events: none;
+        filter: blur(38px);
+        opacity: 0.9;
+      }
+      .aurora span {
+        position: absolute;
+        display: block;
+        border-radius: 50%;
+        will-change: transform;
+      }
+      .aurora .a1 {
+        width: 46vw; height: 46vw; left: 2%; top: -6%;
+        background: radial-gradient(circle at 35% 35%, var(--aurora-a), transparent 68%);
+        animation: drift1 26s ease-in-out infinite;
+      }
+      .aurora .a2 {
+        width: 40vw; height: 40vw; right: -4%; top: 4%;
+        background: radial-gradient(circle at 60% 40%, var(--aurora-b), transparent 68%);
+        animation: drift2 32s ease-in-out infinite;
+      }
+      .aurora .a3 {
+        width: 44vw; height: 44vw; left: 22%; bottom: -12%;
+        background: radial-gradient(circle at 50% 50%, var(--aurora-c), transparent 68%);
+        animation: drift3 38s ease-in-out infinite;
+      }
+      .aurora .a4 {
+        width: 30vw; height: 30vw; right: 14%; bottom: 6%;
+        background: radial-gradient(circle at 50% 50%, var(--aurora-d), transparent 68%);
+        animation: drift4 30s ease-in-out infinite;
+      }
+      @keyframes drift1 {
+        0%,100% { transform: translate3d(0,0,0) scale(1); }
+        33%     { transform: translate3d(6vw,4vh,0) scale(1.12); }
+        66%     { transform: translate3d(-3vw,7vh,0) scale(0.94); }
+      }
+      @keyframes drift2 {
+        0%,100% { transform: translate3d(0,0,0) scale(1); }
+        40%     { transform: translate3d(-7vw,5vh,0) scale(1.1); }
+        70%     { transform: translate3d(-2vw,-4vh,0) scale(0.92); }
+      }
+      @keyframes drift3 {
+        0%,100% { transform: translate3d(0,0,0) scale(1); }
+        50%     { transform: translate3d(5vw,-6vh,0) scale(1.15); }
+      }
+      @keyframes drift4 {
+        0%,100% { transform: translate3d(0,0,0) scale(1); }
+        45%     { transform: translate3d(-5vw,-3vh,0) scale(1.08); }
+      }
+
+      /* ── 细网格：给「工程感」打底 ── */
+      body::after {
+        content: "";
+        position: fixed;
+        inset: 0;
+        z-index: -1;
+        pointer-events: none;
+        background-image: linear-gradient(var(--grid-line) 1px, transparent 1px),
+          linear-gradient(90deg, var(--grid-line) 1px, transparent 1px);
+        background-size: 56px 56px;
+        mask-image: radial-gradient(ellipse 80% 60% at 50% 0%, #000 25%, transparent 78%);
+        -webkit-mask-image: radial-gradient(ellipse 80% 60% at 50% 0%, #000 25%, transparent 78%);
+      }
+
+      /* ── 粒子画布 ── */
+      #fx {
+        position: fixed;
+        inset: 0;
+        z-index: -1;
+        pointer-events: none;
+        opacity: 0.75;
+      }
+
+      /* ── 顶部滚动进度条（三色渐变） ── */
+      #progress {
+        position: fixed;
+        top: 0; left: 0;
+        height: 2px;
+        width: 0%;
+        z-index: 100;
+        background: linear-gradient(90deg, var(--brand-blue), var(--brand-cyan) 55%, var(--brand-gold));
+        box-shadow: 0 0 12px rgba(56, 189, 248, 0.55);
+        transition: width 90ms linear;
+      }
+
+      /* ── 主题切换按钮 ── */
+      .theme-btn {
+        display: inline-grid;
+        place-items: center;
+        width: 34px; height: 34px;
+        border-radius: var(--radius-pill);
+        border: 1px solid var(--border);
+        background: var(--bg-soft);
+        color: var(--text-dim);
+        cursor: pointer;
+        padding: 0;
+        transition: color var(--dur) var(--ease), border-color var(--dur) var(--ease),
+          transform var(--dur) var(--ease), background var(--dur) var(--ease);
+      }
+      .theme-btn:hover {
+        color: var(--text);
+        border-color: var(--border-hi);
+        transform: rotate(-18deg) scale(1.06);
+      }
+      .theme-btn svg { width: 16px; height: 16px; display: block; }
+      .theme-btn .i-moon { display: none; }
+      :root[data-theme="light"] .theme-btn .i-moon { display: block; }
+      :root[data-theme="light"] .theme-btn .i-sun { display: none; }
+
+      /* ── 标题与文字的入场：分块上浮 ── */
+      .js-fx .rise {
+        opacity: 0;
+        transform: translateY(22px);
+        transition: opacity 0.75s var(--ease), transform 0.75s var(--ease);
+        transition-delay: var(--d, 0ms);
+      }
+      .js-fx .rise.in { opacity: 1; transform: none; }
+      .js-fx .rise-zoom {
+        opacity: 0; transform: scale(0.93) translateY(14px);
+        transition: opacity 0.8s var(--ease), transform 0.8s var(--ease-back);
+        transition-delay: var(--d, 0ms);
+      }
+      .js-fx .rise-zoom.in { opacity: 1; transform: none; }
+
+      /* ── Hero 大标题：渐变流动 + 描边光 ── */
+      h1 .grad {
+        background: linear-gradient(110deg, var(--brand-blue), var(--brand-cyan) 32%,
+          var(--brand-violet) 58%, var(--brand-gold) 82%, var(--brand-cyan));
+        background-size: 280% 100%;
+        -webkit-background-clip: text;
+        background-clip: text;
+        color: transparent;
+        animation: gradFlow 9s ease infinite;
+      }
+      @keyframes gradFlow {
+        0%   { background-position: 0% 50%; }
+        50%  { background-position: 100% 50%; }
+        100% { background-position: 0% 50%; }
+      }
+      /* 光标扫过标题时的光泽 */
+      h1 {
+        position: relative;
+        text-shadow: 0 0 40px rgba(56, 189, 248, 0.10);
+      }
+
+      /* ── 按钮：光泽扫过 + 悬浮抬升 ── */
+      .btn { position: relative; overflow: hidden; }
+      .btn::after {
+        content: "";
+        position: absolute;
+        top: 0; left: -120%;
+        width: 60%; height: 100%;
+        background: linear-gradient(100deg, transparent, var(--sheen), transparent);
+        transform: skewX(-18deg);
+        transition: left 0.75s var(--ease);
+        pointer-events: none;
+      }
+      .btn:hover::after { left: 130%; }
+      .btn-primary {
+        background-size: 180% 100%;
+        animation: gradFlow 7s ease infinite;
+      }
+      .btn-primary:hover { box-shadow: 0 10px 30px rgba(6, 182, 212, 0.42); }
+
+      /* ── 卡片：跟随光标的聚光 + 3D 微倾 ── */
+      .card, .layer, .stat, .comp .row, details.faq {
+        position: relative;
+        transform-style: preserve-3d;
+      }
+      .card::before, .stat::before {
+        content: "";
+        position: absolute;
+        inset: 0;
+        border-radius: inherit;
+        background: radial-gradient(
+          260px circle at var(--mx, 50%) var(--my, 50%),
+          var(--spot), transparent 62%);
+        opacity: 0;
+        transition: opacity var(--dur) var(--ease);
+        pointer-events: none;
+      }
+      .card:hover::before, .stat:hover::before { opacity: 1; }
+      .card:hover, .stat:hover {
+        border-color: var(--border-hi);
+        box-shadow: var(--shadow-md);
+      }
+      /* 图标在悬浮时轻转 */
+      .card .icon { transition: transform 0.5s var(--ease-back); }
+      .card:hover .icon { transform: rotate(-8deg) scale(1.12); }
+
+      /* ── 三层记忆色条：入场时自上而下「灌注」 ── */
+      .layer .bar {
+        transform: scaleY(0);
+        transform-origin: top center;
+        transition: transform 0.9s var(--ease) 0.15s;
+        box-shadow: 0 0 18px currentColor;
+      }
+      .layer.in .bar { transform: scaleY(1); }
+      .layer.l-ctx .bar { color: var(--brand-blue); }
+      .layer.l-doc .bar { color: var(--brand-cyan); }
+      .layer.l-gph .bar { color: var(--brand-gold); }
+
+      /* ── 架构图的「数据流动」：一条光带缓缓下行 ── */
+      .flow { position: relative; overflow-y: hidden; }
+      .flow::after {
+        content: "";
+        position: absolute;
+        left: 0; right: 0; top: -30%;
+        height: 30%;
+        background: linear-gradient(
+          to bottom, transparent,
+          rgba(56, 189, 248, 0.10) 45%,
+          rgba(56, 189, 248, 0.16) 50%,
+          transparent);
+        animation: flowSweep 5.5s linear infinite;
+        pointer-events: none;
+      }
+      @keyframes flowSweep {
+        0%   { top: -30%; }
+        100% { top: 100%; }
+      }
+      /* 节点标签的脉冲 */
+      .flow .k-blue, .flow .k-cyan, .flow .k-gold, .flow .k-violet {
+        animation: nodePulse 4s ease-in-out infinite;
+      }
+      .flow .k-cyan   { animation-delay: 0.6s; }
+      .flow .k-gold   { animation-delay: 1.2s; }
+      .flow .k-violet { animation-delay: 1.8s; }
+      @keyframes nodePulse {
+        0%, 100% { filter: brightness(1); }
+        50%      { filter: brightness(1.45); }
+      }
+
+      /* ── 数字卡片：数值滚动到位 ── */
+      .stat .n { font-variant-numeric: tabular-nums; }
+
+      /* ── 插件徽章：错落浮现 ── */
+      .js-fx .badge {
+        opacity: 0;
+        transform: translateY(10px) scale(0.94);
+        transition: opacity 0.5s var(--ease), transform 0.5s var(--ease-back);
+      }
+      .js-fx .badges.in .badge { opacity: 1; transform: none; }
+
+      /* ── 分节标题：渐变下划线展开 ── */
+      section > .wrap > h2 { position: relative; }
+      section > .wrap > h2::after {
+        content: "";
+        display: block;
+        width: 62px;
+        height: 3px;
+        margin-top: 0.6rem;
+        border-radius: 3px;
+        background: linear-gradient(90deg, var(--brand-blue), var(--brand-cyan), var(--brand-gold));
+        transform: scaleX(0);
+        transform-origin: left center;
+        transition: transform 0.9s var(--ease) 0.2s;
+      }
+      section > .wrap > h2.in::after { transform: scaleX(1); }
+
+      /* ── FAQ 展开：内容淡入 ── */
+      details.faq[open] p { animation: fadeUp 0.45s var(--ease); }
+      @keyframes fadeUp {
+        from { opacity: 0; transform: translateY(-6px); }
+        to   { opacity: 1; transform: none; }
+      }
+
+      /* ── 导航链接：下划线滑入 ── */
+      nav a.link { position: relative; }
+      nav a.link::after {
+        content: "";
+        position: absolute;
+        left: 0; bottom: -2px;
+        width: 100%; height: 2px;
+        background: linear-gradient(90deg, var(--brand-blue), var(--brand-cyan));
+        transform: scaleX(0);
+        transform-origin: right center;
+        transition: transform var(--dur) var(--ease);
+      }
+      nav a.link:hover::after { transform: scaleX(1); transform-origin: left center; }
+
+      /* ── 浅色下的微调：光晕别太亮、网格别太淡 ── */
+      :root[data-theme="light"] .aurora { opacity: 0.62; }
+      :root[data-theme="light"] #fx { opacity: 0.5; }
+      :root[data-theme="light"] nav .en,
+      :root[data-theme="light"] nav a.link { color: var(--text-dim); }
+      /* 浅色下代码块的光条更淡 */
+      :root[data-theme="light"] .flow::after {
+        background: linear-gradient(to bottom, transparent,
+          rgba(37, 99, 235, 0.07) 45%, rgba(37, 99, 235, 0.12) 50%, transparent);
+      }
+
+      /* ── 统一降级：减少动态效果时全部静止 ── */
+      @media (prefers-reduced-motion: reduce) {
+        *, *::before, *::after {
+          animation-duration: 0.001ms !important;
+          animation-iteration-count: 1 !important;
+          transition-duration: 0.001ms !important;
+        }
+        .js-fx .rise, .js-fx .rise-zoom, .js-fx .badge { opacity: 1; transform: none; }
+        .layer .bar { transform: scaleY(1); }
+        section > .wrap > h2::after { transform: scaleX(1); }
+        #progress { display: none; }
+        #fx { display: none; }
+      }
     </style>
   </head>
   <body>
+    <div id="progress"></div>
+    <div class="aurora" aria-hidden="true">
+      <span class="a1"></span><span class="a2"></span>
+      <span class="a3"></span><span class="a4"></span>
+    </div>
+    <canvas id="fx" aria-hidden="true"></canvas>
     <header>
       <div class="wrap">
         <nav>
@@ -461,6 +817,18 @@
           <a class="link hide-sm" href="#architecture">架构</a>
           <a class="link hide-sm" href="#quickstart">上手</a>
           <a class="link" href="#faq">FAQ</a>
+          <button class="theme-btn" id="themeToggle" type="button"
+                  aria-label="切换深浅主题" title="切换深浅主题">
+            <svg class="i-sun" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+                 stroke-width="2" stroke-linecap="round">
+              <circle cx="12" cy="12" r="4.2"/>
+              <path d="M12 2.5v2.2M12 19.3v2.2M4.2 4.2l1.6 1.6M18.2 18.2l1.6 1.6M2.5 12h2.2M19.3 12h2.2M4.2 19.8l1.6-1.6M18.2 5.8l1.6-1.6"/>
+            </svg>
+            <svg class="i-moon" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+                 stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+              <path d="M20 14.5A8.5 8.5 0 1 1 9.5 4a6.8 6.8 0 0 0 10.5 10.5z"/>
+            </svg>
+          </button>
         </nav>
       </div>
     </header>
@@ -469,21 +837,18 @@
       <!-- ── Hero ── -->
       <section class="hero">
         <div class="wrap hero-grid">
-          <div>
-            <span class="tagline">常驻型个人 Agent 框架</span>
-            <h1>一个<span class="grad">不会忘记</span><br />也不会被一条长任务卡死的管家</h1>
-            <p class="lede">
+          <div class="hero-copy">
+            <span class="tagline rise" style="--d:0ms">常驻型个人 Agent 框架</span>
+            <h1 class="rise" style="--d:80ms">一个<span class="grad">不会忘记</span><br />也不会被一条长任务卡死的管家</h1>
+            <p class="lede rise" style="--d:180ms">
               HomeAgent 是内核 + 插件的双层 Agent 框架。内核只管
               <strong>LLM 编排、记忆与调度</strong>；所有外部能力（消息、文件、网络、设备）
               都是可独立安装、崩溃不牵连内核的插件。
             </p>
-            <div class="cta">
+            <div class="cta rise" style="--d:280ms">
               <a class="btn btn-primary" href="#quickstart">快速上手 →</a>
               <a class="btn btn-ghost" href="https://gitcode.com/JianFeeeee/HomeAgent">查看源码</a>
             </div>
-          </div>
-          <div class="mascot">
-            <img src="assets/mascot.webp" alt="看板娘 小宅" />
           </div>
         </div>
       </section>
@@ -491,14 +856,14 @@
       <!-- ── 特性 ── -->
       <section id="features">
         <div class="wrap">
-          <h2 class="reveal">四个不那么常见的设计决定</h2>
-          <p class="sub reveal">
+          <h2 class="reveal rise">四个不那么常见的设计决定</h2>
+          <p class="sub reveal rise" style="--d:90ms">
             大多数框架先写功能再补边界。HomeAgent 反过来：先把
             <strong>边界</strong>和<strong>调度</strong>定死，再往上加能力。
           </p>
 
           <div class="grid-2">
-            <div class="card reveal">
+            <div class="card reveal rise" style="--d:0ms">
               <div class="icon" style="background: rgba(59,130,246,.14); color: var(--brand-blue)">◇</div>
               <h3>内核零 IO</h3>
               <p>
@@ -508,7 +873,7 @@
               </p>
             </div>
 
-            <div class="card reveal">
+            <div class="card reveal rise" style="--d:90ms">
               <div class="icon" style="background: rgba(6,182,212,.14); color: var(--brand-cyan)">◈</div>
               <h3>插件是独立进程</h3>
               <p>
@@ -518,7 +883,7 @@
               </p>
             </div>
 
-            <div class="card reveal">
+            <div class="card reveal rise" style="--d:180ms">
               <div class="icon" style="background: rgba(245,158,11,.14); color: var(--brand-gold)">◉</div>
               <h3>输入是有级别的</h3>
               <p>
@@ -528,7 +893,7 @@
               </p>
             </div>
 
-            <div class="card reveal">
+            <div class="card reveal rise" style="--d:270ms">
               <div class="icon" style="background: rgba(139,92,246,.14); color: var(--brand-violet)">◆</div>
               <h3>忙时有人顶班</h3>
               <p>
@@ -544,8 +909,8 @@
       <!-- ── 三层记忆 ── -->
       <section id="memory">
         <div class="wrap">
-          <h2 class="reveal">三层记忆：从「刚才说了什么」到「三年前说过什么」</h2>
-          <p class="sub reveal">
+          <h2 class="reveal rise">三层记忆：从「刚才说了什么」到「三年前说过什么」</h2>
+          <p class="sub reveal rise" style="--d:90ms">
             不是一个向量库包打天下，而是三层各司其职、逐层衰减与整合。
             品牌的蓝 / 青 / 金三色，对应的就是这三层。
           </p>
@@ -586,21 +951,21 @@
           </div>
 
           <div class="grid-3" style="margin-top: 1.2rem">
-            <div class="card reveal">
+            <div class="card reveal rise" style="--d:360ms">
               <h3>媒体也是一等节点</h3>
               <p>
                 图片/音频不是附件，而是三层里的一类节点：内容寻址存储（相同字节只存一份）、
                 引用计数 GC（有引用绝不删）。
               </p>
             </div>
-            <div class="card reveal">
+            <div class="card reveal rise" style="--d:450ms">
               <h3>描述才是持久语义</h3>
               <p>
                 视觉模型生成的描述以 <span class="mono">[mime digest] 描述</span> 写进纯文本记忆并参与检索；
                 blob 只是可被淘汰的缓存。所以几个月后“那张三色图”仍能搜到。
               </p>
             </div>
-            <div class="card reveal">
+            <div class="card reveal rise" style="--d:540ms">
               <h3>统一多模态空间</h3>
               <p>
                 文本与图像落在同一向量空间（默认 Chinese-CLIP），
@@ -614,12 +979,12 @@
       <!-- ── 架构 ── -->
       <section id="architecture">
         <div class="wrap">
-          <h2 class="reveal">一条消息进来之后</h2>
-          <p class="sub reveal">
+          <h2 class="reveal rise">一条消息进来之后</h2>
+          <p class="sub reveal rise" style="--d:90ms">
             输入先过调度器，再进处理管道；管道有 7 个阶段钩子，插件可在此改写或短路。
           </p>
 
-          <div class="flow reveal">
+          <div class="flow reveal rise">
             <pre>
   <span class="k-dim">外部输入（QQ / WebUI / CLI / 邮件 / 设备 …）</span>
         │
@@ -640,7 +1005,7 @@
           </div>
 
           <h2 class="reveal" style="margin-top: 3rem">核心组件</h2>
-          <div class="comp reveal">
+          <div class="comp reveal rise">
             <div class="row"><code>homed</code><span>常驻内核进程：LLM 编排、记忆管理、输入调度、插件生命周期</span></div>
             <div class="row"><code>PluginSDK</code><span>四通道：注册工具 / 挂阶段钩子 / 订阅事件 / 声明输出通道</span></div>
             <div class="row"><code>inputch</code><span>最基本的输入路由单位，可划给某个 agent（含驻留子）</span></div>
@@ -661,13 +1026,13 @@
       <!-- ── 上手 ── -->
       <section id="quickstart">
         <div class="wrap">
-          <h2 class="reveal">跑起来</h2>
-          <p class="sub reveal">
+          <h2 class="reveal rise">跑起来</h2>
+          <p class="sub reveal rise" style="--d:90ms">
             依赖 Go 1.25+ 与 CGo（sqlite3）。内核需 Linux —— Windows 上
             <span class="mono">homed</span> 跑在 WSL2 里，只构建 <span class="mono">waiter.exe</span>。
           </p>
 
-          <div class="code reveal"><span class="c"># 构建守护进程 + CLI</span>
+          <div class="code reveal rise"><span class="c"># 构建守护进程 + CLI</span>
 make build build-cli
 
 <span class="c"># 启动内核（数据目录自定）</span>
@@ -677,12 +1042,12 @@ make build build-cli
 ./build/waiter
 echo <span class="s">"你好，记住我喜欢喝咖啡"</span> | ./build/waiter</div>
 
-          <p class="sub reveal" style="margin-top: 1.2rem">
+          <p class="sub reveal rise" style="--d:90ms; margin-top: 1.2rem">
             WebUI 与 API 密钥在 <span class="mono">http://localhost:8080</span> 配置，持久化在 SQLite。
           </p>
 
           <h2 class="reveal" style="margin-top: 3rem">开箱可用的插件</h2>
-          <p class="sub reveal">外部插件经 <span class="mono">hmapdev</span> 构建为独立二进制，可单独安装、卸载、热重载。</p>
+          <p class="sub reveal rise" style="--d:90ms">外部插件经 <span class="mono">hmapdev</span> 构建为独立二进制，可单独安装、卸载、热重载。</p>
           <div class="badges reveal">
             <span class="badge">qq</span>
             <span class="badge">wechat</span>
@@ -714,10 +1079,10 @@ echo <span class="s">"你好，记住我喜欢喝咖啡"</span> | ./build/waiter
       <!-- ── FAQ ── -->
       <section id="faq">
         <div class="wrap">
-          <h2 class="reveal">常见问题</h2>
-          <p class="sub reveal">这些是设计上最容易引起误解的地方。</p>
+          <h2 class="reveal rise">常见问题</h2>
+          <p class="sub reveal rise" style="--d:90ms">这些是设计上最容易引起误解的地方。</p>
 
-          <div class="reveal">
+          <div class="reveal rise">
             <details class="faq">
               <summary>「内核零 IO」是不是意味着内核很简单？</summary>
               <p>
@@ -827,35 +1192,231 @@ echo <span class="s">"你好，记住我喜欢喝咖啡"</span> | ./build/waiter
     </footer>
 
     <script>
-      // 滚入淡入（渐进增强）：内容**默认可见**，只有本脚本真的跑起来才接管动画。
-      // 这样 JS 报错/被禁用时页面依然完整可读。
+      /* ═══════════════════════════════════════════════════════════
+         动效引擎。设计原则（吃过一次亏，见 git 历史）：
+           · **内容默认可读** —— 不用 JS 也完整；只有本脚本真的跑起来
+             才给 <html> 加 .js-fx 接管初始隐藏，因此 JS 报错/被禁用
+             时页面不会变成一片空白（早期版本把 opacity:0 写在默认
+             样式里，结果 30 个元素里 26 个永久不可见）。
+           · 尊重 prefers-reduced-motion（此时不动、不加 .js-fx）。
+           · 所有 listener 走 rAF 节流；粒子数按视口面积自适应。
+         ═══════════════════════════════════════════════════════════ */
       (function () {
-        var els = document.querySelectorAll(".reveal");
-        var reduce = window.matchMedia && window.matchMedia("(prefers-reduced-motion: reduce)").matches;
-        if (!("IntersectionObserver" in window) || reduce) {
-          return; // 不动：保持默认可见
+        var root = document.documentElement;
+        var reduce = window.matchMedia &&
+          window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+
+        /* ── 主题切换 ── */
+        var toggle = document.getElementById("themeToggle");
+        function paint(isLight) {
+          root.setAttribute("data-theme", isLight ? "light" : "dark");
         }
-        // 先标记为“待动画”，再观察 —— 顺序不能反，否则首屏元素会闪一下
-        els.forEach(function (el) { el.classList.add("js-reveal"); });
-        var io = new IntersectionObserver(
-          function (entries) {
-            entries.forEach(function (e) {
-              if (e.isIntersecting) {
-                e.target.classList.add("in");
-                io.unobserve(e.target);
-              }
-            });
-          },
-          { threshold: 0.12, rootMargin: "0px 0px -8% 0px" }
-        );
-        els.forEach(function (el) { io.observe(el); });
-        // 保险：图片/字体迟到导致布局变化时，已在视口内的元素补上 .in
-        window.addEventListener("load", function () {
-          els.forEach(function (el) {
-            var r = el.getBoundingClientRect();
-            if (r.top < window.innerHeight && r.bottom > 0) { el.classList.add("in"); }
+        if (toggle) {
+          toggle.addEventListener("click", function () {
+            var isLight = root.getAttribute("data-theme") === "light";
+            paint(!isLight);
+            try { localStorage.setItem("ha-theme", !isLight ? "light" : "dark"); } catch (e) {}
           });
-        });
+        }
+        // 系统主题变化时跟随（用户没手动选过才跟）
+        try {
+          var mq = window.matchMedia("(prefers-color-scheme: light)");
+          if (mq.addEventListener) {
+            mq.addEventListener("change", function (e) {
+              if (!localStorage.getItem("ha-theme")) paint(e.matches);
+            });
+          }
+        } catch (e) {}
+
+        /* ── 滚动进度条 ── */
+        var bar = document.getElementById("progress");
+        var ticking = false;
+        function onScroll() {
+          if (ticking) return;
+          ticking = true;
+          requestAnimationFrame(function () {
+            if (bar) {
+              var h = document.documentElement.scrollHeight - window.innerHeight;
+              bar.style.width = (h > 0 ? (window.scrollY / h) * 100 : 0) + "%";
+            }
+            ticking = false;
+          });
+        }
+        window.addEventListener("scroll", onScroll, { passive: true });
+        onScroll();
+
+        /* ── 入场动画 ── */
+        if (!reduce) {
+          root.classList.add("js-fx");
+          var els = [].slice.call(document.querySelectorAll(
+            ".rise, .rise-zoom, .reveal, section > .wrap > h2, .badges"));
+
+          function reveal(el) {
+            el.classList.add("in");
+            if (el.classList.contains("badges")) {
+              var bs = el.querySelectorAll(".badge");
+              for (var i = 0; i < bs.length; i++) {
+                bs[i].style.transitionDelay = (i * 28) + "ms";
+              }
+            }
+          }
+
+          if ("IntersectionObserver" in window) {
+            var io = new IntersectionObserver(function (entries) {
+              entries.forEach(function (e) {
+                if (e.isIntersecting) { reveal(e.target); io.unobserve(e.target); }
+              });
+            }, { threshold: 0.1, rootMargin: "0px 0px -6% 0px" });
+            els.forEach(function (el) { io.observe(el); });
+          } else {
+            els.forEach(reveal);
+          }
+
+          // 保险：布局因图片/字体迟到而变化时，已在视口内的补上
+          window.addEventListener("load", function () {
+            els.forEach(function (el) {
+              var r = el.getBoundingClientRect();
+              if (r.top < window.innerHeight && r.bottom > 0) reveal(el);
+            });
+          });
+          // 兜底：3 秒后无论 observer 是否生效，强制全部可见
+          setTimeout(function () { els.forEach(reveal); }, 3000);
+        }
+
+        /* ── 数字滚动 ── */
+        var stats = [].slice.call(document.querySelectorAll(".stat .n"));
+        function runCount(el) {
+          var raw = el.textContent.trim();
+          var m = raw.match(/^([\d.]+)(.*)$/);
+          if (!m) return;
+          var target = parseFloat(m[1]), suffix = m[2], dur = 1100, t0 = null;
+          // 小数位按原值保持（如 34.6）
+          var dec = (m[1].split(".")[1] || "").length;
+          function step(ts) {
+            if (!t0) t0 = ts;
+            var p = Math.min((ts - t0) / dur, 1);
+            var eased = 1 - Math.pow(1 - p, 3);
+            el.textContent = (target * eased).toFixed(dec) + suffix;
+            if (p < 1) requestAnimationFrame(step);
+            else el.textContent = raw;
+          }
+          requestAnimationFrame(step);
+        }
+        if (!reduce && "IntersectionObserver" in window && stats.length) {
+          var sio = new IntersectionObserver(function (entries) {
+            entries.forEach(function (e) {
+              if (e.isIntersecting) { runCount(e.target); sio.unobserve(e.target); }
+            });
+          }, { threshold: 0.6 });
+          stats.forEach(function (el) { sio.observe(el); });
+        }
+        // 无 IO / reduce 时保留静态文本，不做数字动画
+
+        /* ── 卡片聚光 + 3D 微倾（仅精确指针；触屏不做） ── */
+        var fine = window.matchMedia && window.matchMedia("(hover: hover) and (pointer: fine)").matches;
+        if (!reduce && fine) {
+          var cards = [].slice.call(document.querySelectorAll(".card, .stat"));
+          cards.forEach(function (c) {
+            var raf = 0;
+            c.addEventListener("mousemove", function (ev) {
+              if (raf) return;
+              raf = requestAnimationFrame(function () {
+                var r = c.getBoundingClientRect();
+                var x = ev.clientX - r.left, y = ev.clientY - r.top;
+                c.style.setProperty("--mx", x + "px");
+                c.style.setProperty("--my", y + "px");
+                // 轻微倾斜：以中心为原点，最多 ±3.2°
+                var rx = ((y / r.height) - 0.5) * -4.2;
+                var ry = ((x / r.width) - 0.5) * 4.2;
+                c.style.transform =
+                  "perspective(760px) rotateX(" + rx.toFixed(2) + "deg) rotateY(" +
+                  ry.toFixed(2) + "deg) translateY(-2px)";
+                raf = 0;
+              });
+            });
+            c.addEventListener("mouseleave", function () {
+              if (raf) { cancelAnimationFrame(raf); raf = 0; }
+              c.style.transform = "";
+            });
+          });
+        }
+
+        /* ── 粒子网络 ── */
+        var cv = document.getElementById("fx");
+        if (!reduce && cv && cv.getContext) {
+          var ctx = cv.getContext("2d");
+          var dpr = Math.min(window.devicePixelRatio || 1, 2);
+          var W = 0, H = 0, pts = [], rgb = "148, 190, 255", alive = true;
+
+          function themeColor() {
+            rgb = getComputedStyle(root).getPropertyValue("--particle").trim() ||
+              "148, 190, 255";
+          }
+          function resize() {
+            /* 用 clientWidth 而不是 innerWidth：后者含滚动条宽度（实测 390 vs 375），
+               画布按 390 铺开会多出 15px 并把整页撑出横向滚动条。 */
+            var de = document.documentElement;
+            W = de.clientWidth; H = de.clientHeight;
+            cv.width = Math.round(W * dpr); cv.height = Math.round(H * dpr);
+            cv.style.width = W + "px"; cv.style.height = H + "px";
+            ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+            // 密度按面积自适应，上限 72（再多就开始吃 CPU 了）
+            var n = Math.min(72, Math.round((W * H) / 26000));
+            pts = [];
+            for (var i = 0; i < n; i++) {
+              pts.push({
+                x: Math.random() * W, y: Math.random() * H,
+                vx: (Math.random() - 0.5) * 0.24,
+                vy: (Math.random() - 0.5) * 0.24,
+                r: Math.random() * 1.5 + 0.6
+              });
+            }
+          }
+          function frame() {
+            if (!alive) return;
+            ctx.clearRect(0, 0, W, H);
+            for (var i = 0; i < pts.length; i++) {
+              var p = pts[i];
+              p.x += p.vx; p.y += p.vy;
+              if (p.x < -20) p.x = W + 20; else if (p.x > W + 20) p.x = -20;
+              if (p.y < -20) p.y = H + 20; else if (p.y > H + 20) p.y = -20;
+              ctx.beginPath();
+              ctx.arc(p.x, p.y, p.r, 0, 6.2832);
+              ctx.fillStyle = "rgba(" + rgb + ", 0.5)";
+              ctx.fill();
+            }
+            // 近邻连线：距离 < 130 才连，透明度线性衰减
+            for (var a = 0; a < pts.length; a++) {
+              for (var b = a + 1; b < pts.length; b++) {
+                var dx = pts[a].x - pts[b].x, dy = pts[a].y - pts[b].y;
+                var d2 = dx * dx + dy * dy;
+                if (d2 < 16900) {
+                  var o = (1 - Math.sqrt(d2) / 130) * 0.22;
+                  ctx.strokeStyle = "rgba(" + rgb + ", " + o.toFixed(3) + ")";
+                  ctx.lineWidth = 1;
+                  ctx.beginPath();
+                  ctx.moveTo(pts[a].x, pts[a].y);
+                  ctx.lineTo(pts[b].x, pts[b].y);
+                  ctx.stroke();
+                }
+              }
+            }
+            requestAnimationFrame(frame);
+          }
+          themeColor(); resize(); frame();
+          var rraf = 0;
+          window.addEventListener("resize", function () {
+            if (rraf) return;
+            rraf = requestAnimationFrame(function () { resize(); rraf = 0; });
+          });
+          // 切主题时换粒子颜色
+          if (toggle) toggle.addEventListener("click", function () { setTimeout(themeColor, 30); });
+          // 标签页不可见时暂停（省电；回来再继续）
+          document.addEventListener("visibilitychange", function () {
+            if (document.hidden) { alive = false; }
+            else if (!alive) { alive = true; frame(); }
+          });
+        }
       })();
     </script>
   </body>
