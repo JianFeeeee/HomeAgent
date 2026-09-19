@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"regexp"
 	"strings"
 
 	agentAPI "gitcode.com/JianFeeeee/HomeAgent/internal/agent/api"
@@ -343,8 +344,12 @@ func accumulateStream(ctx context.Context, ch <-chan agentAPI.StreamChunk, a *Ag
 }
 
 // parseToolArgsJSON 将经过完整拼接的 tool call arguments JSON 字符串解析为 map。
-// 第二个返回值 ok=false 表示分片拼接结果不是合法 JSON（分片污染/丢失），
-// 与「合法的空对象 {}」相区分。
+// 第二个返回值 ok=false 表示分片拼接结果不是合法 JSON（分片污染/丢失）。
+//
+// ❗解析失败时**不要**直接返回空 map 就完事：调用方会拿着空参数去调工具，
+// 工具只能报 “xxx is required”这类与真因无关的错（实测 2026-09-19：
+// cmd_run 失败率 34%，全部同一个成因）。解析失败时先用 repairToolArgsJSON
+// 试着把「一个可选字段写坏」与「整段截断」分开。
 func parseToolArgsJSON(s string) (map[string]interface{}, bool) {
 	if strings.TrimSpace(s) == "" {
 		return map[string]interface{}{}, true
@@ -353,7 +358,43 @@ func parseToolArgsJSON(s string) (map[string]interface{}, bool) {
 	if err := json.Unmarshal([]byte(s), &m); err == nil && m != nil {
 		return m, true
 	}
+	if repaired, ok := repairToolArgsJSON(s); ok {
+		return repaired, true
+	}
 	return map[string]interface{}{}, false
+}
+
+// unitNumberRe 匹配**未加引号的带单位数字**，如 20s / 1m / 500ms。
+//
+// 这是模型最常见的写法（工具 schema 里 timeout 的示例就是“10s, 1m, 30s”，
+// 于是它把值原样写进 JSON，忘了声明里写的是 string 类型）。
+var unitNumberRe = regexp.MustCompile(`:\s*(-?\d+(?:\.\d+)?(?:ms|s|m|h|d))\s*([,}])`)
+
+// repairToolArgsJSON 试着修复**单字段值格式错**导致的 JSON 非法。
+//
+// 为什么值得修而不是直接报错（实测 2026-09-19）：11/11 个真 invalid JSON 都是
+// `{"command": "…完好的长命令…", "timeout": 20s}` —— command 一字节没错，
+// 只因 timeout 少了引号。旧行为把**整个参数**丢掉，模型看到 “command is required”
+// 后只能原样重试，实测 cmd_run 失败率 34%（34 败 / 64 成）。
+//
+// 修复只做一件很窄的事：给未加引号的带单位数字补上引号。宁可保守也不能猜错：
+//   - 只动“值位置”上的 `数字+单位`，且后面紧跟着 `,` 或 `}`
+//   - 修完必须真的能解析成功才接受（否则返回 ok=false，行为同旧）
+//
+// 因此它不会把合法 JSON 改坏，也不会凭空造出字段。
+func repairToolArgsJSON(s string) (map[string]interface{}, bool) {
+	if !strings.Contains(s, ":") {
+		return nil, false
+	}
+	fixed := unitNumberRe.ReplaceAllString(s, `: "$1"$2`)
+	if fixed == s {
+		return nil, false
+	}
+	var m map[string]interface{}
+	if err := json.Unmarshal([]byte(fixed), &m); err != nil || m == nil {
+		return nil, false
+	}
+	return m, true
 }
 
 func convertToolCalls(tcs []agentAPI.ToolCall) []sdk.ToolCall {
