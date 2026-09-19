@@ -482,6 +482,174 @@
         .js-reveal { opacity: 1; transform: none; transition: none; }
       }
 
+
+      /* ── 插件：徽章可点，下方显示详情 ── */
+      .badges {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 0.5rem;
+        margin-top: 1rem;
+      }
+      .badge {
+        /* 重置 button 默认样式 */
+        appearance: none;
+        font: inherit;
+        font-family: var(--font-mono);
+        font-size: 0.8rem;
+        padding: 0.34rem 0.7rem;
+        border-radius: var(--radius-pill);
+        background: var(--bg-card);
+        border: 1px solid var(--border);
+        color: var(--text-dim);
+        cursor: pointer;
+        transition: border-color 0.22s var(--ease), color 0.22s var(--ease),
+          background 0.22s var(--ease), transform 0.22s var(--ease-back),
+          box-shadow 0.22s var(--ease);
+      }
+      .badge:hover {
+        border-color: var(--border-hi);
+        color: var(--text);
+        transform: translateY(-2px);
+        box-shadow: var(--shadow-md);
+      }
+      .badge:focus-visible {
+        outline: 2px solid var(--brand-sky);
+        outline-offset: 2px;
+      }
+      /* 选中态：淡底 + 主色描边（实心渐变太重，20 个齐亮像一堵墙） */
+      .badge[aria-pressed="true"] {
+        /* 回退：不支持 color-mix 的浏览器给淡青底 */
+        background: rgba(6, 182, 212, 0.14);
+        background: color-mix(in srgb, var(--brand-cyan) 12%, var(--bg-card));
+        border-color: var(--brand-cyan);
+        color: var(--text);
+      }
+      /* 小圆点提示可点 */
+      .badge::after {
+        content: "";
+        display: inline-block;
+        width: 4px; height: 4px;
+        margin-left: 0.4rem;
+        border-radius: 50%;
+        background: currentColor;
+        opacity: 0.45;
+        vertical-align: middle;
+        transition: opacity 0.22s var(--ease);
+      }
+      .badge[aria-pressed="true"]::after { opacity: 1; }
+      /* 「展开全部」：虚线边框，与具体插件徽章区分 */
+      .badge.muted {
+        font-style: italic;
+        color: var(--text-muted);
+        border-style: dashed;
+      }
+      .badge.muted::after { display: none; }
+
+      .pdetail {
+        margin-top: 1.2rem;
+        display: grid;
+        gap: 0.85rem;
+        grid-template-columns: repeat(auto-fill, minmax(300px, 1fr));
+      }
+      .phint {
+        grid-column: 1 / -1;
+        margin: 0;
+        text-align: center;
+        color: var(--text-muted);
+        font-size: 0.88rem;
+        padding: 0.85rem 0;
+        border: 1px dashed var(--border);
+        border-radius: var(--radius-md);
+      }
+      .pcard {
+        display: none;
+        position: relative;
+        background: var(--bg-card);
+        border: 1px solid var(--border-hi);
+        border-radius: var(--radius-lg);
+        padding: 1rem 1.15rem;
+        box-shadow: var(--shadow-md);
+      }
+      .pcard.show {
+        display: block;
+        animation: pcardIn 0.4s var(--ease-back);
+      }
+      @keyframes pcardIn {
+        from { opacity: 0; transform: translateY(10px) scale(0.98); }
+        to   { opacity: 1; transform: none; }
+      }
+      .pcard-head {
+        display: flex;
+        align-items: baseline;
+        gap: 0.6rem;
+        margin-bottom: 0.5rem;
+      }
+      .pcard-head code {
+        font-size: 0.95rem;
+        font-weight: 700;
+        color: var(--brand-cyan);
+      }
+      .pcard-head .ver {
+        font-size: 0.75rem;
+        color: var(--text-muted);
+        font-family: var(--font-mono);
+        margin-left: auto;
+      }
+      .pcard p {
+        margin: 0;
+        font-size: 0.88rem;
+        color: var(--text-dim);
+        line-height: 1.65;
+      }
+      /* 全部展开时的网格 */
+      .pdetail.all {
+        grid-template-columns: repeat(auto-fill, minmax(300px, 1fr));
+      }
+      .pdetail.all .pcard { display: block; }
+      .pdetail.all .phint { display: none; }
+
+      /* ── 统计卡：补一行小字，避免数字孤零零 ── */
+      .stat .sm {
+        display: block;
+        margin-top: 0.25rem;
+        font-size: 0.72rem;
+        color: var(--text-muted);
+        letter-spacing: 0.01em;
+      }
+      .stat .l { line-height: 1.5; }
+
+      /* ── 版面精致化：统一节奏与呼吸 ── */
+      section { padding: 4.5rem 0; }
+      @media (max-width: 860px) { section { padding: 3rem 0; } }
+      h2 { margin: 0 0 0.7rem; letter-spacing: -0.01em; }
+      .sub { max-width: 44rem; }
+      /* 卡片内边距与标题间距收敛一档 */
+      .card { padding: 1.4rem 1.5rem; }
+      .card h3 { margin: 0 0 0.55rem; }
+      .card p { font-size: 0.9rem; }
+      /* 组件表：行高收敛、代码列定宽对齐 */
+      .comp .row { padding: 0.65rem 1rem; }
+      .comp .row code { min-width: 7.5rem; }
+      /* 统计卡内边距 */
+      .stat { padding: 1.25rem 1rem; }
+      .stat .n { margin-bottom: 0.15rem; }
+      /* 三层记忆卡收紧 */
+      .layer .body { padding: 1rem 1.2rem 1rem 0; }
+      .layer h3 { margin-bottom: 0.3rem; }
+      .layer p { margin: 0; }
+
+      /* 分隔：章节之间给一条极淡的线，强化节奏 */
+      section + section > .wrap > h2,
+      section + section > .wrap > .sub {
+        /* 占位：保持选择器有效，视觉由间距承担 */
+      }
+
+      /* 打印：不显示装饰与折叠 */
+      @media print {
+        .aurora, #fx, #progress, .badges, .pdetail { display: none !important; }
+        body { background: #fff; color: #000; }
+      }
+
       /* ═══════════════════════════════════════════════════
          动效层。全部遵守 prefers-reduced-motion（见文件末脚本）。
          原则：**内容默认可读**，动效只是增强，JS 挂了也不影响阅读。
@@ -857,9 +1025,8 @@
       <section id="features">
         <div class="wrap">
           <h2 class="reveal rise">四个不那么常见的设计决定</h2>
-          <p class="sub reveal rise" style="--d:90ms">
-            大多数框架先写功能再补边界。HomeAgent 反过来：先把
-            <strong>边界</strong>和<strong>调度</strong>定死，再往上加能力。
+                    <p class="sub reveal rise" style="--d:90ms">
+            先定<strong>边界</strong>与<strong>调度</strong>，再加能力。
           </p>
 
           <div class="grid-2">
@@ -867,9 +1034,9 @@
               <div class="icon" style="background: rgba(59,130,246,.14); color: var(--brand-blue)">◇</div>
               <h3>内核零 IO</h3>
               <p>
-                内核不直接读写任何外部世界。收发消息、文件操作、网络请求、硬件交互
-                全部由插件经 PluginSDK 实现。于是「内核有多可信」与「某个插件有多安全」
-                成为两个可独立评估的问题。
+                                内核不碰任何外部世界。消息、文件、网络、硬件全部由插件经
+                PluginSDK 实现。于是「内核是否可信」与「某个插件是否安全」
+                可以分开评估。
               </p>
             </div>
 
@@ -877,9 +1044,9 @@
               <div class="icon" style="background: rgba(6,182,212,.14); color: var(--brand-cyan)">◈</div>
               <h3>插件是独立进程</h3>
               <p>
-                外部插件编译成普通 Go 二进制，由内核 spawn 为子进程，经
-                stdio JSON-RPC（控制）+ 共享内存段（数据）+ 事件环（通知）通信。
-                插件崩溃不影响内核，换掉 <span class="mono">plugin.bin</span> 即真热重载。
+                                插件是普通 Go 二进制，由内核 spawn 为子进程，经 stdio JSON-RPC
+                （控制）、共享内存段（数据）、事件环（通知）通信。插件崩溃不牵连内核，
+                换掉 <span class="mono">plugin.bin</span> 即热重载。
               </p>
             </div>
 
@@ -887,9 +1054,9 @@
               <div class="icon" style="background: rgba(245,158,11,.14); color: var(--brand-gold)">◉</div>
               <h3>输入是有级别的</h3>
               <p>
-                输入先进调度器，分「排队」与「中断」两类，中断再按“有多不能等”分 L1–L4。
-                高优先级可抢占并保存现场，同级不抢占。L4 只归内核
-                —— 所以“停止”按钮真的能立刻停下。
+                                输入分「排队」与「中断」两类，中断再按紧迫度分 L1–L4。
+                高级可抢占并保存现场，同级不抢占。L4 归内核独占
+                —— 所以「停止」真的能立刻停下。
               </p>
             </div>
 
@@ -897,9 +1064,9 @@
               <div class="icon" style="background: rgba(139,92,246,.14); color: var(--brand-violet)">◆</div>
               <h3>忙时有人顶班</h3>
               <p>
-                主 agent 执行长任务时，后来的消息不会干等十几分钟：内核把积压交给
-                临时<strong>分诊助手</strong> —— 简单的直接办完，需要主 agent 的立刻回
-                「忙碌中，请稍候」。
+                                主 agent 忙长任务时，积压交给临时<strong>分诊助手</strong>：
+                能办的直接办，需要主 agent 的立刻回「忙碌中，请稍候」。
+                不必干等十几分钟。
               </p>
             </div>
           </div>
@@ -911,8 +1078,8 @@
         <div class="wrap">
           <h2 class="reveal rise">三层记忆：从「刚才说了什么」到「三年前说过什么」</h2>
           <p class="sub reveal rise" style="--d:90ms">
-            不是一个向量库包打天下，而是三层各司其职、逐层衰减与整合。
-            品牌的蓝 / 青 / 金三色，对应的就是这三层。
+                        不是一个大向量库包打天下，而是三层各司其职、逐层下沉。
+            蓝 / 青 / 金三色对应的就是这三层。
           </p>
 
           <div class="layers">
@@ -921,8 +1088,8 @@
               <div class="body">
                 <h3><span class="mark">①</span> Context<span class="en">工作窗口</span></h3>
                 <p>
-                  内存中的事件窗口，按与当前输入的相关性评分排序（预训练词向量 → 余弦相似度，
-                  TF-IDF 回退），并保护最近若干条。低分事件自动下沉。
+                                    内存中的事件窗口。按与当前输入的相关性排序（预训练词向量 → 余弦相似度，
+                  TF-IDF 回退），最近若干条受保护。低分事件自动下沉。
                 </p>
               </div>
             </div>
@@ -932,8 +1099,8 @@
               <div class="body">
                 <h3><span class="mark">②</span> Document<span class="en">文件记忆</span></h3>
                 <p>
-                  JSON + TF-IDF 索引的中间层。支持显式提交与隐式归档；
-                  冷数据按时间下沉，蒸馏成三元组进入图谱。
+                                    JSON + TF-IDF 索引的中间层。支持显式提交与隐式归档，
+                  冷数据下沉后蒸馏成三元组进入图谱。
                 </p>
               </div>
             </div>
@@ -943,8 +1110,8 @@
               <div class="body">
                 <h3><span class="mark">③</span> Graph<span class="en">图数据库</span></h3>
                 <p>
-                  SQLite 持久化实体与关系，BFS 遍历召回。蒸馏管道从对话里提取三元组，
-                  越用越准；这是“几个月前的事还记得”的落点。
+                                    SQLite 持久化实体与关系，BFS 遍历召回。三元组从对话中蒸馏而来，
+                  越用越准 —— 「几个月前的事还记得」靠的就是这层。
                 </p>
               </div>
             </div>
@@ -954,22 +1121,22 @@
             <div class="card reveal rise" style="--d:360ms">
               <h3>媒体也是一等节点</h3>
               <p>
-                图片/音频不是附件，而是三层里的一类节点：内容寻址存储（相同字节只存一份）、
+                                图片、音频不是附件，而是三层里的一类节点：内容寻址（相同字节只存一份）、
                 引用计数 GC（有引用绝不删）。
               </p>
             </div>
             <div class="card reveal rise" style="--d:450ms">
               <h3>描述才是持久语义</h3>
               <p>
-                视觉模型生成的描述以 <span class="mono">[mime digest] 描述</span> 写进纯文本记忆并参与检索；
-                blob 只是可被淘汰的缓存。所以几个月后“那张三色图”仍能搜到。
+                                视觉模型生成的描述以 <span class="mono">[mime digest] 描述</span> 写入纯文本记忆并参与检索，
+                blob 只是可淘汰的缓存。所以几个月后「那张三色图」仍搜得到。
               </p>
             </div>
             <div class="card reveal rise" style="--d:540ms">
               <h3>统一多模态空间</h3>
               <p>
-                文本与图像落在同一向量空间（默认 Chinese-CLIP），
-                因此可以用一句话搜图，也可以用图找相关记忆。
+                                文本与图像落在同一向量空间（默认 Chinese-CLIP）：
+                可以用一句话搜图，也可以用图找记忆。
               </p>
             </div>
           </div>
@@ -981,7 +1148,7 @@
         <div class="wrap">
           <h2 class="reveal rise">一条消息进来之后</h2>
           <p class="sub reveal rise" style="--d:90ms">
-            输入先过调度器，再进处理管道；管道有 7 个阶段钩子，插件可在此改写或短路。
+                        输入先过调度器，再进处理管道。管道有 7 个阶段钩子，插件可改写或短路。
           </p>
 
           <div class="flow reveal rise">
@@ -1015,10 +1182,10 @@
           </div>
 
           <div class="stats reveal" style="margin-top: 2rem">
-            <div class="stat"><div class="n">36</div><div class="l">外部插件（实测在跑）</div></div>
-            <div class="stat"><div class="n">340</div><div class="l">可用工具</div></div>
-            <div class="stat"><div class="n">110k</div><div class="l">Go 代码行</div></div>
-            <div class="stat"><div class="n">10</div><div class="l">LLM 协议适配器</div></div>
+                        <div class="stat"><div class="n">36</div><div class="l">在跑插件<br /><span class="sm">16 内置 + 20 外部</span></div></div>
+            <div class="stat"><div class="n">340</div><div class="l">可用工具<br /><span class="sm">实测注册数</span></div></div>
+            <div class="stat"><div class="n">109k</div><div class="l">Go 代码行<br /><span class="sm">不含第三方</span></div></div>
+            <div class="stat"><div class="n">9</div><div class="l">LLM 适配器<br /><span class="sm">另有 1 个网关脚本</span></div></div>
           </div>
         </div>
       </section>
@@ -1028,8 +1195,8 @@
         <div class="wrap">
           <h2 class="reveal rise">跑起来</h2>
           <p class="sub reveal rise" style="--d:90ms">
-            依赖 Go 1.25+ 与 CGo（sqlite3）。内核需 Linux —— Windows 上
-            <span class="mono">homed</span> 跑在 WSL2 里，只构建 <span class="mono">waiter.exe</span>。
+            依赖 Go 1.25+ 与 CGo（sqlite3）。内核需 Linux；Windows 上
+            <span class="mono">homed</span> 跑在 WSL2 里，仅需构建 <span class="mono">waiter.exe</span>。
           </p>
 
           <div class="code reveal rise"><span class="c"># 构建守护进程 + CLI</span>
@@ -1043,35 +1210,116 @@ make build build-cli
 echo <span class="s">"你好，记住我喜欢喝咖啡"</span> | ./build/waiter</div>
 
           <p class="sub reveal rise" style="--d:90ms; margin-top: 1.2rem">
-            WebUI 与 API 密钥在 <span class="mono">http://localhost:8080</span> 配置，持久化在 SQLite。
+                        WebUI 与 API 密钥在 <span class="mono">http://localhost:8080</span> 配置，持久化到 SQLite。
           </p>
 
           <h2 class="reveal" style="margin-top: 3rem">开箱可用的插件</h2>
-          <p class="sub reveal rise" style="--d:90ms">外部插件经 <span class="mono">hmapdev</span> 构建为独立二进制，可单独安装、卸载、热重载。</p>
+                    <p class="sub reveal rise" style="--d:90ms">外部插件经 <span class="mono">hmapdev</span> 构建为独立二进制，可单独装卸、热重载。<strong>点任意插件看它能做什么。</strong></p>
           <div class="badges reveal">
-            <span class="badge">qq</span>
-            <span class="badge">wechat</span>
-            <span class="badge">browser</span>
-            <span class="badge">files</span>
-            <span class="badge">memo</span>
-            <span class="badge">calendar</span>
-            <span class="badge">rss</span>
-            <span class="badge">editdoc</span>
-            <span class="badge">ocr</span>
-            <span class="badge">music</span>
-            <span class="badge">bili</span>
-            <span class="badge">ai_image</span>
-            <span class="badge">weather</span>
-            <span class="badge">vikunja</span>
-            <span class="badge">vanblog</span>
-            <span class="badge">deepsearch</span>
-            <span class="badge">mcp</span>
-            <span class="badge">a2a</span>
-            <span class="badge">acp</span>
-            <span class="badge">mc</span>
-            <span class="badge">remotedevice</span>
-            <span class="badge">recoverydiag</span>
-            <span class="badge muted">…共 36 个</span>
+            <button class="badge" type="button" data-plugin="a2a" style="--i:0">a2a</button>
+            <button class="badge" type="button" data-plugin="acp" style="--i:1">acp</button>
+            <button class="badge" type="button" data-plugin="bili" style="--i:2">bili</button>
+            <button class="badge" type="button" data-plugin="browser" style="--i:3">browser</button>
+            <button class="badge" type="button" data-plugin="calendar" style="--i:4">calendar</button>
+            <button class="badge" type="button" data-plugin="deepsearch" style="--i:5">deepsearch</button>
+            <button class="badge" type="button" data-plugin="editdoc" style="--i:6">editdoc</button>
+            <button class="badge" type="button" data-plugin="homeagent-mail-bridge" style="--i:7">homeagent-mail-bridge</button>
+            <button class="badge" type="button" data-plugin="mc" style="--i:8">mc</button>
+            <button class="badge" type="button" data-plugin="memo" style="--i:9">memo</button>
+            <button class="badge" type="button" data-plugin="music" style="--i:10">music</button>
+            <button class="badge" type="button" data-plugin="ocr" style="--i:11">ocr</button>
+            <button class="badge" type="button" data-plugin="plugindev" style="--i:12">plugindev</button>
+            <button class="badge" type="button" data-plugin="qq" style="--i:13">qq</button>
+            <button class="badge" type="button" data-plugin="recoverydiag" style="--i:14">recoverydiag</button>
+            <button class="badge" type="button" data-plugin="rss" style="--i:15">rss</button>
+            <button class="badge" type="button" data-plugin="sanitizer" style="--i:16">sanitizer</button>
+            <button class="badge" type="button" data-plugin="vanblog" style="--i:17">vanblog</button>
+            <button class="badge" type="button" data-plugin="vikunja" style="--i:18">vikunja</button>
+            <button class="badge" type="button" data-plugin="weather" style="--i:19">weather</button>
+            <button class="badge muted" type="button" id="expandAll">展开全部</button>
+          </div>
+          <div class="pdetail" id="pdetail">
+            <p class="phint" id="phint">点上方任一插件查看用途</p>
+          <div class="pcard" id="p-a2a">
+            <div class="pcard-head"><code>a2a</code><span class="ver">v1.3.1</span></div>
+            <p>Agent-to-Agent 协议通信插件，支持双向 A2A 通信：可查询其他 Agent 并回复其请求。提供 HTTP 服务端暴露本 Agent 能力。</p>
+          </div>
+          <div class="pcard" id="p-acp">
+            <div class="pcard-head"><code>acp</code><span class="ver">v1.2.1</span></div>
+            <p>Agent Client Protocol 通信插件：充当 ACP 服务端接受其他 Agent 的任务请求，同时提供客户端工具向远程 ACP Agent（如 opencode）发起会话并读取回复</p>
+          </div>
+          <div class="pcard" id="p-bili">
+            <div class="pcard-head"><code>bili</code><span class="ver">v1.2.0</span></div>
+            <p>B站视频下载工具，基于 yt-dlp 引擎。支持查看视频清晰度列表、指定格式下载、可配置下载目录。</p>
+          </div>
+          <div class="pcard" id="p-browser">
+            <div class="pcard-head"><code>browser</code><span class="ver">v2.4.1</span></div>
+            <p>统一浏览器插件：搜索、HTTP抓取(quick)、无头渲染(normal)、交互式浏览器(interactive/CDP)</p>
+          </div>
+          <div class="pcard" id="p-calendar">
+            <div class="pcard-head"><code>calendar</code><span class="ver">v1.1.0</span></div>
+            <p>日历事件管理，支持提醒和重复事件</p>
+          </div>
+          <div class="pcard" id="p-deepsearch">
+            <div class="pcard-head"><code>deepsearch</code><span class="ver">v1.1.2</span></div>
+            <p>为 agent 提供真正的联网信息检索：本地 SearXNG 聚合多引擎（返回标题/URL/摘要/时间），支持新闻、时间范围、指定引擎；并提供网页正文抽取与「搜索+读前K篇」的深检索</p>
+          </div>
+          <div class="pcard" id="p-editdoc">
+            <div class="pcard-head"><code>editdoc</code><span class="ver">v2.0.0</span></div>
+            <p>全能办公插件：新建/读取/编辑/转换 docx·xlsx·pptx·md·csv·txt（基于 python-docx / openpyxl / python-pptx / soffice / pandoc）</p>
+          </div>
+          <div class="pcard" id="p-homeagent-mail-bridge">
+            <div class="pcard-head"><code>homeagent-mail-bridge</code><span class="ver">v0.2.2</span></div>
+            <p>HomeAgent 接入 AgentMail：邮件驱动的多智能体协作</p>
+          </div>
+          <div class="pcard" id="p-mc">
+            <div class="pcard-head"><code>mc</code><span class="ver">v0.1.8</span></div>
+            <p>把 mineflayer 虚拟 MC 客户端封装为 HomeAgent 的 chan:mc IO 通道（两阶段激活 + 动作工具）</p>
+          </div>
+          <div class="pcard" id="p-memo">
+            <div class="pcard-head"><code>memo</code><span class="ver">v1.1.0</span></div>
+            <p>待办与备忘录插件。待办（todo_add/todo_complete/todo_list）会主动提醒；备忘录（memo_create/memo_list/memo_delete）纯记事不提醒。</p>
+          </div>
+          <div class="pcard" id="p-music">
+            <div class="pcard-head"><code>music</code><span class="ver">v0.1.0</span></div>
+            <p>音乐搜索插件，支持搜索歌曲和查看歌词（基于网易云音乐）</p>
+          </div>
+          <div class="pcard" id="p-ocr">
+            <div class="pcard-head"><code>ocr</code><span class="ver">v1.0.0</span></div>
+            <p>图片文字识别工具，基于 Tesseract OCR 引擎。支持从 URL 或 base64 图片中提取文字内容。</p>
+          </div>
+          <div class="pcard" id="p-plugindev">
+            <div class="pcard-head"><code>plugindev</code><span class="ver">v1.0.0</span></div>
+            <p>把 hmapdev 工具链封装成 Agent 可调用的工具：脚手架生成插件工程、构建打包 .hmap、管理 SDK 版本。配合 plugin_install 即可让 Agent 自己做完「新建插件 → 构建 → 安装」全流程。</p>
+          </div>
+          <div class="pcard" id="p-qq">
+            <div class="pcard-head"><code>qq</code><span class="ver">v1.4.1</span></div>
+            <p>QQ 消息收发插件，通过 NapCat 协议桥接</p>
+          </div>
+          <div class="pcard" id="p-recoverydiag">
+            <div class="pcard-head"><code>recoverydiag</code><span class="ver">v0.2.0</span></div>
+            <p>快速检查/崩溃取证工具集：diag_triage（退出码/信号/存活粗分）、diag_db（config.db 完整性 + LLM 源解析校验）、diag_log_scan（日志签名命中）、diag_delta（last-good 快照 vs 现状 diff）、diag_loc（正交综合定位）。全部返回结论而非原文，确定性、不消耗 LLM token，供 guard / failback 恢复决策使用。</p>
+          </div>
+          <div class="pcard" id="p-rss">
+            <div class="pcard-head"><code>rss</code><span class="ver">v1.1.0</span></div>
+            <p>RSS/Atom 订阅监控插件，自动检测更新并推送通知</p>
+          </div>
+          <div class="pcard" id="p-sanitizer">
+            <div class="pcard-head"><code>sanitizer</code><span class="ver">v0.1.0</span></div>
+            <p>清洗 LLM 输出中的工具调用残留（思维泄漏）</p>
+          </div>
+          <div class="pcard" id="p-vanblog">
+            <div class="pcard-head"><code>vanblog</code><span class="ver">v1.0.0</span></div>
+            <p>管理 VanBlog 开源博客系统：文章的增删改查、分类标签管理、草稿发布、备份导出等</p>
+          </div>
+          <div class="pcard" id="p-vikunja">
+            <div class="pcard-head"><code>vikunja</code><span class="ver">v1.0.1</span></div>
+            <p>Vikunja 待办/任务管理：任务增删改查、项目与看板桶、标签、指派、评论、关联、附件、保存筛选器、团队与分享、通知、订阅、Webhook、时间跟踪、数据导入、实例管理；并附通用 API 直通工具兜底</p>
+          </div>
+          <div class="pcard" id="p-weather">
+            <div class="pcard-head"><code>weather</code><span class="ver">v1.0.0</span></div>
+            <p>天气查询插件（基于 wttr.in），支持实时天气和未来预报</p>
+          </div>
           </div>
         </div>
       </section>
@@ -1080,60 +1328,58 @@ echo <span class="s">"你好，记住我喜欢喝咖啡"</span> | ./build/waiter
       <section id="faq">
         <div class="wrap">
           <h2 class="reveal rise">常见问题</h2>
-          <p class="sub reveal rise" style="--d:90ms">这些是设计上最容易引起误解的地方。</p>
+                    <p class="sub reveal rise" style="--d:90ms">最容易引起误解的六个地方。</p>
 
           <div class="reveal rise">
             <details class="faq">
               <summary>「内核零 IO」是不是意味着内核很简单？</summary>
               <p>
-                恰恰相反——零 IO 是为了让内核能专注做难的部分：输入调度（四级中断、
-                抢占与现场保存）、上下文预算、三层记忆的蒸馏与召回。
-                把 IO 挪出去之后，这些才有清晰的所有权。
+                                恰恰相反。零 IO 是为了让内核专注做难的部分：输入调度（四级中断、抢占与
+                现场保存）、上下文预算、三层记忆的蒸馏与召回。IO 挪出去之后，这些才有
+                清晰的所有权。
               </p>
             </details>
 
             <details class="faq">
               <summary>插件崩了会不会把 Agent 带崩？</summary>
               <p>
-                不会。从 v1.0.0 起外部插件是独立子进程，与内核只通过
-                stdio JSON-RPC、共享内存段、事件环三个面通信。插件崩溃后内核摘除其
-                注册面（工具/阶段/通道）并按退避重启它，其余插件与内核不受影响。
+                                不会。外部插件是独立子进程，与内核只通过 stdio JSON-RPC、共享内存段、
+                事件环通信。插件崩溃后，内核摘除它注册的工具、阶段与通道，按退避重启，
+                其余部分不受影响。
               </p>
             </details>
 
             <details class="faq">
               <summary>为什么消息会「排队」而不是立即处理？</summary>
               <p>
-                因为同一时刻只应该有一个任务在改上下文。同级中断不抢占同级任务——
-                抢了会让两边都做一半。需要立刻插队的场景请用更高级别的中断
-                （如 L4：内核与内核级插件），而不是让所有消息都变成抢占者。
+                                因为同一时刻只应有一个任务在改上下文。同级抢占会让两边都做一半。
+                需要立刻插队时用更高级别的中断（如 L4：内核与内核级插件），
+                而不是让所有消息都变成抢占者。
               </p>
             </details>
 
             <details class="faq">
               <summary>长任务会不会让用户等很久？</summary>
               <p>
-                这正是「分诊助手」要解决的。主 agent 忙超过阈值（默认 5 分钟）且积压够多时，
-                内核会拉起一个临时驻留子接手积压：能直接办的办完并回复，
-                需要主 agent 的立刻回一句「忙碌中，请稍候」。
+                                这正是「分诊助手」的用途。主 agent 忙超阈值且积压够多时，内核拉起临时
+                驻留子接手：能办的直接办，需要主 agent 的立刻回「忙碌中，请稍候」。
               </p>
             </details>
 
             <details class="faq">
               <summary>记忆会不会无限膨胀？</summary>
               <p>
-                不会。三层是<strong>迁移</strong>关系而不是复制：上下文事件被裁剪后归档成文档，
-                文档冷掉后蒸馏成图谱三元组。图谱有去重与 UNIQUE 约束，
-                媒体则靠引用计数 GC 回收无主内容。
+                                不会。三层是迁移而非复制：上下文事件裁剪后归档成文档，文档冷掉后蒸馏成
+                图谱三元组。图谱有去重与 UNIQUE 约束，媒体靠引用计数 GC 回收无主内容。
               </p>
             </details>
 
             <details class="faq">
               <summary>能换 LLM 吗？</summary>
               <p>
-                可以。内核不绑定任何厂商：每个 LLM 源对应一个 Lua 脚本负责请求/响应转换，
-                仓库内置 10 个适配器（OpenAI、Anthropic、Gemini、DeepSeek、Groq、Ollama 等），
-                也可以自己写一个接任意兼容 API。
+                                可以。内核不绑定厂商：每个 LLM 源对应一个 Lua 脚本负责请求与响应转换。
+                内置 9 个适配器（OpenAI、Anthropic、Gemini、DeepSeek、Groq、Mistral、
+                Ollama、GitHub、KimiCode），也可自己写一个接任意兼容 API。
               </p>
             </details>
           </div>
@@ -1180,12 +1426,11 @@ echo <span class="s">"你好，记住我喜欢喝咖啡"</span> | ./build/waiter
         </div>
         <div class="note">
           <p style="margin: 0 0 0.4rem">
-            <strong>AI 辅助编程声明</strong>：本项目代码、文档与提交历史中，部分内容由 AI 辅助生成或修改。
-            人工已审阅关键改动，使用时请自行评估与验证。
+                        <strong>AI 辅助声明</strong>：本项目代码、文档与提交历史含 AI 生成或修改的内容。
+            关键改动经人工审阅，使用前请自行评估验证。
           </p>
           <p style="margin: 0">
-            HomeAgent 以 AGPL-3.0-only 发布：通过 HTTP 提供交互式服务时，
-            须向使用者提供完整对应源码（§13）。
+                        AGPL-3.0-only。通过 HTTP 提供交互式服务时，须向使用者提供完整对应源码（§13）。
           </p>
         </div>
       </div>
@@ -1340,6 +1585,66 @@ echo <span class="s">"你好，记住我喜欢喝咖啡"</span> | ./build/waiter
             });
           });
         }
+
+        /* ── 插件徽章：点击展开详情（可多开；「全部」按钮切全展开） ── */
+        (function () {
+          var badges = [].slice.call(document.querySelectorAll(".badge[data-plugin]"));
+          var hint = document.getElementById("phint");
+          var detail = document.getElementById("pdetail");
+          if (!badges.length || !detail) return;
+
+          function sync(btn) {
+            var id = "p-" + btn.dataset.plugin;
+            var card = document.getElementById(id);
+            var on = btn.getAttribute("aria-pressed") === "true";
+            if (card) card.classList.toggle("show", on);
+          }
+          badges.forEach(function (b) {
+            b.setAttribute("aria-pressed", "false");
+            b.addEventListener("click", function () {
+              var on = b.getAttribute("aria-pressed") === "true";
+              b.setAttribute("aria-pressed", on ? "false" : "true");
+              sync(b);
+              // 有任何一张打开就藏起提示
+              var any = badges.some(function (x) {
+                return x.getAttribute("aria-pressed") === "true";
+              });
+              if (hint) hint.style.display = any ? "none" : "";
+              // 首次打开时把详情滚进视口
+              if (!on) {
+                var c = document.getElementById("p-" + b.dataset.plugin);
+                if (c && c.getBoundingClientRect().top > window.innerHeight - 120) {
+                  c.scrollIntoView({ behavior: reduce ? "auto" : "smooth", block: "center" });
+                }
+              }
+            });
+          });
+
+          // 「…共 N 个」按钮：一次全展开
+          var all = document.querySelector(".badge.muted");
+          if (all && !all.dataset.bound) {
+            all.dataset.bound = "1";
+            var expanded = false;
+            var total = badges.length;
+            all.setAttribute("role", "button");
+            all.setAttribute("tabindex", "0");
+            all.textContent = "展开全部 " + total + " 个";
+            function toggleAll() {
+              expanded = !expanded;
+              detail.classList.toggle("all", expanded);
+              badges.forEach(function (b) {
+                b.setAttribute("aria-pressed", expanded ? "true" : "false");
+                sync(b);
+              });
+              all.textContent = expanded ? "收起" : "展开全部 " + total + " 个";
+              if (hint) hint.style.display = expanded ? "none" : "";
+            }
+            all.addEventListener("click", toggleAll);
+            all.addEventListener("keydown", function (e) {
+              if (e.key === "Enter" || e.key === " ") { e.preventDefault(); toggleAll(); }
+            });
+          }
+        })();
 
         /* ── 粒子网络 ── */
         var cv = document.getElementById("fx");

@@ -107,14 +107,41 @@ print(im.mode)  # RGB —— 没有 alpha 通道
 结论：**这类素材要么重新出一张带透明通道的图，要么就不放**。
 现在 Hero 是单栏文字，版面反而更稳。
 
-## 改内容前请核对事实
+## 插件卡片
 
-页面上的数字（外部插件数、工具数、代码行数、适配器数）都是**实测值**，
-不是估的。改动前建议重新取一遍：
+「开箱可用的插件」一节里，每个徽章都是**按钮**：
+
+- 点一下展开该插件卡（名称 / 版本 / 用途），再点收起
+- 可同时展开多个
+- 末尾「展开全部 N 个」一次全开
+
+数据来自各插件的 `plugin.json`，不是手写的：
 
 ```bash
-ls /home/newqqagent/plugins/ | grep -v hmap | wc -l          # 外部插件
-grep -oE '[0-9]+ tools' $(ls -t /home/newqqagent/log/*.log | head -1) | tail -1
-ls internal/lua/adapters/*.lua | wc -l                        # LLM 适配器
-find . -name '*.go' -not -path './.git/*' -not -path './.go/*' -not -path './third_party/*' | xargs wc -l | tail -1
+cd /home/newqqagent/plugins
+for d in */; do [ -f "$d/plugin.json" ] && python3 -c "
+import json;d=json.load(open('$d/plugin.json'))
+print(d.get('name'), d.get('version'), d.get('description','')[:60])"; done
+```
+
+## 改内容前请核对事实
+
+页面上的数字都是**实测值**。**注意「在跑插件 36」是加载总数**
+（16 内置 + 20 外部），不是"外部插件数" —— 早期版本写成「36 外部插件」是错的，
+已更正。改动前建议重新取一遍：
+
+```bash
+# 在跑插件（以日志里实际 loaded 的为准，比数目录可靠）
+grep -h '\[plugin\] loaded:' $(ls -t /home/newqqagent/log/homed_*.log | head -1) \
+  | sed 's/.*loaded: //' | sort -u | wc -l
+
+# 工具数（同上，日志里注册后的真实值）
+grep -ohE '[0-9]+ tools' $(ls -t /home/newqqagent/log/homed_*.log | head -1) | tail -1
+
+# Go 代码行（排除第三方与鸿蒙工程）
+find . -name '*.go' -not -path './.git/*' -not -path './.go/*' \
+  -not -path './third_party/*' -not -path './cmd/ohos/*' | xargs cat | wc -l
+
+# LLM 适配器（注意 server.lua 是网关脚本，不是厂商适配器，故为 9）
+ls internal/lua/adapters/*.lua | xargs -n1 basename
 ```
