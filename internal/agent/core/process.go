@@ -218,6 +218,19 @@ func truncatedArgsError(name string, rawLen, maxTokens int) string {
 		name, rawLen, maxTokens)
 }
 
+// malformedArgsError 把「参数 JSON 写坏了」变成模型能自己改对的一句话。
+//
+// 实测最常见的一种：带单位的值忘了加引号 —— `{"command": "ls", "timeout": 20s}`。
+// 工具 schema 把这类参数声明为 string、示例又写成 “10s, 1m, 30s”，模型容易照抄格式。
+// 旧实现丢整条参数，模型只看到 “command is required”，永远不知道坏在 timeout。
+func malformedArgsError(name, raw string) string {
+	return fmt.Sprintf(
+		"工具 %s 的参数不是合法 JSON，本次调用未执行（这是参数格式问题，不是工具故障）。"+
+			"请重新生成完整参数并注意：所有字符串值必须带引号 —— 特别是超时/时长这种"+
+			"带单位的值，要写成 \"20s\" 而不是 20s。收到 %d 字节，开头是：%s",
+		name, len(raw), truncateStr(raw, 160))
+}
+
 // accumulateStream 消费 chunk channel，累积为完整 CompletionResponse，
 // 同时发布增量事件。返回的 response 与非流式 Chat() 的返回等价。
 //
@@ -248,13 +261,22 @@ func accumulateStream(ctx context.Context, ch <-chan agentAPI.StreamChunk, a *Ag
 		} else if raw == "" {
 			log.Printf("[agent] stream tool_call %s (idx=%d) received NO argument fragments", acc.name, idx)
 		}
-		// 被 MaxTokens 截断时**不要**静默降级成空参数：那会让工具报
-		// "path is required" 这类与真因无关的错，模型据此重试只会再撞一次。
-		// 改成把「参数不完整」原样交给模型，并附上可执行的收缩指引。
-		if !argsOK && lastFinish == "length" {
-			log.Printf("[agent] stream tool_call %s (idx=%d) TRUNCATED by max_tokens=%d (%d bytes of args) — surfacing to model",
-				acc.name, idx, maxTokens, len(raw))
-			args = map[string]interface{}{"__truncated_error": truncatedArgsError(acc.name, len(raw), maxTokens)}
+		// 参数没法解析时**绝不能**静默降级成空 map：工具只能报 “xxx is required”，
+		// 那与真因（参数 JSON 写坏了）毫无关系，模型据此重试只会再撞一次
+		// （实测 2026-09-19：cmd_run 失败 34 次、某任务 48% 时间耗在这上面）。
+		// 分两种成因给出可执行的指引：
+		//   - finish_reason=length  → 被输出上限截断，需拆小参数
+		//   - 其他               → JSON 写坏了（常见：带单位的值忘了引号）
+		if !argsOK {
+			if lastFinish == "length" {
+				log.Printf("[agent] stream tool_call %s (idx=%d) TRUNCATED by max_tokens=%d (%d bytes of args) — surfacing to model",
+					acc.name, idx, maxTokens, len(raw))
+				args = map[string]interface{}{"__arg_error": truncatedArgsError(acc.name, len(raw), maxTokens)}
+			} else {
+				log.Printf("[agent] stream tool_call %s (idx=%d) args unparseable (%d bytes) — surfacing to model instead of calling with empty args",
+					acc.name, idx, len(raw))
+				args = map[string]interface{}{"__arg_error": malformedArgsError(acc.name, raw)}
+			}
 		}
 		tc := agentAPI.ToolCall{
 			ID:        acc.id,

@@ -44,11 +44,12 @@ func (a *Agent) executeToolCall(tc agentAPI.ToolCall, channel string, turnScenes
 }
 
 func (a *Agent) executeToolCallInner(tc agentAPI.ToolCall, channel string, turnScenes []string) string {
-	// 参数被 max_tokens 截断（见 accumulateStream）：**不要**拿着残缺/空参数去调工具。
-	// 否则工具会报 "path is required" 这类与真因无关的错，模型看不出是截断，
-	// 只会原样重试（实测连续 4 次）。直接把可执行的指引交回模型。
-	if msg, ok := tc.Arguments["__truncated_error"].(string); ok && msg != "" {
-		log.Printf("[agent] tool %s skipped: arguments were truncated by max_tokens", tc.Name)
+	// 参数没法用（被 max_tokens 截断，或 JSON 写坏了）：**不要**拿着空/残缺参数去调工具。
+	// 否则工具会报 “path is required”“command is required” 这类与真因无关的错，
+	// 模型看不出真因、只能原样重试（实测 cmd_run 失败率高达 34%~48%）。
+	// __arg_error 里带的已经是分因写好的可执行指引，直接交回模型。
+	if msg, ok := tc.Arguments["__arg_error"].(string); ok && msg != "" {
+		log.Printf("[agent] tool %s skipped: arguments unusable (truncated or malformed)", tc.Name)
 		return msg
 	}
 

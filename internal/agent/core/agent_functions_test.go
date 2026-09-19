@@ -11,10 +11,10 @@ func TestEntitySimilarity(t *testing.T) {
 		a, b string
 		want float64
 	}{
-		{"", "", 0},         // empty → 0
-		{"a", "b", 0},       // single char → 0
-		{"张三", "张三", 1.0}, // identical → 1.0
-		{"张三", "李四", 0},  // no common bigrams
+		{"", "", 0},                    // empty → 0
+		{"a", "b", 0},                  // single char → 0
+		{"张三", "张三", 1.0},              // identical → 1.0
+		{"张三", "李四", 0},                // no common bigrams
 		{"iPhone", "iPhone 15", 0.625}, // partial overlap
 	}
 	for _, tt := range tests {

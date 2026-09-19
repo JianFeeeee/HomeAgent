@@ -7,9 +7,9 @@ import (
 )
 
 const (
-	maxPluginCrashes  = 3
-	crashWindow       = 5 * time.Minute
-	reloadCooldown    = 30 * time.Second
+	maxPluginCrashes = 3
+	crashWindow      = 5 * time.Minute
+	reloadCooldown   = 30 * time.Second
 )
 
 type pluginHealthTracker struct {

@@ -166,6 +166,7 @@ func inferToolPlugin(name string) string {
 // 各 handler 共享 *StageContext，通过其内置 RWMutex 安全读写：
 //   - 只读操作先调用 ctx.RLock() / defer ctx.RUnlock()
 //   - 写操作（如设置 ctx.Response）先调用 ctx.Lock() / defer ctx.Unlock()
+//
 // 如果任意 handler 设置了 Response，后续 handler 可通过 ctx.IsResponded() 判断后提前返回。
 // handler 返回的 error 会被收集到 ctx.Errors 中并记录日志，不会中断其他 handler 的执行。
 func (h *StageHost) RunStage(stage sdk.Stage, ctx *sdk.StageContext) {
