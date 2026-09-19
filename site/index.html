@@ -820,6 +820,60 @@
         color: var(--text-dim);
         line-height: 1.65;
       }
+      /* 源码链接：卡片底部一行，点进对应源码仓路径 */
+      .psrc {
+        display: flex;
+        align-items: center;
+        gap: 0.4rem;
+        margin-top: 0.75rem;
+        padding-top: 0.65rem;
+        border-top: 1px dashed var(--border);
+        font-size: 0.76rem;
+        font-family: var(--font-mono);
+        color: var(--text-muted);
+        text-decoration: none;
+        transition: color 0.2s var(--ease);
+      }
+      a.psrc:hover { color: var(--brand-cyan); }
+      a.psrc:focus-visible {
+        outline: 2px solid var(--brand-sky);
+        outline-offset: 2px;
+        border-radius: var(--radius-sm);
+      }
+      .psrc-r {
+        flex: 0 0 auto;
+        padding: 0.06rem 0.4rem;
+        border-radius: var(--radius-sm);
+        font-size: 0.7rem;
+        background: rgba(119, 128, 154, 0.16);
+        color: var(--text-dim);
+      }
+      .psrc-p {
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+      }
+      /* editdoc：卡片写 v2.0.0，公开仓只有 v1.0.0 —— 显式标出，不静默指过去 */
+      .psrc-warn .psrc-r { background: rgba(245, 158, 11, 0.18); color: var(--brand-gold); }
+      .psrc-note {
+        margin: 0.4rem 0 0;
+        font-size: 0.72rem;
+        line-height: 1.55;
+        color: var(--brand-gold);
+      }
+      .psrc-out {
+        margin-left: auto;
+        opacity: 0.55;
+        transition: transform 0.2s var(--ease), opacity 0.2s var(--ease);
+      }
+      a.psrc:hover .psrc-out { opacity: 1; transform: translate(2px, -2px); }
+      /* 无公开地址：不可点，视觉上也要看得出来 */
+      .psrc-none {
+        cursor: default;
+        opacity: 0.75;
+        font-style: italic;
+      }
+
       /* 全部展开时的网格 */
       .pdetail.all {
         grid-template-columns: repeat(auto-fill, minmax(300px, 1fr));
@@ -862,6 +916,34 @@
       section + section > .wrap > .sub {
         /* 占位：保持选择器有效，视觉由间距承担 */
       }
+
+      /* 备案号：公开站点合规要求，需始终可见 */
+      .beian {
+        margin: 1rem 0 0;
+        display: flex;
+        flex-wrap: wrap;
+        align-items: center;
+        gap: 0.5rem;
+        font-size: 0.78rem;
+        color: var(--text-muted);
+      }
+      .beian a {
+        color: var(--text-muted);
+        text-decoration: none;
+        border-bottom: 1px solid transparent;
+        transition: color 0.2s var(--ease), border-color 0.2s var(--ease);
+      }
+      .beian a:hover {
+        color: var(--text-dim);
+        border-bottom-color: var(--border-hi);
+      }
+      .beian:focus-within a { outline: none; }
+      .beian a:focus-visible {
+        outline: 2px solid var(--brand-sky);
+        outline-offset: 2px;
+        border-radius: 2px;
+      }
+      .beian-sep { opacity: 0.45; }
 
       /* 打印：不显示装饰与折叠 */
       @media print {
@@ -1338,15 +1420,16 @@
             <div class="card reveal rise" style="--d:360ms">
               <h3>媒体也是一等节点</h3>
               <p>
-                                图片、音频不是附件，而是三层里的一类节点：内容寻址（相同字节只存一份）、
-                引用计数 GC（有引用绝不删）。
+                                图片、音频不是附件，而是三层里的一类节点：内容寻址（相同字节只存一份）。
+                媒体不单独记引用账本 —— 删掉持有它的记忆块才删内容，与文本块同一套规则。
               </p>
             </div>
             <div class="card reveal rise" style="--d:450ms">
-              <h3>描述才是持久语义</h3>
+              <h3>图片靠自己的向量被检索</h3>
               <p>
-                                视觉模型生成的描述以 <span class="mono">[mime digest] 描述</span> 写入纯文本记忆并参与检索，
-                blob 只是可淘汰的缓存。所以几个月后「那张三色图」仍搜得到。
+                图像是真正的记忆块，不是「描述文本 + 可淘汰的 blob」。
+                旧实现靠视觉模型生成的描述当索引，现已弃用 ——
+                文本标签只留 <span class="mono">[mime digest]</span>，召回走统一空间的图像向量。
               </p>
             </div>
             <div class="card reveal rise" style="--d:540ms">
@@ -1531,82 +1614,103 @@ echo <span class="s">"你好，记住我喜欢喝咖啡"</span> | ./build/waiter
           <div class="pcard" id="p-a2a">
             <div class="pcard-head"><code>a2a</code><span class="ver">v1.3.1</span></div>
             <p>Agent-to-Agent 协议通信插件，支持双向 A2A 通信：可查询其他 Agent 并回复其请求。提供 HTTP 服务端暴露本 Agent 能力。</p>
+            <a class="psrc" href="https://gitcode.com/JianFeeeee/homeagent-sdk/blob/main/example/a2a" target="_blank" rel="noopener noreferrer" title="SDK example/a2a"><span class="psrc-r">SDK</span><span class="psrc-p">example/a2a</span><span class="psrc-out">↗</span></a>
           </div>
           <div class="pcard" id="p-acp">
             <div class="pcard-head"><code>acp</code><span class="ver">v1.2.1</span></div>
             <p>Agent Client Protocol 通信插件：充当 ACP 服务端接受其他 Agent 的任务请求，同时提供客户端工具向远程 ACP Agent（如 opencode）发起会话并读取回复</p>
+            <a class="psrc" href="https://gitcode.com/JianFeeeee/homeagent-sdk/blob/main/example/acp" target="_blank" rel="noopener noreferrer" title="SDK example/acp"><span class="psrc-r">SDK</span><span class="psrc-p">example/acp</span><span class="psrc-out">↗</span></a>
           </div>
           <div class="pcard" id="p-bili">
             <div class="pcard-head"><code>bili</code><span class="ver">v1.2.0</span></div>
             <p>B站视频下载工具，基于 yt-dlp 引擎。支持查看视频清晰度列表、指定格式下载、可配置下载目录。</p>
+            <a class="psrc" href="https://gitcode.com/JianFeeeee/homeagent-sdk/blob/main/example/bili" target="_blank" rel="noopener noreferrer" title="SDK example/bili"><span class="psrc-r">SDK</span><span class="psrc-p">example/bili</span><span class="psrc-out">↗</span></a>
           </div>
           <div class="pcard" id="p-browser">
             <div class="pcard-head"><code>browser</code><span class="ver">v2.4.1</span></div>
             <p>统一浏览器插件：搜索、HTTP抓取(quick)、无头渲染(normal)、交互式浏览器(interactive/CDP)</p>
+            <a class="psrc" href="https://gitcode.com/JianFeeeee/homeagent-sdk/blob/main/example/browser" target="_blank" rel="noopener noreferrer" title="SDK example/browser"><span class="psrc-r">SDK</span><span class="psrc-p">example/browser</span><span class="psrc-out">↗</span></a>
           </div>
           <div class="pcard" id="p-calendar">
             <div class="pcard-head"><code>calendar</code><span class="ver">v1.1.0</span></div>
             <p>日历事件管理，支持提醒和重复事件</p>
+            <a class="psrc" href="https://gitcode.com/JianFeeeee/homeagent-sdk/blob/main/example/calendar" target="_blank" rel="noopener noreferrer" title="SDK example/calendar"><span class="psrc-r">SDK</span><span class="psrc-p">example/calendar</span><span class="psrc-out">↗</span></a>
           </div>
           <div class="pcard" id="p-deepsearch">
             <div class="pcard-head"><code>deepsearch</code><span class="ver">v1.1.2</span></div>
             <p>为 agent 提供真正的联网信息检索：本地 SearXNG 聚合多引擎（返回标题/URL/摘要/时间），支持新闻、时间范围、指定引擎；并提供网页正文抽取与「搜索+读前K篇」的深检索</p>
+            <a class="psrc" href="https://gitcode.com/JianFeeeee/homeagent-sdk/blob/main/example/deepsearch" target="_blank" rel="noopener noreferrer" title="SDK example/deepsearch"><span class="psrc-r">SDK</span><span class="psrc-p">example/deepsearch</span><span class="psrc-out">↗</span></a>
           </div>
           <div class="pcard" id="p-editdoc">
             <div class="pcard-head"><code>editdoc</code><span class="ver">v2.0.0</span></div>
             <p>全能办公插件：新建/读取/编辑/转换 docx·xlsx·pptx·md·csv·txt（基于 python-docx / openpyxl / python-pptx / soffice / pandoc）</p>
+            <a class="psrc" href="https://gitcode.com/JianFeeeee/homeagent-sdk/blob/main/example/editdoc" target="_blank" rel="noopener noreferrer" title="SDK example/editdoc"><span class="psrc-r">SDK</span><span class="psrc-p">example/editdoc</span><span class="psrc-out">↗</span></a>
+            <p class="psrc-note">公开仓中的 example 仍是 v1.0.0；v2.0.0 全能版源码尚未公开。</p>
           </div>
           <div class="pcard" id="p-homeagent-mail-bridge">
             <div class="pcard-head"><code>homeagent-mail-bridge</code><span class="ver">v0.2.2</span></div>
             <p>HomeAgent 接入 AgentMail：邮件驱动的多智能体协作</p>
+            <a class="psrc" href="https://gitea.jianfgit.xyz/jianf/MailUI4Agents/src/branch/main/plugins/homeagent-mail-bridge" target="_blank" rel="noopener noreferrer" title="agentmail plugins/homeagent-mail-bridge"><span class="psrc-r">agentmail</span><span class="psrc-p">plugins/homeagent-mail-bridge</span><span class="psrc-out">↗</span></a>
           </div>
           <div class="pcard" id="p-mc">
             <div class="pcard-head"><code>mc</code><span class="ver">v0.1.8</span></div>
-            <p>把 mineflayer 虚拟 MC 客户端封装为 HomeAgent 的 chan:mc IO 通道（两阶段激活 + 动作工具）</p>
+            <p>把 mineflayer 虚拟 MC 客户端封装为 HomeAgent 的 chan:mc IO 通道（两阶段激活 + 动作工具）</p></span>
+            <span class="psrc psrc-none" title="该插件源码在本地开发仓，尚无公开地址"><span class="psrc-p">本地开发仓（无公开地址）</span></span>
           </div>
           <div class="pcard" id="p-memo">
             <div class="pcard-head"><code>memo</code><span class="ver">v1.1.0</span></div>
             <p>待办与备忘录插件。待办（todo_add/todo_complete/todo_list）会主动提醒；备忘录（memo_create/memo_list/memo_delete）纯记事不提醒。</p>
+            <a class="psrc" href="https://gitcode.com/JianFeeeee/homeagent-sdk/blob/main/example/memo" target="_blank" rel="noopener noreferrer" title="SDK example/memo"><span class="psrc-r">SDK</span><span class="psrc-p">example/memo</span><span class="psrc-out">↗</span></a>
           </div>
           <div class="pcard" id="p-music">
             <div class="pcard-head"><code>music</code><span class="ver">v0.1.0</span></div>
             <p>音乐搜索插件，支持搜索歌曲和查看歌词（基于网易云音乐）</p>
+            <a class="psrc" href="https://gitcode.com/JianFeeeee/homeagent-sdk/blob/main/example/music" target="_blank" rel="noopener noreferrer" title="SDK example/music"><span class="psrc-r">SDK</span><span class="psrc-p">example/music</span><span class="psrc-out">↗</span></a>
           </div>
           <div class="pcard" id="p-ocr">
             <div class="pcard-head"><code>ocr</code><span class="ver">v1.0.0</span></div>
             <p>图片文字识别工具，基于 Tesseract OCR 引擎。支持从 URL 或 base64 图片中提取文字内容。</p>
+            <a class="psrc" href="https://gitcode.com/JianFeeeee/homeagent-sdk/blob/main/example/ocr" target="_blank" rel="noopener noreferrer" title="SDK example/ocr"><span class="psrc-r">SDK</span><span class="psrc-p">example/ocr</span><span class="psrc-out">↗</span></a>
           </div>
           <div class="pcard" id="p-plugindev">
             <div class="pcard-head"><code>plugindev</code><span class="ver">v1.0.0</span></div>
             <p>把 hmapdev 工具链封装成 Agent 可调用的工具：脚手架生成插件工程、构建打包 .hmap、管理 SDK 版本。配合 plugin_install 即可让 Agent 自己做完「新建插件 → 构建 → 安装」全流程。</p>
+            <a class="psrc" href="https://gitcode.com/JianFeeeee/homeagent-sdk/blob/main/example/plugindev" target="_blank" rel="noopener noreferrer" title="SDK example/plugindev"><span class="psrc-r">SDK</span><span class="psrc-p">example/plugindev</span><span class="psrc-out">↗</span></a>
           </div>
           <div class="pcard" id="p-qq">
             <div class="pcard-head"><code>qq</code><span class="ver">v1.4.1</span></div>
             <p>QQ 消息收发插件，通过 NapCat 协议桥接</p>
+            <a class="psrc" href="https://gitcode.com/JianFeeeee/homeagent-sdk/blob/main/example/qq" target="_blank" rel="noopener noreferrer" title="SDK example/qq"><span class="psrc-r">SDK</span><span class="psrc-p">example/qq</span><span class="psrc-out">↗</span></a>
           </div>
           <div class="pcard" id="p-recoverydiag">
             <div class="pcard-head"><code>recoverydiag</code><span class="ver">v0.2.0</span></div>
             <p>快速检查/崩溃取证工具集：diag_triage（退出码/信号/存活粗分）、diag_db（config.db 完整性 + LLM 源解析校验）、diag_log_scan（日志签名命中）、diag_delta（last-good 快照 vs 现状 diff）、diag_loc（正交综合定位）。全部返回结论而非原文，确定性、不消耗 LLM token，供 guard / failback 恢复决策使用。</p>
+            <a class="psrc" href="https://gitcode.com/JianFeeeee/homeagent-sdk/blob/main/example/recoverydiag" target="_blank" rel="noopener noreferrer" title="SDK example/recoverydiag"><span class="psrc-r">SDK</span><span class="psrc-p">example/recoverydiag</span><span class="psrc-out">↗</span></a>
           </div>
           <div class="pcard" id="p-rss">
             <div class="pcard-head"><code>rss</code><span class="ver">v1.1.0</span></div>
             <p>RSS/Atom 订阅监控插件，自动检测更新并推送通知</p>
+            <a class="psrc" href="https://gitcode.com/JianFeeeee/homeagent-sdk/blob/main/example/rss" target="_blank" rel="noopener noreferrer" title="SDK example/rss"><span class="psrc-r">SDK</span><span class="psrc-p">example/rss</span><span class="psrc-out">↗</span></a>
           </div>
           <div class="pcard" id="p-sanitizer">
             <div class="pcard-head"><code>sanitizer</code><span class="ver">v0.1.0</span></div>
             <p>清洗 LLM 输出中的工具调用残留（思维泄漏）</p>
+            <a class="psrc" href="https://gitcode.com/JianFeeeee/homeagent-sdk/blob/main/example/sanitizer" target="_blank" rel="noopener noreferrer" title="SDK example/sanitizer"><span class="psrc-r">SDK</span><span class="psrc-p">example/sanitizer</span><span class="psrc-out">↗</span></a>
           </div>
           <div class="pcard" id="p-vanblog">
             <div class="pcard-head"><code>vanblog</code><span class="ver">v1.0.0</span></div>
             <p>管理 VanBlog 开源博客系统：文章的增删改查、分类标签管理、草稿发布、备份导出等</p>
+            <a class="psrc" href="https://gitcode.com/JianFeeeee/homeagent-sdk/blob/main/example/vanblog" target="_blank" rel="noopener noreferrer" title="SDK example/vanblog"><span class="psrc-r">SDK</span><span class="psrc-p">example/vanblog</span><span class="psrc-out">↗</span></a>
           </div>
           <div class="pcard" id="p-vikunja">
             <div class="pcard-head"><code>vikunja</code><span class="ver">v1.0.1</span></div>
             <p>Vikunja 待办/任务管理：任务增删改查、项目与看板桶、标签、指派、评论、关联、附件、保存筛选器、团队与分享、通知、订阅、Webhook、时间跟踪、数据导入、实例管理；并附通用 API 直通工具兜底</p>
+            <a class="psrc" href="https://gitcode.com/JianFeeeee/homeagent-sdk/blob/main/example/vikunja" target="_blank" rel="noopener noreferrer" title="SDK example/vikunja"><span class="psrc-r">SDK</span><span class="psrc-p">example/vikunja</span><span class="psrc-out">↗</span></a>
           </div>
           <div class="pcard" id="p-weather">
             <div class="pcard-head"><code>weather</code><span class="ver">v1.0.0</span></div>
             <p>天气查询插件（基于 wttr.in），支持实时天气和未来预报</p>
+            <a class="psrc" href="https://gitcode.com/JianFeeeee/homeagent-sdk/blob/main/example/weather" target="_blank" rel="noopener noreferrer" title="SDK example/weather"><span class="psrc-r">SDK</span><span class="psrc-p">example/weather</span><span class="psrc-out">↗</span></a>
           </div>
           </div>
         </div>
@@ -1658,7 +1762,7 @@ echo <span class="s">"你好，记住我喜欢喝咖啡"</span> | ./build/waiter
               <summary>记忆会不会无限膨胀？</summary>
               <p>
                                 不会。三层是迁移而非复制：上下文事件裁剪后归档成文档，文档冷掉后蒸馏成
-                图谱三元组。图谱有去重与 UNIQUE 约束，媒体靠引用计数 GC 回收无主内容。
+                图谱三元组。图谱有去重与 UNIQUE 约束；媒体跟着记忆块走，块被永久删除时才回收字节。
               </p>
             </details>
 
@@ -1719,6 +1823,11 @@ echo <span class="s">"你好，记住我喜欢喝咖啡"</span> | ./build/waiter
           </p>
           <p style="margin: 0">
                         AGPL-3.0-only。通过 HTTP 提供交互式服务时，须向使用者提供完整对应源码（§13）。
+          </p>
+          <p class="beian">
+            <a href="https://beian.miit.gov.cn" target="_blank" rel="noopener noreferrer">豫ICP备2024074105号-1</a>
+            <span class="beian-sep">·</span>
+            <a href="https://beian.mps.gov.cn" target="_blank" rel="noopener noreferrer">豫公网安备41070202001579号</a>
           </p>
         </div>
       </div>
