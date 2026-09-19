@@ -1,0 +1,862 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>HomeAgent — 常驻型个人 Agent 框架</title>
+    <meta name="description" content="HomeAgent 是一个持续运行的个人智能 Agent 框架：内核零 IO（所有 IO 由插件承载）、三层记忆（Context → Document → Graph）、输入调度（两类别 + 四级中断）与驻留式子 agent。" />
+    <link rel="icon" type="image/svg+xml" href="assets/logo.svg" />
+    <meta property="og:title" content="HomeAgent — 常驻型个人 Agent 框架" />
+    <meta property="og:description" content="内核零 IO · 三层记忆 · 四级中断调度 · 驻留式子 agent" />
+    <meta property="og:type" content="website" />
+    <style>
+      /* ── 设计令牌：取自品牌指南的配色（三色对应三层记忆）── */
+      :root {
+        --brand-blue: #3b82f6;   /* Context 层 */
+        --brand-cyan: #06b6d4;   /* Document 层 */
+        --brand-gold: #f59e0b;   /* Graph / Kernel */
+        --brand-violet: #8b5cf6;
+        --brand-sky: #38bdf8;
+
+        --bg: #0b1020;
+        --bg-soft: rgba(17, 24, 44, 0.72);
+        --bg-card: rgba(17, 24, 44, 0.6);
+        --border: rgba(255, 255, 255, 0.09);
+        --text: #eef1f8;
+        --text-dim: #a7b0c4;
+        --text-muted: #77809a;
+
+        --radius-sm: 6px;
+        --radius-md: 10px;
+        --radius-lg: 14px;
+        --radius-pill: 999px;
+
+        --font-sans: "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei",
+          system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+        --font-mono: "SF Mono", "JetBrains Mono", Menlo, Consolas, monospace;
+
+        --ease: cubic-bezier(0.22, 1, 0.36, 1);
+        --dur: 300ms;
+
+        --shadow-md: 0 4px 16px rgba(0, 0, 0, 0.28);
+        --shadow-lg: 0 12px 36px rgba(0, 0, 0, 0.38);
+        --shadow-glow: 0 0 0 1px rgba(59, 130, 246, 0.22),
+          0 8px 32px rgba(59, 130, 246, 0.18);
+      }
+
+      * { box-sizing: border-box; }
+
+      html { scroll-behavior: smooth; }
+
+      body {
+        margin: 0;
+        background: var(--bg);
+        color: var(--text);
+        font-family: var(--font-sans);
+        line-height: 1.75;
+        -webkit-font-smoothing: antialiased;
+      }
+
+      /* 背景光晕：蓝/青/金，呼应三层记忆 */
+      body::before {
+        content: "";
+        position: fixed;
+        inset: 0;
+        z-index: -1;
+        background:
+          radial-gradient(60rem 40rem at 15% -10%, rgba(59, 130, 246, 0.16), transparent 60%),
+          radial-gradient(50rem 35rem at 85% 5%, rgba(6, 182, 212, 0.12), transparent 60%),
+          radial-gradient(45rem 30rem at 50% 100%, rgba(245, 158, 11, 0.08), transparent 60%);
+        pointer-events: none;
+      }
+
+      .wrap { width: min(1120px, 92vw); margin: 0 auto; }
+
+      /* ── 顶部导航 ── */
+      header {
+        position: sticky;
+        top: 0;
+        z-index: 50;
+        backdrop-filter: blur(14px);
+        background: rgba(11, 16, 32, 0.78);
+        border-bottom: 1px solid var(--border);
+      }
+      nav {
+        display: flex;
+        align-items: center;
+        gap: 1.25rem;
+        padding: 0.85rem 0;
+      }
+      nav .brand {
+        display: flex;
+        align-items: center;
+        gap: 0.6rem;
+        font-weight: 700;
+        letter-spacing: 0.01em;
+        margin-right: auto;
+      }
+      nav .brand img { width: 30px; height: 30px; border-radius: 8px; }
+      nav a.link {
+        color: var(--text-dim);
+        text-decoration: none;
+        font-size: 0.92rem;
+        padding: 0.35rem 0.2rem;
+        border-bottom: 2px solid transparent;
+        transition: color var(--dur) var(--ease), border-color var(--dur) var(--ease);
+      }
+      nav a.link:hover { color: var(--text); border-bottom-color: var(--brand-blue); }
+      nav .en { color: var(--text-muted); font-size: 0.85rem; }
+      @media (max-width: 760px) {
+        nav { flex-wrap: wrap; gap: 0.6rem; }
+        nav .hide-sm { display: none; }
+      }
+
+      /* ── Hero ── */
+      .hero { padding: 5.5rem 0 4rem; }
+      .hero-grid {
+        display: grid;
+        grid-template-columns: 1.35fr 1fr;
+        gap: 3rem;
+        align-items: center;
+      }
+      @media (max-width: 860px) {
+        .hero { padding: 3rem 0 2rem; }
+        .hero-grid { grid-template-columns: 1fr; gap: 2rem; text-align: center; }
+        .hero .cta { justify-content: center; }
+        .hero .mascot { order: -1; }
+        .hero .mascot img { width: 168px; }
+      }
+
+      .tagline {
+        display: inline-block;
+        font-size: 0.8rem;
+        letter-spacing: 0.08em;
+        text-transform: uppercase;
+        color: var(--brand-sky);
+        border: 1px solid rgba(56, 189, 248, 0.3);
+        background: rgba(56, 189, 248, 0.08);
+        padding: 0.3rem 0.7rem;
+        border-radius: var(--radius-pill);
+        margin-bottom: 1.1rem;
+      }
+      h1 {
+        font-size: clamp(2.1rem, 5vw, 3.2rem);
+        line-height: 1.2;
+        margin: 0 0 1rem;
+        letter-spacing: -0.02em;
+      }
+      h1 .grad {
+        background: linear-gradient(120deg, var(--brand-blue), var(--brand-cyan) 50%, var(--brand-gold));
+        -webkit-background-clip: text;
+        background-clip: text;
+        color: transparent;
+      }
+      .lede {
+        font-size: 1.08rem;
+        color: var(--text-dim);
+        max-width: 40rem;
+        margin: 0 0 1.6rem;
+      }
+      @media (max-width: 860px) { .lede { margin-inline: auto; } }
+
+      .cta { display: flex; gap: 0.75rem; flex-wrap: wrap; align-items: center; }
+      .btn {
+        display: inline-flex;
+        align-items: center;
+        gap: 0.45rem;
+        padding: 0.62rem 1.1rem;
+        border-radius: var(--radius-md);
+        font-size: 0.94rem;
+        font-weight: 600;
+        text-decoration: none;
+        border: 1px solid transparent;
+        transition: transform var(--dur) var(--ease), box-shadow var(--dur) var(--ease),
+          background var(--dur) var(--ease);
+      }
+      .btn:hover { transform: translateY(-1px); }
+      .btn-primary {
+        background: linear-gradient(135deg, var(--brand-blue), var(--brand-cyan));
+        color: #04121f;
+        box-shadow: var(--shadow-glow);
+      }
+      .btn-ghost {
+        background: var(--bg-soft);
+        color: var(--text);
+        border-color: var(--border);
+      }
+      .btn-ghost:hover { background: rgba(255, 255, 255, 0.06); }
+
+      .mascot { position: relative; }
+      .mascot img {
+        width: 100%;
+        max-width: 272px;
+        display: block;
+        margin: 0 auto;
+        border-radius: 22px;
+        /* 立绘自带蓝紫渐变底，正好在主题蓝系里 —— 当成有意的圆角卡面，
+           而不是硬抠背景（原图是白底 + 蓝边，抠图会连带毁掉白裙子与发丝高光）。 */
+        border: 1px solid rgba(139, 92, 246, 0.35);
+        box-shadow: 0 18px 48px rgba(6, 182, 212, 0.24),
+          0 0 0 1px rgba(255, 255, 255, 0.06) inset;
+        animation: float 6s ease-in-out infinite;
+      }
+      /* 底部渐隐：让方形图与深色页面自然衔接 */
+      .mascot::after {
+        content: "";
+        position: absolute;
+        left: 0; right: 0; bottom: -1px;
+        height: 34%;
+        border-radius: 0 0 22px 22px;
+        background: linear-gradient(to bottom, transparent, rgba(11, 16, 32, 0.55));
+        pointer-events: none;
+      }
+      @keyframes float {
+        0%, 100% { transform: translateY(0); }
+        50% { transform: translateY(-9px); }
+      }
+      @media (prefers-reduced-motion: reduce) {
+        .mascot img { animation: none; }
+        html { scroll-behavior: auto; }
+      }
+
+      /* ── 通用区块 ── */
+      section { padding: 3.6rem 0; }
+      section > .wrap > h2 {
+        font-size: clamp(1.4rem, 3vw, 1.85rem);
+        margin: 0 0 0.5rem;
+        letter-spacing: -0.01em;
+      }
+      section > .wrap > .sub {
+        color: var(--text-dim);
+        margin: 0 0 2rem;
+        max-width: 46rem;
+      }
+
+      .card {
+        background: var(--bg-card);
+        border: 1px solid var(--border);
+        border-radius: var(--radius-lg);
+        padding: 1.4rem;
+        transition: border-color var(--dur) var(--ease), transform var(--dur) var(--ease),
+          box-shadow var(--dur) var(--ease);
+      }
+      .card:hover {
+        border-color: rgba(59, 130, 246, 0.35);
+        transform: translateY(-2px);
+        box-shadow: var(--shadow-md);
+      }
+      .card h3 { margin: 0 0 0.5rem; font-size: 1.05rem; }
+      .card p { margin: 0; color: var(--text-dim); font-size: 0.93rem; }
+      .card .icon {
+        width: 34px; height: 34px;
+        border-radius: var(--radius-sm);
+        display: grid; place-items: center;
+        margin-bottom: 0.8rem;
+        font-size: 1.05rem;
+      }
+
+      .grid-2 { display: grid; grid-template-columns: repeat(2, 1fr); gap: 1.1rem; }
+      .grid-3 { display: grid; grid-template-columns: repeat(3, 1fr); gap: 1.1rem; }
+      @media (max-width: 860px) {
+        .grid-2, .grid-3 { grid-template-columns: 1fr; }
+      }
+
+      /* ── 三层记忆：用品牌三色 ── */
+      .layers { display: grid; gap: 0.9rem; }
+      .layer {
+        display: grid;
+        grid-template-columns: 4px 1fr;
+        gap: 1.1rem;
+        background: var(--bg-card);
+        border: 1px solid var(--border);
+        border-radius: var(--radius-lg);
+        overflow: hidden;
+        transition: border-color var(--dur) var(--ease);
+      }
+      .layer:hover { border-color: var(--border); }
+      .layer .bar { border-radius: 0; }
+      .layer .body { padding: 1.05rem 1.2rem 1.05rem 0; }
+      .layer h3 { margin: 0 0 0.35rem; font-size: 1.02rem; }
+      .layer h3 .en { color: var(--text-muted); font-weight: 400; font-size: 0.85rem; margin-left: 0.4rem; }
+      .layer p { margin: 0; color: var(--text-dim); font-size: 0.92rem; }
+      .l-ctx .bar { background: var(--brand-blue); }
+      .l-doc .bar { background: var(--brand-cyan); }
+      .l-gph .bar { background: var(--brand-gold); }
+      .l-ctx h3 span.mark { color: var(--brand-blue); }
+      .l-doc h3 span.mark { color: var(--brand-cyan); }
+      .l-gph h3 span.mark { color: var(--brand-gold); }
+
+      /* ── 消息流程 ── */
+      .flow {
+        background: var(--bg-card);
+        border: 1px solid var(--border);
+        border-radius: var(--radius-lg);
+        padding: 1.4rem;
+        overflow-x: auto;
+      }
+      .flow pre {
+        margin: 0;
+        font-family: var(--font-mono);
+        font-size: 0.82rem;
+        line-height: 1.7;
+        color: var(--text-dim);
+        white-space: pre;
+      }
+      .flow .k-blue { color: var(--brand-blue); }
+      .flow .k-cyan { color: var(--brand-cyan); }
+      .flow .k-gold { color: var(--brand-gold); }
+      .flow .k-violet { color: var(--brand-violet); }
+      .flow .k-dim { color: var(--text-muted); }
+
+      /* ── 代码块 ── */
+      .code {
+        background: rgba(6, 10, 22, 0.85);
+        border: 1px solid var(--border);
+        border-radius: var(--radius-md);
+        padding: 1rem 1.15rem;
+        font-family: var(--font-mono);
+        font-size: 0.86rem;
+        color: #cdd3f5;
+        overflow-x: auto;
+        line-height: 1.7;
+      }
+      .code .c { color: var(--text-muted); }
+      .code .s { color: #c3e88d; }
+
+      /* ── 数字 ── */
+      .stats { display: grid; grid-template-columns: repeat(4, 1fr); gap: 1rem; }
+      @media (max-width: 860px) { .stats { grid-template-columns: repeat(2, 1fr); } }
+      .stat {
+        background: var(--bg-card);
+        border: 1px solid var(--border);
+        border-radius: var(--radius-lg);
+        padding: 1.2rem 1rem;
+        text-align: center;
+      }
+      .stat .n {
+        font-size: 1.7rem;
+        font-weight: 700;
+        letter-spacing: -0.02em;
+        background: linear-gradient(120deg, var(--brand-blue), var(--brand-cyan));
+        -webkit-background-clip: text;
+        background-clip: text;
+        color: transparent;
+      }
+      .stat .l { color: var(--text-muted); font-size: 0.86rem; }
+
+      /* ── 插件徽章 ── */
+      .badges { display: flex; flex-wrap: wrap; gap: 0.5rem; }
+      .badge {
+        font-family: var(--font-mono);
+        font-size: 0.8rem;
+        padding: 0.32rem 0.65rem;
+        border-radius: var(--radius-pill);
+        background: rgba(255, 255, 255, 0.05);
+        border: 1px solid var(--border);
+        color: var(--text-dim);
+        transition: border-color var(--dur) var(--ease), color var(--dur) var(--ease);
+      }
+      .badge:hover { border-color: rgba(6, 182, 212, 0.45); color: var(--text); }
+
+      /* ── 组件角色 ── */
+      .comp { display: grid; gap: 0.7rem; }
+      .comp .row {
+        display: grid;
+        grid-template-columns: minmax(9rem, auto) 1fr;
+        gap: 1rem;
+        padding: 0.75rem 1rem;
+        background: var(--bg-card);
+        border: 1px solid var(--border);
+        border-radius: var(--radius-md);
+        font-size: 0.9rem;
+        align-items: baseline;
+      }
+      .comp .row code {
+        font-family: var(--font-mono);
+        font-size: 0.85rem;
+        color: var(--brand-sky);
+      }
+      .comp .row span { color: var(--text-dim); }
+      @media (max-width: 760px) {
+        .comp .row { grid-template-columns: 1fr; gap: 0.25rem; }
+      }
+
+      /* ── FAQ ── */
+      details.faq {
+        background: var(--bg-card);
+        border: 1px solid var(--border);
+        border-radius: var(--radius-md);
+        padding: 0.95rem 1.15rem;
+        margin-bottom: 0.7rem;
+      }
+      details.faq summary {
+        cursor: pointer;
+        font-weight: 600;
+        font-size: 0.96rem;
+        list-style: none;
+      }
+      details.faq summary::-webkit-details-marker { display: none; }
+      details.faq summary::before { content: "＋ "; color: var(--brand-cyan); }
+      details.faq[open] summary::before { content: "－ "; }
+      details.faq p {
+        margin: 0.7rem 0 0;
+        color: var(--text-dim);
+        font-size: 0.92rem;
+      }
+
+      /* ── 页脚 ── */
+      footer {
+        border-top: 1px solid var(--border);
+        padding: 2.4rem 0 3rem;
+        color: var(--text-muted);
+        font-size: 0.88rem;
+      }
+      footer .cols {
+        display: grid;
+        grid-template-columns: repeat(4, 1fr);
+        gap: 1.6rem;
+        margin-bottom: 1.8rem;
+      }
+      @media (max-width: 860px) { footer .cols { grid-template-columns: repeat(2, 1fr); } }
+      footer h4 { color: var(--text); font-size: 0.9rem; margin: 0 0 0.6rem; }
+      footer ul { list-style: none; padding: 0; margin: 0; }
+      footer li { margin-bottom: 0.35rem; }
+      footer a { color: var(--text-dim); text-decoration: none; }
+      footer a:hover { color: var(--brand-cyan); }
+      footer .note {
+        border-top: 1px solid var(--border);
+        padding-top: 1.3rem;
+        line-height: 1.7;
+      }
+
+      a.plain { color: var(--brand-sky); text-decoration: none; }
+      a.plain:hover { text-decoration: underline; }
+      .mono { font-family: var(--font-mono); }
+      .muted { color: var(--text-muted); }
+      /* 滚入淡入：**默认可见**，JS 就绪后才接管。
+         为什么这样写：若默认 opacity:0，则 JS 未执行/抛错/被禁用时整页内容
+         永久不可见（实测：30 个 .reveal 里 26 个停在 opacity:0）。
+         所以动画必须由 JS 主动加 .js-reveal 才启用 —— 渐进增强，不是降级。 */
+      .js-reveal {
+        opacity: 0;
+        transform: translateY(14px);
+        transition: opacity 600ms var(--ease), transform 600ms var(--ease);
+      }
+      .js-reveal.in { opacity: 1; transform: none; }
+      @media (prefers-reduced-motion: reduce) {
+        .js-reveal { opacity: 1; transform: none; transition: none; }
+      }
+    </style>
+  </head>
+  <body>
+    <header>
+      <div class="wrap">
+        <nav>
+          <span class="brand">
+            <img src="assets/logo.svg" alt="HomeAgent logo" />
+            HomeAgent
+          </span>
+          <a class="link hide-sm" href="#features">特性</a>
+          <a class="link hide-sm" href="#memory">记忆</a>
+          <a class="link hide-sm" href="#architecture">架构</a>
+          <a class="link hide-sm" href="#quickstart">上手</a>
+          <a class="link" href="#faq">FAQ</a>
+        </nav>
+      </div>
+    </header>
+
+    <main>
+      <!-- ── Hero ── -->
+      <section class="hero">
+        <div class="wrap hero-grid">
+          <div>
+            <span class="tagline">常驻型个人 Agent 框架</span>
+            <h1>一个<span class="grad">不会忘记</span><br />也不会被一条长任务卡死的管家</h1>
+            <p class="lede">
+              HomeAgent 是内核 + 插件的双层 Agent 框架。内核只管
+              <strong>LLM 编排、记忆与调度</strong>；所有外部能力（消息、文件、网络、设备）
+              都是可独立安装、崩溃不牵连内核的插件。
+            </p>
+            <div class="cta">
+              <a class="btn btn-primary" href="#quickstart">快速上手 →</a>
+              <a class="btn btn-ghost" href="https://gitcode.com/JianFeeeee/HomeAgent">查看源码</a>
+            </div>
+          </div>
+          <div class="mascot">
+            <img src="assets/mascot.webp" alt="看板娘 小宅" />
+          </div>
+        </div>
+      </section>
+
+      <!-- ── 特性 ── -->
+      <section id="features">
+        <div class="wrap">
+          <h2 class="reveal">四个不那么常见的设计决定</h2>
+          <p class="sub reveal">
+            大多数框架先写功能再补边界。HomeAgent 反过来：先把
+            <strong>边界</strong>和<strong>调度</strong>定死，再往上加能力。
+          </p>
+
+          <div class="grid-2">
+            <div class="card reveal">
+              <div class="icon" style="background: rgba(59,130,246,.14); color: var(--brand-blue)">◇</div>
+              <h3>内核零 IO</h3>
+              <p>
+                内核不直接读写任何外部世界。收发消息、文件操作、网络请求、硬件交互
+                全部由插件经 PluginSDK 实现。于是「内核有多可信」与「某个插件有多安全」
+                成为两个可独立评估的问题。
+              </p>
+            </div>
+
+            <div class="card reveal">
+              <div class="icon" style="background: rgba(6,182,212,.14); color: var(--brand-cyan)">◈</div>
+              <h3>插件是独立进程</h3>
+              <p>
+                外部插件编译成普通 Go 二进制，由内核 spawn 为子进程，经
+                stdio JSON-RPC（控制）+ 共享内存段（数据）+ 事件环（通知）通信。
+                插件崩溃不影响内核，换掉 <span class="mono">plugin.bin</span> 即真热重载。
+              </p>
+            </div>
+
+            <div class="card reveal">
+              <div class="icon" style="background: rgba(245,158,11,.14); color: var(--brand-gold)">◉</div>
+              <h3>输入是有级别的</h3>
+              <p>
+                输入先进调度器，分「排队」与「中断」两类，中断再按“有多不能等”分 L1–L4。
+                高优先级可抢占并保存现场，同级不抢占。L4 只归内核
+                —— 所以“停止”按钮真的能立刻停下。
+              </p>
+            </div>
+
+            <div class="card reveal">
+              <div class="icon" style="background: rgba(139,92,246,.14); color: var(--brand-violet)">◆</div>
+              <h3>忙时有人顶班</h3>
+              <p>
+                主 agent 执行长任务时，后来的消息不会干等十几分钟：内核把积压交给
+                临时<strong>分诊助手</strong> —— 简单的直接办完，需要主 agent 的立刻回
+                「忙碌中，请稍候」。
+              </p>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <!-- ── 三层记忆 ── -->
+      <section id="memory">
+        <div class="wrap">
+          <h2 class="reveal">三层记忆：从「刚才说了什么」到「三年前说过什么」</h2>
+          <p class="sub reveal">
+            不是一个向量库包打天下，而是三层各司其职、逐层衰减与整合。
+            品牌的蓝 / 青 / 金三色，对应的就是这三层。
+          </p>
+
+          <div class="layers">
+            <div class="layer l-ctx reveal">
+              <div class="bar"></div>
+              <div class="body">
+                <h3><span class="mark">①</span> Context<span class="en">工作窗口</span></h3>
+                <p>
+                  内存中的事件窗口，按与当前输入的相关性评分排序（预训练词向量 → 余弦相似度，
+                  TF-IDF 回退），并保护最近若干条。低分事件自动下沉。
+                </p>
+              </div>
+            </div>
+
+            <div class="layer l-doc reveal">
+              <div class="bar"></div>
+              <div class="body">
+                <h3><span class="mark">②</span> Document<span class="en">文件记忆</span></h3>
+                <p>
+                  JSON + TF-IDF 索引的中间层。支持显式提交与隐式归档；
+                  冷数据按时间下沉，蒸馏成三元组进入图谱。
+                </p>
+              </div>
+            </div>
+
+            <div class="layer l-gph reveal">
+              <div class="bar"></div>
+              <div class="body">
+                <h3><span class="mark">③</span> Graph<span class="en">图数据库</span></h3>
+                <p>
+                  SQLite 持久化实体与关系，BFS 遍历召回。蒸馏管道从对话里提取三元组，
+                  越用越准；这是“几个月前的事还记得”的落点。
+                </p>
+              </div>
+            </div>
+          </div>
+
+          <div class="grid-3" style="margin-top: 1.2rem">
+            <div class="card reveal">
+              <h3>媒体也是一等节点</h3>
+              <p>
+                图片/音频不是附件，而是三层里的一类节点：内容寻址存储（相同字节只存一份）、
+                引用计数 GC（有引用绝不删）。
+              </p>
+            </div>
+            <div class="card reveal">
+              <h3>描述才是持久语义</h3>
+              <p>
+                视觉模型生成的描述以 <span class="mono">[mime digest] 描述</span> 写进纯文本记忆并参与检索；
+                blob 只是可被淘汰的缓存。所以几个月后“那张三色图”仍能搜到。
+              </p>
+            </div>
+            <div class="card reveal">
+              <h3>统一多模态空间</h3>
+              <p>
+                文本与图像落在同一向量空间（默认 Chinese-CLIP），
+                因此可以用一句话搜图，也可以用图找相关记忆。
+              </p>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <!-- ── 架构 ── -->
+      <section id="architecture">
+        <div class="wrap">
+          <h2 class="reveal">一条消息进来之后</h2>
+          <p class="sub reveal">
+            输入先过调度器，再进处理管道；管道有 7 个阶段钩子，插件可在此改写或短路。
+          </p>
+
+          <div class="flow reveal">
+            <pre>
+  <span class="k-dim">外部输入（QQ / WebUI / CLI / 邮件 / 设备 …）</span>
+        │
+        ▼
+  <span class="k-blue">输入调度器</span>  <span class="k-dim">两类别 · 四级中断 L1–L4</span>
+        │   ├─ 同级不抢占 → 入队列
+        │   ├─ 更高级     → <span class="k-gold">抢占</span>（现场压入中断栈，稍后恢复）
+        │   └─ 忙太久     → <span class="k-violet">转投</span> 临时分诊助手
+        ▼
+  <span class="k-cyan">处理管道</span>  <span class="k-dim">on_input → pre_action → post_action → before/after_toolcall → before/after_output</span>
+        │   记忆召回 + 人格注入 + LLM 调用 + 工具循环
+        ▼
+  <span class="k-gold">三层记忆</span>  <span class="k-dim">Context → Document → Graph</span>
+        │
+        ▼
+  <span class="k-blue">输出通道</span>  <span class="k-dim">可寻址到具体 agent（父 ↔ 驻留子）</span>
+</pre>
+          </div>
+
+          <h2 class="reveal" style="margin-top: 3rem">核心组件</h2>
+          <div class="comp reveal">
+            <div class="row"><code>homed</code><span>常驻内核进程：LLM 编排、记忆管理、输入调度、插件生命周期</span></div>
+            <div class="row"><code>PluginSDK</code><span>四通道：注册工具 / 挂阶段钩子 / 订阅事件 / 声明输出通道</span></div>
+            <div class="row"><code>inputch</code><span>最基本的输入路由单位，可划给某个 agent（含驻留子）</span></div>
+            <div class="row"><code>Stage</code><span>7 个处理阶段钩子，插件可改写或短路消息流</span></div>
+            <div class="row"><code>resident</code><span>驻留子 agent：独立调度器 + temp 图记忆，父可查看/收发/压缩/回收</span></div>
+            <div class="row"><code>hmapdev</code><span>插件工具链：生成工程、构建 .hmap、安装</span></div>
+          </div>
+
+          <div class="stats reveal" style="margin-top: 2rem">
+            <div class="stat"><div class="n">36</div><div class="l">外部插件（实测在跑）</div></div>
+            <div class="stat"><div class="n">340</div><div class="l">可用工具</div></div>
+            <div class="stat"><div class="n">110k</div><div class="l">Go 代码行</div></div>
+            <div class="stat"><div class="n">10</div><div class="l">LLM 协议适配器</div></div>
+          </div>
+        </div>
+      </section>
+
+      <!-- ── 上手 ── -->
+      <section id="quickstart">
+        <div class="wrap">
+          <h2 class="reveal">跑起来</h2>
+          <p class="sub reveal">
+            依赖 Go 1.25+ 与 CGo（sqlite3）。内核需 Linux —— Windows 上
+            <span class="mono">homed</span> 跑在 WSL2 里，只构建 <span class="mono">waiter.exe</span>。
+          </p>
+
+          <div class="code reveal"><span class="c"># 构建守护进程 + CLI</span>
+make build build-cli
+
+<span class="c"># 启动内核（数据目录自定）</span>
+./build/homed -data /tmp/ha
+
+<span class="c"># 另开一个终端：交互模式，或单条消息</span>
+./build/waiter
+echo <span class="s">"你好，记住我喜欢喝咖啡"</span> | ./build/waiter</div>
+
+          <p class="sub reveal" style="margin-top: 1.2rem">
+            WebUI 与 API 密钥在 <span class="mono">http://localhost:8080</span> 配置，持久化在 SQLite。
+          </p>
+
+          <h2 class="reveal" style="margin-top: 3rem">开箱可用的插件</h2>
+          <p class="sub reveal">外部插件经 <span class="mono">hmapdev</span> 构建为独立二进制，可单独安装、卸载、热重载。</p>
+          <div class="badges reveal">
+            <span class="badge">qq</span>
+            <span class="badge">wechat</span>
+            <span class="badge">browser</span>
+            <span class="badge">files</span>
+            <span class="badge">memo</span>
+            <span class="badge">calendar</span>
+            <span class="badge">rss</span>
+            <span class="badge">editdoc</span>
+            <span class="badge">ocr</span>
+            <span class="badge">music</span>
+            <span class="badge">bili</span>
+            <span class="badge">ai_image</span>
+            <span class="badge">weather</span>
+            <span class="badge">vikunja</span>
+            <span class="badge">vanblog</span>
+            <span class="badge">deepsearch</span>
+            <span class="badge">mcp</span>
+            <span class="badge">a2a</span>
+            <span class="badge">acp</span>
+            <span class="badge">mc</span>
+            <span class="badge">remotedevice</span>
+            <span class="badge">recoverydiag</span>
+            <span class="badge muted">…共 36 个</span>
+          </div>
+        </div>
+      </section>
+
+      <!-- ── FAQ ── -->
+      <section id="faq">
+        <div class="wrap">
+          <h2 class="reveal">常见问题</h2>
+          <p class="sub reveal">这些是设计上最容易引起误解的地方。</p>
+
+          <div class="reveal">
+            <details class="faq">
+              <summary>「内核零 IO」是不是意味着内核很简单？</summary>
+              <p>
+                恰恰相反——零 IO 是为了让内核能专注做难的部分：输入调度（四级中断、
+                抢占与现场保存）、上下文预算、三层记忆的蒸馏与召回。
+                把 IO 挪出去之后，这些才有清晰的所有权。
+              </p>
+            </details>
+
+            <details class="faq">
+              <summary>插件崩了会不会把 Agent 带崩？</summary>
+              <p>
+                不会。从 v1.0.0 起外部插件是独立子进程，与内核只通过
+                stdio JSON-RPC、共享内存段、事件环三个面通信。插件崩溃后内核摘除其
+                注册面（工具/阶段/通道）并按退避重启它，其余插件与内核不受影响。
+              </p>
+            </details>
+
+            <details class="faq">
+              <summary>为什么消息会「排队」而不是立即处理？</summary>
+              <p>
+                因为同一时刻只应该有一个任务在改上下文。同级中断不抢占同级任务——
+                抢了会让两边都做一半。需要立刻插队的场景请用更高级别的中断
+                （如 L4：内核与内核级插件），而不是让所有消息都变成抢占者。
+              </p>
+            </details>
+
+            <details class="faq">
+              <summary>长任务会不会让用户等很久？</summary>
+              <p>
+                这正是「分诊助手」要解决的。主 agent 忙超过阈值（默认 5 分钟）且积压够多时，
+                内核会拉起一个临时驻留子接手积压：能直接办的办完并回复，
+                需要主 agent 的立刻回一句「忙碌中，请稍候」。
+              </p>
+            </details>
+
+            <details class="faq">
+              <summary>记忆会不会无限膨胀？</summary>
+              <p>
+                不会。三层是<strong>迁移</strong>关系而不是复制：上下文事件被裁剪后归档成文档，
+                文档冷掉后蒸馏成图谱三元组。图谱有去重与 UNIQUE 约束，
+                媒体则靠引用计数 GC 回收无主内容。
+              </p>
+            </details>
+
+            <details class="faq">
+              <summary>能换 LLM 吗？</summary>
+              <p>
+                可以。内核不绑定任何厂商：每个 LLM 源对应一个 Lua 脚本负责请求/响应转换，
+                仓库内置 10 个适配器（OpenAI、Anthropic、Gemini、DeepSeek、Groq、Ollama 等），
+                也可以自己写一个接任意兼容 API。
+              </p>
+            </details>
+          </div>
+        </div>
+      </section>
+    </main>
+
+    <footer>
+      <div class="wrap">
+        <div class="cols">
+          <div>
+            <h4>文档</h4>
+            <ul>
+              <li><a href="https://gitcode.com/JianFeeeee/HomeAgent/blob/main/assets/docs/zh/OVERVIEW.md">项目概览</a></li>
+              <li><a href="https://gitcode.com/JianFeeeee/HomeAgent/blob/main/assets/docs/zh/ARCHITECTURE.md">技术架构</a></li>
+              <li><a href="https://gitcode.com/JianFeeeee/HomeAgent/blob/main/assets/docs/zh/PLUGIN_DEV.md">插件开发</a></li>
+              <li><a href="https://gitcode.com/JianFeeeee/HomeAgent/blob/main/assets/docs/zh/ADAPTER.md">Lua 适配器</a></li>
+            </ul>
+          </div>
+          <div>
+            <h4>深入</h4>
+            <ul>
+              <li><a href="https://gitcode.com/JianFeeeee/HomeAgent/blob/main/docs/zh/input-scheduler-design.md">输入调度器设计</a></li>
+              <li><a href="https://gitcode.com/JianFeeeee/HomeAgent/blob/main/docs/zh/resident-subagent-design.md">驻留式子 Agent</a></li>
+              <li><a href="https://gitcode.com/JianFeeeee/HomeAgent/blob/main/docs/zh/multimodal-space.md">统一多模态空间</a></li>
+            </ul>
+          </div>
+          <div>
+            <h4>项目</h4>
+            <ul>
+              <li><a href="https://gitcode.com/JianFeeeee/HomeAgent">源码仓库</a></li>
+              <li><a href="https://gitcode.com/JianFeeeee/HomeAgent/releases">发布下载</a></li>
+              <li><a href="https://gitcode.com/JianFeeeee/homeagent-sdk">插件 SDK</a></li>
+            </ul>
+          </div>
+          <div>
+            <h4>状态</h4>
+            <ul>
+              <li><span class="muted">最新发布 v1.3.x 线</span></li>
+              <li><span class="muted">main 在研 1.4.0</span></li>
+              <li><span class="muted">许可 AGPL-3.0-only</span></li>
+            </ul>
+          </div>
+        </div>
+        <div class="note">
+          <p style="margin: 0 0 0.4rem">
+            <strong>AI 辅助编程声明</strong>：本项目代码、文档与提交历史中，部分内容由 AI 辅助生成或修改。
+            人工已审阅关键改动，使用时请自行评估与验证。
+          </p>
+          <p style="margin: 0">
+            HomeAgent 以 AGPL-3.0-only 发布：通过 HTTP 提供交互式服务时，
+            须向使用者提供完整对应源码（§13）。
+          </p>
+        </div>
+      </div>
+    </footer>
+
+    <script>
+      // 滚入淡入（渐进增强）：内容**默认可见**，只有本脚本真的跑起来才接管动画。
+      // 这样 JS 报错/被禁用时页面依然完整可读。
+      (function () {
+        var els = document.querySelectorAll(".reveal");
+        var reduce = window.matchMedia && window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+        if (!("IntersectionObserver" in window) || reduce) {
+          return; // 不动：保持默认可见
+        }
+        // 先标记为“待动画”，再观察 —— 顺序不能反，否则首屏元素会闪一下
+        els.forEach(function (el) { el.classList.add("js-reveal"); });
+        var io = new IntersectionObserver(
+          function (entries) {
+            entries.forEach(function (e) {
+              if (e.isIntersecting) {
+                e.target.classList.add("in");
+                io.unobserve(e.target);
+              }
+            });
+          },
+          { threshold: 0.12, rootMargin: "0px 0px -8% 0px" }
+        );
+        els.forEach(function (el) { io.observe(el); });
+        // 保险：图片/字体迟到导致布局变化时，已在视口内的元素补上 .in
+        window.addEventListener("load", function () {
+          els.forEach(function (el) {
+            var r = el.getBoundingClientRect();
+            if (r.top < window.innerHeight && r.bottom > 0) { el.classList.add("in"); }
+          });
+        });
+      })();
+    </script>
+  </body>
+</html>
