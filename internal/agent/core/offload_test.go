@@ -299,3 +299,49 @@ func TestOffloadLoopRunsWhileBusy(t *testing.T) {
 	}
 	t.Fatal("offloadLoop 在忙时没有转投：检查没有跑在独立 goroutine 里？")
 }
+
+// ★★ 回归：积压可能**全在 io 输入 channel 里**，不在 sched.queue。
+//
+// 这是本特性最容易写错、而且我在线上真踩了的一步：schedulerLoop 是同步执行
+// 任务的，所以「正忙」期间它根本回不到 pumpInbox —— 后到的输入全堆在
+// io.inputCh（容量 256）里，sched.queue 恒为 0。
+//
+// 只数 s.queue 的实现在线上**永不触发**（实测：主 agent 跑着 6×45s 的任务、
+// 我连发 4 条消息，队列始终显示 0、residents 始终 0）。
+// 仓库里 armStop 早记过同一个坑（"只数 s.queue 会得到 0"），这里钉死不重犯。
+func TestOffloadSeesInputsStuckInChannel(t *testing.T) {
+	root, main := newRootWithoutSchedulerLoop(t)
+	defer main.Close()
+
+	opts := DefaultOffloadOptions()
+	opts.Enabled = true
+	opts.BusyAfter = time.Nanosecond
+	opts.MinPending = 3
+	opts.MaxResidents = 1
+
+	// 伪造"正忙"
+	root.sched.enqueue(makeQueuedInput(1))
+	root.sched.nextRef()
+
+	// 关键：把 3 条消息注入 **io 输入 channel**，不碰 sched.queue。
+	// 这精确复现"调度器忙于执行任务、pumpInbox 没被调用"的现场状态。
+	for i := 0; i < 3; i++ {
+		root.io.InjectInputTo("webui", "webui", "text",
+			map[string]interface{}{"content": "stuck"})
+	}
+	if len(root.sched.queue) != 0 {
+		t.Fatalf("前置条件：此时 sched.queue 应为 0（输入还没被搬运），实际 %d", len(root.sched.queue))
+	}
+	if root.io.PendingInputs() != 3 {
+		t.Fatalf("前置条件：输入应堆在 channel 里，实际 %d", root.io.PendingInputs())
+	}
+
+	// 转投必须能看到它们（先搬进队列再取）
+	moved := root.offloadPendingTasks(opts)
+	if moved != 3 {
+		t.Fatalf("★ 堆在 channel 里的积压必须被看见并转投：期望 3，实际 %d", moved)
+	}
+	if len(root.Residents()) != 1 {
+		t.Fatalf("应拉起 1 个驻留子，实际 %d", len(root.Residents()))
+	}
+}
