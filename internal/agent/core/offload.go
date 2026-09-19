@@ -120,12 +120,8 @@ func (a *Agent) drainInboxToQueue() {
 	}
 }
 
-// residentInputChannel 返回"父给某个子投递输入"用的 inputch 名。
-//
-// 与 SendToResident 用的是同一个（sub/<id>）：子是**不配插件 inputch** 的
-// （opts.InputChs 为空），它的入站口就只有父给它的这一条，因此必须与
-// SendToResident 保持一致，否则转投的消息会落到一个父不知道的通道名上。
-func residentInputChannel(id string) string { return "sub/" + id }
+// 注：转投不走 inputch 名字（那会在投递时重建事件、丢掉 ResponseCh），
+// 而是直接跨 agent 推原事件 —— 见 forwardInputToResident。
 
 // offloadPendingTasks 检查是否需要转投，需要则拉起/复用一个驻留子并搬运任务。
 //
@@ -212,11 +208,16 @@ func (a *Agent) offloadPendingTasks(opts OffloadOptions) int {
 	return moved
 }
 
-// forwardInputToResident 把一条输入原文投给指定驻留子的 inputch。
+// forwardInputToResident 把一条输入**原文**投给指定驻留子的队列。
 //
-// 走 InjectInputTo（排队输入，非中断）：转投的是"待办工作"，不是"打断子"。
-// 子的 io 上有 inputRouter（routeInputByOwner），但投递目标是**它自己的** inputch
-// 且 Owner 就是它，因此不会被再次路由走。
+// ❗必须推**原事件**（DeliverRouted），不能重建：原事件带 ResponseCh，
+// 而 cli / a2a / webui 这些**同步**调用方正阻塞等它。重建事件（如用
+// InjectInputTo）会把 ResponseCh 丢掉 ⇒ 任务被子处理完、调用方却永远收不到回执。
+// 实测：转投生效、子也正常处理（各 ~3s 日志可见），但 HTTP 请求一直挂着不返回。
+// 仓库反复警告同一件事（见 Agent.Stop 对 drainPendingInterrupts 的注释：
+// “带 ResponseCh 的同步注入方会永久挂起”），这里必须走既有的跨 agent 投递原语。
+//
+// 用排队语义（isInterrupt=false）：转投的是"待办工作"，不是"打断子"。
 func (a *Agent) forwardInputToResident(residentID string, evt *agentIO.InputEvent) error {
 	a.residentMu.Lock()
 	rc := a.residents[residentID]
@@ -225,16 +226,14 @@ func (a *Agent) forwardInputToResident(residentID string, evt *agentIO.InputEven
 		return fmt.Errorf("驻留子 %s 不存在或不可用", residentID)
 	}
 
-	payload := map[string]interface{}{}
-	for k, v := range evt.Payload {
-		payload[k] = v
+	// 带上来源线索（不重建事件，只补充 payload，保留 ResponseCh/RequestID）。
+	if evt.Payload == nil {
+		evt.Payload = map[string]interface{}{}
 	}
-	// 带上来源线索，让子知道这条不是父当前任务的续接，而是转投的独立请求。
-	payload["offloaded_from"] = string(a.id)
-	payload["offloaded_at"] = time.Now().Format(time.RFC3339)
+	evt.Payload["offloaded_from"] = string(a.id)
+	evt.Payload["offloaded_at"] = time.Now().Format(time.RFC3339)
 
-	ch := residentInputChannel(residentID)
-	rc.agent.io.InjectInputToOpts(evt.Source, ch, evt.Type, payload, agentIO.InjectOptions{})
+	rc.agent.io.DeliverRouted(evt, false)
 	return nil
 }
 
