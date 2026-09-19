@@ -14,6 +14,7 @@ package core
 import (
 	"encoding/json"
 	"fmt"
+	"log"
 	"os"
 	"path/filepath"
 	"sort"
@@ -58,15 +59,17 @@ type ResidentOptions struct {
 
 // ResidentInfo 是父对某个驻留子的可查询状态（登记表条目 + 状态面摘要）。
 type ResidentInfo struct {
-	ID             string          `json:"id"`
-	State          string          `json:"state"`
-	InputChs       []string        `json:"inputchs"`
-	AllowedOutputs []string        `json:"allowed_outputs"`
-	Rounds         int             `json:"rounds"`
-	ContextFull    bool            `json:"context_full"`
-	CreatedAt      time.Time       `json:"created_at"`
-	TableSize      int             `json:"table_size"`
-	Table          []InputchRecord `json:"table,omitempty"`
+	ID             string    `json:"id"`
+	State          string    `json:"state"`
+	InputChs       []string  `json:"inputchs"`
+	AllowedOutputs []string  `json:"allowed_outputs"`
+	Rounds         int       `json:"rounds"`
+	ContextFull    bool      `json:"context_full"`
+	CreatedAt      time.Time `json:"created_at"`
+	TableSize      int       `json:"table_size"`
+	// OffloadOwned 标记这是内核为承接积压而拉起的**临时分诊助手**（见 offload.go）。
+	OffloadOwned bool            `json:"offload_owned,omitempty"`
+	Table        []InputchRecord `json:"table,omitempty"`
 
 	// Sched* 是这个驻留子**自己的**输入调度器积压摘要（排队 / 待处理中断 /
 	// 中断栈 / 四级中断队列）。
@@ -89,7 +92,7 @@ type residentChild struct {
 	dir       string
 	inputChs  []string
 	allowed   []string
-	createdAt    time.Time
+	createdAt time.Time
 	// offloadOwned 标记这是内核为转投拉起的子（见 offload.go）。
 	offloadOwned bool
 
@@ -165,7 +168,19 @@ func (a *Agent) SpawnResident(opts ResidentOptions) (ResidentInfo, error) {
 
 	parentID := string(a.id)
 	child := New(AgentConfig{
-		ID:              types.AgentID(opts.ID),
+		ID: types.AgentID(opts.ID),
+		// SystemPrompt 必须**继承父的**：
+		//
+		// 拿不到它时子只能用 buildSystemPrompt 里的兜底句（一句人格描述）。
+		// 而父的提示词里写着**回复投递规则** ——「面向 qq、wechat、a2a、acp 等异步
+		// 通道时，必须显式调用 output_send__{通道名}；只返回纯文本会被直接丢弃，
+		// 用户永远收不到，而你会误以为已经回复过了」，以及事实性约束、命令与文件
+		// 操作策略等。缺了这些，子于异步通道（如 QQ 积压）处理完却发不出去，
+		// 而且它自己不会意识到（提示词没告诉它）。
+		//
+		// 实测（2026-09-19）：webui 这类**同步**通道能回，是因为走 ResponseCh；
+		// 而 QQ 是异步通道、必须子主动 output_send —— 这正是本字段必须接上的理由。
+		SystemPrompt:    a.systemPrompt,
 		Provider:        a.provider,
 		ProviderManager: a.providerManager,
 		IO:              childIO,
@@ -261,6 +276,88 @@ func (a *Agent) DestroyResident(id string) error {
 	}
 	a.teardownResident(rc)
 	return nil
+}
+
+// ResidualPolicy 是父对**残余任务**的显式决定。
+//
+// 为什么需要它（用户 2026-09-19 明确要求）：回收/销毁驻留子时，
+// 它手头可能还有**尚未处理的消息**。这些消息的处置不能由内核悄悄决定：
+//   - 直接丢弃 → 用户消息无声消失（异步通道更是零反馈：qq 无 ResponseCh，
+//     用户不知道发生了什么，系统里也没任何痕迹）；
+//   - 无条件转回父 → 父本来就很忙，把一堆活重新塞回去可能反而加剧积压。
+//
+// 因此与其它控制面动作一致：**原语在内核，决定在父的模型**（设计 §7）。
+// 内核负责把残余任务**列清楚**（来源、通道、内容），父选 keep（转回自己）/ drop。
+//
+// 无论选哪个，内核都会**逐条留日志**：丢弃必须可追溯。
+// 默认（不传 policy）取 keep：宁可多做一件，不可默默丢一条。
+type ResidualPolicy string
+
+const (
+	// ResidualKeep 把残余任务转回父自己的队列，父稍后处理。
+	ResidualKeep ResidualPolicy = "keep"
+	// ResidualDrop 明确丢弃残余任务（父已看过清单并确认）。
+	ResidualDrop ResidualPolicy = "drop"
+)
+
+// TakeResidual 取走一个驻留子手头**尚未处理**的残余任务（不处置）。
+//
+// 调它**会**从子的队列里移除这些任务，所以父必须先看返回值再决定：
+// 一旦取走，不再调 ApplyResidual 就等于把它们丢了。控制面工具走 ApplyResidual
+// （取+处置一步完成）以避免这个误用。
+func (a *Agent) TakeResidual(id string) ([]*agentIO.InputEvent, error) {
+	a.residentMu.Lock()
+	rc := a.residents[id]
+	a.residentMu.Unlock()
+	if rc == nil || rc.agent == nil {
+		return nil, fmt.Errorf("驻留子 %s 不存在", id)
+	}
+	return rc.agent.sched.takeAllPendingEvents(), nil
+}
+
+// ApplyResidual 按父给出的策略处置一个驻留子的残余任务。
+//
+// keep：逐条转回父自己的队列（保留原事件，含 ResponseCh 与来源/通道）；
+// drop：逐条记录日志后丢弃（不可追溯的丢弃是不允许的）。
+//
+// 无论哪种，带 ResponseCh 的都要给终态，否则 cli/a2a 这类无超时同步调用方
+// 会永久挂起（设计 §7 I5）。
+func (a *Agent) ApplyResidual(id string, policy ResidualPolicy) (int, string, error) {
+	events, err := a.TakeResidual(id)
+	if err != nil {
+		return 0, "", err
+	}
+	if len(events) == 0 {
+		return 0, "无残余任务", nil
+	}
+	if policy == ResidualDrop {
+		for _, evt := range events {
+			// 丢弃必须留痕：异步通道（qq/wechat）没有 ResponseCh，
+			// 不记日志的话“这条消息为什么没人回”永远查不出来。
+			log.Printf("[resident] %s 残余任务按父的决定丢弃：source=%s channel=%s request=%s content=%s",
+				id, evt.Source, evt.OutputChannel, evt.RequestID, truncateStr(inputTextOf(evt), 80))
+			a.emitSkippedReply(evt, "residual_dropped_by_parent")
+		}
+		return len(events), fmt.Sprintf("已按父的决定丢弃 %d 条残余任务（逐条已记日志）", len(events)), nil
+	}
+	// 默认 keep：转回父自己
+	for _, evt := range events {
+		if evt == nil {
+			continue
+		}
+		a.sched.enqueue(newInputTask(evt))
+	}
+	a.sched.signalWake()
+	return len(events), fmt.Sprintf("已把 %d 条残余任务转回主 agent 队列", len(events)), nil
+}
+
+// inputTextOf 取一条输入事件的正文（供日志描述残余任务用）。
+func inputTextOf(evt *agentIO.InputEvent) string {
+	if evt == nil || evt.Payload == nil {
+		return ""
+	}
+	s, _ := evt.Payload["content"].(string)
+	return s
 }
 
 // teardownResident 停内核、放通道、丢 temp（销毁与回收共用）。

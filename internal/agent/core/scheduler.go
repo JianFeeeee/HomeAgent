@@ -1011,6 +1011,41 @@ func (s *scheduler) pendingEvents() []*agentIO.InputEvent {
 	return out
 }
 
+// takeAllPendingEvents 取走**全部尚未执行**的输入事件（含无回执通道的异步输入），
+// 并从队列中移除它们。返回的事件不再会被本调度器执行。
+//
+// 与 pendingEvents 的区别（两者用途完全不同，不要混用）：
+//   - pendingEvents 只挑**带 ResponseCh** 的，用途是给同步调用方补终态；
+//   - 本函数**不筛通道**，因为回收/销毁驻留子时要向父交代的是"手头还有哪些活"，
+//     而 QQ/微信这类异步消息本来就没有 ResponseCh —— 它们恰恰是最容易被无声丢掉的。
+//
+// 只取 TaskQueued/KindInput 与中断队列里的输入事件；self 任务是内核内部记账
+// （记忆整理），换 agent 没有意义，原地丢弃即可（不计入返回）。
+func (s *scheduler) takeAllPendingEvents() []*agentIO.InputEvent {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	var out []*agentIO.InputEvent
+	for _, t := range s.queue {
+		if t != nil && t.Kind == TaskKindInput && t.Event != nil {
+			out = append(out, t.Event)
+		}
+	}
+	s.queue = nil
+	for lv := LevelBackground; lv <= LevelCritical; lv++ {
+		for _, t := range s.interruptQueues[lv] {
+			if t != nil && t.Event != nil {
+				out = append(out, t.Event)
+			}
+		}
+		s.interruptQueues[lv] = nil
+	}
+	if s.immediate != nil && s.immediate.Event != nil {
+		out = append(out, s.immediate.Event)
+	}
+	s.immediate = nil
+	return out
+}
+
 // done 标记任务执行结束。
 func (s *scheduler) done(t *Task) {
 	s.mu.Lock()
