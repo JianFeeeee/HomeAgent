@@ -728,7 +728,13 @@ func (h *Handler) handleChatEvents(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	subTypes := []string{"agent_output", "reasoning", "agent_error", "tool_call", "stage", "agent_llm_chain", "terminal_output"}
+	// scheduler：输入调度器的状态变更（抢占 / 挂起 / 恢复）。
+	//
+	// 为何必须转发：内核里 suspend/resume 只发事件（见 core/scheduler.go 的
+	// executeNewTask/resumeTask），而 `scheduler` 曾既不在本列表里、也没有任何
+	// 订阅方—— 事件发出来就掉地上。后果是「我的任务被谁打断了」对内对外都
+	// 不可见，排查时只能按时序猜。这里补上对外那一半。
+	subTypes := []string{"agent_output", "reasoning", "agent_error", "tool_call", "stage", "agent_llm_chain", "terminal_output", "scheduler"}
 	// token 级流式增量事件：实时转发给浏览器做逐 token 渲染。
 	// 不进 sseEventRing —— 断线重连只重放聚合事件（最终真相），
 	// 避免重放 delta 与聚合内容重复追加。
