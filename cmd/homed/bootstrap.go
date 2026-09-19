@@ -487,6 +487,12 @@ func newMainAgent(cfg *types.Config, cfgReg *internalConfig.ConfigRegistry, prov
 		ReviewInterval:     cfgReg.GetDuration("core.agent.review_interval", 120*time.Minute),
 		MergeInterval:      cfgReg.GetDuration("core.agent.merge_interval", 120*time.Minute),
 		MaxToolTurns:       cfgReg.GetInt("core.agent.max_tool_turns", 10),
+		Offload: agentCore.OffloadOptions{
+			Enabled:      cfgReg.GetBool("core.agent.offload_enabled", false),
+			BusyAfter:    cfgReg.GetDuration("core.agent.offload_busy_after", 5*time.Minute),
+			MinPending:   cfgReg.GetInt("core.agent.offload_min_pending", 3),
+			MaxResidents: cfgReg.GetInt("core.agent.offload_max_residents", 2),
+		},
 		ContextSavePath:    filepath.Join(cfg.Daemon.DataDir, "memory", "context.json"),
 		EmbeddingModelPath: cfgReg.GetString("core.agent.embedding_model_path", ""),
 		Embedder:           embedder,

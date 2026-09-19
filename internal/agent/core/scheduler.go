@@ -412,6 +412,101 @@ func (s *scheduler) signalWake() {
 	}
 }
 
+// runningTask 返回当前正在运行的任务（无则 nil）。
+//
+// 供自动转投判定"主 agent 是否忙"用。本函数只读取指针，不参与调度决策。
+func (s *scheduler) runningTask() *Task {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.running
+}
+
+// runningFor 返回当前运行任务已持续多久；无运行任务时为 0。
+//
+// 为什么用 EnqueuedAt 而不是另开一个"开始时间"字段：Task 已有 EnqueuedAt
+// （allocateIDLocked 保证非零），它对外排队输入就是"多久没人处理它"，
+// 恰好也是转投判定关心的量。新增字段会多一份需要维护的真相。
+func (s *scheduler) runningFor() time.Duration {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.running == nil || s.running.EnqueuedAt.IsZero() {
+		return 0
+	}
+	return time.Since(s.running.EnqueuedAt)
+}
+
+// takeQueuedInputs 从就绪队列**前端**取出至多 max 条纯排队输入（用于转投）。
+//
+// 只取 TaskQueued + KindInput：
+//   - 中断任务带级别语义，転投会打乱中断阶梯，不动；
+//   - self 任务（记忆整理等）与父的记忆面绑定，不能换 agent。
+//
+// 只从**前端**取：队列是 FIFO，前端就是"最久没人处理"的那几条；
+// 从尾部抽会把后来者先送走，反而拉长前面几等的等待。
+//
+// 少于 min 条时**什么都不取**（返回 nil）：拉起一个 agent 的成本不该为
+// 一条任务付；宁等下一轮积到量再一起转。这使得本函数要么不动、要么成批移动。
+func (s *scheduler) takeQueuedInputs(min int) []offloadCandidate {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	var out []offloadCandidate
+	for _, t := range s.queue {
+		if t == nil || t.Class != TaskQueued || t.Kind != TaskKindInput || t.Event == nil {
+			continue
+		}
+		out = append(out, offloadCandidate{Event: t.Event})
+		if len(out) >= min {
+			break
+		}
+	}
+	if len(out) < min {
+		return nil
+	}
+	// 真的取走：重建队列，抽掉刚选中的那些事件（按指针同一性判断）。
+	selected := make(map[*agentIO.InputEvent]bool, len(out))
+	for _, c := range out {
+		selected[c.Event] = true
+	}
+	kept := s.queue[:0]
+	for _, t := range s.queue {
+		if t != nil && t.Event != nil && selected[t.Event] {
+			continue
+		}
+		kept = append(kept, t)
+	}
+	s.queue = kept
+	return out
+}
+
+// requeueFront 把任务放回队列**前端**（保持原相对顺序）。
+//
+// 转投失败/未生效时用，保证"输入只多不少"：吞掉一条输入比多处理一条更糟
+// （与 routeOnInputByOwner 的兜底同一条理由）。
+// self 任务在転投路径上不可能出现（takeQueuedInputs 已排掉），所以这里只需处理 Event。
+func (s *scheduler) requeueFront(cands []offloadCandidate) {
+	if len(cands) == 0 {
+		return
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	restored := make([]*Task, 0, len(cands))
+	for _, c := range cands {
+		if c.Event == nil {
+			continue
+		}
+		t := newInputTask(c.Event)
+		// 保持"这些任务比当前队列里的一切都早"的语义。
+		if t.EnqueuedAt.IsZero() {
+			t.EnqueuedAt = time.Now()
+		}
+		restored = append(restored, t)
+	}
+	if len(restored) == 0 {
+		return
+	}
+	s.queue = append(restored, s.queue...)
+}
+
 // setCritical 由调度器 goroutine 在任务进入/离开临界区时设置。
 func (s *scheduler) setCritical(v bool) { s.critical.Store(v) }
 
