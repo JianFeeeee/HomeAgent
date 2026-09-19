@@ -49,10 +49,10 @@ func TestAccumulateStreamParallelToolCallsByIndex(t *testing.T) {
 		t.Fatalf("expected 4 tool calls, got %d: %+v", len(resp.ToolCalls), resp.ToolCalls)
 	}
 	want := map[string]string{
-		"spawn_child":   `{"task":"调查大模型排名"}`,
+		"spawn_child":    `{"task":"调查大模型排名"}`,
 		"browser_render": `{"url":"https://example.com"}`,
-		"cmd_run":       `{"command":"uname -a"}`,
-		"skill_list":    `{}`,
+		"cmd_run":        `{"command":"uname -a"}`,
+		"skill_list":     `{}`,
 	}
 	for _, tc := range resp.ToolCalls {
 		raw, _ := json.Marshal(tc.Arguments)

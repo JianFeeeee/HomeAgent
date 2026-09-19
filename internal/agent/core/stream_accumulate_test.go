@@ -4,6 +4,7 @@ import (
 	"context"
 	"strings"
 	"testing"
+	"time"
 
 	agentAPI "gitcode.com/JianFeeeee/HomeAgent/internal/agent/api"
 )
@@ -73,7 +74,7 @@ func TestAccumulateStreamContent(t *testing.T) {
 // 上游发 finish_reason="length"、参数 JSON 残缺。旧实现把残缺 JSON 静默降级成
 // 空 map，工具只报 "path is required"，模型看不出真因、原样重试四次。
 //
-// 本测试钉死：截断必须变成带指引的 __truncated_error，而不是空参数。
+// 本测试钉死：截断必须变成带指引的 __arg_error，而不是空参数。
 func TestAccumulateStreamTruncatedArgsSurfaced(t *testing.T) {
 	ch := make(chan agentAPI.StreamChunk, 10)
 	go func() {
@@ -95,9 +96,9 @@ func TestAccumulateStreamTruncatedArgsSurfaced(t *testing.T) {
 	if len(resp.ToolCalls) != 1 {
 		t.Fatalf("want 1 tool call, got %d", len(resp.ToolCalls))
 	}
-	msg, ok := resp.ToolCalls[0].Arguments["__truncated_error"].(string)
+	msg, ok := resp.ToolCalls[0].Arguments["__arg_error"].(string)
 	if !ok || msg == "" {
-		t.Fatalf("截断的参数必须带 __truncated_error，实际 Arguments=%v", resp.ToolCalls[0].Arguments)
+		t.Fatalf("截断的参数必须带 __arg_error，实际 Arguments=%v", resp.ToolCalls[0].Arguments)
 	}
 	// 指引必须可执行：说出真因（截断/max_tokens）并给出拆小方案
 	for _, want := range []string{"截断", "max_tokens=4096", "拆成多次调用"} {
@@ -111,9 +112,10 @@ func TestAccumulateStreamTruncatedArgsSurfaced(t *testing.T) {
 	}
 }
 
-// 非截断的残缺 JSON 保持旧行为（静默降级成空 map，由工具自己的必填校验报错）：
-// 这样不会把「厂商不回 finish_reason」的流也误判成截断。
-func TestAccumulateStreamInvalidArgsNotFlaggedAsTruncated(t *testing.T) {
+// 非截断的残缺 JSON 也要拦住工具调用（不然工具只会报 “path is required”），
+// 但**必须与真截断用不同的文案** —— 否则模型会去“拆小参数”，而它其实是写坏了。
+// 这里同时钉死两件事：①不丢给工具 ②两种成因可区分。
+func TestAccumulateStreamMalformedArgsDistinctFromTruncated(t *testing.T) {
 	ch := make(chan agentAPI.StreamChunk, 10)
 	go func() {
 		ch <- agentAPI.StreamChunk{ToolCalls: []agentAPI.ToolCall{
@@ -130,8 +132,16 @@ func TestAccumulateStreamInvalidArgsNotFlaggedAsTruncated(t *testing.T) {
 	if len(resp.ToolCalls) != 1 {
 		t.Fatalf("want 1 tool call, got %d", len(resp.ToolCalls))
 	}
-	if _, ok := resp.ToolCalls[0].Arguments["__truncated_error"]; ok {
-		t.Error("finish_reason=tool_calls 时不应标记为截断")
+	msg, ok := resp.ToolCalls[0].Arguments["__arg_error"].(string)
+	if !ok || msg == "" {
+		t.Fatalf("残缺参数必须被拦住，实际 Arguments=%v", resp.ToolCalls[0].Arguments)
+	}
+	// 不能被说成“截断”：真因是 JSON 写坏，两者对模型要求的动作完全不同。
+	if strings.Contains(msg, "max_tokens") || strings.Contains(msg, "截断") {
+		t.Errorf("非截断的残缺参数被误报为截断：%s", msg)
+	}
+	if !strings.Contains(msg, "合法 JSON") {
+		t.Errorf("应指出 JSON 格式问题：%s", msg)
 	}
 }
 
@@ -143,7 +153,7 @@ func TestTruncatedToolCallIsShortCircuited(t *testing.T) {
 		ID:   "call_1",
 		Name: "files_write",
 		Arguments: map[string]interface{}{
-			"__truncated_error": truncatedArgsError("files_write", 259, 4096),
+			"__arg_error": truncatedArgsError("files_write", 259, 4096),
 		},
 	}
 	a := &Agent{}
@@ -217,5 +227,25 @@ func TestRepairDoesNotFabricateTruncatedArgs(t *testing.T) {
 		if _, ok := parseToolArgsJSON(s); ok {
 			t.Errorf("截断参数被误判为可修复（危险）: %s", s)
 		}
+	}
+}
+
+// 端到端：修好 JSON 之后，字段必须**真的能被插件用上**。
+// cmd 插件走 args["timeout"].(string) 再 time.ParseDuration ——
+// 若修复把 20s 变成数字或丢了引号，插件会静默忽略 timeout，等于换个姿势失败。
+func TestRepairedTimeoutUsableByPlugin(t *testing.T) {
+	m, ok := parseToolArgsJSON(`{"command": "ls -lt /tmp | head -20", "timeout": 20s}`)
+	if !ok {
+		t.Fatal("解析失败")
+	}
+	to, isStr := m["timeout"].(string)
+	if !isStr {
+		t.Fatalf("timeout 必须是 string，否则 cmd 插件读不到: %#v", m["timeout"])
+	}
+	if to != "20s" {
+		t.Errorf("timeout 值不对: %q", to)
+	}
+	if d, err := time.ParseDuration(to); err != nil || d.Seconds() != 20 {
+		t.Errorf("cmd 插件下一步 ParseDuration(%q) 会失败: %v", to, err)
 	}
 }
