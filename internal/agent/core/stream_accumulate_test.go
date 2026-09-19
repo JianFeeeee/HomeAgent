@@ -134,3 +134,27 @@ func TestAccumulateStreamInvalidArgsNotFlaggedAsTruncated(t *testing.T) {
 		t.Error("finish_reason=tool_calls 时不应标记为截断")
 	}
 }
+
+// 截断必须**真的拦住工具调用**，而不是只改错误文案：
+// 旧实现拿着空 map 去调 files_write，工具回 "path is required"，
+// 模型据此原样重试（实测连续 4 次）。这里断言 executeToolCallInner 的短路。
+func TestTruncatedToolCallIsShortCircuited(t *testing.T) {
+	tc := agentAPI.ToolCall{
+		ID:   "call_1",
+		Name: "files_write",
+		Arguments: map[string]interface{}{
+			"__truncated_error": truncatedArgsError("files_write", 259, 4096),
+		},
+	}
+	a := &Agent{}
+	got := a.executeToolCallInner(tc, "webui", nil)
+
+	if strings.Contains(got, "path is required") {
+		t.Errorf("截断后仍走了工具分派（模型会原样重试）：%s", got)
+	}
+	for _, want := range []string{"截断", "max_tokens=4096", "拆成多次调用"} {
+		if !strings.Contains(got, want) {
+			t.Errorf("指引缺少 %q：%s", want, got)
+		}
+	}
+}
