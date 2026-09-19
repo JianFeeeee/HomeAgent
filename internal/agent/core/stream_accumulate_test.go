@@ -158,3 +158,64 @@ func TestTruncatedToolCallIsShortCircuited(t *testing.T) {
 		}
 	}
 }
+
+// 回归（2026-09-19 线上实测）：真 invalid JSON 有 11/11 是同一成因 ——
+// 模型把 timeout 写成 `"timeout": 20s`（值缺引号，schema 示例是 "10s, 1m, 30s"
+// 而声明是 string 类型），而 command 部分一字节没错。
+//
+// 旧行为：解析失败 → 静默降级成空 map → 整个 command 被丢 → 工具报
+// "command is required"，模型只能原样重试 ⇒ 实测 cmd_run 失败率 34%（34 败/64 成）。
+func TestRepairUnquotedUnitNumberInArgs(t *testing.T) {
+	// 全部取自日志原文（未被我自己的日志截断的那些）
+	real := []string{
+		`{"command": "ls -lt /tmp/*.xlsx /tmp/*.py 2>/dev/null | head -20; echo \"=== home ===\"; ls -lt ~ 2>/dev/null | head -20", "timeout": 20s}`,
+		`{"command": "sleep 45; cat /tmp/run_szce.log; ls -la /tmp/szce_run_raw.json 2>/dev/null", "timeout": 90s}`,
+		`{"command": "echo \"=== 上一轮 raw (471B) ===\"; cat /tmp/szce_run_raw.json; echo; echo \"=== 后台进程 ===\"; ps aux | grep -c \"[r]un_szce.py\"; echo \"=== log ===\"; cat /tmp/run_szce.log", "timeout": 30s}`,
+		`{"command": "sleep 60; cat /tmp/probe_out.txt; echo \"=== alive ===\"; ps aux | grep -c \"[p]robe_models.py\"", "timeout": 120s}`,
+		`{"command": "cat /tmp/probe_out.txt; echo \"--- alive ---\"; ps aux | grep -c \"[p]robe_models.py\"", "timeout": 30s}`,
+	}
+	for i, s := range real {
+		m, ok := parseToolArgsJSON(s)
+		if !ok {
+			t.Errorf("case %d 仍解析失败", i)
+			continue
+		}
+		if cmd, _ := m["command"].(string); cmd == "" {
+			t.Errorf("case %d 完好的 command 丢失", i)
+		}
+		if to, _ := m["timeout"].(string); to == "" {
+			t.Errorf("case %d timeout 未补成字符串: %#v", i, m["timeout"])
+		}
+	}
+}
+
+// 修复必须保守：不能碰合法 JSON，尤其不能改到字符串**正文里**的 “20s”。
+func TestRepairKeepsValidArgsIntact(t *testing.T) {
+	m, ok := parseToolArgsJSON(`{"command": "ls", "timeout": "20s"}`)
+	if !ok {
+		t.Fatal("合法 JSON 被判非法")
+	}
+	if m["timeout"] != "20s" {
+		t.Errorf("合法 timeout 被改: %#v", m["timeout"])
+	}
+	m2, ok := parseToolArgsJSON(`{"content": "wait 20s then go"}`)
+	if !ok {
+		t.Fatal("含 20s 的正文被判非法")
+	}
+	if m2["content"] != "wait 20s then go" {
+		t.Errorf("正文里的 20s 被误改: %#v", m2["content"])
+	}
+}
+
+// 真截断（JSON 从中间断掉）绝不能被“修好”，否则会拿残缺参数去执行 —— 更危险。
+func TestRepairDoesNotFabricateTruncatedArgs(t *testing.T) {
+	for _, s := range []string{
+		`{"command": "ls -la /tmp && echo done"`,
+		`{"command": "echo hi", "timeout": 30`,
+		`{"path": "/tmp/x", "content": "unterminated`,
+	} {
+		if _, ok := parseToolArgsJSON(s); ok {
+			t.Errorf("截断参数被误判为可修复（危险）: %s", s)
+		}
+	}
+}
