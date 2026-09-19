@@ -580,3 +580,119 @@ func TestResidualEmptyIsReported(t *testing.T) {
 		t.Errorf("应报告无残余任务，实际 n=%d msg=%q", n, msg)
 	}
 }
+
+// ★ 回归：offload_owned 必须真的**被填上**。
+//
+// 我第一版加了字段、加了状态面映射，却漏了在 rc.info() 里赋值 ⇒ 父读到的
+// 永远是 false（实测：线上转投子明明存在，offload_owned 却是 null）。
+// 这类"加了字段但没接线"的缺陷不会报错，只会让上层判断悄悄失效。
+func TestOffloadOwnedIsReported(t *testing.T) {
+	root, main := newRootWithoutSchedulerLoop(t)
+	defer main.Close()
+
+	// 人工建的子（offload_owned 应为 false）
+	manual, err := root.SpawnResident(ResidentOptions{
+		ID: "manual-child", TempPath: root.residentTempPath("manual-child"),
+	})
+	if err != nil {
+		t.Fatalf("创建驻留子失败: %v", err)
+	}
+	if manual.OffloadOwned {
+		t.Error("人工创建的子不应被标记为 offload_owned")
+	}
+
+	// 内核为转投拉起的子（应为 true）
+	opts := DefaultOffloadOptions()
+	opts.Enabled = true
+	opts.BusyAfter = time.Nanosecond
+	opts.MinPending = 1
+	opts.MaxResidents = 1
+	root.sched.enqueue(makeQueuedInput(1))
+	root.sched.nextRef()
+	root.sched.enqueue(makeQueuedInput(2))
+	if n := root.offloadPendingTasks(opts); n != 1 {
+		t.Fatalf("应转投 1 条，实际 %d", n)
+	}
+
+	list := root.Residents()
+	var foundOffload *ResidentInfo
+	for i := range list {
+		if strings.HasPrefix(list[i].ID, "offload-") {
+			foundOffload = &list[i]
+		}
+	}
+	if foundOffload == nil {
+		t.Fatal("未找到转投子")
+	}
+	if !foundOffload.OffloadOwned {
+		t.Error("★ 转投子必须被标记 offload_owned=true（父据此决定回收策略）")
+	}
+}
+
+// ★★ 回归：内核自己留的说明**不能再被转投**，否则自我循环。
+//
+// 我第一版漏了这一步：转投会在队列里留一条 [系统] 说明（source=kernel），
+// 而转投条件（"排队输入够了"）又会把这条说明算进去 ⇒ 每次转投都产生下一轮
+// 要转投的东西。实测：5 秒内连续触发两次，分诊助手不断收到这类噪音。
+func TestKernelNoticeIsNeverOffloaded(t *testing.T) {
+	root, main := newRootWithoutSchedulerLoop(t)
+	defer main.Close()
+
+	opts := DefaultOffloadOptions()
+	opts.Enabled = true
+	opts.BusyAfter = time.Nanosecond
+	opts.MinPending = 1
+	opts.MaxResidents = 1
+
+	root.sched.enqueue(makeQueuedInput(1))
+	root.sched.nextRef()
+
+	// 队列里放一条"内核说明"+ 一条真实积压
+	root.sched.enqueue(newInputTask(root.syntheticEvent("2 条积压已交由临时助手分诊")))
+	root.sched.enqueue(makeQueuedInput(2))
+
+	moved := root.offloadPendingTasks(opts)
+	if moved != 1 {
+		t.Fatalf("★ 只应转投真实积压 1 条（说明不可转投），实际 %d", moved)
+	}
+	// 说明必须还在队列里（留给主 agent 看），不能被搬走
+	var noticeLeft bool
+	for _, task := range root.sched.queue {
+		if task.Event != nil && isKernelNotice(task.Event) {
+			noticeLeft = true
+		}
+	}
+	if !noticeLeft {
+		t.Error("内核说明应留在队列里给主 agent 看，不应被转投走")
+	}
+}
+
+// 转投自身产生的说明也不能构成下一轮的积压（循环必须终止）。
+func TestOffloadDoesNotLoopOnOwnNotice(t *testing.T) {
+	root, main := newRootWithoutSchedulerLoop(t)
+	defer main.Close()
+
+	opts := DefaultOffloadOptions()
+	opts.Enabled = true
+	opts.BusyAfter = time.Nanosecond
+	opts.MinPending = 2
+	opts.MaxResidents = 1
+
+	root.sched.enqueue(makeQueuedInput(1))
+	root.sched.nextRef()
+	root.sched.enqueue(makeQueuedInput(2))
+	root.sched.enqueue(makeQueuedInput(3))
+
+	if n := root.offloadPendingTasks(opts); n != 2 {
+		t.Fatalf("第一轮应转 2 条，实际 %d", n)
+	}
+	// 再调若干次：队列里只剩一条说明，不够 MinPending ⇒ 不该再转
+	for i := 0; i < 5; i++ {
+		if n := root.offloadPendingTasks(opts); n != 0 {
+			t.Fatalf("第 %d 次仍在转投（自我循环）：转了 %d 条", i+1, n)
+		}
+	}
+	if got := len(root.Residents()); got != 1 {
+		t.Errorf("不应反复拉起新子，实际 %d 个", got)
+	}
+}

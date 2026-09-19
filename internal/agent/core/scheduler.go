@@ -454,6 +454,14 @@ func (s *scheduler) takeQueuedInputs(min int) []offloadCandidate {
 		if t == nil || t.Class != TaskQueued || t.Kind != TaskKindInput || t.Event == nil {
 			continue
 		}
+		// ❗内核自己造的说明（source=kernel）**不能再被转投**。
+		//
+		// 它本来就是"告知这条信息不用再处理"的通知，而转投又会在队列里留下
+		// 一条新的同款通知 ⇒ 自我循环：每次转投都产生下一轮要转投的东西。
+		// 实测（2026-09-19）：5 秒内连续触发两次，子侧不断收到这类噪音。
+		if isKernelNotice(t.Event) {
+			continue
+		}
 		out = append(out, offloadCandidate{Event: t.Event})
 		if len(out) >= min {
 			break
@@ -1376,4 +1384,15 @@ func (a *Agent) resumeTask(t *Task, f *TaskFrame) {
 	}
 	a.finishInputTask(f, out)
 	a.sched.done(t)
+}
+
+// kernelNoticeSource 是内核自己造的输入事件的来源名（见 offload.syntheticEvent）。
+//
+// 它存在的主要理由是**可被识别**：转投等机制必须能排除"自己造的说明"，
+// 否则会在队列里自我循环（说明 → 被转投 → 产生新说明 → …）。
+const kernelNoticeSource = "kernel"
+
+// isKernelNotice 判断一条输入是不是内核自己造的通知。
+func isKernelNotice(evt *agentIO.InputEvent) bool {
+	return evt != nil && evt.Source == kernelNoticeSource
 }
