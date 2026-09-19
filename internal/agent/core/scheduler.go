@@ -810,11 +810,61 @@ func (s *scheduler) suspend(t *Task, f *TaskFrame) {
 	s.preemptLevel = 0
 }
 
+// sourceOf 从任务/帧里取一个**可辨识来源**，用于抢占日志与故障定位。
+//
+// 为什么必须记这个：此前 suspend/resume 只发事件不落日志（见
+// executeNewTask/resumeTask），于是生产上「我的任务被谁打断了」完全不可查——
+// 日志里只有 `interrupt from X` 和 `LLM request cancelled by preemption` 两行，
+// **看不到受害者是谁**。排查时只能按时间猜，把相邻的输入误认成凶手。
+//
+// 取静态注入源（evt.Source）而不是 evt.OutputChannel：前者回答「谁送来的」
+// （qq / homeagent-mail-bridge / timer / child/xxx），后者是回答要投到哪个通道，
+// 两者在多数场景下同名，但前者才是因果链上的那一环。
+func sourceOf(t *Task, f *TaskFrame) string {
+	if f != nil && f.Evt != nil {
+		if f.Evt.Source != "" {
+			return f.Evt.Source
+		}
+		return f.Evt.OutputChannel
+	}
+	if t != nil && t.Event != nil {
+		if t.Event.Source != "" {
+			return t.Event.Source
+		}
+		return t.Event.OutputChannel
+	}
+	if t != nil && t.Kind == TaskKindSelf {
+		if t.Self.channel != "" {
+			return "self:" + t.Self.channel
+		}
+		return "self"
+	}
+	return "?"
+}
+
+// describeTask 把任务的类别/级别拼成一段可读标签（日志用）。
+func describeTask(t *Task) string {
+	if t == nil {
+		return "<nil>"
+	}
+	return fmt.Sprintf("task#%d class=%s level=%d", t.ID, t.Class, t.Level)
+}
+
 // canSuspend 报告还有下潜余量（安全点用它决定是否真的让位）。
 func (s *scheduler) canSuspend() bool {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return len(s.suspendStack) < s.maxInterruptFrames
+}
+
+// suspendDepth 返回当前中断栈深度（仅用于日志）。
+//
+// 单独一个方法而不是让调用方直接读 s.suspendStack：那个字段只允许在 s.mu 下访问，
+// 而日志点不应该自己摸调度器内部状态（也不应该为了打一行日志多持一次锁的窗口）。
+func (s *scheduler) suspendDepth() int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return len(s.suspendStack)
 }
 
 // pendingEvents 收集**尚未执行**（排队队列 / 四条中断队列 / immediate）与
@@ -1114,6 +1164,17 @@ func (a *Agent) executeNewTask(t *Task) {
 	var f *TaskFrame
 	var out stepOutcome = outcomeDone
 
+	if t.Class == TaskInterrupt {
+		// 让位之前先记一笔「谁将要被打断」——这是排查「任务被莫名打断」的锚点。
+		// victim 从调度器取：此刻 s.running 还是被抢占者本身（suspend 里才清）。
+		a.sched.mu.Lock()
+		victim := describeTask(a.sched.running)
+		victimSrc := sourceOf(a.sched.running, nil)
+		a.sched.mu.Unlock()
+		log.Printf("[agent] preempt start: %s from %s (level=%d) -> victim %s (%s)",
+			describeTask(t), sourceOf(t, nil), int(t.Level), victim, victimSrc)
+	}
+
 	func() {
 		defer func() {
 			if r := recover(); r != nil {
@@ -1131,6 +1192,11 @@ func (a *Agent) executeNewTask(t *Task) {
 	}()
 
 	if out == outcomeSuspended && f != nil {
+		// 挂起必须落日志：此前只发事件不落盘，导致生产日志里
+		// 「谁把谁挤下去了」完全查不到（只有 interrupt from / cancelled 两行）。
+		// 曾因此把时间上相邻的输入误判成凶手。
+		log.Printf("[agent] suspend: %s (%s) yields to an interrupt; suspendStack=%d",
+			describeTask(t), sourceOf(t, f), a.sched.suspendDepth())
 		a.sched.suspend(t, f)
 		a.publishEvent(events.EventScheduler, map[string]interface{}{
 			"action": "suspend", "task": t.ID, "level": int(t.Level),
@@ -1151,6 +1217,8 @@ func (a *Agent) resumeTask(t *Task, f *TaskFrame) {
 	a.sched.mu.Lock()
 	a.sched.stats.Resumed++
 	a.sched.mu.Unlock()
+	log.Printf("[agent] resume: %s (%s) resumes after the interrupt finished",
+		describeTask(t), sourceOf(t, f))
 	a.publishEvent(events.EventScheduler, map[string]interface{}{
 		"action": "resume", "task": t.ID, "level": int(t.Level),
 	})
