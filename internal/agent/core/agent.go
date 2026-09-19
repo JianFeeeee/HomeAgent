@@ -142,6 +142,8 @@ type Agent struct {
 
 	// 工具轮次硬上限（0 = 不限）；见 AgentConfig.MaxToolTurns。
 	maxToolTurns int
+	// offload 是积压任务自动转投的参数（见 offload.go）。
+	offload OffloadOptions
 
 	// 进行中的 LLM 请求取消函数，interceptLoop 可调用以在请求中打断
 	cancelLLM context.CancelFunc
@@ -279,6 +281,12 @@ type AgentConfig struct {
 	// MaxToolTurns 是单个任务允许的工具轮次上限（0 = 不限）。
 	// 设计文档 D6：主循环必须有硬上限，否则模型不停调用就永不完结。
 	MaxToolTurns int
+
+	// Offload 是「积压任务自动转投给驻留子」的参数（见 offload.go）。
+	//
+	// 默认关闭（Enabled=false）：它让**内核替父做决策**，是设计 §7
+	//「决策在父的模型手里」的刻意例外，因此必须由部署方显式打开。
+	Offload OffloadOptions
 }
 
 func New(cfg AgentConfig) *Agent {
@@ -369,6 +377,7 @@ func New(cfg AgentConfig) *Agent {
 		childTasks:        make(map[string]*childTaskState),
 		sched:             newScheduler(256),
 		maxToolTurns:      cfg.MaxToolTurns,
+		offload:           cfg.Offload,
 		pluginHealth:      newPluginHealthTracker(),
 		thinkingEnabled:   cfg.ThinkingEnabled,
 		inputCfg:          cfg.InputProcessing,
@@ -407,6 +416,7 @@ func (a *Agent) Start() {
 	go a.archiveLoop()
 	go a.mergeLoop()
 	go a.reviewLoop()
+	go a.offloadLoop()
 	a.subscribeTerminalRegistry()
 	a.reembedStaleMedia()
 	a.migrateLegacyGraphMedia()
