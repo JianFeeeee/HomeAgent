@@ -345,3 +345,66 @@ func TestOffloadSeesInputsStuckInChannel(t *testing.T) {
 		t.Fatalf("应拉起 1 个驻留子，实际 %d", len(root.Residents()))
 	}
 }
+
+// ★★ 回归：转投必须保留 ResponseCh，否则同步调用方永久挂起。
+//
+// 这是我在线上真踩的第二个 bug：第一版用 InjectInputTo 重建事件 ⇒ ResponseCh
+// 被丢掉 ⇒ 日志显示子**正常处理完了**（各 ~3s），但 webui 的 HTTP 请求一直挂着
+// 不返回，最终 504。仓库反复警告同一件事（Agent.Stop 的注释："带 ResponseCh 的
+// 同步注入方（cli / clawhubadapter 均无超时）会永久挂起"）。
+//
+// 正确做法是走既有的跨 agent 投递原语 DeliverRouted：它推**原事件**。
+//
+// 断言方式是**最强的那个**：真的等同步回执回来。
+// （不用读子的 InputChan 来断言：SpawnResident 会启动子自己的调度循环，
+//
+//	它会与测试抢同一个 channel —— 那样写出来的测试是 flaky 的，实测过一次挂死。）
+func TestForwardKeepsResponseCh(t *testing.T) {
+	root, main := newRootWithoutSchedulerLoop(t)
+	defer main.Close()
+
+	opts := DefaultOffloadOptions()
+	opts.Enabled = true
+	opts.BusyAfter = time.Nanosecond
+	opts.MinPending = 1
+	opts.MaxResidents = 1
+
+	root.sched.enqueue(makeQueuedInput(1))
+	root.sched.nextRef()
+
+	// 一条**带同步回执通道**的输入（模拟 cli/webui 这类调用方）
+	respCh := make(chan *agentIO.OutputEvent, 1)
+	evt := &agentIO.InputEvent{
+		RequestID: "sync-1", Source: "webui", Type: "text",
+		OutputChannel: "webui",
+		Payload:       map[string]interface{}{"content": "sync request"},
+		ResponseCh:    respCh,
+	}
+	root.sched.enqueue(newInputTask(evt))
+
+	if n := root.offloadPendingTasks(opts); n != 1 {
+		t.Fatalf("应转投 1 条，实际 %d", n)
+	}
+
+	// 转投的是**同一个事件对象**（所以 payload 上的标注能在这里被看到），
+	// 而不是重建的副本 —— 副本会丢掉 ResponseCh。
+	if evt.Payload["offloaded_from"] != "parent" {
+		t.Errorf("应标注转投来源，实际 %v", evt.Payload["offloaded_from"])
+	}
+	if evt.ResponseCh == nil {
+		t.Fatal("★ 原事件的 ResponseCh 被清掉了")
+	}
+
+	// ★ 决定性断言：同步调用方真的收到回执。
+	select {
+	case out := <-respCh:
+		if out == nil {
+			t.Fatal("收到空回执")
+		}
+		if out.RequestID != "sync-1" {
+			t.Errorf("回执应带原 RequestID，实际 %q", out.RequestID)
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("★ 同步调用方没收到回执：转投丢了 ResponseCh（线上表现为 HTTP 挂起 504）")
+	}
+}
