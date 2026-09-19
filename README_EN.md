@@ -184,6 +184,31 @@ External plugin development: see [homeagent-sdk](https://gitcode.com/JianFeeeee/
 
 ## Project Status
 
+**v1.3.x line** (v1.3.1–v1.3.12, latest released) — **resident sub-agents** + **input scheduler rework**.
+
+- **Resident sub-agents**: the kernel can station lightweight-kernel child agents (their own
+  scheduler, their own temp graph memory, sharing the channel registry). The parent dispatches
+  and collects work via `resident_agents` (list/create/send/inspect/compress/reclaim/destroy).
+  An inputch can be assigned to a child, so input is routed to it **before entering the kernel**.
+- **Output channels addressable to a specific agent**: the `AllowedOutputs` grant set
+  (consistent across all three filter points) lets parent/child deliver to each other;
+  device capabilities became output channels too (one `device/<id>` per device).
+- **Input scheduler**: two task classes (queued/interrupt) + four interrupt levels (L1–L4)
+  + preempt/suspend/resume/interrupt-stack; same level never preempts same level, with a
+  starvation guard and preemption cooldown. L4 belongs only to the kernel and kernel-level
+  plugins (e.g. the WebUI stop button).
+- **Lightweight kernel profile**: a child's memory surface narrows to "conventional context
+  + graph memory" (narrow interface; the main graph opens as a query_only handle, writes go
+  to its own temp instance).
+- **Backlog timely feedback** (later in the line): when the main agent is busy for a long time,
+  the kernel hands queued input to a temporary **triage assistant** — simple items are handled
+  directly, items needing the main agent get an immediate "busy, please wait", so users no
+  longer wait 10+ minutes in silence.
+- Fixed a batch of real defects: inbound inputch (`child/<id>`) registration leak on resident
+  destruction, a child's round count always showing 0 (`info()` never filled it), an empty
+  child-side childIO (output channels not inherited), device heartbeat pong missing Flush
+  (dropping every 60s), and Lua plugin bridge alignment with SDK 1.3.0.
+
 **v1.2.0** — unified multimodal vector space, media promoted to first-class graph memory, and the whole data plane moved into shared memory.
 
 - **Model-neutral unified embedding space**: the kernel no longer adapts to any specific model.

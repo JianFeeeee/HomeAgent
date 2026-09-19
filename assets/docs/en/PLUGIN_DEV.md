@@ -804,7 +804,7 @@ Internal: records are stored in SQLite `disabled_plugins` table (`name`, `disabl
 |---------|------|----------|
 | [weather](https://gitcode.com/JianFeeeee/homeagent-sdk/tree/main/example/weather) | Go | Weather queries (wttr.in); demonstrates NoMemory/Cleaner/stage hooks/channels/text memory |
 | [luademo](https://gitcode.com/JianFeeeee/homeagent-sdk/tree/main/example/luademo) | Lua | Full-featured Lua example covering the whole v0.8.0 Lua SDK surface |
-| [qq](https://gitcode.com/JianFeeeee/homeagent-sdk/tree/main/example/qq) | Go | NapCat OneBot integration, 17 tools, full input/output channel wiring |
+| [qq](https://gitcode.com/JianFeeeee/homeagent-sdk/tree/main/example/qq) | Go | NapCat OneBot integration, 20 tools, full input/output channel wiring |
 | [memo](https://gitcode.com/JianFeeeee/homeagent-sdk/tree/main/example/memo) | Go | Memo management, PreAction injection + timed interrupt dual reminder |
 | [files](https://gitcode.com/JianFeeeee/homeagent-sdk/tree/main/example/files) | Go | File system operations, 4 write modes, sandbox isolation |
 | [browser](https://gitcode.com/JianFeeeee/homeagent-sdk/tree/main/example/browser) | Go | Web search + HTTP fetch (SSRF) + Chromium render (merged from web/webfetch) |
@@ -817,6 +817,12 @@ Internal: records are stored in SQLite `disabled_plugins` table (`name`, `disabl
 | [rss](https://gitcode.com/JianFeeeee/homeagent-sdk/tree/main/example/rss) | Go | RSS subscriptions |
 | [ai_image](https://gitcode.com/JianFeeeee/homeagent-sdk/tree/main/example/ai_image) | Go | AI image generation |
 | [music](https://gitcode.com/JianFeeeee/homeagent-sdk/tree/main/example/music) | Go | Music playback |
+| [vikunja](https://gitcode.com/JianFeeeee/homeagent-sdk/tree/main/example/vikunja) | Go | Vikunja task management (projects/tasks/labels CRUD) |
+| [vanblog](https://gitcode.com/JianFeeeee/homeagent-sdk/tree/main/example/vanblog) | Go | VanBlog publishing and management |
+| [deepsearch](https://gitcode.com/JianFeeeee/homeagent-sdk/tree/main/example/deepsearch) | Go | Multi-round deep search (progressive focus + cited summary) |
+| [acp](https://gitcode.com/JianFeeeee/homeagent-sdk/tree/main/example/acp) | Go | Agent Client Protocol (external editors/IDEs drive this agent) |
+| [recoverydiag](https://gitcode.com/JianFeeeee/homeagent-sdk/tree/main/example/recoverydiag) | Go | Five-part fault diagnosis (triage / sqlite check / log signatures / diff / ranked conclusions); core plugin of failback mode |
+| [plugindev](https://gitcode.com/JianFeeeee/homeagent-sdk/tree/main/example/plugindev) | Go | Plugin scaffolding: generate, build, install — lets the agent develop plugins itself |
 
 ### Built-in Plugins
 
