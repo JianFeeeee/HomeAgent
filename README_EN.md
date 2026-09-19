@@ -32,6 +32,19 @@ plane). A plugin crash cannot take down the kernel and it restarts automatically
 - **Document Layer**: Temporary memory with automatic cold data sinking, also supports user-initiated submissions
 - **Graph Layer**: SQLite graph database, persists entity relationships and semantic memory, supports distillation pipelines to extract triples from conversations
 
+**Input Scheduling: 2 classes + 4 interrupt levels** — Input does not go straight to the LLM;
+it first enters the scheduler. Two classes (queued = pending work, interrupt = ranked L1–L4 by
+"how urgent") with preemption and frame saving (interrupt stack); same level never preempts
+same level. L4 belongs only to the kernel and kernel-level plugins (e.g. the WebUI stop button).
+See "Input Scheduler & Interrupt Mechanism" in [`assets/docs/en/ARCHITECTURE.md`](assets/docs/en/ARCHITECTURE.md).
+
+**Resident sub-agents** — The kernel can station lightweight-kernel child agents (their own
+scheduler and temp graph memory, sharing the channel registry) to run long or backlogged work
+in parallel. When the main agent stays busy, the kernel hands queued input to a temporary
+**triage assistant**: simple items are handled directly, items needing the main agent get an
+immediate "busy, please wait" — users no longer wait in silence.
+See [`docs/zh/resident-subagent-design.md`](docs/zh/resident-subagent-design.md).
+
 ## Architecture Diagrams
 
 ### 1. Message Processing Sequence
@@ -40,6 +53,7 @@ plane). A plugin crash cannot take down the kernel and it restarts automatically
 sequenceDiagram
     participant U as User/Plugin
     participant IO as IOManager
+    participant SCH as Input Scheduler
     participant EV as eventLoop
     participant CTX as RelevanceContext
     participant LLM as LLM+Tool Loop
@@ -47,7 +61,14 @@ sequenceDiagram
     participant MEM as Three-Layer Memory
 
     U->>IO: InjectInput(type, payload)
-    IO->>EV: inputCh
+    IO->>SCH: inputCh
+    rect lavender
+        Note over SCH: 2 task classes + 4 interrupt levels (L1-L4)
+        SCH->>SCH: same level never preempts -> ready/interrupt queue
+        SCH->>SCH: higher level -> preempt (frame pushed to interrupt stack)
+        SCH->>SCH: offload (main agent busy too long -> temporary triage assistant)
+    end
+    SCH->>EV: pick one task and run it
     rect lavender
         Note over EV: processTextInput
         EV->>ST: StageOnInput  Plugin can rewrite/short-circuit
@@ -61,7 +82,7 @@ sequenceDiagram
         EV->>MEM: buildSystemPrompt  DocQuery summary+Graph memory index+Persona+Skills
         EV->>ST: StagePreAction  Plugin can pre-intercept
         loop Tool loop
-            LLM->>LLM: drainInterrupts
+            LLM->>LLM: safe point: interrupt eval / yield
             LLM->>LLM: LLM Chat
             LLM->>ST: StagePostAction  Plugin can modify/short-circuit
             alt No tool call
@@ -169,16 +190,16 @@ API keys are configured via WebUI `http://localhost:8080` settings page, persist
 cmd/homed/          Daemon entry, assembles all subsystems
 cmd/waiter/         CLI client (Unix socket)
 internal/
-├── agent/core/     Agent core: event loop, LLM tool loop, 7-stage pipeline
-├── agent/api/      LLM Provider + 8 Lua adapters
+├── agent/core/     Agent core: input scheduler (2 classes + 4 levels), event loop, LLM tool loop, 7-stage pipeline, residents
+├── agent/api/      LLM Provider (Lua adapter layer: provider.go drives the vm)
 ├── memory/         Three-layer memory: Graph(SQLite) / Document(JSON+TF-IDF) / Text(JSONL) + StaticEmbedder(pretrained word embedding/TF-IDF fallback) + CleanTemplateText(de-template)
 ├── knowledge/      Knowledge base (filesystem + TF-IDF)
 ├── plugin/         Plugin registry + subprocess loader (stdio RPC + shared memory segment + event ring)
-├── plugins/        11 built-in plugins (webui/cli/timer/cmd/mcp/clawhubadapter/agentcli/healthcheck/pluginmgr/files/cfgmgr)
+├── plugins/        18 built-in plugins (webui/cli/timer/cmd/mcp/files/cfgmgr/agentcli/healthcheck/pluginmgr/clawhubadapter/multimodal/remotedevice/ai_image/localuse/skillmgr/data, ...)
 ├── sdk/            PluginSDK (Tool/Stage/Event three channels)
 ├── config/         SQLite config center
 ├── events/         Event bus
-└── internal/lua/adapters/   8 LLM protocol adapter scripts
+└── internal/lua/adapters/   10 LLM protocol adapter scripts
 External plugin development: see [homeagent-sdk](https://gitcode.com/JianFeeeee/homeagent-sdk) repo, use `hmapdev` toolchain, refer to Go and Lua examples in `example/`
 ```
 
@@ -304,7 +325,12 @@ make test               # go test ./...
 make install            # Install to system
 ```
 
-Dependencies: Go 1.25+, CGo (go-sqlite3), Linux/Windows.
+Dependencies: Go 1.25+, CGo (go-sqlite3), Linux.
+
+> `homed` requires Linux (it relies on fd inheritance and intra-segment offset
+dereferencing of the shared memory region; see `cmd/homed/platform_windows.go`).
+On Windows only `waiter.exe` is built and `homed` runs under WSL2 (see Downloads).
+macOS can build `waiter`/`initconfig`; `homed` must be built on native macOS.
 
 ## License
 
