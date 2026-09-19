@@ -26,6 +26,16 @@ homed（内核零 IO） ← PluginSDK → 插件（所有 IO 能力）
 - **Document 层**：临时记忆，冷数据自动下沉，也支持用户主动提交
 - **Graph 层**：SQLite 图数据库，持久化实体关系和语义记忆，支持蒸馏管道从原始对话中提取三元组
 
+**输入调度：两类别 + 四级中断** — 输入不直接进 LLM，先进调度器。
+排队（待办工作）与中断（按"有多不能等"分 L1~L4）两类；高级可抢占低级并保存现场
+（中断栈），同级不抢占。L4 只归内核与内核级插件（如 WebUI 终止按钮）。
+见 [`assets/docs/zh/ARCHITECTURE.md`](assets/docs/zh/ARCHITECTURE.md) 的「输入调度器与中断机制」。
+
+**驻留式子 agent** — 内核可派驻轻量内核的子 agent（自己的调度器与 temp 图记忆，
+共享通道登记表），把长任务/积压交出去并行做。主 agent 忙久了，内核还会把排队输入
+交给临时**分诊助手**：简单的直接处理，需要主 agent 的立刻回「忙碌中，请稍候」，
+用户不再干等。见 [`docs/zh/resident-subagent-design.md`](docs/zh/resident-subagent-design.md)。
+
 ## 架构图
 
 ### 一、消息处理时序
@@ -34,6 +44,7 @@ homed（内核零 IO） ← PluginSDK → 插件（所有 IO 能力）
 sequenceDiagram
     participant U as 用户/插件
     participant IO as IOManager
+    participant SCH as 输入调度器
     participant EV as eventLoop
     participant CTX as RelevanceContext
     participant LLM as LLM+工具循环
@@ -41,7 +52,14 @@ sequenceDiagram
     participant MEM as 三层记忆
 
     U->>IO: InjectInput(type, payload)
-    IO->>EV: inputCh
+    IO->>SCH: inputCh
+    rect lavender
+        Note over SCH: 两类别 + 四级中断（L1~L4）
+        SCH->>SCH: 同级不抢占 → 入就绪队列/中断队列
+        SCH->>SCH: 更高级 → 抢占（现场压中断栈，稍后可恢复）
+        SCH->>SCH: 转投（主 agent 忙久了 → 交给临时分诊助手）
+    end
+    SCH->>EV: 选中一个任务开始跑
     rect lavender
         Note over EV: processTextInput
         EV->>ST: StageOnInput  插件可改写/短路
@@ -55,7 +73,7 @@ sequenceDiagram
         EV->>MEM: buildSystemPrompt  DocQuery摘要+Graph记忆索引+人格+技能
         EV->>ST: StagePreAction  插件可预拦截
         loop 工具循环
-            LLM->>LLM: drainInterrupts
+            LLM->>LLM: 安全点：中断求值/让位
             LLM->>LLM: LLM Chat
             LLM->>ST: StagePostAction  插件可修改/短路
             alt 无tool call
@@ -180,16 +198,16 @@ API 密钥通过 WebUI `http://localhost:8080` 设置页配置，持久化在 SQ
 cmd/homed/          守护进程入口，组装所有子系统
 cmd/waiter/         CLI 客户端（Unix socket）
 internal/
-├── agent/core/     Agent 核心：事件循环、LLM 工具循环、7 阶段管道
-├── agent/api/      LLM Provider + 8 个 Lua 适配器
+├── agent/core/     Agent 核心：输入调度器（两类别+四级中断）、事件循环、LLM 工具循环、7 阶段管道、驻留子
+├── agent/api/      LLM Provider（Lua 适配层：provider.go 调 vm）
 ├── memory/         三层记忆：Graph(SQLite) / Document(JSON+TF-IDF) / Text(JSONL) + StaticEmbedder(预训练词嵌入/TF-IDF回退) + CleanTemplateText(去模版)
 ├── knowledge/      知识库（文件系统 + TF-IDF）
 ├── plugin/         插件注册表 + 子进程加载器（stdio RPC + 共享内存段 + 事件环）
-├── plugins/        内置 11 个插件（webui/cli/timer/cmd/mcp/clawhubadapter/agentcli/healthcheck/pluginmgr/files/cfgmgr）
+├── plugins/        内置 18 个插件（webui/cli/timer/cmd/mcp/files/cfgmgr/agentcli/healthcheck/pluginmgr/clawhubadapter/multimodal/remotedevice/ai_image/localuse/skillmgr/data 等）
 ├── sdk/            PluginSDK（Tool/Stage/Event 三通道）
 ├── config/         SQLite 配置中心
 ├── events/         事件总线
-└── internal/lua/adapters/   8 个 LLM 协议适配器脚本
+└── internal/lua/adapters/   10 个 LLM 协议适配器脚本
 外部插件开发见 [homeagent-sdk](https://gitcode.com/JianFeeeee/homeagent-sdk) 仓库，使用 `hmapdev` 工具链开发，参考 `example/` 目录下的 Go 和 Lua 示例
 ```
 
@@ -282,7 +300,12 @@ make test               # go test ./...
 make install            # 安装到系统
 ```
 
-依赖：Go 1.25+, CGo (go-sqlite3), Linux/Windows。
+依赖：Go 1.25+, CGo (go-sqlite3), Linux。
+
+> `homed` 需 Linux（依赖 fd 继承与共享内存段的段内偏移解引用，见
+> `cmd/homed/platform_windows.go`）；Windows 上只构建 `waiter.exe`，
+> `homed` 跑在 WSL2 里（见「下载」）。macOS 可构建 `waiter`/`initconfig`，
+> `homed` 需在原生 macOS 构建。
 
 ## 许可
 
