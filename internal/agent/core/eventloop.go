@@ -313,15 +313,28 @@ func (a *Agent) mediaToBlocks(payload map[string]interface{}, mediaType string, 
 	return blocks, alt
 }
 
-// emitSkippedReply 给被跳过任务的**同步**调用方一个终态。
+// emitSkippedReply 给被跳过任务的调用方一个终态。
 //
 // 为什么要单独一条路径而不是复用 emitResponse：跳过意味着“我们没有处理这条输入”，
 // 不应对外发 agent_output 事件（否则 WebUI 聊天记录会凭空多出一条空消息），
 // 但必须写 ResponseCh——否则 cli/clawhub 这类无超时的同步注入会永久挂起。
 //
+// ❗异步来源（qq / wechat / rss 等）**没有 ResponseCh**，于是这里以前是直接 return。
+// 后果是任务被丢弃时**完全无声**：用户什么都没收到、日志里也没痕迹，
+// 他只会以为消息丢了。转投子被回收/销毁时队列里的积压正落在这个盲区里
+// （父可随时对子 reclaim/destroy，而子手上可能还握着几条 QQ 消息）。
+// 现在至少留一条带来源与通道的日志，让“这条消息为什么没回”可被追溯。
+//
 // 非阻塞写：ResponseCh 由同步调用方以 cap=1 创建，调用方超时离开后仍可写入。
 func (a *Agent) emitSkippedReply(evt *agentIO.InputEvent, reason string) {
-	if evt == nil || evt.ResponseCh == nil {
+	if evt == nil {
+		return
+	}
+	if evt.ResponseCh == nil {
+		// 无可回执的通道：不静默。异步来源本就靠 agent 主动 output_send，
+		// 丢弃后没有任何东西会告诉用户，因此这条日志是唯一的线索。
+		log.Printf("[agent] %s: 丢弃一条无回执通道的输入（source=%s channel=%s request=%s reason=%s）",
+			a.id, evt.Source, evt.OutputChannel, evt.RequestID, reason)
 		return
 	}
 	ch := evt.OutputChannel

@@ -123,17 +123,31 @@ func (a *Agent) executeResidentAgents(tc agentAPI.ToolCall) string {
 		return fmt.Sprintf("已压缩子 agent 上下文（丢弃 %d 条旧事件，并发清理其 inputch 处理表）；子继续存在", n)
 
 	case "reclaim":
-		info, err := a.ReclaimResident(strArg(tc, "id"), reclaimKeepAll)
+		id := strArg(tc, "id")
+		// 残余任务先由父**显式**决定保留还是丢弃（用户 2026-09-19 要求）。
+		// 不传 residual 时默认 keep：宁可多做一件，不可默默丢一条。
+		residual, rmsg, rerr := a.ApplyResidual(id, residualPolicyOf(tc))
+		if rerr != nil {
+			return fmt.Sprintf("处置残余任务失败: %v", rerr)
+		}
+		info, err := a.ReclaimResident(id, reclaimKeepAll)
 		if err != nil {
 			return fmt.Sprintf("回收失败: %v", err)
 		}
-		return "已回收（temp 中选中的记录已合入主记忆，该驻留子已取消）: " + MarshalResidentInfo(info)
+		return fmt.Sprintf("残余任务（%d 条）：%s\n已回收（temp 中选中的记录已合入主记忆，该驻留子已取消）: %s",
+			residual, rmsg, MarshalResidentInfo(info))
 
 	case "destroy":
-		if err := a.DestroyResident(strArg(tc, "id")); err != nil {
+		id := strArg(tc, "id")
+		// 同上：销毁前先把残余任务交出去，否则它们会随子一起无声消失。
+		residual, rmsg, rerr := a.ApplyResidual(id, residualPolicyOf(tc))
+		if rerr != nil {
+			return fmt.Sprintf("处置残余任务失败: %v", rerr)
+		}
+		if err := a.DestroyResident(id); err != nil {
 			return fmt.Sprintf("销毁失败: %v", err)
 		}
-		return "已销毁并移除该驻留子"
+		return fmt.Sprintf("残余任务（%d 条）：%s\n已销毁并移除该驻留子", residual, rmsg)
 
 	default:
 		return fmt.Sprintf("未知 action=%q；可用：list | create | send | inspect | compress | reclaim | destroy", action)
@@ -143,6 +157,19 @@ func (a *Agent) executeResidentAgents(tc agentAPI.ToolCall) string {
 // reclaimKeepAll 是回收时的默认策略：把子 temp 的活跃记录全部纳入主记忆
 // （"哪些纳入"由父的模型决定——这里给的是"全要"这一档）。
 func reclaimKeepAll(_ []InputchRecord, triples []memory.Triple) []memory.Triple { return triples }
+
+// residualPolicyOf 从工具参数读残余任务的处置策略（keep/drop）。
+//
+// 默认 keep：父没明确说丢时，一律转回自己而不是丢弃。
+// "宁可多做一件，不可默默丢一条"——吞掉一条输入比多处理一条更糟。
+func residualPolicyOf(tc agentAPI.ToolCall) ResidualPolicy {
+	switch strings.ToLower(strArg(tc, "residual")) {
+	case "drop", "discard":
+		return ResidualDrop
+	default:
+		return ResidualKeep
+	}
+}
 
 func intArg(tc agentAPI.ToolCall, key string) int {
 	switch v := tc.Arguments[key].(type) {
