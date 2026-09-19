@@ -677,4 +677,4 @@ go test -count=1 ./... && go test -race -count=1 ./internal/agent/... ./internal
 
 - 本设计在 `feature/input-semantics` 之后的特性分支上开发，完成后合回 `main`。
 - 若需要动公开 SDK（例如新增 `agent_*` 控制面原语、通道授权字段），按"**只增不减、签名不改**"
-  追加，并同步 `docs/zh/plugin-interface-matrix.md` 与 SDK 仓版本。
+  追加，并按 `docs/git-branching.md` §八 的接线清单同步（含 hmapdev 模板）与 SDK 仓版本（§七）。

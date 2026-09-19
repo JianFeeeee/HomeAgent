@@ -12,7 +12,7 @@ import (
 
 // 子进程架构的性能基准（Part 6.6 验收项）。
 //
-// 对照基线来自 docs/zh/experiments/plugin-arch：
+// 对照基线（迁移期可行性实验实测，那些实验脚本已随迁移完成删除）：
 //
 //	实验 3  锁仲裁 RPC 往返    19.40 µs/次
 //	实验 4  post-and-forget    5.07s → 2.29ms（5000 token + 20µs 慢消费者）
