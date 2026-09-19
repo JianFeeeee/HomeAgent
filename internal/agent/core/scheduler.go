@@ -706,11 +706,29 @@ func (s *scheduler) registerInterrupt(t *Task) bool {
 				s.preemptArmed = true
 				s.preemptLevel = t.Level
 				s.stats.bumpInterruptLevel(&s.stats.PreemptsByLevel, t.Level)
+				// 抢占判决点：此刻 running 还是真正的受害者，记下来才能回答
+				// 「我的任务被谁打断了」。放在 executeNewTask 里打是错的——
+				// 那时 nextRef 已把 running 换成抢占者自己，日志会写成
+				// "victim = 入侵者自己"（实测过这个错误输出）。
+				log.Printf("[agent] preempt: %s from %s (L%d) preempts %s (%s)",
+					describeTask(t), sourceOf(t, nil), int(t.Level),
+					describeTask(running), sourceOf(running, nil))
 			}
 		}
 	}
 	if !arm {
 		s.enqueueInterruptLocked(t)
+		// 入队而不是抢占：这也是要能看见的（否则「中断明明到了却没生效」无从解释）。
+		// 两种成因分开写：临界区 vs 级别不够/冷却期。
+		reason := "level insufficient"
+		if critical {
+			reason = "running in critical section"
+		} else if canPreempt(t, running) && running != nil && !running.LastPreemptAt.IsZero() && time.Since(running.LastPreemptAt) < preemptCooldown {
+			reason = "preempt cooldown"
+		}
+		log.Printf("[agent] interrupt queued: %s from %s (L%d) vs %s (%s) — %s; queue=%d",
+			describeTask(t), sourceOf(t, nil), int(t.Level),
+			describeTask(running), sourceOf(running, nil), reason, s.interruptCountLocked())
 	}
 	s.mu.Unlock()
 
@@ -1163,17 +1181,6 @@ func (a *Agent) executeTask(t *Task) {
 func (a *Agent) executeNewTask(t *Task) {
 	var f *TaskFrame
 	var out stepOutcome = outcomeDone
-
-	if t.Class == TaskInterrupt {
-		// 让位之前先记一笔「谁将要被打断」——这是排查「任务被莫名打断」的锚点。
-		// victim 从调度器取：此刻 s.running 还是被抢占者本身（suspend 里才清）。
-		a.sched.mu.Lock()
-		victim := describeTask(a.sched.running)
-		victimSrc := sourceOf(a.sched.running, nil)
-		a.sched.mu.Unlock()
-		log.Printf("[agent] preempt start: %s from %s (level=%d) -> victim %s (%s)",
-			describeTask(t), sourceOf(t, nil), int(t.Level), victim, victimSrc)
-	}
 
 	func() {
 		defer func() {
