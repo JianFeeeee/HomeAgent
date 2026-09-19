@@ -41,7 +41,7 @@ func TestAccumulateStreamParallelToolCallsByIndex(t *testing.T) {
 	}
 	close(ch)
 
-	resp, err := accumulateStream(ctx, ch, nil, "cli")
+	resp, err := accumulateStream(ctx, ch, nil, "cli", 4096)
 	if err != nil {
 		t.Fatalf("accumulateStream: %v", err)
 	}

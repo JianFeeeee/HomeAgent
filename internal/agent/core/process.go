@@ -153,7 +153,7 @@ func chatStreamWithFallback(ctx context.Context, p agentAPI.Provider, req *agent
 		return p.Chat(ctx, req)
 	}
 
-	resp, accErr := accumulateStream(ctx, ch, a, channel)
+	resp, accErr := accumulateStream(ctx, ch, a, channel, req.MaxTokens)
 
 	// 中断/超时取消必须保持取消语义传给调用方（与原 Chat() 行为一致：
 	// 被 cancel 时丢弃已收内容返回 err），让 process() 的 continue 分支
@@ -197,9 +197,32 @@ type toolCallAcc struct {
 	argsRaw strings.Builder
 }
 
+// truncatedArgsError 把「参数被 MaxTokens 截断」变成模型能看懂的一句话。
+//
+// 背景（实测 2026-09-19）：core.llm.max_tokens=4096 会在长参数（整段脚本/
+// 大 JSON）写到一半时从中间切断，上游回 finish_reason="length"。旧实现把这个
+// 信号整个丢掉，残缺 JSON 解析失败后静默降级成空 map，工具只看到参数为空
+// （files_write → "path is required"），模型因此完全看不出是被截断，原样重试
+// 四遍、次次撞同一堵墙（日志里 4 次 files_write 失败即此）。
+//
+// 这里改成**显式报错 + 可执行指引**：告诉模型参数不完整、要拆小或改分批写。
+// 调用方（executeToolCallInner）据此短路，不再拿空参数去调工具。
+func truncatedArgsError(name string, rawLen, maxTokens int) string {
+	return fmt.Sprintf(
+		"工具 %s 调用被截断：参数 JSON 不完整（收到 %d 字节），"+
+			"原因是本轮流式输出达到了 max_tokens=%d 的上限（上游 finish_reason=length），"+
+			"不是网络或工具的问题。请改用更小的参数重试：把长内容拆成多次调用"+
+			"（例如先写文件的前半部分，再用追加/编辑的方式补后半部分），"+
+			"或先用更少的字段完成本次调用。请勿原样重复上一次的调用。",
+		name, rawLen, maxTokens)
+}
+
 // accumulateStream 消费 chunk channel，累积为完整 CompletionResponse，
 // 同时发布增量事件。返回的 response 与非流式 Chat() 的返回等价。
-func accumulateStream(ctx context.Context, ch <-chan agentAPI.StreamChunk, a *Agent, channel string) (*agentAPI.CompletionResponse, error) {
+//
+// maxTokens 是本轮请求发送的输出上限，只参与错误文案（把「参数被截断」说成
+// 模型能执行的话），不参与解析逻辑。
+func accumulateStream(ctx context.Context, ch <-chan agentAPI.StreamChunk, a *Agent, channel string, maxTokens int) (*agentAPI.CompletionResponse, error) {
 	resp := &agentAPI.CompletionResponse{
 		ToolCalls: make([]agentAPI.ToolCall, 0),
 	}
@@ -223,6 +246,14 @@ func accumulateStream(ctx context.Context, ch <-chan agentAPI.StreamChunk, a *Ag
 			log.Printf("[agent] stream tool_call %s (idx=%d) argument fragments invalid JSON: %q", acc.name, idx, truncateStr(raw, 200))
 		} else if raw == "" {
 			log.Printf("[agent] stream tool_call %s (idx=%d) received NO argument fragments", acc.name, idx)
+		}
+		// 被 MaxTokens 截断时**不要**静默降级成空参数：那会让工具报
+		// "path is required" 这类与真因无关的错，模型据此重试只会再撞一次。
+		// 改成把「参数不完整」原样交给模型，并附上可执行的收缩指引。
+		if !argsOK && lastFinish == "length" {
+			log.Printf("[agent] stream tool_call %s (idx=%d) TRUNCATED by max_tokens=%d (%d bytes of args) — surfacing to model",
+				acc.name, idx, maxTokens, len(raw))
+			args = map[string]interface{}{"__truncated_error": truncatedArgsError(acc.name, len(raw), maxTokens)}
 		}
 		tc := agentAPI.ToolCall{
 			ID:        acc.id,
@@ -294,6 +325,9 @@ func accumulateStream(ctx context.Context, ch <-chan agentAPI.StreamChunk, a *Ag
 
 			if ck.Done && ck.FinishReason != "" {
 				lastFinish = ck.FinishReason
+				if lastFinish == "length" {
+					log.Printf("[agent] stream finished with finish_reason=length (output hit max_tokens) — tool args may be truncated")
+				}
 			}
 			if ck.Usage != nil {
 				resp.TokenUsage = *ck.Usage
