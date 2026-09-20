@@ -725,6 +725,57 @@
          走动的包用 .dv-pkdot（金色）。 */
       .dv-pkline { fill: none; stroke: var(--brand-gold); stroke-width: 1.1; opacity: .22; }
 
+      /* ── 图 5 新增图元 ── */
+      /* 主 agent 的忙碌条：一直爬不到头，呼应「占住很久」 */
+      .dv-busy-track { fill: var(--border); opacity: .5; }
+      .dv-busy-fill { fill: var(--brand-blue); opacity: .75; }
+      /* 回执区：极淡底 + 虚线边，与主干道区分开 */
+      .dv5-band { fill: var(--bg-card); stroke: var(--border); stroke-width: 1; stroke-dasharray: 5 4; opacity: .55; }
+      .dv5-chip { fill: var(--bg-elev, var(--bg-card)); stroke: var(--border-hi); stroke-width: 1; }
+      .dv5-out1 { fill: var(--brand-cyan); font-size: 9.4px; text-anchor: middle; }
+      .dv5-out2 { fill: var(--text-muted); font-size: 9.4px; text-anchor: middle; }
+      /* 触发条件卡：金色系，与「忙碌」呼应；也给的是可核验的默认值 */
+      .dv5-trigger { fill: none; stroke: var(--brand-gold); stroke-width: 1.2; stroke-dasharray: 5 4; opacity: .6; }
+      .dv5-tcap { fill: var(--brand-gold); font-size: 9.6px; text-anchor: middle; font-weight: 600; letter-spacing: .04em; }
+      .dv5-tval { fill: var(--text-dim); font-size: 9.6px; text-anchor: middle; }
+      .dv5-tnote { fill: var(--text-muted); font-size: 8.6px; text-anchor: middle; }
+      /* 积压条被逐条取走 */
+      .js-fx .dv5-pile rect { animation: queueTake 3.6s ease-in-out infinite; }
+      .js-fx .dv5-pile rect:nth-of-type(1) { animation-delay: 0s; }
+      .js-fx .dv5-pile rect:nth-of-type(2) { animation-delay: .5s; }
+      .js-fx .dv5-pile rect:nth-of-type(3) { animation-delay: 1s; }
+
+      /* ── 图 3 新增图元 ── */
+      /* 玻璃高光：贴在方块上半部，营造「有厚度的一层壳」 */
+      .dv-sheen {
+        fill: url(#gSheen);
+        /* 只盖上半部、透明度低。整块铺满会像蒙了层白纱（实测过）。 */
+        opacity: .3;
+        pointer-events: none;
+      }
+      /* 进程的虚拟地址：左右各自靠边，避开中间的竖向连接线 */
+      .dv-addr { fill: var(--text-muted); font-size: 10px; font-family: var(--font-mono); text-anchor: start; }
+      .dv-addr-r { text-anchor: end; }
+      /* 桥接说明：居中，压在两条竖向虚线之间，不与任何线重叠 */
+      .dv-bridge { fill: var(--brand-cyan); font-size: 10px; text-anchor: middle; font-weight: 600; }
+      /* 物理页标题：也居中。靠左会被 x=72 那条写入虚线穿过（实测压字）。 */
+      .dv-physcap { fill: var(--brand-cyan); font-size: 10.5px; text-anchor: middle; font-weight: 600; opacity: .9; }
+      /* 同一物理页的呼吸描边 */
+      .dv-phys-glow { fill: none; stroke: var(--brand-cyan); stroke-width: 2; opacity: 0; }
+      @keyframes physBreathe {
+        0%, 100% { opacity: 0; }
+        50%      { opacity: .38; }
+      }
+      .js-fx .dv-phys-glow { animation: physBreathe 4.4s ease-in-out infinite; }
+      /* 同一物理页：实线外框 + 极淡填充，与「虚拟地址」的虚线形成对比 */
+      .dv-phys { fill: none; stroke: var(--brand-cyan); stroke-width: 1.6; opacity: .5; }
+      .dv-page-fill { fill: url(#gPage); }
+      /* arena 字节刻度：细密竖线，把「一片区域」讲成「有结构的区域」 */
+      .dv-ticks path { stroke: var(--text-muted); stroke-width: 0.8; opacity: .35; }
+      /* 同页连通线：两进程之间的一条细光路 */
+      .dv-pagelink { fill: none; stroke: var(--brand-cyan); stroke-width: 1.1; opacity: .30; stroke-dasharray: 3 3; }
+      .dv-linkdot { fill: var(--brand-cyan); filter: url(#fGlow); }
+
       /* 级别强度条（图 4）：从 L1 到 L4 依次点亮，表现「级别越低越可等、
          越高越紧急」。静态时四条只是深浅不同的背景，看不出递进。 */
       .dv-gauge-fill rect { opacity: .45; }
@@ -1993,8 +2044,7 @@
             <span class="tagline rise" style="--d:0ms">常驻型个人 Agent 框架</span>
             <h1 class="rise" style="--d:80ms">是<span class="grad">记得住</span>的管家<br />更是从不让你干等的搭档</h1>
             <p class="lede rise" style="--d:180ms">
-              内核只管<strong>编排、记忆与调度</strong>，消息 / 文件 / 网络 / 设备
-              一律交给插件。插件崩了不牵连内核 —— 换掉一个二进制就热重载。
+              内核只做<strong>编排、记忆、调度</strong>三件事，其余由插件桥接，崩了自己重启，波及不到内核。
             </p>
             <div class="cta rise" style="--d:280ms">
               <a class="btn btn-primary" href="#quickstart">快速上手 →</a>
@@ -2187,7 +2237,6 @@
                 <rect class="dv-hit dv-hit-c" x="36" y="160" width="76" height="38" rx="8" />
                 <rect class="dv-hit dv-hit-d" x="248" y="160" width="76" height="38" rx="8" />
               </svg>
-              <p class="dv-note">箭头只进出插件 —— 内核一列都没有</p>
             </div>
           </div>
         </div>
@@ -2254,35 +2303,73 @@
             </div>
             <div class="alt-visual">
               <svg viewBox="0 0 360 250" role="img" aria-label="共享内存段加偏移解引用，实现零拷贝">
-                <rect class="dv-box dv-accent" x="24" y="40" width="96" height="56" rx="9" />
-                <text class="dv-ts" x="72" y="64">内核</text>
-                <text class="dv-s" x="72" y="82">homed</text>
-                <rect class="dv-box dv-accent" x="240" y="40" width="96" height="56" rx="9" />
-                <text class="dv-ts" x="288" y="64">插件</text>
-                <text class="dv-s" x="288" y="82">plugin.bin</text>
-                <rect class="dv-seg" x="24" y="126" width="312" height="88" rx="10" />
-                <text class="dv-cap" x="34" y="146">共享内存段（一块，两边同一物理页）</text>
-                <rect class="dv-box dv-hd" x="40" y="156" width="60" height="42" rx="6" />
-                <text class="dv-ts" x="70" y="182">header</text>
-                <rect class="dv-box dv-ar" x="112" y="156" width="208" height="42" rx="6" />
-                <text class="dv-ts" x="216" y="181">arena　变长数据</text>
-                <text class="dv-labs" x="216" y="194">{off, len} 相对基址</text>
-                <path class="dv-line" d="M72 96 V126" />
-                <path class="dv-line" d="M288 96 V126" />
-                <path class="dv-arrow" d="M70 60 L2 60 L2 177 L40 177" />
-                <!-- 写入 → 读回：内核写进 arena，插件直接读同一物理页。
-                     这是「零拷贝」最该被看见的一步，静态图完全表达不了。 -->
-                <path id="writePath" class="dv-pk dv-dash" d="M72 96 V150" />
-                <path id="readPath" class="dv-pk dv-dash" d="M288 96 V150" />
+                <defs>
+                  <linearGradient id="gPage" x1="0" y1="0" x2="1" y2="0">
+                    <stop offset="0" stop-color="var(--brand-cyan)" stop-opacity="0.05"/>
+                    <stop offset="0.5" stop-color="var(--brand-cyan)" stop-opacity="0.13"/>
+                    <stop offset="1" stop-color="var(--brand-cyan)" stop-opacity="0.05"/>
+                  </linearGradient>
+                </defs>
+
+                <!-- 两端进程：地址标注放在卡片**上方**。
+                     放下面会与竖向连接线重叠（实测两处文字都压在线上）。 -->
+                <text class="dv-addr" x="24" y="22">0x7f2a…</text>
+                <text class="dv-addr dv-addr-r" x="336" y="22">0x55c1…</text>
+                <g>
+                  <rect class="dv-box dv-accent" x="20" y="30" width="104" height="54" rx="10" />
+                  <rect class="dv-sheen" x="20" y="30" width="104" height="24" rx="10" />
+                  <text class="dv-ts" x="72" y="55">homed</text>
+                  <text class="dv-s" x="72" y="73">进程 A</text>
+                </g>
+                <g>
+                  <rect class="dv-box dv-accent" x="236" y="30" width="104" height="54" rx="10" />
+                  <rect class="dv-sheen" x="236" y="30" width="104" height="24" rx="10" />
+                  <text class="dv-ts" x="288" y="55">plugin.bin</text>
+                  <text class="dv-s" x="288" y="73">进程 B</text>
+                </g>
+                <path class="dv-line dv-dash" d="M72 104 V128" />
+                <path class="dv-line dv-dash" d="M288 104 V128" />
+                <!-- 点题的桥接放在两列之间：两侧各有自己的虚拟地址，
+                     但落点是同一块物理页 —— 这才是「零拷贝」的关键。
+                     原先左右各一句「各自的虚拟地址」既冗余、又被竖向虚线穿过。 -->
+                <text class="dv-bridge" x="180" y="104">不同虚拟地址 · 同一物理页</text>
+
+                <!-- 同一物理页 -->
+                <rect class="dv-page-fill" x="20" y="128" width="320" height="98" rx="12" />
+                <rect class="dv-phys" x="20" y="128" width="320" height="98" rx="12" />
+                <text class="dv-physcap" x="180" y="146">段布局：定长头 + 变长 arena</text>
+
+                <rect class="dv-box dv-hd" x="34" y="158" width="66" height="52" rx="7" />
+                <rect class="dv-sheen" x="34" y="158" width="66" height="22" rx="7" />
+                <text class="dv-ts" x="67" y="180">header</text>
+                <text class="dv-labs" x="67" y="196">魔数 · 版本</text>
+
+                <rect class="dv-box dv-ar" x="108" y="158" width="218" height="52" rx="7" />
+                <rect class="dv-sheen" x="108" y="158" width="218" height="22" rx="7" />
+                <text class="dv-ts" x="217" y="178">arena</text>
+                <text class="dv-labs" x="217" y="194">变长数据 · {off, len} 相对基址</text>
+                <!-- 字节刻度：把「一片区域」讲成「有结构的区域」 -->
+                <g class="dv-ticks">
+                  <path d="M126 202 v6" /><path d="M152 202 v9" /><path d="M178 202 v6" />
+                  <path d="M204 202 v9" /><path d="M230 202 v6" /><path d="M256 202 v9" />
+                  <path d="M282 202 v6" /><path d="M308 202 v9" />
+                </g>
+
+                <!-- 写入 → 读回 -->
+                <path id="writePath" class="dv-pk dv-dash" d="M72 86 V158" />
+                <path id="readPath" class="dv-pk dv-dash" d="M288 86 V158" />
                 <circle class="dv-pkdot dv-anim" r="3.4">
                   <animateMotion dur="2.8s" repeatCount="indefinite"><mpath href="#writePath" /></animateMotion>
                 </circle>
                 <circle class="dv-pkdot dv-anim" r="3.4">
                   <animateMotion dur="2.8s" begin="1.4s" repeatCount="indefinite"><mpath href="#readPath" /></animateMotion>
                 </circle>
-                <!-- arena 被写入时的数据流：光带自左向右扫过 -->
-                <rect class="dv-sweep dv-anim" x="112" y="156" width="34" height="42" rx="6" />
-                <text class="dv-x" x="180" y="238">零拷贝：不序列化、不复制</text>
+                <rect class="dv-sweep dv-anim" x="108" y="158" width="40" height="52" rx="7" />
+                <!-- 同页提示：外框自身做极缓的呼吸，不再画第二条巡行线
+                     （巡行框看起来像页内又多了一层框，反而乱）。 -->
+                <rect class="dv-phys-glow dv-anim" x="20" y="128" width="320" height="98" rx="12" />
+
+                <text class="dv-x" x="180" y="243">零拷贝：不序列化、不复制</text>
               </svg>
               <p class="dv-note">实测整段写入+读回 3.5µs</p>
             </div>
@@ -2401,41 +2488,83 @@
               <span class="alt-n">05</span>
               <h3>忙时，有人替你接住</h3>
               <p>
-                主 agent 被长任务占住、积压又够多时，内核把这些消息转给一个
-                临时驻留的<strong>分诊助手</strong>。能当场办的就办了；
+                主 agent 被长任务占住、积压又够多时，内核把这些消息转给一个临时驻留的<strong>分诊助手</strong>。能当场办的就办了；
                 非等主 agent 不可的，立刻回一句「忙碌中，请稍候」。
                 你不必对着对话框猜它还在不在。
               </p>
             </div>
             <div class="alt-visual">
-              <svg viewBox="0 0 360 250" role="img" aria-label="主 agent 忙时把积压转投给分诊助手">
-                <rect class="dv-box dv-run" x="24" y="36" width="150" height="52" rx="9" />
-                <text class="dv-ts" x="99" y="58">主 agent</text>
-                <text class="dv-s" x="99" y="76">长任务 · 占住很久</text>
-                <g class="dv-msg">
-                  <rect class="dv-box" x="24" y="116" width="150" height="26" rx="6" />
-                  <text class="dv-s" x="99" y="134">积压消息 ×3</text>
-                  <rect class="dv-box" x="24" y="148" width="150" height="26" rx="6" />
-                  <text class="dv-s" x="99" y="166">积压消息 ×4</text>
+              <svg viewBox="0 0 360 250" role="img" aria-label="主 agent 忙时把积压转投给分诊助手，两种出路让用户不必干等">
+                <!-- 主 agent：长任务占住，带一条一直爬不到头的忙碌条 -->
+                <rect class="dv-box dv-run" x="16" y="18" width="150" height="56" rx="9" />
+                <rect class="dv-sheen" x="16" y="18" width="150" height="24" rx="9" />
+                <text class="dv-ts" x="91" y="40">主 agent</text>
+                <text class="dv-s" x="91" y="56">长任务 · 占住很久</text>
+                <rect class="dv-busy-track" x="28" y="63" width="126" height="4" rx="2" />
+                <rect class="dv-busy-fill" x="28" y="63" height="4" rx="2">
+                  <animate attributeName="width" dur="4.5s" repeatCount="indefinite"
+                    values="0;126;126" keyTimes="0;0.74;1" />
+                </rect>
+
+                <!-- 触发条件：填住右上原本空着的一块，且给的是源码实测默认值
+                     （defaultOffloadBusyAfter = 5min，defaultOffloadMinPending = 3）。 -->
+                <rect class="dv5-trigger" x="180" y="18" width="164" height="56" rx="9" />
+                <text class="dv5-tcap" x="262" y="38">触发条件</text>
+                <text class="dv5-tval" x="262" y="56">忙超 5 分钟 · 积压 ≥ 3 条</text>
+                <text class="dv5-tnote" x="262" y="68">默认关闭，需部署方打开</text>
+
+                <!-- 积压消息：三条，宽度递减，像越堆越窄的一摞 -->
+                <g class="dv5-pile">
+                  <rect class="dv-box" x="16" y="88" width="150" height="20" rx="6" />
+                  <text class="dv-s" x="91" y="102">积压消息 ×3</text>
+                  <rect class="dv-box" x="16" y="112" width="132" height="20" rx="6" />
+                  <text class="dv-s" x="82" y="126">积压消息 ×4</text>
+                  <rect class="dv-box" x="16" y="136" width="114" height="20" rx="6" />
+                  <text class="dv-s" x="73" y="150">积压消息 ×2</text>
                 </g>
-                <path id="handoffPath" class="dv-pk dv-dash" d="M174 161 H228" />
-                <text class="dv-lab" x="201" y="156">转投</text>
-                <!-- 转投的包：沿链路飞向分诊助手，循环往复。
-                     静态版只有一条金线，看不出「消息真的被接走了」。 -->
+
+                <!-- 分诊助手 -->
+                <rect class="dv-box dv-accent" x="200" y="86" width="144" height="70" rx="9" />
+                <rect class="dv-sheen" x="200" y="86" width="144" height="24" rx="9" />
+                <text class="dv-ts" x="272" y="110">分诊助手</text>
+                <text class="dv-s" x="272" y="128">临时驻留子</text>
+                <text class="dv-s" x="272" y="144">当场办 / 立刻答</text>
+                <rect class="dv-recv" x="200" y="86" width="144" height="70" rx="9" />
+
+                <!-- 转投 -->
+                <path id="handoffPath" class="dv-pk dv-dash" d="M166 122 H200" />
+                <text class="dv-lab" x="183" y="116">转投</text>
                 <circle class="dv-pkdot dv-anim" r="3.4">
                   <animateMotion dur="2.4s" repeatCount="indefinite"><mpath href="#handoffPath" /></animateMotion>
                 </circle>
                 <circle class="dv-pkdot dv-anim" r="3.4">
                   <animateMotion dur="2.4s" begin="1.2s" repeatCount="indefinite"><mpath href="#handoffPath" /></animateMotion>
                 </circle>
-                <!-- 接走时的收货闪光：分诊助手亮一下 -->
-                <rect class="dv-recv" x="228" y="116" width="110" height="76" rx="9" />
-                <rect class="dv-box dv-accent" x="228" y="116" width="110" height="76" rx="9" />
-                <text class="dv-ts" x="283" y="146">分诊助手</text>
-                <text class="dv-s" x="283" y="166">当场办 / 立刻答</text>
-                <path class="dv-line" d="M24 214 H338" />
-                <path class="dv-arrow" d="M338 214 V196" />
-                <text class="dv-x" x="180" y="236">不必干等</text>
+
+                <!-- ── 下半部：两种出路，最后都回到用户 ──
+                     原文案只说「能办的直接办、需要主 agent 的立刻回请稍候」，
+                     但图上没有任何一处表达它。这里把它做成回执区，
+                     顺带填掉原来空着的下三分之一。 -->
+                <path class="dv-line" d="M272 156 V176" />
+
+                <!-- 回执区外框 -->
+                <rect class="dv5-band" x="16" y="176" width="336" height="58" rx="10" />
+
+                <!-- 用户 -->
+                <rect class="dv-box" x="24" y="186" width="76" height="38" rx="8" />
+                <text class="dv-ts" x="62" y="204">用户</text>
+                <text class="dv-caps" x="62" y="218">不必干等</text>
+
+                <!-- 回执 chip：两种出路 -->
+                <rect class="dv5-chip" x="128" y="182" width="216" height="46" rx="8" />
+                <text class="dv5-out1" x="236" y="200">① 简单 → 直接办完，发回原通道</text>
+                <text class="dv5-out2" x="236" y="218">② 需主 agent → 回「忙碌中，请稍候」</text>
+
+                <!-- 回执送达用户 -->
+                <path id="replyPath" class="dv-arrow" d="M128 205 H102" />
+                <circle class="dv-linkdot dv-anim" r="2.8">
+                  <animateMotion dur="2.6s" repeatCount="indefinite"><mpath href="#replyPath" /></animateMotion>
+                </circle>
               </svg>
             </div>
           </div>
@@ -2520,7 +2649,7 @@
         <div class="wrap">
           <h2 class="reveal rise">一条消息进来之后</h2>
           <p class="sub reveal rise" style="--d:90ms">
-                        输入先过调度器，再进处理管道。全程 7 个阶段钩子，插件可改写或短路。
+                        输入先过调度器，再进处理管道。全程 7 个阶段钩子。
           </p>
 
           <div class="flow reveal rise">
@@ -2810,8 +2939,7 @@ echo <span class="s">"你好，记住我喜欢喝咖啡"</span> | ./build/waiter
             <details class="faq">
               <summary>「内核零 IO」是不是意味着内核很简单？</summary>
               <p>
-                                恰恰相反。零 IO 是为了让内核专注做难的部分：输入调度（四级中断、抢占与
-                现场保存）、上下文预算、三层记忆的蒸馏与召回。IO 挪出去之后，这些才有
+                                恰恰相反。零 IO 是为了让内核专注做难的部分：输入调度（四级中断、抢占与现场保存）、上下文预算、三层记忆的蒸馏与召回。IO 挪出去之后，这些才有
                 清晰的所有权。
               </p>
             </details>
@@ -2848,8 +2976,7 @@ echo <span class="s">"你好，记住我喜欢喝咖啡"</span> | ./build/waiter
             <details class="faq">
               <summary>记忆会不会无限膨胀？</summary>
               <p>
-                                不会。三层是迁移而非复制：上下文事件裁剪后归档成文档，文档冷掉后蒸馏成
-                图谱三元组。图谱有去重与 UNIQUE 约束；媒体字节在块被永久删除时回收，但如果同一份字节仍被别的块共享，则不删。
+                                不会。三层是迁移而非复制：上下文事件裁剪后归档成文档，文档冷掉后蒸馏成图谱三元组。图谱有去重与 UNIQUE 约束；媒体字节在块被永久删除时回收，但如果同一份字节仍被别的块共享，则不删。
               </p>
             </details>
 
