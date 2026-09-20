@@ -328,7 +328,12 @@
       html {
         scroll-snap-type: y mandatory;
         scroll-padding-top: 4.5rem;
+        /* 横向必须裁掉：交错行的入场位移（translateX ±42px）会让未入场的
+           元素先探头到视口右侧之外，窄屏实测撑出 26px 横向溢出。
+           用 clip 而不是 hidden —— hidden 会新建滚动容器，可能干扰 sticky。 */
+        overflow-x: clip;
       }
+      body { overflow-x: clip; }
       section {
         min-height: calc(100svh - 4.5rem);
         display: flex;
@@ -337,6 +342,33 @@
         scroll-snap-align: start;
       }
       section > .wrap { width: min(1120px, 92vw); margin: 0 auto; }
+      /* 内容比一屏高的节（运行时打 .too-tall）：取消 min-height 撑高，
+         但**保留吸附点**。
+         为何不让它退出吸附（实测过的死锁）：把它设为 snap-align:none 后，
+         前一个吸附点（memory）会把它自己吸回来，而后面又没有吸附点接住，
+         结果卡死在 memory 底部（y=5791 不动）—— 页脚与后续内容全部到不了。
+         正确做法是让它自然高、仍作为吸附点，间距不等距不影响可达性。 */
+      section.too-tall { min-height: auto; }
+      /* 页脚也是吸附点。
+         不加这条的后果（实测）：最后一个 section 顶部到文档底有 1214px
+         （含 footer 386px），而视口只有 900px —— mandatory 只允许停在吸附点，
+         于是**页脚永远滚不到**（实测卡在 y=10283，上限 10669，差 386px）。
+         scroll-snap-stop: always 确保它自己占一屏，不与其他吸附点抢。 */
+      /* 页脚**不单独做吸附点**。
+         为何（实测二次修）：faq 高 643px + footer 367px = 1010px > 视口 900px。
+         只要 footer 也是吸附点，浏览器就必须在「faq 顶部对齐」与「页脚可见」
+         之间二选一 —— 实测选了前者，把 faq 的 h2 吸到 y=-38，被导航栏压住。
+         让它跟随 faq 自然滚动，两者都可读，也不会出现多一屏空白。 */
+      footer { scroll-snap-align: none; }
+      /* 收尾段：取消整屏高度（它本就不需要占满），恢复吸附。
+         前提是 faq 已改双列 —— 收尾合计压到一屏内，此时同时满足
+         「标题不被导航压住」与「页脚可达」两个要求。 */
+      section:last-of-type {
+        min-height: auto;
+        padding-bottom: 0.5rem;
+      }
+      /* 注：footer 的 padding 调优直接写进下面那条原始规则里（约 1022 行）——
+         同优先级下后出现的规则会胜，在这里再写一条会被它覆盖（已踩过）。 */
       /* 吸附容器不能有 transform 祖先：会让 snap 失效（实测过）。
          故 .wrap 上不加任何位移类动画，入场只做透明度。 */
       @media (prefers-reduced-motion: reduce) {
@@ -510,6 +542,12 @@
       }
       @media (max-width: 860px) {
         .alt { grid-template-columns: 1fr; gap: 1.6rem; margin-top: 2.6rem; }
+        /* 窄屏位移收小：单列时左右各 42px 会让内容显得跳，也更容易探出视口 */
+        .js-fx .alt:not(.flip) .alt-copy { transform: translateX(-20px); }
+        .js-fx .alt:not(.flip) .alt-visual { transform: translateX(20px); }
+        .js-fx .alt.flip .alt-copy { transform: translateX(20px); }
+        .js-fx .alt.flip .alt-visual { transform: translateX(-20px); }
+        .faq-grid { grid-template-columns: 1fr; gap: 0.55rem; }
         .alt.flip .alt-copy, .alt.flip .alt-visual { order: 0; }
       }
 
@@ -567,7 +605,7 @@
       .dv-ar { fill: url(#gCyan); stroke: var(--border-hi); }
       .dv-off { fill: none; stroke: var(--border); stroke-width: 1.2; stroke-dasharray: 4 4; }
       .dv-offt { fill: var(--text-muted); font-size: 11.5px; text-anchor: middle; text-decoration: line-through; }
-      .dv-no path { stroke: var(--brand-gold); stroke-width: 1.6; opacity: .85; }
+      .dv-no path { fill: none; stroke: var(--brand-gold); stroke-width: 1.6; opacity: .9; stroke-linecap: round; }
       .dv-line { fill: none; stroke: var(--border-hi); stroke-width: 1.4; }
       /* 流动的虚线：让连接线看起来「有东西在跑」而不是静止装饰 */
       .dv-dash,
@@ -599,6 +637,195 @@
       .dv-g4 { fill: rgba(139, 92, 246, 0.10); }
       /* 抢占线的起点圆点 */
       .dv-pkdot { fill: var(--brand-gold); }
+
+      /* ══ 示意图的「活着」层 ══
+         为何要这一层：图里 19~39 个元素原本只有一个虚线在跑，其余全静 ——
+         读起来就是「框框住文本」。这里按每张图的语义给它自己的动作：
+         包在链路上跑、依赖被划掉、共享内存写入、消息分级抢占、任务转投。
+         所有动画共用一套节奏变量，同一屏内不打架。 */
+      .alt-visual {
+        --dvc: cubic-bezier(.4, 0, .2, 1);
+      }
+      /* 仅在入场完成后开跑（未入场时图偏在屏外，跑动画没人看且耗费帧） */
+      .alt-visual svg .dv-anim { animation-play-state: paused; }
+      .alt.in .alt-visual svg .dv-anim,
+      .alt-visual.in svg .dv-anim { animation-play-state: running; }
+
+      /* ① 数据包沿链路反复穿行（图 1 / 图 5） */
+      @keyframes pktTravel {
+        0%   { offset-distance: 0%;   opacity: 0; }
+        12%  { opacity: 1; }
+        80%  { opacity: 1; }
+        100% { offset-distance: 100%; opacity: 0; }
+      }
+      /* ② 依赖项被依次划掉（图 2）：线自己「划」过去，不是淡入。
+         实现：pathLength=1 把每条线归一化，再用 dashoffset 1→0 逐段绘出。
+         比单纯 opacity 淡入像"划掉"得多。 */
+      @keyframes strikeDeps {
+        0%, 8%   { stroke-dashoffset: 1; opacity: 1; }
+        30%      { stroke-dashoffset: 0; opacity: 1; }
+        78%      { stroke-dashoffset: 0; opacity: 1; }
+        92%, 100% { stroke-dashoffset: 0; opacity: 0; }
+      }
+      @keyframes depPulse {
+        0%, 100% { opacity: .42; }
+        45%      { opacity: .95; }
+      }
+      .dv-deps .dv-plug { animation: depPulse 3.4s var(--dvc) infinite; }
+      .dv-deps .dv-no path { animation: strikeDeps 3.4s var(--dvc) infinite; }
+      .dv-deps .dv-no path:nth-child(1) { animation-delay: .18s; }
+      .dv-deps .dv-no path:nth-child(2) { animation-delay: .34s; }
+      .dv-deps .dv-no path:nth-child(3) { animation-delay: .50s; }
+      .dv-deps .dv-no path:nth-child(4) { animation-delay: .66s; }
+      .dv-deps .dv-x { animation: depPulse 3.4s var(--dvc) infinite; animation-delay: .8s; }
+
+      /* ③ 共享内存：写入光带扫过，头部/arena 依次亮（图 3） */
+      @keyframes shmSweep {
+        0%   { transform: translateX(0);     opacity: 0; }
+        10%  { opacity: 1; }
+        90%  { opacity: 1; }
+        100% { transform: translateX(150px); opacity: 0; }
+      }
+      @keyframes segLight {
+        0%, 100% { opacity: .55; }
+        50%      { opacity: 1; }
+      }
+      .dv-seg { animation: segLight 2.6s var(--dvc) infinite; }
+      .dv-hd  { animation: segLight 2.6s var(--dvc) infinite; animation-delay: .3s; }
+
+      /* ④ 优先级：高优先级包从下往上插队（图 4） */
+      @keyframes preempt {
+        0%      { transform: translateY(0);    opacity: 0; }
+        8%      { opacity: 1; }
+        30%     { transform: translateY(-26px); opacity: 1; }
+        62%     { transform: translateY(-26px); opacity: 1; }
+        80%, 100% { transform: translateY(-26px); opacity: 0; }
+      }
+      .dv-pk-dot { animation: preempt 3.6s var(--dvc) infinite; }
+
+      /* ⑤ 消息排队 → 转投：包先积压再被接走（图 5） */
+      @keyframes msgStack {
+        0%, 18% { opacity: 0; transform: translateY(6px); }
+        30%     { opacity: 1; transform: none; }
+        72%     { opacity: 1; transform: none; }
+        88%, 100% { opacity: 0; transform: translateX(16px); }
+      }
+      .dv-msg { animation: msgStack 3.8s var(--dvc) infinite; }
+      .dv-msg:nth-child(2) { animation-delay: .22s; }
+      .dv-msg:nth-child(3) { animation-delay: .44s; }
+
+      /* 插队轨迹：常驻淡线，让「从哪来、到哪去」始终可读；
+         走动的包用 .dv-pkdot（金色）。 */
+      .dv-pkline { fill: none; stroke: var(--brand-gold); stroke-width: 1.1; opacity: .22; }
+
+      /* 级别强度条（图 4）：从 L1 到 L4 依次点亮，表现「级别越低越可等、
+         越高越紧急」。静态时四条只是深浅不同的背景，看不出递进。 */
+      .dv-gauge-fill rect { opacity: .45; }
+      @keyframes lvlLight {
+        0%, 100% { opacity: .45; }
+        50%      { opacity: 1; }
+      }
+      .js-fx .dv-g1 { animation: lvlLight 3.2s ease-in-out infinite; }
+      .js-fx .dv-g2 { animation: lvlLight 3.2s ease-in-out infinite; animation-delay: .25s; }
+      .js-fx .dv-g3 { animation: lvlLight 3.2s ease-in-out infinite; animation-delay: .5s; }
+      .js-fx .dv-g4 { animation: lvlLight 3.2s ease-in-out infinite; animation-delay: .75s; }
+
+      /* 写入光带（图 3）：沿 arena 自左向右扫过，示意数据落进共享段 */
+      .dv-sweep {
+        fill: url(#gCyan);
+        opacity: 0;
+      }
+      @keyframes shmSweep {
+        0%   { transform: translateX(0);    opacity: 0; }
+        12%  { opacity: .75; }
+        70%  { opacity: .75; }
+        88%, 100% { transform: translateX(196px); opacity: 0; }
+      }
+      .js-fx .dv-sweep { animation: shmSweep 2.8s cubic-bezier(.4,0,.2,1) infinite; }
+
+      /* 收货闪光（图 5）：分诊助手接到消息时亮一下 */
+      .dv-recv {
+        fill: none;
+        stroke: var(--brand-cyan);
+        stroke-width: 2;
+        opacity: 0;
+      }
+      @keyframes recvFlash {
+        0%, 44% { opacity: 0; }
+        54%     { opacity: .95; }
+        66%     { opacity: .2; }
+        80%, 100% { opacity: 0; }
+      }
+      .js-fx .dv-recv { animation: recvFlash 2.4s cubic-bezier(.4,0,.2,1) infinite; }
+      /* 主 agent 忙碌：呼吸更慢更沉，与「被占住」呼应 */
+      .js-fx .dv-run { animation: busyBreathe 3.2s ease-in-out infinite; }
+      @keyframes busyBreathe {
+        0%, 100% { opacity: .82; }
+        50%      { opacity: 1; }
+      }
+
+      /* ══ 外界光球（图 1）══
+         语义：外面的一切都落在插件上，内核一列都没有。
+         故光球从画面外飞入、命中插件、激起涟漪 —— 让「隔离」这件事看得见。
+         四个插件各给一个颜色，命中时插件自己也闪一下，这样「打到谁」很清楚。 */
+      .dv-orbpath { fill: none; stroke: none; }
+      .dv-orb { filter: url(#fGlow); }
+      .dv-orb-a { fill: var(--brand-cyan); }
+      .dv-orb-b { fill: var(--brand-gold); }
+      .dv-orb-c { fill: var(--brand-violet); }
+      .dv-orb-d { fill: var(--brand-blue); }
+      /* 涟漪：从命中点向外扩一圈，很快淡去 */
+      .dv-ripple {
+        fill: none;
+        stroke: var(--brand-cyan);
+        stroke-width: 1.4;
+      }
+      /* 涟漪逐色（不能用 :nth-of-type）——
+         同层还有数据包圆点也是 <circle>，按类型计数会错配，
+         实测四个涟漪全被染成金色。显式逐色才对得上各自的插件。 */
+      .dv-ripple-a { stroke: var(--brand-cyan); }
+      .dv-ripple-b { stroke: var(--brand-gold); }
+      .dv-ripple-c { stroke: var(--brand-violet); }
+      .dv-ripple-d { stroke: var(--brand-blue); }
+      /* 命中闪光：贴在插件框上，短暂高亮后回落 */
+      .dv-hit {
+        fill: none;
+        stroke-width: 2.2;
+        stroke-linecap: round;
+        opacity: 0;
+      }
+      .dv-hit-a { stroke: var(--brand-cyan); }
+      .dv-hit-b { stroke: var(--brand-gold); }
+      .dv-hit-c { stroke: var(--brand-violet); }
+      .dv-hit-d { stroke: var(--brand-blue); }
+      @keyframes hitFlash {
+        0%, 28% { opacity: 0; }
+        34%     { opacity: 1; }
+        46%     { opacity: .25; }
+        60%, 100% { opacity: 0; }
+      }
+      .js-fx .dv-hit { animation: hitFlash 3.6s cubic-bezier(.4,0,.2,1) infinite; }
+      .js-fx .dv-hit-a { animation-delay: 0s; }
+      .js-fx .dv-hit-b { animation-delay: .9s; }
+      .js-fx .dv-hit-c { animation-delay: 1.8s; }
+      .js-fx .dv-hit-d { animation-delay: 2.7s; }
+      /* 注意：这些 SMIL 动画不受 CSS 的 prefers-reduced-motion 约束，
+         reduce 下由 JS 调 pauseAnimations() 统一停（见脚本里的说明）。 */
+
+      /* ⑥ 节点呼吸：内核 / 主 agent 保持轻微脉动，图不平 */
+      @keyframes nodeBreathe {
+        0%, 100% { opacity: .88; }
+        50%      { opacity: 1; }
+      }
+      .dv-accent { animation: nodeBreathe 4.2s var(--dvc) infinite; }
+      /* reduce 下全停 —— 不只是虚线，上面这些都停 */
+      @media (prefers-reduced-motion: reduce) {
+        .alt-visual svg .dv-anim,
+        .dv-plug, .dv-no path, .dv-x, .dv-seg, .dv-hd,
+        .dv-pk-dot, .dv-msg, .dv-accent, .dv-pk {
+          animation: none !important;
+        }
+      }
       .dv-pkcap {
         fill: var(--brand-gold);
         font-size: 9.5px;
@@ -613,6 +840,16 @@
         stroke-dasharray: 5 4;
       }
       .dv-qitem { fill: var(--dv-queue-item); opacity: 0.95; }
+      /* 队列条逐条被取走：表现「先到先处理」。
+         用 opacity 而非位移 —— 条是 <rect>，位移会露出底色缺口。 */
+      @keyframes queueTake {
+        0%, 100% { opacity: .95; }
+        45%      { opacity: .2; }
+      }
+      .js-fx .dv-qitem rect { animation: queueTake 3.2s ease-in-out infinite; }
+      .js-fx .dv-qitem rect:nth-child(1) { animation-delay: 0s; }
+      .js-fx .dv-qitem rect:nth-child(2) { animation-delay: .4s; }
+      .js-fx .dv-qitem rect:nth-child(3) { animation-delay: .8s; }
       /* 处理方向指示 */
       .dv-qdir { fill: none; stroke: var(--text-muted); stroke-width: 1.2; opacity: 0.6; }
       .dv-qdir-tip { fill: none; stroke: var(--text-muted); stroke-width: 1.4; stroke-linecap: round; stroke-linejoin: round; opacity: 0.6; }
@@ -621,10 +858,14 @@
       .dv-colcap-dim { fill: var(--text-muted); }
       .dv-caps { fill: var(--text-muted); font-size: 8.8px; text-anchor: middle; }
       @media (prefers-reduced-motion: no-preference) {
+        /* 只呼吸透明度，不动 r。
+           为何：.dv-pkdot 现在兼做「沿链路行进的数据包」（靠 SMIL 的
+           animateMotion 定位），若再用 CSS 动 r，包在跑的同时忽大忽小，
+           看着像闪烁的噪点。半径交给标记本身。 */
         .dv-pkdot { animation: pkPulse 1.8s ease-in-out infinite; }
         @keyframes pkPulse {
-          0%, 100% { opacity: 1; r: 3.5; }
-          50%      { opacity: .55; r: 4.5; }
+          0%, 100% { opacity: 1; }
+          50%      { opacity: .5; }
         }
       }
 
@@ -972,13 +1213,24 @@
         .comp .row { grid-template-columns: 1fr; gap: 0.25rem; }
       }
 
-      /* ── FAQ ── */
+      /* ── FAQ ──
+         双列是「一滑一页」的硬约束逼出来的：末尾 faq(635px) + footer(367px)
+         = 1002px > 一屏 828px，mandatory 只允许停在吸附点，于是二者不可兼得
+         —— 实测要么标题被导航栏压住（h2 顶=-57），要么永远滚不到页脚。
+         六条改成两列省下约 190px，末尾整段才装得进一屏。单列在窄屏恢复。 */
+      .faq-grid {
+        display: grid;
+        grid-template-columns: 1fr 1fr;
+        gap: 0.6rem 1.1rem;
+        align-items: start;
+        margin-top: 1.6rem;
+      }
       details.faq {
         background: var(--bg-card);
         border: 1px solid var(--border);
         border-radius: var(--radius-md);
-        padding: 0.95rem 1.15rem;
-        margin-bottom: 0.7rem;
+        padding: 0.8rem 1rem;
+        margin-bottom: 0;
       }
       details.faq summary {
         cursor: pointer;
@@ -998,7 +1250,9 @@
       /* ── 页脚 ── */
       footer {
         border-top: 1px solid var(--border);
-        padding: 2.4rem 0 3rem;
+        /* 收紧上下内边距：末尾空间要与最后一个 section 一起装进一屏，
+           否则 mandatory 会把该节标题吸到导航栏底下（实测 h2 顶=-57，导航底=67）。 */
+        padding: 2rem 0 2.2rem;
         color: var(--text-muted);
         font-size: 0.88rem;
       }
@@ -1421,6 +1675,40 @@
       }
       .js-fx .rise-zoom.in { opacity: 1; transform: none; }
 
+      /* ── 交错行：文字与示意图从两侧滑入 ──
+         行本身只做很轻的上浮，重点放在内部两列的相向入场，
+         这样「左文右图」的对应关系在动的那一下就被看见了。 */
+      /* ── 交错行：文与图各自从「自己所在的那一侧」滑入 ──
+         方向由 .flip 推导，而不是手写 slide-l/slide-r ——
+         手写版本踩过坑：翻转子行里图在**左边**却写了 slide-r（从右进），
+         于是图穿过文字从右侧飞入，方向与布局相反。
+         退出时不加 .in，transform 回到同侧，所以「从左进就从左退」是自动的。 */
+      .js-fx .alt .alt-copy,
+      .js-fx .alt .alt-visual {
+        opacity: 0;
+        transition: opacity 0.85s var(--ease), transform 0.9s var(--ease);
+        transition-delay: var(--d, 110ms);
+        will-change: transform, opacity;
+      }
+      /* 非翻转：文左、图右 */
+      .js-fx .alt:not(.flip) .alt-copy { transform: translateX(-42px); }
+      .js-fx .alt:not(.flip) .alt-visual { transform: translateX(42px); }
+      /* 翻转：图左、文右 —— 方向跟着换 */
+      .js-fx .alt.flip .alt-copy { transform: translateX(42px); }
+      .js-fx .alt.flip .alt-visual { transform: translateX(-42px); }
+      /* 入场完成 */
+      .js-fx .alt.in .alt-copy,
+      .js-fx .alt.in .alt-visual { opacity: 1; transform: none; }
+
+      /* 交错行自身：仅轻微上浮，不抢内部动画 */
+      .js-fx .alt.rise { transform: translateY(14px); }
+
+      /* ── 卡片错落入场：四张依次亮起，不用手写 --d ── */
+      .js-fx .duties.in .duty:nth-child(1) { transition-delay: 0ms; }
+      .js-fx .duties.in .duty:nth-child(2) { transition-delay: 90ms; }
+      .js-fx .duties.in .duty:nth-child(3) { transition-delay: 180ms; }
+      .js-fx .duties.in .duty:nth-child(4) { transition-delay: 270ms; }
+
       /* ── Hero 大标题：渐变流动 + 描边光 ── */
       h1 .grad {
         background: linear-gradient(110deg, var(--brand-blue), var(--brand-cyan) 32%,
@@ -1720,28 +2008,28 @@
           </p>
 
           <div class="duties reveal rise" style="--d:180ms">
-            <article class="duty">
+            <article class="duty rise-zoom">
               <span class="duty-k">隔离</span>
               <h3>崩一个，不赔上全部</h3>
               <p>插件不在内核里，是另一个进程。崩了就把它注册的东西一并摘掉，其余照跑。</p>
               <span class="duty-ev">退避重启 1s / 2s / 3s；5 分钟内第 4 次崩溃即停下等人</span>
             </article>
 
-            <article class="duty">
+            <article class="duty rise-zoom">
               <span class="duty-k">调度</span>
               <h3>拦得住，也接得回</h3>
               <p>输入分能等与不能等。不能等的可抢占，被打断的现场压栈，稍后<strong>原样恢复</strong>。</p>
               <span class="duty-ev">L4 内核独占；外部插件声明 L4 会被夹到 L3</span>
             </article>
 
-            <article class="duty">
+            <article class="duty rise-zoom">
               <span class="duty-k">通信</span>
               <h3>三条道，各走各的</h3>
               <p>控制走 stdio，数据走共享内存，通知走事件环。变长内容只传偏移，两边映射到不同地址也能读。</p>
               <span class="duty-ev">整段写入 + 读回 3.5µs（实测）</span>
             </article>
 
-            <article class="duty">
+            <article class="duty rise-zoom">
               <span class="duty-k">资源</span>
               <h3>记忆不会越用越肿</h3>
               <p>上下文按相关性取舍，最近 10 条恒受保护。低分下沉成文档，冷文档再蒸馏成三元组。</p>
@@ -1755,7 +2043,7 @@
       <section id="zero-io">
         <div class="wrap">
           <!-- ① 文左 图右 -->
-          <div class="alt reveal">
+          <div class="alt reveal rise">
             <div class="alt-copy">
               <span class="alt-n">01</span>
               <h3>内核零 IO，只碰调度</h3>
@@ -1770,6 +2058,31 @@
               <svg viewBox="0 0 360 250" role="img" aria-label="内核不直接连接外部世界，由插件桥接">
                 <rect class="dv-bound" x="16" y="40" width="328" height="170" rx="14" />
                 <text class="dv-cap" x="30" y="232">外部世界</text>
+                <!-- 涟漪在插件框**下层**：框会盖住内圈，露在外面的那圈
+                     看起来就是「从插件背后漾开的冲击波」，而不是框里画了个圆。 -->
+                <g class="dv-ripples">
+                  <circle class="dv-ripple dv-ripple-a" r="1">
+                    <animateMotion dur="3.6s" begin="0s" repeatCount="indefinite"><mpath href="#orbPathA" /></animateMotion>
+                    <animate attributeName="r" dur="3.6s" begin="0s" repeatCount="indefinite" values="0;0;14;0" keyTimes="0;0.30;0.52;1" />
+                    <animate attributeName="opacity" dur="3.6s" begin="0s" repeatCount="indefinite" values="0;0;.55;0" keyTimes="0;0.30;0.36;0.55" />
+                  </circle>
+                  <circle class="dv-ripple dv-ripple-b" r="1">
+                    <animateMotion dur="3.6s" begin="0.9s" repeatCount="indefinite"><mpath href="#orbPathB" /></animateMotion>
+                    <animate attributeName="r" dur="3.6s" begin="0.9s" repeatCount="indefinite" values="0;0;14;0" keyTimes="0;0.30;0.52;1" />
+                    <animate attributeName="opacity" dur="3.6s" begin="0.9s" repeatCount="indefinite" values="0;0;.55;0" keyTimes="0;0.30;0.36;0.55" />
+                  </circle>
+                  <circle class="dv-ripple dv-ripple-c" r="1">
+                    <animateMotion dur="3.6s" begin="1.8s" repeatCount="indefinite"><mpath href="#orbPathC" /></animateMotion>
+                    <animate attributeName="r" dur="3.6s" begin="1.8s" repeatCount="indefinite" values="0;0;14;0" keyTimes="0;0.30;0.52;1" />
+                    <animate attributeName="opacity" dur="3.6s" begin="1.8s" repeatCount="indefinite" values="0;0;.55;0" keyTimes="0;0.30;0.36;0.55" />
+                  </circle>
+                  <circle class="dv-ripple dv-ripple-d" r="1">
+                    <animateMotion dur="3.6s" begin="2.7s" repeatCount="indefinite"><mpath href="#orbPathD" /></animateMotion>
+                    <animate attributeName="r" dur="3.6s" begin="2.7s" repeatCount="indefinite" values="0;0;14;0" keyTimes="0;0.30;0.52;1" />
+                    <animate attributeName="opacity" dur="3.6s" begin="2.7s" repeatCount="indefinite" values="0;0;.55;0" keyTimes="0;0.30;0.36;0.55" />
+                  </circle>
+                </g>
+
                 <rect class="dv-box dv-accent" x="120" y="100" width="120" height="60" rx="10" />
                 <text class="dv-t" x="180" y="126">内核</text>
                 <text class="dv-s" x="180" y="144">编排 · 记忆 · 调度</text>
@@ -1787,7 +2100,85 @@
                 <path class="dv-line" d="M286 90 V160" />
                 <path class="dv-pk" d="M112 130 H74" />
                 <path class="dv-pk" d="M248 130 H286" />
-                <path class="dv-line dv-dash" d="M112 130 H160 M200 130 H248" />
+                <path id="pathIso1" class="dv-line dv-dash" d="M112 130 H74" />
+                <path id="pathIso2" class="dv-line dv-dash" d="M286 130 H248" />
+                <!-- 数据包沿链路真跑：用 SMIL 的 mpath 贴合上面那条路径，
+                     不靠 JS 也不靠 offset-path（Safari 支持不齐）。 -->
+                <circle class="dv-pkdot dv-anim" r="3.2">
+                  <animateMotion dur="2.6s" repeatCount="indefinite" keyPoints="0;1" keyTimes="0;1" calcMode="linear">
+                    <mpath href="#pathIso1" />
+                  </animateMotion>
+                </circle>
+                <circle class="dv-pkdot dv-anim" r="3.2">
+                  <animateMotion dur="2.6s" begin="1.3s" repeatCount="indefinite" keyPoints="1;0" keyTimes="0;1" calcMode="linear">
+                    <mpath href="#pathIso2" />
+                  </animateMotion>
+                </circle>
+
+                <!-- ── 外界光球 ──
+                     语义：外面的一切都落在插件上，内核一列都没有。
+                     所以光球从四个方向（画面外）飞入，各自命中一个插件，
+                     四种颜色对应四个插件；错开时序后看起来像随机到达。
+                     击中瞬间激起一圈涟漪 + 插件自己闪一下，让"命中"可感知。 -->
+                <g class="dv-orbs">
+                  <!-- ① 左上插件：光球自左上角飞入 -->
+                  <circle class="dv-orb dv-orb-a" r="4">
+                    <animateMotion id="orbA" dur="3.6s" begin="0s" repeatCount="indefinite"
+                      keyPoints="0;0;1;1" keyTimes="0;0.10;0.34;1" calcMode="spline"
+                      keySplines="0.4 0 1 1;0.4 0 0.15 1;0.4 0 1 1">
+                      <mpath href="#orbPathA" />
+                    </animateMotion>
+                    <animate attributeName="opacity" dur="3.6s" begin="0s" repeatCount="indefinite"
+                      values="0;0;1;1;0;0" keyTimes="0;0.16;0.22;0.30;0.36;1" />
+                  </circle>
+
+                  <!-- ② 右上插件：自右上角飞入 -->
+                  <circle class="dv-orb dv-orb-b" r="4">
+                    <animateMotion id="orbB" dur="3.6s" begin="0.9s" repeatCount="indefinite"
+                      keyPoints="0;0;1;1" keyTimes="0;0.10;0.34;1" calcMode="spline"
+                      keySplines="0.4 0 1 1;0.4 0 0.15 1;0.4 0 1 1">
+                      <mpath href="#orbPathB" />
+                    </animateMotion>
+                    <animate attributeName="opacity" dur="3.6s" begin="0.9s" repeatCount="indefinite"
+                      values="0;0;1;1;0;0" keyTimes="0;0.16;0.22;0.30;0.36;1" />
+                  </circle>
+
+                  <!-- ③ 左下插件 -->
+                  <circle class="dv-orb dv-orb-c" r="4">
+                    <animateMotion dur="3.6s" begin="1.8s" repeatCount="indefinite"
+                      keyPoints="0;0;1;1" keyTimes="0;0.10;0.34;1" calcMode="spline"
+                      keySplines="0.4 0 1 1;0.4 0 0.15 1;0.4 0 1 1">
+                      <mpath href="#orbPathC" />
+                    </animateMotion>
+                    <animate attributeName="opacity" dur="3.6s" begin="1.8s" repeatCount="indefinite"
+                      values="0;0;1;1;0;0" keyTimes="0;0.16;0.22;0.30;0.36;1" />
+                  </circle>
+
+                  <!-- ④ 右下插件 -->
+                  <circle class="dv-orb dv-orb-d" r="4">
+                    <animateMotion dur="3.6s" begin="2.7s" repeatCount="indefinite"
+                      keyPoints="0;0;1;1" keyTimes="0;0.10;0.34;1" calcMode="spline"
+                      keySplines="0.4 0 1 1;0.4 0 0.15 1;0.4 0 1 1">
+                      <mpath href="#orbPathD" />
+                    </animateMotion>
+                    <animate attributeName="opacity" dur="3.6s" begin="2.7s" repeatCount="indefinite"
+                      values="0;0;1;1;0;0" keyTimes="0;0.16;0.22;0.30;0.36;1" />
+                  </circle>
+                </g>
+
+                <!-- 四条飞入轨迹（不可见，仅作 mpath 用）。
+                     终点取各插件框的中心：左上(74,71) 右上(286,71) 左下(74,179) 右下(286,179)；
+                     起点在画面外，故光球「从外面来」。 -->
+                <path id="orbPathA" class="dv-orbpath" d="M-30 -10 C 10 26, 44 52, 74 71" />
+                <path id="orbPathB" class="dv-orbpath" d="M392 -10 C 350 26, 316 52, 286 71" />
+                <path id="orbPathC" class="dv-orbpath" d="M-30 262 C 10 226, 44 200, 74 179" />
+                <path id="orbPathD" class="dv-orbpath" d="M392 262 C 350 226, 316 200, 286 179" />
+
+                <!-- 命中闪光：与光球同一时序，贴在插件上 -->
+                <rect class="dv-hit dv-hit-a" x="36" y="52" width="76" height="38" rx="8" />
+                <rect class="dv-hit dv-hit-b" x="248" y="52" width="76" height="38" rx="8" />
+                <rect class="dv-hit dv-hit-c" x="36" y="160" width="76" height="38" rx="8" />
+                <rect class="dv-hit dv-hit-d" x="248" y="160" width="76" height="38" rx="8" />
               </svg>
               <p class="dv-note">箭头只进出插件 —— 内核一列都没有</p>
             </div>
@@ -1799,7 +2190,7 @@
       <section id="zero-dep">
         <div class="wrap">
           <!-- ② 文右 图左 -->
-          <div class="alt flip reveal">
+          <div class="alt flip reveal rise">
             <div class="alt-copy">
               <span class="alt-n">02</span>
               <h3>部署，从未如此便捷</h3>
@@ -1811,7 +2202,7 @@
               </p>
             </div>
             <div class="alt-visual">
-              <svg viewBox="0 0 360 250" role="img" aria-label="插件是单个静态二进制，不依赖任何运行时">
+              <svg class="dv-deps" viewBox="0 0 360 250" role="img" aria-label="插件是单个静态二进制，不依赖任何运行时">
                 <rect class="dv-bound" x="20" y="34" width="140" height="182" rx="12" />
                 <text class="dv-cap" x="30" y="228">目标机</text>
                 <rect class="dv-box dv-accent" x="40" y="96" width="100" height="60" rx="10" />
@@ -1828,8 +2219,8 @@
                   <text class="dv-offt" x="266" y="192">容器运行时</text>
                 </g>
                 <g class="dv-no">
-                  <path d="M200 58 L332 76" /><path d="M200 98 L332 116" />
-                  <path d="M200 138 L332 156" /><path d="M200 178 L332 196" />
+                  <path pathLength="1" stroke-dasharray="1" d="M200 58 L332 76" /><path pathLength="1" stroke-dasharray="1" d="M200 98 L332 116" />
+                  <path pathLength="1" stroke-dasharray="1" d="M200 138 L332 156" /><path pathLength="1" stroke-dasharray="1" d="M200 178 L332 196" />
                 </g>
                 <text class="dv-x" x="266" y="42">都不需要</text>
               </svg>
@@ -1843,7 +2234,7 @@
       <section id="shm">
         <div class="wrap">
           <!-- ③ 文左 图右：共享内存 -->
-          <div class="alt reveal">
+          <div class="alt reveal rise">
             <div class="alt-copy">
               <span class="alt-n">03</span>
               <h3>数据如水，随流，随改，随走</h3>
@@ -1872,6 +2263,18 @@
                 <path class="dv-line" d="M72 96 V126" />
                 <path class="dv-line" d="M288 96 V126" />
                 <path class="dv-arrow" d="M70 60 L2 60 L2 177 L40 177" />
+                <!-- 写入 → 读回：内核写进 arena，插件直接读同一物理页。
+                     这是「零拷贝」最该被看见的一步，静态图完全表达不了。 -->
+                <path id="writePath" class="dv-pk dv-dash" d="M72 96 V150" />
+                <path id="readPath" class="dv-pk dv-dash" d="M288 96 V150" />
+                <circle class="dv-pkdot dv-anim" r="3.4">
+                  <animateMotion dur="2.8s" repeatCount="indefinite"><mpath href="#writePath" /></animateMotion>
+                </circle>
+                <circle class="dv-pkdot dv-anim" r="3.4">
+                  <animateMotion dur="2.8s" begin="1.4s" repeatCount="indefinite"><mpath href="#readPath" /></animateMotion>
+                </circle>
+                <!-- arena 被写入时的数据流：光带自左向右扫过 -->
+                <rect class="dv-sweep dv-anim" x="112" y="156" width="34" height="42" rx="6" />
                 <text class="dv-x" x="180" y="238">零拷贝：不序列化、不复制</text>
               </svg>
               <p class="dv-note">实测整段写入+读回 3.5µs</p>
@@ -1884,7 +2287,7 @@
       <section id="priority">
         <div class="wrap">
           <!-- ④ 文右 图左 -->
-          <div class="alt flip reveal">
+          <div class="alt flip reveal rise">
             <div class="alt-copy">
               <span class="alt-n">04</span>
               <h3>轻重缓急，各归其位</h3>
@@ -1952,6 +2355,30 @@
                 <text class="dv-tsl" x="58" y="204">正在跑的任务</text>
                 <text class="dv-end" x="302" y="204">同一时刻只一个</text>
                 <text class="dv-caps" x="180" y="220">被打断的现场压入中断栈，稍后原样恢复</text>
+
+                <!-- 插队动线：从排队列（右）绕到中断列（左）各级前。
+                     这是本图的核心语义 —— 「任何中断都能插它前面」，
+                     静态版只能靠一行小字说明，动起来才看得见。 -->
+                <path id="pkPath4" class="dv-pkline dv-anim"
+                      d="M258 100 C 210 100, 200 47, 168 47" />
+                <path id="pkPath3" class="dv-pkline dv-anim"
+                      d="M258 100 C 214 100, 202 77, 168 77" />
+                <path id="pkPath2" class="dv-pkline dv-anim"
+                      d="M258 100 C 218 100, 206 107, 168 107" />
+                <path id="pkPath1" class="dv-pkline dv-anim"
+                      d="M258 100 C 222 100, 210 137, 168 137" />
+                <circle class="dv-pkdot dv-anim" r="3">
+                  <animateMotion dur="4.2s" repeatCount="indefinite"><mpath href="#pkPath4" /></animateMotion>
+                </circle>
+                <circle class="dv-pkdot dv-anim" r="3">
+                  <animateMotion dur="4.2s" begin="0.5s" repeatCount="indefinite"><mpath href="#pkPath3" /></animateMotion>
+                </circle>
+                <circle class="dv-pkdot dv-anim" r="3">
+                  <animateMotion dur="4.2s" begin="1.0s" repeatCount="indefinite"><mpath href="#pkPath2" /></animateMotion>
+                </circle>
+                <circle class="dv-pkdot dv-anim" r="3">
+                  <animateMotion dur="4.2s" begin="1.5s" repeatCount="indefinite"><mpath href="#pkPath1" /></animateMotion>
+                </circle>
               </svg>
             </div>
           </div>
@@ -1962,7 +2389,7 @@
       <section id="offload">
         <div class="wrap">
           <!-- ④ 文右 图左 -->
-          <div class="alt flip reveal">
+          <div class="alt flip reveal rise">
             <div class="alt-copy">
               <span class="alt-n">05</span>
               <h3>忙时，有人替你接住</h3>
@@ -1984,8 +2411,18 @@
                   <rect class="dv-box" x="24" y="148" width="150" height="26" rx="6" />
                   <text class="dv-s" x="99" y="166">积压消息 ×4</text>
                 </g>
-                <path class="dv-pk" d="M174 165 H228" />
+                <path id="handoffPath" class="dv-pk dv-dash" d="M174 161 H228" />
                 <text class="dv-lab" x="201" y="156">转投</text>
+                <!-- 转投的包：沿链路飞向分诊助手，循环往复。
+                     静态版只有一条金线，看不出「消息真的被接走了」。 -->
+                <circle class="dv-pkdot dv-anim" r="3.4">
+                  <animateMotion dur="2.4s" repeatCount="indefinite"><mpath href="#handoffPath" /></animateMotion>
+                </circle>
+                <circle class="dv-pkdot dv-anim" r="3.4">
+                  <animateMotion dur="2.4s" begin="1.2s" repeatCount="indefinite"><mpath href="#handoffPath" /></animateMotion>
+                </circle>
+                <!-- 接走时的收货闪光：分诊助手亮一下 -->
+                <rect class="dv-recv" x="228" y="116" width="110" height="76" rx="9" />
                 <rect class="dv-box dv-accent" x="228" y="116" width="110" height="76" rx="9" />
                 <text class="dv-ts" x="283" y="146">分诊助手</text>
                 <text class="dv-s" x="283" y="166">当场办 / 立刻答</text>
@@ -2362,7 +2799,7 @@ echo <span class="s">"你好，记住我喜欢喝咖啡"</span> | ./build/waiter
           <h2 class="reveal rise">常见问题</h2>
                     <p class="sub reveal rise" style="--d:90ms">最容易引起误解的六个地方。</p>
 
-          <div class="reveal rise">
+          <div class="reveal rise faq-grid">
             <details class="faq">
               <summary>「内核零 IO」是不是意味着内核很简单？</summary>
               <p>
@@ -2528,6 +2965,18 @@ echo <span class="s">"你好，记住我喜欢喝咖啡"</span> | ./build/waiter
         window.addEventListener("scroll", onScroll, { passive: true });
         onScroll();
 
+        /* ── SMIL 与 reduced-motion ──
+           CSS 的 prefers-reduced-motion 管不到 SMIL（<animateMotion> 不是 CSS 动画），
+           实测 reduce 下 6 个数据包照样在跑。故在 JS 里显式停掉：
+           暂停整棵 SVG 时间轴（pauseAnimations 对 SVG 文档生效）。 */
+        if (reduce) {
+          try {
+            document.querySelectorAll("svg").forEach(function (sv) {
+              if (sv.pauseAnimations) sv.pauseAnimations();
+            });
+          } catch (e) {}
+        }
+
         /* ── 入场动画 ── */
         if (!reduce) {
           root.classList.add("js-fx");
@@ -2545,11 +2994,25 @@ echo <span class="s">"你好，记住我喜欢喝咖啡"</span> | ./build/waiter
           }
 
           if ("IntersectionObserver" in window) {
+            // 双向：向下滚入场，向上滚退场 —— 不再 unobserve。
+            // 原先入场后 unobserve，元素永远停在 .in，所以“滚回去”没有任何退场动作，
+            // 读起来就像一页页静态堆叠。
+            // 方向由视口交叉的位置判断（不用全局 scroll 方向，那样在快速滚动时会抖）：
+            //   boundingClientRect.top > 0 且向下 → 从下方进来
+            //   boundingClientRect.top < 0        → 已滑到上方，停用
             var io = new IntersectionObserver(function (entries) {
               entries.forEach(function (e) {
-                if (e.isIntersecting) { reveal(e.target); io.unobserve(e.target); }
+                if (e.isIntersecting) {
+                  reveal(e.target);
+                } else {
+                  // 仅当元素确实离开（而非只是未达阈值）才移除，避免边缘抖动
+                  var r = e.boundingClientRect;
+                  if (r.bottom < 0 || r.top > window.innerHeight) {
+                    e.target.classList.remove("in");
+                  }
+                }
               });
-            }, { threshold: 0.1, rootMargin: "0px 0px -6% 0px" });
+            }, { threshold: 0.12, rootMargin: "0px 0px -6% 0px" });
             els.forEach(function (el) { io.observe(el); });
           } else {
             els.forEach(reveal);
@@ -2562,8 +3025,23 @@ echo <span class="s">"你好，记住我喜欢喝咖啡"</span> | ./build/waiter
               if (r.top < window.innerHeight && r.bottom > 0) reveal(el);
             });
           });
-          // 兜底：3 秒后无论 observer 是否生效，强制全部可见
-          setTimeout(function () { els.forEach(reveal); }, 3000);
+
+          // 比一屏高的节退出吸附。
+          // 为何在运行时做：高度受字体、图片、视口影响，CSS 无法预知。
+          // 不做的话吸附点不等距，累积误差会把后面的节顶到导航栏底下（实测 faq h2 被抬到 -57）。
+          var markTall = function () {
+            var limit = window.innerHeight - 8;
+            [].slice.call(document.querySelectorAll("section")).forEach(function (s) {
+              s.classList.toggle("too-tall", s.getBoundingClientRect().height > limit);
+            });
+          };
+          markTall();
+          window.addEventListener("load", markTall);
+          window.addEventListener("resize", markTall);
+
+          // 不再用「3 秒后强制全部 reveal」的兜底：
+          // 那会把已退场的元素强行拉回来，退场动画就废了。
+          // 改为只在 observer 不存在时（已在上面分支处理）整体 reveal。
         }
 
         /* ── 数字滚动 ── */
