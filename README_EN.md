@@ -236,7 +236,7 @@ External plugin development: see [homeagent-sdk](https://gitcode.com/JianFeeeee/
   It exposes only a public provider SPI (`pkg/embedding`: `Modality` / `Input{Data,MIME}` /
   `Info{Dimension,Fingerprint,Modalities}` + a name registry), with implementations under
   `providers/*`. Default: **Chinese-CLIP ViT-B/16** — text and image land in the **same space**
-  (512-dim, fingerprint `cd2a495cf990`, Apache-2.0, ~1.15GB RSS measured standalone);
+  (512-dim, fingerprint `cd2a495cf990`, Apache-2.0; measured ~1.59GB peak on load, settling to ~0.89GB steady-state);
   `qwen3vl` is kept (2048-dim, ~9.4GB) for machines with headroom or future video. Text search
   still falls back to the existing word-vector / TF-IDF path — a CLIP dual tower's pure-text
   semantics are **weaker than an MLLM-style embedder**, a cost documented rather than hidden.
@@ -263,6 +263,17 @@ External plugin development: see [homeagent-sdk](https://gitcode.com/JianFeeeee/
 
 > The historical entries below are kept verbatim to show the evolution; two mechanisms in them
 > were **removed in v1.2.0**: text-description-based media indexing, and reference-counted media GC.
+>
+> **Two performance claims also need correcting** (measured 2026-09-20):
+> "crash-to-recovery under 1s" does not hold — restarts are **linearly backed off**, i.e.
+> 1s / 2s / 3s (`procRestartBackoff=1s × nth crash`). Even the *first* restart waits 1s.
+> And the **4th** crash within a 5-minute window stops automatic restarts pending human
+> intervention (`procMaxRestarts=3`, tested as `n > 3`).
+> The backoff was already 1s when this claim was written (v1.0.0), so it never held.
+> "RPC round-trip p50 24.1µs" is the right order of magnitude but does not match current
+> measurements: `BenchmarkToolInvoke` on this machine gives inline/small **30.4µs**,
+> frame/small 51.5µs, inline/large 767µs, frame/large 398µs.
+> The original text is left unedited rather than rewritten, so the history isn't falsified.
 
 **v1.1.1** — Multimodal reaches the **plugin boundary**. v1.1.0 gave the memory system binary
 multimedia nodes, but that path was open only to the kernel itself; this release opens it to

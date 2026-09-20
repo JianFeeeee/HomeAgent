@@ -1,7 +1,7 @@
 // Package chineseclip 提供 Chinese-CLIP ViT-B/16 的 text+image 向量空间 provider。
 //
 // 为什么是它（而不是 Qwen3-VL-Embedding-2B / jina-v5-omni-nano）：
-//   - 体积：721MB ONNX、实测常驻 1.15GB；Qwen 2B 需要 9.4GB，本机可用内存只有 5.3GB。
+//   - 体积：721MB ONNX、实测稳态约 0.89GB（加载峰值 1.59GB）；Qwen 2B 峰值约 9.4GB，本机可用内存只有 5.3GB。
 //   - 许可：Apache-2.0，可随发行版分发；jina-v5-omni-nano 是 CC BY-NC（不可商用）。
 //   - 中文：原生在 ~2 亿中文图文对上训练。
 //
