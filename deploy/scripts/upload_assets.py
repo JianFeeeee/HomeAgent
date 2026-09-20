@@ -32,12 +32,16 @@ ARTIFACT_SUFFIXES = (
     ".rpm",
     ".pkg",
     "_win64.exe",
+    # 插件包。之前不在白名单里，会被静默跳过——而 release 本该带上它们，
+    # 否则用户要自己装 Go + hmapdev 逐插件构建（见 SDK 仓 scripts/build_plugin_bundles.sh）。
+    ".hmap",
+    # 插件包汇总校验和（与 SHA256SUMS 同性质，独立文件免得混淆内核包与插件)
+    "SHA256SUMS.plugins",
 )
 
 
 def is_artifact(name: str) -> bool:
     return name == "SHA256SUMS" or name.endswith(ARTIFACT_SUFFIXES)
-
 
 def get_upload_url(tag: str, token: str, filename: str) -> tuple[str, dict]:
     q = urllib.parse.urlencode({"file_name": filename})
