@@ -23,9 +23,17 @@ func TestBuildPluginBundlesInstallable(t *testing.T) {
 	if dir == "" {
 		t.Skip("未设 HMAP_BUNDLE_DIR（指向 build_plugin_bundles.sh 的产出目录）")
 	}
+	// 相对路径按**仓根**而非本包目录解析：测试的 cwd 是包目录，
+	// 而调用方通常写 `HMAP_BUNDLE_DIR=dist/plugins`（相对仓根），不修正就会
+	// 报 “no such file or directory”，看起来像产物不存在。
+	if !filepath.IsAbs(dir) {
+		if abs, err := filepath.Abs(filepath.Join(repoRoot(), dir)); err == nil {
+			dir = abs
+		}
+	}
 	entries, err := os.ReadDir(dir)
 	if err != nil {
-		t.Fatalf("读产物目录: %v", err)
+		t.Fatalf("读产物目录 %s: %v", dir, err)
 	}
 
 	n := 0
@@ -103,6 +111,25 @@ func TestBuildPluginBundlesInstallable(t *testing.T) {
 		t.Fatal("没有任何 .hmap 通过安装校验")
 	}
 	t.Logf("共 %d 个插件包通过内核解包校验", n)
+}
+
+// repoRoot 从本文件位置向上找到仓根（含 go.mod 的目录）。
+func repoRoot() string {
+	d, err := os.Getwd()
+	if err != nil {
+		return "."
+	}
+	for i := 0; i < 8; i++ {
+		if _, err := os.Stat(filepath.Join(d, "go.mod")); err == nil {
+			return d
+		}
+		parent := filepath.Dir(d)
+		if parent == d {
+			break
+		}
+		d = parent
+	}
+	return "."
 }
 
 // extractField 从 JSON 文本里取一个字符串字段（本文件不想为此引 encoding/json）。
