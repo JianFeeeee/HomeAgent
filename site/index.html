@@ -291,6 +291,134 @@
         .grid-2, .grid-3 { grid-template-columns: 1fr; }
       }
 
+      /* ── 整屏翻页 ──
+         用 mandatory（一滑一页）。前提是**每节都必须塞得进一屏** ——
+         mandatory 下比视口高的节，超出部分会永久滚不到。
+         为此 features 的 5 条设计决定已各自独立成节（见 stageB2），
+         architecture 的流程图也单独成节。
+         实测 proximity 不满足需求：滑 500px 落在 500，离最近边界 395px，
+         距离太远不触发吸附 —— 那样只是"有时粘一下"，不是翻页。 */
+      html {
+        scroll-snap-type: y mandatory;
+        scroll-padding-top: 4.5rem;
+      }
+      section {
+        min-height: calc(100svh - 4.5rem);
+        display: flex;
+        flex-direction: column;
+        justify-content: center;
+        scroll-snap-align: start;
+      }
+      section > .wrap { width: min(1120px, 92vw); margin: 0 auto; }
+      /* 吸附容器不能有 transform 祖先：会让 snap 失效（实测过）。
+         故 .wrap 上不加任何位移类动画，入场只做透明度。 */
+      @media (prefers-reduced-motion: reduce) {
+        html { scroll-snap-type: none; }
+      }
+      /* 窄屏/矮屏放宽：手机可视高度小且地址栏收缩会变，强制一屏反而难受 */
+      @media (max-width: 860px), (max-height: 620px) {
+        html { scroll-snap-type: none; }
+        section { min-height: 0; }
+      }
+
+      /* ── 五个决定的索引（总起页）── */
+      .idx {
+        list-style: none;
+        margin: 2.2rem 0 0;
+        padding: 0;
+        display: grid;
+        gap: 0.5rem;
+      }
+      .idx li {
+        display: flex;
+        align-items: center;
+        gap: 0.85rem;
+        padding: 0.7rem 1rem;
+        font-size: 0.95rem;
+        color: var(--text-dim);
+        background: var(--bg-card);
+        border: 1px solid var(--border);
+        border-radius: var(--radius-md);
+        transition: border-color .25s var(--ease), color .25s var(--ease), transform .25s var(--ease);
+      }
+      .idx li:hover { border-color: var(--border-hi); color: var(--text); transform: translateX(3px); }
+      .idx li span {
+        flex: 0 0 auto;
+        font-family: var(--font-mono);
+        font-size: 0.75rem;
+        color: var(--brand-cyan);
+      }
+
+      /* ── 交错行：文/图左右互换 ──
+         为什么用 grid 而不是 flex 的 order 翻转：order 只改视觉次序，
+         键盘 Tab 与读屏仍按 DOM —— 这里 DOM 始终「标题在前」，
+         翻的只是视觉，所以两者都正确。 */
+      .alt {
+        display: grid;
+        grid-template-columns: 1fr 1fr;
+        gap: 3.2rem;
+        align-items: center;
+        margin-top: 3.4rem;
+      }
+      .alt.flip .alt-copy { order: 2; }
+      .alt.flip .alt-visual { order: 1; }
+      .alt-n {
+        display: inline-block;
+        font-family: var(--font-mono);
+        font-size: 0.75rem;
+        letter-spacing: 0.08em;
+        color: var(--brand-cyan);
+        border: 1px solid var(--border);
+        border-radius: var(--radius-pill);
+        padding: 0.1rem 0.55rem;
+        margin-bottom: 0.7rem;
+      }
+      .alt-copy h3 {
+        font-size: clamp(1.15rem, 2vw, 1.5rem);
+        margin: 0 0 0.7rem;
+        letter-spacing: -0.01em;
+      }
+      .alt-copy p { margin: 0; color: var(--text-dim); line-height: 1.8; }
+      .alt-visual { min-width: 0; }
+      .alt-visual svg { width: 100%; height: auto; display: block; }
+      .dv-note {
+        margin: 0.6rem 0 0;
+        text-align: center;
+        font-size: 0.75rem;
+        color: var(--text-muted);
+      }
+      @media (max-width: 860px) {
+        .alt { grid-template-columns: 1fr; gap: 1.6rem; margin-top: 2.6rem; }
+        .alt.flip .alt-copy, .alt.flip .alt-visual { order: 0; }
+      }
+
+      /* ── 示意图图元 ── */
+      .dv-bound { fill: none; stroke: var(--border); stroke-width: 1.5; stroke-dasharray: 6 5; }
+      .dv-box { fill: var(--bg-card); stroke: var(--border-hi); stroke-width: 1.4; }
+      .dv-accent { fill: rgba(6, 182, 212, 0.10); stroke: var(--brand-cyan); }
+      .dv-run { fill: rgba(59, 130, 246, 0.10); stroke: var(--brand-blue); }
+      .dv-l4 { fill: rgba(139, 92, 246, 0.13); stroke: var(--brand-violet); }
+      .dv-l3 { fill: rgba(59, 130, 246, 0.11); stroke: var(--brand-blue); }
+      .dv-l2 { fill: rgba(6, 182, 212, 0.10); stroke: var(--brand-cyan); }
+      .dv-l1 { fill: rgba(245, 158, 11, 0.10); stroke: var(--brand-gold); }
+      .dv-t { fill: var(--text); font-size: 15px; font-weight: 700; text-anchor: middle; }
+      .dv-ts { fill: var(--text); font-size: 12.5px; font-weight: 600; text-anchor: middle; }
+      .dv-s { fill: var(--text-muted); font-size: 10.5px; text-anchor: middle; }
+      .dv-lab { fill: var(--text-dim); font-size: 11px; text-anchor: middle; }
+      .dv-labs { fill: var(--text-muted); font-size: 9.5px; text-anchor: middle; }
+      .dv-cap { fill: var(--text-muted); font-size: 10px; }
+      .dv-seg { fill: rgba(119,128,154,.07); stroke: var(--border-hi); stroke-width: 1.4; stroke-dasharray: 5 4; }
+      .dv-hd { fill: rgba(139,92,246,.12); stroke: var(--brand-violet); }
+      .dv-ar { fill: rgba(6,182,212,.09); stroke: var(--border-hi); }
+      .dv-off { fill: none; stroke: var(--border); stroke-width: 1.2; stroke-dasharray: 4 4; }
+      .dv-offt { fill: var(--text-muted); font-size: 11.5px; text-anchor: middle; text-decoration: line-through; }
+      .dv-no path { stroke: var(--brand-gold); stroke-width: 1.6; opacity: .85; }
+      .dv-line { fill: none; stroke: var(--border-hi); stroke-width: 1.4; }
+      .dv-dash { stroke-dasharray: 4 4; }
+      .dv-pk { fill: none; stroke: var(--brand-gold); stroke-width: 2; }
+      .dv-arrow { fill: none; stroke: var(--brand-cyan); stroke-width: 1.6; stroke-dasharray: 4 4; }
+      .dv-x { fill: var(--text-muted); font-size: 10px; text-anchor: middle; }
+
       /* ── 三层记忆：用品牌三色 ── */
       .layers { display: grid; gap: 0.9rem; }
       .layer {
@@ -385,7 +513,7 @@
       /* ── 连接线：中轴上的一小段，带流动感 ── */
       .lnk {
         position: relative;
-        height: 2.1rem;
+        height: 1.15rem;
         width: 2px;
         margin: 0 auto;
         background: var(--border-hi);
@@ -461,8 +589,8 @@
         position: relative;
         z-index: 1;
         max-width: 34rem;
-        margin: 0.75rem auto 0;
-        padding: 2.4rem 1rem 2.6rem;
+        margin: 0.5rem auto 0;
+        padding: 1.7rem 1rem 1.9rem;
         border: 1px dashed rgba(6, 182, 212, 0.4);
         border-radius: var(--radius-md);
         background: rgba(6, 182, 212, 0.045);
@@ -1306,11 +1434,10 @@
         <div class="wrap hero-grid">
           <div class="hero-copy">
             <span class="tagline rise" style="--d:0ms">常驻型个人 Agent 框架</span>
-            <h1 class="rise" style="--d:80ms">一个<span class="grad">不会忘记</span><br />也不会被一条长任务卡死的管家</h1>
+            <h1 class="rise" style="--d:80ms">是<span class="grad">记得住</span>的管家<br />更是从不让你干等的搭档</h1>
             <p class="lede rise" style="--d:180ms">
-              HomeAgent 是内核 + 插件的双层 Agent 框架。内核只管
-              <strong>LLM 编排、记忆与调度</strong>；所有外部能力（消息、文件、网络、设备）
-              都是可独立安装、崩溃不牵连内核的插件。
+              内核只管<strong>编排、记忆与调度</strong>，消息 / 文件 / 网络 / 设备
+              一律交给插件。插件崩了不牵连内核 —— 换掉一个二进制就热重载。
             </p>
             <div class="cta rise" style="--d:280ms">
               <a class="btn btn-primary" href="#quickstart">快速上手 →</a>
@@ -1321,56 +1448,231 @@
       </section>
 
       <!-- ── 特性 ── -->
+      <!-- ── 特性总起 ── -->
       <section id="features">
         <div class="wrap">
-          <h2 class="reveal rise">四个不那么常见的设计决定</h2>
-                    <p class="sub reveal rise" style="--d:90ms">
-            先定<strong>边界</strong>与<strong>调度</strong>，再加能力。
+          <h2 class="reveal rise">先定边界，再加能力</h2>
+          <p class="sub reveal rise" style="--d:90ms">
+            大多数 Agent 框架先堆功能、边界后补。这里反过来 —— 五个决定，都是先把「谁能碰什么」定死。
           </p>
+          <ol class="idx reveal rise" style="--d:180ms">
+            <li><span>01</span>内核零 IO，只碰调度</li>
+            <li><span>02</span>部署，从未如此便捷</li>
+            <li><span>03</span>数据如水，随流，随改，随走</li>
+            <li><span>04</span>轻重缓急，各归其位</li>
+            <li><span>05</span>忙时，有人替你接住</li>
+          </ol>
+        </div>
+      </section>
 
-          <div class="grid-2">
-            <div class="card reveal rise" style="--d:0ms">
-              <div class="icon" style="background: rgba(59,130,246,.14); color: var(--brand-blue)">◇</div>
-              <h3>内核零 IO</h3>
+      <!-- ── 设计决定 01 ── -->
+      <section id="zero-io">
+        <div class="wrap">
+          <!-- ① 文左 图右 -->
+          <div class="alt reveal">
+            <div class="alt-copy">
+              <span class="alt-n">01</span>
+              <h3>内核零 IO，只碰调度</h3>
               <p>
-                                内核不碰任何外部世界。消息、文件、网络、硬件全部由插件经
-                PluginSDK 实现。于是「内核是否可信」与「某个插件是否安全」
-                可以分开评估。
+                内核不读文件、不发网络、不碰硬件。它只做三件事：
+                <strong>编排、记忆、调度</strong>。外面的一切 —— 消息、文件、网络、设备 ——
+                都由插件接管。于是「内核可信吗」和「这个插件安全吗」
+                成了两个可以分开回答的问题，而不是一次押上整块。
               </p>
             </div>
-
-            <div class="card reveal rise" style="--d:90ms">
-              <div class="icon" style="background: rgba(6,182,212,.14); color: var(--brand-cyan)">◈</div>
-              <h3>插件是独立进程</h3>
-              <p>
-                                插件是普通 Go 二进制，由内核 spawn 为子进程，经 stdio JSON-RPC
-                （控制）、共享内存段（数据）、事件环（通知）通信。插件崩溃不牵连内核，
-                换掉 <span class="mono">plugin.bin</span> 即热重载。
-              </p>
-            </div>
-
-            <div class="card reveal rise" style="--d:180ms">
-              <div class="icon" style="background: rgba(245,158,11,.14); color: var(--brand-gold)">◉</div>
-              <h3>输入是有级别的</h3>
-              <p>
-                                输入分「排队」与「中断」两类，中断再按紧迫度分 L1–L4。
-                高级可抢占并保存现场，同级不抢占。L4 归内核独占
-                —— 所以「停止」真的能立刻停下。
-              </p>
-            </div>
-
-            <div class="card reveal rise" style="--d:270ms">
-              <div class="icon" style="background: rgba(139,92,246,.14); color: var(--brand-violet)">◆</div>
-              <h3>忙时有人顶班</h3>
-              <p>
-                                主 agent 忙长任务时，积压交给临时<strong>分诊助手</strong>：
-                能办的直接办，需要主 agent 的立刻回「忙碌中，请稍候」。
-                不必干等十几分钟。
-              </p>
+            <div class="alt-visual">
+              <svg viewBox="0 0 360 250" role="img" aria-label="内核不直接连接外部世界，由插件桥接">
+                <rect class="dv-bound" x="16" y="40" width="328" height="170" rx="14" />
+                <text class="dv-cap" x="30" y="232">外部世界</text>
+                <rect class="dv-box dv-accent" x="120" y="100" width="120" height="60" rx="10" />
+                <text class="dv-t" x="180" y="126">内核</text>
+                <text class="dv-s" x="180" y="144">编排 · 记忆 · 调度</text>
+                <g class="dv-plug">
+                  <rect class="dv-box" x="36" y="52" width="76" height="38" rx="8" />
+                  <text class="dv-ts" x="74" y="76">插件</text>
+                  <rect class="dv-box" x="248" y="52" width="76" height="38" rx="8" />
+                  <text class="dv-ts" x="286" y="76">插件</text>
+                  <rect class="dv-box" x="36" y="160" width="76" height="38" rx="8" />
+                  <text class="dv-ts" x="74" y="184">插件</text>
+                  <rect class="dv-box" x="248" y="160" width="76" height="38" rx="8" />
+                  <text class="dv-ts" x="286" y="184">插件</text>
+                </g>
+                <path class="dv-line" d="M74 90 V160" />
+                <path class="dv-line" d="M286 90 V160" />
+                <path class="dv-pk" d="M112 130 H74" />
+                <path class="dv-pk" d="M248 130 H286" />
+                <path class="dv-line dv-dash" d="M112 130 H160 M200 130 H248" />
+              </svg>
+              <p class="dv-note">箭头只进出插件 —— 内核一列都没有</p>
             </div>
           </div>
         </div>
       </section>
+
+      <!-- ── 设计决定 02 ── -->
+      <section id="zero-dep">
+        <div class="wrap">
+          <!-- ② 文右 图左 -->
+          <div class="alt flip reveal">
+            <div class="alt-copy">
+              <span class="alt-n">02</span>
+              <h3>部署，从未如此便捷</h3>
+              <p>
+                插件是<strong>静态编译的单个文件</strong>：目标机上没有 Go、没有 libc、
+                没有容器、没有运行时，拷过去就能跑。
+                本体同样不要求你先装什么 —— 没有数据库、没有缓存、没有消息队列，
+                记忆与索引都在进程内。所谓部署，就是把文件放上去。
+              </p>
+            </div>
+            <div class="alt-visual">
+              <svg viewBox="0 0 360 250" role="img" aria-label="插件是单个静态二进制，不依赖任何运行时">
+                <rect class="dv-bound" x="20" y="34" width="140" height="182" rx="12" />
+                <text class="dv-cap" x="30" y="228">目标机</text>
+                <rect class="dv-box dv-accent" x="40" y="96" width="100" height="60" rx="10" />
+                <text class="dv-ts" x="90" y="122">plugin.bin</text>
+                <text class="dv-s" x="90" y="140">单个文件</text>
+                <g class="dv-plug">
+                  <rect class="dv-box dv-off" x="196" y="52" width="140" height="30" rx="7" />
+                  <text class="dv-offt" x="266" y="72">Go 工具链</text>
+                  <rect class="dv-box dv-off" x="196" y="92" width="140" height="30" rx="7" />
+                  <text class="dv-offt" x="266" y="112">libc / glibc</text>
+                  <rect class="dv-box dv-off" x="196" y="132" width="140" height="30" rx="7" />
+                  <text class="dv-offt" x="266" y="152">Node / Python</text>
+                  <rect class="dv-box dv-off" x="196" y="172" width="140" height="30" rx="7" />
+                  <text class="dv-offt" x="266" y="192">容器运行时</text>
+                </g>
+                <g class="dv-no">
+                  <path d="M200 58 L332 76" /><path d="M200 98 L332 116" />
+                  <path d="M200 138 L332 156" /><path d="M200 178 L332 196" />
+                </g>
+                <text class="dv-x" x="266" y="42">都不需要</text>
+              </svg>
+              <p class="dv-note">实测：statically linked，无动态依赖</p>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <!-- ── 设计决定 03 ── -->
+      <section id="shm">
+        <div class="wrap">
+          <!-- ③ 文左 图右：共享内存 -->
+          <div class="alt reveal">
+            <div class="alt-copy">
+              <span class="alt-n">03</span>
+              <h3>数据如水，随流，随改，随走</h3>
+              <p>
+                控制信令走 stdio，<strong>真正的数据走一块共享内存</strong>。
+                变长内容只传一个相对偏移，两边 mmap 到不同地址也能各自解引用。
+                所以上下文在插件里是<strong>零拷贝</strong>改写的 ——
+                不是「序列化出去、传字符串、再反序列化回来」，而是两边看着同一块内存。
+              </p>
+            </div>
+            <div class="alt-visual">
+              <svg viewBox="0 0 360 250" role="img" aria-label="共享内存段加偏移解引用，实现零拷贝">
+                <rect class="dv-box dv-accent" x="24" y="40" width="96" height="56" rx="9" />
+                <text class="dv-ts" x="72" y="64">内核</text>
+                <text class="dv-s" x="72" y="82">homed</text>
+                <rect class="dv-box dv-accent" x="240" y="40" width="96" height="56" rx="9" />
+                <text class="dv-ts" x="288" y="64">插件</text>
+                <text class="dv-s" x="288" y="82">plugin.bin</text>
+                <rect class="dv-seg" x="24" y="126" width="312" height="88" rx="10" />
+                <text class="dv-cap" x="34" y="146">共享内存段（一块，两边同一物理页）</text>
+                <rect class="dv-box dv-hd" x="40" y="156" width="60" height="42" rx="6" />
+                <text class="dv-ts" x="70" y="182">header</text>
+                <rect class="dv-box dv-ar" x="112" y="156" width="208" height="42" rx="6" />
+                <text class="dv-ts" x="216" y="181">arena　变长数据</text>
+                <text class="dv-labs" x="216" y="194">{off, len} 相对基址</text>
+                <path class="dv-line" d="M72 96 V126" />
+                <path class="dv-line" d="M288 96 V126" />
+                <path class="dv-arrow" d="M70 60 L2 60 L2 177 L40 177" />
+                <text class="dv-x" x="180" y="238">零拷贝：不序列化、不复制</text>
+              </svg>
+              <p class="dv-note">实测整段写入+读回 3.5µs</p>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <!-- ── 设计决定 04 ── -->
+      <section id="priority">
+        <div class="wrap">
+          <!-- ④ 文右 图左 -->
+          <div class="alt flip reveal">
+            <div class="alt-copy">
+              <span class="alt-n">04</span>
+              <h3>轻重缓急，各归其位</h3>
+              <p>
+                输入先分两类：<strong>可以等的</strong>，和<strong>不能等的</strong>。
+                不能等的再按紧迫度排 L1–L4：高级别可以抢占，被抢占的现场压进栈、稍后原样恢复。
+                同一时刻只有一个任务在改上下文，所以不会两边各做一半。
+                L4 归内核独占 —— 「停止」按下去就真的停。
+              </p>
+            </div>
+            <div class="alt-visual">
+              <svg viewBox="0 0 360 250" role="img" aria-label="四级中断与抢占">
+                <g class="dv-lv">
+                  <rect class="dv-box dv-l4" x="30" y="30" width="200" height="34" rx="7" />
+                  <text class="dv-ts" x="46" y="52">L4　内核独占 · 立即打断</text>
+                  <rect class="dv-box dv-l3" x="30" y="72" width="200" height="34" rx="7" />
+                  <text class="dv-ts" x="46" y="94">L3　高优先级</text>
+                  <rect class="dv-box dv-l2" x="30" y="114" width="200" height="34" rx="7" />
+                  <text class="dv-ts" x="46" y="136">L2　重要</text>
+                  <rect class="dv-box dv-l1" x="30" y="156" width="200" height="34" rx="7" />
+                  <text class="dv-ts" x="46" y="178">L1　可等</text>
+                </g>
+                <text class="dv-lab" x="130" y="212">高 → 低</text>
+                <rect class="dv-box dv-run" x="250" y="72" width="86" height="76" rx="9" />
+                <text class="dv-ts" x="293" y="104">正在跑</text>
+                <text class="dv-s" x="293" y="122">现场压栈</text>
+                <path class="dv-pk" d="M230 47 H293 V72" />
+                <text class="dv-x" x="293" y="166">抢占 → 稍后恢复</text>
+              </svg>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <!-- ── 设计决定 05 ── -->
+      <section id="offload">
+        <div class="wrap">
+          <!-- ④ 文右 图左 -->
+          <div class="alt flip reveal">
+            <div class="alt-copy">
+              <span class="alt-n">05</span>
+              <h3>忙时，有人替你接住</h3>
+              <p>
+                主 agent 被长任务占住、积压又够多时，内核把这些消息转给一个
+                临时驻留的<strong>分诊助手</strong>。能当场办的就办了；
+                非等主 agent 不可的，立刻回一句「忙碌中，请稍候」。
+                你不必对着对话框猜它还在不在。
+              </p>
+            </div>
+            <div class="alt-visual">
+              <svg viewBox="0 0 360 250" role="img" aria-label="主 agent 忙时把积压转投给分诊助手">
+                <rect class="dv-box dv-run" x="24" y="36" width="150" height="52" rx="9" />
+                <text class="dv-ts" x="99" y="58">主 agent</text>
+                <text class="dv-s" x="99" y="76">长任务 · 占住很久</text>
+                <g class="dv-msg">
+                  <rect class="dv-box" x="24" y="116" width="150" height="26" rx="6" />
+                  <text class="dv-s" x="99" y="134">积压消息 ×3</text>
+                  <rect class="dv-box" x="24" y="148" width="150" height="26" rx="6" />
+                  <text class="dv-s" x="99" y="166">积压消息 ×4</text>
+                </g>
+                <path class="dv-pk" d="M174 165 H228" />
+                <text class="dv-lab" x="201" y="156">转投</text>
+                <rect class="dv-box dv-accent" x="228" y="116" width="110" height="76" rx="9" />
+                <text class="dv-ts" x="283" y="146">分诊助手</text>
+                <text class="dv-s" x="283" y="166">当场办 / 立刻答</text>
+                <path class="dv-line" d="M24 214 H338" />
+                <path class="dv-arrow" d="M338 214 V196" />
+                <text class="dv-x" x="180" y="236">不必干等</text>
+              </svg>
+            </div>
+          </div>
+        </div>
+      </section>
+
 
       <!-- ── 三层记忆 ── -->
       <section id="memory">
@@ -1543,7 +1845,13 @@
             </p>
           </div>
 
-          <h2 class="reveal" style="margin-top: 3rem">核心组件</h2>
+        </div>
+      </section>
+
+      <!-- ── 核心组件 ── -->
+      <section id="components">
+        <div class="wrap">
+          <h2 class="reveal">核心组件</h2>
           <div class="comp reveal rise">
             <div class="row"><code>homed</code><span>常驻内核进程：LLM 编排、记忆管理、输入调度、插件生命周期</span></div>
             <div class="row"><code>PluginSDK</code><span>面向内核的接口：注册工具 / 挂阶段钩子 / 订阅事件 / 声明输出通道</span></div>
@@ -1585,7 +1893,13 @@ echo <span class="s">"你好，记住我喜欢喝咖啡"</span> | ./build/waiter
                         WebUI 与 API 密钥在 <span class="mono">http://localhost:8080</span> 配置，持久化到 SQLite。
           </p>
 
-          <h2 class="reveal" style="margin-top: 3rem">开箱可用的插件</h2>
+        </div>
+      </section>
+
+      <!-- ── 插件墙 ── -->
+      <section id="plugins">
+        <div class="wrap">
+          <h2 class="reveal">开箱可用的插件</h2>
                     <p class="sub reveal rise" style="--d:90ms">外部插件经 <span class="mono">hmapdev</span> 构建为独立二进制，可单独装卸、热重载。<strong>点任意插件看它能做什么。</strong></p>
           <div class="badges reveal">
             <button class="badge" type="button" data-plugin="a2a" style="--i:0">a2a</button>
