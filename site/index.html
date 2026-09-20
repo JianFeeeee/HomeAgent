@@ -57,6 +57,18 @@
         --text: #eef1f8;
         --text-dim: #a7b0c4;
         --text-muted: #77809a;
+        /* 示意图节点面：深色下上浅下深，模拟受光 */
+        --dv-card-a: rgba(30, 41, 66, 0.92);
+        --dv-card-b: rgba(17, 24, 44, 0.92);
+        --dv-sheen: rgba(255, 255, 255, 0.10);
+        /* 示意图玻璃面板 */
+        --fig-bg: linear-gradient(165deg, rgba(30, 41, 66, 0.62), rgba(12, 18, 34, 0.72));
+        --fig-border: rgba(255, 255, 255, 0.10);
+        --fig-shadow: rgba(0, 0, 0, 0.85);
+        --fig-inner-top: rgba(255, 255, 255, 0.10);
+        --fig-inner-bottom: rgba(0, 0, 0, 0.35);
+        --fig-glow: rgba(56, 189, 248, 0.10);
+        --fig-grain: 0.16;
         --code-bg: rgba(6, 10, 22, 0.85);
         --code-fg: #cdd3f5;
         --nav-bg: rgba(7, 11, 22, 0.72);
@@ -83,6 +95,17 @@
         --bg-card-hi: rgba(255, 255, 255, 0.9);
         --border: rgba(15, 23, 42, 0.10);
         --border-hi: rgba(37, 99, 235, 0.45);
+        /* 浅色下受光方向相反：上近白、下微灰 */
+        --dv-card-a: rgba(255, 255, 255, 0.98);
+        --dv-card-b: rgba(240, 245, 253, 0.98);
+        --dv-sheen: rgba(255, 255, 255, 0.85);
+        --fig-bg: linear-gradient(165deg, rgba(255, 255, 255, 0.88), rgba(236, 242, 252, 0.92));
+        --fig-border: rgba(15, 23, 42, 0.08);
+        --fig-shadow: rgba(15, 23, 42, 0.55);
+        --fig-inner-top: rgba(255, 255, 255, 0.95);
+        --fig-inner-bottom: rgba(15, 23, 42, 0.06);
+        --fig-glow: rgba(37, 99, 235, 0.08);
+        --fig-grain: 0.08;
         --text: #0d1526;
         --text-dim: #48546c;
         --text-muted: #78849a;
@@ -432,45 +455,159 @@
         letter-spacing: -0.01em;
       }
       .alt-copy p { margin: 0; color: var(--text-dim); line-height: 1.8; }
-      .alt-visual { min-width: 0; }
-      .alt-visual svg { width: 100%; height: auto; display: block; }
+      /* ── 示意图容器：玻璃面板 ──
+         为什么不再把 SVG 裸放在页面上：平面矢量图形浮在平坦背景上，
+         无论内部怎么画都像线框图。给一层带内高光、分层投影与颗粒的玻璃底，
+         图形才像「浮在界面上」。 */
+      .alt-visual {
+        position: relative;
+        min-width: 0;
+        padding: 1.15rem 1.15rem 0.95rem;
+        border-radius: var(--radius-lg);
+        background: var(--fig-bg);
+        border: 1px solid var(--fig-border);
+        /* 三层叠加：外投影（飘起来） + 内上高光（顶部受光） + 内下暗（厚度） */
+        box-shadow:
+          0 18px 40px -18px var(--fig-shadow),
+          0 2px 6px -2px var(--fig-shadow),
+          inset 0 1px 0 var(--fig-inner-top),
+          inset 0 -1px 0 var(--fig-inner-bottom);
+        backdrop-filter: blur(8px);
+        -webkit-backdrop-filter: blur(8px);
+        overflow: hidden;
+      }
+      /* 顶部柔光：让面板有「受光面」 */
+      .alt-visual::before {
+        content: "";
+        position: absolute;
+        inset: -40% -10% auto -10%;
+        height: 70%;
+        background: radial-gradient(ellipse 60% 100% at 50% 0%, var(--fig-glow), transparent 70%);
+        pointer-events: none;
+      }
+      /* 细微颗粒：抿掉矢量图的「塑料感」 */
+      .alt-visual::after {
+        content: "";
+        position: absolute;
+        inset: 0;
+        pointer-events: none;
+        opacity: var(--fig-grain);
+        background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='140' height='140'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.85' numOctaves='3'/%3E%3C/filter%3E%3Crect width='140' height='140' filter='url(%23n)' opacity='0.5'/%3E%3C/svg%3E");
+      }
+      .alt-visual svg { position: relative; z-index: 1; width: 100%; height: auto; display: block; }
       .dv-note {
-        margin: 0.6rem 0 0;
+        position: relative;
+        z-index: 1;
+        margin: 0.55rem 0 0;
         text-align: center;
-        font-size: 0.75rem;
+        font-size: 0.74rem;
         color: var(--text-muted);
+        font-family: var(--font-mono);
       }
       @media (max-width: 860px) {
         .alt { grid-template-columns: 1fr; gap: 1.6rem; margin-top: 2.6rem; }
         .alt.flip .alt-copy, .alt.flip .alt-visual { order: 0; }
       }
 
+      /* ── 共享 SVG defs 的取值（随主题切换）── */
+      .g-card-a { stop-color: var(--dv-card-a); }
+      .g-card-b { stop-color: var(--dv-card-b); }
+      .g-cyan-a { stop-color: rgba(6, 182, 212, 0.28); }
+      .g-cyan-b { stop-color: rgba(6, 182, 212, 0.08); }
+      .g-blue-a { stop-color: rgba(59, 130, 246, 0.28); }
+      .g-blue-b { stop-color: rgba(59, 130, 246, 0.08); }
+      .g-violet-a { stop-color: rgba(139, 92, 246, 0.30); }
+      .g-violet-b { stop-color: rgba(139, 92, 246, 0.09); }
+      .g-gold-a { stop-color: rgba(245, 158, 11, 0.26); }
+      .g-gold-b { stop-color: rgba(245, 158, 11, 0.07); }
+      .g-sheen-a { stop-color: var(--dv-sheen); }
+      .g-sheen-b { stop-color: rgba(255, 255, 255, 0); }
+      .f-shadow { flood-color: rgba(0, 0, 0, 0.55); flood-opacity: 0.5; }
+      :root[data-theme="light"] .f-shadow { flood-color: rgba(15, 23, 42, 0.9); flood-opacity: 0.18; }
+      .f-glowtint { flood-color: var(--brand-cyan); flood-opacity: 0.35; }
+
       /* ── 示意图图元 ── */
       .dv-bound { fill: none; stroke: var(--border); stroke-width: 1.5; stroke-dasharray: 6 5; }
-      .dv-box { fill: var(--bg-card); stroke: var(--border-hi); stroke-width: 1.4; }
-      .dv-accent { fill: rgba(6, 182, 212, 0.10); stroke: var(--brand-cyan); }
-      .dv-run { fill: rgba(59, 130, 246, 0.10); stroke: var(--brand-blue); }
-      .dv-l4 { fill: rgba(139, 92, 246, 0.13); stroke: var(--brand-violet); }
-      .dv-l3 { fill: rgba(59, 130, 246, 0.11); stroke: var(--brand-blue); }
-      .dv-l2 { fill: rgba(6, 182, 212, 0.10); stroke: var(--brand-cyan); }
-      .dv-l1 { fill: rgba(245, 158, 11, 0.10); stroke: var(--brand-gold); }
+      /* 节点：渐变面 + 分层投影 */
+      .dv-box {
+        fill: url(#gCard);
+        stroke: var(--border-hi);
+        stroke-width: 1.3;
+        filter: url(#fShadow);
+        transition: stroke .3s var(--ease), filter .3s var(--ease);
+      }
+      /* 悬停：描边提亮 + 光晕，证明它不是一张死的图 */
+      @media (hover: hover) {
+        .dv-box:hover {
+          stroke: var(--brand-cyan);
+          filter: url(#fLift);
+        }
+      }
+      .dv-accent { fill: url(#gCyan); stroke: var(--brand-cyan); }
+      .dv-run { fill: url(#gBlue); stroke: var(--brand-blue); }
+      .dv-l4 { fill: url(#gViolet); stroke: var(--brand-violet); }
+      .dv-l3 { fill: url(#gBlue); stroke: var(--brand-blue); }
+      .dv-l2 { fill: url(#gCyan); stroke: var(--brand-cyan); }
+      .dv-l1 { fill: url(#gGold); stroke: var(--brand-gold); }
       .dv-t { fill: var(--text); font-size: 15px; font-weight: 700; text-anchor: middle; }
       .dv-ts { fill: var(--text); font-size: 12.5px; font-weight: 600; text-anchor: middle; }
+      /* 左对齐变体：L1–L4 那种「编号 + 说明」的行必须左对齐，
+         用 middle 会让长的那行（L4 内核独占 · 立即打断）直接溢出框外。 */
+      .dv-tsl { fill: var(--text); font-size: 12px; font-weight: 600; text-anchor: start; }
       .dv-s { fill: var(--text-muted); font-size: 10.5px; text-anchor: middle; }
       .dv-lab { fill: var(--text-dim); font-size: 11px; text-anchor: middle; }
       .dv-labs { fill: var(--text-muted); font-size: 9.5px; text-anchor: middle; }
       .dv-cap { fill: var(--text-muted); font-size: 10px; }
-      .dv-seg { fill: rgba(119,128,154,.07); stroke: var(--border-hi); stroke-width: 1.4; stroke-dasharray: 5 4; }
-      .dv-hd { fill: rgba(139,92,246,.12); stroke: var(--brand-violet); }
-      .dv-ar { fill: rgba(6,182,212,.09); stroke: var(--border-hi); }
+      .dv-seg { fill: url(#gCard); stroke: var(--border-hi); stroke-width: 1.4; }
+      .dv-hd { fill: url(#gViolet); stroke: var(--brand-violet); }
+      .dv-ar { fill: url(#gCyan); stroke: var(--border-hi); }
       .dv-off { fill: none; stroke: var(--border); stroke-width: 1.2; stroke-dasharray: 4 4; }
       .dv-offt { fill: var(--text-muted); font-size: 11.5px; text-anchor: middle; text-decoration: line-through; }
       .dv-no path { stroke: var(--brand-gold); stroke-width: 1.6; opacity: .85; }
       .dv-line { fill: none; stroke: var(--border-hi); stroke-width: 1.4; }
+      /* 流动的虚线：让连接线看起来「有东西在跑」而不是静止装饰 */
+      .dv-dash,
+      .dv-arrow { animation: dashFlow 1.4s linear infinite; }
+      @keyframes dashFlow { to { stroke-dashoffset: -16; } }
+      /* 推荐：reduce 下停掉 */
+      @media (prefers-reduced-motion: reduce) {
+        .dv-dash, .dv-arrow { animation: none; }
+      }
       .dv-dash { stroke-dasharray: 4 4; }
       .dv-pk { fill: none; stroke: var(--brand-gold); stroke-width: 2; }
       .dv-arrow { fill: none; stroke: var(--brand-cyan); stroke-width: 1.6; stroke-dasharray: 4 4; }
       .dv-x { fill: var(--text-muted); font-size: 10px; text-anchor: middle; }
+      /* 级别徽标：L1–L4 */
+      .dv-badge {
+        fill: var(--text);
+        font-family: var(--font-mono);
+        font-size: 11.5px;
+        font-weight: 700;
+        text-anchor: start;
+      }
+      /* 右侧场景标注 */
+      .dv-end { fill: var(--text-muted); font-size: 9.5px; text-anchor: end; }
+      /* 背景强度条：越靠上越亮，用高度表现紧迫度 */
+      .dv-gauge-bg { fill: rgba(119, 128, 154, 0.07); }
+      .dv-g1 { fill: rgba(245, 158, 11, 0.07); }
+      .dv-g2 { fill: rgba(6, 182, 212, 0.07); }
+      .dv-g3 { fill: rgba(59, 130, 246, 0.07); }
+      .dv-g4 { fill: rgba(139, 92, 246, 0.10); }
+      /* 抢占线的起点圆点 */
+      .dv-pkdot { fill: var(--brand-gold); }
+      .dv-pkcap {
+        fill: var(--brand-gold);
+        font-size: 9.5px;
+        text-anchor: middle;
+        letter-spacing: 0.08em;
+      }
+      @media (prefers-reduced-motion: no-preference) {
+        .dv-pkdot { animation: pkPulse 1.8s ease-in-out infinite; }
+        @keyframes pkPulse {
+          0%, 100% { opacity: 1; r: 3.5; }
+          50%      { opacity: .55; r: 4.5; }
+        }
+      }
 
       /* ── 三层记忆：用品牌三色 ── */
       .layers { display: grid; gap: 0.9rem; }
@@ -1447,6 +1584,59 @@
     </style>
   </head>
   <body>
+    <!-- 共享 SVG defs：五张示意图共用，避免每张各写一套渐变。
+         hidden 而非 display:none —— display:none 会让被引用的渐变/滤镜失效。 -->
+    <svg width="0" height="0" aria-hidden="true" focusable="false"
+         style="position:absolute;pointer-events:none">
+      <defs>
+        <!-- 卡片面：上浅下深的竖向渐变，营造受光感 -->
+        <linearGradient id="gCard" x1="0" y1="0" x2="0" y2="1">
+          <stop class="g-card-a" offset="0" />
+          <stop class="g-card-b" offset="1" />
+        </linearGradient>
+        <linearGradient id="gCyan" x1="0" y1="0" x2="1" y2="1">
+          <stop class="g-cyan-a" offset="0" />
+          <stop class="g-cyan-b" offset="1" />
+        </linearGradient>
+        <linearGradient id="gBlue" x1="0" y1="0" x2="1" y2="1">
+          <stop class="g-blue-a" offset="0" />
+          <stop class="g-blue-b" offset="1" />
+        </linearGradient>
+        <linearGradient id="gViolet" x1="0" y1="0" x2="1" y2="1">
+          <stop class="g-violet-a" offset="0" />
+          <stop class="g-violet-b" offset="1" />
+        </linearGradient>
+        <linearGradient id="gGold" x1="0" y1="0" x2="1" y2="1">
+          <stop class="g-gold-a" offset="0" />
+          <stop class="g-gold-b" offset="1" />
+        </linearGradient>
+
+        <!-- 高光：顶部一道白，模拟玻璃反光 -->
+        <linearGradient id="gSheen" x1="0" y1="0" x2="0" y2="1">
+          <stop class="g-sheen-a" offset="0" />
+          <stop class="g-sheen-b" offset="1" />
+        </linearGradient>
+
+        <!-- 发光：给强调节点一圈柔光 -->
+        <filter id="fGlow" x="-40%" y="-40%" width="180%" height="180%">
+          <feGaussianBlur stdDeviation="4" result="b" />
+          <feMerge><feMergeNode in="b" /><feMergeNode in="SourceGraphic" /></feMerge>
+        </filter>
+        <!-- 投影：让卡片浮起来 -->
+        <filter id="fShadow" x="-30%" y="-30%" width="160%" height="170%">
+          <feDropShadow dx="0" dy="3" stdDeviation="3.5" class="f-shadow" />
+        </filter>
+        <!-- 悬停提升：更远更柔的阴影 + 一层青色泛光 -->
+        <filter id="fLift" x="-50%" y="-50%" width="200%" height="200%">
+          <feDropShadow dx="0" dy="6" stdDeviation="7" class="f-shadow" />
+          <feGaussianBlur in="SourceAlpha" stdDeviation="5" result="g" />
+          <feFlood class="f-glowtint" result="c" />
+          <feComposite in="c" in2="g" operator="in" result="gl" />
+          <feMerge><feMergeNode in="gl" /><feMergeNode in="SourceGraphic" /></feMerge>
+        </filter>
+      </defs>
+    </svg>
+
     <div id="progress"></div>
     <div class="aurora" aria-hidden="true">
       <span class="a1"></span><span class="a2"></span>
@@ -1680,30 +1870,59 @@
               <span class="alt-n">04</span>
               <h3>轻重缓急，各归其位</h3>
               <p>
-                输入先分两类：<strong>可以等的</strong>，和<strong>不能等的</strong>。
-                不能等的再按紧迫度排 L1–L4：高级别可以抢占，被抢占的现场压进栈、稍后原样恢复。
-                同一时刻只有一个任务在改上下文，所以不会两边各做一半。
-                L4 归内核独占 —— 「停止」按下去就真的停。
+                输入走两条路。<strong>排队</strong>的没有级别 —— 什么都能插它前面；
+                <strong>中断</strong>的带级别 L1–L4，级别高的可以抢占级别低的。
+                被抢占的现场压进栈，稍后原样恢复。
+                L4 内核独占，所以「停止」按下去就真的停。
               </p>
             </div>
             <div class="alt-visual">
               <svg viewBox="0 0 360 250" role="img" aria-label="四级中断与抢占">
-                <g class="dv-lv">
-                  <rect class="dv-box dv-l4" x="30" y="30" width="200" height="34" rx="7" />
-                  <text class="dv-ts" x="46" y="52">L4　内核独占 · 立即打断</text>
-                  <rect class="dv-box dv-l3" x="30" y="72" width="200" height="34" rx="7" />
-                  <text class="dv-ts" x="46" y="94">L3　高优先级</text>
-                  <rect class="dv-box dv-l2" x="30" y="114" width="200" height="34" rx="7" />
-                  <text class="dv-ts" x="46" y="136">L2　重要</text>
-                  <rect class="dv-box dv-l1" x="30" y="156" width="200" height="34" rx="7" />
-                  <text class="dv-ts" x="46" y="178">L1　可等</text>
+                <!-- 背景：强度条形，从 L1 到 L4 逐级变亮，用高度表现「紧迫度」 -->
+                <g class="dv-gauge">
+                  <rect class="dv-gauge-bg" x="34" y="26" width="292" height="160" rx="10" />
+                  <g class="dv-gauge-fill">
+                    <rect x="34" y="139" width="292" height="47" rx="0" class="dv-g1" />
+                    <rect x="34" y="104" width="292" height="35" rx="0" class="dv-g2" />
+                    <rect x="34" y="75"  width="292" height="29" rx="0" class="dv-g3" />
+                    <rect x="34" y="26"  width="292" height="49" rx="0" class="dv-g4" />
+                  </g>
                 </g>
-                <text class="dv-lab" x="130" y="212">高 → 低</text>
-                <rect class="dv-box dv-run" x="250" y="72" width="86" height="76" rx="9" />
-                <text class="dv-ts" x="293" y="104">正在跑</text>
-                <text class="dv-s" x="293" y="122">现场压栈</text>
-                <path class="dv-pk" d="M230 47 H293 V72" />
-                <text class="dv-x" x="293" y="166">抢占 → 稍后恢复</text>
+
+                <!-- 四级：每级一条，左侧级别、右侧语义 -->
+                <g class="dv-lv">
+                  <rect class="dv-box dv-l4" x="46" y="32" width="268" height="37" rx="8" />
+                  <text class="dv-badge" x="62" y="56">L4</text>
+                  <text class="dv-tsl" x="94" y="56">内核独占 · 立即打断</text>
+                  <text class="dv-end" x="298" y="56">panic</text>
+
+                  <rect class="dv-box dv-l3" x="46" y="75" width="268" height="29" rx="8" />
+                  <text class="dv-badge" x="62" y="95">L3</text>
+                  <text class="dv-tsl" x="94" y="95">需及时处理</text>
+                  <text class="dv-end" x="298" y="95">交互</text>
+
+                  <rect class="dv-box dv-l2" x="46" y="110" width="268" height="29" rx="8" />
+                  <text class="dv-badge" x="62" y="130">L2</text>
+                  <text class="dv-tsl" x="94" y="130">消息类</text>
+                  <text class="dv-end" x="298" y="130">QQ / 邮件</text>
+
+                  <rect class="dv-box dv-l1" x="46" y="145" width="268" height="29" rx="8" />
+                  <text class="dv-badge" x="62" y="165">L1</text>
+                  <text class="dv-tsl" x="94" y="165">完全可等</text>
+                  <text class="dv-end" x="298" y="165">批量任务</text>
+                </g>
+
+                <!-- 抢占：从级别条右侧指向「正在跑」，语义是「有更高优先级来抢」
+                     标签必须留在 viewBox 内侧：玻璃面板有内边距，
+                     贴边（x=349）会被裁掉。 -->
+                <path class="dv-pk" d="M322 100 H332 V213 H314" />
+                <circle class="dv-pkdot" r="3.5" cx="322" cy="100" />
+                <text class="dv-pkcap" x="341" y="160" transform="rotate(90 341 160)">抢占</text>
+
+                <rect class="dv-box dv-run" x="46" y="192" width="268" height="42" rx="9" />
+                <text class="dv-tsl" x="62" y="209">正在跑的任务</text>
+                <text class="dv-end" x="298" y="209">被抢占</text>
+                <text class="dv-s" x="180" y="226">现场压入中断栈 · 稍后从栈顶原样恢复</text>
               </svg>
             </div>
           </div>
