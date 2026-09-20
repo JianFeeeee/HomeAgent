@@ -1387,10 +1387,11 @@
               <div class="body">
                 <h3><span class="mark">①</span> Context<span class="en">工作窗口</span></h3>
                 <p>
-                                    内存中的事件窗口。按与当前输入的相关性排序（预训练词向量 → 余弦相似度，
-                  TF-IDF 回退），最近若干条受保护。低分事件自动下沉。
-                </p>
-              </div>
+                内存中的事件窗口。按与当前输入的相关性打分：优先比统一空间的稠密向量余弦，
+                未配置时退到稀疏词向量（TF-IDF / fastText）。最近 10 条受保护，
+                低分事件归档进 Document 层。
+              </p>
+            </div>
             </div>
 
             <div class="layer l-doc reveal">
@@ -1448,7 +1449,7 @@
         <div class="wrap">
           <h2 class="reveal rise">一条消息进来之后</h2>
           <p class="sub reveal rise" style="--d:90ms">
-                        输入先过调度器，再进处理管道。管道有 7 个阶段钩子，插件可改写或短路。
+                        输入先过调度器，再进处理管道。全程 7 个阶段钩子，插件可改写或短路。
           </p>
 
           <div class="flow reveal rise">
@@ -1545,10 +1546,10 @@
           <h2 class="reveal" style="margin-top: 3rem">核心组件</h2>
           <div class="comp reveal rise">
             <div class="row"><code>homed</code><span>常驻内核进程：LLM 编排、记忆管理、输入调度、插件生命周期</span></div>
-            <div class="row"><code>PluginSDK</code><span>四通道：注册工具 / 挂阶段钩子 / 订阅事件 / 声明输出通道</span></div>
+            <div class="row"><code>PluginSDK</code><span>面向内核的接口：注册工具 / 挂阶段钩子 / 订阅事件 / 声明输出通道</span></div>
             <div class="row"><code>inputch</code><span>最基本的输入路由单位，可划给某个 agent（含驻留子）</span></div>
-            <div class="row"><code>Stage</code><span>7 个处理阶段钩子，插件可改写或短路消息流</span></div>
-            <div class="row"><code>resident</code><span>驻留子 agent：独立调度器 + temp 图记忆，父可查看/收发/压缩/回收</span></div>
+            <div class="row"><code>Stage</code><span>7 个处理阶段钩子（进管道前 1 个、轮次中 4 个、收尾 2 个），插件可改写或短路</span></div>
+            <div class="row"><code>resident</code><span>驻留子 agent：独立调度器 + temp 图记忆；父可查看/发送/压缩/回收/销毁，子是父拉取而非推送</span></div>
             <div class="row"><code>hmapdev</code><span>插件工具链：生成工程、构建 .hmap、安装</span></div>
           </div>
 
@@ -1613,7 +1614,7 @@ echo <span class="s">"你好，记住我喜欢喝咖啡"</span> | ./build/waiter
             <p class="phint" id="phint">点上方任一插件查看用途</p>
           <div class="pcard" id="p-a2a">
             <div class="pcard-head"><code>a2a</code><span class="ver">v1.3.1</span></div>
-            <p>Agent-to-Agent 协议通信插件，支持双向 A2A 通信：可查询其他 Agent 并回复其请求。提供 HTTP 服务端暴露本 Agent 能力。</p>
+            <p>Agent 间通信。对外起 HTTP 服务暴露 /agent-card 与 /a2a（JSON-RPC）供他人发现与调用；对内提供工具去问别的 Agent。把监听地址设为空即只出站、不开端口。</p>
             <a class="psrc" href="https://gitcode.com/JianFeeeee/homeagent-sdk/blob/main/example/a2a" target="_blank" rel="noopener noreferrer" title="SDK example/a2a"><span class="psrc-r">SDK</span><span class="psrc-p">example/a2a</span><span class="psrc-out">↗</span></a>
           </div>
           <div class="pcard" id="p-acp">
@@ -1623,7 +1624,7 @@ echo <span class="s">"你好，记住我喜欢喝咖啡"</span> | ./build/waiter
           </div>
           <div class="pcard" id="p-bili">
             <div class="pcard-head"><code>bili</code><span class="ver">v1.2.0</span></div>
-            <p>B站视频下载工具，基于 yt-dlp 引擎。支持查看视频清晰度列表、指定格式下载、可配置下载目录。</p>
+            <p>B站视频下载。需系统装 yt-dlp。不指定格式时先返回可用清晰度列表，选定后再下载；输出目录有路径校验，拒绝写成系统目录。</p>
             <a class="psrc" href="https://gitcode.com/JianFeeeee/homeagent-sdk/blob/main/example/bili" target="_blank" rel="noopener noreferrer" title="SDK example/bili"><span class="psrc-r">SDK</span><span class="psrc-p">example/bili</span><span class="psrc-out">↗</span></a>
           </div>
           <div class="pcard" id="p-browser">
@@ -1654,22 +1655,22 @@ echo <span class="s">"你好，记住我喜欢喝咖啡"</span> | ./build/waiter
           </div>
           <div class="pcard" id="p-mc">
             <div class="pcard-head"><code>mc</code><span class="ver">v0.1.8</span></div>
-            <p>把 mineflayer 虚拟 MC 客户端封装为 HomeAgent 的 chan:mc IO 通道（两阶段激活 + 动作工具）</p></span>
+            <p>基于 mineflayer 的虚拟 MC 客户端，作为 chan:mc 通道接入。「激活」分两个状态：想连着（意图）与确实连着（连接），所以 bridge 进程被杀后能自动重登恢复会话，而不是要人再喊一次。带移动/挖掘/合成/攻击等 11 个动作工具。</p>
             <span class="psrc psrc-none" title="该插件源码在本地开发仓，尚无公开地址"><span class="psrc-p">本地开发仓（无公开地址）</span></span>
           </div>
           <div class="pcard" id="p-memo">
             <div class="pcard-head"><code>memo</code><span class="ver">v1.1.0</span></div>
-            <p>待办与备忘录插件。待办（todo_add/todo_complete/todo_list）会主动提醒；备忘录（memo_create/memo_list/memo_delete）纯记事不提醒。</p>
+            <p>待办与备忘录刻意分两类：待办每 5 分钟检查未完成数、有则注入提醒；备忘录纯记事不提醒。混成一类要么天天弹、要么被忘掉。</p>
             <a class="psrc" href="https://gitcode.com/JianFeeeee/homeagent-sdk/blob/main/example/memo" target="_blank" rel="noopener noreferrer" title="SDK example/memo"><span class="psrc-r">SDK</span><span class="psrc-p">example/memo</span><span class="psrc-out">↗</span></a>
           </div>
           <div class="pcard" id="p-music">
             <div class="pcard-head"><code>music</code><span class="ver">v0.1.0</span></div>
-            <p>音乐搜索插件，支持搜索歌曲和查看歌词（基于网易云音乐）</p>
+            <p>搜歌与查歌词（网易云公开接口）。只读：不下载音频、不落文件。两段式用法 —— 先搜到歌曲 ID，再按 ID 取词。</p>
             <a class="psrc" href="https://gitcode.com/JianFeeeee/homeagent-sdk/blob/main/example/music" target="_blank" rel="noopener noreferrer" title="SDK example/music"><span class="psrc-r">SDK</span><span class="psrc-p">example/music</span><span class="psrc-out">↗</span></a>
           </div>
           <div class="pcard" id="p-ocr">
             <div class="pcard-head"><code>ocr</code><span class="ver">v1.0.0</span></div>
-            <p>图片文字识别工具，基于 Tesseract OCR 引擎。支持从 URL 或 base64 图片中提取文字内容。</p>
+            <p>图片文字识别。需系统装 tesseract（中文另需 chi_sim 语言包）。支持 URL 或 base64 输入，临时文件识别后自动清理。</p>
             <a class="psrc" href="https://gitcode.com/JianFeeeee/homeagent-sdk/blob/main/example/ocr" target="_blank" rel="noopener noreferrer" title="SDK example/ocr"><span class="psrc-r">SDK</span><span class="psrc-p">example/ocr</span><span class="psrc-out">↗</span></a>
           </div>
           <div class="pcard" id="p-plugindev">
@@ -1679,7 +1680,7 @@ echo <span class="s">"你好，记住我喜欢喝咖啡"</span> | ./build/waiter
           </div>
           <div class="pcard" id="p-qq">
             <div class="pcard-head"><code>qq</code><span class="ver">v1.4.1</span></div>
-            <p>QQ 消息收发插件，通过 NapCat 协议桥接</p>
+            <p>经 NapCat 桥接 QQ：20 个工具覆盖消息、群/好友、文件传输。带权限模型 —— 身份绑在「帧」上而非插件全局（中断抢占恢复后不会丢身份），多来源合并取权限交集，敏感工具按前缀一律拒绝非所有者。</p>
             <a class="psrc" href="https://gitcode.com/JianFeeeee/homeagent-sdk/blob/main/example/qq" target="_blank" rel="noopener noreferrer" title="SDK example/qq"><span class="psrc-r">SDK</span><span class="psrc-p">example/qq</span><span class="psrc-out">↗</span></a>
           </div>
           <div class="pcard" id="p-recoverydiag">
@@ -1689,12 +1690,12 @@ echo <span class="s">"你好，记住我喜欢喝咖啡"</span> | ./build/waiter
           </div>
           <div class="pcard" id="p-rss">
             <div class="pcard-head"><code>rss</code><span class="ver">v1.1.0</span></div>
-            <p>RSS/Atom 订阅监控插件，自动检测更新并推送通知</p>
+            <p>RSS/Atom 订阅监控。按间隔轮询，发现新条目即以中断注入告知 agent；订阅时记下历史条目，所以订一个源不会把旧文章全推一遍。</p>
             <a class="psrc" href="https://gitcode.com/JianFeeeee/homeagent-sdk/blob/main/example/rss" target="_blank" rel="noopener noreferrer" title="SDK example/rss"><span class="psrc-r">SDK</span><span class="psrc-p">example/rss</span><span class="psrc-out">↗</span></a>
           </div>
           <div class="pcard" id="p-sanitizer">
             <div class="pcard-head"><code>sanitizer</code><span class="ver">v0.1.0</span></div>
-            <p>清洗 LLM 输出中的工具调用残留（思维泄漏）</p>
+            <p>在三个阶段清洗文本：坏 UTF-8 / U+FFFD / ANSI 转义（会被模型复读）与 LLM 输出里的工具调用残留。不注册工具，只挂钩子。</p>
             <a class="psrc" href="https://gitcode.com/JianFeeeee/homeagent-sdk/blob/main/example/sanitizer" target="_blank" rel="noopener noreferrer" title="SDK example/sanitizer"><span class="psrc-r">SDK</span><span class="psrc-p">example/sanitizer</span><span class="psrc-out">↗</span></a>
           </div>
           <div class="pcard" id="p-vanblog">
@@ -1709,7 +1710,7 @@ echo <span class="s">"你好，记住我喜欢喝咖啡"</span> | ./build/waiter
           </div>
           <div class="pcard" id="p-weather">
             <div class="pcard-head"><code>weather</code><span class="ver">v1.0.0</span></div>
-            <p>天气查询插件（基于 wttr.in），支持实时天气和未来预报</p>
+            <p>查实时天气与预报（wttr.in，无需 API Key）。可设默认城市；结果标记为不进记忆计算 —— 天气是易变数据，反复写进记忆只会挤占预算。</p>
             <a class="psrc" href="https://gitcode.com/JianFeeeee/homeagent-sdk/blob/main/example/weather" target="_blank" rel="noopener noreferrer" title="SDK example/weather"><span class="psrc-r">SDK</span><span class="psrc-p">example/weather</span><span class="psrc-out">↗</span></a>
           </div>
           </div>
@@ -1745,8 +1746,9 @@ echo <span class="s">"你好，记住我喜欢喝咖啡"</span> | ./build/waiter
               <summary>为什么消息会「排队」而不是立即处理？</summary>
               <p>
                                 因为同一时刻只应有一个任务在改上下文。同级抢占会让两边都做一半。
-                需要立刻插队时用更高级别的中断（如 L4：内核与内核级插件），
-                而不是让所有消息都变成抢占者。
+                需要立刻插队时用更高级别的中断：插件可声明 L1–L3，L4 是内核保留的
+                「立即打断」（panic、内核事件），外部插件声明 L4 会被夹到 L3。
+                不该让所有消息都变成抢占者。
               </p>
             </details>
 
