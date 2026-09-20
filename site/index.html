@@ -321,6 +321,59 @@
         section { min-height: 0; }
       }
 
+      /* ── 总起页：四项 OS 本职 ──
+         用四张并列的卡片而不是对照表：用户要的是「展示我们做到了什么」，
+         不是「和别人比」。每张卡固定给「机制 + 可测数字」两段。 */
+      .duties {
+        margin-top: 2.2rem;
+        display: grid;
+        grid-template-columns: 1fr 1fr;
+        gap: 1rem;
+      }
+      .duty {
+        position: relative;
+        padding: 1.35rem 1.4rem 1.5rem;
+        background: var(--bg-card);
+        border: 1px solid var(--border);
+        border-radius: var(--radius-lg);
+        transition: border-color 0.3s var(--ease), transform 0.3s var(--ease-back);
+      }
+      .duty:hover { border-color: var(--border-hi); transform: translateY(-3px); }
+      .duty-k {
+        position: absolute;
+        top: 1.15rem; right: 1.25rem;
+        font-family: var(--font-mono);
+        font-size: 0.7rem;
+        letter-spacing: 0.12em;
+        color: var(--brand-cyan);
+        opacity: 0.75;
+      }
+      .duty h3 {
+        margin: 0 0 0.6rem;
+        font-size: 1.06rem;
+        letter-spacing: -0.01em;
+      }
+      .duty p {
+        margin: 0 0 0.85rem;
+        font-size: 0.9rem;
+        line-height: 1.75;
+        color: var(--text-dim);
+      }
+      .duty p strong { color: var(--brand-cyan); font-weight: 700; }
+      .duty-ev {
+        display: inline-block;
+        font-family: var(--font-mono);
+        font-size: 0.72rem;
+        line-height: 1.5;
+        color: var(--text-muted);
+        padding-top: 0.7rem;
+        border-top: 1px solid var(--border);
+        width: 100%;
+      }
+      @media (max-width: 860px) {
+        .duties { grid-template-columns: 1fr; gap: 0.8rem; }
+      }
+
       /* ── 五个决定的索引（总起页）── */
       .idx {
         list-style: none;
@@ -1451,17 +1504,41 @@
       <!-- ── 特性总起 ── -->
       <section id="features">
         <div class="wrap">
-          <h2 class="reveal rise">先定边界，再加能力</h2>
+          <h2 class="reveal rise">真正的 AgentOS，长这样</h2>
           <p class="sub reveal rise" style="--d:90ms">
-            大多数 Agent 框架先堆功能、边界后补。这里反过来 —— 五个决定，都是先把「谁能碰什么」定死。
+            隔离、调度、通信、资源。操作系统躲不开的四道题，
+            这里逐题给答案 —— 且每题都有能测的数字。
           </p>
-          <ol class="idx reveal rise" style="--d:180ms">
-            <li><span>01</span>内核零 IO，只碰调度</li>
-            <li><span>02</span>部署，从未如此便捷</li>
-            <li><span>03</span>数据如水，随流，随改，随走</li>
-            <li><span>04</span>轻重缓急，各归其位</li>
-            <li><span>05</span>忙时，有人替你接住</li>
-          </ol>
+
+          <div class="duties reveal rise" style="--d:180ms">
+            <article class="duty">
+              <span class="duty-k">隔离</span>
+              <h3>崩一个，不赔上全部</h3>
+              <p>插件不在内核里，是另一个进程。崩了就把它注册的东西一并摘掉，其余照跑。</p>
+              <span class="duty-ev">退避重启 1s / 2s / 3s；5 分钟内崩 3 次则停下等人</span>
+            </article>
+
+            <article class="duty">
+              <span class="duty-k">调度</span>
+              <h3>拦得住，也接得回</h3>
+              <p>输入分能等与不能等。不能等的可抢占，被打断的现场压栈，稍后<strong>原样恢复</strong>。</p>
+              <span class="duty-ev">L4 内核独占；外部插件声明 L4 会被夹到 L3</span>
+            </article>
+
+            <article class="duty">
+              <span class="duty-k">通信</span>
+              <h3>三条道，各走各的</h3>
+              <p>控制走 stdio，数据走共享内存，通知走事件环。变长内容只传偏移，两边映射到不同地址也能读。</p>
+              <span class="duty-ev">整段写入 + 读回 3.5µs（实测）</span>
+            </article>
+
+            <article class="duty">
+              <span class="duty-k">资源</span>
+              <h3>记忆不会越用越肿</h3>
+              <p>上下文按相关性取舍，最近 10 条恒受保护。低分下沉成文档，冷文档再蒸馏成三元组。</p>
+              <span class="duty-ev">有效工作区间上限 60 万 token</span>
+            </article>
+          </div>
         </div>
       </section>
 
@@ -2126,9 +2203,9 @@ echo <span class="s">"你好，记住我喜欢喝咖啡"</span> | ./build/waiter
           <div>
             <h4>状态</h4>
             <ul>
-              <li><span class="muted">最新发布 v1.3.x 线</span></li>
-              <li><span class="muted">main 在研 1.4.0</span></li>
-              <li><span class="muted">许可 AGPL-3.0-only</span></li>
+              <li><a href="https://gitcode.com/JianFeeeee/HomeAgent/releases">最新发布：v1.3.x 线</a></li>
+              <li><a href="https://gitcode.com/JianFeeeee/HomeAgent/blob/main/internal/meta/meta.go">main 在研：1.4.0</a></li>
+              <li><a href="https://gitcode.com/JianFeeeee/HomeAgent/blob/main/LICENSE">许可：AGPL-3.0-only</a></li>
             </ul>
           </div>
         </div>
