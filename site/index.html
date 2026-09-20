@@ -342,6 +342,13 @@
         scroll-snap-align: start;
       }
       section > .wrap { width: min(1120px, 92vw); margin: 0 auto; }
+      /* FAQ 展开超过一屏时：整页切到自由滚动。
+         为何不是只让 faq 退出吸附 —— 试过了，会死锁：faq 退出吸附后它下方
+         没有吸附点，而 mandatory 只允许停在吸附点，实测卡在 plugins 的
+         吸附位（y=9455）不再前进，页脚永远到不了。
+         因为 faq 是最后一个吸附节，它一旦不能吸附，末尾就必须整体自由滚动。 */
+      html.faq-open { scroll-snap-type: none; }
+
       /* 内容比一屏高的节（运行时打 .too-tall）：取消 min-height 撑高，
          但**保留吸附点**。
          为何不让它退出吸附（实测过的死锁）：把它设为 snap-align:none 后，
@@ -2822,8 +2829,8 @@ echo <span class="s">"你好，记住我喜欢喝咖啡"</span> | ./build/waiter
               <summary>为什么消息会「排队」而不是立即处理？</summary>
               <p>
                                 因为同一时刻只应有一个任务在改上下文。同级抢占会让两边都做一半。
-                需要立刻插队时用更高级别的中断：插件可声明 L1–L3，L4 是内核保留的
-                「立即打断」（panic、内核事件），外部插件声明 L4 会被夹到 L3。
+                需要立刻插队时用更高级别的中断：插件声明 L1–L3，L4 是「立即打断」
+                （panic、内核事件），只给内核与编译期内置插件 —— 外部插件声明 L4 会被夹到 L3。
                 不该让所有消息都变成抢占者。
               </p>
             </details>
@@ -2831,8 +2838,10 @@ echo <span class="s">"你好，记住我喜欢喝咖啡"</span> | ./build/waiter
             <details class="faq">
               <summary>长任务会不会让用户等很久？</summary>
               <p>
-                                这正是「分诊助手」的用途。主 agent 忙超阈值且积压够多时，内核拉起临时
-                驻留子接手：能办的直接办，需要主 agent 的立刻回「忙碌中，请稍候」。
+                                这正是「分诊助手」的用途。主 agent 忙超阈值（默认 5 分钟）且积压够多（默认 3 条）
+                时，内核可拉起临时驻留子接手：能办的直接办，需要主 agent 的立刻回「忙碌中，请稍候」。
+                这个自动转投<strong>默认关闭</strong>，由部署方显式打开 —— 它属于「内核替父做决策」，与
+                「显式才是特权」同一条理由。
               </p>
             </details>
 
@@ -2840,7 +2849,7 @@ echo <span class="s">"你好，记住我喜欢喝咖啡"</span> | ./build/waiter
               <summary>记忆会不会无限膨胀？</summary>
               <p>
                                 不会。三层是迁移而非复制：上下文事件裁剪后归档成文档，文档冷掉后蒸馏成
-                图谱三元组。图谱有去重与 UNIQUE 约束；媒体跟着记忆块走，块被永久删除时才回收字节。
+                图谱三元组。图谱有去重与 UNIQUE 约束；媒体字节在块被永久删除时回收，但如果同一份字节仍被别的块共享，则不删。
               </p>
             </details>
 
@@ -3038,6 +3047,29 @@ echo <span class="s">"你好，记住我喜欢喝咖啡"</span> | ./build/waiter
           markTall();
           window.addEventListener("load", markTall);
           window.addEventListener("resize", markTall);
+
+          // FAQ 展开后可能远超一屏。此时若仍吸附，mandatory 会把滚动锁在
+          // 吸附点上，末尾（含页脚）就再也到不了 —— 实测全部展开时卡住、
+          // 页脚不可见。故展开态一旦超一屏就让该节退出吸附。
+          var markFaqOpen = function () {
+            var faq = document.getElementById("faq");
+            if (!faq) return;
+            // 阈值不是「视口高」而是「视口高 − 页脚高」：
+            // 末尾的约束是 faq + footer 要一起装进一屏。用视口高当阈值时，
+            // 展开后 faq 高 712 < 892，判不出超限，类加不上（踩过这个错）。
+            var ft = document.querySelector("footer");
+            var ftH = ft ? ft.getBoundingClientRect().height : 0;
+            var limit = window.innerHeight - ftH - 8;
+            var over = faq.getBoundingClientRect().height > limit;
+            // 注意是切 html 上的类（整页退出吸附），不是在 faq 上加类。
+            // 只让 faq 退出吸附会死锁：它下方没有吸附点，而 mandatory
+            // 只允许停在吸附点 —— 实测卡在 plugins 的吸附位不再前进。
+            document.documentElement.classList.toggle("faq-open", over);
+          };
+          markFaqOpen();
+          [].slice.call(document.querySelectorAll("details.faq")).forEach(function (d) {
+            d.addEventListener("toggle", markFaqOpen);
+          });
 
           // 不再用「3 秒后强制全部 reveal」的兜底：
           // 那会把已退场的元素强行拉回来，退场动画就废了。
