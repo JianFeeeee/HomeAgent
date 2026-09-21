@@ -211,8 +211,10 @@ func (r *Registry) scheduleProcRestart(name string, cause error) {
 		return
 	}
 
-	// 线性退避：1 次→1s，2 次→2s，3 次→3s。崩溃循环时不至于打满 CPU，
-	// 又足够快到用户感知不到工具缺席。
+	// 线性退避：1 次→1s，2 次→2s，3 次→3s。
+	// 目的只是崩溃循环时不至于打满 CPU。
+	// 注意这**不是**无感恢复：首次就要等 1s，期间该插件的工具是缺席的，
+	// 调用会直接报错。需要秒级就位的插件应在 OnStart 里自建重连与状态重建。
 	delay := time.Duration(n) * procRestartBackoff
 	time.Sleep(delay)
 
