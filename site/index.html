@@ -426,16 +426,6 @@
         color: var(--text-dim);
       }
       .duty p strong { color: var(--brand-cyan); font-weight: 700; }
-      .duty-ev {
-        display: inline-block;
-        font-family: var(--font-mono);
-        font-size: 0.72rem;
-        line-height: 1.5;
-        color: var(--text-muted);
-        padding-top: 0.7rem;
-        border-top: 1px solid var(--border);
-        width: 100%;
-      }
       @media (max-width: 860px) {
         .duties { grid-template-columns: 1fr; gap: 0.8rem; }
       }
@@ -538,15 +528,6 @@
         background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='140' height='140'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.85' numOctaves='3'/%3E%3C/filter%3E%3Crect width='140' height='140' filter='url(%23n)' opacity='0.5'/%3E%3C/svg%3E");
       }
       .alt-visual svg { position: relative; z-index: 1; width: 100%; height: auto; display: block; }
-      .dv-note {
-        position: relative;
-        z-index: 1;
-        margin: 0.55rem 0 0;
-        text-align: center;
-        font-size: 0.74rem;
-        color: var(--text-muted);
-        font-family: var(--font-mono);
-      }
       @media (max-width: 860px) {
         .alt { grid-template-columns: 1fr; gap: 1.6rem; margin-top: 2.6rem; }
         /* 窄屏位移收小：单列时左右各 42px 会让内容显得跳，也更容易探出视口 */
@@ -738,7 +719,6 @@
       .dv5-trigger { fill: none; stroke: var(--brand-gold); stroke-width: 1.2; stroke-dasharray: 5 4; opacity: .6; }
       .dv5-tcap { fill: var(--brand-gold); font-size: 9.6px; text-anchor: middle; font-weight: 600; letter-spacing: .04em; }
       .dv5-tval { fill: var(--text-dim); font-size: 9.6px; text-anchor: middle; }
-      .dv5-tnote { fill: var(--text-muted); font-size: 8.6px; text-anchor: middle; }
       /* 积压条被逐条取走 */
       .js-fx .dv5-pile rect { animation: queueTake 3.6s ease-in-out infinite; }
       .js-fx .dv5-pile rect:nth-of-type(1) { animation-delay: 0s; }
@@ -801,7 +781,7 @@
       }
       .js-fx .dv-sweep { animation: shmSweep 2.8s cubic-bezier(.4,0,.2,1) infinite; }
 
-      /* 收货闪光（图 5）：分诊助手接到消息时亮一下 */
+      /* 收货闪光（图 5）：驻留子 agent 接到消息时亮一下 */
       .dv-recv {
         fill: none;
         stroke: var(--brand-cyan);
@@ -914,7 +894,6 @@
       /* 两列标题 */
       .dv-colcap { fill: var(--text-dim); font-size: 10px; text-anchor: middle; letter-spacing: 0.04em; }
       .dv-colcap-dim { fill: var(--text-muted); }
-      .dv-caps { fill: var(--text-muted); font-size: 8.8px; text-anchor: middle; }
       @media (prefers-reduced-motion: no-preference) {
         /* 只呼吸透明度，不动 r。
            为何：.dv-pkdot 现在兼做「沿链路行进的数据包」（靠 SMIL 的
@@ -1096,9 +1075,10 @@
       .loop {
         position: relative;
         z-index: 1;
-        max-width: 34rem;
+        width: fit-content;
+        min-width: 21rem;
         margin: 0.5rem auto 0;
-        padding: 1.7rem 1rem 1.9rem;
+        padding: 1.7rem 1.6rem 2.4rem;
         border: 1px dashed rgba(6, 182, 212, 0.4);
         border-radius: var(--radius-md);
         background: rgba(6, 182, 212, 0.045);
@@ -1114,6 +1094,8 @@
         border: 1px solid rgba(6, 182, 212, 0.4);
         border-radius: var(--radius-pill);
       }
+      /* 单列。曾试过两列填满宽度，但 grid 按行填充会把编号排成
+         1/3/5 · 2/4/6 —— 这是线性流程，顺序不能乱。 */
       .seq {
         list-style: none;
         margin: 0;
@@ -1171,24 +1153,12 @@
         line-height: 1;
       }
 
-      .flow-note {
-        position: relative;
-        z-index: 1;
-        margin: 1.1rem auto 0;
-        max-width: 34rem;
-        text-align: center;
-        font-size: 0.76rem;
-        color: var(--text-muted);
-        line-height: 1.6;
-      }
-      .flow-note code { font-size: 0.74rem; }
-
       /* 窄屏：中轴线收边，节点撑满 */
       @media (max-width: 620px) {
         .flow { padding: 1.2rem 1rem 1.1rem; }
         .flow::before { display: none; }
         .n { width: auto; max-width: none; }
-        .br, .flow-note { max-width: none; }
+        .br { max-width: none; }
         .loop { max-width: none; padding: 2.2rem 0.8rem 2.4rem; }
         .lnk { height: 1.6rem; }
       }
@@ -2068,29 +2038,25 @@
             <article class="duty rise-zoom">
               <span class="duty-k">隔离</span>
               <h3>崩一个，不赔上全部</h3>
-              <p>插件不在内核里，是另一个进程。崩了就把它注册的东西一并摘掉，其余照跑。</p>
-              <span class="duty-ev">退避重启 1s / 2s / 3s；5 分钟内第 4 次崩溃即停下等人</span>
+              <p>插件不在内核里，是另一个进程。崩了就把它注册的东西一并摘掉，其余照跑。重启退避 1s / 2s / 3s，5 分钟内第 4 次崩溃则停下等人。</p>
             </article>
 
             <article class="duty rise-zoom">
               <span class="duty-k">调度</span>
               <h3>拦得住，也接得回</h3>
-              <p>输入分能等与不能等。不能等的可抢占，被打断的现场压栈，稍后<strong>原样恢复</strong>。</p>
-              <span class="duty-ev">L4 内核独占；外部插件声明 L4 会被夹到 L3</span>
+              <p>输入分能等与不能等。不能等的可抢占，被打断的现场压栈，稍后<strong>原样恢复</strong>。L4 内核独占，外部插件声明 L4 会被夹到 L3。</p>
             </article>
 
             <article class="duty rise-zoom">
               <span class="duty-k">通信</span>
               <h3>三条道，各走各的</h3>
-              <p>控制走 stdio，数据走共享内存，通知走事件环。变长内容只传偏移，两边映射到不同地址也能读。</p>
-              <span class="duty-ev">整段写入 + 读回 3.5µs（实测）</span>
+              <p>控制走 stdio，数据走共享内存，通知走事件环。变长内容只传偏移，两边映射到不同地址也能读。实测整段写入 + 读回 3.5µs。</p>
             </article>
 
             <article class="duty rise-zoom">
               <span class="duty-k">资源</span>
               <h3>记忆不会越用越肿</h3>
-              <p>上下文按相关性取舍，最近 10 条恒受保护。低分下沉成文档，冷文档再蒸馏成三元组。</p>
-              <span class="duty-ev">有效工作区间上限 60 万 token</span>
+              <p>上下文按相关性取舍，最近 10 条恒受保护。低分下沉成文档，冷文档再蒸馏成三元组。有效工作区间上限 60 万 token。</p>
             </article>
           </div>
         </div>
@@ -2280,7 +2246,6 @@
                 </g>
                 <text class="dv-x" x="266" y="42">都不需要</text>
               </svg>
-              <p class="dv-note">实测：statically linked，无动态依赖</p>
             </div>
           </div>
         </div>
@@ -2371,7 +2336,6 @@
 
                 <text class="dv-x" x="180" y="243">零拷贝：不序列化、不复制</text>
               </svg>
-              <p class="dv-note">实测整段写入+读回 3.5µs</p>
             </div>
           </div>
         </div>
@@ -2438,7 +2402,7 @@
                 <path class="dv-qdir" d="M340 38 V97" />
                 <path class="dv-qdir-tip" d="M336 93 L340 98 L344 93" />
                 <text class="dv-cap" x="266" y="114">先到先处理</text>
-                <text class="dv-caps" x="266" y="130">任何中断都能插它前面</text>
+
 
                 <!-- 两路汇入正在跑的任务 -->
                 <path class="dv-line" d="M94 150 V176 H180" />
@@ -2448,7 +2412,7 @@
                 <rect class="dv-box dv-run" x="40" y="188" width="280" height="38" rx="9" />
                 <text class="dv-tsl" x="58" y="204">正在跑的任务</text>
                 <text class="dv-end" x="302" y="204">同一时刻只一个</text>
-                <text class="dv-caps" x="180" y="220">被打断的现场压入中断栈，稍后原样恢复</text>
+
 
                 <!-- 插队动线：从排队列（右）绕到中断列（左）各级前。
                      这是本图的核心语义 —— 「任何中断都能插它前面」，
@@ -2488,13 +2452,13 @@
               <span class="alt-n">05</span>
               <h3>忙时，有人替你接住</h3>
               <p>
-                主 agent 被长任务占住、积压又够多时，内核把这些消息转给一个临时驻留的<strong>分诊助手</strong>。能当场办的就办了；
+                主 agent 被长任务占住、积压又够多时，内核把这些消息转给一个<strong>驻留子 agent</strong>。能当场办的就办了；
                 非等主 agent 不可的，立刻回一句「忙碌中，请稍候」。
                 你不必对着对话框猜它还在不在。
               </p>
             </div>
             <div class="alt-visual">
-              <svg viewBox="0 0 360 250" role="img" aria-label="主 agent 忙时把积压转投给分诊助手，两种出路让用户不必干等">
+              <svg viewBox="0 0 360 250" role="img" aria-label="主 agent 忙时把积压转投给驻留子 agent，两种出路让用户不必干等">
                 <!-- 主 agent：长任务占住，带一条一直爬不到头的忙碌条 -->
                 <rect class="dv-box dv-run" x="16" y="18" width="150" height="56" rx="9" />
                 <rect class="dv-sheen" x="16" y="18" width="150" height="24" rx="9" />
@@ -2508,10 +2472,10 @@
 
                 <!-- 触发条件：填住右上原本空着的一块，且给的是源码实测默认值
                      （defaultOffloadBusyAfter = 5min，defaultOffloadMinPending = 3）。 -->
-                <rect class="dv5-trigger" x="180" y="18" width="164" height="56" rx="9" />
-                <text class="dv5-tcap" x="262" y="38">触发条件</text>
-                <text class="dv5-tval" x="262" y="56">忙超 5 分钟 · 积压 ≥ 3 条</text>
-                <text class="dv5-tnote" x="262" y="68">默认关闭，需部署方打开</text>
+                <rect class="dv5-trigger" x="180" y="26" width="164" height="42" rx="9" />
+                <text class="dv5-tcap" x="262" y="44">触发条件</text>
+                <text class="dv5-tval" x="262" y="60">忙超 5 分钟 · 积压 ≥ 3 条</text>
+                
 
                 <!-- 积压消息：三条，宽度递减，像越堆越窄的一摞 -->
                 <g class="dv5-pile">
@@ -2523,12 +2487,11 @@
                   <text class="dv-s" x="73" y="150">积压消息 ×2</text>
                 </g>
 
-                <!-- 分诊助手 -->
+                <!-- 驻留子 agent -->
                 <rect class="dv-box dv-accent" x="200" y="86" width="144" height="70" rx="9" />
                 <rect class="dv-sheen" x="200" y="86" width="144" height="24" rx="9" />
-                <text class="dv-ts" x="272" y="110">分诊助手</text>
-                <text class="dv-s" x="272" y="128">临时驻留子</text>
-                <text class="dv-s" x="272" y="144">当场办 / 立刻答</text>
+                <text class="dv-ts" x="272" y="108">驻留子 agent</text>
+                <text class="dv-s" x="272" y="136">当场办 / 立刻答</text>
                 <rect class="dv-recv" x="200" y="86" width="144" height="70" rx="9" />
 
                 <!-- 转投 -->
@@ -2553,7 +2516,7 @@
                 <!-- 用户 -->
                 <rect class="dv-box" x="24" y="186" width="76" height="38" rx="8" />
                 <text class="dv-ts" x="62" y="204">用户</text>
-                <text class="dv-caps" x="62" y="218">不必干等</text>
+
 
                 <!-- 回执 chip：两种出路 -->
                 <rect class="dv5-chip" x="128" y="182" width="216" height="46" rx="8" />
@@ -2670,7 +2633,7 @@
             <ul class="br" aria-label="调度器的三种去向">
               <li class="br-que"><b>同级不抢占</b> → 入队列排队</li>
               <li class="br-pre"><b>更高级别</b> → <i>抢占</i>，现场压入中断栈，稍后恢复</li>
-              <li class="br-off"><b>忙得太久</b> → <i>转投</i>临时分诊助手</li>
+              <li class="br-off"><b>忙得太久</b> → <i>转投</i>驻留子 agent</li>
             </ul>
             <div class="lnk" style="--d:0.55s" aria-hidden="true"></div>
 
@@ -2687,33 +2650,27 @@
               <ol class="seq">
                 <li class="seq-item">
                   <span class="seq-n">1</span>
-                  <div class="seq-b"><code>pre_action</code>
-                    <em>构建消息与工具表 · 插件可在此短路</em></div>
+                  <div class="seq-b"><code>pre_action</code></div>
                 </li>
                 <li class="seq-item">
                   <span class="seq-n">2</span>
-                  <div class="seq-b"><b>LLM 调用</b>
-                    <em>provider 回退 + 瞬时错误重试 · 流式累积</em></div>
+                  <div class="seq-b"><b>LLM 调用</b></div>
                 </li>
                 <li class="seq-item">
                   <span class="seq-n">3</span>
-                  <div class="seq-b"><code>post_action</code>
-                    <em>插件可改写最终文本</em></div>
+                  <div class="seq-b"><code>post_action</code></div>
                 </li>
                 <li class="seq-item">
                   <span class="seq-n">4</span>
-                  <div class="seq-b"><code>before_toolcall</code>
-                    <em>逐个工具执行前 · 可拒</em></div>
+                  <div class="seq-b"><code>before_toolcall</code></div>
                 </li>
                 <li class="seq-item">
                   <span class="seq-n">5</span>
-                  <div class="seq-b"><b>执行工具</b>
-                    <em>临界区：副作用不可回滚</em></div>
+                  <div class="seq-b"><b>执行工具</b></div>
                 </li>
                 <li class="seq-item">
                   <span class="seq-n">6</span>
-                  <div class="seq-b"><code>after_toolcall</code>
-                    <em>上下文裁剪 · 相关记忆召回 · 结果入消息</em></div>
+                  <div class="seq-b"><code>after_toolcall</code></div>
                 </li>
               </ol>
               <div class="loop-back" aria-hidden="true">
@@ -2738,9 +2695,6 @@
               <span class="n-s">before_output · after_output · 可寻址到具体 agent</span>
             </div>
 
-            <p class="flow-note">
-              <code>on_input</code> 在进管道之前跑；<code>before_output</code> / <code>after_output</code> 在全部轮次结束后跑一次。
-            </p>
           </div>
 
         </div>
@@ -2760,10 +2714,10 @@
           </div>
 
           <div class="stats reveal" style="margin-top: 2rem">
-                        <div class="stat"><div class="n">36</div><div class="l">在跑插件<br /><span class="sm">16 内置 + 20 外部</span></div></div>
-            <div class="stat"><div class="n">340</div><div class="l">可用工具<br /><span class="sm">实测注册数</span></div></div>
-            <div class="stat"><div class="n">109k</div><div class="l">Go 代码行<br /><span class="sm">不含第三方</span></div></div>
-            <div class="stat"><div class="n">9</div><div class="l">LLM 适配器<br /><span class="sm">另有 1 个网关脚本</span></div></div>
+                        <div class="stat"><div class="n">36</div><div class="l">在跑插件</div></div>
+            <div class="stat"><div class="n">340</div><div class="l">可用工具</div></div>
+            <div class="stat"><div class="n">109k</div><div class="l">Go 代码行</div></div>
+            <div class="stat"><div class="n">9</div><div class="l">LLM 适配器</div></div>
           </div>
         </div>
       </section>
@@ -2966,7 +2920,7 @@ echo <span class="s">"你好，记住我喜欢喝咖啡"</span> | ./build/waiter
             <details class="faq">
               <summary>长任务会不会让用户等很久？</summary>
               <p>
-                                这正是「分诊助手」的用途。主 agent 忙超阈值（默认 5 分钟）且积压够多（默认 3 条）
+                                这正是驻留子 agent 的用途。主 agent 忙超阈值（默认 5 分钟）且积压够多（默认 3 条）
                 时，内核可拉起临时驻留子接手：能办的直接办，需要主 agent 的立刻回「忙碌中，请稍候」。
                 这个自动转投<strong>默认关闭</strong>，由部署方显式打开 —— 它属于「内核替父做决策」，与
                 「显式才是特权」同一条理由。
