@@ -775,8 +775,12 @@ func (s *PluginSDK) SetToolBlocks(blocks []ContentBlock) {
 	}
 }
 
-// SetAutoRestart 设置插件是否允许内核自动重启（崩溃后自动重载）。
+// SetAutoRestart 设置插件崩溃后内核是否自动重启它。
 // 默认 true。如果插件有无法恢复的状态（如外部连接），应设为 false。
+//
+// 重启是有限度的：线性退避（第 n 次等 n×1s，即 1s→2s→3s），
+// 且同一 5 分钟窗口内第 4 次崩溃就停下不再拉起（详见 README）。
+// 注意这与「重载」（换 plugin.bin 后重新加载）是两回事。
 func (s *PluginSDK) SetAutoRestart(enabled bool) {
 	s.apiMu.Lock()
 	s.autoRestart = enabled
