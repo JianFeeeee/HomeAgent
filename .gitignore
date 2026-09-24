@@ -26,7 +26,8 @@ cmd/gui/dist/
 #
 # 外部插件与工具链维护在独立 SDK 仓（决策 sdk_repo_only），
 # 本仓经 go.mod 的 replace => ./third_party/homeagent-sdk 引用。
-# example/ 下已跟踪的 20 个文件（plg.json + plugin.go）早于本规则，
+# example/ 下已跟踪的 21 个文件（10 个示例的 plg.json + plugin.go，
+# 加 qq/plugin_test.go）早于本规则，
 # 靠「已跟踪文件不受 .gitignore 影响」保留——这是有意的，不要「修」。
 third_party/homeagent-sdk/bin/
 third_party/homeagent-sdk/tools/
