@@ -790,7 +790,14 @@ pmgr.ReloadPlugins()                     // Reload all plugins
 
 Internal: records are stored in SQLite `disabled_plugins` table (`name`, `disabled_at`, `disabled_by`). Disabling takes effect immediately (plugin stops receiving input); full removal requires a restart.
 
-> **Note**: `PluginMgr()` is only available to built-in plugins; external dynamic plugins cannot call it directly.
+> **Note**: `PluginMgr()` returns an interface with **only 3 methods** (`ReloadOne` /
+> `ListLoadedPlugins` / `IsPluginDisabled`). Enable/disable/remove/reload-all
+> (`EnablePlugin` / `DisablePlugin` / `RemovePlugin` / `ReloadPlugins`) and the
+> built-in check (`IsBuiltinPlugin`) exist only on the kernel-internal
+> `internal/sdk.PluginManager` — external plugins cannot reach them. To reload from
+> an external plugin, use `ReloadOne`.
+> The two interfaces have similar names but are **not the same**:
+> `sdk.PluginMgrAPI` (public, 3 methods) vs `internal/sdk.PluginManager` (internal, 9).
 
 ---
 
