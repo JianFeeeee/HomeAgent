@@ -41,6 +41,8 @@ third_party/homeagent-sdk/example/
 third_party/homeagent-sdk/docs/
 third_party/homeagent-sdk/mkdocs.yml
 third_party/homeagent-sdk/site_build/
+# 主题覆盖目录（只覆盖 footer.html，补备案号）——同属文档站。
+third_party/homeagent-sdk/overrides/
 .codegraph/
 
 # codegraph 本地索引配置（含嵌套 SDK 仓放行，仅本地生效）
