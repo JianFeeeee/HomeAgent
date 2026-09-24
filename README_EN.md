@@ -264,6 +264,12 @@ External plugin development: see [homeagent-sdk](https://gitcode.com/JianFeeeee/
 > The historical entries below are kept verbatim to show the evolution; two mechanisms in them
 > were **removed in v1.2.0**: text-description-based media indexing, and reference-counted media GC.
 >
+> **One licensing statement has also changed** (2026-09-24): "statically linked plugins must match"
+> in the v1.2.0 entry below **no longer holds**. The SDK is now released under **MIT** (a permissive
+> license that does not inherit the kernel's AGPL), so external plugins are **not** derivative works
+> of this project: authors choose their own license (closed-source, commercial or private included)
+> and are not bound by §13. The original text is kept to show the position at the time.
+>
 > **Two performance claims also need correcting** (measured 2026-09-20):
 > "crash-to-recovery under 1s" does not hold — restarts are **linearly backed off**, i.e.
 > 1s / 2s / 3s (`procRestartBackoff=1s × nth crash`). Even the *first* restart waits 1s.
@@ -353,9 +359,19 @@ source when you distribute the software, **you must also offer the source to use
 with it over a network** (§13, Remote Network Interaction). Anyone running a modified HomeAgent
 as a network service therefore has to make the modified source available to that service's users.
 
-Plugins are **statically linked** against this project through the public SDK (the SDK source
-ends up inside the plugin binary), so plugins are derivative works and must be released under
-the same license. Process isolation does not change this — what is linked is the SDK code itself.
+Plugins are **statically linked** against this project through the public
+[homeagent-sdk](https://gitcode.com/JianFeeeee/homeagent-sdk) (the SDK source ends up inside the
+plugin binary), but that repository is released under **MIT** — a permissive license, so code
+received under it does **not** inherit this project's AGPL. External plugins are therefore **not
+derivative works of this project**: authors pick their own license (closed-source, commercial or
+private included), with no same-license obligation and no §13 network clause. The safety and
+vitality of the third-party plugin ecosystem rest on this.
+
+The boundary is clean: **AGPL covers the kernel and the bundled plugins** (`homed`, `internal/`,
+the 18 built-in plugins under `internal/plugins/`); **MIT covers the public SDK** (`sdk/`, whose
+`go.mod` has zero external dependencies and imports only the Go standard library — it never
+references any kernel code). Process isolation is beside the point here — what decides the
+license is the linked SDK code itself, and that code is MIT.
 
 ### Third-party components shipped with the packages
 
