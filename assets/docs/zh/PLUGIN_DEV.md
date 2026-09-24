@@ -783,7 +783,12 @@ pmgr.ReloadPlugins()                     // 重载所有插件
 
 内部机制：禁用记录存储在 SQLite `disabled_plugins` 表（`name`, `disabled_at`, `disabled_by`），禁用立即生效（插件不再接收输入），完全卸载需重启内核。
 
-> **注意**：`PluginMgr()` 仅内置插件可用，外部动态插件无法直接调用。
+> **注意**：`PluginMgr()` 返回的接口**只有 3 个方法**（`ReloadOne` / `ListLoadedPlugins` /
+> `IsPluginDisabled`）。启用/禁用/卸载/重载全部（`EnablePlugin` / `DisablePlugin` /
+> `RemovePlugin` / `ReloadPlugins`）以及内置插件判定（`IsBuiltinPlugin`）只在内核内部
+> 的 `internal/sdk.PluginManager` 上，外部插件拿不到——需重载插件请调 `ReloadOne`。
+> 两个接口叫相似的名字但**不是同一个**：`sdk.PluginMgrAPI`（公开，3 方法）与
+> `internal/sdk.PluginManager`（内部，9 方法）。
 
 ---
 
