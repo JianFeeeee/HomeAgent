@@ -36,6 +36,11 @@ third_party/homeagent-sdk/scripts/
 third_party/homeagent-sdk/.gitignore
 third_party/homeagent-sdk/README*
 third_party/homeagent-sdk/example/
+# 文档站（mkdocs.yml + docs/ + 生成器）属于 SDK 仓，与 README* / tools/ 同理。
+# 注意 docs/ 带前导路径限定，够精确：本仓自己的 docs/ 不受影响。
+third_party/homeagent-sdk/docs/
+third_party/homeagent-sdk/mkdocs.yml
+third_party/homeagent-sdk/site_build/
 .codegraph/
 
 # codegraph 本地索引配置（含嵌套 SDK 仓放行，仅本地生效）
