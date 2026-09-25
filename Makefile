@@ -132,20 +132,35 @@ install: build
 test:
 	$(GO) test ./...
 	@$(MAKE) csrc-test
-	@$(MAKE) check-codec-paths
+	@$(MAKE) check-codec-cgo-only
 
-# check-codec-paths：钉死「C 实现与纯 Go 回退都在、且行为等价」。
+# check-codec-cgo-only：钉死「编解码层完全 C 化」这一决定。
 #
-# 为何必须显式测两条：homed 走 cgo（C 路径），而 waiter 等 CGO-free 目标走回退。
-# 只测一条，另一条的破坏不会被发现；而两条路径的语义等价是 C 化的核心约束
-# （见 internal/agent/api/codec_golden_test.go）。
-.PHONY: check-codec-paths
-check-codec-paths:
-	@echo "== 编解码双路径检查 =="
+# 两条断言，缺一不可：
+#   ① CGO_ENABLED=1 下测试全绿（含黄金对照：C 与纯 Go 参考实现逐值相等）
+#   ② CGO_ENABLED=0 下**构建必须失败**
+#
+# 为什么②要断言「失败」而不是「也能编过」：内核已完全 C 化，C 是唯一实现。
+# 若有人在 CGO_ENABLED=0 下让整包静默编过（例如加回一个纯 Go 回退），
+# 就会同时存在两份语义可能分叉的实现 —— 而 C 侧对畸形 UTF-8 的解码边界
+# 一旦与 Go 分叉，只表现为 rune 计数偏差（进而 token 预算与截断点偏移），
+# **不会立刻暴露**。所以这里把「不许有第二条路」变成可执行的断言。
+#
+# 注：这不影响任何现有构建 —— waiter/initconfig/memgc 均不依赖本包
+# （go list -deps 实测）；homed 本就强制 cgo。
+.PHONY: check-codec-cgo-only
+check-codec-cgo-only:
+	@echo "== 编解码层：完全 C 化检查 =="
 	@CGO_ENABLED=1 $(GO) test -count=1 ./internal/agent/api/ \
-		&& echo "  cgo / C 实现路径: OK"
-	@CGO_ENABLED=0 $(GO) test -count=1 ./internal/agent/api/ \
-		&& echo "  !cgo / 纯 Go 回退: OK"
+		&& echo "  ① cgo 下测试全绿（含黄金对照）: OK"
+	@if CGO_ENABLED=0 $(GO) build ./internal/agent/api/ 2>/dev/null; then \
+		echo "  [FAIL] CGO_ENABLED=0 下本包竟然构建成功——"; \
+		echo "         编解码层已完全 C 化，不该存在第二条实现路径。"; \
+		echo "         若是有意引入回退，请同时更新本检查与 codec_cgo.go 的说明。"; \
+		exit 1; \
+	else \
+		echo "  ② CGO_ENABLED=0 下响亮失败（防静默回退）: OK"; \
+	fi
 
 run: build
 	./$(BUILD_DIR)/$(BINARY) -data /tmp/homeagent

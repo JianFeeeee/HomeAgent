@@ -1,14 +1,13 @@
 package api
 
-// codec_golden_test.go —— 黄金对照测试：C 实现与纯 Go 实现必须逐值等价。
+// codec_golden_test.go —— 黄金对照测试：C 实现与纯 Go 参考实现必须逐值等价。
 //
-// 这是本轮 C 化**最重要的验收**（见 docs/zh/c-core/llm-orchestration-c.md §五）。
+// 这是 C 化**最重要的验收**（见 docs/zh/c-core/llm-orchestration-c.md §五）。
 // 没有它，「C 化没坏」就只是感觉，不是证据。
 //
-// 两条约束：
-//   1. CGO_ENABLED=1 时：真的对比 C 与纯 Go 两条路径
-//   2. CGO_ENABLED=0 时：C 符号已转发到纯 Go，对照退化为自比（仍跑，防止
-//      测试文件因 build tag 被整文件跳过 —— 那会让 0 模式下失去这段覆盖）
+// 运行前提：**CGO_ENABLED=1**。内核已完全 C 化：本包**要求 cgo 才能编译**
+// （无 !cgo 回退文件），故 CGO_ENABLED=0 时整包构建失败 —— 这是有意的
+// 响亮失败，见 codec_cgo.go 顶部与 Makefile 的 check-codec-cgo-only。
 
 import (
 	"math/rand"
@@ -113,3 +112,68 @@ func TestGolden_Randomized(t *testing.T) {
 		}
 	}
 }
+
+// TestGolden_InvalidUTF8 用**任意字节**（含畸形序列）对比 C 与纯 Go。
+//
+// 为什么必须有：C 侧的解码必须与 Go 的 utf8.DecodeRuneInString 完全同语义
+// ——尤其是「无效/截断序列只前进 1 字节」（Go 返回 RuneError 且 size=1）。
+// 若 C 侧放宽校验，两侧 rune 计数就会分叉，而合法 UTF-8 的测试**抓不到**这个。
+// 这是 C 化最容易出错、也最容易被漏测的地方。
+func TestGolden_InvalidUTF8(t *testing.T) {
+	// 覆盖各类边界字节：续字节、过长编码、代理对、超出 U+10FFFF、截断序列。
+	seed := []byte{
+		0x00, 0x41, 0x7F, 0x80, 0xBF, 0xC0, 0xC1, 0xC2, 0xDF, 0xE0, 0xE1,
+		0xED, 0xEF, 0xF0, 0xF1, 0xF4, 0xF5, 0xF8, 0xFE, 0xFF,
+		0xE4, 0xBD, 0xA0, // 你
+		0xF0, 0x9F, 0x98, 0x80, // 😀
+		0xED, 0xA0, 0x80, // 0xED 0xA0 0x80 = UTF-16 代理对，非法
+		0xC0, 0x80, // 过长编码 NUL，非法
+		0xF4, 0x90, 0x80, 0x80, // > U+10FFFF，非法
+	}
+	rng := rand.New(rand.NewSource(20260925))
+
+	for i := 0; i < 3000; i++ {
+		n := rng.Intn(24)
+		b := make([]byte, n)
+		for j := range b {
+			if rng.Intn(3) == 0 {
+				b[j] = byte(rng.Intn(256)) // 完全随机字节
+			} else {
+				b[j] = seed[rng.Intn(len(seed))]
+			}
+		}
+		s := string(b)
+
+		if c, p := estimateTokensC(s), estimateTokensPure(s); c != p {
+			t.Fatalf("EstimateTokens(%q) 畸形输入: C=%d, pure=%d", b, c, p)
+		}
+		// 截断也必须落在同一字节边界上（不得切在字符中间，且两侧一致）
+		mt := rng.Intn(40) - 2
+		if c, p := truncateByTokensC(s, mt), truncateByTokensPure(s, mt); c != p {
+			t.Fatalf("TruncateByTokens(%q, %d): C=%q, pure=%q", b, mt, c, p)
+		}
+	}
+}
+
+// TestGolden_TruncateAlwaysPrefix 不变量：截断结果必须是原串前缀，且 <= 原长。
+func TestGolden_TruncateAlwaysPrefix(t *testing.T) {
+	inputs := []string{
+		"", "a", "abc", "你好世界", "a你b好c", "😀😀😀", strings.Repeat("x", 300),
+		strings.Repeat("中", 300), "\xe4\xbd", "a\xed\xa0\x80b",
+	}
+	for _, s := range inputs {
+		for mt := -2; mt <= 60; mt++ {
+			got := truncateByTokensC(s, mt)
+			if !strings.HasPrefix(s, got) {
+				t.Fatalf("TruncateByTokens(%q, %d)=%q 不是原串前缀", s, mt, got)
+			}
+			if len(got) > len(s) {
+				t.Fatalf("TruncateByTokens(%q, %d) 结果长于输入", s, mt)
+			}
+			if got != truncateByTokensPure(s, mt) {
+				t.Fatalf("TruncateByTokens(%q, %d): C=%q, pure=%q", s, mt, got, truncateByTokensPure(s, mt))
+			}
+		}
+	}
+}
+

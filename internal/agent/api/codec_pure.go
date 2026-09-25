@@ -1,16 +1,30 @@
 package api
 
-// codec_pure.go —— 编解码层的**纯 Go 实现**，永远参与编译。
+// codec_pure.go —— 编解码层的**纯 Go 参考实现**。
 //
-// 它有两个身份：
-//   1. CGO_ENABLED=0 时的生产实现（Windows 包走这里，见
-//      deploy/packaging/package-windows.sh:69）
-//   2. CGO_ENABLED=1 时**黄金对照的基准**（codec_golden_test.go 用同一组输入
-//      对比它与 C 实现，逐值必须相等）
+// ★ 这**不是生产路径**。内核已「完全 C 化」：所有调用都走 C
+//   （internal/agent/api/codec_cgo.go），本文件只服务两个目的：
 //
-// 因此本文件**不带 build tag**——两条路径都要能见到它。
+//   1. **规格基准**：`codec_golden_test.go` 用同一组输入对比它与 C 实现，
+//      断言逐值相等。C 侧的任何语义偏差（尤其畸形 UTF-8 的解码边界）
+//      都由它抓出。没有它，「C 化没改错」就只是感觉。
+//   2. **可读的规格**：C 是命令式字节游走，Go 版是直白的语义陈述。
+//      两者并读时，改哪边都能立刻看出另一边该怎么改。
+//
+// 因此本文件**不带 build tag**，永远参与编译（测试要能引用）。
+// 但没有任何生产代码路径调用它：编解码层要求 cgo 才能编译
+// （CGO_ENABLED=0 下整包构建失败，见 codec_cgo.go 顶部）。
+//
+// ★ 零分配：本文件刻意不用 `len([]rune(s))` / `[]rune(s)`。
+//   `[]rune(s)` 会分配 4×len 字节的临时切片（1KB 字符串就是 4KB 垃圾），
+//   而 rune 计数与「前 keep 个 rune 的字节边界」都能用
+//   utf8.RuneCountInString / utf8.DecodeRuneInString 游走完成，零分配。
+//   实测这曾使纯 Go 的 TruncateByTokens 在 1KB 中文上分配 4208 B/2 allocs。
 
-import "strings"
+import (
+	"strings"
+	"unicode/utf8"
+)
 
 // defaultInferredContextWindow 是模型名无法推断窗口时的兜底。
 //
@@ -29,6 +43,9 @@ const contextWindowUnknown = -1
 
 // modelContextWindowPure 由模型名推断最大上下文窗口；推断不出返回哨兵。
 // 标称窗口 ≠ 有效窗口：接近满时注意力涣散，调用方应取 70-80% 为目标利用率。
+//
+// ★ 分支顺序即语义：先匹配者胜出（例：gpt-4-turbo 必须先于裸 gpt-4）。
+//   C 侧 ha_codec_model_context_window 必须保持同一顺序。
 func modelContextWindowPure(model string) int {
 	model = strings.ToLower(model)
 	switch {
@@ -71,11 +88,14 @@ func modelContextWindowPure(model string) int {
 
 // estimateTokensPure 粗略估算 token 数。
 // 中文 ~1.5 token/字，英文 ~0.3 token/字符，保守估计取 max(1, runeCount * 2)。
+//
+// 用 RuneCountInString 而非 len([]rune(text))：后者会分配 4×len 字节。
+// 两者对**畸形 UTF-8** 的计数一致（无效字节各计 1 个 rune）。
 func estimateTokensPure(text string) int {
 	if text == "" {
 		return 0
 	}
-	runeCount := len([]rune(text))
+	runeCount := utf8.RuneCountInString(text)
 	if runeCount == 0 {
 		return 0
 	}
@@ -87,17 +107,26 @@ func estimateTokensPure(text string) int {
 }
 
 // truncateByTokensPure 截断字符串至不超过 maxTokens 估计值。
+//
+// 语义（与 C 侧一致）：未超预算则原样返回；否则保留前 maxTokens/2 个 rune。
+// 结果必然是输入的前缀，故直接按字节边界切片——无需构造 []rune。
 func truncateByTokensPure(s string, maxTokens int) string {
 	if maxTokens <= 0 || s == "" {
 		return ""
 	}
-	runes := []rune(s)
-	if len(runes)*2 <= maxTokens {
+	runeCount := utf8.RuneCountInString(s)
+	if runeCount*2 <= maxTokens {
 		return s
 	}
 	keep := maxTokens / 2
-	if keep >= len(runes) {
+	if keep >= runeCount {
 		return s
 	}
-	return string(runes[:keep])
+	// 游走到「前 keep 个 rune」的字节边界（零分配）。
+	n := 0
+	for count := 0; count < keep; count++ {
+		_, size := utf8.DecodeRuneInString(s[n:])
+		n += size
+	}
+	return s[:n]
 }
