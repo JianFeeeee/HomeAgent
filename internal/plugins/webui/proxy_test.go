@@ -462,7 +462,7 @@ func TestListProxyServicesIncludesURLAndErrors(t *testing.T) {
 	t.Cleanup(func() { SetProxyDeclProvider(prev); InvalidateProxyRoutes() })
 
 	h := NewHandler(proxyTestSettings(t))
-	svcs := h.listProxyServices("http", ":8080", "localhost:8080")
+	svcs := h.listProxyServices("http", ":8080", "localhost:8080", "localhost")
 	if len(svcs) != 2 {
 		t.Fatalf("入口数 = %d，期望 2（含坏条目）", len(svcs))
 	}
@@ -925,8 +925,11 @@ func TestDeviceGatewayDiscovery(t *testing.T) {
 		URL string `json:"url"`
 	}
 	json.Unmarshal(rec2.Body.Bytes(), &got2)
-	if got2.URL != "wss://devices.localhost/api/v1/device/ws" {
-		t.Errorf("https 场景 url = %q，期望 wss 且无端口", got2.URL)
+	// 外部入口是 portal.example.com 时，插件服务自然挂在
+	// devices.portal.example.com —— 子域基名取自**实际入口**，
+	// 而不是本机配置的 localhost（后者对远程用户毫无意义）。
+	if got2.URL != "wss://devices.portal.example.com/api/v1/device/ws" {
+		t.Errorf("https 场景 url = %q，期望基于 X-Forwarded-Host 的 wss 地址且无端口", got2.URL)
 	}
 
 	// ★ 安全：不得把设备令牌带回来（门户凭证不该换来设备执行权）
@@ -1310,5 +1313,132 @@ func TestDeviceGatewayDiscoveryNoDuplicatePort(t *testing.T) {
 	}
 	if got.URLPortal != "ws://127.0.0.1:8080/api/v1/device/ws" {
 		t.Errorf("url_portal = %q", got.URLPortal)
+	}
+}
+
+// ---- 外部入口 base_url ----
+//
+// 真实场景：webui 经 frp/nginx 穿透到 https://homeagent.example.com。
+// 此时请求可能带内网 Host、或缺失协议，按请求推导会拼出用户点不开的链接
+// （本项目实测：外层未放行子域，只有 homeagent.jianfgit.xyz 这一个 Host
+// 带通配证书，三级子域外部握手失败）。
+//
+// base_url 让「外部入口」成为**可配置的部署事实**，而不是靠猜。
+func TestBaseURLOverridesRequestDerived(t *testing.T) {
+	cfgReg := internalConfig.NewConfigRegistry("")
+	seedWebUIConfig(cfgReg)
+	webuiCfg := cfgReg.PluginConfig("webui")
+	webuiCfg.Set("base_url", "https://homeagent.example.com")
+	settings := sdk.NewSettings("webui", cfgReg)
+
+	prev := declProvider
+	SetProxyDeclProvider(func() []proxyDecl {
+		return []proxyDecl{{
+			Plugin: "remotedevice", Name: "gateway", Host: "devices",
+			Path: "/api/v1/device", Target: "127.0.0.1:9890",
+			WebSocket: true, Auth: sdk.ProxyAuthNone,
+		}}
+	})
+	manualProxyRoutes = ""
+	InvalidateProxyRoutes()
+	t.Cleanup(func() { SetProxyDeclProvider(prev); InvalidateProxyRoutes() })
+
+	h := NewHandler(testSDK(sdk.SDKConfig{Settings: settings}))
+
+	// 请求来自内网（Host 是 127.0.0.1:8080）—— 这正是穿透场景的真实样子
+	rec := httptest.NewRecorder()
+	r := httptest.NewRequest("GET", "/api/v1/device/gateway", nil)
+	r.Host = "127.0.0.1:8080"
+	h.handleDeviceGatewayDiscovery(rec, r)
+
+	var got struct {
+		URL       string `json:"url"`
+		URLPortal string `json:"url_portal"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &got); err != nil {
+		t.Fatal(err)
+	}
+	// 门户同源形态必须是外部可点的
+	if got.URLPortal != "wss://homeagent.example.com/api/v1/device/ws" {
+		t.Errorf("url_portal = %q，期望用 base_url 推导的 wss 外部地址", got.URLPortal)
+	}
+	// 子域形态也必须用 base_url 的域（example.com → devices.example.com）
+	if got.URL != "wss://devices.homeagent.example.com/api/v1/device/ws" {
+		t.Errorf("url = %q，子域应基于 base_url 的主机名", got.URL)
+	}
+
+	// 服务清单同样以 base_url 为准
+	rec2 := httptest.NewRecorder()
+	r2 := httptest.NewRequest("GET", "/api/v1/proxy/services", nil)
+	r2.Host = "127.0.0.1:8080"
+	r2.Header.Set("X-API-Key", "test-api-key")
+	h.handleProxyServices(rec2, r2)
+	var out struct {
+		BaseDomain string `json:"base_domain"`
+		EntryURL   string `json:"entry_url"`
+		Services   []struct {
+			URLPortal string `json:"url_portal"`
+		} `json:"services"`
+	}
+	if err := json.Unmarshal(rec2.Body.Bytes(), &out); err != nil {
+		t.Fatal(err)
+	}
+	if out.EntryURL != "https://homeagent.example.com" {
+		t.Errorf("entry_url = %q", out.EntryURL)
+	}
+	if out.BaseDomain != "homeagent.example.com" {
+		t.Errorf("base_domain = %q，应取自 base_url", out.BaseDomain)
+	}
+	if len(out.Services) != 1 || !strings.HasPrefix(out.Services[0].URLPortal, "https://homeagent.example.com/") {
+		t.Errorf("服务入口未用 base_url: %+v", out.Services)
+	}
+}
+
+// 未配 base_url 时：X-Forwarded-* 优先于请求自身（反代层已给权威信息）。
+func TestEntryPrefersForwardedHeaders(t *testing.T) {
+	h := NewHandler(proxyTestSettings(t))
+	r := httptest.NewRequest("GET", "/", nil)
+	r.Host = "10.0.0.5:8080" // 内网地址（穿透场景常见）
+	r.Header.Set("X-Forwarded-Proto", "https")
+	r.Header.Set("X-Forwarded-Host", "portal.example.com")
+	scheme, host, domain := h.resolveEntry(r)
+	if scheme != "https" {
+		t.Errorf("scheme = %q，应取 X-Forwarded-Proto", scheme)
+	}
+	if host != "portal.example.com" {
+		t.Errorf("host = %q，应取 X-Forwarded-Host", host)
+	}
+	if domain != "portal.example.com" {
+		t.Errorf("domain = %q，应取 X-Forwarded-Host 的主机名", domain)
+	}
+
+	// 都没有时回落到请求自身
+	r2 := httptest.NewRequest("GET", "/", nil)
+	r2.Host = "192.168.2.60:8080"
+	s2, h2, d2 := h.resolveEntry(r2)
+	if s2 != "http" || h2 != "192.168.2.60:8080" {
+		t.Errorf("回落失败: scheme=%q host=%q", s2, h2)
+	}
+	if d2 != "localhost" {
+		t.Errorf("未配 base_url 且无 XFF 时，基域名应回落配置默认值，实际 %q", d2)
+	}
+}
+
+// base_url 末尾斜杠/多余空格必须被容忍（手填配置最常见的两种手误）。
+func TestBaseURLTolerant(t *testing.T) {
+	for _, raw := range []string{"https://h.example.com/", "  https://h.example.com  ", "https://h.example.com"} {
+		cfgReg := internalConfig.NewConfigRegistry("")
+		seedWebUIConfig(cfgReg)
+		cfgReg.PluginConfig("webui").Set("base_url", raw)
+		h := NewHandler(testSDK(sdk.SDKConfig{Settings: sdk.NewSettings("webui", cfgReg)}))
+		r := httptest.NewRequest("GET", "/", nil)
+		r.Host = "127.0.0.1:8080"
+		_, host, domain := h.resolveEntry(r)
+		if host != "h.example.com" {
+			t.Errorf("base_url=%q → host=%q，期望 h.example.com（应容忍尾斜杠/空格）", raw, host)
+		}
+		if domain != "h.example.com" {
+			t.Errorf("base_url=%q → domain=%q", raw, domain)
+		}
 	}
 }
