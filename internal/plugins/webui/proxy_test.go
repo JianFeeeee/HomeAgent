@@ -713,3 +713,144 @@ func TestAutoDiscoveryRoutesEndToEnd(t *testing.T) {
 		t.Fatalf("自动发现的声明未生效: code=%d body=%q", rec.Code, rec.Body.String())
 	}
 }
+
+// ---- 凭证头按 auth 区分：真实端到端发现过这个 bug ----
+//
+// auth=none 的路由，凭证是给**上游**的（设备网关的接入令牌走 X-API-Key），
+// 必须原样转发；无条件剥掉会让设备链路全部 401。
+// auth=homeagent 的路由，凭证是给门户的，绝不能泄漏给上游。
+//
+// 说明：这条判据是**事后补的**。此前的单测用「不校验凭证的假上游」，
+// 抓不到这个 bug；是隔离实例上跑真实 remotedevice（真令牌、真校验）
+// 才发现「直连 200、经反代 401」。
+func TestProxyCredentialHeadersDependOnAuth(t *testing.T) {
+	type probe struct {
+		cookie string
+		apiKey string
+		bearer string
+	}
+	got := make(chan probe, 4)
+	up := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		got <- probe{
+			cookie: r.Header.Get("Cookie"),
+			apiKey: r.Header.Get("X-API-Key"),
+			bearer: r.Header.Get("Authorization"),
+		}
+		w.Write([]byte("ok"))
+	}))
+	defer up.Close()
+
+	prev := declProvider
+	SetProxyDeclProvider(func() []proxyDecl {
+		return []proxyDecl{
+			{Plugin: "dev", Name: "gw", Host: "dev", Target: up.Listener.Addr().String(), Auth: sdk.ProxyAuthNone},
+			{Plugin: "ui", Name: "ui", Host: "ui", Target: up.Listener.Addr().String(), Auth: sdk.ProxyAuthHomeAgent},
+		}
+	})
+	manualProxyRoutes = ""
+	InvalidateProxyRoutes()
+	t.Cleanup(func() { SetProxyDeclProvider(prev); InvalidateProxyRoutes() })
+
+	h := NewHandler(proxyTestSettings(t))
+	call := func(host, apiKey string) probe {
+		rec := httptest.NewRecorder()
+		r := httptest.NewRequest("GET", "/", nil)
+		r.Host = host
+		// 同时带上三样：受保护路由要靠门户 key 过鉴权，而我们要断言的是
+		// **这三样都不该到上游**；不受保护路由则用设备令牌，且必须到上游。
+		r.Header.Set("X-API-Key", apiKey)
+		r.Header.Set("Authorization", "Bearer UPSTREAM-BEARER")
+		r.Header.Set("Cookie", "homeagent_session=PORTAL")
+		h.serveProxyHost(rec, r)
+		select {
+		case p := <-got:
+			return p
+		case <-time.After(3 * time.Second):
+			t.Fatalf("%s 未到达上游", host)
+			return probe{}
+		}
+	}
+
+	// auth=none：上游自己的令牌必须保留
+	// auth=none：用的就是设备令牌（它同时也是发给上游的凭证）
+	p := call("dev.localhost:8080", "UPSTREAM-DEVICE-TOKEN")
+	if p.apiKey != "UPSTREAM-DEVICE-TOKEN" {
+		t.Errorf("auth=none 时 X-API-Key 必须转发给上游（设备令牌），实际 %q", p.apiKey)
+	}
+	if p.bearer != "Bearer UPSTREAM-BEARER" {
+		t.Errorf("auth=none 时 Authorization 应转发，实际 %q", p.bearer)
+	}
+
+	// auth=homeagent：门户凭证绝不能泄漏
+	// auth=homeagent：用门户 key 通过鉴权，再看它有没有被转发出去
+	q := call("ui.localhost:8080", "test-api-key")
+	if q.apiKey != "" {
+		t.Errorf("auth=homeagent 时 X-API-Key（门户密钥）泄漏给上游: %q", q.apiKey)
+	}
+	if strings.Contains(q.cookie, "PORTAL") {
+		t.Errorf("auth=homeagent 时门户 cookie 泄漏给上游: %q", q.cookie)
+	}
+	if q.bearer != "" {
+		t.Errorf("auth=homeagent 时 Authorization 泄漏给上游: %q", q.bearer)
+	}
+}
+
+// ---- Host 分发必须先于门户路由判定 ----
+//
+// 真实端到端踩到的坑：插件子域上的路径若与门户某条更具体的路由同名
+// （例如 /api/v1/device/online），会被那条**面向门户**的路由截走——
+// 表现为 401，且响应体是门户的 JSON 而非上游的响应。
+//
+// 本判据经由完整 RegisterRoutes（而不是直接调 serveProxyHost）验证：
+// 走一遍真实 mux，确认插件子域被 Host 分发接住。
+func TestProxyHostTakesPrecedenceOverPortalRoutes(t *testing.T) {
+	up := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/plain")
+		w.Write([]byte("UPSTREAM-ANSWER"))
+	}))
+	defer up.Close()
+
+	prev := declProvider
+	SetProxyDeclProvider(func() []proxyDecl {
+		return []proxyDecl{{
+			Plugin: "dev", Name: "gw", Host: "dev",
+			Target: up.Listener.Addr().String(), Auth: sdk.ProxyAuthNone,
+		}}
+	})
+	manualProxyRoutes = ""
+	InvalidateProxyRoutes()
+	t.Cleanup(func() { SetProxyDeclProvider(prev); InvalidateProxyRoutes() })
+
+	h := NewHandler(proxyTestSettings(t))
+	h.RegisterRoutes(http.NewServeMux())
+
+	// 路径刻意选一个门户也注册了更具体模式的路径。
+	// 若 Host 分发没生效，会被 /api/v1/device/ 的 requireAPI 接走 → 401 JSON。
+	for _, p := range []string{"/api/v1/device/online", "/api/v1/status", "/api/v1/plugins/", "/"} {
+		rec := httptest.NewRecorder()
+		r := httptest.NewRequest("GET", p, nil)
+		r.Host = "dev.localhost:8080"
+		h.Handler().ServeHTTP(rec, r)
+		if rec.Code != 200 || rec.Body.String() != "UPSTREAM-ANSWER" {
+			t.Errorf("插件子域 %s 被门户路由截走了：code=%d body=%q（应为上游响应）",
+				p, rec.Code, rec.Body.String())
+		}
+	}
+
+	// 主门户 Host 上，同样的路径必须仍走门户自己的路由（不能被反代吞掉）
+	rec := httptest.NewRecorder()
+	r := httptest.NewRequest("GET", "/api/v1/status", nil)
+	r.Host = "localhost:8080"
+	r.Header.Set("X-API-Key", "test-api-key")
+	h.Handler().ServeHTTP(rec, r)
+	if rec.Code != 200 {
+		t.Fatalf("门户自身的 /api/v1/status 不可用：%d", rec.Code)
+	}
+	var st map[string]interface{}
+	if err := json.Unmarshal(rec.Body.Bytes(), &st); err != nil {
+		t.Fatalf("门户 /api/v1/status 返回的不是门户 JSON（被反代吞了？）: %s", rec.Body.String())
+	}
+	if st["status"] != "running" {
+		t.Errorf("门户 /api/v1/status 返回异常: %v", st)
+	}
+}

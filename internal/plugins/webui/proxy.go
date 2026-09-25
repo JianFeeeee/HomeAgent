@@ -227,7 +227,7 @@ func buildProxyTable(decls []proxyDecl, manualText string, settings sdk.Settings
 			continue
 		}
 		r.upstream = u
-		r.reverse = newReverseProxy(u)
+		r.reverse = newReverseProxy(u, r.Auth)
 		log.Printf("[webui] 反代: %s.%s → %s (plugin=%s ws=%v auth=%s)",
 			r.Host, base, r.Target, r.Plugin, r.WS, r.Auth)
 	}
@@ -276,17 +276,29 @@ func parseUpstream(target string) (*url.URL, error) {
 //     泄给客户端。ReverseProxy 默认不跟随重定向，3xx 原样透传。
 //  3. **补齐转发头**：SetXForwarded 注入 X-Forwarded-For/Host/Proto，
 //     旧实现完全不注入，上游无法判断真实来源。
-func newReverseProxy(u *url.URL) *httputil.ReverseProxy {
+func newReverseProxy(u *url.URL, auth string) *httputil.ReverseProxy {
+	stripCredentials := auth == sdk.ProxyAuthHomeAgent
 	rp := &httputil.ReverseProxy{
 		Rewrite: func(pr *httputil.ProxyRequest) {
 			pr.SetURL(u)
 			pr.SetXForwarded()
 			// 透传子域标签给上游（插件据此可感知自己被挂在哪个标签下）。
 			pr.Out.Header.Set("X-HA-Proxy-Host", pr.In.Host)
-			// 上游可能自带鉴权，浏览器带来的门户 cookie 不应泄漏给它。
-			pr.Out.Header.Del("Cookie")
-			pr.Out.Header.Del("Authorization")
-			pr.Out.Header.Del("X-API-Key")
+			// 凭证头的处理**必须按路由的 auth 分开**：
+			//
+			//   auth=homeagent：凭证是给门户的（会话 cookie / 门户 API Key），
+			//     上游不需要也不该看到它们 ⇒ 剥掉，避免把门户凭证泄漏给插件。
+			//   auth=none：请求就是要原样交给上游的，凭证本来就是给**上游**的
+			//     （设备网关的接入令牌正是通过 X-API-Key 传的）⇒ 必须保留。
+			//
+			// 这里踩过一次真实故障：无条件剥 X-API-Key 导致 auth=none 的设备
+			// 链路全部 401（直连 9890 是 200，经反代却 401）。单测用的是不校验
+			// 凭证的假上游，抓不到；是**真实端到端**（真设备网关 + 真令牌）发现的。
+			if stripCredentials {
+				pr.Out.Header.Del("Cookie")
+				pr.Out.Header.Del("Authorization")
+				pr.Out.Header.Del("X-API-Key")
+			}
 		},
 		FlushInterval: -1, // 立即 flush：SSE/长轮询逐帧下发
 		ErrorHandler: func(w http.ResponseWriter, r *http.Request, err error) {
