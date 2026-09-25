@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
+	"net"
 	"net/http"
 	"path/filepath"
 	"strings"
@@ -75,7 +76,7 @@ func (p *Plugin) Start(s *sdk.PluginSDK) error {
 	p.sdk = s
 
 	// ---- 设置 ----------------
-	s.Settings().RegisterDef(sdk.ConfigDef{Key: "listen_addr", Default: defaultAddr, Type: "string", DisplayName: "监听地址", Description: "设备网关 HTTP/WS 监听地址（默认 127.0.0.1:9890，仅本机）", Category: "remotedevice"})
+	s.Settings().RegisterDef(sdk.ConfigDef{Key: "listen_addr", Default: defaultAddr, Type: "string", DisplayName: "监听地址", Description: "设备网关 HTTP/WS 监听地址（默认 127.0.0.1:9890，仅本机）；填 127.0.0.1:0 让系统分配空闲端口", Category: "remotedevice"})
 	s.Settings().RegisterDef(sdk.ConfigDef{Key: "ws_token", Default: "", Type: "password", DisplayName: "接入 Token", Description: "设备绑定/接入时使用的令牌；留空启动时自动生成", Category: "remotedevice"})
 	// 注意：不注册 authorized_devices 设置项 —— 鉴权在设备端执行（客户端存储），
 	// 服务端不保存授权状态，避免 agent 经 config_set 工具自行授权。
@@ -176,10 +177,25 @@ func (p *Plugin) Start(s *sdk.PluginSDK) error {
 
 	// ---- REST 管理面 + WS 设备通道 ----------------
 	p.registerRoutes()
-	p.server = &http.Server{Addr: p.addr, Handler: p.mux}
+
+	// 显式 net.Listen + Serve，而非 ListenAndServe：
+	//
+	// 1. 配 `127.0.0.1:0` 时只有 net.Listener 知道真实端口，ListenAndServe 拿不到。
+	//    这不只是测试便利——它是 `:0` 语义能工作的前提（多实例/沙箱需要）。
+	// 2. 监听失败必须**可见**：此前 ListenAndServe 在后台 goroutine 里报错，
+	//    端口被占时只打一行日志、Start 仍返回 nil（插件表面「已加载」而网关根本没跑）。
+	//    现在在 Start 里同步 Listen，把错误交给调用方。
+	ln, err := net.Listen("tcp", p.addr)
+	if err != nil {
+		return fmt.Errorf("remotedevice: 监听 %s 失败: %w", p.addr, err)
+	}
+	// 用**实际绑定**地址回写，使日志与诊断面显示真实端口（配 :0 时尤其重要）。
+	p.addr = ln.Addr().String()
+
+	p.server = &http.Server{Handler: p.mux}
 	go func() {
 		log.Printf("[remotedevice] device gateway listening on %s", p.addr)
-		if err := p.server.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+		if err := p.server.Serve(ln); err != nil && err != http.ErrServerClosed {
 			log.Printf("[remotedevice] server error: %v", err)
 		}
 	}()
