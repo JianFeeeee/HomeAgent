@@ -39,6 +39,20 @@ func setupIntegration(t *testing.T) *testPluginEnv {
 func setupIntegrationWithProvider(t *testing.T, pm *agentAPI.ProviderManager) *testPluginEnv {
 	t.Helper()
 
+	// 测试绝不能绑生产端口。这里加载的是**全部内置插件**（含 webui），
+	// 而 webui 默认监听 :8080 —— 那正是生产实例的端口。
+	// 不覆盖的后果不是测试失败，而是**测试静默地跟生产抢端口**：
+	// 先到者胜，另一个 bind 失败。webui 现在会在 bind 失败时明确报错，
+	// 于是表现为「测试随机失败」+「生产 WebUI 随机死掉」，且两边看起来
+	// 互不相干，极难定位（实际踩到过）。
+	//
+	// 用 SetListenOverride 指到 127.0.0.1:0（内核分配空闲端口）：
+	// 测试拿到真实可用的 HTTP 服务，且与任何固定端口实例互不干扰。
+	if prev := webui.ListenOverride(); prev == "" {
+		webui.SetListenOverride("127.0.0.1:0")
+		t.Cleanup(func() { webui.SetListenOverride(prev) })
+	}
+
 	tmpDir, err := os.MkdirTemp("", "hc_integration_*")
 	if err != nil {
 		t.Fatal(err)
