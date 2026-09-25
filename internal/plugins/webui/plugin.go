@@ -235,7 +235,11 @@ func (p *Plugin) Start(s *sdk.PluginSDK) error {
 	// 基域名：默认 localhost ⇒ <标签>.localhost:<端口> 开箱即用（RFC 6761 强制
 	// 解析到 loopback，无需 DNS/证书/hosts）。远程访问时改成本机可达的域名，
 	// 如 webui.example.com ⇒ <标签>.webui.example.com。
-	s.Settings().RegisterDef(sdk.ConfigDef{Key: "base_domain", Default: "localhost", Type: "string", DisplayName: "反代基域名", Description: "插件服务反代的基域名。默认 localhost，此时 <插件标签>.localhost:<端口> 直接可用；远程访问填如 webui.example.com", Category: "webui"})
+	// 外部入口 base URL：经 frp/nginx 穿透时，请求 Host 往往是内网地址或
+	// 缺少协议信息，而生成给用户的链接必须是**外部可点的**。填这里即覆盖。
+	// 例：https://homeagent.example.com —— 生成的链接一律用它做协议+主机。
+	s.Settings().RegisterDef(sdk.ConfigDef{Key: "base_url", Default: "", Type: "string", DisplayName: "外部入口 Base URL", Description: "经反代/穿透暴露给外部的完整入口地址（含协议），如 https://homeagent.example.com。留空则按请求推导（直连时正确；经多层网关时可能拼错）。填了它，所有生成的外部链接都用它", Category: "webui"})
+	s.Settings().RegisterDef(sdk.ConfigDef{Key: "base_domain", Default: "localhost", Type: "string", DisplayName: "反代基域名", Description: "插件服务按子域反代时用的基域名（如 webui.example.com 则 <插件标签>.webui.example.com）。默认 localhost 只对本机浏览器有效。若外层未放行子域，请改用手填反代条目或路径挂载", Category: "webui"})
 	// 手填反代条目（自动发现之外的补充）：每行 `<标签> <上游地址> [ws] [auth=none]`
 	s.Settings().RegisterDef(sdk.ConfigDef{Key: "proxy_routes", Default: "", Type: "text", DisplayName: "手填反代条目", Description: "每行一条：<子域标签> <上游地址> [ws] [auth=none|homeagent]。插件的 proxies 声明会自动发现，这里只用于补充未声明/第三方服务。例：grafana 127.0.0.1:3000", Category: "webui"})
 	s.Settings().RegisterDef(sdk.ConfigDef{Key: "device_gateway_enabled", Default: "false", Type: "bool", DisplayName: "设备网关反代", Description: "启用后 /api/v1/device/* 反代到 remotedevice 插件（默认关闭，避免硬耦合）", Category: "webui"})
