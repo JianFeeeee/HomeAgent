@@ -102,6 +102,9 @@ type Handler struct {
 	// hostPort 是 webui 实际监听的 ":port"（用于推导服务入口链接）。
 	hostPort string
 
+	// mux 由 RegisterRoutes 记下，供 Handler() 组装生产链。
+	mux *http.ServeMux
+
 	sessionMu sync.Mutex
 	sessions  map[string]time.Time
 
@@ -398,7 +401,37 @@ func (sw *statusWriter) Hijack() (net.Conn, *bufio.ReadWriter, error) {
 	return nil, nil, fmt.Errorf("hijack not supported")
 }
 
+// proxyDispatch 是**最外层**的 Host 分发中间件。
+//
+// 为什么不放在 mux 的 "/" 兜底里（这是实测踩出来的）：stdlib ServeMux 是
+// 最长前缀优先，任何更具体的模式都会先命中。插件子域上的路径若与门户某条
+// 路由同名（/api/v1/device/online 就是——门户为「旧路径反代」注册了
+// /api/v1/device/），请求会被那条**面向门户**的路由截走：实测表现为 401，
+// 且响应体是门户的 {"error":"unauthorized"} 而不是上游的响应，极难排查。
+//
+// 包在 mux 外层后，Host 判定先于任何路径匹配发生：插件子域整体交给反代，
+// 主门户 Host 则原样下沉给 mux 走各自路由，两边互不干扰。
+// Handler 返回**生产用的完整处理链**（外 → 内：Host 分发 → 日志 → mux）。
+//
+// 抽成一个方法而非在 plugin.go 里手写组合：测试必须能拿到与线上**逐字节
+// 相同**的链，否则很容易测出错位的东西——本次就踩过：测 mux 而中间件挂在
+// plugin.go，判据全绿却在真实实例上 401。共享同一条链可以结构性地避免
+// 这类漂移。
+func (h *Handler) Handler() http.Handler {
+	return h.proxyDispatch(h.logged(h.mux))
+}
+
+func (h *Handler) proxyDispatch(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if h.serveProxyHost(w, r) {
+			return
+		}
+		next.ServeHTTP(w, r)
+	})
+}
+
 func (h *Handler) RegisterRoutes(mux *http.ServeMux) {
+	h.mux = mux
 	mux.HandleFunc("/login", h.handleLoginPage)
 	mux.HandleFunc("/api/v1/login", h.handleLogin)
 	mux.HandleFunc("/api/v1/logout", h.handleLogout)
@@ -447,17 +480,7 @@ func (h *Handler) RegisterRoutes(mux *http.ServeMux) {
 	// 走 requireAPI：清单本身含上游地址，属于管理面信息，不该匿名可读。
 	mux.HandleFunc("/api/v1/proxy/services", h.requireAPI(h.handleProxyServices))
 	mux.HandleFunc("/api/v1/proxy", h.requireAPI(h.handleProxyInfo))
-	// "/" 兜底：**先**尝试按 Host 分发到插件反代，不是插件子域才落到主站静态页。
-	// 顺序很重要——ServeMux 只会把未被更具体模式匹配的请求交给这里。
-	mux.HandleFunc("/", h.handleRoot)
-}
-
-// handleRoot 是根路由兜底：先看是不是插件反代的子域，不是再走主站。
-func (h *Handler) handleRoot(w http.ResponseWriter, r *http.Request) {
-	if h.serveProxyHost(w, r) {
-		return
-	}
-	h.requireWeb(h.handleStatic)(w, r)
+	mux.HandleFunc("/", h.requireWeb(h.handleStatic))
 }
 
 func (h *Handler) handleLoginPage(w http.ResponseWriter, r *http.Request) {
