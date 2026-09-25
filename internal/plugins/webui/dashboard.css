@@ -2989,3 +2989,16 @@
       opacity: 0.75;
       font-variant-numeric: tabular-nums;
     }
+
+/* ===== 服务入口列表（反代插件服务的「点一下直接打开」） ===== */
+/* 与 run-* 系列同样的格槽风格：左状态点、中名称、右动作，避免行内文字挤在一起 */
+.svc-list{display:flex;flex-direction:column;gap:6px}
+.svc-row{display:flex;align-items:center;gap:10px;padding:9px 12px;border-radius:10px;background:var(--bg-input,rgba(13,13,22,.5));border:1px solid var(--border-color,rgba(255,255,255,.09));font-size:13px;transition:border-color .15s,background .15s}
+.svc-row:hover{border-color:var(--sakura-400,#ff7fac)}
+.svc-dot{width:8px;height:8px;border-radius:50%;flex-shrink:0}
+.svc-name{font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:180px}
+.svc-sub{color:var(--text-muted,#6e7284);font-size:12px;white-space:nowrap}
+.svc-tag{font-size:10px;padding:2px 6px;border-radius:6px;background:var(--frost-300,#88c0d0);color:#0d0d16;font-weight:700;letter-spacing:.04em}
+.svc-tag-warn{background:var(--danger,#d1383d);color:#fff}
+.svc-path{color:var(--text-muted,#6e7284);font-family:ui-monospace,Menlo,Consolas,monospace;font-size:11px;margin-left:auto;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:240px}
+.svc-err{color:var(--danger,#d1383d);font-size:11px;margin-left:auto;max-width:260px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}

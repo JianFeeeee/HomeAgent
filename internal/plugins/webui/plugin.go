@@ -231,6 +231,13 @@ func (p *Plugin) Start(s *sdk.PluginSDK) error {
 	s.Settings().RegisterDef(sdk.ConfigDef{Key: "username", Default: "admin", Type: "string", DisplayName: "登录用户名", Description: "Web 控制台登录用户名", Category: "webui"})
 	s.Settings().RegisterDef(sdk.ConfigDef{Key: "password", Default: "", Type: "password", DisplayName: "Web 控制台登录密码", Description: "Web 控制台登录密码", Category: "webui"})
 	s.Settings().RegisterDef(sdk.ConfigDef{Key: "session_ttl_hours", Default: "24", Type: "int", DisplayName: "会话时长(小时)", Description: "登录 cookie 有效时长", Category: "webui"})
+	// ---- 通用反代（HomeAgent 自带能力）----
+	// 基域名：默认 localhost ⇒ <标签>.localhost:<端口> 开箱即用（RFC 6761 强制
+	// 解析到 loopback，无需 DNS/证书/hosts）。远程访问时改成本机可达的域名，
+	// 如 webui.example.com ⇒ <标签>.webui.example.com。
+	s.Settings().RegisterDef(sdk.ConfigDef{Key: "base_domain", Default: "localhost", Type: "string", DisplayName: "反代基域名", Description: "插件服务反代的基域名。默认 localhost，此时 <插件标签>.localhost:<端口> 直接可用；远程访问填如 webui.example.com", Category: "webui"})
+	// 手填反代条目（自动发现之外的补充）：每行 `<标签> <上游地址> [ws] [auth=none]`
+	s.Settings().RegisterDef(sdk.ConfigDef{Key: "proxy_routes", Default: "", Type: "text", DisplayName: "手填反代条目", Description: "每行一条：<子域标签> <上游地址> [ws] [auth=none|homeagent]。插件的 proxies 声明会自动发现，这里只用于补充未声明/第三方服务。例：grafana 127.0.0.1:3000", Category: "webui"})
 	s.Settings().RegisterDef(sdk.ConfigDef{Key: "device_gateway_enabled", Default: "false", Type: "bool", DisplayName: "设备网关反代", Description: "启用后 /api/v1/device/* 反代到 remotedevice 插件（默认关闭，避免硬耦合）", Category: "webui"})
 	s.Settings().RegisterDef(sdk.ConfigDef{Key: "device_gateway_addr", Default: "127.0.0.1:9890", Type: "string", DisplayName: "设备网关地址", Description: "remotedevice 插件的内部监听地址", Category: "webui"})
 	s.Settings().RegisterDef(sdk.ConfigDef{Key: "device_gateway_token", Default: "", Type: "password", DisplayName: "设备网关令牌", Description: "访问 remotedevice 的 token（与 remotedevice 的 ws_token 一致）", Category: "webui"})
@@ -269,6 +276,20 @@ func (p *Plugin) Start(s *sdk.PluginSDK) error {
 		return nil
 	})
 
+	// 反代接线：手填条目 + 自动发现回调。
+	// 自动发现读插件目录里的 plugin.json（webui 已能拿到该目录），因此
+	// **无需给内核接口加方法**即可发现声明，插件进程没起来也照样可见。
+	if v, _ := s.Settings().Get("proxy_routes"); v != nil {
+		if raw, ok := v.(string); ok {
+			SetManualProxyRoutes(raw)
+		}
+	}
+	if pm := s.PluginMgr(); pm != nil {
+		dir := pm.PluginDir()
+		SetProxyDeclProvider(func() []proxyDecl { return readPluginProxyDecls(dir) })
+	}
+	InvalidateProxyRoutes()
+
 	p.handler = NewHandler(s)
 	p.handler.RegisterRoutes(p.mux)
 
@@ -282,6 +303,10 @@ func (p *Plugin) Start(s *sdk.PluginSDK) error {
 	ln, err := net.Listen("tcp", addr)
 	if err != nil {
 		return fmt.Errorf("webui: 监听 %s 失败: %w", addr, err)
+	}
+	// 记录实际监听端口：「服务入口」链接必须带同一端口（单端口穿透的前提）。
+	if _, port, err := net.SplitHostPort(ln.Addr().String()); err == nil {
+		p.handler.hostPort = ":" + port
 	}
 	p.server = &http.Server{Handler: p.handler.logged(p.mux)}
 	go func() {

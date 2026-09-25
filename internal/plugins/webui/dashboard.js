@@ -472,6 +472,9 @@
           state.installedPlugins = await api("/plugins");
         } catch (e) {}
         try {
+          await loadProxyServices();
+        } catch (e) {}
+        try {
           await loadTerminals();
         } catch (e) {}
         try {
@@ -3803,12 +3806,96 @@
       }
 
       // ===== Plugins =====
+      // 「服务入口」：被反代的插件服务，点一下直接打开。
+      //
+      // 为什么单独一张卡而不是塞进每个插件的详情：入口是**跨插件**的（同一个
+      // webui 端口、不同子域），用户的心智是「我要打开某个服务」，不是
+      // 「我要进某个插件的管理页」。
+      //
+      // 链接带 ?__token=<api_key>：子域与门户不同源，浏览器不会带上会话 cookie；
+      // 不带 token 会 401（这是刻意的受保护默认）。页面已登录，此处复用同一把 key。
+      function renderProxyServicesCard() {
+        var svcs = state.proxyServices || [];
+        var base = state.proxyBaseDomain || "localhost";
+        var html =
+          '<div class="card"><h2>' +
+          __("服务入口", "Service Entry Points") +
+          "</h2>";
+        if (!svcs.length) {
+          return (
+            html +
+            '<p style="color:var(--text-muted);font-size:13px">' +
+            __(
+              "暂无被反代的插件服务。插件在 plugin.json 的 proxies 字段里声明后会自动出现在这里。",
+              "No proxied plugin services yet. Declare them in plugin.json's proxies field.",
+            ) +
+            "</p></div>"
+          );
+        }
+        var token = state.settings?.["plugin.webui.api_key"] || "";
+        html +=
+          '<div style="font-size:12px;color:var(--text-muted);margin-bottom:10px">' +
+          __("插件服务经 HomeAgent 同一端口反代，按子域区分（基域名 ", "Proxied through the same port, keyed by subdomain (base ") +
+          escHtml(base) +
+          __("）。点「打开」直接访问。", "). Click Open to visit.") +
+          "</div>";
+        html += '<div class="svc-list">';
+        svcs.forEach(function (s) {
+          var url = s.url || "";
+          if (url && token) url += "?__token=" + encodeURIComponent(token);
+          var dot = s.ok ? "var(--ok, #22c55e)" : "var(--danger, #d1383d)";
+          html +=
+            '<div class="svc-row">' +
+            '<span class="svc-dot" style="background:' + dot + '"></span>' +
+            '<span class="svc-name">' + escHtml(s.plugin_name || s.plugin) + "</span>" +
+            '<span class="svc-sub">' + escHtml(s.name) + "</span>" +
+            (s.websocket
+              ? '<span class="svc-tag">WS</span>'
+              : "") +
+            (s.auth === "none"
+              ? '<span class="svc-tag svc-tag-warn">' +
+                __("未保护", "unprotected") +
+                "</span>"
+              : "") +
+            '<span class="svc-path">' + escHtml(s.host + "." + base) + "</span>";
+          if (s.ok && url) {
+            html +=
+              '<a class="btn btn-primary btn-sm" style="margin-left:auto" target="_blank" rel="noopener" href="' +
+              escHtml(url) +
+              '">' +
+              __("打开", "Open") +
+              "</a>";
+          } else {
+            html +=
+              '<span class="svc-err" title="' +
+              escHtml(s.error || "") +
+              '">' +
+              escHtml(s.error || __("不可用", "unavailable")) +
+              "</span>";
+          }
+          html += "</div>";
+        });
+        html += "</div></div>";
+        return html;
+      }
+
+      async function loadProxyServices() {
+        try {
+          var d = await api("/proxy/services");
+          state.proxyServices = (d && d.services) || [];
+          state.proxyBaseDomain = (d && d.base_domain) || "localhost";
+        } catch (e) {
+          state.proxyServices = [];
+        }
+      }
+
       function renderPlugins() {
         var k = state.kernel;
         var plugins = k?.plugins || [];
         var tools = k?.tools || [];
         var installed = state.installedPlugins || [];
-        var html =
+        var html = renderProxyServicesCard();
+        html +=
           '<div class="card"><h2>' +
           __("安装插件", "Install Plugin") +
           "</h2>" +

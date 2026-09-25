@@ -77,6 +77,25 @@ func (p *Plugin) Start(s *sdk.PluginSDK) error {
 
 	// ---- 设置 ----------------
 	s.Settings().RegisterDef(sdk.ConfigDef{Key: "listen_addr", Default: defaultAddr, Type: "string", DisplayName: "监听地址", Description: "设备网关 HTTP/WS 监听地址（默认 127.0.0.1:9890，仅本机）；填 127.0.0.1:0 让系统分配空闲端口", Category: "remotedevice"})
+	// ---- 反代声明（HomeAgent 自带能力）----
+	//
+	// 设备网关需要被外部访问（设备/客户端要连 WS），但它默认只监听本机
+	// 127.0.0.1:9890。声明后由 webui 的对外端口按 Host 子域反代出去，
+	// **用户不需要额外开端口或配 frp 映射**。
+	//
+	// auth=none 是**刻意的**：调用方是设备与嵌入式客户端，不可能持有浏览器
+	// 门户会话；本服务**自身已有接入令牌**（ws_token / X-API-Key），
+	// 由 requireToken 强制校验。若这里声明 homeagent（默认值），会把设备链路
+	// 全部挡在门户鉴权之外——那正是"认证必须可声明"的原因。
+	//
+	// websocket=true：设备注册/命令下发走 WS 长连接。
+	s.DeclareProxy(sdk.ProxyDecl{
+		Name:      "gateway",
+		Host:      "devices",
+		Target:    "127.0.0.1:9890",
+		WebSocket: true,
+		Auth:      sdk.ProxyAuthNone,
+	})
 	s.Settings().RegisterDef(sdk.ConfigDef{Key: "ws_token", Default: "", Type: "password", DisplayName: "接入 Token", Description: "设备绑定/接入时使用的令牌；留空启动时自动生成", Category: "remotedevice"})
 	// 注意：不注册 authorized_devices 设置项 —— 鉴权在设备端执行（客户端存储），
 	// 服务端不保存授权状态，避免 agent 经 config_set 工具自行授权。
