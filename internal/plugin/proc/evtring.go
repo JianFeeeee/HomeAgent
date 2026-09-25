@@ -130,6 +130,12 @@ func (r *EvtRing) Init() {
 	r.writeSeq.Store(0)
 }
 
+// Written 返回已写入的事件条数（含因环满而只标记未落盘的那些）。
+//
+// 供诊断与测试观测「某次 Publish 是否真的通过了 EventRing」——
+// 这比读内部字段稳定，也是关停退订验证所需的可观察量。
+func (r *EvtRing) Written() uint64 { return r.writeSeq.Load() }
+
 // WritePush post-and-forget，**绝不阻塞**（§3.6 约束 B）。
 func (r *EvtRing) WritePush(evtType pubsdk.EventType, payload []byte) {
 	seq := r.writeSeq.Add(1) - 1
