@@ -17,6 +17,7 @@ import (
 	doc "gitcode.com/JianFeeeee/HomeAgent/internal/memory/document"
 	"gitcode.com/JianFeeeee/HomeAgent/internal/plugin"
 	cli "gitcode.com/JianFeeeee/HomeAgent/internal/plugins/cli"
+	"gitcode.com/JianFeeeee/HomeAgent/internal/plugins/webui"
 	sdk "gitcode.com/JianFeeeee/HomeAgent/internal/sdk"
 )
 
@@ -86,6 +87,29 @@ func setupIntegrationWithProvider(t *testing.T, pm *agentAPI.ProviderManager) *t
 	// 经 ConfigRegistry 装配内核路径配置（clawhubadapter/pluginmgr 等经 SDK settings 读取）
 	cfgReg := internalConfig.NewConfigRegistry("")
 	cfgReg.SeedDefaults(tmpDir)
+
+	// ★ 预置临时端口，避免测试之间（以及本机生产实例）抢固定默认端口。
+	//
+	// 为什么必须在 Load 之前预置：插件表由 RegisterDef 在插件 Start 时创建，
+	// 此时才能 Set；而端口冲突发生在 Start 内部（net.Listen 失败即 HTTP 服务
+	// 静默不启动，或测试二进制被信号打断）。SetPluginConfig 会先建表再写，
+	// 正好填补这个时序缺口。
+	//
+	// 用 :0 让 OS 分配空闲端口——固定端口在「并行跑测试」或「本机有 homed
+	// 常驻」时必然周期性失败（实测：干净树连跑 20 轮也复现 2 次）。
+	for _, kv := range []struct{ plugin, key string }{
+		{"pluginmgr", "http_addr"},
+		{"remotedevice", "listen_addr"},
+	} {
+		if err := cfgReg.SetPluginConfig(kv.plugin, kv.key, "127.0.0.1:0"); err != nil {
+			t.Fatalf("预置 %s.%s 临时端口: %v", kv.plugin, kv.key, err)
+		}
+	}
+	// webui 的监听地址走独立旁路（SetListenOverride 优先级高于 settings，
+	// 因为历史上内核在插件表建立前写 settings 会失败）。
+	webui.SetListenOverride("127.0.0.1:0")
+	t.Cleanup(func() { webui.SetListenOverride("") })
+
 	pluginReg.SetConfigRegistry(cfgReg)
 
 	plgDir := filepath.Join(tmpDir, "plugins")
