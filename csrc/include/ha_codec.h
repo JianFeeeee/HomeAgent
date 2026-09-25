@@ -9,12 +9,21 @@
  * 修改必须走大版本流程（与 third_party/homeagent-sdk 同一冻结标准）。
  *
  * 设计约束（见 docs/zh/c-core/llm-orchestration-c.md §四）：
- *   1. 只吃 const char* + 长度，出数值/JSON 串
- *   2. 不回调 Go、不传 Go 指针
- *   3. 不长期持有 malloc 内存；需要出参的用调用方缓冲区
- *   4. 无状态、纯函数、线程安全（不写全局可变状态）
+ *   1. 只吃 const char* + **显式长度**，出数值/字节偏移 —— 不回调 Go、
+ *      不传 Go 指针、不要求 NUL 结尾
+ *   2. **不 malloc**：不需要出参缓冲区，需要「结果」时返回字节偏移/长度，
+ *      由调用方在自己的缓冲上切片（零拷贝）
+ *   3. 无状态、纯函数、线程安全（不写全局可变状态）
  *
  * 当前覆盖：L1 协议编解码层中的纯计算部分（第一个最小切片）。
+ *
+ * ============================ 为什么签名带长度 ============================
+ * 初版签名用 `const char*` 隐含「NUL 结尾」，于是每次调用都要：
+ *   Go `C.CString` 分配+拷贝一遍 → C `strlen` 再扫一遍。
+ * 实测这部分开销占单次调用的 80% 以上（cgo 边界本身仅 ~30ns，
+ * 而初版 ModelContextWindow 实测 175ns）。
+ * 改为「指针 + 长度」后，Go 侧用 unsafe.StringData 直接传底层数组，
+ * 零分配零拷贝。这是设计约束第 1 条的字面要求。
  */
 
 #include <stddef.h>
@@ -34,31 +43,41 @@ extern "C" {
 #define HA_CODEC_CONTEXT_WINDOW_UNKNOWN (-1)
 
 /* 由模型名推断最大上下文窗口（token 数）；推断不出返回
- * HA_CODEC_CONTEXT_WINDOW_UNKNOWN。model 为 NULL 时同样返回 UNKNOWN。
+ * HA_CODEC_CONTEXT_WINDOW_UNKNOWN。
  *
- * model 为 UTF-8 字符串，匹配大小写不敏感。
+ * model 为 UTF-8 字节序列，**不需要 NUL 结尾**；model_len 是字节数。
+ * model 为 NULL 或 model_len 为 0 时返回 UNKNOWN。
+ *
+ * 匹配大小写不敏感（仅对 ASCII 字母做折叠；非 ASCII 字节按原样比较，
+ * 与 Go 侧对模型名的实际输入一致）。
+ *
  * 语义必须与 Go 侧 modelContextWindowPure 逐值一致（黄金对照测试钉死）。 */
-int ha_codec_model_context_window(const char *model);
+int ha_codec_model_context_window(const char *model, size_t model_len);
 
 /* ==================== token 估算与截断 ==================== */
 
 /* 粗略估算 token 数。
  *
- * 规则（与 Go 侧 EstimateTokens 一致）：中文 ~1.5 token/字、英文 ~0.3 token/字符，
- * 保守取 max(1, runeCount * 2)。text 为 NULL 或空串返回 0。
+ * 规则（与 Go 侧 EstimateTokens 一致）：保守取 max(1, runeCount * 2)。
+ * 按 UTF-8 **字符数**（rune）计，不是字节数。
+ * text 为 NULL 或 text_len 为 0 返回 0。
  *
- * 注意：按 UTF-8 **字符数**（rune）计，不是字节数。 */
-int ha_codec_estimate_tokens(const char *text);
+ * 非法 UTF-8 序列按 Go 的 utf8 解码语义处理（每字节一个 rune），
+ * 保证与 Go 侧逐值一致。 */
+int ha_codec_estimate_tokens(const char *text, size_t text_len);
 
-/* 截断字符串至不超过 maxTokens 估计值，返回写入 out 的字节数（不含结尾 NUL）。
+/* 按 token 预算计算「应保留的字节数」。
  *
- * 语义与 Go 侧 TruncateByTokens 一致：从开头保留 maxTokens/2 个字符。
- * maxTokens <= 0 或 text 为空时写入空串。
+ * ★ 返回的是**字节数**而非字符串：截断结果必然是输入的前缀，
+ *   调用方直接在自己的缓冲上切片即可（零拷贝、无出参缓冲区、无 malloc）。
  *
- * out 由调用方提供，容量须为 outCap（含结尾 NUL）；函数保证 NUL 结尾、
- * 不越界写。返回值是实际写入的字节数（可能因 outCap 不足而短于完整截断结果）。 */
-size_t ha_codec_truncate_by_tokens(const char *text, int max_tokens,
-                                   char *out, size_t out_cap);
+ * 语义与 Go 侧 TruncateByTokens 一致：从开头保留 maxTokens/2 个 rune；
+ * 未超预算时返回 text_len（即整串）。
+ * max_tokens <= 0 或 text 为 NULL/text_len 为 0 时返回 0。
+ *
+ * 返回值保证 <= text_len。 */
+size_t ha_codec_truncate_by_tokens(const char *text, size_t text_len,
+                                   int max_tokens);
 
 #ifdef __cplusplus
 }

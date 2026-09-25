@@ -3,12 +3,15 @@ package api
 // codec.go —— 编解码层的**统一出口**（无论 CGO 开关如何，调用方只认这里）。
 //
 // 分层：
-//   codec_pure.go  —— 纯 Go 实现，永远参与编译（回退 + 黄金对照基准）
-//   codec_cgo.go   —— CGO_ENABLED=1：真正调 C 库
-//   codec_nocgo.go —— CGO_ENABLED=0：把 C 符号转发到纯 Go
+//   codec_cgo.go   —— C 实现绑定（要求 cgo；CGO_ENABLED=0 下整包构建失败）
+//   codec_pure.go  —— 纯 Go **参考实现**：只作黄金对照的规格基准，
+//                     不是生产路径（不带 build tag，永远参与编译）
 //   codec.go       —— 本文件：对外的稳定 API，含兜底与日志
 //
 // 这样调用方（provider.go / core）不需要写任何 build tag 分支。
+//
+// ★ 编解码层已「完全 C 化」：C 是唯一实现，不存在 CGO_ENABLED=0 回退。
+//   理由（防两条语义分叉的实现同时跑）见 codec_cgo.go 顶部。
 
 import (
 	"log"
@@ -34,9 +37,11 @@ func ModelContextWindow(model string) int {
 
 // EstimateTokens 粗略估算 token 数。
 //
-// 注意：这是**高频热路径**（上下文裁剪对每个事件都调）。走 C 的跨语言开销
-// 对短文本未必划算 —— 是否该留在 C 侧由 codec_bench_test.go 的实测数据决定，
-// 不要凭直觉断言（见 docs/zh/c-core/llm-orchestration-c.md §七 未决问题 3）。
+// 注意：这是**高频热路径**（上下文裁剪对每个事件都调）。已完全 C 化，
+// 但 cgo 边界固有成本约 30ns ⇒ 极短串上比直调纯 Go 慢（纳秒级，见
+// codec_bench_test.go 的实测与 docs/zh/c-core/llm-orchestration-c.md §7.1）。
+// 若某循环对极短串高频调用，正确应对是**把该循环 C 化（批量传一次）**，
+// 而不是按长度分派回 Go —— 那会引入第二条可能分叉的实现。
 func EstimateTokens(text string) int { return estimateTokensC(text) }
 
 // TruncateByTokens 截断字符串至不超过 maxTokens 估计值。
