@@ -99,6 +99,9 @@ type Handler struct {
 	term       sdk.TerminalAPI
 	llm        sdk.LLMAPI
 
+	// hostPort 是 webui 实际监听的 ":port"（用于推导服务入口链接）。
+	hostPort string
+
 	sessionMu sync.Mutex
 	sessions  map[string]time.Time
 
@@ -440,7 +443,21 @@ func (h *Handler) RegisterRoutes(mux *http.ServeMux) {
 	// 用户上传文件的下载（uploads 目录，同一安全模型）
 	mux.HandleFunc("/uploads/", h.requireWeb(h.handleUploads))
 	mux.HandleFunc("/v1/chat/completions", h.requireAPI(h.handleOpenAICompletions))
-	mux.HandleFunc("/", h.requireWeb(h.handleStatic))
+	// 反代服务入口清单：给前端渲染「插件 UI」选项卡。
+	// 走 requireAPI：清单本身含上游地址，属于管理面信息，不该匿名可读。
+	mux.HandleFunc("/api/v1/proxy/services", h.requireAPI(h.handleProxyServices))
+	mux.HandleFunc("/api/v1/proxy", h.requireAPI(h.handleProxyInfo))
+	// "/" 兜底：**先**尝试按 Host 分发到插件反代，不是插件子域才落到主站静态页。
+	// 顺序很重要——ServeMux 只会把未被更具体模式匹配的请求交给这里。
+	mux.HandleFunc("/", h.handleRoot)
+}
+
+// handleRoot 是根路由兜底：先看是不是插件反代的子域，不是再走主站。
+func (h *Handler) handleRoot(w http.ResponseWriter, r *http.Request) {
+	if h.serveProxyHost(w, r) {
+		return
+	}
+	h.requireWeb(h.handleStatic)(w, r)
 }
 
 func (h *Handler) handleLoginPage(w http.ResponseWriter, r *http.Request) {

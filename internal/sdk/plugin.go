@@ -320,6 +320,9 @@ type SDKConfig struct {
 
 func New(name string, cfg SDKConfig) *PluginSDK {
 	base := pubsdk.New(name, cfg.Settings, cfg.RegTool, cfg.RegStage, cfg.RegAPI, cfg.RegOutput)
+	// 反代声明收集：内置插件（无 plugin.json）在 Start 里用 DeclareProxy
+	// 声明自己的服务，落到本包的登记表；外部插件走 plugin.json 自动发现。
+	base.SetProxyDeclarer(func(d pubsdk.ProxyDecl) { DeclareBuiltinProxy(name, d) })
 	if cfg.IOManager != nil {
 		base.SetIOInjector(ioAdapter{iom: cfg.IOManager})
 	}
