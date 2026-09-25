@@ -731,9 +731,27 @@ func (r *Registry) handleWS(conn net.Conn, rw *bufio.ReadWriter, handshakeAuthor
 		payload, isClose, opcode, err := readFrame(rw.Reader)
 		if err != nil {
 			if err == errPing {
-				// pong 也走写锁：它可能在 Push* 持锁推送大块数据时到达。
-				err := r.wsWriteLocked(curID, writePong)
-				if err != nil {
+				// ★ 回 pong 绝不能因为「还没 bind」而失败。
+				//
+				// 原实现无条件走 wsWriteLocked(curID, writePong)，而 conns 表
+				// **只在 bind 成功后才写入**（bind 之前刻意不把连接暴露给查询/
+				// 命令路径）。于是握手完成、bind 尚未到达时来的 ping 找不到写
+				// 入口 → 返回错误 → 读循环 return → **连接被关掉**。
+				//
+				// 生产后果（日志实证）：客户端每 30s 一次 ping，只要有一次落在
+				// 未 bind 窗口就断连，表现为同一设备 20 秒内多次 ws connected、
+				// online/offline 反复交替，输出通道跟着反复注销/注册。
+				//
+				// 正确做法：pong 直接写本连接的 writer。此时该连接**尚未**进入
+				// conns（即没有 Push* 会碰它的 writer），不存在并发写风险；
+				// 已 bind 时才需要取写锁（Push* 可能正在写同一 buffer）。
+				var werr error
+				if bound {
+					werr = r.wsWriteLocked(curID, writePong)
+				} else {
+					werr = writePong(rw.Writer)
+				}
+				if werr != nil {
 					return
 				}
 				continue

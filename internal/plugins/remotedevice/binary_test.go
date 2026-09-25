@@ -862,3 +862,77 @@ func TestAwaitResultReturnsResultDeliveredBeforeWaiter(t *testing.T) {
 		t.Fatalf("unexpected early result: %v", got)
 	}
 }
+
+// ===== ping 帧处理：不得因未 bind 而断连 =====
+
+// ★ 未 bind（或已 bind）时收到 ping，服务端必须回 pong，**不得关闭连接**。
+//
+// 真实 bug（生产日志实证）：原实现用 wsWriteLocked(curID, writePong)，而
+// conns[curID] 只在 bind 成功后才写入 ⇒ 握手后、bind 前到来的 ping 找不到
+// 写锁入口，函数返回错误，读循环直接 return 关连接。
+//
+// 后果：客户端每 30s ping 一次，只要有一次落在未 bind 窗口就断连；生产日志里
+// 同一设备 20 秒内多次 "ws connected" 且 online/offline 反复交替，正是这个。
+//
+// 判据直打 bug 点：只握手、**不发 hello/bind**，发 ping，要求收到 pong。
+// readMsg 会跳过 pong，所以这里直接读原始帧。
+func TestPingBeforeBindDoesNotDropConnection(t *testing.T) {
+	reg := NewRegistry()
+	token := "tok-ping-bind"
+	reg.SetAcceptToken(func(s string) bool { return s == token })
+
+	srv := httptest.NewServer(http.HandlerFunc(reg.ServeWS))
+	defer srv.Close()
+
+	c := dialTestWS(t, srv.URL, token)
+	defer c.close()
+
+	// 只握手，不发 hello/bind —— 模拟「尚未绑定完成」的窗口
+	c.sendFrame(0x9, nil) // ping
+
+	// 必须收到 pong；EOF/错误说明服务端在 ping 路径上断了连接
+	c.conn.SetReadDeadline(time.Now().Add(3 * time.Second))
+	_, _, opcode, err := readFrame(c.rw.Reader)
+	if err != nil {
+		t.Fatalf("未 bind 时 ping 导致连接不可用（服务端 bug）: %v", err)
+	}
+	if opcode != 0xA {
+		t.Fatalf("期望 pong(0xA)，收到 opcode=%#x", opcode)
+	}
+}
+
+// 已 bind 的设备发 ping 同样必须得到 pong，且连接与在线状态都保持。
+func TestPingAfterBindGetsPong(t *testing.T) {
+	reg := NewRegistry()
+	token := "tok-ping-bound"
+	reg.SetAcceptToken(func(s string) bool { return s == token })
+	srv := httptest.NewServer(http.HandlerFunc(reg.ServeWS))
+	defer srv.Close()
+
+	c := dialTestWS(t, srv.URL, token)
+	defer c.close()
+	c.sendText(mustJSON(map[string]interface{}{
+		"op": "hello",
+		"device": map[string]interface{}{
+			"device_id": "d-ping", "name": "d", "kind": "computer", "caps": []string{"status"},
+		},
+	}))
+	c.readHelloAck(t)
+	c.bindDevice(t, "d-ping", token)
+	if !reg.Online("d-ping") {
+		t.Fatal("bind 后设备应在线")
+	}
+
+	c.sendFrame(0x9, nil) // ping
+	c.conn.SetReadDeadline(time.Now().Add(3 * time.Second))
+	_, _, opcode, err := readFrame(c.rw.Reader)
+	if err != nil {
+		t.Fatalf("已 bind 设备 ping 失败: %v", err)
+	}
+	if opcode != 0xA {
+		t.Fatalf("期望 pong(0xA)，收到 %#x", opcode)
+	}
+	if !reg.Online("d-ping") {
+		t.Error("ping 之后设备不应掉线")
+	}
+}
