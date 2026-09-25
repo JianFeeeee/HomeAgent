@@ -1268,8 +1268,11 @@ func TestProxyServiceURLsWithPortInHost(t *testing.T) {
 	if s := out.Services[0].URLPortal; strings.Contains(s, "8080:8080") {
 		t.Errorf("url_portal 端口重复: %q", s)
 	}
-	if s := out.Services[0].URLPortal; s != "http://127.0.0.1:8080/api/v1/device/" {
-		t.Errorf("url_portal = %q", s)
+	// 这条路由是**别名模式**（设备网关，客户端已硬编码 /api/v1/device/ws），
+	// 所以不能补尾斜杠 —— path 在这里是上游真实路径语义，补了会让人
+	// 以为存在一个 /api/v1/device/ 的根。
+	if s := out.Services[0].URLPortal; s != "http://127.0.0.1:8080/api/v1/device" {
+		t.Errorf("url_portal = %q（别名模式不该补尾斜杠）", s)
 	}
 	// 子域形态也必须只有一次端口
 	if s := out.Services[0].URL; strings.Contains(s, "8080:8080") {
@@ -1639,5 +1642,109 @@ func TestProxyStripPathRedirectsToTrailingSlash(t *testing.T) {
 	}
 	if rec.Body.String() != "upstream:/api/v1/device" {
 		t.Errorf("别名模式应原样转发 /api/v1/device，实际 %q", rec.Body.String())
+	}
+}
+
+// ---- 服务入口必须给用户**能用**的那个链接 ----
+//
+// 真实验收里发现的用户可见缺口：API 同时返回 url（子域）与 url_portal
+// （路径），但前端只用了 url —— 而子域形态在穿透部署下**恰恰是坏的**
+// （外层只放行一个 Host、三级子域证书不匹配）。
+// 用户点「打开」得到的是打不开的地址，还以为是插件的问题。
+func TestProxyServicesOffersBothForms(t *testing.T) {
+	prev := declProvider
+	SetProxyDeclProvider(func() []proxyDecl {
+		return []proxyDecl{{
+			Plugin: "huawei_smarthome", Name: "ui", Host: "huawei-smarthome",
+			Path: "/p/huawei", StripPath: true,
+			Target: "127.0.0.1:12100", Auth: sdk.ProxyAuthHomeAgent,
+		}}
+	})
+	manualProxyRoutes = ""
+	InvalidateProxyRoutes()
+	t.Cleanup(func() { SetProxyDeclProvider(prev); InvalidateProxyRoutes() })
+
+	cfgReg := internalConfig.NewConfigRegistry("")
+	seedWebUIConfig(cfgReg)
+	cfgReg.PluginConfig("webui").Set("base_url", "https://homeagent.example.com")
+	h := NewHandler(testSDK(sdk.SDKConfig{Settings: sdk.NewSettings("webui", cfgReg)}))
+
+	rec := httptest.NewRecorder()
+	r := httptest.NewRequest("GET", "/api/v1/proxy/services", nil)
+	r.Host = "127.0.0.1:8080"
+	r.Header.Set("X-API-Key", "test-api-key")
+	h.handleProxyServices(rec, r)
+
+	var out struct {
+		EntryURL string `json:"entry_url"`
+		Services []struct {
+			URL       string `json:"url"`
+			URLPortal string `json:"url_portal"`
+			StripPath bool   `json:"strip_path"`
+			Path      string `json:"path"`
+		} `json:"services"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &out); err != nil {
+		t.Fatal(err)
+	}
+	if len(out.Services) != 1 {
+		t.Fatalf("期望 1 条服务，实际 %d", len(out.Services))
+	}
+	s := out.Services[0]
+
+	// 两种形态都必须给出：路径形态给无 DNS 依赖的客户端/穿透场景，
+	// 子域形态给局域网内浏览器。缺一个就会有用户点不开。
+	if s.URLPortal != "https://homeagent.example.com/p/huawei/" {
+		t.Errorf("url_portal = %q，路径形态缺失或不是入口下的地址", s.URLPortal)
+	}
+	if s.URL != "https://huawei-smarthome.homeagent.example.com" {
+		t.Errorf("url = %q，子域形态应为 <host>.<入口主机名>", s.URL)
+	}
+	// 前缀模式的入口必须带尾斜杠（否则浏览器算错相对路径基准）
+	if !strings.HasSuffix(s.URLPortal, "/") {
+		t.Errorf("strip_path 路由的 url_portal 必须以 / 结尾（相对路径基准），实际 %q", s.URLPortal)
+	}
+	// 前端据此决定要不要显示「子域」次选按钮
+	if !s.StripPath || s.Path != "/p/huawei" {
+		t.Errorf("path/strip_path 未透出，前端无法区分两种开关: %+v", s)
+	}
+}
+
+// 别名模式（设备网关）的 url_portal 不能加尾斜杠 —— 那会改坏上游路径语义。
+func TestProxyServicesAliasKeepsExactPath(t *testing.T) {
+	prev := declProvider
+	SetProxyDeclProvider(func() []proxyDecl {
+		return []proxyDecl{{
+			Plugin: "remotedevice", Name: "gateway", Host: "devices",
+			Path: "/api/v1/device", Target: "127.0.0.1:9890",
+			WebSocket: true, Auth: sdk.ProxyAuthNone,
+		}}
+	})
+	manualProxyRoutes = ""
+	InvalidateProxyRoutes()
+	t.Cleanup(func() { SetProxyDeclProvider(prev); InvalidateProxyRoutes() })
+
+	cfgReg := internalConfig.NewConfigRegistry("")
+	seedWebUIConfig(cfgReg)
+	h := NewHandler(testSDK(sdk.SDKConfig{Settings: sdk.NewSettings("webui", cfgReg)}))
+
+	rec := httptest.NewRecorder()
+	r := httptest.NewRequest("GET", "/api/v1/proxy/services", nil)
+	r.Host = "127.0.0.1:8080"
+	r.Header.Set("X-API-Key", "test-api-key")
+	h.handleProxyServices(rec, r)
+
+	var out struct {
+		Services []struct {
+			URLPortal string `json:"url_portal"`
+		} `json:"services"`
+	}
+	json.Unmarshal(rec.Body.Bytes(), &out)
+	if len(out.Services) != 1 {
+		t.Fatal("期望 1 条服务")
+	}
+	if strings.HasSuffix(out.Services[0].URLPortal, "/") {
+		t.Errorf("别名模式的 url_portal 不应以 / 结尾（那是上游真实路径语义）：%q",
+			out.Services[0].URLPortal)
 	}
 }

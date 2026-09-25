@@ -3835,9 +3835,17 @@
         var token = state.settings?.["plugin.webui.api_key"] || "";
         html +=
           '<div style="font-size:12px;color:var(--text-muted);margin-bottom:10px">' +
-          __("插件服务经 HomeAgent 同一端口反代，按子域区分（基域名 ", "Proxied through the same port, keyed by subdomain (base ") +
-          escHtml(base) +
-          __("）。点「打开」直接访问。", "). Click Open to visit.") +
+          __(
+            "插件服务经 HomeAgent 同一端口反代。子域形态需要 DNS 能解析 ",
+            "Proxied through the same port. The subdomain form needs DNS for ",
+          ) +
+          "<b>" +
+          escHtml("*." + base) +
+          "</b>" +
+          __(
+            "；路径形态无 DNS 依赖，穿透场景下更可靠（点「打开」优先用它）。",
+            "; the path form has no DNS dependency and is more reliable behind a tunnel (Open prefers it).",
+          ) +
           "</div>";
         html += '<div class="svc-list">';
         svcs.forEach(function (s) {
@@ -3858,13 +3866,30 @@
                 "</span>"
               : "") +
             '<span class="svc-path">' + escHtml(s.host + "." + base) + "</span>";
-          if (s.ok && url) {
+          // 「打开」优先用**路径形态**（url_portal）：
+          //   - 它没有 DNS 依赖，单端口穿透 / 子域无证书时都能用；
+          //   - 子域形态要求 DNS 能解析 <host>.<基域名>，而这些域名
+          //     在外部常常不可达（实测：外层只放行一个 Host，三级子域
+          //     因通配证书不匹配而握手失败）。
+          // 保留子域链接作为次选（局域网内直连时它更直观）。
+          var primary = s.url_portal || url;
+          if (s.ok && primary) {
             html +=
               '<a class="btn btn-primary btn-sm" style="margin-left:auto" target="_blank" rel="noopener" href="' +
-              escHtml(url) +
+              escHtml(primary) +
               '">' +
               __("打开", "Open") +
               "</a>";
+            if (url && s.url_portal && url !== s.url_portal) {
+              html +=
+                '<a class="btn btn-ghost btn-sm" target="_blank" rel="noopener" title="' +
+                escHtml(url) +
+                '" href="' +
+                escHtml(url) +
+                '">' +
+                __("子域", "subdomain") +
+                "</a>";
+            }
           } else {
             html +=
               '<span class="svc-err" title="' +

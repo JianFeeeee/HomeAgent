@@ -732,7 +732,18 @@ func (h *Handler) listProxyServices(scheme, hostPort, portalHost, domain string)
 			if r.Path != "" {
 				// portalHostWithPort 保证端口恰好出现一次（见其注释：
 				// 生产实例的 Host 自带 :8080，直接追加会拼出 8080:8080）
-				e.URLPortal = fmt.Sprintf("%s://%s%s/", scheme, portalHostWithPort(portalHost, hostPort), r.Path)
+				//
+				// 尾斜杠只给**前缀模式**：那是它的规范形态（访问无尾斜杠会被
+				// 301 补上，见 redirectToTrailingSlash），而且路径形态的前端
+				// 靠它算相对路径基准。
+				// 别名模式**不能**加：那里的 path 是上游真实路径语义
+				// （/api/v1/device 是给 /api/v1/device/xxx 做前缀的），
+				// 补成 /api/v1/device/ 会让人以为有个可访问的根。
+				suffix := ""
+				if r.StripPath {
+					suffix = "/"
+				}
+				e.URLPortal = fmt.Sprintf("%s://%s%s%s", scheme, portalHostWithPort(portalHost, hostPort), r.Path, suffix)
 			}
 		}
 		out = append(out, e)
