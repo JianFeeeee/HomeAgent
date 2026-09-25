@@ -1129,6 +1129,27 @@ func (r *ConfigRegistry) ListPlugins() []string {
 	return names
 }
 
+// SetPluginConfig 在**插件表可能尚不存在**时写入一条插件配置。
+//
+// 与 PluginConfig(name).Set 的区别：后者要求表已存在（表由 RegisterDef 创建，
+// 而 RegisterDef 只在插件 Start 时调用）。这带来一个真实的时序缺口——
+// 内核想在**插件加载前**预置配置（测试要换监听端口、安装器要预置 data_dir
+// 之类的插件级项）时无从下手：直接 Set 会因表不存在而失败，且错误常被忽略。
+//
+// 本方法先确保表存在再写，填补该缺口。语义上等价于「预置 + RegisterDef 的
+// INSERT OR IGNORE 不会覆盖它」——即预置值优先于插件默认值，符合直觉。
+func (r *ConfigRegistry) SetPluginConfig(name, key string, value interface{}) error {
+	if name == "" || key == "" {
+		return fmt.Errorf("config: SetPluginConfig 需要非空的插件名与键")
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.ensurePluginTable(name)
+	table := r.pluginTableName(name)
+	_, err := r.db.Exec(fmt.Sprintf(`INSERT OR REPLACE INTO %s (key, value) VALUES (?, ?)`, table), key, fmt.Sprint(value))
+	return err
+}
+
 func (r *ConfigRegistry) PluginConfig(name string) *PluginSettings {
 	return &PluginSettings{
 		registry: r,

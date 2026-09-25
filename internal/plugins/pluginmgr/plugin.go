@@ -67,7 +67,15 @@ var downloadClient = &http.Client{
 	},
 }
 
-var HTTPAddr = "127.0.0.1:9876" // 监听地址，可被 settings 配置
+// defaultHTTPAddr 是 HTTP API 的**内置默认**监听地址。
+//
+// ★ 曾经这里是一个**包级可变全局** `var HTTPAddr`，且 Start() 会把 settings 读到的值
+// **反写**回该全局。两个真实后果：
+//   1. 多实例互相污染——测试并行起两个 Registry，后启动的实例会把地址写进全局，
+//      先启动那个的 startHTTPServer 读到的是别人的地址（实测与生产 homed 抢 9876）；
+//   2. 全局读写在并发下没有同步，属数据竞态。
+// 现在改为实例字段 p.httpAddr（默认值走本常量），不再有可被任意代码改写的包级状态。
+const defaultHTTPAddr = "127.0.0.1:9876"
 
 func init() {
 	plugin.RegisterPluginMeta("pluginmgr", "插件管理", "Plugin Manager")
@@ -83,12 +91,13 @@ type Plugin struct {
 	mux       *http.ServeMux
 	listen    net.Listener
 	httpURL   string
+	httpAddr  string // 本实例的监听地址（默认 defaultHTTPAddr；来自 settings）
 	sdk       *sdk.PluginSDK
 	pluginDir string
 }
 
 func New(name string) *Plugin {
-	return &Plugin{name: name, mux: http.NewServeMux()}
+	return &Plugin{name: name, mux: http.NewServeMux(), httpAddr: defaultHTTPAddr}
 }
 
 func (p *Plugin) Name() string { return p.name }
@@ -98,16 +107,19 @@ func (p *Plugin) Start(s *sdk.PluginSDK) error {
 	p.sdk = s
 	s.Settings().RegisterDef(sdk.ConfigDef{
 		Key:         "http_addr",
-		Default:     HTTPAddr,
+		Default:     defaultHTTPAddr,
 		Type:        "string",
 		DisplayName: "HTTP 监听地址",
-		Description: "插件管理 API 的监听地址，设为空可禁用 HTTP 服务",
-		Category:    "pluginmgr",
+		Description: "插件管理 API 的监听地址，设为空可禁用 HTTP 服务；" +
+			"填 127.0.0.1:0 让系统分配空闲端口（测试/多实例推荐）",
+		Category: "pluginmgr",
 	})
 
+	// 只写本实例字段，**不写任何包级状态**（见 defaultHTTPAddr 注释）。
+	p.httpAddr = defaultHTTPAddr
 	if v, _ := s.Settings().Get("http_addr"); v != nil {
-		if addr, ok := v.(string); ok && addr != "" {
-			HTTPAddr = addr
+		if addr, ok := v.(string); ok {
+			p.httpAddr = addr // 允许空串 = 显式禁用 HTTP 服务
 		}
 	}
 
@@ -119,7 +131,7 @@ func (p *Plugin) Start(s *sdk.PluginSDK) error {
 
 	p.registerTools(s)
 
-	if HTTPAddr != "" {
+	if p.httpAddr != "" {
 		p.startHTTPServer()
 	}
 
@@ -273,21 +285,34 @@ func (p *Plugin) startHTTPServer() {
 	p.mux.HandleFunc("/plugins", p.handlePlugins)
 	p.mux.HandleFunc("/plugins/", p.handlePluginByID)
 
-	listen, err := net.Listen("tcp", HTTPAddr)
+	listen, err := net.Listen("tcp", p.httpAddr)
 	if err != nil {
 		log.Printf("[pluginmgr] HTTP listen: %v", err)
 		return
 	}
+	// 用**实际绑定**的地址而非配置值：配 :0 时只有 net.Listener 知道真实端口。
+	// 这也让 httpURL 在多实例/测试下始终指向本实例真正监听的端点。
+	url := "http://" + listen.Addr().String()
+	p.mu.Lock()
 	p.listen = listen
-	p.httpURL = "http://" + listen.Addr().String()
+	p.httpURL = url
+	p.mu.Unlock()
 
 	p.server = &http.Server{Handler: p.mux}
 	go func() {
-		log.Printf("[pluginmgr] HTTP API on %s", p.httpURL)
+		log.Printf("[pluginmgr] HTTP API on %s", url)
 		if err := p.server.Serve(listen); err != nil && err != http.ErrServerClosed {
 			log.Printf("[pluginmgr] HTTP serve: %v", err)
 		}
 	}()
+}
+
+// HTTPURL 返回本实例实际监听的基地址（形如 http://127.0.0.1:9876）；
+// 未启动或禁用时返回空串。供诊断与需要知道“到底在哪个端口”的调用方使用。
+func (p *Plugin) HTTPURL() string {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.httpURL
 }
 
 func (p *Plugin) handlePlugins(w http.ResponseWriter, r *http.Request) {
