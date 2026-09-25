@@ -46,6 +46,14 @@ type Bridge struct {
 	info       map[string]interface{}
 	authorized bool // 客户端本地授权状态（用户在设备上手动开启）
 
+	// bound 表示服务端已确认 bind（设备真正登记进网关）。
+	// 与「连接已建立」是两件事：连接成功但 bind 被拒时设备是**失联**的，
+	// 必须能区分（原实现完全不看 bind_ack 的 ok，失败静默）。
+	mu2          sync.RWMutex
+	bound        bool
+	lastBind     string // 最近一次 bind 失败原因（空 = 未失败过）
+	boundHandler func(bound bool, reason string)
+
 	ws      *wsConn
 	stopCh  chan struct{}
 	doneCh  chan struct{}
@@ -137,6 +145,55 @@ func (b *Bridge) SetAuthorized(auth bool) {
 			},
 		})
 	}
+}
+
+// markBound 记录服务端已确认 bind。
+func (b *Bridge) markBound() {
+	b.mu2.Lock()
+	b.bound = true
+	b.lastBind = ""
+	h := b.boundHandler
+	b.mu2.Unlock()
+	if h != nil {
+		h(true, "")
+	}
+}
+
+// markUnbound 记录 bind 失败（连接可能随即被服务端关闭）。
+func (b *Bridge) markUnbound(reason string) {
+	b.mu2.Lock()
+	b.bound = false
+	b.lastBind = reason
+	h := b.boundHandler
+	b.mu2.Unlock()
+	if h != nil {
+		h(false, reason)
+	}
+}
+
+// Bound 返回服务端是否已确认 bind。
+//
+// 为什么要单独一个状态：连接成功 ≠ 设备可用。bind 被拒时 TCP/WS 是通的，
+// 但设备没有登记进网关，命令永远下发不到 —— 只看「连接是否建立」的
+// 健康检查会给出假阳性。
+func (b *Bridge) Bound() bool {
+	b.mu2.RLock()
+	defer b.mu2.RUnlock()
+	return b.bound
+}
+
+// BindError 返回最近一次 bind 失败原因（空 = 未失败）。
+func (b *Bridge) BindError() string {
+	b.mu2.RLock()
+	defer b.mu2.RUnlock()
+	return b.lastBind
+}
+
+// OnBoundState 注册绑定状态变更回调（GUI/waiter 据此提示用户）。
+func (b *Bridge) OnBoundState(handler func(bound bool, reason string)) {
+	b.mu2.Lock()
+	b.boundHandler = handler
+	b.mu2.Unlock()
 }
 
 // Authorized 返回当前客户端本地授权状态。
@@ -464,7 +521,33 @@ func (b *Bridge) handleMessage(msg map[string]interface{}) {
 		}
 
 	case "hello_ack", "bind_ack":
-		log.Printf("[devicebridge] %s device=%v", op, msg["device"])
+		// ★ 必须分别处理，且要判失败。
+		//
+		// 原实现只打一行 `device=%v`，而服务端**成功**时回的是
+		// {"op":"bind_ack","ok":true} —— 根本没有 device 字段，于是日志
+		// 永远显示 `bind_ack device=<nil>`。这会让人误判成「绑定失败」，
+		// 而实际上连接是好的（实测：同一现象经直连与经反代完全一致）。
+		//
+		// 更严重的是失败无人处理：服务端 bind 被拒时回
+		// {"op":"bind_ack","ok":false,"error":"bind rejected"} 并**关闭连接**，
+		// 客户端却既不报错也不重连，设备静默失联。
+		if op == "bind_ack" {
+			if ok, _ := msg["ok"].(bool); !ok {
+				reason, _ := msg["error"].(string)
+				if reason == "" {
+					reason = "bind rejected"
+				}
+				log.Printf("[devicebridge] bind 被拒：%s（令牌不匹配或设备未授权）", reason)
+				b.markUnbound(reason)
+				return
+			}
+			log.Printf("[devicebridge] bind 成功，设备已登记")
+			b.markBound()
+			return
+		}
+		dev, _ := msg["device"].(string)
+		online, _ := msg["online"].(bool)
+		log.Printf("[devicebridge] hello_ack device=%s online=%v", dev, online)
 
 	case "cmd_speech_start":
 		reqID, _ := msg["req_id"].(string)
