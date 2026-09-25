@@ -388,8 +388,17 @@ PluginContext（独立身份，共享管道）。
   写真实系统路径，且两处 `os.WriteFile(...)` **不检查 err** → 在 `/etc` 不可写的
   环境里静默失败，报 `expected restore to happen`（根因是测试，不是实现）。
   建议改用 `t.TempDir()` + 保留 `IsProtectedPath` 语义所需的显式前缀，并检查每步 err。
-- `internal/plugins/remotedevice/plugin.go:27` 固定端口 `127.0.0.1:9890`：测试沿用该
-  默认值，本机已有 homed 常驻监听。建议测试改用 `:0` 让 OS 分配。
+- `internal/plugins/remotedevice/plugin.go:27` 固定端口 `127.0.0.1:9890`；**同类还有**：
+  `pluginmgr` 的 `127.0.0.1:9876`（`pluginmgr/plugin.go:70`，且是**包级可变全局**
+  `var HTTPAddr`，多实例互相踩）、webui 的 `:8080`。
+  ★ 实测（2026-09-25 A/B 对照）：`internal/plugins` 连跑 20 轮，**干净树（无 C 化改动）
+  也复现 2 次失败**（`bind: address already in use` + `signal: terminated`）
+  ⇒ 既有 flaky，与 C 化无关。建议测试改用 `:0` 让 OS 分配。
+- **`TestRealPlugin_DeepSearchInvoke` 依赖外部服务，上游限流即红**：
+  `deepsearch_e2e_test.go` 打 `127.0.0.1:8888` 的 SearXNG；实测失败报错为
+  `brave(Suspended: too many requests), duckduckgo(CAPTCHA), google cse(...)`
+  ⇒ **外部依赖**，不是代码缺陷。干净树同样复现（2/20）。
+  建议区分「服务不可达（skip）」与「真功能回归（fail）」，别把限流当回归。
 - **PTY 三例的 skip 判据是坏的（真缺陷，不只是卫生）**：`integration_test.go`
   284/337/395 查 `resp["status"] == "error"`，而 `terminal_create` 失败时返回
   `{"error": "创建终端失败: ..."}`（`internal/plugins/agentcli/plugin.go:496`）——
@@ -456,192 +465,6 @@ PluginContext（独立身份，共享管道）。
 处理的正是**长文本**，是 C 的主场，比「把短函数搬过去」更合理。
 但其前置是 JSON 解析 ⇒ 先定 `ha_json.c` 复用还是新写。
 
-## 三、已关闭 / 已实现（旧档误标或本轮更正，防复活）
-
-逐条给出「旧档怎么说」与「实际怎样」。
-
-### 1. §13.12 L3 原生多模态 —— 已实现
-- 实际：`internal/memory/graph.go:169` 起建 `memory_blocks`
-  （含 `modality/payload_digest/mime/vector/fingerprint/scene`）+
-  `memory_block_edges`（`source_kind/target_kind/edge_type`），以及
-  `scenes`/`scene_features`/`scene_refs`；`internal/agent/core/graphmedia.go`（310 行）
-  实现 `migrateLegacyGraphMedia`/`attachBlocksToSentence`/`linkBlocksToDocument`/
-  `commitTriplesWithMedia`；`graphmedia_test.go` 21 个测试。
-- 结论：**关闭**
-
-### 2. §13.9 llmsproxy 上下文溢出感知 —— 不属本仓（见 §五.1）
-
-### 3. §13.10 AgentMail 三个 bug —— 不属本仓（见 §五.2）
-
-### 4. §11.4 Lua stage 快照缺读锁（DATA RACE）—— 已修
-- 实际：`internal/plugin/proc/shmcodec.go:42` 的 `WriteAll` 已在 `captureLocal`
-  前后持 `sc.RLock()/RUnlock()`；`go test -race ./internal/lua/... ./internal/plugin/...` 全绿
-- 结论：**关闭**
-
-### 5. §12.2 `io.setToolBlocks` 内核侧是桩 —— 已实现
-- 实际：`internal/plugin/proc/corehandler_inject.go:132` 实现
-  `MethodIOSetToolBlocks`；模板 `putArena` → `blocks_ref`；
-  `e2e_template_test.go:371` 用**真实 SDK 模板**验证
-- 结论：**关闭**
-
-### 6. §13.11 WebUI 修复清单 —— 主体已实现，仅剩 P1-7
-- 逐项核实：`Last-Event-ID` 重放（`handler_chat.go:710`）、请求超时
-  （`handler_chat.go:592` 等 300s）、XSS 消毒（`dashboard.js:252` DOMPurify）、
-  `renderAll` 增量（`dashboard.js:34 / :452 / :1361` 增量游标 + 流式增量）、
-  `handleKnowledge` 不再吞错（`handler_memory.go:122` 起逐分支返回错误）、
-  CSS/DesignSystem（`dashboard.css:3` 起 sakura/frost 令牌）、
-  GUI 重构（`cmd/gui/renderer/app.js`）—— 均已落地。
-- 仅 `handleAgentAction` 501 是真缺口（已列 P1-7）
-
-### 7. Windows 支持 —— **已设计性放弃**（旧档 P2-8 与 C 化 §2.3 的前提均据此更正）
-- 旧档说：「Windows 桩已收敛，但缺真机验证」（把它当待办）
-- 实际：`cmd/homed/platform_windows.go` 明确**原生 Windows 拒绝启动**并给 WSL2 指引。
-  原因写入注释：插件体系依赖「继承的 fd」+「统一共享内存区的段内偏移解引用」，
-  Windows 句柄模型无法表达；强适等于再维护一套平台专属 ABI（C ABI 时代三套 ABI
-  并存曾致改写型插件静默失效）。
-- 配套：`internal/plugin/proc/shmalloc_windows.go` 的 `allocShm` 直接报错不返回半可用段；
-  `deploy/packaging/windows/install-via-wsl.ps1`（新）引导 WSL2 并复用 Linux 包；
-  `build.sh` windows 目标**只构建 waiter + gui**，homed/initconfig 明确拒绝
-  （见 `build.sh:257-267`）。
-- 实测佐证：`GOOS=windows GOARCH=amd64 CGO_ENABLED=0 go build ./cmd/waiter` 成功
-  （12MB .exe）；`homed` 无论如何都编不出 Windows（`internal/memory` 依赖 cgo-only 的
-  `gojieba`）。
-- 结论：**关闭**（该项不是待办；Windows 的正确验收 = WSL2 内按 Linux 路径跑，
-  与 Linux 目标同一条流水线）
-
-### 8. 仓库卫生：PTY 三例的 FAIL —— 环境相关 + skip 判据失效（旧档 P2-10）
-- 旧档说：`go test ./...` 有 3 个 FAIL（PTY 三例 / 端口 9890 冲突 / `system_test` 写 `/etc`）
-- 本轮实测（分时）时：
-  - `go test -count=1 ./...` → **57 包：38 ok + 19 无测试文件 + 0 FAIL**
-  - PTY 三例**本就有 skip 意图**（`integration_test.go:284/337/395` 的
-    `t.Skipf("PTY not available: ...")`），且 `/dev/ptmx` 可用时正常通过（连跑 3 次均 ok）
-  - **但该 skip 的判据是坏的**：它查 `resp["status"] == "error"`，而插件失败时返回的是
-    `{"error": "创建终端失败: ..."}`（`internal/plugins/agentcli/plugin.go:496`）——
-    **键名不匹配**，于是真遇到无 PTY 权限的环境会走到 `t.Fatalf` 而非 skip。
-    这是「探测存在但失效」的典型：比没有探测更隐蔽
-  - `TestRestoreFileFromBaseline` 在 `/etc` 可写时 **PASS**（`system_test.go:83` 确实
-    写真实路径且不检查 err——**代码确实不干净**，但它不构成「稳定 FAIL」）
-  - `9890` 端口**确有占用**（本机 homed 常驻监听），但测试用 `setupIntegration`
-    起的实例未与之冲突（连跑 3 次均 ok）
-- 结论：**旧档的记录在当时是真的**（环境退化：ptmx 无权限 + 端口被占），
-  环境恢复后自然全绿。但**两个真缺陷存留**：① skip 判据键名不匹配（探测失效，
-  退化时硬 FAIL）；② 测试依赖固定端口。两条已列 §六，不列为「待办功能项」。
-
----
-
-## 四、生产部署后验证（代码已就绪，本就无法在仓库内完成）
-
-这些**不是待开发项**，是「必须落到生产实例才能确认」的验收。仓库内有
-`scripts/verify_deploy.sh [data_dir]` 可一键检查前两条。
-
-- [ ] **§0.1 healthcheck 隔离**：部署后 `knowledge/`、`memory/graph.db`、
-      `memory/documents/` 不再出现 `_hc_*` 残留
-- [ ] **图记忆去重**：`relations` 重复率归零，跑一周不新增重复
-- [ ] **§13.5 / §13.6 QQ 端到端**：真实 QQ 消息注入与输出经共享内存通道正常
-      （小 payload 内联、大 payload 走 `text_ref`/`frame`）
-- [ ] **§0.2 agentcli 不泛滥**：QQ 消息在 agentcli 无自喂送风暴时能被正常响应
-
----
-
-## 五、跨项目工单（**不属本仓**，旧档误并入）
-
-旧 plan.md 把别仓的工单写成本仓 TODO，导致「查无此代码却挂着未完成」。移出并说明归属：
-
-### 1. §13.9「llmsproxy 上下文溢出感知」
-- 旧档写：补 `OVERFLOW_PATTERNS`（"Context window is full"）、AUTO 截断宽度 `80→160`、
-  `go test ./internal/ai/...`
-- 事实：本仓**没有 `internal/ai/`**；相关符号在 **`/home/program/llmsproxy`**
-  （`internal/gateway/chat.go`）。本仓 `internal/agent/api/provider.go` 只**消费**
-  该网关（注释里提到 "llmsproxy 的 AUTO 链"，:361）
-- 现状：该仓已把宽度改成 160
-- 归属：**llmsproxy 仓**
-
-### 2. §13.10「AgentMail 三个 bug」
-- 旧档写：提示词修正 / `InReplyTo` / `relay_key ≤ 64 字节`
-- 事实：AgentMail 是独立仓 **`/home/program/agentmail`**
-  （`relay_key` 见 `server/internal/handler/permission.go`）。本仓
-  `grep relay_key\|InReplyTo` **零命中**
-- 归属：**agentmail 仓**
-
-> 若这两仓也要纳入统一管理，应各自建 plan，不要塞进本仓文档。
-
----
-
-## 六、明确「不做」与「建议修但不阻塞」
-
-### 不做（防反复挂账）
-
-- **§13.13 反向结果入共享内存**：本仓**不存在 `llm.chat`**（`llm.*` 只映射
-  listSources/setSource/currentSource）；唯一可能返回大结果的 `doc.query` 被
-  `CapDocMemory` 能力门挡着，且无外部插件使用。**不做**。
-- **Windows 原生适配**：见 §三.7，**设计上不做**。
-
-### 建议修但不阻塞（测试卫生，非当前 FAIL）
-
-- `internal/system/system_test.go:83`：`target := "/etc/RestoreFileFromBaseline.test.tmp"`
-  写真实系统路径，且两处 `os.WriteFile(...)` **不检查 err** → 在 `/etc` 不可写的
-  环境里静默失败，报 `expected restore to happen`（根因是测试，不是实现）。
-  建议改用 `t.TempDir()` + 保留 `IsProtectedPath` 语义所需的显式前缀，并检查每步 err。
-- `internal/plugins/remotedevice/plugin.go:27` 固定端口 `127.0.0.1:9890`：测试沿用该
-  默认值，本机已有 homed 常驻监听。建议测试改用 `:0` 让 OS 分配。
-- **PTY 三例的 skip 判据是坏的（真缺陷，不只是卫生）**：`integration_test.go`
-  284/337/395 查 `resp["status"] == "error"`，而 `terminal_create` 失败时返回
-  `{"error": "创建终端失败: ..."}`（`internal/plugins/agentcli/plugin.go:496`）——
-  键名不匹配 ⇒ 真遇到无 PTY 权限的环境**会 `t.Fatalf` 而非 skip**。
-  同类型：其他依赖工具错误响应的环境探测（应统一认 `error` 键）。
-- 同类审计：其他「写真实系统路径且吞错误」的测试。
-
----
-
-## 七、C 化：已定事项与待拍板事项
-
-第一刀（L1 纯函数层）已落地并闭环（见 §二 P0-1 与
-`docs/zh/c-core/llm-orchestration-c.md`）。下阶段扩大前，有三处**需 jianf 拍板**：
-
-1. **C 实现放主仓 `csrc/` 还是 SDK `third_party/homeagent-sdk/`？**
-   - 当前已在主仓 `csrc/`（`ha_codec.{c,h}` 是权威源，Go 侧符号链接过去）
-   - 若 SDK / 鸿蒙 / C SDK 侧也要复用，需定同步机制；搬进 SDK 则要走 SDK 冻结流程
-2. **`ha_json.c` 复用还是新写？**（复用会动 SDK 目录结构）
-   - 这是下一个切片的**前置**：L1 剩下的协议编解码（`parseOpenAICompatible*`、
-     `normalize*ToolCalls`）全部依赖 JSON 解析，不定就推不下去
-3. **下一个切片选谁？**（已有基准数据支撑，见下）
-
-### ★ 已定：跨语言开销基线已补齐（2026-09-25）
-
-原本文写「需先有真实延迟基线（当前没有）」——现已补上
-（`internal/agent/api/codec_bench_test.go`）。数据**反驳了「C 比 Go 快」的直觉**：
-
-| 基准 | C（经 cgo）| 纯 Go | 谁快 |
-|---|---:|---:|---|
-| `ModelContextWindow`（短 ASCII）| 175 ns | 38 ns | **Go 快 4.6×** |
-| `EstimateTokens` / 空串 | 100 ns | 0.43 ns | **Go 快 230×** |
-| `EstimateTokens` / 短中文 | 100 ns | 29 ns | **Go 快 3.4×** |
-| `EstimateTokens` / 中 200 字 | 229 ns | 509 ns | C 快 2.2× |
-| `EstimateTokens` / 1KB 中文 | 840 ns | 2870 ns | C 快 3.4× |
-| `EstimateTokens` / 1KB ASCII | 2318 ns | 332 ns | **Go 快 7×** |
-| `TruncateByTokens` / 短中文 | 233 ns | 54 ns | **Go 快 4.3×** |
-
-三条结论：
-1. **cgo 固定开销约 95–100 ns/次**，小输入下完全压倒算法差异
-2. C 只在**长中文**（UTF-8 步进重）上领先；长 ASCII 反而 Go 快 7×
-3. ⇒ 判据应是「**哪个在真实输入分布下真能变快**」，不是「哪个看起来更底层」
-
-**对现有三个函数的影响（实测调用分布）**：
-
-- `EstimateTokens` 的**真高频点在 `process.go:476` 的逐事件循环**
-  （对每条上下文事件算 `Source + Input + 40`）。实测字段分布：
-  - `Source` 是**短标签**（`"qq"` / `"webui"`），按上表属 **Go 快 17×** 那一档
-  - `Input` / `Response` 是**对话文本，长度跨度大**：长中文 C 快 2–3.4×，
-    短文本与长 ASCII 则 Go 快 3–7×
-  ⇒ 该循环**没有单一答案**：当前一刀切走 C 会让 `Source` 这类短串净亏。
-  待办：若长会话下该循环累积可观，应改为**按长度分派**（短走 Go、长中文走 C），
-  但**先用 `-bench` 复测真实长度分布再定**，不要凭此处推测动手。
-- `ModelContextWindow`（`provider.go:333`）与 `TruncateByTokens`（`tooldefs.go:38`）
-  调用点单一、非热路径，175/233 ns 在单次请求尺度上无关痛痒。
-
-⇒ **这不否定 C 化方向**：协议编解码（JSON 解析、SSE 分片）处理的正是长文本，
-那才是 C 的主场，也是比「把短函数搬过去」更合理的下一步。
-
 ### 已定事项（不再挂账）
 
 - **不保留回退路径**：编解码层**要求 cgo 才能编译**（无 `!cgo` 文件）。
@@ -665,8 +488,7 @@ PluginContext（独立身份，共享管道）。
   （它本身也已零分配化：去掉 `[]rune` 的 4×len 临时分配。）
 - **不链接预构建 `.a`，也不用包外 `#include`**（前者架构错 + 产物两头空，
   后者缓存漏跟踪）。用包内符号链接，理由与实测见 §二 P0-1 与设计文档 §2.4。
-- **不链接预构建 `.a`，也不用包外 `#include`**（前者架构错 + 产物两头空，
-  后者缓存漏跟踪）。用包内符号链接，理由与实测见 §二 P0-1 与设计文档 §2.4。
+
 
 ---
 
