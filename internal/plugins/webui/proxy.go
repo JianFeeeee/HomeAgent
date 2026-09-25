@@ -428,6 +428,78 @@ func portalHostWithPort(host, hostPort string) string {
 	return h + p
 }
 
+// baseURLSetting 读外部入口 base_url 设置（空 = 未配置，按请求推导）。
+func baseURLSetting(settings sdk.SettingsAPI) string {
+	if settings == nil {
+		return ""
+	}
+	v, err := settings.Get("base_url")
+	if err != nil || v == nil {
+		return ""
+	}
+	s, _ := v.(string)
+	return strings.TrimRight(strings.TrimSpace(s), "/")
+}
+
+// resolveEntry 解析「对外入口」的 scheme / host（含端口）/ 子域基域名。
+//
+// 三级优先，因为每种来源在不同部署下才可靠：
+//
+//  1. **配置项 base_url**（最可靠）。经 frp/nginx 穿透时，请求可能带内网
+//     Host、或缺失协议，按请求推导会拼出用户点不开的链接。填了 base_url
+//     就一律以它为准 —— 这是「webui 应当支持配置 baseurl」的直接诉求：
+//     外部入口是**部署事实**，服务端不该靠猜。
+//
+//  2. **X-Forwarded-Proto / X-Forwarded-Host**（反代层正确设置时可靠）。
+//     实测本项目外层 nginx/WAF 会带 X-Forwarded-Proto=https 与
+//     X-Forwarded-Host=<外部域名>，于是不需要任何配置也能推出正确链接。
+//
+//  3. **请求自身**（直连时的正确来源）。
+//
+// 返回的 host 保证端口恰好出现一次（见 portalHostWithPort）。
+func (h *Handler) resolveEntry(r *http.Request) (scheme, host, domain string) {
+	_, port := h.proxySchemeAndPort(r)
+
+	if bu := baseURLSetting(h.settings); bu != "" {
+		if u, err := url.Parse(bu); err == nil && u.Host != "" {
+			scheme = u.Scheme
+			if scheme == "" {
+				scheme = "https"
+			}
+			host = u.Host // 已含端口（若有）
+			// base_url 的**主机名**就是子域反代的基域名：外部入口是
+			// homeagent.example.com 时，插件服务自然是 <标签>.homeagent.example.com。
+			domain = u.Hostname()
+			return scheme, host, domain
+		}
+	}
+
+	if p := r.Header.Get("X-Forwarded-Proto"); p != "" {
+		scheme = strings.ToLower(strings.TrimSpace(strings.Split(p, ",")[0]))
+	} else if r.TLS != nil {
+		scheme = "https"
+	} else {
+		scheme = "http"
+	}
+	if fh := r.Header.Get("X-Forwarded-Host"); fh != "" {
+		// 外层给了权威 Host：它的主机名即基域名。
+		host = portalHostWithPort(strings.TrimSpace(strings.Split(fh, ",")[0]), port)
+		if hn := hostnameOf(host); hn != "" {
+			return scheme, host, hn
+		}
+	}
+	host = portalHostWithPort(r.Host, port)
+	return scheme, host, proxyBaseDomain(h.settings)
+}
+
+// hostnameOf 去掉端口，返回纯主机名。
+func hostnameOf(hostport string) string {
+	if h, _, err := net.SplitHostPort(hostport); err == nil {
+		return h
+	}
+	return hostport
+}
+
 // matchProxyPath 按**最长前缀**匹配路径挂载的服务。
 //
 // 边界要卡在路径分隔符上：/api/v1/device 不能匹配 /api/v1/devicefoo
@@ -574,7 +646,15 @@ type proxyServiceEntry struct {
 
 // listProxyServices 汇总反代服务清单（含被拒条目，供配置页排错）。
 // schemePort 由调用方按当前请求推导（本机 http:8080 / 远程 https:443 等）。
-func (h *Handler) listProxyServices(scheme, hostPort, portalHost string) []proxyServiceEntry {
+// portOf 从 host:port 里取 ":port"（无端口返回空串）。
+func portOf(hostport string) string {
+	if _, p, err := net.SplitHostPort(hostport); err == nil {
+		return ":" + p
+	}
+	return ""
+}
+
+func (h *Handler) listProxyServices(scheme, hostPort, portalHost, domain string) []proxyServiceEntry {
 	t := currentProxyTable()
 	metas := map[string]sdk.PluginMeta{}
 	if h.pluginMgr != nil {
@@ -600,7 +680,11 @@ func (h *Handler) listProxyServices(scheme, hostPort, portalHost string) []proxy
 			e.PluginZh = r.Plugin
 		}
 		if r.Err == "" {
-			e.URL = fmt.Sprintf("%s://%s.%s%s", scheme, r.Host, t.base, hostPort)
+			baseForSub := t.base
+			if domain != "" {
+				baseForSub = domain
+			}
+			e.URL = fmt.Sprintf("%s://%s.%s%s", scheme, r.Host, baseForSub, hostPort)
 			if r.Path != "" {
 				// portalHostWithPort 保证端口恰好出现一次（见其注释：
 				// 生产实例的 Host 自带 :8080，直接追加会拼出 8080:8080）
@@ -797,12 +881,8 @@ func (h *Handler) handleProxyServices(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
-	scheme, port := h.proxySchemeAndPort(r)
-	portalHost := portalHostWithPort(r.Host, port)
-	if hh := r.Header.Get("X-Forwarded-Host"); hh != "" {
-		portalHost = portalHostWithPort(strings.TrimSpace(strings.Split(hh, ",")[0]), port)
-	}
-	svcs := h.listProxyServices(scheme, port, portalHost)
+	scheme, portalHost, domain := h.resolveEntry(r)
+	svcs := h.listProxyServices(scheme, portOf(portalHost), portalHost, domain)
 	// 可达性探测：并发带超时，避免一个坏上游拖住整个清单。
 	var wg sync.WaitGroup
 	for i := range svcs {
@@ -819,15 +899,21 @@ func (h *Handler) handleProxyServices(w http.ResponseWriter, r *http.Request) {
 		}(&svcs[i])
 	}
 	wg.Wait()
-	base := "localhost"
-	if h.settings != nil {
-		base = proxyBaseDomain(h.settings)
+	// base_domain 优先报告**推导出的基域名**（base_url / X-Forwarded-Host /
+	// 配置项），它是前端拼子域链接的依据；只有推导不出时才回落配置项。
+	base := domain
+	if base == "" {
+		base = "localhost"
+		if h.settings != nil {
+			base = proxyBaseDomain(h.settings)
+		}
 	}
 	writeJSON(w, http.StatusOK, map[string]interface{}{
 		"services":    svcs,
 		"base_domain": base,
 		"scheme":      scheme,
-		"port":        port,
+		"port":        portOf(portalHost),
+		"entry_url":   scheme + "://" + portalHost,
 	})
 }
 
@@ -888,7 +974,11 @@ func (h *Handler) handleDeviceGatewayDiscovery(w http.ResponseWriter, r *http.Re
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
-	scheme, port := h.proxySchemeAndPort(r)
+	// 用 resolveEntry 而非 proxySchemeAndPort：前者认得 base_url 与
+	// X-Forwarded-*，能给出**外部可点**的入口；后者只看请求自身，
+	// 穿透场景下会拼出内网地址。
+	scheme, portalHost, domain := h.resolveEntry(r)
+	port := portOf(portalHost)
 	wsScheme := "ws"
 	if scheme == "https" {
 		wsScheme = "wss"
@@ -923,15 +1013,14 @@ func (h *Handler) handleDeviceGatewayDiscovery(w http.ResponseWriter, r *http.Re
 	//                 无任何 DNS 依赖，永远可解析 ⇒ 设备客户端的正确选择。
 	//
 	// 两者都是「同一个端口」，单端口穿透的前提不受影响。
-	out["host"] = route.Host + "." + t.base
-	out["url"] = wsScheme + "://" + route.Host + "." + t.base + port + "/api/v1/device/ws"
-	out["http_url"] = scheme + "://" + route.Host + "." + t.base + port
-	// 门户同源形态：用**客户端实际访问用的 host**，保证它一定能解析。
-	// portalHostWithPort 负责让端口恰好出现一次（Host 可能已带端口）。
-	portalHost := portalHostWithPort(r.Host, port)
-	if h := r.Header.Get("X-Forwarded-Host"); h != "" {
-		portalHost = portalHostWithPort(strings.TrimSpace(strings.Split(h, ",")[0]), port)
+	baseForSub := t.base
+	if domain != "" {
+		baseForSub = domain
 	}
+	out["host"] = route.Host + "." + baseForSub
+	out["url"] = wsScheme + "://" + route.Host + "." + baseForSub + port + "/api/v1/device/ws"
+	out["http_url"] = scheme + "://" + route.Host + "." + baseForSub + port
+	// 门户同源形态：portalHost 已由上面的 resolveEntry 给出（外部可点的入口）。
 	if route.Path != "" {
 		// 声明了路径挂载 ⇒ 门户同源形态就是它（无 DNS 依赖，设备客户端首选）
 		out["url_portal"] = wsScheme + "://" + portalHost + route.Path + "/ws"
