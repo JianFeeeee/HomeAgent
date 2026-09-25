@@ -205,6 +205,18 @@ func main() {
 	}
 
 	if oneShotMsg != "" {
+		// ★ -chat 是一次性问答，会立刻走到上面的 return 并触发
+		// defer stopDeviceBridge()，桥的生命周期只有几百毫秒。
+		//
+		// 后果：设备来不及完成 hello→bind 登记就已断开，服务端列表里永远
+		// 看不到它（实测：`device bridge active` 打印了、bind_ack 也收到了，
+		// 但 /api/v1/device/online 始终为空）。
+		// 这不是桥的错 —— 用裸客户端把 hello/bind 发完并保持连接，同一实例
+		// 上设备立刻出现在列表里（已验证）。
+		//
+		// 等待 bind 确认（或短暂超时）再退出：既让登记完成，也不把一次性
+		// 命令拖长。bind 失败要明说，而不是静默丢掉设备。
+		waitDeviceBind(3 * time.Second)
 		oneshot(state, oneShotMsg)
 		return
 	}
@@ -498,4 +510,27 @@ func printServerEventColored(rl respLine, raw string) {
 		}
 		fmt.Printf("%s%s%s\n", clearLine, text, colorReset)
 	}
+}
+
+// waitDeviceBind 等待服务端确认 bind（最多 timeout），返回是否确认。
+//
+// 用于一次性命令（-chat）：桥启动后立刻退出会让设备来不及登记。
+// 超时不报错（服务端可能只是慢），bind 明确被拒则打出来 —— 那通常意味着
+// 设备令牌不对或设备未授权，用户需要知道，而不是以为「桥起来了就好了」。
+func waitDeviceBind(timeout time.Duration) bool {
+	if deviceBridge == nil {
+		return false
+	}
+	deadline := time.Now().Add(timeout)
+	for time.Now().Before(deadline) {
+		if deviceBridge.Bound() {
+			return true
+		}
+		if reason := deviceBridge.BindError(); reason != "" {
+			printlnC(colorYellow, "device bridge bind rejected: "+reason)
+			return false
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	return deviceBridge.Bound()
 }
