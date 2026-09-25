@@ -810,6 +810,11 @@ const devOs = require("os");
 let deviceBridge = null; // 当前活动设备桥
 let deviceBridgeId = ""; // 设备 meta device_id（hello 后可用于 cmd_result）
 let deviceBridgeAddr = ""; // 设备桥网关地址
+
+// 设备桥的**登记**状态（与"连接已建立"是两件事）。
+// 连接成功但 bind 被拒时设备是失联的，只看 connected 会给出假阳性。
+let deviceBridgeBound = false;
+let deviceBridgeBindError = "";
 // 音频/媒体接收聚合缓冲（服务端分块推送二进制→聚合→播放）
 let speechAccum = null;
 
@@ -1252,9 +1257,33 @@ function onDeviceMsg(msg) {
     } catch (e) {
       console.log("[device-bridge] exec error: " + e.message);
     }
-  } else if (op === "hello_ack" || op === "bind_ack") {
+  } else if (op === "bind_ack") {
+    // ★ bind 结果必须判 ok —— 与鸿蒙端（DeviceBridge.ets:209）对齐。
+    //
+    // 原实现与 Go 客户端同病：只打一行日志、不看 ok。服务端 bind 被拒时回
+    // {"ok":false,"error":"bind rejected"} 并**关闭连接**，GUI 却既不报错也
+    // 不重连，设备静默失联 —— TCP/WS 通但从未登记进网关，命令永远下发不到。
+    //
+    // 另：成功时服务端**不含 device 字段**，原日志靠 `msg.device || deviceBridgeId`
+    // 兜底才显示得像成功，掩盖了「没有真的读 ok」这件事。
+    const accepted = msg.ok === true;
+    deviceBridgeBound = accepted;
+    if (accepted) {
+      console.log("[device-bridge] bind_ok device=" + deviceBridgeId);
+    } else {
+      deviceBridgeBindError = String(msg.error || "bind rejected");
+      console.error(
+        "[device-bridge] bind rejected: " +
+          deviceBridgeBindError +
+          "（设备令牌不匹配或设备未授权）",
+      );
+    }
+    try {
+      rebuildTrayMenu();
+    } catch (e) {}
+  } else if (op === "hello_ack") {
     console.log(
-      "[device-bridge] " + op + " device=" + (msg.device || deviceBridgeId),
+      "[device-bridge] hello_ack device=" + (msg.device || deviceBridgeId) + " online=" + msg.online,
     );
     try {
       rebuildTrayMenu();
@@ -2080,6 +2109,8 @@ function argsSafe(cmd) {
 //   url 可为 ws(s)://完整端点（含路径），token 为网关 ws_token。
 async function startDeviceBridge(cfg) {
   if (!cfg) return;
+  deviceBridgeBound = false;
+  deviceBridgeBindError = "";
   const url = cfg.url || cfg.gateway || "";
   const token = cfg.apiKey || cfg.token || "";
   if (!url || !token) {
