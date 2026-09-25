@@ -391,13 +391,30 @@ func (p *Process) markExited() {
 			ch <- &Response{Error: ErrProcessExited.Error()}
 		}
 
-		close(p.exited)
+		// ★ 顺序至关重要：onExit 必须在 close(p.exited) **之前**完成。
+		//
+		// onExit（内核侧即 Plugin.handleExit）会调 Host.ReclaimOwner 回收该插件
+		// 残留的共享槽——**那是要读共享内存区域的**。而 exited 一关闭，
+		// Stop()/Kill() 就返回，StopAll 随即返回，调用方（Host.Close）立刻
+		// freeShm 解除映射；若此刻 onExit 还没跑完，ReclaimOwner 就成了读
+		// 已 munmap 的内存 —— SIGSEGV（recover 捕不到，直接杀进程）。
+		//
+		// 实测崩溃栈（2026-09-25，全量 go test 偶发）：
+		//   readLoop(process.go:334) → markExited → once.Do
+		//     → onExit → handleExit → Host.ReclaimOwner
+		//       → arenaRegion.ReclaimOwner → blockBase → getU32 → SIGSEGV
+		//
+		// 因此 exited 的语义是「**完全**收尾完毕」，而不是「进程已死」：
+		// 任何等待者（Stop/Kill/CallContext/Alive）在它关闭后都可以安全地
+		// 释放共享内存、卸载资源。
 		if p.sup != nil {
 			p.sup.untrack(p.name)
 		}
 		if p.onExit != nil {
 			p.onExit(p.name, p.ExitError())
 		}
+
+		close(p.exited)
 	})
 }
 
