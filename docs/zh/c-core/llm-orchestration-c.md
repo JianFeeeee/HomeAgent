@@ -278,50 +278,66 @@ C 化的正确性**不能靠「跑起来没崩」**，必须有可复现的对�
 3. **下一个切片选谁**？L1 剩下的是协议编解码（`parseOpenAICompatible*`、
    `normalize*ToolCalls` 等，见 §三 L1 表）；该层依赖 JSON 解析 ⇒ 先解第 2 题。
 
-### 7.1 ★ 跨语言开销基线（实测已补，2026-09-25）
+### 7.1 ★ 性能：初版结论是错的，根因是我的绑定与 C 实现
 
-原 §七 写着「需先有真实延迟基线，当前没有」。现已补上
-（`internal/agent/api/codec_bench_test.go`，`go test -bench`）：
+**初版结论「C 比 Go 慢」不成立** —— 那是把「我自己的 malloc/拷贝开销」误当成了
+「cgo 的固有成本」。拆解实测（同一台机，`-benchtime` 百万次）：
 
-| 基准 | C（经 cgo）| 纯 Go | 谁快 |
-|---|---:|---:|---|
-| `ModelContextWindow`（短 ASCII）| 175 ns | 38 ns | **Go 快 4.6×** |
-| `EstimateTokens` / 空串 | 100 ns | 0.43 ns | **Go 快 230×** |
-| `EstimateTokens` / 短 ASCII | 115 ns | 6.5 ns | **Go 快 17×** |
-| `EstimateTokens` / 短中文 | 100 ns | 29 ns | **Go 快 3.4×** |
-| `EstimateTokens` / 中200字 | 229 ns | 509 ns | C 快 2.2× |
-| `EstimateTokens` / 1KB 中文 | 840 ns | 2870 ns | C 快 3.4× |
-| `EstimateTokens` / 1KB ASCII | 2318 ns | 332 ns | **Go 快 7×** |
-| `TruncateByTokens` / 短中文 | 233 ns | 54 ns | **Go 快 4.3×** |
-| `TruncateByTokens` / 1KB 中文 | 3923 ns | 6918 ns | C 快 1.8× |
+| 场景 | ns/op | 说明 |
+|---|---:|---|
+| cgo 边界（零拷贝传指针 + 空函数体）| **31.9** | cgo 的**真实**固有成本 |
+| + 一次 `C.CString` + C 侧 `strlen` | 105–111 | **多出 ~75ns（70%）** |
+| 初版 `ModelContextWindow`（另加 `lower_dup` malloc + 16×strstr）| **175** | 即 **82% 是自找的** |
 
-**结论（不要凭直觉，数据说话）**：
+而初版**违反了自己写在本文 §四 的接口原则第 1 条**：
+「C 接口只吃 `const char*` **+ 长度**」—— 它没传长度，让 C 侧 `strlen` 再扫一遍。
 
-1. **cgo 的固定开销约 95–100 ns/次**，小输入下完全压倒算法差异。
-2. C 只在**长中文**（rune 密集、UTF-8 步进重）上明显领先；
-   长 ASCII 反而 Go 快 7×（Go 的 `utf8.RuneCountInString` 对 ASCII
-   有快路径，而 C 侧逐字节跑）。
-3. ⇒ **「C 比 Go 快」是错的**；正确表述是「在特定输入分布上更快」。
+#### 优化措施（逐项对应上表的浪费）
 
-**对函数的建议（按调用分布）**：
+| # | 初版做法 | 现在 |
+|---|---|---|
+| 1 | `C.CString`（malloc + 整串拷贝）| `unsafe.StringData` 传指针 + 长度，**零拷贝** |
+| 2 | C 侧 `strlen` 再扫一遍 | 长度由调用方传入，**不扫** |
+| 3 | `truncate` malloc 输出缓冲 + `GoStringN` 拷回 | C 只返回**字节数**（结果必是前缀），Go 侧 `s[:n]` 切片 |
+| 4 | `lower_dup` 每次 malloc 模型名 | 栈缓冲折叠（超长走零分配回退） |
+| 5 | 逐字节 `utf8_next` 函数调用 | **字级（8 字节）ASCII 检测** + 位运算 UTF-8 校验 |
+| 6 | `truncate` 扫完整串才判断 | **数满 keep 个 rune 立即返回**（提前短路） |
+| 7 | 纯 Go 侧 `len([]rune(s))` / `[]rune(s)`（1KB 分配 4KB）| `utf8.RuneCountInString` / `DecodeRuneInString` 游走，**零分配** |
 
-- `ModelContextWindow`：调用点单一（`provider.go:333`，每请求一次），
-  且输入是**短 ASCII** ⇒ 拿不到收益。但它应该是**冷路径**，
-  175 ns 在单次请求尺度上无关痛痒——关键是别把它放到循环里。
-- `EstimateTokens`：**真正的高频点**在 `process.go:476` 的逐事件循环
-  （对每条上下文事件算 `Source + Input + 40`）与 `resident.go:552`
-  （对每条上下文算 `Input + Response`）。字段分布**不单一**：
-  - `Source` 是短标签（`"qq"` / `"webui"`）⇒ 属 Go 快 17× 那一档
-  - `Input` / `Response` 是对话文本，长度跨度大：长中文 C 快 2–3.4×，
-    短文本与长 ASCII 则 Go 快 3–7×
-  ⇒ **没有单一答案**：当前一刀切走 C 会让短串净亏。
-  正确做法是**按长度分派**（短走 Go、长中文走 C），
-  但需先用真实长度分布复测——不要凭推测动手。
-- `TruncateByTokens`：调用点单一（`tooldefs.go:38`），非热路径。
+#### 优化后（完全 C 化：一律走 C，无按长度分派）
 
-**这不否定 C 化方向**，但把「选谁下一个 C 化」的判据从「哪个函数看起来底层」
-换成「**哪个在真实输入分布下真能变快**」。协议编解码（JSON 解析、SSE 分片）
-处理的正是**长文本**——那才是 C 的主场，也是下一步更合理的候选。
+| 基准 | 初版 C | **优化后 C** | 纯 Go | 提升 |
+|---|---:|---:|---:|---:|
+| `ModelContextWindow`（短 ASCII）| 175 | **76.5** | 46.8 | **2.3×** |
+| `EstimateTokens` / 短 ASCII | 114.6 | **47.2** | 2.8 | 2.4× |
+| `EstimateTokens` / 短中文 | 99.6 | **49.7** | 22.8 | 2.0× |
+| `EstimateTokens` / **1KB ASCII** | 2318 | **80.8** | 326 | **28.7×** |
+| `EstimateTokens` / 1KB 中文 | 840 | 1467 | 2844 | 0.57×（见下）|
+| `TruncateByTokens` / 短中文 | 233 | **40.2** | 25.3 | 5.8× |
+| `TruncateByTokens` / **1KB ASCII** | 2594 | **71.7** | 411 | **36×** |
+| `TruncateByTokens` / **1KB 中文** | 3923 | **70.1** | 3097 | **56×** |
+
+#### ★ 必须如实说明的两点
+
+**① 中文密集输入比初版慢（1467 vs 840）—— 这是刻意的正确性代价。**
+初版的 `utf8_next` **只按首字节推断长度、不校验后续字节**，因此对畸形序列会与 Go
+分叉（例：`"\xE4\x41\x41"`，Go 判 3 个 rune，初版判 1 个 ⇒ rune 计数偏差 ⇒
+token 预算与截断点偏移）。现在 C 侧做了**与 Go `utf8.DecodeRuneInString` 等价**的
+完整校验（含过长编码、代理对、超 U+10FFFF、截断序列）。
+换来的能力由 `TestGolden_InvalidUTF8`（3000 组随机字节）钉死 —— 这类偏差
+**只影响计数、不会崩**，不测就发现不了。**正确性优先，且仍比纯 Go 快 2×。**
+
+**② 极短串上 C 慢于 Go（约慢一个数量级）—— 这是「完全 C 化」的已知代价。**
+`EstimateTokens("qq")`：C 约 47ns（几乎全是 31ns 的边界成本）vs 纯 Go 约 3ns。
+绝对值是纳秒级（47ns = 0.000047ms），单次请求尺度可忽略；
+但**若某个循环对极短串高频调用**，这一项会累积。
+
+⇒ **正确的应对是「C 化那个循环（批量传一次）」而不是「按长度分派回 Go」**
+（后者正是被否掉的混合做法：它会同时存在两份语义可能分叉的实现）。
+这也是 §三 L2/L3 把「有状态编排」明确留给 Go、而把「长 payload 编解码」
+作为下一步目标的原因 —— 协议编解码（JSON / SSE 分片）处理的正是长文本。
+
+---
 
 ---
 

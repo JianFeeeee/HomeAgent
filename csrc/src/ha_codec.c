@@ -1,132 +1,289 @@
 /*
  * ha_codec.c — HomeAgent 内核编解码层（C 实现）
  *
- * 第一个最小切片：模型窗口推断 + token 估算/截断。
- * 语义必须与 Go 侧实现逐值一致，由黄金对照测试钉死。
+ * ============================ 性能设计（勿回退）============================
+ *   1. **不 malloc**：模型名折叠用栈缓冲（短名走快路径，超长走零分配的回退）。
+ *   2. **不 strlen**：长度由调用方传入（见 ha_codec.h 签名说明）。
+ *   3. **ASCII 批量快路径**：连续 ASCII 成批计数，避免逐字节函数调用。
+ *   4. **截断提前短路**：数满 keep 个 rune 立即返回，不扫完整串。
+ *   5. **截断返回字节数**而非字符串：结果必然是输入前缀，调用方自己切片。
+ *
+ * 初版的三个反例（实测代价，见 docs/zh/c-core/llm-orchestration-c.md §7.1）：
+ *   - Go 侧 C.CString（malloc+拷贝）＋ C 侧 strlen，单这一项约 75ns，
+ *     而 cgo 边界本身仅约 32ns —— 即 **82% 的开销是自找的**，不是 cgo 的成本。
+ *     初版由此得出「C 比 Go 慢」的结论是错的。
+ *   - 逐字节 utf8_next 函数调用 ⇒ 1KB ASCII 比纯 Go 慢 7 倍。
+ *   - 1KB 中文要先扫完整串才判断是否截断。
+ *
+ * 语义必须与 Go 侧实现逐值一致，由黄金对照测试钉死（含畸形 UTF-8）。
  */
 
 #include "ha_codec.h"
 
-#include <ctype.h>
-#include <stdlib.h>
+#include <stdint.h>
 #include <string.h>
 
 /* ---------------------------------------------------------------- */
-/* 小工具                                                            */
+/* 大小写不敏感的子串匹配                                            */
 /* ---------------------------------------------------------------- */
 
-/* 在 s 中查找子串 sub（子串已小写）。s 需已是小写。找不到返回 NULL。 */
-static const char *find_sub(const char *s, const char *sub) {
-    return strstr(s, sub);
+/* 只折 ASCII 字母；非 ASCII 字节原样（与 Go strings.ToLower 对模型名的
+ * 实际效果一致——模型名都是 ASCII，中文/日文字节不受 ToLower 影响）。 */
+static unsigned char ascii_lower(unsigned char c) {
+    return (c >= 'A' && c <= 'Z') ? (unsigned char)(c + 32) : c;
 }
 
-/* 分配一份小写副本。调用方负责 free。失败返回 NULL。 */
-static char *lower_dup(const char *s) {
-    if (s == NULL) {
-        return NULL;
+/* 已折叠缓冲（长度 hn）中是否含子串 sub（sub 必须已小写、ASCII）。
+ * memcmp 版本：折叠一次后可向量化比较，是短名快路径。 */
+static int contains(const char *m, size_t hn, const char *sub) {
+    size_t m_len = strlen(sub);
+    if (m_len == 0 || hn < m_len) {
+        return 0;
     }
-    size_t n = strlen(s);
-    char *p = (char *)malloc(n + 1);
-    if (p == NULL) {
-        return NULL;
+    size_t last = hn - m_len;
+    for (size_t i = 0; i <= last; i++) {
+        /* 首字节过滤掉绝大多数位置，避免无谓 memcmp */
+        if (m[i] == sub[0] && memcmp(m + i, sub, m_len) == 0) {
+            return 1;
+        }
     }
-    for (size_t i = 0; i < n; i++) {
-        /* 只对 ASCII 做小写；UTF-8 多字节原样保留（与 Go strings.ToLower 对
-         * 中文不改变结果一致——Go 会把非 ASCII 也处理，但模型名都是 ASCII）。 */
-        unsigned char c = (unsigned char)s[i];
-        p[i] = (char)((c < 0x80) ? tolower(c) : c);
+    return 0;
+}
+
+/* 边比较边折叠：**任意长度**都正确，无需缓冲（超长模型名的回退路径）。
+ * sub 中的 ASCII 字母按小写处理；非 ASCII 字节按字节精确比较
+ * （因此可直接用于 "\xe9\x9b\xb6\xe4\xb8\x80" 这类多字节字面量）。 */
+static int contains_ci(const char *h, size_t hn, const char *sub) {
+    size_t m_len = strlen(sub);
+    if (m_len == 0 || hn < m_len) {
+        return 0;
     }
-    p[n] = '\0';
-    return p;
+    size_t last = hn - m_len;
+    for (size_t i = 0; i <= last; i++) {
+        size_t j = 0;
+        while (j < m_len &&
+               ascii_lower((unsigned char)h[i + j]) == (unsigned char)sub[j]) {
+            j++;
+        }
+        if (j == m_len) {
+            return 1;
+        }
+    }
+    return 0;
+}
+
+/* 模型名的不可变视图：能进栈缓冲就折叠，否则按原样（用 contains_ci 匹配）。 */
+typedef struct {
+    const char *p;
+    size_t n;
+    int folded;
+} model_view;
+
+/* 栈缓冲容量：模型名实测都是几十字节。超出则退化为不折叠 +
+ * contains_ci —— 仍**零分配且语义正确**，只是少了 memcmp 的向量化优势。 */
+#define HA_MODEL_STACK 256
+
+static int mv_contains(const model_view *v, const char *sub) {
+    return v->folded ? contains(v->p, v->n, sub) : contains_ci(v->p, v->n, sub);
 }
 
 /* ---------------------------------------------------------------- */
 /* 模型上下文窗口推断                                                */
 /* ---------------------------------------------------------------- */
 
-int ha_codec_model_context_window(const char *model) {
-    if (model == NULL) {
+int ha_codec_model_context_window(const char *model, size_t model_len) {
+    if (model == NULL || model_len == 0) {
         return HA_CODEC_CONTEXT_WINDOW_UNKNOWN;
     }
 
-    char *m = lower_dup(model);
-    if (m == NULL) {
-        return HA_CODEC_CONTEXT_WINDOW_UNKNOWN;
+    char stack[HA_MODEL_STACK];
+    model_view v;
+    if (model_len < HA_MODEL_STACK) {
+        for (size_t i = 0; i < model_len; i++) {
+            stack[i] = (char)ascii_lower((unsigned char)model[i]);
+        }
+        stack[model_len] = '\0';
+        v.p = stack;
+        v.n = model_len;
+        v.folded = 1;
+    } else {
+        v.p = model;
+        v.n = model_len;
+        v.folded = 0;
     }
-
-    int result = HA_CODEC_CONTEXT_WINDOW_UNKNOWN;
 
     /* 顺序与 Go 侧 switch 分支**严格一致**：先匹配到的分支胜出。
-     * 这不是「随便一组 if」，顺序错了就会给出不同窗口。 */
-    if (find_sub(m, "deepseek-v4") || find_sub(m, "deepseek-v3")) {
-        result = 1048576;
-    } else if (find_sub(m, "deepseek-r1") || find_sub(m, "deepseek-chat")) {
-        result = 65536;
-    } else if (find_sub(m, "gpt-4") &&
-               (find_sub(m, "turbo") || find_sub(m, "mini") || find_sub(m, "omni"))) {
-        result = 128000;
-    } else if (find_sub(m, "gpt-4")) {
-        result = 8192;
-    } else if (find_sub(m, "gpt-3.5")) {
-        result = 16384;
-    } else if (find_sub(m, "claude-3.5") || find_sub(m, "claude-3")) {
-        result = 200000;
-    } else if (find_sub(m, "claude")) {
-        result = 100000;
-    } else if (find_sub(m, "gemini-1.5") || find_sub(m, "gemini-2")) {
-        result = 1048576;
-    } else if (find_sub(m, "gemini")) {
-        result = 32768;
-    } else if (find_sub(m, "qwen")) {
-        result = 131072;
-    } else if (find_sub(m, "glm") || find_sub(m, "chatglm")) {
-        result = 131072;
-    } else if (find_sub(m, "llama-3")) {
-        result = 8192;
-    } else if (find_sub(m, "llama-2")) {
-        result = 4096;
-    } else if (find_sub(m, "mistral") || find_sub(m, "mixtral")) {
-        result = 32768;
-    } else if (find_sub(m, "yi-") || find_sub(m, "零一")) {
-        result = 200000;
-    } else if (find_sub(m, "moonshot") || find_sub(m, "kimi")) {
-        result = 131072;
+     * 这不是「随便一组 if」，顺序错了就会给出不同窗口
+     * （例：gpt-4-turbo 必须先于裸 gpt-4 命中）。 */
+    if (mv_contains(&v, "deepseek-v4") || mv_contains(&v, "deepseek-v3")) {
+        return 1048576;
+    }
+    if (mv_contains(&v, "deepseek-r1") || mv_contains(&v, "deepseek-chat")) {
+        return 65536;
+    }
+    if (mv_contains(&v, "gpt-4")) {
+        if (mv_contains(&v, "turbo") || mv_contains(&v, "mini") || mv_contains(&v, "omni")) {
+            return 128000;
+        }
+        return 8192;
+    }
+    if (mv_contains(&v, "gpt-3.5")) {
+        return 16384;
+    }
+    if (mv_contains(&v, "claude-3.5") || mv_contains(&v, "claude-3")) {
+        return 200000;
+    }
+    if (mv_contains(&v, "claude")) {
+        return 100000;
+    }
+    if (mv_contains(&v, "gemini-1.5") || mv_contains(&v, "gemini-2")) {
+        return 1048576;
+    }
+    if (mv_contains(&v, "gemini")) {
+        return 32768;
+    }
+    if (mv_contains(&v, "qwen")) {
+        return 131072;
+    }
+    if (mv_contains(&v, "glm") || mv_contains(&v, "chatglm")) {
+        return 131072;
+    }
+    if (mv_contains(&v, "llama-3")) {
+        return 8192;
+    }
+    if (mv_contains(&v, "llama-2")) {
+        return 4096;
+    }
+    if (mv_contains(&v, "mistral") || mv_contains(&v, "mixtral")) {
+        return 32768;
+    }
+    /* "yi-" 与 "零一"（UTF-8 字面量）——contains_ci 对字节精确比较，
+     * 故中文部分不受折叠影响，与 Go 的 strings.Contains 一致。 */
+    if (mv_contains(&v, "yi-") || mv_contains(&v, "\xe9\x9b\xb6\xe4\xb8\x80")) {
+        return 200000;
+    }
+    if (mv_contains(&v, "moonshot") || mv_contains(&v, "kimi")) {
+        return 131072;
     }
 
-    free(m);
-    return result;
+    return HA_CODEC_CONTEXT_WINDOW_UNKNOWN;
+}
+
+/* ---------------------------------------------------------------- */
+/* UTF-8 解码（与 Go utf8.DecodeRuneInString 逐值等价）               */
+/* ---------------------------------------------------------------- */
+
+/* 返回 s[0] 起始字符的字节长度（1..4）。
+ *
+ * 必须与 Go 的 utf8.DecodeRuneInString 语义一致——**包括无效序列只前进
+ * 1 字节**（Go 对无效/截断序列返回 RuneError 且 size=1），否则 rune 计数
+ * 会与 Go 分叉。这正是黄金对照测试用畸形输入能抓到的地方。
+ *
+ * remaining 是当前可读字节数。 */
+static inline size_t utf8_char_len(const char *s, size_t remaining) {
+    unsigned char c0 = (unsigned char)s[0];
+
+    if (c0 < 0x80) {
+        return 1; /* ASCII */
+    }
+    if (c0 < 0xC2) {
+        return 1; /* 0x80..0xC1：续字节或过长编码 → Go 判无效，size=1 */
+    }
+
+    if (c0 < 0xE0) { /* 2 字节：0xC2..0xDF */
+        if (remaining < 2) {
+            return 1;
+        }
+        if (((unsigned char)s[1] & 0xC0) != 0x80) {
+            return 1;
+        }
+        return 2;
+    }
+
+    if (c0 < 0xF0) { /* 3 字节：0xE0..0xEF */
+        if (remaining < 3) {
+            return 1;
+        }
+        /* 用 (c & 0xC0) == 0x80 走单条 AND+CMP（而非两条范围比较），
+         * 并用 & 而非 && 避免短路分支——这是 CJK 主路径，须最短。 */
+        unsigned char c1 = (unsigned char)s[1];
+        unsigned char c2 = (unsigned char)s[2];
+        if (((c1 & 0xC0) == 0x80) & ((c2 & 0xC0) == 0x80)) {
+            /* 常见情形：既非 0xE0（防过长编码）也非 0xED（防代理对） */
+            if (c0 != 0xE0 && c0 != 0xED) {
+                return 3;
+            }
+            if ((c0 == 0xE0 && c1 >= 0xA0) || (c0 == 0xED && c1 <= 0x9F)) {
+                return 3;
+            }
+        }
+        return 1;
+    }
+
+    if (c0 < 0xF5) { /* 4 字节：0xF0..0xF4 */
+        if (remaining < 4) {
+            return 1;
+        }
+        unsigned char c1 = (unsigned char)s[1];
+        unsigned char c2 = (unsigned char)s[2];
+        unsigned char c3 = (unsigned char)s[3];
+        if (((c1 & 0xC0) == 0x80) & ((c2 & 0xC0) == 0x80) & ((c3 & 0xC0) == 0x80)) {
+            if (c0 != 0xF0 && c0 != 0xF4) {
+                return 4;
+            }
+            if ((c0 == 0xF0 && c1 >= 0x90) || (c0 == 0xF4 && c1 <= 0x8F)) {
+                return 4;
+            }
+        }
+        return 1;
+    }
+
+    return 1; /* 0xF5..0xFF：无效 */
+}
+
+/* ASCII 批量扫描：返回从 text[i] 起连续 ASCII 的字节数（扫到串尾）。
+ *
+ * ★ 字（word）级探测：一次读 8 字节，用单条掩码判断「8 字节是否全为 ASCII」。
+ *   逐字节比较会让 1KB ASCII 明显慢于纯 Go（后者内部有 8 字节快路径）。
+ *   实测：逐字节版 ascii_1k 约 2318ns（比 Go 慢 7×），改字级后大幅收敛。 */
+#define HA_HIGH_BITS 0x8080808080808080ULL
+
+static size_t ascii_run(const char *text, size_t i, size_t len) {
+    size_t j = i;
+    while (j + 8 <= len) {
+        uint64_t v;
+        memcpy(&v, text + j, 8); /* memcpy 让编译器按需生成未对齐安全加载 */
+        if (v & HA_HIGH_BITS) {
+            break;
+        }
+        j += 8;
+    }
+    while (j < len && (unsigned char)text[j] < 0x80) {
+        j++;
+    }
+    return j - i;
 }
 
 /* ---------------------------------------------------------------- */
 /* token 估算                                                        */
 /* ---------------------------------------------------------------- */
 
-/* 计 UTF-8 字符数（rune 数）并返回下一字符起点。
- * 非法字节按 1 字符前进（不吞字节），保证不会死循环。 */
-static size_t utf8_next(const char *s, size_t remaining) {
-    unsigned char c = (unsigned char)s[0];
-    size_t len = 1;
-    if (c >= 0xF0 && remaining >= 4) {
-        len = 4;
-    } else if (c >= 0xE0 && remaining >= 3) {
-        len = 3;
-    } else if (c >= 0xC0 && remaining >= 2) {
-        len = 2;
-    }
-    return len;
-}
-
-int ha_codec_estimate_tokens(const char *text) {
-    if (text == NULL || text[0] == '\0') {
+int ha_codec_estimate_tokens(const char *text, size_t text_len) {
+    if (text == NULL || text_len == 0) {
         return 0;
     }
 
-    size_t n = strlen(text);
     size_t runes = 0;
     size_t i = 0;
-    while (i < n) {
-        i += utf8_next(text + i, n - i);
-        runes++;
+    while (i < text_len) {
+        if ((unsigned char)text[i] < 0x80) {
+            size_t n = ascii_run(text, i, text_len);
+            runes += n;
+            i += n;
+        } else {
+            i += utf8_char_len(text + i, text_len - i);
+            runes++;
+        }
     }
 
     /* 与 Go 侧一致：t = runeCount * 2；t < 1 时取 1。
@@ -142,50 +299,39 @@ int ha_codec_estimate_tokens(const char *text) {
 }
 
 /* ---------------------------------------------------------------- */
-/* 按 token 截断                                                     */
+/* 按 token 预算计算应保留的字节数                                    */
 /* ---------------------------------------------------------------- */
 
-size_t ha_codec_truncate_by_tokens(const char *text, int max_tokens,
-                                   char *out, size_t out_cap) {
-    if (out == NULL || out_cap == 0) {
-        return 0;
-    }
-    out[0] = '\0';
-
-    if (max_tokens <= 0 || text == NULL || text[0] == '\0') {
+size_t ha_codec_truncate_by_tokens(const char *text, size_t text_len,
+                                   int max_tokens) {
+    if (text == NULL || text_len == 0 || max_tokens <= 0) {
         return 0;
     }
 
-    size_t n = strlen(text);
-
-    /* 先算 rune 数：与 Go 侧 len([]rune(s))*2 <= maxTokens 的短路一致 */
-    size_t runes = 0;
-    size_t i = 0;
-    while (i < n) {
-        i += utf8_next(text + i, n - i);
-        runes++;
-    }
-
-    /* 未超限：整体返回 */
-    if (runes <= (size_t)0x3FFFFFFF && (int)(runes * 2) <= max_tokens) {
-        size_t copy = (n < out_cap - 1) ? n : (out_cap - 1);
-        memcpy(out, text, copy);
-        out[copy] = '\0';
-        return copy;
-    }
-
-    /* 保留 maxTokens/2 个字符（与 Go 一致：keep := maxTokens / 2，整数除法） */
+    /* 要保留的 rune 数（与 Go 一致：整数除法）。keep==0 时循环首轮即返回 0。 */
     size_t keep = (size_t)(max_tokens / 2);
 
-    size_t byte_end = 0;
-    size_t kept = 0;
-    while (kept < keep && byte_end < n) {
-        byte_end += utf8_next(text + byte_end, n - byte_end);
-        kept++;
+    /* 提前短路：keep 个 rune 数满而串仍有剩余 ⇒ 必然截断，直接返回该字节边界，
+     * 不必扫完整串（长文本上的主要收益）。
+     * 若数完整串仍未数满 keep ⇒ 未超预算，返回全长（= 不截断）。 */
+    size_t runes = 0;
+    size_t i = 0;
+    while (i < text_len) {
+        if (runes == keep) {
+            return i;
+        }
+        if ((unsigned char)text[i] < 0x80) {
+            size_t n = ascii_run(text, i, text_len);
+            if (runes + n >= keep) {
+                /* keep 落在这批 ASCII 内：批内每字节一个 rune */
+                return i + (keep - runes);
+            }
+            runes += n;
+            i += n;
+        } else {
+            runes++;
+            i += utf8_char_len(text + i, text_len - i);
+        }
     }
-
-    size_t copy = (byte_end < out_cap - 1) ? byte_end : (out_cap - 1);
-    memcpy(out, text, copy);
-    out[copy] = '\0';
-    return copy;
+    return text_len; /* 未超预算：整串都留 */
 }
