@@ -57,6 +57,22 @@ type ProxyDecl struct {
 	// 而不是静默降级成普通请求（后者表现为前端一直重连、排查困难）。
 	WebSocket bool `json:"websocket,omitempty"`
 
+	// Path 是可选的**路径挂载前缀**（如 "/api/v1/device"）。
+	//
+	// 为什么 Host 子域之外还需要它：子域形态依赖 DNS 解析，而 *.localhost
+	// 只有浏览器内置该特例（RFC 6761）—— 普通进程（设备客户端、固件、
+	// CLI）走系统解析器，实测解析不到，会以「no such host」失败。
+	// 路径形态挂在门户自身 host 下，**无任何 DNS 依赖**，是给非浏览器
+	// 客户端用的。
+	//
+	// 语义：请求路径**原样保留**（不做前缀剥除）——声明者按上游真实路径填写，
+	// 例如上游注册 /api/v1/device/ws，就声明 Path="/api/v1/device"。
+	// 这样设备客户端可以直接使用它已硬编码的路径，不需要知道反代的存在。
+	//
+	// 留空 = 只提供子域形态（插件自带 UI 的常见情形：UI 与它自己的 API
+	// 同源，走子域天然正确）。
+	Path string `json:"path,omitempty"`
+
 	// Auth 决定这条反代由谁保护，取值见 ProxyAuthNone / ProxyAuthHomeAgent。
 	// 空串等价于 ProxyAuthHomeAgent（默认安全）。
 	//
@@ -162,6 +178,17 @@ func ValidateProxyDecl(d ProxyDecl) string {
 	}
 	if d.Host != "" && !ValidProxyHostLabel(d.Host) {
 		return "host 不是合法的子域名标签（只允许小写字母/数字/连字符，且不以连字符开头结尾）: " + d.Host
+	}
+	if p := strings.TrimSpace(d.Path); p != "" {
+		if !strings.HasPrefix(p, "/") {
+			return "path 必须以 / 开头: " + d.Path
+		}
+		if strings.HasSuffix(p, "/") {
+			return "path 不应以 / 结尾（它是前缀，不是目录）: " + d.Path
+		}
+		if strings.Contains(p, "..") || strings.ContainsAny(p, " \t\r\n\x00?#") {
+			return "path 含非法字符: " + d.Path
+		}
 	}
 	// Target 的 host:port 部分必须可解析；路径前缀允许保留。
 	//

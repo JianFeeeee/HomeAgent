@@ -90,8 +90,13 @@ func (p *Plugin) Start(s *sdk.PluginSDK) error {
 	//
 	// websocket=true：设备注册/命令下发走 WS 长连接。
 	s.DeclareProxy(sdk.ProxyDecl{
-		Name:      "gateway",
-		Host:      "devices",
+		Name: "gateway",
+		Host: "devices",
+		// Path 让**非浏览器客户端**也能用：*.localhost 只有浏览器内置解析
+		// 特例（RFC 6761），设备/固件/CLI 走系统解析器会以 no such host 失败。
+		// 挂到门户自身 host 的路径下则无任何 DNS 依赖 —— 设备客户端沿用它
+		// 已硬编码的 /api/v1/device/ws 路径即可，不需要知道反代的存在。
+		Path:      "/api/v1/device",
 		Target:    "127.0.0.1:9890",
 		WebSocket: true,
 		Auth:      sdk.ProxyAuthNone,

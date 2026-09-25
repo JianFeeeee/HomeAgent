@@ -181,6 +181,17 @@ func main() {
 	if dt == "" {
 		dt = cfg.DeviceToken
 	}
+	// 网关地址优先向门户**发现**（服务端才知道子域标签与基域名），
+	// 失败再回退到用户配置 —— 老版本 HomeAgent 没有发现端点。
+	// 只在用户已配置门户地址时尝试：没配门户就没有可问的对象。
+	if portal := cfg.Remote; portal != "" {
+		if discovered, err := discoverGateway(portal, cfg.APIKey, 5*time.Second); err == nil {
+			printlnC(colorGreen, "device gateway discovered: "+discovered)
+			dg = discovered
+		} else if dg == "" {
+			printlnC(colorYellow, "device gateway discovery failed: "+err.Error())
+		}
+	}
 	if dg != "" && dt != "" {
 		if err := startDeviceBridge(dg, dt); err != nil {
 			printlnC(colorYellow, fmt.Sprintf("device bridge: %v (continue without)", err))
