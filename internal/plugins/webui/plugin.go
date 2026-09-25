@@ -308,7 +308,7 @@ func (p *Plugin) Start(s *sdk.PluginSDK) error {
 	if _, port, err := net.SplitHostPort(ln.Addr().String()); err == nil {
 		p.handler.hostPort = ":" + port
 	}
-	p.server = &http.Server{Handler: p.handler.logged(p.mux)}
+	p.server = &http.Server{Handler: p.handler.Handler()}
 	go func() {
 		if err := p.server.Serve(ln); err != nil && err != http.ErrServerClosed {
 			log.Printf("[webui] server error: %v", err)
