@@ -52,15 +52,8 @@ func startDeviceBridge(addr, token string) error {
 		"version": meta.Version,
 	}
 
-	// 确保 gateway URL 格式正确
-	gateway := addr
-	if !strings.HasPrefix(gateway, "ws://") && !strings.HasPrefix(gateway, "wss://") {
-		gateway = "ws://" + gateway
-		// 默认 remotedevice WS 路径
-		if !strings.Contains(gateway, "/api/v1/device/ws") {
-			gateway = gateway + "/api/v1/device/ws"
-		}
-	}
+	// 网关地址规范化（含「已是完整端点」「只有 host:port」两种旧输入形态）。
+	gateway := normalizeGateway(addr)
 
 	bridge := client.New(gateway, token, deviceID, "HomeAgent CLI", caps, info)
 	cmdRouter = client.NewCmdRouter()
