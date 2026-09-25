@@ -1,6 +1,10 @@
 package sdk
 
-import "testing"
+import (
+	"os"
+	"strings"
+	"testing"
+)
 
 func TestProxyAuthDefaultsToHomeAgent(t *testing.T) {
 	// 空串必须归一化为「HomeAgent 统一保护」——这是安全默认。
@@ -76,8 +80,8 @@ func TestNormalizeProxyHost(t *testing.T) {
 	}
 }
 
-func TestValidateProxyDecl(t *testing.T) {
-	valid := []ProxyDecl{
+func TestValidateProxyDef(t *testing.T) {
+	valid := []ProxyDef{
 		{Target: "127.0.0.1:12100"},
 		{Target: "http://127.0.0.1:12100"},
 		{Target: "127.0.0.1:12100", Host: "huawei"},
@@ -87,25 +91,73 @@ func TestValidateProxyDecl(t *testing.T) {
 		{Target: "https://example.com", Host: "ext"}, // 远程上游也允许（由 auth 决定安全性）
 	}
 	for _, d := range valid {
-		if msg := ValidateProxyDecl(d); msg != "" {
+		if msg := ValidateProxyDef(d); msg != "" {
 			t.Errorf("%+v 应合法，却报: %s", d, msg)
 		}
 	}
 
-	bad := []ProxyDecl{
-		{},                                  // 无 target
-		{Target: "   "},                     // 空白 target
+	bad := []ProxyDef{
+		{},                                       // 无 target
+		{Target: "   "},                          // 空白 target
 		{Target: "127.0.0.1:12100", Auth: "yes"}, // auth 非法
 		{Target: "127.0.0.1:12100", Host: "a_b"}, // host 非法
 		{Target: "127.0.0.1:12100", Host: "-x"},
 		{Target: "127.0.0.1:12100", Host: "X"},
-		{Target: "://12100"},         // 无主机
-		{Target: "http:///path"},     // 无主机
+		{Target: "://12100"},           // 无主机
+		{Target: "http:///path"},       // 无主机
 		{Target: "127.0.0.1:notaport"}, // 端口非数字
 	}
 	for _, d := range bad {
-		if msg := ValidateProxyDecl(d); msg == "" {
+		if msg := ValidateProxyDef(d); msg == "" {
 			t.Errorf("%+v 应被拒绝，却通过了", d)
 		}
+	}
+}
+
+// ---- 单一入口原则 ----
+
+// 被反代的插件必须能同时适配 Host 形态与 Path 形态。这两条判据把
+// 「插件内部不得用根绝对路径」这条契约钉在**可执行**的层面：
+// 声明合法不代表它的资源能被两种形态访问到 —— 后者取决于插件前端的写法，
+// 而 SDK 只能把要求写清楚并给出校验工具。
+func TestSingleEntryPrincipleDocumented(t *testing.T) {
+	// Path 形态下插件前端必须用相对路径，否则请求会打到门户自己。
+	// 这是**文档级约定**，只能靠 review 与这份判据共同保证：
+	// 判据确保 SDK 里确实写明了这条要求（防止后来者删掉注释）。
+	src, err := os.ReadFile("proxy.go")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{
+		"单一入口原则",
+		"相对路径",
+		"根绝对路径",
+	} {
+		if !strings.Contains(string(src), want) {
+			t.Errorf("SDK 文档缺少「%s」—— 单一入口原则是反代的硬要求，不能只存在于口头约定里", want)
+		}
+	}
+}
+
+// strip_path 的两种语义必须由声明者显式选，且非法组合要被挡住。
+func TestStripPathValidation(t *testing.T) {
+	// 合法：两种模式
+	for _, d := range []ProxyDef{
+		{Target: "127.0.0.1:1", Path: "/p/app", StripPath: true},
+		{Target: "127.0.0.1:1", Path: "/api/v1/device", StripPath: false},
+	} {
+		if msg := ValidateProxyDef(d); msg != "" {
+			t.Errorf("应合法却被拒: %+v → %s", d, msg)
+		}
+	}
+	// 非法：strip_path 但没有 path（没有可剥的前缀）
+	if msg := ValidateProxyDef(ProxyDef{Target: "127.0.0.1:1", StripPath: true}); msg == "" {
+		t.Error("strip_path=true 而无 path 应被拒（没有可剥的前缀）")
+	}
+	// 非法：前缀模式挂到根会吞掉整个门户。
+	// 实际由「不应以 / 结尾」规则挡下（"/" 同时是前缀又以 / 结尾），
+	// 这里断言的是**行为**：这种声明无论如何都不能通过。
+	if msg := ValidateProxyDef(ProxyDef{Target: "127.0.0.1:1", Path: "/", StripPath: true}); msg == "" {
+		t.Error("path=\"/\" + strip_path 应被拒（会覆盖整个门户）")
 	}
 }

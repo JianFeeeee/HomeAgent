@@ -356,7 +356,7 @@ type PluginSDK struct {
 	// proxyDecl 是反代声明的收集回调（内置插件经 DeclareProxy 声明服务）。
 	// 与上面的 API 字段同受 apiMu 保护——写方是内核注入，读方是插件 Start
 	// 起的 goroutine。
-	proxyDecl ProxyDeclarer
+	proxyReg ProxyRegistrar
 
 	// apiMu 保护上面这些由内核注入的 API 字段，以及 autoRestart。
 	//
