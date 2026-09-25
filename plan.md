@@ -388,17 +388,17 @@ PluginContext（独立身份，共享管道）。
   写真实系统路径，且两处 `os.WriteFile(...)` **不检查 err** → 在 `/etc` 不可写的
   环境里静默失败，报 `expected restore to happen`（根因是测试，不是实现）。
   建议改用 `t.TempDir()` + 保留 `IsProtectedPath` 语义所需的显式前缀，并检查每步 err。
-- `internal/plugins/remotedevice/plugin.go:27` 固定端口 `127.0.0.1:9890`；**同类还有**：
-  `pluginmgr` 的 `127.0.0.1:9876`（`pluginmgr/plugin.go:70`，且是**包级可变全局**
-  `var HTTPAddr`，多实例互相踩）、webui 的 `:8080`。
-  ★ 实测（2026-09-25 A/B 对照）：`internal/plugins` 连跑 20 轮，**干净树（无 C 化改动）
-  也复现 2 次失败**（`bind: address already in use` + `signal: terminated`）
-  ⇒ 既有 flaky，与 C 化无关。建议测试改用 `:0` 让 OS 分配。
-- **`TestRealPlugin_DeepSearchInvoke` 依赖外部服务，上游限流即红**：
-  `deepsearch_e2e_test.go` 打 `127.0.0.1:8888` 的 SearXNG；实测失败报错为
-  `brave(Suspended: too many requests), duckduckgo(CAPTCHA), google cse(...)`
-  ⇒ **外部依赖**，不是代码缺陷。干净树同样复现（2/20）。
-  建议区分「服务不可达（skip）」与「真功能回归（fail）」，别把限流当回归。
+- ✅ **（已修，2026-09-25，`17e7094`）固定端口冲突**：webui `:8080`、
+  `pluginmgr` `127.0.0.1:9876`（曾是包级可变全局 `var HTTPAddr`，多实例互相踩）、
+  `remotedevice` `127.0.0.1:9890`。
+  修法：pluginmgr 改为实例字段；remotedevice 改显式 `net.Listen`（失败同步可见、
+  `:0` 能回报真实端口）；测试经新增的 `ConfigRegistry.SetPluginConfig` 在插件
+  加载前预置 `127.0.0.1:0`，三个插件各自绑 OS 分配的空闲端口。
+  验证：`internal/plugins` 连跑 **30/30**（修前干净树 18/20）。
+- ✅ **（已修，2026-09-25，`17e7094`）`TestRealPlugin_DeepSearchInvoke` 把上游限流当回归**：
+  插件在上游限流时返回的是**正常结果**（err==nil，content 含「未返回结果」+ 无响应
+  引擎列表），那是外部条件。现区分「上游不可用（限流/CAPTCHA）⇒ t.Skip 带理由」
+  与「其他异常 ⇒ fail」，不再让噪声淹没真回归。
 - **PTY 三例的 skip 判据是坏的（真缺陷，不只是卫生）**：`integration_test.go`
   284/337/395 查 `resp["status"] == "error"`，而 `terminal_create` 失败时返回
   `{"error": "创建终端失败: ..."}`（`internal/plugins/agentcli/plugin.go:496`）——
