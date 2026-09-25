@@ -260,61 +260,9 @@ func ProviderSupportsAudio(p Provider) bool {
 	return false
 }
 
-// defaultInferredContextWindow 是模型名无法推断窗口时的兜底。
-//
-// 32768 是个保守值，但它属于**静默降级**：模型名写 AUTO（网关自己选上游）时
-// ModelContextWindow 匹配不到任何分支，内核就会拿着一份比真实小得多的窗口
-// 去算全部预算（实测：deepseek-v4.1-flash 能吞 990,034 token，而预算按 32768 算）。
-// 因此推断不出来时留一条日志，并让部署方用 per-source context_window 显式声明。
-const defaultInferredContextWindow = 32768
-
-// ModelContextWindow 返回模型的最大上下文窗口（token 数）
-// 标称窗口 ≠ 有效窗口：接近满时注意力涣散，调用方应取 70-80% 为目标利用率
-func ModelContextWindow(model string) int {
-	model = strings.ToLower(model)
-	switch {
-	case strings.Contains(model, "deepseek-v4") || strings.Contains(model, "deepseek-v3"):
-		return 1048576
-	case strings.Contains(model, "deepseek-r1") || strings.Contains(model, "deepseek-chat"):
-		return 65536
-	case strings.Contains(model, "gpt-4") && (strings.Contains(model, "turbo") || strings.Contains(model, "mini") || strings.Contains(model, "omni")):
-		return 128000
-	case strings.Contains(model, "gpt-4"):
-		return 8192
-	case strings.Contains(model, "gpt-3.5"):
-		return 16384
-	case strings.Contains(model, "claude-3.5") || strings.Contains(model, "claude-3"):
-		return 200000
-	case strings.Contains(model, "claude"):
-		return 100000
-	case strings.Contains(model, "gemini-1.5") || strings.Contains(model, "gemini-2"):
-		return 1048576
-	case strings.Contains(model, "gemini"):
-		return 32768
-	case strings.Contains(model, "qwen"):
-		return 131072
-	case strings.Contains(model, "glm") || strings.Contains(model, "chatglm"):
-		return 131072
-	case strings.Contains(model, "llama-3"):
-		return 8192
-	case strings.Contains(model, "llama-2"):
-		return 4096
-	case strings.Contains(model, "mistral") || strings.Contains(model, "mixtral"):
-		return 32768
-	case strings.Contains(model, "yi-") || strings.Contains(model, "零一"):
-		return 200000
-	case strings.Contains(model, "moonshot") || strings.Contains(model, "kimi"):
-		return 131072
-	default:
-		// 模型名推断不出窗口（如 "AUTO"）：不要静静退回一个比真实小得多的值。
-		// 报一行日志，让“窗口被低估”这件事可见；部署方用 per-source
-		// core.llm.sources.<name>.context_window 声明真实值即可覆盖。
-		log.Printf("[provider] 模型 %q 无法推断上下文窗口，回退 %d；"+
-			"若真实窗口更大，请设置 core.llm.sources.<name>.context_window",
-			model, defaultInferredContextWindow)
-		return defaultInferredContextWindow
-	}
-}
+// defaultInferredContextWindow 与 ModelContextWindow 已移至 codec.go /
+// codec_pure.go（编解码层 C 化，见 docs/zh/c-core/llm-orchestration-c.md）。
+// 这里不再重复定义，避免两份实现漂移。
 
 type BaseConfig struct {
 	Model         string  `json:"model"`
