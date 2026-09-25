@@ -89,7 +89,7 @@ func (p *Plugin) Start(s *sdk.PluginSDK) error {
 	// 全部挡在门户鉴权之外——那正是"认证必须可声明"的原因。
 	//
 	// websocket=true：设备注册/命令下发走 WS 长连接。
-	s.DeclareProxy(sdk.ProxyDecl{
+	s.RegisterProxy("gateway", sdk.ProxyDef{
 		Name: "gateway",
 		Host: "devices",
 		// Path 让**非浏览器客户端**也能用：*.localhost 只有浏览器内置解析

@@ -50,14 +50,15 @@ import (
 
 // ProxyRoute 是一条**已解析**的反代路由（声明 + 归属插件 + 校验结果）。
 type ProxyRoute struct {
-	Plugin string // 声明该服务的插件名
-	Name   string // 声明内的服务标识（展示用，如 "ui"）
-	Host   string // 子域标签（小写，已归一化）
-	Path   string // 可选的路径挂载前缀（非浏览器客户端用，无 DNS 依赖）
-	Target string // 上游地址（原样，含可能的 scheme/路径前缀）
-	WS     bool   // 是否允许 WebSocket 升级
-	Auth   string // 生效的鉴权模式（已归一化）
-	Err    string // 非空表示该条声明被拒绝及原因（不参与路由，仅展示）
+	Plugin    string // 声明该服务的插件名
+	Name      string // 声明内的服务标识（展示用，如 "ui"）
+	Host      string // 子域标签（小写，已归一化）
+	Path      string // 可选的路径挂载前缀（非浏览器客户端用，无 DNS 依赖）
+	StripPath bool   // 转发前是否剥掉 Path 前缀（见 SDK 的说明：两种语义真实不同）
+	Target    string // 上游地址（原样，含可能的 scheme/路径前缀）
+	WS        bool   // 是否允许 WebSocket 升级
+	Auth      string // 生效的鉴权模式（已归一化）
+	Err       string // 非空表示该条声明被拒绝及原因（不参与路由，仅展示）
 
 	upstream *url.URL
 	reverse  *httputil.ReverseProxy
@@ -191,16 +192,17 @@ func buildProxyTable(decls []proxyDecl, manualText string, settings sdk.Settings
 
 	for _, d := range decls {
 		r := &ProxyRoute{
-			Plugin: d.Plugin,
-			Name:   d.Name,
-			Host:   d.Host,
-			Path:   strings.TrimSpace(d.Path),
-			Target: d.Target,
-			WS:     d.WebSocket,
-			Auth:   sdk.EffectiveProxyAuth(d.Auth),
+			Plugin:    d.Plugin,
+			Name:      d.Name,
+			Host:      d.Host,
+			Path:      strings.TrimSpace(d.Path),
+			StripPath: d.StripPath,
+			Target:    d.Target,
+			WS:        d.WebSocket,
+			Auth:      sdk.EffectiveProxyAuth(d.Auth),
 		}
-		if msg := sdk.ValidateProxyDecl(sdk.ProxyDecl{
-			Name: d.Name, Host: d.Host, Path: d.Path,
+		if msg := sdk.ValidateProxyDef(sdk.ProxyDef{
+			Host: d.Host, Path: d.Path, StripPath: d.StripPath,
 			Target: d.Target, WebSocket: d.WebSocket, Auth: d.Auth,
 		}); msg != "" {
 			r.Err = msg
@@ -212,16 +214,17 @@ func buildProxyTable(decls []proxyDecl, manualText string, settings sdk.Settings
 
 	for _, d := range parseManualRoutes(manualText) {
 		r := &ProxyRoute{
-			Plugin: "manual",
-			Name:   d.Name,
-			Host:   d.Host,
-			Path:   strings.TrimSpace(d.Path),
-			Target: d.Target,
-			WS:     d.WebSocket,
-			Auth:   sdk.EffectiveProxyAuth(d.Auth),
+			Plugin:    "manual",
+			Name:      d.Name,
+			Host:      d.Host,
+			Path:      strings.TrimSpace(d.Path),
+			StripPath: d.StripPath,
+			Target:    d.Target,
+			WS:        d.WebSocket,
+			Auth:      sdk.EffectiveProxyAuth(d.Auth),
 		}
-		if msg := sdk.ValidateProxyDecl(sdk.ProxyDecl{
-			Name: d.Name, Host: d.Host, Path: d.Path,
+		if msg := sdk.ValidateProxyDef(sdk.ProxyDef{
+			Host: d.Host, Path: d.Path, StripPath: d.StripPath,
 			Target: d.Target, WebSocket: d.WebSocket, Auth: d.Auth,
 		}); msg != "" {
 			r.Err = msg
@@ -241,7 +244,13 @@ func buildProxyTable(decls []proxyDecl, manualText string, settings sdk.Settings
 			continue
 		}
 		r.upstream = u
-		r.reverse = newReverseProxy(u, r.Auth)
+		// 前缀模式：Rewrite 时把 Path 前缀剥掉再交给上游。
+		// 别名模式（原样保留）：不需要额外处理 —— 客户端用的就是上游的真实路径。
+		prefix := ""
+		if r.StripPath {
+			prefix = r.Path
+		}
+		r.reverse = newReverseProxy(u, r.Auth, prefix)
 		log.Printf("[webui] 反代: %s.%s → %s (plugin=%s ws=%v auth=%s)",
 			r.Host, base, r.Target, r.Plugin, r.WS, r.Auth)
 	}
@@ -290,11 +299,28 @@ func parseUpstream(target string) (*url.URL, error) {
 //     泄给客户端。ReverseProxy 默认不跟随重定向，3xx 原样透传。
 //  3. **补齐转发头**：SetXForwarded 注入 X-Forwarded-For/Host/Proto，
 //     旧实现完全不注入，上游无法判断真实来源。
-func newReverseProxy(u *url.URL, auth string) *httputil.ReverseProxy {
+func newReverseProxy(u *url.URL, auth, stripPrefix string) *httputil.ReverseProxy {
 	stripCredentials := auth == sdk.ProxyAuthHomeAgent
 	rp := &httputil.ReverseProxy{
 		Rewrite: func(pr *httputil.ProxyRequest) {
 			pr.SetURL(u)
+			// 前缀模式：剥掉门户上的挂载前缀，上游看到它自己的路径。
+			// 别名模式（stripPrefix == ""）：路径原样，见 SDK 的 Path 说明。
+			if stripPrefix != "" {
+				// 路径恰好等于前缀时（/p/myapp）余量是空串 —— 那是上游的
+				// **根**，必须映射成 "/" 而不是保持原样（保持原样会把
+				// /p/myapp 整个当路径转给上游，上游无从识别）。
+				rest := strings.TrimPrefix(pr.In.URL.Path, stripPrefix)
+				if rest == "" {
+					rest = "/"
+				}
+				pr.Out.URL.Path = rest
+				pr.Out.URL.RawPath = ""
+				// SetURL 已按上游 base path 拼过一次，这里以 rest 为准重设。
+				if u.Path != "" && u.Path != "/" {
+					pr.Out.URL.Path = strings.TrimSuffix(u.Path, "/") + rest
+				}
+			}
 			pr.SetXForwarded()
 			// 透传子域标签给上游（插件据此可感知自己被挂在哪个标签下）。
 			pr.Out.Header.Set("X-HA-Proxy-Host", pr.In.Host)
@@ -376,7 +402,7 @@ func currentProxyTable() *proxyTable {
 		decls = declProvider()
 	}
 	// 内置插件的运行期声明（无 plugin.json，扫目录发现不到）。
-	for plugin, list := range sdk.BuiltinProxyDecls() {
+	for plugin, list := range sdk.BuiltinProxyDefs() {
 		for _, d := range list {
 			host := d.Host
 			if host == "" {
@@ -507,6 +533,8 @@ func hostnameOf(hostport string) string {
 func (t *proxyTable) matchProxyPath(p string) (*ProxyRoute, bool) {
 	var best *ProxyRoute
 	for prefix, r := range t.paths {
+		// 边界必须卡在路径分隔符上：/p/huawei 不能匹配 /p/huaweix
+		// （否则会劫持同前缀的其它管理页），但 /p/huawei 自身与其子路径都算。
 		if p == prefix || strings.HasPrefix(p, prefix+"/") {
 			if best == nil || len(prefix) > len(best.Path) {
 				best = r
@@ -541,6 +569,20 @@ func (h *Handler) serveProxyHost(w http.ResponseWriter, r *http.Request) bool {
 	// *.localhost）也能用：它们连门户地址本身即可，不需要知道反代的存在。
 	// 路径原样保留 —— 客户端沿用它已有的路径。
 	if rt, ok := t.matchProxyPath(r.URL.Path); ok && proxyHostLabel(r.Host, base) == "" {
+		// 前缀模式下，路径**恰好等于挂载前缀**（/p/huawei，无尾斜杠）时
+		// 必须重定向到 /p/huawei/。
+		//
+		// 原因在前端：相对路径的基准是「当前文档目录」。地址是 /p/huawei 时
+		// 浏览器算出的目录是 /p/ —— 页面里的 fetch('api/status') 会打到
+		// /p/api/status（404），看起来像插件坏了。补上尾斜杠后目录成为
+		// /p/huawei/，相对路径立即正确。
+		//
+		// 别名模式（strip_path=false）**不能**这样做：那类客户端的路径是
+		// 上游真实路径（/api/v1/device/online），加尾斜杠会改变语义。
+		if rt.StripPath && rt.Path != "" && r.URL.Path == rt.Path {
+			h.redirectToTrailingSlash(w, r, rt.Path)
+			return true
+		}
 		if isWebSocketUpgrade(r) && !rt.WS {
 			writeJSON(w, http.StatusBadRequest, map[string]string{
 				"error": fmt.Sprintf("插件 %s 的服务 %s 未声明 websocket", rt.Plugin, rt.Name),
@@ -628,12 +670,13 @@ func isWebSocketUpgrade(r *http.Request) bool {
 
 // proxyServiceEntry 是「服务入口」条目：给前端渲染选项卡用。
 type proxyServiceEntry struct {
-	Plugin   string `json:"plugin"`
-	PluginZh string `json:"plugin_name"`
-	Name     string `json:"name"`
-	Host     string `json:"host"`
-	Path     string `json:"path,omitempty"` // 路径挂载前缀（无 DNS 依赖的形态）
-	URL      string `json:"url"`            // 子域形态（浏览器）
+	Plugin    string `json:"plugin"`
+	PluginZh  string `json:"plugin_name"`
+	Name      string `json:"name"`
+	Host      string `json:"host"`
+	Path      string `json:"path,omitempty"`       // 路径挂载前缀（无 DNS 依赖的形态）
+	StripPath bool   `json:"strip_path,omitempty"` // 该前缀是否被剥掉后转发
+	URL       string `json:"url"`                  // 子域形态（浏览器）
 	// URLPortal 是门户同源形态：挂在门户自身 host 的路径下，**无 DNS 依赖**。
 	// 非浏览器客户端（设备/固件/CLI）用系统解析器解析不了 *.localhost，用它。
 	URLPortal string `json:"url_portal,omitempty"`
@@ -663,15 +706,16 @@ func (h *Handler) listProxyServices(scheme, hostPort, portalHost, domain string)
 	out := make([]proxyServiceEntry, 0, len(t.ordered))
 	for _, r := range t.ordered {
 		e := proxyServiceEntry{
-			Plugin: r.Plugin,
-			Name:   r.Name,
-			Host:   r.Host,
-			Path:   r.Path,
-			Auth:   r.Auth,
-			WS:     r.WS,
-			Target: r.Target,
-			OK:     r.Err == "",
-			Error:  r.Err,
+			Plugin:    r.Plugin,
+			Name:      r.Name,
+			Host:      r.Host,
+			Path:      r.Path,
+			StripPath: r.StripPath,
+			Auth:      r.Auth,
+			WS:        r.WS,
+			Target:    r.Target,
+			OK:        r.Err == "",
+			Error:     r.Err,
 		}
 		if m, ok := metas[r.Plugin]; ok {
 			e.PluginZh = m.NameZh
@@ -704,6 +748,7 @@ type proxyDecl struct {
 	Name      string
 	Host      string
 	Path      string
+	StripPath bool
 	Target    string
 	WebSocket bool
 	Auth      string
@@ -753,6 +798,7 @@ func readPluginProxyDecls(pluginDir string) []proxyDecl {
 				Name:      sname,
 				Host:      strings.ToLower(host),
 				Path:      strings.TrimSpace(p.Path),
+				StripPath: p.StripPath,
 				Target:    p.Target,
 				WebSocket: p.WebSocket,
 				Auth:      p.Auth,
@@ -1033,4 +1079,22 @@ func (h *Handler) handleDeviceGatewayDiscovery(w http.ResponseWriter, r *http.Re
 	out["auth"] = route.Auth
 	out["target"] = route.Target
 	writeJSON(w, http.StatusOK, out)
+}
+
+// redirectToTrailingSlash 把 /p/app 重定向到 /p/app/（保留查询串）。
+//
+// 为什么需要：相对路径的解析基准是「当前文档所在目录」。没有尾斜杠时
+// 浏览器把最后一段当**文件名**，目录退回上一级 —— 页面里的
+// fetch('api/status') 于是打到 /p/api/status 而不是 /p/app/api/status。
+// 表现为：页面能打开，但所有数据加载失败（很容易误判成插件故障）。
+//
+// 用 301 而不是 302：这是稳定的规范形态，浏览器与中间层都可以长期缓存。
+func (h *Handler) redirectToTrailingSlash(w http.ResponseWriter, r *http.Request, prefix string) {
+	target := prefix + "/"
+	if r.URL.RawQuery != "" {
+		target += "?" + r.URL.RawQuery
+	}
+	// 保留门户可能挂载的额外前缀（如外层网关又套了一层 /ha）。
+	// 这里以请求的真实路径为准做相对拼装，避免绝对路径丢失上下文。
+	http.Redirect(w, r, target, http.StatusMovedPermanently)
 }
