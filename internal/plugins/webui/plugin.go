@@ -68,9 +68,16 @@ var listenOverride string
 
 // SetListenOverride 设置监听地址覆盖（空值表示不覆盖）。
 // 由 cmd/homed 在插件加载前调用，见 resolveWebUIOverride。
+//
+// 测试也用它在加载内置插件前把地址指到 127.0.0.1:0：
+// 否则测试会绑生产端口 :8080，与线上实例互相抢（见 integration_test.go）。
 func SetListenOverride(addr string) {
 	listenOverride = strings.TrimSpace(addr)
 }
+
+// ListenOverride 返回当前的覆盖值（空串表示未覆盖）。
+// 供调用方「保存-还原」用，避免测试互相污染。
+func ListenOverride() string { return listenOverride }
 
 // resolveListenAddr 决定最终监听地址：覆盖值 > 插件设置 > 内置默认。
 // 抽成纯函数是为了能被单测直接钉住优先级。
