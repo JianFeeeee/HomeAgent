@@ -1196,3 +1196,119 @@ func TestDiscoveryEndpointNotHijackedByPathMount(t *testing.T) {
 		t.Errorf("设备路径未走反代: code=%d body=%q", rec2.Code, rec2.Body.String())
 	}
 }
+
+// ★ 服务入口链接的端口必须恰好出现一次。
+//
+// 真实 bug（生产部署后立即暴露）：请求 Host 自带端口（生产实测 Host 是
+// 127.0.0.1:8080），而无条件再追加监听端口，拼出
+//
+//	"http://127.0.0.1:8080:8080/api/v1/device/"   ← 链接点不开
+//
+// 单测抓不到的原因：此前测试用的 Host 不含端口。补上这条覆盖两种输入。
+func TestPortalHostPortExactlyOnce(t *testing.T) {
+	cases := []struct{ host, port, want string }{
+		// Host 已带端口 → 不得重复追加
+		{"127.0.0.1:8080", ":8080", "127.0.0.1:8080"},
+		{"portal.example.com:443", ":8080", "portal.example.com:443"},
+		// Host 不含端口 → 补上监听端口
+		{"127.0.0.1", ":8080", "127.0.0.1:8080"},
+		{"portal.example.com", ":18080", "portal.example.com:18080"},
+		// 空输入 → 兜底 localhost
+		{"", ":8080", "localhost:8080"},
+		// 端口为空 → 原样（由调用方/scheme 决定默认端口）
+		{"portal.example.com", "", "portal.example.com"},
+		// 端口号不带冒号也要能处理
+		{"127.0.0.1", "8080", "127.0.0.1:8080"},
+	}
+	for _, c := range cases {
+		if got := portalHostWithPort(c.host, c.port); got != c.want {
+			t.Errorf("portalHostWithPort(%q, %q) = %q，期望 %q", c.host, c.port, got, c.want)
+		}
+	}
+}
+
+// 端到端：Host 自带端口时，服务入口的两种形态都必须可点（无重复端口）。
+func TestProxyServiceURLsWithPortInHost(t *testing.T) {
+	prev := declProvider
+	SetProxyDeclProvider(func() []proxyDecl {
+		return []proxyDecl{{
+			Plugin: "remotedevice", Name: "gateway", Host: "devices",
+			Path: "/api/v1/device", Target: "127.0.0.1:9890",
+			WebSocket: true, Auth: sdk.ProxyAuthNone,
+		}}
+	})
+	manualProxyRoutes = ""
+	InvalidateProxyRoutes()
+	t.Cleanup(func() { SetProxyDeclProvider(prev); InvalidateProxyRoutes() })
+
+	h := NewHandler(proxyTestSettings(t))
+
+	// 模拟生产：请求 Host 自带端口
+	rec := httptest.NewRecorder()
+	r := httptest.NewRequest("GET", "/api/v1/proxy/services", nil)
+	r.Host = "127.0.0.1:8080"
+	r.Header.Set("X-API-Key", "test-api-key")
+	h.handleProxyServices(rec, r)
+
+	var out struct {
+		Services []struct {
+			URL       string `json:"url"`
+			URLPortal string `json:"url_portal"`
+		} `json:"services"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &out); err != nil {
+		t.Fatal(err)
+	}
+	if len(out.Services) != 1 {
+		t.Fatalf("服务数 = %d", len(out.Services))
+	}
+	if s := out.Services[0].URLPortal; strings.Contains(s, "8080:8080") {
+		t.Errorf("url_portal 端口重复: %q", s)
+	}
+	if s := out.Services[0].URLPortal; s != "http://127.0.0.1:8080/api/v1/device/" {
+		t.Errorf("url_portal = %q", s)
+	}
+	// 子域形态也必须只有一次端口
+	if s := out.Services[0].URL; strings.Contains(s, "8080:8080") {
+		t.Errorf("url 端口重复: %q", s)
+	}
+}
+
+// 发现端点在 Host 自带端口时同样不得拼重复端口。
+func TestDeviceGatewayDiscoveryNoDuplicatePort(t *testing.T) {
+	prev := declProvider
+	SetProxyDeclProvider(func() []proxyDecl {
+		return []proxyDecl{{
+			Plugin: "remotedevice", Name: "gateway", Host: "devices",
+			Path: "/api/v1/device", Target: "127.0.0.1:9890",
+			WebSocket: true, Auth: sdk.ProxyAuthNone,
+		}}
+	})
+	manualProxyRoutes = ""
+	InvalidateProxyRoutes()
+	t.Cleanup(func() { SetProxyDeclProvider(prev); InvalidateProxyRoutes() })
+
+	h := NewHandler(proxyTestSettings(t))
+	rec := httptest.NewRecorder()
+	r := httptest.NewRequest("GET", "/api/v1/device/gateway", nil)
+	r.Host = "127.0.0.1:8080"
+	// 不设 X-Forwarded-*：用最朴素的场景（真实生产直连就是这样）
+	h.handleDeviceGatewayDiscovery(rec, r)
+
+	var got struct {
+		URL       string `json:"url"`
+		URLPortal string `json:"url_portal"`
+		HTTPURL   string `json:"http_url"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &got); err != nil {
+		t.Fatal(err)
+	}
+	for name, v := range map[string]string{"url": got.URL, "url_portal": got.URLPortal, "http_url": got.HTTPURL} {
+		if strings.Contains(v, "8080:8080") {
+			t.Errorf("%s 端口重复: %q", name, v)
+		}
+	}
+	if got.URLPortal != "ws://127.0.0.1:8080/api/v1/device/ws" {
+		t.Errorf("url_portal = %q", got.URLPortal)
+	}
+}

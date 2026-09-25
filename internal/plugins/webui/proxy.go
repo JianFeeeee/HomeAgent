@@ -399,6 +399,35 @@ func currentProxyTable() *proxyTable {
 	return proxySnap
 }
 
+// portalHostWithPort 把「主机」与「端口」合成恰好带一个端口的 host。
+//
+// 必须做这一步：请求的 Host 头**可能已经带端口**（实测生产实例的 Host 是
+// 127.0.0.1:8080），此时再无脑追加 hostPort 就会得到
+// "127.0.0.1:8080:8080" —— 链接点不开，而且这个 bug 只在真实服务器上出现
+// （单测的 Host 通常不含端口，抓不到）。
+//
+// 规则：
+//   - host 已含端口 → 原样返回（尊重调用方看到的真实入口）；
+//   - host 不含端口 → 追加监听端口（否则 http 场景下链接缺端口）；
+//   - 以下情况不追加端口：端口为空、或 host 已含端口。
+func portalHostWithPort(host, hostPort string) string {
+	h := strings.TrimSpace(host)
+	if h == "" {
+		h = "localhost"
+	}
+	if _, _, err := net.SplitHostPort(h); err == nil {
+		return h // 已经带端口
+	}
+	p := strings.TrimSpace(hostPort)
+	if p == "" {
+		return h
+	}
+	if !strings.HasPrefix(p, ":") {
+		p = ":" + p
+	}
+	return h + p
+}
+
 // matchProxyPath 按**最长前缀**匹配路径挂载的服务。
 //
 // 边界要卡在路径分隔符上：/api/v1/device 不能匹配 /api/v1/devicefoo
@@ -573,7 +602,9 @@ func (h *Handler) listProxyServices(scheme, hostPort, portalHost string) []proxy
 		if r.Err == "" {
 			e.URL = fmt.Sprintf("%s://%s.%s%s", scheme, r.Host, t.base, hostPort)
 			if r.Path != "" {
-				e.URLPortal = fmt.Sprintf("%s://%s%s%s/", scheme, portalHost, hostPort, r.Path)
+				// portalHostWithPort 保证端口恰好出现一次（见其注释：
+				// 生产实例的 Host 自带 :8080，直接追加会拼出 8080:8080）
+				e.URLPortal = fmt.Sprintf("%s://%s%s/", scheme, portalHostWithPort(portalHost, hostPort), r.Path)
 			}
 		}
 		out = append(out, e)
@@ -767,21 +798,9 @@ func (h *Handler) handleProxyServices(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	scheme, port := h.proxySchemeAndPort(r)
-	portalHost := r.Host
+	portalHost := portalHostWithPort(r.Host, port)
 	if hh := r.Header.Get("X-Forwarded-Host"); hh != "" {
-		portalHost = strings.TrimSpace(strings.Split(hh, ",")[0])
-	}
-	// 反代层看到的 Host 可能不含端口（nginx 默认剥掉），此时用监听端口补，
-	// 保证服务入口链接点得开。
-	if _, _, err := net.SplitHostPort(portalHost); err != nil {
-		if p := strings.TrimPrefix(port, ":"); p != "" {
-			if portalHost == "" {
-				portalHost = "localhost"
-			}
-			if _, _, e2 := net.SplitHostPort(portalHost + ":" + p); e2 == nil {
-				portalHost = portalHost + ":" + p
-			}
-		}
+		portalHost = portalHostWithPort(strings.TrimSpace(strings.Split(hh, ",")[0]), port)
 	}
 	svcs := h.listProxyServices(scheme, port, portalHost)
 	// 可达性探测：并发带超时，避免一个坏上游拖住整个清单。
@@ -908,9 +927,10 @@ func (h *Handler) handleDeviceGatewayDiscovery(w http.ResponseWriter, r *http.Re
 	out["url"] = wsScheme + "://" + route.Host + "." + t.base + port + "/api/v1/device/ws"
 	out["http_url"] = scheme + "://" + route.Host + "." + t.base + port
 	// 门户同源形态：用**客户端实际访问用的 host**，保证它一定能解析。
-	portalHost := r.Host
+	// portalHostWithPort 负责让端口恰好出现一次（Host 可能已带端口）。
+	portalHost := portalHostWithPort(r.Host, port)
 	if h := r.Header.Get("X-Forwarded-Host"); h != "" {
-		portalHost = strings.TrimSpace(strings.Split(h, ",")[0])
+		portalHost = portalHostWithPort(strings.TrimSpace(strings.Split(h, ",")[0]), port)
 	}
 	if route.Path != "" {
 		// 声明了路径挂载 ⇒ 门户同源形态就是它（无 DNS 依赖，设备客户端首选）
