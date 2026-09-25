@@ -10,8 +10,8 @@ import (
 
 const PackageExt = ".hmap"
 
-// SDKProxyDecl 是 SDK 反代声明在本包的别名（避免调用方两处 import）。
-type SDKProxyDecl = pubsdk.ProxyDecl
+// SDKProxyDef 是 SDK 反代声明在本包的别名（避免调用方两处 import）。
+type SDKProxyDef = pubsdk.ProxyDef
 
 // PluginManifest 每个插件目录中的 plugin.json 元数据。
 type PluginManifest struct {
@@ -37,7 +37,7 @@ type PluginManifest struct {
 	//
 	// 字段解析忽略未知键（本仓无 DisallowUnknownFields），因此加这个字段
 	// 对「旧内核读新插件」与「新内核读旧插件」都是无害的。
-	Proxies []SDKProxyDecl `json:"proxies,omitempty"`
+	Proxies []SDKProxyDef `json:"proxies,omitempty"`
 
 	// Capabilities 声明本插件需要的内核能力组（§3.8 权限梯度）。
 	//

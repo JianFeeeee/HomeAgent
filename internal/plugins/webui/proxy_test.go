@@ -1442,3 +1442,202 @@ func TestBaseURLTolerant(t *testing.T) {
 		}
 	}
 }
+
+// ---- 路径挂载的两种语义（必须由声明者选，不能猜）----
+//
+// 别名模式（strip_path=false，默认）：Path 是上游真实路径的一部分。
+//
+//	设备网关就是这种 —— 客户端硬编码 /api/v1/device/ws，不可能知道反代。
+//
+// 前缀模式（strip_path=true）：Path 只是门户上的挂载点，上游不知道它。
+//
+//	自带 UI 的服务是这种 —— 前端用相对路径，被挂到哪里都对。
+//
+// 猜错的结果是全部请求 404，且看起来像上游故障，所以必须显式声明。
+func TestProxyPathAliasVsStrip(t *testing.T) {
+	var gotPath string
+	up := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotPath = r.URL.Path
+		w.Write([]byte("ok"))
+	}))
+	defer up.Close()
+
+	prev := declProvider
+	SetProxyDeclProvider(func() []proxyDecl {
+		return []proxyDecl{
+			// 别名：原样保留（机器接口，客户端已硬编码路径）
+			{Plugin: "gw", Name: "gateway", Host: "gw", Path: "/api/v1/device",
+				Target: up.Listener.Addr().String(), Auth: sdk.ProxyAuthNone},
+			// 前缀：剥掉后转发（自带 UI 的服务）
+			{Plugin: "ui", Name: "ui", Host: "ui", Path: "/p/myapp", StripPath: true,
+				Target: up.Listener.Addr().String(), Auth: sdk.ProxyAuthNone},
+		}
+	})
+	manualProxyRoutes = ""
+	InvalidateProxyRoutes()
+	t.Cleanup(func() { SetProxyDeclProvider(prev); InvalidateProxyRoutes() })
+
+	h := NewHandler(nil)
+	call := func(p string) string {
+		gotPath = ""
+		rec := httptest.NewRecorder()
+		r := httptest.NewRequest("GET", p, nil)
+		r.Host = "127.0.0.1:8080"
+		if !h.serveProxyHost(rec, r) {
+			t.Fatalf("%s 未被路径挂载接住", p)
+		}
+		return gotPath
+	}
+
+	// 别名模式：上游必须收到**一模一样**的路径
+	if p := call("/api/v1/device/ws"); p != "/api/v1/device/ws" {
+		t.Errorf("别名模式：上游收到 %q，期望原样 /api/v1/device/ws", p)
+	}
+	if p := call("/api/v1/device/online"); p != "/api/v1/device/online" {
+		t.Errorf("别名模式：上游收到 %q", p)
+	}
+
+	// 前缀模式：上游必须收到**剥掉前缀之后**的路径
+	if p := call("/p/myapp/api/status"); p != "/api/status" {
+		t.Errorf("前缀模式：上游收到 %q，期望 /api/status（前缀应被剥掉）", p)
+	}
+	if p := call("/p/myapp/"); p != "/" {
+		t.Errorf("前缀模式根：上游收到 %q，期望 /", p)
+	}
+	// 无尾斜杠时**不再转发**，而是 301 到带尾斜杠的形态 ——
+	// 否则浏览器算出的相对路径基准会退回上一级（见
+	// TestProxyStripPathRedirectsToTrailingSlash）。这里断言它确实
+	// 没有把 /p/myapp 当路径转给上游。
+	gotPath = ""
+	rec := httptest.NewRecorder()
+	r := httptest.NewRequest("GET", "/p/myapp", nil)
+	r.Host = "127.0.0.1:8080"
+	h.serveProxyHost(rec, r)
+	if rec.Code != http.StatusMovedPermanently || gotPath != "" {
+		t.Errorf("前缀模式无尾斜杠应 301 且不转发，实际 code=%d upstream_path=%q", rec.Code, gotPath)
+	}
+}
+
+// 路径前缀匹配必须**最长优先**，且边界卡在分隔符上。
+func TestProxyPathLongestPrefixWins(t *testing.T) {
+	var gotPath string
+	up := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotPath = r.URL.Path
+		w.Write([]byte("ok"))
+	}))
+	defer up.Close()
+
+	prev := declProvider
+	SetProxyDeclProvider(func() []proxyDecl {
+		return []proxyDecl{
+			{Plugin: "a", Name: "short", Host: "a", Path: "/p/app", StripPath: true,
+				Target: up.Listener.Addr().String(), Auth: sdk.ProxyAuthNone},
+			{Plugin: "b", Name: "long", Host: "b", Path: "/p/app/admin", StripPath: true,
+				Target: up.Listener.Addr().String(), Auth: sdk.ProxyAuthNone},
+		}
+	})
+	manualProxyRoutes = ""
+	InvalidateProxyRoutes()
+	t.Cleanup(func() { SetProxyDeclProvider(prev); InvalidateProxyRoutes() })
+
+	h := NewHandler(nil)
+	call := func(p string) string {
+		gotPath = ""
+		rec := httptest.NewRecorder()
+		r := httptest.NewRequest("GET", p, nil)
+		r.Host = "127.0.0.1:8080"
+		h.serveProxyHost(rec, r)
+		return gotPath
+	}
+
+	// 更长前缀必须胜出（否则 /p/app/admin/x 会被 /p/app 抢走）
+	if p := call("/p/app/admin/x"); p != "/x" {
+		t.Errorf("最长前缀未生效：上游收到 %q，期望 /x（由 /p/app/admin 处理）", p)
+	}
+	if p := call("/p/app/other"); p != "/other" {
+		t.Errorf("短前缀处理: %q，期望 /other", p)
+	}
+
+	// 边界：/p/app 不得匹配 /p/apple（否则会劫持无关路径）
+	rec := httptest.NewRecorder()
+	r := httptest.NewRequest("GET", "/p/apple/pie", nil)
+	r.Host = "127.0.0.1:8080"
+	if h.serveProxyHost(rec, r) {
+		t.Errorf("/p/apple 被 /p/app 前缀劫持了（边界必须卡在路径分隔符）: gotPath=%q", gotPath)
+	}
+}
+
+// ---- 前缀模式的尾斜杠（相对路径的基准）----
+//
+// 真实踩到的 bug：/p/huawei 能打开但页面里所有 fetch 都 404。
+// 原因是相对路径以「当前文档目录」为基准 —— 没有尾斜杠时浏览器把最后
+// 一段当文件名，目录退回上一级，fetch('api/status') 打到 /p/api/status。
+// 表现为「页面能开、数据全空」，极易误判成插件故障。
+func TestProxyStripPathRedirectsToTrailingSlash(t *testing.T) {
+	up := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Write([]byte("upstream:" + r.URL.Path))
+	}))
+	defer up.Close()
+
+	prev := declProvider
+	SetProxyDeclProvider(func() []proxyDecl {
+		return []proxyDecl{
+			// 前缀模式：需要尾斜杠重定向
+			{Plugin: "ui", Name: "ui", Host: "ui", Path: "/p/app", StripPath: true,
+				Target: up.Listener.Addr().String(), Auth: sdk.ProxyAuthNone},
+			// 别名模式：绝不能重定向（路径是上游真实语义）
+			{Plugin: "gw", Name: "gw", Host: "gw", Path: "/api/v1/device",
+				Target: up.Listener.Addr().String(), Auth: sdk.ProxyAuthNone},
+		}
+	})
+	manualProxyRoutes = ""
+	InvalidateProxyRoutes()
+	t.Cleanup(func() { SetProxyDeclProvider(prev); InvalidateProxyRoutes() })
+
+	h := NewHandler(nil)
+	do := func(p string) *httptest.ResponseRecorder {
+		rec := httptest.NewRecorder()
+		r := httptest.NewRequest("GET", p, nil)
+		r.Host = "127.0.0.1:8080"
+		if !h.serveProxyHost(rec, r) {
+			t.Fatalf("%s 未被接住", p)
+		}
+		return rec
+	}
+
+	// 前缀模式 + 无尾斜杠 → 必须 301 到带尾斜杠
+	rec := do("/p/app")
+	if rec.Code != http.StatusMovedPermanently {
+		t.Errorf("/p/app 应 301 到 /p/app/，实际 %d（body=%s）", rec.Code, rec.Body.String())
+	}
+	if loc := rec.Header().Get("Location"); loc != "/p/app/" {
+		t.Errorf("Location = %q，期望 /p/app/", loc)
+	}
+
+	// 查询串必须保留
+	rec = do("/p/app?a=1&b=2")
+	if loc := rec.Header().Get("Location"); loc != "/p/app/?a=1&b=2" {
+		t.Errorf("带查询串的 Location = %q，期望 /p/app/?a=1&b=2", loc)
+	}
+
+	// 有尾斜杠 → 正常转发到上游根
+	rec = do("/p/app/")
+	if rec.Code != http.StatusOK || rec.Body.String() != "upstream:/" {
+		t.Errorf("/p/app/ 应转发到上游 /，实际 %d %q", rec.Code, rec.Body.String())
+	}
+
+	// 子路径不受影响（不重定向）
+	rec = do("/p/app/api/status")
+	if rec.Code != http.StatusOK || rec.Body.String() != "upstream:/api/status" {
+		t.Errorf("/p/app/api/status 应转发到 /api/status，实际 %d %q", rec.Code, rec.Body.String())
+	}
+
+	// ★ 别名模式绝不能重定向：/api/v1/device 是上游真实路径，加斜杠会毁掉语义
+	rec = do("/api/v1/device")
+	if rec.Code == http.StatusMovedPermanently {
+		t.Errorf("别名模式的 /api/v1/device 被重定向了 —— 那类客户端的路径是上游真实语义，不能改")
+	}
+	if rec.Body.String() != "upstream:/api/v1/device" {
+		t.Errorf("别名模式应原样转发 /api/v1/device，实际 %q", rec.Body.String())
+	}
+}

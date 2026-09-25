@@ -21,18 +21,51 @@ import (
 //  3. 旧内核无害：manifest 解析忽略未知字段，未支持该能力的 HomeAgent 读旧
 //     插件、或旧 HomeAgent 读新插件都不会报错。
 //
+// 与 ToolDef / ChannelDef / ConfigDef 同族：SDK 定义声明契约，内核实现行为。
+// 声明方式与其它能力一致 —— 在 Start() 里调 RegisterProxy(name, def)，
+// 或写进 plugin.json 的 proxies 字段（外部插件两种都支持）。
+//
 // 安全性：**不声明 = 不被反代**。声明本身就是能力声明，因此不需要在
 // capabilities 里另外开一个开关——最小权限默认生效。
 //
-// 反代路径：HomeAgent 按 Host 路由（子域名标签 → Target），而非路径前缀。
-// 理由：插件前端普遍使用根绝对路径（`fetch('/api/status')`），放在路径前缀
-// 下会被劫持到 HomeAgent 自己的路由上；Host 路由下根路径天然正确，
-// 插件前端**零改动**。这也让「只穿透一个端口」成立：同一端口按 Host 分发。
-type ProxyDecl struct {
+// # 单一入口原则（强制要求）
+//
+// **一个声明 = 一个入口**。被反代的插件必须让它的全部资源与接口都能从
+// 该入口的一个基准路径出发访问到，不得依赖「入口之外的根路径」。
+//
+// 为什么强制：反代有两种挂载形态，而它们对「根路径」的处理截然不同——
+//
+//	Host 形态（host）：插件独占 <标签>.<基域名>，根路径就是插件的根。
+//	                  根绝对路径（fetch('/api/x')）**天然正确**。
+//	Path 形态（path）：插件挂在门户自身 host 的某个前缀下，根路径属于**门户**。
+//	                  此时插件里的 fetch('/api/x') 会打到门户自己的 /api/x
+//	                  —— 静默错路由，页面能开但功能全坏。
+//
+// 于是「同一个插件必须同时支持两种形态」这条要求，等价于：
+//
+//	**插件内部一律使用相对路径**（或基于 <base>/location 推导的路径），
+//	绝不硬编码以 / 开头的绝对路径。
+//
+// 这样同一份前端在两种形态下都正确，插件作者也不必知道自己被挂在哪。
+// 反代层据此可以：外部子域可用时给 Host 形态，子域不可用（证书/放行限制）
+// 时给 Path 形态，**无需插件配合改动**。
+//
+// 自检（插件作者在本地就该做）：把页面挂到 <门户>/<任意前缀>/ 下访问，
+// 所有请求都必须仍然打到插件自己。
+//
+// 本项目实测案例：某插件前端写死 fetch('/api/status')，配在
+// /p/huawei/ 下会打到门户的 /api/status（404 或返回门户数据）；
+// 改成相对路径后两种形态同时可用。
+// ProxyDef 是一个服务的**反代声明体**。
+//
+// 与 ToolDef 同构：Name 同时出现在字段与 RegisterProxy 的第一个参数里
+// （ToolDef 也是这么做的 —— 字段供 plugin.json 序列化，参数供运行期调用）。
+// Name 只用于展示、日志与冲突提示，**不参与路由**（路由键是 Host 与 Path）。
+type ProxyDef struct {
 	// Name 是同一插件内多条声明的唯一标识（如 "ui"、"api"）。
-	// 省略时由 HomeAgent 按声明顺序补 "default"/"ui"/"api"... 仅用于展示与日志。
+	// 运行期由 RegisterProxy 的第一个参数填入；声明式由 plugin.json 的
+	// name 键填入。省略时由 HomeAgent 兜底为 "service"。
 	Name string `json:"name,omitempty"`
-
 	// Host 是**子域名标签**（不含基域名），如 "huawei" 对应 huawei.<基域名>。
 	//
 	// 约束：仅小写字母、数字与连字符，不以连字符开头/结尾，长度 ≤ 63
@@ -69,9 +102,33 @@ type ProxyDecl struct {
 	// 例如上游注册 /api/v1/device/ws，就声明 Path="/api/v1/device"。
 	// 这样设备客户端可以直接使用它已硬编码的路径，不需要知道反代的存在。
 	//
+	// 与 Host 形态的关系（见包注释的「单一入口原则」）：声明的服务应当
+	// **同时**能被两种形态访问。因此 Path 形态下插件内部必须用相对路径，
+	// 否则它的前端会把请求打到门户自己身上。
+	//
 	// 留空 = 只提供子域形态（插件自带 UI 的常见情形：UI 与它自己的 API
 	// 同源，走子域天然正确）。
 	Path string `json:"path,omitempty"`
+
+	// StripPath 决定转发前是否**剥掉** Path 前缀。默认 false（原样保留）。
+	//
+	// 两种挂载语义真实不同，必须由声明者选，不能靠猜：
+	//
+	//	false（别名模式）：Path 就是上游真实路径的一部分。
+	//	  请求 /api/v1/device/ws + Path="/api/v1/device"
+	//	  → 上游收到 /api/v1/device/ws（一模一样）。
+	//	  适用：客户端**已硬编码**路径的机器接口（设备网关就是如此，
+	//	  它按 /api/v1/device/ws 连接，不可能知道反代的存在）。
+	//
+	//	true（前缀模式）：Path 只是门户上的挂载点，上游不知道它。
+	//	  请求 /p/myapp/api/status + Path="/p/myapp"
+	//	  → 上游收到 /api/status。
+	//	  适用：自带 UI 的服务（前端用相对路径，被挂到哪里都对）。
+	//
+	// 为什么不能自动判定：同一个声明「Path=/api/v1/device」在两种语义下
+	// 都说得通，代理无从分辨 —— 猜错的结果是全部请求 404，且看起来像
+	// 上游故障。所以由声明者显式写清楚。
+	StripPath bool `json:"strip_path,omitempty"`
 
 	// Auth 决定这条反代由谁保护，取值见 ProxyAuthNone / ProxyAuthHomeAgent。
 	// 空串等价于 ProxyAuthHomeAgent（默认安全）。
@@ -164,12 +221,12 @@ func NormalizeProxyHost(pluginName string) string {
 	return out
 }
 
-// ValidateProxyDecl 校验一条反代声明，返回人类可读的错误说明（合法时为空）。
+// ValidateProxyDef 校验一条反代声明，返回人类可读的错误说明（合法时为空）。
 //
 // 为什么要在 SDK 里做校验：HomeAgent 加载插件时必须能明确拒绝坏声明并说明
 // 原因（而不是静默忽略导致用户以为配好了）；插件作者也需要在本地就能查出
 // 拼错的 Target/Host。同一套规则两端共用。
-func ValidateProxyDecl(d ProxyDecl) string {
+func ValidateProxyDef(d ProxyDef) string {
 	if strings.TrimSpace(d.Target) == "" {
 		return "target 为空：必须给出上游地址（如 127.0.0.1:12100 或 http://127.0.0.1:12100）"
 	}
@@ -189,6 +246,12 @@ func ValidateProxyDecl(d ProxyDecl) string {
 		if strings.Contains(p, "..") || strings.ContainsAny(p, " \t\r\n\x00?#") {
 			return "path 含非法字符: " + d.Path
 		}
+	}
+	// 前缀模式必须给出可剥的前缀。
+	// 注意 "/" 不需要单独判：它是前缀又同时以 "/" 结尾，已被上面的
+	// 「不应以 / 结尾」规则挡掉（挂到门户根会覆盖整站的意图因此无法达成）。
+	if d.StripPath && strings.TrimSpace(d.Path) == "" {
+		return "strip_path=true 时必须给出 path（否则没有可剥的前缀）"
 	}
 	// Target 的 host:port 部分必须可解析；路径前缀允许保留。
 	//
@@ -232,45 +295,51 @@ func ValidateProxyDecl(d ProxyDecl) string {
 	return ""
 }
 
-// ProxyDeclarer 是内核注入的「收集反代声明」回调。
+// ProxyRegistrar 由内核注入（与 ToolRegistrar / InputChannelRegistrar 同族）。
+// 插件不直接调它，用 RegisterProxy。
 //
-// 为什么需要运行期通道（明明主要走 plugin.json 自动发现）：**内置插件**
-// （编译进内核、没有独立插件目录与 plugin.json，如 remotedevice）无法靠
-// 扫目录发现自己的服务；而它们恰恰最需要被反代出去（设备网关就是内置的）。
-// 两种来源互补：
-//   - 外部插件 → plugin.json 的 proxies（静态、未启动也可见）
-//   - 内置插件 → DeclareProxy（运行期，随 Start 注册）
-type ProxyDeclarer func(decl ProxyDecl)
+// 为什么需要运行期注册（明明有 plugin.json 自动发现）：**内置插件**
+// （编译进内核、没有独立插件目录与 plugin.json，如 remotedevice）扫不到；
+// 而它们恰恰最需要被反代出去（设备网关就是内置的）。两种来源互补：
+//   - 外部插件 → plugin.json 的 proxies（静态，未启动也可见）
+//   - 内置插件 → RegisterProxy（运行期，随 Start 注册）
+type ProxyRegistrar func(name string, def ProxyDef)
 
-// SetProxyDeclarer 由内核注入收集回调。插件不直接调它。
-func (s *PluginSDK) SetProxyDeclarer(d ProxyDeclarer) {
+// SetProxyRegistrar 由内核注入。插件不直接调它（与 SetInputChannelRegistrar 同族）。
+func (s *PluginSDK) SetProxyRegistrar(r ProxyRegistrar) {
 	if s == nil {
 		return
 	}
 	s.apiMu.Lock()
-	s.proxyDecl = d
+	s.proxyReg = r
 	s.apiMu.Unlock()
 }
 
-// DeclareProxy 声明本插件的一个服务需要 HomeAgent 反代出去。
+// RegisterProxy 声明一个需要 HomeAgent 反代出去的服务。
+//
+// 与 RegisterTool / RegisterInputChannel / RegisterOutputChannel 同一风格：
+// 显式给名字 + 声明体。名字用于展示、日志与冲突提示（不参与路由 —— 路由键是
+// def.Host / def.Path）。
 //
 // 用法（通常在 Start 里调用）：
 //
-//	s.DeclareProxy(sdk.ProxyDecl{
-//	    Name: "ui", Host: "myapp", Target: "127.0.0.1:12100",
+//	s.RegisterProxy("ui", sdk.ProxyDef{
+//	    Host: "myapp", Target: "127.0.0.1:12100",
 //	})
 //
-// 声明立即生效（反代表会在下一次请求时重建）。声明**不做去重**：同一 Host
-// 被两条声明占用时由反代层判定冲突并明确报错，而不是这里静默吞掉——
+// 声明立即生效（反代表在下一次请求时重建）。**不做去重**：同一 Host/Path
+// 被两条声明占用时由反代层判定冲突并明确报错，而不是在这里静默吞掉 ——
 // 插件作者需要看见冲突。
-func (s *PluginSDK) DeclareProxy(decl ProxyDecl) {
+//
+// 与 plugin.json 的 proxies 字段等价：写哪个都行，两者会合并（同名以本调用为准）。
+func (s *PluginSDK) RegisterProxy(name string, def ProxyDef) {
 	if s == nil {
 		return
 	}
-	s.apiMu.Lock()
-	d := s.proxyDecl
-	s.apiMu.Unlock()
-	if d != nil {
-		d(decl)
+	s.apiMu.RLock()
+	r := s.proxyReg
+	s.apiMu.RUnlock()
+	if r != nil {
+		r(name, def)
 	}
 }
