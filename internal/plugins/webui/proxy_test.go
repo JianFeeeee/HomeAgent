@@ -462,7 +462,7 @@ func TestListProxyServicesIncludesURLAndErrors(t *testing.T) {
 	t.Cleanup(func() { SetProxyDeclProvider(prev); InvalidateProxyRoutes() })
 
 	h := NewHandler(proxyTestSettings(t))
-	svcs := h.listProxyServices("http", ":8080")
+	svcs := h.listProxyServices("http", ":8080", "localhost:8080")
 	if len(svcs) != 2 {
 		t.Fatalf("入口数 = %d，期望 2（含坏条目）", len(svcs))
 	}
@@ -852,5 +852,347 @@ func TestProxyHostTakesPrecedenceOverPortalRoutes(t *testing.T) {
 	}
 	if st["status"] != "running" {
 		t.Errorf("门户 /api/v1/status 返回异常: %v", st)
+	}
+}
+
+// ---- 设备网关发现：客户端自动链接的权威来源 ----
+//
+// 改造后网关在 devices.<基域名>，而客户端无从知道基域名与子域标签。
+// 让服务端回答「网关在哪」是唯一不漂移的做法。
+func TestDeviceGatewayDiscovery(t *testing.T) {
+	prev := declProvider
+	SetProxyDeclProvider(func() []proxyDecl {
+		return []proxyDecl{{
+			Plugin: "remotedevice", Name: "gateway", Host: "devices",
+			Target: "127.0.0.1:9890", WebSocket: true, Auth: sdk.ProxyAuthNone,
+		}}
+	})
+	manualProxyRoutes = ""
+	InvalidateProxyRoutes()
+	t.Cleanup(func() { SetProxyDeclProvider(prev); InvalidateProxyRoutes() })
+
+	h := NewHandler(proxyTestSettings(t))
+
+	// 本机 http:8080
+	rec := httptest.NewRecorder()
+	r := httptest.NewRequest("GET", "/api/v1/device/gateway", nil)
+	r.Host = "localhost:8080"
+	h.handleDeviceGatewayDiscovery(rec, r)
+	var got struct {
+		Available bool   `json:"available"`
+		URL       string `json:"url"`
+		Host      string `json:"host"`
+		Base      string `json:"base_domain"`
+		Auth      string `json:"auth"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &got); err != nil {
+		t.Fatal(err)
+	}
+	if !got.Available {
+		t.Fatalf("应报告网关可用: %s", rec.Body.String())
+	}
+	if got.URL != "ws://devices.localhost:8080/api/v1/device/ws" {
+		t.Errorf("url = %q，期望 ws://devices.localhost:8080/api/v1/device/ws", got.URL)
+	}
+	if got.Host != "devices.localhost" {
+		t.Errorf("host = %q", got.Host)
+	}
+	if got.Auth != sdk.ProxyAuthNone {
+		t.Errorf("auth = %q", got.Auth)
+	}
+	// ★ 门户同源形态必须一并给出：*.localhost 只有浏览器能解析，
+	// 设备客户端走系统解析器会失败（实测：getent/Go 均解析不到）。
+	var full struct {
+		URLPortal string `json:"url_portal"`
+		Preferred string `json:"preferred"`
+	}
+	json.Unmarshal(rec.Body.Bytes(), &full)
+	if full.URLPortal != "ws://localhost:8080/api/v1/device/ws" {
+		t.Errorf("url_portal = %q，期望门户同源形态 ws://localhost:8080/api/v1/device/ws", full.URLPortal)
+	}
+	if full.Preferred != "url_portal" {
+		t.Errorf("preferred = %q，非浏览器客户端应优先门户同源形态", full.Preferred)
+	}
+
+	// 远程 https 反代：必须给出 wss 且省略 443
+	rec2 := httptest.NewRecorder()
+	r2 := httptest.NewRequest("GET", "/api/v1/device/gateway", nil)
+	r2.Host = "portal.example.com"
+	r2.Header.Set("X-Forwarded-Proto", "https")
+	r2.Header.Set("X-Forwarded-Host", "portal.example.com")
+	h.handleDeviceGatewayDiscovery(rec2, r2)
+	var got2 struct {
+		URL string `json:"url"`
+	}
+	json.Unmarshal(rec2.Body.Bytes(), &got2)
+	if got2.URL != "wss://devices.localhost/api/v1/device/ws" {
+		t.Errorf("https 场景 url = %q，期望 wss 且无端口", got2.URL)
+	}
+
+	// ★ 安全：不得把设备令牌带回来（门户凭证不该换来设备执行权）
+	body := rec.Body.String()
+	for _, leak := range []string{"ws_token", "device_gateway_token", "test-api-key", "token\":\""} {
+		if strings.Contains(body, leak) {
+			t.Errorf("发现端点泄漏了凭证相关字段 %q: %s", leak, body)
+		}
+	}
+}
+
+// 没有声明设备网关时必须明确报告不可用（客户端据此回退自配地址），
+// 而不是给一个连不上的 URL。
+func TestDeviceGatewayDiscoveryUnavailable(t *testing.T) {
+	prev := declProvider
+	SetProxyDeclProvider(func() []proxyDecl { return nil })
+	manualProxyRoutes = ""
+	InvalidateProxyRoutes()
+	t.Cleanup(func() { SetProxyDeclProvider(prev); InvalidateProxyRoutes() })
+
+	h := NewHandler(proxyTestSettings(t))
+	rec := httptest.NewRecorder()
+	h.handleDeviceGatewayDiscovery(rec, httptest.NewRequest("GET", "/api/v1/device/gateway", nil))
+	var got struct {
+		Available bool   `json:"available"`
+		URL       string `json:"url"`
+		Hint      string `json:"hint"`
+	}
+	json.Unmarshal(rec.Body.Bytes(), &got)
+	if got.Available {
+		t.Error("无声明时应报告不可用")
+	}
+	if got.URL != "" {
+		t.Errorf("不可用时不应给出 URL，实际 %q", got.URL)
+	}
+	if got.Hint == "" {
+		t.Error("不可用时应给出可操作提示")
+	}
+}
+
+// 发现端点必须排在门户的旧路径反代（/api/v1/device/）之前——
+// 否则会被 requireAPI + 旧反代接走。
+func TestDeviceGatewayDiscoveryBeatsLegacyDeviceRoute(t *testing.T) {
+	prev := declProvider
+	SetProxyDeclProvider(func() []proxyDecl {
+		return []proxyDecl{{
+			Plugin: "remotedevice", Name: "gateway", Host: "devices",
+			Target: "127.0.0.1:9890", WebSocket: true, Auth: sdk.ProxyAuthNone,
+		}}
+	})
+	manualProxyRoutes = ""
+	InvalidateProxyRoutes()
+	t.Cleanup(func() { SetProxyDeclProvider(prev); InvalidateProxyRoutes() })
+
+	h := NewHandler(proxyTestSettings(t))
+	h.RegisterRoutes(http.NewServeMux())
+	rec := httptest.NewRecorder()
+	r := httptest.NewRequest("GET", "/api/v1/device/gateway", nil)
+	r.Host = "localhost:8080"
+	r.Header.Set("X-API-Key", "test-api-key")
+	h.Handler().ServeHTTP(rec, r)
+	if rec.Code != 200 {
+		t.Fatalf("code=%d body=%s", rec.Code, rec.Body.String())
+	}
+	var got struct {
+		Available bool `json:"available"`
+	}
+	json.Unmarshal(rec.Body.Bytes(), &got)
+	if !got.Available {
+		t.Errorf("发现端点被旧 /api/v1/device/ 路由截走了: %s", rec.Body.String())
+	}
+}
+
+// ---- 路径挂载：非浏览器客户端（无 DNS 依赖）----
+//
+// *.localhost 只有浏览器内置解析特例（RFC 6761），普通进程走系统解析器
+// 解析不到（实测：getent/Go 均失败）。路径挂载挂在门户自身 host 下，
+// 设备客户端因此可用它已硬编码的 /api/v1/device/ws。
+func TestProxyPathMount(t *testing.T) {
+	var gotPath string
+	up := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotPath = r.URL.Path
+		w.Write([]byte("PATH-MOUNT-OK"))
+	}))
+	defer up.Close()
+
+	prev := declProvider
+	SetProxyDeclProvider(func() []proxyDecl {
+		return []proxyDecl{{
+			Plugin: "remotedevice", Name: "gateway", Host: "devices",
+			Path:   "/api/v1/device",
+			Target: up.Listener.Addr().String(),
+			Auth:   sdk.ProxyAuthNone,
+		}}
+	})
+	manualProxyRoutes = ""
+	InvalidateProxyRoutes()
+	t.Cleanup(func() { SetProxyDeclProvider(prev); InvalidateProxyRoutes() })
+
+	h := NewHandler(proxyTestSettings(t))
+
+	// 门户 host + 声明路径 → 必须被反代（无 DNS 依赖的那条路）
+	for _, p := range []string{"/api/v1/device/online", "/api/v1/device/ws", "/api/v1/device"} {
+		rec := httptest.NewRecorder()
+		r := httptest.NewRequest("GET", p, nil)
+		r.Host = "127.0.0.1:8080"
+		if !h.serveProxyHost(rec, r) {
+			t.Errorf("%s 应被路径挂载接住", p)
+			continue
+		}
+		if rec.Code != 200 || rec.Body.String() != "PATH-MOUNT-OK" {
+			t.Errorf("%s → code=%d body=%q", p, rec.Code, rec.Body.String())
+		}
+	}
+	// ★ 路径必须**原样保留**：设备客户端沿用它已硬编码的路径，
+	// 剥前缀会让上游 404。
+	if gotPath != "/api/v1/device" {
+		t.Errorf("上游收到的路径 = %q，期望原样 /api/v1/device（不剥前缀）", gotPath)
+	}
+
+	// 边界：同前缀但不同路径段**不得**被劫持
+	for _, p := range []string{"/api/v1/devicefoo", "/api/v1/devices/x"} {
+		rec := httptest.NewRecorder()
+		r := httptest.NewRequest("GET", p, nil)
+		r.Host = "127.0.0.1:8080"
+		if h.serveProxyHost(rec, r) {
+			t.Errorf("%s 不该被 /api/v1/device 前缀劫持（边界必须卡在路径分隔符）", p)
+		}
+	}
+
+	// 子域形态同时仍然可用
+	rec := httptest.NewRecorder()
+	r := httptest.NewRequest("GET", "/any", nil)
+	r.Host = "devices.localhost:8080"
+	if !h.serveProxyHost(rec, r) || rec.Body.String() != "PATH-MOUNT-OK" {
+		t.Errorf("子域形态失效: code=%d body=%q", rec.Code, rec.Body.String())
+	}
+}
+
+// 路径前缀冲突同样不得静默覆盖
+func TestProxyPathConflictNotOverridden(t *testing.T) {
+	prev := declProvider
+	SetProxyDeclProvider(func() []proxyDecl {
+		return []proxyDecl{
+			{Plugin: "a", Name: "x", Host: "a", Path: "/api/v1/dup", Target: "127.0.0.1:1001"},
+			{Plugin: "b", Name: "y", Host: "b", Path: "/api/v1/dup", Target: "127.0.0.1:1002"},
+		}
+	})
+	manualProxyRoutes = ""
+	InvalidateProxyRoutes()
+	t.Cleanup(func() { SetProxyDeclProvider(prev); InvalidateProxyRoutes() })
+
+	tbl := currentProxyTable()
+	first := tbl.paths["/api/v1/dup"]
+	if first == nil || first.Plugin != "a" {
+		t.Fatalf("先声明者应占住路径前缀: %+v", first)
+	}
+	var loser *ProxyRoute
+	for _, x := range tbl.ordered {
+		if x.Plugin == "b" {
+			loser = x
+		}
+	}
+	if loser == nil || loser.Err == "" {
+		t.Error("路径冲突的后者必须可见并带原因，不能静默消失")
+	}
+}
+
+// 发现端点必须同时给出两种形态，并标出优先项
+func TestDeviceGatewayDiscoveryOffersPathForm(t *testing.T) {
+	prev := declProvider
+	SetProxyDeclProvider(func() []proxyDecl {
+		return []proxyDecl{{
+			Plugin: "remotedevice", Name: "gateway", Host: "devices",
+			Path:   "/api/v1/device",
+			Target: "127.0.0.1:9890", WebSocket: true, Auth: sdk.ProxyAuthNone,
+		}}
+	})
+	manualProxyRoutes = ""
+	InvalidateProxyRoutes()
+	t.Cleanup(func() { SetProxyDeclProvider(prev); InvalidateProxyRoutes() })
+
+	h := NewHandler(proxyTestSettings(t))
+	rec := httptest.NewRecorder()
+	r := httptest.NewRequest("GET", "/api/v1/device/gateway", nil)
+	r.Host = "portal.example.com"
+	r.Header.Set("X-Forwarded-Proto", "https")
+	h.handleDeviceGatewayDiscovery(rec, r)
+	var got struct {
+		URL       string `json:"url"`
+		URLPortal string `json:"url_portal"`
+		Preferred string `json:"preferred"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &got); err != nil {
+		t.Fatal(err)
+	}
+	if got.URL == "" {
+		t.Error("必须给出子域形态（浏览器用）")
+	}
+	if got.URLPortal == "" {
+		t.Error("必须给出门户同源形态（非浏览器用，无 DNS 依赖）")
+	}
+	if got.Preferred != "url_portal" {
+		t.Errorf("preferred = %q，应对非浏览器更稳的形态", got.Preferred)
+	}
+}
+
+// ★ 发现端点不得被路径挂载劫持。
+//
+// 真实实测踩到：remotedevice 声明了 Path="/api/v1/device"（auth=none，
+// 凭设备令牌），于是 /api/v1/device/gateway 被它接走转给上游，上游回 401
+// —— 客户端因此永远发现不到网关。
+//
+// 这条判据走**完整生产链**：既确认发现端点没被劫持，也确认同前缀下的
+// 真实设备路径仍归反代。
+func TestDiscoveryEndpointNotHijackedByPathMount(t *testing.T) {
+	up := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Write([]byte("UPSTREAM-DEVICE"))
+	}))
+	defer up.Close()
+
+	prev := declProvider
+	SetProxyDeclProvider(func() []proxyDecl {
+		return []proxyDecl{{
+			Plugin: "remotedevice", Name: "gateway", Host: "devices",
+			Path:      "/api/v1/device",
+			Target:    up.Listener.Addr().String(),
+			WebSocket: true, Auth: sdk.ProxyAuthNone,
+		}}
+	})
+	manualProxyRoutes = ""
+	InvalidateProxyRoutes()
+	t.Cleanup(func() { SetProxyDeclProvider(prev); InvalidateProxyRoutes() })
+
+	h := NewHandler(proxyTestSettings(t))
+	h.RegisterRoutes(http.NewServeMux())
+
+	// 发现端点：必须由门户处理（返回 available 字段），不得转给上游
+	rec := httptest.NewRecorder()
+	r := httptest.NewRequest("GET", "/api/v1/device/gateway", nil)
+	r.Host = "127.0.0.1:18080"
+	r.Header.Set("X-API-Key", "test-api-key")
+	h.Handler().ServeHTTP(rec, r)
+	if rec.Code != 200 {
+		t.Fatalf("发现端点 code=%d body=%s", rec.Code, rec.Body.String())
+	}
+	var got struct {
+		Available bool   `json:"available"`
+		URLPortal string `json:"url_portal"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &got); err != nil {
+		t.Fatalf("发现端点返回的不是门户 JSON（被路径挂载劫持了？）: %s", rec.Body.String())
+	}
+	if !got.Available {
+		t.Error("应报告网关可用")
+	}
+	if !strings.Contains(got.URLPortal, "/api/v1/device/ws") {
+		t.Errorf("url_portal = %q，应指向声明路径", got.URLPortal)
+	}
+
+	// 同前缀下的真实设备路径仍必须归反代（无 auth 需求：auth=none）
+	rec2 := httptest.NewRecorder()
+	r2 := httptest.NewRequest("GET", "/api/v1/device/online", nil)
+	r2.Host = "127.0.0.1:18080"
+	h.Handler().ServeHTTP(rec2, r2)
+	if rec2.Body.String() != "UPSTREAM-DEVICE" {
+		t.Errorf("设备路径未走反代: code=%d body=%q", rec2.Code, rec2.Body.String())
 	}
 }

@@ -593,6 +593,31 @@ async function api(p, o) {
   return body;
 }
 
+// 从服务端发现设备网关地址（自动链接的权威来源）。
+//
+// 失败不报错：老版本 HomeAgent 没有这个端点，回退到本地推导即可
+// （见 renderDeviceChannel 里的 state.discoveredGateway || 旧口径）。
+//
+// 优先 url_portal（门户同源形态）：GUI 主进程连 WS 走系统解析器，
+// devices.localhost 这类子域在系统解析器下通常解析不到 —— *.localhost
+// 是浏览器内置特例（RFC 6761），不适用于普通进程。实测确认。
+async function loadDiscoveredGateway() {
+  if (!state.currentConn || state.currentConn.type !== "webui") {
+    state.discoveredGateway = "";
+    return;
+  }
+  try {
+    var d = await api("/device/gateway");
+    state.discoveredGateway =
+      (d && d.available && (d.url_portal || d.url)) || "";
+    if (state.discoveredGateway) {
+      console.log("[device-bridge] discovered gateway: " + state.discoveredGateway);
+    }
+  } catch (e) {
+    state.discoveredGateway = "";
+  }
+}
+
 // ===== Navigation =====
 function switchView(n) {
   document.querySelectorAll(".view").forEach((e) => {
@@ -723,6 +748,7 @@ async function refreshDataOnly() {
       state.currentConn.type === "webui" &&
       state.currentConn.url
     ) {
+      await loadDiscoveredGateway();
       var d = await api("/device/online");
       state.devices = (d && d.devices) || [];
     } else {
@@ -807,6 +833,7 @@ async function refreshAll() {
       state.currentConn.type === "webui" &&
       state.currentConn.url
     ) {
+      await loadDiscoveredGateway();
       var d = await api("/device/online");
       state.devices = (d && d.devices) || [];
     } else {
@@ -5705,12 +5732,21 @@ function renderDevices() {
   }
   // 设备通道配置（独立于连接类型：devicced 是 GUI 组件，默认走 webui 反代端口）
   var dbc = state.dbConfig || {};
-  var webuiUrl = "";
+  // 网关地址优先用**服务端发现的权威值**（state.discoveredGateway），
+  // 其次才是用户手填 / 本地推导。
+  //
+  // 为什么不能继续用「门户 URL 同 host 拼 /api/v1/device/ws」：
+  // 网关改造为子域反代后位于 devices.<基域名>，而**基域名与子域标签都是
+  // 服务端配置**，客户端无从得知。硬拼的结果是连到门户自己的路由上。
+  // 服务端 /api/v1/device/gateway 是唯一不会漂移的来源。
+  var webuiUrl = state.discoveredGateway || "";
   if (
+    !webuiUrl &&
     state.currentConn &&
     state.currentConn.type === "webui" &&
     state.currentConn.url
   ) {
+    // 回退：老部署（无发现端点）仍按旧口径推导，保持向后兼容。
     webuiUrl = state.currentConn.url.replace(/\/+$/, "") + "/api/v1/device/ws";
   }
   var curGateway = dbc.gateway || webuiUrl || "";
@@ -5855,8 +5891,8 @@ function renderDevices() {
     html +=
       '<p style="color:var(--text-muted)">' +
       __(
-        "暂无设备接入。设备通过 WebSocket 连接到设备网关（默认 127.0.0.1:9890/api/v1/device/ws），携带 token 后 hello 登记、bind 授权。",
-        "No devices yet. Devices connect via WebSocket (default 127.0.0.1:9890/api/v1/device/ws), hello to register, bind to authorize.",
+        "暂无设备接入。设备通过 WebSocket 连接到设备网关（默认经 HomeAgent 反代到 devices.<基域名>，或直连 127.0.0.1:9890/api/v1/device/ws），携带 token 后 hello 登记、bind 授权。",
+        "No devices yet. Devices connect via WebSocket (proxied by HomeAgent at devices.<base-domain>, or directly 127.0.0.1:9890/api/v1/device/ws), hello to register, bind to authorize.",
       ) +
       "</p>";
   } else {

@@ -469,8 +469,16 @@ func (h *Handler) RegisterRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("/api/v1/persona", h.requireAPI(h.handlePersona))
 	mux.HandleFunc("/api/v1/plugins", h.requireAPI(h.handlePlugins))
 	mux.HandleFunc("/api/v1/plugins/", h.requireAPI(h.handlePluginByID))
-	// 设备网关（可配置反代到 remotedevice；默认禁用，未启用时返回 404）
-	mux.HandleFunc("/api/v1/device/", h.requireAPI(h.handleDeviceGatewayProxy))
+	// 设备网关的**遗留路径反代**（装置开关 device_gateway_enabled 控制）。
+	//
+	// 鉴权**不再套 requireAPI**：该路由的调用方是设备与嵌入式客户端，
+	// 它们带的是设备接入令牌（?token= / X-API-Key），不是门户凭证；套上
+	// requireAPI 会把它们全部挡在 401（实测：waiter 经此路径升级握手 401）。
+	// 上游 remotedevice 自己用 requireToken 强制校验令牌，安全性不降级。
+	//
+	// 声明了 path 的服务（新机制）会在最外层 Host 分发里更早命中，
+	// 走不到这里；这条保留是为了「只开开关、不写声明」的老部署仍可用。
+	mux.HandleFunc("/api/v1/device/", h.handleDeviceGatewayProxy)
 	// agent 发送的文件下载（webui_files 中转目录；requireWeb 与 dashboard 同源同鉴权）
 	mux.HandleFunc("/files/", h.requireWeb(h.handleFiles))
 	// 用户上传文件的下载（uploads 目录，同一安全模型）
@@ -480,6 +488,8 @@ func (h *Handler) RegisterRoutes(mux *http.ServeMux) {
 	// 走 requireAPI：清单本身含上游地址，属于管理面信息，不该匿名可读。
 	mux.HandleFunc("/api/v1/proxy/services", h.requireAPI(h.handleProxyServices))
 	mux.HandleFunc("/api/v1/proxy", h.requireAPI(h.handleProxyInfo))
+	// 设备网关发现：客户端（GUI/鸿蒙/waiter）据此自动链接，不再自己拼地址。
+	mux.HandleFunc("/api/v1/device/gateway", h.requireAPI(h.handleDeviceGatewayDiscovery))
 	mux.HandleFunc("/", h.requireWeb(h.handleStatic))
 }
 

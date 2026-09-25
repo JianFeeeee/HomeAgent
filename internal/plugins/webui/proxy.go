@@ -53,6 +53,7 @@ type ProxyRoute struct {
 	Plugin string // 声明该服务的插件名
 	Name   string // 声明内的服务标识（展示用，如 "ui"）
 	Host   string // 子域标签（小写，已归一化）
+	Path   string // 可选的路径挂载前缀（非浏览器客户端用，无 DNS 依赖）
 	Target string // 上游地址（原样，含可能的 scheme/路径前缀）
 	WS     bool   // 是否允许 WebSocket 升级
 	Auth   string // 生效的鉴权模式（已归一化）
@@ -68,6 +69,7 @@ type ProxyRoute struct {
 // 而声明只在启动/插件重载时变化。读路径无锁，重载时整体换指针。
 type proxyTable struct {
 	routes  map[string]*ProxyRoute // key = 小写 host 标签
+	paths   map[string]*ProxyRoute // key = 路径挂载前缀（按最长前缀匹配）
 	ordered []*ProxyRoute          // 稳定顺序（展示/配置页用）
 	base    string                 // 基域名（"" 表示用 localhost）
 }
@@ -162,7 +164,7 @@ func proxyHostLabel(host, base string) string {
 // 仍会出现在表里（Err 非空），在配置页可见；只是不参与路由。
 func buildProxyTable(decls []proxyDecl, manualText string, settings sdk.SettingsAPI) *proxyTable {
 	base := proxyBaseDomain(settings)
-	t := &proxyTable{routes: map[string]*ProxyRoute{}, base: base}
+	t := &proxyTable{routes: map[string]*ProxyRoute{}, paths: map[string]*ProxyRoute{}, base: base}
 
 	add := func(r *ProxyRoute) {
 		t.ordered = append(t.ordered, r)
@@ -177,6 +179,14 @@ func buildProxyTable(decls []proxyDecl, manualText string, settings sdk.Settings
 			return
 		}
 		t.routes[key] = r
+		if r.Path != "" {
+			if prev, dup := t.paths[r.Path]; dup {
+				r.Err = fmt.Sprintf("路径前缀 %q 已被插件 %s 的服务 %s 占用", r.Path, prev.Plugin, prev.Name)
+				delete(t.routes, key)
+				return
+			}
+			t.paths[r.Path] = r
+		}
 	}
 
 	for _, d := range decls {
@@ -184,12 +194,14 @@ func buildProxyTable(decls []proxyDecl, manualText string, settings sdk.Settings
 			Plugin: d.Plugin,
 			Name:   d.Name,
 			Host:   d.Host,
+			Path:   strings.TrimSpace(d.Path),
 			Target: d.Target,
 			WS:     d.WebSocket,
 			Auth:   sdk.EffectiveProxyAuth(d.Auth),
 		}
 		if msg := sdk.ValidateProxyDecl(sdk.ProxyDecl{
-			Name: d.Name, Host: d.Host, Target: d.Target, WebSocket: d.WebSocket, Auth: d.Auth,
+			Name: d.Name, Host: d.Host, Path: d.Path,
+			Target: d.Target, WebSocket: d.WebSocket, Auth: d.Auth,
 		}); msg != "" {
 			r.Err = msg
 		} else if r.Name == "" {
@@ -203,12 +215,14 @@ func buildProxyTable(decls []proxyDecl, manualText string, settings sdk.Settings
 			Plugin: "manual",
 			Name:   d.Name,
 			Host:   d.Host,
+			Path:   strings.TrimSpace(d.Path),
 			Target: d.Target,
 			WS:     d.WebSocket,
 			Auth:   sdk.EffectiveProxyAuth(d.Auth),
 		}
 		if msg := sdk.ValidateProxyDecl(sdk.ProxyDecl{
-			Name: d.Name, Host: d.Host, Target: d.Target, WebSocket: d.WebSocket, Auth: d.Auth,
+			Name: d.Name, Host: d.Host, Path: d.Path,
+			Target: d.Target, WebSocket: d.WebSocket, Auth: d.Auth,
 		}); msg != "" {
 			r.Err = msg
 		}
@@ -374,6 +388,7 @@ func currentProxyTable() *proxyTable {
 			}
 			decls = append(decls, proxyDecl{
 				Plugin: plugin, Name: name, Host: strings.ToLower(host),
+				Path:   strings.TrimSpace(d.Path),
 				Target: d.Target, WebSocket: d.WebSocket, Auth: d.Auth,
 			})
 		}
@@ -384,6 +399,22 @@ func currentProxyTable() *proxyTable {
 	return proxySnap
 }
 
+// matchProxyPath 按**最长前缀**匹配路径挂载的服务。
+//
+// 边界要卡在路径分隔符上：/api/v1/device 不能匹配 /api/v1/devicefoo
+// （否则会劫持同前缀的其它路径）。返回剩余部分供上游使用。
+func (t *proxyTable) matchProxyPath(p string) (*ProxyRoute, bool) {
+	var best *ProxyRoute
+	for prefix, r := range t.paths {
+		if p == prefix || strings.HasPrefix(p, prefix+"/") {
+			if best == nil || len(prefix) > len(best.Path) {
+				best = r
+			}
+		}
+	}
+	return best, best != nil
+}
+
 // serveProxyHost 是挂在根路由前的 Host 分发入口。
 // 返回 true 表示已处理该请求。
 func (h *Handler) serveProxyHost(w http.ResponseWriter, r *http.Request) bool {
@@ -391,11 +422,45 @@ func (h *Handler) serveProxyHost(w http.ResponseWriter, r *http.Request) bool {
 	if h.settings != nil {
 		base = proxyBaseDomain(h.settings)
 	}
+	// ★ 发现端点必须先于路径挂载判定。
+	//
+	// 否则它会被 /api/v1/device 这类前缀接走：声明该前缀的服务通常
+	// auth=none（凭设备令牌），于是发现请求会被当成设备请求转给上游，
+	// 上游对 /api/v1/device/gateway 回 401 —— 客户端再也发现不到网关。
+	// （真实实测踩到：waiter 用门户地址发现时拿到 401 unauthorized。）
+	if r.URL.Path == "/api/v1/device/gateway" {
+		return false // 交给 mux 上的 requireAPI 处理
+	}
+
+	t := currentProxyTable()
+
+	// 先把「门户自身 host + 声明了 path」的请求交给对应服务。
+	//
+	// 这条分支让**非浏览器客户端**（设备/固件/CLI，走系统解析器解析不了
+	// *.localhost）也能用：它们连门户地址本身即可，不需要知道反代的存在。
+	// 路径原样保留 —— 客户端沿用它已有的路径。
+	if rt, ok := t.matchProxyPath(r.URL.Path); ok && proxyHostLabel(r.Host, base) == "" {
+		if isWebSocketUpgrade(r) && !rt.WS {
+			writeJSON(w, http.StatusBadRequest, map[string]string{
+				"error": fmt.Sprintf("插件 %s 的服务 %s 未声明 websocket", rt.Plugin, rt.Name),
+			})
+			return true
+		}
+		if rt.Auth == sdk.ProxyAuthHomeAgent && !h.authorizeProxy(w, r) {
+			return true
+		}
+		if rt.reverse == nil {
+			writeJSON(w, http.StatusBadGateway, map[string]string{"error": "路由未就绪"})
+			return true
+		}
+		rt.reverse.ServeHTTP(w, r)
+		return true
+	}
+
 	label := proxyHostLabel(r.Host, base)
 	if label == "" {
 		return false
 	}
-	t := currentProxyTable()
 	route, ok := t.routes[label]
 	if !ok {
 		writeJSON(w, http.StatusNotFound, map[string]string{
@@ -466,17 +531,21 @@ type proxyServiceEntry struct {
 	PluginZh string `json:"plugin_name"`
 	Name     string `json:"name"`
 	Host     string `json:"host"`
-	URL      string `json:"url"`  // 完整可点 URL（带端口/协议，按当前请求推导）
-	Auth     string `json:"auth"` // homeagent | none
-	WS       bool   `json:"websocket"`
-	Target   string `json:"target"`
-	OK       bool   `json:"ok"` // false = 声明被拒或上游不可达（见 error）
-	Error    string `json:"error,omitempty"`
+	Path     string `json:"path,omitempty"` // 路径挂载前缀（无 DNS 依赖的形态）
+	URL      string `json:"url"`            // 子域形态（浏览器）
+	// URLPortal 是门户同源形态：挂在门户自身 host 的路径下，**无 DNS 依赖**。
+	// 非浏览器客户端（设备/固件/CLI）用系统解析器解析不了 *.localhost，用它。
+	URLPortal string `json:"url_portal,omitempty"`
+	Auth      string `json:"auth"` // homeagent | none
+	WS        bool   `json:"websocket"`
+	Target    string `json:"target"`
+	OK        bool   `json:"ok"` // false = 声明被拒或上游不可达（见 error）
+	Error     string `json:"error,omitempty"`
 }
 
 // listProxyServices 汇总反代服务清单（含被拒条目，供配置页排错）。
 // schemePort 由调用方按当前请求推导（本机 http:8080 / 远程 https:443 等）。
-func (h *Handler) listProxyServices(scheme, hostPort string) []proxyServiceEntry {
+func (h *Handler) listProxyServices(scheme, hostPort, portalHost string) []proxyServiceEntry {
 	t := currentProxyTable()
 	metas := map[string]sdk.PluginMeta{}
 	if h.pluginMgr != nil {
@@ -488,6 +557,7 @@ func (h *Handler) listProxyServices(scheme, hostPort string) []proxyServiceEntry
 			Plugin: r.Plugin,
 			Name:   r.Name,
 			Host:   r.Host,
+			Path:   r.Path,
 			Auth:   r.Auth,
 			WS:     r.WS,
 			Target: r.Target,
@@ -502,6 +572,9 @@ func (h *Handler) listProxyServices(scheme, hostPort string) []proxyServiceEntry
 		}
 		if r.Err == "" {
 			e.URL = fmt.Sprintf("%s://%s.%s%s", scheme, r.Host, t.base, hostPort)
+			if r.Path != "" {
+				e.URLPortal = fmt.Sprintf("%s://%s%s%s/", scheme, portalHost, hostPort, r.Path)
+			}
 		}
 		out = append(out, e)
 	}
@@ -515,6 +588,7 @@ type proxyDecl struct {
 	Plugin    string
 	Name      string
 	Host      string
+	Path      string
 	Target    string
 	WebSocket bool
 	Auth      string
@@ -563,6 +637,7 @@ func readPluginProxyDecls(pluginDir string) []proxyDecl {
 				Plugin:    m.Name,
 				Name:      sname,
 				Host:      strings.ToLower(host),
+				Path:      strings.TrimSpace(p.Path),
 				Target:    p.Target,
 				WebSocket: p.WebSocket,
 				Auth:      p.Auth,
@@ -692,7 +767,23 @@ func (h *Handler) handleProxyServices(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	scheme, port := h.proxySchemeAndPort(r)
-	svcs := h.listProxyServices(scheme, port)
+	portalHost := r.Host
+	if hh := r.Header.Get("X-Forwarded-Host"); hh != "" {
+		portalHost = strings.TrimSpace(strings.Split(hh, ",")[0])
+	}
+	// 反代层看到的 Host 可能不含端口（nginx 默认剥掉），此时用监听端口补，
+	// 保证服务入口链接点得开。
+	if _, _, err := net.SplitHostPort(portalHost); err != nil {
+		if p := strings.TrimPrefix(port, ":"); p != "" {
+			if portalHost == "" {
+				portalHost = "localhost"
+			}
+			if _, _, e2 := net.SplitHostPort(portalHost + ":" + p); e2 == nil {
+				portalHost = portalHost + ":" + p
+			}
+		}
+	}
+	svcs := h.listProxyServices(scheme, port, portalHost)
 	// 可达性探测：并发带超时，避免一个坏上游拖住整个清单。
 	var wg sync.WaitGroup
 	for i := range svcs {
@@ -736,4 +827,101 @@ func (h *Handler) handleProxyInfo(w http.ResponseWriter, r *http.Request) {
 		"total":       len(t.ordered),
 		"manual":      strings.TrimSpace(manualProxyRoutes) != "",
 	})
+}
+
+// ---- 设备网关发现（客户端自动链接的权威来源）----
+
+// deviceGatewayRoute 找出本实例的设备网关反代路由。
+//
+// 为什么按「插件名 + 声明名」而不是按地址猜：地址是插件配置里可改的
+// （remotedevice 的 listen_addr 就能改），按地址匹配会在改配置后静默失配。
+// 声明归属是稳定的契约。
+func deviceGatewayRoute(t *proxyTable) *ProxyRoute {
+	for _, r := range t.ordered {
+		if r.Err != "" {
+			continue
+		}
+		if r.Plugin == "remotedevice" && r.WS {
+			return r
+		}
+	}
+	return nil
+}
+
+// handleDeviceGatewayDiscovery 返回设备网关的**可连接地址**，供客户端
+// （GUI / 鸿蒙 / waiter / 设备固件）自动链接。
+//
+// 为什么需要它：改造成子域反代后，网关不再是「门户地址 + /api/v1/device/ws」——
+// 硬拼路径的客户端会连到门户自己的路由上（那里没有 WS 升级处理），
+// 或者根本连不上。而**客户端无从知道基域名与子域标签**（那是服务端配置）。
+// 让服务端回答「网关在哪」是唯一不会漂移的做法：
+//   - 子域标签可改（插件声明）→ 客户端不用跟着改；
+//   - 基域名可改（webui.base_domain）→ 同上；
+//   - 实例可换成路径前缀模式 → 客户端拿到的仍是对的 URL。
+//
+// 返回的 url 用 ws/wss 前缀，可直接喂给 WebSocket 客户端。
+//
+// ⚠️ **不返回设备令牌**：本端点用门户凭证鉴权，而设备令牌能执行设备命令
+// （cmdrun 等），把令牌塞进来等于「门户只读凭证 → 设备执行权」的越权。
+// 令牌仍由客户端自己的配置提供（见部署说明）。
+func (h *Handler) handleDeviceGatewayDiscovery(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	scheme, port := h.proxySchemeAndPort(r)
+	wsScheme := "ws"
+	if scheme == "https" {
+		wsScheme = "wss"
+	}
+	t := currentProxyTable()
+	route := deviceGatewayRoute(t)
+
+	out := map[string]interface{}{
+		"base_domain": t.base,
+		"scheme":      scheme,
+		"port":        port,
+		// available=false 时，客户端应回退到自己配置的网关地址
+		// （老部署、或设备网关被显式关闭的实例）。
+		"available": route != nil,
+	}
+	if route == nil {
+		out["reason"] = "本实例没有声明设备网关反代（remotedevice 未加载，或未声明 websocket）"
+		out["hint"] = "在 webui 设置页手填，或在插件声明里加 proxies（host=devices, websocket=true）"
+		writeJSON(w, http.StatusOK, out)
+		return
+	}
+	// 两种形态都要给，因为**能解析 *.localhost 的只有浏览器**：
+	//
+	//   实测：浏览器 ✓ / curl ✓（各自内置 RFC 6761 特例），
+	//   但 getent 与 Go/Node 的解析器 ✗（系统 nsswitch 是 files,dns，
+	//   没有 nss-myhostname，也没有通配条目）。设备客户端（waiter / GUI
+	//   主进程 / 嵌入式固件）用的正是系统解析器。
+	//
+	// 所以：
+	//   url        —— 子域形态。浏览器用；基域名配成真实通配域名时通用。
+	//   url_portal —— **门户同源形态**（同一 host、同一端口，走路径挂载）。
+	//                 无任何 DNS 依赖，永远可解析 ⇒ 设备客户端的正确选择。
+	//
+	// 两者都是「同一个端口」，单端口穿透的前提不受影响。
+	out["host"] = route.Host + "." + t.base
+	out["url"] = wsScheme + "://" + route.Host + "." + t.base + port + "/api/v1/device/ws"
+	out["http_url"] = scheme + "://" + route.Host + "." + t.base + port
+	// 门户同源形态：用**客户端实际访问用的 host**，保证它一定能解析。
+	portalHost := r.Host
+	if h := r.Header.Get("X-Forwarded-Host"); h != "" {
+		portalHost = strings.TrimSpace(strings.Split(h, ",")[0])
+	}
+	if route.Path != "" {
+		// 声明了路径挂载 ⇒ 门户同源形态就是它（无 DNS 依赖，设备客户端首选）
+		out["url_portal"] = wsScheme + "://" + portalHost + route.Path + "/ws"
+		out["path"] = route.Path
+	} else {
+		// 未声明 path：门户同源形态只能退回旧口径（门户自己的设备路由）
+		out["url_portal"] = wsScheme + "://" + portalHost + "/api/v1/device/ws"
+	}
+	out["preferred"] = "url_portal" // 对非浏览器客户端更稳（无 DNS 依赖）
+	out["auth"] = route.Auth
+	out["target"] = route.Target
+	writeJSON(w, http.StatusOK, out)
 }
