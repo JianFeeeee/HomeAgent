@@ -6,25 +6,28 @@
     <title>HomeAgent Dashboard</title>
     <link rel="icon" type="image/svg+xml" href="/logo.svg" />
     <script
-      src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"
+      src="/static/three.min.js"
       onerror="window._THREE_FAILED = true"
     ></script>
     <script
-      src="https://cdn.jsdelivr.net/npm/three@0.128.0/examples/js/controls/OrbitControls.js"
+      src="/static/OrbitControls.js"
       onerror="window._THREE_FAILED = true"
     ></script>
     <script
-      src="https://cdnjs.cloudflare.com/ajax/libs/marked/4.3.0/marked.min.js"
+      src="/static/marked.min.js"
       onerror="console.warn('marked CDN failed')"
     ></script>
     <script
-      src="https://cdn.jsdelivr.net/npm/dompurify@3.2.4/dist/purify.min.js"
+      src="/static/purify.min.js"
       onerror="console.warn('DOMPurify CDN failed')"
     ></script>
     <script>
+      // 兜底：本地库是毫秒级加载，3 秒足够；仍超时说明真的出了问题
+      // （比如二进制没带上 static/），标记失败好让页面给出明确提示
+      // 而不是一直转圈。
       setTimeout(function () {
         if (!window.THREE) window._THREE_FAILED = true;
-      }, 8000);
+      }, 3000);
     </script>
     <style>
 {{DASHBOARD_CSS}}
