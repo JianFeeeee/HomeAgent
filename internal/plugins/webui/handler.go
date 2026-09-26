@@ -449,14 +449,17 @@ func (sw *statusWriter) Hijack() (net.Conn, *bufio.ReadWriter, error) {
 //
 // 包在 mux 外层后，Host 判定先于任何路径匹配发生：插件子域整体交给反代，
 // 主门户 Host 则原样下沉给 mux 走各自路由，两边互不干扰。
-// Handler 返回**生产用的完整处理链**（外 → 内：Host 分发 → 日志 → mux）。
+// Handler 返回**生产用的完整处理链**（外 → 内：Host 分发 → gzip → 日志 → mux）。
 //
 // 抽成一个方法而非在 plugin.go 里手写组合：测试必须能拿到与线上**逐字节
 // 相同**的链，否则很容易测出错位的东西——本次就踩过：测 mux 而中间件挂在
 // plugin.go，判据全绿却在真实实例上 401。共享同一条链可以结构性地避免
 // 这类漂移。
 func (h *Handler) Handler() http.Handler {
-	return h.proxyDispatch(h.logged(h.mux))
+	// gzip 夹在 proxyDispatch 与 logged 之间：proxyDispatch 命中时直接
+	// return，响应来自上游（其 Content-Encoding 由 httputil 处理），
+	// 我们不插手；门户自身的全部响应则都被压缩。
+	return h.proxyDispatch(gzipMW(h.logged(h.mux)))
 }
 
 func (h *Handler) proxyDispatch(next http.Handler) http.Handler {
