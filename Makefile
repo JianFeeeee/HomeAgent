@@ -26,7 +26,32 @@ GOCACHE=/tmp/gocache
 export GOPATH=/tmp/gopath
 BUILD_DIR=build
 PROJECT_ROOT := $(CURDIR)
-VERSION ?= $(shell git describe --tags --dirty 2>/dev/null || echo "0.8.0")
+# 版本号来源（见 docs/git-branching.md §2.1）：
+#
+#   发布线（release/vX.Y.x）：用该线的 tag 描述，产出 v1.3.12 这类正式号。
+#   main（开发线）：**不**用 git describe —— main 上可达的最新 tag 永远属于
+#   某条已发布的旧 patch 线（实测：main 可达 tag 是 v1.3.2，而 v1.3.12 打在
+#   release/v1.3.x 上、不在 main 的祖先路径里），于是 main 构建会自称
+#   "v1.3.2-192-gxxxxxx" —— 版本号看着像在 1.3.2 补丁线上，实际是下一个
+#   中版本的开发态，属于会误导人的路牌。
+#
+# 所以 main 显式产出 <meta.Version>dev：1.4.0dev。
+# meta.Version 由源码声明（internal/meta/meta.go），随发布推进而更新。
+# 构建号（距上次 tag 的提交数 + 短 SHA）仍然保留，便于定位具体提交。
+VERSION ?= $(shell git describe --tags --dirty 2>/dev/null)
+# 开发线（main）强制走 dev 号：以 meta.Version 源码声明为准，加 dev 后缀。
+# 不能用「describe 为空」来判断 —— main 上 describe 非空（可达 v1.3.2），
+# 但那个号属于已发布的旧 patch 线，对 main 没有版本语义。
+# 判定用「是否在发布线分支」而不是「是否等于 main」：detached HEAD（CI 常见）
+# 时分支名是 HEAD，若只判 main 就会退回 describe，产出 v1.3.2-192 这种
+# 属于旧 patch 线的误导号（实测踩到）。发布线之外的任何状态都走 dev 号。
+CURRENT_BRANCH := $(shell git rev-parse --abbrev-ref HEAD 2>/dev/null)
+ifneq ($(filter release/v%,$(CURRENT_BRANCH)),)
+VERSION := $(VERSION)
+else
+META_VERSION := $(shell grep -oE 'Version = "[0-9.]+"' internal/meta/meta.go | head -1 | grep -oE '[0-9.]+')
+VERSION := $(META_VERSION)dev$(if $(filter --dirty,$(shell git status --porcelain)),+dirty)
+endif
 COMMIT ?= $(shell git rev-parse --short HEAD 2>/dev/null || echo "unknown")
 BUILD_TIME ?= $(shell date -u '+%Y-%m-%dT%H:%M:%SZ')
 LDFLAGS = -X gitcode.com/JianFeeeee/HomeAgent/internal/meta.Version=$(VERSION) -X gitcode.com/JianFeeeee/HomeAgent/internal/meta.Commit=$(COMMIT) -X gitcode.com/JianFeeeee/HomeAgent/internal/meta.BuildTime=$(BUILD_TIME)
