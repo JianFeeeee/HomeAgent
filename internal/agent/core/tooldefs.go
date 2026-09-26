@@ -63,11 +63,9 @@ func (a *Agent) buildTaskMemoryContext(f *TaskFrame, input string, maxTokens int
 	if f.Evt != nil && f.Evt.Source != "" {
 		trigger = "input:" + f.Evt.Source
 	}
-	// 场景集合 = 声明（主动）+ 涌现（被动）两条路的并集。
+	// 场景集合 = 声明（主动）+ 涌现（被动）两条路的并集（去重）。
 	turn := a.resolveTurnScenes(f, "")
-	for _, k := range turn.Keys {
-		scenes = append(scenes, k)
-	}
+	scenes = mergeSceneKeys(scenes, turn.Keys)
 	return a.recallText(query, trigger, maxTokens, scenes)
 }
 
