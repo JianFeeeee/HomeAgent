@@ -68,6 +68,41 @@ auto:chan:system+topic:任务           ↔ auto:chan:system_topic:任务
 
 **R3 是"没被发现"的原因，R1/R2 是病因。** 顺序不能反。
 
+### R4 场景身份只有「输入通道」一个可靠维度
+
+现网 65 个场景键的维度分布（实测）：
+
+```
+auto:chan（涌现·通道主导）  36
+chan:  （输入通道）        26
+tool:  （工具）             3
+peer 主导                  0
+topic 主导                 0
+```
+
+两个独立原因叠加：
+
+1. **采集侧恒空**：`situationFeaturesFor` 从 `evt.Payload` 找
+   `peer/peer_id/group_id/user_id/chat_id`，而全仓**没有任何插件在 InjectInput
+   时填这些键**（`group_id` 只出现在 `output.go:145` 的发送侧帮助文本里）。
+   ⇒ 日志中 `peer` 特征出现次数为 **0**。
+2. **排序上被挤掉**：`chan` 与 `peer` 权重同为 1.0，而 `NewSituation` 按权重
+   降序**稳定**排序，`chan` 先 append 就永远在前 ⇒ 即使采集到 peer，
+   `Label(2)` 也轮不到它。
+
+后果：「跟谁对话」这个本该最强的身份信号（权重与 chan 并列）**根本进不了
+场景身份**。同一件事在 QQ 和 Telegram 上会落进不同场景而无法共享。
+
+**R4 与 R1/R2 是不同层面的问题**：R1/R2 让键构造正确，R4 决定键**能表达
+什么**。R1 修完后 `auto:chan:qq` 会取代 `auto:chan:qq+part:morning`，
+但它依然只认通道——所以 R4 不修，修复效果只到「正确的单一维度」。
+
+### R5 `situation_evidence` 全表清空
+
+`createSceneLocked` 新场景一成立就 `DELETE FROM situation_evidence`
+（不只删本指纹的足迹）。多场景并发轮次下，A 场景的建立会连带清掉 B 尚未
+攒够 `minSceneEvidence=2` 的证据 ⇒ 门槛判定被别的场景的建立随机打断。
+
 ---
 
 ## 步骤
@@ -98,11 +133,26 @@ auto:chan:system+topic:任务           ↔ auto:chan:system_topic:任务
 - [ ] 重启 homed，等 ≥2 次同类交互让场景重新涌现
 - [ ] 复验：新场景键**不含 `+`**、有 features **且**有 refs
 
-### 步骤 4：验证与收口
+### 步骤 4：修 R4（覆盖面：让 peer 进得来）— 需跨插件，等用户确认范围
+
+- [ ] 先查各插件 InjectInput 时手上**有没有** peer 信息可用（发信侧有
+      `meta.group_id`/`user_id`，收信侧是否拿得到要逐个确认）
+- [ ] 有则补：插件填 `payload["group_id"]`/`["user_id"]`
+- [ ] 排序侧：`peer` 权重提到高于 `chan`，或 `NewSituation` 排序时 peer 优先
+      （两者都要，否则采集到了也进不了身份）
+- [ ] 判据：构造「同一 chan、不同 peer」的两轮，期望落进**不同**场景
+
+### 步骤 5：修 R5（证据桶别全表清）
+
+- [ ] `DELETE FROM situation_evidence` 改为按本指纹的桶标签删
+- [ ] 判据：预置两个桶的证据各 1 次；建一个场景后断言另一个桶的证据还在
+
+### 步骤 6：验证与收口
 
 - [ ] `go test ./internal/memory/... ./internal/agent/core/...` 全绿
 - [ ] `go build ./...` + 全仓 `go test ./...`
 - [ ] 现网观察：日志中场景命中后能查到 refs（非 0）
+- [ ] 现网观察：场景键前缀分布不再 100% 锚在 chan（R4 未做则保持挂账）
 - [ ] `git_release_check.sh` 无新增红项
 
 ---
