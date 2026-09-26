@@ -148,16 +148,27 @@ func (s *Supervisor) StopAll(timeout time.Duration) {
 		// 优雅停止没在预算内完成：剩下的直接 Kill。
 		// 不能无限等——homed 关停被单个卡住的插件拖住比杀掉它更糟。
 		var stuck []string
+		var killers sync.WaitGroup
 		for _, p := range procs {
 			select {
 			case <-p.Exited():
 			default:
 				stuck = append(stuck, fmt.Sprintf("%s(pid=%d)", p.Name(), p.PID()))
-				go p.Kill()
+				// ★ 必须等 Kill 完成，不能发射后不管。
+				// 本函数返回后调用方（Host.Close）立刻 freeShm 解除映射，
+				// 而 Kill 内部要等 markExited 跑完（含 onExit → ReclaimOwner，
+				// 那是要读共享内存的）。不等就 unmap ⇒ SIGSEGV。
+				// Kill 自带 killReapTimeout 上限，不会无限拖住关停。
+				killers.Add(1)
+				go func(pr *Process) {
+					defer killers.Done()
+					_ = pr.Kill()
+				}(p)
 			}
 		}
 		if len(stuck) > 0 {
 			log.Printf("[proc] %v 内未优雅退出，强制结束: %v", timeout, stuck)
 		}
+		killers.Wait()
 	}
 }
