@@ -100,6 +100,7 @@ type Handler struct {
 	status     sdk.StatusAPI
 	term       sdk.TerminalAPI
 	llm        sdk.LLMAPI
+	mediaStore sdk.MediaAPI
 
 	// hostPort 是 webui 实际监听的 ":port"（用于推导服务入口链接）。
 	hostPort string
@@ -161,6 +162,7 @@ func NewHandler(s *sdk.PluginSDK) *Handler {
 		st   sdk.StatusAPI
 		term sdk.TerminalAPI
 		llm  sdk.LLMAPI
+		ms   sdk.MediaAPI
 	)
 	if s != nil {
 		sup, mem, idx = s.Supervisor(), s.Memory(), s.Indexer()
@@ -169,6 +171,7 @@ func NewHandler(s *sdk.PluginSDK) *Handler {
 		se, pm = s.Settings(), s.PluginMgr()
 		st, llm = s.Status(), s.LLM()
 		term = s.Terminal()
+		ms = s.Media()
 	}
 	h := &Handler{
 		sdk:          s,
@@ -186,6 +189,7 @@ func NewHandler(s *sdk.PluginSDK) *Handler {
 		status:       st,
 		term:         term,
 		llm:          llm,
+		mediaStore:   ms,
 		sessions:     make(map[string]time.Time),
 		loginLimiter: newLoginLimiter(loginMaxFails, loginWindow),
 		pendingIdx:   -1,
