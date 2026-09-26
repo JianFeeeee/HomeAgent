@@ -34,6 +34,23 @@ AUTH="X-API-Key: $KB_TOKEN"     # 或 Authorization: Bearer <token> 或 ?token=
 curl -s -H "$AUTH" "$BASE/"
 ```
 
+### 本机封装脚本（推荐先用它）
+
+`scripts/kb_tree.sh` 把上面四条命令封好了，省得手拼 URL 与鉴权头：
+
+```bash
+S=~/.claude/skills/knowledge-base/scripts/kb_tree.sh   # 按实际安装路径调整
+
+$S                       # 整棵树
+$S tree -c tech -d 1     # tech 子树，只看第一层
+$S categories            # 分类列表
+$S counts                # 各分类条目数
+$S search -q goroutine -c tech
+```
+
+token 读取顺序：环境变量 `KB_TOKEN` → 同上��目录的 `../config.json`。
+**不要**把 token 写在命令行上（会进 shell 历史与 `ps` 输出）。
+
 ### 核心工作流：先看树，再定向检索
 
 **别一上来就全文搜索。** 知识库是分层的，先定位分类能显著提高命中率，
