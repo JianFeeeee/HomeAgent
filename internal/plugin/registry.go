@@ -707,23 +707,70 @@ func (r *Registry) runOnRemoveHandlers(name string) {
 	}
 }
 
+// stopTarget 是 StopAll 并行化时的一个停止单元：插件本体 + 它的 SDK 句柄。
+type stopTarget struct {
+	plugin sdk.Plugin
+	sdkRef *sdk.PluginSDK
+}
+
 func (r *Registry) StopAll() {
 	// 关停开始即冻结自动重启：否则「Stop 触发退出 → 崩溃判定 → 重新 spawn」
 	// 会在内核正在关停时把子进程又拉起来，段已拆而进程还在，直接 SIGBUS。
 	r.shuttingDown.Store(true)
 
+	// 取插件快照后**立即释放 registry 锁**，再并行停。
+	//
+	// 为何必须并行：串行时最坏耗时 = Σ(每个插件) = 5s(plugin.stop 调用)
+	// + 5s(等退出) + 2s(收割) = 12s；线上有 23 个子进程插件，
+	// 即 276s，而 systemd 只给 90s ⇒ 关停必然 timed out 然后 SIGKILL。
+	// 实测确实每次都超时（线上日志里 23 个插件全退完了，
+	// 最后那条 "[homed] stopped" 仍打不出来）。
+	//
+	// 为何先释放锁：p.Stop() 会触发 markExited → onExit → ReclaimOwner，
+	// 那条链要读共享内存段。持着 registry 锁并行跑，若某插件的 onExit
+	// 回调需要拿 registry 锁（如摘通道），就是自死锁。
 	r.mu.Lock()
-	for _, p := range r.instances {
-		r.runStopHandlers(p.Name())
-		if err := p.Stop(); err != nil {
-			log.Printf("[plugin] stop %s: %v", p.Name(), err)
+	snapshot := make([]sdk.Plugin, len(r.instances))
+	copy(snapshot, r.instances)
+	// stop handler 挂在 PluginSDK 上（r.sdkRefs），必须**在清空 sdkRefs 之前**
+	// 把 handler 跑掉 —— 否则下面并行 goroutine 里就找不到它了。
+	// runStopHandlers 自己不加锁（调用方持锁），这里正是持锁状态。
+	stoppers := make([]stopTarget, 0, len(snapshot))
+	for _, p := range snapshot {
+		if p == nil {
+			continue
 		}
+		stoppers = append(stoppers, stopTarget{plugin: p, sdkRef: r.sdkRefs[p.Name()]})
 	}
 	r.plugins = make(map[string]sdk.Plugin)
 	r.instances = nil
 	r.pluginAutoRestart = make(map[string]bool)
 	r.sdkRefs = make(map[string]*sdk.PluginSDK)
 	r.mu.Unlock()
+
+	// 并行停：每个插件一个 goroutine，等全部完成。
+	// 单个插件 panic 不带崩整个关停（那会让剩下的插件全停不掉），
+	// 也不静默吞掉（留下日志）。
+	var wg sync.WaitGroup
+	for _, t := range stoppers {
+		wg.Add(1)
+		go func(tg stopTarget) {
+			defer wg.Done()
+			defer func() {
+				if rec := recover(); rec != nil {
+					log.Printf("[plugin] stop %s panic: %v", tg.plugin.Name(), rec)
+				}
+			}()
+			// stop handler（解绑通道等）必须先于 Stop：见 runStopHandlers 注释。
+			if tg.sdkRef != nil {
+				tg.sdkRef.RunStopHandlers()
+			}
+			if err := tg.plugin.Stop(); err != nil {
+				log.Printf("[plugin] stop %s: %v", tg.plugin.Name(), err)
+			}
+		}(t)
+	}
+	wg.Wait()
 
 	// 共享段在全部子进程退出后再释放：插件还持有映射时拆段，
 	// 它们下一次访问就是 SIGBUS。在锁外调用：Close 不需 registry 锁，
