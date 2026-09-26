@@ -49,6 +49,10 @@ type Plugin struct {
 	sdkRef *sdk.PluginSDK
 	addr   string
 	token  string
+	// expose 是暴露范围（nil/空 = 全部可见）。见 scope.go。
+	expose *scope
+	// kn 是知识库句柄的测试注入口（生产从 sdkRef 取）。
+	kn sdk.KnowledgeAPI
 	server *http.Server
 	mux    *http.ServeMux
 	// 启动时未显式配置 token 则自动生成（与 remotedevice 同策略）
@@ -85,6 +89,16 @@ func (p *Plugin) Start(s *sdk.PluginSDK) error {
 			DisplayName: "访问令牌", Category: "kbtree",
 			Description: "外部 agent 访问本服务所需的令牌；留空则启动时随机生成（仅本次运行有效）",
 		})
+		set.RegisterDef(sdk.ConfigDef{
+			Key: "expose_categories", Default: "", Type: "string",
+			DisplayName: "暴露范围", Category: "kbtree",
+			Description: "逗号分隔的分类路径，只暴露这些分类及其子树（如 \"public,tech/go\"）。留空=全部可见。前缀按路径分段匹配：public 不会匹配 publication。根下无分类的条目在范围非空时不可见。",
+		})
+		if v, _ := set.Get("expose_categories"); v != nil {
+			if str, ok := v.(string); ok {
+				p.expose = newScope(str)
+			}
+		}
 		if v, _ := set.Get("listen_addr"); v != nil {
 			if a, ok := v.(string); ok && strings.TrimSpace(a) != "" {
 				p.addr = strings.TrimSpace(a)
@@ -218,6 +232,9 @@ func (p *Plugin) handleTree(w http.ResponseWriter, r *http.Request) {
 		})
 		return
 	}
+	// 范围裁剪在服务端做：裁剪后响应里根本不含范围外条目，
+	// 客户端无从察觉它们存在。
+	p.expose.filterTree(view)
 	writeJSON(w, http.StatusOK, map[string]interface{}{"tree": view})
 }
 
@@ -227,7 +244,7 @@ func (p *Plugin) handleCategories(w http.ResponseWriter, r *http.Request) {
 	if kn == nil {
 		return
 	}
-	names := p.safeCategories(kn)
+	names := p.expose.filterNames(p.safeCategories(kn))
 	if names == nil {
 		names = []string{}
 	}
@@ -248,17 +265,9 @@ func (p *Plugin) handleCounts(w http.ResponseWriter, r *http.Request) {
 	if counts == nil {
 		counts = []sdk.KnowledgeCategoryCount{}
 	}
-	// 附总量：只数叶子分类，避免中间层重复计数
-	total := 0
-	byCat := make(map[string]int, len(counts))
-	for _, c := range counts {
-		byCat[c.Category] = c.Count
-	}
-	for c := range byCat {
-		if !isParentCategory(counts, c) {
-			total += byCat[c]
-		}
-	}
+	// 附总量：只数叶子分类，避免中间层重复计数（范围过滤后按过滤结果重算，
+	// 否则 total 会把范围外的条目数也报出去 —— 数量本身也是信息泄露）
+	counts, total := p.expose.filterCounts(counts)
 	writeJSON(w, http.StatusOK, map[string]interface{}{"counts": counts, "total": total})
 }
 
@@ -284,11 +293,19 @@ func (p *Plugin) handleSearch(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
 		return
 	}
+	// ★ 范围过滤必须在这里（服务端）。只在前端/客户端过滤等于没过滤：
+	//   范围外条目全文已经随响应发出去了。
+	//   同时它也修正了 limit 语义 —— 范围外条目不占名额，范围内的
+	//   条目不会因为 limit 被范围外条目挤掉而漏掉。
 	items := make([]map[string]interface{}, 0, len(results))
 	for _, k := range results {
+		if !p.expose.allows(k.Category) {
+			continue
+		}
 		items = append(items, map[string]interface{}{
-			"name":    k.Name,
-			"content": k.Content,
+			"name":     k.Name,
+			"category": k.Category,
+			"content":  k.Content,
 		})
 	}
 	writeJSON(w, http.StatusOK, map[string]interface{}{
@@ -301,6 +318,10 @@ func (p *Plugin) handleSearch(w http.ResponseWriter, r *http.Request) {
 
 // knowledge 取知识库；不可用时写 503 并返回 nil。
 func (p *Plugin) knowledge(w http.ResponseWriter) sdk.KnowledgeAPI {
+	// kn 是测试注入口，优先于 sdkRef（它在 sdkRef 之前就已经有值了）
+	if p.kn != nil {
+		return p.kn
+	}
 	if p.sdkRef == nil {
 		writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "plugin not started"})
 		return nil

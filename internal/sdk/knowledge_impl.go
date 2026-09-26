@@ -13,7 +13,7 @@ func (k *knowledgeImpl) Search(query string, topK int) ([]*Knowledge, error) {
 	got := k.ks.Search(query, topK)
 	out := make([]*Knowledge, len(got))
 	for i, item := range got {
-		out[i] = &Knowledge{Name: item.Name, Content: item.Content}
+		out[i] = &Knowledge{Name: item.Name, Content: item.Content, Category: item.Category}
 	}
 	return out, nil
 }
@@ -32,7 +32,7 @@ func (k *knowledgeImpl) SearchIn(query, category string, topK int) ([]*Knowledge
 	got := k.ks.SearchIn(query, category, topK)
 	out := make([]*Knowledge, len(got))
 	for i, item := range got {
-		out[i] = &Knowledge{Name: item.Name, Content: item.Content}
+		out[i] = &Knowledge{Name: item.Name, Content: item.Content, Category: item.Category}
 	}
 	return out, nil
 }
