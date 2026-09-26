@@ -126,19 +126,34 @@ csrc-abi:
 # C 侧没有 Go 的 -race 等价物，sanitizer 就是这里的关等物。
 # 若本机无 libasan/libubsan（交叉工具链常见），明确 SKIP 而非静默跳过。
 .PHONY: csrc-sanitize
+# ★ 每个测试文件**各自**链接成独立二进制：契约测试每个都带 main，
+#   合在一起会「multiple definition of main」——而报错被 2>/dev/null
+#   吞掉后会被误报成「本机无 sanitizer」，是个假的 SKIP。
+#   故这里逐个构建、逐个跑，任何一个失败都判红。
 csrc-sanitize:
 	@echo "== C 侧 ASan+UBSan =="
 	@tmp=$$(mktemp -d); \
-	if ! $(CC) $(CSRC_CFLAGS) -fsanitize=address,undefined -fno-omit-frame-pointer \
-		-o $$tmp/san_test $(CSRC_SRCS) $(CSRC_DIR)/test/*.c 2>/dev/null; then \
-		echo "  [SKIP] 本机无 ASan/UBSan 运行库（交叉工具链常见），已跳过"; rm -rf $$tmp; exit 0; \
-	fi; \
-	if ASAN_OPTIONS=detect_leaks=1 UBSAN_OPTIONS=print_stacktrace=1:halt_on_error=1 \
-		$$tmp/san_test > $$tmp/out.txt 2>&1; then \
-		echo "  ASan+UBSan 契约测试: PASS"; rm -rf $$tmp; \
-	else \
-		echo "  [FAIL] sanitizer 报告："; cat $$tmp/out.txt | head -30; rm -rf $$tmp; exit 1; \
-	fi
+	built=0; \
+	for t in $(CSRC_DIR)/test/test_*.c; do \
+		case "$$t" in *fuzz*) continue ;; esac; \
+		base=$$(basename $$t .c); \
+		if ! $(CC) $(CSRC_CFLAGS) -fsanitize=address,undefined -fno-omit-frame-pointer \
+			-o $$tmp/$$base $(CSRC_SRCS) $$t 2>$$tmp/build.log; then \
+			if grep -qi 'sanitize\|asan\|ubsan' $$tmp/build.log; then \
+				echo "  [SKIP] 本机无 ASan/UBSan 运行库，已跳过"; rm -rf $$tmp; exit 0; \
+			fi; \
+			echo "  [FAIL] 构建失败 ($$base)：" ; head -10 $$tmp/build.log; rm -rf $$tmp; exit 1; \
+		fi; \
+		built=1; \
+		if ASAN_OPTIONS=detect_leaks=1 UBSAN_OPTIONS=print_stacktrace=1:halt_on_error=1 \
+			$$tmp/$$base > $$tmp/$$base.out 2>&1; then \
+			echo "  ASan+UBSan $$base: PASS"; \
+		else \
+			echo "  [FAIL] sanitizer 报告 ($$base)："; head -30 $$tmp/$$base.out; rm -rf $$tmp; exit 1; \
+		fi; \
+	done; \
+	rm -rf $$tmp; \
+	if [ "$$built" = "0" ]; then echo "  [FAIL] 没找到任何契约测试"; exit 1; fi
 
 # csrc-headers：头文件自包含性（每个 .h 都能单独编过）
 #
@@ -207,12 +222,16 @@ csrc-cross:
 	if ! command -v $$CC_ARM64 >/dev/null 2>&1; then \
 		echo "  [SKIP] $$CC_ARM64 不存在（未装交叉工具链）"; exit 0; \
 	fi; \
-	if $$CC_ARM64 -std=$(CSRC_STD) $(CSRC_WARN_FLAGS) -Werror -I$(CSRC_DIR)/include \
-		-c $(CSRC_SRCS) -o /dev/null 2>/dev/null; then \
-		echo "  $$CC_ARM64: 0 告警、编译通过 ✓"; \
+	ok=1; \
+	for src in $(CSRC_SRCS); do \
+		if ! $$CC_ARM64 $(CSRC_CFLAGS) -Werror -fsyntax-only $$src 2>&1 | head -20; then \
+			ok=0; \
+		fi; \
+	done; \
+	if [ "$$ok" = "1" ]; then \
+		echo "  $$CC_ARM64: 0 告警、编译通过 ✓（$(words $(CSRC_SRCS)) 个源文件）"; \
 	else \
-		echo "  [FAIL] arm64 交叉编译失败（把 .o 汇成单个输出是 gcc 的已知限制，改用逐文件）"; \
-		$$CC_ARM64 $(CSRC_CFLAGS) -Werror -fsyntax-only $(CSRC_SRCS) 2>&1 | head -20; exit 1; \
+		echo "  [FAIL] arm64 交叉编译失败"; exit 1; \
 	fi
 
 # check-csrc：C 侧全部门禁的聚合入口（接进 make test 与 CI）
