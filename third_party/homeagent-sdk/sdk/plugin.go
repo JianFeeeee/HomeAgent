@@ -353,7 +353,7 @@ type PluginSDK struct {
 	events         EventSubscriber
 	plgMgr         PluginMgrAPI
 
-	// proxyDecl 是反代声明的收集回调（内置插件经 DeclareProxy 声明服务）。
+	// proxyReg 是反代声明的注册回调（内置插件经 RegisterProxy 声明服务）。
 	// 与上面的 API 字段同受 apiMu 保护——写方是内核注入，读方是插件 Start
 	// 起的 goroutine。
 	proxyReg ProxyRegistrar
