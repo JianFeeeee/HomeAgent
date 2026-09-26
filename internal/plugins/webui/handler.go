@@ -491,6 +491,10 @@ func (h *Handler) RegisterRoutes(mux *http.ServeMux) {
 	// 用户上传文件的下载（uploads 目录，同一安全模型）
 	mux.HandleFunc("/uploads/", h.requireWeb(h.handleUploads))
 	mux.HandleFunc("/v1/chat/completions", h.requireAPI(h.handleOpenAICompletions))
+	// /v1/models：几乎每个 OpenAI 客户端（curl 脚本、LangChain、OpenAI SDK、
+	// IDE 插件）启动时都会先列模型来探测服务是否可用。没有它，客户端直接
+	// 判定「服务不可用」而连试都不试 —— 这是最容易让集成方踩空的缺口。
+	mux.HandleFunc("/v1/models", h.requireAPI(h.handleOpenAIModels))
 	// 反代服务入口清单：给前端渲染「插件 UI」选项卡。
 	// 走 requireAPI：清单本身含上游地址，属于管理面信息，不该匿名可读。
 	mux.HandleFunc("/api/v1/proxy/services", h.requireAPI(h.handleProxyServices))
