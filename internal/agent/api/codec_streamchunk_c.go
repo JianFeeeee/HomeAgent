@@ -172,40 +172,6 @@ func (s strSpan) firstByte() byte {
 // 定位
 // ---------------------------------------------------------------------
 
-// findKey 在 obj 里按**大小写敏感**的键定位值。
-// 返回 (span, found, dup, malformed)。
-// dup=true ⇒ 发现重复键，调用方**必须**整体回退 encoding/json（§5.1）。
-func findKey(obj strSpan, name string) (strSpan, bool, bool, bool) {
-	if !obj.valid() {
-		return strSpan{}, false, false, false
-	}
-	keyp, keyn := cstr(name)
-	var vp *C.char
-	var vlen C.size_t
-	var dup C.int
-	rc := C.go_obj_find(obj.p, obj.n, keyp, C.int(keyn), &vp, &vlen, &dup)
-	switch rc {
-	case 1:
-		return strSpan{vp, vlen}, true, dup == 1, false
-	case 0:
-		return strSpan{}, false, dup == 1, false
-	default:
-		return strSpan{}, false, false, true // 畸形 ⇒ 让 encoding/json 判
-	}
-}
-
-// firstElem 取数组第一个元素的 span。
-func firstElem(arr strSpan) (strSpan, bool) {
-	if !arr.valid() {
-		return strSpan{}, false
-	}
-	var vp *C.char
-	var vlen C.size_t
-	if C.go_arr_first(arr.p, arr.n, &vp, &vlen) != 1 {
-		return strSpan{}, false
-	}
-	return strSpan{vp, vlen}, true
-}
 
 // ---------------------------------------------------------------------
 // 取值（C 可判定的热分支）
@@ -234,21 +200,6 @@ func stringifyC(val strSpan) (string, bool) {
 	return string(buf[:int(outLen)]), true
 }
 
-// argStringC 取出 arguments 的**字符串**形态（省掉 interface{} 与二次解析）。
-func argStringC(val strSpan) (string, bool) {
-	if !val.valid() {
-		return "", false
-	}
-	buf := decBuf(int(val.n))
-	var outLen C.size_t
-	if C.go_arg_string(val.p, val.n, cstrb(buf), C.size_t(len(buf)), &outLen) != 1 {
-		return "", false
-	}
-	return string(buf[:int(outLen)]), true
-}
-
-// sseABIVersion 供 ABI 漂移测试使用。
-func sseABIVersion() int { return int(C.go_sse_abi()) }
 
 // ---------------------------------------------------------------------
 // 顶层 helper：大小写不敏感（struct 字段语义）与根对象校验
@@ -302,35 +253,6 @@ func sseRootObject(doc strSpan) bool {
 	return C.go_root_object(doc.p, doc.n) == 1
 }
 
-
-// scanArray 枚举数组的全部元素 span（零拷贝，指向原缓冲）。
-//
-// ★ 为什么要「先数一遍再填」：C 侧迭代器一次回一个元素，而 Go 需要一个切片。
-//   做法是让 C 一次把**所有元素**写进 Go 侧的 span 数组
-//   （Go 预分配、容量按字节数上界估），单趟、无 C 分配。
-func scanArray(arr strSpan) ([]strSpan, bool) {
-	if !arr.valid() || arr.firstByte() != '[' {
-		return nil, false
-	}
-	// 元素数上界：每个元素至少 1 字节 + 分隔符 ⇒ ≤ 字节数
-	capHint := int(arr.n)
-	if capHint < 4 {
-		capHint = 4
-	}
-	if capHint > 1024 {
-		capHint = 1024 // 工具调用数量级很小；超出部分不可能（协议上界）
-	}
-	spans := make([]C.ha_span, capHint)
-	n := C.go_arr_all(arr.p, arr.n, &spans[0], C.int(capHint))
-	if n < 0 {
-		return nil, false
-	}
-	out := make([]strSpan, 0, int(n))
-	for i := 0; i < int(n); i++ {
-		out = append(out, strSpan{spans[i].p, spans[i].len})
-	}
-	return out, true
-}
 
 // ---------------------------------------------------------------------
 // 批量定位（第三刀的重做：一次 cgo 调用代替 5+ 次）
@@ -427,38 +349,4 @@ func locateChunkBatch(data string) chunkLocateResult {
 	return out
 }
 
-// locateChunkBatchInto 是 locateChunkBatch 的零分配内核（基准用）：
-// 复用调用方提供的 sbuf，不自己 make。
-func locateChunkBatchInto(data string, sbuf []byte) chunkLocateResult {
-	var out chunkLocateResult
-	if len(data) == 0 {
-		out.status = chunkFallback
-		return out
-	}
-	p, n := cstr(data)
-	var co C.ha_chunk_out
-	var used C.size_t
-	st := C.go_chunk_locate(p, n, &co, cstrb(sbuf), C.size_t(len(sbuf)), &used)
-	out.status = int(st)
-	if st != C.int(chunkOK) {
-		return out
-	}
-	out.usageKind = int(co.slot[slotUsage].kind)
-	out.usageSpan = strSpan{co.slot[slotUsage].span.p, co.slot[slotUsage].span.len}
-	out.toolCallsKind = int(co.slot[slotToolCalls].kind)
-	out.toolCallsSpan = strSpan{co.slot[slotToolCalls].span.p, co.slot[slotToolCalls].span.len}
-	out.contentKind = int(co.slot[slotContent].kind)
-	out.reasoningKind = int(co.slot[slotReasoning].kind)
-	out.finishKind = int(co.slot[slotFinishReason].kind)
-	out.hasDelta = int(co.slot[slotDelta].kind) == kindObject
-	out.deltaKind = int(co.slot[slotDelta].kind)
-	out.choicesPresent = co.has_choices == 1
-	out.choicesKind = int(co.choices_kind)
-	out.choicesCount = int(co.choices_count)
-	out.choice0Span = strSpan{co.choice0_span.p, co.choice0_span.len}
-	s := sbuf[:int(used)]
-	out.content = string(s[co.content_off : co.content_off+co.content_len])
-	out.reasoning = string(s[co.reasoning_off : co.reasoning_off+co.reasoning_len])
-	out.finish = string(s[co.finish_off : co.finish_off+co.finish_len])
-	return out
-}
+
