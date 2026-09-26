@@ -1,4 +1,4 @@
-.PHONY: all build build-plain build-cli build-gui clean install test run build-static build-linux-arm64 lint fmt sync-client-versions check-client-versions csrc csrc-test
+.PHONY: all build build-plain build-cli build-gui clean install test run build-static build-linux-arm64 lint fmt sync-client-versions check-client-versions csrc csrc-test csrc-lint csrc-abi csrc-headers csrc-sanitize csrc-cross csrc-fuzz check-csrc check-csrc-full
 # HOMED_TAGS 默认带 onnxruntime：发行版**默认启用**本地向量空间（与
 # deploy/packaging/build.sh 保持一致）。
 #
@@ -56,6 +56,28 @@ CSRC_DIR=csrc
 CSRC_BUILD=$(CSRC_DIR)/build
 CSRC_LIB=$(CSRC_BUILD)/libha_codec.a
 
+# ============================ C 编译告警门禁 ============================
+#
+# 为什么要「零告警」而不是「有告警就看看」：
+# 1. 本仓 C 代码量还小（ha_codec.c 约 340 行），任何告警都值得当场修；
+#    门禁零成本维持（本地实测 4 个编译器×标准组合全 0 告警）。
+# 2. C 侧没有 Go 那套 vet 等价物，告警是**唯一的**静态信号。
+#    若是「先攒着」，C 侧会慢慢退化成一堆没人看的噪声，然后没人看。
+# 3. -Wconversion 特意包含在内：C→Go 经 cgo 时隐式窄化（如 size_t→int）
+#    是真实事故来源（长度字段截断），而它在默认档下是静默的。
+#
+# -Wpedantic 尤其重要：它抓出「用了 C11 特性但 CFLAGS 写 -std=c99」这类
+# 跨工具链不一致（本轮就当场抓到 _Static_assert 一例，见 ha_abi.h）。
+CSRC_STD ?= c99
+CSRC_WARN_FLAGS = -Wall -Wextra -Wpedantic -Wshadow -Wconversion
+CSRC_CFLAGS = -std=$(CSRC_STD) $(CSRC_WARN_FLAGS) -I$(CSRC_DIR)/include
+CSRC_SRCS = $(wildcard $(CSRC_DIR)/src/*.c)
+CSRC_HDRS = $(wildcard $(CSRC_DIR)/include/*.h)
+
+# 可选的第二编译器：只有一份编译器通过 ≠ C 写法可移植
+# （GCC 扩展在 clang 下报错、或反之，都是真实的发布事故）。
+CSRC_CC2 ?= clang
+
 csrc: $(CSRC_LIB)
 
 $(CSRC_LIB): $(wildcard $(CSRC_DIR)/src/*.c) $(wildcard $(CSRC_DIR)/include/*.h) $(CSRC_DIR)/CMakeLists.txt
@@ -66,6 +88,142 @@ $(CSRC_LIB): $(wildcard $(CSRC_DIR)/src/*.c) $(wildcard $(CSRC_DIR)/include/*.h)
 # csrc-test：C 侧契约测试（黄金对照的另一半，见 docs/zh/c-core/llm-orchestration-c.md §五）
 csrc-test: csrc
 	@cd $(CSRC_BUILD) && ctest --output-on-failure
+
+# csrc-lint：C 侧告警门禁（主编译器 + 第二编译器交叉，零告警）
+#
+# 用 \`-Werror\` 而不是只看输出：只有「告警即失败」才是门禁，
+# 否则它只是打印给人看，而人会累。
+.PHONY: csrc-lint
+csrc-lint:
+	@echo "== C 告警门禁（$(CSRC_STD)，$(CSRC_WARN_FLAGS)）=="
+	@for cc in $(CC) $(CSRC_CC2); do \
+		command -v $$cc >/dev/null 2>&1 || { echo "  [SKIP] $$cc 不存在"; continue; }; \
+		out=$$($$cc $(CSRC_CFLAGS) -Werror -fsyntax-only $(CSRC_SRCS) 2>&1); \
+		if [ -n "$$out" ]; then \
+			echo "  [FAIL] $$cc 有告警："; echo "$$out" | head -20; exit 1; \
+		else \
+			echo "  $$cc: 0 告警 ✓"; \
+		fi; \
+	done
+
+# csrc-abi：C 侧 ABI 版本自洽性（编译期断言已在 ha_abi.h 内，这里做运行期核对）
+.PHONY: csrc-abi
+csrc-abi:
+	@echo "== C ABI 版本自述 =="
+	@printf '#include <stdio.h>\n#include "ha_codec.h"\nint main(void){printf("%%d\\n", ha_codec_abi_version());return 0;}\n' > $(CSRC_BUILD)/abi_probe.c 2>/dev/null || mkdir -p $(CSRC_BUILD) && printf '#include <stdio.h>\n#include "ha_codec.h"\nint main(void){printf("%%d\\n", ha_codec_abi_version());return 0;}\n' > $(CSRC_BUILD)/abi_probe.c
+	@$(CC) $(CSRC_CFLAGS) $(CSRC_BUILD)/abi_probe.c -o $(CSRC_BUILD)/abi_probe $(CSRC_SRCS) 2>/dev/null
+	@v=$$($(CSRC_BUILD)/abi_probe); \
+	if [ "$$v" -ge 1000 ] && [ "$$v" -le 99999 ]; then \
+		echo "  ha_codec ABI_VERSION = $$v (major=$$((v/1000)) minor=$$((v%1000))): OK"; \
+	else \
+		echo "  [FAIL] ABI 版本荒谬：$$v"; exit 1; \
+	fi
+
+# csrc-sanitize：ASan + UBSan 跑 C 契约测试
+#
+# 目的：内存错误与未定义行为在 C 侧默认是**静默的**（不崩、结果看起来对），
+# 而内核 L1 路径零 malloc 的设计依赖「没有越界写」这一前提。
+# C 侧没有 Go 的 -race 等价物，sanitizer 就是这里的关等物。
+# 若本机无 libasan/libubsan（交叉工具链常见），明确 SKIP 而非静默跳过。
+.PHONY: csrc-sanitize
+csrc-sanitize:
+	@echo "== C 侧 ASan+UBSan =="
+	@tmp=$$(mktemp -d); \
+	if ! $(CC) $(CSRC_CFLAGS) -fsanitize=address,undefined -fno-omit-frame-pointer \
+		-o $$tmp/san_test $(CSRC_SRCS) $(CSRC_DIR)/test/*.c 2>/dev/null; then \
+		echo "  [SKIP] 本机无 ASan/UBSan 运行库（交叉工具链常见），已跳过"; rm -rf $$tmp; exit 0; \
+	fi; \
+	if ASAN_OPTIONS=detect_leaks=1 UBSAN_OPTIONS=print_stacktrace=1:halt_on_error=1 \
+		$$tmp/san_test > $$tmp/out.txt 2>&1; then \
+		echo "  ASan+UBSan 契约测试: PASS"; rm -rf $$tmp; \
+	else \
+		echo "  [FAIL] sanitizer 报告："; cat $$tmp/out.txt | head -30; rm -rf $$tmp; exit 1; \
+	fi
+
+# csrc-headers：头文件自包含性（每个 .h 都能单独编过）
+#
+# 为什么需要：ha_codec.h 头写了「本头文件是对外契约，签名冻结」，
+# 而**头文件能不能自己编过**是另一件事。若头里用到了自己没包含的东西
+# （比如用了 int32_t 却没 <stdint.h>），后果是：
+#   - 在某个翻译单元里恰好被别的头预先包含了 → 静默编过
+#   - 在别处（鸿蒙/嵌入式/C SDK 直接包含它）→ 报一堆无关的错
+# 本轮就靠它抓出 ha_abi.h 的静态断言垫片缺 <assert 类依赖> 类问题。
+# 判据：每个头单独编 -fsyntax-only 必须为 0 告警 0 错。
+.PHONY: csrc-headers
+csrc-headers:
+	@echo "== 头文件自包含性 =="
+	@ok=1; \
+	for h in $(CSRC_HDRS); do \
+		base=$$(basename $$h); \
+		inc=$$(dirname $$h); \
+		out=$$(echo "$$cc" | tr -d '-'; ); \
+		for cc in $(CC) $(CSRC_CC2); do \
+			command -v $$cc >/dev/null 2>&1 || continue; \
+			printf '#include "%s"\nint main(void){return 0;}\n' "$$base" > $(CSRC_BUILD)/hdr_probe.c; \
+			res=$$($$cc -std=$(CSRC_STD) $(CSRC_WARN_FLAGS) -I$$inc -I$(CSRC_DIR)/include -Werror \
+				-fsyntax-only $(CSRC_BUILD)/hdr_probe.c 2>&1); \
+			if [ -n "$$res" ]; then \
+				echo "  [FAIL] $$base 单独包含时失败（$$cc）："; echo "$$res" | head -10; ok=0; \
+			fi; \
+		done; \
+	done; \
+	if [ "$$ok" = "1" ]; then echo "  $(words $(CSRC_HDRS)) 个头文件：自包含 OK ✓"; else exit 1; fi
+
+# csrc-fuzz：libFuzzer 跑不变式 + 内存安全（需 clang，无则明确 SKIP）
+#
+# 这是 C 侧唯一能「持续」而非「等下一次手写用例」的检验。
+# ha_codec 的等价契约（与 Go 的 utf8.DecodeRuneInString 一致）在正常输入下
+# 永远测不到，只有随机字节能覆盖截断序列/过长编码/代理对/超 U+10FFFF。
+# 门禁不能假装通过：无 clang 或无 libFuzzer 时显式 SKIP 并说明。
+.PHONY: csrc-fuzz
+csrc-fuzz:
+	@echo "== C 侧 libFuzzer（clang）=="
+	@if ! command -v $(CSRC_CC2) >/dev/null 2>&1; then \
+		echo "  [SKIP] $(CSRC_CC2) 不存在，无法跑 libFuzzer"; exit 0; \
+	fi; \
+	tmp=$$(mktemp -d); \
+	if ! $(CSRC_CC2) $(CSRC_CFLAGS) -fsanitize=fuzzer,address,undefined -fno-omit-frame-pointer \
+		-o $$tmp/fz $(CSRC_SRCS) $(CSRC_DIR)/test/test_fuzz_ha_codec.c 2>/dev/null; then \
+		echo "  [SKIP] 无 libFuzzer 运行库（需要 clang 自带），已跳过"; rm -rf $$tmp; exit 0; \
+	fi; \
+	SECS=$${FUZZ_SECS:-20}; \
+	if $$tmp/fz -max_total_time=$$SECS -rss_limit_mb=4096 > $$tmp/fz.log 2>&1; then \
+		runs=$$(grep -oE 'Done [0-9]+ runs' $$tmp/fz.log | tail -1); \
+		echo "  libFuzzer: PASS（$${runs:-完成}，$${SECS}s）"; rm -rf $$tmp; \
+	else \
+		echo "  [FAIL] 模糊测试崩溃："; tail -30 $$tmp/fz.log; rm -rf $$tmp; exit 1; \
+	fi
+
+# csrc-cross：交叉编译 C 侧（arm64 是 homed 的真实发布目标之一）
+#
+# 为什么要单独门禁：Go 侧的 `go build` 不等于 C 代码在该架构上能编。
+# C 侧的架构相关问题（endianness 假设、指针宽度、size_t vs int 宽度、
+# -fsanitize 不可用）只有真的用目标编译器编一遍才会暴露。
+# 与 deploy/packaging/build.sh 的 arm64 目标共用同一套 CC 变量。
+.PHONY: csrc-cross
+csrc-cross:
+	@echo "== C 侧交叉编译（linux/arm64）=="
+	@CC_ARM64=$${CC_ARM64:-aarch64-linux-gnu-gcc}; \
+	if ! command -v $$CC_ARM64 >/dev/null 2>&1; then \
+		echo "  [SKIP] $$CC_ARM64 不存在（未装交叉工具链）"; exit 0; \
+	fi; \
+	if $$CC_ARM64 -std=$(CSRC_STD) $(CSRC_WARN_FLAGS) -Werror -I$(CSRC_DIR)/include \
+		-c $(CSRC_SRCS) -o /dev/null 2>/dev/null; then \
+		echo "  $$CC_ARM64: 0 告警、编译通过 ✓"; \
+	else \
+		echo "  [FAIL] arm64 交叉编译失败（把 .o 汇成单个输出是 gcc 的已知限制，改用逐文件）"; \
+		$$CC_ARM64 $(CSRC_CFLAGS) -Werror -fsyntax-only $(CSRC_SRCS) 2>&1 | head -20; exit 1; \
+	fi
+
+# check-csrc：C 侧全部门禁的聚合入口（接进 make test 与 CI）
+.PHONY: check-csrc
+check-csrc: csrc-lint csrc-abi csrc-headers csrc-sanitize csrc-cross
+	@echo "== C 基础设施门禁：全部通过 =="
+
+# check-csrc-full：在 check-csrc 基础上加模糊测试（耗时，故分开）
+.PHONY: check-csrc-full
+check-csrc-full: check-csrc csrc-fuzz
+	@echo "== C 基础设施门禁（含模糊测试）：全部通过 =="
 
 build:
 	@mkdir -p $(BUILD_DIR)
@@ -132,6 +290,7 @@ install: build
 test:
 	$(GO) test ./...
 	@$(MAKE) csrc-test
+	@$(MAKE) check-csrc
 	@$(MAKE) check-codec-cgo-only
 
 # check-codec-cgo-only：钉死「编解码层完全 C 化」这一决定。
