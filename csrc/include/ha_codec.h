@@ -28,9 +28,20 @@
 
 #include <stddef.h>
 
+#include "ha_abi.h"
+
 #ifdef __cplusplus
 extern "C" {
 #endif
+
+/* ==================== ABI 自述（供 Go 侧与日志核对） ==================== */
+
+/* 返回 HA_CODEC_ABI_VERSION（major*1000 + minor）。
+ *
+ * 存在的意义：Go 侧不该靠 `#include` 宏做版本断言（cgo 头文件里的宏在
+ * 预处理后不可见），而要**运行期/测试期**能问 C 侧「你自称什么版本」。
+ * 由 codec_cgo.go 绑定、codec_abiversion_test.go 与 C 侧宏三方比对。 */
+int ha_codec_abi_version(void);
 
 /* ==================== 模型上下文窗口推断 ==================== */
 
