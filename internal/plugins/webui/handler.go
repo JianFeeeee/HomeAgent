@@ -467,6 +467,11 @@ func (h *Handler) RegisterRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("/api/v1/settings/", h.requireAPI(h.handleSettings))
 	mux.HandleFunc("/api/v1/knowledge", h.requireAPI(h.handleKnowledge))
 	mux.HandleFunc("/api/v1/knowledge/", h.requireAPI(h.handleKnowledge))
+	// 知识库的树形只读面（供外部 agent / skill 按分类导航）。
+	// 路由顺序无关：Go 1.22+ 的 ServeMux 取**最长前缀匹配**
+	// （/knowledge/ 只是子树通配，不会吃掉 /knowledge/tree）。go.mod 要求 1.25。
+	mux.HandleFunc("/api/v1/knowledge/tree", h.requireAPI(h.handleKnowledgeTree))
+	mux.HandleFunc("/api/v1/knowledge/tree/", h.requireAPI(h.handleKnowledgeTree))
 	mux.HandleFunc("/api/v1/adapters", h.requireAPI(h.handleAdapters))
 	mux.HandleFunc("/api/v1/adapters/", h.requireAPI(h.handleAdapterByID))
 	mux.HandleFunc("/api/v1/tracker", h.requireAPI(h.handleTracker))

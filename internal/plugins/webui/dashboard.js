@@ -1647,18 +1647,22 @@
           '</span><span class="val" id="know-count">' +
           (k?.knowledge?.item_count ?? "-") +
           "</span></div>" +
-          '<div style="margin-top:8px;display:flex;gap:4px;flex-wrap:wrap">' +
+          '<details id="know-tree-box" style="margin-top:8px">' +
+          '<summary style="cursor:pointer;font-size:12px;opacity:.8">' +
+          __("按分类浏览", "Browse by category") +
+          '</summary>' +
+          '<div id="know-tree" style="margin-top:6px;max-height:200px;overflow:auto;font-size:12px"></div>' +
+          '</details>' +
+          '<div style="margin-top:8px;display:flex;gap:4px;flex-wrap:wrap;align-items:center">' +
           '<input id="know-query" placeholder="' +
           __("搜索知识", "Search knowledge") +
           '" style="flex:1;min-width:120px">' +
-          '<input id="know-category" placeholder="' +
-          __("分类(可选)", "Category (optional)") +
-          '" style="width:110px" title="' +
-          __("限定在该分类子树内，如 tech 会搜 tech/go、tech/rust。留空则搜全库",
-             "Limit search to a category subtree, e.g. tech covers tech/go, tech/rust. Empty searches all") +
-          '">' +
+          '<span id="know-cat-scope" style="font-size:11px;opacity:.7"></span>' +
           '<button class="btn btn-primary btn-sm" onclick="searchKnowledgeChat()">' +
           __("搜索", "Search") +
+          "</button>" +
+          '<button class="btn btn-sm" onclick="clearKnowledgeCategory()">' +
+          __("全库", "All") +
           "</button>" +
           '</div><div id="know-result-chat" style="margin-top:8px;max-height:220px;overflow:auto"></div>' +
           '<div style="margin-top:12px;border-top:1px solid var(--border-color);padding-top:8px">' +
@@ -2990,9 +2994,92 @@
         return html;
       }
 
+      // 知识库分类树浏览。
+      //
+      // 数据来自 /knowledge/tree（只读树接口）。当前分类存 state，
+      // 搜索时自动带上 —— 这样"先定位分类再检索"这个更准的用法在 UI 上
+      // 是一步的事，而不是要求用户手打分类名。
+      var _knowCat = ""; // 当前分类的完整 path；"" = 全库
+
+      function renderKnowTree(node, depth) {
+        var html = "";
+        // 本节点的条目
+        (node.items || []).forEach(function (it) {
+          html +=
+            '<div style="padding-left:' +
+            (depth * 12 + 4) +
+            'px;padding-top:1px;padding-bottom:1px">' +
+            '<span style="opacity:.7">▸</span> ' +
+            '<span style="word-break:break-all">' +
+            knowEsc(it.name) +
+            "</span>" +
+            (it.size ? ' <span style="opacity:.5;font-size:10px">' + it.size + "B</span>" : "") +
+            (it.media && it.media.length
+              ? ' <span style="opacity:.6;font-size:10px">[' + it.media.length + __(" 媒体", " media") + "]</span>"
+              : "") +
+            "</div>";
+        });
+        // 子分类
+        (node.children || []).forEach(function (c) {
+          var isCur = _knowCat === c.path;
+          var mark = isCur ? "● " : "";
+          html +=
+            '<div style="padding-left:' +
+            (depth * 12) +
+            'px"><span onclick="selectKnowledgeCategory(\'' +
+            knowEsc(c.path).replace(/'/g, "&#39;") +
+            '\')" style="cursor:pointer;user-select:none">' +
+            mark +
+            knowEsc(c.name) +
+            ' <span style="opacity:.55;font-size:10px">' +
+            c.item_count +
+            "/" +
+            c.total_count +
+            "</span></span></div>";
+          html += renderKnowTree(c, depth + 1);
+        });
+        return html;
+      }
+
+      async function loadKnowledgeTree() {
+        var box = document.getElementById("know-tree");
+        if (!box) return;
+        box.innerHTML = '<div class="loading"></div>';
+        try {
+          var d = await api("/knowledge/tree?items=1");
+          if (!d || !d.tree) {
+            box.innerHTML =
+              '<p style="opacity:.6;font-size:11px">' + __("暂无分类", "No categories yet") + "</p>";
+            return;
+          }
+          box.innerHTML = renderKnowTree(d.tree, 0);
+        } catch (e) {
+          box.innerHTML =
+            '<p style="color:#fca5a5;font-size:11px">' + __("加载分类失败: ", "Load categories failed: ") + knowEsc(e.message) + "</p>";
+        }
+      }
+
+      function selectKnowledgeCategory(path) {
+        _knowCat = path || "";
+        var lbl = document.getElementById("know-cat-scope");
+        if (lbl) {
+          lbl.textContent = _knowCat
+            ? __("范围：", "scope: ") + _knowCat
+            : __("范围：全库", "scope: all");
+        }
+        loadKnowledgeTree();
+        // 立刻按新范围搜一次，省一次点击
+        var q = document.getElementById("know-query")?.value;
+        if (q) searchKnowledgeChat();
+      }
+
+      function clearKnowledgeCategory() {
+        selectKnowledgeCategory("");
+      }
+
       async function searchKnowledgeChat() {
         var q = document.getElementById("know-query")?.value;
-        var cat = document.getElementById("know-category")?.value || "";
+        var cat = _knowCat || "";
         var r = document.getElementById("know-result-chat");
         if (!r) return;
         if (!q) {
@@ -3082,7 +3169,14 @@
       function switchChatPanel(tab, el) {
         // 切到知识面板时拉实时计数：面板里的数字来自 state.kernel 快照，
         // 而知识条目会经工具/上传增删，快照不会自己变（实测创建后仍显示 "-"）。
-        if (tab === "knowledge") refreshKnowledgeCount();
+        if (tab === "knowledge") {
+          refreshKnowledgeCount();
+          var lbl = document.getElementById("know-cat-scope");
+          if (lbl && !lbl.textContent) {
+            lbl.textContent = _knowCat ? __("范围：", "scope: ") + _knowCat : __("范围：全库", "scope: all");
+          }
+          loadKnowledgeTree();
+        }
         var panels = {
           chat: document.getElementById("chat-panel-chat"),
           starmap: document.getElementById("chat-panel-starmap"),
