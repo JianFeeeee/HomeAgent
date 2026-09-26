@@ -63,10 +63,57 @@ package api
 #cgo CFLAGS: -std=c99
 #include <stdlib.h>
 #include "ha_codec.h"
+
+// 下面这个常量就是 C 侧宏展开后的值，经由 cgo 暴露给 Go。
+//
+// ★ 声明成 C 函数（而非 const）才能从 Go 侧读到值：
+//   cgo 生成的 `*_Cvar_*` 变量对 Go 而言**不是常量**（实测报
+//   "is not constant"），所以 Go 侧拿它做不了编译期断言，
+//   只能在测试期当普通变量比对。编译期的保证由下面那条 C 断言提供。
+int ha_abi_version_macro(void) { return HA_CODEC_ABI_VERSION; }
+
+// C 侧自检：宏合成式与主/次版本必须自洽。
+// 这条断言在**编译 C 时**就生效，而不是等 Go 侧测试跑到。
+_Static_assert(HA_CODEC_ABI_MAJOR * 1000 + HA_CODEC_ABI_MINOR == HA_CODEC_ABI_VERSION,
+               "ha_abi.h: HA_CODEC_ABI_VERSION 合成式与主/次版本不一致");
 */
 import "C"
 
 import "unsafe"
+
+// codecABIVersionExpected 是 C 侧 ha_abi.h 里 HA_CODEC_ABI_VERSION 的 Go 副本。
+//
+// ★ 为什么要手工拄一份而不是让 cgo 直接读宏：
+//   cgo 顶部的 C 代码在 cgo 阶段被**预处理并丢弃**，其中的宏在 Go 侧不可见；
+//   能看到的只有 cgo 生成的文件。用 cgo 的 `const` 桥接（C.ha_codec_abi_version）只能在
+//   **运行期**问到版本，编译期拿不到，无法把「两侧版本不一致」变成构建失败。
+//   而「注释里说冻结」不是机制。这份 Go 常量 + codec_abiversion_test.go
+//   把版本漂移变成**测试期断言**，真正对得上才跑得起来。
+//
+// 改动规则（与 ha_abi.h 一致）：
+//   - C 侧新增函数/枚举值（纯追加）→ 同步把这里 +1，并改 abi_test 的期望
+//   - 改签名/删函数/改结构体布局 → MAJOR+1，**所有调用方必须同步重编**
+const (
+	codecABIMajorExpected = 1
+	codecABIMinorExpected = 0
+)
+
+// codecABIVersionMacroValue 查询 C 侧 HA_CODEC_ABI_VERSION 宏展开后的值。
+//
+// ★ 它的存在是为了堵一个盲区：TestABIVersionMatches 比的是
+//   「Go 常量 vs C 函数返回值」。若有人同时把 Go 常量和 C 函数
+//   一起改掉（而忘了改 ha_abi.h 的宏），那条测试照样通过 ——
+//   **两边一起错成一样**是它的盲区。这个值直接取自 C 宏，
+//   由 codec_abimacro_test.go 拿来交叉核对。
+//
+// ★ 为何是函数而非 Go 常量：cgo 生成的 `*_Cvar_*` 不是 Go 常量
+//   （实测 "is not constant"），无法在编译期参与断言。
+//   编译期的保证在 C 侧（codec_cgo.go 里的 _Static_assert）。
+func codecABIVersionMacroValue() int { return int(C.ha_abi_version_macro()) }
+
+// codecABIVersion 查询 C 侧自称的 ABI 版本（major*1000 + minor）。
+func codecABIVersion() int { return int(C.ha_codec_abi_version()) }
+
 
 // cstr 返回 s 的底层字节首地址与长度，供 C 侧零拷贝读取。
 //

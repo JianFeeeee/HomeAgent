@@ -335,3 +335,11 @@ size_t ha_codec_truncate_by_tokens(const char *text, size_t text_len,
     }
     return text_len; /* 未超预算：整串都留 */
 }
+
+/* ---------------------------------------------------------------- */
+/* ABI 自述                                                          */
+/* ---------------------------------------------------------------- */
+
+int ha_codec_abi_version(void) {
+    return HA_CODEC_ABI_VERSION;
+}
