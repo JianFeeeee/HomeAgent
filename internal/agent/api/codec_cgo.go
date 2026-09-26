@@ -115,6 +115,27 @@ func codecABIVersionMacroValue() int { return int(C.ha_abi_version_macro()) }
 func codecABIVersion() int { return int(C.ha_codec_abi_version()) }
 
 
+// cstr2 与 cstr 同义（返回 Go 的 string 版本），供 cgo 桥接层使用。
+// 名字不同是为了与测试文件里的辅助函数区分，避免包内重名。
+func cstr2(s string) (*C.char, C.size_t) { return cstr(s) }
+
+// cstrb 取字节切片的首地址（供 C 侧写入目标缓冲）。
+func cstrb(b []byte) *C.char {
+	if len(b) == 0 {
+		return nil
+	}
+	return (*C.char)(unsafe.Pointer(&b[0]))
+}
+
+// cstrp 返回 Go string 的底层字节首地址（不做空串短路，供
+// 「长度已知、可能为空」的取值场景使用）。
+func cstrp(s string) *C.char {
+	if len(s) == 0 {
+		return nil
+	}
+	return (*C.char)(unsafe.Pointer(unsafe.StringData(s)))
+}
+
 // cstr 返回 s 的底层字节首地址与长度，供 C 侧零拷贝读取。
 //
 // 空串返回 (nil, 0)：调用方不应把 nil 传给会解引用的 C 函数。
