@@ -2936,6 +2936,9 @@ function initChatStarmap() {
 	// 活动数据源：/runtime 3s + /memory/graph/pulse 10s。
 	// 只在星图真正初始化后启动，避免在隐藏页签空跑。
 	starmapStartActivity();
+	// 图例按实际出现的类型生成（建图后 smPresentTypes 才是准的）。
+	smLegend();
+	smUpdateStat();
 }
 
 // starmapStartActivity 启动两路活动轮询（幂等）。
@@ -2954,6 +2957,13 @@ function starmapStartActivity() {
 }
 
 function buildChatStarmapGraph() {
+	// 先统计实际出现的类型（smColorFor / 动态图例都要用）。
+	// 必须在建节点**之前**算完 —— 颜色在创建 mesh 时就定下了。
+	smPresentTypes = {};
+	starmapNodes.forEach((n) => {
+		var t = String(n.type || "").toLowerCase() || "(未知)";
+		smPresentTypes[t] = (smPresentTypes[t] || 0) + 1;
+	});
 	starmapNodeMeshes.forEach((m) => {
 		starmapScene.remove(m);
 	});
@@ -3113,7 +3123,7 @@ function buildChatStarmapGraph() {
 		// 服务端 type 是首字母大写（"Concept" / "Person" …），
 		// 原 smTypeColors 的键全是小写，永远匹配不上 ⇒ 全图单色 0xcccccc。
 		// 这里统一小写归一化，并补上服务端实际会产出的类型。
-		var col = smTypeColors[String(n.type || "").toLowerCase()] || 0xcccccc;
+		var col = smColorFor(n.type);
 		var ei = 0.3 + mnr * 0.7;
 		var mat = new THREE.MeshPhongMaterial({
 			color: col,
@@ -5468,21 +5478,60 @@ var starmapLabelEl = null;
 // smTypeColors 的键必须与**服务端实际产出的 type 字符串小写后**一致。
 // 服务端默认类型是 "Concept"（首字母大写，见 internal/memory/graph.go），
 // 原键全为小写 ⇒ 永远匹配不上 ⇒ 1150 个节点全渲染成同一个灰色 0xcccccc，
-// 分类配色实际上从未生效过。
+// 分类配色实际上从未生效过。现已加小写归一化，映射是真的生效了。
+//
+// ★ 但色相换成**中性灰蓝**（用户裁定）：亮青绿（0x44ff88）配 1151 个
+// 自发光球确实扎眼，而且它掩盖了一个更刺眼的事实 ——
+//
+//	实测图谱里 Concept 占 1148/1149 = 99%（nlp/extractor.go 完全不判类型，
+//	graph.go:451 在 type 为空时写死 "Concept"）。也就是说这套按类型
+//	配色的设计，对真实数据而言**只有一种颜色会被用到**。
+//
+//	所以真正的做法不是挑一个好看的色，而是：
+//	  1. 默认色改为低饱和灰蓝（全图统一，不假装在分类）
+//	  2. 类型色只在**真的存在多种类型**时才按类型区分（见 smColorFor）
+//	  3. 图例按实际节点集合动态生成，不列出永不出现的类型
+var SM_COLOR_DIM = 0x7d8a9e; // 中性灰蓝：单一类型时的全图色
 var smTypeColors = {
-	person: 0x4488ff,
-	task: 0xff8844,
-	ai: 0xaa44ff,
-	concept: 0x44ff88,
-	object: 0xff4444,
-	// 服务端还会产出这些（indexer_test 里可见 "Person"/"Location"）
-	location: 0xffaa44,
-	source: 0x8899ff,
-	document: 0xaabbcc,
-	event: 0xff88cc,
-	entity: 0x44ddcc,
-	scene: 0x88ff44,
+	// 以下类型在真实数据里几乎不出现（仅 social.go 会产出 person），
+	// 但保留定义：万一出现就能自动获得区分色 + 动态图例条目。
+	person: 0x6f9fd8,
+	task: 0xd89a6a,
+	ai: 0xa583d8,
+	// 绝大多数节点（Concept）：用中性灰蓝，不在“分类色”里扮浓。
+	concept: SM_COLOR_DIM,
+	object: 0xd87a7a,
+	location: 0xd8b06a,
+	source: 0x8b9dc4,
+	document: 0x9aa5b1,
+	event: 0xc98fb5,
+	entity: 0x7fb5ad,
+	scene: 0x9dc47f,
 };
+
+// smColorTypeSet 统计本次图谱里实际出现的类型（小写）。
+// 由 buildChatStarmapGraph 在建图前填好。
+var smPresentTypes = {};
+
+// smColorFor 取节点颜色。
+//
+// 规则：图谱里存在 2 种以上「有存在感」的类型时按类型上色，否则全图
+// 用 SM_COLOR_DIM。阈值与图例一致（>=1% 算“有存在感”）。
+// 理由：99.9% 概念 + 0.1% 其他时，按类型上色得到的仍是一整片同色，
+// 只是换了个色相；而那一两个异色点在视觉上就是噪点。
+function smColorFor(type) {
+	var t = String(type || "").toLowerCase();
+	var keys = Object.keys(smPresentTypes);
+	if (keys.length <= 1) return SM_COLOR_DIM;
+	var total = 0;
+	for (var i = 0; i < starmapNodes.length; i++) total++;
+	var self = (smPresentTypes[t] || 0) * 100;
+	if (total > 0 && self / total < 1) {
+		// 稀疏类型也走中性色：宁可全图同色，不引入单点亮色噪点。
+		return SM_COLOR_DIM;
+	}
+	return smTypeColors[t] || SM_COLOR_DIM;
+}
 var smEdgeColors = {
 	喜欢: 0xff6b6b,
 	学习: 0x4ecdc4,
@@ -5866,13 +5915,7 @@ function renderStarmapTab() {
 			__("记忆星图", "Memory Star Map") +
 			' <span class="badge" id="sm-page-stat" style="font-size:10px;font-weight:400"></span></h2>' +
 			'<div id="sm-container-page" style="height:calc(100vh - 260px);min-height:420px"></div>' +
-			'<div style="display:flex;gap:14px;flex-wrap:wrap;margin-top:10px;font-size:11px;color:var(--text-secondary)">' +
-			smLegend("person", __("人物", "Person")) +
-			smLegend("concept", __("概念", "Concept")) +
-			smLegend("object", __("对象", "Object")) +
-			smLegend("location", __("地点", "Location")) +
-			smLegend("source", __("来源", "Source")) +
-			"</div>" +
+			'<div id="sm-legend" style="display:flex;gap:14px;flex-wrap:wrap;margin-top:10px;font-size:11px;color:var(--text-secondary)"></div>' +
 			'<div style="margin-top:8px;font-size:11px;color:var(--text-muted)">' +
 			__(
 				"星图跟随 agent 活动脉动：工具调用 / 阶段推进 / 输出 / 调度器繁忙 / 新记忆生长。",
@@ -5892,21 +5935,95 @@ function renderStarmapTab() {
 			onStarmapResize();
 		}
 	}
+	// ★ 图例也要在这里重算，而不只是 initChatStarmap 里算一次：
+	//   首屏时星图是在**总览页**初始化的（那时 #sm-legend 还不存在，
+	//   smLegend 内部 getElementById 返回 null 直接返回），而本函数的
+	//   容器骨架恰恰是此刻才建的。不在这里补一次，图例就永远是空的。
+	smLegend();
 	smUpdateStat();
 }
 
-// smLegend 生成图例小项。
-function smLegend(key, label) {
-	var col = smTypeColors[key] || 0xcccccc;
-	var hex = "#" + ("0000" + col.toString(16)).slice(-6);
-	return (
-		'<span style="display:inline-flex;align-items:center;gap:5px">' +
-		'<i style="width:9px;height:9px;border-radius:50%;background:' +
-		hex +
-		';display:inline-block"></i>' +
-		escHtml(label) +
-		"</span>"
-	);
+// smLegendLabel 把内部类型名转成可读标签。
+var SM_TYPE_LABELS = {
+	person: ["人物", "Person"],
+	concept: ["概念", "Concept"],
+	object: ["对象", "Object"],
+	location: ["地点", "Location"],
+	source: ["来源", "Source"],
+	document: ["文档", "Document"],
+	event: ["事件", "Event"],
+	entity: ["实体", "Entity"],
+	scene: ["场景", "Scene"],
+	ai: ["AI", "AI"],
+	task: ["任务", "Task"],
+};
+
+// smLegend 按**实际出现**的类型生成图例。
+//
+// ★ 为什么不用固定列表：原图例写死了「人物/概念/对象/地点/来源」五项，
+// 而实测图谱里只有 Concept（1148）与 Source（1）。列出四个永不出现的
+// 类型 = 对用户说谎（图例说“分类”，实际是一整片同色）。
+//
+// 现在：
+//   - 只有一种类型  → 只显示一项，并标注占比（如「概念 1149」）
+//   - 多种类型      → 按数量降序列出全部，每项带占比
+//   - 类型名不认识  → 退化为小写原文而不是默默消失
+function smLegend() {
+	var box = document.getElementById("sm-legend");
+	if (!box) return;
+	var keys = Object.keys(smPresentTypes);
+	if (!keys.length || !starmapNodes.length) {
+		box.innerHTML = "";
+		return;
+	}
+	var total = starmapNodes.length;
+	keys.sort((a, b) => smPresentTypes[b] - smPresentTypes[a]);
+	// 「主要类型」= 占比 >= 1% 的。实测 1148 Concept + 1 Source 时，
+	// Source 占 0.087% —— 直接列出来会显示成「来源 0%」，既难看又误导
+	//（读者会以为图里没有来源节点）。低于 1% 的归入「其他 N 个」。
+	var MIN_SHOW_PCT = 1;
+	var major = [];
+	var minor = 0;
+	keys.forEach((k) => {
+		if ((smPresentTypes[k] * 100) / total >= MIN_SHOW_PCT) major.push(k);
+		else minor += smPresentTypes[k];
+	});
+	var dim = major.length <= 1; // 颜色上是否走单一色
+	var html = major
+		.map((k) => {
+			var lbl = SM_TYPE_LABELS[k];
+			var label = lbl ? __(lbl[0], lbl[1]) : k;
+			var hex = "#" + ("0000" + smColorFor(k).toString(16)).slice(-6);
+			var pct = Math.round((smPresentTypes[k] * 100) / total);
+			return (
+				'<span style="display:inline-flex;align-items:center;gap:5px">' +
+				'<i style="width:9px;height:9px;border-radius:50%;background:' +
+				hex +
+				';display:inline-block"></i>' +
+				escHtml(label) +
+				' <span style="color:var(--text-muted)">' +
+				pct +
+				"%</span></span>"
+			);
+		})
+		.join("");
+	if (minor > 0)
+		html +=
+			'<span style="color:var(--text-muted)">' +
+			__("其他 ", "other ") +
+			minor +
+			__(" 个", " nodes") +
+			"</span>";
+	// 颜色上实际是单一色时，说清楚这不是分类图。
+	if (dim)
+		html +=
+			'<span style="color:var(--text-muted)">' +
+			__(
+				"（图谱实体几乎都是同一类型，节点同色；出现新类型后会自动分类）",
+				"(entities are almost all one type, so nodes share a color; new types will be color-coded automatically)",
+			) +
+			"</span>";
+	box.innerHTML = html;
 }
 
 // smUpdateStat 在星图页签头部显示节点/边/活动状态。
