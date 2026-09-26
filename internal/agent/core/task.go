@@ -790,9 +790,7 @@ func (a *Agent) stepToolAfter(f *TaskFrame) stepOutcome {
 			// 召回用两条路的并集：声明场景（注入点/通道/工具）+ 涌现场景
 			scenes := a.sceneKeysFor(f.Evt, tc.Name)
 			turn := a.resolveTurnScenes(f, tc.Name)
-			for _, k := range turn.Keys {
-				scenes = append(scenes, k)
-			}
+			scenes = mergeSceneKeys(scenes, turn.Keys)
 			recallText = a.memoryPass(query, "tool:"+tc.Name, needPrune, needRecall, scenes).RecallText
 		}
 	}
