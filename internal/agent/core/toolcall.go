@@ -615,6 +615,66 @@ func (a *Agent) executeKnowledgeTool(tc agentAPI.ToolCall) string {
 		tree := a.knowledge.BuildTree()
 		return formatTree(tree, 0)
 
+	case "knowledge_import_dir":
+		dir, _ := tc.Arguments["dir"].(string)
+		category, _ := tc.Arguments["category"].(string)
+		// dry_run 默认 true：导入是批量写，agent 第一次试某个目录时
+		// 应该先看清会写什么。默认直接写等于让它盲写一批数据。
+		dryRun := true
+		if b, ok := getBool(tc.Arguments, "dry_run"); ok {
+			dryRun = b
+		}
+		includeMedia := false
+		if b, ok := getBool(tc.Arguments, "include_media"); ok {
+			includeMedia = b
+		}
+		st, err := a.knowledge.ImportDir(knowledge.ImportOptions{
+			Dir:          dir,
+			Category:     category,
+			DryRun:       dryRun,
+			IncludeMedia: includeMedia,
+			MaxItems:     int(getFloat(tc.Arguments, "max_items")),
+		})
+		if err != nil {
+			return fmt.Sprintf("知识导入失败: %v", err)
+		}
+		var b strings.Builder
+		verb := "已导入"
+		if dryRun {
+			verb = "将导入（dry_run，未实际写入）"
+		}
+		fmt.Fprintf(&b, "%s %d 条", verb, st.Imported)
+		if category != "" {
+			fmt.Fprintf(&b, "（分类前缀 %s）", category)
+		}
+		if st.Media > 0 {
+			fmt.Fprintf(&b, "，含 %d 个媒体", st.Media)
+		}
+		if st.Skipped > 0 {
+			fmt.Fprintf(&b, "；跳过 %d", st.Skipped)
+		}
+		if st.Failed > 0 {
+			fmt.Fprintf(&b, "；失败 %d", st.Failed)
+		}
+		if st.Truncated {
+			fmt.Fprintf(&b, "；★ 超出 max_items 被截断，未导完（可调大 max_items 或分批）")
+		}
+		if len(st.Names) > 0 {
+			show := st.Names
+			if len(show) > 10 {
+				show = show[:10]
+			}
+			fmt.Fprintf(&b, "。知识名：%s", strings.Join(show, "、"))
+			if len(st.Names) > 10 {
+				fmt.Fprintf(&b, " …共 %d 个", len(st.Names))
+			}
+		}
+		// 失败原因要报给 agent：否则它只知道"失败 37 条"却无从下手。
+		for _, e := range st.Errors {
+			fmt.Fprintf(&b, "\n- %s", e)
+		}
+		return b.String()
+
 	case "knowledge_delete":
 		name, _ := tc.Arguments["name"].(string)
 		if name == "" {

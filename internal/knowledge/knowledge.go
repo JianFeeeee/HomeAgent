@@ -121,6 +121,9 @@ type Store struct {
 	mu    sync.RWMutex
 	items map[string]*Knowledge
 
+	// mediaPut 是媒体写入器（ImportDir 复制媒体时用），见 SetMediaPutter。
+	mediaPut MediaPutter
+
 	indexPath      string
 	denseCachePath string
 	denseDirty     bool
@@ -128,6 +131,10 @@ type Store struct {
 	// 由 flushIndex 收口：实测 writeIndexLocked 是 Add 的主开销
 	// （N=400 时 6.7ms/次，占单条 Add 的绝大部分）。
 	indexDirty bool
+	// batchDepth > 0 表示处于批量写入期（ImportDir）。此时逐条写出的
+	// flushDenseLocked 只标脏不落盘，由 endBatch 收口一次 —— 否则批量导入
+	// 的派生数据写入量是 O(N²)（见 import.go 的说明）。
+	batchDepth int
 	// denseCacheLoaded 保证缓存只尝试恢复一次；scanned 表示 items 已扫盘就绪。
 	// 两个状态位缺一不可：接线（SetDenseSpace）与扫盘（Start）的先后顺序
 	// 在调用方是自由的，缓存恢复必须等**两者都就绪**才可能成功，
@@ -218,6 +225,17 @@ func (s *Store) SetMediaGetter(g MediaGetter) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.mediaGet = g
+}
+
+// SetMediaPutter 注入媒体写入器（ImportDir 把图片/音视频复制进媒体库时用）。
+//
+// 与 SetMediaGetter 分开：一个是取（算嵌入时读回媒体块），一个是存
+// （目录导入时收字节）。合成一个接口会强迫测试同时实现两侧。
+// 不注入时 ImportDir 仍能导入正文，只是媒体被跳过并记原因。
+func (s *Store) SetMediaPutter(p MediaPutter) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.mediaPut = p
 }
 
 // denseEnabled 报告稠密路是否可用（供 Stats/自证与分支判断）。
@@ -1186,6 +1204,11 @@ func shortFP(fp string) string {
 // 出于同样理由选择当场写盘）。
 func (s *Store) flushDenseLocked() error {
 	if !s.denseDirty {
+		return nil
+	}
+	// 批量期不落盘：saveDenseCacheLocked 是全量序列化 + 重写整个文件，
+	// 逐条做就是 O(N²)。由 endBatch 收口一次。
+	if s.batchDepth > 0 {
 		return nil
 	}
 	s.saveDenseCacheLocked()
