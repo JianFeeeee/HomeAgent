@@ -2076,6 +2076,42 @@
       #sm-container-chat canvas {
         display: block;
       }
+      /* 星图容器：独立页签 / 总览页 / 聊天面板三处共用同一套样式。
+         position:relative 是必需的 —— hover 角标（#sm-label）绝对定位在容器上。*/
+      #sm-container-page,
+      #sm-container-home {
+        background: var(--bg-input);
+        border-radius: var(--radius-sm);
+        border: 1px solid var(--border-color);
+        overflow: hidden;
+        position: relative;
+        width: 100%;
+      }
+      #sm-container-page canvas,
+      #sm-container-home canvas {
+        display: block;
+      }
+      /* hover 角标：取代原先每节点一张 256x64 CanvasTexture
+         （1151 张贴图 ≈ 72MB 显存）。DOM 文字更清晰且零 GPU 开销。*/
+      #sm-label {
+        position: absolute;
+        left: 10px;
+        bottom: 10px;
+        display: none;
+        max-width: 60%;
+        padding: 4px 10px;
+        font-size: 12px;
+        line-height: 1.4;
+        color: var(--text-primary);
+        background: rgba(10, 10, 20, 0.82);
+        border: 1px solid var(--border-color);
+        border-radius: var(--radius-sm);
+        pointer-events: none;
+        z-index: 5;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+      }
 
       .toggle-row {
         margin-top: 8px;
