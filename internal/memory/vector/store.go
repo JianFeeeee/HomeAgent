@@ -254,22 +254,87 @@ func (v *TFIDFVectorizer) Train(docs []string) {
 	defer v.mu.Unlock()
 
 	v.docFreq = make(map[string]float64)
-	v.totalDocs = len(docs)
+	v.totalDocs = 0
 
 	seen := make(map[string]map[string]bool)
 	for _, doc := range docs {
-		features := v.tokenizer(doc)
-		key := doc
-		if seen[key] == nil {
-			seen[key] = make(map[string]bool)
-		}
-		for _, f := range features {
-			if !seen[key][f] {
-				seen[key][f] = true
-				v.docFreq[f]++
+		v.addDocLocked(doc, seen)
+	}
+}
+
+// AddDoc 把一篇新文档计入 DF 统计（增量）。
+//
+// 存在的理由：Train 是全量重训，而知识库的 Add 是逐条发生的。此前 Add 只把
+// 文本追进一个 summaries 切片、不更新 DF，于是**新引入的词 df=0**，
+// 而 Vectorize 会跳过 df<=0 的特征 —— 运行时新增的知识当场搜不到，
+// 重启（重新 Train）后才恢复。这不是优化项，是功能缺陷。
+//
+// 注意：document 是**文档级去重**的（同一词在同篇里多次出现只记 1 次 df），
+// 与 Train 里那份 seen 表的语义必须一致，否则 IDF 会随写入路径不同而漂移。
+func (v *TFIDFVectorizer) AddDoc(doc string) {
+	v.mu.Lock()
+	defer v.mu.Unlock()
+	v.addDocLocked(doc, nil)
+}
+
+// RemoveDoc 把一篇文档从 DF 统计中移出（AddDoc 的逆操作）。
+//
+// totalDocs 可能减到 0；此后 Vectorize 会走 totalDocs < 3 的退化分支
+// （直接给 tf，不乘 IDF），这是可接受的行为 —— 库里都没东西了，
+// IDF 本来也无从谈起。采用**下界守卫**：减到 0 后即使 RemoveDoc 被多调
+// 一次，也不会变成负数。
+func (v *TFIDFVectorizer) RemoveDoc(doc string) {
+	v.mu.Lock()
+	defer v.mu.Unlock()
+
+	for f := range v.seenFeatures(doc) {
+		if v.docFreq[f] > 0 {
+			v.docFreq[f]--
+			if v.docFreq[f] == 0 {
+				// 删掉零频条目：否则 DF 表会被"曾经出现过一次"的词永久撑大，
+				// 而这正是 summaries 只增不减之外的第二处泄漏。
+				delete(v.docFreq, f)
 			}
 		}
 	}
+	if v.totalDocs > 0 {
+		v.totalDocs--
+	}
+}
+
+// addDocLocked 是 AddDoc/Train 共用的记账内核。seen 非 nil 时复用调用方的表
+// （Train 的整轮去重），nil 时本函数内使用自己的表。
+//
+// 调用方必须已持写锁。
+func (v *TFIDFVectorizer) addDocLocked(doc string, seen map[string]map[string]bool) {
+	var local map[string]bool
+	if seen != nil {
+		if seen[doc] == nil {
+			seen[doc] = make(map[string]bool)
+		}
+		local = seen[doc]
+	} else {
+		local = make(map[string]bool)
+	}
+
+	for _, f := range v.tokenizer(doc) {
+		if local[f] {
+			continue
+		}
+		local[f] = true
+		v.docFreq[f]++
+	}
+	v.totalDocs++
+}
+
+// seenFeatures 返回一篇文档的**去重**特征集（与 addDocLocked 的口径一致）。
+// 调用方必须已持写锁。
+func (v *TFIDFVectorizer) seenFeatures(doc string) map[string]bool {
+	out := make(map[string]bool)
+	for _, f := range v.tokenizer(doc) {
+		out[f] = true
+	}
+	return out
 }
 
 func (v *TFIDFVectorizer) Vectorize(text string) Vector {
