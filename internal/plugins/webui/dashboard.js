@@ -563,9 +563,7 @@ async function starmapFetchBlock(name) {
 			try {
 				var s = await api("/status");
 				state.status = s;
-				state.startedAt = s.startedAt
-					? new Date(s.startedAt).getTime()
-					: null;
+				state.startedAt = s.startedAt ? new Date(s.startedAt).getTime() : null;
 			} catch (e) {}
 			break;
 		case "runtime":
@@ -624,9 +622,7 @@ async function renderAll(force) {
 	if (force) _loadedOnce = {};
 	// 1) 只拉当前页签需要的数据（并发的别串行等）
 	var needs = spec.fetch || [];
-	await Promise.all(
-		needs.map((n) => starmapFetchBlock(n)),
-	);
+	await Promise.all(needs.map((n) => starmapFetchBlock(n)));
 	// 2) 只渲染当前页签（+ 星图在多处出现，单独处理）
 	try {
 		spec.render.forEach((fn) => {
