@@ -8,7 +8,7 @@
 #   kb_tree.sh -q goroutine -c tech     # 在 tech 子树内检索
 #   kb_tree.sh -l                       # 列分类
 #
-# token 读取顺序：环境变量 KB_TOKEN > 本目录 config.json > 报错。
+# token 读取顺序：环境变量 KB_TOKEN > <skill>/config/config.json（或 <skill>/config.json）> 报错。
 # 故意不放命令行参数：token 会进 shell 历史与 ps 输出。
 set -euo pipefail
 
@@ -35,10 +35,14 @@ done
 
 
 if [[ -z "${KB_TOKEN:-}" ]]; then
-  CFG="$HERE/../config.json"
-  if [[ -f "$CFG" ]]; then
-    KB_TOKEN="$(python3 -c 'import json,sys;print(json.load(open(sys.argv[1])).get("token",""))' "$CFG" 2>/dev/null || true)"
-  fi
+  # 两种布局都试：<skill>/config/config.json（当前布局）与 <skill>/config.json。
+  # 只写一种会因目录结构调整而静默失效——症状是「明明配了 token 却说没找到」。
+  for CFG in "$HERE/../config/config.json" "$HERE/../config.json"; do
+    if [[ -f "$CFG" ]]; then
+      KB_TOKEN="$(python3 -c 'import json,sys;print(json.load(open(sys.argv[1])).get("token",""))' "$CFG" 2>/dev/null || true)"
+      [[ -n "$KB_TOKEN" ]] && break
+    fi
+  done
 fi
 if [[ -z "${KB_TOKEN:-}" ]]; then
   cat >&2 <<'EOF'
@@ -57,7 +61,14 @@ fi
 
 auth=(-H "X-API-Key: ${KB_TOKEN}")
 
-cmd="${1:-tree}"; shift || true
+# 第一个参数若是选项（如 -q x），它就是选项而非子命令。
+# 原先会把 "-q" 当命令名报「未知命令: -q」——而 `kb_tree.sh -q 并发` 是很自然的写法。
+if [[ $# -gt 0 && "$1" == -* ]]; then
+  cmd=""
+else
+  cmd="${1:-tree}"
+  shift || true
+fi
 query=""; category=""; depth=""; items=""; limit=""
 while getopts "q:c:d:i:l:h" opt 2>/dev/null; do
   case "$opt" in
@@ -122,6 +133,11 @@ except Exception:
   esac
 }
 
+# 命令在解析选项**之后**定：没显式给子命令时，
+# 有 -q 走 search、没有则走 tree。
+if [[ -z "$cmd" ]]; then
+  if [[ -n "$query" ]]; then cmd="search"; else cmd="tree"; fi
+fi
 case "$cmd" in
   tree|categories|counts|search) ;;
   *) echo "未知命令: $cmd" >&2; exit 2 ;;
