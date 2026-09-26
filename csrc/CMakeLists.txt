@@ -31,6 +31,7 @@ set(CMAKE_C_EXTENSIONS OFF)   # 禁用 gnu99 扩展，严格 -std=c99
 
 set(HA_CODEC_SRC
     src/ha_codec.c
+    src/ha_json_scan.c
 )
 
 if(BUILD_SHARED_LIBS)
@@ -71,8 +72,11 @@ install(DIRECTORY include/ DESTINATION include)
 if(BUILD_TESTS)
     add_executable(ha_codec_test test/test_ha_codec.c)
     target_link_libraries(ha_codec_test PRIVATE ha_codec)
+    add_executable(ha_json_scan_test test/test_ha_json_scan.c)
+    target_link_libraries(ha_json_scan_test PRIVATE ha_codec)
     enable_testing()
     add_test(NAME ha_codec_test COMMAND ha_codec_test)
+    add_test(NAME ha_json_scan_test COMMAND ha_json_scan_test)
 endif()
 
 # ============================================================
@@ -92,7 +96,7 @@ endif()
 # ============================================================
 if(BUILD_FUZZ)
     if(CMAKE_C_COMPILER_ID MATCHES "Clang")
-        foreach(fz IN ITEMS test_fuzz_ha_codec)
+        foreach(fz IN ITEMS test_fuzz_ha_codec test_fuzz_ha_json_scan)
             add_executable(${fz} test/${fz}.c)
             target_link_libraries(${fz} PRIVATE ha_codec)
             target_compile_options(${fz} PRIVATE
