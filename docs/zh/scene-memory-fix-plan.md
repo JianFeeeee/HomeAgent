@@ -103,18 +103,64 @@ topic 主导                 0
 （不只删本指纹的足迹）。多场景并发轮次下，A 场景的建立会连带清掉 B 尚未
 攒够 `minSceneEvidence=2` 的证据 ⇒ 门槛判定被别的场景的建立随机打断。
 
+### R6 通道侧没有「是否参与场面识别」的声明项（SDK 缺口）
+
+`ChannelDef` 的记忆相关声明已有三件套，语义各管一轴：
+
+```
+NoMemory       进不进记忆计算
+ContextPolicy  裁不裁上下文（破坏性，默认关）
+RecallPolicy   召不召回记忆（只读，默认开）
+```
+
+**唯独没有「这条通道是否参与场面识别」。** 现状是**无条件参与**：
+`situationFeaturesFor` 里只要 `evt.Source != ""` 就塞一个 `chan` 特征，
+没有可关的开关 ⇒ 现网 `chan:system` / `chan:kernel` / `chan:timer` 这类
+**纯内部信噪通道也在参与场面聚类**。
+
+穷举确认不是查漏：编译使用的就是 `third_party/homeagent-sdk`（go.mod replace），
+`plugin.go` 中 `scene` 出现 0 次，SDK 自身 git 历史 `-S'Scene' -- sdk/` 为空。
+
+已有但未被使用的另一个口子：`Payload["scene"]`（`memorypass.go:37`）允许插件
+在单次注入时声明场景键（string/[]string/[]interface{} 三形态，来自 `d98bf51`）。
+现网 **0 个插件使用**，24 个 declared 场景全是 `ChannelScene(evt.Source)` 派生。
+
+### R7 渠道本身可以覆盖多个场景
+
+`payload["scene"]` 传 `chan:qq/peer:group_1` 这类**层级键**时，
+`RecallByScene` 的 `(key = ? OR key LIKE ? || '/%')`（`scene.go:351`）
+支持前缀召回——这层能力已存在，但因 R6 无人使用而闲置。
+
 ---
 
 ## 步骤
 
-### 步骤 1：修 R1 + R2（源头，不碰存量）
+### 步骤 1：修 R1 + R2（源头，不碰存量）✅ 已完成
 
-- [ ] `Label` 改名语义：**只取权重 ≥ 阈值的主导特征**，且结果过 `NormalizeSceneKey`
-- [ ] `createSceneLocked` 的 `base` 用归一化后的 label
-- [ ] `recordSituationEvidenceLocked` 的桶键用同一个归一化 label（R2 的另一半）
-- [ ] 判据：先写**红**测试——同一指纹两次建键必须落同一行（现状会落两行）
+- [x] `Label` 只取权重 ≥ `labelFeatureWeight`(0.5) 的主导特征，结果过 `NormalizeSceneKey`
+- [x] `createSceneLocked` 的 `base` 再做一次防御性归一化；label 为空时拒建无名场景
+- [x] 冲突后缀 `#N` → `.N`（`'#'` 会被归一化成 `'_'`，是第四处双胞胎来源）
+- [x] 判据：`scene_key_test.go` 6 例，先红后绿（4 红 1 绿 → 全绿）
+- 提交：`1fa9ef6`
 
-### 步骤 2：修 R3（让图整理覆盖全库）
+### 步骤 2：SDK 补 `ScenePolicy` 声明项（公开接口，可动）
+
+按 `ContextPolicy` / `RecallPolicy` 的既有风格补齐（同一文件、同一形状）：
+
+- [ ] 常量：`ScenePolicyAuto = "auto"` / `ScenePolicyNone = "none"`
+- [ ] 校验：`ValidScenePolicy(policy string) bool`（空串等价默认）
+- [ ] `ChannelDef.ScenePolicy string` + json tag `scene_policy,omitempty`
+- [ ] `InjectOptions.ScenePolicy string`（单次注入可覆盖通道默认）
+- [ ] 内核接线：
+      - `internal/agent/io/channel.go:349-357` 的 payload 搬运加一条 `scene_policy`
+      - `situationFeaturesFor` 读到 `none` 时**不产任何特征**（连 `part` 也不产——
+        一个不参与场面识别的通道不该留下时段噪声）
+      - 声明路 `sceneKeysFor` 同样受 `none` 约束
+- [ ] 判据：`none` 通道连续 5 次交互，`scenes` 表行数不变
+- [ ] 存量标注：给 `system` / `kernel` / `timer` / `healthcheck` 等内部信噪通道
+      标 `ScenePolicyNone`（**逐个确认后再标**，不批量猜）
+
+### 步骤 3：修 R3（让图整理覆盖全库）
 
 - [ ] 给 `mergeLoop` 加**独立的场景去重路径**，不塞进实体那个 O(n²) 双重循环
       （理由：实体 1 万行 × bigram + LLM 裁决，实测 5000 万次配对/轮；
@@ -122,40 +168,46 @@ topic 主导                 0
 - [ ] 键归一化后相同 ⇒ 合并 refs/features/strength，**不经 LLM**（键相同已证明同一场面）
 - [ ] 判据：构造两个 `+`/`_` 孪生键，跑一次 mergeLoop 后期望合成一个
 
-### 步骤 3：清理现网垃圾场景，让它重新生成
+### 步骤 4：清理现网垃圾场景，让它重新生成
 
 用户明确要求：**直接清理，重新生成**（不做保守迁移）。
 
 - [ ] `sqlite3 .backup` 备份（**禁用 cp**，WAL 模式会拷出不一致快照）
 - [ ] 删 `origin='emergent'` 的全部场景 + 其 `scene_features`/`scene_refs`
-      （**保留 `origin='declared'`**：那些是插件声明的，不是垃圾）
 - [ ] 同步清 `situation_evidence`
 - [ ] 重启 homed，等 ≥2 次同类交互让场景重新涌现
-- [ ] 复验：新场景键**不含 `+`**、有 features **且**有 refs
+- [ ] 复验：新场景键**不含 `+`/`#`**、有 features **且**有 refs
 
-### 步骤 4：修 R4（覆盖面：让 peer 进得来）— 需跨插件，等用户确认范围
-
-- [ ] 先查各插件 InjectInput 时手上**有没有** peer 信息可用（发信侧有
-      `meta.group_id`/`user_id`，收信侧是否拿得到要逐个确认）
-- [ ] 有则补：插件填 `payload["group_id"]`/`["user_id"]`
-- [ ] 排序侧：`peer` 权重提到高于 `chan`，或 `NewSituation` 排序时 peer 优先
-      （两者都要，否则采集到了也进不了身份）
-- [ ] 判据：构造「同一 chan、不同 peer」的两轮，期望落进**不同**场景
+> 清理**不影响记忆本体**：868 条 active 关系与 1179 个实体都在
+> `relations`/`entities` 表，与 `scenes` 无外键依赖。
+> 兜底不冷场：`chan:qq` 声明场景（strength=281、108 条关系）全程保留，
+> 涌现重建期间它继续承担 QQ 场景召回。
 
 ### 步骤 5：修 R5（证据桶别全表清）
 
 - [ ] `DELETE FROM situation_evidence` 改为按本指纹的桶标签删
 - [ ] 判据：预置两个桶的证据各 1 次；建一个场景后断言另一个桶的证据还在
 
-### 步骤 6：验证与收口
+### 步骤 6：修 R4 的「覆盖面」部分（让 peer / 语义场景进得来）
 
-- [ ] `go test ./internal/memory/... ./internal/agent/core/...` 全绿
+前置：先只读调查各插件 InjectInput 时手上有什么，产出结论表再动。
+`payload["scene"]` 的口子已存在（R6），插件声明比内核猜 peer 更直接。
+
+- [ ] 调查：qq / mail-bridge / a2a / acp / webui / cli … 各自可声明什么
+- [ ] 排序侧：`chan` 与 `peer` 权重同为 1.0 而 `chan` 恒在前（稳定排序），
+      即使采集到 peer 也进不了 `Label(2)` ⇒ 需要 peer 优先或提权
+- [ ] 判据：构造「同一 chan、不同 peer」的两轮，期望落进**不同**场景
+
+### 步骤 7：验证与收口
+
 - [ ] `go build ./...` + 全仓 `go test ./...`
-- [ ] 现网观察：日志中场景命中后能查到 refs（非 0）
+- [ ] `go test ./internal/memory/... ./internal/agent/core/...` 全绿
+- [ ] SDK 接口冻结检查：`git diff main -- third_party/homeagent-sdk/sdk/` 的变化
+      **已获用户授权**（开发阶段），但需在提交信息里写明「纯追加、omitempty、
+      老插件行为不变」
+- [ ] 现网观察：场景命中后能查到 refs（非 0）
 - [ ] 现网观察：场景键前缀分布不再 100% 锚在 chan（R4 未做则保持挂账）
-- [ ] `git_release_check.sh` 无新增红项
-
----
+- [ ] `git_release_check.sh` 无新增红项（SDK 冻结项变化属预期）
 
 ## 不做的事（防反复挂账）
 
@@ -164,3 +216,5 @@ topic 主导                 0
 - **不**改 `validGraphNodeKind`：它只管 `memory_block_edges` 端点校验，与 `scenes` 无关。
 - **不**给实体那个 O(n²) 循环做优化：属独立问题（已实测：1 万实体→~224GB 瞬时分配/轮），
   混进本次修复会让 diff 失焦。单独开条目。
+- **不**在 R6 里动 `ValidContextPolicy` / `ValidRecallPolicy` 的既有语义：
+  新增项是纯追加，不借机改旧行为。
