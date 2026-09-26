@@ -89,7 +89,11 @@ func ValidRecallPolicy(policy string) bool {
 //     与 ContextPolicy 刻意相反（同为破坏性操作，那里是默认关）。
 //
 // 该关的典型是纯内部通道：system（内核自循环）、kernel、timer、healthcheck。
-// 它们每次触发都在撑一个「场面」，会把不相干的交互聚到一起。
+// 但**现网不标任何一个**（2026-09-26 裁定）：实测这些 0-refs 通道合计 70
+// strength、0 条记忆，场景召回返回空；而 declared 场景不进相似度空间
+// （loadEmergentScenesLocked 只取 origin='emergent'），多写对聚类零影响。
+// 「多写无影响、少写会缺场景」——默认 auto 保持开，声明项只作为插件
+// 将来确实需要时的闸门。
 const (
 	ScenePolicyAuto = "auto"
 	ScenePolicyNone = "none"

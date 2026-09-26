@@ -157,8 +157,11 @@ RecallPolicy   召不召回记忆（只读，默认开）
         一个不参与场面识别的通道不该留下时段噪声）
       - 声明路 `sceneKeysFor` 同样受 `none` 约束
 - [ ] 判据：`none` 通道连续 5 次交互，`scenes` 表行数不变
-- [ ] 存量标注：给 `system` / `kernel` / `timer` / `healthcheck` 等内部信噪通道
-      标 `ScenePolicyNone`（**逐个确认后再标**，不批量猜）
+- [x] **存量标注：不做**（用户裁定 2026-09-26：「所有都默认开启，因为多写无影响，
+      少写会缺场景」）。实测支持：8 个 0-refs 通道合计 70 strength、0 条记忆，
+      召回返回空；且 declared 场景**不进**相似度空间
+      （`loadEmergentScenesLocked` 只取 `origin='emergent'`），
+      故多写对聚类零影响。声明项作为「插件将来确实需要时」的闸门保留。
 
 ### 步骤 3：修 R3（让图整理覆盖全库）
 

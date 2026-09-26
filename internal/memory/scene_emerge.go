@@ -410,8 +410,17 @@ func (g *GraphDB) createSceneLocked(sig Situation) (string, error) {
 			return "", err
 		}
 	}
-	// 场景成立后，把此前登记的同类线索清掉（它们已被这次长出吸收）
-	if _, err := tx.Exec(`DELETE FROM situation_evidence`); err != nil {
+	// 场景成立后，**只清本指纹那个桶**的线索（它们已被这次长出吸收）。
+	//
+	// 曾经是 `DELETE FROM situation_evidence`（全表清），后果不是「多清一点」：
+	// 多通道共用一个库，qq 的场景一长出来，就把 mc / webui / cli 尚未攒够
+	// minSceneEvidence 的证据一并抹掉——它们的计数被反复清零，于是
+	// **永远**攒不到 2 次，场景永远长不出来。实测：6 个通道各来 3 次，
+	// 只长出 2 个场景。
+	//
+	// ★ 桶键是 sig.Label(2) 本身，**不带 "auto:" 前缀**（见
+	// recordSituationEvidenceLocked）——base 是带前缀的场景键，两者不是一回事。
+	if _, err := tx.Exec(`DELETE FROM situation_evidence WHERE label = ?`, sig.Label(2)); err != nil {
 		return "", err
 	}
 	if err := tx.Commit(); err != nil {
