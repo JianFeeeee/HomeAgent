@@ -625,29 +625,39 @@ func normalizeStreamToolCalls(raw []openAIToolCall) []ToolCall {
 	}
 	out := make([]ToolCall, 0, len(raw))
 	for _, tc := range raw {
-		name := tc.Function.Name
-		argsRaw := tc.Function.Arguments
-		if name == "" {
-			name = tc.Name
-			// 仅当顶层 Arguments 存在才用扁平格式；否则保留 function.arguments 嵌套值
-			// （OpenAI 流式续传 chunk：name 不重发但 function.arguments 继续）
-			if tc.Arguments != nil {
-				argsRaw = tc.Arguments
-			}
-		}
-		typ := tc.Type
-		if typ == "" && (tc.ID != "" || name != "" || argsRaw != nil) {
-			typ = "function"
-		}
-		out = append(out, ToolCall{
-			ID:           tc.ID,
-			Type:         typ,
-			Name:         name,
-			RawArguments: rawArgsString(argsRaw),
-			StreamIndex:  tc.Index,
-		})
+		out = append(out, normalizeStreamToolCall(tc))
 	}
 	return out
+}
+
+// normalizeStreamToolCall 是单元素的归一化逻辑。
+//
+// ★ 之所以从循环里抽成单元素函数：C 快速路径逐元素处理（而不是整块
+// unmarshal 成 []openAIToolCall），必须与本函数**共用**同一份归一化逻辑，
+// 否则两条路径会在「name 回退 / type 补全 / arguments 取哪一份」这些
+// 条件分支上分叉。抽出后循环与快速路径都调它，结构上无法分叉。
+func normalizeStreamToolCall(tc openAIToolCall) ToolCall {
+	name := tc.Function.Name
+	argsRaw := tc.Function.Arguments
+	if name == "" {
+		name = tc.Name
+		// 仅当顶层 Arguments 存在才用扁平格式；否则保留 function.arguments 嵌套值
+		// （OpenAI 流式续传 chunk：name 不重发但 function.arguments 继续）
+		if tc.Arguments != nil {
+			argsRaw = tc.Arguments
+		}
+	}
+	typ := tc.Type
+	if typ == "" && (tc.ID != "" || name != "" || argsRaw != nil) {
+		typ = "function"
+	}
+	return ToolCall{
+		ID:           tc.ID,
+		Type:         typ,
+		Name:         name,
+		RawArguments: rawArgsString(argsRaw),
+		StreamIndex:  tc.Index,
+	}
 }
 
 func parseToolArguments(v interface{}) map[string]interface{} {
@@ -705,64 +715,32 @@ func stringifyContent(v interface{}) string {
 // 兼容多种 token 用量键名（prompt_tokens/prompt、total_tokens/total 等）
 // 与 prompt cache 细节字段。返回 false 表示非内容块（纯 usage 心跳等）。
 func parseOpenAICompatibleStreamChunkFull(data string) (StreamChunk, bool) {
-	var raw struct {
-		Choices []struct {
-			Delta struct {
-				Content          interface{}      `json:"content"`
-				ReasoningContent string           `json:"reasoning_content"`
-				ToolCalls        []openAIToolCall `json:"tool_calls"`
-			} `json:"delta"`
-			FinishReason *string `json:"finish_reason"`
-		} `json:"choices"`
-		UpstreamUsage struct {
-			PromptTokens        int `json:"prompt_tokens"`
-			CompletionTokens    int `json:"completion_tokens"`
-			TotalTokens         int `json:"total_tokens"`
-			Prompt              int `json:"prompt"`
-			Completion          int `json:"completion"`
-			Total               int `json:"total"`
-			PromptCacheHit      int `json:"prompt_cache_hit_tokens"`
-			PromptCacheMiss     int `json:"prompt_cache_miss_tokens"`
-			PromptTokensDetails *struct {
-				CachedTokens int `json:"cached_tokens"`
-			} `json:"prompt_tokens_details"`
-		} `json:"usage"`
-	}
-	if err := json.Unmarshal([]byte(data), &raw); err != nil {
-		return StreamChunk{}, false
-	}
-
-	var usage *TokenUsage
-	pu := raw.UpstreamUsage
-	if pu.Total > 0 || pu.TotalTokens > 0 || pu.Prompt > 0 || pu.PromptTokens > 0 {
-		usage = &TokenUsage{
-			Prompt:     pickFirstInt(pu.PromptTokens, pu.Prompt),
-			Completion: pickFirstInt(pu.CompletionTokens, pu.Completion),
-			Total:      pickFirstInt(pu.TotalTokens, pu.Total),
+	// ★ C 快速路径（结构导航）：定位在 C（零分配、零解码），类型检查与
+	//   需要重新序列化的形态交回 Go 的 encoding/json。
+	//
+	//   契约：必须与 chunkParseGo 对所有输入产出完全相同的结果。
+	//   保证方式见 codec_chunkfast_c.go 顶部：任一环节「不确定」即**整体回退**
+	//   chunkParseGo，且拼装/归一化两条路径**共用**同一份代码。
+	//
+	//   为什么保留 Go 实现：它既是回退目标，也是黄金对照的参照实现 ——
+	//   没有它，「C 化没坏」就只是感觉而不是证据。
+	//
+	// ★ 开关：chunkFastEnabled 目前为 false —— 实测本架构比原实现**慢**
+	//   （2016ns/20allocs vs 1325ns/13allocs），根因是「5+ 次 cgo 边界
+	//   × 每次 ~200ns」吃掉了收益。详见 codec_chunkfast_c.go 的说明与
+	//   docs/zh/c-core/sse-codec-c.md §六。改造方向已由天花板实验确认可行。
+	if chunkFastEnabled {
+		if ck, handled, decided := chunkParseFast(data); handled && decided {
+			return ck, true
 		}
 	}
+	return chunkParseGo(data)
+}
 
-	if len(raw.Choices) == 0 {
-		// 纯 usage 心跳块：有 usage 就透传，否则丢弃
-		if usage != nil {
-			return StreamChunk{Usage: usage}, true
-		}
-		return StreamChunk{}, false
-	}
-
-	choice := raw.Choices[0]
-	ck := StreamChunk{
-		Content:          stringifyContent(choice.Delta.Content),
-		ReasoningContent: choice.Delta.ReasoningContent,
-		ToolCalls:        normalizeStreamToolCalls(choice.Delta.ToolCalls),
-		Usage:            usage,
-	}
-	// finish reason 为空字符串不算终止信号（sensenova 每块都发 ""）
-	if choice.FinishReason != nil && *choice.FinishReason != "" {
-		ck.Done = true
-		ck.FinishReason = *choice.FinishReason
-	}
-	return ck, true
+// parseOpenAICompatibleStreamChunkFullGo 供黄金对照测试直接调原始实现，
+// 用于验证快速路径与它逐值等价。
+func parseOpenAICompatibleStreamChunkFullGo(data string) (StreamChunk, bool) {
+	return chunkParseGo(data)
 }
 
 // pickFirstInt 返回 a 非零时的 a，否则 b（兼容 *_tokens 与短键名两种 usage 格式）。
@@ -772,7 +750,6 @@ func pickFirstInt(a, b int) int {
 	}
 	return b
 }
-
 // streamHTTPClient 返回专用的流式 HTTP client（懒初始化）。
 // SSE 长连接不能套整体超时（非流式 180s 会在长流中途报断），
 // 只保留拨号/握手超时。
