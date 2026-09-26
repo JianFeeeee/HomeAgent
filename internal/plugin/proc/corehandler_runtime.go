@@ -100,12 +100,20 @@ func (h *coreHandler) handleEvents(method string, params json.RawMessage) (inter
 		}
 		// 订阅请求来自子进程——handler 直接注册到 Bus，
 		// 事件经 EventRing 写入环后由子进程消费。
-		h.evtRing.EvtRingSubscribe(p.Types)
+		//
+		// ★ 用 tracked 版本：订阅会被登记，Host.Close 在内核关停时统一退订。
+		// 必须如此——这些 handler 写共享内存，而 Host.Close 会 munmap 整块区域；
+		// 未退订的 handler 在关停后会写已解除映射的内存 ⇒ SIGSEGV。
+		h.evtRing.EvtRingSubscribeTracked(p.Types)
 		return nil, nil
 
 	case MethodEventsUnsubscribe:
-		// 事件环的订阅没有持久化句柄（取消函数由 Subscribe 返回但子进程未保存）。
-		// 当前设计：子进程 Stop 时由内核统一清理其订阅。
+		// 事件环的订阅没有**按插件**持久化句柄（取消函数由 Subscribe 返回，
+		// 但子进程不保存，故无法精确撤销单个插件的订阅）。
+		// 当前设计：子进程 Stop 时由内核统一清理——具体落点是
+		// Host.Close → evtCloser.Close 退订全部 tracked 订阅。
+		// 因此这里仍是 no-op；但「统一清理」现在是真的有实现，
+		// 不再是只写在注释里的承诺。
 		return nil, nil
 
 	}
