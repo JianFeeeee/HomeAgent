@@ -12,8 +12,10 @@ import (
 	"time"
 
 	"crypto/rand"
+	"crypto/subtle"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	sdk "gitcode.com/JianFeeeee/HomeAgent/internal/sdk"
 	"net/http"
 )
@@ -108,6 +110,10 @@ type Handler struct {
 	sessionMu sync.Mutex
 	sessions  map[string]time.Time
 
+	// loginLimiter 是登录入口的按来源失败计数（见 login_limiter.go）。
+	// 门户可被穿透到公网，登录是唯一的口令入口，必须有滥用防护。
+	loginLimiter *loginLimiter
+
 	sseEvents *sseEventRing // SSE 事件环状缓冲区，Last-Event-ID 重放用
 
 	chatMu      sync.Mutex
@@ -175,6 +181,7 @@ func NewHandler(s *sdk.PluginSDK) *Handler {
 		term:         term,
 		llm:          llm,
 		sessions:     make(map[string]time.Time),
+		loginLimiter: newLoginLimiter(loginMaxFails, loginWindow),
 		pendingIdx:   -1,
 		chatMsgCache: make(map[string]*chatMsgEntry),
 		sseEvents:    newSSEEventRing(200),
@@ -511,6 +518,11 @@ func (h *Handler) handleLogin(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
+	// 限流必须在**校验之前**：口令错误也要计数。否则爆破请求每次都走
+	// 完整套校验（含配置读取），限流也就失去了保护意义。
+	if !h.enforceLoginRateLimit(w, r) {
+		return
+	}
 	_, username, password, _ := h.getWebUIConfig()
 	if username == "" || password == "" {
 		writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "webui username/password not configured"})
@@ -520,14 +532,47 @@ func (h *Handler) handleLogin(w http.ResponseWriter, r *http.Request) {
 		Username string `json:"username"`
 		Password string `json:"password"`
 	}
+	// 体积限制必须在解码**之前**生效，且不能只依赖解码器报错：
+	//
+	//   json.Decoder 是**按需读流**的。若请求体是「超大且非法 JSON」，
+	//   解码器会在第 0 个字节就报语法错误，**永远不会读到上限**，
+	//   于是 MaxBytesError 根本不会出现 —— 而 8MB 数据仍已被读入缓冲。
+	//   那样「限体积」只对「合法到能继续解析的大 JSON」生效。
+	//
+	// 所以先用 ContentLength 快速拒绝（覆盖绝大多数真实攻击：直接发
+	// 声明很大的 Content-Length），再用 MaxBytesReader 兜住分块传输
+	// 与谎报 Content-Length 的情况。
+	if r.ContentLength > loginBodyLimit {
+		writeJSON(w, http.StatusRequestEntityTooLarge, map[string]string{"error": "请求体过大"})
+		return
+	}
+	r.Body = http.MaxBytesReader(w, r.Body, loginBodyLimit)
 	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		var maxErr *http.MaxBytesError
+		if errors.As(err, &maxErr) {
+			writeJSON(w, http.StatusRequestEntityTooLarge, map[string]string{"error": "请求体过大"})
+			return
+		}
+		// 解析到一半也可能撞上上限（合法 JSON 但超长），再兜一次。
+		if r.ContentLength < 0 && bodyOverLimit(r) {
+			writeJSON(w, http.StatusRequestEntityTooLarge, map[string]string{"error": "请求体过大"})
+			return
+		}
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid request"})
 		return
 	}
-	if body.Username != username || body.Password != password {
+	// 两条失败路径**必须**给完全相同的状态码与报文，否则可用于枚举用户名。
+	// 用 constant-time 比较：== 会在第一个不同字节处短路，泄漏
+	// 「猜对了几位」的时序信息（远程噪声大，但攻击者可多次采样取均值）。
+	userOK := subtle.ConstantTimeCompare([]byte(body.Username), []byte(username)) == 1
+	passOK := subtle.ConstantTimeCompare([]byte(body.Password), []byte(password)) == 1
+	if !userOK || !passOK {
+		h.loginLimiter.Fail(sourceKey(r))
 		writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "用户名或密码错误"})
 		return
 	}
+	// 成功即清零：惩罚只针对持续失败，手滑输错几次不该被记账。
+	h.loginLimiter.Reset(sourceKey(r))
 	token, expires, err := h.createSession()
 	if err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
