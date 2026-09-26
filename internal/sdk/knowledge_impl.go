@@ -1,6 +1,10 @@
 package sdk
 
-import "gitcode.com/JianFeeeee/HomeAgent/internal/knowledge"
+import (
+	"fmt"
+
+	"gitcode.com/JianFeeeee/HomeAgent/internal/knowledge"
+)
 
 type knowledgeImpl struct{ ks *knowledge.Store }
 
@@ -57,6 +61,14 @@ func (k *knowledgeImpl) Subtree(category string, opt KnowledgeTreeOptions) (*Kno
 		IncludeItems: opt.IncludeItems,
 		PreviewLimit: opt.PreviewLimit,
 	}), nil
+}
+
+// ImportDir 转发到内核 Store。
+func (k *knowledgeImpl) ImportDir(opt knowledge.ImportOptions) (knowledge.ImportStats, error) {
+	if k.ks == nil {
+		return knowledge.ImportStats{}, fmt.Errorf("knowledge: 知识库不可用")
+	}
+	return k.ks.ImportDir(opt)
 }
 
 func (k *knowledgeImpl) Categories() ([]string, error) {

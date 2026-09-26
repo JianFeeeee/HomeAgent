@@ -346,6 +346,10 @@ func New(cfg AgentConfig) *Agent {
 			// 若先重建后接线，首次启动算出的向量会被丢掉而不落盘。
 			cfg.Knowledge.SetDenseSpace(cfg.MultimodalSpace)
 			cfg.Knowledge.SetMediaGetter(cfg.MediaStore)
+			// 媒体**写入**器：ImportDir 复制图片/音视频时用。
+			// 不接的话 include_media=true 会静默失效（媒体全被跳过、
+			// 只在导入结果里留一行"媒体库不可用"），模型无从察觉。
+			cfg.Knowledge.SetMediaPutter(cfg.MediaStore)
 			built, skipped := cfg.Knowledge.ReindexDense()
 			if built > 0 || skipped > 0 {
 				log.Printf("[knowledge] 多模态稠密索引: 新建 %d 跳过 %d（其余命中缓存）", built, skipped)
