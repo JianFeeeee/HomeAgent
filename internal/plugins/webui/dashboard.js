@@ -493,80 +493,173 @@ function toggleSidebar() {
 }
 
 // ===== Tab Render Dispatch =====
-async function renderAll() {
-	try {
-		var s = await api("/status");
-		state.status = s;
-		state.startedAt = s.startedAt ? new Date(s.startedAt).getTime() : null;
-	} catch (e) {}
-	try {
-		state.kernel = await api("/kernel");
-	} catch (e) {}
-	try {
-		var s = await api("/settings");
-		state.settings = s.settings || {};
-		state.meta = s.meta || {};
-		state.settingsPlugins = s.plugins || ["core"];
-		state.pluginMeta = s.plugin_meta || {};
-		state.disabledPlugins = s.disabled_plugins || [];
-	} catch (e) {}
-	try {
-		state.installedPlugins = await api("/plugins");
-	} catch (e) {}
-	try {
-		await loadProxyServices();
-	} catch (e) {}
-	try {
-		await loadTerminals();
-	} catch (e) {}
-	try {
-		await loadCmdHistory();
-	} catch (e) {}
-	try {
-		renderOverview();
-	} catch (e) {
-		console.error("renderOverview", e);
+
+// TABS 是「哪个页签需要哪些数据」的**唯一真相表**。
+//
+// 为什么要有这张表（实测依据，非估算）：
+//
+//	改前 renderAll 无论当前在哪个页签，都无条件拉 9 个接口并渲染全部
+//	7 个页签。生产实例首屏 792,933 B 里，**约 230KB 花在用户看不见的
+//	隐藏 DOM 上**：/api/v1/kernel（152KB，只有「内核」页要）与
+//	/api/v1/settings（72KB，只有「设置」页要）——而 renderKernel() /
+//	renderOneSettings() 是在**隐藏的 tab 容器**里构建 DOM 的。
+//
+//	依赖关系是**实测**出来的（逐个 render 函数 grep 它读的 state.*），
+//	不是猜的：
+//	  renderOverview  → 无（只读 status/runtime/dom）★ 总览最便宜
+//	  renderKernel    → state.kernel
+//	  renderOneSettings → state.settings / state.meta
+//	  renderPlugins   → state.kernel / state.installedPlugins /
+//	                   state.disabledPlugins / state.pluginInfo
+//	  renderAdapters  → 无（自拉 /api/v1/adapters）
+//	  renderChat      → 自建布局；星图/终端/命令是其子面板
+//
+//	于是「切到哪页才拉哪页的数据」成为结构性正确，而不是靠 if 串联。
+var TABS = {
+	overview: { fetch: ["status", "runtime"], render: ["renderOverview"] },
+	chat: {
+		fetch: ["status", "proxyServices", "terminals", "cmdHistory"],
+		render: ["renderChat"],
+	},
+	starmap: { fetch: [], render: ["renderStarmapTab"] },
+	plugins: {
+		fetch: ["status", "kernel", "plugins", "runtime"],
+		render: ["renderPlugins"],
+	},
+	settings: { fetch: ["settings", "status"], render: ["renderOneSettings"] },
+	adapters: { fetch: ["status"], render: ["renderAdapters"] },
+	kernel: { fetch: ["status", "kernel", "runtime"], render: ["renderKernel"] },
+};
+
+// starmapActiveTab 返回当前激活的页签名。
+function starmapActiveTab() {
+	var el = document.querySelector(".tab-content.active");
+	if (el && el.id) return el.id.replace(/^tab-/, "");
+	return "overview";
+}
+
+// loadedOnce 记录每个数据块是否已拉过。刷新语义刻意区分：
+//   - 首次进入某页签：拉
+//   - 之后每 15s 的 renderAll：**不**重拉 kernel/settings（它们几乎不变，
+//     却占每拍 232KB —— 这是「空闲 53MB/h」的主因）
+//   - 切回页签：仍然不重拉（数据没理由变），只重渲染
+//     真正需要新鲜的（runtime/status）单独走快通道，见 STALE_EVERY。
+var _loadedOnce = {};
+var _lastFetchAt = {};
+// STALE_EVERY：这几块数据是活的（运行态/状态），每 3s 允许重拉一次。
+var STALE_EVERY = 3000;
+
+// starmapFetchBlock 按名字拉一块数据。幂等且带节流。
+async function starmapFetchBlock(name) {
+	var now = Date.now();
+	var volatile_ = name === "status" || name === "runtime";
+	if (_loadedOnce[name]) {
+		if (!volatile_) return;
+		if (now - (_lastFetchAt[name] || 0) < STALE_EVERY) return;
 	}
-	try {
-		await loadRuntime();
-	} catch (e) {
-		console.error("loadRuntime", e);
+	_lastFetchAt[name] = now;
+	switch (name) {
+		case "status":
+			try {
+				var s = await api("/status");
+				state.status = s;
+				state.startedAt = s.startedAt
+					? new Date(s.startedAt).getTime()
+					: null;
+			} catch (e) {}
+			break;
+		case "runtime":
+			try {
+				var rt = await api("/runtime");
+				state.runtime = rt;
+			} catch (e) {
+				state.runtime = null;
+			}
+			// 运行态变了就顺手让星图重算一次（读同一个快照，不额外发请求）。
+			if (typeof starmapApplyActivity === "function") starmapApplyActivity();
+			break;
+		case "kernel":
+			try {
+				state.kernel = await api("/kernel");
+			} catch (e) {}
+			break;
+		case "settings":
+			try {
+				var s2 = await api("/settings");
+				state.settings = s2.settings || {};
+				state.meta = s2.meta || {};
+				state.settingsPlugins = s2.plugins || ["core"];
+				state.pluginMeta = s2.plugin_meta || {};
+				state.disabledPlugins = s2.disabled_plugins || [];
+			} catch (e) {}
+			break;
+		case "plugins":
+			try {
+				state.installedPlugins = await api("/plugins");
+			} catch (e) {}
+			break;
+		case "proxyServices":
+			try {
+				await loadProxyServices();
+			} catch (e) {}
+			break;
+		case "terminals":
+			try {
+				await loadTerminals();
+			} catch (e) {}
+			break;
+		case "cmdHistory":
+			try {
+				await loadCmdHistory();
+			} catch (e) {}
+			break;
 	}
+	_loadedOnce[name] = true;
+}
+
+async function renderAll(force) {
+	var tab = starmapActiveTab();
+	var spec = TABS[tab] || TABS.overview;
+	// force：变更操作后（保存设置/启停插件）需要重新拉那块数据。
+	if (force) _loadedOnce = {};
+	// 1) 只拉当前页签需要的数据（并发的别串行等）
+	var needs = spec.fetch || [];
+	await Promise.all(
+		needs.map((n) => starmapFetchBlock(n)),
+	);
+	// 2) 只渲染当前页签（+ 星图在多处出现，单独处理）
 	try {
-		renderChat();
+		spec.render.forEach((fn) => {
+			if (typeof window[fn] === "function") window[fn]();
+		});
 	} catch (e) {
-		console.error("renderChat", e);
+		console.error("renderAll(" + tab + ")", e);
 	}
-	try {
-		renderChatStarmap();
-	} catch (e) {
-		console.error("renderChatStarmap", e);
+	// 星图：总览页内嵌 + 独立页签两处都要确保已初始化。
+	if (tab === "overview" || tab === "starmap" || tab === "chat") {
+		try {
+			renderChatStarmap();
+		} catch (e) {
+			console.error("renderChatStarmap", e);
+		}
+		if (tab === "starmap") {
+			try {
+				renderStarmapTab();
+			} catch (e) {
+				console.error("renderStarmapTab", e);
+			}
+		}
 	}
-	try {
-		renderStarmapTab();
-	} catch (e) {
-		console.error("renderStarmapTab", e);
+	// 3) 聊天页的子面板（终端/运行中命令）只在聊天页重建
+	if (tab === "chat") {
+		try {
+			renderTerminals();
+			renderCmdHistory();
+		} catch (e) {
+			console.error("chat sub-panels", e);
+		}
 	}
-	try {
-		renderPlugins();
-	} catch (e) {
-		console.error("renderPlugins", e);
-	}
-	try {
-		renderKernel();
-	} catch (e) {
-		console.error("renderKernel", e);
-	}
-	try {
-		renderOneSettings();
-	} catch (e) {
-		console.error("renderOneSettings", e);
-	}
-	try {
-		renderAdapters();
-	} catch (e) {
-		console.error("renderAdapters", e);
-	}
+	// 4) 卡片倾斜高光：只在指针设备上加
 	try {
 		if (!window.matchMedia("(hover: none)").matches) {
 			document
@@ -1758,7 +1851,11 @@ function startRuntimeTicker() {
 	state._runtimeTicker = setInterval(() => {
 		var tab = document.querySelector("#tab-overview");
 		if (tab && tab.classList.contains("active")) {
-			loadRuntime();
+			// 走共享数据块（自带 3s 节流 + 单一数据源）而不是直接 loadRuntime：
+			// 星图也读 state.runtime，两个入口拉同一接口就是重复请求。
+			starmapFetchBlock("runtime").then(() => {
+				if (starmapActiveTab() === "overview") renderRuntime();
+			});
 		}
 	}, 3000);
 }
@@ -2750,6 +2847,13 @@ function renderChatStarmap() {
 async function loadChatStarmapData() {
 	try {
 		var resp = await api("/memory/graph");
+		// 星图现在有三个容器（总览/独立页签/聊天面板），写提示前必须重新
+		// 拿当前活跃的那个。原代码硬写 getElementById("sm-container-chat")，
+		// 而总览页与独立页签都没有这个 id —— 空图分支一进就抛
+		// 「Cannot set properties of null」（浏览器实测：首页首帧必现）。
+		// 症状是整个函数被 catch 吞掉、state.starmapInit 却没置上，
+		// 于是后续再也不会重试 —— 星图永远是空的。
+		var target = starmapActiveContainer();
 		if (
 			!resp ||
 			!resp.success ||
@@ -2757,10 +2861,11 @@ async function loadChatStarmapData() {
 			!resp.data.nodes ||
 			resp.data.nodes.length === 0
 		) {
-			document.getElementById("sm-container-chat").innerHTML =
-				'<p style="color:var(--text-muted);padding:20px;text-align:center">' +
-				__("暂无记忆数据", "No memory data") +
-				"</p>";
+			if (target)
+				target.innerHTML =
+					'<p style="color:var(--text-muted);padding:20px;text-align:center">' +
+					__("暂无记忆数据", "No memory data") +
+					"</p>";
 			state.starmapInit = true;
 			state.starmapLoading = false;
 			return;
@@ -2772,10 +2877,12 @@ async function loadChatStarmapData() {
 		state.starmapLoading = false;
 		initChatStarmap();
 	} catch (e) {
-		document.getElementById("sm-container-chat").innerHTML =
-			'<p style="color:var(--text-muted);padding:20px;text-align:center">' +
-			__("加载失败", "Load failed") +
-			"</p>";
+		var target2 = starmapActiveContainer();
+		if (target2)
+			target2.innerHTML =
+				'<p style="color:var(--text-muted);padding:20px;text-align:center">' +
+				__("加载失败", "Load failed") +
+				"</p>";
 		state.starmapInit = true;
 		state.starmapLoading = false;
 	}
@@ -4573,20 +4680,35 @@ function connectSSE() {
 		console.log("[SSE] sync_required received, incremental sync");
 		syncChatFromHistory().catch(() => {});
 	});
-	// Periodically refresh sidebar data
+	// 终端 / 运行中命令的定时刷新。
+	//
+	// ★ 原来这段是**无条件**的 5s 轮询（浏览器实测：停在总览页 40s 内
+	// 打了 8 次 /terminals + 8 次 /cmd/history）。但这两个面板只存在于
+	// **聊天页**（buildChatLayout 里的 chat-panel-terminal / -cmd），
+	// 在总览/设置/内核页渲染它们既没人看也只改看不见的 DOM。
+	//
+	// 改为「仅聊天页可见时才轮询」，且错过的那一拍在切回聊天页时由
+	// renderAll 补上（renderAll 的 terminals/cmdHistory 数据块带节流）。
 	if (state._sidebarRefresh) clearInterval(state._sidebarRefresh);
-	state._sidebarRefresh = setInterval(async () => {
-		try {
-			var td = await api("/terminals");
-			if (td && td.terminals) state.terminals = td.terminals;
-		} catch (e) {}
-		try {
-			var ch = await api("/cmd/history");
-			if (ch && ch.history) state.cmdHistory = ch.history;
-		} catch (e) {}
-		renderTerminals();
-		renderCmdHistory();
+	state._sidebarRefresh = setInterval(() => {
+		var tab = document.querySelector("#tab-chat");
+		if (!tab || !tab.classList.contains("active")) return;
+		fetchTerminalsAndCmd().catch(() => {});
 	}, 5000);
+}
+
+// fetchTerminalsAndCmd 拉终端与运行中命令并重渲染（只在聊天页需要）。
+async function fetchTerminalsAndCmd() {
+	try {
+		var td = await api("/terminals");
+		if (td && td.terminals) state.terminals = td.terminals;
+	} catch (e) {}
+	try {
+		var ch = await api("/cmd/history");
+		if (ch && ch.history) state.cmdHistory = ch.history;
+	} catch (e) {}
+	renderTerminals();
+	renderCmdHistory();
 }
 
 // ===== Plugins =====
@@ -5480,32 +5602,53 @@ function starmapHintTokens(hint) {
 }
 
 // starmapPullActivity 拉 /runtime，把调度器状态映射成图的整体节奏。
+// starmapPullActivity 用**已有的** /runtime 快照驱动图，绝不自己再发一轮请求。
+//
+// ★ 原来它直接 api("/runtime")，而 startRuntimeTicker 也在 3s 拉同一个
+//   接口 —— 浏览器实测：停在总览页 40s 内 /runtime 被打 **17 次**
+//   （= 3s 一次 × 2 + 15s 的 renderAll）。两个消费者拉同一份数据是纯浪费。
+//
+// 现在只读 state.runtime（由 startRuntimeTicker / renderAll 负责刷新）。
+// 星图慢一拍（最多 3s）无所谓：它只是把调度器状态映射成脉冲。
 function starmapPullActivity() {
 	if (!starmapScene) return;
-	api("/runtime")
-		.then((rt) => {
-			if (!rt || !rt.scheduler) return;
-			var s = rt.scheduler;
-			var prev = state.starmapActivity;
-			state.starmapActivity = s;
-			var pend =
-				(s.ready_queue_depth || 0) +
-				(s.pending_interrupts || 0) +
-				(s.suspend_stack || 0);
-			// 有任务在排队/中断 ⇒ 脉冲，让图「绷紧」。
-			if (pend > 0) starmapPulse("stage", null);
-			// 中断或抢占计数上升 ⇒ 一次强脉冲（高优先级插入）。
-			if (prev) {
-				var dInt =
-					(s.interrupts_by_level || []).reduce((a, b) => a + b, 0) -
-					(prev.interrupts_by_level || []).reduce((a, b) => a + b, 0);
-				var dPre =
-					(s.preempts_by_level || []).reduce((a, b) => a + b, 0) -
-					(prev.preempts_by_level || []).reduce((a, b) => a + b, 0);
-				if (dInt > 0 || dPre > 0) starmapPulse("output", null);
-			}
-		})
-		.catch(() => {});
+	var s0 = state.runtime && state.runtime.scheduler;
+	if (!s0) {
+		// 还没有快照（星图先于运行态轮询初始化）：拉一次，建立基线。
+		starmapFetchBlock("runtime").then(() => {
+			starmapApplyActivity();
+		});
+		return;
+	}
+	starmapApplyActivity();
+}
+
+// starmapApplyActivity 把 state.runtime 里的调度器计数映射成星图脉冲。
+function starmapApplyActivity() {
+	var rt = state.runtime;
+	if (!rt || !rt.scheduler) return;
+	var s = rt.scheduler;
+	var prev = state.starmapActivity;
+	state.starmapActivity = s;
+	var pend =
+		(s.ready_queue_depth || 0) +
+		(s.pending_interrupts || 0) +
+		(s.suspend_stack || 0);
+	// 有任务在排队/中断 ⇒ 脉冲，让图「绷紧」。
+	if (pend > 0) starmapPulse("stage", null);
+	if (!prev) {
+		smUpdateStat();
+		return;
+	}
+	// 中断或抢占计数上升 ⇒ 一次强脉冲（高优先级插入）。
+	var sum = (a) => (a || []).reduce((x, y) => x + y, 0);
+	if (
+		sum(s.interrupts_by_level) - sum(prev.interrupts_by_level) > 0 ||
+		sum(s.preempts_by_level) - sum(prev.preempts_by_level) > 0
+	) {
+		starmapPulse("output", null);
+	}
+	smUpdateStat();
 }
 
 // starmapPullPulse 拉轻量活动端点，把新长出来的节点标记为「生长」。
@@ -5688,13 +5831,6 @@ function starmapLabelShow(mesh) {
 }
 function starmapLabelHide() {
 	if (starmapLabelEl) starmapLabelEl.style.display = "none";
-}
-// starmapContainer 返回当前星图所在的容器（主页或聊天面板任一）。
-function starmapContainer() {
-	return (
-		document.getElementById("sm-container-home") ||
-		document.getElementById("sm-container-chat")
-	);
 }
 
 // starmapActiveContainer 选出「该把星图画在哪」的容器。
@@ -6517,7 +6653,7 @@ function showAddSourceDialog() {
 					'" ' +
 					__("已创建，请配置各项参数", "created, please configure parameters"),
 			);
-			renderAll();
+			renderAll(true);
 		})
 		.catch((e) => {
 			toast(__("创建失败: ", "Create failed: ") + e.message, true);
@@ -6548,7 +6684,7 @@ async function deleteSource(name) {
 			});
 		}
 		toast(__("源", "Source") + ' "' + name + '" ' + __("已删除", "deleted"));
-		renderAll();
+		renderAll(true);
 	} catch (e) {
 		toast(__("删除失败: ", "Delete failed: ") + e.message, true);
 	}
@@ -6586,7 +6722,7 @@ function addMCPSource() {
 					'" ' +
 					__("已创建", "created"),
 			);
-			renderAll();
+			renderAll(true);
 		})
 		.catch((e) => {
 			toast(__("创建失败: ", "Create failed: ") + e.message, true);
@@ -6622,7 +6758,7 @@ async function deleteMCPServer(name) {
 				'" ' +
 				__("已删除", "deleted"),
 		);
-		renderAll();
+		renderAll(true);
 	} catch (e) {
 		toast(__("删除失败: ", "Delete failed: ") + e.message, true);
 	}
