@@ -1,6 +1,7 @@
 package core
 
 import (
+	"encoding/json"
 	"fmt"
 	"strings"
 
@@ -169,4 +170,95 @@ func (a *Agent) executeOutputListChannels() string {
 		}
 	}
 	return strings.Join(parts, "\n")
+}
+
+// autoFillOutputMeta 在 meta 缺收件人时，从**本轮输入事件**自动补。
+//
+// 为何需要（线上实测 2026-09-26 17:57）：用户从 QQ 私聊发来消息，agent
+// 生成了回复也调了 output_send__qq，但没填 meta：
+//
+//	17:57:45  qq_get_message → {user_id: 2198972886, message_type: private}
+//	17:57:46  output_send__qq → 失败：meta 中需要 group_id 或 user_id
+//	17:58:14  output_send__qq_help → 查格式
+//	17:58:14  output_send__qq → ok      ← 靠重试成功，耗了 74s
+//
+// 信息内核本来就有（输入事件里带着 user_id/group_id），却要模型从
+// qq_get_message 的返回里手抄一遍。抄错就失败，失败才去查 _help。
+// 而"回复"这件事的收件人是确定的（= 消息来源），本不该由模型负责。
+//
+// 边界（都刻意收窄，宁可不补也不能补错）：
+//   - 显式传了 meta ⇒ 原样返回。主动 DM 别人等场景必须保持原行为。
+//   - meta 里有 group_id/user_id ⇒ 不覆盖。
+//   - meta 是坏 JSON ⇒ 原样返回。让下游报"格式错"，而不是被静默替换
+//     成一个模型没要求过的收件人（那比报错更坏：消息会发给错的人）。
+//   - 非 qq 通道（如 webui）⇒ 不补。webui 走 ResponseCh，不过 output_send。
+//   - 输入事件里没��件人信息 ⇒ 留空，让下游按原逻辑报"需要 user_id"。
+//     宁可报错让模型重试，也不要编一个收件人。
+func autoFillOutputMeta(meta, channel string, evt *agentIO.InputEvent) string {
+	if meta != "" {
+		// 已有内容：合法且已含收件人就不动；坏 JSON 也原样返回（见函数注释）
+		var m map[string]interface{}
+		if err := json.Unmarshal([]byte(meta), &m); err != nil {
+			return meta
+		}
+		if _, ok := m["group_id"]; ok {
+			return meta
+		}
+		if _, ok := m["user_id"]; ok {
+			return meta
+		}
+		// meta 存在但没收件人：补进去
+		if id := recipientFromEvent(channel, evt); id != nil {
+			m = mergeMeta(m, id)
+			if out, err := json.Marshal(m); err == nil {
+				return string(out)
+			}
+		}
+		return meta
+	}
+	// meta 完全没传：能确定收件人才补
+	if id := recipientFromEvent(channel, evt); id != nil {
+		if out, err := json.Marshal(map[string]interface{}{
+			id.key: id.val,
+		}); err == nil {
+			return string(out)
+		}
+	}
+	return ""
+}
+
+// metaField 是从输入事件里提取出的收件人字段。
+type metaField struct {
+	key string // "user_id" 或 "group_id"
+	val string
+}
+
+// recipientFromEvent 从输入事件推导收件人。
+//
+// 只处理 qq 通道：它是唯一一个"meta 必填收件人"的异步通道，且收件人
+// 与消息来源一一对应。其它通道（wechat 等）不猜 —— 猜错等于发错人。
+func recipientFromEvent(channel string, evt *agentIO.InputEvent) *metaField {
+	if evt == nil || channel != "qq" {
+		return nil
+	}
+	if evt.Payload == nil {
+		return nil
+	}
+	// 群消息优先：群里的 user_id 是**发送者**，用它当收件人会发错人。
+	// group_id 存在且非 "0" 时才是群聊（QQ 私聊时 group_id 会出现为 0）。
+	if gid := payloadString(evt.Payload["group_id"]); gid != "" && gid != "0" {
+		return &metaField{key: "group_id", val: gid}
+	}
+	if uid := payloadString(evt.Payload["user_id"]); uid != "" {
+		return &metaField{key: "user_id", val: uid}
+	}
+	return nil
+}
+
+func mergeMeta(m map[string]interface{}, f *metaField) map[string]interface{} {
+	if m == nil {
+		m = map[string]interface{}{}
+	}
+	m[f.key] = f.val
+	return m
 }
