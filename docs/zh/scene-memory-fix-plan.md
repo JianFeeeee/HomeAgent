@@ -163,7 +163,14 @@ RecallPolicy   召不召回记忆（只读，默认开）
       （`loadEmergentScenesLocked` 只取 `origin='emergent'`），
       故多写对聚类零影响。声明项作为「插件将来确实需要时」的闸门保留。
 
-### 步骤 3：修 R3（让图整理覆盖全库）
+### 步骤 3：修 R3（让图整理覆盖全库）✅ 已完成
+
+- [x] `GraphDB.DedupeScenes()`：归一化后同名场景合成一个
+- [x] 接到 `mergeLoop` 尾部（不塞进实体的 O(n²) 双重循环）
+- [x] 判据 8 例（先红后绿）
+- 生产库副本实测：65 → 57，合并 8 组，`auto:chan:qq_part:morning`
+  的 refs/rel/ent 一条没丢，strength 1 → 272
+- 提交：`758ec11`
 
 - [ ] 给 `mergeLoop` 加**独立的场景去重路径**，不塞进实体那个 O(n²) 双重循环
       （理由：实体 1 万行 × bigram + LLM 裁决，实测 5000 万次配对/轮；
@@ -174,6 +181,30 @@ RecallPolicy   召不召回记忆（只读，默认开）
 ### 步骤 4：清理现网垃圾场景，让它重新生成
 
 用户明确要求：**直接清理，重新生成**（不做保守迁移）。
+
+> ⚠️ **硬约束：必须先部署含 R1 修复的二进制**。反过来的话，重新涌现出来的
+> 还是带 `+`/`#` 的旧键，清一场白清。
+
+#### 部署前基线（2026-09-26 20:1x 实测）
+
+```
+PID 92115 / 启动于 Sat 19:12:43
+子进程插件 25 个
+近 24h 异常日志（Fatal/panic/DATA RACE）: 0
+场景数 65
+`homed --version` 不存在（flag 未定义）⇒ 纪律清单那条用 status 接口或 ps 核对
+```
+
+#### 执行顺序
+
+- [ ] 1. `make build`（默认 `HOMED_TAGS=onnxruntime`，cgo；校验 onnx/cgo 标记）
+- [ ] 2. 备份：`sqlite3 graph.db ".backup 'graph.db.bak-<ts>'"`（**禁用 cp**，WAL 不一致）
+- [ ] 3. `install -m 0755 build/homed /usr/local/bin/homed`（**禁用 cp**，会写坏运行中进程映像）
+- [ ] 4. `systemctl restart homeagent`
+- [ ] 5. 后置验证：进程起来 / 子进程插件数恢复 / 异常日志为 0 / 真实对话跑通
+- [ ] 6. 清理：删 `origin='emergent'` 全部 + 关联 features/refs + `situation_evidence`
+- [ ] 7. 等 ≥2 次同类交互让场景重新涌现
+- [ ] 8. 复验：新键不含 `+`/`#`、有 features **且**有 refs、strength 合理
 
 - [ ] `sqlite3 .backup` 备份（**禁用 cp**，WAL 模式会拷出不一致快照）
 - [ ] 删 `origin='emergent'` 的全部场景 + 其 `scene_features`/`scene_refs`
@@ -186,10 +217,12 @@ RecallPolicy   召不召回记忆（只读，默认开）
 > 兜底不冷场：`chan:qq` 声明场景（strength=281、108 条关系）全程保留，
 > 涌现重建期间它继续承担 QQ 场景召回。
 
-### 步骤 5：修 R5（证据桶别全表清）
+### 步骤 5：修 R5（证据桶别全表清）✅ 已完成
 
-- [ ] `DELETE FROM situation_evidence` 改为按本指纹的桶标签删
-- [ ] 判据：预置两个桶的证据各 1 次；建一个场景后断言另一个桶的证据还在
+- [x] `DELETE FROM situation_evidence` → `... WHERE label = ?`（桶键 = `sig.Label(2)`，
+      **不带 `auto:` 前缀**——这点修的时候差点栽）
+- [x] 判据 3 例：判据实测「6 个通道各来 3 次只长出 2 个场景」
+- 提交：`758ec11`
 
 ### 步骤 6：修 R4 的「覆盖面」部分（让 peer / 语义场景进得来）
 
