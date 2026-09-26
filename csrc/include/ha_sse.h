@@ -41,7 +41,7 @@ extern "C" {
 #endif
 
 #define HA_SSE_ABI_MAJOR 1
-#define HA_SSE_ABI_MINOR 0
+#define HA_SSE_ABI_MINOR 1
 #define HA_SSE_ABI_VERSION (HA_SSE_ABI_MAJOR * 1000 + HA_SSE_ABI_MINOR)
 
 HA_STATIC_ASSERT(HA_SSE_ABI_MAJOR >= 1 && HA_SSE_ABI_MAJOR <= 9,
@@ -130,6 +130,86 @@ int ha_sse_stringify(const ha_span *val, char *out, size_t cap, size_t *outlen);
  * 逐值一致要求由 encoding/json 来做。
  */
 int ha_sse_arg_string(const ha_span *val, char *out, size_t cap, size_t *outlen);
+
+/* ==================================================================== */
+/* 批量定位：**一次调用**返回整块解析所需的全部字段                     */
+/* ==================================================================== */
+/*
+ * ★ 为什么需要它（第三刀实测的教训，见 sse-codec-c.md §六）：
+ *   逐字段往返做 5+ 次 cgo 调用，每次约 168ns 边界 + 2 allocs（out-param
+ *   逃逸到堆）⇒ 约 1µs 固定成本，把全部收益吃光，结果比原实现更慢。
+ *
+ *   本接口把它压成 **1 次调用**，并顺带解决另外两点：
+ *     · **单趟键分派**：不再「每个键各扫一遍对象」，而是遍历一次成员表
+ *       就分派（原来 6 次扫描 → 2 次）
+ *     · **解码内联**：content / reasoning_content 的解码在同一趟里写进
+ *       调用方缓冲，不再各来一次往返
+ *
+ * 结果写在调用方的 ha_chunk_out 里（C 结构体、无 Go 指针 ⇒ 可安全传指针）。
+ */
+
+/* 槽位索引（固定约定，**改动必须 bump ABI**）。 */
+#define HA_CHUNK_SLOT_DELTA         0
+#define HA_CHUNK_SLOT_CONTENT       1
+#define HA_CHUNK_SLOT_REASONING     2
+#define HA_CHUNK_SLOT_TOOL_CALLS    3
+#define HA_CHUNK_SLOT_FINISH_REASON 4
+#define HA_CHUNK_SLOT_USAGE         5
+#define HA_CHUNK_SLOT_COUNT         6
+
+/* 槽位类型。与 Go 侧「该字段是什么 Go 类型」对应，而非单纯 JSON 类型。 */
+#define HA_CHUNK_KIND_ABSENT 0
+#define HA_CHUNK_KIND_NULL   1
+#define HA_CHUNK_KIND_STRING 2
+#define HA_CHUNK_KIND_OBJECT 3
+#define HA_CHUNK_KIND_ARRAY  4
+#define HA_CHUNK_KIND_OTHER  5  /* 数字 / 布尔 */
+
+/* ha_sse_chunk_locate 返回码。 */
+#define HA_CHUNK_OK          0  /* 定位成功，可用快速路径 */
+#define HA_CHUNK_FALLBACK   -1  /* 需回退 Go：重复键 / 畸形 / 顶层非对象 /
+                                 * 多 choices / 缓冲不足 */
+#define HA_CHUNK_TYPE_FAIL  -2  /* 与 Go 一致的「整块作废」（类型不符） */
+
+typedef struct {
+    ha_span span;  /* 原始值 span（未解码，指向 data） */
+    int     kind;  /* HA_CHUNK_KIND_*  */
+} ha_chunk_slot;
+
+typedef struct {
+    ha_chunk_slot slot[HA_CHUNK_SLOT_COUNT];
+    /* choices 数组本身的 span（choices_count>0 时有效） */
+    ha_span choices_span;
+    /* choices[0] 的 span（choices_count==1 时有效） */
+    ha_span choice0_span;
+    /* 解码/反转义结果（写入 sbuf，以 [off,len) 表示；kind 非字符串时为 (0,0)） */
+    size_t content_off;   size_t content_len;
+    size_t reasoning_off; size_t reasoning_len;
+    size_t finish_off;    size_t finish_len;
+
+    int has_choices;    /* choices 是否存在且非 null */
+    int choices_kind;   /* ABSENT / NULL / ARRAY */
+    int choices_count;  /* 元素个数（>1 时调用方必须回退，见下） */
+    int choice0_kind;   /* ABSENT / NULL / OBJECT */
+} ha_chunk_out;
+
+/*
+ * 一次调用定位整块解析所需的全部字段。
+ *
+ * data/len  : SSE chunk 原始字节（不需要 NUL 结尾）
+ * out       : 输出（调用方持有；C 只在本调用内写它）
+ * sbuf/scap : 解码输出缓冲（content / reasoning_content / finish_reason）
+ * sused     : 出参，缓冲区实际用量
+ *
+ * 返回 HA_CHUNK_OK / HA_CHUNK_FALLBACK / HA_CHUNK_TYPE_FAIL。
+ *
+ * ★ 调用方**必须**检查 choices_count：Go 侧是 `[]struct`，Unmarshal 会解析
+ *   **全部**元素，而本层只取 [0]（协议约定）。若元素 >1，本层无法保证
+ *   其余元素也能被 Go 解析（它们可能有类型错误）⇒ 必须回退。
+ *   本函数在 choices_count>1 时**直接返回 FALLBACK**，不给调用方犯错的机会。
+ */
+int ha_sse_chunk_locate(const char *data, size_t len, ha_chunk_out *out,
+                        char *sbuf, size_t scap, size_t *sused);
 
 #ifdef __cplusplus
 }
