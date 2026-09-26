@@ -132,17 +132,52 @@ func (s Situation) Keys() []string {
 // Empty 表示指纹里没有任何可判定的信号。
 func (s Situation) Empty() bool { return len(s.Features) == 0 }
 
-// Label 用权重最高的少数特征给场景起个可读名字（`chan:qq+tool:qq_get_message`）。
-// 只用于人看，不参与匹配——匹配永远走特征集合。
+// labelFeatureWeight 是参与**场景身份**的最低特征权重。
+//
+// 为什么设门槛：part（时段）权重只有 0.2，是场面里最弱的维度——
+// 「在 QQ 上」和「在 QQ 上且是早上」是同一个场面，时段不该把它切成两个。
+// 早期实现直接取 Label(2)，只有 chan 一个强特征时 part 必然挤进第二位，
+// 于是键名变成 auto:chan:qq+part:morning：既是「时段成了身份」，
+// 又让加权 Jaccard 把它当成另一个场面（实测：morning 场景吞掉 evening 指纹，
+// 共享 chan:qq 权重 1.0、并集含 part 0.2×2，相似度 1.0/1.4=0.714 > 0.5）。
+const labelFeatureWeight = 0.5
+
+// Label 用权重达标的主导特征给场景起个**可读名**（`chan:qq+tool:qq_get_message`）。
+//
+// 两条硬约束（缺一就会造出写侧匹配不上的键）：
+//  1. 只取权重 ≥ labelFeatureWeight 的特征：时段/话题不进身份。
+//  2. 结果**必须过 NormalizeSceneKey**：'+' 会被 normalizeSceneSegment 归一成
+//     '_'，而 EnsureScene / effectiveScenes / RecallByScene 三处都过了归一化。
+//     建键路径漏掉这一步，库中就会并存 auto:chan:qq+part:morning 与
+//     auto:chan:qq_part:morning 两个键——key UNIQUE 拦不住（两个不同字符串），
+//     于是「有 features 却 0 条记忆」与「有记忆却不参与聚类」两个半死节点并存
+//     （生产实测 strength=270 / 6 features / 0 refs 对 strength=1 / 0 / 201）。
 func (s Situation) Label(max int) string {
 	if max <= 0 {
 		max = 2
 	}
-	keys := s.Keys()
-	if len(keys) > max {
-		keys = keys[:max]
+	var picked []string
+	for _, f := range s.Features {
+		if f.Weight() < labelFeatureWeight {
+			continue
+		}
+		picked = append(picked, f.Key())
+		if len(picked) >= max {
+			break
+		}
 	}
-	return strings.Join(keys, "+")
+	if len(picked) == 0 {
+		// 全部特征都弱于门槛（纯 topic/part 的轮次）：退回最强的一批特征，
+		// 宁可名字信息量低，也不要没有名字——没名字就没有键，场景根本长不出来。
+		n := max
+		if n > len(s.Features) {
+			n = len(s.Features)
+		}
+		for _, f := range s.Features[:n] {
+			picked = append(picked, f.Key())
+		}
+	}
+	return NormalizeSceneKey(strings.Join(picked, "+"))
 }
 
 // emergentScene 是一次聚类计算中的场景视图。
@@ -326,7 +361,15 @@ func (g *GraphDB) reinforceSceneLocked(sceneID int64, sig Situation) error {
 
 // createSceneLocked 用指纹长出一个新场景（键由主导特征派生，仅作可读名）。
 func (g *GraphDB) createSceneLocked(sig Situation) (string, error) {
-	base := "auto:" + sig.Label(2)
+	// Label 已保证：过滤弱特征 + 过 NormalizeSceneKey。
+	// 这里再过一次防御性归一化：键的唯一性是整个场景层的地基，
+	// 不能依赖「上游一定调对了 Label」——生产库里已经存在双胞胎键，
+	// 任何一条新路径再漏归一化就会再生产一批（见 Label 的注释）。
+	base := NormalizeSceneKey("auto:" + sig.Label(2))
+	if base == "auto:" {
+		// Label 退化到空（指纹被裁空）：不建无主场景，否则所有空指纹会堆进同一行。
+		return "", fmt.Errorf("situation label 为空，拒绝建无名场景")
+	}
 	key := base
 
 	tx, err := g.db.Begin()
@@ -336,6 +379,13 @@ func (g *GraphDB) createSceneLocked(sig Situation) (string, error) {
 	defer tx.Rollback()
 
 	// 键冲突（同一可读名已被占）时加后缀，不合并——真正的合并交给相似度判定。
+	//
+	// ★ 这里加出来的 #N 后缀**必须与原键一样合法**：它会被写进 scenes.key，
+	// 而写侧（effectiveScenes）与读侧（RecallByScene）都会对它做归一化。
+	// '#' 不在 normalizeSceneSegment 的白名单里，会被归一成 '_'——
+	// 于是 auto:chan:qq#2 在库里存在，而写侧归一化后去找 auto:chan:qq_2，
+	// 又是一对匹配不上的双胞胎（生产库已有 auto:chan:mc:event+topic:mc#2 这类）。
+	// 所以后缀改用不会触发归一化改写的字符。
 	for i := 2; ; i++ {
 		var exists int
 		if err := tx.QueryRow(`SELECT COUNT(*) FROM scenes WHERE key = ?`, key).Scan(&exists); err != nil {
@@ -344,7 +394,7 @@ func (g *GraphDB) createSceneLocked(sig Situation) (string, error) {
 		if exists == 0 {
 			break
 		}
-		key = fmt.Sprintf("%s#%d", base, i)
+		key = fmt.Sprintf("%s.%d", base, i)
 	}
 
 	res, err := tx.Exec(`INSERT INTO scenes (key, strength, origin) VALUES (?, 1, 'emergent')`, key)
@@ -372,8 +422,8 @@ func (g *GraphDB) createSceneLocked(sig Situation) (string, error) {
 
 // recordSituationEvidenceLocked 登记一次「同类指纹出现过」，返回累计次数。
 //
-// 用指纹标签（主导特征）做粗聚类桶，只服务于「首次不建场景」的门槛判定，
-// 不参与后续匹配——匹配永远走 EnterScene 的相似度。
+// 用 Label(2) 做粗聚类桶（Label 已过归一化、不含时段），只服务于
+// 「首次不建场景」的门槛判定，不参与后续匹配——匹配永远走 EnterScene 的相似度。
 func (g *GraphDB) recordSituationEvidenceLocked(sig Situation) (int, error) {
 	label := sig.Label(2)
 	if _, err := g.db.Exec(
