@@ -56,7 +56,20 @@ type coreHandler struct {
 // EvtRingSubscribe 返回一个取消函数（与 Bus.Subscribe 约定一致）。
 type EvtRingSubscriber interface {
 	EvtRingSubscribe(types []pubsdk.EventType) func()
+
+	// EvtRingSubscribeTracked 与上面相同，但订阅会被登记、可在内核关停时统一退订。
+	//
+	// ★ 为什么需要单独的 tracked 版本：这些 handler 会写共享内存，而
+	// Host.Close() 会 munmap 整块区域。若订阅不在关停前撤销，一条事件就会让
+	// handler 写已解除映射的内存 ⇒ SIGSEGV（Bus.safeCall 的 recover 捕不到
+	// runtime 致命错误）。详见 internal/plugin/evtring.go 的 unsubs 说明。
+	EvtRingSubscribeTracked(types []pubsdk.EventType) func()
 }
+
+// evtCloser 是可关闭的事件环适配层（可选实现）。
+//
+// Host.Close 在 munmap 前调用它，撤掉全部写共享内存的 Bus handler。
+type evtCloser interface{ Close() }
 
 func (h *coreHandler) invokeStageWithCtx(ctx context.Context, stage string, seq uint64) error {
 	if h.invokeStageFn == nil {

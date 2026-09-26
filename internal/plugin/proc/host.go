@@ -151,6 +151,19 @@ func (h *Host) Close() error {
 	if h.sup != nil {
 		h.sup.StopAll(0)
 	}
+
+	// ★ 必须在 unmap **之前**退掉事件环订阅。
+	//
+	// 那些订阅的 handler 会 ring.WritePush（写共享内存）。若让它们留在
+	// Bus 上，munmap 之后只要有一条事件经过 Publish，handler 就写已解除
+	// 映射的内存 ⇒ SIGSEGV。注意 Bus.safeCall 的 recover **捕不到**它
+	// （runtime 致命错误不是 panic），所以后果是整个 homed 被杀。
+	//
+	// 顺序要求：StopAll 之后（不再有新订阅进来）、freeShm 之前。
+	if c, ok := h.evtSubscriber.(evtCloser); ok && c != nil {
+		c.Close()
+	}
+
 	var firstErr error
 	if h.data != nil {
 		if err := freeShm(h.memfd, h.data); err != nil && firstErr == nil {

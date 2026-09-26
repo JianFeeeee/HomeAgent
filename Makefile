@@ -1,5 +1,4 @@
-.PHONY: all build build-plain build-cli build-gui clean install test run build-static build-linux-arm64 lint fmt sync-client-versions check-client-versions
-
+.PHONY: all build build-plain build-cli build-gui clean install test run build-static build-linux-arm64 lint fmt sync-client-versions check-client-versions csrc csrc-test csrc-lint csrc-abi csrc-headers csrc-sanitize csrc-cross csrc-fuzz check-csrc check-csrc-full
 # HOMED_TAGS 默认带 onnxruntime：发行版**默认启用**本地向量空间（与
 # deploy/packaging/build.sh 保持一致）。
 #
@@ -10,6 +9,12 @@
 # （package-linux.sh 检查 `-tags=.*onnxruntime`）。即「本地随手 make build」
 # 与「发行构建」不是同一个东西，部署时无从察觉。
 # 需要极简构建时显式 HOMED_TAGS= 关掉。
+#
+# 注意：内核 C 编解码层（internal/agent/api/ha_codec.c）**不靠 tag 开关**，
+# 而是由 cgo 本身决定（`//go:build cgo` / `!cgo`）。原因：它是零依赖纯 C99
+# 源码内联编译，不需要任何外部库/工具链前提；而 homed 本就强制 cgo
+# （sqlite3 + gojieba），所以 C 路径自然生效，无需额外开关。
+# 对比 onnxruntime：那个需要运行期的 libonnxruntime.so，所以必须显式 tag。
 HOMED_TAGS ?= onnxruntime
 TAG_ARGS = $(if $(HOMED_TAGS),-tags $(HOMED_TAGS),)
 
@@ -28,12 +33,225 @@ LDFLAGS = -X gitcode.com/JianFeeeee/HomeAgent/internal/meta.Version=$(VERSION) -
 
 all: build build-cli
 
+# csrc：C 源码的**独立**产物（静态库 + 契约测试），供 C 侧复用（鸿蒙/嵌入式/C SDK）。
+#
+# ⚠️ Go 构建**不依赖**它：internal/agent/api/ha_codec.{c,h} 是指向 csrc/ 的
+# **符号链接**，cgo 直接编这份源码，而不是链接预构建的 .a。
+#
+# 为什么是「包内符号链接」而不是别的（历史教训 + 实测，勿回退）：
+#   1. 不能链静态库：.a 是构建产物、不入库，而发布脚本原先不产出它
+#      ⇒「不入库 + 不生成」两头空（实测 cannot find csrc/build/libha_codec.a）；
+#      且交叉编译 linux/arm64 时宿主 x86-64 的 .a 被链进目标产物，
+#      报 `file in wrong format`。
+#   2. 不能用 `#include "../../../csrc/src/ha_codec.c"`（包外相对包含）：
+#      ★ Go 构建缓存**不跟踪包外被 #include 的 C 文件**，改了 C 源码但缓存命中时
+#        会静默沿用旧代码（实测：变异 C 源码后 go test 仍报 ok）。
+#        这对「逐步推进 C 化」是致命的——改动无效却无人察觉。
+#   3. 包内符号链接：文件在包目录内 ⇒ 缓存按内容哈希正确跟踪
+#      （实测：改 csrc/ 源文件后 go test 立即判红）；
+#      同时只有一份权威源（csrc/），无副本漂移、无需同步目标。
+#
+# csrc 目标本身只服务「C 侧独立使用 + ctest」，不参与 Go 构建链路。
+CSRC_DIR=csrc
+CSRC_BUILD=$(CSRC_DIR)/build
+CSRC_LIB=$(CSRC_BUILD)/libha_codec.a
+
+# ============================ C 编译告警门禁 ============================
+#
+# 为什么要「零告警」而不是「有告警就看看」：
+# 1. 本仓 C 代码量还小（ha_codec.c 约 340 行），任何告警都值得当场修；
+#    门禁零成本维持（本地实测 4 个编译器×标准组合全 0 告警）。
+# 2. C 侧没有 Go 那套 vet 等价物，告警是**唯一的**静态信号。
+#    若是「先攒着」，C 侧会慢慢退化成一堆没人看的噪声，然后没人看。
+# 3. -Wconversion 特意包含在内：C→Go 经 cgo 时隐式窄化（如 size_t→int）
+#    是真实事故来源（长度字段截断），而它在默认档下是静默的。
+#
+# -Wpedantic 尤其重要：它抓出「用了 C11 特性但 CFLAGS 写 -std=c99」这类
+# 跨工具链不一致（本轮就当场抓到 _Static_assert 一例，见 ha_abi.h）。
+CSRC_STD ?= c99
+CSRC_WARN_FLAGS = -Wall -Wextra -Wpedantic -Wshadow -Wconversion
+CSRC_CFLAGS = -std=$(CSRC_STD) $(CSRC_WARN_FLAGS) -I$(CSRC_DIR)/include
+CSRC_SRCS = $(wildcard $(CSRC_DIR)/src/*.c)
+CSRC_HDRS = $(wildcard $(CSRC_DIR)/include/*.h)
+
+# 可选的第二编译器：只有一份编译器通过 ≠ C 写法可移植
+# （GCC 扩展在 clang 下报错、或反之，都是真实的发布事故）。
+CSRC_CC2 ?= clang
+
+csrc: $(CSRC_LIB)
+
+$(CSRC_LIB): $(wildcard $(CSRC_DIR)/src/*.c) $(wildcard $(CSRC_DIR)/include/*.h) $(CSRC_DIR)/CMakeLists.txt
+	@cmake -S $(CSRC_DIR) -B $(CSRC_BUILD) -DBUILD_TESTS=ON >/dev/null
+	@cmake --build $(CSRC_BUILD) -j >/dev/null
+	@echo "Built: $(CSRC_LIB)（C 侧复用，不参与 Go 构建）"
+
+# csrc-test：C 侧契约测试（黄金对照的另一半，见 docs/zh/c-core/llm-orchestration-c.md §五）
+csrc-test: csrc
+	@cd $(CSRC_BUILD) && ctest --output-on-failure
+
+# csrc-lint：C 侧告警门禁（主编译器 + 第二编译器交叉，零告警）
+#
+# 用 \`-Werror\` 而不是只看输出：只有「告警即失败」才是门禁，
+# 否则它只是打印给人看，而人会累。
+.PHONY: csrc-lint
+csrc-lint:
+	@echo "== C 告警门禁（$(CSRC_STD)，$(CSRC_WARN_FLAGS)）=="
+	@for cc in $(CC) $(CSRC_CC2); do \
+		command -v $$cc >/dev/null 2>&1 || { echo "  [SKIP] $$cc 不存在"; continue; }; \
+		out=$$($$cc $(CSRC_CFLAGS) -Werror -fsyntax-only $(CSRC_SRCS) 2>&1); \
+		if [ -n "$$out" ]; then \
+			echo "  [FAIL] $$cc 有告警："; echo "$$out" | head -20; exit 1; \
+		else \
+			echo "  $$cc: 0 告警 ✓"; \
+		fi; \
+	done
+
+# csrc-abi：C 侧 ABI 版本自洽性（编译期断言已在 ha_abi.h 内，这里做运行期核对）
+.PHONY: csrc-abi
+csrc-abi:
+	@echo "== C ABI 版本自述 =="
+	@printf '#include <stdio.h>\n#include "ha_codec.h"\nint main(void){printf("%%d\\n", ha_codec_abi_version());return 0;}\n' > $(CSRC_BUILD)/abi_probe.c 2>/dev/null || mkdir -p $(CSRC_BUILD) && printf '#include <stdio.h>\n#include "ha_codec.h"\nint main(void){printf("%%d\\n", ha_codec_abi_version());return 0;}\n' > $(CSRC_BUILD)/abi_probe.c
+	@$(CC) $(CSRC_CFLAGS) $(CSRC_BUILD)/abi_probe.c -o $(CSRC_BUILD)/abi_probe $(CSRC_SRCS) 2>/dev/null
+	@v=$$($(CSRC_BUILD)/abi_probe); \
+	if [ "$$v" -ge 1000 ] && [ "$$v" -le 99999 ]; then \
+		echo "  ha_codec ABI_VERSION = $$v (major=$$((v/1000)) minor=$$((v%1000))): OK"; \
+	else \
+		echo "  [FAIL] ABI 版本荒谬：$$v"; exit 1; \
+	fi
+
+# csrc-sanitize：ASan + UBSan 跑 C 契约测试
+#
+# 目的：内存错误与未定义行为在 C 侧默认是**静默的**（不崩、结果看起来对），
+# 而内核 L1 路径零 malloc 的设计依赖「没有越界写」这一前提。
+# C 侧没有 Go 的 -race 等价物，sanitizer 就是这里的关等物。
+# 若本机无 libasan/libubsan（交叉工具链常见），明确 SKIP 而非静默跳过。
+.PHONY: csrc-sanitize
+# ★ 每个测试文件**各自**链接成独立二进制：契约测试每个都带 main，
+#   合在一起会「multiple definition of main」——而报错被 2>/dev/null
+#   吞掉后会被误报成「本机无 sanitizer」，是个假的 SKIP。
+#   故这里逐个构建、逐个跑，任何一个失败都判红。
+csrc-sanitize:
+	@echo "== C 侧 ASan+UBSan =="
+	@tmp=$$(mktemp -d); \
+	built=0; \
+	for t in $(CSRC_DIR)/test/test_*.c; do \
+		case "$$t" in *fuzz*) continue ;; esac; \
+		base=$$(basename $$t .c); \
+		if ! $(CC) $(CSRC_CFLAGS) -fsanitize=address,undefined -fno-omit-frame-pointer \
+			-o $$tmp/$$base $(CSRC_SRCS) $$t 2>$$tmp/build.log; then \
+			if grep -qi 'sanitize\|asan\|ubsan' $$tmp/build.log; then \
+				echo "  [SKIP] 本机无 ASan/UBSan 运行库，已跳过"; rm -rf $$tmp; exit 0; \
+			fi; \
+			echo "  [FAIL] 构建失败 ($$base)：" ; head -10 $$tmp/build.log; rm -rf $$tmp; exit 1; \
+		fi; \
+		built=1; \
+		if ASAN_OPTIONS=detect_leaks=1 UBSAN_OPTIONS=print_stacktrace=1:halt_on_error=1 \
+			$$tmp/$$base > $$tmp/$$base.out 2>&1; then \
+			echo "  ASan+UBSan $$base: PASS"; \
+		else \
+			echo "  [FAIL] sanitizer 报告 ($$base)："; head -30 $$tmp/$$base.out; rm -rf $$tmp; exit 1; \
+		fi; \
+	done; \
+	rm -rf $$tmp; \
+	if [ "$$built" = "0" ]; then echo "  [FAIL] 没找到任何契约测试"; exit 1; fi
+
+# csrc-headers：头文件自包含性（每个 .h 都能单独编过）
+#
+# 为什么需要：ha_codec.h 头写了「本头文件是对外契约，签名冻结」，
+# 而**头文件能不能自己编过**是另一件事。若头里用到了自己没包含的东西
+# （比如用了 int32_t 却没 <stdint.h>），后果是：
+#   - 在某个翻译单元里恰好被别的头预先包含了 → 静默编过
+#   - 在别处（鸿蒙/嵌入式/C SDK 直接包含它）→ 报一堆无关的错
+# 本轮就靠它抓出 ha_abi.h 的静态断言垫片缺 <assert 类依赖> 类问题。
+# 判据：每个头单独编 -fsyntax-only 必须为 0 告警 0 错。
+.PHONY: csrc-headers
+csrc-headers:
+	@echo "== 头文件自包含性 =="
+	@ok=1; \
+	for h in $(CSRC_HDRS); do \
+		base=$$(basename $$h); \
+		inc=$$(dirname $$h); \
+		out=$$(echo "$$cc" | tr -d '-'; ); \
+		for cc in $(CC) $(CSRC_CC2); do \
+			command -v $$cc >/dev/null 2>&1 || continue; \
+			printf '#include "%s"\nint main(void){return 0;}\n' "$$base" > $(CSRC_BUILD)/hdr_probe.c; \
+			res=$$($$cc -std=$(CSRC_STD) $(CSRC_WARN_FLAGS) -I$$inc -I$(CSRC_DIR)/include -Werror \
+				-fsyntax-only $(CSRC_BUILD)/hdr_probe.c 2>&1); \
+			if [ -n "$$res" ]; then \
+				echo "  [FAIL] $$base 单独包含时失败（$$cc）："; echo "$$res" | head -10; ok=0; \
+			fi; \
+		done; \
+	done; \
+	if [ "$$ok" = "1" ]; then echo "  $(words $(CSRC_HDRS)) 个头文件：自包含 OK ✓"; else exit 1; fi
+
+# csrc-fuzz：libFuzzer 跑不变式 + 内存安全（需 clang，无则明确 SKIP）
+#
+# 这是 C 侧唯一能「持续」而非「等下一次手写用例」的检验。
+# ha_codec 的等价契约（与 Go 的 utf8.DecodeRuneInString 一致）在正常输入下
+# 永远测不到，只有随机字节能覆盖截断序列/过长编码/代理对/超 U+10FFFF。
+# 门禁不能假装通过：无 clang 或无 libFuzzer 时显式 SKIP 并说明。
+.PHONY: csrc-fuzz
+csrc-fuzz:
+	@echo "== C 侧 libFuzzer（clang）=="
+	@if ! command -v $(CSRC_CC2) >/dev/null 2>&1; then \
+		echo "  [SKIP] $(CSRC_CC2) 不存在，无法跑 libFuzzer"; exit 0; \
+	fi; \
+	tmp=$$(mktemp -d); \
+	if ! $(CSRC_CC2) $(CSRC_CFLAGS) -fsanitize=fuzzer,address,undefined -fno-omit-frame-pointer \
+		-o $$tmp/fz $(CSRC_SRCS) $(CSRC_DIR)/test/test_fuzz_ha_codec.c 2>/dev/null; then \
+		echo "  [SKIP] 无 libFuzzer 运行库（需要 clang 自带），已跳过"; rm -rf $$tmp; exit 0; \
+	fi; \
+	SECS=$${FUZZ_SECS:-20}; \
+	if $$tmp/fz -max_total_time=$$SECS -rss_limit_mb=4096 > $$tmp/fz.log 2>&1; then \
+		runs=$$(grep -oE 'Done [0-9]+ runs' $$tmp/fz.log | tail -1); \
+		echo "  libFuzzer: PASS（$${runs:-完成}，$${SECS}s）"; rm -rf $$tmp; \
+	else \
+		echo "  [FAIL] 模糊测试崩溃："; tail -30 $$tmp/fz.log; rm -rf $$tmp; exit 1; \
+	fi
+
+# csrc-cross：交叉编译 C 侧（arm64 是 homed 的真实发布目标之一）
+#
+# 为什么要单独门禁：Go 侧的 `go build` 不等于 C 代码在该架构上能编。
+# C 侧的架构相关问题（endianness 假设、指针宽度、size_t vs int 宽度、
+# -fsanitize 不可用）只有真的用目标编译器编一遍才会暴露。
+# 与 deploy/packaging/build.sh 的 arm64 目标共用同一套 CC 变量。
+.PHONY: csrc-cross
+csrc-cross:
+	@echo "== C 侧交叉编译（linux/arm64）=="
+	@CC_ARM64=$${CC_ARM64:-aarch64-linux-gnu-gcc}; \
+	if ! command -v $$CC_ARM64 >/dev/null 2>&1; then \
+		echo "  [SKIP] $$CC_ARM64 不存在（未装交叉工具链）"; exit 0; \
+	fi; \
+	ok=1; \
+	for src in $(CSRC_SRCS); do \
+		if ! $$CC_ARM64 $(CSRC_CFLAGS) -Werror -fsyntax-only $$src 2>&1 | head -20; then \
+			ok=0; \
+		fi; \
+	done; \
+	if [ "$$ok" = "1" ]; then \
+		echo "  $$CC_ARM64: 0 告警、编译通过 ✓（$(words $(CSRC_SRCS)) 个源文件）"; \
+	else \
+		echo "  [FAIL] arm64 交叉编译失败"; exit 1; \
+	fi
+
+# check-csrc：C 侧全部门禁的聚合入口（接进 make test 与 CI）
+.PHONY: check-csrc
+check-csrc: csrc-lint csrc-abi csrc-headers csrc-sanitize csrc-cross
+	@echo "== C 基础设施门禁：全部通过 =="
+
+# check-csrc-full：在 check-csrc 基础上加模糊测试（耗时，故分开）
+.PHONY: check-csrc-full
+check-csrc-full: check-csrc csrc-fuzz
+	@echo "== C 基础设施门禁（含模糊测试）：全部通过 =="
+
 build:
 	@mkdir -p $(BUILD_DIR)
 	CGO_ENABLED=1 $(GO) build $(TAG_ARGS) -trimpath -installsuffix dynlink -ldflags '$(LDFLAGS)' -o $(BUILD_DIR)/$(BINARY) ./cmd/homed/
 	@echo "Built: $(BUILD_DIR)/$(BINARY) ($(VERSION), tags='$(HOMED_TAGS)')"
 	@go version -m $(BUILD_DIR)/$(BINARY) | grep -q 'onnxruntime' \
 		|| echo "WARN: 本次构建不含 onnxruntime，本地向量空间不可用（HOMED_TAGS= 显式关掉时才符合预期）"
+	@go version -m $(BUILD_DIR)/$(BINARY) | grep -q 'CGO_ENABLED=1' \
+		|| echo "WARN: 本次构建未启用 cgo，编解码走纯 Go 回退（不应发生）"
 
 build-cli:
 	@mkdir -p $(BUILD_DIR)
@@ -49,13 +267,36 @@ build-static:
 	CGO_ENABLED=1 $(GO) build -tags netgo -installsuffix dynlink -ldflags '-extldflags "-static" $(LDFLAGS)' -o $(BUILD_DIR)/$(BINARY)-static ./cmd/homed/
 	@echo "Built (static): $(BUILD_DIR)/$(BINARY)-static"
 
+# build-linux-arm64：交叉编译 homed（真实发布目标之一）。
+#
+# 两处必须显式给定，否则必然失败（都不是 C 化引入的，但都长期缺覆盖）：
+#   1. CC/CXX 交叉工具链。缺 CXX 时 cgo 回退到宿主 g++，而宿主编译器不认
+#      aarch64 汇编，报 `gcc_arm64.S: no such instruction: 'stp x29,x30,[sp,'`。
+#      deploy/packaging/build.sh:49 一直是对的，此处此前漏了。
+#   2. .syso 隔离。cmd/{homed,waiter}/*.syso 是 Windows COFF 资源对象，
+#      Go 会把同目录 .syso **无条件**链进任何目标；交叉到非 Windows 平台报
+#      `file format not recognized`。build.sh 有 hide_syso_for_target，此处同样漏了。
+CC_ARM64 ?= aarch64-linux-gnu-gcc
+CXX_ARM64 ?= aarch64-linux-gnu-g++
+
 build-linux-arm64:
 	@mkdir -p $(BUILD_DIR)
-	GOOS=linux GOARCH=arm64 CGO_ENABLED=1 $(GO) build -installsuffix dynlink -ldflags '$(LDFLAGS)' -o $(BUILD_DIR)/$(BINARY)-arm64 ./cmd/homed/
-	@echo "Built (arm64): $(BUILD_DIR)/$(BINARY)-arm64"
+	@for f in cmd/homed/*.syso cmd/waiter/*.syso; do \
+		[ -f "$$f" ] || continue; \
+		mv "$$f" "$$f.hidden"; \
+	done; \
+	trap 'for f in cmd/homed/*.syso.hidden cmd/waiter/*.syso.hidden; do \
+		[ -f "$$f" ] || continue; mv "$$f" "$${f%.hidden}"; done' EXIT; \
+	GOOS=linux GOARCH=arm64 CGO_ENABLED=1 CC=$(CC_ARM64) CXX=$(CXX_ARM64) \
+		$(GO) build $(TAG_ARGS) -installsuffix dynlink -ldflags '$(LDFLAGS)' \
+		-o $(BUILD_DIR)/$(BINARY)-arm64 ./cmd/homed/; \
+	for f in cmd/homed/*.syso.hidden cmd/waiter/*.syso.hidden; do \
+		[ -f "$$f" ] || continue; mv "$$f" "$${f%.hidden}"; done; \
+	trap - EXIT
+	@echo "Built (arm64): $(BUILD_DIR)/$(BINARY)-arm64 ($$(file $(BUILD_DIR)/$(BINARY)-arm64 | sed 's/.*: //'))"
 
 clean:
-	rm -rf $(BUILD_DIR) $(BINARY)
+	rm -rf $(BUILD_DIR) $(BINARY) $(CSRC_BUILD)
 
 install: build
 	-systemctl stop homeagent 2>/dev/null
@@ -67,6 +308,37 @@ install: build
 
 test:
 	$(GO) test ./...
+	@$(MAKE) csrc-test
+	@$(MAKE) check-csrc
+	@$(MAKE) check-codec-cgo-only
+
+# check-codec-cgo-only：钉死「编解码层完全 C 化」这一决定。
+#
+# 两条断言，缺一不可：
+#   ① CGO_ENABLED=1 下测试全绿（含黄金对照：C 与纯 Go 参考实现逐值相等）
+#   ② CGO_ENABLED=0 下**构建必须失败**
+#
+# 为什么②要断言「失败」而不是「也能编过」：内核已完全 C 化，C 是唯一实现。
+# 若有人在 CGO_ENABLED=0 下让整包静默编过（例如加回一个纯 Go 回退），
+# 就会同时存在两份语义可能分叉的实现 —— 而 C 侧对畸形 UTF-8 的解码边界
+# 一旦与 Go 分叉，只表现为 rune 计数偏差（进而 token 预算与截断点偏移），
+# **不会立刻暴露**。所以这里把「不许有第二条路」变成可执行的断言。
+#
+# 注：这不影响任何现有构建 —— waiter/initconfig/memgc 均不依赖本包
+# （go list -deps 实测）；homed 本就强制 cgo。
+.PHONY: check-codec-cgo-only
+check-codec-cgo-only:
+	@echo "== 编解码层：完全 C 化检查 =="
+	@CGO_ENABLED=1 $(GO) test -count=1 ./internal/agent/api/ \
+		&& echo "  ① cgo 下测试全绿（含黄金对照）: OK"
+	@if CGO_ENABLED=0 $(GO) build ./internal/agent/api/ 2>/dev/null; then \
+		echo "  [FAIL] CGO_ENABLED=0 下本包竟然构建成功——"; \
+		echo "         编解码层已完全 C 化，不该存在第二条实现路径。"; \
+		echo "         若是有意引入回退，请同时更新本检查与 codec_cgo.go 的说明。"; \
+		exit 1; \
+	else \
+		echo "  ② CGO_ENABLED=0 下响亮失败（防静默回退）: OK"; \
+	fi
 
 run: build
 	./$(BUILD_DIR)/$(BINARY) -data /tmp/homeagent

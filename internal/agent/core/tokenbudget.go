@@ -1,8 +1,6 @@
 package core
 
 import (
-	"unicode/utf8"
-
 	"gitcode.com/JianFeeeee/HomeAgent/internal/agent/api"
 )
 
@@ -16,24 +14,21 @@ type TokenBudget struct {
 	Reserved      int // 预留（response 空间）
 }
 
-// EstimateTokens 粗略估算 token 数
-// 中文 ~1.5 token/字，英文 ~0.3 token/字符
-// 保守估计取 max(1, runeCount * 2)，对混合文本足够安全
-func EstimateTokens(text string) int {
-	if text == "" {
-		return 0
-	}
-	runeCount := utf8.RuneCountInString(text)
-	if runeCount == 0 {
-		return 0
-	}
-	t := runeCount * 2
-	if t < 1 {
-		return 1
-	}
-	return t
-}
+// EstimateTokens / TruncateByTokens 转发到编解码层统一出口。
+//
+// 本包内调用点很多（context.go / process.go / resident.go / tooldefs.go…），
+// 而实现只有一份（api 包，C 化后可选走 C）。保留这两个同名转发，
+// 是为了不把调用点全部改写成 api.EstimateTokens —— 那场改动对行为零收益，
+// 却把「本包依赖 api」这件事铺得到处都是。
 
+// EstimateTokens 粗略估算 token 数（转发到 api.EstimateTokens）。
+func EstimateTokens(text string) int { return api.EstimateTokens(text) }
+
+// TruncateByTokens 截断字符串至不超过 maxTokens 估计值（转发到 api.TruncateByTokens）。
+func TruncateByTokens(s string, maxTokens int) string { return api.TruncateByTokens(s, maxTokens) }
+
+// ComputeTokenBudget 计算各部分的 token 预算。
+//
 // maxTargetTokens 是**有效工作区间**的上限（不是模型窗口）。
 //
 // 为什么窗口 1M 却不能按 800K 干活：标称窗口 ≠ 有效窗口。接近满窗口时注意力
@@ -85,19 +80,5 @@ func ComputeTokenBudget(provider api.Provider, systemPromptBase string) TokenBud
 	}
 }
 
-// TruncateByTokens 截断字符串至不超过 maxTokens 估计值
-func TruncateByTokens(s string, maxTokens int) string {
-	if maxTokens <= 0 || s == "" {
-		return ""
-	}
-	runes := []rune(s)
-	if len(runes)*2 <= maxTokens {
-		return s
-	}
-	// 从开头保留 maxTokens/2 个字符（每个字符约 2 token）
-	keep := maxTokens / 2
-	if keep >= len(runes) {
-		return s
-	}
-	return string(runes[:keep])
-}
+// TruncateByTokens 已移至 api 包（编解码层统一出口，见 codec.go）。
+// 上方已有同名转发，此处不再重复定义。
