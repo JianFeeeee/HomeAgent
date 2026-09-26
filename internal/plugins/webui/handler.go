@@ -479,6 +479,9 @@ func (h *Handler) RegisterRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("/api/v1/memory", h.requireAPI(h.handleMemory))
 	mux.HandleFunc("/api/v1/memory/", h.requireAPI(h.handleMemory))
 	mux.HandleFunc("/api/v1/memory/graph", h.requireAPI(h.handleMemoryGraph))
+	// 星图活动端点：只回最近变动的实体（几百字节 ~ 几 KB），
+	// 而不是每 10s 重拉 400KB 全量图谱。见 handleMemoryGraphPulse。
+	mux.HandleFunc("/api/v1/memory/graph/pulse", h.requireAPI(h.handleMemoryGraphPulse))
 	mux.HandleFunc("/api/v1/memory/context", h.requireAPI(h.handleMemoryContext))
 	mux.HandleFunc("/api/v1/memory/tools", h.requireAPI(h.handleMemoryTools))
 	mux.HandleFunc("/api/v1/memory/text", h.requireAPI(h.handleTextMemory))

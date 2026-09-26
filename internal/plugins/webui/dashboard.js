@@ -1,5 +1,5 @@
       // ===== State =====
-      let state = {
+      const state = {
         status: {},
         kernel: null,
         settings: {},
@@ -20,6 +20,18 @@
         starmapInit: false,
         starmapLoading: false,
         starmapData: null,
+        // ===== 星图：跟随 agent 活动 =====
+        // 三路活动信号（均已在页面上，无需新数据源）：
+        //   1. toolPulseMs —— SSE tool_call/stage 触发的「脉冲」，实时
+        //   2. activity   —— /runtime 调度器计数（排队/中断/抢占），3s 轮询
+        //   3. grownIds   —— /memory/graph/pulse 检出「新长出来」的节点，10s 轮询
+        starmapPulses: [], // { mesh, until, kind } 活动脉冲队列
+        starmapGrown: {}, // nodeId -> 生长动画截止时间戳
+        starmapActivity: null, // /runtime 的调度器快照
+        starmapPulseTimer: null, // /memory/graph/pulse 轮询 id
+        starmapActivityTimer: null, // /runtime 轮询 id
+        starmapLastPulseAt: 0, // 最后一次活动时间（ms），驱动全局呼吸
+        starmapPulseSince: 0, // 下次 pulse 请求的回看起点（unix 秒）
         chatHistory: [],
         terminals: [],
         cmdHistory: [],
@@ -39,6 +51,7 @@
       window._i18n = {
         navOverview: ["概览", "Overview"],
         navChat: ["对话", "Chat"],
+        navStarmap: ["星图", "Star Map"],
         navPlugins: ["插件", "Plugins"],
         navSettings: ["设置", "Settings"],
         navAdapters: ["适配器", "Adapters"],
@@ -57,7 +70,7 @@
       function toggleLang() {
         state.lang = state.lang === "zh" ? "en" : "zh";
         localStorage.setItem("ha-lang", state.lang);
-        document.querySelectorAll("[data-i18n]").forEach(function (el) {
+        document.querySelectorAll("[data-i18n]").forEach((el) => {
           var k = el.getAttribute("data-i18n");
           var m = window._i18n && window._i18n[k];
           if (m) el.textContent = __(m[0], m[1]);
@@ -69,7 +82,7 @@
         var lang = state.lang;
         var btn = document.getElementById("lang-btn");
         if (btn) btn.textContent = lang === "zh" ? "EN" : "中";
-        document.querySelectorAll("[data-i18n]").forEach(function (el) {
+        document.querySelectorAll("[data-i18n]").forEach((el) => {
           var k = el.getAttribute("data-i18n");
           var m = window._i18n && window._i18n[k];
           if (m) el.textContent = lang === "en" ? m[1] : m[0];
@@ -162,7 +175,7 @@
           var img = localStorage.getItem("ha-bg-img") || "";
           var blur = localStorage.getItem("ha-bg-blur") || "0";
           var dots = "";
-          Object.keys(PALETTES).forEach(function (k) {
+          Object.keys(PALETTES).forEach((k) => {
             dots +=
               '<button class="cdot" data-c="' +
               k +
@@ -209,7 +222,7 @@
         if (blur) applyBgBlur(blur);
       })();
 
-      (function () {
+      (() => {
         var saved = localStorage.getItem("ha-theme");
         setTheme(saved || "light");
         // 默认配色 = 黑白：必须**主动** setColor 一次。只设 data-theme 时
@@ -275,7 +288,7 @@
         t.className = "toast" + (isError ? " error" : "");
         t.style.display = "block";
         clearTimeout(t._hideTimer);
-        t._hideTimer = setTimeout(function () {
+        t._hideTimer = setTimeout(() => {
           t.style.display = "none";
         }, 3000);
       }
@@ -283,7 +296,7 @@
       // ===== 8.6 Unified toast + confirm dialog =====
 
       // ===== 8.4 Card 3D tilt + cursor glow =====
-      document.addEventListener("mousemove", function (e) {
+      document.addEventListener("mousemove", (e) => {
         var card = e.target.closest ? e.target.closest(".card.tilt") : null;
         if (card) {
           var r = card.getBoundingClientRect();
@@ -299,7 +312,7 @@
             "deg) translateY(-1px)";
         }
       });
-      document.addEventListener("mouseleave", function (e) {
+      document.addEventListener("mouseleave", (e) => {
         var card = e.target.closest ? e.target.closest(".card.tilt") : null;
         if (card) card.style.transform = "";
       });
@@ -360,8 +373,8 @@
             }
             close();
           }
-          ov.querySelectorAll("button[data-mode]").forEach(function (b) {
-            b.onclick = function () {
+          ov.querySelectorAll("button[data-mode]").forEach((b) => {
+            b.onclick = () => {
               var mode = b.getAttribute("data-mode");
               if (mode !== "custom") {
                 submit(mode);
@@ -407,12 +420,12 @@
 
       // ===== Navigation =====
       function switchTab(n) {
-        document.querySelectorAll(".tab-content").forEach(function (e) {
+        document.querySelectorAll(".tab-content").forEach((e) => {
           e.classList.remove("active");
         });
         var el = document.getElementById("tab-" + n);
         if (el) el.classList.add("active");
-        document.querySelectorAll("nav a").forEach(function (e) {
+        document.querySelectorAll("nav a").forEach((e) => {
           e.classList.remove("active");
         });
         var match = document.querySelector('nav a[onclick*="' + n + '"]');
@@ -435,6 +448,23 @@
             msgsEl.scrollTop = msgsEl.scrollHeight;
           }
           initChatDragDrop();
+        }
+        if (n === "starmap") {
+          // 独立星图页签：把 canvas 搬过来并按新容器尺寸重算。
+          // 必须在 renderAll 之前做，否则 renderChatStarmap 会按上一次的
+          // 活跃容器（总览页）算尺寸。
+          var sc = document.getElementById("sm-container-page");
+          if (sc) {
+            if (starmapRen) {
+              if (starmapRen.domElement.parentElement !== sc) {
+                sc.appendChild(starmapRen.domElement);
+                starmapRen.domElement.style.display = "block";
+              }
+              onStarmapResize();
+            } else if (!state.starmapInit && !state.starmapLoading) {
+              loadChatStarmapData();
+            }
+          }
         }
         renderAll();
       }
@@ -501,6 +531,11 @@
           console.error("renderChatStarmap", e);
         }
         try {
+          renderStarmapTab();
+        } catch (e) {
+          console.error("renderStarmapTab", e);
+        }
+        try {
           renderPlugins();
         } catch (e) {
           console.error("renderPlugins", e);
@@ -526,7 +561,7 @@
               .querySelectorAll(
                 "#tab-overview .card, #tab-plugins .card, #tab-kernel .card",
               )
-              .forEach(function (c) {
+              .forEach((c) => {
                 if (!c.querySelector(".tilt-glow")) {
                   var g = document.createElement("span");
                   g.className = "tilt-glow";
@@ -571,7 +606,7 @@
       var uptimeTick = null;
       function startUptimeTicker() {
         if (uptimeTick) clearInterval(uptimeTick);
-        uptimeTick = setInterval(function () {
+        uptimeTick = setInterval(() => {
           var el = document.querySelector("#ov-uptime");
           if (el && state.startedAt) {
             var now = Date.now();
@@ -706,7 +741,7 @@
 
       function rtCapsHtml(caps) {
         var out = "";
-        Object.keys(RT_CAP_NAMES).forEach(function (bit) {
+        Object.keys(RT_CAP_NAMES).forEach((bit) => {
           if (caps & Number(bit)) {
             out += '<span class="rt-cap">' + RT_CAP_NAMES[bit] + "</span>";
           }
@@ -728,7 +763,7 @@
       function rtOwnerGroups(inputs, residents, rootID) {
         var order = [];
         var map = {};
-        inputs.forEach(function (c) {
+        inputs.forEach((c) => {
           var o = c.owner || "";
           if (o === rootID) o = "";
           if (!map[o]) {
@@ -739,23 +774,23 @@
         });
         // 驻留子即使一条 inputch 都没划到也要出现——否则「子存在但看不见」
         // 与「子不存在」无法区分。
-        residents.forEach(function (r) {
+        residents.forEach((r) => {
           var o = r.id || "";
           if (o && o !== rootID && !map[o]) {
             map[o] = [];
             order.push(o);
           }
         });
-        order.sort(function (a, b) {
+        order.sort((a, b) => {
           if (a === "") return -1;
           if (b === "") return 1;
           return a < b ? -1 : 1;
         });
         var ci = 0;
         var OW = rtOwnerColors();
-        return order.map(function (o) {
+        return order.map((o) => {
           var res = null;
-          residents.forEach(function (r) {
+          residents.forEach((r) => {
             if (r.id === o) res = r;
           });
           var list = map[o] || [];
@@ -866,10 +901,8 @@
       // 所以「这一步发生了什么」不需要靠颜色或图例去猜。
       function rtPipelineHtml(phase, trail) {
         var g = rtPhaseGroup(phase);
-        var cells = RT_PIPE_GROUPS.map(function (s, i) {
-          var items = (trail || []).filter(function (t) {
-            return (t.g | 0) === i;
-          });
+        var cells = RT_PIPE_GROUPS.map((s, i) => {
+          var items = (trail || []).filter((t) => (t.g | 0) === i);
           // 「工具」格是**循环**格：一轮里可能调几十次工具/输出通道。把每一次都
           // 追加成 chip，这格会被撑成一长条，读者反而看不出「现在正在调什么」。
           // 所以它只保留**最新一条**，旧条在同一行视口里向上滚走
@@ -971,10 +1004,8 @@
       function rtAgents(rt) {
         var rootID = rt.agent_id || "";
         var groups = rtOwnerGroups(rt.input_channels || [], rt.residents || [], rootID);
-        var outChans = (rt.channels || []).filter(function (c) {
-          return c.direction === "out" || c.direction === "io";
-        });
-        return groups.map(function (g) {
+        var outChans = (rt.channels || []).filter((c) => c.direction === "out" || c.direction === "io");
+        return groups.map((g) => {
           var id = g.owner || rootID;
           var outputs = [];
           var seen = {};
@@ -987,10 +1018,10 @@
             // 驻留子：优先用父显式授权的输出；没有授权登记时退回它自己 inputch 的
             // 默认回程（`output` 字段）。
             ((g.res && g.res.allowed_outputs) || []).forEach(add);
-            if (!outputs.length) g.list.forEach(function (c) { add(c.output); });
+            if (!outputs.length) g.list.forEach((c) => { add(c.output); });
           } else {
             // 根 agent 可以写任何输出通道；上限交给渲染侧截断。
-            outChans.forEach(function (c) { add(c.name); });
+            outChans.forEach((c) => { add(c.name); });
           }
           var load = g.child
             ? rtLoadPct(
@@ -1060,9 +1091,7 @@
         _rtEdgeIn = {};
         _rtEdgeOut = {};
         function esc(s) {
-          return String(s == null ? "" : s).replace(/[<>&]/g, function (m) {
-            return m === "<" ? "&lt;" : m === ">" ? "&gt;" : "&amp;";
-          });
+          return String(s == null ? "" : s).replace(/[<>&]/g, (m) => m === "<" ? "&lt;" : m === ">" ? "&gt;" : "&amp;");
         }
         function pathD(x1, y1, x2, y2) {
           var mx = (x1 + x2) / 2;
@@ -1073,7 +1102,7 @@
           out.push('<text class="tp-hint" x="8" y="24">' + __("暂无通道 / agent", "no channels / agents") + "</text>");
           y = 44;
         }
-        agents.forEach(function (a) {
+        agents.forEach((a) => {
           var nin = a.inputs.length;
           var nout = Math.min(a.outputs.length, MAX_OUT);
           var rows = Math.max(nin, nout, 1);
@@ -1091,7 +1120,7 @@
           out.push('<rect x="0" y="' + (y - 3) + '" width="3" height="' + (bandH - 4) + '" rx="1.5" fill="' + a.color + '" fill-opacity="0.7"/>');
 
           // 输入通道 → agent
-          a.inputs.forEach(function (c, i) {
+          a.inputs.forEach((c, i) => {
             var ry = inTop + i * ROW + ROW / 2;
             out.push('<rect x="' + IN_X + '" y="' + (ry - BOX_H / 2) + '" width="' + IN_W + '" height="' + BOX_H + '" rx="7" fill="rgba(255,255,255,0.05)" stroke="' + a.color + '" stroke-opacity="0.35"/>');
             out.push('<text class="tp-name" x="' + (IN_X + 10) + '" y="' + (ry + 4) + '">' + esc(rtClip(c.name, IN_W - 44, 12)) + "<title>" + esc(c.name) + "</title></text>");
@@ -1119,7 +1148,7 @@
           }
 
           // agent → 输出通道
-          a.outputs.slice(0, MAX_OUT).forEach(function (name, i) {
+          a.outputs.slice(0, MAX_OUT).forEach((name, i) => {
             var ry = outTop + i * ROW + ROW / 2;
             out.push('<rect x="' + OUT_X + '" y="' + (ry - BOX_H / 2) + '" width="' + OUT_W + '" height="' + BOX_H + '" rx="7" fill="rgba(255,255,255,0.04)" stroke="rgba(255,255,255,0.12)"/>');
             out.push('<text class="tp-name" x="' + (OUT_X + 10) + '" y="' + (ry + 4) + '">' + esc(rtClip(name, OUT_W - 20, 12)) + "<title>" + esc(name) + "</title></text>");
@@ -1161,7 +1190,7 @@
         am.setAttribute("begin", "0s");
         c.appendChild(am);
         svg.appendChild(c);
-        setTimeout(function () { if (c.parentNode) c.parentNode.removeChild(c); }, 950);
+        setTimeout(() => { if (c.parentNode) c.parentNode.removeChild(c); }, 950);
       }
       // 输入：某条 inputch 来消息了（SSE channel_input）。
       function rtSparkInput(source) {
@@ -1192,7 +1221,7 @@
         // 数据没变 → 早退 → 滑块不动，只能等下一次 /runtime 轮询才追上。
         var sig = JSON.stringify([
           sc, residents, channels, inputs, state.pipelinePhase,
-          (state.stageTrail || []).map(function (t) { return t.g + ":" + t.kind + ":" + (t.short || t.label) + "x" + (t.n || 1); }).join(","),
+          (state.stageTrail || []).map((t) => t.g + ":" + t.kind + ":" + (t.short || t.label) + "x" + (t.n || 1)).join(","),
         ]);
         if (sig === _rtSig) return;
         _rtSig = sig;
@@ -1234,7 +1263,7 @@
         h += rtTile(ready, __("排队", "Ready"), "", ready ? Math.min(100, ready * 20) : 0, ready > 0);
         h += rtTile(pending, __("中断", "Pending"), "", pending ? Math.min(100, pending * 25) : 0, pending > 0, pending > 0);
         h += rtTile(stack + "/" + maxStack, __("栈", "Stack"), "", (stack / (maxStack || 4)) * 100, stack > 0);
-        var rFull = residents.filter(function (r) { return r.context_full; }).length;
+        var rFull = residents.filter((r) => r.context_full).length;
         h += rtTile(residents.length, __("子代理", "Subagents"), rFull ? rFull + __("满", " full") : "", residents.length ? Math.min(100, residents.length * 20) : 0, residents.length > 0, rFull > 0);
         h += "</div>";
         // 「累计：入队 … 执行 … 抢占 …」那一整行纯文字被去掉了：它对"现在忙不忙"
@@ -1253,7 +1282,7 @@
         var maxQ = Math.max(1, ready, q[1] || 0, q[2] || 0, q[3] || 0, q[4] || 0);
         var maxReg = 1;
         var maxPre = 1;
-        RT_LEVELS.forEach(function (L) {
+        RT_LEVELS.forEach((L) => {
           maxReg = Math.max(maxReg, byLv[L.lv] || 0);
           maxPre = Math.max(maxPre, preLv[L.lv] || 0);
         });
@@ -1262,7 +1291,7 @@
         // 五个**等大表框**（四级中断 + 一条排队），与阶段管道同一套视觉语言。
         // 此前是五行扁条，四级中断全为 0 时四行几乎全是空白，又占高度又难看。
         h += '<div class="rt-queues">';
-        RT_LEVELS.forEach(function (L) {
+        RT_LEVELS.forEach((L) => {
           var depth = q[L.lv] || 0;
           var reg = byLv[L.lv] || 0;
           var pre = preLv[L.lv] || 0;
@@ -1298,7 +1327,7 @@
         h += rtSlider(stack, maxStack, __("深度", "depth"), stack + " / " + maxStack);
         if (frames.length) {
           h += '<div class="rt-stack">';
-          frames.forEach(function (f, i) {
+          frames.forEach((f, i) => {
             var t = (f && f.task) || {};
             h += '<div class="rt-frame">' + escHtml(t.kind || "") + " #" + (t.id || "?") +
               '<span class="rt-frame-top">L' + (t.level || 0) +
@@ -1340,17 +1369,17 @@
       // 界面最终状态由轮询拉到的数据决定，SSE 只负责让流式看起来即时。
       function startChatTicker() {
         if (state._chatTicker) return;
-        state._chatTicker = setInterval(function () {
+        state._chatTicker = setInterval(() => {
           var tab = document.querySelector("#tab-chat");
           if (tab && tab.classList.contains("active")) {
-            syncChatFromHistory().catch(function () {});
+            syncChatFromHistory().catch(() => {});
           }
         }, 3000);
       }
 
       function startRuntimeTicker() {
         if (state._runtimeTicker) return;
-        state._runtimeTicker = setInterval(function () {
+        state._runtimeTicker = setInterval(() => {
           var tab = document.querySelector("#tab-overview");
           if (tab && tab.classList.contains("active")) {
             loadRuntime();
@@ -1417,11 +1446,20 @@
             ovKpi("docs", OV_ICONS.file, __("文档", "Docs")) +
             ovKpi("runtime", OV_ICONS.cpu, __("运行时", "Runtime")) +
             '</div></div>' +
+            // 星图搬到主页：作为总览的门面，跟随 agent 活动脉动。
             // 开源许可单独成框：之前在 KPI 卡底部只是一行小链接（.ov-foot），
             // 几乎看不见，也看不出是许可证还是别的什么。
+            '<div class="card"><h2>' +
+            __("记忆星图", "Memory Star Map") +
+            ' <span class="badge" id="sm-home-badge" style="font-size:10px;font-weight:400"></span></h2>' +
+            '<div id="sm-container-home" style="height:360px"></div></div>' +
             '<div class="card" id="ov-legal"></div>';
         }
         updateOverview();
+        // 星图在主页常驻：容器已建好，首次就拉数据 + 初始化 3D。
+        if (document.getElementById("sm-container-home") && !state.starmapInit) {
+          renderChatStarmap();
+        }
       }
 
       function ovSet(id, text) {
@@ -1738,7 +1776,7 @@
         tpl.innerHTML = html;
         var next = Array.prototype.slice.call(tpl.children);
         var existing = {};
-        Array.prototype.forEach.call(container.children, function (n) {
+        Array.prototype.forEach.call(container.children, (n) => {
           var k = n.getAttribute && n.getAttribute("data-key");
           if (k) existing[k] = n;
         });
@@ -1778,7 +1816,7 @@
           msgsEl._stickBound = true;
           msgsEl.addEventListener(
             "scroll",
-            function () {
+            () => {
               state.chatStick =
                 msgsEl.scrollHeight - msgsEl.scrollTop - msgsEl.clientHeight <
                 80;
@@ -1791,7 +1829,7 @@
           );
           msgsEl.addEventListener(
             "load",
-            function () {
+            () => {
               if (state.chatStick === true) {
                 msgsEl.scrollTop = msgsEl.scrollHeight;
               }
@@ -1802,7 +1840,7 @@
         var msgs = state.messages;
         var sig =
           msgs
-            .map(function (m) {
+            .map((m) => {
               var c = m.content || "";
               return (
                 (m.role || "") +
@@ -1812,9 +1850,7 @@
                 c.slice(-40) +
                 ":" +
                 (m.tool_calls || [])
-                  .map(function (t) {
-                    return (t.tool || t.name || "") + "/" + (t.status || "");
-                  })
+                  .map((t) => (t.tool || t.name || "") + "/" + (t.status || ""))
                   .join(",")
               );
             })
@@ -1835,7 +1871,7 @@
         if (state.chatLoading) {
           var lastM = msgs.length ? msgs[msgs.length - 1] : null;
           if (lastM && lastM.role === "assistant") {
-            (lastM.tool_calls || []).forEach(function (tc) {
+            (lastM.tool_calls || []).forEach((tc) => {
               if (!tc.result && tc.status !== "denied") {
                 var nm = tc.tool || tc.name || "";
                 if (newPending.indexOf(nm) === -1) newPending.push(nm);
@@ -1843,9 +1879,7 @@
             });
           }
         }
-        var newlyDone = prevPending.filter(function (n) {
-          return newPending.indexOf(n) === -1;
-        });
+        var newlyDone = prevPending.filter((n) => newPending.indexOf(n) === -1);
         msgsEl._lastPending = newPending;
         var streamingLast = !!(
           state.chatLoading &&
@@ -1855,7 +1889,7 @@
         );
         function pillHtml() {
           var s = "";
-          newPending.forEach(function (nm) {
+          newPending.forEach((nm) => {
             var anim = prevPending.indexOf(nm) !== -1 ? "" : " pill-in";
             s +=
               '<span class="thinking-tool' +
@@ -1879,7 +1913,7 @@
             ) +
             "</p></div>";
         } else {
-          msgs.forEach(function (m, i) {
+          msgs.forEach((m, i) => {
             var _k = chatMsgKey(m);
             var role = m.role || "user";
             var c = m.content || "";
@@ -1959,7 +1993,7 @@
             }
             var tcs = "";
             if (m.tool_calls && m.tool_calls.length > 0) {
-              m.tool_calls.forEach(function (tc) {
+              m.tool_calls.forEach((tc) => {
                 var argsStr =
                   typeof tc.args === "object"
                     ? JSON.stringify(tc.args, null, 1)
@@ -2136,7 +2170,7 @@
           var last = msgs.length ? msgs[msgs.length - 1] : null;
           if (last && last.role === "assistant" && !last._final) {
             if (_rerenderTimer) return; // 已有排程的增量更新
-            _rerenderTimer = setTimeout(function () {
+            _rerenderTimer = setTimeout(() => {
               _rerenderTimer = null;
               renderChatStreamChunk();
             }, 90);
@@ -2145,7 +2179,7 @@
         }
         // 非流式（完成/工具/历史变化）：全量重渲（含防抖合并）
         if (_rerenderTimer) clearTimeout(_rerenderTimer);
-        _rerenderTimer = setTimeout(function () {
+        _rerenderTimer = setTimeout(() => {
           _rerenderTimer = null;
           renderChat();
           if (full) {
@@ -2263,8 +2297,11 @@
         }
       }
 
+      // renderChatStarmap：把星图挂到**当前活跃的容器**上。
+      // 容器优先级：独立星图页签 > 总览页小图 > 聊天面板。
+      // 同一套 three.js renderer 在容器间搬运 canvas，不重建场景。
       function renderChatStarmap() {
-        var cont = document.getElementById("sm-container-chat");
+        var cont = starmapActiveContainer();
         if (!cont) return;
         if (
           window._THREE_FAILED ||
@@ -2348,13 +2385,19 @@
       }
 
       function initChatStarmap() {
-        var cont = document.getElementById("sm-container-chat");
+        // 容器可以是独立星图页签 / 总览页 / 聊天面板 —— 同一套 renderer
+        // 会在多个容器间搬运 canvas（appendChild 即可）。
+        var cont = starmapActiveContainer();
         if (!cont) return;
         var rect = cont.getBoundingClientRect();
         var w = Math.max(rect.width || 300, 100);
         var h = Math.max(rect.height || 250, 100);
         if (starmapRen) {
           starmapRen.setSize(w, h);
+          // 换父节点前先把旧角标从旧容器里拨掉，否则它会残留在旧位置。
+          if (starmapLabelEl && starmapLabelEl.parentElement === cont) {
+            starmapLabelEl.style.display = "none";
+          }
           cont.appendChild(starmapRen.domElement);
           starmapRen.domElement.style.display = "block";
           return;
@@ -2384,19 +2427,40 @@
         starmapScene.add(dl);
         createStarField();
         createNebula();
+        // 共享几何（低规格）：所有节点/光晕球复用这两份。
+        starmapGeo = new THREE.SphereGeometry(0.5, 8, 6);
+        starmapGlowGeo = new THREE.SphereGeometry(1.0, 8, 6);
         buildChatStarmapGraph();
         starmapRen.domElement.addEventListener("mousemove", onStarmapMove);
         starmapRen.domElement.addEventListener("click", onStarmapClick);
         window.addEventListener("resize", onStarmapResize);
         if (starmapRaf) cancelAnimationFrame(starmapRaf);
         starmapAnimate();
+        // 活动数据源：/runtime 3s + /memory/graph/pulse 10s。
+        // 只在星图真正初始化后启动，避免在隐藏页签空跑。
+        starmapStartActivity();
+      }
+
+      // starmapStartActivity 启动两路活动轮询（幂等）。
+      function starmapStartActivity() {
+        if (state.starmapPulseTimer) return;
+        starmapPullActivity();
+        starmapPullPulse();
+        state.starmapPulseTimer = setInterval(() => {
+          starmapPullActivity();
+        }, 3000);
+        var pulseTimer = setInterval(() => {
+          starmapPullPulse();
+        }, 10000);
+        // 两个 id 合并到一个字段会导致 setInterval 被覆盖，这里分开记。
+        state.starmapActivityTimer = pulseTimer;
       }
 
       function buildChatStarmapGraph() {
-        starmapNodeMeshes.forEach(function (m) {
+        starmapNodeMeshes.forEach((m) => {
           starmapScene.remove(m);
         });
-        starmapEdgeLines.forEach(function (l) {
+        starmapEdgeLines.forEach((l) => {
           starmapScene.remove(l);
         });
         starmapNodeMeshes = [];
@@ -2404,23 +2468,19 @@
         if (starmapNodes.length === 0) return;
         // Calculate node degrees for leaf node detection
         var nodeDegs = {};
-        starmapNodes.forEach(function (n) {
+        starmapNodes.forEach((n) => {
           nodeDegs[n.id] = 0;
         });
-        starmapEdges.forEach(function (e) {
+        starmapEdges.forEach((e) => {
           nodeDegs[e.source_id] = (nodeDegs[e.source_id] || 0) + 1;
           nodeDegs[e.target_id] = (nodeDegs[e.target_id] || 0) + 1;
         });
         var nodeMap = {};
-        starmapNodes.forEach(function (n) {
+        starmapNodes.forEach((n) => {
           nodeMap[n.id] = n;
         });
-        var sorted = starmapNodes.slice().sort(function (a, b) {
-          return (b.mention_count || 0) - (a.mention_count || 0);
-        });
-        var mc = sorted.map(function (n) {
-          return n.mention_count || 0;
-        });
+        var sorted = starmapNodes.slice().sort((a, b) => (b.mention_count || 0) - (a.mention_count || 0));
+        var mc = sorted.map((n) => n.mention_count || 0);
         var maxMc = Math.max(...mc, 1),
           minMc = Math.min(...mc, 0),
           rng = maxMc - minMc || 1;
@@ -2430,7 +2490,7 @@
           maxR = 80;
         var total = sorted.length;
         var acc = 0;
-        sorted.forEach(function (n, i) {
+        sorted.forEach((n, i) => {
           var m = n.mention_count || 0,
             mn = rng > 0 ? (m - minMc) / rng : 0;
           var radius = baseR + mn * (maxR - baseR);
@@ -2447,12 +2507,10 @@
           };
         });
         // Leaf nodes (degree 1) reposition near parent
-        sorted.forEach(function (n) {
+        sorted.forEach((n) => {
           var deg = nodeDegs[n.id] || 0;
           if (deg !== 1) return;
-          var edge = starmapEdges.find(function (e) {
-            return e.source_id === n.id || e.target_id === n.id;
-          });
+          var edge = starmapEdges.find((e) => e.source_id === n.id || e.target_id === n.id);
           if (!edge) return;
           var parentId =
             edge.source_id === n.id ? edge.target_id : edge.source_id;
@@ -2495,7 +2553,7 @@
             }
           }
           // Attraction along edges
-          starmapEdges.forEach(function (e) {
+          starmapEdges.forEach((e) => {
             var a = pos[e.source_id],
               b = pos[e.target_id];
             if (!a || !b) return;
@@ -2515,7 +2573,7 @@
             }
           });
           // Centering constraint
-          ids.forEach(function (id) {
+          ids.forEach((id) => {
             var p = pos[id];
             var dist = Math.sqrt(p.x * p.x + p.y * p.y + p.z * p.z);
             var maxA = maxR * 1.5;
@@ -2528,90 +2586,101 @@
           });
         }
         // Create nodes
-        starmapNodes.forEach(function (n) {
+        //
+        // ★ 低规格渲染（1151 节点实测后定的方案）：保留**全部**节点，
+        // 但把每节点开销从「一个独立球 + 一个独立球光晕 + 一张 256x64
+        // 文字贴图」降到「共享几何 + 共享材质 + 无常驻文字」。
+        //
+        // 改之前的实际开销（生产实例 1151 节点）：
+        //   - SphereGeometry(16,12) 主球 + 同样规格的光晕球 = 2302 个独立
+        //     BufferGeometry，共约 88 万三角形
+        //   - 每节点一张 256x64 CanvasTexture = 1151 张 <canvas> +
+        //     1151 个纹理，仅文字就吃约 72MB 显存
+        // 这两样在「星图只是个展示」的前提下纯属浪费：星图全图远看根本
+        // 读不清标签（256x64 贴在半径 0.5~2.5 的球上，本来就糊）。
+        //
+        // 现在：共享一份 SphereGeometry(8,6)（约 84 三角形/节点），
+        // 颜色靠每 mesh 的 material.color（材质本身仍每节点一份，
+        // 因为 MeshPhongMaterial 要独立发光强度才能做活动脉冲）。
+        // 标签改为「hover / 选中时才在容器角上显示 HTML 文本」——
+        // 文字清晰度反而比 3D 贴图好，且零显存。
+        starmapNodes.forEach((n) => {
           var p = pos[n.id];
           if (!p) return;
           var mn = n.mention_count || 0,
             mnr = rng > 0 ? (mn - minMc) / rng : 0;
           var rad = 0.5 + mnr * 2.0;
-          var col = smTypeColors[n.type] || 0xcccccc;
+          // 服务端 type 是首字母大写（"Concept" / "Person" …），
+          // 原 smTypeColors 的键全是小写，永远匹配不上 ⇒ 全图单色 0xcccccc。
+          // 这里统一小写归一化，并补上服务端实际会产出的类型。
+          var col = smTypeColors[String(n.type || "").toLowerCase()] || 0xcccccc;
           var ei = 0.3 + mnr * 0.7;
-          var g = new THREE.SphereGeometry(rad, 16, 12);
           var mat = new THREE.MeshPhongMaterial({
             color: col,
             emissive: col,
             emissiveIntensity: ei,
             shininess: 30,
           });
-          var mesh = new THREE.Mesh(g, mat);
+          var mesh = new THREE.Mesh(starmapGeo, mat);
           mesh.position.set(p.x, p.y, p.z);
+          mesh.scale.setScalar(rad / 0.5); // 共享几何半径 0.5，按需缩放
           mesh.userData.nodeData = n;
           mesh.userData.nodeId = n.id;
           mesh.userData.baseEmissive = ei;
-          // Glow sphere
-          var gr = rad * 1.2 + mnr * 0.5;
-          var gg = new THREE.SphereGeometry(gr, 16, 12);
+          mesh.userData.baseScale = rad / 0.5;
+          mesh.userData.baseGlow = 0.12 + mnr * 0.08;
+          // Glow sphere：共享几何 + 各自材质（发光强度要独立才能做脉冲）
           var gm = new THREE.MeshBasicMaterial({
             color: col,
             transparent: true,
-            opacity: 0.12 + mnr * 0.08,
+            opacity: mesh.userData.baseGlow,
             side: THREE.BackSide,
             blending: THREE.AdditiveBlending,
           });
-          var gs = new THREE.Mesh(gg, gm);
+          var gs = new THREE.Mesh(starmapGlowGeo, gm);
+          gs.scale.setScalar(rad * 1.2 + mnr * 0.5);
           mesh.add(gs);
           mesh.userData.glowSphere = gs;
-          // Label sprite
-          var canvas = document.createElement("canvas");
-          canvas.width = 256;
-          canvas.height = 64;
-          var ctx = canvas.getContext("2d");
-          ctx.clearRect(0, 0, 256, 64);
-          ctx.font = "Bold 24px Courier New";
-          ctx.textAlign = "center";
-          ctx.textBaseline = "middle";
-          ctx.shadowColor = "#aaccff";
-          ctx.shadowBlur = 8;
-          ctx.fillStyle = "#ffffff";
-          ctx.fillText((n.name || n.id).substring(0, 12), 128, 32);
-          var tex = new THREE.CanvasTexture(canvas);
-          tex.needsUpdate = true;
-          var spMat = new THREE.SpriteMaterial({
-            map: tex,
-            transparent: true,
-            opacity: 0.9,
-            depthTest: false,
-            depthWrite: false,
-            blending: THREE.AdditiveBlending,
-          });
-          var sprite = new THREE.Sprite(spMat);
-          sprite.scale.set(8, 2, 1);
-          sprite.position.y = rad + 2;
-          mesh.add(sprite);
+          // 名字不再烘成贴图；hover 时由 onStarmapMove 写进角标。
           starmapScene.add(mesh);
           starmapNodeMeshes.push(mesh);
         });
         // Create edges
-        starmapEdges.forEach(function (e) {
+        //
+        // 866 条边原本每条一个 BufferGeometry + Line + LineBasicMaterial
+        // （866 个 draw call）。改为**按关系类型分组**的少量 LineSegments：
+        // 同类型边合并成一个几何体，draw call 从 866 降到「关系类型数」
+        // （生产实例实测 6 种左右）。
+        //
+        // 副作用：单条边不再能单独点选。星图此前也没有点选边的交互
+        // （onStarmapClick 只处理节点），所以这是纯粹的成本削减。
+        var edgeByColor = {};
+        starmapEdges.forEach((e) => {
           var a = pos[e.source_id],
             b = pos[e.target_id];
           if (!a || !b) return;
           var col =
             smEdgeColors[e.relation_type] || smEdgeColors[e.type] || 0x444466;
-          var pts = [
-            new THREE.Vector3(a.x, a.y, a.z),
-            new THREE.Vector3(b.x, b.y, b.z),
-          ];
-          var geo = new THREE.BufferGeometry().setFromPoints(pts);
+          var k = String(col);
+          if (!edgeByColor[k]) edgeByColor[k] = { col: col, pts: [] };
+          edgeByColor[k].pts.push(a.x, a.y, a.z, b.x, b.y, b.z);
+        });
+        Object.keys(edgeByColor).forEach((k) => {
+          var g = edgeByColor[k];
+          if (!g.pts.length) return;
+          var geo = new THREE.BufferGeometry();
+          geo.setAttribute(
+            "position",
+            new THREE.Float32BufferAttribute(g.pts, 3),
+          );
           var mat = new THREE.LineBasicMaterial({
-            color: col,
+            color: g.col,
             transparent: true,
             opacity: 0.4,
           });
-          var line = new THREE.Line(geo, mat);
-          line.userData = { edgeId: e.id, edgeData: e };
-          starmapScene.add(line);
-          starmapEdgeLines.push(line);
+          var seg = new THREE.LineSegments(geo, mat);
+          starmapScene.add(seg);
+          starmapEdgeLines.push(seg);
         });
       }
 
@@ -2640,7 +2709,7 @@
       // 提示用户回复可能已生成、可刷新查看历史。避免回合永久卡在 loading。
       function armTurnWatchdog() {
         if (state._turnWatchdog) clearTimeout(state._turnWatchdog);
-        state._turnWatchdog = setTimeout(function () {
+        state._turnWatchdog = setTimeout(() => {
           state._turnWatchdog = null;
           if (state.chatLoading) {
             endChatTurn();
@@ -2663,14 +2732,14 @@
         var panel = document.getElementById("chat-panel-chat");
         if (!panel || panel.__dnd) return;
         panel.__dnd = true;
-        panel.addEventListener("dragover", function (e) {
+        panel.addEventListener("dragover", (e) => {
           e.preventDefault();
           panel.style.outline = "2px dashed var(--accent, #4a90d9)";
         });
-        panel.addEventListener("dragleave", function () {
+        panel.addEventListener("dragleave", () => {
           panel.style.outline = "";
         });
-        panel.addEventListener("drop", function (e) {
+        panel.addEventListener("drop", (e) => {
           e.preventDefault();
           panel.style.outline = "";
           if (e.dataTransfer.files && e.dataTransfer.files.length) {
@@ -2678,7 +2747,7 @@
           }
         });
         // 粘贴截图/复制的文件直接发送
-        document.addEventListener("paste", function (e) {
+        document.addEventListener("paste", (e) => {
           var chatVisible =
             document.getElementById("chat-panel-chat") &&
             document.getElementById("chat-input");
@@ -2751,7 +2820,7 @@
         // 触发式 POST：短超时仅确认受理；回复靠 SSE 流式渲染（对齐 GUI 行为）。
         try {
           var ctrl = new AbortController();
-          var ackTimer = setTimeout(function () {
+          var ackTimer = setTimeout(() => {
             ctrl.abort();
           }, 15000);
           var r = null;
@@ -2893,9 +2962,7 @@
               __("实体", "Entities") +
               '</span><span class="val">' +
               entities
-                .map(function (e) {
-                  return escHtml(e.name || e.id || "");
-                })
+                .map((e) => escHtml(e.name || e.id || ""))
                 .join(", ") +
               "</span></div>";
           }
@@ -2960,7 +3027,7 @@
           );
         }
         var html = "";
-        views.forEach(function (v) {
+        views.forEach((v) => {
           html += '<div class="know-item" style="padding:6px 0;border-bottom:1px solid var(--border-color)">';
           html += '<div style="display:flex;gap:6px;align-items:baseline">';
           html += '<strong style="font-size:12px;flex:1;word-break:break-all">' + knowEsc(v.name) + "</strong>";
@@ -2976,7 +3043,7 @@
           html += "</div>";
           if (v.media && v.media.length) {
             html += '<div style="font-size:10px;opacity:.7;margin-top:2px">';
-            v.media.forEach(function (m) {
+            v.media.forEach((m) => {
               var kind = m.kind || "file";
               html +=
                 '<span style="margin-right:6px">[' + knowEsc(kind) + "] " + knowEsc(m.digest.slice(0, 8)) + "…</span>";
@@ -3004,7 +3071,7 @@
       function renderKnowTree(node, depth) {
         var html = "";
         // 本节点的条目
-        (node.items || []).forEach(function (it) {
+        (node.items || []).forEach((it) => {
           html +=
             '<div style="padding-left:' +
             (depth * 12 + 4) +
@@ -3020,7 +3087,7 @@
             "</div>";
         });
         // 子分类
-        (node.children || []).forEach(function (c) {
+        (node.children || []).forEach((c) => {
           var isCur = _knowCat === c.path;
           var mark = isCur ? "● " : "";
           html +=
@@ -3186,14 +3253,14 @@
           context: document.getElementById("chat-panel-context"),
           knowledge: document.getElementById("chat-panel-knowledge"),
         };
-        Object.keys(panels).forEach(function (k) {
+        Object.keys(panels).forEach((k) => {
           var p = panels[k];
           if (p) p.classList.toggle("active", k === tab);
         });
         if (el) {
           var parent = el.parentElement;
           if (parent) {
-            Array.from(parent.children).forEach(function (ch) {
+            Array.from(parent.children).forEach((ch) => {
               ch.classList.remove("active");
             });
             el.classList.add("active");
@@ -3249,7 +3316,7 @@
         if (!data) return 0;
         if (typeof data.last_seq === "number") return data.last_seq;
         var mx = 0;
-        (data.messages || []).forEach(function (m) {
+        (data.messages || []).forEach((m) => {
           if (m && m.seq > mx) mx = m.seq;
         });
         return mx;
@@ -3270,7 +3337,7 @@
           if (prev && prev._grow) sm._grow = true;
           return sm;
         }
-        list.forEach(function (sm) {
+        list.forEach((sm) => {
           if (!sm) return;
           var seq = sm.seq;
           var found = -1;
@@ -3310,7 +3377,7 @@
           msgs.push(sm);
           changed = true;
         });
-        list.forEach(function (sm) {
+        list.forEach((sm) => {
           if (sm && sm.seq > (state.chatLastSeq || 0)) state.chatLastSeq = sm.seq;
         });
         if (changed) rerenderChat();
@@ -3327,19 +3394,19 @@
         var after = state.chatLastSeq || 0;
         if (!after) {
           // 还没建立游标（首次 / 本地为空）：退回一次性全量，交给已有一致性逻辑
-          return api("/chat/history?limit=" + CHAT_PAGE_SIZE).then(function (data) {
+          return api("/chat/history?limit=" + CHAT_PAGE_SIZE).then((data) => {
             state.chatLastSeq = historyLastSeq(data);
             return mergeChatFromHistory(data);
           });
         }
         return api("/chat/history?after=" + after)
-          .then(function (data) {
+          .then((data) => {
             if (!data) return;
             state.chatLastSeq = historyLastSeq(data) || after;
             applyServerMessages(data.messages || [], false);
             return api("/chat/history?limit=1");
           })
-          .then(function (tail) {
+          .then((tail) => {
             if (tail && tail.messages && tail.messages.length) {
               applyServerMessages(tail.messages.slice(-1), true);
             }
@@ -3394,8 +3461,8 @@
         if (_syncingChat) return Promise.resolve();
         _syncingChat = true;
         return pollChatIncremental()
-          .catch(function () {})
-          .then(function () {
+          .catch(() => {})
+          .then(() => {
             _syncingChat = false;
           });
       }
@@ -3404,7 +3471,6 @@
       // 关键约束：**绝不**用更短的服务端页替换更长的本地列表（那会让用户翻上来的旧页
       // 凭空消失、视口跳回顶部）。
       function mergeChatFromHistory(data) {
-        {
           if (!data || !data.messages || data.messages.length === 0) return;
           var serverMsgs = data.messages;
           var localMsgs = state.messages;
@@ -3469,7 +3535,7 @@
           if (msgsEl) {
             var aiAvatar = '<img src="/mascot.webp" alt="小宅">';
             var userAvatar = '<svg viewBox="0 0 24 24" style="width:16px;height:16px" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><circle cx="12" cy="8" r="4"/><path d="M4 20c0-4 4-6 8-6s8 2 8 6"/></svg>';
-            newMsgs.forEach(function (m) {
+            newMsgs.forEach((m) => {
               var role = m.role || m.Role || "user";
               var c = m.content || m.Content || "";
               if (role === "assistant") c = renderMd(c); else c = escHtml(c);
@@ -3491,7 +3557,6 @@
           Array.prototype.push.apply(state.messages, newMsgs);
           // 同步聊天占位符（如果有新消息但最后一条非 assistant → 显示流式占位）
           syncStreamingPlaceholder();
-        }
       }
       // syncStreamingPlaceholder：同步聊天占位符的可见性
       function syncStreamingPlaceholder() {
@@ -3503,7 +3568,7 @@
         if (showPh && !existing) {
           var aiAvatar = '<img src="/mascot.webp" alt="小宅">';
           var pillHtml = "";
-          (state.pendingTools || []).forEach(function (nm) {
+          (state.pendingTools || []).forEach((nm) => {
             pillHtml += '<span class="thinking-tool"><svg viewBox="0 0 24 24" width="11" height="11" fill="none" stroke="currentColor" stroke-width="2"><path d="M14.7 6.3a4 4 0 0 0-5.4 5.4L3 18l3 3 6.3-6.3a4 4 0 0 0 5.4-5.4l-2.9 2.9-2.5-.6-.6-2.5z"/></svg>' + escHtml(nm) + '</span>';
           });
           msgsEl.insertAdjacentHTML("beforeend", '<div class="msg msg-assistant msg-streaming-ph"><div class="msg-avatar">' + aiAvatar + '</div><div class="msg-content"><div class="msg-bubble"><span class="live-spinner"></span>' + (pillHtml ? '<span class="thinking-tools">' + pillHtml + '</span>' : '') + '</div></div></div>');
@@ -3549,7 +3614,7 @@
           return;
         }
         var html = "";
-        list.forEach(function (t, i) {
+        list.forEach((t, i) => {
           var detailId = "term-detail-" + i;
           var scr = (state.termScreens && state.termScreens[t.id]) || null;
           var running = scr ? scr.running : !!t.running;
@@ -3619,9 +3684,7 @@
         var r = document.getElementById("cmd-list");
         var cnt = document.getElementById("cmd-count-badge");
         if (!r) return;
-        var running = (state.terminals || []).filter(function (t) {
-          return t.running;
-        });
+        var running = (state.terminals || []).filter((t) => t.running);
         if (cnt) cnt.textContent = running.length;
         if (running.length === 0) {
           r.innerHTML =
@@ -3638,7 +3701,7 @@
           "</th><th>" +
           __("运行时长", "Uptime") +
           "</th></tr>";
-        running.forEach(function (t) {
+        running.forEach((t) => {
           var scr = (state.termScreens && state.termScreens[t.id]) || null;
           var out = scr ? scr.output : t.output || "";
           html +=
@@ -3685,13 +3748,15 @@
           return;
         }
         console.log("[SSE] connected");
-        es.addEventListener("agent_output", function (e) {
+        es.addEventListener("agent_output", (e) => {
           try {
             var ev = JSON.parse(e.data);
             var p = ev.payload || {};
             // 光点：agent → 输出通道。总览页拓扑靠它做"消息出去了"的动画；
             // 其它页没有该 SVG，rtSparkOutput 查不到元素就是 no-op。
             if (p.channel) rtSparkOutput(ev.source || "", p.channel);
+            // 星图跟随：agent 输出是一次完整活动的收尾，给一记强脉冲。
+            starmapPulse("output", p.channel || null);
             console.log(
               "[SSE] agent_output received",
               p.content ? p.content.substring(0, 50) : "(empty)",
@@ -3775,7 +3840,7 @@
         });
         // token 级流式增量：逐块追加到当前回复内容（流式生成中）；
         // reset 帧表示轮次作废（用户中断）：定格已显示的部分内容，置 final。
-        es.addEventListener("content_delta", function (e) {
+        es.addEventListener("content_delta", (e) => {
           try {
             var ev = JSON.parse(e.data);
             var p = ev.payload || {};
@@ -3814,7 +3879,7 @@
             rerenderChat();
           } catch (ex) {}
         });
-        es.addEventListener("terminal_output", function (e) {
+        es.addEventListener("terminal_output", (e) => {
           try {
             var ev = JSON.parse(e.data);
             var p = ev.payload || {};
@@ -3837,7 +3902,7 @@
             console.error("[SSE] terminal_output error", ex);
           }
         });
-        es.addEventListener("reasoning", function (e) {
+        es.addEventListener("reasoning", (e) => {
           try {
             var ev = JSON.parse(e.data);
             var p = ev.payload || {};
@@ -3865,7 +3930,7 @@
           } catch (ex) {}
         });
         // token 级流式增量：逐块追加到当前思考内容；reset 帧表示轮次作废
-        es.addEventListener("reasoning_delta", function (e) {
+        es.addEventListener("reasoning_delta", (e) => {
           try {
             var ev = JSON.parse(e.data);
             var p = ev.payload || {};
@@ -3891,7 +3956,7 @@
             rerenderChat();
           } catch (ex) {}
         });
-        es.addEventListener("tool_call", function (e) {
+        es.addEventListener("tool_call", (e) => {
           try {
             var ev = JSON.parse(e.data);
             var p = ev.payload || {};
@@ -3922,13 +3987,16 @@
             var pidx = (state.pendingTools || []).indexOf(p.tool);
             if (pidx !== -1) state.pendingTools.splice(pidx, 1);
             state.chatStage = __("工具调用: ", "Tool: ") + (p.tool || "");
+            // 星图跟随：工具调用是最可靠的活动信号。工具名（如
+            // knowledge_list / qq_send）会拿去匹配相关实体节点并点亮。
+            starmapPulse("tool", p.tool);
             rerenderChat();
           } catch (ex) {
             console.error("[SSE] tool_call error", ex);
           }
         });
         // 注：后端不发布 tool_result 类型事件（工具结果随 EventToolCall 一次发出），无此监听器。
-        es.addEventListener("stage", function (e) {
+        es.addEventListener("stage", (e) => {
           try {
             var ev = JSON.parse(e.data);
             var p = ev.payload || {};
@@ -3954,9 +4022,11 @@
             } else if (phase === "after_output") {
               rtTrailPush(4, "stage", __("本轮完成", "turn complete"), __("完成", "done"));
             }
+            // 星图跟随：阶段推进也作为活动信号（工具名优先匹配节点）。
+            starmapPulse("stage", tool || phase);
             state.pipelinePhase = phase;
             if (state.pipelineTimer) clearTimeout(state.pipelineTimer);
-            state.pipelineTimer = setTimeout(function () {
+            state.pipelineTimer = setTimeout(() => {
               state.pipelinePhase = "";
               if (document.getElementById("rt-sec-pipe")) renderRuntime();
             }, 2500);
@@ -3989,7 +4059,7 @@
         });
         // channel_input：内核在输入进来时另发的一条轻量事件（只带通道名与 agent
         // id，不带正文）。总览页拓扑靠它画"光点进入 agent"。
-        es.addEventListener("channel_input", function (e) {
+        es.addEventListener("channel_input", (e) => {
           try {
             var d = JSON.parse(e.data);
             var src = d.source || "";
@@ -3998,27 +4068,27 @@
             console.error("[SSE] channel_input error", ex);
           }
         });
-        es.onopen = function () {
+        es.onopen = () => {
           console.log("[SSE] connection opened");
         };
-        es.onerror = function (e) {
+        es.onerror = (e) => {
           console.error("[SSE] error", e);
           // 1) 立即 close 阻止浏览器原生自动重连与手动 setTimeout(connectSSE) 双连接竞态
           try { state.eventSource && state.eventSource.close(); state.eventSource = null; } catch(ex){}
           // 2) 连接错误期间可能丢失事件，增量补拉历史（无闪烁）
-          syncChatFromHistory().catch(function(){});
+          syncChatFromHistory().catch(()=> {});
           // 3) 2s 后手动重连（比原 5s 更快恢复）
           setTimeout(connectSSE, 2000);
         };
         // sync_required：Server 因 Last-Event-ID 不在 ring（delta ID / 已到 tip）无法重放，
         // 通知前端增量补拉历史——避免前端空等后续聚合事件导致「消息同步不及时」。
-        es.addEventListener("sync_required", function(e) {
+        es.addEventListener("sync_required", (e) => {
           console.log("[SSE] sync_required received, incremental sync");
-          syncChatFromHistory().catch(function(){});
+          syncChatFromHistory().catch(()=> {});
         });
         // Periodically refresh sidebar data
         if (state._sidebarRefresh) clearInterval(state._sidebarRefresh);
-        state._sidebarRefresh = setInterval(async function () {
+        state._sidebarRefresh = setInterval(async () => {
           try {
             var td = await api("/terminals");
             if (td && td.terminals) state.terminals = td.terminals;
@@ -4075,7 +4145,7 @@
           ) +
           "</div>";
         html += '<div class="svc-list">';
-        svcs.forEach(function (s) {
+        svcs.forEach((s) => {
           var url = s.url || "";
           if (url && token) url += "?__token=" + encodeURIComponent(token);
           var dot = s.ok ? "var(--ok, #22c55e)" : "var(--danger, #d1383d)";
@@ -4163,17 +4233,15 @@
           __("选择 .hmap 文件上传", "Upload .hmap file") +
           "</label></div></div>";
         var disabledNames = {};
-        (state.disabledPlugins || []).forEach(function (d) {
+        (state.disabledPlugins || []).forEach((d) => {
           disabledNames[d.name] = d;
         });
-        var installedNames = (state.installedPlugins || []).map(function (p) {
-          return p.name;
-        });
+        var installedNames = (state.installedPlugins || []).map((p) => p.name);
         var allPluginNames = {};
-        plugins.forEach(function (p) {
+        plugins.forEach((p) => {
           allPluginNames[p.name] = true;
         });
-        state.disabledPlugins.forEach(function (d) {
+        state.disabledPlugins.forEach((d) => {
           allPluginNames[d.name] = true;
         });
         html +=
@@ -4197,12 +4265,10 @@
             "</th><th>" +
             __("操作", "Actions") +
             "</th></tr>";
-          names.forEach(function (name) {
+          names.forEach((name) => {
             var isExternal = installedNames.indexOf(name) >= 0;
             var isDisabled = disabledNames[name];
-            var loaded = plugins.some(function (p) {
-              return p.name === name;
-            });
+            var loaded = plugins.some((p) => p.name === name);
             var statusHtml =
               loaded && !isDisabled
                 ? '<span class="badge badge-green">' +
@@ -4273,7 +4339,7 @@
             "</th><th>" +
             __("操作", "Actions") +
             "</th></tr>";
-          installed.forEach(function (p) {
+          installed.forEach((p) => {
             html +=
               "<tr><td>" +
               escHtml(p.name) +
@@ -4319,7 +4385,7 @@
             tools.length +
             ")</h2>" +
             '<div style="display:flex;flex-wrap:wrap;gap:4px">';
-          tools.forEach(function (t) {
+          tools.forEach((t) => {
             html +=
               '<span class="tool-badge" title="' +
               escHtml(t.description || "") +
@@ -4559,9 +4625,7 @@
         try {
           var r = await api("/kernel");
           var tools = r?.tools || [];
-          var healthTool = tools.find(function (t) {
-            return t.name === "healthcheck";
-          });
+          var healthTool = tools.find((t) => t.name === "healthcheck");
           if (!healthTool) {
             panel.innerHTML =
               '<p style="color:var(--text-secondary)">' +
@@ -4608,12 +4672,8 @@
             "</p>"
           );
         var checks = r.checks || [];
-        var passed = checks.filter(function (c) {
-          return c.pass;
-        }).length;
-        var failed = checks.filter(function (c) {
-          return !c.pass;
-        }).length;
+        var passed = checks.filter((c) => c.pass).length;
+        var failed = checks.filter((c) => !c.pass).length;
         var html =
           '<div style="margin-bottom:12px;display:flex;gap:16px;align-items:center">' +
           '<span class="badge badge-green">' +
@@ -4630,7 +4690,7 @@
           __("总计: ", "Total: ") +
           checks.length +
           "</span></div>";
-        checks.forEach(function (c) {
+        checks.forEach((c) => {
           var passClass = c.pass ? "check-pass" : "check-fail";
           if (c.status === "skip") passClass = "check-skip";
           html +=
@@ -4777,7 +4837,7 @@
           ")</h2>";
         if (k.plugins?.length) {
           html += '<div style="display:flex;flex-wrap:wrap;gap:4px">';
-          k.plugins.forEach(function (p) {
+          k.plugins.forEach((p) => {
             html +=
               '<span class="badge badge-blue">' + escHtml(p.name) + "</span>";
           });
@@ -4804,12 +4864,31 @@
         starmapSelected = null,
         starmapAutoView = true;
       var starmapRaf = null;
+      // 共享几何：1151 节点各自 new SphereGeometry 会产生 1151 个
+      // BufferGeometry（另加同样数量的光晕球）。几何形状对所有节点相同，
+      // 差别只在外层 mesh.scale，故共享一份即可。半径固定 0.5，
+      // 真实半径由 scale 给出（见 buildChatStarmapGraph）。
+      var starmapGeo = null,
+        starmapGlowGeo = null;
+      // 标签角标：hover / 选中时显示的 HTML 元素（零显存，文字清晰）。
+      var starmapLabelEl = null;
+      // smTypeColors 的键必须与**服务端实际产出的 type 字符串小写后**一致。
+      // 服务端默认类型是 "Concept"（首字母大写，见 internal/memory/graph.go），
+      // 原键全为小写 ⇒ 永远匹配不上 ⇒ 1150 个节点全渲染成同一个灰色 0xcccccc，
+      // 分类配色实际上从未生效过。
       var smTypeColors = {
         person: 0x4488ff,
         task: 0xff8844,
         ai: 0xaa44ff,
         concept: 0x44ff88,
         object: 0xff4444,
+        // 服务端还会产出这些（indexer_test 里可见 "Person"/"Location"）
+        location: 0xffaa44,
+        source: 0x8899ff,
+        document: 0xaabbcc,
+        event: 0xff88cc,
+        entity: 0x44ddcc,
+        scene: 0x88ff44,
       };
       var smEdgeColors = {
         喜欢: 0xff6b6b,
@@ -4819,6 +4898,228 @@
         使用: 0xfeca57,
         创建: 0xff9ff3,
       };
+
+      // ===== 星图活动：让图跟上 agent 的动作 =====
+      //
+      // 改之前：starmapAnimate() 只转星空，节点完全静止。现在三路信号：
+      //
+      //  1. starmapPulse(kind)      —— 实时。SSE 的 tool_call / stage /
+      //     agent_output 触发。命中的节点（按工具名匹配已知实体，否则随机
+      //     取一批）做一次扩散涟漪 + 发光冲高。
+      //  2. starmapPullActivity()   —— /runtime 调度器快照，3s。
+      //     ready_queue_depth > 0 ⇒ 图整体「绷紧」（轻微缩放脉冲）；
+      //     interrupts/preempts 上升 ⇒ 高优先级别的红色电弧感闪烁。
+      //  3. starmapPullPulse()      —— /memory/graph/pulse，10s。
+      //     最近变动的实体（新增概念 / mention_count 变化）做一次
+      //     「生长」：从 0 缩放到正常大小，并留下余晖。
+      //
+      // 全部在渲染循环里推进，不额外起定时器。
+      var SM_PULSE_MS = 1400; // 单个脉冲的生命期
+      var SM_RIPPLE_R = 26; // 涟漪最大半径
+
+      // starmapPulse 发出一次活动脉冲。
+      // kind: "tool" | "stage" | "output" | "grow"
+      function starmapPulse(kind, hint) {
+        if (!starmapScene || !starmapNodeMeshes.length) return;
+        var now = Date.now();
+        state.starmapLastPulseAt = now;
+        // 有 hint（工具名/阶段名）时优先点亮名字与提示相关的节点，
+        // 这是「图在跟 agent 动」最直接的体现：调了 knowledge_* 就亮知识节点。
+        var targets = starmapPickPulseTargets(hint);
+        if (!targets.length) return;
+        var life = kind === "grow" ? SM_PULSE_MS * 1.6 : SM_PULSE_MS;
+        targets.forEach((m) => {
+          state.starmapPulses.push({ mesh: m, until: now + life, kind: kind });
+        });
+        // 队列上限：防止密集工具调用时脉冲无限堆积占内存。
+        if (state.starmapPulses.length > 260)
+          state.starmapPulses = state.starmapPulses.slice(-260);
+      }
+
+      // starmapPickPulseTargets 选出该被点亮的节点。
+      // 优先名字/类型命中 hint 的；不足时按 mention_count 补齐（高权重节点
+      // 本身就是最常被 agent 触碰的，用它们代表「整体活动」合理）。
+      //
+      // ★ 匹配必须用「词」而不是子串包含：
+      //   hint="knowledge" 与实体名 "k" / "e" 互为子串，会让半个图谱
+      //   （含 "时"、"会" 这类单字实体）全部命中 ⇒ 脉冲退化成「全图齐亮」，
+      //   既看不出关联，又把队列瞬间打满。浏览器实测：旧写法一次 pulse
+      //   就选中 250 个节点、队列顶到 260 上限。
+      function starmapPickPulseTargets(hint) {
+        var out = [];
+        if (!starmapNodeMeshes.length) return out;
+        if (hint) {
+          var keys = starmapHintTokens(hint);
+          if (keys.length) {
+            for (var i = 0; i < starmapNodeMeshes.length && out.length < 26; i++) {
+              var nd = starmapNodeMeshes[i].userData.nodeData || {};
+              var nm = String(nd.name || "").toLowerCase();
+              var ty = String(nd.type || "").toLowerCase();
+              if (!nm) continue;
+              for (var k = 0; k < keys.length; k++) {
+                var key = keys[k];
+                // 词边界命中：实体名恰好等于该词，或以该词为词首
+                // （如 "knowledge_base" 命中词 "knowledge"）。
+                if (nm === key || nm.indexOf(key + "_") === 0 || ty === key) {
+                  out.push(starmapNodeMeshes[i]);
+                  break;
+                }
+              }
+            }
+          }
+        }
+        // ★ 只有「一个都没匹配上」时才用全局权重节点代表「整体活动」。
+        //   实测（浏览器里跑真数据）：词匹配对 knowledge_list 只命中 1 个，
+        //   但旧的补齐逻辑会把它补到 20 个 —— 于是脉冲看起来仍然是「一大片
+        //   无关节点在亮」，与要修的子串 bug 效果一样，只是换了个成因。
+        //   补齐只保留在真正无匹配的场景（hint 为空，如调度器脉冲）。
+        if (out.length > 0) return out;
+        // 补齐：按 mention_count 降序取靠前且尚未入列的。
+        var sorted = starmapNodeMeshes.slice().sort((a, b) => (
+            (b.userData.nodeData || {}).mention_count -
+            (a.userData.nodeData || {}).mention_count
+          ));
+        for (var j = 0; j < sorted.length && out.length < 8; j++) {
+          if (out.indexOf(sorted[j]) === -1) out.push(sorted[j]);
+        }
+        return out;
+      }
+
+      // starmapHintTokens 把提示词（工具名/阶段名）拆成可匹配的词元。
+      // 例："knowledge_list" → ["knowledge","list"]。
+      // 只保留长度 >= 3 的词：单/双字母词（"a"/"ls"）几乎必然撞上无关
+      // 实体名，匹配它们只会制造噪声。
+      function starmapHintTokens(hint) {
+        var raw = String(hint).toLowerCase().split(/[^a-z0-9\u4e00-\u9fa5]+/);
+        var out = [];
+        for (var i = 0; i < raw.length; i++) {
+          var t = raw[i];
+          if (t.length >= 3 && out.indexOf(t) === -1) out.push(t);
+        }
+        return out;
+      }
+
+      // starmapPullActivity 拉 /runtime，把调度器状态映射成图的整体节奏。
+      function starmapPullActivity() {
+        if (!starmapScene) return;
+        api("/runtime")
+          .then((rt) => {
+            if (!rt || !rt.scheduler) return;
+            var s = rt.scheduler;
+            var prev = state.starmapActivity;
+            state.starmapActivity = s;
+            var pend =
+              (s.ready_queue_depth || 0) +
+              (s.pending_interrupts || 0) +
+              (s.suspend_stack || 0);
+            // 有任务在排队/中断 ⇒ 脉冲，让图「绷紧」。
+            if (pend > 0) starmapPulse("stage", null);
+            // 中断或抢占计数上升 ⇒ 一次强脉冲（高优先级插入）。
+            if (prev) {
+              var dInt =
+                (s.interrupts_by_level || []).reduce((a, b) => a + b, 0) -
+                (prev.interrupts_by_level || []).reduce((a, b) => a + b, 0);
+              var dPre =
+                (s.preempts_by_level || []).reduce((a, b) => a + b, 0) -
+                (prev.preempts_by_level || []).reduce((a, b) => a + b, 0);
+              if (dInt > 0 || dPre > 0) starmapPulse("output", null);
+            }
+          })
+          .catch(() => {});
+      }
+
+      // starmapPullPulse 拉轻量活动端点，把新长出来的节点标记为「生长」。
+      function starmapPullPulse() {
+        if (!starmapScene) return;
+        var since = state.starmapPulseSince || 0;
+        api("/memory/graph/pulse?since=" + since)
+          .then((r) => {
+            if (!r || !r.success || !r.data) return;
+            var now = Math.floor(Date.now() / 1000);
+            state.starmapPulseSince = now - 30; // 30s 重叠，防跨轮漏节点
+            var nodes = r.data.nodes || [];
+            if (!nodes.length) return;
+            var known = 0;
+            nodes.forEach((n) => {
+              var m = starmapNodeMeshes.find((x) => x.userData.nodeId === n.id);
+              if (!m) return; // 全量图里没有（可能刚创建）⇒ 忽略，等下次全量
+              known++;
+              state.starmapGrown[m.userData.nodeId] = Date.now() + SM_PULSE_MS * 2;
+              starmapPulse("grow", n.name);
+            });
+            // 若有新实体但一个都没匹配上，说明全量图过期了，
+            // 下一拍重拉全量（新节点才能出现）。
+            if (known === 0 && nodes.length > 2) starmapDirty = true;
+          })
+          .catch(() => {});
+      }
+
+      // starmapTickActivity 在渲染循环里推进所有脉冲与余晖。
+      function starmapTickActivity(t) {
+        var now = Date.now();
+        var breathe = 0;
+        // 1) 活动脉冲：发光冲高 + 尺寸微扩 + 涟漪环
+        if (state.starmapPulses.length) {
+          var keep = [];
+          for (var i = 0; i < state.starmapPulses.length; i++) {
+            var p = state.starmapPulses[i];
+            if (p.until <= now) {
+              p.mesh.material.emissiveIntensity = p.mesh.userData.baseEmissive;
+              p.mesh.scale.setScalar(p.mesh.userData.baseScale);
+              continue;
+            }
+            keep.push(p);
+            var left = (p.until - now) / SM_PULSE_MS; // 1→0
+            var k = 1 - left; // 0→1
+            var wave = Math.sin(Math.min(1, k) * Math.PI);
+            var amp = p.kind === "output" ? 1.8 : 1.2;
+            p.mesh.material.emissiveIntensity =
+              p.mesh.userData.baseEmissive + wave * amp;
+            p.mesh.scale.setScalar(
+              p.mesh.userData.baseScale * (1 + wave * 0.28),
+            );
+            // 生长：新节点从 0 弹到正常大小
+            if (p.kind === "grow") {
+              var g = Math.min(1, k * 1.4);
+              p.mesh.scale.setScalar(
+                p.mesh.userData.baseScale * (0.15 + 0.85 * g),
+              );
+            }
+          }
+          state.starmapPulses = keep;
+        }
+        // 2) 「生长」余晖：脉冲结束后短暂保留一点亮
+        if (state.starmapGrown) {
+          for (var gid in state.starmapGrown) {
+            if (state.starmapGrown[gid] <= now) {
+              delete state.starmapGrown[gid];
+              continue;
+            }
+            var gm = starmapNodeMeshes.find((x) => x.userData.nodeId == gid);
+            if (gm)
+              gm.material.emissiveIntensity = Math.max(
+                gm.material.emissiveIntensity,
+                gm.userData.baseEmissive + 0.6,
+              );
+          }
+        }
+        // 3) 全局呼吸：距上次活动越近越亮，实现「agent 一忙图就活」
+        var idle = (now - (state.starmapLastPulseAt || 0)) / 4000;
+        breathe = Math.max(0, 1 - idle);
+        if (breathe > 0.01 && starmapNodeMeshes.length) {
+          // 只抽样一部分节点做呼吸，避免每帧改 1151 个材质。
+          var stride = 24;
+          for (var b = 0; b < starmapNodeMeshes.length; b += stride) {
+            var m2 = starmapNodeMeshes[b];
+            if (m2.userData.baseEmissive === undefined) continue;
+            m2.material.emissiveIntensity = Math.max(
+              m2.userData.baseEmissive,
+              m2.userData.baseEmissive + breathe * 0.25,
+            );
+          }
+        }
+        return breathe;
+      }
 
       function createStarField() {
         var c = 3000;
@@ -4872,17 +5173,152 @@
         if (hits.length > 0) {
           var n = hits[0].object;
           if (starmapHovered !== n) {
-            if (starmapHovered) starmapHovered.scale.set(1, 1, 1);
+            // 复位用 baseScale，不能用 set(1,1,1)：节点现在是按 mention_count
+            // 缩放过的（userData.baseScale），置 1 会把大节点缩成最小尺寸。
+            // （这是低规格改造后必须跟着改的一处，旧代码能“跑”是因为那时
+            //  几何体本身就带半径、不靠 scale。）
+            if (starmapHovered)
+              starmapHovered.scale.setScalar(
+                starmapHovered.userData.baseScale || 1,
+              );
             starmapHovered = n;
-            n.scale.set(1.2, 1.2, 1.2);
+            starmapLabelShow(n);
           }
         } else {
           if (starmapHovered) {
-            starmapHovered.scale.set(1, 1, 1);
+            starmapHovered.scale.setScalar(
+              starmapHovered.userData.baseScale || 1,
+            );
             starmapHovered = null;
+            starmapLabelHide();
           }
         }
       }
+
+      // starmapLabelShow/Hide：hover 时在容器角上显示一个 HTML 角标。
+      // 取代原先每节点一张 256x64 CanvasTexture（1151 张贴图 ≈ 72MB 显存），
+      // 文字用 DOM 渲染反而更清楚，且零 GPU 开销。
+      function starmapLabelShow(mesh) {
+        var cont = starmapActiveContainer();
+        if (!cont) return;
+        if (!starmapLabelEl) {
+          starmapLabelEl = document.createElement("div");
+          starmapLabelEl.id = "sm-label";
+        }
+        // 角标必须跟 canvas 在同一个容器里（它是绝对定位在容器上的）。
+        // canvas 换页签搬运时，角标也要跟着搬。
+        if (starmapLabelEl.parentElement !== cont) cont.appendChild(starmapLabelEl);
+        var nd = (mesh && mesh.userData && mesh.userData.nodeData) || {};
+        var nm = nd.name || nd.id || "";
+        starmapLabelEl.textContent =
+          nm + (nd.mention_count ? "  ×" + nd.mention_count : "");
+        starmapLabelEl.style.display = "block";
+      }
+      function starmapLabelHide() {
+        if (starmapLabelEl) starmapLabelEl.style.display = "none";
+      }
+      // starmapContainer 返回当前星图所在的容器（主页或聊天面板任一）。
+      function starmapContainer() {
+        return (
+          document.getElementById("sm-container-home") ||
+          document.getElementById("sm-container-chat")
+        );
+      }
+
+      // starmapActiveContainer 选出「该把星图画在哪」的容器。
+      //
+      // 规则：先看独立星图页签，不存在（该页签还没打开过）就退回总览页，
+      // 再退回聊天面板。为什么要这个优先级：three.js 的 canvas 只能有一个
+      // 父节点，同时往两处渲染就会一边黑屏。每次切页签都把 canvas 搬到
+      // 当前该显示的地方，是单一 renderer 前提下最干净的做法。
+      function starmapActiveContainer() {
+        var tab = document.getElementById("tab-starmap");
+        if (tab && tab.classList.contains("active")) {
+          var c = document.getElementById("sm-container-page");
+          if (c) return c;
+        }
+        var ov = document.getElementById("tab-overview");
+        if (ov && ov.classList.contains("active")) {
+          var h = document.getElementById("sm-container-home");
+          if (h) return h;
+        }
+        return (
+          document.getElementById("sm-container-chat") ||
+          document.getElementById("sm-container-home") ||
+          null
+        );
+      }
+
+      // renderStarmapTab 渲染独立星图页签（只建一次骨架，不重复重建）。
+      function renderStarmapTab() {
+        var host = document.getElementById("tab-starmap");
+        if (!host) return;
+        if (!document.getElementById("sm-container-page")) {
+          var rt = state.runtime || {};
+          var sc = rt.scheduler || {};
+          var pend =
+            (sc.ready_queue_depth || 0) + (sc.pending_interrupts || 0);
+          host.innerHTML =
+            '<div class="card"><h2>' +
+            __("记忆星图", "Memory Star Map") +
+            ' <span class="badge" id="sm-page-stat" style="font-size:10px;font-weight:400"></span></h2>' +
+            '<div id="sm-container-page" style="height:calc(100vh - 260px);min-height:420px"></div>' +
+            '<div style="display:flex;gap:14px;flex-wrap:wrap;margin-top:10px;font-size:11px;color:var(--text-secondary)">' +
+            smLegend("person", __("人物", "Person")) +
+            smLegend("concept", __("概念", "Concept")) +
+            smLegend("object", __("对象", "Object")) +
+            smLegend("location", __("地点", "Location")) +
+            smLegend("source", __("来源", "Source")) +
+            "</div>" +
+            '<div style="margin-top:8px;font-size:11px;color:var(--text-muted)">' +
+            __(
+              "星图跟随 agent 活动脉动：工具调用 / 阶段推进 / 输出 / 调度器繁忙 / 新记忆生长。",
+              "The map pulses with agent activity: tool calls, stage progress, output, scheduler load, new memory.",
+            ) +
+            "</div></div>";
+        }
+        // 页签每次激活都把 canvas 搬过来 + 重新按容器尺寸 resize。
+        if (document.getElementById("sm-container-page")) {
+          if (!state.starmapInit && !state.starmapLoading)
+            loadChatStarmapData();
+          else if (starmapRen) {
+            var cont = document.getElementById("sm-container-page");
+            if (starmapRen.domElement.parentElement !== cont) {
+              cont.appendChild(starmapRen.domElement);
+              starmapRen.domElement.style.display = "block";
+            }
+            onStarmapResize();
+          }
+        }
+        smUpdateStat();
+      }
+
+      // smLegend 生成图例小项。
+      function smLegend(key, label) {
+        var col = smTypeColors[key] || 0xcccccc;
+        var hex = "#" + ("0000" + col.toString(16)).slice(-6);
+        return (
+          '<span style="display:inline-flex;align-items:center;gap:5px">' +
+          '<i style="width:9px;height:9px;border-radius:50%;background:' +
+          hex +
+          ';display:inline-block"></i>' +
+          escHtml(label) +
+          "</span>"
+        );
+      }
+
+      // smUpdateStat 在星图页签头部显示节点/边/活动状态。
+      function smUpdateStat() {
+        var el = document.getElementById("sm-page-stat");
+        if (!el) return;
+        var act = state.starmapActivity;
+        var busy = act && (act.ready_queue_depth || act.pending_interrupts);
+        var txt = starmapNodes.length + " " + __("节点", "nodes");
+        if (starmapEdges.length) txt += " / " + starmapEdges.length + " " + __("关系", "edges");
+        if (busy) txt += " · " + __("调度中", "busy");
+        el.textContent = txt;
+      }
+
 
       function onStarmapClick(e) {
         if (!starmapRen || !starmapCam) return;
@@ -4907,9 +5343,7 @@
 
       function flyStarmapTo(nodeId, dur) {
         if (!starmapAutoView) return;
-        var m = starmapNodeMeshes.find(function (x) {
-          return x.userData.nodeId === nodeId;
-        });
+        var m = starmapNodeMeshes.find((x) => x.userData.nodeId === nodeId);
         if (!m) return;
         var tp = m.position.clone(),
           sp = starmapCam.position.clone(),
@@ -4919,7 +5353,7 @@
         var t0 = Date.now();
         (function lerp() {
           var t = Math.min((Date.now() - t0) / dur, 1),
-            e = 1 - Math.pow(1 - t, 3);
+            e = 1 - (1 - t) ** 3;
           starmapCam.position.lerpVectors(sp, ep, e);
           starmapCtrl.target.lerpVectors(st, tp, e);
           if (t < 1) requestAnimationFrame(lerp);
@@ -4944,6 +5378,8 @@
         starmapRaf = requestAnimationFrame(starmapAnimate);
         if (starmapCtrl) starmapCtrl.update();
         if (starmapStarField) starmapStarField.rotation.y += 0.0001;
+        // 推进活动脉冲 / 生长 / 呼吸（无活动时开销≈0）。
+        if (starmapNodeMeshes.length) starmapTickActivity();
         if (starmapRen && starmapScene && starmapCam)
           starmapRen.render(starmapScene, starmapCam);
       }
@@ -5007,16 +5443,16 @@
         var ap = document.createElement("span");
         ap.textContent = __("外观", "Appearance");
         if (state.selectedSection === "appearance") ap.className = "active";
-        ap.onclick = function () {
+        ap.onclick = () => {
           state.selectedSection = "appearance";
           renderOneSettings();
         };
         el.appendChild(ap);
-        state.settingsPlugins.forEach(function (p) {
+        state.settingsPlugins.forEach((p) => {
           var a = document.createElement("span");
           a.textContent = pluginDisplayName(p);
           if (p === state.selectedSection) a.className = "active";
-          a.onclick = function () {
+          a.onclick = () => {
             state.selectedSection = p;
             renderOneSettings();
           };
@@ -5031,7 +5467,7 @@
         var theme = document.documentElement.getAttribute("data-theme") || "light";
         var color = localStorage.getItem("ha-color") || "mono";
         var dots = "";
-        Object.keys(PALETTES).forEach(function (k) {
+        Object.keys(PALETTES).forEach((k) => {
           dots +=
             '<button class="ap-dot' + (k === color ? " on" : "") + '" data-c="' + k +
             '" title="' + k + '" style="background:' + PALETTES[k] + '" onclick="pickColor(\'' + k + '\')"></button>';
@@ -5078,9 +5514,7 @@
         }
         var prefix = state.selectedSection + ".";
         var allKeys = Object.keys(state.settings || {});
-        var filtered = allKeys.filter(function (k) {
-          return k === prefix.slice(0, -1) || k.startsWith(prefix);
-        });
+        var filtered = allKeys.filter((k) => k === prefix.slice(0, -1) || k.startsWith(prefix));
         filtered.sort();
         var hideTopLlms = [
           "core.llm.base_url",
@@ -5090,36 +5524,30 @@
           "core.llm.adapter_path",
           "core.llm.thinking_enabled",
         ];
-        var sourceKeys = filtered.filter(function (k) {
-          return k.startsWith("core.llm.sources.");
-        });
+        var sourceKeys = filtered.filter((k) => k.startsWith("core.llm.sources."));
         var sourceMap = {};
-        sourceKeys.forEach(function (k) {
+        sourceKeys.forEach((k) => {
           var parts = k.split(".");
           var srcName = parts[3];
           if (!sourceMap[srcName]) sourceMap[srcName] = {};
           sourceMap[srcName][k] = true;
         });
-        var mcpServerKeys = filtered.filter(function (k) {
-          return (
+        var mcpServerKeys = filtered.filter((k) => (
             k.startsWith("plugin.mcp.servers.") && k.split(".").length >= 5
-          );
-        });
+          ));
         var mcpServerMap = {};
-        mcpServerKeys.forEach(function (k) {
+        mcpServerKeys.forEach((k) => {
           var parts = k.split(".");
           var srvName = parts[3];
           if (!mcpServerMap[srvName]) mcpServerMap[srvName] = {};
           mcpServerMap[srvName][k] = true;
         });
-        var regularKeys = filtered.filter(function (k) {
-          return (
+        var regularKeys = filtered.filter((k) => (
             !k.startsWith("core.llm.sources.") &&
             hideTopLlms.indexOf(k) === -1 &&
             !k.startsWith("plugin.mcp.servers.") &&
             k !== "plugin.mcp.servers"
-          );
-        });
+          ));
         var html =
           '<div class="settings-layout"><div class="settings-tabs"></div><div class="settings-content">';
         if (
@@ -5135,7 +5563,7 @@
             __("暂无设置项", "No settings") +
             "</p></div>";
         } else {
-          regularKeys.forEach(function (k) {
+          regularKeys.forEach((k) => {
             var v = state.settings[k];
             var sv = typeof v === "object" ? JSON.stringify(v) : String(v);
             var m = state.meta?.[k];
@@ -5161,7 +5589,7 @@
                 "</label>";
             } else if (typ === "select") {
               var selOpts = "";
-              opts.forEach(function (o) {
+              opts.forEach((o) => {
                 selOpts +=
                   '<option value="' +
                   o +
@@ -5210,7 +5638,7 @@
             }
             var extra = "";
             if (m?.extra) {
-              m.extra.forEach(function (f) {
+              m.extra.forEach((f) => {
                 var fk = (k ? k + "." : "") + f.key;
                 var fv = state.settings?.[fk];
                 var fph = f.placeholder || __("输入", "Enter ") + f.label;
@@ -5221,7 +5649,7 @@
                 if (f.type === "select") {
                   var fopts = "";
                   if (f.options)
-                    f.options.forEach(function (o) {
+                    f.options.forEach((o) => {
                       fopts +=
                         '<option value="' +
                         o +
@@ -5271,7 +5699,7 @@
           // LLM Sources
           Object.keys(sourceMap)
             .sort()
-            .forEach(function (src) {
+            .forEach((src) => {
               var baseKey = "core.llm.sources." + src;
               var srcData =
                 state.settings?.[baseKey + ".adapter"] ||
@@ -5300,14 +5728,14 @@
               ];
               var headerLabel = mL10n(src, "LLM Source: " + src);
               html += '<div class="card"><h2>' + escHtml(headerLabel) + "</h2>";
-              fields.forEach(function (f) {
+              fields.forEach((f) => {
                 var fk = baseKey + "." + f.key;
                 var fv = state.settings?.[fk] || "";
                 var flabel = f.label;
                 var fieldId = "inp-" + fk.replace(/\./g, "_");
                 if (f.type === "select") {
                   var fopts = "";
-                  f.options.forEach(function (o) {
+                  f.options.forEach((o) => {
                     fopts +=
                       '<option value="' +
                       o +
@@ -5398,7 +5826,7 @@
               "</p></div>";
             Object.keys(mcpServerMap)
               .sort()
-              .forEach(function (srv) {
+              .forEach((srv) => {
                 var baseKey = "plugin.mcp.servers." + srv;
                 var fields = [
                   {
@@ -5419,7 +5847,7 @@
                   },
                 ];
                 html += '<div class="card"><h2>' + escHtml(srv) + "</h2>";
-                fields.forEach(function (f) {
+                fields.forEach((f) => {
                   var fk = baseKey + "." + f.key;
                   var fv = state.settings?.[fk] || "";
                   var fieldId = "inp-" + fk.replace(/\./g, "_");
@@ -5561,17 +5989,15 @@
           adapter_path: "",
           thinking_enabled: "false",
         };
-        var promises = keys.map(function (f) {
-          return api("/settings", {
+        var promises = keys.map((f) => api("/settings", {
             method: "PUT",
             body: JSON.stringify({
               key: "core.llm.sources." + name + "." + f,
               value: values[f],
             }),
-          });
-        });
+          }));
         Promise.all(promises)
-          .then(function () {
+          .then(() => {
             toast(
               __("源", "Source") +
                 ' "' +
@@ -5584,7 +6010,7 @@
             );
             renderAll();
           })
-          .catch(function (e) {
+          .catch((e) => {
             toast(__("创建失败: ", "Create failed: ") + e.message, true);
           });
       }
@@ -5639,17 +6065,15 @@
         }
         var fields = ["command", "url", "args", "env"];
         var values = { command: "", url: "", args: "[]", env: "[]" };
-        var promises = fields.map(function (f) {
-          return api("/settings", {
+        var promises = fields.map((f) => api("/settings", {
             method: "PUT",
             body: JSON.stringify({
               key: "plugin.mcp.servers." + name + "." + f,
               value: values[f],
             }),
-          });
-        });
+          }));
         Promise.all(promises)
-          .then(function () {
+          .then(() => {
             toast(
               "MCP " +
                 __("服务器", "server") +
@@ -5660,7 +6084,7 @@
             );
             renderAll();
           })
-          .catch(function (e) {
+          .catch((e) => {
             toast(__("创建失败: ", "Create failed: ") + e.message, true);
           });
       }
@@ -5727,7 +6151,7 @@
               "</th><th>" +
               __("操作", "Actions") +
               "</th></tr>";
-            adapters.forEach(function (a) {
+            adapters.forEach((a) => {
               html +=
                 "<tr><td>" +
                 escHtml(a.name) +
@@ -5758,7 +6182,7 @@
             "</label>" +
             '<textarea id="adapter-code" rows="12" placeholder="-- ' +
             __("返回一个适配器表", "return an adapter table") +
-            '\nreturn {\n  name = \&quot;openai\&quot;,\n  version = \&quot;1.0\&quot;,\n  transform_request = function(raw) ... end,\n  transform_response = function(raw) ... end,\n}"></textarea>' +
+            '\nreturn {\n  name = &quot;openai&quot;,\n  version = &quot;1.0&quot;,\n  transform_request = function(raw) ... end,\n  transform_response = function(raw) ... end,\n}"></textarea>' +
             '<button class="btn btn-primary" onclick="uploadAdapter()">' +
             __("上传", "Upload") +
             "</button></div>";
@@ -5851,7 +6275,7 @@
 
       renderConfigDisabled();
       // 先加载历史再连 SSE：避免 SSE 事件先到与历史加载顺序不确定导致消息重复/丢失
-      (async function () {
+      (async () => {
         await loadChatHistory();
         renderAll();
         connectSSE();
@@ -5864,6 +6288,6 @@
       // 消息同步轮询兜底：每30秒增量同步 chatHistory，补偿 SSE 断连窗口期
       // 丢失的事件（尤其是非 WebUI 触发的跨渠道消息，如 CLI/QQ/设备桥输出）。
       // syncChatFromHistory 仅追加新消息 DOM 节点，不重建已有消息，无闪烁。
-      setInterval(function () {
-        syncChatFromHistory().catch(function(){});
+      setInterval(() => {
+        syncChatFromHistory().catch(()=> {});
       }, 30000);
