@@ -18,6 +18,7 @@ import (
 	"errors"
 	sdk "gitcode.com/JianFeeeee/HomeAgent/internal/sdk"
 	"net/http"
+	"path"
 )
 
 // 本文件是 WebUI 的骨架：嵌入式前端资源、Handler 结构、构造、路由表、
@@ -25,6 +26,26 @@ import (
 
 //go:embed dashboard.html dashboard.css dashboard.js mascot.webp logo.svg
 var dashboardFS embed.FS
+
+// static/ 放前端第三方库（three.js / OrbitControls / marked / DOMPurify）。
+//
+// ★ 为什么必须 vendor 而不是走 CDN（这是星图「看不了」的直接原因）：
+//
+//	dashboard.html 原先从 cdnjs / jsdelivr 拉这四个库。用户点「星图」
+//	看到「3D 星图不可用（CDN 加载失败）」—— 服务端 curl 同一 URL 是 200，
+//	说明是**浏览器**访问不到公网 CDN（内网 / 出口受限 / 断网）。
+//
+//	换 CDN 只是把同一个赌注重下���遍：HomeAgent 明确支持离线与内网部署，
+//	前端却有 4 个硬依赖在公网上，断网即坏且用户无从修复。
+//
+//	连带的两个理由：
+//	- XSS：DOMPurify 是净化 Markdown 的关键一环，它挂了前端会退化到
+//	  「不净化」分支（见 dashboard.js 的 typeof 检查）—— 那是安全降级。
+//	- 体积：四个库共 ~700KB，embed 进二进制后由本服务同源提供，
+//	  省掉 4 个跨域握手，也不再受第三方可用性影响。
+//
+//go:embed static
+var staticFS embed.FS
 
 var dashboardHTML string
 
@@ -516,6 +537,11 @@ func (h *Handler) RegisterRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("/api/v1/proxy", h.requireAPI(h.handleProxyInfo))
 	// 设备网关发现：客户端（GUI/鸿蒙/waiter）据此自动链接，不再自己拼地址。
 	mux.HandleFunc("/api/v1/device/gateway", h.requireAPI(h.handleDeviceGatewayDiscovery))
+	// 静态资源（页面本体 + 内嵌第三方库）**不要求认证**：
+	// 登录页自身就要加载 CSS 与库才能渲染出来，若加认证则未登录时
+	// 页面连样式都加载不到（503/401），用户看到的是「白屏 + 控制台报错」。
+	// 这类资源不含任何用户数据，公开无害。
+	mux.HandleFunc("/static/", h.handleStaticVendor)
 	mux.HandleFunc("/", h.requireWeb(h.handleStatic))
 }
 
@@ -613,6 +639,31 @@ func (h *Handler) handleLogout(w http.ResponseWriter, r *http.Request) {
 		http.SetCookie(w, &http.Cookie{Name: "homeagent_session", Value: "", Path: "/", Expires: time.Unix(0, 0), MaxAge: -1, HttpOnly: true, SameSite: http.SameSiteLaxMode})
 	}
 	writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
+}
+
+// handleStaticVendor 提供内嵌的第三方前端库（/static/<file>）。
+//
+// 独立于 handleStatic 且**不走 requireWeb**：未登录时页面也要能加载这些库
+// 才能渲染出登录框，否则用户看到白屏（比 401 更难自查）。
+//
+// 用 path.Base 挡目录穿越；文件不存在一律 404（而不是 200 + 空体 ——
+// 空体在浏览器里的症状与 404 完全一样，但日志里更难看出是文件缺失）。
+func (h *Handler) handleStaticVendor(w http.ResponseWriter, r *http.Request) {
+	name := path.Base(r.URL.Path)
+	if name == "" || name == "." || name == "/" {
+		http.NotFound(w, r)
+		return
+	}
+	data, err := staticFS.ReadFile("static/" + name)
+	if err != nil {
+		http.NotFound(w, r)
+		return
+	}
+	// 内容不会变（vendored 固定版本），可长缓存；不用 immutable ——
+	// 将来换库版本时同 URL 的强缓存会让客户端长期用旧文件。
+	w.Header().Set("Content-Type", "application/javascript; charset=utf-8")
+	w.Header().Set("Cache-Control", "public, max-age=86400")
+	w.Write(data)
 }
 
 func (h *Handler) handleStatic(w http.ResponseWriter, r *http.Request) {
