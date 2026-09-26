@@ -65,6 +65,35 @@ func (a *Agent) sceneKeysFor(evt *agentIO.InputEvent, toolName string) []string 
 	return keys
 }
 
+// mergeSceneKeys 把「声明路」与「涌现场景」两路合并成一个**无重复**的场景集合。
+//
+// 为什么需要它：两路各自都去重过（sceneKeysFor 内部有 seen、resolveTurnScenes
+// 内部也有），但**两路之间**没有共同的 seen。而声明路与通道派生路会产出
+// 同一个键（chan:qq 既是声明的、也是从 evt.Source 派生的）——现网日志实测到
+// `scenes=[chan:qq chan:qq]`。
+//
+// 功能上 RecallByScene 内部会再去重，所以这不是 bug，但有两个实际代价：
+// 日志里的 scenes=[...] 会误导排查；每次白走一遍前缀匹配。
+func mergeSceneKeys(declared, emergent []string) []string {
+	out := make([]string, 0, len(declared)+len(emergent))
+	seen := make(map[string]bool, len(declared)+len(emergent))
+	for _, k := range declared {
+		if k == "" || seen[k] {
+			continue
+		}
+		seen[k] = true
+		out = append(out, k)
+	}
+	for _, k := range emergent {
+		if k == "" || seen[k] {
+			continue
+		}
+		seen[k] = true
+		out = append(out, k)
+	}
+	return out
+}
+
 // memoryPassOut 是一次记忆操作（取进来 / 踢出去）的结果。
 type memoryPassOut struct {
 	// Archived 是被归档进文档记忆的低相关 L0 事件数（prune 的输出）。
