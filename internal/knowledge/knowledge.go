@@ -1150,7 +1150,15 @@ func (s *Store) denseHits(queryVec []float64) []scoreHit {
 			out = append(out, scoreHit{id: k.Name, score: score})
 		}
 	}
-	sort.Slice(out, func(i, j int) bool { return out[i].score > out[j].score })
+	// 分数相同时按名字定序：map 迭代顺序随机，缺了这一步同分条目的
+	// 相对次序会随每次调用变化（Search 的主排序早有这条，denseHits 漏了），
+	// 表现为「同样的查询两次给出不同首位」——测试偶发、用户看到结果在跳。
+	sort.Slice(out, func(i, j int) bool {
+		if out[i].score != out[j].score {
+			return out[i].score > out[j].score
+		}
+		return out[i].id < out[j].id
+	})
 	return out
 }
 
