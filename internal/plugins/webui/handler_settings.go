@@ -1,7 +1,6 @@
 package webui
 
 import (
-	"io"
 	"log"
 	"math"
 	"sort"
@@ -212,25 +211,9 @@ func (h *Handler) pluginmgrAddr() string {
 func (h *Handler) proxyToPluginmgr(w http.ResponseWriter, r *http.Request, path string) {
 	addr := h.pluginmgrAddr()
 	url := "http://" + addr + path
-	req, err := http.NewRequestWithContext(r.Context(), r.Method, url, r.Body)
-	if err != nil {
-		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
-		return
-	}
-	req.Header = r.Header.Clone()
-
-	resp, err := http.DefaultClient.Do(req)
-	if err != nil {
-		writeJSON(w, http.StatusBadGateway, map[string]string{"error": err.Error()})
-		return
-	}
-	defer resp.Body.Close()
-
-	for k, v := range resp.Header {
-		w.Header()[k] = v
-	}
-	w.WriteHeader(resp.StatusCode)
-	io.Copy(w, resp.Body)
+	// 与设备网关反代共用同一实现：原来两处各抄一份，于是同一个 bug
+	//（跟随 3xx / 不逐帧 flush / 不透传 X-Forwarded）修了两遍还漏了两处。
+	h.reverseToUpstream(w, r, url, "")
 }
 
 func (h *Handler) handlePlugins(w http.ResponseWriter, r *http.Request) {
