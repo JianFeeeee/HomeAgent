@@ -17,6 +17,33 @@ func getString(m map[string]interface{}, key string) string {
 	return ""
 }
 
+// getBool 从工具参数里取布尔值。
+//
+// 为何不直接 v.(bool)：LLM 的工具参数经 JSON 解码后可能是
+// bool、也可能是字符串（"true"）或数字（1）—— 实际调用里三种都出现过。
+// 只认 bool 会让模型明明传了 true 却走默认值（表现为「参数被无视」，
+// 排查时很难看出是解析问题）。
+func getBool(m map[string]interface{}, key string) (bool, bool) {
+	v, ok := m[key]
+	if !ok {
+		return false, false
+	}
+	switch b := v.(type) {
+	case bool:
+		return b, true
+	case string:
+		switch strings.ToLower(strings.TrimSpace(b)) {
+		case "1", "true", "yes", "on":
+			return true, true
+		case "0", "false", "no", "off":
+			return false, true
+		}
+	case float64:
+		return b != 0, true
+	}
+	return false, false
+}
+
 func getFloat(m map[string]interface{}, key string) float64 {
 	if v, ok := m[key]; ok {
 		switch n := v.(type) {

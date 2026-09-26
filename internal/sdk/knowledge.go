@@ -43,9 +43,20 @@ type KnowledgeAPI interface {
 	AttachMedia(name string, media ...KnowledgeMediaRef) error
 	// ReindexDense 重建稠密向量（模型/维度变化后调用），返回新建与跳过条数。
 	ReindexDense() (built, skipped int)
+	// ImportDir 从目录批量导入知识（复制，不是引用），见 knowledge.ImportDir。
+	//
+	// 放接口里而不是只用内核：子进程插件与外部 agent 拿到知识库后，
+	// "把这份资料灌进来"是常见诉求，不该逼它们回去调内核工具。
+	ImportDir(opt knowledge.ImportOptions) (knowledge.ImportStats, error)
 	// DenseStats 报告稠密路的接线与覆盖情况。
 	DenseStats() map[string]interface{}
 }
+
+// KnowledgeImportOptions 是 ImportDir 的参数（别名，便于外部引用）。
+type KnowledgeImportOptions = knowledge.ImportOptions
+
+// KnowledgeImportStats 是 ImportDir 的结果（别名）。
+type KnowledgeImportStats = knowledge.ImportStats
 
 // KnowledgeMediaRef 是媒体在知识条目中的一等引用。
 //
