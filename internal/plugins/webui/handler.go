@@ -114,6 +114,12 @@ type Handler struct {
 	// 门户可被穿透到公网，登录是唯一的口令入口，必须有滥用防护。
 	loginLimiter *loginLimiter
 
+	// trustedProxies 是受信反代网段（CIDR 或裸 IP）。
+	// 只有来自这些网段的请求，其 X-Forwarded-For 才会被采信用于限流计数。
+	// 为空 = 不采信任何 XFF（保守默认，见 login_limiter.go 的 sourceKey）。
+	// 由设置项 webui.trusted_proxies 配置（逗号分隔）。
+	trustedProxies []string
+
 	sseEvents *sseEventRing // SSE 事件环状缓冲区，Last-Event-ID 重放用
 
 	chatMu      sync.Mutex
@@ -571,12 +577,12 @@ func (h *Handler) handleLogin(w http.ResponseWriter, r *http.Request) {
 	userOK := subtle.ConstantTimeCompare([]byte(body.Username), []byte(username)) == 1
 	passOK := subtle.ConstantTimeCompare([]byte(body.Password), []byte(password)) == 1
 	if !userOK || !passOK {
-		h.loginLimiter.Fail(sourceKey(r))
+		h.loginLimiter.Fail(h.sourceKey(r))
 		writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "用户名或密码错误"})
 		return
 	}
 	// 成功即清零：惩罚只针对持续失败，手滑输错几次不该被记账。
-	h.loginLimiter.Reset(sourceKey(r))
+	h.loginLimiter.Reset(h.sourceKey(r))
 	token, expires, err := h.createSession()
 	if err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})

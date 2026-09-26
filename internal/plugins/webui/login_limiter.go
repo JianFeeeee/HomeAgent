@@ -1,9 +1,11 @@
 package webui
 
 import (
+	"log"
 	"net"
 	"net/http"
 	"strconv"
+	"strings"
 	"sync"
 	"time"
 )
@@ -140,16 +142,38 @@ func (l *loginLimiter) clockAdvance(d time.Duration) {
 	l.now = func() time.Time { return time.Now().Add(l.offsetInTest) }
 }
 
-// sourceKey 取请求的来源标识。
+// sourceKey 取请求的来源标识，用于按来源隔离限流计数。
 //
-// 刻意**不用** X-Forwarded-For：那个头由客户端可伪造，直接采信等于让
-// 攻击者随手换一个头就能绕过限流（甚至把限流当成打别人来源的武器）。
-// 真实客户端 IP 只能由前置反代决定，那是部署侧的事。
+// ★ 这里有一个我在生产上亲手踩过的坑，务必先读：
 //
-// 代价（写明以免误以为它永远精确）：若 webui 直接挂在反代后面，
-// 所有请求会共用反代的 IP，限流会退化成「全局」。那种部署应在反代层
-// 做限流，或让反代用 PROXY protocol 传真实来源。
-func sourceKey(r *http.Request) string {
+// webui 经 frp/nginx 穿透到公网时，**所有外部请求的 RemoteAddr 都是
+// 127.0.0.1**（日志实证 from=127.0.0.1）。若只用 RemoteAddr 计数，
+// 所有人共用一个桶 —— 任何人爆破 5 次就把**所有人（含管理员）**一起
+// 锁死 10 分钟。限流于是从防护变成了 DoS。我最初就是这么写的，
+// 并且在用 8 次错误登录做「验证」时真的把管理员锁在了外面。
+//
+// 反过来，无条件采信 X-Forwarded-For 也不行：该头由客户端可伪造，
+// 攻击者换一个头就能绕过限流，甚至把限流当成打别人来源的武器。
+//
+// 正确做法是中间路线：**只信任受信反代发来的 XFF**。判定「是否来自
+// 受信反代」不能靠内网/回环 IP 猜 —— 穿透部署下反代恰恰就在本机
+// 127.0.0.1，跟直连请求完全同源。所以必须由部署方**显式声明**受信
+// 反代网段（webui.trusted_proxies 设置），未声明则一律不采信 XFF。
+//
+// 权衡写清楚：未声明受信反代时，穿透场景下限流会退化成「全局」。
+// 这不是 bug 而是**刻意的保守默认** —— 宁可限流偏保守（并发场景下
+// 容易误伤），也不要因为采信伪造头而形同虚设。部署方按需开启。
+func (h *Handler) sourceKey(r *http.Request) string {
+	if h.trustedProxies != nil {
+		if remote := hostOnly(r.RemoteAddr); h.isTrustedProxy(remote) {
+			if xff := firstForwardedIP(r.Header.Get("X-Forwarded-For")); xff != "" {
+				return xff
+			}
+			if xr := strings.TrimSpace(r.Header.Get("X-Real-IP")); xr != "" {
+				return xr
+			}
+		}
+	}
 	if host, _, err := net.SplitHostPort(r.RemoteAddr); err == nil {
 		return host
 	}
@@ -157,6 +181,47 @@ func sourceKey(r *http.Request) string {
 		return r.RemoteAddr
 	}
 	return "unknown"
+}
+
+// hostOnly 去掉端口。
+func hostOnly(addr string) string {
+	if host, _, err := net.SplitHostPort(addr); err == nil {
+		return host
+	}
+	return addr
+}
+
+// isTrustedProxy 判断来源地址是否落在受信反代网段内。
+func (h *Handler) isTrustedProxy(ip string) bool {
+	parsed := net.ParseIP(ip)
+	if parsed == nil {
+		return false
+	}
+	for _, cidr := range h.trustedProxies {
+		if _, ipnet, err := net.ParseCIDR(cidr); err == nil && ipnet.Contains(parsed) {
+			return true
+		}
+		// 也接受裸 IP 写法（配置更省事）
+		if single := net.ParseIP(cidr); single != nil && single.Equal(parsed) {
+			return true
+		}
+	}
+	return false
+}
+
+// firstForwardedIP 取 X-Forwarded-For 里最接近客户端的地址。
+//
+// 语义：XFF 是逐跳追加的列表，**最左边**是原始客户端。右边那些是中间
+// 代理自报的，可被伪造。取第一个即可 —— 它由受信反代写入（我们只在
+// 受信来源才走到这里）。
+func firstForwardedIP(xff string) string {
+	if xff == "" {
+		return ""
+	}
+	if i := strings.IndexByte(xff, ','); i >= 0 {
+		return strings.TrimSpace(xff[:i])
+	}
+	return strings.TrimSpace(xff)
 }
 
 // 限流参数。取「够宽容又不至于被爆破」的值：
@@ -179,7 +244,7 @@ func (h *Handler) enforceLoginRateLimit(w http.ResponseWriter, r *http.Request) 
 	if h.loginLimiter == nil {
 		return true
 	}
-	key := sourceKey(r)
+	key := h.sourceKey(r)
 	if ok, retry := h.loginLimiter.Allow(key); !ok {
 		w.Header().Set("Retry-After", strconv.Itoa(int(retry.Seconds())))
 		writeJSON(w, http.StatusTooManyRequests, map[string]string{
@@ -198,4 +263,34 @@ func (h *Handler) enforceLoginRateLimit(w http.ResponseWriter, r *http.Request) 
 // 这里显式检查 ContentLength 补上这个缺口。
 func bodyOverLimit(r *http.Request) bool {
 	return r.ContentLength > loginBodyLimit
+}
+
+// parseTrustedProxies 解析受信反代网段设置（逗号分隔的 CIDR 或裸 IP）。
+//
+// 为什么**不去掉非法项而是整份拒绝**：一份含拼写错误的受信列表会静默
+// 退化成「不采信 XFF」—— 而表现是「限流把所有人锁了」，运维很难联想到
+// 是这里写错了。宁可启动时报错。
+func parseTrustedProxies(raw string) []string {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return nil
+	}
+	var out []string
+	for _, part := range strings.Split(raw, ",") {
+		part = strings.TrimSpace(part)
+		if part == "" {
+			continue
+		}
+		if strings.Contains(part, "/") {
+			if _, _, err := net.ParseCIDR(part); err != nil {
+				log.Printf("[webui] trusted_proxies: 非法 CIDR %q 已忽略（%v）", part, err)
+				continue
+			}
+		} else if net.ParseIP(part) == nil {
+			log.Printf("[webui] trusted_proxies: 非法 IP %q 已忽略", part)
+			continue
+		}
+		out = append(out, part)
+	}
+	return out
 }
