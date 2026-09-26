@@ -257,7 +257,16 @@ func (s *Store) Add(name, content string) error {
 	if category != "" {
 		dirName = sanitize(category) + "/" + dirName
 	}
+	if err := checkSafeName(dirName); err != nil {
+		return err
+	}
 	dir := filepath.Join(s.root, dirName)
+	// 双保险：不得写到知识根之外（否则条目落在根外，重启 scanAll 扫不到，
+	// 变成"内存有、盘上根外"的幽灵条目）
+	rootClean := filepath.Clean(s.root)
+	if dir != rootClean && !strings.HasPrefix(filepath.Clean(dir), rootClean+string(filepath.Separator)) {
+		return fmt.Errorf("knowledge: 拒绝写入知识根之外的路径: %q", name)
+	}
 	if err := os.MkdirAll(dir, 0755); err != nil {
 		return fmt.Errorf("create knowledge dir: %w", err)
 	}
@@ -335,7 +344,18 @@ func (s *Store) Remove(name string) error {
 	defer s.mu.Unlock()
 
 	id := sanitize(name)
+	if err := checkSafeName(id); err != nil {
+		return err
+	}
 	dir := filepath.Join(s.root, id)
+	// 双保险：解析后的路径必须仍在知识根内。sanitize 不过滤 ".."，
+	// 少了这一步，Remove("..") 会 RemoveAll 掉整个数据目录
+	// （实测把 <data> 连同 memory/documents/media 一起删掉），
+	// 且 os.RemoveAll 对不存在的目标返回 nil ⇒ 工具层回报"已删除"。
+	rootClean := filepath.Clean(s.root)
+	if dir != rootClean && !strings.HasPrefix(filepath.Clean(dir), rootClean+string(filepath.Separator)) {
+		return fmt.Errorf("knowledge: 拒绝删除知识根之外的路径: %q", name)
+	}
 	if err := os.RemoveAll(dir); err != nil {
 		return err
 	}
@@ -539,6 +559,24 @@ func (s *Store) scanDir(category, dirName string) {
 		childDir := dirName + "/" + sub.Name()
 		s.scanDir(dirName, childDir)
 	}
+}
+
+// checkSafeName 拒绝会让路径逃出知识根的成分。
+//
+// sanitize 只做小写/去空格/换下划线，**不过滤 ".."**，所以
+// "../../x" 或 ".." 会被 filepath.Join 解析到知识根之外。
+// 这里在拼接之前挡掉：空段、"."、".."，以及以点开头的段
+// （后者会被 scanDir 当隐藏目录跳过，造成"写进去了却扫不回来"）。
+func checkSafeName(name string) error {
+	if strings.TrimSpace(name) == "" {
+		return fmt.Errorf("knowledge: 名称为空")
+	}
+	for _, seg := range strings.Split(name, "/") {
+		if seg == "" || seg == "." || seg == ".." || strings.HasPrefix(seg, ".") {
+			return fmt.Errorf("knowledge: 名称含非法路径段 %q: %q", seg, name)
+		}
+	}
+	return nil
 }
 
 func sanitize(name string) string {
