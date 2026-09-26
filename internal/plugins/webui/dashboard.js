@@ -1644,17 +1644,23 @@
           "</h2>" +
           '<div class="kv-row"><span class="key">' +
           __("项目", "Items") +
-          '</span><span class="val">' +
-          (k?.knowledge?.item_count || "-") +
+          '</span><span class="val" id="know-count">' +
+          (k?.knowledge?.item_count ?? "-") +
           "</span></div>" +
-          '<div style="margin-top:8px">' +
+          '<div style="margin-top:8px;display:flex;gap:4px;flex-wrap:wrap">' +
           '<input id="know-query" placeholder="' +
           __("搜索知识", "Search knowledge") +
+          '" style="flex:1;min-width:120px">' +
+          '<input id="know-category" placeholder="' +
+          __("分类(可选)", "Category (optional)") +
+          '" style="width:110px" title="' +
+          __("限定在该分类子树内，如 tech 会搜 tech/go、tech/rust。留空则搜全库",
+             "Limit search to a category subtree, e.g. tech covers tech/go, tech/rust. Empty searches all") +
           '">' +
           '<button class="btn btn-primary btn-sm" onclick="searchKnowledgeChat()">' +
           __("搜索", "Search") +
           "</button>" +
-          '</div><div id="know-result-chat" style="margin-top:8px;max-height:180px;overflow:auto"></div>' +
+          '</div><div id="know-result-chat" style="margin-top:8px;max-height:220px;overflow:auto"></div>' +
           '<div style="margin-top:12px;border-top:1px solid var(--border-color);padding-top:8px">' +
           '<input id="know-name" placeholder="' +
           __("知识名称", "Knowledge name") +
@@ -1662,9 +1668,12 @@
           '<textarea id="know-content" placeholder="' +
           __("内容", "Content") +
           '" style="min-height:50px;margin-bottom:4px"></textarea>' +
-          '<button class="btn btn-primary btn-sm" onclick="createKnowledgeChat()">' +
+          '<input type="file" id="know-media" multiple accept="image/*,audio/*,video/*,.md,.txt" style="margin-bottom:6px;font-size:11px">' +
+          '<div><button class="btn btn-primary btn-sm" onclick="createKnowledgeChat()">' +
           __("创建", "Create") +
           "</button>" +
+          '<span id="know-media-hint" style="margin-left:6px;font-size:11px;opacity:.7"></span>' +
+          "</div>" +
           "</div></div></div>";
         html += "</div>";
         cont.innerHTML = html;
@@ -2900,56 +2909,180 @@
         }
       }
 
+      // 知识库面板：搜索 / 创建 / 删除 / 刷新计数。
+      //
+      // 此前三处问题：搜索把裸 JSON 直接 stringify 丢进 <pre>（用户看到一坨
+      // 机器码）；创建后不刷新计数（1644 行读的是 state.kernel 快照，创建
+      // 完仍是旧值）；没有任何删除入口，也没有媒体上传。
+      function knowEsc(v) {
+        return String(v == null ? "" : v)
+          .replace(/&/g, "&amp;")
+          .replace(/</g, "&lt;")
+          .replace(/>/g, "&gt;");
+      }
+
+      async function refreshKnowledgeCount() {
+        try {
+          var d = await api("/knowledge");
+          var el = document.getElementById("know-count");
+          if (el && d && d.names) el.textContent = d.names.length;
+          // 稠密路（多模态）状态提示
+          var hint = document.getElementById("know-media-hint");
+          if (hint && d && d.dense) {
+            if (d.dense.enabled) {
+              hint.textContent =
+                __("多模态已就绪 ", "Multimodal ready ") +
+                (d.dense.ready || 0) +
+                "/" +
+                ((d.dense.ready || 0) + (d.dense.stale || 0));
+            } else {
+              hint.textContent = __(
+                "未接入多模态：图片只记录不参与召回",
+                "Multimodal off: images recorded but not searchable",
+              );
+            }
+          }
+        } catch (e) {
+          /* 计数刷新失败不该打断用户操作 */
+        }
+      }
+
+      function renderKnowledgeResults(views, q) {
+        if (!views || !views.length) {
+          return (
+            '<p style="opacity:.7;font-size:12px">' +
+            __("未找到相关知识", "No matching knowledge") +
+            "</p>"
+          );
+        }
+        var html = "";
+        views.forEach(function (v) {
+          html += '<div class="know-item" style="padding:6px 0;border-bottom:1px solid var(--border-color)">';
+          html += '<div style="display:flex;gap:6px;align-items:baseline">';
+          html += '<strong style="font-size:12px;flex:1;word-break:break-all">' + knowEsc(v.name) + "</strong>";
+          if (v.size) {
+            html += '<span style="font-size:10px;opacity:.6">' + v.size + " B</span>";
+          }
+          html +=
+            '<button class="btn btn-sm" style="font-size:10px" onclick="deleteKnowledge(' +
+            JSON.stringify(v.name).replace(/"/g, "&quot;") +
+            ')">' +
+            __("删除", "Delete") +
+            "</button>";
+          html += "</div>";
+          if (v.media && v.media.length) {
+            html += '<div style="font-size:10px;opacity:.7;margin-top:2px">';
+            v.media.forEach(function (m) {
+              var kind = m.kind || "file";
+              html +=
+                '<span style="margin-right:6px">[' + knowEsc(kind) + "] " + knowEsc(m.digest.slice(0, 8)) + "…</span>";
+            });
+            html += "</div>";
+          }
+          if (v.preview) {
+            html +=
+              '<div style="font-size:11px;opacity:.8;margin-top:3px;white-space:pre-wrap;max-height:80px;overflow:auto">' +
+              knowEsc(v.preview) +
+              "</div>";
+          }
+          html += "</div>";
+        });
+        return html;
+      }
+
       async function searchKnowledgeChat() {
         var q = document.getElementById("know-query")?.value;
+        var cat = document.getElementById("know-category")?.value || "";
         var r = document.getElementById("know-result-chat");
-        if (!r || !q) return;
+        if (!r) return;
+        if (!q) {
+          r.innerHTML =
+            '<p style="opacity:.7;font-size:12px">' +
+            __("请输入查询关键词", "Enter a keyword") +
+            "</p>";
+          return;
+        }
         r.innerHTML = '<div class="loading"></div>';
         try {
-          var data = await api("/knowledge?q=" + encodeURIComponent(q));
-          r.innerHTML =
-            '<pre style="font-size:11px">' +
-            escHtml(JSON.stringify(data, null, 2)) +
-            "</pre>";
+          var url = "/knowledge?q=" + encodeURIComponent(q);
+          if (cat) url += "&category=" + encodeURIComponent(cat);
+          var data = await api(url);
+          r.innerHTML = renderKnowledgeResults(data && data.results, q);
         } catch (e) {
           r.innerHTML =
-            '<p style="color:#fca5a5">' +
-            __("搜索失败: ", "Search failed: ") +
-            escHtml(e.message) +
-            "</p>";
+            '<p style="color:#fca5a5">' + __("搜索失败: ", "Search failed: ") + knowEsc(e.message) + "</p>";
+        }
+      }
+
+      async function deleteKnowledge(name) {
+        if (
+          !confirm(
+            __("确定删除知识「", "Delete knowledge \"") + name + __("」？此操作不可撤销。", "\"? This cannot be undone."),
+          )
+        ) {
+          return;
+        }
+        try {
+          await api("/knowledge?name=" + encodeURIComponent(name), { method: "DELETE" });
+          toast(__("知识「", 'Knowledge "') + name + __("」已删除", '" deleted'));
+          refreshKnowledgeCount();
+          searchKnowledgeChat();
+        } catch (e) {
+          toast(__("删除失败: ", "Delete failed: ") + e.message, true);
         }
       }
 
       async function createKnowledgeChat() {
         var name = document.getElementById("know-name")?.value;
         var content = document.getElementById("know-content")?.value;
-        if (!name || !content) {
+        var fileInput = document.getElementById("know-media");
+        var files = fileInput && fileInput.files ? fileInput.files : null;
+        if (!name) {
+          toast(__("名称不能为空", "Name is required"), true);
+          return;
+        }
+        if ((!content || !content.trim()) && (!files || !files.length)) {
           toast(
-            __("名称和内容不能为空", "Name and content cannot be empty"),
+            __("内容与媒体至少要有一项", "Content or media is required"),
             true,
           );
           return;
         }
         try {
-          var r = await api("/knowledge", {
-            method: "POST",
-            body: JSON.stringify({ name: name, content: content }),
-          });
-          if (r.status || r.id) {
-            toast(
-              __("知识「", 'Knowledge "') + name + __("」已创建", '" created'),
-            );
-            document.getElementById("know-name").value = "";
-            document.getElementById("know-content").value = "";
+          var r;
+          if (files && files.length) {
+            // 有文件走 multipart：服务端按**探测到的真实类型**分流，
+            // 图片/音视频入媒体库并按 digest 挂到条目上，文本存正文。
+            var fd = new FormData();
+            fd.append("name", name);
+            if (content) fd.append("content", content);
+            for (var i = 0; i < files.length; i++) fd.append("file", files[i]);
+            r = await api("/knowledge", { method: "POST", body: fd });
           } else {
-            toast(__("创建失败", "Create failed"), true);
+            r = await api("/knowledge", {
+              method: "POST",
+              body: JSON.stringify({ name: name, content: content }),
+            });
           }
+          var msg = __("知识「", 'Knowledge "') + name + __("」已创建", '" created');
+          if (r && r.media) msg += __("，含 ", " with ") + r.media + __(" 个媒体", " media item(s)");
+          if (r && r.rejected && r.rejected.length) {
+            msg += __("；", "; ") + r.rejected.length + __(" 项被跳过", " skipped");
+          }
+          toast(msg);
+          document.getElementById("know-name").value = "";
+          document.getElementById("know-content").value = "";
+          if (fileInput) fileInput.value = "";
+          refreshKnowledgeCount();
         } catch (e) {
           toast(__("创建失败: ", "Create failed: ") + e.message, true);
         }
       }
 
       function switchChatPanel(tab, el) {
+        // 切到知识面板时拉实时计数：面板里的数字来自 state.kernel 快照，
+        // 而知识条目会经工具/上传增删，快照不会自己变（实测创建后仍显示 "-"）。
+        if (tab === "knowledge") refreshKnowledgeCount();
         var panels = {
           chat: document.getElementById("chat-panel-chat"),
           starmap: document.getElementById("chat-panel-starmap"),
