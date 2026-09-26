@@ -410,8 +410,93 @@ PluginContext（独立身份，共享管道）。
 
 ## 七、C 化：已定事项与待拍板事项
 
+### ✅ 已落地：C 基础设施门禁（2026-09-26，`8070844`）
+
+在推进下一刀之前先把地基建起来 —— 没有门禁，每个 C 切片都在裸奔。
+
+| 门禁 | 内容 | 为什么不能省 |
+|---|---|---|
+| `csrc-lint` | gcc+clang × `-Wall -Wextra -Wpedantic -Wshadow -Wconversion`，零告警才过 | C 侧没有 Go 的 vet 等价物，告警是**唯一**静态信号；`-Wconversion` 专门盯 cgo 窄化（`size_t→int` 截断默认静默） |
+| `csrc-abi` | `ha_abi.h` 的 ABI 主/次版本 + 运行期自述 + Go 侧常量，三方交叉断言 | 「签名冻结」原本只写在注释里，注释不参与编译 |
+| `csrc-headers` | 每个 `.h` 能单独编过 | 缺 include 时只在「恰好被别的头先包含」处静默编过 |
+| `csrc-sanitize` | ASan + UBSan 跑契约测试 | C 侧内存错误/UBSan 默认静默（不崩、结果看着对），而零 malloc 设计依赖「无越界写」 |
+| `csrc-cross` | arm64 交叉编译 | `go build` 不等于 C 代码在该架构上能编 |
+| `csrc-fuzz` | libFuzzer：内存安全 + 6 条不变式 | 畸形 UTF-8 等价性正常输入永远测不到，只有随机字节覆盖得到 |
+
+聚合入口 `make check-csrc`（已接进 `make test`）与 `make check-csrc-full`（含模糊测试）。
+
+**地基上线第一小时就抓出 5 个真 bug，全是我自己写的基础设施代码** ——
+这本身就是门禁有效的证据：
+1. `_Static_assert` 是 C11，而项目 CFLAGS 是 `-std=c99`（`-Wpedantic` 报的）
+2. C99 分支 `##msg` 拼接字符串字面量 ⇒ 两个断言共用一个 typedef 名（clang 报的）
+3. bench 用 POSIX `clock_gettime`，而 CMake 刻意 `C_EXTENSIONS OFF` ⇒ 未声明
+4. 头文件缺 include 的静默通过
+5. **Go 不允许在 `_test.go` 里用 cgo**，且 cgo 生成的 `*_Cvar_*` 不是 Go 常量
+
+**验证**（全部当场可复现）：libFuzzer 91s / **3,329,316 次运行 / 零崩溃**；
+变异测试证明门禁不摆设（改 C 宏、或让 Go 常量与 C 函数「一起错成一样」均被判红）；
+双编译器 × c99/c11 零告警；ASan+UBSan PASS；arm64 交叉编译 0 告警；
+全量 `go test -count=1 ./...` **57 包 0 FAIL**；`make build-linux-arm64` → ELF aarch64。
+
+**首次把两类成本分开测**（这是基础设施的核心价值之一）：
+C 侧纯函数基准给出的**函数体成本**与 Go 侧基准里的 **cgo 边界成本（~30ns）** 从此可分离 ——
+否则看到某场景慢，根本分不清该优化 C 函数体、还是该减少跨语言调用次数。
+
+| 场景 | C 函数体（纯 C，无边界） |
+|---|---:|
+| `estimate_tokens` ascii_1k | **121.7 ns / 8.4 GB/s** |
+| `estimate_tokens` zh_1k | 1434 ns / 0.71 GB/s |
+| `truncate_by_tokens` ascii_1k | 134 ns |
+| `truncate_by_tokens` zh_1k | 128 ns |
+
+注：`estimate_tokens` 的**中文与 ASCII 差距 11.8×**（与 Go 侧 bench 注释「zh_1k 3097ns」的
+量级关系一致）。这是「中文字节校验」的固有成本，不是缺陷；但它是下一个切片的输入 ——
+若某热路径以中文为主，优化点在这里，不在 cgo 边界。
+
+### ★ 下一刀的决定：协议编解码层（实测支撑，不再是「哪个看起来底层」）
+
+**为什么是它**：SSE 流式分块解析 `parseOpenAICompatibleStreamChunkFull` 是
+**每个流式 chunk 都要跑一次**的最热路径，而它当前每次付费 12–21 次堆分配：
+
+| 输入（真实负载形状） | ns/op | allocs/op |
+|---|---:|---:|
+| content 块（含中文） | 1937 | 13 |
+| toolcall 块 | **3122** | **21** |
+| usage 块 | 2464 | 12 |
+| 纯字节扫描理论下限 | **133** | 1 |
+
+差距 **15–23×**。会话 1 万块 ⇒ 1–2 万次分配，正是 GC 抖动的来源（C 化的原始动机）。
+
+### ★ `ha_json.c`：**不可直接复用**（原判断「仓库里已有现成实现」已被实测推翻）
+
+SDK 的 `remotedevice/src/ha_json.c`（368 行）经实测有**三个对协议层致命的语义缺陷**：
+
+| # | 缺陷 | 实测 |
+|---|---|---|
+| 1 | **没有 `\u` 解码** | `{"k":"\u4f60\u597d\ud83d\ude00"}` → `?0?d?d?0`（期望 `你好😀`） |
+| 2 | 只有 `ha_json_get_int`，无浮点 | `temperature:0.7` → `0`（注意：`0.7` 的 `int_val` 被**静默**置 0，不是解析失败） |
+| 3 | `null` 与「键缺失」不可区分 | 二者都返回 `NULL` / `def` |
+
+外加架构冲突：它是 **DOM + malloc**，与 ha_codec 的「不 malloc / 零拷贝 / 纯函数」约束正交；
+在热路径用它等于重建刚测出的「每 chunk 十几次分配」。它的定位是
+**remotedevice 设备通道的 JSON**（`ha_json_parse` 注释显示 `\u` 一律写 `'?'`），
+不是 LLM 协议层。
+
+**建议方案：`csrc/` 新建专用 `ha_jsonscan.c`（零分配、span 返回、增量）** ——
+对齐 ha_codec.h 的既有三条设计约束（只吃指针+长度 / 不 malloc / 无状态纯函数）。
+
+不复用 SDK 版的四条理由：
+1. 复用 = 跨仓改动 → SDK 发版 → 两仓版本对齐（违反「双仓绑定」纪律）；
+2. 把内核 LLM 协议层耦合到 SDK 的 remotedevice 设备通道库（架构错位）；
+3. `\u`/浮点/null 三缺陷必须补，补完已等同于重写；
+4. DOM + malloc 与既定约束冲突。
+
+**不建议把内核热路径依赖另一个仓** —— 这是本项的核心理由。
+
+
 第一刀（L1 纯函数层）已落地并闭环（见 §二 P0-1 与
-`docs/zh/c-core/llm-orchestration-c.md`）。下阶段扩大前，有三处**需 jianf 拍板**：
+`docs/zh/c-core/llm-orchestration-c.md`）。基础设施门禁已建成（见上）。
+下阶段扩大前，**三处需 jianf 拍板**（建议已附，见上）：
 
 1. **C 实现放主仓 `csrc/` 还是 SDK `third_party/homeagent-sdk/`？**
    - 当前已在主仓 `csrc/`（`ha_codec.{c,h}` 是权威源，Go 侧符号链接过去）
