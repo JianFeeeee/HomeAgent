@@ -226,3 +226,95 @@ func TestLoginLimiterRetryNeverZero(t *testing.T) {
 		t.Errorf("Retry-After 时长 = %v，必须为正（返回 0 会让客户端立即重试）", retry)
 	}
 }
+
+// ===== 限流的来源识别：穿透部署下不能把所有人算成一个 =====
+//
+// ★ 这是我在生产上亲手踩出来的：加了按 IP 限流后，跑 8 次错误登录做验证，
+// 结果**把管理员自己锁在外面 10 分钟**。
+//
+// 原因：webui 经 frp/nginx 穿透到公网，所有外部请求的 RemoteAddr 都是
+// 127.0.0.1（日志实证：from=127.0.0.1 status=429）。于是所有人共用一个桶，
+// 任何人爆破 5 次，**所有人**（含管理员）一起被锁 —— 限流反而成了 DoS。
+//
+// 正确做法不是「不信 XFF」（那正是我第一版的做法，会退化成全局限流），
+// 而是：**只信任来自受信反代的 X-Forwarded-For**。受信判定不能靠 IP 名单
+// 猜（穿透场景下反代就在本机 127.0.0.1），得由配置显式声明。
+
+// 经受信反代时，必须按 XFF 里的真实客户端 IP 计数。
+func TestLoginRateLimitUsesForwardedForFromTrustedProxy(t *testing.T) {
+	h := newAuthTestHandler(t)
+	h.trustedProxies = []string{"127.0.0.1/32", "::1/128"}
+
+	// 攻击者（XFF 声明的来源）狂刷
+	for i := 0; i < 30; i++ {
+		tryLoginXFF(h, "203.0.113.66", "admin", "bad")
+	}
+	// 受害者：不同的 XFF 声明 + 正确口令 → 不该被牵连
+	if code := tryLoginXFF(h, "198.51.100.23", "admin", testAuthPassword); code != http.StatusOK {
+		t.Errorf("受信反代下，不同真实客户端被牵连（限流退化成全局），实际 %d", code)
+	}
+}
+
+// 不受信来源的 XFF 必须被忽略：否则任何人都能换一个头就绕过限流
+// （甚至把限流当成打别人来源的武器）。
+func TestLoginRateLimitIgnoresUntrustedForwardedFor(t *testing.T) {
+	h := newAuthTestHandler(t)
+	// 显式配置为「无受信反代」
+	h.trustedProxies = nil
+
+	for i := 0; i < 30; i++ {
+		tryLoginXFF(h, "203.0.113.66", "admin", "bad")
+	}
+	// 换一个 XFF 继续试：来源未被认可，应仍然被限流
+	if code := tryLoginXFF(h, "198.51.100.23", "admin", "bad"); code != http.StatusTooManyRequests {
+		t.Errorf("换 XFF 头就绕过了限流，实际 %d —— 说明采信了不可信的 XFF", code)
+	}
+}
+
+// 反代在**同一台机器**上（穿透部署的常态）时，若未配置受信反代，
+// 必须仍能识别不同客户端 —— 否则默认配置就把限流变成了全局锁。
+// 判据：未配置时退化到「有 XFF 就用第一个非内网地址」？不行 —— 那等于
+// 无条件采信。所以这里钉的是另一个行为：**必须显式配置才能生效**，
+// 且未配置时的行为要与「无反代」场景一致（全部算同一个来源）。
+func TestLoginRateLimitNeedsExplicitTrustedProxyConfig(t *testing.T) {
+	h := newAuthTestHandler(t)
+	h.trustedProxies = nil // 未配置
+
+	// 未配置 = 不采信 XFF ⇒ 两个不同 XFF 视为同一来源（127.0.0.1）
+	for i := 0; i < 6; i++ {
+		tryLoginXFF(h, "203.0.113.66", "admin", "bad")
+	}
+	if code := tryLoginXFF(h, "198.51.100.23", "admin", "bad"); code != http.StatusTooManyRequests {
+		t.Errorf("未配置受信反代时，XFF 不应被采信（应视为同一来源），实际 %d", code)
+	}
+}
+
+// tryLoginXFF 带 X-Forwarded-For 的登录。
+func tryLoginXFF(h *Handler, xff, user, pass string) int {
+	body := `{"username":"` + user + `","password":"` + pass + `"}`
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/login", strings.NewReader(body))
+	req.RemoteAddr = "127.0.0.1:54321" // 穿透场景：反代在本机
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("X-Forwarded-For", xff)
+	rec := httptest.NewRecorder()
+	h.Handler().ServeHTTP(rec, req)
+	return rec.Code
+}
+
+// parseTrustedProxies 解析要稳：合法项接受，非法项被丢弃（而不是让整份
+// 配置静默失效）。
+func TestParseTrustedProxies(t *testing.T) {
+	got := parseTrustedProxies(" 127.0.0.1 , 10.0.0.0/8 ,, ::1 ")
+	if len(got) != 3 {
+		t.Errorf("应解析出 3 项，实际 %d: %v", len(got), got)
+	}
+	// 非法项被丢弃
+	got = parseTrustedProxies("127.0.0.1,999.999.999.999,10.0.0.0/33")
+	if len(got) != 1 || got[0] != "127.0.0.1" {
+		t.Errorf("非法项未被丢弃，实际 %v", got)
+	}
+	// 空串 → nil（不采信任何 XFF）
+	if parseTrustedProxies("   ") != nil {
+		t.Error("空白配置应返回 nil（保守默认：不采信 XFF）")
+	}
+}
