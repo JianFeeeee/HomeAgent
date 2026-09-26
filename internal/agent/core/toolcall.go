@@ -8,6 +8,7 @@ import (
 	"time"
 
 	agentAPI "gitcode.com/JianFeeeee/HomeAgent/internal/agent/api"
+	"gitcode.com/JianFeeeee/HomeAgent/internal/knowledge"
 	"gitcode.com/JianFeeeee/HomeAgent/internal/memory"
 	"gitcode.com/JianFeeeee/HomeAgent/internal/memory/document"
 	"gitcode.com/JianFeeeee/HomeAgent/internal/memory/text"
@@ -536,6 +537,30 @@ func (a *Agent) executeSocialTool(tc agentAPI.ToolCall) string {
 	}
 }
 
+// knowledgeMediaRefs 把模型给的 digest 列表解析成知识条目的媒体引用。
+//
+// 复用 doc_commit 的既有约定：digest 可传前缀（ResolvePrefix），解析不了
+// 的跳过而不是报错——模型偶尔会把 digest 记错，不该让整次写入失败。
+// MIME 从媒体存储回读，嵌入时需要（EmbedImageDense 靠它判定模态）。
+func (a *Agent) knowledgeMediaRefs(digests []string) []knowledge.KnowledgeMediaRef {
+	if a.mediaStore == nil || len(digests) == 0 {
+		return nil
+	}
+	var out []knowledge.KnowledgeMediaRef
+	for _, d := range a.resolveMediaDigests(digests) {
+		it, err := a.mediaStore.Stat(d)
+		if err != nil {
+			continue
+		}
+		out = append(out, knowledge.KnowledgeMediaRef{
+			Digest: it.Digest,
+			MIME:   it.MIME,
+			Kind:   string(it.Kind),
+		})
+	}
+	return out
+}
+
 func (a *Agent) executeKnowledgeTool(tc agentAPI.ToolCall) string {
 	if a.knowledge == nil {
 		return "知识库不可用"
@@ -550,7 +575,10 @@ func (a *Agent) executeKnowledgeTool(tc agentAPI.ToolCall) string {
 		if query == "" {
 			return "请输入查询关键词"
 		}
-		results := a.knowledge.Search(query, topK)
+		// 可选分类限定：把召回限制在某棵分类子树内（前缀匹配，见
+		// knowledge.Store.SearchIn）。不传 = 全库。
+		category, _ := tc.Arguments["category"].(string)
+		results := a.knowledge.SearchIn(query, category, topK)
 		if len(results) == 0 {
 			return "未找到相关知识"
 		}
@@ -559,11 +587,9 @@ func (a *Agent) executeKnowledgeTool(tc agentAPI.ToolCall) string {
 			if i >= topK {
 				break
 			}
-			label := k.Name
-			if k.Category != "" {
-				label = k.Category + "/" + k.Name
-			}
-			parts = append(parts, fmt.Sprintf("[%s]\n%s", label, truncateStr(k.Content, 200)))
+			// Name 已是含分类的规范名（"tech/go/并发"），分类前缀就在里面。
+			// 曾经这里再拼一次 Category，输出成 "tech/go/tech/go/并发"（实测）。
+			parts = append(parts, fmt.Sprintf("[%s]\n%s", k.Name, truncateStr(k.Content, 200)))
 		}
 		return strings.Join(parts, "\n---\n")
 
@@ -573,8 +599,15 @@ func (a *Agent) executeKnowledgeTool(tc agentAPI.ToolCall) string {
 		if name == "" || content == "" {
 			return "name 和 content 不能为空"
 		}
-		if err := a.knowledge.Add(name, content); err != nil {
+		// 模型可显式关联已入库的媒体（与 doc_commit 的 media_digests 同形）。
+		// 这些媒体成为知识条目的一等节点：其向量会与正文向量融合，
+		// 使该条目能按图本身被召回，而不依赖任何生成的描述文本。
+		media := a.knowledgeMediaRefs(getStringSlice(tc.Arguments, "media_digests"))
+		if err := a.knowledge.AddWithMedia(name, content, media); err != nil {
 			return fmt.Sprintf("知识创建失败: %v", err)
+		}
+		if len(media) > 0 {
+			return fmt.Sprintf("知识「%s」已创建并向量化索引（%d 字符，%d 个媒体参与跨模态召回）", name, len(content), len(media))
 		}
 		return fmt.Sprintf("知识「%s」已创建并向量化索引（%d 字符）", name, len(content))
 

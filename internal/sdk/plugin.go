@@ -153,6 +153,7 @@ type PluginSDK struct {
 	textMem  TextMemoryAPI
 	docMem   DocMemoryAPI
 	know     KnowledgeAPI
+	media    MediaAPI
 	llm      LLMAPI
 
 	iom       *agentIO.IOManager
@@ -182,7 +183,11 @@ func (s *PluginSDK) Memory() MemoryAPI         { return s.memory }
 func (s *PluginSDK) TextMemory() TextMemoryAPI { return s.textMem }
 func (s *PluginSDK) DocMemory() DocMemoryAPI   { return s.docMem }
 func (s *PluginSDK) Knowledge() KnowledgeAPI   { return s.know }
-func (s *PluginSDK) LLM() LLMAPI               { return s.llm }
+
+// Media 返回媒体存储（CAS）。多模态链路的锚：Put 拿 digest，Get 取回字节。
+// 内置插件用；公开 SDK 契约不含此方法（见 MediaAPI 的注释）。
+func (s *PluginSDK) Media() MediaAPI { return s.media }
+func (s *PluginSDK) LLM() LLMAPI     { return s.llm }
 
 // ioAdapter 桥接 IOManager 到公共 SDK 的 IOInjector 接口，
 // 确保外部插件通过 s.InjectText() 等方法的调用能被路由到内核 IO 层。
@@ -298,6 +303,7 @@ type SDKConfig struct {
 	TextMemory     TextMemoryAPI
 	DocMemory      DocMemoryAPI
 	Knowledge      KnowledgeAPI
+	Media          MediaAPI
 	LLM            LLMAPI
 	Settings       SettingsAPI
 	RegTool        ToolRegistrar
@@ -344,6 +350,7 @@ func New(name string, cfg SDKConfig) *PluginSDK {
 		textMem:   cfg.TextMemory,
 		docMem:    cfg.DocMemory,
 		know:      cfg.Knowledge,
+		media:     cfg.Media,
 		llm:       cfg.LLM,
 
 		iom:       cfg.IOManager,
