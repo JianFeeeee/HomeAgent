@@ -106,6 +106,7 @@ func (a *Agent) mergeLoop() {
 		case <-ticker.C:
 			log.Printf("[agent] heartbeat merge tick")
 			a.detectEntityMerge()
+			a.dedupeScenes()
 		case <-a.ctx.Done():
 			return
 		}
@@ -309,6 +310,31 @@ func (a *Agent) detectEntityMerge() {
 		log.Printf("[agent] entity merge: %d merge candidates sent for LLM decision", llmCandidates)
 	} else {
 		log.Printf("[agent] entity merge: no similar entities found")
+	}
+}
+
+// dedupeScenes 是图整备的场景侧去重：把「同一个场面的两个键」合成一个。
+//
+// 为什么与 detectEntityMerge 分开而不塞进它的双重循环：
+//   - 实体：全库两两 bigram + LLM 裁决。1 万实体实测 5000 万次配对、
+//     ~224GB 瞬时分配每轮（见 plan「不做的事」），已是独立问题。
+//   - 场景：判重口径是**归一化后是否同名**——同名即同一场面，**不需要 LLM
+//     裁决**（键相同本身就是证据）。且 declared 场景不进相似度空间，
+//     场景之间「像不像」由 EnterScene 的聚类负责，不是这里的事。
+//
+// 所以这里只做确定性的同键合并，不做相似度合并：把「chan:qq 与
+// chan:webui 很像」也合并是危险的，那会把不同场面糊成一个。
+func (a *Agent) dedupeScenes() {
+	if a.memory == nil {
+		return
+	}
+	merged, err := a.memory.DedupeScenes()
+	if err != nil {
+		log.Printf("[agent] 场景去重失败（下轮重试）: %v", err)
+		return
+	}
+	if merged > 0 {
+		log.Printf("[agent] 场景去重：合并 %d 组同键场景（同一场面的重复键）", merged)
 	}
 }
 

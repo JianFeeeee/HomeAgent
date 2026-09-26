@@ -580,3 +580,146 @@ func (g *GraphDB) TagSceneDocument(sceneKey, docID string) error {
 	}
 	return tx.Commit()
 }
+
+// ──────────────────────────────────────────────
+// 场景去重（整备）：把「同一个场面的两个键」合成一个
+// ──────────────────────────────────────────────
+
+// DedupeScenes 合并归一化后同名的场景，返回合并组数。
+//
+// 存在的原因：scenes.key 有 UNIQUE 约束，但**归一化口径曾经不统一**——
+// 建键路径用 "auto:" + Label(2) 而 Label 拼的是 "+"，不过 NormalizeSceneKey；
+// 而写侧（effectiveScenes）、读侧（RecallByScene）、声明建键（EnsureScene）
+// 三处都过了归一化。于是 "+" 与 "_" 成为两个都合法的主键，UNIQUE 拦不住：
+//
+//	auto:chan:qq+part:morning   strength=270  6 features  0 refs
+//	auto:chan:qq_part:morning   strength=1    0 features  201 refs
+//
+// 两个节点互不可见：聚类只读 scene_features，所以 0-features 的那个
+// 永远不被看见；而 0-refs 的那个收不到任何写侧记忆。实测这对双胞胎
+// 从建库起累积到 strength=270 都没人发现——因为图整理心跳（mergeLoop）
+// 的遍历入口 Recall(nil,nil,1,"") 只查 entities 与 relations，scenes
+// 不在其中。
+//
+// 合并口径：**只有归一化后完全同名才算重复**。相似但不同的场面
+// （chan:qq 与 chan:webui）绝不合并——去重不是"把像的一律合并"。
+// 场景之间的相似度判定是 EnterScene 的聚类职责，那是另一件事。
+//
+// 存活规则：保留 id 最小的那一行（先来者），其余并入它。
+// 强度相加、特征取并集（权重取大）、引用全部重定向。
+// 跨 origin 也合：现网存在 origin='emergent' 却长得像声明键的
+// chan:context_archived。
+func (g *GraphDB) DedupeScenes() (int, error) {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+
+	rows, err := g.db.Query(`SELECT id, key FROM scenes ORDER BY id`)
+	if err != nil {
+		return 0, err
+	}
+	type row struct {
+		id  int64
+		key string
+	}
+	var all []row
+	for rows.Next() {
+		var r row
+		if err := rows.Scan(&r.id, &r.key); err != nil {
+			rows.Close()
+			return 0, err
+		}
+		all = append(all, r)
+	}
+	rows.Close()
+	if err := rows.Err(); err != nil {
+		return 0, err
+	}
+	if len(all) < 2 {
+		return 0, nil
+	}
+
+	// 按归一化后的键分组，组内 id 最小者为存活者。
+	groups := make(map[string][]row)
+	order := make([]string, 0, len(all))
+	for _, r := range all {
+		nk := NormalizeSceneKey(r.key)
+		if nk == "" {
+			// 键归一化后为空：无法判定它与谁重复，跳过（不擅自删数据）。
+			continue
+		}
+		if _, seen := groups[nk]; !seen {
+			order = append(order, nk)
+		}
+		groups[nk] = append(groups[nk], r)
+	}
+
+	merged := 0
+	for _, nk := range order {
+		gp := groups[nk]
+		if len(gp) < 2 {
+			continue
+		}
+		keep := gp[0] // ORDER BY id ⇒ 最早创建的那行
+
+		tx, err := g.db.Begin()
+		if err != nil {
+			return merged, err
+		}
+		err = func() error {
+			for _, dup := range gp[1:] {
+				// 强度相加。
+				if _, err := tx.Exec(
+					`UPDATE scenes SET strength = COALESCE(strength,1) +
+					   COALESCE((SELECT strength FROM scenes WHERE id = ?), 0),
+					   updated_at = CURRENT_TIMESTAMP
+					 WHERE id = ?`, dup.id, keep.id); err != nil {
+					return err
+				}
+				// 特征取并集，权重取大。
+				if _, err := tx.Exec(
+					`INSERT INTO scene_features (scene_id, feature, weight)
+					 SELECT ?, feature, weight FROM scene_features WHERE scene_id = ?
+					 ON CONFLICT(scene_id, feature) DO UPDATE
+					   SET weight = MAX(weight, excluded.weight)`,
+					keep.id, dup.id); err != nil {
+					return err
+				}
+				if _, err := tx.Exec(
+					`DELETE FROM scene_features WHERE scene_id = ?`, dup.id); err != nil {
+					return err
+				}
+				// 引用重定向。UNIQUE(scene_id,kind,ref_id,ref_text) 会与存活者
+				// 上的同一条冲突——冲突即同一条记忆，取权重大的那条。
+				if _, err := tx.Exec(
+					`INSERT INTO scene_refs (scene_id, kind, ref_id, ref_text, weight)
+					 SELECT ?, kind, ref_id, ref_text, weight FROM scene_refs WHERE scene_id = ?
+					 ON CONFLICT(scene_id, kind, ref_id, ref_text) DO UPDATE
+					   SET weight = MAX(weight, excluded.weight)`,
+					keep.id, dup.id); err != nil {
+					return err
+				}
+				if _, err := tx.Exec(
+					`DELETE FROM scene_refs WHERE scene_id = ?`, dup.id); err != nil {
+					return err
+				}
+				if _, err := tx.Exec(`DELETE FROM scenes WHERE id = ?`, dup.id); err != nil {
+					return err
+				}
+				merged++
+			}
+			// 存活者的键也归一化，避免下次又认不出自己。
+			if _, err := tx.Exec(`UPDATE scenes SET key = ? WHERE id = ?`, nk, keep.id); err != nil {
+				return err
+			}
+			return nil
+		}()
+		if err != nil {
+			tx.Rollback()
+			return merged, err
+		}
+		if err := tx.Commit(); err != nil {
+			return merged, err
+		}
+	}
+	return merged, nil
+}
