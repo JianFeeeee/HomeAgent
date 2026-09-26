@@ -155,199 +155,75 @@ func chunkAssemble(choices []chunkChoice, usage chunkUsage) (StreamChunk, bool) 
 // ---------------------------------------------------------------------
 
 // chunkParseFast 尝试 C 快速路径。
-// 返回 (chunk, handled, decided)：
-//   handled=false            ⇒ 调用方必须用 chunkParseGo
-//   handled=true,decided=true ⇒ 结果是最终答案
+//
+// ============================ 第三刀的重做：一次 cgo 调用 ============================
+// 上一版逐字段往返（5+ 次 findKey，每次 ~168ns 边界 + 2 allocs）造成固定成本
+// 约 1µs，比原实现更慢。本版把全部定位压进**一次** C 调用
+// （ha_sse_chunk_locate），并在同一趟里完成键分派与字符串解码。
+//
+// 返回 (chunk, handled, decided)。handled=false ⇒ 调用方用 chunkParseGo。
 func chunkParseFast(data string) (StreamChunk, bool, bool) {
-	root := rootSpan(data)
-	if !sseRootObject(root) {
-		return StreamChunk{}, false, false
-	}
-
-	// ---- usage：整棵子树交给 encoding/json ----
-	// ★ 为什么逐个整数取是错的：Go 侧 usage 有 9 个字段，且**任一类型不符
-	//   就让整块作废**（实测 {"prompt_cache_hit_tokens":"x","prompt_tokens":1}
-	//   → 整块 false）。整棵 unmarshal 到**同一个 Go 类型** ⇒ 语义自动一致。
-	var usage chunkUsage
-	us, ufound, udup, ubad := findKeyCI(root, "usage")
-	if ubad || udup {
-		return StreamChunk{}, false, false
-	}
-	if ufound {
-		switch us.firstByte() {
-		case 'n':
-			// null ⇒ 零值 struct（不产出 usage）
-		case '{':
-			if err := json.Unmarshal(us.bytes(), &usage); err != nil {
-				// ★ 类型不符 ⇒ 与 Go 一样「整块作废」，**不需要回退**
-				return StreamChunk{}, false, true
-			}
-		default:
-			return StreamChunk{}, false, false // 交回 Go 决定
-		}
-	}
-
-	// ---- choices：只取 [0]，但要先判整切片的长度语义 ----
-	cs, cfound, cdup, cbad := findKeyCI(root, "choices")
-	if cbad || cdup {
-		return StreamChunk{}, false, false
-	}
-	if !cfound {
-		ck, ok := chunkAssemble(nil, usage)
-		return ck, true, ok
-	}
-	switch cs.firstByte() {
-	case 'n':
-		// null ⇒ 零值切片（长度 0）⇒ 走「无 choices」分支
-		ck, ok := chunkAssemble(nil, usage)
-		return ck, true, ok
-	case '[':
+	loc := locateChunkBatch(data)
+	switch loc.status {
+	case chunkTypeFail:
+		// C 已判定「与 Go 一致的整块作废」⇒ 直接给答案，无需回退
+		return StreamChunk{}, false, true
+	case chunkOK:
+		// 继续
 	default:
 		return StreamChunk{}, false, false
 	}
-	el, has := firstElem(cs)
-	if !has {
-		// 空数组：len(choices)==0 ⇒ 与 Go 相同
-		ck, ok := chunkAssemble(nil, usage)
-		return ck, true, ok
-	}
-	ch, ok := fastChoice(el)
-	if !ok {
-		return StreamChunk{}, false, false // 任何不确定 ⇒ 整体回退
-	}
-	ck, ok2 := chunkAssemble([]chunkChoice{ch}, usage)
-	return ck, true, ok2
-}
 
-// fastChoice 解析 choices[0]。ok=false ⇒ 必须回退 Go。
-//
-// ★ 键匹配方式按 Go 那一跳的实际类型选择：
-//   - choices / delta / finish_reason / tool_calls 是 **struct 字段** ⇒ 大小写不敏感
-//   - content / reasoning_content / "text" 是 **interface{} → map key** ⇒ 大小写敏感
-//   （实测：{"CHOICES":[{"DELTA":{"CONTENT":"ci"}}]} 有效；
-//     {"content":[{"TEXT":"up"}]} 取不到 text）
-func fastChoice(el strSpan) (chunkChoice, bool) {
-	var ch chunkChoice
-	if el.firstByte() != '{' {
-		return ch, false
-	}
-
-	ds, dfound, ddup, dbad := findKeyCI(el, "delta")
-	if dbad || ddup {
-		return ch, false
-	}
-	if dfound {
-		switch ds.firstByte() {
-		case 'n':
-			// delta:null ⇒ 零值 struct
-		case '{':
-			// ★ delta 是 **struct**（不是 map！）——
-			//   原实现：Delta struct { Content interface{}; ... } `json:"delta"`
-			//   故它的字段名匹配是**大小写不敏感**。
-			//   实测 `{"CHOICES":[{"DELTA":{"CONTENT":"ci"}}]}` → content="ci"。
-			//   只有 content 的**值**（若为对象/数组）才成为 map/[]interface{}，
-			//   那时里面的键（如 "text"）才是大小写敏感。
-			//
-			//   我一度把这里改成 CS 并认为「差分测试会通过」——那是错的推理：
-			//   Go 侧给的是 "ci"（CI 匹配成功），改成 CS 反而把快速路径弄丢。
-			//   教训：**「哪一层是 struct、哪一层是 map」要回原实现读类型，
-			//   不能凭字段名像 map 就推断它是 map。**
-
-			// reasoning_content：Go 侧是 **string**（强类型）。
-			// 用同样的 Go 类型 unmarshal ⇒ 123 会报错，与原实现一致。
-			rs, rfound, rdup, rbad := findKeyCI(ds, "reasoning_content")
-			if rbad || rdup {
-				return ch, false
-			}
-			if rfound && rs.firstByte() != 'n' {
-				var s string
-				if err := json.Unmarshal(rs.bytes(), &s); err != nil {
-					return ch, false // 类型不符 ⇒ 回退（Go 会整块作废）
-				}
-				ch.reasoning = s
-			}
-
-			// content 字段名：CI（struct 字段）。
-			// 其**值**若是数组/对象，内部键由 ha_sse_stringify 按 CS 处理。
-			cs, cfound, cdup, cbad := findKeyCI(ds, "content")
-			if cbad || cdup {
-				return ch, false
-			}
-			if cfound {
-				if s, handled := stringifyC(cs); handled {
-					ch.content = s
-				} else {
-					return ch, false // 需 json.Marshal 重新编码（§5.2）
-				}
-			}
-
-			// tool_calls：逐个元素整体 unmarshal 成 openAIToolCall，
-			// 使 arguments 的 interface{} 形态 / 类型检查全由 encoding/json 负责。
-			tcs, tfound, tdup, tbad := findKeyCI(ds, "tool_calls")
-			if tbad || tdup {
-				return ch, false
-			}
-			if tfound {
-				switch tcs.firstByte() {
-				case 'n':
-					// null ⇒ 零值切片
-				case '[':
-					t, ok := fastToolCalls(tcs)
-					if !ok {
-						return ch, false
-					}
-					ch.toolCalls = t
-				default:
-					return ch, false
-				}
-			}
-		default:
-			return ch, false
+	// ---- usage：整棵子树交给 encoding/json（9 个字段 + 类型规则）----
+	var usage chunkUsage
+	switch loc.usageKind {
+	case kindAbsent, kindNull:
+		// 零值
+	case kindObject:
+		if err := json.Unmarshal(loc.usageSpan.bytes(), &usage); err != nil {
+			return StreamChunk{}, false, true // 类型不符 ⇒ 整块作废
 		}
+	default:
+		return StreamChunk{}, false, false
 	}
 
-	// finish_reason：struct 字段 ⇒ 大小写不敏感；Go 侧是 *string
-	fs, ffound, fdup, fbad := findKeyCI(el, "finish_reason")
-	if fbad || fdup {
-		return ch, false
+	// ---- delta 非对象 ⇒ 与 Go 的 Unmarshal 失败一致 ----
+	if loc.deltaKind == kindOther {
+		return StreamChunk{}, false, true
 	}
-	if ffound && fs.firstByte() != 'n' {
-		if fs.firstByte() != '"' {
-			return ch, false
-		}
-		var s string
-		if err := json.Unmarshal(fs.bytes(), &s); err != nil {
-			return ch, false
-		}
-		ch.finishPtr = &s
-	}
-	return ch, true
-}
 
-// fastToolCalls 解析 tool_calls 数组。
-//
-// ★ 逐元素整体 unmarshal 成 openAIToolCall 是刻意的：这样 arguments 的
-//   interface{} 形态、字符串/对象/数组/数字各分支、重复键，全部由
-//   encoding/json 处理（§5.2 的重新编码语义不必在 C 复刻）。
-//   归一化也走**同一个** normalizeStreamToolCall ⇒ 与 Go 路径不分叉。
-func fastToolCalls(arr strSpan) ([]ToolCall, bool) {
-	elems, ok := scanArray(arr)
-	if !ok {
-		return nil, false
-	}
-	if len(elems) == 0 {
-		return nil, true // 空数组 ⇒ nil（与 Go 的 normalizeStreamToolCalls 一致）
-	}
-	out := make([]ToolCall, 0, len(elems))
-	for _, elem := range elems {
-		if elem.firstByte() != '{' {
-			return nil, false
+	// ---- tool_calls：整段 unmarshal 成 []openAIToolCall ----
+	// ★ 用与 Go 完全相同的类型 ⇒ arguments 的 interface{} 形态与类型检查
+	//   全部由 encoding/json 负责；归一化共用 normalizeStreamToolCall。
+	var toolCalls []ToolCall
+	switch loc.toolCallsKind {
+	case kindAbsent, kindNull:
+		// nil
+	case kindArray:
+		var raw []openAIToolCall
+		if err := json.Unmarshal(loc.toolCallsSpan.bytes(), &raw); err != nil {
+			return StreamChunk{}, false, true // 元素类型不符 ⇒ 整块作废
 		}
-		var raw openAIToolCall
-		if err := json.Unmarshal(elem.bytes(), &raw); err != nil {
-			return nil, false
-		}
-		out = append(out, normalizeStreamToolCall(raw))
+		toolCalls = normalizeStreamToolCalls(raw)
+	default:
+		return StreamChunk{}, false, true
 	}
-	return out, true
+
+	// ---- 拼装（与 Go 路径共用 chunkAssemble）----
+	var choices []chunkChoice
+	if loc.choicesPresent && loc.choicesCount > 0 {
+		ch := chunkChoice{
+			content:   loc.content,
+			reasoning: loc.reasoning,
+			toolCalls: toolCalls,
+		}
+		if loc.finishKind == kindString {
+			// 保留三态：缺失/null ⇒ nil；"" ⇒ 非 nil 空串（不算终止信号）
+			f := loc.finish
+			ch.finishPtr = &f
+		}
+		choices = []chunkChoice{ch}
+	}
+	ck, ok := chunkAssemble(choices, usage)
+	return ck, true, ok
 }
