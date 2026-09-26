@@ -131,21 +131,10 @@ func TestRemove(t *testing.T) {
 	}
 }
 
-func TestRemoveNotFound(t *testing.T) {
-	dir, err := os.MkdirTemp("", "know_notfound_*")
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer os.RemoveAll(dir)
-
-	s := NewStore(dir)
-	s.Start()
-	defer s.Stop()
-
-	if err := s.Remove("nonexistent"); err != nil {
-		t.Errorf("remove nonexistent should not error, got: %v", err)
-	}
-}
+// TestRemoveNotFound 原断言"删除不存在的条目不应报错"，该契约已作废：
+// webui 的 DELETE 处理器把 error 映射成 404，说明调用方本来就期望 ErrNotFound；
+// 宽松版本只会让工具层对一次什么都没删的操作回报"已删除"。
+// 新契约见 hardening_test.go 的 TestRemoveNotFound。
 
 func TestStats(t *testing.T) {
 	dir, err := os.MkdirTemp("", "know_stats_*")

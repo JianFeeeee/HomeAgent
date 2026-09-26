@@ -106,10 +106,11 @@ func TestRankingQualityOnRealKB(t *testing.T) {
 	}
 
 	if os.Getenv("KB_DIAG_SWEEP") != "" {
-		fmt.Printf("\n  === 融合权重扫描（1.0 = 只用稠密路，0.0 = 只用词法路）===\n")
-		saved := densePathWeight
+		fmt.Printf("\n  === 稀疏融合权重扫描（1.0 = 只用语义路，0.0 = 只用词法路）===\n")
+		fmt.Printf("  （无多模态稠密路接入时，本扫描直接对应历史 densePathWeight 的语义）\n")
+		saved := sparseSemWeight
 		for _, w := range []float64{1.0, 0.8, 0.7, 0.5, 0.3, 0.0} {
-			densePathWeight = w
+			sparseSemWeight = w
 			t1, m := 0, 0.0
 			for _, name := range names {
 				hits := st.Search(name, len(names))
@@ -126,7 +127,7 @@ func TestRankingQualityOnRealKB(t *testing.T) {
 			fmt.Printf("  权重 %.1f：top-1 %2d/%d = %3.0f%%   MRR %.3f\n",
 				w, t1, len(names), 100*float64(t1)/float64(len(names)), m/float64(len(names)))
 		}
-		densePathWeight = saved
+		sparseSemWeight = saved
 	}
 
 	if os.Getenv("KB_DIAG_ASSERT") != "" {

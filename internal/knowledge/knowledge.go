@@ -2,6 +2,7 @@ package knowledge
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log"
 	"os"
@@ -23,7 +24,35 @@ type Knowledge struct {
 	Tags      []string          `json:"tags"`
 	UpdatedAt time.Time         `json:"updated_at"`
 	Meta      map[string]string `json:"meta,omitempty"`
+
+	// Dense 是该条目在**多模态统一空间**（image ⊕ text 共享坐标系）里的向量。
+	// nil 表示未嵌入或嵌入失败——检索侧会被长度守卫跳过，退回流沙两路。
+	// 不落 content.md：它是可重算的派生数据，落盘只会多个会失效的副本。
+	Dense []float64 `json:"-"`
+	// DenseFP 是产生 Dense 的模型空间标识（≠ 当前 fingerprint 时视为过期）。
+	DenseFP string `json:"-"`
+	// Media 是本条目携带的媒体块（媒体是**一等节点**：由自己的向量参与
+	// 召回，不依赖任何生成的描述文本）。与 Dense 一同内存持有。
+	Media []MediaRef `json:"-"`
 }
+
+// MediaRef 是媒体在知识条目里的一等引用。Digest 是内容 sha256（媒体存储的
+// 主键），向量不在这里——它存在 media.Store 里（同一份媒体可能被多条知识
+// 引用，向量只算一次、只存一份）。
+//
+// 与 memory/media 的 Item 刻意不共用：那边是媒体存储的内务结构（含
+// OriginPath/FirstSeen 等溯源字段），这里是知识条目对外暴露的引用。
+// 知识库只依赖 digest + MIME 就能完成嵌入与检索。
+//
+// 命名为 KnowledgeMediaRef 而非 MediaRef，是为了不与别的包的类型撞名。
+type KnowledgeMediaRef struct {
+	Digest string `json:"digest"`
+	MIME   string `json:"mime"`
+	Kind   string `json:"kind,omitempty"`
+}
+
+// KnowledgeMediaRef 的别名，照顾内部可读性。
+type MediaRef = KnowledgeMediaRef
 
 // IndexItem — 索引条目，包含向量特征和内容摘要
 type IndexItem struct {
@@ -89,22 +118,78 @@ type Store struct {
 	// 且「词都在停用词里」的查询（稠密路给空向量）能靠词法路救回来。
 	lex *vector.Store
 
-	mu        sync.RWMutex
-	items     map[string]*Knowledge
-	summaries []string
+	mu    sync.RWMutex
+	items map[string]*Knowledge
 
-	indexPath  string
-	vectorizer vector.Vectorizer // 可选：词嵌入向量化器，优先于 TF-IDF
+	indexPath      string
+	denseCachePath string
+	denseDirty     bool
+	// indexDirty 标记 .index.json 过期。批量导入时置位但**不立即写**，
+	// 由 flushIndex 收口：实测 writeIndexLocked 是 Add 的主开销
+	// （N=400 时 6.7ms/次，占单条 Add 的绝大部分）。
+	indexDirty bool
+	// denseCacheLoaded 保证缓存只尝试恢复一次；scanned 表示 items 已扫盘就绪。
+	// 两个状态位缺一不可：接线（SetDenseSpace）与扫盘（Start）的先后顺序
+	// 在调用方是自由的，缓存恢复必须等**两者都就绪**才可能成功，
+	// 因此不能在任一单点里无条件做，只能在每次都试一下。
+	denseCacheLoaded bool
+	scanned          bool
+	vectorizer       vector.Vectorizer // 可选：词嵌入向量化器，优先于 TF-IDF
+
+	// dense 是多模态稠密空间（可选）。与 vectorizer 是**两层不同的东西**：
+	//   vectorizer 把文本变成稀疏特征（TF-IDF/词向量），供内部两路融合；
+	//   dense 把 text/image 投到同一个稠密坐标系，让「按图搜知识」
+	//   「按文搜含图知识」成立。文档记忆（docStore）走的就是后者。
+	//
+	// 为何不把稠密向量塞进 s.vec：vector.Store 是稀疏倒排结构
+	// （feature → {docID: weight}），稠密向量会把倒排表退化成全量特征桶，
+	// 同时破坏 TF-IDF 语义（vector.MultimodalEmbedder 的注释已明言）。
+	// 因此稠密路自成一等路，与另两路并列，不混进任何一个 Store。
+	dense    vector.MultimodalEmbedder
+	mediaGet MediaGetter
+}
+
+// mediaSidecarName 是每条知识目录下存放媒体引用的文件名。
+//
+// 为何媒体引用必须落盘：它是**作者数据**（谁给哪条知识挂了哪张图），
+// 不是可重算的派生量。此前它只存在于内存，进程一重启 scanDir 重建条目时
+// Media 就空了 —— 图片关联静默消失，而且因为不报错，没有任何迹象。
+// 放在条目目录内（与 content.md 并列）而非全局文件：随条目一起生灭，
+// Remove 的 os.RemoveAll 天然把它清掉，不会留下孤儿记录。
+const mediaSidecarName = ".media.json"
+
+// denseCacheEntry 是单条知识的稠密向量缓存。
+type denseCacheEntry struct {
+	Dense []float64 `json:"dense"`
+	FP    string    `json:"fp"`
+	Dim   int       `json:"dim"`
+}
+
+// denseCache 是稠密向量的全局缓存文件。
+//
+// 它是**派生数据**（可由 content.md ⊕ 媒体重算），损坏/丢失只会导致一次
+// 重算，不会丢内容。因此与媒体引用分开存放、分开承担风险。
+type denseCache struct {
+	Fingerprint string                     `json:"fingerprint"`
+	Dim         int                        `json:"dim"`
+	Entries     map[string]denseCacheEntry `json:"entries"`
+}
+
+// MediaGetter 让知识库能取回媒体字节以计算嵌入，而不依赖具体的媒体存储包。
+// 取不到（或未接线）时，该条目退化为纯文本嵌入——而不是整条不可用。
+type MediaGetter interface {
+	Get(digest string) ([]byte, error)
 }
 
 func NewStore(root string) *Store {
 	return &Store{
-		root:      root,
-		indexPath: filepath.Join(root, ".index.json"),
-		vec:       vector.NewStore(),
-		lex:       newLexicalStore(),
-		veczer:    vector.NewTFIDFVectorizer(memory.TokenizeWords),
-		items:     make(map[string]*Knowledge),
+		root:           root,
+		indexPath:      filepath.Join(root, ".index.json"),
+		denseCachePath: filepath.Join(root, ".dense.json"),
+		vec:            vector.NewStore(),
+		lex:            newLexicalStore(),
+		veczer:         vector.NewTFIDFVectorizer(memory.TokenizeWords),
+		items:          make(map[string]*Knowledge),
 	}
 }
 
@@ -116,31 +201,244 @@ func newLexicalStore() *vector.Store {
 	return st
 }
 
+// SetDenseSpace 注入多模态统一向量空间（text ↔ image 共享坐标系）。
+// 未注入时知识库退化为原有的稀疏两路（词向量 + TF-IDF），保持既有行为。
+func (s *Store) SetDenseSpace(ds vector.MultimodalEmbedder) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.dense = ds
+	// 接线与扫盘的先后顺序由调用方决定；这里补一次尝试，确保
+	// 「先 Start 后 SetDenseSpace」（agent 的现行顺序）也能命中缓存。
+	s.maybeLoadDenseCacheLocked()
+}
+
+// SetMediaGetter 注入媒体取回器（用于为 Media 块算嵌入）。
+// 不注入时多媒体条目仍可入库，只是退化为纯文本嵌入。
+func (s *Store) SetMediaGetter(g MediaGetter) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.mediaGet = g
+}
+
+// denseEnabled 报告稠密路是否可用（供 Stats/自证与分支判断）。
+// 调用方必须已持锁。
+func (s *Store) denseEnabled() bool {
+	return s.dense != nil && s.dense.Loaded()
+}
+
+// denseFor 计算一条知识的稠密向量：正文文本向量 ⊕ 各媒体块向量。
+//
+// 只有与当前空间**同指纹且同维度**的媒体向量才参与融合。只比指纹不够：
+// 指纹相同但维度不同的向量会被 FuseVectors 按最大维度拼成错维度结果，
+// 而它下次又被当成"已对齐"，就永远错下去（docStore 里踩过同一个坑）。
+//
+// 返回 nil 表示本条目在当前空间下无向量（检索侧会跳过它）。
+func (s *Store) denseFor(k *Knowledge) []float64 {
+	if !s.denseEnabled() {
+		return nil
+	}
+	dim := s.dense.Dim()
+	var parts [][]float64
+	if tv, err := s.dense.VectorizeDense(k.Name + " " + k.Content); err == nil && len(tv) == dim {
+		parts = append(parts, tv)
+	}
+	for _, m := range k.Media {
+		if v := s.mediaDense(m); v != nil {
+			parts = append(parts, v)
+		}
+	}
+	return vector.FuseVectors(parts...)
+}
+
+// mediaDense 取回媒体字节并嵌入。任何一步拿不到就返回 nil——
+// 媒体缺失不应让整条知识失去文本向量。
+func (s *Store) mediaDense(m KnowledgeMediaRef) []float64 {
+	if !s.denseEnabled() || s.mediaGet == nil || m.Digest == "" {
+		return nil
+	}
+	data, err := s.mediaGet.Get(m.Digest)
+	if err != nil || len(data) == 0 {
+		return nil
+	}
+	mime := m.MIME
+	if mime == "" {
+		mime = "application/octet-stream"
+	}
+	v, err := s.dense.EmbedImageDense(data, mime)
+	if err != nil || len(v) != s.dense.Dim() {
+		// 模态不在本空间覆盖范围内（如音频）时返回的是
+		// ErrModalityUnsupported：那是「永久无向量」，不是「本次失败」。
+		// 两者都不重试、也不拿别的模型的向量顶替。
+		return nil
+	}
+	return v
+}
+
+// 为一条知识算稠密向量。
+//
+// 融合顺序为 [文本, 媒体...]：FuseVectors 是逐维求和，对交换律不敏感，
+// 顺序不影响结果；这里固定下来只为让日志/调试可复现。
+func (s *Store) ReindexDense() (built, skipped int) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if !s.denseEnabled() {
+		return 0, 0
+	}
+	fp := s.dense.Fingerprint()
+	dim := s.dense.Dim()
+	for _, k := range s.items {
+		if len(k.Dense) == dim && k.DenseFP == fp {
+			continue
+		}
+		v := s.denseFor(k)
+		if v == nil {
+			skipped++
+			continue
+		}
+		k.Dense, k.DenseFP = v, fp
+		built++
+	}
+	// 落盘，否则磁盘缓存永远对不上当前空间，判定条件永远成立 ——
+	// 每次启动都重算同一批（docStore 的 BuildDenseIndex 踩过这个坑）。
+	if built > 0 {
+		s.denseDirty = true
+	}
+	s.flushDenseLocked()
+	log.Printf("[knowledge] dense reindex complete: built=%d skipped=%d fp=%s dim=%d", built, skipped, shortFP(fp), dim)
+	return built, skipped
+}
+
+// AttachMedia 给一条已有知识挂上媒体，并**当场重算**它的稠密向量。
+//
+// 单独抽出来的理由：媒体入库（AddWithMedia）与媒体后续到达是两条时序，
+// 前者少见（大多数场景是先有知识、图片晚一点才上传）。不重算的话，
+// 新挂的媒体要等下次 ReindexDense 才参与召回。
+func (s *Store) AttachMedia(name string, media ...KnowledgeMediaRef) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	id, k, err := s.resolve(name)
+	if err != nil {
+		return err
+	}
+	k.Media = append(k.Media, media...)
+	// 媒体引用与向量都要落盘：引用是作者数据，向量是派生缓存。
+	if err := writeMediaSidecar(filepath.Dir(k.Path), k.Media); err != nil {
+		return fmt.Errorf("写媒体引用失败: %w", err)
+	}
+	if s.denseEnabled() {
+		if v := s.denseFor(k); v != nil {
+			k.Dense, k.DenseFP = v, s.dense.Fingerprint()
+			s.denseDirty = true
+		}
+	}
+	s.flushDenseLocked()
+	_ = id
+	return nil
+}
+
+// DenseStats 报告稠密路的接线与覆盖情况，供状态页/自证使用。
+func (s *Store) DenseStats() map[string]interface{} {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	out := map[string]interface{}{
+		"enabled":      s.denseEnabled(),
+		"media_getter": s.mediaGet != nil,
+	}
+	if s.denseEnabled() {
+		fp := s.dense.Fingerprint()
+		dim := s.dense.Dim()
+		ready, stale := 0, 0
+		for _, k := range s.items {
+			switch {
+			case len(k.Dense) == dim && k.DenseFP == fp:
+				ready++
+			default:
+				stale++
+			}
+		}
+		out["fingerprint"] = fp
+		out["dim"] = dim
+		out["ready"] = ready
+		out["stale"] = stale
+	}
+	return out
+}
+
 // SetVectorizer 设置词嵌入向量化器，优先于 TF-IDF
 func (s *Store) SetVectorizer(v vector.Vectorizer) {
 	s.vectorizer = v
 }
 
-// ReindexWithVectorizer 用给定的向量化器重建所有知识条目的向量索引
+// ReindexWithVectorizer 用给定的向量化器重建稀疏两路索引。
+// 稠密路不在此重建：它由独立的 ReindexDense 负责（换模型只影响它）。
 func (s *Store) ReindexWithVectorizer(v vector.Vectorizer) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
 	log.Printf("[knowledge] reindex with vectorizer (%d items)", len(s.items))
 	s.vec = vector.NewStore()
-	s.lex = newLexicalStore()
 	// 词法路的 IDF 必须建在全语料上（否则 IDF 没意义）
-	if len(s.summaries) > 0 {
-		s.veczer.Train(s.summaries)
-	}
+	s.retrainLexLocked()
 	for _, k := range s.items {
 		text := k.Name + " " + k.Content
 		s.vec.Insert(k.Name, k.Name+": "+k.Content, v.Vectorize(text), map[string]string{
 			"name": k.Name, "path": k.Path,
 		})
-		s.lex.Insert(k.Name, k.Name+": "+k.Content, s.veczer.Vectorize(text), nil)
 	}
 	log.Printf("[knowledge] reindex complete (dense=%d lex=%d)", s.vec.Size(), s.lex.Size())
+}
+
+// lexText 是一条知识参与**词法路**（TF-IDF）统计的文本。
+//
+// 为何用规范名而不是原始入参名：DF 统计必须与 lex 里实际插入的文档
+// **逐字一致**，否则重启后重新 Train 的 DF 与运行时增量维护的 DF 会对不上，
+// IDF 悄悄漂移。取名一律以 items 里的规范名为准。
+func lexText(id, content string) string { return id + " " + content }
+
+// indexDocLocked 把一条知识登记进词法路索引并更新 IDF 统计。
+//
+// IDF 与索引必须**同步**维护：只插索引不更新 DF，新引入的词 df=0 会被
+// Vectorize 当作未知词跳过，于是「新增的知识当场搜不到，重启后才恢复」。
+// 同一个词的 DF 也不能重复计：覆盖写同名条目时先 RemoveDoc 旧文本。
+// 调用方必须已持写锁。
+func (s *Store) indexDocLocked(id string, k *Knowledge) {
+	text := lexText(id, k.Content)
+	if old, ok := s.items[id]; ok && old != nil {
+		s.veczer.RemoveDoc(lexText(id, old.Content))
+	}
+	s.veczer.AddDoc(text)
+	s.lex.Remove(id)
+	s.lex.Insert(id, id+": "+k.Content, s.veczer.Vectorize(text), nil)
+}
+
+// unindexDocLocked 把一条知识从词法路索引与 IDF 统计里同时摘掉。
+// 调用方必须已持写锁。
+func (s *Store) unindexDocLocked(id string, k *Knowledge) {
+	if k != nil {
+		s.veczer.RemoveDoc(lexText(id, k.Content))
+	}
+	s.lex.Remove(id)
+}
+
+// retrainLexLocked 从当前 items 全量重建词法路索引与 IDF。
+// 启动与全量重建时走这条（比逐条增量更简单也更一致）。
+// 调用方必须已持写锁。
+func (s *Store) retrainLexLocked() {
+	texts := make([]string, 0, len(s.items))
+	for id, k := range s.items {
+		texts = append(texts, lexText(id, k.Content))
+	}
+	if len(texts) > 0 {
+		s.veczer.Train(texts)
+	} else {
+		s.veczer.Train(nil)
+	}
+	s.lex = newLexicalStore()
+	for id, k := range s.items {
+		text := lexText(id, k.Content)
+		s.lex.Insert(id, id+": "+k.Content, s.veczer.Vectorize(text), nil)
+	}
 }
 
 // vectorize 优先使用词嵌入向量化器，不可用时回退到 TF-IDF
@@ -158,7 +456,10 @@ func (s *Store) Start() error {
 	if err := s.scanAll(); err != nil {
 		log.Printf("[knowledge] scan error: %v", err)
 	}
-	// 重建索引文件
+	// 稠密向量是派生数据：先尝试从缓存恢复，避免每次启动对每条知识
+	// 重跑一次嵌入（外部 HTTP 嵌入服务下就是 N 次网络调用）。
+	s.loadDenseCache()
+	// 重建索引文件（启动时必写一次，之后标脏延迟到 Flush/Stop）
 	if err := s.writeIndex(); err != nil {
 		log.Printf("[knowledge] write index error: %v", err)
 	}
@@ -166,58 +467,128 @@ func (s *Store) Start() error {
 	return nil
 }
 
-func (s *Store) Stop() {}
+// Stop 落盘未持久化的派生数据（稠密向量缓存）。
+// 正文与媒体引用在写入时已落盘，这里只是补上派生缓存。
+func (s *Store) Stop() {
+	if err := s.Flush(); err != nil {
+		log.Printf("[knowledge] flush on stop: %v", err)
+	}
+}
 
-// 融合权重：稠密路（词向量）与词法路（TF-IDF）。
-// 取值由真实 KB 上的权重扫描定（rankdiag_test.go 的 KB_DIAG_SWEEP）：
-// 1.0 = 修复前的「只用稠密路」行为，作为对照基线。
-var densePathWeight = 0.5
-
-// Search 融合两路召回：稠密路（词向量/多模态空间）+ 词法路（TF-IDF）。
+// 三路权重。
 //
-// 为何不能只用稠密路：词向量取平均后各向异性明显，真实 KB 上自检索 top-1 只有 15%，
-// 前两名平均只差 0.013（等于没区分度）；且全为停用词的查询会得到**空向量**，
-// 直接搜不出任何东西（"最近更新" 就撞上这个）。词法路对专名/术语/短查询强，
-// 两路各自**按查询内最大值归一化**后加权融合，排序才可信。
+// 总预算先分给稠密路 denseSpaceWeight，剩下的留给稀疏两路，稀疏两路再按
+// sparseSemWeight 在「语义（词向量/TF-IDF）」与「词法（专名/术语）」之间切分。
+//
+// 为何稠密占一半：它是唯一能跨模态召回的一路（按图搜含图知识），也是语义
+// 泛化最好的一路；稀疏两路负责把专名/术语/停用词查询抓回来。
+//
+// denseSpaceWeight 是 const（改代码才会变）；sparseSemWeight 是 var，供应
+// rankdiag_test 的 KB_DIAG_SWEEP 实测扫描——它的取值有实测依据，不是拍脑袋。
+const denseSpaceWeight = 0.5
+
+// sparseSemWeight 是稀疏预算里语义路占的比例（剩下给词法路）。
+// 0.5 即历史上实测最优的「语义 0.5 / 词法 0.5」。
+var sparseSemWeight = 0.5
+
+// Search 融合三路召回：多模态稠密路 + 稀疏语义路 + 词法路。
+//
+// 为何不能只用稠密路：词向量取平均后各向异性明显，真实 KB 上自检索 top-1
+// 只有 15%，前两名平均只差 0.013（几乎没有区分度）；且全为停用词的查询会得到
+// **空向量**，直接搜不出任何东西（"最近更新" 就撞上这个）。词法路对专名/术语/
+// 短查询强。三路各自**按查询内最大值归一化**后加权融合，排序才可信。
+//
+// 为何不先截候选再融合：截断后只能拿**候选内**最大值归一化，路与路之间的
+// 相对权重就随候选集漂移——测过同一份 KB 上自检索 MRR 从 0.376 掉到 0.197。
 func (s *Store) Search(query string, topK int) []*Knowledge {
+	return s.SearchIn(query, "", topK)
+}
+
+// SearchIn 与 Search 同语义，但可把召回范围限定在某个分类子树内。
+//
+// category 为空 = 全库（等价于 Search）。非空时**前缀匹配**该分类路径：
+// 查 "tech" 命中 "tech/go"、"tech/rust" 下的条目；查 "tech/go" 只命中
+// 它的子孙。这样分层才真正参与召回——此前分层只是存储布局，检索是全库
+// 平铺，`SearchTree`/`SearchCategories` 两个死代码想做的事没落到检索上。
+//
+// 为何用前缀而不是精确相等：分类是**层级**，不是标签。要么看整棵子树，
+// 要么用精确路径定位到某一层；只匹配精确相等会让 "tech" 查不到
+// "tech/go" 里的东西，那正是层级索引最该提供的价值。
+func (s *Store) SearchIn(query, category string, topK int) []*Knowledge {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
+
+	category = strings.Trim(strings.TrimSpace(category), "/")
+	inScope := func(id string) bool {
+		if category == "" {
+			return true
+		}
+		k, ok := s.items[id]
+		if !ok {
+			return false
+		}
+		// 条目自身的 Category 或条目全名以该前缀开头都算命中：
+		// Category 是父路径，而条目全名是 category/叶名，两者都要覆盖
+		// （顶层无分类的条目 Category 为空，只能靠全名判断）。
+		return k.Category == category ||
+			strings.HasPrefix(k.Category, category+"/") ||
+			strings.HasPrefix(id, category+"/")
+	}
 
 	if topK <= 0 {
 		topK = 5
 	}
-	if s.vec.Size() == 0 && s.lex.Size() == 0 {
+	if s.vec.Size() == 0 && s.lex.Size() == 0 && !s.hasAnyDense() {
 		return nil
 	}
-	// 两路各自对**全部**文档打分：
-	//  - 稠密路的特征是维索引，几乎每篇都命中，"候选"就是全量；
-	//  - 词法路只召回与查询共词的文档（这正是它的长处：专名/术语）。
-	// 为何不先截候选再融合：截断后只能拿**候选内**最大值归一化，路与路之间的
-	// 相对权重就随候选集漂移——实测同一份 KB 上自检索 MRR 从 0.376 掉到 0.197。
-	// KB 规模下全量 cosine 的代价可忽略；真到数万条再上 ANN 也不迟。
-	denseHits := s.vec.SearchScored(s.vectorize(query), s.vec.Size())
-	lexHits := s.lex.SearchScored(s.veczer.Vectorize(query), s.lex.Size())
-	if len(denseHits) == 0 && len(lexHits) == 0 {
-		return nil
+	if category != "" && !s.hasInScopeLocked(category) {
+		return nil // 该分类下没有任何条目，省掉三路全量打分
 	}
 
-	scores := make(map[string]float64, len(denseHits)+len(lexHits))
-	addPath := func(hits []vector.DocVectorHit, weight float64) {
+	// 各路分别打分，再按查询内最大值归一化加权融合。
+	// 三个来源形状不同（稀疏路给 DocVectorHit），统一成 scoreHit 再交给
+	// addPath 收口。
+	scores := make(map[string]float64)
+	addPath := func(hits []scoreHit, weight float64) {
+		// 归一化取**作用域内**的最大值：拿全库最大值归一会让限定分类后的
+		// 分数被一个范围外的条目压低，跨路相对权重随之失真。
 		max := 0.0
 		for _, h := range hits {
-			if h.Score > max {
-				max = h.Score
+			if h.score > max && inScope(h.id) {
+				max = h.score
 			}
 		}
 		if max <= 0 {
-			return // 该路对这条查询没有信号（如空向量），全量让给另一路
+			return // 该路对这条查询（在作用域内）没有信号，全量让给其余路
 		}
 		for _, h := range hits {
-			scores[h.Doc.ID] += weight * h.Score / max
+			if !inScope(h.id) {
+				continue
+			}
+			scores[h.id] += weight * h.score / max
 		}
 	}
-	addPath(denseHits, densePathWeight)
-	addPath(lexHits, 1-densePathWeight)
+	// 路 1：多模态稠密空间（可用时先占掉 denseSpaceWeight）
+	sparseBudget := 1.0
+	if s.denseEnabled() {
+		if qv, err := s.dense.VectorizeDense(query); err == nil && len(qv) > 0 {
+			addPath(s.denseHits(qv), denseSpaceWeight)
+			sparseBudget = 1.0 - denseSpaceWeight
+		}
+	}
+
+	// 路 2：稀疏语义（词向量；未注入时即 TF-IDF）
+	// 路 3：词法（TF-IDF，专名/术语）
+	// 注：这里拿的是各路**全量**打分结果，不做候选截断——截断会让归一化
+	// 随候选集漂移（见函数头注释）。
+	denseHits := s.vec.SearchScored(s.vectorize(query), s.vec.Size())
+	lexHits := s.lex.SearchScored(s.veczer.Vectorize(query), s.lex.Size())
+	addPath(toHits(denseHits), sparseBudget*sparseSemWeight)
+	addPath(toHits(lexHits), sparseBudget*(1-sparseSemWeight))
+
+	if len(scores) == 0 {
+		return nil
+	}
 
 	ids := make([]string, 0, len(scores))
 	for id := range scores {
@@ -242,49 +613,69 @@ func (s *Store) Search(query string, topK int) []*Knowledge {
 	return out
 }
 
+// KnowledgeEntryInput 是知识条目的写入参数（纯文本 / 带媒体）。
+// 走 struct 而非多个位置参数：媒体与文本在 5 个方法里成对出现，
+// 位置参数会让调用点难以自明（且带媒体时必填空串）。
+type KnowledgeEntryInput struct {
+	Name    string
+	Content string
+	Media   []KnowledgeMediaRef
+}
+
+// Add 写入一条纯文本知识。媒体请用 AddWithMedia。
 func (s *Store) Add(name, content string) error {
+	return s.AddWithMedia(name, content, nil)
+}
+
+// AddWithMedia 写入一条知识，可携带媒体块（媒体作为一等节点参与稠密召回）。
+//
+// 与 Add 的区别只在于媒体：稠密向量会把正文向量与各媒体向量**融合**成一个
+// 向量（同一坐标系内求和后归一化），所以一条带图的知识既能被文字搜到，
+// 也能被“这张图”本身搜到。
+//
+// 为何 EmbedImageDense 可能失败：当前模态不在本空间覆盖范围（如音频）时返回
+// ErrModalityUnsupported。此时**静默跳过该媒体**、仅用文本建立向量——
+// 绝不能拿另一个模型的向量顶替，那会把两套坐标系混进同一空间，相似度全无意义。
+func (s *Store) AddWithMedia(name, content string, media []KnowledgeMediaRef) error {
+	return s.Write(KnowledgeEntryInput{Name: name, Content: content, Media: media})
+}
+
+// Write 按输入参数写入一条知识。
+func (s *Store) Write(in KnowledgeEntryInput) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	// 解析层级：将 "/" 作为路径分隔符
-	category := ""
-	leaf := name
-	if idx := strings.LastIndex(name, "/"); idx >= 0 {
-		category = name[:idx]
-		leaf = name[idx+1:]
-	}
-	dirName := sanitize(leaf)
-	if category != "" {
-		dirName = sanitize(category) + "/" + dirName
-	}
-	if err := checkSafeName(dirName); err != nil {
+	// id 同时是三样东西：内存 map 的键、LLM 可见的知识名、盘上相对目录。
+	// 三者必须逐字相同——扫盘重建（scanDir）读回的是真实目录名，若与 Add 时的
+	// 键不一致，重启那一刻知识名就变了，knowledge_list / knowledge_delete 的
+	// key 全部对不上，删除还会静默失败（详见 Remove）。
+	id, err := normalizeName(in.Name)
+	if err != nil {
 		return err
 	}
-	dir := filepath.Join(s.root, dirName)
-	// 双保险：不得写到知识根之外（否则条目落在根外，重启 scanAll 扫不到，
-	// 变成"内存有、盘上根外"的幽灵条目）
-	rootClean := filepath.Clean(s.root)
-	if dir != rootClean && !strings.HasPrefix(filepath.Clean(dir), rootClean+string(filepath.Separator)) {
-		return fmt.Errorf("knowledge: 拒绝写入知识根之外的路径: %q", name)
+	category := ""
+	if idx := strings.LastIndex(id, "/"); idx >= 0 {
+		category = id[:idx]
 	}
+	dir := filepath.Join(s.root, filepath.FromSlash(id))
 	if err := os.MkdirAll(dir, 0755); err != nil {
 		return fmt.Errorf("create knowledge dir: %w", err)
 	}
 
 	path := filepath.Join(dir, "content.md")
-	if err := os.WriteFile(path, []byte(content), 0644); err != nil {
+	if err := os.WriteFile(path, []byte(in.Content), 0644); err != nil {
 		return fmt.Errorf("write knowledge: %w", err)
 	}
 
 	now := time.Now()
-	id := sanitize(name)
 	k := &Knowledge{
 		Name:      id,
-		Content:   content,
+		Content:   in.Content,
 		Path:      path,
-		Category:  sanitize(category),
-		Tags:      memory.ExtractKeywords(name + " " + content),
+		Category:  category,
+		Tags:      memory.ExtractKeywords(filepath.ToSlash(id) + " " + in.Content),
 		UpdatedAt: now,
+		Media:     in.Media,
 	}
 	s.items[id] = k
 
@@ -295,76 +686,77 @@ func (s *Store) Add(name, content string) error {
 	// 是对的，只有向量数比条目数多——而检索可能因此命中已被替换掉的旧内容。
 	s.vec.Remove(id)
 
-	text := name + " " + content
+	text := in.Name + " " + in.Content
 	vec := s.vectorize(text)
-	s.vec.Insert(id, name+": "+content, vec, map[string]string{
-		"name": name, "path": path,
+	s.vec.Insert(id, in.Name+": "+in.Content, vec, map[string]string{
+		"name": in.Name, "path": path,
 	})
-	// 词法路同样去重后重建这条；IDF 统计沿用现有语料（重启时 scanAll 会全量重训）
-	s.lex.Remove(id)
-	s.lex.Insert(id, name+": "+content, s.veczer.Vectorize(text), nil)
-	s.summaries = append(s.summaries, name+" "+content)
+	// 词法路：重建本条索引 + 增量维护 IDF（覆盖写时先摘掉旧文本的贡献）
+	s.indexDocLocked(id, k)
 
-	if err := s.writeIndexLocked(); err != nil {
-		log.Printf("[knowledge] write index error after adding %s: %v", name, err)
+	// 媒体引用是作者数据，必须落盘（放条目目录内，随条目生灭）。
+	if err := writeMediaSidecar(dir, in.Media); err != nil {
+		// 侧车写失败不阻断知识本身：正文已落盘，媒体丢了只影响跨模态召回，
+		// 且下次 AddWithMedia/AttachMedia 会补写。但要留下痕迹。
+		log.Printf("[knowledge] media sidecar write error for %s: %v", in.Name, err)
 	}
-	log.Printf("[knowledge] added: %s (%d bytes)", name, len(content))
+
+	// 稠密路：算完就挂上，使新写入的条目立即可被跨模态召回命中
+	// （不必等下次 ReindexDense）。
+	if s.denseEnabled() {
+		if v := s.denseFor(k); v != nil {
+			k.Dense, k.DenseFP = v, s.dense.Fingerprint()
+			s.denseDirty = true
+		}
+	}
+
+	s.flushDenseLocked()
+	// 索引写入改为「标脏 + 延迟收口」，见 indexDirty 字段注释。
+	s.indexDirty = true
+	log.Printf("[knowledge] added: %s (%d bytes, %d media)", in.Name, len(in.Content), len(in.Media))
 	return nil
 }
 
-func (s *Store) SearchCategories(query string, topK int) []string {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
+// 树状检索与分类检索已于 2026-09 移除：全仓无调用方，且停留在 Search 修复
+// **之前**的单路口径（直接 s.vec.Search，无词法融合、0.05 阈值）。
+// 留着它们等于埋一份已知的检索质量回归；真需要按分类召回，应给 Search 加
+// category 过滤参数，而不是复活这两个。
 
-	if query == "" {
-		var names []string
-		for _, k := range s.items {
-			names = append(names, k.Name)
-		}
-		sort.Strings(names)
-		if len(names) > topK {
-			names = names[:topK]
-		}
-		return names
-	}
-
-	vec := s.vectorize(query)
-	results := s.vec.Search(vec, topK)
-	var names []string
-	for _, r := range results {
-		if k, ok := s.items[r.ID]; ok {
-			names = append(names, k.Name)
-		}
-	}
-	return names
-}
-
+// Remove 删除一条知识。
+//
+// 盘上路径取自**条目自记的 Path**（Add 写入 / scanDir 扫盘时记下的事实），
+// 不再用 name 重新拼一遍：拼出来的路径和真实落点只要有一个字符对不上，
+// os.RemoveAll 就删空目录返 nil，工具层回报"已删除"而文件与索引条目都还在。
+//
+// 不存在的条目返回 ErrNotFound（webui 的 DELETE 处理器把 error 映射成 404，
+// 正是这个语义）。只删不存在的条目是幂等操作，不算错误。
 func (s *Store) Remove(name string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	id := sanitize(name)
-	if err := checkSafeName(id); err != nil {
+	id, k, err := s.resolve(name)
+	if err != nil {
 		return err
 	}
-	dir := filepath.Join(s.root, id)
-	// 双保险：解析后的路径必须仍在知识根内。sanitize 不过滤 ".."，
-	// 少了这一步，Remove("..") 会 RemoveAll 掉整个数据目录
-	// （实测把 <data> 连同 memory/documents/media 一起删掉），
-	// 且 os.RemoveAll 对不存在的目标返回 nil ⇒ 工具层回报"已删除"。
+
+	itemDir := filepath.Dir(k.Path)
+	if err := os.RemoveAll(itemDir); err != nil {
+		return err
+	}
+	// 顺带清掉空掉的分类目录：名字去掉最后一段就是分类路径，分类下最后一条
+	// 被删后目录会空留在盘上，越积越多。只往上到 s.root 为止，**绝不动 root**
+	// （root 被删 = 整个知识库连同索引一起没了）。
 	rootClean := filepath.Clean(s.root)
-	if dir != rootClean && !strings.HasPrefix(filepath.Clean(dir), rootClean+string(filepath.Separator)) {
-		return fmt.Errorf("knowledge: 拒绝删除知识根之外的路径: %q", name)
+	for dir := filepath.Clean(filepath.Dir(itemDir)); strings.HasPrefix(dir, rootClean+string(filepath.Separator)); dir = filepath.Dir(dir) {
+		if err := os.Remove(dir); err != nil {
+			break // 非空或无权限，留给上层判断
+		}
 	}
-	if err := os.RemoveAll(dir); err != nil {
-		return err
-	}
+
+	s.unindexDocLocked(id, k)
 	delete(s.items, id)
 	s.vec.Remove(id)
-	s.lex.Remove(id)
-	if err := s.writeIndexLocked(); err != nil {
-		log.Printf("[knowledge] write index error after removing %s: %v", name, err)
-	}
+	s.indexDirty = true
 	return nil
 }
 
@@ -401,7 +793,20 @@ func (s *Store) BuildTree() *TreeIndex {
 // 为什么需要：writeIndex 会走 BuildTree（RLock），而 Add/Remove 持的是写锁，
 // 直接调用会死锁；此前就是因此把索引写丢进了无追踪的 goroutine 里，
 // 结果是「失败只打日志」+ 与调用方（含测试的临时目录清理）竞态。
+// buildTreeLocked 从当前条目重建树状索引。
+//
+// 向量直接取自 s.vec（稀疏语义路的既有结果），**不再逐条重算**：
+// 此前每条都调一次 s.vectorize()，那是全量分词 + TF-IDF 加权，
+// 而结果与 s.vec 里已经存着的向量是同一个东西。实测这是 Add 单条
+// 耗时随库规模线性增长的主因（2.1ms@50 → 13.7ms@400）。
+// 调用方必须已持锁。
 func (s *Store) buildTreeLocked() *TreeIndex {
+	// 一次 O(N) 取全量向量建表（纯内存拷贝），替代 N 次分词计算。
+	vecByID := make(map[string]vector.Vector, s.vec.Size())
+	for _, d := range s.vec.All() {
+		vecByID[d.ID] = d.Vector
+	}
+
 	root := newTreeIndex("root")
 	for _, k := range s.items {
 		node := root
@@ -417,8 +822,9 @@ func (s *Store) buildTreeLocked() *TreeIndex {
 				node = node.Children[part]
 			}
 		}
-		// 获取该条目的向量并压缩
-		vec := s.vectorize(k.Name + " " + k.Content)
+		// 取该条目的向量并压缩（命中不到就留空向量，不再回退去重算——
+		// 那会把本函数重新拖回 O(N × 分词)）
+		vec := vecByID[k.Name]
 		preview := []rune(k.Content)
 		previewStr := ""
 		if len(preview) > 200 {
@@ -438,44 +844,40 @@ func (s *Store) buildTreeLocked() *TreeIndex {
 	return root
 }
 
-// SearchTree 树状搜索：在树节点下搜索，返回按分类聚合的结果
-func (s *Store) SearchTree(query string, topK int) map[string][]*Knowledge {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
-
-	if topK <= 0 {
-		topK = 10
-	}
-
-	vec := s.vectorize(query)
-	results := s.vec.Search(vec, topK*2)
-
-	categorized := make(map[string][]*Knowledge)
-	for _, r := range results {
-		if k, ok := s.items[r.ID]; ok {
-			cat := k.Category
-			if cat == "" {
-				cat = "未分类"
-			}
-			categorized[cat] = append(categorized[cat], k)
-		}
-	}
-
-	out := make(map[string][]*Knowledge)
-	for cat, items := range categorized {
-		if len(items) > topK {
-			items = items[:topK]
-		}
-		out[cat] = items
-	}
-	return out
-}
-
 // writeIndex 写入 .index.json 树状索引文件（含向量和摘要）
 func (s *Store) writeIndex() error {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
-	return s.writeIndexLocked()
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.flushIndexLocked()
+}
+
+// flushIndexLocked 把过期的 .index.json 写回（调用方须持写锁）。
+//
+// 为什么延迟：批量导入 400 条就是 400 次全量序列化（实测 6.7ms/次），
+// 而该文件**目前没有任何读取方**（Start 是全量扫盘重建索引）。
+// 改为标脏 + 在 Stop/Flush 时收口，导入成本降为一次写。
+// 若将来真把它当缓存读回，必须先把"读取"实现补上，再考虑是否仍需延迟。
+func (s *Store) flushIndexLocked() error {
+	if !s.indexDirty {
+		return nil
+	}
+	if err := s.writeIndexLocked(); err != nil {
+		log.Printf("[knowledge] write index error: %v", err)
+		return err
+	}
+	s.indexDirty = false
+	return nil
+}
+
+// Flush 把待落盘的派生数据（树索引）写回。批量导入后由调用方显式调用，
+// 否则要等 Stop。
+func (s *Store) Flush() error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if err := s.flushDenseLocked(); err != nil {
+		return err
+	}
+	return s.flushIndexLocked()
 }
 
 // writeIndexLocked 与 writeIndex 同义但**不取锁**（调用方已持锁）。
@@ -485,7 +887,19 @@ func (s *Store) writeIndexLocked() error {
 	if err != nil {
 		return err
 	}
-	return os.WriteFile(s.indexPath, data, 0644)
+	// tmp + rename：直接 os.WriteFile 会在中途崩溃时留下半截 JSON。
+	// 本文件目前没有任何读取方（Start 是全量扫盘重建索引），所以损坏的
+	// 后果只是「导出物不可读」；但那是运气，不该依赖——何况将来若真把它
+	// 当缓存读回来，半截文件会被当成有效索引。
+	tmp := s.indexPath + ".tmp"
+	if err := os.WriteFile(tmp, data, 0644); err != nil {
+		return err
+	}
+	if err := os.Rename(tmp, s.indexPath); err != nil {
+		os.Remove(tmp)
+		return err
+	}
+	return nil
 }
 
 // ——— internal ———
@@ -507,18 +921,16 @@ func (s *Store) scanAll() error {
 		s.scanDir("", entry.Name())
 	}
 
-	if len(s.summaries) > 0 {
-		s.veczer.Train(s.summaries)
-	}
-
-	s.lex = newLexicalStore()
+	s.retrainLexLocked()
 	for _, k := range s.items {
 		text := k.Name + " " + k.Content
 		s.vec.Insert(k.Name, k.Name+": "+k.Content, s.vectorize(text), map[string]string{
 			"name": k.Name, "path": k.Path,
 		})
-		s.lex.Insert(k.Name, k.Name+": "+k.Content, s.veczer.Vectorize(text), nil)
 	}
+	s.scanned = true
+	// 若接线早于扫盘（测试与部分调用方会这么做），这里补一次缓存恢复。
+	s.maybeLoadDenseCacheLocked()
 
 	return nil
 }
@@ -542,8 +954,8 @@ func (s *Store) scanDir(category, dirName string) {
 			Tags:      memory.ExtractKeywords(dirName + " " + content),
 			UpdatedAt: now,
 		}
+		k.Media = readMediaSidecar(dir)
 		s.items[name] = k
-		s.summaries = append(s.summaries, name+" "+content)
 		return
 	}
 
@@ -561,22 +973,60 @@ func (s *Store) scanDir(category, dirName string) {
 	}
 }
 
-// checkSafeName 拒绝会让路径逃出知识根的成分。
+// ErrInvalidName 表示知识名不合法：空段、`.`、`..` 或以点开头的段。
+var ErrInvalidName = errors.New("knowledge: 知识名不合法")
+
+// ErrNotFound 表示要删除/读取的知识不存在。
+var ErrNotFound = errors.New("knowledge: 知识不存在")
+
+// normalizeName 把外部传入的知识名规范成**唯一**的规范名。
 //
-// sanitize 只做小写/去空格/换下划线，**不过滤 ".."**，所以
-// "../../x" 或 ".." 会被 filepath.Join 解析到知识根之外。
-// 这里在拼接之前挡掉：空段、"."、".."，以及以点开头的段
-// （后者会被 scanDir 当隐藏目录跳过，造成"写进去了却扫不回来"）。
-func checkSafeName(name string) error {
+// 规范名同时充当三样东西：内存 map 的键、LLM 可见的知识名、盘上相对目录。
+// 三者必须逐字相同——扫盘重建（scanDir）读回的是真实目录名，若与 Add 时的
+// 键不一致，重启那一刻知识名就变了，knowledge_list / knowledge_delete 的
+// key 全部对不上，删除还会静默失败（详见 Remove）。
+//
+// 为何**逐段** sanitize 而非整串：sanitize 内含 TrimSpace，只作用于整串两端。
+// 整串处理时 "tech/ Go /note" 得到 id="tech/_go_/note"（段内前后空格变 "_"），
+// 而建目录时逐段 sanitize 得到 "tech/_go/note"（段内空格被 TrimSpace 掉）——
+// 两者从**第一次落盘起**就对不上。这不是重启才产生的漂移。
+func normalizeName(name string) (string, error) {
 	if strings.TrimSpace(name) == "" {
-		return fmt.Errorf("knowledge: 名称为空")
+		return "", fmt.Errorf("%w: 空名", ErrInvalidName)
 	}
-	for _, seg := range strings.Split(name, "/") {
-		if seg == "" || seg == "." || seg == ".." || strings.HasPrefix(seg, ".") {
-			return fmt.Errorf("knowledge: 名称含非法路径段 %q: %q", seg, name)
+	segs := strings.Split(name, "/")
+	out := make([]string, 0, len(segs))
+	for _, seg := range segs {
+		s := sanitize(seg)
+		// 空段 / "." / ".." 会让 filepath.Join 逃出知识根（实测 Remove("..")
+		// 直接删掉整个 data 目录）；以点开头的段会被 scanDir 当隐藏目录跳过，
+		// 变成"内存有、盘上扫不回"的幽灵条目。
+		if s == "" || s == "." || s == ".." || strings.HasPrefix(s, ".") {
+			return "", fmt.Errorf("%w: %q 含有空段、点段或隐藏段 %q", ErrInvalidName, name, seg)
+		}
+		out = append(out, s)
+	}
+	return strings.Join(out, "/"), nil
+}
+
+// findByLeaf 按最后一段（叶名）找条目，返回命中的 id 与命中数（大小写敏感）。
+// 保留给需要精确叶名的调用方；resolve 用的是 findByLeafFold。
+func (s *Store) findByLeaf(id string) (string, int) {
+	leaf := id
+	if idx := strings.LastIndex(id, "/"); idx >= 0 {
+		leaf = id[idx+1:]
+	}
+	found, n := "", 0
+	for k := range s.items {
+		l := k
+		if idx := strings.LastIndex(k, "/"); idx >= 0 {
+			l = k[idx+1:]
+		}
+		if l == leaf {
+			found, n = k, n+1
 		}
 	}
-	return nil
+	return found, n
 }
 
 func sanitize(name string) string {
@@ -585,4 +1035,258 @@ func sanitize(name string) string {
 	name = strings.ReplaceAll(name, " ", "_")
 	name = strings.ReplaceAll(name, "\\", "_")
 	return name
+}
+
+// findByLeafFold 与 findByLeaf 同义，但叶名比较大小写不敏感——
+// 遗留盘上目录可能带大写。
+func (s *Store) findByLeafFold(want string) (string, int) {
+	want = strings.ToLower(want)
+	found, n := "", 0
+	for k := range s.items {
+		l := k
+		if idx := strings.LastIndex(k, "/"); idx >= 0 {
+			l = k[idx+1:]
+		}
+		if strings.ToLower(l) == want {
+			found, n = k, n+1
+		}
+	}
+	return found, n
+}
+
+// resolve 把外部传入的名字解析到一个真实存在的条目。
+//
+// 为何不能只查规范名：scanDir 是按**盘上目录原样**建键的，所以修复前 Add
+// 留下的目录（大写、带空格，如 "Tech/Upper"）在 items 里的键就是那个原样名。
+// 直接拿 normalizeName 的结果去查会查不中，而盘上条目又确实存在——
+// 结果就是老条目删不掉、清不清（实测）。查找按三层退让，但**删的路径
+// 永远取自条目自记的 Path**，所以退让本身不带来误删风险。
+func (s *Store) resolve(name string) (string, *Knowledge, error) {
+	// 1. 原样精确匹配（scanDir 建键与新建的规范名都会命中这里）
+	if k, ok := s.items[name]; ok {
+		return name, k, nil
+	}
+
+	norm, nerr := normalizeName(name)
+	leaf := name
+	if i := strings.LastIndex(name, "/"); i >= 0 {
+		leaf = name[i+1:]
+	}
+	// 2. 规范名匹配
+	if nerr == nil {
+		if k, ok := s.items[norm]; ok {
+			return norm, k, nil
+		}
+		if i := strings.LastIndex(norm, "/"); i >= 0 {
+			leaf = norm[i+1:]
+		} else {
+			leaf = norm
+		}
+	}
+
+	// 3. 叶名匹配（大小写不敏感）。唯一命中才接受——多条同名时宁可不删，
+	// 也不能猜错目录。
+	if id, n := s.findByLeafFold(leaf); n == 1 {
+		return id, s.items[id], nil
+	} else if n > 1 {
+		return "", nil, fmt.Errorf("%w: %q 命中 %d 条条目，请用全名", ErrNotFound, name, n)
+	}
+
+	// 都不中：名字本身非法就报非法（更具体），否则就是不存在。
+	if nerr != nil {
+		return "", nil, nerr
+	}
+	return "", nil, fmt.Errorf("%w: %q", ErrNotFound, name)
+}
+
+// scoreHit 是融合三路时统一的 (条目, 相似度) 形状。包级命名而非函数内
+// 匿名 struct：三个来源（稠密/稀疏语义/词法）必须落在**同一**类型上，
+// 否则 addPath 无法作为泛型收口点。
+type scoreHit struct {
+	id    string
+	score float64
+}
+
+// hasInScopeLocked 报告某分类子树下是否存在条目（调用方须持锁）。
+// 用于在分类过滤下提前返回，避免三路对全库白打分。
+func (s *Store) hasInScopeLocked(category string) bool {
+	for _, k := range s.items {
+		if k.Category == category ||
+			strings.HasPrefix(k.Category, category+"/") ||
+			strings.HasPrefix(k.Name, category+"/") {
+			return true
+		}
+	}
+	return false
+}
+
+// hasAnyDense 报告是否有任何条目已带稠密向量（调用方须持锁）。
+func (s *Store) hasAnyDense() bool {
+	for _, k := range s.items {
+		if len(k.Dense) > 0 {
+			return true
+		}
+	}
+	return false
+}
+
+// denseHits 在多模态空间内对全库打分。
+//
+// 维度守卫是硬要求：不同模型/维度的向量混进来算出的余弦没有意义
+// （会得到一个夹在两套坐标系之间的方向，且“看起来还挺像”）。维度不符
+// 一律跳过。同维但指纹过期的（模型换过）也跳过。
+func (s *Store) denseHits(queryVec []float64) []scoreHit {
+	if !s.denseEnabled() || len(queryVec) == 0 {
+		return nil
+	}
+	dim := s.dense.Dim()
+	fp := s.dense.Fingerprint()
+	out := make([]scoreHit, 0, len(s.items))
+	for _, k := range s.items {
+		if len(k.Dense) != dim || k.DenseFP != fp {
+			continue
+		}
+		if score := vector.DenseCosine(queryVec, k.Dense); score > 0.01 {
+			out = append(out, scoreHit{id: k.Name, score: score})
+		}
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].score > out[j].score })
+	return out
+}
+
+// toHits 把稀疏路的 DocVectorHit 归一成 addPath 用的 (id, score) 形状。
+func toHits(in []vector.DocVectorHit) []scoreHit {
+	out := make([]scoreHit, 0, len(in))
+	for _, h := range in {
+		out = append(out, scoreHit{id: h.Doc.ID, score: h.Score})
+	}
+	return out
+}
+
+// shortFP 截断 fingerprint 为可读日志格式。
+func shortFP(fp string) string {
+	if len(fp) > 12 {
+		return fp[:12]
+	}
+	return fp
+}
+
+// flushDenseLocked 把脏的稠密缓存落盘（调用方须持写锁）。
+//
+// 为何在 Add 当场落盘而不是等 Stop：进程可能被 kill -9，那时没有任何
+// 优雅关停钩子可跑，这批向量的计算就白费了（docStore 的 BuildDenseIndex
+// 出于同样理由选择当场写盘）。
+func (s *Store) flushDenseLocked() error {
+	if !s.denseDirty {
+		return nil
+	}
+	s.saveDenseCacheLocked()
+	s.denseDirty = false
+	return nil
+}
+
+// ——— 稠密向量缓存 ———
+
+// loadDenseCache 读回稠密向量缓存。只在该空间未变更时命中。
+//
+// 缓存本身是派生数据，坏了就当没有（下次重算），绝不返回 error 卡住启动。
+func (s *Store) loadDenseCache() {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.maybeLoadDenseCacheLocked()
+}
+
+// maybeLoadDenseCacheLocked 在「已接线 + 已扫盘 + 未加载过」时恢复缓存的
+// 稠密向量。调用方必须已持锁。
+func (s *Store) maybeLoadDenseCacheLocked() {
+	if s.denseCacheLoaded || !s.scanned || !s.denseEnabled() {
+		return
+	}
+	s.denseCacheLoaded = true
+	data, err := os.ReadFile(s.denseCachePath)
+	if err != nil {
+		return
+	}
+	var c denseCache
+	if json.Unmarshal(data, &c) != nil {
+		return
+	}
+	// 换过模型/维度后整份作废：否则会把一个坐标系的向量当另一个用
+	if c.Fingerprint != s.dense.Fingerprint() || c.Dim != s.dense.Dim() {
+		return
+	}
+	dim := s.dense.Dim()
+	loaded := 0
+	for id, e := range c.Entries {
+		k, ok := s.items[id]
+		if !ok || len(e.Dense) != dim {
+			continue
+		}
+		k.Dense, k.DenseFP = e.Dense, e.FP
+		loaded++
+	}
+	log.Printf("[knowledge] dense cache restored: %d vectors (fp=%s dim=%d)", loaded, shortFP(c.Fingerprint), dim)
+}
+
+// saveDenseCacheLocked 把稠密向量写回缓存文件（调用方须持写锁）。
+//
+// 用 tmp+rename 原子替换：写一半的缓存文件会被下次启动当成"损坏"而整体丢弃，
+// 代价是一次全量重算——可接受，但不该每次都发生。
+func (s *Store) saveDenseCacheLocked() {
+	if !s.denseEnabled() {
+		return
+	}
+	fp, dim := s.dense.Fingerprint(), s.dense.Dim()
+	c := denseCache{Fingerprint: fp, Dim: dim, Entries: map[string]denseCacheEntry{}}
+	for id, k := range s.items {
+		if len(k.Dense) == dim && k.DenseFP == fp {
+			c.Entries[id] = denseCacheEntry{Dense: k.Dense, FP: k.DenseFP, Dim: dim}
+		}
+	}
+	data, err := json.Marshal(c)
+	if err != nil {
+		log.Printf("[knowledge] dense cache marshal error: %v", err)
+		return
+	}
+	tmp := s.denseCachePath + ".tmp"
+	if err := os.WriteFile(tmp, data, 0644); err != nil {
+		log.Printf("[knowledge] dense cache write error: %v", err)
+		return
+	}
+	if err := os.Rename(tmp, s.denseCachePath); err != nil {
+		os.Remove(tmp)
+		log.Printf("[knowledge] dense cache commit error: %v", err)
+	}
+}
+
+// ——— 媒体引用持久化 ———
+
+// readMediaSidecar 读条目目录下的媒体引用文件。没有文件 = 无媒体（正常）。
+func readMediaSidecar(dir string) []KnowledgeMediaRef {
+	data, err := os.ReadFile(filepath.Join(dir, mediaSidecarName))
+	if err != nil {
+		return nil
+	}
+	var refs []KnowledgeMediaRef
+	if json.Unmarshal(data, &refs) != nil || len(refs) == 0 {
+		return nil
+	}
+	return refs
+}
+
+// writeMediaSidecar 把媒体引用写回条目目录。
+// 媒体为空时删掉该文件，避免留下 "[]" 这种无意义的残留。
+func writeMediaSidecar(dir string, refs []KnowledgeMediaRef) error {
+	p := filepath.Join(dir, mediaSidecarName)
+	if len(refs) == 0 {
+		if err := os.Remove(p); err != nil && !os.IsNotExist(err) {
+			return err
+		}
+		return nil
+	}
+	data, err := json.MarshalIndent(refs, "", "  ")
+	if err != nil {
+		return err
+	}
+	return os.WriteFile(p, data, 0644)
 }
