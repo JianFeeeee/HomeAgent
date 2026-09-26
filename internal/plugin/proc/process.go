@@ -12,6 +12,7 @@ import (
 	"os/exec"
 	"sync"
 	"sync/atomic"
+	"syscall"
 	"time"
 
 	"gitcode.com/JianFeeeee/HomeAgent/internal/meta"
@@ -135,6 +136,15 @@ func Spawn(name, bin string, opts Options) (*Process, error) {
 	cmd.Dir = opts.Dir
 	// stderr 直通内核日志：插件的 panic 栈、log 输出可直接看到。
 	cmd.Stderr = os.Stderr
+	// 插件自成进程组（Setpgid）。为何必须：
+	//
+	// 插件会用 exec.Command 拉孙进程（bili→yt-dlp→ffmpeg、editdoc→python、
+	// browser→chromium —— 实测 8 个插件都这么干，且无一做进程组隔离）。
+	// 不分组时孙进程与内核同组，Kill 只能打给插件本体，孙进程变孤儿：
+	//  1. 它继续持有插件 stdout 管道的写端 ⇒ 内核 readLoop 永不 EOF；
+	//  2. 它自己活成孤儿，继续占 CPU/网络/文件句柄。
+	// 分组后 Kill 可以 kill(-pgid) 一次带走整棵树。
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 	if len(opts.Env) > 0 {
 		cmd.Env = append(os.Environ(), opts.Env...)
 	}
@@ -597,7 +607,24 @@ func (p *Process) Kill() error {
 	if p.cmd == nil || p.cmd.Process == nil {
 		return nil
 	}
-	err := p.cmd.Process.Kill()
+	// 杀**整个进程组**（负 pid = 进程组），不只是插件本体。
+	//
+	// 插件拉起的孙进程（bili→yt-dlp→ffmpeg 等，实测 8 个插件都拉孙进程）
+	// 继承插件的 stdout 管道写端。只杀本体的话孙进程变孤儿：
+	// 它继续持有写端 ⇒ 内核 readLoop 永远等不到 EOF ⇒ 关停挂死。
+	// 线上症状：StopAll 里只有 bili 报 "SIGKILL 后 2s 仍未被收割"，
+	// 之后近 90 秒无日志，systemd SIGKILL。
+	//
+	// 兜底：Setpgid 未生效（老插件/平台不支持）时退回杀本体，
+	// 否则 kill(-pgid) 会失败而插件还活着。
+	pid := p.cmd.Process.Pid
+	killErr := syscall.Kill(-pid, syscall.SIGKILL)
+	if killErr != nil {
+		// 进程组不存在或无权限：退回只杀本体。
+		// 不能直接返回错误：Setpgid 未生效时（老插件、非 Unix 平台）
+		// 负 pid 会报 ESRCH，此时必须仍然把插件本体杀掉。
+		killErr = p.cmd.Process.Kill()
+	}
 	// 等 waitLoop 收割完成。不再在此兜底调 markExited：
 	// cmd.Wait 只能由 waitLoop 调一次，两处调会报 "wait: no child processes"。
 	select {
@@ -607,9 +634,33 @@ func (p *Process) Kill() error {
 		// 不能无限等，否则重载路径整体挂死；留日志供定位。
 		log.Printf("[proc] %s SIGKILL 后 %v 仍未被收割（进程可能卡在内核态）", p.name, killReapTimeout)
 	}
-	p.readerWG.Wait()
-	if err != nil && !errors.Is(err, os.ErrProcessDone) {
-		return fmt.Errorf("proc: 结束 %s: %w", p.name, err)
+	// readerWG.Wait 必须有界：孙进程持有 stdout 写端时 readLoop 永不返回，
+	// 无超时就是"任何插件泄漏一个孙进程都能拖死整个关停"。
+	// 超时后主动关掉读端，强制 readLoop 从 Scan 里出来（file already closed，
+	// 已在 waitLoop 里被列为预期错误）。
+	readerDone := make(chan struct{})
+	go func() {
+		p.readerWG.Wait()
+		close(readerDone)
+	}()
+	select {
+	case <-readerDone:
+	case <-time.After(killReapTimeout):
+		log.Printf("[proc] %s 的 stdout 读取未在 %v 内结束（孙进程可能仍持有写端），强制关闭读端",
+			p.name, killReapTimeout)
+		if p.stdoutFile != nil {
+			_ = p.stdoutFile.Close()
+		}
+		select {
+		case <-readerDone:
+		case <-time.After(killReapTimeout):
+			// 极端情况：关管道也没能让它退出。不再等 —— 宁可让这次
+			// Stop 少等 2 秒，也不能把关停无限期挂住。
+			log.Printf("[proc] %s 读端关闭后 readLoop 仍未退出，放弃等待", p.name)
+		}
+	}
+	if killErr != nil && !errors.Is(killErr, os.ErrProcessDone) {
+		return fmt.Errorf("proc: 结束 %s: %w", p.name, killErr)
 	}
 	return nil
 }
