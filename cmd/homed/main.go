@@ -132,6 +132,9 @@ func main() {
 	multimodalSpace, mmProviderName, mmErr, closeMultimodal := initMultimodalSpace(cfgReg)
 	defer closeMultimodal()
 
+	// 迁移必须在 store 扫盘**之前**：改名后扫盘一次到位，
+	// 避免先以旧名建索引、再改名造成内存键与盘上目录短暂不一致。
+	initKnowledgeMigration(cfg)
 	ks := initKnowledgeStore(cfg)
 
 	// ---- 人格设定 ----
