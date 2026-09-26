@@ -3,6 +3,7 @@ package proc
 import (
 	"encoding/json"
 	"fmt"
+	"gitcode.com/JianFeeeee/HomeAgent/internal/knowledge"
 	"strings"
 	"sync"
 	"testing"
@@ -34,8 +35,17 @@ type fakeCoreSDK struct {
 	// toolBlocks 累积 SetToolBlocks 收到的块（多模态注入通道）。
 	toolBlocks []pubsdk.ContentBlock
 	// 文档/知识：验证大正文经 doc_ref / content_ref 走共享内存。
-	docMem    *fakeDocMemory
-	knowledge *fakeKnowledge
+	docMem *fakeDocMemory
+	// 用接口而非具体类型：需要能塞入"只实现公开 KnowledgeAPI、
+	// 不具备内核多模态扩展"的替身，以验证能力缺失时的报错路径。
+	knowledge knowledgeAPITest
+}
+
+// knowledgeAPITest 是公开 SDK 的知识库契约（不含内核扩展方法）。
+type knowledgeAPITest interface {
+	Search(query string, topK int) ([]*pubsdk.Knowledge, error)
+	Add(name, content string) error
+	List() ([]string, error)
 }
 
 func newFakeCore() *fakeCoreSDK {
@@ -148,9 +158,18 @@ func (f *fakeDocMemory) Stats() map[string]interface{} { return nil }
 
 // fakeKnowledge 只实现测试需要的部分，记录 Add 收到的正文。
 type fakeKnowledge struct {
-	mu   sync.Mutex
-	name string
-	body string
+	mu    sync.Mutex
+	name  string
+	body  string
+	media []knowledge.KnowledgeMediaRef
+}
+
+// AddWithMedia 模拟内核的扩展能力（corehandler 用局部接口断言它）。
+func (f *fakeKnowledge) AddWithMedia(name, content string, media []knowledge.KnowledgeMediaRef) error {
+	f.mu.Lock()
+	f.name, f.body, f.media = name, content, media
+	f.mu.Unlock()
+	return nil
 }
 
 func (f *fakeKnowledge) Search(string, int) ([]*pubsdk.Knowledge, error) { return nil, nil }
@@ -901,3 +920,77 @@ func TestPlugin_ToolInvokeArgsResultViaArena(t *testing.T) {
 		}
 	})
 }
+
+// §13.14：knowledge.addWithMedia 走共享内存，且媒体清单能穿透到内核扩展能力。
+//
+// 媒体参数可能很长（一篇知识挂几十张图），与正文同形走 content_ref/media_ref。
+func TestCoreHandler_KnowledgeAddWithMedia(t *testing.T) {
+	host, err := NewHost()
+	if err != nil {
+		t.Fatalf("NewHost: %v", err)
+	}
+	defer host.Close()
+
+	core := newFakeCore()
+	kn := &fakeKnowledge{}
+	core.knowledge = kn
+	h := &coreHandler{sdk: core, name: "x", host: host, locks: &lockRegistry{}}
+
+	content := strings.Repeat("带图知识", 2000)
+	blob, _ := json.Marshal(content)
+	cRef := arenaPutForTest(t, host, blob)
+	defer func() { _ = host.Arena().Free(OwnerHost, cRef) }()
+
+	media := []knowledge.KnowledgeMediaRef{{Digest: "d1", MIME: "image/png", Kind: "image"}}
+	mBlob, _ := json.Marshal(media)
+	mRef := arenaPutForTest(t, host, mBlob)
+	defer func() { _ = host.Arena().Free(OwnerHost, mRef) }()
+
+	params, _ := json.Marshal(map[string]interface{}{
+		"name": "n", "content_ref": cRef, "media_ref": mRef,
+	})
+	res, err := h.Handle(MethodKnowledgeAddMedia, params)
+	if err != nil {
+		t.Fatalf("knowledge.addWithMedia 应成功: %v", err)
+	}
+	kn.mu.Lock()
+	got, gotName := kn.body, kn.name
+	gotMedia := kn.media
+	kn.mu.Unlock()
+	if gotName != "n" {
+		t.Fatalf("name 传错: %q", gotName)
+	}
+	if got != content {
+		t.Fatalf("经共享内存送达的正文不一致（got len=%d want len=%d）", len(got), len(content))
+	}
+	if len(gotMedia) != 1 || gotMedia[0].Digest != "d1" {
+		t.Fatalf("媒体清单未穿透到内核: %+v", gotMedia)
+	}
+	// 回传媒体清单（插件据此后续引用同一份媒体）
+	m, _ := res.(map[string]interface{})
+	if m == nil || m["media"] == nil {
+		t.Errorf("应回传 media 清单，实为 %#v", res)
+	}
+}
+
+// 内核不支持多模态扩展时必须**明确报错**，不能静默退化成"媒体已写入"。
+func TestCoreHandler_KnowledgeAddMediaCapabilityMissing(t *testing.T) {
+	core := newFakeCore()
+	// 用一个只实现公开 KnowledgeAPI 的假实现（无 AddWithMedia）
+	core.knowledge = &pubOnlyKnowledge{}
+	h := &coreHandler{sdk: core, name: "x", locks: &lockRegistry{}}
+
+	params := json.RawMessage(`{"name":"n","content":"正文","media":[{"digest":"d1","mime":"image/png"}]}`)
+	if _, err := h.Handle(MethodKnowledgeAddMedia, params); err == nil {
+		t.Error("内核缺少多模态能力时应明确报错，而不是静默丢弃媒体")
+	}
+}
+
+// pubOnlyKnowledge 只实现公开 SDK 的 KnowledgeAPI（**刻意不含**内核扩展的
+// AddWithMedia）。不能内嵌 fakeKnowledge——那会把 AddWithMedia 一起带进来，
+// 断言就会成功，用例测不到「能力缺失」这条路径。
+type pubOnlyKnowledge struct{}
+
+func (f *pubOnlyKnowledge) Search(string, int) ([]*pubsdk.Knowledge, error) { return nil, nil }
+func (f *pubOnlyKnowledge) Add(name, content string) error                  { return nil }
+func (f *pubOnlyKnowledge) List() ([]string, error)                         { return nil, nil }

@@ -3,6 +3,7 @@ package proc
 import (
 	"encoding/json"
 	"fmt"
+	"gitcode.com/JianFeeeee/HomeAgent/internal/knowledge"
 
 	pubsdk "gitcode.com/JianFeeeee/homeagent-sdk/sdk"
 )
@@ -209,6 +210,16 @@ func (h *coreHandler) handleDocMemory(method string, params json.RawMessage) (in
 	return nil, fmt.Errorf("未知 method: %s", method)
 }
 
+// knowledgeMediaAdder 是 knowledge.addWithMedia 需要的扩展能力。
+//
+// 定义为局部接口而非直接依赖 internal/sdk.KnowledgeAPI：那样会让
+// internal/plugin/proc → internal/sdk，而后者已依赖 internal/plugin 的类型，
+// 形成循环（CoreSDK 的注释已说明这一点）。断言失败时返回"能力不可用"，
+// 而不是静默退化成不写媒体——后者会让调用方以为媒体已入库。
+type knowledgeMediaAdder interface {
+	AddWithMedia(name, content string, media []knowledge.KnowledgeMediaRef) error
+}
+
 // handleKnowledge 处理知识库：search / add / list。
 //
 // 本函数体是 corehandler.go 里 Handle 那一个大 switch 的**整块平移**：
@@ -222,11 +233,29 @@ func (h *coreHandler) handleKnowledge(method string, params json.RawMessage) (in
 			return nil, errUnavailable("knowledge")
 		}
 		var p struct {
-			Query string `json:"query"`
-			TopK  int    `json:"top_k"`
+			Query    string `json:"query"`
+			TopK     int    `json:"top_k"`
+			Category string `json:"category,omitempty"`
 		}
 		if err := unmarshal(params, &p); err != nil {
 			return nil, err
+		}
+		// 分类限定是内核侧扩展能力（见 internal/sdk/knowledge.go），
+		// 用局部接口断言取用；能力缺失时退回全库搜索而不是报错——
+		// 那只是"少了个筛选条件"，不是调用失败。
+		if p.Category != "" {
+			if scoped, ok := kn.(interface {
+				SearchIn(query, category string, topK int) ([]*pubsdk.Knowledge, error)
+			}); ok {
+				results, err := scoped.SearchIn(p.Query, p.Category, p.TopK)
+				if err != nil {
+					return nil, err
+				}
+				if results == nil {
+					results = []*pubsdk.Knowledge{}
+				}
+				return map[string]interface{}{"results": results}, nil
+			}
 		}
 		results, err := kn.Search(p.Query, p.TopK)
 		if err != nil {
@@ -256,6 +285,41 @@ func (h *coreHandler) handleKnowledge(method string, params json.RawMessage) (in
 			return nil, err
 		}
 		return nil, kn.Add(p.Name, p.Content)
+
+	case MethodKnowledgeAddMedia:
+		kn := h.sdk.Knowledge()
+		if kn == nil {
+			return nil, errUnavailable("knowledge")
+		}
+		var p struct {
+			Name       string                        `json:"name"`
+			Content    string                        `json:"content,omitempty"`
+			Media      []knowledge.KnowledgeMediaRef `json:"media,omitempty"`
+			ContentRef SharedRef                     `json:"content_ref,omitempty"`
+			MediaRef   SharedRef                     `json:"media_ref,omitempty"`
+		}
+		if err := unmarshal(params, &p); err != nil {
+			return nil, err
+		}
+		// 正文与媒体清单都可能很大，优先走共享内存（与 knowledge.add 同形）。
+		if err := h.resolveJSONRef(p.ContentRef, &p.Content); err != nil {
+			return nil, err
+		}
+		if err := h.resolveJSONRef(p.MediaRef, &p.Media); err != nil {
+			return nil, err
+		}
+		// 多模态是内核侧扩展能力（公开 SDK 契约不含它，见 internal/sdk/knowledge.go）。
+		// 这里用局部接口 + 类型断言取用，而不把 internal/sdk 拉进本包：
+		// 后者已依赖 internal/plugin，直接引会成环（见 corehandler.go 顶部注释）。
+		adder, ok := kn.(knowledgeMediaAdder)
+		if !ok {
+			return nil, errUnavailable("knowledge multimodal")
+		}
+		if err := adder.AddWithMedia(p.Name, p.Content, p.Media); err != nil {
+			return nil, err
+		}
+		// 回传媒体清单：插件后续要按 digest 引用同一份媒体。
+		return map[string]interface{}{"media": p.Media}, nil
 
 	case MethodKnowledgeList:
 		kn := h.sdk.Knowledge()
