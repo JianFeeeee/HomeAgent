@@ -234,6 +234,7 @@ func (p *Plugin) Start(s *sdk.PluginSDK) error {
 
 	s.Settings().RegisterDef(sdk.ConfigDef{Key: "addr", Default: ":8080", Type: "string", DisplayName: "监听地址", Description: "Web 控制台监听地址", Category: "webui"})
 	s.Settings().RegisterDef(sdk.ConfigDef{Key: "history_file", Default: "", Type: "string", DisplayName: "聊天记录文件", Description: "聊天记录存放路径。留空 = <data>/webui_chat_history.json；相对路径按 data 目录解析（可指向独立挂载盘）", Category: "webui"})
+	s.Settings().RegisterDef(sdk.ConfigDef{Key: "trusted_proxies", Default: "", Type: "string", DisplayName: "受信反代网段", Description: "逗号分隔的 CIDR 或裸 IP（如 127.0.0.1,10.0.0.0/8）。只有来自这些网段的请求，其 X-Forwarded-For 才被采信用于登录限流计数。**经 frp/nginx 穿透到公网时必须配置**（反代通常就在本机 127.0.0.1），否则所有外部访问被视为同一来源，限流会误伤所有人。留空 = 不采信任何 XFF（保守默认）", Category: "webui"})
 	s.Settings().RegisterDef(sdk.ConfigDef{Key: "api_key", Default: "", Type: "password", DisplayName: "API 密钥", Description: "访问 API 时需要的密钥", Category: "webui"})
 	s.Settings().RegisterDef(sdk.ConfigDef{Key: "username", Default: "admin", Type: "string", DisplayName: "登录用户名", Description: "Web 控制台登录用户名", Category: "webui"})
 	s.Settings().RegisterDef(sdk.ConfigDef{Key: "password", Default: "", Type: "password", DisplayName: "Web 控制台登录密码", Description: "Web 控制台登录密码", Category: "webui"})
@@ -302,6 +303,10 @@ func (p *Plugin) Start(s *sdk.PluginSDK) error {
 	InvalidateProxyRoutes()
 
 	p.handler = NewHandler(s)
+	// 受信反代网段：限流要按真实客户端隔离，就得以可信方式拿到客户端 IP。
+	// 穿透部署下反代通常就在本机 127.0.0.1（外部请求的 RemoteAddr 全是它），
+	// 不配置的话所有人共用一个桶，限流会误伤所有人 —— 生产上踩过。
+	p.handler.trustedProxies = parseTrustedProxies(settingString(s.Settings(), "trusted_proxies"))
 	p.handler.RegisterRoutes(p.mux)
 
 	// 最外层套 logged 中间件：记录每个请求的来源 IP / 方法 / 路径 / 认证方式 / 状态码。
