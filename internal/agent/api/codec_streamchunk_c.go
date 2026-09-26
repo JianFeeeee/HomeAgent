@@ -118,6 +118,11 @@ static int go_arr_all(const char *p, size_t n, ha_span *out, int cap) {
     return count;
 }
 
+static int go_chunk_locate(const char *p, size_t n, ha_chunk_out *out,
+                           char *sbuf, size_t scap, size_t *sused) {
+    return ha_sse_chunk_locate(p, n, out, sbuf, scap, sused);
+}
+
 static int go_sse_abi(void) { return ha_sse_abi_version(); }
 */
 import "C"
@@ -325,4 +330,135 @@ func scanArray(arr strSpan) ([]strSpan, bool) {
 		out = append(out, strSpan{spans[i].p, spans[i].len})
 	}
 	return out, true
+}
+
+// ---------------------------------------------------------------------
+// 批量定位（第三刀的重做：一次 cgo 调用代替 5+ 次）
+// ---------------------------------------------------------------------
+
+// chunkLocateResult 是 C 侧 ha_chunk_out 的 Go 视图。
+type chunkLocateResult struct {
+	status int
+
+	// 原始 span（用于交回 encoding/json 的那些字段）
+	usageSpan     strSpan
+	usageKind     int
+	toolCallsSpan strSpan
+	toolCallsKind int
+
+	// C 已解码的字符串（sbuf 的副本）
+	content   string
+	reasoning string
+	finish    string
+
+	// 标志
+	choicesPresent bool
+	choicesKind    int
+	choicesCount   int
+	choice0Span    strSpan
+	hasDelta       bool
+	deltaKind      int
+	contentKind    int
+	reasoningKind  int
+	finishKind     int
+}
+
+// 槽位/类型常量（与 ha_sse.h 保持一致；改动必须同步 ABI 版本）
+const (
+	slotDelta        = 0
+	slotContent      = 1
+	slotReasoning    = 2
+	slotToolCalls    = 3
+	slotFinishReason = 4
+	slotUsage        = 5
+	slotCount        = 6
+
+	kindAbsent = 0
+	kindNull   = 1
+	kindString = 2
+	kindObject = 3
+	kindArray  = 4
+	kindOther  = 5
+
+	chunkOK         = 0
+	chunkFallback   = -1
+	chunkTypeFail   = -2
+)
+
+// locateChunkBatch 一次调用完成整块定位。
+func locateChunkBatch(data string) chunkLocateResult {
+	var out chunkLocateResult
+	if len(data) == 0 {
+		out.status = chunkFallback
+		return out
+	}
+	p, n := cstr(data)
+
+	var co C.ha_chunk_out
+	// ★ 单块缓冲：整块解码输出（content+reasoning+finish）都写这一块。
+	//   尺寸按输入上界（每字节最坏 3 字节 U+FFFD）——1 次分配，
+	//   替代原来「每个字段一次 decBuf」的多次分配。
+	sbuf := make([]byte, len(data)*3+16)
+	var used C.size_t
+
+	st := C.go_chunk_locate(p, n, &co, cstrb(sbuf), C.size_t(len(sbuf)), &used)
+	out.status = int(st)
+	if st != C.int(chunkOK) {
+		return out
+	}
+
+	out.usageKind = int(co.slot[slotUsage].kind)
+	out.usageSpan = strSpan{co.slot[slotUsage].span.p, co.slot[slotUsage].span.len}
+	out.toolCallsKind = int(co.slot[slotToolCalls].kind)
+	out.toolCallsSpan = strSpan{co.slot[slotToolCalls].span.p, co.slot[slotToolCalls].span.len}
+	out.contentKind = int(co.slot[slotContent].kind)
+	out.reasoningKind = int(co.slot[slotReasoning].kind)
+	out.finishKind = int(co.slot[slotFinishReason].kind)
+	out.hasDelta = int(co.slot[slotDelta].kind) == kindObject
+	out.deltaKind = int(co.slot[slotDelta].kind)
+	out.choicesPresent = co.has_choices == 1
+	out.choicesKind = int(co.choices_kind)
+	out.choicesCount = int(co.choices_count)
+
+	s := sbuf[:int(used)]
+	out.content = string(s[co.content_off : co.content_off+co.content_len])
+	out.reasoning = string(s[co.reasoning_off : co.reasoning_off+co.reasoning_len])
+	out.finish = string(s[co.finish_off : co.finish_off+co.finish_len])
+	return out
+}
+
+// locateChunkBatchInto 是 locateChunkBatch 的零分配内核（基准用）：
+// 复用调用方提供的 sbuf，不自己 make。
+func locateChunkBatchInto(data string, sbuf []byte) chunkLocateResult {
+	var out chunkLocateResult
+	if len(data) == 0 {
+		out.status = chunkFallback
+		return out
+	}
+	p, n := cstr(data)
+	var co C.ha_chunk_out
+	var used C.size_t
+	st := C.go_chunk_locate(p, n, &co, cstrb(sbuf), C.size_t(len(sbuf)), &used)
+	out.status = int(st)
+	if st != C.int(chunkOK) {
+		return out
+	}
+	out.usageKind = int(co.slot[slotUsage].kind)
+	out.usageSpan = strSpan{co.slot[slotUsage].span.p, co.slot[slotUsage].span.len}
+	out.toolCallsKind = int(co.slot[slotToolCalls].kind)
+	out.toolCallsSpan = strSpan{co.slot[slotToolCalls].span.p, co.slot[slotToolCalls].span.len}
+	out.contentKind = int(co.slot[slotContent].kind)
+	out.reasoningKind = int(co.slot[slotReasoning].kind)
+	out.finishKind = int(co.slot[slotFinishReason].kind)
+	out.hasDelta = int(co.slot[slotDelta].kind) == kindObject
+	out.deltaKind = int(co.slot[slotDelta].kind)
+	out.choicesPresent = co.has_choices == 1
+	out.choicesKind = int(co.choices_kind)
+	out.choicesCount = int(co.choices_count)
+	out.choice0Span = strSpan{co.choice0_span.p, co.choice0_span.len}
+	s := sbuf[:int(used)]
+	out.content = string(s[co.content_off : co.content_off+co.content_len])
+	out.reasoning = string(s[co.reasoning_off : co.reasoning_off+co.reasoning_len])
+	out.finish = string(s[co.finish_off : co.finish_off+co.finish_len])
+	return out
 }
