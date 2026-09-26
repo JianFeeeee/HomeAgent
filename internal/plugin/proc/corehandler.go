@@ -166,7 +166,7 @@ func (h *coreHandler) Handle(method string, params json.RawMessage) (interface{}
 		MethodDocStats:
 		return h.handleDocMemory(method, params)
 
-	case MethodKnowledgeSearch, MethodKnowledgeAdd, MethodKnowledgeList:
+	case MethodKnowledgeSearch, MethodKnowledgeAdd, MethodKnowledgeAddMedia, MethodKnowledgeList:
 		return h.handleKnowledge(method, params)
 
 	case MethodTextMemoryAppend:

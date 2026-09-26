@@ -128,6 +128,10 @@ const (
 	MethodKnowledgeSearch = "knowledge.search" // 15
 	MethodKnowledgeAdd    = "knowledge.add"    // 35
 	MethodKnowledgeList   = "knowledge.list"   // 36
+	// MethodKnowledgeAddMedia 写入知识并关联媒体（与 doc.insertWithMedia
+	// 同形）。媒体成为一等节点参与跨模态召回；未接入多模态空间时与
+	// knowledge.add 等价。
+	MethodKnowledgeAddMedia = "knowledge.addWithMedia"
 
 	// 文本记忆（原 case 41）
 	MethodTextMemoryAppend = "textmemory.append" // 41

@@ -25,6 +25,46 @@ func (k *knowledgeImpl) Add(name, content string) error {
 	return k.ks.Add(name, content)
 }
 
+func (k *knowledgeImpl) SearchIn(query, category string, topK int) ([]*Knowledge, error) {
+	if k.ks == nil {
+		return nil, nil
+	}
+	got := k.ks.SearchIn(query, category, topK)
+	out := make([]*Knowledge, len(got))
+	for i, item := range got {
+		out[i] = &Knowledge{Name: item.Name, Content: item.Content}
+	}
+	return out, nil
+}
+
+func (k *knowledgeImpl) AddWithMedia(name, content string, media []KnowledgeMediaRef) error {
+	if k.ks == nil {
+		return nil
+	}
+	return k.ks.AddWithMedia(name, content, media)
+}
+
+func (k *knowledgeImpl) AttachMedia(name string, media ...KnowledgeMediaRef) error {
+	if k.ks == nil {
+		return nil
+	}
+	return k.ks.AttachMedia(name, media...)
+}
+
+func (k *knowledgeImpl) ReindexDense() (int, int) {
+	if k.ks == nil {
+		return 0, 0
+	}
+	return k.ks.ReindexDense()
+}
+
+func (k *knowledgeImpl) DenseStats() map[string]interface{} {
+	if k.ks == nil {
+		return map[string]interface{}{}
+	}
+	return k.ks.DenseStats()
+}
+
 func (k *knowledgeImpl) List() ([]string, error) {
 	if k.ks == nil {
 		return nil, nil

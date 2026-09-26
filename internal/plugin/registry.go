@@ -352,6 +352,7 @@ func (r *Registry) buildSDK(name string) *sdk.PluginSDK {
 		TextMemory:     sdk.NewTextMemoryWithMedia(name, r.textMem, r.mediaStore),
 		DocMemory:      sdk.NewDocMemoryWithMedia(name, r.docStore, r.mediaStore),
 		Knowledge:      sdk.NewKnowledge(r.ks),
+		Media:          sdk.NewMedia(r.mediaStore),
 		LLM:            sdk.NewLLM(r.mgr, r.cfgReg, r.lua, r.baseKey),
 		Settings:       sett,
 		RegTool:        regTool,

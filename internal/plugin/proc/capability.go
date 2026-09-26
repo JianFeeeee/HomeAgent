@@ -126,9 +126,10 @@ var methodCapability = map[string]Capability{
 	MethodDocInsertMedia: CapDocMemory,
 
 	// ---- 知识库 ----
-	MethodKnowledgeSearch: CapKnowledge,
-	MethodKnowledgeAdd:    CapKnowledge,
-	MethodKnowledgeList:   CapKnowledge,
+	MethodKnowledgeSearch:   CapKnowledge,
+	MethodKnowledgeAdd:      CapKnowledge,
+	MethodKnowledgeAddMedia: CapKnowledge,
+	MethodKnowledgeList:     CapKnowledge,
 
 	// ---- 文本记忆 ----
 	MethodTextMemoryAppend: CapTextMemory,

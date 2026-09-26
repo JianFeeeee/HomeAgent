@@ -335,6 +335,22 @@ func New(cfg AgentConfig) *Agent {
 			cfg.DocStore.SetDenseSpace(cfg.MultimodalSpace)
 			cfg.DocStore.BuildDenseIndex(cfg.MultimodalSpace)
 		}
+		// 知识库接入同一多模态空间：媒体作为一等节点参与稠密召回，
+		// 于是「按图搜知识」「按文搜含图知识」成立。
+		//
+		// 稀疏两路（词向量 + TF-IDF）**保持启用**且仍是主召回路径：多模态
+		// 空间未配置时知识库行为与此前逐字一致（退化为 0.5/0.5 两路融合）。
+		if cfg.Knowledge != nil {
+			// 顺序要紧：先接线（含 MediaStore），再重建。ReindexDense 会
+			// 尝试从 .dense.json 缓存恢复，恢复不了才重算，最后把结果落盘。
+			// 若先重建后接线，首次启动算出的向量会被丢掉而不落盘。
+			cfg.Knowledge.SetDenseSpace(cfg.MultimodalSpace)
+			cfg.Knowledge.SetMediaGetter(cfg.MediaStore)
+			built, skipped := cfg.Knowledge.ReindexDense()
+			if built > 0 || skipped > 0 {
+				log.Printf("[knowledge] 多模态稠密索引: 新建 %d 跳过 %d（其余命中缓存）", built, skipped)
+			}
+		}
 	}
 
 	a := &Agent{

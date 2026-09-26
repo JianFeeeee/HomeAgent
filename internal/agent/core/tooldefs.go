@@ -373,17 +373,23 @@ func (a *Agent) buildToolDefs() []interface{} {
 	}
 
 	if a.knowledge != nil {
-		tools = append(tools, toolDef("knowledge_search", "搜索知识库。输入查询关键词，返回相关知识内容。", map[string]interface{}{
-			"query": map[string]interface{}{"type": "string", "description": "查询关键词"},
-			"top_k": map[string]interface{}{"type": "integer", "description": "返回数量", "default": 5},
+		tools = append(tools, toolDef("knowledge_search", "搜索知识库。输入查询关键词，返回相关知识内容。可用 category 把搜索限定在某个分类子树内。", map[string]interface{}{
+			"query":    map[string]interface{}{"type": "string", "description": "查询关键词"},
+			"top_k":    map[string]interface{}{"type": "integer", "description": "返回数量", "default": 5},
+			"category": map[string]interface{}{"type": "string", "description": "可选：限定在某个分类内（前缀匹配子树，如 tech 会搜 tech/go、tech/rust）。留空则搜全库"},
 		}, "query"))
 		tools = append(tools, toolDef("knowledge_list", "列出知识库中所有知识分类。", map[string]interface{}{}))
 	}
 
 	if a.knowledge != nil {
-		tools = append(tools, toolDef("knowledge_create", "创建新知识。将知识写入知识库（knowledge/目录），自动向量化索引。", map[string]interface{}{
+		tools = append(tools, toolDef("knowledge_create", "创建新知识。将知识写入知识库（knowledge/目录），自动向量化索引。可关联已入库媒体（附图/音视频）使该知识能被图本身检索到。", map[string]interface{}{
 			"name":    map[string]interface{}{"type": "string", "description": "知识名称（用作目录名）"},
 			"content": map[string]interface{}{"type": "string", "description": "知识内容，支持 Markdown"},
+			"media_digests": map[string]interface{}{
+				"type":        "array",
+				"items":       map[string]interface{}{"type": "string"},
+				"description": "可选：关联的媒体 digest（可传前缀）。媒体作为一等节点参与跨模态检索——知识能按图本身被搜到，而不依赖生成的描述文本",
+			},
 		}, "name", "content"))
 		tools = append(tools, toolDef("knowledge_delete", "删除知识库中的指定知识条目。", map[string]interface{}{
 			"name": map[string]interface{}{"type": "string", "description": "要删除的知识名称"},
