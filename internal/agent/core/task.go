@@ -788,7 +788,7 @@ func (a *Agent) stepToolAfter(f *TaskFrame) stepOutcome {
 			// 与这一步工具本身（如 tool:qq_get_message）。带上工具场景，
 			// 才能让「凡是要回 QQ 消息」这类规则在该步被取回。
 			// 召回用两条路的并集：声明场景（注入点/通道/工具）+ 涌现场景
-			scenes := sceneKeysFor(f.Evt, tc.Name)
+			scenes := a.sceneKeysFor(f.Evt, tc.Name)
 			turn := a.resolveTurnScenes(f, tc.Name)
 			for _, k := range turn.Keys {
 				scenes = append(scenes, k)
