@@ -37,6 +37,42 @@ func (k *knowledgeImpl) SearchIn(query, category string, topK int) ([]*Knowledge
 	return out, nil
 }
 
+func (k *knowledgeImpl) Tree(opt KnowledgeTreeOptions) (*KnowledgeTreeView, error) {
+	if k.ks == nil {
+		return nil, nil
+	}
+	return k.ks.Tree(knowledge.TreeOptions{
+		MaxDepth:     opt.MaxDepth,
+		IncludeItems: opt.IncludeItems,
+		PreviewLimit: opt.PreviewLimit,
+	}), nil
+}
+
+func (k *knowledgeImpl) Subtree(category string, opt KnowledgeTreeOptions) (*KnowledgeTreeView, error) {
+	if k.ks == nil {
+		return nil, nil
+	}
+	return k.ks.Subtree(category, knowledge.TreeOptions{
+		MaxDepth:     opt.MaxDepth,
+		IncludeItems: opt.IncludeItems,
+		PreviewLimit: opt.PreviewLimit,
+	}), nil
+}
+
+func (k *knowledgeImpl) Categories() ([]string, error) {
+	if k.ks == nil {
+		return nil, nil
+	}
+	return k.ks.Categories(), nil
+}
+
+func (k *knowledgeImpl) CategoryCounts() ([]KnowledgeCategoryCount, error) {
+	if k.ks == nil {
+		return nil, nil
+	}
+	return k.ks.CategoryCounts(), nil
+}
+
 func (k *knowledgeImpl) AddWithMedia(name, content string, media []KnowledgeMediaRef) error {
 	if k.ks == nil {
 		return nil

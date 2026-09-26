@@ -25,6 +25,15 @@ type KnowledgeAPI interface {
 
 	// SearchIn 在某个分类子树内检索（category 为空 = 全库）。
 	SearchIn(query, category string, topK int) ([]*Knowledge, error)
+
+	// Tree 返回分类树视图（面向服务：不带向量，只带计数与摘要）。
+	Tree(opt KnowledgeTreeOptions) (*KnowledgeTreeView, error)
+	// Subtree 返回某棵子树；category 为空等价于 Tree。
+	Subtree(category string, opt KnowledgeTreeOptions) (*KnowledgeTreeView, error)
+	// Categories 列出全部分类路径（去重排序）。
+	Categories() ([]string, error)
+	// CategoryCounts 给出每个分类的条目数，按数量倒序。
+	CategoryCounts() ([]KnowledgeCategoryCount, error)
 	// AddWithMedia 写入带媒体的知识。媒体是一等节点：其向量会与正文向量
 	// 在多模态统一空间内融合，使该条目能按图本身被召回。
 	//
@@ -48,3 +57,25 @@ type KnowledgeMediaRef = knowledge.KnowledgeMediaRef
 // Knowledge 沿用公共 SDK 的类型，保证内外两侧对同一批知识条目的
 // 字段理解一致（跨 ABI 传递时按此结构序列化）。
 type Knowledge = pubsdk.Knowledge
+
+// KnowledgeTreeOptions 控制树视图的取舍。
+type KnowledgeTreeOptions struct {
+	// MaxDepth 限制层数，0 = 不限。分类多时用它做懒加载。
+	MaxDepth int
+	// IncludeItems 是否填充条目详情（只看结构时可关掉）。
+	IncludeItems bool
+	// PreviewLimit 预览字数上限，0 用内核默认。
+	PreviewLimit int
+}
+
+// KnowledgeTreeView 是分类树节点。
+type KnowledgeTreeView = knowledge.TreeView
+
+// KnowledgeTreeItemView 是树上的知识条目。
+type KnowledgeTreeItemView = knowledge.TreeItemView
+
+// KnowledgeTreeMediaView 是条目挂载的媒体摘要。
+type KnowledgeTreeMediaView = knowledge.TreeMediaView
+
+// KnowledgeCategoryCount 是一个分类的条目数。
+type KnowledgeCategoryCount = knowledge.CategoryCount

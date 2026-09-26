@@ -13,6 +13,7 @@ import (
 	_ "gitcode.com/JianFeeeee/HomeAgent/internal/plugins/clawhubadapter"
 	cli "gitcode.com/JianFeeeee/HomeAgent/internal/plugins/cli"
 	_ "gitcode.com/JianFeeeee/HomeAgent/internal/plugins/healthcheck"
+	_ "gitcode.com/JianFeeeee/HomeAgent/internal/plugins/kbtree"
 	_ "gitcode.com/JianFeeeee/HomeAgent/internal/plugins/pluginmgr"
 	webui "gitcode.com/JianFeeeee/HomeAgent/internal/plugins/webui"
 
