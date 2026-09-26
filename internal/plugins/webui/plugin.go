@@ -11,6 +11,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"gitcode.com/JianFeeeee/HomeAgent/internal/plugin"
 	sdk "gitcode.com/JianFeeeee/HomeAgent/internal/sdk"
@@ -324,7 +325,27 @@ func (p *Plugin) Start(s *sdk.PluginSDK) error {
 	if _, port, err := net.SplitHostPort(ln.Addr().String()); err == nil {
 		p.handler.hostPort = ":" + port
 	}
-	p.server = &http.Server{Handler: p.handler.Handler()}
+	// 超时配置。为什么不"全设上"（读侧全设、写侧全不设）：
+	//
+	// 读侧必须有超时，否则 Slowloris —— 攻击者只占连接不发完整请求头，
+	// 每个连接挂几 KB。MaxHeaderBytes 限的是头部**大小**，"慢慢发"不占大小，
+	// 因此不受它约束；几百个连接就能耗尽 fd。这里三个读侧超时分别覆盖：
+	//   ReadHeaderTimeout —— 请求头必须在此时间内发完（Slowloris 的正解）
+	//   ReadTimeout       —— 读完整请求（含 body）的预算，防慢速上传
+	//   IdleTimeout       —— keep-alive 空闲连接（另外两个都管不到）
+	//
+	// 写侧**刻意不设**：webui 有长连接 SSE（/api/v1/chat/events）与可跑
+	// 300s 的流式 /v1/chat/completions。WriteTimeout 是"从请求开始到响应
+	// 写完"的**总预算**，会把它们腰斩（表现为 SSE 每隔一段时间断一次、
+	// 前端疯狂重连）—— 这类回归很难在功能测试里立刻发现，所以有专门
+	// 的反向判据钉住它必须保持为 0。
+	p.server = &http.Server{
+		Handler:           p.handler.Handler(),
+		ReadHeaderTimeout: 20 * time.Second,
+		ReadTimeout:       60 * time.Second,
+		IdleTimeout:       120 * time.Second,
+		// WriteTimeout 保持 0（见上方说明）
+	}
 	go func() {
 		if err := p.server.Serve(ln); err != nil && err != http.ErrServerClosed {
 			log.Printf("[webui] server error: %v", err)

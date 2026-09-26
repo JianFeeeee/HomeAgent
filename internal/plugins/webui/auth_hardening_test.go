@@ -1,7 +1,9 @@
 package webui
 
 import (
+	"bufio"
 	"bytes"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"strconv"
@@ -317,4 +319,109 @@ func TestParseTrustedProxies(t *testing.T) {
 	if parseTrustedProxies("   ") != nil {
 		t.Error("空白配置应返回 nil（保守默认：不采信 XFF）")
 	}
+}
+
+// ===== Server 超时：Slowloris 防护，但不能误杀流式 =====
+//
+// http.Server 原本**一个超时都没设**（只有 Handler）。后果是 Slowloris：
+// 攻击者只占连接不发完整请求头，每个连接挂几 KB，Go 默认不主动断
+// （MaxHeaderBytes 限了头部大小，但「慢慢发」不占头部大小），
+// 几百个连接就能耗尽 fd。
+//
+// ★ 但不能图省事直接加 WriteTimeout：webui 有一条**长连接** SSE
+// （/api/v1/chat/events）与流式 /v1/chat/completions（可跑 300s）。
+// WriteTimeout 是**从请求开始到响应写完**的总预算，会把它们全部腰斩
+// （表现为 SSE 每 30s 断一次、前端疯狂重连）。
+//
+// 判据钉住该设的与不该设的。
+func TestServerHasReadSideTimeouts(t *testing.T) {
+	p := newServerForTest(t)
+	srv := p.server
+	if srv == nil {
+		t.Fatal("server 未初始化")
+	}
+	// ReadHeaderTimeout 是 Slowloris 的正解：头在规定时间内没发完就断。
+	if srv.ReadHeaderTimeout <= 0 {
+		t.Errorf("ReadHeaderTimeout = %v，必须 > 0（无此值时 Slowloris 可挂住连接）",
+			srv.ReadHeaderTimeout)
+	}
+	// IdleTimeout 覆盖 keep-alive 空闲连接（ReadHeaderTimeout 管不到）。
+	if srv.IdleTimeout <= 0 {
+		t.Errorf("IdleTimeout = %v，必须 > 0（keep-alive 空闲连接会无限累积）", srv.IdleTimeout)
+	}
+	// ReadTimeout 限制「读完整请求」的��间（含 body），防慢速上传。
+	if srv.ReadTimeout <= 0 {
+		t.Errorf("ReadTimeout = %v，必须 > 0（慢速上传会长期占用连接）", srv.ReadTimeout)
+	}
+}
+
+// ★ 反向判据：WriteTimeout 必须为 0（保持流式不被腰斩）。
+// 这是「不该设的超时」，同样要钉住 —— 否则将来有人「顺手补全」就把
+// SSE 与流式端点弄坏了，而这类回归在功能测试里很难立刻发现。
+func TestServerHasNoWriteTimeout(t *testing.T) {
+	p := newServerForTest(t)
+	if got := p.server.WriteTimeout; got != 0 {
+		t.Errorf("WriteTimeout = %v，应为 0 —— 它会腰斩 SSE（/api/v1/chat/events）"+
+			"与流式 /v1/chat/completions（可跑 300s），表现为 SSE 每隔一段时间断一次",
+			got)
+	}
+}
+
+// SSE 端点必须真的能长时间保持连接（判据的正面一侧）。
+// 短于 WriteTimeout 的观察窗口即可（不需要真等 30s）。
+func TestSSEConnectionSurvivesBeyondReadTimeout(t *testing.T) {
+	srv, _, _ := newOpenAITestServer(t)
+
+	// 连上 SSE，观察它至少活过 ReadHeaderTimeout（证明没有被读侧超时误杀）
+	req, _ := http.NewRequest(http.MethodGet, srv.URL+"/api/v1/chat/events", nil)
+	req.Header.Set("X-API-Key", testAuthAPIKey)
+	req.Header.Set("Accept", "text/event-stream")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("SSE 连接失败: %v", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("SSE 应 200，实际 %d", resp.StatusCode)
+	}
+	// 试着读一点：能读到（哪怕是心跳/注释行）说明连接是活的
+	rd := bufio.NewReader(resp.Body)
+	done := make(chan bool, 1)
+	go func() {
+		_, err := rd.ReadString('\n')
+		done <- err == nil
+	}()
+	select {
+	case ok := <-done:
+		if !ok {
+			t.Error("SSE 首读即失败（连接被立即关闭）")
+		}
+	case <-time.After(5 * time.Second):
+		// 没数据也算活：SSE 空闲时不发帧是正常的，关键是连接没断。
+		_ = resp.Body.Close()
+	}
+}
+
+// newServerForTest 起一个 webui 插件实例（走真实 Start），用于检查 server 配置。
+func newServerForTest(t *testing.T) *Plugin {
+	t.Helper()
+	cfgReg := internalConfig.NewConfigRegistry("")
+	seedWebUIConfig(cfgReg)
+	// 绑到空闲端口：绝不能用 :8080，那是生产端口（见 a752ae1 的教训）
+	probe, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	addr := probe.Addr().String()
+	probe.Close()
+	cfgReg.PluginConfig("webui").Set("addr", addr)
+
+	p := &Plugin{name: "webui", mux: http.NewServeMux()}
+	s := testSDK(sdk.SDKConfig{Settings: sdk.NewSettings("webui", cfgReg)})
+	if err := p.Start(s); err != nil {
+		t.Fatalf("启动 webui 失败: %v", err)
+	}
+	t.Cleanup(func() { _ = p.Stop() })
+	return p
 }
