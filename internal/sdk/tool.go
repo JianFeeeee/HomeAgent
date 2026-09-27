@@ -63,6 +63,33 @@ type BuiltinToolDef struct {
 	Name        string
 	Description string
 	Parameters  map[string]interface{}
+	// ParallelSafe 与 ToolDef.ParallelSafe 同义：声明此工具可被并发执行。
+	// 零值 false = 默认串行（保守）。
+	//
+	// ⚠️ 内核曾经没有这个字段，于是内置工具的并发声明无处安放 ——
+	// 先后试过"内核里一张硬编码 map"和"往 required 变参塞字符串"两种错做法。
+	// 声明项必须落在**工具自己的结构体**上，与 NoMemory 同构。
+	ParallelSafe bool
+	// Serial 声明此工具必须串行，优先于 ParallelSafe。
+	Serial bool
+}
+
+// ToSchema 转成下发给模型的 function schema。
+func (d BuiltinToolDef) ToSchema() map[string]interface{} {
+	return map[string]interface{}{
+		"type": "function",
+		"function": map[string]interface{}{
+			"name":        d.Name,
+			"description": d.Description,
+			"parameters":  d.Parameters,
+		},
+	}
+}
+
+// ConcurrencySafe 报告该工具是否可并发执行。
+// Serial 优先：显式声明"必须串行"不允许被 ParallelSafe 或默认值覆盖。
+func (d BuiltinToolDef) ConcurrencySafe() bool {
+	return d.ParallelSafe && !d.Serial
 }
 
 // BuiltinProvider 由内核注入（导出：core 需实现它）。
