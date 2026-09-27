@@ -2,6 +2,8 @@ package core
 
 import (
 	"context"
+	"fmt"
+	"strings"
 	"sync"
 	"testing"
 
@@ -297,5 +299,106 @@ func TestBatchLayoutSingleAssistantCarriesAllToolCalls(t *testing.T) {
 	}
 	if gotIDs[0] != "c1" || gotIDs[1] != "c2" {
 		t.Errorf("tool 消息应按 index 升序，实际 %v", gotIDs)
+	}
+}
+
+// 阶段 2c：`StageContext` 拆 per-tool。
+//
+// 现状：f.StageCtx 是**单槽**，批内每个工具都覆写它
+// （ToolCalls=[单元素]、ToolResults 覆写、Results[0] 回读）。并行下
+// N 个 goroutine 同写一个 ctx = 数据竞争，且 after_toolcall 插件读到的
+// 可能是**别的工具**的结果。
+//
+// 本判据钉死：每个工具的 before/after stage 必须各自看到**自己的**
+// ToolCalls[0].Name 与自己的结果，输出通道等 Extra 也要逐份带过去。
+func TestBatchEachToolSeesItsOwnStageContext(t *testing.T) {
+	tcA := agentAPI.ToolCall{ID: "c1", Name: "tool_alpha", Arguments: map[string]interface{}{}}
+	tcB := agentAPI.ToolCall{ID: "c2", Name: "tool_beta", Arguments: map[string]interface{}{}}
+	sp := &batchProvider{responses: []*agentAPI.CompletionResponse{
+		{ToolCalls: []agentAPI.ToolCall{tcA, tcB}},
+		{Content: "final"},
+	}}
+	a, _ := newBatchAgent(t, sp)
+
+	var mu sync.Mutex
+	beforeSeen := map[string]string{}
+	var missingChannel int
+
+	a.stageHost.RegisterStage(sdk.StageBeforeToolcall, func(ctx *sdk.StageContext) error {
+		name := ""
+		if len(ctx.ToolCalls) > 0 {
+			name = ctx.ToolCalls[0].Name
+		}
+		// 每个工具的 ctx 必须只带它自己（长度恒为 1），否则就是单槽串味。
+		if len(ctx.ToolCalls) != 1 {
+			t.Errorf("before_toolcall 的 ctx 应只带 1 个 ToolCall，实际 %d", len(ctx.ToolCalls))
+		}
+		// Extra 里的 output_channel 必须逐份复制过来（stage.go:18 依赖它）。
+		if _, ok := ctx.Extra["output_channel"]; !ok {
+			mu.Lock()
+			missingChannel++
+			mu.Unlock()
+		}
+		mu.Lock()
+		beforeSeen[name] = name
+		mu.Unlock()
+		return nil
+	})
+
+	// 复刻生产：prepareInputTask 会往 Extra 写 input_source/output_channel
+	//（task.go:380-381）。我的 harness 若不设它，测的就是「Extra 缺失」
+	//  这一**自己造的**场景，而不是「per-tool 复制」——先修正 harness。
+	ctx := a.stageCtxFromInput("go", "cli", "")
+	ctx.Extra["output_channel"] = "cli"
+	ctx.Extra["input_source"] = "cli"
+	if out := a.runTaskSteps(a.newTaskFrame("go", ctx)); out != outcomeDone {
+		t.Fatalf("runTaskSteps 未收敛: %v", out)
+	}
+	if len(beforeSeen) != 2 {
+		t.Errorf("before_toolcall 应被两个工具各触发一次且名字不同，实际 %v", beforeSeen)
+	}
+	for _, want := range []string{"tool_alpha", "tool_beta"} {
+		if beforeSeen[want] != want {
+			t.Errorf("工具 %s 的 before_toolcall 未看到自己（看到 %q）", want, beforeSeen[want])
+		}
+	}
+	if missingChannel > 0 {
+		t.Errorf("有 %d 个工具的 ctx 缺少 Extra[output_channel]", missingChannel)
+	}
+}
+
+// 反向断言：after_toolcall 读到的结果必须属于**当前**工具，
+// 不能是批内另一个工具的（单槽下极易串味）。
+func TestBatchAfterToolcallSeesOwnResult(t *testing.T) {
+	tcA := agentAPI.ToolCall{ID: "c1", Name: "tool_alpha", Arguments: map[string]interface{}{}}
+	tcB := agentAPI.ToolCall{ID: "c2", Name: "tool_beta", Arguments: map[string]interface{}{}}
+	sp := &batchProvider{responses: []*agentAPI.CompletionResponse{
+		{ToolCalls: []agentAPI.ToolCall{tcA, tcB}},
+		{Content: "final"},
+	}}
+	a, _ := newBatchAgent(t, sp)
+
+	var mu sync.Mutex
+	bad := map[string]string{}
+	a.stageHost.RegisterStage(sdk.StageAfterToolcall, func(ctx *sdk.StageContext) error {
+		if len(ctx.ToolResults) == 0 {
+			return nil
+		}
+		name := ctx.ToolResults[0].Name
+		res := fmt.Sprint(ctx.ToolResults[0].Result)
+		// 结果文案必须含自己的工具名（"ran:tool_alpha"），否则就是串味。
+		if !strings.Contains(res, name) {
+			mu.Lock()
+			bad[name] = res
+			mu.Unlock()
+		}
+		return nil
+	})
+
+	if out := a.runTaskSteps(a.newTaskFrame("go", a.stageCtxFromInput("go", "", ""))); out != outcomeDone {
+		t.Fatalf("runTaskSteps 未收敛: %v", out)
+	}
+	if len(bad) > 0 {
+		t.Errorf("after_toolcall 读到别的工具的结果: %v", bad)
 	}
 }
