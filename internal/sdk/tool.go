@@ -15,6 +15,11 @@ type ToolAPI interface {
 	GetToolDefs() []ToolDef
 	// GetAllTools returns all tools exposed by IO devices/channels.
 	GetAllTools() []ToolDef
+	// ToolDefByName 按名字查任一来源（StageHost 插件工具 / IO 设备工具）的声明。
+	// 插件需要它来在**运行前**判断目标是否存在、是否并发安全 ——
+	// 而工具是动态注册的，"不存在"是常态（见 seq 包的 missing 策略）。
+	// 查不到返回 nil（调用方按"不存在"处理，不得 panic）。
+	ToolDefByName(name string) *ToolDef
 	// ExecuteTool executes a tool by name, resolving across the stage host first.
 	ExecuteTool(name string, args map[string]interface{}) (interface{}, error)
 }
