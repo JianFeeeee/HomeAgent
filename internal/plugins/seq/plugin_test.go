@@ -315,3 +315,56 @@ func min(a, b int) int {
 	}
 	return b
 }
+
+// ⑩ ★ 真机实跑发现的最高频坑：`in` 传空字符串 ""（而非对象 {}）。
+//
+// 两轮对照实验（隔离实例，各 5 次与 3 次 seq_create 尝试）里，
+// 模型**都在同一处错了两次**：
+//
+//	① 实验 A：in 传 "" → 连续 2 次失败
+//	② 实验 B（先查 seq_help）：in 仍传 "" → 又连续 2 次失败
+//
+// 模型自述：「我把『无入参』理解成『不传这个字段』，结果序列化成了字符串」。
+//
+// ⇒ 现有文案虽已可执行（"无入参请写 {}，不要写成字符串"），
+// 但**位置太深**：埋在「格式要点」第 2 条里，模型读到了仍会错。
+// 本判据要求这条在**前两屏内**且**用醒目措辞**出现。
+func TestHelpWarnsEmptyStringInProminently(t *testing.T) {
+	p := newTestPlugin(t)
+	out, err := p.dispatch("seq_help", map[string]interface{}{})
+	if err != nil {
+		t.Fatalf("seq_help 失败: %v", err)
+	}
+	text, _ := out.(string)
+
+	// ① 必须明确说"不要写成字符串"（这是模型实际犯的错）
+	if !strings.Contains(text, "不要写成字符串") {
+		t.Errorf("seq_help 未警示『in 不要写成字符串』（实跑中模型在此错了 4 次）")
+	}
+	// ② 这条必须出现在**前 400 字**内 —— 埋太深就会被跳过（实跑证明）
+	head := text
+	if len(head) > 400 {
+		head = head[:400]
+	}
+	if !strings.Contains(head, "不要写成字符串") {
+		t.Errorf("『in 不要写成字符串』未出现在前 400 字内（实跑证明埋太深会被忽略）")
+	}
+	// ③ 必须给出正确写法，让模型无需推断
+	if !strings.Contains(text, "{}") {
+		t.Error("未给出正确写法 {}")
+	}
+}
+
+// ⑪ ★ 同样的坑必须也出现在 seq_create 自己的描述里 ——
+// 模型可能不查 help 就直接建序列。
+func TestSeqCreateDescWarnsAboutIn(t *testing.T) {
+	p := newTestPlugin(t)
+	desc := p.toolDefs()["seq_create"].Description
+	if !strings.Contains(desc, "in") {
+		t.Errorf("seq_create 描述未提及 in：%s", desc)
+	}
+	// 描述里至少要点明 groups[].in 是对象
+	if !strings.Contains(desc, "对象") && !strings.Contains(desc, "{}") {
+		t.Errorf("seq_create 描述未说明 groups[].in 应为对象：%s", desc)
+	}
+}

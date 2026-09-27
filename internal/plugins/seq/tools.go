@@ -31,9 +31,12 @@ func seqToolDefs() []toolDefInfo {
 						"type": "string", "description": "一句话说明这条序列做什么",
 					},
 					"groups": map[string]interface{}{
-						"type":        "array",
-						"description": "组数组，按数组顺序执行；与 file 二选一",
-						"items":       map[string]interface{}{"type": "object"},
+						"type": "array",
+						"description": "组数组，按数组顺序执行；与 file 二选一。" +
+							"⚠️ 每个 group 的 in 必须是**对象**（无入参写 {}），写成空字符串会被拒绝；" +
+							"tools 是字符串（内容为 ';' 分隔的 JSON 对象，每个 tool 后都要有 ';'，含最后一个）。" +
+							"格式细节先用 seq_help 查。",
+						"items": map[string]interface{}{"type": "object"},
 					},
 					"file": map[string]interface{}{
 						"type":        "string",
