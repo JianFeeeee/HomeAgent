@@ -117,7 +117,21 @@ function adapter.transform_stream_chunk(raw_chunk)
                 id = tc.id or "",
                 type = tc.type or "function",
                 name = name,
-                raw_arguments = raw_args
+                raw_arguments = raw_args,
+                -- ★ 必须透传上游 index（键名是 stream_index，不是 index）。
+                --
+                -- 内核按 stream_index 分桶累积同一轮多个 tool_call 的分片
+                -- （process.go:347 `idx := tc.StreamIndex`）。缺了这一项，
+                -- 所有分片的 StreamIndex 都是缺省 0 ⇒ 全部并进同一个桶 ⇒
+                -- argsRaw 混拼 ⇒ 每个工具都报"参数不是合法 JSON"，
+                -- 而工具一次都没真跑过。
+                --
+                -- 单工具调用时上游 index 恒为 0，缺省也是 0，所以这个问题
+                -- 在生产上长期不显形 —— 直到模型一轮发多个工具才炸。
+                --
+                -- 续传分片（只有 arguments、没有 name）尤其依赖它：
+                -- 那种分片除了 index 没有任何可归位的依据。
+                stream_index = tc.index or 0
             })
         end
         unified.tool_calls = tcs
