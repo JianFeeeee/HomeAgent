@@ -17,6 +17,29 @@ import (
 // 插值判据就成了摆设——它永远"通过"）。
 type toolRunner interface {
 	call(name string, args map[string]interface{}) (string, error)
+	// parallelSafe 报告工具是否**声明**可并发。
+	//
+	// ⚠️ 引擎层（execGroup）必须有它：否则"含非并发安全工具则整批串行"
+	// 这条规则只在上层（runGroup）实现 —— 任何人直接调 execGroup 都会
+	// 拿到不受约束的并发。压力测试 TestStress_ParallelNotSafeFallsBackToSerial
+	// 正是为此而写（它第一次跑就抓到了这个分层缺陷）。
+	parallelSafe(name string) bool
+}
+
+// batchCanRun 并发执行本组工具的判据。
+//
+// 规则：**全部**工具都声明并发安全才并发；一个不安全就**整批**串行。
+// 不做部分并发 —— 收益不抵其不可预测性。
+func batchCanRun(g Group, runner toolRunner) bool {
+	if !g.Parallel || len(g.Tools) <= 1 || runner == nil {
+		return false
+	}
+	for _, t := range g.Tools {
+		if !runner.parallelSafe(t.Tool) {
+			return false
+		}
+	}
+	return true
 }
 
 // errToolNotFound 表示「工具不存在」（未注册 / 插件未加载、已卸载或崩溃）。
@@ -83,7 +106,7 @@ func execGroup(g Group, args map[string]interface{}, runner toolRunner) (GroupRe
 	}
 
 	// ② 执行
-	if g.Parallel && n > 1 {
+	if batchCanRun(g, runner) {
 		var wg sync.WaitGroup
 		for i := 0; i < n; i++ {
 			wg.Add(1)

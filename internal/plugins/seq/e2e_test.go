@@ -4,7 +4,9 @@ import (
 	"encoding/json"
 	"os"
 	"strings"
+	"sync"
 	"testing"
+	"time"
 )
 
 // 阶段 P4 端到端：真实 Plugin + 真实工具执行，串通
@@ -21,14 +23,24 @@ import (
 
 // e2eRunner 是真实执行面：它按名字查工具声明、真的返回结果。
 type e2eRunner struct {
-	defs   map[string]toolDefInfo
+	defs map[string]toolDefInfo
+	// mu 保护 called：组内并发时多个 goroutine 同时 append，
+	// 无锁会**真的**触发 -race（压测首次跑就报出来了）。
+	mu     sync.Mutex
 	called []string
 	// results 覆盖默认返回
 	results map[string]string
+	// delay 按工具名制造延迟（毫秒），用于**打乱完成顺序**——
+	// 并发下若按完成顺序合并，槽内容就会错位；压力测试需要能造出这种乱序。
+	delay map[string]int
 }
 
 func newE2ERunner(names ...string) *e2eRunner {
-	r := &e2eRunner{defs: map[string]toolDefInfo{}, results: map[string]string{}}
+	r := &e2eRunner{
+		defs:    map[string]toolDefInfo{},
+		results: map[string]string{},
+		delay:   map[string]int{},
+	}
 	for _, n := range names {
 		// 默认**不**声明并发安全 ⇒ 序列会整批退回串行（保守默认）
 		r.defs[n] = toolDefInfo{Name: n, Description: n}
@@ -45,7 +57,12 @@ func (r *e2eRunner) markParallel(names ...string) {
 }
 
 func (r *e2eRunner) call(name string, args map[string]interface{}) (string, error) {
+	if d := r.delay[name]; d > 0 {
+		time.Sleep(time.Duration(d) * time.Millisecond)
+	}
+	r.mu.Lock()
 	r.called = append(r.called, name)
+	r.mu.Unlock()
 	if s, ok := r.results[name]; ok {
 		return s, nil
 	}
@@ -336,4 +353,13 @@ func TestSeqRunDoesNotSilentlyTruncateSlot(t *testing.T) {
 				strings.Count(res, "L"), len(long))
 		}
 	}
+}
+
+// calledSnapshot 返回调用记录的快照（加锁）。
+func (r *e2eRunner) calledSnapshot() []string {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	out := make([]string, len(r.called))
+	copy(out, r.called)
+	return out
 }

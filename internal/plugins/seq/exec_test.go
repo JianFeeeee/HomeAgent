@@ -49,6 +49,11 @@ func (f *fakeTool) call(name string, _ map[string]interface{}) (string, error) {
 	return "ran:" + name, nil
 }
 
+// parallelSafe：默认全部视为可并发（工具级压测通过 toolDefs 控制）。
+// 本文件用 fakeTool 的用例关注的是**组内顺序/合并**不变式，
+// 并发资格由 TestStress_* 单独检验。
+func (f *fakeTool) parallelSafe(string) bool { return true }
+
 func (f *fakeTool) called() []string {
 	f.mu.Lock()
 	defer f.mu.Unlock()
@@ -321,6 +326,8 @@ type capturingTool struct {
 	mu    sync.Mutex
 	args  map[string]interface{}
 }
+
+func (c *capturingTool) parallelSafe(string) bool { return true }
 
 func (c *capturingTool) call(name string, args map[string]interface{}) (string, error) {
 	c.mu.Lock()
