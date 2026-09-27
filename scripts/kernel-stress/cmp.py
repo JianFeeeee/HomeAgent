@@ -90,12 +90,13 @@ def has_error(frames):
 
 
 def tools_done(frames):
-    """数出工具真正执行的个数（按 done-N 标记去重）。"""
+    """ 数出工具真正执行的个数（按 done-N 标记去重）。"""
     blob = " ".join(frames)
     return len({int(m.group(1)) for m in re.finditer(r"done-(\d+)", blob)})
 
 
 # ---------------------------------------------------------------- 单轮测量
+
 
 def measure(sock, key, marker, rounds):
     """连一次、跑 rounds 轮（每轮唯一输入）。
@@ -127,6 +128,7 @@ def measure(sock, key, marker, rounds):
 
 
 # ---------------------------------------------------------------- 并发轰炸
+
 
 def blast(sock, key, conns, inputs, tag):
     """conns 条连接并发，每条连接连发 inputs 条输入。返回通过率。
@@ -174,6 +176,7 @@ def blast(sock, key, conns, inputs, tag):
 
 
 # ---------------------------------------------------------------- 主流程
+
 
 def arg_int(pos, default, name):
     """解析位置参数为正整数；非法时给出可执行报错而不是裸 ValueError。"""
