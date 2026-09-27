@@ -71,9 +71,10 @@ var downloadClient = &http.Client{
 //
 // ★ 曾经这里是一个**包级可变全局** `var HTTPAddr`，且 Start() 会把 settings 读到的值
 // **反写**回该全局。两个真实后果：
-//   1. 多实例互相污染——测试并行起两个 Registry，后启动的实例会把地址写进全局，
-//      先启动那个的 startHTTPServer 读到的是别人的地址（实测与生产 homed 抢 9876）；
-//   2. 全局读写在并发下没有同步，属数据竞态。
+//  1. 多实例互相污染——测试并行起两个 Registry，后启动的实例会把地址写进全局，
+//     先启动那个的 startHTTPServer 读到的是别人的地址（实测与生产 homed 抢 9876）；
+//  2. 全局读写在并发下没有同步，属数据竞态。
+//
 // 现在改为实例字段 p.httpAddr（默认值走本常量），不再有可被任意代码改写的包级状态。
 const defaultHTTPAddr = "127.0.0.1:9876"
 
@@ -168,6 +169,8 @@ func (p *Plugin) registerTools(s *sdk.PluginSDK) {
 				},
 			},
 		},
+		// 装插件：改磁盘与运行态，可能半安装
+		Serial: true,
 	}, func(args map[string]interface{}) (interface{}, error) {
 		overwrite, _ := args["overwrite"].(bool)
 		// path 优先：它对应"agent 自己构建出产物再装"的场景（plugindev_build → plugin_install）。
@@ -192,6 +195,8 @@ func (p *Plugin) registerTools(s *sdk.PluginSDK) {
 			"type":       "object",
 			"properties": map[string]interface{}{},
 		},
+		// 已核实只读：只列举已装插件
+		ParallelSafe: true,
 	}, func(args map[string]interface{}) (interface{}, error) {
 		return p.listPlugins()
 	})
@@ -209,6 +214,8 @@ func (p *Plugin) registerTools(s *sdk.PluginSDK) {
 				},
 			},
 		},
+		// 已核实只读：查运行状态
+		ParallelSafe: true,
 	}, func(args map[string]interface{}) (interface{}, error) {
 		name, _ := args["name"].(string)
 		return p.pluginStatus(name)
@@ -228,6 +235,8 @@ func (p *Plugin) registerTools(s *sdk.PluginSDK) {
 			},
 			"required": []string{"name"},
 		},
+		// 重启插件：改运行态
+		Serial: true,
 	}, func(args map[string]interface{}) (interface{}, error) {
 		name, _ := args["name"].(string)
 		if name == "" {
@@ -249,6 +258,8 @@ func (p *Plugin) registerTools(s *sdk.PluginSDK) {
 			},
 			"required": []string{"name"},
 		},
+		// 卸插件：改磁盘与运行态
+		Serial: true,
 	}, func(args map[string]interface{}) (interface{}, error) {
 		name, _ := args["name"].(string)
 		if name == "" {
@@ -270,6 +281,8 @@ func (p *Plugin) registerTools(s *sdk.PluginSDK) {
 			},
 			"required": []string{"name"},
 		},
+		// 已核实只读：查单个插件详情
+		ParallelSafe: true,
 	}, func(args map[string]interface{}) (interface{}, error) {
 		name, _ := args["name"].(string)
 		if name == "" {

@@ -249,19 +249,54 @@ func (a *Agent) validateArgsAgainstSchema(tc agentAPI.ToolCall) *sdk.ToolError {
 //
 // 为什么保守：新语义下并发会改变工具的行为前提，让存量插件意外并发
 // 比慢一点危险得多——判不出就该按串行走。
+//
+// ★ Serial 优先于 ParallelSafe：工具显式声明"必须串行"时，
+// 即使同时写了 ParallelSafe:true 也不并发（判据 TestSerialOverridesParallelSafe）。
+// 没有这条，"显式声明必须串行"就只是一个没被读取的死字段 ——
+// 工具作者写了 Serial:true 以为能保护自己，实际毫无作用。
 func (a *Agent) toolParallelSafe(name string) bool {
 	if a == nil {
 		return false
 	}
 	if a.stageHost != nil {
 		if def := a.stageHost.ToolDef(name); def != nil {
-			return def.ParallelSafe
+			return def.ParallelSafe && !def.Serial
 		}
 	}
 	if a.io != nil {
 		if def, ok := a.io.ToolDefOf(name); ok {
-			return def.ParallelSafe
+			return def.ParallelSafe && !def.Serial
 		}
+	}
+	// ③ 内置工具：以裸 schema map 下发，不在 stageHost/io 任何一侧 ⇒
+	//    前两条都查不到。声明随工具定义一起给（toolDef 的 toolParallel 选项，
+	//    与 SDK 的 NoMemory 同构），所以这里从定义里读，不是查硬编码名单。
+	return a.builtinToolParallelSafe(name)
+}
+
+// builtinToolParallelSafe 从**内置工具定义**里读并发声明。
+//
+// 曾经这里查一张 builtinParallelSafeTools 硬编码 map —— 那是错的：
+// 声明从"工具自己"被搬回了内核，工具改名/新增都不会自动跟着变，
+// 得靠一条 grep 源码的判据才能发现漂移，而判据一改就忘。
+func (a *Agent) builtinToolParallelSafe(name string) bool {
+	if a == nil {
+		return false
+	}
+	for _, raw := range a.buildToolDefs() {
+		m, ok := raw.(map[string]interface{})
+		if !ok {
+			continue
+		}
+		fn, ok := m["function"].(map[string]interface{})
+		if !ok {
+			continue
+		}
+		if n, _ := fn["name"].(string); n != name {
+			continue
+		}
+		safe, _ := fn["parallel_safe"].(bool)
+		return safe
 	}
 	return false
 }

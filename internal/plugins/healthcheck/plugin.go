@@ -42,33 +42,33 @@ func init() {
 }
 
 type Plugin struct {
-	name       string
-	mu         sync.Mutex
-	reports    []llmReport
-	sessionID  string
+	name          string
+	mu            sync.Mutex
+	reports       []llmReport
+	sessionID     string
 	selfToolNames map[string]bool
-	checkMu    sync.Mutex
+	checkMu       sync.Mutex
 
-	stopCh chan struct{}
-	perfData   PerfData
+	stopCh   chan struct{}
+	perfData PerfData
 
-	autoInterval   time.Duration
-	llmTimeout    time.Duration
-	llmMaxTurns   int
-	llmMaxTokens  int
-	perfHistory   int
+	autoInterval time.Duration
+	llmTimeout   time.Duration
+	llmMaxTurns  int
+	llmMaxTokens int
+	perfHistory  int
 }
 
 type PerfData struct {
-	LastCheck time.Time         `json:"last_check"`
-	Checks    []PerfCheckPoint  `json:"checks"`
+	LastCheck time.Time        `json:"last_check"`
+	Checks    []PerfCheckPoint `json:"checks"`
 }
 type PerfCheckPoint struct {
-	Time   time.Time `json:"time"`
-	Passed int       `json:"passed"`
-	Failed int       `json:"failed"`
-	Total  int       `json:"total"`
-	ElapsedMs int64  `json:"elapsed_ms"`
+	Time      time.Time `json:"time"`
+	Passed    int       `json:"passed"`
+	Failed    int       `json:"failed"`
+	Total     int       `json:"total"`
+	ElapsedMs int64     `json:"elapsed_ms"`
 }
 
 func New(name string) *Plugin {
@@ -170,6 +170,8 @@ func (p *Plugin) Start(s *sdk.PluginSDK) error {
 				"plugin": map[string]interface{}{"type": "string", "description": "可选：指定只检查该插件的健康状态（列出插件工具并逐一测试），不填则检查全部插件"},
 			},
 		},
+		// 共享 p.mu 写锁，且 healthcheck_report 会 append p.reports
+		Serial: true,
 	}, func(args map[string]interface{}) (interface{}, error) {
 		plugin, _ := args["plugin"].(string)
 		return p.runFullCheck(s, plugin)
@@ -183,6 +185,8 @@ func (p *Plugin) Start(s *sdk.PluginSDK) error {
 			"type":       "object",
 			"properties": map[string]interface{}{},
 		},
+		// 共享 p.mu 写锁，且 healthcheck_report 会 append p.reports
+		Serial: true,
 	}, func(args map[string]interface{}) (interface{}, error) {
 		return p.checkPlugins(s)
 	})
@@ -195,6 +199,8 @@ func (p *Plugin) Start(s *sdk.PluginSDK) error {
 			"type":       "object",
 			"properties": map[string]interface{}{},
 		},
+		// 共享 p.mu 写锁，且 healthcheck_report 会 append p.reports
+		Serial: true,
 	}, func(args map[string]interface{}) (interface{}, error) {
 		return p.listAllTools(s)
 	})
@@ -207,6 +213,8 @@ func (p *Plugin) Start(s *sdk.PluginSDK) error {
 			"type":       "object",
 			"properties": map[string]interface{}{},
 		},
+		// 共享 p.mu 写锁，且 healthcheck_report 会 append p.reports
+		Serial: true,
 	}, func(args map[string]interface{}) (interface{}, error) {
 		return p.checkMemory(s)
 	})
@@ -224,6 +232,8 @@ func (p *Plugin) Start(s *sdk.PluginSDK) error {
 			},
 			"required": []string{"tool_name", "status"},
 		},
+		// 共享 p.mu 写锁，且 healthcheck_report 会 append p.reports
+		Serial: true,
 	}, func(args map[string]interface{}) (interface{}, error) {
 		toolName, _ := args["tool_name"].(string)
 		status, _ := args["status"].(string)
@@ -245,6 +255,8 @@ func (p *Plugin) Start(s *sdk.PluginSDK) error {
 				"type":       "object",
 				"properties": map[string]interface{}{},
 			},
+			// 共享 p.mu 写锁，且 healthcheck_report 会 append p.reports
+			Serial: true,
 		}, func(args map[string]interface{}) (interface{}, error) {
 			return s.Status().GetKernelStatus(), nil
 		})
@@ -258,6 +270,8 @@ func (p *Plugin) Start(s *sdk.PluginSDK) error {
 			"type":       "object",
 			"properties": map[string]interface{}{},
 		},
+		// 共享 p.mu 写锁，且 healthcheck_report 会 append p.reports
+		Serial: true,
 	}, func(args map[string]interface{}) (interface{}, error) {
 		p.mu.Lock()
 		defer p.mu.Unlock()
@@ -268,8 +282,8 @@ func (p *Plugin) Start(s *sdk.PluginSDK) error {
 			failed += c.Failed
 		}
 		return map[string]interface{}{
-			"status":      "ok",
-			"last_check":  p.perfData.LastCheck,
+			"status":       "ok",
+			"last_check":   p.perfData.LastCheck,
 			"total_checks": len(p.perfData.Checks),
 			"total_passed": passed,
 			"total_failed": failed,
@@ -833,16 +847,16 @@ func (p *Plugin) collectToolDefsForLLM(s *sdk.PluginSDK, pluginFilter string) []
 func isSafeReadonlyTool(name string) bool {
 	// 明确只读的查询/列表类工具
 	readonlyExact := map[string]bool{
-		"memory_recall":      true,
-		"memory_introspect":  true,
-		"doc_query":          true,
-		"knowledge_search":   true,
-		"knowledge_list":     true,
-		"person_query":       true,
-		"person_network":     true,
-		"llm_list_sources":   true,
+		"memory_recall":        true,
+		"memory_introspect":    true,
+		"doc_query":            true,
+		"knowledge_search":     true,
+		"knowledge_list":       true,
+		"person_query":         true,
+		"person_network":       true,
+		"llm_list_sources":     true,
 		"output_list_channels": true,
-		"terminal_list":      true,
+		"terminal_list":        true,
 	}
 	if readonlyExact[name] {
 		return true
