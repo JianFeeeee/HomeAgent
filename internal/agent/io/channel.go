@@ -341,7 +341,7 @@ type InjectOptions = pubsdk.InjectOptions
 // applyInjectOpts 把注入标志位写进事件 payload。
 //
 // 只在非零时写：零值与旧 payload 逐字节一致，事件订阅方与旧内核
-// （不认识这两个键）都不会受影响。
+// （不认识这些键）都不会受影响。
 //
 // 为什么不把标志位当独立参数传到底：eventloop 与各注入路径都按 payload 取字段
 // （no_memory 本来就是这么走的），payload 是这里唯一已有的携带面。
@@ -354,6 +354,9 @@ func applyInjectOpts(payload map[string]interface{}, opts InjectOptions) {
 	}
 	if opts.RecallPolicy != "" {
 		payload["recall_policy"] = opts.RecallPolicy
+	}
+	if opts.ScenePolicy != "" {
+		payload["scene_policy"] = opts.ScenePolicy
 	}
 	if opts.CleanerName != "" {
 		payload["cleaner_name"] = opts.CleanerName
