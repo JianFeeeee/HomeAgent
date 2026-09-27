@@ -44,7 +44,10 @@ do_check() {
   t=$(ssh_of "$ip"); [ -z "$t" ] && { info "未知主机: $ip"; return 1; }
   s=$(sudo_of "$ip")
   info "──── $ip ────"
-  ssh -o BatchMode=yes -o ConnectTimeout=8 "$t" "
+  # ★ -n：ssh 会从 stdin 读，若不截断会**吃掉后面 read 的输入**
+  #   （"yes" 被 ssh 消耗 ⇒ read 拿到空 ⇒ 脚本静默取消）。
+  #   症状是"明明喂了 yes 却说已取消"，极难定位。
+  ssh -n -o BatchMode=yes -o ConnectTimeout=8 "$t" "
     echo -n '  主机: '; hostname
     echo -n '  当前二进制: '; ls -la $BIN 2>/dev/null | awk '{print \$5\" 字节  \"\$6\" \"\$7\" \"\$8}'
     echo -n '  服务: '; systemctl is-active $SVC 2>/dev/null
@@ -74,7 +77,7 @@ do_deploy() {
   scp -q "$NEW" "$t:/tmp/waiter.new" || { info "上传失败"; return 1; }
   info "已上传"
 
-  ssh -o BatchMode=yes -o ConnectTimeout=8 "$t" "
+  ssh -n -o BatchMode=yes -o ConnectTimeout=8 "$t" "
     set -e
     $s cp -a $BIN $BIN.bak-\$(date +%Y%m%d-%H%M%S)
     echo BACKUP=\$(ls -t $BIN.bak-* | head -1)
@@ -89,14 +92,14 @@ do_deploy() {
   say "更新后验证 $ip"
   local alive=false
   for i in 1 2 3 4 5; do
-    if ssh -o BatchMode=yes -o ConnectTimeout=8 "$t" "systemctl is-active --quiet $SVC" 2>/dev/null; then
+    if ssh -n -o BatchMode=yes -o ConnectTimeout=8 "$t" "systemctl is-active --quiet $SVC" 2>/dev/null; then
       alive=true; break
     fi
     sleep 3
   done
   if [ "$alive" = true ]; then
     info "✓ 服务 active"
-    ssh -o BatchMode=yes -o ConnectTimeout=8 "$t" "
+    ssh -n -o BatchMode=yes -o ConnectTimeout=8 "$t" "
       echo -n '  新二进制: '; ls -la $BIN | awk '{print \$5\" 字节\"}'
       echo -n '  进程时长: '; ps -o etime= -p \$(pgrep -f 'waiter --daemon' | head -1) 2>/dev/null
       echo -n '  配置未变: '; md5sum $CFG | cut -c1-32
@@ -113,7 +116,7 @@ do_rollback() {
   local ip=$1 t s
   t=$(ssh_of "$ip"); s=$(sudo_of "$ip")
   say "回滚 $ip"
-  ssh -o BatchMode=yes -o ConnectTimeout=8 "$t" "
+  ssh -n -o BatchMode=yes -o ConnectTimeout=8 "$t" "
     set -e
     BAK=\$(ls -t $BIN.bak-* 2>/dev/null | head -1)
     [ -n \"\$BAK\" ] || { echo '找不到备份'; exit 1; }
