@@ -37,6 +37,7 @@ type StageContext = pubsdk.StageContext
 type MemItem = pubsdk.MemItem
 type ToolCall = pubsdk.ToolCall
 type ToolResult = pubsdk.ToolResult
+type ToolError = pubsdk.ToolError
 type ToolDef = pubsdk.ToolDef
 type IOInjector = pubsdk.IOInjector
 type ToolRegistrar = pubsdk.ToolRegistrar

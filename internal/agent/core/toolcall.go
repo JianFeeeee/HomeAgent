@@ -15,7 +15,25 @@ import (
 	"gitcode.com/JianFeeeee/HomeAgent/internal/memory/text"
 )
 
-func (a *Agent) executeToolCall(tc agentAPI.ToolCall, channel string, turnScenes ...string) (ret string) {
+// toolOutcome 是一次工具执行的完整结果：**文本**（给模型）与
+// **原值**（给契约判断）分开携带。
+//
+// 为何必须分开：executeToolCall 历来只返回 string，结构化信息在这一步
+// 被抹平，导致（a）ToolResult.Success 无法诚实化、（b）after_toolcall
+// 阶段插件对结构化结果的改写因类型断言失败而静默失效。
+type toolOutcome struct {
+	Text string
+	Raw  interface{}
+}
+
+// executeToolCall 保留原签名（spawn.go 与既有测试依赖），只取文本。
+func (a *Agent) executeToolCall(tc agentAPI.ToolCall, channel string, turnScenes ...string) string {
+	return a.executeToolCallOutcome(tc, channel, turnScenes...).Text
+}
+
+// executeToolCallOutcome 是完整形态：崩溃/超时同样以 ToolError 表达，
+// 使「工具故障」与「工具报告的业务失败」在上层可区分。
+func (a *Agent) executeToolCallOutcome(tc agentAPI.ToolCall, channel string, turnScenes ...string) (out toolOutcome) {
 	defer func() {
 		if r := recover(); r != nil {
 			stack := debug.Stack()
@@ -27,11 +45,13 @@ func (a *Agent) executeToolCall(tc agentAPI.ToolCall, channel string, turnScenes
 				}
 			}
 
-			ret = fmt.Sprintf("工具 %s 执行崩溃: %v", tc.Name, r)
+			te := newToolError("panic", "", fmt.Sprintf("工具 %s 执行崩溃: %v", tc.Name, r),
+				"这是工具自身故障（不是你的参数问题），请勿原样重试；可换用其他工具或告知用户。")
+			out = toolOutcome{Text: te.Error(), Raw: te}
 		}
 	}()
 
-	done := make(chan string, 1)
+	done := make(chan toolOutcome, 1)
 	go func() {
 		done <- a.executeToolCallInner(tc, channel, turnScenes)
 	}()
@@ -41,70 +61,74 @@ func (a *Agent) executeToolCall(tc agentAPI.ToolCall, channel string, turnScenes
 		return result
 	case <-time.After(60 * time.Second):
 		log.Printf("[agent] tool %s timed out after 60s", tc.Name)
-		return fmt.Sprintf("工具 %s 执行超时（60秒），已取消", tc.Name)
+		te := newToolError(ErrReasonTimeout, "", fmt.Sprintf("工具 %s 执行超时（60秒）", tc.Name),
+			"该工具本次未在时限内返回。可改用更小的任务，或换用其他工具。")
+		return toolOutcome{Text: te.Error(), Raw: te}
 	}
 }
 
-func (a *Agent) executeToolCallInner(tc agentAPI.ToolCall, channel string, turnScenes []string) string {
+func (a *Agent) executeToolCallInner(tc agentAPI.ToolCall, channel string, turnScenes []string) toolOutcome {
 	// 参数没法用（被 max_tokens 截断，或 JSON 写坏了）：**不要**拿着空/残缺参数去调工具。
 	// 否则工具会报 “path is required”“command is required” 这类与真因无关的错，
 	// 模型看不出真因、只能原样重试（实测 cmd_run 失败率高达 34%~48%）。
 	// __arg_error 里带的已经是分因写好的可执行指引，直接交回模型。
 	if msg, ok := tc.Arguments["__arg_error"].(string); ok && msg != "" {
 		log.Printf("[agent] tool %s skipped: arguments unusable (truncated or malformed)", tc.Name)
-		return msg
+		return toolOutcome{Text: msg}
 	}
 
 	switch {
 	case tc.Name == "persona_set":
-		return a.executePersonaTool(tc)
+		return toolOutcome{Text: a.executePersonaTool(tc)}
 	case strings.HasPrefix(tc.Name, "memory_"):
-		return a.executeMemoryTool(tc, turnScenes)
+		return toolOutcome{Text: a.executeMemoryTool(tc, turnScenes)}
 	case strings.HasPrefix(tc.Name, "social_"):
-		return a.executeSocialTool(tc)
+		return toolOutcome{Text: a.executeSocialTool(tc)}
 	case strings.HasPrefix(tc.Name, "knowledge_"):
-		return a.executeKnowledgeTool(tc)
+		return toolOutcome{Text: a.executeKnowledgeTool(tc)}
 	case strings.HasPrefix(tc.Name, "doc_"):
-		return a.executeDocTool(tc)
+		return toolOutcome{Text: a.executeDocTool(tc)}
 	case strings.HasPrefix(tc.Name, "output_send__") && strings.HasSuffix(tc.Name, "_help"):
-		return a.executeOutputSendHelp(tc)
+		return toolOutcome{Text: a.executeOutputSendHelp(tc)}
 	case strings.HasPrefix(tc.Name, "output_send__"):
-		return a.executeOutputSendTool(tc)
+		return toolOutcome{Text: a.executeOutputSendTool(tc)}
 	case tc.Name == "output_list_channels":
-		return a.executeOutputListChannels()
+		return toolOutcome{Text: a.executeOutputListChannels()}
 	case tc.Name == "input_channels":
-		return a.executeInputChannels(tc)
+		return toolOutcome{Text: a.executeInputChannels(tc)}
 	case tc.Name == "resident_agents":
-		return a.executeResidentAgents(tc)
+		return toolOutcome{Text: a.executeResidentAgents(tc)}
 	case tc.Name == "notify_parent":
-		return a.executeNotifyParent(tc)
+		return toolOutcome{Text: a.executeNotifyParent(tc)}
 	case tc.Name == "inputch_note":
-		return a.executeInputchNote(tc)
+		return toolOutcome{Text: a.executeInputchNote(tc)}
 	case tc.Name == "plgreload":
-		return a.executePluginReload()
+		return toolOutcome{Text: a.executePluginReload()}
 	case tc.Name == "get_plugin_tools":
 		pluginName, _ := tc.Arguments["plugin_name"].(string)
-		return a.executeGetPluginTools(pluginName)
+		return toolOutcome{Text: a.executeGetPluginTools(pluginName)}
 	case tc.Name == "spawn_child":
-		return a.executeSpawnChild(tc, channel)
+		return toolOutcome{Text: a.executeSpawnChild(tc, channel)}
 	case tc.Name == "child_result":
-		return a.executeChildResultTool(tc)
+		return toolOutcome{Text: a.executeChildResultTool(tc)}
 	case strings.HasPrefix(tc.Name, "llm_"):
-		return a.executeLLMTool(tc)
+		return toolOutcome{Text: a.executeLLMTool(tc)}
 	case tc.Name == "describe_image":
-		return a.executeDescribeImage(tc)
+		return toolOutcome{Text: a.executeDescribeImage(tc)}
 	case tc.Name == "transcribe_audio":
-		return a.executeTranscribeAudio(tc)
+		return toolOutcome{Text: a.executeTranscribeAudio(tc)}
 	case tc.Name == "ocr_image":
-		return a.executeOCRImage(tc)
+		return toolOutcome{Text: a.executeOCRImage(tc)}
 	}
 
 	if a.stageHost != nil {
 		if result, err := a.stageHost.ExecuteTool(tc.Name, tc.Arguments); err == nil {
-			return fmt.Sprintf("%v", result)
+			// Raw 必须带上：否则结构化失败（{"error":…} / ToolError）在这一步被抹平成文本，
+			// Success 又会退回恒真——正是阶段 1b 要修的那个洞。
+			return toolOutcome{Text: renderToolResult(tc.Name, result), Raw: result}
 		} else if !agentIO.IsToolNotFound(err) {
 			// 非「不存在」= 真的执行失败，如实上报（可被 on_error/retry 处置）。
-			return fmt.Sprintf("工具 %s 执行失败: %v", tc.Name, err)
+			return toolOutcome{Text: fmt.Sprintf("工具 %s 执行失败: %v", tc.Name, err)}
 		}
 		// 是「不存在」：继续往下走 io / 设备路径，两处都没有才报缺工具。
 	}
@@ -117,7 +141,7 @@ func (a *Agent) executeToolCallInner(tc agentAPI.ToolCall, channel string, turnS
 	// 这里按目标设备的通道名 device/<id> 查同一道闸：父授权了哪台设备，才允许指挥哪台。
 	if _, isDeviceTool := a.io.DeviceOfTool(tc.Name); isDeviceTool {
 		if id, _ := tc.Arguments["device_id"].(string); id != "" && !a.IsOutputAllowed("device/"+id) {
-			return fmt.Sprintf("设备 [%s] 未授权给本 agent（可用设备见 output_list_channels 的 device/<id> 通道，或 devicedetect）", id)
+			return toolOutcome{Text: fmt.Sprintf("设备 [%s] 未授权给本 agent（可用设备见 output_list_channels 的 device/<id> 通道，或 devicedetect）", id)}
 		}
 	}
 
@@ -135,13 +159,15 @@ func (a *Agent) executeToolCallInner(tc agentAPI.ToolCall, channel string, turnS
 			// 工具是动态注册的，"不存在"是常态而非异常（插件未加载/已卸载/崩溃）。
 			// 文案必须让模型知道该做什么，而不是含糊的"执行失败"——
 			// 后者会让模型反复重试同一个不存在的名字。
-			return fmt.Sprintf("工具 %s 不存在或未注册：它可能属于未加载/已崩溃的插件。"+
+			return toolOutcome{Text: fmt.Sprintf("工具 %s 不存在或未注册：它可能属于未加载/已崩溃的插件。"+
 				"先调 get_plugin_tools(\"\") 看当前可用工具，或 output_list_channels 看通道；"+
-				"确认名称无误后再调用", tc.Name)
+				"确认名称无误后再调用", tc.Name)}
 		}
-		return fmt.Sprintf("工具 %s 执行失败: %v", tc.Name, err)
+		return toolOutcome{Text: fmt.Sprintf("工具 %s 执行失败: %v", tc.Name, err)}
 	}
-	return fmt.Sprintf("%v", result)
+	// Raw 必须带上：否则结构化失败（{"error":…} / ToolError）在这一步被抹平成文本，
+	// Success 又会退回恒真——正是阶段 1b 要修的那个洞。
+	return toolOutcome{Text: renderToolResult(tc.Name, result), Raw: result}
 }
 
 // toolNotFound / isToolNotFound 是 agentIO 哨兵在 core 侧的薄封装，
