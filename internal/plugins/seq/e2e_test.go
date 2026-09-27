@@ -74,7 +74,12 @@ func (r *e2eRunner) parallelSafe(name string) bool {
 	return ok && d.ParallelSafe
 }
 
-func newE2EPlugin(t *testing.T, runner *e2eRunner) *Plugin {
+// newE2EPlugin 造一个不依赖内核的 Plugin。
+//
+// 参数用**接口** seqRunner 而非具体类型：压力测试需要不同替身
+// （e2eRunner 用于串行场景、extRunner 用于千级并发），写死类型会逼着
+// 压测去改这个 helper —— TestStressExtreme 第一次跑就编译不过，正是这个原因。
+func newE2EPlugin(t *testing.T, runner seqRunner) *Plugin {
 	t.Helper()
 	return &Plugin{
 		name:   "seq",
