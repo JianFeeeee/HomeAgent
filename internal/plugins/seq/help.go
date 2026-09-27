@@ -21,9 +21,11 @@ func seqHelpText() string {
 
 const helpHeader = `【工具序列 seq】
 
-一条序列 = 若干 group，**组内并行、组间串行**。每个 group 有独立签名
-（in 入参 / out 出参），可被 seq_call 按名调用。
-序列存的是**解析后的 AST**：保存时做完全部静态校验，执行期不再解析文本。
+⚠️ 最容易错的一处（真机实测模型在此连续失败 4 次）：
+
+     group 的 in 必须是**对象**，无入参写 {}   ——   不要写成字符串
+
+  "in": "" 或 "in": "{}"（字符串）一律被拒。「无入参」要表达成空**对象**。
 
 常用操作：
   seq_list                    列出全部序列及其签名
@@ -32,6 +34,10 @@ const helpHeader = `【工具序列 seq】
   seq_call                    按名调用某个 group 或某条序列
   seq_when_call               条件调用，when 为真才执行
   seq_delete                  删除
+
+序列 = 若干 group，**组内并行、组间串行**；每个 group 有独立签名
+（in 入参 / out 出参），可被 seq_call 按名调用。
+序列存的是**解析后的 AST**：保存时做完全部静态校验，执行期不再解析文本。
 `
 
 const helpFormat = `
@@ -42,6 +48,7 @@ const helpFormat = `
 2. 每个 group 的字段：
      name       必填，组名，全局唯一（它是签名名）
      in         入参声明，**对象**，如 {"host":"string"}；无入参写 {}
+                ⚠️ 必须是对象 {"k":"type"}；写 "" 或 "{}"（字符串）一律被拒
      out        出参声明，**对象**，如 {"summary":"string"}；无出参写 {}
      when       条件屏障，默认 "true"，只可读 $args.*
      parallel   默认 true；置 false 则组内串行（保序场景用）

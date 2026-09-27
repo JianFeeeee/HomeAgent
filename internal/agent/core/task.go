@@ -128,6 +128,12 @@ type TaskFrame struct {
 	//（output_channel / input_source / media_* —— stage.go:18 依赖前者）。
 	toolCtxs []sdk.StageContext
 
+	// oversizeTools / oversizeToolNames 记录本任务中「过大工具结果」的次数与工具名。
+	// ⚠️ 结果**未被裁剪**（方案 B），这里只是记账，供调度器/状态面判断
+	// 是否有工具在稳定地产出超大结果。
+	oversizeTools     int
+	oversizeToolNames []string
+
 	// assistantMsgIdx 是本批 assistant(tool_calls) 消息在 Msgs 中的下标，
 	// -1 表示尚未写入。阶段 2a：批内只写**一条** assistant 承载全部
 	// tool_calls，工具结果各自作为 tool 消息追加在它之后。
@@ -1027,6 +1033,16 @@ func (a *Agent) stepToolAfter(f *TaskFrame) stepOutcome {
 		}
 	}
 	f.Msgs = append(f.Msgs, toolMsg)
+
+	// 工具结果大小统计（方案 B：**只统计不裁剪**）。
+	//
+	// 为什么在这里而不是 stepToolExec：那里拿到的 outcome.Text 尚未经
+	// after_toolcall 阶段改写，而模型最终看到的是**这里**的内容。
+	// ⚠️ 刻意不截断 —— 截断会让模型基于残缺数据下结论，且它不知道被截过
+	// （与本仓「静默降级」同族）。处置权交回调度器/上层。
+	if a.checkToolResultSize(tc.Name, toolMsg.Content) {
+		f.noteOversizeTool(tc.Name)
+	}
 	if mediaMsg != nil {
 		// 必须紧跟在 toolMsg 之后：中间插入其他消息会让 tool_call_id 配对断开。
 		f.Msgs = append(f.Msgs, *mediaMsg)
