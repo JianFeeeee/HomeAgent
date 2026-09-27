@@ -15,7 +15,7 @@
 | --- | --- | --- | --- |
 | **0** | 修 map 迭代顺序（flush 乱序） | — | ✅ **已完成** |
 | **0.2** | **工具错误类型化（已完成）** | — | ✅ **已完成** |
-| **0.5** | 补多 tool_call 批内路径判据 | — | ⬜ 待办 |
+| **0.5** | 补多 tool_call 批内路径判据 | — | ✅ **已完成** |
 | **1** | 结果契约 + 参数预校验 | — | ⬜ 待办 |
 | **2** | 并行执行层 | 1 | ⬜ 待办 |
 | **2.5** | 提示词改为「默认并行」 | 2 | ⬜ 待办 |
@@ -78,24 +78,37 @@ FAIL（`父的执行失败被误报为『工具不存在』`）；修复后全�
 
 ---
 
-## 阶段 0.5 ⬜ 补批内路径判据
+## 阶段 0.5 ✅ 补批内路径判据（已完成）
 
-**为什么先做**：核实到**仓内没有任何测试直接驱动 `PendingTools` / `ToolIdx`**，
-即「同一批多个 tool_call」这条路径**无判据可依**。阶段 2 要改的正是这段逻辑。
+**前提更正**（此前我写「无任何测试直接驱动批内路径」——**不准确**）：
+`scheduler_critical_test.go:125` 的 `TestBatch_NotAbandonedWithoutPreemption`
+**已经**驱动了「同批两个工具按序执行」。漏查是因为我只 grep 了
+`PendingTools` / `ToolIdx` 这两个**字段名**，没查断言**内容**。
 
-**产出**：`internal/agent/core/toolbatch_test.go`（新建）
+**真正缺的是**该测试**未覆盖**的三条（已核实全仓无对应断言）：
 
-1. **批内全序列可观测**：构造一个假 provider，一轮返回 2 个 tool_call，
-   断言 `f.ToolsUsed` 含两个、`f.ToolResults` 有两条、`f.Msgs` 里 tool_call_id 配对完整。
-2. **配对完整性**：断言每个 tool_call_id 都有且仅有一条 `role=tool` 消息。
-   （这条是并行化的安全网——一旦落法改成「一个 assistant 带全部 tool_calls」，
-   它能立刻发现配对被破坏。）
-3. **`content_once` 语义**：`f.ContentOnce` 保证 assistant 文本只出现一次，
-   在批内多工具下必须仍然成立。
+| 缺口 | 风险 | 新增判据 |
+| --- | --- | --- |
+| `tool_call_id` 配对完整性 | 阶段 2 改消息落法时，配对一旦断裂上游直接报错 | `TestBatchToolCallIDsAllPaired` |
+| `ContentOnce` 批内语义 | 同一段 assistant 文本在批内重复 N 次，撑爆上下文 | `TestBatchAssistantTextAppearsOnce` |
+| denied 后**继续**批内 | 改成 abort 会丢掉本可执行的后续调用 | `TestBatchContinuesAfterDeniedTool` |
 
-**判据形态**：全部为**确定性**断言，不依赖 map 随机性（阶段 0 已把乱序消除）。
+另加 `TestBatchExecutesEveryToolCall`（批内全序列 + 顺序 + ToolResults 完整性）。
 
----
+**判据**：`toolbatch_test.go`（4 条）+ 复用既有 `TestBatch_NotAbandonedWithoutPreemption`。
+全部**确定性**断言（阶段 0 已消除 map 随机性）。
+
+**变异验证**：令 `stepToolBegin` 跳过批内最后一个工具后，**4 条判据同时 FAIL**
+（既有那条也 FAIL），报错直指 `ToolsUsed = [tool_alpha]`、`tool_call_id "c2" 被声明 0 次`。
+
+⚠️ **过程中三次自伤**（都靠"判据先写"暴露）：
+1. 臆造了不存在的 helper（`sdkToolDef` / `sdkStageCtx`）⇒ build 失败
+2. 把 `a.stageHost = nil` 后又用它注册 stage handler
+3. 给 `newTaskFrame` 传 `nil` ⇒ `stepPrepare` 于 `task.go:519` **nil 解引用 panic**
+   ⇒ 改用仓内既有的 `a.stageCtxFromInput(...)`（与 `scheduler_preempt_test` 一致）
+   ★ 顺带记录：生产路径两处 `newTaskFrame` 调用（`task.go:228/422`）都传真实 ctx，
+     但 `stepPrepare` 对 `f.StageCtx` **无 nil 兜底**。本次不修（无生产触发路径），
+     记为潜在健壮性缺口。
 
 ## 阶段 1 ⬜ 结果契约 + 参数预校验
 
