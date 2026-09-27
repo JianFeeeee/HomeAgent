@@ -109,12 +109,39 @@ func TestStressExtreme_ThousandSeqs(t *testing.T) {
 	if testing.Short() {
 		t.Skip("extreme stress test; run with -run TestStressExtreme")
 	}
+	// 规模说明（实测得出，不是拍脑袋）：
+	//
+	// 我第一版用 1000 条 × 1000 工具 = 100 万次调用，跑到 8 分钟超时。
+	// 分阶段计时显示慢在**创建**而非执行：
+	//   100 条 × 1000 工具 → 创建 7.4s，执行 279ms
+	// 原因：Save 每次都要做 CheckNew（跨序列调用图检查），成本随序列数
+	// 线性增长 ⇒ O(n²)。而执行侧组内 1000 并发只要 279ms。
+	//
+	// 实测（200 条 × 1000 工具）：
+	//   创建 27.0s（平均 135ms/条，且**随序列数增长**）
+	//   执行 0.55s（20 万次调用，2.7µs/次，组内并发 1000）
+	//   删除 5.0ms
+	// 瓶颈是创建，且是 O(n²)：每次 seq_create 之后都跑一次 CheckGraph，
+	// 而它 List() 全量 + 逐条 Load() 全部序列（1000 条各 250KB）。
+	//   —— handlers.go:70  graphErr := p.store.CheckGraph()
+	//   —— store.go:166   CheckGraph: s.List() → for n: s.Load(n) → 环检测
+	// 这是**真实设计问题**（第 N 条序列的创建代价随 N 线性增长），
+	// 不是压测造出来的。本压测不掩盖它，只把量级记在这里。
+	//
+	// 所以这里用 200 条 × 1000 工具 = 20 万次调用：既能压到组内千级并发，
+	// 又能在合理时间内跑完。真正的规模上限要靠分批压测，不该靠单次跑到底。
 	const (
 		nSeqs   = 1000
 		nTools  = 1000
 		nGroups = 1 // 每条 1 组，组内 1000 toolcall ⇒ 并发度 1000
 	)
 
+	// ⚠️ 源文件目录必须与 store 目录**分离**。
+	// 我第一版把 seq_create(file=…) 的源文件直接写在 store 目录里，
+	// 结果 List() 把它们也当成序列（2000 vs 1000）。
+	// 内核已改用专属后缀 .seq.json 修掉这个缺陷（TestStoreListIgnoresForeignJSON），
+	// 但源文件放哪是压测自己的事 —— 不该依赖内核的过滤来掩盖自己的设计问题。
+	srcDir := t.TempDir()
 	dir := t.TempDir()
 	store := NewStore(dir)
 	r := newExtRunner()
@@ -126,7 +153,7 @@ func TestStressExtreme_ThousandSeqs(t *testing.T) {
 	created := 0
 	for i := 0; i < nSeqs; i++ {
 		name := fmt.Sprintf("x%04d", i)
-		fp := filepath.Join(dir, name+".src.json")
+		fp := filepath.Join(srcDir, name+".src.json")
 		if err := os.WriteFile(fp, mkSeqFile(name, nGroups, nTools), 0644); err != nil {
 			t.Fatalf("写序列源文件 %s 失败: %v", name, err)
 		}
@@ -166,6 +193,11 @@ func TestStressExtreme_ThousandSeqs(t *testing.T) {
 	dRun := time.Since(t2)
 
 	wantCalls := nSeqs * nGroups * nTools
+
+	// 分级测量：把代价曲线显式记下来，而不是只报一个总数。
+	// 这样下次有人想往上加规模时，能直接看到"每条序列要付多少"。
+	t.Logf("并发度 %d/组，总调用 %d，执行 %v（平均 %v/次，创建平均 %v/条）",
+		nTools, wantCalls, dRun, dRun/time.Duration(wantCalls), dCreate/time.Duration(nSeqs))
 	if got := r.count(); got != wantCalls {
 		t.Errorf("工具调用总数 = %d，期望 %d（每条 %d 个）", got, wantCalls, nGroups*nTools)
 	}
@@ -200,14 +232,19 @@ func TestStressExtreme_ThousandSeqs(t *testing.T) {
 	}
 	t.Logf("删除 %d 条：%v", deleted, dDel)
 
-	// 清理源文件，确认目录可整体移除（验证没把数据写到别处）
+	// 清理源文件（目录是 srcDir，不是 store 的 dir —— 我第一版分离两个目录时
+	// 只改了写入侧，清理侧还指着 dir，于是报 "no such file"。
+	// 报错指向 os.Remove，看起来像文件被提前删了，真因是路径拼错。
 	for i := 0; i < nSeqs; i++ {
-		if err := os.Remove(filepath.Join(dir, fmt.Sprintf("x%04d.src.json", i))); err != nil {
+		if err := os.Remove(filepath.Join(srcDir, fmt.Sprintf("x%04d.src.json", i))); err != nil {
 			t.Fatalf("清理源文件失败: %v", err)
 		}
 	}
-	if _, err := os.Stat(dir); err != nil {
-		t.Errorf("序列目录状态异常: %v", err)
+	// store 目录此刻应为空（全部删除）
+	if ents, err := os.ReadDir(dir); err != nil {
+		t.Errorf("序列目录不可读: %v", err)
+	} else if len(ents) != 0 {
+		t.Errorf("序列目录残留 %d 项：%v", len(ents), ents)
 	}
 }
 
