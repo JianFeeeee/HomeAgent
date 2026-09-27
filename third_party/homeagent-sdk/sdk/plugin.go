@@ -74,6 +74,40 @@ func ValidRecallPolicy(policy string) bool {
 	return false
 }
 
+// 场面策略：决定一次输入是否参与**场面识别**（场景式记忆）。
+//
+// 与前两项再正交一轴：NoMemory 管「进不进记忆计算」、ContextPolicy 管
+// 「裁不裁上下文」、RecallPolicy 管「召不召回记忆」，本项管的是
+// 「这条输入算不算一场戏的一部分」——它决定输入会不会产出现场指纹
+// （通道/对话对象/工具/话题/时段），进而决定会不会长出、命中、写入场景。
+//
+// 默认（空串或 ScenePolicyAuto）**参与**，保持既有行为：场景式记忆自
+// v1.3 落地起就对所有通道无条件生效，没有开关。不默认关有两个原因：
+//  1. 场景只**附加**现有记忆的检索路，不改记忆本体，默认关会让存量
+//     通道突然失去场景召回；
+//  2. 「关」是少数意图（内部信噪通道），少数意图不该是默认——
+//     与 ContextPolicy 刻意相反（同为破坏性操作，那里是默认关）。
+//
+// 该关的典型是纯内部通道：system（内核自循环）、kernel、timer、healthcheck。
+// 但**现网不标任何一个**（2026-09-26 裁定）：实测这些 0-refs 通道合计 70
+// strength、0 条记忆，场景召回返回空；而 declared 场景不进相似度空间
+// （loadEmergentScenesLocked 只取 origin='emergent'），多写对聚类零影响。
+// 「多写无影响、少写会缺场景」——默认 auto 保持开，声明项只作为插件
+// 将来确实需要时的闸门。
+const (
+	ScenePolicyAuto = "auto"
+	ScenePolicyNone = "none"
+)
+
+// ValidScenePolicy 校验场面策略取值；空串等价于 ScenePolicyAuto。
+func ValidScenePolicy(policy string) bool {
+	switch policy {
+	case "", ScenePolicyAuto, ScenePolicyNone:
+		return true
+	}
+	return false
+}
+
 // InjectOptions 声明一次注入行为在记忆层与上下文层的表现。
 //
 // 零值 = 记入记忆 + 不裁剪上下文，与历史行为（三参数注入方法）完全一致，
@@ -102,7 +136,11 @@ type InjectOptions struct {
 	// 空串 = 默认（输入/注入 auto，即保持既有「每条输入都召回」的行为）；
 	// RecallPolicyNone 显式关闭（如中断通知的 meta 文本不该据它召回）。
 	RecallPolicy string
-	CleanerName  string
+	// ScenePolicy 声明此次注入是否参与场面识别（场景式记忆）。
+	// 空串 = 默认参与（保持既有行为）；ScenePolicyNone 显式关闭，
+	// 适用于不产生任何场面指纹的纯内部信号（心跳、自循环、内部状态）。
+	ScenePolicy string
+	CleanerName string
 
 	// Priority 声明**中断注入**的优先级（仅 InjectInterrupt* 有意义）。
 	//
@@ -132,6 +170,7 @@ const (
 // Cleaner:  计算层过滤函数，不改原文；仅在向量化/jieba/蒸馏/存档提取关键词时调用
 // ContextPolicy: 此通道的输入到达后是否据此裁剪上下文，默认 none（不裁剪）
 // RecallPolicy:  此通道的输入到达后是否据此召回相关记忆，默认 auto（召回）
+// ScenePolicy:   此通道的输入到达后是否参与场面识别（场景式记忆），默认 auto（参与）
 //
 // JSON tag 是必需的：通道定义要跨进程传给内核，而 Cleaner 是函数（必须忽略）。
 // 没有 tag 时既无法整体 marshal（func 不支持），又会诱使调用方手写字段白名单——
@@ -142,6 +181,8 @@ type ChannelDef struct {
 	ContextPolicy string              `json:"context_policy,omitempty"`
 	// RecallPolicy 见 InjectOptions.RecallPolicy；空串等价 auto（保持既有行为）。
 	RecallPolicy string `json:"recall_policy,omitempty"`
+	// ScenePolicy 见 InjectOptions.ScenePolicy；空串等价 auto（保持既有行为）。
+	ScenePolicy string `json:"scene_policy,omitempty"`
 }
 
 // StageContext provides context for stage handlers.

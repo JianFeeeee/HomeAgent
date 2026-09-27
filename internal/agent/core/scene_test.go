@@ -11,8 +11,9 @@ import (
 // TestSceneKeysFor 钉住当前场景的推导优先级：
 // 注入点显式声明 > 通道 > 工具；并列命中且去重。
 func TestSceneKeysFor(t *testing.T) {
+	a := &Agent{io: agentIO.NewIOManager()}
 	// 通道 + 工具：两个都能独立成立的触发条件，都要带上
-	got := sceneKeysFor(&agentIO.InputEvent{Source: "qq"}, "qq_get_message")
+	got := a.sceneKeysFor(&agentIO.InputEvent{Source: "qq"}, "qq_get_message")
 	want := []string{"chan:qq", "tool:qq_get_message"}
 	if len(got) != len(want) {
 		t.Fatalf("sceneKeysFor = %v, want %v", got, want)
@@ -28,7 +29,7 @@ func TestSceneKeysFor(t *testing.T) {
 		Source:  "QQ",
 		Payload: map[string]interface{}{"scene": " chan:qq/peer:group_1 "},
 	}
-	got = sceneKeysFor(evt, "")
+	got = a.sceneKeysFor(evt, "")
 	if len(got) != 2 || got[0] != "chan:qq/peer:group_1" || got[1] != "chan:qq" {
 		t.Errorf("显式声明应排最前且通道场景归一: %v", got)
 	}
@@ -38,18 +39,18 @@ func TestSceneKeysFor(t *testing.T) {
 		Source:  "webui",
 		Payload: map[string]interface{}{"scene": []interface{}{"chan:qq", "task:reminder"}},
 	}
-	got = sceneKeysFor(evt, "")
+	got = a.sceneKeysFor(evt, "")
 	if len(got) != 3 || got[0] != "chan:qq" || got[1] != "task:reminder" || got[2] != "chan:webui" {
 		t.Errorf("数组声明未生效: %v", got)
 	}
 
 	// nil 事件不 panic
-	if got := sceneKeysFor(nil, ""); len(got) != 0 {
+	if got := a.sceneKeysFor(nil, ""); len(got) != 0 {
 		t.Errorf("nil 事件应无场景: %v", got)
 	}
 	// 未声明的 payload 键不影响
 	evt = &agentIO.InputEvent{Source: "cli", Payload: map[string]interface{}{"recall_policy": "none"}}
-	if got := sceneKeysFor(evt, ""); len(got) != 1 || got[0] != "chan:cli" {
+	if got := a.sceneKeysFor(evt, ""); len(got) != 1 || got[0] != "chan:cli" {
 		t.Errorf("无 scene 声明时应只有通道场景: %v", got)
 	}
 }
@@ -57,11 +58,12 @@ func TestSceneKeysFor(t *testing.T) {
 // TestSituationFeaturesFor 钉住指纹来源：全部是运行时可观察量，
 // 不需要模型配合也不需要人工标注。
 func TestSituationFeaturesFor(t *testing.T) {
+	a := &Agent{io: agentIO.NewIOManager()}
 	evt := &agentIO.InputEvent{
 		Source:  "QQ",
 		Payload: map[string]interface{}{"group_id": float64(1027993713)},
 	}
-	feats := situationFeaturesFor(evt, "帮我看看排班表", "qq_get_message")
+	feats := a.situationFeaturesFor(evt, "帮我看看排班表", "qq_get_message")
 	kinds := map[string]int{}
 	for _, f := range feats {
 		kinds[f.Kind]++
@@ -98,7 +100,7 @@ func TestSituationFeaturesFor(t *testing.T) {
 	}
 
 	// 无事件时不 panic，且只有工具特征时也成立
-	if feats := situationFeaturesFor(nil, "", "memory_recall"); len(feats) != 1 {
+	if feats := a.situationFeaturesFor(nil, "", "memory_recall"); len(feats) != 1 {
 		t.Errorf("仅工具场景应有 1 个特征: %+v", feats)
 	}
 }
@@ -106,9 +108,10 @@ func TestSituationFeaturesFor(t *testing.T) {
 // TestWritePathAttachesBothPaths 钉住写侧的「两条路都挂」：
 // 显式声明优先；否则挂本轮声明的 + 涌现的场景集合。
 func TestTurnSceneKeysBothPaths(t *testing.T) {
+	a := &Agent{io: agentIO.NewIOManager()}
 	// 声明的通道场景与工具场景都在，涌现键（若有）追加在后
 	evt := &agentIO.InputEvent{Source: "qq", Payload: map[string]interface{}{"scene": "chan:qq/peer:group_1"}}
-	got := sceneKeysFor(evt, "qq_get_message")
+	got := a.sceneKeysFor(evt, "qq_get_message")
 	want := []string{"chan:qq/peer:group_1", "chan:qq", "tool:qq_get_message"}
 	if len(got) != len(want) {
 		t.Fatalf("声明侧场景数不对: %v want %v", got, want)

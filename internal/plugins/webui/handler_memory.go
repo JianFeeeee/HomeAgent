@@ -9,9 +9,11 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"time"
 	"unicode/utf8"
 
 	"gitcode.com/JianFeeeee/HomeAgent/internal/knowledge"
+	"gitcode.com/JianFeeeee/HomeAgent/internal/memory"
 	sdk "gitcode.com/JianFeeeee/HomeAgent/internal/sdk"
 	pubsdk "gitcode.com/JianFeeeee/homeagent-sdk/sdk"
 )
@@ -109,6 +111,77 @@ func (h *Handler) handleMemoryTools(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+// graphBlockView 是 memory_blocks 的**瘦身**下发视图。
+//
+// 为什么要瘦身（实测生产实例 1151 节点 / 866 边）：
+//
+//	原始 /memory/graph 响应 408,146 B，其中 memory_blocks[].vector 占 79,314 B
+//	（19%）。那是稠密向量 —— 检索侧（SearchIn / 稠密召回）才需要它，
+//	而星图是本接口**唯一**消费者，它只画节点/连线，压根不读 vector。
+//
+//	更大的问题是量级：每多一块记忆就多一份向量。8 块已经 79KB，
+//	200 块就是约 2MB 白白从库里查出来、序列化、走 socket、丢进浏览器堆，
+//	全程没有一行代码看过它。文本向量的维度还随模型走（数百到数千），
+//	换一次 embedder 就能让这个开销翻几倍。
+//
+// 所以这里显式裁掉 vector，而不是让 GraphData 返回值带个开关：
+// 本接口的语义就是「图谱的可视化数据」，让唯一调用方拿到它要的东西。
+type graphBlockView struct {
+	ID            string    `json:"id"`
+	Modality      string    `json:"modality"`
+	Text          string    `json:"text,omitempty"`
+	PayloadDigest string    `json:"payload_digest"`
+	MIME          string    `json:"mime,omitempty"`
+	Size          int64     `json:"size"`
+	Width         int       `json:"width,omitempty"`
+	Height        int       `json:"height,omitempty"`
+	Fingerprint   string    `json:"fingerprint,omitempty"`
+	Source        string    `json:"source,omitempty"`
+	Tool          string    `json:"tool,omitempty"`
+	Scene         string    `json:"scene,omitempty"`
+	CreatedAt     time.Time `json:"created_at"`
+	UpdatedAt     time.Time `json:"updated_at"`
+}
+
+// graphDataForVisual 把 GraphData 的原始 map 裁成可视化视图（去掉稠密向量）。
+//
+// 用 map 断言而不是泛型/反射：GraphData 返回 map[string]interface{}，
+// 里面的具体类型是包内私有的 graphEntity/[]*memory.MemoryBlock，
+// 断言不中就原样透传（宁可多发也不让接口挂掉）。
+func graphDataForVisual(data map[string]interface{}) map[string]interface{} {
+	out := make(map[string]interface{}, len(data))
+	for k, v := range data {
+		out[k] = v
+	}
+	blocks, _ := out["memory_blocks"].([]memory.MemoryBlock)
+	if blocks == nil {
+		// 可能是 []*memory.MemoryBlock 或空；两种都不是就直接跳过裁剪。
+		return out
+	}
+	views := make([]graphBlockView, 0, len(blocks))
+	for i := range blocks {
+		b := blocks[i]
+		views = append(views, graphBlockView{
+			ID:            b.ID,
+			Modality:      string(b.Modality),
+			Text:          b.Text,
+			PayloadDigest: b.PayloadDigest,
+			MIME:          b.MIME,
+			Size:          b.Size,
+			Width:         b.Width,
+			Height:        b.Height,
+			Fingerprint:   b.Fingerprint,
+			Source:        b.Source,
+			Tool:          b.Tool,
+			Scene:         b.Scene,
+			CreatedAt:     b.CreatedAt,
+			UpdatedAt:     b.UpdatedAt,
+		})
+	}
+	out["memory_blocks"] = views
+	return out
+}
+
 func (h *Handler) handleMemoryGraph(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
@@ -123,8 +196,78 @@ func (h *Handler) handleMemoryGraph(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]interface{}{"success": true, "data": data})
+	writeJSON(w, http.StatusOK, map[string]interface{}{"success": true, "data": graphDataForVisual(data)})
 }
+
+// handleMemoryGraphPulse 是给星图「跟随 agent 动」用的**轻量**活动端点。
+//
+// 为什么不让星图反复拉完整 /memory/graph 做对比：
+//
+//	完整图谱生产实例 408KB（瘦身前 408KB→瘦身后约 329KB，仍含 1151 个节点
+//	和 866 条边的全量 JSON）。为了「知道哪些节点是新的」而每 N 秒拉一次全量，
+//	是把带宽和 JSON.parse 全花在重复数据上。
+//
+// 这里只回「最近 since 秒内变动过的实体」，字段压到最小（id + name +
+// mention_count + updated_at），实测是几百字节到几 KB 的量级 ——
+// 与完整图谱差两个数量级。新节点「生长」出来、老节点被再次提及而计数变化，
+// 都能从这份清单里看出来。
+//
+// since 缺省给 900s（15 分钟）：略大于星图轮询周期（10s），
+// 即使客户端漏掉几个周期也能自愈，不必担心漏掉节点。
+func (h *Handler) handleMemoryGraphPulse(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	if h.memory == nil {
+		writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "memory system not available"})
+		return
+	}
+	since := time.Now().Add(-defaultGraphPulseWindow)
+	if raw := strings.TrimSpace(r.URL.Query().Get("since")); raw != "" {
+		if sec, err := strconv.Atoi(raw); err == nil && sec > 0 {
+			since = time.Now().Add(-time.Duration(sec) * time.Second)
+		}
+	}
+	data, err := h.memory.GraphData()
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		return
+	}
+	out := graphDataForVisual(data)
+	// 过滤出窗口内变动过的节点。GraphData 的 nodes 是 []graphEntity（私有类型），
+	// 这里用重新序列化的方式裁剪：字段少、无向量、且不依赖私有类型断言。
+	// 成本是「再序列化一次节点」，但相比把 400KB 发出去仍然划算得多。
+	rawNodes, _ := json.Marshal(out["nodes"])
+	var nodes []struct {
+		ID           int64     `json:"id"`
+		Name         string    `json:"name"`
+		Type         string    `json:"type"`
+		MentionCount int       `json:"mention_count"`
+		UpdatedAt    time.Time `json:"updated_at"`
+	}
+	_ = json.Unmarshal(rawNodes, &nodes)
+	pulse := make([]map[string]interface{}, 0, 8)
+	for _, n := range nodes {
+		if n.UpdatedAt.Before(since) {
+			continue
+		}
+		pulse = append(pulse, map[string]interface{}{
+			"id":            n.ID,
+			"name":          n.Name,
+			"type":          n.Type,
+			"mention_count": n.MentionCount,
+			"updated_at":    n.UpdatedAt,
+		})
+	}
+	writeJSON(w, http.StatusOK, map[string]interface{}{
+		"success": true,
+		"data":    map[string]interface{}{"nodes": pulse},
+	})
+}
+
+// defaultGraphPulseWindow 是 /memory/graph/pulse 不带 since 时的回看窗口。
+const defaultGraphPulseWindow = 900 * time.Second
 
 // knowledgeWriteReq 是知识写入请求体（JSON 分支）。
 type knowledgeWriteReq struct {

@@ -2604,6 +2604,39 @@
               </p>
             </div>
           </div>
+
+          <div class="wrap" style="margin-top: 2.2rem">
+            <h3 class="reveal rise" style="margin-bottom: .2rem">场面涌现：同一场合，记忆自己回来</h3>
+            <p class="reveal rise" style="--d:80ms; opacity:.78; max-width: 62ch">
+                          三层记忆按<strong>字面相关性</strong>召回——你得说出相近的词才想得起来。
+              场面记忆补上另一半：<strong>按场合召回</strong>。同一个场合再次出现，
+              当时挂在这个场合上的约定、偏好、人物关系会自动回来，与这次说了什么措辞无关。
+            </p>
+            <div class="grid-3" style="margin-top: 1.1rem">
+              <div class="card reveal rise" style="--d:160ms">
+                <h3>没人声明，自己长出来</h3>
+                <p>
+                              每轮交互只采集可观察的信号：在哪个通道、跟谁、在用什么工具、聊什么词、什么时段。
+                  这组指纹反复重合时，一场「场面」就自己成形了——不需要人工标注。
+                </p>
+              </div>
+              <div class="card reveal rise" style="--d:250ms">
+                <h3>只发生一次的不算场面</h3>
+                <p>
+                              同类场面<strong>出现第二次</strong>才被认定会重复。
+                  一次性的交互不建场面，否则图库里会堆满只发生过一次的事，
+                  每次路过都要召回一堆不相干的。
+                </p>
+              </div>
+              <div class="card reveal rise" style="--d:340ms">
+                <h3>参与与否，由插件声明</h3>
+                <p>
+                              通道可用 <code>ScenePolicy</code> 声明是否参与场面识别（默认参与）。
+                  纯内部信号（内核自循环、心跳）可以显式退出，不在记忆里留下脚印。
+                </p>
+              </div>
+            </div>
+          </div>
         </div>
       </section>
 

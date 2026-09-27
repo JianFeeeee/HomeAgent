@@ -7,6 +7,7 @@ import (
 
 	agentIO "gitcode.com/JianFeeeee/HomeAgent/internal/agent/io"
 	"gitcode.com/JianFeeeee/HomeAgent/internal/memory"
+	pubsdk "gitcode.com/JianFeeeee/homeagent-sdk/sdk"
 )
 
 // sceneKeysFor 推导本轮输入的**当前场景**。
@@ -19,8 +20,13 @@ import (
 //
 // 多个场景是**并列命中**（取回任一场景的记忆），不是交集：
 // 「在 QQ 上」与「刚取回消息正文」是两个都能独立成立的触发条件。
-func sceneKeysFor(evt *agentIO.InputEvent, toolName string) []string {
+func (a *Agent) sceneKeysFor(evt *agentIO.InputEvent, toolName string) []string {
 	var keys []string
+	// 通道/注入点声明不参与场面识别时，**连派生场景键也不给**。
+	// 只停掉指纹采集而留着声明路，等于给「不参与场面」这个口子开了后门。
+	if a.sceneSuppressed(evt) {
+		return nil
+	}
 	seen := make(map[string]bool)
 	add := func(k string) {
 		// 显式声明的场景键来自插件，大小写/空白/标点都不可控；归一化后再去重，
@@ -57,6 +63,35 @@ func sceneKeysFor(evt *agentIO.InputEvent, toolName string) []string {
 		add(memory.ToolScene(toolName))
 	}
 	return keys
+}
+
+// mergeSceneKeys 把「声明路」与「涌现场景」两路合并成一个**无重复**的场景集合。
+//
+// 为什么需要它：两路各自都去重过（sceneKeysFor 内部有 seen、resolveTurnScenes
+// 内部也有），但**两路之间**没有共同的 seen。而声明路与通道派生路会产出
+// 同一个键（chan:qq 既是声明的、也是从 evt.Source 派生的）——现网日志实测到
+// `scenes=[chan:qq chan:qq]`。
+//
+// 功能上 RecallByScene 内部会再去重，所以这不是 bug，但有两个实际代价：
+// 日志里的 scenes=[...] 会误导排查；每次白走一遍前缀匹配。
+func mergeSceneKeys(declared, emergent []string) []string {
+	out := make([]string, 0, len(declared)+len(emergent))
+	seen := make(map[string]bool, len(declared)+len(emergent))
+	for _, k := range declared {
+		if k == "" || seen[k] {
+			continue
+		}
+		seen[k] = true
+		out = append(out, k)
+	}
+	for _, k := range emergent {
+		if k == "" || seen[k] {
+			continue
+		}
+		seen[k] = true
+		out = append(out, k)
+	}
+	return out
 }
 
 // memoryPassOut 是一次记忆操作（取进来 / 踢出去）的结果。
@@ -129,11 +164,41 @@ func (a *Agent) pruneByQuery(query string) int {
 // 已有量，不需要模型配合，也不需要人工标注。
 // ──────────────────────────────────────────────
 
-// situationFeaturesFor 采集一轮交互的场面指纹。
+// sceneSuppressed 报告本次输入是否被声明为**不参与场面识别**。
+//
+// 读取面与其它记忆声明完全一致：先看注入点 payload（单次覆盖），
+// 再看通道定义（ChannelDef.ScenePolicy），都没声明 = 参与（保持既有行为）。
+// 优先级与 pruneDeclared / recallDeclared 同构。
+//
+// 为什么要一个显式开关：场面指纹只要 evt.Source != "" 就无条件产出一个 chan
+// 特征，于是内核自循环（system）、心跳（timer）、内部状态汇报（kernel）这类
+// **纯信噪通道**也在撑场面——它们每次触发都让一个不相干的场景长出来或变强，
+// 而召回时又会把「内核在跑定时器」当成「用户在这类场景下说过的话」取回。
+func (a *Agent) sceneSuppressed(evt *agentIO.InputEvent) bool {
+	if evt == nil {
+		return false
+	}
+	if p, ok := evt.Payload["scene_policy"].(string); ok && p != "" {
+		return p == pubsdk.ScenePolicyNone
+	}
+	if a.io != nil {
+		if chDef, ok := a.io.GetInputChannelDef(evt.Source); ok && chDef.ScenePolicy != "" {
+			return chDef.ScenePolicy == pubsdk.ScenePolicyNone
+		}
+	}
+	return false
+}
+
+// sceneFeaturesFor 采集一轮交互的场面指纹。
 //
 // 特征权重由种类决定（见 memory.SituationFeature.Weight）：通道与对象是
 // 「同一个场面」最强的同一性信号，工具是行为信号，话题是软信号。
-func situationFeaturesFor(evt *agentIO.InputEvent, cleanInput, tool string) []memory.SituationFeature {
+func (a *Agent) situationFeaturesFor(evt *agentIO.InputEvent, cleanInput, tool string) []memory.SituationFeature {
+	// 声明不参与场面识别：连时段特征都不产——一个不参与的面孔
+	// 不该在 situation_evidence / scene_features 里留下任何足迹。
+	if a.sceneSuppressed(evt) {
+		return nil
+	}
 	var feats []memory.SituationFeature
 	if evt != nil {
 		if evt.Source != "" {
@@ -225,8 +290,8 @@ func (a *Agent) resolveTurnScenes(f *TaskFrame, tool string) memory.TurnScene {
 		return f.turnScene
 	}
 
-	declared := sceneKeysFor(evtOf(f), tool)
-	feats := situationFeaturesFor(evtOf(f), cleanInputOf(f), tool)
+	declared := a.sceneKeysFor(evtOf(f), tool)
+	feats := a.situationFeaturesFor(evtOf(f), cleanInputOf(f), tool)
 	sig := memory.NewSituation(feats...)
 
 	turn, err := a.memory.EnterSceneWithHint(sig, declared)
