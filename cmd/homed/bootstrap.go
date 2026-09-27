@@ -514,6 +514,11 @@ func newMainAgent(cfg *types.Config, cfgReg *internalConfig.ConfigRegistry, prov
 		sysPrompt = defaultSystemPrompt
 	}
 
+	// D4：把"设备是否已授权"的判据注入插件侧（toolImpl.CanUse 用）。
+	// ⚠️ 必须放在 agent 构造**之后**——判据要用 agent 的 allowedOutputs，
+	// 而 registry 早于 agent 构造（故这里传的是晚绑定闭包）。
+	// 未注入时 ToolAPI 路径对设备放行：那是"授权可被绕过"的既成缺口。
+	// 注入后，cli 的 /terminal、seq 序列等一切走 ToolAPI 的调用都受同一道闸。
 	agent := agentCore.New(agentCore.AgentConfig{
 		ID:              "main",
 		SystemPrompt:    sysPrompt,
@@ -536,12 +541,12 @@ func newMainAgent(cfg *types.Config, cfgReg *internalConfig.ConfigRegistry, prov
 		PluginDir:    cfg.Plugin.Dir,
 		// DataDir：驻留子的 temp 图库锚点（<data>/residents/<id>/graph.db）。
 		// 漏接时的现象是"工具存在、可调用、但创建必失败"——只有真实二进制才看得出来。
-		DataDir:            cfg.Daemon.DataDir,
-		DistillInterval:    cfgReg.GetDuration("core.agent.distill_interval", 30*time.Minute),
-		ArchiveInterval:    cfgReg.GetDuration("core.agent.archive_interval", 60*time.Minute),
-		ReviewInterval:     cfgReg.GetDuration("core.agent.review_interval", 120*time.Minute),
-		MergeInterval:      cfgReg.GetDuration("core.agent.merge_interval", 120*time.Minute),
-		MaxToolTurns:       cfgReg.GetInt("core.agent.max_tool_turns", 10),
+		DataDir:         cfg.Daemon.DataDir,
+		DistillInterval: cfgReg.GetDuration("core.agent.distill_interval", 30*time.Minute),
+		ArchiveInterval: cfgReg.GetDuration("core.agent.archive_interval", 60*time.Minute),
+		ReviewInterval:  cfgReg.GetDuration("core.agent.review_interval", 120*time.Minute),
+		MergeInterval:   cfgReg.GetDuration("core.agent.merge_interval", 120*time.Minute),
+		MaxToolTurns:    cfgReg.GetInt("core.agent.max_tool_turns", 10),
 		Offload: agentCore.OffloadOptions{
 			Enabled:      cfgReg.GetBool("core.agent.offload_enabled", false),
 			BusyAfter:    cfgReg.GetDuration("core.agent.offload_busy_after", 5*time.Minute),
@@ -558,6 +563,21 @@ func newMainAgent(cfg *types.Config, cfgReg *internalConfig.ConfigRegistry, prov
 		EventBus:           evBus,
 		ThinkingEnabled:    cfg.LLM.ThinkingEnabled,
 		InputProcessing:    cfg.InputProcessing,
+	})
+
+	// D4：把「设备是否已授权」的判据注入插件侧（toolImpl.CanUse 消费它）。
+	//
+	// 为什么必须在这里：判据要用 agent 自己的 allowedOutputs，而
+	// pluginReg 早于 agent 构造（newStageAndRegistry 在 main() 里先跑），
+	// 所以 registry 存的是**晚绑定**闭包，注入点必须在 agent 建好之后。
+	//
+	// 不注入的后果（已实测的真实缺口）：设备授权闸只存在于
+	// core.executeToolCallInner，即「agent 收到模型 tool_call」那条路径；
+	// 而 ToolAPI.ExecuteTool 是**另一条**独立入口，不经那道闸 ⇒
+	// 凡是走 ToolAPI 的调用都能绕过 AllowedOutputs。实测范围不止序列：
+	// cli 的 /terminal 就直接经 ToolAPI 调 agentcli 的终端工具。
+	pluginReg.SetDeviceAuthQuery(func(deviceID string) bool {
+		return agent.IsOutputAllowed("device/" + deviceID)
 	})
 
 	return agent

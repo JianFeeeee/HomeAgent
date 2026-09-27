@@ -83,3 +83,49 @@ func (t *toolImpl) ToolDefByName(name string) *ToolDef {
 	}
 	return nil
 }
+
+// CanUse 报告「执行该工具是否被授权」（D4）。
+//
+// 实现要点：**必须与 core.executeToolCallInner 里的那道闸同源同语义**，
+// 否则两条路径判定不同，本身就是漏洞。判据 core.TestCanUseAgreesWithInnerPath
+// 逐例比对两条路径的结论。
+//
+// 判据只有一条：设备类工具按 `device/<id>` 查当前 agent 的 allowedOutputs。
+//
+// ⚠️ device_id 缺失时**放行**（fail-open）——这是内核现状
+// （core 的 TestDeviceToolAuth_* 依赖它）。两处行为已由
+// TestCanUseMatchesInnerFailOpenOnMissingDeviceID 钉住；若将来要改成
+// fail-closed，**必须两处同时改**，否则两条路径不一致。
+func (t *toolImpl) CanUse(toolName string, args map[string]interface{}) bool {
+	if t == nil || t.iom == nil {
+		return true // 拿不到设备视图 ⇒ 不拦（与内核无 io 时的行为一致）
+	}
+	// 非设备工具不受此闸影响：闸的作用域必须窄，否则会把所有工具锁死。
+	if _, isDeviceTool := t.iom.DeviceOfTool(toolName); !isDeviceTool {
+		return true
+	}
+	id, _ := args["device_id"].(string)
+	if id == "" {
+		return true // fail-open，与内核一致
+	}
+	return t.canUseDevice(id)
+}
+
+// canUseDevice 是**可注入**的授权查询。
+//
+// 为何不直接在 toolImpl 里调 Agent：toolImpl 在 internal/sdk 包，
+// 而 IsOutputAllowed 是 core.*Agent 的方法（core 反向依赖 sdk，
+// sdk 不能依赖 core）。故内核在装配时把查询函数注入进来。
+var deviceAuthQuery func(deviceID string) bool
+
+// SetDeviceAuthQuery 注入"设备是否已授权"的查询（由内核在装配时调用）。
+//
+// 传 nil 表示尚未注入 ⇒ CanUse 对设备工具**放行**（保持存量行为不变）。
+func SetDeviceAuthQuery(fn func(deviceID string) bool) { deviceAuthQuery = fn }
+
+func (t *toolImpl) canUseDevice(deviceID string) bool {
+	if deviceAuthQuery == nil {
+		return true
+	}
+	return deviceAuthQuery(deviceID)
+}
