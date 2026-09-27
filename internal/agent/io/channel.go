@@ -624,6 +624,22 @@ func (m *IOManager) GetInputChannelDef(name string) (ChannelDef, bool) {
 	return ch.Def, true
 }
 
+// ToolDefOf 按工具名取其声明（含 Parameters schema）。
+// 用途：内核在执行前按 schema 预校验——没有它就只���校验到插件工具，
+// 而设备/通道工具（cmd_run、files_write 等）会完全绕过校验。
+func (m *IOManager) ToolDefOf(name string) (ToolDef, bool) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	for _, dev := range m.devices {
+		for _, t := range dev.Tools() {
+			if t.Name == name {
+				return t, true
+			}
+		}
+	}
+	return ToolDef{}, false
+}
+
 func (m *IOManager) GetAllTools() []ToolDef {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
