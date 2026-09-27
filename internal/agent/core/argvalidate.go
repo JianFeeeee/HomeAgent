@@ -241,3 +241,58 @@ func (a *Agent) validateArgsAgainstSchema(tc agentAPI.ToolCall) *sdk.ToolError {
 	}
 	return nil
 }
+
+// toolParallelSafe 报告工具是否可被**并发执行**。
+//
+// 两条来源都要查（与 validateArgsAgainstSchema 同理）：插件工具走 StageHost，
+// 设备/通道工具走 IOManager。查不到 ⇒ 保守返回 false（不可并发）。
+//
+// 为什么保守：新语义下并发会改变工具的行为前提，让存量插件意外并发
+// 比慢一点危险得多——判不出就该按串行走。
+func (a *Agent) toolParallelSafe(name string) bool {
+	if a == nil {
+		return false
+	}
+	if a.stageHost != nil {
+		if def := a.stageHost.ToolDef(name); def != nil {
+			return def.ParallelSafe
+		}
+	}
+	if a.io != nil {
+		if def, ok := a.io.ToolDefOf(name); ok {
+			return def.ParallelSafe
+		}
+	}
+	return false
+}
+
+// batchRunnable 并发执行本批工具。
+//
+// 何时并发（三条全满足）：
+//  1. 批内 >1 个工具
+//  2. **全部**工具都声明 ParallelSafe —— 一个不声明就整批降级，
+//     不做"部分并发"：部分并发收益不抵其不可预测性
+//  3. 不含需要保序的同通道输出发送（同 output_send__<通道> 多次发送）
+//
+// 保序为什么不用 ParallelSafe 表达：那属于**批内**约束而非工具属性，
+// 且同一工具在不同批里的通道可能不同（output_send__qq 两次、一次 qq 一次 cli）。
+func (f *TaskFrame) batchRunnable(a *Agent) bool {
+	if f == nil || len(f.PendingTools) <= 1 {
+		return false
+	}
+	chans := map[string]bool{}
+	for _, tc := range f.PendingTools {
+		if !a.toolParallelSafe(tc.Name) {
+			return false
+		}
+		// 同通道多次发送必须保序 —— 用户可见消息顺序敏感
+		if isOutputDeliveryTool(tc.Name) {
+			ch := strings.TrimPrefix(tc.Name, "output_send__")
+			if chans[ch] {
+				return false
+			}
+			chans[ch] = true
+		}
+	}
+	return true
+}

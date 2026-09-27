@@ -94,6 +94,9 @@ type ToolDef struct {
 	Description string                 `json:"description"`
 	Parameters  map[string]interface{} `json:"parameters"`
 	Handler     ToolHandler            `json:"-"` // 可选：插件工具的直接处理器，Device 通过 Execute() 分发
+	// ParallelSafe 与 SDK 的 ToolDef.ParallelSafe 同义：声明此设备工具可被
+	// **并发执行**。零值 false = 不可并发（保守默认，见 SDK 注释）。
+	ParallelSafe bool `json:"parallel_safe,omitempty"`
 }
 
 type InputEvent struct {

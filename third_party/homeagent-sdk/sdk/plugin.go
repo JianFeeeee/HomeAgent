@@ -288,6 +288,16 @@ type ToolDef struct {
 	// ""(默认 none) / RecallPolicyNone / RecallPolicyAuto。
 	// 默认 none：多数工具输出是噪声；需要「取回真实内容后据它召回」的工具（如 qq_get_message）应显式声明 auto。
 	RecallPolicy string `json:"recall_policy,omitempty"`
+	// ParallelSafe 声明此工具**可以被并发执行**（同一批多个 tool_call 同时跑）。
+	//
+	// ⚠️ 零值 false 是刻意的：存量插件不改一行就得到**保守**行为
+	//（整批串行），不会因升级被意外并发。声明它是**责任**而非特权。
+	//
+	// 判据（三者皆满足才可并发）：
+	//   · handler 自身线程安全（不持有跨调用的可变状态）
+	//   · 不与同批其它工具争抢同一资源（SQLite 写、设备、同一输出通道）
+	//   · 执行顺序无关（顺序敏感的工具应留 false，由内核保序）
+	ParallelSafe bool `json:"parallel_safe,omitempty"`
 }
 
 // IOInjector provides methods for injecting input and interrupts into the agent pipeline.
