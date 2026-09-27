@@ -97,6 +97,13 @@ type ToolDef struct {
 	// ParallelSafe 与 SDK 的 ToolDef.ParallelSafe 同义：声明此设备工具可被
 	// **并发执行**。零值 false = 不可并发（保守默认，见 SDK 注释）。
 	ParallelSafe bool `json:"parallel_safe,omitempty"`
+	// Serial 与 SDK 的 ToolDef.Serial 同义：声明此设备工具**必须**串行。
+	// 判据优先级高于 ParallelSafe（显式声明不允许被任何默认值覆盖）。
+	//
+	// 对设备工具尤其重要：设备侧（C 实现）工具的并发安全性内核无从审核，
+	// "没声明"可能只是因为那套接口里压根没这个字段 —— 显式给出
+	// Serial:true 是设备作者唯一能表达"这里有隐含顺序约束"的途径。
+	Serial bool `json:"serial,omitempty"`
 }
 
 type InputEvent struct {

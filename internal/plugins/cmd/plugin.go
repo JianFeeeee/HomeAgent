@@ -129,6 +129,8 @@ func (p *Plugin) Start(s *sdk.PluginSDK) error {
 			},
 			"required": []string{"command"},
 		},
+		// 执行体只依赖入参；唯一共享 p.history 由 recordCmd 加 p.mu 保护
+		ParallelSafe: true,
 	}, func(args map[string]interface{}) (interface{}, error) {
 		command, _ := args["command"].(string)
 		if command == "" {

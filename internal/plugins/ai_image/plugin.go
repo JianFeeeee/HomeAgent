@@ -112,6 +112,8 @@ func (p *Plugin) Start(s *sdk.PluginSDK) error {
 			},
 			"required": []string{"prompt"},
 		},
+		// 外部调用，插件内无共享可变状态
+		ParallelSafe: true,
 	}, p.handleGenerate)
 
 	return nil

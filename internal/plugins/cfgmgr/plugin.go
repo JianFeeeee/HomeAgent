@@ -36,6 +36,8 @@ func (p *Plugin) Start(s *sdk.PluginSDK) error {
 			"type":       "object",
 			"properties": map[string]interface{}{},
 		},
+		// 已核实只读：只列举插件名
+		ParallelSafe: true,
 	}, p.handleListPlugins(s))
 
 	s.RegisterTool("config_get", sdk.ToolDef{
@@ -49,6 +51,8 @@ func (p *Plugin) Start(s *sdk.PluginSDK) error {
 			},
 			"required": []string{"scope", "key"},
 		},
+		// 已核实只读：底层 ConfigRegistry 有 RWMutex，且本工具不改任何状态
+		ParallelSafe: true,
 	}, p.handleGet(s))
 
 	s.RegisterTool("config_set", sdk.ToolDef{
@@ -63,6 +67,8 @@ func (p *Plugin) Start(s *sdk.PluginSDK) error {
 			},
 			"required": []string{"scope", "key", "value"},
 		},
+		// 写配置：即使底层有锁也按声明序执行
+		Serial: true,
 	}, p.handleSet(s))
 
 	s.RegisterTool("config_list_keys", sdk.ToolDef{
@@ -76,6 +82,8 @@ func (p *Plugin) Start(s *sdk.PluginSDK) error {
 			},
 			"required": []string{"scope"},
 		},
+		// 已核实只读:只列举键值
+		ParallelSafe: true,
 	}, p.handleListKeys(s))
 
 	s.RegisterTool("config_get_defs", sdk.ToolDef{
@@ -89,6 +97,8 @@ func (p *Plugin) Start(s *sdk.PluginSDK) error {
 			},
 			"required": []string{"scope"},
 		},
+		// 已核实只读：返回配置项定义，不改状态
+		ParallelSafe: true,
 	}, p.handleGetDefs(s))
 
 	s.RegisterTool("config_dump", sdk.ToolDef{
@@ -98,6 +108,8 @@ func (p *Plugin) Start(s *sdk.PluginSDK) error {
 			"type":       "object",
 			"properties": map[string]interface{}{},
 		},
+		// 已核实只读：导出当前配置
+		ParallelSafe: true,
 	}, p.handleDump(s))
 
 	s.RegisterTool("config_batch_set", sdk.ToolDef{
@@ -122,6 +134,8 @@ func (p *Plugin) Start(s *sdk.PluginSDK) error {
 			},
 			"required": []string{"items"},
 		},
+		// 批量写配置：同上
+		Serial: true,
 	}, p.handleBatchSet(s))
 
 	log.Printf("[cfgmgr] started")
