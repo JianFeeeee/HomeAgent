@@ -24,6 +24,17 @@ type Config struct {
 	DeviceGateway    string       `yaml:"device_gateway,omitempty"`    // remotedevice 网关地址（如 127.0.0.1:9890）
 	DeviceToken      string       `yaml:"device_token,omitempty"`      // 设备接入 token
 	DeviceAuthorized bool         `yaml:"device_authorized,omitempty"` // 客户端本地授权（用户手动开启，服务端无法篡改）
+	// DeviceCmdAllowlist 是设备桥**命令白名单**（可执行命令名的第一段）。
+	//
+	// 留空/缺省 ⇒ 用内置默认集（见 device.go 的 defaultCmdAllowlist）。
+	// ★ 不是"追加"而是"替换"：写了就以它为准，避免"以为加了 find、
+	//   结果还留着 python3 -c 任意执行"这类误判。
+	//
+	// 为什么需要它：白名单原本是源码里硬编码的正则（18 个命令），
+	// 而 waiter.yaml 里没有任何键能改它 ⇒ find / grep / sed / sort / tr
+	// 这些排查问题最常用的**只读**命令一律被拒，实测报错：
+	//     device_ctl_cmdrun  device_id:waiter-fnnas  error: command not in whitelist
+	DeviceCmdAllowlist []string `yaml:"device_cmd_allowlist,omitempty"`
 }
 
 func (c *Config) Active() *Connection {
