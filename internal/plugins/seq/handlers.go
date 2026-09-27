@@ -43,7 +43,7 @@ func (p *Plugin) seqCreate(args map[string]interface{}) (interface{}, error) {
 		text = b
 		from = "文件 " + file
 	} else {
-		b, err := marshalGroups(groupsRaw)
+		b, err := marshalGroups(name, groupsRaw)
 		if err != nil {
 			return nil, err
 		}
@@ -124,12 +124,19 @@ func absPath(p string) (string, error) {
 func filepathToSlash(p string) string { return strings.ReplaceAll(p, `\`, "/") }
 
 // marshalGroups 把 groups 参数（[]interface{}）序列化为 JSON 文本。
-func marshalGroups(raw interface{}) ([]byte, error) {
+// marshalGroups 把 groups 参数（[]interface{}）序列化为 JSON 文本。
+//
+// ⚠️ name **必须**一起放进文档：Parse 要求 name 非空，而调用方传的 name
+// 在参数顶层。此前这里只包 groups，于是**传参方式完全不可用**
+// （"序列缺少 name"）—— 而下面的 `if seq.Name == ""` 回落分支是死代码。
+// 这是端到端判据（TestE2E_CreateListRun）抓出来的，包内判据抓不到：
+// 它们直接构造 *Sequence，不经过这条路径。
+func marshalGroups(name string, raw interface{}) ([]byte, error) {
 	arr, ok := raw.([]interface{})
 	if !ok {
 		return nil, fmt.Errorf("groups 必须是数组，实际是 %T", raw)
 	}
-	doc := map[string]interface{}{"groups": arr}
+	doc := map[string]interface{}{"name": name, "groups": arr}
 	b, err := json.MarshalIndent(doc, "", "  ")
 	if err != nil {
 		return nil, fmt.Errorf("groups 序列化失败（每个 group 应为对象）: %w", err)
