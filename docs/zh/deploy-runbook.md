@@ -269,3 +269,92 @@ stage handler 入口自动加锁 + 锁不可重入所致，**插件侧问题**�
 | 白名单不看参数 | 功能限制 | `find -delete`/`sed -i` 能逃，用户已知悉并选择先下发 |
 | `重复申请 stage 锁` | 插件缺陷 | 需改 SDK 模板并重编 9月14日的 `plugins/qq/plugin.bin` |
 | 群聊必须 @ 才触发 | 设计 | 放宽会在群里引发 unwanted 触发 |
+
+---
+
+## 5. 部署站点（SDK 文档站 / introduce）
+
+`deploy-sdk-site.sh` 覆盖两个静态站，**与 homed / waiter 是独立部署单元**。
+
+| 站 | 本地源 | 线上位置 | 构建 |
+| --- | --- | --- | --- |
+| SDK 文档站 | `third_party/homeagent-sdk/site_build/` | `/vol1/docker/navi-data/sites/sdk` | 需 `tools/apidoc/build.sh`（§5.3 坑①） |
+| introduce | `site/`（排除 `README.md`） | `/vol1/docker/navi-data/sites/introduce` | 零构建，源即产物 |
+
+两站部署在**同一台** 106 的同一 `sites/` 目录下。
+
+introduce 是**零构建**的 —— `site/` 里就是成品，脚本部署时**故意不带
+`README.md`**（那是仓库说明文档，不是站点资源）。
+
+### 5.1 用法
+
+```bash
+bash deploy-sdk-site.sh --check                        # 只核对差异，不动线上
+bash deploy-sdk-site.sh                               # 构建 + 部署 + 验证
+bash deploy-sdk-site.sh --rollback .sdk-bak-<时间戳>  # 回滚
+```
+
+`--check` 逐字节比对本地与线上，两个站都一致时可直接跳过部署。
+
+### 5.2 链路（实测确认）
+
+```
+本机 192.168.2.60
+  └─ nginx stream 按 ssl_preread SNI 把 443 透传 → 192.168.2.106:3080
+       └─ navi 容器内的 nginx（**不是** portal-nginx，那个已 Exited 两周）
+            └─ server_name sdk.homeagent.jianfgit.xyz → root /app/data/sites/sdk
+                 └─ 宿主对应 /vol1/docker/navi-data/sites/sdk
+```
+
+登录 106 只能用 `admin@` + `sudo -n`，`root@` 会被拒。
+
+### 5.3 ★ 两个坑
+
+**① 构建必须走 `tools/apidoc/build.sh`，不能裸跑 `mkdocs build`**
+
+裸跑会丢掉整个 `api/*.md` 和 `llms.txt` —— 而 `llms.txt` 正是**给 agent 直读的入口**。
+正确产物 **106 个文件**，裸跑只有 **78 个**。
+
+**② 打包不能走设备网关**
+
+106 的 waiter 白名单（`device_cmd_allowlist`）现有 **22 条**：
+
+```
+ls pwd cat du df free ps ip uname uptime date hostname
+find grep sed sort tr wc head tail stat file
+```
+
+里面**没有 `tar`**（有 `sed` 也不能打包）⇒ `device_ctl_cmdrun` 打不了包，
+必须走 SSH 直连。
+
+> 早先这里记的是「只放行 `ls`/`stat`/`find`/`cat`」，那是 waiter 白名单
+> 硬编码 18 条时的状况。2026-09-27 部署 `7193446` 后扩到 22 条 ——
+> 结论（打不了包）不变但**理由已变**，别照旧文字理解。
+
+### 5.4 新增文档后要记得更新 nav
+
+`mkdocs.yml` 的 nav 没登记的页面，mkdocs 会明确警告
+`not included in the nav configuration` —— 等于**文档写完了但在站点里不可达**。
+
+改完 SDK 文档的完整流程：
+
+```bash
+cd third_party/homeagent-sdk
+# 1) 在 docs/guide/ 写文档
+# 2) 在 mkdocs.yml 的 nav 里登记          ← 漏了这步站点里找不到
+# 3) 重新生成（含 docs/api/* 与 llms.txt 同步）
+tools/apidoc/build.sh
+# 4) 部署并验证
+bash ../../deploy-sdk-site.sh
+```
+
+验证线上是否真的可访问（**别只看本地产物**）：
+
+```bash
+curl -s -o /dev/null -m 10 -w '%{http_code}\n' -k https://sdk.homeagent.jianfgit.xyz/guide/<新文档>/
+```
+
+### 5.5 回滚点
+
+每次部署留 `.sdk-bak-<时间戳>`（同 `sites/` 下）。`--rollback` 会先把当前站
+`cp -a` 成 `.sdk-failed-<时间戳>` 再恢复，失败版本不丢。
