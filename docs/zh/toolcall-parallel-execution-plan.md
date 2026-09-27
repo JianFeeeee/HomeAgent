@@ -503,3 +503,72 @@ waiter 有**两条**设备桥启动路径：
 
 脚本本身完全正常、备份逻辑没问题，只是"明明喂了 yes 却什么也没发生"。
 已给 5 处 `ssh` 统一加 `-n`。
+
+---
+
+## 附：生产日志里的两个 toolcall 告警（2026-09-27 21:0x 排查）
+
+部署后逐条核对了 `homeagent.service` 的告警。结论：**适配器无缺陷；
+toolcall 侧一个真缺陷（已修）、一个插件侧 bug（内核自愈，非内核缺陷）。**
+
+### 适配器：干净
+
+| 检查项 | 次数 |
+| --- | --- |
+| `finish_reason=length`（输出截断） | **0** |
+| `unmarshal unified response` 失败 | **0** |
+| 流式分片解析错误 | **0** |
+| `非法 JSON 帧` | 11，**全在 19:46:03–09 启动握手期**，此后 3 小时零发生 |
+
+`stream_index` 透传亦已核实：生产 `adapters/openai.lua:122` 与仓库版一致。
+
+### ① `has empty arguments` —— 真缺陷，已修
+
+原始响应里参数**完好**：
+
+```json
+"tool_calls":[{"function":{"arguments":"{}","name":"clawhubadapter_list"},...}]
+```
+
+根因：诊断条件用 `len(tc.Arguments)==0 && RawArguments==""`，而
+`parseToolArguments("{}")` 返回**非 nil 的空 map** ⇒ 零参数工具
+（`seq_list` / `*_list` / `seq_help`，其 `properties` 本就是 `{}`）全部误报。
+部署后共 **14 次**。
+
+**危害不是"日志吵"**，而是这条诊断的本职是抓「上游/适配器真的丢了参数」——
+真发生时会被这堆噪音淹没。**诊断日志失去信噪比就等于没有。**
+
+修法：新增 `argsLookDropped(rawArgs)`，判 `RawArguments` 原文而非解析后的 map：
+空串/空白 ⇒ 真丢；能解析成 JSON（哪怕是 `{}`）⇒ 没丢；解析失败（半截 JSON）⇒ 等同丢失。
+
+判据 3 条，其中 `TestArgsLookDroppedEndToEnd` 用**日志里出现过的真实 body**
+走 `normalizeOpenAIToolCalls` 到判定的完整接缝 —— 单测过了但接缝不对的情况，
+只有端到端才抓得到。
+
+### ② `重复申请 stage 锁` —— 插件侧 bug，内核自愈正常
+
+```
+stage.go:106   qq stage before_toolcall 失败后强制释放其持有的 stage 锁
+stages.go:260  before_toolcall handler error: 插件 qq 重复申请 stage 锁（handler 内不应嵌套加锁）
+```
+
+**不要当内核缺陷去修。** 链路是：
+
+1. `proc_main.go.tmpl:1569` —— SDK 生成的模板在**每个** stage handler 入口
+   **自动**调 `callCoreVoid("stage.lock", nil)`（跨进程写锁，内核仲裁）
+2. `lock.go:51` —— 锁**不可重入**：`l.held && l.owner == plugin` 即报错
+3. 所以只要**同一次 `before_toolcall` 被触发两次且首次未释放**，就会命中
+
+已排查并排除的可能：qq 的 `beforeToolcall`（`plugin.go:1303-1350`）函数体里
+只有 `ctx.Lock()`（SDK **数据**锁，与 proc stage 锁是两把锁）与
+`currentToolAllowed` / `clearPreviousDenial` 等纯本地调用，**无任何再次触发 stage 的路径**。
+
+⇒ 成因在**插件进程侧的运行时**（编译进 `plugin.bin`），不在 example/qq 的业务代码里。
+生产 `plugin.bin` 是 **9月14日**的独立构建产物，**不随 homed 部署** ——
+要修需改 SDK 模板并重编该二进制，改动面比内核大得多。
+
+**内核这边的行为是正确的**：`stage.go:102-106` 在插件持锁失败时强制释放，
+注释写明这是"锁仲裁回内核"的自愈机制（实验 9），目的正是**避免后续插件死锁**；
+`stages.go:258` 把错误收进 `ctx.Errors` 而不中断流程，所以那轮 212 秒正常跑完。
+
+⇒ 5 次告警全部有惊无险。**唯一风险**是：哪天自愈逻辑变动，就是真死锁。
