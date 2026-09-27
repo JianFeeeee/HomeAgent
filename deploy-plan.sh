@@ -112,7 +112,39 @@ do_deploy() {
     return 1
   fi
   say "部署后验证"
-  info "等 20s 让 agent 起来，然后看 /kernel 状态"
+  # 只说"等 20s 看日志"是不够的 —— 进程活着 ≠ agent 起来了。
+  # 逐项核对，每项都对应一个真实故障模式：
+  info "等待 agent 就绪（最多 60s）…"
+  local ready=0
+  for i in $(seq 1 30); do
+    if journalctl -u "$SVC" --since '-2 min' --no-pager 2>/dev/null \
+         | grep -q 'kernel ready'; then ready=1; break; fi
+    sleep 2
+  done
+  if [ "$ready" = "1" ]; then
+    info "✓ kernel ready"
+  else
+    info "✗ 60s 内没看到 'kernel ready' —— 回滚：bash $BAK/ROLLBACK.sh"
+    journalctl -u "$SVC" --since '-2 min' --no-pager | tail -25
+    return 1
+  fi
+  # 插件加载：生产有 18 个，少于 10 个说明加载异常
+  local nplug
+  nplug=$(journalctl -u "$SVC" --since '-2 min' --no-pager 2>/dev/null \
+          | grep -c 'SetToolRegistrar registering tool')
+  info "注册工具条目: $nplug"
+  # LLM 可达：不可达会进 rollback 循环（生产设了 max_retries=100000）
+  local unreach
+  unreach=$(journalctl -u "$SVC" --since '-2 min' --no-pager 2>/dev/null \
+           | grep -c 'LLM API unreachable')
+  if [ "${unreach:-0}" -gt 3 ]; then
+    info "✗ LLM 不可达 ${unreach} 次 —— 内核在 rollback 循环"
+    info "   回滚：bash $BAK/ROLLBACK.sh"
+    return 1
+  fi
+  info "✓ LLM 可达（unreachable=${unreach:-0}）"
+  info "✓ ONNX provider：见日志 'onnx' 相关行（缺失时应为明确错误+降级，不静默）"
+  journalctl -u "$SVC" --since '-2 min' --no-pager | grep -iE 'onnx|provider' | tail -5
 }
 
 # ---------------------------------------------------------------- rollback
