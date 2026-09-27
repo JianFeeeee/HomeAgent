@@ -240,6 +240,41 @@ type ToolResult struct {
 	Result  interface{} `json:"result"`
 }
 
+// ToolError 描述一次工具调用的失败原因。
+//
+// 存在的理由：失败若只表达为文本，模型无法定位到字段，只能原样重试
+// （实测 cmd_run 失败率 34%~48%，全部源于同一个成因：参数被截断或
+// JSON 写坏，工具却只回报 "command is required" 这类与真因无关的错）。
+//
+// ⚠️ 零值语义：插件**不必**改用本类型。内核的失败识别同时兼容既有三种约定
+// （{"error":…}、{"isError":true,…}、显式 error 返回），见 core.isToolError。
+// 本类型是给**新写**的工具用的可选项，不是迁移要求。
+type ToolError struct {
+	// Field 是出错的参数字段名（参数校验失败时填）。
+	Field string `json:"field,omitempty"`
+	// Reason 是机器可读的原因码：required / type / unauthorized / timeout / not_found。
+	Reason string `json:"reason"`
+	// Detail 是人类可读的补充说明。
+	Detail string `json:"detail,omitempty"`
+	// Hint 是给模型的可执行指引（该改什么、不要重试什么）。
+	Hint string `json:"hint,omitempty"`
+}
+
+// Error 实现 error，便于工具同时走 (ToolError, error) 通道。
+func (e *ToolError) Error() string {
+	if e == nil {
+		return ""
+	}
+	s := e.Reason
+	if e.Field != "" {
+		s = e.Field + ": " + s
+	}
+	if e.Detail != "" {
+		s += " (" + e.Detail + ")"
+	}
+	return s
+}
+
 // ToolDef describes a tool that the plugin exposes.
 type ToolDef struct {
 	Name          string                 `json:"name"`
