@@ -6,6 +6,7 @@ import (
 	"runtime/debug"
 	"sync"
 
+	agentIO "gitcode.com/JianFeeeee/HomeAgent/internal/agent/io"
 	sdk "gitcode.com/JianFeeeee/HomeAgent/internal/sdk"
 )
 
@@ -93,7 +94,10 @@ func (h *StageHost) ExecuteTool(name string, args map[string]interface{}) (ret i
 	handler, ok := h.tools[name]
 	h.mu.RUnlock()
 	if !ok {
-		return nil, fmt.Errorf("tool %s not found in any plugin", name)
+		// 类型化哨兵：工具是动态注册的，调用方需要能**精确**区分
+		// 「不存在」（插件挂了吗）与「执行失败」（本次业务失败）—— 二者对
+		// on_error/retry 的处置完全不同。见 agentIO.ErrToolNotFound。
+		return nil, agentIO.ToolNotFound(name)
 	}
 	if handler == nil {
 		return nil, fmt.Errorf("tool %s has nil handler", name)

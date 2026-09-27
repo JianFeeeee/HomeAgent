@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"log"
 	"regexp"
+	"sort"
 	"strings"
 
 	agentAPI "gitcode.com/JianFeeeee/HomeAgent/internal/agent/api"
@@ -287,13 +288,31 @@ func accumulateStream(ctx context.Context, ch <-chan agentAPI.StreamChunk, a *Ag
 		delete(accs, idx)
 	}
 
+	// flushAll 按 index 升序 flush 所有累积中的 tool call。
+	//
+	// ❗必须排序，不能直接 `for idx := range accs`：Go 的 map 迭代顺序是**随机化**的，
+	// 同一批并行 tool_call 因此会以任意顺序进入 resp.ToolCalls。对 output_send__
+	// 这类**用户可见消息**通道，后果是分段消息的到达顺序每次运行都可能不同
+	// （不可复现的外部行为）；对 tool_call_id 配对虽无影响（靠 id 而非位置），
+	// 但让「同一输入产生同一执行序列」这条最基本的可复现性失守。
+	//
+	// 排序也让判据可写：stream_flush_order_test 断言输出严格按 index 升序。
+	flushAll := func() {
+		idxs := make([]int, 0, len(accs))
+		for idx := range accs {
+			idxs = append(idxs, idx)
+		}
+		sort.Ints(idxs)
+		for _, idx := range idxs {
+			flushToolCall(idx)
+		}
+	}
+
 	for {
 		select {
 		case ck, ok := <-ch:
 			if !ok {
-				for idx := range accs {
-					flushToolCall(idx)
-				}
+				flushAll()
 				if lastFinish != "" {
 					resp.FinishReason = lastFinish
 				}
@@ -357,9 +376,7 @@ func accumulateStream(ctx context.Context, ch <-chan agentAPI.StreamChunk, a *Ag
 			}
 
 		case <-ctx.Done():
-			for idx := range accs {
-				flushToolCall(idx)
-			}
+			flushAll()
 			return resp, ctx.Err()
 		}
 	}
