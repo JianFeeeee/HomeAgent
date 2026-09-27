@@ -530,7 +530,11 @@ async function api(p, o) {
     window._haReloginLock = true;
     try {
       await syncConnAuth();
-      await new Promise((res2) => setTimeout(res2, 800));
+      // ★ 原来固定 setTimeout(…, 800)：认证过期时**每个**请求都白等 0.8s，
+      //   并发几个请求就叠加成明显的「卡」。syncConnAuth 本身是 await 的，
+      //   它返回即代表凭据已就绪，无需再额外空等。
+      //   留 30ms 让 setAuth 的 cookie 落盘，避免极端情况下仍用旧凭据。
+      await new Promise((res2) => setTimeout(res2, 30));
     } catch (e2) {}
     window._haReloginLock = false;
     // 重试一次
@@ -562,7 +566,11 @@ async function api(p, o) {
     window._haReloginLock = true;
     try {
       await syncConnAuth();
-      await new Promise((res2) => setTimeout(res2, 800));
+      // ★ 原来固定 setTimeout(…, 800)：认证过期时**每个**请求都白等 0.8s，
+      //   并发几个请求就叠加成明显的「卡」。syncConnAuth 本身是 await 的，
+      //   它返回即代表凭据已就绪，无需再额外空等。
+      //   留 30ms 让 setAuth 的 cookie 落盘，避免极端情况下仍用旧凭据。
+      await new Promise((res2) => setTimeout(res2, 30));
     } catch (e2) {}
     window._haReloginLock = false;
     return api(p, o);
@@ -5287,6 +5295,16 @@ async function connectFetchSSE(url) {
       }, 5000);
       return;
     }
+    // ★ 建连成功 ⇒ 退避计数清零。
+    //
+    // 为什么要在这里清：_sseRetryAttempts 只在下面 catch（**建立**连接失败）
+    // 里自增，而 pump() 中途断流后的重连**只读它算延迟**。不清零的话，
+    // 只要历史上累计过 5 次，之后每次断连都固定等 32s —— 哪怕这次刚成功
+    // 连上、说明服务端和网络都好好的。
+    //
+    // 这正是「消息流不稳 / 看着卡」的一个共因：滞后、卡顿、闪断不是四个
+    // 独立问题，而是同一条退避链在空等。
+    state._sseRetryAttempts = 0;
     var reader = resp.body.getReader();
     var decoder = new TextDecoder();
     var buffer = "";
@@ -5577,9 +5595,12 @@ async function connectFetchSSE(url) {
       }
       // 断连后先增量同步历史（补偿断连窗口期丢失的事件），再重连
       syncChatFromHistory().catch(function () {});
+      // ★ 此处也清零：本次连接曾成功建立（上面已清），断流是运行期事件，
+      //   不该把「建连失败」的累计次数带进下一次退避。
+      state._sseRetryAttempts = 0;
       reconnectTimer = setTimeout(() => {
         connectSSE();
-      }, Math.min(1000 * Math.pow(2, Math.min((state._sseRetryAttempts || 0), 5)), 60000));
+      }, Math.min(1000 * Math.pow(2, Math.min((state._sseRetryAttempts || 0), 5)), 32000));
     }
     pump();
   } catch (e) {
