@@ -13,7 +13,9 @@ package seq
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
+	"reflect"
 	"sort"
 	"strings"
 )
@@ -105,7 +107,7 @@ func Parse(data []byte) (*Sequence, error) {
 	dec.DisallowUnknownFields()
 	var raw rawSeq
 	if err := dec.Decode(&raw); err != nil {
-		return nil, fmt.Errorf("序列 JSON 解析失败: %w", err)
+		return nil, fmt.Errorf("序列 JSON 解析失败: %w", friendlyJSONError(err))
 	}
 
 	if strings.TrimSpace(raw.Name) == "" {
@@ -384,4 +386,102 @@ func trunc(s string, n int) string {
 		return s
 	}
 	return s[:n] + "..."
+}
+
+// friendlyJSONError 把 encoding/json 的原始报错翻译成**模型可执行**的话。
+//
+// 为什么必须翻译（真机实跑证据）：模型把 group 的 `in` 传成字符串 "{}"
+// 时，原始报错是
+//
+//	json: cannot unmarshal string into Go struct field rawSeq.groups.0.in
+//	      of type map[string]string
+//
+// 这句话说的是"事实"（string 解不成 map），不是"该怎么做"
+// （in 应该写成对象 {"键":"类型"}）。模型为此重试了 **3 次**才改对。
+// 残留的 `rawSeq` / `Go struct field` 更是 Go 内部实现细节，
+// 对模型无意义且会误导它去猜一个叫 rawSeq 的东西。
+//
+// 这与本仓反复吃亏的那类问题同源：`20s` 少引号 → 静默降级 →
+// cmd_run 失败率 34%。**报事实不报改法，模型只能猜。**
+func friendlyJSONError(err error) error {
+	// ① 未知字段：拼写错误最常见，且必须显式（DisallowUnknownFields 已启用）
+	if strings.Contains(err.Error(), "unknown field") {
+		return fmt.Errorf("%w（注意字段名拼写；每个 group 允许的字段为 "+
+			"name/description/in/out/when/parallel/missing/timeout/on_error/retries/tools）", err)
+	}
+
+	// ② 类型不匹配：给出该字段**应该**是什么
+	var te *json.UnmarshalTypeError
+	if errors.As(err, &te) {
+		field := shortFieldName(te.Field)
+		switch field {
+		case "in", "out":
+			return fmt.Errorf("group 的 %s 应写成**对象**，形如 {\"键\":\"类型\"}"+
+				"（键=参数名，值=类型如 string/bool/integer/array）；"+
+				"收到的是 %s —— 无入参请写 {}，不要写成字符串", field, jsonKind(te.Value))
+		case "tools":
+			return fmt.Errorf("group 的 tools 应写成**字符串**（内容是若干以 ';' 分隔的 JSON 对象），"+
+				"而不是数组；例如 \"{\\\"tool\\\":\\\"cmd_run\\\",\\\"args\\\":{},\\\"as\\\":\\\"x\\\"} ;\"；"+
+				"收到的是 %s", jsonKind(te.Value))
+		case "groups":
+			return fmt.Errorf("groups 应是数组，形如 [ {…}, {…} ]；收到的是 %s", jsonKind(te.Value))
+		case "name", "description", "when", "missing", "timeout", "on_error":
+			return fmt.Errorf("%s 应写成字符串；收到的是 %s", field, jsonKind(te.Value))
+		default:
+			return fmt.Errorf("%s 的类型不对（应为 %s，收到 %s）",
+				field, goTypeName(te.Type), jsonKind(te.Value))
+		}
+	}
+	return err
+}
+
+// shortFieldName 把 "rawSeq.groups.0.in" 缩成 "in"。
+//
+// 剥掉 Go 内部类型名（rawSeq）：那是本包的实现细节，模型无从得知，
+// 照抄反而会去猜"rawSeq 是什么"。
+func shortFieldName(f string) string {
+	if f == "" {
+		return "某个字段"
+	}
+	if i := strings.LastIndex(f, "."); i >= 0 {
+		f = f[i+1:]
+	}
+	// 去掉数组下标：groups.0.in → in（上面已取最后一段，兜底再剥一次）
+	f = strings.TrimSuffix(f, "]")
+	return f
+}
+
+// jsonKind 描述**收到的** JSON 值长什么样（用模型看得懂的说法）。
+func jsonKind(v string) string {
+	switch v {
+	case "string":
+		return "字符串"
+	case "array":
+		return "数组"
+	case "object":
+		return "对象"
+	case "number":
+		return "数字"
+	case "bool":
+		return "布尔值"
+	}
+	return v
+}
+
+// goTypeName 去掉包名前缀（map[string]string → map）。
+func goTypeName(t reflect.Type) string {
+	if t == nil {
+		return "未知"
+	}
+	if t.Kind() == reflect.Map {
+		return "对象"
+	}
+	if t.Kind() == reflect.Slice {
+		return "数组"
+	}
+	s := t.String()
+	if i := strings.LastIndex(s, "."); i >= 0 {
+		s = s[i+1:]
+	}
+	return s
 }
