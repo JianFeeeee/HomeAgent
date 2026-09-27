@@ -81,15 +81,28 @@ function adapter.transform_stream_chunk(raw_chunk)
     end
     if chunk.message.tool_calls then
         local tools = {}
-        for _, tc in ipairs(chunk.message.tool_calls) do
+        for i, tc in ipairs(chunk.message.tool_calls) do
+            -- ★ 必须是**扁平**结构（name / raw_arguments 在顶层）且键名是
+            --   stream_index —— homed 的 agentAPI.ToolCall 按 json tag 反序列化：
+            --   · 嵌套 ["function"]={...} ⇒ Go 侧取不到 name/raw_arguments（零值）
+            --   · 键名写 index ⇒ StreamIndex 取零值 ⇒ 多个分片并到同一个桶，
+            --     argsRaw 混拼 ⇒ 每个工具报"参数不是合法 JSON"而一个都没真跑
+            --   两种都是**静默**失效，所以这里逐项对齐。
+            local fn = tc["function"]
+            local name = (type(fn) == "table" and fn.name) or tc.name or ""
+            local args = "{}"
+            if type(fn) == "table" and fn.arguments ~= nil then
+                args = fn.arguments
+            elseif type(tc.arguments) == "string" then
+                args = tc.arguments
+            end
+            -- ollama 的 tool_calls **整条一次发完**（不分片），所以序号即下标
             table.insert(tools, {
-                index = #tools,
-                id = tc.id or ("call_" .. #tools),
+                id = tc.id or ("call_" .. i),
                 type = "function",
-                ["function"] = {
-                    name = tc["function"] and tc["function"].name or "",
-                    arguments = tc["function"] and (tc["function"].arguments or "{}") or "{}"
-                }
+                name = name,
+                raw_arguments = args,
+                stream_index = (tc.index or (i - 1))
             })
         end
         unified.tool_calls = tools

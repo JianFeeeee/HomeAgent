@@ -86,10 +86,48 @@ function adapter.transform_stream_chunk(raw_chunk)
     if not chunk.choices or #chunk.choices == 0 then return "" end
     local delta = chunk.choices[1].delta or {}
     local fr = chunk.choices[1].finish_reason
-    return json.encode({
+    local unified = {
         content = delta.content or "",
         done = (fr ~= nil)
-    })
+    }
+    if delta.reasoning_content then
+        unified.reasoning_content = delta.reasoning_content
+    end
+    -- ★ 必须处理流式 tool_calls —— 此前只透 content/done，导致 deepseek 源
+    --   在**流式**模式下工具调用全部丢失，模型调不动任何工具且无任何报错。
+    --
+    --   为什么难发现：非流式路径（transform_response）是好的，所以端到端
+    --   手工测试也过；而内核的 tool call 循环默认走流式。
+    --   功能判据（core 包的批内测试）直接构造 Go 结构体，绕过适配器。
+    --
+    -- 形态与 openai.lua 一致：OpenAI 兼容流式格式
+    -- {function:{name,arguments}, id, type, index} → homed 扁平结构
+    -- {id, type, name, raw_arguments, stream_index}。
+    if delta.tool_calls then
+        local tcs = {}
+        for _, tc in ipairs(delta.tool_calls) do
+            local fn = tc["function"]
+            local name = (type(fn) == "table" and fn.name) or tc.name or ""
+            local raw_args = ""
+            if type(fn) == "table" and type(fn.arguments) == "string" then
+                raw_args = fn.arguments
+            elseif type(tc.arguments) == "string" then
+                raw_args = tc.arguments
+            end
+            -- 不能按 name 过滤：流式续传片 name 为空但携带 arguments，
+            -- 内核 accumulateStream 按 stream_index 分桶并累积
+            table.insert(tcs, {
+                id = tc.id or "",
+                type = tc.type or "function",
+                name = name,
+                raw_arguments = raw_args,
+                -- 透传上游分片 index：并行多工具调用时内核按它区分归属桶
+                stream_index = tc.index or 0
+            })
+        end
+        unified.tool_calls = tcs
+    end
+    return json.encode(unified)
 end
 
 return adapter
