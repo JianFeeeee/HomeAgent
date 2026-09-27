@@ -115,6 +115,13 @@ type Registry struct {
 	idx       *memory.Indexer
 	termAPI   sdk.TerminalAPI
 
+	// deviceAuth 回答"设备 deviceID 是否已授权给当前 agent"（D4）。
+	//
+	// 由 bootstrap 在 agent 建好之后注入（registry 本身早于 agent 构造，
+	// 所以这里存的是**晚绑定**的闭包）。为 nil 时 ToolAPI.CanUse 对
+	// 设备工具放行 —— 保持存量行为不变。
+	deviceAuth func(deviceID string) bool
+
 	knownDisabled map[string]bool
 	allowlist     map[string]bool
 
@@ -207,8 +214,17 @@ func (r *Registry) SetSupervisor(sup sdk.SupervisorAPI)                     { r.
 func (r *Registry) SetTracker(trk *tracker.Tracker)                         { r.trk = trk }
 func (r *Registry) SetConfig(cfg *types.Config)                             { r.cfg = cfg }
 func (r *Registry) SetStageHost(sh sdk.ToolSource)                          { r.stageHost = sh }
-func (r *Registry) SetIndexer(idx *memory.Indexer)                          { r.idx = idx }
-func (r *Registry) SetTerminalAPI(t sdk.TerminalAPI)                        { r.termAPI = t }
+
+// SetDeviceAuthQuery 注入"设备是否已授权"的查询（D4）。
+//
+// 由 bootstrap 在 agent 构造完成后调用。注入后，ToolAPI.CanUse 才会
+// 对未授权设备返回 false —— 此前 ToolAPI 路径**完全不过授权闸**。
+func (r *Registry) SetDeviceAuthQuery(fn func(deviceID string) bool) {
+	r.deviceAuth = fn
+	sdk.SetDeviceAuthQuery(fn)
+}
+func (r *Registry) SetIndexer(idx *memory.Indexer)   { r.idx = idx }
+func (r *Registry) SetTerminalAPI(t sdk.TerminalAPI) { r.termAPI = t }
 
 // SetLoadAllowlist 限制 Load 仅装载指定插件名（failback 受限启动用）。
 // 空/未设置 = 装载全部。违反白名单的插件（含已注册工厂）一律跳过。
