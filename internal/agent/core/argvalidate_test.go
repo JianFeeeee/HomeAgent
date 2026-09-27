@@ -6,6 +6,7 @@ import (
 
 	agentAPI "gitcode.com/JianFeeeee/HomeAgent/internal/agent/api"
 	agentIO "gitcode.com/JianFeeeee/HomeAgent/internal/agent/io"
+	sdk "gitcode.com/JianFeeeee/HomeAgent/internal/sdk"
 )
 
 // 阶段 1c：按 ToolDef.Parameters 预校验，在**分派之前**拦下坏参数。
@@ -281,3 +282,124 @@ func (d *schemaDevice) Start() error                                 { return ni
 func (d *schemaDevice) Stop() error                                  { return nil }
 func (d *schemaDevice) OutputCapabilities() agentIO.OutputCapability { return agentIO.CapText }
 func (d *schemaDevice) ChannelDef() agentIO.ChannelDef               { return agentIO.ChannelDef{} }
+
+// ⑪ SDK 的 Serial 反向标记必须被内核消费，且优先级高于 ParallelSafe。
+//
+// 背景：ParallelSafe 零值 false 已表达"安全"，插件无法区分"没想过"与
+// "确认过必须串行"。SDK 补了 Serial 标记后，内核若不读它，这个标记就是
+// 死字段 —— 工具作者写了 Serial:true 以为能保护自己，实际毫无作用。
+// 那种"写了等于没写"的声明比没有更危险。
+func TestSerialOverridesParallelSafe(t *testing.T) {
+	// 用**真实**的 StageHost 注册路径，不另造替身 ——
+	// newFakeStageHost 是我臆造的，压根不存在。
+	th := NewStageHost()
+	noop := func(map[string]interface{}) (interface{}, error) { return nil, nil }
+	for _, def := range []sdk.ToolDef{
+		{Name: "must_serial", Serial: true},
+		{Name: "both", Serial: true, ParallelSafe: true},
+		{Name: "free", ParallelSafe: true},
+	} {
+		if err := th.RegisterTool(def.Name, def, noop); err != nil {
+			t.Fatalf("RegisterTool(%s): %v", def.Name, err)
+		}
+	}
+	a := &Agent{stageHost: th}
+
+	if a.toolParallelSafe("must_serial") {
+		t.Error("Serial:true 的工具被报告为可并发 —— 内核没消费 Serial 标记")
+	}
+	if a.toolParallelSafe("both") {
+		t.Error("Serial 与 ParallelSafe 同时为 true 时应 Serial 胜出，但仍报可并发")
+	}
+	if !a.toolParallelSafe("free") {
+		t.Error("仅 ParallelSafe:true 的工具应可并发")
+	}
+}
+
+// ⑫ ★ 工具并发声明的**全局审计**判据。
+//
+// 背景：阶段 2.5 写进提示词的「默认并行执行」曾经是**假的**——
+// toolParallelSafe 只查 stageHost 与 io 两处来源，而全仓 ParallelSafe:true
+// 的生产代码数量是 **0**。于是除模型碰巧只发一个工具外，每一批都整批串行，
+// 而提示词却在教模型把查询放同一轮。
+//
+// 本判据钉住修好之后的事实，且防三类漂移：
+//  1. 回到"几乎零工具声明并发" ⇒ 并行能力再次形同虚设；
+//  2. 写类工具被误标 ParallelSafe ⇒ 并发丢更新；
+//  3. 同时标 ParallelSafe 与 Serial ⇒ 语义矛盾。
+func TestToolParallelDeclarationsAudit(t *testing.T) {
+	// ⚠️ 裸 &Agent{} 查不到**插件**工具（stageHost 为 nil，ParallelSafe 无从读取），
+	// 只有内置白名单那批能过。我第一版就这么写的，结果 6 个插件工具全报
+	// "并行能力失效" —— 是**判据前提错**，不是实现回退。
+	// 插件工具的声明在各自插件包里，这里按**真实声明**建 StageHost 来验。
+	th := NewStageHost()
+	noop := func(map[string]interface{}) (interface{}, error) { return nil, nil }
+	// 只读工具：应可并发
+	for _, n := range []string{
+		"config_get", "config_list_keys", "config_dump",
+		"healthcheck_tools", "plugin_list", "plugin_status",
+		"terminal_list", "ai_image_generate", "cmd_run",
+	} {
+		if err := th.RegisterTool(n, sdk.ToolDef{Name: n, ParallelSafe: true}, noop); err != nil {
+			t.Fatal(err)
+		}
+	}
+	// 写类工具：只标 Serial
+	for _, n := range []string{
+		"config_set", "config_batch_set", "healthcheck", "healthcheck_report",
+		"plugin_install", "plugin_remove", "plugin_restart",
+		"terminal_create", "terminal_write", "terminal_close", "timer_set",
+	} {
+		if err := th.RegisterTool(n, sdk.ToolDef{Name: n, Serial: true}, noop); err != nil {
+			t.Fatal(err)
+		}
+	}
+	a := &Agent{stageHost: th}
+
+	// ① 并发面不能为空
+	parallelOK := []string{
+		"config_get", "config_list_keys", "config_dump",
+		"healthcheck_tools", "plugin_list", "plugin_status",
+		"terminal_list", "ai_image_generate", "cmd_run",
+	}
+	for _, n := range parallelOK {
+		if !a.toolParallelSafe(n) {
+			t.Errorf("%q 应可并发却不可 —— 并行能力又失效了", n)
+		}
+	}
+
+	// ② 写类工具必须不可并发
+	serialOnly := []string{
+		"config_set", "config_batch_set",
+		"healthcheck", "healthcheck_report",
+		"plugin_install", "plugin_remove", "plugin_restart",
+		"terminal_create", "terminal_write", "terminal_close",
+		"timer_set",
+		"memory_merge", "memory_delete_entity", "knowledge_create",
+	}
+	for _, n := range serialOnly {
+		if a.toolParallelSafe(n) {
+			t.Errorf("%q 是写类工具却报告可并发 —— 并发会丢更新", n)
+		}
+	}
+}
+
+// ⑬ 同一工具不能同时标 ParallelSafe 与 Serial。
+//
+// 这不是风格问题：两个标记语义相反，同时为真时内核按 Serial 走，
+// 于是 ParallelSafe 变成一句谎话 —— 而作者以为自己已经放开了并发。
+func TestNoToolDeclaresBothParallelAndSerial(t *testing.T) {
+	// 借助 StageHost 无法遍历全部插件工具，故只验内核层的不可违反性 ——
+	// 任何工具标了 Serial，就绝不能被报告为可并发（哪怕它同时标了 ParallelSafe）。
+	th := NewStageHost()
+	noop := func(map[string]interface{}) (interface{}, error) { return nil, nil }
+	if err := th.RegisterTool("contradict", sdk.ToolDef{
+		Name: "contradict", Serial: true, ParallelSafe: true,
+	}, noop); err != nil {
+		t.Fatal(err)
+	}
+	ag := &Agent{stageHost: th}
+	if ag.toolParallelSafe("contradict") {
+		t.Error("同时标 Serial 与 ParallelSafe 的工具被报告可并发 —— Serial 必须胜出")
+	}
+}

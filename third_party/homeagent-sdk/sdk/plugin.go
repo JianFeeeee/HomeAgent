@@ -298,6 +298,19 @@ type ToolDef struct {
 	//   · 不与同批其它工具争抢同一资源（SQLite 写、设备、同一输出通道）
 	//   · 执行顺序无关（顺序敏感的工具应留 false，由内核保序）
 	ParallelSafe bool `json:"parallel_safe,omitempty"`
+	// Serial 声明本工具**必须**串行 —— ParallelSafe 的反向标记。
+	//
+	// 为什么需要它：ParallelSafe 的零值 false 已经表达"安全/串行"，
+	// 插件无法区分"我没想过"和"我确认过必须串行"。一旦工具作者需要
+	// 把"这里**故意**串行，是有原因的"写进代码（而不只是没填），
+	// 这个区分就是必需的 —— 否则只能靠命名约定传递意图。
+	//
+	// 适用场景：读操作但有隐含顺序约束（终端 read/resize 这类共享会话
+	// 状态）、或写操作虽已加锁但需要串行以获得可预测的交错顺序。
+	//
+	// 判据优先级：**Serial 胜出**。显式声明"必须串行"不允许被
+	// ParallelSafe 或任何默认值覆盖。
+	Serial bool `json:"serial,omitempty"`
 }
 
 // IOInjector provides methods for injecting input and interrupts into the agent pipeline.

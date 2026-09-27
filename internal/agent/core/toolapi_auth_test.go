@@ -1,6 +1,7 @@
 package core
 
 import (
+	"os"
 	"strings"
 	"testing"
 
@@ -159,3 +160,94 @@ func TestCanUseMatchesInnerFailOpenOnMissingDeviceID(t *testing.T) {
 		t.Log("现状：缺 device_id 时放行（fail-open）。已钉住，若要改须两边同时改。")
 	}
 }
+
+// ⑨ 内置读类工具的并发资格。
+//
+// ★ 这个缺口是被**提示词**暴露出来的，不是被并行判据：
+// 阶段 2.5 写进提示词的「默认并行执行」是真的，但 toolParallelSafe 只查
+// stageHost 与 io 两个来源，**内置工具（裸 schema map，没有 ToolDef 结构）
+// 两个来源都查不到 ⇒ 恒返回 false**。
+// 结果：除插件里手写 ParallelSafe 的少数工具外，**每一批都整批串行**，
+// 而提示词却在告诉模型「默认并行」。内核与提示词不一致 = 对模型说谎。
+//
+// ⑩ 内置工具的并发声明必须与工具定义**同源**。
+//
+// 曾经的错误做法：toolParallelSafe 查一张内核里的硬编码白名单 map。
+// 那把声明从"工具自己"搬回了内核 —— 工具改名/新增不会自动跟着变，
+// 要靠一条 grep 源码的判据才能发现漂移，而判据一改就忘。
+//
+// 现在声明写在 toolDef 的 toolParallel 选项里，本判据守两件事：
+//  1. 声明的工具**真的**出现在 buildToolDefs 的输出里（不是幽灵声明）；
+//  2. 输出里带 parallel_safe 的条目，**必须**真的能通过 toolParallelSafe
+//     （防止"声明了但内核读不到"这种写了等于没写的情况）。
+func TestBuiltinParallelDeclaredWhereDefined(t *testing.T) {
+	// ⚠️ 不能拿裸 &Agent{} 的 buildToolDefs 输出当"实际可见工具"：
+	//   这 9 个工具**全在条件可见分支里**（a.knowledge != nil / a.social != nil /
+	//   a.providerManager != nil / a.parentID != ""），裸 Agent 一个都不产出。
+	//   我第一版就这么写的，结果 9 条全报"声明形同虚设" —— 判据前提错，
+	//   不是实现问题。这已是同一个坑第二次踩（上次叫它"幽灵条目"）。
+	//
+	// 所以改成对**源码声明**核对：这才是"声明写在工具定义处"的真正含义。
+	src, err := osReadFile("tooldefs.go")
+	if err != nil {
+		t.Fatalf("读 tooldefs.go 失败: %v", err)
+	}
+	body := string(src)
+	if !strings.Contains(body, "func toolParallel(fn map[string]interface{})") {
+		t.Error("tooldefs.go 里没有 toolParallel 声明项 —— 声明机制不存在")
+	}
+	// 逐个确认：这 9 个工具的定义处确实带了 toolParallel 声明。
+	//
+	// ⚠️ 必须从**注释之后**开始找：toolParallel 的用法注释里也写着
+	// `toolDef("knowledge_search", ...)` 这样的示例，先匹配到注释就会
+	// 得出"声明位置丢了"的错误结论（我第一版正是这样）。
+	// 同一个坑：注释里模仿真实签名会污染一切按文本匹配的判据。
+	declStart := strings.Index(body, "func toolDef(")
+	if declStart < 0 {
+		t.Fatal("tooldefs.go 里没有 toolDef 函数")
+	}
+	for _, n := range []string{
+		"knowledge_search", "knowledge_list", "person_query", "person_network",
+		"input_channels", "get_plugin_tools", "doc_query",
+		"llm_list_sources", "output_list_channels",
+	} {
+		i := strings.Index(body[declStart:], `toolDef("`+n+`"`)
+		if i < 0 {
+			t.Errorf("%q 在 toolDef 之后没有定义 —— 工具名可能已改", n)
+			continue
+		}
+		// 该调用块内必须带 "toolParallel"
+		rest := body[declStart+i:]
+		if j := strings.Index(rest, "\n\t\ttools = append"); j > 0 {
+			rest = rest[:j]
+		}
+		if !strings.Contains(rest, `"toolParallel"`) {
+			t.Errorf("%q 的定义没有带 toolParallel 声明 —— 并发声明缺失", n)
+		}
+	}
+
+	// 机制本身要可用：造一个带声明的 Agent，验证内核真能读出来
+	a := &Agent{}
+	seen := 0
+	for _, raw := range a.buildToolDefs() {
+		m, ok := raw.(map[string]interface{})
+		if !ok {
+			continue
+		}
+		fn, ok := m["function"].(map[string]interface{})
+		if !ok {
+			continue
+		}
+		if _, has := fn["parallel_safe"]; has {
+			seen++
+			n, _ := fn["name"].(string)
+			if !a.toolParallelSafe(n) {
+				t.Errorf("%q 的定义带 parallel_safe，但 toolParallelSafe 返回 false", n)
+			}
+		}
+	}
+	t.Logf("当前 Agent 条件下可见的并行声明数：%d", seen)
+}
+
+// osReadFile 读文件（判据用）。
+func osReadFile(name string) ([]byte, error) { return os.ReadFile(name) }

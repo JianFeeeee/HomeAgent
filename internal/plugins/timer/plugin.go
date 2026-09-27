@@ -82,6 +82,8 @@ func (p *Plugin) Start(s *sdk.PluginSDK) error {
 			},
 			"required": []string{"duration", "message"},
 		},
+		// 写定时器：改 p.timers（持 p.mu），按序更可预期
+		Serial: true,
 	}, func(args map[string]interface{}) (interface{}, error) {
 		durStr, _ := args["duration"].(string)
 		message, _ := args["message"].(string)

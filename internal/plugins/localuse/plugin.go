@@ -53,6 +53,8 @@ func (p *Plugin) Start(s *sdk.PluginSDK) error {
 			"type":       "object",
 			"properties": map[string]interface{}{},
 		},
+		// 只读观察：不改插件内共享状态
+		ParallelSafe: true,
 	}, p.handleScreensee)
 
 	// ── camerasue ──
@@ -70,6 +72,8 @@ func (p *Plugin) Start(s *sdk.PluginSDK) error {
 				},
 			},
 		},
+		// 只读观察：不改插件内共享状态
+		ParallelSafe: true,
 	}, p.handleCamerasue)
 
 	// ── speakeruse ──
@@ -87,6 +91,8 @@ func (p *Plugin) Start(s *sdk.PluginSDK) error {
 			},
 			"required": []string{"text"},
 		},
+		// 只读观察：不改插件内共享状态
+		ParallelSafe: true,
 	}, p.handleSpeakeruse)
 
 	// ── screensue ──
@@ -120,6 +126,8 @@ func (p *Plugin) Start(s *sdk.PluginSDK) error {
 			"type":       "object",
 			"properties": map[string]interface{}{},
 		},
+		// 只读观察：不改插件内共享状态
+		ParallelSafe: true,
 	}, p.handleClipboardsee)
 
 	// ── clipboardsue ──
@@ -160,6 +168,8 @@ func (p *Plugin) Start(s *sdk.PluginSDK) error {
 			},
 			"required": []interface{}{"action"},
 		},
+		// 只读观察：不改插件内共享状态
+		ParallelSafe: true,
 	}, p.handleComputeruse)
 
 	return nil

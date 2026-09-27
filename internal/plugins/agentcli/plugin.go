@@ -257,6 +257,8 @@ func (p *Plugin) Start(s *sdk.PluginSDK) error {
 				},
 			},
 		},
+		// 建会话：写共享会话表
+		Serial: true,
 	}, func(args map[string]interface{}) (interface{}, error) {
 		return p.handleCreate(s, args)
 	})
@@ -283,6 +285,8 @@ func (p *Plugin) Start(s *sdk.PluginSDK) error {
 			},
 			"required": []string{"id"},
 		},
+		// 写终端：与会话缓冲区共享，须按序
+		Serial: true,
 	}, func(args map[string]interface{}) (interface{}, error) {
 		return p.handleWrite(s, args)
 	})
@@ -309,6 +313,8 @@ func (p *Plugin) Start(s *sdk.PluginSDK) error {
 			},
 			"required": []string{"id"},
 		},
+		// 读终端：与会话缓冲区共享，须按序
+		Serial: true,
 	}, func(args map[string]interface{}) (interface{}, error) {
 		return p.handleRead(args)
 	})
@@ -335,6 +341,8 @@ func (p *Plugin) Start(s *sdk.PluginSDK) error {
 			},
 			"required": []string{"id"},
 		},
+		// 改窗口尺寸：改会话状态
+		Serial: true,
 	}, func(args map[string]interface{}) (interface{}, error) {
 		return p.handleResize(args)
 	})
@@ -353,6 +361,8 @@ func (p *Plugin) Start(s *sdk.PluginSDK) error {
 			},
 			"required": []string{"id"},
 		},
+		// 关会话：改共享会话表
+		Serial: true,
 	}, func(args map[string]interface{}) (interface{}, error) {
 		return p.handleClose(s, args)
 	})
@@ -365,6 +375,8 @@ func (p *Plugin) Start(s *sdk.PluginSDK) error {
 			"type":       "object",
 			"properties": map[string]interface{}{},
 		},
+		// 已核实只读：只列举会话
+		ParallelSafe: true,
 	}, func(args map[string]interface{}) (interface{}, error) {
 		return p.handleList()
 	})
@@ -407,6 +419,8 @@ func (p *Plugin) Start(s *sdk.PluginSDK) error {
 			},
 			"required": []string{"id"},
 		},
+		// 订阅输出：注册监听者，改共享状态
+		Serial: true,
 	}, func(args map[string]interface{}) (interface{}, error) {
 		return p.handleWatch(args)
 	})
