@@ -380,7 +380,25 @@ P3 落地时暴露的**真实缺陷**（不是新需求）：
 压测脚本（4）、SDK（3）、io（3）、cmd 插件（2）。**未触及** `distill.go` /
 `onnx.go` / `nlp`，而工具调用路径本身不经过 ONNX ⇒ 上面的结论对生产成立。
 
-### ⚠ 部署前置条件（未完成）
+### ✅ 部署（已完成 2026-09-27）
+
+生产实例已更新到 `d3eaff4`+ 并验证通过：
+
+| 项 | 结果 |
+| --- | --- |
+| 二进制 | 86,496,624 → **86,784,400** 字节（onnxruntime） |
+| 服务 | `active`、`kernel ready`、LLM 可达（unreachable=0） |
+| 多模态空间 | `provider=chineseclip dim=512 modalities=[text image]` |
+| `seq_*` 工具 | **7 个全部注册** |
+| 适配器 | md5 **完全一致**（`bf1dff86…`）—— 无 `.bundled` 清单 ⇒ 首次升级不覆盖已有文件 |
+| 备份 | `/var/tmp/homed-backup-20260927-194554`（含 `ROLLBACK.sh`） |
+
+> 注：部署前生产二进制构建于**当天 06:36**，而 `seq` 引入于 `71c894c`（更晚）
+> ⇒ 旧实例的 `strings /usr/local/bin/homed | grep -c internal/plugins/seq` 为 **0**。
+> 它在 QQ 上如实回答"没有编排工具"**并不是说谎**，是确实没有。
+> 这类"实例自述与代码状态不一致"应先查二进制构建时间，别急着怀疑提示词。
+
+### ⚠ 部署前置条件
 
 生产二进制是 **`-tags=onnxruntime`** 构建（strip 后 75MB、`.rodata` 62.5MB），
 普通 `go build` 只有 28MB。`deploy/packaging/package-linux.sh:139` 会显式拒绝
@@ -391,3 +409,97 @@ P3 落地时暴露的**真实缺陷**（不是新需求）：
 
 ⇒ **必须走 `deploy/packaging/build.sh`（需 `libonnxruntime.so` 与
 `CHINESECLIP_BUNDLE_DIR` 资产）才能部署**，否则依存句法分析与多模态向量化失效。
+
+---
+
+## 附：设备命令白名单改为可配置（2026-09-27）
+
+与上面的 toolcall 并行是同一次排查的**另一条线**，记在这里是因为它同样属于
+"能力声明不该硬编码"这个主题。
+
+### 起因
+
+agent 通过 `device_ctl_cmdrun` 下发命令，命令在**设备侧**执行
+（`cmd/waiter/device.go` 的 `exec.CommandContext`），而白名单是**源码里
+硬编码的正则**（18 个命令：`ls/pwd/cat/df/…`）。`waiter.yaml` 里**没有任何键
+能改它** ⇒ `find` / `grep` / `sed` / `sort` / `tr` 这些排查问题最常用的
+**只读**命令一律被拒：
+
+    device_ctl_cmdrun  device_id:waiter-fnnas  error: command not in whitelist
+
+注意 `device_authorized` 当时**已经是 `true`**、两台 token 相同、进程正常 ——
+所以"没开启设备桥授权"这个判断是错的，问题在白名单。
+
+### 改动
+
+`waiter.yaml` 新增 `device_cmd_allowlist`（字符串数组）：
+
+```yaml
+device_cmd_allowlist:
+  - ls
+  - find
+  - grep
+  - sed
+```
+
+- **替换**默认集而非追加：避免"以为加了 find、结果还留着 `python3 -c` 任意执行"
+- 留空 ⇒ 用内置默认集（★ **绝不能变成"全放行"**，那等于静默拆掉闸门）
+- 只取命令名**第一段**再整词匹配：`grep -rn x .` 能过，而 `grepXxx` / `mygrep`
+  不会因 `contains` 蒙混过关
+
+### ★ 一次真实的疏漏
+
+waiter 有**两条**设备桥启动路径：
+
+| 路径 | 场景 |
+| --- | --- |
+| `main.go` 的 `startDeviceBridge` | 交互 / 一次性模式 |
+| `daemon.go` 的 `startDaemonDeviceBridge` | **`waiter --daemon`（生产两台都这么跑）** |
+
+最初只在 `main.go` 里赋值 ⇒ daemon 路径不经过那里 ⇒ 配置**完全不生效**。
+症状极难定位：**配置写了、启动也打了招呼、命令照样被拒** ——
+看起来像"配置没读到"，实际是"那条路径没接线"。
+已加 `TestDaemonPathAppliesAllowlist` 守住。
+
+### ★ 已知局限：只匹配命令名，不看参数
+
+实测（22 条白名单下）：
+
+| 命令 | 结果 | 实际副作用 |
+| --- | --- | --- |
+| `find . -name x.go` | 放行 | 只读 ✓ |
+| `find . -delete` | **放行** | ★ 删文件 |
+| `find . -exec rm {} ;` | **放行** | ★ 执行删除 |
+| `sed -i s/a/b/ f` | **放行** | ★ 原地改文件 |
+| `sort -o out.txt in.txt` | **放行** | ★ 写文件 |
+
+即：**白名单是"命令名清单"，不是"只读保证"**。用户已知悉并选择先下发
+（`ship_now`），参数级拦截（拒绝 `-i` / `-delete` / `-exec` / `-o` / `> 重定向`）
+作为后续项。
+
+⇒ 写文档时不要把这一层叫"只读白名单"，那会让人以为写操作被挡住了。
+
+### 部署
+
+| | 106 (fnnas) | 30 (mainnas) |
+| --- | --- | --- |
+| 二进制 | 11,388,177 → **12,691,402** | 同 |
+| 版本 | 8月27日 → `1.4.0` | 同 |
+| 白名单 | 22 条（启动日志确认读到） | 同 |
+| 备份 | `waiter.bak-20260927-194730` | `waiter.bak-20260927-194750` |
+
+**顺带解答了一个悬案**：106 此前一直没有 `online` 日志，而 30 正常。
+两台配置与 token 完全相同 ⇒ 差异只可能在旧 waiter 二进制。8月27日那版
+落在"未 bind 时收到 ping 会关连接"的缺陷窗口里 ⇒ 更新后已正常：
+
+    19:46:12  device waiter-fnnas online → 输出通道 device-waiter-fnnas
+    19:47:30  device waiter-fnnas offline → online   （更新二进制时重连）
+
+### 部署脚本的一个坑
+
+`deploy-waiter.sh` 里 `ssh` 会从 stdin 读，把后续 `read -p "确认更新"` 的输入吃掉：
+
+    bash deploy-waiter.sh deploy <ip> <<< "yes"   # 喂了 yes 却打印「已取消」
+
+脚本本身完全正常、备份逻辑没问题，只是"明明喂了 yes 却什么也没发生"。
+已给 5 处 `ssh` 统一加 `-n`。
