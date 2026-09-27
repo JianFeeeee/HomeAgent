@@ -580,6 +580,17 @@ func newMainAgent(cfg *types.Config, cfgReg *internalConfig.ConfigRegistry, prov
 		return agent.IsOutputAllowed("device/" + deviceID)
 	})
 
+	// 方案 B：把 agent 的**内置工具面**注入 ToolAPI。
+	//
+	// 缺口背景：`memory_*` / `knowledge_*` / `doc_*` / `person_*` 这 20+ 个
+	// 在 executeToolCallInner 里按前缀分派，从不进 ToolAPI ⇒ 插件经 ToolAPI
+	// 既查不到也调不了。真机实跑实证：seq_run 报「工具 knowledge_list
+	// 不存在或未注册」，而同一轮模型直接调它是成功的。
+	//
+	// 注入必须在此处（agent 构造之后）：内置工具的可见性由运行期状态门控
+	// （memory/knowledge 是否就绪），而 provider 持有的是 agent。
+	agent.InstallBuiltinToolProvider()
+
 	return agent
 }
 

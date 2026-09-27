@@ -1,8 +1,6 @@
 package sdk
 
 import (
-	"fmt"
-
 	agentIO "gitcode.com/JianFeeeee/HomeAgent/internal/agent/io"
 )
 
@@ -50,9 +48,23 @@ func (t *toolImpl) ExecuteTool(name string, args map[string]interface{}) (interf
 		}
 	}
 	if t.iom != nil {
-		return t.iom.ExecuteTool(name, args)
+		ret, err := t.iom.ExecuteTool(name, args)
+		if err == nil {
+			return ret, nil
+		}
+		// io 没有该工具 ⇒ 试内置工具（方案 B）。
+		// ⚠️ 只在「确实不存在」时才继续；io 的**执行失败**必须如实上抛，
+		// 否则会把「设备离线」误报成「工具不存在」，让调用方按 missing
+		// 策略跳过——这与 P3 修过的父 io 吞错误是同一族陷阱。
+		if !agentIO.IsToolNotFound(err) {
+			return nil, err
+		}
 	}
-	return nil, fmt.Errorf("tool %s not found", name)
+	// ② 内核内置工具
+	if hasBuiltin(name) {
+		return builtinExec(name, args)
+	}
+	return nil, agentIO.ToolNotFound(name)
 }
 
 var _ ToolAPI = (*toolImpl)(nil)
@@ -78,6 +90,21 @@ func (t *toolImpl) ToolDefByName(name string) *ToolDef {
 				Description:  def.Description,
 				Parameters:   def.Parameters,
 				ParallelSafe: def.ParallelSafe,
+			}
+		}
+	}
+	// ③ 内核内置工具（方案 B）：此前这里直接返回 nil ⇒ 插件既查不到也调不了
+	//    memory_*/knowledge_*/doc_*/person_*。
+	for _, d := range builtinDefs() {
+		if d.Name == name {
+			return &ToolDef{
+				Name:        d.Name,
+				Description: d.Description,
+				Parameters:  d.Parameters,
+				// ⚠️ 内置工具**默认不声明并发安全**：它们含 SQLite 写与召回，
+				// 且部分依赖 per-agent 状态（驻留子是轻量内核，memory 为 nil）。
+				// 保守默认 = 不并发，与它们今天的行为一致。
+				ParallelSafe: false,
 			}
 		}
 	}
@@ -128,4 +155,26 @@ func (t *toolImpl) canUseDevice(deviceID string) bool {
 		return true
 	}
 	return deviceAuthQuery(deviceID)
+}
+
+// builtinExec 执行内核内置工具。
+//
+// 放在本文件是因为要用 agentIO.ErrToolNotFound（sdk/tool.go 未导入 agentIO）。
+// 未注入 provider 时返回**类型化**的 not-found，使调用方（如 seq 的
+// missing 策略）能把它与「插件执行失败」区分开 —— 二者的处置完全不同。
+func builtinExec(name string, args map[string]interface{}) (string, error) {
+	if builtinProv == nil {
+		return "", agentIO.ToolNotFound(name)
+	}
+	return builtinProv.Exec(name, args)
+}
+
+// hasBuiltin 报告该名字是否是可见的内置工具。
+func hasBuiltin(name string) bool {
+	for _, d := range builtinDefs() {
+		if d.Name == name {
+			return true
+		}
+	}
+	return false
 }
