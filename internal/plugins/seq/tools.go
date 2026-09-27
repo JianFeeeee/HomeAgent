@@ -44,6 +44,15 @@ func seqToolDefs() []toolDefInfo {
 			},
 		},
 		{
+			Name: "seq_help",
+			Description: "查看工具序列的完整格式说明与可照抄的示例。**写序列前先查这个** —— " +
+				"tools 字段的分隔符、in/out 的写法、as 与 out 的关系都在这里。",
+			Parameters: map[string]interface{}{
+				"type":       "object",
+				"properties": map[string]interface{}{},
+			},
+		},
+		{
 			Name: "seq_list",
 			Description: "列出全部可用序列：名称、描述、组数与各组的签名（in/out）。" +
 				"按名调用前先用它确认名称与签名。",

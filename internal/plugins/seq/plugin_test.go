@@ -1,6 +1,7 @@
 package seq
 
 import (
+	"fmt"
 	"strings"
 	"testing"
 )
@@ -17,6 +18,7 @@ func TestAllSixSeqToolsRegistered(t *testing.T) {
 	p := newTestPlugin(t)
 	want := []string{
 		"seq_create", "seq_list", "seq_delete", "seq_run", "seq_call", "seq_when_call",
+		"seq_help", // 格式说明与可照抄示例（真机实跑后加：模型踩格式坑各试 1~3 次）
 	}
 	defs := p.toolDefs()
 	for _, name := range want {
@@ -157,4 +159,159 @@ func keysOf(m map[string]toolDefInfo) []string {
 func newTestPlugin(t *testing.T) *Plugin {
 	t.Helper()
 	return &Plugin{name: "seq", store: NewStore(t.TempDir())}
+}
+
+// ⑦ seq_help 必须存在，且**只返回文本**（与仓内 output_send__*_help 同范式）。
+//
+// 动机来自真机实跑：模型在写序列时踩了三个坑，各试了 1~3 次才改对
+//
+//	① tools 漏末尾的 ';'      → 「末尾缺少 ';'」
+//	② group 的 in 传成字符串   → 重试 3 次
+//	③ as 指向未声明的 out 槽    → 静态校验拦下
+//
+// 这三处的**格式细节**都适合集中在一处可查的地方，而不是散在六个工具
+// 描述里（描述有长度限制，细节写不进去）。
+func TestSeqHelpRegistered(t *testing.T) {
+	p := newTestPlugin(t)
+	def, ok := p.toolDefs()["seq_help"]
+	if !ok {
+		t.Fatalf("seq_help 未注册（已注册：%v）", keysOf(p.toolDefs()))
+	}
+	if strings.TrimSpace(def.Description) == "" {
+		t.Error("seq_help 的 description 为空 —— 模型不知道该什么时候查它")
+	}
+	if def.ParallelSafe {
+		t.Error("seq_help 不该声明并发安全（它是纯查询）")
+	}
+}
+
+// ⑧ ★ seq_help 的内容必须覆盖真机踩过的**每一个**坑。
+//
+// 判据从"坑"出发而非从"我打算写什么"出发：下面每一项都对应一次真实失败。
+func TestSeqHelpCoversRealPitfalls(t *testing.T) {
+	p := newTestPlugin(t)
+	out, err := p.dispatch("seq_help", map[string]interface{}{})
+	if err != nil {
+		t.Fatalf("seq_help 失败: %v", err)
+	}
+	text, _ := out.(string)
+	if strings.TrimSpace(text) == "" {
+		t.Fatal("seq_help 返回空")
+	}
+	need := []struct{ key, want string }{
+		{"①tools 是字符串且 ; 结尾", ";"},
+		{"②in/out 是对象", "对象"},
+		{"③as 必须在 out 声明", "out"},
+		{"④groups 与 file 二选一", "file"},
+		{"⑤组内并行组间串行", "并行"},
+		{"⑥when 条件", "when"},
+	}
+	for _, n := range need {
+		if !strings.Contains(text, n.want) {
+			t.Errorf("seq_help 缺少要点「%s」（应含 %q）", n.key, n.want)
+		}
+	}
+}
+
+// ⑨ seq_help 必须给一个**可直接照抄**的完整例子。
+//
+// 实跑里模型是照着自己理解拼 JSON 的，踩了两次格式坑。
+// 一个正确样例比三段描述更有用。
+func TestSeqHelpIncludesCopyableExample(t *testing.T) {
+	p := newTestPlugin(t)
+	out, err := p.dispatch("seq_help", map[string]interface{}{})
+	if err != nil {
+		t.Fatalf("seq_help 失败: %v", err)
+	}
+	text, _ := out.(string)
+	if !strings.Contains(text, `"groups"`) {
+		t.Fatalf("seq_help 未包含示例: %s", truncateForMsg(text, 300))
+	}
+	// 例子必须能被本包自己的解析器接受 —— 判据直接拿它过一遍 Parse。
+	_ = err
+	if err := validateHelpExample(text); err != nil {
+		t.Errorf("seq_help 里的示例**自己解析不过**（模型照抄必然失败）: %v", err)
+	}
+}
+
+func truncateForMsg(s string, n int) string {
+	if len(s) <= n {
+		return s
+	}
+	return s[:n] + "..."
+}
+
+// validateHelpExample 从 seq_help 文本里抽出示例并交给**本包自己的解析器**校验。
+//
+// 为什么要这么判：seq_help 是**给模型照抄的**。如果示例本身解析不过
+// （例如 tools 少一个 ';'、in 写成了字符串），模型照抄必然失败 —— 而这类
+// bug 从"文本里有没有某个词"是看不出来的。
+//
+// 做法：从文本里取第一个含 `"groups"` 的 JSON 对象（花括号配平扫描），
+// 直接喂给 Parse。
+func validateHelpExample(help string) error {
+	// ⚠️ 两个坑（都踩过）：
+	//  1. 不能用 strings.Index(help, `{"name"`)：帮助文本的「格式要点」里
+	//     也有一段 `{"name":…, "groups":[…]}` 示意（有意写的），先命中它
+	//     会截到非示例的片段，报出莫名其妙的 invalid character。
+	//  2. 基准必须统一。下面全程在**同一个**子串 base 上做偏移，
+	//     绝不把 base 的下标拿去切 help。
+	const marker = "【可照抄的完整示例】"
+	mi := strings.Index(help, marker)
+	if mi < 0 {
+		return fmt.Errorf("help 里缺少【可照抄的完整示例】小节")
+	}
+	base := help[mi+len(marker):]
+
+	// 找第一行"整行就是一个 JSON 对象"的内容
+	var line string
+	for _, l := range strings.Split(base, "\n") {
+		t := strings.TrimSpace(l)
+		t = strings.Trim(t, "`")
+		if strings.HasPrefix(t, `{"name"`) {
+			line = t
+			break
+		}
+	}
+	if line == "" {
+		return fmt.Errorf("示例小节里找不到一整行的 JSON 序列")
+	}
+
+	// 在 base 上定位该行，再做括号配平扫描（全程同一基准）
+	off := strings.Index(base, line)
+	depth := 0
+	inStr := false
+	esc := false
+	for i := off; i < len(base); i++ {
+		c := base[i]
+		switch {
+		case esc:
+			esc = false
+		case c == '\\' && inStr:
+			esc = true
+		case c == '"':
+			inStr = !inStr
+		case inStr:
+		case c == '{':
+			depth++
+		case c == '}':
+			depth--
+			if depth == 0 {
+				_, err := Parse([]byte(base[off : i+1]))
+				if err != nil {
+					return fmt.Errorf("示例解析失败: %w（示例前 120 字：%s）",
+						err, truncateForMsg(base[off:min(i+1, off+120)], 120))
+				}
+				return nil
+			}
+		}
+	}
+	return fmt.Errorf("示例 JSON 括号未配平")
+}
+
+func min(a, b int) int {
+	if a < b {
+		return a
+	}
+	return b
 }

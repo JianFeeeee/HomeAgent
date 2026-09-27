@@ -165,6 +165,9 @@ func (p *Plugin) dispatch(name string, args map[string]interface{}) (interface{}
 	switch name {
 	case "seq_create":
 		return p.seqCreate(args)
+	case "seq_help":
+		// 纯查询：返回格式说明 + 可照抄示例（示例由判据校验其**自己解析得过**）
+		return seqHelpText(), nil
 	case "seq_list":
 		return p.seqList()
 	case "seq_delete":
