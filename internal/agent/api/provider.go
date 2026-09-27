@@ -408,9 +408,16 @@ func (p *LuaAdaptedProvider) Chat(ctx context.Context, req *CompletionRequest) (
 		return nil, fmt.Errorf("unmarshal unified response: %w (body: %s)", err, unifiedJSON)
 	}
 
-	// 诊断：tool_calls 存在但参数为空——上游/适配器丢参数，打印原始响应片段定位
+	// 诊断：tool_calls 存在但参数为空——上游/适配器丢参数，打印原始响应片段定位。
+	//
+	// ★ 判据是 argsLookDropped(tc.RawArguments)，不是 len(tc.Arguments)==0。
+	//
+	//   零参数工具（seq_list / *_list / seq_help，properties 本来就是 {}）
+	//   上游会明确回 "arguments":"{}"。旧判定把"空 map"当"丢了参数"，
+	//   部署后误报 14 次 —— 而这条诊断的本职是抓**真丢参数**，
+	//   噪音会把真信号淹掉。详见 argsLookDropped。
 	for _, tc := range result.ToolCalls {
-		if len(tc.Arguments) == 0 && tc.RawArguments == "" {
+		if argsLookDropped(tc.RawArguments) {
 			log.Printf("[provider:%s] tool_call %s (%s) has empty arguments; raw body head: %s",
 				p.name, tc.Name, tc.ID, string(rawResp[:min(len(rawResp), 400)]))
 		}
@@ -660,6 +667,31 @@ func normalizeStreamToolCall(tc openAIToolCall) ToolCall {
 	}
 }
 
+// argsLookDropped 报告「上游/适配器把 tool_call 的参数丢了」。
+//
+// 上游 JSON 里 arguments 有三种形态，只有第一种是真丢参数：
+//
+//	"arguments":"{}"        → 零参数工具的正常形态，不是丢失（生产误报 14 次）
+//	"arguments":"{\"a\":1}" → 正常
+//	无 arguments 键 / 空串   → 真的丢了
+//
+// 刻意**不看**解析后的 Arguments map：`parseToolArguments("{}")` 返回的是
+// 非 nil 的空 map，用 len()==0 判定必然误伤零参数工具。
+func argsLookDropped(rawArgs string) bool {
+	trimmed := strings.TrimSpace(rawArgs)
+	// 上游没给 arguments 键时 Go 侧拿到空串；给空白也等价于没给。
+	if trimmed == "" {
+		return true
+	}
+	// 显式的空 JSON 对象：解析成功但没有字段 ⇒ 上游确实回了参数。
+	var probe map[string]json.RawMessage
+	if err := json.Unmarshal([]byte(trimmed), &probe); err == nil {
+		return false
+	}
+	// 解析失败（如 arguments 是一段半截 JSON）——参数本身就是坏的，等同于丢失。
+	return true
+}
+
 func parseToolArguments(v interface{}) map[string]interface{} {
 	switch x := v.(type) {
 	case nil:
@@ -750,6 +782,7 @@ func pickFirstInt(a, b int) int {
 	}
 	return b
 }
+
 // streamHTTPClient 返回专用的流式 HTTP client（懒初始化）。
 // SSE 长连接不能套整体超时（非流式 180s 会在长流中途报断），
 // 只保留拨号/握手超时。
