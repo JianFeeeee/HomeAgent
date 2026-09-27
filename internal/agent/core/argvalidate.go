@@ -258,9 +258,13 @@ func (a *Agent) toolParallelSafe(name string) bool {
 	if a == nil {
 		return false
 	}
+	// ⚠️ 这里用 ConcurrencySafeOf 而不是 ToolDef(name).ParallelSafe：
+	// 后者每次调用**拷贝整个 ToolDef**（含 2 个 map 与 Cleaner 函数指针），
+	// 而本函数在每批并发判据里对每个工具各调一次 —— 1000 并发就是 1000 次
+	// 拷贝。语义完全等价（两者都算 ParallelSafe && !Serial），只是不拷贝。
 	if a.stageHost != nil {
-		if def := a.stageHost.ToolDef(name); def != nil {
-			return def.ParallelSafe && !def.Serial
+		if safe, ok := a.stageHost.ConcurrencySafeOf(name); ok {
+			return safe
 		}
 	}
 	if a.io != nil {
