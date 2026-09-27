@@ -148,7 +148,7 @@ func TestAdapterEmitsOnlyKnownFields(t *testing.T) {
 		`{"index":1,"id":"c1","type":"function","function":{"name":"f","arguments":"{\"a\":1}"}}]}}]}`
 
 	checked := 0
-	for _, name := range bundledAdapterNames(t) {
+	for _, name := range bundledAdapterNames {
 		vm := NewVM(t.TempDir())
 		loadBundled(t, vm, name)
 		out, err := vm.CallTransformStreamChunk(name, chunk)
