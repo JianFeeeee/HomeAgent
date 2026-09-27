@@ -95,6 +95,12 @@ type Agent struct {
 	// 被授权的输出通道集合（空 = 完整授权，见 AgentConfig.AllowedOutputs）。
 	allowedOutputs []string
 
+	// toolResultWarnTokens 是「单条工具结果过大」的告警阈值（0 = 用默认）。
+	// ⚠️ 方案 B 只**统计与报告**，绝不裁剪（见 toolresult_budget.go 的理由）。
+	toolResultWarnTokens int
+	// toolResultReporter 报告超限；nil 时用 logReporter。
+	toolResultReporter toolResultReporter
+
 	// 插件注册表（用于 plgreload）
 	pluginReg *plugin.Registry
 	pluginDir string

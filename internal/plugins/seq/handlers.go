@@ -324,7 +324,7 @@ func (p *Plugin) runSequence(seq *Sequence, in map[string]interface{}, _ any) (i
 		}
 		sort.Strings(keys)
 		for _, k := range keys {
-			fmt.Fprintf(&sb, "\n  %s = %s", k, truncate(renderResult(slots[k]), 160))
+			fmt.Fprintf(&sb, "\n  %s = %s", k, renderSlot(slots[k]))
 		}
 	}
 	if failed {
@@ -428,15 +428,34 @@ func renderGroupResult(res GroupResult) string {
 		sort.Strings(keys)
 		sb.WriteString("\n出参:")
 		for _, k := range keys {
-			fmt.Fprintf(&sb, "\n  %s = %s", k, truncate(renderResult(res.Slots[k]), 160))
+			fmt.Fprintf(&sb, "\n  %s = %s", k, renderSlot(res.Slots[k]))
 		}
 	}
 	return sb.String()
 }
 
-func truncate(s string, n int) string {
-	if len(s) <= n {
+// renderSlot 渲染一个变量槽的值。
+//
+// ⚠️ 截断**必须显式标注**（方案 B：只统计不静默裁剪）。
+// 我此前在这里写了裸 truncate(…, 160) —— 那正是本仓反复吃亏的
+// 「静默降级」：模型拿到 160 字的残缺值却**不知道**后面还有内容，
+// 会基于残缺数据下结论。端到端判据 TestSeqRunDoesNotSilentlyTruncateSlot
+// 正是为此而写（它抓到过这个缺陷）。
+//
+// 行为：≤ slotDisplayLimit 时给全；超过时给前段 + 显式的「已截断，共 N 字」。
+// 标注让模型能自己决定是否改用更窄的查询重取。
+func renderSlot(v interface{}) string {
+	s := renderResult(v)
+	if len(s) <= slotDisplayLimit {
 		return s
 	}
-	return s[:n] + "..."
+	return fmt.Sprintf("%s …【已截断：共 %d 字，此处显示前 %d 字。"+
+		"若需完整内容，请用更窄的查询条件重跑，或把大结果转存后按需取回】",
+		s[:slotDisplayLimit], len(s), slotDisplayLimit)
 }
+
+// slotDisplayLimit 是变量槽的单条显示上限。
+//
+// 它**只影响展示**，不影响执行：槽里存的始终是完整值（模型可在本轮内
+// 通过条件表达式读到完整内容）。截断仅为控制**回填文本**的长度。
+const slotDisplayLimit = 160

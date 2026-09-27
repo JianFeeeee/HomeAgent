@@ -289,3 +289,51 @@ func TestE2E_DeleteMissingErrors(t *testing.T) {
 		t.Fatal("删除不存在的序列却返回成功")
 	}
 }
+
+// ⑧ ★ 变量槽的值不得**静默**截断（方案 B 的要求在 seq 侧同样适用）。
+//
+// 背景：seq_run / seq_call 回填变量槽时，我当初随手写了 truncate(…, 160)。
+// 那正是本仓反复吃亏的「静默降级」——模型拿到 160 字的残缺值，
+// **不知道**后面还有内容，会基于残缺数据下结论。
+//
+// 正确做法：要么给全，要么**显式标注**被截断（并说明有多少）。
+func TestSeqRunDoesNotSilentlyTruncateSlot(t *testing.T) {
+	long := strings.Repeat("L", 5000) // 远超 160
+	r := newE2ERunner("uptime")
+	r.results["uptime"] = long
+	p := newE2EPlugin(t, r)
+
+	if _, err := p.dispatch("seq_create", map[string]interface{}{
+		"name": "trunc",
+		"groups": []interface{}{
+			map[string]interface{}{
+				"name":  "g1",
+				"in":    map[string]string{},
+				"out":   map[string]string{"summary": "string"},
+				"tools": `{"tool":"uptime","args":{},"as":"summary"} ;`,
+			},
+		},
+	}); err != nil {
+		t.Fatalf("seq_create: %v", err)
+	}
+
+	out, err := p.dispatch("seq_run", map[string]interface{}{"name": "trunc"})
+	if err != nil {
+		t.Fatalf("seq_run: %v", err)
+	}
+	res, _ := out.(string)
+	if !strings.Contains(res, "summary") {
+		t.Fatalf("未回填 summary 槽: %s", res)
+	}
+	// 若确实截断，必须**显式标注**并说明被截了多少
+	if strings.Count(res, "L") < 160 {
+		t.Fatalf("summary 槽几乎为空: %s", res)
+	}
+	if strings.Count(res, "L") < len(long) {
+		// 发生了截断 —— 那必须看得见
+		if !strings.Contains(res, "已截断") && !strings.Contains(res, "省略") {
+			t.Errorf("变量槽被截到 %d/%d 字却**没有任何标注** —— 模型会基于残缺值下结论",
+				strings.Count(res, "L"), len(long))
+		}
+	}
+}
