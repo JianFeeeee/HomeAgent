@@ -272,3 +272,55 @@ func TestBracesInsideStringDoNotAffectDepth(t *testing.T) {
 		t.Errorf("command 被破坏: %q（期望 %q）", got, command)
 	}
 }
+
+// ①' ★ 字段类型不匹配的错误必须**可执行**（真机实跑发现的缺口）。
+//
+// 实测：模型把 `in` 传成字符串 "{}"，拿到的是 encoding/json 的原始报错：
+//
+//	j 序列 JSON 解析失败: json: cannot unmarshal string into Go struct
+//	  field rawSeq.groups.0.in of type map[string]string
+//
+// 这条文案对模型**不可执行**：它说"string 不能解到 map"，却没说
+// "`in` 应该是对象 {键:类型}"。模型为此重试了 **3 次**才改对。
+//
+// 这正是本仓反复吃亏的那类问题（`20s` 少引号 → 静默降级 → 34% 失败率）：
+// 报"事实"而不报"该怎么做"，模型只能猜。
+func TestParseTypeErrorIsActionable(t *testing.T) {
+	// in 传字符串（模型最常犯：以为能写 "{}"）
+	bad := `{"name":"t","groups":[{"name":"g","in":"{}","out":{"x":"string"},` +
+		`"tools":"{\"tool\":\"cmd_run\",\"args\":{},\"as\":\"x\"} ;"}]}`
+	_, err := Parse([]byte(bad))
+	if err == nil {
+		t.Fatal("in 传字符串却通过了")
+	}
+	msg := err.Error()
+	// 必须指出**哪个字段**
+	if !strings.Contains(msg, "in") {
+		t.Errorf("错误应指明出错的字段 in，实际: %s", msg)
+	}
+	// 必须说明**该传什么**
+	if !strings.Contains(msg, "对象") && !strings.Contains(msg, "{") {
+		t.Errorf("错误应说明该传对象（如 {\"键\":\"类型\"}），实际: %s", msg)
+	}
+	// 必须剥掉 Go 内部类型名 rawSeq（那是实现细节，对模型无意义且误导）
+	if strings.Contains(msg, "rawSeq") || strings.Contains(msg, "Go struct field") {
+		t.Errorf("错误里残留 Go 内部类型信息（模型无法据此行动）: %s", msg)
+	}
+}
+
+// ②' 同类问题：tools 传数组而非字符串（模型可能照直觉传数组）。
+func TestParseToolsTypeErrorIsActionable(t *testing.T) {
+	bad := `{"name":"t","groups":[{"name":"g","in":{},"out":{"x":"string"},` +
+		`"tools":[{"tool":"cmd_run","args":{},"as":"x"}]}]}`
+	_, err := Parse([]byte(bad))
+	if err == nil {
+		t.Fatal("tools 传数组却通过了")
+	}
+	msg := err.Error()
+	if !strings.Contains(msg, "tools") {
+		t.Errorf("错误应指明 tools 字段，实际: %s", msg)
+	}
+	if !strings.Contains(msg, "字符串") {
+		t.Errorf("错误应说明 tools 是**字符串**（内含 ; 分隔的 JSON 对象），实际: %s", msg)
+	}
+}
