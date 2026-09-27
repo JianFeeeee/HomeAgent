@@ -53,6 +53,12 @@ _RE_MIXED = re.compile(r"!mixed(\d+)")
 # cmd_run 已声明 ParallelSafe（执行体只依赖入参，共享的 p.history 由
 # recordCmd 加锁保护），且 sleep 是纯计算、不碰磁盘 —— 延迟可精确预期。
 _RE_SLOW = re.compile(r"!slowbatch(\d+)")
+# ★ 强制串行对照：混入一个未声明 ParallelSafe 的工具（knowledge_create）
+#   ⇒ 内核 batchRunnable 必须整批退回串行（"一个不安全就整批降级"）。
+#   有了它才能在**同一套内核**上量出并发 vs 串行的差异 —— 跨版本做不到，
+#   因为旧版的适配器缺 stream_index，多个分片并到槽 0、参数混拼，
+#   工具一个都没真跑（耗时更短但没干活）。
+_RE_SERIALBATCH = re.compile(r"!serialbatch(\d+)")
 
 # 批内并发的工具集。全部是**只读且已核实无共享写**的内置工具，
 # 且都不触发 ONNX（TF-IDF 关键词路）。
@@ -182,6 +188,16 @@ class H(BaseHTTPRequestHandler):
 
         # ---- 批内并发：!batchN / !mixedN ----
         if not has_tool_msg:
+            msb = _RE_SERIALBATCH.search(text)
+            if msb:
+                cnt = max(2, min(int(msb.group(1)), 32))
+                sm = int(os.environ.get("MOCK_TOOL_SLEEP_MS", "200"))
+                tcs = slow_tool_calls(cnt, sm)
+                # 插在中间：确保降级判据不能靠"最后一个工具"侥幸通过
+                tcs.insert(cnt // 2, mk_tool_call(900, SERIAL_TOOL,
+                                                  {"name": "对照/强制串行", "content": "x"}))
+                return self._respond(body, content=None, tool_calls=tcs)
+
             ms = _RE_SLOW.search(text)
             if ms:
                 cnt = max(2, min(int(ms.group(1)), 32))
