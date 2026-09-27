@@ -110,14 +110,14 @@ FAIL（`父的执行失败被误报为『工具不存在』`）；修复后全�
      但 `stepPrepare` 对 `f.StageCtx` **无 nil 兜底**。本次不修（无生产触发路径），
      记为潜在健壮性缺口。
 
-## 阶段 2 ⬜ 并行执行层（进行中：2a/2b/2c 已落地，2d 待做）
+## 阶段 2 ✅ 并行执行层（已完成）
 
 | 子项 | 内容 | 状态 |
 | --- | --- | --- |
-| **2a** | 消息落法：一条 assistant 带全部 tool_calls | ✅ 已提交 |
-| **2b** | `ConsumeToolBlocks` 改 per-call 归档 | ✅ 已提交 |
-| **2c** | `StageContext` 拆 per-tool | ✅ 已提交（**判据待 2d 补强**） |
-| **2d** | 批次调度与保序（`ParallelSafe` + 同通道保序） | ⬜ 待做 |
+| **2a** | 消息落法：一条 assistant 带全部 tool_calls | ✅ `28b42bc` |
+| **2b** | `ConsumeToolBlocks` 改 per-call 归档 | ✅ `25f5c53` |
+| **2c** | `StageContext` 拆 per-tool | ✅ `3d12e82`（判据由 2d 闭合） |
+| **2d** | 批次调度与保序（`ParallelSafe` + 同通道保序） | ✅ `34c0df2` |
 
 **改动要点**（细节见设计文档 §6）：
 
@@ -129,6 +129,28 @@ FAIL（`父的执行失败被误报为『工具不存在』`）；修复后全�
   （`output_channel` 被 `stage.go:18` 依赖）。
 - **2d** 全批 `ParallelSafe` 才并发，否则**整批**降级串行（不做部分并发——
   收益不抵不可预测性）；同 `output_send__<通道>` 多次发送**保序**。
+
+**并发规则**（三条全满足才并发）：批内 >1 个工具；**全部**声明 `ParallelSafe`；
+不含需保序的同通道输出发送。
+
+**结构**：`StepToolBatch` —— fan-out（每工具一 goroutine，各写自己的
+`toolCtxs[i]`）→ join → **按索引顺序**串行收尾。收尾必须串行且按索引：
+`f.Msgs` 是共享切片，且按索引落才能让模型读到的上下文顺序与它自己发出的
+顺序一致。
+
+⚠️ **修掉一个我自己引入的竞争**：`resolveTurnScenes` 会把结果记进**共享**的
+`f.sceneDone` / `f.turnScene`。最初在每个 goroutine 里各调一次 —— 既是数据
+竞争，又会各自触发一次 `EnterSceneWithHint`，**重复计入场景强度**
+（正是 `sceneDone` 注释警告过的问题）。改为 fan-out **之前**解析一次。
+
+### 2c 判据缺口：已由 2d 闭合
+
+2c 落地时做过变体验证（`toolCtxFor` 退回单槽），**两条判据仍全绿** ——
+因为串行路径下「单槽」与「per-tool」行为完全一致，差别只在并发下显现。
+当时据实记为「实现已就位、判据未闭合」。
+
+2d 落地后补了**并发版**判据（`TestBatchConcurrentEachToolSeesOwnContext`）：
+退回单槽时触发 **6 处 DATA RACE 报告 + 串味断言失败**。缺口至此关闭。
 
 ### 遇到的一处**既有**测试竞态（非本次引入，但会污染回归信号）
 
