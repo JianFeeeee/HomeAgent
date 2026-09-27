@@ -6,6 +6,7 @@ import (
 
 	agentAPI "gitcode.com/JianFeeeee/HomeAgent/internal/agent/api"
 	agentIO "gitcode.com/JianFeeeee/HomeAgent/internal/agent/io"
+	sdk "gitcode.com/JianFeeeee/HomeAgent/internal/sdk"
 )
 
 // 阶段 1b：诚实化 Success。
@@ -121,10 +122,24 @@ func TestStageCtxSuccessIsHonestEndToEnd(t *testing.T) {
 			if out := a.runTaskSteps(f); out != outcomeDone {
 				t.Fatalf("runTaskSteps=%v err=%v", out, f.Err)
 			}
-			if len(f.StageCtx.ToolResults) == 0 {
-				t.Fatal("StageCtx.ToolResults 为空")
+			// 阶段 2c 起结果写在**每个工具自己的** ctx 上（不再回写 f.StageCtx），
+			// 因此这里按批索引取对应那份——判据跟着结构走，但断言的仍是
+			// **内核产出的 Success 值本身**。
+			if len(f.toolCtxs) == 0 {
+				t.Fatal("toolCtxs 为空（per-tool ctx 未建立）")
 			}
-			tr := f.StageCtx.ToolResults[0]
+			var tr sdk.ToolResult
+			found := false
+			for i := range f.toolCtxs {
+				if len(f.toolCtxs[i].ToolResults) > 0 {
+					tr = f.toolCtxs[i].ToolResults[0]
+					found = true
+					break
+				}
+			}
+			if !found {
+				t.Fatal("各工具 ctx 的 ToolResults 全为空")
+			}
 			if tr.Success != c.wantSucc {
 				t.Errorf("Success = %v，期望 %v（返回值 %#v）", tr.Success, c.wantSucc, c.toolRet)
 			}

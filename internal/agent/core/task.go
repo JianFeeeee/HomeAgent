@@ -110,6 +110,16 @@ type TaskFrame struct {
 	CurTool       agentAPI.ToolCall
 	CurToolPlugin string
 	CurResult     string
+	// toolCtxs 是**每个工具各一份**的 StageContext（阶段 2c）。
+	//
+	// 为何必须拆：f.StageCtx 原本是单槽，批内每个工具都覆写
+	// （ToolCalls=[单元素]、ToolResults 覆写、Results[0] 回读）。
+	// 并行下 N 个 goroutine 同写一个 ctx = 数据竞争，且 after_toolcall
+	// 插件可能读到**别的工具**的结果。
+	// 拆分后每个工具只写自己那份，Extra 在构造时逐份复制
+	//（output_channel / input_source / media_* —— stage.go:18 依赖前者）。
+	toolCtxs []sdk.StageContext
+
 	// assistantMsgIdx 是本批 assistant(tool_calls) 消息在 Msgs 中的下标，
 	// -1 表示尚未写入。阶段 2a：批内只写**一条** assistant 承载全部
 	// tool_calls，工具结果各自作为 tool 消息追加在它之后。
@@ -682,6 +692,8 @@ func (a *Agent) stepLLM(f *TaskFrame) stepOutcome {
 	}
 	f.ContentOnce = true
 	f.PendingTools = resp.ToolCalls
+	// 阶段 2c：为批内每个工具预建独立的 StageContext（Extra 逐份复制）。
+	f.buildToolContexts()
 	// 阶段 2a：批内消息**预置**为「一个 assistant 带全部 tool_calls」。
 	//
 	// 为何预置而不是逐步 append：并行执行下多个工具的**完成顺序不确定**，
@@ -713,10 +725,12 @@ func (a *Agent) stepToolBegin(f *TaskFrame) stepOutcome {
 	}
 
 	sdkTC := sdk.ToolCall{ID: tc.ID, Name: tc.Name, Plugin: pluginName, Arguments: tc.Arguments}
-	f.StageCtx.ToolCalls = []sdk.ToolCall{sdkTC}
-	f.StageCtx.ToolResults = nil
-	if a.runStage(sdk.StageBeforeToolcall, f.StageCtx) {
-		result := denialResultText(f.StageCtx, tc.Name)
+	// 阶段 2c：写**本工具自己的** ctx，不再覆写共享的 f.StageCtx。
+	tctx := f.toolCtxFor(f.ToolIdx)
+	tctx.ToolCalls = []sdk.ToolCall{sdkTC}
+	tctx.ToolResults = nil
+	if a.runStage(sdk.StageBeforeToolcall, tctx) {
+		result := denialResultText(tctx, tc.Name)
 		f.ensureBatchAssistant()
 		f.Msgs = append(f.Msgs, agentAPI.Message{Role: "tool", ToolCallID: tc.ID, Content: result})
 		a.publishEvent(events.EventToolCall, map[string]interface{}{
@@ -730,7 +744,7 @@ func (a *Agent) stepToolBegin(f *TaskFrame) stepOutcome {
 		f.ToolIdx++
 		return outcomeContinue
 	}
-	tc.Arguments = f.StageCtx.ToolCalls[0].Arguments
+	tc.Arguments = tctx.ToolCalls[0].Arguments
 
 	if pluginName != "" && !a.pluginHealth.isHealthy(pluginName) {
 		result := fmt.Sprintf("插件 %s 处于崩溃状态，已跳过执行，等待自动恢复重载", pluginName)
@@ -777,7 +791,7 @@ func (a *Agent) stepToolExec(f *TaskFrame) stepOutcome {
 	// false。工具失败是以 nil error + 错误**值**返回的，所以判据必须看返回值。
 	// ⚠️ isToolError 必须同时覆盖存量插件的两种失败约定与「成功不误判」，
 	// 否则升级会把存量插件的成功判成失败（见 toolerror_test.go）。
-	f.StageCtx.ToolResults = []sdk.ToolResult{{
+	f.toolCtxFor(f.ToolIdx).ToolResults = []sdk.ToolResult{{
 		CallID: f.CurTool.ID, Name: f.CurTool.Name, Plugin: f.CurToolPlugin,
 		Success: !isToolError(outcome.Raw), Result: outcome.Raw,
 	}}
@@ -791,12 +805,13 @@ func (a *Agent) stepToolAfter(f *TaskFrame) stepOutcome {
 	pluginName := f.CurToolPlugin
 	result := f.CurResult
 
-	a.runStage(sdk.StageAfterToolcall, f.StageCtx)
-	if len(f.StageCtx.ToolResults) > 0 {
+	tctx := f.toolCtxFor(f.ToolIdx)
+	a.runStage(sdk.StageAfterToolcall, tctx)
+	if len(tctx.ToolResults) > 0 {
 		// 此前是 `Result.(string)` 类型断言，而插件返回的多是 map ⇒ 断言几乎
 		// 恒失败，after_toolcall 阶段对结构化结果的改写**静默失效**。
 		// 改为：字符串就替换文本；结构化值则保留其原值并按契约渲染。
-		switch r := f.StageCtx.ToolResults[0].Result.(type) {
+		switch r := tctx.ToolResults[0].Result.(type) {
 		case string:
 			result = r
 		case nil:
@@ -1049,4 +1064,43 @@ func (a *Agent) callLLMWithFallback(req *agentAPI.CompletionRequest, providers [
 	}
 
 	return resp, llmErr
+}
+
+// buildToolContexts 为本批每个工具预建一份独立的 StageContext。
+//
+// Extra 必须**逐份复制**而不是共享同一个 map：Extra 会被 stage handler 写
+// （例如插件注入 media_blocks），共享即竞争。逐份浅拷贝即可——里面的值
+// （string / []agentAPI.ContentBlock）本身是只读的。
+func (f *TaskFrame) buildToolContexts() {
+	base := f.StageCtx
+	f.toolCtxs = make([]sdk.StageContext, len(f.PendingTools))
+	for i := range f.PendingTools {
+		f.toolCtxs[i] = sdk.StageContext{
+			Extra:    copyExtraMap(base.Extra),
+			NoMemory: base.NoMemory,
+		}
+		// Phase 由 runStage 每次调用时设置，此处不预置。
+	}
+}
+
+// toolCtxFor 返回第 i 个工具的 StageContext；越界或未建时回落到 f.StageCtx，
+// 保证调用方不必判空（测试替身等未走 buildToolContexts 的路径）。
+func (f *TaskFrame) toolCtxFor(i int) *sdk.StageContext {
+	if i >= 0 && i < len(f.toolCtxs) {
+		return &f.toolCtxs[i]
+	}
+	return f.StageCtx
+}
+
+// copyExtraMap 浅拷贝 Extra（值视为只读）。
+// nil 安全：base.Extra 为 nil 时返回 nil，写入方需自行判空。
+func copyExtraMap(src map[string]interface{}) map[string]interface{} {
+	if src == nil {
+		return nil
+	}
+	dst := make(map[string]interface{}, len(src))
+	for k, v := range src {
+		dst[k] = v
+	}
+	return dst
 }

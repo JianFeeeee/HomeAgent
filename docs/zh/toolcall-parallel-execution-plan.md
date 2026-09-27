@@ -110,6 +110,56 @@ FAIL（`父的执行失败被误报为『工具不存在』`）；修复后全�
      但 `stepPrepare` 对 `f.StageCtx` **无 nil 兜底**。本次不修（无生产触发路径），
      记为潜在健壮性缺口。
 
+## 阶段 2 ⬜ 并行执行层（进行中：2a/2b/2c 已落地，2d 待做）
+
+| 子项 | 内容 | 状态 |
+| --- | --- | --- |
+| **2a** | 消息落法：一条 assistant 带全部 tool_calls | ✅ 已提交 |
+| **2b** | `ConsumeToolBlocks` 改 per-call 归档 | ✅ 已提交 |
+| **2c** | `StageContext` 拆 per-tool | ✅ 已提交（**判据待 2d 补强**） |
+| **2d** | 批次调度与保序（`ParallelSafe` + 同通道保序） | ⬜ 待做 |
+
+**改动要点**（细节见设计文档 §6）：
+
+- **2a** 现状每工具一对消息；改为一条 assistant 带全部 tool_calls。
+  这本身是协议上更正确的形态（现状不表达「这是一批」）。
+- **2b** `ConsumeToolBlocks` 原本是 IOManager 级单队列，并发下会互相抢媒体 ⇒
+  破坏「媒体必须紧跟自己 toolMsg」那条三轮实测的结论。改按 `call_id` 归档。
+- **2c** `f.StageCtx` 原本是单槽；改为每工具一份，`Extra` 逐份浅拷贝
+  （`output_channel` 被 `stage.go:18` 依赖）。
+- **2d** 全批 `ParallelSafe` 才并发，否则**整批**降级串行（不做部分并发——
+  收益不抵不可预测性）；同 `output_send__<通道>` 多次发送**保序**。
+
+### 遇到的一处**既有**测试竞态（非本次引入，但会污染回归信号）
+
+`TestResidualKeepReturnsTasksToParent` / `TestResidualDropNotifiesSyncCaller`
+偶发失败，报「应处置 2 条，实际 1」。
+
+**根因**（已核实）：`offload_test.go:473` 的 `SpawnResident` 会启动**子 agent 的
+调度器 goroutine**，而测试随后 `child.sched.enqueue(...)` 两条任务、
+立刻 `ApplyResidual` 去读同一队列——**全程无任何同步**。调度器与测试读并发
+同一份 `sched.queue`，条数可能已被取走。
+
+**为什么以前没暴露**：干净基线（阶段 2 之前）连跑 3 次恰好全绿，是**运气**，
+不是确定性。`-race` 单跑该用例也过（无并发源）。本次改动让 core 包耗时略增、
+调度时序变化，才把它翻出来。
+
+**处置**：属测试侧缺陷，不在本阶段范围内，**记为待修**（修法：测试里改用
+不启动调度器的子 agent，或给 enqueue/读取加同步）。记录在此以免后续误判为
+「并行化引入的回归」。
+
+### 2c 的诚实记录：判据在串行下测不出差别
+
+`toolCtxFor` 退回单槽后，两条 2c 判据**仍然全绿**。原因是：
+**串行路径下「单槽」与「per-tool」行为完全一致**——每个工具跑完才进下一个，
+不存在交错。差别只在**并发**下显现（互相覆写 / after 读到别人的结果）。
+
+⇒ 因此 2c 的真正判据**必须与 2d 一起写**：并发执行批内多工具时，
+断言每个工具的 ctx 只带自己的 ToolCalls、after_toolcall 读到自己结果，
+并以 `go test -race` 确认无数据竞争。
+**在 2d 落地前，2c 只能算"实现已就位、判据未闭合"**，不得记为已验证。
+
+---
 ## 阶段 1 ⬜ 结果契约 + 参数预校验
 
 对应设计文档 §4。**动机**：`Success` 硬编码 `true`（`task.go:757` 唯一赋值点）、
@@ -165,52 +215,6 @@ type ToolError struct {
   成功 map / 成功 string）
 - `argvalidate_test.go`：缺 required、类型不符、`"true"` 宽松放行
 - 回归：core 包全绿；**存量插件 smoke**（`internal/plugins` 不得新增 FAIL）
-
----
-
-## 阶段 2 ⬜ 并行执行层
-
-对应设计文档 §6。三处结构性改动，**按耦合从松到紧**推进：
-
-### 2a. 消息落法（最松，先做）
-
-现状：每工具一对 `assistant` + `tool` 消息。
-改为：**一个** assistant 消息携带**全部** tool_calls，后接 N 条 `tool` 消息，
-**按 index 升序**。
-
-**独立价值**：这本身是协议上更正确的形态（现状的「N 个 assistant 各带 1 个 tool_call」
-不表达「这是一批」）。阶段 0.5 判据 2 在此直接生效。
-
-### 2b. ConsumeToolBlocks 改 per-call（最硬的耦合）
-
-`io/channel.go:974` 现为 **IOManager 级单队列**（取走即清空）。
-多模态插件在 3 处调用 `SetToolBlocks`（`multimodal/plugin.go:136,246,320`）。
-
-**并发下会抢走彼此的媒体** ⇒ 挂到错误的 tool 消息上 ⇒ 直接破坏 `task.go:818`
-那条花了三轮实测才定下的结论（媒体必须走 user message、紧跟 toolMsg）。
-
-改法：blocks 按 `call_id` 归档，`ConsumeToolBlocks(callID)` 按 id 取。
-
-**判据**：`toolblocks_concurrent_test.go` —— 2 个工具各自注入媒体，
-断言各自拿到**自己**的块（当前必失败：第二个抢走第一个的）。
-
-### 2c. StageContext 拆 per-tool
-
-`f.StageCtx` 是**单槽**，每工具覆写（`task.go:697-698, 714, 755, 769-771`）。
-并发下 N 个 goroutine 同写一个 ctx = 数据竞争。
-
-改法：每工具一份独立 `StageContext`。`Extra` 必须**逐份复制**——
-现载有 `input_source` / `output_channel` / `media_blocks` / `media_type`
-（`task.go:371-375`），`stage.go:18` 依赖 `output_channel`。
-
-**判据**：`-race` 下跑 2 工具并发批，断言无 race **且**两个 `before_toolcall`
-handler 各自看到正确的 `ToolCalls[0].Name`。
-
-### 2d. 批次调度与保序
-
-- 全批 `ParallelSafe` ⇒ 并发；否则整批串行（**整批降级，不做部分并发**——
-  部分并发的收益不抵其不可预测性）。
-- **同 `output_send__<通道>` 多次发送保序**（用户可见顺序敏感）。
 
 ---
 
