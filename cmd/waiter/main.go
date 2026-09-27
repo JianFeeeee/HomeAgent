@@ -196,6 +196,19 @@ func main() {
 		if err := startDeviceBridge(dg, dt); err != nil {
 			printlnC(colorYellow, fmt.Sprintf("device bridge: %v (continue without)", err))
 		} else {
+			// 命令白名单：waiter.yaml device_cmd_allowlist，留空用内置默认集。
+			//
+			// ★ 在 startDeviceBridge **之后**赋值：白名单只在收到命令时才用，
+			//   放在这里能保证它一定在第一帧命令到达前就绪。
+			if len(cfg.DeviceCmdAllowlist) > 0 {
+				deviceCmdAllowed = buildCmdMatcher(cfg.DeviceCmdAllowlist)
+				printlnC(colorGreen, fmt.Sprintf("device cmd allowlist: %d 条（来自 waiter.yaml）",
+					len(cfg.DeviceCmdAllowlist)))
+			} else {
+				printlnC(colorGreen, fmt.Sprintf("device cmd allowlist: 默认 %d 条（waiter.yaml 未配置 device_cmd_allowlist）",
+					len(defaultCmdAllowlist)))
+			}
+
 			// 客户端本地授权：命令行 --device-authorized 或 waiter.yaml device_authorized
 			auth := *deviceAuthorized || cfg.DeviceAuthorized
 			deviceBridge.SetAuthorized(auth)
