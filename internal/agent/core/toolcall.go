@@ -77,6 +77,15 @@ func (a *Agent) executeToolCallInner(tc agentAPI.ToolCall, channel string, turnS
 		return toolOutcome{Text: msg}
 	}
 
+	// 按 schema 预校验（阶段 1c）。放在分派**之前**：坏参数不该进到工具内部
+	// 再报一句与真因无关的 "path is required"——模型据此只会原样重试。
+	// ⚠️ 校验器刻意宽松（见 argvalidate.go）：只拦真正无法解析的形态，
+	// 对 "true"/20/"20s" 这类宽松等价形态一律放行，避免制造新失败。
+	if ve := a.validateArgsAgainstSchema(tc); ve != nil {
+		log.Printf("[agent] tool %s rejected by schema validation: field=%s reason=%s", tc.Name, ve.Field, ve.Reason)
+		return toolOutcome{Text: renderToolError(tc.Name, ve), Raw: ve}
+	}
+
 	switch {
 	case tc.Name == "persona_set":
 		return toolOutcome{Text: a.executePersonaTool(tc)}
