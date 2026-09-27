@@ -25,6 +25,7 @@ import (
 	"fmt"
 	"log"
 	"strings"
+	"sync"
 	"time"
 
 	agentAPI "gitcode.com/JianFeeeee/HomeAgent/internal/agent/api"
@@ -43,6 +44,13 @@ const (
 	StepPrepare Step = iota
 	// StepLLM 轮次顶部（中断/占位）+ LLM 调用（含 provider 回退与重试）+ post_action。
 	StepLLM
+	// StepToolBatch 并发执行整批工具（阶段 2d）。仅当全批可并发时使用；
+	// 否则走 StepToolBegin/Exec/After 的串行路径。
+	//
+	// 为何要有独立 step：runTaskSteps 是**单线程**驱动状态机的，
+	// 并发必须在一个 step 内 fan-out 并 join，否则"每步一个工具"的游标
+	// 推进模型无法表达"一批同时跑"。
+	StepToolBatch
 	// StepToolBegin 取本批下一个工具，跑 before_toolcall；被拒/插件不健康则跳过。
 	StepToolBegin
 	// StepToolExec 执行工具。**临界区**：副作用不可回滚，执行中不是安全点。
@@ -504,6 +512,8 @@ func (a *Agent) step(f *TaskFrame) stepOutcome {
 		return a.stepPrepare(f)
 	case StepLLM:
 		return a.stepLLM(f)
+	case StepToolBatch:
+		return a.stepToolBatch(f)
 	case StepToolBegin:
 		return a.stepToolBegin(f)
 	case StepToolExec:
@@ -705,8 +715,125 @@ func (a *Agent) stepLLM(f *TaskFrame) stepOutcome {
 	// 若某插件将来要改写 args，需在这里改为「回填后重写该条 assistant」。
 	f.assistantMsgIdx = -1
 	f.ToolIdx = 0
-	f.Step = StepToolBegin
+	// 阶段 2d：全批可并发（且无需保序）⇒ 走并发 step。
+	if f.batchRunnable(a) {
+		f.Step = StepToolBatch
+	} else {
+		f.Step = StepToolBegin
+	}
 	return outcomeContinue
+}
+
+// stepToolBatch **并发**执行整批工具（阶段 2d）。
+//
+// 结构上是「fan-out → join → 顺序落消息」三段：
+//
+//  1. fan-out：每个工具一个 goroutine，各自跑 before_toolcall + 执行。
+//     每个 goroutine 只写**自己那份** toolCtxs[i]（阶段 2c 的拆分正为此），
+//     共享的 f.Msgs / f.ToolResults 在此期间**一律不碰**。
+//  2. join：等全部完成。
+//  3. 落消息：按 **索引顺序**（不是完成顺序）逐个跑 after_toolcall 与落消息。
+//     这一步必须串行——f.Msgs 是共享切片；而且按索引落能让模型读到的
+//     上下文顺序与模型自己发出的顺序一致。
+//
+// 落消息为何不放进 goroutine：那样完成顺序不确定 ⇒ 同一批 tool 消息
+// 顺序随机 ⇒ 模型读到的因果关系与实际执行不符。
+func (a *Agent) stepToolBatch(f *TaskFrame) stepOutcome {
+	n := len(f.PendingTools)
+	results := make([]batchItemResult, n)
+
+	// 保证 assistant 消息**先于**任何 tool 消息存在（协议要求）。
+	f.ensureBatchAssistant()
+
+	// ⚠️ 场景必须**在 fan-out 之前**解析一次：resolveTurnScenes 会把结果
+	// 记进共享的 f.sceneDone / f.turnScene（memorypass.go:289），
+	// 在 N 个 goroutine 里各调一次既是数据竞争，也会各自触发一次
+	// EnterSceneWithHint（重复计入场景强度——正是 task.go 里
+	// sceneDone 注释警告的「多解析一次就多给场景加一次强度」）。
+	for i := 0; i < n; i++ {
+		a.resolveTurnScenes(f, f.PendingTools[i].Name)
+	}
+
+	var wg sync.WaitGroup
+	for i := 0; i < n; i++ {
+		wg.Add(1)
+		go func(idx int) {
+			defer wg.Done()
+			results[idx] = a.runOneTool(f, idx)
+		}(i)
+	}
+	wg.Wait()
+
+	// 顺序收尾：after_toolcall / 裁剪 / 落消息 / 事件。
+	for i := 0; i < n; i++ {
+		r := results[i]
+		f.CurTool = f.PendingTools[i]
+		f.CurToolPlugin = r.plugin
+		f.CurResult = r.text
+		f.CurRaw = r.raw
+		f.ToolIdx = i
+		f.ToolResults = append(f.ToolResults, ToolResultItem{Name: r.name, Output: r.text})
+		if out := a.stepToolAfter(f); out != outcomeContinue {
+			return out
+		}
+	}
+	f.ToolIdx = n
+	f.Step = StepTurnEnd
+	return outcomeContinue
+}
+
+// batchItemResult 是单个工具在并发阶段产出的结果。
+type batchItemResult struct {
+	name   string
+	plugin string
+	text   string
+	raw    interface{}
+	// denied 表示被 before_toolcall 拒绝或插件不健康而未执行（已落 tool 消息）。
+	denied bool
+}
+
+// runOneTool 执行**单个**工具的「before_toolcall + 实际执行」，不碰共享状态。
+//
+// 只写 toolCtxs[idx] 与返回值：f.Msgs / f.ToolResults / f.Cur* 全部由调用方
+// （stepToolBatch 的顺序收尾段，或串行路径的 stepToolBegin/Exec）负责。
+func (a *Agent) runOneTool(f *TaskFrame, idx int) batchItemResult {
+	tc := f.PendingTools[idx]
+	pluginName := a.resolveToolPlugin(tc.Name)
+	res := batchItemResult{name: tc.Name, plugin: pluginName}
+
+	tctx := f.toolCtxFor(idx)
+	tctx.ToolCalls = []sdk.ToolCall{{ID: tc.ID, Name: tc.Name, Plugin: pluginName, Arguments: tc.Arguments}}
+	tctx.ToolResults = nil
+
+	// before_toolcall（拒绝则不执行）
+	if a.runStage(sdk.StageBeforeToolcall, tctx) {
+		res.text = denialResultText(tctx, tc.Name)
+		res.denied = true
+		return res
+	}
+	tc.Arguments = tctx.ToolCalls[0].Arguments
+
+	// 插件崩溃态：不执行
+	if pluginName != "" && !a.pluginHealth.isHealthy(pluginName) {
+		res.text = fmt.Sprintf("插件 %s 处于崩溃状态，已跳过执行，等待自动恢复重载", pluginName)
+		res.denied = true
+		return res
+	}
+
+	// 场景已在 stepToolBatch 的 fan-out **之前**解析完毕（避免竞争与重复计强度），
+	// 这里只读取结果。
+	var turn memory.TurnScene
+	if f != nil && f.sceneDone {
+		turn = f.turnScene
+	}
+	outcome := a.executeToolCallOutcome(tc, f.OutputChannel, turn.Keys...)
+	res.text = outcome.Text
+	res.raw = outcome.Raw
+	tctx.ToolResults = []sdk.ToolResult{{
+		CallID: tc.ID, Name: tc.Name, Plugin: pluginName,
+		Success: !isToolError(outcome.Raw), Result: outcome.Raw,
+	}}
+	return res
 }
 
 // stepToolBegin 取本批下一个工具；批已耗尽或发生中断则进入收尾。
