@@ -516,7 +516,19 @@ function toggleSidebar() {
 //
 //	于是「切到哪页才拉哪页的数据」成为结构性正确，而不是靠 if 串联。
 var TABS = {
-	overview: { fetch: ["status", "runtime"], render: ["renderOverview"] },
+	// ★ overview 必须拉 kernel：总览的 8 个 KPI 里有 5 个读它
+	//   （插件数 / 版本 / LLM / 记忆 / 文档 / 运行时），取值都写成
+	//   `(k && k.plugins)` 这种安全形式——于是缺数据时不报错，
+	//   **只显示「插件 0、记忆 —、文档 —」**，看起来像“服务坏了”。
+	//
+	//   我先前只 grep 了 renderOverview 直接读的 state.*，**漏了它间接
+	//   调用的 updateOverview**，就把 kernel 从总览的数据块里删掉了。
+	//   线上实测印证：state.kernel=false 而 status/runtime 有值。
+	//
+	//   教训：依赖分析必须覆盖**整个调用链**（render → 内部调用的 update*），
+	//   只看入口函数的直接引用会漏。kernel 拉过一次后不再重拉
+	//   （见 starmapFetchBlock 的节流），152KB 只在首屏付一次。
+	overview: { fetch: ["status", "runtime", "kernel"], render: ["renderOverview"] },
 	chat: {
 		fetch: ["status", "proxyServices", "terminals", "cmdHistory"],
 		render: ["renderChat"],
@@ -5491,7 +5503,7 @@ var starmapLabelEl = null;
 //	  1. 默认色改为低饱和灰蓝（全图统一，不假装在分类）
 //	  2. 类型色只在**真的存在多种类型**时才按类型区分（见 smColorFor）
 //	  3. 图例按实际节点集合动态生成，不列出永不出现的类型
-var SM_COLOR_DIM = 0x7d8a9e; // 中性灰蓝：单一类型时的全图色
+var SM_COLOR_DIM = 0xc8ced8; // 银色：单一类型时的全图色（用户裁定）
 var smTypeColors = {
 	// 以下类型在真实数据里几乎不出现（仅 social.go 会产出 person），
 	// 但保留定义：万一出现就能自动获得区分色 + 动态图例条目。
