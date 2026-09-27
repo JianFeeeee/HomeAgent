@@ -193,8 +193,13 @@ func TestBuiltinParallelDeclaredWhereDefined(t *testing.T) {
 		t.Fatalf("读 tooldefs.go 失败: %v", err)
 	}
 	body := string(src)
-	if !strings.Contains(body, "func toolParallel(fn map[string]interface{})") {
-		t.Error("tooldefs.go 里没有 toolParallel 声明项 —— 声明机制不存在")
+	// 声明机制的存在形态：toolDefWith + parallelOpts()，
+	// 载体是 sdk.BuiltinToolDef.ParallelSafe 字段。
+	if !strings.Contains(body, "func toolDefWith(") {
+		t.Error("tooldefs.go 里没有 toolDefWith —— 内置工具的声明机制不存在")
+	}
+	if !strings.Contains(body, "parallelOpts()") {
+		t.Error("tooldefs.go 里没有 parallelOpts() 声明项")
 	}
 	// 逐个确认：这 9 个工具的定义处确实带了 toolParallel 声明。
 	//
@@ -202,16 +207,16 @@ func TestBuiltinParallelDeclaredWhereDefined(t *testing.T) {
 	// `toolDef("knowledge_search", ...)` 这样的示例，先匹配到注释就会
 	// 得出"声明位置丢了"的错误结论（我第一版正是这样）。
 	// 同一个坑：注释里模仿真实签名会污染一切按文本匹配的判据。
-	declStart := strings.Index(body, "func toolDef(")
+	declStart := strings.Index(body, "func toolDefWith(")
 	if declStart < 0 {
-		t.Fatal("tooldefs.go 里没有 toolDef 函数")
+		t.Fatal("tooldefs.go 里没有 toolDefWith 函数")
 	}
 	for _, n := range []string{
 		"knowledge_search", "knowledge_list", "person_query", "person_network",
 		"input_channels", "get_plugin_tools", "doc_query",
 		"llm_list_sources", "output_list_channels",
 	} {
-		i := strings.Index(body[declStart:], `toolDef("`+n+`"`)
+		i := strings.Index(body[declStart:], `toolDefWith("`+n+`"`)
 		if i < 0 {
 			t.Errorf("%q 在 toolDef 之后没有定义 —— 工具名可能已改", n)
 			continue
@@ -221,32 +226,42 @@ func TestBuiltinParallelDeclaredWhereDefined(t *testing.T) {
 		if j := strings.Index(rest, "\n\t\ttools = append"); j > 0 {
 			rest = rest[:j]
 		}
-		if !strings.Contains(rest, `"toolParallel"`) {
-			t.Errorf("%q 的定义没有带 toolParallel 声明 —— 并发声明缺失", n)
+		if !strings.Contains(rest, "parallelOpts()") {
+			t.Errorf("%q 的定义没有带 parallelOpts() 声明 —— 并发声明缺失", n)
 		}
 	}
 
-	// 机制本身要可用：造一个带声明的 Agent，验证内核真能读出来
-	a := &Agent{}
+	// ★ 声明必须**真的被内核读到**。
+	//
+	// 这一条是本判据存在的核心理由：声明写在别处（工具定义处）而内核从
+	// 聚合表读，两者之间可能悄悄脱节 —— 判据全绿但并发能力为零。
+	// 之前那张硬编码 map 就出现过"表在、但工具定义里没有"的状态。
 	seen := 0
-	for _, raw := range a.buildToolDefs() {
-		m, ok := raw.(map[string]interface{})
-		if !ok {
-			continue
-		}
-		fn, ok := m["function"].(map[string]interface{})
-		if !ok {
-			continue
-		}
-		if _, has := fn["parallel_safe"]; has {
+	for _, n := range []string{
+		"knowledge_search", "knowledge_list", "person_query", "person_network",
+		"input_channels", "get_plugin_tools", "doc_query",
+		"llm_list_sources", "output_list_channels",
+	} {
+		if concurrencySafeOf(n) {
 			seen++
-			n, _ := fn["name"].(string)
-			if !a.toolParallelSafe(n) {
-				t.Errorf("%q 的定义带 parallel_safe，但 toolParallelSafe 返回 false", n)
-			}
+		} else {
+			t.Errorf("%q 在定义处声明了 parallelOpts()，但内核聚合表里读不到", n)
 		}
 	}
-	t.Logf("当前 Agent 条件下可见的并行声明数：%d", seen)
+	if seen != 9 {
+		t.Errorf("可并发的内置工具 = %d，期望 9", seen)
+	}
+	t.Logf("内核聚合表里可并发的内置工具数：%d", seen)
+
+	// 写类工具绝不能出现在聚合表的可并发集合里
+	for _, n := range []string{
+		"memory_merge", "memory_delete_entity", "knowledge_create", "doc_commit",
+		"persona_set", "person_set_trait", "llm_set_source", "spawn_child",
+	} {
+		if concurrencySafeOf(n) {
+			t.Errorf("写类工具 %q 被标为可并发 —— 并发会丢更新", n)
+		}
+	}
 }
 
 // osReadFile 读文件（判据用）。

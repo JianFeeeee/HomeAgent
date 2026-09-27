@@ -276,29 +276,18 @@ func (a *Agent) toolParallelSafe(name string) bool {
 
 // builtinToolParallelSafe 从**内置工具定义**里读并发声明。
 //
-// 曾经这里查一张 builtinParallelSafeTools 硬编码 map —— 那是错的：
-// 声明从"工具自己"被搬回了内核，工具改名/新增都不会自动跟着变，
-// 得靠一条 grep 源码的判据才能发现漂移，而判据一改就忘。
+// 声明存在 sdk.BuiltinToolDef 的 ParallelSafe 字段上（与 NoMemory 同构），
+// 由 toolDefWith 在**工具定义处**登记进 builtinDefs 聚合表。
+// 这里只查表，不重扫工具定义 —— 声明是静态的，没有理由每次调用都重算。
+//
+// 走过的弯路（都留在注释里，因为每一种都"看起来能工作"）：
+//  1. 内核里一张 map[string]bool 硬编码名单：声明从工具搬回内核，
+//     工具改名/新增不会跟着变，要靠 grep 源码的判据才���发现漂移；
+//  2. 往 required 变参里塞字符串 "toolParallel"：拼错静默失效，
+//     编译器不报错，而"少一个工具能并发"正是最难察觉的那类问题；
+//  3. 每次查询重跑 buildToolDefs()：正确但 O(工具数) 重复劳动。
 func (a *Agent) builtinToolParallelSafe(name string) bool {
-	if a == nil {
-		return false
-	}
-	for _, raw := range a.buildToolDefs() {
-		m, ok := raw.(map[string]interface{})
-		if !ok {
-			continue
-		}
-		fn, ok := m["function"].(map[string]interface{})
-		if !ok {
-			continue
-		}
-		if n, _ := fn["name"].(string); n != name {
-			continue
-		}
-		safe, _ := fn["parallel_safe"].(bool)
-		return safe
-	}
-	return false
+	return concurrencySafeOf(name)
 }
 
 // batchRunnable 并发执行本批工具。
