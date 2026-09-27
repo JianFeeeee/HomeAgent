@@ -93,10 +93,59 @@ func stopDeviceBridge() {
 
 // ===== 命令分发 =====
 
-// homeagent 能力白名单命令（与 remotedevice 插件对齐）
-var homeagentAllowCmd = regexp.MustCompile(
-	"^(ls|pwd|whoami|uname|date|echo|uptime|hostname|cat|df|free|ps|ip|dir|node|python3?|npm|git|curl|wget|systeminfo|tasklist)\\b",
-)
+// defaultCmdAllowlist 是**内置默认**命令白名单（命令名的第一段）。
+//
+// 只收「只读/低风险」的诊断类命令。这道闸的唯一作用是挡住
+// rm -rf /、dd、chmod 777、fork 炸弹这类破坏性命令 —— 而触发它的是
+// **agent**（经 device_ctl_cmdrun），不是人，所以需要一道机器闸。
+var defaultCmdAllowlist = []string{
+	"ls", "pwd", "whoami", "uname", "date", "echo", "uptime", "hostname",
+	"cat", "df", "free", "ps", "ip", "dir", "node", "python3", "python",
+	"npm", "git", "curl", "wget", "systeminfo", "tasklist",
+}
+
+// buildCmdMatcher 由命令名列表构造匹配函数。
+//
+// 只取**命令名的第一段**再整词匹配：这样 "grep -rn x ." 能过，
+// 而 "grepXxx" / "mygrep" 不会因为 contains 而蒙混过关。
+// 空列表 ⇒ 回退默认集（★ 绝不能变成"全放行"）。
+func buildCmdMatcher(cmds []string) func(string) bool {
+	if len(cmds) == 0 {
+		cmds = defaultCmdAllowlist
+	}
+	set := make(map[string]bool, len(cmds))
+	for _, c := range cmds {
+		if c = strings.TrimSpace(c); c != "" {
+			set[c] = true
+		}
+	}
+	return func(command string) bool {
+		fields := strings.Fields(strings.TrimSpace(command))
+		if len(fields) == 0 {
+			return false
+		}
+		// 跳过 VAR=value 前缀（`FOO=bar cmd` 这种合法写法）
+		i := 0
+		for i < len(fields) && strings.Contains(fields[i], "=") &&
+			!strings.HasPrefix(fields[i], "-") {
+			i++
+		}
+		if i >= len(fields) {
+			return false
+		}
+		return set[filepath.Base(fields[i])]
+	}
+}
+
+// deviceCmdAllowed 是当前生效的命令白名单匹配函数。
+//
+// 包级变量 + 由 main 从配置赋值，与同文件既有的 sendBridgeResult 同一模式
+// （那里也是包级函数变量，测试可替换）。
+var deviceCmdAllowed = buildCmdMatcher(nil)
+
+// cmdAllowed / defaultCmdAllowed 是两个测试可读的入口。
+func cmdAllowed(command string) bool        { return deviceCmdAllowed(command) }
+func defaultCmdAllowed(command string) bool { return buildCmdMatcher(nil)(command) }
 
 func handleShellCmd(reqID, command string) {
 	cmd := strings.TrimSpace(command)
@@ -104,7 +153,7 @@ func handleShellCmd(reqID, command string) {
 		sendBridgeResult(reqID, "error", "", "empty command")
 		return
 	}
-	if !homeagentAllowCmd.MatchString(cmd) {
+	if !cmdAllowed(cmd) {
 		sendBridgeResult(reqID, "error", "", "command not in whitelist")
 		return
 	}

@@ -304,6 +304,22 @@ func startDaemonDeviceBridge(cfg *Config) {
 	if dg == "" || dt == "" {
 		return
 	}
+	// ★ 命令白名单必须在**这里**也赋值一次。
+	//
+	// 原因：daemon 模式（waiter --daemon，生产两台都这么跑）走的是本函数，
+	// 不经过 main.go 里那处赋值。只改 main.go 的话，配置在 daemon 下**完全不生效**
+	// —— 而症状是"配置写了、启动日志也打了招呼、命令照样被拒"，极难定位。
+	//
+	// 赋值放在 goroutine 之前：白名单在收到第一帧命令时就要就绪。
+	if len(cfg.DeviceCmdAllowlist) > 0 {
+		deviceCmdAllowed = buildCmdMatcher(cfg.DeviceCmdAllowlist)
+		printlnC(colorGreen, fmt.Sprintf("device cmd allowlist: %d 条（来自 waiter.yaml）",
+			len(cfg.DeviceCmdAllowlist)))
+	} else {
+		printlnC(colorGreen, fmt.Sprintf("device cmd allowlist: 默认 %d 条（waiter.yaml 未配置 device_cmd_allowlist）",
+			len(defaultCmdAllowlist)))
+	}
+
 	// 设备桥重连循环：WS 断开时自动重连，并保留配置中的本地授权状态。
 	go runDeviceBridgeLoop(dg, dt, cfg.DeviceAuthorized)
 }
