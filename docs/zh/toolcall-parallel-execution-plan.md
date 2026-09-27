@@ -295,13 +295,25 @@ P3 落地时暴露的**真实缺陷**（不是新需求）：
    `seq_call` 系列留给序列内部组合，递归由 `maxCallDepth` + 环检测负责
    （设计文档 §8.3 本来就这么定，是我把两层混了）。
 
-### 仍未做（需要你定）
+### 遗留项状态
 
-| 项 | 内容 | 说明 |
+| 项 | 内容 | 状态 |
 | --- | --- | --- |
-| **D4** | `ToolAPI` 补 agent 上下文（`CanUse`） | 设备授权闸在 `ToolAPI` 路径**仍然失效** —— 任何经它的调用都绕过授权，不只是序列。**这是已知缺口** |
-| 端到端 | 真机跑一次 `seq_create → seq_run` | 当前只有单元/包级判据，未在真实 agent 上跑通 |
-| 提权 | 内置插件默认加载 | `seq` 目前在 `all.go` 里 import 即注册，需确认是否应默认启用 |
+| **D4** | 设备授权闸在 `ToolAPI` 路径失效 | ✅ **已解决**（`994f198`）。`ToolAPI` 新增 `CanUse`，由 bootstrap 注入 agent 的授权判据；两条路径判定一致性由 `TestCanUseAgreesWithInnerPath` 钉住 |
+| 端到端 | 真机跑一次 `seq_create → seq_run` | ✅ **已完成**（`3d31037`）。并抓出「传参方式完全不可用」的真 bug |
+| 提权 | `seq` 是否默认启用 | ✅ **无需决策**：仓内已有 `IsPluginDisabled` / `AddDisabledPlugin` 机制，任何插件（含内置）都可被用户禁用，`seq` 无需特殊处理 |
+
+### 仍需注意的两点
+
+1. **缺 `device_id` 时是 fail-open**（放行）。这是内核既有语义
+   （`TestDeviceToolAuth_*` 依赖它），本次**未擅自改**；已由
+   `TestCanUseMatchesInnerFailOpenOnMissingDeviceID` 钉住现状。
+   若要改成 fail-closed，**必须内核与 `ToolAPI.CanUse` 两处同时改**，
+   否则两条路径判定不一致本身就是漏洞。
+
+2. **`TestResidual*` 既有竞态**（`offload_test.go`）：`SpawnResident` 起了
+   子调度器 goroutine，而测试 enqueue 后无同步就读同一队列。
+   与本次改动无关，已定位根因，待修。
 
 ## 阶段纪律 ［沿用本仓既有教训］
 
