@@ -48,7 +48,7 @@ func (a *Agent) buildMemoryContext(input string, maxTokens int, scenes []string)
 // query 取**清洗后**的输入（通道 Cleaner 的输出），与裁剪侧同一套语义：
 // 原始输入里的 ANSI/base64/JSON 包装会把相关性打分带偏。清洗为空时回退原文。
 func (a *Agent) buildTaskMemoryContext(f *TaskFrame, input string, maxTokens int) string {
-	scenes := sceneKeysFor(evtOf(f), "")
+	scenes := a.sceneKeysFor(evtOf(f), "")
 	if f == nil {
 		return a.recallText(input, "input", maxTokens, scenes)
 	}
@@ -63,11 +63,9 @@ func (a *Agent) buildTaskMemoryContext(f *TaskFrame, input string, maxTokens int
 	if f.Evt != nil && f.Evt.Source != "" {
 		trigger = "input:" + f.Evt.Source
 	}
-	// 场景集合 = 声明（主动）+ 涌现（被动）两条路的并集。
+	// 场景集合 = 声明（主动）+ 涌现（被动）两条路的并集（去重）。
 	turn := a.resolveTurnScenes(f, "")
-	for _, k := range turn.Keys {
-		scenes = append(scenes, k)
-	}
+	scenes = mergeSceneKeys(scenes, turn.Keys)
 	return a.recallText(query, trigger, maxTokens, scenes)
 }
 
