@@ -148,17 +148,24 @@ type IOManager struct {
 
 	// toolBlocks：插件工具注入多模态内容块，process.go 在下一条 tool message 时消费。
 	// 用 interface{}[] 避免 import api.ContentBlock 导致的循环依赖。
-	toolBlocksMu      sync.Mutex
-	toolPendingBlocks []interface{}
+	toolBlocksMu sync.Mutex
+	// toolPendingBlocks 按 **call_id** 归档多模态块。
+	//
+	// 为何不用单槽：并行执行下（同批多个 tool_call 同时跑），单槽会让
+	// 后执行的 ConsumeToolBlocks 抢走前一个工具注入的媒体 ⇒ 挂到错误的
+	// tool 消息上。task.go 里"媒体必须紧跟自己的 toolMsg"那条结论
+	// （三轮实测得出）会被直接破坏。
+	toolPendingBlocks map[string][]interface{}
 }
 
 func NewIOManager() *IOManager {
 	return &IOManager{
-		devices:     make(map[string]Device),
-		inputCh:     make(chan *InputEvent, 256),
-		interruptCh: make(chan *InputEvent, 64),
-		outputCh:    make(chan *OutputEvent, 256),
-		channelReg:  NewChannelRegistry(),
+		devices:           make(map[string]Device),
+		inputCh:           make(chan *InputEvent, 256),
+		interruptCh:       make(chan *InputEvent, 64),
+		outputCh:          make(chan *OutputEvent, 256),
+		channelReg:        NewChannelRegistry(),
+		toolPendingBlocks: make(map[string][]interface{}),
 	}
 }
 
@@ -1007,17 +1014,50 @@ func (d *GPIODevice) Execute(tool string, args map[string]interface{}) (interfac
 
 // SetToolBlocks 插件工具调用时注入多模态内容块（image_url/audio_url 等），
 // 下一条 tool message 追加这些块到 content 数组（OpenAI 多模态格式）。
+// SetToolBlocks 写入**当前调用**的多模态块（无 call_id 语境时的兼容入口）。
+//
+// ⚠️ 兼容语义：多模态插件（multimodal/plugin.go:136,246,320）调的是
+// **无参** SetToolBlocks —— 那时内核还拿不到"当前是哪个 call"。
+// 并行化后这条路径**不可靠**（无法区分同批多个工具），因此新增
+// SetToolBlocksFor(callID, blocks) 供内核在执行前登记 call_id。
+// 本方法保留给串行/单工具场景与存量调用方。
 func (m *IOManager) SetToolBlocks(blocks []interface{}) {
-	m.toolBlocksMu.Lock()
-	m.toolPendingBlocks = blocks
-	m.toolBlocksMu.Unlock()
+	m.SetToolBlocksFor("", blocks)
 }
 
-// ConsumeToolBlocks 返回并清空 pending blocks，process.go 在 append tool message 时调用。
-func (m *IOManager) ConsumeToolBlocks() []interface{} {
+// SetToolBlocksFor 按 call_id 归档多模态块 —— 并行安全的入口。
+func (m *IOManager) SetToolBlocksFor(callID string, blocks []interface{}) {
 	m.toolBlocksMu.Lock()
-	blocks := m.toolPendingBlocks
-	m.toolPendingBlocks = nil
-	m.toolBlocksMu.Unlock()
+	defer m.toolBlocksMu.Unlock()
+	if m.toolPendingBlocks == nil {
+		m.toolPendingBlocks = make(map[string][]interface{})
+	}
+	m.toolPendingBlocks[callID] = blocks
+}
+
+// ConsumeToolBlocks 返回并清空 pending blocks（兼容入口，取 callID=""）。
+func (m *IOManager) ConsumeToolBlocks() []interface{} {
+	return m.ConsumeToolBlocksFor("")
+}
+
+// ConsumeToolBlocksFor 取走并清空**指定 call** 的块。
+//
+// 取走即消费（第二次返回空）：块被 ConsumeToolBlocksFor 拿走或
+// ClearToolBlocks 清理后不再返回。
+//
+// ⚠️ 未知 callID 返回空且**不影响他人**的块 —— 这一点是并行下的关键：
+// 若这里误取走别人的块，媒体会挂到错误的 tool 消息上。
+func (m *IOManager) ConsumeToolBlocksFor(callID string) []interface{} {
+	m.toolBlocksMu.Lock()
+	defer m.toolBlocksMu.Unlock()
+	blocks := m.toolPendingBlocks[callID]
+	delete(m.toolPendingBlocks, callID)
 	return blocks
+}
+
+// ClearToolBlocks 清理某个 call 的块（工具超时/取消时避免泄漏）。
+func (m *IOManager) ClearToolBlocks(callID string) {
+	m.toolBlocksMu.Lock()
+	delete(m.toolPendingBlocks, callID)
+	m.toolBlocksMu.Unlock()
 }
