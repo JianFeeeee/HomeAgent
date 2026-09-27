@@ -590,28 +590,124 @@ func setupGlobals(L *lua.LState) {
 	}))
 }
 
+// bundledAdapterNames 是内核内置的适配器清单。
+//
+// 单独提出来：writeBundledAdapters 与体检判据共用，避免两处各写一份而漏掉
+// 某个（漏掉的后果是该适配器永远不会被更新）。
+var bundledAdapterNames = []string{
+	"openai", "anthropic", "deepseek", "gemini",
+	"github", "groq", "mistral", "ollama", "kimicode",
+	"server",
+}
+
+// writeBundledAdapters 把内嵌适配器落到 DataDir/adapters。
+//
+// ★ 原本是 `if 文件已存在 { continue }` —— 后果是「修了适配器 → 升级二进制
+//
+//	→ 已部署实例上的文件不更新」。这正是仓库 openai.lua 缺 stream_index
+//	透传、而生产早有（2026-08-26 15:46 手工补上，比入库早 32 分钟）却长期
+//	没人发现的机制性原因。
+//
+// 现在的判据（按内容，不按存在）：
+//
+//	文件不存在                        ⇒ 写
+//	有历史清单且盘上 == 上次内嵌       ⇒ 用新的覆盖（只是没跟上新版本）
+//	有历史清单但盘上 != 上次内嵌       ⇒ 不动（用户改过，静默覆盖等于丢修改）
+//	无历史清单（首跑/从旧版本升级）    ⇒ 不动，只补缺失的文件
+//
+// "上次内嵌的版本"记在 DataDir/adapters/.bundled（`<name>\t<sha256>`）。
+//
+// ⚠️ 代价：升级到本版本的**那一次**，已部署实例上的适配器不会更新
+//
+//	（没有历史清单可比）。从第二次升级起自动生效。要立刻生效就删掉
+//	DataDir/adapters 让内核重新解包。
 func (v *VM) writeBundledAdapters() error {
-	known := []string{
-		"openai", "anthropic", "deepseek", "gemini",
-		"github", "groq", "mistral", "ollama", "kimicode",
-		"server",
-	}
-	for _, name := range known {
-		srcPath := "adapters/" + name + ".lua"
-		dstPath := filepath.Join(v.dir, name+".lua")
-		if _, err := os.Stat(dstPath); err == nil {
-			continue
-		}
-		data, err := bundledAdapters.ReadFile(srcPath)
+	prev := v.readBundledManifest()
+	cur := map[string]string{}
+	updated := 0
+
+	for _, name := range bundledAdapterNames {
+		data, err := bundledAdapters.ReadFile("adapters/" + name + ".lua")
 		if err != nil {
 			continue
 		}
-		if err := os.WriteFile(dstPath, data, 0644); err != nil {
-			return fmt.Errorf("write %s: %w", name+".lua", err)
+		sum := sha256Hex(data)
+		dstPath := filepath.Join(v.dir, name+".lua")
+
+		if old, rerr := os.ReadFile(dstPath); rerr == nil {
+			onDisk := sha256Hex(old)
+			prevHash, known := prev[name]
+			switch {
+			case !known:
+				// 无历史清单：无法判断是否被用户改过 ⇒ 不动（与旧行为一致）
+			case onDisk == sum:
+				// 已是当前版本，无需写
+			case onDisk != prevHash:
+				// 与"上次内嵌"不同 ⇒ 用户改过 ⇒ 保留，并记下盘上真实版本
+				fmt.Printf("[lua] adapter %s 已被修改，保留用户版本（内核不覆盖）\n", name+".lua")
+				cur[name] = onDisk
+			default:
+				// onDisk == prevHash != sum ⇒ 只是没跟上新版本，覆盖是安全的
+				if werr := os.WriteFile(dstPath, data, 0644); werr != nil {
+					return fmt.Errorf("write %s: %w", name, werr)
+				}
+				updated++
+			}
+		} else {
+			if werr := os.WriteFile(dstPath, data, 0644); werr != nil {
+				return fmt.Errorf("write %s: %w", name, werr)
+			}
+			updated++
+			fmt.Printf("[lua] installed bundled adapter: %s\n", name+".lua")
 		}
-		fmt.Printf("[lua] installed bundled adapter: %s\n", name+".lua")
+		cur[name] = sum
+	}
+
+	if err := v.writeBundledManifest(cur); err != nil {
+		// 清单写失败只影响下次的判别，不该让启动失败
+		fmt.Printf("[lua] 写内嵌清单失败（下次按不覆盖处理）: %v\n", err)
+	}
+	if updated > 0 {
+		fmt.Printf("[lua] updated %d bundled adapter(s)\n", updated)
 	}
 	return nil
+}
+
+func (v *VM) manifestPath() string { return filepath.Join(v.dir, ".bundled") }
+
+// readBundledManifest 读上次运行时的内嵌清单（name → sha256）。
+func (v *VM) readBundledManifest() map[string]string {
+	out := map[string]string{}
+	b, err := os.ReadFile(v.manifestPath())
+	if err != nil {
+		return out
+	}
+	for _, line := range strings.Split(string(b), "\n") {
+		parts := strings.SplitN(strings.TrimSpace(line), "\t", 2)
+		if len(parts) == 2 && parts[0] != "" {
+			out[parts[0]] = parts[1]
+		}
+	}
+	return out
+}
+
+func (v *VM) writeBundledManifest(m map[string]string) error {
+	var sb strings.Builder
+	for _, name := range bundledAdapterNames {
+		if h, ok := m[name]; ok {
+			sb.WriteString(name + "\t" + h + "\n")
+		}
+	}
+	tmp := v.manifestPath() + ".tmp"
+	if err := os.WriteFile(tmp, []byte(sb.String()), 0644); err != nil {
+		return err
+	}
+	return os.Rename(tmp, v.manifestPath())
+}
+
+func sha256Hex(b []byte) string {
+	sum := sha256.Sum256(b)
+	return hex.EncodeToString(sum[:])
 }
 
 func luaValueToGo(lv lua.LValue) interface{} {
