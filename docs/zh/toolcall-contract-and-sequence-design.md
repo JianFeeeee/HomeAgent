@@ -302,7 +302,7 @@ ParallelSafe bool `json:"parallel_safe,omitempty"`
       "in":  { "host": "string", "verbose": "bool" },
       "out": { "summary": "string", "load": "string" },
       "when": "$args.verbose == true",
-      "tools": "{tool:cmd_run,args:{command:\"ssh $args.host uptime\"},as:summary} ; {tool:cmd_run,args:{command:\"ssh $args.host top -bn1\"},as:load} ;"
+      "tools": "{\"tool\":\"cmd_run\",\"args\":{\"command\":\"ssh $args.host uptime\"},\"as\":\"summary\"} ; {\"tool\":\"cmd_run\",\"args\":{\"command\":\"ssh $args.host top -bn1\"},\"as\":\"load\"} ;"
     },
     {
       "name": "巡检全部",
@@ -310,7 +310,7 @@ ParallelSafe bool `json:"parallel_safe,omitempty"`
       "in":  { "hosts": "array" },
       "out": { "reports": "array", "errors": "array" },
       "parallel": true,
-      "tools": "{tool:seq_call,args:{group:\"拉取单台\",args:{host:$args.hosts[0]}},as:reports} ; {tool:seq_call,args:{group:\"拉取单台\",args:{host:$args.hosts[1]}},as:reports} ;"
+      "tools": "{\"tool\":\"seq_call\",\"args\":{\"group\":\"拉取单台\",\"args\":{\"host\":$args.hosts[0]}},\"as\":\"reports\"} ; {\"tool\":\"seq_call\",\"args\":{\"group\":\"拉取单台\",\"args\":{\"host\":$args.hosts[1]}},\"as\":\"reports\"} ;"
     }
   ]
 }
@@ -376,6 +376,10 @@ ParallelSafe bool `json:"parallel_safe,omitempty"`
 `tools` 写成字符串而非 `[{…},{…}]`，是为了**让格式错误可被立即发现**，
 而不是静默丢一个工具。但 `;` 本身**只有在 tool 被 `{…}` 包裹时才是安全的**——
 这一点是本设计的关键，不加包裹会立刻出问题（见下）。
+
+⚠️ **每个 tool 必须是合法 JSON**（键要带引号）：`{"tool":"cmd_run","args":{...},"as":"x"} ;`
+写成 `{tool:cmd_run,...}` 是**非法 JSON**，内核用 `encoding/json` 解析会直接失败。
+（这条是 P1 实现时判据跑出来的真实缺陷，不是假想。）
 
 #### 切分规则（已实测）
 
