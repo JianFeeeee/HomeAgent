@@ -2,6 +2,7 @@ package seq
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"strconv"
 	"strings"
@@ -18,12 +19,24 @@ type toolRunner interface {
 	call(name string, args map[string]interface{}) (string, error)
 }
 
+// errToolNotFound 表示「工具不存在」（未注册 / 插件未加载、已卸载或崩溃）。
+//
+// 它是**本包定义**的标记，不复用内核的 agentIO.ErrToolNotFound：seq 是插件，
+// 拿得到的是 sdk.ToolAPI（ExecuteTool/GetAllTools），拿不到 io 包的类型
+// （见设计文档 §7 的边界声明）。内核侧的类型化错误本就要经 D4 才下放到插件。
+var errToolNotFound = errors.New("工具不存在或未注册")
+
+// IsToolNotFound 报告 err 是否为「工具不存在」。
+func IsToolNotFound(err error) bool { return errors.Is(err, errToolNotFound) }
+
 // GroupResult 是一组的执行结果。
 type GroupResult struct {
 	Group   string
 	Skipped bool // 条件为假而整组跳过
 	Slots   map[string]interface{}
 	Tools   []ToolRun
+	// Missing 列出因「工具不存在」而被 skip/degrade 的工具名。
+	Missing []string
 	Err     error
 }
 
@@ -91,6 +104,18 @@ func execGroup(g Group, args map[string]interface{}, runner toolRunner) (GroupRe
 	var firstErr error
 	for _, r := range results {
 		res.Tools = append(res.Tools, r)
+		tc := g.Tools[r.Order]
+
+		// 「工具不存在」单独处理：动态注册下它是**常态**（插件未加载/崩溃），
+		// 与「执行失败」语义不同 —— 前者该按 missing 策略走，后者才该 retry。
+		//
+		// ⚠️ 必须先于通用的 on_error 检查：若「不存在」先被记成 firstErr/
+		//   failed，missing skip/degrade 就会被 on_error=abort 连坐中断。
+		if r.Err != nil && IsToolNotFound(r.Err) {
+			dealMissing(g, tc, r, &res, &failed, &firstErr)
+			continue
+		}
+
 		if r.Err != nil {
 			if firstErr == nil {
 				firstErr = fmt.Errorf("工具 %s 失败: %w", r.Name, r.Err)
@@ -99,7 +124,7 @@ func execGroup(g Group, args map[string]interface{}, runner toolRunner) (GroupRe
 				failed = true
 			}
 		}
-		tc := g.Tools[r.Order]
+
 		if tc.As == "" {
 			continue
 		}
@@ -421,4 +446,45 @@ func compactJSON(v interface{}) string {
 		return fmt.Sprintf("%v", v)
 	}
 	return string(b)
+}
+
+// parseFallback 解析 degrade 的兜底值（紧凑 JSON 文本）。
+// 解析失败时原样作为字符串返回——兜底值本身不该让整组失败。
+func parseFallback(s string) interface{} {
+	if strings.TrimSpace(s) == "" {
+		return ""
+	}
+	var v interface{}
+	if err := json.Unmarshal([]byte(s), &v); err == nil {
+		return v
+	}
+	return s
+}
+
+// dealMissing 处理「工具不存在」这一**常态**情形（动态注册下插件可能
+// 未加载、已卸载或崩溃），按 group 的 missing 策略处置。
+//
+// 与「执行失败」严格分开：后者才该走 on_error / retry。若把两者混同，
+// 一条"插件挂了"会被当成业务失败反复重试，或反过来该重试的被整组跳过。
+func dealMissing(g Group, tc ToolCall, r ToolRun, res *GroupResult, failed *bool, firstErr *error) {
+	switch g.missingPolicy() {
+	case "skip":
+		res.Missing = append(res.Missing, tc.Tool)
+		return // 不给槽赋值（与「条件为假」同一情形：下游要能应对槽缺失）
+	case "degrade":
+		res.Missing = append(res.Missing, tc.Tool)
+		if tc.As != "" {
+			res.Slots[tc.As] = parseFallback(tc.Fallback)
+		}
+		return
+	default: // fail
+		*failed = true
+		if *firstErr == nil {
+			*firstErr = fmt.Errorf("工具 %s 不存在或未注册"+
+				"（可能属于未加载/已崩溃的插件；用 seq_list 看可用序列，或改用其他工具）", tc.Tool)
+		}
+		if tc.As != "" {
+			res.Slots[tc.As] = "错误：工具不存在"
+		}
+	}
 }
