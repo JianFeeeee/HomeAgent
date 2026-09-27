@@ -1,0 +1,271 @@
+# HomeAgent 生产部署手册（homed / waiter）
+
+> 适用范围：本机（`.60`）的 `homeagent.service`，以及两台设备桥宿主上的
+> `waiter-remote.service`。
+>
+> 静态站 / nginx / 证书的运维见另册
+> [`site-infra-runbook.md`](./site-infra-runbook.md) —— 本册**不涉及**。
+>
+> 记录日期：2026-09-27。本册所有数字均与现场核对过，不是模板值。
+
+---
+
+## 0. 一句话拓扑
+
+```
+                    ┌─────────────────── 本机 .60 ───────────────────┐
+                    │ homeagent.service ← /usr/local/bin/homed      │
+                    │   （必须 -tags=onnxruntime 构建）              │
+  QQ 用户 ─NapCat─► │   :9890  remotedevice 网关                    │
+   （在 106 上）    │   /home/newqqagent/  51G 模型资产（部署不动）   │
+                    └────────┬──────────────────────┬────────────────┘
+                             │ ws 设备桥             │ ws 设备桥
+                 ┌───────────▼──────────┐  ┌────────▼─────────┐
+                 │ 192.168.2.106 fnnas  │  │ 192.168.2.30     │
+                 │ /opt/waiter/waiter   │  │  mainnas         │
+                 │ waiter-remote.service│  │ /opt/waiter/...  │
+                 │ + NapCat(25570)      │  │                  │
+                 └──────────────────────┘  └──────────────────┘
+```
+
+要点：
+
+- **`waiter` 与 `homed` 是两个独立部署单元**，更新其一不影响其二。
+- 设备桥授权（`device_authorized`）在 **waiter 侧**，网关地址也在
+  waiter 的 `waiter.yaml` 里。
+- NapCat（QQ 上游）在 **106** 上，`http://192.168.2.106:25570`。
+
+---
+
+## 1. 部署 homed（本机）
+
+### 1.1 硬前置：必须 onnxruntime 构建
+
+普通 `go build` 只有 ~28MB，**缺 ONNX Runtime**，会让依存句法分析与多模态
+向量化失效。生产二进制是 `-tags=onnxruntime`（约 87MB）。
+
+`deploy/packaging/package-linux.sh:139` 会显式拒绝非 onnxruntime 构建。
+
+### 1.2 ★ 构建参数必须与线上一致
+
+```bash
+CGO_ENABLED=1 CC=cc go build -tags onnxruntime -o /tmp/homed-ort-new \
+  -ldflags "-X .../internal/meta.Version=<v> -X .../internal/meta.Commit=<c>" \
+  ./cmd/homed
+```
+
+**不要顺手加 `-s -w`。** 加了会 strip 掉符号，产物从 ~86.8MB 掉到 ~78MB ——
+体积差 8.8MB 会让人误判成"构建坏了"，而它只是被 strip 了。
+若确实要 strip，须先确认线上也是同样参数，否则两次构建不可比。
+
+验证：
+
+```bash
+go version -m /tmp/homed-ort-new | grep onnxruntime   # 必须有 build -tags=onnxruntime
+ls -l /tmp/homed-ort-new                             # 与 /usr/local/bin/homed 同量级
+```
+
+### 1.3 部署
+
+```bash
+bash deploy-plan.sh check                             # 只读
+NEW_BIN=/tmp/homed-ort-new bash deploy-plan.sh deploy # 需输入 yes
+bash deploy-plan.sh rollback                          # 回滚
+```
+
+- `check`：服务状态、onnxruntime 标签、`libonnxruntime.so`、模型资产、适配器清单
+- `deploy`：备份 → 替换二进制 → 重启 → 验证
+- 备份落在 `/var/tmp/homed-backup-<时间戳>/`，含 `ROLLBACK.sh`、旧二进制、
+  适配器、unit 文件
+- 默认候选 `/tmp/homed-ort`，可用 `NEW_BIN=` 覆盖
+
+### 1.4 部署后必须核对
+
+```bash
+systemctl is-active homeagent.service
+journalctl -u homeagent.service --since "-3 min" | grep "multimodal space active"
+journalctl -u homeagent.service --since "-3 min" | grep -c "registering tool: seq_"  # 应为 7
+```
+
+`multimodal space active: provider=chineseclip dim=512` 是 ONNX 链路真的
+加载起来的标志 —— 缺它说明已降级，只是没报错。
+
+### 1.5 ★ 适配器升级的保护语义
+
+`/home/newqqagent/adapters/.bundled` 记录**上次随包带出的版本**哈希：
+
+| 盘上版本 | 判定 | 行为 |
+| --- | --- | --- |
+| 无 `.bundled`（首次升级） | 未知 | **只补缺失文件，不动已有文件** |
+| 盘上 == 旧内嵌 | 未被改过 | **自动覆盖**为新版本 |
+| 盘上 != 旧内嵌 | **用户改过** | **保留用户版本** |
+
+**2026-09-27 21:50 实测**：生产 `openai.lua` 是 8月26日手工补过 `stream_index`
+的版本（盘上 `1a649be2…` ≠ 旧内嵌 `6374c596…`），被**正确判定为用户修改并保留**。
+
+验证方式（部署前后各跑一次，应完全一致）：
+
+```bash
+md5sum /home/newqqagent/adapters/*.lua | md5sum
+```
+
+### 1.6 两次部署的真实记录（2026-09-27）
+
+| | 19:45 首次 | 21:50 修复后 |
+| --- | --- | --- |
+| 二进制 | 86,496,624 → 86,784,400 | 86,784,400 → 86,811,464 |
+| onnxruntime | ✓ | ✓ |
+| `seq_*` 工具 | 0 → **7** | 7 |
+| 适配器 | 无 `.bundled` ⇒ 一律不动 | 有清单 ⇒ 保护用户修改 |
+| 备份 | `homed-backup-20260927-194554` | `homed-backup-20260927-215026` |
+| `has empty arguments` 误报 | 24 次（仍在增长） | **0 次** |
+
+首次部署前生产二进制构建于**当天 06:36**，而 `seq` 插件引入于更晚的提交 ⇒
+旧实例的 `strings /usr/local/bin/homed | grep -c internal/plugins/seq` 为 **0**。
+它在 QQ 上如实回答"没有编排工具"**不是说谎**，是确实没有。
+
+> 这类"实例自述与代码状态不一致"，**先查二进制构建时间与内含符号**，
+> 别急着怀疑提示词或模型。
+
+---
+
+## 2. 部署 waiter（设备桥，106 / 30）
+
+### 2.1 现状
+
+两台配置相同（同一 `device_gateway`、同一 `device_token`、`device_authorized: true`），
+差异只在登录方式：106 走 `admin@` + `sudo`，30 走 `root@`。
+
+### 2.2 更新
+
+```bash
+bash deploy-waiter.sh check                # 两台一起，只读
+bash deploy-waiter.sh deploy 192.168.2.106 # 需输入 yes
+bash deploy-waiter.sh deploy 192.168.2.30  # 上一台验证通过后再做
+bash deploy-waiter.sh rollback <ip>
+```
+
+**逐台更新，不要并行** —— 两台都连同一网关，同时重启会同时断链。
+
+`deploy` 会：备份 `/opt/waiter/waiter` → 替换 → 重启服务 → 验证
+（服务 active、进程时长、**配置 md5 未变**）。
+
+### 2.3 部署后确认设备已注册
+
+```bash
+journalctl -u homeagent.service --since "-2 min" | grep "device waiter-"
+# 期望：device waiter-fnnas online / device waiter-mainnas online
+```
+
+**2026-09-27 顺手解决的一个悬案**：106 此前一直没有 `online` 日志而 30 正常，
+两台配置与 token 完全相同 ⇒ 差异只可能在旧 waiter 二进制。8月27日那版落在
+"未 bind 时收到 ping 会关连接"的缺陷窗口里，更新后即正常。
+
+### 2.4 命令白名单（`device_cmd_allowlist`）
+
+waiter 的命令白名单原本是**源码里硬编码的正则**（18 个命令），`waiter.yaml` 里
+**没有任何键能改它** ⇒ `find`/`grep`/`sed`/`sort`/`tr` 这些排查问题最常用的
+**只读**命令一律被拒，报错：
+
+```
+device_ctl_cmdrun  device_id:waiter-fnnas  error: command not in whitelist
+```
+
+现改为 `waiter.yaml` 可配置（2026-09-27 随 `7193446` 部署）：
+
+```yaml
+device_cmd_allowlist:
+  - ls
+  - find
+  - grep
+  - sed
+```
+
+- **替换**默认集而非追加 —— 避免"以为加了 find、结果还留着 `python3 -c` 任意执行"
+- 留空 ⇒ 用内置默认集（**绝不能变成"全放行"**，那等于静默拆掉闸门）
+- 生效验证：重启后启动日志应打印
+  `device cmd allowlist: 22 条（来自 waiter.yaml）`
+
+**当前生产配置**：22 条，只读为主（`ls pwd cat du df free ps ip uname uptime
+date hostname find grep sed sort tr wc head tail stat file`）。
+
+> **已知局限**：白名单**只匹配命令名、不看参数** ⇒ `find -delete`、
+> `find -exec rm {} ;`、`sed -i`、`sort -o` 仍能放行。
+> 这是"命令名清单"，**不是"只读保证"**。参数级拦截是后续项。
+> ⇒ 文档与对话里都**不要**把它称作"只读白名单"，那会让人以为写操作被挡住了。
+
+追加到 `waiter.yaml` 的幂等做法（已用于两台）：
+
+```bash
+Y=/opt/waiter/waiter.yaml
+cp -a "$Y" "$Y.bak-$(date +%Y%m%d-%H%M%S)"
+grep -q '^device_cmd_allowlist:' "$Y" || cat >> "$Y" <<'CFG'
+device_cmd_allowlist:
+  - ls
+  - find
+  - grep
+CFG
+systemctl restart waiter-remote.service
+```
+
+---
+
+## 3. 故障排查
+
+### 3.1 "消息发过去没反应"
+
+按这个顺序查，**别跳步**：
+
+```bash
+# 1) 消息到了吗
+journalctl -u homeagent.service --since "-5 min" | grep -E "interrupt from|webhook recv"
+#    群聊里没 @bot 会打 not @bot —— 那不是 bug，是设计
+
+# 2) 任务执行了吗（tools=[] 说明模型没发 tool_call）
+journalctl -u homeagent.service --since "-5 min" | grep "→ response"
+
+# 3) LLM 通吗
+journalctl -u homeagent.service --since "-10 min" | grep -i unreachable
+
+# 4) 代理层活着吗
+curl -s --max-time 8 http://127.0.0.1:8081/v1/models -H "Authorization: Bearer <key>"
+#    data:[] 是正常的（该网关不列模型），能返回即说明进程活着
+```
+
+**"群聊 not @bot"** 与 **"私聊没回"** 是两件事：前者是插件按规则丢弃，
+内核压根没收到任务，自然没有"卡死"。
+
+### 3.2 设备命令被拒
+
+```bash
+journalctl -u homeagent.service --since "-10 min" | grep "not in whitelist"
+```
+
+先确认命令**第一段在不在** `waiter.yaml` 的 `device_cmd_allowlist` 里
+（`netstat`、`systemctl` 不在当前的 22 条内，被拒是**正确行为**）。
+
+### 3.3 适配器流式 tool_call 异常
+
+```bash
+journalctl -u homeagent.service --since "-10 min" | grep -E "finish_reason=length|unmarshal unified"
+```
+
+`非法 JSON 帧` 出现在**启动握手期**属正常（插件启动时的非 JSON 帧），
+只在**运行期持续出现**才是问题。
+
+### 3.4 有告警但不确定是不是缺陷
+
+先看**是不是内核的兜底在工作**。例：`重复申请 stage 锁` 是 SDK 模板在每个
+stage handler 入口自动加锁 + 锁不可重入所致，**插件侧问题**；内核的强制释放
+是有意设计（避免后续插件死锁），不要当内核缺陷去修。详见
+[`toolcall-parallel-execution-plan.md`](./toolcall-parallel-execution-plan.md) 末节。
+
+---
+
+## 4. 已知未修
+
+| 项 | 性质 | 说明 |
+| --- | --- | --- |
+| 白名单不看参数 | 功能限制 | `find -delete`/`sed -i` 能逃，用户已知悉并选择先下发 |
+| `重复申请 stage 锁` | 插件缺陷 | 需改 SDK 模板并重编 9月14日的 `plugins/qq/plugin.bin` |
+| 群聊必须 @ 才触发 | 设计 | 放宽会在群里引发 unwanted 触发 |
