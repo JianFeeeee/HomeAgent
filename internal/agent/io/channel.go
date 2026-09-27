@@ -1,6 +1,7 @@
 package io
 
 import (
+	"errors"
 	"fmt"
 	"log"
 	"runtime/debug"
@@ -9,6 +10,24 @@ import (
 
 	pubsdk "gitcode.com/JianFeeeee/homeagent-sdk/sdk"
 )
+
+// ErrToolNotFound 表示「工具不存在」（未注册 / 所属插件已卸载或崩溃）。
+//
+// 存在的理由：工具是**动态注册**的（buildToolDefs 每轮重建、plgreload 即时生效、
+// 插件崩溃后被摘除），因此「不存在」是运行期常态而非异常。
+// 判别它必须**类型化**：此前 core 靠 strings.Contains(err, "not found in any plugin")
+// 匹配错误文案，而插件的错误文案只要恰好含该子串就会被误判为「工具不存在」
+// 并错误 fallback。errors.Is 才能精确区分「不存在」与「执行失败」——
+// 二者对 on_error 的处置完全不同（前者工具没了，后者可 retry）。
+var ErrToolNotFound = errors.New("工具不存在或未注册")
+
+// ToolNotFound 返回一个包裹 ErrToolNotFound 的错误，带上工具名。
+func ToolNotFound(name string) error {
+	return fmt.Errorf("tool %s: %w", name, ErrToolNotFound)
+}
+
+// IsToolNotFound 报告 err 是否为「工具不存在」。
+func IsToolNotFound(err error) bool { return errors.Is(err, ErrToolNotFound) }
 
 // ChannelDef 描述通道在记忆计算层的行为，与 ToolDef.NoMemory/Cleaner 语义一致。
 type ChannelDef = pubsdk.ChannelDef
@@ -651,15 +670,23 @@ func (m *IOManager) ExecuteTool(name string, args map[string]interface{}) (ret i
 
 	if len(candidates) == 0 {
 		// 自己没这个设备工具 → 看上级（驻留子的设备工具都在父的 io 上）。
+		//
+		// ⚠️ 父的**执行失败**不得被吞成「工具不存在」：那会让 on_error 的
+		// retry 失效（本该重试的失败被判为工具没了，整组被跳过）。
+		// 因此只把父的「确实不存在」继续向上传递，其余错误如实上抛。
 		m.mu.RLock()
 		parent := m.parent
 		m.mu.RUnlock()
 		if parent != nil {
-			if ret, err := parent.ExecuteTool(name, args); err == nil {
+			ret, err := parent.ExecuteTool(name, args)
+			if err == nil {
 				return ret, nil
 			}
+			if !IsToolNotFound(err) {
+				return nil, err
+			}
 		}
-		return nil, fmt.Errorf("tool %s not found", name)
+		return nil, ToolNotFound(name)
 	}
 	defer func() {
 		if r := recover(); r != nil {

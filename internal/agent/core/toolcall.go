@@ -8,6 +8,7 @@ import (
 	"time"
 
 	agentAPI "gitcode.com/JianFeeeee/HomeAgent/internal/agent/api"
+	agentIO "gitcode.com/JianFeeeee/HomeAgent/internal/agent/io"
 	"gitcode.com/JianFeeeee/HomeAgent/internal/knowledge"
 	"gitcode.com/JianFeeeee/HomeAgent/internal/memory"
 	"gitcode.com/JianFeeeee/HomeAgent/internal/memory/document"
@@ -101,9 +102,11 @@ func (a *Agent) executeToolCallInner(tc agentAPI.ToolCall, channel string, turnS
 	if a.stageHost != nil {
 		if result, err := a.stageHost.ExecuteTool(tc.Name, tc.Arguments); err == nil {
 			return fmt.Sprintf("%v", result)
-		} else if !strings.Contains(err.Error(), "not found in any plugin") {
+		} else if !agentIO.IsToolNotFound(err) {
+			// 非「不存在」= 真的执行失败，如实上报（可被 on_error/retry 处置）。
 			return fmt.Sprintf("工具 %s 执行失败: %v", tc.Name, err)
 		}
+		// 是「不存在」：继续往下走 io / 设备路径，两处都没有才报缺工具。
 	}
 
 	// 设备类工具的**授权闸**（最小授权的缺口在这里）。
@@ -128,10 +131,24 @@ func (a *Agent) executeToolCallInner(tc agentAPI.ToolCall, channel string, turnS
 		}
 	}
 	if err != nil {
+		if agentIO.IsToolNotFound(err) {
+			// 工具是动态注册的，"不存在"是常态而非异常（插件未加载/已卸载/崩溃）。
+			// 文案必须让模型知道该做什么，而不是含糊的"执行失败"——
+			// 后者会让模型反复重试同一个不存在的名字。
+			return fmt.Sprintf("工具 %s 不存在或未注册：它可能属于未加载/已崩溃的插件。"+
+				"先调 get_plugin_tools(\"\") 看当前可用工具，或 output_list_channels 看通道；"+
+				"确认名称无误后再调用", tc.Name)
+		}
 		return fmt.Sprintf("工具 %s 执行失败: %v", tc.Name, err)
 	}
 	return fmt.Sprintf("%v", result)
 }
+
+// toolNotFound / isToolNotFound 是 agentIO 哨兵在 core 侧的薄封装，
+// 便于 core 内部与测试直接使用（core 依赖 io，不反向）。
+func toolNotFound(name string) error { return agentIO.ToolNotFound(name) }
+
+func isToolNotFound(err error) bool { return agentIO.IsToolNotFound(err) }
 
 func (a *Agent) executeMemoryTool(tc agentAPI.ToolCall, turnScenes []string) string {
 	g := a.graphMem()
