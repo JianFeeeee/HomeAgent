@@ -108,22 +108,32 @@ function adapter.transform_stream_chunk(raw_chunk)
         -- first fragment of a tool call: emit index + id + name, empty args
         return json.encode({
             content = "", done = false,
+            -- ★ 必须是**扁平**结构（name / raw_arguments 在顶层）且键名是
+            --   stream_index —— homed 的 agentAPI.ToolCall 按 json tag 反序列化：
+            --   · 嵌套 ["function"]={...} ⇒ Go 侧取不到 name/raw_arguments（取零值）
+            --   · 键名写 index ⇒ StreamIndex 取零值 ⇒ 多个分片并到同一个桶，
+            --     argsRaw 混拼 ⇒ 每个工具报"参数不是合法 JSON"而一个都没真跑
+            --   两种形态都是**静默**失效，所以这里逐项对齐。
             tool_calls = { {
-                index = chunk.index or 0,
                 id = chunk.content_block.id or "",
                 type = "function",
-                ["function"] = { name = chunk.content_block.name or "", arguments = "" }
+                name = chunk.content_block.name or "",
+                raw_arguments = "",
+                stream_index = chunk.index or 0
             } }
         })
     end
     if chunk.type == "content_block_delta" and chunk.delta then
         if chunk.delta.type == "input_json_delta" then
             -- incremental JSON fragment; clients accumulate across chunks
+            -- 同上：扁平 + stream_index。续传片 name 为空是正常的 ——
+            -- 内核按 stream_index 累积，补齐 name 后才 flush。
             local unified = { content = "", done = false, tool_calls = { {
-                index = chunk.index or 0,
                 id = "",
                 type = "function",
-                ["function"] = { name = "", arguments = chunk.delta.partial_json or "" }
+                name = "",
+                raw_arguments = chunk.delta.partial_json or "",
+                stream_index = chunk.index or 0
             } } }
             return json.encode(unified)
         end
