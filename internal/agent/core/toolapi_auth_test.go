@@ -18,6 +18,9 @@ func toolAPIOf(t *testing.T, a *Agent) sdk.ToolAPI {
 		return a.IsOutputAllowed("device/" + deviceID)
 	})
 	t.Cleanup(func() { sdk.SetDeviceAuthQuery(nil) })
+	// 方案 B：把本 agent 的内置工具面注入（真实路径里由 bootstrap/新建 agent 时做）
+	sdk.SetBuiltinProvider(builtinProvider{a: a})
+	t.Cleanup(func() { sdk.SetBuiltinProvider(nil) })
 	return sdk.NewTool(a.stageHost, a.io)
 }
 
