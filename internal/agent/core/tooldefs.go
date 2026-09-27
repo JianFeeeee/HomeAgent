@@ -4,9 +4,11 @@ import (
 	"fmt"
 	"log"
 	"strings"
+	"sync"
 
 	agentIO "gitcode.com/JianFeeeee/HomeAgent/internal/agent/io"
 	"gitcode.com/JianFeeeee/HomeAgent/internal/meta"
+	"gitcode.com/JianFeeeee/HomeAgent/internal/sdk"
 	sdkmeta "gitcode.com/JianFeeeee/homeagent-sdk/meta"
 )
 
@@ -293,25 +295,30 @@ func (a *Agent) buildToolCatalog() string {
 // map[string]interface{} 字面量（约 20 行/条）；本助手把它压成一次调用，
 // 只消除重复、不改变 schema 形状——properties 原样保留（空表仍序列化为 {}），
 // required 为空则整个键省略。
-// toolDefOption 是内置工具定义处的声明标记。
+// toolDefOptions 是内置工具的**声明项**。
 //
-// ★ 形态与 SDK 的 NoMemory **完全同构**：声明写在**工具自己的定义里**，
-// 内核从定义读，没有任何硬编码名单表。
+// ★ 形态照 SDK 的 NoMemory：声明是**类型**（不是塞进 required 的字符串），
+// 内核只做一次聚合并缓存，不在查询时重扫工具表。
 //
-//	toolDef("knowledge_search", "...", props, "toolParallel")              // 默认串行
-//	toolDef("knowledge_list", "...", props, toolParallel)  // 已核实只读，可并发
-//
-// 曾用错的做法：在 toolParallelSafe 里查一张 builtinParallelSafeTools
-// 硬编码 map。那把声明从工具挪回了内核 —— 工具改名/新增不会自动跟着变，
-// 要靠一条 grep 源码的判据才能发现漂移，而判据一改就忘。
-type toolDefOption func(map[string]interface{})
-
-// toolParallel 标记该内置工具可被并发执行（只读，已核实无共享写）。
-func toolParallel(fn map[string]interface{}) {
-	fn["parallel_safe"] = true
+// 曾用错的两种做法（都是"把声明做成运行时猜谜"）：
+//  1. 内核里一张 map[string]bool 硬编码名单 —— 声明从工具搬回内核，
+//     工具改名不会跟着变；
+//  2. 往 required 变参里塞字符串 "toolParallel" —— 拼错就静默失效，
+//     编译器不报错，而"少一个工具能并发"正是最难察觉的那类问题。
+type toolDefOptions struct {
+	// parallel 声明该工具可被并发执行（已核实只读、无共享写）。
+	parallel bool
 }
 
+// parallelOpts 是"可并发"的声明项。
+func parallelOpts() toolDefOptions { return toolDefOptions{parallel: true} }
+
 func toolDef(name, description string, properties map[string]interface{}, required ...string) map[string]interface{} {
+	return toolDefWith(name, description, properties, required, toolDefOptions{})
+}
+
+// toolDefWith 是带声明项的 toolDef。
+func toolDefWith(name, description string, properties map[string]interface{}, required []string, opts toolDefOptions) map[string]interface{} {
 	params := map[string]interface{}{
 		"type":       "object",
 		"properties": properties,
@@ -319,37 +326,39 @@ func toolDef(name, description string, properties map[string]interface{}, requir
 	if len(required) > 0 {
 		params["required"] = required
 	}
-	fn := map[string]interface{}{
-		"name":        name,
-		"description": description,
-		"parameters":  params,
+	def := sdk.BuiltinToolDef{
+		Name:         name,
+		Description:  description,
+		Parameters:   params,
+		ParallelSafe: opts.parallel,
 	}
-	// 并发声明走**变参 options**：不额外改签名，读工具表的老调用点一行不用动。
-	for _, o := range parseToolDefOptions(required) {
-		if o != nil {
-			o(fn)
-		}
-	}
-	return map[string]interface{}{
-		"type":     "function",
-		"function": fn,
-	}
+	return def.ToSchema()
 }
 
-// parseToolDefOptions 从 required 变参里分离出"声明项"。
+// init 登记**全部**声明为可并发的内置工具。
 //
-// 为什么不单独加一个 options 变参：required 是 ...string，再加一个
-// ...toolDefOption 会让 33 个调用点里绝大多数（不需要声明的）也跟着改。
-// 混在一个变参里，声明就写在工具定义**那一行**，读代码时一眼可见。
-func parseToolDefOptions(required []string) []toolDefOption {
-	var out []toolDefOption
-	for _, r := range required {
-		switch r {
-		case "toolParallel":
-			out = append(out, toolParallel)
-		}
+// 集中在这里而不是散落在各调用点，是为了可审计：一屏能看全"哪些内置工具
+// 允许并发"，新增/改名时漏改会立刻被下面那条判据抓到。
+//
+// ⚠️ 这份名单是**已核实无共享写**的结论，不是分类标签。
+// 任何内置工具只要引入写操作，就必须从这里移除。
+// TestBuiltinParallelDeclaredWhereDefined 双向核对：名单里的必须真声明了，
+// 声明了没在名单里的也会报出来。
+func init() {
+	for _, name := range []string{
+		// 知识库：检索与列举
+		"knowledge_search", "knowledge_list",
+		// 人物图谱：查询与邻域读取
+		"person_query", "person_network",
+		// 通道：列举
+		"input_channels", "output_list_channels",
+		// 插件与来源：列举
+		"get_plugin_tools", "llm_list_sources",
+		// 文档：检索
+		"doc_query",
+	} {
+		declareParallelTool(name)
 	}
-	return out
 }
 
 func (a *Agent) buildToolDefs() []interface{} {
@@ -424,12 +433,12 @@ func (a *Agent) buildToolDefs() []interface{} {
 	}
 
 	if a.knowledge != nil {
-		tools = append(tools, toolDef("knowledge_search", "搜索知识库。输入查询关键词，返回相关知识内容。可用 category 把搜索限定在某个分类子树内。", map[string]interface{}{
+		tools = append(tools, toolDefWith("knowledge_search", "搜索知识库。输入查询关键词，返回相关知识内容。可用 category 把搜索限定在某个分类子树内。", map[string]interface{}{
 			"query":    map[string]interface{}{"type": "string", "description": "查询关键词"},
 			"top_k":    map[string]interface{}{"type": "integer", "description": "返回数量", "default": 5},
 			"category": map[string]interface{}{"type": "string", "description": "可选：限定在某个分类内（前缀匹配子树，如 tech 会搜 tech/go、tech/rust）。留空则搜全库"},
-		}, "query", "toolParallel"))
-		tools = append(tools, toolDef("knowledge_list", "列出知识库中所有知识分类。", map[string]interface{}{}, "toolParallel"))
+		}, []string{"query"}, parallelOpts()))
+		tools = append(tools, toolDefWith("knowledge_list", "列出知识库中所有知识分类。", map[string]interface{}{}, nil, parallelOpts()))
 	}
 
 	if a.knowledge != nil {
@@ -467,10 +476,10 @@ func (a *Agent) buildToolDefs() []interface{} {
 	}
 
 	if a.docStore != nil {
-		tools = append(tools, toolDef("doc_query", "查询文档记忆。输入查询内容，返回相关文档摘要。", map[string]interface{}{
+		tools = append(tools, toolDefWith("doc_query", "查询文档记忆。输入查询内容，返回相关文档摘要。", map[string]interface{}{
 			"query": map[string]interface{}{"type": "string", "description": "查询内容"},
 			"top_k": map[string]interface{}{"type": "integer", "description": "返回数量", "default": 3},
-		}, "query", "toolParallel"))
+		}, []string{"query"}, parallelOpts()))
 		tools = append(tools, toolDef("doc_commit", "提交一条文档记忆。将重要信息显式写入文档记忆层。", map[string]interface{}{
 			"content": map[string]interface{}{"type": "string", "description": "文档内容"},
 			"summary": map[string]interface{}{"type": "string", "description": "摘要（可选）"},
@@ -488,9 +497,9 @@ func (a *Agent) buildToolDefs() []interface{} {
 	}
 
 	if a.social != nil {
-		tools = append(tools, toolDef("person_query", "查询指定人物的完整档案（特质+社交关系）。用于了解一个人的性格、喜好、背景和社交圈。", map[string]interface{}{
+		tools = append(tools, toolDefWith("person_query", "查询指定人物的完整档案（特质+社交关系）。用于了解一个人的性格、喜好、背景和社交圈。", map[string]interface{}{
 			"name": map[string]interface{}{"type": "string", "description": "人物名称"},
-		}, "name", "toolParallel"))
+		}, []string{"name"}, parallelOpts()))
 		tools = append(tools, toolDef("person_set_trait", "记录/更新一个人的特质（性格、喜好、习惯等）。例如：person_set_trait(name=\"张三\", trait=\"喜欢\", value=\"红色\")。如果该特质已存在则覆盖。", map[string]interface{}{
 			"name":  map[string]interface{}{"type": "string", "description": "人物名称"},
 			"trait": map[string]interface{}{"type": "string", "description": "特质名称，如：喜欢、性格、职业、年龄"},
@@ -501,10 +510,10 @@ func (a *Agent) buildToolDefs() []interface{} {
 			"relation": map[string]interface{}{"type": "string", "description": "关系类型，如：朋友、家人、同事、邻居、同学"},
 			"person_b": map[string]interface{}{"type": "string", "description": "人物B"},
 		}, "person_a", "relation", "person_b"))
-		tools = append(tools, toolDef("person_network", "查询某人的社交网络（多度关系）。显示该人物周围的相关人物及其关系和特质。", map[string]interface{}{
+		tools = append(tools, toolDefWith("person_network", "查询某人的社交网络（多度关系）。显示该人物周围的相关人物及其关系和特质。", map[string]interface{}{
 			"name":  map[string]interface{}{"type": "string", "description": "人物名称"},
 			"depth": map[string]interface{}{"type": "integer", "description": "关系深度（默认2）", "default": 2},
-		}, "name", "toolParallel"))
+		}, []string{"name"}, parallelOpts()))
 	}
 
 	if a.pluginReg != nil && a.pluginDir != "" {
@@ -512,9 +521,9 @@ func (a *Agent) buildToolDefs() []interface{} {
 	}
 
 	// 按插件动态拉取工具定义(避免全量注入提示词污染)
-	tools = append(tools, toolDef("get_plugin_tools", "获取指定插件的完整工具定义(名称/参数/用途)。参数 plugin_name 传插件名(见系统提示的【可用工具能力】列表)。省略时返回全部插件的工具摘要。", map[string]interface{}{
+	tools = append(tools, toolDefWith("get_plugin_tools", "获取指定插件的完整工具定义(名称/参数/用途)。参数 plugin_name 传插件名(见系统提示的【可用工具能力】列表)。省略时返回全部插件的工具摘要。", map[string]interface{}{
 		"plugin_name": map[string]interface{}{"type": "string", "description": "插件名，如 qq / remotedevice / weather", "default": ""},
-	}, "toolParallel"))
+	}, nil, parallelOpts()))
 
 	tools = append(tools, toolDef("spawn_child", "启动一个异步子 Agent 执行独立任务。子 Agent 后台运行，不阻塞当前对话。完成后系统会自动通知你，届时请调用 child_result 工具查看输出。\n使用时机：多个互不依赖的子任务（如同时查三个网站、分别处理多个文件）可以在**同一轮**里一次 spawn 多个子 Agent——同轮调用默认并行，子 Agent 会各自后台启动（是否真正并发取决于工具的并发安全声明）。长耗时任务（批量处理、多轮搜索）也应交给子 Agent，避免阻塞对话。注意：一次 spawn 只是一个启动动作；要立刻拿到结果仍需另一次 `child_result` 调用。", map[string]interface{}{
 		"task": map[string]interface{}{
@@ -534,7 +543,7 @@ func (a *Agent) buildToolDefs() []interface{} {
 	}, "task_id"))
 
 	if a.providerManager != nil {
-		tools = append(tools, toolDef("llm_list_sources", "列出所有可用的 LLM 源（如 deepseek、openai、ollama），每个源有对应的 Lua 适配器和配置。如需切换 LLM 源，请使用 llm_set_source。", map[string]interface{}{}, "toolParallel"))
+		tools = append(tools, toolDefWith("llm_list_sources", "列出所有可用的 LLM 源（如 deepseek、openai、ollama），每个源有对应的 Lua 适配器和配置。如需切换 LLM 源，请使用 llm_set_source。", map[string]interface{}{}, nil, parallelOpts()))
 		tools = append(tools, toolDef("llm_set_source", "切换当前 LLM 源到指定名称。变更立即生效，后续对话将使用新的 LLM 源。源名称可通过 llm_list_sources 查看。", map[string]interface{}{
 			"name": map[string]interface{}{
 				"type":        "string",
@@ -585,7 +594,7 @@ func (a *Agent) buildToolDefs() []interface{} {
 		tools = append(tools, toolDef("output_send__"+ch.Name+"_help", "查看 "+ch.Name+" 输出通道的 meta 格式说明和 type 枚举", map[string]interface{}{}))
 	}
 
-	tools = append(tools, toolDef("output_list_channels", "列出所有可用输出通道及其能力（如 text/file/image/audio）和对应的输出门工具名称。", map[string]interface{}{}, "toolParallel"))
+	tools = append(tools, toolDefWith("output_list_channels", "列出所有可用输出通道及其能力（如 text/file/image/audio）和对应的输出门工具名称。", map[string]interface{}{}, nil, parallelOpts()))
 
 	// 父侧：驻留子控制面（单工具多动作，见设计 §7）。
 	if a.parentID == "" {
@@ -623,7 +632,7 @@ func (a *Agent) buildToolDefs() []interface{} {
 			"写了就不会再被系统自动记录；不写则本轮结束时系统自动写。", map[string]interface{}{"text": map[string]interface{}{"type": "string", "description": "本轮处理信息摘要"}}, "text"))
 	}
 
-	tools = append(tools, toolDef("input_channels", "查看 inputch（最基本的输入路由单位）：哪些已注册、谁注册的、"+
+	tools = append(tools, toolDefWith("input_channels", "查看 inputch（最基本的输入路由单位）：哪些已注册、谁注册的、"+
 		"各自划给了哪个 agent、容量与记忆策略。单工具多视图。", map[string]interface{}{
 		"view": map[string]interface{}{
 			"type": "string",
@@ -635,7 +644,7 @@ func (a *Agent) buildToolDefs() []interface{} {
 			"type":        "string",
 			"description": "view=detail 时必填：inputch 名",
 		},
-	}, "toolParallel"))
+	}, nil, parallelOpts()))
 
 	if a.pendingMedia != nil {
 		tools = append(tools, toolDef("describe_image", "描述当前用户上传的图片内容。使用配置的多模态模型或默认 LLM 进行识别。调用此工具后你将获得图片的详细文字描述。", map[string]interface{}{
@@ -666,4 +675,44 @@ func (a *Agent) buildToolDefs() []interface{} {
 	}
 
 	return tools
+}
+
+// builtinDefRegistry 汇总内置工具的声明项。
+//
+// 形态照 StageHost.NoMemoryToolNames：**一次聚合**，查询不再遍历工具表。
+// 之前 builtinToolParallelSafe 每次 toolParallelSafe 调用都重跑一遍
+// buildToolDefs()，等于 O(工具数) 的重复劳动 —— 声明是静态的，没有理由每次重算。
+type builtinDefRegistry struct {
+	mu     sync.RWMutex
+	byName map[string]sdk.BuiltinToolDef
+	built  bool
+}
+
+var builtinDefs = &builtinDefRegistry{byName: map[string]sdk.BuiltinToolDef{}}
+
+// declareParallelTool 在**工具定义处**登记"可并发"声明。
+//
+// 由每个 toolDefWith(..., parallelOpts()) 调用点在 init 里调用 ——
+// 不依赖运行时路径。
+//
+// ⚠️ 曾经让 toolDefWith 在**被调用时**顺带登记，结果聚合表是空的：
+// 那些工具都在 `if a.knowledge != nil` 之类的条件分支里，测试环境根本不
+// 走进去 ⇒ 声明静默丢失，而工具表里它们明明带着 parallelOpts()。
+// 症状是"判据全绿但并发能力为零"—— 判据查的是同一张空表，自证。
+func declareParallelTool(name string) {
+	builtinDefs.mu.Lock()
+	builtinDefs.byName[name] = sdk.BuiltinToolDef{Name: name, ParallelSafe: true}
+	builtinDefs.mu.Unlock()
+}
+
+// concurrencySafeOf 查询内置工具的并发声明。
+// 未登记 ⇒ 不可并发（保守，与 SDK 的零值语义一致）。
+func concurrencySafeOf(name string) bool {
+	builtinDefs.mu.RLock()
+	defer builtinDefs.mu.RUnlock()
+	def, ok := builtinDefs.byName[name]
+	if !ok {
+		return false
+	}
+	return def.ConcurrencySafe()
 }
