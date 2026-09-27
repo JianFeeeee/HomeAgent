@@ -72,15 +72,69 @@ func (h *StageHost) GetToolDefs() []sdk.ToolDef {
 	return defs
 }
 
+// ToolDef 返回工具声明的**副本**。
+//
+// 保留"返回副本"是有意的：ToolDef 里有 map 与函数指针（Cleaner），
+// 返回内部切片元素会把可变引用交出去。Go 1.22+ 循环变量每轮独立，
+// 所以 &def 不是逃逸漏洞。
+//
+// 但代价真实存在：结构体含 3 个 string + 2 个 map 头 + 2 个 bool，
+// 每次调用都是一次结构体拷贝。而 toolParallelSafe 在**每批**判断里对
+// 每个工具各调一次，1000 并发时就是 1000 次拷贝。
+//
+// 只需"是否存在 + 声明项"的调用方（toolParallelSafe、validateArgsAgainstSchema
+// 等热路径）应改用 ConcurrencySafeOf / HasTool，避免拷贝。
+// 需要拿到完整声明的（如 Cleaner）才用 ToolDef。
 func (h *StageHost) ToolDef(name string) *sdk.ToolDef {
 	h.mu.RLock()
 	defer h.mu.RUnlock()
-	for _, def := range h.toolDefs {
-		if def.Name == name {
-			return &def
-		}
+	if def, ok := h.findLocked(name); ok {
+		return &def
 	}
 	return nil
+}
+
+// ConcurrencySafeOf 报告工具是否可并发执行，**不做结构体拷贝**。
+//
+// 与 ToolDef(name).ParallelSafe && !Serial 等价，但只读两个 bool 字段。
+// 热路径（每批并发判据）必须走这个。
+func (h *StageHost) ConcurrencySafeOf(name string) (safe, found bool) {
+	h.mu.RLock()
+	defer h.mu.RUnlock()
+	def, ok := h.findLocked(name)
+	if !ok {
+		return false, false
+	}
+	return def.ParallelSafe && !def.Serial, true
+}
+
+// NoMemoryOf 报告工具是否声明 NoMemory，同样不拷贝。
+func (h *StageHost) NoMemoryOf(name string) (v, found bool) {
+	h.mu.RLock()
+	defer h.mu.RUnlock()
+	def, ok := h.findLocked(name)
+	if !ok {
+		return false, false
+	}
+	return def.NoMemory, true
+}
+
+// HasTool 报告工具是否存在，不拷贝。
+func (h *StageHost) HasTool(name string) bool {
+	h.mu.RLock()
+	defer h.mu.RUnlock()
+	_, ok := h.findLocked(name)
+	return ok
+}
+
+// findLocked 必须在持有 h.mu 时调用。
+func (h *StageHost) findLocked(name string) (sdk.ToolDef, bool) {
+	for _, def := range h.toolDefs {
+		if def.Name == name {
+			return def, true
+		}
+	}
+	return sdk.ToolDef{}, false
 }
 
 func (h *StageHost) ExecuteTool(name string, args map[string]interface{}) (ret interface{}, err error) {
