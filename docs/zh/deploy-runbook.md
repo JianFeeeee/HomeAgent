@@ -31,6 +31,7 @@
 要点：
 
 - **`waiter` 与 `homed` 是两个独立部署单元**，更新其一不影响其二。
+- **GUI 不在服务端部署**（见下）。
 - 设备桥授权（`device_authorized`）在 **waiter 侧**，网关地址也在
   waiter 的 `waiter.yaml` 里。
 - NapCat（QQ 上游）在 **106** 上，`http://192.168.2.106:25570`。
@@ -358,3 +359,81 @@ curl -s -o /dev/null -m 10 -w '%{http_code}\n' -k https://sdk.homeagent.jianfgit
 
 每次部署留 `.sdk-bak-<时间戳>`（同 `sites/` 下）。`--rollback` 会先把当前站
 `cp -a` 成 `.sdk-failed-<时间戳>` 再恢复，失败版本不丢。
+
+---
+
+## 6. 部署单元清单（哪些在服务端、哪些不在）
+
+排查"改了什么没生效"时，先确认改动落在**哪个单元** —— 服务端只有前三个。
+
+| 单元 | 入口 | 部署位置 | 服务端部署 |
+| --- | --- | --- | --- |
+| homed（内核） | `cmd/homed` | 本机 `/usr/local/bin/homed` | ✅ |
+| waiter / waitercli | `cmd/waiter` | 106、30 的 `/opt/waiter/waiter` | ✅ |
+| 站点 | `site/`、`site_build/` | 106 的 `sites/` | ✅ |
+| **GUI** | `cmd/gui` | **不在服务端** | ❌ |
+
+### 6.1 GUI 是客户端，不在服务端
+
+`cmd/gui` 是 **Electron 桌面应用**（`main.js` / `icon-tray.png` /
+`devicebridge_dll.js`），随客户端分发，**不在服务端部署**：
+生产既无 `*.service` 也无对应进程。
+
+> 核查时的坑：`ps -ef | grep -icE "[e]lectron|cmd/gui"` 会把**它自己的
+> grep 命令行**算进去而返回非 0（本机实测返回 2，实际 0）。
+> 确认进程是否存在要**看列出的内容**，别只看计数。
+
+⇒ **不要**在服务端找 GUI 的产物或配置；排查 GUI 问题时，
+要看**用户机器上运行的客户端**，而不是 `homeagent.service` 的日志。
+
+它与 waiter 的关系是**两端**：GUI 用 `devicebridge_dll.js` 走设备桥协议
+连接服务端 waiter，`a781f8e`/`ff69127` 修的正是 GUI 侧 bind 结果判 ok
+与登记状态暴露。
+
+### 6.2 ★ 本机 `/usr/local/bin/waiter` 与 106/30 不同步
+
+本机也留了一份 waiter，但**不是** 106/30 那条设备桥：
+
+| 位置 | 版本 | 状态 |
+| --- | --- | --- |
+| 106 / 30 | `1.4.0`（`55906b8`） | ✅ 最新 |
+| 本机 `/usr/local/bin/waiter` | `v1.3.2-153-gff69127`（2026-09-25 构建） | ⚠️ **落后 main** |
+
+本机这份**早于** main 在 2026-09-26 合入的那批修复（设备反复掉线、
+bind 判 ok、服务端发现自动链接），因此**缺**它们。
+
+不过它**无进程、无服务**（只有 `~/.config/homeagent/waiter.yaml`），
+所以不影响生产设备桥。若要更新，用与 106/30 同样的构建：
+
+```bash
+CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build \
+  -ldflags "-X .../internal/meta.Version=1.4.0 -X .../internal/meta.Commit=$(git rev-parse --short HEAD)" \
+  -o /tmp/waiter-new ./cmd/waiter
+```
+
+### 6.3 一次误判的记录：别只看"不在分支上"
+
+2026-09-27 排查时，我用 `git merge-base --is-ancestor ff69127 origin/main`
+判定"这批提交没进 main"，并据此推断"存在一条未合入、只靠 reflog 撑着的
+5 提交线"。**该结论是错的。**
+
+真实情况：这批改动在 2026-09-26 以**新 hash** 重做并进入 main：
+
+| 旧（9-25 那条线） | 新（main 上） | 内容 diff |
+| --- | --- | --- |
+| `1acbd39` 通用反向代理 | `1e58af7` | 0 行 |
+| `3d30482` 反代两处故障 | `5d278cf` | 0 行 |
+| `078517e` 设备桥自动链接 | `7f5bf16` | 0 行 |
+| `aaafaac` 修复设备反复掉线 | `94c74b2` | 0 行 |
+| `ff69127` GUI bind 判 ok | `a781f8e` | 0 行 |
+
+逐字节一致，无需合入。之所以误判，是因为只查了**旧 hash 的祖先关系**，
+没查**提交标题/内容**是否已有等价副本。
+
+⇒ **判定"某改动是否已合入"要按内容查，不能只按 hash 查。**
+   同一改动可能被重做为新 hash；此时 `merge-base` 必然说不包含，
+   而 `git merge-tree` 报的 13 个"冲突"正是同源改动做两遍的必然结果。
+
+另注：`aaafaac`/`94c74b2`（修复设备反复掉线/静默失联：ping 路径断连 +
+bind 结果无人处理）正是 106 此前长期无 `online` 日志的成因，
+2026-09-26 已进 main，今天部署的 `1.4.0` 包含它。
