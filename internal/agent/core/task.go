@@ -110,7 +110,11 @@ type TaskFrame struct {
 	CurTool       agentAPI.ToolCall
 	CurToolPlugin string
 	CurResult     string
-	Resp          *agentAPI.CompletionResponse
+	// CurRaw 是本次执行的**未降级**返回值（interface{}）。
+	// 存在理由：CurResult 是 string，结构化信息在此被抹平，导致 Success
+	// 无法诚实化、after_toolcall 的改写静默失效。
+	CurRaw interface{}
+	Resp   *agentAPI.CompletionResponse
 
 	// Scene 是本轮**涌现**出来的场景键（由场面指纹聚类得到，无人声明），
 	// sceneDone 标记是否已解析过——一轮只解析一次：多解析一次就多给场景
@@ -747,14 +751,20 @@ func (a *Agent) stepToolExec(f *TaskFrame) stepOutcome {
 	// 执行工具前先解析本轮场景：写侧要用它给记忆自动挂场景（主动+被动两条路），
 	// 而工具步不一定走到下面的召回分支，所以不能等那里再解析。
 	turn := a.resolveTurnScenes(f, f.CurTool.Name)
-	result := a.executeToolCall(f.CurTool, f.OutputChannel, turn.Keys...)
+	outcome := a.executeToolCallOutcome(f.CurTool, f.OutputChannel, turn.Keys...)
+	result := outcome.Text
 	f.CurResult = result
+	f.CurRaw = outcome.Raw
 	f.ToolResults = append(f.ToolResults, ToolResultItem{Name: f.CurTool.Name, Output: result})
 	log.Printf("[agent] tool %s result: %s", f.CurTool.Name, truncateStr(result, 100))
 
+	// Success 此前是**唯一**赋值点且硬编码 true ⇒ 该字段恒真、结构上不可能为
+	// false。工具失败是以 nil error + 错误**值**返回的，所以判据必须看返回值。
+	// ⚠️ isToolError 必须同时覆盖存量插件的两种失败约定与「成功不误判」，
+	// 否则升级会把存量插件的成功判成失败（见 toolerror_test.go）。
 	f.StageCtx.ToolResults = []sdk.ToolResult{{
 		CallID: f.CurTool.ID, Name: f.CurTool.Name, Plugin: f.CurToolPlugin,
-		Success: true, Result: result,
+		Success: !isToolError(outcome.Raw), Result: outcome.Raw,
 	}}
 	f.Step = StepToolAfter
 	return outcomeContinue
@@ -768,8 +778,20 @@ func (a *Agent) stepToolAfter(f *TaskFrame) stepOutcome {
 
 	a.runStage(sdk.StageAfterToolcall, f.StageCtx)
 	if len(f.StageCtx.ToolResults) > 0 {
-		if r, ok := f.StageCtx.ToolResults[0].Result.(string); ok {
+		// 此前是 `Result.(string)` 类型断言，而插件返回的多是 map ⇒ 断言几乎
+		// 恒失败，after_toolcall 阶段对结构化结果的改写**静默失效**。
+		// 改为：字符串就替换文本；结构化值则保留其原值并按契约渲染。
+		switch r := f.StageCtx.ToolResults[0].Result.(type) {
+		case string:
 			result = r
+		case nil:
+			// 插件清空结果：保持原样，不覆盖。
+		default:
+			f.CurRaw = r
+			result = toolErrorText(f.CurTool.Name, r)
+			if !isToolError(r) {
+				result = fmt.Sprintf("%v", r)
+			}
 		}
 	}
 	// 工具后处理：一次相关性过程，两个**正交**声明——
