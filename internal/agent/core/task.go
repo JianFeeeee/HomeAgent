@@ -110,6 +110,11 @@ type TaskFrame struct {
 	CurTool       agentAPI.ToolCall
 	CurToolPlugin string
 	CurResult     string
+	// assistantMsgIdx 是本批 assistant(tool_calls) 消息在 Msgs 中的下标，
+	// -1 表示尚未写入。阶段 2a：批内只写**一条** assistant 承载全部
+	// tool_calls，工具结果各自作为 tool 消息追加在它之后。
+	assistantMsgIdx int
+
 	// CurRaw 是本次执行的**未降级**返回值（interface{}）。
 	// 存在理由：CurResult 是 string，结构化信息在此被抹平，导致 Success
 	// 无法诚实化、after_toolcall 的改写静默失效。
@@ -677,6 +682,16 @@ func (a *Agent) stepLLM(f *TaskFrame) stepOutcome {
 	}
 	f.ContentOnce = true
 	f.PendingTools = resp.ToolCalls
+	// 阶段 2a：批内消息**预置**为「一个 assistant 带全部 tool_calls」。
+	//
+	// 为何预置而不是逐步 append：并行执行下多个工具的**完成顺序不确定**，
+	// 若等结果回来再落消息，assistant 就必须等所有结果齐了才能写；
+	// 而 OpenAI 协议要求 assistant(tool_calls) 在**结果之前**。
+	// 预置同时让 assistant 只出现一次（逐步 append 会产生 N 条）。
+	//
+	// ⚠️ 前提：before_toolcall 阶段不得改写工具参数（已核实全仓无此用法）。
+	// 若某插件将来要改写 args，需在这里改为「回填后重写该条 assistant」。
+	f.assistantMsgIdx = -1
 	f.ToolIdx = 0
 	f.Step = StepToolBegin
 	return outcomeContinue
@@ -702,7 +717,7 @@ func (a *Agent) stepToolBegin(f *TaskFrame) stepOutcome {
 	f.StageCtx.ToolResults = nil
 	if a.runStage(sdk.StageBeforeToolcall, f.StageCtx) {
 		result := denialResultText(f.StageCtx, tc.Name)
-		f.Msgs = append(f.Msgs, agentAPI.Message{Role: "assistant", ToolCalls: []agentAPI.ToolCall{tc}})
+		f.ensureBatchAssistant()
 		f.Msgs = append(f.Msgs, agentAPI.Message{Role: "tool", ToolCallID: tc.ID, Content: result})
 		a.publishEvent(events.EventToolCall, map[string]interface{}{
 			"tool":    tc.Name,
@@ -720,7 +735,7 @@ func (a *Agent) stepToolBegin(f *TaskFrame) stepOutcome {
 	if pluginName != "" && !a.pluginHealth.isHealthy(pluginName) {
 		result := fmt.Sprintf("插件 %s 处于崩溃状态，已跳过执行，等待自动恢复重载", pluginName)
 		log.Printf("[agent] skip tool %s: plugin %s unhealthy", tc.Name, pluginName)
-		f.Msgs = append(f.Msgs, agentAPI.Message{Role: "assistant", ToolCalls: []agentAPI.ToolCall{tc}})
+		f.ensureBatchAssistant()
 		f.Msgs = append(f.Msgs, agentAPI.Message{Role: "tool", ToolCallID: tc.ID, Content: result})
 		f.ToolIdx++
 		return outcomeContinue
@@ -817,16 +832,7 @@ func (a *Agent) stepToolAfter(f *TaskFrame) stepOutcome {
 		}
 	}
 
-	msgContent := ""
-	if f.ContentOnce {
-		msgContent = f.Resp.Content
-		f.ContentOnce = false
-	}
-	f.Msgs = append(f.Msgs, agentAPI.Message{
-		Role: "assistant", Content: msgContent,
-		ReasoningContent: f.Resp.ReasoningContent,
-		ToolCalls:        []agentAPI.ToolCall{tc},
-	})
+	f.ensureBatchAssistant()
 
 	// 多模态工具结果：插件通过 SDK.SetToolBlocks 注入 image_url/audio_url block。
 	//
@@ -900,6 +906,35 @@ func (a *Agent) stepToolAfter(f *TaskFrame) stepOutcome {
 	f.ToolIdx++
 	f.Step = StepToolBegin
 	return outcomeContinue
+}
+
+// ensureBatchAssistant 保证本批有且只有**一条**带 tool_calls 的 assistant 消息。
+//
+// 阶段 2a 的落法：批内「一个 assistant 携带全部 tool_calls」+ N 条 tool 消息。
+// 惰性写入（首次调用时才 append）而不是在 stepLLM 预置，因为：
+//
+//	· 预置会让「全部工具都被拒绝/崩溃」这类零执行分支也留下一条空 assistant
+//	  （虽然无害，但会给模型一条没有结果的 tool_calls，个别网关会报错）
+//	· assistant 文本（ContentOnce）要挂在**第一条**上，而那要等到有结果才知道
+//
+// 并行下完成顺序不确定，因此 assistant 必须**先于**任何 tool 消息存在；
+// 惰性写入天然满足：第一个完成的工具触发写入，后续只补 tool 消息。
+func (f *TaskFrame) ensureBatchAssistant() {
+	if f.assistantMsgIdx >= 0 {
+		return
+	}
+	msgContent := ""
+	if f.ContentOnce && f.Resp != nil {
+		msgContent = f.Resp.Content
+		f.ContentOnce = false
+	}
+	f.assistantMsgIdx = len(f.Msgs)
+	f.Msgs = append(f.Msgs, agentAPI.Message{
+		Role:             "assistant",
+		Content:          msgContent,
+		ReasoningContent: f.Resp.ReasoningContent,
+		ToolCalls:        f.PendingTools,
+	})
 }
 
 // stepTurnEnd 收尾本批并进入下一轮。

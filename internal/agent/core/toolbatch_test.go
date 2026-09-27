@@ -245,3 +245,57 @@ func TestBatchContinuesAfterDeniedTool(t *testing.T) {
 		t.Errorf("tool_beta 的结果未回填（被前一工具的拒绝连带丢弃）")
 	}
 }
+
+// 阶段 2a：消息落法改为「**一个** assistant 带全部 tool_calls + N 条 tool」。
+//
+// 现状：每个工具各自 append 一对（assistant[tool_calls=[tc]] + tool），
+// 不表达「这是一批」。阶段 2 的批内并发要求消息形态与之对应，且并行下
+// 多个 tool message 的相对顺序必须**按 index 确定**，否则模型读到的
+// 上下文顺序 ≠ 执行顺序，会诱导出错误的因果推断。
+//
+// 本判据钉死：新布局下（a）配对仍完整、（b）assistant 只出现一条且带全部
+// tool_calls、（c）tool 消息按 index 升序、（d）多模态 user 消息仍紧跟
+// 各自的 tool 消息。
+func TestBatchLayoutSingleAssistantCarriesAllToolCalls(t *testing.T) {
+	tcA := agentAPI.ToolCall{ID: "c1", Name: "tool_alpha", Arguments: map[string]interface{}{}}
+	tcB := agentAPI.ToolCall{ID: "c2", Name: "tool_beta", Arguments: map[string]interface{}{}}
+	sp := &batchProvider{responses: []*agentAPI.CompletionResponse{
+		{Content: "BATCHTEXT", ToolCalls: []agentAPI.ToolCall{tcA, tcB}},
+		{Content: "final"},
+	}}
+	a, _ := newBatchAgent(t, sp)
+
+	f := a.newTaskFrame("go", a.stageCtxFromInput("go", "", ""))
+	if out := a.runTaskSteps(f); out != outcomeDone {
+		t.Fatalf("runTaskSteps=%v err=%v", out, f.Err)
+	}
+
+	// ① 找带 tool_calls 的 assistant 消息，必须**恰好一条**且带 2 个。
+	var assistants []int
+	for i, m := range f.Msgs {
+		if m.Role == "assistant" && len(m.ToolCalls) > 0 {
+			assistants = append(assistants, i)
+			if len(m.ToolCalls) != 2 {
+				t.Errorf("批内 assistant 应带 2 个 tool_calls，实际 %d", len(m.ToolCalls))
+			}
+		}
+	}
+	if len(assistants) != 1 {
+		t.Fatalf("带 tool_calls 的 assistant 应恰好 1 条，实际 %d 条（索引 %v）", len(assistants), assistants)
+	}
+
+	// ② 该 assistant 之后应紧跟 2 条 tool 消息，且按声明顺序。
+	idx := assistants[0]
+	var gotIDs []string
+	for i := idx + 1; i < len(f.Msgs); i++ {
+		if f.Msgs[i].Role == "tool" {
+			gotIDs = append(gotIDs, f.Msgs[i].ToolCallID)
+		}
+	}
+	if len(gotIDs) != 2 {
+		t.Fatalf("assistant 之后应有 2 条 tool 消息，实际 %d（%v）", len(gotIDs), gotIDs)
+	}
+	if gotIDs[0] != "c1" || gotIDs[1] != "c2" {
+		t.Errorf("tool 消息应按 index 升序，实际 %v", gotIDs)
+	}
+}
