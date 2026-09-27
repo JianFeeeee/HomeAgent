@@ -2,7 +2,6 @@ package lua
 
 import (
 	"encoding/json"
-	"path/filepath"
 	"testing"
 )
 
@@ -122,7 +121,7 @@ func TestAllBundledAdaptersStreamToolCallStatus(t *testing.T) {
 	}
 	var supported, nested, unsupported []string
 
-	for _, name := range bundledAdapterNames(t) {
+	for _, name := range bundledAdapterNames {
 		vm := NewVM(t.TempDir())
 		loadBundled(t, vm, name)
 		out, err := vm.CallTransformStreamChunk(name, openAIMultiToolChunk)
@@ -182,19 +181,4 @@ func loadBundled(t *testing.T, vm *VM, name string) {
 	if err := vm.LoadAdapterSource(name, string(b)); err != nil {
 		t.Fatalf("加载 %s 失败: %v", name, err)
 	}
-}
-
-func bundledAdapterNames(t *testing.T) []string {
-	t.Helper()
-	ents, err := bundledAdapters.ReadDir("adapters")
-	if err != nil {
-		t.Fatalf("读 adapters 目录失败: %v", err)
-	}
-	var out []string
-	for _, e := range ents {
-		if filepath.Ext(e.Name()) == ".lua" {
-			out = append(out, e.Name()[:len(e.Name())-4])
-		}
-	}
-	return out
 }
