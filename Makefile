@@ -352,12 +352,23 @@ install: build
 #   不下结论。要稳定门禁就单独跑并重试：
 #       go test ./internal/plugin/proc/ -count=1
 #   ⚠ 别把"单跑通过"当结论——同一命令会交替通过/失败。
+# ★ test-gui 必须**一定被执行**，但不能被前序失败短路，也不能吞掉自己的失败。
+#
+#   问题：`go test ./...` 一旦 FAIL，make 立即中止 ⇒ 挂在它后面的目标
+#   都不会跑。实测 internal/plugin/proc 偶发 FAIL 时，make test 日志里
+#   **找不到 test-gui 的任何输出** —— 门禁形同虚设。
+#   但直接用 `-@$(MAKE) test-gui` 又会**吞掉** GUI 判据自己的失败码，
+#   变成给假绿灯。
+#
+#   做法：先无条件跑并把结果存进变量，最后统一决定退出码。
+#   这样既保证它一定跑，也保留它自己的失败。
 test:
-	$(GO) test ./...
-	@$(MAKE) test-gui
-	@$(MAKE) csrc-test
-	@$(MAKE) check-csrc
-	@$(MAKE) check-codec-cgo-only
+	@rc=0; $(GO) test ./... || rc=$$?; \
+	 $(MAKE) test-gui || rc=$$?; \
+	 $(MAKE) csrc-test || rc=$$?; \
+	 $(MAKE) check-csrc || rc=$$?; \
+	 $(MAKE) check-codec-cgo-only || rc=$$?; \
+	 exit $$rc
 
 # check-codec-cgo-only：钉死「编解码层完全 C 化」这一决定。
 #
