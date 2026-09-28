@@ -968,8 +968,51 @@ async function refreshAll() {
   } catch (e) {
     console.error("renderDevices", e);
   }
+  // ★ 协议对齐补齐的 6 个端点（2026-09-28）。
+  //
+  //   GUI 原来只用 22 个端点，服务端有 47 个。缺的这些**都是只读诊断类**，
+  //   接上它们的价值是"不用切到别的工具就能看到"。
+  //
+  // ★ 只加进 refreshAll，**不加** refreshDataOnly：后者每 15 秒一轮，
+  //   6 个端点虽只 +3ms（实测），但没必要为诊断数据高频轮询。
+  await refreshDiagData();
+  try {
+    renderOverview();
+    renderPersona();
+    renderProxy();
+  } catch (e) {
+    console.error("render diag panels", e);
+  }
   applyI18n();
   applyCardTilt();
+}
+
+// refreshDiagData 拉取协议对齐补齐的诊断类端点。
+//
+// 刻意每个都独立 try/catch：某个端点挂了（如老版本内核没有该路由），
+// 不该拖垮整轮刷新 —— 与既有 6 个 loader 的写法一致。
+async function refreshDiagData() {
+  try {
+    state.agents = await api("/agents");
+  } catch (e) {}
+  try {
+    state.network = await api("/network");
+  } catch (e) {}
+  try {
+    state.tracker = await api("/tracker");
+  } catch (e) {}
+  try {
+    state.runConfig = await api("/config");
+  } catch (e) {}
+  try {
+    state.persona = await api("/persona");
+  } catch (e) {}
+  try {
+    state.proxy = await api("/proxy");
+  } catch (e) {}
+  try {
+    state.proxyServices = await api("/proxy/services");
+  } catch (e) {}
 }
 
 // ===== 动效补齐：卡片 3D tilt + 光标光斑（事件委托，动态渲染后自动生效） =====
@@ -1046,9 +1089,9 @@ function startUptimeTicker() {
   // 丢失的事件（尤其是非 GUI 触发的跨渠道消息，如 CLI/QQ/设备桥输出）。
   // syncChatFromHistory 增量同步，不重建已有消息 DOM，无闪烁。
   if (_chatSyncTick) clearInterval(_chatSyncTick);
-  _chatSyncTick = setInterval(function () {
+  _chatSyncTick = setInterval(() => {
     if (state.currentConn && state.currentConn.type !== "cli") {
-      syncChatFromHistory().catch(function () {});
+      syncChatFromHistory().catch(() => {});
     }
   }, 30000);
 }
@@ -1185,10 +1228,8 @@ function renderRuntimePanel() {
     '<div class="rt-section-title">' + __("阶段管道", "Stage pipeline") +
     (g < 0 ? "　" + __("（空闲）", "(idle)") : "") + "</div>";
   html += '<div class="rt-pipe-row' + (g < 0 ? " rt-pipe-idle" : "") + '">';
-  html += RT_PIPE_GROUPS.map(function (s, i) {
-    var items = (state.stageTrail || []).filter(function (t) {
-      return (t.g | 0) === i;
-    });
+  html += RT_PIPE_GROUPS.map((s, i) => {
+    var items = (state.stageTrail || []).filter((t) => (t.g | 0) === i);
     // 「工具」是循环格：一轮里可能调几十次工具/输出通道，全部追加会把这一格
     // 撑成长条，反而看不出「现在在调什么」。只留**最新一条**，右侧给本轮累计
     // 次数（与 WebUI 同一口径，见 internal/plugins/webui/dashboard.js）。
@@ -1213,7 +1254,7 @@ function renderRuntimePanel() {
         __("本轮工具调用累计次数", "tool calls this turn") + '">x' + total + "</i>";
     } else {
       body = items
-        .map(function (t) {
+        .map((t) => {
           var kind = t.kind || "stage";
           var ico =
             kind === "output" ? RT_ICO.out : kind === "tool" ? RT_ICO.tool : "";
@@ -1244,7 +1285,7 @@ function renderRuntimePanel() {
   // ---- 中断队列：五个等大表框（L4/L3/L2/L1 + 排队）----
   html += '<div class="rt-section-title">' + __("队列", "Queues") + "</div>";
   html += '<div class="rt-queues">';
-  RT_LEVELS.forEach(function (L) {
+  RT_LEVELS.forEach((L) => {
     var depth = q[L.lv] || 0;
     var reg = byLv[L.lv] || 0;
     var pre = preLv[L.lv] || 0;
@@ -1323,7 +1364,7 @@ function renderOverview() {
     statCard(__("插件", "Plugins"), (k?.plugins || []).length || 0, "plugin") +
     statCard(
       __("版本", "Version"),
-      (function () {
+      (() => {
         // 构建身份取自 /kernel 的 build（-ldflags 注入的真实版本/commit）。
         // 旧实现用的是 /status 的 version 加一个凭空写死的 "0.1.0" 兑底 ——
         // 拿不到数据时会向用户展示一个不存在的版本号。
@@ -1416,8 +1457,146 @@ function renderOverview() {
     ) +
     statCard("Go " + __("版本", "Version"), k?.runtime?.go_version || "-", "") +
     "</div></div>";
+  html += renderDiagPanel();
   html += renderLegalCard();
   document.getElementById("view-overview").innerHTML = html;
+}
+
+// renderDiagPanel 协议对齐补齐的诊断卡片（agents / network / tracker / config）。
+//
+// 全部走 `(x && x.y)` 的安全取值：任一端点没取到（老内核无该路由、
+// 连接断开）都只显示 "-"，不抛错 —— 与既有卡片一致。
+function renderDiagPanel() {
+  var a = state.agents || {};
+  var list = a.agents || [];
+  var main0 = list[0] || {};
+  var nw = state.network || {};
+  var tk = state.tracker || {};
+  var cfg = state.runConfig || {};
+  var llmOk = main0.network && main0.network.llm_api_reachable;
+
+  return (
+    '<div class="card"><h2>' +
+    __("诊断", "Diagnostics") +
+    '</h2><div class="grid-4">' +
+    statCard(
+      __("Agent 健康", "Agent health"),
+      main0.health === 1
+        ? __("正常", "healthy")
+        : main0.health === 0
+          ? "-"
+          : __("异常", "unhealthy"),
+      main0.health === 1 ? "running" : "",
+    ) +
+    statCard(
+      __("LLM 可达", "LLM reachable"),
+      llmOk === true
+        ? __("是", "yes")
+        : llmOk === false
+          ? __("否", "no")
+          : "-",
+      llmOk === false ? "denied" : "",
+    ) +
+    statCard(
+      __("网络端点", "Endpoints"),
+      Array.isArray(nw.endpoints) ? String(nw.endpoints.length) : "-",
+      "",
+    ) +
+    statCard(
+      __("文件变更集", "Changesets"),
+      tk.changesets !== undefined ? String(tk.changesets) : "-",
+      tk.has_changes ? "warn" : "",
+    ) +
+    "</div>" +
+    '<div class="grid-2" style="margin-top:10px">' +
+    '<div><b>' +
+    __("数据目录", "Data dir") +
+    "</b>: " +
+    escHtml(cfg?.daemon?.data_dir || "-") +
+    "</div>" +
+    '<div><b>' +
+    __("心跳间隔", "Heartbeat") +
+    "</b>: " +
+    (cfg?.daemon?.heartbeat_interval
+      ? Math.round(cfg.daemon.heartbeat_interval / 1e6) + " ms"
+      : "-") +
+    "</div>" +
+    "</div></div>"
+  );
+}
+
+// renderPersona 人设面板：展示 /persona 返回的人格设定。
+//
+// 只读展示。当前先不做编辑 —— 编辑要处理保存、失败回滚、并发覆盖，
+// 与"协议对齐"是两件事，混在一起容易做半。
+function renderPersona() {
+  var el = document.getElementById("view-persona");
+  if (!el) return;
+  var p = state.persona || {};
+  var prompt = p.current_prompt || "";
+  // ★ 实测结构是 {current_prompt, file_override, initialized}，
+  //   不是键值对 —— 我第一版按 map 遍历，结果只会显示三个字段名。
+  el.innerHTML =
+    '<div class="card"><h2>' +
+    __("人设", "Persona") +
+    '</h2><div class="grid-3">' +
+    statCard(
+      __("已初始化", "Initialized"),
+      p.initialized ? __("是", "yes") : __("否", "no"),
+      p.initialized ? "running" : "",
+    ) +
+    statCard(
+      __("文件覆盖", "File override"),
+      p.file_override ? __("开", "on") : __("关", "off"),
+      "",
+    ) +
+    statCard(__("提示词长度", "Prompt length"), String(prompt.length), "") +
+    "</div>" +
+    '<h2 style="margin-top:12px">' +
+    __("当前提示词", "Current prompt") +
+    '</h2><pre style="white-space:pre-wrap;word-break:break-word">' +
+    escHtml(prompt || __("（空）", "(empty)")) +
+    "</pre></div>";
+}
+
+// renderProxy 反代面板：展示 /proxy 的挂载与模式。
+function renderProxy() {
+  var el = document.getElementById("view-proxy");
+  if (!el) return;
+  var px = state.proxy || {};
+  var svc = state.proxyServices || null;
+  var head =
+    '<div class="card"><h2>' +
+    __("反代", "Reverse Proxy") +
+    '</h2><div class="grid-4">' +
+    statCard(__("基础域名", "Base domain"), px.base_domain || "-", "") +
+    statCard(__("模式", "Mode"), px.mode || "-", "") +
+    statCard(__("总数", "Total"), px.total !== undefined ? String(px.total) : "-", "") +
+    statCard(__("手动", "Manual"), px.manual !== undefined ? String(px.manual) : "-", "") +
+    "</div>";
+  var body = "";
+  var list = svc && Array.isArray(svc.services) ? svc.services : null;  // 实测：services 是数组
+  if (list) {
+    body =
+      '<div class="card"><h2>' +
+      __("服务", "Services") +
+      "</h2><pre style=\"white-space:pre-wrap;word-break:break-word\">" +
+      escHtml(
+        list
+          .map((s) => {
+            // ★ 实测字段：{name, host, path, url, target, ok, auth, websocket}
+            return (
+              (s.ok === false ? "✗ " : "✓ ") +
+              (s.name || "?") +
+              " → " +
+              (s.target || s.url || "?")
+            );
+          })
+          .join("\n"),
+      ) +
+      "</pre></div>";
+  }
+  el.innerHTML = head + body;
 }
 
 // ===== Chat =====
@@ -2014,9 +2193,7 @@ function applyIncrementalChatRender(msgsEl, html) {
   while ((m = re.exec(html)) !== null) want.push(m[1]);
 
   var kids = Array.prototype.slice.call(msgsEl.children);
-  var have = kids.map(function (n) {
-    return n.getAttribute("data-msgkey") || "";
-  });
+  var have = kids.map((n) => n.getAttribute("data-msgkey") || "");
 
   // 没带 key（老结构 / 空列表）⇒ 只能整棵重建
   if (want.length === 0 || have.length === 0) {
@@ -2866,7 +3043,7 @@ async function loadOlderChat() {
 // 不重建已有消息 → 无闪烁。用于 SSE 断连恢复期间的轮询兜底（跨渠道消息补偿）。
 function syncChatFromHistory() {
   return api("/chat/history?limit=" + CHAT_PAGE_SIZE)
-    .then(function (data) {
+    .then((data) => {
       if (!data || !data.messages || data.messages.length === 0) return;
       var serverMsgs = data.messages;
       var localMsgs = state.messages;
@@ -2915,7 +3092,7 @@ function syncChatFromHistory() {
         rerenderChatIfActive();
       }
     })
-    .catch(function () {});
+    .catch(() => {});
 }
 
 async function loadTerminals() {
@@ -5692,7 +5869,7 @@ async function connectFetchSSE(url) {
             state.pipelinePhase = phase;
             // 阶段停留一会儿就回空闲，避免留下一个永远停在 after_output 的假状态。
             if (state.pipelineTimer) clearTimeout(state.pipelineTimer);
-            state.pipelineTimer = setTimeout(function () {
+            state.pipelineTimer = setTimeout(() => {
               state.pipelinePhase = "";
               if (state.currentView === "overview") renderOverview();
             }, 2500);
@@ -5722,13 +5899,13 @@ async function connectFetchSSE(url) {
         }
       }
       // 断连后先增量同步历史（补偿断连窗口期丢失的事件），再重连
-      syncChatFromHistory().catch(function () {});
+      syncChatFromHistory().catch(() => {});
       // ★ 此处也清零：本次连接曾成功建立（上面已清），断流是运行期事件，
       //   不该把「建连失败」的累计次数带进下一次退避。
       state._sseRetryAttempts = 0;
       reconnectTimer = setTimeout(() => {
         connectSSE();
-      }, Math.min(1000 * Math.pow(2, Math.min((state._sseRetryAttempts || 0), 5)), 32000));
+      }, Math.min(1000 * 2 ** Math.min((state._sseRetryAttempts || 0), 5), 32000));
     }
     pump();
   } catch (e) {
@@ -5736,7 +5913,7 @@ async function connectFetchSSE(url) {
     state._sseRetryAttempts = attempts;
     setTimeout(() => {
       connectSSE();
-    }, Math.min(1000 * Math.pow(2, Math.min(attempts - 1, 5)), 60000));
+    }, Math.min(1000 * 2 ** Math.min(attempts - 1, 5), 60000));
   }
 }
 
