@@ -536,9 +536,22 @@ async function api(p, o) {
       //   留 30ms 让 setAuth 的 cookie 落盘，避免极端情况下仍用旧凭据。
       await new Promise((res2) => setTimeout(res2, 30));
     } catch (e2) {}
-    window._haReloginLock = false;
-    // 重试一次
-    return api(p, o);
+    // ★★ 锁必须在**递归返回之后**才释放。
+    //
+    // 原写法在递归前 `window._haReloginLock = false` ⇒ 每层递归进来看到的
+    // 都是「没人在重登」⇒ 无限自我递归。真机实测（Electron + CDP）：
+    // fetch 被调 13 次、重登 12 次才被上限截断。
+    //
+    // 而且这与「800ms → 30ms」那次优化直接相关：原来只是每 800ms 慢速空转，
+    // 改完变成每 30ms 快速烧 CPU 并反复打服务端 —— **优化放大了这个 bug**。
+    //
+    // try/finally 保证：递归正常返回后锁才释放（下次真实 401 仍可重登），
+    // 递归抛错时也一定释放（不会把后续所有请求都锁死成直接 401）。
+    try {
+      return await api(p, o);
+    } finally {
+      window._haReloginLock = false;
+    }
   }
   if (r.status === 408 || r.status === 504) {
     // 网关超时：API 层直接抛错，调用方可选择提示用户重试或自动降级
@@ -572,8 +585,12 @@ async function api(p, o) {
       //   留 30ms 让 setAuth 的 cookie 落盘，避免极端情况下仍用旧凭据。
       await new Promise((res2) => setTimeout(res2, 30));
     } catch (e2) {}
-    window._haReloginLock = false;
-    return api(p, o);
+    // ★★ 同上：锁在递归返回后才释放（递归前清锁 = 无限重试）
+    try {
+      return await api(p, o);
+    } finally {
+      window._haReloginLock = false;
+    }
   }
   // 非 2xx 状态码：解包 server error + 以 ApiError 抛出，调用方按 status 分支处理
   if (!r.ok) {
