@@ -488,3 +488,77 @@ CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build \
 另注：`aaafaac`/`94c74b2`（修复设备反复掉线/静默失联：ping 路径断连 +
 bind 结果无人处理）正是 106 此前长期无 `online` 日志的成因，
 2026-09-26 已进 main，今天部署的 `1.4.0` 包含它。
+
+---
+
+## 7. webui WebAPI 压测
+
+脚本：`scripts/kernel-stress/webui-bench.py`，打的是**生产实例**
+`127.0.0.1:8080`。
+
+```bash
+K=$(sqlite3 /home/newqqagent/config.db "select value from config_webui where key='api_key';")
+python3 scripts/kernel-stress/webui-bench.py --key "$K" --probe   # 先探测
+python3 scripts/kernel-stress/webui-bench.py --key "$K" --scale 3 --json /tmp/w.json
+```
+
+### ★ 必须先 `--probe`
+
+webui 无认证时返回 **200 + 登录页 HTML**（含 `THEME_PLACEHOLDER`）。
+**状态码是 200**，只看 `http_code` 会把登录页当成健康响应 ⇒
+「全部 200」是假的。脚本因此额外校验响应体（`looks_like_login_page()`）。
+
+### ★ 只压只读端点
+
+压测绝不能改状态。18 个端点**逐个探测确认**是 GET + 只读：
+
+| 规模 | 端点 | 备注 |
+| --- | --- | --- |
+| 小 | `/status` `/network` `/terminals` `/tracker` `/adapters` `/agents` `/config` `/persona` `/proxy/services` | 104B–1.8KB |
+| 中 | `/plugins` `/runtime` `/memory/context` `/memory/text` `/memory` `/knowledge` | 4.4KB–53KB |
+| 大 | `/kernel` `/memory/graph` `/knowledge/tree` | 157KB / 338KB / **425KB** |
+
+**排除**：`/chat`（真调 LLM）、`/chat/interrupt`（中断在跑的任务）、
+`/settings/*` `/plugins/*`（改配置）、`/login` `/logout`（改会话）、
+`/knowledge/*` `/memory/*` 写接口、`/device/*`（控制真实设备）。
+
+### 实测（2026-09-28）
+
+| scale | 请求 | 吞吐 | p50 | p95 | p99 | max | 成功 |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| 1 | 360 | 779 req/s | 6.7ms | 26.8ms | 45.5ms | 51.6ms | **360/360** |
+| 2 | 720 | 788 req/s | 12.2ms | 52.6ms | 163.0ms | 213.5ms | **720/720** |
+| 3 | 1080 | 1038 req/s | 16.4ms | 60.4ms | 79.7ms | 123.0ms | **1080/1080** |
+
+**2160 请求零失败**，压测期间服务端 `active`、0 个 5xx、0 个 webui 错误，
+QQ/agent 链路未受影响。
+
+#### 重响应不是瓶颈（并发 1 → 16）
+
+| 端点 | 大小 | 并发 1 | 并发 16 | 吞吐 |
+| --- | --- | --- | --- | --- |
+| `/status` | 0.2KB | 104 req/s | **1781 req/s** | 320KB/s |
+| `/kernel` | 153KB | 126 req/s | 375 req/s | 19 → **57 MB/s** |
+| `/memory/graph` | 330KB | 70 req/s | 410 req/s | 23 → **135 MB/s** |
+| `/knowledge/tree` | 415KB | 79 req/s | 717 req/s | 33 → **297 MB/s** |
+
+⇒ 大 JSON 端点的 p50 **不随并发上升**（`/knowledge/tree` 12.3ms → 8.9ms，
+即排队更充分、效率更高），瓶颈不在 JSON 序列化。
+
+### ⚠ 一次未下结论的观察
+
+scale=2 的 p99（163ms）反而**高于** scale=3（79.7ms）。看着像反常，但当时
+机器上另一个 agent 的 chromium 占 **766% CPU**（另有 cjpm/cjc 在编译）
+⇒ 是**环境噪声**，不是 webui 特性。
+
+**未在可比条件下重测就不下结论** —— 别拿这一组数据当性能特征。
+要判定需先固定负载条件（停掉占 CPU 的进程）再跑。
+
+### 踩过的坑
+
+脚本第一版把端点表存成路径后半段（`"/status"`）而漏了 `/api/v1` 前缀 ⇒
+拼出 `http://127.0.0.1:8080/status` ⇒ **18 个端点全 404**，而同一时刻
+`curl /api/v1/status` 是 200。
+
+⇒ **压测脚本必须先 probe 再压。** 若不 probe，那一跑会得出
+「webui 全挂」的错误结论。
