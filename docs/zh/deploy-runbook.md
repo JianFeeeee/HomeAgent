@@ -491,74 +491,68 @@ bind 结果无人处理）正是 106 此前长期无 `online` 日志的成因，
 
 ---
 
-## 7. webui WebAPI 压测
+## 7. WebAPI 压测（webui + kbtree + pluginmgr + remotedevice）
 
-脚本：`scripts/kernel-stress/webui-bench.py`，打的是**生产实例**
-`127.0.0.1:8080`。
+脚本：`scripts/kernel-stress/webui-bench.py`，打的是**生产实例**。
 
 ```bash
 K=$(sqlite3 /home/newqqagent/config.db "select value from config_webui where key='api_key';")
-python3 scripts/kernel-stress/webui-bench.py --key "$K" --probe   # 先探测
+python3 scripts/kernel-stress/webui-bench.py --key "$K" --probe          # 先探测
 python3 scripts/kernel-stress/webui-bench.py --key "$K" --scale 3 --json /tmp/w.json
 ```
 
-### ★ 必须先 `--probe`
+### ★ 8080 上有 4 个插件注册路由，但监听端口不止 8080
 
-webui 无认证时返回 **200 + 登录页 HTML**（含 `THEME_PLACEHOLDER`）。
-**状态码是 200**，只看 `http_code` 会把登录页当成健康响应 ⇒
-「全部 200」是假的。脚本因此额外校验响应体（`looks_like_login_page()`）。
+第一版我只压了 webui，**漏了 pluginmgr 与 kbtree 的根路由**。
+`ss -ltnp` 实测：
 
-### ★ 只压只读端点
+| 端口 | 插件 | 路由 | 认证 |
+| --- | --- | --- | --- |
+| `127.0.0.1:8080` | webui | `/api/v1/*` | `config_webui.api_key` |
+| | remotedevice | `/api/v1/device/*` | `config_remotedevice.ws_token` |
+| | kbtree 子路径 | `/api/v1/knowledge/tree/{categories,counts}` | `config_webui.api_key` |
+| `127.0.0.1:9876` | **pluginmgr** | `/plugins`（**无** `/api/v1`） | **无需认证** |
+| `127.0.0.1:9892` | **kbtree** | `/categories` `/counts` `/search`（**无**前缀） | `config_kbtree.token` |
+| `127.0.0.1:9890` | remotedevice | 设备 WS 网关（非 REST） | 不压 |
 
-压测绝不能改状态。18 个端点**逐个探测确认**是 GET + 只读：
+⇒ 「打 `/api/v1/*`」这个假设只对 8080 上的 webui 成立。
+`:8080/plugins` 实测 **404**。
 
-| 规模 | 端点 | 备注 |
-| --- | --- | --- |
-| 小 | `/status` `/network` `/terminals` `/tracker` `/adapters` `/agents` `/config` `/persona` `/proxy/services` | 104B–1.8KB |
-| 中 | `/plugins` `/runtime` `/memory/context` `/memory/text` `/memory` `/knowledge` | 4.4KB–53KB |
-| 大 | `/kernel` `/memory/graph` `/knowledge/tree` | 157KB / 338KB / **425KB** |
+### ★ 三条判据
 
-**排除**：`/chat`（真调 LLM）、`/chat/interrupt`（中断在跑的任务）、
-`/settings/*` `/plugins/*`（改配置）、`/login` `/logout`（改会话）、
-`/knowledge/*` `/memory/*` 写接口、`/device/*`（控制真实设备）。
+1. **必须先 `--probe`**：webui 无认证时返回 **200 + 登录页 HTML**
+   （含 `THEME_PLACEHOLDER`）。**状态码是 200** ⇒ 只看 `http_code`
+   会把登录页当健康响应。
+2. **只压只读端点**：`/chat`（真调 LLM）、`/chat/interrupt`（中断在跑
+   的任务）、`/settings/*` `/plugins/*`（改配置）、`/login` `/logout`、
+   `/device/push`（向真实设备下发）、`/device/ws`（长连接）—— 全部排除。
+   `/api/v1/device/online` 收进来之前逐行读过实现：仅 `GET` +
+   `registry.OnlineList()`，纯读。
+3. **配置库只读打开**（`mode=ro`）—— 压测脚本绝不能碰生产库写路径。
 
-### 实测（2026-09-28）
+### 实测（2026-09-28，24 端点 × 3 档）
 
 | scale | 请求 | 吞吐 | p50 | p95 | p99 | max | 成功 |
 | --- | --- | --- | --- | --- | --- | --- | --- |
-| 1 | 360 | 779 req/s | 6.7ms | 26.8ms | 45.5ms | 51.6ms | **360/360** |
-| 2 | 720 | 788 req/s | 12.2ms | 52.6ms | 163.0ms | 213.5ms | **720/720** |
-| 3 | 1080 | 1038 req/s | 16.4ms | 60.4ms | 79.7ms | 123.0ms | **1080/1080** |
+| 1 | 480 | 953 req/s | 4.0ms | 23.0ms | 34.7ms | 40.6ms | **480/480** |
+| 2 | 960 | 1310 req/s | 7.9ms | 32.4ms | 48.4ms | 72.3ms | **960/960** |
+| 3 | 1440 | 1422 req/s | 12.0ms | 42.7ms | 60.5ms | 88.7ms | **1440/1440** |
 
-**2160 请求零失败**，压测期间服务端 `active`、0 个 5xx、0 个 webui 错误，
-QQ/agent 链路未受影响。
+（24 端点 × 20/40/60 轮 = 480/960/1440）
 
-#### 重响应不是瓶颈（并发 1 → 16）
+**2880 请求零失败**；压测期间服务端 `active`、0 个 5xx。
 
-| 端点 | 大小 | 并发 1 | 并发 16 | 吞吐 |
-| --- | --- | --- | --- | --- |
-| `/status` | 0.2KB | 104 req/s | **1781 req/s** | 320KB/s |
-| `/kernel` | 153KB | 126 req/s | 375 req/s | 19 → **57 MB/s** |
-| `/memory/graph` | 330KB | 70 req/s | 410 req/s | 23 → **135 MB/s** |
-| `/knowledge/tree` | 415KB | 79 req/s | 717 req/s | 33 → **297 MB/s** |
+**p99 随并发单调上升**（34.7 → 48.4 → 60.5ms），符合排队预期。
+上一轮曾出现 scale=2 的 p99 反常地高于 scale=3，当时机器上另一个 agent 的
+chromium 占 766% CPU ⇒ **环境噪声**，已明确不作为性能特征。
 
-⇒ 大 JSON 端点的 p50 **不随并发上升**（`/knowledge/tree` 12.3ms → 8.9ms，
-即排队更充分、效率更高），瓶颈不在 JSON 序列化。
+### 踩过的三个坑（都在脚本注释里）
 
-### ⚠ 一次未下结论的观察
-
-scale=2 的 p99（163ms）反而**高于** scale=3（79.7ms）。看着像反常，但当时
-机器上另一个 agent 的 chromium 占 **766% CPU**（另有 cjpm/cjc 在编译）
-⇒ 是**环境噪声**，不是 webui 特性。
-
-**未在可比条件下重测就不下结论** —— 别拿这一组数据当性能特征。
-要判定需先固定负载条件（停掉占 CPU 的进程）再跑。
-
-### 踩过的坑
-
-脚本第一版把端点表存成路径后半段（`"/status"`）而漏了 `/api/v1` 前缀 ⇒
-拼出 `http://127.0.0.1:8080/status` ⇒ **18 个端点全 404**，而同一时刻
-`curl /api/v1/status` 是 200。
-
-⇒ **压测脚本必须先 probe 再压。** 若不 probe，那一跑会得出
-「webui 全挂」的错误结论。
+1. **端点表漏 `/api/v1` 前缀** ⇒ 18 个端点全 404，而同一时刻 curl 是 200。
+   不 probe 直接压 ⇒ 结论会是「webui 全挂」。
+2. **前缀补了两次** ⇒ `remotedevice` 拼成 `/api/v1/api/v1/device/online`
+   ⇒ 落到 webui 兜底路由、返回 **200 + 登录页**（probe 的
+   `looks_like_login_page()` 抓到的）。反向的「表里含前缀 + 代码仍补」
+   又让 webui 组全 404 ⇒ 最终统一成**表里写完整路径、代码不补**。
+3. **`contextlib.suppress(sqlite3.connect)`** —— `connect` 是函数不是
+   异常类，`suppress` 会抛 `TypeError`。改回显式 `try/except sqlite3.Error`。
