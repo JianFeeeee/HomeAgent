@@ -1,4 +1,4 @@
-.PHONY: all build build-plain build-cli build-gui clean install test run build-static build-linux-arm64 lint fmt sync-client-versions check-client-versions csrc csrc-test csrc-lint csrc-abi csrc-headers csrc-sanitize csrc-cross csrc-fuzz check-csrc check-csrc-full
+.PHONY: test-gui all build build-plain build-cli build-gui clean install test run build-static build-linux-arm64 lint fmt sync-client-versions check-client-versions csrc csrc-test csrc-lint csrc-abi csrc-headers csrc-sanitize csrc-cross csrc-fuzz check-csrc check-csrc-full
 # HOMED_TAGS 默认带 onnxruntime：发行版**默认启用**本地向量空间（与
 # deploy/packaging/build.sh 保持一致）。
 #
@@ -118,6 +118,16 @@ csrc-test: csrc
 #
 # 用 \`-Werror\` 而不是只看输出：只有「告警即失败」才是门禁，
 # 否则它只是打印给人看，而人会累。
+# cmd/gui 的判据入口。
+#
+# 为什么单列：cmd/gui 是**纯 Electron 目录**（0 个 .go、无 go.mod），
+# `go test ./...` 会跳过它（实测 43 包全绿、0 处提及）。
+# 也就是说：不挂到这里，GUI 的判据**没有任何标准工具链会跑**。
+# `go test ./cmd/gui` 报 "no Go files [setup failed]" 属预期，不是回归。
+test-gui:
+	@command -v node >/dev/null || { echo "SKIP: 无 node，GUI 判据未跑"; exit 0; }
+	@cd cmd/gui && npm test --silent
+
 .PHONY: csrc-lint
 csrc-lint:
 	@echo "== C 告警门禁（$(CSRC_STD)，$(CSRC_WARN_FLAGS)）=="
@@ -333,6 +343,7 @@ install: build
 
 test:
 	$(GO) test ./...
+	@$(MAKE) test-gui
 	@$(MAKE) csrc-test
 	@$(MAKE) check-csrc
 	@$(MAKE) check-codec-cgo-only
