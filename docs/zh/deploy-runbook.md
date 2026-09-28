@@ -556,3 +556,76 @@ chromium 占 766% CPU ⇒ **环境噪声**，已明确不作为性能特征。
    又让 webui 组全 404 ⇒ 最终统一成**表里写完整路径、代码不补**。
 3. **`contextlib.suppress(sqlite3.connect)`** —— `connect` 是函数不是
    异常类，`suppress` 会抛 `TypeError`。改回显式 `try/except sqlite3.Error`。
+
+---
+
+## 8. grandchild 测试：不稳定的是**测试设计**，不是生产代码
+
+`internal/plugin/proc` 的 `TestKillReturnsEvenWhenGrandchildSurvives`
+曾在 `go test ./...`（600s 超时）与 `make test`（20.4s FAIL）里失败，
+但**单独跑 0.24s 通过**、连跑 3 次全绿 ⇒ 「单跑绿、合跑红」。
+
+2026-09-28 定位，结论是**三个测试设计缺陷**，生产代码（`process.go`）没问题。
+
+### 缺陷 1：名字说 Survives，实际测的是「被杀」
+
+| 测试 | spawn 的源 | 孙进程 | `kill(-pgid)` 能杀吗 |
+| --- | --- | --- | --- |
+| `…EvenWhenGrandchildSurvives` | `grandchildPluginSource` | `sleep 400`，**不设** Setpgid，留在进程组内 | **能** |
+| `…WhenGrandchildEscapesProcessGroup` | `escapingGrandchildSource` | `sleep 401` + `Setsid: true` | **不能** |
+
+`grandchildPluginSource` 自己的注释写着「孙进程**不**设 Setpgid：它要留在
+插件的进程组里」⇒ 第一个测试里孙进程**不会 Survive**。
+⇒ 容易让人误以为「脱组场景已被覆盖」，而它其实覆盖的是另一个场景。
+
+**已改名** `…WhenGrandchildDiesWithProcessGroup`，名字与实现一致。
+
+### 缺陷 2：判据数的是**全系统**进程
+
+`countShimGrandchildren()` / `countEscapingGrandchildren()` 扫 `/proc` 找
+`"sleep 400"` / `"sleep 401"` 字符串，**不区分父子关系** ⇒ 同机任何命中同样
+cmdline 的进程/容器都会串味。
+
+原注释记过一次前车之鉴（「我第一版就踩了：明明单跑通过，合跑却红」），
+但当时只加了 base 快照，**没解决全局匹配这个根因** —— base 也救不了
+「别的测试中途拉起 sleep 400」。
+
+**已修**：新增 `procPPid()`，两个计数器都限定 `PPid` 属于本测试的插件。
+顺带补上 `e.Name()` 的 `Atoi` 校验（原来会把 `/proc/self`、`/proc/net`
+这类非数字目录也去读 cmdline）。
+
+### 缺陷 3：defer 清理「拿不到 pid 就整个跳过」
+
+```go
+if pid := pluginPid(p); pid > 0 { syscall.Kill(-pid, SIGKILL) }
+```
+
+pid 取不到时**静默跳过** ⇒ 残留 `sleep 400` 污染后续测试 ⇒ 变成下一个测试的
+假失败。
+
+**已修**：新增 `cleanupSleepMarkers(marker)`，按唯一 cmdline 标记兜底清理，
+即使 `pluginPid` 返回 0 也执行。
+
+### ★ 我被推翻的一个假设（记下来免得重犯）
+
+我一度认定根因是 `waitLoop` 里 `p.cmd.Wait()` **先阻塞**、拆管道在**之后**
+（`process.go:359-367`）：Go 的 `exec` 里 `Wait()` 会等 copy goroutine 结束，
+而那些要等所有管道写端关闭 —— 孙进程持有着，死锁。
+
+**实测推翻了它**：把拆管道提到 `Wait` 之前，那个测试**5 次全 FAIL**
+（改前只是偶发）。说明真正的根因是上面三个测试设计问题，
+而「Wait 阻塞」是**被孙进程持管道放大**的效应，不是缺陷本身。
+
+⇒ 改了生产代码不但没修好，还把偶发变成必现。**先证明因果再动手。**
+
+### 判据
+
+`internal/plugin/proc/grandchild_design_test.go`，4 条。写它时踩了个坑：
+它是**查源码文本**的，我一改源文件（改名/加 ppid 限定/加兜底清理），
+锚点就全过期 ⇒ 三条判据一起红。
+
+⇒ 判据自己被重构打断时，要改的是**判据的锚点**（认新旧两种形态），
+不是回退修复。最后把判据①从「解函数体比对 spawn 参数」简化为
+「只问名字是否还说 Survives」—— 少耦合一层，少失效一处。
+
+变异测试（三个都抓到）：改名回 Survives / 抽掉 ppid 限定 / 去掉兜底清理。
