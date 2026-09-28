@@ -234,7 +234,7 @@ internal/
 
 - **模型中立的统一向量空间**：内核不再适配任何具体模型，只提供公共 provider SPI
   （`pkg/embedding`：`Modality` / `Input{Data,MIME}` / `Info{Dimension,Fingerprint,Modalities}`
-  + 名字注册表），实现在 `providers/*`。默认 **Chinese-CLIP ViT-B/16** —— text 与 image
+  - 名字注册表），实现在 `providers/*`。默认 **Chinese-CLIP ViT-B/16** —— text 与 image
   落在**同一空间**（512 维、指纹 `cd2a495cf990`、Apache-2.0；实测加载峰值 1.59GB、静置回收后稳态约 0.89GB）；
   `qwen3vl` 保留（2048 维、常驻约 9.4GB，供内存充足或将来要视频的机器切回）。
   文本检索仍由既有词向量 / TF-IDF 兜底：CLIP 双塔的**纯文本语义弱于 MLLM 型嵌入器**，
@@ -293,7 +293,7 @@ internal/
 [Releases](https://gitcode.com/JianFeeeee/HomeAgent/releases) 提供三种变体：
 
 | 变体 | 内容 | 适用 |
-|---|---|---|
+| --- | --- | --- |
 | **full** | homed + waiter + 桌面 GUI + systemd unit | 单机全功能 |
 | **server** | homed + waiter + systemd unit | 服务器（无桌面环境） |
 | **client** | waiter + 桌面 GUI | 连接远程 HomeAgent |
@@ -340,7 +340,7 @@ make install            # 安装到系统
 ### 随包分发的第三方组件
 
 | 组件 | 许可 | 位置 |
-|---|---|---|
+| --- | --- | --- |
 | Chinese-CLIP ViT-B/16（ONNX 产物） | Apache-2.0 | `/usr/lib/homeagent/models/chinese-clip-vit-b16-onnx/` |
 | ONNX Runtime（`libonnxruntime.so`） | MIT | `/usr/lib/homeagent/onnxruntime/` |
 | jieba 词库（内嵌进二进制） | MIT | 源码 `internal/memory/jiebadict/` |
