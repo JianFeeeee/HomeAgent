@@ -91,6 +91,57 @@ journalctl -u homeagent.service --since "-3 min" | grep -c "registering tool: se
 `multimodal space active: provider=chineseclip dim=512` 是 ONNX 链路真的
 加载起来的标志 —— 缺它说明已降级，只是没报错。
 
+### 1.4b ★ 判断线上跑的是哪次构建：看 `commit`，别看 `strings`
+
+生产二进制里嵌着 `commit`（`internal/meta`），**这是唯一可靠的判据**：
+
+```bash
+K=$(sqlite3 /home/newqqagent/config.db "select value from config_webui where key='api_key';")
+curl -s -H "X-API-Key: $K" http://127.0.0.1:8080/api/v1/status | grep -oE '"commit":"[^"]*"'
+# ⇒ "commit":"d084137"   这才是线上真实在跑的提交
+```
+
+⚠ **必须带 `X-API-Key`**：无认证时 `/api/v1/status` 返回**登录页 HTML**
+（200 + `THEME_PLACEHOLDER`），`grep '"commit"'` 匹配不到任何东西 ——
+看起来像"命令没输出"，实际是**认证缺失**。这与 GUI 客户端里
+`api()` 专门检测 `THEME_PLACEHOLDER` 是同一件事。
+
+**为什么不能用 `strings` 判**：webui 等插件的静态资源是
+`//go:embed` **编译进二进制**的（`internal/plugins/webui/handler.go:27`），
+其内容取决于**构建时**磁盘上的文件。
+
+⇒ 已提交过的改动，即使还没部署，线上二进制的 `strings` 里**也可能**
+已经出现新代码片段。
+
+2026-09-28 实踩：我据此差点白部署一次（线上 commit 已是 `d084137`，
+而我以为还是旧版）。同一天还发生过一次**字节数完全相同**的巧合
+（86811464），更掩盖了这个问题。
+
+⇒ 部署前的判据顺序：
+1. `/api/v1/status` 的 `commit` —— 线上在跑什么
+2. `git log <commit>..HEAD` —— 差哪些提交
+3. 那些提交里**有无运行时改动**（`internal/`、`cmd/`）—— 只有它才需要部署
+4. 文档 / 判据 / 部署脚本类的提交**不需要**部署
+
+### 1.4c 内置插件 vs 独立二进制
+
+`internal/plugins/<name>/` 是**内置**插件，编译进 homed。
+`/home/newqqagent/plugins/<name>/plugin.bin` 是**独立**插件，要单独构建部署。
+
+判定方法（2026-09-28 核实）：
+
+```bash
+for p in webui qq cmd seq; do
+  printf "%-8s " $p
+  ls /home/newqqagent/plugins/$p/plugin.bin >/dev/null 2>&1 \
+    && echo "独立二进制（需单独部署）" || echo "内置（随 homed 部署）"
+done
+# 2026-09-28 实测：webui/cmd/seq 内置，qq 独立
+```
+
+⚠ 目录**存在不等于**有独立二进制 —— `plugins/webui/` 目录存在但**0 个文件**，
+走的是内置。改内置插件只需重编 homed。
+
 ### 1.5 ★ 适配器升级的保护语义
 
 `/home/newqqagent/adapters/.bundled` 记录**上次随包带出的版本**哈希：
