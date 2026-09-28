@@ -9,7 +9,7 @@
     "start": "electron . --no-sandbox",
     "dev": "electron . --no-sandbox --dev",
     "test": "node sse-backoff.test.mjs && node sse-backoff-behavior.test.mjs && node retry-guard.test.mjs",
-    "test-live": "node chat-perf.test.mjs"
+    "test-live": "node chat-perf.test.mjs && node protocol-align.test.mjs"
   },
   "dependencies": {
     "koffi": "^3.1.6"
