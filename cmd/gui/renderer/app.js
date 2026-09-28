@@ -1745,6 +1745,12 @@ function renderChat() {
     msgs.forEach((m, i) => {
       var role = m.role || "user";
       var c = m.content || "";
+      // ★ 稳定标识：role + 序号 + 内容长度 + 首尾片段。
+      //   序号参与是为了区分「连续两条同 role 同长度」的消息；
+      //   内容片段参与是为了让「同一条消息内容变了」能被识别出来。
+      //   增量渲染靠它定位可复用的 DOM 节点（**不能靠下标** ——
+      //   loadOlderChat 会 unshift 前插消息，下标整体位移）。
+      var mkey = role + ":" + i + ":" + c.length + ":" + c.slice(0, 24) + ":" + c.slice(-24);
       if (role === "assistant") {
         if (typeof marked === "undefined") {
           c = "<pre>" + escHtml(c) + "</pre>";
@@ -1866,12 +1872,12 @@ function renderChat() {
       }
       if (role === "system") {
         html +=
-          '<div class="msg msg-system"><div class="msg-bubble">' +
+          '<div class="msg msg-system" data-msgkey="' + escHtml(mkey) + '"><div class="msg-bubble">' +
           (c || "") +
           "</div></div>";
       } else if (isChan) {
         html +=
-          '<div class="msg msg-channel">' +
+          '<div class="msg msg-channel" data-msgkey="' + escHtml(mkey) + '">' +
           '<div class="msg-avatar chan-avatar" style="background:' +
           chanColor(m.source) +
           '">' +
@@ -1893,6 +1899,8 @@ function renderChat() {
         html +=
           '<div class="msg msg-' +
           role +
+          '" data-msgkey="' +
+          escHtml(mkey) +
           '">' +
           '<div class="msg-avatar">' +
           (role === "user" ? userAvatar : aiAvatar) +
@@ -1910,7 +1918,7 @@ function renderChat() {
       __("小宅", "Agent") +
       '">';
     html +=
-      '<div class="msg msg-assistant"><div class="msg-avatar">' +
+      '<div class="msg msg-assistant" data-msgkey="__loading__"><div class="msg-avatar">' +
       aiAvatar2 +
       '</div><div class="msg-content"><div class="msg-bubble">' +
       '<span class="live-spinner"></span>' +
@@ -1919,13 +1927,21 @@ function renderChat() {
         : "") +
       "</div></div></div>";
   }
-  msgsEl.innerHTML = html;
+  // ★ 增量渲染：能复用就复用，别整棵重建（见 applyIncrementalChatRender）。
+  applyIncrementalChatRender(msgsEl, html);
   if (state.chatStick !== false) {
-    try {
-      msgsEl.scrollTo({ top: msgsEl.scrollHeight, behavior: "smooth" });
-    } catch (e) {
-      msgsEl.scrollTop = msgsEl.scrollHeight;
-    }
+    // ★ 必须用 scrollTop 立即到位，**不能**用 scrollTo({behavior:"smooth"})。
+    //
+    // 真机实测（Xvfb + Electron + CDP，200 条消息 / 3500 DOM 节点）：
+    //   smooth：立即 scrollTop=0，300ms 后只到 6894，而上限是 22838
+    //           ⇒ 既慢又**没到位**，用户看到的就是「打开不在最新消息、
+    //             还要反复滑动」
+    //   scrollTop=scrollHeight：立即 22838，一次到位
+    //
+    // 原因：上面刚做完 DOM 变更，smooth 动画的起点算的是**旧**布局；
+    // 动画启动前布局又变了，于是滚到错误位置。重建后本就不该有动画
+    // ——用户要的是「立刻看到最新消息」。
+    msgsEl.scrollTop = msgsEl.scrollHeight;
   }
   updateChatBadge();
   if (window.homeagent && window.homeagent.log) {
@@ -1978,6 +1994,101 @@ function updateChatBadge() {
   if (!badge) return;
   badge.textContent = state.chatStage || "";
   badge.style.display = "none";
+}
+
+// applyIncrementalChatRender 按 data-msgkey 复用可用的 DOM 节点。
+//
+// 为什么需要：旧实现无条件整棵 innerHTML 重建 —— 200 条消息 = 3500 个 DOM
+// 节点全部销毁重建，真机实测单次 235ms；流式追加时每个放行的 chunk 都走这条路
+// （200 条时每 chunk 6.6ms）⇒ 聊得越久越卡，用户「卡得没有用的欲望」。
+//
+// 策略（从便宜到贵）：
+//   1) 尾部追加 —— 新 key 序列是旧序列的前缀 + 新增（最常见：发消息/工具轮）
+//   2) 头部前插 —— loadOlderChat 往上翻：新序列 = 新前缀 + 旧序列
+//   3) 局部替换 —— 个别 key 变了（某条消息内容更新）
+//   4) 兜底整棵重建 —— 序列既非前缀也非后缀（删除/去重/重排）
+function applyIncrementalChatRender(msgsEl, html) {
+  var want = [];
+  var re = /data-msgkey="([^"]*)"/g;
+  var m;
+  while ((m = re.exec(html)) !== null) want.push(m[1]);
+
+  var kids = Array.prototype.slice.call(msgsEl.children);
+  var have = kids.map(function (n) {
+    return n.getAttribute("data-msgkey") || "";
+  });
+
+  // 没带 key（老结构 / 空列表）⇒ 只能整棵重建
+  if (want.length === 0 || have.length === 0) {
+    msgsEl.innerHTML = html;
+    return;
+  }
+
+  // 情况 2：头部前插。新序列 = 新前缀 + 旧序列
+  if (want.length > have.length) {
+    var off = want.length - have.length;
+    var isPrepend = true;
+    for (var p = 0; p < have.length; p++) {
+      if (want[p + off] !== have[p]) { isPrepend = false; break; }
+    }
+    if (isPrepend) {
+      var prevH = msgsEl.scrollHeight;
+      var prevTop = msgsEl.scrollTop;
+      for (var q = off - 1; q >= 0; q--) {
+        var tn = parseChatNode(html, want[q]);
+        if (tn) msgsEl.insertBefore(tn, msgsEl.firstChild);
+      }
+      // 保持滚动锚点：内容变高后把视口往下挪相同高度
+      msgsEl.scrollTop = prevTop + (msgsEl.scrollHeight - prevH);
+      return;
+    }
+  }
+
+  // 情况 1：尾部追加。新序列是旧序列的前缀
+  var isAppend = have.length <= want.length;
+  for (var a = 0; a < have.length && isAppend; a++) {
+    if (want[a] !== have[a]) isAppend = false;
+  }
+  if (isAppend) {
+    var frag = document.createDocumentFragment();
+    for (var b = have.length; b < want.length; b++) {
+      var node = parseChatNode(html, want[b]);
+      if (node) frag.appendChild(node);
+    }
+    msgsEl.appendChild(frag);
+    return;
+  }
+
+  // 情况 3：局部替换
+  for (var c = 0; c < want.length && c < kids.length; c++) {
+    if (have[c] === want[c]) continue;
+    var fresh = parseChatNode(html, want[c]);
+    if (fresh && kids[c] && kids[c].parentNode === msgsEl) {
+      msgsEl.replaceChild(fresh, kids[c]);
+    }
+  }
+  // 尾部有删除 ⇒ 截断
+  while (msgsEl.childElementCount > want.length) {
+    msgsEl.removeChild(msgsEl.lastElementChild);
+  }
+  if (msgsEl.childElementCount === want.length) return;
+  // 兜底
+  msgsEl.innerHTML = html;
+}
+
+// parseChatNode 从整段 html 里切出 key 对应的那一个顶层消息节点。
+//
+// 用一个容器承载并逐个子节点比对 data-msgkey —— 不引 DOMParser 重新解析整棵
+// html（那会抵消掉增量渲染省下的开销）。
+function parseChatNode(html, key) {
+  var holder = document.createElement("div");
+  holder.innerHTML = html;
+  for (var i = 0; i < holder.children.length; i++) {
+    if ((holder.children[i].getAttribute("data-msgkey") || "") === key) {
+      return holder.children[i];
+    }
+  }
+  return null;
 }
 
 function rerenderChat() {
