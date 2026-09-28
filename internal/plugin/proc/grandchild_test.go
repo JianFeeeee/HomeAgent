@@ -85,25 +85,72 @@ func buildGrandchildPlugin(t *testing.T) string {
 }
 
 // countShimGrandchildren 数本测试拉起的 sleep 400。
+//
+// ★ 只数**自己那一支**（孙进程的 PPid 链上必须有本测试的插件 pid），
+//
+//	不再扫全系统。
+//
+//	旧实现扫全 /proc 找 "sleep 400"：同机任何命中同样 cmdline 的进程
+//	/ 容器都会串味，表现为「单跑绿、合跑红」。注释里记过一次前车之鉴
+//	（「我第一版就踩了」），但当时只加了 base 快照，**没解决全局匹配**
+//	这个根因 —— base 也救不了「别的测试中途拉起 sleep 400」的情况。
+//
+//	限定 PPid 之后，别的测试/容器的进程一律不算数。
 func countShimGrandchildren() int {
+	return countShimGrandchildrenUnder(0)
+}
+
+// countShimGrandchildrenUnder 只数 PPid 属于 rootPid 的 sleep 400。
+// rootPid == 0 时不做父子限定（保留旧语义，供不知道插件 pid 的场合用）。
+func countShimGrandchildrenUnder(rootPid int) int {
 	entries, err := os.ReadDir("/proc")
 	if err != nil {
 		return 0
 	}
 	n := 0
 	for _, e := range entries {
-		if _, err := strconv.Atoi(e.Name()); err != nil {
+		pid, err := strconv.Atoi(e.Name())
+		if err != nil {
 			continue
 		}
 		cl, err := os.ReadFile(filepath.Join("/proc", e.Name(), "cmdline"))
 		if err != nil {
 			continue
 		}
-		if strings.Contains(strings.ReplaceAll(string(cl), "\x00", " "), "sleep 400") {
-			n++
+		if !strings.Contains(strings.ReplaceAll(string(cl), "\x00", " "), "sleep 400") {
+			continue
 		}
+		// ★ 父子限定：孙进程的父进程就是插件本体。
+		if rootPid > 0 && procPPid(pid) != rootPid {
+			continue
+		}
+		n++
 	}
 	return n
+}
+
+// procPPid 读 /proc/<pid>/stat 的第 4 个字段（ppid）。
+// stat 的 comm 字段可能含空格与括号，从最后一个 ')' 之后切分才稳。
+func procPPid(pid int) int {
+	b, err := os.ReadFile(filepath.Join("/proc", strconv.Itoa(pid), "stat"))
+	if err != nil {
+		return 0
+	}
+	s := string(b)
+	i := strings.LastIndex(s, ")")
+	if i < 0 || i+2 >= len(s) {
+		return 0
+	}
+	fields := strings.Fields(s[i+1:])
+	// fields[0]=state, fields[1]=ppid
+	if len(fields) < 2 {
+		return 0
+	}
+	ppid, err := strconv.Atoi(fields[1])
+	if err != nil {
+		return 0
+	}
+	return ppid
 }
 
 func waitForCond(t *testing.T, limit time.Duration, cond func() bool, msg string) {
@@ -161,6 +208,44 @@ func waitGrandchildrenGone(t *testing.T, base int, limit time.Duration) bool {
 }
 
 // pluginPid 取插件子进程 pid。
+// cleanupSleepMarkers 按 cmdline 标记清理残留的 sleep 进程。
+//
+// ★ 为什么需要它
+//
+// 旧写法是 `if pid := pluginPid(p); pid > 0 { syscall.Kill(-pid, SIGKILL) }` ——
+// pid 取不到时**整个跳过清理**，残留的 sleep 400 会污染后续测试，表现为
+// 「单跑绿、合跑红」的间歇性失败。
+//
+// 这里作为兜底：按唯一 cmdline 标记（"sleep <marker>"）扫 /proc 清掉。
+// 它比 pluginPid 粗，但**只在 defer 里用**，且 marker 是本测试专用数字，
+// 不会误杀无关进程。
+//
+// 为什么不在生产代码里加这个：这是**测试辅助**，生产侧的正确做法是
+// kill(-pgid) 杀整组 + 内核兜底强杀，不该依赖扫 /proc。
+func cleanupSleepMarkers(marker string) {
+	entries, err := os.ReadDir("/proc")
+	if err != nil {
+		return
+	}
+	needle := "sleep " + marker
+	self := os.Getpid()
+	for _, e := range entries {
+		pid, err := strconv.Atoi(e.Name())
+		if err != nil || pid == self {
+			continue
+		}
+		cl, err := os.ReadFile(filepath.Join("/proc", e.Name(), "cmdline"))
+		if err != nil {
+			continue
+		}
+		line := strings.ReplaceAll(string(cl), "\x00", " ")
+		if !strings.Contains(line, needle) {
+			continue
+		}
+		_ = syscall.Kill(pid, syscall.SIGKILL)
+	}
+}
+
 func pluginPid(p *Plugin) int {
 	if p == nil || p.proc == nil || p.proc.cmd == nil || p.proc.cmd.Process == nil {
 		return 0
@@ -243,12 +328,27 @@ func TestSpawnPutsPluginInOwnProcessGroup(t *testing.T) {
 //	而 Kill 第 607 行就 `if p.cmd == nil { return nil }` 早退了 ——
 //	根本走不到 readerWG 那段，撤掉超时它照样绿。变异测试才暴露出来。
 //	现在改用真实插件：孙进程活着且持有 stdout 写端，走完整路径。
-func TestKillReturnsEvenWhenGrandchildSurvives(t *testing.T) {
+//
+// ★ 名字订正（2026-09-28）：这个测试**不测「孙进程存活」**。
+//
+//	grandchildPluginSource 的孙进程 `sleep 400` **不设** Setpgid，
+//	刻意留在插件进程组内 ⇒ `kill(-pgid)` **能**杀掉它
+//	（该源自己的注释写着「孙进程**不**设 Setpgid：它要留在插件的进程组里」）。
+//	真正测脱组存活（setsid ⇒ 杀不到）的是
+//	TestKillReturnsWhenGrandchildEscapesProcessGroup。
+//	⇒ 原名 EvenWhenGrandchildSurvives 与实现矛盾，容易让人误以为
+//	   「脱组场景已被覆盖」，而它其实覆盖的是「孙进程随组被杀时 Kill 有界返回」。
+func TestKillReturnsWhenGrandchildDiesWithProcessGroup(t *testing.T) {
 	p, host := spawnGrandchildPlugin(t, "gc4")
 	defer func() {
 		_ = p.Close()
 		host.Close()
-		// 孙进程可能活下来（setsid 脱组场景），按 pid 精确清理
+		// ★ 清理不再「拿不到 pid 就整个跳过」：
+		//   旧写法 `if pid := pluginPid(p); pid > 0 { Kill }` 在 pid 取不到时
+		//   静默跳过 ⇒ 残留 sleep 400 污染后续测试，表现为
+		//   「单跑绿、合跑红」的间歇性失败。
+		//   改为：即使 pluginPid 取不到，也按唯一 cmdline 标记兜底清理。
+		cleanupSleepMarkers("400")
 		if pid := pluginPid(p); pid > 0 {
 			_ = syscall.Kill(-pid, syscall.SIGKILL)
 		}
@@ -308,20 +408,48 @@ func NewPluginFactory(name string, config map[string]interface{}) (sdk.Plugin, e
 `
 
 // countEscapingGrandchildren 数脱组的 sleep 401。
+// countEscapingGrandchildren 数本测试拉起的 sleep 401（setsid 脱组的）。
+//
+// ★ 与 countShimGrandchildrenUnder 同样的修复：限定 PPid 到本测试的插件，
+//
+//	不再扫全系统。否则同机任何命中 "sleep 401" 的进程都会串味。
+//	另外补上 e.Name() 的 Atoi 校验 —— 原实现会把 /proc 下非数字目录
+//	（self、net、sys…）也去读 cmdline，虽读不到内容但白跑，且掩盖了
+//	「这里本该只处理数字 pid」的事实。
 func countEscapingGrandchildren() int {
+	return countSleepMarkersUnder(0, "401")
+}
+
+// countEscapingGrandchildrenUnder 限定 PPid 属于 rootPid 的脱组孙进程数。
+func countEscapingGrandchildrenUnder(rootPid int) int {
+	return countSleepMarkersUnder(rootPid, "401")
+}
+
+// countSleepMarkersUnder 数 cmdline 含 "sleep <marker>" 且（rootPid==0 或）
+// PPid 属于 rootPid 的进程数。
+func countSleepMarkersUnder(rootPid int, marker string) int {
 	entries, err := os.ReadDir("/proc")
 	if err != nil {
 		return 0
 	}
+	needle := "sleep " + marker
 	n := 0
 	for _, e := range entries {
+		pid, err := strconv.Atoi(e.Name())
+		if err != nil {
+			continue // /proc 下有 self、net、sys… 等非数字目录
+		}
 		cl, err := os.ReadFile(filepath.Join("/proc", e.Name(), "cmdline"))
 		if err != nil {
 			continue
 		}
-		if strings.Contains(strings.ReplaceAll(string(cl), "\x00", " "), "sleep 401") {
-			n++
+		if !strings.Contains(strings.ReplaceAll(string(cl), "\x00", " "), needle) {
+			continue
 		}
+		if rootPid > 0 && procPPid(pid) != rootPid {
+			continue
+		}
+		n++
 	}
 	return n
 }
