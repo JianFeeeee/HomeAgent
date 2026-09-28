@@ -7,7 +7,8 @@
   "main": "main.js",
   "scripts": {
     "start": "electron . --no-sandbox",
-    "dev": "electron . --no-sandbox --dev"
+    "dev": "electron . --no-sandbox --dev",
+    "test": "node sse-backoff.test.mjs && node sse-backoff-behavior.test.mjs"
   },
   "dependencies": {
     "koffi": "^3.1.6"
