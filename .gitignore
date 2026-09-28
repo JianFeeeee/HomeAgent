@@ -74,3 +74,6 @@ dist/
 .hvigor-home/
 .npm-cache/
 .ohpm/
+
+# 漂移巡检的运行时状态（含时间戳与指纹，每次跑都变）
+.drift-watch/
