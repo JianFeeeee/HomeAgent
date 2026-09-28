@@ -341,6 +341,17 @@ install: build
 	systemctl daemon-reload
 	@echo "Installed. Run: systemctl enable --now homeagent"
 
+# ⚠ internal/plugin/proc 的 grandchild 系列测试（fork 真进程 + syscall.Kill
+#   杀进程组）**本身不稳定**，与本次改动无关：
+#     · 单独跑同一命令：ok 11.5s / FAIL 交替出现（实测至少各一次）
+#     · 全量并发跑：曾 600s 超时，也曾 90s 就 FAIL
+#     · 失败形态固定是 TestKillReturnsEvenWhenGrandchildSurvives，
+#       伴随日志 `[proc] audit 退出: signal: killed`
+#   症状像 fork/kill 的进程组语义在容器/并发下不稳（孙进程 setsid 脱组后
+#   杀不掉 ⇒ Wait 挂死），但**尚未定位到根因**，所以这里只记录现象、
+#   不下结论。要稳定门禁就单独跑并重试：
+#       go test ./internal/plugin/proc/ -count=1
+#   ⚠ 别把"单跑通过"当结论——同一命令会交替通过/失败。
 test:
 	$(GO) test ./...
 	@$(MAKE) test-gui
