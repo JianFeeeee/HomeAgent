@@ -203,18 +203,28 @@ spec = (d.get('devDependencies', {}) or {}).get('electron') or (d.get('dependenc
 m = re.search(r'(\\d+(?:\\.\\d+)*)', spec)
 print(m.group(1) if m else '')
 " 2>/dev/null || true)
-    [ -n "$ever" ] && echo "  electron 版本取自 package.json 依赖声明: $ever（非精确）"
+    if [ -n "$ever" ]; then
+      echo "  electron 版本取自 package.json 依赖声明: $ever（非精确）"
+    fi
   fi
 
   mkdir -p "$gui_out"
 
   # 优先：缓存里的目标架构 zip（~/.cache/electron/<hash>/electron-v<ver>-linux-<arch>.zip）
+  #
+  # ★ 这里必须 `|| true`：`find` 对**不存在的目录**返回退出码 1，而本脚本是
+  #   `set -euo pipefail`，命令替换里的失败会让整个脚本当场退出。
+  #   后果：任何**没有 ~/.cache/electron 的机器**（全新克隆、CI runner、
+  #   其他开发机）跑到这里就死，且只留下一行「electron 版本取自 package.json」
+  #   作为最后的输出，看不出真因。实测（2026-09-29，GitHub runner 与本地
+  #   移走缓存后均复现）：build_go 全部成功，然后卡在这里静默退出。
+  #   本机历史上之所以一直「能打包」，只是因为碰巧有那份缓存。
   local zip=""
   if [ -n "$ever" ]; then
-    zip=$(find "$HOME/.cache/electron" -name "electron-v${ever}-linux-${ELECTRON_ARCH}.zip" 2>/dev/null | head -1)
+    zip=$(find "$HOME/.cache/electron" -name "electron-v${ever}-linux-${ELECTRON_ARCH}.zip" 2>/dev/null | head -1 || true)
   fi
   if [ -z "$zip" ]; then
-    zip=$(find "$HOME/.cache/electron" -name "electron-v*-linux-${ELECTRON_ARCH}.zip" 2>/dev/null | head -1)
+    zip=$(find "$HOME/.cache/electron" -name "electron-v*-linux-${ELECTRON_ARCH}.zip" 2>/dev/null | head -1 || true)
   fi
 
   if [ -n "$zip" ]; then
@@ -620,9 +630,11 @@ build_rpm() {
   if [ ! -f "$rpmbuild_dir/usr/bin/rpmbuild" ]; then
     # try to extract from cached deb packages
     local rpm_deb
-    rpm_deb="$(find /tmp -name "rpm_*.deb" -type f 2>/dev/null | head -1)"
+    # 同 build_gui：`find` 对不存在/无命中会返回 1，`set -euo pipefail` 下
+    # 会让脚本当场退出（`|| true` 是给命令替换兜底，不是忽视错误）。
+    rpm_deb="$(find /tmp -name "rpm_*.deb" -type f 2>/dev/null | head -1 || true)"
     if [ -z "$rpm_deb" ]; then
-      rpm_deb="$(find "$PROJECT_ROOT" -name "rpm_*.deb" -type f 2>/dev/null | head -1)"
+      rpm_deb="$(find "$PROJECT_ROOT" -name "rpm_*.deb" -type f 2>/dev/null | head -1 || true)"
     fi
     if [ -n "$rpm_deb" ]; then
       mkdir -p "$rpmbuild_dir"
