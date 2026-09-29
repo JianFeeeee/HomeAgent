@@ -45,7 +45,7 @@ var (
 	//        child/<id>（改用纯函数名并 Unregister，覆盖 destroy/reclaim/StopResidents）；
 	//        ② sdk.events.subscribe 用了从未注入的公共 Events()，且订阅生命周期
 	//        管理会自死锁/use-after-close（改用内部 Subscribe + 独立 subsMu + Stop 取消）。
-	Version = "1.3.12"
+	Version = "1.3.13"
 
 	// Commit 是构建时的 Git commit hash。
 	Commit = "unknown"
