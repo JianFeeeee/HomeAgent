@@ -26,6 +26,18 @@ homed（内核零 IO） ← PluginSDK → 插件（所有 IO 能力）
 - **Document 层**：临时记忆，冷数据自动下沉，也支持用户主动提交
 - **Graph 层**：SQLite 图数据库，持久化实体关系和语义记忆，支持蒸馏管道从原始对话中提取三元组
 
+**场面识别：声明 + 涌现** — 记忆不按「会话」切，而按**可观察的场所指纹**切：
+通道（`chan:*`）与对话对象最强（权重 1.0），工具 0.8、话题 0.4、时段最弱 0.2。
+两条路同时走——**声明**（注入点/工具声明「这是哪个场面」）与**涌现**
+（指纹同类重复 ≥2 次就自己长出场景，`origin=emergent`，无需标注、无需模型配合）。
+相似度 ≥0.5 判归属、≥0.35 判唤起（**唤起比归属宽松**：想不起来是损失，多想起一条只是多几行上下文）。
+场景每次重现强度 +1，久不重现按半衰期衰减。
+
+> 这条机制有一个值得注意的副作用：**agent 自己的回复也写回记忆**
+> （`task.go` 的 `context.Append(Source: "agent")`），所以它在同一场面上会**读到自己先前的结论**。
+> 当输入已过期时，它会据此认出「这事上一轮已经办过」并**主动纠正自己先前的错误判断**——
+> 表现为自我复盘。这是记忆召回的自然结果，内核里**没有**任何名为「反思」的机制。
+
 **输入调度：两类别 + 四级中断** — 输入不直接进 LLM，先进调度器。
 排队（待办工作）与中断（按"有多不能等"分 L1~L4）两类；高级可抢占低级并保存现场
 （中断栈），同级不抢占。L4 只归内核与内核级插件（如 WebUI 终止按钮）。
@@ -76,14 +88,22 @@ sequenceDiagram
             LLM->>LLM: 安全点：中断求值/让位
             LLM->>LLM: LLM Chat
             LLM->>ST: StagePostAction  插件可修改/短路
-            alt 无tool call
+            alt 无 tool call
                 LLM-->>EV: 返回response
-            else
-                loop 每个tool
-                    ST->>ST: StageBeforeToolcall  插件可拒绝
-                    LLM->>LLM: executeToolCall
-                    ST->>ST: StageAfterToolcall
+            else 一批 N 个 tool_call
+                Note over EV: batchRunnable 判据：批内 >1 且全部 ParallelSafe<br/>且无同通道重复发送（output_send__「通道」）
+                alt 可并发（三条全满足）
+                    par fan-out 并发执行
+                        ST->>ST: StageBeforeToolcall ×N  插件可拒绝
+                        LLM->>LLM: executeToolCall ×N
+                    end
+                else 整批降级串行（任一个未声明 ParallelSafe）
+                    loop 每个 tool 依次
+                        ST->>ST: StageBeforeToolcall  插件可拒绝
+                        LLM->>LLM: executeToolCall
+                    end
                 end
+                Note over EV: 顺序收尾：按**声明序** StageAfterToolcall → 落 tool 消息<br/>同通道输出严格保序
             end
         end
     end
@@ -104,17 +124,25 @@ sequenceDiagram
 flowchart LR
     S1[① on_input] --> S2[② pre_action]
     S2 --> S3[③ post_action]
-    S3 --> Q{有tool?}
-    Q -->|是| S4[④ before_toolcall]
-    S4 --> T[executeToolCall]
-    T --> S5[⑤ after_toolcall]
-    S5 --> S3
+    S3 --> Q{有 tool_call?}
+    Q -->|是，一批 N 个| PB{batchRunnable?<br/>全声明 ParallelSafe<br/>且无同通道重复发送}
+    PB -->|可并发| S45P[④⑤ 并发 ×N<br/>before_toolcall×N → 执行×N<br/>→ 按声明序 after_toolcall]
+    PB -->|整批降级| S45S[④⑤ 依次 ×N<br/>before_toolcall → 执行<br/>→ after_toolcall]
+    S45P --> S3
+    S45S --> S3
     Q -->|否| S6[⑥ before_output]
     S6 --> S7[⑦ after_output]
     style S1 fill:#e1f5fe
     style S3 fill:#fff3e0
     style S6 fill:#e8f5e9
+    style S45P fill:#fce4ec
+    style S45S fill:#f5f5f5
 ```
+
+> ①–⑦ 七个 Stage 均由 `internal/sdk/plugin.go` 公开（`StageOnInput` … `StageAfterOutput`），
+> 插件可注册挂钩。⚠️ 并行只影响 **④⑤ 的执行时序**：`post_action` 仍在本批工具
+> 全部收尾后由下一轮触发，`after_toolcall` 也仍按**声明序**回调——
+> 并发的是 IO 等待，不是插件契约的可见顺序。
 
 ### 三、三层记忆
 
@@ -138,6 +166,17 @@ flowchart TB
         IDX[Indexer 向量+jieba→BFS depth=2] -->|【记忆索引】| SP
         MEM[memory_recall/commit/merge/purge/edit]
         SOC[person_query/set_trait]
+        subgraph SC[场面识别：声明 + 涌现]
+            FE[① 指纹 chan/peer/tool/topic/part<br/>权重 1.0/1.0/0.8/0.4/0.2]
+            EN{② EnterSceneWithHint<br/>相似度 ≥0.5 归属<br/>≥0.35 唤起}
+            FE --> EN
+            EN -->|插件已声明| DEC[origin=declared]
+            EN -->|重现 ≥2 次| EM[origin=emergent<br/>自动长出场景]
+            EM -->|每次重现 strength+1| STR[③ 用进废退<br/>久不重现按半衰期衰减]
+            DEC --> STR
+        end
+        STR -->|Primary| CARRY[本轮命中的场景<br/>挂载的记忆自动唤起]
+        CARRY -->|【场景记忆】| SP
     end
     subgraph H[④ 心跳蒸馏]
         REORG -->|Step3 冷文档| CD
@@ -150,13 +189,6 @@ flowchart TB
 ```
 
 详细说明见 [`assets/docs/zh/ARCHITECTURE.md`](assets/docs/zh/ARCHITECTURE.md)。
-
-## 看板娘
-
-<div align="center">
-  <img src="assets/branding/mascot-xiaozhai.webp" alt="HomeAgent 看板娘 小宅" width="200">
-  <p><strong>小宅</strong> — HomeAgent 看板娘</p>
-</div>
 
 ## 快速体验
 
@@ -203,17 +235,33 @@ internal/
 ├── memory/         三层记忆：Graph(SQLite) / Document(JSON+TF-IDF) / Text(JSONL) + StaticEmbedder(预训练词嵌入/TF-IDF回退) + CleanTemplateText(去模版)
 ├── knowledge/      知识库（文件系统 + TF-IDF）
 ├── plugin/         插件注册表 + 子进程加载器（stdio RPC + 共享内存段 + 事件环）
-├── plugins/        内置 18 个插件（webui/cli/timer/cmd/mcp/files/cfgmgr/agentcli/healthcheck/pluginmgr/clawhubadapter/multimodal/remotedevice/ai_image/localuse/skillmgr/data 等）
+├── plugins/        内置 20 个插件（webui/cli/timer/cmd/mcp/files/cfgmgr/agentcli/healthcheck/pluginmgr/clawhubadapter/multimodal/remotedevice/ai_image/localuse/skillmgr/data/seq/kbtree 等）
 ├── sdk/            PluginSDK（Tool/Stage/Event 三通道）
 ├── config/         SQLite 配置中心
 ├── events/         事件总线
 └── internal/lua/adapters/   10 个 LLM 协议适配器脚本
-外部插件开发见 [homeagent-sdk](https://gitcode.com/JianFeeeee/homeagent-sdk) 仓库，使用 `hmapdev` 工具链开发，参考 `example/` 目录下的 Go 和 Lua 示例
+外部插件开发见 [homeagent-sdk](https://github.com/JianFeeeee/homeagentsdk) 仓库，使用 `hmapdev` 工具链开发，参考 `example/` 目录下的 Go 和 Lua 示例
 ```
 
 ## 项目状态
 
-**v1.3.x 线**（v1.3.1–v1.3.12，最新已发布）—— **驻留式子 agent** + **输入调度器重做**。
+**v1.4.x 线**（进行中，`main`）—— **声明式并发安全** + **序列编排（seq）** + **工具结果诚实化**。
+
+- **同轮工具并行执行**：同一轮里的多个 `tool_call` 默认并发执行，**但以「安全」为前置**——
+  工具必须在自己的 `ToolDef` 里显式声明 `ParallelSafe`（内置工具用 `toolDefOptions`），
+  未声明的一律串行；`Serial` 优先级更高。**批内只要有一个不安全，整批降级为串行**。
+  并发声明写在**工具自身**，内核不做硬编码工具名安全表。同通道输出**严格保序**，
+  结果与文本分离（`toolOutcome.Text` / `Raw`）。
+- **`seq` 序列编排插件**：AST 解析 + 持久化、具名 group、变量槽、**组内并行 + 组间串行**、
+  条件调用（`seq_when_call`）、跨序列调用图与环检测、错误契约。
+- **工具结果只统计不裁剪**：结果超出预算时**报告**统计量，不静默截断。
+- **结构化工具错误契约**：参数按 schema **预校验**（分派前拦下）、
+  「工具不存在」与「执行失败」区分、`Success` 不再恒真。
+- **设备命令白名单可配置**（waiter `device_cmd_allowlist`）、
+  **站点漂移巡检**、**GUI 增量渲染**（保留全部历史，按 `data-msgkey` 复用节点，
+  50/200/400 条实测 8.2/23.5/38.2ms）。
+
+**v1.3.x 线**（v1.3.1–v1.3.13）—— **驻留式子 agent** + **输入调度器重做**。
 
 - **驻留式子 agent**：内核可派驻轻量内核的子 agent（自己的调度器、自己的 temp 图记忆、
   共享通道登记表）。父经 `resident_agents`（list/create/send/inspect/compress/reclaim/destroy）
@@ -278,7 +326,7 @@ internal/
 
 **v0.9.0** — C ABI v2：外部插件 Stage 回调支持写回（`invoke_stage` 增加 result 输出，插件可在 OnInput/AfterToolcall/PostAction 修改 RawMessage/LLMText/ToolResults 等并同步回内核），ABI 版本随内核 minor 对齐（v0.9.x → ABIVersion=2，`version_min=1` 向后兼容旧插件）。同步修复工具循环 zen 兼容补位误伤首轮 system 上下文的问题。配套 SDK 提供增强版 sanitizer 示例（坏 UTF-8/U+FFFD/ANSI 转义全链路清洗）。**该 ABI 已随 v1.0.0 退场。**
 
-**v0.8.0** — 核心可用，插件系统增强。内置 20+ 插件，外部插件开发见 [homeagent-sdk](https://gitcode.com/JianFeeeee/homeagent-sdk) 仓库。新增输入通道 `NoMemory`/`Cleaner`、`ChannelDef`、插件禁用/启用系统（CLI + WebUI），`plugindev` 工具链完成 C ABI `ChannelDef` 传递。
+**v0.8.0** — 核心可用，插件系统增强。内置 20+ 插件，外部插件开发见 [homeagent-sdk](https://github.com/JianFeeeee/homeagentsdk) 仓库。新增输入通道 `NoMemory`/`Cleaner`、`ChannelDef`、插件禁用/启用系统（CLI + WebUI），`plugindev` 工具链完成 C ABI `ChannelDef` 传递。
 
 ## 文档
 
@@ -290,7 +338,7 @@ internal/
 
 ## 下载
 
-[Releases](https://gitcode.com/JianFeeeee/HomeAgent/releases) 提供三种变体：
+[Releases](https://github.com/JianFeeeee/HomeAgent/releases) 提供三种变体：
 
 | 变体 | 内容 | 适用 |
 | --- | --- | --- |
@@ -328,12 +376,12 @@ make install            # 安装到系统
 **通过网络提供服务时也要向使用者提供源码**（§13 Remote Network Interaction）。
 即：任何人把改过的 HomeAgent 对外提供网络服务，都必须让该服务的使用者拿到改动后的源码。
 
-插件与本项目通过公开 [homeagent-sdk](https://gitcode.com/JianFeeeee/homeagent-sdk) 静态链接
+插件与本项目通过公开 [homeagent-sdk](https://github.com/JianFeeeee/homeagentsdk) 静态链接
 （SDK 源码会进入插件二进制），但那个仓**以 MIT 发布**——MIT 是宽松许可，拿到授权的代码不继承
 本项目的 AGPL。因此**外部插件不是本项目的衍生作品**，作者可自行选择许可（含闭源、商业、私有），
 既不必同许可、也不受 §13 网络条款约束。第三方插件生态的安全与活跃正建立在这条之上。
 
-边界很清楚：**AGPL 覆盖内核与随包内置插件**（`homed`、`internal/`、`internal/plugins/` 下 18 个内置插件）；
+边界很清楚：**AGPL 覆盖内核与随包内置插件**（`homed`、`internal/`、`internal/plugins/` 下 20 个内置插件）；
 **MIT 覆盖公开 SDK**（`sdk/`，`go.mod` 零外部依赖、只依赖 Go 标准库，不引用内核任何代码）。
 子进程隔离在这里不重要了——决定许可的是被链接的 SDK 代码本身，而它是 MIT。
 
