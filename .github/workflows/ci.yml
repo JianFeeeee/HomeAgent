@@ -1,0 +1,199 @@
+# HomeAgent 主仓 CI。
+#
+# 设计原则：**CI 里跑的每一条命令，都是本地已实测通过的命令**。
+# 不写「应该有用来试试」的步骤 —— 未验证的 CI 步骤会把假红灯变成常态，
+# 最后所有人学会忽略它。
+#
+# 覆盖范围与本地 `make test` 对齐（build / vet / test / client-versions /
+# gui / csrc），并按依赖拆成独立 job，便于失败定位。
+#
+# 明确**不在** CI 里跑的东西（依赖真机/密钥/内网，跑了只会变 flaky 噪音）：
+#   - deploy-*.sh / homed 生产部署
+#   - waiter 真机验证（192.168.2.x）
+#   - cmd/gui 的 `npm run test-live`（需真 Electron + Xvfb + 真后端）
+#   - scripts/kernel-stress/*（需 llmsproxy 与压测端点）
+#   - 需要 DEEPSEEK_API_KEY / MEDIALIVE_* 的真实 LLM 测试（已自带 t.Skip）
+name: CI
+
+on:
+  push:
+    branches: [main, 'release/**']
+  pull_request:
+  workflow_dispatch:
+
+# 只读权限：CI 不需要写仓库。
+permissions:
+  contents: read
+
+# 同一分支连续推送时取消旧跑，省额度也避免过期结果误导。
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  # gojieba / onnx 相关包需要 cgo ⇒ 不能用 CGO_ENABLED=0。
+  CGO_ENABLED: 1
+  # 减少 go test 输出噪音。
+  GOFLAGS: -buildvcs=false
+
+jobs:
+  # ── Go 后端：构建 + 静态检查 + 全量测试 + 跨平台客户端版本一致性 ──
+  go:
+    name: Go build / vet / test
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      # cgo 需要 gcc/g++（gojieba 会编译自带 C++ 源码）。
+      - name: 确认 cgo 工具链
+        run: |
+          gcc --version | head -1
+          g++ --version | head -1
+
+      - name: go build ./...
+        run: go build ./...
+
+      - name: go vet ./...
+        run: go vet ./...
+
+      # ./... 不点名 cmd/gui（该目录是纯 Electron，无 .go 文件）：
+      # 显式 `go test ./cmd/gui` 会报 "no Go files"，那是误报，不是缺陷。
+      - name: go test ./...
+        run: go test ./... -count=1 -timeout 20m
+
+      # 跨平台客户端版本一致性：内核 internal/meta 是唯一事实源，
+      # GUI(package.json) / 鸿蒙(AppScope/app.json5) / waiter 都必须跟它一致。
+      - name: 客户端版本一致性
+        run: make check-client-versions
+
+  # ── 竞态检测（并发改动的主要防线）──
+  race:
+    name: Race detector
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+          cache: true
+      - name: go test -race（并发核心）
+        run: |
+          go test -race \
+            ./internal/agent/core/ ./cmd/waiter/ \
+            -count=1 -timeout 15m
+
+  # ── 交叉编译：可在无 cgo 下构建的客户端/工具 ──
+  #
+  # 只有这三个 cmd 支持纯交叉编译。另外三个依赖 cgo（gojieba / onnx）：
+  #   homed / memgc / homed-kb-migrate  →  internal/memory(gojieba)
+  #   homed                             →  internal/agent/api(onnx)
+  # 它们必须在原生平台构建（见 Makefile 的 build target）。
+  cross:
+    name: Cross-compile
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - goos: linux
+            goarch: amd64
+            ext: ""
+          - goos: linux
+            goarch: arm64
+            ext: ""
+          - goos: darwin
+            goarch: amd64
+            ext: ""
+          - goos: darwin
+            goarch: arm64
+            ext: ""
+          - goos: windows
+            goarch: amd64
+            ext: ".exe"
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+          cache: true
+      - name: 构建 ${{ matrix.goos }}/${{ matrix.goarch }}
+        env:
+          GOOS: ${{ matrix.goos }}
+          GOARCH: ${{ matrix.goarch }}
+          CGO_ENABLED: 0
+        run: |
+          set -euo pipefail
+          mkdir -p dist
+          for c in waiter initconfig mock-server; do
+            out="dist/${c}_${{ matrix.goos }}_${{ matrix.goarch }}${{ matrix.ext }}"
+            go build -trimpath -o "$out" "./cmd/${c}"
+            echo "  ✓ ${c} ${{ matrix.goos }}/${{ matrix.goarch }}"
+          done
+
+  # ── Electron GUI（纯 Node 测试，零依赖）──
+  #
+  # `npm test` 只跑三个 .mjs，全部只 import node: 内置模块（fs/url/path/vm），
+  # 所以**不需要 npm ci、不需要 electron**，秒级完成。
+  # `npm run test-live` 需真 Electron + 真后端 ⇒ 不进 CI。
+  gui:
+    name: GUI (node)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with:
+          node-version: '22'
+      - name: npm test
+        working-directory: cmd/gui
+        run: npm test
+
+  # ── C 基础设施门禁（ABI / 告警 / ASan+UBSan / 跨架构）──
+  csrc:
+    name: C infrastructure gates
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v7
+
+      # clang 供双编译器告警对照；gcc-aarch64 供跨架构编译门禁。
+      # 门禁在缺工具时是显式 SKIP 而不是假通过，这里装齐以免静默降级。
+      - name: 安装 C 工具链
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq cmake clang gcc-aarch64-linux-gnu
+
+      - name: make check-csrc
+        run: make check-csrc
+
+  # ── 文档站构建（mkdocs，纯 Python，无外部依赖）──
+  docs:
+    name: Docs build
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: '3.12'
+      - name: 校验站点配置可解析
+        # 这里只做「配置与文档源没坏」的轻量校验，不做完整 mkdocs build
+        # （站点发布有独立流水线，见 deploy-sdk-site.sh）。
+        run: |
+          set -euo pipefail
+          if [ -f mkdocs.yml ]; then
+            python -c \
+              "import yaml; yaml.safe_load(open('mkdocs.yml'))" \
+              && echo "mkdocs.yml OK"
+          else
+            echo "无 mkdocs.yml，跳过"
+          fi
+          test -d docs || echo "无 docs/，跳过"
