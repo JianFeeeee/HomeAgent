@@ -329,7 +329,12 @@ jobs:
           set -euo pipefail
           mkdir -p /tmp/back
           cd /tmp/back
-          gh release download "$TAG"
+          # ★ 必须显式 --repo：gh 默认从**当前目录的 git 上下文**推断仓库，
+          #   而 /tmp/back 不是 git 仓库 ⇒ 报
+          #   "failed to run git: fatal: not a git repository"。
+          #   首次试发布就死在这里 —— 产物其实全部上传成功（tag 与
+          #   release 已建、2.40GB 附件齐备），只是这道回读校验自己失败了。
+          gh release download "$TAG" --repo "$GITHUB_REPOSITORY"
           for f in *; do
             printf "  %8.1fMB  %s\n" \
               "$(stat -c %s "$f" | awk '{print $1/1048576}')" "$f"
