@@ -1,0 +1,24 @@
+# .mailmap —— 提交身份归并
+#
+# 为什么需要：GitHub 的 Contributors 列表按 **提交邮箱** 归并身份，而本项目历史里
+# 同一个人的提交来自多个邮箱（本地 root、个人 QQ、gitcode noreply、GitHub noreply），
+# 于是列表里出现若干「虚拟贡献者」，看起来像有多个协作者，实际只有一个人。
+#
+# 本文件只影响 **展示层**（git shortlog / git log --use-mailmap / GitHub Contributors），
+# 不改写任何提交对象，历史 SHA 全部保持不变。
+#
+# 格式：<归并到的姓名> <归并到的邮箱>  <历史姓名> <历史邮箱>
+#
+# 注意：HomeAgent Agent <agent@homeagent.local> **不归并** —— agent 的自动提交
+# 保留独立身份，便于区分人类提交与自动化提交。
+
+JianFeeeee <JianFeeeee@users.noreply.gitcode.com>      JianFeeeee <JianFeeeee@users.noreply.gitcode.com>
+JianFeeeee <JianFeeeee@users.noreply.gitcode.com>      <root@qq.com>
+JianFeeeee <JianFeeeee@users.noreply.gitcode.com>      <2198972886@qq.com>
+JianFeeeee <JianFeeeee@users.noreply.gitcode.com>      <jianfeeeee@homeagent.local>
+JianFeeeee <JianFeeeee@users.noreply.gitcode.com>      <dev@local>
+JianFeeeee <JianFeeeee@users.noreply.gitcode.com>      <root@minecraft-server>
+JianFeeeee <JianFeeeee@users.noreply.gitcode.com>      <109188060+JianFeeeee@users.noreply.github.com>
+
+# 说明：上表用同一主身份覆盖所有历史邮箱；`git shortlog -sne --use-mailmap` 应只剩
+# JianFeeeee 与 HomeAgent Agent 两条。
