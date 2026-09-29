@@ -158,6 +158,32 @@ jobs:
         run: |
           echo "::warning title=go test 门已跳过::本次发版未跑 go test，产物可能建立在单元测试失败的代码上。"
 
+      # GUI 依赖 Electron 运行时。打包脚本从两处找它：
+      #   1) ~/.cache/electron 里的 electron-v<ver>-linux-<arch>.zip
+      #   2) cmd/gui/node_modules/electron/dist（同架构时）
+      # 全新 runner 两处都没有 —— 而脚本在都没有时**只能跳过 GUI**，
+      # 于是 client/full 包会静默地不含界面（这正是脚本作者担心的“假包”）。
+      # 所以这里显式装一份：npm 会解析出 ^33.0.0 的实际版本并落到
+      # node_modules，脚本便走第 2 条路径（runner 是 amd64 == 目标架构）。
+      #
+      # ⚠️ 不能用 `npm install --production`（那会跳过 devDependencies，
+      #    而 electron 正是 devDependency）。
+      - uses: actions/setup-node@v7
+        with:
+          node-version: '22'
+
+      - name: 安装 Electron（GUI 打包需要）
+        working-directory: cmd/gui
+        run: |
+          set -euo pipefail
+          # 用 npm ci 而非 `npm install electron@<range>`：后者是非确定性的
+          # （range 会随上游发布漂到新版本），且锁不住传递依赖。
+          # package-lock.json 里已锁定 electron（lockfileVersion 3），
+          # ci 严格按 lock 安装，同一个 commit 永远得到同一套依赖。
+          npm ci --no-audit --no-fund
+          test -f node_modules/electron/dist/electron
+          echo "  已就绪：$(node_modules/electron/dist/electron --version)"
+
       - name: 下载构建资产（模型 + ONNX Runtime）
         run: |
           set -euo pipefail
