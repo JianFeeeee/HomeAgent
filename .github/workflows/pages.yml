@@ -1,0 +1,85 @@
+name: Pages Mirror
+
+# 介绍站（site/）的 GitHub Pages 镜像。
+#
+# 为什么是「镜像」而不是主站：主站自托管在 NAS（192.168.2.106），
+# 国内访问是内网直连（毫秒级）；GitHub Pages 负责海外可达性与灾备。
+# 两边内容同源（同一个 site/ 目录），不存在谁是「真身」的问题。
+#
+# 手动触发也留着：改完 site/ 想立刻发布、或主站回滚后要重新对齐时用。
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'site/**'
+      - '.github/workflows/pages.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+# 同一时刻只跑一个 Pages 部署；排队中的旧任务直接取消
+concurrency:
+  group: pages
+  cancel-in-progress: true
+
+jobs:
+  build:
+    name: Build site artifact
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      # 静态站：没有构建步骤，site/ 就是要发布的内容。
+      # 这里只做**完整性检查**——少一个文件会让线上 404，而 404 不会让
+      # 部署失败（Pages 照样返回 200 + 404 页），所以必须在发布前拦住。
+      - name: Verify site completeness
+        run: |
+          set -euo pipefail
+          test -f site/index.html || { echo "缺少 site/index.html"; exit 1; }
+          test -f site/assets/logo.svg || {
+            echo "缺少 site/assets/logo.svg"; exit 1
+          }
+
+          # index.html 引用的本地资源必须都在（防「改了引用忘了加文件」）
+          missing=0
+          grep -oE '(src|href)="(assets|\./assets)/[^"]+"' site/index.html \
+            | sed -E 's/.*="(\.\/)?([^"]*)"/\2/' > /tmp/refs.txt
+          while read -r ref; do
+            [ -z "$ref" ] && continue
+            if [ ! -e "site/$ref" ]; then
+              echo "引用缺失: site/$ref"
+              missing=1
+            fi
+          done < /tmp/refs.txt
+          [ "$missing" -eq 0 ] || exit 1
+
+          echo "site/ 文件数: $(find site -type f | wc -l)"
+          echo "index.html 字节: $(wc -c < site/index.html)"
+
+      - name: Configure Pages
+        uses: actions/configure-pages@v5
+
+      - name: Upload artifact
+        uses: actions/upload-pages-artifact@v4
+        with:
+          path: site
+          # Pages 产物必须保留；不设 retention 会被仓库默认值（30 天）回收——
+          # 与部署无关，但重跑 build 时会少掉旧产物对比。
+          retention-days: 7
+
+  deploy:
+    name: Deploy to Pages
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - name: Deploy
+        id: deployment
+        uses: actions/deploy-pages@v4
