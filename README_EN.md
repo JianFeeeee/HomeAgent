@@ -87,12 +87,20 @@ sequenceDiagram
             LLM->>ST: StagePostAction  Plugin can modify/short-circuit
             alt No tool call
                 LLM-->>EV: Returns response
-            else
-                loop Each tool
-                    ST->>ST: StageBeforeToolcall  Plugin can reject
-                    LLM->>LLM: executeToolCall
-                    ST->>ST: StageAfterToolcall
+            else a batch of N tool_calls
+                Note over EV: batchRunnable criteria: batch >1 AND all declare ParallelSafe<br/>and no same-channel duplicate send (output_send__«channel»)
+                alt parallel (all three satisfied)
+                    par fan-out concurrent execution
+                        ST->>ST: StageBeforeToolcall ×N  Plugin can reject
+                        LLM->>LLM: executeToolCall ×N
+                    end
+                else whole batch degrades to serial (any undeclared)
+                    loop Each tool in turn
+                        ST->>ST: StageBeforeToolcall  Plugin can reject
+                        LLM->>LLM: executeToolCall
+                    end
                 end
+                Note over EV: ordered tail: StageAfterToolcall in **declaration order** → append tool msgs<br/>same-channel output strictly ordered
             end
         end
     end
@@ -113,17 +121,26 @@ sequenceDiagram
 flowchart LR
     S1[① on_input] --> S2[② pre_action]
     S2 --> S3[③ post_action]
-    S3 --> Q{Has tool?}
-    Q -->|Yes| S4[④ before_toolcall]
-    S4 --> T[executeToolCall]
-    T --> S5[⑤ after_toolcall]
-    S5 --> S3
+    S3 --> Q{Any tool_call?}
+    Q -->|Yes, batch of N| PB{batchRunnable?<br/>all declare ParallelSafe<br/>and no same-channel duplicate send}
+    PB -->|parallel| S45P[④⑤ concurrent ×N<br/>before_toolcall×N → execute×N<br/>→ after_toolcall in declaration order]
+    PB -->|degrade to serial| S45S[④⑤ sequential ×N<br/>before_toolcall → execute<br/>→ after_toolcall]
+    S45P --> S3
+    S45S --> S3
     Q -->|No| S6[⑥ before_output]
     S6 --> S7[⑦ after_output]
     style S1 fill:#e1f5fe
     style S3 fill:#fff3e0
     style S6 fill:#e8f5e9
+    style S45P fill:#fce4ec
+    style S45S fill:#f5f5f5
 ```
+
+> All seven stages ①–⑦ are published by `internal/sdk/plugin.go` (`StageOnInput` …
+> `StageAfterOutput`); plugins may register hooks. ⚠️ Parallelism affects only the
+> **execution timing of ④⑤**: `post_action` still fires on the next round once the whole
+> batch is collected, and `after_toolcall` still runs in **declaration order** —
+> what runs concurrently is IO waiting, not the plugin-visible contract order.
 
 ### 3. Three-Layer Memory
 
@@ -137,16 +154,27 @@ flowchart TB
     end
     subgraph D[② Document File Memory]
         DS[DocStore JSON+TF-IDF]
-        Q1[Query summary auto-inject] -->|[Related Memory Docs]| SP
+        Q1[Query summary auto-inject] -->|Related Memory Docs| SP
         Q2[doc_query LLM active recall] -->|Consume+delete source| DS
         Q2 -->|Original timestamp write to context| RC
         CD[FindColdDocs 72h] -->|docToTriples| G
     end
     subgraph G[③ Graph Database]
         DB[(SQLite)]
-        IDX[Indexer vector+jieba→BFS depth=2] -->|[Memory Index]| SP
+        IDX[Indexer vector+jieba→BFS depth=2] -->|Memory Index| SP
         MEM[memory_recall/commit/merge/purge/edit]
         SOC[person_query/set_trait]
+        subgraph SC[Scene recognition: declared + emergent]
+            FE[① fingerprint chan/peer/tool/topic/part<br/>weights 1.0/1.0/0.8/0.4/0.2]
+            EN{② EnterSceneWithHint<br/>similarity ≥0.5 join<br/>≥0.35 recall}
+            FE --> EN
+            EN -->|plugin declared| DEC[origin=declared]
+            EN -->|seen ≥2 times| EM[origin=emergent<br/>the scene grows itself]
+            EM -->|each recurrence strength+1| STR[③ use-it-or-lose-it<br/>decay by half-life when unused]
+            DEC --> STR
+        end
+        STR -->|Primary| CARRY[scene hit this round<br/>its memories auto-recalled]
+        CARRY -->|Scene Memory| SP
     end
     subgraph H[④ Heartbeat Distillation]
         REORG -->|Step3 Cold docs| CD
@@ -159,13 +187,6 @@ flowchart TB
 ```
 
 See [`assets/docs/en/ARCHITECTURE.md`](assets/docs/en/ARCHITECTURE.md) for details.
-
-## Web Mascot
-
-<div align="center">
-  <img src="assets/branding/mascot-xiaozhai.webp" alt="HomeAgent Web Mascot Xiaozhai" width="200">
-  <p><strong>Xiaozhai</strong> — HomeAgent Web Mascot</p>
-</div>
 
 ## Quick Start
 
@@ -195,17 +216,35 @@ internal/
 ├── memory/         Three-layer memory: Graph(SQLite) / Document(JSON+TF-IDF) / Text(JSONL) + StaticEmbedder(pretrained word embedding/TF-IDF fallback) + CleanTemplateText(de-template)
 ├── knowledge/      Knowledge base (filesystem + TF-IDF)
 ├── plugin/         Plugin registry + subprocess loader (stdio RPC + shared memory segment + event ring)
-├── plugins/        18 built-in plugins (webui/cli/timer/cmd/mcp/files/cfgmgr/agentcli/healthcheck/pluginmgr/clawhubadapter/multimodal/remotedevice/ai_image/localuse/skillmgr/data, ...)
+├── plugins/        20 built-in plugins (webui/cli/timer/cmd/mcp/files/cfgmgr/agentcli/healthcheck/pluginmgr/clawhubadapter/multimodal/remotedevice/ai_image/localuse/skillmgr/data/seq/kbtree, ...)
 ├── sdk/            PluginSDK (Tool/Stage/Event three channels)
 ├── config/         SQLite config center
 ├── events/         Event bus
 └── internal/lua/adapters/   10 LLM protocol adapter scripts
-External plugin development: see [homeagent-sdk](https://gitcode.com/JianFeeeee/homeagent-sdk) repo, use `hmapdev` toolchain, refer to Go and Lua examples in `example/`
+External plugin development: see [homeagent-sdk](https://github.com/JianFeeeee/homeagentsdk) repo, use `hmapdev` toolchain, refer to Go and Lua examples in `example/`
 ```
 
 ## Project Status
 
-**v1.3.x line** (v1.3.1–v1.3.12, latest released) — **resident sub-agents** + **input scheduler rework**.
+**v1.4.x line** (in progress, `main`) — **declarative concurrency safety** + **sequence orchestration (seq)** + **honest tool results**.
+
+- **Same-round parallel tool execution**: multiple `tool_call`s in one round run concurrently,
+  **but safety gates it** — a tool must explicitly declare `ParallelSafe` in its own `ToolDef`
+  (built-ins use `toolDefOptions`); anything undeclared runs serially, and `Serial` wins.
+  **A single unsafe tool degrades the whole batch to serial.** Declarations live **in the tool
+  itself**; the kernel keeps no hardcoded name table. Same-channel output stays **strictly ordered**,
+  and results are separated from text (`toolOutcome.Text` / `Raw`).
+- **`seq` orchestration plugin**: AST parsing + persistence, named groups, variable slots,
+  **parallel within a group / serial between groups**, conditional calls (`seq_when_call`),
+  cross-sequence call graph with cycle detection, error contract.
+- **Tool results are reported, never silently truncated** — over budget emits statistics.
+- **Structured tool error contract**: arguments pre-validated against the schema (rejected before
+  dispatch), "tool not found" distinguished from "execution failed", `Success` no longer always true.
+- **Configurable device command allowlist** (waiter `device_cmd_allowlist`),
+  **site drift watcher**, **incremental GUI rendering** (keeps all history, reuses nodes by
+  `data-msgkey`; 50/200/400 messages measured at 8.2/23.5/38.2ms).
+
+**v1.3.x line** (v1.3.1–v1.3.13) — **resident sub-agents** + **input scheduler rework**.
 
 - **Resident sub-agents**: the kernel can station lightweight-kernel child agents (their own
   scheduler, their own temp graph memory, sharing the channel registry). The parent dispatches
@@ -215,11 +254,11 @@ External plugin development: see [homeagent-sdk](https://gitcode.com/JianFeeeee/
   (consistent across all three filter points) lets parent/child deliver to each other;
   device capabilities became output channels too (one `device/<id>` per device).
 - **Input scheduler**: two task classes (queued/interrupt) + four interrupt levels (L1–L4)
-  + preempt/suspend/resume/interrupt-stack; same level never preempts same level, with a
+  - preempt/suspend/resume/interrupt-stack; same level never preempts same level, with a
   starvation guard and preemption cooldown. L4 belongs only to the kernel and kernel-level
   plugins (e.g. the WebUI stop button).
 - **Lightweight kernel profile**: a child's memory surface narrows to "conventional context
-  + graph memory" (narrow interface; the main graph opens as a query_only handle, writes go
+  - graph memory" (narrow interface; the main graph opens as a query_only handle, writes go
   to its own temp instance).
 - **Backlog timely feedback** (later in the line): when the main agent is busy for a long time,
   the kernel hands queued input to a temporary **triage assistant** — simple items are handled
@@ -307,7 +346,7 @@ semantic memory; the blob is only a cache that capacity GC may evict.
 
 **v0.9.0** — C ABI v2: external plugin Stage callbacks can now write back (`invoke_stage` gained a result out-param; plugins may mutate RawMessage/LLMText/ToolResults etc. in OnInput/AfterToolcall/PostAction and have them synced to the core). ABI version now tracks core minor releases (v0.9.x → ABIVersion=2, `version_min=1` keeps old plugins loadable). Also fixes the tool-loop zen-compat placeholder that wrongly fired on first-turn system context tail. The SDK ships an enhanced sanitizer example (bad-UTF-8 / U+FFFD / ANSI-escape scrub across the whole pipeline). **This ABI retired with v1.0.0.**
 
-**v0.8.0** — Core is functional, plugin system enhanced. 20+ built-in plugins. External plugin development via [homeagent-sdk](https://gitcode.com/JianFeeeee/homeagent-sdk) repo. Added input channel `NoMemory`/`Cleaner`, `ChannelDef`, plugin disable/enable system (CLI + WebUI), `plugindev` toolchain C ABI `ChannelDef` support.
+**v0.8.0** — Core is functional, plugin system enhanced. 20+ built-in plugins. External plugin development via [homeagent-sdk](https://github.com/JianFeeeee/homeagentsdk) repo. Added input channel `NoMemory`/`Cleaner`, `ChannelDef`, plugin disable/enable system (CLI + WebUI), `plugindev` toolchain C ABI `ChannelDef` support.
 
 ## Documentation
 
@@ -319,10 +358,10 @@ semantic memory; the blob is only a cache that capacity GC may evict.
 
 ## Downloads
 
-[Releases](https://gitcode.com/JianFeeeee/HomeAgent/releases) ship three variants:
+[Releases](https://github.com/JianFeeeee/HomeAgent/releases) ship three variants:
 
 | Variant | Contents | For |
-|---|---|---|
+| --- | --- | --- |
 | **full** | homed + waiter + desktop GUI + systemd unit | Single-machine, everything |
 | **server** | homed + waiter + systemd unit | Servers (no desktop environment) |
 | **client** | waiter + desktop GUI | Connecting to a remote HomeAgent |
@@ -360,7 +399,7 @@ with it over a network** (§13, Remote Network Interaction). Anyone running a mo
 as a network service therefore has to make the modified source available to that service's users.
 
 Plugins are **statically linked** against this project through the public
-[homeagent-sdk](https://gitcode.com/JianFeeeee/homeagent-sdk) (the SDK source ends up inside the
+[homeagent-sdk](https://github.com/JianFeeeee/homeagentsdk) (the SDK source ends up inside the
 plugin binary), but that repository is released under **MIT** — a permissive license, so code
 received under it does **not** inherit this project's AGPL. External plugins are therefore **not
 derivative works of this project**: authors pick their own license (closed-source, commercial or
@@ -368,7 +407,7 @@ private included), with no same-license obligation and no §13 network clause. T
 vitality of the third-party plugin ecosystem rest on this.
 
 The boundary is clean: **AGPL covers the kernel and the bundled plugins** (`homed`, `internal/`,
-the 18 built-in plugins under `internal/plugins/`); **MIT covers the public SDK** (`sdk/`, whose
+the 20 built-in plugins under `internal/plugins/`); **MIT covers the public SDK** (`sdk/`, whose
 `go.mod` has zero external dependencies and imports only the Go standard library — it never
 references any kernel code). Process isolation is beside the point here — what decides the
 license is the linked SDK code itself, and that code is MIT.
@@ -376,7 +415,7 @@ license is the linked SDK code itself, and that code is MIT.
 ### Third-party components shipped with the packages
 
 | Component | License | Location |
-|---|---|---|
+| --- | --- | --- |
 | Chinese-CLIP ViT-B/16 (ONNX artifacts) | Apache-2.0 | `/usr/lib/homeagent/models/chinese-clip-vit-b16-onnx/` |
 | ONNX Runtime (`libonnxruntime.so`) | MIT | `/usr/lib/homeagent/onnxruntime/` |
 | jieba dictionary (embedded in the binary) | MIT | `internal/memory/jiebadict/` |
