@@ -350,6 +350,15 @@ semantic memory; the blob is only a cache that capacity GC may evict.
 
 ## Documentation
 
+**Online docs**:
+
+- Introduction site (project overview): <https://introduce.homeagent.jianfgit.xyz/>
+- Plugin SDK docs (getting started / API reference / guides / examples): <https://sdk.homeagent.jianfgit.xyz/>
+  — agent-friendly plain text: [`llms.txt`](https://sdk.homeagent.jianfgit.xyz/llms.txt) /
+  [`llms-full.txt`](https://sdk.homeagent.jianfgit.xyz/llms-full.txt)
+
+**In-repo docs** (versioned with the code):
+
 - [Project Overview](assets/docs/en/OVERVIEW.md) | [中文](assets/docs/zh/OVERVIEW.md)
 - [Technical Architecture](assets/docs/en/ARCHITECTURE.md) | [中文](assets/docs/zh/ARCHITECTURE.md)
 - [Plugin Development Guide](assets/docs/en/PLUGIN_DEV.md) | [中文](assets/docs/zh/PLUGIN_DEV.md)
