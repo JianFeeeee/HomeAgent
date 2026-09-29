@@ -22,9 +22,11 @@
 #        结论（打不了包）不变但**理由已变**，别照旧文字理解。
 #
 # 用法：
-#   ./deploy-sdk-site.sh            # 构建 + 部署 + 验证
-#   ./deploy-sdk-site.sh --check    # 只核对线上与本地产物差异，不动线上
-#   ./deploy-sdk-site.sh --rollback <备份目录名>   # 回滚
+#   ./deploy-sdk-site.sh                # 构建 + 部署 + 验证（两个站）
+#   ./deploy-sdk-site.sh --check        # 只核对线上与本地产物差异，不动线上
+#   ./deploy-sdk-site.sh --introduce    # 只部署 introduce 站（改 site/ 时用，跳过 SDK 站重建）
+#   ./deploy-sdk-site.sh --rollback <备份目录名>            # 回滚 sdk 站
+#   ./deploy-sdk-site.sh --rollback-introduce <备份目录名>  # 回滚 introduce 站
 
 set -euo pipefail
 
@@ -39,6 +41,23 @@ PKG=/tmp/$PKG_NAME
 
 say()  { printf '\n\033[1m%s\033[0m\n' "$*"; }
 info() { printf '  %s\n' "$*"; }
+
+# ── 比对工具：必须是**真能报出差异**的 diff ──
+#
+# 2026-09-29 实测踩到：本机 PATH 首位的 diff
+# （/opt/huawei/harmonyos/ohos-sdk/linux/toolchains/diff）对**任何**输入都返回 0
+# 且无输出。用它做判据的后果不是「偶尔报错」，而是**永久给出「逐字节一致」的假绿灯**——
+# --check 永远说「无需部署」，站点改完再也不会被更新，而且看不出来。
+#
+# 所以：钉绝对路径 + 启动时自检一次。自检不过就直接退出，
+# 而不是继续拿一个坏判据去做部署决定（「探针不红先怀疑探针」）。
+DIFF=/usr/bin/diff
+[ -x "$DIFF" ] || { printf '找不到可用的 %s\n' "$DIFF" >&2; exit 1; }
+if "$DIFF" -q <(printf 'A\n') <(printf 'B\n') >/dev/null 2>&1; then
+  printf '★ 判据自检失败：%s 对两个不同输入报告「无差异」。\n' "$DIFF" >&2
+  printf '  这个 diff 是坏的（PATH 首位那个工具链自带的可能有问题），拒绝据此做部署判断。\n' >&2
+  exit 1
+fi
 
 # ── introduce 站 ──
 #
@@ -67,12 +86,12 @@ do_check_introduce() {
   info "本机源: $n 个文件（已排除 README.md）"
   files=$($SSH "sudo -n find $SITES/introduce -type f 2>/dev/null | wc -l" 2>/dev/null)
   info "线上站:   $files 个文件"
-  if diff -q <(intro_local_md5) <(intro_remote_md5) >/dev/null 2>&1; then
+  if "$DIFF" -q <(intro_local_md5) <(intro_remote_md5) >/dev/null 2>&1; then
     info "✓ introduce 线上与本机源逐字节一致"
     return 0
   fi
   info "✗ introduce 有差异："
-  diff <(intro_local_md5) <(intro_remote_md5) | head -20 || true
+  "$DIFF" <(intro_local_md5) <(intro_remote_md5) | head -20 || true
   return 1
 }
 
@@ -104,10 +123,10 @@ do_deploy_introduce() {
   local code
   code=$(curl -s -o /dev/null -m 10 -w '%{http_code}' -k https://introduce.homeagent.jianfgit.xyz/)
   info "首页 http=$code（introduce 配了 try_files 回落，404 才是异常）"
-  if diff -q <(intro_local_md5) <(intro_remote_md5) >/dev/null 2>&1; then
+  if "$DIFF" -q <(intro_local_md5) <(intro_remote_md5) >/dev/null 2>&1; then
     info "✓ introduce 线上与本机源逐字节一致"
   else
-    info "✗ introduce 仍有差异："; diff <(intro_local_md5) <(intro_remote_md5) | head -20; return 1
+    info "✗ introduce 仍有差异："; "$DIFF" <(intro_local_md5) <(intro_remote_md5) | head -20; return 1
   fi
 }
 
@@ -132,11 +151,11 @@ do_check() {
   info "本地产物: $n 个文件"
   files=$($SSH "sudo -n find $SITES/sdk -type f 2>/dev/null | wc -l" 2>/dev/null)
   info "线上站:   $files 个文件"
-  if diff -q <(local_md5) <(remote_md5) >/dev/null 2>&1; then
+  if "$DIFF" -q <(local_md5) <(remote_md5) >/dev/null 2>&1; then
     info "✓ 线上与本地产物逐字节一致，无需部署"
   else
     info "✗ sdk 有差异，需部署。差异文件："
-    diff <(local_md5) <(remote_md5) | head -20 || true
+    "$DIFF" <(local_md5) <(remote_md5) | head -20 || true
   fi
 
   # introduce 始终检查：两个站是独立的，sdk 一致不代表 introduce 也一致
@@ -169,8 +188,8 @@ do_deploy() {
     sudo -n mv $SITES/sdk $SITES/.sdk-old-$TS
     sudo -n mv $SITES/.sdk-new-$TS $SITES/sdk
     echo -n '现役站文件数: '; sudo -n find $SITES/sdk -type f | wc -l
-    # .sdk-old 与刚建的 .sdk-bak 内容必然相同（同一份旧站复制两次），
-    # 留一份就够，白占 11M。
+    # 注意：这里的 diff 是**远端**执行的（远端是健康的 /usr/bin/diff），
+    # 不受本机 PATH 首位那个坏 diff 影响。
     if sudo -n diff -r -q $SITES/.sdk-bak-$TS $SITES/.sdk-old-$TS >/dev/null 2>&1; then
       sudo -n rm -rf $SITES/.sdk-old-$TS
       echo '已删重复的 .sdk-old（与 .sdk-bak 内容相同）'
@@ -190,12 +209,27 @@ do_deploy() {
     printf '  %-34s ' "$p"
     curl -s -o /dev/null -m 10 -w 'http=%{http_code}\n' -k "https://sdk.homeagent.jianfgit.xyz/$p"
   done
-  if diff -q <(local_md5) <(remote_md5) >/dev/null 2>&1; then
+  if "$DIFF" -q <(local_md5) <(remote_md5) >/dev/null 2>&1; then
     info "✓ 线上与本地产物逐字节一致"
   else
-    info "✗ 仍有差异："; diff <(local_md5) <(remote_md5) | head -20; return 1
+    info "✗ 仍有差异："; "$DIFF" <(local_md5) <(remote_md5) | head -20; return 1
   fi
 
+  do_deploy_introduce
+}
+
+# 只跑 introduce 站：改 site/ 时用。
+#
+# 为何需要：do_deploy 会先把 SDK 文档站重建一遍（要跑 apidoc + mkdocs，产物 106 个文件、
+# 十几 MB），而 site/ 的改动跟 SDK 站毫无关系。只动介绍页却重建整个文档站，
+# 既慢又把一个本来没必要碰的线上站也卷进变更面。
+do_deploy_introduce_only() {
+  say "introduce 站：先比对再决定"
+  # 一致就不动线上（越少触碰越好）；不一致才走「备份→原子替换→回验」
+  if do_check_introduce; then
+    info "✓ 线上已是最新，无需部署"
+    return 0
+  fi
   do_deploy_introduce
 }
 
@@ -213,9 +247,25 @@ do_rollback() {
   info "已回滚，失败版本留在 $SITES/.sdk-failed-$TS"
 }
 
+do_rollback_introduce() {
+  local bak=${1:?用法: --rollback-introduce <备份目录名，如 .intro-bak-20260929-170000>}
+  say "回滚 introduce 到 $bak"
+  $SSH "
+    set -e
+    [ -d '$SITES/$bak' ] || { echo '找不到备份 $SITES/$bak'; exit 1; }
+    sudo -n cp -a $SITES/introduce $SITES/.intro-failed-$TS
+    sudo -n rm -rf $SITES/introduce
+    sudo -n cp -a $SITES/$bak $SITES/introduce
+    echo -n '回滚后文件数: '; sudo -n find $SITES/introduce -type f | wc -l
+  " 2>&1 | tail -3
+  info "已回滚，失败版本留在 $SITES/.intro-failed-$TS"
+}
+
 case "${1:-}" in
-  --check)    do_check ;;
-  --rollback) do_rollback "${2:?用法: --rollback <备份目录名>}" ;;
-  "")         do_deploy ;;
-  *)          echo "用法: $0 [--check | --rollback <备份目录名>]"; exit 2 ;;
+  --check)              do_check ;;
+  --introduce)          do_deploy_introduce_only ;;
+  --rollback)           do_rollback "${2:?用法: --rollback <备份目录名>}" ;;
+  --rollback-introduce) do_rollback_introduce "${2:?用法: --rollback-introduce <备份目录名>}" ;;
+  "")                   do_deploy ;;
+  *)  echo "用法: $0 [--check | --introduce | --rollback <备份目录名> | --rollback-introduce <备份目录名>]"; exit 2 ;;
 esac
