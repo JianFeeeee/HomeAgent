@@ -96,11 +96,19 @@ jobs:
           # 是否跳过发版前的 go test 门（默认不跳）。
           # 两个来源：手动触发的输入，或发版 commit 里的显式标记。
           # 后者使决定落在定义该次发版的 commit 上，可以从 git 历史审计。
+          #
+          # 标记查在**改动 meta.Version 的那个提交**上，而不是 HEAD：
+          # 发版提交之后往往还会跟几个提交（如同步 workflow、改文档），
+          # 若只看 HEAD，标记就会被后续提交顶掉，静默失效。
           SKIP="${{ inputs.skip_tests }}"
           MARKER=0
-          if git log -1 --pretty=%B | grep -qF '[skip-release-tests]'; then
-            MARKER=1
-          fi
+          REL_COMMIT=$(git log -1 --format=%H -- internal/meta/meta.go)
+          REL_MSG=$(git log -1 --pretty=%B "$REL_COMMIT")
+          case "$REL_MSG" in
+            *'[skip-release-tests]'*) MARKER=1 ;;
+            *) MARKER=0 ;;
+          esac
+          echo "  发版提交: ${REL_COMMIT:0:12}"
           if [ "$SKIP" = "true" ] || [ "$MARKER" = "1" ]; then
             echo "skip_tests=true" >> "$GITHUB_OUTPUT"
             echo ""
