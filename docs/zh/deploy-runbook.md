@@ -38,6 +38,49 @@
 
 ---
 
+### 0.1 ★★ 本机 `diff` 是坏的 —— 所有比对判据的硬前置
+
+**结论：本机一律用 `/usr/bin/diff` 或 `cmp`，不要用裸 `diff`。**
+
+PATH 首位是 `/opt/huawei/harmonyos/ohos-sdk/linux/toolchains/diff`，
+它**对任何输入都返回 0 且无输出**。用两个必然不同的小文件验证：
+
+```bash
+printf 'A\n' > /tmp/d1; printf 'B\n' > /tmp/d2
+diff -q /tmp/d1 /tmp/d2; echo $?              # ⇒ 0（错！应为 1）
+/usr/bin/diff -q /tmp/d1 /tmp/d2; echo $?     # ⇒ 1（对）
+cmp -s /tmp/d1 /tmp/d2; echo $?               # ⇒ 1（cmp 未被污染）
+```
+
+为什么这比“偶尔报错”危险得多：它让**部署判据变成假绿灯**。
+2026-09-29 实测：`deploy-sdk-site.sh --check` 对着两份**确实不同**的
+`index.html`（本地 `f8898cfc…` / 线上 `cc615cfa…`）报「✓ 逐字节一致」，
+于是永远判定「无需部署」——站点改完再也不会被更新，而且看不出来。
+已在 `547d28d` 修掉（钉绝对路径 + 启动自检）。
+
+★ 判据自检的通用做法：
+
+```bash
+# 启动时用两个必然不同的输入验证判据真的能报差异；不通过就退出，
+# 而不是继续拿一个坏判据去做决定。
+if "$DIFF" -q <(printf 'A\n') <(printf 'B\n') >/dev/null 2>&1; then
+  echo '判据自检失败：这个 diff 认为两份不同内容“无差异”' >&2; exit 1
+fi
+```
+
+同类信号（任一出现就立刻怀疑判据本身）：
+
+| 信号 | 含义 |
+| --- | --- |
+| `diff` 说无差异，但 `wc -c` / `stat -c %s` 说大小不同 | 判据坏了 |
+| 部署脚本报「一致」但线上内容明显是旧的 | 判据坏了 |
+| 测了两个**必然不同**的样本却报「相同」 | 判据坏了 |
+
+远端（106 / 30）的 `diff` **是健康的**（`/usr/bin/diff`），不受影响；
+但嵌在 `ssh "…"` 里的命令要分清楚是本地还是远端执行。
+
+---
+
 ## 1. 部署 homed（本机）
 
 ### 1.1 硬前置：必须 onnxruntime 构建
@@ -118,6 +161,7 @@ curl -s -H "X-API-Key: $K" http://127.0.0.1:8080/api/v1/status | grep -oE '"comm
 （86811464），更掩盖了这个问题。
 
 ⇒ 部署前的判据顺序：
+
 1. `/api/v1/status` 的 `commit` —— 线上在跑什么
 2. `git log <commit>..HEAD` —— 差哪些提交
 3. 那些提交里**有无运行时改动**（`internal/`、`cmd/`）—— 只有它才需要部署
