@@ -330,6 +330,15 @@ internal/
 
 ## 文档
 
+**在线文档**：
+
+- 介绍站（项目总览）：<https://introduce.homeagent.jianfgit.xyz/>
+- 插件 SDK 文档（快速开始 / API 参考 / 指南 / 示例）：<https://sdk.homeagent.jianfgit.xyz/>
+  —— 面向 agent 的纯文本入口：[`llms.txt`](https://sdk.homeagent.jianfgit.xyz/llms.txt) /
+  [`llms-full.txt`](https://sdk.homeagent.jianfgit.xyz/llms-full.txt)
+
+**仓内文档**（随代码版本走）：
+
 - [项目概览](assets/docs/zh/OVERVIEW.md) | [English](assets/docs/en/OVERVIEW.md)
 - [技术架构](assets/docs/zh/ARCHITECTURE.md) | [English](assets/docs/en/ARCHITECTURE.md)
 - [插件开发指南](assets/docs/zh/PLUGIN_DEV.md) | [English](assets/docs/en/PLUGIN_DEV.md)
