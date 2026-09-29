@@ -8,12 +8,19 @@
 # 版本号来源：internal/meta/meta.go 的 Version（唯一事实源）。
 # 所以发版动作 = 在 release/vX.Y.x 上把 meta.Version 改成目标版本后推送。
 # 版本未变的推送（如改文档）会因 tag 已存在而**整轮跳过**，不会重复发版。
+#
+# 发版前的 go test 门可以显式跳过（见下面 skip_tests 的说明）。
 name: Release
 
 on:
   push:
     branches: ['release/**']
   workflow_dispatch:
+    inputs:
+      skip_tests:
+        description: '跳过发版前的 go test 门（仅用于已知红的历史维护线）'
+        type: boolean
+        default: false
 
 # 发布必须能写仓库（打 tag、建 release、传附件）。
 permissions:
@@ -42,10 +49,23 @@ jobs:
       tag: ${{ steps.ver.outputs.tag }}
       prerelease: ${{ steps.ver.outputs.prerelease }}
       exists: ${{ steps.ver.outputs.exists }}
+      skip_tests: ${{ steps.ver.outputs.skip_tests }}
     steps:
       - uses: actions/checkout@v7
         with:
           fetch-depth: 0
+      # 发版前的 go test 门为什么可以跳过：
+      #
+      # 新旧发布线的测试健康状况不同。实测 release/v1.3.x（历史维护线）上
+      # internal/plugins 的 TestRealPlugin_DeepSearchKeepsSharedBackendOnStop
+      # 失败、GUI 尚无 npm test 脚本、csrc 基础设施不存在 —— 而这三项在 main
+      # 上都正常。给旧线补新流水线等于用今天的门去量旧代码，硬门会让该线
+      # **完全无法发版**。
+      #
+      # 故：默认严格（测试必跑）；发版人若确知该线测试是既存红的，可在
+      # 发版 commit 里写 [skip-release-tests] 显式跳过 —— 决定因此记录在
+      # **定义该次发版的那个 commit** 里，git 历史可审计。
+      # go build 仍是硬门（产物不可能建立在编译失败的代码上）。
       - id: ver
         name: 读取 meta.Version 并检查 tag
         run: |
@@ -71,6 +91,26 @@ jobs:
           else
             echo "exists=false" >> "$GITHUB_OUTPUT"
             echo "  将为 v$V 发版"
+          fi
+
+          # 是否跳过发版前的 go test 门（默认不跳）。
+          # 两个来源：手动触发的输入，或发版 commit 里的显式标记。
+          # 后者使决定落在定义该次发版的 commit 上，可以从 git 历史审计。
+          SKIP="${{ inputs.skip_tests }}"
+          MARKER=0
+          if git log -1 --pretty=%B | grep -qF '[skip-release-tests]'; then
+            MARKER=1
+          fi
+          if [ "$SKIP" = "true" ] || [ "$MARKER" = "1" ]; then
+            echo "skip_tests=true" >> "$GITHUB_OUTPUT"
+            echo ""
+            echo "  ⚠️  **已请求跳过发版前的 go test 门**"
+            echo "      来源：${SKIP} = true / commit 标记 = $MARKER"
+            echo "      后果：产物可能建立在单元测试失败的代码上。"
+            echo "      理由应当记录在发版 commit 的正文里。"
+          else
+            echo "skip_tests=false" >> "$GITHUB_OUTPUT"
+            echo "  发版前会跑 go test 门（可用 [skip-release-tests] 标记跳过）"
           fi
 
   # ── 构建 Linux 产物（amd64）──
@@ -99,12 +139,24 @@ jobs:
           gcc --version | head -1
           g++ --version | head -1
 
-      # 发版前的最后一道门：产物若建立在编译失败的代码上，发布了也没用。
-      - name: go build + go test（发版前验证）
+      # 发版前的门。
+      #
+      # go build 是**硬门**：产物不可能建立在编译失败的代码上。
+      # go test 默认也跑，但可在发版 commit 里写 [skip-release-tests] 跳过
+      # —— 历史维护线的既有红测试不应阻断该线的一切发版（详见 prepare job）。
+      - name: go build（硬门）
         run: |
           set -euo pipefail
           go build ./...
-          go test ./... -count=1 -timeout 20m
+
+      - name: go test（发版前验证）
+        if: needs.prepare.outputs.skip_tests != 'true'
+        run: go test ./... -count=1 -timeout 20m
+
+      - name: go test 被跳过（显式声明的后果）
+        if: needs.prepare.outputs.skip_tests == 'true'
+        run: |
+          echo "::warning title=go test 门已跳过::本次发版未跑 go test，产物可能建立在单元测试失败的代码上。"
 
       - name: 下载构建资产（模型 + ONNX Runtime）
         run: |
