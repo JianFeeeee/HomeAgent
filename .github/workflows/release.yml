@@ -1,0 +1,294 @@
+# 发布流水线：release/** 分支推送即发版。
+#
+# 设计依据 docs/git-branching.md §七（发版产物清单）与 git-release-discipline
+# skill。核心事实：**推 tag ≠ 完成发版** —— 完整发版是四件事：
+# bump meta.Version → 打 tag → 打包产物 → 建 release 条目并上传附件。
+# （v1.3.1–v1.3.6 曾只推了 tag，产物与 release 条目全缺，事后补做。）
+#
+# 版本号来源：internal/meta/meta.go 的 Version（唯一事实源）。
+# 所以发版动作 = 在 release/vX.Y.x 上把 meta.Version 改成目标版本后推送。
+# 版本未变的推送（如改文档）会因 tag 已存在而**整轮跳过**，不会重复发版。
+name: Release
+
+on:
+  push:
+    branches: ['release/**']
+  workflow_dispatch:
+
+# 发布必须能写仓库（打 tag、建 release、传附件）。
+permissions:
+  contents: write
+
+# 发布不允许并发/取消：半途中断会留下 tag 存在但附件不全的状态。
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  # gojieba 需要 cgo；onnxruntime 版本经 dlopen 加载，编译期无需装 ORT。
+  CGO_ENABLED: 1
+  GOFLAGS: -buildvcs=false
+  # CI 用的大资产（模型/运行库）存于这个 release。
+  ASSETS_TAG: ci-assets-v1
+
+jobs:
+  # ── 读版本号并判断是否需要发版 ──
+  prepare:
+    name: Prepare
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    outputs:
+      version: ${{ steps.ver.outputs.version }}
+      tag: ${{ steps.ver.outputs.tag }}
+      prerelease: ${{ steps.ver.outputs.prerelease }}
+      exists: ${{ steps.ver.outputs.exists }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+      - id: ver
+        name: 读取 meta.Version 并检查 tag
+        run: |
+          set -euo pipefail
+          V=$(sed -n 's/^[[:space:]]*Version = "\(.*\)"/\1/p' \
+              internal/meta/meta.go | head -1)
+          if [ -z "$V" ]; then
+            echo "ERROR: 无法从 internal/meta/meta.go 读出 Version"
+            exit 1
+          fi
+          echo "version=$V" >> "$GITHUB_OUTPUT"
+          echo "tag=v$V" >> "$GITHUB_OUTPUT"
+          # SemVer 预发布（1.3.13-beta.1）⇒ release 标记为预发布
+          case "$V" in
+            *-*) echo "prerelease=true" >> "$GITHUB_OUTPUT" ;;
+            *)   echo "prerelease=false" >> "$GITHUB_OUTPUT" ;;
+          esac
+          # 幂等闸门：tag 已存在说明该版本发过了，整轮跳过。
+          if git ls-remote --exit-code --tags origin "refs/tags/v$V" \
+               >/dev/null 2>&1; then
+            echo "exists=true" >> "$GITHUB_OUTPUT"
+            echo "  tag v$V 已存在 —— 跳过发版"
+          else
+            echo "exists=false" >> "$GITHUB_OUTPUT"
+            echo "  将为 v$V 发版"
+          fi
+
+  # ── 构建 Linux 产物（amd64）──
+  #
+  # 三个 deb + 一个 tar.gz，总约 2.4GB（server/full/tar 含 719MB 模型）。
+  # 编译不需要 ONNX Runtime —— onnxruntime_go 是 dlopen 方式，运行期才加载
+  # libonnxruntime.so；但**打包**需要它（要打进 deb），故从 ASSETS_TAG 下载。
+  build-linux:
+    name: Build linux/amd64
+    needs: prepare
+    if: needs.prepare.outputs.exists == 'false'
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: 确认 cgo 工具链
+        run: |
+          gcc --version | head -1
+          g++ --version | head -1
+
+      # 发版前的最后一道门：产物若建立在编译失败的代码上，发布了也没用。
+      - name: go build + go test（发版前验证）
+        run: |
+          set -euo pipefail
+          go build ./...
+          go test ./... -count=1 -timeout 20m
+
+      - name: 下载构建资产（模型 + ONNX Runtime）
+        run: |
+          set -euo pipefail
+          BASE="https://github.com/${GITHUB_REPOSITORY}/releases/download/${ASSETS_TAG}"
+          mkdir -p /tmp/assets/model /tmp/assets/ort
+          for f in chinese-clip-vit-b16-onnx.tar \
+                   onnxruntime-linux-amd64-1.28.0.tar SHA256SUMS; do
+            echo "  下载 $f"
+            curl -sSL --retry 3 -o "/tmp/assets/$f" "$BASE/$f"
+          done
+          # 校验（资产是构建输入，损坏会打出坏包）
+          (cd /tmp/assets && sha256sum -c SHA256SUMS)
+          tar -xf /tmp/assets/chinese-clip-vit-b16-onnx.tar \
+            -C /tmp/assets/model
+          ORT_TAR=/tmp/assets/onnxruntime-linux-amd64-1.28.0.tar
+          tar -xf "$ORT_TAR" -C /tmp/assets/ort
+          echo "  模型文件："
+          ls /tmp/assets/model/chinese-clip-vit-b16-onnx
+          echo "  ORT 文件："
+          ls /tmp/assets/ort
+
+      - name: 打包（tar.gz + full/server/client deb）
+        env:
+          VERSION: ${{ needs.prepare.outputs.version }}
+          CHINESECLIP_BUNDLE_DIR: /tmp/assets/model/chinese-clip-vit-b16-onnx
+          ONNXRUNTIME_ASSET_DIR: /tmp/assets/ort
+        run: |
+          set -euo pipefail
+          bash deploy/packaging/package-linux.sh amd64 all
+
+      - name: 平铺产物（附件必须同目录，SHA256SUMS 用平铺名）
+        run: |
+          set -euo pipefail
+          mkdir -p /tmp/out
+          cp dist/linux/deb/*.deb /tmp/out/
+          cp dist/linux/tar/*.tar.gz /tmp/out/
+          cp dist/linux/SHA256SUMS /tmp/out/
+          echo "  产物："
+          for f in /tmp/out/*; do
+            printf "    %8.1fMB  %s\n" \
+              "$(stat -c %s "$f" | awk '{print $1/1048576}')" "$(basename "$f")"
+          done
+
+      - name: 验证产物（deb 元数据 + 校验和自验）
+        run: |
+          set -euo pipefail
+          cd /tmp/out
+          for f in *.deb; do
+            echo "  $f"
+            dpkg-deb -f "$f" Package Version Architecture | sed 's/^/    /'
+          done
+          # full/server 必须真的带模型，否则是"默认启用但装完不能用"的假包
+          dpkg-deb -c homeagent-full_*_amd64.deb \
+            | grep -q "chinese-clip-vit-b16-onnx/TextEncoder.onnx"
+          echo "  ✓ full 包含模型"
+          dpkg-deb -c homeagent-full_*_amd64.deb \
+            | grep -q "libonnxruntime.so"
+          echo "  ✓ full 包含 ONNX Runtime"
+          sha256sum -c SHA256SUMS
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: linux-amd64
+          path: /tmp/out/*
+          retention-days: 7
+          if-no-files-found: error
+
+  # ── 建 tag、建 release、上传附件 ──
+  publish:
+    name: Publish
+    needs: [prepare, build-linux]
+    if: needs.prepare.outputs.exists == 'false'
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+
+      - uses: actions/download-artifact@v8
+        with:
+          name: linux-amd64
+          path: dist
+
+      - name: 打 tag（打在触发本次发版的 commit 上）
+        env:
+          TAG: ${{ needs.prepare.outputs.tag }}
+        run: |
+          set -euo pipefail
+          git config user.name  "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git tag -a "$TAG" -m "$TAG"
+          git push origin "$TAG"
+
+      - name: 建 release 并上传附件
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ needs.prepare.outputs.tag }}
+          VERSION: ${{ needs.prepare.outputs.version }}
+          PRE: ${{ needs.prepare.outputs.prerelease }}
+        run: |
+          set -euo pipefail
+          cd dist
+          FLAGS=()
+          [ "$PRE" = "true" ] && FLAGS+=(--prerelease)
+          gh release create "$TAG" \
+            --title "$TAG" \
+            --notes "HomeAgent $VERSION
+
+          产物清单与校验见 SHA256SUMS。
+          - \`homeagent_${VERSION}_linux_amd64.tar.gz\` — 内核 + CLI + GUI 打包
+          - \`homeagent-client_${VERSION}_amd64.deb\` — 客户端
+          - \`homeagent-server_${VERSION}_amd64.deb\` — 服务端（含向量模型）
+          - \`homeagent-full_${VERSION}_amd64.deb\` — 全量" \
+            "${FLAGS[@]}" \
+            ./*.deb ./*.tar.gz ./SHA256SUMS
+          echo "=== release 内容 ==="
+          gh release view "$TAG" --json assets \
+            --jq '.assets[] | "  \(.name)  \(.size) 字节"'
+
+      - name: 回读校验（下载回来验证附件可读且校验和成立）
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ needs.prepare.outputs.tag }}
+        run: |
+          set -euo pipefail
+          mkdir -p /tmp/back
+          cd /tmp/back
+          gh release download "$TAG"
+          for f in *; do
+            printf "  %8.1fMB  %s\n" \
+              "$(stat -c %s "$f" | awk '{print $1/1048576}')" "$f"
+          done
+          sha256sum -c SHA256SUMS
+          echo "  ✓ 回读校验通过"
+
+  # ── 同步到 gitcode（国内镜像）──
+  #
+  # 需要仓库 secret GITCODE_TOKEN；未配置则跳过（不阻断 GitHub 侧发布）。
+  # gitcode 的 release 附件是"同名只写一次"，故只在此处上传一次。
+  sync-gitcode:
+    name: Sync to gitcode
+    needs: [prepare, publish]
+    if: needs.prepare.outputs.exists == 'false'
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v7
+      - id: tok
+        name: 检查 gitcode 凭据
+        run: |
+          if [ -n "${{ secrets.GITCODE_TOKEN }}" ]; then
+            echo "ok=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "ok=false" >> "$GITHUB_OUTPUT"
+            echo "  未配置 GITCODE_TOKEN —— 跳过 gitcode 同步"
+          fi
+      - uses: actions/download-artifact@v8
+        if: steps.tok.outputs.ok == 'true'
+        with:
+          name: linux-amd64
+          path: dist
+      - name: 推 tag 与附件到 gitcode
+        if: steps.tok.outputs.ok == 'true'
+        env:
+          GC_TOKEN: ${{ secrets.GITCODE_TOKEN }}
+          TAG: ${{ needs.prepare.outputs.tag }}
+        run: |
+          set -euo pipefail
+          # 1) 推 tag（附件上传前 release 条目必须先存在）
+          git config user.name  "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git tag -a "$TAG" -m "$TAG" 2>/dev/null || true
+          GC_URL="https://JianFeeeee:${GC_TOKEN}@gitcode.com"
+          git push "${GC_URL}/JianFeeeee/HomeAgent.git" "$TAG"
+          # 2) 建 release 条目
+          curl -sS --max-time 60 -X POST \
+            -H "private-token: ${GC_TOKEN}" \
+            -H "Content-Type: application/json" \
+            "https://gitcode.com/api/v5/repos/JianFeeeee/HomeAgent/releases" \
+            -d "{\"tag_name\":\"$TAG\",\"body\":\"同步自 GitHub\"}" \
+            -o /tmp/.gcrel -w "  建 release → %{http_code}\n"
+          # 3) 上传附件（用仓库既有脚本，它处理 OBS 预签名两步流程）
+          cd dist
+          python3 ../deploy/scripts/upload_assets.py "$TAG" "$GC_TOKEN" \
+            ./*.deb ./*.tar.gz ./SHA256SUMS
