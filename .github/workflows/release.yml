@@ -385,5 +385,9 @@ jobs:
             -o /tmp/.gcrel -w "  建 release → %{http_code}\n"
           # 3) 上传附件（用仓库既有脚本，它处理 OBS 预签名两步流程）
           cd dist
-          python3 ../deploy/scripts/upload_assets.py "$TAG" "$GC_TOKEN" \
-            ./*.deb ./*.tar.gz ./SHA256SUMS
+          # 脚本的路径语义是 os.path.join(ASSET_DIR, name)。
+          # 不传文件名时它扫描 ASSET_DIR 并按后缀识别发布产物 —— 这里正合适
+          # （.deb/.tar.gz/SHA256SUMS 都在白名单里）。
+          # 不要传 "./x" 或 "dist/x"：那会拼成 dist/dist/x。
+          ASSET_DIR=. GITCODE_REPO=JianFeeeee/HomeAgent \
+            python3 ../deploy/scripts/upload_assets.py "$TAG" "$GC_TOKEN"
