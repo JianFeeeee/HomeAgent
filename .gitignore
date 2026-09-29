@@ -36,6 +36,9 @@ third_party/homeagent-sdk/scripts/
 # skills/ 是 SDK 仓的 skill 源（hmapdev skill install 的来源），
 # 与 tools/、docs/ 同理属 SDK 仓自治范围，不进本仓。
 third_party/homeagent-sdk/skills/
+# .github/ 同理：SDK 仓的 workflow 由 SDK 仓自己管（它在那边被跟踪），
+# 本仓不参与构建，不需要在这边重复一份。
+third_party/homeagent-sdk/.github/
 third_party/homeagent-sdk/.gitignore
 third_party/homeagent-sdk/README*
 third_party/homeagent-sdk/example/
