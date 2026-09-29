@@ -243,13 +243,22 @@ jobs:
             echo "  $f"
             dpkg-deb -f "$f" Package Version Architecture | sed 's/^/    /'
           done
-          # full/server 必须真的带模型，否则是"默认启用但装完不能用"的假包
+          # full/server 必须真的带模型，否则是“默认启用但装完不能用”的假包。
+          #
+          # ★ 不能用 grep -q：它匹配到就退出，关闭管道读端，dpkg-deb 内部
+          #   的 tar 写 stdout 时收到 EPIPE（“stdout: write error”），
+          #   在 pipefail 下整条 pipeline 变成失败 —— 检测项本身是好的，
+          #   却被检测手段误杀（首次试发布就死在这里）。改用 >/dev/null，
+          #   grep 会读完整个输入再退出，不产生 SIGPIPE。
           dpkg-deb -c homeagent-full_*_amd64.deb \
-            | grep -q "chinese-clip-vit-b16-onnx/TextEncoder.onnx"
+            | grep "chinese-clip-vit-b16-onnx/TextEncoder.onnx" >/dev/null
           echo "  ✓ full 包含模型"
           dpkg-deb -c homeagent-full_*_amd64.deb \
-            | grep -q "libonnxruntime.so"
+            | grep "libonnxruntime.so" >/dev/null
           echo "  ✓ full 包含 ONNX Runtime"
+          dpkg-deb -c homeagent-server_*_amd64.deb \
+            | grep "chinese-clip-vit-b16-onnx/TextEncoder.onnx" >/dev/null
+          echo "  ✓ server 包含模型"
           sha256sum -c SHA256SUMS
 
       - uses: actions/upload-artifact@v7
