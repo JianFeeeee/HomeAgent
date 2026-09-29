@@ -323,7 +323,7 @@ External plugin development: see [homeagent-sdk](https://github.com/JianFeeeee/h
 **v1.1.1** — Multimodal reaches the **plugin boundary**. v1.1.0 gave the memory system binary
 multimedia nodes, but that path was open only to the kernel itself; this release opens it to
 plugins and the model. The public SDK gains media fields and three media injection methods
-(paired with [SDK v1.1.0](https://gitcode.com/JianFeeeee/homeagent-sdk/releases/tag/v1.1.0),
+(paired with [SDK v1.1.0](https://github.com/JianFeeeee/homeagentsdk/tree/v1.1.0),
 shared by the whole 1.1.x line), and the kernel implements the four matching RPCs. The bridge
 layer had been **silently dropping fields**: `Confidence`/types/`SentenceText` handed in by a
 plugin were discarded, `Doc` kept only three fields, and `Remove` never released references
