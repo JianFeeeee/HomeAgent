@@ -1,0 +1,14 @@
+{
+  "_comment": "pi-lens 仓库级配置。cmd/gui 的 test 排除原因见 docs/zh/ci-cd-runbook.md「诊断噪音」一节。",
+  "_why_cmd_gui_tests_excluded": "cmd/gui 是纯 Electron/Node 目录（0 个 .go 文件、无 go.mod）。pi-lens 的 test runner 在写文件时按仓库主语言（Go）为目录跑测试，而 cmd/gui/*.test.mjs 被识别成测试文件 ⇒ 它对一个纯 Node 目录执行 `go test ./cmd/gui`，必然得到 `no Go files ... [setup failed]`，却被报成「测试失败」。这些 .mjs 的真实运行方式是 `npm test`（CI 的 GUI job 已在跑），pi-lens 无法正确执行它们，故排除触发源。上游缺陷：runner 应先确认目录内有该语言的源文件。",
+  "ignore": [
+    "cmd/gui/node_modules/**",
+    "cmd/gui/**/*.test.mjs",
+    ".npm-cache/**",
+    "build/**",
+    "dist/**",
+    "third_party/homeagent-sdk/site_build/**",
+    "third_party/homeagent-sdk/build/**",
+    "third_party/homeagent-sdk/.npm-cache/**"
+  ]
+}
