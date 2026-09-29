@@ -158,9 +158,37 @@ tar 写 stdout 收到 EPIPE ⇒ pipefail 判失败。**包越大越易触发**
 要 `cd` 进资产目录、`ASSET_DIR=.`、传**裸文件名**。SDK 仓的产物多数无
 扩展名，必须显式列名（自动扫描按后缀识别，会静默一个都不传）。
 
-### 3.6 手工补发 gitcode 附件
+### 3.6 gitcode 凭据（`GITCODE_TOKEN`）
 
-CI 的 sync job 需要 secret `GITCODE_TOKEN`；未配置时该 job 显式跳过。
+CI 的 sync job 需要仓库 secret `GITCODE_TOKEN`；**未配置时该 job 显式跳过**
+（不阻断 GitHub 侧发布）。
+
+**2026-09-29 已配置**：两仓（`JianFeeeee/HomeAgent`、`JianFeeeee/homeagentsdk`）
+均已设同名 secret，取值自 `~/.git-credentials` 里那条 `https://JianFeeeee:<token>@gitcode.com`。
+配置方式（经 stdin 传入，避免 token 出现在进程列表）：
+
+```bash
+printf '%s' "$TOKEN" | gh secret set GITCODE_TOKEN --repo JianFeeeee/HomeAgent
+printf '%s' "$TOKEN" | gh secret set GITCODE_TOKEN --repo JianFeeeee/homeagentsdk
+```
+
+验收：sync job 只在**新版本**发版时运行（`prepare.outputs.exists == 'false'`），
+历史 tag 触发不了，所以无法用旧版本实跑。等价验证三道：
+
+```bash
+# ① secret 存在
+gh secret list --repo JianFeeeee/HomeAgent | grep GITCODE_TOKEN
+# ② token 有效
+curl -s "https://gitcode.com/api/v5/user?access_token=$TOKEN"
+# ③ job 用的 private-token 头可读 release（两仓都测）
+curl -s -H "private-token: $TOKEN" \
+  "https://gitcode.com/api/v5/repos/JianFeeeee/HomeAgent/releases/tags/v1.3.13"
+```
+
+★ **token 是宽范围的个人令牌**（可读 92 仓/48 私有、有写权限），而 CI 只需要这两个仓。
+更稳的做法是去 gitcode 建一枚**仅限这两仓**的令牌再替换 —— 这样 CI 泄漏时
+影响面不扩到其他仓。当前未做（按用户 2026-09-29 的决定）。
+
 手工补发的完整流程（下载 GitHub 产物 → 建 release 条目 → 上传）：
 
 ```bash
