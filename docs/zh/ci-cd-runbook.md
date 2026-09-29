@@ -219,3 +219,84 @@ Actions 失败会给仓库 owner 发邮件（GitHub 默认）。若嫌吵：
 github.com/settings/notifications → Actions 关闭，或仓库页 Watch → Custom
 取消 Actions。注意失败邮件也可能是"验证步骤自身 bug"的假警报 ——
 先看是哪个 job/step 红了再判断（对照 §3 的坑）。
+
+## 6. 开发环境的诊断噪音（`cmd/gui [setup failed]`）
+
+### 6.1 症状
+
+每轮改完文件，pi-lens 的回合末摘要里会冒一条：
+
+```text
+FAIL ./cmd/gui [setup failed]
+```
+
+它看着像仓库里有测试红了，**实际是工具缺陷**。真实状态：
+
+```bash
+go test ./...          # 退出码 0，43 个包全过、0 FAIL
+find cmd/gui -name '*.go' | wc -l   # 0 —— 该目录根本没有 Go 代码
+go test ./cmd/gui      # “no Go files in .../cmd/gui”
+cd cmd/gui && npm test # 这才是它的测试（node 的 .test.mjs），通过
+```
+
+### 6.2 根因（pi-lens 的两个缺陷叠加）
+
+1. **runner 按仓库根选**，不按被跑的文件选。本仓根有 `go.mod` ⇒ 选中 go runner；
+   而 `cmd/gui/*.test.mjs` 命中通用测试命名（`detectFileRole` 与 runner 无关）
+   ⇒ 对 `cmd/gui` 生成 `go test -run . ./cmd/gui` ⇒ 必失败。
+2. **failed-first 把误报变成永久**：失败项进 `failedTestsByRunner`（进程内 Map），
+   此后**每次**编辑都优先重跑它（与当前编辑的文件无关）；而该条目只在测试
+   **通过**时才移除 ⇒ 对这条永远失败的命令，永不自愈。
+
+日志里的形态（`/root/.pi-lens/sessionstart.log`）：
+
+```text
+turn_end: README.md → test go cmd/gui/sse-backoff.test.mjs (failed-first)
+```
+
+注意触发者是 `README.md` —— 目标是**与本次编辑无关**的陈旧失败项。
+
+### 6.3 为什么不能用项目级配置关掉
+
+`.pi-lens.json` 是**项目级**，只认一小排键
+（`ignore` / `rules` / `maxProjectFiles` / `reviewGraph` / `trivy` + 三个改动开关）。
+`tests` 是**全局级**键，写进项目文件会被忽略并告警：
+
+```text
+"tests" is a global-only pi-lens setting and is not honored in a project .pi-lens.json
+```
+
+而全局关掉（`~/.pi-lens/config.json` 的 `{"tests":{"enabled":false}}`）
+会一起关掉**所有项目**的回合末测试反馈 —— 为一个仓库的误报付全局代价，不值。
+另：`ignore` 也挡不住，因为它只作用于扫描，不参与测试目标选择（`failed-first`
+的回退分支根本不看候选文件）。
+
+### 6.4 修法：本机补丁（已打）
+
+补丁位置：`~/.pi/agent/npm/node_modules/pi-lens/dist/index.js`。
+在 `getTestRunTarget` 返回目标前加一道校验：
+
+> 该 runner 是否**真能跑**这个目标？只有 go 做实质检查 ——
+> 目标所在目录要有至少一个 `.go` 文件。不能跑就返回 null，
+> 并顺手把这条不可运行的记录从 `failed-first` 集合里移除。
+
+原方法体改名为 `selectTestRunTargetRaw`，外面套一层校验（`runTestFileAsync`
+只有这一个调用点，所以这里是唯一收口）。补丁全文已用 `node --check` 验语法，
+用 `/usr/bin/diff` 核对为**纯新增、零删除**。
+
+**立即生效（不必重启会话）**：在会话里执行内置命令 **`/reload`**
+（重载扩展且不重启 `pi-web-sessiond`）；不手动重载则在**下个会话**自然生效。
+
+**验证**：改一个仓库文件但先不提交，等回合结束，然后
+`grep 'turn_end: .*→ test' /root/.pi-lens/sessionstart.log | tail -3`
+—— 应不再出现 `test go cmd/gui/...`；而编辑一个真 Go 测试文件时仍应正常触发。
+
+**会被覆盖**：pi-lens 升级/重装后补丁消失，误报会回来（不影响仓库，只是噪音）。
+备份在同目录 `index.js.orig-*`，回退就是拷回去：
+
+```bash
+cd ~/.pi/agent/npm/node_modules/pi-lens/dist
+cp -a index.js.orig-<时间戳> index.js    # 然后 /reload
+```
+
+> 上游缺陷：runner 选择应先确认目标文件属于该语言（或至少确认目录内有该语言的源文件）。
