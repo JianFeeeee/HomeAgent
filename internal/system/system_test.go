@@ -38,10 +38,22 @@ func TestIsProtectedPath(t *testing.T) {
 
 func TestArchiveBeforeWrite(t *testing.T) {
 	dir := t.TempDir()
-	// 受保护路径
-	target := "/etc/ArchiveBeforeWrite.test.tmp"
-	os.WriteFile(target, []byte("original"), 0644)
-	defer os.Remove(target)
+
+	// 受保护路径用**临时目录 + SetProtectedPaths 显式声明**，不写真实的 /etc。
+	//
+	// 为什么不能硬编码 /etc：CI（GitHub Actions runner）以非 root 运行，
+	// os.WriteFile("/etc/...") 会 permission denied，而此处原先忽略了该错误
+	// ⇒ 文件根本不存在 ⇒ ArchiveBeforeWrite 按「新建文件无需留档」返回 false
+	// ⇒ 断言 "expected archive to happen" 失败。本地以 root 跑则通过，
+	// 缺陷因此长期不可见（只有换到非 root 环境才暴露）。
+	protected := t.TempDir()
+	SetProtectedPaths([]string{protected})
+	defer SetProtectedPaths(nil) // 恢复默认（/etc/），避免影响同包其它测试
+
+	target := filepath.Join(protected, "archive_before_write.tmp")
+	if err := os.WriteFile(target, []byte("original"), 0644); err != nil {
+		t.Fatalf("write target: %v", err)
+	}
 
 	archived, err := ArchiveBeforeWrite(dir, target)
 	if err != nil {
@@ -82,9 +94,17 @@ func TestArchiveBeforeWrite(t *testing.T) {
 
 func TestRestoreFileFromBaseline(t *testing.T) {
 	dir := t.TempDir()
-	target := "/etc/RestoreFileFromBaseline.test.tmp"
-	os.WriteFile(target, []byte("v1"), 0644)
-	defer os.Remove(target)
+
+	// 同 TestArchiveBeforeWrite：用临时目录声明受保护路径，不碰真实 /etc
+	// （非 root 环境写 /etc 必然失败，会让断言在 CI 上假红）。
+	protected := t.TempDir()
+	SetProtectedPaths([]string{protected})
+	defer SetProtectedPaths(nil)
+
+	target := filepath.Join(protected, "restore_from_baseline.tmp")
+	if err := os.WriteFile(target, []byte("v1"), 0644); err != nil {
+		t.Fatalf("write target: %v", err)
+	}
 
 	ArchiveBeforeWrite(dir, target)
 	os.WriteFile(target, []byte("v2"), 0644)
