@@ -592,6 +592,17 @@ async function starmapFetchBlock(name) {
 			try {
 				state.kernel = await api("/kernel");
 			} catch (e) {}
+			// 初次进页就用 /kernel 的累计把徐标填上，不等第一条消息。
+			// 口径说明：/kernel 的 usage 是**进程生命周期累计**，
+			// 与 usage_session（本会话）不同 —— 所以显式传来源标记，
+			// 免得两者混在一起看。
+			if (state.kernel && state.kernel.usage) {
+				renderChatUsage(
+					state.kernel.usage,
+					null,
+					__("进程累计", "process total"),
+				);
+			}
 			break;
 		case "settings":
 			try {
@@ -2089,7 +2100,12 @@ function buildChatLayout() {
 		__("对话", "Chat") +
 		' <span id="chat-stage" class="badge" style="font-size:10px;font-weight:400;display:none">' +
 		escHtml(state.chatStage || "") +
-		'</span></h2><div class="chat-messages" id="chat-msgs">';
+		'</span>' +
+		// 用量徐标：本会话累计 token 与缓存命中率。
+		// 内核一直在推 agent_llm_chain（带 usage/usage_session），
+		// 前端此前从未订阅 ⇒ 「发了但没人收到」，页面上看不到成本。
+		' <span id="chat-usage" class="badge" style="font-size:10px;font-weight:400;display:none;cursor:help"></span>' +
+		'</h2><div class="chat-messages" id="chat-msgs">';
 	if (state.messages.length === 0) {
 		html +=
 			'<div class="empty-state" style="flex:1;display:flex;align-items:center;justify-content:center"><p>' +
@@ -4433,6 +4449,70 @@ function connectSSE() {
 			console.error("[SSE] agent_output error", ex);
 		}
 	});
+	// 用量账目：内核在每次 LLM 调用记账后发 agent_llm_chain，
+	// payload 同时带 usage（本次）与 usage_session（会话累计）。
+	//
+	// 为何要显式订阅：后端**一直在推**这个事件（见 handler_chat.go 的 subTypes），
+	// 而前端从未监听它 —— 另一个「写了、发了、不报错，只是没人收到」。
+	// 后果是用户看不到缓存命中率与 token 用量。
+	es.addEventListener("agent_llm_chain", (e) => {
+		try {
+			var ev = JSON.parse(e.data);
+			var p = ev.payload || {};
+			renderChatUsage(p.usage_session, p.usage, __("本会话", "this session"));
+		} catch (ex) {
+			console.error("[SSE] agent_llm_chain error", ex);
+		}
+	});
+
+	// 用量徐标渲染。
+	//
+	// 口径纪律（与内核 usageLedger 同一套，不能各写一套）：
+	//   · cache_hit_rate **可能缺席** —— 那是「没有任何调用报过缓存细节」，
+	//     必须显示「—」而不是 0%。把「不知道」画成 0% 会让人去优化一个
+	//     本来就没开的功能；
+	//   · 缺席与「命中率为 0」是两回事，后者是有数据、真的一分没命中。
+	function renderChatUsage(u, single, source) {
+		var el = document.getElementById("chat-usage");
+		if (!el) return;
+		if (!u || !u.total) {
+			el.style.display = "none";
+			return;
+		}
+		function compact(n) {
+			n = n || 0;
+			if (n >= 1000000) return (n / 1000000).toFixed(1) + "M";
+			if (n >= 1000) return (n / 1000).toFixed(1) + "k";
+			return String(n);
+		}
+		var hasRate = typeof u.cache_hit_rate === "number";
+		el.textContent =
+			compact(u.total) +
+			" tok · " +
+			(hasRate
+				? __("缓存 ", "cache ") + Math.round(u.cache_hit_rate * 100) + "%"
+				: __("缓存 —", "cache —"));
+		var tip = [source || "",
+			__("调用 ", "calls ") + (u.calls || 0),
+			"prompt " + (u.prompt || 0),
+			"completion " + (u.completion || 0),
+			"cache_read " + (u.cache_read || 0),
+			"cache_miss " + (u.cache_miss || 0)];
+		tip.push(
+			hasRate
+				? __("命中率 ", "hit rate ") + (u.cache_hit_rate * 100).toFixed(1) + "%"
+				: __(
+						"命中率未知（上游未报缓存细节）",
+						"hit rate unknown (upstream reported no cache)",
+					),
+		);
+		if (single && single.total) {
+			tip.push(__("本次 ", "last call ") + "prompt " + (single.prompt || 0) +
+				" / completion " + (single.completion || 0));
+		}
+		el.title = tip.filter(Boolean).join("\n");
+		el.style.display = "";
+	}
 	// token 级流式增量：逐块追加到当前回复内容（流式生成中）；
 	// reset 帧表示轮次作废（用户中断）：定格已显示的部分内容，置 final。
 	es.addEventListener("content_delta", (e) => {
