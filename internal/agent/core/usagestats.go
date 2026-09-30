@@ -97,6 +97,49 @@ func (l *usageLedger) record(u agentAPI.TokenUsage) {
 	l.mu.Unlock()
 }
 
+// usageMapFromInts 把 SDK 插件的 TokenUsage(map[string]int) 归一成
+// 回包用的 map[string]interface{}。
+//
+// 为何必须转而不能直接透传：Go 的类型断言对 map 是精确匹配，
+// 消费方 handler_openai.go 写的是 .(map[string]interface{})，
+// 直接塞 map[string]int 会断言失败 ⇒ usage 静默变 nil，两边都不报错。
+// 注意这里**不**过滤零值：插件既然显式设了这份 map，就尊重它的全部内容。
+func usageMapFromInts(in map[string]int) map[string]interface{} {
+	m := make(map[string]interface{}, len(in))
+	for k, v := range in {
+		m[k] = v
+	}
+	return m
+}
+
+// turnUsageMap 把**本次请求**的用量转成对外回包用的键值形式。
+//
+// 键名用 OpenAI 的 snake_case（prompt_tokens/…），且值类型为
+// map[string]interface{} —— 消费方（handler_openai.go）用精确类型断言取值，
+// 给 map[string]int 会静默变 nil（见 eventloop.go:emitResponse 的说明）。
+func turnUsageMap(u agentAPI.TokenUsage) map[string]interface{} {
+	m := map[string]interface{}{
+		"prompt_tokens":     u.Prompt,
+		"completion_tokens": u.Completion,
+		"total_tokens":      u.Total,
+	}
+	// 缓存/推理字段仅在**有数据**时才带上：缺了它们消费方会画成 0，
+	// 而 0 与「上游没报」是两回事（与 UsageTotals.CacheHitRate 的 ok 同口径）。
+	if u.CacheRead > 0 {
+		m["cache_read_tokens"] = u.CacheRead
+	}
+	if u.CacheMiss > 0 {
+		m["cache_miss_tokens"] = u.CacheMiss
+	}
+	if u.ReasoningTokens > 0 {
+		m["reasoning_tokens"] = u.ReasoningTokens
+	}
+	if u.CacheReported {
+		m["cache_reported"] = true
+	}
+	return m
+}
+
 // snapshot 取当前累计值的副本。
 func (l *usageLedger) snapshot() UsageTotals {
 	l.mu.Lock()

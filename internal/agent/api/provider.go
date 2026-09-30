@@ -210,6 +210,33 @@ type TokenUsage struct {
 	ReasoningTokens int `json:"reasoning_tokens,omitempty"`
 }
 
+// Add 把另一次调用的用量并入本结构（求和）。
+//
+// 用途：一次用户请求（一个 TaskFrame）可能触发多轮 LLM 调用（工具回环），
+// 对外的 usage 需要报**本次请求**的合计，与 OpenAI 的语义一致；
+// 会话级累计另由 usageLedger 承担（链事件里的 usage_session）。
+func (t *TokenUsage) Add(u TokenUsage) {
+	t.Prompt += u.Prompt
+	t.Completion += u.Completion
+	t.Total += u.Total
+	t.CacheRead += u.CacheRead
+	t.CacheMiss += u.CacheMiss
+	t.ReasoningTokens += u.ReasoningTokens
+	// CacheReported 是「上游报过缓存」的标记，用或而非加：
+	// 一轮里只要有一帧报了，本轮就算有缓存数据可算。
+	t.CacheReported = t.CacheReported || u.CacheReported
+}
+
+// IsZero 报告该用量是否**完全没有数据**。
+//
+// 调用方据此决定「不报 usage」而不是「报 0」：把「不知道」画成 0
+// 会让人去优化一个本来就没开的功能（与 UsageTotals.CacheHitRate 的
+// ok=false 同一口径）。
+func (t TokenUsage) IsZero() bool {
+	return t.Prompt == 0 && t.Completion == 0 && t.Total == 0 &&
+		t.CacheRead == 0 && t.CacheMiss == 0 && t.ReasoningTokens == 0
+}
+
 type ToolCall struct {
 	ID           string                 `json:"id"`
 	Type         string                 `json:"type"`

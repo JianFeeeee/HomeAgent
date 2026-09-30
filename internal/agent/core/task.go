@@ -157,6 +157,14 @@ type TaskFrame struct {
 	Response string
 	Err      error
 
+	// turnUsage 是本轮任务（一个 TaskFrame）内全部 LLM 调用的用量合计。
+	//
+	// 为何要单独存：usageLedger 是**会话级**累计（跨用户请求），
+	// 而对外回包的 usage 按 OpenAI 语义应是**本次请求**。
+	// 两者口径不同，不能互相顶替：把会话累计当本次报了，
+	// 第二次请求就会报出翻倍的数字。
+	turnUsage agentAPI.TokenUsage
+
 	// ---- 任务层现场（原 processInput 的局部变量）----
 	//
 	// 这些字段让帧覆盖 prepare → step… → finish 全生命周期：挂起发生在 run 段的
@@ -413,7 +421,8 @@ func (a *Agent) prepareInputTask(evt *agentIO.InputEvent) (*TaskFrame, taskTermi
 	a.injectSourceContext(stageCtx, evt)
 
 	if a.runStage(sdk.StageOnInput, stageCtx) {
-		a.emitResponse(evt, *stageCtx.Response)
+		// 插件在 OnInput 短路：本轮一个 LLM 都没跑，用量为零是如实的。
+		a.emitResponse(evt, *stageCtx.Response, agentAPI.TokenUsage{})
 		return nil, terminalStageShortCircuit
 	}
 
@@ -476,7 +485,7 @@ func (a *Agent) finishInputTask(f *TaskFrame, out stepOutcome) {
 	if out == outcomeFailed {
 		log.Printf("[agent] process %s error: %v", evt.Type, f.Err)
 		resp := fmt.Sprintf("处理错误: %v", f.Err)
-		a.emitResponse(evt, resp)
+		a.emitResponse(evt, resp, f.turnUsage)
 		a.context.Append(ContextEvent{Timestamp: time.Now(), Source: "agent", Input: f.Input, Response: resp})
 		f.Terminal = terminalError
 		return
@@ -503,7 +512,7 @@ func (a *Agent) finishInputTask(f *TaskFrame, out stepOutcome) {
 	a.bindEventMedia(&turnEvt, a.drainMediaDigests())
 	a.context.Append(turnEvt)
 
-	a.emitResponse(evt, f.Response)
+	a.emitResponse(evt, f.Response, f.turnUsage)
 
 	if !f.StageCtx.NoMemory {
 		a.emitMemoryCandidate(evt.Source, f.CleanInput, f.Response, f.ToolResults, f.ToolsUsed)
@@ -687,6 +696,9 @@ func (a *Agent) stepLLM(f *TaskFrame) stepOutcome {
 	// 为何把累计也带上：要回答的是「这个会话花了多少、缓存省了多少」，
 	// 只有单次数字就得消费方自己一条条加。放在同一事件里，消费方无需另建状态。
 	a.usageLedger.record(resp.TokenUsage)
+	// 本轮任务内的合计（一个 TaskFrame 可能多轮 LLM：工具回环）。
+	// 它与 usageLedger 的口径不同（本次请求 vs 会话累计），两者都要留。
+	f.turnUsage.Add(resp.TokenUsage)
 
 	if resp.TokenUsage.Total > 0 {
 		// ⚠️ 必须是 map[string]interface{}：WebUI 的 handler_openai.go
