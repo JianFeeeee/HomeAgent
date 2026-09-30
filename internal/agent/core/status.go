@@ -281,8 +281,33 @@ func (a *Agent) GetKernelStatus() *KernelStatus {
 	ks.ONNX = a.onnxStatus()
 	ks.Scheduler = a.schedulerStatus()
 	ks.Residents = residentStatuses(a.Residents())
+	ks.Usage = a.usageStatus()
 
 	return ks
+}
+
+// usageStatus 把 agent 的累计用量账目转成对外状态视图。
+//
+// 数据源就是 usageLedger（每次 LLM 调用后记账的那份），所以这里**不重算**：
+// 重算等于给同一个事实造第二个来源，两边迟早会不一致。
+func (a *Agent) usageStatus() sdk.UsageStatus {
+	snap := a.usageLedger.snapshot()
+	out := sdk.UsageStatus{
+		Calls:              snap.Calls,
+		Prompt:             snap.Prompt,
+		Completion:         snap.Completion,
+		Total:              snap.Total,
+		CacheRead:          snap.CacheRead,
+		CacheMiss:          snap.CacheMiss,
+		Reasoning:          snap.Reasoning,
+		CacheReportedCalls: snap.CacheReportedCalls,
+	}
+	// ok=false（没有任何调用报过缓存）时**不带**这个字段，
+	// 让消费方显示「—」而不是把「不知道」画成 0%。
+	if rate, ok := snap.CacheHitRate(); ok {
+		out.CacheHitRate = &rate
+	}
+	return out
 }
 
 // onnxStatus 汇总统一多模态向量空间（ONNX 模型）的启用状态。
