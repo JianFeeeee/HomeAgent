@@ -211,6 +211,13 @@ type Agent struct {
 
 	// 技能索引提供者：由 skillmgr 插件实现，向 system prompt 注入轻量技能索引
 	skillIndex SkillIndexProvider
+
+	// usageLedger 累计**跨调用**的 token 用量与缓存命中。
+	//
+	// 为何是 Agent 级而不是 TaskFrame 级：「这个会话花了多少、缓存省了多少」
+	// 不是单次调用的属性，必须跨轮次、跨任务累积才有意义。
+	// 单次用量一直在 StageCtx 与 LLM chain 事件里，缺的正是这个落点。
+	usageLedger usageLedger
 }
 
 // SkillIndexProvider 提供已加载技能的精炼索引，供 buildSystemPrompt 注入。

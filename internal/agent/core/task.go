@@ -650,10 +650,17 @@ func (a *Agent) stepLLM(f *TaskFrame) stepOutcome {
 
 	f.StageCtx.LLMText = resp.Content
 	f.StageCtx.ReasoningContent = resp.ReasoningContent
+	// 用量同时给插件看（StageCtx）与记账（usageLedger）。
+	//
+	// StageCtx.TokenUsage 是 map[string]int，放不了布尔，
+	// 所以「上游是否报了缓存」只在事件里给（见下面的 cache_reported）。
 	f.StageCtx.TokenUsage = map[string]int{
 		"prompt_tokens":     resp.TokenUsage.Prompt,
 		"completion_tokens": resp.TokenUsage.Completion,
 		"total_tokens":      resp.TokenUsage.Total,
+		"cache_read_tokens": resp.TokenUsage.CacheRead,
+		"cache_miss_tokens": resp.TokenUsage.CacheMiss,
+		"reasoning_tokens":  resp.TokenUsage.ReasoningTokens,
 	}
 	f.StageCtx.ToolCalls = convertToolCalls(resp.ToolCalls)
 	for i := range f.StageCtx.ToolCalls {
@@ -675,12 +682,45 @@ func (a *Agent) stepLLM(f *TaskFrame) stepOutcome {
 		"phase":      "intermediate",
 		"turn":       f.Turn,
 	}
+	// 记账：先并入累计，再把「本次」与「会话累计」一起发出去。
+	//
+	// 为何把累计也带上：要回答的是「这个会话花了多少、缓存省了多少」，
+	// 只有单次数字就得消费方自己一条条加。放在同一事件里，消费方无需另建状态。
+	a.usageLedger.record(resp.TokenUsage)
+
 	if resp.TokenUsage.Total > 0 {
-		chainPayload["usage"] = map[string]int{
-			"prompt":     resp.TokenUsage.Prompt,
-			"completion": resp.TokenUsage.Completion,
-			"total":      resp.TokenUsage.Total,
+		// ⚠️ 必须是 map[string]interface{}：WebUI 的 handler_openai.go
+		// 用 `Payload["usage"].(map[string]interface{})` 取它，而 Go 的
+		// 类型断言对 map 是**精确匹配** —— 发 map[string]int 时断言为 false
+		// （已实证），于是在 /v1/chat/completions 回包里 usage 静默变 nil。
+		// 这是“发了但没人收到”的典型形态：两边都不报错。
+		chainPayload["usage"] = map[string]interface{}{
+			"prompt":           resp.TokenUsage.Prompt,
+			"completion":       resp.TokenUsage.Completion,
+			"total":            resp.TokenUsage.Total,
+			"cache_read":       resp.TokenUsage.CacheRead,
+			"cache_miss":       resp.TokenUsage.CacheMiss,
+			"cache_reported":   resp.TokenUsage.CacheReported,
+			"reasoning_tokens": resp.TokenUsage.ReasoningTokens,
 		}
+	}
+	// 会话累计。命中率**不可算时不带该字段** ——
+	// 让消费方显示「—」而不是把「不知道」画成 0% 命中率。
+	if sess := a.usageLedger.snapshot(); sess.Calls > 0 {
+		sessPayload := map[string]interface{}{
+			"prompt":               sess.Prompt,
+			"completion":           sess.Completion,
+			"total":                sess.Total,
+			"cache_read":           sess.CacheRead,
+			"cache_miss":           sess.CacheMiss,
+			"reasoning":            sess.Reasoning,
+			"calls":                sess.Calls,
+			"cache_reported_calls": sess.CacheReportedCalls,
+		}
+		if rate, ok := sess.CacheHitRate(); ok {
+			sessPayload["cache_hit_rate"] = rate
+		}
+		chainPayload["usage_session"] = sessPayload
 	}
 	a.publishEvent(events.EventAgentLLMChain, chainPayload)
 
