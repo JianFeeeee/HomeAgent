@@ -116,6 +116,12 @@ type Agent struct {
 	// 上下文裁剪：活跃上下文最大条数，超出按相关性裁剪
 	maxContextSize int
 
+	// ctxTuning 是上下文预算的可调参数（零值 = 历史默认）。
+	//
+	// 从配置读入（core.agent.context.*），使不同窗口的实例可以各自调优，
+	// 而不是所有实例共用一套写死的 0.8 / 600000 / 1:3。
+	ctxTuning ContextTuning
+
 	// 当前请求的输出通道（mutex 保护，process() 内独占）
 
 	// 阶段管道：插件消息流编辑
@@ -280,6 +286,12 @@ type AgentConfig struct {
 	ReviewInterval     time.Duration          // 关系复审间隔，0 则使用 DistillInterval
 	MergeInterval      time.Duration          // 实体合并检测间隔，0 则使用 DistillInterval
 	MaxContextSize     int                    // 活跃上下文最大条数，超出按相关性裁剪
+
+	// CtxTuning 是上下文预算的可调参数。零值 ⇒ 使用历史默认（与硬编码时代一致）。
+	//
+	// 为何必须能从配置传进来：这些阈值原本写死在 ComputeTokenBudget 里，
+	// 界面改不了、不同窗口的实例也没法各自调优（详见 ContextTuning 的注释）。
+	CtxTuning ContextTuning
 	ContextSavePath    string                 // 上下文持久化路径，空则不持久化
 	EmbeddingModelPath string                 // 预训练词嵌入模型路径（word2vec 文本格式），空则不使用
 	Embedder           *memory.StaticEmbedder // 共享词嵌入实例；nil 时按 EmbeddingModelPath 自建
@@ -333,6 +345,10 @@ func New(cfg AgentConfig) *Agent {
 	}
 
 	rc := NewRelevanceContext(cfg.ContextSavePath, embedder)
+	// 裁剪保留条数：从配置传入（0 时保持 NewRelevanceContext 的历史默认）。
+	if cfg.CtxTuning.ProtectedCount > 0 {
+		rc.protectedCount = cfg.CtxTuning.ProtectedCount
+	}
 	if cfg.StageHost != nil {
 		rc.SetToolDefLookup(cfg.StageHost.ToolDef)
 	}
@@ -403,6 +419,7 @@ func New(cfg AgentConfig) *Agent {
 		reviewInterval:    cfg.ReviewInterval,
 		mergeInterval:     cfg.MergeInterval,
 		maxContextSize:    cfg.MaxContextSize,
+		ctxTuning:         cfg.CtxTuning,
 		stageHost:         cfg.StageHost,
 		skillIndex:        cfg.SkillIndexProvider,
 		eventBus:          cfg.EventBus,

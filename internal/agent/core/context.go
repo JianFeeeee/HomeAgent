@@ -54,12 +54,21 @@ type RelevanceContext struct {
 	dirty            bool
 	toolDefLookup    func(name string) *sdk.ToolDef
 	channelDefLookup func(name string) (sdk.ChannelDef, bool)
+
+	// protectedCount 是裁剪时**无条件保留**的最近事件条数。
+	//
+	// 为何要可调：它决定「近处信息」与「向量检索」的权重 ——
+	// 条数大则不容易丢近处，小则更依赖检索准确度。不同窗口/不同用法
+	// （如长期助手 vs 短任务）适合的值不同，所以从 core.agent.context.* 传入。
+	// 零值 ⇒ defaultProtectedCount（与历史硬编码 10 一致）。
+	protectedCount int
 }
 
 func NewRelevanceContext(savePath string, embedder *memory.StaticEmbedder) *RelevanceContext {
 	rc := &RelevanceContext{
-		embedder: embedder,
-		savePath: savePath,
+		embedder:       embedder,
+		savePath:       savePath,
+		protectedCount: defaultProtectedCount,
 	}
 	if savePath != "" {
 		rc.load()
@@ -341,7 +350,10 @@ func (c *RelevanceContext) Prune(currentInput string, topK int, docStore *docume
 		return 0
 	}
 
-	pCount := 10
+	pCount := c.protectedCount
+	if pCount <= 0 {
+		pCount = defaultProtectedCount
+	}
 	if pCount > len(c.events) {
 		pCount = len(c.events)
 	}

@@ -323,7 +323,7 @@ func (a *Agent) rebaseFramePrefix(f *TaskFrame) {
 	}
 	tail := append([]agentAPI.Message(nil), f.Msgs[f.PrefixLen:]...)
 
-	budget := ComputeTokenBudget(a.provider, a.systemPrompt)
+	budget := a.computeTokenBudget()
 	memContext := a.buildTaskMemoryContext(f, f.Input, budget.MemoryTokens)
 	sysPrompt := a.buildSystemPrompt(memContext, f.Input)
 	prefix := a.buildMessages(sysPrompt, f.Input, a.contextTokenBudget(budget))
@@ -545,7 +545,7 @@ func (a *Agent) step(f *TaskFrame) stepOutcome {
 
 // stepPrepare 构建本轮任务的初始帧。
 func (a *Agent) stepPrepare(f *TaskFrame) stepOutcome {
-	budget := ComputeTokenBudget(a.provider, a.systemPrompt)
+	budget := a.computeTokenBudget()
 
 	memContext := a.buildTaskMemoryContext(f, f.Input, budget.MemoryTokens)
 	sysPrompt := a.buildSystemPrompt(memContext, f.Input)

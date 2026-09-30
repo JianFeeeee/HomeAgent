@@ -87,7 +87,7 @@ func evtOf(f *TaskFrame) *agentIO.InputEvent {
 func (a *Agent) recallTextFor(query, trigger string, scenes []string) string {
 	memTokens := 0 // 0 = 不截断
 	if a != nil && a.provider != nil {
-		memTokens = ComputeTokenBudget(a.provider, a.systemPrompt).MemoryTokens
+		memTokens = a.computeTokenBudget().MemoryTokens
 	}
 	return a.recallText(query, trigger, memTokens, scenes)
 }

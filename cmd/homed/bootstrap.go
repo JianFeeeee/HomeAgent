@@ -547,6 +547,18 @@ func newMainAgent(cfg *types.Config, cfgReg *internalConfig.ConfigRegistry, prov
 		ReviewInterval:  cfgReg.GetDuration("core.agent.review_interval", 120*time.Minute),
 		MergeInterval:   cfgReg.GetDuration("core.agent.merge_interval", 120*time.Minute),
 		MaxToolTurns:    cfgReg.GetInt("core.agent.max_tool_turns", 10),
+		// 上下文管理的可调阈值。此前这些值全部硬编码在 ComputeTokenBudget 里，
+		// 界面改不了、不同窗口的实例也没法各自调优。
+		CtxTuning: agentCore.ContextTuning{
+			UtilizationPercent: cfgReg.GetInt("core.agent.context.utilization_percent", 80),
+			MaxTargetTokens:    cfgReg.GetInt("core.agent.context.max_target_tokens", 600000),
+			MemoryRatioPercent: cfgReg.GetInt("core.agent.context.memory_ratio_percent", 0),
+			ProtectedCount:     cfgReg.GetInt("core.agent.context.protected_count", 10),
+		},
+		// ⚠️ 这条键此前被注册进配置面板、也有默认值，但**从未被读取** ——
+		// 界面上改它没有任何效果，且不报任何错。同一类「死配置」正是
+		// 本次把阈值接入配置系统时要一并修掉的。
+		MaxContextSize: cfgReg.GetInt("core.agent.max_context_size", 30),
 		Offload: agentCore.OffloadOptions{
 			Enabled:      cfgReg.GetBool("core.agent.offload_enabled", false),
 			BusyAfter:    cfgReg.GetDuration("core.agent.offload_busy_after", 5*time.Minute),
