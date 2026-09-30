@@ -11,6 +11,7 @@ import (
 	"image/png"
 	"math"
 	"os"
+	"strings"
 	"testing"
 
 	"gitcode.com/JianFeeeee/HomeAgent/pkg/embedding"
@@ -253,10 +254,25 @@ func TestFingerprintStable(t *testing.T) {
 	}
 }
 
-// 缺 model_dir 必须明确报错（便于区分「没配置」与「模型坏了」）。
+// 缺 model_dir 时不得静默成功打开一个“空产物”。
+//
+// 2026-10-01 语义变更：New 增加了 findModelDir 回退链（configured →
+// /usr/lib/homeagent/models）。若本机装了系统级产物，回退命中属合法行为，
+// 但打开的必须是那个真实产物（指纹非空）；若系统目录也没有，则必须报错，
+// 且错误里要带可执行指引（export 脚本名）。
 func TestOpenRejectsMissingModelDir(t *testing.T) {
-	if _, err := embedding.Open("chineseclip", embedding.Config{}); err == nil {
-		t.Fatal("缺 model_dir 时应打开失败")
+	got, err := embedding.Open("chineseclip", embedding.Config{})
+	if err == nil {
+		// 回退命中了系统目录：允许，但必须是真的产物而不是空壳。
+		defer got.Close()
+		if got.Info().Fingerprint == "" {
+			t.Fatal("回退打开成功但指纹为空（打开了个空壳？）")
+		}
+		return
+	}
+	// 未命中回退 ⇒ 必须报错且给可执行指引。
+	if !strings.Contains(err.Error(), "export_chineseclip_onnx.py") {
+		t.Fatalf("错误应带可执行指引（export 脚本名），got: %v", err)
 	}
 }
 

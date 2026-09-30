@@ -43,12 +43,40 @@ type Embedder struct {
 	closeOnce sync.Once
 }
 
+// findModelDir 解析产物目录：配置值缺失/不存在时按候选链回退，
+// 都不命中时返回空串与**可执行**的指引（错误信息要能直接照着做，
+// 而不是一句「读取失败」让用户自己去猜模型从哪来）。
+//
+// 背景教训（2026-09-30 跑分实测）：全新数据目录启动时模型缺失，
+// 内核只打一行 warning 就静默禁用稠密检索，照常服务 —— 用户不知道
+// 自己少了什么，跑分台跑了 50 分钟残废配置才发现。
+func findModelDir(configured string) (string, string) {
+	var candidates []string
+	if configured = strings.TrimSpace(configured); configured != "" {
+		candidates = append(candidates, configured)
+	}
+	candidates = append(candidates,
+		"/usr/lib/homeagent/models/chinese-clip-vit-b16-onnx", // 发行包安装位置
+	)
+	for _, p := range candidates {
+		if _, err := os.Stat(filepath.Join(p, "embed_config.json")); err == nil {
+			return p, ""
+		}
+	}
+	hint := "chineseclip: 产物目录不可用（依次尝试: " + strings.Join(candidates, ", ") + "）。获得模型任选其一:\n" +
+		"  ① 运行 scripts/export_chineseclip_onnx.py 导出，产物放到上述任一路径\n" +
+		"  ② 从已有实例的 <dataDir>/models/chinese-clip-vit-b16-onnx 拷贝或 symlink\n" +
+		"  ③ 安装发行包（自带 /usr/lib/homeagent/models/）"
+	return "", hint
+}
+
 // New 从产物目录构造 provider。
 func New(modelDir string) (*Embedder, error) {
-	modelDir = strings.TrimSpace(modelDir)
-	if modelDir == "" {
-		return nil, fmt.Errorf("chineseclip: 未配置 model_dir（产物目录）")
+	resolved, hint := findModelDir(modelDir)
+	if resolved == "" {
+		return nil, fmt.Errorf("%s", hint)
 	}
+	modelDir = resolved
 	cfg, err := loadConfig(modelDir)
 	if err != nil {
 		return nil, err

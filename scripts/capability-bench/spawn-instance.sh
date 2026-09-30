@@ -76,6 +76,35 @@ CLIKEY=$(sqlite3 "$DATA/config.db" "SELECT value FROM config_cli WHERE key='api_
 [ -n "$CLIKEY" ] || CLIKEY="$WEBKEY"   # cli 空时回落到 webui key（cliAPIKey 的兜底）
 
 grep -E "main agent started" "$DATA/run.log" | tail -1 | sed 's/^/  /'
+
+# ── 稠密向量空间自检 ──
+# 2026-09-30 教训：模型目录缺失时内核静默降级（TF-IDF fallback），跑分照跑，
+# 50 分钟测的是残废配置。跑分实例必须断言 multimodal space active。
+MODEL_DIR="$DATA/models/chinese-clip-vit-b16-onnx"
+if [ ! -d "$MODEL_DIR" ]; then
+  if [ -d "/usr/lib/homeagent/models/chinese-clip-vit-b16-onnx" ]; then
+    mkdir -p "$DATA/models"
+    ln -s /usr/lib/homeagent/models/chinese-clip-vit-b16-onnx "$MODEL_DIR"
+    say "模型缺失 → 已从系统目录 symlink：$MODEL_DIR"
+    # 关停重启（provider 启动时构建，改了必须重启）
+    kill "$(cat "$DATA/pid")" 2>/dev/null; sleep 3
+    ( cd "$DATA" && nohup "$BIN" -data "$DATA" -webui "127.0.0.1:$PORT" \
+        >"$DATA/run.log" 2>&1 & echo $! > "$DATA/pid" )
+    sleep 10
+  else
+    say "★ 模型目录缺失且系统目录也没有：$MODEL_DIR"
+    say "  跑分将测到禁用稠密检索的残废配置。先解决模型："
+    say "  ① python3 scripts/export_chineseclip_onnx.py  ② 或从生产实例拷贝  ③ 或装发行包"
+    exit 1
+  fi
+fi
+if ! grep -q 'multimodal space active' "$DATA/run.log"; then
+  say "★ 多模态向量空间未激活（跑分无效，拒跑）。启动日志："
+  grep -i 'multimodal\|chineseclip' "$DATA/run.log" | sed 's/^/  /'
+  exit 1
+fi
+grep -E 'multimodal space active' "$DATA/run.log" | tail -1 | sed 's/^/  /'
+
 say "pid=$(cat "$DATA/pid")  cli.sock=$DATA/cli.sock"
 say "api_key=$CLIKEY"
 echo "$CLIKEY" > "$DATA/apikey"
