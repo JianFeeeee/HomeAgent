@@ -1,0 +1,67 @@
+{
+  "_comment": [
+    "零基础认知任务集 —— 两侧读**同一份材料**，不碰任何一方的内部状态。",
+    "",
+    "为何要重做（上一版的问题）：",
+    "  原来的 knowledge-stats 让 pi 去读 HomeAgent 自己的 graph.db / kbtree 服务，",
+    "  等于把「能不能翻别人的数据库」当成认知能力 —— pi 花了 97s / 317k token",
+    "  （占它总 token 的 56%），而 HomeAgent 7s / 45k。那不是能力差异，",
+    "  是「谁有权限看自己的库」。对比毫无意义。",
+    "",
+    "本集的材料：/var/tmp/zerobasis/{incident-2026-08.md, config-notes.md}",
+    "  两侧读同一份文件，任务与判据完全相同。",
+    "",
+    "设计要点（每条都对应一种认知动作）：",
+    "  1. 检索 —— 事实埋在时间线里，要跨段找",
+    "  2. 算术 —— 退避总时长要自己算（200+400），材料里没直接给",
+    "  3. 推断 —— 为什么 QPS 210 耗尽而 40 不会（要理解 N+1 与连接池的关系）",
+    "  4. 抗干扰 —— cache 的 ttl=0 是「永不过期」，不是「永不过期」的反面",
+    "  5. 综合 —— 用指定数字复述事故（考察有没有真的读进去）",
+    "",
+    "⚠️ 提示词各不相同：HomeAgent 会把完全相同的输入判为 duplicate 直接跳过。"
+  ],
+  "tasks": [
+    {
+      "id": "zb-extract-limit",
+      "dimension": "retrieval",
+      "prompt": "请阅读 /var/tmp/zerobasis/incident-2026-08.md，只回答一个问题：连接池的上限是多少？只回答数字。",
+      "check": { "kind": "output_contains", "value": "512" },
+      "timeout_s": 240
+    },
+    {
+      "id": "zb-arithmetic-backoff",
+      "dimension": "arithmetic",
+      "prompt": "请阅读 /var/tmp/zerobasis/config-notes.md，计算：在默认配置下，retry 的三次尝试总共要等待多少毫秒？请给出计算过程和最终数字。",
+      "check": { "kind": "output_regex", "value": "600" },
+      "timeout_s": 240
+    },
+    {
+      "id": "zb-reasoning-why",
+      "dimension": "reasoning",
+      "prompt": "请阅读 /var/tmp/zerobasis/incident-2026-08.md，解释：为什么同样的接口在 QPS 40 时只占用连接池约 8%，而 QPS 210 时却把连接池耗尽？如果你同时读到 /var/tmp/zerobasis/config-notes.md，也可以引用其中的数字。",
+      "check": { "kind": "output_regex", "value": "(N\\+1|n\\+1|循环.{0,10}查询|连接池|batch|批处理)" },
+      "timeout_s": 300
+    },
+    {
+      "id": "zb-distractor-ttl",
+      "dimension": "distractor",
+      "prompt": "在 /var/tmp/zerobasis/config-notes.md 中，cache.ttl_seconds 设为 0 表示什么？请精确回答，不要臆测。",
+      "check": { "kind": "output_regex", "value": "(永不过期|不过期|从不失效|永久)" },
+      "timeout_s": 240
+    },
+    {
+      "id": "zb-synthesis-numbers",
+      "dimension": "synthesis",
+      "prompt": "请阅读 /var/tmp/zerobasis/incident-2026-08.md，用三句话复述这次事故。要求必须包含三个数字：故障峰值 p99 延迟、回滚到的版本号、补偿处理的订单数。",
+      "check": { "kind": "output_regex", "value": "(4200|4,200)" },
+      "timeout_s": 300
+    },
+    {
+      "id": "zb-multihop",
+      "dimension": "multihop",
+      "prompt": "阅读 /var/tmp/zerobasis 目录下的两份文件，回答：如果按 config-notes.md 的默认 pool.size，同时运行 incident 里提到的那个对账批处理任务，会发生什么？请结合两份文件里的具体数字说明。",
+      "check": { "kind": "completed" },
+      "timeout_s": 360
+    }
+  ]
+}

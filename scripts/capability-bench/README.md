@@ -102,3 +102,53 @@ mock 上报        prompt=300 completion=30 cache_read=200 cache_miss=100
 
 标定台本身跑 3 个任务：差分 330 token/任务、命中率 66.7%、PASS/FAIL 判定正常、
 报告与 JSON 落盘正常。
+
+## 其他三个工具
+
+| 文件 | 作用 | 关键点 |
+| --- | --- | --- |
+| `pi_bench.py` | **pi 基线**（同任务、同模型） | `pi -p --mode json`；必须隔离配置目录与端口 |
+| `compare.py` | 两侧并排对比 | 校验任务集一致；命中率无数据写「—」 |
+| `memory_recall.py` | 多轮**超出窗口后**的记忆召回 | 埋针 + 填充 + 提问；单行消息（协议按行读） |
+
+### pi 基线的三个坑（都实测踩过）
+
+1. **必须隔离配置目录**：`PI_CODING_AGENT_DIR` 指向独立目录，否则子 pi 会
+   读写你的会话状态。
+2. **必须隔离端口**：本机会话守护进程占着 `PI_A2A_PORT=14010`，另一个 pi 占默认
+   `12010` ⇒ 子进程继承环境后直接 `EADDRINUSE` 崩。
+   顺带的好事：隔离配置里没有扩展 ⇒ 不起 A2A/ACP 服务 ⇒ `pi -p` **跑完自己退出**
+   （有扩展时它跑完不退，必须自己 kill）。
+3. **工具名是 `toolName`、事件名是 `tool_execution_start`**：
+   写错不会报错，只是工具名恒为空（`tool_calls=30` 而 `tools=[]`）。
+
+### ★ 同名不同义：两侧 usage 口径相反
+
+| | 输入总量 | 未命中侧 |
+| --- | --- | --- |
+| HomeAgent（OpenAI 口径） | `prompt_tokens` **含**缓存 | `cache_miss_tokens` |
+| pi（Anthropic 口径） | `input + cacheRead` | `input` |
+
+实测实证（pi）：`totalTokens == input + cacheRead + output`。
+不归一就直接比，会给 pi 系统性低估，且命中率会算成 `read/read` = **恒 100%**。
+两侧都过各自的归一函数，汇总只认归一后的键。
+
+### 记忆召回测试怎么用
+
+```bash
+# 小窗口先验仪器（快）
+python3 memory_recall.py --harness homeagent --socket <cli.sock> --api-key KEY \
+    --window 20000 --overshoot 1.3 --needles 3 --out /var/tmp/mem/probe
+
+# 正式：200k
+python3 memory_recall.py --harness pi --window 200000 --overshoot 1.25 \
+    --needles 4 --out /var/tmp/mem/pi-200k
+```
+
+**两侧必须把窗口配成同一个值**，否则比的不是策略而是配置：
+
+- HomeAgent：`core.llm.sources.<name>.context_window`
+- pi：隔离目录 `models.json` 里的 `ctx`
+
+⚠️ 消息**不能含换行**：`cli.sock` 按行读，一条多行消息会被拆成几十条独立消息
+（历史全乱，表现为 BrokenPipe）。脚本内有 `assert "\n" not in text` 兜底。
