@@ -237,6 +237,40 @@ func (t TokenUsage) IsZero() bool {
 		t.CacheRead == 0 && t.CacheMiss == 0 && t.ReasoningTokens == 0
 }
 
+// DeriveCacheMiss 在**上游只报了命中侧**时补出未命中输入数。
+//
+// 这是「缓存命中率」这条规则的**唯一实现**（见文件头"单一实现"说明）：
+// Go 侧的 chunkAssemble 与 Lua 适配器结果的落地处都调它，
+// 不允许任何一方自己再算一遍 —— 两套实现迟早会漂移，
+// 而漂移的表现是「同一份上游数据，配不配适配器给出不同命中率」。
+//
+// 为何必须补：OpenAI v2 只在 `prompt_tokens_details.cached_tokens` 里
+// 给**命中侧**，不给未命中数。留 0 的后果不是"少一点"，而是：
+// 命中率 = CacheRead/(CacheRead+0) = **恒 100%**。
+// 2026-09-30 跑分实测（llmsproxy + AUTO，7 个任务）就报出了 100%，
+// 而真实值约 53% —— 结构性假绿，且不会让任何地方报错。
+//
+// 补的依据是 `Prompt`（上游给的输入总数，权威）：
+// 未命中输入 = 输入总数 - 命中数。DeepSeek 那种**两边都给**的上游
+// （prompt_cache_hit_tokens + prompt_cache_miss_tokens）CacheMiss != 0，
+// 直接不动 —— 上游明说的值永远优先于我们推的。
+//
+// 边界：
+//   - 未报缓存（CacheReported=false）⇒ 不动，让消费方显示「—」；
+//   - 报了但命中 0 ⇒ miss = prompt（全部未命中）。这是**有数据**的 0%，
+//     与「不知道」不同，正是 CacheReported 存在的意义；
+//   - 上游给的命中数大于输入总数（脏数据）⇒ 夹到 0，不让 miss 变负。
+func (t *TokenUsage) DeriveCacheMiss() {
+	if !t.CacheReported || t.CacheMiss != 0 || t.Prompt <= 0 {
+		return
+	}
+	miss := t.Prompt - t.CacheRead
+	if miss < 0 {
+		miss = 0
+	}
+	t.CacheMiss = miss
+}
+
 type ToolCall struct {
 	ID           string                 `json:"id"`
 	Type         string                 `json:"type"`
@@ -458,6 +492,10 @@ func (p *LuaAdaptedProvider) Chat(ctx context.Context, req *CompletionRequest) (
 		return nil, fmt.Errorf("unmarshal unified response: %w (body: %s)", err, unifiedJSON)
 	}
 
+	// 统一补齐缓存未命中数（规则单一实现：TokenUsage.DeriveCacheMiss）。
+	// 适配器只搬上游字段，不自己算 —— 两端都用同一个函数才不会漂。
+	result.TokenUsage.DeriveCacheMiss()
+
 	// 诊断：tool_calls 存在但参数为空——上游/适配器丢参数，打印原始响应片段定位。
 	//
 	// ★ 判据是 argsLookDropped(tc.RawArguments)，不是 len(tc.Arguments)==0。
@@ -503,11 +541,9 @@ func (p *LuaAdaptedProvider) applyAdapterHeaders(httpReq *http.Request, url, bod
 
 func parseOpenAICompatibleResponse(raw []byte) (*CompletionResponse, error) {
 	var resp struct {
-		Usage struct {
-			PromptTokens     int `json:"prompt_tokens"`
-			CompletionTokens int `json:"completion_tokens"`
-			TotalTokens      int `json:"total_tokens"`
-		} `json:"usage"`
+		// 用共享的 chunkUsage（而不是就地列字段）：字段映射与缓存规则
+		// 只有一份实现，流式与非流式不可能再漂。
+		Usage   chunkUsage `json:"usage"`
 		Choices []struct {
 			FinishReason string `json:"finish_reason"`
 			Message      struct {
@@ -520,12 +556,10 @@ func parseOpenAICompatibleResponse(raw []byte) (*CompletionResponse, error) {
 	if err := json.Unmarshal(raw, &resp); err != nil {
 		return nil, err
 	}
-	out := &CompletionResponse{
-		TokenUsage: TokenUsage{
-			Prompt:     resp.Usage.PromptTokens,
-			Completion: resp.Usage.CompletionTokens,
-			Total:      resp.Usage.TotalTokens,
-		},
+	out := &CompletionResponse{}
+	// nil 表示上游没报用量 —— 保持零值（无数据），不造 0。
+	if u := tokenUsageFromChunkUsage(resp.Usage); u != nil {
+		out.TokenUsage = *u
 	}
 	if len(resp.Choices) == 0 {
 		return out, nil
@@ -960,6 +994,13 @@ func (p *LuaAdaptedProvider) ChatStream(ctx context.Context, req *CompletionRequ
 			if terr == nil && unified != "" && unified != data {
 				if json.Unmarshal([]byte(unified), &ck) != nil {
 					continue
+				}
+				// 适配器只搬上游给的字段（上游只报命中侧时 miss 会是 0），
+				// 这里统一补出来 —— 与 Go 标准解析走**同一个**规则实现。
+				// 不在这里补的后果：配了适配器的源报 100% 命中率，
+				// 而同一份数据走回退路径报真实值，两边不一致。
+				if ck.Usage != nil {
+					ck.Usage.DeriveCacheMiss()
 				}
 			} else {
 				parsed, ok := parseOpenAICompatibleStreamChunkFull(data)

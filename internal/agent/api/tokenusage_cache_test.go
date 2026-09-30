@@ -41,6 +41,16 @@ func TestCacheUsage_OpenAIV2Details(t *testing.T) {
 	if !ck.Usage.CacheReported {
 		t.Error("CacheReported = false，期望 true（上游报了缓存细节）")
 	}
+	// miss 缺失时必须用 prompt - read 补出来。
+	//
+	// 为何这是判据而非实现细节：OpenAI v2 只给 cached_tokens（命中侧），
+	// miss 若留 0，命中率分母变成 read+0 ⇒ read/read = 100% 恒成立 ——
+	// 2026-09-30 跑分实测（llmsproxy+AUTO，7 任务全命中）就是这么假绿的：
+	// 报 100%，真实 53%。prompt 是权威总数，未命中输入必然 ≥ prompt-read。
+	if got := ck.Usage.CacheMiss; got != 232 {
+		t.Errorf("CacheMiss = %d，期望 232（= prompt 1000 - read 768；"+
+			"留 0 会让命中率算成 read/read = 100%% 假绿）", got)
+	}
 }
 
 // TestCacheUsage_DeepSeekLegacy 覆盖 DeepSeek 遗留的独立字段。
