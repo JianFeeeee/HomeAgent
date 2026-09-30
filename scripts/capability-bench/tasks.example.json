@@ -1,0 +1,79 @@
+{
+  "_comment": [
+    "HomeAgent 能力标定任务集（starter）。",
+    "设计原则：",
+    "1. 每个任务都带显式 check —— 没有 check 的任务一律判失败：",
+    "   「看起来答对了」不是证据，那正是假绿的来源。",
+    "2. 分维度。全面标定要分得清是「能力缺失」还是「某一路径退化」：",
+    "   readonly（只读，最快）/ browser（CDP 浏览器）/ knowledge（知识库）",
+    "   / multistep（多轮工具回环，同时压账目链路）/ long（长时任务）。",
+    "3. 全部可复现且只读，或只写 /var/tmp 下的临时路径。",
+    "   破坏性提示词请另建集合，不要混进来。",
+    "4. 提示词刻意各不相同：内核会把完全相同的输入判为 duplicate 直接跳过",
+    "   （skipped:true），那样第二次根本没跑 LLM，测出来是假数据。",
+    "5. check 里的路径必须用绝对路径，且要能在目标实例里访问",
+    "   （各实例的 files 沙箱根与 cmd 工作目录不同）。",
+    "6. 期望值全部经过实测核对，不凭记忆写：",
+    "   Version=1.4.0（internal/meta/meta.go:33）；",
+    "   internal/plugins 子目录=20；",
+    "   ParallelSafe 定义在 internal/sdk/tool.go:72（不在 agent/core）。"
+  ],
+  "tasks": [
+    {
+      "id": "read-single-file",
+      "dimension": "readonly",
+      "prompt": "读取 /home/program/TrueAgent/internal/meta/meta.go，只回答这个文件里 Version 常量的字面值是什么。不要做别的。",
+      "check": { "kind": "output_contains", "value": "1.4" },
+      "timeout_s": 180
+    },
+    {
+      "id": "read-and-count",
+      "dimension": "readonly",
+      "prompt": "统计 /home/program/TrueAgent/internal/plugins/ 目录下一共有多少个子目录（每个子目录是一个插件）。只回答数字。",
+      "check": { "kind": "output_regex", "value": "\\b20\\b" },
+      "timeout_s": 240
+    },
+    {
+      "id": "grep-code",
+      "dimension": "readonly",
+      "prompt": "在 /home/program/TrueAgent/internal/sdk/ 里找出 ParallelSafe 这个字段定义在哪个文件、哪一行。回答「文件名:行号」。",
+      "check": { "kind": "output_regex", "value": "tool\\.go:7[0-9]" },
+      "timeout_s": 240
+    },
+    {
+      "id": "write-temp-file",
+      "dimension": "readonly",
+      "prompt": "把文本 benchmark-probe-ok 写入 /var/tmp/bench-probe.txt，然后告诉我写好了。",
+      "check": { "kind": "file_contains", "value": "/var/tmp/bench-probe.txt", "needle": "benchmark-probe-ok" },
+      "timeout_s": 240
+    },
+    {
+      "id": "multistep-chain",
+      "dimension": "multistep",
+      "prompt": "三步任务，请依次完成并报告每步结果：1) 读 /home/program/TrueAgent/internal/meta/meta.go 拿到 Version；2) 读 /home/program/TrueAgent/README.md 找到出现该版本号的位置；3) 用一句话说明两者是否一致。",
+      "check": { "kind": "completed" },
+      "timeout_s": 420
+    },
+    {
+      "id": "browser-navigate",
+      "dimension": "browser",
+      "prompt": "用浏览器打开 https://example.com ，告诉我页面上 h1 标题的确切文字。",
+      "check": { "kind": "output_contains", "value": "Example Domain" },
+      "timeout_s": 300
+    },
+    {
+      "id": "knowledge-stats",
+      "dimension": "knowledge",
+      "prompt": "查询当前知识库的条目统计（有多少条知识、多少条记忆），用一两句话概述。",
+      "check": { "kind": "completed" },
+      "timeout_s": 300
+    },
+    {
+      "id": "long-soak",
+      "dimension": "long",
+      "prompt": "请做一件需要持续数分钟的只读工作：遍历 /home/program/TrueAgent/internal/ 下的每个一级子目录，统计各自的 .go 文件数与总行数，最后输出一张按行数降序的表格。请分步进行，不要一次性读完所有文件。",
+      "check": { "kind": "completed" },
+      "timeout_s": 1800
+    }
+  ]
+}
