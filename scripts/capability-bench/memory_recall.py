@@ -442,13 +442,13 @@ class PiDriver:
             "pi", "-p", "--mode", "json",
             "--session-id", self.session_id,
             "--provider", self.args.provider, "--model", self.args.model,
-            "-C", self.args.cwd, text,
+            text,
         ]
         started = time.monotonic()
         try:
             proc = subprocess.run(
                 cmd, env=env, capture_output=True, text=True,
-                timeout=self.args.timeout)
+                timeout=self.args.timeout, cwd=self.args.cwd)
         except subprocess.TimeoutExpired:
             return {"reply": "", "wall_s": time.monotonic() - started,
                     "usage": {}, "tools": [], "timed_out": True,
