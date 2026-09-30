@@ -286,12 +286,19 @@ int ha_codec_estimate_tokens(const char *text, size_t text_len) {
         }
     }
 
-    /* 与 Go 侧一致：t = runeCount * 2；t < 1 时取 1。
-     * runes > 0 时 t >= 2，故只需处理溢出与下限。 */
-    if (runes > (size_t)0x3FFFFFFF) { /* 防 int 溢出 */
+    /* 与 Go 侧 estimateTokensPure 一致：t = min(text_len, runes * 2)。
+     * text_len 是**数学上界**（每个 token 至少覆盖 1 字节），
+     * runes * 2 是实测校准（CJK/emoji）。详见 Go 侧注释与
+     * internal/agent/api/codec_golden_test.go 的跨语言一致性判据。
+     * runes > 0 时 runes*2 >= 2，故只需处理溢出与下限。 */
+    if (runes > (size_t)0x3FFFFFFF) { /* 防 runes*2 窄化到 int 溢出 */
         return 0x7FFFFFFF;
     }
-    int t = (int)(runes * 2);
+    size_t by_runes = runes * 2;
+    size_t t = (text_len < by_runes) ? text_len : by_runes;
+    if (t > (size_t)0x7FFFFFFF) { /* 极端长串：饱和到 int 上限 */
+        return 0x7FFFFFFF;
+    }
     if (t < 1) {
         return 1;
     }

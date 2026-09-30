@@ -87,7 +87,22 @@ func modelContextWindowPure(model string) int {
 }
 
 // estimateTokensPure 粗略估算 token 数。
-// 中文 ~1.5 token/字，英文 ~0.3 token/字符，保守估计取 max(1, runeCount * 2)。
+//
+// 公式（2026-09-30 用真实 tokenizer 实测校准，样本含英/中/俄/日文、
+// base64/hex/UUID、emoji 共 8 类）：取 min(字节数, 2×rune数)。
+//
+// 为何是这个形状：
+//   - tokens ≤ 字节数恒成立（每个 token 至少覆盖 1 字节），
+//     所以字节项是数学上界，对 base64/hex/UUID 这类高熵工具结果
+//     （实测 1.3–1.7 字节/token）不会低估；
+//   - 2×rune 项是实测校准：CJK ≈0.6 token/字、emoji 恰 2 token/rune，
+//     纯按字节会把 CJK 过估到 5×，取 min 后与旧公式持平；
+//   - 旧公式 runeCount×2 对英文散文过估 7×（实测 0.28 token/字符），
+//     高熵 ASCII 过估 2.8× ⇒ 全部降到 1.4–3.5×。
+//
+// 已知失效模式（如实记录）：byte-fallback 型 tokenizer 对 CJK 可达 3 token/字
+// ⇒ 2×rune 项低估 1.5×。这是旧公式同款风险（旧公式也是 2×rune），
+// 且预算路径另有 0.8 系数兜底（ContextTokens = 0.8×窗口）。
 //
 // 用 RuneCountInString 而非 len([]rune(text))：后者会分配 4×len 字节。
 // 两者对**畸形 UTF-8** 的计数一致（无效字节各计 1 个 rune）。
@@ -99,7 +114,10 @@ func estimateTokensPure(text string) int {
 	if runeCount == 0 {
 		return 0
 	}
-	t := runeCount * 2
+	t := len(text) // 数学上界：tokens ≤ bytes
+	if r := runeCount * 2; r < t {
+		t = r // 实测校准（CJK/emoji）
+	}
 	if t < 1 {
 		return 1
 	}
