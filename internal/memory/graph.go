@@ -556,13 +556,17 @@ func validEntityName(name string) bool {
 	if len(r) < 2 || len(r) > 50 {
 		return false
 	}
-	hasLetter := false
+	// 纯数字串是合法实体值：端口/分机/编号这类属性值的本体就是数字。
+	// 此前把它拒掉导致 commit 静默丢弃（0 写入假成功回执，实测
+	// 2026-10-01 跑分：metrics 端口 8328 / 分机 4379→4324 都因此丢失）。
+	// 但仍禁纯标点/空白串。
+	hasLetterOrDigit := false
 	for _, ch := range r {
-		if (ch >= 'a' && ch <= 'z') || (ch >= 'A' && ch <= 'Z') || (ch >= '\u4e00' && ch <= '\u9fff') || ch == '-' || ch == '_' {
-			hasLetter = true
+		if (ch >= 'a' && ch <= 'z') || (ch >= 'A' && ch <= 'Z') || (ch >= '\u4e00' && ch <= '\u9fff') || ch == '-' || ch == '_' || (ch >= '0' && ch <= '9') {
+			hasLetterOrDigit = true
 		}
 	}
-	return hasLetter
+	return hasLetterOrDigit
 }
 
 // upsertEntity 写入/刷新一个实体，返回 1 表示该实体**通过名校验并被写入或刷新**，

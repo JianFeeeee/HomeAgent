@@ -326,6 +326,12 @@ func (a *Agent) executeMemoryTool(tc agentAPI.ToolCall, turnScenes []string) str
 		if err != nil {
 			return fmt.Sprintf("记忆写入失败: %v", err)
 		}
+		// ★ 0 写入必须显式报告：提交了 N 条但一条都没落库（如实体名校验被拒）
+		// 却回「已写入 0 个」，模型会当成成功而永不重试 —— 实测（2026-10-01
+		// 跑分）：metrics 端口/分机号更新全部因此静默丢失。
+		if ec == 0 && rc == 0 {
+			return fmt.Sprintf("提交了 %d 条三元组但全部被拒（未写入）。常见原因：实体名为空、过长（>50 字）、或不含字母/汉字/数字。请检查主语/宾语的写法后重试。", len(triples))
+		}
 		if mb > 0 {
 			return fmt.Sprintf("已写入 %d 个实体和 %d 条关系，关联 %d 份媒体", ec, rc, mb)
 		}
