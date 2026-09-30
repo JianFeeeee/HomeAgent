@@ -185,6 +185,29 @@ type TokenUsage struct {
 	Prompt     int `json:"prompt"`
 	Completion int `json:"completion"`
 	Total      int `json:"total"`
+
+	// ── 缓存与推理归因（详见 tokenusage_cache_test.go 的说明）──
+	//
+	// 参考 llmsproxy 的 internal/types.TokenUsage 与
+	// internal/gateway/chat.go:recordChatUsage：那边已把
+	// 「OpenAI v2 的 prompt_tokens_details.cached_tokens」与
+	// 「DeepSeek 遗留的 prompt_cache_hit_tokens」两条来源归一化好了，
+	// 本结构沿用同一套语义，免得两个项目对同一份上游数据给出不同答案。
+
+	// CacheRead 是命中缓存（跳过计算的）输入 token 数。
+	CacheRead int `json:"cache_read,omitempty"`
+	// CacheMiss 是未命中的输入 token 数（上游只给其一时另一侧留 0）。
+	CacheMiss int `json:"cache_miss,omitempty"`
+	// CacheReported 区分「上游报了缓存但命中为 0」与「上游根本没报缓存」。
+	//
+	// 为何必须分开：混为一谈会把「无数据」显示成 0% 命中率，
+	// 让人去优化一个本来就没开的功能 —— 那是拿假数据做的决定。
+	CacheReported bool `json:"cache_reported,omitempty"`
+	// ReasoningTokens 是计费输出里属于「思考」的那部分。
+	//
+	// 为何要单独拎出来：缺了它，成本归因会把思考 token 算进「回答长度」，
+	// 于是长思考被误读成啰嗦。
+	ReasoningTokens int `json:"reasoning_tokens,omitempty"`
 }
 
 type ToolCall struct {
