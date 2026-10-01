@@ -209,6 +209,19 @@ function loadConnections() {
       const raw = fs
         .readFileSync(CONNECTIONS_FILE, "utf-8")
         .replace(/^\uFEFF/, "");
+      // ★ 空/纯空白 = 「还没有配置」，不是「配置损坏」。
+      //
+      // 原实现在这里直接 JSON.parse，空文件会抛错并掉进下面的 catch，
+      // 而 catch 会**把文件改写成空配置**。也就是说：只要读到一次空/半截
+      // 内容（写入竞争、上次异常退出的残留、另一实例正在改写），
+      // 用户的真实连接列表就被永久覆盖成空 —— 且没有二次确认。
+      //
+      // 实测（沙箱复现原函数）：空文件 -> 返回空配置，
+      // **并把文件写成 {"connections":[],"currentId":null}**。
+      if (raw.trim() === "") {
+        console.log("connections.json is empty; treating as uninitialized");
+        return { connections: [], currentId: null };
+      }
       const data = JSON.parse(raw);
       normalizeConnections(data);
       return data;
@@ -217,7 +230,10 @@ function loadConnections() {
     console.error("Failed to load connections:", e);
     // 配置损坏：备份后重建，避免应用一直处于"无连接"状态
     try {
-      const backup = CONNECTIONS_FILE + ".bak";
+      // 带时间戳：原实现只写一个固定的 .bak，反复损坏会把上一份
+      // 真实配置覆盖掉，于是「唯一的退路」也丢了。
+      const stamp = new Date().toISOString().replace(/[:.]/g, "-");
+      const backup = CONNECTIONS_FILE + ".corrupt-" + stamp + ".bak";
       fs.copyFileSync(CONNECTIONS_FILE, backup);
       fs.writeFileSync(
         CONNECTIONS_FILE,
@@ -255,10 +271,22 @@ function normalizeConnections(data) {
 }
 
 function saveConnections(data) {
+  // ★ 原子写：先写同目录临时文件，再 rename 覆盖。
+  //
+  // 为什么必须：原实现直接 writeFileSync 截断重写，落地过程中存在
+  // 「已截断、内容未写完」的窗口。若此刻另一个实例（或本实例另一次
+  // loadConnections）读到那份半截内容，JSON.parse 抛错就走损坏分支 ——
+  // 于是「一次并发读」变成「配置被清空」。rename 在同一文件系统内
+  // 是原子的：读者只会看到改写前或改写后的完整文件。
+  const tmp = CONNECTIONS_FILE + ".tmp-" + process.pid;
   try {
-    fs.writeFileSync(CONNECTIONS_FILE, JSON.stringify(data, null, 2), "utf-8");
+    fs.writeFileSync(tmp, JSON.stringify(data, null, 2), "utf-8");
+    fs.renameSync(tmp, CONNECTIONS_FILE);
   } catch (e) {
     console.error("Failed to save connections:", e);
+    try {
+      if (fs.existsSync(tmp)) fs.unlinkSync(tmp);
+    } catch (_) {}
   }
 }
 
