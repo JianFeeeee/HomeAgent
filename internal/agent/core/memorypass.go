@@ -150,7 +150,7 @@ func (a *Agent) pruneByQuery(query string) int {
 		return 0
 	}
 	topK := a.contextTopK()
-	return a.context.Prune(query, topK, a.docStore)
+	return a.context.PruneWithProtected(query, topK, a.docStore, a.effectiveProtectedCount())
 }
 
 // contextTopK 推导裁剪后应保留的**条数**。
@@ -205,7 +205,7 @@ func (a *Agent) contextTopK() int {
 	// 工具大回执型事件平均 48000 token，而预算只有 40000）。此时正确的做法
 	// 不是「只留 1 条」（等于清空记忆），而是至少留够 protected 条 ——
 	// 宁可暂时超页，等 budget 或事件尺寸回到正常区间再裁。
-	if min := a.protectedContextCount() + 1; topK < min {
+	if min := a.effectiveProtectedCount() + 1; topK < min {
 		topK = min
 	}
 	if topK > hardCap {

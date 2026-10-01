@@ -43,7 +43,7 @@ func newOverflowAgent(window, maxContextSize int, events int, chunkChars int) *A
 
 func TestOverflow_T1_积累超125触发(t *testing.T) {
 	// 窗口 1000 token；maxContextSize=2（条数），制造远超容量的积累。
-	a := newOverflowAgent(1000, 2, 20, 400)
+	a := newOverflowAgent(2000, 2, 20, 400) // 单条827 < 预算~1067，但总量 16540 远超
 	before := a.context.Len()
 
 	ratio := a.overflowRatioNow()
@@ -91,7 +91,7 @@ func TestOverflow_T1_轻量内核跳过(t *testing.T) {
 // ── T2：裁剪后积累量确实下降 ──
 
 func TestOverflow_T2_裁剪后累积下降(t *testing.T) {
-	a := newOverflowAgent(1000, 2, 20, 400)
+	a := newOverflowAgent(2000, 2, 20, 400) // 单条装得下，总量超页
 	before := a.accumulatedTokens()
 
 	a.maybeHandleContextOverflow(nil, "退款导出")
@@ -107,9 +107,11 @@ func TestOverflow_T2_裁剪后累积下降(t *testing.T) {
 // 构造「装得下却超页」：maxContextSize 给得足够大，Prune 会返回 0。
 // 期望：记账 Aborted、不调 raiseKernelInterrupt（用 stat.Triggered 验证）。
 func TestOverflow_T4_裁不动则终止不中断(t *testing.T) {
-	// 窗口极小 ⇒ ratio 超限；但 maxContextSize=9999 ⇒ len(events) <= topK
-	// ⇒ Prune 直接返回 0（context.go:349），上下文一点没变 ⇒ 必须终止
-	a := newOverflowAgent(1000, 9999, 5, 400)
+	// 「裁不动」的真正构造：**只有 1 条事件** —— 裁剪不可能减少任何东西
+	// （Prune 里 protected 至少 1 条、keep 也至少要留 1 条）。
+	// 旧构造（maxContextSize=9999 + 5 条）在自适应 protected 下反而能裁掉 3 条，
+	// 因为预算 534 token 装不下 10 条保护 ⇒ 自动收紧到 1 ⇒ topK=2。
+	a := newOverflowAgent(1000, 9999, 1, 4000)
 	if a.overflowRatioNow() < overflowRatio {
 		t.Fatal("前置条件不成立：构造的会话应超页")
 	}
@@ -151,7 +153,7 @@ func TestOverflow_T6_中断消息含认知提示(t *testing.T) {
 // ── 上游 ErrContextFull 走同一条裁剪路径 ──
 
 func TestOverflow_上游ErrContextFull走同路径(t *testing.T) {
-	a := newOverflowAgent(1000, 2, 20, 400)
+	a := newOverflowAgent(2000, 2, 20, 400) // 单条装得下，总量超页
 
 	// 累积不足以下次超页也没关系：上游已经明说装不下了
 	if !a.handleUpstreamContextFull(&agentAPI.ProviderError{
@@ -224,7 +226,8 @@ func TestOverflow_并发安全(t *testing.T) {
 // 为什么要单独测：这个防护一度是**死代码**（TaskFrame.OverflowRecover 声明了
 // 但从没被读取）。没接线的防护等于没有防护 —— 变异测试正是抓这种。
 func TestOverflow_T5_恢复预算耗尽则终止(t *testing.T) {
-	a := newOverflowAgent(1000, 2, 20, 400)
+	// (4000,800) 实测：单条 1627 token 装得进预算 2134，但总量 ratio=8.13 超页
+	a := newOverflowAgent(4000, 30, 20, 800)
 	f := &TaskFrame{}
 
 	// 第一次超页：正常裁剪
@@ -236,10 +239,21 @@ func TestOverflow_T5_恢复预算耗尽则终止(t *testing.T) {
 		t.Fatalf("首次应记一次恢复，��际 %d", f.OverflowRecover)
 	}
 
-	// 把 topK 放大到裁不动（模拟「topK 与窗口脱钩」这个真实根因）
-	a.maxContextSize = 99999
+	// 制造「裁不动」：每次检查前把上下文压到只剩 1 条大事件
+	// （实测 ratio=8.03），裁剪无从下手。
+	// 注：必须每次重新压 —— 第一次超页已把上下文裁小，不重压就不会再超页，
+	// 那样测的就不是「反复裁不动」而是「裁一次就好了」。
+	collapse := func() {
+		for a.context.Len() > 1 {
+			a.context.events = a.context.events[:len(a.context.events)-1]
+		}
+		a.context.events[0] = &ContextEvent{
+			Input: strings.Repeat("A", 8_000), Response: strings.Repeat("B", 8_000),
+		}
+	}
 
 	// 预算内的第二次：仍会尝试
+	collapse()
 	handled, _ = a.maybeHandleContextOverflow(f, "退款导出")
 	if !handled {
 		t.Fatal("预算内仍应处理")
@@ -249,6 +263,7 @@ func TestOverflow_T5_恢复预算耗尽则终止(t *testing.T) {
 	}
 
 	// 第三次：超预算 ⇒ 终止，且写明原因
+	collapse()
 	handled, _ = a.maybeHandleContextOverflow(f, "退款导出")
 	if !handled {
 		t.Fatal("超预算也应算「已处理」（终止），以免调用方再重跑")
@@ -271,6 +286,12 @@ func TestOverflow_T5_变异_预算极大则不终止(t *testing.T) {
 	a.maxContextSize = 99999 // 裁不动
 	f := &TaskFrame{}
 	for i := 0; i < 5; i++ {
+		for a.context.Len() > 1 {
+			a.context.events = a.context.events[:len(a.context.events)-1]
+		}
+		a.context.events[0] = &ContextEvent{
+			Input: strings.Repeat("A", 8_000), Response: strings.Repeat("B", 8_000),
+		}
 		a.maybeHandleContextOverflow(f, "退款导出")
 	}
 	if f.Terminal == terminalError {
@@ -391,7 +412,7 @@ func TestOverflow_大事件时topK不塌到1(t *testing.T) {
 	}
 
 	topK := a.contextTopK()
-	protected := a.protectedContextCount()
+	protected := a.effectiveProtectedCount()
 	if topK <= protected {
 		t.Fatalf("topK=%d <= protectedCount=%d ⇒ 裁剪会把全部事件归档（keep 为空），"+
 			"超页处理空转", topK, protected)
@@ -417,9 +438,9 @@ func TestOverflow_大事件时裁剪仍有效(t *testing.T) {
 		t.Fatalf("裁剪无效：%d → %d 条，pruned=%d", before, after, pruned)
 	}
 	// 裁剪后仍应留下 protected 条以上，不能清空
-	if after < a.protectedContextCount() {
-		t.Fatalf("裁剪后只剩 %d 条，少于 protectedCount=%d（记忆被清空）",
-			after, a.protectedContextCount())
+	if after < a.effectiveProtectedCount() {
+		t.Fatalf("裁剪后只剩 %d 条，少于有效保护数 %d（记忆被清空）",
+			after, a.effectiveProtectedCount())
 	}
 }
 
@@ -469,5 +490,84 @@ func TestOverflow_无工具时只算对话(t *testing.T) {
 	}
 	if acc < 100 {
 		t.Fatalf("无工具结果的短对话算成 %d token，明显漏算", acc)
+	}
+}
+
+// ── B 方案：protected 按预算自适应（配置值是上限，不是固定值）──
+//
+// T10c 实测踩出的自相矛盾：protected=10 × 单条 5800 token = 58000 >
+// ContextTokens 预算 40000 ⇒「钉住 10 条」本身就装不下 ⇒ 裁剪无解 ⇒
+// 每轮触发两次超页 → 预算耗尽 → 任务终止（prompt=0）。召回 44%→22%。
+//
+// 现在：预算装不下时自动收紧，装得下时用满配置。
+func TestOverflow_protected按预算收紧(t *testing.T) {
+	// 小窗口 + 大事件 ⇒ 预算装不下 10 条
+	small := newOverflowAgent(20_000, 30, 12, 20_000)
+	cfgCap := small.context.ProtectedCount() // 配置上限仍是 10
+	eff := small.effectiveProtectedCount()
+
+	if cfgCap != 10 {
+		t.Fatalf("配置上限应仍为 10，实际 %d", cfgCap)
+	}
+	if eff >= cfgCap {
+		t.Fatalf("预算装不下时应收紧，但 eff=%d >= cfg=%d", eff, cfgCap)
+	}
+	// 收紧后若仍装不下，必须能识别出「单条事件本身就超预算」这个真相，
+	// 让调用方走终止路径，而不是反复裁剪到预算耗尽。
+	if eff*small.accumulatedTokens()/small.context.Len() > small.computeTokenBudget().ContextTokens {
+		if small.singleEventFitsBudget() {
+			t.Fatalf("收紧后装不下却报告单条装得下 ⇒ 判定自相矛盾")
+		}
+	}
+
+	// 大窗口 ⇒ 用满配置值（这正是「1M 下这套调度器能更好」的机制）
+	big := newOverflowAgent(1_000_000, 30, 12, 200)
+	if got := big.effectiveProtectedCount(); got != big.context.ProtectedCount() {
+		t.Fatalf("大窗口下应��满配置值 %d，实际 %d", big.context.ProtectedCount(), got)
+	}
+}
+
+// 自适应后裁剪必须真的有效（旧逻辑下裁不动）。
+func TestOverflow_自适应后裁剪有效(t *testing.T) {
+	// (4000,800)：单条 1627 装得进预算 2134，总量 ratio=8.13 ⇒ 裁剪可帮上忙。
+	// 对照组是「单条本身就超预算」——那种情况裁剪无解，走终止路径，
+	// 由TestOverflow_单条超预算则终止 覆盖。
+	a := newOverflowAgent(4000, 30, 5, 800)
+	before := a.context.Len()
+	pruned := a.handleContextOverflow("退款导出", 1.3)
+	after := a.context.Len()
+
+	if after >= before {
+		t.Fatalf("自适应后裁剪应有效：%d → %d（pruned=%d）", before, after, pruned)
+	}
+	if a.effectiveProtectedCount() >= before {
+		t.Fatalf("有效保护数 %d 不应 ≥ 裁剪前条数 %d",
+			a.effectiveProtectedCount(), before)
+	}
+}
+
+// 单条事件本身就超预算 ⇒ 裁剪无解 ⇒ 直接终止并报真实原因
+// （而不是裁两轮后 Budget 耗尽，后者会丢失已经裁掉的记忆）。
+func TestOverflow_单条超预算则终止(t *testing.T) {
+	// (2000,800)：单条 1627 > 预算 1067 ⇒ fits=false
+	a := newOverflowAgent(2000, 30, 5, 800)
+	if a.singleEventFitsBudget() {
+		t.Fatal("前置不成立：单条应装不下预算")
+	}
+	before := a.context.Len()
+
+	pruned := a.handleContextOverflow("退款导出", 5.0)
+
+	if pruned != 0 {
+		t.Fatalf("单条超预算时不应裁剪（裁了也装不下），实际 pruned=%d", pruned)
+	}
+	if after := a.context.Len(); after != before {
+		t.Fatalf("单条超预算时上下文不应被改动：%d → %d", before, after)
+	}
+	a.overflowStat.Lock()
+	aborted := a.overflowStat.Aborted
+	a.overflowStat.Unlock()
+	if aborted == 0 {
+		t.Fatal("应记一次 Aborted")
 	}
 }

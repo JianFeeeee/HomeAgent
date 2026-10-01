@@ -161,6 +161,17 @@ func (a *Agent) maybeHandleContextOverflow(f *TaskFrame, query string) (handled 
 // 却报超页 —— 这是判定逻辑的 bug，不是可恢复状态。此时保存现场并明确终止，
 // 绝不再次触发中断。
 func (a *Agent) handleContextOverflow(query string, ratio float64) int {
+	// 单条事件本身就超预算 ⇒ 裁剪在任何保护数下都无解（实测 T10c：
+	// 事件 40026 token vs 预算 10667）。此时直接终止并报真实原因，
+	// 而不是裁剪两轮后 Budget 耗尽 —— 后者会丢失已经裁掉的记忆。
+	if !a.singleEventFitsBudget() {
+		avg := a.accumulatedTokens() / a.context.Len()
+		log.Printf("[agent] context overflow: single event (%d tok) exceeds budget (%d tok) — "+
+			"pruning cannot help, terminating", avg, a.computeTokenBudget().ContextTokens)
+		a.markOverflowAborted(ratio, a.context.Len())
+		return 0
+	}
+
 	before := a.context.Len()
 	beforeTokens := a.accumulatedTokens()
 	// pruned 是**写进 docStore 的条数**（Prune 内部计数），不是「少了几条」。
