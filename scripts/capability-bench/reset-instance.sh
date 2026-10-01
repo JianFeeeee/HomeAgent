@@ -69,7 +69,7 @@ rm -rf "$DATA"/memory/documents "$DATA"/memory/text \
        "$DATA"/agentfs/* "$DATA"/snapshots/* 2>/dev/null
 rm -f  "$DATA"/webui_chat_history.json 2>/dev/null
 
-ENT=$(sqlite3 "$DATA/memory/graph.db" "select count(*) from entities;" 2>/dev/null || echo "?")
+ENT=$(timeout 5 sqlite3 "$DATA/memory/graph.db" "select count(*) from entities;" 2>/dev/null || echo "?")
 printf '已清理 %s（entities=%s）\n' "$DATA" "${ENT:-无库}"
 
 [ "$START" = "--start" ] || exit 0
@@ -81,4 +81,4 @@ sleep 30
 N=$(ha_pids | grep -c . || true)
 printf '进程数 %s%s\n' "$N" "$( [ "$N" = 1 ] && printf ' ✓' || printf ' ✗ 期望 1' )"
 grep -a 'multimodal space active' "$DATA/boot.log" | tail -1
-sqlite3 "$DATA/memory/graph.db" "select 'entities=' || count(*) from entities;" 2>/dev/null
+timeout 5 sqlite3 "$DATA/memory/graph.db" "select 'entities=' || count(*) from entities;" 2>/dev/null || echo 'entities=?（库锁超时）'

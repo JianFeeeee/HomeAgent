@@ -413,7 +413,8 @@ def run(args: argparse.Namespace) -> int:
           f"{sum(1 for p in plan if p['kind']=='probe')}")
     print(f"  填充 token 估算 ≈ {filler_tokens}（目标窗口 {args.window}，"
           f"比值 {filler_tokens / max(1, args.window):.2f}×）")
-    print("  探针：casual×4  overwrite×1  overwrite-stale(哨兵)×1  multihop×1")
+    print("  探针：casual×4  overwrite×1  overwrite-stale(哨兵)×1  multihop×1"
+          "  + v4取舍判据 unmarked×1 causal×1 freeze×1")
     # ★ 超窗判定以**实测 prompt** 为准，不以文本估算为准（2026-10-01 实测教训）：
     #   纯叙事文本估算 14k，而 HA 第 6 轮真实 prompt 已 127k —— 每轮还含系统提示、
     #   工具定义、记忆上下文与工具回执，估算只是保守下界。若按估算判「无效」，
