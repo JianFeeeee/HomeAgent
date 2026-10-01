@@ -135,6 +135,28 @@ class Material:
         self.overwrite_old = rng.randrange(4000, 4999)
         self.overwrite_new = rng.randrange(4000, 4999)
 
+        # ---- v4 判据组：区分「语义取舍」与「侥幸命中」 ----
+        # 动机（2026-10-01）：v3d 里 pi 压缩后 6/6 全中，但探针**太短太集中**
+        # （全是 4 位端口 + 一个覆盖值），被丢在摘要角落也能命中，分辨不出
+        # 压缩质量。以下三类专门打「摘要到底保住了什么」：
+        #
+        # (A) unmarked：填充里埋一个**语义自足但从未被问过**的规则声明。
+        #     真正的语义压缩会把它当约束保留；纯截断/关键词摘要会丢。
+        #     —— 测「有没有保住未被点名的东西」。
+        self.rule_key = "端口表的归档口径"
+        self.rule_value = f"以第 {rng.randrange(40, 95)} 次上报为准，早期上报一律作废"
+        # (B) causal：一条三段因果链（现象→定位→措施），只问最后一步的结论。
+        #     摘要爱列「要点清单」，清单外的**因果链中间环**容易丢；
+        #     丢了就编不出完整故事。
+        self.causal_symptom = f"慢查询涨到每分钟 {rng.randrange(120, 400)} 条"
+        self.causal_cause = f"{rng.choice(['退款导出','对账任务','库存同步'])}逐单查库"
+        self.causal_fix = f"改批量查询后回落到每分钟 {rng.randrange(1, 4)} 条"
+        # (C) distractor-pair：一组**两个都合理但只有一个对**的近似值，
+        #     措辞里明确给出区分依据（“最新冻结的那个”）。
+        #     —— 测摘要有没有把“中间快照”当成最终值（这是压缩最典型的新错误）。
+        self.freeze_old = f"{rng.randrange(300, 400)} 秒"
+        self.freeze_new = f"{rng.randrange(700, 900)} 秒"
+
         # ---- 填充 token 目标 ----
         self.target_tokens = int(window * overshoot)
         # 叙事里的其它服务依赖（干扰端口）：每个都是真实依赖，只是不是针
@@ -177,6 +199,10 @@ class Material:
                          f"理由是写链路要等库存扣减（平均 {rng.randrange(400, 900)}ms）")
             items.append(f"重试策略：最多 {rng.choice([2, 3])} 次，只对幂等接口开启；"
                          f"指数退避基数 {rng.choice([100, 200, 300])}ms")
+            if i == int(total * 0.05):
+                # ★ v4(A) unmarked：语义自足的规则声明，**从未被点名要求记住**
+                items.append(f"归档约定（团队内部通用）：{self.rule_key}{self.rule_value}；"
+                             f"这点不改的话以后查历史端口会一直对不上")
             if rng.random() < 0.5:
                 items.append(f"回滚预案演练完成：从发现异常到回滚到上一版本用时 {rng.randrange(3, 9)} 分钟，"
                              f"预案里写明触发条件是错误率连续 5 分钟超过 {rng.choice([1.0, 2.0])}%")
@@ -190,6 +216,10 @@ class Material:
                 items.append(f"灰度事故推进：order-gw 的 p99 从 {rng.choice([180, 220, 260])}ms 涨到 "
                              f"{rng.randrange(2800, 5200)}ms，错误率峰值 {rng.randrange(4, 18)}%，"
                              f"集中在 {rng.choice(['下单','退款','查询'])}接口")
+            if i == int(total * 0.30):
+                # ★ v4(B) causal：三段因果链（现象→根因→措施），只问最后一步
+                items.append(f"根因链条完整记一下：现象是{self.causal_symptom}；定位到{self.causal_cause}；"
+                             f"最后{self.causal_fix}，这条是验收依据")
             items.append(f"定位进展：慢查询数从每分钟 {rng.randrange(2, 6)} 条涨到 {rng.randrange(120, 400)} 条，"
                          f"根因是 {rng.choice(['退款导出','对账任务','库存同步'])}在循环里逐单查库，"
                          f"单次调用产生 {rng.randrange(600, 2000)} 次查询")
@@ -206,6 +236,10 @@ class Material:
                              f"p99 稳定在 {rng.randrange(150, 320)}ms，观察了 {rng.randrange(6, 24)} 小时无反弹")
             items.append(f"缓存层核对了淘汰策略：ttl 设 {rng.choice([300, 600, 900])} 秒，"
                          f"容量 {rng.choice([5000, 10000, 20000])} 条；命中率从 {rng.randrange(40, 60)}% 提到 {rng.randrange(72, 91)}%")
+            if i == int(total * 0.58):
+                # ★ v4(C) distractor-pair：两个都合理的 ttl，中间调过，最后冻结
+                items.append(f"缓存 ttl 中间从 {self.freeze_old} 调到 {self.freeze_new} 试过一轮，"
+                             f"最终冻结值是 {self.freeze_new}（中间那个不算，别记混）")
             items.append(f"限流参数调整：全局 {rng.randrange(400, 900)} QPS，单用户 {rng.randrange(5, 30)} QPS，"
                          f"超限返回 {rng.choice([429, 503])} 并带 Retry-After")
 
@@ -311,6 +345,28 @@ class Material:
                                 "申请表在哪个房间？两个都要答。"),
                        "expect": f"{self.multihop_team} {self.multihop_room}"})
 
+        # ---- v4：区分「语义取舍」与「侥幸命中」的三类判据 ----
+        # (A) unmarked：问一个**从未点名要记住**的规则声明。
+        #     语义压缩把它当约束保留 ⇒ 命中；纯截断/关键词摘要 ⇒ 丢。
+        probes.append({"kind": "probe", "ptype": "unmarked",
+                       "text": (f"对了，{self.rule_key}当时是怎么定的来着？"
+                                f"我记得跟上报次数有关，说一下具体怎么算的。"),
+                       "expect": self.rule_value.split("，")[0]})
+        # (B) causal：只问三段因果链的**结论**，中间环是否还在决定它能否自洽。
+        # expect 必须是**带语境的短语**而不是裸数字：裸数字（如 "2"）会跟上下文里
+        # 任意数字撞上，等于没判据。改用"每分钟 N 条"整段。
+        probes.append({"kind": "probe", "ptype": "causal",
+                       "text": ("慢查询最后是怎么治好的？我要写进复盘，"
+                                "改完之后回落到什么水平了？照原话说。"),
+                       "expect": self.causal_fix,
+                       # 症状值是因果链的**首环**，答它说明只记住了现象、没走完链
+                       "forbid": self.causal_symptom})
+        # (C) distractor-pair：措辞明确指向「最终冻结的那个」，
+        #     中间快照值也出现在上下文里 —— 答中间值 = 被压缩摘要带偏。
+        probes.append({"kind": "probe", "ptype": "freeze",
+                       "text": ("缓存 ttl 最终冻结的是多少秒？我要确认不是中间试的那个值。"),
+                       "expect": self.freeze_new, "forbid": self.freeze_old})
+
         for p in probes:
             plan.append(p)
 
@@ -324,12 +380,14 @@ class Material:
 # 判定
 # ════════════════════════════════════════════════════════════════
 
-def score(reply: str, expect: str, ptype: str) -> bool:
+def score(reply: str, expect: str, ptype: str, forbid: str | None = None) -> bool:
     """召回判定。
 
     casual/overwrite：值必须出现，且**不得**把同域干扰值或旧值当答案；
     multihop：两个要素都出现；
-    overwrite-stale：期望答出旧值（塌回哨兵，反向计分）。
+    overwrite-stale：期望答出旧值（塌回哨兵，反向计分）；
+    freeze：必须给最终值，**且不得**给中间快照值（forbid）——
+            这是「压缩把中间快照当最终结论」这一典型新错误的探针。
     """
     r = reply.upper()
     if ptype == "multihop":
@@ -337,6 +395,10 @@ def score(reply: str, expect: str, ptype: str) -> bool:
         return all(p.upper() in r for p in parts)
     if ptype == "overwrite-stale":
         return expect in r
+    if forbid and ptype in ("freeze", "causal"):
+        # 出现「不该出现的那值」而没出现期望值 ⇒ 被摘要带偏（或只记住首环）
+        if forbid.upper() in r and expect.upper() not in r:
+            return False
     ok = expect in r
     return ok
 
@@ -412,7 +474,8 @@ def run(args: argparse.Namespace) -> int:
             }
             if step["kind"] == "probe":
                 rec["expect"] = step["expect"]
-                rec["recalled"] = score(r["reply"] or "", step["expect"], step["ptype"])
+                rec["recalled"] = score(r["reply"] or "", step["expect"], step["ptype"],
+                                        step.get("forbid"))
                 mark = "✅" if rec["recalled"] else "❌"
                 print(f"[{i}/{len(plan)}] 提问[{step['ptype']}] {step['expect']} … {mark} "
                       f"{r['wall_s']:.1f}s", flush=True)
