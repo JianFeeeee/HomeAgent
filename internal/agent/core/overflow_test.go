@@ -422,3 +422,52 @@ func TestOverflow_大事件时裁剪仍有效(t *testing.T) {
 			after, a.protectedContextCount())
 	}
 }
+
+// ── 工具回灌必须计入累积量 ──
+//
+// 实测缺陷（T10 诊断日志 ratio=0.00 / events=1 抓到）：ContextEvent 里工具输出
+// 是**独立字段** ToolResults，accumulatedTokens 只算 Input+Response 时，
+// 一个「用户说 10 字、模型回 20 字、调了 8 个工具各回 3 万 token」的轮次
+// 算出来是 30 token ⇒ 超页判据永远不触发。
+//
+// 而 prompt 峰值的真正来源恰恰是工具回灌。
+func TestOverflow_工具回灌计入累积(t *testing.T) {
+	a := newOverflowAgent(50_000, 30, 0, 0)
+	a.context.Append(ContextEvent{
+		Input:    "查一下 order-gw 的端口",
+		Response: "好的，正在查",
+		ToolResults: []ToolResultItem{
+			{Name: "files_read", Output: strings.Repeat("X", 120_000)}, // 约 30000 token
+			{Name: "cmd_run", Output: strings.Repeat("Y", 120_000)},    // 约 30000 token
+		},
+	})
+
+	acc := a.accumulatedTokens()
+	if acc < 50_000 {
+		t.Fatalf("工具回灌未计入：accumulatedTokens=%d（两条工具各 3 万 token）", acc)
+	}
+
+	// 且应能触发超页：2 轮同样的事件即远超窗口
+	a.context.Append(ContextEvent{
+		Input:       "再查一次",
+		Response:    "好",
+		ToolResults: a.context.Recent(1)[0].ToolResults,
+	})
+	if ratio := a.overflowRatioNow(); ratio < overflowRatio {
+		t.Fatalf("两条工具回灌轮次应触发超页，实际 ratio=%.2f", ratio)
+	}
+}
+
+// 反向判据：没有工具结果时，累积量应只等于 Input+Response。
+func TestOverflow_无工具时只算对话(t *testing.T) {
+	a := newOverflowAgent(50_000, 30, 0, 0)
+	a.context.Append(ContextEvent{Input: strings.Repeat("a", 400), Response: strings.Repeat("b", 400)})
+	acc := a.accumulatedTokens()
+	// 800 字符 ≈ 400 token（EstimateTokens 是字符/2 量级），不应有额外放大
+	if acc > 1000 {
+		t.Fatalf("无工具结果的短对话被算成 %d token（应≈400）", acc)
+	}
+	if acc < 100 {
+		t.Fatalf("无工具结果的短对话算成 %d token，明显漏算", acc)
+	}
+}

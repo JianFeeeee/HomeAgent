@@ -54,9 +54,26 @@ func (a *Agent) accumulatedTokens() int {
 	}
 	acc := 0
 	for _, e := range a.context.Recent(0) {
-		acc += EstimateTokens(e.Input) + EstimateTokens(e.Response)
+		acc += eventTokens(e)
 	}
 	return acc
+}
+
+// eventTokens 估算单条上下文事件的 token 占用。
+//
+// ★ ToolResults 必须计入 —— 这是实测踩过的坑：v4 与 T10 的 prompt 峰值
+// （17 万~40 万 token）几乎全部来自工具回灌，而 ContextEvent 里工具输出是
+// **独立字段**（ToolResults []ToolResultItem），不算它的话 accumulatedTokens
+// 会返回 0，超页判据永远不触发（诊断日志 ratio=0.00/ events=1 就是这么来的）。
+//
+// resident.go 的 checkContextFull 有同样缺陷，但它只对驻留子生效、一直没暴露；
+// 现在两处共用本函数，口径不会再漂移。
+func eventTokens(e ContextEvent) int {
+	n := EstimateTokens(e.Input) + EstimateTokens(e.Response)
+	for _, tr := range e.ToolResults {
+		n += EstimateTokens(tr.Output)
+	}
+	return n
 }
 
 // contextWindowTokens 取本 agent 的窗口上限（token）。
