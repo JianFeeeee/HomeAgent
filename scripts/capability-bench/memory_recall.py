@@ -353,11 +353,28 @@ def run(args: argparse.Namespace) -> int:
     driver = HomeAgentDriver(args) if args.harness == "homeagent" else PiDriver(args)
     started_at = datetime.now(timezone.utc).astimezone().isoformat(timespec="seconds")
     turns: list[dict] = []
-    # ★ 断点/防丢：每轮结束就把已完成轮次落盘。长跑（143 轮、3h+）实测被杀过三次，
-    #   而原来只在全部跑完后才写 json ⇒ 中途崩溃等于零产出。
+    # ★ 断点/防丢：每轮结束就把已完成轮次落盘。长跑（143 轮、实测均值 ~150s/轮、
+    #   约 6h）本会话被杀过三次，而原来只在全部跑完后才写 json ⇒ 中途崩溃等于零产出。
     out = Path(args.out)
     out.mkdir(parents=True, exist_ok=True)
     partial = out / "partial.jsonl"
+
+    # --resume：从 partial.jsonl 续跑。服务端会话状态跨连接保留（CliSession 每轮
+    # 新建连接但 agent 会话在服务端），所以「跳过已完成的轮次、从第 N+1 轮继续发」
+    # 是真正接续而不是重放。
+    # ★ 为什么必须能续而不是只看 partial：7 个探针全排在最后 7 轮，崩溃后的
+    #   partial 只有填充，**拿不到任何召回信号** —— 没有 resume 就等于重跑。
+    # 前提：续跑时实例必须仍是同一个（未重启、未清库），否则上下文对不上。
+    done: dict[int, dict] = {}
+    if args.resume and partial.exists():
+        for line in partial.read_text(encoding="utf-8").splitlines():
+            if line.strip():
+                rec0 = json.loads(line)
+                done[int(rec0["index"])] = rec0
+    if done:
+        print(f"  ↻ resume：已有 {len(done)} 轮落盘，从第 {max(done) + 1} 轮继续"
+              f"（实例必须仍未重启）", flush=True)
+        turns.extend(done[k] for k in sorted(done))
 
     def _flush_turn(rec: dict) -> None:
         with partial.open("a", encoding="utf-8") as fh:
@@ -365,6 +382,8 @@ def run(args: argparse.Namespace) -> int:
 
     try:
         for i, step in enumerate(plan, 1):
+            if i in done:
+                continue
             r = driver.ask(step["text"])
             rec = {
                 "index": i, "kind": step["kind"],
@@ -561,6 +580,9 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--seed", type=int, default=20261001, help="全部材料随机种子（可复现）")
     ap.add_argument("--timeout", type=float, default=900.0, help="单轮超时（秒）")
     ap.add_argument("--dry-run", action="store_true")
+    ap.add_argument("--resume", action="store_true",
+                    help="从 <out>/partial.jsonl 续跑（要求实例未重启；探针在末尾，"
+                         "崩溃后不续跑就拿不到召回信号）")
     # HomeAgent
     ap.add_argument("--socket", help="HomeAgent cli.sock")
     ap.add_argument("--api-key", default=os.environ.get("HOMEAGENT_CLI_KEY", ""))
