@@ -370,6 +370,10 @@ def run(args: argparse.Namespace) -> int:
     out = Path(args.out)
     out.mkdir(parents=True, exist_ok=True)
     partial = out / "partial.jsonl"
+    # 非 resume 模式必须清掉上一次运行的残留（实测踩过：跨运行 append 会把
+    # 被 kill 的旧轮次混进本次结果，出现两条「轮1」）
+    if not args.resume and partial.exists():
+        partial.unlink()
 
     # --resume：从 partial.jsonl 续跑。服务端会话状态跨连接保留（CliSession 每轮
     # 新建连接但 agent 会话在服务端），所以「跳过已完成的轮次、从第 N+1 轮继续发」
