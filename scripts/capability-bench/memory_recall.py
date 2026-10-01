@@ -353,6 +353,16 @@ def run(args: argparse.Namespace) -> int:
     driver = HomeAgentDriver(args) if args.harness == "homeagent" else PiDriver(args)
     started_at = datetime.now(timezone.utc).astimezone().isoformat(timespec="seconds")
     turns: list[dict] = []
+    # ★ 断点/防丢：每轮结束就把已完成轮次落盘。长跑（143 轮、3h+）实测被杀过三次，
+    #   而原来只在全部跑完后才写 json ⇒ 中途崩溃等于零产出。
+    out = Path(args.out)
+    out.mkdir(parents=True, exist_ok=True)
+    partial = out / "partial.jsonl"
+
+    def _flush_turn(rec: dict) -> None:
+        with partial.open("a", encoding="utf-8") as fh:
+            fh.write(json.dumps(rec, ensure_ascii=False) + "\n")
+
     try:
         for i, step in enumerate(plan, 1):
             r = driver.ask(step["text"])
@@ -370,9 +380,11 @@ def run(args: argparse.Namespace) -> int:
                 mark = "✅" if rec["recalled"] else "❌"
                 print(f"[{i}/{len(plan)}] 提问[{step['ptype']}] {step['expect']} … {mark} "
                       f"{r['wall_s']:.1f}s", flush=True)
-            elif i % 10 == 0 or i == len(plan) - len([p for p in plan if p['kind'] == 'probe']):
+            else:
+                # 每轮都落笔：既给长跑可见进度，又把「单轮 5 分钟」这类异常立刻暴露出来
                 print(f"[{i}/{len(plan)}] 填充[{step.get('cat')}] … {r['wall_s']:.1f}s", flush=True)
             turns.append(rec)
+            _flush_turn(rec)
     finally:
         driver.close()
 
@@ -418,8 +430,6 @@ def run(args: argparse.Namespace) -> int:
     if read or miss:
         summary["cache_hit_rate"] = read / (read + miss)
 
-    out = Path(args.out)
-    out.mkdir(parents=True, exist_ok=True)
     (out / "memory_recall.json").write_text(
         json.dumps({"meta": {"started_at": started_at, "config": vars(args),
                              "material": {
