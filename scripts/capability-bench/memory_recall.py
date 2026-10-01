@@ -265,13 +265,14 @@ class Material:
         frags_per_turn = 8
         sample = "；".join(self.narrative_block(k, 600)[0] for k in range(frags_per_turn))
         per_turn_tokens = max(1, est_tokens(sample))
-        # 填充轮数：**由 HA 实测反推，不靠 token 估算**（2026-10-01）。
-        # 脚本估的「填充 121k token」是纯文本量，但真实 prompt 每轮还含
-        # 系统提示 + 工具定义 + 记忆上下文 + 工具回执，实测每轮固有开销很大：
-        #   HA 第6轮 prompt=127126（此时累计填充才 5×8=40 个叙事片段）
-        # ⇒ 灌到 >100k 窗口只需 5 个填充轮，规划里再排 50 轮纯属烧 token。
-        # 留 max(4, ...) 下限：填充太少会退化成「窗口内记忆」假跑分。
-        filler_turns = max(4, min(5, self.target_tokens // per_turn_tokens))
+        # 填充轮数：以「累计叙事文本 ≈ 1.45× 窗口」为目标，靠**加厚灌入**而非
+        # 压低窗口来制造超窗（2026-10-01 定案）。压窗口（如 10k）会让 HA 反复
+        # 上下文管理抖动 —— 相当于在低内存设备上测内存调度，测出的是病态行为
+        # 不是设计工作点。两侧窗口保持一致（如 50k），让灌入量本身超过窗口：
+        #   pi 是水位线压缩，累计文本 > 窗口 ⇒ 必须开始真实丢信息；
+        #   HA 同窗口下已实测超窗召回（50k 窗口 max prompt 286k 仍 6/6）。
+        # 上限 25 轮是成本护栏（实测 pi ~20s/轮、HA ~120s/轮）。
+        filler_turns = max(4, min(25, self.target_tokens // per_turn_tokens))
 
         # 开场白：完全自然，不预告任何要记的东西
         plan.append({"kind": "filler", "cat": "narrative",
