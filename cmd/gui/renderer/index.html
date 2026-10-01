@@ -6,26 +6,41 @@
     <title>HomeAgent</title>
     <link rel="icon" type="image/svg+xml" href="icon.svg" />
     <link rel="stylesheet" href="style.css" />
-    <script
-      src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"
-      onerror="window._THREE_FAILED = true"
-    ></script>
-    <script
-      src="https://cdn.jsdelivr.net/npm/three@0.128.0/examples/js/controls/OrbitControls.js"
-      onerror="window._THREE_FAILED = true"
-    ></script>
-    <script
-      src="https://cdnjs.cloudflare.com/ajax/libs/marked/4.3.0/marked.min.js"
-      onerror="console.warn('marked CDN failed')"
-    ></script>
-    <script
-      src="https://cdn.jsdelivr.net/npm/dompurify@3.2.4/dist/purify.min.js"
-      onerror="console.warn('DOMPurify CDN failed')"
-    ></script>
+    <!--
+      第三方库全部本地化（renderer/vendor/），不引用任何公网 CDN。
+
+      为什么（与服务端 webui 插件同一条理由，见
+      internal/plugins/webui/starmap_vendor_test.go 的注释）：
+      HomeAgent 明确支持离线/内网部署，而前端原本有 4 个硬依赖在公网上
+      （cdnjs/jsdelivr）。真实现象是「服务端 curl 同一批 URL 返回 200，
+      但用户点星图看到『3D 星图不可用（CDN 加载失败）』」——不是服务端的问题，
+      是客户端访问不到公共 CDN（内网/出口受限/断网）。
+      换 CDN 只是把同一个赌注重下一遍。
+
+      ★ 版本与 internal/plugins/webui/static/ 下那四个文件一致（同样是
+      three r128 / marked 4.3.0 / DOMPurify 3.2.4），两端保持一致，
+      由 vendor-align.test.mjs 钉住。
+
+      ★ DOMPurify 从 CDN 挪到本地还修掉了一个**安全边界**：
+      它加载失败时 renderMd() 会回退到手写正则剥 <script>/on*=/javascript:，
+      那不是完备的 HTML sanitizer，而它渲染的是**模型输出与记忆文本**
+      （都算不可信输入）。净化器必须可用，不能有降级路径。
+    -->
+    <script src="vendor/three.min.js"></script>
+    <script src="vendor/OrbitControls.js"></script>
+    <script src="vendor/marked.min.js"></script>
+    <script src="vendor/purify.min.js"></script>
     <script>
-      setTimeout(function () {
-        if (!window.THREE) window._THREE_FAILED = true;
-      }, 8000);
+      // 本地依赖缺失时的可见报错：宁可显式说「本地库缺失」，
+      // 也不要静默退化（静默退化的症状是星图空白/markdown 变纯文本，
+      // 用户看不出是打包漏了文件）。
+      if (!window.THREE) window._THREE_FAILED = true;
+      if (typeof marked === "undefined")
+        console.error("[vendor] marked.min.js 缺失：Markdown 将退化为纯文本");
+      if (typeof DOMPurify === "undefined")
+        console.error(
+          "[vendor] purify.min.js 缺失：Markdown 净化不可用（不应发生，库已本地化）",
+        );
     </script>
   </head>
   <body>
