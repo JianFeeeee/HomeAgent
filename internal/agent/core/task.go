@@ -110,6 +110,13 @@ type TaskFrame struct {
 	Turn               int
 	LastBatchReplyOnly bool
 
+	// OverflowRecover 是本帧内的超页恢复次数。
+	//
+	// 为什么按**帧**而不是按 agent 计：恢复预算要防的是「一次裁剪没搞定 ⇒
+	// 裁剪→复原→又超页→再裁剪」这个**单帧内**的循环；跨帧累计会让一个长会话
+	// 在若干帧后突然失去超页处理能力（而那时恰恰最需要它）。
+	OverflowRecover int
+
 	// 当前工具批
 	PendingTools  []agentAPI.ToolCall
 	ToolIdx       int
@@ -633,6 +640,17 @@ func (a *Agent) stepLLM(f *TaskFrame) stepOutcome {
 	resp, llmErr := a.callLLMWithFallback(req, providers, f.OutputChannel)
 
 	if llmErr != nil {
+		// ★ 上下文超页（上游 ErrContextFull）必须在 provider fallback **之前**处理：
+		//   fallback 会换 provider 重发**同一个**超限请求，换谁都一样超。
+		//   与本地预判（maybeHandleContextOverflow）走同一条裁剪路径。
+		if a.handleUpstreamContextFull(llmErr) {
+			// 已裁剪。**必须退回 StepPrepare 重建 f.Msgs**：
+			// f.Msgs 只在 stepPrepare 里由 buildMessages 装配，stepLLM 不重建；
+			// 而挂起帧里那份就是刚刚超限的那份，复用它等于原样再发一次。
+			f.Turn++
+			f.Step = StepPrepare
+			return outcomeContinue
+		}
 		if errors.Is(llmErr, context.Canceled) && a.ctx.Err() == nil {
 			if f.OutputChannel == channelConsolidation {
 				f.Err = fmt.Errorf("interrupted by user input")

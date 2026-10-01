@@ -116,6 +116,18 @@ type Agent struct {
 	// 上下文裁剪：活跃上下文最大条数，超出按相关性裁剪
 	maxContextSize int
 
+	// overflowStat 统计上下文超页处理（触发次数、裁剪条数、终止次数）。
+	// 放 Agent 上而非全局：多实例并存时各自独立（跑分台就要实例隔离）。
+	overflowStat struct {
+		sync.Mutex
+		Triggered  int // L4 上报次数
+		Aborted    int // 裁不出东西的终止次数
+		Upstream   int // 上游 ErrContextFull 次数
+		LastPruned int // 上次裁剪条数
+		LastRatio  float64
+		LastEvents int
+	}
+
 	// ctxTuning 是上下文预算的可调参数（零值 = 历史默认）。
 	//
 	// 从配置读入（core.agent.context.*），使不同窗口的实例可以各自调优，
