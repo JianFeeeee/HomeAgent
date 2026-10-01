@@ -55,6 +55,7 @@ const state = {
   displays: [],
   selfDeviceId: "",
   selfGateway: "",
+  deviceBridgeToken: "", // 设备接入令牌明文（来自 device-bridge:get），用于 /device/* 的 requireToken
   // ---- 星图活动数据源（对齐服务端 /memory/graph/pulse + /runtime）----
   starmapPulses: [], // { mesh, until, kind } 活动脉冲队列
   starmapGrown: {}, // nodeId -> 生长动画截止时间戳（ms）
@@ -511,6 +512,57 @@ function ApiError(message, status, statusText, body) {
 }
 ApiError.prototype = Object.create(Error.prototype);
 
+// deviceTokenPaths 列出走**设备接入令牌**鉴权的端点。
+//
+// 为什么要单独判：服务端 /api/v1/device/ 命名空间下并存**两套鉴权**——
+//   · /device/gateway   注册在 webui 插件，走 requireAPI，认 session cookie
+//   · /device/online、/device/、/device/push
+//                        注册在 remotedevice 插件，走 requireToken，
+//                        **只认 X-API-Key 头或 ?token=，完全不认 cookie**
+// 所以只带 cookie 调后三者 ⇒ 401（实测：cookie 与错 token 的响应体
+// 都是纯文本 "unauthorized"，而 webui 鉴权是 JSON {"error":...}，
+// 可据此判定命中的是 requireToken）。
+//
+// 三种能工作的客户端做法一致：
+//   · WebUI 浏览器：cookie 进内核，reverseToUpstream 里注入
+//     deviceGatewayToken（handler_device.go:118）
+//   · waiter：客户端自己带 X-API-Key（gateway_discover.go:103）
+//   · GUI：两者都没做 ⇒ 设备页永远空白（本次修复的内容）
+function isDeviceTokenPath(p) {
+  return (
+    p === "/device/online" ||
+    p === "/device" ||
+    p === "/device/push" ||
+    p.indexOf("/device/") === 0
+  ) && p !== "/device/gateway";
+}
+
+// deviceApiKey 取设备接入令牌。
+//
+// 优先用连接自身的 apiKey（为该连接显式配的管理员凭据）；
+// 退回本机设备桥的 token（state.deviceBridgeToken，来自
+// device-bridge:get，桥与 waiter 同源）——那才是 requireToken 要的那份。
+// 两者都没有时返回空：此时发出去的请求会被服务端 401，属预期，
+// 调用方负责给用户可读提示（见 deviceAuthHint）。
+function deviceApiKey() {
+  if (state.currentConn && state.currentConn.apiKey)
+    return state.currentConn.apiKey;
+  return state.deviceBridgeToken || "";
+}
+
+// deviceAuthHint 在设备接口 401 时拼一句可读原因。
+//
+// 为什么不能静默：此前 401 被 catch 吞掉并置空数组，界面上与
+// 「确实没有设备」长得一模一样，用户无从判断是配置问题还是真没设备。
+function deviceAuthHint() {
+  if (state.currentConn && state.currentConn.apiKey) return "";
+  if (state.deviceBridgeToken) return "";
+  return __(
+    "设备接口需要设备接入令牌：请在「设置 → 设备」里配置设备桥网关与令牌，或给该连接填 API Key。",
+    "Device endpoints require a device token: configure the device bridge gateway and token in Settings → Devices, or set an API Key on this connection.",
+  );
+}
+
 async function api(p, o) {
   if (!state.currentConn)
     throw new Error(__("未选择连接", "No connection selected"));
@@ -521,6 +573,11 @@ async function api(p, o) {
   var to = opts.timeout || 8000;
   var headers = { "Content-Type": "application/json", ...(opts.headers || {}) };
   if (state.currentConn.apiKey) headers["X-API-Key"] = state.currentConn.apiKey;
+  // 设备接入面需要设备令牌而非管理员会话 cookie（见 isDeviceTokenPath 注释）。
+  if (!headers["X-API-Key"] && isDeviceTokenPath(p)) {
+    var devKey = deviceApiKey();
+    if (devKey) headers["X-API-Key"] = devKey;
+  }
   var ctl = new AbortController();
   var timer = setTimeout(() => {
     ctl.abort();
@@ -644,6 +701,9 @@ async function loadDiscoveredGateway() {
     state.discoveredGateway = "";
     return;
   }
+  // 已有值则跳过：网关地址在一次会话内基本不变，
+  // 而 refreshAll 会被 15s 定时器反复触发。
+  if (state.discoveredGateway) return;
   try {
     var d = await api("/device/gateway");
     state.discoveredGateway =
@@ -748,6 +808,29 @@ function renderAll() {
   refreshAll();
 }
 
+// ensureDeviceToken 拉取设备桥配置并缓存设备令牌。
+//
+// ★ 必须在任何 /device/* 请求**之前**调用：那些端点走服务端
+// requireToken，只认 X-API-Key；令牌不在手上就必然 401。
+// （此前令牌加载排在 /device/online 之后，顺序正好反了。）
+async function ensureDeviceToken() {
+  try {
+    if (!window.homeagent || !window.homeagent.deviceBridge) return "";
+    var dbinfo = await window.homeagent.deviceBridge.get();
+    state.dbConfig = dbinfo || state.dbConfig;
+    state.deviceBridgeToken = (dbinfo && dbinfo.token) || "";
+    // 顺带按需发现网关地址：设备通道配置（renderDevices 的 webuiUrl）
+    // 依赖 state.discoveredGateway，而它是服务端配置、客户端无从推导。
+    // loadDiscoveredGateway 自带缓存，这里不会反复请求。
+    try {
+      await loadDiscoveredGateway();
+    } catch (e) {}
+    return state.deviceBridgeToken;
+  } catch (e) {
+    return "";
+  }
+}
+
 async function refreshDataOnly() {
   // 仅刷新 state 数据，不重建 DOM（用于定时轮询时避免擦掉用户输入）
   try {
@@ -786,14 +869,18 @@ async function refreshDataOnly() {
       state.currentConn.type === "webui" &&
       state.currentConn.url
     ) {
-      await loadDiscoveredGateway();
+      // 令牌必须先到位，否则 /device/online 必 401（见 ensureDeviceToken）。
+      await ensureDeviceToken();
       var d = await api("/device/online");
       state.devices = (d && d.devices) || [];
+      state.deviceAuthError = "";
     } else {
       state.devices = [];
     }
   } catch (e) {
+    // 静默置空会把「没鉴权」显示成「没设备」，两者界面上无法区分。
     state.devices = [];
+    state.deviceAuthError = e && e.status === 401 ? deviceAuthHint() : "";
   }
   try {
     try {
@@ -871,14 +958,20 @@ async function refreshAll() {
       state.currentConn.type === "webui" &&
       state.currentConn.url
     ) {
-      await loadDiscoveredGateway();
+      // 网关发现**不在**这里做：doRenderAll 每 15s 会走到 refreshAll，
+      // 而网关地址是服务端配置（慢变量），15s 拉一次纯属浪费。
+      // 它由 ensureDeviceToken 同批按需拉取（下面 deviceRefresh/切连接时），
+      // 且有缓存：discoveredGateway 一旦拿到就不重复请求。
+      await ensureDeviceToken();
       var d = await api("/device/online");
       state.devices = (d && d.devices) || [];
+      state.deviceAuthError = "";
     } else {
       state.devices = [];
     }
   } catch (e) {
     state.devices = [];
+    state.deviceAuthError = e && e.status === 401 ? deviceAuthHint() : "";
   }
   try {
     // 本机显示器列表（screensue 默认屏幕配置用）
@@ -5868,6 +5961,8 @@ async function saveConnForm() {
       // 而定时器闭包里的 api() 会一直打旧地址。
       starmapStopActivity();
       starmapDirty = false;
+      // 切连接后网关地址要重新发现（缓存属于旧后端）
+      state.discoveredGateway = "";
       state.starmapPulses = [];
       state.starmapGrown = {};
       state._smPrevSched = null;
@@ -6339,6 +6434,20 @@ function renderDevices() {
   if (!el) return;
   var conn = state.currentConn;
   var devs = state.devices || [];
+  // 设备列表鉴权失败的显式提示。
+  //
+  // 为什么必须显式：/device/online 走服务端 requireToken（只认
+  // X-API-Key），而普通面板用管理员 cookie。没配令牌时服务端返回 401，
+  // 旧实现把它 catch 掉置空数组 ⇒ 界面与「确实没有设备」完全一样，
+  // 用户只能看到空列表，无法判断是配置问题还是真没设备。
+  var authErrHtml = state.deviceAuthError
+    ? '<div class="card" style="border-left:3px solid #d1383d">' +
+      '<h2>' +
+      __("设备列表不可用", "Device list unavailable") +
+      "</h2><p style=\"color:var(--text-muted)\">" +
+      escHtml(state.deviceAuthError) +
+      "</p></div>"
+    : "";
   var selfDev = null;
   if (state.selfDeviceId) {
     for (var si = 0; si < devs.length; si++) {
@@ -6615,7 +6724,7 @@ function renderDevices() {
     html += "</table>";
   }
   html += "</div>";
-  el.innerHTML = html;
+  el.innerHTML = authErrHtml + html;
 }
 
 // 保存设备通道配置（网关 + token + 启用），调主进程 deviceBridge:set
@@ -6672,6 +6781,10 @@ async function saveBridgeChannel() {
 
 async function deviceRefresh() {
   try {
+    // 手动刷新是显式动作：破掉网关地址缓存，确保拿到服务端当前值
+    state.discoveredGateway = "";
+    await loadDiscoveredGateway();
+    await ensureDeviceToken();
     var d = await api("/device/online");
     state.devices = d.devices || [];
     renderDevices();
