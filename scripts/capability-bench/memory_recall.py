@@ -259,7 +259,10 @@ class Material:
 
         # 先探每轮 token：叙事片段 ~450 token/条，每批拼 4 条 ≈ 1800 token。
         # 轮数 ~140：在「轮数开销」（每轮一次 LLM 调用）与「信息密度」之间取平衡。
-        frags_per_turn = 5
+        # 每轮拼多少叙事片段。它决定「轮数」与「信息密度」的换算：
+        # 填充总量必须 > 窗口（否则测的是窗口内记忆），而轮数越少每轮越贵。
+        # 100k 窗口 × 1.45 = 145k ⇒ 8 片段/轮（≈2900 tok）= 50 轮填充。
+        frags_per_turn = 8
         sample = "；".join(self.narrative_block(k, 600)[0] for k in range(frags_per_turn))
         per_turn_tokens = max(1, est_tokens(sample))
         filler_turns = max(4, self.target_tokens // per_turn_tokens)
