@@ -558,11 +558,19 @@ class PiDriver:
             proc = subprocess.run(
                 cmd, env=env, capture_output=True, text=True,
                 timeout=self.args.timeout, cwd=self.args.cwd)
-        except subprocess.TimeoutExpired:
+        except subprocess.TimeoutExpired as exc:
+            # ★ 超时必须带 stderr 尾巴：v3b 的 900s 假死就是靠它才定位到
+            #   "No project session found ...; creating a new session"（每轮重建
+            #   会话并重新压缩全部历史）。驱动原先丢弃 stderr，盲区直接吃掉了故障线索。
+            err = exc.stderr or ""
+            tail = (" | stderr: " + " ".join(str(err).split())[-400:]) if str(err).strip() else " | stderr: (空)"
             return {"reply": "", "wall_s": time.monotonic() - started,
                     "usage": {}, "tools": [], "timed_out": True,
-                    "error": f"timeout after {self.args.timeout}s"}
+                    "error": f"timeout after {self.args.timeout}s{tail}"}
         wall = time.monotonic() - started
+
+        # stderr 一律回传（不吞）：pi 的警告（会话重建/压缩/模型降级）只走这里
+        stderr_note = (" | stderr: " + " ".join(proc.stderr.split())[-300:]) if proc.stderr.strip() else ""
 
         usage: dict = {}
         reply_parts: list[str] = []
@@ -587,7 +595,8 @@ class PiDriver:
             "usage": usage,
             "tools": [],
             "timed_out": False,
-            "error": None if proc.returncode == 0 else f"exit={proc.returncode}",
+            "error": ((None if proc.returncode == 0 else f"exit={proc.returncode}")
+                      or "") + stderr_note,
         }
 
     def close(self) -> None:
@@ -615,7 +624,14 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--provider", default="llmsproxy")
     ap.add_argument("--model", default="AUTO")
     ap.add_argument("--iso-dir", default="/var/tmp/pi-iso/agent")
-    ap.add_argument("--cwd", default="/var/tmp/pi-iso/work")
+    # cwd 必须是**干净空目录**。两个实测坑：
+    #   ① pi 会把 cwd 里的文件读进上下文 —— 实验残留（order_gw_*.md /
+    #      port_freq.json）会直接变成「记忆」的假答案：v3b 的 4324 就是
+    #      答自磁盘文件而非会话记忆。
+    #   ② cwd 与 PI_CODING_AGENT_SESSION_DIR 不一致时，pi 报 "No project
+    #      session found with id ...; creating a new session"，每轮重建
+    #      会话并重新压缩全部历史 ⇒ 越到后面越慢，最后 900s 超时假死。
+    ap.add_argument("--cwd", default="/var/tmp/pi-iso/clean-cwd")
     ap.add_argument("--pi-port-base", type=int, default=20110)
     args = ap.parse_args(argv)
 
