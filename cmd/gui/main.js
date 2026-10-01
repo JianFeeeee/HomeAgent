@@ -2630,6 +2630,12 @@ ipcMain.handle("device-bridge:get", () => {
     authorized: !!db.authorized, // 客户端本地授权状态
     gateway: db.gateway || "",
     tokenSet: !!(db.token || ""),
+    // 设备接入面（/device/online 等）走服务端 requireToken，只认 X-API-Key。
+    // 渲染进程要用同一份令牌去拉设备列表，而此前只给了 tokenSet（布尔），
+    // 于是渲染侧永远拿不到明文 ⇒ 设备页恒 401（显示为空列表）。
+    // 明文本来就存在本机 gui-prefs.json，不新增任何密钥存储面；
+    // 且只经 contextBridge 送到渲染进程，不落日志、不进 URL。
+    token: db.token || "",
     connected: !!deviceBridge,
     deviceId: deviceBridgeId,
     address: deviceBridgeAddr,
