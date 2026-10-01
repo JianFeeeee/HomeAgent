@@ -462,10 +462,7 @@ func (p *LuaAdaptedProvider) Chat(ctx context.Context, req *CompletionRequest) (
 	}
 
 	if resp.StatusCode != 200 {
-		return nil, &ProviderError{
-			StatusCode: resp.StatusCode,
-			Message:    fmt.Sprintf("api error %d: %s", resp.StatusCode, string(rawResp)),
-		}
+		return nil, newProviderError(resp.StatusCode, string(rawResp))
 	}
 
 	unifiedJSON, err := p.vm.CallTransformResponse(p.adapter, string(rawResp))
@@ -1299,14 +1296,90 @@ type rawToolCall struct {
 	} `json:"function"`
 }
 
+// ErrKind 是 ProviderError 的**错误类别**。
+//
+// 为什么要分类而不只看 StatusCode：同一个 HTTP 码在不同上游代表不同处置。
+// 最要紧的是 ErrContextFull —— 它是**可恢复**的（裁剪上下文后重试），
+// 而 5xx/429 靠重试、401/403 靠换凭证，三者处置完全不同。若只有 StatusCode，
+// 调用方就只能靠字符串匹配错误消息（脆，且上游改文案即失效）。
+type ErrKind uint8
+
+const (
+	// ErrUnknown 未分类：默认按瞬时错误处理（重试 + fallback）。
+	ErrUnknown ErrKind = iota
+	// ErrTransient 瞬时错误：网关瞬断、429、网络抖动。重试有意义。
+	ErrTransient
+	// ErrCredential 凭证错误：401/403。重试与换 provider 都无意义。
+	ErrCredential
+	// ErrContextFull 上游报上下文超限。**可恢复**：裁剪后重试即可，
+	// 不应当成失败终结本轮（否则超页直接变成用户可见的报错）。
+	ErrContextFull
+)
+
 // ProviderError wraps an HTTP-level error with status code for precise auth detection.
 type ProviderError struct {
 	StatusCode int
 	Message    string
+	// Kind 由 newProviderError 统一填。手工构造的 ProviderError 默认为
+	// ErrUnknown（= 旧的「只看 StatusCode」行为，向后兼容）。
+	Kind ErrKind
 }
 
 func (e *ProviderError) Error() string {
 	return e.Message
+}
+
+// contextFullMarkers 是上游表达「上下文超限」的报文特征。
+//
+// 形状不统一是实测结论：不同上游/网关把同一件事报成 400、413，或
+// invalid_request_error 里带一句人话。所以判别必须是「状态码 + 报文特征」
+// 组合，且**每次接新上游都要用真报文回归验证**（见 provider_test.go）。
+var contextFullMarkers = []string{
+	"context_length_exceeded",
+	"maximum context length",
+	"max_tokens_exceeded",
+	"context window full",
+	"too many tokens",
+	"prompt is too long",
+	"reduce the length of the messages",
+	"上下文超限",
+}
+
+// classifyProviderError 给定状态码与上游报文，判定错误类别。
+//
+// 判据优先级：凭证 → 上下文超限 → 瞬时。
+// 顺序不能换：401/403 的报文偶尔也会提到 context（网关模板文案），
+// 但凭证错误永远不该按「裁剪重试」处理。
+func classifyProviderError(status int, body string) ErrKind {
+	switch status {
+	case 401, 403:
+		return ErrCredential
+	}
+	lower := strings.ToLower(body)
+	for _, m := range contextFullMarkers {
+		if strings.Contains(lower, m) {
+			return ErrContextFull
+		}
+	}
+	switch {
+	case status == 413, status == 429, status >= 500:
+		return ErrTransient
+	default:
+		// 400/404 等：报文里没命中上下文特征 ⇒ 判瞬时（沿用旧行为：
+		// 旧代码只区分 401/403 与其余，其余一律重试）。
+		return ErrTransient
+	}
+}
+
+// newProviderError 构造带类别的 ProviderError。
+// 所有非 200 响应都应走它，不要手工构造（否则 Kind 会漏填成 ErrUnknown，
+// 让 ErrContextFull 分支永远不命中）。
+func newProviderError(status int, rawBody string) *ProviderError {
+	return &ProviderError{
+		StatusCode: status,
+		Message:    fmt.Sprintf("api error %d: %s", status, rawBody),
+		Kind:       classifyProviderError(status, rawBody),
+	}
 }
 
 func getString(m map[string]interface{}, key string) string {
