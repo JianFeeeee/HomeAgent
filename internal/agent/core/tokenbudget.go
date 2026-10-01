@@ -104,7 +104,13 @@ func (a *Agent) computeTokenBudget() TokenBudget {
 // 固定部分（system prompt + tools + rules）优先保障，剩余按 MemoryRatioPercent
 // 切给 memory context 与 context events。
 func ComputeTokenBudgetTuned(provider api.Provider, systemPromptBase string, t ContextTuning) TokenBudget {
-	maxCtx := provider.MaxContextTokens()
+	// provider 可能为 nil（构造期、或 provider 尚未就绪/已被换掉）。
+	// 之前直接调 provider.MaxContextTokens() 会 SIGSEGV —— 实测由contextTopK
+	// 在测试里撞出来，但它同样会在「配置早于 provider 就绪」的启动序列上发生。
+	var maxCtx int
+	if provider != nil {
+		maxCtx = provider.MaxContextTokens()
+	}
 	if maxCtx <= 0 {
 		maxCtx = 32768
 	}

@@ -340,3 +340,33 @@ func TestOverflow_T9_变异_固定topK则脱钩(t *testing.T) {
 		t.Fatalf("新实现下窗口变大 topK 未变大：%d → %d", newSmall, newLarge)
 	}
 }
+
+// ── provider 未就绪时不得崩 ──
+//
+// 回归：contextTopK → computeTokenBudget → ComputeTokenBudgetTuned 里曾直接调
+// provider.MaxContextTokens()，provider 为 nil 时 SIGSEGV（实测由
+// TestMemoryPass_PruneAndRecallTogether 撞出来）。它同样会发生在
+// 「配置早于 provider 就绪」的启动序列上，不只是测试场景。
+func TestOverflow_零值Agent不崩(t *testing.T) {
+	// 完全零值 Agent（非 nil）：无 provider、无 context、无配置
+	empty := &Agent{}
+	if got := empty.contextTopK(); got < 1 {
+		t.Fatalf("零值 Agent 的 topK=%d，至少应为 1", got)
+	}
+	// 硬上限为 0 时也不能崩
+	empty.maxContextSize = 0
+	if got := empty.contextTopK(); got < 1 {
+		t.Fatalf("maxContextSize=0 时 topK=%d，至少应为 1", got)
+	}
+}
+
+// ComputeTokenBudgetTuned 直接吃 nil provider（不经 Agent）也要安全。
+func TestComputeTokenBudgetTuned_nilProvider(t *testing.T) {
+	b := ComputeTokenBudgetTuned(nil, "", ContextTuning{})
+	if b.MaxContext <= 0 {
+		t.Fatalf("nil provider 时应回退到默认窗口，实际 %d", b.MaxContext)
+	}
+	if b.ContextTokens < 0 {
+		t.Fatalf("ContextTokens 不应为负：%d", b.ContextTokens)
+	}
+}

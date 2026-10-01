@@ -181,8 +181,10 @@ func (a *Agent) contextTopK() int {
 
 	// 平均事件 token：优先用实际积累，没有积累时退回保守值。
 	avg := 0
-	if n := a.context.Len(); n > 0 {
-		avg = a.accumulatedTokens() / n
+	if a.context != nil {
+		if n := a.context.Len(); n > 0 {
+			avg = a.accumulatedTokens() / n
+		}
 	}
 	if avg <= 0 {
 		avg = defaultAvgEventTokens
