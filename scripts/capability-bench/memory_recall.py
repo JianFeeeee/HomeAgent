@@ -79,14 +79,28 @@ def _norm_pi_usage(u: object) -> dict:
 # ════════════════════════════════════════════════════════════════
 # 材料生成（全部确定性：seed 相同 ⇒ 探针/答案/干扰集完全一致）
 # ════════════════════════════════════════════════════════════════
+#
+# ★ v3 填充模型：高密度叙事，不是废话流。
+#
+# v2 的填充（"打印机需要更换墨盒（编号 123456）"×104 轮）是**明显无价值**
+# 的信息：pi 压缩时直接丢弃垃圾，偶发针反而成了填充里仅有的有价值内容
+# 被保住 —— 跑分虚高，且不贴合真实对话。真实对话是高信息密度的：
+# 有任务、决策、因果、变化、前后引用，压缩必须在「保什么丢什么」间真取舍。
+#
+# v3 主线：order-gw 服务运维全程（上线准备→灰度事故→修复验证→新版本→
+# 交接→收尾）。针全部自然嵌在价值信息流里：
+#   · 偶发针 = 服务依赖清单里的真实条目（同构干扰 = 其它服务的端口，
+#     同样有意义，只是不是针）
+#   · 覆盖针 = 值班安排里的分机变更（真实变更流）
+#   · 多跳 = 交接流程（团队→门禁→申请表位置）
+# 叙事含跨轮引用（"按之前定的阈值…"），压缩丢弃早期轮次会破坏骨架。
 
-NEUTRAL_TOPICS = [
-    "今天的天气看上去不错", "窗外的树叶在动", "桌上的杯子是陶瓷的",
-    "打印机需要更换墨盒", "走廊的灯换了新的", "会议室的椅子有些松动",
-    "楼下的咖啡店换了招牌", "电梯里贴了新的通知", "前台的绿植长得很好",
-    "午休时间走廊很安静", "空调的温度设定在二十六度", "储物柜的编号是连续的",
-    "茶水间的咖啡豆快用完了", "停车场 B 区在修地面", "二楼窗户的把手有点松",
-    "打印机旁的纸箱该清了", "新来的同事工位在三楼", "楼道口的自行车该挪了",
+SERVICE_PHASES = [  # (占比起点, 阶段名) —— 由 build_plan 按填充轮总数切分
+    (0.00, "launch-prep"),
+    (0.16, "incident"),
+    (0.46, "verify"),
+    (0.61, "release"),
+    (0.76, "handover"),
 ]
 
 
@@ -123,104 +137,143 @@ class Material:
 
         # ---- 填充 token 目标 ----
         self.target_tokens = int(window * overshoot)
+        # 叙事里的其它服务依赖（干扰端口）：每个都是真实依赖，只是不是针
+        self.dep_services = ["billing", "notify", "inventory", "search", "oauth", "captcha"]
+        self.dep_ports = {s: rng.randrange(8000, 8999) for s in self.dep_services}
+        self.dep_ports["auth"] = self.casual["auth 服务的端口"]
+        self.dep_ports["metrics"] = self.casual["metrics 服务的端口"]
+        self.dep_ports["trace"] = self.casual["trace 服务的端口"]
+        self.dep_ports["admin"] = self.casual["admin 服务的端口"]
 
-    # -- 各类填充轮 --
+    # -- 高密度叙事轮 --
 
-    def neutral_block(self, n: int) -> str:
-        """中性句，逐句不重复编号。作对照档。"""
-        out = []
-        for i in range(n):
-            t = self.rng.choice(NEUTRAL_TOPICS)
-            out.append(f"{t}（编号 {self.rng.randrange(100000, 999999)}）")
-        return "；".join(out)
+    def _dep_line(self, services: list[str]) -> str:
+        """依赖服务清单片段：真实工作信息，偶发针混在其中无任何标记。"""
+        parts = [f"{s} 服务的端口是 {self.dep_ports[s]}" for s in services]
+        return "；".join(parts)
 
-    def confusable_block(self, n: int, hide: list[tuple[str, int]] | None = None) -> str:
-        """同域干扰：n 个形似端口值；hide 里的偶发针**混在其中**，
-        措辞与干扰项完全同构（都叫「某端口是 XXXX」），无任何强调。"""
-        vals: list[str] = []
-        slots = self.rng.sample(range(n), len(hide)) if hide else []
-        hidden_used = 0
-        for i in range(n):
-            if hide and hidden_used < len(hide) and i in slots:
-                vals.append(f"{hide[hidden_used][0]}是 {hide[hidden_used][1]}")
-                hidden_used += 1
+    def narrative_block(self, i: int, total: int) -> tuple[str, str]:
+        """第 i/total 轮的高密度叙事片段。返回 (text, cat)。
+
+        每轮 2-4 条有信息增量的工作项：数值、因果、决策、跨轮引用。
+        确定性：同 seed 同位置产出相同文本。"""
+        rng = self.rng
+        frac = i / max(1, total - 1)
+        phase = SERVICE_PHASES[0][1]
+        for start, name in SERVICE_PHASES:
+            if frac >= start:
+                phase = name
+        day = 12 + i // 6  # 叙事日期推进
+        items: list[str] = []
+
+        if phase == "launch-prep":
+            if i == int(total * 0.10):
+                # ★ auth 偶发针：藏在依赖清单里（清单本身是真实工作项）
+                items.append(self._dep_line(["auth", "billing", "notify"]))
             else:
-                vals.append(f"网关端口是 {self.rng.choice(self.port_distractors)}")
-        return "；".join(vals)
+                items.append(f"order-gw 上线准备：压测环境跑通了下单链路，网关 QPS 压到 {rng.randrange(800, 1500)}，"
+                             f"错误率 {rng.randrange(2, 9) / 100:.2f}%，符合准入线")
+            items.append(f"超时配置定了：读接口 {rng.choice([800, 1000, 1200])}ms、写接口 {rng.choice([2500, 3000, 3500])}ms，"
+                         f"理由是写链路要等库存扣减（平均 {rng.randrange(400, 900)}ms）")
+            items.append(f"重试策略：最多 {rng.choice([2, 3])} 次，只对幂等接口开启；"
+                         f"指数退避基数 {rng.choice([100, 200, 300])}ms")
+            if rng.random() < 0.5:
+                items.append(f"回滚预案演练完成：从发现异常到回滚到上一版本用时 {rng.randrange(3, 9)} 分钟，"
+                             f"预案里写明触发条件是错误率连续 5 分钟超过 {rng.choice([1.0, 2.0])}%")
 
-    def code_block(self, n: int) -> str:
-        """代号干扰：n 个形似内部代号。"""
-        vals = []
-        for _ in range(n):
-            vals.append(f"{self.rng.choice(['BLUE','GREEN','SILVER','COPPER','IVORY','ONYX'])}"
-                        f"-{self.rng.randrange(1000, 9999)} 归档在 {self.rng.choice(['A','B','C'])}"
-                        f"{self.rng.randrange(1000, 3999)}")
-        return "；".join(vals)
+        elif phase == "incident":
+            if i == int(total * 0.20):
+                # ★ 覆盖旧值：值班安排里的分机（真实变更流）
+                items.append(f"本周值班安排下来了，夜班有问题打{self.overwrite_key} {self.overwrite_old}，"
+                             f"值班的是 {rng.choice(['老陈','小王','阿李'])}")
+            else:
+                items.append(f"灰度事故推进：order-gw 的 p99 从 {rng.choice([180, 220, 260])}ms 涨到 "
+                             f"{rng.randrange(2800, 5200)}ms，错误率峰值 {rng.randrange(4, 18)}%，"
+                             f"集中在 {rng.choice(['下单','退款','查询'])}接口")
+            items.append(f"定位进展：慢查询数从每分钟 {rng.randrange(2, 6)} 条涨到 {rng.randrange(120, 400)} 条，"
+                         f"根因是 {rng.choice(['退款导出','对账任务','库存同步'])}在循环里逐单查库，"
+                         f"单次调用产生 {rng.randrange(600, 2000)} 次查询")
+            items.append(f"临时措施：把连接池从 {rng.choice([32, 64])} 扩到 {rng.choice([128, 256])}，"
+                         f"并给等待队列加了长度告警（阈值 {rng.choice([300, 400, 500])}）；"
+                         f"注意这只是缓解，根因要等代码修复")
+
+        elif phase == "verify":
+            if i == int(total * 0.52):
+                # ★ metrics 偶发针
+                items.append(self._dep_line(["metrics", "inventory", "search"]))
+            else:
+                items.append(f"修复验证：N+1 查询改成批量后，慢查询回落到每分钟 {rng.randrange(1, 4)} 条，"
+                             f"p99 稳定在 {rng.randrange(150, 320)}ms，观察了 {rng.randrange(6, 24)} 小时无反弹")
+            items.append(f"缓存层核对了淘汰策略：ttl 设 {rng.choice([300, 600, 900])} 秒，"
+                         f"容量 {rng.choice([5000, 10000, 20000])} 条；命中率从 {rng.randrange(40, 60)}% 提到 {rng.randrange(72, 91)}%")
+            items.append(f"限流参数调整：全局 {rng.randrange(400, 900)} QPS，单用户 {rng.randrange(5, 30)} QPS，"
+                         f"超限返回 {rng.choice([429, 503])} 并带 Retry-After")
+
+        elif phase == "release":
+            if i == int(total * 0.66):
+                # ★ 覆盖新值（真实变更：值班表更新）
+                items.append(f"注意：下周起{self.overwrite_key}换成 {self.overwrite_new} 了，"
+                             f"旧号停用，值班轮换到 {rng.choice(['小赵','老周'])}")
+            elif i == int(total * 0.70):
+                # ★ trace 偶发针
+                items.append(self._dep_line(["trace", "oauth", "captcha"]))
+            else:
+                items.append(f"新版本 v2.{rng.randrange(30, 34)}.{rng.randrange(0, 9)} 发布评审通过，"
+                             f"变更项：修复 N+1、连接池参数化、慢查询日志采样率 {rng.choice([5, 10, 20])}%")
+            items.append(f"发布窗口定在 {rng.choice(['周二','周三','周四'])} 凌晨 {rng.choice([1, 2, 3])} 点，"
+                         f"预计停机 {rng.randrange(3, 10)} 分钟；回滚版本锁定为 v2.{rng.randrange(28, 30)}.{rng.randrange(0, 6)}")
+            items.append(f"灰度比例：先 {rng.choice([5, 10])}% 流量观察 {rng.randrange(30, 90)} 分钟，"
+                         f"无异常再放到 {rng.choice([50, 100])}%")
+
+        else:  # handover
+            if i == int(total * 0.85):
+                # ★ admin 偶发针
+                items.append(self._dep_line(["admin", "billing", "oauth"]))
+            elif i == int(total * 0.76):
+                # ★ 多跳要素 1：负责门禁的团队
+                items.append(f"交接事项：门禁相关事务由 {self.multihop_team} 团队负责，"
+                             f"对接人是 {rng.choice(['小林','老郑','阿芳'])}，工位在 {rng.choice(['3 楼东','4 楼西'])}")
+            elif i == int(total * 0.92):
+                # ★ 多跳要素 2：申请表位置
+                items.append(f"门禁申请表已归档，放在 {self.multihop_room} 的文件柜，"
+                             f"需要 {rng.choice(['部门主管','行政'])}签字后提交")
+            else:
+                items.append(f"交接文档整理：监控大盘链接、告警规则 {rng.randrange(8, 20)} 条、"
+                             f"值班手册更新到第 {rng.randrange(3, 9)} 版；新增了容量预警（连接池使用率连续 10 分钟超 "
+                             f"{rng.choice([70, 80])}% 就升级到人工）")
+            items.append(f"后续排期：下季度做连接池动态化（现在改参数要重启），"
+                         f"预计 {rng.choice(['10 月','11 月'])} 排期；另一个待办是把对账任务迁到独立连接池")
+
+        text = f"order-gw 运维同步（第 {i} 批，{day} 日）：" + "；".join(items)
+        return text, "narrative"
 
     def build_plan(self) -> list[dict]:
-        """对话脚本。针混在干扰轮里，绝不单独成轮、绝不预告。"""
-        rng = self.rng
+        """对话脚本：高密度叙事填充 + 嵌入式探针 + 改述提问。
+
+        ★ v3 语义：填充是 order-gw 服务运维的真实工作流（有任务/决策/因果/变化），
+        不是废话流。针自然嵌在价值信息里（依赖清单/值班变更/交接流程），
+        压缩必须保住叙事骨架才有真实取舍 —— 这是针对「废话填充让 pi
+        直接丢垃圾 ⇒ 跑分虚高」的修正。
+        """
         plan: list[dict] = []
 
-        # 每轮 token：80 句/轮。v2 句子短（"网关端口是 8123"），30 句只有 ~900 token
-        # 会让轮数烟到 200+，轮开销（每轮一次 LLM 调用）反而稀释了填充密度。
-        per_turn = 80
-        # ★ 估算必须按**实际混合比例**：neutral 句长（~43 token/句），
-        # confusable 句短（~22 token/句）。v2 轮里 confusable 占多数，
-        # 若按 neutral 估会高估近一倍 ⇒ 实际灌入量不超窗（教训：上轮 dry-run
-        # 估 178k 实际只有 ~90k）。
-        sample_neutral = self.neutral_block(per_turn)
-        sample_conf = self.confusable_block(per_turn)
-        # 混合比例与下方循环一致：45% neutral，55% confusable（含针/覆盖/多跳轮，
-        # 它们的长度落在 confusable 同级）
-        per_turn_tokens = max(1, int(est_tokens(sample_neutral) * 0.45
-                                     + est_tokens(sample_conf) * 0.55))
+        # 先探每轮 token：叙事片段 ~450 token/条，每批拼 4 条 ≈ 1800 token。
+        # 轮数 ~140：在「轮数开销」（每轮一次 LLM 调用）与「信息密度」之间取平衡。
+        frags_per_turn = 5
+        sample = "；".join(self.narrative_block(k, 600)[0] for k in range(frags_per_turn))
+        per_turn_tokens = max(1, est_tokens(sample))
         filler_turns = max(4, self.target_tokens // per_turn_tokens)
 
-        # 偶发针分散到 4 个不同位置（~10%/35%/60%/85% 处），各藏 1 根
-        hide_positions = {
-            int(filler_turns * 0.10): [("auth 服务的端口", self.casual["auth 服务的端口"])],
-            int(filler_turns * 0.35): [("metrics 服务的端口", self.casual["metrics 服务的端口"])],
-            int(filler_turns * 0.60): [("trace 服务的端口", self.casual["trace 服务的端口"])],
-            int(filler_turns * 0.85): [("admin 服务的端口", self.casual["admin 服务的端口"])],
-        }
-        # 覆盖针：旧值在 ~20% 处，新值在 ~50% 处（中间隔大量干扰）
-        old_pos = int(filler_turns * 0.20)
-        new_pos = int(filler_turns * 0.50)
-        # 多跳要素：团队代号在 ~30%，会议室在 ~70%（两处都混进代号干扰轮）
-        hop_pos = int(filler_turns * 0.30)
-        room_pos = int(filler_turns * 0.70)
-
         # 开场白：完全自然，不预告任何要记的东西
-        plan.append({"kind": "filler", "cat": "neutral",
-                     "text": "我接着上一条线继续同步一些琐碎记录，你顺手收着就行。"})
+        plan.append({"kind": "filler", "cat": "narrative",
+                     "text": "我这边开始按天同步 order-gw 的运维进展，你顺手套理着就行，后面我会随时问细节。"})
 
         for i in range(filler_turns):
-            r = rng.random()
-            if i in hide_positions:
-                block = self.confusable_block(per_turn, hide=hide_positions[i])
-                cat = "confusable"
-            elif i == old_pos:
-                block = self.confusable_block(per_turn - 1) + f"；{self.overwrite_key}是 {self.overwrite_old}"
-                cat = "confusable"
-            elif i == new_pos:
-                block = self.confusable_block(per_turn - 1) + f"；对了，{self.overwrite_key}改成 {self.overwrite_new} 了"
-                cat = "confusable"
-            elif i == hop_pos:
-                block = self.code_block(per_turn - 1) + f"；{self.multihop_team} 团队负责门禁"
-                cat = "confusable"
-            elif i == room_pos:
-                block = self.code_block(per_turn - 1) + f"；门禁申请表放在 {self.multihop_room}"
-                cat = "confusable"
-            elif r < 0.45:
-                block = self.neutral_block(per_turn)
-                cat = "neutral"
-            else:
-                block = self.confusable_block(per_turn)
-                cat = "confusable"
-            # 每轮带唯一序号避免内核 dedupe（v1 教训：相同输入被 skipped:true 跳过）
-            plan.append({"kind": "filler", "cat": cat,
-                         "text": f"日常记录（第 {i} 批）：{block}"})
+            # 每批拼 3 条不同位置的片段（同阶段推进）：信息密度高且互不重复
+            base = i * frags_per_turn
+            parts = [self.narrative_block(base + k, filler_turns * frags_per_turn)[0]
+                     for k in range(frags_per_turn)]
+            plan.append({"kind": "filler", "cat": "narrative", "text": "；".join(parts)})
 
         # ---- 提问（措辞与出现时不同；一次一问）----
 
