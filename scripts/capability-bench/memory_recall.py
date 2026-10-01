@@ -549,6 +549,13 @@ class PiDriver:
         }
         cmd = [
             "pi", "-p", "--mode", "json",
+            # ★ --no-tools 是本测试的**正确性前提**，不是优化。
+            #   实测（2026-10-01）：不加时 pi 在一轮里跑 33 次 bash，把自己
+            #   当上帝视角 —— grep "4324" 搜到旧会话、cat order_gw_ops_index.md
+            #   读跑分台自己的材料、sed -n '605,625p' 去挖脚本行号。
+            #   ⇒ 它不是在测记忆，而是在作弊；此前所有 pi 100% 成绩全部作废。
+            #   记忆召回测试必须是纯对话，不能给 agent 接触磁盘的手段。
+            "--no-tools",
             "--session-id", self.session_id,
             "--provider", self.args.provider, "--model", self.args.model,
             text,
