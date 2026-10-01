@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -18,6 +19,19 @@ import (
 // 把一次召回变成一次全表扫描。
 const maxKeywordEntities = 50
 
+// maxRecallEntities 是**一次召回全局**的实体上限（跨所有关键词）。
+//
+// ★ 为什么必须有它（2026-10-01 跑分实测）：maxKeywordEntities 是**每个关键词**
+// 的上限，而 ExtractKeywords 会把一个问句切成多个词（实测
+// 「metrics服务的端口是多少」→ [metrics, 服务, 端口]，其中「服务」「端口」
+// 是无区分度的泛词）。于是 3 个关键词 × 50 = 最多 150 个实体被**平铺**进上下文，
+// 实测 memory_recall 单次返回 193 个实体 / 13744 tokens = 工具预算的 436%，
+// 模型被噪音淹没后转去 grep 知识库文件，还把「没检索到」当成「不存在」。
+//
+// 实验结论（internal/memory 内的三方案对比，见 benchmark 记录）：排序不是瓶颈
+// —— 目标实体在三种方案里都排#1。缺的是**全局上限**。
+const maxRecallEntities = 20
+
 // maxAdjacentRelations 是深度扩展里**每层**读取的关系上限。
 const maxAdjacentRelations = 200
 
@@ -27,6 +41,14 @@ const maxAdjacentRelations = 200
 const maxFullRecallEntities = 10000
 
 type Entity struct {
+	// MatchRank 是**实词关键词**上的最佳命中层级（0=完全相等, 1=前缀, 2=包含）。
+	//
+	// ★ 为什么实体要带这个字段（2026-10-01 跑分实测）：召回结果平铺给模型时，
+	// 「为什么这条相关」此前完全不可见 —— 模型看到 193 个同格式的
+	// 「-名称(提及N次)」，无从判断该信哪个，于是转去 grep 知识库文件，
+	// 还把「没检索到」当成「不存在」。带上层级后最相关的几条一眼可辨。
+	// 仅在关键词召回路径上填充；深度扩展产出与 seed 路径为 -1（未知）。
+	MatchRank int       `json:"match_rank,omitempty"`
 	ID           int64     `json:"id"`
 	Name         string    `json:"name"`
 	Type         string    `json:"type"`
@@ -601,7 +623,43 @@ type RecallResult struct {
 	Relations []Relation `json:"relations"`
 }
 
+// SortMode 决定召回结果的呈现顺序。
+type SortMode string
+
+const (
+	// SortRelevance：按「实词命中层级 → 提及次数 → 名字长度」排序。
+	// 回答「某个具体东西是什么/是多少」用这个 —— 实词精确命中最可信。
+	SortRelevance SortMode = "relevance"
+	// SortRecent：按更新时间倒序，同时间按提及次数。
+	// 回答「最近/最新/现在是什么」用这个 —— 运维场景里答案常常是
+	// 「新值覆盖旧值」（实测 v4 的 overwrite 组就是考这个），
+	// 相关性排序会把旧的同名实体排在新值前面。
+	SortRecent SortMode = "recent"
+)
+
+// ParseSortMode 解析排序模式；空或无法识别时返回默认（相关性）。
+//
+// 刻意不接受任何"看起来像"的字符串：这里只服务显式入参，
+// 认错会让调用方以为自己按时间排序了、实际拿到相关性顺序。
+func ParseSortMode(s string) SortMode {
+	switch strings.ToLower(strings.TrimSpace(s)) {
+	case "recent", "time", "newest":
+		return SortRecent
+	default:
+		return SortRelevance
+	}
+}
+
+// Recall 保持原签名（相关性排序），委托给 RecallSorted。
 func (g *GraphDB) Recall(keywords []string, seedEntities []string, depth int, sessionFilter string) (*RecallResult, error) {
+	return g.RecallSorted(keywords, seedEntities, depth, sessionFilter, SortRelevance)
+}
+
+// RecallSorted 是可指定呈现顺序的召回。
+//
+// 截断在**出口**做（深度扩展之后），不是深度扩展之前 —— 扩展会从种子实体
+// 带出新的邻居实体，扩展前截断会让总量再次越界（实测 47 > 20）。
+func (g *GraphDB) RecallSorted(keywords []string, seedEntities []string, depth int, sessionFilter string, mode SortMode) (*RecallResult, error) {
 	g.mu.RLock()
 	defer g.mu.RUnlock()
 
@@ -662,6 +720,9 @@ func (g *GraphDB) Recall(keywords []string, seedEntities []string, depth int, se
 	}
 
 	entityIDs := make(map[int64]bool)
+	// entityRank 记每个实体在**各关键词**下的最佳精确度层级（0=完全相等、
+	// 1=前缀命中、2=包含命中），用于跨关键词归并排序。
+	entityRank := make(map[int64]int)
 
 	for _, kw := range keywords {
 		// 相关度排序 + 限额。
@@ -674,7 +735,11 @@ func (g *GraphDB) Recall(keywords []string, seedEntities []string, depth int, se
 		// 相关度分三层：完全相等 > 前缀命中 > 包含命中；同层按提及次数、
 		// 再按名字长度（短名更可能是实体本身而不是长描述）。
 		rows, err := g.db.Query(
-			`SELECT id, name, type, mention_count, created_at, updated_at
+			`SELECT id, name, type, mention_count, created_at, updated_at,
+			        CASE
+			          WHEN LOWER(name) = LOWER(?) THEN 0
+			          WHEN LOWER(name) LIKE LOWER(?) || '%' THEN 1
+			          ELSE 2 END
 			 FROM entities WHERE LOWER(name) LIKE ?
 			 ORDER BY CASE
 			     WHEN LOWER(name) = LOWER(?) THEN 0
@@ -682,7 +747,7 @@ func (g *GraphDB) Recall(keywords []string, seedEntities []string, depth int, se
 			     ELSE 2 END,
 			   mention_count DESC, LENGTH(name) ASC
 			 LIMIT ?`,
-			"%"+kw+"%", kw, kw, maxKeywordEntities,
+			kw, kw, "%"+kw+"%", kw, kw, maxKeywordEntities,
 		)
 		if err != nil {
 			return nil, err
@@ -690,9 +755,16 @@ func (g *GraphDB) Recall(keywords []string, seedEntities []string, depth int, se
 
 		for rows.Next() {
 			var e Entity
-			if err := rows.Scan(&e.ID, &e.Name, &e.Type, &e.MentionCount, &e.CreatedAt, &e.UpdatedAt); err != nil {
+			var rank int
+			if err := rows.Scan(&e.ID, &e.Name, &e.Type, &e.MentionCount,
+				&e.CreatedAt, &e.UpdatedAt, &rank); err != nil {
 				rows.Close()
 				return nil, err
+			}
+			// 跨关键词取**最优**rank：同一实体被多个关键词命中时，
+			// 以最精确的那次为准（否则「完全相等」会被「包含」稀释）。
+			if prev, ok := entityRank[e.ID]; !ok || rank < prev {
+				entityRank[e.ID] = rank
 			}
 			if !entityIDs[e.ID] {
 				entityIDs[e.ID] = true
@@ -718,6 +790,14 @@ func (g *GraphDB) Recall(keywords []string, seedEntities []string, depth int, se
 	if len(entityIDs) == 0 {
 		return result, nil
 	}
+
+	// ★ 全局上限：跨关键词累加后按「三层精确度」截断。
+	//
+	// 单个关键词的 LIMIT(maxKeywordEntities) 管不住总量 —— 多个关键词各召回
+	// 一批会累加，实测 3 个关键词就能堆到 193 个实体（13744 tokens）。
+	// 这里按 SQL 里已有的三层精确度（完全相等 > 前缀命中 > 包含命中）跨关键词
+	// 归并后截断：那一层信息在单关键词查询里已经算出来了（rank 列），
+	// 但之前被 append 顺序冲淡了。
 
 	// seenRel 跨层去重。
 	//
@@ -828,6 +908,17 @@ func (g *GraphDB) Recall(keywords []string, seedEntities []string, depth int, se
 			entityIDs[id] = true
 		}
 	}
+
+	// ★ 出口排序 + 全局截断（在深度扩展之后）。
+	//
+	// 深度扩展会从种子实体带出新的邻居实体，所以上限必须在出口施加。
+	sortRecallEntities(result.Entities, entityRank, keywords, mode)
+	if len(result.Entities) > maxRecallEntities {
+		dropped := len(result.Entities) - maxRecallEntities
+		result.Entities = result.Entities[:maxRecallEntities]
+		log.Printf("[graph] recall: 截断 %d 个实体（全局上限 %d）", dropped, maxRecallEntities)
+	}
+	sortRecallRelations(result.Relations, mode)
 
 	return result, nil
 }
@@ -1410,4 +1501,166 @@ func effectiveScenes(t Triple) []string {
 	}
 	add(t.Scene)
 	return out
+}
+
+// sortRecallEntities 按模式给实体排序（原地），并回填 MatchRank。
+//
+// 相关性模式的三层键（从强到弱）：
+//  1. 实词命中层级：完全相等(0) > 前缀(1) > 包含(2)。**最关键的一层**——
+//     问 metrics 时「metrics服务端口8328」是前缀命中，而「metrics服务端口」类
+//     实体只是包含命中，前者必须在前。
+//  2. 提及次数降序：提及多的更可能是常用实体。
+//  3. 名字长度升序：短名更可能是实体本身而非长描述（沿用 SQL 原口径）。
+//
+// 时间模式：UpdatedAt 倒序 → 提及次数降序 → 名字长度升序。
+// 运维场景里「现在的值」通常是最新的那次写入（实测 v4 overwrite 组
+// 就是「新分机覆盖旧分机」），相关性排序会把旧值排在新值前面。
+//
+// 稳定排序保证同层内顺序可复现，不会两次调用结果跳动。
+func sortRecallEntities(ents []Entity, rank map[int64]int, keywords []string, mode SortMode) {
+	spec := make(map[int64]int, len(ents))
+	for i := range ents {
+		// 先算实词层级：只命中泛词时退回整体 rank（仍应召回，只是靠后）。
+		spec[ents[i].ID] = bestSpecificRank(rank[ents[i].ID], ents[i].Name, keywords)
+	}
+	// 回填 MatchRank，供上层展示「为什么这条相关」。
+	for i := range ents {
+		ents[i].MatchRank = spec[ents[i].ID]
+	}
+
+	sort.SliceStable(ents, func(i, j int) bool {
+		if mode == SortRecent {
+			if !ents[i].UpdatedAt.Equal(ents[j].UpdatedAt) {
+				return ents[i].UpdatedAt.After(ents[j].UpdatedAt)
+			}
+		} else if spec[ents[i].ID] != spec[ents[j].ID] {
+			return spec[ents[i].ID] < spec[ents[j].ID]
+		}
+		if ents[i].MentionCount != ents[j].MentionCount {
+			return ents[i].MentionCount > ents[j].MentionCount
+		}
+		return len(ents[i].Name) < len(ents[j].Name)
+	})
+}
+
+// sortRecallRelations 按同一模式给关系排序（原地）。
+//
+// 时间模式：CreatedAt 倒序 → TurnID 倒序 → ID 倒序。
+//
+// ★ 为什么必须带 TurnID/ID 两级兜底（实测抓到的坑）：SQLite 的 CURRENT_TIMESTAMP
+// **只到秒**。同一秒内写入的两次覆盖（实测 turn 1 写 4379、turn 2 写 4324
+// 落在同一秒），CreatedAt 完全相等，稳定排序会保留原顺序 —— 而原顺序来自
+// `ORDER BY confidence DESC`，置信度相同时退化到 rowid 升序，也就是**旧值在前**。
+// 这与「记忆只能按毫秒时间戳排序」是同一类问题（SQLite 秒精度）。
+// TurnID 在一次会话内单调递增，RelationID 是自增主键，两者都严格单调，
+// 因此即使同秒也能分出先后。
+//
+// 相关性模式下关系**保持召回顺序**（源头已按种子实体的相关性排过），
+// 刻意不打乱 —— 邻接扩展的顺序本身带语义（从种子实体出发由近及远）。
+func sortRecallRelations(rels []Relation, mode SortMode) {
+	if mode != SortRecent {
+		return
+	}
+	sort.SliceStable(rels, func(i, j int) bool {
+		a, b := rels[i], rels[j]
+		if !a.CreatedAt.Equal(b.CreatedAt) {
+			return a.CreatedAt.After(b.CreatedAt)
+		}
+		if a.TurnID != b.TurnID {
+			return a.TurnID > b.TurnID
+		}
+		return a.ID > b.ID
+	})
+}
+
+// rankEntity 按「精确度层级 → 提及次数 → 名字长度」给实体排序（原地）。
+//
+// 为什么需要跨关键词归并（2026-10-01 跑分实测）：SQL 里已经算出了三层精确度
+// （完全相等 > 前缀命中 > 包含命中），但那只是**单个关键词内**的排序。
+// ExtractKeywords 会把问句切成多个词（实测「metrics服务的端口是多少」
+// → [metrics, 服务, 端口]），各关键词的结果被依次 append —— 精确度层级
+// 在拼接过程中被冲淡，第一个泛词召回的噪音会排在精确命中之前。
+//
+// 排序键（从强到弱）：
+//  1. rank：完全相等(0) > 前缀(1) > 包含(2)。**这是最关键的一层**——
+//     问 metrics 时，「metrics服务端口8328」是前缀命中，而「metrics服务端口」
+//     类实体是包含命中，前者必须在前。
+//  2. mention_count 降序：提及多的更可能是常用实体。
+//  3. 名字长度升序：短名更可能是实体本身而非长描述（沿用 SQL 的口径）。
+//
+// 稳定排序：rank 相同的实体保持原顺序（SQL 已在各关键词内排过），
+// 避免同层内因合并而随机跳动 —— 那会让「第一次调用结果」与「第二次」不一致。
+func rankEntity(ents []Entity, rank map[int64]int, keywords []string) {
+	// specificity 为每个实体算「最有区分度的那个关键词」上的命中层级。
+	//
+	// ★ 为什么要区分「泛词」与「实词」（实测抓到）：关键词里有「端口」「服务」
+	// 这类泛词，实体名恰好就叫「端口」时它对泛词是**完全相等命中（rank=0）**，
+	// 于是把真正的答案「metrics服务端口8328」（前缀命中 rank=1）压到了第二。
+	// 「完全相等」只在**实词**上才算强信号。
+	spec := make(map[int64]int, len(ents))
+	for _, e := range ents {
+		spec[e.ID] = bestSpecificRank(rank[e.ID], e.Name, keywords)
+	}
+	sort.SliceStable(ents, func(i, j int) bool {
+		ri, rj := spec[ents[i].ID], spec[ents[j].ID]
+		if ri != rj {
+			return ri < rj
+		}
+		if ents[i].MentionCount != ents[j].MentionCount {
+			return ents[i].MentionCount > ents[j].MentionCount
+		}
+		return len(ents[i].Name) < len(ents[j].Name)
+	})
+}
+
+// rankOf 取实体的精确度层级；未记录时按最差处理（包含命中）。
+func rankOf(rank map[int64]int, e Entity) int {
+	if r, ok := rank[e.ID]; ok {
+		return r
+	}
+	return 2
+}
+
+// genericKeywords 是区分不出实体的泛词：对它们做「完全相等」匹配没有意义。
+//
+// 判据：出现在大量实体名里的短词。实测「端口」「服务」这类词在 order-gw
+// 的实体表里遍布（每个「xx服务端口」都含它们），而「metrics」只出现一次。
+// 用固定表而非动态统计，是为了召回路径可预测、不引入额外查询；
+// 代价是新领域需要补这张表（补漏了也只是排序略差，不会召回不到）。
+var genericKeywords = map[string]bool{
+	"端口": true, "服务": true, "版本": true, "接口": true, "任务": true,
+	"状态": true, "类型": true, "时间": true, "配置": true, "数量": true,
+	"名称": true, "结果": true, "内容": true, "问题": true, "记录": true,
+	"数据": true, "信息": true, "文件": true, "系统": true, "功能": true,
+}
+
+// bestSpecificRank 返回实体在**实词**关键词上的最佳命中层级。
+//
+// 若实体只命中泛词（全都不算实词），退回用整体 rank —— 它仍然该被召回，
+// 只是排在命中实词的实体之后。
+func bestSpecificRank(rank int, name string, keywords []string) int {
+	best := -1
+	lower := strings.ToLower(name)
+	for _, kw := range keywords {
+		if genericKeywords[strings.ToLower(kw)] {
+			continue
+		}
+		lkw := strings.ToLower(kw)
+		var r int
+		switch {
+		case lower == lkw:
+			r = 0
+		case strings.HasPrefix(lower, lkw):
+			r = 1
+		default:
+			r = 2
+		}
+		if best < 0 || r < best {
+			best = r
+		}
+	}
+	if best < 0 {
+		return rank // 只命中泛词
+	}
+	return best
 }

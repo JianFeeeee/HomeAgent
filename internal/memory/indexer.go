@@ -288,6 +288,8 @@ func (idx *Indexer) BuildToolPrompt() string {
 参数:
 - query_intent: 查询关键词，逗号分隔
 - depth: 遍历深度（默认2）
+- sort: 排序方式。relevance=相关性（默认）；recent=时间倒序最新在前
+  （问"最近/最新/现在是什么"时必须用 —— 答案常是新值覆盖旧值）
 
 ### memory_commit
 将三元组写入图记忆。
@@ -426,7 +428,10 @@ func (idx *Indexer) GetToolDefinitions() []map[string]interface{} {
 			"type": "function",
 			"function": map[string]interface{}{
 				"name":        "memory_recall",
-				"description": "检索图记忆。输入查询意图关键词，返回相关实体和关系。",
+				"description": "检索图记忆。输入查询意图关键词，返回相关实体和关系。" +
+					"问『某个具体东西是什么/是多少』用默认相关性排序；" +
+					"问『最近/最新/现在是什么』必须传 sort=recent —— " +
+					"运维场景里答案常是新值覆盖旧值，相关性排序分不出新旧。",
 				"parameters": map[string]interface{}{
 					"type": "object",
 					"properties": map[string]interface{}{
@@ -438,6 +443,12 @@ func (idx *Indexer) GetToolDefinitions() []map[string]interface{} {
 							"type":        "integer",
 							"description": "遍历深度，默认2",
 							"default":     2,
+						},
+						"sort": map[string]interface{}{
+							"type": "string",
+							"description": "排序方式。relevance=相关性（默认，问具体是什么/多少）；" +
+								"recent=时间倒序最新在前（问最近/最新/现在）。",
+							"enum": []string{"relevance", "recent"},
 						},
 					},
 					"required": []string{"query_intent"},

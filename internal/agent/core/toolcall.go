@@ -216,7 +216,15 @@ func (a *Agent) executeMemoryTool(tc agentAPI.ToolCall, turnScenes []string) str
 		if len(keywords) == 1 {
 			keywords = memory.ExtractKeywords(query)
 		}
-		result, err := g.Recall(keywords, nil, int(depth), "")
+		// 排序模式：默认相关性；显式要"最近/最新"时用 recent。
+		//
+		// ★ 为什么要分两种（实测 v4 跑分）：overwrite 组考的是"新值覆盖旧值"，
+		// 相关性排序下新旧同名实体的命中层级完全相同，只能靠时间分胜负；
+		// 而 casual 组问"某个服务端口是多少"，要的是实词精确命中。
+		// 用一个排序同时服务这两类问题，必然有一边错。
+		sortMode := memory.ParseSortMode(fmt.Sprint(tc.Arguments["sort"]))
+
+		result, err := g.RecallSorted(keywords, nil, int(depth), "", sortMode)
 		if err != nil {
 			return fmt.Sprintf("记忆检索失败: %v", err)
 		}
@@ -231,9 +239,21 @@ func (a *Agent) executeMemoryTool(tc agentAPI.ToolCall, turnScenes []string) str
 			a.indexer.MarkRecalled(names...)
 		}
 		var parts []string
-		parts = append(parts, fmt.Sprintf("找到 %d 个相关实体:", len(result.Entities)))
+		parts = append(parts, fmt.Sprintf("找到 %d 个相关实体（按%s排序）:", len(result.Entities), sortLabel(sortMode)))
 		for _, e := range result.Entities {
-			parts = append(parts, fmt.Sprintf("- %s (提及%d次, 类型:%s)", e.Name, e.MentionCount, e.Type))
+			// ★ 带出匹配层级：此前输出是同格式平铺，模型无从判断该信哪条。
+			//
+			// 实测 v4：193 个实体平铺（13744 tokens）后，模型放弃向量检索、
+			// 转去 grep 知识库文件，还把"没检索到"说成"库里不存在"。
+			// 层级标记让最相关的几条一眼可辨。
+			tag := ""
+			switch {
+			case e.MatchRank == 0:
+				tag = ", 精确匹配"
+			case e.MatchRank == 1:
+				tag = ", 前缀匹配"
+			}
+			parts = append(parts, fmt.Sprintf("- %s (提及%d次, 类型:%s%s)", e.Name, e.MentionCount, e.Type, tag))
 		}
 		parts = append(parts, fmt.Sprintf("找到 %d 条关系:", len(result.Relations)))
 		parts = append(parts, formatRecallRelations(result.Relations, 10)...)
@@ -838,4 +858,12 @@ func (a *Agent) executeDocTool(tc agentAPI.ToolCall) string {
 	default:
 		return fmt.Sprintf("未知的文档工具: %s", tc.Name)
 	}
+}
+
+// sortLabel 把排序模式翻成给模型看的中文标签。
+func sortLabel(m memory.SortMode) string {
+	if m == memory.SortRecent {
+		return "时间倒序，最新在前"
+	}
+	return "相关性"
 }
