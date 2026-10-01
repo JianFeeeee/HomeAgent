@@ -51,7 +51,7 @@ func TestOverflow_T1_积累超125触发(t *testing.T) {
 		t.Fatalf("构造后应已超页，ratio=%.2f 阈值=%.2f", ratio, overflowRatio)
 	}
 
-	handled, pruned := a.maybeHandleContextOverflow("退款导出")
+	handled, pruned := a.maybeHandleContextOverflow(nil, "退款导出")
 	if !handled {
 		t.Fatal("超限时 maybeHandleContextOverflow 应返回 handled=true")
 	}
@@ -69,7 +69,7 @@ func TestOverflow_T1_未超页不动手(t *testing.T) {
 	a := newOverflowAgent(10_000_000, 2, 5, 100)
 	before := a.context.Len()
 
-	handled, pruned := a.maybeHandleContextOverflow("查询")
+	handled, pruned := a.maybeHandleContextOverflow(nil, "查询")
 	if handled || pruned != 0 {
 		t.Fatalf("未超页不应处理：handled=%v pruned=%d", handled, pruned)
 	}
@@ -82,7 +82,7 @@ func TestOverflow_T1_未超页不动手(t *testing.T) {
 func TestOverflow_T1_轻量内核跳过(t *testing.T) {
 	a := newOverflowAgent(1000, 2, 20, 400)
 	a.parentID = "parent-1" // 触发 isLightKernel
-	handled, pruned := a.maybeHandleContextOverflow("查询")
+	handled, pruned := a.maybeHandleContextOverflow(nil, "查询")
 	if handled || pruned != 0 {
 		t.Fatalf("轻量内核不应按相关度裁剪：handled=%v pruned=%d", handled, pruned)
 	}
@@ -94,7 +94,7 @@ func TestOverflow_T2_裁剪后累积下降(t *testing.T) {
 	a := newOverflowAgent(1000, 2, 20, 400)
 	before := a.accumulatedTokens()
 
-	a.maybeHandleContextOverflow("退款导出")
+	a.maybeHandleContextOverflow(nil, "退款导出")
 	after := a.accumulatedTokens()
 
 	if after >= before {
@@ -114,7 +114,7 @@ func TestOverflow_T4_裁不动则终止不中断(t *testing.T) {
 		t.Fatal("前置条件不成立：构造的会话应超页")
 	}
 
-	a.maybeHandleContextOverflow("查询")
+	a.maybeHandleContextOverflow(nil, "查询")
 
 	a.overflowStat.Lock()
 	aborted, triggered := a.overflowStat.Aborted, a.overflowStat.Triggered
@@ -187,11 +187,11 @@ func TestOverflow_上游其他错误不误接(t *testing.T) {
 // nil context / nil provider 不得 panic。
 func TestOverflow_零值不panic(t *testing.T) {
 	var a *Agent
-	if handled, _ := a.maybeHandleContextOverflow("q"); handled {
+	if handled, _ := a.maybeHandleContextOverflow(nil, "q"); handled {
 		t.Fatal("nil agent 不应处理")
 	}
 	empty := &Agent{}
-	if handled, _ := empty.maybeHandleContextOverflow("q"); handled {
+	if handled, _ := empty.maybeHandleContextOverflow(nil, "q"); handled {
 		t.Fatal("零值 agent 不应处理")
 	}
 	_ = empty.overflowRatioNow()
@@ -218,4 +218,62 @@ func TestOverflow_并发安全(t *testing.T) {
 		}(i)
 	}
 	wg.Wait()
+}
+// ── T5（变异项）：帧内恢复预算耗尽 ⇒ 终止而非死循环 ──
+//
+// 为什么要单独测：这个防护一度是**死代码**（TaskFrame.OverflowRecover 声明了
+// 但从没被读取）。没接线的防护等于没有防护 —— 变异测试正是抓这种。
+func TestOverflow_T5_恢复预算耗尽则终止(t *testing.T) {
+	a := newOverflowAgent(1000, 2, 20, 400)
+	f := &TaskFrame{}
+
+	// 第一次超页：正常裁剪
+	handled, pruned := a.maybeHandleContextOverflow(f, "退款导出")
+	if !handled || pruned <= 0 {
+		t.Fatalf("首次应正常裁剪：handled=%v pruned=%d", handled, pruned)
+	}
+	if f.OverflowRecover != 1 {
+		t.Fatalf("首次应记一次恢复，��际 %d", f.OverflowRecover)
+	}
+
+	// 把 topK 放大到裁不动（模拟「topK 与窗口脱钩」这个真实根因）
+	a.maxContextSize = 99999
+
+	// 预算内的第二次：仍会尝试
+	handled, _ = a.maybeHandleContextOverflow(f, "退款导出")
+	if !handled {
+		t.Fatal("预算内仍应处理")
+	}
+	if f.OverflowRecover != 2 {
+		t.Fatalf("预算内应累计到 2，实际 %d", f.OverflowRecover)
+	}
+
+	// 第三次：超预算 ⇒ 终止，且写明原因
+	handled, _ = a.maybeHandleContextOverflow(f, "退款导出")
+	if !handled {
+		t.Fatal("超预算也应算「已处理」（终止），以免调用方再重跑")
+	}
+	if f.Terminal != terminalError {
+		t.Fatalf("超预算应置终止态，实际 terminal=%v", f.Terminal)
+	}
+	if f.Err == nil || !strings.Contains(f.Err.Error(), "max_context_size") {
+		t.Fatalf("终止原因应指向根因（max_context_size 与窗口不匹配）：%v", f.Err)
+	}
+}
+
+// 变异自证：把预算调到极大 ⇒ 上面那条必须变红（证明它真的在数）。
+func TestOverflow_T5_变异_预算极大则不终止(t *testing.T) {
+	backup := overflowRecoverBudget
+	overflowRecoverBudget = 1 << 30
+	defer func() { overflowRecoverBudget = backup }()
+
+	a := newOverflowAgent(1000, 2, 20, 400)
+	a.maxContextSize = 99999 // 裁不动
+	f := &TaskFrame{}
+	for i := 0; i < 5; i++ {
+		a.maybeHandleContextOverflow(f, "退款导出")
+	}
+	if f.Terminal == terminalError {
+		t.Fatalf("预算=2^30 时不应终止 ⇒ 预算判定可能没生效")
+	}
 }

@@ -618,6 +618,21 @@ func (a *Agent) stepPrepare(f *TaskFrame) stepOutcome {
 // 取消（context.Canceled 且 agent 未退出）时**留在本 step 并 Turn++**——等价于
 // 原实现的 `continue`：重新排空中断、补占位、重新请求。抢占挂起将在 M3 从这里接管。
 func (a *Agent) stepLLM(f *TaskFrame) stepOutcome {
+	// ★ 本地超页预判：每次发 LLM 请求**之前**检查积累上下文，覆盖轮内 tool 回环。
+	//   轮内工具回灌会把积累量推到窗口数倍，而现状只在轮首检查
+	//   （checkContextFull，且根 agent no-op）—— 等轮首才发现时，
+	//   整轮工具调用的代价已经付掉了。
+	//   必须在这里做而不能更早：f.Msgs 在上一行之前已经拼好，
+	//   而本次裁剪会让它过期。
+	if handled, _ := a.maybeHandleContextOverflow(f, ""); handled {
+		if f.Terminal == terminalError {
+			return outcomeFailed // 恢复预算耗尽，f.Err 已写明
+		}
+		// 已裁剪：f.Msgs 必须在 stepPrepare 重建，这里那份就是超限那份。
+		f.Step = StepPrepare
+		return outcomeContinue
+	}
+
 	// zen 兼容网关要求请求的最后一条消息必须是 user(thinking 续写模式校验),
 	// 工具轮产出的 tool/assistant 消息作结尾会被 400 拒绝,故补一条 user 占位。
 	f.Msgs = dropContinuationPlaceholders(f.Msgs)

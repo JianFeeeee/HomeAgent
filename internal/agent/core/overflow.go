@@ -37,7 +37,10 @@ const overflowRatio = 1.25
 // 循环，每次都付一轮任务调度开销。
 //
 // 超限时**不做静默重试**：保存现场并明确终止，把问题暴露给用户与状态面。
-const overflowRecoverBudget = 2
+//
+// 声明为 var 而非 const：测试要能变异它做判据自证（变异后超预算用例必须变红），
+// 将来若要按窗口大小动态给额度（窗口越大越值得多试几次），也不用改结构。
+var overflowRecoverBudget = 2
 
 // accumulatedTokens 估算**未裁剪**的积累上下文 token 数。
 //
@@ -82,7 +85,7 @@ func (a *Agent) overflowRatioNow() float64 {
 // 之后挂起帧里那份超限请求不能复用（见设计文档约束三）。
 //
 // 幂等：未超页时零开销（一次 token 估算 + 一次比较），可安全地在热路径调用。
-func (a *Agent) maybeHandleContextOverflow(query string) (handled bool, pruned int) {
+func (a *Agent) maybeHandleContextOverflow(f *TaskFrame, query string) (handled bool, pruned int) {
 	if a == nil || a.context == nil || a.isLightKernel() {
 		// 轻量内核（驻留子）不做按相关度裁剪，见 pruneByQuery 的同款理由。
 		return false, 0
@@ -90,6 +93,22 @@ func (a *Agent) maybeHandleContextOverflow(query string) (handled bool, pruned i
 	ratio := a.overflowRatioNow()
 	if ratio < overflowRatio {
 		return false, 0
+	}
+	// 恢复预算：同一帧内裁剪仍裁不下 ⇒ 说明 topK 与窗口脱钩（见 pruneByQuery），
+	// 再裁一次也是同样结果。超预算后**明确终止**，不静默重试。
+	if f != nil {
+		if f.OverflowRecover >= overflowRecoverBudget {
+			log.Printf("[agent] context overflow: recover budget exhausted (%d/%d), "+
+				"terminating this frame instead of looping",
+				f.OverflowRecover, overflowRecoverBudget)
+			a.markOverflowAborted(ratio, a.context.Len())
+			f.Err = fmt.Errorf("上下文超限：已裁剪 %d 次仍超出窗口，"+
+				"本轮终止（请检查 core.agent.max_context_size 与窗口是否匹配）",
+				f.OverflowRecover)
+			f.Terminal = terminalError
+			return true, 0 // 终止也是「已处理」：调用方不要再重跑
+		}
+		f.OverflowRecover++
 	}
 	return true, a.handleContextOverflow(query, ratio)
 }
