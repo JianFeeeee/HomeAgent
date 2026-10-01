@@ -277,3 +277,66 @@ func TestOverflow_T5_变异_预算极大则不终止(t *testing.T) {
 		t.Fatalf("预算=2^30 时不应终止 ⇒ 预算判定可能没生效")
 	}
 }
+
+// ── T9：topK 随窗口换算（不再与窗口脱钩）──
+//
+// 这是 v4 跑分归因的根因二：max_context_size 是条数、与窗口无关，
+// 所以「只调 context_window 到 1M 就更好」不成立。
+func TestOverflow_T9_topK随窗口变化(t *testing.T) {
+	// 同样 20 条事件、同样的 max_context_size，只改窗口 ⇒ topK 必须跟着变
+	build := func(window int) *Agent {
+		return newOverflowAgent(window, 30, 20, 400) // maxContextSize=30（默认）
+	}
+
+	small := build(10_000)      // 小窗口
+	large := build(1_000_000)   // 大窗口（用户关心的 1M 场景）
+
+	topKSmall := small.contextTopK()
+	topKLarge := large.contextTopK()
+
+	if topKLarge <= topKSmall {
+		t.Fatalf("窗口变大后 topK 应变大：%d → %d（说明仍与窗口脱钩）", topKSmall, topKLarge)
+	}
+	// 小窗口下预算只够留很少事件；大窗口下应更宽松
+	if topKLarge < 10 {
+		t.Fatalf("1M 窗口下 topK=%d 过小，说明预算反推失效", topKLarge)
+	}
+}
+
+// max_context_size 仍是硬上限（改了配置必须生效，否则运维会困惑）。
+func TestOverflow_T9_运维配置仍是上限(t *testing.T) {
+	a := newOverflowAgent(1_000_000, 5, 40, 200) // 窗口很大但硬上限 5
+	if got := a.contextTopK(); got > 4 {
+		t.Fatalf("topK=%d 超过 max_context_size-1=4，运维配置失效", got)
+	}
+}
+
+// 无积累样本时不得除零/返回 0。
+func TestOverflow_T9_空上下文topK至少为1(t *testing.T) {
+	a := newOverflowAgent(50_000, 30, 0, 200)
+	if got := a.contextTopK(); got < 1 {
+		t.Fatalf("空上下文时 topK=%d，至少应为 1", got)
+	}
+}
+
+// 变异自证：把 contextTopK 退回「固定用 maxContextSize」，
+// 上面那条「窗口变大 topK 变大」必须变红（证明该测试真能抓到脱钩）。
+func TestOverflow_T9_变异_固定topK则脱钩(t *testing.T) {
+	build := func(window int) *Agent { return newOverflowAgent(window, 30, 20, 400) }
+
+	// 旧行为：topK 只看 max_context_size，与窗口无关 ⇒ 两个窗口得到同一个值。
+	oldTopK := func(a *Agent) int { return a.maxContextSize - 1 }
+	if oldTopK(build(10_000)) != oldTopK(build(1_000_000)) {
+		t.Fatalf("前置不成立：旧行为本应与窗口无关")
+	}
+
+	// 新实现必须与旧行为不同，否则「T9_topK随窗口变化」那条主测试是假绿。
+	newSmall := build(10_000).contextTopK()
+	newLarge := build(1_000_000).contextTopK()
+	if newSmall == oldTopK(build(10_000)) && newLarge == oldTopK(build(1_000_000)) {
+		t.Fatalf("新实现与旧实现不可区分 ⇒ topK 实际仍与窗口脱钩，主测试是假绿")
+	}
+	if newLarge <= newSmall {
+		t.Fatalf("新实现下窗口变大 topK 未变大：%d → %d", newSmall, newLarge)
+	}
+}
