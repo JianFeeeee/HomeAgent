@@ -18,7 +18,7 @@ import (
 // 当时共享内存只有 POSIX mmap 实现，故 Windows 侧只放了个报「尚未实现」的桩。
 // 但那个桩只定义了 tryLoadProc，而平台中立的 registry.go 还在调 loadProc /
 // closeProcHost —— **Windows 下整个 homed 从那时起就编译不过**
-// （plan.md §12.5 声称「交叉编译通过」，实际只验证了 proc 子包）。
+// （历史核实：曾有「交叉编译通过」的说法，但实际只验证了 proc 子包）。
 //
 // Part 6.2（d027c96）补齐了 Windows 共享内存（CreateFileMappingW）、事件通知
 // （CreateEventW）与段传递（命名对象经环境变量），桩却没人回头删。

@@ -83,3 +83,14 @@ dist/
 
 # 漂移巡检的运行时状态（含时间戳与指纹，每次跑都变）
 .drift-watch/
+
+# ——— 本地运维脚本 / 一次性工具（不入库，克隆后需另行获取）———
+# deploy-*.sh 是生产部署入口，含环境相关的 IP/路径约定；
+# 文档见 docs/zh/deploy-runbook.md。换机器部署前先确认脚本来源。
+/deploy-plan.sh
+/deploy-waiter.sh
+/deploy-sdk-site.sh
+
+# 一次性跑分/设计提取脚本，用完即弃
+/tmp_jinabench.py
+/napcat-design-dna.json

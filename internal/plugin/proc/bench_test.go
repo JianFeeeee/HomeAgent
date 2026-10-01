@@ -109,7 +109,7 @@ func benchmarkToolInvokeInline(b *testing.B, payloadSize int) {
 
 // benchmarkToolInvokeFrame 是 §13.3 之后的生产路径：内核 Alloc 帧 → 参数写帧
 // 前段 → RPC 只传 {frame, args_len} → 插件从帧读参数、结果写回帧结果区 →
-// 内核读回并归还整帧（调用帧模型，见 plan.md §13.3）。
+// 内核读回并归还整帧（调用帧模型）。
 func benchmarkToolInvokeFrame(b *testing.B, payloadSize int) {
 	bin := buildBenchPlugin(b, "stageplugin.go")
 	core := newFakeCore()
