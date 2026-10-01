@@ -66,26 +66,54 @@ python3 scripts/capability-bench/compare.py --a /var/tmp/cmp2/ha --b /var/tmp/cm
 
 **目的**：多轮对话超出窗口后，早期内容的召回率（HomeAgent 向量裁剪 vs pi 压缩）。
 
+**★ v3 填充模型（`95224eb`，当前唯一有效版本）**
+
+| 版本 | 填充 | 结论 |
+| --- | --- | --- |
+| v1 | 显式强调针 + 语义空转 | 两例 4/4 满分零区分度 |
+| v2 | 端口同构干扰 + **废话流**（天气/树叶/墨盒） | **作废**：废话被压缩直接丢弃 ⇒ 偶发针成填充里唯一的价值内容 ⇒ pi 跑分虚高 |
+| v3 | **高密度叙事**（order-gw 运维主线） | 当前版本 |
+
+v3 主线：`上线准备 → 灰度事故 → 修复验证 → 版本发布 → 交接收尾`，
+每轮 5 片段、每片段 2-4 条有信息增量的工作项（数值、因果、决策、变更）、
+含跨轮引用。针全部嵌在价值信息流里：
+
+- **偶发针** = 服务依赖清单条目（同构干扰 = 其它服务的**真实**端口，同样有意义，只是不是针）
+- **覆盖针** = 值班安排改号（`4379 → 4324`，真实变更场景；反向哨兵验证不塌回）
+- **多跳** = 交接流程本身（团队→门禁→申请表）
+
+实测证据支持「废话填充虚高」：v3 第 1 轮 HA 模型就同时调用
+`memory_recall / doc_query / config_list_plugins / cmd_run` 四个工具，
+而 v2 废话填充下只调 `doc_commit` —— 高密度负载才考得出 harness 的工具选择与
+循环管理能力。
+
+**★ 踩坑：锚点 frac 必须落在对应 phase 区间内**（生成器自证时抓到）
+`narrative_block` 的 phase 由 `frac` 切分，而针锚点也用 `frac`。写
+`i == int(total*0.50)` 想在 release 阶段插针，但 `0.50 < 0.61` 实际落在
+verify 分支 ⇒ **永不触发**（表现为「覆盖新值找不到」，不报错）。同理
+`0.63` 距边界 `0.61` 太近，浮点除法下可能仍在相邻区间。改法：把每个锚点
+推到所属区间**内部**（0.52/0.66/0.70/0.76/0.85/0.92），并写落位自证。
+
 **★ 先把两侧窗口真实配成一致（这是上次翻车点）**：
 
 - HomeAgent：`core.llm.sources.deepseek.context_window = 200000`（spawn-instance.sh 第 3 参传 200000），起后 `sqlite3 ... "SELECT value FROM config WHERE key LIKE '%context_window%'"` 验证 = 200000
 - pi：把隔离目录 `/var/tmp/pi-iso/agent/models.json` 的 AUTO 模型 `contextWindow` 改成 200000，并用 python3 读回验证
 
-执行（串行，先 A 后 pi）：
+执行（串行，先 A 后 pi；v3 填充实测 `overshoot` 需给 1.45 才能达到 1.23×）：
 
 ```bash
 python3 scripts/capability-bench/memory_recall.py --harness homeagent \
-  --socket /var/tmp/ha-a/cli.sock --api-key "$(cat /var/tmp/ha-a/apikey)" \
-  --window 200000 --expect-window 200000 --overshoot 1.25 --needles 4 \
-  --out /var/tmp/mem/ha-200k
+  --socket /var/tmp/ha-c/cli.sock --api-key "$(cat /var/tmp/ha-c/apikey)" \
+  --window 200000 --expect-window 200000 --overshoot 1.45 \
+  --out /var/tmp/mem/v3-ha-200k
 python3 scripts/capability-bench/memory_recall.py --harness pi \
-  --window 200000 --expect-window 200000 --overshoot 1.25 --needles 4 \
-  --out /var/tmp/mem/pi-200k
+  --window 200000 --expect-window 200000 --overshoot 1.45 \
+  --out /var/tmp/mem/v3-pi-200k
 ```
 
-验收：工具打印「✓ 超窗校验通过」（否则结果无效，删掉重跑）；报告 recall_rate 按针分层；两侧灌入量同级。
+验收：工具打印「✓ 超窗校验通过」（否则结果无效，删掉重跑）；报告 recall_rate 按针分层；两侧灌入量同级（v3 = 143 轮 / 245k / 1.23×）。
 
-注意：~99 轮/侧，每轮数秒到数十秒，单侧可能 10-30 分钟；用 bg_run 跑且**不要** `| tail`（会缓冲到看不见进度），输出落文件。
+注意：143 轮/侧，高密度叙事下单轮 ~25-50s，单侧约 1.5-2 小时；用 bg_run 跑且**不要** `| tail`（会缓冲到看不见进度），输出落文件。实时轮数看实例 `run.log` 的 `grep -ac 'text from cli'`（脚本 stdout 重定向后块缓冲滞后）。
 
 ## 4. 测试 C：多实例并行吞吐（可选，性能）
 
