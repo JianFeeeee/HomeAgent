@@ -197,7 +197,32 @@ func (a *Agent) contextTopK() int {
 	if topK > hardCap {
 		topK = hardCap
 	}
+	// ★ 下限必须是 protectedCount+1，否则裁剪会**无效**：Prune 里
+	//   keepCount = topK - len(protected)，若 topK <= protected 则 keep 为空、
+	//   全部事件被归档，裁完一轮上下文还是超页（实测 topK 被算成 1 时）。
+	//
+	// 什么时候会算成 1：单条事件就超过整个 ContextTokens 预算（实测 v4 的
+	// 工具大回执型事件平均 48000 token，而预算只有 40000）。此时正确的做法
+	// 不是「只留 1 条」（等于清空记忆），而是至少留够 protected 条 ——
+	// 宁可暂时超页，等 budget 或事件尺寸回到正常区间再裁。
+	if min := a.protectedContextCount() + 1; topK < min {
+		topK = min
+	}
+	if topK > hardCap {
+		topK = hardCap
+	}
 	return topK
+}
+
+// protectedContextCount 返回当前保护条数（最近 N 条永不换出）。
+func (a *Agent) protectedContextCount() int {
+	if a == nil || a.context == nil {
+		return defaultProtectedCount
+	}
+	if n := a.context.protectedCount; n > 0 {
+		return n
+	}
+	return defaultProtectedCount
 }
 
 // defaultAvgEventTokens 是「没有积累样本时」用于反推的事件平均 token。

@@ -370,3 +370,55 @@ func TestComputeTokenBudgetTuned_nilProvider(t *testing.T) {
 		t.Fatalf("ContextTokens 不应为负：%d", b.ContextTokens)
 	}
 }
+
+// ── topK 下限：不能被算成 1（会让裁剪完全无效）──
+//
+// 实测缺陷：v4 的工具大回执型事件平均 48000 token，而 50k 窗口的
+// ContextTokens 预算只有 40000 ⇒ 预算反推的 topK = 0 ⇒ 钳到 1。
+// 而 Prune 里 keepCount = topK - protected = 1 - 10 < 0 ⇒ keep 为空
+// ⇒ **全部事件被归档**：裁完一轮上下文照样超页，超页处理空转。
+//
+// 正确下限是 protectedCount+1：宁可暂时超页，等预算或事件尺寸回到正常区间。
+func TestOverflow_大事件时topK不塌到1(t *testing.T) {
+	// 窗口 50000 ⇒ ContextTokens 预算约 40000
+	a := newOverflowAgent(50_000, 30, 30, 0)
+	// 造「单条就超预算」的事件：Response 48000 token
+	for i := 0; i < 30; i++ {
+		a.context.Append(ContextEvent{
+			Input:    strings.Repeat("A", 160_000), // 约 40000 token
+			Response: strings.Repeat("B", 192_000), // 约 48000 token
+		})
+	}
+
+	topK := a.contextTopK()
+	protected := a.protectedContextCount()
+	if topK <= protected {
+		t.Fatalf("topK=%d <= protectedCount=%d ⇒ 裁剪会把全部事件归档（keep 为空），"+
+			"超页处理空转", topK, protected)
+	}
+	if topK < protected+1 {
+		t.Fatalf("topK=%d 必须至少是 protectedCount+1=%d", topK, protected+1)
+	}
+}
+
+// 真实形状验证：topK 下限生效时，Prune 确实还能裁掉东西。
+func TestOverflow_大事件时裁剪仍有效(t *testing.T) {
+	a := newOverflowAgent(50_000, 30, 30, 0)
+	for i := 0; i < 30; i++ {
+		a.context.Append(ContextEvent{
+			Input:    strings.Repeat("A", 8_000),
+			Response: strings.Repeat("B", 40_000),
+		})
+	}
+	before := a.context.Len()
+	pruned := a.handleContextOverflow("退款导出", 10.0)
+	after := a.context.Len()
+	if pruned <= 0 && after >= before {
+		t.Fatalf("裁剪无效：%d → %d 条，pruned=%d", before, after, pruned)
+	}
+	// 裁剪后仍应留下 protected 条以上，不能清空
+	if after < a.protectedContextCount() {
+		t.Fatalf("裁剪后只剩 %d 条，少于 protectedCount=%d（记忆被清空）",
+			after, a.protectedContextCount())
+	}
+}
