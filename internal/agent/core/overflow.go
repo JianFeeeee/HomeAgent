@@ -86,11 +86,31 @@ func (a *Agent) overflowRatioNow() float64 {
 //
 // 幂等：未超页时零开销（一次 token 估算 + 一次比较），可安全地在热路径调用。
 func (a *Agent) maybeHandleContextOverflow(f *TaskFrame, query string) (handled bool, pruned int) {
-	if a == nil || a.context == nil || a.isLightKernel() {
+	// 诊断留痕：超页判据在**每次 LLM 请求**都会走，而生产上从未见它触发过。
+	// 没有这行日志时，「没触发」和「没执行」无法区分（2026-10-01 T10 排查
+	// 花了 10 轮工具调用就卡在这里）。只记比值与判定，不记内容。
+	light := a != nil && a.isLightKernel()
+	noCtx := a == nil || a.context == nil
+	var ratio float64
+	if !noCtx {
+		ratio = a.overflowRatioNow()
+	}
+	if a != nil {
+		a.overflowStat.Lock()
+		checked := a.overflowStat.Checked
+		a.overflowStat.Checked++
+		a.overflowStat.Unlock()
+		if checked%20 == 0 {
+			log.Printf("[agent] overflow check #%d: ratio=%.2f window=%d events=%d "+
+				"(threshold=%.2f lightKernel=%v noContext=%v)",
+				checked+1, ratio, a.contextWindowTokens(), a.contextLenSafe(),
+				overflowRatio, light, noCtx)
+		}
+	}
+	if noCtx || light {
 		// 轻量内核（驻留子）不做按相关度裁剪，见 pruneByQuery 的同款理由。
 		return false, 0
 	}
-	ratio := a.overflowRatioNow()
 	if ratio < overflowRatio {
 		return false, 0
 	}
@@ -209,6 +229,14 @@ func (a *Agent) handleUpstreamContextFull(llmErr error) bool {
 	a.overflowStat.Upstream++
 	a.overflowStat.Unlock()
 	return pruned > 0
+}
+
+// contextLenSafe 是 nil 安全的上下文条数（诊断日志用）。
+func (a *Agent) contextLenSafe() int {
+	if a == nil || a.context == nil {
+		return 0
+	}
+	return a.context.Len()
 }
 
 // overflowStat 字段定义在 Agent 上（见 agent.go），此处只做访问辅助。

@@ -120,6 +120,7 @@ type Agent struct {
 	// 放 Agent 上而非全局：多实例并存时各自独立（跑分台就要实例隔离）。
 	overflowStat struct {
 		sync.Mutex
+		Checked    int // 判据执行次数（诊断：区分「没触发」与「没执行」）
 		Triggered  int // L4 上报次数
 		Aborted    int // 裁不出东西的终止次数
 		Upstream   int // 上游 ErrContextFull 次数
