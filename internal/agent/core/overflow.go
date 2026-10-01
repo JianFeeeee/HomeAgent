@@ -106,19 +106,27 @@ func (a *Agent) maybeHandleContextOverflow(query string) (handled bool, pruned i
 // 绝不再次触发中断。
 func (a *Agent) handleContextOverflow(query string, ratio float64) int {
 	before := a.context.Len()
+	beforeTokens := a.accumulatedTokens()
+	// pruned 是**写进 docStore 的条数**（Prune 内部计数），不是「少了几条」。
+	// 判据必须看上下文是否真的变小了 —— 因为 docStore == nil 时（轻量内核、
+	// 文档记忆未初始化）pruned 恒为 0，但裁剪其实照常发生了。用 pruned 判会
+	// 把正常裁剪误判成 bug 而终止。
 	pruned := a.pruneByQuery(query)
+	after := a.context.Len()
+	afterTokens := a.accumulatedTokens()
 
-	if pruned <= 0 {
-		// 装得下却超页 ⇒ 判定有 bug。保存现场 + 终止，不触发中断。
+	if after >= before || afterTokens >= beforeTokens {
+		// 超页了却裁不动 ⇒ 判定逻辑有问题（或 topK ≥ 实际条数）。
+		// 按用户口径：保存现场 + 明确终止，**不重试不触发中断**。
 		// 为什么不再试一次：L4 遇 L4 不能抢占（canPreempt 用严格大于），
 		// 第二个 L4 只会排队等，永远等不到能执行的时机。
-		log.Printf("[agent] context overflow aborted: ratio=%.2f pruned=0 (before=%d events) — "+
-			"判定逻辑可能有 bug，保存现场并终止本轮，不重试", ratio, before)
+		log.Printf("[agent] context overflow aborted: ratio=%.2f no reduction "+
+			"(%d→%d events, %d→%d tokens) — 判定逻辑可能有 bug，保存现场并终止本轮，不重试",
+			ratio, before, after, beforeTokens, afterTokens)
 		a.markOverflowAborted(ratio, before)
 		return 0
 	}
-
-	after := a.context.Len()
+	pruned = before - after
 	log.Printf("[agent] context overflow: ratio=%.2f pruned=%d (%d→%d events), raising L4",
 		ratio, pruned, before, after)
 	a.raiseContextOverflow(pruned)
@@ -151,9 +159,18 @@ func (a *Agent) raiseContextOverflow(pruned int) {
 	a.overflowStat.LastPruned = pruned
 	a.overflowStat.Unlock()
 
-	a.raiseKernelInterrupt("kernel/overflow", "kernel",
-		fmt.Sprintf("[内核] 上下文超页：已裁剪 %d 条低相关事件到文档记忆。"+
-			"被裁内容仍可检索，但需显式查询；查不到不等于不存在。", pruned))
+	a.raiseKernelInterrupt("kernel/overflow", "kernel", overflowNotice(pruned))
+}
+
+// overflowNotice 构造超页中断消息。
+//
+// 抽成纯函数是为了可测：这条消息的措辞不是装饰，它是 agent 唯一的认知输入
+//（L4 任务按调度器设计拿不到被打断者的上下文）。「查不到不等于不存在」这句
+// 直接对应 v4 实测的一类真实失败 —— HA 对检索不到的事实回答
+// 「库里根本没有 X，任何数字都是编的」，因为它不知道有内容被移走了。
+func overflowNotice(pruned int) string {
+	return fmt.Sprintf("[内核] 上下文超页：已裁剪 %d 条低相关事件到文档记忆。"+
+		"被裁内容仍可检索，但需显式查询；查不到不等于不存在。", pruned)
 }
 
 // handleUpstreamContextFull 处理上游返回的 ErrContextFull：与本地预判走**同一条**
