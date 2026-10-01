@@ -344,6 +344,8 @@ def run(args: argparse.Namespace) -> int:
     print("  探针：casual×4  overwrite×1  overwrite-stale(哨兵)×1  multihop×1")
     if filler_tokens < args.window:
         print("  ⚠️ 填充量没超过窗口 ⇒ 测的是「窗口内记忆」，结果无效")
+    else:
+        print("  ✓ 超窗校验通过（灌入量超过窗口，压缩将真实发生）")
 
     if args.dry_run:
         return 0
@@ -543,6 +545,8 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--harness", choices=["homeagent", "pi"], required=True)
     ap.add_argument("--out", required=True)
     ap.add_argument("--window", type=int, default=200000)
+    ap.add_argument("--expect-window", type=int, default=None,
+                    help="实例（模型）真实窗口；与 --window 不同则拒跑（防「窗口内召回」假跑分）")
     ap.add_argument("--overshoot", type=float, default=1.25)
     ap.add_argument("--seed", type=int, default=20261001, help="全部材料随机种子（可复现）")
     ap.add_argument("--timeout", type=float, default=900.0, help="单轮超时（秒）")
@@ -560,6 +564,14 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.harness == "homeagent" and not args.socket:
         print("--harness homeagent 需要 --socket", file=sys.stderr)
+        return 2
+    # ★ 超窗校验：灌入量必须既超过灌入目标（--window），又被实例真实窗口
+    #   （--expect-window）容纳。两个条件任一不满足都是「测错东西」：
+    #   - 填充 < window ⇒ 测的是窗口内记忆，无需压缩；
+    #   - expect-window < 填充 ⇒ 实例先于压缩策略把内容截断，结果不可归因。
+    if args.expect_window is not None and args.expect_window != args.window:
+        print(f"✗ 超窗校验失败：--expect-window {args.expect_window} != --window {args.window} "
+              f"（实例窗口与灌入目标不一致，结果不可归因）", file=sys.stderr)
         return 2
     return run(args)
 
