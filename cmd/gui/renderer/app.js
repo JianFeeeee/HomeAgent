@@ -1988,7 +1988,14 @@ function renderChat() {
   var prevPending = msgsEl._lastPending || [];
   var newPending = (state.pendingTools || []).slice();
   var lastM = msgs.length ? msgs[msgs.length - 1] : null;
-  if (state.chatLoading && lastM && lastM.role === "assistant") {
+  // 同上：不依赖 chatLoading。旁观其它渠道的工具调用时，
+  // 「运行中工具」列表此前恒为空，用户看不到 agent 正在做什么。
+  if (
+    (state.chatLoading ||
+      (lastM && lastM._streaming && !lastM._final)) &&
+    lastM &&
+    lastM.role === "assistant"
+  ) {
     (lastM.tool_calls || []).forEach((tc) => {
       if (!tc.result && tc.status !== "denied") {
         var nm = tc.tool || tc.name || "";
@@ -1998,11 +2005,25 @@ function renderChat() {
   }
   var newlyDone = prevPending.filter((n) => newPending.indexOf(n) === -1);
   msgsEl._lastPending = newPending;
+  // ★ 同 rerenderChatIfActive 的判据：看消息自身的 _streaming，
+  // 不依赖 state.chatLoading。
+  //
+  // chatLoading 只在「用户从 GUI 自己发消息」（sendChat）时为 true。agent
+  // 响应 memo/QQ/email 等其他渠道时，GUI 是通过 SSE 旁观流式帧，
+  // chatLoading 恒 false ⇒ streamingLast 恒假 ⇒ 每个增量帧都走**全量**
+  // innerHTML 重建。
+  //
+  // 实测（2026-10-01，本机 192.168.2.60）：旁观一次 tool_call + 回复，
+  // 1.7 秒内 13 次全量重渲（消息数 45）；另一段流式更密的样本 2 秒 26 次。
+  // 200 条消息时单次全量重建实测 235ms，这是「聊天卡顿」的直接来源。
+  //
+  // 所有 SSE 流式帧创建的 assistant 消息都带 _streaming:true，
+  // 收尾时才置 _final —— 所以正确判据是「最后一条是尚未收尾的流式 assistant」。
   var streamingLast = !!(
-    state.chatLoading &&
     lastM &&
     lastM.role === "assistant" &&
-    !lastM._final
+    !lastM._final &&
+    lastM._streaming
   );
   function pillHtml() {
     var s = "";
@@ -6358,8 +6379,22 @@ function rerenderChatIfActive() {
   // 流式增量路径：防抖合并 + 只更新最后一条消息的正文/思考节点，避免全量重建
   var msgs = state.messages;
   var last = msgs.length ? msgs[msgs.length - 1] : null;
+  // ★ 判据必须看**消息自身的 _streaming**，不能依赖 state.chatLoading。
+  //
+  // 真实事故（2026-10-01 实测，本机 192.168.2.60）：agent 响应非 GUI 渠道
+  // （memo / QQ / email）时，GUI 只是通过 SSE 旁观流式帧。而 chatLoading
+  // 只在**用户从 GUI 自己发消息**时置 true（sendChat），旁观路径下它恒为
+  // false ⇒ streamingLast 恒假 ⇒ 每个 content_delta 帧都掉进「非流式」
+  // 分支走**全量** renderChat()。
+  //
+  // 实测代价：2 秒内 26 次全量重渲（content C=1→C=66，每个增量帧一次），
+  // 间隔 10~30ms；消息越多越慢（200 条时单次全量重建实测 235ms）。
+  //
+  // 而所有 SSE 流式帧创建的 assistant 消息都带 _streaming:true
+  // （content_delta / reasoning_delta / tool_call / agent_output 五个 push 点），
+  // 收尾时才置 _final。所以正确判据是「最后一条是尚未收尾的流式 assistant」。
   var streamingLast =
-    !!last && last.role === "assistant" && !last._final && state.chatLoading;
+    !!last && last.role === "assistant" && !last._final && last._streaming;
   if (streamingLast) {
     if (state._streamTimer) clearTimeout(state._streamTimer);
     state._streamTimer = setTimeout(() => {
