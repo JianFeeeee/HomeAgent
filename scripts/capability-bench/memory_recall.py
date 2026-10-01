@@ -265,7 +265,13 @@ class Material:
         frags_per_turn = 8
         sample = "；".join(self.narrative_block(k, 600)[0] for k in range(frags_per_turn))
         per_turn_tokens = max(1, est_tokens(sample))
-        filler_turns = max(4, self.target_tokens // per_turn_tokens)
+        # 填充轮数：**由 HA 实测反推，不靠 token 估算**（2026-10-01）。
+        # 脚本估的「填充 121k token」是纯文本量，但真实 prompt 每轮还含
+        # 系统提示 + 工具定义 + 记忆上下文 + 工具回执，实测每轮固有开销很大：
+        #   HA 第6轮 prompt=127126（此时累计填充才 5×8=40 个叙事片段）
+        # ⇒ 灌到 >100k 窗口只需 5 个填充轮，规划里再排 50 轮纯属烧 token。
+        # 留 max(4, ...) 下限：填充太少会退化成「窗口内记忆」假跑分。
+        filler_turns = max(4, min(5, self.target_tokens // per_turn_tokens))
 
         # 开场白：完全自然，不预告任何要记的东西
         plan.append({"kind": "filler", "cat": "narrative",
@@ -345,10 +351,13 @@ def run(args: argparse.Namespace) -> int:
     print(f"  填充 token 估算 ≈ {filler_tokens}（目标窗口 {args.window}，"
           f"比值 {filler_tokens / max(1, args.window):.2f}×）")
     print("  探针：casual×4  overwrite×1  overwrite-stale(哨兵)×1  multihop×1")
-    if filler_tokens < args.window:
-        print("  ⚠️ 填充量没超过窗口 ⇒ 测的是「窗口内记忆」，结果无效")
-    else:
-        print("  ✓ 超窗校验通过（灌入量超过窗口，压缩将真实发生）")
+    # ★ 超窗判定以**实测 prompt** 为准，不以文本估算为准（2026-10-01 实测教训）：
+    #   纯叙事文本估算 14k，而 HA 第 6 轮真实 prompt 已 127k —— 每轮还含系统提示、
+    #   工具定义、记忆上下文与工具回执，估算只是保守下界。若按估算判「无效」，
+    #   会把实际已超窗的有效跑分误杀；反过来只看估算也会让无效跑分看起来合格。
+    est_ok = filler_tokens >= args.window
+    print(f"  {'✓' if est_ok else 'ℹ'} 文本估算 {filler_tokens} vs 窗口 {args.window}"
+          f"（估算为下界，超窗以实测 prompt 为准）")
 
     if args.dry_run:
         return 0
@@ -410,6 +419,10 @@ def run(args: argparse.Namespace) -> int:
     finally:
         driver.close()
 
+    # 实测超窗校验：任一填充轮的 prompt 超过窗口 ⇒ 压缩真实发生过
+    max_prompt = max((t["usage"].get("prompt", 0) for t in turns), default=0)
+    overshoot_verified = max_prompt > args.window
+
     probes_done = [t for t in turns if t["kind"] == "probe"]
     total_in = sum(t["usage"].get("prompt", 0) for t in turns)
     total_out = sum(t["usage"].get("completion", 0) for t in turns)
@@ -435,6 +448,8 @@ def run(args: argparse.Namespace) -> int:
         "overshoot": args.overshoot,
         "filler_tokens_est": filler_tokens,
         "filler_to_window": round(filler_tokens / max(1, args.window), 3),
+        "max_prompt_observed": max_prompt,
+        "overshoot_verified": overshoot_verified,
         "turns": len(turns),
         "recall_rate": (hits / len(counted)) if counted else None,
         "recalled": hits,
@@ -467,8 +482,10 @@ def run(args: argparse.Namespace) -> int:
     for pt, d in by_type.items():
         tag = "（反向哨兵）" if pt == "overwrite-stale" else ""
         print(f"  {pt}{tag}: {d['recalled']}/{d['n']}")
-    print(f"  灌入 ≈ {filler_tokens} token（{summary['filler_to_window']}× 窗口），"
+    print(f"  灌入 ≈ {filler_tokens} token（估算 {summary['filler_to_window']}× 窗口），"
           f"实际累计 prompt {total_in}")
+    print(f"  实测最大单轮 prompt {max_prompt} vs 窗口 {args.window} ⇒ "
+          f"{'✓ 超窗校验通过（压缩真实发生）' if overshoot_verified else '⚠️ 未超窗 ⇒ 结果无效'}")
     print(f"  墙钟 {summary['wall_s_total']}s  缓存命中率 "
           f"{bench.fmt_rate(summary.get('cache_hit_rate'))}")
     print(f"结果: {out / 'memory_recall.json'}")
