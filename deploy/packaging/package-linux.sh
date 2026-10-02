@@ -261,13 +261,43 @@ print(m.group(1) if m else '')
   rm -f "$gui_out/resources/default_app.asar" 2>/dev/null
 
   # copy app source
+  #
+  # ★ 改成**按目录整体同步**，不再逐文件手列。
+  #
+  # 原实现手工 cp 七个文件，每加一个新文件就要记得补一行，漏了不会有
+  # 任何报错，只会做出一个"装完缺东西"的包。已实际漏掉过：
+  #   · renderer/mascot.svg      —— 源码里根本不存在（真名 mascot.webp）
+  #   · icon.svg / icon.ico / icon-tray*.png —— 托盘与窗口图标
+  #   · renderer/icon.svg
+  #   · renderer/vendor/*         —— three/OrbitControls/marked/purify
+  #     （这四个是本地化后的第三方库，缺了 Linux 发行版的星图直接坏）
+  #
+  # 整体同步还顺带保证 .hmap 之外的任何新增资源都会进包。
   cp "$gui_dir/main.js" "$gui_out/resources/app/"
   cp "$gui_dir/preload.js" "$gui_out/resources/app/"
   cp "$gui_dir/package.json" "$gui_out/resources/app/"
-  cp "$gui_dir/renderer/index.html" "$gui_out/resources/app/renderer/"
-  cp "$gui_dir/renderer/app.js" "$gui_out/resources/app/renderer/"
-  cp "$gui_dir/renderer/style.css" "$gui_out/resources/app/renderer/" 2>/dev/null || true
-  cp "$gui_dir/renderer/mascot.svg" "$gui_out/resources/app/renderer/" 2>/dev/null || true
+  cp "$gui_dir"/*.svg "$gui_out/resources/app/" 2>/dev/null || true
+  cp "$gui_dir"/*.ico "$gui_out/resources/app/" 2>/dev/null || true
+  cp "$gui_dir"/icon-tray*.png "$gui_out/resources/app/" 2>/dev/null || true
+
+  # renderer 整目录同步（含 vendor/ 与全部静态资源）
+  cp -r "$gui_dir/renderer/." "$gui_out/resources/app/renderer/"
+
+  # ★ 必备文件校验：缺了就是"装完坏掉"的包，且不会有任何构建报错。
+  # renderer/vendor 是本地化后的第三方库（three/OrbitControls/marked/purify），
+  # 缺任何一份都会让星图或 Markdown 渲染在断网/离线环境下直接坏掉。
+  local missing=""
+  for _f in index.html app.js style.css vendor/three.min.js vendor/OrbitControls.js \
+            vendor/marked.min.js vendor/purify.min.js; do
+    [ -f "$gui_out/resources/app/renderer/$_f" ] || missing="$_f "
+  done
+  [ -f "$gui_out/resources/app/icon.svg" ] || missing="icon.svg "
+  if [ -n "$missing" ]; then
+    echo "  ERROR: GUI 资源缺失：$missing"
+    echo "         宁可不发，也不发装了跑不起来的包。"
+    rm -rf "$gui_out"
+    return
+  fi
 
   # production node_modules for app
   if [ -d "$gui_dir/node_modules" ]; then
