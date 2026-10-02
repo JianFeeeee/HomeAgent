@@ -352,7 +352,20 @@ function stopHomed() {
   }
 }
 
-function createWindow() {
+// createWindow 创建主窗口。
+//
+// ★ show=false = **静默启动**：窗口照常创建（渲染进程随之启动，SSE、
+// 设备桥、聊天全部可用），只是不显示。
+//
+// 为什么不是「不创建窗口」：不创建 ⇒ 渲染进程不启动 ⇒ app.js 整个不执行
+// ⇒ SSE 通道与设备桥轮询全废，GUI 退化成纯托盘图标；而且
+// showMainWindow() 只做 show()、不会创建窗口，app.on("activate") 又只在
+// macOS 触发 —— Windows 上托盘菜单点「显示主界面」将**毫无反应**，
+// 进程变成无法唤起的僵尸。
+//
+// 为什么不用 show:false 再 show()：那会先显示一帧再隐藏，肉眼可见闪一下。
+// 这里用 ready-to-show + 条件 show，避免闪烁。
+function createWindow(show = true) {
   const menu = Menu.buildFromTemplate([]);
   Menu.setApplicationMenu(menu);
 
@@ -363,6 +376,7 @@ function createWindow() {
     minHeight: 600,
     title: "HomeAgent",
     frame: false,
+    show: false, // 一律先不显示，由 ready-to-show 决定
     icon: path.join(__dirname, "icon.ico"),
     webPreferences: {
       preload: path.join(__dirname, "preload.js"),
@@ -370,6 +384,15 @@ function createWindow() {
       nodeIntegration: false,
     },
   });
+
+  // 静默时不显示；非静默时在首帧就绪后显示，避免白屏闪现。
+  if (show) {
+    mainWindow.once("ready-to-show", () => {
+      try {
+        mainWindow.show();
+      } catch (e) {}
+    });
+  }
 
   mainWindow.loadFile(path.join(__dirname, "renderer", "index.html"));
 
@@ -2455,10 +2478,21 @@ function initTray() {
 function showMainWindow() {
   try {
     if (mainWindow && !mainWindow.isDestroyed()) {
-      mainWindow.show();
+      // 窗口是静默创建时已处于「未显示」态，这里正常显示即可。
+      if (!mainWindow.isVisible()) mainWindow.show();
       mainWindow.focus();
+      return;
     }
-  } catch (e) {}
+  } catch (e) {
+    /* 落到下面重建 */
+  }
+  // 兜底：窗口不存在（异常退出后残留状态、或未来改成不建窗）时重建，
+  // 否则托盘菜单点了没反应，进程就成了唤不起来的僵尸。
+  try {
+    createWindow(true);
+  } catch (e) {
+    console.error("showMainWindow: recreate failed: " + e.message);
+  }
 }
 function destroyTray() {
   try {
@@ -2506,7 +2540,28 @@ app.whenReady().then(async () => {
   } catch (e) {
     console.error("[auth-schedule] start failed: " + e.message);
   }
-  createWindow();
+
+  // ★ 静默启动：prefs.silentStart 为真时不显示主窗口，驻留托盘。
+  //
+  // 此前这个开关是**死的**：设置页有它、gui-prefs.json 存了它、文案写着
+  // 「启动时不显示主窗口，驻留托盘后台运行」，但主进程从来没读过它 ——
+  // whenReady 无条件 createWindow()，于是必然弹窗。
+  //
+  // 实测（本机，prefs.silentStart=true）：窗口标题 HomeAgent 照样出现。
+  //
+  // 与 applyAutoLaunch 里的 openAsHidden 是两回事：那个是告诉 OS「开机自启
+  // 时如何启动」（仅 Windows/macOS 生效），这里是本进程自己决定要不要显示，
+  // 对手动启动同样生效。
+  let silent = false;
+  try {
+    silent = !!loadGuiPrefs().silentStart;
+  } catch (e) {
+    console.error("[startup] read silentStart failed: " + e.message);
+  }
+  createWindow(!silent);
+  if (silent) {
+    console.log("[startup] silentStart=on: window created hidden (tray only)");
+  }
 });
 
 app.on("before-quit", () => {
@@ -2556,7 +2611,19 @@ const GUI_PREFS_FILE = path.join(app.getPath("userData"), "gui-prefs.json");
 function loadGuiPrefs() {
   try {
     if (fs.existsSync(GUI_PREFS_FILE)) {
-      const d = JSON.parse(fs.readFileSync(GUI_PREFS_FILE, "utf-8"));
+      // ★ 去 BOM 后再 parse。
+      //
+      // Windows 上用 PowerShell Set-Content -Encoding UTF8、记事本等工具改过
+      // 这个文件，会在开头写入 UTF-8 BOM（EF BB BF）。JSON.parse 遇到它直接
+      // 抛错 → 走 catch → 返回**默认 prefs**（silentStart/exitToTray/
+      // deviceBridge 全部被重置）→ 用户界面上的开关像是"保存了但不起作用"。
+      //
+      // 本次实测踩到：判据脚本用 Set-Content 改 silentStart，文件带上 BOM 后
+      // 静默启动不生效，而 loadConnections 早就有去 BOM 处理、这里没有 ——
+      // 两个读取点不一致，属实打实的疏漏。
+      const d = JSON.parse(
+        fs.readFileSync(GUI_PREFS_FILE, "utf-8").replace(/^\uFEFF/, ""),
+      );
       const db = d.deviceBridge || {};
       return {
         autoLaunch: !!d.autoLaunch,
