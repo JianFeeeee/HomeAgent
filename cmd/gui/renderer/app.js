@@ -56,6 +56,8 @@ const state = {
   selfDeviceId: "",
   selfGateway: "",
   deviceBridgeToken: "", // 设备接入令牌明文（来自 device-bridge:get），用于 /device/* 的 requireToken
+  _notifyState: null,      // 本轮通知去重状态 { turnSig, notified }
+  _notifySupported: null, // 系统通知是否可用（null=未探测）
   // ---- 星图活动数据源（对齐服务端 /memory/graph/pulse + /runtime）----
   starmapPulses: [], // { mesh, until, kind } 活动脉冲队列
   starmapGrown: {}, // nodeId -> 生长动画截止时间戳（ms）
@@ -467,6 +469,55 @@ function confirmDialog(action, isDanger) {
 }
 
 // ===== API =====
+// ===== 系统通知 =====
+//
+// 何时通知：agent **完成一轮输出**时。
+// 不在流式过程中逐 token 通知 —— 那是噪音（一轮可能几十个 delta），
+// 用户要的是"有结果了"，不是"正在打字"。
+//
+// 去重：同一轮（signature 相同）只通知一次。SSE 有 tool_call / stage /
+// agent_output 多个事件都可能判定"一轮结束"，不去重会连弹好几次。
+//
+// 前台可见且聚焦时不通知：用户正看着界面，弹窗只会烦人。
+// 静默启动（窗口 hidden）正好走"要通知"这条 —— 这也是静默后
+// 唯一能让用户知道"agent 回了"的途径。
+function shouldNotify() {
+  if (!state._notifySupported) return false;
+  return true;
+}
+
+async function notifyTurn(title, body, msgKey) {
+  if (!shouldNotify()) return;
+  try {
+    await window.homeagent.notify.show({
+      title: title,
+      body: body,
+      msgKey: msgKey || "",
+      silent: false,
+    });
+  } catch (e) {}
+}
+
+// notifyTurnOnce 保证同一轮只通知一次。
+function notifyTurnOnce(sig, title, body, msgKey) {
+  if (!shouldNotify()) return;
+  if (!state._notifyState || state._notifyState.turnSig !== sig) {
+    state._notifyState = { turnSig: sig, notified: false };
+  }
+  if (state._notifyState.notified) return;
+  state._notifyState.notified = true;
+  notifyTurn(title, body, msgKey);
+}
+
+// onNotifyClicked 点系统通知后：切到 chat 视图并滚到那条消息。
+function onNotifyClicked() {
+  try {
+    switchView("chat");
+    var el = document.querySelector(".msg-assistant:last-of-type");
+    if (el && el.scrollIntoView) el.scrollIntoView({ block: "end" });
+  } catch (e) {}
+}
+
 async function cliRequest(line) {
   var conn = state.currentConn;
   if (!conn) throw new Error(__("未选择连接", "No connection selected"));
@@ -1799,7 +1850,7 @@ function buildChatLayout() {
     '<div class="chat-panel" id="chat-panel-starmap"><div class="card"><h2>' +
     __("星图", "Star Map") +
     "</h2>" +
-    '<div id="sm-container-chat" style="display:flex;align-items:center;justify-content:center;min-height:480px"><div class="loading-spinner"></div></div></div></div>';
+    '<div id="sm-container-chat" style="display:flex;align-items:center;justify-content:center;min-height:480px"><div class="ha-dots-panel"><span class="ha-dots ha-dots-lg"><i></i><i></i><i></i></span></div></div></div>';
   html +=
     '<div class="chat-panel" id="chat-panel-terminal"><div class="card"><h2>' +
     __("终端", "Terminal") +
@@ -2151,7 +2202,7 @@ function renderChat() {
       var isStreamingLast = i === msgs.length - 1 && streamingLast;
       if (isStreamingLast) {
         var liveRow =
-          '<span class="live-spinner"></span>' +
+          '<span class="live-spinner"><i></i><i></i><i></i></span>' +
           (newPending.length
             ? '<span class="thinking-tools">' + pillHtml() + "</span>"
             : "");
@@ -2227,7 +2278,7 @@ function renderChat() {
       '<div class="msg msg-assistant" data-msgkey="__loading__"><div class="msg-avatar">' +
       aiAvatar2 +
       '</div><div class="msg-content"><div class="msg-bubble">' +
-      '<span class="live-spinner"></span>' +
+      '<span class="live-spinner"><i></i><i></i><i></i></span>' +
       (newPending.length
         ? '<span class="thinking-tools">' + pillHtml() + "</span>"
         : "") +
@@ -2457,7 +2508,7 @@ function renderChatStarmap() {
   }
   if (!window.THREE) {
     cont.innerHTML =
-      '<div style="display:flex;align-items:center;justify-content:center;height:100%;padding:20px"><div class="loading-spinner"></div></div>';
+      '<div class="ha-dots-panel"><span class="ha-dots ha-dots-lg"><i></i><i></i><i></i></span></div>';
     state.starmapInit = false;
     state.starmapLoading = false;
     return;
@@ -3240,7 +3291,7 @@ async function queryMemoryChat() {
   var q = document.getElementById("mem-query")?.value;
   var r = document.getElementById("mem-result-chat");
   if (!r || !q) return;
-  r.innerHTML = '<div class="loading"></div>';
+  r.innerHTML = '<div class="ha-dots-panel"><span class="ha-dots"><i></i><i></i><i></i></span></div>';
   try {
     var data = await api("/memory?q=" + encodeURIComponent(q) + "&depth=2");
     r.innerHTML =
@@ -3260,7 +3311,7 @@ async function queryMemoryContext() {
   var q = document.getElementById("ctx-query")?.value;
   var r = document.getElementById("ctx-result");
   if (!r) return;
-  r.innerHTML = '<div class="loading"></div>';
+  r.innerHTML = '<div class="ha-dots-panel"><span class="ha-dots"><i></i><i></i><i></i></span></div>';
   try {
     var data = await api("/memory/context?q=" + encodeURIComponent(q || ""));
     var ctx = data?.context || __("无上下文", "No context");
@@ -3307,7 +3358,7 @@ async function searchKnowledgeChat() {
   var q = document.getElementById("know-query")?.value;
   var r = document.getElementById("know-result-chat");
   if (!r || !q) return;
-  r.innerHTML = '<div class="loading"></div>';
+  r.innerHTML = '<div class="ha-dots-panel"><span class="ha-dots"><i></i><i></i><i></i></span></div>';
   try {
     var data = await api("/knowledge?q=" + encodeURIComponent(q));
     r.innerHTML =
@@ -5269,6 +5320,16 @@ async function deleteAdapter(name) {
     doRenderAll();
     startUptimeTicker();
     setInterval(doRenderAll, 15000);
+    // 系统通知：探测可用性 + 接点击跳转（放在连上之后，避免无连接时空转）
+    if (window.homeagent && window.homeagent.notify) {
+      try {
+        const sup = await window.homeagent.notify.supported();
+        state._notifySupported = !!(sup && sup.supported);
+      } catch (e) {
+        state._notifySupported = false;
+      }
+      window.homeagent.notify.onClicked(onNotifyClicked);
+    }
   } else {
     renderAll();
     updateConnIndicator();
@@ -6125,6 +6186,14 @@ async function connectFetchSSE(url) {
             // 用文本前若干字符当 hint，让点亮落到**本轮相关**的实体上，
             // 而不是每次都亮同一批高权重节点。
             starmapPulse("output", String(p.content || "").slice(0, 60));
+            // 系统通知：一轮输出收尾时通知一次（不在流式过程中逐 token 弹）。
+            var _sig = (p.content || "").length + ":" +
+              String(p.content || "").slice(0, 40);
+            notifyTurnOnce(
+              _sig,
+              "HomeAgent",
+              String(p.content || "").slice(0, 160) || __("（空回复）", "(empty reply)"),
+            );
             endChatTurn();
             return;
           }

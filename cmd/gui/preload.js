@@ -34,6 +34,11 @@ contextBridge.exposeInMainWorld("homeagent", {
   },
   cacheBg: (src) => ipcRenderer.invoke("bg:cache", { src }),
   log: (m) => ipcRenderer.invoke("log:r", m),
+  notify: {
+    show: (payload) => ipcRenderer.invoke("notify:show", payload),
+    supported: () => ipcRenderer.invoke("notify:supported"),
+    onClicked: (cb) => ipcRenderer.on("notify:clicked", (_e, d) => cb(d)),
+  },
   prefs: {
     get: () => ipcRenderer.invoke("prefs:get"),
     set: (p) => ipcRenderer.invoke("prefs:set", p),
