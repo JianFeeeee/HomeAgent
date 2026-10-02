@@ -129,6 +129,55 @@ func (g *GraphDB) RecallBlocks(q BlockRecallQuery) ([]BlockHit, error) {
 	return hits, nil
 }
 
+// RecallBlocksWithArbitration 与 RecallBlocks 相同，但额外返回仲裁详情
+// （被取代的块、结论状态）。
+//
+// 分成两个入口的原因：调用方大多只关心「该给模型看什么」，仲裁详情是
+// 调试与跑分用的。把它塞进返回签名会让 90% 的调用点多做无用功。
+func (g *GraphDB) RecallBlocksWithArbitration(q BlockRecallQuery) ([]BlockHit, ArbitrationResult, error) {
+	// ★ 仲裁前必须拿到**未截断**的全量候选。
+	//
+	// 实测故障形态（真实 chineseclip + 真库 188 块）：查询「值班室分机号
+	// 是多少」，旧号 4379 以 0.8127 排 top1，新号 4324 那条**进不了
+	// top8**。正确记录在召回阶段就被挤掉了 —— 事后仲裁无从挽回，
+	// 因为被判取代的旧值和新值都不在候选里。
+	//
+	// 所以顺序是：全量打分（TopK 放大）→ 仲裁 → 按调用方的 TopK 截断。
+	//
+	// 为什么 RecallBlocks 本身不仲裁：它是通用召回接口，
+	// 返回顺序按余弦相似度是它的**既有契约**（有测试钉着）。
+	// 仲裁改变的是「给模型看哪些、按什么顺序看」，属于上层策略 ——
+	// 混进召回层会让这个接口的语义变得含糊（调用方说不清拿到的是什么序）。
+	q2 := q
+	q2.TopK = largeTopK
+	hits, err := g.RecallBlocks(q2)
+	if err != nil {
+		return nil, ArbitrationResult{}, err
+	}
+	arb := arbitrate(g, hits)
+	kept := arb.Kept
+	if k := effectiveTopK(q.TopK); len(kept) > k {
+		kept = kept[:k]
+	}
+	return kept, arb, nil
+}
+
+// largeTopK 是仲裁前的候选上限。
+//
+// ★ 为什么要有上限而不是真·全量：仲裁是 O(n²)，候选数若等于库里全部
+// 带向量的块（实测 188，回填后可能上万），比较次数会到亿级。
+// 这个值远大于正常 TopK（默认 10 / 生产 5~20），实际效果是「足够全」，
+// 同时给出一个确定的性能上界。
+const largeTopK = 2000
+
+// effectiveTopK 归一 TopK（与 RecallBlocks 内部一致）。
+func effectiveTopK(k int) int {
+	if k <= 0 {
+		return 10
+	}
+	return k
+}
+
 // BlockVectorStats 报告块向量的回填状态，用于运维判断「要不要跑回填」。
 type BlockVectorStats struct {
 	Total        int      `json:"total"`
