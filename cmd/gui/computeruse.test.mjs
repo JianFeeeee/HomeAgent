@@ -1,18 +1,25 @@
-// computeruse 能力面 + PiDeck 借鉴声明的判据。
+// computeruse 能力面 + GUI 启动期误判的判据。
 //
-// ## 要判的是什么
+// 覆盖三组回归：
 //
-// 1) computeruse 高级操作。两处实现（cmd/gui/main.js 的本机桥、
-//    cmd/waiter/device.go 的设备侧）此前都只有 click/move/scroll/
-//    keypress/type 这 9 个基础 action，缺拖拽、悬停、按键按下/释放、
-//    三击、显式等待、显示器信息 —— 业界 computer-use 的基本盘。
+// 1) computeruse 高级操作（两端：GUI 本机桥 / waiter 设备侧）。
+//    此前两端都只有 9 个基础 action，缺拖拽、悬停、按下/释放、三击、
+//    显式等待、显示器信息 —— 与业界 computer-use 的基本盘差距明显。
 //
-// 2) HiDPI 坐标换算。截图给模型的是**物理像素**，而 SetCursorPos /
-//    xdotool 期望**逻辑点(DIP)**。原先只加了 display bounds 的原点
-//    偏移，没换算 scaleFactor ⇒ 150% 缩放屏上点击系统性偏移。
+// 2) HiDPI 与 koffi 调用约定。
+//    · 坐标：截图给模型的是**物理像素**，而 SetCursorPos/xdotool 期望
+//      **逻辑点(DIP)**；原先只加了 bounds 原点偏移，没换算 scaleFactor
+//      ⇒ 150% 缩放屏上点击系统性偏移。
+//    · 类型名：koffi 不认 Win32 的 `byte`，曾让 keybd_event 整体
+//      拿不到 ⇒ 组合键全废，而单键 click 不受影响、极易漏掉。
 //
-// 3) PiDeck 借鉴声明。用户要求显式声明 GUI 借鉴了 PiDeck 的设计与实现，
-//    这类"来源说明"一旦丢失就无从追溯，故钉在这里。
+// 3) 启动期误判「服务端未启动」。
+//    isServerRunning 硬编码 localhost:8080，在「服务端跑在 WSL/远端」
+//    的部署下必然探不通 → 误判服务没起 → 去拉起 GUI 旁并不存在的
+//    homed.exe → 干等 8s 超时 → 每次启动刷一条
+//    "homed failed to start within timeout"。
+//
+// 另含 PiDeck 借鉴声明（用户明确要求显式记录设计与实现的出处）。
 //
 // 运行：node computeruse.test.mjs
 
@@ -36,7 +43,7 @@ const check = (name, ok, detail) => {
   }
 };
 
-// ── 1) 高级操作：GUI 侧 ────────────────────────────────────────────
+// ── 1) 高级操作 ────────────────────────────────────────────────────
 const advanced = [
   ["drag", "拖拽"],
   ["hover", "悬停（触发 tooltip）"],
@@ -56,28 +63,18 @@ for (const [act, desc] of advanced) {
   );
 }
 
-// ── 2) 高级操作：waiter 侧（设备侧主力，Linux 才是真正执行者）──
 const wStart = waiter.indexOf("func execComputeruseLinux(");
 const wEnd = waiter.indexOf("func execComputeruseWindows(");
 const linuxSeg = waiter.slice(wStart, wEnd);
 for (const [act, desc] of advanced) {
-  if (act === "display") {
-    // display 在 waiter 侧是提示用命令（设备上没有 Electron screen API）
-    continue;
-  }
-  // 匹配要允许 `case "a", "b":` 这种合并写法。
-  // waiter 的 hover 与 move 同分支（`case "move", "hover":`）、
+  if (act === "display") continue; // waiter 侧无 Electron screen API
+  // 匹配要允许 `case "a", "b":` 合并写法：waiter 的 hover 与 move 同分支、
   // keypress 与 hotkey/combo 同分支，只匹配单个 case 名会误报「未实现」。
-  // 用「该 action 名出现在某个 case 标签列表里」来判，而不绑定 case 关键字位置。
   const re = new RegExp('case[^:]*"' + act + '"[^:]*:');
-  check(
-    `waiter Linux 支持 ${act}（${desc}）`,
-    re.test(linuxSeg),
-    "waiter Linux 未实现 " + act,
-  );
+  check(`waiter Linux 支持 ${act}（${desc}）`, re.test(linuxSeg), "waiter Linux 未实现 " + act);
 }
 
-// ── 3) HiDPI 坐标换算 ──────────────────────────────────────────────
+// ── 2) HiDPI 与 koffi 约定 ─────────────────────────────────────────
 check(
   "★ GUI 按 scaleFactor 换算坐标",
   /physical\s*!==\s*false/.test(main) && /rawX\s*\/\s*scale/.test(main),
@@ -86,49 +83,81 @@ check(
 check(
   "GUI 有 physical 参数供调用方声明坐标空间",
   /params\.physical/.test(main),
-  "缺少 physical 开关，模型无法声明坐标已是逻辑点",
+  "缺少 physical 开关",
+);
+// 只看**真实代码**里 user32.func(...) 传的签名，不看注释
+// （注释里会引用 `keybd_event(byte ...)` 描述旧 bug，不能因此误报）。
+const kbdSig = main.match(/user32\.func\(\s*"[^"]*keybd_event\((uint8|byte)/);
+check(
+  "★ keybd_event 用 koffi 支持的类型名（uint8 而非 byte）",
+  !!kbdSig && kbdSig[1] === "uint8",
+  kbdSig
+    ? "user32.func 里用的是 " + kbdSig[1] + "，koffi 不认 `byte` ⇒ 组合键整体报 keybd_event unavailable"
+    : "未找到 user32.func(...keybd_event...) 调用",
+);
+check(
+  "keybd_event 解析失败会记录日志",
+  /keybd_event signature failed/.test(main),
+  "静默 catch 掉签名错误，线上无法诊断",
 );
 check(
   "★ waiter Linux 有 normKeySpec 归一化组合键",
   /func normKeySpec/.test(waiter),
-  "缺少组合键归一化 ⇒ 模型输出 \"Ctrl+C\" 这类自然写法会失效",
+  "缺少组合键归一化 ⇒ 模型输出 \"Ctrl+C\" 会失效",
 );
 check(
   "waiter type 用 --clearmodifiers",
-  /type.*--clearmodifiers|--clearmodifiers.*--delay/s.test(linuxSeg),
+  /type[\s\S]{0,80}--clearmodifiers/.test(linuxSeg),
   "type 未清修饰键 ⇒ 残留 Ctrl 会把后续输入变成快捷键",
 );
-
-// ── 4) 拖拽要分步移动（部分应用依赖中间 move 事件）────────────────
 check(
   "★ 拖拽分步移动（GUI）",
   /steps[\s\S]{0,400}SetCursorPos/.test(main),
-  "拖拽一步到位 ⇒ canvas 拖拽/排序类操作会失效",
+  "一步到位 ⇒ canvas 拖拽/排序失效",
 );
 check(
   "★ 拖拽分步移动（waiter）",
   /steps[\s\S]{0,400}mousemove/.test(linuxSeg),
-  "拖拽一步到位 ⇒ canvas 拖拽/排序类操作会失效",
+  "一步到位 ⇒ canvas 拖拽/排序失效",
 );
 
-// ── 5) PiDeck 借鉴声明 ─────────────────────────────────────────────
-// 声明位置：app.js（工具组卡与呼吸光晕的逻辑）、style.css（三项动画）、
-// 以及本仓的文档。用户明确要求「显式声明 GUI 借鉴了 PiDeck 的设计与
-// 实现」—— 这类来源说明一旦丢失，后来人就无法判断某段设计是本地决定
-// 还是外部借鉴，也无从追溯许可与出处。
+// ── 3) 启动期不得误判服务端 ───────────────────────────────────────
 check(
-  "★ app.js 有 PiDeck 借鉴说明",
-  /PiDeck/.test(app),
-  "app.js 缺 PiDeck 借鉴说明",
+  "★ 服务探测不只探 localhost",
+  /function serverProbeTargets/.test(main) && /loadConnections\(\)/.test(
+    main.slice(main.indexOf("function serverProbeTargets"), main.indexOf("function probeOne")),
+  ),
+  "未从 connections.json 取已配置端点",
 );
+check(
+  "★ localhost 仅作为兜底候选",
+  /push\("http:\/\/localhost:8080"\)/.test(main),
+  "缺少 localhost 兜底",
+);
+check(
+  "★ 仅当存在本地 homed 才尝试拉起",
+  /else if \(!findHomed\(\)\)/.test(main),
+  "无 homed 可执行文件时仍会空等 8s 超时",
+);
+check(
+  "★ 服务可达时跳过 homed 自动拉起",
+  /server reachable, skip homed autostart/.test(main),
+  "服务在远端时仍会拉起 homed 并超时",
+);
+check(
+  "探测有超时保护（不会无限等）",
+  /probeOne[\s\S]{0,300}setTimeout/.test(main),
+  "探测缺超时 ⇒ 启动被挂住",
+);
+
+// ── 4) PiDeck 借鉴声明 ─────────────────────────────────────────────
+check("★ app.js 有 PiDeck 借鉴说明", /PiDeck/.test(app), "app.js 缺 PiDeck 借鉴说明");
 check("★ style.css 有 PiDeck 借鉴说明", /PiDeck/.test(css), "style.css 缺 PiDeck 借鉴说明");
 check(
   "★ 文档记录了 PiDeck 借鉴",
-  existsSync(join(repoRoot, "cmd", "gui", "DESIGN-NOTES.md")),
+  existsSync(join(here, "DESIGN-NOTES.md")),
   "缺 cmd/gui/DESIGN-NOTES.md（借鉴来源与设计决策的落点）",
 );
-
-// 借鉴的三个具体设计要写明（便于追溯"抄了什么"）
 check("声明了三点渐次明暗动画", /haDots/.test(css) && /PiDeck/.test(css));
 check("声明了运行态呼吸光晕", /haRunBreathe/.test(css) && /msg-running/.test(css));
 check("声明了工具调用分组卡", /tool-group-card/.test(app) && /tool-group-card/.test(css));

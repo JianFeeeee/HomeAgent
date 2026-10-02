@@ -297,29 +297,83 @@ function findHomed() {
   return fs.existsSync(p) ? p : null;
 }
 
-function isServerRunning() {
+// ★ 探测服务端候选地址。
+//
+// 旧实现硬编码 http://localhost:8080/，在「服务端跑在 WSL/另一台机器」
+// 的常见部署下必然探不通，进而误判服务未启动、去拉起 GUI 旁边并不存在的
+// homed.exe，最后打印 "homed failed to start within timeout"。
+// 实测证据：localhost:8080 返回 000，而 connections.json 里配置的
+// 192.168.2.60:8080 返回 302 —— 服务一直好好地在那儿。
+//
+// 现在按「已配置的连接 → localhost」顺序探，命中任一即视为在线。
+function serverProbeTargets() {
+  const targets = [];
+  const seen = new Set();
+  const push = (u) => {
+    if (!u) return;
+    const s = String(u).replace(/\/+$/, "");
+    if (!/^https?:\/\//.test(s)) return;
+    if (seen.has(s)) return;
+    seen.add(s);
+    targets.push(s);
+  };
+  try {
+    const data = loadConnections();
+    // loadConnections 返回 {connections:[...], currentId}，
+    // 不是数组（早期按数组写的判断在此处不成立）。
+    const list = data && Array.isArray(data.connections) ? data.connections : [];
+    // 当前连接优先，其余也一并探测（用户可能切过连接）
+    const curId = data ? data.currentId : null;
+    const ordered = list
+      .slice()
+      .sort((a, b) => (a && b && a.id === curId ? -1 : 0));
+    for (const c of ordered) if (c && c.url) push(c.url);
+  } catch (e) {}
+  push("http://localhost:8080");
+  return targets;
+}
+
+function probeOne(target, timeoutMs) {
   return new Promise((resolve) => {
-    const req = http.get("http://localhost:8080/", () => resolve(true));
-    req.on("error", () => resolve(false));
-    req.setTimeout(2000, () => {
-      req.destroy();
-      resolve(false);
+    let done = false;
+    const finish = (ok, via) => {
+      if (done) return;
+      done = true;
+      resolve({ ok, via });
+    };
+    let req;
+    try {
+      req = http.get(target + "/", () => finish(true, target));
+    } catch (e) {
+      return finish(false, target);
+    }
+    req.on("error", () => finish(false, target));
+    req.setTimeout(timeoutMs || 2000, () => {
+      try {
+        req.destroy();
+      } catch (e) {}
+      finish(false, target);
     });
   });
 }
 
-function waitForServer(maxWait = 8000) {
-  return new Promise((resolve) => {
-    const start = Date.now();
-    const check = () => {
-      isServerRunning().then((running) => {
-        if (running) return resolve(true);
-        if (Date.now() - start > maxWait) return resolve(false);
-        setTimeout(check, 300);
-      });
-    };
-    check();
-  });
+// 任一候选端点可达即认为服务在线。
+async function isServerRunning() {
+  const targets = serverProbeTargets();
+  for (const t of targets) {
+    const r = await probeOne(t, 1500);
+    if (r.ok) return true;
+  }
+  return false;
+}
+
+async function waitForServer(maxWait = 8000) {
+  const start = Date.now();
+  for (;;) {
+    if (await isServerRunning()) return true;
+    if (Date.now() - start > maxWait) return false;
+    await new Promise((r) => setTimeout(r, 300));
+  }
 }
 
 function startHomed() {
@@ -1965,8 +2019,20 @@ function executeHomeagentCmd(capability, reqId) {
           const VK_EXTENDED = new Set([0x21,0x22,0x23,0x24,0x25,0x26,0x27,0x28,0x2e,0x5b,0x5c,0x6f,0x74]);
 
           // keybd_event 全局声明（拿得到 user32 后用）
+          //
+          // ★ 类型名必须是 uint8：koffi 不认 Win32 头文件里的 `byte`，
+          //   实测 `void keybd_event(byte bVk, ...)` 抛
+          //   "Unknown or invalid type name 'byte'"，而 uint8 可正常解析。
+          //   这个 bug 曾让组合键（hotkey/keypress）整体报
+          //   "keybd_event unavailable" —— 单键 click 不受影响，所以很容易漏掉。
           let keybd_event = null;
-          try { keybd_event = user32.func("void keybd_event(byte bVk, byte bScan, uint dwFlags, UIntPtr dwExtraInfo)"); } catch (e) {}
+          try {
+            keybd_event = user32.func(
+              "void keybd_event(uint8 bVk, uint8 bScan, uint32 dwFlags, uintptr_t dwExtraInfo)",
+            );
+          } catch (e) {
+            console.error("keybd_event signature failed: " + e.message);
+          }
 
           // tapVk 按键一次：支持 "ctrl+c"、"ctrl+shift+t"、"alt+f4"
           const tapVk = (spec) => {
@@ -2784,7 +2850,16 @@ function destroyTray() {
 app.whenReady().then(async () => {
   installAuthRule();
   const running = await isServerRunning();
-  if (!running) {
+  if (running) {
+    // 已探测到可用端点：服务端在别处正常运行（远程/WSL/另一台机器）。
+    // 这类部署下 GUI 不该、也拉不起 homed —— 此前仍会去 startHomed()
+    // 再等 8s 超时，刷出误导性的 "homed failed to start within timeout"。
+    console.log("server reachable, skip homed autostart");
+  } else if (!findHomed()) {
+    // 没有本地 homed 可执行文件 ⇒ 本机根本不具备托管服务端的能力，
+    // 此时干等超时毫无意义，直接说明情况即可。
+    console.log("no local homed binary and no reachable endpoint; GUI will use configured connection");
+  } else {
     startHomed();
     const started = await waitForServer();
     if (started) {
