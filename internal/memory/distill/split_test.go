@@ -233,3 +233,32 @@ func TestNormalizeDimension_包含式最长匹配(t *testing.T) {
 		}
 	}
 }
+
+// ★ 自环过滤：字段名或值等于主语时丢弃。
+//
+// 起因（实测）：提示词里写「批次号是主语，不要单独列成字段」这条**负向指令**
+// 会让 qwen3:1.7b 把所有字段都当成批次号相关而丢弃（4 字段 → 0 字段）。
+// 去掉该指令后它改为主动拆出「批次号」字段，于是产生
+// (第183批) -[批次号]-> 第183批 这种自环。过滤必须放在 Go 侧，
+// 不能指望模型听懂否定指令。
+func TestSplit_过滤主语自环(t *testing.T) {
+	g := &fakeGen{text: `{"fields":[
+		{"name":"批次号","value":"第183批"},
+		{"name":"批号","value":"第183批"},
+		{"name":"容量预警","value":"70%"}]}`}
+	tr, err := NewExtractor(g, nil).Split(context.Background(), rec)
+	if err != nil {
+		t.Fatalf("Split: %v", err)
+	}
+	for _, x := range tr {
+		if x.Subject == x.Object {
+			t.Errorf("自环未过滤: %+v", x)
+		}
+		if x.Relation == "第183批" || x.Relation == "批次号" || x.Relation == "批号" {
+			t.Errorf("主语被当成字段名: %+v", x)
+		}
+	}
+	if len(tr) != 1 || tr[0].Object != "70%" {
+		t.Fatalf("只应保留非自环字段，实际 %+v", tr)
+	}
+}
