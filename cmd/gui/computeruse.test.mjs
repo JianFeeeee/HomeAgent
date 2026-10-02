@@ -75,15 +75,36 @@ for (const [act, desc] of advanced) {
 }
 
 // ── 2) HiDPI 与 koffi 约定 ─────────────────────────────────────────
+// ★ 坐标空间：Win32 = 物理像素 = 截图像素，**不应再除以 scaleFactor**。
+//
+// 实测（Electron 主进程内）：
+//   screen API (DIP) : 1260 x 840  scaleFactor=2
+//   GetSystemMetrics : 2520 x 1680
+//   SetCursorPos(200,200) -> GetCursorPos 读回 (200,200)   ← 恒等，不缩放
+//
+// 因为 Electron 主进程是 per-monitor DPI-aware，Win32 坐标不虚拟化。
+// （对照：普通 node 进程里同一函数读到 1260x840，那是 DPI-*unaware*
+//   的虚拟化行为，不能拿来推断 Electron 内的行为。）
+//
+// 本仓曾按「SetCursorPos 期望 DIP」加过 `/ scaleFactor`，那个前提是错的，
+// 会把原本正确的点击改坏（150% 屏上点 (600,400) 被送到 (400,267)）。
+const kx = main.match(/const absX = Math\.round\([^;]*?physical \? ([^:]+):/);
 check(
-  "★ GUI 按 scaleFactor 换算坐标",
-  /physical\s*!==\s*false/.test(main) && /rawX\s*\/\s*scale/.test(main),
-  "未做 物理像素→DIP 换算 ⇒ HiDPI 屏上点击系统性偏移",
+  "★ Win32 坐标按物理像素直接用（不除 scaleFactor）",
+  !!kx && !/\/\s*scale\b/.test(kx[1]),
+  kx
+    ? "absX 仍对物理像素做了 /scale 换算 ⇒ HiDPI 屏上点击偏移"
+    : "未找到 absX 计算",
 );
 check(
-  "GUI 有 physical 参数供调用方声明坐标空间",
-  /params\.physical/.test(main),
-  "缺少 physical 开关",
+  "physical:false 时才乘回 scaleFactor（DIP→物理）",
+  /physical \? rawX : rawX \* scale/.test(main),
+  "DIP 输入未乘回缩放比",
+);
+check(
+  "拖拽终点坐标与主坐标用同一套换算",
+  /physical \? \(parseFloat\(params\.tox[^\n]*\* scale\)/.test(main),
+  "drag 终点仍在用旧的 /scale 逻辑，会与起点偏移不一致",
 );
 // 只看**真实代码**里 user32.func(...) 传的签名，不看注释
 // （注释里会引用 `keybd_event(byte ...)` 描述旧 bug，不能因此误报）。
@@ -150,7 +171,40 @@ check(
   "探测缺超时 ⇒ 启动被挂住",
 );
 
-// ── 4) PiDeck 借鉴声明 ─────────────────────────────────────────────
+// ── 4) 模式 A：agent 独立光标 + 后台注入 ─────────────────────────
+// 模式 A 的核心承诺是「不动用户真实鼠标」。这条承诺必须由判据钉住 ——
+// 一旦有人图省事改回 SetCursorPos，用户的光标就会被抢，且很难归因。
+const injectSrc = readFileSync(join(here, "agent-inject.js"), "utf8");
+const cursorSrc = readFileSync(join(here, "agent-cursor.js"), "utf8");
+// 去掉整行注释后再查 SetCursorPos —— 注释里会引用这个名字来解释「为什么不用它」
+const stripComments = (s) => s.replace(/^\s*\/\/.*$/gm, "");
+check(
+  "★ 模式 A 不碰真实鼠标（agent-inject 无 SetCursorPos 调用）",
+  !/SetCursorPos\(/.test(stripComments(injectSrc)),
+  "agent-inject 出现 SetCursorPos 调用 ⇒ 会抢用户鼠标",
+);
+check(
+  "★ 模式 A 不碰真实鼠标（agent-cursor 无 SetCursorPos 调用）",
+  !/SetCursorPos\(/.test(stripComments(cursorSrc)),
+  "agent-cursor 出现 SetCursorPos 调用 ⇒ 会抢用户鼠标",
+);
+check(
+  "★ koffi 指针参数用 Buffer（普通对象不写回）",
+  /Buffer\.alloc\(8\)/.test(injectSrc),
+  "指针参数未用 Buffer ⇒ WindowFromPoint 拿不到真实 hwnd，点击会落错窗口",
+);
+check(
+  "★ overlay 默认开启且可切回 real",
+  /cursorMode = "overlay"/.test(main) && /cursorMode = "real"/.test(main),
+  "未提供 overlay/real 切换",
+);
+check(
+  "自绘光标层不吃点击（setIgnoreMouseEvents）",
+  /setIgnoreMouseEvents\(true/.test(cursorSrc),
+  "光标层会挡住用户点击",
+);
+
+// ── 5) PiDeck 借鉴声明 ─────────────────────────────────────────────
 check("★ app.js 有 PiDeck 借鉴说明", /PiDeck/.test(app), "app.js 缺 PiDeck 借鉴说明");
 check("★ style.css 有 PiDeck 借鉴说明", /PiDeck/.test(css), "style.css 缺 PiDeck 借鉴说明");
 check(
