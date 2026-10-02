@@ -45,6 +45,14 @@ type BlockRecallQuery struct {
 	TopK        int
 	// MinScore 低于此分数的候选被丢弃（0 表示不设下限）。
 	MinScore float64
+	// SkipCentroid 关闭中心化校正，直接用原始向量算余弦。
+	//
+	// 默认是要校正的：实测 chineseclip 的块向量均值范数 0.9374，
+	// 93.7% 的能量在同一个方向上，导致同属性不同值的分离度只有 0.0095
+	// （去均值后 0.0689，提升 7.3 倍）。而中心是**按需加载**的 ——
+	// 库里没建过中心、或中心已失效（块数变化 >20%）时自动跳过校正，
+	// 所以这个开关只在「明确知道中心存在却想绕开」时才需要。
+	SkipCentroid bool
 }
 
 // RecallBlocks 按向量相似度召回块节点。
@@ -58,6 +66,21 @@ func (g *GraphDB) RecallBlocks(q BlockRecallQuery) ([]BlockHit, error) {
 	topK := q.TopK
 	if topK <= 0 {
 		topK = 10
+	}
+
+	// 中心在 RLock 之前加载：LoadCentroid 内部自己拿锁，
+	// 而 g.mu 是写锁优先的 Mutex（不可重入），RLock 里再 RLock 虽可行
+	// 但夹着写锁时会出现窗口。分开更稳。
+	var centroid *Centroid
+	if !q.SkipCentroid && q.Fingerprint != "" {
+		c, use, err := g.LoadCentroid(q.Fingerprint, len(q.Vector))
+		if err != nil {
+			// 中心读取失败不该让召回失败 —— 退回原始向量即可，
+			// 只是少了个校正。记日志以便发现。
+			log.Printf("[graph] recall blocks: 中心向量读取失败，退回原始向量: %v", err)
+		} else if use {
+			centroid = c
+		}
 	}
 
 	g.mu.RLock()
@@ -102,7 +125,10 @@ func (g *GraphDB) RecallBlocks(q BlockRecallQuery) ([]BlockHit, error) {
 			skippedFP++
 			continue
 		}
-		score := cosine(vec, q.Vector)
+		// ★ 中心化：查询向量与块向量**都要**中心化后再算余弦。
+		// 只处理一边的话等于在混两种量纲（一半带公共分量、一半不带），
+		// 算出的余弦没有意义。
+		score := centerBoth(centroid, vec, q.Vector)
 		if q.MinScore > 0 && score < q.MinScore {
 			continue
 		}
