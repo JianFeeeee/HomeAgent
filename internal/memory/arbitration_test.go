@@ -158,20 +158,50 @@ func TestArbitrate_无时间块保留(t *testing.T) {
 	}
 }
 
-// 时间相同时按分数降序（迁移后同批写入的块时间完全一致）。
-func TestArbitrate_同时间按分数(t *testing.T) {
+// ★ 仲裁不重排 kept：保持调用方给的向量序。
+//
+// 判据直接来自端到端实测的故障形态：仲裁若按时间升序重排，
+// 迁移来的整句块（时间戳最早 13:20:43）会全被顶到 top3，于是
+//
+//	仲裁前 top1 = 值班室分机号 4379，值班人 阿李   （正确候选）
+//	仲裁后 top1 = 随时追问细节                      （完全无关）
+//
+// 端到端探针因此从 5/7 掉到 0/7。
+//
+// 时间只该决定「谁取代谁」（仲裁判断），不该决定「先给模型看哪个」
+// （相关性排序，那是向量分的事）。
+func TestArbitrate_不重排保持向量序(t *testing.T) {
 	hits := []BlockHit{
-		hit("服务A|端口=8861", "2026-10-01 13:00:00", 0.70),
-		hit("服务A|值班人=阿李", "2026-10-01 13:00:00", 0.90),
-		hit("服务A|排期=10月", "2026-10-01 13:00:00", 0.80),
+		hit("服务A|端口=8861", "2026-10-01 13:00:00", 0.90),
+		hit("服务B|端口=8499", "2026-10-01 13:00:00", 0.85),
+		hit("服务C|端口=8271", "2026-10-01 13:00:00", 0.80),
 	}
 	res := arbitrate(nil, hits)
 	if len(res.Kept) != 3 {
 		t.Fatalf("三条都该保留，实际 %d", len(res.Kept))
 	}
-	if res.Kept[0].Block.Text != "服务A|值班人=阿李" {
-		t.Errorf("同时间应按分数降序（0.90 在前），实际首条 %q (score %.2f)",
-			res.Kept[0].Block.Text, res.Kept[0].Score)
+	for i := range hits {
+		if res.Kept[i].Block.Text != hits[i].Block.Text {
+			t.Errorf("第 %d 位被重排了：期望 %q，实际 %q",
+				i, hits[i].Block.Text, res.Kept[i].Block.Text)
+		}
+	}
+}
+
+// 时间不同也不能重排（这个更容易踩：迁移来的整句块时间最早）。
+func TestArbitrate_时间不同也不重排(t *testing.T) {
+	hits := []BlockHit{
+		// 分数最高但时间最早 —— 若按时间升序会被顶到最后
+		hit("服务A|端口=8861", "2026-10-01 13:00:00", 0.95),
+		hit("服务B|端口=8499", "2026-10-01 14:00:00", 0.60),
+	}
+	res := arbitrate(nil, hits)
+	if len(res.Kept) != 2 {
+		t.Fatalf("两条都该保留，实际 %d", len(res.Kept))
+	}
+	if res.Kept[0].Block.Text != "服务A|端口=8861" {
+		t.Errorf("第 0 位应保持向量序（分数 0.95），实际 %q",
+			res.Kept[0].Block.Text)
 	}
 }
 
