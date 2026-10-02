@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log"
 	"strings"
+	"time"
 )
 
 // 存量实体迁移为块节点（entities 退场第 3 步）。
@@ -120,6 +121,8 @@ func (g *GraphDB) MigrateLegacyTextEntities(embed EntityEmbedder) (MigrateResult
 			Vector:      vectors[e.id],
 			Fingerprint: fps[e.id],
 			Source:      "legacy-entity",
+			CreatedAt:   e.createdAt,
+			UpdatedAt:   e.updatedAt,
 		}); err != nil {
 			return res, fmt.Errorf("put block for entity %d: %w", e.id, err)
 		}
@@ -160,13 +163,19 @@ func (g *GraphDB) MigrateLegacyTextEntities(embed EntityEmbedder) (MigrateResult
 }
 
 type legacyEnt struct {
-	id   int64
-	name string
+	id                   int64
+	name                 string
+	createdAt, updatedAt time.Time
 }
 
+// MemoryBlock 的时间戳来自源实体 —— 值覆盖维度（同一属性先后给两个值）
+// 靠的就是时序。迁移时若统一写 NOW()，就把 188 个块的先后关系抹平成
+// 同一时刻，`overwrite` 检索就退化成「新旧并列，取谁全靠向量相似度」——
+// 实测 chineseclip 对新旧号短句给 0.9298 vs 0.9284，数值上根本区分不了。
 type legacyRel struct {
 	id, src, tgt int64
 	typ          string
+	createdAt    time.Time
 }
 
 // readLegacySnapshot 在短读锁内取全部实体与关系。
@@ -174,7 +183,10 @@ func (g *GraphDB) readLegacySnapshot() ([]legacyEnt, []legacyRel, error) {
 	g.mu.RLock()
 	defer g.mu.RUnlock()
 
-	rows, err := g.db.Query(`SELECT id, name FROM entities
+	rows, err := g.db.Query(`SELECT id, name,
+		COALESCE(created_at, ''),
+		COALESCE(updated_at, '')
+		FROM entities
 		WHERE name IS NOT NULL AND TRIM(name) != '' ORDER BY id`)
 	if err != nil {
 		return nil, nil, err
@@ -182,10 +194,13 @@ func (g *GraphDB) readLegacySnapshot() ([]legacyEnt, []legacyRel, error) {
 	var ents []legacyEnt
 	for rows.Next() {
 		var e legacyEnt
-		if err := rows.Scan(&e.id, &e.name); err != nil {
+		var created, updated string
+		if err := rows.Scan(&e.id, &e.name, &created, &updated); err != nil {
 			rows.Close()
 			return nil, nil, err
 		}
+		e.createdAt = parseLegacyTime(created)
+		e.updatedAt = parseLegacyTime(updated)
 		ents = append(ents, e)
 	}
 	rows.Close()
@@ -229,6 +244,39 @@ func shortHash(s string) string {
 	return fmt.Sprintf("%08x", uint32(h))
 }
 
+// legacyTimeLayouts 是旧库里时间列出现过的格式。
+//
+// entities.created_at 声明为 TIMESTAMP 但 SQLite 是弱类型：经由
+// COALESCE 或历史写入路径存进去的可能是裸字符串，driver 会把它作为
+// string 返回（直接扫进 time.Time 会报 unsupported Scan）。实测就是
+// 卡在这里 —— 所以扫到 string 自己解析，而不是赌 driver 的类型推断。
+var legacyTimeLayouts = []string{
+	"2006-01-02 15:04:05.999999999-07:00",
+	"2006-01-02 15:04:05-07:00",
+	"2006-01-02 15:04:05.999999999",
+	"2006-01-02 15:04:05",
+	"2006-01-02T15:04:05.999999999Z07:00",
+	"2006-01-02T15:04:05Z07:00",
+	"2006-01-02T15:04:05",
+	"2006-01-02",
+}
+
+// parseLegacyTime 解析旧库时间列；空值或无法识别时返回零值，
+// 由 putBlockTx 兜底成 NOW()（宁可丢时序，也不能编造一个错的时刻）。
+func parseLegacyTime(s string) time.Time {
+	s = strings.TrimSpace(s)
+	if s == "" {
+		return time.Time{}
+	}
+	for _, layout := range legacyTimeLayouts {
+		if t, err := time.Parse(layout, s); err == nil {
+			return t.UTC()
+		}
+	}
+	log.Printf("[graph] 旧库时间 %q 格式无法识别，该块将落为当前时间（时序信息丢失）", s)
+	return time.Time{}
+}
+
 // ── 事务内工具（与 block.go 的公开方法同款语义，但共用同一个 tx）──
 
 func ensureSentenceTx(tx *sql.Tx, text string) (int64, error) {
@@ -251,19 +299,30 @@ func putBlockTx(tx *sql.Tx, b MemoryBlock) error {
 		}
 		vectorJSON = string(raw)
 	}
+	// 时间戳显式写入（COALESCE 兜底 NOW()）：值覆盖维度依赖块间先后，
+	// 全部落成同一时刻就等于把时序抹平。
+	created := b.CreatedAt
+	if created.IsZero() {
+		created = time.Now()
+	}
+	updated := b.UpdatedAt
+	if updated.IsZero() {
+		updated = created
+	}
 	_, err := tx.Exec(`INSERT INTO memory_blocks
 		(id, modality, text_content, payload_digest, mime, size, width, height,
-		 vector, fingerprint, source, tool, scene)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+		 vector, fingerprint, source, tool, scene, created_at, updated_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 		ON CONFLICT(id) DO UPDATE SET
 			modality = excluded.modality,
 			text_content = excluded.text_content,
 			vector = excluded.vector,
 			fingerprint = excluded.fingerprint,
 			source = excluded.source,
-			updated_at = CURRENT_TIMESTAMP`,
+			created_at = excluded.created_at,
+			updated_at = excluded.updated_at`,
 		b.ID, b.Modality, b.Text, b.PayloadDigest, b.MIME, b.Size, b.Width, b.Height,
-		vectorJSON, b.Fingerprint, b.Source, b.Tool, b.Scene)
+		vectorJSON, b.Fingerprint, b.Source, b.Tool, b.Scene, created, updated)
 	return err
 }
 

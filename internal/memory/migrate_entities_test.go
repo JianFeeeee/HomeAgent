@@ -3,6 +3,7 @@ package memory
 import (
 	"strings"
 	"testing"
+	"time"
 )
 
 func newMigrateGraph(t *testing.T) *GraphDB {
@@ -291,5 +292,131 @@ func TestLegacyEntityBlockID_稳定可读(t *testing.T) {
 	}
 	if !strings.Contains(a, "blk_ent_42") {
 		t.Errorf("块 ID 应含实体 id 便于排查，实际 %q", a)
+	}
+}
+
+// ★ 值覆盖维度依赖时序：迁移必须保住实体的先后关系。
+//
+// 背景：实测（真实 chineseclip + 真库）同一属性先后给两个值时，
+// 「值班室分机号 4324」与「值班室分机号 4379」短句向量相似度是
+// 0.9284 vs 0.9298 —— 数值上区分不了。若迁移把块的时���全写成 NOW()，
+// overwrite 检索就彻底没救了。
+//
+// ★ 断言覆盖**全部**块：初版只查了含关键字的那一个，结果把
+// 「CreatedAt 不传」的变异判成通过 —— 假绿。实际漏掉的是没被 UPDATE
+// 到的那些实体（它们本就该落 NOW()，但保护要能区分两种情况）。
+func TestMigrateLegacyTextEntities_保留时序(t *testing.T) {
+	g := newMigrateGraph(t)
+	seedLegacy(t, g, []Triple{
+		{Subject: "值班室分机号", Relation: "是", Object: "四三七九"},
+	})
+	// 给**两个**实体都写同一个历史时刻
+	g.mu.Lock()
+	_, err := g.db.Exec(`UPDATE entities SET created_at = '2026-01-01 10:00:00',
+		updated_at = '2026-01-01 10:00:00'`)
+	g.mu.Unlock()
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := g.MigrateLegacyTextEntities(nil); err != nil {
+		t.Fatal(err)
+	}
+
+	blocks, err := g.MemoryBlocks()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(blocks) == 0 {
+		t.Fatal("无块")
+	}
+	want := time.Date(2026, 1, 1, 10, 0, 0, 0, time.UTC)
+	for _, b := range blocks {
+		if b.CreatedAt.IsZero() {
+			t.Errorf("%s created_at 为零值", b.ID)
+			continue
+		}
+		if !b.CreatedAt.Equal(want) {
+			t.Errorf("%s 应继承实体时间 %v，实际 %v（时序被抹平/未传递）",
+				b.ID, want, b.CreatedAt)
+		}
+	}
+}
+
+// 多个实体的时间戳必须**不同**（全都落成同一时刻等于抹平时序）。
+func TestMigrateLegacyTextEntities_时序不被抹平(t *testing.T) {
+	g := newMigrateGraph(t)
+	seedLegacy(t, g, []Triple{
+		{Subject: "值班室分机号", Relation: "是", Object: "四三七九"},
+		{Subject: "新分机号码", Relation: "是", Object: "四三二四"},
+	})
+	// 主语（较早）与后写入的实体（较晚）
+	g.mu.Lock()
+	_, err := g.db.Exec(`UPDATE entities SET
+		created_at = CASE WHEN name IN ('值班室分机号', '四三七九')
+		                  THEN '2026-01-01 10:00:00' ELSE '2026-01-01 11:00:00' END,
+		updated_at = CASE WHEN name IN ('值班室分机号', '四三七九')
+		                  THEN '2026-01-01 10:00:00' ELSE '2026-01-01 11:00:00' END`)
+	g.mu.Unlock()
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := g.MigrateLegacyTextEntities(nil); err != nil {
+		t.Fatal(err)
+	}
+	blocks, _ := g.MemoryBlocks()
+	// 主语+宾语各成一块：「值班室分机号」「新分机号码」「四三七九」「四三二四」
+	if len(blocks) != 4 {
+		t.Fatalf("应得 4 块，实际 %d", len(blocks))
+	}
+	// 判据：4 个块必须分属两个不同时刻（主语+首宾语 10:00，
+	// 次宾语对 11:00）。若全落同一时刻，时序就被抹平了。
+	// ★ 注意：不能断言「排序后首两块不等」—— 10:00 那组本来就有 2 块，
+	// 同刻是正常的。判据是「时刻的分布」而不是「相邻两块是否相等」。
+	seen := map[string]int{}
+	for _, b := range blocks {
+		seen[b.CreatedAt.UTC().Format("2006-01-02 15:04")]++
+	}
+	if len(seen) != 2 {
+		t.Errorf("块应分属 2 个不同时刻，实际 %d 个：%v", len(seen), seen)
+	}
+	if seen["2026-01-01 10:00"] != 2 {
+		t.Errorf("10:00 组应有 2 块，实际 %d", seen["2026-01-01 10:00"])
+	}
+	if seen["2026-01-01 11:00"] != 2 {
+		t.Errorf("11:00 组应有 2 块，实际 %d", seen["2026-01-01 11:00"])
+	}
+}
+
+// 旧库时间格式不认得时：宁可零值兜底，也不编造错的时刻。
+func TestParseLegacyTime(t *testing.T) {
+	cases := []struct {
+		in   string
+		want string // 空 = 期望零值
+	}{
+		{"2026-01-01 10:00:00", "2026-01-01 10:00:00"},
+		{"2026-01-01T10:00:00Z", "2026-01-01 10:00:00"},
+		{"2026-01-01 10:00:00.123456", "2026-01-01 10:00:00.123456"},
+		{"2026-01-01", "2026-01-01 00:00:00"},
+		{"", ""},
+		{"   ", ""},
+		{"去年某天", ""},
+	}
+	for _, c := range cases {
+		got := parseLegacyTime(c.in)
+		if c.want == "" {
+			if !got.IsZero() {
+				t.Errorf("parseLegacyTime(%q) 应为零值，实际 %v", c.in, got)
+			}
+			continue
+		}
+		want, err := time.Parse("2006-01-02 15:04:05", c.want)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !got.Equal(want) {
+			t.Errorf("parseLegacyTime(%q) = %v，期望 %v", c.in, got, want)
+		}
 	}
 }
