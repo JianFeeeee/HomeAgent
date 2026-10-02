@@ -50,10 +50,22 @@ const fieldsSchema = `{
   "required": ["fields"]
 }`
 
-// promptTemplate 零样本 + 单示例。示例的作用是给出**输出形状**，
-// 不是 few-shot 续写 —— 续写在结构不匹配时会复读示例答案。
+// promptTemplate 零样本 + **三示例**（每个示例代表一种记录形态）。
 //
-// 两条实测约束（都是踩出来的）：
+// ★ 为什么是三个而不是一个 —— 实测（真实 qwen3:1.7b + 6 条真库记录）
+//
+//	提示词形态            分机号新值  分机号旧值  复合句  批次型  纯叙述
+//	单示例（批次型）           0        0       0      4  ✓    0 ✓
+//	单示例（属性型）           3  ✓     2  ✓    0      0      0 ✓
+//	无示例                    0        2       0      0      0 ✓
+//	★ 三示例               4  ✓     2  ✓    3  ✓    4  ✓    0 ✓
+//
+// 单示例不管换成哪种形态都会**压掉另一半**：模型把示例的输出形态当成范本，
+// 不像示例的句子直接交白卷 `{"fields":[]}`。三示例把三种形态都摆出来，
+// 才不会锚定到某一类。这是 1.7b 的能力边界，不是提示词没调好 ——
+// 无示例那一行同样说明「去掉示例」并不等于「去掉锚定」。
+//
+// 另外两条实测约束（都是踩出来的）：
 //
 //  1. **不能用 <record> 之外的裸文本**：无标签时实测 0 字段。
 //  2. **不能写「批次号是主语，不要单独列成字段」这类"负向指令"**：
@@ -72,6 +84,12 @@ const promptTemplate = `把下面的记录拆成字段，输出 JSON。
 记录：第183批 告警规则9条·值班手册第4版·容量预警70%·排期10月
 输出：{"fields":[{"name":"告警规则数","value":"9条"},{"name":"值班手册版本","value":"第4版"},{"name":"容量预警","value":"70%"},{"name":"排期","value":"10月"}]}
 
+记录：值班室分机号 4324，值班 老周
+输出：{"fields":[{"name":"值班分机号","value":"4324"},{"name":"值班人","value":"老周"}]}
+
+记录：admin服务端口8861·billing服务端口8499·oauth服务端口8271
+输出：{"fields":[{"name":"端口","value":"8861"},{"name":"端口","value":"8499"},{"name":"端口","value":"8271"}]}
+
 <record>__RECORD__</record>
 输出：`
 
@@ -86,6 +104,32 @@ type Extractor struct {
 	// subjectFrom 由记录文本推导主语（通常是批次号）。返回空则不产出三元组，
 	// 只把字段当作无主语的属性。
 	subjectFrom func(record string) string
+	// subjectsFrom 是多主语推导钩子。nil 时用内置规则 DeriveSubjects。
+	subjectsFrom func(record string) []Subject
+}
+
+// deriveSubjects 解析本条记录的主语列表。
+//
+// 优先级：注入的 subjectsFrom → 内置规则 DeriveSubjects → 老的 subjectFrom。
+// 保留 subjectFrom 是为了兼容既有调用方（NewExtractor 的第二个参数）。
+func (e *Extractor) deriveSubjects(record string) []Subject {
+	if e.subjectsFrom != nil {
+		return e.subjectsFrom(record)
+	}
+	if subs := DeriveSubjects(record); len(subs) > 0 {
+		return subs
+	}
+	if e.subjectFrom != nil {
+		if s := e.subjectFrom(record); s != "" {
+			return []Subject{{Name: s}}
+		}
+	}
+	return nil
+}
+
+// SetSubjectsFrom 注入自定义的多主语推导（供测试与特殊场景）。
+func (e *Extractor) SetSubjectsFrom(f func(record string) []Subject) {
+	e.subjectsFrom = f
 }
 
 // NewExtractor 构造一个拆分器。subjectFrom 为 nil 时默认按「批次号」推导。
@@ -163,7 +207,7 @@ func (e *Extractor) Split(ctx context.Context, record string) ([]memory.Triple, 
 		return nil, fmt.Errorf("distill: parse fields: %w", err)
 	}
 
-	subject := e.subjectFrom(record)
+	subjects := e.deriveSubjects(record)
 	var triples []memory.Triple
 	for _, f := range fields {
 		name := NormalizeDimension(f.Name)
@@ -178,10 +222,20 @@ func (e *Extractor) Split(ctx context.Context, record string) ([]memory.Triple, 
 		if len([]rune(name)) > 12 {
 			continue
 		}
-		// 有主语时建成三元组（可检索）；无主语时写不出 subject，
-		// 直接跳过 —— 宁可少记也不写脏数据。
-		if subject == "" {
+		// 无主语时写不出 subject，直接跳过 —— 宁可少记也不写悬空属性。
+		if len(subjects) == 0 {
 			continue
+		}
+		// 字段归属到哪个主语？一句多主语时（如三个服务各自的端口），
+		// 按值在原句里的位置落段：值落在哪个主语的锚点之后，就归那个主语。
+		// 落不进任何区间时归最后一个 —— 宁可归属存疑，也不要丢字段。
+		owner := subjects[len(subjects)-1]
+		if valPos := indexOfRunes([]rune(record), []rune(f.Value)); valPos >= 0 {
+			for _, sub := range subjects {
+				if valPos >= sub.Anchor {
+					owner = sub
+				}
+			}
 		}
 		// 自环过滤：主语已在三元组的位置，字段名等于主语则这条没有新信息。
 		//
@@ -189,11 +243,11 @@ func (e *Extractor) Split(ctx context.Context, record string) ([]memory.Triple, 
 		// 字段都当成批次号相关而丢弃（实测 4 字段 → 0 字段），所以那条
 		// 负向指令已从提示词移除；代价就是它会把批次号也拆成字段。
 		// 过滤放在 Go 侧，不依赖模型听懂否定指令。
-		if name == subject || f.Value == subject {
+		if name == owner.Name || f.Value == owner.Name {
 			continue
 		}
 		triples = append(triples, memory.Triple{
-			Subject:  subject,
+			Subject:  owner.Name,
 			Relation: name,
 			Object:   f.Value,
 			// 记原句，便于日后从图谱回到原文。
