@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"gitcode.com/JianFeeeee/HomeAgent/internal/memory"
+	"gitcode.com/JianFeeeee/HomeAgent/internal/memory/distill"
 )
 
 // newTestDistiller 建一个带真实图库的 Distiller（nil db 的那种测不了入库）。
@@ -157,4 +158,93 @@ func indexOf(s, sub string) int {
 		}
 	}
 	return -1
+}
+
+// blockSplitter 实现 BlockSplitter（多了 Blocks 方法）。
+type blockSplitter struct {
+	stubSplitter
+	payload  *distill.BlockPayload
+	blockErr error
+	calls    int
+}
+
+func (b *blockSplitter) Blocks(_ context.Context, record string) (*distill.BlockPayload, error) {
+	b.calls++
+	if b.blockErr != nil {
+		return nil, b.blockErr
+	}
+	if b.payload != nil {
+		return b.payload, nil
+	}
+	return &distill.BlockPayload{
+		Sentence: record,
+		Fields: []distill.FieldBlock{
+			{Dimension: "停机时长", Value: "4分"},
+		},
+	}, nil
+}
+
+// ★ 块路径优先：实现 BlockSplitter 时，产出应落成块（不是 entities）。
+func TestDistillBatch_块路径优先(t *testing.T) {
+	d, cleanup := newTestDistiller(t)
+	defer cleanup()
+	bs := &blockSplitter{}
+	d.SetSplitter(bs)
+
+	ok := d.distillBatch([]RawRecord{{ID: 1, SessionID: "s", Role: "user",
+		Content: "第112批 停机4分"}})
+	if !ok {
+		t.Fatal("distillBatch 应成功")
+	}
+	if bs.calls == 0 {
+		t.Fatal("应走块路径")
+	}
+	blocks, err := d.db.MemoryBlocks()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(blocks) == 0 {
+		t.Fatal("块路径应写入块")
+	}
+	// ★ 关键：不该写 entities
+	res, err := d.db.Recall([]string{"停机时长"}, nil, 1, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(res.Entities) != 0 {
+		t.Errorf("块路径不该写 entities，实际 %+v", res.Entities)
+	}
+}
+
+// ★ 块路失败时落回 Triple 路，而不是让整批重试。
+func TestDistillBatch_块路失败落回Triple(t *testing.T) {
+	d, cleanup := newTestDistiller(t)
+	defer cleanup()
+	bs := &blockSplitter{
+		stubSplitter: stubSplitter{triples: []memory.Triple{{Subject: "s", Relation: "r", Object: "o"}}},
+		blockErr:     errors.New("model timeout"),
+	}
+	d.SetSplitter(bs)
+
+	ok := d.distillBatch([]RawRecord{{ID: 1, SessionID: "s", Role: "user",
+		Content: "第112批 停机4分"}})
+	if !ok {
+		t.Fatal("块路失败应落回 Triple 路并成功，而非整批失败（那会无限重试）")
+	}
+}
+
+// 不带 BlockSplitter 能力（只有 Split）时走旧路，不 panic。
+func TestDistillBatch_仅Split能力走旧路(t *testing.T) {
+	d, cleanup := newTestDistiller(t)
+	defer cleanup()
+	st := &stubSplitter{triples: []memory.Triple{{Subject: "s", Relation: "r", Object: "o"}}}
+	d.SetSplitter(st)
+
+	if ok := d.distillBatch([]RawRecord{{ID: 1, SessionID: "s", Role: "user",
+		Content: "第112批 停机4分"}}); !ok {
+		t.Fatal("应成功")
+	}
+	if st.called == 0 {
+		t.Fatal("应走 Triple 路")
+	}
 }

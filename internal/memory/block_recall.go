@@ -6,6 +6,7 @@ import (
 	"log"
 	"math"
 	"sort"
+	"strings"
 )
 
 // 块节点的向量召回。
@@ -217,4 +218,28 @@ func shortFP(fp string) string {
 		return fp[:12]
 	}
 	return fp
+}
+
+// EnsureSentence 写入一条句子并返回它的 id；已存在则返回既有 id。
+//
+// 从 commit() 里那段内联逻辑提出来的（graph.go:516 附近）：蒸馏的块路径
+// 也需要句子作为结构边的源端点，而边端点校验要求句子先存在。两处各写
+// 一份「INSERT OR IGNORE + 回查」必然漂移，且漂移的表现是边建不上
+// —— 那种失败只在 AddMemoryBlockEdge 报 "graph node does not exist"。
+func (g *GraphDB) EnsureSentence(text string) (int64, error) {
+	text = strings.TrimSpace(text)
+	if text == "" {
+		return 0, fmt.Errorf("ensure sentence: empty text")
+	}
+	g.mu.Lock()
+	defer g.mu.Unlock()
+
+	if _, err := g.db.Exec(`INSERT OR IGNORE INTO sentences (text) VALUES (?)`, text); err != nil {
+		return 0, err
+	}
+	var id int64
+	if err := g.db.QueryRow(`SELECT id FROM sentences WHERE text = ?`, text).Scan(&id); err != nil {
+		return 0, err
+	}
+	return id, nil
 }

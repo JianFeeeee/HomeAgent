@@ -1,0 +1,330 @@
+package distill
+
+import (
+	"context"
+	"errors"
+	"strings"
+	"testing"
+
+	"gitcode.com/JianFeeeee/HomeAgent/internal/memory"
+	"gitcode.com/JianFeeeee/HomeAgent/pkg/generation"
+)
+
+// 拆解产物的块落库。判据核心：三元组应是【句子】【contains 边】【块】，
+// 而不是 entities/relations（本会话最初的错误做法）。
+
+func newBlockGraph(t *testing.T) *memory.GraphDB {
+	t.Helper()
+	g, err := memory.NewGraphDB(t.TempDir() + "/graph.db")
+	if err != nil {
+		t.Fatalf("NewGraphDB: %v", err)
+	}
+	t.Cleanup(func() { g.Close() })
+	return g
+}
+
+func recGraphTriples(rec string) *fakeGen {
+	return &fakeGen{text: `{"fields":[
+		{"name":"停机时长","value":"4分"},
+		{"name":"回滚版本","value":"v2.29.5"},
+		{"name":"灰度比例","value":"10%"}]}`}
+}
+
+const blockRec = "第112批周四凌晨2点·停机4分·回滚v2.29.5·灰度10%"
+
+// ★ 落库形态：句子 + 块 + contains 边，**零 entity**。
+func TestWritePayload_句子块边形态(t *testing.T) {
+	g := newBlockGraph(t)
+	e := NewExtractor(recGraphTriples(blockRec), nil)
+
+	payload, err := e.Blocks(context.Background(), blockRec)
+	if err != nil {
+		t.Fatalf("Blocks: %v", err)
+	}
+	if payload.Sentence != blockRec {
+		t.Errorf("原句应保留，实际 %q", payload.Sentence)
+	}
+	if len(payload.Fields) != 3 {
+		t.Fatalf("期望 3 个字段，实际 %d: %+v", len(payload.Fields), payload.Fields)
+	}
+
+	n, err := WritePayload(context.Background(), g, payload, nil)
+	if err != nil {
+		t.Fatalf("WritePayload: %v", err)
+	}
+	if n != 3 {
+		t.Fatalf("应写入 3 个块，实际 %d", n)
+	}
+
+	blocks, err := g.MemoryBlocks()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(blocks) != 3 {
+		t.Fatalf("库中应有 3 个块，实际 %d", len(blocks))
+	}
+	edges, err := g.MemoryBlockEdges()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(edges) != 3 {
+		t.Fatalf("应有 3 条 contains 边，实际 %d", len(edges))
+	}
+	for _, ed := range edges {
+		if ed.SourceKind != "sentence" || ed.TargetKind != "block" || ed.Type != "contains" {
+			t.Errorf("边形态应为 sentence--contains-->block，实际 %+v", ed)
+		}
+	}
+
+	// ★ 关键：不能产出任何 entity（旧形态）
+	entities, err := g.Recall([]string{"停机时长"}, nil, 1, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(entities.Entities) != 0 {
+		t.Errorf("块路径不该写 entities，实际 %+v", entities.Entities)
+	}
+}
+
+// 块文本承载「维度=值」的完整语义。
+func TestWritePayload_块文本形态(t *testing.T) {
+	g := newBlockGraph(t)
+	e := NewExtractor(recGraphTriples(blockRec), nil)
+	payload, _ := e.Blocks(context.Background(), blockRec)
+	if _, err := WritePayload(context.Background(), g, payload, nil); err != nil {
+		t.Fatal(err)
+	}
+	blocks, _ := g.MemoryBlocks()
+	texts := map[string]bool{}
+	for _, b := range blocks {
+		texts[b.Text] = true
+	}
+	for _, want := range []string{"停机时长=4分", "回滚版本=v2.29.5", "灰度比例=10%"} {
+		if !texts[want] {
+			t.Errorf("缺少块文本 %q，实际 %v", want, texts)
+		}
+	}
+}
+
+// ★ 幂等：同一记录重复拆解得到同一批块 ID，不堆重复记忆。
+//
+// 蒸馏是可重试的（distillOnce 失败会把记录写回队列），随机 ID 会让
+// 每次重试都产生新块，同一句记忆堆成 N 份。
+func TestWritePayload_幂等(t *testing.T) {
+	g := newBlockGraph(t)
+	e := NewExtractor(recGraphTriples(blockRec), nil)
+
+	for i := 0; i < 3; i++ {
+		payload, _ := e.Blocks(context.Background(), blockRec)
+		if _, err := WritePayload(context.Background(), g, payload, nil); err != nil {
+			t.Fatalf("第 %d 次写入: %v", i, err)
+		}
+	}
+	blocks, _ := g.MemoryBlocks()
+	if len(blocks) != 3 {
+		t.Fatalf("重复写入 3 次后仍应只有 3 个块，实际 %d", len(blocks))
+	}
+}
+
+// ★ 无 provider 时块仍入库但不带向量——**不编造零向量**。
+//
+// 编造零向量会让它参与向量检索并永远排在最后，那是静默的错误记忆。
+func TestWritePayload_无provider不编造向量(t *testing.T) {
+	g := newBlockGraph(t)
+	e := NewExtractor(recGraphTriples(blockRec), nil)
+	payload, _ := e.Blocks(context.Background(), blockRec)
+	if _, err := WritePayload(context.Background(), g, payload, nil); err != nil {
+		t.Fatal(err)
+	}
+	blocks, _ := g.MemoryBlocks()
+	for _, b := range blocks {
+		if len(b.Vector) != 0 {
+			t.Errorf("无 provider 时不该有向量，%s 有 %d 维", b.ID, len(b.Vector))
+		}
+		if b.Fingerprint != "" {
+			t.Errorf("无 provider 时不该有指纹，%s 有 %q", b.ID, b.Fingerprint)
+		}
+	}
+	// 但它们仍可被按边查到
+	sid, err := g.EnsureSentence(blockRec)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, err := g.BlocksForNode("sentence", itoa64(sid))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 3 {
+		t.Fatalf("无向量的块仍应按边可查，实际 %d", len(got))
+	}
+}
+
+// 有 provider 时向量与指纹都落库。
+func TestWritePayload_带向量落库(t *testing.T) {
+	g := newBlockGraph(t)
+	e := NewExtractor(recGraphTriples(blockRec), nil)
+	payload, _ := e.Blocks(context.Background(), blockRec)
+	embed := func(string) ([]float64, string) {
+		return []float64{1, 0, 0}, "fp-test"
+	}
+	if _, err := WritePayload(context.Background(), g, payload, embed); err != nil {
+		t.Fatal(err)
+	}
+	blocks, _ := g.MemoryBlocks()
+	for _, b := range blocks {
+		if len(b.Vector) != 3 || b.Fingerprint != "fp-test" {
+			t.Errorf("%s 应带 3 维向量与 fp-test，实际 %d 维 %q",
+				b.ID, len(b.Vector), b.Fingerprint)
+		}
+	}
+}
+
+// 空字段是正常结果：0 块、不报错、不写句子。
+func TestWritePayload_空字段(t *testing.T) {
+	g := newBlockGraph(t)
+	e := NewExtractor(&fakeGen{text: `{"fields":[]}`}, nil)
+	payload, err := e.Blocks(context.Background(), "第129~143批均仅评审通过")
+	if err != nil {
+		t.Fatal(err)
+	}
+	n, err := WritePayload(context.Background(), g, payload, nil)
+	if err != nil {
+		t.Fatalf("空字段不该报错: %v", err)
+	}
+	if n != 0 {
+		t.Fatalf("应写入 0 块，实际 %d", n)
+	}
+	blocks, _ := g.MemoryBlocks()
+	if len(blocks) != 0 {
+		t.Fatalf("空字段不该产生块，实际 %d", len(blocks))
+	}
+}
+
+// 空 payload / nil graph 必须显式报错，不能静默成功。
+func TestWritePayload_非法输入报错(t *testing.T) {
+	g := newBlockGraph(t)
+	if _, err := WritePayload(context.Background(), g, nil, nil); err == nil {
+		t.Error("nil payload 应报错")
+	}
+	if _, err := WritePayload(context.Background(), nil,
+		&BlockPayload{Sentence: "x", Fields: []FieldBlock{{Dimension: "d", Value: "v"}}}, nil); err == nil {
+		t.Error("nil graph 应报错")
+	}
+	if _, err := WritePayload(context.Background(), g, &BlockPayload{}, nil); err == nil {
+		t.Error("空句子应报错")
+	}
+}
+
+// 模型失败时透传错误（调用方据此重试）。
+func TestBlocks_模型失败透传(t *testing.T) {
+	g := newBlockGraph(t)
+	e := NewExtractor(&fakeGen{err: errors.New("model down")}, nil)
+	if _, err := e.Blocks(context.Background(), blockRec); err == nil {
+		t.Fatal("应透传模型错误")
+	}
+	_ = g
+}
+
+// BlockID 内容派生且稳定。
+func TestBlockID_稳定且区分(t *testing.T) {
+	a := BlockID("s", "d", "v")
+	b := BlockID("s", "d", "v")
+	if a != b {
+		t.Error("同输入应得同 ID（幂等的前提）")
+	}
+	if !strings.HasPrefix(a, "blk_") {
+		t.Errorf("ID 应有 blk_ 前缀，实际 %q", a)
+	}
+	// ★ 三个输入分量都必须参与派生。
+	//
+	// 变异自证抓出来的漏洞：上一版只测了「不同 value」，于是把 dimension
+	// 从派生里去掉后测试仍然通过——而那会让「停机时长」与「回滚版本」在
+	// 同一句话里撞成同一个块 ID，后者覆盖前者，**静默丢失一条记忆**。
+	distinct := map[string]string{
+		"同句同值不同维度": BlockID("s", "d2", "v"),
+		"同句同维度不同值": BlockID("s", "d", "v2"),
+		"同维度同值不同句": BlockID("s2", "d", "v"),
+	}
+	for name, id := range distinct {
+		if id == a {
+			t.Errorf("%s 应与基准 ID 不同（该分量未参与派生）: %q", name, id)
+		}
+	}
+	// 两两之间也要不同
+	seen := map[string]string{}
+	for name, id := range distinct {
+		if prev, dup := seen[id]; dup {
+			t.Errorf("%s 与 %s 撞 ID: %q", name, prev, id)
+		}
+		seen[id] = name
+	}
+}
+
+// ★ 同一句话里不同维度必须得到不同块 ID（上面的漏洞会造成静默覆盖）。
+func TestWritePayload_同句不同维度不撞块(t *testing.T) {
+	g := newBlockGraph(t)
+	e := NewExtractor(&fakeGen{text: `{"fields":[
+		{"name":"停机时长","value":"4分"},
+		{"name":"回滚版本","value":"4分"}]}`}, nil) // 值相同、维度不同
+	payload, err := e.Blocks(context.Background(), "第112批 停机4分 回滚4分")
+	if err != nil {
+		t.Fatal(err)
+	}
+	n, err := WritePayload(context.Background(), g, payload, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	blocks, _ := g.MemoryBlocks()
+	if len(blocks) != n || len(blocks) != 2 {
+		t.Fatalf("值相同但维度不同应产生 2 个块，实际 %d（块 ID 撞了会少）", len(blocks))
+	}
+}
+
+// Dimension/Value 从块文本取回结构化字段。
+func TestDimensionValue(t *testing.T) {
+	for _, c := range []struct{ text, dim, val string }{
+		{"停机时长=4分", "停机时长", "4分"},
+		{"回滚版本=v2.29.5", "回滚版本", "v2.29.5"},
+		{"无等号", "", "无等号"},
+	} {
+		if got := Dimension(c.text); got != c.dim {
+			t.Errorf("Dimension(%q)=%q，期望 %q", c.text, got, c.dim)
+		}
+		if got := Value(c.text); got != c.val {
+			t.Errorf("Value(%q)=%q，期望 %q", c.text, got, c.val)
+		}
+	}
+}
+
+// EnsureSentence 幂等。
+func TestEnsureSentence_幂等(t *testing.T) {
+	g := newBlockGraph(t)
+	id1, err := g.EnsureSentence("同一句")
+	if err != nil {
+		t.Fatal(err)
+	}
+	id2, err := g.EnsureSentence("同一句")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if id1 != id2 {
+		t.Fatalf("同句应得同 id，实际 %d vs %d", id1, id2)
+	}
+	if _, err := g.EnsureSentence("  "); err == nil {
+		t.Error("空句应报错")
+	}
+}
+
+func itoa64(i int64) string {
+	if i == 0 {
+		return "0"
+	}
+	var b []byte
+	for i > 0 {
+		b = append([]byte{byte('0' + i%10)}, b...)
+		i /= 10
+	}
+	return string(b)
+}
+
+var _ = generation.ErrSchemaUnsupported

@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"gitcode.com/JianFeeeee/HomeAgent/internal/memory"
+	"gitcode.com/JianFeeeee/HomeAgent/internal/memory/distill"
 	"gitcode.com/JianFeeeee/HomeAgent/internal/nlp"
 )
 
@@ -50,6 +51,9 @@ type Distiller struct {
 	onMemory func(input, response string)
 	embedder nlp.Vectorizer
 
+	// embed 把块文本变成向量与指纹；nil 表示不带向量（不编造）。
+	embed EmbedFunc
+
 	// splitter 是小模型拆分器（pkg/generation 提供的 provider）。
 	//
 	// ★ 为什么要有它：jieba/ONNX 那条自动蒸馏路实测产出 **0 条**
@@ -73,6 +77,9 @@ type RecordSplitter interface {
 
 // SetSplitter 注入小模型拆分器。为 nil 时蒸馏回退 jieba 路。
 func (d *Distiller) SetSplitter(s RecordSplitter) { d.splitter = s }
+
+// SetEmbedFunc 注入块向量计算函数（由持有 embedding provider 的一方提供）。
+func (d *Distiller) SetEmbedFunc(fn EmbedFunc) { d.embed = fn }
 
 // SetEmbedder 注入词嵌入器，供既有 jieba/ONNX 抽取路做 TransE 语义验证。
 // 与 SetSplitter 并存：splitter 存在时优先生效，embedder 仍用于回退路径。
@@ -321,6 +328,24 @@ func (d *Distiller) distillBatch(batch []RawRecord) bool {
 			assistantContent += r.Content + " "
 		}
 	}
+	// 块路径优先（正确形态），Triple 路保留为对照期回退。
+	//
+	// ★ 为什么改（本会话认知纠错）：拆解产物的正确落库形态是
+	//【句子】【contains 边】【块】—— 节点已从纯文本实体升级为带向量的
+	// memory_blocks（46f833c）。把拆解结果 Commit 成 entities 是把新产出
+	// 灌进正在退场的旧形态；而旧 jieba 路实测产出 0 条，保留它只为
+	//「块路不可用时记忆不丢」的底线。
+	if d.splitter != nil {
+		if wb, ok := d.splitter.(BlockSplitter); ok {
+			if d.writeBlocks(wb, userContent, assistantContent) {
+				return true
+			}
+			// 块路失败（模型错误/超时）：不要在这里 return false ——
+			// 那会让同一批记录无限重试。落回 Triple 路（jieba），
+			// 失败原因已在 writeBlocks 里记日志。
+		}
+	}
+
 	triples := d.extractTriples(userContent, assistantContent)
 	if len(triples) > 0 {
 		sessionID := ""
@@ -330,6 +355,51 @@ func (d *Distiller) distillBatch(batch []RawRecord) bool {
 		}
 		if _, _, err := d.db.Commit(triples, sessionID, 0); err != nil {
 			log.Printf("[memory] distill commit: %v", err)
+			return false
+		}
+	}
+	return true
+}
+
+// BlockSplitter 是能产出块形态的拆解器（distill.Extractor 实现）。
+//
+// 与 RecordSplitter 并存的原因：RecordSplitter.Split 返回 Triple（对照期
+// 仍被 memoryface 接口使用），块形态经 Blocks 返回。两个方法由同一个
+// Extractor 实现，共用同一套闸门，不重复实现。
+type BlockSplitter interface {
+	RecordSplitter
+	Blocks(ctx context.Context, record string) (*distill.BlockPayload, error)
+}
+
+// EmbedFunc 由持有 embedding provider 的一方注入；nil 表示不带向量
+// （块仍入库，只是不参与向量召回——不编造零向量）。
+type EmbedFunc func(text string) (vec []float64, fingerprint string)
+
+// writeBlocks 逐条拆解并落块。全部成功返回 true；任一条失败记日志并
+// 返回 false（调用方落回 Triple 路），已成功的块保留（幂等 ID 保证
+// 重试不会产生重复）。
+func (d *Distiller) writeBlocks(bs BlockSplitter, userContent, assistantContent string) bool {
+	text := userContent
+	if assistantContent != "" {
+		text += " " + assistantContent
+	}
+	// 按句切分：块的语义单位是句子，整段混合会让 contains 边失去指向。
+	for _, sent := range splitSentences(text) {
+		sent = strings.TrimSpace(sent)
+		if len([]rune(sent)) < 4 {
+			continue
+		}
+		ctx, cancel := context.WithTimeout(d.ctx, distillSplitTimeout)
+		payload, err := bs.Blocks(ctx, sent)
+		cancel()
+		if err != nil {
+			log.Printf("[memory] distill blocks: %v", err)
+			return false
+		}
+		// 用 d.ctx 而非 context.Background()：Distiller.Stop() 会 cancel 它，
+		// 用 Background 会让停机时正在写库的蒸馏循环继续跑。
+		if _, err := distill.WritePayload(d.ctx, d.db, payload, d.embed); err != nil {
+			log.Printf("[memory] distill write blocks: %v", err)
 			return false
 		}
 	}
@@ -517,4 +587,15 @@ func (d *Distiller) Stats() map[string]interface{} {
 		"interval":       d.cfg.Interval.String(),
 		"retention_days": d.cfg.RetentionDays,
 	}
+}
+
+// splitSentences 按中英文句读切分文本。
+//
+// 蒸馏的块语义单位是句子；这里只做粗切（。！?；\n），不做 NLP 级
+// 句法分析 —— 粗切足够给块提供「同一场对话里的一个片段」边界。
+func splitSentences(text string) []string {
+	return strings.FieldsFunc(text, func(r rune) bool {
+		return r == '。' || r == '！' || r == '?' || r == '；' ||
+			r == '\n' || r == '？' || r == '!'
+	})
 }
