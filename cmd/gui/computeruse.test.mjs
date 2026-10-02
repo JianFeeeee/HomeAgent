@@ -194,9 +194,41 @@ check(
   "指针参数未用 Buffer ⇒ WindowFromPoint 拿不到真实 hwnd，点击会落错窗口",
 );
 check(
-  "★ overlay 默认开启且可切回 real",
-  /cursorMode = "overlay"/.test(main) && /cursorMode = "real"/.test(main),
-  "未提供 overlay/real 切换",
+  "★ 注入模式默认 sendinput，且可切 overlay/real",
+  // overlay/real 只出现在条件判断里（不是赋值），不能要求 "cursorMode = \"overlay\""
+  /let cursorMode = "sendinput"/.test(main) &&
+    /_ac\.mode === "overlay" \|\| _ac\.mode === "real"\) cursorMode = _ac\.mode/.test(main),
+  "未提供 sendinput/overlay/real 三档切换",
+);
+check(
+  "★ 用户活动感知排除自身注入（ownTick/ownCursor）",
+  // GetLastInputInfo 是全局的，agent 自己的 SendInput 也会被算作「用户输入」。
+  // 不排除则永远判定「用户正在操作」，所有命令被暂缓（实测踩到）。
+  /ownTick/.test(injectSrc) && /ownCursor/.test(injectSrc),
+  "未排除自身注入 ⇒ 永远处于「用户正在操作」状态",
+);
+check(
+  "★ send() 成功后必须记录自身注入（否则 idleMs 归零）",
+  // 这个断言必须盯**调用点**而不是函数名：只检查 /markOwnInput/ 时，
+  // 把 send() 里的调用删掉仍会误报绿（已用品变异验证）。
+  //   function send(...) { ...; markOwnInput(); return true; }
+  /function send\(events\)[\s\S]{0,600}?markOwnInput\(\);[\s\S]{0,60}?return true;/.test(
+    injectSrc,
+  ),
+  "send() 内未调用 markOwnInput ⇒ 自己的注入会被误判为用户操作",
+);
+check(
+  "★ SendInput 绝对坐标按虚拟桌面归一化到 0–65535",
+  // 像素直接传给 SendInput 会落在错误位置（它要的是归一化值）。
+  /65535/.test(injectSrc) && /VIRTUALDESK/.test(injectSrc),
+  "绝对坐标未归一化，或未带 VIRTUALDESK（多屏会错位）",
+);
+check(
+  "★ sendinput 分支结束后必须 return（防双执行）",
+  // runAction 里的 return 只退出它自己；少了外层 return 会 fall through
+  // 到旧 real 路径 —— 实测 8 条命令回了 16 个结果。
+  /startDefer\(\(proceed\)[\s\S]{0,400}?\n\s+return;\n\s*\} catch \(e\) \{/.test(main),
+  "缺少外层 return，同一条命令会被执行两遍",
 );
 check(
   "自绘光标层不吃点击（setIgnoreMouseEvents）",
