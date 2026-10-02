@@ -125,31 +125,55 @@ func main() {
 	ex := distill.NewExtractor(gen, nil)
 
 	// ── 干跑：先只统计，不写 ──
+	// ★ 拆一次，落库复用同一份结果。
+	//
+	// 初版在 -apply 分支里又调了一次 ex.Blocks —— 每条记录跑两遍模型。
+	// 两个后果，都实测撞到了：
+	//  1. 耗时翻倍：真库 188 条在 CPU 上第一轮就超了 2400s 超时上限。
+	//  2. **结果可能不一致**：qwen3:1.7b 在 Temperature=0 下仍有波动，
+	//     干跑报告的字段与落库的实际字段可能不是同一批 ——
+	//     报告与数据对不上，整个命令的可信度就没了。
+	//
+	// 所以 payload 在这里算一次并保留，-apply 直接用它落库。
 	type splitResult struct {
-		fields int
-		err    error
+		payload *distill.BlockPayload
+		err     error
 	}
-	results := make([]splitResult, 0, len(entities))
+	results := make([]splitResult, len(entities))
 	triples := 0
 	zeroField := 0
 	failed := 0
-	for _, e := range entities {
+	t0 := time.Now()
+	for i, e := range entities {
 		payload, err := ex.Blocks(context.Background(), e.name)
 		if err != nil {
-			results = append(results, splitResult{err: err})
+			results[i] = splitResult{err: err}
 			failed++
-			continue
+		} else {
+			results[i] = splitResult{payload: payload}
+			n := len(payload.Fields)
+			if n == 0 {
+				zeroField++
+			} else {
+				triples += n
+			}
 		}
-		n := len(payload.Fields)
-		results = append(results, splitResult{fields: n})
-		if n == 0 {
-			zeroField++
-			continue
+		// ★ 进度必须实时可见：这活儿在 CPU 上要十几分钟，
+		// 没有进度就只能等超时（第一版就是这么废掉的 —— 2400s 超时，
+		// 跑完的 35 条结果全丢）。每 10 条或每 20 秒打一行。
+		if (i+1)%10 == 0 || i+1 == len(entities) {
+			el := time.Since(t0).Seconds()
+			rate := float64(i+1) / el
+			eta := 0.0
+			if rate > 0 {
+				eta = float64(len(entities)-i-1) / rate
+			}
+			fmt.Printf("  [%d/%d] %s 用时%.0fs 预计剩余%.0fs\n",
+				i+1, len(entities), truncForLog(e.name, 26), el, eta)
 		}
-		triples += n
-		if len(entities) <= 8 || n != 0 {
-			fmt.Printf("  %2d 字段  %.46s\n", n, e.name)
-			for _, f := range payload.Fields {
+		// 前 8 条照常打印字段内容（用于人工核对形态）
+		if i < 8 && results[i].payload != nil {
+			for _, f := range results[i].payload.Fields {
 				fmt.Printf("        %s|%s=%s\n", f.Subject, f.Dimension, f.Value)
 			}
 		}
@@ -172,7 +196,7 @@ func main() {
 	fmt.Printf("\n已快照：%s\n", backup)
 
 	// ── 落块 ──
-	t0 := time.Now()
+	writeStart := time.Now()
 	written, zeroWritten, writeFailed := 0, 0, 0
 	for i, e := range entities {
 		r := results[i]
@@ -180,25 +204,23 @@ func main() {
 			writeFailed++
 			continue
 		}
-		if r.fields == 0 {
+		if len(r.payload.Fields) == 0 {
 			zeroWritten++
 			continue
 		}
-		payload, err := ex.Blocks(context.Background(), e.name)
-		if err != nil {
-			writeFailed++
-			continue
-		}
-		// ★ WritePayload 会保证「同一条原句 → 同 ID」的重试幂等
-		n, err := distill.WritePayload(context.Background(), db, payload, embed)
+		// 复用干跑阶段算出的 payload（不再调模型）
+		n, err := distill.WritePayload(context.Background(), db, r.payload, embed)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "  写入失败 %.40s: %v\n", e.name, err)
 			writeFailed++
 			continue
 		}
 		written += n
+		if (i+1)%10 == 0 || i+1 == len(entities) {
+			fmt.Printf("  落库 [%d/%d] 已写 %d 块\n", i+1, len(entities), written)
+		}
 	}
-	elapsed := time.Since(t0)
+	elapsed := time.Since(writeStart)
 
 	after, _ := db.BlockVectorStats()
 	fmt.Printf("\n落块完成（%.1fs）：写入字段块 %d，零字段跳过 %d，写入失败 %d\n",
@@ -254,6 +276,14 @@ func buildEmbedder(name, modelDir string) (*vector.ProviderAdapter, error) {
 		return nil, err
 	}
 	return adapted, nil
+}
+
+func truncForLog(s string, n int) string {
+	r := []rune(s)
+	if len(r) <= n {
+		return s
+	}
+	return string(r[:n]) + "…"
 }
 
 func copyFile(src, dst string) error {
