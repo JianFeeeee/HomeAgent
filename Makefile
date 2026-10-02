@@ -294,7 +294,7 @@ build-cli:
 	@echo "Built: $(BUILD_DIR)/$(CLI_BINARY) ($(VERSION))"
 
 build-gui:
-	@cd cmd/gui && npm install --production && npx electron-packager . $(GUI_BINARY) --out=../../$(BUILD_DIR) --overwrite --no-sandbox
+	@cd cmd/gui && npm install --production && npx electron-packager . $(GUI_BINARY) --out=../../$(BUILD_DIR) --overwrite --no-sandbox --icon=icon.ico
 	@echo "Built: $(BUILD_DIR)/$(GUI_BINARY)"
 
 build-static:
