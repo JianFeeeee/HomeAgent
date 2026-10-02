@@ -1918,8 +1918,25 @@ function executeHomeagentCmd(capability, reqId) {
       const disp = displays[dispIdx];
       const ox = disp ? (disp.bounds.x || 0) : 0;
       const oy = disp ? (disp.bounds.y || 0) : 0;
-      const absX = Math.round(ox + (parseFloat(params.x) || 0));
-      const absY = Math.round(oy + (parseFloat(params.y) || 0));
+
+      // ★ HiDPI 坐标换算。
+      //
+      // 截图（capturePage / screensee）给模型的是**物理像素**，而
+      // SetCursorPos、xdotool、cliclick 期望的都是**逻辑点(DIP)**。
+      // 直接拿截图像素去点，在 150% 缩放屏上会系统性偏移
+      // （越靠右下偏得越多）—— 这正是 HiDPI 屏上"点击不准"的根因。
+      //
+      // 旧实现只加了 display bounds 的原点偏移，完全没换算缩放比例。
+      // 这里按目标屏的 scaleFactor 换算；若调用方显式声明坐标已是
+      // 逻辑点（physical:false），则原样使用。
+      const scale = disp && disp.scaleFactor ? disp.scaleFactor : 1;
+      const rawX = parseFloat(params.x) || 0;
+      const rawY = parseFloat(params.y) || 0;
+      // 多数截图工具返回物理像素，故默认 physical=true。
+      // 模型若已按 DIP 推理，可显式传 physical:false 免换算。
+      const physical = params.physical !== false;
+      const absX = Math.round(ox + (physical ? rawX / scale : rawX));
+      const absY = Math.round(oy + (physical ? rawY / scale : rawY));
 
       // === Windows: 用 koffi 直接调用 user32.dll，不依赖 PowerShell C# 编译 ===
       if (os_ === "win32") {
@@ -1929,8 +1946,57 @@ function executeHomeagentCmd(capability, reqId) {
           const SetCursorPos = user32.func("bool SetCursorPos(int x, int y)");
           const mouse_event = user32.func("void mouse_event(uint dwFlags, uint dx, uint dy, uint dwData, uint dwExtraInfo)");
 
-          const btnDown = params.button === "right" ? 0x0008 : params.button === "middle" ? 0x0020 : 0x0002;
-          const btnUp = params.button === "right" ? 0x0010 : params.button === "middle" ? 0x0040 : 0x0004;
+          const BTN = { left: [0x0002, 0x0004], middle: [0x0020, 0x0040], right: [0x0008, 0x0010] };
+          const btn = params.button === "right" ? "right" : params.button === "middle" ? "middle" : "left";
+          const btnDown = BTN[btn][0];
+          const btnUp = BTN[btn][1];
+          // MOUSEEVENTF_WHEEL=0x0800, HWHEEL=0x0100；WHEEL_DELTA=120
+          const WHEEL = 0x0800;
+          const HWHEEL = 0x0100;
+          // 修饰键虚拟键码（VK_*）
+          const VK = {
+            ctrl: 0x11, control: 0x11, alt: 0x12, shift: 0x10, win: 0x5b, meta: 0x5b, super: 0x5b,
+            enter: 0x0d, return: 0x0d, tab: 0x09, esc: 0x1b, escape: 0x1b,
+            space: 0x20, backspace: 0x08, delete: 0x2e, del: 0x2e,
+            up: 0x26, down: 0x28, left: 0x25, right: 0x27,
+            home: 0x24, end: 0x23, pageup: 0x21, pagedown: 0x22,
+          };
+          // 修饰键的 keybd_event 标志（EXTENDEDKEY 表示右侧/小键盘扩展键）
+          const VK_EXTENDED = new Set([0x21,0x22,0x23,0x24,0x25,0x26,0x27,0x28,0x2e,0x5b,0x5c,0x6f,0x74]);
+
+          // keybd_event 全局声明（拿得到 user32 后用）
+          let keybd_event = null;
+          try { keybd_event = user32.func("void keybd_event(byte bVk, byte bScan, uint dwFlags, UIntPtr dwExtraInfo)"); } catch (e) {}
+
+          // tapVk 按键一次：支持 "ctrl+c"、"ctrl+shift+t"、"alt+f4"
+          const tapVk = (spec) => {
+            if (!keybd_event) return "keybd_event unavailable";
+            const parts = String(spec || "").split("+").map((x) => x.trim().toLowerCase()).filter(Boolean);
+            if (parts.length === 0) return "empty key";
+            const last = parts[parts.length - 1];
+            const mods = parts.slice(0, -1);
+            const modCodes = mods.map((m) => VK[m]).filter((c) => c !== undefined);
+            if (modCodes.length !== mods.length) return "unknown modifier in " + spec;
+            let keyCode = VK[last];
+            if (keyCode === undefined) {
+              // 单字符：字母/数字 → ASCII 大写
+              if (last.length === 1) keyCode = last.toUpperCase().charCodeAt(0);
+              else return "unknown key: " + last;
+            }
+            for (const c of modCodes) keybd_event(c, 0, 0, 0);
+            keybd_event(keyCode, 0, VK_EXTENDED.has(keyCode) ? 1 : 0, 0);
+            keybd_event(keyCode, 0, (VK_EXTENDED.has(keyCode) ? 1 : 0) | 0x0002, 0);
+            for (const c of modCodes.slice().reverse()) keybd_event(c, 0, 0x0002, 0);
+            return null;
+          };
+
+          // 滚动：dy 纵向、dx 横向，正数向上
+          const doScroll = () => {
+            const dy = Number(params.dy !== undefined ? params.dy : params.y) || 0;
+            const dx = Number(params.dx !== undefined ? params.dx : params.x) || 0;
+            if (dx) mouse_event(HWHEEL, 0, 0, -Math.round(dx * 120), 0);
+            if (dy) mouse_event(WHEEL, 0, 0, Math.round(dy * 120), 0);
+          };
 
           // 先移动鼠标到目标位置
           SetCursorPos(absX, absY);
@@ -1958,10 +2024,142 @@ function executeHomeagentCmd(capability, reqId) {
               mouse_event(0x0010, 0, 0, 0, 0);
               sendCmdResult(reqId, baseResult(reqId, "ok", "computeruse rightclick @ (" + absX + "," + absY + ")", ""));
               break;
-            case "scroll":
-              mouse_event(0x0800, 0, 0, Math.round((params.dy || 120) * 120), 0);
-              sendCmdResult(reqId, baseResult(reqId, "ok", "computeruse scroll @ (" + absX + "," + absY + ")", ""));
+            case "scroll": {
+              // 旧实现固定向上滚 120*dy，且不支持横向。
+              // 现在按参数给方向/量级，并支持 dx（横向滚动）。
+              doScroll();
+              sendCmdResult(
+                reqId,
+                baseResult(
+                  reqId,
+                  "ok",
+                  "computeruse scroll dx=" + (params.dx || 0) + " dy=" + (params.dy || params.y || 0) +
+                    " @ (" + absX + "," + absY + ")",
+                  "",
+                ),
+              );
               break;
+            }
+            // === 以下为补齐的高级操作 ===
+            case "mousedown":
+              // 按下不释放：用于与 mouseup 配对做"按住拖拽"
+              mouse_event(btnDown, 0, 0, 0, 0);
+              sendCmdResult(reqId, baseResult(reqId, "ok", "computeruse mousedown(" + btn + ")", ""));
+              break;
+            case "mouseup":
+              mouse_event(btnUp, 0, 0, 0, 0);
+              sendCmdResult(reqId, baseResult(reqId, "ok", "computeruse mouseup(" + btn + ")", ""));
+              break;
+            case "drag": {
+              // 一步拖拽：从 (x,y) 按下 → 移动到 (tox,toy) → 释放
+              const toX = Math.round(
+                ox + (params.physical !== false ? (parseFloat(params.tox || params.tx) || 0) / scale : (parseFloat(params.tox || params.tx) || 0)),
+              );
+              const toY = Math.round(
+                oy + (params.physical !== false ? (parseFloat(params.toy || params.ty) || 0) / scale : (parseFloat(params.toy || params.ty) || 0)),
+              );
+              SetCursorPos(absX, absY);
+              mouse_event(btnDown, 0, 0, 0, 0);
+              // 分步移动：部分应用（浏览器 canvas、拖拽排序）需要中间 move 事件
+              const steps = Math.max(1, Math.min(40, parseInt(params.steps || 12, 10) || 12));
+              for (let i = 1; i <= steps; i++) {
+                const t = i / steps;
+                SetCursorPos(
+                  Math.round(absX + (toX - absX) * t),
+                  Math.round(absY + (toY - absY) * t),
+                );
+              }
+              mouse_event(btnUp, 0, 0, 0, 0);
+              sendCmdResult(
+                reqId,
+                baseResult(reqId, "ok", "computeruse drag (" + absX + "," + absY + ") -> (" + toX + "," + toY + ")", ""),
+              );
+              break;
+            }
+            case "hover":
+              // 悬停：只移动不点击（触发 tooltip / hover 菜单）
+              SetCursorPos(absX, absY);
+              sendCmdResult(reqId, baseResult(reqId, "ok", "computeruse hover @ (" + absX + "," + absY + ")", ""));
+              break;
+            case "keypress": {
+              // 支持 "ctrl+c" 这类组合键；旧实现只发单键
+              const err2 = tapVk(params.key || params.keys || params.text);
+              if (err2) {
+                sendCmdResult(reqId, baseResult(reqId, "error", "", "computeruse keypress: " + err2));
+              } else {
+                sendCmdResult(reqId, baseResult(reqId, "ok", "computeruse keypress " + (params.key || params.keys || params.text), ""));
+              }
+              break;
+            }
+            case "hotkey":
+            case "combo": {
+              const keys = String(params.keys || params.key || "");
+              const err2 = tapVk(keys);
+              if (err2) {
+                sendCmdResult(reqId, baseResult(reqId, "error", "", "computeruse hotkey: " + err2));
+              } else {
+                sendCmdResult(reqId, baseResult(reqId, "ok", "computeruse hotkey " + keys, ""));
+              }
+              break;
+            }
+            case "middleclick":
+              mouse_event(BTN.middle[0], 0, 0, 0, 0);
+              mouse_event(BTN.middle[1], 0, 0, 0, 0);
+              sendCmdResult(reqId, baseResult(reqId, "ok", "computeruse middleclick @ (" + absX + "," + absY + ")", ""));
+              break;
+            case "tripleclick":
+              // 三击：三次快速左键，用于选中整行
+              for (let i = 0; i < 3; i++) {
+                mouse_event(BTN.left[0], 0, 0, 0, 0);
+                mouse_event(BTN.left[1], 0, 0, 0, 0);
+              }
+              sendCmdResult(reqId, baseResult(reqId, "ok", "computeruse tripleclick @ (" + absX + "," + absY + ")", ""));
+              break;
+            case "type": {
+              // 用 SendKeys 注入文本（koffi 只能发按键，文本需走 SendInput）
+              const t = String(params.text || "");
+              if (!t) {
+                sendCmdResult(reqId, baseResult(reqId, "error", "", "computeruse type: empty text"));
+                break;
+              }
+              // 逐字符发送：SendKeys 语法里 + ^ % ~ { } 都是特殊字符
+              const SPECIAL = { "+": "{+}", "^": "{^}", "%": "{%}", "~": "{~}", "{": "{{}", "}": "{}}", "(": "{(}", ")": "{)}", "[": "{[}", "]": "{]}" };
+              let expr = "";
+              for (const ch of t) expr += SPECIAL[ch] !== undefined ? SPECIAL[ch] : ch;
+              const ps =
+                "Add-Type -AssemblyName System.Windows.Forms;" +
+                "[System.Windows.Forms.SendKeys]::SendWait('" +
+                expr.replace(/'/g, "''") +
+                "')";
+              cp.exec("powershell", ["-NoProfile", "-Command", ps], { timeout: 15000 }, (err) => {
+                if (err) {
+                  sendCmdResult(reqId, baseResult(reqId, "error", "", "computeruse type failed: " + err.message));
+                } else {
+                  sendCmdResult(reqId, baseResult(reqId, "ok", "computeruse typed " + t.length + " chars", ""));
+                }
+              });
+              break;
+            }
+            case "wait":
+            case "sleep": {
+              // 显式等待：UI 更新/动画未完成时先等一下再下一步
+              const ms = Math.max(0, Math.min(10000, parseInt(params.ms || params.duration || 500, 10) || 500));
+              setTimeout(() => {
+                sendCmdResult(reqId, baseResult(reqId, "ok", "computeruse waited " + ms + "ms", ""));
+              }, ms);
+              break;
+            }
+            case "display": {
+              // 返回各显示器信息：模型需要知道有几个屏、逻辑尺寸与缩放
+              const info = displays.map((d, i) => ({
+                index: i,
+                bounds: d.bounds,
+                scaleFactor: d.scaleFactor,
+                primary: d.id === screen.getPrimaryDisplay().id,
+              }));
+              sendCmdResult(reqId, baseResult(reqId, "ok", "displays: " + JSON.stringify(info), ""));
+              break;
+            }
             default:
               sendCmdResult(reqId, baseResult(reqId, "error", "", "computeruse: unknown action " + action));
           }
@@ -1981,6 +2179,12 @@ function executeHomeagentCmd(capability, reqId) {
             case "doubleclick": return ["dc:" + pos];
             case "rightclick": return ["c:" + pos];
             case "scroll": return ["w:" + (params.dy > 0 ? "+" : "-")];
+            case "hover": return ["m:" + pos];
+            case "middleclick": return ["dc:" + pos];
+            // cliclick 原生支持 dd（按下拖拽）/ du（释放）/ dm（拖到）
+            case "mousedown": return ["dd:" + pos];
+            case "mouseup": return ["du:" + pos];
+            case "drag": return ["dm:" + (absX) + "," + (absY) + "," + (ox + (parseFloat(params.tox) || 0) / scale) + "," + (oy + (parseFloat(params.toy) || 0) / scale)];
             default: return a;
           }
         }
@@ -2005,8 +2209,82 @@ function executeHomeagentCmd(capability, reqId) {
           run(L(["mousemove", String(absX), String(absY), "scroll", "--button", "5", String(Math.round(params.dy || params.y || 0))]));
           return;
         case "keypress":
-          run(L(["key", String(params.key || params.text || "")]));
+        case "hotkey":
+        case "combo": {
+          // xdotool/ cliclick 的 key 参数本身就接受 "ctrl+c" 这类组合键，
+          // 但旧代码把整个字符串原样透传，模型传 "Ctrl+C"（大写/带引号）就失效。
+          // 这里做一次归一化。
+          let spec = String(params.key || params.keys || params.text || "").trim();
+          spec = spec
+            .replace(/\+/g, " plus ")
+            .replace(/ctrl\s*\+\s*ctrl\s*\+/gi, "ctrl+")
+            .split(/\s*\+\s*/)
+            .filter(Boolean)
+            .map((x) => x.toLowerCase().trim())
+            .join("+");
+          if (!spec) {
+            sendCmdResult(reqId, baseResult(reqId, "error", "", "computeruse keypress: empty key"));
+            return;
+          }
+          run(L(["key", spec]));
           return;
+        }
+        case "mousedown":
+          run(L([os_ === "darwin" ? "mousedown" : "mousedown", String(absX), String(absY)]));
+          return;
+        case "mouseup":
+          run(L([os_ === "darwin" ? "mouseup" : "mouseup", String(absX), String(absY)]));
+          return;
+        case "drag": {
+          const toX = Math.round(ox + (parseFloat(params.tox) || 0) / scale);
+          const toY = Math.round(oy + (parseFloat(params.toy) || 0) / scale);
+          const steps = Math.max(1, Math.min(40, parseInt(params.steps || 12, 10) || 12));
+          run(L(["mousemove", String(absX), String(absY), "mousedown", "1"]));
+          for (let i = 1; i <= steps; i++) {
+            const tt = i / steps;
+            run(
+              L([
+                "mousemove",
+                String(Math.round(absX + (toX - absX) * tt)),
+                String(Math.round(absY + (toY - absY) * tt)),
+              ]),
+            );
+          }
+          run(L(["mouseup", "1"]));
+          return;
+        }
+        case "hover":
+          run(L(["mousemove", String(absX), String(absY)]));
+          return;
+        case "middleclick":
+          run(L(["mousemove", String(absX), String(absY), "click", "2"]));
+          return;
+        case "tripleclick":
+          run(
+            L([
+              "mousemove", String(absX), String(absY),
+              "click", "--repeat", "3", "--delay", "60", "1",
+            ]),
+          );
+          return;
+        case "wait":
+        case "sleep": {
+          const ms = Math.max(0, Math.min(10000, parseInt(params.ms || params.duration || 500, 10) || 500));
+          setTimeout(() => {
+            sendCmdResult(reqId, baseResult(reqId, "ok", "computeruse waited " + ms + "ms", ""));
+          }, ms);
+          return;
+        }
+        case "display": {
+          const info = displays.map((d, i) => ({
+            index: i,
+            bounds: d.bounds,
+            scaleFactor: d.scaleFactor,
+            primary: d.id === screen.getPrimaryDisplay().id,
+          }));
+          sendCmdResult(reqId, baseResult(reqId, "ok", "displays: " + JSON.stringify(info), ""));
+          return;
+        }
         case "type": {
           // macOS cliclick 无 type，用 osascript
           if (os_ === "darwin") {

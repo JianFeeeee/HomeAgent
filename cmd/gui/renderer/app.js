@@ -1953,6 +1953,116 @@ function chanLetter(src) {
   return /[A-Za-z0-9]/.test(ch) ? ch : "C";
 }
 
+// renderToolCard 渲染单个工具调用卡。
+// 独立成函数是为了让分组逻辑能复用（组卡展开后要逐个渲染）。
+function renderToolCard(tc, drip) {
+  var argsStr =
+    typeof tc.args === "object"
+      ? JSON.stringify(tc.args, null, 1)
+      : tc.args || "";
+  var resultStr = tc.result
+    ? typeof tc.result === "object"
+      ? JSON.stringify(tc.result, null, 1)
+      : String(tc.result)
+    : "";
+  var running = !resultStr && tc.status !== "denied";
+  var error = tc.status === "error" || tc.status === "denied" || !!tc.error;
+  var iconSvg = error
+    ? '<svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><circle cx="12" cy="12" r="9"/><path d="M5.6 5.6l12.8 12.8"/></svg>'
+    : running
+      ? '<span class="tc-spinner"></span>'
+      : '<svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M14.7 6.3a4 4 0 0 0-5.4 5.4L3 18l3 3 6.3-6.3a4 4 0 0 0 5.4-5.4l-2.9 2.9-2.5-.6-.6-2.5z"/></svg>';
+  var statusHtml =
+    tc.status === "denied"
+      ? '<span class="tc-state tc-deny">' + __("已拒绝", "Denied") + "</span>"
+      : running
+        ? '<span class="tc-state tc-run">' + __("调用中", "Running") + "</span>"
+        : '<span class="tc-state tc-done">' + __("完成", "Done") + "</span>";
+  var pluginHtml = tc.plugin
+    ? '<span class="tc-plugin">' + escHtml(tc.plugin) + "</span>"
+    : "";
+  return (
+    '<div class="tool-card' +
+    (error ? " tc-error" : running ? " tc-running" : " tc-done") +
+    (drip ? " tool-drip-in" : "") +
+    '" data-tool="' +
+    escHtml(tc.tool || tc.name || "") +
+    '" onclick="toggleToolCall(this)">' +
+    '<div class="tc-line"><span class="tc-ico">' +
+    iconSvg +
+    '</span><span class="tc-name">' +
+    escHtml(tc.tool || tc.name || "") +
+    "</span>" +
+    pluginHtml +
+    statusHtml +
+    '<span class="tc-caret">▾</span></div>' +
+    '<div class="tc-detail" style="display:none">' +
+    (argsStr && argsStr !== "{}"
+      ? '<div class="tc-args"><div class="tc-detail-label">' +
+        __("参数", "Args") +
+        "</div>" +
+        escHtml(argsStr) +
+        "</div>"
+      : "") +
+    (resultStr
+      ? '<div class="tc-result"><div class="tc-detail-label">' +
+        __("结果", "Result") +
+        "</div>" +
+        escHtml(resultStr) +
+        "</div>"
+      : "") +
+    "</div></div>"
+  );
+}
+
+// renderToolGroupOrSingle 按数量决定形态：1 个走单卡，多个折成组卡。
+//
+// ★ 分组策略参考 PiDeck 的 tool-group-card。原来一轮里每个调用各占一张卡，
+// 调 5 个工具就是 5 张卡竖排，把真正的回复挤到很下面；而这些卡形态高度
+// 相似（图标 + 工具名 + 状态），信息密度极低。折成组卡后「agent 干了什么」
+// 一眼可见，而不被细节淹没。
+function renderToolGroupOrSingle(tcs, newlyDone) {
+  var cards = tcs.map(function (tc) {
+    return renderToolCard(
+      tc,
+      newlyDone.indexOf(tc.tool || tc.name || "") !== -1,
+    );
+  });
+  if (cards.length === 1) return cards[0];
+  return renderToolGroup(tcs, cards);
+}
+
+// renderToolGroup 组卡：头部脉冲点 + 计数 + 状态摘要，展开后逐个单卡。
+function renderToolGroup(tcs, cards) {
+  var runningN = 0;
+  var errN = 0;
+  tcs.forEach(function (tc) {
+    if (!tc.result && tc.status !== "denied") runningN++;
+    if (tc.status === "error" || tc.status === "denied" || !!tc.error) errN++;
+  });
+  var tone =
+    errN > 0 ? "tone-error" : runningN > 0 ? "tone-running" : "tone-done";
+  var summary =
+    errN > 0
+      ? __("部分失败", "some failed")
+      : runningN > 0
+        ? __("进行中", "running")
+        : __("完成", "done");
+  return (
+    '<div class="tool-group-card ' + tone + '">' +
+    '<div class="tool-group-head" onclick="toggleToolGroup(this)">' +
+    '<span class="tool-group-dot"></span>' +
+    '<span class="tool-group-count">' + cards.length + "</span>" +
+    '<span class="tool-group-label">' + __("个工具调用", "tool calls") + "</span>" +
+    '<span class="tc-state">' + escHtml(summary) + "</span>" +
+    '<span class="tc-caret"></span>' +
+    "</div>" +
+    '<div class="tool-group-body" style="display:none">' +
+    cards.join("") +
+    "</div></div>"
+  );
+}
+
 // PiDeck 风格思考卡片：Brain 图标 + 折叠时单行预览（流式中扫光）+ 展开/收起
 // PiDeck 风格思考卡片：Brain 图标 + 折叠单行预览（流式中扫光）+ 展开懒加载全文
 function renderReasoningCard(text, isStreaming, idx) {
@@ -2126,6 +2236,9 @@ function renderChat() {
       }
       var tcs = "";
       if (m.tool_calls && m.tool_calls.length > 0) {
+        tcs = renderToolGroupOrSingle(m.tool_calls, newlyDone);
+      }
+      if (false) {
         m.tool_calls.forEach((tc) => {
           var argsStr =
             typeof tc.args === "object"
@@ -2206,6 +2319,12 @@ function renderChat() {
           (newPending.length
             ? '<span class="thinking-tools">' + pillHtml() + "</span>"
             : "");
+        // ★ msg-running：整条气泡的呼吸光晕。参考 PiDeck 的
+        // .turn-row--running:before —— 一层极淡的 accent 底色缓慢明暗
+        // 交替。单看气泡里那几个点，视线要缩到一小块；光晕铺在整条消息
+        // 上，余光就能感知「agent 正在回」。只加在最后一条且未收尾的
+        // 流式消息上，已完成的历史消息不带。
+        var runCls = " msg-running";
         if (c) {
           body +=
             '<div class="msg-bubble' +
@@ -2451,6 +2570,19 @@ function rerenderChat() {
   renderChatStarmap();
   renderTerminals();
   renderCmdHistory();
+}
+
+// toggleToolGroup 展开/收起工具调用组卡。
+// 只切 body 的 display，不重建 DOM —— 展开时里面的单卡已是渲染好的
+// HTML，重建会丢掉它们各自的折叠状态与"刚完成"的入场动画。
+function toggleToolGroup(el) {
+  var card = el.parentNode;
+  if (!card) return;
+  var body = card.querySelector(".tool-group-body");
+  if (!body) return;
+  var open = body.style.display !== "none";
+  body.style.display = open ? "none" : "block";
+  el.classList.toggle("open", !open);
 }
 
 function toggleToolCall(el) {
