@@ -102,3 +102,6 @@ dist/
 
 # 临时探针目录（scripts/ 之外的临时 main.go 探针）
 /tools/zz_*/
+
+# 编译产物（迁移工具）
+/homed-graph-migrate
