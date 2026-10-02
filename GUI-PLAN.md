@@ -118,16 +118,25 @@ agent 一干活用户就没法用电脑。
 | 文件 | 职责 |
 |---|---|
 | `cmd/gui/agent-cursor.js` | 透明置顶层窗口 + mascot 指针 + 移动/点击脉冲动画；记录上次命中的窗口句柄 |
-| `cmd/gui/agent-inject.js` | Windows 后台注入：`WindowFromPoint` 定位、坐标换算、`PostMessage` 投递鼠标/键盘/滚轮/文本 |
+| `cmd/gui/agent-inject.js` | 两种注入路径：`SendInput`（默认）与 `PostMessage`（后台）；含用户活动感知 |
 
 ### 3.3 配置
 
-`gui-prefs.json` → `deviceBridge.agentCursor.mode`：
+`gui-prefs.json` → `deviceBridge.agentCursor`：
 
-| 值 | 行为 |
-|---|---|
-| `"overlay"` | **默认**。不动用户鼠标，后台注入 |
-| `"real"` | 旧行为，操作真实鼠标 |
+| 键 | 值 | 行为 |
+|---|---|---|
+| `mode` | `"sendinput"` | **默认**。`SendInput` 注入系统输入队列，可靠性高（Chromium/游戏都能操作）。代价：会移动真实光标，故先等用户停手 |
+| `mode` | `"overlay"` | `PostMessage` 直投窗口句柄。用户鼠标纹丝不动，但自绘界面常忽略合成消息 |
+| `mode` | `"real"` | 保留旧代码路径（兼容） |
+| `deferMs` | 数字 | 用户活动时最多等多久（默认 3000，上限 10000）。0 = 不等待 |
+
+> 为什么默认改成 `sendinput`：用户要求「可靠 + 用户正在操作则暂缓」。
+> 参考 `Pal-AI-Lab/Coopanion`（见 `DESKTOP-PET-NOTES.md` 第七节）。
+>
+> ⚠ 实测发现：`GetLastInputInfo` 是**全局**的，agent 自己的 `SendInput`
+> 也会被算作「用户输入」，若不排除则**永远处于「用户正在操作」状态**。
+> 已按 Coopanion 的三重判定修正（ownTick / ownCursor / 无符号差值）。
 
 ### 3.4 已验证（端到端，8/8 有正确响应）
 
@@ -178,13 +187,25 @@ agent 一干活用户就没法用电脑。
 
 ## 四、待办
 
-### 4.1 优先：验证模式 A 的真实效果
+### 4.1 优先：修 `deferMs` 读取不生效
+
+实测：`gui-prefs.json` 里 `agentCursor.deferMs = 0`，但命令仍按默认 3000ms
+暂缓（回执写「已等待 3000ms」）。`loadGuiPrefs()` 会重建对象且**不透传
+`agentCursor` 字段**，导致读取永远拿到默认值。
+
+- [ ] `loadGuiPrefs()` 透传 `deviceBridge.agentCursor`
+- [ ] 判据：配置 `deferMs:0` 时不得进入暂缓路径
+
+### 4.2 验证 sendinput 的真实效果
+
+当前环境无可注入的可见目标窗口（`WindowFromPoint` 恒返回 null，
+`GetCursorPos` 读回 0,0），故「点击真的落到目标窗口上」尚未证明。
 
 - [ ] 端到端测试：打开真实应用 → 点它 → 输入 → 截图回读
-- [ ] 断言全过程用户鼠标位置未变
-- [ ] 判据：把该测试固化进 `npm test`（需能在无桌面 CI 环境跳过）
+- [ ] 断言：`overlay` 模式下全过程用户鼠标位置未变
+- [ ] 判据：固化进 `npm test`（需能在无桌面 CI 环境跳过）
 
-### 4.2 服务端配合（详见 `SERVER-HANDOFF.md`）
+### 4.3 服务端配合（详见 `SERVER-HANDOFF.md`）
 
 - [ ] 放开 `device.go` 的 action 白名单（schema enum + switch default 双重限制）
 - [ ] 透传新参数 `tox`/`toy`/`steps`/`dx`/`ms`/`physical`
@@ -197,9 +218,16 @@ agent 一干活用户就没法用电脑。
 
 - [ ] `agentCursor.mode` 的 UI（目前只能手改 `gui-prefs.json`）
 
-### 4.4 可选增强
+### 4.4 设置页
 
-- [ ] mascot 待机动作、常驻屏幕边缘（借鉴桌宠的视觉层）
+- [ ] `agentCursor.mode` / `deferMs` 的 UI（目前只能手改 `gui-prefs.json`）
+
+### 4.5 可选增强（详见 `DESKTOP-PET-NOTES.md` 第六、九节）
+
+- [ ] `main.js` 显式调 `SetProcessDpiAwarenessContext(-4)`，不依赖 Electron 默认值
+- [ ] mascot 姿态：思考 / 等待 / 出错
+- [ ] 动作解析容错：未知动作丢弃而非整条失败
+- [ ] mascot 待机自主行为：闲置时轻微眨眼/呼吸
 - [ ] Linux 侧若也要「不抢鼠标」，需 Wayland + uinput 虚拟设备
       （X11 下做不到 —— XTEST 合成的是真实设备事件）
 

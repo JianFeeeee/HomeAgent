@@ -1423,6 +1423,15 @@ function sendCmdResult(a, b) {
   }
 }
 
+// 安全设置自绘光标的「忙碌」呼吸态（agentCursor 可能未就绪）
+function agentCursorBusySafe(dispIdx, busy) {
+  try {
+    if (agentCursor && typeof agentCursor.agentCursorBusy === "function") {
+      agentCursor.agentCursorBusy(busy, dispIdx);
+    }
+  } catch (e) {}
+}
+
 function baseResult(reqId, status, output, error) {
   return {
     op: "cmd_result",
@@ -1948,17 +1957,33 @@ function executeHomeagentCmd(capability, reqId) {
       }
       const action = params.action || "click";
 
-      // ★ 模式 A：agent 独立光标 + 后台注入。
+      // ★ 注入模式：sendinput（默认）/ overlay / real
       //
-      // 取值 "overlay"（不动用户鼠标）/ "real"（旧行为，操作真实鼠标）。
-      // 未配置时默认 "overlay" —— 用户明确要求不要抢鼠标。
-      let cursorMode = "overlay";
+      //   sendinput  SendInput 注入到系统输入队列。等价真实硬件事件，
+      //              Chromium/Electron/游戏等自绘界面都能接收 —— 可靠。
+      //              代价：会移动用户的真实光标，故操作前先等用户停手。
+      //              参考 Pal-AI-Lab/Coopanion 的 cortico-world-cua。
+      //   overlay    PostMessage 直投窗口句柄。用户鼠标纹丝不动，但自绘
+      //              界面常忽略合成消息 ⇒ 只能操作原生 Win32 程序。
+      //   real       同上但用旧代码路径（保留以兼容）。
+      //
+      // 默认 sendinput：用户要求「可靠 + 用户正在操作则暂缓」。
+      let cursorMode = "sendinput";
       try {
         const _p = loadGuiPrefs();
         const _ac = (_p && _p.deviceBridge && _p.deviceBridge.agentCursor) || {};
-        if (_ac.mode === "real") cursorMode = "real";
+        if (_ac.mode === "overlay" || _ac.mode === "real") cursorMode = _ac.mode;
       } catch (e) {}
-      const useOverlay = cursorMode === "overlay" && agentInject.available();
+      const injOk = agentInject.available();
+      const useOverlay = cursorMode === "overlay" && injOk;
+      const useSendInput = cursorMode === "sendinput" && injOk;
+      // 用户活动暂缓：等用户停手再注入（毫秒）。0 = 不等待。
+      let deferMs = 3000;
+      try {
+        const _p2 = loadGuiPrefs();
+        const _ac2 = (_p2 && _p2.deviceBridge && _p2.deviceBridge.agentCursor) || {};
+        if (typeof _ac2.deferMs === "number") deferMs = Math.max(0, Math.min(10000, _ac2.deferMs));
+      } catch (e) {}
 
       // 把内部参数提到 action 分支之前共用
       const cuNumber = (v, dflt) => {
@@ -2018,6 +2043,147 @@ function executeHomeagentCmd(capability, reqId) {
       const physical = params.physical !== false;
       const absX = Math.round(ox + (physical ? rawX : rawX * scale));
       const absY = Math.round(oy + (physical ? rawY : rawY * scale));
+
+      // === 模式 sendinput：SendInput 注入 + 用户在操作则暂缓 ===
+      //
+      // SendInput 会动真实光标，因此注入前先等用户停手（deferMs 上限）。
+      // 等不到就跳过本次操作并明确报错 —— 宁可失败，也不打断用户。
+      if (os_ === "win32" && useSendInput) {
+        try {
+          const busy = () => agentCursorBusySafe(dispIdx, true);
+          const idle = () => agentCursorBusySafe(dispIdx, false);
+          const fin = (ok, msg) => {
+            idle();
+            sendCmdResult(reqId, baseResult(reqId, ok ? "ok" : "error", msg, ok ? "" : msg));
+          };
+          const fail = (m) => fin(false, m);
+
+          // 等待用户停手
+          //
+          // 注意：executeHomeagentCmd 是**同步函数**，不能 await。
+          // 故改为「同步查询 + 轮询回调」：先看用户是否在操作；若是，
+          // 定时轮询到空闲或超时再继续；全程不阻塞主进程。
+          const startDefer = (cb) => {
+            if (deferMs <= 0 || !agentInject.userIsActive(1200)) return cb(true);
+            const before = agentInject.idleMs();
+            const t0 = Date.now();
+            const tick = () => {
+              if (!agentInject.userIsActive(800)) return cb(true);
+              if (Date.now() - t0 >= deferMs) {
+                idle();
+                sendCmdResult(
+                  reqId,
+                  baseResult(
+                    reqId,
+                    "error",
+                    "",
+                    "用户正在操作（已等待 " + deferMs + "ms，开始时空闲仅 " + before +
+                      "ms）。为避免抢走光标已跳过本次操作。可在设置里调整 agentCursor.deferMs。",
+                  ),
+                );
+                return cb(false);
+              }
+              setTimeout(tick, 120);
+            };
+            tick();
+          };
+
+          const runAction = () => {
+          const btnName = params.button === "right" ? "right" : params.button === "middle" ? "middle" : "left";
+          const toX = () => Math.round(ox + (physical ? (parseFloat(params.tox || params.tx) || 0) : (parseFloat(params.tox || params.tx) || 0) * scale));
+          const toY = () => Math.round(oy + (physical ? (parseFloat(params.toy || params.ty) || 0) : (parseFloat(params.toy || params.ty) || 0) * scale));
+
+          // 自绘光标同步到目标位置（视觉指示 agent 在做什么）
+          const needsXY = ["click", "doubleclick", "rightclick", "middleclick", "tripleclick",
+            "mousedown", "mouseup", "move", "hover", "drag", "scroll"].includes(action);
+          if (needsXY) agentCursor.agentCursorMove(absX, absY, dispIdx);
+          busy();
+
+          switch (action) {
+            case "move":
+            case "hover": {
+              const r = agentInject.si.move(absX, absY);
+              return fin(r.ok, "sendinput " + action + " @ (" + absX + "," + absY + ")");
+            }
+            case "click":
+            case "rightclick":
+            case "middleclick":
+            case "doubleclick":
+            case "tripleclick":
+            case "mousedown":
+            case "mouseup": {
+              const btn = action === "rightclick" ? "right" : action === "middleclick" ? "middle" : btnName;
+              const act = action === "rightclick" || action === "middleclick" ? "click" : action;
+              const r = agentInject.si.button(absX, absY, act, btn);
+              if (act === "click" || act === "doubleclick" || act === "tripleclick") {
+                agentCursor.agentCursorClick(dispIdx);
+              }
+              return fin(r.ok, "sendinput " + action + " @ (" + absX + "," + absY + ")");
+            }
+            case "drag": {
+              const steps = Math.max(1, Math.min(60, parseInt(params.steps || 12, 10) || 12));
+              const r = agentInject.si.drag(absX, absY, toX(), toY(), btnName, steps);
+              agentCursor.agentCursorMove(toX(), toY(), dispIdx);
+              agentCursor.agentCursorClick(dispIdx);
+              return fin(r.ok, "sendinput drag (" + absX + "," + absY + ") -> (" + toX() + "," + toY() + ")");
+            }
+            case "scroll": {
+              const dy = cuNumber(params.dy !== undefined ? params.dy : params.y, 0);
+              const dx = cuNumber(params.dx !== undefined ? params.dx : params.x, 0);
+              // GUI 侧约定：dy 正=向上。SendInput 的 WHEEL 正值即向上，直接传。
+              const r = agentInject.si.scroll(dy, dx);
+              return fin(r.ok, "sendinput scroll dx=" + dx + " dy=" + dy);
+            }
+            case "keypress":
+            case "hotkey":
+            case "combo": {
+              const keys = String(params.keys || params.key || params.text || "");
+              const r = agentInject.si.key(keys);
+              return fin(r.ok, "sendinput keypress " + keys);
+            }
+            case "type": {
+              const r = agentInject.si.type(String(params.text || ""));
+              return fin(r.ok, "sendinput typed " + r.chars + " chars");
+            }
+            case "wait":
+            case "sleep": {
+              const ms = Math.max(0, Math.min(10000, parseInt(params.ms || params.duration || 500, 10) || 500));
+              idle();
+              setTimeout(() => sendCmdResult(reqId, baseResult(reqId, "ok", "sendinput waited " + ms + "ms", "")), ms);
+              return;
+            }
+            case "display": {
+              const info = displays.map((d, i) => ({
+                index: i, bounds: d.bounds, scaleFactor: d.scaleFactor,
+                primary: d.id === screen.getPrimaryDisplay().id,
+              }));
+              const v = agentInject.virtualScreen();
+              idle();
+              sendCmdResult(reqId, baseResult(reqId, "ok",
+                "displays: " + JSON.stringify(info) +
+                " | virtualScreen: " + JSON.stringify(v) +
+                " | inputMode: sendinput | coordinateSpace: physical-pixel", ""));
+              return;
+            }
+            default:
+              return fail("unknown action " + action);
+          }
+          };
+          startDefer((proceed) => { if (proceed) runAction(); });
+          // ★ 必须在这里 return。
+          //
+          // runAction 里的 `return fin(...)` 只退出 runAction，不会退出
+          // executeHomeagentCmd。少了这句，执行完 sendinput 后会继续往下
+          // fall through 到旧的 real 鼠标路径 —— 同一条命令被彻底执行两遍
+          // （实测：8 条命令回了 16 个 cmd_result，且真光标被额外抢一次）。
+          return;
+        } catch (e) {
+          try { agentCursorBusySafe(dispIdx, false); } catch (e2) {}
+          console.error("[sendinput] failed: " + e.message);
+          sendCmdResult(reqId, baseResult(reqId, "error", "", "sendinput: " + e.message));
+          return;
+        }
+      }
 
       // === 模式 A：后台注入（PostMessage 到目标窗口），不动用户真实鼠标 ===
       if (os_ === "win32" && useOverlay) {
