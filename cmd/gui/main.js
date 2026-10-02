@@ -10,6 +10,8 @@ const { spawn } = require("child_process");
 const http = require("http");
 const crypto = require("crypto");
 const { pathToFileURL } = require("url");
+const agentCursor = require("./agent-cursor");
+const agentInject = require("./agent-inject");
 
 const CONNECTIONS_FILE = path.join(app.getPath("userData"), "connections.json");
 const LOG_FILE = path.join(app.getPath("userData"), "gui.log");
@@ -1945,6 +1947,24 @@ function executeHomeagentCmd(capability, reqId) {
         params.action = t[2] || "click";
       }
       const action = params.action || "click";
+
+      // ★ 模式 A：agent 独立光标 + 后台注入。
+      //
+      // 取值 "overlay"（不动用户鼠标）/ "real"（旧行为，操作真实鼠标）。
+      // 未配置时默认 "overlay" —— 用户明确要求不要抢鼠标。
+      let cursorMode = "overlay";
+      try {
+        const _p = loadGuiPrefs();
+        const _ac = (_p && _p.deviceBridge && _p.deviceBridge.agentCursor) || {};
+        if (_ac.mode === "real") cursorMode = "real";
+      } catch (e) {}
+      const useOverlay = cursorMode === "overlay" && agentInject.available();
+
+      // 把内部参数提到 action 分支之前共用
+      const cuNumber = (v, dflt) => {
+        const n = parseFloat(v);
+        return Number.isFinite(n) ? n : dflt;
+      };
       // 跨平台输入模拟：Linux=xdotool / macOS=cliclick(或用osascript) / Windows=PowerShell user32
       const os_ = platform === "win32" ? "win32" : platform === "darwin" ? "darwin" : "linux";
       let tool = null; // {cmd, args, shell}
@@ -1973,24 +1993,167 @@ function executeHomeagentCmd(capability, reqId) {
       const ox = disp ? (disp.bounds.x || 0) : 0;
       const oy = disp ? (disp.bounds.y || 0) : 0;
 
-      // ★ HiDPI 坐标换算。
+      // ★ 坐标空间：Win32 坐标与截图一样，都是**物理像素**，不要换算。
       //
-      // 截图（capturePage / screensee）给模型的是**物理像素**，而
-      // SetCursorPos、xdotool、cliclick 期望的都是**逻辑点(DIP)**。
-      // 直接拿截图像素去点，在 150% 缩放屏上会系统性偏移
-      // （越靠右下偏得越多）—— 这正是 HiDPI 屏上"点击不准"的根因。
+      // 实测（Electron 主进程内，cmd/gui/probe2）：
+      //   screen API (DIP)      : 1260 x 840   scaleFactor=2
+      //   GetSystemMetrics      : 2520 x 1680  ← Win32 用的是物理像素
+      //   SetCursorPos(1260,840) -> GetCursorPos 读回 (1260,840)
+      //                            而 Electron 读回 DIP (630,420)
+      //   比值 = 2.000
       //
-      // 旧实现只加了 display bounds 的原点偏移，完全没换算缩放比例。
-      // 这里按目标屏的 scaleFactor 换算；若调用方显式声明坐标已是
-      // 逻辑点（physical:false），则原样使用。
+      // 原因是 Electron 主进程默认 per-monitor DPI-aware：这种感知下
+      // Win32 坐标 API 不做虚拟化，直接就是物理像素。
+      //
+      // ⚠ 本仓曾在这一段加过 `/ scaleFactor` 换算，理由是「SetCursorPos
+      //   期望 DIP」——那个前提是错的（那是 DPI-*unaware* 进程的行为）。
+      //   加了之后反而把原本正确的点击改坏：150% 缩放屏上点 (600,400)
+      //   会被送到 (400,267)，越靠右下偏得越远。现已改回直接使用。
+      //
+      // 保留 physical 开关：多数截图工具给物理像素（默认），若调用方
+      // 明确声明坐标已是 DIP（physical:false），再乘回 scaleFactor。
       const scale = disp && disp.scaleFactor ? disp.scaleFactor : 1;
       const rawX = parseFloat(params.x) || 0;
       const rawY = parseFloat(params.y) || 0;
-      // 多数截图工具返回物理像素，故默认 physical=true。
-      // 模型若已按 DIP 推理，可显式传 physical:false 免换算。
       const physical = params.physical !== false;
-      const absX = Math.round(ox + (physical ? rawX / scale : rawX));
-      const absY = Math.round(oy + (physical ? rawY / scale : rawY));
+      const absX = Math.round(ox + (physical ? rawX : rawX * scale));
+      const absY = Math.round(oy + (physical ? rawY : rawY * scale));
+
+      // === 模式 A：后台注入（PostMessage 到目标窗口），不动用户真实鼠标 ===
+      if (os_ === "win32" && useOverlay) {
+        const btnName = params.button === "right" ? "right" : params.button === "middle" ? "middle" : "left";
+        const beginBusy = () => agentCursor.agentCursorBusy(true, dispIdx);
+        const endBusy = () => agentCursor.agentCursorBusy(false, dispIdx);
+        const done = (ok, msg) => {
+          endBusy();
+          sendCmdResult(reqId, baseResult(reqId, ok ? "ok" : "error", msg, ok ? "" : msg));
+        };
+        const fail = (msg) => done(false, "agent-overlay: " + msg);
+        // 位置类 action 之外（type/keypress 等）不需要先移动光标
+        const needsXY = ["click", "doubleclick", "rightclick", "middleclick", "tripleclick",
+          "mousedown", "mouseup", "move", "hover", "drag", "scroll"].includes(action);
+        try {
+          if (needsXY) {
+            const h = agentInject.windowAtPoint(absX, absY);
+            if (!h) {
+              return fail(
+                "该坐标下没有窗口（WindowFromPoint 返回空）。" +
+                "后台注入只能作用于可见窗口，请确认 screensueDisplay 与截图用的屏一致。",
+              );
+            }
+            // 自绘光标移到目标位置（不动真实鼠标）
+            agentCursor.agentCursorMove(absX, absY, dispIdx);
+          }
+          beginBusy();
+          switch (action) {
+            case "move":
+            case "hover": {
+              const r = agentInject.mouse(absX, absY, "move", { button: btnName });
+              agentCursor.setLastHwnd(r.hwnd);
+              return done(r.ok, "agent-overlay " + action + " @ (" + absX + "," + absY + ") hwnd=" + agentInject.hwndStr(r.hwnd));
+            }
+            case "click": {
+              const r = agentInject.mouse(absX, absY, "click", { button: btnName });
+              agentCursor.setLastHwnd(r.hwnd);
+              agentCursor.agentCursorClick(dispIdx);
+              return done(r.ok, "agent-overlay click @ (" + absX + "," + absY + ") hwnd=" + agentInject.hwndStr(r.hwnd));
+            }
+            case "rightclick": {
+              const r = agentInject.mouse(absX, absY, "click", { button: "right" });
+              agentCursor.setLastHwnd(r.hwnd);
+              agentCursor.agentCursorClick(dispIdx);
+              return done(r.ok, "agent-overlay rightclick @ (" + absX + "," + absY + ") hwnd=" + agentInject.hwndStr(r.hwnd));
+            }
+            case "middleclick": {
+              const r = agentInject.mouse(absX, absY, "click", { button: "middle" });
+              agentCursor.setLastHwnd(r.hwnd);
+              agentCursor.agentCursorClick(dispIdx);
+              return done(r.ok, "agent-overlay middleclick @ (" + absX + "," + absY + ") hwnd=" + agentInject.hwndStr(r.hwnd));
+            }
+            case "doubleclick": {
+              const r = agentInject.mouse(absX, absY, "doubleclick", { button: btnName });
+              agentCursor.agentCursorClick(dispIdx);
+              return done(r.ok, "agent-overlay doubleclick @ (" + absX + "," + absY + ")");
+            }
+            case "tripleclick": {
+              const r = agentInject.tripleClick(absX, absY);
+              agentCursor.setLastHwnd(r.hwnd);
+              agentCursor.agentCursorClick(dispIdx);
+              return done(r.ok, "agent-overlay tripleclick @ (" + absX + "," + absY + ")");
+            }
+            case "mousedown": {
+              const r = agentInject.mouse(absX, absY, "mousedown", { button: btnName });
+              return done(r.ok, "agent-overlay mousedown(" + btnName + ")");
+            }
+            case "mouseup": {
+              const r = agentInject.mouse(absX, absY, "mouseup", { button: btnName });
+              return done(r.ok, "agent-overlay mouseup(" + btnName + ")");
+            }
+            case "drag": {
+              const toX = Math.round(ox + (physical ? (parseFloat(params.tox || params.tx) || 0) : (parseFloat(params.tox || params.tx) || 0) * scale));
+              const toY = Math.round(oy + (physical ? (parseFloat(params.toy || params.ty) || 0) : (parseFloat(params.toy || params.ty) || 0) * scale));
+              agentCursor.agentCursorMove(absX, absY, dispIdx);
+              const steps = Math.max(1, Math.min(60, parseInt(params.steps || 12, 10) || 12));
+              // 拖拽过程中让自绘光标跟着走，视觉上与真实拖拽一致
+              const r = agentInject.drag(absX, absY, toX, toY, { button: btnName, steps });
+              agentCursor.setLastHwnd(r.hwnd);
+              agentCursor.agentCursorMove(toX, toY, dispIdx);
+              agentCursor.agentCursorClick(dispIdx);
+              return done(r.ok, "agent-overlay drag (" + absX + "," + absY + ") -> (" + toX + "," + toY + ")");
+            }
+            case "scroll": {
+              const dy = cuNumber(params.dy !== undefined ? params.dy : params.y, 0);
+              const dx = cuNumber(params.dx !== undefined ? params.dx : params.x, 0);
+              const r = agentInject.scroll(absX, absY, dy, dx);
+              return done(r.ok, "agent-overlay scroll dx=" + dx + " dy=" + dy);
+            }
+            case "keypress":
+            case "hotkey":
+            case "combo": {
+              const keys = String(params.keys || params.key || params.text || "");
+              // 无坐标语义：发给「当前光标所在窗口」，即上次 agent 操作过的窗口
+              const h = agentInject.windowAtPoint(absX, absY) || agentCursor.lastHwnd;
+              if (!h) {
+                return fail("keypress 需要先有点击类操作确定目标窗口（当前无法确定目标窗口）");
+              }
+              const r = agentInject.keyTap(h, keys);
+              return done(r.ok, "agent-overlay keypress " + keys + " -> hwnd=" + agentInject.hwndStr(h));
+            }
+            case "type": {
+              const t = String(params.text || "");
+              const h = agentInject.windowAtPoint(absX, absY) || agentCursor.lastHwnd;
+              if (!h) return fail("type 需要先有点击类操作确定目标窗口");
+              const r = agentInject.typeText(h, t);
+              return done(r.ok, "agent-overlay typed " + r.chars + " chars -> hwnd=" + agentInject.hwndStr(h));
+            }
+            case "wait":
+            case "sleep": {
+              const ms = Math.max(0, Math.min(10000, parseInt(params.ms || params.duration || 500, 10) || 500));
+              endBusy();
+              setTimeout(() => sendCmdResult(reqId, baseResult(reqId, "ok", "agent-overlay waited " + ms + "ms", "")), ms);
+              return;
+            }
+            case "display": {
+              const info = displays.map((d, i) => ({
+                index: i, bounds: d.bounds, scaleFactor: d.scaleFactor,
+                primary: d.id === screen.getPrimaryDisplay().id,
+              }));
+              endBusy();
+              sendCmdResult(reqId, baseResult(reqId, "ok",
+                "displays: " + JSON.stringify(info) +
+                " | coordinateSpace: physical-pixel (Win32 与截图像素一致, 无需换算)", ""));
+              return;
+            }
+            default:
+              return fail("unknown action " + action);
+          }
+        } catch (e) {
+          endBusy();
+          console.error("[agent-overlay] failed: " + e.message);
+          sendCmdResult(reqId, baseResult(reqId, "error", "", "agent-overlay: " + e.message));
+          return;
+        }
+      }
 
       // === Windows: 用 koffi 直接调用 user32.dll，不依赖 PowerShell C# 编译 ===
       if (os_ === "win32") {
@@ -2119,10 +2282,10 @@ function executeHomeagentCmd(capability, reqId) {
             case "drag": {
               // 一步拖拽：从 (x,y) 按下 → 移动到 (tox,toy) → 释放
               const toX = Math.round(
-                ox + (params.physical !== false ? (parseFloat(params.tox || params.tx) || 0) / scale : (parseFloat(params.tox || params.tx) || 0)),
+                ox + (physical ? (parseFloat(params.tox || params.tx) || 0) : (parseFloat(params.tox || params.tx) || 0) * scale),
               );
               const toY = Math.round(
-                oy + (params.physical !== false ? (parseFloat(params.toy || params.ty) || 0) / scale : (parseFloat(params.toy || params.ty) || 0)),
+                oy + (physical ? (parseFloat(params.toy || params.ty) || 0) : (parseFloat(params.toy || params.ty) || 0) * scale),
               );
               SetCursorPos(absX, absY);
               mouse_event(btnDown, 0, 0, 0, 0);
