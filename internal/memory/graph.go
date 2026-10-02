@@ -48,7 +48,15 @@ type Entity struct {
 	// 「-名称(提及N次)」，无从判断该信哪个，于是转去 grep 知识库文件，
 	// 还把「没检索到」当成「不存在」。带上层级后最相关的几条一眼可辨。
 	// 仅在关键词召回路径上填充；深度扩展产出与 seed 路径为 -1（未知）。
-	MatchRank int       `json:"match_rank,omitempty"`
+	MatchRank int `json:"match_rank,omitempty"`
+	// Seq 是该实体最新一次被写入时的**句子 id**（sentences.id，自增单调）。
+	//
+	// ★ 为什么实体时间排序需要它（真实库实测）：entities.updated_at 来自
+	// SQLite CURRENT_TIMESTAMP，只到**秒**，而一批记忆常在同一秒内批量写入。
+	// 实测 ha-c 生产库 190 个实体里最多的一批 20 个实体共享同一秒。
+	// sentences.id 是自增主键，严格单调，是唯一可靠的时序信号。
+	// 0 表示该实体没有关联句子（合成/导入的实体），此时回退到 UpdatedAt。
+	Seq          int64     `json:"seq,omitempty"`
 	ID           int64     `json:"id"`
 	Name         string    `json:"name"`
 	Type         string    `json:"type"`
@@ -736,6 +744,11 @@ func (g *GraphDB) RecallSorted(keywords []string, seedEntities []string, depth i
 		// 再按名字长度（短名更可能是实体本身而不是长描述）。
 		rows, err := g.db.Query(
 			`SELECT id, name, type, mention_count, created_at, updated_at,
+			        COALESCE((
+			          SELECT MAX(r.sentence_id) FROM relations r
+			          WHERE (r.source_id = entities.id OR r.target_id = entities.id)
+			            AND r.sentence_id > 0
+			        ), 0),
 			        CASE
 			          WHEN LOWER(name) = LOWER(?) THEN 0
 			          WHEN LOWER(name) LIKE LOWER(?) || '%' THEN 1
@@ -757,7 +770,7 @@ func (g *GraphDB) RecallSorted(keywords []string, seedEntities []string, depth i
 			var e Entity
 			var rank int
 			if err := rows.Scan(&e.ID, &e.Name, &e.Type, &e.MentionCount,
-				&e.CreatedAt, &e.UpdatedAt, &rank); err != nil {
+				&e.CreatedAt, &e.UpdatedAt, &e.Seq, &rank); err != nil {
 				rows.Close()
 				return nil, err
 			}
@@ -776,10 +789,16 @@ func (g *GraphDB) RecallSorted(keywords []string, seedEntities []string, depth i
 
 	for _, se := range seedEntities {
 		row := g.db.QueryRow(
-			`SELECT id, name, type, mention_count, created_at, updated_at
+			`SELECT id, name, type, mention_count, created_at, updated_at,
+			        COALESCE((
+			          SELECT MAX(r.sentence_id) FROM relations r
+			          WHERE (r.source_id = entities.id OR r.target_id = entities.id)
+			            AND r.sentence_id > 0
+			        ), 0)
 			 FROM entities WHERE name = ?`, se)
 		var e Entity
-		if err := row.Scan(&e.ID, &e.Name, &e.Type, &e.MentionCount, &e.CreatedAt, &e.UpdatedAt); err == nil {
+		if err := row.Scan(&e.ID, &e.Name, &e.Type, &e.MentionCount,
+			&e.CreatedAt, &e.UpdatedAt, &e.Seq); err == nil {
 			if !entityIDs[e.ID] {
 				entityIDs[e.ID] = true
 				result.Entities = append(result.Entities, e)
@@ -883,7 +902,12 @@ func (g *GraphDB) RecallSorted(keywords []string, seedEntities []string, depth i
 
 		eRows, err := g.db.Query(
 			fmt.Sprintf(
-				`SELECT id, name, type, mention_count, created_at, updated_at
+				`SELECT id, name, type, mention_count, created_at, updated_at,
+				        COALESCE((
+			          SELECT MAX(r.sentence_id) FROM relations r
+			          WHERE (r.source_id = entities.id OR r.target_id = entities.id)
+			            AND r.sentence_id > 0
+			        ), 0)
 				 FROM entities WHERE id IN (%s)`, placeholders(len(ids2))),
 			ids2...,
 		)
@@ -893,7 +917,8 @@ func (g *GraphDB) RecallSorted(keywords []string, seedEntities []string, depth i
 
 		for eRows.Next() {
 			var e Entity
-			if err := eRows.Scan(&e.ID, &e.Name, &e.Type, &e.MentionCount, &e.CreatedAt, &e.UpdatedAt); err != nil {
+			if err := eRows.Scan(&e.ID, &e.Name, &e.Type, &e.MentionCount,
+				&e.CreatedAt, &e.UpdatedAt, &e.Seq); err != nil {
 				eRows.Close()
 				return nil, err
 			}
@@ -1530,6 +1555,10 @@ func sortRecallEntities(ents []Entity, rank map[int64]int, keywords []string, mo
 
 	sort.SliceStable(ents, func(i, j int) bool {
 		if mode == SortRecent {
+			// Seq 优先：严格单调，不受秒级精度影响。
+			if ents[i].Seq != ents[j].Seq {
+				return ents[i].Seq > ents[j].Seq
+			}
 			if !ents[i].UpdatedAt.Equal(ents[j].UpdatedAt) {
 				return ents[i].UpdatedAt.After(ents[j].UpdatedAt)
 			}

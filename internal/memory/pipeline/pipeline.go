@@ -49,8 +49,33 @@ type Distiller struct {
 	cancel   context.CancelFunc
 	onMemory func(input, response string)
 	embedder nlp.Vectorizer
+
+	// splitter 是小模型拆分器（pkg/generation 提供的 provider）。
+	//
+	// ★ 为什么要有它：jieba/ONNX 那条自动蒸馏路实测产出 **0 条**
+	//（defaultParser 为 nil，POS 模板抽不出），于是图记忆里的 188 个实体
+	// 全部是模型主动调 memory_commit 写进来的**整句复合值**
+	//（admin服务端口8861·billing服务端口8499·oauth服务端口8271）。
+	// 后果是跨维度检索全失效：严格判据下基线 0/5。
+	//
+	// splitter 为 nil 时回退 extractKeyTriples（现有 jieba 路），
+	// 保持蒸馏不停摆 —— 哪怕产出 0 条也比整体失败好。
+	splitter RecordSplitter
 }
 
+// RecordSplitter 把一条原始记录拆成三元组。
+//
+// 抽成接口是为了让 pipeline 不依赖 internal/memory/distill（那个包依赖
+// pkg/generation，而 pipeline 在早期启动阶段不该拉起生成侧依赖）。
+type RecordSplitter interface {
+	Split(ctx context.Context, record string) ([]memory.Triple, error)
+}
+
+// SetSplitter 注入小模型拆分器。为 nil 时蒸馏回退 jieba 路。
+func (d *Distiller) SetSplitter(s RecordSplitter) { d.splitter = s }
+
+// SetEmbedder 注入词嵌入器，供既有 jieba/ONNX 抽取路做 TransE 语义验证。
+// 与 SetSplitter 并存：splitter 存在时优先生效，embedder 仍用于回退路径。
 func (d *Distiller) SetEmbedder(ev nlp.Vectorizer) { d.embedder = ev }
 
 func NewDistiller(db *memory.GraphDB, dataDir string, cfg DistillerConfig) *Distiller {
@@ -277,6 +302,13 @@ func (d *Distiller) distillOnce() {
 	}
 }
 
+// distillSplitTimeout 是单次小模型拆分调用的上限。
+//
+// 实测单条 4-9s（qwen3:1.7b + schema 约束，CPU）。超时不能太短，
+// 否则每条都超时 = splitter 恒失败 = 静默退化成 0 产出的 jieba 路；
+// 也不能太长，否则一批 50 条会把 30 分钟的蒸馏间隔吃穿。
+const distillSplitTimeout = 90 * time.Second
+
 // distillBatch 蒸馏一批记录，全部成功返回 true，任一失败返回 false（调用方重试）
 func (d *Distiller) distillBatch(batch []RawRecord) bool {
 	var userContent, assistantContent string
@@ -289,7 +321,7 @@ func (d *Distiller) distillBatch(batch []RawRecord) bool {
 			assistantContent += r.Content + " "
 		}
 	}
-	triples := extractKeyTriples(userContent, assistantContent, d.embedder)
+	triples := d.extractTriples(userContent, assistantContent)
 	if len(triples) > 0 {
 		sessionID := ""
 		for sid := range sessionIDs {
@@ -422,6 +454,30 @@ func extractKeyTriples(userContent, assistantContent string, embedder nlp.Vector
 	// 该路的既定行为）。要不要在对话路也拦常用词是行为决策，不在此处擅改，
 	// 参见 memory.IsNoiseEntity 的说明。
 	return triples
+}
+
+// extractTriples 按「有 splitter 用 splitter，否则回退 jieba」的顺序抽取。
+//
+// 必须能区分「splitter 跑了但没拆出东西」与「splitter 没跑/失败」：
+//   - 跑出 0 条 = 正常（这类记录本就无字段可拆，例如纯叙述句）
+//   - 报错     = 异常，回退 jieba 路并保留记录等下次重试
+func (d *Distiller) extractTriples(userContent, assistantContent string) []memory.Triple {
+	if d.splitter != nil {
+		text := userContent
+		if assistantContent != "" {
+			text += " " + assistantContent
+		}
+		ctx, cancel := context.WithTimeout(d.ctx, distillSplitTimeout)
+		defer cancel()
+		triples, err := d.splitter.Split(ctx, text)
+		if err == nil {
+			return triples
+		}
+		// 回退前记一笔：splitter 长期失败会静默退化成 jieba 路的 0 条产出，
+		// 那种情况从外部看不出来（蒸馏照常「成功」，只是没写进任何东西）。
+		log.Printf("[memory] splitter failed, falling back to jieba path: %v", err)
+	}
+	return extractKeyTriples(userContent, assistantContent, d.embedder)
 }
 
 func truncate(s string, max int) string {
