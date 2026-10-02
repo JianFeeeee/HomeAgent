@@ -1,0 +1,296 @@
+package memory
+
+import (
+	"database/sql"
+	"encoding/json"
+	"fmt"
+	"log"
+	"strings"
+)
+
+// 存量实体迁移为块节点（entities 退场第 3 步）。
+//
+// 为什么需要
+// --------
+// entities 是旧形态：只有 name/type/mention_count，没有向量；而块节点
+// (memory_blocks) 带 vector+fingerprint/modality，是节点的正统形态。
+// MigrateLegacyMediaEntities 已经把「媒体类实体」迁过一次（见 migrate.go），
+// 本函数处理剩下的**文本类实体**——生产库实测 1277 个。
+//
+// 迁成什么形态
+// ------------
+//	sentence(实体名作为一句「陈述」) --contains--> block(实体名, 带向量)
+//
+// 关系则转成 block 边：
+//	block(主语) -[关系类型]-> block(宾语)
+//
+// 为什么不拆字段：拆（LLM 三元组化）是**提升召回**的动作，与「换存储格式」
+// 是两件事。混在一起做会让这次迁移既不可回滚也不可验证 —— 迁完不知道
+// 召回变好还是变坏。拆分留给迁移后单独跑（有独立的探针判据）。
+//
+// 回滚
+// ----
+// 全程单事务，任何一步失败整体回滚：半途中断会留下既没有实体也没有块的
+// 关系，信息静默消失（与 MigrateLegacyMediaEntities 同款考量）。
+// 另：调用方应在迁移前自行快照 graph.db —— 本函数**不删数据**，
+// 只在全部成功后由调用方决定是否清理旧表。
+
+// MigrateResult 是存量迁移的统计。
+type MigrateResult struct {
+	Sentences     int `json:"sentences"`
+	Blocks        int `json:"blocks"`
+	Edges         int `json:"edges"`
+	SkippedOrphan int `json:"skipped_orphan"`
+	SkippedNoVec  int `json:"skipped_no_vector"`
+}
+
+// EntityEmbedder 为一个实体名算向量与空间指纹。
+//
+// 由调用方注入（持有 embedding provider 的一方）。返回 nil 向量表示
+// 「这个实体算不出向量」——迁移**继续但不计为成功块**，不编造零向量。
+type EntityEmbedder func(entityName string) (vec []float64, fingerprint string)
+
+// MigrateLegacyTextEntities 把文本类实体迁移成块节点。
+//
+// embed 为 nil 时仍迁移（块不带向量，只是不参与向量召回）—— 这是可接受的
+// 中间态：结构对了，向量可以后续回填（RecallBlocks 对无向量的块直接跳过）。// MigrateLegacyTextEntities 把文本类实体迁移成块节点。
+//
+// embed 为 nil 时仍迁移（块不带向量，只是不参与向量召回）—— 这是可接受的
+// 中间态：结构对了，向量可以后续回填（RecallBlocks 对无向量的块直接跳过）。
+//
+// ★ 三个阶段，慢操作不进事务
+// ----------------------------
+//
+//	阶段一 读快照（RLock，短）    取出全部实体与关系到内存
+//	阶段二 算向量（无锁）          embed 回调可能很慢
+//	阶段三 写事务落库（Lock）      句子 + 块 + 边
+//
+// 分阶段的原因：embed 是 ONNX 前向，实测 0.3~1s/条，生产库 1277 实体
+// = 6~21 分钟。若在写事务内调用 embed，graph.db 会被锁住那么久 ——
+// 它是单文件、所有记忆操作共用一把 g.mu，期间召回与写入全部阻塞。
+// 第一版就是这么写的，症状是测试直接卡死 600s（测试在 embed 回调里
+// 反过来拿锁，构造出真实场景的等价死锁）。
+func (g *GraphDB) MigrateLegacyTextEntities(embed EntityEmbedder) (MigrateResult, error) {
+	var res MigrateResult
+
+	ents, rels, err := g.readLegacySnapshot()
+	if err != nil {
+		return res, err
+	}
+
+	// ── 阶段二：锁外算向量 ──
+	vectors := make(map[int64][]float64, len(ents))
+	fps := make(map[int64]string, len(ents))
+	if embed != nil {
+		for _, e := range ents {
+			if vec, fp := embed(e.name); len(vec) > 0 {
+				vectors[e.id] = vec
+				fps[e.id] = fp
+			} else {
+				res.SkippedNoVec++
+			}
+		}
+	} else {
+		res.SkippedNoVec = len(ents)
+	}
+
+	// ── 阶段三：写事务落库 ──
+	g.mu.Lock()
+	defer g.mu.Unlock()
+
+	tx, err := g.db.Begin()
+	if err != nil {
+		return res, err
+	}
+	defer tx.Rollback()
+
+	entToBlock := make(map[int64]string, len(ents))
+	for _, e := range ents {
+		// 实体名同时充当「句子」（陈述）与「块文本」：迁移期 1:1 对应，
+		// 不做内容改写 —— 改写属于拆分，不属于迁移。
+		sentenceID, err := ensureSentenceTx(tx, e.name)
+		if err != nil {
+			return res, fmt.Errorf("ensure sentence %q: %w", e.name, err)
+		}
+		blockID := legacyEntityBlockID(e.id, e.name)
+		if err := putBlockTx(tx, MemoryBlock{
+			ID:          blockID,
+			Modality:    BlockText,
+			Text:        e.name,
+			Vector:      vectors[e.id],
+			Fingerprint: fps[e.id],
+			Source:      "legacy-entity",
+		}); err != nil {
+			return res, fmt.Errorf("put block for entity %d: %w", e.id, err)
+		}
+		if err := addBlockEdgeTx(tx, "sentence", fmt.Sprint(sentenceID),
+			"block", blockID, "contains"); err != nil {
+			return res, fmt.Errorf("link block %s: %w", blockID, err)
+		}
+		entToBlock[e.id] = blockID
+		res.Sentences++
+		res.Blocks++
+	}
+
+	for _, r := range rels {
+		src, ok1 := entToBlock[r.src]
+		tgt, ok2 := entToBlock[r.tgt]
+		if !ok1 || !ok2 {
+			res.SkippedOrphan++
+			continue
+		}
+		edgeType := strings.TrimSpace(r.typ)
+		if edgeType == "" {
+			// 空类型会被 addBlockEdgeTx 拒绝（端点与类型都必填）。
+			// 用明确占位名而不是跳过 —— 关系的**存在**本身是信息。
+			edgeType = "related_to"
+		}
+		if err := addBlockEdgeTx(tx, "block", src, "block", tgt, edgeType); err != nil {
+			return res, fmt.Errorf("migrate relation %d: %w", r.id, err)
+		}
+		res.Edges++
+	}
+
+	if err := tx.Commit(); err != nil {
+		return res, err
+	}
+	log.Printf("[graph] 存量实体迁移完成: 句子 %d，块 %d，边 %d（跳过孤儿关系 %d，无向量 %d）",
+		res.Sentences, res.Blocks, res.Edges, res.SkippedOrphan, res.SkippedNoVec)
+	return res, nil
+}
+
+type legacyEnt struct {
+	id   int64
+	name string
+}
+
+type legacyRel struct {
+	id, src, tgt int64
+	typ          string
+}
+
+// readLegacySnapshot 在短读锁内取全部实体与关系。
+func (g *GraphDB) readLegacySnapshot() ([]legacyEnt, []legacyRel, error) {
+	g.mu.RLock()
+	defer g.mu.RUnlock()
+
+	rows, err := g.db.Query(`SELECT id, name FROM entities
+		WHERE name IS NOT NULL AND TRIM(name) != '' ORDER BY id`)
+	if err != nil {
+		return nil, nil, err
+	}
+	var ents []legacyEnt
+	for rows.Next() {
+		var e legacyEnt
+		if err := rows.Scan(&e.id, &e.name); err != nil {
+			rows.Close()
+			return nil, nil, err
+		}
+		ents = append(ents, e)
+	}
+	rows.Close()
+	if err := rows.Err(); err != nil {
+		return nil, nil, err
+	}
+
+	relRows, err := g.db.Query(`SELECT id, source_id, target_id,
+		COALESCE(relation_type, '') FROM relations ORDER BY id`)
+	if err != nil {
+		return nil, nil, err
+	}
+	var rels []legacyRel
+	for relRows.Next() {
+		var r legacyRel
+		if err := relRows.Scan(&r.id, &r.src, &r.tgt, &r.typ); err != nil {
+			relRows.Close()
+			return nil, nil, err
+		}
+		rels = append(rels, r)
+	}
+	relRows.Close()
+	return ents, rels, relRows.Err()
+}
+
+// legacyEntityBlockID 由**实体 id**派生块 id。
+//
+// 用 id 而非内容：实体的 name 是 UNIQUE 的，但迁移期同一句话可能既是实体
+// 又是句子（下面第 3 步会把关系句子也建成块），用内容派生会撞。
+// 实体 id 保证块 id 稳定且可重复迁移（幂等）。
+func legacyEntityBlockID(entityID int64, name string) string {
+	return fmt.Sprintf("blk_ent_%d_%s", entityID, shortHash(name))
+}
+
+func shortHash(s string) string {
+	var h uint64 = 14695981039346656037
+	for i := 0; i < len(s); i++ {
+		h ^= uint64(s[i])
+		h *= 1099511628211
+	}
+	return fmt.Sprintf("%08x", uint32(h))
+}
+
+// ── 事务内工具（与 block.go 的公开方法同款语义，但共用同一个 tx）──
+
+func ensureSentenceTx(tx *sql.Tx, text string) (int64, error) {
+	if _, err := tx.Exec(`INSERT OR IGNORE INTO sentences (text) VALUES (?)`, text); err != nil {
+		return 0, err
+	}
+	var id int64
+	if err := tx.QueryRow(`SELECT id FROM sentences WHERE text = ?`, text).Scan(&id); err != nil {
+		return 0, err
+	}
+	return id, nil
+}
+
+func putBlockTx(tx *sql.Tx, b MemoryBlock) error {
+	vectorJSON := ""
+	if len(b.Vector) > 0 {
+		raw, err := json.Marshal(b.Vector)
+		if err != nil {
+			return err
+		}
+		vectorJSON = string(raw)
+	}
+	_, err := tx.Exec(`INSERT INTO memory_blocks
+		(id, modality, text_content, payload_digest, mime, size, width, height,
+		 vector, fingerprint, source, tool, scene)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+		ON CONFLICT(id) DO UPDATE SET
+			modality = excluded.modality,
+			text_content = excluded.text_content,
+			vector = excluded.vector,
+			fingerprint = excluded.fingerprint,
+			source = excluded.source,
+			updated_at = CURRENT_TIMESTAMP`,
+		b.ID, b.Modality, b.Text, b.PayloadDigest, b.MIME, b.Size, b.Width, b.Height,
+		vectorJSON, b.Fingerprint, b.Source, b.Tool, b.Scene)
+	return err
+}
+
+func addBlockEdgeTx(tx *sql.Tx, sourceKind, sourceID, targetKind, targetID, edgeType string) error {
+	// 端点存在性校验：与 AddMemoryBlockEdge 同款，但共用当前事务 ——
+	// 分开校验会在并发下出现「校验通过后节点被删」的窗口。
+	for _, ep := range []struct{ kind, id string }{
+		{sourceKind, sourceID}, {targetKind, targetID}} {
+		var n int
+		var err error
+		switch ep.kind {
+		case "block":
+			err = tx.QueryRow(`SELECT COUNT(*) FROM memory_blocks WHERE id = ?`, ep.id).Scan(&n)
+		case "sentence":
+			err = tx.QueryRow(`SELECT COUNT(*) FROM sentences WHERE CAST(id AS TEXT) = ?`, ep.id).Scan(&n)
+		default:
+			err = fmt.Errorf("invalid graph node kind %q", ep.kind)
+		}
+		if err != nil {
+			return err
+		}
+		if n == 0 {
+			return fmt.Errorf("%s graph node %s does not exist", ep.kind, ep.id)
+		}
+	}
+	_, err := tx.Exec(`INSERT OR IGNORE INTO memory_block_edges
+		(source_kind, source_id, target_kind, target_id, edge_type)
+		VALUES (?, ?, ?, ?, ?)`, sourceKind, sourceID, targetKind, targetID, edgeType)
+	return err
+}
