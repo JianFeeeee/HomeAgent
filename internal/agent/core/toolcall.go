@@ -224,6 +224,20 @@ func (a *Agent) executeMemoryTool(tc agentAPI.ToolCall, turnScenes []string) str
 		// 用一个排序同时服务这两类问题，必然有一边错。
 		sortMode := memory.ParseSortMode(fmt.Sprint(tc.Arguments["sort"]))
 
+		// 块向量召回优先。
+		//
+		// ★ 为什么要有它（这是这条路径缺失的直接后果）：memory_blocks 是
+		// 带 vector+fingerprint 的图节点载体，但此前**没有任何召回读它** ——
+		// BlocksForNode 只能按端点反查，得先知道 nodeID。于是「问一个具体
+		// 问题」只能退到 entities 的 jieba+LIKE，实测跨维度定位 0/5
+		//（问「第181批的值班手册是第几版」完全答不出）。
+		//
+		// 混合而非替换：端口号（8328）、分机号（4324）这类纯数字串向量天然弱，
+		// 而它们恰是本项目最常问的。两条路都跑，块向量在前，符号路兜底。
+		if blockOut := a.recallByBlocks(query); blockOut != "" {
+			return blockOut
+		}
+
 		result, err := g.RecallSorted(keywords, nil, int(depth), "", sortMode)
 		if err != nil {
 			return fmt.Sprintf("记忆检索失败: %v", err)
@@ -867,3 +881,51 @@ func sortLabel(m memory.SortMode) string {
 	}
 	return "相关性"
 }
+
+// recallByBlocks 用稠密向量召回块节点，返回格式化文本；不可用/无命中时返回空串。
+//
+// 返回空串让调用方无缝退回符号路 —— 这保证了「向量侧没配好」不会让
+// memory_recall 整体失败（那会让模型完全失去记忆，比召回差得多）。
+func (a *Agent) recallByBlocks(query string) string {
+	if a == nil || a.memory == nil || a.multimodalSpace == nil {
+		return ""
+	}
+	if !a.multimodalSpace.Loaded() {
+		return ""
+	}
+	vec, err := a.multimodalSpace.VectorizeDense(query)
+	if err != nil || len(vec) == 0 {
+		// 向量化失败不报错到工具层：符号路仍可用，而这条失败通常意味着
+		// 模型未加载/超时，报给模型只会让它以为"记忆不存在"。
+		return ""
+	}
+	hits, err := a.memory.RecallBlocks(memory.BlockRecallQuery{
+		Vector:      vec,
+		Fingerprint: a.multimodalSpace.Fingerprint(),
+		TopK:        blockRecallTopK,
+		MinScore:    blockRecallMinScore,
+	})
+	if err != nil || len(hits) == 0 {
+		return ""
+	}
+	var parts []string
+	parts = append(parts, fmt.Sprintf("找到 %d 条相关记忆片段:", len(hits)))
+	for _, h := range hits {
+		text := strings.TrimSpace(h.Block.Text)
+		if text == "" {
+			text = h.Block.PayloadDigest
+		}
+		parts = append(parts, fmt.Sprintf("- [%s %.2f] %s",
+			h.Block.Modality, h.Score, truncateStr(text, 160)))
+	}
+	return strings.Join(parts, "\n")
+}
+
+const (
+	// blockRecallTopK 是块召回的条数上限。与实体路的 20 条同量级：
+	// 实测 193 条平铺会把模型淹没（13744 tokens / 预算 436%）。
+	blockRecallTopK = 8
+	// blockRecallMinScore 是入选下限。低于它的候选分数已无区分意义
+	// （生成模型主干的余弦普遍偏高，实测无关句也能到 0.83）。
+	blockRecallMinScore = 0.5
+)
