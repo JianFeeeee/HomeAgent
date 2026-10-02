@@ -2595,6 +2595,62 @@ app.on("activate", () => {
     createWindow();
   }
 });
+// ============ 系统通知（Electron 原生）============
+//
+// 之前**完全没有**这个能力：主进程没引入 Notification、preload 没暴露接口、
+// 渲染层只有页面内的 toast（用户不盯着窗口就看不到）。
+// 这套是补齐：渲染层判断"该不该通知"，主进程负责弹系统通知。
+//
+// 为什么点击要回传会话：点了通知却不知道该看哪句话，等于没通知。
+// 点击时通过 webContents 回到渲染进程，由它切到 chat 视图并滚到该条。
+let notifSeq = 0;
+
+ipcMain.handle("notify:show", (_, payload) => {
+  try {
+    const p = payload || {};
+    const title = String(p.title || "HomeAgent");
+    const body = String(p.body || "");
+    if (!body) return { ok: false, error: "empty body" };
+    if (!Notification.isSupported()) return { ok: false, error: "unsupported" };
+
+    // 已有窗口在前台且可见时不再打扰：用户正看着界面。
+    // 静默启动场景下 mainWindow 存在但 hidden，正好走"要通知"这条路。
+    if (mainWindow && !mainWindow.isDestroyed() && mainWindow.isVisible() && mainWindow.isFocused()) {
+      return { ok: false, skipped: "focused" };
+    }
+
+    const id = ++notifSeq;
+    const n = new Notification({
+      title: title,
+      body: body.length > 180 ? body.slice(0, 180) + "\u2026" : body,
+      silent: !!p.silent,
+      urgency: p.urgent ? "critical" : "normal",
+    });
+    n.on("click", () => {
+      if (mainWindow && !mainWindow.isDestroyed()) {
+        if (!mainWindow.isVisible()) mainWindow.show();
+        mainWindow.focus();
+      }
+      try {
+        mainWindow.webContents.send("notify:clicked", { id: id, msgKey: p.msgKey || "" });
+      } catch (e) {}
+      n.close();
+    });
+    n.show();
+    return { ok: true, id: id };
+  } catch (e) {
+    return { ok: false, error: e.message };
+  }
+});
+
+ipcMain.handle("notify:supported", () => {
+  try {
+    return { supported: Notification.isSupported() };
+  } catch (e) {
+    return { supported: false };
+  }
+});
+
 // IPC：prefs（renderer 设置页需要）
 // IPC：本机设备身份（renderer 设备页需要）
 ipcMain.handle("device:identity", () =>
