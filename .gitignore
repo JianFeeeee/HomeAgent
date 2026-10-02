@@ -94,3 +94,11 @@ dist/
 # 一次性跑分/设计提取脚本，用完即弃
 /tmp_jinabench.py
 /napcat-design-dna.json
+
+# 已删除的动态工作文档（2e30e06）。曾被本机某进程恢复过一次 ——
+# 它的 mtime 还是删除前的 Sep 26，说明是外部写回而不是 git 操作。
+# 不加这行的话，恢复一次就重新入库一次。
+/plan.md
+
+# 临时探针目录（scripts/ 之外的临时 main.go 探针）
+/tools/zz_*/
