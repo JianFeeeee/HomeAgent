@@ -353,3 +353,53 @@ func addBlockEdgeTx(tx *sql.Tx, sourceKind, sourceID, targetKind, targetID, edge
 		VALUES (?, ?, ?, ?, ?)`, sourceKind, sourceID, targetKind, targetID, edgeType)
 	return err
 }
+
+// LegacyEntity 是存量实体的一条只读快照。
+type LegacyEntity struct {
+	ID   int64
+	Name string
+}
+
+// LegacyEntities 读出存量实体，供拆分/迁移命令使用。
+//
+// 只读，不删任何东西 —— 方案 A 里旧表的清理由调用方在验证通过后
+// 单独执行（见 cmd/homed-graph-migrate 的说明）。
+//
+// limit <= 0 表示不限。分批是为了让拆分能增量推进（CPU 上 1.7b 模型
+// 每条约 1~2 秒，全量 188 条要 3~6 分钟）。
+//
+// minLen > 0 时跳过过短的实体名：标题类实体（「order-gw 运维进展」「每天」
+// 「老大」）本来就没有可拆字段，实测对它们跑拆分 8/8 全零字段 ——
+// 那是正确结果，但会让报告看起来像「拆分坏了」。按长度预筛能把注意力
+// 放在真有字段的记录上。
+func (g *GraphDB) LegacyEntities(limit, minLen int) ([]LegacyEntity, error) {
+	g.mu.RLock()
+	defer g.mu.RUnlock()
+
+	query := `SELECT id, name FROM entities
+		WHERE name IS NOT NULL AND TRIM(name) != ''`
+	args := []any{}
+	if minLen > 0 {
+		query += ` AND LENGTH(name) >= ?`
+		args = append(args, minLen)
+	}
+	query += ` ORDER BY id`
+	if limit > 0 {
+		query += ` LIMIT ?`
+		args = append(args, limit)
+	}
+	rows, err := g.db.Query(query, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []LegacyEntity
+	for rows.Next() {
+		var e LegacyEntity
+		if err := rows.Scan(&e.ID, &e.Name); err != nil {
+			return nil, err
+		}
+		out = append(out, e)
+	}
+	return out, rows.Err()
+}

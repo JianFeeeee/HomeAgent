@@ -90,6 +90,9 @@ const promptTemplate = `把下面的记录拆成字段，输出 JSON。
 记录：admin服务端口8861·billing服务端口8499·oauth服务端口8271
 输出：{"fields":[{"name":"端口","value":"8861"},{"name":"端口","value":"8499"},{"name":"端口","value":"8271"}]}
 
+记录：连接池从 32/64 扩到 128/256，等待队列长度告警阈值 300~500
+输出：{"fields":[{"name":"连接池容量","value":"32/64"},{"name":"连接池容量","value":"128/256"},{"name":"等待队列告警阈值","value":"300~500"}]}
+
 <record>__RECORD__</record>
 输出：`
 
@@ -317,14 +320,59 @@ func NormalizeDimension(name string) string {
 	// 挑**最长**匹配别名而不是最短：「停机时长」比「停机」长但更具体，
 	// 先命中它才不会退化成更泛的「停机时长」（虽然此处二者同 canonical，
 	// 但「排期」vs「排期月」这类一对多映射下，最长匹配才是对的规则）。
+	//
+	// ★ 但「最长匹配」本身有个反例，必须加防误伤：
+	//
+	//	NormalizeDimension("连接池容量") → "容量预警"   ← 错，两个不同维度
+	//
+	// 原因：「容量」是 2 字符泛词，命中了「连接池**容量**」的后半截。
+	// 泛词跨词边界吞掉更具体的名字，会把两个真维度静默合并 —— 而维度名
+	// 是建边的依据，合并后边就建错了。
+	//
+	// 判据：泛别名若只是**尾部子串**（name 的前缀是别的词），且前缀本身
+	// 不在词表里，就认为是误伤，保持原名不归一。宁可留一个未归一的维度名
+	// （还能被漂移发现机制报出来），也不要把两个维度错并成一个。
 	bestAlias := ""
 	for alias := range dimensionAliases {
-		if strings.Contains(name, alias) && len(alias) > len(bestAlias) {
-			bestAlias = alias
+		if len(alias) <= len(bestAlias) {
+			continue
 		}
+		if !strings.Contains(name, alias) {
+			continue
+		}
+		if isCrossWordTailMatch(name, alias) {
+			continue
+		}
+		bestAlias = alias
 	}
 	if bestAlias != "" {
 		return dimensionAliases[bestAlias]
 	}
 	return name
+}
+
+// isCrossWordTailMatch 判断这次包含匹配是否是「跨词边界吞掉泛词」。
+//
+// 命中位置 > 0 且前缀不含任何词表条目 ⇒ 前缀是另一个独立词，
+// 于是整个 name 是「<独立词><泛词>」结构，属于被误伤，不该归一。
+//
+// 例：
+//
+//	"连接池容量" + "容量" → 前缀「连接池」不在维度词表 → 误伤
+//	"停机时长(分钟)" + "停机时长" → 位置 0 → 不是尾部误伤 → 正常归一
+//	"值班手册第8版" + "值班手册" → 位置 0 → 正常归一
+func isCrossWordTailMatch(name, alias string) bool {
+	i := strings.Index(name, alias)
+	if i <= 0 {
+		return false
+	}
+	prefix := name[:i]
+	// 前缀若命中任何词表条目，说明 name 整体属于那个更长的词，不算误伤。
+	for other := range dimensionAliases {
+		if other != alias && strings.Contains(prefix, other) {
+			return false
+		}
+	}
+	// 泛词（≤3 字符）才容易误伤；更长的别名更可能是完整的维度名
+	return len([]rune(alias)) <= 3
 }
