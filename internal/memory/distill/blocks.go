@@ -39,8 +39,22 @@ type BlockPayload struct {
 	Fields []FieldBlock
 }
 
-// FieldBlock 是一个字段块：维度名 + 原样值。
+// FieldBlock 是一个字段块：**所属主语** + 维度名 + 原样值。
+//
+// ★ Subject 不能省（实测踩出来的）：一句多主语时
+// 「admin服务端口8861·billing服务端口8499·oauth服务端口8271」
+// 会拆出三条同维度不同值的字段：
+//
+//	{admin服务, 端口, 8861}  {billing服务, 端口, 8499}  {oauth服务, 端口, 8271}
+//
+// 少了 Subject 就只剩「端口=8861」，三个服务的端口落库后无法区分 ——
+// 查「billing 的端口」时块文本里根本没有 billing。
+// 单主语时 Subject 是那条主语（如「值班室分机号」），它同样要进块文本，
+// 否则「值班分机号=4324」查不到「值班室分机号是多少」。
 type FieldBlock struct {
+	// Subject 是这条字段所属的主语。空串表示无主语（不该出现 ——
+	// Split 的闸门会挡掉无主语的字段）。
+	Subject   string
 	Dimension string
 	Value     string
 }
@@ -62,6 +76,7 @@ func (e *Extractor) Blocks(ctx context.Context, record string) (*BlockPayload, e
 	payload := &BlockPayload{Sentence: record}
 	for _, t := range triples {
 		payload.Fields = append(payload.Fields, FieldBlock{
+			Subject:   t.Subject,
 			Dimension: t.Relation,
 			Value:     t.Object,
 		})
@@ -75,8 +90,14 @@ func (e *Extractor) Blocks(ctx context.Context, record string) (*BlockPayload, e
 // 把记录写回队列下次重试），随机 ID 会让每次重试都产生一批新块，
 // 同一句记忆在库里堆成 N 份。内容派生 ID 配合 PutMemoryBlocks 的
 // ON CONFLICT 语义天然幂等。
-func BlockID(sentence, dimension, value string) string {
-	h := sha256.Sum256([]byte(sentence + "\x00" + dimension + "\x00" + value))
+//
+// ★ subject 必须参与 ID 派生：三个服务的端口
+// 「admin服务端口8861·billing服务端口8499」若不含 subject，
+// 「端口=8861」与另一个主语的「端口=8861」会撞成同一个块 ——
+// 那是静默的数据丢失（后者被覆盖，且不会有任何报错）。
+func BlockID(sentence, subject, dimension, value string) string {
+	h := sha256.Sum256([]byte(sentence + "\x00" + subject + "\x00" +
+		dimension + "\x00" + value))
 	return "blk_" + hex.EncodeToString(h[:12])
 }
 
@@ -87,15 +108,25 @@ func BlockID(sentence, dimension, value string) string {
 // 只是不参与向量召回；编造一个零向量会让它参与检索并永远排在最后，
 // 那是静默的错误记忆。
 func (f FieldBlock) ToMemoryBlock(sentence string) memory.MemoryBlock {
+	// 块文本形态：<主语>|<维度>=<值>
+	//
+	// ★ 主语必须进文本（不只是进 BlockID）：向量是基于 text_content 算的，
+	// 「billing服务 端口=8499」能被「billing 服务的端口是多少」召回，
+	// 而只有「端口=8499」的那个块召回不到 —— 三个服务的端口同维度时
+	// 光靠维度+值无法区分归属（实测形态见 FieldBlock 的注释）。
+	//
+	// 分隔符用 '|'（不在维度名/值/主语的字符集里）：维度名已受控词表归一
+	// 不含 '|='，主语是实体名同样不含。而文本只有一个 '=' 时
+	// Dimension/Value 的切分才可靠，所以主语与维度之间用 '|' 隔开。
+	text := f.Dimension + "=" + f.Value
+	if f.Subject != "" {
+		text = f.Subject + "|" + text
+	}
 	return memory.MemoryBlock{
-		ID:       BlockID(sentence, f.Dimension, f.Value),
+		ID:       BlockID(sentence, f.Subject, f.Dimension, f.Value),
 		Modality: memory.BlockText,
-		Text:     f.Dimension + "=" + f.Value,
-		// 保留维度名与值两个结构化字段进 source/tool 之外的位置？
-		// 不：MemoryBlock 没有任意扩展字段，而 text_content 已经承载
-		// "维度=值" 的完整语义（向量也基于它算）。需要拆出维度时按
-		// 首个 '=' 切分即可，且维度名已受控词表归一（NormalizeDimension），
-		// 不含 '='。
+		Text:     text,
+		Source:   "distill",
 	}
 }
 
@@ -107,6 +138,13 @@ func Dimension(blockText string) string {
 	if i <= 0 {
 		return ""
 	}
+	// ★ 去掉主语前缀（「<主语>|<维度>=…」形态）。
+	// 不去掉的话 Dimension 会返回「billing服务|端口」，
+	// 维度名与主语混在一起 —— 而维度名是受控词表归一过的，
+	// 混进去之后边就建不起来了。
+	if j := strings.LastIndex(blockText[:i], "|"); j >= 0 {
+		return blockText[j+1 : i]
+	}
 	return blockText[:i]
 }
 
@@ -117,6 +155,21 @@ func Value(blockText string) string {
 		return blockText
 	}
 	return blockText[i+1:]
+}
+
+// BlockSubject 从块文本里取回所属主语（首个 '|' 前）。没有则返回空串。
+//
+// 命名：subject.go 里 Subject 已是推导出的主语类型，这里是「从块文本
+// 反解出主语」的函数，不能同名。
+//
+// 用途：召回后要告诉模型「这条记忆是关于谁的」——
+// 一句多主语时（三个服务各自的端口）没有主语就分不清归属。
+func BlockSubject(blockText string) string {
+	i := strings.Index(blockText, "|")
+	if i <= 0 {
+		return ""
+	}
+	return blockText[:i]
 }
 
 // WritePayload 把拆解产物写入图：句子行 + 字段块 + contains 边。

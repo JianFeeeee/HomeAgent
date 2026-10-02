@@ -99,7 +99,17 @@ func TestWritePayload_块文本形态(t *testing.T) {
 	for _, b := range blocks {
 		texts[b.Text] = true
 	}
-	for _, want := range []string{"停机时长=4分", "回滚版本=v2.29.5", "灰度比例=10%"} {
+	// ★ 块文本形态是「<主语>|<维度>=<值>」而不是「<维度>=<值>」。
+	//
+	// 本轮补的缺口：上一版 FieldBlock 没有 Subject，块文本里只有维度与值。
+	// 单主语时就丢了「这条是关于谁的」（第112批），一句话多主语时更致命
+	// （三个服务的端口会全变成「端口=8861」而无法区分）。所以这里跟着改成
+	// 带主语的形态断言 —— 不是放宽，是把旧形态的漏洞写进判据。
+	for _, want := range []string{
+		"第112批|停机时长=4分",
+		"第112批|回滚版本=v2.29.5",
+		"第112批|灰度比例=10%",
+	} {
 		if !texts[want] {
 			t.Errorf("缺少块文本 %q，实际 %v", want, texts)
 		}
@@ -227,8 +237,8 @@ func TestBlocks_模型失败透传(t *testing.T) {
 
 // BlockID 内容派生且稳定。
 func TestBlockID_稳定且区分(t *testing.T) {
-	a := BlockID("s", "d", "v")
-	b := BlockID("s", "d", "v")
+	a := BlockID("s", "主语", "d", "v")
+	b := BlockID("s", "主语", "d", "v")
 	if a != b {
 		t.Error("同输入应得同 ID（幂等的前提）")
 	}
@@ -241,9 +251,12 @@ func TestBlockID_稳定且区分(t *testing.T) {
 	// 从派生里去掉后测试仍然通过——而那会让「停机时长」与「回滚版本」在
 	// 同一句话里撞成同一个块 ID，后者覆盖前者，**静默丢失一条记忆**。
 	distinct := map[string]string{
-		"同句同值不同维度": BlockID("s", "d2", "v"),
-		"同句同维度不同值": BlockID("s", "d", "v2"),
-		"同维度同值不同句": BlockID("s2", "d", "v"),
+		"同句同值不同维度": BlockID("s", "主语", "d2", "v"),
+		"同句同维度不同值": BlockID("s", "主语", "d", "v2"),
+		"同维度同值不同句": BlockID("s2", "主语", "d", "v"),
+		// ★ 主语必须参与派生：三个服务的端口同维度同值时，
+		// 不含 subject 就会撞 ID —— 静默丢一条记忆（无任何报错）。
+		"同维度同值不同主语": BlockID("s", "主语2", "d", "v"),
 	}
 	for name, id := range distinct {
 		if id == a {
@@ -328,3 +341,94 @@ func itoa64(i int64) string {
 }
 
 var _ = generation.ErrSchemaUnsupported
+
+// ★ 主语必须进块文本（不只是进 ID）。
+//
+// 这是本轮修的真缺口：一句多主语时
+// 「admin服务端口8861·billing服务端口8499·oauth服务端口8271」
+// 拆出三条同维度不同值的字段，少了主语就只剩「端口=8861」，
+// 三个服务的端口落库后无法区分 —— 查「billing 的端口」时块文本里
+// 根本没有 billing，向量也召回不到。
+func TestFieldBlock_主语进块文本(t *testing.T) {
+	f := FieldBlock{Subject: "billing服务", Dimension: "端口", Value: "8499"}
+	b := f.ToMemoryBlock("admin服务端口8861·billing服务端口8499·oauth服务端口8271")
+
+	if b.Text == "端口=8499" {
+		t.Errorf("块文本必须含主语，实际 %q", b.Text)
+	}
+	if got := BlockSubject(b.Text); got != "billing服务" {
+		t.Errorf("BlockSubject(%q) = %q，期望 billing服务", b.Text, got)
+	}
+	if got := Dimension(b.Text); got != "端口" {
+		t.Errorf("Dimension(%q) = %q，期望 端口（不该混进主语）", b.Text, got)
+	}
+	if got := Value(b.Text); got != "8499" {
+		t.Errorf("Value(%q) = %q，期望 8499", b.Text, got)
+	}
+	// 往返：文本 → 三段全还原
+	if BlockSubject(b.Text)+"|"+Dimension(b.Text)+"="+Value(b.Text) != b.Text {
+		t.Errorf("往返不一致：%q", b.Text)
+	}
+}
+
+// 三个服务的端口必须是三个不同的块（ID 不撞、文本可区分）。
+func TestFieldBlock_多主语不撞ID(t *testing.T) {
+	sent := "admin服务端口8861·billing服务端口8499·oauth服务端口8271"
+	fields := []FieldBlock{
+		{Subject: "admin服务", Dimension: "端口", Value: "8861"},
+		{Subject: "billing服务", Dimension: "端口", Value: "8499"},
+		{Subject: "oauth服务", Dimension: "端口", Value: "8271"},
+	}
+	ids := map[string]string{}
+	for _, f := range fields {
+		b := f.ToMemoryBlock(sent)
+		if prev, dup := ids[b.ID]; dup {
+			t.Errorf("块 ID 撞了：%s 与 %s 同为 %s", prev, b.Text, b.ID)
+		}
+		ids[b.ID] = b.Text
+	}
+	if len(ids) != 3 {
+		t.Errorf("三个服务的端口应得 3 个块，实际 %d", len(ids))
+	}
+}
+
+// 无主语时（不该出现，但 BlockPayload 可能来自别的路径）文本不带 '|'，
+// 切分函数仍要正确工作而不是崩。
+func TestFieldBlock_无主语时切分(t *testing.T) {
+	f := FieldBlock{Dimension: "停机时长", Value: "4分"}
+	b := f.ToMemoryBlock("第112批周四凌晨2点·停机4分")
+	if b.Text != "停机时长=4分" {
+		t.Errorf("无主语时文本不该带分隔符，实际 %q", b.Text)
+	}
+	if got := BlockSubject(b.Text); got != "" {
+		t.Errorf("无主语时 BlockSubject 应为空，实际 %q", got)
+	}
+	if got := Dimension(b.Text); got != "停机时长" {
+		t.Errorf("Dimension = %q", got)
+	}
+	if got := Value(b.Text); got != "4分" {
+		t.Errorf("Value = %q", got)
+	}
+}
+
+// Blocks() 必须把 Split 算出的主语带到 FieldBlock 里。
+//
+// ★ 这条直接盯着本轮修的缺口：上一版 FieldBlock 没有 Subject 字段，
+// 于是多主语在落库时被丢弃 —— 编译通过、单测全绿，但数据是错的。
+func TestBlocks_主语透传到字段块(t *testing.T) {
+	e := NewExtractor(&fakeGen{text: `{"fields":[{"name":"端口","value":"8861"},{"name":"端口","value":"8499"}]}`}, nil)
+	payload, err := e.Blocks(context.Background(),
+		"admin服务端口8861·billing服务端口8499")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(payload.Fields) != 2 {
+		t.Fatalf("应拆出 2 个字段，实际 %d", len(payload.Fields))
+	}
+	if payload.Fields[0].Subject != "admin服务" {
+		t.Errorf("字段0 主语应为 admin服务，实际 %q", payload.Fields[0].Subject)
+	}
+	if payload.Fields[1].Subject != "billing服务" {
+		t.Errorf("字段1 主语应为 billing服务，实际 %q", payload.Fields[1].Subject)
+	}
+}
