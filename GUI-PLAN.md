@@ -138,49 +138,59 @@ agent 一干活用户就没法用电脑。
 > 也会被算作「用户输入」，若不排除则**永远处于「用户正在操作」状态**。
 > 已按 Coopanion 的三重判定修正（ownTick / ownCursor / 无符号差值）。
 
-### 3.4 已验证（端到端，8/8 有正确响应）
+### 3.4 已验证（端到端）
 
-用假网关（自实现 WS 服务端）下发 computeruse 命令，GUI 执行并回执：
+用假网关（自实现 WS 服务端）下发 computeruse 命令，GUI 执行并回执。
+两轮合计：
 
-```
-[error] agent-overlay: 该坐标下没有窗口（WindowFromPoint 返回空）...
-[error] agent-overlay: type 需要先有点击类操作确定目标窗口
-[ok]    displays: [{...}] | coordinateSpace: physical-pixel (Win32 与截图像素一致, 无需换算)
-[error] agent-overlay: unknown action __nope__
-```
+**overlay（PostMessage）路径**：8/8 有响应，错误处理正确 ——
+无窗口时报「WindowFromPoint 返回空」，而不是静默回退到真实鼠标。
 
-**结论：代码路径已接通，错误处理正确 —— 失败时明确报错，不静默回退到真实鼠标。**
+**sendinput 路径**（当前默认）：8/8 有响应，回执形如
+`sendinput click @ (300,300)` / `sendinput typed 2 chars` /
+`sendinput drag (100,100) -> (400,300)`。
 
 ### 3.5 ⚠️ 未完成：真实点击效果未验证
 
-上面 7 个动作都报「该坐标下没有窗口」。原因是**当时的执行环境没有可供
-注入的可见目标窗口**（`WindowFromPoint` 对所有坐标返回 null）。
+当前执行环境**没有可供注入的可见目标窗口**
+（`WindowFromPoint` 对所有坐标返回 null，`GetCursorPos` 读回 0,0）。
 
 **因此：「点击真的落到目标窗口上」这一步尚未被证明。** 需要在有交互桌面的
 会话里跑一个端到端测试：
 
 > 打开记事本 → agent 点它 → 输入文字 → 截图回读验证
 
-同时验证「用户鼠标位置在全过程未变」。
+同时验证「`overlay` 模式下用户鼠标位置在全过程未变」。
 
 ### 3.6 设计取舍（明确的边界）
 
-- **只对「接受窗口消息的程序」可靠。** 原生 Win32 程序（记事本、Excel、Office）
-  可靠；Chromium/Electron 自绘界面、多数游戏、DirectX 程序会忽略合成消息。
-  这是 Windows 消息模型的硬限制，**不是实现缺陷**。
-- **不做真实鼠标降级。** 用户既然选择「不抢鼠标」，就不该偷偷改成操作真实鼠标。
-  失败即 `status=error` 并说明原因。
-- **键盘类动作依赖先前的鼠标操作。** `keypress`/`hotkey`/`type` 不带坐标，
-  且后台注入不移动真实光标，所以 `GetCursorPos` 拿到的是**用户自己**的
-  光标位置。因此设备端记录「上次鼠标操作命中的 hwnd」，键盘动作投递到那里。
-  从未点过则报错。
+- **两种注入的适用范围不同**：
+  - `sendinput`（默认）：注入系统输入队列，等价真实硬件事件。
+    Chromium/Electron 自绘界面、多数游戏都能接收 —— **可靠**。
+    代价：会移动用户真实光标，故先等用户停手（`deferMs`）。
+  - `overlay`：`PostMessage` 直投窗口句柄，用户鼠标纹丝不动。
+    但自绘界面常忽略合成消息 ⇒ 只能操作原生 Win32 程序。
+
+  > 本仓曾把「自绘界面点不动」写成「Windows 消息模型的硬限制」——
+  > **那个说法是错的**，它只是 `PostMessage` 这条 API 的限制。
+  > 用 `SendInput` 就不受此限（参考 Coopanion）。
+
+- **不做静默降级**。无论哪种模式，失败即 `status=error` 并说明原因，
+  不会自作主张换成另一种注入方式。
+- **`sendinput` 模式下用户正在操作会暂缓**（而不是硬抢）：
+  轮询等到用户空闲，超时则跳过本次操作并报错。
+  已在 `agent-inject.js` 中排除「自身注入被误判为用户操作」的陷阱。
+- **`overlay` 模式下键盘类动作依赖先前的鼠标操作**。
+  `keypress`/`hotkey`/`type` 不带坐标，而该模式不移动真实光标，
+  所以 `GetCursorPos` 拿到的是**用户自己**的光标位置；
+  故记录「上次鼠标操作命中的 hwnd」，键盘动作投递到那里。从未点过则报错。
 
 ### 3.7 跨平台状态
 
 | 平台 | 状态 |
 |---|---|
-| Windows | 模式 A 已实现（效果待验证） |
-| Linux | waiter 侧仍是 `xdotool`，**会动真鼠标**。未做模式 A |
+| Windows | 已实现（sendinput 默认 / overlay 可选；真实效果待验证） |
+| Linux | waiter 侧仍是 `xdotool`，**会动真鼠标**。未做独立光标 |
 | macOS | 同上 |
 
 ---
@@ -214,10 +224,6 @@ agent 一干活用户就没法用电脑。
 
 > ⚠ 不改白名单，则新增的 11 个动作**根本下发不到设备**。
 
-### 4.3 设置页
-
-- [ ] `agentCursor.mode` 的 UI（目前只能手改 `gui-prefs.json`）
-
 ### 4.4 设置页
 
 - [ ] `agentCursor.mode` / `deferMs` 的 UI（目前只能手改 `gui-prefs.json`）
@@ -230,6 +236,15 @@ agent 一干活用户就没法用电脑。
 - [ ] mascot 待机自主行为：闲置时轻微眨眼/呼吸
 - [ ] Linux 侧若也要「不抢鼠标」，需 Wayland + uinput 虚拟设备
       （X11 下做不到 —— XTEST 合成的是真实设备事件）
+
+### 4.6 其它已定位但未修
+
+- [ ] `overlay` 模式下键盘类动作「必须先点过」的限制可放宽：
+      可改为「取当前前台窗口」作为兵底，而不是直接报错。
+- [ ] `real` 模式与 `sendinput` 模式代码重叠较多，可考虑合并；
+      目前保留 `real` 仅为兼容旧路径，实际上与 `sendinput` 行为重复。
+- [ ] `p3.js` / `p4.js` 是本轮遗留的临时补丁脚本（未被跟踪），
+      确认无价值后删除，避免占坑。
 
 ---
 
