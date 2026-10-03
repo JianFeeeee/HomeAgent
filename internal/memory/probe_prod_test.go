@@ -136,6 +136,12 @@ func TestProbe_生产规模召回(t *testing.T) {
 		joined := strings.Join(texts, " ｜ ")
 
 		ok := judgeProd(p, texts)
+		// ★ 必须写回 map：数组是值语义，
+		// st := byDim[k]; st[1]++ 不写回的话 byDim 永远是零值
+		// ⇒ 汇总时 st[1]==0 全部 continue ⇒ 打印「合计 0/0」。
+		//
+		// 这个 bug 藏了两次重跑：修判据时看到 0/0 以为是「前提不满足」，
+		// 补完探针后它还在，才意识到是计数本身坏了。
 		st := byDim[p.dim]
 		st[1]++
 		if ok {
@@ -143,6 +149,7 @@ func TestProbe_生产规模召回(t *testing.T) {
 		} else {
 			fails = append(fails, fmt.Sprintf("[%s]%s", p.dim, p.name))
 		}
+		byDim[p.dim] = st
 		fmt.Printf("    [%s] %-18s %s %s\n", p.dim, p.name,
 			mark(ok), trunc(joined, 110))
 	}
