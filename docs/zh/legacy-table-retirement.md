@@ -106,3 +106,33 @@ block_recall.go:316  EnsureSentence（唯一残留写入点）
   迁移只从 entities 读，从不为 sentences 建载体 ⇒ 直接清理会丢原文
 - **关系边 959 vs relations 980**：
   20 组 `(source,target,type)` 完全重复被边表去重（`dd2c996` 已显式报出 `DedupedEdges`）
+
+
+## 六、⚠️ 一个操作错误：**`cp` 拿不到一致的快照**
+
+验证 `55db22c`（sentences 原句块）时，我用
+`cp /home/newqqagent/memory/graph.db /var/tmp/ha-probe/fix.db` 取副本，
+结果：
+
+```
+生产库     entities=1294  sentences=66
+cp 出来的   entities=1293  sentences=67      ← 差 1，且方向相反
+```
+
+第一反应是「迁移改动了源表」，差点去查迁移的写入逻辑。
+**实际是 `cp` 的问题** —— 生产库在 WAL 模式下，已提交但未
+checkpoint 的数据还在 `-wal` 文件里，`cp` 只拿到主库文件 ⇒ 不一致快照。
+
+用 `sqlite3 .backup` 重取后：
+
+```
+.backup 快照  entities=1294  sentences=66  blocks=98   ← 与生产库一致
+```
+
+★ 本文档与 `production-recall-validation.md` 里都写过
+  「库在写，`cp` 拿不到一致快照，要用 `.backup`」，
+  **我自己写下的规则自己违反了。**
+
+⇒ 判据也该加一条：**快照来源必须可验证**。
+  最省事的做法是取完快照立刻与源库比对关键计数，不一致就重取
+  —— 差 1 就会暴露。
