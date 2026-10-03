@@ -203,11 +203,29 @@ func (e *Extractor) Split(ctx context.Context, record string) ([]memory.Triple, 
 
 	fields, err := parseFields(resp.Text)
 	if err != nil {
+		// ★ 错误里必须带上原始响应。
+		//
+		// 实测故障（生产蒸馏 60 条 → 0 字段，837 秒）：判据只显示
+		// 「零字段 60 条」，看不出是数据没得拆还是模型返回了垃圾。
+		// 而根因是 ollama schema 污染 —— 模型返回
+		//   {"fields":[{"name":"text","value":"commit f91b27a…"}]}
+		// 这种「字段名=字段类型、值=整句」的垃圾，被三道闸门全拦掉。
+		//
+		// ★ **判据能显示 0，是因为它只看得到 0。**
+		//   观测面不够 ⇒ 只能看到失败，看不到原因。
+		raw := resp.Text
+		if len(raw) > 400 {
+			raw = raw[:400] + "…"
+		}
 		if resp.Truncated {
 			// 截断的 JSON 不可救，也不该救 —— 重试比丢弃更划算（模型是随机的）。
-			return nil, fmt.Errorf("distill: output truncated at max tokens: %w", err)
+			return nil, fmt.Errorf(
+				"distill: output truncated at max tokens（原始输出 %d 字）: %w\n  原始: %s",
+				len(resp.Text), err, raw)
 		}
-		return nil, fmt.Errorf("distill: parse fields: %w", err)
+		return nil, fmt.Errorf(
+			"distill: parse fields（原始输出 %d 字）: %w\n  原始: %s",
+			len(resp.Text), err, raw)
 	}
 
 	subjects := e.deriveSubjects(record)

@@ -171,14 +171,37 @@ func main() {
 			fmt.Printf("  [%d/%d] %s 用时%.0fs 预计剩余%.0fs\n",
 				i+1, len(entities), truncForLog(e.name, 26), el, eta)
 		}
-		// 前 8 条照常打印字段内容（用于人工核对形态）
-		if i < 8 && results[i].payload != nil {
-			for _, f := range results[i].payload.Fields {
-				fmt.Printf("        %s|%s=%s\n", f.Subject, f.Dimension, f.Value)
+		// ★ 前 8 条无条件打印 —— 包括「报错」和「零字段」两种情况。
+		//
+		// 原版只在 `payload != nil` 时打印字段，于是：
+		//   - 报错 → payload 为 nil → 什么都不打印
+		//   - 零字段 → Fields 为空 → 什么都不打印
+		// 而生产蒸馏实测「零字段 60 条」，屏幕上**一行内容都没有**
+		// —— 判据能显示 0，是因为它只看得到 0。
+		//
+		// 实测故障根因：ollama schema 污染让模型返回
+		//   {"fields":[{"name":"text","value":"commit f91b27a…"}]}
+		// 这种「字段名=字段类型、值=整句」的垃圾，被三道闸门全拦掉 ⇒ 零字段。
+		// 那个原始响应就藏在 err 里（split.go 现在会带上），必须打出来。
+		if i < 8 {
+			switch {
+			case results[i].err != nil:
+				fmt.Printf("        ✘ %s\n", truncForLog(results[i].err.Error(), 400))
+			case results[i].payload != nil && len(results[i].payload.Fields) > 0:
+				for _, f := range results[i].payload.Fields {
+					fmt.Printf("        %s|%s=%s\n", f.Subject, f.Dimension, f.Value)
+				}
+			default:
+				fmt.Printf("        · 零字段（LLM 返回了合法 JSON 但没有字段）\n")
 			}
 		}
 	}
 
+	// ★ 报错与零字段必须分开报 —— 它们的根因完全不同：
+	//   报错  = 工具链故障（JSON 解析失败、模型返回垃圾）
+	//   零字段 = 数据事实（确实没有可拆字段）
+	//   实测 60 条零字段的根因是前者（ollama schema 污染），
+	//   但旧统计把它们混在一个数字里 ⇒ 看不出根因。
 	fmt.Printf("\n拆解结果：%d 条实体 → %d 个字段块；零字段 %d 条，报错 %d 条\n",
 		len(entities), triples, zeroField, failed)
 	if !*apply {
