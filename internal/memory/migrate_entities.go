@@ -174,6 +174,42 @@ func (g *GraphDB) MigrateLegacyTextEntities(embed EntityEmbedder) (MigrateResult
 		res.Edges++
 	}
 
+	// ★ 为 sentences 表的原文补建原句块。
+	//
+	// 实测（清理前置判据，生产快照）：sentences 66 条，原句块 **0 个**。
+	// 而迁移只从 `entities` 读（readLegacySnapshot 里只有 entities 查询），
+	// 从没为 sentences 建过载体 ⇒ 直接清理该表会**丢 66 条原句**。
+	//
+	// 而 sentences 表的价值就在原文本身（entities 是提炼后的名字），
+	// 所以原句块是它唯一的迁移出口 —— 不补这一段，清理就是数据丢失。
+	//
+	// 形态与迁移块的父节点一致：blk_src_<sha256(Text[:12])>，无向量。
+	// 已有原句块（entities 迁移建的）会被 putBlockTx 的 ON CONFLICT 跳过，
+	// 所以重复跑是幂等的。
+	sentRows, err := tx.Query(`SELECT text FROM sentences
+		WHERE text IS NOT NULL AND TRIM(text) != ''`)
+	if err != nil {
+		return res, fmt.Errorf("read sentences for migration: %w", err)
+	}
+	for sentRows.Next() {
+		var text string
+		if err := sentRows.Scan(&text); err != nil {
+			_ = sentRows.Close()
+			return res, err
+		}
+		sb := NewSentenceBlock(text, time.Time{}, time.Time{})
+		if err := putBlockTx(tx, sb); err != nil {
+			_ = sentRows.Close()
+			return res, fmt.Errorf("put sentence block: %w", err)
+		}
+		res.Sentences++
+	}
+	if err := sentRows.Err(); err != nil {
+		_ = sentRows.Close()
+		return res, err
+	}
+	_ = sentRows.Close()
+
 	if err := tx.Commit(); err != nil {
 		return res, err
 	}

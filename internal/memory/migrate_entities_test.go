@@ -493,3 +493,81 @@ func TestMigrate_报告数等于实际写入数(t *testing.T) {
 		t.Errorf("★ 报告边数 %d ≠ 实际写入 %d —— 报告会骗人", res.Edges, relEdges)
 	}
 }
+
+// ★★ 迁移必须为 sentences 表的原文补建原句块。
+//
+// 实测缺口（清理前置判据，生产快照）：
+//
+//	sentences 66 条  →  原句块 0 个
+//
+// 而迁移只从 `entities` 读（readLegacySnapshot 里只有 entities 查询），
+// 从没为 sentences 建过载体。sentences 表的价值就在**原文本身**
+// （entities 是提炼后的名字）⇒ 直接清理该表会丢 66 条原句。
+func TestMigrate_sentences补建原句块(t *testing.T) {
+	g := newMigrateGraph(t)
+	// 直接插 sentences（原句），不经过 Commit（Commit 只造 entity）
+	// ★ sentences.text 有 UNIQUE 约束 ⇒ 同一句只能插一次。
+	//   所以幂等性不能靠「重复插入」来测（那是数据库层的约束，
+	//   根本到不了迁移代码）—— 幂等要靠**迁移跑两遍**来测。
+	for _, txt := range []string{
+		"值班室分机号改为 4324，旧号 4379 停用",
+		"第 114 批周日凌晨停机 4 分，回滚 v2.28.4",
+	} {
+		if _, err := g.db.Exec(
+			`INSERT INTO sentences (text) VALUES (?)`, txt); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	embed := func(string) ([]float64, string) { return []float64{1, 0}, fixedEmbed }
+	res, err := g.MigrateLegacyTextEntities(embed)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.Sentences == 0 {
+		t.Error("迁移应统计 sentences 的原句块数（res.Sentences）")
+	}
+
+	blocks, err := g.MemoryBlocks()
+	if err != nil {
+		t.Fatal(err)
+	}
+	// 幂等：迁移跑第二遍不应新增原句块
+	if _, err := g.MigrateLegacyTextEntities(embed); err != nil {
+		t.Fatal(err)
+	}
+
+	var srcBlocks int
+	seen := map[string]bool{}
+	for _, b := range blocks {
+		if b.Source == SentenceBlockSource {
+			if seen[b.ID] {
+				t.Errorf("原句块 ID 重复：%s", b.ID)
+			}
+			seen[b.ID] = true
+			srcBlocks++
+		}
+	}
+	if srcBlocks != 2 {
+		t.Errorf("应有 2 个原句块（迁移两遍仍不增），实际 %d", srcBlocks)
+	}
+
+	// ★ 每条 sentence 的原文都能由内容派生出对应的块
+	for _, txt := range []string{
+		"值班室分机号改为 4324，旧号 4379 停用",
+		"第 114 批周日凌晨停机 4 分，回滚 v2.28.4",
+	} {
+		id := SentenceBlockID(txt)
+		if !seen[id] {
+			t.Errorf("sentence %q 缺原句块 %s", truncT(txt, 24), id)
+		}
+	}
+}
+
+func truncT(s string, n int) string {
+	r := []rune(s)
+	if len(r) <= n {
+		return s
+	}
+	return string(r[:n]) + "…"
+}
