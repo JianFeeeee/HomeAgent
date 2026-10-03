@@ -922,11 +922,28 @@ func (a *Agent) recallByBlocks(query string) string {
 	//   而向量加权只有 0.7×余弦。用 0.5 筛会把「精确串命中 1.0」
 	//   留下，却把所有纯向量候选（0.35~0.45）全筛掉 ——
 	//   反而丢掉向量侧的有效召回。筛选改由融合内部按路处理。
-	hits, arb, err := a.memory.RecallBlocksFused(memory.BlockRecallQuery{
-		Vector:      vec,
-		Fingerprint: a.multimodalSpace.Fingerprint(),
-		TopK:        blockRecallTopK,
-	}, query)
+	// ★ 走**带拒答的**入口 RecallBlocksGuarded。
+	//
+	// 拒答在图库层而不是这一层，是有教训的：第一版把 AbstainCheck
+	// 写在这里（core 层），而探针在 memory 包内直连图库，
+	// 于是**探针完全绕过了拒答** —— 端到端跑出 abstention 0/3，
+	// 但生产路径其实是有拒答的，却没人能证明它。
+	// 「判据测不到被测路径 ⇒ 判据等于不存在」。
+	//
+	// 拒答为什么必须在召回之前：编造的成因正是「查询符号在库里零出现」
+	// ⇒ 向量却仍给 0.84+ 的高分（grafana/kafka/容灾演练 三类都是）。
+	// 先召回再判断的话，看到的是一堆高分块 ——
+	// 而「分数高」本身不能证明相关。
+	hits, abstain, arb, err := a.memory.RecallBlocksGuarded(
+		memory.BlockRecallQuery{
+			Vector:      vec,
+			Fingerprint: a.multimodalSpace.Fingerprint(),
+			TopK:        blockRecallTopK,
+		}, query)
+	if abstain != nil {
+		log.Printf("[memory] abstain: 符号零命中，拒答「%s」", query)
+		return abstain.Notice
+	}
 	if err != nil || len(hits) == 0 {
 		return ""
 	}

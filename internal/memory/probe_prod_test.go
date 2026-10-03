@@ -126,11 +126,29 @@ func TestProbe_生产规模召回(t *testing.T) {
 		// ★ 走**融合**入口 —— 这是本次改动的真实判据。
 		// 纯向量入口的 2/9 是基线（纯向量 top8 全挤在 0.84~0.90，
 		// 含精确串的「13010/13011 而非 12011」连 top2000 都进不去）。
-		hits, _, err := g.RecallBlocksFused(BlockRecallQuery{
+		// ★ 走**带拒答**的入口，与生产路径完全一致。
+		// 之前这里直连 RecallBlocksFused，绕过了 core 层的拒答 ——
+		// 于是探针测不出拒答是否存在（判据没覆盖被测路径）。
+		hits, abstain, _, err := g.RecallBlocksGuarded(BlockRecallQuery{
 			Vector: vec, Fingerprint: fp, TopK: 8,
 		}, p.query)
 		if err != nil {
 			t.Fatalf("召回失败: %v", err)
+		}
+		if abstain != nil {
+			// 拒答了：abstention 维度要求的就是这个
+			ok := p.abstain
+			st := byDim[p.dim]
+			st[1]++
+			if ok {
+				st[0]++
+			} else {
+				fails = append(fails, fmt.Sprintf("[%s]%s 误拒答", p.dim, p.name))
+			}
+			byDim[p.dim] = st
+			fmt.Printf("    [%s] %-18s %s 拒答: %s\n", p.dim, p.name,
+				mark(ok), trunc(abstain.Notice, 78))
+			continue
 		}
 		texts := make([]string, 0, len(hits))
 		for _, h := range hits {
