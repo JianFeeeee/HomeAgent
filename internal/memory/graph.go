@@ -1210,7 +1210,18 @@ func (g *GraphDB) Introspect() (map[string]interface{}, error) {
 
 	var entityCount, relationCount int
 	g.db.QueryRow("SELECT COUNT(*) FROM entities").Scan(&entityCount)
-	g.db.QueryRow("SELECT COUNT(*) FROM relations WHERE status = 'active'").Scan(&relationCount)
+	// ★ 必须数**全部**关系，不能只数 status='active'。
+	//
+	// 迁移（MigrateLegacyTextEntities）按 `ORDER BY id` 遍历 relations 全表
+	// 转成块边，**不按 status 过滤**。而这里原本只数 active，于是
+	// homed-graph-migrate 的「预计产出 块边 N」比实际写入少：
+	//
+	//	报告   966（active）
+	//	实际  980（全表）   ← 生产库实测，差 14 条
+	//
+	// 报告数与实际写入数不一致，用户会把它当承诺。
+	// 修法：与迁移同口径（全表）。
+	g.db.QueryRow("SELECT COUNT(*) FROM relations").Scan(&relationCount)
 
 	hotspots := []map[string]interface{}{}
 	rows, err := g.db.Query(

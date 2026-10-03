@@ -106,6 +106,9 @@ func main() {
 		fmt.Printf("\n这是报告模式（缺省）。加 -apply 真正迁移。\n")
 		fmt.Printf("预计产出：块 %d，块边 %d（实体名同时作为句子，句子--contains-->块）\n",
 			before.Entities, before.Relations)
+		// ★ 口径说明：块边数是**按 relations 全表**估计的，与迁移同口径。
+		// 孤儿关系（两端实体已不存在）会被跳过，实际产出可能略少。
+		fmt.Println("  （块边按 relations 全表计，孤儿关系会被跳过，实际可能略少）")
 		fmt.Printf("旧表 entities/relations/sentences 保持不动，验证通过后再单独清理。\n")
 		return
 	}

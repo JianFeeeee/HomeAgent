@@ -145,6 +145,17 @@ func TestProbe_生产规模召回(t *testing.T) {
 		fmt.Printf("    维度 %-11s %d/%d  %s\n", d, st[0], st[1], verdict)
 	}
 	fmt.Printf("        合计 %d/%d\n", totP, totT)
+
+	// ★ 硬断言：探针全挂 ≠ 测试失败（t.Logf 不改退出码）
+	//
+	// 实测踩过：首次跑生产快照时 7 条探针全部失败、合计打印 0/0，
+	// 而测试框架报 --- PASS —— 因为「0 条通过 / 0 条判定」根本不满足
+	// `failures > 0`。**「0/0」被打印成 PASS 比红更危险**：
+	// 红会让人去查，绿不会。
+	if totT == 0 || totP == 0 {
+		t.Fatalf("探针未产生任何有效判定（通过 %d / 总数 %d）—— "+
+			"前提不满足（如库里有文本块才能判召回），不是通过", totP, totT)
+	}
 	if len(fails) > 0 {
 		t.Logf("未通过: %s", strings.Join(fails, " / "))
 	}
