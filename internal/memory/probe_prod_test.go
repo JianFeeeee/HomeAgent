@@ -37,25 +37,48 @@ type prodProbe struct {
 	abstain bool // 期望「答不出」：不该召回任何块
 }
 
+// ★ 探针的 want 值全部取自**生产库自己的数据**。
+//
+// 第一版把 ha-c 测试库的值抄了过来（4324/老周/9090/8080），
+// 实测在生产快照上：
+//
+//	4324 → 0 块    老周 → 0 块
+//	9090 → 0 块    8080 → 0 块
+//
+// 也就是说**一半的期望值在库里根本不存在**，探针会全判失败。
+// 那与「假 PASS」是同一类错误的两面：
+//   - 假 PASS：什么都没判定，却报成功
+//   - 编造期望：判据描述的状态在库里不存在
+//
+// 下面每个 want 都对应生产库真实存在的块（迁移自 1294 个实体）。
 var prodProbes = []prodProbe{
 	// casual：常规查询
-	{name: "插件目录", dim: "casual", query: "homeagent 插件装在哪个目录", want: "plugins"},
-	{name: "记忆库路径", dim: "casual", query: "graph.db 存在哪里", want: "graph.db"},
+	{name: "脚本路径", dim: "casual",
+		query: "脚本路径改到哪个目录了", want: "/home/newqqagent"},
+	{name: "插件工具链", dim: "casual",
+		query: "从零开发 QQ 插件用什么工具链", want: "plugindev"},
+	{name: "公网地址", dim: "casual",
+		query: "agentmail 公网访问地址是什么", want: "101.201.37.155"},
+	{name: "本机端口", dim: "casual",
+		query: "本机 13010 端口对应什么", want: "13010"},
 
-	// overwrite：值覆盖（本次改动的目标维度）
-	{name: "值班分机-覆盖", dim: "overwrite", query: "现在的值班室分机号是多少",
-		want: "4324", notWant: "4379"},
-	{name: "值班人-覆盖", dim: "overwrite", query: "现在谁值班", want: "老周"},
+	// overwrite：值覆盖 —— 需要库里真有「新旧两个值」的成对事实。
+	// 生产库的端口事实是 13010/13011 这类**并存**的（不是覆盖），
+	// 所以这一维度在生产数据上**不适用**，改为验证「不误判」：
+	{name: "并存端口不互斥", dim: "coexist",
+		query: "本机服务监听哪些端口", want: "13010", notWant: ""},
 
-	// confusable：两个相近的东西，别答错对象
-	{name: "计费端口不混admin", dim: "confusable",
-		query: "billing 服务的监听端口", want: "9090", notWant: "8080"},
+	// confusable：两个相近的东西
+	{name: "13010与13011", dim: "confusable",
+		query: "13011 端口对应什么服务", want: "13011", notWant: "13010"},
 
-	// ★ abstention：库里根本没有，不该编造
-	{name: "不存在的面板", dim: "abstention", query: "grafana 监控面板的端口是多少",
-		abstain: true},
-	{name: "不存在的负责人", dim: "abstention", query: "谁负责数据库容灾演练",
-		abstain: true},
+	// ★ abstention：库里根本没有的东西，不该编造
+	{name: "不存在的面板", dim: "abstention",
+		query: "grafana 监控面板的端口是多少", abstain: true},
+	{name: "不存在的负责人", dim: "abstention",
+		query: "谁负责数据库容灾演练", abstain: true},
+	{name: "不存在的服务", dim: "abstention",
+		query: "kafka 消息队列的 broker 地址是什么", abstain: true},
 }
 
 // TestProbe_生产规模召回 在生产库快照上跑全维度探针。
@@ -126,7 +149,7 @@ func TestProbe_生产规模召回(t *testing.T) {
 
 	fmt.Println()
 	totP, totT := 0, 0
-	for _, d := range []string{"casual", "overwrite", "confusable", "abstention"} {
+	for _, d := range []string{"casual", "coexist", "confusable", "abstention"} {
 		st := byDim[d]
 		if st[1] == 0 {
 			continue
