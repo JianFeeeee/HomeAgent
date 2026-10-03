@@ -4,6 +4,8 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"reflect"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -29,7 +31,54 @@ type goldResult struct {
 //
 // ★ 判据独立性：期望值来自 goldcases_test.go（人工核对），
 // 与 LLM 输出无关。LLM 的输出只被拿来「比对」，不当参照。
+// goldCache 缓存 runGoldCases 的结果。
+//
+// ★ 为什么需要它
+// ------------
+// 实测（最终回归）：distill 包跑 500 秒，其中
+//
+//	TestGold_Baseline      250.95s
+//	TestGold_ShowFailures  251.64s
+//
+// **两个测试各调了一遍 runGoldCases**，而它会打开 ollama 并逐条调 LLM
+// ⇒ 同一批金标准用例被跑了两遍模型，浪费 250 秒。
+//
+// 缓存只在同一进程内有效，且带 subjectFrom 的调用不共享
+// （那批测的是另一条主语路径）。
+var goldCache struct {
+	done bool
+	out  []goldResult
+}
+
+// 变体缓存（带 subjectFrom 的那条路径）
+var goldAltCache = map[string][]goldResult{}
+
 func runGoldCases(t *testing.T, subjectFrom func(string) string) []goldResult {
+	t.Helper()
+	if subjectFrom == nil {
+		if goldCache.done {
+			return goldCache.out
+		}
+	} else {
+		key := runtime.FuncForPC(reflect.ValueOf(subjectFrom).Pointer()).Name()
+		if v, ok := goldAltCache[key]; ok {
+			return v
+		}
+	}
+	out := runGoldCasesUncached(t, subjectFrom)
+	if subjectFrom == nil {
+		goldCache.out, goldCache.done = out, true
+	} else {
+		key := runtime.FuncForPC(reflect.ValueOf(subjectFrom).Pointer()).Name()
+		goldAltCache[key] = out
+	}
+	return out
+}
+
+// runGoldCasesUncached 是真正跑一遍模型的那份实现。
+func runGoldCasesUncached(t *testing.T, subjectFrom func(string) string) []goldResult {
+	t.Helper()
+
 	t.Helper()
 	gen, err := generation.Open("ollama", generation.Config{
 		Options: map[string]string{
