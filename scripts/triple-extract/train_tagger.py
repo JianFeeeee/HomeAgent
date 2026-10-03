@@ -376,8 +376,14 @@ def main():
     model = CharTagger(len(vocab), args.d_model, args.layers, args.heads)
     print(f"参数量 {count_params(model):,}")
     opt = torch.optim.AdamW(model.parameters(), lr=args.lr, weight_decay=0.01)
+    # ★ total_steps 必须与实际迭代次数**精确一致**，否则训练跑到一半
+    #   会抛 "Tried to step N times. The specified number of total steps is M"。
+    #   用 ceil 而不是整除 —— 整除会少算最后一批的迭代。
+    steps_per_epoch = math.ceil(len(train) / args.bs) if train else 1
+    total_steps = max(1, args.epochs * steps_per_epoch)
     sched = torch.optim.lr_scheduler.OneCycleLR(
-        opt, max_lr=args.lr, total_steps=args.epochs * max(1, len(train) // args.bs))
+        opt, max_lr=args.lr, total_steps=total_steps,
+        pct_start=0.3, anneal_strategy="cos")
 
     best = 0.0
     for ep in range(args.epochs):
