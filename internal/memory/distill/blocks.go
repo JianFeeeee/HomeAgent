@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"fmt"
 	"strings"
+	"time"
 
 	"gitcode.com/JianFeeeee/HomeAgent/internal/memory"
 )
@@ -101,44 +102,19 @@ func BlockID(sentence, subject, dimension, value string) string {
 	return "blk_" + hex.EncodeToString(h[:12])
 }
 
-// SentenceBlockID 由**原句文本**派生原句块的 ID。
+// SentenceBlockID 由原句文本派生原句块的 ID。
 //
-// ★ 为什么需要它（方案 A 的最后一步）
-// ---------------------------------
-// 现状：字段块的父节点是 `sentences` 表的行 ——
+// ★ 实现在 memory 包（memory.SentenceBlockID）——
 //
-//	sentence --contains--> block
-//
-// 而方案 A 要求删掉 `sentences`。要退场就得让块自己承载原句。
-//
-// 关键约束是**幂等**：原句块 ID 必须由内容派生，不能依赖
-// `sentences` 的自增 id 或 `entities` 的行号 ——
-// 迁移块用 `blk_ent_<entityID>_<hash>`（依赖 entityID），
-// 那条路不可行：entityID 不是内容派生的。
-//
-// 这里用 sha256(sentence)，与 BlockID 同一套派生方式，
-// 重复跑同一条原句得到同一个 ID ⇒ 不产生重复块。
-func SentenceBlockID(sentence string) string {
-	h := sha256.Sum256([]byte(strings.TrimSpace(sentence)))
-	return "blk_src_" + hex.EncodeToString(h[:12])
-}
+//	迁移与蒸馏两条路径都要用它，而 distill 已导入 memory，
+//	放在 distill 会形成导入环。这里只做转发以便包内调用方便。
+func SentenceBlockID(sentence string) string { return memory.SentenceBlockID(sentence) }
 
-// SentenceBlock 构造承载原句的块。
+// SentenceBlock 构造承载原句的块（转发到 memory.NewSentenceBlock）。
 //
-// ★ 它是**原句的唯一载体**（方案 A 退场 sentences 后）
-//   - source="sentence"：便于按来源筛选与回溯
-//   - 无向量：原句块不参与向量召回（召回的是字段块，
-//     原句只是溯源锚点）—— 省一次 embedding，也避免
-//     长整句稀释向量（实测：短「13000端口」比 20 字整句更容易被召回，
-//     整句进召回只会引入噪声）
-//   - 无边：原句块不需要指向任何实体，它自己就是叶子
+// 刻意不带向量：原句块是溯源锚点，长整句会稀释向量召回。
 func SentenceBlock(sentence string) memory.MemoryBlock {
-	return memory.MemoryBlock{
-		ID:       SentenceBlockID(sentence),
-		Modality: memory.BlockText,
-		Text:     strings.TrimSpace(sentence),
-		Source:   "sentence",
-	}
+	return memory.NewSentenceBlock(sentence, time.Time{}, time.Time{})
 }
 
 // ToMemoryBlock 把一个字段块转成可入库的 MemoryBlock。

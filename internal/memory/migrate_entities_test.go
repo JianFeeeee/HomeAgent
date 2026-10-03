@@ -35,9 +35,15 @@ func TestMigrateLegacyTextEntities_形态(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Migrate: %v", err)
 	}
-	// 2 个实体 → 2 句 2 块
-	if res.Sentences != 2 || res.Blocks != 2 {
-		t.Errorf("实体 2 个应得 2 句 2 块，实际 %+v", res)
+	// ★ 2 个实体 → 2 个迁移块 + 2 个原句块（方案 A 后原句也是块）
+	//
+	// res.Sentences 不再递增：统计口径改为「迁移块数」，
+	// 因为 sentences 表已不再被写入。
+	if res.Blocks != 2 {
+		t.Errorf("2 个实体应得 2 个迁移块，实际 %+v", res)
+	}
+	if res.Sentences != 0 {
+		t.Errorf("迁移不应再创建 sentence 记录（方案 A 退场），实际 %d", res.Sentences)
 	}
 	// 1 条关系 → 1 条块边
 	if res.Edges != 1 {
@@ -48,10 +54,18 @@ func TestMigrateLegacyTextEntities_形态(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(blocks) != 2 {
-		t.Fatalf("应有 2 块，实际 %d", len(blocks))
+	// 2 迁移块 + 2 原句块
+	if len(blocks) != 4 {
+		t.Fatalf("应有 4 块（2 迁移 + 2 原句），实际 %d", len(blocks))
 	}
 	for _, b := range blocks {
+		// ★ 原句块刻意不带向量（溯源锚点，长整句会稀释召回）
+		if b.Source == SentenceBlockSource {
+			if len(b.Vector) != 0 {
+				t.Errorf("原句块 %s 不该带向量，实际 %d 维", b.ID, len(b.Vector))
+			}
+			continue
+		}
 		if len(b.Vector) != 3 || b.Fingerprint != fixedEmbed {
 			t.Errorf("%s 应带 3 维向量与 %s，实际 %d 维 %q",
 				b.ID, fixedEmbed, len(b.Vector), b.Fingerprint)
@@ -68,7 +82,8 @@ func TestMigrateLegacyTextEntities_形态(t *testing.T) {
 	}
 	containsCount := 0
 	for _, e := range edges {
-		if e.Type == "contains" && e.SourceKind == "sentence" && e.TargetKind == "block" {
+		// ★ 起点是**原句块**（block），不再是 sentence 表行 —— 方案 A
+		if e.Type == "contains" && e.SourceKind == "block" && e.TargetKind == "block" {
 			containsCount++
 		}
 	}
@@ -100,8 +115,9 @@ func TestMigrateLegacyTextEntities_幂等(t *testing.T) {
 		}
 	}
 	blocks, _ := g.MemoryBlocks()
-	if len(blocks) != 2 {
-		t.Fatalf("迁移 3 次后仍应只有 2 块，实际 %d", len(blocks))
+	// ★ 2 迁移块 + 2 原句块；重复跑不增
+	if len(blocks) != 4 {
+		t.Fatalf("迁移 3 次后仍应只有 4 块（2 迁移 + 2 原句），实际 %d", len(blocks))
 	}
 	edges, _ := g.MemoryBlockEdges()
 	contains := 0
@@ -367,8 +383,11 @@ func TestMigrateLegacyTextEntities_时序不被抹平(t *testing.T) {
 	}
 	blocks, _ := g.MemoryBlocks()
 	// 主语+宾语各成一块：「值班室分机号」「新分机号码」「四三七九」「四三二四」
-	if len(blocks) != 4 {
-		t.Fatalf("应得 4 块，实际 %d", len(blocks))
+	// ★ 4 个实体 → 4 迁移块 + 4 原句块 = 8
+	//   （原为 4，方案 A 让原句也成了块）
+	if len(blocks) != 8 {
+		// 2 迁移块 + 2 原句块
+		t.Fatalf("应得 8 块（4 迁移 + 4 原句），实际 %d", len(blocks))
 	}
 	// 判据：4 个块必须分属两个不同时刻（主语+首宾语 10:00，
 	// 次宾语对 11:00）。若全落同一时刻，时序就被抹平了。
@@ -381,11 +400,13 @@ func TestMigrateLegacyTextEntities_时序不被抹平(t *testing.T) {
 	if len(seen) != 2 {
 		t.Errorf("块应分属 2 个不同时刻，实际 %d 个：%v", len(seen), seen)
 	}
-	if seen["2026-01-01 10:00"] != 2 {
-		t.Errorf("10:00 组应有 2 块，实际 %d", seen["2026-01-01 10:00"])
+	if seen["2026-01-01 10:00"] != 4 {
+		// ★ 每组 2 实体 × 2 块（迁移块 + 原句块）= 4 块
+		t.Errorf("10:00 组应有 4 块（2 迁移 + 2 原句），实际 %d", seen["2026-01-01 10:00"])
 	}
-	if seen["2026-01-01 11:00"] != 2 {
-		t.Errorf("11:00 组应有 2 块，实际 %d", seen["2026-01-01 11:00"])
+	if seen["2026-01-01 11:00"] != 4 {
+		// ★ 同上
+		t.Errorf("11:00 组应有 4 块（2 迁移 + 2 原句），实际 %d", seen["2026-01-01 11:00"])
 	}
 }
 

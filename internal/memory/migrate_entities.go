@@ -109,11 +109,20 @@ func (g *GraphDB) MigrateLegacyTextEntities(embed EntityEmbedder) (MigrateResult
 	for _, e := range ents {
 		// 实体名同时充当「句子」（陈述）与「块文本」：迁移期 1:1 对应，
 		// 不做内容改写 —— 改写属于拆分，不属于迁移。
-		sentenceID, err := ensureSentenceTx(tx, e.name)
-		if err != nil {
-			return res, fmt.Errorf("ensure sentence %q: %w", e.name, err)
-		}
+		// ★ 不再建 sentences 行（方案 A 退场）。
+		//
+		// 原来的 sentence 节点**没有独立价值**：它的 text 就是实体名，
+		// 而下面那个块的 Text 也是 e.name —— 两者完全重复，
+		// 而 sentences 表一退场这个节点就悬空了。
+		//
+		// 现在：原句块（blk_src_<hash>）--contains--> 迁移块
+		// 与蒸馏路径（0586f6b）用同一套原句块形态。
 		blockID := legacyEntityBlockID(e.id, e.name)
+		src := NewSentenceBlock(e.name, e.createdAt, e.updatedAt)
+		srcBlockID := src.ID
+		if err := putBlockTx(tx, src); err != nil {
+			return res, fmt.Errorf("put sentence block for entity %d: %w", e.id, err)
+		}
 		if err := putBlockTx(tx, MemoryBlock{
 			ID:          blockID,
 			Modality:    BlockText,
@@ -126,12 +135,12 @@ func (g *GraphDB) MigrateLegacyTextEntities(embed EntityEmbedder) (MigrateResult
 		}); err != nil {
 			return res, fmt.Errorf("put block for entity %d: %w", e.id, err)
 		}
-		if err := addBlockEdgeTx(tx, "sentence", fmt.Sprint(sentenceID),
+		if err := addBlockEdgeTx(tx, "block", srcBlockID,
 			"block", blockID, "contains"); err != nil {
 			return res, fmt.Errorf("link block %s: %w", blockID, err)
 		}
 		entToBlock[e.id] = blockID
-		res.Sentences++
+		// 注意：res.Sentences 不再递增 —— 统计口径改为「原句块」
 		res.Blocks++
 	}
 
