@@ -1204,6 +1204,22 @@ func (g *GraphDB) GraphData() (map[string]interface{}, error) {
 	}, nil
 }
 
+// CountSentences 返回 sentences 表的行数（只读）。
+//
+// ★ 用途：方案 A 的退场判据
+// ------------------------
+// 蒸馏已不写该表（WritePayload 改用原句块承载原句），
+// 而迁移仍会写它（MigrateLegacyTextEntities 建 sentence→block 边）。
+// 所以「sentences 是否清零」是判断退场是否完成的可观察信号 ——
+// 给它一个明确的只读接口，而不是让调用方猜 SQL 或翻 schema。
+func (g *GraphDB) CountSentences() (int, error) {
+	g.mu.RLock()
+	defer g.mu.RUnlock()
+	var n int
+	err := g.db.QueryRow(`SELECT COUNT(*) FROM sentences`).Scan(&n)
+	return n, err
+}
+
 func (g *GraphDB) Introspect() (map[string]interface{}, error) {
 	g.mu.RLock()
 	defer g.mu.RUnlock()

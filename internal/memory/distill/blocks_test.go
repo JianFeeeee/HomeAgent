@@ -60,8 +60,9 @@ func TestWritePayload_句子块边形态(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(blocks) != 3 {
-		t.Fatalf("库中应有 3 个块，实际 %d", len(blocks))
+	// ★ 原句块 + 3 个字段块 = 4（原为 3，方案 A 让原句也成了块）
+	if len(blocks) != 4 {
+		t.Fatalf("库中应有 4 个块（1 原句 + 3 字段），实际 %d", len(blocks))
 	}
 	edges, err := g.MemoryBlockEdges()
 	if err != nil {
@@ -71,7 +72,7 @@ func TestWritePayload_句子块边形态(t *testing.T) {
 		t.Fatalf("应有 3 条 contains 边，实际 %d", len(edges))
 	}
 	for _, ed := range edges {
-		if ed.SourceKind != "sentence" || ed.TargetKind != "block" || ed.Type != "contains" {
+		if ed.SourceKind != "block" || ed.TargetKind != "block" || ed.Type != "contains" {
 			t.Errorf("边形态应为 sentence--contains-->block，实际 %+v", ed)
 		}
 	}
@@ -131,8 +132,9 @@ func TestWritePayload_幂等(t *testing.T) {
 		}
 	}
 	blocks, _ := g.MemoryBlocks()
-	if len(blocks) != 3 {
-		t.Fatalf("重复写入 3 次后仍应只有 3 个块，实际 %d", len(blocks))
+	// ★ 同上：1 原句块 + 3 字段块，重复写不增
+	if len(blocks) != 4 {
+		t.Fatalf("重复写入 3 次后仍应只有 4 个块，实际 %d", len(blocks))
 	}
 }
 
@@ -156,11 +158,8 @@ func TestWritePayload_无provider不编造向量(t *testing.T) {
 		}
 	}
 	// 但它们仍可被按边查到
-	sid, err := g.EnsureSentence(blockRec)
-	if err != nil {
-		t.Fatal(err)
-	}
-	got, err := g.BlocksForNode("sentence", itoa64(sid))
+	sid := SentenceBlockID(blockRec)
+	got, err := g.BlocksForNode("block", sid)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -181,11 +180,33 @@ func TestWritePayload_带向量落库(t *testing.T) {
 		t.Fatal(err)
 	}
 	blocks, _ := g.MemoryBlocks()
+	var withVec, sentenceBlocks int
 	for _, b := range blocks {
+		if b.Source == "sentence" {
+			// ★ 原句块**刻意不带向量**
+			//
+			// 它是溯源锚点，不参与向量召回。理由：
+			// 长整句的句向量会把关键值稀释掉 ——
+			// 实测「13000端口」(7字) 容易被召回，
+			// 而「13010/13011 而非 12011」(20字) 召不回。
+			// 让原句进召回只会引入噪声。
+			sentenceBlocks++
+			if len(b.Vector) != 0 {
+				t.Errorf("原句块 %s 不该带向量，实际 %d 维", b.ID, len(b.Vector))
+			}
+			continue
+		}
+		withVec++
 		if len(b.Vector) != 3 || b.Fingerprint != "fp-test" {
 			t.Errorf("%s 应带 3 维向量与 fp-test，实际 %d 维 %q",
 				b.ID, len(b.Vector), b.Fingerprint)
 		}
+	}
+	if sentenceBlocks != 1 {
+		t.Errorf("应恰好 1 个原句块，实际 %d", sentenceBlocks)
+	}
+	if withVec == 0 {
+		t.Error("字段块都该带向量")
 	}
 }
 
@@ -288,8 +309,10 @@ func TestWritePayload_同句不同维度不撞块(t *testing.T) {
 		t.Fatal(err)
 	}
 	blocks, _ := g.MemoryBlocks()
-	if len(blocks) != n || len(blocks) != 2 {
-		t.Fatalf("值相同但维度不同应产生 2 个块，实际 %d（块 ID 撞了会少）", len(blocks))
+	// ★ n 是**字段块**数（WritePayload 的返回值语义），不含原句块。
+	//   总块数 = n 字段 + 1 原句。
+	if len(blocks) != n+1 || len(blocks) != 3 {
+		t.Fatalf("值相同但维度不同应产生 3 个块（1 原句 + 2 字段），实际 %d（块 ID 撞了会少）", len(blocks))
 	}
 }
 
@@ -430,5 +453,156 @@ func TestBlocks_主语透传到字段块(t *testing.T) {
 	}
 	if payload.Fields[1].Subject != "billing服务" {
 		t.Errorf("字段1 主语应为 billing服务，实际 %q", payload.Fields[1].Subject)
+	}
+}
+
+// ★★ 方案 A 判据：蒸馏落块**不得再写 sentences 表**。
+//
+// 这是退场的最后依赖点 —— blocks.go:192 原先调 EnsureSentence，
+// 而 EnsureSentence 是 sentences 表唯一的写入者之一。
+func TestWritePayload_不写sentences表(t *testing.T) {
+	g := newBlockGraph(t)
+	defer g.Close()
+
+	pl := &BlockPayload{
+		Sentence: "值班室分机号 4324，值班 老周",
+		Fields: []FieldBlock{
+			{Subject: "值班室", Dimension: "分机号", Value: "4324"},
+			{Subject: "值班", Dimension: "人员", Value: "老周"},
+		},
+	}
+	n, err := WritePayload(context.Background(), g, pl, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if n != 2 {
+		t.Fatalf("应写 2 个字段块，实际 %d", n)
+	}
+
+	// ★ sentences 表必须仍是空的
+	sentCount, err := g.CountSentences()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if sentCount != 0 {
+		t.Errorf("★ distill 写了 %d 条 sentences —— 方案 A 要求退场该表", sentCount)
+	}
+
+	// 字段块与原句块都要在
+	blocks, err2 := g.MemoryBlocks()
+	err = err2
+	if err != nil {
+		t.Fatal(err)
+	}
+	var hasSentence, hasField int
+	for _, b := range blocks {
+		if b.Source == "sentence" {
+			hasSentence++
+		}
+		if b.Source == "distill" {
+			hasField++
+		}
+	}
+	if hasSentence != 1 {
+		t.Errorf("应恰好 1 个原句块，实际 %d", hasSentence)
+	}
+	if hasField != 2 {
+		t.Errorf("应恰好 2 个字段块，实际 %d", hasField)
+	}
+}
+
+// ★ 边必须是 block→block（不再是 sentence→block）。
+func TestWritePayload_边是块到块(t *testing.T) {
+	g := newBlockGraph(t)
+	defer g.Close()
+
+	pl := &BlockPayload{
+		Sentence: "连接池容量 128/256 扩容后",
+		Fields:   []FieldBlock{{Subject: "连接池", Dimension: "容量", Value: "128/256"}},
+	}
+	if _, err := WritePayload(context.Background(), g, pl, nil); err != nil {
+		t.Fatal(err)
+	}
+	edges, err := g.MemoryBlockEdges()
+	if err != nil {
+		t.Fatal(err)
+	}
+	found := 0
+	for _, e := range edges {
+		if e.Type == "contains" {
+			found++
+			if e.SourceKind != "block" {
+				t.Errorf("contains 边起点应是 block，实际 %q", e.SourceKind)
+			}
+			if e.TargetKind != "block" {
+				t.Errorf("contains 边终点应是 block，实际 %q", e.TargetKind)
+			}
+		}
+	}
+	if found != 1 {
+		t.Errorf("应恰好 1 条 contains 边，实际 %d", found)
+	}
+}
+
+// ★ 幂等：同一原句重复跑不产生重复块，也不产生重复边。
+//
+//	—— 记忆里明确记着「重试不能产生重复记忆」。
+func TestWritePayload_重复跑幂等(t *testing.T) {
+	g := newBlockGraph(t)
+	defer g.Close()
+
+	pl := &BlockPayload{
+		Sentence: "第130批 v2.31.5 评审通过",
+		Fields:   []FieldBlock{{Subject: "第130批", Dimension: "版本", Value: "v2.31.5"}},
+	}
+	for i := 0; i < 3; i++ {
+		if _, err := WritePayload(context.Background(), g, pl, nil); err != nil {
+			t.Fatalf("第 %d 次失败: %v", i+1, err)
+		}
+	}
+	blocks, err := g.MemoryBlocks()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(blocks) != 2 {
+		ids := make([]string, 0, len(blocks))
+		for _, b := range blocks {
+			ids = append(ids, b.ID)
+		}
+		t.Errorf("重复跑 3 次后应仍是 2 个块（原句+字段），实际 %d: %v", len(blocks), ids)
+	}
+	edges, err := g.MemoryBlockEdges()
+	if err != nil {
+		t.Fatal(err)
+	}
+	var contains int
+	for _, e := range edges {
+		if e.Type == "contains" {
+			contains++
+		}
+	}
+	if contains != 1 {
+		t.Errorf("重复跑 3 次后应仍是 1 条 contains 边，实际 %d", contains)
+	}
+}
+
+// ★ 变异自证：把原句块 ID 改成非确定性，幂等判据必须变红。
+func TestSentenceBlockID_确定性(t *testing.T) {
+	s := "值班室分机号 4324，值班 老周"
+	a := SentenceBlockID(s)
+	b := SentenceBlockID(s)
+	if a != b {
+		t.Fatalf("同原句必须得到同 ID：%s vs %s", a, b)
+	}
+	// ★ 首尾空格**应当**得到同 ID —— TrimSpace 的目的正是如此：
+	//   原句带的换行/空格不该让它与另一个库里的同一句话分成两块。
+	if a != SentenceBlockID(s+"  \n") {
+		t.Error("首尾空白差异不该产生不同 ID（那是同一句话）")
+	}
+	if a == SentenceBlockID("别的句子") {
+		t.Error("不同原句必须得到不同 ID")
+	}
+	if len(a) < 8 || a[:8] != "blk_src_" {
+		t.Errorf("ID 前缀应为 blk_src_，实际 %q", a)
 	}
 }
