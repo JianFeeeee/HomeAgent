@@ -1,6 +1,7 @@
 package memory
 
 import (
+	"regexp"
 	"sort"
 	"strings"
 	"time"
@@ -292,6 +293,39 @@ func hasSameSentenceSibling(db *GraphDB, sentenceID, excludeBlockID string) bool
 	return err == nil && n > 0
 }
 
+// supersedesSentence 判断 later 文本是否取代了 earlier 文本。
+//
+// ★ 专为**整句块**设计（解析不出「主语|维度=值」的那种）：
+//
+//	判据只要两件事 —— 时间更晚 + 提到了更早那条里的关键值。
+//
+// 为什么不需要解析主语：值覆盖场景下，「新号生效、旧号作废」这句话
+// **必然同时含新旧两个值**：
+//
+//	early: 值班室分机号 4379，值班人 阿李
+//	late:  值班室分机号 4324，值班 老周（旧号 4379 停用）
+//	                                          ↑ 含 early 的 4379
+//
+// 抽出的「关键值」用与 parseFact 同一套值形态正则（数字/版本/百分比），
+// 匹配 early 里最长的那个。
+var sentenceValueRe = regexp.MustCompile(
+	`\d+(?:\.\d+)?(?:/\d+)*(?:~\d+)?%?|[vV]\d+(?:\.\d+)+|第\d+[批号版]?`)
+
+func supersedesSentence(earlier, later string) bool {
+	// 取 earlier 里最长的那个值
+	best := ""
+	for _, m := range sentenceValueRe.FindAllString(earlier, -1) {
+		if len(m) > len(best) {
+			best = m
+		}
+	}
+	if best == "" {
+		return false // earlier 里没有可识别的值，无从判断取代
+	}
+	// later 提到了它，且 later 不是同一句话（否则是自我引用）
+	return best != later && strings.Contains(later, best)
+}
+
 // arbitrate 对同属性的候选块做时序仲裁。
 //
 // db 可为 nil（拿不到块→原句归属时退化为纯时间+文本判据）。
@@ -329,8 +363,40 @@ func arbitrate(db *GraphDB, hits []BlockHit) ArbitrationResult {
 
 	for i, a := range ps {
 		if !a.ok || a.fact.When.IsZero() {
-			// 规则 1：不可仲裁 → 保留
-			kept = append(kept, a.hit)
+			// 规则 1（修订）：**没有时间的**不可仲裁 → 保留。
+			//
+			// 但「有时间的整句块」要参与取代判断 —— 它解析不出
+			// (主语,维度,值)，不代表不能判断「谁取代了谁」。
+			//
+			// 实测故障（真库 legacy-entity 整句块）：
+			//
+			//	13:28  值班室分机号 4379，值班人 阿李
+			//	13:44  值班室分机号 4324，值班 老周（旧号 4379 停用）
+			//	13:44  下周起值班室分机号改为 4324，旧号 4379 停用
+			//
+			// 查询「现在的值班分机号」时旧号排 top1 —— 而 13:44 那两条
+			// **文本里含 "4379"**，正是「新号生效、旧号作废」的自述。
+			// 判据就是 supersedesSentence：更晚 + 提到更早那条的值 ⇒ 取代。
+			// 不需要解析主语，也不需要维度。
+			if a.fact.When.IsZero() {
+				kept = append(kept, a.hit)
+				continue
+			}
+			supersededByOther := false
+			for j, b := range ps {
+				if i == j || b.fact.When.IsZero() || !b.fact.When.After(a.fact.When) {
+					continue
+				}
+				if supersedesSentence(a.hit.Block.Text, b.hit.Block.Text) {
+					dropped[a.hit.Block.ID] = true
+					superseded = append(superseded, a.hit)
+					supersededByOther = true
+					break
+				}
+			}
+			if !supersededByOther {
+				kept = append(kept, a.hit)
+			}
 			continue
 		}
 		// 规则 2：被后面任一条显式取代？

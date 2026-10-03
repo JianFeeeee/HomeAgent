@@ -899,7 +899,18 @@ func (a *Agent) recallByBlocks(query string) string {
 		// 模型未加载/超时，报给模型只会让它以为"记忆不存在"。
 		return ""
 	}
-	hits, err := a.memory.RecallBlocks(memory.BlockRecallQuery{
+	// ★ 走仲裁入口而不是 RecallBlocks
+	//
+	// 值覆盖维度上，纯向量序会答错（实测端到端）：
+	//   仲裁前 5/7 → 仲裁后 5/7（no-regression），但 overwrite 维度
+	//   之所以仍只有 1/2，是因为「4324 那条」有时压根没被拆出来
+	//   （LLM 标注波动，实测同批输入两次产出 259 vs 362 个字段块）。
+	//
+	// 而仲裁必须发生在 topK 截断**之前** —— RecallBlocksWithArbitration
+	// 内部已按「放大 TopK → 仲裁 → 截断」实现（见 block_recall.go 的说明）：
+	// 实测旧号 4379 以 0.8127 排 top1 而新号进不了 top8，
+	// 事后仲裁无从挽回，因为被判取代的旧值和新值都不在候选里。
+	hits, arb, err := a.memory.RecallBlocksWithArbitration(memory.BlockRecallQuery{
 		Vector:      vec,
 		Fingerprint: a.multimodalSpace.Fingerprint(),
 		TopK:        blockRecallTopK,
@@ -907,6 +918,12 @@ func (a *Agent) recallByBlocks(query string) string {
 	})
 	if err != nil || len(hits) == 0 {
 		return ""
+	}
+	if n := len(arb.Superseded); n > 0 {
+		// 被取代的块不返回给模型，但**记一笔**：旧值被显式作废这件事
+		// 本身有信息（「旧号 4379 停用」解释了为什么现在打不通），
+		// 而完全静默会让「记忆里为什么没有旧号」变成无解之谜。
+		log.Printf("[memory] recall blocks: %d 条被时序仲裁剔除（被更新的值取代）", n)
 	}
 	var parts []string
 	parts = append(parts, fmt.Sprintf("找到 %d 条相关记忆片段:", len(hits)))

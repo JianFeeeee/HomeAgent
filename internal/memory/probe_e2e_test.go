@@ -240,31 +240,59 @@ func TestProbe_端到端召回_仲裁前后对比(t *testing.T) {
 
 // judgeProbe 判定一次召回结果是否答对。
 //
-// 判据：want 必须在结果里，notWant 不该压过 want。
-// notWant 的检查方式不是「notWant 不出现」（旧号作为历史信息出现是对的），
-// 而是「want 排不到 notWant 后面」—— 那是值覆盖答错的真正形态
-// （实测错答形态：查询新号，top1 是旧号）。
+// ★ 判据修过一次（原版有缺陷）
+// ------------------------------
+// 原版：`notWant` 不该排在 `want` 前面。
+//
+// 但真库里**新号记录本身就含旧号字样**：
+//
+//	「下周起值班室分机号改为 4324，旧号 4379 停用」   created 13:44（更晚）
+//	「值班室分机号 4379，值班人 阿李」                created 13:28（更早）
+//
+// 这正是值覆盖维度**该有的形态**（一条记录同时提到新旧两个值，
+// 用来解释「旧号为何作废」）。原判据会把第一条判成「notWant 排在前面」
+// → 误判失败。
+//
+// 现在改成按**时间**判：含旧号的那条若比含新号的那条更新，它是
+// 「新号生效、旧号作废」的说明，应该胜出。
 func judgeProbe(hits []BlockHit, c probeCase) bool {
 	if len(hits) == 0 {
 		return false
 	}
-	wantIdx, notIdx := -1, -1
+	wantIdx := -1
 	for i, h := range hits {
-		txt := h.Block.Text
-		if wantIdx < 0 && strings.Contains(txt, c.want) {
+		if strings.Contains(h.Block.Text, c.want) {
 			wantIdx = i
-		}
-		if c.notWant != "" && notIdx < 0 && strings.Contains(txt, c.notWant) {
-			notIdx = i
+			break
 		}
 	}
 	if wantIdx < 0 {
-		return false
+		return false // 新号根本没被召回 —— 那是召回问题，与排序无关
 	}
-	if notIdx >= 0 && notIdx < wantIdx {
-		return false // 旧号压在新号前面 = 值覆盖答错
+	if c.notWant == "" {
+		return true
 	}
-	return true
+
+	// 找出「只含旧号、不含新号」的那些块（真正的旧值记录）
+	oldOnly := -1
+	for i, h := range hits {
+		txt := h.Block.Text
+		if strings.Contains(txt, c.want) {
+			continue // 这条也含新号（新号记录里提到旧号是正常的）
+		}
+		if strings.Contains(txt, c.notWant) {
+			oldOnly = i
+			break
+		}
+	}
+	if oldOnly < 0 {
+		return true // 没有纯旧值块，无从冲突
+	}
+	if oldOnly > wantIdx {
+		return true // 旧值排在新号之后 —— 正确
+	}
+	// 旧值排在前面：只有当它**更新**时才合理（那是「新号作废」的镜像）
+	return hits[oldOnly].Block.CreatedAt.After(hits[wantIdx].Block.CreatedAt)
 }
 
 func topText(hits []BlockHit) string {

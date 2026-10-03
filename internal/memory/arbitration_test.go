@@ -21,19 +21,40 @@ func hit(text string, when string, score float64) BlockHit {
 	}
 }
 
-// 真库形态（迁移来的整句，无 '|' 无 '='）→ 不可仲裁，必须保留。
-func TestArbitrate_整句块不仲裁(t *testing.T) {
+// ★ 整句块（迁移来的，无 '|' 无 '='）：现在**参与取代判断**。
+//
+// 这条测试的断言改过一次。初版断言「整句块不可仲裁，全部保留」，
+// 而端到端 overwrite 维度卡在 1/2 的根因正是它：
+//
+//	13:28  值班室分机号 4379，值班人 阿李
+//	13:44  值班室分机号 4324，值班 老周（旧号 4379 停用）
+//	13:44  下周起值班室分机号改为 4324，旧号 4379 停用
+//
+// 查询「现在的值班分机号」时旧号排 top1 —— 而 13:44 那两条**文本里
+// 含 "4379"**，正是「新号生效、旧号作废」的自述。
+//
+// 「解析不出主语」≠「不能判断谁取代了谁」：取代判断只需
+// 「更晚 + 提到了更早那条的关键值」，不需要维度名。
+func TestArbitrate_整句块参与取代(t *testing.T) {
+	g := newTestGraph(t)
+	defer func() { _ = g.Close() }()
+
+	putRawBlockArb(t, g, "e1", "值班室分机号 4379，值班人 阿李", "2026-10-01 13:28:28")
+	putRawBlockArb(t, g, "e2", "值班室分机号 4324，值班 老周（旧号 4379 停用）",
+		"2026-10-01 13:44:26")
+
 	hits := []BlockHit{
-		hit("值班室分机号 4379，值班人 阿李", "2026-10-01 13:28:28", 0.81),
-		hit("下周起值班室分机号改为 4324，旧号 4379 停用", "2026-10-01 13:44:26", 0.73),
+		{Block: mustBlock(t, g, "e1"), Score: 0.81},
+		{Block: mustBlock(t, g, "e2"), Score: 0.73},
 	}
 	res := arbitrate(nil, hits)
-	if len(res.Kept) != 2 {
-		t.Errorf("整句块解析不出三元组，应全部保留，实际保留 %d：%+v",
-			len(res.Kept), res.Kept)
+
+	if len(res.Kept) != 1 || res.Kept[0].Block.ID != "e2" {
+		t.Errorf("只应保留新号那条，实际 kept=%v", textsOf(res.Kept))
 	}
-	if len(res.Superseded) != 0 {
-		t.Errorf("不该有被取代的块，实际 %d", len(res.Superseded))
+	if len(res.Superseded) != 1 || res.Superseded[0].Block.ID != "e1" {
+		t.Errorf("旧号应进 Superseded（不丢弃 ——「旧号作废」本身有信息），实际 %v",
+			textsOf(res.Superseded))
 	}
 }
 
@@ -462,4 +483,111 @@ func TestRecallBlocks_仲裁在截断前(t *testing.T) {
 	if len(raw) == 0 || raw[0].Block.ID != "a_old" {
 		t.Errorf("纯召回应按向量分返回（旧值在前），实际 %v", textsOf(raw))
 	}
+}
+
+// ★ supersedesSentence：整句块的取代判断。
+//
+// 这是端到端 overwrite 维度 1/2 的直接根因（真库 legacy-entity 形态）：
+//
+//	13:28  值班室分机号 4379，值班人 阿李
+//	13:44  值班室分机号 4324，值班 老周（旧号 4379 停用）
+//
+// 查询新号时旧号排 top1 —— 而 13:44 那两条**文本里含 "4379"**，
+// 正是「新号生效、旧号作废」的自述。
+func TestSupersedesSentence(t *testing.T) {
+	// ✓ 真实形态：更晚那条提到旧值
+	if !supersedesSentence(
+		"值班室分机号 4379，值班人 阿李",
+		"值班室分机号 4324，值班 老周（旧号 4379 停用）") {
+		t.Error("更晚且提到旧值 ⇒ 应判取代")
+	}
+	// ✓ 改述形态
+	if !supersedesSentence(
+		"值班室分机号 4379，值班人 阿李",
+		"下周起值班室分机号改为 4324，旧号 4379 停用，值班轮换到 老周") {
+		t.Error("改述形态也应判取代")
+	}
+	// ✗ later 不含旧值（只是又提了一句别的）
+	if supersedesSentence(
+		"值班室分机号 4379，值班人 阿李",
+		"值班室分机号 4324，值班 老周") {
+		t.Error("later 未提旧值 ⇒ 不该判取代（会误伤并存的两个值）")
+	}
+	// ✗ later 提到的是别的值
+	if supersedesSentence(
+		"峰值 4%~17%（30~71批整体）",
+		"峰值 4%~17%（30~84批整体），80~84批为 7%~16%") {
+		t.Error("指标收窄不该判取代")
+	}
+	// ✗ earlier 没有可识别的值
+	if supersedesSentence("随时追问细节", "随时追问细节（补充）") {
+		t.Error("earlier 无可识别值 ⇒ 不该判取代")
+	}
+}
+
+// ★ 端到端：整句块的旧值必须被剔除，且不能误伤真实并列。
+func TestArbitrate_整句块的取代(t *testing.T) {
+	g := newTestGraph(t)
+	defer func() { _ = g.Close() }()
+
+	// 真库形态：旧号（13:28）+ 两条新号自述（13:44）
+	putRawBlockArb(t, g, "old", "值班室分机号 4379，值班人 阿李",
+		"2026-10-01 13:28:28")
+	putRawBlockArb(t, g, "new1", "值班室分机号 4324，值班 老周（旧号 4379 停用）",
+		"2026-10-01 13:44:26")
+	putRawBlockArb(t, g, "new2", "下周起值班室分机号改为 4324，旧号 4379 停用，值班轮换到 老周",
+		"2026-10-01 13:44:26")
+	// ★ 不能误伤的：另一个属性的值覆盖（不同属性，各自独立）
+	putRawBlockArb(t, g, "pool-a", "连接池容量 32/64 扩容前", "2026-10-01 13:00:00")
+	putRawBlockArb(t, g, "pool-b", "连接池容量 128/256 扩容后", "2026-10-01 14:00:00")
+
+	hits := []BlockHit{
+		{Block: mustBlock(t, g, "old"), Score: 0.95},
+		{Block: mustBlock(t, g, "new1"), Score: 0.90},
+		{Block: mustBlock(t, g, "new2"), Score: 0.88},
+		{Block: mustBlock(t, g, "pool-a"), Score: 0.60},
+		{Block: mustBlock(t, g, "pool-b"), Score: 0.55},
+	}
+	res := arbitrate(nil, hits)
+
+	keptIDs := map[string]bool{}
+	for _, h := range res.Kept {
+		keptIDs[h.Block.ID] = true
+	}
+	if keptIDs["old"] {
+		t.Error("旧号块应被取代剔除（13:28，且被 13:44 的两条自述提到）")
+	}
+	if !keptIDs["new1"] || !keptIDs["new2"] {
+		t.Errorf("两条新号自述都该保留，实际 kept=%v", keptIDs)
+	}
+	// ★ 不同属性的两条都该留 —— 它们不是彼此的「新旧」
+	if !keptIDs["pool-a"] || !keptIDs["pool-b"] {
+		t.Errorf("不同属性的两条不该互斥，实际 kept=%v", keptIDs)
+	}
+	if len(res.Superseded) != 1 {
+		t.Errorf("应恰有 1 条被取代，实际 %d：%v", len(res.Superseded), textsOf(res.Superseded))
+	}
+}
+
+func putRawBlockArb(t *testing.T, g *GraphDB, id, text, when string) {
+	t.Helper()
+	b := MemoryBlock{ID: id, Modality: BlockText, Text: text, CreatedAt: mustTime(when)}
+	if err := g.PutMemoryBlocks([]MemoryBlock{b}); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func mustBlock(t *testing.T, g *GraphDB, id string) MemoryBlock {
+	t.Helper()
+	blocks, err := g.MemoryBlocks()
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, b := range blocks {
+		if b.ID == id {
+			return b
+		}
+	}
+	t.Fatalf("找不到块 %s", id)
+	return MemoryBlock{}
 }
