@@ -81,6 +81,8 @@ func main() {
 
 	// ── 准备 embed（可选）──
 	var embed memory.EntityEmbedder
+	// embedFP 记下 provider 指纹：迁移后重建中心要用（见文件末尾说明）。
+	var embedFP string
 	if *provider != "" {
 		adapter, err := buildEmbedder(*provider, *modelDir)
 		if err != nil {
@@ -96,8 +98,9 @@ func main() {
 			}
 			return vec, adapter.Fingerprint()
 		}
+		embedFP = adapter.Fingerprint()
 		fmt.Printf("向量 provider：%s（指纹 %s，维度 %d）\n",
-			*provider, adapter.Fingerprint(), adapter.Dim())
+			*provider, embedFP, adapter.Dim())
 	} else {
 		fmt.Println("向量 provider：未指定 → 块不带向量迁移（可后续回填）")
 	}
@@ -144,6 +147,32 @@ func main() {
 		fmt.Printf("  无向量块 %d 个（可后续回填；本次迁移不影响它们按边查取）\n", res.SkippedNoVec)
 	}
 	fmt.Printf("\n迁移后：%s\n", after)
+
+	// ★ 迁移后必须重建中心向量，否则召回没有区分度。
+	//
+	// 实测（生产快照 1294 实体 / 1391 块）：迁移后不建中心，
+	// 召回分数挤成一团 —— 查询「本机 13010 端口」返回的 8 条
+	// 全在 0.84~0.90，含精确串 13010 的目标块连 top2000 都进不去：
+	//
+	//	1. 0.9006  本机 443 按 SNI 透传到 192.168.2.106:3080
+	//	2. 0.8712  ACP回环调用自身12001
+	//	3. 0.8611  MAR/MDR与ALU不直通必须经CPU内部总线
+	//
+	// 而 RebuildCentroid 此前**只有测试在调用**，生产路径没有调用者
+	// —— ha-c 的中心是手工测试时留下的，生产侧从来没有过。
+	if embedFP != "" {
+		if _, anomalous, err := db.RebuildCentroid(embedFP); err != nil {
+			fmt.Fprintf(os.Stderr, "警告：重建中心失败（召回将无区分度）: %v\n", err)
+		} else if anomalous {
+			fmt.Println("已重建中心向量（检测到各向异性，已启用双边中心化）")
+		} else {
+			fmt.Println("已重建中心向量（各向异性不显著，仍保存以便后续块增多时复用）")
+		}
+	} else {
+		fmt.Println("未指定向量 provider，跳过中心重建" +
+			"（无向量时中心无意义；回填向量后请重跑本命令或手工 RebuildCentroid）")
+	}
+
 	fmt.Println("\n下一步：验证召回改善（memory_recall 的跨维度探针），确认后再清理旧表。")
 }
 

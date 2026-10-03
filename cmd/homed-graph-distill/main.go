@@ -227,6 +227,22 @@ func main() {
 		elapsed.Seconds(), written, zeroWritten, writeFailed)
 	fmt.Printf("块总数 %d → %d（带向量 %d）\n", stats.Total, after.Total, after.WithVector)
 
+	// ★ 蒸馏加了新块，中心向量必须跟着重建。
+	//
+	// 中心是「全库带向量块的均值」，块集变了它就过期。
+	// 迁移后建的那份不覆盖新蒸馏的块 —— 而新块恰恰是**拆分块**
+	// （格式 <主语>|<维度>=<值>），它们与整句块分布不同，
+	// 混在一个中心里会把中心拉偏，反而削弱区分度。
+	if *embedProvider != "" {
+		if _, anomalous, err := db.RebuildCentroid(adapter.Fingerprint()); err != nil {
+			fmt.Fprintf(os.Stderr, "警告：重建中心失败（召回将无区分度）: %v\n", err)
+		} else if anomalous {
+			fmt.Println("已重建中心向量（检测到各向异性，已启用双边中心化）")
+		} else {
+			fmt.Println("已重建中心向量")
+		}
+	}
+
 	// 抽样展示落库后的块文本
 	if b, err := db.MemoryBlocks(); err == nil && len(b) > 0 {
 		fmt.Println("\n抽样块文本（应有 <主语>|<维度>=<值> 形态）：")

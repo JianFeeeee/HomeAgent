@@ -313,6 +313,36 @@ type CentroidStatus struct {
 	BuiltAt       string  `json:"built_at,omitempty"`
 }
 
+// DominantBlockFingerprint 返回库内带向量块中出现最多的 provider 指纹。
+//
+// 独立重建中心时用它代替「用户手输指纹」—— 运维不该去翻配置找那串 hex。
+// 库内混了多个 provider 时（迁移期换过模型），取数量最多的那个，
+// 并把实际取值打印出来让用户确认。
+func (g *GraphDB) DominantBlockFingerprint() (string, error) {
+	g.mu.RLock()
+	defer g.mu.RUnlock()
+	rows, err := g.db.Query(`SELECT fingerprint, COUNT(*) AS n
+		FROM memory_blocks
+		WHERE vector IS NOT NULL AND vector != '' AND fingerprint IS NOT NULL
+		GROUP BY fingerprint ORDER BY n DESC LIMIT 1`)
+	if err != nil {
+		return "", err
+	}
+	defer func() { _ = rows.Close() }()
+	if !rows.Next() {
+		if err := rows.Err(); err != nil {
+			return "", err
+		}
+		return "", nil
+	}
+	var fp string
+	var n int
+	if err := rows.Scan(&fp, &n); err != nil {
+		return "", err
+	}
+	return fp, nil
+}
+
 // CentroidStatusOf 报告中心状态，不启用校正。
 func (g *GraphDB) CentroidStatusOf(fingerprint string) (CentroidStatus, error) {
 	g.mu.RLock()
