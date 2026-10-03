@@ -737,7 +737,11 @@ func execComputeruseLinux(reqID, action string, params map[string]interface{}) {
 			btn = "5"
 		}
 		steps := 1
-		if mag := dy; mag < 0 {
+		// ★ mag 必须在 if 外声明：init 语句里的 `mag := dy`
+		//   作用域只到该 if 的 }，而下面还要用它（GUI 分支 0d8b129
+		//   自带的编译错误 undefined: mag）。
+		mag := dy
+		if mag < 0 {
 			mag = -mag
 		}
 		if mag > 120 {
