@@ -96,6 +96,54 @@ func main() {
 	stats, _ := db.BlockVectorStats()
 	fmt.Printf("待处理实体 %d 条；现有块 %d（带向量 %d）\n", len(entities), stats.Total, stats.WithVector)
 
+	// ★ 只对**有主语**的实体跑拆分。
+	//
+	// 实测（生产库 429 条实体）：
+	//
+	//	有主语 5 条（1%），无主语 424 条（99%）
+	//	  路径/URL 38 条 全无主语
+	//	  符号开头  2 条 全无主语
+	//	  其他     387 条 98.7% 无主语
+	//
+	// 而 ha-c 的主力句式「第114批…」「值班室分机号 4324」在生产库
+	// **一条都没有**（含「第N批」0 条、含「分机」0 条）。
+	//
+	// 无主语的实体跑 LLM 是纯浪费：Split 里
+	//   if len(subjects) == 0 { continue }
+	// 会把 LLM 已经拆对的字段**全部丢弃**（实测 60 条 / 837 秒 / 0 产出）。
+	//
+	// ⇒ 这里先过滤，并在报告里说明跳过了多少 —— 让「没产出」这件事
+	//   变成可解释的数字，而不是又一次「零字段 N 条」的谜。
+	withSubj := make([]legacyEntity, 0, len(entities))
+	noSubj := make([]legacyEntity, 0, len(entities))
+	for _, e := range entities {
+		if len(distill.DeriveSubjects(e.name)) > 0 {
+			withSubj = append(withSubj, e)
+		} else {
+			noSubj = append(noSubj, e)
+		}
+	}
+	if len(noSubj) > 0 {
+		fmt.Printf("\n★ 跳过无主语实体 %d 条（%.0f%%）：Split 的第五道闸门"+
+			"「无主语不写悬空属性」会把 LLM 已拆对的字段全部丢弃。\n",
+			len(noSubj), float64(len(noSubj))/float64(len(entities))*100)
+		for i, e := range noSubj {
+			if i >= 3 {
+				fmt.Printf("    … 另 %d 条\n", len(noSubj)-3)
+				break
+			}
+			fmt.Printf("    · %s\n", truncForLog(e.name, 56))
+		}
+	}
+	entities = withSubj
+	if len(entities) == 0 {
+		fmt.Println("\n没有可拆分的实体（有主语的为 0）。" +
+			"这些内容应保持整句块形态 —— 迁移已把它们写成 legacy-entity 块。")
+		return
+	}
+	fmt.Printf("\n实际处理 %d 条（其余 %d 条无主语，保持整句块形态）\n",
+		len(entities), len(noSubj))
+
 	// 打开两个 provider
 	gen, err := generation.Open("ollama", generation.Config{
 		Options: map[string]string{
