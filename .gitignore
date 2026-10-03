@@ -105,3 +105,9 @@ dist/
 
 # 编译产物（迁移工具）
 /homed-graph-migrate
+
+# 构建产物落在仓库根（go build ./cmd/xxx 时最易发生）
+/homed
+/homed-graph-migrate
+/homed-graph-distill
+/homed-centroid
