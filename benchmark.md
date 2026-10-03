@@ -136,3 +136,53 @@ spawn-instance.sh 可起多实例（18082/18083/…；pluginmgr 9876 / remotedev
 - 推送：`git push origin main`（8+ 提交在本地）
 - 部署：`deploy-plan.sh check`（已预检过：onnxruntime ✓ libonnxruntime ✓）→ backup → deploy；deploy 前需人工确认
 - 生产适配器：`/home/newqqagent/adapters/` 有 9/10 与 .bundled 清单不符（openai.lua 实测仅版本落后、无用户修改）；部署前逐个核对后清掉让内核重解包（backup 会带走）
+
+## v4 跑分（2026-10-04，新内核 657ccd7）
+
+### ★ 先说一个必须记的操作错误
+
+跑之前先核对了内核版本：
+
+```
+build/homed      Oct  1 21:18   ← 3 天前的二进制
+今天的 memory 层提交  19 个
+```
+
+**如果直接跑，测的就是三天前的内核。** 而今天改的
+全部是 memory 层（融合召回 / 拒答判据 / 仲裁 / schema 退场）——
+跑分会完全测不到今天的工作。
+
+⇒ **跑分前必须核对 `vcs.revision` == `git rev-parse HEAD`。**
+  这一条应该进 `spawn-instance.sh`，让它自动拒绝版本不符的实例。
+
+（另外两次操作失误：`cp` 取快照在 WAL 模式下不一致；
+`${VAR:0:8}` 在 `/bin/sh` 里报 Bad substitution。）
+
+### 能力标定（tasks.zerobasis，6 任务）
+
+| 指标 | 值 |
+|---|---|
+| 任务数 / 通过 | **6 / 6（100%）** |
+| 总墙钟 | 159.17s |
+| 工具调用 | 8 |
+| 合计 token | 281971 |
+| 缓存命中率 | 42.7% |
+| 超时任务 | 0 |
+
+分项：检索 3.85s / 算术 43.44s（算出 600）/ 推断 42.66s /
+抗干扰 6.57s（答出「永不过期」）/ 综合 5.36s（命中 4200）/ 多跳 57.30s
+
+### 与今天的记忆侧改动的关系
+
+这一轮 6/6 **验证的是「今天没把主干跑坏」**，不是「今天的改动带来了提升」。
+
+记忆召回质量另有专项（`memory_recall.py`，36 探针），
+它的结论已经单独记录在 `production-recall-validation.md`：
+
+| | 测试库 ha-c | 生产快照 1391 块 |
+|---|---|---|
+| 端到端 | 7/7 | 4/9 |
+| abstention | — | 0/3（纯中文编造） |
+
+★ **两个库的可拆率差 7.5 倍**（83% vs 11%），
+  ha-c 的分数不能推广到生产。
