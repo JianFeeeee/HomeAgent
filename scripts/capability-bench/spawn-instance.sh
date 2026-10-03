@@ -31,6 +31,35 @@ if [ ! -x "$BIN" ]; then
   say "★ 二进制不存在: $BIN（先 make build）"; exit 1
 fi
 
+# ★ 跑分前必须核对内核版本 —— 否则测的是旧内核，分数毫无意义
+#
+# 实测踩过（2026-10-04）：build/homed 是 Oct 1 的，而当天有 19 个
+# memory 层提交（融合召回 / 拒答判据 / 仲裁 / schema 退场）。
+# 直接跑分测的**完全是三天前的内核**，当天的工作一点没测到 ——
+# 而 6/6 的满分让人以为改动被验证过了。
+#
+# 用 --allow-stale 显式跳过（只在你确实想测旧版本时）。
+if [ "${ALLOW_STALE:-0}" != "1" ]; then
+  BIN_REV="$(go version -m "$BIN" 2>/dev/null | sed -n 's/.*vcs.revision=\([0-9a-f]*\).*/\1/p' | head -1)"
+  # ★ 两者都要短形式：go version -m 给的是完整 40 位，
+  #   而 rev-parse --short 给短形式 ⇒ 不统一就永远「不匹配」。
+  HEAD_REV="$(git -C /home/program/TrueAgent rev-parse --short=8 HEAD 2>/dev/null)"
+  BIN_REV="${BIN_REV:0:8}"
+  BIN_TIME="$(stat -c %y "$BIN" 2>/dev/null | cut -d. -f1)"
+  if [ -z "$BIN_REV" ] || [ -z "$HEAD_REV" ]; then
+    say "· 读不到版本信息（未装 git 或非 git 构建），跳过核对"
+  elif [ "$BIN_REV" != "$HEAD_REV" ]; then
+    say "★ 内核版本不符，拒绝启动跑分实例"
+    say "    二进制 $BIN_REV ($BIN_TIME)"
+    say "    HEAD   $HEAD_REV"
+    say "    改动可能没被测到。重跑：go build -tags onnxruntime -o build/homed ./cmd/homed"
+    say "    确实想测旧版本：ALLOW_STALE=1 $0 $*"
+    exit 2
+  else
+    say "✓ 内核版本匹配 $BIN_REV（$BIN_TIME）"
+  fi
+fi
+
 say "实例: name=$NAME data=$DATA webui=127.0.0.1:$PORT ctx=$CTX"
 
 # ── 首次启动生成 config.db ──
