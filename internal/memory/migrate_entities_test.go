@@ -441,3 +441,55 @@ func TestParseLegacyTime(t *testing.T) {
 		}
 	}
 }
+
+// ★★ 报告数必须等于实际写入数。
+//
+// 生产快照实测（1294 实体 / 980 relations）：
+//
+//	迁移报告   边 980
+//	边表实际   959        ← 差 21
+//
+// 根因：addBlockEdgeTx 用 `INSERT OR IGNORE` 且**不检查 RowsAffected**，
+// 而 `res.Edges++` 照加。relations 表里有 20 组 (src,tgt,type) 完全重复
+// （各 2 次），980 → 去重 959。
+//
+// ★ 与 941e6b9 同类：那是 relations 口径（active vs 全表），
+//
+//	这是边去重口径。两次都是「报告数 ≠ 实际写入数」，
+//	而用户会把报告数当承诺。
+func TestMigrate_报告数等于实际写入数(t *testing.T) {
+	g := newMigrateGraph(t)
+	seedLegacy(t, g, []Triple{
+		{Subject: "值班室分机号", Relation: "是", Object: "4324"},
+	})
+	// ★ 生产库里有 20 组 (src,tgt,type) 完全重复的关系行。
+	//   seedLegacy 用 Upsert（第二次覆盖第一次）⇒ 造不出重复，
+	//   所以直接插库 —— 这也是之前判据「通过」却没测到问题的原因。
+	if _, err := g.db.Exec(`INSERT INTO relations
+		(source_id, target_id, relation_type, confidence, status)
+		SELECT source_id, target_id, relation_type, confidence, status
+		FROM relations LIMIT 1`); err != nil {
+		t.Fatalf("插入重复关系: %v", err)
+	}
+
+	embed := func(string) ([]float64, string) { return []float64{1, 0}, fixedEmbed }
+	res, err := g.MigrateLegacyTextEntities(embed)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	edges, err := g.MemoryBlockEdges()
+	if err != nil {
+		t.Fatal(err)
+	}
+	var relEdges int
+	for _, e := range edges {
+		if e.Type != "contains" {
+			relEdges++
+		}
+	}
+
+	if res.Edges != relEdges {
+		t.Errorf("★ 报告边数 %d ≠ 实际写入 %d —— 报告会骗人", res.Edges, relEdges)
+	}
+}

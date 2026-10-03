@@ -42,7 +42,11 @@ type MigrateResult struct {
 	Blocks        int `json:"blocks"`
 	Edges         int `json:"edges"`
 	SkippedOrphan int `json:"skipped_orphan"`
-	SkippedNoVec  int `json:"skipped_no_vector"`
+	// DedupedEdges 是**被去重**的边数：relations 表里有完全重复的
+	// (source,target,type) 三元组，边表按唯一键存 ⇒ 实际写入少于遍历数。
+	// 必须显式报出来，否则「报告数 ≠ 实际写入数」会被当成数据丢失。
+	DedupedEdges int `json:"deduped_edges"`
+	SkippedNoVec int `json:"skipped_no_vector"`
 }
 
 // EntityEmbedder 为一个实体名算向量与空间指纹。
@@ -135,7 +139,7 @@ func (g *GraphDB) MigrateLegacyTextEntities(embed EntityEmbedder) (MigrateResult
 		}); err != nil {
 			return res, fmt.Errorf("put block for entity %d: %w", e.id, err)
 		}
-		if err := addBlockEdgeTx(tx, "block", srcBlockID,
+		if err, _ := addBlockEdgeTx(tx, "block", srcBlockID,
 			"block", blockID, "contains"); err != nil {
 			return res, fmt.Errorf("link block %s: %w", blockID, err)
 		}
@@ -157,8 +161,15 @@ func (g *GraphDB) MigrateLegacyTextEntities(embed EntityEmbedder) (MigrateResult
 			// 用明确占位名而不是跳过 —— 关系的**存在**本身是信息。
 			edgeType = "related_to"
 		}
-		if err := addBlockEdgeTx(tx, "block", src, "block", tgt, edgeType); err != nil {
+		// ★ 只在**真的新增**时计数 —— 否则报告会多算被去重的那些。
+		//   实测：980 行 relations（含 20 组重复三元组）报告 980 而实际 959。
+		err, added := addBlockEdgeTx(tx, "block", src, "block", tgt, edgeType)
+		if err != nil {
 			return res, fmt.Errorf("migrate relation %d: %w", r.id, err)
+		}
+		if !added {
+			res.DedupedEdges++
+			continue
 		}
 		res.Edges++
 	}
@@ -166,8 +177,10 @@ func (g *GraphDB) MigrateLegacyTextEntities(embed EntityEmbedder) (MigrateResult
 	if err := tx.Commit(); err != nil {
 		return res, err
 	}
-	log.Printf("[graph] 存量实体迁移完成: 句子 %d，块 %d，边 %d（跳过孤儿关系 %d，无向量 %d）",
-		res.Sentences, res.Blocks, res.Edges, res.SkippedOrphan, res.SkippedNoVec)
+	log.Printf("[graph] 存量实体迁移完成: 句子 %d，块 %d，边 %d"+
+		"（跳过孤儿关系 %d，去重边 %d，无向量 %d）",
+		res.Sentences, res.Blocks, res.Edges,
+		res.SkippedOrphan, res.DedupedEdges, res.SkippedNoVec)
 	return res, nil
 }
 
@@ -335,7 +348,10 @@ func putBlockTx(tx *sql.Tx, b MemoryBlock) error {
 	return err
 }
 
-func addBlockEdgeTx(tx *sql.Tx, sourceKind, sourceID, targetKind, targetID, edgeType string) error {
+// ★ 返回 (error, 是否真的新增了一行)。第二个返回值是给报告口径用的 ——
+//
+//	`INSERT OR IGNORE` 静默去重时它为 false。
+func addBlockEdgeTx(tx *sql.Tx, sourceKind, sourceID, targetKind, targetID, edgeType string) (error, bool) {
 	// 端点存在性校验：与 AddMemoryBlockEdge 同款，但共用当前事务 ——
 	// 分开校验会在并发下出现「校验通过后节点被删」的窗口。
 	for _, ep := range []struct{ kind, id string }{
@@ -351,16 +367,29 @@ func addBlockEdgeTx(tx *sql.Tx, sourceKind, sourceID, targetKind, targetID, edge
 			err = fmt.Errorf("invalid graph node kind %q", ep.kind)
 		}
 		if err != nil {
-			return err
+			return err, false
 		}
 		if n == 0 {
-			return fmt.Errorf("%s graph node %s does not exist", ep.kind, ep.id)
+			return fmt.Errorf("%s graph node %s does not exist", ep.kind, ep.id), false
 		}
 	}
-	_, err := tx.Exec(`INSERT OR IGNORE INTO memory_block_edges
+	res, err := tx.Exec(`INSERT OR IGNORE INTO memory_block_edges
 		(source_kind, source_id, target_kind, target_id, edge_type)
 		VALUES (?, ?, ?, ?, ?)`, sourceKind, sourceID, targetKind, targetID, edgeType)
-	return err
+	if err != nil {
+		return err, false
+	}
+	// ★ 返回「是否真的新增了一行」。
+	//
+	// `INSERT OR IGNORE` 在冲突时**既不报错也不新增**，调用方若只看
+	// error 就会把「被去重」当成「写入成功」——
+	// 生产快照实测：relations 980 行（含 20 组完全重复的三元组），
+	// 报告写「边 980」而边表实际 959。
+	n, err := res.RowsAffected()
+	if err != nil {
+		return err, false
+	}
+	return nil, n > 0
 }
 
 // LegacyEntity 是存量实体的一条只读快照。
