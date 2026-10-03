@@ -899,23 +899,34 @@ func (a *Agent) recallByBlocks(query string) string {
 		// 模型未加载/超时，报给模型只会让它以为"记忆不存在"。
 		return ""
 	}
-	// ★ 走仲裁入口而不是 RecallBlocks
+	// ★ 走**融合**入口（向量 + 符号），而不是纯向量或仲裁-only
 	//
-	// 值覆盖维度上，纯向量序会答错（实测端到端）：
-	//   仲裁前 5/7 → 仲裁后 5/7（no-regression），但 overwrite 维度
-	//   之所以仍只有 1/2，是因为「4324 那条」有时压根没被拆出来
-	//   （LLM 标注波动，实测同批输入两次产出 259 vs 362 个字段块）。
+	// 三层根因（生产快照 1391 块实测）：
 	//
-	// 而仲裁必须发生在 topK 截断**之前** —— RecallBlocksWithArbitration
-	// 内部已按「放大 TopK → 仲裁 → 截断」实现（见 block_recall.go 的说明）：
+	//	1. 各向异性    已修（中心化，补上了生产调用者）
+	//	2. 精确串被稀释  向量模型固有限制：「13010/13011 而非 12011」
+	//	              含精确串却召不回，而「本地网关8081」召回了
+	//	3. 符号路无补位  本函数修的就是这个
+	//
+	// 旧实现是「块向量在前，符号路兜底」—— 块一旦有命中就直接 return，
+	// 符号路的 RecallSorted **根本没被调用**。设计注释写的
+	//「端口号、分机号这类纯数字串向量天然弱」是对的，但没有真正生效。
+	//
+	// 而仲裁仍必须在 topK 截断**之前**（RecallBlocksFused 内部
+	// 已按「放大 TopK → 符号融合 → 仲裁 → 截断」实现）：
 	// 实测旧号 4379 以 0.8127 排 top1 而新号进不了 top8，
 	// 事后仲裁无从挽回，因为被判取代的旧值和新值都不在候选里。
-	hits, arb, err := a.memory.RecallBlocksWithArbitration(memory.BlockRecallQuery{
+	//
+	// ★ MinScore 传 0 而不是 blockRecallMinScore(0.5)：
+	//   融合分数的**量纲变了** —— 精确串命中是 1.0（布尔置顶），
+	//   而向量加权只有 0.7×余弦。用 0.5 筛会把「精确串命中 1.0」
+	//   留下，却把所有纯向量候选（0.35~0.45）全筛掉 ——
+	//   反而丢掉向量侧的有效召回。筛选改由融合内部按路处理。
+	hits, arb, err := a.memory.RecallBlocksFused(memory.BlockRecallQuery{
 		Vector:      vec,
 		Fingerprint: a.multimodalSpace.Fingerprint(),
 		TopK:        blockRecallTopK,
-		MinScore:    blockRecallMinScore,
-	})
+	}, query)
 	if err != nil || len(hits) == 0 {
 		return ""
 	}
@@ -925,15 +936,41 @@ func (a *Agent) recallByBlocks(query string) string {
 		// 而完全静默会让「记忆里为什么没有旧号」变成无解之谜。
 		log.Printf("[memory] recall blocks: %d 条被时序仲裁剔除（被更新的值取代）", n)
 	}
+	// 归因统计：融合到底救回了多少条 —— 这是判断它在起作用的关键读数
+	var bySymbol, byExact int
+	for _, h := range hits {
+		if h.ExactHit {
+			byExact++
+		} else if h.VectorHit == 0 && h.SymbolHit > 0 {
+			bySymbol++
+		}
+	}
+	if byExact+bySymbol > 0 {
+		log.Printf("[memory] recall blocks: 符号路补位 %d 条（精确串 %d，词法 %d）",
+			byExact+bySymbol, byExact, bySymbol)
+	}
+
 	var parts []string
 	parts = append(parts, fmt.Sprintf("找到 %d 条相关记忆片段:", len(hits)))
 	for _, h := range hits {
-		text := strings.TrimSpace(h.Block.Text)
+		text := strings.TrimSpace(h.Text)
 		if text == "" {
-			text = h.Block.PayloadDigest
+			continue
+		}
+		// 分数照旧给模型看（它用这个判断相关性），
+		// 但精确串命中统一显示 1.00 —— 它是布尔信号不是强度信号。
+		score := h.Score
+		if h.ExactHit {
+			score = 1.0
+		}
+		tag := "text"
+		if h.ExactHit {
+			tag = "exact"
+		} else if h.VectorHit == 0 && h.SymbolHit > 0 {
+			tag = "symbol"
 		}
 		parts = append(parts, fmt.Sprintf("- [%s %.2f] %s",
-			h.Block.Modality, h.Score, truncateStr(text, 160)))
+			tag, score, truncateStr(text, 160)))
 	}
 	return strings.Join(parts, "\n")
 }

@@ -123,15 +123,18 @@ func TestProbe_生产规模召回(t *testing.T) {
 		if err != nil {
 			t.Fatalf("向量化失败 %q: %v", p.query, err)
 		}
-		hits, _, err := g.RecallBlocksWithArbitration(BlockRecallQuery{
-			Vector: vec, Fingerprint: fp, TopK: 8, MinScore: 0.25,
-		})
+		// ★ 走**融合**入口 —— 这是本次改动的真实判据。
+		// 纯向量入口的 2/9 是基线（纯向量 top8 全挤在 0.84~0.90，
+		// 含精确串的「13010/13011 而非 12011」连 top2000 都进不去）。
+		hits, _, err := g.RecallBlocksFused(BlockRecallQuery{
+			Vector: vec, Fingerprint: fp, TopK: 8,
+		}, p.query)
 		if err != nil {
 			t.Fatalf("召回失败: %v", err)
 		}
 		texts := make([]string, 0, len(hits))
 		for _, h := range hits {
-			texts = append(texts, h.Block.Text)
+			texts = append(texts, h.Text)
 		}
 		joined := strings.Join(texts, " ｜ ")
 
@@ -150,8 +153,21 @@ func TestProbe_生产规模召回(t *testing.T) {
 			fails = append(fails, fmt.Sprintf("[%s]%s", p.dim, p.name))
 		}
 		byDim[p.dim] = st
-		fmt.Printf("    [%s] %-18s %s %s\n", p.dim, p.name,
-			mark(ok), trunc(joined, 110))
+		// 归因统计：融合救回了多少条（精确串 / 词法）
+		var nExact, nSymOnly int
+		for _, h := range hits {
+			if h.ExactHit {
+				nExact++
+			} else if h.VectorHit == 0 && h.SymbolHit > 0 {
+				nSymOnly++
+			}
+		}
+		attr := ""
+		if nExact+nSymOnly > 0 {
+			attr = fmt.Sprintf("  [+符号 %d: 精确%d 词法%d]", nExact+nSymOnly, nExact, nSymOnly)
+		}
+		fmt.Printf("    [%s] %-18s %s %s%s\n", p.dim, p.name,
+			mark(ok), trunc(joined, 92), attr)
 	}
 
 	fmt.Println()
