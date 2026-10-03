@@ -35,7 +35,7 @@ import sys
 from collections import Counter, defaultdict
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from train import load_labeled, _lcs_len  # noqa: E402
+from train_tagger import load_labeled, _lcs_len  # noqa: E402
 
 sys.path.insert(0, "/home/program/TrueAgent/internal/memory/distill")
 
