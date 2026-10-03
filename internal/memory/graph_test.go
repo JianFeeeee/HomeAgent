@@ -539,3 +539,71 @@ func TestPlaceholders(t *testing.T) {
 		t.Errorf("expected '?,?,?' for n=3, got %s", placeholders(3))
 	}
 }
+
+// ★ Introspect 的两个关系计数必须**语义分离**。
+//
+// 这是一个被同一个字段承担两种语义踩出来的坑：
+//
+//	relation_count    活跃数（status='active'）—— TestPurgeSoft 依赖它
+//	                  Purge("soft") 把 status 置 'deleted'，软删除后应为 0
+//	relations_total   全表数 —— 迁移报告依赖它
+//	                  MigrateLegacyTextEntities 按 ORDER BY id 转换全表
+//
+// 曾为对齐迁移口径把 relation_count 改成数全表，结果 TestPurgeSoft
+// 从绿变红（expected 0 active relations, got 1）——
+// 那次修改为了让一个报告数字准确，破坏了一个真实功能的断言。
+func TestIntrospect_关系计数语义分离(t *testing.T) {
+	g := newTestGraph(t)
+	defer os.Remove(g.dbPath)
+	defer g.Close()
+
+	g.Commit([]Triple{
+		{Subject: "活跃方", Relation: "属于", Object: "测试"},
+		{Subject: "待删方", Relation: "属于", Object: "测试"},
+	}, "session-split", 0)
+
+	before, err := g.Introspect()
+	if err != nil {
+		t.Fatal(err)
+	}
+	activeBefore := before["relation_count"].(int)
+	totalBefore, ok := before["relations_total"].(int)
+	if !ok {
+		t.Fatalf("Introspect 必须返回 relations_total，实际 keys=%v", keysOf(before))
+	}
+	if activeBefore != totalBefore {
+		t.Errorf("初始应相等：active=%d total=%d", activeBefore, totalBefore)
+	}
+
+	// 软删一条
+	if _, err := g.Purge(map[string]string{"subject_contains": "待删方"}, "soft"); err != nil {
+		t.Fatal(err)
+	}
+
+	after, err := g.Introspect()
+	if err != nil {
+		t.Fatal(err)
+	}
+	activeAfter := after["relation_count"].(int)
+	totalAfter := after["relations_total"].(int)
+
+	if activeAfter != activeBefore-1 {
+		t.Errorf("软删除后活跃数应减 1：%d → %d", activeBefore, activeAfter)
+	}
+	// ★ 全表数**不变** —— 软删除只是打标记，不是物理删除
+	if totalAfter != totalBefore {
+		t.Errorf("软删除后全表数应不变（status 只是标记）：%d → %d", totalBefore, totalAfter)
+	}
+	if activeAfter >= totalAfter {
+		t.Errorf("活跃数(%d) 必须小于全表数(%d) —— 否则 status 过滤没生效",
+			activeAfter, totalAfter)
+	}
+}
+
+func keysOf(m map[string]interface{}) []string {
+	out := make([]string, 0, len(m))
+	for k := range m {
+		out = append(out, k)
+	}
+	return out
+}

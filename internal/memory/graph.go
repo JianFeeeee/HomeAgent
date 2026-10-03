@@ -1210,18 +1210,26 @@ func (g *GraphDB) Introspect() (map[string]interface{}, error) {
 
 	var entityCount, relationCount int
 	g.db.QueryRow("SELECT COUNT(*) FROM entities").Scan(&entityCount)
-	// ★ 必须数**全部**关系，不能只数 status='active'。
+	// ★ relation_count 保持**活跃数**语义（status='active'）。
 	//
-	// 迁移（MigrateLegacyTextEntities）按 `ORDER BY id` 遍历 relations 全表
-	// 转成块边，**不按 status 过滤**。而这里原本只数 active，于是
-	// homed-graph-migrate 的「预计产出 块边 N」比实际写入少：
+	// 第一版为对齐迁移口径改成数全表（因为 MigrateLegacyTextEntities
+	// 按 `ORDER BY id` 遍历全表、不按 status 过滤，而报告只数 active，
+	// 导致「预计产出 块边 966」实际写入 980）。
 	//
-	//	报告   966（active）
-	//	实际  980（全表）   ← 生产库实测，差 14 条
+	// ★ 但那个修法是错的：relation_count 是**通用统计字段**，
+	//   Purge("soft") 会把 status 置为 'deleted'，而 TestPurgeSoft
+	//   断言软删除后 relation_count == 0。改成数全表后软删除失效，
+	//   该测试失败 —— 它在我这次改动之前是绿的。
 	//
-	// 报告数与实际写入数不一致，用户会把它当承诺。
-	// 修法：与迁移同口径（全表）。
-	g.db.QueryRow("SELECT COUNT(*) FROM relations").Scan(&relationCount)
+	// 正确修法：**两处口径分开**。
+	//   - Introspect 的 relation_count = 活跃数（语义不变，各调用方依赖）
+	//   - 迁移报告要的是「会转换多少条」= 全表数，另开一个字段
+	g.db.QueryRow(
+		"SELECT COUNT(*) FROM relations WHERE status = 'active'").Scan(&relationCount)
+	// relations_total 是**全表**关系数（不过滤 status）——
+	// 迁移报告用它，因为 MigrateLegacyTextEntities 会转换全表。
+	var relationsTotal int
+	g.db.QueryRow("SELECT COUNT(*) FROM relations").Scan(&relationsTotal)
 
 	hotspots := []map[string]interface{}{}
 	rows, err := g.db.Query(
@@ -1241,8 +1249,11 @@ func (g *GraphDB) Introspect() (map[string]interface{}, error) {
 	}
 
 	return map[string]interface{}{
-		"entity_count":    entityCount,
-		"relation_count":  relationCount,
+		"entity_count":   entityCount,
+		"relation_count": relationCount,
+		// relations_total 不过滤 status。★ 迁移报告必须用它 ——
+		// MigrateLegacyTextEntities 转换全表，用 active 会少报。
+		"relations_total": relationsTotal,
 		"memory_hotspots": hotspots,
 	}, nil
 }

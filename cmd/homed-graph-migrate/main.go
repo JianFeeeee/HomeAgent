@@ -108,7 +108,7 @@ func main() {
 	if !*apply {
 		fmt.Printf("\n这是报告模式（缺省）。加 -apply 真正迁移。\n")
 		fmt.Printf("预计产出：块 %d，块边 %d（实体名同时作为句子，句子--contains-->块）\n",
-			before.Entities, before.Relations)
+			before.Entities, before.RelationsTotal)
 		// ★ 口径说明：块边数是**按 relations 全表**估计的，与迁移同口径。
 		// 孤儿关系（两端实体已不存在）会被跳过，实际产出可能略少。
 		fmt.Println("  （块边按 relations 全表计，孤儿关系会被跳过，实际可能略少）")
@@ -199,6 +199,13 @@ func buildEmbedder(name, modelDir string) (*vector.ProviderAdapter, error) {
 
 type legacyStat struct {
 	Entities, Relations, Blocks, BlockEdges int
+	// RelationsTotal 是 relations 全表数（不过滤 status）。
+	//
+	// 迁移转换全表（MigrateLegacyTextEntities 按 ORDER BY id 遍历），
+	// 而 Introspect 的 relation_count 是**活跃数**（status='active'），
+	// 两者语义不同：报告必须用这个，否则「预计产出」会少报
+	// （生产库实测 966 vs 980）。
+	RelationsTotal int
 }
 
 func (s legacyStat) String() string {
@@ -221,6 +228,12 @@ func legacyStats(db *memory.GraphDB) (legacyStat, error) {
 	}
 	if v, ok := intro["relation_count"].(int); ok {
 		s.Relations = v
+	}
+	// 迁移报告用全表数（与 MigrateLegacyTextEntities 的遍历范围一致）
+	if v, ok := intro["relations_total"].(int); ok {
+		s.RelationsTotal = v
+	} else {
+		s.RelationsTotal = s.Relations
 	}
 	edges, err := db.MemoryBlockEdges()
 	if err != nil {

@@ -939,6 +939,10 @@ func (a *Agent) recallByBlocks(query string) string {
 			Vector:      vec,
 			Fingerprint: a.multimodalSpace.Fingerprint(),
 			TopK:        blockRecallTopK,
+			// ★ MinScore 保留：融合内部按路应用（只约束纯向量那一路，
+			//   精确串/纯符号命中不受它约束）。曾误传 0 让噪声过滤失效，
+			//   toolcall_block_test.go 的两条判据立刻红了。
+			MinScore: blockRecallMinScore,
 		}, query)
 	if abstain != nil {
 		log.Printf("[memory] abstain: 符号零命中，拒答「%s」", query)

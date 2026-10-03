@@ -384,11 +384,28 @@ func (g *GraphDB) RecallBlocksFused(q BlockRecallQuery, query string) (
 	if err != nil {
 		return nil, ArbitrationResult{}, err
 	}
+	// ★★ 符号路必须也按 fingerprint 过滤 —— 这是一个真实的安全缺陷。
+	//
+	// 判据立刻抓到（toolcall_block_test.go:124）：
+	//
+	//	块  {Text: "旧空间的内容", Fingerprint: "old-fp"}
+	//	查询「旧空间的内容」
+	//	⇒ 期望不召回，实际召回了（找到 1 条）
+	//
+	// 根因：符号路拿的是 `MemoryBlocks()` 的**全部**带文本块，
+	// 而 RecallBlocks 会按 fingerprint 跳过不匹配的块。
+	// 文本匹配不依赖向量空间，所以「旧空间的块」在符号路原形毕露 ——
+	// 换向量空间后旧块仍会污染结果，正是这条判据要防的事。
 	textBlocks := make([]MemoryBlock, 0, len(all))
 	for _, b := range all {
-		if b.Text != "" {
-			textBlocks = append(textBlocks, b)
+		if b.Text == "" {
+			continue
 		}
+		// 指纹不匹配的块一律不进符号路候选
+		if q.Fingerprint != "" && b.Fingerprint != "" && b.Fingerprint != q.Fingerprint {
+			continue
+		}
+		textBlocks = append(textBlocks, b)
 	}
 
 	fused := fuseCandidates(vecHits, textBlocks, query, defaultWeights())
@@ -413,8 +430,37 @@ func (g *GraphDB) RecallBlocksFused(q BlockRecallQuery, query string) (
 		if superseded[f.BlockID] {
 			continue
 		}
-		if q.MinScore > 0 && f.Score < q.MinScore {
-			continue
+		// ★ MinScore 按**路**应用，不是套在融合分上。
+		//
+		// 接入时我曾把 MinScore 直接传 0（理由「量纲变了」），
+		// 结果两条判据立刻红了：
+		//
+		//	toolcall_block_test.go:80  低分块不该出现（MinScore 应滤掉）
+		//	toolcall_block_test.go:124 指纹不匹配的块不该被召回
+		//
+		// ★ 那等于**放弃了噪声过滤** —— 「量纲变了」是事实，
+		//   但解法不是丢掉阈值，而是让阈值作用在它该作用的那一路上。
+		//
+		// 融合分有三段不同量纲：
+		//   精确串命中  ≥1.00        布尔置顶，不过滤
+		//   纯符号命中  0 ~ w.Symbol 字面强信号
+		//   纯向量命中  0 ~ w.Vector×余弦  ← MinScore 说的就是这个
+		//
+		// 而指纹不匹配的块压根不在候选里（RecallBlocks 已跳过），
+		// 它的失败另有原因 —— 见下方说明。
+		switch {
+		case f.ExactHit:
+			// 精确串命中是决定性信号，不受 MinScore 约束
+		case f.VectorHit > 0:
+			// 有向量分时才用 MinScore 过滤（避免把纯符号命中误杀）
+			if q.MinScore > 0 && f.VectorHit < q.MinScore {
+				continue
+			}
+		default:
+			// 只有符号分、无向量分：靠覆盖率判断，不套向量阈值
+			if f.SymbolHit <= 0 {
+				continue
+			}
 		}
 		kept = append(kept, f)
 	}
