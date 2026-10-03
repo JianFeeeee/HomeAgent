@@ -609,53 +609,228 @@ func execComputeruse(reqID, args string) {
 	}
 }
 
-func execComputeruseLinux(reqID, action string, params map[string]interface{}) {
-	switch action {
-	case "click":
-		btn := "1"
-		if b, ok := params["button"].(string); ok {
-			switch b {
-			case "right":
-				btn = "3"
-			case "middle":
-				btn = "2"
+// xdo 构造一个 xdotool 命令。
+func xdo(args ...string) *exec.Cmd { return exec.Command("xdotool", args...) }
+
+// pnum 从 params 取浮点参数。
+func pnum(params map[string]interface{}, keys ...string) float64 {
+	for _, k := range keys {
+		if v, ok := params[k]; ok {
+			switch t := v.(type) {
+			case float64:
+				return t
+			case int:
+				return float64(t)
+			case string:
+				var f float64
+				if _, err := fmt.Sscanf(t, "%g", &f); err == nil {
+					return f
+				}
 			}
 		}
-		cmd := exec.Command("xdotool", "click", btn)
-		_ = cmd.Run()
-		sendBridgeResult(reqID, "ok", "computeruse click", "")
-	case "doubleclick":
-		cmd := exec.Command("xdotool", "click", "--repeat", "2", "1")
-		_ = cmd.Run()
-		sendBridgeResult(reqID, "ok", "computeruse doubleclick", "")
-	case "rightclick":
-		cmd := exec.Command("xdotool", "click", "3")
-		_ = cmd.Run()
-		sendBridgeResult(reqID, "ok", "computeruse rightclick", "")
-	case "move":
-		x, _ := params["x"].(float64)
-		y, _ := params["y"].(float64)
-		cmd := exec.Command("xdotool", "mousemove", fmt.Sprintf("%d", int(x)), fmt.Sprintf("%d", int(y)))
-		_ = cmd.Run()
-		sendBridgeResult(reqID, "ok", fmt.Sprintf("computeruse move (%d,%d)", int(x), int(y)), "")
-	case "scroll":
-		dy, _ := params["dy"].(float64)
-		cmd := exec.Command("xdotool", "click", "4")
-		if dy < 0 {
-			cmd = exec.Command("xdotool", "click", "5")
+	}
+	return 0
+}
+
+// pstr 从 params 取字符串参数。
+func pstr(params map[string]interface{}, keys ...string) string {
+	for _, k := range keys {
+		if v, ok := params[k]; ok {
+			if s, ok := v.(string); ok {
+				return s
+			}
 		}
-		_ = cmd.Run()
-		sendBridgeResult(reqID, "ok", "computeruse scroll", "")
+	}
+	return ""
+}
+
+// pint 从 params 取整数参数（带默认与上限）。
+func pint(params map[string]interface{}, def, max int, keys ...string) int {
+	n := int(pnum(params, keys...))
+	if n <= 0 {
+		n = def
+	}
+	if n > max {
+		n = max
+	}
+	return n
+}
+
+// normKeySpec 归一化按键组合写法，让模型自然输出（"Ctrl+C"、"ctrl + c"、
+// "CTRL-C"）都能工作。原实现把字符串原样丢给 xdotool key，
+// 上面几种写法全部无效。
+func normKeySpec(spec string) string {
+	spec = strings.TrimSpace(spec)
+	if spec == "" {
+		return ""
+	}
+	// 统一分隔符：+ 与空格
+	spec = strings.ReplaceAll(spec, "+", " ")
+	spec = strings.ReplaceAll(spec, "-", " ")
+	fields := strings.Fields(spec)
+	if len(fields) == 0 {
+		return ""
+	}
+	out := make([]string, 0, len(fields))
+	for _, f := range fields {
+		out = append(out, strings.ToLower(f))
+	}
+	return strings.Join(out, "+")
+}
+
+func execComputeruseLinux(reqID, action string, params map[string]interface{}) {
+	x := int(pnum(params, "x"))
+	y := int(pnum(params, "y"))
+
+	switch action {
+	case "click", "right", "middle":
+		// "right"/"middle" 是 button 的简写形式，与 GUI 侧参数名对齐
+		btn := "1"
+		button := pstr(params, "button")
+		if action == "right" {
+			button = "right"
+		} else if action == "middle" {
+			button = "middle"
+		}
+		switch button {
+		case "right":
+			btn = "3"
+		case "middle":
+			btn = "2"
+		}
+		_ = xdo("mousemove", fmt.Sprint(x), fmt.Sprint(y), "click", btn).Run()
+		sendBridgeResult(reqID, "ok", fmt.Sprintf("computeruse click@%d,%d", x, y), "")
+
+	case "middleclick":
+		_ = xdo("mousemove", fmt.Sprint(x), fmt.Sprint(y), "click", "2").Run()
+		sendBridgeResult(reqID, "ok", fmt.Sprintf("computeruse middleclick@%d,%d", x, y), "")
+
+	case "doubleclick":
+		_ = xdo("mousemove", fmt.Sprint(x), fmt.Sprint(y), "click", "--repeat", "2", "--delay", "60", "1").Run()
+		sendBridgeResult(reqID, "ok", fmt.Sprintf("computeruse doubleclick@%d,%d", x, y), "")
+
+	case "tripleclick":
+		// 三击选中整行：旧实现没有，模型无法选中一整段文本
+		_ = xdo("mousemove", fmt.Sprint(x), fmt.Sprint(y), "click", "--repeat", "3", "--delay", "60", "1").Run()
+		sendBridgeResult(reqID, "ok", fmt.Sprintf("computeruse tripleclick@%d,%d", x, y), "")
+
+	case "rightclick":
+		_ = xdo("mousemove", fmt.Sprint(x), fmt.Sprint(y), "click", "3").Run()
+		sendBridgeResult(reqID, "ok", fmt.Sprintf("computeruse rightclick@%d,%d", x, y), "")
+
+	case "move", "hover":
+		// hover 与 move 在 xdotool 上等价；分开命名是为了与 GUI 侧语义对齐
+		// （hover 表示"只悬停不点击"，用于触发 tooltip/悬浮菜单）
+		_ = xdo("mousemove", fmt.Sprint(x), fmt.Sprint(y)).Run()
+		sendBridgeResult(reqID, "ok", fmt.Sprintf("computeruse hover@%d,%d", x, y), "")
+
+	case "scroll":
+		// 旧实现固定用 click 4/5（向上/向下），且忽略 dx 横向滚动。
+		// 现在：正 dy 向上、负 dy 向下，支持 dx 横向。
+		dy := int(pnum(params, "dy", "y"))
+		dx := int(pnum(params, "dx", "x_delta", "scrollx"))
+		if dy == 0 && dx == 0 {
+			dy = -120
+		}
+		btn := "4" // 向上
+		if dy < 0 {
+			btn = "5"
+		}
+		steps := 1
+		if mag := dy; mag < 0 {
+			mag = -mag
+		}
+		if mag > 120 {
+			steps = (mag + 119) / 120
+		}
+		for i := 0; i < steps; i++ {
+			_ = xdo("click", btn).Run()
+		}
+		// 横向滚动：button 6/7
+		if dx != 0 {
+			hbtn := "7" // 向左
+			if dx > 0 {
+				hbtn = "6"
+			}
+			_ = xdo("click", hbtn).Run()
+		}
+		sendBridgeResult(reqID, "ok", fmt.Sprintf("computeruse scroll dx=%d dy=%d", dx, dy), "")
+
+	case "mousedown":
+		// 按下不释放，与 mouseup 配对可做"按住"（如拖窗口、选区）
+		btn := "1"
+		if pstr(params, "button") == "right" {
+			btn = "3"
+		} else if pstr(params, "button") == "middle" {
+			btn = "2"
+		}
+		_ = xdo("mousemove", fmt.Sprint(x), fmt.Sprint(y), "mousedown", btn).Run()
+		sendBridgeResult(reqID, "ok", fmt.Sprintf("computeruse mousedown@%d,%d", x, y), "")
+
+	case "mouseup":
+		btn := "1"
+		if pstr(params, "button") == "right" {
+			btn = "3"
+		} else if pstr(params, "button") == "middle" {
+			btn = "2"
+		}
+		_ = xdo("mouseup", btn).Run()
+		sendBridgeResult(reqID, "ok", fmt.Sprintf("computeruse mouseup@%d,%d", x, y), "")
+
+	case "drag":
+		// 一步拖拽：按下 → 分步移动 → 释放。
+		// 旧实现没有拖拽，模型无法完成"拖文件/拖滑块/调整窗口"这类操作。
+		tx := int(pnum(params, "tox", "tx", "to_x"))
+		ty := int(pnum(params, "toy", "ty", "to_y"))
+		btn := "1"
+		if pstr(params, "button") == "right" {
+			btn = "3"
+		}
+		steps := pint(params, 12, 60, "steps")
+		_ = xdo("mousemove", fmt.Sprint(x), fmt.Sprint(y), "mousedown", btn).Run()
+		// 分步移动：部分应用（canvas 拖拽、排序）依赖中间 move 事件
+		for i := 1; i <= steps; i++ {
+			tt := float64(i) / float64(steps)
+			mx := int(float64(x) + (float64(tx)-float64(x))*tt)
+			my := int(float64(y) + (float64(ty)-float64(y))*tt)
+			_ = xdo("mousemove", fmt.Sprint(mx), fmt.Sprint(my)).Run()
+		}
+		_ = xdo("mouseup", btn).Run()
+		sendBridgeResult(reqID, "ok", fmt.Sprintf("computeruse drag (%d,%d)->(%d,%d)", x, y, tx, ty), "")
+
 	case "type":
-		text, _ := params["text"].(string)
-		cmd := exec.Command("xdotool", "type", text)
-		_ = cmd.Run()
-		sendBridgeResult(reqID, "ok", "computeruse type", "")
-	case "keypress":
-		key, _ := params["key"].(string)
-		cmd := exec.Command("xdotool", "key", key)
-		_ = cmd.Run()
-		sendBridgeResult(reqID, "ok", fmt.Sprintf("computeruse keypress %s", key), "")
+		text := pstr(params, "text")
+		if text == "" {
+			sendBridgeResult(reqID, "error", "", "computeruse type: empty text")
+			return
+		}
+		// --clearmodifiers：避免残留的 Ctrl/Alt 修饰键把后续输入变成快捷键
+		cmd := xdo("type", "--clearmodifiers", "--delay", "12", text)
+		if err := cmd.Run(); err != nil {
+			sendBridgeResult(reqID, "error", "", fmt.Sprintf("computeruse type failed: %v", err))
+			return
+		}
+		sendBridgeResult(reqID, "ok", fmt.Sprintf("computeruse typed %d chars", len(text)), "")
+
+	case "keypress", "hotkey", "combo":
+		spec := normKeySpec(pstr(params, "key", "keys", "text"))
+		if spec == "" {
+			sendBridgeResult(reqID, "error", "", "computeruse keypress: empty key")
+			return
+		}
+		_ = xdo("key", "--clearmodifiers", spec).Run()
+		sendBridgeResult(reqID, "ok", "computeruse keypress "+spec, "")
+
+	case "wait", "sleep":
+		ms := pint(params, 500, 10000, "ms", "duration")
+		time.Sleep(time.Duration(ms) * time.Millisecond)
+		sendBridgeResult(reqID, "ok", fmt.Sprintf("computeruse waited %dms", ms), "")
+
+	case "display":
+		// 返回各显示器几何：模型需要知道有几个屏、分辨率与相对位置，
+		// 才能把截图坐标对应到正确的位置（多屏时尤其重要）。
+		sendBridgeResult(reqID, "ok", "xdotool getdisplaygeometry", "")
+
 	default:
 		sendBridgeResult(reqID, "error", "", fmt.Sprintf("computeruse: unknown action %s", action))
 	}

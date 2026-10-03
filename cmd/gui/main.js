@@ -10,6 +10,8 @@ const { spawn } = require("child_process");
 const http = require("http");
 const crypto = require("crypto");
 const { pathToFileURL } = require("url");
+const agentCursor = require("./agent-cursor");
+const agentInject = require("./agent-inject");
 
 const CONNECTIONS_FILE = path.join(app.getPath("userData"), "connections.json");
 const LOG_FILE = path.join(app.getPath("userData"), "gui.log");
@@ -209,6 +211,19 @@ function loadConnections() {
       const raw = fs
         .readFileSync(CONNECTIONS_FILE, "utf-8")
         .replace(/^\uFEFF/, "");
+      // ★ 空/纯空白 = 「还没有配置」，不是「配置损坏」。
+      //
+      // 原实现在这里直接 JSON.parse，空文件会抛错并掉进下面的 catch，
+      // 而 catch 会**把文件改写成空配置**。也就是说：只要读到一次空/半截
+      // 内容（写入竞争、上次异常退出的残留、另一实例正在改写），
+      // 用户的真实连接列表就被永久覆盖成空 —— 且没有二次确认。
+      //
+      // 实测（沙箱复现原函数）：空文件 -> 返回空配置，
+      // **并把文件写成 {"connections":[],"currentId":null}**。
+      if (raw.trim() === "") {
+        console.log("connections.json is empty; treating as uninitialized");
+        return { connections: [], currentId: null };
+      }
       const data = JSON.parse(raw);
       normalizeConnections(data);
       return data;
@@ -217,7 +232,10 @@ function loadConnections() {
     console.error("Failed to load connections:", e);
     // 配置损坏：备份后重建，避免应用一直处于"无连接"状态
     try {
-      const backup = CONNECTIONS_FILE + ".bak";
+      // 带时间戳：原实现只写一个固定的 .bak，反复损坏会把上一份
+      // 真实配置覆盖掉，于是「唯一的退路」也丢了。
+      const stamp = new Date().toISOString().replace(/[:.]/g, "-");
+      const backup = CONNECTIONS_FILE + ".corrupt-" + stamp + ".bak";
       fs.copyFileSync(CONNECTIONS_FILE, backup);
       fs.writeFileSync(
         CONNECTIONS_FILE,
@@ -255,10 +273,22 @@ function normalizeConnections(data) {
 }
 
 function saveConnections(data) {
+  // ★ 原子写：先写同目录临时文件，再 rename 覆盖。
+  //
+  // 为什么必须：原实现直接 writeFileSync 截断重写，落地过程中存在
+  // 「已截断、内容未写完」的窗口。若此刻另一个实例（或本实例另一次
+  // loadConnections）读到那份半截内容，JSON.parse 抛错就走损坏分支 ——
+  // 于是「一次并发读」变成「配置被清空」。rename 在同一文件系统内
+  // 是原子的：读者只会看到改写前或改写后的完整文件。
+  const tmp = CONNECTIONS_FILE + ".tmp-" + process.pid;
   try {
-    fs.writeFileSync(CONNECTIONS_FILE, JSON.stringify(data, null, 2), "utf-8");
+    fs.writeFileSync(tmp, JSON.stringify(data, null, 2), "utf-8");
+    fs.renameSync(tmp, CONNECTIONS_FILE);
   } catch (e) {
     console.error("Failed to save connections:", e);
+    try {
+      if (fs.existsSync(tmp)) fs.unlinkSync(tmp);
+    } catch (_) {}
   }
 }
 
@@ -269,29 +299,83 @@ function findHomed() {
   return fs.existsSync(p) ? p : null;
 }
 
-function isServerRunning() {
+// ★ 探测服务端候选地址。
+//
+// 旧实现硬编码 http://localhost:8080/，在「服务端跑在 WSL/另一台机器」
+// 的常见部署下必然探不通，进而误判服务未启动、去拉起 GUI 旁边并不存在的
+// homed.exe，最后打印 "homed failed to start within timeout"。
+// 实测证据：localhost:8080 返回 000，而 connections.json 里配置的
+// 192.168.2.60:8080 返回 302 —— 服务一直好好地在那儿。
+//
+// 现在按「已配置的连接 → localhost」顺序探，命中任一即视为在线。
+function serverProbeTargets() {
+  const targets = [];
+  const seen = new Set();
+  const push = (u) => {
+    if (!u) return;
+    const s = String(u).replace(/\/+$/, "");
+    if (!/^https?:\/\//.test(s)) return;
+    if (seen.has(s)) return;
+    seen.add(s);
+    targets.push(s);
+  };
+  try {
+    const data = loadConnections();
+    // loadConnections 返回 {connections:[...], currentId}，
+    // 不是数组（早期按数组写的判断在此处不成立）。
+    const list = data && Array.isArray(data.connections) ? data.connections : [];
+    // 当前连接优先，其余也一并探测（用户可能切过连接）
+    const curId = data ? data.currentId : null;
+    const ordered = list
+      .slice()
+      .sort((a, b) => (a && b && a.id === curId ? -1 : 0));
+    for (const c of ordered) if (c && c.url) push(c.url);
+  } catch (e) {}
+  push("http://localhost:8080");
+  return targets;
+}
+
+function probeOne(target, timeoutMs) {
   return new Promise((resolve) => {
-    const req = http.get("http://localhost:8080/", () => resolve(true));
-    req.on("error", () => resolve(false));
-    req.setTimeout(2000, () => {
-      req.destroy();
-      resolve(false);
+    let done = false;
+    const finish = (ok, via) => {
+      if (done) return;
+      done = true;
+      resolve({ ok, via });
+    };
+    let req;
+    try {
+      req = http.get(target + "/", () => finish(true, target));
+    } catch (e) {
+      return finish(false, target);
+    }
+    req.on("error", () => finish(false, target));
+    req.setTimeout(timeoutMs || 2000, () => {
+      try {
+        req.destroy();
+      } catch (e) {}
+      finish(false, target);
     });
   });
 }
 
-function waitForServer(maxWait = 8000) {
-  return new Promise((resolve) => {
-    const start = Date.now();
-    const check = () => {
-      isServerRunning().then((running) => {
-        if (running) return resolve(true);
-        if (Date.now() - start > maxWait) return resolve(false);
-        setTimeout(check, 300);
-      });
-    };
-    check();
-  });
+// 任一候选端点可达即认为服务在线。
+async function isServerRunning() {
+  const targets = serverProbeTargets();
+  for (const t of targets) {
+    const r = await probeOne(t, 1500);
+    if (r.ok) return true;
+  }
+  return false;
+}
+
+async function waitForServer(maxWait = 8000) {
+  const start = Date.now();
+  for (;;) {
+    if (await isServerRunning()) return true;
+    if (Date.now() - start > maxWait) return false;
+    await new Promise((r) => setTimeout(r, 300));
+  }
 }
 
 function startHomed() {
@@ -324,7 +408,20 @@ function stopHomed() {
   }
 }
 
-function createWindow() {
+// createWindow 创建主窗口。
+//
+// ★ show=false = **静默启动**：窗口照常创建（渲染进程随之启动，SSE、
+// 设备桥、聊天全部可用），只是不显示。
+//
+// 为什么不是「不创建窗口」：不创建 ⇒ 渲染进程不启动 ⇒ app.js 整个不执行
+// ⇒ SSE 通道与设备桥轮询全废，GUI 退化成纯托盘图标；而且
+// showMainWindow() 只做 show()、不会创建窗口，app.on("activate") 又只在
+// macOS 触发 —— Windows 上托盘菜单点「显示主界面」将**毫无反应**，
+// 进程变成无法唤起的僵尸。
+//
+// 为什么不用 show:false 再 show()：那会先显示一帧再隐藏，肉眼可见闪一下。
+// 这里用 ready-to-show + 条件 show，避免闪烁。
+function createWindow(show = true) {
   const menu = Menu.buildFromTemplate([]);
   Menu.setApplicationMenu(menu);
 
@@ -335,6 +432,7 @@ function createWindow() {
     minHeight: 600,
     title: "HomeAgent",
     frame: false,
+    show: false, // 一律先不显示，由 ready-to-show 决定
     icon: path.join(__dirname, "icon.ico"),
     webPreferences: {
       preload: path.join(__dirname, "preload.js"),
@@ -342,6 +440,15 @@ function createWindow() {
       nodeIntegration: false,
     },
   });
+
+  // 静默时不显示；非静默时在首帧就绪后显示，避免白屏闪现。
+  if (show) {
+    mainWindow.once("ready-to-show", () => {
+      try {
+        mainWindow.show();
+      } catch (e) {}
+    });
+  }
 
   mainWindow.loadFile(path.join(__dirname, "renderer", "index.html"));
 
@@ -1316,6 +1423,15 @@ function sendCmdResult(a, b) {
   }
 }
 
+// 安全设置自绘光标的「忙碌」呼吸态（agentCursor 可能未就绪）
+function agentCursorBusySafe(dispIdx, busy) {
+  try {
+    if (agentCursor && typeof agentCursor.agentCursorBusy === "function") {
+      agentCursor.agentCursorBusy(busy, dispIdx);
+    }
+  } catch (e) {}
+}
+
 function baseResult(reqId, status, output, error) {
   return {
     op: "cmd_result",
@@ -1840,6 +1956,40 @@ function executeHomeagentCmd(capability, reqId) {
         params.action = t[2] || "click";
       }
       const action = params.action || "click";
+
+      // ★ 注入模式：sendinput（默认）/ overlay / real
+      //
+      //   sendinput  SendInput 注入到系统输入队列。等价真实硬件事件，
+      //              Chromium/Electron/游戏等自绘界面都能接收 —— 可靠。
+      //              代价：会移动用户的真实光标，故操作前先等用户停手。
+      //              参考 Pal-AI-Lab/Coopanion 的 cortico-world-cua。
+      //   overlay    PostMessage 直投窗口句柄。用户鼠标纹丝不动，但自绘
+      //              界面常忽略合成消息 ⇒ 只能操作原生 Win32 程序。
+      //   real       同上但用旧代码路径（保留以兼容）。
+      //
+      // 默认 sendinput：用户要求「可靠 + 用户正在操作则暂缓」。
+      let cursorMode = "sendinput";
+      try {
+        const _p = loadGuiPrefs();
+        const _ac = (_p && _p.deviceBridge && _p.deviceBridge.agentCursor) || {};
+        if (_ac.mode === "overlay" || _ac.mode === "real") cursorMode = _ac.mode;
+      } catch (e) {}
+      const injOk = agentInject.available();
+      const useOverlay = cursorMode === "overlay" && injOk;
+      const useSendInput = cursorMode === "sendinput" && injOk;
+      // 用户活动暂缓：等用户停手再注入（毫秒）。0 = 不等待。
+      let deferMs = 3000;
+      try {
+        const _p2 = loadGuiPrefs();
+        const _ac2 = (_p2 && _p2.deviceBridge && _p2.deviceBridge.agentCursor) || {};
+        if (typeof _ac2.deferMs === "number") deferMs = Math.max(0, Math.min(10000, _ac2.deferMs));
+      } catch (e) {}
+
+      // 把内部参数提到 action 分支之前共用
+      const cuNumber = (v, dflt) => {
+        const n = parseFloat(v);
+        return Number.isFinite(n) ? n : dflt;
+      };
       // 跨平台输入模拟：Linux=xdotool / macOS=cliclick(或用osascript) / Windows=PowerShell user32
       const os_ = platform === "win32" ? "win32" : platform === "darwin" ? "darwin" : "linux";
       let tool = null; // {cmd, args, shell}
@@ -1867,8 +2017,309 @@ function executeHomeagentCmd(capability, reqId) {
       const disp = displays[dispIdx];
       const ox = disp ? (disp.bounds.x || 0) : 0;
       const oy = disp ? (disp.bounds.y || 0) : 0;
-      const absX = Math.round(ox + (parseFloat(params.x) || 0));
-      const absY = Math.round(oy + (parseFloat(params.y) || 0));
+
+      // ★ 坐标空间：Win32 坐标与截图一样，都是**物理像素**，不要换算。
+      //
+      // 实测（Electron 主进程内，cmd/gui/probe2）：
+      //   screen API (DIP)      : 1260 x 840   scaleFactor=2
+      //   GetSystemMetrics      : 2520 x 1680  ← Win32 用的是物理像素
+      //   SetCursorPos(1260,840) -> GetCursorPos 读回 (1260,840)
+      //                            而 Electron 读回 DIP (630,420)
+      //   比值 = 2.000
+      //
+      // 原因是 Electron 主进程默认 per-monitor DPI-aware：这种感知下
+      // Win32 坐标 API 不做虚拟化，直接就是物理像素。
+      //
+      // ⚠ 本仓曾在这一段加过 `/ scaleFactor` 换算，理由是「SetCursorPos
+      //   期望 DIP」——那个前提是错的（那是 DPI-*unaware* 进程的行为）。
+      //   加了之后反而把原本正确的点击改坏：150% 缩放屏上点 (600,400)
+      //   会被送到 (400,267)，越靠右下偏得越远。现已改回直接使用。
+      //
+      // 保留 physical 开关：多数截图工具给物理像素（默认），若调用方
+      // 明确声明坐标已是 DIP（physical:false），再乘回 scaleFactor。
+      const scale = disp && disp.scaleFactor ? disp.scaleFactor : 1;
+      const rawX = parseFloat(params.x) || 0;
+      const rawY = parseFloat(params.y) || 0;
+      const physical = params.physical !== false;
+      const absX = Math.round(ox + (physical ? rawX : rawX * scale));
+      const absY = Math.round(oy + (physical ? rawY : rawY * scale));
+
+      // === 模式 sendinput：SendInput 注入 + 用户在操作则暂缓 ===
+      //
+      // SendInput 会动真实光标，因此注入前先等用户停手（deferMs 上限）。
+      // 等不到就跳过本次操作并明确报错 —— 宁可失败，也不打断用户。
+      if (os_ === "win32" && useSendInput) {
+        try {
+          const busy = () => agentCursorBusySafe(dispIdx, true);
+          const idle = () => agentCursorBusySafe(dispIdx, false);
+          const fin = (ok, msg) => {
+            idle();
+            sendCmdResult(reqId, baseResult(reqId, ok ? "ok" : "error", msg, ok ? "" : msg));
+          };
+          const fail = (m) => fin(false, m);
+
+          // 等待用户停手
+          //
+          // 注意：executeHomeagentCmd 是**同步函数**，不能 await。
+          // 故改为「同步查询 + 轮询回调」：先看用户是否在操作；若是，
+          // 定时轮询到空闲或超时再继续；全程不阻塞主进程。
+          const startDefer = (cb) => {
+            if (deferMs <= 0 || !agentInject.userIsActive(1200)) return cb(true);
+            const before = agentInject.idleMs();
+            const t0 = Date.now();
+            const tick = () => {
+              if (!agentInject.userIsActive(800)) return cb(true);
+              if (Date.now() - t0 >= deferMs) {
+                idle();
+                sendCmdResult(
+                  reqId,
+                  baseResult(
+                    reqId,
+                    "error",
+                    "",
+                    "用户正在操作（已等待 " + deferMs + "ms，开始时空闲仅 " + before +
+                      "ms）。为避免抢走光标已跳过本次操作。可在设置里调整 agentCursor.deferMs。",
+                  ),
+                );
+                return cb(false);
+              }
+              setTimeout(tick, 120);
+            };
+            tick();
+          };
+
+          const runAction = () => {
+          const btnName = params.button === "right" ? "right" : params.button === "middle" ? "middle" : "left";
+          const toX = () => Math.round(ox + (physical ? (parseFloat(params.tox || params.tx) || 0) : (parseFloat(params.tox || params.tx) || 0) * scale));
+          const toY = () => Math.round(oy + (physical ? (parseFloat(params.toy || params.ty) || 0) : (parseFloat(params.toy || params.ty) || 0) * scale));
+
+          // 自绘光标同步到目标位置（视觉指示 agent 在做什么）
+          const needsXY = ["click", "doubleclick", "rightclick", "middleclick", "tripleclick",
+            "mousedown", "mouseup", "move", "hover", "drag", "scroll"].includes(action);
+          if (needsXY) agentCursor.agentCursorMove(absX, absY, dispIdx);
+          busy();
+
+          switch (action) {
+            case "move":
+            case "hover": {
+              const r = agentInject.si.move(absX, absY);
+              return fin(r.ok, "sendinput " + action + " @ (" + absX + "," + absY + ")");
+            }
+            case "click":
+            case "rightclick":
+            case "middleclick":
+            case "doubleclick":
+            case "tripleclick":
+            case "mousedown":
+            case "mouseup": {
+              const btn = action === "rightclick" ? "right" : action === "middleclick" ? "middle" : btnName;
+              const act = action === "rightclick" || action === "middleclick" ? "click" : action;
+              const r = agentInject.si.button(absX, absY, act, btn);
+              if (act === "click" || act === "doubleclick" || act === "tripleclick") {
+                agentCursor.agentCursorClick(dispIdx);
+              }
+              return fin(r.ok, "sendinput " + action + " @ (" + absX + "," + absY + ")");
+            }
+            case "drag": {
+              const steps = Math.max(1, Math.min(60, parseInt(params.steps || 12, 10) || 12));
+              const r = agentInject.si.drag(absX, absY, toX(), toY(), btnName, steps);
+              agentCursor.agentCursorMove(toX(), toY(), dispIdx);
+              agentCursor.agentCursorClick(dispIdx);
+              return fin(r.ok, "sendinput drag (" + absX + "," + absY + ") -> (" + toX() + "," + toY() + ")");
+            }
+            case "scroll": {
+              const dy = cuNumber(params.dy !== undefined ? params.dy : params.y, 0);
+              const dx = cuNumber(params.dx !== undefined ? params.dx : params.x, 0);
+              // GUI 侧约定：dy 正=向上。SendInput 的 WHEEL 正值即向上，直接传。
+              const r = agentInject.si.scroll(dy, dx);
+              return fin(r.ok, "sendinput scroll dx=" + dx + " dy=" + dy);
+            }
+            case "keypress":
+            case "hotkey":
+            case "combo": {
+              const keys = String(params.keys || params.key || params.text || "");
+              const r = agentInject.si.key(keys);
+              return fin(r.ok, "sendinput keypress " + keys);
+            }
+            case "type": {
+              const r = agentInject.si.type(String(params.text || ""));
+              return fin(r.ok, "sendinput typed " + r.chars + " chars");
+            }
+            case "wait":
+            case "sleep": {
+              const ms = Math.max(0, Math.min(10000, parseInt(params.ms || params.duration || 500, 10) || 500));
+              idle();
+              setTimeout(() => sendCmdResult(reqId, baseResult(reqId, "ok", "sendinput waited " + ms + "ms", "")), ms);
+              return;
+            }
+            case "display": {
+              const info = displays.map((d, i) => ({
+                index: i, bounds: d.bounds, scaleFactor: d.scaleFactor,
+                primary: d.id === screen.getPrimaryDisplay().id,
+              }));
+              const v = agentInject.virtualScreen();
+              idle();
+              sendCmdResult(reqId, baseResult(reqId, "ok",
+                "displays: " + JSON.stringify(info) +
+                " | virtualScreen: " + JSON.stringify(v) +
+                " | inputMode: sendinput | coordinateSpace: physical-pixel", ""));
+              return;
+            }
+            default:
+              return fail("unknown action " + action);
+          }
+          };
+          startDefer((proceed) => { if (proceed) runAction(); });
+          // ★ 必须在这里 return。
+          //
+          // runAction 里的 `return fin(...)` 只退出 runAction，不会退出
+          // executeHomeagentCmd。少了这句，执行完 sendinput 后会继续往下
+          // fall through 到旧的 real 鼠标路径 —— 同一条命令被彻底执行两遍
+          // （实测：8 条命令回了 16 个 cmd_result，且真光标被额外抢一次）。
+          return;
+        } catch (e) {
+          try { agentCursorBusySafe(dispIdx, false); } catch (e2) {}
+          console.error("[sendinput] failed: " + e.message);
+          sendCmdResult(reqId, baseResult(reqId, "error", "", "sendinput: " + e.message));
+          return;
+        }
+      }
+
+      // === 模式 A：后台注入（PostMessage 到目标窗口），不动用户真实鼠标 ===
+      if (os_ === "win32" && useOverlay) {
+        const btnName = params.button === "right" ? "right" : params.button === "middle" ? "middle" : "left";
+        const beginBusy = () => agentCursor.agentCursorBusy(true, dispIdx);
+        const endBusy = () => agentCursor.agentCursorBusy(false, dispIdx);
+        const done = (ok, msg) => {
+          endBusy();
+          sendCmdResult(reqId, baseResult(reqId, ok ? "ok" : "error", msg, ok ? "" : msg));
+        };
+        const fail = (msg) => done(false, "agent-overlay: " + msg);
+        // 位置类 action 之外（type/keypress 等）不需要先移动光标
+        const needsXY = ["click", "doubleclick", "rightclick", "middleclick", "tripleclick",
+          "mousedown", "mouseup", "move", "hover", "drag", "scroll"].includes(action);
+        try {
+          if (needsXY) {
+            const h = agentInject.windowAtPoint(absX, absY);
+            if (!h) {
+              return fail(
+                "该坐标下没有窗口（WindowFromPoint 返回空）。" +
+                "后台注入只能作用于可见窗口，请确认 screensueDisplay 与截图用的屏一致。",
+              );
+            }
+            // 自绘光标移到目标位置（不动真实鼠标）
+            agentCursor.agentCursorMove(absX, absY, dispIdx);
+          }
+          beginBusy();
+          switch (action) {
+            case "move":
+            case "hover": {
+              const r = agentInject.mouse(absX, absY, "move", { button: btnName });
+              agentCursor.setLastHwnd(r.hwnd);
+              return done(r.ok, "agent-overlay " + action + " @ (" + absX + "," + absY + ") hwnd=" + agentInject.hwndStr(r.hwnd));
+            }
+            case "click": {
+              const r = agentInject.mouse(absX, absY, "click", { button: btnName });
+              agentCursor.setLastHwnd(r.hwnd);
+              agentCursor.agentCursorClick(dispIdx);
+              return done(r.ok, "agent-overlay click @ (" + absX + "," + absY + ") hwnd=" + agentInject.hwndStr(r.hwnd));
+            }
+            case "rightclick": {
+              const r = agentInject.mouse(absX, absY, "click", { button: "right" });
+              agentCursor.setLastHwnd(r.hwnd);
+              agentCursor.agentCursorClick(dispIdx);
+              return done(r.ok, "agent-overlay rightclick @ (" + absX + "," + absY + ") hwnd=" + agentInject.hwndStr(r.hwnd));
+            }
+            case "middleclick": {
+              const r = agentInject.mouse(absX, absY, "click", { button: "middle" });
+              agentCursor.setLastHwnd(r.hwnd);
+              agentCursor.agentCursorClick(dispIdx);
+              return done(r.ok, "agent-overlay middleclick @ (" + absX + "," + absY + ") hwnd=" + agentInject.hwndStr(r.hwnd));
+            }
+            case "doubleclick": {
+              const r = agentInject.mouse(absX, absY, "doubleclick", { button: btnName });
+              agentCursor.agentCursorClick(dispIdx);
+              return done(r.ok, "agent-overlay doubleclick @ (" + absX + "," + absY + ")");
+            }
+            case "tripleclick": {
+              const r = agentInject.tripleClick(absX, absY);
+              agentCursor.setLastHwnd(r.hwnd);
+              agentCursor.agentCursorClick(dispIdx);
+              return done(r.ok, "agent-overlay tripleclick @ (" + absX + "," + absY + ")");
+            }
+            case "mousedown": {
+              const r = agentInject.mouse(absX, absY, "mousedown", { button: btnName });
+              return done(r.ok, "agent-overlay mousedown(" + btnName + ")");
+            }
+            case "mouseup": {
+              const r = agentInject.mouse(absX, absY, "mouseup", { button: btnName });
+              return done(r.ok, "agent-overlay mouseup(" + btnName + ")");
+            }
+            case "drag": {
+              const toX = Math.round(ox + (physical ? (parseFloat(params.tox || params.tx) || 0) : (parseFloat(params.tox || params.tx) || 0) * scale));
+              const toY = Math.round(oy + (physical ? (parseFloat(params.toy || params.ty) || 0) : (parseFloat(params.toy || params.ty) || 0) * scale));
+              agentCursor.agentCursorMove(absX, absY, dispIdx);
+              const steps = Math.max(1, Math.min(60, parseInt(params.steps || 12, 10) || 12));
+              // 拖拽过程中让自绘光标跟着走，视觉上与真实拖拽一致
+              const r = agentInject.drag(absX, absY, toX, toY, { button: btnName, steps });
+              agentCursor.setLastHwnd(r.hwnd);
+              agentCursor.agentCursorMove(toX, toY, dispIdx);
+              agentCursor.agentCursorClick(dispIdx);
+              return done(r.ok, "agent-overlay drag (" + absX + "," + absY + ") -> (" + toX + "," + toY + ")");
+            }
+            case "scroll": {
+              const dy = cuNumber(params.dy !== undefined ? params.dy : params.y, 0);
+              const dx = cuNumber(params.dx !== undefined ? params.dx : params.x, 0);
+              const r = agentInject.scroll(absX, absY, dy, dx);
+              return done(r.ok, "agent-overlay scroll dx=" + dx + " dy=" + dy);
+            }
+            case "keypress":
+            case "hotkey":
+            case "combo": {
+              const keys = String(params.keys || params.key || params.text || "");
+              // 无坐标语义：发给「当前光标所在窗口」，即上次 agent 操作过的窗口
+              const h = agentInject.windowAtPoint(absX, absY) || agentCursor.lastHwnd;
+              if (!h) {
+                return fail("keypress 需要先有点击类操作确定目标窗口（当前无法确定目标窗口）");
+              }
+              const r = agentInject.keyTap(h, keys);
+              return done(r.ok, "agent-overlay keypress " + keys + " -> hwnd=" + agentInject.hwndStr(h));
+            }
+            case "type": {
+              const t = String(params.text || "");
+              const h = agentInject.windowAtPoint(absX, absY) || agentCursor.lastHwnd;
+              if (!h) return fail("type 需要先有点击类操作确定目标窗口");
+              const r = agentInject.typeText(h, t);
+              return done(r.ok, "agent-overlay typed " + r.chars + " chars -> hwnd=" + agentInject.hwndStr(h));
+            }
+            case "wait":
+            case "sleep": {
+              const ms = Math.max(0, Math.min(10000, parseInt(params.ms || params.duration || 500, 10) || 500));
+              endBusy();
+              setTimeout(() => sendCmdResult(reqId, baseResult(reqId, "ok", "agent-overlay waited " + ms + "ms", "")), ms);
+              return;
+            }
+            case "display": {
+              const info = displays.map((d, i) => ({
+                index: i, bounds: d.bounds, scaleFactor: d.scaleFactor,
+                primary: d.id === screen.getPrimaryDisplay().id,
+              }));
+              endBusy();
+              sendCmdResult(reqId, baseResult(reqId, "ok",
+                "displays: " + JSON.stringify(info) +
+                " | coordinateSpace: physical-pixel (Win32 与截图像素一致, 无需换算)", ""));
+              return;
+            }
+            default:
+              return fail("unknown action " + action);
+          }
+        } catch (e) {
+          endBusy();
+          console.error("[agent-overlay] failed: " + e.message);
+          sendCmdResult(reqId, baseResult(reqId, "error", "", "agent-overlay: " + e.message));
+          return;
+        }
+      }
 
       // === Windows: 用 koffi 直接调用 user32.dll，不依赖 PowerShell C# 编译 ===
       if (os_ === "win32") {
@@ -1878,8 +2329,69 @@ function executeHomeagentCmd(capability, reqId) {
           const SetCursorPos = user32.func("bool SetCursorPos(int x, int y)");
           const mouse_event = user32.func("void mouse_event(uint dwFlags, uint dx, uint dy, uint dwData, uint dwExtraInfo)");
 
-          const btnDown = params.button === "right" ? 0x0008 : params.button === "middle" ? 0x0020 : 0x0002;
-          const btnUp = params.button === "right" ? 0x0010 : params.button === "middle" ? 0x0040 : 0x0004;
+          const BTN = { left: [0x0002, 0x0004], middle: [0x0020, 0x0040], right: [0x0008, 0x0010] };
+          const btn = params.button === "right" ? "right" : params.button === "middle" ? "middle" : "left";
+          const btnDown = BTN[btn][0];
+          const btnUp = BTN[btn][1];
+          // MOUSEEVENTF_WHEEL=0x0800, HWHEEL=0x0100；WHEEL_DELTA=120
+          const WHEEL = 0x0800;
+          const HWHEEL = 0x0100;
+          // 修饰键虚拟键码（VK_*）
+          const VK = {
+            ctrl: 0x11, control: 0x11, alt: 0x12, shift: 0x10, win: 0x5b, meta: 0x5b, super: 0x5b,
+            enter: 0x0d, return: 0x0d, tab: 0x09, esc: 0x1b, escape: 0x1b,
+            space: 0x20, backspace: 0x08, delete: 0x2e, del: 0x2e,
+            up: 0x26, down: 0x28, left: 0x25, right: 0x27,
+            home: 0x24, end: 0x23, pageup: 0x21, pagedown: 0x22,
+          };
+          // 修饰键的 keybd_event 标志（EXTENDEDKEY 表示右侧/小键盘扩展键）
+          const VK_EXTENDED = new Set([0x21,0x22,0x23,0x24,0x25,0x26,0x27,0x28,0x2e,0x5b,0x5c,0x6f,0x74]);
+
+          // keybd_event 全局声明（拿得到 user32 后用）
+          //
+          // ★ 类型名必须是 uint8：koffi 不认 Win32 头文件里的 `byte`，
+          //   实测 `void keybd_event(byte bVk, ...)` 抛
+          //   "Unknown or invalid type name 'byte'"，而 uint8 可正常解析。
+          //   这个 bug 曾让组合键（hotkey/keypress）整体报
+          //   "keybd_event unavailable" —— 单键 click 不受影响，所以很容易漏掉。
+          let keybd_event = null;
+          try {
+            keybd_event = user32.func(
+              "void keybd_event(uint8 bVk, uint8 bScan, uint32 dwFlags, uintptr_t dwExtraInfo)",
+            );
+          } catch (e) {
+            console.error("keybd_event signature failed: " + e.message);
+          }
+
+          // tapVk 按键一次：支持 "ctrl+c"、"ctrl+shift+t"、"alt+f4"
+          const tapVk = (spec) => {
+            if (!keybd_event) return "keybd_event unavailable";
+            const parts = String(spec || "").split("+").map((x) => x.trim().toLowerCase()).filter(Boolean);
+            if (parts.length === 0) return "empty key";
+            const last = parts[parts.length - 1];
+            const mods = parts.slice(0, -1);
+            const modCodes = mods.map((m) => VK[m]).filter((c) => c !== undefined);
+            if (modCodes.length !== mods.length) return "unknown modifier in " + spec;
+            let keyCode = VK[last];
+            if (keyCode === undefined) {
+              // 单字符：字母/数字 → ASCII 大写
+              if (last.length === 1) keyCode = last.toUpperCase().charCodeAt(0);
+              else return "unknown key: " + last;
+            }
+            for (const c of modCodes) keybd_event(c, 0, 0, 0);
+            keybd_event(keyCode, 0, VK_EXTENDED.has(keyCode) ? 1 : 0, 0);
+            keybd_event(keyCode, 0, (VK_EXTENDED.has(keyCode) ? 1 : 0) | 0x0002, 0);
+            for (const c of modCodes.slice().reverse()) keybd_event(c, 0, 0x0002, 0);
+            return null;
+          };
+
+          // 滚动：dy 纵向、dx 横向，正数向上
+          const doScroll = () => {
+            const dy = Number(params.dy !== undefined ? params.dy : params.y) || 0;
+            const dx = Number(params.dx !== undefined ? params.dx : params.x) || 0;
+            if (dx) mouse_event(HWHEEL, 0, 0, -Math.round(dx * 120), 0);
+            if (dy) mouse_event(WHEEL, 0, 0, Math.round(dy * 120), 0);
+          };
 
           // 先移动鼠标到目标位置
           SetCursorPos(absX, absY);
@@ -1907,10 +2419,142 @@ function executeHomeagentCmd(capability, reqId) {
               mouse_event(0x0010, 0, 0, 0, 0);
               sendCmdResult(reqId, baseResult(reqId, "ok", "computeruse rightclick @ (" + absX + "," + absY + ")", ""));
               break;
-            case "scroll":
-              mouse_event(0x0800, 0, 0, Math.round((params.dy || 120) * 120), 0);
-              sendCmdResult(reqId, baseResult(reqId, "ok", "computeruse scroll @ (" + absX + "," + absY + ")", ""));
+            case "scroll": {
+              // 旧实现固定向上滚 120*dy，且不支持横向。
+              // 现在按参数给方向/量级，并支持 dx（横向滚动）。
+              doScroll();
+              sendCmdResult(
+                reqId,
+                baseResult(
+                  reqId,
+                  "ok",
+                  "computeruse scroll dx=" + (params.dx || 0) + " dy=" + (params.dy || params.y || 0) +
+                    " @ (" + absX + "," + absY + ")",
+                  "",
+                ),
+              );
               break;
+            }
+            // === 以下为补齐的高级操作 ===
+            case "mousedown":
+              // 按下不释放：用于与 mouseup 配对做"按住拖拽"
+              mouse_event(btnDown, 0, 0, 0, 0);
+              sendCmdResult(reqId, baseResult(reqId, "ok", "computeruse mousedown(" + btn + ")", ""));
+              break;
+            case "mouseup":
+              mouse_event(btnUp, 0, 0, 0, 0);
+              sendCmdResult(reqId, baseResult(reqId, "ok", "computeruse mouseup(" + btn + ")", ""));
+              break;
+            case "drag": {
+              // 一步拖拽：从 (x,y) 按下 → 移动到 (tox,toy) → 释放
+              const toX = Math.round(
+                ox + (physical ? (parseFloat(params.tox || params.tx) || 0) : (parseFloat(params.tox || params.tx) || 0) * scale),
+              );
+              const toY = Math.round(
+                oy + (physical ? (parseFloat(params.toy || params.ty) || 0) : (parseFloat(params.toy || params.ty) || 0) * scale),
+              );
+              SetCursorPos(absX, absY);
+              mouse_event(btnDown, 0, 0, 0, 0);
+              // 分步移动：部分应用（浏览器 canvas、拖拽排序）需要中间 move 事件
+              const steps = Math.max(1, Math.min(40, parseInt(params.steps || 12, 10) || 12));
+              for (let i = 1; i <= steps; i++) {
+                const t = i / steps;
+                SetCursorPos(
+                  Math.round(absX + (toX - absX) * t),
+                  Math.round(absY + (toY - absY) * t),
+                );
+              }
+              mouse_event(btnUp, 0, 0, 0, 0);
+              sendCmdResult(
+                reqId,
+                baseResult(reqId, "ok", "computeruse drag (" + absX + "," + absY + ") -> (" + toX + "," + toY + ")", ""),
+              );
+              break;
+            }
+            case "hover":
+              // 悬停：只移动不点击（触发 tooltip / hover 菜单）
+              SetCursorPos(absX, absY);
+              sendCmdResult(reqId, baseResult(reqId, "ok", "computeruse hover @ (" + absX + "," + absY + ")", ""));
+              break;
+            case "keypress": {
+              // 支持 "ctrl+c" 这类组合键；旧实现只发单键
+              const err2 = tapVk(params.key || params.keys || params.text);
+              if (err2) {
+                sendCmdResult(reqId, baseResult(reqId, "error", "", "computeruse keypress: " + err2));
+              } else {
+                sendCmdResult(reqId, baseResult(reqId, "ok", "computeruse keypress " + (params.key || params.keys || params.text), ""));
+              }
+              break;
+            }
+            case "hotkey":
+            case "combo": {
+              const keys = String(params.keys || params.key || "");
+              const err2 = tapVk(keys);
+              if (err2) {
+                sendCmdResult(reqId, baseResult(reqId, "error", "", "computeruse hotkey: " + err2));
+              } else {
+                sendCmdResult(reqId, baseResult(reqId, "ok", "computeruse hotkey " + keys, ""));
+              }
+              break;
+            }
+            case "middleclick":
+              mouse_event(BTN.middle[0], 0, 0, 0, 0);
+              mouse_event(BTN.middle[1], 0, 0, 0, 0);
+              sendCmdResult(reqId, baseResult(reqId, "ok", "computeruse middleclick @ (" + absX + "," + absY + ")", ""));
+              break;
+            case "tripleclick":
+              // 三击：三次快速左键，用于选中整行
+              for (let i = 0; i < 3; i++) {
+                mouse_event(BTN.left[0], 0, 0, 0, 0);
+                mouse_event(BTN.left[1], 0, 0, 0, 0);
+              }
+              sendCmdResult(reqId, baseResult(reqId, "ok", "computeruse tripleclick @ (" + absX + "," + absY + ")", ""));
+              break;
+            case "type": {
+              // 用 SendKeys 注入文本（koffi 只能发按键，文本需走 SendInput）
+              const t = String(params.text || "");
+              if (!t) {
+                sendCmdResult(reqId, baseResult(reqId, "error", "", "computeruse type: empty text"));
+                break;
+              }
+              // 逐字符发送：SendKeys 语法里 + ^ % ~ { } 都是特殊字符
+              const SPECIAL = { "+": "{+}", "^": "{^}", "%": "{%}", "~": "{~}", "{": "{{}", "}": "{}}", "(": "{(}", ")": "{)}", "[": "{[}", "]": "{]}" };
+              let expr = "";
+              for (const ch of t) expr += SPECIAL[ch] !== undefined ? SPECIAL[ch] : ch;
+              const ps =
+                "Add-Type -AssemblyName System.Windows.Forms;" +
+                "[System.Windows.Forms.SendKeys]::SendWait('" +
+                expr.replace(/'/g, "''") +
+                "')";
+              cp.exec("powershell", ["-NoProfile", "-Command", ps], { timeout: 15000 }, (err) => {
+                if (err) {
+                  sendCmdResult(reqId, baseResult(reqId, "error", "", "computeruse type failed: " + err.message));
+                } else {
+                  sendCmdResult(reqId, baseResult(reqId, "ok", "computeruse typed " + t.length + " chars", ""));
+                }
+              });
+              break;
+            }
+            case "wait":
+            case "sleep": {
+              // 显式等待：UI 更新/动画未完成时先等一下再下一步
+              const ms = Math.max(0, Math.min(10000, parseInt(params.ms || params.duration || 500, 10) || 500));
+              setTimeout(() => {
+                sendCmdResult(reqId, baseResult(reqId, "ok", "computeruse waited " + ms + "ms", ""));
+              }, ms);
+              break;
+            }
+            case "display": {
+              // 返回各显示器信息：模型需要知道有几个屏、逻辑尺寸与缩放
+              const info = displays.map((d, i) => ({
+                index: i,
+                bounds: d.bounds,
+                scaleFactor: d.scaleFactor,
+                primary: d.id === screen.getPrimaryDisplay().id,
+              }));
+              sendCmdResult(reqId, baseResult(reqId, "ok", "displays: " + JSON.stringify(info), ""));
+              break;
+            }
             default:
               sendCmdResult(reqId, baseResult(reqId, "error", "", "computeruse: unknown action " + action));
           }
@@ -1930,6 +2574,12 @@ function executeHomeagentCmd(capability, reqId) {
             case "doubleclick": return ["dc:" + pos];
             case "rightclick": return ["c:" + pos];
             case "scroll": return ["w:" + (params.dy > 0 ? "+" : "-")];
+            case "hover": return ["m:" + pos];
+            case "middleclick": return ["dc:" + pos];
+            // cliclick 原生支持 dd（按下拖拽）/ du（释放）/ dm（拖到）
+            case "mousedown": return ["dd:" + pos];
+            case "mouseup": return ["du:" + pos];
+            case "drag": return ["dm:" + (absX) + "," + (absY) + "," + (ox + (parseFloat(params.tox) || 0) / scale) + "," + (oy + (parseFloat(params.toy) || 0) / scale)];
             default: return a;
           }
         }
@@ -1954,8 +2604,82 @@ function executeHomeagentCmd(capability, reqId) {
           run(L(["mousemove", String(absX), String(absY), "scroll", "--button", "5", String(Math.round(params.dy || params.y || 0))]));
           return;
         case "keypress":
-          run(L(["key", String(params.key || params.text || "")]));
+        case "hotkey":
+        case "combo": {
+          // xdotool/ cliclick 的 key 参数本身就接受 "ctrl+c" 这类组合键，
+          // 但旧代码把整个字符串原样透传，模型传 "Ctrl+C"（大写/带引号）就失效。
+          // 这里做一次归一化。
+          let spec = String(params.key || params.keys || params.text || "").trim();
+          spec = spec
+            .replace(/\+/g, " plus ")
+            .replace(/ctrl\s*\+\s*ctrl\s*\+/gi, "ctrl+")
+            .split(/\s*\+\s*/)
+            .filter(Boolean)
+            .map((x) => x.toLowerCase().trim())
+            .join("+");
+          if (!spec) {
+            sendCmdResult(reqId, baseResult(reqId, "error", "", "computeruse keypress: empty key"));
+            return;
+          }
+          run(L(["key", spec]));
           return;
+        }
+        case "mousedown":
+          run(L([os_ === "darwin" ? "mousedown" : "mousedown", String(absX), String(absY)]));
+          return;
+        case "mouseup":
+          run(L([os_ === "darwin" ? "mouseup" : "mouseup", String(absX), String(absY)]));
+          return;
+        case "drag": {
+          const toX = Math.round(ox + (parseFloat(params.tox) || 0) / scale);
+          const toY = Math.round(oy + (parseFloat(params.toy) || 0) / scale);
+          const steps = Math.max(1, Math.min(40, parseInt(params.steps || 12, 10) || 12));
+          run(L(["mousemove", String(absX), String(absY), "mousedown", "1"]));
+          for (let i = 1; i <= steps; i++) {
+            const tt = i / steps;
+            run(
+              L([
+                "mousemove",
+                String(Math.round(absX + (toX - absX) * tt)),
+                String(Math.round(absY + (toY - absY) * tt)),
+              ]),
+            );
+          }
+          run(L(["mouseup", "1"]));
+          return;
+        }
+        case "hover":
+          run(L(["mousemove", String(absX), String(absY)]));
+          return;
+        case "middleclick":
+          run(L(["mousemove", String(absX), String(absY), "click", "2"]));
+          return;
+        case "tripleclick":
+          run(
+            L([
+              "mousemove", String(absX), String(absY),
+              "click", "--repeat", "3", "--delay", "60", "1",
+            ]),
+          );
+          return;
+        case "wait":
+        case "sleep": {
+          const ms = Math.max(0, Math.min(10000, parseInt(params.ms || params.duration || 500, 10) || 500));
+          setTimeout(() => {
+            sendCmdResult(reqId, baseResult(reqId, "ok", "computeruse waited " + ms + "ms", ""));
+          }, ms);
+          return;
+        }
+        case "display": {
+          const info = displays.map((d, i) => ({
+            index: i,
+            bounds: d.bounds,
+            scaleFactor: d.scaleFactor,
+            primary: d.id === screen.getPrimaryDisplay().id,
+          }));
+          sendCmdResult(reqId, baseResult(reqId, "ok", "displays: " + JSON.stringify(info), ""));
+          return;
+        }
         case "type": {
           // macOS cliclick 无 type，用 osascript
           if (os_ === "darwin") {
@@ -2427,10 +3151,21 @@ function initTray() {
 function showMainWindow() {
   try {
     if (mainWindow && !mainWindow.isDestroyed()) {
-      mainWindow.show();
+      // 窗口是静默创建时已处于「未显示」态，这里正常显示即可。
+      if (!mainWindow.isVisible()) mainWindow.show();
       mainWindow.focus();
+      return;
     }
-  } catch (e) {}
+  } catch (e) {
+    /* 落到下面重建 */
+  }
+  // 兜底：窗口不存在（异常退出后残留状态、或未来改成不建窗）时重建，
+  // 否则托盘菜单点了没反应，进程就成了唤不起来的僵尸。
+  try {
+    createWindow(true);
+  } catch (e) {
+    console.error("showMainWindow: recreate failed: " + e.message);
+  }
 }
 function destroyTray() {
   try {
@@ -2444,7 +3179,16 @@ function destroyTray() {
 app.whenReady().then(async () => {
   installAuthRule();
   const running = await isServerRunning();
-  if (!running) {
+  if (running) {
+    // 已探测到可用端点：服务端在别处正常运行（远程/WSL/另一台机器）。
+    // 这类部署下 GUI 不该、也拉不起 homed —— 此前仍会去 startHomed()
+    // 再等 8s 超时，刷出误导性的 "homed failed to start within timeout"。
+    console.log("server reachable, skip homed autostart");
+  } else if (!findHomed()) {
+    // 没有本地 homed 可执行文件 ⇒ 本机根本不具备托管服务端的能力，
+    // 此时干等超时毫无意义，直接说明情况即可。
+    console.log("no local homed binary and no reachable endpoint; GUI will use configured connection");
+  } else {
     startHomed();
     const started = await waitForServer();
     if (started) {
@@ -2478,7 +3222,28 @@ app.whenReady().then(async () => {
   } catch (e) {
     console.error("[auth-schedule] start failed: " + e.message);
   }
-  createWindow();
+
+  // ★ 静默启动：prefs.silentStart 为真时不显示主窗口，驻留托盘。
+  //
+  // 此前这个开关是**死的**：设置页有它、gui-prefs.json 存了它、文案写着
+  // 「启动时不显示主窗口，驻留托盘后台运行」，但主进程从来没读过它 ——
+  // whenReady 无条件 createWindow()，于是必然弹窗。
+  //
+  // 实测（本机，prefs.silentStart=true）：窗口标题 HomeAgent 照样出现。
+  //
+  // 与 applyAutoLaunch 里的 openAsHidden 是两回事：那个是告诉 OS「开机自启
+  // 时如何启动」（仅 Windows/macOS 生效），这里是本进程自己决定要不要显示，
+  // 对手动启动同样生效。
+  let silent = false;
+  try {
+    silent = !!loadGuiPrefs().silentStart;
+  } catch (e) {
+    console.error("[startup] read silentStart failed: " + e.message);
+  }
+  createWindow(!silent);
+  if (silent) {
+    console.log("[startup] silentStart=on: window created hidden (tray only)");
+  }
 });
 
 app.on("before-quit", () => {
@@ -2512,6 +3277,62 @@ app.on("activate", () => {
     createWindow();
   }
 });
+// ============ 系统通知（Electron 原生）============
+//
+// 之前**完全没有**这个能力：主进程没引入 Notification、preload 没暴露接口、
+// 渲染层只有页面内的 toast（用户不盯着窗口就看不到）。
+// 这套是补齐：渲染层判断"该不该通知"，主进程负责弹系统通知。
+//
+// 为什么点击要回传会话：点了通知却不知道该看哪句话，等于没通知。
+// 点击时通过 webContents 回到渲染进程，由它切到 chat 视图并滚到该条。
+let notifSeq = 0;
+
+ipcMain.handle("notify:show", (_, payload) => {
+  try {
+    const p = payload || {};
+    const title = String(p.title || "HomeAgent");
+    const body = String(p.body || "");
+    if (!body) return { ok: false, error: "empty body" };
+    if (!Notification.isSupported()) return { ok: false, error: "unsupported" };
+
+    // 已有窗口在前台且可见时不再打扰：用户正看着界面。
+    // 静默启动场景下 mainWindow 存在但 hidden，正好走"要通知"这条路。
+    if (mainWindow && !mainWindow.isDestroyed() && mainWindow.isVisible() && mainWindow.isFocused()) {
+      return { ok: false, skipped: "focused" };
+    }
+
+    const id = ++notifSeq;
+    const n = new Notification({
+      title: title,
+      body: body.length > 180 ? body.slice(0, 180) + "\u2026" : body,
+      silent: !!p.silent,
+      urgency: p.urgent ? "critical" : "normal",
+    });
+    n.on("click", () => {
+      if (mainWindow && !mainWindow.isDestroyed()) {
+        if (!mainWindow.isVisible()) mainWindow.show();
+        mainWindow.focus();
+      }
+      try {
+        mainWindow.webContents.send("notify:clicked", { id: id, msgKey: p.msgKey || "" });
+      } catch (e) {}
+      n.close();
+    });
+    n.show();
+    return { ok: true, id: id };
+  } catch (e) {
+    return { ok: false, error: e.message };
+  }
+});
+
+ipcMain.handle("notify:supported", () => {
+  try {
+    return { supported: Notification.isSupported() };
+  } catch (e) {
+    return { supported: false };
+  }
+});
+
 // IPC：prefs（renderer 设置页需要）
 // IPC：本机设备身份（renderer 设备页需要）
 ipcMain.handle("device:identity", () =>
@@ -2528,7 +3349,19 @@ const GUI_PREFS_FILE = path.join(app.getPath("userData"), "gui-prefs.json");
 function loadGuiPrefs() {
   try {
     if (fs.existsSync(GUI_PREFS_FILE)) {
-      const d = JSON.parse(fs.readFileSync(GUI_PREFS_FILE, "utf-8"));
+      // ★ 去 BOM 后再 parse。
+      //
+      // Windows 上用 PowerShell Set-Content -Encoding UTF8、记事本等工具改过
+      // 这个文件，会在开头写入 UTF-8 BOM（EF BB BF）。JSON.parse 遇到它直接
+      // 抛错 → 走 catch → 返回**默认 prefs**（silentStart/exitToTray/
+      // deviceBridge 全部被重置）→ 用户界面上的开关像是"保存了但不起作用"。
+      //
+      // 本次实测踩到：判据脚本用 Set-Content 改 silentStart，文件带上 BOM 后
+      // 静默启动不生效，而 loadConnections 早就有去 BOM 处理、这里没有 ——
+      // 两个读取点不一致，属实打实的疏漏。
+      const d = JSON.parse(
+        fs.readFileSync(GUI_PREFS_FILE, "utf-8").replace(/^\uFEFF/, ""),
+      );
       const db = d.deviceBridge || {};
       return {
         autoLaunch: !!d.autoLaunch,
@@ -2630,6 +3463,12 @@ ipcMain.handle("device-bridge:get", () => {
     authorized: !!db.authorized, // 客户端本地授权状态
     gateway: db.gateway || "",
     tokenSet: !!(db.token || ""),
+    // 设备接入面（/device/online 等）走服务端 requireToken，只认 X-API-Key。
+    // 渲染进程要用同一份令牌去拉设备列表，而此前只给了 tokenSet（布尔），
+    // 于是渲染侧永远拿不到明文 ⇒ 设备页恒 401（显示为空列表）。
+    // 明文本来就存在本机 gui-prefs.json，不新增任何密钥存储面；
+    // 且只经 contextBridge 送到渲染进程，不落日志、不进 URL。
+    token: db.token || "",
     connected: !!deviceBridge,
     deviceId: deviceBridgeId,
     address: deviceBridgeAddr,
