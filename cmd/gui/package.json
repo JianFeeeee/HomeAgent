@@ -37,6 +37,8 @@
     "files": [
       "main.js",
       "preload.js",
+      "agent-inject.js",
+      "agent-cursor.js",
       "renderer/**/*",
       "icon.svg",
       "node_modules/**/*",
