@@ -184,6 +184,64 @@ def align(sentence: str, fields: list[dict]) -> tuple[list[str] | None, str | No
     return labels, None
 
 
+def salvage(samples: list[dict]) -> list[dict]:
+    """逐字段挽救：一条样本里坏字段不该拖累好字段。
+
+    ★ 为什么需要（实测数据）
+    ----------------------
+    严格三道闸门是**整条**丢弃（任一字段不过闸，整条作废）：
+
+        生产库 149 条有字段的样本
+          严格闸门   →  35 条可用
+          逐字段挽救 →  55 条可用   (+57%)
+
+    而实测的坏字段有明确的形态 ——「值 = 整句」（实测占 18%）：
+
+        版本 = 115批周二凌晨2点·停机6分·回滚v2.28.1·灰度5%观察63分后直放100%
+
+    丢掉这个坏字段，同一条样本里的**其他字段往往都是好的**：
+
+        「AgentMail 邮件通道插件 v0.1.0」
+          ✘ 插件名称 = AgentMail 邮件通道插件 v0.1.0   ← 整句当值
+          ✓ 插件版本 = v0.1.0                          ← 保留
+
+    ★ 所以闸门应该是**逐字段**的，不是逐样本的。
+
+    注意与「部分修复无效」的区分：早前测过「丢弃整条里的坏字段后救回 2 条」
+    —— 那是在**已经丢掉的样本**里再救，而这里是在**还没丢的样本**里救，
+    不是同一件事。
+    """
+    kept = []
+    for x in samples:
+        fields = []
+        for f in x.get("fields", []):
+            if isinstance(f, str):
+                if "=" not in f:
+                    continue
+                k, v = f.split("=", 1)
+            else:
+                k, v = f.get("name", ""), f.get("value", "")
+            if k and v:
+                fields.append({"name": k, "value": v})
+        good = []
+        for f in fields:
+            v = f["value"]
+            # 闸门 1：值必须原样出现在原句（幻觉）
+            if not v or v not in x["sentence"]:
+                continue
+            # 闸门 2：值长度（拦「值 = 整句」，实测占 18%）
+            if len(v) > 12:
+                continue
+            # 闸门 3：属性名要能在值之前模糊对上
+            vp = x["sentence"].find(v)
+            if not find_dim_in(f["name"], x["sentence"][:vp]):
+                continue
+            good.append(f)
+        if good:
+            kept.append({"sentence": x["sentence"], "fields": good})
+    return kept
+
+
 @dataclass
 class Example:
     ids: list[int]
@@ -357,8 +415,10 @@ def main():
     torch.manual_seed(args.seed)
     torch.set_num_threads(12)
 
-    samples = load_labeled(args.data)
-    print(f"原始样本 {len(samples)}")
+    raw = load_labeled(args.data)
+    # ★ 逐字段挽救（坏字段不拖累好字段）：实测 149 → 55 条（+57%）
+    samples = salvage(raw)
+    print(f"原始样本 {len(raw)} → salvage 后 {len(samples)}")
     vocab = build_vocab(samples)
     data, reasons = build_dataset(samples, vocab)
     print(f"对齐成功 {len(data)}，词表 {len(vocab)}")
