@@ -75,8 +75,33 @@ func defaultWeights() FusionWeights { return FusionWeights{Vector: 0.7, Symbol: 
 var (
 	symbolNumericRe = regexp.MustCompile(
 		`\d+(?:[./]\d+)*(?:\.\d+)?%?|[vV]\d+(?:\.\d+)+`)
-	symbolLatinRe = regexp.MustCompile(`[A-Za-z][A-Za-z0-9_-]{2,}`)
-	symbolCJKRe   = regexp.MustCompile(`[一-鿿]{2,}`)
+	symbolLatinRe  = regexp.MustCompile(`[A-Za-z][A-Za-z0-9_-]{2,}`)
+	symbolCJKRunRe = regexp.MustCompile(`[一-鿿]+`)
+)
+
+// cjkWindow 是中文符号的切分窗口。
+//
+// ★ 为什么不用词法切分而用滑窗
+// -----------------------------
+// 正确的做法是 jieba 之类的分词，但 memory 里记过它的问题：
+// 「jieba + LIKE 把『服务』『端口』这类泛词当过滤词，造成大量噪音」——
+// 它把「监控面板的端口是多少」切成「监控/面板/的/端口/是/多少」，
+// 而块文本里的词边界与它不一致，两边对不齐。
+//
+// ★ 而贪婪长串匹配更糟（实测）
+// -----------------------------
+//
+//	「grafana 监控面板的端口是多少」 → [grafana 监控面板的端口是多少]
+//	「脚本路径改到哪个目录了」      → [脚本路径改到哪个目录了]
+//
+// 整句变成**一个**符号，而任何块都不可能包含整句 ⇒ 符号分恒为 0，
+// 符号路对**所有纯中文查询完全失效**（只有含数字串的探针能被救）。
+//
+// 折中：2~4 字滑窗 + 泛词黑名单。宁可多提候选（靠覆盖率阈值压制
+// 噪声），也不要「一个符号都没有」。
+const (
+	cjkWindowMin = 2
+	cjkWindowMax = 4
 )
 
 // symbolStopWords 是符号路的泛词黑名单 —— 命中它们不作为信号。
@@ -104,13 +129,60 @@ func QuerySymbols(query string) []string {
 	for _, m := range symbolLatinRe.FindAllString(query, -1) {
 		add(strings.ToLower(m))
 	}
-	for _, m := range symbolCJKRe.FindAllString(query, -1) {
-		if symbolStopWords[m] {
-			continue
+	for _, run := range symbolCJKRunRe.FindAllString(query, -1) {
+		for _, w := range cjkWindows(run) {
+			add(w)
 		}
-		add(m)
 	}
 	return out
+}
+
+// cjkWindows 把一段连续中文切成 2~4 字滑窗候选。
+//
+// ★ 去重与裁剪
+// ------------
+// 同一段中文会产出大量重叠窗口（「监控面板的」→ 监控/控面板/面板的…），
+// 但只有**非重叠前缀**保留，避免符号集被同质候选塞满：
+//
+//	「监控面板的」→ 监控控/控面板/面板的（步长 2，max-1 = 3）
+//
+// 泛词在调用侧被 symbolStopWords 过滤。
+func cjkWindows(run string) []string {
+	r := []rune(run)
+	if len(r) < cjkWindowMin {
+		return nil
+	}
+	// 去掉句尾的虚词尾巴（「的」「了」「吗」等）——
+	// 它们几乎不可能是块内容的一部分
+	for len(r) > cjkWindowMin && isTrailingParticle(r[len(r)-1]) {
+		r = r[:len(r)-1]
+	}
+	out := make([]string, 0, 8)
+	n := len(r)
+	for i := 0; i < n; i++ {
+		for l := cjkWindowMax; l >= cjkWindowMin; l-- {
+			if i+l > n {
+				continue
+			}
+			w := string(r[i : i+l])
+			if symbolStopWords[w] {
+				continue
+			}
+			out = append(out, w)
+			// 只取该位置最长的一个窗口，往后步进，避免重叠候选
+			i += l - 1
+			break
+		}
+	}
+	return out
+}
+
+func isTrailingParticle(r rune) bool {
+	switch r {
+	case '的', '了', '吗', '呢', '啊', '呀', '吧', '是', '在', '个':
+		return true
+	}
+	return false
 }
 
 // SymbolScore 用查询符号在块文本里的出现情况打分（0~1）。
