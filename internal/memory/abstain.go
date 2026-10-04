@@ -191,6 +191,25 @@ func (g *GraphDB) RecallBlocksGuarded(q BlockRecallQuery, query string) (
 			Notice: AbstainNotice(query, ratio, matched),
 		}, ArbitrationResult{}, nil
 	}
+	// ★ 这里**不**接 BFS 联想（2026-10-04 实测后决定）
+	//
+	// 我先把它接上了（RecallBlocksFusedBFS），理由是
+	// 「coexist 0/1 看起来是缺联想」。实测结果是**假设不成立**：
+	//
+	//	直接命中 top8 全是噪音（CPU总线… / sdk/introduce 站部署…）
+	//	联想确实在工作（从噪音节点联出 5 个）
+	//	但 13010 根本没进 top8 ⇒ 无从联想
+	//
+	// ⇒ 真正的根因是**符号切分**：
+	//   「本机服务监听哪些端口」只切出 ["本机服务","监听哪些"]，
+	//   全是跨词伪词，「端口」被中划窗的「每位置取最长窗口」吃掉。
+	//
+	// ★★ 教训：**召回即联想救不了召回本身错了的情况**。
+	//   联想从「已命中」节点出发，命中错了就一起错。
+	//   图联想补的是**上下文**，不是**命中**。
+	//
+	// ⇒ 联想入口作为独立函数保留（RecallBlocksFusedBFS），
+	//   等命中质量修好之后再接 —— 那时它才有意义。
 	hits, arb, rerr := g.RecallBlocksFused(q, query)
 	return hits, nil, arb, rerr
 }

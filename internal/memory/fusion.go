@@ -469,3 +469,166 @@ func (g *GraphDB) RecallBlocksFused(q BlockRecallQuery, query string) (
 	}
 	return kept, arb, nil
 }
+
+// ═══════════════════════════════════════════════════════════════
+//  RecallBlocksFusedBFS —— 召回即联想（2026-10-04）
+//
+//  ★★ 这个入口是为了验证一个假设：
+//
+//  生产探针 coexist 0/1：查询「本机服务监听哪些端口」召不回 13010。
+//  直觉是「召回该联想」—— 命中节点沿边走一层，找回图上相连的上下文。
+//
+//  ★ 实测结论：**假设不成立**，而且原因值得记下来。
+//
+//  调试记录（生产库）：
+//
+//	直接命中 top8 全是噪音（CPU总线… / sdk/introduce 站部署 / …）
+//	联想确实在工作（从噪音节点联出了 5 个）
+//	但 13010 **根本没进 top8** ⇒ 联想无从谈起
+//
+//  往下挖，真正的根因是**符号切分**：
+//
+//	查询「本机服务监听哪些端口」的符号只有
+//	["本机服务","监听哪些"] —— 全是跨词伪词
+//	「端口」被中划窗「每位置只取最长窗口」吃掉
+//	⇒ 符号路对「14010端口」全打 0 分
+//
+//  ⇒ ★★ **召回即联想救不了召回本身错了的情况**：
+//     联想从**已命中**节点出发，而命中节点本身就是错的。
+//     图联想只能补上下文，不能修命中。
+//
+//  所以本函数**不接入生产路径**，作为独立入口保留：
+//  修好命中质量之后，它才有意义。
+// ═══════════════════════════════════════════════════════════════
+
+// bfsExpansionBudget 是 BFS 追加节点的总预算上限。
+//
+// ★ 为什么必须有预算：图不是树 —— 关系边双向、稠密。
+//
+//	无预算的 BFS 在大图上会把整个连通分量拖进来，
+//	而 memory_recall 的工具预算是有限的
+//	（历史上曾一次返回 193 个实体、13744 tokens，是预算的 436%）。
+//
+// ★ 它约束「**追加**的联想节点」，不含直接命中 ——
+//
+//	直接命中已由 q.TopK 控制。
+const bfsExpansionBudget = 60
+
+// RecallBlocksFusedBFS 在向量 + 符号的直接命中之外，
+// 对每个命中节点做一层 BFS，把联想到的节点按**发现顺序**追加到尾部。
+//
+// ★ 追加而非置顶：联想是补充，不是答案。
+//
+//	混进相关性排序会污染「离查询多近」这个信号。
+//
+// ★ 联想节点按 base/(1+d) 衰减，越远越弱但仍 > 0
+//
+//	（否则会被下游 MinScore 滤掉）。
+//
+// ★ 预算耗尽即停，且已产出的部分照常返回 ——
+//
+//	截断不该让整次召回失败。
+func (g *GraphDB) RecallBlocksFusedBFS(q BlockRecallQuery, query string, depth int) (
+	[]FusedHit, ArbitrationResult, error) {
+
+	hits, arb, err := g.RecallBlocksFused(q, query)
+	if err != nil {
+		return nil, arb, err
+	}
+	if depth <= 0 || len(hits) == 0 {
+		return hits, arb, nil
+	}
+
+	seen := make(map[string]bool, len(hits))
+	for _, h := range hits {
+		seen[h.BlockID] = true
+	}
+	base := 0.0
+	for _, h := range hits {
+		if h.Score > base {
+			base = h.Score
+		}
+	}
+	if base <= 0 {
+		base = 1.0
+	}
+
+	appended := 0
+	for _, seed := range hits {
+		if appended >= bfsExpansionBudget {
+			break
+		}
+		for d := 1; d <= depth; d++ {
+			neighbors, err := g.NeighbourBlocks(seed.BlockID)
+			if err != nil {
+				// 联想失败不该让整次召回失败 —— 主路结果仍然有用。
+				break
+			}
+			for _, nb := range neighbors {
+				if seen[nb.ID] {
+					continue
+				}
+				seen[nb.ID] = true
+				if appended >= bfsExpansionBudget {
+					return hits, arb, nil
+				}
+				hits = append(hits, FusedHit{
+					BlockID: nb.ID,
+					Text:    nb.Text,
+					Score:   base / float64(1+d),
+					Why: []string{"联想：" + seed.Text + " → " + nb.Text +
+						fmt.Sprintf("（%d 层）", d)},
+				})
+				appended++
+			}
+			// 只展开一层 —— 下一轮 d 由新追加的节点继续。
+			break
+		}
+	}
+	return hits, arb, nil
+}
+
+// NeighbourBlocks 返回 startID 的**直接邻居**（一层，双向，按发现顺序）。
+//
+// ★ 与 BFSBlocks 的区别：那个按 depth 逐层展开，
+//
+//	这里专供召回链逐层调用 —— 因为要按层给不同打分。
+//
+// ★ 只沿**关系边**展开，不沿 contains 结构边：
+//
+//	contains 连的是「原句块 → 字段块/关系边」，那是实现细节，
+//	把它当语义边会让原句块（长文本）混进召回结果、抢占预算。
+func (g *GraphDB) NeighbourBlocks(startID string) ([]MemoryBlock, error) {
+	if startID == "" {
+		return nil, nil
+	}
+	g.mu.RLock()
+	defer g.mu.RUnlock()
+
+	rows, err := g.db.Query(
+		`SELECT DISTINCT
+		        CASE WHEN e.source_id = ? THEN e.target_id ELSE e.source_id END AS peer
+		 FROM memory_block_edges e
+		 WHERE (e.source_id = ? OR e.target_id = ?)
+		   AND e.source_kind = 'block' AND e.target_kind = 'block'
+		   AND e.edge_type != 'contains'
+		   AND COALESCE(e.status, '') != 'deleted'
+		 ORDER BY e.created_at ASC, e.id ASC`, startID, startID, startID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var ids []string
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			return nil, err
+		}
+		ids = append(ids, id)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return g.blocksByIDsLocked(ids)
+}

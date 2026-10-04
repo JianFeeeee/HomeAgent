@@ -310,6 +310,10 @@ func (g *GraphDB) BFSBlocks(startID string, depth int) ([]MemoryBlock, error) {
 	// 不去重会在环上无限展开。
 	visited := map[string]bool{startID: true}
 	frontier := []string{startID}
+	// ★ ordered 记录 BFS 的**发现顺序**：起点在前，邻居按层、按到达顺序。
+	//   它是「离查询多近」这个语义的载体 —— 丢了顺序，
+	//   「最近的上下文在前」就没了（同图两次 BFS 结果不同）。
+	ordered := []string{startID}
 
 	for d := 0; d < depth && len(frontier) > 0; d++ {
 		var next []string
@@ -338,6 +342,9 @@ func (g *GraphDB) BFSBlocks(startID string, depth int) ([]MemoryBlock, error) {
 				}
 				if nb != "" && !visited[nb] {
 					visited[nb] = true
+					// ★ 记录**发现顺序** —— BFS 的语义全在这里。
+					//   去重用 map，出序用这个 slice，两者不能混。
+					ordered = append(ordered, nb)
 					next = append(next, nb)
 				}
 			}
@@ -350,12 +357,22 @@ func (g *GraphDB) BFSBlocks(startID string, depth int) ([]MemoryBlock, error) {
 		frontier = next
 	}
 
-	// 取块内容（按 visited 顺序返回：起点在前，邻居按发现顺序）
-	ids := make([]string, 0, len(visited))
-	for id := range visited {
-		ids = append(ids, id)
+	// ★ 取块内容必须按**发现顺序**，不能用 map 遍历。
+	//
+	// visited 是 map（判定去重要 O(1)），而它的迭代顺序是随机的 ——
+	// 于是同一个图连续两次 BFS 得到不同顺序的结果，
+	// 「离查询多近」这个语义就没了，测试与用户输出都会飘。
+	//
+	// 正确做法：用入队时累积的 ordered（见上），终点直接传它。
+	//
+	// 兜底：若 ordered 为空（depth=0 时不展开），退回 map 遍历 ——
+	// 此时只有一个节点，顺序无所谓。
+	if len(ordered) == 0 {
+		for id := range visited {
+			ordered = append(ordered, id)
+		}
 	}
-	return g.blocksByIDsLocked(ids)
+	return g.blocksByIDsLocked(ordered)
 }
 
 func (g *GraphDB) blocksByIDsLocked(ids []string) ([]MemoryBlock, error) {
