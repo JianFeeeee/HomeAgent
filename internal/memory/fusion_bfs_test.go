@@ -157,3 +157,93 @@ func textsOfFused(hits []FusedHit) []string {
 	}
 	return out
 }
+
+// ═══════════════════════════════════════════════════════════════
+//  中文字符切分 —— 判据（2026-10-04）
+//
+//  ★ 这是生产探针 coexist 0/1 的**真正根因**
+//
+//  滑窗「每位置只取最长窗口」把目标词吃掉了：
+//
+//	「本机服务监听哪些端口」
+//	  滑窗 → ["本机服务", "监听哪些"]   全是跨词伪词
+//	  jieba → [本机 服务 监听 哪些 端口] 「端口」独立成词
+//
+// ⇒ 「端口」从未单独成窗 ⇒ 符号路对「14010端口」全打 0 分
+//   ⇒ 直接命中全是噪音 ⇒ 图联想也无从谈起
+// ═══════════════════════════════════════════════════════════════
+
+// TestQuerySymbols_目标词必须独立成词
+func TestQuerySymbols_目标词必须独立成词(t *testing.T) {
+	for _, tc := range []struct {
+		query   string
+		want    []string // 必须出现的词
+		notWant []string // 跨词伪词，出现即失败
+	}{
+		{
+			query:   "本机服务监听哪些端口",
+			want:    []string{"端口", "服务", "监听"},
+			notWant: []string{"听哪些", "些端口", "务监听哪"},
+		},
+		{
+			query:   "grafana 监控面板的端口是多少",
+			want:    []string{"端口", "面板", "grafana"},
+			notWant: []string{"控面板的", "板的端口"},
+		},
+		{
+			query: "本机 13010 端口对应什么服务",
+			want:  []string{"13010", "端口", "服务"},
+		},
+	} {
+		syms := QuerySymbols(tc.query)
+		set := make(map[string]bool, len(syms))
+		for _, s := range syms {
+			set[s] = true
+		}
+		fmt.Printf("  %q → %v\n", tc.query, syms)
+		for _, w := range tc.want {
+			if !set[w] {
+				t.Errorf("★ %q 的符号应含 %q（目标词被切分吃掉），实际 %v", tc.query, w, syms)
+			}
+		}
+		for _, w := range tc.notWant {
+			if set[w] {
+				t.Errorf("★ %q 的符号不该含跨词伪词 %q，实际 %v", tc.query, w, syms)
+			}
+		}
+	}
+}
+
+// TestQuerySymbols_数字与英文精确串不受分词影响
+func TestQuerySymbols_数字与英文精确串(t *testing.T) {
+	syms := QuerySymbols("本机 13010 端口对应 grafana 9.99.99 吗")
+	set := map[string]bool{}
+	for _, s := range syms {
+		set[s] = true
+	}
+	for _, want := range []string{"13010", "grafana", "9.99.99"} {
+		if !set[want] {
+			t.Errorf("★ 精确串 %q 必须原样保留，实际 %v", want, syms)
+		}
+	}
+}
+
+// TestSymbolScore_目标词能匹配到对应块：端到端的一环
+func TestSymbolScore_目标词能匹配到对应块(t *testing.T) {
+	syms := QuerySymbols("本机服务监听哪些端口")
+	for _, tc := range []struct {
+		text        string
+		shouldMatch bool
+	}{
+		{"14010端口", true},
+		{"端口", true},
+		{"13010/13011 而非 12011", false}, // 不含目标词
+	} {
+		_, matched, _ := SymbolScore(syms, tc.text)
+		got := len(matched) > 0
+		if got != tc.shouldMatch {
+			t.Errorf("★ %q 是否匹配 %q：期望 %v，实际 %v（matched=%v）",
+				tc.text, "端口", tc.shouldMatch, got, matched)
+		}
+	}
+}

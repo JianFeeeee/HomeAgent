@@ -112,6 +112,35 @@ var symbolStopWords = map[string]bool{
 	"文件": true, "目录": true, "路径": true, "用户": true, "系统": true,
 }
 
+// cjkFunctionWords 是 jieba 分出来的**虚词** —— 它们是词，但不携带语义。
+//
+// ★ 与 symbolStopWords 的区别（这是 2026-10-04 才想清楚的）
+// ------------------
+//
+//	symbolStopWords  滑窗的跨词伪词（2~4 字重叠窗口）
+//	cjkFunctionWords 词典分词认出的虚词
+//
+// 「端口」曾在 symbolStopWords 里，那是错的 —— 它是实词。
+// 但「什么」「哪些」是真的虚词，即便 jieba 认得出它们，
+// 作为召回信号也没有区分度（库里有「什么」的块很多，
+// 而「哪些」的命中几乎覆盖全库）。
+//
+// ★ 所以两套标准分开：jieba 分出来的词过这张**虚词**表，
+//
+//	滑窗产出的候选过 symbolStopWords。
+var cjkFunctionWords = map[string]bool{
+	"什么": true, "哪些": true, "哪个": true, "怎么": true, "如何": true,
+	"是否": true, "可以": true, "需要": true, "应该": true, "必须": true,
+	"的": true, "了": true, "吗": true, "呢": true, "吧": true,
+	"和": true, "与": true, "或": true, "及": true, "等": true,
+	// ★ 语气词（2026-10-04）：判据 TestFuse_无符号退化为向量序 用「嗯」
+	//   构造"查询提不出符号"的场景，而 jieba 会把它切出来 ——
+	//   于是那条判据测不到退化路径了（它绿着，但测的不是目标行为）。
+	//   ★ 这是「修了 A 弄坏 B」的典型：单看每处都对，合起来错。
+	"嗯": true, "啊": true, "呀": true, "哦": true, "噢": true,
+	"欸": true, "喂": true, "哎": true, "唔": true,
+}
+
 // QuerySymbols 提取查询里的高信息量符号。
 func QuerySymbols(query string) []string {
 	out := make([]string, 0, 8)
@@ -129,9 +158,70 @@ func QuerySymbols(query string) []string {
 	for _, m := range symbolLatinRe.FindAllString(query, -1) {
 		add(strings.ToLower(m))
 	}
-	for _, run := range symbolCJKRunRe.FindAllString(query, -1) {
-		for _, w := range cjkWindows(run) {
-			add(w)
+	// ★★★ 中文用 jieba 切，滑窗只作降级（2026-10-04）
+	//
+	// 为什么不用滑窗（它曾是这个函数的唯一实现）：
+	//
+	//	查询「本机服务监听哪些端口」
+	//	  滑窗 → ["本机服务", "监听哪些"]   ← 全是跨词伪词
+	//	  jieba → [本机 服务 监听 哪些 端口] ← 「端口」独立成词
+	//
+	// ★ 这是生产探针 coexist 0/1 的**真正根因**：
+	//   「端口」从未单独成窗 ⇒ 符号路对「14010端口」全打 0 分
+	//   ⇒ 直接命中全是噪音 ⇒ 图联想也无从谈起
+	//   （详见 RecallBlocksFusedBFS 的注释：联想救不了召回本身错了）
+	//
+	// ★ 为什么两者都产出
+	//
+	//   jieba 有词典依赖（词库目录）。GetJieba() 拿不到词库时返回 nil，
+	//   此时若只靠 jieba，符号会**整个消失** ⇒ 符号路彻底失效。
+	//   所以：jieba 成功则用它 + 保留滑窗作为补充；
+	//   失败则纯滑窗（退化成今天的行为，不会更差）。
+	//
+	// ★ 停用词在这里仍然生效（jieba 分出来的虚词会被 add 过滤）：
+	//   「哪些」「什么」这类词 jieba 也会切出来，不加过滤会被当信号。
+	cjkRuns := symbolCJKRunRe.FindAllString(query, -1)
+	cut := GetJieba()
+	usedJieba := false
+	if cut != nil {
+		for _, run := range cjkRuns {
+			for _, w := range cut.Cut(run, true) {
+				w = strings.TrimSpace(w)
+				if w == "" || cjkFunctionWords[w] {
+					continue
+				}
+				// ★★ 停用词表**只对滑窗生效**，对 jieba 不生效。
+				//
+				// 理由：jieba 是**词典分词**，「端口」「服务」被切成
+				// 独立词，是因为它们在语料里确实是词 ——
+				// 它们携带语义，不是伪词。
+				//
+				// 而滑窗切出来的「服务」可能只是「本机服务监听」里
+				// 恰好跨界的 2 字串，那种是伪词，该滤。
+				//
+				// ★ 混用两套标准会出问题：2026-10-04 试过把
+				//   「端口/服务」从停用词表移出（数据上它们命中
+				//   只占 0.8%，并不泛），但因为**滑窗**同时被改成
+				//   全子窗，于是噪音涌入、casual 从 3/4 掉到 2/4。
+				//   ⇒ 那次回归的根因不是停用词表，是滑窗。
+				//
+				// 现在滑窗保持原样（全子窗没启用），jieba 独立成词
+				// 不受停用词限制 —— 两套标准分开，问题不会互相污染。
+				// ★ 只收**单个词**，不收 jieba 的组合结果
+				//   （Cut(hmm=true) 只切不组，理论上不会有组合；
+				//   这里防御性过滤，避免将来误用 hmm=false 时把整句当符号）。
+				add(w)
+			}
+		}
+		usedJieba = len(out) > 0
+	}
+	// ★ 滑窗补充：jieba 缺词时仍能给出重叠窗口候选。
+	//   注意滑窗产出**会**包含停用词过滤（cjkWindows 内部已过滤）。
+	if !usedJieba {
+		for _, run := range cjkRuns {
+			for _, w := range cjkWindows(run) {
+				add(w)
+			}
 		}
 	}
 	return out
