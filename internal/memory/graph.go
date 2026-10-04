@@ -1576,7 +1576,26 @@ func (g *GraphDB) Introspect() (map[string]interface{}, error) {
 	defer g.mu.RUnlock()
 
 	var entityCount, relationCount int
-	g.db.QueryRow("SELECT COUNT(*) FROM entities").Scan(&entityCount)
+	// ★★★ entity_count 必须数**块**而不是旧表 entities（2026-10-05）
+	//
+	// 旧表停双写 ⇒ 这句恒为 0 ⇒ Introspect 报告「库里没有记忆」
+	// 而实际有几千条。实测（隔离实例，380 块）工具回：
+	//
+	//	记忆统计: map[entity_count:0 memory_hotspots:[map[count:15 name:order-gw ...]]
+	//
+	// ★ 同一个输出里 entity_count=0 而 hotspots 有真实度数 ——
+	//   **半个旧表半个块表**，模型看到的是自相矛盾的统计，
+	//   于是会得出「记忆是空的」而放弃写入。
+	//
+	// ★ 口径对齐下面两处（relation_count / hotspots 都已数块）。
+	//
+	// ★ 为什么不数全表块：块表含**原句块**（blk_src_*）与媒体块，
+	//   它们不是「实体」。entity_count 的语义是端点块数
+	//   （即三元组的主语/宾语），所以排除原句块与 contains 结构边。
+	g.db.QueryRow(
+		`SELECT COUNT(*) FROM memory_blocks
+		 WHERE text_content != ''
+		   AND COALESCE(modality,'') = 'text'`).Scan(&entityCount)
 	// ★ relation_count 保持**活跃数**语义（status='active'）。
 	//
 	// 第一版为对齐迁移口径改成数全表（因为 MigrateLegacyTextEntities
@@ -1694,19 +1713,22 @@ func (g *GraphDB) MergeEntities(sourceName, targetName string) (int, error) {
 //	memory_block_edges Δ0
 //
 // ★ 危害不是「删不干净」，是**谎报**：工具层回「已彻底删除实体…及其所有关联关系」，
-//   模型据此认为内容已消失（不再提及、或重新写入），
-//   而 40+ 条关联边还在，后续召回继续命中它。
-//   这比留残迹严重一级：残迹只是脏，谎报会让模型的行为跟着错。
+//
+//	模型据此认为内容已消失（不再提及、或重新写入），
+//	而 40+ 条关联边还在，后续召回继续命中它。
+//	这比留残迹严重一级：残迹只是脏，谎报会让模型的行为跟着错。
 //
 // ★ 删块口径（用户明定「删除块」）：按**块文本精确匹配**定位，
-//   删掉这些块 + 它们的全部关联边 + 指向它们的 contains 结构边，
-//   再摘掉场景引用 —— 与 Purge 的收尾纪律一致
-//   （否则场景里挂一条永远召不回的幽灵，而 SceneStats 照样把它算进去）。
+//
+//	删掉这些块 + 它们的全部关联边 + 指向它们的 contains 结构边，
+//	再摘掉场景引用 —— 与 Purge 的收尾纪律一致
+//	（否则场景里挂一条永远召不回的幽灵，而 SceneStats 照样把它算进去）。
 //
 // ★ 为什么按文本而不按 legacy entities.id：
-//   旧表只是历史对照，不再是权威源；块才是活图谱的节点。
-//   按 name 查 entities.id 会把「旧表里叫这个名字的行」
-//   与「图里文本相同的块」当成两回事 —— 那正是本缺陷的成因。
+//
+//	旧表只是历史对照，不再是权威源；块才是活图谱的节点。
+//	按 name 查 entities.id 会把「旧表里叫这个名字的行」
+//	与「图里文本相同的块」当成两回事 —— 那正是本缺陷的成因。
 func (g *GraphDB) DeleteEntity(name string) (DeleteResult, error) {
 	g.mu.Lock()
 	defer g.mu.Unlock()
@@ -1815,8 +1837,9 @@ func (g *GraphDB) DeleteEntity(name string) (DeleteResult, error) {
 // DeleteResult 报告一次删除实际删掉了什么。
 //
 // ★ 不返回单一数字，是因为「删了 1 个块」和「删了 0 个块 40 条边」
-//   是**两种不同的事实**，压成一个 int 就会让工具层只能说谎
-//   —— 那正是本缺陷的成因（回「已彻底删除…及其所有关联关系」而实际 Δ0）。
+//
+//	是**两种不同的事实**，压成一个 int 就会让工具层只能说谎
+//	—— 那正是本缺陷的成因（回「已彻底删除…及其所有关联关系」而实际 Δ0）。
 type DeleteResult struct {
 	Blocks int `json:"blocks"`
 	Edges  int `json:"edges"`

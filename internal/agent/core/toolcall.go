@@ -367,8 +367,16 @@ func (a *Agent) executeMemoryTool(tc agentAPI.ToolCall, turnScenes []string) str
 		if err != nil {
 			return fmt.Sprintf("记忆写入失败: %v", err)
 		}
+		edgesBefore, err := a.memory.MemoryEdgeCount()
+		if err != nil {
+			return fmt.Sprintf("记忆写入失败: %v", err)
+		}
 
-		ec, rc, mb, err := a.commitTriplesWithMedia(triples, string(a.id), 0, nil)
+		// ★ ec/rc 丢弃（2026-10-05）：它们恒为 0（graph.go 里
+		// relationsCreated = 0 写死），拿它们当「写了几条」会**永远说 0**。
+		// 保留位置只是因为 commitTriplesWithMedia 的签名未变。
+		//   唯一可信信号是下面实测的 newBlocks / newEdges。
+		_, _, mb, err := a.commitTriplesWithMedia(triples, string(a.id), 0, nil)
 		if err != nil {
 			return fmt.Sprintf("记忆写入失败: %v", err)
 		}
@@ -376,7 +384,12 @@ func (a *Agent) executeMemoryTool(tc agentAPI.ToolCall, turnScenes []string) str
 		if err != nil {
 			return fmt.Sprintf("记忆写入失败: %v", err)
 		}
+		edgesAfter, err := a.memory.MemoryEdgeCount()
+		if err != nil {
+			return fmt.Sprintf("记忆写入失败: %v", err)
+		}
 		newBlocks := blocksAfter - blocksBefore
+		newEdges := edgesAfter - edgesBefore
 		// ★ 0 写入必须显式报告：提交了 N 条但一条都没落库（如实体名校验被拒）
 		// 却回「已写入 0 个」，模型会当成成功而永不重试 —— 实测（2026-10-01
 		// 跑分）：metrics 端口/分机号更新全部因此静默丢失。
@@ -395,10 +408,27 @@ func (a *Agent) executeMemoryTool(tc agentAPI.ToolCall, turnScenes []string) str
 		if newBlocks == 0 && mb == 0 {
 			return fmt.Sprintf("提交了 %d 条三元组但全部被拒（未写入）。常见原因：实体名为空、过长（>50 字）、或不含字母/汉字/数字。请检查主语/宾语的写法后重试。", len(triples))
 		}
+		// ★★★ 成功分支也**不能用 ec/rc**（2026-10-05）
+		//
+		//	旧表停双写后 ec/rc 恒为 0，所以这里原本回
+		//	「已写入 0 个实体和 0 条关系」——**而实际写进去了**。
+		//
+		//	实测（隔离实例）：一次对话写入 7 块 9 边，工具却回
+		//	「已写入 0 个实体和 0 条关系」与「全部被拒（未写入）」。
+		//	模型据此认为记忆系统坏了，回复里明说
+		//	「the write is being rejected」并放弃重试。
+		//
+		//	★ 与上面那个「报假失败」是同一个病的两种表现：
+		//	  判据用 newBlocks（对）但文案用 ec/rc（错），
+		//	  于是同一份代码里两套口径打架。
+		//
+		//	唯一可信的信号是 newBlocks（块总量差值）——
+		//	它直接量「库里多了几个块」，不依赖任何旧表口径。
 		if mb > 0 {
-			return fmt.Sprintf("已写入 %d 个实体和 %d 条关系，关联 %d 份媒体", ec, rc, mb)
+			return fmt.Sprintf("已写入 %d 个记忆块、%d 条关系边，关联 %d 份媒体",
+				newBlocks, newEdges, mb)
 		}
-		return fmt.Sprintf("已写入 %d 个实体和 %d 条关系", ec, rc)
+		return fmt.Sprintf("已写入 %d 个记忆块、%d 条关系边", newBlocks, newEdges)
 
 	case "memory_introspect":
 		if msg := requireFull(); msg != "" {

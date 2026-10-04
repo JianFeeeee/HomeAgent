@@ -19,8 +19,9 @@ import (
 //	而 40+ 条关联边还在，召回继续命中。
 //
 // ★ 判据设计要点：只断言「块和边真的少了」会漏掉一半缺陷
-//   （比如只删块不删边、或只删边不删块都能通过一半断言），
-//   所以这里**同时**断言块没了、边没了、没有悬空边。
+//
+//	（比如只删块不删边、或只删边不删块都能通过一半断言），
+//	所以这里**同时**断言块没了、边没了、没有悬空边。
 func TestDeleteEntityRemovesLiveBlocks(t *testing.T) {
 	g, err := NewGraphDB(filepath.Join(t.TempDir(), "g.db"))
 	if err != nil {
@@ -132,7 +133,8 @@ func TestDeleteEntityByExactTextNotSubstring(t *testing.T) {
 // TestDeleteEntityMissingBlockIsError 钉住「找不到要报错，不能静默成功」。
 //
 // ★ 静默成功比报错坏：模型收到「已删除」会认为内容已消失，
-//   于是重新写入或不再提及 —— 而库里那块从未被动过。
+//
+//	于是重新写入或不再提及 —— 而库里那块从未被动过。
 func TestDeleteEntityMissingBlockIsError(t *testing.T) {
 	g, err := NewGraphDB(filepath.Join(t.TempDir(), "g.db"))
 	if err != nil {

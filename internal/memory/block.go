@@ -744,3 +744,27 @@ func (g *GraphDB) MemoryBlockCount() (int, error) {
 	}
 	return n, nil
 }
+
+// MemoryEdgeCount 返回关系边数（不含 contains 结构边）。
+//
+// ★ 为什么需要它（2026-10-05）
+//
+//	旧表停双写后 Commit 的 ec/rc 恒为 0（graph.go 里
+//	relationsCreated = 0 是写死的），所以「写了多少条关系」
+//	唯一的可信来源只能是**实测边数差值**。
+//
+//	不含 contains：那是结构边（原句块 → 字段块 / 关系边），
+//	混进来会让「关系数」随原句数量翻倍 —— 与 Introspect 的
+//	relation_count 口径保持一致。
+func (g *GraphDB) MemoryEdgeCount() (int, error) {
+	g.mu.RLock()
+	defer g.mu.RUnlock()
+	var n int
+	if err := g.db.QueryRow(
+		`SELECT COUNT(*) FROM memory_block_edges
+		 WHERE source_kind = 'block' AND target_kind = 'block'
+		   AND edge_type != 'contains'`).Scan(&n); err != nil {
+		return 0, err
+	}
+	return n, nil
+}
