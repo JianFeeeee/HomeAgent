@@ -373,3 +373,42 @@ func (g *GraphDB) BlocksForNode(nodeKind, nodeID string) ([]MemoryBlock, error) 
 	}
 	return blocks, rows.Err()
 }
+
+// addContainsEdgeTx 在事务内建一条**结构边**（原句块 → 关系边）。
+//
+// ★ 为什么不能用 AddRelationBlockEdge：它刻意不查重（同对节点可并存多条
+//
+//	同类型关系边，这是 52e4596 的设计）。结构边语义相反 —— 同一句与同一条
+//	关系之间只应有一条 contains，重复插入会让 BFS 的邻接表里出现重复项。
+//
+// ★ 为什么不能用 addBlockEdgeTx：它是迁移专用的 INSERT OR IGNORE 版本，
+//
+//	端点校验走的是旧表。
+//
+// ★ 端点允许是**边 ID**：原句块指向的是关系边（memory_block_edges.id），
+//
+//	所以 targetKind 用 'edge'。graphNodeExists 已支持该 kind。
+//
+// ★ 幂等：重复写入静默跳过（返回 nil），让重试安全。
+func addContainsEdgeTx(tx *sql.Tx, sentenceBlockID string, edgeID int64, weight float64) error {
+	if sentenceBlockID == "" || edgeID == 0 {
+		return nil
+	}
+	var n int
+	if err := tx.QueryRow(`SELECT COUNT(*) FROM memory_block_edges
+		WHERE source_kind='block' AND source_id=?
+		  AND target_kind='edge' AND target_id=?
+		  AND edge_type='contains' AND COALESCE(session_id,'')=''`,
+		sentenceBlockID, edgeID).Scan(&n); err != nil {
+		return err
+	}
+	if n > 0 {
+		return nil
+	}
+	_, err := tx.Exec(`INSERT INTO memory_block_edges
+		(source_kind, source_id, target_kind, target_id, edge_type,
+		 confidence, status)
+		VALUES ('block', ?, 'edge', ?, 'contains', ?, 'active')`,
+		sentenceBlockID, edgeID, weight)
+	return err
+}

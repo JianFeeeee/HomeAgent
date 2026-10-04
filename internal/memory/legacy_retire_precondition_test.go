@@ -175,3 +175,131 @@ func excerpt(ss []string) string {
 	}
 	return s
 }
+
+// ★★ scene 读方适配：TagSceneByEntityGlob 改走块体系
+//
+// 现状（scene.go:260）：按实体名 GLOB 查 relations：
+//
+//	SELECT r.id, r.source_id, r.target_id, r.confidence
+//	FROM relations r JOIN entities e1 ... JOIN entities e2 ...
+//	WHERE r.status='active' AND (e1.name GLOB ? OR e2.name GLOB ?)
+//
+// 块体系里等价于：按**块文本** GLOB 找关系边的两端，
+// 再把两端块都挂到场景上（边本身也挂，kind='edge'）。
+//
+// ★ 这条路径有真实调用方（cmd/memgc），所以必须有判据。
+func TestSceneAdapt_ByEntityGlob走块体系(t *testing.T) {
+	g := newTestGraph(t)
+	defer func() { _ = g.Close() }()
+
+	// 织一张网：值班室分机号 --是--> 4324
+	for _, b := range []MemoryBlock{
+		{ID: "blk_subject", Modality: BlockText, Text: "值班室分机号"},
+		{ID: "blk_value", Modality: BlockText, Text: "4324"},
+		{ID: "blk_other", Modality: BlockText, Text: "billing服务"},
+	} {
+		if err := g.PutMemoryBlocks([]MemoryBlock{b}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := g.AddRelationBlockEdge("blk_subject", "blk_value", "是",
+		RelationEdgeData{SessionID: "s1", Confidence: 0.9, Status: EdgeActive}); err != nil {
+		t.Fatal(err)
+	}
+
+	// 按名字 GLOB 找关系（dryRun，不真写）
+	n, err := g.TagSceneByEntityGlob("值班场景", "*分机号*", true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	fmt.Printf("  GLOB '*分机号*' 匹配 %d 条关系\n", n)
+	if n != 1 {
+		t.Errorf("★ 应匹配 1 条（值班室分机号 --是--> 4324），实际 %d", n)
+	}
+
+	// 不匹配的名字不该匹配
+	n2, err := g.TagSceneByEntityGlob("值班场景", "*不存在的名字*", true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if n2 != 0 {
+		t.Errorf("★ 不该匹配任何关系，实际 %d", n2)
+	}
+
+	// ★ 真写（dryRun=false）后，场景应挂到块上
+	if _, err := g.TagSceneByEntityGlob("值班场景", "*分机号*", false); err != nil {
+		t.Fatal(err)
+	}
+	counts := sceneRefCounts(t, g)
+	fmt.Printf("  写入后 scene_refs: %v\n", counts)
+	if counts["block"] == 0 {
+		t.Error("★ 场景应挂到块上（kind='block'），实际无")
+	}
+	if counts["edge"] == 0 {
+		t.Error("★ 场景应挂到边上（kind='edge'），实际无")
+	}
+	// ★ 旧表读方不应再被使用 —— 但引用不应退回 entity/relation
+	if counts["entity"] != 0 || counts["relation"] != 0 {
+		t.Errorf("★ 不该产生旧表引用，实际 %v", counts)
+	}
+}
+
+// ★★ 悬空引用清理要认 kind='edge'
+//
+// 旧实现只清 kind='relation'/'entity'/'block'/'document'，
+// 而 scene_refs 现在多了一种：**kind='edge'**（指向 memory_block_edges.id）。
+//
+// ★ 不加这个分支的后果：边被删后那批 edge 引用永远悬空，
+//
+//	而且是**静默**的 —— purgeStaleSceneRefs 看着跑成功了，
+//	实际没清掉任何东西。
+func TestSceneAdapt_悬空清理认edge(t *testing.T) {
+	g := newTestGraph(t)
+	defer func() { _ = g.Close() }()
+
+	if err := g.PutMemoryBlocks([]MemoryBlock{
+		{ID: "blk_a", Modality: BlockText, Text: "甲"},
+		{ID: "blk_b", Modality: BlockText, Text: "乙"},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := g.AddRelationBlockEdge("blk_a", "blk_b", "是",
+		RelationEdgeData{SessionID: "s1", Confidence: 0.9}); err != nil {
+		t.Fatal(err)
+	}
+
+	// 挂三条引用：两个有效、一个指向不存在的块
+	g.mu.Lock()
+	for _, ref := range []struct{ kind, text, id string }{
+		{"block", "blk_a", "0"},
+		{"edge", "0", "99999"}, // 指向不存在的边
+		{"block", "blk_gone", "0"},
+	} {
+		if _, err := g.db.Exec(
+			`INSERT INTO scene_refs (scene_id, kind, ref_id, ref_text, weight)
+			 VALUES (1, ?, CAST(? AS INTEGER), ?, 1.0)`,
+			ref.kind, ref.id, ref.text); err != nil {
+			g.mu.Unlock()
+			t.Fatal(err)
+		}
+	}
+	g.mu.Unlock()
+
+	n, err := g.PurgeStaleSceneRefs()
+	if err != nil {
+		t.Fatal(err)
+	}
+	fmt.Printf("  清理 %d 条悬空引用\n", n)
+	if n != 2 {
+		t.Errorf("★ 应清理 2 条（悬空的 edge 与 block），实际 %d", n)
+	}
+
+	counts := sceneRefCounts(t, g)
+	fmt.Printf("  清理后: %v\n", counts)
+	if counts["edge"] != 0 {
+		t.Errorf("★ 悬空的 kind='edge' 未被清理（缺该分支）")
+	}
+	if counts["block"] != 1 {
+		t.Errorf("★ 有效引用应保留，实际 %v", counts)
+	}
+}

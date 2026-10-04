@@ -265,25 +265,38 @@ func (g *GraphDB) TagSceneByEntityGlob(sceneKey, pattern string, dryRun bool) (i
 	g.mu.Lock()
 	defer g.mu.Unlock()
 
+	// ★★★ 改走块体系（2026-10-04）
+	//
+	// 旧实现查 relations JOIN entities 按名字 GLOB。entities/relations 退场后
+	// 这条路直接断 —— 而 scene 是「条件型记忆召回」的底座，它断了整个
+	// 场景式记忆失效。
+	//
+	// 块体系里的等价物：按**块文本**匹配找关系边的两端。
+	// 只取非 deleted 的关系边（与旧 WHERE r.status='active' 同义）。
+	//
+	// ★ 用 LIKE 而不是 GLOB：GLOB 模式串里 `*?[]` 都是元字符，
+	// 而 memgc --entity-glob 传的是**用户输入**，容易带出意外模式。
 	rows, err := g.db.Query(
-		`SELECT r.id, r.source_id, r.target_id, r.confidence
-		 FROM relations r
-		 JOIN entities e1 ON r.source_id = e1.id
-		 JOIN entities e2 ON r.target_id = e2.id
-		 WHERE r.status = 'active' AND (e1.name GLOB ? OR e2.name GLOB ?)`,
-		pattern, pattern)
+		`SELECT e.id, e.source_id, e.target_id, e.confidence
+		 FROM memory_block_edges e
+		 JOIN memory_blocks sb ON sb.id = e.source_id
+		 JOIN memory_blocks tb ON tb.id = e.target_id
+		 WHERE e.source_kind = 'block' AND e.target_kind = 'block'
+		   AND COALESCE(e.status, '') != 'deleted'
+		   AND (sb.text_content LIKE ? OR tb.text_content LIKE ?)`,
+		globToLike(pattern), globToLike(pattern))
 	if err != nil {
 		return 0, err
 	}
 	type cand struct {
-		relID            int64
-		sourceID, target int64
+		edgeID           int64
+		sourceID, target string
 		confidence       float64
 	}
 	var cands []cand
 	for rows.Next() {
 		var c cand
-		if err := rows.Scan(&c.relID, &c.sourceID, &c.target, &c.confidence); err != nil {
+		if err := rows.Scan(&c.edgeID, &c.sourceID, &c.target, &c.confidence); err != nil {
 			rows.Close()
 			return 0, err
 		}
@@ -303,7 +316,15 @@ func (g *GraphDB) TagSceneByEntityGlob(sceneKey, pattern string, dryRun bool) (i
 	}
 	defer tx.Rollback()
 	for _, c := range cands {
-		if err := tagSceneTx(tx, key, c.relID, []int64{c.sourceID, c.target}, c.confidence); err != nil {
+		// ★ 端点都是**块 ID** ⇒ kind 用 'block'（不是 'entity'）；
+		//   关系边本身另挂一条 kind='edge'。
+		if err := tagSceneRefTx(tx, key, "block", 0, c.sourceID, c.confidence); err != nil {
+			return 0, err
+		}
+		if err := tagSceneRefTx(tx, key, "block", 0, c.target, c.confidence); err != nil {
+			return 0, err
+		}
+		if err := tagSceneRefTx(tx, key, "edge", c.edgeID, "", c.confidence); err != nil {
 			return 0, err
 		}
 	}
@@ -353,20 +374,39 @@ func (g *GraphDB) RecallByScene(scenes []string, limit int) (*SceneRecall, error
 	}
 	where := "(" + strings.Join(conds, " OR ") + ")"
 
-	relQuery := `SELECT r.id, r.source_id, r.target_id, e1.name, e2.name,
-			r.relation_type, r.confidence, r.status, r.session_id,
-			r.turn_id, r.created_at, COALESCE(r.date_bucket, ''),
-			COALESCE(r.sentence_id, 0), COALESCE(sn.text, ''),
+	// ★★★ 改走块体系（2026-10-04）
+	//
+	// 旧实现 JOIN relations + entities + sentences。旧表退场后这条查询
+	// 直接断 —— 而 RecallByScene 是**场景式记忆的取回端**，
+	// 它断了比写入端更致命：写入端断了会报错，取回端断了会**静默召回空**。
+	//
+	// 块体系里的等价物：
+	//
+	//	关系    → memory_block_edges（边自带 relation_type / confidence /
+	//	         session_id / turn_id / status / created_at）
+	//	两端名  → memory_blocks.text_content
+	//	原句    → 原句块 blk_src_<hash>，走 contains 边回溯
+	//
+	// ★ 原句不能丢：带条件的规则本体长在句子里，只给关系名等于没召回。
+	relQuery := `SELECT e.id, sb.id, tb.id, sb.text_content, tb.text_content,
+			e.edge_type, e.confidence, COALESCE(e.status, ''), e.session_id,
+			e.turn_id, e.created_at, COALESCE(srt.text, ''),
 			MAX(sr.weight) AS w
 		FROM scene_refs sr
 		JOIN scenes s ON sr.scene_id = s.id
-		JOIN relations r ON sr.kind = 'relation' AND sr.ref_id = r.id
-		JOIN entities e1 ON r.source_id = e1.id
-		JOIN entities e2 ON r.target_id = e2.id
-		LEFT JOIN sentences sn ON r.sentence_id = sn.id
-		WHERE ` + where + ` AND r.status = 'active'
-		GROUP BY r.id
-		ORDER BY w DESC, r.updated_at DESC, r.id DESC
+		JOIN memory_block_edges e ON sr.kind = 'edge' AND sr.ref_id = e.id
+		JOIN memory_blocks sb ON sb.id = e.source_id
+		JOIN memory_blocks tb ON tb.id = e.target_id
+		LEFT JOIN (
+			SELECT c.target_id AS edge_id, MIN(b.text_content) AS text
+			FROM memory_block_edges c
+			JOIN memory_blocks b ON b.id = c.source_id
+			WHERE c.edge_type = 'contains' AND c.target_kind = 'edge'
+			GROUP BY c.target_id
+		) srt ON srt.edge_id = e.id
+		WHERE ` + where + ` AND COALESCE(e.status, '') = 'active'
+		GROUP BY e.id
+		ORDER BY w DESC, e.created_at DESC, e.id DESC
 		LIMIT ?`
 	relArgs := append(append([]interface{}{}, args...), limit)
 	rows, err := g.db.Query(relQuery, relArgs...)
@@ -376,11 +416,20 @@ func (g *GraphDB) RecallByScene(scenes []string, limit int) (*SceneRecall, error
 	for rows.Next() {
 		var rel Relation
 		var w float64
-		if err := rows.Scan(&rel.ID, &rel.SourceID, &rel.TargetID, &rel.SourceName, &rel.TargetName,
+		// ★ 端点扫进块 ID 字段（旧的 int64 SourceID/TargetID 留空 —— 它们是
+		//   relations 行号，块体系下无意义）。
+		// ★ DateBucket / SentenceID 不再有来源：旧表退场后边表不存这两列，
+		//   日期可从 created_at 推，原句 ID 由 contains 边回溯得到。
+		if err := rows.Scan(&rel.ID, &rel.SourceBlockID, &rel.TargetBlockID,
+			&rel.SourceName, &rel.TargetName,
 			&rel.RelationType, &rel.Confidence, &rel.Status, &rel.SessionID,
-			&rel.TurnID, &rel.CreatedAt, &rel.DateBucket, &rel.SentenceID, &rel.SentenceText, &w); err != nil {
+			&rel.TurnID, &rel.CreatedAt, &rel.SentenceText, &w); err != nil {
 			rows.Close()
 			return nil, err
+		}
+		// 旧表退场后边表不存 date_bucket，从 created_at 推日期桶。
+		if rel.DateBucket == "" && !rel.CreatedAt.IsZero() {
+			rel.DateBucket = rel.CreatedAt.Format("2006-01-02")
 		}
 		out.Relations = append(out.Relations, rel)
 	}
@@ -389,31 +438,37 @@ func (g *GraphDB) RecallByScene(scenes []string, limit int) (*SceneRecall, error
 		return nil, err
 	}
 
-	entQuery := `SELECT e.id, e.name, e.type, e.mention_count, e.created_at, e.updated_at, MAX(sr.weight) AS w
-		FROM scene_refs sr
-		JOIN scenes s ON sr.scene_id = s.id
-		JOIN entities e ON sr.kind = 'entity' AND sr.ref_id = e.id
-		WHERE ` + where + `
-		GROUP BY e.id
-		ORDER BY w DESC, e.mention_count DESC, e.id DESC
-		LIMIT ?`
-	entArgs := append(append([]interface{}{}, args...), limit)
-	erows, err := g.db.Query(entQuery, entArgs...)
-	if err != nil {
-		return nil, err
-	}
-	for erows.Next() {
-		var e Entity
-		var w float64
-		if err := erows.Scan(&e.ID, &e.Name, &e.Type, &e.MentionCount, &e.CreatedAt, &e.UpdatedAt, &w); err != nil {
-			erows.Close()
-			return nil, err
+	// ★★★ 改走块体系（2026-10-04）
+	//
+	// 旧实现 JOIN entities。旧表退场后这条路断 —— 而「两端实体」是场景
+	// 召回里**能重建关系语义的那一半**（「值班室分机号 → 4324」与
+	// 「billing服务 → 4324」只凭关系名无法区分）。
+	//
+	// 块体系里两端块已在 rel.SourceBlockID / rel.TargetBlockID 上，
+	// 不必再查一次 —— 但排序口径要保持：weight 降序 → mention_count → id。
+	// 块没有 mention_count，用 created_at 兼之（语义近似：先出现的更稳定）。
+	//
+	// ★ 用 map 去重：两端块可能出现在多条关系的端点上，
+	//   而关系查询已按 limit 截断 —— 实体列表不应再套一次 limit 而漏掉
+	//   已召回关系的两端。
+	seenBlock := make(map[string]bool)
+	for _, rel := range out.Relations {
+		for _, blk := range []struct {
+			id   string
+			name string
+		}{{rel.SourceBlockID, rel.SourceName}, {rel.TargetBlockID, rel.TargetName}} {
+			if blk.id == "" || blk.name == "" || seenBlock[blk.id] {
+				continue
+			}
+			seenBlock[blk.id] = true
+			out.Entities = append(out.Entities, Entity{
+				ID:        0, // 旧表行号已无意义
+				Name:      blk.name,
+				Type:      "block",
+				CreatedAt: rel.CreatedAt,
+				UpdatedAt: rel.CreatedAt,
+			})
 		}
-		out.Entities = append(out.Entities, e)
-	}
-	erows.Close()
-	if err := erows.Err(); err != nil {
-		return nil, err
 	}
 
 	blockQuery := `SELECT b.id, b.modality, b.text_content, b.payload_digest, b.mime,
@@ -475,8 +530,11 @@ func (g *GraphDB) SceneStats() ([]SceneStat, error) {
 	rows, err := g.db.Query(
 		`SELECT s.key,
 		        COUNT(sr.id),
-		        SUM(CASE WHEN sr.kind = 'relation' THEN 1 ELSE 0 END),
-		        SUM(CASE WHEN sr.kind = 'entity' THEN 1 ELSE 0 END),
+		        -- ★ kind 口径已随 scene_refs 迁移改变（07b8c23 / 2026-10-04）
+		        --   旧：'relation' / 'entity' —— 两者都已退场，归零
+		        --   新：'edge' / 'block'
+		        SUM(CASE WHEN sr.kind = 'edge' THEN 1 ELSE 0 END),
+		        SUM(CASE WHEN sr.kind = 'block' THEN 1 ELSE 0 END),
 		        COALESCE(s.strength, 1),
 		        (SELECT COUNT(*) FROM scene_features f WHERE f.scene_id = s.id),
 		        COALESCE(s.origin, 'emergent'),
@@ -518,8 +576,18 @@ func (g *GraphDB) PurgeStaleSceneRefs() (int, error) {
 }
 
 func (g *GraphDB) purgeStaleSceneRefsLocked() (int, error) {
+	// ★★ kind='edge' 分支必须存在
+	//
+	// scene_refs 现在多了一种引用：指向 memory_block_edges.id（关系边）。
+	// 旧实现只清 relation/entity/block/document —— 于是边被删后，
+	// 那批 edge 引用**静默悬空**，而 purgeStaleSceneRefs 看着跑成功了。
+	//
+	// ★ relation/entity 两个分支保留但已无数据来源
+	//   （07b8c23 把 718 条全迁到 block/edge），
+	//   它们现在是空转；等旧表删除时这两个分支也要删。
 	res, err := g.db.Exec(`DELETE FROM scene_refs WHERE
-		(kind = 'relation' AND ref_id NOT IN (SELECT id FROM relations))
+		(kind = 'edge' AND ref_id NOT IN (SELECT id FROM memory_block_edges))
+		OR (kind = 'relation' AND ref_id NOT IN (SELECT id FROM relations))
 		OR (kind = 'entity' AND ref_id NOT IN (SELECT id FROM entities))
 		OR (kind = 'block' AND ref_text NOT IN (SELECT id FROM memory_blocks))
 		OR (kind = 'document' AND ref_text NOT IN (SELECT id FROM documents))`)
@@ -538,8 +606,11 @@ func (g *GraphDB) ScenesOfRelation(relationID int64) ([]string, error) {
 	g.mu.RLock()
 	defer g.mu.RUnlock()
 	rows, err := g.db.Query(
+		// ★ 端点已是**关系边**，故 kind='edge'（不是 'relation'）。
+		//   旧表退场后 kind='relation' 恒空 ⇒ 返回空列表 ⇒
+		//   「这条记忆属于哪些场景」的信息彻底丢失，且无报错。
 		`SELECT s.key FROM scene_refs sr JOIN scenes s ON sr.scene_id = s.id
-		 WHERE sr.kind = 'relation' AND sr.ref_id = ?`, relationID)
+		 WHERE sr.kind = 'edge' AND sr.ref_id = ?`, relationID)
 	if err != nil {
 		return nil, err
 	}
@@ -722,4 +793,57 @@ func (g *GraphDB) DedupeScenes() (int, error) {
 		}
 	}
 	return merged, nil
+}
+
+// globToLike 把 GLOB 模式转成 LIKE（只换通配符：* → %、? → _）。
+//
+// ★ 代价：LIKE 不支持 `[...]` 字符类（GLOB 支持）。
+//
+//	若调用方需要字符类，应改用显式的 name LIKE 参数，而不是走 glob。
+func globToLike(pattern string) string {
+	return strings.NewReplacer("*", "%", "?", "_").Replace(pattern)
+}
+
+// tagSceneTripleTx 在事务内把「两端块 + 关系边」挂到场景上。
+//
+// ★ 这是 tagSceneTx 的块版（2026-10-04）
+//
+// 旧 tagSceneTx 收 relationID + []entityID，写出 kind='relation'
+// 与 kind='entity' 的引用 —— 旧表退场后这两类引用全部悬空。
+//
+// 三条引用缺一不可：
+//
+//	block(两端)  场景召回时要能把关系还原成「谁 — 什么 — 谁」
+//	edge(关系)  ★ 只有两端块拿不到关系语义 ——
+//	                「值班室分机号 → 4324」和
+//	                「billing服务 → 4324」只凭两端无法区分
+//
+// weight 用边的置信度：场景内的记忆也要能排序，这是目前唯一现成的质量信号。
+func tagSceneTripleTx(tx *sql.Tx, sceneKey, srcBlockID, dstBlockID string,
+	edgeID int64, weight float64) error {
+	key := NormalizeSceneKey(sceneKey)
+	if key == "" {
+		return nil
+	}
+	if _, err := tx.Exec(`INSERT OR IGNORE INTO scenes (key) VALUES (?)`, key); err != nil {
+		return err
+	}
+	var sceneID int64
+	if err := tx.QueryRow(`SELECT id FROM scenes WHERE key = ?`, key).Scan(&sceneID); err != nil {
+		return err
+	}
+	for _, id := range []string{srcBlockID, dstBlockID} {
+		if id == "" {
+			continue
+		}
+		if err := tagSceneRefTx(tx, key, "block", 0, id, weight); err != nil {
+			return err
+		}
+	}
+	if edgeID != 0 {
+		if err := tagSceneRefTx(tx, key, "edge", edgeID, "", weight); err != nil {
+			return err
+		}
+	}
+	return nil
 }

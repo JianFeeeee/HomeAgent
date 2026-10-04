@@ -66,20 +66,30 @@ type Entity struct {
 }
 
 type Relation struct {
-	ID           int64     `json:"id"`
-	SourceID     int64     `json:"source_id"`
-	TargetID     int64     `json:"target_id"`
-	SourceName   string    `json:"source_name"`
-	TargetName   string    `json:"target_name"`
-	RelationType string    `json:"relation_type"`
-	Confidence   float64   `json:"confidence"`
-	Status       string    `json:"status"`
-	SessionID    string    `json:"session_id"`
-	TurnID       int       `json:"turn_id"`
-	CreatedAt    time.Time `json:"created_at"`
-	DateBucket   string    `json:"date_bucket"`
-	SentenceID   int64     `json:"sentence_id,omitempty"`   // FK → sentences.id
-	SentenceText string    `json:"sentence_text,omitempty"` // JOINed from sentences
+	ID       int64 `json:"id"`
+	SourceID int64 `json:"source_id"`
+	TargetID int64 `json:"target_id"`
+	// ★★ 块体系的端点 ID（2026-10-04）
+	//
+	// 旧 SourceID/TargetID 是 relations 表的行号，退场后无效。
+	// 块体系里端点是 memory_blocks.id（字符串，内容派生的稳定 ID）。
+	// 两个字段并存：RecallByScene 已走块侧，旧字段留给旧表读方；
+	// 旧表退场时删掉 SourceID/TargetID 即可。
+	SourceBlockID string    `json:"source_block_id,omitempty"`
+	TargetBlockID string    `json:"target_block_id,omitempty"`
+	SourceName    string    `json:"source_name"`
+	TargetName    string    `json:"target_name"`
+	RelationType  string    `json:"relation_type"`
+	Confidence    float64   `json:"confidence"`
+	Status        string    `json:"status"`
+	SessionID     string    `json:"session_id"`
+	TurnID        int       `json:"turn_id"`
+	CreatedAt     time.Time `json:"created_at"`
+	DateBucket    string    `json:"date_bucket"`
+	SentenceID    int64     `json:"sentence_id,omitempty"`   // FK → sentences.id（退场后不用）
+	SentenceText  string    `json:"sentence_text,omitempty"` // 原句全文（走原句块回溯）
+	// SentenceBlockID 是原句块的 ID（blk_src_<hash>），供场景引用与去重。
+	SentenceBlockID string `json:"sentence_block_id,omitempty"`
 }
 
 type Triple struct {
@@ -529,7 +539,12 @@ func (g *GraphDB) commit(triples []Triple, sessionID string, turnID int, trackSe
 		// ★ 旧表写入**暂时保留**：Recall 等 55 处调用方仍读它们
 		//   （见 docs/zh/legacy-table-retirement.md），先删会打断在线读取。
 		//   退场顺序是「读方先切块 → 再停写旧表 → 最后删表」。
-		if err := putTripleBlocksTx(tx, t); err != nil {
+		// ★ 原句块 ID：在原句分支里赋值，场景挂载与 contains 边要用。
+		//   （声明提前到循环开头，否则它只在 SentenceText != "" 的分支里可见）
+		var sentenceBlockID string
+
+		srcBlockID, dstBlockID, edgeID, err := putTripleBlocksTx(tx, t)
+		if err != nil {
 			return nil, 0, 0, fmt.Errorf("block triple %s/%s: %w",
 				t.Subject, t.Relation, err)
 		}
@@ -583,7 +598,7 @@ func (g *GraphDB) commit(triples []Triple, sessionID string, turnID int, trackSe
 				time.Time{}, time.Time{})); err != nil {
 				return nil, 0, 0, fmt.Errorf("put sentence block: %w", err)
 			}
-			sentenceBlockID := SentenceBlockID(t.SentenceText)
+			sentenceBlockID = SentenceBlockID(t.SentenceText)
 			if sentenceIDs != nil {
 				// ★ 返回原句块 ID 而非 sentences 行号（见 CommitWithMedia 注释）
 				sentenceIDs[t.SentenceText] = sentenceBlockID
@@ -607,7 +622,10 @@ func (g *GraphDB) commit(triples []Triple, sessionID string, turnID int, trackSe
 			`SELECT id FROM relations WHERE source_id = ? AND target_id = ? AND relation_type = ? AND session_id = ?`,
 			sourceID, targetID, t.Relation, sessionID,
 		).Scan(&existing)
+		// relID 仅为旧表 relations 双写保留 —— 场景引用已改用块 ID + 边 ID，
+		// 不再需要它。旧表退场时本段整体删除。
 		var relID int64
+		_ = relID
 		if err == sql.ErrNoRows {
 			res, ierr := tx.Exec(
 				`INSERT INTO relations (source_id, target_id, relation_type, confidence, session_id, turn_id, date_bucket, sentence_id)
@@ -634,12 +652,42 @@ func (g *GraphDB) commit(triples []Triple, sessionID string, turnID int, trackSe
 			}
 		}
 
-		// 场景引用：写完关系立即把「关系 + 两端实体」挂到**每个**场景上
+		// 场景引用：写完关系立即把「关系 + 两端块」挂到**每个**场景上
 		// （主动声明的 + 被动涌现的）。同一事务内完成，避免出现「关系写进去了
 		// 但场景引用丢了」——那会让这条记忆在后来的场景里永远召不回来，且无声无息。
-		if relID != 0 {
+		//
+		// ★★ 端点已改为**块**（2026-10-04）
+		//
+		// 旧实现传 relationID（relations.id）与两个 entityID，
+		// 于是 Commit 每写一条关系就在 scene_refs 里生成
+		// kind='relation' + kind='entity' 的引用 ——
+		// 而 entities/relations 退场后这些引用全部悬空，
+		// 且场景式记忆会指向不存在的对象。
+		//
+		// 现在传块 ID：两端 kind='block'，关系边本身 kind='edge'。
+		if srcBlockID != "" || dstBlockID != "" {
+			// ★★ 原句回溯：原句块 --contains--> 关系边
+			//
+			// 旧表靠 relations.sentence_id 外键取原句。sentences 退场后
+			// 这个外键没有了 —— 而**带条件的规则本体长在句子里**，
+			// 只给关系名等于没召回（判据「场景召回必须带原句」盯的就是这条）。
+			//
+			// ★ 方向：原句块 --contains--> 关系边。
+			//   从原句出发能顺着 contains 找到关系，从关系能逆向找到原句
+			//   （BFS 是双向的）。反向（原句块→关系）才是对的：
+			//   「这句里说了什么」是块→边的方向。
+			//
+			// ★ 含时间才能做时序仲裁。
+			if sentenceBlockID != "" && edgeID != 0 {
+				if err := addContainsEdgeTx(tx, sentenceBlockID, edgeID,
+					confidence); err != nil {
+					return nil, 0, 0, fmt.Errorf("contains %s->%d: %w",
+						sentenceBlockID, edgeID, err)
+				}
+			}
 			for _, sc := range effectiveScenes(t) {
-				if err := tagSceneTx(tx, sc, relID, []int64{sourceID, targetID}, confidence); err != nil {
+				if err := tagSceneTripleTx(tx, sc, srcBlockID, dstBlockID,
+					edgeID, confidence); err != nil {
 					return nil, 0, 0, err
 				}
 			}

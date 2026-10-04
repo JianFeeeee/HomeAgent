@@ -98,7 +98,18 @@ func TripleBlockID(name string) string {
 //
 //	也不该被仲裁当成时间依据（仲裁跳过无时间的块 —— 见其规则 1）。
 //	真正需要时序的块由迁移/蒸馏显式传 CreatedAt。
-func putTripleBlocksTx(tx *sql.Tx, t Triple) error {
+//
+// putTripleBlocksTx 把一条三元组写成两端块 + 一条关系边。
+//
+// ★ 返回两端块 ID 与边 ID（2026-10-04）
+//
+// 调用方需要它们来挂场景引用 —— 场景引用的端点必须是**块 ID**
+// （kind='block'）与**边 ID**（kind='edge'）。此前这些值无处可取，
+// 于是 Commit 只能传旧表的 relationID/entityID，
+// 写出一批退场后会悬空的引用。
+//
+// 返回值顺序：sourceBlockID, targetBlockID, edgeID（无块时为空/0）。
+func putTripleBlocksTx(tx *sql.Tx, t Triple) (string, string, int64, error) {
 	src := MemoryBlock{
 		ID:       TripleBlockID(t.Subject),
 		Modality: BlockText,
@@ -113,10 +124,29 @@ func putTripleBlocksTx(tx *sql.Tx, t Triple) error {
 	}
 	for _, b := range []MemoryBlock{src, dst} {
 		if err := putBlockTx(tx, b); err != nil {
-			return err
+			return "", "", 0, err
 		}
 	}
-	err, _ := addBlockEdgeTx(tx, "block", src.ID, "block", dst.ID,
-		strings.TrimSpace(t.Relation))
-	return err
+	// ★ status 必须显式写 'active'（2026-10-04）
+	//
+	//   边表的 status 有 DEFAULT，但那个默认值是**空串**。
+	//   而所有读取路径都按 status='active' 过滤 ——
+	//   于是写进去的边**永远召不回来**，且没有任何报错。
+	//
+	//   这是典型的「写入成功但静默失效」：只有端到端判据能发现，
+	//   而 scene 的 4 个测试全部同时变红，才把它逼出来。
+	//
+	// ★ 用**关系边**写入器（addBlockEdgeTx 是迁移专用的去重插入器：
+	//   INSERT OR IGNORE 会把同对节点的第二条同类型边静默吞掉，
+	//   而关系边按设计允许并存多条 —— 52e4596 已把全局 UNIQUE 移除）。
+	res, err := tx.Exec(
+		`INSERT INTO memory_block_edges
+		 (source_kind, source_id, target_kind, target_id, edge_type, status)
+		 VALUES ('block', ?, 'block', ?, ?, 'active')`,
+		src.ID, dst.ID, strings.TrimSpace(t.Relation))
+	if err != nil {
+		return "", "", 0, err
+	}
+	edgeID, err := res.LastInsertId()
+	return src.ID, dst.ID, edgeID, err
 }
