@@ -316,29 +316,42 @@ func TestArbitrate_同句归属参与仲裁(t *testing.T) {
 	}
 	res := arbitrate(g, hits)
 
-	// ★ 这个测试原来只检查了 blk_a 是否提及 4379，漏了 blk_b。
+	// ★★ 修正后的断言（2026-10-04，hasSameSentenceSibling 修好之后）。
 	//
-	// 原数据下 blk_b 没进候选所以没暴露；端点类型改成 block 之后
-	// 它进了候选，而它「停用旧号=4379」**确实显式提到了 4379**
-	// ⇒ blk_c 被正确地判为「被取代」。
+	// 本断言原写「三条都该保留」，注释解释为「blk_b 没进候选」——
+	// **那个理由是错的**：blk_b 一直在 hits 里（见上）。
 	//
-	// ⇒ 原断言「三条都该保留」与数据不符。这不是仲裁的 bug：
-	//     supersedesSentence 的判据（「更晚 + 提到更早那条的值」）
-	//     恰好命中 blk_b → blk_c。
+	// 真正机制：hasSameSentenceSibling 恒返回 false
+	//（SQL 写 source_kind='sentence'，而 contains 边两端都是 block），
+	// 于是「同句并列字段不得外溢取代」的守卫**从未生效**，
+	// blk_b（停用旧号=4379）以自己身份把 blk_c 判成被取代。
 	//
-	// 修正后的意图：验证**同句并列不被同句兄弟剔除**（blk_a/blk_b），
-	// 以及**跨句的取代只在有显式提及时发生**。
-	if len(res.Kept) != 2 {
-		t.Errorf("同句并列的 blk_a/blk_b 都该保留，实际 %d：%v",
+	// 守卫修好后，行为回到 arbitrate.go:465 写明的设计意图：
+	//
+	//	原句B 的「停用旧号=4379」属于「新值+旧值并列」结构，不该单独执行取代；
+	//	而原句A 的 4379 是「历史上真实用过的号」，正是值覆盖要保留的信息。
+	//
+	// 所以三条**都该保留** —— 原断言的结论对，只是理由写错了。
+	// 实测：修复前 Superseded=1[blk_c]；修复后 Kept=3 Superseded=0。
+	if len(res.Kept) != 3 {
+		t.Errorf("同句并列的 blk_a/blk_b 与历史上真实用过的 blk_c 都该保留，实际保留 %d：%v",
 			len(res.Kept), textsOf(res.Kept))
 	}
-	// 被剔除的应是旧句的 blk_c，且原因可追溯（Superseded 而非丢弃）
-	if len(res.Superseded) != 1 || res.Superseded[0].Block.ID != "blk_c" {
-		t.Errorf("被取代的应是旧句的 blk_c（blk_b 显式提到 4379），实际 %d 条：%v",
+	// blk_b 不得以自己身份取代 blk_c —— 这正是刚修好的守卫。
+	if len(res.Superseded) != 0 {
+		t.Errorf("blk_b 属于「新值+旧值并列」结构，不得外溢取代 blk_c；实际取代了 %d：%v",
 			len(res.Superseded), textsOf(res.Superseded))
+	}
+	if !keptContains(res.Kept, "blk_c") {
+		t.Errorf("blk_c 是历史上真实用过的 4379，不该被剔除；实际保留 %v", textsOf(res.Kept))
 	}
 
 	// ★ 关键：把 blk_a 的文本换成提及旧值的版本，此时 blk_c 应被取代。
+	//
+	// 这里刻意用**未经 PutMemoryBlocks 落库**的临时块 ——
+	// 于是 sameSentenceOf 查不到 blk_a 的原句归属（sameOf 为空），
+	// 外溢守卫被跳过，于是「明确提及旧值」的 blk_a 直接执行取代。
+	// 验证的是守卫的另一侧：有归属就不外溢、没归属只看是否显式提及。
 	hits2 := []BlockHit{
 		{Block: MemoryBlock{ID: "blk_a", Modality: BlockText,
 			Text:      "值班室分机号|值班分机号=4324（旧号 4379 停用）",
@@ -356,6 +369,16 @@ func TestArbitrate_同句归属参与仲裁(t *testing.T) {
 func mustTime(s string) time.Time {
 	t, _ := time.Parse("2006-01-02 15:04:05", s)
 	return t
+}
+
+// keptContains 报告 hits 里是否有指定 id（判据用）。
+func keptContains(hits []BlockHit, id string) bool {
+	for _, h := range hits {
+		if h.Block.ID == id {
+			return true
+		}
+	}
+	return false
 }
 
 // 「旧值作废」语义识别。判据来自真库模型的实际用词。

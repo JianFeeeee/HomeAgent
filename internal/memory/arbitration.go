@@ -291,6 +291,25 @@ func isDeprecatedDim(dim string) bool {
 //
 // 用途：识别「新值 + 旧值并列」的结构 —— 这种句子里已经自带了
 // 「旧值作废」的信息，不需要靠外溢取代去表达（见 arbitrate 里的注释）。
+//
+// ★★ source_kind 必须是 'block'，不是 'sentence'（2026-10-04）。
+//
+// contains 边的两个端点都是块（source_kind / target_kind 均为 'block'），
+// 因为端点类型在 Commit 块化时从「sentences 表行号」改成了「原句块」；
+// 而原句块恒在 source 侧 —— 生产库实测 1298 条 contains 边里
+// source_id 全部是 blk_src_* 原句块，无一例外。
+//
+// 句子的 id 也正是从 sameSentenceOf 拿的（它查 target_id=字段块、
+// 取 source_id 作原句 id），两处口径必须一致，否则：
+//
+//	查询恒空（source_kind='sentence' 没有一行匹配）
+//	  → 「新值+旧值并列」的结构识别不出来
+//	  → 带 isDeprecatedDim 的旧值块被错误地当成取代者执行外溢
+//	  → 误剔除本该保留的旧值。
+//
+// ★ 症状隐蔽：它在同形态下表现正常，只有「旧值块恰好带废弃维度名」
+//
+//	的那批数据才会偏 —— 而那批数据在长对话里占比不高。
 func hasSameSentenceSibling(db *GraphDB, sentenceID, excludeBlockID string) bool {
 	if db == nil || sentenceID == "" {
 		return false
@@ -299,8 +318,8 @@ func hasSameSentenceSibling(db *GraphDB, sentenceID, excludeBlockID string) bool
 	defer db.mu.RUnlock()
 	var n int
 	err := db.db.QueryRow(`SELECT COUNT(*) FROM memory_block_edges
-		WHERE edge_type = 'contains' AND source_kind = 'sentence'
-		AND source_id = ? AND target_kind = 'block' AND target_id != ?`,
+		WHERE edge_type = 'contains' AND source_kind = 'block' AND target_kind = 'block'
+		AND source_id = ? AND target_id != ?`,
 		sentenceID, excludeBlockID).Scan(&n)
 	return err == nil && n > 0
 }
