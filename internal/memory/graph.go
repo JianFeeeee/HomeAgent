@@ -1680,34 +1680,146 @@ func (g *GraphDB) MergeEntities(sourceName, targetName string) (int, error) {
 	return g.MergeBlocks(sourceName, targetName)
 }
 
-// DeleteEntity 彻底删除一个实体及其所有关联关系。
-func (g *GraphDB) DeleteEntity(name string) error {
+// ★★★ 改走块/边体系（2026-10-04，删块口径由用户明定）
+//
+// 旧实现三句 SQL 全在 entities/relations 上：
+//
+//	SELECT id FROM entities WHERE name = ?
+//	DELETE FROM relations WHERE source_id = ? OR target_id = ?
+//	DELETE FROM entities WHERE id = ?
+//
+// 而旧表在停双写（c2bf963）后**不再增长** —— 于是这个函数是**纯空转**：
+//
+//	memory_blocks      Δ0
+//	memory_block_edges Δ0
+//
+// ★ 危害不是「删不干净」，是**谎报**：工具层回「已彻底删除实体…及其所有关联关系」，
+//   模型据此认为内容已消失（不再提及、或重新写入），
+//   而 40+ 条关联边还在，后续召回继续命中它。
+//   这比留残迹严重一级：残迹只是脏，谎报会让模型的行为跟着错。
+//
+// ★ 删块口径（用户明定「删除块」）：按**块文本精确匹配**定位，
+//   删掉这些块 + 它们的全部关联边 + 指向它们的 contains 结构边，
+//   再摘掉场景引用 —— 与 Purge 的收尾纪律一致
+//   （否则场景里挂一条永远召不回的幽灵，而 SceneStats 照样把它算进去）。
+//
+// ★ 为什么按文本而不按 legacy entities.id：
+//   旧表只是历史对照，不再是权威源；块才是活图谱的节点。
+//   按 name 查 entities.id 会把「旧表里叫这个名字的行」
+//   与「图里文本相同的块」当成两回事 —— 那正是本缺陷的成因。
+func (g *GraphDB) DeleteEntity(name string) (DeleteResult, error) {
 	g.mu.Lock()
 	defer g.mu.Unlock()
 
 	tx, err := g.db.Begin()
 	if err != nil {
-		return err
+		return DeleteResult{}, err
 	}
 	defer tx.Rollback()
 
-	var id int64
-	err = tx.QueryRow("SELECT id FROM entities WHERE name = ?", name).Scan(&id)
-	if err != nil {
-		return fmt.Errorf("entity '%s' not found: %w", name, err)
+	name = strings.TrimSpace(name)
+	if name == "" {
+		return DeleteResult{}, fmt.Errorf("name 不能为空")
 	}
 
-	_, err = tx.Exec(`DELETE FROM relations WHERE source_id = ? OR target_id = ?`, id, id)
+	// ★ 按块文本精确匹配（不是 LIKE）：DeleteEntity 的承诺是「删除这一个实体」，
+	//   用子串会把「admin」连带「admin 8861、billing 8499」一起删掉。
+	//   要批量按子串清理走 Purge(subject_contains=…)，两者语义本就不同。
+	rows, err := tx.Query(
+		`SELECT id FROM memory_blocks WHERE text_content = ? ORDER BY id`, name)
 	if err != nil {
-		return err
+		return DeleteResult{}, err
+	}
+	var blockIDs []string
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			rows.Close()
+			return DeleteResult{}, err
+		}
+		blockIDs = append(blockIDs, id)
+	}
+	if err := rows.Err(); err != nil {
+		rows.Close()
+		return DeleteResult{}, err
+	}
+	rows.Close()
+
+	if len(blockIDs) == 0 {
+		// ★ 明确报「找不到」，不静默返回成功。
+		//
+		//   旧实现在这里返回 "not found" 错误，是对的 —— 但它查的是旧表，
+		//   于是「旧表有、块里没有」会报成功，而「块里有、旧表没有」会报错。
+		//   两种都说不清真相。现在以块为准：块里没有就是没有。
+		//
+		// ★ 返回 0 而不是 error 也可以，但那样工具层只能回「已删除 0 个」——
+		//   模型分不清「删了但本来就没有」和「条件写错了」，
+		//   于是会重试或改口径乱猜。明确报错更有用。
+		return DeleteResult{}, fmt.Errorf("块 %q 不存在，删除未执行（可能已删除，或这个名字是关系文本而非端点块）", name)
 	}
 
-	_, err = tx.Exec(`DELETE FROM entities WHERE id = ?`, id)
-	if err != nil {
-		return err
+	ph := placeholders(len(blockIDs))
+	args := make([]interface{}, len(blockIDs))
+	for i, id := range blockIDs {
+		args[i] = id
 	}
 
-	return tx.Commit()
+	// ① 删全部关联边（关系边 + 指向这些块的 contains 结构边）。
+	//
+	// ★ 不区分 edge_type：承诺是「所有关联关系」，
+	//   而 contains 边指向已删块就是悬空边 —— 留着会让
+	//   sameSentenceOf / hasSameSentenceSibling 的分组落到不存在的块上。
+	endpointCond := fmt.Sprintf(
+		`(source_kind = 'block' AND source_id IN (%s)) OR (target_kind = 'block' AND target_id IN (%s))`,
+		ph, ph)
+	edgeArgs := append(append([]interface{}{}, args...), args...)
+	edgeRes, err := tx.Exec(
+		`DELETE FROM memory_block_edges WHERE `+endpointCond, edgeArgs...)
+	if err != nil {
+		return DeleteResult{}, err
+	}
+	edgesDeleted, _ := edgeRes.RowsAffected()
+
+	// ② 删块本身。
+	blockRes, err := tx.Exec(
+		`DELETE FROM memory_blocks WHERE id IN (`+ph+`)`, args...)
+	if err != nil {
+		return DeleteResult{}, err
+	}
+	blocksDeleted, _ := blockRes.RowsAffected()
+
+	// ③ 旧表同步删（若那一行还在）。
+	//
+	//   不是本函数的主职责 —— 旧表已冻结、不再增长，
+	//   留着它只是不让「块已删、旧表还在」这种对不上的状态继续存在。
+	//   查不到就跳过：旧表**不是权威源**，它的缺行不代表删除失败。
+	if _, err := tx.Exec(`DELETE FROM relations WHERE id IN (
+		SELECT id FROM entities WHERE name = ?)`, name); err != nil {
+		return DeleteResult{}, err
+	}
+	if _, err := tx.Exec(`DELETE FROM entities WHERE name = ?`, name); err != nil {
+		return DeleteResult{}, err
+	}
+
+	if err := tx.Commit(); err != nil {
+		return DeleteResult{}, err
+	}
+
+	// ④ 摘场景引用。必须在 Commit 之后 —— purgeStaleSceneRefsLocked 走 g.db，
+	//   而这里的事务还没提交。
+	g.purgeStaleSceneRefsLocked()
+
+	return DeleteResult{Blocks: int(blocksDeleted), Edges: int(edgesDeleted)}, nil
+}
+
+// DeleteResult 报告一次删除实际删掉了什么。
+//
+// ★ 不返回单一数字，是因为「删了 1 个块」和「删了 0 个块 40 条边」
+//   是**两种不同的事实**，压成一个 int 就会让工具层只能说谎
+//   —— 那正是本缺陷的成因（回「已彻底删除…及其所有关联关系」而实际 Δ0）。
+type DeleteResult struct {
+	Blocks int `json:"blocks"`
+	Edges  int `json:"edges"`
 }
 
 // Archive 把 days 天前的**关系边**标记为 archived。

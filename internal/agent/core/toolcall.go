@@ -436,10 +436,20 @@ func (a *Agent) executeMemoryTool(tc agentAPI.ToolCall, turnScenes []string) str
 		if name == "" {
 			return "name 不能为空"
 		}
-		if err := a.memory.DeleteEntity(name); err != nil {
+		res, err := a.memory.DeleteEntity(name)
+		if err != nil {
 			return fmt.Sprintf("删除失败: %v", err)
 		}
-		return fmt.Sprintf("已彻底删除实体「%s」及其所有关联关系", name)
+		// ★ 如实报告实际删掉多少，不说「已彻底删除…及其所有关联关系」。
+		//
+		//   旧文案是谎报：底层只碰旧表、活图谱 Δ0，却回「彻底删除」。
+		//   模型据此认为内容已消失（不再提及或重新写入），
+		//   而关联边还在、召回继续命中 —— 谎报会让模型的行为跟着错。
+		if res.Blocks == 0 {
+			return fmt.Sprintf("未找到名为「%s」的块，未删除任何内容", name)
+		}
+		return fmt.Sprintf("已删除块「%s」及其 %d 条关联关系（块 %d 个）",
+			name, res.Edges, res.Blocks)
 
 	case "memory_purge":
 		if msg := requireFull(); msg != "" {
