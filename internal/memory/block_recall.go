@@ -85,9 +85,7 @@ func (g *GraphDB) RecallBlocks(q BlockRecallQuery) ([]BlockHit, error) {
 	g.mu.RLock()
 	defer g.mu.RUnlock()
 
-	rows, err := g.db.Query(`SELECT id, modality, text_content, payload_digest,
-		mime, size, width, height, vector, fingerprint, source, tool, scene,
-		created_at, updated_at
+	rows, err := g.db.Query(`SELECT ` + blockColumns + `
 		FROM memory_blocks
 		WHERE vector IS NOT NULL AND vector != '' AND vector != 'null'`)
 	if err != nil {
@@ -103,7 +101,7 @@ func (g *GraphDB) RecallBlocks(q BlockRecallQuery) ([]BlockHit, error) {
 		var vectorJSON string
 		if err := rows.Scan(&b.ID, &b.Modality, &b.Text, &b.PayloadDigest,
 			&b.MIME, &b.Size, &b.Width, &b.Height, &vectorJSON,
-			&b.Fingerprint, &b.Source, &b.Tool, &b.Scene,
+			&b.Fingerprint, &b.Source, &b.Tool, &b.Scene, &b.SemanticType,
 			&b.CreatedAt, &b.UpdatedAt); err != nil {
 			return nil, err
 		}

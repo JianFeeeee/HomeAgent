@@ -130,8 +130,16 @@ func TestGraphCommit_BindsMediaFromDigests(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Recall: %v", err)
 	}
-	if len(res.Relations) == 0 || res.Relations[0].SentenceID == 0 {
-		t.Fatal("没有句子落点 —— 媒体块无从挂接")
+	// ★ 判据从 SentenceID 改成**原句文本非空**（2026-10-04）
+	//
+	//   SentenceID 是**旧 sentences 表的行号**，退场后不存在，
+	//   而它是这个断言里唯一与「有没有句子落点」有关的字段 ——
+	//   于是断言恒红，而底下的媒体挂接其实一直是好的。
+	//
+	//   真正要验证的是「关系能回溯到原句」⇒ 原句文本非空。
+	//   媒体块挂接的正确性由下面 BlocksForNode 那段验。
+	if len(res.Relations) == 0 || res.Relations[0].SentenceText == "" {
+		t.Fatalf("没有原句落点 —— 媒体块无从挂接（relations=%+v）", res.Relations)
 	}
 	// ★ 媒体的挂载点从「sentences 表行号」改成「原句块 ID」。
 	//

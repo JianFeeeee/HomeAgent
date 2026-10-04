@@ -97,7 +97,10 @@ func (m *LightMemory) Commit(triples []Triple, sessionID string, turnID int) (in
 // 「主库的第 3 号实体」和「temp 的第 3 号实体」互相顶掉 ——
 // 实测子代理因此**看不到主记忆**（TestLightProfile_MemoryFaceWiring 变红）。
 // 正确做法与旧路径一致：复用 mergeRecall，它按名字/三元组去重。
-func (m *LightMemory) RecallSorted(keywords []string, seedEntities []string, depth int, sessionFilter string, mode SortMode) (*RecallResult, error) {
+// ★ fingerprint 透传（2026-10-04）：LightMemory 是薄代理，
+//
+//	不加这个参数就会在代理这一层把向量空间隔离悄悄丢掉。
+func (m *LightMemory) RecallSorted(keywords []string, seedEntities []string, depth int, sessionFilter, fingerprint string, mode SortMode) (*RecallResult, error) {
 	m.mu.RLock()
 	temp := m.temp
 	main := m.main
@@ -112,7 +115,7 @@ func (m *LightMemory) RecallSorted(keywords []string, seedEntities []string, dep
 		if g == nil {
 			continue
 		}
-		r, err := g.RecallSorted(keywords, seedEntities, depth, sessionFilter, mode)
+		r, err := g.RecallSorted(keywords, seedEntities, depth, sessionFilter, fingerprint, mode)
 		if err != nil {
 			lastErr = err
 			continue

@@ -399,17 +399,20 @@ func putBlockTx(tx *sql.Tx, b MemoryBlock) error {
 	}
 	_, err := tx.Exec(`INSERT INTO memory_blocks
 		(id, modality, text_content, payload_digest, mime, size, width, height,
-		 vector, fingerprint, source, tool, scene, created_at, updated_at)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+		 vector, fingerprint, source, tool, scene, semantic_type, created_at, updated_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 		ON CONFLICT(id) DO UPDATE SET
 			modality = excluded.modality,
 			text_content = excluded.text_content,
 			vector = excluded.vector,
 			fingerprint = excluded.fingerprint,
 			source = excluded.source,
+			semantic_type = CASE WHEN excluded.semantic_type != ''
+				THEN excluded.semantic_type ELSE memory_blocks.semantic_type END,
 			`+tsUpdate,
 		b.ID, b.Modality, b.Text, b.PayloadDigest, b.MIME, b.Size, b.Width, b.Height,
-		vectorJSON, b.Fingerprint, b.Source, b.Tool, b.Scene, created, updated)
+		vectorJSON, b.Fingerprint, b.Source, b.Tool, b.Scene, b.SemanticType,
+		created, updated)
 	return err
 }
 
@@ -520,4 +523,28 @@ func (g *GraphDB) LegacyEntities(limit, minLen int) ([]LegacyEntity, error) {
 		out = append(out, e)
 	}
 	return out, rows.Err()
+}
+
+// CountLegacyEntitiesByType 统计旧表 entities 里某类型的行数。
+//
+// ★ 用途：判据「迁移后旧表不该残留 X」。
+//
+// 读侧切块之后，Recall 返回的东西既可能是块也可能是旧表行，
+// 而两者 Name/Type 可能完全一样 —— 光看召回结果分不出来。
+// 于是判据必须**直查旧表**，而那是本包的私有 db。
+//
+// ★ 只读，无副作用。minLen=0 表示不限名长。
+//
+// ★ 它存在的另一理由：`LegacyEntity` 只带 ID/Name（不含 Type），
+//
+//	所以拿它做「按类型核查」并不够用。
+func (g *GraphDB) CountLegacyEntitiesByType(entityType string) (int, error) {
+	g.mu.RLock()
+	defer g.mu.RUnlock()
+	var n int
+	if err := g.db.QueryRow(
+		`SELECT COUNT(*) FROM entities WHERE type = ?`, entityType).Scan(&n); err != nil {
+		return 0, err
+	}
+	return n, nil
 }

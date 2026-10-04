@@ -626,15 +626,32 @@ func TestMigrateLegacyMediaEntities(t *testing.T) {
 		t.Fatalf("应迁移 1 块 / 删 1 实体，实际 %d / %d", blocks, entities)
 	}
 
-	// 旧媒体实体与描述关系必须消失
+	// ★ 旧媒体实体与描述关系必须消失。
+	//
+	// ★ 判据口径变了（2026-10-04）：原来断言「Recall 结果里没有 Type=='Media'」。
+	//   但 media → legacy-entity 块的迁移会给那块打上 semantic_type='Media'
+	//   （迁移保留源实体的 type，这是对的），而 Recall 切块后返回的正是**块** ——
+	//   于是判据把「块」误判成「残留的旧实体」。
+	//
+	//   判据的**意图**是「旧表 entities 里不该还有它」，所以直接查旧表：
+	//   与实现无关，也不受迁移是否保留 type 影响。
 	res, err := g.Recall([]string{"图片 " + digest[:12]}, nil, 2, "")
 	if err != nil {
 		t.Fatal(err)
 	}
+	// 块侧可以存在同名同类型的块 —— 那是迁移的**成果**，不是残留。
+	// 但必须至少确认召回没把旧实体当块带出来（blockKey 为空 = 旧表行）。
 	for _, e := range res.Entities {
-		if e.Type == "Media" {
-			t.Fatalf("旧媒体实体仍存在: %+v", e)
+		if e.Type == "Media" && e.IsLegacyRow() {
+			t.Fatalf("旧媒体实体仍存在（旧表行）: %+v", e)
 		}
+	}
+	legacyMedia, err := g.CountLegacyEntitiesByType("Media")
+	if err != nil {
+		t.Fatalf("查旧媒体实体: %v", err)
+	}
+	if legacyMedia != 0 {
+		t.Errorf("旧表里仍有 %d 个媒体实体", legacyMedia)
 	}
 	// 块必须挂回原句子
 	got, err := g.BlocksForNode("block", sid)

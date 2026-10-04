@@ -42,9 +42,16 @@ type MemoryBlock struct {
 	// 场景要贯穿到流水线底，就得从块开始——否则「QQ 那场对话里发过来的那张图」
 	// 在场面重现时永远拿不回来。块进 L3 时按 Scene 挂 scene_refs(kind='block')，
 	// 场景召回即可把它取回（见 GraphDB.RecallByScene）。
-	Scene     string    `json:"scene,omitempty"`
-	CreatedAt time.Time `json:"created_at"`
-	UpdatedAt time.Time `json:"updated_at"`
+	Scene string `json:"scene,omitempty"`
+	// SemanticType 是实体的语义类别（Person / Animal / Concept / Topic…），
+	// 对应旧 entities.type 与 Triple.SubjectType/ObjectType。
+	//
+	// ★ 2026-10-04 加入。此前 Triple 标注的类型只写旧表，块侧完全没有 ——
+	//   判据 TestGraphCommit_CarriesAllFields 抓到：
+	//   Commit 标注的 (Person, Animal) 读回来是 ("block","block")。
+	SemanticType string    `json:"semantic_type,omitempty"`
+	CreatedAt    time.Time `json:"created_at"`
+	UpdatedAt    time.Time `json:"updated_at"`
 }
 
 // MemoryBlockEdge 是 L3 中连接一等记忆节点的结构化语义边。
@@ -131,6 +138,10 @@ func (g *GraphDB) PutMemoryBlocks(blocks []MemoryBlock) error {
 			-- 场景只在本次给了值时才覆盖：块可能先被写入、后被归档路径补挂场景，
 			-- 反过来「已挂场景的块被一次无场景的重写抹掉」是不可接受的静默降级。
 			scene = CASE WHEN excluded.scene != '' THEN excluded.scene ELSE memory_blocks.scene END,
+			-- ★ semantic_type 同样「空值不覆盖」：
+			--   后写的三元组往往不带类型（Triple.SubjectType 可选），
+			--   若让它覆盖已有类型，一次不带标注的写入就会抹掉语义类别。
+			semantic_type = CASE WHEN excluded.semantic_type != '' THEN excluded.semantic_type ELSE memory_blocks.semantic_type END,
 			updated_at = excluded.updated_at`,
 			block.ID, block.Modality, block.Text, block.PayloadDigest, block.MIME,
 			block.Size, block.Width, block.Height, string(vectorJSON), block.Fingerprint,
@@ -165,9 +176,7 @@ func (g *GraphDB) PutDocumentNode(id, summary string) error {
 func (g *GraphDB) MemoryBlocks() ([]MemoryBlock, error) {
 	g.mu.RLock()
 	defer g.mu.RUnlock()
-	rows, err := g.db.Query(`SELECT id, modality, text_content, payload_digest, mime,
-		size, width, height, vector, fingerprint, source, tool, scene,
-		created_at, updated_at
+	rows, err := g.db.Query(`SELECT ` + blockColumns + `
 		FROM memory_blocks ORDER BY created_at, id`)
 	if err != nil {
 		return nil, err
@@ -208,6 +217,23 @@ func (g *GraphDB) MemoryBlocks() ([]MemoryBlock, error) {
 // blockColumns 是 memory_blocks 的完整列清单，**必须与 scanBlockRow 的
 // Scan 顺序逐列一致**。
 //
+// ★★★ 加列时的必读（2026-10-04 实测踩了 6 次）
+//
+// 加 semantic_type 那一次，**四处 SELECT 是手写列清单**（不是常量），
+// 两处 Scan 也是手写 —— 于是：
+//
+//	「sql: expected 16 destination arguments in Scan, not 15」
+//
+// ★ 这个错**只在真跑 SQL 时暴露**，编译期完全无感；
+//
+//	而且它表现为「召回突然空了」而非「读失败」，
+//	很容易被误判成召回逻辑坏了而查错方向。
+//
+// ⇒ 本文件的 SELECT 一律用 blockColumns，不要再手写。
+// ⇒ 加列后必须做两件事：
+//  1. `grep -rn 'FROM memory_blocks' --include='*.go'` 确认无手写清单
+//  2. `grep -rn '&b.Scene,\|&scene,' --include='*.go'` 确认所有 Scan 已同步
+//
 // ★ 为什么要提成常量：2026-10-04 修过一次由此引发的生产 bug ——
 //
 //	MemoryBlocks() 的 SELECT 漏了 scene 列，而它与 scanBlockRow 共用，
@@ -215,7 +241,7 @@ func (g *GraphDB) MemoryBlocks() ([]MemoryBlock, error) {
 //
 //	单靠“记得同步”不可靠；提成常量后新增查询直接复用。
 const blockColumns = `id, modality, text_content, payload_digest, mime, size, width, height,
-			vector, fingerprint, source, tool, scene, created_at, updated_at`
+			vector, fingerprint, source, tool, scene, semantic_type, created_at, updated_at`
 
 func scanBlockRow(rows *sql.Rows) (MemoryBlock, error) {
 	var b MemoryBlock
@@ -223,7 +249,7 @@ func scanBlockRow(rows *sql.Rows) (MemoryBlock, error) {
 	var scene sql.NullString
 	if err := rows.Scan(&b.ID, &b.Modality, &b.Text, &b.PayloadDigest,
 		&b.MIME, &b.Size, &b.Width, &b.Height, &vectorJSON,
-		&b.Fingerprint, &b.Source, &b.Tool, &scene,
+		&b.Fingerprint, &b.Source, &b.Tool, &scene, &b.SemanticType,
 		&b.CreatedAt, &b.UpdatedAt); err != nil {
 		return b, err
 	}
@@ -671,4 +697,26 @@ func (g *GraphDB) NeighbourEdgesOfBlock(blockID string) ([]BlockNeighbour, []Mem
 		}
 	}
 	return edges, peers, rows.Err()
+}
+
+// blockSemanticType 返回块对外呈现的语义类型。
+//
+// ★ 为什么要这个函数而不是直接用 b.SemanticType：
+//
+//	语义类型是**可选标注**，绝大多数块没被标注过。
+//	旧 entities 表在缺省时写 "Concept"（graph.go 里 subjType 默认值），
+//	所以读侧（social 的 ListPersons、SDK 的实体类型）期待一个具体字符串。
+//	返回空串会让下游的 == "Person" 之类的比较全部落空 ——
+//	那不是「未标注」，那像是「数据坏了」。
+//
+// ★ 取值优先级：
+//  1. 块自带标注（Person / Animal / Concept…）—— 直接用
+//  2. 未标注 → "block"（说清「这是一个图节点，且没标类型」）
+//     ★ 不用 "Concept"：那是旧表的默认值，
+//     拿来兜底会让「未标注」与「确实是概念」无法区分。
+func blockSemanticType(b MemoryBlock) string {
+	if t := strings.TrimSpace(b.SemanticType); t != "" {
+		return t
+	}
+	return "block"
 }

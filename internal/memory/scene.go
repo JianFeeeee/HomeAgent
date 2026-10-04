@@ -473,7 +473,8 @@ func (g *GraphDB) RecallByScene(scenes []string, limit int) (*SceneRecall, error
 
 	blockQuery := `SELECT b.id, b.modality, b.text_content, b.payload_digest, b.mime,
 			b.size, b.width, b.height, b.fingerprint, b.source, b.tool,
-			COALESCE(b.scene, ''), b.created_at, b.updated_at, MAX(sr.weight) AS w
+			COALESCE(b.scene, ''), COALESCE(b.semantic_type, ''),
+			b.created_at, b.updated_at, MAX(sr.weight) AS w
 		FROM scene_refs sr
 		JOIN scenes s ON sr.scene_id = s.id
 		JOIN memory_blocks b ON sr.kind = 'block' AND b.id = sr.ref_text
@@ -492,7 +493,7 @@ func (g *GraphDB) RecallByScene(scenes []string, limit int) (*SceneRecall, error
 		var w float64
 		if err := brows.Scan(&b.ID, &b.Modality, &b.Text, &b.PayloadDigest, &b.MIME,
 			&b.Size, &b.Width, &b.Height, &b.Fingerprint, &b.Source, &b.Tool,
-			&b.Scene, &b.CreatedAt, &b.UpdatedAt, &w); err != nil {
+			&b.Scene, &b.SemanticType, &b.CreatedAt, &b.UpdatedAt, &w); err != nil {
 			return nil, err
 		}
 		out.Blocks = append(out.Blocks, b)

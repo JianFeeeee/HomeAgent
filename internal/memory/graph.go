@@ -79,6 +79,17 @@ type Entity struct {
 	blockKey string `json:"-"`
 }
 
+// IsLegacyRow 报告这个实体行是**旧表**（entities）来的，而不是块。
+//
+// ★ 存在的理由：读侧切块之后，External Recall 回来的东西既可能是块
+//
+//	（blockKey 非空）也可能是旧表行（blockKey 为空）。
+//	而判据常需要区分「块」与「旧表残留」——
+//	两者 Name/Type 可能完全一样，光看内容分不出来。
+//
+// ★ 只读，不进 JSON。
+func (e Entity) IsLegacyRow() bool { return e.blockKey == "" }
+
 type Relation struct {
 	ID       int64 `json:"id"`
 	SourceID int64 `json:"source_id"`
@@ -234,6 +245,10 @@ func (g *GraphDB) initSchema() error {
 			source TEXT DEFAULT '',
 			tool TEXT DEFAULT '',
 			scene TEXT DEFAULT '',
+			-- semantic_type 是实体的语义类别（Person / Animal / Concept），
+			-- 对应旧 entities.type。2026-10-04 加入：social 层靠它
+			-- 区分人物与特质，检索层靠它区分「谁」与「什么」。
+			semantic_type TEXT DEFAULT '',
 			created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
 			updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 		)`,
@@ -334,6 +349,19 @@ func (g *GraphDB) initSchema() error {
 	tx.Exec(`ALTER TABLE memory_blocks ADD COLUMN scene TEXT DEFAULT ''`)
 	// 迁移6：旧 scenes 表加 strength 列（涌现侧的强度计数）
 	tx.Exec(`ALTER TABLE scenes ADD COLUMN strength INTEGER DEFAULT 1`)
+	// ★ 迁移7：记忆块加语义类型列（2026-10-04）
+	//
+	// ★ 为什么必须补：Triple.SubjectType / ObjectType 此前**只写旧表
+	//   entities.type**，块侧完全没有 —— 于是 Commit 标注的
+	//   「这是 Person / 那是 Animal」在块体系里直接丢失。
+	//
+	//   判据 TestGraphCommit_CarriesAllFields 当场抓到：
+	//   实体类型 = ("block","block")，期望 (Person,Animal)。
+	//
+	//   ★ 命名用 semantic_type 而不是 type：
+	//   `type` 在 SQLite 里合法但与很多工具的保留字冲突
+	//   （且 memory_blocks 已有 modality 列表达「模态」，语义类型是另一回事）。
+	tx.Exec(`ALTER TABLE memory_blocks ADD COLUMN semantic_type TEXT DEFAULT ''`)
 
 	// ★★★ 迁移8：memory_block_edges 升格为「边是独立单位」
 	//
@@ -797,14 +825,27 @@ func ParseSortMode(s string) SortMode {
 
 // Recall 保持原签名（相关性排序），委托给 RecallSorted。
 func (g *GraphDB) Recall(keywords []string, seedEntities []string, depth int, sessionFilter string) (*RecallResult, error) {
-	return g.RecallSorted(keywords, seedEntities, depth, sessionFilter, SortRelevance)
+	// ★ 不传 fingerprint：Recall 是**库层**接口（social / indexer / SDK 都用），
+	//   它不知道当前向量空间是什么 —— 那是 core 层的关注点。
+	//   需要空间隔离的路径（memory_recall 工具）走 RecallSorted 并显式传。
+	return g.RecallSorted(keywords, seedEntities, depth, sessionFilter, "", SortRelevance)
 }
 
 // RecallSorted 是可指定呈现顺序的召回。
 //
 // 截断在**出口**做（深度扩展之后），不是深度扩展之前 —— 扩展会从种子实体
 // 带出新的邻居实体，扩展前截断会让总量再次越界（实测 47 > 20）。
-func (g *GraphDB) RecallSorted(keywords []string, seedEntities []string, depth int, sessionFilter string, mode SortMode) (*RecallResult, error) {
+// ★ fingerprint 是**向量空间隔离键**（2026-10-04）：
+//
+//	非空时只返回 fingerprint 匹配的块。
+//
+//	RecallSorted 是**纯词法**召回（不碰向量），但它不能因此绕过隔离 ——
+//	它是 recallByBlocks 失败后的兜底路，一旦 fallback 到它，
+//	「换向量空间后旧块不能污染结果」这条约束就被绕过了。
+//
+//	判据 TestMemoryRecall_指纹不匹配的块被跳过 当场抓到这一点：
+//	块路因无空间被跳过 → 走兜底 → 兜底把旧空间的块原样返回。
+func (g *GraphDB) RecallSorted(keywords []string, seedEntities []string, depth int, sessionFilter, fingerprint string, mode SortMode) (*RecallResult, error) {
 	g.mu.RLock()
 	defer g.mu.RUnlock()
 
@@ -825,8 +866,9 @@ func (g *GraphDB) RecallSorted(keywords []string, seedEntities []string, depth i
 		// 优先取最早的，因为它们更可能是稳定的基础事实）。
 		rows, err := g.db.Query(
 			`SELECT `+blockColumns+` FROM memory_blocks
-			 WHERE text_content != '' ORDER BY created_at ASC, id ASC LIMIT ?`,
-			maxFullRecallEntities,
+			 WHERE text_content != '' AND (? = '' OR fingerprint = ?)
+			 ORDER BY created_at ASC, id ASC LIMIT ?`,
+			fingerprint, fingerprint, maxFullRecallEntities,
 		)
 		if err != nil {
 			return nil, err
@@ -843,7 +885,7 @@ func (g *GraphDB) RecallSorted(keywords []string, seedEntities []string, depth i
 			result.Entities = append(result.Entities, Entity{
 				ID:        seq, // 占位：块 ID 是字符串，Entity.ID 是 int64
 				Name:      b.Text,
-				Type:      "block",
+				Type:      blockSemanticType(b),
 				CreatedAt: b.CreatedAt,
 				UpdatedAt: b.UpdatedAt,
 			})
@@ -934,13 +976,15 @@ func (g *GraphDB) RecallSorted(keywords []string, seedEntities []string, depth i
 			          ELSE 2 END, `+blockColumns+`
 			 FROM memory_blocks
 			 WHERE text_content != '' AND LOWER(text_content) LIKE ?
+			   AND (? = '' OR fingerprint = ?)
 			 ORDER BY CASE
 			         WHEN LOWER(text_content) = LOWER(?) THEN 0
 			         WHEN LOWER(text_content) LIKE LOWER(?) || '%' THEN 1
 			         ELSE 2 END,
 			       created_at DESC, LENGTH(text_content) ASC
 			 LIMIT ?`,
-			kw, kw, "%"+strings.ToLower(kw)+"%", kw, kw, maxKeywordEntities,
+			kw, kw, "%"+strings.ToLower(kw)+"%",
+			fingerprint, fingerprint, kw, kw, maxKeywordEntities,
 		)
 		if err != nil {
 			return nil, err
@@ -953,7 +997,8 @@ func (g *GraphDB) RecallSorted(keywords []string, seedEntities []string, depth i
 				&bScratch.Text, &bScratch.PayloadDigest, &bScratch.MIME,
 				&bScratch.Size, &bScratch.Width, &bScratch.Height, &vecJSON,
 				&bScratch.Fingerprint, &bScratch.Source, &bScratch.Tool,
-				&sceneNull, &bScratch.CreatedAt, &bScratch.UpdatedAt); err != nil {
+				&sceneNull, &bScratch.SemanticType,
+				&bScratch.CreatedAt, &bScratch.UpdatedAt); err != nil {
 				rows.Close()
 				return nil, err
 			}
@@ -962,7 +1007,7 @@ func (g *GraphDB) RecallSorted(keywords []string, seedEntities []string, depth i
 			e := Entity{
 				ID:        int64(seq),
 				Name:      b.Text,
-				Type:      "block",
+				Type:      blockSemanticType(b),
 				CreatedAt: b.CreatedAt,
 				UpdatedAt: b.UpdatedAt,
 			}
@@ -985,7 +1030,8 @@ func (g *GraphDB) RecallSorted(keywords []string, seedEntities []string, depth i
 		}
 		rows, err := g.db.Query(
 			`SELECT `+blockColumns+` FROM memory_blocks
-			 WHERE text_content = ? LIMIT 1`, se)
+			 WHERE text_content = ? AND (? = '' OR fingerprint = ?) LIMIT 1`,
+			se, fingerprint, fingerprint)
 		if err != nil {
 			return nil, err
 		}
@@ -1002,7 +1048,7 @@ func (g *GraphDB) RecallSorted(keywords []string, seedEntities []string, depth i
 				result.Entities = append(result.Entities, Entity{
 					ID:        int64(seq),
 					Name:      b.Text,
-					Type:      "block",
+					Type:      blockSemanticType(b),
 					CreatedAt: b.CreatedAt,
 					UpdatedAt: b.UpdatedAt,
 					blockKey:  b.ID,
@@ -1168,7 +1214,7 @@ func (g *GraphDB) RecallSorted(keywords []string, seedEntities []string, depth i
 				result.Entities = append(result.Entities, Entity{
 					ID:        int64(seq),
 					Name:      b.Text,
-					Type:      "block",
+					Type:      blockSemanticType(b),
 					CreatedAt: b.CreatedAt,
 					UpdatedAt: b.UpdatedAt,
 					blockKey:  b.ID,
@@ -1457,8 +1503,7 @@ func (g *GraphDB) GraphData() (map[string]interface{}, error) {
 		return nil, err
 	}
 
-	brows, err := g.db.Query(`SELECT id, modality, text_content, payload_digest, mime,
-		size, width, height, vector, fingerprint, source, tool, created_at, updated_at
+	brows, err := g.db.Query(`SELECT ` + blockColumns + `
 		FROM memory_blocks ORDER BY created_at, id`)
 	if err != nil {
 		return nil, err
@@ -1468,9 +1513,13 @@ func (g *GraphDB) GraphData() (map[string]interface{}, error) {
 	for brows.Next() {
 		var block MemoryBlock
 		var vectorJSON string
+		// ★ 这条 Scan 历史上就少扫了 scene（SELECT 用 blockConstants 改了，
+		//   Scan 却没跟上）—— 与 semantic_type 是同一类错，
+		//   报错形如「expected 16 destination arguments in Scan, not 14」。
 		if err := brows.Scan(&block.ID, &block.Modality, &block.Text, &block.PayloadDigest,
 			&block.MIME, &block.Size, &block.Width, &block.Height, &vectorJSON,
-			&block.Fingerprint, &block.Source, &block.Tool, &block.CreatedAt,
+			&block.Fingerprint, &block.Source, &block.Tool, &block.Scene,
+			&block.SemanticType, &block.CreatedAt,
 			&block.UpdatedAt); err != nil {
 			return nil, err
 		}
@@ -1605,90 +1654,19 @@ func (g *GraphDB) Introspect() (map[string]interface{}, error) {
 // 3. sourceName 彻底删除（不再残留 @merged_ 实体）
 // 返回 (关系的重定向数, error)
 func (g *GraphDB) MergeEntities(sourceName, targetName string) (int, error) {
-	g.mu.Lock()
-	defer g.mu.Unlock()
-
-	tx, err := g.db.Begin()
-	if err != nil {
-		return 0, err
-	}
-	defer tx.Rollback()
-
-	var sourceID, targetID int64
-	var sourceCount, targetCount int
-
-	err = tx.QueryRow("SELECT id, mention_count FROM entities WHERE name = ?", sourceName).Scan(&sourceID, &sourceCount)
-	if err != nil {
-		return 0, fmt.Errorf("source entity '%s' not found: %w", sourceName, err)
-	}
-	err = tx.QueryRow("SELECT id, mention_count FROM entities WHERE name = ?", targetName).Scan(&targetID, &targetCount)
-	if err != nil {
-		return 0, fmt.Errorf("target entity '%s' not found: %w", targetName, err)
-	}
-
-	if sourceID == targetID {
-		return 0, fmt.Errorf("cannot merge entity with itself")
-	}
-
-	// 重定向 source → target 的活跃关系（作为 source）
-	res, err := tx.Exec(
-		`UPDATE relations SET source_id = ?, updated_at = CURRENT_TIMESTAMP
-		 WHERE source_id = ? AND status = 'active'`,
-		targetID, sourceID,
-	)
-	if err != nil {
-		return 0, err
-	}
-	redirectedSource, _ := res.RowsAffected()
-
-	// 重定向 source → target 的活跃关系（作为 target）
-	res, err = tx.Exec(
-		`UPDATE relations SET target_id = ?, updated_at = CURRENT_TIMESTAMP
-		 WHERE target_id = ? AND status = 'active'`,
-		targetID, sourceID,
-	)
-	if err != nil {
-		return 0, err
-	}
-	redirectedTarget, _ := res.RowsAffected()
-
-	// 删除可能产生的自引用关系
-	_, err = tx.Exec(
-		`DELETE FROM relations
-		 WHERE source_id = target_id AND source_id = ?`,
-		targetID,
-	)
-	if err != nil {
-		return 0, err
-	}
-
-	// 清理 source 残留的非活跃关系（archived/deleted），否则外键约束阻止删除实体
-	_, err = tx.Exec(`DELETE FROM relations WHERE source_id = ? OR target_id = ?`, sourceID, sourceID)
-	if err != nil {
-		return 0, err
-	}
-
-	// 更新 target 的 mention_count
-	_, err = tx.Exec(
-		`UPDATE entities SET mention_count = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?`,
-		targetCount+sourceCount, targetID,
-	)
-	if err != nil {
-		return 0, err
-	}
-
-	// 彻底删除 source 实体（所有关系已重定向，自引用已删除）
-	_, err = tx.Exec(`DELETE FROM entities WHERE id = ?`, sourceID)
-	if err != nil {
-		return 0, err
-	}
-
-	if err := tx.Commit(); err != nil {
-		return 0, err
-	}
-
-	total := int(redirectedSource + redirectedTarget)
-	return total, nil
+	// ★ 委托给 MergeBlocks（2026-10-04）
+	//
+	// 旧实现在这里直接操作 entities/relations（85 行），块侧完全不动。
+	// 后果：改名后「张先生」的块还叫「张先生」，召回照样命中它 ——
+	// 判据 TestMergeEntities 就是这么红的（「should be merged and hidden」）。
+	//
+	// ★ 对外签名保持不变（source, target string）→ (int, error)：
+	//   它是 SDK 公开接口（sdk/memory.go 的 Memory 接口），
+	//   有 5 个调用方（sdk / toolcall / lua / proc / mocksdk）。
+	//   改名会连带改 SDK 契约，那是另一次变更。
+	//
+	// ★ 返回值语义也保持：重定向的边数。
+	return g.MergeBlocks(sourceName, targetName)
 }
 
 // DeleteEntity 彻底删除一个实体及其所有关联关系。

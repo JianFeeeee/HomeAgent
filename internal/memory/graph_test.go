@@ -2,6 +2,7 @@ package memory
 
 import (
 	"database/sql"
+	"fmt"
 	"os"
 	"path/filepath"
 	"testing"
@@ -403,21 +404,34 @@ func TestMergeEntities(t *testing.T) {
 		t.Error("张先生 should be merged and hidden")
 	}
 
-	// target 的 mention_count 应合并
-	// 验证 target 还存在（seedEntities 精确查找）
+	// ★ 判据从「mention_count 相加」改成「信息没丢」（2026-10-04）
+	//
+	//   块侧**没有 mention_count 这个概念** —— 它是旧 entities 表的列，
+	//   而 Recall 从不填它（块是内容派生的，不存在「被提及几次」）。
+	//
+	//   原断言 `mention_count >= 2` 在块体系下无意义，且它衡量的
+	//   只是「计数」这个代理指标，不是「信息还在」这件真事。
+	//
+	//   块侧的真实验证：**合并后「张三」应当同时承载两人的关系**。
+	//   合并前张先生有「喜欢→Go」，张三有「负责→billing服务」等；
+	//   合并后两组都必须还在 —— 那才是「没丢信息」。
 	result2, err := g.Recall([]string{"张三"}, nil, 1, "")
 	if err != nil {
 		t.Fatal(err)
 	}
 	found := false
+	targets := map[string]bool{}
 	for _, e := range result2.Entities {
 		if e.Name == "张三" {
 			found = true
-			if e.MentionCount < 2 {
-				t.Errorf("expected 张三 mention_count >= 2 after merge, got %d", e.MentionCount)
-			}
-			break
 		}
+	}
+	for _, r := range result2.Relations {
+		targets[r.TargetName] = true
+	}
+	fmt.Printf("  合并后「张三」继承 %d 条关系: %v\n", len(result2.Relations), targets)
+	if !targets["Go"] {
+		t.Error("★ 合并丢失了源块的关系「喜欢→Go」（信息丢失，不是计数问题）")
 	}
 	if !found {
 		t.Error("张三 should still exist after merge")

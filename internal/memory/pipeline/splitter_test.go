@@ -206,13 +206,20 @@ func TestDistillBatch_块路径优先(t *testing.T) {
 	if len(blocks) == 0 {
 		t.Fatal("块路径应写入块")
 	}
-	// ★ 关键：不该写 entities
-	res, err := d.db.Recall([]string{"停机时长"}, nil, 1, "")
+	// ★ 关键：块路径**不写旧表 entities**。
+	//
+	// ★ 判据口径变了（2026-10-04）：原来断言「Recall 返回 0 个实体」。
+	//   那是在 Recall 仍读旧表时的写法 —— Recall 切块之后它必然返回块
+	//   （那正是块路径该做的事），于是判据恒红。
+	//
+	//   判据的**意图**是「没有走旧表双写」，所以直接查旧表本身：
+	//   与实现无关，且比间接断言可靠。
+	legacy, err := d.db.LegacyEntities(0, 1)
 	if err != nil {
-		t.Fatal(err)
+		t.Fatalf("LegacyEntities: %v", err)
 	}
-	if len(res.Entities) != 0 {
-		t.Errorf("块路径不该写 entities，实际 %+v", res.Entities)
+	if len(legacy) != 0 {
+		t.Errorf("块路径不该写 entities（旧表 %d 个）: %+v", len(legacy), legacy)
 	}
 }
 

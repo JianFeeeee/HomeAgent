@@ -115,17 +115,28 @@ func TripleBlockID(name string) string {
 //	Triple 是「三元组内容」，会话是「这次写入的上下文」，
 //	两者本就不该混在一个结构里。
 func putTripleBlocksTx(tx *sql.Tx, t Triple, sessionID string, turnID int) (string, string, int64, error) {
+	// ★ SemanticType 必须带（2026-10-04）
+	//
+	//   Triple.SubjectType / ObjectType 此前只写旧 entities.type，
+	//   块侧完全丢 —— 于是 Commit 标注的「这是 Person / 那是 Animal」
+	//   在召回时读回来是 ("block","block")。
+	//   判据 TestGraphCommit_CarriesAllFields 抓的就是这个。
+	//
+	// ★ 留空是合法的（很多三元组不带类型），block.go 的 ON CONFLICT
+	//   对该列用「空值不覆盖」语义，后写的不带标注不会抹掉已有的。
 	src := MemoryBlock{
-		ID:       TripleBlockID(t.Subject),
-		Modality: BlockText,
-		Text:     strings.TrimSpace(t.Subject),
-		Source:   "triple",
+		ID:           TripleBlockID(t.Subject),
+		Modality:     BlockText,
+		Text:         strings.TrimSpace(t.Subject),
+		Source:       "triple",
+		SemanticType: strings.TrimSpace(t.SubjectType),
 	}
 	dst := MemoryBlock{
-		ID:       TripleBlockID(t.Object),
-		Modality: BlockText,
-		Text:     strings.TrimSpace(t.Object),
-		Source:   "triple",
+		ID:           TripleBlockID(t.Object),
+		Modality:     BlockText,
+		Text:         strings.TrimSpace(t.Object),
+		Source:       "triple",
+		SemanticType: strings.TrimSpace(t.ObjectType),
 	}
 	for _, b := range []MemoryBlock{src, dst} {
 		if err := putBlockTx(tx, b); err != nil {
@@ -150,11 +161,25 @@ func putTripleBlocksTx(tx *sql.Tx, t Triple, sessionID string, turnID int) (stri
 		//   Recall 的 sessionFilter 依赖边表的这两列。缺了它，
 		//   任何按会话过滤的召回都返回空 —— 而测试若不显式带
 		//   sessionFilter 就发现不了（无过滤时召回照常工作）。
+		// ★★ confidence 必须写进去（2026-10-04）
+		//
+		//   它不只是「插件标注的置信度被丢弃」那么局部：
+		//   confidence 是边表里**唯一的质量信号**，被三处依赖 ——
+		//     ① RecallSorted 的 SortRelevance 排序（`ORDER BY confidence DESC`）
+		//     ② 场景排序（tagSceneTripleTx 拿它当 weight）
+		//     ③ 蒸馏时的置信度传播
+		//
+		//   不写 ⇒ 全部为 0 ⇒ 排序退化成插入序、场景权重恒 0，
+		//   而**没有任何报错**。
+		//
+		// ★ 同时写 updated_at 不可行：边表**没有**这一列
+		//   （升格成独立边时只加了 confidence/session/turn/status/merged_into）。
+		//   旧 relations 表有，所以照抄会报 no such column。
 		`INSERT INTO memory_block_edges
 		 (source_kind, source_id, target_kind, target_id, edge_type,
-		  status, session_id, turn_id)
-		 VALUES ('block', ?, 'block', ?, ?, 'active', ?, ?)`,
-		src.ID, dst.ID, strings.TrimSpace(t.Relation), sessionID, turnID)
+		  confidence, status, session_id, turn_id)
+		 VALUES ('block', ?, 'block', ?, ?, ?, 'active', ?, ?)`,
+		src.ID, dst.ID, strings.TrimSpace(t.Relation), t.Confidence, sessionID, turnID)
 	if err != nil {
 		return "", "", 0, err
 	}

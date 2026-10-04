@@ -238,7 +238,10 @@ func (a *Agent) executeMemoryTool(tc agentAPI.ToolCall, turnScenes []string) str
 			return blockOut
 		}
 
-		result, err := g.RecallSorted(keywords, nil, int(depth), "", sortMode)
+		// ★ fingerprint 必须传：这是 recallByBlocks 失败后的兜底路，
+		// 不传就等于让旧向量空间的块混进结果
+		// （判据 TestMemoryRecall_指纹不匹配的块被跳过）。
+		result, err := g.RecallSorted(keywords, nil, int(depth), "", a.currentFingerprint(), sortMode)
 		if err != nil {
 			return fmt.Sprintf("记忆检索失败: %v", err)
 		}
@@ -1004,3 +1007,31 @@ const (
 	// （生成模型主干的余弦普遍偏高，实测无关句也能到 0.83）。
 	blockRecallMinScore = 0.5
 )
+
+// currentFingerprint 返回**当前向量空间**的指纹，用于给兜底召回路径做隔离。
+//
+// ★ 为什么需要它
+//
+//	memory_recall 的主路是 recallByBlocks（带向量空间检查），
+//	失败时退到 RecallSorted —— 而 RecallSorted 是纯词法的，不查 fingerprint
+//	⇒ 换向量空间后旧块会从兜底路混回结果。
+//	（判据 TestMemoryRecall_指纹不匹配的块被跳过 就是抓这个的）
+//
+// ★★ 为什么用「当前空间的指纹」而不是「库里多数取值」
+//
+//	我先写的版本是查库（DominantBlockFingerprint）—— **错的**：
+//	库里只有旧空间的块时，多数取值就是旧指纹，
+//	拿它当过滤条件等于「不��滤」，旧块原样通过。
+//	（判据当场抓住：测试库里唯一的块是 old-fp，而当前空间是 fp1。）
+//
+//	隔离的语义是「只信任当前空间写入的块」，
+//	判据必须来自**空间对象**而不是库 —— 库只能说明过去，不能说明现在。
+func (a *Agent) currentFingerprint() string {
+	if a == nil || a.multimodalSpace == nil {
+		return ""
+	}
+	if !a.multimodalSpace.Loaded() {
+		return ""
+	}
+	return a.multimodalSpace.Fingerprint()
+}

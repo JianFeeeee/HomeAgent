@@ -368,9 +368,7 @@ func (g *GraphDB) blocksByIDsLocked(ids []string) ([]MemoryBlock, error) {
 		placeholders[i] = "?"
 		args[i] = id
 	}
-	rows, err := g.db.Query(`SELECT id, modality, text_content, payload_digest,
-		mime, size, width, height, vector, fingerprint, source, tool, scene,
-		created_at, updated_at
+	rows, err := g.db.Query(`SELECT `+blockColumns+`
 		FROM memory_blocks WHERE id IN (`+strings.Join(placeholders, ",")+`)`, args...)
 	if err != nil {
 		return nil, err
@@ -411,4 +409,193 @@ type BlockNeighbour struct {
 	IsOutgoing bool
 
 	RelationEdgeData
+}
+
+// ═══════════════════════════════════════════════════════════════
+//  MergeBlocks —— 块合并（2026-10-04）
+//
+//  这是旧表退场的最后一环：MergeEntities 只改 entities/relations，
+//  块侧完全不动 ⇒ 「张先生」改名后，块还叫「张先生」，
+//  召回照样命中它（判据 TestMergeEntities 就是这么红的）。
+//
+//  ★★ 与旧实现的本质差异
+//
+//  旧（entities/relations）
+//      改 relations.source_id / target_id 即可 —— 实体 ID 不变，
+//      改名（UPDATE entities.name）就完成了合并的「改名」语义。
+//
+//  新（blocks/edges）
+//      块 ID 是**内容派生**的：blk_ent_<hash(name)>。
+//      「张先生」与「张三」是两个不同的块，合并意味着**源块消失**，
+//      它的边改指向目标块。
+//
+//  ⇒ 所以本函数不能只重定向端点，还要：
+//      ① 删源块（不留 @merged_ 残留，与旧实现同款）
+//      ② 处理结构边（contains）—— 否则原句块指向已删的块，端点悬空
+//      ③ 同步 scene_refs —— 否则场景里挂一条永远召不回的幽灵
+//
+//  ★ 边的合并语义：**重定向 + 去自环**，不合并属性。
+//    「李四喜欢咖啡」+「李四讨厌咖啡」合并到「王五」后都变成
+//    「王五—喜欢/讨厌→咖啡」—— 这是**两条不同的关系**（edge_type 不同），
+//    都保留；而「李四喜欢咖啡」+「王五喜欢咖啡」合并后同端同类型，
+//    那才是重复，必须收敛（否则「王五喜欢咖啡」出现两次）。
+// ═══════════════════════════════════════════════════════════════
+
+// MergeBlocks 把 sourceText 块的边合并进 targetText 块，源块随之消失。
+//
+// 返回**重定向的边数**（不含被去重丢弃的重复边）。
+// 幂等：源块不存在时返回 (0, nil)。
+func (g *GraphDB) MergeBlocks(sourceText, targetText string) (int, error) {
+	sourceText = strings.TrimSpace(sourceText)
+	targetText = strings.TrimSpace(targetText)
+	if sourceText == "" || targetText == "" {
+		return 0, fmt.Errorf("merge requires both source and target")
+	}
+	if sourceText == targetText {
+		return 0, fmt.Errorf("merge source and target are identical: %q", sourceText)
+	}
+
+	g.mu.Lock()
+	defer g.mu.Unlock()
+
+	src, err := g.blockByTextTxLocked(sourceText)
+	if err != nil {
+		return 0, err
+	}
+	if src == nil {
+		// ★ 必须报错，不能返回 (0, nil)。
+		//
+		//   我一开始写的是「幂等：源块已合并过」—— 那是对的**理由**
+		//   配上了错的**行为**：源块不存在有两种截然不同的原因：
+		//
+		//     a) 已经合并过了（重试，正常路径）
+		//     b) 名字拼错了 / 从没写过（调用方的 bug）
+		//
+		//   返回 (0, nil) 把两者都变成「静默成功」——
+		//   而这正是记忆系统里最贵的一类 bug：调用方以为合并了，
+		//   库里其实什么都没变。
+		//
+		//   旧 MergeEntities 在这里返回 error，是对的。
+		//   幂等由**调用方**判断（合并后不要再合并同一个源），
+		//   不该由存储层替它猜。
+		return 0, fmt.Errorf("merge source block %q does not exist", sourceText)
+	}
+	dst, err := g.blockByTextTxLocked(targetText)
+	if err != nil {
+		return 0, err
+	}
+	if dst == nil {
+		// ★ 目标不存在必须报错。
+		//   返回 0 会让调用方以为合并成功了，而实际上什么都没做 ——
+		//   那正是「静默失效」的一种。
+		return 0, fmt.Errorf("merge target block %q does not exist", targetText)
+	}
+	if src.ID == dst.ID {
+		return 0, nil
+	}
+
+	tx, err := g.db.Begin()
+	if err != nil {
+		return 0, err
+	}
+	defer tx.Rollback()
+
+	// ── ① 重定向关系边：source → target ──────────────────────
+	//
+	// ★ 只动**关系边**，不动结构边（contains）。
+	//   contains 的端点是「原句块」与「关系边」或「块」，
+	//   把它改成 target 会让原句指向一个语义不同的块。
+	res, err := tx.Exec(
+		`UPDATE memory_block_edges SET source_id = ?
+		 WHERE source_kind = 'block' AND source_id = ?
+		   AND COALESCE(session_id,'') != ''`,
+		dst.ID, src.ID)
+	if err != nil {
+		return 0, fmt.Errorf("redirect source edges: %w", err)
+	}
+	nOut, _ := res.RowsAffected()
+
+	res, err = tx.Exec(
+		`UPDATE memory_block_edges SET target_id = ?
+		 WHERE target_kind = 'block' AND target_id = ?
+		   AND COALESCE(session_id,'') != ''`,
+		dst.ID, src.ID)
+	if err != nil {
+		return 0, fmt.Errorf("redirect target edges: %w", err)
+	}
+	nIn, _ := res.RowsAffected()
+
+	// ── ② 去自环 ─────────────────────────────────────────────
+	//
+	// 重定向后 source→X 与 target→X 都成了 target→X。
+	// 同端**同类型**的边是重复（重复陈述同一件事）；
+	// 同端**不同类型**的边不是（喜欢 vs 讨厌 是两回事）。
+	//
+	// ★ 判定必须含 edge_type：只按 (source,target) 去重会把
+	//   「王五喜欢咖啡」与「王五讨厌咖啡」误删一条。
+	//
+	// 保留 id 最小的那条，其余标记 deleted（不硬删）：
+	//   scene_refs 可能还指向它们。
+	if _, err := tx.Exec(
+		`UPDATE memory_block_edges SET status = 'deleted'
+		 WHERE id NOT IN (
+		     SELECT MIN(id) FROM memory_block_edges
+		     WHERE source_kind='block' AND target_kind='block'
+		       AND (source_id = ? OR target_id = ?)
+		       AND COALESCE(session_id,'') != ''
+		     GROUP BY source_id, target_id, edge_type
+		 )
+		   AND source_kind='block' AND target_kind='block'
+		   AND (source_id = ? OR target_id = ?)
+		   AND COALESCE(session_id,'') != ''
+		   AND COALESCE(status,'') != 'deleted'`,
+		dst.ID, dst.ID, dst.ID, dst.ID); err != nil {
+		return 0, fmt.Errorf("dedupe self-loops: %w", err)
+	}
+
+	// ── ③ 清理指向源块的结构边 ────────────────────────────────
+	//
+	// contains 的端点可能是块（媒体挂载、迁移关系）。
+	// 源块删了之后这些边端点悬空 —— 而悬空端点会让
+	// graphNodeExists 校验失败，后续任何引用它的写入都被拒。
+	if _, err := tx.Exec(
+		`DELETE FROM memory_block_edges
+		 WHERE (source_kind='block' AND source_id=? AND COALESCE(session_id,'')='')
+		    OR (target_kind='block' AND target_id=? AND COALESCE(session_id,'')='')`,
+		src.ID, src.ID); err != nil {
+		return 0, fmt.Errorf("drop structural edges of source: %w", err)
+	}
+
+	// ── ④ 删源块 ─────────────────────────────────────────────
+	if _, err := tx.Exec(`DELETE FROM memory_blocks WHERE id = ?`, src.ID); err != nil {
+		return 0, fmt.Errorf("delete source block: %w", err)
+	}
+
+	// ── ⑤ 场景引用同步 ───────────────────────────────────────
+	//
+	// 源块的引用必须换成目标块 —— 而不是删掉：
+	// 「张先生那次值班」这个场景仍然存在，只是人换了名字。
+	if _, err := tx.Exec(
+		`UPDATE scene_refs SET ref_text = ?
+		 WHERE kind = 'block' AND ref_text = ?`,
+		dst.ID, src.ID); err != nil {
+		return 0, fmt.Errorf("repoint scene refs: %w", err)
+	}
+
+	if err := tx.Commit(); err != nil {
+		return 0, err
+	}
+	return int(nOut + nIn), nil
+}
+
+// blockByTextTxLocked 按文本取最早的块（调用方已持锁）。
+func (g *GraphDB) blockByTextTxLocked(text string) (*MemoryBlock, error) {
+	blocks, err := g.blocksByTextTx(text)
+	if err != nil {
+		return nil, err
+	}
+	if len(blocks) == 0 {
+		return nil, nil
+	}
+	return &blocks[0], nil
 }

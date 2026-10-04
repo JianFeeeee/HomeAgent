@@ -461,7 +461,10 @@ func TestToolMemoryCommit_BindsMedia(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Recall: %v", err)
 	}
-	if len(res.Relations) == 0 || res.Relations[0].SentenceID == 0 {
+	// ★ 断言改用**原句文本**（2026-10-04）：
+	//   SentenceID 是旧 sentences 表行号，退场后恒为 0 ——
+	//   而它是这里唯一与「有没有句子落点」有关的字段，于是恒红。
+	if len(res.Relations) == 0 || res.Relations[0].SentenceText == "" {
 		t.Fatal("没有句子落点 —— 媒体引用无从挂起")
 	}
 	// ★ 挂载点已从「sentences 表行号」改成「原句块 ID」

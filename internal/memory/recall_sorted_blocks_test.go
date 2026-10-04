@@ -28,7 +28,7 @@ func TestRecallSorted_关键词命中并带出关系(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	res, err := g.RecallSorted([]string{"张三"}, nil, 1, "", SortRelevance)
+	res, err := g.RecallSorted([]string{"张三"}, nil, 1, "", "", SortRelevance)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -78,7 +78,7 @@ func TestRecallSorted_深度扩展(t *testing.T) {
 		{1, false, "depth=1 到乙为止，不该有丙"},
 		{2, true, "depth=2 应扩展到丙"},
 	} {
-		res, err := g.RecallSorted([]string{"甲组"}, nil, tc.depth, "", SortRelevance)
+		res, err := g.RecallSorted([]string{"甲组"}, nil, tc.depth, "", "", SortRelevance)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -102,7 +102,7 @@ func TestRecallSorted_种子实体(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	res, err := g.RecallSorted(nil, []string{"唯一主体"}, 1, "", SortRelevance)
+	res, err := g.RecallSorted(nil, []string{"唯一主体"}, 1, "", "", SortRelevance)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -118,7 +118,7 @@ func TestRecallSorted_种子实体(t *testing.T) {
 	}
 
 	// 不存在的种子不该 panic，且返回空
-	res2, err := g.RecallSorted(nil, []string{"不存在的人"}, 1, "", SortRelevance)
+	res2, err := g.RecallSorted(nil, []string{"不存在的人"}, 1, "", "", SortRelevance)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -145,7 +145,7 @@ func TestRecallSorted_会话过滤(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	res, err := g.RecallSorted([]string{"会话甲"}, nil, 1, "s-A", SortRelevance)
+	res, err := g.RecallSorted([]string{"会话甲"}, nil, 1, "s-A", "", SortRelevance)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -171,7 +171,7 @@ func TestRecallSorted_全量分支(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	res, err := g.RecallSorted(nil, nil, 1, "", SortRelevance)
+	res, err := g.RecallSorted(nil, nil, 1, "", "", SortRelevance)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -203,7 +203,7 @@ func TestRecallSorted_软删不可见(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	res, err := g.RecallSorted([]string{"软删主体"}, nil, 1, "", SortRelevance)
+	res, err := g.RecallSorted([]string{"软删主体"}, nil, 1, "", "", SortRelevance)
 	if err != nil {
 		t.Fatal(err)
 	}

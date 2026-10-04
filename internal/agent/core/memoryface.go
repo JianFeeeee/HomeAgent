@@ -55,7 +55,12 @@ type GraphMemory interface {
 	//
 	// 刻意与 Recall 并存而不是改签名：Recall 有 6 个调用方（webui / cli /
 	// healthcheck / sdk / 记忆通道注入），全部依赖默认相关性语义。
-	RecallSorted(keywords []string, seedEntities []string, depth int, sessionFilter string, mode memory.SortMode) (*memory.RecallResult, error)
+	// ★ fingerprint 是**向量空间隔离键**（2026-10-04）。
+	//   它不在 SDK 的公开契约里，只在 core 内部这个接口上 ——
+	//   加它是因为「兜底召回路径绕过向量空间隔离」是真回归
+	//   （判据 TestMemoryRecall_指纹不匹配的块被跳过）。
+	RecallSorted(keywords []string, seedEntities []string, depth int, sessionFilter, fingerprint string, mode memory.SortMode) (*memory.RecallResult, error)
+
 	// Commit 写入三元组（子的实现只落自己的 temp 空间）。
 	Commit(triples []memory.Triple, sessionID string, turnID int) (int, int, error)
 }

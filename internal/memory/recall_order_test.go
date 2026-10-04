@@ -190,7 +190,7 @@ func TestRecall_时间倒序新值在前(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	res, err := db.RecallSorted([]string{"值班室分机"}, nil, 2, "", SortRecent)
+	res, err := db.RecallSorted([]string{"值班室分机"}, nil, 2, "", "", SortRecent)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -216,7 +216,7 @@ func TestRecall_时间倒序_变异_相关性模式顺序不同(t *testing.T) {
 	db.Commit([]Triple{{Subject: "值班室分机", Relation: "是", Object: "4379"}}, "s", 1)
 	db.Commit([]Triple{{Subject: "值班室分机", Relation: "是", Object: "4324"}}, "s", 2)
 
-	res, _ := db.RecallSorted([]string{"值班室分机"}, nil, 2, "", SortRelevance)
+	res, _ := db.RecallSorted([]string{"值班室分机"}, nil, 2, "", "", SortRelevance)
 	if len(res.Relations) < 2 {
 		t.Fatalf("关系不足 2 条")
 	}
@@ -364,7 +364,7 @@ func TestRecall_时间倒序_变异_同秒且rowid顺序相反(t *testing.T) {
 	}
 
 	// 期望：时间倒序 = 按 turn 倒序 = turn2(4379) 在前
-	res, _ := db.RecallSorted([]string{"值班室分机"}, nil, 2, "", SortRecent)
+	res, _ := db.RecallSorted([]string{"值班室分机"}, nil, 2, "", "", SortRecent)
 	if got := res.Relations[0].TargetName; got != "4379" {
 		var all []string
 		for _, r := range res.Relations {
