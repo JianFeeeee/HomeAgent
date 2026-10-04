@@ -77,13 +77,20 @@ func TestWritePayload_句子块边形态(t *testing.T) {
 		}
 	}
 
-	// ★ 关键：不能产出任何 entity（旧形态）
-	entities, err := g.Recall([]string{"停机时长"}, nil, 1, "")
+	// ★ 关键：块路径**不写旧表 entities**。
+	//
+	// ★ 判据口径变了（2026-10-04）：原来断言「Recall 返回 0 个实体」。
+	//   那是在 Recall 仍读旧表时的写法 —— Recall 切块之后，
+	//   它必然返回块（那正是块路径该做的事），于是判据恒红。
+	//
+	//   判据的**意图**是「没有走旧表双写」，所以直接查旧表本身 ——
+	//   与实现无关，且比间接断言更可靠。
+	legacy, err := g.LegacyEntities(0, 1)
 	if err != nil {
-		t.Fatal(err)
+		t.Fatalf("LegacyEntities: %v", err)
 	}
-	if len(entities.Entities) != 0 {
-		t.Errorf("块路径不该写 entities，实际 %+v", entities.Entities)
+	if len(legacy) != 0 {
+		t.Errorf("块路径不该写 entities（旧表 %d 个）: %+v", len(legacy), legacy)
 	}
 }
 

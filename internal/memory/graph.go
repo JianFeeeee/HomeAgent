@@ -63,6 +63,20 @@ type Entity struct {
 	MentionCount int       `json:"mention_count"`
 	CreatedAt    time.Time `json:"created_at"`
 	UpdatedAt    time.Time `json:"updated_at"`
+
+	// blockKey 是对应的**块 ID**（2026-10-04）。
+	//
+	// ★ 为什么 ID 不能直接用块 ID：Entity.ID 是 int64（JSON 与 SDK 契约），
+	//   而块 ID 是内容派生的字符串（blk_ent_<hash>）—— 放不进去。
+	//   所以 ID 退化为「本次召回内的序号」，块 ID 走这个新字段。
+	//
+	// ★ 为什么需要它：召回内部要用块 ID 做 map 键（跨关键词去重、
+	//   深度扩展的前沿集合），而出口排序 sortRecallEntities 按
+	//   Entity.ID 建索引 —— 两者需要一次映射。
+	//
+	// ★ 不导出到 JSON（omitempty + json:"-"）：它是内部索引键，
+	//   不是对外契约的一部分 —— 对外应该是 block_id 而不是这个临时序号。
+	blockKey string `json:"-"`
 }
 
 type Relation struct {
@@ -543,7 +557,7 @@ func (g *GraphDB) commit(triples []Triple, sessionID string, turnID int, trackSe
 		//   （声明提前到循环开头，否则它只在 SentenceText != "" 的分支里可见）
 		var sentenceBlockID string
 
-		srcBlockID, dstBlockID, edgeID, err := putTripleBlocksTx(tx, t)
+		srcBlockID, dstBlockID, edgeID, err := putTripleBlocksTx(tx, t, sessionID, turnID)
 		if err != nil {
 			return nil, 0, 0, fmt.Errorf("block triple %s/%s: %w",
 				t.Subject, t.Relation, err)
@@ -872,83 +886,130 @@ func (g *GraphDB) RecallSorted(keywords []string, seedEntities []string, depth i
 		return result, nil
 	}
 
-	entityIDs := make(map[int64]bool)
-	// entityRank 记每个实体在**各关键词**下的最佳精确度层级（0=完全相等、
-	// 1=前缀命中、2=包含命中），用于跨关键词归并排序。
-	entityRank := make(map[int64]int)
+	// ══════════════════════════════════════════════════════════
+	//  第二分支：关键词 / 种子实体 —— 已改块/边体系（2026-10-04）
+	//
+	//  ★ 这一整块是「int64 实体 ID → 旧表查询」的闭环：
+	//      查 entities 拿 ID → 用 ID 查 relations → 再用关系两端 ID 查 entities。
+	//    块体系里端点是**字符串块 ID**，所以 entityIDs 换成 map[string]bool，
+	//    三处查询全部重写。
+	//
+	//  ★ 它服务的调用方（全部经由 db.Recall）：
+	//      social（人物/特质/关系）  ← 本次改动的直接受害者
+	//      indexer（全量，已在前一分支改完）
+	//      light_memory（透传）
+	//      toolcall（旧路兜底）
+	//
+	//  ★★ 这次改动的实测后果（social 3 个测试当场变红）：
+	//      写侧（Purge）已切块、读侧（这里）还没切 ⇒ 软删的边在旧表里
+	//      仍是 active ⇒ 召回照样返回它。**混合态比全旧态更危险**，
+	//      因为它看起来是「部分成功」。
+	// ══════════════════════════════════════════════════════════
+
+	// entityIDs 的键从 int64 变成**块 ID 字符串**。
+	var bScratch MemoryBlock
+	var vecJSON string
+	var sceneNull sql.NullString
+
+	entityIDs := make(map[string]bool)
+	// entityRank 记「三层精确度」：完全相等 > 前缀命中 > 包含命中。
+	entityRank := make(map[string]int)
+	seq := 0
 
 	for _, kw := range keywords {
-		// 相关度排序 + 限额。
+		if kw == "" {
+			continue
+		}
+		// ★ mention_count 已无处可取（旧表才有），用 created_at 兜底排序：
+		//   先出现的块更可能是稳定的基础事实。
+		// ★ rank 放在 SELECT 的**第一列**，而不是最后。
 		//
-		// 此前这里既没有 ORDER BY 也没有 LIMIT：拿回来的顺序就是建表顺序
-		// （rowid 升序），于是注入进 prompt 的"前 5 个实体"是**最早创建的**，
-		// 越新越准的记忆越排后面被截掉（实测：输入「QQ回复格式」命中 148 个，
-		// 规则实体排第 32，前 5 里根本没有它）。
-		//
-		// 相关度分三层：完全相等 > 前缀命中 > 包含命中；同层按提及次数、
-		// 再按名字长度（短名更可能是实体本身而不是长描述）。
+		//   之前放在 blockColumns 之后 ⇒ scanBlockRow 只吃 15 列，
+		//   多出来的那列无人扫 ⇒ 「expected 16 destination arguments in Scan,
+		//   not 15」。这类错只在真跑 SQL 时暴露，编译期完全看不出来。
 		rows, err := g.db.Query(
-			`SELECT id, name, type, mention_count, created_at, updated_at,
-			        COALESCE((
-			          SELECT MAX(r.sentence_id) FROM relations r
-			          WHERE (r.source_id = entities.id OR r.target_id = entities.id)
-			            AND r.sentence_id > 0
-			        ), 0),
-			        CASE
-			          WHEN LOWER(name) = LOWER(?) THEN 0
-			          WHEN LOWER(name) LIKE LOWER(?) || '%' THEN 1
-			          ELSE 2 END
-			 FROM entities WHERE LOWER(name) LIKE ?
+			`SELECT CASE
+			          WHEN LOWER(text_content) = LOWER(?) THEN 0
+			          WHEN LOWER(text_content) LIKE LOWER(?) || '%' THEN 1
+			          ELSE 2 END, `+blockColumns+`
+			 FROM memory_blocks
+			 WHERE text_content != '' AND LOWER(text_content) LIKE ?
 			 ORDER BY CASE
-			     WHEN LOWER(name) = LOWER(?) THEN 0
-			     WHEN LOWER(name) LIKE LOWER(?) || '%' THEN 1
-			     ELSE 2 END,
-			   mention_count DESC, LENGTH(name) ASC
+			         WHEN LOWER(text_content) = LOWER(?) THEN 0
+			         WHEN LOWER(text_content) LIKE LOWER(?) || '%' THEN 1
+			         ELSE 2 END,
+			       created_at DESC, LENGTH(text_content) ASC
 			 LIMIT ?`,
-			kw, kw, "%"+kw+"%", kw, kw, maxKeywordEntities,
+			kw, kw, "%"+strings.ToLower(kw)+"%", kw, kw, maxKeywordEntities,
 		)
 		if err != nil {
 			return nil, err
 		}
 
 		for rows.Next() {
-			var e Entity
 			var rank int
-			if err := rows.Scan(&e.ID, &e.Name, &e.Type, &e.MentionCount,
-				&e.CreatedAt, &e.UpdatedAt, &e.Seq, &rank); err != nil {
+			// rank 是第 1 列，先扫掉，剩下 15 列正好对上 scanBlockRow。
+			if err := rows.Scan(&rank, &bScratch.ID, &bScratch.Modality,
+				&bScratch.Text, &bScratch.PayloadDigest, &bScratch.MIME,
+				&bScratch.Size, &bScratch.Width, &bScratch.Height, &vecJSON,
+				&bScratch.Fingerprint, &bScratch.Source, &bScratch.Tool,
+				&sceneNull, &bScratch.CreatedAt, &bScratch.UpdatedAt); err != nil {
 				rows.Close()
 				return nil, err
 			}
-			// 跨关键词取**最优**rank：同一实体被多个关键词命中时，
-			// 以最精确的那次为准（否则「完全相等」会被「包含」稀释）。
-			if prev, ok := entityRank[e.ID]; !ok || rank < prev {
-				entityRank[e.ID] = rank
+			b := bScratch
+			seq++
+			e := Entity{
+				ID:        int64(seq),
+				Name:      b.Text,
+				Type:      "block",
+				CreatedAt: b.CreatedAt,
+				UpdatedAt: b.UpdatedAt,
 			}
-			if !entityIDs[e.ID] {
-				entityIDs[e.ID] = true
+			if prev, ok := entityRank[b.ID]; !ok || rank < prev {
+				entityRank[b.ID] = rank
+			}
+			if !entityIDs[b.ID] {
+				entityIDs[b.ID] = true
+				e.blockKey = b.ID
 				result.Entities = append(result.Entities, e)
 			}
 		}
 		rows.Close()
 	}
 
+	// 种子实体：按名**精确**命中（不区分大小写，与旧实现一致）。
 	for _, se := range seedEntities {
-		row := g.db.QueryRow(
-			`SELECT id, name, type, mention_count, created_at, updated_at,
-			        COALESCE((
-			          SELECT MAX(r.sentence_id) FROM relations r
-			          WHERE (r.source_id = entities.id OR r.target_id = entities.id)
-			            AND r.sentence_id > 0
-			        ), 0)
-			 FROM entities WHERE name = ?`, se)
-		var e Entity
-		if err := row.Scan(&e.ID, &e.Name, &e.Type, &e.MentionCount,
-			&e.CreatedAt, &e.UpdatedAt, &e.Seq); err == nil {
-			if !entityIDs[e.ID] {
-				entityIDs[e.ID] = true
-				result.Entities = append(result.Entities, e)
+		if se == "" {
+			continue
+		}
+		rows, err := g.db.Query(
+			`SELECT `+blockColumns+` FROM memory_blocks
+			 WHERE text_content = ? LIMIT 1`, se)
+		if err != nil {
+			return nil, err
+		}
+		for rows.Next() {
+			b, err := scanBlockRow(rows)
+			if err != nil {
+				rows.Close()
+				return nil, err
+			}
+			if !entityIDs[b.ID] {
+				seq++
+				entityIDs[b.ID] = true
+				entityRank[b.ID] = 0
+				result.Entities = append(result.Entities, Entity{
+					ID:        int64(seq),
+					Name:      b.Text,
+					Type:      "block",
+					CreatedAt: b.CreatedAt,
+					UpdatedAt: b.UpdatedAt,
+					blockKey:  b.ID,
+				})
 			}
 		}
+		rows.Close()
 	}
 
 	if len(entityIDs) == 0 {
@@ -959,66 +1020,106 @@ func (g *GraphDB) RecallSorted(keywords []string, seedEntities []string, depth i
 	//
 	// 单个关键词的 LIMIT(maxKeywordEntities) 管不住总量 —— 多个关键词各召回
 	// 一批会累加，实测 3 个关键词就能堆到 193 个实体（13744 tokens）。
-	// 这里按 SQL 里已有的三层精确度（完全相等 > 前缀命中 > 包含命中）跨关键词
-	// 归并后截断：那一层信息在单关键词查询里已经算出来了（rank 列），
-	// 但之前被 append 顺序冲淡了。
+	// 这里按三层精确度（完全相等 > 前缀命中 > 包含命中）跨关键词归并后截断。
 
-	// seenRel 跨层去重。
-	//
-	// 每层都用**已累积的** entityIDs 查邻接关系，因此上一层刚产出、以及
-	// 两个已访问实体之间的关系会在下一层被重复查回并再次 append。
-	// 深度 2、稠密图上重复会淹没 memory_recall 的 10 条关系预算——
-	// 模型看到的是同一句话刷屏，真正的新关系被截断。
 	seenRel := make(map[int64]bool)
 
+	// ★★ 深度扩展
+	//
+	// 旧实现每层用「已累积的 entityIDs」查邻接关系 ——
+	// ★★ 那个设计是错的：entityIDs 累积的是**实体**，
+	//    而一层扩展的正确语义是「上一层新发现的实体的邻居」。
+	//    用累积集会让第 2 层把第 0 层见过的实体再查一遍，
+	//    于是深度形同虚设（判据 TestRecallSorted_深度扩展 抓到：
+	//    depth=2 拿不到「丙」，而甲→乙→丙→丁 是 3 跳链）。
+	//
+	// 现在：frontier = 上一层新发现的块；每层只从 frontier 扩展。
+	// prevFrontier 是本层的扩展起点；每轮结束时被 newIDs 替换。
+	prevFrontier := entityIDs
 	for depthLevel := 0; depthLevel < depth; depthLevel++ {
-		ids := make([]interface{}, 0, len(entityIDs))
-		for id := range entityIDs {
+		if len(prevFrontier) == 0 {
+			break
+		}
+		// ★ 起点集合必须是「**本层之前**新发现的块」，不是 entityIDs 全集。
+		//
+		// 我先写成 entityIDs（累积集），那等于「每层从所有已知点重新扩一遍」——
+		// 深度形同虚设，而且第一层就把 2 跳邻居全拉进来了。
+		//
+		// prevFrontier 由上一轮的 newIDs 赋值；depthLevel==0 时用种子命中集。
+		frontier := prevFrontier
+
+		ids := make([]interface{}, 0, len(frontier))
+		for id := range frontier {
 			ids = append(ids, id)
 		}
-
 		if len(ids) == 0 {
 			break
 		}
 
-		query := fmt.Sprintf(
-			`SELECT r.id, r.source_id, r.target_id, e1.name, e2.name,
-					r.relation_type, r.confidence, r.status, r.session_id,
-					r.turn_id, r.created_at, COALESCE(r.date_bucket, ''),
-					COALESCE(r.sentence_id, 0), COALESCE(s.text, '')
-			 FROM relations r
-			 JOIN entities e1 ON r.source_id = e1.id
-			 JOIN entities e2 ON r.target_id = e2.id
-			 LEFT JOIN sentences s ON r.sentence_id = s.id
-			 WHERE (r.source_id IN (%s) OR r.target_id IN (%s))
-			   AND r.status = 'active'`,
-			placeholders(len(ids)),
-			placeholders(len(ids)),
-		)
-		allIDs := append(ids, ids...)
-
+		ph := placeholders(len(ids))
+		relQuery := fmt.Sprintf(
+			`SELECT e.id, e.source_id, e.target_id, sb.text_content, tb.text_content,
+			        e.edge_type, COALESCE(e.confidence,0), COALESCE(e.status,''),
+			        COALESCE(e.session_id,''), COALESCE(e.turn_id,0), e.created_at,
+			        COALESCE((SELECT b.text_content FROM memory_block_edges c
+			                  JOIN memory_blocks b ON b.id = c.source_id
+			                  WHERE c.target_kind='edge' AND c.target_id = e.id
+			                    AND c.edge_type='contains' LIMIT 1), '')
+			 FROM memory_block_edges e
+			 JOIN memory_blocks sb ON sb.id = e.source_id
+			 JOIN memory_blocks tb ON tb.id = e.target_id
+			 WHERE (e.source_id IN (%s) OR e.target_id IN (%s))
+			   AND e.source_kind='block' AND e.target_kind='block'
+			   AND e.edge_type != 'contains'
+			   AND COALESCE(e.status,'') = 'active'`, ph, ph)
+		args := append(append([]interface{}{}, ids...), ids...)
 		if sessionFilter != "" {
-			query += " AND r.session_id = ?"
-			allIDs = append(allIDs, sessionFilter)
+			relQuery += " AND COALESCE(e.session_id,'') = ?"
+			args = append(args, sessionFilter)
 		}
-		// 每层限额：热实体（"文档"这类）的邻接可能是上千条，无上限时每层都
-		// 整片读进内存，而调用方（memory_recall 注入 10 条、自动注入只要实体名）
-		// 根本用不到。按置信度取最相关的一批。
-		query += " ORDER BY r.confidence DESC, r.updated_at DESC LIMIT ?"
-		allIDs = append(allIDs, maxAdjacentRelations)
+		// ★★ 排序口径必须交给 sortRecallRelations，不能在 SQL 里预设（2026-10-04）
+		//
+		//   我写了 `ORDER BY e.created_at DESC`，看起来无害 ——
+		//   实际上它让**两种 SortMode 的结果完全相同**：
+		//   sortRecallRelations 对 SortRelevance 直接 return（不排序），
+		//   于是「相关性」模式实际拿到的是「时间倒序」。
+		//
+		//   判据 TestRecall_时间倒序_变异_相关性模式顺序不同 当场抓住：
+		//   它是**变异自证** —— 断言「相关性模式下顺序必须不同于时间模式」，
+		//   一旦两者相同就说明上一个测试的判据不可信。
+		//
+		// ★★ SortRelevance 需要自己的顺序依据（2026-10-04）
+		//
+		//   sortRecallRelations 对 SortRelevance 直接 return —— 前提是
+		//   「SQL 已按种子实体的相关性排过」。
+		//
+		// ★ 那个前提在我改写时不成立：无 ORDER BY 时 SQLite 按 rowid 走，
+		//   而 rowid = 插入顺序 = 时间顺序 ⇒
+		//   相关性模式实际拿到的是时间倒序，两种 SortMode 完全同序。
+		//
+		//   判据（变异自证）当场抓住：它断言「相关性模式下顺序必须不同于
+		//   时间模式」，两者一相同就说明上一个测试的判据不可信。
+		//
+		//   相关性的可用信号只有 confidence（边自带），用它兜底：
+		//   同分时保持插入序，于是「高置信在前」可区分于「新的在前」。
+		if mode != SortRecent {
+			relQuery += " ORDER BY e.confidence DESC, e.id ASC"
+		} else {
+			relQuery += " ORDER BY e.created_at DESC, e.turn_id DESC, e.id DESC"
+		}
 
-		relRows, err := g.db.Query(query, allIDs...)
+		relRows, err := g.db.Query(relQuery, args...)
 		if err != nil {
 			return nil, err
 		}
 
-		newIDs := make(map[int64]bool)
+		newIDs := make(map[string]bool)
 		for relRows.Next() {
 			var rel Relation
-			if err := relRows.Scan(&rel.ID, &rel.SourceID, &rel.TargetID,
+			if err := relRows.Scan(&rel.ID, &rel.SourceBlockID, &rel.TargetBlockID,
 				&rel.SourceName, &rel.TargetName, &rel.RelationType,
 				&rel.Confidence, &rel.Status, &rel.SessionID,
-				&rel.TurnID, &rel.CreatedAt, &rel.DateBucket, &rel.SentenceID, &rel.SentenceText); err != nil {
+				&rel.TurnID, &rel.CreatedAt, &rel.SentenceText); err != nil {
 				relRows.Close()
 				return nil, err
 			}
@@ -1026,12 +1127,11 @@ func (g *GraphDB) RecallSorted(keywords []string, seedEntities []string, depth i
 				seenRel[rel.ID] = true
 				result.Relations = append(result.Relations, rel)
 			}
-
-			if !entityIDs[rel.SourceID] {
-				newIDs[rel.SourceID] = true
+			if !entityIDs[rel.SourceBlockID] {
+				newIDs[rel.SourceBlockID] = true
 			}
-			if !entityIDs[rel.TargetID] {
-				newIDs[rel.TargetID] = true
+			if !entityIDs[rel.TargetBlockID] {
+				newIDs[rel.TargetBlockID] = true
 			}
 		}
 		relRows.Close()
@@ -1039,50 +1139,59 @@ func (g *GraphDB) RecallSorted(keywords []string, seedEntities []string, depth i
 		if len(newIDs) == 0 {
 			break
 		}
+		// ★ 下一层从这批新块出发 —— 这是「深度」真正生效的地方。
+		prevFrontier = newIDs
 
+		// 取出新实体的块内容 —— 块 ID 就是主键，直接查一次。
 		ids2 := make([]interface{}, 0, len(newIDs))
 		for id := range newIDs {
 			ids2 = append(ids2, id)
 		}
-
 		eRows, err := g.db.Query(
-			fmt.Sprintf(
-				`SELECT id, name, type, mention_count, created_at, updated_at,
-				        COALESCE((
-			          SELECT MAX(r.sentence_id) FROM relations r
-			          WHERE (r.source_id = entities.id OR r.target_id = entities.id)
-			            AND r.sentence_id > 0
-			        ), 0)
-				 FROM entities WHERE id IN (%s)`, placeholders(len(ids2))),
+			fmt.Sprintf(`SELECT `+blockColumns+` FROM memory_blocks WHERE id IN (%s)`,
+				placeholders(len(ids2))),
 			ids2...,
 		)
 		if err != nil {
 			return nil, err
 		}
-
 		for eRows.Next() {
-			var e Entity
-			if err := eRows.Scan(&e.ID, &e.Name, &e.Type, &e.MentionCount,
-				&e.CreatedAt, &e.UpdatedAt, &e.Seq); err != nil {
+			b, err := scanBlockRow(eRows)
+			if err != nil {
 				eRows.Close()
 				return nil, err
 			}
-			if !entityIDs[e.ID] {
-				entityIDs[e.ID] = true
-				result.Entities = append(result.Entities, e)
+			if !entityIDs[b.ID] {
+				seq++
+				entityIDs[b.ID] = true
+				entityRank[b.ID] = 3 // 深度扩展来的，精度最低
+				result.Entities = append(result.Entities, Entity{
+					ID:        int64(seq),
+					Name:      b.Text,
+					Type:      "block",
+					CreatedAt: b.CreatedAt,
+					UpdatedAt: b.UpdatedAt,
+					blockKey:  b.ID,
+				})
 			}
 		}
 		eRows.Close()
-
-		for id := range newIDs {
-			entityIDs[id] = true
-		}
 	}
 
 	// ★ 出口排序 + 全局截断（在深度扩展之后）。
 	//
 	// 深度扩展会从种子实体带出新的邻居实体，所以上限必须在出口施加。
-	sortRecallEntities(result.Entities, entityRank, keywords, mode)
+	// ★ entityRank 的键要从块 ID 映射回 Entity.ID：
+	//   sortRecallEntities 按 ents[i].ID 建索引，而 Entity.ID 现在是
+	//   「本次召回内的序号」（块 ID 是字符串，放不进 int64）。
+	//   序号在本次调用内唯一，所以映射是一一对应的。
+	rankBySeq := make(map[int64]int, len(result.Entities))
+	for i := range result.Entities {
+		if r, ok := entityRank[result.Entities[i].blockKey]; ok {
+			rankBySeq[result.Entities[i].ID] = r
+		}
+	}
+	sortRecallEntities(result.Entities, rankBySeq, keywords, mode)
 	if len(result.Entities) > maxRecallEntities {
 		dropped := len(result.Entities) - maxRecallEntities
 		result.Entities = result.Entities[:maxRecallEntities]

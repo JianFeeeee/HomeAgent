@@ -109,7 +109,12 @@ func TripleBlockID(name string) string {
 // 写出一批退场后会悬空的引用。
 //
 // 返回值顺序：sourceBlockID, targetBlockID, edgeID（无块时为空/0）。
-func putTripleBlocksTx(tx *sql.Tx, t Triple) (string, string, int64, error) {
+//
+// ★ sessionID / turnID 来自 commit() 的参数而非 Triple ——
+//
+//	Triple 是「三元组内容」，会话是「这次写入的上下文」，
+//	两者本就不该混在一个结构里。
+func putTripleBlocksTx(tx *sql.Tx, t Triple, sessionID string, turnID int) (string, string, int64, error) {
 	src := MemoryBlock{
 		ID:       TripleBlockID(t.Subject),
 		Modality: BlockText,
@@ -140,10 +145,16 @@ func putTripleBlocksTx(tx *sql.Tx, t Triple) (string, string, int64, error) {
 	//   INSERT OR IGNORE 会把同对节点的第二条同类型边静默吞掉，
 	//   而关系边按设计允许并存多条 —— 52e4596 已把全局 UNIQUE 移除）。
 	res, err := tx.Exec(
+		// ★★ session_id / turn_id 必须写进去（2026-10-04）
+		//
+		//   Recall 的 sessionFilter 依赖边表的这两列。缺了它，
+		//   任何按会话过滤的召回都返回空 —— 而测试若不显式带
+		//   sessionFilter 就发现不了（无过滤时召回照常工作）。
 		`INSERT INTO memory_block_edges
-		 (source_kind, source_id, target_kind, target_id, edge_type, status)
-		 VALUES ('block', ?, 'block', ?, ?, 'active')`,
-		src.ID, dst.ID, strings.TrimSpace(t.Relation))
+		 (source_kind, source_id, target_kind, target_id, edge_type,
+		  status, session_id, turn_id)
+		 VALUES ('block', ?, 'block', ?, ?, 'active', ?, ?)`,
+		src.ID, dst.ID, strings.TrimSpace(t.Relation), sessionID, turnID)
 	if err != nil {
 		return "", "", 0, err
 	}
