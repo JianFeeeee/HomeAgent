@@ -3,7 +3,6 @@ package sdk
 import (
 	"fmt"
 	"log"
-	"strconv"
 	"sync/atomic"
 	"time"
 
@@ -202,7 +201,10 @@ func (m *graphMemory) Commit(triples []Triple) error {
 // 并以 sentence --contains--> block 结构边关联。
 //
 // 不再往句子文本里写 marker、也不再从文本反解 digest：归属由结构化字段直接给出。
-func (m *graphMemory) bindSentences(sentenceIDs map[string]int64, triples []memory.Triple) {
+// ★ sentenceIDs 现在是「原句文本 → 原句**块 ID**」（原为 sentences 表行号）。
+//
+//	sentences 表退场后行号不存在，媒体边改挂到原句块上。
+func (m *graphMemory) bindSentences(sentenceIDs map[string]string, triples []memory.Triple) {
 	if m.ms == nil || m.db == nil || len(sentenceIDs) == 0 {
 		return
 	}
@@ -212,7 +214,7 @@ func (m *graphMemory) bindSentences(sentenceIDs map[string]int64, triples []memo
 			continue
 		}
 		sid := sentenceIDs[t.SentenceText]
-		if sid == 0 {
+		if sid == "" {
 			continue
 		}
 		for _, b := range sdkBlocksFromDigests(m.ms, t.MediaDigests) {
@@ -220,7 +222,9 @@ func (m *graphMemory) bindSentences(sentenceIDs map[string]int64, triples []memo
 				log.Printf("[sdk media] 插件 %s 写入 L3 记忆块失败: %v", m.plugin, err)
 				continue
 			}
-			if err := m.db.AddMemoryBlockEdge("sentence", strconv.FormatInt(sid, 10), "block", b.ID, "contains"); err != nil {
+			// ★ 起点是**块**（原句块）而非 sentence 表行 ——
+			//   句子的承载者已从 sentences 表迁移到 blk_src_<hash>。
+			if err := m.db.AddMemoryBlockEdge("block", sid, "block", b.ID, "contains"); err != nil {
 				log.Printf("[sdk media] 插件 %s 建立句子→块边失败: %v", m.plugin, err)
 				continue
 			}

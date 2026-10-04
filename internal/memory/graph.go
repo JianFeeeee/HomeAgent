@@ -445,17 +445,24 @@ func (g *GraphDB) Commit(triples []Triple, sessionID string, turnID int) (int, i
 // 返回的 map 只包含本次真正写入了 sentences 表的句子。调用方据此把媒体
 // 变成 L3 一等块，并以 sentence --contains--> block 边与句子相连；
 // 关系行本身不持有媒体。
-func (g *GraphDB) CommitWithMedia(triples []Triple, sessionID string, turnID int) (map[string]int64, int, int, error) {
+// ★ 返回的 map 现在是「原句文本 → **原句块 ID**」（原为 sentences 表行号）。
+//
+// 变更原因：sentences 表退场后行号不再存在，而媒体桥
+// （graphmedia.go commitTriplesWithMedia）要靠它挂
+// 「原句块 --contains--> 媒体块」这条边。
+//
+// ⇒ 媒体桥那条边要同步改：source_kind 从 "sentence" 变成 "block"。
+func (g *GraphDB) CommitWithMedia(triples []Triple, sessionID string, turnID int) (map[string]string, int, int, error) {
 	return g.commit(triples, sessionID, turnID, true)
 }
 
-func (g *GraphDB) commit(triples []Triple, sessionID string, turnID int, trackSentences bool) (map[string]int64, int, int, error) {
+func (g *GraphDB) commit(triples []Triple, sessionID string, turnID int, trackSentences bool) (map[string]string, int, int, error) {
 	g.mu.Lock()
 	defer g.mu.Unlock()
 
-	var sentenceIDs map[string]int64
+	var sentenceIDs map[string]string
 	if trackSentences {
-		sentenceIDs = make(map[string]int64)
+		sentenceIDs = make(map[string]string)
 	}
 
 	tx, err := g.db.Begin()
@@ -474,6 +481,24 @@ func (g *GraphDB) commit(triples []Triple, sessionID string, turnID int, trackSe
 		}
 		if !validEntityName(t.Subject) || !validEntityName(t.Object) {
 			continue
+		}
+
+		// ★ 块化写入：三元组 → 「主语块 --关系--> 宾语块」
+		//
+		// 为什么在 commit 里做（而不是让调用方各自块化）：
+		// Commit 有四条调用路径（媒体桥 / memory_commit 工具 / 驻留子 /
+		// 记忆整理流水线），实测只有 memory_commit 工具在活跃写库。
+		// 若各路径自己块化，必然出现「有的路径写块、有的不写」——
+		// 那正是「旧表在长大」（跑分实测 entities 188 → 381）的机制。
+		//
+		// ★ 块 ID 由内容派生 ⇒ 重复提交同一三元组得到同一个块，天然幂等。
+		//
+		// ★ 旧表写入**暂时保留**：Recall 等 55 处调用方仍读它们
+		//   （见 docs/zh/legacy-table-retirement.md），先删会打断在线读取。
+		//   退场顺序是「读方先切块 → 再停写旧表 → 最后删表」。
+		if err := putTripleBlocksTx(tx, t); err != nil {
+			return nil, 0, 0, fmt.Errorf("block triple %s/%s: %w",
+				t.Subject, t.Relation, err)
 		}
 
 		subjType := t.SubjectType
@@ -514,6 +539,25 @@ func (g *GraphDB) commit(triples []Triple, sessionID string, turnID int, trackSe
 		// 写入/查找句子
 		var sentenceID int64
 		if t.SentenceText != "" {
+			// ★ 原句块：sentences 表退场后，原句由块承载。
+			//
+			// 它必须在**任何分支之外**建 —— 否则「sentence 行插入失败」
+			// 会连带丢掉原句块，而那句原句本身是有效记忆。
+			// 判据 zz_blockcommit_test.go 的②盯的就是这条。
+			// ★ 同样留空时间：原句块的时序由迁移/蒸馏显式指定，
+			//   这里写 now 会覆盖既有值（实测抹平了迁移块的时序）。
+			if err := putBlockTx(tx, NewSentenceBlock(t.SentenceText,
+				time.Time{}, time.Time{})); err != nil {
+				return nil, 0, 0, fmt.Errorf("put sentence block: %w", err)
+			}
+			sentenceBlockID := SentenceBlockID(t.SentenceText)
+			if sentenceIDs != nil {
+				// ★ 返回原句块 ID 而非 sentences 行号（见 CommitWithMedia 注释）
+				sentenceIDs[t.SentenceText] = sentenceBlockID
+			}
+
+			// 旧表写入暂时保留：Recall 等 55 处调用方仍读它们
+			// （docs/zh/legacy-table-retirement.md）。
 			_, err = tx.Exec(
 				`INSERT OR IGNORE INTO sentences (text) VALUES (?)`, t.SentenceText)
 			if err != nil {
@@ -522,8 +566,6 @@ func (g *GraphDB) commit(triples []Triple, sessionID string, turnID int, trackSe
 			err = tx.QueryRow("SELECT id FROM sentences WHERE text = ?", t.SentenceText).Scan(&sentenceID)
 			if err != nil {
 				sentenceID = 0
-			} else if sentenceIDs != nil {
-				sentenceIDs[t.SentenceText] = sentenceID
 			}
 		}
 

@@ -158,20 +158,26 @@ func insertMigratedBlock(tx *sql.Tx, block MemoryBlock) error {
 // attachBlockToLegacySentences 把迁移出的块挂到该旧实体当时所属的句子上，
 // 并保留那些句子（它们可能只有媒体关系，删实体后就再无关系引用）。
 func attachBlockToLegacySentences(tx *sql.Tx, entityID int64, blockID string) (int, error) {
-	rows, err := tx.Query(`SELECT DISTINCT s.id FROM sentences s
+	// ★ 取 sentences.**text** 而不是 id —— 挂载点已从 sentences 表行号
+	// 改成原句块 ID（Commit 块化，sentences 表退场）。
+	// 行号只在这一行里当作 JOIN 键用，不作为边的端点。
+	rows, err := tx.Query(`SELECT DISTINCT s.text FROM sentences s
 		JOIN relations r ON r.sentence_id = s.id
 		WHERE r.source_id = ? OR r.target_id = ?`, entityID, entityID)
 	if err != nil {
 		return 0, err
 	}
-	var sids []int64
+	var sentTexts []string
 	for rows.Next() {
-		var sid int64
-		if err := rows.Scan(&sid); err != nil {
+		var text string
+		if err := rows.Scan(&text); err != nil {
 			rows.Close()
 			return 0, err
 		}
-		sids = append(sids, sid)
+		if text == "" {
+			continue
+		}
+		sentTexts = append(sentTexts, text)
 	}
 	if err := rows.Err(); err != nil {
 		rows.Close()
@@ -180,11 +186,12 @@ func attachBlockToLegacySentences(tx *sql.Tx, entityID int64, blockID string) (i
 	rows.Close()
 
 	n := 0
-	for _, sid := range sids {
+	for _, text := range sentTexts {
+		// 端点 kind 从 'sentence' 改成 'block'（原句由块承载）
 		if _, err := tx.Exec(`INSERT OR IGNORE INTO memory_block_edges
 			(source_kind, source_id, target_kind, target_id, edge_type)
-			VALUES ('sentence', ?, 'block', ?, 'contains')`,
-			fmt.Sprintf("%d", sid), blockID); err != nil {
+			VALUES ('block', ?, 'block', ?, 'contains')`,
+			SentenceBlockID(text), blockID); err != nil {
 			return n, err
 		}
 		n++

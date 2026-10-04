@@ -2,6 +2,7 @@ package memory
 
 import (
 	"crypto/sha256"
+	"database/sql"
 	"encoding/hex"
 	"strings"
 	"time"
@@ -49,4 +50,73 @@ func NewSentenceBlock(text string, createdAt, updatedAt time.Time) MemoryBlock {
 		CreatedAt: createdAt,
 		UpdatedAt: updatedAt,
 	}
+}
+
+// TripleBlockID 由三元组内容派生「值块」的 ID。
+//
+// ★ 为什么三元组要变成**两个块 + 一条边**，而不是一个块
+// ------------------------------------------------
+// 三元组是「主语 --关系--> 宾语」。若压成一个块（`<主语>|<关系>=<宾语>`），
+// 就无法回答「X 的关系有哪些」「Y 被哪些主语指向」这类图查询 ——
+// 而那正是 Recall 的主要用法（`docs/zh/recall-capability-tiers.md`）。
+//
+// ⇒ 主语块、宾语块各自可独立被召回（它们是独立的事实），
+//
+//	关系由边承载。
+//
+// 幂等：ID 完全由内容派生，重复提交同一三元组得到同一对块 ⇒ 天然去重。
+func TripleBlockID(name string) string {
+	h := sha256.Sum256([]byte(strings.TrimSpace(name)))
+	return "blk_ent_" + hex.EncodeToString(h[:12])
+}
+
+// putTripleBlocksTx 把一条三元组写成「主语块 --关系--> 宾语块」。
+//
+// ★ 不带向量
+// ----------
+// Commit 这条路径上**没有 embedding provider**（Commit 的签名里就没有）。
+// 而编造零向量比不写更坏：零向量块会参与召回并永远排在最后，
+// 那是「静默的错误记忆」（见 ToMemoryBlock 的注释）。
+//
+// ⇒ 块先入库、无向量；召回侧按「有无向量」分别处理
+//
+//	（有向量的走语义召回，无向量的靠符号路按内容串匹配 ——
+//	实测跑分里 `[exact]` 那 14 条正是这类）。
+//
+// ★ 时间戳：不写 now，而是**留空**
+// --------------------------------
+// 第一版给块打了 time.Now()，结果被 putBlockTx 的 ON CONFLICT 覆盖了
+// 迁移块的时序 —— 实测迁移测试直接抓到：
+//
+//	blk_ent_edb5a71b11d814fdc36e8332 应继承实体时间 2026-01-01 10:00
+//	实际 2026-10-04 08:04（时序被抹平）
+//
+// 而时序是**仲裁的前提**（internal/memory/arbitration.go 靠
+// CreatedAt 判断「谁取代了谁」）。抹平时序会让仲裁失效。
+//
+// ⇒ 留空的语义是「时间未指定」：putBlockTx 不会用它覆盖既有值，
+//
+//	也不该被仲裁当成时间依据（仲裁跳过无时间的块 —— 见其规则 1）。
+//	真正需要时序的块由迁移/蒸馏显式传 CreatedAt。
+func putTripleBlocksTx(tx *sql.Tx, t Triple) error {
+	src := MemoryBlock{
+		ID:       TripleBlockID(t.Subject),
+		Modality: BlockText,
+		Text:     strings.TrimSpace(t.Subject),
+		Source:   "triple",
+	}
+	dst := MemoryBlock{
+		ID:       TripleBlockID(t.Object),
+		Modality: BlockText,
+		Text:     strings.TrimSpace(t.Object),
+		Source:   "triple",
+	}
+	for _, b := range []MemoryBlock{src, dst} {
+		if err := putBlockTx(tx, b); err != nil {
+			return err
+		}
+	}
+	err, _ := addBlockEdgeTx(tx, "block", src.ID, "block", dst.ID,
+		strings.TrimSpace(t.Relation))
+	return err
 }

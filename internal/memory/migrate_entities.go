@@ -359,13 +359,43 @@ func putBlockTx(tx *sql.Tx, b MemoryBlock) error {
 	}
 	// 时间戳显式写入（COALESCE 兜底 NOW()）：值覆盖维度依赖块间先后，
 	// 全部落成同一时刻就等于把时序抹平。
+	//
+	// ★★ 但「零值」要区分两种语义（实测 Commit 块化后踩过）
+	//
+	//	① 迁移/蒸馏显式指定时间  → 用它
+	//	② 调用方未指定（零值）    → 填 now，但**绝不覆盖已有时间**
+	//
+	// 第一版对②也用 now + 无条件 ON CONFLICT SET created_at，于是
+	// Commit 块化之后：
+	//
+	//	Commit 写 blk_ent_<hash>（无时序）→ 填 now
+	//	  → 迁移处理同名实体 → ON CONFLICT 覆盖 created_at
+	//	  → 迁移块继承的实体时序被抹平
+	//
+	// 实测迁移测试直接抓到：
+	//
+	//	blk_ent_edb5a71b11d814fdc36e8332 应继承实体时间 2026-01-01 10:00
+	//	实际 2026-10-04 08:05（时序被抹平）
+	//
+	// 而时序是**仲裁的前提**（arbitration.go 靠 CreatedAt 判断谁取代谁）。
+	// ⇒ 零值时 UPDATE 分支**不碰时间列**。
 	created := b.CreatedAt
-	if created.IsZero() {
+	updated := b.UpdatedAt
+	explicitTime := !created.IsZero()
+	if !explicitTime {
 		created = time.Now()
 	}
-	updated := b.UpdatedAt
 	if updated.IsZero() {
-		updated = created
+		if explicitTime {
+			updated = created
+		} else {
+			updated = created
+		}
+	}
+	// 只有显式指定时间时才在 UPDATE 分支写时间列
+	tsUpdate := "created_at = excluded.created_at, updated_at = excluded.updated_at"
+	if !explicitTime {
+		tsUpdate = "updated_at = memory_blocks.updated_at"
 	}
 	_, err := tx.Exec(`INSERT INTO memory_blocks
 		(id, modality, text_content, payload_digest, mime, size, width, height,
@@ -377,8 +407,7 @@ func putBlockTx(tx *sql.Tx, b MemoryBlock) error {
 			vector = excluded.vector,
 			fingerprint = excluded.fingerprint,
 			source = excluded.source,
-			created_at = excluded.created_at,
-			updated_at = excluded.updated_at`,
+			`+tsUpdate,
 		b.ID, b.Modality, b.Text, b.PayloadDigest, b.MIME, b.Size, b.Width, b.Height,
 		vectorJSON, b.Fingerprint, b.Source, b.Tool, b.Scene, created, updated)
 	return err
