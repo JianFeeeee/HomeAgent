@@ -386,3 +386,29 @@ func (g *GraphDB) blocksByIDsLocked(ids []string) ([]MemoryBlock, error) {
 	}
 	return out, rows.Err()
 }
+
+// BlockNeighbour 是一条关系边连同它的对端块 —— 「谁和谁有什么关系」的完整读法。
+//
+// ★ 为什么不复用 RelationEdgeData：那个类型只是**属性载荷**
+//
+//	（confidence/session/turn/status/merged_into），刻意不含 ID 与端点，
+//	因为 AddRelationBlockEdge 的入参就是「端点已知、只传属性」。
+//
+//	读的方向相反：要端点、要 ID。所以另立类型而不是硬塞进去。
+type BlockNeighbour struct {
+	// EdgeID 是 memory_block_edges.id。场景引用 kind='edge' 指向它。
+	EdgeID int64
+	// SourceID / TargetID 是两端块 ID。
+	SourceID string
+	TargetID string
+	// EdgeType 是关系名（「偏好」「使用」…）。
+	EdgeType string
+	// Peer 是**对端**块：SourceID == 查询块时为 Target，反之为 Source。
+	// 查询块自己是起点，不需要重复带出。
+	Peer MemoryBlock
+	// IsOutgoing 标明方向：true 表示 Peer 是这条关系的宾语。
+	// social 层区分「A 认识 B」与「B 认识 A」时必须看它。
+	IsOutgoing bool
+
+	RelationEdgeData
+}

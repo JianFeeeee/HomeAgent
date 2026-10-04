@@ -799,9 +799,19 @@ func (g *GraphDB) RecallSorted(keywords []string, seedEntities []string, depth i
 	if len(keywords) == 0 && len(seedEntities) == 0 {
 		// 全量读取仅用于内部整备（Indexer.Sync / 实体合并检测），
 		// 必须加限额：无 LIMIT 时大图会被整表读进内存。
+		// ★★★ 改走块/边体系（2026-10-04）
+		//
+		// 旧实现读 entities + relations。旧表退场后这里返回空 ——
+		// 而这条路径是 Indexer.Sync 的数据源（建向量索引）与
+		// 实体合并检测的唯一入口。它空了，整备就是空转：
+		// 索引里一条向量都没有，而没有任何报错。
+		//
+		// 块侧口径：按 created_at **升序**（旧的是 mention_count DESC 的逆序，
+		// 但全量读取只用于建索引，顺序不影响正确性；命中上限时
+		// 优先取最早的，因为它们更可能是稳定的基础事实）。
 		rows, err := g.db.Query(
-			`SELECT id, name, type, mention_count, created_at, updated_at
-			 FROM entities ORDER BY mention_count DESC LIMIT ?`,
+			`SELECT `+blockColumns+` FROM memory_blocks
+			 WHERE text_content != '' ORDER BY created_at ASC, id ASC LIMIT ?`,
 			maxFullRecallEntities,
 		)
 		if err != nil {
@@ -809,28 +819,40 @@ func (g *GraphDB) RecallSorted(keywords []string, seedEntities []string, depth i
 		}
 		defer rows.Close()
 
+		var seq int64
 		for rows.Next() {
-			var e Entity
-			if err := rows.Scan(&e.ID, &e.Name, &e.Type, &e.MentionCount, &e.CreatedAt, &e.UpdatedAt); err != nil {
+			b, err := scanBlockRow(rows)
+			if err != nil {
 				return nil, err
 			}
-			result.Entities = append(result.Entities, e)
+			seq++
+			result.Entities = append(result.Entities, Entity{
+				ID:        seq, // 占位：块 ID 是字符串，Entity.ID 是 int64
+				Name:      b.Text,
+				Type:      "block",
+				CreatedAt: b.CreatedAt,
+				UpdatedAt: b.UpdatedAt,
+			})
 		}
 		if len(result.Entities) >= maxFullRecallEntities {
 			log.Printf("[graph] full recall 命中实体上限 %d，可能有实体未纳入", maxFullRecallEntities)
 		}
 
 		relRows, err := g.db.Query(
-			`SELECT r.id, r.source_id, r.target_id, e1.name, e2.name,
-					r.relation_type, r.confidence, r.status, r.session_id,
-					r.turn_id, r.created_at, COALESCE(r.date_bucket, ''),
-					COALESCE(r.sentence_id, 0), COALESCE(s.text, '')
-			 FROM relations r
-			 JOIN entities e1 ON r.source_id = e1.id
-			 JOIN entities e2 ON r.target_id = e2.id
-			 LEFT JOIN sentences s ON r.sentence_id = s.id
-			 WHERE r.status = 'active'
-			 ORDER BY r.created_at DESC LIMIT 30`,
+			`SELECT e.id, e.source_id, e.target_id, sb.text_content, tb.text_content,
+					e.edge_type, COALESCE(e.confidence, 0), COALESCE(e.status, ''),
+					COALESCE(e.session_id, ''), COALESCE(e.turn_id, 0), e.created_at,
+					COALESCE((SELECT b.text_content FROM memory_block_edges c
+					          JOIN memory_blocks b ON b.id = c.source_id
+					          WHERE c.target_kind = 'edge' AND c.target_id = e.id
+					            AND c.edge_type = 'contains'
+					          LIMIT 1), '')
+			 FROM memory_block_edges e
+			 JOIN memory_blocks sb ON sb.id = e.source_id
+			 JOIN memory_blocks tb ON tb.id = e.target_id
+			 WHERE e.source_kind = 'block' AND e.target_kind = 'block'
+				  AND COALESCE(e.status, '') = 'active'
+			 ORDER BY e.created_at DESC LIMIT 30`,
 		)
 		if err != nil {
 			return nil, err
@@ -838,10 +860,10 @@ func (g *GraphDB) RecallSorted(keywords []string, seedEntities []string, depth i
 		defer relRows.Close()
 		for relRows.Next() {
 			var rel Relation
-			if err := relRows.Scan(&rel.ID, &rel.SourceID, &rel.TargetID,
+			if err := relRows.Scan(&rel.ID, &rel.SourceBlockID, &rel.TargetBlockID,
 				&rel.SourceName, &rel.TargetName, &rel.RelationType,
 				&rel.Confidence, &rel.Status, &rel.SessionID,
-				&rel.TurnID, &rel.CreatedAt, &rel.DateBucket, &rel.SentenceID, &rel.SentenceText); err != nil {
+				&rel.TurnID, &rel.CreatedAt, &rel.SentenceText); err != nil {
 				return nil, err
 			}
 			result.Relations = append(result.Relations, rel)
@@ -1115,92 +1137,118 @@ func (g *GraphDB) Purge(criteria map[string]string, mode string) (int, error) {
 	g.mu.Lock()
 	defer g.mu.Unlock()
 
-	conds := []string{"status = 'active'"}
+	// ★★★ 改走块/边体系（2026-10-04）
+	//
+	// 旧实现查 entities 拿 id、拼 relations 的 where、删/软删 relations，
+	// 最后 purgeStaleSceneRefsLocked。旧表退场后这条路全断 ——
+	// 而 Purge 有 9 处调用方（webui / healthcheck / SDK / toolcall×2 /
+	// social×2 / lua / proc），它是**记忆删除的主路径**：
+	// 用户说「忘掉这条」而它删不动，等于没有删除功能。
+	//
+	// 块体系里的等价物：
+	//
+	//	subject_contains → 按块文本 LIKE 找源块 ID
+	//	target_contains  → 按块文本 LIKE 找目标块 ID
+	//	relation_type    → edge_type
+	//	session_id       → session_id
+	//
+	// ★ 端点是**块 ID 字符串**，所以 IN 列表的参数类型从 int64 变 string。
+	// ★ status 口径：软删写 'deleted'；硬删直接 DELETE。
+	//   两者都紧跟 purgeStaleSceneRefsLocked —— 否则场景里会挂一条
+	//   永远召不回的幽灵，而 SceneStats 还照样把它算进去。
+
+	if _, ok := criteria["subject_contains"]; !ok {
+		if _, ok := criteria["target_contains"]; !ok {
+			if _, ok := criteria["relation_type"]; !ok {
+				if _, ok := criteria["session_id"]; !ok {
+					return 0, fmt.Errorf("no criteria provided")
+				}
+			}
+		}
+	}
+
+	// 收集要匹配的端点块 ID（可能同时来自 subject 与 target）
+	var endpointConds []string
+	var endpointArgs []interface{}
+
+	for _, spec := range []struct{ key, col string }{
+		{"subject_contains", "source_id"},
+		{"target_contains", "target_id"},
+	} {
+		v, ok := criteria[spec.key]
+		if !ok {
+			continue
+		}
+		blocks, err := g.blocksByTextLikeTx(v)
+		if err != nil {
+			return 0, err
+		}
+		if len(blocks) == 0 {
+			// ★ 匹配不到块 ⇒ 没有任何边可删。
+			//   返回 0 而不是构造恒假条件 —— 后者会让「删 0 条」
+			//   与「条件写错了」在返回值上无法区分。
+			return 0, nil
+		}
+		ids := make([]interface{}, 0, len(blocks))
+		for _, b := range blocks {
+			ids = append(ids, b.ID)
+		}
+		endpointConds = append(endpointConds,
+			fmt.Sprintf("%s IN (%s)", spec.col, placeholders(len(ids))))
+		endpointArgs = append(endpointArgs, ids...)
+	}
+
+	conds := []string{"source_kind = 'block'", "target_kind = 'block'"}
 	args := []interface{}{}
-
-	if v, ok := criteria["subject_contains"]; ok {
-		rows, err := g.db.Query("SELECT id FROM entities WHERE name LIKE ?", "%"+v+"%")
-		if err != nil {
-			return 0, err
-		}
-		var ids []interface{}
-		for rows.Next() {
-			var id int64
-			rows.Scan(&id)
-			ids = append(ids, id)
-		}
-		rows.Close()
-		if len(ids) > 0 {
-			conds = append(conds, fmt.Sprintf("source_id IN (%s)", placeholders(len(ids))))
-			args = append(args, ids...)
-		}
-	}
-
-	if v, ok := criteria["target_contains"]; ok {
-		rows, err := g.db.Query("SELECT id FROM entities WHERE name LIKE ?", "%"+v+"%")
-		if err != nil {
-			return 0, err
-		}
-		var ids []interface{}
-		for rows.Next() {
-			var id int64
-			rows.Scan(&id)
-			ids = append(ids, id)
-		}
-		rows.Close()
-		if len(ids) > 0 {
-			conds = append(conds, fmt.Sprintf("target_id IN (%s)", placeholders(len(ids))))
-			args = append(args, ids...)
-		}
-	}
+	conds = append(conds, endpointConds...)
+	args = append(args, endpointArgs...)
 
 	if v, ok := criteria["relation_type"]; ok {
-		conds = append(conds, "relation_type = ?")
+		conds = append(conds, "edge_type = ?")
 		args = append(args, v)
 	}
-
 	if v, ok := criteria["session_id"]; ok {
-		conds = append(conds, "session_id = ?")
+		conds = append(conds, "COALESCE(session_id, '') = ?")
 		args = append(args, v)
 	}
 
-	if len(conds) == 1 {
-		return 0, fmt.Errorf("no criteria provided")
+	// ★ 只有「仅按 session/relation_type 删」时不限定 status；
+	//   带端点条件时也限定 active —— 否则重复调用会反复命中已软删的行，
+	//   计数虚高而实际什么都没删。
+	if _, hasEndpoint := criteria["subject_contains"]; hasEndpoint {
+		conds = append(conds, "COALESCE(status, '') != 'deleted'")
+	} else if _, hasEndpoint := criteria["target_contains"]; hasEndpoint {
+		conds = append(conds, "COALESCE(status, '') != 'deleted'")
 	}
 
-	where := ""
-	for i, c := range conds {
-		if i == 0 {
-			where = c
-		} else {
-			where += " AND " + c
-		}
-	}
+	where := strings.Join(conds, " AND ")
 
 	if mode == "hard" {
 		result, err := g.db.Exec(
-			fmt.Sprintf(`DELETE FROM relations WHERE %s`, where), args...)
+			fmt.Sprintf(`DELETE FROM memory_block_edges WHERE %s`, where), args...)
 		if err != nil {
 			return 0, err
 		}
 		n, _ := result.RowsAffected()
 
-		// 这里**不再**顺手全局删孤儿实体。
+		// ★ 这里**不再**顺手全局删孤儿块。
 		//
-		// 原来那句 `DELETE FROM entities WHERE id NOT IN (relations 两端)` 是与
-		// 调用方意图无关的全局副作用：memory_edit 只想去掉一条关系，却可能把
-		// 图里其它孤零零的实体一并清掉。孤儿清理交给 PurgeOrphans
-		// （显式、可 dry-run、有计数与审计），一次改动只做一件事。
+		// 与旧实现同一条纪律：孤儿清理是独立意图，
+		// 混进删除路径会让「删一条边」清掉全图的孤块。
 		//
-		// 关系没了，它的场景引用必须跟着对齐：残留引用会让场景看着很大、
+		// 边没了，它的场景引用必须跟着对齐：残留引用会让场景看着很大、
 		// 召回却是空的（SceneStats 也跟着说谎）。
 		g.purgeStaleSceneRefsLocked()
 
 		return int(n), nil
 	}
 
+	// ★ 不能写 updated_at：memory_block_edges **没有**这一列
+	//   （升格成独立边时只加了 confidence/session/turn/status/merged_into）。
+	//   旧 relations 表有，所以这个字段是照抄过来的 ——
+	//   一旦旧表删掉、这里不改，Purge 软删会直接报 no such column。
 	result, err := g.db.Exec(
-		fmt.Sprintf(`UPDATE relations SET status = 'deleted', updated_at = CURRENT_TIMESTAMP WHERE %s`, where),
+		fmt.Sprintf(`UPDATE memory_block_edges SET status = 'deleted' WHERE %s`, where),
 		args...,
 	)
 	if err != nil {
@@ -1211,6 +1259,34 @@ func (g *GraphDB) Purge(criteria map[string]string, mode string) (int, error) {
 	// 留着引用只会在场景里挂一条永远召不回的幽灵。
 	g.purgeStaleSceneRefsLocked()
 	return int(n), nil
+}
+
+// blocksByTextLikeTx 按文本子串取块（调用方已持锁）。
+//
+// 与 BlockTextsLike 同语义，供**已持锁**的删除路径复用 ——
+// 持锁路径不能调 BlockTextsLike（它自己要拿锁）。
+func (g *GraphDB) blocksByTextLikeTx(fragment string) ([]MemoryBlock, error) {
+	fragment = strings.TrimSpace(fragment)
+	if fragment == "" {
+		return nil, nil
+	}
+	rows, err := g.db.Query(
+		`SELECT `+blockColumns+` FROM memory_blocks
+		 WHERE text_content LIKE ? ESCAPE '\' ORDER BY id`,
+		"%"+escapeLike(fragment)+"%")
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []MemoryBlock
+	for rows.Next() {
+		b, err := scanBlockRow(rows)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, b)
+	}
+	return out, rows.Err()
 }
 
 func (g *GraphDB) GraphData() (map[string]interface{}, error) {
@@ -1363,12 +1439,29 @@ func (g *GraphDB) Introspect() (map[string]interface{}, error) {
 	// 正确修法：**两处口径分开**。
 	//   - Introspect 的 relation_count = 活跃数（语义不变，各调用方依赖）
 	//   - 迁移报告要的是「会转换多少条」= 全表数，另开一个字段
+	// ★★★ 改数块/边（2026-10-04）
+	//
+	// 旧表退场后这两句恒为 0 ⇒ Introspect 报告「库里没有记忆」
+	// 而实际有几千条。它是 healthcheck 与 WebUI 状态页的数据源 ——
+	// **报告说谎比报错更坏**（没人会去查）。
+	//
+	// ★ 口径对齐（沿用此前定的语义分离）：
+	//   relation_count  = 活跃关系边（status='active'，不含 contains 结构边）
+	//   relations_total = 全部关系边（含 soft-deleted）
+	//
+	// ★ 排除 contains：那是结构边（原句块 → 关系边），
+	//   计数它会让「关系数」随原句数量翻倍。
 	g.db.QueryRow(
-		"SELECT COUNT(*) FROM relations WHERE status = 'active'").Scan(&relationCount)
+		`SELECT COUNT(*) FROM memory_block_edges
+		 WHERE source_kind='block' AND target_kind='block'
+		   AND edge_type != 'contains' AND COALESCE(status,'')='active'`).Scan(&relationCount)
 	// relations_total 是**全表**关系数（不过滤 status）——
 	// 迁移报告用它，因为 MigrateLegacyTextEntities 会转换全表。
 	var relationsTotal int
-	g.db.QueryRow("SELECT COUNT(*) FROM relations").Scan(&relationsTotal)
+	g.db.QueryRow(
+		`SELECT COUNT(*) FROM memory_block_edges
+		 WHERE source_kind='block' AND target_kind='block'
+		   AND edge_type != 'contains'`).Scan(&relationsTotal)
 
 	hotspots := []map[string]interface{}{}
 	rows, err := g.db.Query(

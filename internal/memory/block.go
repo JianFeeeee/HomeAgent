@@ -4,6 +4,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"fmt"
+	"strings"
 	"time"
 )
 
@@ -204,6 +205,18 @@ func (g *GraphDB) MemoryBlocks() ([]MemoryBlock, error) {
 // 将来加列时**两处都要改** —— 而我只加了 schema 列忘了扩读取端
 // 已经犯过一次（属性静默变零值，被 TestEdge_承载关系属性 抓到）。
 // 共用扫描让「加列漏改」不再可能。
+// blockColumns 是 memory_blocks 的完整列清单，**必须与 scanBlockRow 的
+// Scan 顺序逐列一致**。
+//
+// ★ 为什么要提成常量：2026-10-04 修过一次由此引发的生产 bug ——
+//
+//	MemoryBlocks() 的 SELECT 漏了 scene 列，而它与 scanBlockRow 共用，
+//	结果媒体与召回测试大面积变红（列数不匹配 ⇒ 读失败）。
+//
+//	单靠“记得同步”不可靠；提成常量后新增查询直接复用。
+const blockColumns = `id, modality, text_content, payload_digest, mime, size, width, height,
+			vector, fingerprint, source, tool, scene, created_at, updated_at`
+
 func scanBlockRow(rows *sql.Rows) (MemoryBlock, error) {
 	var b MemoryBlock
 	var vectorJSON string
@@ -411,4 +424,251 @@ func addContainsEdgeTx(tx *sql.Tx, sentenceBlockID string, edgeID int64, weight 
 		VALUES ('block', ?, 'edge', ?, 'contains', ?, 'active')`,
 		sentenceBlockID, edgeID, weight)
 	return err
+}
+
+// ═══════════════════════════════════════════════════════════════
+//  读方切换用的薄包装（2026-10-04）
+//
+//  这三个函数存在的唯一理由：让 indexer / social / distill / Purge
+//  能从旧表（entities/relations/sentences）迁到块体系。
+//
+//  ★ 它们**刻意不做语义加工** —— 只做「按名找块」「枚举块名」
+//  「取某块的邻居边」这三件最朴素的事。
+//    任何排序、过滤、仲裁、召回打分都该在调用方做，
+//    否则同一个语义会散落在两处，然后各自漂移。
+//
+//  ★ 全部走 g.mu，所以调用方**不得**已持锁。
+// ═══════════════════════════════════════════════════════════════
+
+// BlockByText 按文本取块（精确匹配）。
+//
+// 用途对应旧表的 `WHERE name = ?` —— 旧表的 name 是实体名，
+// 块侧的等价物是 text_content。
+//
+// ★ 为什么用 = 而不是 LIKE：旧表 name 是**规范化过的实体名**
+//
+//	（Commit 走 TripleBlockID(t.Subject) 这样的内容派生 ID），
+//	精确匹配能命中；模糊匹配会把「值班室分机号」与「值班室分机号（旧）」
+//	混为一谈，而那正是仲裁要区分的东西。
+//
+// ★ 不区分 modality：媒体块的 text_content 常为空，
+//
+//	空串匹配不到任何真实查询（调用方不会传空串查）。
+func (g *GraphDB) BlockByText(text string) (*MemoryBlock, error) {
+	text = strings.TrimSpace(text)
+	if text == "" {
+		return nil, nil
+	}
+	g.mu.Lock()
+	defer g.mu.Unlock()
+
+	blocks, err := g.blocksByTextTx(text)
+	if err != nil {
+		return nil, err
+	}
+	if len(blocks) == 0 {
+		return nil, nil
+	}
+	// 多个块同文本时取**最早**的：TripleBlockID 是内容派生的，
+	// 理论上一个文本一个块；重复只可能来自迁移的历史数据，
+	// 此时取最早的（它的 created_at 来自源实体，语义上更接近原意）。
+	b := blocks[0]
+	return &b, nil
+}
+
+// blocksByTextTx 按文本取全部同文本块（调用方已持锁）。
+func (g *GraphDB) blocksByTextTx(text string) ([]MemoryBlock, error) {
+	rows, err := g.db.Query(
+		`SELECT `+blockColumns+` FROM memory_blocks
+		 WHERE text_content = ? ORDER BY created_at ASC, id ASC`, text)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []MemoryBlock
+	for rows.Next() {
+		b, err := scanBlockRow(rows)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, b)
+	}
+	return out, rows.Err()
+}
+
+// BlockTextsLike 返回文本匹配 LIKE 的块（大小写不敏感，%value% 包裹）。
+//
+// 用途对应旧表的 `WHERE LOWER(name) LIKE ?`。
+// ★ 调用方自己拼 LIKE 还是传裸子串？**传裸子串** ——
+//
+//	包裹在这里做，避免每个调用方各写各的 %…% 然后漏掉转义。
+//
+// ★ 不做 N 限制：调用方要么自己限，要么要全量（建索引类场景）。
+//
+//	但 ⚠️ 全表 LIKE 在大库上是 O(n) —— 调用方需自行评估。
+func (g *GraphDB) BlockTextsLike(fragment string) ([]MemoryBlock, error) {
+	fragment = strings.TrimSpace(fragment)
+	if fragment == "" {
+		return nil, nil
+	}
+	pattern := "%" + escapeLike(fragment) + "%"
+	g.mu.Lock()
+	defer g.mu.Unlock()
+
+	rows, err := g.db.Query(
+		`SELECT `+blockColumns+` FROM memory_blocks
+		 WHERE text_content LIKE ? ESCAPE '\'
+		 ORDER BY created_at ASC, id ASC`, pattern)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []MemoryBlock
+	for rows.Next() {
+		b, err := scanBlockRow(rows)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, b)
+	}
+	return out, rows.Err()
+}
+
+// escapeLike 转义 LIKE 的元字符（% _ 与 ESCAPE 自身）。
+//
+// ★ 不转义的话，「50%」这类文本会变成通配符，
+//
+//	在 Purge 的删除路径上就是**误删**。
+func escapeLike(s string) string {
+	r := strings.NewReplacer(`\`, `\\`, `%`, `\%`, `_`, `\_`)
+	return r.Replace(s)
+}
+
+// AllBlockTexts 返回全部块的文本（去重，按出现顺序）。
+//
+// 用途对应旧表的「全量实体名」—— 建向量索引（indexer）与
+// 记忆整理（distill）都需要这个。
+//
+// ★ 去重：同名实体在旧表是**多行**（mention_count 不同），
+//
+//	而块侧的 TripleBlockID 是内容派生 ⇒ 同文本本应只有一个块。
+//	去重让调用方不必处理重复，也顺带掩盖迁移期的历史重复。
+//
+// ★ 分批读取：全表取进内存在百万块级会炸。
+//
+//	batchSize<=0 时用默认批大小。
+func (g *GraphDB) AllBlockTexts(batchSize int) ([]string, error) {
+	if batchSize <= 0 {
+		batchSize = 5000
+	}
+	g.mu.Lock()
+	defer g.mu.Unlock()
+
+	var out []string
+	seen := make(map[string]bool)
+	var lastID string
+	for {
+		rows, err := g.db.Query(
+			`SELECT id, text_content FROM memory_blocks
+			 WHERE id > ? AND text_content != ''
+			 ORDER BY id LIMIT ?`, lastID, batchSize)
+		if err != nil {
+			return nil, err
+		}
+		n := 0
+		var nextID string
+		for rows.Next() {
+			var id, text string
+			if err := rows.Scan(&id, &text); err != nil {
+				rows.Close()
+				return nil, err
+			}
+			nextID = id
+			n++
+			if seen[text] {
+				continue
+			}
+			seen[text] = true
+			out = append(out, text)
+		}
+		rows.Close()
+		if err := rows.Err(); err != nil {
+			return nil, err
+		}
+		if n < batchSize {
+			break
+		}
+		lastID = nextID
+	}
+	return out, nil
+}
+
+// NeighbourEdgesOfBlock 返回以该块为端点的全部 active 关系边及其对端块。
+//
+// 用途对应旧表的「按实体名找它的所有关系」—— social 层按人/物聚合
+// 社交关系时用它。
+//
+// ★ 双向：块作为 source 或 target 都算。
+// ★ 只取非 deleted 的边（与全部读路径的 status 口径一致）。
+//
+// ★ 返回顺序按创建时间 —— 稳定的输出对测试与展示都重要，
+//
+//	而 SQLite 不保证无 ORDER BY 的行序。
+func (g *GraphDB) NeighbourEdgesOfBlock(blockID string) ([]BlockNeighbour, []MemoryBlock, error) {
+	if blockID == "" {
+		return nil, nil, nil
+	}
+	g.mu.Lock()
+	defer g.mu.Unlock()
+
+	rows, err := g.db.Query(
+		`SELECT e.id, e.source_id, e.target_id, e.edge_type,
+		        COALESCE(e.confidence, 0), COALESCE(e.session_id, ''),
+		        COALESCE(e.turn_id, 0), COALESCE(e.status, ''),
+		        COALESCE(e.created_at, ''),
+		        COALESCE(other.id, ''), COALESCE(other.text_content, '')
+		 FROM memory_block_edges e
+		 LEFT JOIN memory_blocks other
+		   ON other.id = CASE WHEN e.source_id = ? THEN e.target_id ELSE e.source_id END
+		 WHERE (e.source_id = ? OR e.target_id = ?)
+		   AND e.source_kind = 'block' AND e.target_kind = 'block'
+		   AND COALESCE(e.status, '') != 'deleted'
+		 ORDER BY e.created_at ASC, e.id ASC`, blockID, blockID, blockID)
+	if err != nil {
+		return nil, nil, err
+	}
+	defer rows.Close()
+
+	var edges []BlockNeighbour
+	var peers []MemoryBlock
+	seenPeer := make(map[string]bool)
+	for rows.Next() {
+		var nb BlockNeighbour
+		var otherID, otherText, created string
+		if err := rows.Scan(&nb.EdgeID, &nb.SourceID, &nb.TargetID, &nb.EdgeType,
+			&nb.Confidence, &nb.SessionID, &nb.TurnID, &nb.Status, &created,
+			&otherID, &otherText); err != nil {
+			return nil, nil, err
+		}
+		nb.IsOutgoing = nb.SourceID == blockID
+		nb.Peer = MemoryBlock{
+			ID:        otherID,
+			Modality:  BlockText,
+			Text:      otherText,
+			CreatedAt: parseLegacyTime(created),
+			UpdatedAt: parseLegacyTime(created),
+		}
+		nb.RelationEdgeData = RelationEdgeData{
+			Confidence: nb.Confidence,
+			SessionID:  nb.SessionID,
+			TurnID:     nb.TurnID,
+			Status:     nb.Status,
+		}
+		edges = append(edges, nb)
+		if otherText != "" && !seenPeer[otherID] {
+			seenPeer[otherID] = true
+			peers = append(peers, nb.Peer)
+		}
+	}
+	return edges, peers, rows.Err()
 }
