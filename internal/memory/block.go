@@ -165,7 +165,8 @@ func (g *GraphDB) MemoryBlocks() ([]MemoryBlock, error) {
 	g.mu.RLock()
 	defer g.mu.RUnlock()
 	rows, err := g.db.Query(`SELECT id, modality, text_content, payload_digest, mime,
-		size, width, height, vector, fingerprint, source, tool, created_at, updated_at
+		size, width, height, vector, fingerprint, source, tool, scene,
+		created_at, updated_at
 		FROM memory_blocks ORDER BY created_at, id`)
 	if err != nil {
 		return nil, err
@@ -174,22 +175,52 @@ func (g *GraphDB) MemoryBlocks() ([]MemoryBlock, error) {
 
 	var blocks []MemoryBlock
 	for rows.Next() {
-		var block MemoryBlock
-		var vectorJSON string
-		if err := rows.Scan(&block.ID, &block.Modality, &block.Text, &block.PayloadDigest,
-			&block.MIME, &block.Size, &block.Width, &block.Height, &vectorJSON,
-			&block.Fingerprint, &block.Source, &block.Tool, &block.CreatedAt,
-			&block.UpdatedAt); err != nil {
+		block, err := scanBlockRow(rows)
+		if err != nil {
 			return nil, err
-		}
-		if vectorJSON != "" && vectorJSON != "null" {
-			if err := json.Unmarshal([]byte(vectorJSON), &block.Vector); err != nil {
-				return nil, fmt.Errorf("decode memory block %s vector: %w", block.ID, err)
-			}
 		}
 		blocks = append(blocks, block)
 	}
 	return blocks, rows.Err()
+}
+
+// scanBlockRow 读一行 memory_blocks。
+//
+// ★★ 列顺序与个数必须与**每个**调用它的 SELECT 完全一致
+// -----------------------------------------------
+// 共用扫描的代价是：SELECT 少列就整体读不出（不是某字段零值，而是
+// 整行 Scan 失败 ⇒ 该路径静默返回空）。
+//
+// 实测踩过：MemoryBlocks() 的 SELECT 少了 scene 列（14 列），
+// 而 block_recall.go / edge_entity.go 是 15 列，换成共用扫描后
+// 三处一起读不出块 —— 症状是「召回返回未找到相关记忆」，
+// 完全看不出是列数问题。
+//
+// ⇒ 改任何 memory_blocks 的 SELECT 时，**数一遍列**。
+//
+// ★ 提取成共用函数的原因
+// ------------------
+// BFSBlocks（edge_entity.go）也要读块。若它自己写一份 Scan，
+// 将来加列时**两处都要改** —— 而我只加了 schema 列忘了扩读取端
+// 已经犯过一次（属性静默变零值，被 TestEdge_承载关系属性 抓到）。
+// 共用扫描让「加列漏改」不再可能。
+func scanBlockRow(rows *sql.Rows) (MemoryBlock, error) {
+	var b MemoryBlock
+	var vectorJSON string
+	var scene sql.NullString
+	if err := rows.Scan(&b.ID, &b.Modality, &b.Text, &b.PayloadDigest,
+		&b.MIME, &b.Size, &b.Width, &b.Height, &vectorJSON,
+		&b.Fingerprint, &b.Source, &b.Tool, &scene,
+		&b.CreatedAt, &b.UpdatedAt); err != nil {
+		return b, err
+	}
+	b.Scene = scene.String
+	if vectorJSON != "" && vectorJSON != "null" {
+		if err := json.Unmarshal([]byte(vectorJSON), &b.Vector); err != nil {
+			return b, fmt.Errorf("decode memory block %s vector: %w", b.ID, err)
+		}
+	}
+	return b, nil
 }
 
 func validGraphNodeKind(kind string) bool {

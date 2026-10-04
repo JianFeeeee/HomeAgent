@@ -266,3 +266,126 @@ func ensureRelationEdgeUniqueness(tx *sql.Tx) {
 	}
 	log.Printf("[graph] 边表升格完成")
 }
+
+// BFSBlocks 从 startID 出发，沿**关系边**展开 depth 层，返回全部可达节点。
+//
+// ★★★ 这就是「联想」的实现（docs/zh/recall-as-association.md）
+//
+// 人听到「值班室分机号是多少」时：想起主语 → 想起值 → 想起旧值 → 想起人。
+// 节点是召回对象，N 层 BFS 是把「自动附带的上下文」取回来。
+//
+// ★ 为什么必须是「节点 + BFS」而不是「只召回主语块」
+//
+//	宾语块 "4324" 孤立召回时不知道自己来自哪里。
+//	若只召回主语块 ⇒ 要么丢它（漏掉「用户直接问值」的场景），
+//	要么加「来源标注」特判（联想本来就不需要标注）。
+//
+// ★ 双向遍历
+//
+//	人联想到「老周值班」是从「老周 --值班分机--> 4324」**反向**走来的。
+//	所以正反向都要展开，否则网会退化成有向森林。
+//
+// ★ depth=0 只返回自身（不是空）
+//
+//	命中节点本身就是要返回的内容之一。
+func (g *GraphDB) BFSBlocks(startID string, depth int) ([]MemoryBlock, error) {
+	if depth < 0 {
+		depth = 0
+	}
+	if startID == "" {
+		return nil, fmt.Errorf("bfs: empty start id")
+	}
+
+	g.mu.RLock()
+	defer g.mu.RUnlock()
+
+	// 起点必须存在
+	var exists int
+	if err := g.db.QueryRow(
+		`SELECT COUNT(*) FROM memory_blocks WHERE id = ?`, startID).Scan(&exists); err != nil {
+		return nil, err
+	}
+	if exists == 0 {
+		return nil, fmt.Errorf("bfs: start block %s does not exist", startID)
+	}
+
+	// visited 同时充当去重集合：网会织成"部分连通"，
+	// 不去重会在环上无限展开。
+	visited := map[string]bool{startID: true}
+	frontier := []string{startID}
+
+	for d := 0; d < depth && len(frontier) > 0; d++ {
+		var next []string
+		for _, cur := range frontier {
+			// ★ 正向 + 反向：前驱（谁指向我）与后继（我指向谁）都是邻居。
+			//
+			// ★★ 这里**不能**加 COALESCE(session_id,'')='' 的过滤 ——
+			//   那个条件是给结构边去重用的（结构边 session_id 恒空），
+			//   而关系边的 session_id 恰恰**非空**（它是边的属性）。
+			//   加上它会把所有关系边滤掉 ⇒ BFS 一个邻居都走不到。
+			//   实测：边写对了（session=s1 status=active）但 BFS 只返回起点。
+			rows, err := g.db.Query(`SELECT target_id FROM memory_block_edges
+				WHERE source_kind='block' AND source_id=?
+				UNION
+				SELECT source_id FROM memory_block_edges
+				WHERE target_kind='block' AND target_id=?`,
+				cur, cur)
+			if err != nil {
+				return nil, err
+			}
+			for rows.Next() {
+				var nb string
+				if err := rows.Scan(&nb); err != nil {
+					rows.Close()
+					return nil, err
+				}
+				if nb != "" && !visited[nb] {
+					visited[nb] = true
+					next = append(next, nb)
+				}
+			}
+			err = rows.Err()
+			rows.Close()
+			if err != nil {
+				return nil, err
+			}
+		}
+		frontier = next
+	}
+
+	// 取块内容（按 visited 顺序返回：起点在前，邻居按发现顺序）
+	ids := make([]string, 0, len(visited))
+	for id := range visited {
+		ids = append(ids, id)
+	}
+	return g.blocksByIDsLocked(ids)
+}
+
+func (g *GraphDB) blocksByIDsLocked(ids []string) ([]MemoryBlock, error) {
+	if len(ids) == 0 {
+		return nil, nil
+	}
+	placeholders := make([]string, len(ids))
+	args := make([]any, len(ids))
+	for i, id := range ids {
+		placeholders[i] = "?"
+		args[i] = id
+	}
+	rows, err := g.db.Query(`SELECT id, modality, text_content, payload_digest,
+		mime, size, width, height, vector, fingerprint, source, tool, scene,
+		created_at, updated_at
+		FROM memory_blocks WHERE id IN (`+strings.Join(placeholders, ",")+`)`, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []MemoryBlock
+	for rows.Next() {
+		b, err := scanBlockRow(rows)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, b)
+	}
+	return out, rows.Err()
+}
