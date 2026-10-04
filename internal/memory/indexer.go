@@ -126,13 +126,25 @@ func (idx *Indexer) syncIfStale() bool {
 	if idx.db == nil {
 		return false
 	}
+	// ★★ 基线改数**块**（2026-10-04）
+	//
+	// 原来数旧表 entities —— 而旧表双写已停，那张表不再增长
+	// ⇒ count 恒为 0 ⇒ expected 恒为 0 ⇒
+	//    **首次 syncIfStale 也判成「无需同步」**
+	// ⇒ 索引永远不建立，而没有任何报错。
+	//
+	// 判据 TestSyncIfStaleBaseline 的「首次应建立索引」当场抓住。
+	//
+	// ★ 口径与 Sync 保持一致：Sync 走「无关键词全量召回」，
+	//   实体数被 maxFullRecallEntities 封顶。
+	//   ★ 用 COUNT(*) 而非走召回：Sync 内部也用这个封顶口径，
+	//   两边一致才不会「永远不相等」——
+	//   那会导致每 30s 全量重训，把一条读路径变成写放大热点。
 	var count int
-	if err := idx.db.db.QueryRow(`SELECT COUNT(*) FROM entities`).Scan(&count); err != nil {
+	if err := idx.db.db.QueryRow(
+		`SELECT COUNT(*) FROM memory_blocks WHERE text_content != ''`).Scan(&count); err != nil {
 		return false
 	}
-	// 基线口径必须与 Sync 一致：Sync 走的是「无关键词全量召回」，实体数被
-	// maxFullRecallEntities 封顶。直接拿 COUNT(*) 比会在实体数超过上限的大图上
-	// 永远不相等——每 30s 全量重训一次，把一条读路径变成写放大热点。
 	expected := count
 	if expected > maxFullRecallEntities {
 		expected = maxFullRecallEntities
@@ -427,7 +439,7 @@ func (idx *Indexer) GetToolDefinitions() []map[string]interface{} {
 		{
 			"type": "function",
 			"function": map[string]interface{}{
-				"name":        "memory_recall",
+				"name": "memory_recall",
 				"description": "检索图记忆。输入查询意图关键词，返回相关实体和关系。" +
 					"问『某个具体东西是什么/是多少』用默认相关性排序；" +
 					"问『最近/最新/现在是什么』必须传 sort=recent —— " +

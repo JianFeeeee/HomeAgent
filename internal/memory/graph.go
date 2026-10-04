@@ -558,7 +558,9 @@ func (g *GraphDB) commit(triples []Triple, sessionID string, turnID int, trackSe
 
 	entitiesCreated := 0
 	relationsCreated := 0
+	// dateBucket 原供旧表 relations.date_bucket —— 旧表停写后已无去处。
 	dateBucket := time.Now().Format("2006-01-02")
+	_ = dateBucket
 
 	for _, t := range triples {
 		if t.Subject == "" || t.Relation == "" || t.Object == "" {
@@ -604,30 +606,32 @@ func (g *GraphDB) commit(triples []Triple, sessionID string, turnID int, trackSe
 			confidence = 1.0
 		}
 
-		ec, err := g.upsertEntity(tx, t.Subject, subjType)
-		if err != nil {
-			return nil, 0, 0, err
-		}
-		entitiesCreated += ec
+		// ★★ 旧表 entities 双写已停（2026-10-04）
+		//
+		// 读方已全部切块，而 entities.type / mention_count 已无处可取
+		// （块侧改用 semantic_type）。
+		//
+		// ★ 代价要说清楚：**entitiesCreated 现在恒为 0，没有意义了**。
+		//   Commit 的返回签名 (entityCount, relationCount, error) 是
+		//   SDK 契约（9 处调用方），改签名会波及一大片 ——
+		//   所以保留位置并置 0，而不是改签名。
+		//   依赖它做判断的调用方（若存在）应改用块侧计数，
+		//   已记入 docs/zh/legacy-table-retirement.md 的待办。
+		_ = subjType
+		_ = objType
 
-		ec, err = g.upsertEntity(tx, t.Object, objType)
-		if err != nil {
-			return nil, 0, 0, err
-		}
-		entitiesCreated += ec
+		// ★★ 旧表 entities 的**读取**也已停（2026-10-04）
+		//
+		// 这两条 SELECT 只为拿旧表行号（sourceID/targetID），
+		// 而它们唯一的用途是写旧表 relations。旧表不写之后，
+		// 查询本身成了纯开销 —— 且在旧表被删后会直接报错。
+		//
+		// ★ 注意它们**必须**先于句块写入被摘掉：
+		//   旧表退场后 `SELECT id FROM entities WHERE name=?`
+		//   会返回 no rows ⇒ Commit 直接失败 ⇒ **记忆完全写不进去**。
+		//   这是「停双写」时最容易漏的一环：读也要停。
 
-		var sourceID, targetID int64
-		err = tx.QueryRow("SELECT id FROM entities WHERE name = ?", t.Subject).Scan(&sourceID)
-		if err != nil {
-			return nil, 0, 0, fmt.Errorf("subject %q: %w", t.Subject, err)
-		}
-		err = tx.QueryRow("SELECT id FROM entities WHERE name = ?", t.Object).Scan(&targetID)
-		if err != nil {
-			return nil, 0, 0, fmt.Errorf("object %q: %w", t.Object, err)
-		}
-
-		// 写入/查找句子
-		var sentenceID int64
+		// 写入/查找句子（★ 现在只建块，不写 sentences 表）
 		if t.SentenceText != "" {
 			// ★ 原句块：sentences 表退场后，原句由块承载。
 			//
@@ -646,53 +650,23 @@ func (g *GraphDB) commit(triples []Triple, sessionID string, turnID int, trackSe
 				sentenceIDs[t.SentenceText] = sentenceBlockID
 			}
 
-			// 旧表写入暂时保留：Recall 等 55 处调用方仍读它们
-			// （docs/zh/legacy-table-retirement.md）。
-			_, err = tx.Exec(
-				`INSERT OR IGNORE INTO sentences (text) VALUES (?)`, t.SentenceText)
-			if err != nil {
-				return nil, 0, 0, fmt.Errorf("insert sentence: %w", err)
-			}
-			err = tx.QueryRow("SELECT id FROM sentences WHERE text = ?", t.SentenceText).Scan(&sentenceID)
-			if err != nil {
-				sentenceID = 0
-			}
+			// ★★ 旧表 sentences 双写已停（2026-10-04）
+			//
+			// 原句改由**原句块**承载（上方 putBlockTx），
+			// 场景引用已改用块 ID（13c3292），不再需要 sentences.id。
+			// 保留旧表写入只会让它持续增长，退场就永远看不到完成信号。
 		}
 
-		var existing int64
-		err = tx.QueryRow(
-			`SELECT id FROM relations WHERE source_id = ? AND target_id = ? AND relation_type = ? AND session_id = ?`,
-			sourceID, targetID, t.Relation, sessionID,
-		).Scan(&existing)
-		// relID 仅为旧表 relations 双写保留 —— 场景引用已改用块 ID + 边 ID，
-		// 不再需要它。旧表退场时本段整体删除。
-		var relID int64
-		_ = relID
-		if err == sql.ErrNoRows {
-			res, ierr := tx.Exec(
-				`INSERT INTO relations (source_id, target_id, relation_type, confidence, session_id, turn_id, date_bucket, sentence_id)
-				 VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
-				sourceID, targetID, t.Relation, confidence, sessionID, turnID, dateBucket, sentenceID,
-			)
-			if ierr != nil {
-				return nil, 0, 0, ierr
-			}
-			relID, _ = res.LastInsertId()
-			relationsCreated++
-		} else if err != nil {
-			return nil, 0, 0, err
-		} else {
-			relID = existing
-			// 同一(会话内)三元组已存在：仅刷新置信度与时间戳，不重复计数
-			_, err = tx.Exec(
-				`UPDATE relations SET confidence = ?, updated_at = CURRENT_TIMESTAMP
-				 WHERE source_id = ? AND target_id = ? AND relation_type = ? AND session_id = ?`,
-				confidence, sourceID, targetID, t.Relation, sessionID,
-			)
-			if err != nil {
-				return nil, 0, 0, err
-			}
-		}
+		// ★★ 旧表 relations 双写已停（2026-10-04）
+		//
+		// 关系改由**关系边**承载，场景引用已改用 edge ID。
+		// 读方已全部切块（scene / Purge / RecallSorted / Introspect /
+		// MergeBlocks / social / sdk / core），旧表只增不减会让
+		// ① 退场永远看不到完成信号 ② 迁移报告的「旧表还剩多少」永不归零。
+		//
+		// ★ 判断依据是**行为**不是语句：判据 Test停双写_旧表不再增长
+		//   逐表比对 Commit 前后的行数。
+		relationsCreated = 0
 
 		// 场景引用：写完关系立即把「关系 + 两端块」挂到**每个**场景上
 		// （主动声明的 + 被动涌现的）。同一事务内完成，避免出现「关系写进去了
@@ -1260,12 +1234,31 @@ func (g *GraphDB) ExportTriples(limit int) ([]Triple, error) {
 	g.mu.RLock()
 	defer g.mu.RUnlock()
 
-	q := `SELECT s.name, r.relation_type, t.name, r.confidence
-	        FROM relations r
-	        JOIN entities s ON s.id = r.source_id
-	        JOIN entities t ON t.id = r.target_id
-	       WHERE r.status = 'active'
-	       ORDER BY r.id`
+	// ★★★ 改走块/边体系（2026-10-04）
+	//
+	// 原实现读 relations JOIN entities。旧表停双写后这两张表**不再增长**，
+	// 而子 agent 的 temp 库恰恰是靠 Commit 写入的 ——
+	// ⇒ ExportTriples 返回空 ⇒ 回收（ReclaimResident）合入 0 条
+	// ⇒ **驻留子 agent 的记忆回收功能静默失效**。
+	//
+	// 判据：TestResident_ContextFullAndDispositions ④
+	// 「回收应把选中的 temp 记录合入主记忆」当场变红。
+	//
+	// ★ 这也说明「零调用点的读方」不等于「不重要的读方」：
+	//   ExportTriples 只被 resident.go 用，而 resident 是一条完整产品线。
+	q := `SELECT sb.text_content, e.edge_type, tb.text_content,
+	             COALESCE(e.confidence, 0),
+	             COALESCE((SELECT b.text_content FROM memory_block_edges c
+	                         JOIN memory_blocks b ON b.id = c.source_id
+	                         WHERE c.target_kind = 'edge' AND c.target_id = e.id
+	                           AND c.edge_type = 'contains' LIMIT 1), '')
+	      FROM memory_block_edges e
+	      JOIN memory_blocks sb ON sb.id = e.source_id
+	      JOIN memory_blocks tb ON tb.id = e.target_id
+	     WHERE e.source_kind = 'block' AND e.target_kind = 'block'
+	       AND e.edge_type != 'contains'
+	       AND COALESCE(e.status, '') = 'active'
+	     ORDER BY e.id`
 	args := []interface{}{}
 	if limit > 0 {
 		q += " LIMIT ?"
@@ -1280,7 +1273,8 @@ func (g *GraphDB) ExportTriples(limit int) ([]Triple, error) {
 	var out []Triple
 	for rows.Next() {
 		var tr Triple
-		if err := rows.Scan(&tr.Subject, &tr.Relation, &tr.Object, &tr.Confidence); err != nil {
+		if err := rows.Scan(&tr.Subject, &tr.Relation, &tr.Object,
+			&tr.Confidence, &tr.SentenceText); err != nil {
 			return nil, err
 		}
 		out = append(out, tr)
@@ -1622,8 +1616,25 @@ func (g *GraphDB) Introspect() (map[string]interface{}, error) {
 		   AND edge_type != 'contains'`).Scan(&relationsTotal)
 
 	hotspots := []map[string]interface{}{}
+	// ★★ hotspots 改数**块**（2026-10-04）
+	//
+	// 旧实现读 entities 并按 mention_count 排序 ——
+	// 而旧表双写已停，那张表不再增长 ⇒ hotspots 永远是迁移时的快照，
+	// 而真实热点（哪些块被引用最多）已经变了。
+	//
+	// ★ 排序口径换成**关系边度数**：一个块被越多关系边指向，
+	//   它在图里越重要 —— 这正是 hotspots 想回答的问题。
+	//   mention_count 已无处可取（旧表专有）。
 	rows, err := g.db.Query(
-		`SELECT name, mention_count, type FROM entities ORDER BY mention_count DESC LIMIT 10`,
+		`SELECT b.text_content,
+		        COALESCE((SELECT COUNT(*) FROM memory_block_edges e
+		                   WHERE (e.source_id = b.id OR e.target_id = b.id)
+		                     AND COALESCE(e.status,'') != 'deleted'), 0) AS deg,
+		        COALESCE(b.semantic_type, '') AS typ
+		 FROM memory_blocks b
+		 WHERE b.text_content != ''
+		 ORDER BY deg DESC, b.created_at ASC
+		 LIMIT 10`,
 	)
 	if err == nil {
 		defer rows.Close()
@@ -1699,13 +1710,32 @@ func (g *GraphDB) DeleteEntity(name string) error {
 	return tx.Commit()
 }
 
+// Archive 把 days 天前的**关系边**标记为 archived。
+//
+// ★★★ 改走块/边体系（2026-10-04）
+//
+// 原实现只 UPDATE relations 表 —— 而旧表在停双写后**不再增长**，
+// 所以归档对块体系完全无效：关系边永远不会被归档，
+// 于是「按时间衰减记忆」这个能力静默失效了。
+//
+// ★ 它当时零调用方（只有测试），所以这个缺陷从未被发现。
+//
+//	★★ 停双写是把它照出来的原因：旧表冻结 ⇒ 任何只碰旧表的
+//	  维护操作都变成空转。
+//
+// ★ archived 与 deleted 的区别：archived 保留在库里（可回溯），
+//
+//	但不参与召回（读路径按 status='active' 过滤）。
 func (g *GraphDB) Archive(days int) (int, error) {
 	g.mu.Lock()
 	defer g.mu.Unlock()
 
 	result, err := g.db.Exec(
-		`UPDATE relations SET status = 'archived', updated_at = CURRENT_TIMESTAMP
-		 WHERE status = 'active' AND created_at < datetime('now', ?)`,
+		`UPDATE memory_block_edges
+		 SET status = 'archived'
+		 WHERE COALESCE(status, '') = 'active'
+		   AND edge_type != 'contains'
+		   AND created_at < datetime('now', ?)`,
 		fmt.Sprintf("-%d days", days),
 	)
 	if err != nil {
@@ -1715,14 +1745,35 @@ func (g *GraphDB) Archive(days int) (int, error) {
 	return int(n), nil
 }
 
-// ClearSentenceID 清除指定关系的 sentence_id（LLM复审后解除句子引用）
-func (g *GraphDB) ClearSentenceID(relationID int64) error {
+// ClearSentenceID 解除「关系 → 原句」的引用（LLM 复审后不再信任那句话）。
+//
+// ★★★ 改走块/边体系（2026-10-04）
+//
+// 原实现 `UPDATE relations SET sentence_id = 0 WHERE id = ?` ——
+// 而调用方（internal/agent/core/distill.go）传的 rel.ID 来自
+// RecallSorted 的返回，那里 Relation.ID 现在是**关系边 ID**。
+//
+// ⇒ ★★ 也就是说：它一直在清理**错误的行**。
+//
+//	旧表那一行的 sentence_id 纹丝不动，而边侧什么都没发生。
+//	而这**没有任何报错** —— UPDATE 影响 0 行也是成功。
+//
+// ★ 正确做法：删掉「关系边 --contains--> 原句块」这条结构边。
+//
+//	sentence_id=0 的语义是「这条关系不再挂在那句话上」，
+//	而在块体系里那个挂接就是 contains 边。
+//
+// ★ 幂等：边不存在时返回 nil（复审流程会重复调用）。
+func (g *GraphDB) ClearSentenceID(edgeID int64) error {
+	if edgeID == 0 {
+		return nil
+	}
 	g.mu.Lock()
 	defer g.mu.Unlock()
 	_, err := g.db.Exec(
-		`UPDATE relations SET sentence_id = 0, updated_at = CURRENT_TIMESTAMP WHERE id = ?`,
-		relationID,
-	)
+		`DELETE FROM memory_block_edges
+		 WHERE target_kind = 'edge' AND target_id = ? AND edge_type = 'contains'`,
+		edgeID)
 	return err
 }
 
@@ -1795,30 +1846,44 @@ func placeholders(n int) string {
 // 中间那一步会把旧关系的附加信息（置信度、场景、原句）一起丢掉。
 // 编辑前先精确取回这条关系，才能把这些信息带过去。
 func (g *GraphDB) FindRelations(subject, relationType, object string) ([]Relation, error) {
-	g.mu.RLock()
-	defer g.mu.RUnlock()
+	// ★★★ 改走块/边体系（2026-10-04）
+	//
+	// 原实现 JOIN relations + entities + sentences。旧表停双写后
+	// 这条查询返回空 ⇒ 精确查找功能失效（判据 TestFindRelationsAndScenesOfRelation）。
+	//
+	// 按**块文本**精确匹配两端块 —— 语义与旧表的 name = ? 一致。
 	rows, err := g.db.Query(
-		`SELECT r.id, r.source_id, r.target_id, e1.name, e2.name,
-		        r.relation_type, r.confidence, r.status, r.session_id,
-		        r.turn_id, r.created_at, COALESCE(r.date_bucket, ''),
-		        COALESCE(r.sentence_id, 0), COALESCE(sn.text, '')
-		 FROM relations r
-		 JOIN entities e1 ON r.source_id = e1.id
-		 JOIN entities e2 ON r.target_id = e2.id
-		 LEFT JOIN sentences sn ON r.sentence_id = sn.id
-		 WHERE r.status = 'active' AND e1.name = ? AND r.relation_type = ? AND e2.name = ?
-		 ORDER BY r.id DESC`, subject, relationType, object)
+		`SELECT e.id, e.source_id, e.target_id, sb.text_content, tb.text_content,
+		        e.edge_type, COALESCE(e.confidence,0), COALESCE(e.status,''),
+		        COALESCE(e.session_id,''), COALESCE(e.turn_id,0), e.created_at,
+		        COALESCE((SELECT b.text_content FROM memory_block_edges c
+		                  JOIN memory_blocks b ON b.id = c.source_id
+		                  WHERE c.target_kind='edge' AND c.target_id = e.id
+		                    AND c.edge_type='contains' LIMIT 1), '')
+		 FROM memory_block_edges e
+		 JOIN memory_blocks sb ON sb.id = e.source_id
+		 JOIN memory_blocks tb ON tb.id = e.target_id
+		 WHERE e.source_kind='block' AND e.target_kind='block'
+		   AND e.edge_type != 'contains'
+		   AND COALESCE(e.status,'') = 'active'
+		   AND sb.text_content = ? AND e.edge_type = ? AND tb.text_content = ?`,
+		subject, relationType, object)
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
+
 	var out []Relation
 	for rows.Next() {
 		var rel Relation
-		if err := rows.Scan(&rel.ID, &rel.SourceID, &rel.TargetID, &rel.SourceName, &rel.TargetName,
-			&rel.RelationType, &rel.Confidence, &rel.Status, &rel.SessionID,
-			&rel.TurnID, &rel.CreatedAt, &rel.DateBucket, &rel.SentenceID, &rel.SentenceText); err != nil {
+		if err := rows.Scan(&rel.ID, &rel.SourceBlockID, &rel.TargetBlockID,
+			&rel.SourceName, &rel.TargetName, &rel.RelationType,
+			&rel.Confidence, &rel.Status, &rel.SessionID,
+			&rel.TurnID, &rel.CreatedAt, &rel.SentenceText); err != nil {
 			return nil, err
+		}
+		if rel.DateBucket == "" && !rel.CreatedAt.IsZero() {
+			rel.DateBucket = rel.CreatedAt.Format("2006-01-02")
 		}
 		out = append(out, rel)
 	}

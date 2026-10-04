@@ -98,9 +98,17 @@ func TestCommitWithMedia_ReturnsSentenceIDs(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if ec == 0 || rc == 0 {
-		t.Fatalf("应写入实体与关系，实际 ec=%d rc=%d", ec, rc)
+	// ★ 旧表双写已停 ⇒ ec/rc 恒为 0（2026-10-04）
+	//
+	// 判据要验的是「写进了图库」，改用块侧信号。
+	blocks, err := g.MemoryBlocks()
+	if err != nil {
+		t.Fatal(err)
 	}
+	if len(blocks) < 3 { // 主体 + 宾语 + 原句块
+		t.Fatalf("应写入 ≥3 个块（主体/宾语/原句），实际 %d", len(blocks))
+	}
+	fmt.Printf("  写入块 %d 个（旧表计数已停用 ec=%d rc=%d）\n", len(blocks), ec, rc)
 	if ids[sentence] == "" {
 		t.Fatalf("应返回原句块 ID，实际 %v", ids)
 	}
@@ -118,9 +126,25 @@ func TestCommit_StillWorksAfterRefactor(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if ec != 4 || rc != 2 {
-		t.Fatalf("期望 4 实体 2 关系，实际 ec=%d rc=%d", ec, rc)
+	// ★ 旧表双写已停（2026-10-04）⇒ ec/rc 恒为 0。
+	//
+	// 它们数的是旧表 entities/relations 的行号，而那两张表不再增长。
+	// Commit 的返回签名是 SDK 契约（9 处调用方），改签名代价大 ——
+	// 所以保留位置并置 0。
+	//
+	// ★ 判据要验的是「Commit 写进去了」，改用**块侧**信号：
+	//   4 个实体名（张三/李四/编程/北京）+ 2 条关系边。
+	if ec != 0 || rc != 0 {
+		t.Fatalf("旧表双写已停，ec/rc 应为 0，实际 ec=%d rc=%d", ec, rc)
 	}
+	blocks, err := g.MemoryBlocks()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(blocks) < 4 {
+		t.Fatalf("Commit 应写入 ≥4 个实体块，实际 %d", len(blocks))
+	}
+	fmt.Printf("  Commit 写入块 %d 个（旧表计数已停用 ec=%d rc=%d）\n", len(blocks), ec, rc)
 
 	// 重复提交同一批：关系被唯一约束去重。
 	//
@@ -129,15 +153,23 @@ func TestCommit_StillWorksAfterRefactor(t *testing.T) {
 	// 被当成"新建了"。用 main 分支的 graph.go 单独验证过基线同样是
 	// 首次 ec=2 / 重复 ec=2，与 CommitWithMedia 重构无关。
 	// entitiesCreated 只用于日志，故此处记录现状而不改行为。
-	ec2, rc2, err := g.Commit(triples, "s1", 0)
+	_, _, err = g.Commit(triples, "s1", 0)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if rc2 != 0 {
-		t.Fatalf("重复提交不该新建关系，实际 rc=%d", rc2)
+	// ★ 幂等的真正判据是「块数不增长」，不是计数返回值 ——
+	//   后者在旧表停写后恒为 0（2026-10-04）。
+	//
+	// ★ 而且关系边**允许并存多条**（52e4596 移除了 UNIQUE），
+	//   所以「重复提交新建了关系边」不是缺陷，是设计。
+	//   幂等体现在块侧：块 ID 是内容派生的，重写不产生新块。
+	blocks2, err := g.MemoryBlocks()
+	if err != nil {
+		t.Fatal(err)
 	}
-	if ec2 != 4 {
-		t.Fatalf("实体计数应与首次一致（既有 upsert 计数行为），实际 ec=%d", ec2)
+	if len(blocks2) != len(blocks) {
+		t.Errorf("重复提交不该新增块（块 ID 内容派生，幂等），%d → %d",
+			len(blocks), len(blocks2))
 	}
 }
 
@@ -289,9 +321,16 @@ func TestCommitTriplesWithMedia_FallsBackWithoutStore(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if ec != 2 || rc != 1 {
-		t.Fatalf("期望 2 实体 1 关系，实际 ec=%d rc=%d", ec, rc)
+	// ★ 旧表停写后 ec/rc 恒 0，改验块侧（2026-10-04）
+	blocks, err := g.MemoryBlocks()
+	if err != nil {
+		t.Fatal(err)
 	}
+	if len(blocks) < 2 {
+		t.Fatalf("期望 ≥2 个块（主体 + 宾语），实际 %d", len(blocks))
+	}
+	_ = ec
+	_ = rc
 }
 
 func TestMediaContextForSentences(t *testing.T) {
@@ -588,21 +627,37 @@ func TestMigrateLegacyMediaEntities(t *testing.T) {
 
 	digest, _ := ms.Put([]byte("legacy-img"), media.Item{MIME: "image/png"})
 	sentence := "老数据里的三色带图 [image/png " + digest[:12] + "]"
-	// 直接构造旧的实体/关系形态（不走已删除的 marker 代码）。
-	ids, _, _, err := g.CommitWithMedia([]memory.Triple{{
-		Subject:      "图片 " + digest[:12],
-		SubjectType:  "Media",
-		Relation:     "内容",
-		Object:       "三色带的描述文本",
-		ObjectType:   "Description",
-		SentenceText: sentence,
-	}}, "legacy", 0)
+	// ★★ 直接写旧表，不用 CommitWithMedia 造（2026-10-04）
+	//
+	// 旧表双写已停 ⇒ Commit 不再写 entities/relations，
+	// 于是这个迁移测试的**输入天然为空**，
+	// 「迁出 0 条」竟然通过 —— 那不是「迁移正确」，是「测不到」。
+	//
+	// 迁移的输入就是旧表，所以测试也该直接构造旧表。
+	// （SeedLegacyMediaEntity 明确标注为测试专用。）
+	mediaName := "图片 " + digest[:12]
+	mediaEntID, err := g.SeedLegacyMediaEntity(mediaName, "Media")
 	if err != nil {
 		t.Fatal(err)
 	}
-	sid := ids[sentence]
-	if sid == "" {
-		t.Fatal("拿不到句子 id")
+	// ★ 迁移靠旧 relations 找到「该把媒体块挂到哪句上」，
+	//   所以旧表里必须有 sentence 行 + 关联行（生产上它们还在，
+	//   停双写只是让它们不再**增长**）。
+	sentRowID, err := g.SeedLegacySentenceRow(sentence)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := g.LinkLegacyEntityToSentence(mediaEntID, sentRowID); err != nil {
+		t.Fatal(err)
+	}
+	sid := memory.SentenceBlockID(sentence)
+	if _, _, _, err := g.CommitWithMedia([]memory.Triple{{
+		Subject:      "内容源",
+		Relation:     "描述",
+		Object:       "三色带的描述文本",
+		SentenceText: sentence,
+	}}, "legacy", 0); err != nil {
+		t.Fatal(err)
 	}
 
 	blocks, entities, err := g.MigrateLegacyMediaEntities(func(short string) (memory.MemoryBlock, bool) {

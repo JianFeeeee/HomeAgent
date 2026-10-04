@@ -197,26 +197,98 @@ func (a *Agent) archiveColdDocs() {
 			if len(triples) == 0 {
 				continue
 			}
+			// ★★ 写入前取块数基线（2026-10-04）
+			//
+			// 停旧表双写后 Commit 的 ec/rc 恒为 0，
+			// 「有没有真的写进图库」只剩块数这一个信号。
+			blocksBefore, err := a.memory.MemoryBlockCount()
+			if err != nil {
+				log.Printf("[agent] doc→graph: %s 读块数失败，保留文档: %v", doc.ID, err)
+				continue
+			}
+
 			ec, rc, blocks, err := a.commitTriplesWithMedia(triples, string(a.id)+"_doc_archival", 0, doc.Blocks)
 			if err != nil {
 				log.Printf("[agent] doc→graph archival error: %v", err)
 				continue
 			}
 
-			// 归档的实质是「信息从 L2 搬到 L3」。一条实体、一条关系都没写进
-			// 图库时，信息并没有搬过去，此时删文档等于直接丢数据。
+			// 归档的实质是「信息从 L2 搬到 L3」。什么都没写进图库时，
+			// 信息并没有搬过去，此时删文档等于直接丢数据。
 			//
-			// 这不是理论情形：Commit 会静默跳过实体名不合法的三元组
-			//（validEntityName 要求 2–50 字符），而 LLM 生成的长描述几乎
-			// 提不出合规实体名——实测 456 字图片描述得到 0 entities 0
-			// relations，随后文档被删、媒体引用被释放、blob 被 GC 清掉，
-			// 图片与描述彻底消失。保留文档，下一轮再试。
-			if ec == 0 && rc == 0 {
-				log.Printf("[agent] doc→graph: %s 未写入任何实体/关系，保留文档待下轮重试"+
+			// ★★★ 判据必须改用**块数**（2026-10-04）
+			//
+			// 原判据是 `ec == 0 && rc == 0`。而旧表双写已停，
+			// 这两个计数**恒为 0** ⇒ 每个文档都被判定「什么都没搬」
+			// ⇒ 文档永远不会被删除，L2 归档完全停摆。
+			//
+			// ★★ 而且这个防护恰好就是它自己想防的那件事：
+			//   它写下的注释说「实测 456 字图片描述得到 0 entities 0 relations，
+			//   随后文档被删、图片与描述彻底消失」——
+			//   现在它因为同一个原因（0 计数）而**永远保留**，
+			//   只是方向反了：从「误删」变成「永不删」。
+			//
+			// 正确的判据是**块数** —— 那是旧表停写后仍然有效的信号
+			// （commitTriplesWithMedia 的第三个返回值）。
+			//
+			// ★★ 不能用 blocks 判据（2026-10-04 修正）
+			//
+			// 我第一版改成 `if blocks == 0 { 保留文档 }`，结果文档永不被删
+			// —— 因为 **blocks 恒为 0**：docToTriples 产出的三元组
+			// 没有 SentenceText（也没有 MediaDigests），
+			// 而 blocks 只统计「按原句挂接的媒体块」。
+			// 文档的媒体块走的是下面的 linkBlocksToDocument，不是这条路。
+			//
+			// ★ 真正的判据在下面：linkBlocksToDocument 的绑定数。
+			//   本文档没有块时（len(doc.Blocks) == 0），
+			//   「三元组有没有写进图库」才是唯一的问题 ——
+			//   而那要看**块侧**有没有新增节点。
+			//
+			// ec/rc 已停用（恒 0），日志里如实标注。
+			// ★★★ 「图库有没有真的接住内容」（2026-10-04）
+			//
+			// 原判据 `ec == 0 && rc == 0` 已失效（旧表停写后恒 0），
+			// 它会**永远保留文档** —— 而那段防护的初衷恰恰是
+			// 「实测 456 字图片描述得到 0 计数，随后文档被删、
+			// 图片与描述彻底消失」。同一个原因，方向反了：
+			// 从「误删」变成「永不删」。
+			//
+			// ★ 中途试过 `blocks == 0`，不对 —— 而**原因不是缺陷**：
+			//
+			//	blocks 只统计 attachBlocksToSentenceBlock（按原句挂接媒体块），
+			//	而归档路径上的媒体块**设计上就不走那条路**：
+			//	docToTriples 明确不把媒体放进三元组
+			//	（见其注释「媒体不再参与三元组」—— 那是准确的设计，不是遗留），
+			//	媒体由 linkBlocksToDocument 以 document --contains--> block
+			//	写入 L3。所以 blocks 在归档路径上**本来就该是 0**。
+			//
+			// ★★ 记一笔我在这里犯的错（2026-10-04）：
+			//   我把那句准确的设计注释读成「过时注释」，
+			//   于是去查「docToTriples 的三元组没有 SentenceText」，
+			//   把它当成「媒体块无处挂接的功能缺口」。
+			//   —— 而没有 SentenceText 正是设计本意。
+			//   更糟的是我把这个错误判断写进了本注释，
+			//   会误导下一个接手的人。
+			//
+			// ★ 可靠信号是**块总数是否增长**。三条路径任一成功都会加块：
+			//
+			//	doc.Blocks         → linkBlocksToDocument（媒体块）
+			//	triples 的实体名   → putTripleBlocksTx（subject/object 块）
+			//	triples 的原句     → 原句块
+			//
+			blocksAfter, err := a.memory.MemoryBlockCount()
+			if err != nil {
+				log.Printf("[agent] doc→graph: %s 读块数失败，保留文档: %v", doc.ID, err)
+				continue
+			}
+			if blocksAfter == blocksBefore {
+				log.Printf("[agent] doc→graph: %s 未写入任何块，保留文档待下轮重试"+
 					"（三元组 %d 条全被实体名校验拒绝）", doc.ID, len(triples))
 				continue
 			}
-			log.Printf("[agent] doc→graph: %s → %d entities, %d relations, %d blocks", doc.ID, ec, rc, blocks)
+			log.Printf("[agent] doc→graph: %s → 新增 %d 块（三元组 %d 条，"+
+				"媒体挂接 %d，旧表计数已停用 ec=%d rc=%d）",
+				doc.ID, blocksAfter-blocksBefore, len(triples), blocks, ec, rc)
 
 			// 文档持有的一等块写入 L3，并以 document --contains--> block 边关联；
 			// 块 ID 原样保留（迁移而非重建）。块迁走后删除文档即完成迁移。

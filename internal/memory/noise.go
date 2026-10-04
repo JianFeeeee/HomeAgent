@@ -281,14 +281,38 @@ func (g *GraphDB) OrphanEntities() ([]Entity, error) {
 }
 
 func (g *GraphDB) orphanEntitiesLocked() ([]Entity, error) {
+	// ★★★ 改扫 **memory_blocks**（2026-10-04）
+	//
+	// 旧实现扫 entities 并用 relations 判孤立 —— 而这两张表
+	// 在停双写后**都不再增长、不再被写**，于是：
+	//
+	//	① 扫描结果是迁移时的快照，永远不变
+	//	② 新建的块（真正可能孤立的那批）根本不在其中
+	//	③ 而它还在排除 source_kind='entity' 的边 ——
+	//	   那种 kind 在块化之后已经不产生了
+	//
+	// 实测（判据 TestPurgeOrphans）：孤立的块一个都没识别出来。
+	//
+	// ★ 块侧的口径：
+	//   · 没有任何**关系边**指向它  → 孤立
+	//   · 与媒体块/原句块有 contains 结构边 → 不算孤立
+	//     （那是 sentence/document --contains--> block 体系的一部分，
+	//      删了会让结构边悬空）
 	rows, err := g.db.Query(
-		`SELECT id, name, type, mention_count, created_at, updated_at FROM entities e
-		 WHERE NOT EXISTS (SELECT 1 FROM relations r WHERE r.source_id = e.id OR r.target_id = e.id)
-		   -- 与媒体块有边的实体不算孤立：那是 sentence/document --contains--> block
-		   -- 体系的一部分，删了会让块边悬空。
-		   AND NOT EXISTS (SELECT 1 FROM memory_block_edges b
-		        WHERE (b.source_kind = 'entity' AND b.source_id = CAST(e.id AS TEXT))
-		           OR (b.target_kind = 'entity' AND b.target_id = CAST(e.id AS TEXT)))`)
+		`SELECT b.id, b.text_content, COALESCE(b.semantic_type,''),
+		        b.created_at, b.updated_at
+		 FROM memory_blocks b
+		 WHERE b.text_content != ''
+		   AND NOT EXISTS (
+		     SELECT 1 FROM memory_block_edges e
+		     WHERE (e.source_id = b.id OR e.target_id = b.id)
+		       AND e.source_kind = 'block' AND e.target_kind = 'block'
+		       AND e.edge_type != 'contains')
+		   AND NOT EXISTS (
+		     SELECT 1 FROM memory_block_edges e
+		     WHERE (e.source_id = b.id OR e.target_id = b.id)
+		       AND COALESCE(e.session_id,'') = ''
+		       AND e.edge_type = 'contains')`)
 	if err != nil {
 		return nil, err
 	}
@@ -297,9 +321,15 @@ func (g *GraphDB) orphanEntitiesLocked() ([]Entity, error) {
 	var out []Entity
 	for rows.Next() {
 		var e Entity
-		if err := rows.Scan(&e.ID, &e.Name, &e.Type, &e.MentionCount, &e.CreatedAt, &e.UpdatedAt); err != nil {
+		var blockID string
+		if err := rows.Scan(&blockID, &e.Name, &e.Type,
+			&e.CreatedAt, &e.UpdatedAt); err != nil {
 			return nil, err
 		}
+		// ★ ID 退化为序号；blockKey 才是真实块 ID
+		//   （PurgeOrphans 按 blockKey 删除 —— 见该函数注释）。
+		e.ID = int64(len(out) + 1)
+		e.blockKey = blockID
 		out = append(out, e)
 	}
 	if err := rows.Err(); err != nil {
@@ -330,12 +360,26 @@ func (g *GraphDB) PurgeOrphans(dryRun bool) (int, error) {
 		return len(orphans), nil
 	}
 
+	// ★★ 删的是**块**，不是旧表行（2026-10-04）
+	//
+	// orphanEntitiesLocked 已改扫 memory_blocks —— 它返回的 Entity.ID
+	// 是「本次查询内的序号」，blockKey 才是真实块 ID。
+	//
+	// 原实现把 e.ID 当旧表行号去 DELETE FROM entities ⇒ 删错对象
+	// （而删不到任何行时静默报 0）。
 	ids := make([]interface{}, 0, len(orphans))
 	for _, e := range orphans {
-		ids = append(ids, e.ID)
+		if e.blockKey == "" {
+			// 没有块 ID = 不是块侧的孤立实体（理论上不该出现）
+			continue
+		}
+		ids = append(ids, e.blockKey)
+	}
+	if len(ids) == 0 {
+		return 0, nil
 	}
 	if _, err := g.db.Exec(
-		`DELETE FROM entities WHERE id IN (`+placeholders(len(ids))+`)`, ids...); err != nil {
+		`DELETE FROM memory_blocks WHERE id IN (`+placeholders(len(ids))+`)`, ids...); err != nil {
 		return 0, err
 	}
 	if _, err := g.purgeStaleSceneRefsLocked(); err != nil {

@@ -1,7 +1,6 @@
 package memory
 
 import (
-	"fmt"
 	"os"
 	"testing"
 )
@@ -170,18 +169,27 @@ func TestPurgeNoiseKeepsBlockBackedSentences(t *testing.T) {
 		t.Fatalf("commit: %v", err)
 	}
 
-	var sid int64
-	if err := g.db.QueryRow(`SELECT id FROM sentences WHERE text = ?`, sentence).Scan(&sid); err != nil {
-		t.Fatalf("sentence 未写入: %v", err)
+	// ★★★ 全面改用块体系（2026-10-04）
+	//
+	// 原句由**原句块**承载（sentences 表停写），
+	// 而媒体块通过「原句块 --contains--> 媒体块」挂在它上面
+	// —— 端点 kind 也从 "sentence" 变成 "block"（13c3292）。
+	//
+	// 判据的**意图**不变：「清理噪音块时，不能连带删掉仍被引用的原句」。
+	sid := SentenceBlockID(sentence)
+	if blk, err := g.BlockByText(sentence); err != nil || blk == nil {
+		t.Fatalf("原句块未写入: %v", err)
 	}
 	if _, err := g.db.Exec(
-		`INSERT INTO memory_blocks (id, modality, payload_digest, mime) VALUES ('blk1', 'image', 'digest1', 'image/png')`); err != nil {
+		`INSERT INTO memory_blocks (id, modality, payload_digest, mime)
+		 VALUES ('blk1', 'image', 'digest1', 'image/png')`); err != nil {
 		t.Fatalf("insert block: %v", err)
 	}
 	if _, err := g.db.Exec(
-		`INSERT INTO memory_block_edges (source_kind, source_id, target_kind, target_id, edge_type)
-		 VALUES ('sentence', ?, 'block', 'blk1', 'contains')`,
-		fmt.Sprintf("%d", sid)); err != nil {
+		`INSERT INTO memory_block_edges
+		 (source_kind, source_id, target_kind, target_id, edge_type, session_id)
+		 VALUES ('block', ?, 'block', 'blk1', 'contains', '')`,
+		sid); err != nil {
 		t.Fatalf("insert edge: %v", err)
 	}
 
@@ -189,12 +197,35 @@ func TestPurgeNoiseKeepsBlockBackedSentences(t *testing.T) {
 		t.Fatalf("PurgeNoise: %v", err)
 	}
 
+	// ★ 原句块必须还在（它被媒体块的 contains 边引用）
 	var n int
-	if err := g.db.QueryRow(`SELECT COUNT(*) FROM sentences WHERE id = ?`, sid).Scan(&n); err != nil {
-		t.Fatalf("count sentence: %v", err)
+	if err := g.db.QueryRow(
+		`SELECT COUNT(*) FROM memory_blocks WHERE id = ?`, sid).Scan(&n); err != nil {
+		t.Fatalf("count sentence block: %v", err)
 	}
 	if n != 1 {
-		t.Error("PurgeNoise 删掉了仍被媒体块边引用的句子")
+		t.Error("PurgeNoise 删掉了仍被媒体块 contains 边引用的原句块")
+	}
+
+	// ★ 媒体块也必须还在
+	var m int
+	if err := g.db.QueryRow(
+		`SELECT COUNT(*) FROM memory_blocks WHERE id = 'blk1'`).Scan(&m); err != nil {
+		t.Fatalf("count media block: %v", err)
+	}
+	if m != 1 {
+		t.Error("PurgeNoise 误删了媒体块")
+	}
+
+	// ★ 而噪音块（结果/问题）应已被清理 —— 这才是 PurgeNoise 的本职工作
+	var noiseLeft int
+	if err := g.db.QueryRow(
+		`SELECT COUNT(*) FROM memory_blocks
+		 WHERE text_content IN ('结果','问题')`).Scan(&noiseLeft); err != nil {
+		t.Fatalf("count noise: %v", err)
+	}
+	if noiseLeft != 0 {
+		t.Errorf("PurgeNoise 应清掉噪音块，实际剩 %d 个", noiseLeft)
 	}
 }
 
@@ -218,16 +249,32 @@ func TestPurgeOrphans(t *testing.T) {
 		t.Fatalf("清理前不应有孤立实体: %+v", list)
 	}
 
-	// 造一个「边被清掉、节点还在」的壳：直接删边
-	if _, err := g.db.Exec(`DELETE FROM relations WHERE relation_type = '是'`); err != nil {
-		t.Fatalf("delete relation: %v", err)
+	// ★ 造「边被清掉、节点还在」的壳（2026-10-04）
+	//
+	// 原来 `DELETE FROM relations WHERE relation_type='是'` ——
+	// 那是旧表，而旧表停双写后既不被写也不被读，**空操作**。
+	// ⇒ 块侧的边一直在 ⇒ 「结果」「问题」永远不被判为孤立。
+	//
+	// ⇒ 必须删**块侧**的边。
+	if _, err := g.db.Exec("DELETE FROM memory_block_edges WHERE edge_type = '是'"); err != nil {
+		t.Fatalf("delete block edge: %v", err)
 	}
 	// 再补一个从未有过边的孤立实体
-	if _, _, err := g.Commit([]Triple{{Subject: "孤零零", Relation: "是", Object: "小宅", Confidence: 1.0}}, "test", 0); err != nil {
+	if _, _, err := g.Commit([]Triple{{Subject: "孤零零", Relation: "涉及", Object: "小宅", Confidence: 1.0}}, "test", 0); err != nil {
 		t.Fatalf("commit: %v", err)
 	}
-	if _, err := g.db.Exec(`DELETE FROM relations WHERE source_id = (SELECT id FROM entities WHERE name = '孤零零')`); err != nil {
-		t.Fatalf("delete relation 2: %v", err)
+	// ★ 制造孤立：删**块侧**的关系边（2026-10-04）
+	//
+	// 原来删旧表 relations —— 而 orphanEntitiesLocked 已改扫块，
+	// 块侧的边还在，于是没有块被判为孤立。
+	//
+	// ★ 这也说明「测试用旧表制造状态」这条路已经彻底断了：
+	//   旧表不再增长、不再被读，任何依赖它的造数都是空操作。
+	if _, err := g.db.Exec("DELETE FROM memory_block_edges " +
+		"WHERE edge_type != 'contains' " +
+		"AND source_id IN (SELECT id FROM memory_blocks WHERE text_content = '孤零零')",
+	); err != nil {
+		t.Fatalf("delete block edge: %v", err)
 	}
 
 	list, err := g.OrphanEntities()

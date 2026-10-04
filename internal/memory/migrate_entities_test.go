@@ -14,10 +14,63 @@ func newMigrateGraph(t *testing.T) *GraphDB {
 	return g
 }
 
+// seedLegacy 为迁移测试造**旧表数据**。
+//
+// ★★ 2026-10-04：不再用 Commit（2026-10-04）
+//
+// 旧表双写已停 ⇒ Commit 不再写 entities/relations/sentences
+// ⇒ 迁移测试的**输入天然为空**
+// ⇒ 「迁出 0 块 0 边」竟然通过。
+//
+// ★★ 那不是「迁移正确」，是「测不到」——
+//
+//	它让「迁移还对不对」这个问题无法回答，
+//	而这正是判据最不该失效的地方。
+//
+// ⇒ 直接写旧表：迁移的输入是旧表，测试也该直接构造旧表。
+//
+// ★ 同时写一份块侧数据（用 Commit），因为迁移后的断言查的是块。
 func seedLegacy(t *testing.T, g *GraphDB, triples []Triple) {
 	t.Helper()
+
+	// 块侧：Commit 现在只写块与边
 	if _, _, err := g.Commit(triples, "s", 1); err != nil {
 		t.Fatalf("Commit: %v", err)
+	}
+
+	// 旧表：迁移的输入，逐条写入
+	for _, tr := range triples {
+		for _, name := range []string{tr.Subject, tr.Object} {
+			if name == "" {
+				continue
+			}
+			typ := tr.SubjectType
+			if name == tr.Object {
+				typ = tr.ObjectType
+			}
+			if typ == "" {
+				typ = "Concept"
+			}
+			if _, err := g.SeedLegacyEntity(name, typ); err != nil {
+				t.Fatalf("seed entity %q: %v", name, err)
+			}
+		}
+		// 关系（source=主语, target=宾语）
+		if _, _, err := g.SeedLegacyRelation(tr.Subject, tr.Object,
+			tr.Relation, tr.Confidence, "s", 1); err != nil {
+			t.Fatalf("seed relation %s/%s: %v", tr.Subject, tr.Relation, err)
+		}
+		// 原句
+		if tr.SentenceText != "" {
+			sid, err := g.SeedLegacySentenceRow(tr.SentenceText)
+			if err != nil {
+				t.Fatalf("seed sentence: %v", err)
+			}
+			if err := g.LinkLegacyTripleToSentence(
+				tr.Subject, tr.Object, tr.Relation, sid); err != nil {
+				t.Fatalf("link sentence: %v", err)
+			}
+		}
 	}
 }
 
@@ -666,13 +719,18 @@ func TestLegacyRowCount_只允许单表COUNT(t *testing.T) {
 		t.Fatal(err)
 	}
 
+	// ★ 用 SeedLegacyEntity 造旧表数据（2026-10-04）
+	//   Commit 已不写旧表（原判据用 Commit，断言恒失败）。
+	if _, err := g.SeedLegacyEntity("旧表实体", "Concept"); err != nil {
+		t.Fatal(err)
+	}
 	n, err := g.LegacyRowCount("SELECT COUNT(*) FROM entities")
 	if err != nil {
 		t.Fatalf("合法查询应通过: %v", err)
 	}
 	fmt.Printf("  entities 计数 %d\n", n)
-	if n == 0 {
-		t.Error("★ Commit 写了旧表，计数不该为 0")
+	if n != 1 {
+		t.Errorf("★ 刚种下一个旧表实体，计数应为 1，实际 %d", n)
 	}
 
 	// ★ 非 COUNT 前缀必须拒绝
@@ -720,10 +778,17 @@ func TestMigrateLegacy_关系属性完整迁移(t *testing.T) {
 
 	// 造旧表数据：同一对实体在**不同会话**各有一条同类型关系。
 	// 迁移后必须是两条独立的边（关系边按设计允许并存）。
+	// ★ 同时写块侧（Commit）与旧表（Seed*）——
+	//   迁移的输入是旧表，而 Commit 已不写旧表（2026-10-04）。
 	for i, sid := range []string{"sess-A", "sess-B"} {
+		conf := 0.3 + 0.4*float64(i)
 		if _, _, err := g.Commit([]Triple{
-			{Subject: "迁移甲", Relation: "维护", Object: "迁移乙", Confidence: 0.3 + 0.4*float64(i)},
+			{Subject: "迁移甲", Relation: "维护", Object: "迁移乙", Confidence: conf},
 		}, sid, i+1); err != nil {
+			t.Fatal(err)
+		}
+		if _, _, err := g.SeedLegacyRelation("迁移甲", "迁移乙", "维护",
+			conf, sid, i+1); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -804,11 +869,17 @@ func TestMigrateLegacy_关系属性完整迁移(t *testing.T) {
 func TestMigrateLegacy_已删除关系不复活(t *testing.T) {
 	g := newTestGraph(t)
 	defer func() { _ = g.Close() }()
+	// ★ 同时写块侧与旧表（Commit 已不写旧表，2026-10-04）
 	if _, _, err := g.Commit([]Triple{
 		{Subject: "待删甲", Relation: "曾经", Object: "待删乙", Confidence: 1.0},
 	}, "sess-X", 1); err != nil {
 		t.Fatal(err)
 	}
+	if _, _, err := g.SeedLegacyRelation("待删甲", "待删乙", "曾经",
+		1.0, "sess-X", 1); err != nil {
+		t.Fatal(err)
+	}
+	// 软删**块侧**（Purge 现在只改块）⇒ 形成判据要验的混合态
 	if _, err := g.Purge(map[string]string{"subject_contains": "待删甲"}, "soft"); err != nil {
 		t.Fatal(err)
 	}

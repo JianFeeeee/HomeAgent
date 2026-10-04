@@ -720,3 +720,27 @@ func blockSemanticType(b MemoryBlock) string {
 	}
 	return "block"
 }
+
+// MemoryBlockCount 返回当前块总数。
+//
+// ★ 用途：判断「一次写入是否真的落库了」
+//
+// 停旧表双写后，Commit 的两个返回值恒为 0（它们数的是旧表行数），
+// 于是「有没有写进去」失去了信号 ——
+// 而 archiveColdDocs 正需要它来决定文档能否删除
+// （没写进去就删 = 丢数据）。
+//
+// ★ 为什么用块数而不是「本次新增块数」：
+//
+//	新增数需要事务内计数，而 MemoryBlockCount 是事务外的简单计数。
+//	调用方在写入前后各取一次相减即可，误差只来自并发写入 ——
+//	归档是后台低频任务，这个精度足够。
+func (g *GraphDB) MemoryBlockCount() (int, error) {
+	g.mu.RLock()
+	defer g.mu.RUnlock()
+	var n int
+	if err := g.db.QueryRow(`SELECT COUNT(*) FROM memory_blocks`).Scan(&n); err != nil {
+		return 0, err
+	}
+	return n, nil
+}

@@ -303,3 +303,110 @@ func TestSceneAdapt_悬空清理认edge(t *testing.T) {
 		t.Errorf("★ 有效引用应保留，实际 %v", counts)
 	}
 }
+
+// ═══════════════════════════════════════════════════════════════
+//  停旧表双写 —— 判据（2026-10-04）
+//
+//  ★ 目标不是「旧表被删」，而是「旧表停止增长、冻结为历史」���
+//    删表是不可逆的，且读方虽已全切块，仍需要一段时间观察。
+//
+//  ★ 判据的核心是**增长量**，不是「有没有 INSERT 语句」——
+//    后者是文本检查，前者才是行为检查。
+// ═══════════════════════════════════════════════════════════════
+
+// Test停双写_旧表不再增长
+func Test停双写_旧表不再增长(t *testing.T) {
+	g := newTestGraph(t)
+	defer func() { _ = g.Close() }()
+
+	// 先写一批，让旧表有内容
+	if _, _, err := g.Commit([]Triple{
+		{Subject: "初始甲", Relation: "属于", Object: "初始乙", Confidence: 1.0},
+	}, "sess-0", 0); err != nil {
+		t.Fatal(err)
+	}
+	snap := legacyCounts(t, g)
+	fmt.Printf("  首批后（旧表应已冻结）: %v\n", snap)
+
+	// ★ 首批之后旧表就应该是 0 —— 双写已停（2026-10-04）。
+	//   原断言是「首批应写入旧表」，那是**停双写之前**的前提，
+	//   改完之后它必然失败 ⇒ 判据自己抓出了自己过期。
+	//
+	//   ★ 这正是「行为判据优于文本判据」的又一例：
+	//     我们不是在查「有没有 INSERT 语句」，
+	//     而是在看 Commit 之后旧表**实际长没长**。
+	for _, table := range []string{"entities", "relations", "sentences"} {
+		if snap[table] != 0 {
+			t.Fatalf("★ 首批 Commit 后旧表 %s 仍有 %d 行（双写未停）",
+				table, snap[table])
+		}
+	}
+
+	// 再写一批 —— 旧表**不应**再增长
+	for i := 0; i < 5; i++ {
+		if _, _, err := g.Commit([]Triple{
+			{Subject: fmt.Sprintf("新主体%d", i), Relation: "属性",
+				Object: fmt.Sprintf("值%d", i), Confidence: 1.0,
+				SentenceText: fmt.Sprintf("第 %d 句测试", i)},
+		}, fmt.Sprintf("sess-%d", i+1), i+1); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	after := legacyCounts(t, g)
+	fmt.Printf("  五批后: %v\n", after)
+	for _, table := range []string{"entities", "relations", "sentences"} {
+		if after[table] != snap[table] {
+			t.Errorf("★ 旧表 %s 仍在增长: %d → %d（应冻结）",
+				table, snap[table], after[table])
+		}
+	}
+
+	// ★ 但块侧**必须**照常增长 —— 双写停了，单写不能停
+	if blk, err := g.MemoryBlocks(); err != nil {
+		t.Fatal(err)
+	} else {
+		fmt.Printf("  块数 %d（应 ≥ 12：首批 2 + 新批 10）\n", len(blk))
+		if len(blk) < 12 {
+			t.Errorf("★ 块侧写入被误伤，只剩 %d 个块", len(blk))
+		}
+	}
+}
+
+// Test停双写_召回不受影响：旧表冻结后读方仍要工作
+func Test停双写_召回不受影响(t *testing.T) {
+	g := newTestGraph(t)
+	defer func() { _ = g.Close() }()
+	for i := 0; i < 3; i++ {
+		if _, _, err := g.Commit([]Triple{
+			{Subject: "召回主体", Relation: "属性", Object: fmt.Sprintf("召回值%d", i),
+				Confidence: 1.0},
+		}, "sess", i); err != nil {
+			t.Fatal(err)
+		}
+	}
+	res, err := g.Recall([]string{"召回主体"}, nil, 1, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	fmt.Printf("  召回实体 %d，关系 %d\n", len(res.Entities), len(res.Relations))
+	if len(res.Entities) == 0 {
+		t.Error("★ 旧表冻结后召回不该失效（读方已全切块）")
+	}
+	if len(res.Relations) == 0 {
+		t.Error("★ 旧表冻结后关系召回不该失效")
+	}
+}
+
+func legacyCounts(t *testing.T, g *GraphDB) map[string]int {
+	t.Helper()
+	out := map[string]int{}
+	for _, tbl := range []string{"entities", "relations", "sentences"} {
+		n, err := g.LegacyRowCount("SELECT COUNT(*) FROM " + tbl)
+		if err != nil {
+			t.Fatalf("count %s: %v", tbl, err)
+		}
+		out[tbl] = n
+	}
+	return out
+}

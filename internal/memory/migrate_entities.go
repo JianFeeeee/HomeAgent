@@ -710,3 +710,155 @@ func addMigratedRelationTx(tx *sql.Tx, src, tgt, edgeType string,
 	n, _ := res.RowsAffected()
 	return nil, n > 0
 }
+
+// SeedLegacyMediaEntity 为**测试**在旧表造一条媒体实体。
+//
+// ★★ 为什么需要它
+//
+// 迁移的输入是旧表 `entities WHERE type='Media'`。而测试原先靠
+// `CommitWithMedia` 造这份旧表数据 —— 但旧表双写已停（2026-10-04），
+// Commit 不再写它，于是迁移的输入**天然为空**，测试变成假通过
+// （断言「迁出 0 条 0 实体」竟然成立）。
+//
+// ★ 这比直接失败更糟：它让「迁移还对不对」这个问题**无法回答**。
+//
+// ★ 所以把「旧表长什么样」显式化：测试直接写旧表，
+//
+//	迁移动作与被迁数据彼此独立。
+//
+// ⚠ 仅供测试使用 —— 生产代码不应有这条路径。
+//
+//	真正的迁移只读旧表，从不写。
+func (g *GraphDB) SeedLegacyMediaEntity(name, entityType string) (int64, error) {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	res, err := g.db.Exec(`INSERT INTO entities (name, type) VALUES (?, ?)`,
+		name, entityType)
+	if err != nil {
+		return 0, err
+	}
+	return res.LastInsertId()
+}
+
+// SeedLegacySentenceRow 为**测试**在旧表造一条原句行。
+//
+// ⚠ 仅供测试。与 SeedLegacyMediaEntity 同理 ——
+// 迁移的输入是旧表，测试必须能直接构造它
+// （Commit 已不写旧表，见那个函数的注释）。
+func (g *GraphDB) SeedLegacySentenceRow(text string) (int64, error) {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	res, err := g.db.Exec(`INSERT OR IGNORE INTO sentences (text) VALUES (?)`, text)
+	if err != nil {
+		return 0, err
+	}
+	return res.LastInsertId()
+}
+
+// LinkLegacyEntityToSentence 为**测试**造一条旧 relations 行，
+// 把媒体实体与原句关联起来（迁移靠它找到「该挂到哪句上」）。
+func (g *GraphDB) LinkLegacyEntityToSentence(entityID, sentenceID int64) error {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	_, err := g.db.Exec(
+		`INSERT INTO relations (source_id, target_id, relation_type, confidence,
+		                        session_id, turn_id, date_bucket, sentence_id)
+		 VALUES (?, ?, '内容', 1.0, 'legacy', 0, '', ?)`,
+		entityID, sentenceID, sentenceID)
+	return err
+}
+
+// SeedLegacyEntity 为**测试**在旧表 entities 造一行。
+//
+// ⚠ 仅供测试。迁移的输入是旧表，而旧表双写已停（2026-10-04）
+//
+//	⇒ Commit 不再产生这份数据 ⇒ 测试必须能直接构造它。
+//	否则「迁移输入为空 ⇒ 迁出 0 条」会假通过。
+//
+// 见 seedLegacy（migrate_entities_test.go）。
+func (g *GraphDB) SeedLegacyEntity(name, entityType string) (int64, error) {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	var id int64
+	err := g.db.QueryRow(`SELECT id FROM entities WHERE name = ?`, name).Scan(&id)
+	if err == nil {
+		return id, nil
+	}
+	if err != sql.ErrNoRows {
+		return 0, err
+	}
+	res, err := g.db.Exec(`INSERT INTO entities (name, type) VALUES (?, ?)`,
+		name, entityType)
+	if err != nil {
+		return 0, err
+	}
+	return res.LastInsertId()
+}
+
+// SeedLegacyRelation 为**测试**在旧表 relations 造一行（按实体名）。
+//
+// ⚠ 仅供测试，见 SeedLegacyEntity。
+func (g *GraphDB) SeedLegacyRelation(subject, object, relType string,
+	confidence float64, sessionID string, turnID int) (int64, int64, error) {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+
+	sid, err := g.seedLegacyEntityID(subject)
+	if err != nil {
+		return 0, 0, err
+	}
+	tid, err := g.seedLegacyEntityID(object)
+	if err != nil {
+		return 0, 0, err
+	}
+	res, err := g.db.Exec(
+		`INSERT INTO relations (source_id, target_id, relation_type, confidence,
+		                        session_id, turn_id, date_bucket, sentence_id)
+		 VALUES (?, ?, ?, ?, ?, ?, '', 0)`,
+		sid, tid, relType, confidence, sessionID, turnID)
+	if err != nil {
+		return 0, 0, err
+	}
+	if _, err := res.LastInsertId(); err != nil {
+		return 0, 0, err
+	}
+	return sid, tid, nil
+}
+
+func (g *GraphDB) seedLegacyEntityID(name string) (int64, error) {
+	var id int64
+	err := g.db.QueryRow(`SELECT id FROM entities WHERE name = ?`, name).Scan(&id)
+	if err == nil {
+		return id, nil
+	}
+	if err != sql.ErrNoRows {
+		return 0, err
+	}
+	res, err := g.db.Exec(`INSERT INTO entities (name, type) VALUES (?, 'Concept')`, name)
+	if err != nil {
+		return 0, err
+	}
+	return res.LastInsertId()
+}
+
+// LinkLegacyTripleToSentence 为**测试**把某条三元组的原句关联上。
+//
+// ⚠ 仅供测试。迁移靠 relations.sentence_id 找到
+// 「原句要建块」与「关系该挂到哪句上」。
+func (g *GraphDB) LinkLegacyTripleToSentence(subject, object, relType string, sentenceID int64) error {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	sid, err := g.seedLegacyEntityID(subject)
+	if err != nil {
+		return err
+	}
+	tid, err := g.seedLegacyEntityID(object)
+	if err != nil {
+		return err
+	}
+	_, err = g.db.Exec(
+		`UPDATE relations SET sentence_id = ?
+		 WHERE source_id = ? AND target_id = ? AND relation_type = ?`,
+		sentenceID, sid, tid, relType)
+	return err
+}

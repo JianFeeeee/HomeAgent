@@ -193,15 +193,15 @@ func TestWrittenRefReachableFromItsScene(t *testing.T) {
 	}
 
 	// 写侧走 effectiveScenes（它会归一化）——这正是生产代码的路径
-	ec, rc, err := g.Commit([]Triple{{
+	if _, _, err := g.Commit([]Triple{{
 		Subject: "老大", Relation: "偏好", Object: "咖啡",
 		Scenes: []string{key}, // 模型/内核给的键，可能带 + 或 _
-	}}, "s1", 0)
-	if err != nil {
+	}}, "s1", 0); err != nil {
 		t.Fatal(err)
 	}
-	if ec == 0 || rc == 0 {
-		t.Fatal("三元组未写入")
+	// ★ 判据改用**块侧**（旧表停写后 ec/rc 恒为 0，2026-10-04）
+	if blk, err := g.BlockByText("咖啡"); err != nil || blk == nil {
+		t.Fatal("三元组未写入块侧")
 	}
 
 	// 读侧也走归一化（RecallByScene 内部会做）

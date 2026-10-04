@@ -359,14 +359,40 @@ func (a *Agent) executeMemoryTool(tc agentAPI.ToolCall, turnScenes []string) str
 		}
 		// remember 工具是用户/模型显式写入，不涉及归档删除，
 		// 因此不需要 mediaBound——没有旧引用要释放。
+		// ★★ 写入前取块数基线（2026-10-04）
+		//
+		// 旧表双写已停 ⇒ Commit 的 ec/rc 恒为 0，
+		// 拿它们判断「有没有写进去」会**永远判成没写进去**。
+		blocksBefore, err := a.memory.MemoryBlockCount()
+		if err != nil {
+			return fmt.Sprintf("记忆写入失败: %v", err)
+		}
+
 		ec, rc, mb, err := a.commitTriplesWithMedia(triples, string(a.id), 0, nil)
 		if err != nil {
 			return fmt.Sprintf("记忆写入失败: %v", err)
 		}
+		blocksAfter, err := a.memory.MemoryBlockCount()
+		if err != nil {
+			return fmt.Sprintf("记忆写入失败: %v", err)
+		}
+		newBlocks := blocksAfter - blocksBefore
 		// ★ 0 写入必须显式报告：提交了 N 条但一条都没落库（如实体名校验被拒）
 		// 却回「已写入 0 个」，模型会当成成功而永不重试 —— 实测（2026-10-01
 		// 跑分）：metrics 端口/分机号更新全部因此静默丢失。
-		if ec == 0 && rc == 0 {
+		// ★ 判据用**新增块数**，不是 ec/rc（2026-10-04）
+		//
+		// ★★ 这条提示曾经会让模型做错事：
+		//
+		//	旧表停写后 ec/rc 恒为 0 ⇒ 每次提交都被告知
+		//	「全部被拒，请检查实体名写法」——
+		//	而写入其实**成功了**。
+		//
+		//	模型据此去改不该改的东西（把正常实体名改短、
+		//	加字母数字），把记忆内容改坏。
+		//
+		//	⇒ 「报假失败」比「报假成功」危险：前者会诱发破坏性动作。
+		if newBlocks == 0 && mb == 0 {
 			return fmt.Sprintf("提交了 %d 条三元组但全部被拒（未写入）。常见原因：实体名为空、过长（>50 字）、或不含字母/汉字/数字。请检查主语/宾语的写法后重试。", len(triples))
 		}
 		if mb > 0 {

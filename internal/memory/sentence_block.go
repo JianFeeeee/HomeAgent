@@ -155,6 +155,36 @@ func putTripleBlocksTx(tx *sql.Tx, t Triple, sessionID string, turnID int) (stri
 	// ★ 用**关系边**写入器（addBlockEdgeTx 是迁移专用的去重插入器：
 	//   INSERT OR IGNORE 会把同对节点的第二条同类型边静默吞掉，
 	//   而关系边按设计允许并存多条 —— 52e4596 已把全局 UNIQUE 移除）。
+	// ★★ 幂等：同 (source, target, edge_type, session_id) 必须收敛为一条（2026-10-04）
+	//
+	// 旧 relations 表靠 UNIQUE(source_id,target_id,relation_type,session_id) 保证；
+	// 而 52e4596 为支持「同类边并存」把边表的 UNIQUE **全部移除**了。
+	//
+	// ⇒ 后果：重复提交同一三元组会产生**重复的边**。
+	//   实测（判据 TestCommitDedupSameSession）：同会话提交两次 → 2 条边。
+	//   而记忆写入是**高频重试**的（LLM 反复提交同一事实），
+	//   重复边会让召回刷屏、场景权重虚高。
+	//
+	// ★ 去重口径必须含 session_id：
+	//
+	//	同会话内重复 = 同一条事实（收敛）
+	//	跨会话重复   = 多次陈述（并存，见 TestCommitDedupDifferentSession）
+	//
+	//   若不含 session_id，跨会话的多次陈述会被错误压成一条。
+	var existingEdge int64
+	err := tx.QueryRow(`SELECT id FROM memory_block_edges
+		WHERE source_kind = 'block' AND source_id = ?
+		  AND target_kind = 'block' AND target_id = ?
+		  AND edge_type = ? AND COALESCE(session_id, '') = ?
+		ORDER BY id LIMIT 1`,
+		src.ID, dst.ID, strings.TrimSpace(t.Relation), sessionID).Scan(&existingEdge)
+	if err == nil {
+		return src.ID, dst.ID, existingEdge, nil
+	}
+	if err != sql.ErrNoRows {
+		return "", "", 0, err
+	}
+
 	res, err := tx.Exec(
 		// ★★ session_id / turn_id 必须写进去（2026-10-04）
 		//
