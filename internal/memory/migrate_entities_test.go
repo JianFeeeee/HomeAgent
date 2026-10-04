@@ -54,24 +54,43 @@ func TestMigrateLegacyTextEntities_形态(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	// 2 迁移块 + 2 原句块
-	if len(blocks) != 4 {
-		t.Fatalf("应有 4 块（2 迁移 + 2 原句），实际 %d", len(blocks))
+	// ★ 只统计**迁移自己写的块**：legacy-entity（迁移块）与 sentence（原句块）。
+	//
+	// 不能用 len(blocks) —— 因为 seedLegacy 走 Commit，而 Commit 在
+	// 块化之后**也会写块**（source="triple"），那不是迁移的产物。
+	// 实测：未过滤时是 6 = 4 迁移 + 2 Commit 写的值块。
+	if n := countBySource(t, blocks, "legacy-entity"); n != 2 {
+		t.Errorf("应有 2 个迁移块，实际 %d", n)
+	}
+	if n := countBySource(t, blocks, SentenceBlockSource); n != 2 {
+		t.Errorf("应有 2 个原句块，实际 %d", n)
 	}
 	for _, b := range blocks {
 		// ★ 原句块刻意不带向量（溯源锚点，长整句会稀释召回）
-		if b.Source == SentenceBlockSource {
+		// ★ 只检查迁移自己写的两种块：原句块（sentence）与迁移块（legacy-entity）。
+		//
+		// 库里有第三种来源 triple —— 那是 seedLegacy 走 Commit 时写的
+		// （Commit 块化之后），**不是迁移的产物**，不该被本测试断言。
+		//
+		//   原句块      blk_src_<hash>      无向量（溯源锚点）
+		//   迁移块      blk_ent_<id>_<hash> 有向量
+		//   Commit 块   blk_ent_<hash24>   无向量、无时序
+		//
+		// 三者是**不同语义的东西**，不是同一个东西的重复。
+		switch b.Source {
+		case SentenceBlockSource:
 			if len(b.Vector) != 0 {
 				t.Errorf("原句块 %s 不该带向量，实际 %d 维", b.ID, len(b.Vector))
 			}
-			continue
-		}
-		if len(b.Vector) != 3 || b.Fingerprint != fixedEmbed {
-			t.Errorf("%s 应带 3 维向量与 %s，实际 %d 维 %q",
-				b.ID, fixedEmbed, len(b.Vector), b.Fingerprint)
-		}
-		if b.Source != "legacy-entity" {
-			t.Errorf("%s 应标记来源 legacy-entity，实际 %q", b.ID, b.Source)
+		case "legacy-entity":
+			if len(b.Vector) != 3 || b.Fingerprint != fixedEmbed {
+				t.Errorf("迁移块 %s 应带 3 维向量与 %s，实际 %d 维 %q",
+					b.ID, fixedEmbed, len(b.Vector), b.Fingerprint)
+			}
+		case "triple":
+			// Commit 块化的产物，本测试不关心（见 TestBlockCommit_*）
+		default:
+			t.Errorf("块 %s 来源 %q 既不是迁移产物也不是 Commit 产物", b.ID, b.Source)
 		}
 	}
 
@@ -115,9 +134,11 @@ func TestMigrateLegacyTextEntities_幂等(t *testing.T) {
 		}
 	}
 	blocks, _ := g.MemoryBlocks()
-	// ★ 2 迁移块 + 2 原句块；重复跑不增
-	if len(blocks) != 4 {
-		t.Fatalf("迁移 3 次后仍应只有 4 块（2 迁移 + 2 原句），实际 %d", len(blocks))
+	// ★ 重复跑不增：迁移块与原句块各 2 个
+	//   （不过滤 source='triple' —— 那是 seedLegacy 时 Commit 写的，
+	//     重复跑迁移不会再增加它们，但会出现在 blocks 里）
+	if n := countBySource(t, blocks, "legacy-entity"); n != 2 {
+		t.Fatalf("迁移 3 次后仍应只有 2 个迁移块，实际 %d", n)
 	}
 	edges, _ := g.MemoryBlockEdges()
 	contains := 0
@@ -348,12 +369,24 @@ func TestMigrateLegacyTextEntities_保留时序(t *testing.T) {
 	}
 	want := time.Date(2026, 1, 1, 10, 0, 0, 0, time.UTC)
 	for _, b := range blocks {
+		// ★ 只检查**迁移块**（source=legacy-entity）。
+		//
+		// 库里有第三种来源 triple —— seedLegacy 走 Commit 时写的
+		// （Commit 块化之后）。那些块的 created_at 由 PutMemoryBlocks
+		// 填成 now，**本就不该继承实体时间**。
+		//
+		// 第一版没过滤 source，于是断言去检查 Commit 块，
+		// 报「时序被抹平」—— 而被抹平的是 Commit 块，不是迁移块。
+		// ★ 差点误判成「块化破坏了迁移时序」，那会推翻正确的实现。
+		if b.Source != "legacy-entity" {
+			continue
+		}
 		if b.CreatedAt.IsZero() {
-			t.Errorf("%s created_at 为零值", b.ID)
+			t.Errorf("迁移块 %s created_at 为零值", b.ID)
 			continue
 		}
 		if !b.CreatedAt.Equal(want) {
-			t.Errorf("%s 应继承实体时间 %v，实际 %v（时序被抹平/未传递）",
+			t.Errorf("迁移块 %s 应继承实体时间 %v，实际 %v（时序被抹平/未传递）",
 				b.ID, want, b.CreatedAt)
 		}
 	}
@@ -383,30 +416,39 @@ func TestMigrateLegacyTextEntities_时序不被抹平(t *testing.T) {
 	}
 	blocks, _ := g.MemoryBlocks()
 	// 主语+宾语各成一块：「值班室分机号」「新分机号码」「四三七九」「四三二四」
-	// ★ 4 个实体 → 4 迁移块 + 4 原句块 = 8
-	//   （原为 4，方案 A 让原句也成了块）
-	if len(blocks) != 8 {
-		// 2 迁移块 + 2 原句块
-		t.Fatalf("应得 8 块（4 迁移 + 4 原句），实际 %d", len(blocks))
+	// ★ 4 个实体 → 4 迁移块（+ 4 原句块）
+	//
+	// 不能用 len(blocks)：seedLegacy 走 Commit，块化之后它也写块
+	// （source="triple"，无向量、无实体时序）。实测混进来是 12。
+	// ⇒ 只数迁移自己的两种块。
+	if n := countBySource(t, blocks, "legacy-entity"); n != 4 {
+		t.Fatalf("应得 4 个迁移块，实际 %d（另含 triple 块 %d 个）", n,
+			countBySource(t, blocks, "triple"))
 	}
 	// 判据：4 个块必须分属两个不同时刻（主语+首宾语 10:00，
 	// 次宾语对 11:00）。若全落同一时刻，时序就被抹平了。
 	// ★ 注意：不能断言「排序后首两块不等」—— 10:00 那组本来就有 2 块，
 	// 同刻是正常的。判据是「时刻的分布」而不是「相邻两块是否相等」。
+	// ★ 只统计**迁移块**（source=legacy-entity）。
+	//   Commit 块（source=triple）的 created_at 是 PutMemoryBlocks 填的 now
+	//   —— 它会把 seen 变成 3 个时刻（多了 2026-10-04）而误判「时序被抹平」。
 	seen := map[string]int{}
 	for _, b := range blocks {
+		if b.Source != "legacy-entity" {
+			continue
+		}
 		seen[b.CreatedAt.UTC().Format("2006-01-02 15:04")]++
 	}
 	if len(seen) != 2 {
 		t.Errorf("块应分属 2 个不同时刻，实际 %d 个：%v", len(seen), seen)
 	}
-	if seen["2026-01-01 10:00"] != 4 {
-		// ★ 每组 2 实体 × 2 块（迁移块 + 原句块）= 4 块
-		t.Errorf("10:00 组应有 4 块（2 迁移 + 2 原句），实际 %d", seen["2026-01-01 10:00"])
+	// ★ 现在只数迁移块 ⇒ 每组 2 个实体 = 2 个迁移块
+	//   （原句块不参与时序判据：它们的时间是 Commit 填的 now）
+	if seen["2026-01-01 10:00"] != 2 {
+		t.Errorf("10:00 组应有 2 个迁移块，实际 %d", seen["2026-01-01 10:00"])
 	}
-	if seen["2026-01-01 11:00"] != 4 {
-		// ★ 同上
-		t.Errorf("11:00 组应有 4 块（2 迁移 + 2 原句），实际 %d", seen["2026-01-01 11:00"])
+	if seen["2026-01-01 11:00"] != 2 {
+		t.Errorf("11:00 组应有 2 个迁移块，实际 %d", seen["2026-01-01 11:00"])
 	}
 }
 
@@ -482,9 +524,17 @@ func TestMigrate_报告数等于实际写入数(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	var relEdges int
+	// ★ 只数**迁移块之间**的边（两端都是 blk_ent_<entityID>_<hash> 形态）。
+	//
+	// 边表里还有 Commit 块化写的边（source=triple，两端是 blk_ent_<hash24>）
+	// —— 那不是迁移的产物，而 res.Edges 只数迁移自己写的。
+	// 第一版按「非 contains」统计，把 Commit 的边也算进去了 ⇒ 误报。
+	relEdges := 0
 	for _, e := range edges {
-		if e.Type != "contains" {
+		if e.Type == "contains" {
+			continue
+		}
+		if isLegacyEntityBlockID(e.SourceID) && isLegacyEntityBlockID(e.TargetID) {
 			relEdges++
 		}
 	}
@@ -570,4 +620,34 @@ func truncT(s string, n int) string {
 		return s
 	}
 	return string(r[:n]) + "…"
+}
+
+// countBySource 按 source 统计块数。
+//
+// ★ 迁移测试必须用它而不是 len(blocks)：块化之后 Commit 也写块
+//
+//	（source="triple"），那些不是迁移的产物。
+func countBySource(t *testing.T, blocks []MemoryBlock, src string) int {
+	t.Helper()
+	n := 0
+	for _, b := range blocks {
+		if b.Source == src {
+			n++
+		}
+	}
+	return n
+}
+
+// isLegacyEntityBlockID 判断块 ID 是否是迁移块形态（blk_ent_<entityID>_<hash8>）。
+//
+// ★ 与 Commit 块化的 blk_ent_<hash24> 区分：
+//
+//	迁移块  blk_ent_1234_abcd1234   （中间有下划线 + 数字行号）
+//	Commit  blk_ent_abcdef1234…      （纯 hash，无下划线）
+func isLegacyEntityBlockID(id string) bool {
+	if !strings.HasPrefix(id, "blk_ent_") {
+		return false
+	}
+	rest := strings.TrimPrefix(id, "blk_ent_")
+	return strings.Contains(rest, "_")
 }

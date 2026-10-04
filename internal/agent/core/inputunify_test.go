@@ -2,7 +2,6 @@ package core
 
 import (
 	"path/filepath"
-	"strconv"
 	"strings"
 	"testing"
 
@@ -261,7 +260,10 @@ func TestMemoryCommit_DoesNotPolluteSentenceText(t *testing.T) {
 	if res.Relations[0].SentenceText != sentence {
 		t.Errorf("句子文本被污染: %q", res.Relations[0].SentenceText)
 	}
-	blocks, err := a.memory.BlocksForNode("sentence", strconv.FormatInt(res.Relations[0].SentenceID, 10))
+	// ★ 挂载点已从「sentences 表行号」改成「原句块 ID」
+	//   （CommitWithMedia 返回值随之改为 map[string]string）
+	blocks, err := a.memory.BlocksForNode("block",
+		memory.SentenceBlockID(res.Relations[0].SentenceText))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -462,7 +464,10 @@ func TestToolMemoryCommit_BindsMedia(t *testing.T) {
 	if len(res.Relations) == 0 || res.Relations[0].SentenceID == 0 {
 		t.Fatal("没有句子落点 —— 媒体引用无从挂起")
 	}
-	blocks, err := a.memory.BlocksForNode("sentence", strconv.FormatInt(res.Relations[0].SentenceID, 10))
+	// ★ 挂载点已从「sentences 表行号」改成「原句块 ID」
+	//   （CommitWithMedia 返回值随之改为 map[string]string）
+	blocks, err := a.memory.BlocksForNode("block",
+		memory.SentenceBlockID(res.Relations[0].SentenceText))
 	if err != nil {
 		t.Fatalf("BlocksForNode: %v", err)
 	}

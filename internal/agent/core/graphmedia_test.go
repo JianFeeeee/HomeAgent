@@ -24,9 +24,9 @@ import (
 // 描述文本、marker 反解、由 marker 反推出的「媒体实体」全部已废弃，
 // 因此这些测试也不存在任何按描述检索的断言。
 
-// attachBlockToSentence 提交一条句子并把媒体变成 L3 一等块。
+// attachBlockToSentenceBlock 提交一条句子并把媒体变成 L3 一等块。
 // 必须走真实提交：边要求两端都是真实图节点。
-func attachBlockToSentence(t *testing.T, g *memory.GraphDB, ms *media.Store, sentenceText, digest string) (int64, memory.MemoryBlock) {
+func attachBlockToSentenceBlock(t *testing.T, g *memory.GraphDB, ms *media.Store, sentenceText, digest string) (string, memory.MemoryBlock) {
 	t.Helper()
 	ids, _, _, err := g.CommitWithMedia([]memory.Triple{{
 		Subject: "媒体载体", Relation: "包含", Object: "内容", SentenceText: sentenceText,
@@ -34,16 +34,19 @@ func attachBlockToSentence(t *testing.T, g *memory.GraphDB, ms *media.Store, sen
 	if err != nil {
 		t.Fatalf("CommitWithMedia: %v", err)
 	}
+	// ★ 媒体的挂载点已从「sentences 表行号」改成「原句块 ID」
+	//   （CommitWithMedia 返回值由 map[string]int64 改为 map[string]string，
+	//    因为 sentences 表退场后行号不存在）。
 	sid := ids[sentenceText]
-	if sid == 0 {
-		t.Fatalf("拿不到句子 id: %q", sentenceText)
+	if sid == "" {
+		t.Fatalf("拿不到原句块 ID: %q", sentenceText)
 	}
 	it, err := ms.Stat(digest)
 	if err != nil || it == nil {
 		t.Fatalf("Stat(%s): %v", shortDigest(digest), err)
 	}
 	b := memory.MemoryBlock{
-		ID:            fmt.Sprintf("blk_test_%d_%s", sid, shortDigest(digest)),
+		ID:            fmt.Sprintf("blk_test_%s_%s", shortDigest(sid), shortDigest(digest)),
 		Modality:      memory.BlockImage,
 		PayloadDigest: it.Digest,
 		MIME:          it.MIME,
@@ -56,7 +59,8 @@ func attachBlockToSentence(t *testing.T, g *memory.GraphDB, ms *media.Store, sen
 	if err := g.PutMemoryBlocks([]memory.MemoryBlock{b}); err != nil {
 		t.Fatalf("PutMemoryBlocks: %v", err)
 	}
-	if err := g.AddMemoryBlockEdge("sentence", strconv.FormatInt(sid, 10), "block", b.ID, "contains"); err != nil {
+	// ★ 端点 kind 也从 "sentence" 改成 "block"（原句由块承载）
+	if err := g.AddMemoryBlockEdge("block", sid, "block", b.ID, "contains"); err != nil {
 		t.Fatalf("AddMemoryBlockEdge: %v", err)
 	}
 	return sid, b
@@ -97,8 +101,8 @@ func TestCommitWithMedia_ReturnsSentenceIDs(t *testing.T) {
 	if ec == 0 || rc == 0 {
 		t.Fatalf("应写入实体与关系，实际 ec=%d rc=%d", ec, rc)
 	}
-	if ids[sentence] == 0 {
-		t.Fatalf("应返回句子 id，实际 %v", ids)
+	if ids[sentence] == "" {
+		t.Fatalf("应返回原句块 ID，实际 %v", ids)
 	}
 }
 
@@ -165,7 +169,7 @@ func TestCommitTriplesWithMedia_RoundTrip(t *testing.T) {
 		t.Fatal(err)
 	}
 	sid := ids[sentence]
-	if sid == 0 {
+	if sid == "" {
 		t.Fatal("拿不到句子 id")
 	}
 
@@ -194,7 +198,8 @@ func TestCommitTriplesWithMedia_RoundTrip(t *testing.T) {
 func TestAttachBlocksToSentence_SkipsUnresolvable(t *testing.T) {
 	// digest 在库里不存在时必须跳过，不能建一条指向虚无的块边。
 	a, g, _ := newGraphMediaAgent(t)
-	if n := a.attachBlocksToSentence(42, []string{"deadbeefdead"}, nil, ""); n != 0 {
+	// ★ 空块 ID = 无效句柄（原来用 0 行号表示）
+	if n := a.attachBlocksToSentenceBlock("", []string{"deadbeefdead"}, nil, ""); n != 0 {
 		t.Fatalf("无法补全的 digest 不该建块，实际绑定 %d", n)
 	}
 	blocks, err := g.BlocksForNode("sentence", "42")
@@ -208,10 +213,10 @@ func TestAttachBlocksToSentence_SkipsUnresolvable(t *testing.T) {
 
 func TestAttachBlocksToSentence_NilStoreNoop(t *testing.T) {
 	a := &Agent{}
-	if n := a.attachBlocksToSentence(1, []string{"aaaaaaaaaaaa"}, nil, ""); n != 0 {
+	if n := a.attachBlocksToSentenceBlock("", []string{"aaaaaaaaaaaa"}, nil, ""); n != 0 {
 		t.Fatalf("媒体关闭时应静默无操作，实际 %d", n)
 	}
-	if got, err := a.RecallBlocksForSentence(1); err != nil || got != nil {
+	if got, err := a.RecallBlocksForSentence(""); err != nil || got != nil {
 		t.Fatalf("媒体关闭时应静默无操作，实际 %v / %v", got, err)
 	}
 }
@@ -234,10 +239,10 @@ func TestAttachBlocksToSentence_ReusesSeedIdentity(t *testing.T) {
 	sid := ids["迁移测试句。"]
 
 	byDigest := map[string]memory.MemoryBlock{digest: seedBlock}
-	if n := a.attachBlocksToSentence(sid, []string{digest}, byDigest, ""); n != 1 {
+	if n := a.attachBlocksToSentenceBlock(sid, []string{digest}, byDigest, ""); n != 1 {
 		t.Fatalf("应绑定 1 个块，实际 %d", n)
 	}
-	blocks, err := g.BlocksForNode("sentence", strconv.FormatInt(sid, 10))
+	blocks, err := g.BlocksForNode("block", sid)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -293,21 +298,22 @@ func TestMediaContextForSentences(t *testing.T) {
 	a, g, ms := newGraphMediaAgent(t)
 
 	digest, _ := ms.Put([]byte("img"), media.Item{MIME: "image/png"})
-	sid, _ := attachBlockToSentence(t, g, ms, "一张紫蓝红三色带图。", digest)
+	sid, _ := attachBlockToSentenceBlock(t, g, ms, "一张紫蓝红三色带图。", digest)
 
-	out := a.mediaContextForSentences([]int64{sid, sid + 100})
+	out := a.mediaContextForSentences([]string{sid, sid + "-extra"})
 	if out == "" {
 		t.Fatal("应产出媒体说明")
 	}
-	if !contains(out, fmt.Sprintf("句子 #%d", sid)) || !contains(out, shortDigest(digest)) {
-		t.Fatalf("说明内容不对: %q", out)
+	// 说明里的句子标识是 shortID(块ID) = 去掉 blk_src_ 前缀的 hex
+	if !contains(out, fmt.Sprintf("句子 %s", shortID(sid))) || !contains(out, shortDigest(digest)) {
+		t.Fatalf("说明内容不对: %q（期望含 shortID=%s）", out, shortID(sid))
 	}
 	// 说明只含 MIME 与短 digest，不含任何生成的描述
 	if contains(out, "紫蓝红") {
 		t.Fatalf("说明里不该有描述文本（描述式索引已废弃）: %q", out)
 	}
 	// 无引用的句子不该出现
-	if contains(out, fmt.Sprintf("句子 #%d", sid+100)) {
+	if contains(out, fmt.Sprintf("句子 %s", shortID(sid+"-extra"))) {
 		t.Fatalf("无引用的句子不该出现: %q", out)
 	}
 }
@@ -320,10 +326,11 @@ func TestMediaContextForRelations_SurfacesMediaToAgent(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	sid, _ := attachBlockToSentence(t, g, ms, "一张紫蓝红三色带图。", digest)
+	_, _ = attachBlockToSentenceBlock(t, g, ms, "一张紫蓝红三色带图。", digest)
 
 	// 命中的关系挂着该句子 → 应产出媒体说明
-	out := a.mediaContextForRelations([]memory.Relation{{ID: 1, SentenceID: sid}})
+	// ★ 挂载点改成 SentenceText 现算块 ID（sentenceIDsFromRelations 的新契约）
+	out := a.mediaContextForRelations([]memory.Relation{{ID: 1, SentenceText: "一张紫蓝红三色带图。"}})
 	if out == "" {
 		t.Fatal("关系挂着有媒体的句子，却没产出媒体说明——L3 检索接线断了")
 	}
@@ -332,7 +339,7 @@ func TestMediaContextForRelations_SurfacesMediaToAgent(t *testing.T) {
 	}
 
 	// 没挂媒体的关系不该产出噪声
-	if out := a.mediaContextForRelations([]memory.Relation{{ID: 2, SentenceID: 99}}); out != "" {
+	if out := a.mediaContextForRelations([]memory.Relation{{ID: 2, SentenceText: "库中不存在的句子。"}}); out != "" {
 		t.Errorf("无媒体的句子不该产出说明: %q", out)
 	}
 	if out := a.mediaContextForRelations(nil); out != "" {
@@ -358,7 +365,7 @@ func TestBuildMemoryContext_IncludesMediaSection(t *testing.T) {
 		t.Fatal(err)
 	}
 	sid := sids[sentence]
-	if sid == 0 {
+	if sid == "" {
 		t.Fatal("拿不到句子 id")
 	}
 	if err := graph.PutMemoryBlocks([]memory.MemoryBlock{{
@@ -367,7 +374,7 @@ func TestBuildMemoryContext_IncludesMediaSection(t *testing.T) {
 	}}); err != nil {
 		t.Fatal(err)
 	}
-	if err := graph.AddMemoryBlockEdge("sentence", strconv.FormatInt(sid, 10), "block", "blk_auto_1", "contains"); err != nil {
+	if err := graph.AddMemoryBlockEdge("block", sid, "block", "blk_auto_1", "contains"); err != nil {
 		t.Fatal(err)
 	}
 
@@ -594,7 +601,7 @@ func TestMigrateLegacyMediaEntities(t *testing.T) {
 		t.Fatal(err)
 	}
 	sid := ids[sentence]
-	if sid == 0 {
+	if sid == "" {
 		t.Fatal("拿不到句子 id")
 	}
 
@@ -630,7 +637,7 @@ func TestMigrateLegacyMediaEntities(t *testing.T) {
 		}
 	}
 	// 块必须挂回原句子
-	got, err := g.BlocksForNode("sentence", strconv.FormatInt(sid, 10))
+	got, err := g.BlocksForNode("block", sid)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -670,7 +677,8 @@ func TestCleanupOrphanedSentences_KeepsBlockBackedSentences(t *testing.T) {
 	if err := g.PutMemoryBlocks([]memory.MemoryBlock{b}); err != nil {
 		t.Fatal(err)
 	}
-	if err := g.AddMemoryBlockEdge("sentence", strconv.FormatInt(sid, 10), "block", b.ID, "contains"); err != nil {
+	// ★ 端点 kind 也从 "sentence" 改成 "block"（原句由块承载）
+	if err := g.AddMemoryBlockEdge("block", sid, "block", b.ID, "contains"); err != nil {
 		t.Fatal(err)
 	}
 
@@ -687,7 +695,7 @@ func TestCleanupOrphanedSentences_KeepsBlockBackedSentences(t *testing.T) {
 	if _, err := g.CleanupOrphanedSentences(); err != nil {
 		t.Fatal(err)
 	}
-	blocks, err := g.BlocksForNode("sentence", strconv.FormatInt(sid, 10))
+	blocks, err := g.BlocksForNode("block", sid)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -697,20 +705,29 @@ func TestCleanupOrphanedSentences_KeepsBlockBackedSentences(t *testing.T) {
 }
 
 func TestSentenceIDsFromRelations(t *testing.T) {
-	// 关系行不持有媒体，媒体挂在句子上。这个函数负责"关系→句子"这一跳，
-	// 去重与去零都不能少：sentence_id=0 表示该关系没有关联句子。
+	// 关系行不持有媒体，媒体挂在句子上。这个函数负责「关系→句子」这一跳。
+	//
+	// ★ 输入契约已变（Commit 块化后）：
+	//   从 Relation.SentenceID（sentences 表行号）改为按 SentenceText
+	//   现算 blk_src_<hash>。行号不再是稳定挂载点 —— sentences 表退场。
+	//   去重与「无句子」的剔除仍然必须。
 	rels := []memory.Relation{
-		{ID: 1, SentenceID: 5},
-		{ID: 2, SentenceID: 0}, // 无句子
-		{ID: 3, SentenceID: 5}, // 重复
-		{ID: 4, SentenceID: 7},
+		{ID: 1, SentenceText: "句子甲。"},
+		{ID: 2},                       // 无句子
+		{ID: 3, SentenceText: "句子甲。"}, // 重复
+		{ID: 4, SentenceText: "句子乙。"},
 	}
+	want0 := memory.SentenceBlockID("句子甲。")
+	want1 := memory.SentenceBlockID("句子乙。")
 	got := sentenceIDsFromRelations(rels)
 	if len(got) != 2 {
-		t.Fatalf("应得 2 个去重后的句子 id，实际 %v", got)
+		t.Fatalf("应得 2 个去重后的原句块 ID，实际 %v", got)
 	}
-	if got[0] != 5 || got[1] != 7 {
-		t.Fatalf("句子 id 或顺序不对: %v", got)
+	if got[0] != want0 || got[1] != want1 {
+		t.Fatalf("原句块 ID 或顺序不对: %v（期望 [%s %s]）", got, want0, want1)
+	}
+	if !strings.HasPrefix(got[0], "blk_src_") {
+		t.Errorf("应是原句块 ID（blk_src_ 前缀），实际 %q", got[0])
 	}
 	if n := sentenceIDsFromRelations(nil); n != nil {
 		t.Fatalf("空输入应返回 nil，实际 %v", n)

@@ -44,13 +44,13 @@ func (a *Agent) migrateLegacyGraphMedia() {
 	}
 }
 
-// attachBlocksToSentence 把一组 digest 变成 L3 一等块并挂到句子上。
+// attachBlocksToSentenceBlock 把一组 digest 变成 L3 一等块并挂到**原句块**上。
 // seed 允许复用已持有块的 ID（L2→L3 迁移保持块身份不变）。
 // ★ sentenceBlockID 是**原句块 ID**（原为 sentences 表行号）。
 //
 //	句子的承载者已从 sentences 表迁移到 blk_src_<sha256(text[:12])>，
 //	媒体边因此改挂「原句块 --contains--> 媒体块」。
-func (a *Agent) attachBlocksToSentence(sentenceBlockID string, digests []string, seed map[string]memory.MemoryBlock, scene string) int {
+func (a *Agent) attachBlocksToSentenceBlock(sentenceBlockID string, digests []string, seed map[string]memory.MemoryBlock, scene string) int {
 	if a.mediaStore == nil || a.memory == nil || sentenceBlockID == "" {
 		return 0
 	}
@@ -157,7 +157,7 @@ func (a *Agent) commitTriplesWithMedia(triples []memory.Triple, sessionID string
 		if sid == "" {
 			continue
 		}
-		blocks += a.attachBlocksToSentence(sid, t.MediaDigests, byDigest, t.Scene)
+		blocks += a.attachBlocksToSentenceBlock(sid, t.MediaDigests, byDigest, t.Scene)
 	}
 	return ec, rc, blocks, nil
 }

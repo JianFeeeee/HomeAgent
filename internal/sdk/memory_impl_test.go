@@ -2,7 +2,6 @@ package sdk
 
 import (
 	"path/filepath"
-	"strconv"
 	"strings"
 	"testing"
 
@@ -134,19 +133,26 @@ func TestGraphCommit_BindsMediaFromDigests(t *testing.T) {
 	if len(res.Relations) == 0 || res.Relations[0].SentenceID == 0 {
 		t.Fatal("没有句子落点 —— 媒体块无从挂接")
 	}
-	sid := res.Relations[0].SentenceID
+	// ★ 媒体的挂载点从「sentences 表行号」改成「原句块 ID」。
+	//
+	// 变更原因：sentences 表退场后行号不存在，而 media 边要挂在
+	// 「原句块 --contains--> 媒体块」上（CommitWithMedia 的返回值
+	// 已随之从 map[string]int64 改为 map[string]string）。
+	//
+	// 端点 kind 也从 "sentence" 改成 "block"。
+	sid := res.Relations[0].SentenceText
 
 	// 句子文本保持原样：不再往正文里贴媒体标记。
 	if strings.Contains(res.Relations[0].SentenceText, digest[:12]) {
 		t.Errorf("句子文本不该被媒体标记污染: %q", res.Relations[0].SentenceText)
 	}
 
-	blocks, err := g.BlocksForNode("sentence", strconv.FormatInt(sid, 10))
+	blocks, err := g.BlocksForNode("block", memory.SentenceBlockID(sid))
 	if err != nil {
 		t.Fatalf("BlocksForNode: %v", err)
 	}
 	if len(blocks) != 1 || blocks[0].PayloadDigest != digest {
-		t.Errorf("句子 #%d 的媒体块 = %+v，期望 [%s]", sid, blocks, digest)
+		t.Errorf("句子 %q 的媒体块 = %+v，期望 [%s]", sid, blocks, digest)
 	}
 }
 
@@ -170,7 +176,10 @@ func TestGraphCommit_DedupesRepeatedDigest(t *testing.T) {
 	if len(res.Relations) == 0 {
 		t.Fatal("召回不到关系")
 	}
-	blocks, err := g.BlocksForNode("sentence", strconv.FormatInt(res.Relations[0].SentenceID, 10))
+	// ★ 挂载点已从「sentences 表行号」改成「原句块 ID」
+	//   （CommitWithMedia 返回值随之改为 map[string]string）
+	blocks, err := g.BlocksForNode("block",
+		memory.SentenceBlockID(res.Relations[0].SentenceText))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -198,7 +207,10 @@ func TestGraphCommit_NilMediaStoreDegrades(t *testing.T) {
 	if len(res.Relations) == 0 {
 		t.Fatal("召回不到关系")
 	}
-	blocks, err := g.BlocksForNode("sentence", strconv.FormatInt(res.Relations[0].SentenceID, 10))
+	// ★ 挂载点已从「sentences 表行号」改成「原句块 ID」
+	//   （CommitWithMedia 返回值随之改为 map[string]string）
+	blocks, err := g.BlocksForNode("block",
+		memory.SentenceBlockID(res.Relations[0].SentenceText))
 	if err != nil {
 		t.Fatal(err)
 	}
