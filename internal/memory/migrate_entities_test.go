@@ -698,3 +698,155 @@ func TestLegacyRowCount_只允许单表COUNT(t *testing.T) {
 		}
 	}
 }
+
+// ★★★ 迁移必须带上旧关系的属性（2026-10-04）
+//
+// 缺陷：legacyRel 此前只读 id/src/tgt/type，confidence / session_id /
+// turn_id / status **根本没被读取**，于是迁出的边全是空属性。
+//
+// ★ 生产快照实测后果：959 条边 confidence 全为 0 —— 而边表把
+// confidence 当唯一的质量信号（RecallSorted 的相关性排序、
+// 场景权重、蒸馏置信度传播都靠它）。
+//
+// ★ 更隐蔽的一层：迁移原先用 addBlockEdgeTx —— 那是**结构边**写入器，
+// 去重条件带 `COALESCE(session_id,”)=”`。
+// 而要迁移的关系**恰恰带 session_id** ⇒ 每一条都被判成「已存在」跳过。
+// 这层缺陷只有在「测试数据带 session」时才暴露 —— 所以判据必须造它。
+func TestMigrateLegacy_关系属性完整迁移(t *testing.T) {
+	// ★ 用 newTestGraph（干净库）而不是 newMigrateGraph（带种子旧表）——
+	//   后者的种子数据会让边计数翻倍，判据就测不到「跨会话并存」这件事。
+	g := newTestGraph(t)
+	defer func() { _ = g.Close() }()
+
+	// 造旧表数据：同一对实体在**不同会话**各有一条同类型关系。
+	// 迁移后必须是两条独立的边（关系边按设计允许并存）。
+	for i, sid := range []string{"sess-A", "sess-B"} {
+		if _, _, err := g.Commit([]Triple{
+			{Subject: "迁移甲", Relation: "维护", Object: "迁移乙", Confidence: 0.3 + 0.4*float64(i)},
+		}, sid, i+1); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	res, err := g.MigrateLegacyTextEntities(nil)
+	if err != nil {
+		t.Fatalf("迁移: %v", err)
+	}
+	fmt.Printf("  迁移 %d 边（去重 %d）\n", res.Edges, res.DedupedEdges)
+
+	// ★ 基线数：Commit 自己已经写了块侧边（块化路径）。
+	//   判据要比的是「迁移之后」而不是「迁移贡献了多少」——
+	//   前者才是「迁移有没有搬过来」这个真问题。
+	var baseEdges int
+	if err := g.db.QueryRow(`SELECT COUNT(*) FROM memory_block_edges
+		WHERE edge_type='维护'`).Scan(&baseEdges); err != nil {
+		t.Fatal(err)
+	}
+	fmt.Printf("  迁移后「维护」边共 %d 条（Commit 原有 %d + 迁移 %d）\n",
+		baseEdges, baseEdges-res.Edges, res.Edges)
+
+	g.mu.RLock()
+	defer g.mu.RUnlock()
+
+	// ★ 跨会话的两条都必须存在（不能被 session_id 的去重条件吃掉）。
+	//
+	// ★ 只数**迁移新增**的那些：Commit 本身也写了块侧边（块化），
+	//   所以库里本来就有 2 条。判据要测的是「迁移有没有把旧的 2 条
+	//   也搬过来」—— 两者 session_id 不同，共存正是关系边的设计意图。
+	// ★ 关键判据：迁移去重口径按 session。
+	//
+	//   若去重条件像 addBlockEdgeTx 那样带 `session_id=''`
+	//   （结构边口径），要迁移的关系会因「带 session」而被判成已存在
+	//   ⇒ 每一条都跳过 ⇒ res.Edges 为 0。
+	//
+	//   所以这里的判据是 **res.Edges == 旧表关系数**，
+	//   而不是「库里共有几条边」—— 后者会被 Commit 自己写的块侧边干扰。
+	if res.Edges != 2 {
+		t.Errorf("★ 迁移应新增 2 条边（带 session 的不得被去重吃掉），实际 %d", res.Edges)
+	}
+
+	// ★ 迁移出的边必须带 session_id（Recall 的 sessionFilter 依赖它）
+	var nMigratedSess int
+	if err := g.db.QueryRow(`
+		SELECT COUNT(*) FROM memory_block_edges
+		WHERE edge_type='维护' AND COALESCE(session_id,'') != ''
+		  AND confidence > 0`).Scan(&nMigratedSess); err != nil {
+		t.Fatal(err)
+	}
+	if nMigratedSess < 2 {
+		t.Errorf("★ 迁出的边应带 session_id 与 confidence，实际 %d 条符合", nMigratedSess)
+	}
+
+	// ★ confidence 必须迁过来
+	var confidences []float64
+	rows, err := g.db.Query(`
+		SELECT COALESCE(confidence, 0) FROM memory_block_edges WHERE edge_type = '维护'`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for rows.Next() {
+		var c float64
+		_ = rows.Scan(&c)
+		confidences = append(confidences, c)
+	}
+	rows.Close()
+	fmt.Printf("  迁出的 confidence: %v\n", confidences)
+	for _, c := range confidences {
+		if c == 0 {
+			t.Error("★ confidence 未迁移（生产实测 959 条边全 0）")
+		}
+	}
+
+	// ★ session_id / turn_id 必须迁过来（Recall 的 sessionFilter 依赖）
+}
+
+// ★ 非 active 的旧关系不得迁成 active（否则已删除的记忆会复活）
+func TestMigrateLegacy_已删除关系不复活(t *testing.T) {
+	g := newTestGraph(t)
+	defer func() { _ = g.Close() }()
+	if _, _, err := g.Commit([]Triple{
+		{Subject: "待删甲", Relation: "曾经", Object: "待删乙", Confidence: 1.0},
+	}, "sess-X", 1); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := g.Purge(map[string]string{"subject_contains": "待删甲"}, "soft"); err != nil {
+		t.Fatal(err)
+	}
+
+	// ★★ 判据要造的正是**混合态**：旧表行仍是 active，块侧已 deleted。
+	//
+	//   这不是人为 contrived —— 它是读侧切块后的**真实状态**：
+	//   Purge 只改块侧，旧 relations 行停在 active。
+	//   生产库有 14 条 deleted 关系 + memory_purge 工具调用历史，
+	//   两者叠加就是这个形态。
+	//
+	//   若只造「旧表也标 deleted」，测的就只是 status 透传；
+	//   而真正要防的是「旧表说 active、块侧说 deleted，迁移信了谁」。
+	g.mu.Lock()
+	var nStillActive int
+	if err := g.db.QueryRow(
+		`SELECT COUNT(*) FROM relations WHERE status='active'`).Scan(&nStillActive); err != nil {
+		g.mu.Unlock()
+		t.Fatal(err)
+	}
+	if nStillActive == 0 {
+		g.mu.Unlock()
+		t.Fatal("★ 判据前提不成立：旧表不应有 active 行（否则测不到混合态）")
+	}
+	g.mu.Unlock()
+	if _, err := g.MigrateLegacyTextEntities(nil); err != nil {
+		t.Fatalf("迁移: %v", err)
+	}
+	g.mu.RLock()
+	defer g.mu.RUnlock()
+
+	var nActive int
+	if err := g.db.QueryRow(`
+		SELECT COUNT(*) FROM memory_block_edges
+		WHERE edge_type='曾经' AND COALESCE(status,'')='active'`).Scan(&nActive); err != nil {
+		t.Fatal(err)
+	}
+	if nActive != 0 {
+		t.Errorf("★ 已删除的旧关系被迁成 active（记忆会复活），实际 %d 条", nActive)
+	}
+}

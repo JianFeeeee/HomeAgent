@@ -133,6 +133,22 @@ func main() {
 		os.Exit(1)
 	}
 
+	// ★★ scene_refs 迁移必须与块迁移**同一次**完成（2026-10-04）
+	//
+	// scene_refs 里的 kind='entity' / 'relation' 指向旧表的行。
+	// 块迁移完成但 scene_refs 没迁 ⇒ 场景式记忆全部指向不存在的对象，
+	// 而 RecallByScene 只 JOIN 块/边 ⇒ **静默召回空**。
+	//
+	// ★ 之前它是独立函数（只在测试里被调过），
+	//   于是生产迁移留下 718 条旧 kind 引用 —— 验证脚本当场抓到。
+	scN, err := db.MigrateSceneRefsToBlocks()
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "\nscene_refs 迁移失败（已整体回滚）: %v\n", err)
+		fmt.Fprintf(os.Stderr, "快照可用于人工核对：%s\n", backup)
+		os.Exit(1)
+	}
+	fmt.Printf("\n  scene_refs：迁移 %d 条（kind 分布迁移后应为 block/edge/document）\n", scN)
+
 	after, err := legacyStats(db)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "错误：读取迁移后状态失败: %v\n", err)

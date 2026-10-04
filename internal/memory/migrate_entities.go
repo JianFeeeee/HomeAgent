@@ -162,8 +162,54 @@ func (g *GraphDB) MigrateLegacyTextEntities(embed EntityEmbedder) (MigrateResult
 			edgeType = "related_to"
 		}
 		// ★ 只在**真的新增**时计数 —— 否则报告会多算被去重的那些。
-		//   实测：980 行 relations（含 20 组重复三元组）报告 980 而实际 959。
-		err, added := addBlockEdgeTx(tx, "block", src, "block", tgt, edgeType)
+		//   实测：980 行 relations（含 21 组重复三元组）报告 980 而实际 959。
+		//
+		// ★★ 用 addMigratedRelationTx 而不是 addBlockEdgeTx（2026-10-04）：
+		//   后者是**结构边**写入器，去重条件带 `session_id=''`
+		//   ⇒ 每一条带 session 的要迁移的关系都会被判成「已存在」而跳过。
+		//   而且它不写 confidence —— 生产迁移实测 959 条边 confidence 全 0。
+		// ★★ status 要与**块侧**取交集（2026-10-04）
+		//
+		// 读侧切块之后 Purge 只改块侧，旧 relations 行**仍停在 active**。
+		// 于是迁移看到 active 的旧行会当成活跃关系搬过去 ——
+		// 而它在块侧早就被软删了 ⇒ **已删除的记忆复活**。
+		//
+		// 生产库实测有 14 条 deleted 关系；若迁移前跑过 memory_purge
+		// 工具（它走 Purge），这批会被全部复活。
+		//
+		// ⇒ 迁移时额外查一次块侧：块侧已 deleted 的旧行不迁成 active。
+		// ★★ 判据：**精确**匹配块侧那条边（2026-10-04）
+		//
+		// 第一版写成 `source_id IN (src,tgt) AND target_id IN (src,tgt)`
+		// —— 那是**交叉匹配**：任一端相同就算命中。
+		// 于是「A→B 被删」会让「A→C」「B→A」都被误判成 deleted。
+		//
+		// 而且它掩盖了真正的问题：块侧被删的边是
+		// `blk_ent_<hash(A)>` → `blk_ent_<hash(B)>`（块化时写的），
+		// 而迁移用的是旧表行号映射出的块 ID ——
+		// 两套 ID 不同，只有**按块文本**才能对上。
+		effectiveStatus := r.status
+		if effectiveStatus == "" || effectiveStatus == "active" {
+			var blockDeleted int
+			if err := tx.QueryRow(`
+				SELECT COUNT(*) FROM memory_block_edges e
+				JOIN memory_blocks sb ON sb.id = e.source_id
+				JOIN memory_blocks tb ON tb.id = e.target_id
+				WHERE e.source_kind='block' AND e.target_kind='block'
+				  AND e.edge_type = ?
+				  AND COALESCE(sb.text_content,'') = (SELECT name FROM entities WHERE id = ?)
+				  AND COALESCE(tb.text_content,'') = (SELECT name FROM entities WHERE id = ?)
+				  AND COALESCE(e.session_id,'') = ?
+				  AND COALESCE(e.status,'') = 'deleted'`,
+				edgeType, r.src, r.tgt, r.sessionID).Scan(&blockDeleted); err != nil {
+				return res, fmt.Errorf("check block-side status: %w", err)
+			}
+			if blockDeleted > 0 {
+				effectiveStatus = EdgeDeleted
+			}
+		}
+		err, added := addMigratedRelationTx(tx, src, tgt, edgeType,
+			r.confidence, r.sessionID, r.turnID, effectiveStatus)
 		if err != nil {
 			return res, fmt.Errorf("migrate relation %d: %w", r.id, err)
 		}
@@ -234,6 +280,14 @@ type legacyRel struct {
 	id, src, tgt int64
 	typ          string
 	createdAt    time.Time
+	// ★ 以下四列 2026-10-04 补：旧 relations 的属性列此前**根本没被读取**，
+	//   于是迁移出的边全是空属性 —— 而边表把 confidence 当唯一的质量信号
+	//   （RecallSorted 的相关性排序、场景权重、蒸馏置信度传播都靠它）。
+	//   实测生产迁移后 959 条边 confidence 全为 0。
+	confidence float64
+	sessionID  string
+	turnID     int
+	status     string
 }
 
 // readLegacySnapshot 在短读锁内取全部实体与关系。
@@ -267,14 +321,18 @@ func (g *GraphDB) readLegacySnapshot() ([]legacyEnt, []legacyRel, error) {
 	}
 
 	relRows, err := g.db.Query(`SELECT id, source_id, target_id,
-		COALESCE(relation_type, '') FROM relations ORDER BY id`)
+		COALESCE(relation_type, ''),
+		COALESCE(confidence, 0), COALESCE(session_id, ''),
+		COALESCE(turn_id, 0), COALESCE(status, '')
+		FROM relations ORDER BY id`)
 	if err != nil {
 		return nil, nil, err
 	}
 	var rels []legacyRel
 	for relRows.Next() {
 		var r legacyRel
-		if err := relRows.Scan(&r.id, &r.src, &r.tgt, &r.typ); err != nil {
+		if err := relRows.Scan(&r.id, &r.src, &r.tgt, &r.typ,
+			&r.confidence, &r.sessionID, &r.turnID, &r.status); err != nil {
 			relRows.Close()
 			return nil, nil, err
 		}
@@ -591,4 +649,64 @@ func (g *GraphDB) LegacyRowCount(query string) (int, error) {
 		return 0, err
 	}
 	return n, nil
+}
+
+// addMigratedRelationTx 迁移一条**旧 relations 行**到独立关系边。
+//
+// ★★ 为什么不复用 addBlockEdgeTx
+//
+//	addBlockEdgeTx 是**结构边**写入器：去重条件里带
+//	`COALESCE(session_id,'')=''`（结构边无 session），
+//	而且它只写 5 列，不带 confidence / session / turn / status。
+//
+//	而迁移的关系边**恰恰要带 session_id** —— 于是那个去重条件
+//	会让**每一条**要迁移的边都被判成「已存在」而跳过。
+//	（实测若不改：生产 959 条边一条都迁不进去。）
+//
+// ★ 去重口径：同 (source, target, edge_type, session_id) 视为同一条。
+//
+//	生产 relations 里有 21 组完全重复的三元组（实测）——
+//	它们是**迁移期历史重复**（同一事实被记了两次，同一会话内），
+//	按 session 收敛掉是对的；而**跨会话**的重复是真实的多次陈述，
+//	必须各存一条（关系边按设计允许并存多条）。
+//
+// ★ status：旧表有 deleted/archived 的关系不应迁成 active ——
+//
+//	否则一条已删除的记忆会在召回里复活。
+//	只迁 status='active'；其余映射为 'deleted' 保留痕迹。
+func addMigratedRelationTx(tx *sql.Tx, src, tgt, edgeType string,
+	confidence float64, sessionID string, turnID int, status string) (error, bool) {
+	if src == "" || tgt == "" || edgeType == "" {
+		return fmt.Errorf("migrate relation: endpoints and type required"), false
+	}
+	var existing int
+	if err := tx.QueryRow(`SELECT COUNT(*) FROM memory_block_edges
+		WHERE source_kind='block' AND source_id=?
+		  AND target_kind='block' AND target_id=?
+		  AND edge_type=? AND COALESCE(session_id,'')=?`,
+		src, tgt, edgeType, sessionID).Scan(&existing); err != nil {
+		return err, false
+	}
+	if existing > 0 {
+		return nil, false
+	}
+
+	// ★ 非 active 的旧关系迁成 deleted，不迁成 active。
+	if status != "" && status != "active" {
+		status = EdgeDeleted
+	}
+	if status == "" {
+		status = EdgeActive
+	}
+	res, err := tx.Exec(`INSERT INTO memory_block_edges
+		(source_kind, source_id, target_kind, target_id, edge_type,
+		 confidence, status, session_id, turn_id, created_at)
+		VALUES ('block', ?, 'block', ?, ?, ?, ?, ?, ?, ?)`,
+		src, tgt, edgeType, confidence, status, sessionID, turnID,
+		time.Now())
+	if err != nil {
+		return err, false
+	}
+	n, _ := res.RowsAffected()
+	return nil, n > 0
 }

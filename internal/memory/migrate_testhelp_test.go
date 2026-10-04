@@ -6,10 +6,12 @@ package memory
 // ddlMemoryBlocks 是 graph.go 里同一段 DDL 的副本，仅供测试重建被删的表。
 //
 // ★★ 它是**重复的真相源** —— 加列时必须两边都改。
-//   2026-10-04 加 semantic_type 时就漏了这里，报
-//   「no such column: semantic_type」。抽公共常量是正解，
-//   但 graph.go 的 DDL 是一整段 schema 初始化（多张表），
-//   拆出来会改动面更大 —— 暂时保留副本，改列时记得同步。
+//
+//	2026-10-04 加 semantic_type 时就漏了这里，报
+//	「no such column: semantic_type」。抽公共常量是正解，
+//	但 graph.go 的 DDL 是一整段 schema 初始化（多张表），
+//	拆出来会改动面更大 —— 暂时保留副本，改列时记得同步。
+//
 // 刻意不导出成生产符号：它是测试脚手架，不是 API。
 const ddlMemoryBlocks = `CREATE TABLE IF NOT EXISTS memory_blocks (
 	id TEXT PRIMARY KEY,
