@@ -438,7 +438,22 @@ func addBlockEdgeTx(tx *sql.Tx, sourceKind, sourceID, targetKind, targetID, edge
 			return fmt.Errorf("%s graph node %s does not exist", ep.kind, ep.id), false
 		}
 	}
-	res, err := tx.Exec(`INSERT OR IGNORE INTO memory_block_edges
+	// ★ 显式查重：边表升格去掉了 UNIQUE 约束（关系边要能并存多条），
+	// 而 INSERT OR IGNORE 的去重正是靠那个 UNIQUE 实现的。
+	// 不查重的话迁移跑第二遍会插出重复的 contains 边
+	// （实测 TestMigrateLegacyTextEntities_幂等 当场红了）。
+	var existing int
+	if err := tx.QueryRow(`SELECT COUNT(*) FROM memory_block_edges
+		WHERE source_kind=? AND source_id=? AND target_kind=? AND target_id=?
+		  AND edge_type=? AND COALESCE(session_id,'')=''`,
+		sourceKind, sourceID, targetKind, targetID, edgeType).Scan(&existing); err != nil {
+		return err, false
+	}
+	if existing > 0 {
+		return nil, false // 已存在：结构边幂等（不算新增）
+	}
+
+	res, err := tx.Exec(`INSERT INTO memory_block_edges
 		(source_kind, source_id, target_kind, target_id, edge_type)
 		VALUES (?, ?, ?, ?, ?)`, sourceKind, sourceID, targetKind, targetID, edgeType)
 	if err != nil {

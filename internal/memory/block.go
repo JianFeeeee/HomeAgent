@@ -56,6 +56,26 @@ type MemoryBlockEdge struct {
 	TargetID   string    `json:"target_id"`
 	Type       string    `json:"type"`
 	CreatedAt  time.Time `json:"created_at"`
+
+	// ★ 以下是「边作为独立单位」需要的属性列。
+	//
+	// 结构边（contains 等）不填这些；关系边填。
+	// 旧 relations 表有同名列 —— 块化后属性挂在**边**上，
+	// 而不是挂在一张独立的 relations 表上（那才是「边不是独立单位」的根源）。
+	Confidence float64 `json:"confidence,omitempty"`
+	SessionID  string  `json:"session_id,omitempty"`
+	TurnID     int     `json:"turn_id,omitempty"`
+	// Status 是 EdgeActive / EdgeDeleted / EdgeMerged。
+	// 空字符串表示结构边（无状态语义）。
+	Status string `json:"status,omitempty"`
+	// MergedInto 在 EdgeMerged 时指向目标块：源块被并进哪里，
+	// 历史边留在源块上不重定向。
+	MergedInto string `json:"merged_into,omitempty"`
+}
+
+// IsRelationEdge 判断该边是否为**关系边**（而非结构边）。
+func (e MemoryBlockEdge) IsRelationEdge() bool {
+	return e.SessionID != "" || e.Status != "" || e.Confidence != 0
 }
 
 func validBlockModality(modality BlockModality) bool {
@@ -219,10 +239,32 @@ func (g *GraphDB) AddMemoryBlockEdge(sourceKind, sourceID, targetKind, targetID,
 			return fmt.Errorf("%s graph node %s does not exist", endpoint.kind, endpoint.id)
 		}
 	}
-	_, err = tx.Exec(`INSERT OR IGNORE INTO memory_block_edges
-		(source_kind, source_id, target_kind, target_id, edge_type)
-		VALUES (?, ?, ?, ?, ?)`, sourceKind, sourceID, targetKind, targetID, edgeType)
+	// ★★ 结构边必须**显式查重** —— 不能再依赖 INSERT OR IGNORE
+	//
+	// 边表升格去掉了 UNIQUE(source_kind,source_id,target_kind,target_id,
+	// edge_type)（因为它让「同一对节点并存多条同类关系边」不可能）。
+	// 而 OR IGNORE 的去重**正是靠那个 UNIQUE 实现的** ——
+	// 约束一去，重复调用就会插出两条一样的 contains 边。
+	//
+	// 实测后果：distill 幂等与迁移幂等两个判据当场红了。
+	//
+	// ⇒ 结构边（contains 等）在这里显式查；关系边走
+	//   AddRelationBlockEdge，它**刻意**不查重（可并存多条）。
+	var existing int
+	err = tx.QueryRow(`SELECT COUNT(*) FROM memory_block_edges
+		WHERE source_kind=? AND source_id=? AND target_kind=? AND target_id=?
+		  AND edge_type=? AND COALESCE(session_id,'')=''`,
+		sourceKind, sourceID, targetKind, targetID, edgeType).Scan(&existing)
 	if err != nil {
+		return err
+	}
+	if existing > 0 {
+		return nil // 已存在：结构边幂等
+	}
+
+	if _, err = tx.Exec(`INSERT INTO memory_block_edges
+		(source_kind, source_id, target_kind, target_id, edge_type)
+		VALUES (?, ?, ?, ?, ?)`, sourceKind, sourceID, targetKind, targetID, edgeType); err != nil {
 		return err
 	}
 	return tx.Commit()
@@ -231,8 +273,12 @@ func (g *GraphDB) AddMemoryBlockEdge(sourceKind, sourceID, targetKind, targetID,
 func (g *GraphDB) MemoryBlockEdges() ([]MemoryBlockEdge, error) {
 	g.mu.RLock()
 	defer g.mu.RUnlock()
+	// ★ 必须读全部 11 列 —— 只读旧 6 列会让关系边的属性
+	//   （session_id / confidence / status）静默变成零值。
+	//   这正是第一版加列时漏掉的地方：写了列但没扩读取端。
 	rows, err := g.db.Query(`SELECT id, source_kind, source_id, target_kind, target_id,
-		edge_type, created_at FROM memory_block_edges ORDER BY id`)
+		edge_type, created_at, confidence, session_id, turn_id, status, merged_into
+		FROM memory_block_edges ORDER BY id`)
 	if err != nil {
 		return nil, err
 	}
@@ -240,9 +286,20 @@ func (g *GraphDB) MemoryBlockEdges() ([]MemoryBlockEdge, error) {
 	var edges []MemoryBlockEdge
 	for rows.Next() {
 		var edge MemoryBlockEdge
+		var sess, status, merged sql.NullString
+		var conf sql.NullFloat64
+		var turn sql.NullInt64
 		if err := rows.Scan(&edge.ID, &edge.SourceKind, &edge.SourceID, &edge.TargetKind,
-			&edge.TargetID, &edge.Type, &edge.CreatedAt); err != nil {
+			&edge.TargetID, &edge.Type, &edge.CreatedAt,
+			&conf, &sess, &turn, &status, &merged); err != nil {
 			return nil, err
+		}
+		edge.Confidence = conf.Float64
+		edge.SessionID = sess.String
+		edge.Status = status.String
+		edge.MergedInto = merged.String
+		if turn.Valid {
+			edge.TurnID = int(turn.Int64)
 		}
 		edges = append(edges, edge)
 	}

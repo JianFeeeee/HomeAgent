@@ -220,8 +220,9 @@ func (g *GraphDB) initSchema() error {
 			target_kind TEXT NOT NULL,
 			target_id TEXT NOT NULL,
 			edge_type TEXT NOT NULL,
-			created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-			UNIQUE(source_kind, source_id, target_kind, target_id, edge_type)
+			created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+			-- ★ 无 UNIQUE 约束：边是独立单位，同一对节点间可并存多条同类边。
+			--   结构边的幂等由 AddMemoryBlockEdge 的先查后写保证。
 		)`,
 		`CREATE TABLE IF NOT EXISTS documents (
 			id         TEXT PRIMARY KEY,
@@ -309,6 +310,38 @@ func (g *GraphDB) initSchema() error {
 	tx.Exec(`ALTER TABLE memory_blocks ADD COLUMN scene TEXT DEFAULT ''`)
 	// 迁移6：旧 scenes 表加 strength 列（涌现侧的强度计数）
 	tx.Exec(`ALTER TABLE scenes ADD COLUMN strength INTEGER DEFAULT 1`)
+
+	// ★★★ 迁移8：memory_block_edges 升格为「边是独立单位」
+	//
+	// 补五列（对应旧 relations 表的同名列）：
+	//
+	//	confidence   置信度 —— 「值覆盖」维度靠它判断哪条更可信
+	//	session_id   来源会话 —— Recall 的 sessionFilter 依赖它
+	//	turn_id      来源轮次
+	//	status       active/deleted/merged —— 软删除与仲裁依赖它
+	//	merged_into  源块被并进哪个块（历史边留在源块上）
+	//
+	// ★ 建表语句里的 UNIQUE(source_kind,source_id,target_kind,target_id,
+	//   edge_type) **必须去掉** —— 它让同一对节点间只能存一条同类型边，
+	//   而「边是独立单位」要求可并存多条（不同 session/confidence 是
+	//   不同的事实）。实测那正是「报告 980、实际 959」的根因。
+	//
+	//   SQLite 不能直接删 UNIQUE 约束 ⇒ 见下方 ensureRelationEdgeUniqueness。
+	//   结构边（contains 等）靠 AddMemoryBlockEdge 自己的
+	//   「先查后写」保持幂等，不依赖 DB 约束。
+	for _, m := range []struct{ table, col, decl string }{
+		{"memory_block_edges", "confidence", "REAL DEFAULT 0"},
+		{"memory_block_edges", "session_id", "TEXT DEFAULT ''"},
+		{"memory_block_edges", "turn_id", "INTEGER DEFAULT 0"},
+		{"memory_block_edges", "status", "TEXT DEFAULT ''"},
+		{"memory_block_edges", "merged_into", "TEXT DEFAULT ''"},
+	} {
+		if !columnExists(tx, m.table, m.col) {
+			tx.Exec(fmt.Sprintf("ALTER TABLE %s ADD COLUMN %s %s",
+				m.table, m.col, m.decl))
+		}
+	}
+	ensureRelationEdgeUniqueness(tx)
 	// 迁移7：旧 scenes 表加 origin。既有行都是声明/存量引导来的（建表时还没有
 	// 涌现机制），标成 declared；新建的涌现场景在 createSceneLocked 里写 emergent。
 	if !columnExists(tx, "scenes", "origin") {
