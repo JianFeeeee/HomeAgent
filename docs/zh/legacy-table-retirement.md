@@ -57,7 +57,7 @@ graph.go:362  从 sentence_ref 回填 sentences
 ```go
 graph.go:362  INSERT OR IGNORE INTO sentences ... FROM relations.sentence_ref
 graph.go:522  CommitWithMedia 挂接媒体块的落点
-block_recall.go:316  EnsureSentence（唯一残留写入点）
+（EnsureSentence 已删 —— 它是最后一个写入点，07b8c2a 之后归零）
 ```
 
 ## 三、为什么这三条链路必须一起换
@@ -136,3 +136,54 @@ checkpoint 的数据还在 `-wal` 文件里，`cp` 只拿到主库文件 ⇒ 不
 ⇒ 判据也该加一条：**快照来源必须可验证**。
   最省事的做法是取完快照立刻与源库比对关键计数，不一致就重取
   —— 差 1 就会暴露。
+
+
+## 七、2026-10-04 进展：写入侧已完成
+
+### ✅ Commit 块化（cdf0726）
+
+`Commit` 现在在旧表写入之外**并行块化**：
+
+    三元组  主语块 --关系--> 宾语块
+    原句    原句块 blk_src_<hash>
+
+四条写入路径（媒体桥 / memory_commit 工具 / 驻留子 / 记忆整理流水线）
+全部经过它 ⇒ **旧表不再因块化而缺内容**。
+
+### ✅ 边升格为独立单位（52e4596）
+
+    去 UNIQUE(source_kind,source_id,target_kind,target_id,edge_type)
+    + confidence / session_id / turn_id / status / merged_into
+
+★ 那个 UNIQUE 才是「报告 980、实际 959」的根因 —— 边表从设计上
+  存不下多条同类边。详见该提交说明。
+
+### ✅ scene_refs 完整迁移（07b8c23）
+
+    kind='entity'   450 条 → 'block'
+    kind='relation' 268 条 → 'edge'
+    生产快照实测：718 条迁移完成，悬空 0
+
+### ✅ EnsureSentence 已删
+
+`sentences` 表的**最后一个写入点**已移除并连同其专属测试一起删除。
+
+## 八、剩余的读方（尚未切）
+
+| 读方 | 调用处 | 状态 |
+|---|---|---|
+| `scene.go` | :231 取边、:270 按名找邻居、:522 悬空检查 | 引用已迁，**查询还没改** |
+| `social.go` | 3 处 Recall（要「按名取实体 + 关系遍历」） | 需要块侧的等价接口 |
+| `indexer.go` | 2 处（全量实体名 → 建向量索引） | 需要 `AllBlockNames` |
+| `distill.go` | 2 处（全量 → 记忆整理） | 同上 |
+| `light_memory.go` | 3 处（透传代理） | 随上面改动 |
+| `toolcall.go` | 旧路兜底（块路优先，已是生产主路） | 保留兜底 |
+
+### 需要的块侧能力（其中两项已就绪）
+
+    按名取实体        ❌ 缺（一条 SQL 的事）
+    按关系遍历        ✅ BFSBlocks（9df1efb）
+    取边 + 两端节点   ✅ AllRelationEdges / RelationEdgesBetween
+    全量块名          ❌ 缺（MemoryBlocks 已有，只需薄包装）
+
+⇒ 「旧表退场」的准确说法：**写入侧已全部块化，剩余是读方切换。**

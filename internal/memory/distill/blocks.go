@@ -207,7 +207,7 @@ func WritePayload(ctx context.Context, g *memory.GraphDB, payload *BlockPayload,
 
 	// ★ 原句写成块，不再依赖 sentences 表（方案 A 的最后依赖点）。
 	//
-	// 之前：EnsureSentence → sentence --contains--> block
+	// 之前：先写 sentences 行，再 sentence --contains--> block
 	// 现在：SentenceBlock → 原句块 --contains--> 字段块
 	//
 	// 两者对召回完全等价（召回只看字段块），差别在退场路径：

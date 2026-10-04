@@ -180,9 +180,6 @@ func scanRelationEdges(rows *sql.Rows) ([]MemoryBlockEdge, error) {
 	return out, rows.Err()
 }
 
-// trimID 去掉可能带的前缀/空白（块 ID 在不同路径里可能带形态前缀）。
-func trimID(s string) string { return strings.TrimSpace(s) }
-
 // ensureRelationEdgeUniqueness 处理**既有表**上的 UNIQUE 约束。
 //
 // ★ 为什么必须重建表

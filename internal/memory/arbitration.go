@@ -231,8 +231,20 @@ func sameSentenceOf(db *GraphDB, hits []BlockHit) map[string]string {
 		placeholders += "?"
 		args = append(args, id)
 	}
+	// ★★ source_kind 必须是 'block'，不是 'sentence'。
+	//
+	// 端点类型在 Commit 块化时从「sentences 表行号」改成「原句块」
+	// （52e4596 / cdf0726），但这处 SQL 还写着 'sentence'。
+	//
+	// ⇒ 查询恒空 ⇒ 同句分组全失败 ⇒ 仲裁把**跨句**的块当成互相取代：
+	//
+	//	同句并列 blk_a/blk_b + 旧句 blk_c
+	//	  → blk_c 被误剔除（「三者都该保留」失败）
+	//
+	// ★ 症状极隐蔽：仲裁测试当场抓到，但它绿了很久 ——
+	//   因为在旧形态下这处是对的，只有新形态才暴露。
 	rows, err := db.db.Query(`SELECT target_id, source_id FROM memory_block_edges
-		WHERE edge_type = 'contains' AND source_kind = 'sentence'
+		WHERE edge_type = 'contains' AND source_kind = 'block'
 		AND target_kind = 'block' AND target_id IN (`+placeholders+`)`, args...)
 	if err != nil {
 		return nil

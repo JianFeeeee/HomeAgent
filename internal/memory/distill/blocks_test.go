@@ -332,25 +332,6 @@ func TestDimensionValue(t *testing.T) {
 	}
 }
 
-// EnsureSentence 幂等。
-func TestEnsureSentence_幂等(t *testing.T) {
-	g := newBlockGraph(t)
-	id1, err := g.EnsureSentence("同一句")
-	if err != nil {
-		t.Fatal(err)
-	}
-	id2, err := g.EnsureSentence("同一句")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if id1 != id2 {
-		t.Fatalf("同句应得同 id，实际 %d vs %d", id1, id2)
-	}
-	if _, err := g.EnsureSentence("  "); err == nil {
-		t.Error("空句应报错")
-	}
-}
-
 func itoa64(i int64) string {
 	if i == 0 {
 		return "0"
@@ -458,8 +439,7 @@ func TestBlocks_主语透传到字段块(t *testing.T) {
 
 // ★★ 方案 A 判据：蒸馏落块**不得再写 sentences 表**。
 //
-// 这是退场的最后依赖点 —— blocks.go:192 原先调 EnsureSentence，
-// 而 EnsureSentence 是 sentences 表唯一的写入者之一。
+// 这是退场的最后依赖点 —— distill 曾是 sentences 表的写入者之一。
 func TestWritePayload_不写sentences表(t *testing.T) {
 	g := newBlockGraph(t)
 	defer g.Close()

@@ -252,15 +252,18 @@ func (g *GraphDB) MigrateSceneRefsToBlocks() (int, error) {
 	return moved, nil
 }
 
-// sceneRefDangling 报告指向虚无的引用数（迁移后校验用）。
-func sceneRefDangling(tx *sql.Tx) (blockDangling, edgeDangling int, err error) {
-	err = tx.QueryRow(`SELECT COUNT(*) FROM scene_refs sr
+// sceneRefDanglingDB 报告指向虚无的引用数（迁移后校验用）。
+//
+// kind='block' 看 ref_text 里的块 ID 还在不在；
+// kind='edge'  看 ref_id 指向的边还在不在。
+func sceneRefDanglingDB(db *sql.DB) (blockDangling, edgeDangling int, err error) {
+	err = db.QueryRow(`SELECT COUNT(*) FROM scene_refs sr
 		WHERE sr.kind='block' AND NOT EXISTS
 			(SELECT 1 FROM memory_blocks b WHERE b.id = sr.ref_text)`).Scan(&blockDangling)
 	if err != nil {
 		return 0, 0, err
 	}
-	err = tx.QueryRow(`SELECT COUNT(*) FROM scene_refs sr
+	err = db.QueryRow(`SELECT COUNT(*) FROM scene_refs sr
 		WHERE sr.kind='edge' AND NOT EXISTS
 			(SELECT 1 FROM memory_block_edges e WHERE CAST(e.id AS TEXT) = sr.ref_id)`).
 		Scan(&edgeDangling)
@@ -278,19 +281,4 @@ func isUniqueViolation(err error) bool {
 	msg := err.Error()
 	return strings.Contains(msg, "UNIQUE constraint failed") ||
 		strings.Contains(msg, "constraint failed: UNIQUE")
-}
-
-// sceneRefDanglingDB 是 sceneRefDangling 的 *sql.DB 版本（校验用）。
-func sceneRefDanglingDB(db *sql.DB) (blockDangling, edgeDangling int, err error) {
-	err = db.QueryRow(`SELECT COUNT(*) FROM scene_refs sr
-		WHERE sr.kind='block' AND NOT EXISTS
-			(SELECT 1 FROM memory_blocks b WHERE b.id = sr.ref_text)`).Scan(&blockDangling)
-	if err != nil {
-		return 0, 0, err
-	}
-	err = db.QueryRow(`SELECT COUNT(*) FROM scene_refs sr
-		WHERE sr.kind='edge' AND NOT EXISTS
-			(SELECT 1 FROM memory_block_edges e WHERE CAST(e.id AS TEXT) = sr.ref_id)`).
-		Scan(&edgeDangling)
-	return blockDangling, edgeDangling, err
 }

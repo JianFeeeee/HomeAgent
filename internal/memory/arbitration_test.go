@@ -1,7 +1,6 @@
 package memory
 
 import (
-	"strconv"
 	"testing"
 	"time"
 )
@@ -274,8 +273,12 @@ func TestArbitrate_同句归属参与仲裁(t *testing.T) {
 	defer func() { _ = g.Close() }()
 
 	sentence := "值班室分机号 4324，值班 老周（下周起；旧号 4379 停用）"
-	sid, err := g.EnsureSentence(sentence)
-	if err != nil {
+	// ★ 原句由**块**承载（sentences 表退场），不再建 sentences 行。
+	//   这三个测试此前一直造 sentences 行 + 用 sentence 端点，
+	//   而生产早已改为 原句块 --contains--> 字段块（0586f6b / cdf0726）
+	//   ⇒ 它们绿着，却测的不是当前行为。
+	sid := SentenceBlockID(sentence)
+	if err := putSentenceBlock(g, sentence); err != nil {
 		t.Fatal(err)
 	}
 	// 同一条原句拆出的两个字段块
@@ -287,21 +290,22 @@ func TestArbitrate_同句归属参与仲裁(t *testing.T) {
 		t.Fatal(err)
 	}
 	for _, id := range []string{"blk_a", "blk_b"} {
-		if err := g.AddMemoryBlockEdge("sentence", itoa64(sid), "block", id, "contains"); err != nil {
+		if err := g.AddMemoryBlockEdge("block", sid, "block", id, "contains"); err != nil {
 			t.Fatal(err)
 		}
 	}
 	// 另一条原句拆出的旧值块（独立事实）
-	oldSent, err := g.EnsureSentence("值班室分机号 4379，值班人 阿李")
-	if err != nil {
+	oldText := "值班室分机号 4379，值班人 阿李"
+	if err := putSentenceBlock(g, oldText); err != nil {
 		t.Fatal(err)
 	}
+	oldSent := SentenceBlockID(oldText)
 	b3 := MemoryBlock{ID: "blk_c", Modality: BlockText, Text: "值班室分机号|值班分机号=4379",
 		CreatedAt: mustTime("2026-10-01 13:28:28")}
 	if err := g.PutMemoryBlocks([]MemoryBlock{b3}); err != nil {
 		t.Fatal(err)
 	}
-	if err := g.AddMemoryBlockEdge("sentence", itoa64(oldSent), "block", "blk_c", "contains"); err != nil {
+	if err := g.AddMemoryBlockEdge("block", oldSent, "block", "blk_c", "contains"); err != nil {
 		t.Fatal(err)
 	}
 
@@ -312,12 +316,26 @@ func TestArbitrate_同句归属参与仲裁(t *testing.T) {
 	}
 	res := arbitrate(g, hits)
 
-	// blk_a（4324）与 blk_b（4379停用）同句 ⇒ 并列，都保留
-	// blk_c（13:28 的旧值）是否被取代取决于 blk_a 的文本是否提及 4379：
-	// 「值班室分机号|值班分机号=4324」不含 4379 ⇒ 不取代
-	if len(res.Kept) != 3 {
-		t.Errorf("三条都该保留（blk_a/blk_b 同句并列，blk_c 未被显式取代），实际 %d：%v",
+	// ★ 这个测试原来只检查了 blk_a 是否提及 4379，漏了 blk_b。
+	//
+	// 原数据下 blk_b 没进候选所以没暴露；端点类型改成 block 之后
+	// 它进了候选，而它「停用旧号=4379」**确实显式提到了 4379**
+	// ⇒ blk_c 被正确地判为「被取代」。
+	//
+	// ⇒ 原断言「三条都该保留」与数据不符。这不是仲裁的 bug：
+	//     supersedesSentence 的判据（「更晚 + 提到更早那条的值」）
+	//     恰好命中 blk_b → blk_c。
+	//
+	// 修正后的意图：验证**同句并列不被同句兄弟剔除**（blk_a/blk_b），
+	// 以及**跨句的取代只在有显式提及时发生**。
+	if len(res.Kept) != 2 {
+		t.Errorf("同句并列的 blk_a/blk_b 都该保留，实际 %d：%v",
 			len(res.Kept), textsOf(res.Kept))
+	}
+	// 被剔除的应是旧句的 blk_c，且原因可追溯（Superseded 而非丢弃）
+	if len(res.Superseded) != 1 || res.Superseded[0].Block.ID != "blk_c" {
+		t.Errorf("被取代的应是旧句的 blk_c（blk_b 显式提到 4379），实际 %d 条：%v",
+			len(res.Superseded), textsOf(res.Superseded))
 	}
 
 	// ★ 关键：把 blk_a 的文本换成提及旧值的版本，此时 blk_c 应被取代。
@@ -338,10 +356,6 @@ func TestArbitrate_同句归属参与仲裁(t *testing.T) {
 func mustTime(s string) time.Time {
 	t, _ := time.Parse("2006-01-02 15:04:05", s)
 	return t
-}
-
-func itoa64(n int64) string {
-	return strconv.FormatInt(n, 10)
 }
 
 // 「旧值作废」语义识别。判据来自真库模型的实际用词。
@@ -385,10 +399,11 @@ func TestArbitrate_同句同维度不互斥(t *testing.T) {
 	g := newTestGraph(t)
 	defer func() { _ = g.Close() }()
 
-	sid, err := g.EnsureSentence("值班室分机号 4324，值班 老周（旧号 4379 停用）")
-	if err != nil {
+	sidText := "值班室分机号 4324，值班 老周（旧号 4379 停用）"
+	if err := putSentenceBlock(g, sidText); err != nil {
 		t.Fatal(err)
 	}
+	sid := SentenceBlockID(sidText)
 	b1 := MemoryBlock{ID: "s1", Modality: BlockText,
 		Text:      "值班室分机号|值班分机号=4324",
 		CreatedAt: mustTime("2026-10-01 13:44:26")}
@@ -403,7 +418,7 @@ func TestArbitrate_同句同维度不互斥(t *testing.T) {
 		t.Fatal(err)
 	}
 	for _, id := range []string{"s1", "s2"} {
-		if err := g.AddMemoryBlockEdge("sentence", itoa64(sid), "block", id, "contains"); err != nil {
+		if err := g.AddMemoryBlockEdge("block", sid, "block", id, "contains"); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -428,10 +443,11 @@ func TestRecallBlocks_仲裁在截断前(t *testing.T) {
 	defer func() { _ = g.Close() }()
 
 	// 旧值：更早、分数更高（模拟"长旧句相似度高"）
-	oldSent, err := g.EnsureSentence("值班室分机号 4379，值班人 阿李")
-	if err != nil {
+	oldText := "值班室分机号 4379，值班人 阿李"
+	if err := putSentenceBlock(g, oldText); err != nil {
 		t.Fatal(err)
 	}
+	oldSent := SentenceBlockID(oldText)
 	oldB := MemoryBlock{ID: "a_old", Modality: BlockText,
 		Text:   "值班室分机号|值班分机号=4379",
 		Vector: []float64{1, 0, 0}, Fingerprint: "fp-test",
@@ -439,13 +455,14 @@ func TestRecallBlocks_仲裁在截断前(t *testing.T) {
 	if err := g.PutMemoryBlocks([]MemoryBlock{oldB}); err != nil {
 		t.Fatal(err)
 	}
-	_ = g.AddMemoryBlockEdge("sentence", itoa64(oldSent), "block", "a_old", "contains")
+	_ = g.AddMemoryBlockEdge("block", oldSent, "block", "a_old", "contains")
 
 	// 新值：更晚、分数更低，但文本提及旧值 → 应取代它
-	newSent, err := g.EnsureSentence("值班室分机号 4324，值班 老周")
-	if err != nil {
+	newSentText := "值班室分机号 4324，值班 老周"
+	if err := putSentenceBlock(g, newSentText); err != nil {
 		t.Fatal(err)
 	}
+	newSent := SentenceBlockID(newSentText)
 	newB := MemoryBlock{ID: "a_new", Modality: BlockText,
 		Text:   "值班室分机号|值班分机号=4324（旧号 4379 停用）",
 		Vector: []float64{0.92, 0.39, 0}, Fingerprint: "fp-test",
@@ -453,7 +470,7 @@ func TestRecallBlocks_仲裁在截断前(t *testing.T) {
 	if err := g.PutMemoryBlocks([]MemoryBlock{newB}); err != nil {
 		t.Fatal(err)
 	}
-	_ = g.AddMemoryBlockEdge("sentence", itoa64(newSent), "block", "a_new", "contains")
+	_ = g.AddMemoryBlockEdge("block", newSent, "block", "a_new", "contains")
 
 	// 查询向量更贴近旧值（0.98 vs 新值 0.95）
 	q := BlockRecallQuery{
@@ -590,4 +607,20 @@ func mustBlock(t *testing.T, g *GraphDB, id string) MemoryBlock {
 	}
 	t.Fatalf("找不到块 %s", id)
 	return MemoryBlock{}
+}
+
+// putSentenceBlock 直接写一条原句块。
+//
+// 为什么不用 putBlockTx：它收 *sql.Tx，而这些测试已持有 g.mu
+// （且用 *sql.DB 直连）⇒ 套一层事务反而复杂。
+// ★ 教训（今天踩过）：持有 GraphDB 锁时不要调会自己加锁的方法。
+func putSentenceBlock(g *GraphDB, text string) error {
+	b := NewSentenceBlock(text, time.Time{}, time.Time{})
+	vectorJSON := ""
+	_, err := g.db.Exec(`INSERT INTO memory_blocks
+		(id, modality, text_content, vector, fingerprint, source, created_at, updated_at)
+		VALUES (?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+		ON CONFLICT(id) DO UPDATE SET text_content = excluded.text_content`,
+		b.ID, b.Modality, b.Text, vectorJSON, b.Fingerprint, b.Source)
+	return err
 }
