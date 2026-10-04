@@ -3178,6 +3178,11 @@ function destroyTray() {
 
 app.whenReady().then(async () => {
   installAuthRule();
+  // 清理历史遗留的重复开机自启项（产物改名会累积指向同一 exe 的旧项）。
+  // 不依赖用户去设置里手动开关：否则旧项会一直留着、开机启动两次。
+  try {
+    cleanupStaleLoginItems();
+  } catch (e) {}
   const running = await isServerRunning();
   if (running) {
     // 已探测到可用端点：服务端在别处正常运行（远程/WSL/另一台机器）。
@@ -3406,9 +3411,74 @@ function saveGuiPrefs(p) {
   return p;
 }
 
+// Electron LoginItem 写入的注册表项名是「electron.app.<exe 名>」。
+// 产物改名过（HomeAgent.exe → homeagent-gui.exe）就会多出一条旧项，
+// 且 setLoginItemSettings 不会清理它们 ⇒ 开机启动两次同一个 exe。
+// 实测本机 Run 键里确实同时存在：
+//   electron.app.HomeAgent     = "E:\program\homeagent\...\homeagent-gui.exe"
+//   electron.app.homeagent-gui =  E:\program\homeagent\...\homeagent-gui.exe
+// 两条指向同一 exe，所以表面看是两个自启动，实际是同一份的重复。
+//
+// 修法：每次写入前，删掉所有指向当前 exe 的 electron.app.* 旧项，
+// 只保留当前名字对应的那一条。
+function cleanupStaleLoginItems() {
+  if (process.platform !== "win32") return 0;
+  let removed = 0;
+  try {
+    const { execFileSync } = require("child_process");
+    const runKey = "HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Run";
+    const execPath = String(process.execPath || "").toLowerCase();
+    // 列出 Run 键下的所有值名
+    const out = execFileSync(
+      "reg",
+      ["query", runKey],
+      { encoding: "utf8", timeout: 5000, windowsHide: true },
+    );
+    const names = [];
+    for (const line of String(out).split(/\r?\n/)) {
+      const m = line.match(/^\s{4}([A-Za-z0-9_.\-\\]+)\s+REG_/);
+      if (m) names.push(m[1]);
+    }
+    for (const name of names) {
+      if (!/^electron\.app\./i.test(name)) continue;
+      // 只删指向**当前 exe** 的；别的 Electron 应用不能误伤
+      let val = "";
+      try {
+        const q = execFileSync("reg", ["query", runKey, "/v", name], {
+          encoding: "utf8",
+          timeout: 5000,
+          windowsHide: true,
+        });
+        val = String(q);
+      } catch (e) {
+        continue;
+      }
+      const sameExe = val.toLowerCase().includes(execPath);
+      if (!sameExe) continue;
+      // 保留当前 exe 名对应的那一条（Electron 期望的名字）
+      const currentName = "electron.app." + path.basename(process.execPath, ".exe");
+      if (name === currentName) continue;
+      try {
+        execFileSync("reg", ["delete", runKey, "/v", name, "/f"], {
+          timeout: 5000,
+          windowsHide: true,
+        });
+        removed++;
+        console.log("[autolaunch] removed stale login item: " + name);
+      } catch (e) {
+        console.error("[autolaunch] failed to remove " + name + ": " + e.message);
+      }
+    }
+  } catch (e) {
+    console.error("cleanupStaleLoginItems failed: " + e.message);
+  }
+  return removed;
+}
+
 // 应用开机自启设置（Electron LoginItem）
 function applyAutoLaunch(enabled) {
   try {
+    if (enabled) cleanupStaleLoginItems();
     app.setLoginItemSettings({
       openAtLogin: enabled,
       openAsHidden: true, // 开机自启时静默（Windows/macOS 支持）
