@@ -548,3 +548,47 @@ func (g *GraphDB) CountLegacyEntitiesByType(entityType string) (int, error) {
 	}
 	return n, nil
 }
+
+// LegacyRowCount 执行一条**只读**的 COUNT 查询并返回行数。
+//
+// ★ 为什么需要它（2026-10-04）
+//
+//	Introspect 的 entity_count / relation_count 在读侧切块之后
+//	数的是**块侧**。而迁移报告要的是「旧表还剩多少没迁走」——
+//	用 Introspect 的数会得到「关系 0」这种**假的结论**，
+//	进而让运维以为「早就迁完了」而跳过迁移。
+//
+// ★ 风险控制：query 必须是完整的 SELECT COUNT(*) 语句。
+//
+//	这不是「内部函数所以可以放心拼接」—— 迁移命令会接收用户给的
+//	-db 路径，而这类拼接口子在出错时很难定位。
+//	所以：只允许 COUNT、只允许单表、表名白名单在调用方校验。
+//	违反任一条直接拒绝，而不是执行。
+func (g *GraphDB) LegacyRowCount(query string) (int, error) {
+	q := strings.TrimSpace(query)
+	upper := strings.ToUpper(q)
+	if !strings.HasPrefix(upper, "SELECT COUNT(*) FROM ") {
+		return 0, fmt.Errorf("LegacyRowCount: 只允许 SELECT COUNT(*) FROM <table>")
+	}
+	rest := q[len("SELECT COUNT(*) FROM "):]
+	up := strings.ToUpper(rest)
+	// ★ 关键字一律按「子串」判定，不要按「前缀/后缀长度」判定。
+	//
+	//   我第一版写的是 `rest[len(rest)-12:] == " GROUP BY "`，
+	//   而 " GROUP BY " 只有 **10** 个字符 —— 长度判断让它永远不成立，
+	//   于是 `GROUP BY type` 直接穿过守卫。
+	//   ★ 这类「用长度近似关键字」的写法在判据里看着能过，
+	//     因为测试数据恰好没踩到 —— 直到判据专门去试它。
+	for _, banned := range []string{" JOIN ", " GROUP BY ", " UNION ", ";"} {
+		if strings.Contains(up, banned) || strings.HasPrefix(up, strings.TrimSpace(banned)) {
+			return 0, fmt.Errorf("LegacyRowCount: 不允许 %q", strings.TrimSpace(banned))
+		}
+	}
+	g.mu.RLock()
+	defer g.mu.RUnlock()
+	var n int
+	if err := g.db.QueryRow(q).Scan(&n); err != nil {
+		return 0, err
+	}
+	return n, nil
+}

@@ -219,21 +219,42 @@ func (s legacyStat) String() string {
 // 不新增统计 API：句数与块边数用只读查询补齐。
 func legacyStats(db *memory.GraphDB) (legacyStat, error) {
 	var s legacyStat
-	intro, err := db.Introspect()
-	if err != nil {
-		return s, err
-	}
-	if v, ok := intro["entity_count"].(int); ok {
-		s.Entities = v
-	}
-	if v, ok := intro["relation_count"].(int); ok {
-		s.Relations = v
-	}
-	// 迁移报告用全表数（与 MigrateLegacyTextEntities 的遍历范围一致）
-	if v, ok := intro["relations_total"].(int); ok {
-		s.RelationsTotal = v
-	} else {
-		s.RelationsTotal = s.Relations
+	// ★★ 全部直查旧表，不用 Introspect（2026-10-04）
+	//
+	// Introspect 的 entity_count / relation_count 在读侧切块之后
+	// 数的是**块侧**（块数、活跃块边数）。而本命令的全部意义是
+	// 「旧表还有多少没迁走」⇒ 口径必须是旧表。
+	//
+	// ★ 实测踩到的后果（生产快照）：
+	//
+	//     迁移前：实体 1294，关系 0，块 98，块边 97
+	//
+	//   「关系 0」是假的 —— 旧 relations 表里明明有 980 行
+	//   （active 966 / deleted 14）。而报告照抄这个数，
+	//   于是「预计产出：块 1294，块边 0」。
+	//
+	//   ★★ 那句话会让运维以为「旧关系早迁完了」，从而跳过迁移 ——
+	//      而实际上 980 条关系一条都没迁。这是**诊断误导**，
+	//      比报错危险：报错了会有人查，误导了没人会。
+	// ★ 错误一律**返回**，不吞。
+	//
+	// 迁移报告的价值全在数字准确上；一个被静默吞掉的查询错误
+	// 会变成「库里没有关系」，而迁移会照跑，把该迁的漏掉。
+	for _, spec := range []struct {
+		table string
+		where []string
+		dst   *int
+	}{
+		{"entities", nil, &s.Entities},
+		{"relations", []string{"status = 'active'"}, &s.Relations},
+		// 迁移报告用全表数（与 MigrateLegacyTextEntities 的遍历范围一致）
+		{"relations", nil, &s.RelationsTotal},
+	} {
+		v, err := legacyCount(db, spec.table, spec.where...)
+		if err != nil {
+			return s, err
+		}
+		*spec.dst = v
 	}
 	edges, err := db.MemoryBlockEdges()
 	if err != nil {
@@ -258,4 +279,44 @@ func copyFile(src, dst string) error {
 		return err
 	}
 	return os.WriteFile(dst, data, 0644)
+}
+
+// legacyCount 直查旧表的行数。
+//
+// ★ 为什么不用 Introspect：它数的是块侧（读侧切块后），
+//
+//	而迁移报告要的是「旧表还剩多少」。
+//
+// where 为空表示不加过滤。
+func legacyCount(db *memory.GraphDB, table string, where ...string) (int, error) {
+	// 表名是内部常量调用方给的，不是外部输入；
+	// 仍用白名单校验 —— 迁移命令会拿用户给的 -db 路径，
+	// 而 SQL 拼接不该留任何口子。
+	switch table {
+	case "entities", "relations", "sentences":
+	default:
+		return 0, fmt.Errorf("legacyCount: 不支持的表 %q", table)
+	}
+	q := "SELECT COUNT(*) FROM " + table
+	for i, w := range where {
+		// ★ 第一个条件要 WHERE，后续才 AND。
+		//
+		// 我写成统一的 `q += " AND " + w`，于是第一条条件产生
+		// `FROM relations AND status='active'` —— SQL 语法错误。
+		//
+		// ★★ 而错误被调用方的 `if err == nil` 吞掉，
+		//   于是报告打出「关系 0」：一个**语法错误**伪装成
+		//   「库里没有关系」。
+		//   诊断报告里的假 0 比报错危险 —— 报错会有人查，0 不会。
+		if i == 0 {
+			q += " WHERE " + w
+		} else {
+			q += " AND " + w
+		}
+	}
+	n, err := db.LegacyRowCount(q)
+	if err != nil {
+		return 0, fmt.Errorf("legacyCount(%s): %w", table, err)
+	}
+	return n, nil
 }

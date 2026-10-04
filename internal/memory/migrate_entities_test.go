@@ -1,6 +1,7 @@
 package memory
 
 import (
+	"fmt"
 	"strings"
 	"testing"
 	"time"
@@ -650,4 +651,50 @@ func isLegacyEntityBlockID(id string) bool {
 	}
 	rest := strings.TrimPrefix(id, "blk_ent_")
 	return strings.Contains(rest, "_")
+}
+
+// ★ LegacyRowCount 的三条约束（2026-10-04）
+//
+// 它接收完整 SQL 串，所以必须证明「不该接受的被拒绝」。
+// 判据直接来自它的三条 guard：前缀 / JOIN+GROUP BY / 分号。
+func TestLegacyRowCount_只允许单表COUNT(t *testing.T) {
+	g := newTestGraph(t)
+	defer func() { _ = g.Close() }()
+	if _, _, err := g.Commit([]Triple{
+		{Subject: "甲一", Relation: "是", Object: "乙一", Confidence: 1.0},
+	}, "s", 0); err != nil {
+		t.Fatal(err)
+	}
+
+	n, err := g.LegacyRowCount("SELECT COUNT(*) FROM entities")
+	if err != nil {
+		t.Fatalf("合法查询应通过: %v", err)
+	}
+	fmt.Printf("  entities 计数 %d\n", n)
+	if n == 0 {
+		t.Error("★ Commit 写了旧表，计数不该为 0")
+	}
+
+	// ★ 非 COUNT 前缀必须拒绝
+	for _, bad := range []string{
+		"DELETE FROM entities",
+		"DROP TABLE entities",
+		"SELECT * FROM entities",
+		"UPDATE entities SET name = 'x'",
+		"INSERT INTO entities (name) VALUES ('x')",
+	} {
+		if _, err := g.LegacyRowCount(bad); err == nil {
+			t.Errorf("★ 危险查询 %q 被接受了", bad)
+		}
+	}
+	// ★ JOIN / GROUP BY / 分号必须拒绝
+	for _, bad := range []string{
+		"SELECT COUNT(*) FROM entities JOIN relations ON 1=1",
+		"SELECT COUNT(*) FROM entities GROUP BY type",
+		"SELECT COUNT(*) FROM entities; DROP TABLE entities",
+	} {
+		if _, err := g.LegacyRowCount(bad); err == nil {
+			t.Errorf("★ 越界查询 %q 被接受了", bad)
+		}
+	}
 }
