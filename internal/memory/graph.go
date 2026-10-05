@@ -1815,8 +1815,29 @@ func (g *GraphDB) DeleteEntity(name string) (DeleteResult, error) {
 	//   不是本函数的主职责 —— 旧表已冻结、不再增长，
 	//   留着它只是不让「块已删、旧表还在」这种对不上的状态继续存在。
 	//   查不到就跳过：旧表**不是权威源**，它的缺行不代表删除失败。
-	if _, err := tx.Exec(`DELETE FROM relations WHERE id IN (
-		SELECT id FROM entities WHERE name = ?)`, name); err != nil {
+	//
+	// ★★★ 2026-10-05 复核修正（生产库副本实测暴露）
+	//
+	//   原写法：
+	//
+	//	DELETE FROM relations WHERE id IN (SELECT id FROM entities WHERE name = ?)
+	//	DELETE FROM entities  WHERE name = ?
+	//
+	//   第一句是**跨表误用 id**：子查询返回的是 **entities.id**，
+	//   而外层匹配的是 **relations.id**。两者同名不同表。
+	//   生产实测：实体 201 被 relation 101 引用（201≠101），
+	//   于是 relation 101 根本没被删，紧接着
+	//   DELETE FROM entities 因 relations 的外键（source_id/target_id → entities.id）
+	//   而报 `FOREIGN KEY constraint failed` —— **整个删除事务回滚**。
+	//
+	//   ⇒ DeleteEntity 在任何「旧表里存在、且被关系引用」的实体上直接失败。
+	//     判据抓不到：delete_entity_blocks_test.go 只用 Commit/putBlocks 建**块**，
+	//     旧表是空的 ⇒ 那条路径不可达（这是「测不到」而非「没问题」）。
+	//
+	//   正确写法：按**外键列**删，而不是拿 id 去撞另一个表的 id。
+	if _, err := tx.Exec(
+		`DELETE FROM relations WHERE source_id IN (SELECT id FROM entities WHERE name = ?)
+		    OR target_id IN (SELECT id FROM entities WHERE name = ?)`, name, name); err != nil {
 		return DeleteResult{}, err
 	}
 	if _, err := tx.Exec(`DELETE FROM entities WHERE name = ?`, name); err != nil {

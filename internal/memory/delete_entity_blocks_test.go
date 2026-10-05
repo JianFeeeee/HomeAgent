@@ -185,3 +185,86 @@ func countBlocksByText(t *testing.T, g *GraphDB, text string) int {
 	}
 	return n
 }
+
+// TestDeleteEntity_LegacyTableHasReferencingRelation 钉住**旧表被引用时也能删**。
+//
+// ★ 这条判据是 2026-10-05 复核时补的，来源是一次真实的生产库副本实测：
+//
+//	DeleteEntity("CodeGraph安装任务") → FOREIGN KEY constraint failed
+//
+// 根因是旧表清理写成了「跨表误用 id」：
+//
+//	DELETE FROM relations WHERE id IN (SELECT id FROM entities WHERE name = ?)
+//
+// 子查询给的是 **entities.id**，外层匹配的是 **relations.id** —— 同名不同表。
+// 于是被引用的 relation 根本没删，紧接着 DELETE FROM entities 撞上
+// relations 的外键（source_id/target_id → entities.id）⇒ **整个事务回滚**。
+//
+// ★★ 为什么原有的 3 条判据全绿（两次教训叠在一起）：
+//
+//	① 它们只用 Commit/putBlocks 建**块**体系，旧表恒空 ⇒ 路径不可达。
+//	② 我第一版补的判据也只用了 SeedLegacyEntity/SeedLegacyRelation，
+//	   而那条 helper 返回的第二个值是 **target_id**、不是 relations.id；
+//	   在一个新库上两个 AUTOINCREMENT 序列**恰好对齐**（都是 1、都是 2…），
+//	   于是「拿 entity id 当 relation id」碰巧命中正确的那一行 ⇒ 变异测不出来。
+//
+//	⇒ 必须**显式把两个 id 序列错开**，让 entity.id ≠ relations.id，
+//	   这才是生产的真实形态（生产 entities 1294 行 / relations 980 行）。
+//	   「测不到」不等于「没问题」——这是本仓反复记的那条纪律。
+func TestDeleteEntity_LegacyTableHasReferencingRelation(t *testing.T) {
+	g := newTestGraph(t)
+	defer g.Close()
+
+	// 块侧：一个同名块（DeleteEntity 以块为权威源）。
+	putBlocks(t, g, MemoryBlock{ID: "b_del", Text: "待删实体"})
+
+	// ★ 旧表侧：先灌一批无关关系，把 relations 的 AUTOINCREMENT 推远，
+	//   再造目标实体与引用它的关系 —— 保证 entity.id ≠ relations.id。
+	for i := 0; i < 20; i++ {
+		s := "pre" + string(rune('a'+i%26)) + string(rune('a'+i/26))
+		if _, err := g.SeedLegacyEntity(s+"-A", "Concept"); err != nil {
+			t.Fatalf("SeedLegacyEntity(%s): %v", s, err)
+		}
+		if _, err := g.SeedLegacyEntity(s+"-B", "Concept"); err != nil {
+			t.Fatalf("SeedLegacyEntity(%s): %v", s, err)
+		}
+		if _, _, err := g.SeedLegacyRelation(s+"-A", s+"-B", "无关", 1.0, "", 0); err != nil {
+			t.Fatalf("SeedLegacyRelation(%s): %v", s, err)
+		}
+	}
+	eid, err := g.SeedLegacyEntity("待删实体", "Concept")
+	if err != nil {
+		t.Fatalf("SeedLegacyEntity: %v", err)
+	}
+	if _, _, err := g.SeedLegacyRelation("待删实体", "prea-A", "关联", 1.0, "", 0); err != nil {
+		t.Fatalf("SeedLegacyRelation: %v", err)
+	}
+
+	// ★ 前提自检：两个 id 必须**不相等**，否则本判据是假绿。
+	var relID int64
+	if err := g.db.QueryRow(
+		`SELECT id FROM relations WHERE source_id = ?`, eid).Scan(&relID); err != nil {
+		t.Fatal(err)
+	}
+	if relID == eid {
+		t.Fatalf("前提不成立：entity id 与 relation id 相同（%d）——"+
+			"「跨表误用 id」的变异会侥幸通过，本判据失去意义", eid)
+	}
+
+	// ★ 原实现在这里报 FOREIGN KEY constraint failed。
+	if _, err := g.DeleteEntity("待删实体"); err != nil {
+		t.Fatalf("旧表有引用关系时也必须能删（旧表清理跨表误用了 id）：%v", err)
+	}
+
+	// 旧表同步清干净。
+	var ents, rels int
+	g.db.QueryRow(`SELECT count(*) FROM entities WHERE name = ?`, "待删实体").Scan(&ents)
+	g.db.QueryRow(`SELECT count(*) FROM relations
+	  WHERE source_id = ? OR target_id = ?`, eid, eid).Scan(&rels)
+	if ents != 0 {
+		t.Errorf("旧表 entities 残留 %d 行", ents)
+	}
+	if rels != 0 {
+		t.Errorf("旧表 relations 残留 %d 行（会持续阻塞后续删除）", rels)
+	}
+}
