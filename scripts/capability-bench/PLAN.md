@@ -1,4 +1,10 @@
-# 跑分计划（benchmark.md）
+# 跑分计划
+
+> 本文原为根目录 `benchmark.md`，随仓库清理归位到此处
+> （与同目录 `README.md`「能力标定台」是两份不同文档，勿混）。
+>
+> **本机路径已脱敏**：脚本里出现的 `/home/<user>`、`/var/tmp/...` 均为占位示例，
+> 实际跑请按本机环境替换，或改用 `spawn-instance.sh` 的参数。
 
 > 交接文档：供新会话执行。旧会话的测试**已全部停止**，本文件是从头开始的唯一依据。
 > 新会话开始时：**先验证本文件每一条「前置事实」再执行**，不要凭记忆或信任旧会话输出。
@@ -10,11 +16,11 @@
 | 1 | 跑分工具已就位 | `ls scripts/capability-bench/` | bench.py pi_bench.py compare.py memory_recall.py tasks.example.json tasks.zerobasis.json spawn-instance.sh README.md |
 | 2 | 代码提交已完成 | `git log --oneline -8` | 见 §5 提交清单 |
 | 3 | 工作区干净 | `git status --short` | 空 |
-| 4 | 生产实例未受影响 | `ps -p $(pgrep -f 'homed -data /home/newqqagent' \| head -1) -o pid,etime` | 存活 |
+| 4 | 生产实例未受影响 | `ps -p $(pgrep -f 'homed -data ${HA_DATA}' \| head -1) -o pid,etime` | 存活 |
 | 5 | 测试进程已清 | `pgrep -f 'memory_recall\|pi_bench\|bench.py'` | 空 |
-| 6 | llmsproxy 可用 | `curl -s -o /dev/null -w '%{http_code}' -H "Authorization: Bearer $(sqlite3 /home/newqqagent/config.db \"SELECT value FROM config WHERE key='core.llm.api_key'\")" http://127.0.0.1:8081/v1/models` | 200 |
+| 6 | llmsproxy 可用 | `curl -s -o /dev/null -w '%{http_code}' -H "Authorization: Bearer $(sqlite3 ${HA_DATA}/config.db \"SELECT value FROM config WHERE key='core.llm.api_key'\")" http://127.0.0.1:8081/v1/models` | 200 |
 | 7 | pi 可用且版本 | `pi --version`（如 EADDRINUSE 用 `env -u PI_A2A_PORT -u PI_ACP_PORT`） | 0.85.1 |
-| 8 | pi 的 llmsproxy provider | `python3 -c "import json;d=json.load(open('/root/.pi/agent/models.json'));print(d['providers']['llmsproxy']['baseUrl'])"` | <http://127.0.0.1:8081/v1> |
+| 8 | pi 的 llmsproxy provider | `python3 -c "import json;d=json.load(open('${PI_MODELS}'));print(d['providers']['llmsproxy']['baseUrl'])"` | <http://127.0.0.1:8081/v1> |
 
 ## 1. 已知的关键教训（不重犯）
 
@@ -25,7 +31,7 @@
 2. **缓存命中率恒 100% 的假绿已修**（`59c0689`）：上游只报命中侧时 `miss = prompt - read`。修复前 100.0% → 修复后 87.6%。
 3. **cli.sock 按行读**：消息含换行 = 拆成多条独立消息（历史全乱，表现为 BrokenPipe）。memory_recall.py 已有 `assert "\n" not in text`。
 4. **内核会 dedupe 完全相同的输入**（`skipped:true`）：多轮/重跑必须让每条文本不同。
-5. **pi 必须隔离配置目录 + 端口**：`PI_CODING_AGENT_DIR=/var/tmp/pi-iso/agent` + `PI_A2A_PORT`/`PI_ACP_PORT` 给空闲端口。隔离后无扩展 ⇒ `pi -p` 跑完自己退出。
+5. **pi 必须隔离配置目录 + 端口**：`PI_CODING_AGENT_DIR=${PI_ISO}` + `PI_A2A_PORT`/`PI_ACP_PORT` 给空闲端口。隔离后无扩展 ⇒ `pi -p` 跑完自己退出。
 6. **pi 的工具事件**：事件名 `tool_execution_start`、字段 `toolName`（写错只是静默为空）。
 7. **★ 超窗校验是判据的前提，不是可选项**：旧 200k 跑分因实例窗口（HomeAgent 1M / pi 600k）大于灌入量 253k，实际测的是「窗口内召回」—— 跑 19 分钟、数字漂亮、完全无效。memory_recall.py 已加 `--expect-window` 校验（对无效配置直接拒跑）；新会话用它，并先实测两侧真实窗口。
 8. **改 LLM 配置必须重启实例**：provider 启动时构建，`/settings set` 落库但不生效。
@@ -38,7 +44,7 @@
 **目的**：同模型、同一份材料，只变 harness，测认知而非"翻自己的库"。
 （旧版硬伤：knowledge-stats 让 pi 读 HomeAgent 自己的 graph.db ⇒ pi 97s/317k token 全是权限差异，不是能力差异。）
 
-材料：`/var/tmp/zerobasis/{incident-2026-08.md, config-notes.md}`（若不存在，按 git 历史里的任务集重建；材料必须含：512 连接池上限、4200 峰值、v2.30.4、87 订单、"600" **不在**材料里须自己算 200+400、ttl=0=永不过期、N+1、对账批处理）。
+材料：`${BENCH_MATERIAL}/{incident-2026-08.md, config-notes.md}`（若不存在，按 git 历史里的任务集重建；材料必须含：512 连接池上限、4200 峰值、v2.30.4、87 订单、"600" **不在**材料里须自己算 200+400、ttl=0=永不过期、N+1、对账批处理）。
 
 任务集：`scripts/capability-bench/tasks.zerobasis.json`（6 任务：检索/算术/推断/抗干扰/综合/多跳，全部带显式 check）。
 
@@ -46,18 +52,18 @@
 
 ```bash
 # ① 起隔离实例（窗口两侧都配 200000）
-BIN=/home/program/TrueAgent/build/homed \
+BIN=${REPO}/build/homed \
   bash scripts/capability-bench/spawn-instance.sh a 18082 200000
 # ② HomeAgent 侧
-python3 scripts/capability-bench/bench.py --socket /var/tmp/ha-a/cli.sock \
-  --api-key "$(cat /var/tmp/ha-a/apikey)" \
-  --tasks scripts/capability-bench/tasks.zerobasis.json --out /var/tmp/cmp2/ha --timeout 300
+python3 scripts/capability-bench/bench.py --socket ${INSTANCE_A}/cli.sock \
+  --api-key "$(cat "${INSTANCE_A}/apikey")"   # 由 spawn-instance.sh 写入 \
+  --tasks scripts/capability-bench/tasks.zerobasis.json --out ${OUT_DIR}/ha --timeout 300
 # ③ pi 侧（同一任务文件 ⇒ 提示词逐字相同）
 python3 scripts/capability-bench/pi_bench.py \
-  --tasks scripts/capability-bench/tasks.zerobasis.json --out /var/tmp/cmp2/pi --timeout 300
+  --tasks scripts/capability-bench/tasks.zerobasis.json --out ${OUT_DIR}/pi --timeout 300
 # ④ 对比
-python3 scripts/capability-bench/compare.py --a /var/tmp/cmp2/ha --b /var/tmp/cmp2/pi \
-  --label-a HomeAgent --label-b pi --out /var/tmp/cmp2
+python3 scripts/capability-bench/compare.py --a ${OUT_DIR}/ha --b ${OUT_DIR}/pi \
+  --label-a HomeAgent --label-b pi --out ${OUT_DIR}
 ```
 
 验收：两侧任务集一致（compare.py 会检查）；逐任务看通过与 token；失败原因必须留在 compare.md。
@@ -97,18 +103,18 @@ verify 分支 ⇒ **永不触发**（表现为「覆盖新值找不到」，不�
 **★ 先把两侧窗口真实配成一致（这是上次翻车点）**：
 
 - HomeAgent：`core.llm.sources.deepseek.context_window = 200000`（spawn-instance.sh 第 3 参传 200000），起后 `sqlite3 ... "SELECT value FROM config WHERE key LIKE '%context_window%'"` 验证 = 200000
-- pi：把隔离目录 `/var/tmp/pi-iso/agent/models.json` 的 AUTO 模型 `contextWindow` 改成 200000，并用 python3 读回验证
+- pi：把隔离目录 `${PI_ISO}/models.json` 的 AUTO 模型 `contextWindow` 改成 200000，并用 python3 读回验证
 
 执行（串行，先 A 后 pi；v3 填充实测 `overshoot` 需给 1.45 才能达到 1.23×）：
 
 ```bash
 python3 scripts/capability-bench/memory_recall.py --harness homeagent \
-  --socket /var/tmp/ha-c/cli.sock --api-key "$(cat /var/tmp/ha-c/apikey)" \
+  --socket ${INSTANCE_C}/cli.sock --api-key "$(cat ${INSTANCE_C}/apikey)" \
   --window 200000 --expect-window 200000 --overshoot 1.45 \
-  --out /var/tmp/mem/v3-ha-200k
+  --out ${OUT_DIR}/v3-ha
 python3 scripts/capability-bench/memory_recall.py --harness pi \
   --window 200000 --expect-window 200000 --overshoot 1.45 \
-  --out /var/tmp/mem/v3-pi-200k
+  --out ${OUT_DIR}/v3-pi
 ```
 
 验收：工具打印「✓ 超窗校验通过」（否则结果无效，删掉重跑）；报告 recall_rate 按针分层；两侧灌入量同级（v3 = 143 轮 / 245k / 1.23×）。
@@ -135,7 +141,7 @@ spawn-instance.sh 可起多实例（18082/18083/…；pluginmgr 9876 / remotedev
 
 - 推送：`git push origin main`（8+ 提交在本地）
 - 部署：`deploy-plan.sh check`（已预检过：onnxruntime ✓ libonnxruntime ✓）→ backup → deploy；deploy 前需人工确认
-- 生产适配器：`/home/newqqagent/adapters/` 有 9/10 与 .bundled 清单不符（openai.lua 实测仅版本落后、无用户修改）；部署前逐个核对后清掉让内核重解包（backup 会带走）
+- 生产适配器：`${HA_DATA}/adapters/` 有 9/10 与 .bundled 清单不符（openai.lua 实测仅版本落后、无用户修改）；部署前逐个核对后清掉让内核重解包（backup 会带走）
 
 ## v4 跑分（2026-10-04，新内核 657ccd7）
 
@@ -231,7 +237,7 @@ token 281971      缓存命中 42.7%   超时 0
 ```
 ① 未核对内核版本   → 差点测三天前的二进制（已加自动拒绝）
 ② ${VAR:0:8}      → /bin/sh 报 Bad substitution
-③ 改错二进制路径   → /var/tmp/ha-c/homed 不存在，实际是 build/homed
+③ 改错二进制路径   → ${INSTANCE_C}/homed 不存在，实际是 build/homed
 ```
 
 ### 实战数据印证的三件事
