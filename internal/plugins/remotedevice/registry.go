@@ -104,6 +104,8 @@ var capabilityTools = map[string][]string{
 	// 音频播放
 	"speaker":    {"speakeruse"},
 	"speakeruse": {"speakeruse"},
+	// omniparse：GUI 设备端已实现完整 case，补进能力矩阵使其可被下发
+	"omniparse": {"omniparse"},
 }
 
 // compatFullCaps 视为「全能力」的历史 caps 值：声明了这些的设备不参与能力裁剪。
