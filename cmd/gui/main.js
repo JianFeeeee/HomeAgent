@@ -442,15 +442,59 @@ function createWindow(show = true) {
   });
 
   // 静默时不显示；非静默时在首帧就绪后显示，避免白屏闪现。
-  if (show) {
-    mainWindow.once("ready-to-show", () => {
-      try {
+  //
+  // ★ 用 on 而不是 once（2026-10-05 修白屏）：once 只等一次，首帧之后
+  //   监听就没了。而窗口可能被系统回收后重建、或GPU 重启后重新 load，
+  //   那时都需要再show 一次 —— once 的写法让那些路径静默失败。
+  mainWindow.on("ready-to-show", () => {
+    if (!show) return;
+    try {
+      if (mainWindow && !mainWindow.isDestroyed() && !mainWindow.isVisible()) {
         mainWindow.show();
-      } catch (e) {}
-    });
-  }
+      }
+    } catch (e) {}
+  });
 
   mainWindow.loadFile(path.join(__dirname, "renderer", "index.html"));
+
+  // ★ renderer 崩溃自愈（2026-10-05 修「长时间挂后台后打开白屏」）。
+  //
+  // 现象：GUI 在后台挂很久（数小时）后，从托盘打开是**白屏**，且不会自愈。
+  //
+  // 原因链：
+  //   长时间后台 → Chromium 回收 renderer 的 GPU context（或渲染进程
+  //   本身被判定 hung 杀掉）→ 窗口对象仍在、isVisible() 仍返回 true，
+  //   但内容是空的 → showMainWindow() 的 `if (!isVisible()) show()` 被跳过
+  //   → 托盘点一下，窗口出现但是白的，永远不会好。
+  //
+  // 之前全代码没有任何 render-process-gone / unresponsive 监听，所以这条
+  // 路径完全无感知。仓库历史上有过「白屏修复(惰性Tray)」提交，但那只修了
+  // **首次**显示时机，没管**长期后台后**。
+  mainWindow.webContents.on("render-process-gone", (e, details) => {
+    console.error(
+      "[window] renderer gone: " + (details && details.reason) +
+        " (exitCode=" + (details && details.exitCode) + ")",
+    );
+    // OOM 之外的都重建；OOM（reason==="oom"）重建只会立刻再崩一次，
+    // 只记录日志避免反复重启把机器拖死。
+    if (details && details.reason === "oom") return;
+    try {
+      if (mainWindow && !mainWindow.isDestroyed()) {
+        mainWindow.reload();
+      }
+    } catch (err) {
+      console.error("[window] reload after crash failed: " + err.message);
+    }
+  });
+
+  // renderer 活着但无响应（主线程被长任务卡死）：此时页面还在，
+  // 只是不响应。给一次刷新机会，不自动刷（误判会让正在用的用户丢状态）。
+  mainWindow.webContents.on("unresponsive", () => {
+    console.error("[window] renderer unresponsive");
+  });
+  mainWindow.webContents.on("responsive", () => {
+    console.log("[window] renderer responsive again");
+  });
 
   if (process.argv.includes("--dev")) {
     mainWindow.webContents.openDevTools();
@@ -3377,9 +3421,30 @@ function initTray() {
 function showMainWindow() {
   try {
     if (mainWindow && !mainWindow.isDestroyed()) {
+      // ★ 健康检查（2026-10-05 修白屏）：仅靠 isVisible() 不够。
+      //
+      // 长时间后台后 renderer 可能已被回收 —— 窗口句柄还在、isVisible()
+      // 仍为 true，但内容是空的。此时原逻辑会跳过 show()，从托盘打开
+      // 就是一片白，而且永远不会自愈。
+      //
+      // 两个判据：
+      //   isCrashed() —— 渲染进程已死，必须重载才能出内容；
+      //   isLoading() —— 还在加载，等ready-to-show 就行，不重载。
+      const wc = mainWindow.webContents;
+      if (wc.isCrashed()) {
+        console.log("[window] renderer crashed, reloading before show");
+        try {
+          wc.reload();
+        } catch (e) {}
+      }
       // 窗口是静默创建时已处于「未显示」态，这里正常显示即可。
+      // 用 showInactive + focus 两步：showInactive 不抢焦点地显示，
+      // focus 再把焦点给过来（纯 show 在部分 Win 版本上会导致
+      // 无边框窗口不获得焦点，用户还得再点一下）。
       if (!mainWindow.isVisible()) mainWindow.show();
-      mainWindow.focus();
+      try {
+        mainWindow.focus();
+      } catch (e) {}
       return;
     }
   } catch (e) {
@@ -3508,6 +3573,25 @@ app.on("activate", () => {
     createWindow();
   }
 });
+
+// GPU 进程崩溃/重启后，无边框窗口（frame:false）在部分驱动上会停在
+// 上一帧不再重绘 —— 表现同样是「窗口在、内容不动或全白」。
+// `child-process-gone` 比 `render-process-gone` 覆盖面更广（含 GPU），
+// 这里只在 GPU 挂掉时重载渲染进程（不重建窗口，避免丢窗口位置/尺寸）。
+app.on("child-process-gone", (e, details) => {
+  const type = details && details.type;
+  const reason = details && details.reason;
+  if (type !== "GPU") return;
+  console.error("[window] GPU process gone: reason=" + reason);
+  if (reason === "oom" || reason === "launch-failed") return;
+  try {
+    if (mainWindow && !mainWindow.isDestroyed()) {
+      mainWindow.webContents.reload();
+    }
+  } catch (err) {
+    console.error("[window] reload after GPU crash failed: " + err.message);
+  }
+});
 // ============ 系统通知（Electron 原生）============
 //
 // 之前**完全没有**这个能力：主进程没引入 Notification、preload 没暴露接口、
@@ -3540,10 +3624,9 @@ ipcMain.handle("notify:show", (_, payload) => {
       urgency: p.urgent ? "critical" : "normal",
     });
     n.on("click", () => {
-      if (mainWindow && !mainWindow.isDestroyed()) {
-        if (!mainWindow.isVisible()) mainWindow.show();
-        mainWindow.focus();
-      }
+      // 走 showMainWindow 而非直接 show：它带renderer 健康检查，
+      // 直接 show 在 renderer 已被回收时会开出一个白窗口。
+      showMainWindow();
       try {
         mainWindow.webContents.send("notify:clicked", { id: id, msgKey: p.msgKey || "" });
       } catch (e) {}
