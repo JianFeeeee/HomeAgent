@@ -922,6 +922,18 @@ let deviceBridgeAddr = ""; // 设备桥网关地址
 // 连接成功但 bind 被拒时设备是失联的，只看 connected 会给出假阳性。
 let deviceBridgeBound = false;
 let deviceBridgeBindError = "";
+// 设备桥心跳与重连的状态（心跳 + 线性退避重连）。
+let devicePingTimer = null;
+let deviceReconnectTimer = null;
+let deviceReconnectAttempt = 0;
+// 拉起意图：用户主动停用后置 false，作为 scheduleDeviceReconnect 的闸。
+let deviceWanted = false;
+// 当前生效的连接配置，重连时复用（连接断开后局部变量就没了）。
+//
+// 缓存而非每次读 gui-prefs：重连是定时器里的异步路径，重读偏好会引入
+// 「读到半写文件」与「用户刚改完就按新值连」两种意外；且重连必须用
+// **当初启动时那份**配置，否则退避语义就乱了。
+let deviceBridgeCfg = null;
 // 音频/媒体接收聚合缓冲（服务端分块推送二进制→聚合→播放）
 let speechAccum = null;
 
@@ -1137,26 +1149,13 @@ function connectDeviceWS(url, token, onMsg) {
           );
         }
         opened = true;
-        // ★ keepalive：绑定成功后必须周期性发 ping，否则链路空闲超时会
-        // 静默断连，导致「设备可见但命令下发不到」（详见 sendDevicePing
-        // 上方注释）。间隔 25s：压在常见的 30s 空闲阈值之下。
-        const pingTimer = setInterval(() => {
-          try {
-            sendDevicePing(sock);
-          } catch (e) {
-            /* ping 失败不致命，下一轮或 close 事件会处理 */
-          }
-        }, 25000);
-        sock.__bridgePingTimer = pingTimer;
+        // 心跳不在这里起：统一由 connectDeviceBridgeOnce 在拿到 ws.__sock
+        // 后调 startDevicePing。放这里的话心跳会跟着「每次 connectDeviceWS
+        // 调用」起，而不是跟着「一条实际连上的桥」起——重连路径上会漏。
         resolve({
           send: (obj) => sendDeviceFrame(sock, JSON.stringify(obj)),
           __sock: sock, // 暴露底层 socket 供二进制分块发送
-          close: () => {
-            // 关闭前必须清掉 ping，否则定时器会继续往已销毁的 socket 写，
-            // 抛 unhandled error（且进程不会退出）。
-            clearInterval(sock.__bridgePingTimer);
-            sock.destroy();
-          },
+          close: () => sock.destroy(),
         });
       }
       while (buf.length >= 2) {
@@ -1225,50 +1224,241 @@ function connectDeviceWS(url, token, onMsg) {
       if (!opened) reject(e);
     });
     sock.on("close", () => {
-      // 断开时停掉 keepalive，否则定时器会一直持有已死的 socket。
-      if (sock.__bridgePingTimer) {
-        clearInterval(sock.__bridgePingTimer);
-        sock.__bridgePingTimer = null;
-      }
+      // 断开时停掉心跳，否则定时器会一直持有已死的 socket。
+      stopDevicePing();
       deviceBridge = null;
+      // 已建立过的连接被对端/中间链路关掉 ⇒ 排程重连。
+      // scheduleDeviceReconnect 内部有 deviceWanted 闸，用户主动停用
+      // 时不会把桥拉起来。
+      if (opened) scheduleDeviceReconnect();
     });
   });
 }
 
-// 发送 WS ping 控制帧（客户端必须加掩码）。
+// ============ 设备桥心跳 + 断线重连 ============
 //
-// ★ 为什么必须主动 ping（2026-10-05 实测故障）：
+// ★ 这里修的是 2026-10-05 实测到的两个洞，合起来的效果是
+//   「一次失联，终身失联」：
 //
-// GUI 的 bind 能成功（日志有 bind_ok），设备也确实进了服务端 devices 表
-// （webui 面板里能看到），但**几秒后所有设备能力调用全部失败**：
+// 1. **不发 ping**。waiter 侧有 pingLoop（internal/devicebridge/client/
+//    bridge.go，每 30s 一个 0x9 帧），GUI 侧全文件一次 ping 都没发过。
+//    而 remotedevice 服务端**没有设备侧读超时**（registry.go 里没有
+//    SetReadDeadline）—— 不发心跳就没人能发现设备已死，网关会把一台
+//    半死的设备长期显示为 online。
 //
-//	POST /api/v1/device/push {"device_id":"gui-JianF",...}
-//	→ {"error":"device gui-JianF not online"}
+//    实测症状：bind 能成功（bind_ok）、设备进了 devices 表（面板可见），
+//    但几秒后 push 就报
+//        {"error":"device gui-JianF not online"}
+//    —— conns 表已被 defer 里的 markOffline 清空，而 devices 表还在。
+//    「可见但不可下发」就是这个割裂的表象。
 //
-// 而同一时刻 NAS 上的 waiter 完全正常（last_seen 持续刷新）。
+// 2. **不重连**。原来 startDeviceBridge 只有启动/配置变更两个调用点，
+//    失败就 console.error 结束。GUI 是最容易被休眠/切网/服务端重启打断的
+//    形态（合盖一次、WiFi 抖一下、服务端重启），设备桥就再也回不来，
+//    直到用户重启 GUI 或手动改一次配置。
 //
-// 根因：GUI **没有任何 keepalive**。全文件搜不到发ping 的地方，而
-// waiter / 嵌入式客户端都有。链路中间是 frp + TLS 反代，它们的空闲超
-// 时（常见 30~60s）会静默关掉这条连接。
-//
-// 服务端 handleWS 虽有 ping/pong 处理（registry.go:735，且那段注释
-// 记录了「回 pong 不能因未 bind 而失败」的修复），但那解决的是**服务端
-// 回** pong；连接能不能活下去，取决于**客户端有没有主动发**。
-// 连接一断，handleWS 的 defer 走 markOffline(curID) → conns 里删除，
-// 于是「设备可见（devices 表）但不可下发（conns 表）」——
-// 正是本故障的表象。
-//
-// 对照组说明这不是服务端能力缺失：同一 registry 下waiter 一直好好的。
-const deviceBridgePingTimerKey = "__bridgePingTimer";
+// 判据：cmd/gui/device-bridge-liveness.test.mjs（用 node:vm 抽真实函数
+// 在沙箱里跑「连接→ 断线 → 重连 → 再断线」，数真实的 ping 帧与重连次数）。
 
-function sendDevicePing(sock) {
-  try {
-    // 控制帧：FIN + opcode 0x9 (ping)，payload 为空；客户端帧必须掩码。
-    const mask = crypto.randomBytes(4);
-    sock.write(Buffer.concat([Buffer.from([0x89, 0x80]), mask]));
-  } catch (e) {
-    console.log("[device-bridge] ping failed: " + e.message);
+// 与 waiter 的 pingLoop 对齐（bridge.go:636 每 30s 一个 0x9 帧）。
+const devicePingIntervalMs = 30000;
+// 重连退避：线性增长、封顶 60s。首个等待 = base。
+const deviceReconnectBaseMs = 2000;
+const deviceReconnectMaxMs = 60000;
+
+// 发送 WS 控制帧（客户端帧必须带掩码位，RFC6455 §5.3）。
+//
+// 通用签名而非写死 ping：控制帧有 ping(0x9)/pong(0xA)/close(0x8) 三种，
+// 写死一种就换不来另外两种。payload 为 null 表示空载荷。
+function sendDeviceControlFrame(sock, opcode, payload) {
+  const body = payload ? Buffer.from(payload) : Buffer.alloc(0);
+  const mask = crypto.randomBytes(4);
+  const masked = Buffer.alloc(body.length);
+  for (let i = 0; i < body.length; i++) masked[i] = body[i] ^ mask[i % 4];
+  const len = masked.length;
+  let hdr;
+  if (len < 126) {
+    hdr = Buffer.from([0x80 | opcode, 0x80 | len]);
+  } else if (len < 65536) {
+    hdr = Buffer.alloc(4);
+    hdr[0] = 0x80 | opcode;
+    hdr[1] = 0x80 | 126;
+    hdr.writeUInt16BE(len, 2);
+  } else {
+    hdr = Buffer.alloc(10);
+    hdr[0] = 0x80 | opcode;
+    hdr[1] = 0x80 | 127;
+    hdr.writeBigUInt64BE(BigInt(len), 2);
   }
+  sock.write(Buffer.concat([hdr, mask, masked]));
+}
+
+// 启动心跳（先清旧的，避免重复 interval 叠加）。
+function startDevicePing(sock) {
+  if (devicePingTimer) clearInterval(devicePingTimer);
+  devicePingTimer = setInterval(() => {
+    try {
+      if (!sock || sock.destroyed) return;
+      sendDeviceControlFrame(sock, 0x9, null);
+    } catch (e) {
+      /* 心跳失败不致命：close 事件会触发重连 */
+    }
+  }, devicePingIntervalMs);
+}
+
+function stopDevicePing() {
+  if (devicePingTimer) {
+    clearInterval(devicePingTimer);
+    devicePingTimer = null;
+  }
+}
+
+// 排程一次重连。退避随失败次数线性增长并封顶。
+//
+// ★ deviceWanted 是闸：用户主动 stopDeviceBridge（或改配置）之后
+//   再排程，就会把已停用的桥偷偷拉起来。GUI 是常驻托盘程序，
+//   这个「拉起来」没人看得见，表现为「我明明关了怎么又在连」。
+function scheduleDeviceReconnect() {
+  if (!deviceWanted) return;
+  if (deviceReconnectTimer) return; // 已有排程，不叠加
+  // 先递增后算：首次排程（含连接失败那一回）拿到的就是 base，
+  // 之后 2×base、3×base… 线性增长。用 max(1, attempt) 会在
+  // attempt=0 与 1 时都算出 base，出现「退避头两次一样」的假象。
+  deviceReconnectAttempt++;
+  const delay = Math.min(
+    deviceReconnectBaseMs * deviceReconnectAttempt,
+    deviceReconnectMaxMs,
+  );
+  deviceReconnectTimer = setTimeout(async () => {
+    deviceReconnectTimer = null;
+    if (!deviceWanted) return;
+    const cfg = deviceBridgeCfg;
+    // 配置被清空（用户改了偏好）⇒ 无处可连，停在这里等下一次 start。
+    if (!cfg) {
+      deviceReconnectAttempt = 0;
+      return;
+    }
+    try {
+      await connectDeviceBridgeOnce(cfg);
+      // 连上了：退避归零。下次若再断，重新从 base 开始 ——
+      // 否则「昨天断十次、今天又断一次」要等 10×base 才有第一次重试。
+      deviceReconnectAttempt = 0;
+    } catch (e) {
+      console.error("[device-bridge] reconnect failed: " + e.message);
+      scheduleDeviceReconnect();
+    }
+  }, delay);
+}
+
+// startDeviceBridge 拆出的「只做一次连接」部分：重连走这里。
+async function connectDeviceBridgeOnce(cfg) {
+  const url = cfg.url || cfg.gateway || "";
+  const token = cfg.apiKey || cfg.token || "";
+  deviceBridgeAddr = url;
+  deviceBridgeBound = false;
+  // doConnectDeviceBridge 内部会建 ws、起心跳、并存进 deviceBridge。
+  // 不用它的返回值：那层把结果写全局而非return，两边约定不一致时
+  // 「读返回值」就得到 undefined，随后 ws.send 直接TypeError。
+  await doConnectDeviceBridge(cfg);
+  const ws = deviceBridge;
+  if (!ws) {
+    throw new Error("connect produced no bridge");
+  }
+  // host/cpus/mem 的推导包在try 里：它们在 ws.send 的实参里，而 send 之前
+  // 抛错会被 startDeviceBridge 的 catch 吞成「连接失败」—— 实际连接是好的，
+  // 表现为「反复重连但永远连不上」。拿不到主机信息不该阻断设备登记。
+  let host = "";
+  let cpus = 0;
+  let totalMem = 0;
+  let appVersion = "";
+  let platform = "";
+  let arch = "";
+  let nodeVersion = "";
+  let electronVersion = "";
+  try {
+    host = devOs.hostname() || "";
+    cpus = devOs.cpus ? devOs.cpus().length : 0;
+    totalMem = devOs.totalmem ? devOs.totalmem() : 0;
+  } catch (e) {
+    // 忽略：device_id 退化为 gui-local。
+  }
+  try {
+    appVersion = app && app.getVersion ? app.getVersion() : "";
+  } catch (e) {}
+  // process 单独包：electron 主进程有，但判据的 vm 沙箱只注入了 Buffer/Math/
+  // crypto —— 这里抛错会让 ws.send 之前就中断，被上层 catch 吞成
+  // 「连接失败」，而实际连接是好的（表现为无限重连）。
+  try {
+    platform = process.platform || "";
+    arch = process.arch || "";
+    nodeVersion =
+      (process.versions && process.versions.node) || "";
+    electronVersion =
+      (process.versions && process.versions.electron) || "";
+  } catch (e) {}
+  if (!deviceBridgeId) {
+    deviceBridgeId =
+      "gui-" + (host || "local").replace(/[^a-zA-Z0-9_-]/g, "_");
+  }
+  let authorized = false;
+  try {
+    authorized = !!(
+      guiPrefs &&
+      guiPrefs.deviceBridge &&
+      guiPrefs.deviceBridge.authorized
+    );
+  } catch (e) {}
+  ws.send({
+    op: "hello",
+    device: {
+      device_id: deviceBridgeId,
+      name: "HomeAgent GUI",
+      kind: "computer",
+      authorized: authorized,
+      caps: [
+        "status",
+        "cmdrun",
+        "deviceinfo",
+        "cmdresult",
+        "computeruse",
+        "screensee",
+        "clipboardsee",
+        "clipboardsue",
+        "speakeruse",
+        "camerasue",
+        "screensue",
+        "omniparse",
+      ],
+      info: {
+        hostname: host,
+        platform: platform,
+        arch: arch,
+        os_release: "",
+        node_version: nodeVersion,
+        electron_version: electronVersion,
+        version: appVersion,
+        cpus: cpus,
+        total_mem_bytes: totalMem,
+      },
+    },
+  });
+  ws.send({ op: "bind", device_id: deviceBridgeId, token });
+  console.log("[device-bridge] connected as " + deviceBridgeId + " @ " + url);
+}
+
+// 真实连接：建 WS、起心跳、登记到全局。
+//
+// 「连上」与「开始对它发心跳」是同一件事的两半，放一函数里，重连路径
+// 才不会漏掉心跳。
+async function doConnectDeviceBridge(cfg) {
+  const ws = await connectDeviceWS(
+    cfg.url || cfg.gateway || "",
+    cfg.apiKey || cfg.token || "",
+    onDeviceMsg,
+  );
+  startDevicePing(ws.__sock);
+  deviceBridge = ws;
+  return ws;
 }
 
 // 发送 WS text 帧（客户端加掩码）
@@ -2899,59 +3089,38 @@ async function startDeviceBridge(cfg) {
     return;
   }
   deviceBridgeAddr = url;
-  deviceBridgeId =
-    "gui-" + (devOs.hostname() || "local").replace(/[^a-zA-Z0-9_-]/g, "_");
+  // 记住配置：重连时要用（连接断开后局部变量就没了）。
+  deviceBridgeCfg = { url, token };
+  // 拉起意图。scheduleDeviceReconnect 以此为闸 —— 用户主动停用后
+  // 不得再排程重连。
+  deviceWanted = true;
+  deviceReconnectAttempt = 0;
+  if (deviceReconnectTimer) {
+    clearTimeout(deviceReconnectTimer);
+    deviceReconnectTimer = null;
+  }
   try {
-    const ws = await connectDeviceWS(url, token, onDeviceMsg);
-    deviceBridge = ws;
-    ws.send({
-      op: "hello",
-      device: {
-        device_id: deviceBridgeId,
-        name: "HomeAgent GUI",
-        kind: "computer",
-        authorized: guiPrefs?.deviceBridge?.authorized || false, // 客户端自报授权状态
-        caps: [
-          "status",
-          "cmdrun",
-          "deviceinfo",
-          "cmdresult",
-          "computeruse",
-          "screensee",
-          "clipboardsee",
-          "clipboardsue",
-          "speakeruse",
-          "camerasue",
-          "screensue",
-          "omniparse",
-        ],
-        info: {
-          hostname: devOs.hostname() || "",
-          platform: process.platform || "",
-          arch: process.arch || "",
-          os_release: "", // 不提权读取 /etc/os-release，避免破坏沙箱；如需可在白名单命令里由 agent 探
-          node_version:
-            process.versions && process.versions.node
-              ? process.versions.node
-              : "",
-          electron_version:
-            process.versions && process.versions.electron
-              ? process.versions.electron
-              : "",
-          version: app.getVersion ? app.getVersion() : "",
-          cpus: devOs.cpus ? devOs.cpus().length : 0,
-          total_mem_bytes: devOs.totalmem ? devOs.totalmem() : 0,
-        },
-      },
-    });
-    ws.send({ op: "bind", device_id: deviceBridgeId, token });
-    console.log("[device-bridge] connected as " + deviceBridgeId + " @ " + url);
+    await connectDeviceBridgeOnce(deviceBridgeCfg);
+    // 首次就连上：退避归零。
+    deviceReconnectAttempt = 0;
   } catch (e) {
     console.error("[device-bridge] connect failed: " + e.message);
+    // ★ 连接失败也必须排程重连 —— 这条路上**没有** socket close 事件
+    //   （socket 从未 upgraded），若只把重连挂在 close 上，首次失败就
+    //   永远不会自愈。
+    scheduleDeviceReconnect();
   }
 }
 
 function stopDeviceBridge() {
+  // 先断意图，再拆资源：顺序反了会让 close 事件里的排程再把桥拉起来。
+  deviceWanted = false;
+  stopDevicePing();
+  if (deviceReconnectTimer) {
+    clearTimeout(deviceReconnectTimer);
+    deviceReconnectTimer = null;
+  }
+  deviceReconnectAttempt = 0;
   if (deviceBridge) {
     try {
       deviceBridge.close();
