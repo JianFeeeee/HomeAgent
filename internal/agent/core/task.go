@@ -110,6 +110,13 @@ type TaskFrame struct {
 	Turn               int
 	LastBatchReplyOnly bool
 
+	// OverflowRecover 是本帧内的超页恢复次数。
+	//
+	// 为什么按**帧**而不是按 agent 计：恢复预算要防的是「一次裁剪没搞定 ⇒
+	// 裁剪→复原→又超页→再裁剪」这个**单帧内**的循环；跨帧累计会让一个长会话
+	// 在若干帧后突然失去超页处理能力（而那时恰恰最需要它）。
+	OverflowRecover int
+
 	// 当前工具批
 	PendingTools  []agentAPI.ToolCall
 	ToolIdx       int
@@ -156,6 +163,14 @@ type TaskFrame struct {
 	Step     Step
 	Response string
 	Err      error
+
+	// turnUsage 是本轮任务（一个 TaskFrame）内全部 LLM 调用的用量合计。
+	//
+	// 为何要单独存：usageLedger 是**会话级**累计（跨用户请求），
+	// 而对外回包的 usage 按 OpenAI 语义应是**本次请求**。
+	// 两者口径不同，不能互相顶替：把会话累计当本次报了，
+	// 第二次请求就会报出翻倍的数字。
+	turnUsage agentAPI.TokenUsage
 
 	// ---- 任务层现场（原 processInput 的局部变量）----
 	//
@@ -315,7 +330,7 @@ func (a *Agent) rebaseFramePrefix(f *TaskFrame) {
 	}
 	tail := append([]agentAPI.Message(nil), f.Msgs[f.PrefixLen:]...)
 
-	budget := ComputeTokenBudget(a.provider, a.systemPrompt)
+	budget := a.computeTokenBudget()
 	memContext := a.buildTaskMemoryContext(f, f.Input, budget.MemoryTokens)
 	sysPrompt := a.buildSystemPrompt(memContext, f.Input)
 	prefix := a.buildMessages(sysPrompt, f.Input, a.contextTokenBudget(budget))
@@ -413,7 +428,8 @@ func (a *Agent) prepareInputTask(evt *agentIO.InputEvent) (*TaskFrame, taskTermi
 	a.injectSourceContext(stageCtx, evt)
 
 	if a.runStage(sdk.StageOnInput, stageCtx) {
-		a.emitResponse(evt, *stageCtx.Response)
+		// 插件在 OnInput 短路：本轮一个 LLM 都没跑，用量为零是如实的。
+		a.emitResponse(evt, *stageCtx.Response, agentAPI.TokenUsage{})
 		return nil, terminalStageShortCircuit
 	}
 
@@ -476,7 +492,7 @@ func (a *Agent) finishInputTask(f *TaskFrame, out stepOutcome) {
 	if out == outcomeFailed {
 		log.Printf("[agent] process %s error: %v", evt.Type, f.Err)
 		resp := fmt.Sprintf("处理错误: %v", f.Err)
-		a.emitResponse(evt, resp)
+		a.emitResponse(evt, resp, f.turnUsage)
 		a.context.Append(ContextEvent{Timestamp: time.Now(), Source: "agent", Input: f.Input, Response: resp})
 		f.Terminal = terminalError
 		return
@@ -503,7 +519,7 @@ func (a *Agent) finishInputTask(f *TaskFrame, out stepOutcome) {
 	a.bindEventMedia(&turnEvt, a.drainMediaDigests())
 	a.context.Append(turnEvt)
 
-	a.emitResponse(evt, f.Response)
+	a.emitResponse(evt, f.Response, f.turnUsage)
 
 	if !f.StageCtx.NoMemory {
 		a.emitMemoryCandidate(evt.Source, f.CleanInput, f.Response, f.ToolResults, f.ToolsUsed)
@@ -536,7 +552,7 @@ func (a *Agent) step(f *TaskFrame) stepOutcome {
 
 // stepPrepare 构建本轮任务的初始帧。
 func (a *Agent) stepPrepare(f *TaskFrame) stepOutcome {
-	budget := ComputeTokenBudget(a.provider, a.systemPrompt)
+	budget := a.computeTokenBudget()
 
 	memContext := a.buildTaskMemoryContext(f, f.Input, budget.MemoryTokens)
 	sysPrompt := a.buildSystemPrompt(memContext, f.Input)
@@ -602,6 +618,21 @@ func (a *Agent) stepPrepare(f *TaskFrame) stepOutcome {
 // 取消（context.Canceled 且 agent 未退出）时**留在本 step 并 Turn++**——等价于
 // 原实现的 `continue`：重新排空中断、补占位、重新请求。抢占挂起将在 M3 从这里接管。
 func (a *Agent) stepLLM(f *TaskFrame) stepOutcome {
+	// ★ 本地超页预判：每次发 LLM 请求**之前**检查积累上下文，覆盖轮内 tool 回环。
+	//   轮内工具回灌会把积累量推到窗口数倍，而现状只在轮首检查
+	//   （checkContextFull，且根 agent no-op）—— 等轮首才发现时，
+	//   整轮工具调用的代价已经付掉了。
+	//   必须在这里做而不能更早：f.Msgs 在上一行之前已经拼好，
+	//   而本次裁剪会让它过期。
+	if handled, _ := a.maybeHandleContextOverflow(f, ""); handled {
+		if f.Terminal == terminalError {
+			return outcomeFailed // 恢复预算耗尽，f.Err 已写明
+		}
+		// 已裁剪：f.Msgs 必须在 stepPrepare 重建，这里那份就是超限那份。
+		f.Step = StepPrepare
+		return outcomeContinue
+	}
+
 	// zen 兼容网关要求请求的最后一条消息必须是 user(thinking 续写模式校验),
 	// 工具轮产出的 tool/assistant 消息作结尾会被 400 拒绝,故补一条 user 占位。
 	f.Msgs = dropContinuationPlaceholders(f.Msgs)
@@ -624,6 +655,17 @@ func (a *Agent) stepLLM(f *TaskFrame) stepOutcome {
 	resp, llmErr := a.callLLMWithFallback(req, providers, f.OutputChannel)
 
 	if llmErr != nil {
+		// ★ 上下文超页（上游 ErrContextFull）必须在 provider fallback **之前**处理：
+		//   fallback 会换 provider 重发**同一个**超限请求，换谁都一样超。
+		//   与本地预判（maybeHandleContextOverflow）走同一条裁剪路径。
+		if a.handleUpstreamContextFull(llmErr) {
+			// 已裁剪。**必须退回 StepPrepare 重建 f.Msgs**：
+			// f.Msgs 只在 stepPrepare 里由 buildMessages 装配，stepLLM 不重建；
+			// 而挂起帧里那份就是刚刚超限的那份，复用它等于原样再发一次。
+			f.Turn++
+			f.Step = StepPrepare
+			return outcomeContinue
+		}
 		if errors.Is(llmErr, context.Canceled) && a.ctx.Err() == nil {
 			if f.OutputChannel == channelConsolidation {
 				f.Err = fmt.Errorf("interrupted by user input")
@@ -650,10 +692,17 @@ func (a *Agent) stepLLM(f *TaskFrame) stepOutcome {
 
 	f.StageCtx.LLMText = resp.Content
 	f.StageCtx.ReasoningContent = resp.ReasoningContent
+	// 用量同时给插件看（StageCtx）与记账（usageLedger）。
+	//
+	// StageCtx.TokenUsage 是 map[string]int，放不了布尔，
+	// 所以「上游是否报了缓存」只在事件里给（见下面的 cache_reported）。
 	f.StageCtx.TokenUsage = map[string]int{
 		"prompt_tokens":     resp.TokenUsage.Prompt,
 		"completion_tokens": resp.TokenUsage.Completion,
 		"total_tokens":      resp.TokenUsage.Total,
+		"cache_read_tokens": resp.TokenUsage.CacheRead,
+		"cache_miss_tokens": resp.TokenUsage.CacheMiss,
+		"reasoning_tokens":  resp.TokenUsage.ReasoningTokens,
 	}
 	f.StageCtx.ToolCalls = convertToolCalls(resp.ToolCalls)
 	for i := range f.StageCtx.ToolCalls {
@@ -675,12 +724,48 @@ func (a *Agent) stepLLM(f *TaskFrame) stepOutcome {
 		"phase":      "intermediate",
 		"turn":       f.Turn,
 	}
+	// 记账：先并入累计，再把「本次」与「会话累计」一起发出去。
+	//
+	// 为何把累计也带上：要回答的是「这个会话花了多少、缓存省了多少」，
+	// 只有单次数字就得消费方自己一条条加。放在同一事件里，消费方无需另建状态。
+	a.usageLedger.record(resp.TokenUsage)
+	// 本轮任务内的合计（一个 TaskFrame 可能多轮 LLM：工具回环）。
+	// 它与 usageLedger 的口径不同（本次请求 vs 会话累计），两者都要留。
+	f.turnUsage.Add(resp.TokenUsage)
+
 	if resp.TokenUsage.Total > 0 {
-		chainPayload["usage"] = map[string]int{
-			"prompt":     resp.TokenUsage.Prompt,
-			"completion": resp.TokenUsage.Completion,
-			"total":      resp.TokenUsage.Total,
+		// ⚠️ 必须是 map[string]interface{}：WebUI 的 handler_openai.go
+		// 用 `Payload["usage"].(map[string]interface{})` 取它，而 Go 的
+		// 类型断言对 map 是**精确匹配** —— 发 map[string]int 时断言为 false
+		// （已实证），于是在 /v1/chat/completions 回包里 usage 静默变 nil。
+		// 这是“发了但没人收到”的典型形态：两边都不报错。
+		chainPayload["usage"] = map[string]interface{}{
+			"prompt":           resp.TokenUsage.Prompt,
+			"completion":       resp.TokenUsage.Completion,
+			"total":            resp.TokenUsage.Total,
+			"cache_read":       resp.TokenUsage.CacheRead,
+			"cache_miss":       resp.TokenUsage.CacheMiss,
+			"cache_reported":   resp.TokenUsage.CacheReported,
+			"reasoning_tokens": resp.TokenUsage.ReasoningTokens,
 		}
+	}
+	// 会话累计。命中率**不可算时不带该字段** ——
+	// 让消费方显示「—」而不是把「不知道」画成 0% 命中率。
+	if sess := a.usageLedger.snapshot(); sess.Calls > 0 {
+		sessPayload := map[string]interface{}{
+			"prompt":               sess.Prompt,
+			"completion":           sess.Completion,
+			"total":                sess.Total,
+			"cache_read":           sess.CacheRead,
+			"cache_miss":           sess.CacheMiss,
+			"reasoning":            sess.Reasoning,
+			"calls":                sess.Calls,
+			"cache_reported_calls": sess.CacheReportedCalls,
+		}
+		if rate, ok := sess.CacheHitRate(); ok {
+			sessPayload["cache_hit_rate"] = rate
+		}
+		chainPayload["usage_session"] = sessPayload
 	}
 	a.publishEvent(events.EventAgentLLMChain, chainPayload)
 

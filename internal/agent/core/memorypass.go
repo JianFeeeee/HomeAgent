@@ -149,12 +149,88 @@ func (a *Agent) pruneByQuery(query string) int {
 	if a.isLightKernel() {
 		return 0
 	}
-	topK := a.maxContextSize - 1
+	topK := a.contextTopK()
+	return a.context.PruneWithProtected(query, topK, a.docStore, a.effectiveProtectedCount())
+}
+
+// contextTopK 推导裁剪后应保留的**条数**。
+//
+// ★ 为什么不能直接用 maxContextSize（2026-10-01 跑分实测出的根因）：
+// max_context_size 是**条数**、与窗口 token 毫无换算关系。实测 50k 窗口下
+// prompt 峰值达窗口 7 倍、每轮都在「超限→修剪→再超限」——容量 30 条对上
+// 实际占用毫无约束力。而只调 context_window 无效：改窗口不会改这30。
+//
+// 正确做法：用已按窗口算好的 ContextTokens 预算**反推条数**。
+// 一个事件平均占多少 token 由实际数据决定，不用常量猜：
+// 取本 agent 当前积累的实际平均（accumulatedTokens / 事件数），
+// 至少给 1 个 token 的下限（极短事件不会让除零或把预算除成 0）。
+//
+// max_context_size 仍作为**上限**保留：它是运维给的「活跃条数」硬约束，
+// 预算算出来的条数超过它时以它为准（否则改了配置不生效会让人困惑）。
+func (a *Agent) contextTopK() int {
+	hardCap := a.maxContextSize - 1 // 运维配置的上限（历史语义：-1 因为要留 protected）
+	if hardCap < 1 {
+		hardCap = 1
+	}
+
+	budget := a.computeTokenBudget()
+	tokens := budget.ContextTokens
+	if tokens <= 0 {
+		return hardCap
+	}
+
+	// 平均事件 token：优先用实际积累，没有积累时退回保守值。
+	avg := 0
+	if a.context != nil {
+		if n := a.context.Len(); n > 0 {
+			avg = a.accumulatedTokens() / n
+		}
+	}
+	if avg <= 0 {
+		avg = defaultAvgEventTokens
+	}
+
+	topK := tokens / avg
 	if topK < 1 {
 		topK = 1
 	}
-	return a.context.Prune(query, topK, a.docStore)
+	if topK > hardCap {
+		topK = hardCap
+	}
+	// ★ 下限必须是 protectedCount+1，否则裁剪会**无效**：Prune 里
+	//   keepCount = topK - len(protected)，若 topK <= protected 则 keep 为空、
+	//   全部事件被归档，裁完一轮上下文还是超页（实测 topK 被算成 1 时）。
+	//
+	// 什么时候会算成 1：单条事件就超过整个 ContextTokens 预算（实测 v4 的
+	// 工具大回执型事件平均 48000 token，而预算只有 40000）。此时正确的做法
+	// 不是「只留 1 条」（等于清空记忆），而是至少留够 protected 条 ——
+	// 宁可暂时超页，等 budget 或事件尺寸回到正常区间再裁。
+	if min := a.effectiveProtectedCount() + 1; topK < min {
+		topK = min
+	}
+	if topK > hardCap {
+		topK = hardCap
+	}
+	return topK
 }
+
+// protectedContextCount 返回当前保护条数（最近 N 条永不换出）。
+func (a *Agent) protectedContextCount() int {
+	if a == nil || a.context == nil {
+		return defaultProtectedCount
+	}
+	if n := a.context.protectedCount; n > 0 {
+		return n
+	}
+	return defaultProtectedCount
+}
+
+// defaultAvgEventTokens 是「没有积累样本时」用于反推的事件平均 token。
+//
+// 取值依据：一条运维叙事事件通常 1500-3000 token（含工具回灌），
+// 保守取 2000 —— 偏大意味着预算算出的条数偏少、裁得更狠，
+// 宁可多裁也不要让积累量重新涨过窗口。
+const defaultAvgEventTokens = 2000
 
 // ──────────────────────────────────────────────
 // 场面指纹：场景**涌现**的原料

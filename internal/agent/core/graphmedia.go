@@ -3,7 +3,6 @@ package core
 import (
 	"fmt"
 	"log"
-	"strconv"
 	"strings"
 
 	"gitcode.com/JianFeeeee/HomeAgent/internal/memory"
@@ -45,10 +44,14 @@ func (a *Agent) migrateLegacyGraphMedia() {
 	}
 }
 
-// attachBlocksToSentence 把一组 digest 变成 L3 一等块并挂到句子上。
+// attachBlocksToSentenceBlock 把一组 digest 变成 L3 一等块并挂到**原句块**上。
 // seed 允许复用已持有块的 ID（L2→L3 迁移保持块身份不变）。
-func (a *Agent) attachBlocksToSentence(sentenceID int64, digests []string, seed map[string]memory.MemoryBlock, scene string) int {
-	if a.mediaStore == nil || a.memory == nil || sentenceID == 0 {
+// ★ sentenceBlockID 是**原句块 ID**（原为 sentences 表行号）。
+//
+//	句子的承载者已从 sentences 表迁移到 blk_src_<sha256(text[:12])>，
+//	媒体边因此改挂「原句块 --contains--> 媒体块」。
+func (a *Agent) attachBlocksToSentenceBlock(sentenceBlockID string, digests []string, seed map[string]memory.MemoryBlock, scene string) int {
+	if a.mediaStore == nil || a.memory == nil || sentenceBlockID == "" {
 		return 0
 	}
 	bound := 0
@@ -73,7 +76,7 @@ func (a *Agent) attachBlocksToSentence(sentenceID int64, digests []string, seed 
 			log.Printf("[media] L3 块写入失败 (%s): %v", shortDigest(full), err)
 			continue
 		}
-		if err := a.memory.AddMemoryBlockEdge("sentence", strconv.FormatInt(sentenceID, 10), "block", b.ID, "contains"); err != nil {
+		if err := a.memory.AddMemoryBlockEdge("block", sentenceBlockID, "block", b.ID, "contains"); err != nil {
 			log.Printf("[media] 句子→块边建立失败 (%s): %v", shortDigest(full), err)
 			continue
 		}
@@ -151,20 +154,25 @@ func (a *Agent) commitTriplesWithMedia(triples []memory.Triple, sessionID string
 			continue
 		}
 		sid := sentenceIDs[t.SentenceText]
-		if sid == 0 {
+		if sid == "" {
 			continue
 		}
-		blocks += a.attachBlocksToSentence(sid, t.MediaDigests, byDigest, t.Scene)
+		blocks += a.attachBlocksToSentenceBlock(sid, t.MediaDigests, byDigest, t.Scene)
 	}
 	return ec, rc, blocks, nil
 }
 
 // RecallBlocksForSentence 反查某条图库句子持有的一等记忆块。
-func (a *Agent) RecallBlocksForSentence(sentenceID int64) ([]memory.MemoryBlock, error) {
+// RecallBlocksForSentence 按**原句块 ID**取回它承载的媒体块。
+//
+// ★ 签名从 int64 改为 string：挂载点已从「sentences 表行号」
+//
+//	改成「原句块 ID」（sentences 表退场后行号不存在）。
+func (a *Agent) RecallBlocksForSentence(sentenceBlockID string) ([]memory.MemoryBlock, error) {
 	if a.memory == nil {
 		return nil, nil
 	}
-	return a.memory.BlocksForNode("sentence", strconv.FormatInt(sentenceID, 10))
+	return a.memory.BlocksForNode("block", sentenceBlockID)
 }
 
 // resolveMediaDigests 把模型给的（多为短）digest 补全成完整 digest。
@@ -195,18 +203,33 @@ func (a *Agent) resolveMediaDigests(digests []string) []string {
 //
 // 关系行本身不持有媒体，媒体作为一等块以 sentence --contains--> block
 // 结构边与句子相连；因此"这次召回涉及哪些媒体"必须经由关系 → 句子这一跳。
-func sentenceIDsFromRelations(relations []memory.Relation) []int64 {
+// sentenceIDsFromRelations 从关系里取出其原句的**块 ID**。
+//
+// ★ 从 Relation.SentenceID（旧 sentences 表行号）改为按 SentenceText 现算
+//
+//	blk_src_<hash>。
+//
+//	原因：Commit 块化后原句由块承载，sentences 表退场，
+//	行号不再是稳定的挂载点；而 SentenceText 一直在 Relation 上。
+//
+//	这条链（mediaContextForSentences / mediaContextForRelations）
+//	完全靠这个 ID 找回媒体块，所以改错了 = 媒体上下文整体失效。
+func sentenceIDsFromRelations(relations []memory.Relation) []string {
 	if len(relations) == 0 {
 		return nil
 	}
-	seen := make(map[int64]bool, len(relations))
-	var out []int64
+	seen := make(map[string]bool, len(relations))
+	var out []string
 	for _, r := range relations {
-		if r.SentenceID == 0 || seen[r.SentenceID] {
+		id := ""
+		if r.SentenceText != "" {
+			id = memory.SentenceBlockID(r.SentenceText)
+		}
+		if id == "" || seen[id] {
 			continue
 		}
-		seen[r.SentenceID] = true
-		out = append(out, r.SentenceID)
+		seen[id] = true
+		out = append(out, id)
 	}
 	return out
 }
@@ -279,13 +302,13 @@ func (a *Agent) blockLabelsForDoc(d *document.Doc) string {
 //
 // 标签只含 MIME 与短 digest：图片按向量检索，标签的作用是告诉模型
 // "这条记忆当时带着哪份媒体、可用该 digest 取回字节"。
-func (a *Agent) mediaContextForSentences(sentenceIDs []int64) string {
-	if a.mediaStore == nil || a.memory == nil || len(sentenceIDs) == 0 {
+func (a *Agent) mediaContextForSentences(sentenceBlockIDs []string) string {
+	if a.mediaStore == nil || a.memory == nil || len(sentenceBlockIDs) == 0 {
 		return ""
 	}
 	var lines []string
-	for _, sid := range sentenceIDs {
-		blocks, err := a.memory.BlocksForNode("sentence", strconv.FormatInt(sid, 10))
+	for _, sid := range sentenceBlockIDs {
+		blocks, err := a.memory.BlocksForNode("block", sid)
 		if err != nil || len(blocks) == 0 {
 			continue
 		}
@@ -300,11 +323,24 @@ func (a *Agent) mediaContextForSentences(sentenceIDs []int64) string {
 			}
 		}
 		if len(parts) > 0 {
-			lines = append(lines, fmt.Sprintf("句子 #%d 关联媒体：%s", sid, strings.Join(parts, "；")))
+			lines = append(lines, fmt.Sprintf("句子 %s 关联媒体：%s", shortID(sid), strings.Join(parts, "；")))
 		}
 	}
 	if len(lines) == 0 {
 		return ""
 	}
 	return strings.Join(lines, "\n")
+}
+
+// shortID 把块 ID 压成可读短码（blk_src_<24hex> → 前 8 位 hex）。
+// 媒体上下文是给模型看的，整串 hex 只会占 token 且不可读。
+func shortID(blockID string) string {
+	const pfx = "blk_src_"
+	if strings.HasPrefix(blockID, pfx) {
+		return blockID[len(pfx):]
+	}
+	if len(blockID) > 12 {
+		return blockID[:12]
+	}
+	return blockID
 }

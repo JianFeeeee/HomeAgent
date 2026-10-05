@@ -1,24 +1,49 @@
 # .mailmap —— 提交身份归并
 #
-# 为什么需要：GitHub 的 Contributors 列表按 **提交邮箱** 归并身份，而本项目历史里
-# 同一个人的提交来自多个邮箱（本地 root、个人 QQ、gitcode noreply、GitHub noreply），
-# 于是列表里出现若干「虚拟贡献者」，看起来像有多个协作者，实际只有一个人。
+# 为什么需要：GitHub 的 Contributors 按**提交邮箱**归并身份，而本项目历史里
+# 同一个人的提交来自多个邮箱（本地 root、个人 QQ、gitcode noreply、
+# GitHub noreply），于是列表里出现若干「虚拟贡献者」。
 #
-# 本文件只影响 **展示层**（git shortlog / git log --use-mailmap / GitHub Contributors），
+# 本文件只影响 **展示层**（git log --use-mailmap / GitHub Contributors），
 # 不改写任何提交对象，历史 SHA 全部保持不变。
 #
 # 格式：<归并到的姓名> <归并到的邮箱>  <历史姓名> <历史邮箱>
 #
+# ★★ 写法要点（2026-10-05 实测踩坑，附实证）：
+#
+#  ① 右端必须写成「历史姓名 + 历史邮箱」成对形式。
+#     只写邮箱时git 要求提交的 author name **也为空**才匹配，
+#     而历史提交都带名字 ⇒ 映射静默失效，且**不报任何错**。
+#     （实证：只写邮箱的那版，`jianf` 仍出现在 Contributors 里。）
+#
+#  ② 注释里**不要写出形如映射的示例行**。
+#     git 只认行首 `#` 作为注释起点；缩进注释里若出现
+#     「姓名 邮箱」或「若干空格 + 邮箱」，仍会被解析成真实条目。
+#     同名目标后者覆盖前者 ⇒ 真正的映射被悄悄顶掉。
+#
+# ③ 坏字节邮箱无法在文本文件里表达 —— 那种提交只能改写历史
+#     （git filter-repo --mailmap）。本文件已不含此类条目：
+#     唯一那���（58ef728，邮箱前缀多出 3 个坏字节）已于 2026-10-05 改写。
+#
 # 注意：HomeAgent Agent <agent@homeagent.local> **不归并** —— agent 的自动提交
 # 保留独立身份，便于区分人类提交与自动化提交。
 
+# ── 主身份（显式写出，避免依赖隐式默认）──
 JianFeeeee <JianFeeeee@users.noreply.gitcode.com>      JianFeeeee <JianFeeeee@users.noreply.gitcode.com>
-JianFeeeee <JianFeeeee@users.noreply.gitcode.com>      <root@qq.com>
-JianFeeeee <JianFeeeee@users.noreply.gitcode.com>      <2198972886@qq.com>
-JianFeeeee <JianFeeeee@users.noreply.gitcode.com>      <jianfeeeee@homeagent.local>
-JianFeeeee <JianFeeeee@users.noreply.gitcode.com>      <dev@local>
-JianFeeeee <JianFeeeee@users.noreply.gitcode.com>      <root@minecraft-server>
-JianFeeeee <JianFeeeee@users.noreply.gitcode.com>      <109188060+JianFeeeee@users.noreply.github.com>
 
-# 说明：上表用同一主身份覆盖所有历史邮箱；`git shortlog -sne --use-mailmap` 应只剩
-# JianFeeeee 与 HomeAgent Agent 两条。
+# ── 本地 root（历史署名有 root 与 JianFeeeee 两种）──
+JianFeeeee <JianFeeeee@users.noreply.gitcode.com>      root <root@qq.com>
+JianFeeeee <JianFeeeee@users.noreply.gitcode.com>      JianFeeeee <root@qq.com>
+
+# ── 个人 QQ 邮箱（历史上配过 jianf 与 JianFeeeee 两个名字）──
+JianFeeeee <JianFeeeee@users.noreply.gitcode.com>      jianf <2198972886@qq.com>
+JianFeeeee <JianFeeeee@users.noreply.gitcode.com>      JianFeeeee <2198972886@qq.com>
+
+# ── 本地开发身份 ──
+JianFeeeee <JianFeeeee@users.noreply.gitcode.com>      JianFeeeee <jianfeeeee@homeagent.local>
+JianFeeeee <JianFeeeee@users.noreply.gitcode.com>      dev <dev@local>
+JianFeeeee <JianFeeeee@users.noreply.gitcode.com>      root <root@minecraft-server>
+JianFeeeee <JianFeeeee@users.noreply.gitcode.com>      JianFeeeee <109188060+JianFeeeee@users.noreply.github.com>
+
+# ── pi（自动化 agent，保留独立身份）──
+pi <pi@local>                                            pi <pi@local>

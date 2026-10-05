@@ -20,7 +20,7 @@ func TestInitMemoryStackKeepsDistillerRunning(t *testing.T) {
 	if err := os.MkdirAll(filepath.Join(dir, "memory"), 0755); err != nil {
 		t.Fatal(err)
 	}
-	st, cleanup := initMemoryStack(dir)
+	st, cleanup := initMemoryStack(dir, nil)
 	if st == nil || st.distiller == nil {
 		cleanup()
 		t.Fatal("initMemoryStack 未返回蒸馏器")

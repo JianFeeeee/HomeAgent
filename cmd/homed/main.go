@@ -21,6 +21,9 @@ import (
 	// 想把核心换成自己的模型，只需替换这一行（或另建一个发行版 main）。
 	_ "gitcode.com/JianFeeeee/HomeAgent/providers/chineseclip"
 	_ "gitcode.com/JianFeeeee/HomeAgent/providers/qwen3vl"
+	// 生成侧 provider（蒸馏拆三元组）。与上面两个向量 provider 各自独立注册：
+	// 核心只依赖 pkg/generation 的接口，按配置 Open("ollama")。
+	_ "gitcode.com/JianFeeeee/HomeAgent/providers/ollama"
 )
 
 // main 是 worker 进程的启动序列。
@@ -60,19 +63,22 @@ func main() {
 
 	agentWorkDir := ensureDataDirs(opt.dataDir)
 
-	// ---- 基础设施层：记忆、技能 ----
-
-	mem, closeMem := initMemoryStack(opt.dataDir)
-	defer closeMem()
-
 	// ---- 配置中心（SQLite 持久化，唯一配置源） ----
-
+	//
+	// 必须早于 initMemoryStack：蒸馏的生成侧 provider 由配置决定
+	//（core.memory.distill.generation.provider），且要在 distiller.Start()
+	// 之前注入 —— 否则第一个 tick 会白跑一次产出为 0 的 jieba 路。
 	cfgReg := internalConfig.NewConfigRegistry(filepath.Join(opt.dataDir, "config.db"))
 	defer cfgReg.Close()
 	cfgReg.SeedDefaults(opt.dataDir)
 	// LLM 配置写前留档（config_set 写 core.llm.* 前自动快照），guard 恢复用基线
 	cfgReg.SetLLMSnapshotFile(filepath.Join(opt.dataDir, "llm_snapshot.json"))
 	cfg := cfgReg.ToConfig()
+
+	// ---- 基础设施层：记忆、技能 ----
+
+	mem, closeMem := initMemoryStack(opt.dataDir, cfgReg)
+	defer closeMem()
 
 	// 共享词嵌入：蒸馏提取（Phase 3 TransE 验证）与 Agent 上下文复用同一实例，
 	// 避免同一模型被二次加载（约 200k×300 维 ≈ 数百 MB 内存）。

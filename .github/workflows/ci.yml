@@ -140,9 +140,16 @@ jobs:
 
   # ── Electron GUI（纯 Node 测试，零依赖）──
   #
-  # `npm test` 只跑三个 .mjs，全部只 import node: 内置模块（fs/url/path/vm），
+  # `npm test` 跑五个 .mjs，全部只 import node: 内置模块（fs/url/path/vm），
   # 所以**不需要 npm ci、不需要 electron**，秒级完成。
   # `npm run test-live` 需真 Electron + 真后端 ⇒ 不进 CI。
+  #
+  # endpoint-align.test.mjs 跨出 cmd/gui 读 ../../internal/plugins/webui/handler.go
+  # 做端点对账 —— checkout 深度足够（默认 fetch-depth:1 已含工作树文件），
+  # 不需要额外 checkout 步骤。
+  #
+  # connections-io.test.mjs 同样是沙箱里跑 main.js 的**真实函数**（node:vm），
+  # 在临时目录里断言连接配置的加载/保存行为，不碰真实用户数据。
   gui:
     name: GUI (node)
     runs-on: ubuntu-latest

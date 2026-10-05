@@ -215,7 +215,7 @@ stage_linux_payload() {
 # 输出目录必须用 --config.directories.output，**不能用 -o**：
 # electron-builder 的 `-o` 是 `--mac`/`--macos` 的短别名（见 --help 的 Building 段），
 # 不是 output。此前 `-o "$BUILD_DIR"` 被当成 macOS 的 target 列表，报
-#   ⨯ Unknown target: /home/program/trueagent/build
+#   ⨯ Unknown target: ${HOME_DIR}/trueagent/build
 # （路径被 lowercase 后去匹配 target 名表，所以错误信息里的路径是全小写的，
 #  这也是它看起来像「路径错」而实际是「参数位置错」的原因）。
 # v1.0.1 与 v1.0.3 两次发布都因此手工组装过 GUI。

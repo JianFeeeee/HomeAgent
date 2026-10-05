@@ -1290,9 +1290,27 @@ code {
   border: 1px solid var(--kv-border);
   border-left: 3px solid var(--accent);
   cursor: pointer;
+  position: relative;
   transition:
     border-color 0.2s var(--ease-out),
-    background 0.2s var(--ease-out);
+    background 0.2s var(--ease-out),
+    box-shadow 0.2s var(--ease-out);
+}
+
+/* 运行中的工具卡：极淡的呼吸光晕。
+   参考 PiDeck 的 .turn-row--running:before —— 用一层几乎看不见的
+   accent 底色缓慢呼吸来表达"正在跑"，而不是放一个转圈。
+   转圈的语义是"在加载某个确定的东西"，而工具执行没有进度可转。 */
+.tool-card.tc-running::before {
+  content: "";
+  pointer-events: none;
+  position: absolute;
+  inset: -1px -3px;
+  border-radius: var(--radius-sm);
+  background: color-mix(in srgb, var(--accent) 4%, transparent);
+  opacity: 0;
+  animation: haRunBreathe 2.2s ease-in-out infinite;
+  z-index: -1;
 }
 .tool-card.tc-running {
   border-left-color: var(--accent);
@@ -1302,6 +1320,15 @@ code {
 }
 .tool-card.tc-error {
   border-left-color: var(--error, #db3694);
+}
+@keyframes haRunBreathe {
+  0%,
+  100% {
+    opacity: 0;
+  }
+  50% {
+    opacity: 1;
+  }
 }
 .tool-card .tc-line {
   display: flex;
@@ -1357,14 +1384,114 @@ code {
   background: rgba(219, 54, 148, 0.18);
   color: #ff9ec6;
 }
+/* 工具卡内的活动指示：三点脉冲。
+   旧实现是 11px 的 border 转圈（.tc-spinner）—— 与上一条同样的问题，
+   且在 11px 尺寸下转圈糊成一团。改为 PiDeck 的 tool-activity-dot 三点。 */
+/* ===== 工具调用组卡（参考 PiDeck 的 tool-group-card）=====
+   一轮里多个工具调用折成一张卡：收起时只留「脉冲点 + 计数 + 状态摘要」，
+   展开才逐个看细节。相比每工具一张卡，回复正文不会被推到很下面。 */
+.tool-group-card {
+  border: 1px solid var(--kv-border);
+  border-left: 3px solid var(--accent);
+  border-radius: var(--radius-sm);
+  margin: 6px 0;
+  font-size: 11px;
+  background: var(--bg-panel, var(--bg-hover));
+  overflow: hidden;
+}
+.tool-group-card.tone-error {
+  border-left-color: var(--error, #db3694);
+}
+.tool-group-card.tone-done {
+  border-left-color: rgba(23, 169, 100, 0.8);
+}
+.tool-group-head {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 7px 10px;
+  cursor: pointer;
+  color: var(--text-secondary);
+  transition: background 0.2s var(--ease-out);
+}
+.tool-group-head:hover {
+  background: var(--bg-hover);
+}
+.tool-group-card .tool-group-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 999px;
+  background: var(--accent);
+  flex-shrink: 0;
+}
+/* 运行中的组：脉冲点呼吸（PiDeck 的 toolGroupDotPulse：缩放+透明度） */
+.tool-group-card.tone-running .tool-group-dot {
+  background: var(--loading-top, var(--accent));
+  animation: haGroupDotPulse 1.4s ease-in-out infinite;
+}
+.tool-group-card.tone-error .tool-group-dot {
+  background: var(--error, #db3694);
+}
+.tool-group-card.tone-done .tool-group-dot {
+  background: rgba(23, 169, 100, 0.9);
+}
+@keyframes haGroupDotPulse {
+  0%,
+  100% {
+    opacity: 1;
+    transform: scale(1);
+  }
+  50% {
+    opacity: 0.7;
+    transform: scale(1.25);
+  }
+}
+.tool-group-count {
+  font-weight: 600;
+  color: var(--text-primary);
+}
+.tool-group-label {
+  color: var(--text-muted);
+}
+.tool-group-head .tc-caret {
+  font-size: 10px;
+  color: var(--text-muted);
+  transition: transform 0.15s var(--ease-out);
+}
+.tool-group-head.open .tc-caret {
+  transform: rotate(180deg);
+}
+.tool-group-body {
+  padding: 0 6px 4px;
+  border-top: 1px solid var(--kv-border);
+}
+.tool-group-body .tool-card {
+  margin: 4px 0;
+}
+
 .tool-card .tc-spinner {
-  width: 11px;
-  height: 11px;
-  border-radius: 50%;
-  border: 2px solid rgba(63, 110, 245, 0.25);
-  border-top-color: #3f6ef5;
-  animation: spin 0.7s linear infinite;
-  display: inline-block;
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+  width: auto;
+  height: auto;
+  border: none;
+  border-radius: 0;
+  background: none;
+  vertical-align: middle;
+}
+.tool-card .tc-spinner::before,
+.tool-card .tc-spinner::after {
+  content: "";
+  display: block;
+  width: 3px;
+  height: 3px;
+  border-radius: 999px;
+  background: var(--accent);
+  animation: haDots 1.1s ease-in-out infinite;
+}
+.tool-card .tc-spinner::after {
+  animation-delay: 0.2s;
 }
 .tool-card .tc-caret {
   font-size: 10px;
@@ -1458,20 +1585,153 @@ code {
     transform: none;
   }
 }
-.msg-bubble .live-spinner {
-  width: 15px;
-  height: 15px;
-  border-radius: 50%;
-  border: 2px solid var(--msg-user-bg);
-  border-top-color: var(--accent);
-  animation: spin 0.7s linear infinite;
-  flex-shrink: 0;
-  display: inline-block;
+/* ============================================================
+   加载 / 思考动画
+   ------------------------------------------------------------
+   设计参考 PiDeck（@deepseek-ai/dsh-web-frontend / mermaid bundle）：
+   它**不用边框旋转**，而是「等距三点 + 透明度递减 + 轻微上浮」，
+   静默、不抢视线，且在深浅色下都成立。
+
+   旧实现是 border + rotate 的经典 spinner（.loading / .loading-spinner /
+   .live-spinner），在消息气泡里尤其刺眼 —— 一个持续旋转的圆环
+   与「正在思考」的语义也不匹配（旋转暗示在加载某个确定的东西，
+   而思考本身没有进度）。
+
+   下面是等价改造，三处调用点（面板加载 / 列表加载 / 消息内思考）
+   统一到同一套视觉语言。
+   ============================================================ */
+
+/* 三点渐次亮起（PiDeck: _dsh-state-dot-chase 的等价实现） */
+@keyframes haDots {
+  0%,
+  12.4% {
+    opacity: 1;
+  }
+  12.5%,
+  24.9% {
+    opacity: 0.6;
+  }
+  25%,
+  37.4% {
+    opacity: 0.35;
+  }
+  37.5%,
+  100% {
+    opacity: 0.15;
+  }
+}
+
+/* 单点呼吸（PiDeck: tool-activity-dot） */
+@keyframes haDotFloat {
+  0%,
+  100% {
+    opacity: 0.35;
+    transform: translateY(0) scale(0.8);
+  }
+  50% {
+    opacity: 1;
+    transform: translateY(-2px) scale(1);
+  }
+}
+
+/* 扫光（PiDeck: thinking-sweep），用于「思考中」横向扫光 */
+@keyframes haSweep {
+  0% {
+    left: -300px;
+  }
+  90%,
+  100% {
+    left: 100%;
+  }
+}
+
+/* 三点基类：用 flex 排布，gap 固定，避免各调用点尺寸不一 */
+.ha-dots {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
   vertical-align: middle;
+  flex-shrink: 0;
+}
+.ha-dots > i {
+  display: block;
+  width: 4px;
+  height: 4px;
+  border-radius: 999px;
+  background: var(--accent);
+  animation: haDots 1.1s ease-in-out infinite;
+}
+.ha-dots > i:nth-child(2) {
+  animation-delay: 0.15s;
+}
+.ha-dots > i:nth-child(3) {
+  animation-delay: 0.3s;
+}
+
+/* 尺寸变体：替换旧的 .loading / .loading-spinner / .live-spinner */
+.ha-dots-sm > i {
+  width: 3px;
+  height: 3px;
+  gap: 2px;
+}
+.ha-dots-lg > i {
+  width: 6px;
+  height: 6px;
+  gap: 5px;
+}
+
+/* 面板级：居中容器里的加载态（替代 32px 旋转圈） */
+.ha-dots-panel {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 20px;
+}
+
+/* 消息气泡内：思考中 */
+.msg-bubble .live-spinner {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  vertical-align: middle;
+  flex-shrink: 0;
+}
+.msg-bubble .live-spinner > i {
+  display: block;
+  width: 4px;
+  height: 4px;
+  border-radius: 999px;
+  background: var(--accent);
+  animation: haDots 1.1s ease-in-out infinite;
+}
+.msg-bubble .live-spinner > i:nth-child(2) {
+  animation-delay: 0.15s;
+}
+.msg-bubble .live-spinner > i:nth-child(3) {
+  animation-delay: 0.3s;
 }
 .msg-bubble .live-spinner + .thinking-tools,
 .msg-bubble .live-spinner + .text {
   margin-left: 8px;
+}
+
+/* 正在生成的那条消息：整条气泡的呼吸光晕。
+   参考 PiDeck 的 .turn-row--running:before —— 一层几乎看不见的
+   accent 底色缓慢明暗交替。比对单点动画的优势：余光就能感知
+   「agent 正在回」，不必把视线缩到气泡里那几个点上。 */
+.msg-bubble.msg-running {
+  position: relative;
+}
+.msg-bubble.msg-running::before {
+  content: "";
+  pointer-events: none;
+  position: absolute;
+  inset: -4px -6px;
+  border-radius: var(--radius-sm);
+  background: color-mix(in srgb, var(--accent) 4%, transparent);
+  opacity: 0;
+  animation: haRunBreathe 2.2s ease-in-out infinite;
+  z-index: -1;
 }
 .msg-bubble.grow-in {
   animation: bubbleGrow 0.5s var(--ease-out) both;
@@ -1535,22 +1795,44 @@ code {
 #sm-container-chat canvas {
   display: block;
 }
-.loading {
-  display: inline-block;
-  width: 16px;
-  height: 16px;
-  border: 2px solid var(--loading-border);
-  border-radius: 50%;
-  border-top-color: var(--loading-top);
-  animation: spin 0.6s linear infinite;
-}
+/* 旧类名保留为别名：已有 6+ 处调用点直接用 .loading / .loading-spinner。
+   把它们指到新的三点动画，而不是删掉后逐处改 HTML —— 后者容易漏。
+   （用 flex 布局装不出第三个点，::before/::after 只能造 2 个，
+     所以这三个点由 JS 插入；没插入时至少是个 2 点的退化态，
+     不会退化成旋转圈。） */
+.loading,
 .loading-spinner {
-  width: 32px;
-  height: 32px;
-  border: 3px solid color-mix(in srgb, var(--accent) 15%, transparent);
-  border-top: 3px solid var(--accent);
-  border-radius: 50%;
-  animation: spin 0.8s linear infinite;
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  vertical-align: middle;
+  width: auto;
+  height: auto;
+  border: none;
+  border-radius: 0;
+  background: none;
+  animation: none;
+}
+.loading::before,
+.loading::after,
+.loading-spinner::before,
+.loading-spinner::after {
+  content: "";
+  display: block;
+  width: 5px;
+  height: 5px;
+  border-radius: 999px;
+  background: var(--accent);
+  animation: haDots 1.1s ease-in-out infinite;
+}
+.loading::after,
+.loading-spinner::after {
+  animation-delay: 0.2s;
+}
+.loading-spinner::before,
+.loading-spinner::after {
+  width: 6px;
+  height: 6px;
 }
 @keyframes spin {
   to {

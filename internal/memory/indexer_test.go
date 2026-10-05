@@ -44,9 +44,22 @@ func TestIndexerSync(t *testing.T) {
 	if !idx.trained {
 		t.Error("expected indexer to be trained after sync")
 	}
-	if idx.vec.Size() != ec {
-		t.Errorf("expected %d vectors, got %d", ec, idx.vec.Size())
+	// ★ 期望值改用**块数**（2026-10-04）
+	//
+	// 原来用 Commit 返回的 ec（旧表实体计数）——旧表双写已停，
+	// ec 恒为 0，于是判据说「应有 0 个向量」而索引器建了 4 个。
+	//
+	// ★★ 这是**判据与实现都错**的组合：
+	//   判据错在用了一个已失效的信号；实现没错（索引器照块建向量）。
+	blocks, err := db.MemoryBlocks()
+	if err != nil {
+		t.Fatal(err)
 	}
+	if idx.vec.Size() != len(blocks) {
+		t.Errorf("expected %d vectors (one per block), got %d",
+			len(blocks), idx.vec.Size())
+	}
+	_ = ec
 }
 
 // TestSyncIfStaleBaseline 钉住增量同步的基线口径：

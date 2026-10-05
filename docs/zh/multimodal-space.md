@@ -28,7 +28,7 @@ multimodal context 的相关性裁剪/淘汰。
 ```bash
 # 默认导出 图像 + 视频 G=2,3,4（即 4/6/8 帧）
 python3 scripts/export_qwen3vl_embedding_onnx.py \
-    --out /home/newqqagent/models/qwen3-vl-embed-multimodal-onnx
+    --out ${HA_DATA}/models/qwen3-vl-embed-multimodal-onnx
 
 # 只要 4 帧的视频档（省磁盘、省内存）
 python3 scripts/export_qwen3vl_embedding_onnx.py --video-groups 2 --out ...
@@ -36,7 +36,7 @@ python3 scripts/export_qwen3vl_embedding_onnx.py --video-groups 2 --out ...
 # 已下载过模型：跳过拉取
 python3 scripts/export_qwen3vl_embedding_onnx.py \
     --model-dir /path/to/Qwen3-VL-Embedding-2B \
-    --out /home/newqqagent/models/qwen3-vl-embed-multimodal-onnx
+    --out ${HA_DATA}/models/qwen3-vl-embed-multimodal-onnx
 
 # 参考向量默认直接写进产物目录（<out>/qwen_reference.json），无需额外参数
 python3 scripts/export_qwen3vl_embedding_onnx.py --model-dir ... --out ...
@@ -114,7 +114,7 @@ axis，实际却只能用导出的那个长度运行。
 ```bash
 python3 scripts/export_chineseclip_onnx.py \
     --model-dir /path/to/chinese-clip-vit-base-patch16 \
-    --out /home/newqqagent/models/chinese-clip-vit-b16-onnx
+    --out ${HA_DATA}/models/chinese-clip-vit-b16-onnx
 ```
 
 国内下载：本机 `huggingface.co` 走代理会被 reset，用 `hf-mirror.com` 且**不设代理**：
@@ -142,7 +142,7 @@ curl -4 -L --retry 3 -o vocab.txt \
 
 ```bash
 core.memory.multimodal_space.provider = chineseclip
-core.memory.multimodal_space.options.model_dir = /home/newqqagent/models/chinese-clip-vit-b16-onnx
+core.memory.multimodal_space.options.model_dir = ${HA_DATA}/models/chinese-clip-vit-b16-onnx
 ```
 
 **新装默认就是这个**（`SeedDefaults` 写入 `chineseclip` + `<dataDir>/models/chinese-clip-vit-b16-onnx`），
@@ -212,7 +212,7 @@ Go 侧回归对着官方 PyTorch 参考（`reference.json`），模型目录由
 `CHINESECLIP_MODEL_DIR` 指定，缺失时 skip：
 
 ```bash
-CHINESECLIP_MODEL_DIR=/home/newqqagent/models/chinese-clip-vit-b16-onnx \
+CHINESECLIP_MODEL_DIR=${HA_DATA}/models/chinese-clip-vit-b16-onnx \
   go test -tags onnxruntime ./providers/chineseclip/ -v
 ```
 
@@ -238,7 +238,7 @@ CHINESECLIP_MODEL_DIR=/home/newqqagent/models/chinese-clip-vit-b16-onnx \
 ```bash
 # 配置库（config.db）或 WebUI 设置页
 core.memory.multimodal_space.provider = qwen3vl
-core.memory.multimodal_space.options.model_dir = /home/newqqagent/models/qwen3-vl-embed-multimodal-onnx
+core.memory.multimodal_space.options.model_dir = ${HA_DATA}/models/qwen3-vl-embed-multimodal-onnx
 
 # 或换成一个外部向量服务（任何语言写的都行）
 core.memory.multimodal_space.provider = http
@@ -376,7 +376,7 @@ legacy tracer（`dynamo=False`）会把它固化成常量：实测把 `grid_thw`
 
 ```bash
 # Go 侧：ONNX 路径（模型目录缺失时自动 skip）
-QWEN_ONNX_MODEL_DIR=/home/newqqagent/models/qwen3-vl-embed-multimodal-onnx \
+QWEN_ONNX_MODEL_DIR=${HA_DATA}/models/qwen3-vl-embed-multimodal-onnx \
   go test -tags onnxruntime ./internal/memory/qwen/ -v
 
 # 排除二进制交付问题的替代：先单独验证模型与 CSV 无关的 ONNX 图
@@ -399,7 +399,7 @@ Go 测试覆盖：冻结参考向量（文本/图像各 12 维）、同输入确
 
 ```bash
 python3 scripts/export_qwen3vl_embedding_onnx.py --verify-only --model-dir <model> \
-    --out /home/newqqagent/models/qwen3-vl-embed-multimodal-onnx
+    --out ${HA_DATA}/models/qwen3-vl-embed-multimodal-onnx
 ```
 
 脚本会顺便把归一化后的参考向量写入该目录。

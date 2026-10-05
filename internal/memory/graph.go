@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -18,6 +19,19 @@ import (
 // 把一次召回变成一次全表扫描。
 const maxKeywordEntities = 50
 
+// maxRecallEntities 是**一次召回全局**的实体上限（跨所有关键词）。
+//
+// ★ 为什么必须有它（2026-10-01 跑分实测）：maxKeywordEntities 是**每个关键词**
+// 的上限，而 ExtractKeywords 会把一个问句切成多个词（实测
+// 「metrics服务的端口是多少」→ [metrics, 服务, 端口]，其中「服务」「端口」
+// 是无区分度的泛词）。于是 3 个关键词 × 50 = 最多 150 个实体被**平铺**进上下文，
+// 实测 memory_recall 单次返回 193 个实体 / 13744 tokens = 工具预算的 436%，
+// 模型被噪音淹没后转去 grep 知识库文件，还把「没检索到」当成「不存在」。
+//
+// 实验结论（internal/memory 内的三方案对比，见 benchmark 记录）：排序不是瓶颈
+// —— 目标实体在三种方案里都排#1。缺的是**全局上限**。
+const maxRecallEntities = 20
+
 // maxAdjacentRelations 是深度扩展里**每层**读取的关系上限。
 const maxAdjacentRelations = 200
 
@@ -27,29 +41,80 @@ const maxAdjacentRelations = 200
 const maxFullRecallEntities = 10000
 
 type Entity struct {
+	// MatchRank 是**实词关键词**上的最佳命中层级（0=完全相等, 1=前缀, 2=包含）。
+	//
+	// ★ 为什么实体要带这个字段（2026-10-01 跑分实测）：召回结果平铺给模型时，
+	// 「为什么这条相关」此前完全不可见 —— 模型看到 193 个同格式的
+	// 「-名称(提及N次)」，无从判断该信哪个，于是转去 grep 知识库文件，
+	// 还把「没检索到」当成「不存在」。带上层级后最相关的几条一眼可辨。
+	// 仅在关键词召回路径上填充；深度扩展产出与 seed 路径为 -1（未知）。
+	MatchRank int `json:"match_rank,omitempty"`
+	// Seq 是该实体最新一次被写入时的**句子 id**（sentences.id，自增单调）。
+	//
+	// ★ 为什么实体时间排序需要它（真实库实测）：entities.updated_at 来自
+	// SQLite CURRENT_TIMESTAMP，只到**秒**，而一批记忆常在同一秒内批量写入。
+	// 实测 ha-c 生产库 190 个实体里最多的一批 20 个实体共享同一秒。
+	// sentences.id 是自增主键，严格单调，是唯一可靠的时序信号。
+	// 0 表示该实体没有关联句子（合成/导入的实体），此时回退到 UpdatedAt。
+	Seq          int64     `json:"seq,omitempty"`
 	ID           int64     `json:"id"`
 	Name         string    `json:"name"`
 	Type         string    `json:"type"`
 	MentionCount int       `json:"mention_count"`
 	CreatedAt    time.Time `json:"created_at"`
 	UpdatedAt    time.Time `json:"updated_at"`
+
+	// blockKey 是对应的**块 ID**（2026-10-04）。
+	//
+	// ★ 为什么 ID 不能直接用块 ID：Entity.ID 是 int64（JSON 与 SDK 契约），
+	//   而块 ID 是内容派生的字符串（blk_ent_<hash>）—— 放不进去。
+	//   所以 ID 退化为「本次召回内的序号」，块 ID 走这个新字段。
+	//
+	// ★ 为什么需要它：召回内部要用块 ID 做 map 键（跨关键词去重、
+	//   深度扩展的前沿集合），而出口排序 sortRecallEntities 按
+	//   Entity.ID 建索引 —— 两者需要一次映射。
+	//
+	// ★ 不导出到 JSON（omitempty + json:"-"）：它是内部索引键，
+	//   不是对外契约的一部分 —— 对外应该是 block_id 而不是这个临时序号。
+	blockKey string `json:"-"`
 }
 
+// IsLegacyRow 报告这个实体行是**旧表**（entities）来的，而不是块。
+//
+// ★ 存在的理由：读侧切块之后，External Recall 回来的东西既可能是块
+//
+//	（blockKey 非空）也可能是旧表行（blockKey 为空）。
+//	而判据常需要区分「块」与「旧表残留」——
+//	两者 Name/Type 可能完全一样，光看内容分不出来。
+//
+// ★ 只读，不进 JSON。
+func (e Entity) IsLegacyRow() bool { return e.blockKey == "" }
+
 type Relation struct {
-	ID           int64     `json:"id"`
-	SourceID     int64     `json:"source_id"`
-	TargetID     int64     `json:"target_id"`
-	SourceName   string    `json:"source_name"`
-	TargetName   string    `json:"target_name"`
-	RelationType string    `json:"relation_type"`
-	Confidence   float64   `json:"confidence"`
-	Status       string    `json:"status"`
-	SessionID    string    `json:"session_id"`
-	TurnID       int       `json:"turn_id"`
-	CreatedAt    time.Time `json:"created_at"`
-	DateBucket   string    `json:"date_bucket"`
-	SentenceID   int64     `json:"sentence_id,omitempty"`   // FK → sentences.id
-	SentenceText string    `json:"sentence_text,omitempty"` // JOINed from sentences
+	ID       int64 `json:"id"`
+	SourceID int64 `json:"source_id"`
+	TargetID int64 `json:"target_id"`
+	// ★★ 块体系的端点 ID（2026-10-04）
+	//
+	// 旧 SourceID/TargetID 是 relations 表的行号，退场后无效。
+	// 块体系里端点是 memory_blocks.id（字符串，内容派生的稳定 ID）。
+	// 两个字段并存：RecallByScene 已走块侧，旧字段留给旧表读方；
+	// 旧表退场时删掉 SourceID/TargetID 即可。
+	SourceBlockID string    `json:"source_block_id,omitempty"`
+	TargetBlockID string    `json:"target_block_id,omitempty"`
+	SourceName    string    `json:"source_name"`
+	TargetName    string    `json:"target_name"`
+	RelationType  string    `json:"relation_type"`
+	Confidence    float64   `json:"confidence"`
+	Status        string    `json:"status"`
+	SessionID     string    `json:"session_id"`
+	TurnID        int       `json:"turn_id"`
+	CreatedAt     time.Time `json:"created_at"`
+	DateBucket    string    `json:"date_bucket"`
+	SentenceID    int64     `json:"sentence_id,omitempty"`   // FK → sentences.id（退场后不用）
+	SentenceText  string    `json:"sentence_text,omitempty"` // 原句全文（走原句块回溯）
+	// SentenceBlockID 是原句块的 ID（blk_src_<hash>），供场景引用与去重。
+	SentenceBlockID string `json:"sentence_block_id,omitempty"`
 }
 
 type Triple struct {
@@ -180,6 +245,10 @@ func (g *GraphDB) initSchema() error {
 			source TEXT DEFAULT '',
 			tool TEXT DEFAULT '',
 			scene TEXT DEFAULT '',
+			-- semantic_type 是实体的语义类别（Person / Animal / Concept），
+			-- 对应旧 entities.type。2026-10-04 加入：social 层靠它
+			-- 区分人物与特质，检索层靠它区分「谁」与「什么」。
+			semantic_type TEXT DEFAULT '',
 			created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
 			updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 		)`,
@@ -190,8 +259,9 @@ func (g *GraphDB) initSchema() error {
 			target_kind TEXT NOT NULL,
 			target_id TEXT NOT NULL,
 			edge_type TEXT NOT NULL,
-			created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-			UNIQUE(source_kind, source_id, target_kind, target_id, edge_type)
+			created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+			-- ★ 无 UNIQUE 约束：边是独立单位，同一对节点间可并存多条同类边。
+			--   结构边的幂等由 AddMemoryBlockEdge 的先查后写保证。
 		)`,
 		`CREATE TABLE IF NOT EXISTS documents (
 			id         TEXT PRIMARY KEY,
@@ -279,6 +349,51 @@ func (g *GraphDB) initSchema() error {
 	tx.Exec(`ALTER TABLE memory_blocks ADD COLUMN scene TEXT DEFAULT ''`)
 	// 迁移6：旧 scenes 表加 strength 列（涌现侧的强度计数）
 	tx.Exec(`ALTER TABLE scenes ADD COLUMN strength INTEGER DEFAULT 1`)
+	// ★ 迁移7：记忆块加语义类型列（2026-10-04）
+	//
+	// ★ 为什么必须补：Triple.SubjectType / ObjectType 此前**只写旧表
+	//   entities.type**，块侧完全没有 —— 于是 Commit 标注的
+	//   「这是 Person / 那是 Animal」在块体系里直接丢失。
+	//
+	//   判据 TestGraphCommit_CarriesAllFields 当场抓到：
+	//   实体类型 = ("block","block")，期望 (Person,Animal)。
+	//
+	//   ★ 命名用 semantic_type 而不是 type：
+	//   `type` 在 SQLite 里合法但与很多工具的保留字冲突
+	//   （且 memory_blocks 已有 modality 列表达「模态」，语义类型是另一回事）。
+	tx.Exec(`ALTER TABLE memory_blocks ADD COLUMN semantic_type TEXT DEFAULT ''`)
+
+	// ★★★ 迁移8：memory_block_edges 升格为「边是独立单位」
+	//
+	// 补五列（对应旧 relations 表的同名列）：
+	//
+	//	confidence   置信度 —— 「值覆盖」维度靠它判断哪条更可信
+	//	session_id   来源会话 —— Recall 的 sessionFilter 依赖它
+	//	turn_id      来源轮次
+	//	status       active/deleted/merged —— 软删除与仲裁依赖它
+	//	merged_into  源块被并进哪个块（历史边留在源块上）
+	//
+	// ★ 建表语句里的 UNIQUE(source_kind,source_id,target_kind,target_id,
+	//   edge_type) **必须去掉** —— 它让同一对节点间只能存一条同类型边，
+	//   而「边是独立单位」要求可并存多条（不同 session/confidence 是
+	//   不同的事实）。实测那正是「报告 980、实际 959」的根因。
+	//
+	//   SQLite 不能直接删 UNIQUE 约束 ⇒ 见下方 ensureRelationEdgeUniqueness。
+	//   结构边（contains 等）靠 AddMemoryBlockEdge 自己的
+	//   「先查后写」保持幂等，不依赖 DB 约束。
+	for _, m := range []struct{ table, col, decl string }{
+		{"memory_block_edges", "confidence", "REAL DEFAULT 0"},
+		{"memory_block_edges", "session_id", "TEXT DEFAULT ''"},
+		{"memory_block_edges", "turn_id", "INTEGER DEFAULT 0"},
+		{"memory_block_edges", "status", "TEXT DEFAULT ''"},
+		{"memory_block_edges", "merged_into", "TEXT DEFAULT ''"},
+	} {
+		if !columnExists(tx, m.table, m.col) {
+			tx.Exec(fmt.Sprintf("ALTER TABLE %s ADD COLUMN %s %s",
+				m.table, m.col, m.decl))
+		}
+	}
+	ensureRelationEdgeUniqueness(tx)
 	// 迁移7：旧 scenes 表加 origin。既有行都是声明/存量引导来的（建表时还没有
 	// 涌现机制），标成 declared；新建的涌现场景在 createSceneLocked 里写 emergent。
 	if !columnExists(tx, "scenes", "origin") {
@@ -415,17 +530,24 @@ func (g *GraphDB) Commit(triples []Triple, sessionID string, turnID int) (int, i
 // 返回的 map 只包含本次真正写入了 sentences 表的句子。调用方据此把媒体
 // 变成 L3 一等块，并以 sentence --contains--> block 边与句子相连；
 // 关系行本身不持有媒体。
-func (g *GraphDB) CommitWithMedia(triples []Triple, sessionID string, turnID int) (map[string]int64, int, int, error) {
+// ★ 返回的 map 现在是「原句文本 → **原句块 ID**」（原为 sentences 表行号）。
+//
+// 变更原因：sentences 表退场后行号不再存在，而媒体桥
+// （graphmedia.go commitTriplesWithMedia）要靠它挂
+// 「原句块 --contains--> 媒体块」这条边。
+//
+// ⇒ 媒体桥那条边要同步改：source_kind 从 "sentence" 变成 "block"。
+func (g *GraphDB) CommitWithMedia(triples []Triple, sessionID string, turnID int) (map[string]string, int, int, error) {
 	return g.commit(triples, sessionID, turnID, true)
 }
 
-func (g *GraphDB) commit(triples []Triple, sessionID string, turnID int, trackSentences bool) (map[string]int64, int, int, error) {
+func (g *GraphDB) commit(triples []Triple, sessionID string, turnID int, trackSentences bool) (map[string]string, int, int, error) {
 	g.mu.Lock()
 	defer g.mu.Unlock()
 
-	var sentenceIDs map[string]int64
+	var sentenceIDs map[string]string
 	if trackSentences {
-		sentenceIDs = make(map[string]int64)
+		sentenceIDs = make(map[string]string)
 	}
 
 	tx, err := g.db.Begin()
@@ -436,7 +558,9 @@ func (g *GraphDB) commit(triples []Triple, sessionID string, turnID int, trackSe
 
 	entitiesCreated := 0
 	relationsCreated := 0
+	// dateBucket 原供旧表 relations.date_bucket —— 旧表停写后已无去处。
 	dateBucket := time.Now().Format("2006-01-02")
+	_ = dateBucket
 
 	for _, t := range triples {
 		if t.Subject == "" || t.Relation == "" || t.Object == "" {
@@ -444,6 +568,29 @@ func (g *GraphDB) commit(triples []Triple, sessionID string, turnID int, trackSe
 		}
 		if !validEntityName(t.Subject) || !validEntityName(t.Object) {
 			continue
+		}
+
+		// ★ 块化写入：三元组 → 「主语块 --关系--> 宾语块」
+		//
+		// 为什么在 commit 里做（而不是让调用方各自块化）：
+		// Commit 有四条调用路径（媒体桥 / memory_commit 工具 / 驻留子 /
+		// 记忆整理流水线），实测只有 memory_commit 工具在活跃写库。
+		// 若各路径自己块化，必然出现「有的路径写块、有的不写」——
+		// 那正是「旧表在长大」（跑分实测 entities 188 → 381）的机制。
+		//
+		// ★ 块 ID 由内容派生 ⇒ 重复提交同一三元组得到同一个块，天然幂等。
+		//
+		// ★ 旧表写入**暂时保留**：Recall 等 55 处调用方仍读它们
+		//   （见 docs/zh/legacy-table-retirement.md），先删会打断在线读取。
+		//   退场顺序是「读方先切块 → 再停写旧表 → 最后删表」。
+		// ★ 原句块 ID：在原句分支里赋值，场景挂载与 contains 边要用。
+		//   （声明提前到循环开头，否则它只在 SentenceText != "" 的分支里可见）
+		var sentenceBlockID string
+
+		srcBlockID, dstBlockID, edgeID, err := putTripleBlocksTx(tx, t, sessionID, turnID)
+		if err != nil {
+			return nil, 0, 0, fmt.Errorf("block triple %s/%s: %w",
+				t.Subject, t.Relation, err)
 		}
 
 		subjType := t.SubjectType
@@ -459,82 +606,104 @@ func (g *GraphDB) commit(triples []Triple, sessionID string, turnID int, trackSe
 			confidence = 1.0
 		}
 
-		ec, err := g.upsertEntity(tx, t.Subject, subjType)
-		if err != nil {
-			return nil, 0, 0, err
-		}
-		entitiesCreated += ec
+		// ★★ 旧表 entities 双写已停（2026-10-04）
+		//
+		// 读方已全部切块，而 entities.type / mention_count 已无处可取
+		// （块侧改用 semantic_type）。
+		//
+		// ★ 代价要说清楚：**entitiesCreated 现在恒为 0，没有意义了**。
+		//   Commit 的返回签名 (entityCount, relationCount, error) 是
+		//   SDK 契约（9 处调用方），改签名会波及一大片 ——
+		//   所以保留位置并置 0，而不是改签名。
+		//   依赖它做判断的调用方（若存在）应改用块侧计数，
+		//   已记入 docs/zh/legacy-table-retirement.md 的待办。
+		_ = subjType
+		_ = objType
 
-		ec, err = g.upsertEntity(tx, t.Object, objType)
-		if err != nil {
-			return nil, 0, 0, err
-		}
-		entitiesCreated += ec
+		// ★★ 旧表 entities 的**读取**也已停（2026-10-04）
+		//
+		// 这两条 SELECT 只为拿旧表行号（sourceID/targetID），
+		// 而它们唯一的用途是写旧表 relations。旧表不写之后，
+		// 查询本身成了纯开销 —— 且在旧表被删后会直接报错。
+		//
+		// ★ 注意它们**必须**先于句块写入被摘掉：
+		//   旧表退场后 `SELECT id FROM entities WHERE name=?`
+		//   会返回 no rows ⇒ Commit 直接失败 ⇒ **记忆完全写不进去**。
+		//   这是「停双写」时最容易漏的一环：读也要停。
 
-		var sourceID, targetID int64
-		err = tx.QueryRow("SELECT id FROM entities WHERE name = ?", t.Subject).Scan(&sourceID)
-		if err != nil {
-			return nil, 0, 0, fmt.Errorf("subject %q: %w", t.Subject, err)
-		}
-		err = tx.QueryRow("SELECT id FROM entities WHERE name = ?", t.Object).Scan(&targetID)
-		if err != nil {
-			return nil, 0, 0, fmt.Errorf("object %q: %w", t.Object, err)
-		}
-
-		// 写入/查找句子
-		var sentenceID int64
+		// 写入/查找句子（★ 现在只建块，不写 sentences 表）
 		if t.SentenceText != "" {
-			_, err = tx.Exec(
-				`INSERT OR IGNORE INTO sentences (text) VALUES (?)`, t.SentenceText)
-			if err != nil {
-				return nil, 0, 0, fmt.Errorf("insert sentence: %w", err)
+			// ★ 原句块：sentences 表退场后，原句由块承载。
+			//
+			// 它必须在**任何分支之外**建 —— 否则「sentence 行插入失败」
+			// 会连带丢掉原句块，而那句原句本身是有效记忆。
+			// 判据 zz_blockcommit_test.go 的②盯的就是这条。
+			// ★ 同样留空时间：原句块的时序由迁移/蒸馏显式指定，
+			//   这里写 now 会覆盖既有值（实测抹平了迁移块的时序）。
+			if err := putBlockTx(tx, NewSentenceBlock(t.SentenceText,
+				time.Time{}, time.Time{})); err != nil {
+				return nil, 0, 0, fmt.Errorf("put sentence block: %w", err)
 			}
-			err = tx.QueryRow("SELECT id FROM sentences WHERE text = ?", t.SentenceText).Scan(&sentenceID)
-			if err != nil {
-				sentenceID = 0
-			} else if sentenceIDs != nil {
-				sentenceIDs[t.SentenceText] = sentenceID
+			sentenceBlockID = SentenceBlockID(t.SentenceText)
+			if sentenceIDs != nil {
+				// ★ 返回原句块 ID 而非 sentences 行号（见 CommitWithMedia 注释）
+				sentenceIDs[t.SentenceText] = sentenceBlockID
 			}
+
+			// ★★ 旧表 sentences 双写已停（2026-10-04）
+			//
+			// 原句改由**原句块**承载（上方 putBlockTx），
+			// 场景引用已改用块 ID（13c3292），不再需要 sentences.id。
+			// 保留旧表写入只会让它持续增长，退场就永远看不到完成信号。
 		}
 
-		var existing int64
-		err = tx.QueryRow(
-			`SELECT id FROM relations WHERE source_id = ? AND target_id = ? AND relation_type = ? AND session_id = ?`,
-			sourceID, targetID, t.Relation, sessionID,
-		).Scan(&existing)
-		var relID int64
-		if err == sql.ErrNoRows {
-			res, ierr := tx.Exec(
-				`INSERT INTO relations (source_id, target_id, relation_type, confidence, session_id, turn_id, date_bucket, sentence_id)
-				 VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
-				sourceID, targetID, t.Relation, confidence, sessionID, turnID, dateBucket, sentenceID,
-			)
-			if ierr != nil {
-				return nil, 0, 0, ierr
-			}
-			relID, _ = res.LastInsertId()
-			relationsCreated++
-		} else if err != nil {
-			return nil, 0, 0, err
-		} else {
-			relID = existing
-			// 同一(会话内)三元组已存在：仅刷新置信度与时间戳，不重复计数
-			_, err = tx.Exec(
-				`UPDATE relations SET confidence = ?, updated_at = CURRENT_TIMESTAMP
-				 WHERE source_id = ? AND target_id = ? AND relation_type = ? AND session_id = ?`,
-				confidence, sourceID, targetID, t.Relation, sessionID,
-			)
-			if err != nil {
-				return nil, 0, 0, err
-			}
-		}
+		// ★★ 旧表 relations 双写已停（2026-10-04）
+		//
+		// 关系改由**关系边**承载，场景引用已改用 edge ID。
+		// 读方已全部切块（scene / Purge / RecallSorted / Introspect /
+		// MergeBlocks / social / sdk / core），旧表只增不减会让
+		// ① 退场永远看不到完成信号 ② 迁移报告的「旧表还剩多少」永不归零。
+		//
+		// ★ 判断依据是**行为**不是语句：判据 Test停双写_旧表不再增长
+		//   逐表比对 Commit 前后的行数。
+		relationsCreated = 0
 
-		// 场景引用：写完关系立即把「关系 + 两端实体」挂到**每个**场景上
+		// 场景引用：写完关系立即把「关系 + 两端块」挂到**每个**场景上
 		// （主动声明的 + 被动涌现的）。同一事务内完成，避免出现「关系写进去了
 		// 但场景引用丢了」——那会让这条记忆在后来的场景里永远召不回来，且无声无息。
-		if relID != 0 {
+		//
+		// ★★ 端点已改为**块**（2026-10-04）
+		//
+		// 旧实现传 relationID（relations.id）与两个 entityID，
+		// 于是 Commit 每写一条关系就在 scene_refs 里生成
+		// kind='relation' + kind='entity' 的引用 ——
+		// 而 entities/relations 退场后这些引用全部悬空，
+		// 且场景式记忆会指向不存在的对象。
+		//
+		// 现在传块 ID：两端 kind='block'，关系边本身 kind='edge'。
+		if srcBlockID != "" || dstBlockID != "" {
+			// ★★ 原句回溯：原句块 --contains--> 关系边
+			//
+			// 旧表靠 relations.sentence_id 外键取原句。sentences 退场后
+			// 这个外键没有了 —— 而**带条件的规则本体长在句子里**，
+			// 只给关系名等于没召回（判据「场景召回必须带原句」盯的就是这条）。
+			//
+			// ★ 方向：原句块 --contains--> 关系边。
+			//   从原句出发能顺着 contains 找到关系，从关系能逆向找到原句
+			//   （BFS 是双向的）。反向（原句块→关系）才是对的：
+			//   「这句里说了什么」是块→边的方向。
+			//
+			// ★ 含时间才能做时序仲裁。
+			if sentenceBlockID != "" && edgeID != 0 {
+				if err := addContainsEdgeTx(tx, sentenceBlockID, edgeID,
+					confidence); err != nil {
+					return nil, 0, 0, fmt.Errorf("contains %s->%d: %w",
+						sentenceBlockID, edgeID, err)
+				}
+			}
 			for _, sc := range effectiveScenes(t) {
-				if err := tagSceneTx(tx, sc, relID, []int64{sourceID, targetID}, confidence); err != nil {
+				if err := tagSceneTripleTx(tx, sc, srcBlockID, dstBlockID,
+					edgeID, confidence); err != nil {
 					return nil, 0, 0, err
 				}
 			}
@@ -556,13 +725,17 @@ func validEntityName(name string) bool {
 	if len(r) < 2 || len(r) > 50 {
 		return false
 	}
-	hasLetter := false
+	// 纯数字串是合法实体值：端口/分机/编号这类属性值的本体就是数字。
+	// 此前把它拒掉导致 commit 静默丢弃（0 写入假成功回执，实测
+	// 2026-10-01 跑分：metrics 端口 8328 / 分机 4379→4324 都因此丢失）。
+	// 但仍禁纯标点/空白串。
+	hasLetterOrDigit := false
 	for _, ch := range r {
-		if (ch >= 'a' && ch <= 'z') || (ch >= 'A' && ch <= 'Z') || (ch >= '\u4e00' && ch <= '\u9fff') || ch == '-' || ch == '_' {
-			hasLetter = true
+		if (ch >= 'a' && ch <= 'z') || (ch >= 'A' && ch <= 'Z') || (ch >= '\u4e00' && ch <= '\u9fff') || ch == '-' || ch == '_' || (ch >= '0' && ch <= '9') {
+			hasLetterOrDigit = true
 		}
 	}
-	return hasLetter
+	return hasLetterOrDigit
 }
 
 // upsertEntity 写入/刷新一个实体，返回 1 表示该实体**通过名校验并被写入或刷新**，
@@ -597,7 +770,56 @@ type RecallResult struct {
 	Relations []Relation `json:"relations"`
 }
 
+// SortMode 决定召回结果的呈现顺序。
+type SortMode string
+
+const (
+	// SortRelevance：按「实词命中层级 → 提及次数 → 名字长度」排序。
+	// 回答「某个具体东西是什么/是多少」用这个 —— 实词精确命中最可信。
+	SortRelevance SortMode = "relevance"
+	// SortRecent：按更新时间倒序，同时间按提及次数。
+	// 回答「最近/最新/现在是什么」用这个 —— 运维场景里答案常常是
+	// 「新值覆盖旧值」（实测 v4 的 overwrite 组就是考这个），
+	// 相关性排序会把旧的同名实体排在新值前面。
+	SortRecent SortMode = "recent"
+)
+
+// ParseSortMode 解析排序模式；空或无法识别时返回默认（相关性）。
+//
+// 刻意不接受任何"看起来像"的字符串：这里只服务显式入参，
+// 认错会让调用方以为自己按时间排序了、实际拿到相关性顺序。
+func ParseSortMode(s string) SortMode {
+	switch strings.ToLower(strings.TrimSpace(s)) {
+	case "recent", "time", "newest":
+		return SortRecent
+	default:
+		return SortRelevance
+	}
+}
+
+// Recall 保持原签名（相关性排序），委托给 RecallSorted。
 func (g *GraphDB) Recall(keywords []string, seedEntities []string, depth int, sessionFilter string) (*RecallResult, error) {
+	// ★ 不传 fingerprint：Recall 是**库层**接口（social / indexer / SDK 都用），
+	//   它不知道当前向量空间是什么 —— 那是 core 层的关注点。
+	//   需要空间隔离的路径（memory_recall 工具）走 RecallSorted 并显式传。
+	return g.RecallSorted(keywords, seedEntities, depth, sessionFilter, "", SortRelevance)
+}
+
+// RecallSorted 是可指定呈现顺序的召回。
+//
+// 截断在**出口**做（深度扩展之后），不是深度扩展之前 —— 扩展会从种子实体
+// 带出新的邻居实体，扩展前截断会让总量再次越界（实测 47 > 20）。
+// ★ fingerprint 是**向量空间隔离键**（2026-10-04）：
+//
+//	非空时只返回 fingerprint 匹配的块。
+//
+//	RecallSorted 是**纯词法**召回（不碰向量），但它不能因此绕过隔离 ——
+//	它是 recallByBlocks 失败后的兜底路，一旦 fallback 到它，
+//	「换向量空间后旧块不能污染结果」这条约束就被绕过了。
+//
+//	判据 TestMemoryRecall_指纹不匹配的块被跳过 当场抓到这一点：
+//	块路因无空间被跳过 → 走兜底 → 兜底把旧空间的块原样返回。
+func (g *GraphDB) RecallSorted(keywords []string, seedEntities []string, depth int, sessionFilter, fingerprint string, mode SortMode) (*RecallResult, error) {
 	g.mu.RLock()
 	defer g.mu.RUnlock()
 
@@ -606,38 +828,61 @@ func (g *GraphDB) Recall(keywords []string, seedEntities []string, depth int, se
 	if len(keywords) == 0 && len(seedEntities) == 0 {
 		// 全量读取仅用于内部整备（Indexer.Sync / 实体合并检测），
 		// 必须加限额：无 LIMIT 时大图会被整表读进内存。
+		// ★★★ 改走块/边体系（2026-10-04）
+		//
+		// 旧实现读 entities + relations。旧表退场后这里返回空 ——
+		// 而这条路径是 Indexer.Sync 的数据源（建向量索引）与
+		// 实体合并检测的唯一入口。它空了，整备就是空转：
+		// 索引里一条向量都没有，而没有任何报错。
+		//
+		// 块侧口径：按 created_at **升序**（旧的是 mention_count DESC 的逆序，
+		// 但全量读取只用于建索引，顺序不影响正确性；命中上限时
+		// 优先取最早的，因为它们更可能是稳定的基础事实）。
 		rows, err := g.db.Query(
-			`SELECT id, name, type, mention_count, created_at, updated_at
-			 FROM entities ORDER BY mention_count DESC LIMIT ?`,
-			maxFullRecallEntities,
+			`SELECT `+blockColumns+` FROM memory_blocks
+			 WHERE text_content != '' AND (? = '' OR fingerprint = ?)
+			 ORDER BY created_at ASC, id ASC LIMIT ?`,
+			fingerprint, fingerprint, maxFullRecallEntities,
 		)
 		if err != nil {
 			return nil, err
 		}
 		defer rows.Close()
 
+		var seq int64
 		for rows.Next() {
-			var e Entity
-			if err := rows.Scan(&e.ID, &e.Name, &e.Type, &e.MentionCount, &e.CreatedAt, &e.UpdatedAt); err != nil {
+			b, err := scanBlockRow(rows)
+			if err != nil {
 				return nil, err
 			}
-			result.Entities = append(result.Entities, e)
+			seq++
+			result.Entities = append(result.Entities, Entity{
+				ID:        seq, // 占位：块 ID 是字符串，Entity.ID 是 int64
+				Name:      b.Text,
+				Type:      blockSemanticType(b),
+				CreatedAt: b.CreatedAt,
+				UpdatedAt: b.UpdatedAt,
+			})
 		}
 		if len(result.Entities) >= maxFullRecallEntities {
 			log.Printf("[graph] full recall 命中实体上限 %d，可能有实体未纳入", maxFullRecallEntities)
 		}
 
 		relRows, err := g.db.Query(
-			`SELECT r.id, r.source_id, r.target_id, e1.name, e2.name,
-					r.relation_type, r.confidence, r.status, r.session_id,
-					r.turn_id, r.created_at, COALESCE(r.date_bucket, ''),
-					COALESCE(r.sentence_id, 0), COALESCE(s.text, '')
-			 FROM relations r
-			 JOIN entities e1 ON r.source_id = e1.id
-			 JOIN entities e2 ON r.target_id = e2.id
-			 LEFT JOIN sentences s ON r.sentence_id = s.id
-			 WHERE r.status = 'active'
-			 ORDER BY r.created_at DESC LIMIT 30`,
+			`SELECT e.id, e.source_id, e.target_id, sb.text_content, tb.text_content,
+					e.edge_type, COALESCE(e.confidence, 0), COALESCE(e.status, ''),
+					COALESCE(e.session_id, ''), COALESCE(e.turn_id, 0), e.created_at,
+					COALESCE((SELECT b.text_content FROM memory_block_edges c
+					          JOIN memory_blocks b ON b.id = c.source_id
+					          WHERE c.target_kind = 'edge' AND c.target_id = e.id
+					            AND c.edge_type = 'contains'
+					          LIMIT 1), '')
+			 FROM memory_block_edges e
+			 JOIN memory_blocks sb ON sb.id = e.source_id
+			 JOIN memory_blocks tb ON tb.id = e.target_id
+			 WHERE e.source_kind = 'block' AND e.target_kind = 'block'
+				  AND COALESCE(e.status, '') = 'active'
+			 ORDER BY e.created_at DESC LIMIT 30`,
 		)
 		if err != nil {
 			return nil, err
@@ -645,10 +890,10 @@ func (g *GraphDB) Recall(keywords []string, seedEntities []string, depth int, se
 		defer relRows.Close()
 		for relRows.Next() {
 			var rel Relation
-			if err := relRows.Scan(&rel.ID, &rel.SourceID, &rel.TargetID,
+			if err := relRows.Scan(&rel.ID, &rel.SourceBlockID, &rel.TargetBlockID,
 				&rel.SourceName, &rel.TargetName, &rel.RelationType,
 				&rel.Confidence, &rel.Status, &rel.SessionID,
-				&rel.TurnID, &rel.CreatedAt, &rel.DateBucket, &rel.SentenceID, &rel.SentenceText); err != nil {
+				&rel.TurnID, &rel.CreatedAt, &rel.SentenceText); err != nil {
 				return nil, err
 			}
 			result.Relations = append(result.Relations, rel)
@@ -657,120 +902,244 @@ func (g *GraphDB) Recall(keywords []string, seedEntities []string, depth int, se
 		return result, nil
 	}
 
-	entityIDs := make(map[int64]bool)
+	// ══════════════════════════════════════════════════════════
+	//  第二分支：关键词 / 种子实体 —— 已改块/边体系（2026-10-04）
+	//
+	//  ★ 这一整块是「int64 实体 ID → 旧表查询」的闭环：
+	//      查 entities 拿 ID → 用 ID 查 relations → 再用关系两端 ID 查 entities。
+	//    块体系里端点是**字符串块 ID**，所以 entityIDs 换成 map[string]bool，
+	//    三处查询全部重写。
+	//
+	//  ★ 它服务的调用方（全部经由 db.Recall）：
+	//      social（人物/特质/关系）  ← 本次改动的直接受害者
+	//      indexer（全量，已在前一分支改完）
+	//      light_memory（透传）
+	//      toolcall（旧路兜底）
+	//
+	//  ★★ 这次改动的实测后果（social 3 个测试当场变红）：
+	//      写侧（Purge）已切块、读侧（这里）还没切 ⇒ 软删的边在旧表里
+	//      仍是 active ⇒ 召回照样返回它。**混合态比全旧态更危险**，
+	//      因为它看起来是「部分成功」。
+	// ══════════════════════════════════════════════════════════
+
+	// entityIDs 的键从 int64 变成**块 ID 字符串**。
+	var bScratch MemoryBlock
+	var vecJSON string
+	var sceneNull sql.NullString
+
+	entityIDs := make(map[string]bool)
+	// entityRank 记「三层精确度」：完全相等 > 前缀命中 > 包含命中。
+	entityRank := make(map[string]int)
+	seq := 0
 
 	for _, kw := range keywords {
-		// 相关度排序 + 限额。
+		if kw == "" {
+			continue
+		}
+		// ★ mention_count 已无处可取（旧表才有），用 created_at 兜底排序：
+		//   先出现的块更可能是稳定的基础事实。
+		// ★ rank 放在 SELECT 的**第一列**，而不是最后。
 		//
-		// 此前这里既没有 ORDER BY 也没有 LIMIT：拿回来的顺序就是建表顺序
-		// （rowid 升序），于是注入进 prompt 的"前 5 个实体"是**最早创建的**，
-		// 越新越准的记忆越排后面被截掉（实测：输入「QQ回复格式」命中 148 个，
-		// 规则实体排第 32，前 5 里根本没有它）。
-		//
-		// 相关度分三层：完全相等 > 前缀命中 > 包含命中；同层按提及次数、
-		// 再按名字长度（短名更可能是实体本身而不是长描述）。
+		//   之前放在 blockColumns 之后 ⇒ scanBlockRow 只吃 15 列，
+		//   多出来的那列无人扫 ⇒ 「expected 16 destination arguments in Scan,
+		//   not 15」。这类错只在真跑 SQL 时暴露，编译期完全看不出来。
 		rows, err := g.db.Query(
-			`SELECT id, name, type, mention_count, created_at, updated_at
-			 FROM entities WHERE LOWER(name) LIKE ?
+			`SELECT CASE
+			          WHEN LOWER(text_content) = LOWER(?) THEN 0
+			          WHEN LOWER(text_content) LIKE LOWER(?) || '%' THEN 1
+			          ELSE 2 END, `+blockColumns+`
+			 FROM memory_blocks
+			 WHERE text_content != '' AND LOWER(text_content) LIKE ?
+			   AND (? = '' OR fingerprint = ?)
 			 ORDER BY CASE
-			     WHEN LOWER(name) = LOWER(?) THEN 0
-			     WHEN LOWER(name) LIKE LOWER(?) || '%' THEN 1
-			     ELSE 2 END,
-			   mention_count DESC, LENGTH(name) ASC
+			         WHEN LOWER(text_content) = LOWER(?) THEN 0
+			         WHEN LOWER(text_content) LIKE LOWER(?) || '%' THEN 1
+			         ELSE 2 END,
+			       created_at DESC, LENGTH(text_content) ASC
 			 LIMIT ?`,
-			"%"+kw+"%", kw, kw, maxKeywordEntities,
+			kw, kw, "%"+strings.ToLower(kw)+"%",
+			fingerprint, fingerprint, kw, kw, maxKeywordEntities,
 		)
 		if err != nil {
 			return nil, err
 		}
 
 		for rows.Next() {
-			var e Entity
-			if err := rows.Scan(&e.ID, &e.Name, &e.Type, &e.MentionCount, &e.CreatedAt, &e.UpdatedAt); err != nil {
+			var rank int
+			// rank 是第 1 列，先扫掉，剩下 15 列正好对上 scanBlockRow。
+			if err := rows.Scan(&rank, &bScratch.ID, &bScratch.Modality,
+				&bScratch.Text, &bScratch.PayloadDigest, &bScratch.MIME,
+				&bScratch.Size, &bScratch.Width, &bScratch.Height, &vecJSON,
+				&bScratch.Fingerprint, &bScratch.Source, &bScratch.Tool,
+				&sceneNull, &bScratch.SemanticType,
+				&bScratch.CreatedAt, &bScratch.UpdatedAt); err != nil {
 				rows.Close()
 				return nil, err
 			}
-			if !entityIDs[e.ID] {
-				entityIDs[e.ID] = true
+			b := bScratch
+			seq++
+			e := Entity{
+				ID:        int64(seq),
+				Name:      b.Text,
+				Type:      blockSemanticType(b),
+				CreatedAt: b.CreatedAt,
+				UpdatedAt: b.UpdatedAt,
+			}
+			if prev, ok := entityRank[b.ID]; !ok || rank < prev {
+				entityRank[b.ID] = rank
+			}
+			if !entityIDs[b.ID] {
+				entityIDs[b.ID] = true
+				e.blockKey = b.ID
 				result.Entities = append(result.Entities, e)
 			}
 		}
 		rows.Close()
 	}
 
+	// 种子实体：按名**精确**命中（不区分大小写，与旧实现一致）。
 	for _, se := range seedEntities {
-		row := g.db.QueryRow(
-			`SELECT id, name, type, mention_count, created_at, updated_at
-			 FROM entities WHERE name = ?`, se)
-		var e Entity
-		if err := row.Scan(&e.ID, &e.Name, &e.Type, &e.MentionCount, &e.CreatedAt, &e.UpdatedAt); err == nil {
-			if !entityIDs[e.ID] {
-				entityIDs[e.ID] = true
-				result.Entities = append(result.Entities, e)
+		if se == "" {
+			continue
+		}
+		rows, err := g.db.Query(
+			`SELECT `+blockColumns+` FROM memory_blocks
+			 WHERE text_content = ? AND (? = '' OR fingerprint = ?) LIMIT 1`,
+			se, fingerprint, fingerprint)
+		if err != nil {
+			return nil, err
+		}
+		for rows.Next() {
+			b, err := scanBlockRow(rows)
+			if err != nil {
+				rows.Close()
+				return nil, err
+			}
+			if !entityIDs[b.ID] {
+				seq++
+				entityIDs[b.ID] = true
+				entityRank[b.ID] = 0
+				result.Entities = append(result.Entities, Entity{
+					ID:        int64(seq),
+					Name:      b.Text,
+					Type:      blockSemanticType(b),
+					CreatedAt: b.CreatedAt,
+					UpdatedAt: b.UpdatedAt,
+					blockKey:  b.ID,
+				})
 			}
 		}
+		rows.Close()
 	}
 
 	if len(entityIDs) == 0 {
 		return result, nil
 	}
 
-	// seenRel 跨层去重。
+	// ★ 全局上限：跨关键词累加后按「三层精确度」截断。
 	//
-	// 每层都用**已累积的** entityIDs 查邻接关系，因此上一层刚产出、以及
-	// 两个已访问实体之间的关系会在下一层被重复查回并再次 append。
-	// 深度 2、稠密图上重复会淹没 memory_recall 的 10 条关系预算——
-	// 模型看到的是同一句话刷屏，真正的新关系被截断。
+	// 单个关键词的 LIMIT(maxKeywordEntities) 管不住总量 —— 多个关键词各召回
+	// 一批会累加，实测 3 个关键词就能堆到 193 个实体（13744 tokens）。
+	// 这里按三层精确度（完全相等 > 前缀命中 > 包含命中）跨关键词归并后截断。
+
 	seenRel := make(map[int64]bool)
 
+	// ★★ 深度扩展
+	//
+	// 旧实现每层用「已累积的 entityIDs」查邻接关系 ——
+	// ★★ 那个设计是错的：entityIDs 累积的是**实体**，
+	//    而一层扩展的正确语义是「上一层新发现的实体的邻居」。
+	//    用累积集会让第 2 层把第 0 层见过的实体再查一遍，
+	//    于是深度形同虚设（判据 TestRecallSorted_深度扩展 抓到：
+	//    depth=2 拿不到「丙」，而甲→乙→丙→丁 是 3 跳链）。
+	//
+	// 现在：frontier = 上一层新发现的块；每层只从 frontier 扩展。
+	// prevFrontier 是本层的扩展起点；每轮结束时被 newIDs 替换。
+	prevFrontier := entityIDs
 	for depthLevel := 0; depthLevel < depth; depthLevel++ {
-		ids := make([]interface{}, 0, len(entityIDs))
-		for id := range entityIDs {
+		if len(prevFrontier) == 0 {
+			break
+		}
+		// ★ 起点集合必须是「**本层之前**新发现的块」，不是 entityIDs 全集。
+		//
+		// 我先写成 entityIDs（累积集），那等于「每层从所有已知点重新扩一遍」——
+		// 深度形同虚设，而且第一层就把 2 跳邻居全拉进来了。
+		//
+		// prevFrontier 由上一轮的 newIDs 赋值；depthLevel==0 时用种子命中集。
+		frontier := prevFrontier
+
+		ids := make([]interface{}, 0, len(frontier))
+		for id := range frontier {
 			ids = append(ids, id)
 		}
-
 		if len(ids) == 0 {
 			break
 		}
 
-		query := fmt.Sprintf(
-			`SELECT r.id, r.source_id, r.target_id, e1.name, e2.name,
-					r.relation_type, r.confidence, r.status, r.session_id,
-					r.turn_id, r.created_at, COALESCE(r.date_bucket, ''),
-					COALESCE(r.sentence_id, 0), COALESCE(s.text, '')
-			 FROM relations r
-			 JOIN entities e1 ON r.source_id = e1.id
-			 JOIN entities e2 ON r.target_id = e2.id
-			 LEFT JOIN sentences s ON r.sentence_id = s.id
-			 WHERE (r.source_id IN (%s) OR r.target_id IN (%s))
-			   AND r.status = 'active'`,
-			placeholders(len(ids)),
-			placeholders(len(ids)),
-		)
-		allIDs := append(ids, ids...)
-
+		ph := placeholders(len(ids))
+		relQuery := fmt.Sprintf(
+			`SELECT e.id, e.source_id, e.target_id, sb.text_content, tb.text_content,
+			        e.edge_type, COALESCE(e.confidence,0), COALESCE(e.status,''),
+			        COALESCE(e.session_id,''), COALESCE(e.turn_id,0), e.created_at,
+			        COALESCE((SELECT b.text_content FROM memory_block_edges c
+			                  JOIN memory_blocks b ON b.id = c.source_id
+			                  WHERE c.target_kind='edge' AND c.target_id = e.id
+			                    AND c.edge_type='contains' LIMIT 1), '')
+			 FROM memory_block_edges e
+			 JOIN memory_blocks sb ON sb.id = e.source_id
+			 JOIN memory_blocks tb ON tb.id = e.target_id
+			 WHERE (e.source_id IN (%s) OR e.target_id IN (%s))
+			   AND e.source_kind='block' AND e.target_kind='block'
+			   AND e.edge_type != 'contains'
+			   AND COALESCE(e.status,'') = 'active'`, ph, ph)
+		args := append(append([]interface{}{}, ids...), ids...)
 		if sessionFilter != "" {
-			query += " AND r.session_id = ?"
-			allIDs = append(allIDs, sessionFilter)
+			relQuery += " AND COALESCE(e.session_id,'') = ?"
+			args = append(args, sessionFilter)
 		}
-		// 每层限额：热实体（"文档"这类）的邻接可能是上千条，无上限时每层都
-		// 整片读进内存，而调用方（memory_recall 注入 10 条、自动注入只要实体名）
-		// 根本用不到。按置信度取最相关的一批。
-		query += " ORDER BY r.confidence DESC, r.updated_at DESC LIMIT ?"
-		allIDs = append(allIDs, maxAdjacentRelations)
+		// ★★ 排序口径必须交给 sortRecallRelations，不能在 SQL 里预设（2026-10-04）
+		//
+		//   我写了 `ORDER BY e.created_at DESC`，看起来无害 ——
+		//   实际上它让**两种 SortMode 的结果完全相同**：
+		//   sortRecallRelations 对 SortRelevance 直接 return（不排序），
+		//   于是「相关性」模式实际拿到的是「时间倒序」。
+		//
+		//   判据 TestRecall_时间倒序_变异_相关性模式顺序不同 当场抓住：
+		//   它是**变异自证** —— 断言「相关性模式下顺序必须不同于时间模式」，
+		//   一旦两者相同就说明上一个测试的判据不可信。
+		//
+		// ★★ SortRelevance 需要自己的顺序依据（2026-10-04）
+		//
+		//   sortRecallRelations 对 SortRelevance 直接 return —— 前提是
+		//   「SQL 已按种子实体的相关性排过」。
+		//
+		// ★ 那个前提在我改写时不成立：无 ORDER BY 时 SQLite 按 rowid 走，
+		//   而 rowid = 插入顺序 = 时间顺序 ⇒
+		//   相关性模式实际拿到的是时间倒序，两种 SortMode 完全同序。
+		//
+		//   判据（变异自证）当场抓住：它断言「相关性模式下顺序必须不同于
+		//   时间模式」，两者一相同就说明上一个测试的判据不可信。
+		//
+		//   相关性的可用信号只有 confidence（边自带），用它兜底：
+		//   同分时保持插入序，于是「高置信在前」可区分于「新的在前」。
+		if mode != SortRecent {
+			relQuery += " ORDER BY e.confidence DESC, e.id ASC"
+		} else {
+			relQuery += " ORDER BY e.created_at DESC, e.turn_id DESC, e.id DESC"
+		}
 
-		relRows, err := g.db.Query(query, allIDs...)
+		relRows, err := g.db.Query(relQuery, args...)
 		if err != nil {
 			return nil, err
 		}
 
-		newIDs := make(map[int64]bool)
+		newIDs := make(map[string]bool)
 		for relRows.Next() {
 			var rel Relation
-			if err := relRows.Scan(&rel.ID, &rel.SourceID, &rel.TargetID,
+			if err := relRows.Scan(&rel.ID, &rel.SourceBlockID, &rel.TargetBlockID,
 				&rel.SourceName, &rel.TargetName, &rel.RelationType,
 				&rel.Confidence, &rel.Status, &rel.SessionID,
-				&rel.TurnID, &rel.CreatedAt, &rel.DateBucket, &rel.SentenceID, &rel.SentenceText); err != nil {
+				&rel.TurnID, &rel.CreatedAt, &rel.SentenceText); err != nil {
 				relRows.Close()
 				return nil, err
 			}
@@ -778,12 +1147,11 @@ func (g *GraphDB) Recall(keywords []string, seedEntities []string, depth int, se
 				seenRel[rel.ID] = true
 				result.Relations = append(result.Relations, rel)
 			}
-
-			if !entityIDs[rel.SourceID] {
-				newIDs[rel.SourceID] = true
+			if !entityIDs[rel.SourceBlockID] {
+				newIDs[rel.SourceBlockID] = true
 			}
-			if !entityIDs[rel.TargetID] {
-				newIDs[rel.TargetID] = true
+			if !entityIDs[rel.TargetBlockID] {
+				newIDs[rel.TargetBlockID] = true
 			}
 		}
 		relRows.Close()
@@ -791,39 +1159,65 @@ func (g *GraphDB) Recall(keywords []string, seedEntities []string, depth int, se
 		if len(newIDs) == 0 {
 			break
 		}
+		// ★ 下一层从这批新块出发 —— 这是「深度」真正生效的地方。
+		prevFrontier = newIDs
 
+		// 取出新实体的块内容 —— 块 ID 就是主键，直接查一次。
 		ids2 := make([]interface{}, 0, len(newIDs))
 		for id := range newIDs {
 			ids2 = append(ids2, id)
 		}
-
 		eRows, err := g.db.Query(
-			fmt.Sprintf(
-				`SELECT id, name, type, mention_count, created_at, updated_at
-				 FROM entities WHERE id IN (%s)`, placeholders(len(ids2))),
+			fmt.Sprintf(`SELECT `+blockColumns+` FROM memory_blocks WHERE id IN (%s)`,
+				placeholders(len(ids2))),
 			ids2...,
 		)
 		if err != nil {
 			return nil, err
 		}
-
 		for eRows.Next() {
-			var e Entity
-			if err := eRows.Scan(&e.ID, &e.Name, &e.Type, &e.MentionCount, &e.CreatedAt, &e.UpdatedAt); err != nil {
+			b, err := scanBlockRow(eRows)
+			if err != nil {
 				eRows.Close()
 				return nil, err
 			}
-			if !entityIDs[e.ID] {
-				entityIDs[e.ID] = true
-				result.Entities = append(result.Entities, e)
+			if !entityIDs[b.ID] {
+				seq++
+				entityIDs[b.ID] = true
+				entityRank[b.ID] = 3 // 深度扩展来的，精度最低
+				result.Entities = append(result.Entities, Entity{
+					ID:        int64(seq),
+					Name:      b.Text,
+					Type:      blockSemanticType(b),
+					CreatedAt: b.CreatedAt,
+					UpdatedAt: b.UpdatedAt,
+					blockKey:  b.ID,
+				})
 			}
 		}
 		eRows.Close()
+	}
 
-		for id := range newIDs {
-			entityIDs[id] = true
+	// ★ 出口排序 + 全局截断（在深度扩展之后）。
+	//
+	// 深度扩展会从种子实体带出新的邻居实体，所以上限必须在出口施加。
+	// ★ entityRank 的键要从块 ID 映射回 Entity.ID：
+	//   sortRecallEntities 按 ents[i].ID 建索引，而 Entity.ID 现在是
+	//   「本次召回内的序号」（块 ID 是字符串，放不进 int64）。
+	//   序号在本次调用内唯一，所以映射是一一对应的。
+	rankBySeq := make(map[int64]int, len(result.Entities))
+	for i := range result.Entities {
+		if r, ok := entityRank[result.Entities[i].blockKey]; ok {
+			rankBySeq[result.Entities[i].ID] = r
 		}
 	}
+	sortRecallEntities(result.Entities, rankBySeq, keywords, mode)
+	if len(result.Entities) > maxRecallEntities {
+		dropped := len(result.Entities) - maxRecallEntities
+		result.Entities = result.Entities[:maxRecallEntities]
+		log.Printf("[graph] recall: 截断 %d 个实体（全局上限 %d）", dropped, maxRecallEntities)
+	}
+	sortRecallRelations(result.Relations, mode)
 
 	return result, nil
 }
@@ -840,12 +1234,31 @@ func (g *GraphDB) ExportTriples(limit int) ([]Triple, error) {
 	g.mu.RLock()
 	defer g.mu.RUnlock()
 
-	q := `SELECT s.name, r.relation_type, t.name, r.confidence
-	        FROM relations r
-	        JOIN entities s ON s.id = r.source_id
-	        JOIN entities t ON t.id = r.target_id
-	       WHERE r.status = 'active'
-	       ORDER BY r.id`
+	// ★★★ 改走块/边体系（2026-10-04）
+	//
+	// 原实现读 relations JOIN entities。旧表停双写后这两张表**不再增长**，
+	// 而子 agent 的 temp 库恰恰是靠 Commit 写入的 ——
+	// ⇒ ExportTriples 返回空 ⇒ 回收（ReclaimResident）合入 0 条
+	// ⇒ **驻留子 agent 的记忆回收功能静默失效**。
+	//
+	// 判据：TestResident_ContextFullAndDispositions ④
+	// 「回收应把选中的 temp 记录合入主记忆」当场变红。
+	//
+	// ★ 这也说明「零调用点的读方」不等于「不重要的读方」：
+	//   ExportTriples 只被 resident.go 用，而 resident 是一条完整产品线。
+	q := `SELECT sb.text_content, e.edge_type, tb.text_content,
+	             COALESCE(e.confidence, 0),
+	             COALESCE((SELECT b.text_content FROM memory_block_edges c
+	                         JOIN memory_blocks b ON b.id = c.source_id
+	                         WHERE c.target_kind = 'edge' AND c.target_id = e.id
+	                           AND c.edge_type = 'contains' LIMIT 1), '')
+	      FROM memory_block_edges e
+	      JOIN memory_blocks sb ON sb.id = e.source_id
+	      JOIN memory_blocks tb ON tb.id = e.target_id
+	     WHERE e.source_kind = 'block' AND e.target_kind = 'block'
+	       AND e.edge_type != 'contains'
+	       AND COALESCE(e.status, '') = 'active'
+	     ORDER BY e.id`
 	args := []interface{}{}
 	if limit > 0 {
 		q += " LIMIT ?"
@@ -860,7 +1273,8 @@ func (g *GraphDB) ExportTriples(limit int) ([]Triple, error) {
 	var out []Triple
 	for rows.Next() {
 		var tr Triple
-		if err := rows.Scan(&tr.Subject, &tr.Relation, &tr.Object, &tr.Confidence); err != nil {
+		if err := rows.Scan(&tr.Subject, &tr.Relation, &tr.Object,
+			&tr.Confidence, &tr.SentenceText); err != nil {
 			return nil, err
 		}
 		out = append(out, tr)
@@ -872,92 +1286,118 @@ func (g *GraphDB) Purge(criteria map[string]string, mode string) (int, error) {
 	g.mu.Lock()
 	defer g.mu.Unlock()
 
-	conds := []string{"status = 'active'"}
+	// ★★★ 改走块/边体系（2026-10-04）
+	//
+	// 旧实现查 entities 拿 id、拼 relations 的 where、删/软删 relations，
+	// 最后 purgeStaleSceneRefsLocked。旧表退场后这条路全断 ——
+	// 而 Purge 有 9 处调用方（webui / healthcheck / SDK / toolcall×2 /
+	// social×2 / lua / proc），它是**记忆删除的主路径**：
+	// 用户说「忘掉这条」而它删不动，等于没有删除功能。
+	//
+	// 块体系里的等价物：
+	//
+	//	subject_contains → 按块文本 LIKE 找源块 ID
+	//	target_contains  → 按块文本 LIKE 找目标块 ID
+	//	relation_type    → edge_type
+	//	session_id       → session_id
+	//
+	// ★ 端点是**块 ID 字符串**，所以 IN 列表的参数类型从 int64 变 string。
+	// ★ status 口径：软删写 'deleted'；硬删直接 DELETE。
+	//   两者都紧跟 purgeStaleSceneRefsLocked —— 否则场景里会挂一条
+	//   永远召不回的幽灵，而 SceneStats 还照样把它算进去。
+
+	if _, ok := criteria["subject_contains"]; !ok {
+		if _, ok := criteria["target_contains"]; !ok {
+			if _, ok := criteria["relation_type"]; !ok {
+				if _, ok := criteria["session_id"]; !ok {
+					return 0, fmt.Errorf("no criteria provided")
+				}
+			}
+		}
+	}
+
+	// 收集要匹配的端点块 ID（可能同时来自 subject 与 target）
+	var endpointConds []string
+	var endpointArgs []interface{}
+
+	for _, spec := range []struct{ key, col string }{
+		{"subject_contains", "source_id"},
+		{"target_contains", "target_id"},
+	} {
+		v, ok := criteria[spec.key]
+		if !ok {
+			continue
+		}
+		blocks, err := g.blocksByTextLikeTx(v)
+		if err != nil {
+			return 0, err
+		}
+		if len(blocks) == 0 {
+			// ★ 匹配不到块 ⇒ 没有任何边可删。
+			//   返回 0 而不是构造恒假条件 —— 后者会让「删 0 条」
+			//   与「条件写错了」在返回值上无法区分。
+			return 0, nil
+		}
+		ids := make([]interface{}, 0, len(blocks))
+		for _, b := range blocks {
+			ids = append(ids, b.ID)
+		}
+		endpointConds = append(endpointConds,
+			fmt.Sprintf("%s IN (%s)", spec.col, placeholders(len(ids))))
+		endpointArgs = append(endpointArgs, ids...)
+	}
+
+	conds := []string{"source_kind = 'block'", "target_kind = 'block'"}
 	args := []interface{}{}
-
-	if v, ok := criteria["subject_contains"]; ok {
-		rows, err := g.db.Query("SELECT id FROM entities WHERE name LIKE ?", "%"+v+"%")
-		if err != nil {
-			return 0, err
-		}
-		var ids []interface{}
-		for rows.Next() {
-			var id int64
-			rows.Scan(&id)
-			ids = append(ids, id)
-		}
-		rows.Close()
-		if len(ids) > 0 {
-			conds = append(conds, fmt.Sprintf("source_id IN (%s)", placeholders(len(ids))))
-			args = append(args, ids...)
-		}
-	}
-
-	if v, ok := criteria["target_contains"]; ok {
-		rows, err := g.db.Query("SELECT id FROM entities WHERE name LIKE ?", "%"+v+"%")
-		if err != nil {
-			return 0, err
-		}
-		var ids []interface{}
-		for rows.Next() {
-			var id int64
-			rows.Scan(&id)
-			ids = append(ids, id)
-		}
-		rows.Close()
-		if len(ids) > 0 {
-			conds = append(conds, fmt.Sprintf("target_id IN (%s)", placeholders(len(ids))))
-			args = append(args, ids...)
-		}
-	}
+	conds = append(conds, endpointConds...)
+	args = append(args, endpointArgs...)
 
 	if v, ok := criteria["relation_type"]; ok {
-		conds = append(conds, "relation_type = ?")
+		conds = append(conds, "edge_type = ?")
 		args = append(args, v)
 	}
-
 	if v, ok := criteria["session_id"]; ok {
-		conds = append(conds, "session_id = ?")
+		conds = append(conds, "COALESCE(session_id, '') = ?")
 		args = append(args, v)
 	}
 
-	if len(conds) == 1 {
-		return 0, fmt.Errorf("no criteria provided")
+	// ★ 只有「仅按 session/relation_type 删」时不限定 status；
+	//   带端点条件时也限定 active —— 否则重复调用会反复命中已软删的行，
+	//   计数虚高而实际什么都没删。
+	if _, hasEndpoint := criteria["subject_contains"]; hasEndpoint {
+		conds = append(conds, "COALESCE(status, '') != 'deleted'")
+	} else if _, hasEndpoint := criteria["target_contains"]; hasEndpoint {
+		conds = append(conds, "COALESCE(status, '') != 'deleted'")
 	}
 
-	where := ""
-	for i, c := range conds {
-		if i == 0 {
-			where = c
-		} else {
-			where += " AND " + c
-		}
-	}
+	where := strings.Join(conds, " AND ")
 
 	if mode == "hard" {
 		result, err := g.db.Exec(
-			fmt.Sprintf(`DELETE FROM relations WHERE %s`, where), args...)
+			fmt.Sprintf(`DELETE FROM memory_block_edges WHERE %s`, where), args...)
 		if err != nil {
 			return 0, err
 		}
 		n, _ := result.RowsAffected()
 
-		// 这里**不再**顺手全局删孤儿实体。
+		// ★ 这里**不再**顺手全局删孤儿块。
 		//
-		// 原来那句 `DELETE FROM entities WHERE id NOT IN (relations 两端)` 是与
-		// 调用方意图无关的全局副作用：memory_edit 只想去掉一条关系，却可能把
-		// 图里其它孤零零的实体一并清掉。孤儿清理交给 PurgeOrphans
-		// （显式、可 dry-run、有计数与审计），一次改动只做一件事。
+		// 与旧实现同一条纪律：孤儿清理是独立意图，
+		// 混进删除路径会让「删一条边」清掉全图的孤块。
 		//
-		// 关系没了，它的场景引用必须跟着对齐：残留引用会让场景看着很大、
+		// 边没了，它的场景引用必须跟着对齐：残留引用会让场景看着很大、
 		// 召回却是空的（SceneStats 也跟着说谎）。
 		g.purgeStaleSceneRefsLocked()
 
 		return int(n), nil
 	}
 
+	// ★ 不能写 updated_at：memory_block_edges **没有**这一列
+	//   （升格成独立边时只加了 confidence/session/turn/status/merged_into）。
+	//   旧 relations 表有，所以这个字段是照抄过来的 ——
+	//   一旦旧表删掉、这里不改，Purge 软删会直接报 no such column。
 	result, err := g.db.Exec(
-		fmt.Sprintf(`UPDATE relations SET status = 'deleted', updated_at = CURRENT_TIMESTAMP WHERE %s`, where),
+		fmt.Sprintf(`UPDATE memory_block_edges SET status = 'deleted' WHERE %s`, where),
 		args...,
 	)
 	if err != nil {
@@ -968,6 +1408,34 @@ func (g *GraphDB) Purge(criteria map[string]string, mode string) (int, error) {
 	// 留着引用只会在场景里挂一条永远召不回的幽灵。
 	g.purgeStaleSceneRefsLocked()
 	return int(n), nil
+}
+
+// blocksByTextLikeTx 按文本子串取块（调用方已持锁）。
+//
+// 与 BlockTextsLike 同语义，供**已持锁**的删除路径复用 ——
+// 持锁路径不能调 BlockTextsLike（它自己要拿锁）。
+func (g *GraphDB) blocksByTextLikeTx(fragment string) ([]MemoryBlock, error) {
+	fragment = strings.TrimSpace(fragment)
+	if fragment == "" {
+		return nil, nil
+	}
+	rows, err := g.db.Query(
+		`SELECT `+blockColumns+` FROM memory_blocks
+		 WHERE text_content LIKE ? ESCAPE '\' ORDER BY id`,
+		"%"+escapeLike(fragment)+"%")
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []MemoryBlock
+	for rows.Next() {
+		b, err := scanBlockRow(rows)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, b)
+	}
+	return out, rows.Err()
 }
 
 func (g *GraphDB) GraphData() (map[string]interface{}, error) {
@@ -1029,8 +1497,7 @@ func (g *GraphDB) GraphData() (map[string]interface{}, error) {
 		return nil, err
 	}
 
-	brows, err := g.db.Query(`SELECT id, modality, text_content, payload_digest, mime,
-		size, width, height, vector, fingerprint, source, tool, created_at, updated_at
+	brows, err := g.db.Query(`SELECT ` + blockColumns + `
 		FROM memory_blocks ORDER BY created_at, id`)
 	if err != nil {
 		return nil, err
@@ -1040,9 +1507,13 @@ func (g *GraphDB) GraphData() (map[string]interface{}, error) {
 	for brows.Next() {
 		var block MemoryBlock
 		var vectorJSON string
+		// ★ 这条 Scan 历史上就少扫了 scene（SELECT 用 blockConstants 改了，
+		//   Scan 却没跟上）—— 与 semantic_type 是同一类错，
+		//   报错形如「expected 16 destination arguments in Scan, not 14」。
 		if err := brows.Scan(&block.ID, &block.Modality, &block.Text, &block.PayloadDigest,
 			&block.MIME, &block.Size, &block.Width, &block.Height, &vectorJSON,
-			&block.Fingerprint, &block.Source, &block.Tool, &block.CreatedAt,
+			&block.Fingerprint, &block.Source, &block.Tool, &block.Scene,
+			&block.SemanticType, &block.CreatedAt,
 			&block.UpdatedAt); err != nil {
 			return nil, err
 		}
@@ -1084,17 +1555,105 @@ func (g *GraphDB) GraphData() (map[string]interface{}, error) {
 	}, nil
 }
 
+// CountSentences 返回 sentences 表的行数（只读）。
+//
+// ★ 用途：方案 A 的退场判据
+// ------------------------
+// 蒸馏已不写该表（WritePayload 改用原句块承载原句），
+// 而迁移仍会写它（MigrateLegacyTextEntities 建 sentence→block 边）。
+// 所以「sentences 是否清零」是判断退场是否完成的可观察信号 ——
+// 给它一个明确的只读接口，而不是让调用方猜 SQL 或翻 schema。
+func (g *GraphDB) CountSentences() (int, error) {
+	g.mu.RLock()
+	defer g.mu.RUnlock()
+	var n int
+	err := g.db.QueryRow(`SELECT COUNT(*) FROM sentences`).Scan(&n)
+	return n, err
+}
+
 func (g *GraphDB) Introspect() (map[string]interface{}, error) {
 	g.mu.RLock()
 	defer g.mu.RUnlock()
 
 	var entityCount, relationCount int
-	g.db.QueryRow("SELECT COUNT(*) FROM entities").Scan(&entityCount)
-	g.db.QueryRow("SELECT COUNT(*) FROM relations WHERE status = 'active'").Scan(&relationCount)
+	// ★★★ entity_count 必须数**块**而不是旧表 entities（2026-10-05）
+	//
+	// 旧表停双写 ⇒ 这句恒为 0 ⇒ Introspect 报告「库里没有记忆」
+	// 而实际有几千条。实测（隔离实例，380 块）工具回：
+	//
+	//	记忆统计: map[entity_count:0 memory_hotspots:[map[count:15 name:order-gw ...]]
+	//
+	// ★ 同一个输出里 entity_count=0 而 hotspots 有真实度数 ——
+	//   **半个旧表半个块表**，模型看到的是自相矛盾的统计，
+	//   于是会得出「记忆是空的」而放弃写入。
+	//
+	// ★ 口径对齐下面两处（relation_count / hotspots 都已数块）。
+	//
+	// ★ 为什么不数全表块：块表含**原句块**（blk_src_*）与媒体块，
+	//   它们不是「实体」。entity_count 的语义是端点块数
+	//   （即三元组的主语/宾语），所以排除原句块与 contains 结构边。
+	g.db.QueryRow(
+		`SELECT COUNT(*) FROM memory_blocks
+		 WHERE text_content != ''
+		   AND COALESCE(modality,'') = 'text'`).Scan(&entityCount)
+	// ★ relation_count 保持**活跃数**语义（status='active'）。
+	//
+	// 第一版为对齐迁移口径改成数全表（因为 MigrateLegacyTextEntities
+	// 按 `ORDER BY id` 遍历全表、不按 status 过滤，而报告只数 active，
+	// 导致「预计产出 块边 966」实际写入 980）。
+	//
+	// ★ 但那个修法是错的：relation_count 是**通用统计字段**，
+	//   Purge("soft") 会把 status 置为 'deleted'，而 TestPurgeSoft
+	//   断言软删除后 relation_count == 0。改成数全表后软删除失效，
+	//   该测试失败 —— 它在我这次改动之前是绿的。
+	//
+	// 正确修法：**两处口径分开**。
+	//   - Introspect 的 relation_count = 活跃数（语义不变，各调用方依赖）
+	//   - 迁移报告要的是「会转换多少条」= 全表数，另开一个字段
+	// ★★★ 改数块/边（2026-10-04）
+	//
+	// 旧表退场后这两句恒为 0 ⇒ Introspect 报告「库里没有记忆」
+	// 而实际有几千条。它是 healthcheck 与 WebUI 状态页的数据源 ——
+	// **报告说谎比报错更坏**（没人会去查）。
+	//
+	// ★ 口径对齐（沿用此前定的语义分离）：
+	//   relation_count  = 活跃关系边（status='active'，不含 contains 结构边）
+	//   relations_total = 全部关系边（含 soft-deleted）
+	//
+	// ★ 排除 contains：那是结构边（原句块 → 关系边），
+	//   计数它会让「关系数」随原句数量翻倍。
+	g.db.QueryRow(
+		`SELECT COUNT(*) FROM memory_block_edges
+		 WHERE source_kind='block' AND target_kind='block'
+		   AND edge_type != 'contains' AND COALESCE(status,'')='active'`).Scan(&relationCount)
+	// relations_total 是**全表**关系数（不过滤 status）——
+	// 迁移报告用它，因为 MigrateLegacyTextEntities 会转换全表。
+	var relationsTotal int
+	g.db.QueryRow(
+		`SELECT COUNT(*) FROM memory_block_edges
+		 WHERE source_kind='block' AND target_kind='block'
+		   AND edge_type != 'contains'`).Scan(&relationsTotal)
 
 	hotspots := []map[string]interface{}{}
+	// ★★ hotspots 改数**块**（2026-10-04）
+	//
+	// 旧实现读 entities 并按 mention_count 排序 ——
+	// 而旧表双写已停，那张表不再增长 ⇒ hotspots 永远是迁移时的快照，
+	// 而真实热点（哪些块被引用最多）已经变了。
+	//
+	// ★ 排序口径换成**关系边度数**：一个块被越多关系边指向，
+	//   它在图里越重要 —— 这正是 hotspots 想回答的问题。
+	//   mention_count 已无处可取（旧表专有）。
 	rows, err := g.db.Query(
-		`SELECT name, mention_count, type FROM entities ORDER BY mention_count DESC LIMIT 10`,
+		`SELECT b.text_content,
+		        COALESCE((SELECT COUNT(*) FROM memory_block_edges e
+		                   WHERE (e.source_id = b.id OR e.target_id = b.id)
+		                     AND COALESCE(e.status,'') != 'deleted'), 0) AS deg,
+		        COALESCE(b.semantic_type, '') AS typ
+		 FROM memory_blocks b
+		 WHERE b.text_content != ''
+		 ORDER BY deg DESC, b.created_at ASC
+		 LIMIT 10`,
 	)
 	if err == nil {
 		defer rows.Close()
@@ -1110,8 +1669,11 @@ func (g *GraphDB) Introspect() (map[string]interface{}, error) {
 	}
 
 	return map[string]interface{}{
-		"entity_count":    entityCount,
-		"relation_count":  relationCount,
+		"entity_count":   entityCount,
+		"relation_count": relationCount,
+		// relations_total 不过滤 status。★ 迁移报告必须用它 ——
+		// MigrateLegacyTextEntities 转换全表，用 active 会少报。
+		"relations_total": relationsTotal,
 		"memory_hotspots": hotspots,
 	}, nil
 }
@@ -1122,129 +1684,214 @@ func (g *GraphDB) Introspect() (map[string]interface{}, error) {
 // 3. sourceName 彻底删除（不再残留 @merged_ 实体）
 // 返回 (关系的重定向数, error)
 func (g *GraphDB) MergeEntities(sourceName, targetName string) (int, error) {
+	// ★ 委托给 MergeBlocks（2026-10-04）
+	//
+	// 旧实现在这里直接操作 entities/relations（85 行），块侧完全不动。
+	// 后果：改名后「张先生」的块还叫「张先生」，召回照样命中它 ——
+	// 判据 TestMergeEntities 就是这么红的（「should be merged and hidden」）。
+	//
+	// ★ 对外签名保持不变（source, target string）→ (int, error)：
+	//   它是 SDK 公开接口（sdk/memory.go 的 Memory 接口），
+	//   有 5 个调用方（sdk / toolcall / lua / proc / mocksdk）。
+	//   改名会连带改 SDK 契约，那是另一次变更。
+	//
+	// ★ 返回值语义也保持：重定向的边数。
+	return g.MergeBlocks(sourceName, targetName)
+}
+
+// ★★★ 改走块/边体系（2026-10-04，删块口径由用户明定）
+//
+// 旧实现三句 SQL 全在 entities/relations 上：
+//
+//	SELECT id FROM entities WHERE name = ?
+//	DELETE FROM relations WHERE source_id = ? OR target_id = ?
+//	DELETE FROM entities WHERE id = ?
+//
+// 而旧表在停双写（c2bf963）后**不再增长** —— 于是这个函数是**纯空转**：
+//
+//	memory_blocks      Δ0
+//	memory_block_edges Δ0
+//
+// ★ 危害不是「删不干净」，是**谎报**：工具层回「已彻底删除实体…及其所有关联关系」，
+//
+//	模型据此认为内容已消失（不再提及、或重新写入），
+//	而 40+ 条关联边还在，后续召回继续命中它。
+//	这比留残迹严重一级：残迹只是脏，谎报会让模型的行为跟着错。
+//
+// ★ 删块口径（用户明定「删除块」）：按**块文本精确匹配**定位，
+//
+//	删掉这些块 + 它们的全部关联边 + 指向它们的 contains 结构边，
+//	再摘掉场景引用 —— 与 Purge 的收尾纪律一致
+//	（否则场景里挂一条永远召不回的幽灵，而 SceneStats 照样把它算进去）。
+//
+// ★ 为什么按文本而不按 legacy entities.id：
+//
+//	旧表只是历史对照，不再是权威源；块才是活图谱的节点。
+//	按 name 查 entities.id 会把「旧表里叫这个名字的行」
+//	与「图里文本相同的块」当成两回事 —— 那正是本缺陷的成因。
+func (g *GraphDB) DeleteEntity(name string) (DeleteResult, error) {
 	g.mu.Lock()
 	defer g.mu.Unlock()
 
 	tx, err := g.db.Begin()
 	if err != nil {
-		return 0, err
+		return DeleteResult{}, err
 	}
 	defer tx.Rollback()
 
-	var sourceID, targetID int64
-	var sourceCount, targetCount int
-
-	err = tx.QueryRow("SELECT id, mention_count FROM entities WHERE name = ?", sourceName).Scan(&sourceID, &sourceCount)
-	if err != nil {
-		return 0, fmt.Errorf("source entity '%s' not found: %w", sourceName, err)
-	}
-	err = tx.QueryRow("SELECT id, mention_count FROM entities WHERE name = ?", targetName).Scan(&targetID, &targetCount)
-	if err != nil {
-		return 0, fmt.Errorf("target entity '%s' not found: %w", targetName, err)
+	name = strings.TrimSpace(name)
+	if name == "" {
+		return DeleteResult{}, fmt.Errorf("name 不能为空")
 	}
 
-	if sourceID == targetID {
-		return 0, fmt.Errorf("cannot merge entity with itself")
+	// ★ 按块文本精确匹配（不是 LIKE）：DeleteEntity 的承诺是「删除这一个实体」，
+	//   用子串会把「admin」连带「admin 8861、billing 8499」一起删掉。
+	//   要批量按子串清理走 Purge(subject_contains=…)，两者语义本就不同。
+	rows, err := tx.Query(
+		`SELECT id FROM memory_blocks WHERE text_content = ? ORDER BY id`, name)
+	if err != nil {
+		return DeleteResult{}, err
+	}
+	var blockIDs []string
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			rows.Close()
+			return DeleteResult{}, err
+		}
+		blockIDs = append(blockIDs, id)
+	}
+	if err := rows.Err(); err != nil {
+		rows.Close()
+		return DeleteResult{}, err
+	}
+	rows.Close()
+
+	if len(blockIDs) == 0 {
+		// ★ 明确报「找不到」，不静默返回成功。
+		//
+		//   旧实现在这里返回 "not found" 错误，是对的 —— 但它查的是旧表，
+		//   于是「旧表有、块里没有」会报成功，而「块里有、旧表没有」会报错。
+		//   两种都说不清真相。现在以块为准：块里没有就是没有。
+		//
+		// ★ 返回 0 而不是 error 也可以，但那样工具层只能回「已删除 0 个」——
+		//   模型分不清「删了但本来就没有」和「条件写错了」，
+		//   于是会重试或改口径乱猜。明确报错更有用。
+		return DeleteResult{}, fmt.Errorf("块 %q 不存在，删除未执行（可能已删除，或这个名字是关系文本而非端点块）", name)
 	}
 
-	// 重定向 source → target 的活跃关系（作为 source）
-	res, err := tx.Exec(
-		`UPDATE relations SET source_id = ?, updated_at = CURRENT_TIMESTAMP
-		 WHERE source_id = ? AND status = 'active'`,
-		targetID, sourceID,
-	)
-	if err != nil {
-		return 0, err
-	}
-	redirectedSource, _ := res.RowsAffected()
-
-	// 重定向 source → target 的活跃关系（作为 target）
-	res, err = tx.Exec(
-		`UPDATE relations SET target_id = ?, updated_at = CURRENT_TIMESTAMP
-		 WHERE target_id = ? AND status = 'active'`,
-		targetID, sourceID,
-	)
-	if err != nil {
-		return 0, err
-	}
-	redirectedTarget, _ := res.RowsAffected()
-
-	// 删除可能产生的自引用关系
-	_, err = tx.Exec(
-		`DELETE FROM relations
-		 WHERE source_id = target_id AND source_id = ?`,
-		targetID,
-	)
-	if err != nil {
-		return 0, err
+	ph := placeholders(len(blockIDs))
+	args := make([]interface{}, len(blockIDs))
+	for i, id := range blockIDs {
+		args[i] = id
 	}
 
-	// 清理 source 残留的非活跃关系（archived/deleted），否则外键约束阻止删除实体
-	_, err = tx.Exec(`DELETE FROM relations WHERE source_id = ? OR target_id = ?`, sourceID, sourceID)
+	// ① 删全部关联边（关系边 + 指向这些块的 contains 结构边）。
+	//
+	// ★ 不区分 edge_type：承诺是「所有关联关系」，
+	//   而 contains 边指向已删块就是悬空边 —— 留着会让
+	//   sameSentenceOf / hasSameSentenceSibling 的分组落到不存在的块上。
+	endpointCond := fmt.Sprintf(
+		`(source_kind = 'block' AND source_id IN (%s)) OR (target_kind = 'block' AND target_id IN (%s))`,
+		ph, ph)
+	edgeArgs := append(append([]interface{}{}, args...), args...)
+	edgeRes, err := tx.Exec(
+		`DELETE FROM memory_block_edges WHERE `+endpointCond, edgeArgs...)
 	if err != nil {
-		return 0, err
+		return DeleteResult{}, err
 	}
+	edgesDeleted, _ := edgeRes.RowsAffected()
 
-	// 更新 target 的 mention_count
-	_, err = tx.Exec(
-		`UPDATE entities SET mention_count = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?`,
-		targetCount+sourceCount, targetID,
-	)
+	// ② 删块本身。
+	blockRes, err := tx.Exec(
+		`DELETE FROM memory_blocks WHERE id IN (`+ph+`)`, args...)
 	if err != nil {
-		return 0, err
+		return DeleteResult{}, err
 	}
+	blocksDeleted, _ := blockRes.RowsAffected()
 
-	// 彻底删除 source 实体（所有关系已重定向，自引用已删除）
-	_, err = tx.Exec(`DELETE FROM entities WHERE id = ?`, sourceID)
-	if err != nil {
-		return 0, err
+	// ③ 旧表同步删（若那一行还在）。
+	//
+	//   不是本函数的主职责 —— 旧表已冻结、不再增长，
+	//   留着它只是不让「块已删、旧表还在」这种对不上的状态继续存在。
+	//   查不到就跳过：旧表**不是权威源**，它的缺行不代表删除失败。
+	//
+	// ★★★ 2026-10-05 复核修正（生产库副本实测暴露）
+	//
+	//   原写法：
+	//
+	//	DELETE FROM relations WHERE id IN (SELECT id FROM entities WHERE name = ?)
+	//	DELETE FROM entities  WHERE name = ?
+	//
+	//   第一句是**跨表误用 id**：子查询返回的是 **entities.id**，
+	//   而外层匹配的是 **relations.id**。两者同名不同表。
+	//   生产实测：实体 201 被 relation 101 引用（201≠101），
+	//   于是 relation 101 根本没被删，紧接着
+	//   DELETE FROM entities 因 relations 的外键（source_id/target_id → entities.id）
+	//   而报 `FOREIGN KEY constraint failed` —— **整个删除事务回滚**。
+	//
+	//   ⇒ DeleteEntity 在任何「旧表里存在、且被关系引用」的实体上直接失败。
+	//     判据抓不到：delete_entity_blocks_test.go 只用 Commit/putBlocks 建**块**，
+	//     旧表是空的 ⇒ 那条路径不可达（这是「测不到」而非「没问题」）。
+	//
+	//   正确写法：按**外键列**删，而不是拿 id 去撞另一个表的 id。
+	if _, err := tx.Exec(
+		`DELETE FROM relations WHERE source_id IN (SELECT id FROM entities WHERE name = ?)
+		    OR target_id IN (SELECT id FROM entities WHERE name = ?)`, name, name); err != nil {
+		return DeleteResult{}, err
+	}
+	if _, err := tx.Exec(`DELETE FROM entities WHERE name = ?`, name); err != nil {
+		return DeleteResult{}, err
 	}
 
 	if err := tx.Commit(); err != nil {
-		return 0, err
+		return DeleteResult{}, err
 	}
 
-	total := int(redirectedSource + redirectedTarget)
-	return total, nil
+	// ④ 摘场景引用。必须在 Commit 之后 —— purgeStaleSceneRefsLocked 走 g.db，
+	//   而这里的事务还没提交。
+	g.purgeStaleSceneRefsLocked()
+
+	return DeleteResult{Blocks: int(blocksDeleted), Edges: int(edgesDeleted)}, nil
 }
 
-// DeleteEntity 彻底删除一个实体及其所有关联关系。
-func (g *GraphDB) DeleteEntity(name string) error {
-	g.mu.Lock()
-	defer g.mu.Unlock()
-
-	tx, err := g.db.Begin()
-	if err != nil {
-		return err
-	}
-	defer tx.Rollback()
-
-	var id int64
-	err = tx.QueryRow("SELECT id FROM entities WHERE name = ?", name).Scan(&id)
-	if err != nil {
-		return fmt.Errorf("entity '%s' not found: %w", name, err)
-	}
-
-	_, err = tx.Exec(`DELETE FROM relations WHERE source_id = ? OR target_id = ?`, id, id)
-	if err != nil {
-		return err
-	}
-
-	_, err = tx.Exec(`DELETE FROM entities WHERE id = ?`, id)
-	if err != nil {
-		return err
-	}
-
-	return tx.Commit()
+// DeleteResult 报告一次删除实际删掉了什么。
+//
+// ★ 不返回单一数字，是因为「删了 1 个块」和「删了 0 个块 40 条边」
+//
+//	是**两种不同的事实**，压成一个 int 就会让工具层只能说谎
+//	—— 那正是本缺陷的成因（回「已彻底删除…及其所有关联关系」而实际 Δ0）。
+type DeleteResult struct {
+	Blocks int `json:"blocks"`
+	Edges  int `json:"edges"`
 }
 
+// Archive 把 days 天前的**关系边**标记为 archived。
+//
+// ★★★ 改走块/边体系（2026-10-04）
+//
+// 原实现只 UPDATE relations 表 —— 而旧表在停双写后**不再增长**，
+// 所以归档对块体系完全无效：关系边永远不会被归档，
+// 于是「按时间衰减记忆」这个能力静默失效了。
+//
+// ★ 它当时零调用方（只有测试），所以这个缺陷从未被发现。
+//
+//	★★ 停双写是把它照出来的原因：旧表冻结 ⇒ 任何只碰旧表的
+//	  维护操作都变成空转。
+//
+// ★ archived 与 deleted 的区别：archived 保留在库里（可回溯），
+//
+//	但不参与召回（读路径按 status='active' 过滤）。
 func (g *GraphDB) Archive(days int) (int, error) {
 	g.mu.Lock()
 	defer g.mu.Unlock()
 
 	result, err := g.db.Exec(
-		`UPDATE relations SET status = 'archived', updated_at = CURRENT_TIMESTAMP
-		 WHERE status = 'active' AND created_at < datetime('now', ?)`,
+		`UPDATE memory_block_edges
+		 SET status = 'archived'
+		 WHERE COALESCE(status, '') = 'active'
+		   AND edge_type != 'contains'
+		   AND created_at < datetime('now', ?)`,
 		fmt.Sprintf("-%d days", days),
 	)
 	if err != nil {
@@ -1254,14 +1901,35 @@ func (g *GraphDB) Archive(days int) (int, error) {
 	return int(n), nil
 }
 
-// ClearSentenceID 清除指定关系的 sentence_id（LLM复审后解除句子引用）
-func (g *GraphDB) ClearSentenceID(relationID int64) error {
+// ClearSentenceID 解除「关系 → 原句」的引用（LLM 复审后不再信任那句话）。
+//
+// ★★★ 改走块/边体系（2026-10-04）
+//
+// 原实现 `UPDATE relations SET sentence_id = 0 WHERE id = ?` ——
+// 而调用方（internal/agent/core/distill.go）传的 rel.ID 来自
+// RecallSorted 的返回，那里 Relation.ID 现在是**关系边 ID**。
+//
+// ⇒ ★★ 也就是说：它一直在清理**错误的行**。
+//
+//	旧表那一行的 sentence_id 纹丝不动，而边侧什么都没发生。
+//	而这**没有任何报错** —— UPDATE 影响 0 行也是成功。
+//
+// ★ 正确做法：删掉「关系边 --contains--> 原句块」这条结构边。
+//
+//	sentence_id=0 的语义是「这条关系不再挂在那句话上」，
+//	而在块体系里那个挂接就是 contains 边。
+//
+// ★ 幂等：边不存在时返回 nil（复审流程会重复调用）。
+func (g *GraphDB) ClearSentenceID(edgeID int64) error {
+	if edgeID == 0 {
+		return nil
+	}
 	g.mu.Lock()
 	defer g.mu.Unlock()
 	_, err := g.db.Exec(
-		`UPDATE relations SET sentence_id = 0, updated_at = CURRENT_TIMESTAMP WHERE id = ?`,
-		relationID,
-	)
+		`DELETE FROM memory_block_edges
+		 WHERE target_kind = 'edge' AND target_id = ? AND edge_type = 'contains'`,
+		edgeID)
 	return err
 }
 
@@ -1334,30 +2002,44 @@ func placeholders(n int) string {
 // 中间那一步会把旧关系的附加信息（置信度、场景、原句）一起丢掉。
 // 编辑前先精确取回这条关系，才能把这些信息带过去。
 func (g *GraphDB) FindRelations(subject, relationType, object string) ([]Relation, error) {
-	g.mu.RLock()
-	defer g.mu.RUnlock()
+	// ★★★ 改走块/边体系（2026-10-04）
+	//
+	// 原实现 JOIN relations + entities + sentences。旧表停双写后
+	// 这条查询返回空 ⇒ 精确查找功能失效（判据 TestFindRelationsAndScenesOfRelation）。
+	//
+	// 按**块文本**精确匹配两端块 —— 语义与旧表的 name = ? 一致。
 	rows, err := g.db.Query(
-		`SELECT r.id, r.source_id, r.target_id, e1.name, e2.name,
-		        r.relation_type, r.confidence, r.status, r.session_id,
-		        r.turn_id, r.created_at, COALESCE(r.date_bucket, ''),
-		        COALESCE(r.sentence_id, 0), COALESCE(sn.text, '')
-		 FROM relations r
-		 JOIN entities e1 ON r.source_id = e1.id
-		 JOIN entities e2 ON r.target_id = e2.id
-		 LEFT JOIN sentences sn ON r.sentence_id = sn.id
-		 WHERE r.status = 'active' AND e1.name = ? AND r.relation_type = ? AND e2.name = ?
-		 ORDER BY r.id DESC`, subject, relationType, object)
+		`SELECT e.id, e.source_id, e.target_id, sb.text_content, tb.text_content,
+		        e.edge_type, COALESCE(e.confidence,0), COALESCE(e.status,''),
+		        COALESCE(e.session_id,''), COALESCE(e.turn_id,0), e.created_at,
+		        COALESCE((SELECT b.text_content FROM memory_block_edges c
+		                  JOIN memory_blocks b ON b.id = c.source_id
+		                  WHERE c.target_kind='edge' AND c.target_id = e.id
+		                    AND c.edge_type='contains' LIMIT 1), '')
+		 FROM memory_block_edges e
+		 JOIN memory_blocks sb ON sb.id = e.source_id
+		 JOIN memory_blocks tb ON tb.id = e.target_id
+		 WHERE e.source_kind='block' AND e.target_kind='block'
+		   AND e.edge_type != 'contains'
+		   AND COALESCE(e.status,'') = 'active'
+		   AND sb.text_content = ? AND e.edge_type = ? AND tb.text_content = ?`,
+		subject, relationType, object)
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
+
 	var out []Relation
 	for rows.Next() {
 		var rel Relation
-		if err := rows.Scan(&rel.ID, &rel.SourceID, &rel.TargetID, &rel.SourceName, &rel.TargetName,
-			&rel.RelationType, &rel.Confidence, &rel.Status, &rel.SessionID,
-			&rel.TurnID, &rel.CreatedAt, &rel.DateBucket, &rel.SentenceID, &rel.SentenceText); err != nil {
+		if err := rows.Scan(&rel.ID, &rel.SourceBlockID, &rel.TargetBlockID,
+			&rel.SourceName, &rel.TargetName, &rel.RelationType,
+			&rel.Confidence, &rel.Status, &rel.SessionID,
+			&rel.TurnID, &rel.CreatedAt, &rel.SentenceText); err != nil {
 			return nil, err
+		}
+		if rel.DateBucket == "" && !rel.CreatedAt.IsZero() {
+			rel.DateBucket = rel.CreatedAt.Format("2006-01-02")
 		}
 		out = append(out, rel)
 	}
@@ -1406,4 +2088,170 @@ func effectiveScenes(t Triple) []string {
 	}
 	add(t.Scene)
 	return out
+}
+
+// sortRecallEntities 按模式给实体排序（原地），并回填 MatchRank。
+//
+// 相关性模式的三层键（从强到弱）：
+//  1. 实词命中层级：完全相等(0) > 前缀(1) > 包含(2)。**最关键的一层**——
+//     问 metrics 时「metrics服务端口8328」是前缀命中，而「metrics服务端口」类
+//     实体只是包含命中，前者必须在前。
+//  2. 提及次数降序：提及多的更可能是常用实体。
+//  3. 名字长度升序：短名更可能是实体本身而非长描述（沿用 SQL 原口径）。
+//
+// 时间模式：UpdatedAt 倒序 → 提及次数降序 → 名字长度升序。
+// 运维场景里「现在的值」通常是最新的那次写入（实测 v4 overwrite 组
+// 就是「新分机覆盖旧分机」），相关性排序会把旧值排在新值前面。
+//
+// 稳定排序保证同层内顺序可复现，不会两次调用结果跳动。
+func sortRecallEntities(ents []Entity, rank map[int64]int, keywords []string, mode SortMode) {
+	spec := make(map[int64]int, len(ents))
+	for i := range ents {
+		// 先算实词层级：只命中泛词时退回整体 rank（仍应召回，只是靠后）。
+		spec[ents[i].ID] = bestSpecificRank(rank[ents[i].ID], ents[i].Name, keywords)
+	}
+	// 回填 MatchRank，供上层展示「为什么这条相关」。
+	for i := range ents {
+		ents[i].MatchRank = spec[ents[i].ID]
+	}
+
+	sort.SliceStable(ents, func(i, j int) bool {
+		if mode == SortRecent {
+			// Seq 优先：严格单调，不受秒级精度影响。
+			if ents[i].Seq != ents[j].Seq {
+				return ents[i].Seq > ents[j].Seq
+			}
+			if !ents[i].UpdatedAt.Equal(ents[j].UpdatedAt) {
+				return ents[i].UpdatedAt.After(ents[j].UpdatedAt)
+			}
+		} else if spec[ents[i].ID] != spec[ents[j].ID] {
+			return spec[ents[i].ID] < spec[ents[j].ID]
+		}
+		if ents[i].MentionCount != ents[j].MentionCount {
+			return ents[i].MentionCount > ents[j].MentionCount
+		}
+		return len(ents[i].Name) < len(ents[j].Name)
+	})
+}
+
+// sortRecallRelations 按同一模式给关系排序（原地）。
+//
+// 时间模式：CreatedAt 倒序 → TurnID 倒序 → ID 倒序。
+//
+// ★ 为什么必须带 TurnID/ID 两级兜底（实测抓到的坑）：SQLite 的 CURRENT_TIMESTAMP
+// **只到秒**。同一秒内写入的两次覆盖（实测 turn 1 写 4379、turn 2 写 4324
+// 落在同一秒），CreatedAt 完全相等，稳定排序会保留原顺序 —— 而原顺序来自
+// `ORDER BY confidence DESC`，置信度相同时退化到 rowid 升序，也就是**旧值在前**。
+// 这与「记忆只能按毫秒时间戳排序」是同一类问题（SQLite 秒精度）。
+// TurnID 在一次会话内单调递增，RelationID 是自增主键，两者都严格单调，
+// 因此即使同秒也能分出先后。
+//
+// 相关性模式下关系**保持召回顺序**（源头已按种子实体的相关性排过），
+// 刻意不打乱 —— 邻接扩展的顺序本身带语义（从种子实体出发由近及远）。
+func sortRecallRelations(rels []Relation, mode SortMode) {
+	if mode != SortRecent {
+		return
+	}
+	sort.SliceStable(rels, func(i, j int) bool {
+		a, b := rels[i], rels[j]
+		if !a.CreatedAt.Equal(b.CreatedAt) {
+			return a.CreatedAt.After(b.CreatedAt)
+		}
+		if a.TurnID != b.TurnID {
+			return a.TurnID > b.TurnID
+		}
+		return a.ID > b.ID
+	})
+}
+
+// rankEntity 按「精确度层级 → 提及次数 → 名字长度」给实体排序（原地）。
+//
+// 为什么需要跨关键词归并（2026-10-01 跑分实测）：SQL 里已经算出了三层精确度
+// （完全相等 > 前缀命中 > 包含命中），但那只是**单个关键词内**的排序。
+// ExtractKeywords 会把问句切成多个词（实测「metrics服务的端口是多少」
+// → [metrics, 服务, 端口]），各关键词的结果被依次 append —— 精确度层级
+// 在拼接过程中被冲淡，第一个泛词召回的噪音会排在精确命中之前。
+//
+// 排序键（从强到弱）：
+//  1. rank：完全相等(0) > 前缀(1) > 包含(2)。**这是最关键的一层**——
+//     问 metrics 时，「metrics服务端口8328」是前缀命中，而「metrics服务端口」
+//     类实体是包含命中，前者必须在前。
+//  2. mention_count 降序：提及多的更可能是常用实体。
+//  3. 名字长度升序：短名更可能是实体本身而非长描述（沿用 SQL 的口径）。
+//
+// 稳定排序：rank 相同的实体保持原顺序（SQL 已在各关键词内排过），
+// 避免同层内因合并而随机跳动 —— 那会让「第一次调用结果」与「第二次」不一致。
+func rankEntity(ents []Entity, rank map[int64]int, keywords []string) {
+	// specificity 为每个实体算「最有区分度的那个关键词」上的命中层级。
+	//
+	// ★ 为什么要区分「泛词」与「实词」（实测抓到）：关键词里有「端口」「服务」
+	// 这类泛词，实体名恰好就叫「端口」时它对泛词是**完全相等命中（rank=0）**，
+	// 于是把真正的答案「metrics服务端口8328」（前缀命中 rank=1）压到了第二。
+	// 「完全相等」只在**实词**上才算强信号。
+	spec := make(map[int64]int, len(ents))
+	for _, e := range ents {
+		spec[e.ID] = bestSpecificRank(rank[e.ID], e.Name, keywords)
+	}
+	sort.SliceStable(ents, func(i, j int) bool {
+		ri, rj := spec[ents[i].ID], spec[ents[j].ID]
+		if ri != rj {
+			return ri < rj
+		}
+		if ents[i].MentionCount != ents[j].MentionCount {
+			return ents[i].MentionCount > ents[j].MentionCount
+		}
+		return len(ents[i].Name) < len(ents[j].Name)
+	})
+}
+
+// rankOf 取实体的精确度层级；未记录时按最差处理（包含命中）。
+func rankOf(rank map[int64]int, e Entity) int {
+	if r, ok := rank[e.ID]; ok {
+		return r
+	}
+	return 2
+}
+
+// genericKeywords 是区分不出实体的泛词：对它们做「完全相等」匹配没有意义。
+//
+// 判据：出现在大量实体名里的短词。实测「端口」「服务」这类词在 order-gw
+// 的实体表里遍布（每个「xx服务端口」都含它们），而「metrics」只出现一次。
+// 用固定表而非动态统计，是为了召回路径可预测、不引入额外查询；
+// 代价是新领域需要补这张表（补漏了也只是排序略差，不会召回不到）。
+var genericKeywords = map[string]bool{
+	"端口": true, "服务": true, "版本": true, "接口": true, "任务": true,
+	"状态": true, "类型": true, "时间": true, "配置": true, "数量": true,
+	"名称": true, "结果": true, "内容": true, "问题": true, "记录": true,
+	"数据": true, "信息": true, "文件": true, "系统": true, "功能": true,
+}
+
+// bestSpecificRank 返回实体在**实词**关键词上的最佳命中层级。
+//
+// 若实体只命中泛词（全都不算实词），退回用整体 rank —— 它仍然该被召回，
+// 只是排在命中实词的实体之后。
+func bestSpecificRank(rank int, name string, keywords []string) int {
+	best := -1
+	lower := strings.ToLower(name)
+	for _, kw := range keywords {
+		if genericKeywords[strings.ToLower(kw)] {
+			continue
+		}
+		lkw := strings.ToLower(kw)
+		var r int
+		switch {
+		case lower == lkw:
+			r = 0
+		case strings.HasPrefix(lower, lkw):
+			r = 1
+		default:
+			r = 2
+		}
+		if best < 0 || r < best {
+			best = r
+		}
+	}
+	if best < 0 {
+		return rank // 只命中泛词
+	}
+	return best
 }

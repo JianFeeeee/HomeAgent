@@ -26,7 +26,7 @@ func onnxModelDir() string {
 	if v := os.Getenv("QWEN_ONNX_MODEL_DIR"); v != "" {
 		return v
 	}
-	return "/home/newqqagent/models/qwen3-vl-embed-multimodal-onnx"
+	return envOr("QWEN3VL_MODEL_DIR", "/opt/models/qwen3-vl-embed-multimodal-onnx")
 }
 
 // artifactDeclaresVideo 读产物自带的 embed_config.json，判断它是否声明支持原生视频。

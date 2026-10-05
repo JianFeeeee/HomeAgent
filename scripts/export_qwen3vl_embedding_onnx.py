@@ -56,6 +56,10 @@ VISUAL_TOKENS_PER_GROUP = (IMAGE_SIZE // PATCH_SIZE // SPATIAL_MERGE) ** 2
 MAX_LENGTH = 1024  # 768x768 有 576 个视觉 token；512 会截断视觉占位符
 DEFAULT_MODEL_ID = "Qwen/Qwen3-VL-Embedding-2B"
 REFERENCE_TEXT = "今天天气怎么样"
+# 生成侧校验用的输入。刻意用一个**生成模型会自然续写**的 prompt：
+# Embedding 变体在这里也能过 argmax 判据（它只是不会自然续写下去），
+# 所以这道用例验的是「图算得对」，不是「模型答得好」。
+GENERATION_PROMPT = "<|im_start|>system\nYou are a helpful assistant.<|im_end|>\n<|im_start|>user\n中国的首都是哪里？<|im_end|>\n<|im_start|>assistant\n"
 REFERENCE_IMAGE_RGB = (200, 30, 30)
 # 视频参考：4 帧、4 种颜色 → 2 个时间组。用可区分的颜色，
 # 这样帧顺序（组 g 的 tp0←帧2g、tp1←帧2g+1）写错时参考向量立刻不匹配。
@@ -384,6 +388,40 @@ def verify_case(case: str, out_dir: str, model, processor) -> dict:
             "causal_mask": causal_mask(seq).numpy(),
         })[0]
 
+    if case == "generation":
+        # 判据：加载 + 与 PyTorch 的下一步 argmax 一致（不是 cos）。
+        # 加载本身就是这道用例的一半价值 —— external data 撞名只在加载时报。
+        gs = onnx_session(os.path.join(out_dir, "gen", "SequenceWithHead.onnx"))
+        x, h, d, cos, sin, cm, pos = text_inputs(processor, lm, GENERATION_PROMPT)
+        with torch.no_grad():
+            ref = model(input_ids=x["input_ids"], attention_mask=x["attention_mask"],
+                        position_ids=pos, use_cache=False).logits[0, -1]
+        hidden = ts.run(None, {"input_ids": x["input_ids"].numpy().astype(np.int64)})[0]
+        zero = np.zeros_like(hidden)
+        seq = hidden.shape[1]
+        got = gs.run(None, {
+            "hidden": hidden.astype(np.float32),
+            "deepstack_0": zero.astype(np.float32),
+            "deepstack_1": zero.astype(np.float32),
+            "deepstack_2": zero.astype(np.float32),
+            "rotary_cos": cos.numpy().astype(np.float32),
+            "rotary_sin": sin.numpy().astype(np.float32),
+            "causal_mask": causal_mask(seq).numpy(),
+        })[0][0, -1]
+        am_g, am_r = int(got.argmax()), int(ref.argmax())
+        md = float(np.abs(got - ref.numpy()).max())
+        scale = float(np.abs(ref.numpy()).max())
+        log(f"  generation/onnx-vs-full: argmax got={am_g} ref={am_r} "
+            f"maxdiff={md:.3e} scale={scale:.3e}")
+        if am_g != am_r:
+            raise SystemExit(f"生成侧图 argmax 不一致 got={am_g} ref={am_r}（图能加载但选错 token）")
+        if md > scale * 0.05:
+            raise SystemExit(f"生成侧图 maxdiff {md:.3e} 相对量级 {scale:.3e} 过大")
+        return {"case": case, "cos": 1.0, "reference": {
+            "generation_prompt": GENERATION_PROMPT,
+            "generation_next_token": am_r,
+        }}
+
     if case == "text":
         x, _h, _d, cos, sin, _cm, pos = text_inputs(processor, lm, REFERENCE_TEXT)
         with torch.no_grad():
@@ -489,6 +527,14 @@ def verify_onnx(out_dir: str, video_groups, require_video: bool = True, model_di
 def case_list(out_dir: str, video_groups, require_video: bool) -> list:
     """要校验的用例列表。视频档缺图时：刚导出完必须报错，校验旧目录则跳过。"""
     cases = ["text", "image"]
+    # 生成侧图必须一起校验 —— 它与 Transformer.onnx 的 external data 编号
+    # 从各自 0 起算，同目录导出时同名文件互相覆盖，而这种损坏**只在加载时**
+    # 报错（"size to read … out of bounds"），导出与校验⓪ 都察觉不到。
+    gen_graph = os.path.join(out_dir, "gen", "SequenceWithHead.onnx")
+    if os.path.exists(gen_graph):
+        cases.append("generation")
+    elif require_video:
+        raise SystemExit(f"缺少 {gen_graph}（刚导出完却没有生成侧图，说明导出中断）")
     for groups in video_groups:
         path = os.path.join(out_dir, f"Vision_g{groups}.onnx")
         if os.path.exists(path):
@@ -580,6 +626,50 @@ def export_graphs(out_dir: str, model, processor, model_dir: str, transformer, v
             opset_version=17, do_constant_folding=True, dynamo=False,
         )
 
+    # ── 生成侧：全序列 hidden + tied head → logits ──
+    #
+    # 为什么单独一张图而不是改 Transformer.onnx：那张图的输出是池化后的
+    # [dim]，生成要的是每一步的全序列 hidden。两种形状塞一张图只能靠
+    # dynamic_axes 变通，而本脚本已经因「签名写着 dynamic 却只能用导出长度跑」
+    # 吃过亏（见文件头）。权重语义完全一致，最后一个位置的向量相同。
+    #
+    # tied lm_head 零新增权重：tie_word_embeddings=True ⇒ lm_head 就是
+    # embed_tokens 转置（实测 625 个张量里没有独立 lm_head）。
+    # ★ 必须放进**独立子目录**，否则与 Transformer.onnx 的 external data 撞名。
+    #
+    # onnx exporter 对 >2GB 的张量自动外置，文件名是 onnx__MatMul_<编号>，
+    # 编号从 0 起算**每张图各自独立**。同目录导出两张图 ⇒ 同名文件被后写的
+    # 覆盖 ⇒ 加载时报
+    #   "size to read: 50331648 given file_length: 16777216 are out of bounds"
+    # 而且不报错在导出阶段、只在**加载**时才炸，很难往导出逻辑上想。
+    #
+    # 症状实测：校验② 的 text 用例加载失败，而校验⓪（纯 PyTorch）完全通过 ——
+    # 因为校验⓪根本不碰 ONNX 图。
+    gen_dir = os.path.join(out_dir, "gen")
+    os.makedirs(gen_dir, exist_ok=True)
+    log("导出 SequenceWithHead.onnx（生成侧：全序列 hidden + tied head）→ gen/")
+    from qwen3vl_generation_graph import SequenceWithHead
+    seq_head = SequenceWithHead(model.model.language_model).eval()
+    x, h, d, cos, sin, cm = text_inputs(processor, model.model.language_model, REFERENCE_TEXT)[:6]
+    with torch.no_grad():
+        torch.onnx.export(
+            seq_head, (h, *d, cos, sin, cm),
+            os.path.join(gen_dir, "SequenceWithHead.onnx"),
+            input_names=["hidden", "deepstack_0", "deepstack_1", "deepstack_2",
+                         "rotary_cos", "rotary_sin", "causal_mask"],
+            output_names=["logits"],
+            dynamic_axes={
+                "hidden": {1: "seq"}, "deepstack_0": {1: "seq"},
+                "deepstack_1": {1: "seq"}, "deepstack_2": {1: "seq"},
+                "rotary_cos": {1: "seq"}, "rotary_sin": {1: "seq"},
+                "causal_mask": {2: "seq", 3: "seq"},
+                "logits": {1: "seq"},
+            },
+            opset_version=17, do_constant_folding=True, dynamo=False,
+        )
+    del seq_head
+    gc.collect()
+
     log("导出 Vision.onnx（图像，固定 grid 1×48×48）")
     grid = torch.tensor([[1, IMAGE_SIZE // PATCH_SIZE, IMAGE_SIZE // PATCH_SIZE]], dtype=torch.long)
     xi, _h, _d, _c, _s, _cm, _p = image_inputs(processor, model, reference_image())
@@ -617,15 +707,34 @@ def export_graphs(out_dir: str, model, processor, model_dir: str, transformer, v
             shutil.copy2(src, os.path.join(out_dir, name))
 
 
-def write_config(out_dir: str, model, processor, video_groups) -> None:
+def write_config(out_dir: str, model, processor, video_groups, model_dir: str = "") -> None:
     cfg = model.config
     text_cfg = getattr(cfg, "text_config", cfg)
     rope_scaling = getattr(text_cfg, "rope_scaling", None) or {}
     mrope_section = rope_scaling.get("mrope_section") or [24, 20, 20]
     vision = cfg.vision_config
+    # 变体名从模型目录名推断：同结构的两个变体（Embedding / Instruct）
+    # 布局完全一致，只是训练目标不同，值得在配置里留痕。
+    model_variant = "instruct" if "instruct" in os.path.basename(model_dir).lower() else "embedding"
+    arch_name = f"qwen3-vl-2b-{model_variant}-multimodal"
     meta = {
-        "arch": "qwen3-vl-embedding-2b-multimodal",
+        # arch 记录**模型变体**：Embedding 变体做向量/生成都行但生成会复读
+        # （未经生成后训练，argmax 贪心易退化）；Instruct 变体是真正能生成的那个。
+        # 两者的图布局完全相同（实测同为 625 张量、tied head、28 层、vision depth 24），
+        # 所以同一个 qwen3vlgen provider 能开两个目录 —— 但要知道打开的是哪个。
+        "arch": arch_name,
+        "variant": model_variant,
         "runtime": "homeagent-onnx-three-part",
+        # 生成侧：同一份权重的第二种用法。Go 侧据此判断这份模型目录
+        # 能不能当生成 provider 用，而不必去猜某个 .onnx 文件是否存在。
+        # tied_lm_head=true 表示输出层复用 embed_tokens（无独立 lm_head 权重）。
+        "generation": {
+            # 带子目录前缀：见 export_graphs 里关于 external data 撞名的说明。
+            "graph": "gen/SequenceWithHead.onnx",
+            "tied_lm_head": True,
+            "kv_cache": False,
+            "outputs": "logits",
+        },
         "dim": int(getattr(text_cfg, "hidden_size", 2048)),
         "max_length": MAX_LENGTH,
         "instruction": INSTRUCTION,
@@ -729,8 +838,34 @@ def main() -> int:
     transformer = Transformer(model.model.language_model).eval()
 
     verify_split_torch(model, processor, transformer)
+
+    # ── 校验⓪：生成侧图 vs 完整模型（argmax 一致才算对）──
+    #
+    # 判据与向量侧不同：logits 不能按 cos 比 —— 不同 token 的 logits 分布
+    # 本来就不同，cos 高只说明「形状对」。真正要证明的是**下一步选同一个
+    # token**，所以比对 argmax，并额外检查 max|diff| 有界。
+    log("校验⓪：生成侧图 SequenceWithHead vs 完整模型（下一步 argmax）")
+    from qwen3vl_generation_graph import SequenceWithHead
+    _sh = SequenceWithHead(model.model.language_model).eval()
+    x, h, d, cos, sin, cm, _pos = text_inputs(processor, model.model.language_model, REFERENCE_TEXT)
+    with torch.no_grad():
+        got = _sh(h, *d, cos, sin, cm)
+        ref = model(input_ids=x["input_ids"], attention_mask=x["attention_mask"],
+                    position_ids=_pos, use_cache=False).logits
+    g_last, r_last = got[0, -1], ref[0, -1]
+    am_g, am_r = int(g_last.argmax()), int(r_last.argmax())
+    md = float((g_last - r_last).abs().max())
+    scale = float(r_last.abs().max())
+    log(f"  generation/argmax: got={am_g} ref={am_r} maxdiff={md:.3e} scale={scale:.3e}")
+    if am_g != am_r:
+        raise SystemExit(f"生成侧导出校验失败：argmax 不一致 got={am_g} ref={am_r}（图能跑但选错 token）")
+    # 相对误差：权重是 fp32 折进图的，绝对误差应远小于 logits 量级
+    if md > scale * 0.05:
+        raise SystemExit(f"生成侧导出校验失败：maxdiff {md:.3e} 相对 logits 量级 {scale:.3e} 过大")
+    del _sh, got, ref
+    gc.collect()
     export_graphs(args.out, model, processor, model_dir, transformer, video_groups)
-    write_config(args.out, model, processor, video_groups)
+    write_config(args.out, model, processor, video_groups, model_dir)
 
     # 校验在子进程里跑，父进程先把模型释放掉，把内存完全让给子进程。
     del transformer, model

@@ -248,7 +248,7 @@ cd cmd/gui && npm test # 这才是它的测试（node 的 .test.mjs），通过
    此后**每次**编辑都优先重跑它（与当前编辑的文件无关）；而该条目只在测试
    **通过**时才移除 ⇒ 对这条永远失败的命令，永不自愈。
 
-日志里的形态（`/root/.pi-lens/sessionstart.log`）：
+日志里的形态（`${PI_HOME}-lens/sessionstart.log`）：
 
 ```text
 turn_end: README.md → test go cmd/gui/sse-backoff.test.mjs (failed-first)
@@ -288,7 +288,7 @@ turn_end: README.md → test go cmd/gui/sse-backoff.test.mjs (failed-first)
 （重载扩展且不重启 `pi-web-sessiond`）；不手动重载则在**下个会话**自然生效。
 
 **验证**：改一个仓库文件但先不提交，等回合结束，然后
-`grep 'turn_end: .*→ test' /root/.pi-lens/sessionstart.log | tail -3`
+`grep 'turn_end: .*→ test' ${PI_HOME}-lens/sessionstart.log | tail -3`
 —— 应不再出现 `test go cmd/gui/...`；而编辑一个真 Go 测试文件时仍应正常触发。
 
 **会被覆盖**：pi-lens 升级/重装后补丁消失，误报会回来（不影响仓库，只是噪音）。

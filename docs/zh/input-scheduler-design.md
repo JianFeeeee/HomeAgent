@@ -618,7 +618,8 @@ go test -race -count=1 ./internal/agent/... ./internal/plugin/... ./internal/sdk
 1. 异步 step + `tool.cancel`（真正让工具可抢占）。
 2. 帧落盘（跨进程/崩溃恢复）。
 3. 多 agent 并行调度。
-4. 与 `plan.md` §13.7 的 `RuntimeManager + 分组 worker` 合并（本设计是其前置）。
+4. 与 `RuntimeManager + 分组 worker` 方案合并（本设计是其前置；
+   该方案的核实过程见 git log --grep=input-scheduler）。
 
 > **已更正**：早期稿写“`InjectOptions.Priority` 进入公开 SDK 已被删除”，
 > 前提是“优先级是内核内部属性、不应由插件声明”。用户澄清后该前提被推翻：

@@ -17,7 +17,7 @@
                     │ homeagent.service ← /usr/local/bin/homed      │
                     │   （必须 -tags=onnxruntime 构建）              │
   QQ 用户 ─NapCat─► │   :9890  remotedevice 网关                    │
-   （在 106 上）    │   /home/newqqagent/  51G 模型资产（部署不动）   │
+   （在 106 上）    │   ${HA_DATA}/  51G 模型资产（部署不动）   │
                     └────────┬──────────────────────┬────────────────┘
                              │ ws 设备桥             │ ws 设备桥
                  ┌───────────▼──────────┐  ┌────────▼─────────┐
@@ -139,7 +139,7 @@ journalctl -u homeagent.service --since "-3 min" | grep -c "registering tool: se
 生产二进制里嵌着 `commit`（`internal/meta`），**这是唯一可靠的判据**：
 
 ```bash
-K=$(sqlite3 /home/newqqagent/config.db "select value from config_webui where key='api_key';")
+K=$(sqlite3 ${HA_DATA}/config.db "select value from config_webui where key='api_key';")
 curl -s -H "X-API-Key: $K" http://127.0.0.1:8080/api/v1/status | grep -oE '"commit":"[^"]*"'
 # ⇒ "commit":"d084137"   这才是线上真实在跑的提交
 ```
@@ -170,14 +170,14 @@ curl -s -H "X-API-Key: $K" http://127.0.0.1:8080/api/v1/status | grep -oE '"comm
 ### 1.4c 内置插件 vs 独立二进制
 
 `internal/plugins/<name>/` 是**内置**插件，编译进 homed。
-`/home/newqqagent/plugins/<name>/plugin.bin` 是**独立**插件，要单独构建部署。
+`${HA_DATA}/plugins/<name>/plugin.bin` 是**独立**插件，要单独构建部署。
 
 判定方法（2026-09-28 核实）：
 
 ```bash
 for p in webui qq cmd seq; do
   printf "%-8s " $p
-  ls /home/newqqagent/plugins/$p/plugin.bin >/dev/null 2>&1 \
+  ls ${HA_DATA}/plugins/$p/plugin.bin >/dev/null 2>&1 \
     && echo "独立二进制（需单独部署）" || echo "内置（随 homed 部署）"
 done
 # 2026-09-28 实测：webui/cmd/seq 内置，qq 独立
@@ -188,7 +188,7 @@ done
 
 ### 1.5 ★ 适配器升级的保护语义
 
-`/home/newqqagent/adapters/.bundled` 记录**上次随包带出的版本**哈希：
+`${HA_DATA}/adapters/.bundled` 记录**上次随包带出的版本**哈希：
 
 | 盘上版本 | 判定 | 行为 |
 | --- | --- | --- |
@@ -202,7 +202,7 @@ done
 验证方式（部署前后各跑一次，应完全一致）：
 
 ```bash
-md5sum /home/newqqagent/adapters/*.lua | md5sum
+md5sum ${HA_DATA}/adapters/*.lua | md5sum
 ```
 
 ### 1.6 两次部署的真实记录（2026-09-27）
@@ -540,7 +540,7 @@ bind 结果无人处理）正是 106 此前长期无 `online` 日志的成因，
 脚本：`scripts/kernel-stress/webui-bench.py`，打的是**生产实例**。
 
 ```bash
-K=$(sqlite3 /home/newqqagent/config.db "select value from config_webui where key='api_key';")
+K=$(sqlite3 ${HA_DATA}/config.db "select value from config_webui where key='api_key';")
 python3 scripts/kernel-stress/webui-bench.py --key "$K" --probe          # 先探测
 python3 scripts/kernel-stress/webui-bench.py --key "$K" --scale 3 --json /tmp/w.json
 ```

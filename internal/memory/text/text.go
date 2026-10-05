@@ -374,10 +374,10 @@ func (m *Memory) Stats() map[string]interface{} {
 	defer m.mu.Unlock()
 	files, _ := m.listFiles()
 	return map[string]interface{}{
-		"file_count":      len(files),
-		"current_size":    m.size,
-		"rotation_bytes":  m.maxSize,
+		"file_count":        len(files),
+		"current_size":      m.size,
+		"rotation_bytes":    m.maxSize,
 		"rotation_interval": m.interval.String(),
-		"dir":             m.dir,
+		"dir":               m.dir,
 	}
 }

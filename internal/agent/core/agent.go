@@ -116,6 +116,25 @@ type Agent struct {
 	// 上下文裁剪：活跃上下文最大条数，超出按相关性裁剪
 	maxContextSize int
 
+	// overflowStat 统计上下文超页处理（触发次数、裁剪条数、终止次数）。
+	// 放 Agent 上而非全局：多实例并存时各自独立（跑分台就要实例隔离）。
+	overflowStat struct {
+		sync.Mutex
+		Checked    int // 判据执行次数（诊断：区分「没触发」与「没执行」）
+		Triggered  int // L4 上报次数
+		Aborted    int // 裁不出东西的终止次数
+		Upstream   int // 上游 ErrContextFull 次数
+		LastPruned int // 上次裁剪条数
+		LastRatio  float64
+		LastEvents int
+	}
+
+	// ctxTuning 是上下文预算的可调参数（零值 = 历史默认）。
+	//
+	// 从配置读入（core.agent.context.*），使不同窗口的实例可以各自调优，
+	// 而不是所有实例共用一套写死的 0.8 / 600000 / 1:3。
+	ctxTuning ContextTuning
+
 	// 当前请求的输出通道（mutex 保护，process() 内独占）
 
 	// 阶段管道：插件消息流编辑
@@ -211,6 +230,13 @@ type Agent struct {
 
 	// 技能索引提供者：由 skillmgr 插件实现，向 system prompt 注入轻量技能索引
 	skillIndex SkillIndexProvider
+
+	// usageLedger 累计**跨调用**的 token 用量与缓存命中。
+	//
+	// 为何是 Agent 级而不是 TaskFrame 级：「这个会话花了多少、缓存省了多少」
+	// 不是单次调用的属性，必须跨轮次、跨任务累积才有意义。
+	// 单次用量一直在 StageCtx 与 LLM chain 事件里，缺的正是这个落点。
+	usageLedger usageLedger
 }
 
 // SkillIndexProvider 提供已加载技能的精炼索引，供 buildSystemPrompt 注入。
@@ -273,6 +299,12 @@ type AgentConfig struct {
 	ReviewInterval     time.Duration          // 关系复审间隔，0 则使用 DistillInterval
 	MergeInterval      time.Duration          // 实体合并检测间隔，0 则使用 DistillInterval
 	MaxContextSize     int                    // 活跃上下文最大条数，超出按相关性裁剪
+
+	// CtxTuning 是上下文预算的可调参数。零值 ⇒ 使用历史默认（与硬编码时代一致）。
+	//
+	// 为何必须能从配置传进来：这些阈值原本写死在 ComputeTokenBudget 里，
+	// 界面改不了、不同窗口的实例也没法各自调优（详见 ContextTuning 的注释）。
+	CtxTuning ContextTuning
 	ContextSavePath    string                 // 上下文持久化路径，空则不持久化
 	EmbeddingModelPath string                 // 预训练词嵌入模型路径（word2vec 文本格式），空则不使用
 	Embedder           *memory.StaticEmbedder // 共享词嵌入实例；nil 时按 EmbeddingModelPath 自建
@@ -326,6 +358,10 @@ func New(cfg AgentConfig) *Agent {
 	}
 
 	rc := NewRelevanceContext(cfg.ContextSavePath, embedder)
+	// 裁剪保留条数：从配置传入（0 时保持 NewRelevanceContext 的历史默认）。
+	if cfg.CtxTuning.ProtectedCount > 0 {
+		rc.protectedCount = cfg.CtxTuning.ProtectedCount
+	}
 	if cfg.StageHost != nil {
 		rc.SetToolDefLookup(cfg.StageHost.ToolDef)
 	}
@@ -396,6 +432,7 @@ func New(cfg AgentConfig) *Agent {
 		reviewInterval:    cfg.ReviewInterval,
 		mergeInterval:     cfg.MergeInterval,
 		maxContextSize:    cfg.MaxContextSize,
+		ctxTuning:         cfg.CtxTuning,
 		stageHost:         cfg.StageHost,
 		skillIndex:        cfg.SkillIndexProvider,
 		eventBus:          cfg.EventBus,

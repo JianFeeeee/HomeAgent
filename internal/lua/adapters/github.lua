@@ -5,6 +5,51 @@ adapter.version = "2.0.0"
 adapter.endpoint = "/chat/completions"
 adapter.headers = {}
 
+-- ── 用量归一化（transform_response 与 transform_stream_chunk 共用）──
+--
+-- 输出键名对齐 homed 的 agentAPI.TokenUsage（json tag）：
+--   prompt / completion / total / cache_read / cache_miss / cache_reported /
+--   reasoning_tokens
+-- 所以这张表会被 json.Unmarshal 直接吃进 StreamChunk.Usage。
+--
+-- ★ 为何必须透传：适配器是**归一化层**，上游给的用量只有它看得见。
+--   此前它只搬 prompt/completion/total，缓存命中与推理 token 在归一化时被丢掉
+--   —— 而这两个正是「缓存省了多少、思考花了多少」的唯一来源。
+--   丢掉之后内核只剩估算，永远答不出真实成本。
+--
+-- ★ 两种上游形态都认（llmsproxy 会把各家的都归一成第一种）：
+--   · OpenAI v2：usage.prompt_tokens_details.cached_tokens
+--   · DeepSeek 遗留：usage.prompt_cache_hit_tokens / prompt_cache_miss_tokens
+local function usage_to_unified(u)
+    if type(u) ~= "table" then return nil end
+    local out = {
+        prompt = u.prompt_tokens or u.prompt or 0,
+        completion = u.completion_tokens or u.completion or 0,
+        total = u.total_tokens or u.total or 0
+    }
+    local details = u.prompt_tokens_details
+    if type(details) == "table" then
+        out.cache_read = details.cached_tokens or 0
+        -- ★ 只要上游**给了这个对象**就标记「报了缓存」——即使命中为 0。
+        --   它必须与「没给」区分：前者是「这次没命中」，后者是「不知道」。
+        --   混起来会把无数据画成 0% 命中率，让人去优化一个本来没开的功能。
+        out.cache_reported = true
+    elseif (u.prompt_cache_hit_tokens or 0) > 0 then
+        out.cache_read = u.prompt_cache_hit_tokens
+        out.cache_reported = true
+    end
+    if (u.prompt_cache_miss_tokens or 0) > 0 then
+        out.cache_miss = u.prompt_cache_miss_tokens
+    end
+    local cd = u.completion_tokens_details
+    if type(cd) == "table" and (cd.reasoning_tokens or 0) > 0 then
+        out.reasoning_tokens = cd.reasoning_tokens
+    end
+    -- total 缺失时补出来，避免 total=0 而分量为正的自相矛盾记录。
+    if out.total == 0 then out.total = out.prompt + out.completion end
+    return out
+end
+
 -- GitHub Models: Azure-like endpoint, auth via Bearer token (PAT)
 -- BaseURL example: https://models.inference.ai.azure.com
 function adapter.transform_request(raw_body)
@@ -30,9 +75,7 @@ function adapter.transform_response(raw_body)
     }
 
     if type(resp.usage) == "table" then
-        unified.token_usage.prompt = resp.usage.prompt_tokens or 0
-        unified.token_usage.completion = resp.usage.completion_tokens or 0
-        unified.token_usage.total = resp.usage.total_tokens or 0
+        unified.token_usage = usage_to_unified(resp.usage)
     end
 
     if type(resp.choices) == "table" and #resp.choices > 0 then
@@ -83,13 +126,21 @@ end
 function adapter.transform_stream_chunk(raw_chunk)
     local ok, chunk = pcall(json.decode, raw_chunk)
     if not ok then return "" end
-    if not chunk.choices or #chunk.choices == 0 then return "" end
+    -- 用量可能在任意帧上（内容帧、末帧、纯心跳帧），同一趟里一并取出。
+    local usg = usage_to_unified(chunk.usage)
+    if not chunk.choices or #chunk.choices == 0 then
+        -- 纯 usage 心跳帧（OpenAI 开 include_usage 时末帧：choices 为空、只有 usage）。
+        -- 有用量就带出去；没有则返回 "" 交回 Go 侧的标准解析。
+        if usg then return json.encode({ usage = usg }) end
+        return ""
+    end
     local delta = chunk.choices[1].delta or {}
     local fr = chunk.choices[1].finish_reason
     local unified = {
         content = delta.content or "",
         done = (fr ~= nil)
     }
+    if usg then unified.usage = usg end
     if delta.reasoning_content then
         unified.reasoning_content = delta.reasoning_content
     end

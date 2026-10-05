@@ -87,7 +87,7 @@ func evtOf(f *TaskFrame) *agentIO.InputEvent {
 func (a *Agent) recallTextFor(query, trigger string, scenes []string) string {
 	memTokens := 0 // 0 = 不截断
 	if a != nil && a.provider != nil {
-		memTokens = ComputeTokenBudget(a.provider, a.systemPrompt).MemoryTokens
+		memTokens = a.computeTokenBudget().MemoryTokens
 	}
 	return a.recallText(query, trigger, memTokens, scenes)
 }
@@ -408,7 +408,7 @@ func (a *Agent) buildToolDefs() []interface{} {
 			"source": map[string]interface{}{"type": "string", "description": "被合并的实体名（合并后消失）"},
 			"target": map[string]interface{}{"type": "string", "description": "保留的实体名"},
 		}, "source", "target"))
-		tools = append(tools, toolDef("memory_delete_entity", "【记忆清理】彻底删除指定实体及其所有关联关系。用于清理无用的噪音实体，如 mentionCount=0 的孤立实体、distiller 自动产生的垃圾节点、确认无用的旧数据。此操作不可恢复。", map[string]interface{}{
+		tools = append(tools, toolDef("memory_delete_entity", "【记忆清理】删除指定名称的记忆块及其所有关联关系。name 必须是**块文本**（端点名），不是关系文本；按精确匹配定位，不会连带删掉名字相近的其他块。要按子串批量清理改用 memory_purge（subject_contains）。用于清理无用的噪音块、distiller 自动产生的垃圾节点、确认无用的旧数据。此操作不可恢复。", map[string]interface{}{
 			"name": map[string]interface{}{"type": "string", "description": "要删除的实体名称"},
 		}, "name"))
 		tools = append(tools, toolDef("memory_block_merge", "【记忆清理】标记两个实体在指定轮次内不尝试合并，用于阻止误判。当 LLM 判断两个实体虽然相似但不是同一事物时，使用此工具阻止后续心跳自动推送合并候选。每次心跳扫描双方计数各减一，归零后恢复候选资格。", map[string]interface{}{

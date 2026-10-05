@@ -177,7 +177,7 @@ class TFIDFHandler(BaseHTTPRequestHandler):
 
 if __name__ == "__main__":
     # Load from disk if available
-    data_file = os.environ.get("TFIDF_DATA", "/home/newqqagent/memory/tfidf_index.json")
+    data_file = os.environ.get("TFIDF_DATA", "/data/homeagent/memory/tfidf_index.json")
     if os.path.exists(data_file):
         try:
             with open(data_file) as f:

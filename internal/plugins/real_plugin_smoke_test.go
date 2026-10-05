@@ -264,7 +264,7 @@ func TestRealPlugin_CrashDoesNotKillKernel(t *testing.T) {
 	//
 	// 必须拿 plgDir 限定范围：旧实现用全系统 pgrep -f plugin.bin 后
 	// 只比“路径含 editdoc”，于是在跑着生产实例的机器上，它会把
-	// /home/newqqagent/plugins/editdoc/plugin.bin 当成目标杀掉（实测 9 次，
+	// /data/homeagent/plugins/editdoc/plugin.bin 当成目标杀掉（实测 9 次，
 	// 全部落在有人跑 go test 的时段）。更糟的是此时本测试仍会通过：
 	// 它断言的是测试内核存活，而那个内核的插件压根没死——**它在测一件
 	// 没发生的事**，同时还把生产环境打坏了。
