@@ -159,6 +159,64 @@ check(
     : "找不到 connectDeviceWS",
 );
 
+// ── 6) keepalive：设备桥必须有主动 ping ──────────────────────────────
+//
+// 2026-10-05 实测故障：GUI bind 成功、设备进了 devices 表（面板可见），
+// 但几秒后能力调用全失败：
+//     POST /api/v1/device/push {"device_id":"gui-JianF"}
+//     → {"error":"device gui-JianF not online"}
+// 同时 waiter/NAS 完全正常（last_seen 持续刷新）。
+//
+// 根因：GUI **从不发 ping**。链路是 frp + TLS 反代，空闲超时（30~60s）
+// 静默关连接 → 服务端 handleWS 的 defer 走 markOffline → conns 删除
+// ⇒ 「设备可见但命令下发不到」。
+//
+// 服务端 registry.go:735 那段 ping/pong 注释修的是「**回** pong 不能因
+// 未bind 而失败」，不是「客户端有没有发」—— 那是另一个方向的坑。
+
+const pingFn = mainSrc.match(/function sendDevicePing[\s\S]*?\n}\n/);
+check(
+  "存在 sendDevicePing",
+  !!pingFn,
+  "找不到 sendDevicePing —— 设备桥没有 keepalive 能力",
+);
+check(
+  "ping 用 WebSocket 控制帧 0x89",
+  pingFn ? /0x89/.test(pingFn[0]) : false,
+  pingFn ? "ping 帧构造不对（应为 0x89 = FIN|ping 且置掩码位）" : "",
+);
+
+// ping 必须被定时器驱动，且间隔要压在常见空闲阈值之下。
+const openBlock = mainSrc.slice(
+  mainSrc.indexOf("opened = true"),
+  mainSrc.indexOf("opened = true") + 2000,
+);
+check(
+  "连接建立后启动 ping 定时器",
+  /setInterval/.test(openBlock) && /sendDevicePing/.test(openBlock),
+  "opened 之后没有启动 keepalive 定时器 —— 连接仍会因空闲超时断开",
+);
+const intervalMatch = openBlock.match(/setInterval\([^,]*,\s*(\d+)\)/);
+check(
+  "keepalive 间隔 ≤ 30s",
+  intervalMatch ? parseInt(intervalMatch[1], 10) <= 30000 : false,
+  intervalMatch
+    ? `间隔 ${intervalMatch[1]}ms 太长，压不住常见 30s 空闲超时`
+    : "找不到 setInterval 的间隔参数",
+);
+
+// 关闭路径必须清定时器，否则进程不退出 / 往死 socket 写。
+check(
+  "close 时清理 ping 定时器",
+  /close:[\s\S]{0,200}?clearInterval/.test(mainSrc),
+  "close() 里没有 clearInterval —— 定时器泄漏且会向已销毁 socket 写入",
+);
+check(
+  "socket close 事件也清理定时器",
+  /on\("close"[\s\S]{0,300}?clearInterval/.test(mainSrc),
+  'sock.on("close") 里没有 clearInterval —— 异常断开后定时器泄漏',
+);
+
 // ── 汇总 ────────────────────────────────────────────────────────────
 
 console.log("");

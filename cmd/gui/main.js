@@ -1137,10 +1137,26 @@ function connectDeviceWS(url, token, onMsg) {
           );
         }
         opened = true;
+        // ★ keepalive：绑定成功后必须周期性发 ping，否则链路空闲超时会
+        // 静默断连，导致「设备可见但命令下发不到」（详见 sendDevicePing
+        // 上方注释）。间隔 25s：压在常见的 30s 空闲阈值之下。
+        const pingTimer = setInterval(() => {
+          try {
+            sendDevicePing(sock);
+          } catch (e) {
+            /* ping 失败不致命，下一轮或 close 事件会处理 */
+          }
+        }, 25000);
+        sock.__bridgePingTimer = pingTimer;
         resolve({
           send: (obj) => sendDeviceFrame(sock, JSON.stringify(obj)),
           __sock: sock, // 暴露底层 socket 供二进制分块发送
-          close: () => sock.destroy(),
+          close: () => {
+            // 关闭前必须清掉 ping，否则定时器会继续往已销毁的 socket 写，
+            // 抛 unhandled error（且进程不会退出）。
+            clearInterval(sock.__bridgePingTimer);
+            sock.destroy();
+          },
         });
       }
       while (buf.length >= 2) {
@@ -1209,9 +1225,50 @@ function connectDeviceWS(url, token, onMsg) {
       if (!opened) reject(e);
     });
     sock.on("close", () => {
+      // 断开时停掉 keepalive，否则定时器会一直持有已死的 socket。
+      if (sock.__bridgePingTimer) {
+        clearInterval(sock.__bridgePingTimer);
+        sock.__bridgePingTimer = null;
+      }
       deviceBridge = null;
     });
   });
+}
+
+// 发送 WS ping 控制帧（客户端必须加掩码）。
+//
+// ★ 为什么必须主动 ping（2026-10-05 实测故障）：
+//
+// GUI 的 bind 能成功（日志有 bind_ok），设备也确实进了服务端 devices 表
+// （webui 面板里能看到），但**几秒后所有设备能力调用全部失败**：
+//
+//	POST /api/v1/device/push {"device_id":"gui-JianF",...}
+//	→ {"error":"device gui-JianF not online"}
+//
+// 而同一时刻 NAS 上的 waiter 完全正常（last_seen 持续刷新）。
+//
+// 根因：GUI **没有任何 keepalive**。全文件搜不到发ping 的地方，而
+// waiter / 嵌入式客户端都有。链路中间是 frp + TLS 反代，它们的空闲超
+// 时（常见 30~60s）会静默关掉这条连接。
+//
+// 服务端 handleWS 虽有 ping/pong 处理（registry.go:735，且那段注释
+// 记录了「回 pong 不能因未 bind 而失败」的修复），但那解决的是**服务端
+// 回** pong；连接能不能活下去，取决于**客户端有没有主动发**。
+// 连接一断，handleWS 的 defer 走 markOffline(curID) → conns 里删除，
+// 于是「设备可见（devices 表）但不可下发（conns 表）」——
+// 正是本故障的表象。
+//
+// 对照组说明这不是服务端能力缺失：同一 registry 下waiter 一直好好的。
+const deviceBridgePingTimerKey = "__bridgePingTimer";
+
+function sendDevicePing(sock) {
+  try {
+    // 控制帧：FIN + opcode 0x9 (ping)，payload 为空；客户端帧必须掩码。
+    const mask = crypto.randomBytes(4);
+    sock.write(Buffer.concat([Buffer.from([0x89, 0x80]), mask]));
+  } catch (e) {
+    console.log("[device-bridge] ping failed: " + e.message);
+  }
 }
 
 // 发送 WS text 帧（客户端加掩码）
