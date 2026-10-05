@@ -22,15 +22,15 @@
 #        结论（打不了包）不变但**理由已变**，别照旧文字理解。
 #
 # 用法：
-#   ./deploy-sdk-site.sh                # 构建 + 部署 + 验证（两个站）
-#   ./deploy-sdk-site.sh --check        # 只核对线上与本地产物差异，不动线上
-#   ./deploy-sdk-site.sh --introduce    # 只部署 introduce 站（改 site/ 时用，跳过 SDK 站重建）
-#   ./deploy-sdk-site.sh --rollback <备份目录名>            # 回滚 sdk 站
-#   ./deploy-sdk-site.sh --rollback-introduce <备份目录名>  # 回滚 introduce 站
+#   ./deploy/scripts/deploy-sdk-site.sh                # 构建 + 部署 + 验证（两个站）
+#   ./deploy/scripts/deploy-sdk-site.sh --check        # 只核对线上与本地产物差异，不动线上
+#   ./deploy/scripts/deploy-sdk-site.sh --introduce    # 只部署 introduce 站（改 site/ 时用，跳过 SDK 站重建）
+#   ./deploy/scripts/deploy-sdk-site.sh --rollback <备份目录名>            # 回滚 sdk 站
+#   ./deploy/scripts/deploy-sdk-site.sh --rollback-introduce <备份目录名>  # 回滚 introduce 站
 
 set -euo pipefail
 
-SDK_DIR=/home/program/TrueAgent/third_party/homeagent-sdk
+SDK_DIR=${REPO}/third_party/homeagent-sdk
 BUILD_DIR="$SDK_DIR/site_build"
 HOST=192.168.2.106
 SSH="ssh -n -o BatchMode=yes -o ConnectTimeout=10 -o StrictHostKeyChecking=no admin@$HOST"
@@ -61,13 +61,13 @@ fi
 
 # ── introduce 站 ──
 #
-# 零构建：/home/program/TrueAgent/site/ 里就是成品（site/README.md 自称
+# 零构建：${REPO}/site/ 里就是成品（site/README.md 自称
 # 「单文件、零构建、零依赖」），改完直接是产物，所以这条只需要同步。
 #
 # 部署时**故意不带上 README.md**：那是仓库里的说明文档，不是站点资源。
 # 线上现有 2 个文件（index.html + assets/logo.svg），带 README 会多出一个
 # 线上原本没有的文件，反而让 diff 比对永远不为零。
-INTRO_SRC=/home/program/TrueAgent/site
+INTRO_SRC=${REPO}/site
 INTRO_PKG_NAME=intro-site-$TS.tar.gz
 INTRO_PKG=/tmp/$INTRO_PKG_NAME
 

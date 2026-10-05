@@ -53,7 +53,7 @@ cmp -s /tmp/d1 /tmp/d2; echo $?               # ⇒ 1（cmp 未被污染）
 ```
 
 为什么这比“偶尔报错”危险得多：它让**部署判据变成假绿灯**。
-2026-09-29 实测：`deploy-sdk-site.sh --check` 对着两份**确实不同**的
+2026-09-29 实测：`deploy/scripts/deploy-sdk-site.sh --check` 对着两份**确实不同**的
 `index.html`（本地 `f8898cfc…` / 线上 `cc615cfa…`）报「✓ 逐字节一致」，
 于是永远判定「无需部署」——站点改完再也不会被更新，而且看不出来。
 已在 `547d28d` 修掉（钉绝对路径 + 启动自检）。
@@ -112,9 +112,9 @@ ls -l /tmp/homed-ort-new                             # 与 /usr/local/bin/homed 
 ### 1.3 部署
 
 ```bash
-bash deploy-plan.sh check                             # 只读
-NEW_BIN=/tmp/homed-ort-new bash deploy-plan.sh deploy # 需输入 yes
-bash deploy-plan.sh rollback                          # 回滚
+bash deploy/scripts/deploy-plan.sh check                             # 只读
+NEW_BIN=/tmp/homed-ort-new bash deploy/scripts/deploy-plan.sh deploy # 需输入 yes
+bash deploy/scripts/deploy-plan.sh rollback                          # 回滚
 ```
 
 - `check`：服务状态、onnxruntime 标签、`libonnxruntime.so`、模型资产、适配器清单
@@ -235,10 +235,10 @@ md5sum ${HA_DATA}/adapters/*.lua | md5sum
 ### 2.2 更新
 
 ```bash
-bash deploy-waiter.sh check                # 两台一起，只读
-bash deploy-waiter.sh deploy 192.168.2.106 # 需输入 yes
-bash deploy-waiter.sh deploy 192.168.2.30  # 上一台验证通过后再做
-bash deploy-waiter.sh rollback <ip>
+bash deploy/scripts/deploy-waiter.sh check                # 两台一起，只读
+bash deploy/scripts/deploy-waiter.sh deploy 192.168.2.106 # 需输入 yes
+bash deploy/scripts/deploy-waiter.sh deploy 192.168.2.30  # 上一台验证通过后再做
+bash deploy/scripts/deploy-waiter.sh rollback <ip>
 ```
 
 **逐台更新，不要并行** —— 两台都连同一网关，同时重启会同时断链。
@@ -370,7 +370,7 @@ stage handler 入口自动加锁 + 锁不可重入所致，**插件侧问题**�
 
 ## 5. 部署站点（SDK 文档站 / introduce）
 
-`deploy-sdk-site.sh` 覆盖两个静态站，**与 homed / waiter 是独立部署单元**。
+`deploy/scripts/deploy-sdk-site.sh` 覆盖两个静态站，**与 homed / waiter 是独立部署单元**。
 
 | 站 | 本地源 | 线上位置 | 构建 |
 | --- | --- | --- | --- |
@@ -385,9 +385,9 @@ introduce 是**零构建**的 —— `site/` 里就是成品，脚本部署时**
 ### 5.1 用法
 
 ```bash
-bash deploy-sdk-site.sh --check                        # 只核对差异，不动线上
-bash deploy-sdk-site.sh                               # 构建 + 部署 + 验证
-bash deploy-sdk-site.sh --rollback .sdk-bak-<时间戳>  # 回滚
+bash deploy/scripts/deploy-sdk-site.sh --check                        # 只核对差异，不动线上
+bash deploy/scripts/deploy-sdk-site.sh                               # 构建 + 部署 + 验证
+bash deploy/scripts/deploy-sdk-site.sh --rollback .sdk-bak-<时间戳>  # 回滚
 ```
 
 `--check` 逐字节比对本地与线上，两个站都一致时可直接跳过部署。
@@ -441,7 +441,7 @@ cd third_party/homeagent-sdk
 # 3) 重新生成（含 docs/api/* 与 llms.txt 同步）
 tools/apidoc/build.sh
 # 4) 部署并验证
-bash ../../deploy-sdk-site.sh
+bash deploy/scripts/deploy-sdk-site.sh
 ```
 
 验证线上是否真的可访问（**别只看本地产物**）：

@@ -193,7 +193,7 @@ jobs:
           python-version: '3.12'
       - name: 校验站点配置可解析
         # 这里只做「配置与文档源没坏」的轻量校验，不做完整 mkdocs build
-        # （站点发布有独立流水线，见 deploy-sdk-site.sh）。
+        # （站点发布有独立流水线，见 deploy/scripts/deploy-sdk-site.sh）。
         run: |
           set -euo pipefail
           if [ -f mkdocs.yml ]; then
