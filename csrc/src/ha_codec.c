@@ -302,7 +302,11 @@ int ha_codec_estimate_tokens(const char *text, size_t text_len) {
     if (t < 1) {
         return 1;
     }
-    return t;
+    /* 显式收窄：上面已把 t 饱和到 <= 0x7FFFFFFF，
+     * 所以这里的转换不丢信息。但门禁 csrc-lint 带 -Werror=conversion，
+     * size_t -> int 的**隐式**收窄会报警 —— 哪怕运行时安全。
+     * 显式写出来等于向读者与编译器同时声明「这里安全且是有意的」。 */
+    return (int)t;
 }
 
 /* ---------------------------------------------------------------- */
