@@ -51,6 +51,16 @@ func (a *Agent) contextTokenBudget(b TokenBudget) int {
 type GraphMemory interface {
 	// Recall 按关键词/种子实体召回（子的实现是两空间并集）。
 	Recall(keywords []string, seedEntities []string, depth int, sessionFilter string) (*memory.RecallResult, error)
+	// RecallSorted 是可指定呈现顺序的召回（相关性 / 时间倒序）。
+	//
+	// 刻意与 Recall 并存而不是改签名：Recall 有 6 个调用方（webui / cli /
+	// healthcheck / sdk / 记忆通道注入），全部依赖默认相关性语义。
+	// ★ fingerprint 是**向量空间隔离键**（2026-10-04）。
+	//   它不在 SDK 的公开契约里，只在 core 内部这个接口上 ——
+	//   加它是因为「兜底召回路径绕过向量空间隔离」是真回归
+	//   （判据 TestMemoryRecall_指纹不匹配的块被跳过）。
+	RecallSorted(keywords []string, seedEntities []string, depth int, sessionFilter, fingerprint string, mode memory.SortMode) (*memory.RecallResult, error)
+
 	// Commit 写入三元组（子的实现只落自己的 temp 空间）。
 	Commit(triples []memory.Triple, sessionID string, turnID int) (int, int, error)
 }

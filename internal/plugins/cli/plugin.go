@@ -251,17 +251,47 @@ func (p *Plugin) handleChat(w *connWriter, line string, s *sdk.PluginSDK) {
 
 	resp := s.InjectTextSync(cliSource, cliChannel, line)
 	if resp != nil {
-		content, _ := resp.Payload["content"].(string)
-		w.writeLine(map[string]interface{}{
-			"type":    "response",
-			"content": content,
-		})
+		w.writeLine(chatResponseFrame(resp.Payload))
 	} else {
 		w.writeLine(map[string]interface{}{
 			"type":  "error",
 			"error": "agent is not available",
 		})
 	}
+}
+
+// chatResponseFrame 把内核的同步回执转成 chat 的 response 帧。
+//
+// 为何单独抽成函数：这是**无头调用方的唯一信息出口**
+// （waiter -chat、基准 runner、脚本都靠它），而它此前只取了 content。
+// 抽出来才能用判据钉住「哪些字段必须透传」——
+// 症状形态是「写了、发了、不报错，只是收不到」，只有判据拦得住。
+//
+// 透传字段：
+//   - content：回复正文；
+//   - reasoning_content：思考内容（非空才带，不给普通回复挂空字段）；
+//   - usage：用量（存在且非 nil 才带 —— 缺失与 0 是两回事，
+//     消费方据此显示「—」而不是把「不知道」画成 0）。
+func chatResponseFrame(payload map[string]interface{}) map[string]interface{} {
+	frame := map[string]interface{}{
+		"type":    "response",
+		"content": "",
+	}
+	if payload == nil {
+		return frame
+	}
+	if content, _ := payload["content"].(string); content != "" {
+		frame["content"] = content
+	}
+	if reasoning, _ := payload["reasoning_content"].(string); reasoning != "" {
+		frame["reasoning_content"] = reasoning
+	}
+	// 注意用「comma ok 且非 nil」而不是 != nil：
+	// map 里存着一个 nil 值也是常见形态，那种情况同样算「没有」。
+	if usage, ok := payload["usage"]; ok && usage != nil {
+		frame["usage"] = usage
+	}
+	return frame
 }
 
 func (p *Plugin) cliAPIKey(s *sdk.PluginSDK) string {

@@ -105,6 +105,9 @@ type chunkUsage struct {
 	PromptTokensDetails *struct {
 		CachedTokens int `json:"cached_tokens"`
 	} `json:"prompt_tokens_details"`
+	CompletionTokensDetails *struct {
+		ReasoningTokens int `json:"reasoning_tokens"`
+	} `json:"completion_tokens_details"`
 }
 
 // chunkChoice 是装配用的形态：Content 已过 stringifyContent。
@@ -117,18 +120,61 @@ type chunkChoice struct {
 	finishPtr *string
 }
 
+// tokenUsageFromChunkUsage 把上游 usage 归一成 TokenUsage ——
+// **字段映射与缓存规则的唯一落点**。返回 nil 表示上游没报用量。
+//
+// 为何必须只有一处：此前 chunkAssemble（流式）与
+// parseOpenAICompatibleResponse（非流式）各写了一份字段清单与缓存归属判断。
+// 两份实现必然漂移，而漂移的表现是「同一份上游数据，流式与非流式给出
+// 不同命中率」—— 2026-09-30 跑分实测的「命中率恒 100%」（真实 53%）
+// 就属于这一类：只有一边补了未命中数。
+//
+// 字段优先级与 llmsproxy 的 recordChatUsage 同序：
+// 两个项目对同一份上游数据必须给同一答案。
+func tokenUsageFromChunkUsage(usage chunkUsage) *TokenUsage {
+	if usage.Total == 0 && usage.TotalTokens == 0 &&
+		usage.Prompt == 0 && usage.PromptTokens == 0 {
+		return nil
+	}
+	// 缓存归属：优先 OpenAI v2 的 prompt_tokens_details.cached_tokens，
+	// 回退 DeepSeek 遗留的 prompt_cache_hit_tokens。
+	//
+	// ★ PromptTokensDetails 非 nil 即表示「上游报了缓存细节」——
+	// 即使 CachedTokens 为 0 也要置 CacheReported，否则
+	// 「报了但 0 命中」会被当成「没报」，看着成了「无数据」。
+	var cacheRead int
+	cacheReported := false
+	if d := usage.PromptTokensDetails; d != nil {
+		cacheRead = d.CachedTokens
+		cacheReported = true
+	} else if usage.PromptCacheHit > 0 {
+		cacheRead = usage.PromptCacheHit
+		cacheReported = true
+	}
+	u := &TokenUsage{
+		Prompt:        pickFirstInt(usage.PromptTokens, usage.Prompt),
+		Completion:    pickFirstInt(usage.CompletionTokens, usage.Completion),
+		Total:         pickFirstInt(usage.TotalTokens, usage.Total),
+		CacheRead:     cacheRead,
+		CacheMiss:     usage.PromptCacheMiss,
+		CacheReported: cacheReported,
+	}
+	if d := usage.CompletionTokensDetails; d != nil {
+		u.ReasoningTokens = d.ReasoningTokens
+	}
+	// 上游只报命中侧时补出未命中数（规则单一实现见 DeriveCacheMiss）。
+	u.DeriveCacheMiss()
+	return u
+}
+
 // chunkAssemble 把已备好的选择与 usage 拼成 StreamChunk。
 // **两条路径共用**它 ⇒ 拼装逻辑不可能分叉。
+//
+// 这也是缓存/推理字段的**唯一**落地点：快速路径（C 导航）与回退路径
+// （encoding/json）都在这里汇合，所以只需在这里提取一次。
 func chunkAssemble(choices []chunkChoice, usage chunkUsage) (StreamChunk, bool) {
-	var u *TokenUsage
-	if usage.Total > 0 || usage.TotalTokens > 0 ||
-		usage.Prompt > 0 || usage.PromptTokens > 0 {
-		u = &TokenUsage{
-			Prompt:     pickFirstInt(usage.PromptTokens, usage.Prompt),
-			Completion: pickFirstInt(usage.CompletionTokens, usage.Completion),
-			Total:      pickFirstInt(usage.TotalTokens, usage.Total),
-		}
-	}
+	// 用量构造统一走 tokenUsageFromChunkUsage（字段映射与缓存规则的唯一落点）。
+	u := tokenUsageFromChunkUsage(usage)
 	if len(choices) == 0 {
 		// 纯 usage 心跳块：有 usage 就透传，否则丢弃
 		if u != nil {

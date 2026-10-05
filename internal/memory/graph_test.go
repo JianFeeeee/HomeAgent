@@ -2,6 +2,7 @@ package memory
 
 import (
 	"database/sql"
+	"fmt"
 	"os"
 	"path/filepath"
 	"testing"
@@ -40,6 +41,15 @@ func TestNewGraphDB(t *testing.T) {
 	}
 }
 
+// ★★ Commit 的返回值语义已变（2026-10-04）
+//
+// 旧表双写已停 ⇒ ec/rc 恒为 0（它们数的是旧表 entities/relations 行号）。
+// Commit 的返回签名是 SDK 契约（9 处调用方），改签名代价大，
+// 所以保留位置并置 0。
+//
+// ⇒ 断言「写进了几条」必须改用**块侧**信号
+//
+//	（MemoryBlocks 的长度 / MemoryBlockCount）。
 func TestCommitTriples(t *testing.T) {
 	g := newTestGraph(t)
 	defer os.Remove(g.dbPath)
@@ -54,10 +64,10 @@ func TestCommitTriples(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if ec != 4 {
+	if ec != 0 { // 旧表停写后恒 0
 		t.Errorf("expected 4 entity ops (张三×2, 编程, 北京), got %d", ec)
 	}
-	if rc != 2 {
+	if rc != 0 { // 旧表停写后恒 0
 		t.Errorf("expected 2 relations, got %d", rc)
 	}
 }
@@ -73,8 +83,9 @@ func TestCommitDedupSameSession(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if ec != 2 || rc != 1 {
-		t.Fatalf("first commit: want 2/1, got %d/%d", ec, rc)
+	if ec != 0 || rc != 0 {
+		// 旧表停写后 ec/rc 恒 0；真正要验的是块侧写入。
+		t.Fatalf("旧表停写后计数应为 0，实际 %d/%d", ec, rc)
 	}
 
 	// 同一会话重复 commit 同一三元组：关系不再新增
@@ -87,11 +98,19 @@ func TestCommitDedupSameSession(t *testing.T) {
 	}
 
 	var cnt int
-	if err := g.db.QueryRow(`SELECT COUNT(*) FROM relations`).Scan(&cnt); err != nil {
+	// ★ 改查**关系边**（2026-10-04）
+	//
+	// 旧表 relations 不再增长 ⇒ 查它恒为 0，
+	// 而这条判据要验的是「重复提交不产生重复边」。
+	//
+	// ★ 块侧去重口径：同 (source, target, edge_type, session_id) 收敛；
+	//   跨会话并存（关系边按设计允许多条同类型边，52e4596）。
+	if err := g.db.QueryRow(`SELECT COUNT(*) FROM memory_block_edges
+		WHERE edge_type != 'contains' AND source_kind='block'`).Scan(&cnt); err != nil {
 		t.Fatal(err)
 	}
 	if cnt != 1 {
-		t.Errorf("expected exactly 1 relation after duplicate commit, got %d", cnt)
+		t.Errorf("expected exactly 1 relation edge after duplicate commit, got %d", cnt)
 	}
 }
 
@@ -108,11 +127,13 @@ func TestCommitDedupDifferentSession(t *testing.T) {
 		}
 	}
 	var cnt int
-	if err := g.db.QueryRow(`SELECT COUNT(*) FROM relations`).Scan(&cnt); err != nil {
+	// ★ 跨会话允许并存（关系边设计），查边而非旧表。
+	if err := g.db.QueryRow(`SELECT COUNT(*) FROM memory_block_edges
+		WHERE edge_type != 'contains' AND source_kind='block'`).Scan(&cnt); err != nil {
 		t.Fatal(err)
 	}
 	if cnt != 2 {
-		t.Errorf("different sessions may repeat a triple, expected 2 relations, got %d", cnt)
+		t.Errorf("different sessions may repeat a triple, expected 2 relation edges, got %d", cnt)
 	}
 }
 
@@ -329,17 +350,33 @@ func TestArchive(t *testing.T) {
 	defer os.Remove(g.dbPath)
 	defer g.Close()
 
-	// 直接插入一条旧记录
-	g.db.Exec(`INSERT INTO entities (id, name, type) VALUES (1, '旧数据', 'Concept')`)
-	g.db.Exec(`INSERT INTO relations (source_id, target_id, relation_type, created_at)
-		VALUES (1, 1, '包含', datetime('now', '-1 day'))`)
+	// ★ 改造**关系边**而不是旧表行（2026-10-04）
+	//
+	// Archive 已改走块/边体系（旧表停写后，归档旧表等于什么都不做）。
+	// 测试若还造旧表数据，就变成「测一个已不再执行的路径」。
+	g.db.Exec(`INSERT INTO memory_blocks (id, modality, text_content)
+		VALUES ('b_old', 'text', '旧数据')`)
+	g.db.Exec(`INSERT INTO memory_block_edges
+		(source_kind, source_id, target_kind, target_id, edge_type, status, created_at)
+		VALUES ('block','b_old','block','b_old','包含','active', datetime('now','-1 day'))`)
 
 	n, err := g.Archive(0)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if n != 1 {
-		t.Errorf("expected 1 archived relation, got %d", n)
+		t.Errorf("expected 1 archived relation edge, got %d", n)
+	}
+
+	// ★ 归档后应不再参与召回（读路径按 status='active' 过滤）
+	var status string
+	if err := g.db.QueryRow(
+		`SELECT COALESCE(status,'') FROM memory_block_edges
+		 WHERE edge_type='包含'`).Scan(&status); err != nil {
+		t.Fatal(err)
+	}
+	if status != "archived" {
+		t.Errorf("★ 边状态应为 archived，实际 %q", status)
 	}
 }
 
@@ -376,9 +413,22 @@ func TestMergeEntities(t *testing.T) {
 	}, "session", 0)
 
 	// 合并前：两个实体各有关联
-	stats, _ := g.Introspect()
-	if stats["entity_count"].(int) != 5 {
-		t.Fatalf("expected 5 entities (张三, 编程, 北京, 张先生, 字节跳动), got %d", stats["entity_count"])
+	//
+	// ★ 断言改用**块数**（2026-10-04）
+	//
+	// stats["entity_count"] 数的是旧表 entities 行 —— 旧表双写已停，
+	// 它恒为 0。真正要验的是「三元组写进了 5 个实体块」。
+	blocksBefore, err := g.MemoryBlocks()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(blocksBefore) != 5 {
+		names := make([]string, 0, len(blocksBefore))
+		for _, b := range blocksBefore {
+			names = append(names, b.Text)
+		}
+		t.Fatalf("expected 5 entity blocks (张三, 编程, 北京, 张先生, 字节跳动), got %d: %v",
+			len(blocksBefore), names)
 	}
 
 	// 先增加张先生的 mention_count
@@ -403,21 +453,34 @@ func TestMergeEntities(t *testing.T) {
 		t.Error("张先生 should be merged and hidden")
 	}
 
-	// target 的 mention_count 应合并
-	// 验证 target 还存在（seedEntities 精确查找）
+	// ★ 判据从「mention_count 相加」改成「信息没丢」（2026-10-04）
+	//
+	//   块侧**没有 mention_count 这个概念** —— 它是旧 entities 表的列，
+	//   而 Recall 从不填它（块是内容派生的，不存在「被提及几次」）。
+	//
+	//   原断言 `mention_count >= 2` 在块体系下无意义，且它衡量的
+	//   只是「计数」这个代理指标，不是「信息还在」这件真事。
+	//
+	//   块侧的真实验证：**合并后「张三」应当同时承载两人的关系**。
+	//   合并前张先生有「喜欢→Go」，张三有「负责→billing服务」等；
+	//   合并后两组都必须还在 —— 那才是「没丢信息」。
 	result2, err := g.Recall([]string{"张三"}, nil, 1, "")
 	if err != nil {
 		t.Fatal(err)
 	}
 	found := false
+	targets := map[string]bool{}
 	for _, e := range result2.Entities {
 		if e.Name == "张三" {
 			found = true
-			if e.MentionCount < 2 {
-				t.Errorf("expected 张三 mention_count >= 2 after merge, got %d", e.MentionCount)
-			}
-			break
 		}
+	}
+	for _, r := range result2.Relations {
+		targets[r.TargetName] = true
+	}
+	fmt.Printf("  合并后「张三」继承 %d 条关系: %v\n", len(result2.Relations), targets)
+	if !targets["Go"] {
+		t.Error("★ 合并丢失了源块的关系「喜欢→Go」（信息丢失，不是计数问题）")
 	}
 	if !found {
 		t.Error("张三 should still exist after merge")
@@ -537,5 +600,123 @@ func TestPlaceholders(t *testing.T) {
 	}
 	if placeholders(3) != "?,?,?" {
 		t.Errorf("expected '?,?,?' for n=3, got %s", placeholders(3))
+	}
+}
+
+// ★ Introspect 的两个关系计数必须**语义分离**。
+//
+// 这是一个被同一个字段承担两种语义踩出来的坑：
+//
+//	relation_count    活跃数（status='active'）—— TestPurgeSoft 依赖它
+//	                  Purge("soft") 把 status 置 'deleted'，软删除后应为 0
+//	relations_total   全表数 —— 迁移报告依赖它
+//	                  MigrateLegacyTextEntities 按 ORDER BY id 转换全表
+//
+// 曾为对齐迁移口径把 relation_count 改成数全表，结果 TestPurgeSoft
+// 从绿变红（expected 0 active relations, got 1）——
+// 那次修改为了让一个报告数字准确，破坏了一个真实功能的断言。
+func TestIntrospect_关系计数语义分离(t *testing.T) {
+	g := newTestGraph(t)
+	defer os.Remove(g.dbPath)
+	defer g.Close()
+
+	g.Commit([]Triple{
+		{Subject: "活跃方", Relation: "属于", Object: "测试"},
+		{Subject: "待删方", Relation: "属于", Object: "测试"},
+	}, "session-split", 0)
+
+	before, err := g.Introspect()
+	if err != nil {
+		t.Fatal(err)
+	}
+	activeBefore := before["relation_count"].(int)
+	totalBefore, ok := before["relations_total"].(int)
+	if !ok {
+		t.Fatalf("Introspect 必须返回 relations_total，实际 keys=%v", keysOf(before))
+	}
+	if activeBefore != totalBefore {
+		t.Errorf("初始应相等：active=%d total=%d", activeBefore, totalBefore)
+	}
+
+	// 软删一条
+	if _, err := g.Purge(map[string]string{"subject_contains": "待删方"}, "soft"); err != nil {
+		t.Fatal(err)
+	}
+
+	after, err := g.Introspect()
+	if err != nil {
+		t.Fatal(err)
+	}
+	activeAfter := after["relation_count"].(int)
+	totalAfter := after["relations_total"].(int)
+
+	if activeAfter != activeBefore-1 {
+		t.Errorf("软删除后活跃数应减 1：%d → %d", activeBefore, activeAfter)
+	}
+	// ★ 全表数**不变** —— 软删除只是打标记，不是物理删除
+	if totalAfter != totalBefore {
+		t.Errorf("软删除后全表数应不变（status 只是标记）：%d → %d", totalBefore, totalAfter)
+	}
+	if activeAfter >= totalAfter {
+		t.Errorf("活跃数(%d) 必须小于全表数(%d) —— 否则 status 过滤没生效",
+			activeAfter, totalAfter)
+	}
+}
+
+func keysOf(m map[string]interface{}) []string {
+	out := make([]string, 0, len(m))
+	for k := range m {
+		out = append(out, k)
+	}
+	return out
+}
+
+// ★ Introspect 的 relation_count / hotspots 已改数块侧（2026-10-04）
+//
+// 旧实现数旧表，而旧表双写已停 ⇒ 两个字段都恒为 0 / 冻结。
+// 它是 healthcheck 与 WebUI 状态页的数据源，报告说谎比报错更坏。
+func TestIntrospect_关系计数与热点走块侧(t *testing.T) {
+	g := newTestGraph(t)
+	defer func() { _ = g.Close() }()
+
+	if _, _, err := g.Commit([]Triple{
+		{Subject: "热点甲", Relation: "指向", Object: "中心乙", Confidence: 1.0},
+		{Subject: "热点丙", Relation: "指向", Object: "中心乙", Confidence: 1.0},
+	}, "s", 0); err != nil {
+		t.Fatal(err)
+	}
+
+	stats, err := g.Introspect()
+	if err != nil {
+		t.Fatal(err)
+	}
+	// 2 条关系边（都是 active）
+	if rc, _ := stats["relation_count"].(int); rc != 2 {
+		t.Errorf("★ relation_count 应数活跃关系边（2），实际 %v —— "+
+			"数旧表会恒为 0", stats["relation_count"])
+	}
+	if tot, _ := stats["relations_total"].(int); tot < 2 {
+		t.Errorf("★ relations_total（≥2）实际 %v", stats["relations_total"])
+	}
+
+	// hotspots 必须非空且含块文本（不再读旧表 name）
+	hotspots, _ := stats["memory_hotspots"].([]map[string]interface{})
+	if len(hotspots) == 0 {
+		t.Fatal("★ hotspots 为空（旧表不增长 ⇒ 永远是迁移时的快照）")
+	}
+	top, _ := hotspots[0]["name"].(string)
+	fmt.Printf("  最热块: %q\n", top)
+	if top == "" {
+		t.Error("★ hotspot 的 name 应是块文本，不该是旧表的 name")
+	}
+	// ★ 中心乙被两条边指向 ⇒ 应当是度数最高的块之一
+	found := false
+	for _, h := range hotspots {
+		if n, _ := h["name"].(string); n == "中心乙" {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("★ 「中心乙」被两条边指向，应进 hotspots，实际 %v", hotspots)
 	}
 }

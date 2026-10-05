@@ -372,7 +372,39 @@ func accumulateStream(ctx context.Context, ch <-chan agentAPI.StreamChunk, a *Ag
 				}
 			}
 			if ck.Usage != nil {
-				resp.TokenUsage = *ck.Usage
+				// ★ 合并而非覆盖。
+				//
+				// 为何是缺陷而不是风格问题：上游会把用量**分帧**给。
+				// Anthropic 就是典型 —— input/cache 在 message_start，
+				// output_tokens 在 message_delta。若后帧直接覆盖前帧，
+				// 最终只剩 completion，prompt 与缓存计数全归零。
+				// 而这一切**不在任何地方报错**：只是数字变小了一个量级，
+				// 看上去像“这个模型的输入真的很短”。
+				//
+				// 合并规则：新帧非零的字段赢，零值视为「本帧没携带」而不当“真的为 0”。
+				// CacheReported 用或——它一旦为真就不该被后续帧抹掉。
+				u := *ck.Usage
+				old := resp.TokenUsage
+				if u.Prompt == 0 {
+					u.Prompt = old.Prompt
+				}
+				if u.Completion == 0 {
+					u.Completion = old.Completion
+				}
+				if u.Total == 0 {
+					u.Total = old.Total
+				}
+				if u.CacheRead == 0 {
+					u.CacheRead = old.CacheRead
+				}
+				if u.CacheMiss == 0 {
+					u.CacheMiss = old.CacheMiss
+				}
+				if u.ReasoningTokens == 0 {
+					u.ReasoningTokens = old.ReasoningTokens
+				}
+				u.CacheReported = u.CacheReported || old.CacheReported
+				resp.TokenUsage = u
 			}
 
 		case <-ctx.Done():

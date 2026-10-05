@@ -126,13 +126,13 @@ static void test_estimate_tokens(void) {
     check_int("empty", ha_codec_estimate_tokens(LIT("")), 0);
     check_int("NULL", ha_codec_estimate_tokens(NULL, 0), 0);
     check_int("zero len", ha_codec_estimate_tokens("abc", 0), 0);
-    /* "abc" = 3 rune * 2 = 6 */
-    check_int("ascii abc", ha_codec_estimate_tokens(LIT("abc")), 6);
-    /* "你好" = 2 rune * 2 = 4（不是字节数 6） */
+    /* 公式（2026-09-30 实测校准）：min(字节数, 2×rune数)。
+     * - ASCII：字节数更小 ⇒ 按字节计（3 字节 → 3，而非旧公式的 6）；
+     * - CJK：2×rune 更小 ⇒ 按旧公式（"你好" 6 字节 vs 4 → 取 4）；
+     * - emoji：两者相等。 */
+    check_int("ascii abc", ha_codec_estimate_tokens(LIT("abc")), 3);
     check_int("chinese 2 chars", ha_codec_estimate_tokens(LIT("你好")), 4);
-    /* 混合 "a你" = 2 rune * 2 = 4 */
-    check_int("mixed", ha_codec_estimate_tokens(LIT("a你")), 4);
-    /* 4 字节 emoji：1 rune * 2 = 2 */
+    check_int("mixed a你", ha_codec_estimate_tokens(LIT("a你")), 4);
     check_int("emoji", ha_codec_estimate_tokens(LIT("\xF0\x9F\x98\x80")), 2);
 
     /* ASCII 快路径跨界：长度正好落在批量块边界附近，计数必须精确。 */
@@ -140,7 +140,7 @@ static void test_estimate_tokens(void) {
         static char buf[300];
         memset(buf, 'x', sizeof(buf));
         check_int("ascii 300 bytes (chunk boundaries)",
-                  ha_codec_estimate_tokens(buf, sizeof(buf)), 600);
+                  ha_codec_estimate_tokens(buf, sizeof(buf)), 300);
     }
     /* 非 NUL 结尾：只计前 N 字节（后面是垃圾）。 */
     {
@@ -148,11 +148,12 @@ static void test_estimate_tokens(void) {
         memcpy(buf, "abc", 3);
         memset(buf + 3, 'x', sizeof(buf) - 3);
         check_int("no NUL terminator (prefix only)",
-                  ha_codec_estimate_tokens(buf, 3), 6);
+                  ha_codec_estimate_tokens(buf, 3), 3);
     }
-    /* 截断的多字节序列：Go 对无效序列按每字节 1 rune 计，C 必须一致。 */
+    /* 截断的多字节序列：Go 对无效序列按每字节 1 rune 计，C 必须一致。
+     * 2 字节无效输入 = 2 rune → 2×rune=4，字节数=2 → min(2,4)=2。 */
     check_int("truncated 3-byte seq (invalid)",
-              ha_codec_estimate_tokens("\xE4\xBD", 2), 4); /* 2 rune → 4 */
+              ha_codec_estimate_tokens("\xE4\xBD", 2), 2);
 }
 
 static void test_truncate(void) {

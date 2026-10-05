@@ -735,6 +735,11 @@ func (r *ConfigRegistry) seedDBValues(dataDir string) {
 
 	set("core.agent.max_tool_turns", "10")
 	set("core.agent.max_context_size", "30")
+	// 上下文预算的可调阈值（原为硬编码，0 = 沿用历史默认）。
+	set("core.agent.context.utilization_percent", "80")
+	set("core.agent.context.max_target_tokens", "600000")
+	set("core.agent.context.memory_ratio_percent", "0")
+	set("core.agent.context.protected_count", "10")
 	// 积压转投默认**关闭**（false）：它让内核替父做决策（设计 §7 的刻意例外），
 	// 所以必须由部署方显式打开，而不是默默改变系统行为。
 	set("core.agent.offload_enabled", "false")
@@ -848,6 +853,10 @@ func (r *ConfigRegistry) seedCoreDefs(dataDir string) {
 	reg(ConfigDef{Key: "core.agent.offload_min_pending", Default: "3", Type: "int", DisplayName: "转投最少积压条数", Description: "积压少于该条数时不值得拉起驻留子", Category: "agent"})
 	reg(ConfigDef{Key: "core.agent.offload_max_residents", Default: "2", Type: "int", DisplayName: "转投驻留子上限", Description: "自动转投最多拉起几个驻留子（人工创建的不计）", Category: "agent"})
 	reg(ConfigDef{Key: "core.agent.max_context_size", Default: "30", Type: "int", DisplayName: "最大上下文", Description: "上下文窗口中保留的最大消息条数", Category: "agent"})
+	reg(ConfigDef{Key: "core.agent.context.utilization_percent", Default: "80", Type: "int", DisplayName: "上下文利用率（%）", Description: "目标窗口利用率，其余留给回复。原为硬编码 0.8。注意：与「工作区间上限」叠加时，窗口超过 上限/利用率 后实际利用率会下降（如默认值下窗口 1M 实际只有 60%）—— 要让利用率对所有窗口恒定，把工作区间上限设为 -1。", Category: "agent"})
+	reg(ConfigDef{Key: "core.agent.context.max_target_tokens", Default: "600000", Type: "int", DisplayName: "工作区间上限（token）", Description: "记忆与历史可用的绝对上限（不是模型窗口）。600000=默认；-1=不封顶，跟随窗口与利用率；正数=该值封顶。为何不等于模型窗口：标称窗口≠有效窗口，接近满窗时注意力涣散、成本与延迟随 prompt 上升。", Category: "agent"})
+	reg(ConfigDef{Key: "core.agent.context.memory_ratio_percent", Default: "0", Type: "int", DisplayName: "记忆预算占比（%）", Description: "记忆上下文占可用预算的百分比，其余给上下文事件（历史）。0=沿用历史默认的三等分（1/3 记忆、2/3 事件）；1-99=显式指定。", Category: "agent"})
+	reg(ConfigDef{Key: "core.agent.context.protected_count", Default: "10", Type: "int", DisplayName: "裁剪保护条数", Description: "超出上限裁剪时，无条件保留的最近事件条数。它决定「近处信息」与「向量检索」的权重：越大越不容易丢近处，越小越依赖检索准确度。", Category: "agent"})
 	reg(ConfigDef{Key: "core.agent.distill_interval", Default: "30m", Type: "duration", DisplayName: "蒸馏间隔", Description: "记忆蒸馏的执行间隔", Category: "agent"})
 	reg(ConfigDef{Key: "core.agent.archive_interval", Default: "60m", Type: "duration", DisplayName: "冷文档归档间隔", Description: "冷文档归档（L2→L3）的执行间隔", Category: "agent"})
 	reg(ConfigDef{Key: "core.agent.review_interval", Default: "120m", Type: "duration", DisplayName: "关系复审间隔", Description: "三元组关系复审的执行间隔", Category: "agent"})

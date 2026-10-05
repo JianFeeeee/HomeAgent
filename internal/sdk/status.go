@@ -61,6 +61,45 @@ type KernelStatus struct {
 	// M2 起输入不再直接排队在 channel 上，而是经 readyQueue/pendingInterrupts/
 	// suspendStack 三集合按优先级调度；这里把这些状态暴露出来。
 	Scheduler SchedulerStatus `json:"scheduler"`
+
+	// Usage 是本进程的**累计**用量账目（token 与缓存命中）。
+	//
+	// 为何单列：内核早已在每次 LLM 调用后记账（agent.core 的 usageLedger），
+	// 但运行态里看不到 —— 回答「这个实例花了多少、缓存省了多少」只能翻日志。
+	// 放进状态快照后，/kernel、/api/v1/kernel、healthcheck_kernel 就都读得到。
+	//
+	// 口径：这是**进程生命周期内跨请求的累计**，与 /v1/chat/completions 回包里的
+	// usage（单次请求）不同，两者不可互换。
+	Usage UsageStatus `json:"usage"`
+}
+
+// UsageStatus 是内核累计用量的对外视图。
+//
+// 字段语义与 agent.core 的 UsageTotals 一致（同一份数据源），
+// 放在 SDK 侧是为了让插件/外部调用方能读（Agent 内部类型不可导出）。
+type UsageStatus struct {
+	// Calls 是累计 LLM 调用次数（含用量为 0 的调用）。
+	Calls int64 `json:"calls"`
+	// Prompt / Completion / Total 是累计 token 数。
+	Prompt     int64 `json:"prompt"`
+	Completion int64 `json:"completion"`
+	Total      int64 `json:"total"`
+	// CacheRead 是累计命中缓存的输入 token（即省下来未计算的部分）。
+	CacheRead int64 `json:"cache_read"`
+	// CacheMiss 是上游明确报告的未命中输入 token。
+	CacheMiss int64 `json:"cache_miss"`
+	// Reasoning 是累计的思考 token（计费输出里属于思考的部分）。
+	Reasoning int64 `json:"reasoning"`
+	// CacheReportedCalls 是其中**上游报告了缓存字段**的调用数（命中率的分母）。
+	CacheReportedCalls int64 `json:"cache_reported_calls"`
+
+	// CacheHitRate 只在**有调用报过缓存**时给出，否则为 nil。
+	//
+	// 为何用指针而非 float64：必须能区分「命中率 0」与「无数据」。
+	// 混为一谈会把「没开缓存」显示成「命中率 0%」，
+	// 让人去优化一个本来就没开的功能 —— 拿假数据做的决定。
+	// nil 时 omitempty 让该键根本不出现，消费方据此显示「—」。
+	CacheHitRate *float64 `json:"cache_hit_rate,omitempty"`
 }
 
 // SchedulerStatus 是调度器的原子快照 DTO。

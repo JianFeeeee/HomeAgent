@@ -331,6 +331,11 @@ func (e *StaticEmbedder) tokenize(text string) []string {
 }
 
 func (e *StaticEmbedder) Vectorize(text string) vector.Vector {
+	// nil接收者返回空向量而不是 panic：调用方（RelevanceContext.computeVector）
+	// 可能在模型未就绪时拿到 nil embedder，让整条链路崩掉而不是降级。
+	if e == nil {
+		return vector.Vector{}
+	}
 	e.mu.RLock()
 	loaded := e.loaded
 	dim := e.dim

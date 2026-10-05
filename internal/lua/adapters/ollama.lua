@@ -5,6 +5,25 @@ adapter.version = "2.0.0"
 adapter.endpoint = "/api/chat"
 adapter.headers = {}
 
+-- ── 用量归一化（transform_response 与 transform_stream_chunk 共用）──
+--
+-- 输出键名对齐 homed 的 agentAPI.TokenUsage（json tag）：
+--   prompt / completion / total / cache_read / cache_reported 等，
+-- 所以这张表会被 json.Unmarshal 直接吃进 StreamChunk.Usage。
+--
+-- ★ 为何必须透传：适配器是**归一化层**，上游给的用量只有它看得见。
+--   不透传则内核只剩估算，永远答不出真实成本与缓存命中。
+-- Ollama 的计量在**顶层**（不是嵌在 usage 对象里）：
+--   prompt_eval_count → prompt，eval_count → completion
+-- 且只在最后一帧给出，所以帧上没有这两个键时返回 nil（表示「本帧无用量」）。
+local function usage_to_unified(u)
+    if type(u) ~= "table" then return nil end
+    local p = u.prompt_eval_count or 0
+    local c = u.eval_count or 0
+    if p == 0 and c == 0 then return nil end
+    return { prompt = p, completion = c, total = p + c }
+end
+
 -- Ollama API 格式：{ model, messages, stream, options:{temperature,num_predict} }
 function adapter.transform_request(raw_body)
     local ok, req = pcall(json.decode, raw_body)
@@ -57,8 +76,13 @@ function adapter.transform_response(raw_body)
         content = "",
         finish_reason = resp.done_reason or "",
         tool_calls = {},
-        usage = { prompt = 0, completion = 0, total = 0 }
+        -- ★ 键名必须是 token_usage：Go 侧 CompletionResponse 的 json tag 就是
+        --   它。原先这里写的是 usage，于是这份用量**被静默忽略**（缺字段不报错，
+        --   只是永远取零值）——又一个「算了却不返回」。
+        token_usage = { prompt = 0, completion = 0, total = 0 }
     }
+    local rusg = usage_to_unified(resp)
+    if rusg then unified.token_usage = rusg end
 
     if resp.message then
         unified.content = resp.message.content or ""
@@ -70,12 +94,17 @@ end
 function adapter.transform_stream_chunk(raw_chunk)
     local ok, chunk = pcall(json.decode, raw_chunk)
     if not ok then return "" end
-    if not chunk.message then return "" end
+    local usg = usage_to_unified(chunk)
+    if not chunk.message then
+        if usg then return json.encode({ done = chunk.done or false, usage = usg }) end
+        return ""
+    end
 
     local unified = {
         content = chunk.message.content or "",
         done = chunk.done or false
     }
+    if usg then unified.usage = usg end
     if chunk.message.reasoning_content then
         unified.reasoning_content = chunk.message.reasoning_content
     end

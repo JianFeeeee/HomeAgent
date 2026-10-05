@@ -97,7 +97,7 @@ func New(modelDir string) (*Embedder, error) {
 		return nil, err
 	}
 	if !ort.IsInitialized() {
-		if lib := findOnnxLib(); lib != "" {
+		if lib := FindOnnxLib(); lib != "" {
 			ort.SetSharedLibraryPath(lib)
 		}
 		if err := ort.InitializeEnvironment(); err != nil {
@@ -615,7 +615,13 @@ func computeFingerprint(modelDir string) string {
 	return hex.EncodeToString(h.Sum(nil))
 }
 
-func findOnnxLib() string {
+// FindOnnxLib 返回本机 onnxruntime 共享库路径，找不到时返回空串。
+//
+// 导出给同模型族的其它 provider 用（如 providers/qwen3vlgen）：
+// 库路径的候选清单（含发行包内置位置与两个历史环境变量）必须**只有一份** ——
+// 各写一份的话，新增安装位置时必然漏掉某一个，而漏掉的表现是
+// 「初始化失败」这种看不出原因的错误。
+func FindOnnxLib() string {
 	var candidates []string
 	for _, env := range []string{"ONNXRUNTIME_DIR", "ONNX_ML_DIR"} {
 		if dir := strings.TrimSpace(os.Getenv(env)); dir != "" {

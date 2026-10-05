@@ -216,7 +216,32 @@ func (a *Agent) executeMemoryTool(tc agentAPI.ToolCall, turnScenes []string) str
 		if len(keywords) == 1 {
 			keywords = memory.ExtractKeywords(query)
 		}
-		result, err := g.Recall(keywords, nil, int(depth), "")
+		// 排序模式：默认相关性；显式要"最近/最新"时用 recent。
+		//
+		// ★ 为什么要分两种（实测 v4 跑分）：overwrite 组考的是"新值覆盖旧值"，
+		// 相关性排序下新旧同名实体的命中层级完全相同，只能靠时间分胜负；
+		// 而 casual 组问"某个服务端口是多少"，要的是实词精确命中。
+		// 用一个排序同时服务这两类问题，必然有一边错。
+		sortMode := memory.ParseSortMode(fmt.Sprint(tc.Arguments["sort"]))
+
+		// 块向量召回优先。
+		//
+		// ★ 为什么要有它（这是这条路径缺失的直接后果）：memory_blocks 是
+		// 带 vector+fingerprint 的图节点载体，但此前**没有任何召回读它** ——
+		// BlocksForNode 只能按端点反查，得先知道 nodeID。于是「问一个具体
+		// 问题」只能退到 entities 的 jieba+LIKE，实测跨维度定位 0/5
+		//（问「第181批的值班手册是第几版」完全答不出）。
+		//
+		// 混合而非替换：端口号（8328）、分机号（4324）这类纯数字串向量天然弱，
+		// 而它们恰是本项目最常问的。两条路都跑，块向量在前，符号路兜底。
+		if blockOut := a.recallByBlocks(query); blockOut != "" {
+			return blockOut
+		}
+
+		// ★ fingerprint 必须传：这是 recallByBlocks 失败后的兜底路，
+		// 不传就等于让旧向量空间的块混进结果
+		// （判据 TestMemoryRecall_指纹不匹配的块被跳过）。
+		result, err := g.RecallSorted(keywords, nil, int(depth), "", a.currentFingerprint(), sortMode)
 		if err != nil {
 			return fmt.Sprintf("记忆检索失败: %v", err)
 		}
@@ -231,9 +256,21 @@ func (a *Agent) executeMemoryTool(tc agentAPI.ToolCall, turnScenes []string) str
 			a.indexer.MarkRecalled(names...)
 		}
 		var parts []string
-		parts = append(parts, fmt.Sprintf("找到 %d 个相关实体:", len(result.Entities)))
+		parts = append(parts, fmt.Sprintf("找到 %d 个相关实体（按%s排序）:", len(result.Entities), sortLabel(sortMode)))
 		for _, e := range result.Entities {
-			parts = append(parts, fmt.Sprintf("- %s (提及%d次, 类型:%s)", e.Name, e.MentionCount, e.Type))
+			// ★ 带出匹配层级：此前输出是同格式平铺，模型无从判断该信哪条。
+			//
+			// 实测 v4：193 个实体平铺（13744 tokens）后，模型放弃向量检索、
+			// 转去 grep 知识库文件，还把"没检索到"说成"库里不存在"。
+			// 层级标记让最相关的几条一眼可辨。
+			tag := ""
+			switch {
+			case e.MatchRank == 0:
+				tag = ", 精确匹配"
+			case e.MatchRank == 1:
+				tag = ", 前缀匹配"
+			}
+			parts = append(parts, fmt.Sprintf("- %s (提及%d次, 类型:%s%s)", e.Name, e.MentionCount, e.Type, tag))
 		}
 		parts = append(parts, fmt.Sprintf("找到 %d 条关系:", len(result.Relations)))
 		parts = append(parts, formatRecallRelations(result.Relations, 10)...)
@@ -322,14 +359,76 @@ func (a *Agent) executeMemoryTool(tc agentAPI.ToolCall, turnScenes []string) str
 		}
 		// remember 工具是用户/模型显式写入，不涉及归档删除，
 		// 因此不需要 mediaBound——没有旧引用要释放。
-		ec, rc, mb, err := a.commitTriplesWithMedia(triples, string(a.id), 0, nil)
+		// ★★ 写入前取块数基线（2026-10-04）
+		//
+		// 旧表双写已停 ⇒ Commit 的 ec/rc 恒为 0，
+		// 拿它们判断「有没有写进去」会**永远判成没写进去**。
+		blocksBefore, err := a.memory.MemoryBlockCount()
 		if err != nil {
 			return fmt.Sprintf("记忆写入失败: %v", err)
 		}
-		if mb > 0 {
-			return fmt.Sprintf("已写入 %d 个实体和 %d 条关系，关联 %d 份媒体", ec, rc, mb)
+		edgesBefore, err := a.memory.MemoryEdgeCount()
+		if err != nil {
+			return fmt.Sprintf("记忆写入失败: %v", err)
 		}
-		return fmt.Sprintf("已写入 %d 个实体和 %d 条关系", ec, rc)
+
+		// ★ ec/rc 丢弃（2026-10-05）：它们恒为 0（graph.go 里
+		// relationsCreated = 0 写死），拿它们当「写了几条」会**永远说 0**。
+		// 保留位置只是因为 commitTriplesWithMedia 的签名未变。
+		//   唯一可信信号是下面实测的 newBlocks / newEdges。
+		_, _, mb, err := a.commitTriplesWithMedia(triples, string(a.id), 0, nil)
+		if err != nil {
+			return fmt.Sprintf("记忆写入失败: %v", err)
+		}
+		blocksAfter, err := a.memory.MemoryBlockCount()
+		if err != nil {
+			return fmt.Sprintf("记忆写入失败: %v", err)
+		}
+		edgesAfter, err := a.memory.MemoryEdgeCount()
+		if err != nil {
+			return fmt.Sprintf("记忆写入失败: %v", err)
+		}
+		newBlocks := blocksAfter - blocksBefore
+		newEdges := edgesAfter - edgesBefore
+		// ★ 0 写入必须显式报告：提交了 N 条但一条都没落库（如实体名校验被拒）
+		// 却回「已写入 0 个」，模型会当成成功而永不重试 —— 实测（2026-10-01
+		// 跑分）：metrics 端口/分机号更新全部因此静默丢失。
+		// ★ 判据用**新增块数**，不是 ec/rc（2026-10-04）
+		//
+		// ★★ 这条提示曾经会让模型做错事：
+		//
+		//	旧表停写后 ec/rc 恒为 0 ⇒ 每次提交都被告知
+		//	「全部被拒，请检查实体名写法」——
+		//	而写入其实**成功了**。
+		//
+		//	模型据此去改不该改的东西（把正常实体名改短、
+		//	加字母数字），把记忆内容改坏。
+		//
+		//	⇒ 「报假失败」比「报假成功」危险：前者会诱发破坏性动作。
+		if newBlocks == 0 && mb == 0 {
+			return fmt.Sprintf("提交了 %d 条三元组但全部被拒（未写入）。常见原因：实体名为空、过长（>50 字）、或不含字母/汉字/数字。请检查主语/宾语的写法后重试。", len(triples))
+		}
+		// ★★★ 成功分支也**不能用 ec/rc**（2026-10-05）
+		//
+		//	旧表停双写后 ec/rc 恒为 0，所以这里原本回
+		//	「已写入 0 个实体和 0 条关系」——**而实际写进去了**。
+		//
+		//	实测（隔离实例）：一次对话写入 7 块 9 边，工具却回
+		//	「已写入 0 个实体和 0 条关系」与「全部被拒（未写入）」。
+		//	模型据此认为记忆系统坏了，回复里明说
+		//	「the write is being rejected」并放弃重试。
+		//
+		//	★ 与上面那个「报假失败」是同一个病的两种表现：
+		//	  判据用 newBlocks（对）但文案用 ec/rc（错），
+		//	  于是同一份代码里两套口径打架。
+		//
+		//	唯一可信的信号是 newBlocks（块总量差值）——
+		//	它直接量「库里多了几个块」，不依赖任何旧表口径。
+		if mb > 0 {
+			return fmt.Sprintf("已写入 %d 个记忆块、%d 条关系边，关联 %d 份媒体",
+				newBlocks, newEdges, mb)
+		}
+		return fmt.Sprintf("已写入 %d 个记忆块、%d 条关系边", newBlocks, newEdges)
 
 	case "memory_introspect":
 		if msg := requireFull(); msg != "" {
@@ -367,10 +466,20 @@ func (a *Agent) executeMemoryTool(tc agentAPI.ToolCall, turnScenes []string) str
 		if name == "" {
 			return "name 不能为空"
 		}
-		if err := a.memory.DeleteEntity(name); err != nil {
+		res, err := a.memory.DeleteEntity(name)
+		if err != nil {
 			return fmt.Sprintf("删除失败: %v", err)
 		}
-		return fmt.Sprintf("已彻底删除实体「%s」及其所有关联关系", name)
+		// ★ 如实报告实际删掉多少，不说「已彻底删除…及其所有关联关系」。
+		//
+		//   旧文案是谎报：底层只碰旧表、活图谱 Δ0，却回「彻底删除」。
+		//   模型据此认为内容已消失（不再提及或重新写入），
+		//   而关联边还在、召回继续命中 —— 谎报会让模型的行为跟着错。
+		if res.Blocks == 0 {
+			return fmt.Sprintf("未找到名为「%s」的块，未删除任何内容", name)
+		}
+		return fmt.Sprintf("已删除块「%s」及其 %d 条关联关系（块 %d 个）",
+			name, res.Edges, res.Blocks)
 
 	case "memory_purge":
 		if msg := requireFull(); msg != "" {
@@ -832,4 +941,163 @@ func (a *Agent) executeDocTool(tc agentAPI.ToolCall) string {
 	default:
 		return fmt.Sprintf("未知的文档工具: %s", tc.Name)
 	}
+}
+
+// sortLabel 把排序模式翻成给模型看的中文标签。
+func sortLabel(m memory.SortMode) string {
+	if m == memory.SortRecent {
+		return "时间倒序，最新在前"
+	}
+	return "相关性"
+}
+
+// recallByBlocks 用稠密向量召回块节点，返回格式化文本；不可用/无命中时返回空串。
+//
+// 返回空串让调用方无缝退回符号路 —— 这保证了「向量侧没配好」不会让
+// memory_recall 整体失败（那会让模型完全失去记忆，比召回差得多）。
+func (a *Agent) recallByBlocks(query string) string {
+	if a == nil || a.memory == nil || a.multimodalSpace == nil {
+		return ""
+	}
+	if !a.multimodalSpace.Loaded() {
+		return ""
+	}
+	vec, err := a.multimodalSpace.VectorizeDense(query)
+	if err != nil || len(vec) == 0 {
+		// 向量化失败不报错到工具层：符号路仍可用，而这条失败通常意味着
+		// 模型未加载/超时，报给模型只会让它以为"记忆不存在"。
+		return ""
+	}
+	// ★ 走**融合**入口（向量 + 符号），而不是纯向量或仲裁-only
+	//
+	// 三层根因（生产快照 1391 块实测）：
+	//
+	//	1. 各向异性    已修（中心化，补上了生产调用者）
+	//	2. 精确串被稀释  向量模型固有限制：「13010/13011 而非 12011」
+	//	              含精确串却召不回，而「本地网关8081」召回了
+	//	3. 符号路无补位  本函数修的就是这个
+	//
+	// 旧实现是「块向量在前，符号路兜底」—— 块一旦有命中就直接 return，
+	// 符号路的 RecallSorted **根本没被调用**。设计注释写的
+	//「端口号、分机号这类纯数字串向量天然弱」是对的，但没有真正生效。
+	//
+	// 而仲裁仍必须在 topK 截断**之前**（RecallBlocksFused 内部
+	// 已按「放大 TopK → 符号融合 → 仲裁 → 截断」实现）：
+	// 实测旧号 4379 以 0.8127 排 top1 而新号进不了 top8，
+	// 事后仲裁无从挽回，因为被判取代的旧值和新值都不在候选里。
+	//
+	// ★ MinScore 传 0 而不是 blockRecallMinScore(0.5)：
+	//   融合分数的**量纲变了** —— 精确串命中是 1.0（布尔置顶），
+	//   而向量加权只有 0.7×余弦。用 0.5 筛会把「精确串命中 1.0」
+	//   留下，却把所有纯向量候选（0.35~0.45）全筛掉 ——
+	//   反而丢掉向量侧的有效召回。筛选改由融合内部按路处理。
+	// ★ 走**带拒答的**入口 RecallBlocksGuarded。
+	//
+	// 拒答在图库层而不是这一层，是有教训的：第一版把 AbstainCheck
+	// 写在这里（core 层），而探针在 memory 包内直连图库，
+	// 于是**探针完全绕过了拒答** —— 端到端跑出 abstention 0/3，
+	// 但生产路径其实是有拒答的，却没人能证明它。
+	// 「判据测不到被测路径 ⇒ 判据等于不存在」。
+	//
+	// 拒答为什么必须在召回之前：编造的成因正是「查询符号在库里零出现」
+	// ⇒ 向量却仍给 0.84+ 的高分（grafana/kafka/容灾演练 三类都是）。
+	// 先召回再判断的话，看到的是一堆高分块 ——
+	// 而「分数高」本身不能证明相关。
+	hits, abstain, arb, err := a.memory.RecallBlocksGuarded(
+		memory.BlockRecallQuery{
+			Vector:      vec,
+			Fingerprint: a.multimodalSpace.Fingerprint(),
+			TopK:        blockRecallTopK,
+			// ★ MinScore 保留：融合内部按路应用（只约束纯向量那一路，
+			//   精确串/纯符号命中不受它约束）。曾误传 0 让噪声过滤失效，
+			//   toolcall_block_test.go 的两条判据立刻红了。
+			MinScore: blockRecallMinScore,
+		}, query)
+	if abstain != nil {
+		log.Printf("[memory] abstain: 符号零命中，拒答「%s」", query)
+		return abstain.Notice
+	}
+	if err != nil || len(hits) == 0 {
+		return ""
+	}
+	if n := len(arb.Superseded); n > 0 {
+		// 被取代的块不返回给模型，但**记一笔**：旧值被显式作废这件事
+		// 本身有信息（「旧号 4379 停用」解释了为什么现在打不通），
+		// 而完全静默会让「记忆里为什么没有旧号」变成无解之谜。
+		log.Printf("[memory] recall blocks: %d 条被时序仲裁剔除（被更新的值取代）", n)
+	}
+	// 归因统计：融合到底救回了多少条 —— 这是判断它在起作用的关键读数
+	var bySymbol, byExact int
+	for _, h := range hits {
+		if h.ExactHit {
+			byExact++
+		} else if h.VectorHit == 0 && h.SymbolHit > 0 {
+			bySymbol++
+		}
+	}
+	if byExact+bySymbol > 0 {
+		log.Printf("[memory] recall blocks: 符号路补位 %d 条（精确串 %d，词法 %d）",
+			byExact+bySymbol, byExact, bySymbol)
+	}
+
+	var parts []string
+	parts = append(parts, fmt.Sprintf("找到 %d 条相关记忆片段:", len(hits)))
+	for _, h := range hits {
+		text := strings.TrimSpace(h.Text)
+		if text == "" {
+			continue
+		}
+		// 分数照旧给模型看（它用这个判断相关性），
+		// 但精确串命中统一显示 1.00 —— 它是布尔信号不是强度信号。
+		score := h.Score
+		if h.ExactHit {
+			score = 1.0
+		}
+		tag := "text"
+		if h.ExactHit {
+			tag = "exact"
+		} else if h.VectorHit == 0 && h.SymbolHit > 0 {
+			tag = "symbol"
+		}
+		parts = append(parts, fmt.Sprintf("- [%s %.2f] %s",
+			tag, score, truncateStr(text, 160)))
+	}
+	return strings.Join(parts, "\n")
+}
+
+const (
+	// blockRecallTopK 是块召回的条数上限。与实体路的 20 条同量级：
+	// 实测 193 条平铺会把模型淹没（13744 tokens / 预算 436%）。
+	blockRecallTopK = 8
+	// blockRecallMinScore 是入选下限。低于它的候选分数已无区分意义
+	// （生成模型主干的余弦普遍偏高，实测无关句也能到 0.83）。
+	blockRecallMinScore = 0.5
+)
+
+// currentFingerprint 返回**当前向量空间**的指纹，用于给兜底召回路径做隔离。
+//
+// ★ 为什么需要它
+//
+//	memory_recall 的主路是 recallByBlocks（带向量空间检查），
+//	失败时退到 RecallSorted —— 而 RecallSorted 是纯词法的，不查 fingerprint
+//	⇒ 换向量空间后旧块会从兜底路混回结果。
+//	（判据 TestMemoryRecall_指纹不匹配的块被跳过 就是抓这个的）
+//
+// ★★ 为什么用「当前空间的指纹」而不是「库里多数取值」
+//
+//	我先写的版本是查库（DominantBlockFingerprint）—— **错的**：
+//	库里只有旧空间的块时，多数取值就是旧指纹，
+//	拿它当过滤条件等于「不��滤」，旧块原样通过。
+//	（判据当场抓住：测试库里唯一的块是 old-fp，而当前空间是 fp1。）
+//
+//	隔离的语义是「只信任当前空间写入的块」，
+//	判据必须来自**空间对象**而不是库 —— 库只能说明过去，不能说明现在。
+func (a *Agent) currentFingerprint() string {
+	if a == nil || a.multimodalSpace == nil {
+		return ""
+	}
+	if !a.multimodalSpace.Loaded() {
+		return ""
+	}
+	return a.multimodalSpace.Fingerprint()
 }

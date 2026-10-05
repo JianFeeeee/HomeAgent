@@ -55,6 +55,17 @@ const state = {
   displays: [],
   selfDeviceId: "",
   selfGateway: "",
+  deviceBridgeToken: "", // 设备接入令牌明文（来自 device-bridge:get），用于 /device/* 的 requireToken
+  _notifyState: null,      // 本轮通知去重状态 { turnSig, notified }
+  _notifySupported: null, // 系统通知是否可用（null=未探测）
+  // ---- 星图活动数据源（对齐服务端 /memory/graph/pulse + /runtime）----
+  starmapPulses: [], // { mesh, until, kind } 活动脉冲队列
+  starmapGrown: {}, // nodeId -> 生长动画截止时间戳（ms）
+  starmapLastPulseAt: 0, // 最后一次活动时间（ms），驱动全局呼吸
+  starmapPulseSince: 0, // 下次 pulse 的回看起点（unix 秒）
+  starmapPulseTimer: null, // /runtime 3s 轮询 id
+  starmapActivityTimer: null, // /memory/graph/pulse 10s 轮询 id
+  _smPrevSched: null, // 上一拍 /runtime 调度器快照（做差值判定）
 };
 
 // ===== I18n =====
@@ -331,26 +342,31 @@ function toggleAppearance() {
 
 // ===== Utility =====
 // 安全渲染 markdown：marked 转 HTML 后由 DOMPurify 剥离脚本/事件/危险标签。
-// CDN 加载失败时降级为纯转义文本，绝不把未消毒 HTML 直接写入 innerHTML。
+//
+// ★ 净化器不可用时**不降级**，直接退到纯文本。
+//
+// 旧写法是在净化器缺失时掉到手写正则（剥 <script>/on*=/javascript:）再返回。
+// 那不是完备的 HTML sanitizer：它漏掉的东西包括 <iframe srcdoc>、
+// SVG 内联事件、data: URI、CSS url()/expression 等一整类。
+// 而 renderMd 渲染的是**模型输出与记忆文本**——两者都是不可信输入。
+// 让不可信输入绕过净化，比不显示 markdown 危险得多。
+//
+// 库已本地化（renderer/vendor/purify.min.js），正常走不到这个分支；
+// 万一打包漏了文件，看到纯文本 + 控制台一条 error，远好过静默开一个 XSS 口子。
 function renderMd(text) {
   if (typeof text !== "string") text = String(text || "");
   var html;
   if (typeof marked !== "undefined") {
     try { html = marked.parse(text); }
-    catch (e) { html = escHtml(text); }
+    catch (e) { html = "<pre>" + escHtml(text) + "</pre>"; }
   } else {
     html = "<pre>" + escHtml(text) + "</pre>";
   }
-  if (typeof DOMPurify !== "undefined" && typeof DOMPurify.sanitize === "function") {
-    try { return DOMPurify.sanitize(html, { USE_PROFILES: { html: true } }); }
-    catch (e) {}
+  if (typeof DOMPurify === "undefined" || typeof DOMPurify.sanitize !== "function") {
+    return "<pre>" + escHtml(text) + "</pre>";
   }
-  // 兜底：手动删除 <script> 块 + 危险属性/事件句柄（CDN 加载失败时）
-  return html
-    .replace(/<script[\s\S]*?<\/script>/gi, "")
-    .replace(/\son\w+\s*=\s*"[^"]*"/gi, "")
-    .replace(/\son\w+\s*=\s*'[^']*'/gi, "")
-    .replace(/javascript:/gi, "");
+  try { return DOMPurify.sanitize(html, { USE_PROFILES: { html: true } }); }
+  catch (e) { return "<pre>" + escHtml(text) + "</pre>"; }
 }
 
 function escHtml(s) {
@@ -453,6 +469,55 @@ function confirmDialog(action, isDanger) {
 }
 
 // ===== API =====
+// ===== 系统通知 =====
+//
+// 何时通知：agent **完成一轮输出**时。
+// 不在流式过程中逐 token 通知 —— 那是噪音（一轮可能几十个 delta），
+// 用户要的是"有结果了"，不是"正在打字"。
+//
+// 去重：同一轮（signature 相同）只通知一次。SSE 有 tool_call / stage /
+// agent_output 多个事件都可能判定"一轮结束"，不去重会连弹好几次。
+//
+// 前台可见且聚焦时不通知：用户正看着界面，弹窗只会烦人。
+// 静默启动（窗口 hidden）正好走"要通知"这条 —— 这也是静默后
+// 唯一能让用户知道"agent 回了"的途径。
+function shouldNotify() {
+  if (!state._notifySupported) return false;
+  return true;
+}
+
+async function notifyTurn(title, body, msgKey) {
+  if (!shouldNotify()) return;
+  try {
+    await window.homeagent.notify.show({
+      title: title,
+      body: body,
+      msgKey: msgKey || "",
+      silent: false,
+    });
+  } catch (e) {}
+}
+
+// notifyTurnOnce 保证同一轮只通知一次。
+function notifyTurnOnce(sig, title, body, msgKey) {
+  if (!shouldNotify()) return;
+  if (!state._notifyState || state._notifyState.turnSig !== sig) {
+    state._notifyState = { turnSig: sig, notified: false };
+  }
+  if (state._notifyState.notified) return;
+  state._notifyState.notified = true;
+  notifyTurn(title, body, msgKey);
+}
+
+// onNotifyClicked 点系统通知后：切到 chat 视图并滚到那条消息。
+function onNotifyClicked() {
+  try {
+    switchView("chat");
+    var el = document.querySelector(".msg-assistant:last-of-type");
+    if (el && el.scrollIntoView) el.scrollIntoView({ block: "end" });
+  } catch (e) {}
+}
+
 async function cliRequest(line) {
   var conn = state.currentConn;
   if (!conn) throw new Error(__("未选择连接", "No connection selected"));
@@ -498,6 +563,57 @@ function ApiError(message, status, statusText, body) {
 }
 ApiError.prototype = Object.create(Error.prototype);
 
+// deviceTokenPaths 列出走**设备接入令牌**鉴权的端点。
+//
+// 为什么要单独判：服务端 /api/v1/device/ 命名空间下并存**两套鉴权**——
+//   · /device/gateway   注册在 webui 插件，走 requireAPI，认 session cookie
+//   · /device/online、/device/、/device/push
+//                        注册在 remotedevice 插件，走 requireToken，
+//                        **只认 X-API-Key 头或 ?token=，完全不认 cookie**
+// 所以只带 cookie 调后三者 ⇒ 401（实测：cookie 与错 token 的响应体
+// 都是纯文本 "unauthorized"，而 webui 鉴权是 JSON {"error":...}，
+// 可据此判定命中的是 requireToken）。
+//
+// 三种能工作的客户端做法一致：
+//   · WebUI 浏览器：cookie 进内核，reverseToUpstream 里注入
+//     deviceGatewayToken（handler_device.go:118）
+//   · waiter：客户端自己带 X-API-Key（gateway_discover.go:103）
+//   · GUI：两者都没做 ⇒ 设备页永远空白（本次修复的内容）
+function isDeviceTokenPath(p) {
+  return (
+    p === "/device/online" ||
+    p === "/device" ||
+    p === "/device/push" ||
+    p.indexOf("/device/") === 0
+  ) && p !== "/device/gateway";
+}
+
+// deviceApiKey 取设备接入令牌。
+//
+// 优先用连接自身的 apiKey（为该连接显式配的管理员凭据）；
+// 退回本机设备桥的 token（state.deviceBridgeToken，来自
+// device-bridge:get，桥与 waiter 同源）——那才是 requireToken 要的那份。
+// 两者都没有时返回空：此时发出去的请求会被服务端 401，属预期，
+// 调用方负责给用户可读提示（见 deviceAuthHint）。
+function deviceApiKey() {
+  if (state.currentConn && state.currentConn.apiKey)
+    return state.currentConn.apiKey;
+  return state.deviceBridgeToken || "";
+}
+
+// deviceAuthHint 在设备接口 401 时拼一句可读原因。
+//
+// 为什么不能静默：此前 401 被 catch 吞掉并置空数组，界面上与
+// 「确实没有设备」长得一模一样，用户无从判断是配置问题还是真没设备。
+function deviceAuthHint() {
+  if (state.currentConn && state.currentConn.apiKey) return "";
+  if (state.deviceBridgeToken) return "";
+  return __(
+    "设备接口需要设备接入令牌：请在「设置 → 设备」里配置设备桥网关与令牌，或给该连接填 API Key。",
+    "Device endpoints require a device token: configure the device bridge gateway and token in Settings → Devices, or set an API Key on this connection.",
+  );
+}
+
 async function api(p, o) {
   if (!state.currentConn)
     throw new Error(__("未选择连接", "No connection selected"));
@@ -508,6 +624,11 @@ async function api(p, o) {
   var to = opts.timeout || 8000;
   var headers = { "Content-Type": "application/json", ...(opts.headers || {}) };
   if (state.currentConn.apiKey) headers["X-API-Key"] = state.currentConn.apiKey;
+  // 设备接入面需要设备令牌而非管理员会话 cookie（见 isDeviceTokenPath 注释）。
+  if (!headers["X-API-Key"] && isDeviceTokenPath(p)) {
+    var devKey = deviceApiKey();
+    if (devKey) headers["X-API-Key"] = devKey;
+  }
   var ctl = new AbortController();
   var timer = setTimeout(() => {
     ctl.abort();
@@ -631,6 +752,9 @@ async function loadDiscoveredGateway() {
     state.discoveredGateway = "";
     return;
   }
+  // 已有值则跳过：网关地址在一次会话内基本不变，
+  // 而 refreshAll 会被 15s 定时器反复触发。
+  if (state.discoveredGateway) return;
   try {
     var d = await api("/device/gateway");
     state.discoveredGateway =
@@ -735,6 +859,29 @@ function renderAll() {
   refreshAll();
 }
 
+// ensureDeviceToken 拉取设备桥配置并缓存设备令牌。
+//
+// ★ 必须在任何 /device/* 请求**之前**调用：那些端点走服务端
+// requireToken，只认 X-API-Key；令牌不在手上就必然 401。
+// （此前令牌加载排在 /device/online 之后，顺序正好反了。）
+async function ensureDeviceToken() {
+  try {
+    if (!window.homeagent || !window.homeagent.deviceBridge) return "";
+    var dbinfo = await window.homeagent.deviceBridge.get();
+    state.dbConfig = dbinfo || state.dbConfig;
+    state.deviceBridgeToken = (dbinfo && dbinfo.token) || "";
+    // 顺带按需发现网关地址：设备通道配置（renderDevices 的 webuiUrl）
+    // 依赖 state.discoveredGateway，而它是服务端配置、客户端无从推导。
+    // loadDiscoveredGateway 自带缓存，这里不会反复请求。
+    try {
+      await loadDiscoveredGateway();
+    } catch (e) {}
+    return state.deviceBridgeToken;
+  } catch (e) {
+    return "";
+  }
+}
+
 async function refreshDataOnly() {
   // 仅刷新 state 数据，不重建 DOM（用于定时轮询时避免擦掉用户输入）
   try {
@@ -773,14 +920,18 @@ async function refreshDataOnly() {
       state.currentConn.type === "webui" &&
       state.currentConn.url
     ) {
-      await loadDiscoveredGateway();
+      // 令牌必须先到位，否则 /device/online 必 401（见 ensureDeviceToken）。
+      await ensureDeviceToken();
       var d = await api("/device/online");
       state.devices = (d && d.devices) || [];
+      state.deviceAuthError = "";
     } else {
       state.devices = [];
     }
   } catch (e) {
+    // 静默置空会把「没鉴权」显示成「没设备」，两者界面上无法区分。
     state.devices = [];
+    state.deviceAuthError = e && e.status === 401 ? deviceAuthHint() : "";
   }
   try {
     try {
@@ -858,14 +1009,20 @@ async function refreshAll() {
       state.currentConn.type === "webui" &&
       state.currentConn.url
     ) {
-      await loadDiscoveredGateway();
+      // 网关发现**不在**这里做：doRenderAll 每 15s 会走到 refreshAll，
+      // 而网关地址是服务端配置（慢变量），15s 拉一次纯属浪费。
+      // 它由 ensureDeviceToken 同批按需拉取（下面 deviceRefresh/切连接时），
+      // 且有缓存：discoveredGateway 一旦拿到就不重复请求。
+      await ensureDeviceToken();
       var d = await api("/device/online");
       state.devices = (d && d.devices) || [];
+      state.deviceAuthError = "";
     } else {
       state.devices = [];
     }
   } catch (e) {
     state.devices = [];
+    state.deviceAuthError = e && e.status === 401 ? deviceAuthHint() : "";
   }
   try {
     // 本机显示器列表（screensue 默认屏幕配置用）
@@ -1693,7 +1850,7 @@ function buildChatLayout() {
     '<div class="chat-panel" id="chat-panel-starmap"><div class="card"><h2>' +
     __("星图", "Star Map") +
     "</h2>" +
-    '<div id="sm-container-chat" style="display:flex;align-items:center;justify-content:center;min-height:480px"><div class="loading-spinner"></div></div></div></div>';
+    '<div id="sm-container-chat" style="display:flex;align-items:center;justify-content:center;min-height:480px"><div class="ha-dots-panel"><span class="ha-dots ha-dots-lg"><i></i><i></i><i></i></span></div></div></div>';
   html +=
     '<div class="chat-panel" id="chat-panel-terminal"><div class="card"><h2>' +
     __("终端", "Terminal") +
@@ -1796,6 +1953,116 @@ function chanLetter(src) {
   return /[A-Za-z0-9]/.test(ch) ? ch : "C";
 }
 
+// renderToolCard 渲染单个工具调用卡。
+// 独立成函数是为了让分组逻辑能复用（组卡展开后要逐个渲染）。
+function renderToolCard(tc, drip) {
+  var argsStr =
+    typeof tc.args === "object"
+      ? JSON.stringify(tc.args, null, 1)
+      : tc.args || "";
+  var resultStr = tc.result
+    ? typeof tc.result === "object"
+      ? JSON.stringify(tc.result, null, 1)
+      : String(tc.result)
+    : "";
+  var running = !resultStr && tc.status !== "denied";
+  var error = tc.status === "error" || tc.status === "denied" || !!tc.error;
+  var iconSvg = error
+    ? '<svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><circle cx="12" cy="12" r="9"/><path d="M5.6 5.6l12.8 12.8"/></svg>'
+    : running
+      ? '<span class="tc-spinner"></span>'
+      : '<svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M14.7 6.3a4 4 0 0 0-5.4 5.4L3 18l3 3 6.3-6.3a4 4 0 0 0 5.4-5.4l-2.9 2.9-2.5-.6-.6-2.5z"/></svg>';
+  var statusHtml =
+    tc.status === "denied"
+      ? '<span class="tc-state tc-deny">' + __("已拒绝", "Denied") + "</span>"
+      : running
+        ? '<span class="tc-state tc-run">' + __("调用中", "Running") + "</span>"
+        : '<span class="tc-state tc-done">' + __("完成", "Done") + "</span>";
+  var pluginHtml = tc.plugin
+    ? '<span class="tc-plugin">' + escHtml(tc.plugin) + "</span>"
+    : "";
+  return (
+    '<div class="tool-card' +
+    (error ? " tc-error" : running ? " tc-running" : " tc-done") +
+    (drip ? " tool-drip-in" : "") +
+    '" data-tool="' +
+    escHtml(tc.tool || tc.name || "") +
+    '" onclick="toggleToolCall(this)">' +
+    '<div class="tc-line"><span class="tc-ico">' +
+    iconSvg +
+    '</span><span class="tc-name">' +
+    escHtml(tc.tool || tc.name || "") +
+    "</span>" +
+    pluginHtml +
+    statusHtml +
+    '<span class="tc-caret">▾</span></div>' +
+    '<div class="tc-detail" style="display:none">' +
+    (argsStr && argsStr !== "{}"
+      ? '<div class="tc-args"><div class="tc-detail-label">' +
+        __("参数", "Args") +
+        "</div>" +
+        escHtml(argsStr) +
+        "</div>"
+      : "") +
+    (resultStr
+      ? '<div class="tc-result"><div class="tc-detail-label">' +
+        __("结果", "Result") +
+        "</div>" +
+        escHtml(resultStr) +
+        "</div>"
+      : "") +
+    "</div></div>"
+  );
+}
+
+// renderToolGroupOrSingle 按数量决定形态：1 个走单卡，多个折成组卡。
+//
+// ★ 分组策略参考 PiDeck 的 tool-group-card。原来一轮里每个调用各占一张卡，
+// 调 5 个工具就是 5 张卡竖排，把真正的回复挤到很下面；而这些卡形态高度
+// 相似（图标 + 工具名 + 状态），信息密度极低。折成组卡后「agent 干了什么」
+// 一眼可见，而不被细节淹没。
+function renderToolGroupOrSingle(tcs, newlyDone) {
+  var cards = tcs.map(function (tc) {
+    return renderToolCard(
+      tc,
+      newlyDone.indexOf(tc.tool || tc.name || "") !== -1,
+    );
+  });
+  if (cards.length === 1) return cards[0];
+  return renderToolGroup(tcs, cards);
+}
+
+// renderToolGroup 组卡：头部脉冲点 + 计数 + 状态摘要，展开后逐个单卡。
+function renderToolGroup(tcs, cards) {
+  var runningN = 0;
+  var errN = 0;
+  tcs.forEach(function (tc) {
+    if (!tc.result && tc.status !== "denied") runningN++;
+    if (tc.status === "error" || tc.status === "denied" || !!tc.error) errN++;
+  });
+  var tone =
+    errN > 0 ? "tone-error" : runningN > 0 ? "tone-running" : "tone-done";
+  var summary =
+    errN > 0
+      ? __("部分失败", "some failed")
+      : runningN > 0
+        ? __("进行中", "running")
+        : __("完成", "done");
+  return (
+    '<div class="tool-group-card ' + tone + '">' +
+    '<div class="tool-group-head" onclick="toggleToolGroup(this)">' +
+    '<span class="tool-group-dot"></span>' +
+    '<span class="tool-group-count">' + cards.length + "</span>" +
+    '<span class="tool-group-label">' + __("个工具调用", "tool calls") + "</span>" +
+    '<span class="tc-state">' + escHtml(summary) + "</span>" +
+    '<span class="tc-caret"></span>' +
+    "</div>" +
+    '<div class="tool-group-body" style="display:none">' +
+    cards.join("") +
+    "</div></div>"
+  );
+}
+
 // PiDeck 风格思考卡片：Brain 图标 + 折叠时单行预览（流式中扫光）+ 展开/收起
 // PiDeck 风格思考卡片：Brain 图标 + 折叠单行预览（流式中扫光）+ 展开懒加载全文
 function renderReasoningCard(text, isStreaming, idx) {
@@ -1882,7 +2149,14 @@ function renderChat() {
   var prevPending = msgsEl._lastPending || [];
   var newPending = (state.pendingTools || []).slice();
   var lastM = msgs.length ? msgs[msgs.length - 1] : null;
-  if (state.chatLoading && lastM && lastM.role === "assistant") {
+  // 同上：不依赖 chatLoading。旁观其它渠道的工具调用时，
+  // 「运行中工具」列表此前恒为空，用户看不到 agent 正在做什么。
+  if (
+    (state.chatLoading ||
+      (lastM && lastM._streaming && !lastM._final)) &&
+    lastM &&
+    lastM.role === "assistant"
+  ) {
     (lastM.tool_calls || []).forEach((tc) => {
       if (!tc.result && tc.status !== "denied") {
         var nm = tc.tool || tc.name || "";
@@ -1892,11 +2166,25 @@ function renderChat() {
   }
   var newlyDone = prevPending.filter((n) => newPending.indexOf(n) === -1);
   msgsEl._lastPending = newPending;
+  // ★ 同 rerenderChatIfActive 的判据：看消息自身的 _streaming，
+  // 不依赖 state.chatLoading。
+  //
+  // chatLoading 只在「用户从 GUI 自己发消息」（sendChat）时为 true。agent
+  // 响应 memo/QQ/email 等其他渠道时，GUI 是通过 SSE 旁观流式帧，
+  // chatLoading 恒 false ⇒ streamingLast 恒假 ⇒ 每个增量帧都走**全量**
+  // innerHTML 重建。
+  //
+  // 实测（2026-10-01，本机 192.168.2.60）：旁观一次 tool_call + 回复，
+  // 1.7 秒内 13 次全量重渲（消息数 45）；另一段流式更密的样本 2 秒 26 次。
+  // 200 条消息时单次全量重建实测 235ms，这是「聊天卡顿」的直接来源。
+  //
+  // 所有 SSE 流式帧创建的 assistant 消息都带 _streaming:true，
+  // 收尾时才置 _final —— 所以正确判据是「最后一条是尚未收尾的流式 assistant」。
   var streamingLast = !!(
-    state.chatLoading &&
     lastM &&
     lastM.role === "assistant" &&
-    !lastM._final
+    !lastM._final &&
+    lastM._streaming
   );
   function pillHtml() {
     var s = "";
@@ -1948,6 +2236,9 @@ function renderChat() {
       }
       var tcs = "";
       if (m.tool_calls && m.tool_calls.length > 0) {
+        tcs = renderToolGroupOrSingle(m.tool_calls, newlyDone);
+      }
+      if (false) {
         m.tool_calls.forEach((tc) => {
           var argsStr =
             typeof tc.args === "object"
@@ -2024,10 +2315,16 @@ function renderChat() {
       var isStreamingLast = i === msgs.length - 1 && streamingLast;
       if (isStreamingLast) {
         var liveRow =
-          '<span class="live-spinner"></span>' +
+          '<span class="live-spinner"><i></i><i></i><i></i></span>' +
           (newPending.length
             ? '<span class="thinking-tools">' + pillHtml() + "</span>"
             : "");
+        // ★ msg-running：整条气泡的呼吸光晕。参考 PiDeck 的
+        // .turn-row--running:before —— 一层极淡的 accent 底色缓慢明暗
+        // 交替。单看气泡里那几个点，视线要缩到一小块；光晕铺在整条消息
+        // 上，余光就能感知「agent 正在回」。只加在最后一条且未收尾的
+        // 流式消息上，已完成的历史消息不带。
+        var runCls = " msg-running";
         if (c) {
           body +=
             '<div class="msg-bubble' +
@@ -2100,7 +2397,7 @@ function renderChat() {
       '<div class="msg msg-assistant" data-msgkey="__loading__"><div class="msg-avatar">' +
       aiAvatar2 +
       '</div><div class="msg-content"><div class="msg-bubble">' +
-      '<span class="live-spinner"></span>' +
+      '<span class="live-spinner"><i></i><i></i><i></i></span>' +
       (newPending.length
         ? '<span class="thinking-tools">' + pillHtml() + "</span>"
         : "") +
@@ -2275,6 +2572,19 @@ function rerenderChat() {
   renderCmdHistory();
 }
 
+// toggleToolGroup 展开/收起工具调用组卡。
+// 只切 body 的 display，不重建 DOM —— 展开时里面的单卡已是渲染好的
+// HTML，重建会丢掉它们各自的折叠状态与"刚完成"的入场动画。
+function toggleToolGroup(el) {
+  var card = el.parentNode;
+  if (!card) return;
+  var body = card.querySelector(".tool-group-body");
+  if (!body) return;
+  var open = body.style.display !== "none";
+  body.style.display = open ? "none" : "block";
+  el.classList.toggle("open", !open);
+}
+
 function toggleToolCall(el) {
   var d = el.querySelector(".tc-detail");
   if (!d) return;
@@ -2320,8 +2630,8 @@ function renderChatStarmap() {
     cont.innerHTML =
       '<p style="color:var(--text-muted);padding:20px;text-align:center;font-size:13px">' +
       __(
-        "3D 星图不可用（CDN 加载失败）",
-        "Star map unavailable (CDN load failed)",
+        "3D 星图不可用（本地 three.js 缺失）",
+        "Star map unavailable (local three.js missing)",
       ) +
       "</p>";
     state.starmapInit = true;
@@ -2330,12 +2640,15 @@ function renderChatStarmap() {
   }
   if (!window.THREE) {
     cont.innerHTML =
-      '<div style="display:flex;align-items:center;justify-content:center;height:100%;padding:20px"><div class="loading-spinner"></div></div>';
+      '<div class="ha-dots-panel"><span class="ha-dots ha-dots-lg"><i></i><i></i><i></i></span></div>';
     state.starmapInit = false;
     state.starmapLoading = false;
     return;
   }
   if (cont.querySelector("canvas")) {
+    // 已有 canvas：只调尺寸。但若上轮 pulse 置了脏标志，
+    // 必须在这里消费（否则新实体永远进不来）。
+    if (starmapDirty) starmapRefreshFull();
     var rect = cont.getBoundingClientRect();
     if (starmapRen && rect.width > 0)
       starmapRen.setSize(rect.width, Math.max(rect.height, 250));
@@ -2358,6 +2671,26 @@ function renderChatStarmap() {
   if (state.starmapLoading) return;
   state.starmapLoading = true;
   loadChatStarmapData();
+}
+
+// starmapDirty 置位后需要重拉全量图，但 renderChatStarmap() 在已有 canvas
+// 时会早退（只做 setSize），标志会一直没人消费。
+//
+// 所以这里直接驱动重建：拉新数据 → 就地重画（initChatStarmap 在 starmapRen
+// 已存在时只重建 graph，不重建 renderer/camera/控制器）。
+// 轻忘“清标志”而不是“清 canvas”：initChatStarmap 开头对已存在的
+// starmapRen 是早退的，所以光清 canvas 不会触发重拉。
+async function starmapRefreshFull() {
+  if (state.starmapLoading) return;
+  state.starmapLoading = true;
+  starmapDirty = false;
+  await loadChatStarmapData();
+  if (starmapRen) {
+    buildChatStarmapGraph();
+    try {
+      starmapRen.render(starmapScene, starmapCam);
+    } catch (e) {}
+  }
 }
 
 async function loadChatStarmapData() {
@@ -2391,6 +2724,256 @@ async function loadChatStarmapData() {
       "</p>";
     state.starmapInit = true;
     state.starmapLoading = false;
+  }
+}
+
+// starmapStartActivity 启动两路活动轮询（幂等）。
+//
+// 两个 setInterval 的 id **必须分开记**：写进同一个字段会被后者覆盖，
+// 于是 stopStarmapActivity 只能清掉一个，留下一个永远跑的僵尸定时器。
+// （这是 WebUI dashboard.js 里踩过并注释下来的坑，这里跟着分开。）
+function starmapStartActivity() {
+  if (state.starmapPulseTimer) return;
+  starmapPullActivity();
+  starmapPullPulse();
+  state.starmapPulseTimer = setInterval(starmapPullActivity, 3000);
+  state.starmapActivityTimer = setInterval(starmapPullPulse, 10000);
+}
+
+// starmapStopActivity 停掉两路轮询（切连接 / 星图重建时用）。
+function starmapStopActivity() {
+  if (state.starmapPulseTimer) {
+    clearInterval(state.starmapPulseTimer);
+    state.starmapPulseTimer = null;
+  }
+  if (state.starmapActivityTimer) {
+    clearInterval(state.starmapActivityTimer);
+    state.starmapActivityTimer = null;
+  }
+}
+
+// starmapPullActivity 拉 /runtime 快照，把调度器状态映射成图的整体节奏。
+//
+// ★ 关键：**只读已有的 state.runtime，不自己再发一轮请求**。
+// refreshDataOnly() 已经每 15s 取过 /runtime；这里如果再拉，就是把
+// 「秒级刷新的活动源」变成「凭空多出来的高频轮询」。
+// /runtime 的设计意图正是这条注释（handler.go）：让前端秒级刷新而不必
+// 反复拉 30KB 的 /kernel。
+function starmapPullActivity() {
+  if (!starmapScene) return;
+  var s = state.runtime;
+  if (!s || !s.scheduler) return;
+  var prev = state._smPrevSched;
+  if (prev) {
+    var sum = function (a) {
+      return (a || []).reduce(function (x, y) {
+        return x + y;
+      }, 0);
+    };
+    // 队列变深 ⇒ 图整体「绷紧」；中断/抢占上升 ⇒ 强脉冲。
+    // 判定用差值而不是绝对值：绝对值在长会话里会一直触发，脉冲退化成常亮。
+    if ((s.ready_queue_depth || 0) > (prev.ready_queue_depth || 0)) {
+      starmapPulse("tool", null);
+    }
+    if (
+      sum(s.interrupts_by_level) - sum(prev.interrupts_by_level) > 0 ||
+      sum(s.preempts_by_level) - sum(prev.preempts_by_level) > 0
+    ) {
+      starmapPulse("output", null);
+    }
+  }
+  state._smPrevSched = s.scheduler;
+}
+
+// starmapPullPulse 拉轻量活动端点，把新长出来的节点标记为「生长」。
+function starmapPullPulse() {
+  if (!starmapScene) return;
+  var since = state.starmapPulseSince || 0;
+  api("/memory/graph/pulse?since=" + since)
+    .then(function (r) {
+      if (!r || !r.success || !r.data) return;
+      var now = Math.floor(Date.now() / 1000);
+      // 30s 重叠窗口：宁可重复点亮几个，也不漏掉刚好卡在边界上的节点。
+      state.starmapPulseSince = now - 30;
+      var nodes = r.data.nodes || [];
+      if (!nodes.length) return;
+      var known = 0;
+      nodes.forEach(function (n) {
+        var m = starmapNodeMeshes.find(function (x) {
+          return x.userData.nodeId === n.id;
+        });
+        // 全量图里没有（可能刚创建）⇒ 本拍忽略，等下次全量重拉。
+        if (!m) return;
+        known++;
+        state.starmapGrown[m.userData.nodeId] = Date.now() + SM_PULSE_MS * 2;
+        starmapPulse("grow", n.name);
+      });
+      // 有新实体却一个都没匹配上 ⇒ 全量图已经过期，标脏让下一拍重拉。
+      // 阈值取 2：单双节点抖动（同一实体反复 mention）不该触发全量重拉。
+      //
+      // ★ 惰性重拉：**不能**在脉冲回调里直接重拉。pulse 是 10s 一次的，
+      // 而 refreshDataOnly / SSE 也会调 renderChatStarmap；若在这里直接拉，
+      // 就把「几 KB 的轻量活动源」变成「每 10s 拉一次 408KB 全量」——
+      // 正好是 pulse 端点存在的理由。所以只置标志，由下一次
+      // renderChatStarmap 消费。
+      if (known === 0 && nodes.length > 2) starmapDirty = true;
+    })
+    .catch(function () {});
+}
+
+// starmapPulse 发出一次活动脉冲。kind: "tool" | "stage" | "output" | "grow"
+function starmapPulse(kind, hint) {
+  if (!starmapScene || !starmapNodeMeshes.length) return;
+  var now = Date.now();
+  state.starmapLastPulseAt = now;
+  var targets = starmapPickPulseTargets(hint);
+  if (!targets.length) return;
+  var life = kind === "grow" ? SM_PULSE_MS * 1.6 : SM_PULSE_MS;
+  targets.forEach(function (m) {
+    // 去重：同一个节点已在队列里就只延长到期时间，不再 push 新项。
+    // 否则「stage 事件 + tool_call 事件」会点亮两次同一个节点，
+    // 队列里出现重复项，脉冲结束时要复位两次。
+    var existing = null;
+    for (var i = 0; i < state.starmapPulses.length; i++) {
+      if (state.starmapPulses[i].mesh === m) {
+        existing = state.starmapPulses[i];
+        break;
+      }
+    }
+    if (existing) {
+      existing.until = now + life;
+      existing.kind = kind;
+    } else {
+      state.starmapPulses.push({ mesh: m, until: now + life, kind: kind });
+    }
+  });
+  // 队列上限：密集工具调用时脉冲无限堆积会占内存。
+  if (state.starmapPulses.length > 260)
+    state.starmapPulses = state.starmapPulses.slice(-260);
+}
+
+// starmapPickPulseTargets 选出该被点亮的节点。
+//
+// ★ 匹配必须用「词」而不是子串包含：hint="knowledge" 与实体名 "k"/"e"
+// 互为子串，会让半个图谱（含「时」「会」这类单字实体）全部命中 ⇒
+// 脉冲退化成「全图齐亮」，既看不出关联，又把队列瞬间打满。
+// （WebUI 实测：旧写法一次 pulse 选中 250 个节点、队列顶到 260 上限。）
+function starmapPickPulseTargets(hint) {
+  var out = [];
+  if (!starmapNodeMeshes.length) return out;
+  if (hint) {
+    var keys = starmapHintTokens(hint);
+    if (keys.length) {
+      for (var i = 0; i < starmapNodeMeshes.length && out.length < 26; i++) {
+        var nd = starmapNodeMeshes[i].userData.nodeData || {};
+        var nm = String(nd.name || "").toLowerCase();
+        var ty = String(nd.type || "").toLowerCase();
+        if (!nm) continue;
+        for (var k = 0; k < keys.length; k++) {
+          var key = keys[k];
+          // 词边界命中：恰好等于该词，或以该词为词首（knowledge_base 命中 knowledge）。
+          if (nm === key || nm.indexOf(key + "_") === 0 || ty === key) {
+            out.push(starmapNodeMeshes[i]);
+            break;
+          }
+        }
+      }
+    }
+  }
+  // 不足时按 mention_count 补齐：高权重节点本身就是最常被 agent 触碰的，
+  // 用它们代表「整体活动」合理。
+  if (out.length < 8) {
+    var cand = starmapNodeMeshes
+      .filter(function (m) {
+        return out.indexOf(m) === -1;
+      })
+      .sort(function (a, b) {
+        return (
+          (b.userData.nodeData.mention_count || 0) -
+          (a.userData.nodeData.mention_count || 0)
+        );
+      });
+    for (var c = 0; c < cand.length && out.length < 8; c++) out.push(cand[c]);
+  }
+  return out;
+}
+
+// starmapHintTokens 把提示切成「词」（≥3 字符），供上面做词边界匹配。
+function starmapHintTokens(hint) {
+  var raw = String(hint)
+    .toLowerCase()
+    .split(/[^a-z0-9\u4e00-\u9fa5]+/);
+  var out = [];
+  for (var i = 0; i < raw.length; i++) {
+    var t = raw[i];
+    if (t.length >= 3 && out.indexOf(t) === -1) out.push(t);
+  }
+  return out;
+}
+
+// starmapTickActivity 在渲染循环里推进所有脉冲与余晖。
+//
+// 挂在已有的 starmapAnimate（~12fps）里，不额外起定时器 ——
+// 12fps 对「发光冲高 + 缩放」这类动画足够，多起一个 rAF 只会和它抢帧。
+function starmapTickActivity() {
+  var now = Date.now();
+  // 1) 活动脉冲：发光冲高 + 尺寸微扩
+  if (state.starmapPulses.length) {
+    var keep = [];
+    for (var i = 0; i < state.starmapPulses.length; i++) {
+      var p = state.starmapPulses[i];
+      if (p.until <= now) {
+        p.mesh.material.emissiveIntensity = p.mesh.userData.baseEmissive;
+        p.mesh.scale.setScalar(p.mesh.userData.baseScale || 1);
+        continue;
+      }
+      keep.push(p);
+      var left = (p.until - now) / SM_PULSE_MS; // 1→0
+      var k = 1 - left; // 0→1
+      var wave = Math.sin(Math.min(1, k) * Math.PI);
+      var amp = p.kind === "output" ? 1.8 : 1.2;
+      p.mesh.material.emissiveIntensity = p.mesh.userData.baseEmissive + wave * amp;
+      // hover 期间不覆写 scale（会打断 hover 的 1.2 倍高亮）
+      if (p.mesh !== starmapHovered)
+        p.mesh.scale.setScalar(p.mesh.userData.baseScale * (1 + wave * 0.28));
+      // 生长：新节点从 0 弹到正常大小
+      if (p.kind === "grow") {
+        var g = Math.min(1, k * 1.4);
+        p.mesh.scale.setScalar(p.mesh.userData.baseScale * (0.15 + 0.85 * g));
+      }
+    }
+    state.starmapPulses = keep;
+  }
+  // 2) 「生长」余晖：脉冲结束后短暂保留一点亮
+  if (state.starmapGrown) {
+    for (var gid in state.starmapGrown) {
+      if (state.starmapGrown[gid] <= now) {
+        delete state.starmapGrown[gid];
+        continue;
+      }
+      var gm = starmapNodeMeshes.find(function (x) {
+        return String(x.userData.nodeId) === gid;
+      });
+      if (gm)
+        gm.material.emissiveIntensity = Math.max(
+          gm.material.emissiveIntensity,
+          gm.userData.baseEmissive + 0.6,
+        );
+    }
+  }
+  // 3) 全局呼吸：距上次活动越近越亮，实现「agent 一忙图就活」。
+  // 只抽样一部分节点，避免每帧改 1151 个材质。
+  var idle = (now - (state.starmapLastPulseAt || 0)) / 4000;
+  var breathe = Math.max(0, 1 - idle);
+  if (breathe > 0.01 && starmapNodeMeshes.length) {
+    var stride = 24;
+    for (var b = 0; b < starmapNodeMeshes.length; b += stride) {
+      var m2 = starmapNodeMeshes[b];
+      if (m2.userData.baseEmissive === undefined) continue;
+      if (m2 === starmapHovered) continue;
+      m2.material.emissiveIntensity =
+        m2.userData.baseEmissive + breathe * 0.25;
+    }
   }
 }
 
@@ -2437,6 +3020,20 @@ function initChatStarmap() {
   starmapRen.domElement.addEventListener("mousemove", onStarmapMove);
   starmapRen.domElement.addEventListener("click", onStarmapClick);
   window.addEventListener("resize", onStarmapResize);
+  // 活动数据源：/runtime 3s + /memory/graph/pulse 10s。
+  //
+  // 为什么要接：服务端**专门**为星图造了 /memory/graph/pulse 这个轻量活动
+  // 端点（handler_memory.go 的注释写了动机：生产实例全量图谱 408KB /
+  // 1151 节点 / 866 边，为了「知道哪些节点是新的」而每 N 秒拉一次全量，
+  // 是把带宽和 JSON.parse 全花在重复数据上；pulse 只回 id+name+type+
+  // mention_count+updated_at，几百字节 ~ 几 KB，差两个数量级）。
+  //
+  // 而 GUI 此前**只在初始化时拉一次**全量 /memory/graph 且完全没有轮询
+  // ⇒ 星图停在打开那一刻的快照，agent 后面学的东西它永远看不到。
+  // WebUI dashboard 接了这个端点，GUI 没接 —— 这是两端的一次真实漂移。
+  //
+  // 幂等：重复 initChatStarmap（切连接/重建）不会起第二轮定时器。
+  starmapStartActivity();
   if (starmapRaf) cancelAnimationFrame(starmapRaf);
   // 首次加载强制渲染一帧（即使星图面板未激活，切换过去也有内容）
   try {
@@ -2599,6 +3196,9 @@ function buildChatStarmapGraph() {
     mesh.userData.nodeData = n;
     mesh.userData.nodeId = n.id;
     mesh.userData.baseEmissive = ei;
+    // baseScale 必须记：脉冲结束时要把 scale 复原到「按 mention_count
+    // 缩放后」的值，而不是 set(1,1,1)—— 那会把大节点缩成最小尺寸。
+    mesh.userData.baseScale = rad / 0.5;
     // Glow sphere
     var gr = rad * 1.2 + mnr * 0.5;
     var gg = new THREE.SphereGeometry(gr, 16, 12);
@@ -2823,7 +3423,7 @@ async function queryMemoryChat() {
   var q = document.getElementById("mem-query")?.value;
   var r = document.getElementById("mem-result-chat");
   if (!r || !q) return;
-  r.innerHTML = '<div class="loading"></div>';
+  r.innerHTML = '<div class="ha-dots-panel"><span class="ha-dots"><i></i><i></i><i></i></span></div>';
   try {
     var data = await api("/memory?q=" + encodeURIComponent(q) + "&depth=2");
     r.innerHTML =
@@ -2843,7 +3443,7 @@ async function queryMemoryContext() {
   var q = document.getElementById("ctx-query")?.value;
   var r = document.getElementById("ctx-result");
   if (!r) return;
-  r.innerHTML = '<div class="loading"></div>';
+  r.innerHTML = '<div class="ha-dots-panel"><span class="ha-dots"><i></i><i></i><i></i></span></div>';
   try {
     var data = await api("/memory/context?q=" + encodeURIComponent(q || ""));
     var ctx = data?.context || __("无上下文", "No context");
@@ -2890,7 +3490,7 @@ async function searchKnowledgeChat() {
   var q = document.getElementById("know-query")?.value;
   var r = document.getElementById("know-result-chat");
   if (!r || !q) return;
-  r.innerHTML = '<div class="loading"></div>';
+  r.innerHTML = '<div class="ha-dots-panel"><span class="ha-dots"><i></i><i></i><i></i></span></div>';
   try {
     var data = await api("/knowledge?q=" + encodeURIComponent(q));
     r.innerHTML =
@@ -3892,9 +4492,13 @@ function onStarmapMove(e) {
   if (hits.length > 0) {
     var n = hits[0].object;
     if (starmapHovered !== n) {
-      if (starmapHovered) starmapHovered.scale.set(1, 1, 1);
+      // 复位用 baseScale，不能用 set(1,1,1)：节点是按 mention_count
+      // 缩放过的（userData.baseScale），置 1 会把大节点缩成最小尺寸；
+      // 同时脉冲也靠 baseScale 复原，两边必须用同一个基准。
+      if (starmapHovered)
+        starmapHovered.scale.setScalar(starmapHovered.userData.baseScale || 1);
       starmapHovered = n;
-      n.scale.set(1.2, 1.2, 1.2);
+      n.scale.setScalar(n.userData.baseScale * 1.2);
       var nd = n.userData.nodeData;
       if (infoEl) {
         var e1 = document.getElementById("sm-info-name");
@@ -3913,7 +4517,7 @@ function onStarmapMove(e) {
     }
   } else {
     if (starmapHovered) {
-      starmapHovered.scale.set(1, 1, 1);
+      starmapHovered.scale.setScalar(starmapHovered.userData.baseScale || 1);
       starmapHovered = null;
     }
     if (!starmapSelected && infoEl) infoEl.style.display = "none";
@@ -4003,6 +4607,8 @@ function resetStarmapCamera() {
 }
 
 var starmapLastFrame = 0;
+var SM_PULSE_MS = 1400; // 单个脉冲的生命期
+var starmapDirty = false; // 全量图过期标记（pulse 检出未知新实体时置位）
 function starmapPanelActive() {
   // 仅当 chat 视图且"星图"子面板激活时才运行动画
   if (!state.currentView || state.currentView !== "chat") return false;
@@ -4021,6 +4627,12 @@ function starmapAnimate() {
   starmapLastFrame = now;
   if (starmapCtrl) starmapCtrl.update();
   if (starmapStarField) starmapStarField.rotation.y += 0.0001;
+  // 推进活动脉冲（发光/缩放/呼吸），放在渲染前，
+  // 这样本帧看到的就是本帧推进后的材质状态。
+  // hover 冲突由 starmapTickActivity 内部逐节点跳过处理，
+  // **不**在这里整段跳过 —— 那样会在 hover 期间冻结全部脉冲，
+  // hover 一放开就看到一堆积压的脉冲同时弹。
+  starmapTickActivity();
   if (starmapRen && starmapScene && starmapCam)
     starmapRen.render(starmapScene, starmapCam);
 }
@@ -4840,6 +5452,16 @@ async function deleteAdapter(name) {
     doRenderAll();
     startUptimeTicker();
     setInterval(doRenderAll, 15000);
+    // 系统通知：探测可用性 + 接点击跳转（放在连上之后，避免无连接时空转）
+    if (window.homeagent && window.homeagent.notify) {
+      try {
+        const sup = await window.homeagent.notify.supported();
+        state._notifySupported = !!(sup && sup.supported);
+      } catch (e) {
+        state._notifySupported = false;
+      }
+      window.homeagent.notify.onClicked(onNotifyClicked);
+    }
   } else {
     renderAll();
     updateConnIndicator();
@@ -5549,6 +6171,15 @@ async function saveConnForm() {
         state.eventSource.close();
         state.eventSource = null;
       }
+      // 切连接时停掉星图轮询：旧后端的图谱/调度器数据对上新后端无意义，
+      // 而定时器闭包里的 api() 会一直打旧地址。
+      starmapStopActivity();
+      starmapDirty = false;
+      // 切连接后网关地址要重新发现（缓存属于旧后端）
+      state.discoveredGateway = "";
+      state.starmapPulses = [];
+      state.starmapGrown = {};
+      state._smPrevSched = null;
       state.messages = [];
       updateConnIndicator();
       connectSSE();
@@ -5573,8 +6204,15 @@ document.addEventListener("keydown", (e) => {
     cancelConnForm();
 });
 
-// ===== SSE (override for fetch-based) =====
-connectSSE = () => {
+// ===== SSE (fetch-based) =====
+// 用 fetch + ReadableStream 而不是 EventSource：需要自定义请求头
+// （X-API-Key / Last-Event-ID），EventSource 不支持。
+//
+// ★ 必须用 function 声明而不是 `connectSSE = () => {}`：
+// 后者是隐式全局赋值，依赖非严格模式。一旦给 app.js 加 "use strict"
+// （或改成 ES module），就在这一行 ReferenceError，而它位于文件靠后
+// 位置 —— 报错点离调用点很远，难查。
+function connectSSE() {
   if (state.eventSource) {
     state.eventSource.close();
     state.eventSource = null;
@@ -5676,6 +6314,18 @@ async function connectFetchSSE(url) {
             last.content = p.content || "";
             last._final = true;
             rerenderChatIfActive();
+            // 星图：回复产出也是一次活动（agent 说完了 → 图亮一下）。
+            // 用文本前若干字符当 hint，让点亮落到**本轮相关**的实体上，
+            // 而不是每次都亮同一批高权重节点。
+            starmapPulse("output", String(p.content || "").slice(0, 60));
+            // 系统通知：一轮输出收尾时通知一次（不在流式过程中逐 token 弹）。
+            var _sig = (p.content || "").length + ":" +
+              String(p.content || "").slice(0, 40);
+            notifyTurnOnce(
+              _sig,
+              "HomeAgent",
+              String(p.content || "").slice(0, 160) || __("（空回复）", "(empty reply)"),
+            );
             endChatTurn();
             return;
           }
@@ -5808,6 +6458,9 @@ async function connectFetchSSE(url) {
             status: p.status || "ok",
             plugin: p.plugin || "",
           });
+          // 星图：工具名就是最好的 hint（调 knowledge_* 就亮知识节点），
+          // 这是「图在跟 agent 动」最直接的体现。
+          starmapPulse("tool", p.tool || "");
           var pidx = (state.pendingTools || []).indexOf(p.tool);
           if (pidx !== -1) state.pendingTools.splice(pidx, 1);
           state.chatStage = __("工具调用: ", "Tool: ") + (p.tool || "");
@@ -5855,6 +6508,10 @@ async function connectFetchSSE(url) {
                 );
               if (tool) state.toolFlash = true;
               state.chatStage = __("工具调用: ", "Tool: ") + (tool || "");
+              // 星图：阶段事件与 tool_call 事件可能都到（两者由不同路径发布），
+              // 所以 starmapPulse 自身按 (mesh,until) 粗粒度去重：同节点
+              // 刷新到期时间而非叠加队列项。
+              if (tool) starmapPulse("tool", tool);
               if (tool && (state.pendingTools || []).indexOf(tool) === -1) {
                 if (!state.pendingTools) state.pendingTools = [];
                 state.pendingTools.push(tool);
@@ -5923,8 +6580,22 @@ function rerenderChatIfActive() {
   // 流式增量路径：防抖合并 + 只更新最后一条消息的正文/思考节点，避免全量重建
   var msgs = state.messages;
   var last = msgs.length ? msgs[msgs.length - 1] : null;
+  // ★ 判据必须看**消息自身的 _streaming**，不能依赖 state.chatLoading。
+  //
+  // 真实事故（2026-10-01 实测，本机 192.168.2.60）：agent 响应非 GUI 渠道
+  // （memo / QQ / email）时，GUI 只是通过 SSE 旁观流式帧。而 chatLoading
+  // 只在**用户从 GUI 自己发消息**时置 true（sendChat），旁观路径下它恒为
+  // false ⇒ streamingLast 恒假 ⇒ 每个 content_delta 帧都掉进「非流式」
+  // 分支走**全量** renderChat()。
+  //
+  // 实测代价：2 秒内 26 次全量重渲（content C=1→C=66，每个增量帧一次），
+  // 间隔 10~30ms；消息越多越慢（200 条时单次全量重建实测 235ms）。
+  //
+  // 而所有 SSE 流式帧创建的 assistant 消息都带 _streaming:true
+  // （content_delta / reasoning_delta / tool_call / agent_output 五个 push 点），
+  // 收尾时才置 _final。所以正确判据是「最后一条是尚未收尾的流式 assistant」。
   var streamingLast =
-    !!last && last.role === "assistant" && !last._final && state.chatLoading;
+    !!last && last.role === "assistant" && !last._final && last._streaming;
   if (streamingLast) {
     if (state._streamTimer) clearTimeout(state._streamTimer);
     state._streamTimer = setTimeout(() => {
@@ -5999,6 +6670,20 @@ function renderDevices() {
   if (!el) return;
   var conn = state.currentConn;
   var devs = state.devices || [];
+  // 设备列表鉴权失败的显式提示。
+  //
+  // 为什么必须显式：/device/online 走服务端 requireToken（只认
+  // X-API-Key），而普通面板用管理员 cookie。没配令牌时服务端返回 401，
+  // 旧实现把它 catch 掉置空数组 ⇒ 界面与「确实没有设备」完全一样，
+  // 用户只能看到空列表，无法判断是配置问题还是真没设备。
+  var authErrHtml = state.deviceAuthError
+    ? '<div class="card" style="border-left:3px solid #d1383d">' +
+      '<h2>' +
+      __("设备列表不可用", "Device list unavailable") +
+      "</h2><p style=\"color:var(--text-muted)\">" +
+      escHtml(state.deviceAuthError) +
+      "</p></div>"
+    : "";
   var selfDev = null;
   if (state.selfDeviceId) {
     for (var si = 0; si < devs.length; si++) {
@@ -6275,7 +6960,7 @@ function renderDevices() {
     html += "</table>";
   }
   html += "</div>";
-  el.innerHTML = html;
+  el.innerHTML = authErrHtml + html;
 }
 
 // 保存设备通道配置（网关 + token + 启用），调主进程 deviceBridge:set
@@ -6332,6 +7017,10 @@ async function saveBridgeChannel() {
 
 async function deviceRefresh() {
   try {
+    // 手动刷新是显式动作：破掉网关地址缓存，确保拿到服务端当前值
+    state.discoveredGateway = "";
+    await loadDiscoveredGateway();
+    await ensureDeviceToken();
     var d = await api("/device/online");
     state.devices = d.devices || [];
     renderDevices();

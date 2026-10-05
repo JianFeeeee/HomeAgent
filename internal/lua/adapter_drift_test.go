@@ -26,7 +26,7 @@ import (
 //
 // ★ 这条漂移的具体内容与时间线（解释了为什么仓库长期缺它却没人发现）：
 //
-//	生产 /home/newqqagent/adapters/openai.lua   4853 字节  含 stream_index
+//	生产 /data/homeagent/adapters/openai.lua   4853 字节  含 stream_index
 //	仓库 ddef195 时的 openai.lua                4709 字节  不含
 //	生产文件时间 2026-08-26 15:46
 //	ddef195 提交时间 2026-08-26 16:10
@@ -44,7 +44,7 @@ import (
 // 我曾断言「openai.lua 缺 stream_index 透传、批内并发在生产走不通」，并据此
 // 写了实现与提交。后来核对生产实例才发现：
 //
-//	生产 /home/newqqagent/adapters/openai.lua   130 行  含 stream_index
+//	生产 /data/homeagent/adapters/openai.lua   130 行  含 stream_index
 //	仓库（修复前）                              128 行  无 stream_index
 //
 // 生产**早就有**那个透传 —— 仓库版本落后于生产。而当时没有任何判据能发现这个

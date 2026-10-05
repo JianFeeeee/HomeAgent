@@ -64,7 +64,7 @@ var cases = []queryCase{
 }
 
 func main() {
-	docs, err := loadDocs("/home/newqqagent/memory/documents")
+	docs, err := loadDocs("/data/homeagent/memory/documents")
 	if err != nil {
 		panic(err)
 	}

@@ -1,0 +1,57 @@
+{
+  "_comment": [
+    "客户端能力任务集 v2 —— 考 harness 而非裸 LLM。",
+    "两侧同模型（llmsproxy AUTO），能产生差异的只有 harness：",
+    "工具实现质量、错误回填、循环管理、跨步状态保持。",
+    "判据全部落盘（file_contains），与两侧工具名无关。",
+    "",
+    "生成器：scripts/capability-bench/gen_client_fixtures.py（期望答案在生成时独立复算）",
+    "材料目录：/var/tmp/client-bench/{fixloop,pipeline,aggregate,chain}"
+  ],
+  "tasks": [
+    {
+      "id": "cl-fixloop",
+      "dimension": "tool-loop",
+      "prompt": "在 /var/tmp/client-bench/fixloop/ 目录有一个实现和它的测试。运行测试，修复实现代码直到全部测试通过（不许改测试文件）。全部通过时测试程序会自动生成 result.txt。完成后报告：改了哪些缺陷。",
+      "check": {
+        "kind": "file_contains",
+        "value": "/var/tmp/client-bench/fixloop/result.txt",
+        "needle": "ALL GREEN 6"
+      },
+      "timeout_s": 600
+    },
+    {
+      "id": "cl-pipeline",
+      "dimension": "error-recovery",
+      "prompt": "在 /var/tmp/client-bench/pipeline/ 目录运行 python3 extract.py，它现在跑不通。修到它能跑通（不许改 events_*.jsonl 数据文件），然后把最终输出里的 unique 用户数以 users=N 的格式写入该目录的 report.txt。",
+      "check": {
+        "kind": "file_contains",
+        "value": "/var/tmp/client-bench/pipeline/report.txt",
+        "needle": "users=207"
+      },
+      "timeout_s": 600
+    },
+    {
+      "id": "cl-aggregate",
+      "dimension": "large-output",
+      "prompt": "/var/tmp/client-bench/aggregate/ 下有 15 个订单 JSON 文件（每天一个）。统计：status 为 paid 的**去重后** order_id 总数（同一 order_id 可能出现在多个文件）。把结果以 total=N 的格式写入该目录的 answer.txt。要求数字准确。",
+      "check": {
+        "kind": "file_contains",
+        "value": "/var/tmp/client-bench/aggregate/answer.txt",
+        "needle": "total=2752"
+      },
+      "timeout_s": 600
+    },
+    {
+      "id": "cl-chain",
+      "dimension": "state-chain",
+      "prompt": "阅读 /var/tmp/client-bench/chain/start.txt 和 chain/steps/ 下 step1.md 到 step6.md，严格按顺序逐步执行（每步用工具计算并把中间值写入 chain/state.txt，不许跳步、不许心算）。全部完成后把最终值以 answer=值的格式写入 chain/final.txt。",
+      "check": {
+        "kind": "file_contains",
+        "value": "/var/tmp/client-bench/chain/final.txt",
+        "needle": "answer=717192166"
+      },
+      "timeout_s": 600
+    }
+  ]
+}

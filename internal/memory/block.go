@@ -4,6 +4,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"fmt"
+	"strings"
 	"time"
 )
 
@@ -41,9 +42,16 @@ type MemoryBlock struct {
 	// 场景要贯穿到流水线底，就得从块开始——否则「QQ 那场对话里发过来的那张图」
 	// 在场面重现时永远拿不回来。块进 L3 时按 Scene 挂 scene_refs(kind='block')，
 	// 场景召回即可把它取回（见 GraphDB.RecallByScene）。
-	Scene     string    `json:"scene,omitempty"`
-	CreatedAt time.Time `json:"created_at"`
-	UpdatedAt time.Time `json:"updated_at"`
+	Scene string `json:"scene,omitempty"`
+	// SemanticType 是实体的语义类别（Person / Animal / Concept / Topic…），
+	// 对应旧 entities.type 与 Triple.SubjectType/ObjectType。
+	//
+	// ★ 2026-10-04 加入。此前 Triple 标注的类型只写旧表，块侧完全没有 ——
+	//   判据 TestGraphCommit_CarriesAllFields 抓到：
+	//   Commit 标注的 (Person, Animal) 读回来是 ("block","block")。
+	SemanticType string    `json:"semantic_type,omitempty"`
+	CreatedAt    time.Time `json:"created_at"`
+	UpdatedAt    time.Time `json:"updated_at"`
 }
 
 // MemoryBlockEdge 是 L3 中连接一等记忆节点的结构化语义边。
@@ -56,6 +64,26 @@ type MemoryBlockEdge struct {
 	TargetID   string    `json:"target_id"`
 	Type       string    `json:"type"`
 	CreatedAt  time.Time `json:"created_at"`
+
+	// ★ 以下是「边作为独立单位」需要的属性列。
+	//
+	// 结构边（contains 等）不填这些；关系边填。
+	// 旧 relations 表有同名列 —— 块化后属性挂在**边**上，
+	// 而不是挂在一张独立的 relations 表上（那才是「边不是独立单位」的根源）。
+	Confidence float64 `json:"confidence,omitempty"`
+	SessionID  string  `json:"session_id,omitempty"`
+	TurnID     int     `json:"turn_id,omitempty"`
+	// Status 是 EdgeActive / EdgeDeleted / EdgeMerged。
+	// 空字符串表示结构边（无状态语义）。
+	Status string `json:"status,omitempty"`
+	// MergedInto 在 EdgeMerged 时指向目标块：源块被并进哪里，
+	// 历史边留在源块上不重定向。
+	MergedInto string `json:"merged_into,omitempty"`
+}
+
+// IsRelationEdge 判断该边是否为**关系边**（而非结构边）。
+func (e MemoryBlockEdge) IsRelationEdge() bool {
+	return e.SessionID != "" || e.Status != "" || e.Confidence != 0
 }
 
 func validBlockModality(modality BlockModality) bool {
@@ -110,6 +138,10 @@ func (g *GraphDB) PutMemoryBlocks(blocks []MemoryBlock) error {
 			-- 场景只在本次给了值时才覆盖：块可能先被写入、后被归档路径补挂场景，
 			-- 反过来「已挂场景的块被一次无场景的重写抹掉」是不可接受的静默降级。
 			scene = CASE WHEN excluded.scene != '' THEN excluded.scene ELSE memory_blocks.scene END,
+			-- ★ semantic_type 同样「空值不覆盖」：
+			--   后写的三元组往往不带类型（Triple.SubjectType 可选），
+			--   若让它覆盖已有类型，一次不带标注的写入就会抹掉语义类别。
+			semantic_type = CASE WHEN excluded.semantic_type != '' THEN excluded.semantic_type ELSE memory_blocks.semantic_type END,
 			updated_at = excluded.updated_at`,
 			block.ID, block.Modality, block.Text, block.PayloadDigest, block.MIME,
 			block.Size, block.Width, block.Height, string(vectorJSON), block.Fingerprint,
@@ -144,8 +176,7 @@ func (g *GraphDB) PutDocumentNode(id, summary string) error {
 func (g *GraphDB) MemoryBlocks() ([]MemoryBlock, error) {
 	g.mu.RLock()
 	defer g.mu.RUnlock()
-	rows, err := g.db.Query(`SELECT id, modality, text_content, payload_digest, mime,
-		size, width, height, vector, fingerprint, source, tool, created_at, updated_at
+	rows, err := g.db.Query(`SELECT ` + blockColumns + `
 		FROM memory_blocks ORDER BY created_at, id`)
 	if err != nil {
 		return nil, err
@@ -154,22 +185,81 @@ func (g *GraphDB) MemoryBlocks() ([]MemoryBlock, error) {
 
 	var blocks []MemoryBlock
 	for rows.Next() {
-		var block MemoryBlock
-		var vectorJSON string
-		if err := rows.Scan(&block.ID, &block.Modality, &block.Text, &block.PayloadDigest,
-			&block.MIME, &block.Size, &block.Width, &block.Height, &vectorJSON,
-			&block.Fingerprint, &block.Source, &block.Tool, &block.CreatedAt,
-			&block.UpdatedAt); err != nil {
+		block, err := scanBlockRow(rows)
+		if err != nil {
 			return nil, err
-		}
-		if vectorJSON != "" && vectorJSON != "null" {
-			if err := json.Unmarshal([]byte(vectorJSON), &block.Vector); err != nil {
-				return nil, fmt.Errorf("decode memory block %s vector: %w", block.ID, err)
-			}
 		}
 		blocks = append(blocks, block)
 	}
 	return blocks, rows.Err()
+}
+
+// scanBlockRow 读一行 memory_blocks。
+//
+// ★★ 列顺序与个数必须与**每个**调用它的 SELECT 完全一致
+// -----------------------------------------------
+// 共用扫描的代价是：SELECT 少列就整体读不出（不是某字段零值，而是
+// 整行 Scan 失败 ⇒ 该路径静默返回空）。
+//
+// 实测踩过：MemoryBlocks() 的 SELECT 少了 scene 列（14 列），
+// 而 block_recall.go / edge_entity.go 是 15 列，换成共用扫描后
+// 三处一起读不出块 —— 症状是「召回返回未找到相关记忆」，
+// 完全看不出是列数问题。
+//
+// ⇒ 改任何 memory_blocks 的 SELECT 时，**数一遍列**。
+//
+// ★ 提取成共用函数的原因
+// ------------------
+// BFSBlocks（edge_entity.go）也要读块。若它自己写一份 Scan，
+// 将来加列时**两处都要改** —— 而我只加了 schema 列忘了扩读取端
+// 已经犯过一次（属性静默变零值，被 TestEdge_承载关系属性 抓到）。
+// 共用扫描让「加列漏改」不再可能。
+// blockColumns 是 memory_blocks 的完整列清单，**必须与 scanBlockRow 的
+// Scan 顺序逐列一致**。
+//
+// ★★★ 加列时的必读（2026-10-04 实测踩了 6 次）
+//
+// 加 semantic_type 那一次，**四处 SELECT 是手写列清单**（不是常量），
+// 两处 Scan 也是手写 —— 于是：
+//
+//	「sql: expected 16 destination arguments in Scan, not 15」
+//
+// ★ 这个错**只在真跑 SQL 时暴露**，编译期完全无感；
+//
+//	而且它表现为「召回突然空了」而非「读失败」，
+//	很容易被误判成召回逻辑坏了而查错方向。
+//
+// ⇒ 本文件的 SELECT 一律用 blockColumns，不要再手写。
+// ⇒ 加列后必须做两件事：
+//  1. `grep -rn 'FROM memory_blocks' --include='*.go'` 确认无手写清单
+//  2. `grep -rn '&b.Scene,\|&scene,' --include='*.go'` 确认所有 Scan 已同步
+//
+// ★ 为什么要提成常量：2026-10-04 修过一次由此引发的生产 bug ——
+//
+//	MemoryBlocks() 的 SELECT 漏了 scene 列，而它与 scanBlockRow 共用，
+//	结果媒体与召回测试大面积变红（列数不匹配 ⇒ 读失败）。
+//
+//	单靠“记得同步”不可靠；提成常量后新增查询直接复用。
+const blockColumns = `id, modality, text_content, payload_digest, mime, size, width, height,
+			vector, fingerprint, source, tool, scene, semantic_type, created_at, updated_at`
+
+func scanBlockRow(rows *sql.Rows) (MemoryBlock, error) {
+	var b MemoryBlock
+	var vectorJSON string
+	var scene sql.NullString
+	if err := rows.Scan(&b.ID, &b.Modality, &b.Text, &b.PayloadDigest,
+		&b.MIME, &b.Size, &b.Width, &b.Height, &vectorJSON,
+		&b.Fingerprint, &b.Source, &b.Tool, &scene, &b.SemanticType,
+		&b.CreatedAt, &b.UpdatedAt); err != nil {
+		return b, err
+	}
+	b.Scene = scene.String
+	if vectorJSON != "" && vectorJSON != "null" {
+		if err := json.Unmarshal([]byte(vectorJSON), &b.Vector); err != nil {
+			return b, fmt.Errorf("decode memory block %s vector: %w", b.ID, err)
+		}
+	}
+	return b, nil
 }
 
 func validGraphNodeKind(kind string) bool {
@@ -219,10 +309,32 @@ func (g *GraphDB) AddMemoryBlockEdge(sourceKind, sourceID, targetKind, targetID,
 			return fmt.Errorf("%s graph node %s does not exist", endpoint.kind, endpoint.id)
 		}
 	}
-	_, err = tx.Exec(`INSERT OR IGNORE INTO memory_block_edges
-		(source_kind, source_id, target_kind, target_id, edge_type)
-		VALUES (?, ?, ?, ?, ?)`, sourceKind, sourceID, targetKind, targetID, edgeType)
+	// ★★ 结构边必须**显式查重** —— 不能再依赖 INSERT OR IGNORE
+	//
+	// 边表升格去掉了 UNIQUE(source_kind,source_id,target_kind,target_id,
+	// edge_type)（因为它让「同一对节点并存多条同类关系边」不可能）。
+	// 而 OR IGNORE 的去重**正是靠那个 UNIQUE 实现的** ——
+	// 约束一去，重复调用就会插出两条一样的 contains 边。
+	//
+	// 实测后果：distill 幂等与迁移幂等两个判据当场红了。
+	//
+	// ⇒ 结构边（contains 等）在这里显式查；关系边走
+	//   AddRelationBlockEdge，它**刻意**不查重（可并存多条）。
+	var existing int
+	err = tx.QueryRow(`SELECT COUNT(*) FROM memory_block_edges
+		WHERE source_kind=? AND source_id=? AND target_kind=? AND target_id=?
+		  AND edge_type=? AND COALESCE(session_id,'')=''`,
+		sourceKind, sourceID, targetKind, targetID, edgeType).Scan(&existing)
 	if err != nil {
+		return err
+	}
+	if existing > 0 {
+		return nil // 已存在：结构边幂等
+	}
+
+	if _, err = tx.Exec(`INSERT INTO memory_block_edges
+		(source_kind, source_id, target_kind, target_id, edge_type)
+		VALUES (?, ?, ?, ?, ?)`, sourceKind, sourceID, targetKind, targetID, edgeType); err != nil {
 		return err
 	}
 	return tx.Commit()
@@ -231,8 +343,12 @@ func (g *GraphDB) AddMemoryBlockEdge(sourceKind, sourceID, targetKind, targetID,
 func (g *GraphDB) MemoryBlockEdges() ([]MemoryBlockEdge, error) {
 	g.mu.RLock()
 	defer g.mu.RUnlock()
+	// ★ 必须读全部 11 列 —— 只读旧 6 列会让关系边的属性
+	//   （session_id / confidence / status）静默变成零值。
+	//   这正是第一版加列时漏掉的地方：写了列但没扩读取端。
 	rows, err := g.db.Query(`SELECT id, source_kind, source_id, target_kind, target_id,
-		edge_type, created_at FROM memory_block_edges ORDER BY id`)
+		edge_type, created_at, confidence, session_id, turn_id, status, merged_into
+		FROM memory_block_edges ORDER BY id`)
 	if err != nil {
 		return nil, err
 	}
@@ -240,9 +356,20 @@ func (g *GraphDB) MemoryBlockEdges() ([]MemoryBlockEdge, error) {
 	var edges []MemoryBlockEdge
 	for rows.Next() {
 		var edge MemoryBlockEdge
+		var sess, status, merged sql.NullString
+		var conf sql.NullFloat64
+		var turn sql.NullInt64
 		if err := rows.Scan(&edge.ID, &edge.SourceKind, &edge.SourceID, &edge.TargetKind,
-			&edge.TargetID, &edge.Type, &edge.CreatedAt); err != nil {
+			&edge.TargetID, &edge.Type, &edge.CreatedAt,
+			&conf, &sess, &turn, &status, &merged); err != nil {
 			return nil, err
+		}
+		edge.Confidence = conf.Float64
+		edge.SessionID = sess.String
+		edge.Status = status.String
+		edge.MergedInto = merged.String
+		if turn.Valid {
+			edge.TurnID = int(turn.Int64)
 		}
 		edges = append(edges, edge)
 	}
@@ -284,4 +411,360 @@ func (g *GraphDB) BlocksForNode(nodeKind, nodeID string) ([]MemoryBlock, error) 
 		blocks = append(blocks, block)
 	}
 	return blocks, rows.Err()
+}
+
+// addContainsEdgeTx 在事务内建一条**结构边**（原句块 → 关系边）。
+//
+// ★ 为什么不能用 AddRelationBlockEdge：它刻意不查重（同对节点可并存多条
+//
+//	同类型关系边，这是 52e4596 的设计）。结构边语义相反 —— 同一句与同一条
+//	关系之间只应有一条 contains，重复插入会让 BFS 的邻接表里出现重复项。
+//
+// ★ 为什么不能用 addBlockEdgeTx：它是迁移专用的 INSERT OR IGNORE 版本，
+//
+//	端点校验走的是旧表。
+//
+// ★ 端点允许是**边 ID**：原句块指向的是关系边（memory_block_edges.id），
+//
+//	所以 targetKind 用 'edge'。graphNodeExists 已支持该 kind。
+//
+// ★ 幂等：重复写入静默跳过（返回 nil），让重试安全。
+func addContainsEdgeTx(tx *sql.Tx, sentenceBlockID string, edgeID int64, weight float64) error {
+	if sentenceBlockID == "" || edgeID == 0 {
+		return nil
+	}
+	var n int
+	if err := tx.QueryRow(`SELECT COUNT(*) FROM memory_block_edges
+		WHERE source_kind='block' AND source_id=?
+		  AND target_kind='edge' AND target_id=?
+		  AND edge_type='contains' AND COALESCE(session_id,'')=''`,
+		sentenceBlockID, edgeID).Scan(&n); err != nil {
+		return err
+	}
+	if n > 0 {
+		return nil
+	}
+	_, err := tx.Exec(`INSERT INTO memory_block_edges
+		(source_kind, source_id, target_kind, target_id, edge_type,
+		 confidence, status)
+		VALUES ('block', ?, 'edge', ?, 'contains', ?, 'active')`,
+		sentenceBlockID, edgeID, weight)
+	return err
+}
+
+// ═══════════════════════════════════════════════════════════════
+//  读方切换用的薄包装（2026-10-04）
+//
+//  这三个函数存在的唯一理由：让 indexer / social / distill / Purge
+//  能从旧表（entities/relations/sentences）迁到块体系。
+//
+//  ★ 它们**刻意不做语义加工** —— 只做「按名找块」「枚举块名」
+//  「取某块的邻居边」这三件最朴素的事。
+//    任何排序、过滤、仲裁、召回打分都该在调用方做，
+//    否则同一个语义会散落在两处，然后各自漂移。
+//
+//  ★ 全部走 g.mu，所以调用方**不得**已持锁。
+// ═══════════════════════════════════════════════════════════════
+
+// BlockByText 按文本取块（精确匹配）。
+//
+// 用途对应旧表的 `WHERE name = ?` —— 旧表的 name 是实体名，
+// 块侧的等价物是 text_content。
+//
+// ★ 为什么用 = 而不是 LIKE：旧表 name 是**规范化过的实体名**
+//
+//	（Commit 走 TripleBlockID(t.Subject) 这样的内容派生 ID），
+//	精确匹配能命中；模糊匹配会把「值班室分机号」与「值班室分机号（旧）」
+//	混为一谈，而那正是仲裁要区分的东西。
+//
+// ★ 不区分 modality：媒体块的 text_content 常为空，
+//
+//	空串匹配不到任何真实查询（调用方不会传空串查）。
+func (g *GraphDB) BlockByText(text string) (*MemoryBlock, error) {
+	text = strings.TrimSpace(text)
+	if text == "" {
+		return nil, nil
+	}
+	g.mu.Lock()
+	defer g.mu.Unlock()
+
+	blocks, err := g.blocksByTextTx(text)
+	if err != nil {
+		return nil, err
+	}
+	if len(blocks) == 0 {
+		return nil, nil
+	}
+	// 多个块同文本时取**最早**的：TripleBlockID 是内容派生的，
+	// 理论上一个文本一个块；重复只可能来自迁移的历史数据，
+	// 此时取最早的（它的 created_at 来自源实体，语义上更接近原意）。
+	b := blocks[0]
+	return &b, nil
+}
+
+// blocksByTextTx 按文本取全部同文本块（调用方已持锁）。
+func (g *GraphDB) blocksByTextTx(text string) ([]MemoryBlock, error) {
+	rows, err := g.db.Query(
+		`SELECT `+blockColumns+` FROM memory_blocks
+		 WHERE text_content = ? ORDER BY created_at ASC, id ASC`, text)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []MemoryBlock
+	for rows.Next() {
+		b, err := scanBlockRow(rows)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, b)
+	}
+	return out, rows.Err()
+}
+
+// BlockTextsLike 返回文本匹配 LIKE 的块（大小写不敏感，%value% 包裹）。
+//
+// 用途对应旧表的 `WHERE LOWER(name) LIKE ?`。
+// ★ 调用方自己拼 LIKE 还是传裸子串？**传裸子串** ——
+//
+//	包裹在这里做，避免每个调用方各写各的 %…% 然后漏掉转义。
+//
+// ★ 不做 N 限制：调用方要么自己限，要么要全量（建索引类场景）。
+//
+//	但 ⚠️ 全表 LIKE 在大库上是 O(n) —— 调用方需自行评估。
+func (g *GraphDB) BlockTextsLike(fragment string) ([]MemoryBlock, error) {
+	fragment = strings.TrimSpace(fragment)
+	if fragment == "" {
+		return nil, nil
+	}
+	pattern := "%" + escapeLike(fragment) + "%"
+	g.mu.Lock()
+	defer g.mu.Unlock()
+
+	rows, err := g.db.Query(
+		`SELECT `+blockColumns+` FROM memory_blocks
+		 WHERE text_content LIKE ? ESCAPE '\'
+		 ORDER BY created_at ASC, id ASC`, pattern)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []MemoryBlock
+	for rows.Next() {
+		b, err := scanBlockRow(rows)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, b)
+	}
+	return out, rows.Err()
+}
+
+// escapeLike 转义 LIKE 的元字符（% _ 与 ESCAPE 自身）。
+//
+// ★ 不转义的话，「50%」这类文本会变成通配符，
+//
+//	在 Purge 的删除路径上就是**误删**。
+func escapeLike(s string) string {
+	r := strings.NewReplacer(`\`, `\\`, `%`, `\%`, `_`, `\_`)
+	return r.Replace(s)
+}
+
+// AllBlockTexts 返回全部块的文本（去重，按出现顺序）。
+//
+// 用途对应旧表的「全量实体名」—— 建向量索引（indexer）与
+// 记忆整理（distill）都需要这个。
+//
+// ★ 去重：同名实体在旧表是**多行**（mention_count 不同），
+//
+//	而块侧的 TripleBlockID 是内容派生 ⇒ 同文本本应只有一个块。
+//	去重让调用方不必处理重复，也顺带掩盖迁移期的历史重复。
+//
+// ★ 分批读取：全表取进内存在百万块级会炸。
+//
+//	batchSize<=0 时用默认批大小。
+func (g *GraphDB) AllBlockTexts(batchSize int) ([]string, error) {
+	if batchSize <= 0 {
+		batchSize = 5000
+	}
+	g.mu.Lock()
+	defer g.mu.Unlock()
+
+	var out []string
+	seen := make(map[string]bool)
+	var lastID string
+	for {
+		rows, err := g.db.Query(
+			`SELECT id, text_content FROM memory_blocks
+			 WHERE id > ? AND text_content != ''
+			 ORDER BY id LIMIT ?`, lastID, batchSize)
+		if err != nil {
+			return nil, err
+		}
+		n := 0
+		var nextID string
+		for rows.Next() {
+			var id, text string
+			if err := rows.Scan(&id, &text); err != nil {
+				rows.Close()
+				return nil, err
+			}
+			nextID = id
+			n++
+			if seen[text] {
+				continue
+			}
+			seen[text] = true
+			out = append(out, text)
+		}
+		rows.Close()
+		if err := rows.Err(); err != nil {
+			return nil, err
+		}
+		if n < batchSize {
+			break
+		}
+		lastID = nextID
+	}
+	return out, nil
+}
+
+// NeighbourEdgesOfBlock 返回以该块为端点的全部 active 关系边及其对端块。
+//
+// 用途对应旧表的「按实体名找它的所有关系」—— social 层按人/物聚合
+// 社交关系时用它。
+//
+// ★ 双向：块作为 source 或 target 都算。
+// ★ 只取非 deleted 的边（与全部读路径的 status 口径一致）。
+//
+// ★ 返回顺序按创建时间 —— 稳定的输出对测试与展示都重要，
+//
+//	而 SQLite 不保证无 ORDER BY 的行序。
+func (g *GraphDB) NeighbourEdgesOfBlock(blockID string) ([]BlockNeighbour, []MemoryBlock, error) {
+	if blockID == "" {
+		return nil, nil, nil
+	}
+	g.mu.Lock()
+	defer g.mu.Unlock()
+
+	rows, err := g.db.Query(
+		`SELECT e.id, e.source_id, e.target_id, e.edge_type,
+		        COALESCE(e.confidence, 0), COALESCE(e.session_id, ''),
+		        COALESCE(e.turn_id, 0), COALESCE(e.status, ''),
+		        COALESCE(e.created_at, ''),
+		        COALESCE(other.id, ''), COALESCE(other.text_content, '')
+		 FROM memory_block_edges e
+		 LEFT JOIN memory_blocks other
+		   ON other.id = CASE WHEN e.source_id = ? THEN e.target_id ELSE e.source_id END
+		 WHERE (e.source_id = ? OR e.target_id = ?)
+		   AND e.source_kind = 'block' AND e.target_kind = 'block'
+		   AND COALESCE(e.status, '') != 'deleted'
+		 ORDER BY e.created_at ASC, e.id ASC`, blockID, blockID, blockID)
+	if err != nil {
+		return nil, nil, err
+	}
+	defer rows.Close()
+
+	var edges []BlockNeighbour
+	var peers []MemoryBlock
+	seenPeer := make(map[string]bool)
+	for rows.Next() {
+		var nb BlockNeighbour
+		var otherID, otherText, created string
+		if err := rows.Scan(&nb.EdgeID, &nb.SourceID, &nb.TargetID, &nb.EdgeType,
+			&nb.Confidence, &nb.SessionID, &nb.TurnID, &nb.Status, &created,
+			&otherID, &otherText); err != nil {
+			return nil, nil, err
+		}
+		nb.IsOutgoing = nb.SourceID == blockID
+		nb.Peer = MemoryBlock{
+			ID:        otherID,
+			Modality:  BlockText,
+			Text:      otherText,
+			CreatedAt: parseLegacyTime(created),
+			UpdatedAt: parseLegacyTime(created),
+		}
+		nb.RelationEdgeData = RelationEdgeData{
+			Confidence: nb.Confidence,
+			SessionID:  nb.SessionID,
+			TurnID:     nb.TurnID,
+			Status:     nb.Status,
+		}
+		edges = append(edges, nb)
+		if otherText != "" && !seenPeer[otherID] {
+			seenPeer[otherID] = true
+			peers = append(peers, nb.Peer)
+		}
+	}
+	return edges, peers, rows.Err()
+}
+
+// blockSemanticType 返回块对外呈现的语义类型。
+//
+// ★ 为什么要这个函数而不是直接用 b.SemanticType：
+//
+//	语义类型是**可选标注**，绝大多数块没被标注过。
+//	旧 entities 表在缺省时写 "Concept"（graph.go 里 subjType 默认值），
+//	所以读侧（social 的 ListPersons、SDK 的实体类型）期待一个具体字符串。
+//	返回空串会让下游的 == "Person" 之类的比较全部落空 ——
+//	那不是「未标注」，那像是「数据坏了」。
+//
+// ★ 取值优先级：
+//  1. 块自带标注（Person / Animal / Concept…）—— 直接用
+//  2. 未标注 → "block"（说清「这是一个图节点，且没标类型」）
+//     ★ 不用 "Concept"：那是旧表的默认值，
+//     拿来兜底会让「未标注」与「确实是概念」无法区分。
+func blockSemanticType(b MemoryBlock) string {
+	if t := strings.TrimSpace(b.SemanticType); t != "" {
+		return t
+	}
+	return "block"
+}
+
+// MemoryBlockCount 返回当前块总数。
+//
+// ★ 用途：判断「一次写入是否真的落库了」
+//
+// 停旧表双写后，Commit 的两个返回值恒为 0（它们数的是旧表行数），
+// 于是「有没有写进去」失去了信号 ——
+// 而 archiveColdDocs 正需要它来决定文档能否删除
+// （没写进去就删 = 丢数据）。
+//
+// ★ 为什么用块数而不是「本次新增块数」：
+//
+//	新增数需要事务内计数，而 MemoryBlockCount 是事务外的简单计数。
+//	调用方在写入前后各取一次相减即可，误差只来自并发写入 ——
+//	归档是后台低频任务，这个精度足够。
+func (g *GraphDB) MemoryBlockCount() (int, error) {
+	g.mu.RLock()
+	defer g.mu.RUnlock()
+	var n int
+	if err := g.db.QueryRow(`SELECT COUNT(*) FROM memory_blocks`).Scan(&n); err != nil {
+		return 0, err
+	}
+	return n, nil
+}
+
+// MemoryEdgeCount 返回关系边数（不含 contains 结构边）。
+//
+// ★ 为什么需要它（2026-10-05）
+//
+//	旧表停双写后 Commit 的 ec/rc 恒为 0（graph.go 里
+//	relationsCreated = 0 是写死的），所以「写了多少条关系」
+//	唯一的可信来源只能是**实测边数差值**。
+//
+//	不含 contains：那是结构边（原句块 → 字段块 / 关系边），
+//	混进来会让「关系数」随原句数量翻倍 —— 与 Introspect 的
+//	relation_count 口径保持一致。
+func (g *GraphDB) MemoryEdgeCount() (int, error) {
+	g.mu.RLock()
+	defer g.mu.RUnlock()
+	var n int
+	if err := g.db.QueryRow(
+		`SELECT COUNT(*) FROM memory_block_edges
+		 WHERE source_kind = 'block' AND target_kind = 'block'
+		   AND edge_type != 'contains'`).Scan(&n); err != nil {
+		return 0, err
+	}
+	return n, nil
 }

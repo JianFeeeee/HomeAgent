@@ -83,3 +83,37 @@ dist/
 
 # 漂移巡检的运行时状态（含时间戳与指纹，每次跑都变）
 .drift-watch/
+
+# ——— 本地运维脚本 / 一次性工具（不入库，克隆后需另行获取）———
+# deploy-*.sh 是生产部署入口，含环境相关的 IP/路径约定；
+# 文档见 docs/zh/deploy-runbook.md。换机器部署前先确认脚本来源。
+/deploy-plan.sh
+/deploy-waiter.sh
+/deploy-sdk-site.sh
+
+# 一次性跑分/设计提取脚本，用完即弃
+/tmp_jinabench.py
+/napcat-design-dna.json
+
+# 已删除的动态工作文档（2e30e06）。曾被本机某进程恢复过一次 ——
+# 它的 mtime 还是删除前的 Sep 26，说明是外部写回而不是 git 操作。
+# 不加这行的话，恢复一次就重新入库一次。
+/plan.md
+
+# 临时探针目录（scripts/ 之外的临时 main.go 探针）
+/tools/zz_*/
+
+# 编译产物（迁移工具）
+/homed-graph-migrate
+
+# 构建产物落在仓库根（go build ./cmd/xxx 时最易发生）
+/homed
+/homed-graph-migrate
+/homed-graph-distill
+/homed-centroid
+
+# ── 本机运维脚本（含 /home/newqqagent 等本机路径与凭据搬运逻辑，不进仓库）──
+/deploy/scripts/deploy.sh
+/scripts/verify_deploy.sh
+/scripts/kernel-stress/
+/scripts/gui-package-smoke.sh

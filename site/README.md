@@ -118,7 +118,7 @@ print(im.mode)  # RGB —— 没有 alpha 通道
 数据来自各插件的 `plugin.json`，不是手写的：
 
 ```bash
-cd /home/newqqagent/plugins
+cd ${HA_DATA}/plugins
 for d in */; do [ -f "$d/plugin.json" ] && python3 -c "
 import json;d=json.load(open('$d/plugin.json'))
 print(d.get('name'), d.get('version'), d.get('description','')[:60])"; done
@@ -132,11 +132,11 @@ print(d.get('name'), d.get('version'), d.get('description','')[:60])"; done
 
 ```bash
 # 在跑插件（以日志里实际 loaded 的为准，比数目录可靠）
-grep -h '\[plugin\] loaded:' $(ls -t /home/newqqagent/log/homed_*.log | head -1) \
+grep -h '\[plugin\] loaded:' $(ls -t ${HA_DATA}/log/homed_*.log | head -1) \
   | sed 's/.*loaded: //' | sort -u | wc -l
 
 # 工具数（同上，日志里注册后的真实值）
-grep -ohE '[0-9]+ tools' $(ls -t /home/newqqagent/log/homed_*.log | head -1) | tail -1
+grep -ohE '[0-9]+ tools' $(ls -t ${HA_DATA}/log/homed_*.log | head -1) | tail -1
 
 # Go 代码行（排除第三方与鸿蒙工程）
 find . -name '*.go' -not -path './.git/*' -not -path './.go/*' \

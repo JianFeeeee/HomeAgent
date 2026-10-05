@@ -24,6 +24,7 @@ import (
 	logpkg "gitcode.com/JianFeeeee/HomeAgent/internal/log"
 	luapkg "gitcode.com/JianFeeeee/HomeAgent/internal/lua"
 	"gitcode.com/JianFeeeee/HomeAgent/internal/memory"
+	"gitcode.com/JianFeeeee/HomeAgent/internal/memory/distill"
 	"gitcode.com/JianFeeeee/HomeAgent/internal/memory/document"
 	"gitcode.com/JianFeeeee/HomeAgent/internal/memory/media"
 	"gitcode.com/JianFeeeee/HomeAgent/internal/memory/pipeline"
@@ -37,6 +38,7 @@ import (
 	"gitcode.com/JianFeeeee/HomeAgent/internal/supervisor"
 	"gitcode.com/JianFeeeee/HomeAgent/internal/tracker"
 	"gitcode.com/JianFeeeee/HomeAgent/pkg/embedding"
+	"gitcode.com/JianFeeeee/HomeAgent/pkg/generation"
 	"gitcode.com/JianFeeeee/HomeAgent/pkg/types"
 )
 
@@ -139,7 +141,7 @@ type memoryStack struct {
 //
 // 本函数体是 main() 里对应启动阶段的整块平移：语句、日志文本、错误语义不变，
 // 只把「*dataDir」变成参数、把 defer 变成由调用点注册的 cleanup。
-func initMemoryStack(dataDir string) (*memoryStack, func()) {
+func initMemoryStack(dataDir string, cfgReg *internalConfig.ConfigRegistry) (*memoryStack, func()) {
 	memDB, err := memory.NewGraphDB(filepath.Join(dataDir, "memory", "graph.db"))
 	if err != nil {
 		log.Printf("[homed] warning: memory init failed: %v", err)
@@ -156,6 +158,13 @@ func initMemoryStack(dataDir string) (*memoryStack, func()) {
 		RetentionDays: 7,
 		BatchSize:     50,
 	})
+	// ★ 必须在 distiller.Start() **之前**注入：Start 会起 distillLoop，
+	// 而第一次 tick 在 Interval 之后。若先 Start 再注入，头一个周期
+	// （实测配置 10 分钟）会白跑一次 jieba 路 —— 而那条路实测产出 0 条。
+	if memDB != nil {
+		distiller.SetSplitter(initDistillSplitter(cfgReg))
+	}
+
 	if memDB != nil {
 		// 这里**故意不写 defer distiller.Stop()**：本函数在 return 时即触发
 		// defer，而 Stop() → cancel() 会让刚启动的 distillLoop 立刻退出，
@@ -316,6 +325,49 @@ func initMediaStore(cfgReg *internalConfig.ConfigRegistry, cfg *types.Config) (*
 			mediaStore.Close()
 		}
 	}
+}
+
+// initDistillSplitter 按配置打开蒸馏用的生成侧 provider 并组装拆分器。
+//
+// 返回 nil 表示不启用（未配置 provider、或打开失败）—— 此时蒸馏回退既有的
+// jieba/ONNX 路。**不因为模型不可用而让蒸馏停摆**：那条路虽然实测产出 0 条，
+// 但它至少不会让对话记忆丢失。
+//
+// 配置形态与多模态向量侧对称（core.memory.multimodal_space.*）：
+//
+//	core.memory.distill.generation.provider = ollama
+//	core.memory.distill.generation.options.model = qwen3:1.7b
+//	core.memory.distill.generation.options.num_thread = 10
+func initDistillSplitter(cfgReg *internalConfig.ConfigRegistry) pipeline.RecordSplitter {
+	if cfgReg == nil {
+		return nil
+	}
+	providerName := cfgReg.GetString("core.memory.distill.generation.provider", "")
+	if providerName == "" {
+		return nil
+	}
+	opts := map[string]string{}
+	const optPrefix = "core.memory.distill.generation.options."
+	for _, key := range cfgReg.List(optPrefix) {
+		opts[strings.TrimPrefix(key, optPrefix)] = cfgReg.GetString(key, "")
+	}
+	provider, err := generation.Open(providerName, generation.Config{Options: opts})
+	if err != nil {
+		log.Printf("[homed] warning: 蒸馏生成 provider %q 打开失败: %v（蒸馏回退 jieba 路；已注册: %s）",
+			providerName, err, strings.Join(generation.Names(), ", "))
+		return nil
+	}
+	if !provider.Info().SupportsJSONSchema {
+		// 拆分器的零幻觉完全依赖 schema 约束。不支持 schema 的 provider
+		// 会拿到自由文本，解析必炸 —— 与其让它在运行时反复失败，不如现在就拒。
+		log.Printf("[homed] warning: 蒸馏生成 provider %q 不支持 JSON Schema，拆分不可靠（蒸馏回退 jieba 路）",
+			providerName)
+		provider.Close()
+		return nil
+	}
+	log.Printf("[homed] distill generation active: provider=%s model=%s",
+		providerName, provider.Info().Model)
+	return distill.NewExtractor(provider, nil)
 }
 
 // initMultimodalSpace 从公共注册表打开多模态向量 provider。返回 (空间, provider 名, 失败原因, cleanup)：后两个值只用于状态报告。
@@ -547,6 +599,18 @@ func newMainAgent(cfg *types.Config, cfgReg *internalConfig.ConfigRegistry, prov
 		ReviewInterval:  cfgReg.GetDuration("core.agent.review_interval", 120*time.Minute),
 		MergeInterval:   cfgReg.GetDuration("core.agent.merge_interval", 120*time.Minute),
 		MaxToolTurns:    cfgReg.GetInt("core.agent.max_tool_turns", 10),
+		// 上下文管理的可调阈值。此前这些值全部硬编码在 ComputeTokenBudget 里，
+		// 界面改不了、不同窗口的实例也没法各自调优。
+		CtxTuning: agentCore.ContextTuning{
+			UtilizationPercent: cfgReg.GetInt("core.agent.context.utilization_percent", 80),
+			MaxTargetTokens:    cfgReg.GetInt("core.agent.context.max_target_tokens", 600000),
+			MemoryRatioPercent: cfgReg.GetInt("core.agent.context.memory_ratio_percent", 0),
+			ProtectedCount:     cfgReg.GetInt("core.agent.context.protected_count", 10),
+		},
+		// ⚠️ 这条键此前被注册进配置面板、也有默认值，但**从未被读取** ——
+		// 界面上改它没有任何效果，且不报任何错。同一类「死配置」正是
+		// 本次把阈值接入配置系统时要一并修掉的。
+		MaxContextSize: cfgReg.GetInt("core.agent.max_context_size", 30),
 		Offload: agentCore.OffloadOptions{
 			Enabled:      cfgReg.GetBool("core.agent.offload_enabled", false),
 			BusyAfter:    cfgReg.GetDuration("core.agent.offload_busy_after", 5*time.Minute),

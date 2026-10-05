@@ -54,12 +54,97 @@ type RelevanceContext struct {
 	dirty            bool
 	toolDefLookup    func(name string) *sdk.ToolDef
 	channelDefLookup func(name string) (sdk.ChannelDef, bool)
+
+	// protectedCount 是裁剪时**无条件保留**的最近事件条数。
+	//
+	// 为何要可调：它决定「近处信息」与「向量检索」的权重 ——
+	// 条数大则不容易丢近处，小则更依赖检索准确度。不同窗口/不同用法
+	// （如长期助手 vs 短任务）适合的值不同，所以从 core.agent.context.* 传入。
+	// 零值 ⇒ defaultProtectedCount（与历史硬编码 10 一致）。
+	//
+	// ★ 它现在是**上限**而非固定值：实际保护条数由 effectiveProtectedCount
+	// 按预算收紧（见该函数）。原因见那里。
+	protectedCount int
+}
+
+// effectiveProtectedCount 返回本次裁剪**实际**保护多少条。
+//
+// ★ 为什么不能固定用 protectedCount（T10c 实测踩出来的自相矛盾）：
+// 保护条数 × 单条事件平均 token 可能**超过整个 ContextTokens 预算**——
+// 实测 HA 在 50k 窗口下单条事件约 5800 token（工具回灌型），而预算约 40000，
+// 于是「钉住 10 条」本身就装不下。后果是裁剪无解：每次只能裁掉零星1-2 条
+// 就撞到 protected 下限，积累量仍超页 ⇒ 每轮触发两次超页 ⇒ 两轮后恢复预算
+// 耗尽 ⇒ 任务直接终止（实测轮5/6 的 prompt=0）。召回率因此从 44% 掉到 22%。
+//
+// 现在的规则：**保护上限仍由配置给，但不得超过预算能容纳的条数**。
+// budgetCap = (ContextTokens 预算) / (单条平均 token)。取min(配置值, budgetCap)。
+// 于是：
+//   - 小窗口 / 大事件 ⇒ 自动收紧（宁可有取舍，也不让裁剪无解）；
+//   - 大窗口（如 1M）或小事件 ⇒ 仍用满配置值 —— 这正是「1M 下这套调度器
+//     能更好」的实现方式：预算越大，可保护的近处越多。
+//
+// 下限保1：protected=0 会让「最近 N 条一定在候选里」这条保证消失，
+// 而 Prune 的 protected 切片是 `events[len-protected:]` —— 0 值会切出空切片
+// 后仍走 keep 逻辑，虽不panic，但等于放弃了近处保护的意义。
+func (a *Agent) effectiveProtectedCount() int {
+	cfgCap := defaultProtectedCount
+	if n := a.context.ProtectedCount(); n > 0 {
+		cfgCap = n
+	}
+
+	budget := a.computeTokenBudget()
+	tokens := budget.ContextTokens
+	if tokens <= 0 || a.context == nil || a.context.Len() == 0 {
+		return cfgCap // 没有样本/预算，按配置来
+	}
+
+	avg := a.accumulatedTokens() / a.context.Len()
+	if avg <= 0 {
+		avg = defaultAvgEventTokens
+	}
+
+	budgetCap := tokens / avg
+	if budgetCap < 1 {
+		budgetCap = 1
+	}
+	if budgetCap < cfgCap {
+		return budgetCap
+	}
+	return cfgCap
+}
+
+// singleEventFitsBudget 报告「单条事件是否就装不进预算」。
+//
+// 为什么单独判：effectiveProtectedCount 收紧到 1 条仍可能装不下 —— 当单条
+// 事件本身就大于 ContextTokens 预算时（实测 T10c：工具回灌型事件可达 40026
+// token 而预算只有 10667），裁剪在**任何**保护数下都无解。
+//
+// 此时正确做法不是继续收紧（收紧也没用），而是让调用方知道「裁剪帮不上忙」，
+// 由超页处理走终止路径并报出真实原因，而不是反复裁剪直到预算耗尽。
+func (a *Agent) singleEventFitsBudget() bool {
+	if a == nil || a.context == nil || a.context.Len() == 0 {
+		return true
+	}
+	avg := a.accumulatedTokens() / a.context.Len()
+	if avg <= 0 {
+		avg = defaultAvgEventTokens
+	}
+	return avg <= a.computeTokenBudget().ContextTokens
+}
+
+// ProtectedCount 返回配置给的保护条数**上限**（实际值见 effectiveProtectedCount）。
+func (c *RelevanceContext) ProtectedCount() int {
+	if c == nil || c.protectedCount <= 0 {
+		return defaultProtectedCount
+	}
+	return c.protectedCount
 }
 
 func NewRelevanceContext(savePath string, embedder *memory.StaticEmbedder) *RelevanceContext {
 	rc := &RelevanceContext{
-		embedder: embedder,
-		savePath: savePath,
+		embedder:       embedder,
+		savePath:       savePath,
+		protectedCount: defaultProtectedCount,
 	}
 	if savePath != "" {
 		rc.load()
@@ -333,7 +418,14 @@ type scoredEvent struct {
 	idx   int
 }
 
+// pCount <= 0 时用protectedCount 上限。调用方（pruneByQuery）传
+// effectiveProtectedCount，按预算收紧后的值。
 func (c *RelevanceContext) Prune(currentInput string, topK int, docStore *document.Store) int {
+	return c.PruneWithProtected(currentInput, topK, docStore, 0)
+}
+
+// PruneWithProtected 是带显式保护条数的 Prune。
+func (c *RelevanceContext) PruneWithProtected(currentInput string, topK int, docStore *document.Store, pCount int) int {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
@@ -341,7 +433,9 @@ func (c *RelevanceContext) Prune(currentInput string, topK int, docStore *docume
 		return 0
 	}
 
-	pCount := 10
+	if pCount <= 0 {
+		pCount = c.ProtectedCount()
+	}
 	if pCount > len(c.events) {
 		pCount = len(c.events)
 	}

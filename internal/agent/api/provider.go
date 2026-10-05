@@ -185,6 +185,90 @@ type TokenUsage struct {
 	Prompt     int `json:"prompt"`
 	Completion int `json:"completion"`
 	Total      int `json:"total"`
+
+	// ── 缓存与推理归因（详见 tokenusage_cache_test.go 的说明）──
+	//
+	// 参考 llmsproxy 的 internal/types.TokenUsage 与
+	// internal/gateway/chat.go:recordChatUsage：那边已把
+	// 「OpenAI v2 的 prompt_tokens_details.cached_tokens」与
+	// 「DeepSeek 遗留的 prompt_cache_hit_tokens」两条来源归一化好了，
+	// 本结构沿用同一套语义，免得两个项目对同一份上游数据给出不同答案。
+
+	// CacheRead 是命中缓存（跳过计算的）输入 token 数。
+	CacheRead int `json:"cache_read,omitempty"`
+	// CacheMiss 是未命中的输入 token 数（上游只给其一时另一侧留 0）。
+	CacheMiss int `json:"cache_miss,omitempty"`
+	// CacheReported 区分「上游报了缓存但命中为 0」与「上游根本没报缓存」。
+	//
+	// 为何必须分开：混为一谈会把「无数据」显示成 0% 命中率，
+	// 让人去优化一个本来就没开的功能 —— 那是拿假数据做的决定。
+	CacheReported bool `json:"cache_reported,omitempty"`
+	// ReasoningTokens 是计费输出里属于「思考」的那部分。
+	//
+	// 为何要单独拎出来：缺了它，成本归因会把思考 token 算进「回答长度」，
+	// 于是长思考被误读成啰嗦。
+	ReasoningTokens int `json:"reasoning_tokens,omitempty"`
+}
+
+// Add 把另一次调用的用量并入本结构（求和）。
+//
+// 用途：一次用户请求（一个 TaskFrame）可能触发多轮 LLM 调用（工具回环），
+// 对外的 usage 需要报**本次请求**的合计，与 OpenAI 的语义一致；
+// 会话级累计另由 usageLedger 承担（链事件里的 usage_session）。
+func (t *TokenUsage) Add(u TokenUsage) {
+	t.Prompt += u.Prompt
+	t.Completion += u.Completion
+	t.Total += u.Total
+	t.CacheRead += u.CacheRead
+	t.CacheMiss += u.CacheMiss
+	t.ReasoningTokens += u.ReasoningTokens
+	// CacheReported 是「上游报过缓存」的标记，用或而非加：
+	// 一轮里只要有一帧报了，本轮就算有缓存数据可算。
+	t.CacheReported = t.CacheReported || u.CacheReported
+}
+
+// IsZero 报告该用量是否**完全没有数据**。
+//
+// 调用方据此决定「不报 usage」而不是「报 0」：把「不知道」画成 0
+// 会让人去优化一个本来就没开的功能（与 UsageTotals.CacheHitRate 的
+// ok=false 同一口径）。
+func (t TokenUsage) IsZero() bool {
+	return t.Prompt == 0 && t.Completion == 0 && t.Total == 0 &&
+		t.CacheRead == 0 && t.CacheMiss == 0 && t.ReasoningTokens == 0
+}
+
+// DeriveCacheMiss 在**上游只报了命中侧**时补出未命中输入数。
+//
+// 这是「缓存命中率」这条规则的**唯一实现**（见文件头"单一实现"说明）：
+// Go 侧的 chunkAssemble 与 Lua 适配器结果的落地处都调它，
+// 不允许任何一方自己再算一遍 —— 两套实现迟早会漂移，
+// 而漂移的表现是「同一份上游数据，配不配适配器给出不同命中率」。
+//
+// 为何必须补：OpenAI v2 只在 `prompt_tokens_details.cached_tokens` 里
+// 给**命中侧**，不给未命中数。留 0 的后果不是"少一点"，而是：
+// 命中率 = CacheRead/(CacheRead+0) = **恒 100%**。
+// 2026-09-30 跑分实测（llmsproxy + AUTO，7 个任务）就报出了 100%，
+// 而真实值约 53% —— 结构性假绿，且不会让任何地方报错。
+//
+// 补的依据是 `Prompt`（上游给的输入总数，权威）：
+// 未命中输入 = 输入总数 - 命中数。DeepSeek 那种**两边都给**的上游
+// （prompt_cache_hit_tokens + prompt_cache_miss_tokens）CacheMiss != 0，
+// 直接不动 —— 上游明说的值永远优先于我们推的。
+//
+// 边界：
+//   - 未报缓存（CacheReported=false）⇒ 不动，让消费方显示「—」；
+//   - 报了但命中 0 ⇒ miss = prompt（全部未命中）。这是**有数据**的 0%，
+//     与「不知道」不同，正是 CacheReported 存在的意义；
+//   - 上游给的命中数大于输入总数（脏数据）⇒ 夹到 0，不让 miss 变负。
+func (t *TokenUsage) DeriveCacheMiss() {
+	if !t.CacheReported || t.CacheMiss != 0 || t.Prompt <= 0 {
+		return
+	}
+	miss := t.Prompt - t.CacheRead
+	if miss < 0 {
+		miss = 0
+	}
+	t.CacheMiss = miss
 }
 
 type ToolCall struct {
@@ -378,10 +462,7 @@ func (p *LuaAdaptedProvider) Chat(ctx context.Context, req *CompletionRequest) (
 	}
 
 	if resp.StatusCode != 200 {
-		return nil, &ProviderError{
-			StatusCode: resp.StatusCode,
-			Message:    fmt.Sprintf("api error %d: %s", resp.StatusCode, string(rawResp)),
-		}
+		return nil, newProviderError(resp.StatusCode, string(rawResp))
 	}
 
 	unifiedJSON, err := p.vm.CallTransformResponse(p.adapter, string(rawResp))
@@ -407,6 +488,10 @@ func (p *LuaAdaptedProvider) Chat(ctx context.Context, req *CompletionRequest) (
 		}
 		return nil, fmt.Errorf("unmarshal unified response: %w (body: %s)", err, unifiedJSON)
 	}
+
+	// 统一补齐缓存未命中数（规则单一实现：TokenUsage.DeriveCacheMiss）。
+	// 适配器只搬上游字段，不自己算 —— 两端都用同一个函数才不会漂。
+	result.TokenUsage.DeriveCacheMiss()
 
 	// 诊断：tool_calls 存在但参数为空——上游/适配器丢参数，打印原始响应片段定位。
 	//
@@ -453,11 +538,9 @@ func (p *LuaAdaptedProvider) applyAdapterHeaders(httpReq *http.Request, url, bod
 
 func parseOpenAICompatibleResponse(raw []byte) (*CompletionResponse, error) {
 	var resp struct {
-		Usage struct {
-			PromptTokens     int `json:"prompt_tokens"`
-			CompletionTokens int `json:"completion_tokens"`
-			TotalTokens      int `json:"total_tokens"`
-		} `json:"usage"`
+		// 用共享的 chunkUsage（而不是就地列字段）：字段映射与缓存规则
+		// 只有一份实现，流式与非流式不可能再漂。
+		Usage   chunkUsage `json:"usage"`
 		Choices []struct {
 			FinishReason string `json:"finish_reason"`
 			Message      struct {
@@ -470,12 +553,10 @@ func parseOpenAICompatibleResponse(raw []byte) (*CompletionResponse, error) {
 	if err := json.Unmarshal(raw, &resp); err != nil {
 		return nil, err
 	}
-	out := &CompletionResponse{
-		TokenUsage: TokenUsage{
-			Prompt:     resp.Usage.PromptTokens,
-			Completion: resp.Usage.CompletionTokens,
-			Total:      resp.Usage.TotalTokens,
-		},
+	out := &CompletionResponse{}
+	// nil 表示上游没报用量 —— 保持零值（无数据），不造 0。
+	if u := tokenUsageFromChunkUsage(resp.Usage); u != nil {
+		out.TokenUsage = *u
 	}
 	if len(resp.Choices) == 0 {
 		return out, nil
@@ -911,6 +992,13 @@ func (p *LuaAdaptedProvider) ChatStream(ctx context.Context, req *CompletionRequ
 				if json.Unmarshal([]byte(unified), &ck) != nil {
 					continue
 				}
+				// 适配器只搬上游给的字段（上游只报命中侧时 miss 会是 0），
+				// 这里统一补出来 —— 与 Go 标准解析走**同一个**规则实现。
+				// 不在这里补的后果：配了适配器的源报 100% 命中率，
+				// 而同一份数据走回退路径报真实值，两边不一致。
+				if ck.Usage != nil {
+					ck.Usage.DeriveCacheMiss()
+				}
 			} else {
 				parsed, ok := parseOpenAICompatibleStreamChunkFull(data)
 				if !ok {
@@ -1208,14 +1296,90 @@ type rawToolCall struct {
 	} `json:"function"`
 }
 
+// ErrKind 是 ProviderError 的**错误类别**。
+//
+// 为什么要分类而不只看 StatusCode：同一个 HTTP 码在不同上游代表不同处置。
+// 最要紧的是 ErrContextFull —— 它是**可恢复**的（裁剪上下文后重试），
+// 而 5xx/429 靠重试、401/403 靠换凭证，三者处置完全不同。若只有 StatusCode，
+// 调用方就只能靠字符串匹配错误消息（脆，且上游改文案即失效）。
+type ErrKind uint8
+
+const (
+	// ErrUnknown 未分类：默认按瞬时错误处理（重试 + fallback）。
+	ErrUnknown ErrKind = iota
+	// ErrTransient 瞬时错误：网关瞬断、429、网络抖动。重试有意义。
+	ErrTransient
+	// ErrCredential 凭证错误：401/403。重试与换 provider 都无意义。
+	ErrCredential
+	// ErrContextFull 上游报上下文超限。**可恢复**：裁剪后重试即可，
+	// 不应当成失败终结本轮（否则超页直接变成用户可见的报错）。
+	ErrContextFull
+)
+
 // ProviderError wraps an HTTP-level error with status code for precise auth detection.
 type ProviderError struct {
 	StatusCode int
 	Message    string
+	// Kind 由 newProviderError 统一填。手工构造的 ProviderError 默认为
+	// ErrUnknown（= 旧的「只看 StatusCode」行为，向后兼容）。
+	Kind ErrKind
 }
 
 func (e *ProviderError) Error() string {
 	return e.Message
+}
+
+// contextFullMarkers 是上游表达「上下文超限」的报文特征。
+//
+// 形状不统一是实测结论：不同上游/网关把同一件事报成 400、413，或
+// invalid_request_error 里带一句人话。所以判别必须是「状态码 + 报文特征」
+// 组合，且**每次接新上游都要用真报文回归验证**（见 provider_test.go）。
+var contextFullMarkers = []string{
+	"context_length_exceeded",
+	"maximum context length",
+	"max_tokens_exceeded",
+	"context window full",
+	"too many tokens",
+	"prompt is too long",
+	"reduce the length of the messages",
+	"上下文超限",
+}
+
+// classifyProviderError 给定状态码与上游报文，判定错误类别。
+//
+// 判据优先级：凭证 → 上下文超限 → 瞬时。
+// 顺序不能换：401/403 的报文偶尔也会提到 context（网关模板文案），
+// 但凭证错误永远不该按「裁剪重试」处理。
+func classifyProviderError(status int, body string) ErrKind {
+	switch status {
+	case 401, 403:
+		return ErrCredential
+	}
+	lower := strings.ToLower(body)
+	for _, m := range contextFullMarkers {
+		if strings.Contains(lower, m) {
+			return ErrContextFull
+		}
+	}
+	switch {
+	case status == 413, status == 429, status >= 500:
+		return ErrTransient
+	default:
+		// 400/404 等：报文里没命中上下文特征 ⇒ 判瞬时（沿用旧行为：
+		// 旧代码只区分 401/403 与其余，其余一律重试）。
+		return ErrTransient
+	}
+}
+
+// newProviderError 构造带类别的 ProviderError。
+// 所有非 200 响应都应走它，不要手工构造（否则 Kind 会漏填成 ErrUnknown，
+// 让 ErrContextFull 分支永远不命中）。
+func newProviderError(status int, rawBody string) *ProviderError {
+	return &ProviderError{
+		StatusCode: status,
+		Message:    fmt.Sprintf("api error %d: %s", status, rawBody),
+		Kind:       classifyProviderError(status, rawBody),
+	}
 }
 
 func getString(m map[string]interface{}, key string) string {

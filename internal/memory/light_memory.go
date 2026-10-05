@@ -86,6 +86,56 @@ func (m *LightMemory) Commit(triples []Triple, sessionID string, turnID int) (in
 //
 // 任一侧出错都不影响另一侧的结果：单侧失败只在两侧都失败时返回错误
 // （主库是只读句柄，任何"查询即失败"都说明是真实故障）。
+// RecallSorted 是可指定排序的召回：两个空间各自排序后**再合并排序**。
+//
+// 不能只对其中一个空间排序 —— temp（子写的）与 main（主图）都会被召回，
+// 只排其一就会让另一个空间的实体以任意顺序混进前 N。
+//
+// ★ 去重必须按**名字**而不是 ID（第一版写成按 ID，是个真 bug）：
+// temp 与 main 是**两个独立数据库**，各自的 id 都从 1 自增，
+// 同一个 id 在两边是完全无关的实体。按 ID 去重会让
+// 「主库的第 3 号实体」和「temp 的第 3 号实体」互相顶掉 ——
+// 实测子代理因此**看不到主记忆**（TestLightProfile_MemoryFaceWiring 变红）。
+// 正确做法与旧路径一致：复用 mergeRecall，它按名字/三元组去重。
+// ★ fingerprint 透传（2026-10-04）：LightMemory 是薄代理，
+//
+//	不加这个参数就会在代理这一层把向量空间隔离悄悄丢掉。
+func (m *LightMemory) RecallSorted(keywords []string, seedEntities []string, depth int, sessionFilter, fingerprint string, mode SortMode) (*RecallResult, error) {
+	m.mu.RLock()
+	temp := m.temp
+	main := m.main
+	m.mu.RUnlock()
+
+	var (
+		parts   []*RecallResult
+		lastErr error
+		okAny   bool
+	)
+	for _, g := range []*GraphDB{temp, main} {
+		if g == nil {
+			continue
+		}
+		r, err := g.RecallSorted(keywords, seedEntities, depth, sessionFilter, fingerprint, mode)
+		if err != nil {
+			lastErr = err
+			continue
+		}
+		okAny = true
+		parts = append(parts, r)
+	}
+	if !okAny {
+		if lastErr == nil {
+			lastErr = fmt.Errorf("没有可用的图记忆实例")
+		}
+		return nil, lastErr
+	}
+	merged := mergeRecall(parts...)
+	// 跨空间合并后做全局重排：各空间内部已排好，这里只兜底。
+	mergeSortEntities(merged.Entities, keywords, mode)
+	sortRecallRelations(merged.Relations, mode)
+	return merged, nil
+}
+
 func (m *LightMemory) Recall(keywords []string, seedEntities []string, depth int, sessionFilter string) (*RecallResult, error) {
 	m.mu.RLock()
 	temp := m.temp
@@ -188,4 +238,35 @@ func (m *LightMemory) Close() error {
 		return temp.Close()
 	}
 	return nil
+}
+
+// mergeSortEntities 对多空间合并后的实体做全局重排（原地）。
+//
+// 只处理相关性模式的层级键；时间模式在 mergeSortEntities 里退化为
+// 不动 —— 各空间的 UpdatedAt 都是真实时间，合并后仍需全局比时间，
+// 故时间键同样在此重算。
+func mergeSortEntities(ents []Entity, keywords []string, mode SortMode) {
+	if len(ents) <= 1 {
+		return
+	}
+	spec := make(map[int64]int, len(ents))
+	for i := range ents {
+		// MatchRank 已由各空间的 RecallSorted 回填；只命中泛词时它退回 2，
+		// 这里用实体名再算一次实词层级，让跨空间同分实体可比。
+		spec[ents[i].ID] = bestSpecificRank(ents[i].MatchRank, ents[i].Name, keywords)
+	}
+	sort.SliceStable(ents, func(i, j int) bool {
+		a, b := ents[i], ents[j]
+		if mode == SortRecent {
+			if !a.UpdatedAt.Equal(b.UpdatedAt) {
+				return a.UpdatedAt.After(b.UpdatedAt)
+			}
+		} else if spec[a.ID] != spec[b.ID] {
+			return spec[a.ID] < spec[b.ID]
+		}
+		if a.MentionCount != b.MentionCount {
+			return a.MentionCount > b.MentionCount
+		}
+		return len(a.Name) < len(b.Name)
+	})
 }

@@ -360,7 +360,19 @@ func (a *Agent) emitSkippedReply(evt *agentIO.InputEvent, reason string) {
 	}
 }
 
-func (a *Agent) emitResponse(evt *agentIO.InputEvent, response string) {
+// emitResponse 发送终态回执（不变量 I5：每任务恰一次）。
+//
+// turnUsage 是本轮任务内全部 LLM 调用的用量合计，由调用方从 TaskFrame 传入。
+//
+// 为何要它：同步注入方（WebUI 的 /v1/chat/completions、cli.sock、
+// clawhubadapter）的回包就出自这里，而此前这里**只从插件侧**读 TokenUsage
+// （下面新建的 stageCtx），agent 自己算出来的用量从未传进去 ⇒ 回包没有 usage。
+// 实测过：部署实例的 /v1/chat/completions 回包里 "usage" 字段根本不存在。
+//
+// 口径：按 OpenAI 语义报**本次请求**（turnUsage），不是会话累计 ——
+// 会话累计在链事件里的 usage_session（见 task.go 的记账处），两者不可互换，
+// 否则第二次请求会报出翻倍的数字。
+func (a *Agent) emitResponse(evt *agentIO.InputEvent, response string, turnUsage agentAPI.TokenUsage) {
 	// 通道一律从**输入事件**推导（内核不持有"当前通道"）。
 	ch := outputChannelOf(evt)
 	stageCtx := &sdk.StageContext{
@@ -378,8 +390,20 @@ func (a *Agent) emitResponse(evt *agentIO.InputEvent, response string) {
 	if stageCtx.ReasoningContent != "" {
 		payload["reasoning_content"] = stageCtx.ReasoningContent
 	}
-	if stageCtx.TokenUsage != nil {
-		payload["usage"] = stageCtx.TokenUsage
+	// 用量优先级：插件显式设置的赢（那是既有契约，也是此前唯一能拿到 usage 的路径），
+	// 插件没设则回落到 agent 自己的本轮记账。
+	//
+	// ⚠️ 两条路都必须归一成 map[string]interface{}：消费方 handler_openai.go 用
+	// `.(map[string]interface{})` 取值，而 Go 的 map 类型断言是**精确匹配** ——
+	// 插件给的 map[string]int 会断言失败，usage 在回包里静默变 nil，两边都不报错。
+	// （这正是链事件里那个 "发了但没人收到" 的同款坑，已实证。）
+	// SDK 侧 TokenUsage 的类型仍是 map[string]int（公开接口不动），
+	// 转换只发生在这一个出口。
+	switch {
+	case stageCtx.TokenUsage != nil:
+		payload["usage"] = usageMapFromInts(stageCtx.TokenUsage)
+	case !turnUsage.IsZero():
+		payload["usage"] = turnUsageMap(turnUsage)
 	}
 	if evt.ResponseCh != nil {
 		// 非阻塞写：ResponseCh 由同步调用方以 cap=1 创建。按不变量 I5（每任务恰一次

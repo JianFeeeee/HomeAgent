@@ -42,7 +42,10 @@ type specialToken struct {
 // Tokenizer 是千问的字节级 BPE 分词器。
 type Tokenizer struct {
 	vocab map[string]int
-	ranks map[string]int
+	// idToToken 是 vocab 的反向表，供 DecodeOne 用。
+	// 必须显式建：遍历 map 得到的顺序不确定，而生成输出要逐 token 确定。
+	idToToken map[int]string
+	ranks     map[string]int
 
 	// byteEnc 是 GPT-2 的 byte→unicode 映射：把 0..255 每个字节映到一个
 	// 「可见且不会与正常文本冲突」的 unicode 码点。因为 BPE 词表基于文本构建，
@@ -84,6 +87,11 @@ func LoadTokenizer(modelDir string) (*Tokenizer, error) {
 		return nil, fmt.Errorf("tokenizer.json 的 model.vocab 为空")
 	}
 
+	idToToken := make(map[int]string, len(tj.Model.Vocab))
+	for tok, id := range tj.Model.Vocab {
+		idToToken[id] = tok
+	}
+
 	ranks := make(map[string]int, len(tj.Model.Merges))
 	for i, m := range tj.Model.Merges {
 		// merges 有两种形态：字符串 "a b"，或数组 ["a","b"]。
@@ -106,10 +114,11 @@ func LoadTokenizer(modelDir string) (*Tokenizer, error) {
 	}
 
 	t := &Tokenizer{
-		vocab:   tj.Model.Vocab,
-		ranks:   ranks,
-		byteEnc: bytesToUnicode(),
-		MaxLen:  512,
+		vocab:     tj.Model.Vocab,
+		idToToken: idToToken,
+		ranks:     ranks,
+		byteEnc:   bytesToUnicode(),
+		MaxLen:    512,
 	}
 	for _, at := range tj.AddedTokens {
 		if at.Special && at.Content != "" {
@@ -127,6 +136,43 @@ func LoadTokenizer(modelDir string) (*Tokenizer, error) {
 func (t *Tokenizer) VocabSize() int { return len(t.vocab) }
 
 // SpecialID 返回特殊 token 的 id；不存在时 ok=false。
+// DecodeOne 把单个 token id 反解成文本片段。
+//
+// 生成侧（providers/qwen3vlgen）需要它把 argmax 出来的 id 还原成文本。
+// 本包此前只做正向编码（embedding 侧从不需要解码），词表是 map[string]int，
+// 反向要用它自建的 idToToken 表 —— 不能靠遍历 vocab（那样顺序不确定，
+// 而生成输出必须逐 token 确定）。
+func (t *Tokenizer) DecodeOne(id int) string {
+	if s, ok := t.idToToken[id]; ok {
+		return decodeBytes(s, t.byteEnc)
+	}
+	// 词表里没有：特殊 token 走 specials 表（按 content 匹配）。
+	for _, sp := range t.specials {
+		if sp.id == id {
+			return sp.content
+		}
+	}
+	return ""
+}
+
+// decodeBytes 把 GPT-2 byte↔unicode 表反解回原始字节再转 UTF-8。
+func decodeBytes(s string, byteEnc map[byte]rune) string {
+	inv := make(map[rune]byte, len(byteEnc))
+	for b, r := range byteEnc {
+		inv[r] = b
+	}
+	out := make([]byte, 0, len(s))
+	for _, r := range s {
+		b, ok := inv[r]
+		if !ok {
+			out = append(out, string(r)...)
+			continue
+		}
+		out = append(out, b)
+	}
+	return string(out)
+}
+
 func (t *Tokenizer) SpecialID(content string) (int, bool) {
 	for _, s := range t.specials {
 		if s.content == content {
