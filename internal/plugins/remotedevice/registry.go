@@ -91,6 +91,8 @@ var capabilityTools = map[string][]string{
 	// 屏幕显示/查看
 	"screen":    {"screensue", "screensee"},
 	"screensue": {"screensue"},
+	// omniparse：GUI 设备端已实现完整 case，补进能力矩阵使其可被下发
+	"omniparse": {"omniparse"},
 	"screensee": {"screensee"},
 	// 鼠标键盘操控
 	"computeruse": {"computeruse"},
