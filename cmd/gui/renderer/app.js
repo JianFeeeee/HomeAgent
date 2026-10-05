@@ -761,6 +761,29 @@ async function loadDiscoveredGateway() {
       (d && d.available && (d.url_portal || d.url)) || "";
     if (state.discoveredGateway) {
       console.log("[device-bridge] discovered gateway: " + state.discoveredGateway);
+      // ★ 回写到主进程，让设备桥**真的**用上发现结果。
+      //
+      // 此前发现只停在state.discoveredGateway（UI 展示用），而主进程的
+      // startDeviceBridge 读的是 gui-prefs.deviceBridge.gateway ——
+      // 两者从不联通。症状：GUI 面板里能看到设备通道地址，但设备桥连不上，
+      // 而日志只有一行 ws cookie len=0，没有任何“地址来自发现”的痕迹。
+      //
+      // 仅当本地未配置 gateway 时才写：手填的值优先（用户可能故意指向
+      // 内网直连或灰度实例），发现只做**缺省补全**。
+      if (window.homeagent && window.homeagent.deviceBridge) {
+        try {
+          var cur = await window.homeagent.deviceBridge.get();
+          if (cur && !cur.gateway && state.discoveredGateway) {
+            await window.homeagent.deviceBridge.set({ gateway: state.discoveredGateway });
+            console.log(
+              "[device-bridge] gateway auto-configured from discovery: " +
+                state.discoveredGateway,
+            );
+          }
+        } catch (e2) {
+          console.log("[device-bridge] auto-config skipped: " + e2.message);
+        }
+      }
     }
   } catch (e) {
     state.discoveredGateway = "";
