@@ -2,7 +2,7 @@
 //
 // ★ 为什么必须用快照
 // ----------------------------
-// 生产库 /home/newqqagent/memory/graph.db 有 1294 entities / 980 relations /
+// 生产库 /data/homeagent/memory/graph.db 有 1294 entities / 980 relations /
 // 98 blocks，而且它**在跑**。本验证需要补向量（98 个块里大部分没有），
 // 而补向量会：
 //  1. 与线上 1294 个实体抢写锁
@@ -54,7 +54,7 @@ type prodProbe struct {
 var prodProbes = []prodProbe{
 	// casual：常规查询
 	{name: "脚本路径", dim: "casual",
-		query: "脚本路径改到哪个目录了", want: "/home/newqqagent"},
+		query: "脚本路径改到哪个目录了", want: "/data/homeagent"},
 	{name: "插件工具链", dim: "casual",
 		query: "从零开发 QQ 插件用什么工具链", want: "plugindev"},
 	{name: "公网地址", dim: "casual",

@@ -31,10 +31,11 @@ if [ -n "$FORCE" ] && [ "$FORCE" != "--force" ]; then
   exit 2
 fi
 DATA="/var/tmp/ha-${NAME}"
-BIN="${BIN:-/home/program/TrueAgent/build/homed}"
+REPO_ROOT="${REPO_ROOT:-$(cd "$(dirname "$0")/../.." && pwd)}"
+BIN="${BIN:-$REPO_ROOT/build/homed}"
 PORT="${PORT:-18084}"
 
-# 按 -data 精确匹配，只杀这个测试实例；绝不碰生产（-data /home/newqqagent）
+# 按 -data 精确匹配，只杀这个测试实例；绝不碰生产（-data "${HA_DATA}"）
 ha_pids() { pgrep -f "homed -data $DATA( |$)" || true; }
 
 # 跑分占用门禁：memory_recall.py / bench.py 引用本实例 socket 时不许清理

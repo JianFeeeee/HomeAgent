@@ -30,19 +30,19 @@ systemctl is-active  homeagent.service     # 期望: inactive
 systemctl is-enabled homeagent.service     # 期望: disabled
 
 # ② WAL checkpoint
-sqlite3 /home/newqqagent/memory/graph.db "PRAGMA wal_checkpoint(TRUNCATE)"
+sqlite3 ${HA_DATA}/memory/graph.db "PRAGMA wal_checkpoint(TRUNCATE)"
 #    期望输出: 0|0|0
 
 # ③ 生成新快照（.backup，不是 cp）
 TS=$(date +%Y%m%d-%H%M%S)
-sqlite3 /home/newqqagent/memory/graph.db ".backup '/var/tmp/ha-prod-migrate/prod-$TS.db'"
+sqlite3 ${HA_DATA}/memory/graph.db ".backup '/var/tmp/ha-prod-migrate/prod-$TS.db'"
 #    核对副本基线与源库一致
 sqlite3 /var/tmp/ha-prod-migrate/prod-$TS.db \
   "SELECT COUNT(*) FROM entities; SELECT COUNT(*) FROM relations; SELECT COUNT(*) FROM sentences;"
 
 # ④ 先报告（不写库）
 go run -tags onnxruntime ./cmd/homed-graph-migrate \
-  -db /home/newqqagent/memory/graph.db \
+  -db ${HA_DATA}/memory/graph.db \
   -embed-provider chineseclip \
   -model-dir /var/tmp/ha-c/models/chinese-clip-vit-b16-onnx
 #    ★ 核对：实体 1294，关系 966，块 98，块边 97
@@ -50,16 +50,16 @@ go run -tags onnxruntime ./cmd/homed-graph-migrate \
 
 # ⑤ 执行迁移（约 200s）
 go run -tags onnxruntime ./cmd/homed-graph-migrate \
-  -db /home/newqqagent/memory/graph.db -apply \
+  -db ${HA_DATA}/memory/graph.db -apply \
   -embed-provider chineseclip \
   -model-dir /var/tmp/ha-c/models/chinese-clip-vit-b16-onnx
 
 # ⑥ 验证
-bash scripts/verify-migration.sh /home/newqqagent/memory/graph.db
+bash scripts/verify-migration.sh ${HA_DATA}/memory/graph.db
 #    期望：✅ 结构验证全部通过
 
 # ⑦ 召回探针
-PROD_SNAPSHOT=/home/newqqagent/memory/graph.db \
+PROD_SNAPSHOT=${HA_DATA}/memory/graph.db \
   go test -count=1 -tags onnxruntime ./internal/memory/ \
     -run 'TestProbe_生产规模召回' -v
 #    期望：casual 3/4, confusable 1/1, abstention 3/3, 合计 7/9
@@ -109,7 +109,7 @@ git checkout 75d4609      # 或 d4eda47 / 2fe4ca7 等任一已验证提交
 
 # ② 恢复数据库（若需要）
 TS=<迁移时的快照时间戳>
-cp /var/tmp/ha-prod-migrate/prod-$TS.db /home/newqqagent/memory/graph.db
+cp /var/tmp/ha-prod-migrate/prod-$TS.db ${HA_DATA}/memory/graph.db
 #   ★ 生产库必须用 .backup 恢复，不要直接 cp 源库
 
 # ③ 重建二进制并重启（需你确认后才启服务）

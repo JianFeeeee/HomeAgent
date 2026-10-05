@@ -8,7 +8,7 @@
 | 项 | 状态 |
 |---|---|
 | kbtree 代码 | ✅ 已在 `main`（`41d7543`），已推送 |
-| skill | ✅ 已装 `/home/newqqagent/skills/knowledge-base/` |
+| skill | ✅ 已装 `${HA_DATA}/skills/knowledge-base/` |
 | token | ✅ 已写入 `config_kbtree` 表（固定值，重启不变） |
 | 配置库备份 | ✅ `config.db.bak-20260926-143643` |
 | **服务** | ❌ **未上线** —— 运行中的二进制里没有 kbtree |
@@ -30,7 +30,7 @@ ss -ltn | grep 9892                              # → 无监听
 **必须按顺序，且第 1 步不能用 `cp`**：
 
 ```bash
-DATA=/home/newqqagent
+DATA=${HA_DATA}
 
 # 1. 备份配置库（WAL 模式下 cp 会拿到不一致快照，必须用 .backup）
 sqlite3 $DATA/config.db ".backup '$DATA/config.db.bak-$(date +%Y%m%d-%H%M%S)'"
@@ -60,7 +60,7 @@ ss -ltn | grep 9892
 ## 部署后的冒烟测试
 
 ```bash
-cd /home/newqqagent/skills/knowledge-base
+cd ${HA_DATA}/skills/knowledge-base
 
 ./scripts/kb_tree.sh -h                 # 帮助（不需要 token）
 ./scripts/kb_tree.sh categories         # 分类列表

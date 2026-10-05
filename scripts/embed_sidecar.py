@@ -24,7 +24,7 @@ import numpy as np
 import torch
 
 # ─── Config ──────────────────────────────────────────────────────────────────
-MODEL_DIR   = os.environ.get("JINA_MODEL_DIR", "/home/newqqagent/models/jina-v5-omni-nano")
+MODEL_DIR   = os.environ.get("JINA_MODEL_DIR", "/opt/models/jina-v5-omni-nano")
 PORT        = int(os.environ.get("JINA_PORT", "18999"))
 DIMENSION   = int(os.environ.get("JINA_DIMENSION", "768"))
 MAX_WORKERS = int(os.environ.get("JINA_MAX_WORKERS", "4"))

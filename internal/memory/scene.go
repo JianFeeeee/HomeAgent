@@ -254,7 +254,7 @@ func (g *GraphDB) TagScene(sceneKey string, relationIDs []int64) (int, error) {
 // 比漏标更难发现。
 //
 // 为什么用 GLOB 而不是 LIKE：LIKE 对 ASCII **不区分大小写**，于是 `%QQ%`
-// 会把对象里带 `/home/newqqagent` 的路径类记忆（生产数据目录、email-mcp、
+// 会把对象里带 `/data/homeagent` 的路径类记忆（生产数据目录、email-mcp、
 // dify-ops技能路径…实测 7 条）一起卷进「QQ 场景」。GLOB 区分大小写，
 // `*QQ*` 只命中真正写作 QQ 的那些名字。
 func (g *GraphDB) TagSceneByEntityGlob(sceneKey, pattern string, dryRun bool) (int, error) {

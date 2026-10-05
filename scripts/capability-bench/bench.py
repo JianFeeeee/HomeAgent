@@ -24,7 +24,7 @@
 ====
 
     # 对一个实例跑一套任务（该实例的 data 目录决定 socket 路径）
-    python3 bench.py --data /home/newqqagent --tasks tasks.example.json --out /var/tmp/bench
+    python3 bench.py --data "${HA_DATA}" --tasks tasks.example.json --out /var/tmp/bench
 
     # 长时任务：把超时放大（默认 600s）
     python3 bench.py --data ... --tasks tasks.long.json --timeout 7200

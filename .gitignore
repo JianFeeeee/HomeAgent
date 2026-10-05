@@ -111,3 +111,9 @@ dist/
 /homed-graph-migrate
 /homed-graph-distill
 /homed-centroid
+
+# ── 本机运维脚本（含 /home/newqqagent 等本机路径与凭据搬运逻辑，不进仓库）──
+/deploy/scripts/deploy.sh
+/scripts/verify_deploy.sh
+/scripts/kernel-stress/
+/scripts/gui-package-smoke.sh

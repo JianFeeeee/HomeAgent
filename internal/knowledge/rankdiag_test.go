@@ -30,7 +30,7 @@ func TestRankingQualityOnRealKB(t *testing.T) {
 	if os.Getenv("KB_DIAG") == "" {
 		t.Skip("需要 KB_DIAG=1（真实 KB + 词向量文件）")
 	}
-	srcRoot := envOr("KB_DIAG_ROOT", "/home/newqqagent/knowledge")
+	srcRoot := envOr("KB_DIAG_ROOT", envOr("KB_DIAG_ROOT", "/data/knowledge"))
 	models := envOr("KB_DIAG_MODELS", "/data/cc.zh.top200k.vec,/data/cc.en.top200k.vec")
 	emb := memory.NewStaticEmbedder(strings.Split(models, ",")...)
 

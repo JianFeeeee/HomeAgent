@@ -1,7 +1,7 @@
 # entities 退场迁移方案
 
 > 状态：已确认（方案 A：三表全退），执行中
-> 范围：含生产实例 /home/newqqagent（用户 2026-10-02 确认迁移）
+> 范围：含生产实例 ${HA_DATA}（用户 2026-10-02 确认迁移）
 > 前置：docs/zh/memory-restructure-plan.md（重构计划）
 > 原则：一次迁移，删除所有 entities 遗留，避免后续误导。
 
@@ -88,7 +88,7 @@ indexer_test / medialive_test —— 随实现重写，判据保留（变异自�
 
 - 每步一个 commit，第 4 步前任意一步可 revert
 - 第 3 步动真库前必须快照（cp graph.db graph.db.bak-<ts>）
-- 生产实例 /home/newqqagent **不在本次范围**（需人工确认后单独做）
+- 生产实例 ${HA_DATA} **不在本次范围**（需人工确认后单独做）
 
 ## 四、明确不变
 

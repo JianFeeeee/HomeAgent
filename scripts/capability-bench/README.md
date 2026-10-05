@@ -16,12 +16,12 @@
 
 ```bash
 # 不连实例，先看会跑什么
-python3 bench.py --data /home/newqqagent \
+python3 bench.py --data ${HA_DATA} \
     --tasks tasks.example.json --out /var/tmp/bench --dry-run
 
 # 真跑
 HOMEAGENT_CLI_KEY=<cli 或 webui 的 api_key> \
-python3 bench.py --data /home/newqqagent \
+python3 bench.py --data ${HA_DATA} \
     --tasks tasks.example.json --out /var/tmp/bench
 
 # 只跑其中几个 / 放大超时（长时任务）

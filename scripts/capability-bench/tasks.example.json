@@ -22,21 +22,21 @@
     {
       "id": "read-single-file",
       "dimension": "readonly",
-      "prompt": "读取 /home/program/TrueAgent/internal/meta/meta.go，只回答这个文件里 Version 常量的字面值是什么。不要做别的。",
+      "prompt": "读取 ${REPO}/internal/meta/meta.go，只回答这个文件里 Version 常量的字面值是什么。不要做别的。",
       "check": { "kind": "output_contains", "value": "1.4" },
       "timeout_s": 180
     },
     {
       "id": "read-and-count",
       "dimension": "readonly",
-      "prompt": "统计 /home/program/TrueAgent/internal/plugins/ 目录下一共有多少个子目录（每个子目录是一个插件）。只回答数字。",
+      "prompt": "统计 ${REPO}/internal/plugins/ 目录下一共有多少个子目录（每个子目录是一个插件）。只回答数字。",
       "check": { "kind": "output_regex", "value": "\\b20\\b" },
       "timeout_s": 240
     },
     {
       "id": "grep-code",
       "dimension": "readonly",
-      "prompt": "在 /home/program/TrueAgent/internal/sdk/ 里找出 ParallelSafe 这个字段定义在哪个文件、哪一行。回答「文件名:行号」。",
+      "prompt": "在 ${REPO}/internal/sdk/ 里找出 ParallelSafe 这个字段定义在哪个文件、哪一行。回答「文件名:行号」。",
       "check": { "kind": "output_regex", "value": "tool\\.go:7[0-9]" },
       "timeout_s": 240
     },
@@ -50,7 +50,7 @@
     {
       "id": "multistep-chain",
       "dimension": "multistep",
-      "prompt": "三步任务，请依次完成并报告每步结果：1) 读 /home/program/TrueAgent/internal/meta/meta.go 拿到 Version；2) 读 /home/program/TrueAgent/README.md 找到出现该版本号的位置；3) 用一句话说明两者是否一致。",
+      "prompt": "三步任务，请依次完成并报告每步结果：1) 读 ${REPO}/internal/meta/meta.go 拿到 Version；2) 读 ${REPO}/README.md 找到出现该版本号的位置；3) 用一句话说明两者是否一致。",
       "check": { "kind": "completed" },
       "timeout_s": 420
     },
@@ -71,7 +71,7 @@
     {
       "id": "long-soak",
       "dimension": "long",
-      "prompt": "请做一件需要持续数分钟的只读工作：遍历 /home/program/TrueAgent/internal/ 下的每个一级子目录，统计各自的 .go 文件数与总行数，最后输出一张按行数降序的表格。请分步进行，不要一次性读完所有文件。",
+      "prompt": "请做一件需要持续数分钟的只读工作：遍历 ${REPO}/internal/ 下的每个一级子目录，统计各自的 .go 文件数与总行数，最后输出一张按行数降序的表格。请分步进行，不要一次性读完所有文件。",
       "check": { "kind": "completed" },
       "timeout_s": 1800
     }

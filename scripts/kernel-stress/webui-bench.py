@@ -115,7 +115,7 @@ def _cfg(table: str, key: str) -> str:
     """
     import sqlite3
 
-    db = "/home/newqqagent/config.db"
+    db = os.environ.get("HA_CONFIG_DB", "/data/homeagent/config.db")
     if not os.path.exists(db):
         return ""
     con = None

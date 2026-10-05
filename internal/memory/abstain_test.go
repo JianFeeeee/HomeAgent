@@ -13,7 +13,7 @@ import (
 //	符号存在性 真实全部 > 0 vs 编造全部 = 0，是**确定性事实**，无浮点抖动
 func TestAbstain_符号零出现则拒答(t *testing.T) {
 	blocks := []MemoryBlock{
-		{ID: "1", Text: "脚本路径改为 /home/newqqagent"},
+		{ID: "1", Text: "脚本路径改为 /data/homeagent"},
 		{ID: "2", Text: "13010/13011 而非 12011"},
 		{ID: "3", Text: "从零开发 HomeAgent QQ 插件：使用 plugindev 工具链"},
 	}

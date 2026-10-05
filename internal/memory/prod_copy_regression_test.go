@@ -6,6 +6,21 @@ import (
 	"testing"
 )
 
+// prodCopySrc 返回生产库副本路径。
+//
+// ★ 优先读环境变量 HA_PROD_DB；未设置时用一个**占位路径**，
+//   它在 CI 与绝大多数机器上都不存在 ⇒ 上层 os.ReadFile 失败 ⇒ t.Skip。
+//
+//   取快照用（不要直接指生产库，判据会写）：
+//	sqlite3 <生产库> ".backup /tmp/graph-copy.db"
+//	HA_PROD_DB=/tmp/graph-copy.db go test -run ProdCopy ./internal/memory/
+func prodCopySrc() string {
+	if p := os.Getenv("HA_PROD_DB"); p != "" {
+		return p
+	}
+	return "/data/homeagent-snapshots/graph.db"
+}
+
 // TestProdCopy_DeleteEntityRealData 拿**生产库副本**跑一次真实删除。
 //
 // ★ 为什么需要这条：合成判据的库结构与生产库不同，
@@ -16,7 +31,11 @@ import (
 //
 // 无生产库时自动跳过（CI 与开发机不该依赖本机路径）。
 func TestProdCopy_DeleteEntityRealData(t *testing.T) {
-	const src = "/home/newqqagent/memory/graph.db"
+	// ★ 库路径走环境变量 + 默认占位：CI 与别人的机器上不存在 ⇒ 自动 Skip。
+	//
+	//   为什么不写死本机路径：公开仓库里写死 `/home/<user>/...` 等于
+	//   泄露本机目录结构，也让这条判据在别处永远跑不了。
+	src := prodCopySrc()
 	raw, err := os.ReadFile(src)
 	if err != nil {
 		t.Skip("无生产库副本，跳过：" + err.Error())

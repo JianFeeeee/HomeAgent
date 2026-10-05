@@ -10,8 +10,8 @@
 //
 // 用法（默认 dry-run，只列不删）：
 //
-//	memgc -db /home/newqqagent/memory/graph.db
-//	memgc -db /home/newqqagent/memory/graph.db -orphans -apply
+//	memgc -db ${HA_DATA}/memory/graph.db
+//	memgc -db ${HA_DATA}/memory/graph.db -orphans -apply
 //
 // 清理生产库前请先备份：sqlite3 graph.db ".backup 'graph.db.bak-<ts>'"
 // 不要用 cp —— WAL 模式下会复制出主库与 -wal 不一致的快照。
@@ -30,7 +30,7 @@ func main() {
 	apply := flag.Bool("apply", false, "真正删除；不加则只 dry-run 打印")
 	orphans := flag.Bool("orphans", false, "同时处理「零关系孤立实体」（先被清理的噪音在另一端留下的空节点）")
 	tagScene := flag.String("tag-scene", "", "存量引导：把实体名匹配 -entity-glob 的活跃关系标进该场景键（如 chan:qq）")
-	entityGlob := flag.String("entity-glob", "", "配合 -tag-scene 的 GLOB 模式（如 *QQ*）。GLOB 区分大小写，避免把 /home/newqqagent 这类路径卷进场景")
+	entityGlob := flag.String("entity-glob", "", "配合 -tag-scene 的 GLOB 模式（如 *QQ*）。GLOB 区分大小写，避免把 /data/homeagent 这类路径卷进场景")
 	sceneStats := flag.Bool("scene-stats", false, "只打印场景规模摘要")
 	flag.Parse()
 

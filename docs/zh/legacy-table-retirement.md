@@ -111,7 +111,7 @@ graph.go:522  CommitWithMedia 挂接媒体块的落点
 ## 六、⚠️ 一个操作错误：**`cp` 拿不到一致的快照**
 
 验证 `55db22c`（sentences 原句块）时，我用
-`cp /home/newqqagent/memory/graph.db /var/tmp/ha-probe/fix.db` 取副本，
+`cp ${HA_DATA}/memory/graph.db /var/tmp/ha-probe/fix.db` 取副本，
 结果：
 
 ```
@@ -273,7 +273,7 @@ social 3 个测试当场变红，根因值得写下来：
 ### 执行
 
 ```
-homed-graph-migrate -db /home/newqqagent/memory/graph.db -apply \
+homed-graph-migrate -db ${HA_DATA}/memory/graph.db -apply \
   -embed-provider chineseclip -model-dir /var/tmp/ha-c/models/chinese-clip-vit-b16-onnx
 
 耗时 161.8s，单事务，命令自动快照 graph.db.bak-20261004-153657
@@ -327,7 +327,7 @@ entities 1294 / relations 980 / sentences 66  ← 与迁移前完全一致
 
 ```
 主回滚点  /var/tmp/ha-prod-migrate/prod-20261004-153045.db（integrity ok）
-迁移自带  /home/newqqagent/memory/graph.db.bak-20261004-153657
+迁移自带  ${HA_DATA}/memory/graph.db.bak-20261004-153657
 代码回退  e3dea6d 及之前任一提交（全部已提交，未 push）
 ```
 

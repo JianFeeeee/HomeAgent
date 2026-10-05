@@ -1,6 +1,6 @@
 # 场景式记忆修复 plan
 
-> 起点：2026-09-26 生产库实测（`/home/newqqagent/memory/graph.db`）。
+> 起点：2026-09-26 生产库实测（`${HA_DATA}/memory/graph.db`）。
 > 现象：65 个场景中 6 组是同一场面的双胞胎键；主力场景 `auto:chan:qq+part:morning`
 > strength=270、6 个 features、**0 条记忆**，日志里被"命中"179 次。
 > 分支：`feature/scene-writeback`（从 main 拉出，工作树干净）。

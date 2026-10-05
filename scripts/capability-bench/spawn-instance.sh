@@ -21,9 +21,11 @@ NAME="${1:?用法: spawn-instance.sh <名字> <webui端口> [context_window]}"
 PORT="${2:?缺 webui 端口}"
 CTX="${3:-200000}"
 
-BIN="${BIN:-/home/program/TrueAgent/build/homed}"
+REPO_ROOT="${REPO_ROOT:-$(cd "$(dirname "$0")/../.." && pwd)}"
+BIN="${BIN:-$REPO_ROOT/build/homed}"
 DATA="/var/tmp/ha-${NAME}"
-PROD_CFG="/home/newqqagent/config.db"
+# ★ 生产配置库路径走环境变量：仓库里不写死本机路径。
+PROD_CFG="${HA_DATA:-/data/homeagent}/config.db"
 
 say() { printf '  %s\n' "$*"; }
 
@@ -43,7 +45,7 @@ if [ "${ALLOW_STALE:-0}" != "1" ]; then
   BIN_REV="$(go version -m "$BIN" 2>/dev/null | sed -n 's/.*vcs.revision=\([0-9a-f]*\).*/\1/p' | head -1)"
   # ★ 两者都要短形式：go version -m 给的是完整 40 位，
   #   而 rev-parse --short 给短形式 ⇒ 不统一就永远「不匹配」。
-  HEAD_REV="$(git -C /home/program/TrueAgent rev-parse --short=8 HEAD 2>/dev/null)"
+  HEAD_REV="$(git -C "$REPO_ROOT" rev-parse --short=8 HEAD 2>/dev/null)"
   BIN_REV="${BIN_REV:0:8}"
   BIN_TIME="$(stat -c %y "$BIN" 2>/dev/null | cut -d. -f1)"
   if [ -z "$BIN_REV" ] || [ -z "$HEAD_REV" ]; then

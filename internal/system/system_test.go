@@ -23,12 +23,12 @@ func TestIsProtectedPath(t *testing.T) {
 		}
 	}
 	// 发行版/部署路径注入：显式前缀集可扩展受保护范围
-	SetProtectedPaths([]string{"/opt/llm-mock", "/home/newqqagent"})
+	SetProtectedPaths([]string{"/opt/llm-mock", "/data/homeagent"})
 	if !IsProtectedPath("/opt/llm-mock/mock_server.py") {
 		t.Error("explicit prefix /opt/llm-mock should be protected")
 	}
-	if !IsProtectedPath("/home/newqqagent/config.yaml") {
-		t.Error("explicit prefix /home/newqqagent should be protected")
+	if !IsProtectedPath("/data/homeagent/config.yaml") {
+		t.Error("explicit prefix /data/homeagent should be protected")
 	}
 	SetProtectedPaths(nil) // 恢复默认
 	if IsProtectedPath("/opt/llm-mock/mock_server.py") {
