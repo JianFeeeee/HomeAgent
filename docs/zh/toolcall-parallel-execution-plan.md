@@ -497,9 +497,9 @@ waiter 有**两条**设备桥启动路径：
 
 ### 部署脚本的一个坑
 
-`deploy-waiter.sh` 里 `ssh` 会从 stdin 读，把后续 `read -p "确认更新"` 的输入吃掉：
+`deploy/scripts/deploy-waiter.sh 里 `ssh` 会从 stdin 读，把后续 `read -p "确认更新"` 的输入吃掉：
 
-    bash deploy-waiter.sh deploy <ip> <<< "yes"   # 喂了 yes 却打印「已取消」
+    bash deploy/scripts/deploy-waiter.sh deploy <ip> <<< "yes"   # 喂了 yes 却打印「已取消」
 
 脚本本身完全正常、备份逻辑没问题，只是"明明喂了 yes 却什么也没发生"。
 已给 5 处 `ssh` 统一加 `-n`。

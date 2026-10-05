@@ -15,9 +15,9 @@
 #   · 验证项：进程活着 + 设备在网关侧注册成功
 #
 # 用法：
-#   bash deploy-waiter.sh check            只读检查
-#   bash deploy-waiter.sh deploy <ip>      更新指定一台
-#   bash deploy-waiter.sh rollback <ip>    回滚指定一台
+#   bash deploy/scripts/deploy-waiter.sh check            只读检查
+#   bash deploy/scripts/deploy-waiter.sh deploy <ip>      更新指定一台
+#   bash deploy/scripts/deploy-waiter.sh rollback <ip>    回滚指定一台
 
 set -uo pipefail
 

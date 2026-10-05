@@ -2,10 +2,10 @@
 # 生产部署方案（**待确认，不自动执行**）
 #
 # 用法：
-#   bash deploy-plan.sh check     # 只做部署前检查，不改任何东西
-#   bash deploy-plan.sh backup    # 备份当前二进制与适配器
-#   bash deploy-plan.sh deploy    # 替换二进制并重启（需显式确认）
-#   bash deploy-plan.sh rollback  # 回滚到备份
+#   bash deploy/scripts/deploy-plan.sh check     # 只做部署前检查，不改任何东西
+#   bash deploy/scripts/deploy-plan.sh backup    # 备份当前二进制与适配器
+#   bash deploy/scripts/deploy-plan.sh deploy    # 替换二进制并重启（需显式确认）
+#   bash deploy/scripts/deploy-plan.sh rollback  # 回滚到备份
 #
 # ★ 本脚本刻意**不包含**任何"自动回滚"逻辑：回滚要不要做、什么时候做，
 #   是人的判断。脚本只负责把状态保全好，让回滚成为一条可执行的命令。
@@ -13,7 +13,7 @@
 set -uo pipefail
 
 BIN=/usr/local/bin/homed
-DATA=/home/newqqagent
+DATA=${HA_DATA}
 BAK=/var/tmp/homed-backup-$(date +%Y%m%d-%H%M%S)
 NEW=${NEW_BIN:-/tmp/homed-ort}
 ADAPTERS=$DATA/adapters
