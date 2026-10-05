@@ -644,8 +644,24 @@ async function renderAll(force) {
 	// force：变更操作后（保存设置/启停插件）需要重新拉那块数据。
 	if (force) _loadedOnce = {};
 	// 1) 只拉当前页签需要的数据（并发的别串行等）
+	//
+	// ★ 必须逐项容错（2026-10-05）：之前这里是裸的 Promise.all，
+	//   任一 fetch 块抛错 ⇒ 整体 reject ⇒ **后面的 spec.render 根本不执行**
+	//   ⇒ 整页白屏。真实案例：starmapFetchBlock("kernel") 里调用了
+	//   一个作用域不对的函数（ReferenceError），
+	//   而 TABS 的 overview / plugins / kernel 三页都含 "kernel" ⇒ 三页全白。
+	//
+	//   下面对照：第 2 步的 spec.render 有 typeof 守卫、星图有 try/catch，
+	//   唯独这一步没有。而它跑在 render **之前**，一旦炸后面全不执行。
 	var needs = spec.fetch || [];
-	await Promise.all(needs.map((n) => starmapFetchBlock(n)));
+	await Promise.all(
+		needs.map(function (n) {
+			// 单块失败只记日志，不影响同批其它块与后续渲染。
+			return starmapFetchBlock(n).catch(function (e) {
+				console.error("starmapFetchBlock(" + n + ")", e);
+			});
+		}),
+	);
 	// 2) 只渲染当前页签（+ 星图在多处出现，单独处理）
 	try {
 		spec.render.forEach((fn) => {
@@ -3239,6 +3255,73 @@ function endChatTurn() {
 	rerenderChat(true);
 }
 
+// ★★ 用量徐标渲染（2026-10-05 从 connectSSE() 内提到顶层）
+//
+// 此前它定义在 connectSSE() 内部（缩进一个 tab），而 starmapFetchBlock 的
+// kernel 分支在 renderAll 里调用它 —— 那是**顶层**调用，此时 connectSSE
+// 早已返回 ⇒ renderChatUsage 是 undefined ⇒
+//
+//	Uncaught (in promise) ReferenceError: renderChatUsage is not defined
+//	    at starmapFetchBlock (dashboard.js)
+//	    at async Promise.all (index 2)
+//	    at async renderAll (dashboard.js)
+//
+// 而 renderAll 里 `await Promise.all(needs.map(starmapFetchBlock))`
+// **没有 try/catch**，且 TABS 的 overview / plugins / kernel 三个页签都含
+// "kernel" ⇒ 任一页触发它，Promise.all 整体 reject，后面的 spec.render
+// 根本不执行 ⇒ 整页白屏（生产实测）。
+//
+// 教训与本仓其它「静默失效」同型：**声明位置就是契约**。
+// 判据见 dashboard_js_scope_test.go（node 真跑 + 缩进静态检查）。
+// 用量徐标渲染。
+//
+// 口径纪律（与内核 usageLedger 同一套，不能各写一套）：
+//   · cache_hit_rate **可能缺席** —— 那是「没有任何调用报过缓存细节」，
+//     必须显示「—」而不是 0%。把「不知道」画成 0% 会让人去优化一个
+//     本来就没开的功能；
+//   · 缺席与「命中率为 0」是两回事，后者是有数据、真的一分没命中。
+function renderChatUsage(u, single, source) {
+	var el = document.getElementById("chat-usage");
+	if (!el) return;
+	if (!u || !u.total) {
+		el.style.display = "none";
+		return;
+	}
+	function compact(n) {
+		n = n || 0;
+		if (n >= 1000000) return (n / 1000000).toFixed(1) + "M";
+		if (n >= 1000) return (n / 1000).toFixed(1) + "k";
+		return String(n);
+	}
+	var hasRate = typeof u.cache_hit_rate === "number";
+	el.textContent =
+		compact(u.total) +
+		" tok · " +
+		(hasRate
+			? __("缓存 ", "cache ") + Math.round(u.cache_hit_rate * 100) + "%"
+			: __("缓存 —", "cache —"));
+	var tip = [source || "",
+		__("调用 ", "calls ") + (u.calls || 0),
+		"prompt " + (u.prompt || 0),
+		"completion " + (u.completion || 0),
+		"cache_read " + (u.cache_read || 0),
+		"cache_miss " + (u.cache_miss || 0)];
+	tip.push(
+		hasRate
+			? __("命中率 ", "hit rate ") + (u.cache_hit_rate * 100).toFixed(1) + "%"
+			: __(
+					"命中率未知（上游未报缓存细节）",
+					"hit rate unknown (upstream reported no cache)",
+				),
+	);
+	if (single && single.total) {
+		tip.push(__("本次 ", "last call ") + "prompt " + (single.prompt || 0) +
+			" / completion " + (single.completion || 0));
+	}
+	el.title = tip.filter(Boolean).join("\n");
+	el.style.display = "";
+}
+
 // 回合看门狗：POST 已 abort 且 SSE 迟迟无终帧时兕底收尾（连接不稳/事件丢失），
 // 提示用户回复可能已生成、可刷新查看历史。避免回合永久卡在 loading。
 function armTurnWatchdog() {
@@ -4465,54 +4548,6 @@ function connectSSE() {
 		}
 	});
 
-	// 用量徐标渲染。
-	//
-	// 口径纪律（与内核 usageLedger 同一套，不能各写一套）：
-	//   · cache_hit_rate **可能缺席** —— 那是「没有任何调用报过缓存细节」，
-	//     必须显示「—」而不是 0%。把「不知道」画成 0% 会让人去优化一个
-	//     本来就没开的功能；
-	//   · 缺席与「命中率为 0」是两回事，后者是有数据、真的一分没命中。
-	function renderChatUsage(u, single, source) {
-		var el = document.getElementById("chat-usage");
-		if (!el) return;
-		if (!u || !u.total) {
-			el.style.display = "none";
-			return;
-		}
-		function compact(n) {
-			n = n || 0;
-			if (n >= 1000000) return (n / 1000000).toFixed(1) + "M";
-			if (n >= 1000) return (n / 1000).toFixed(1) + "k";
-			return String(n);
-		}
-		var hasRate = typeof u.cache_hit_rate === "number";
-		el.textContent =
-			compact(u.total) +
-			" tok · " +
-			(hasRate
-				? __("缓存 ", "cache ") + Math.round(u.cache_hit_rate * 100) + "%"
-				: __("缓存 —", "cache —"));
-		var tip = [source || "",
-			__("调用 ", "calls ") + (u.calls || 0),
-			"prompt " + (u.prompt || 0),
-			"completion " + (u.completion || 0),
-			"cache_read " + (u.cache_read || 0),
-			"cache_miss " + (u.cache_miss || 0)];
-		tip.push(
-			hasRate
-				? __("命中率 ", "hit rate ") + (u.cache_hit_rate * 100).toFixed(1) + "%"
-				: __(
-						"命中率未知（上游未报缓存细节）",
-						"hit rate unknown (upstream reported no cache)",
-					),
-		);
-		if (single && single.total) {
-			tip.push(__("本次 ", "last call ") + "prompt " + (single.prompt || 0) +
-				" / completion " + (single.completion || 0));
-		}
-		el.title = tip.filter(Boolean).join("\n");
-		el.style.display = "";
-	}
 	// token 级流式增量：逐块追加到当前回复内容（流式生成中）；
 	// reset 帧表示轮次作废（用户中断）：定格已显示的部分内容，置 final。
 	es.addEventListener("content_delta", (e) => {

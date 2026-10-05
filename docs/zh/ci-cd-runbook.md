@@ -256,7 +256,18 @@ turn_end: README.md → test go cmd/gui/sse-backoff.test.mjs (failed-first)
 
 注意触发者是 `README.md` —— 目标是**与本次编辑无关**的陈旧失败项。
 
-### 6.3 为什么不能用项目级配置关掉
+### 6.3 为什么仓库里没有 `.pi-lens.json`
+
+pi-lens 的 `ignore` 是**本地工具配置**，随每个人的工具版本与偏好变化，
+不该进仓库（它对 CI 与其他贡献者毫无意义，还会成为 merge 噪音）。
+需要的配置由各人在自己的机器上放一份即可。
+
+★ 而**根因分析要留在仓库里** —— 就是本节 6.1/6.2：
+上游缺陷（runner 不按目录语言选、failed-first 让误报永不自愈）
+不知道哪年修，修之前每个新 clone 的人都会再踩一遍。
+所以是「配置外置、结论内留」。
+
+### 6.4 为什么不能用项目级配置关掉
 
 `.pi-lens.json` 是**项目级**，只认一小排键
 （`ignore` / `rules` / `maxProjectFiles` / `reviewGraph` / `trivy` + 三个改动开关）。
@@ -271,7 +282,7 @@ turn_end: README.md → test go cmd/gui/sse-backoff.test.mjs (failed-first)
 另：`ignore` 也挡不住，因为它只作用于扫描，不参与测试目标选择（`failed-first`
 的回退分支根本不看候选文件）。
 
-### 6.4 修法：本机补丁（已打）
+### 6.5 修法：本机补丁（已打）
 
 补丁位置：`~/.pi/agent/npm/node_modules/pi-lens/dist/index.js`。
 在 `getTestRunTarget` 返回目标前加一道校验：
