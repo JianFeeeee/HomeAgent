@@ -1873,7 +1873,7 @@ function buildChatLayout() {
     '<div class="chat-panel" id="chat-panel-starmap"><div class="card"><h2>' +
     __("星图", "Star Map") +
     "</h2>" +
-    '<div id="sm-container-chat" style="display:flex;align-items:center;justify-content:center;min-height:480px"><div class="ha-dots-panel"><span class="ha-dots ha-dots-lg"><i></i><i></i><i></i></span></div></div></div>';
+    '<div id="sm-container-chat" style="display:flex;align-items:center;justify-content:center;min-height:480px"><div class="ha-dots-panel"><span class="ha-dots ha-dots-lg"><i></i><i></i><i></i></span></div></div></div></div>';
   html +=
     '<div class="chat-panel" id="chat-panel-terminal"><div class="card"><h2>' +
     __("终端", "Terminal") +
