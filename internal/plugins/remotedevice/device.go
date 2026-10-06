@@ -102,15 +102,22 @@ func (d *devicectlDevice) Tools() []agentIO.ToolDef {
 		},
 		{
 			Name: "screensee",
-			Description: "查看一台已授权设备的屏幕当前画面（截屏回传）。" +
-				"与 screensue（向用户屏幕显示内容）配对：screensue 是给用户看，screensee 是你看。" +
-				"返回屏幕截图的自动视觉描述；如需读取屏上文字可接着用 ocr_image。" +
+			Description: "截取一台已授权设备的当前屏幕画面。\n" +
+				"与 screensue（向用户屏幕显示内容）配对：screensue 是给用户看，screensee 是你看。\n" +
+				"★★ 返回的是截图的**落盘路径**与元信息（file/mime/size/sha256/width/height），" +
+				"**不含画面内容**。要看画面或读屏上文字，必须接着调用：" +
+				"describe_image(path=<file>) 看画面，或 ocr_image(path=<file>) 读文字。" +
+				"两步缺一不可——本工具不会自动描述任何东西。\n" +
 				"需要 device_id（来自 devicedetect）。设备必须已授权且在线。",
 			Parameters: map[string]interface{}{
 				"type": "object",
 				"properties": map[string]interface{}{
 					"device_id": map[string]interface{}{"type": "string", "description": "目标设备 ID"},
-					"provider":  map[string]interface{}{"type": "string", "description": "可选：用于视觉描述的 LLM 源名称，不填则使用默认模型"},
+					"auto_describe": map[string]interface{}{
+						"type": "boolean",
+						"description": "可选（默认 false）：true 时跳过落盘、直接用视觉模型描述" +
+							"（仅调试用：大截图约 13 万 token，且视觉源不可控）",
+					},
 				},
 				"required": []interface{}{"device_id"},
 			},
@@ -372,7 +379,11 @@ func (d *devicectlDevice) SetSeeHandler(fn func(dataURL string, provider string)
 }
 
 // screensee 实现 screensee：向设备下发 homeagent-screensee 截屏命令，
-// 等待回传 jpeg base64，交给 seeHandler（agent 核心）做视觉描述。
+// screensee 截取设备屏幕。
+//
+// ★★ 2026-10-06：不再自动送视觉模型，改为**落盘 + 回路径**，
+// 由 agent 显式调 describe_image(path=…)/ocr_image(path=…)。见函数体注释。
+// args: device_id（必填）、provider（仅 auto_describe 时用）、auto_describe（调试用，默认 false）。
 func (d *devicectlDevice) screensee(args map[string]interface{}) (interface{}, error) {
 	id, _ := args["device_id"].(string)
 	provider, _ := args["provider"].(string)
@@ -420,27 +431,66 @@ func (d *devicectlDevice) screensee(args map[string]interface{}) (interface{}, e
 	//   · 前若干字节的 base64 片段 + SHA256 前 16 hex
 	//     ⇒ 「回传的是不是同一张图」「是不是被截断了」一眼可判。
 	logScreenseePayload(id, output)
-	// 设备端回传 data URL（data:image/jpeg;base64,...）或裸 base64
-	if !strings.HasPrefix(output, "data:") {
-		output = "data:image/jpeg;base64," + output
+	// ★★ 2026-10-06：截图先**落盘**，再把路径交给 agent。
+	//
+	// 原行为：把 base64 直接送去视觉模型自动描述。三个问题：
+	//  ① 96KB 截图 ≈ 13 万 token 的内联 base64；
+	//  ② 自动挑源不可控 —— 生产实证：AUTO 把大图路由到不支持视觉的源，
+	//     模型回「没有收到截图」，而我们无法区分「图没到」与「模型看不了」；
+	//  ③ agent 不知道图存不存在，也就无法决定用 describe 还是 ocr。
+	//
+	// 现在：落盘 + 回元信息，agent 显式调 describe_image(path=…)/ocr_image(path=…)
+	//      —— 需要哪个能力由它自己判断，且 provider 参数可控。
+	//
+	// 落盘失败当**工具失败**上抛（不静默退回内联）：图已经在手上却拿不到路径，
+	// agent 会既没有描述也没有可查证产物，只剩一句「失败」。
+	//
+	// auto_describe=true 保留旧路径（调试用）。
+	if auto, _ := args["auto_describe"].(bool); auto && d.seeHandler != nil {
+		if !strings.HasPrefix(output, "data:") {
+			output = "data:image/jpeg;base64," + output
+		}
+		desc, err := d.seeHandler(output, provider)
+		if err != nil {
+			// ★ 视觉描述失败 ⇒ 工具失败（不是「返回一段说明」）。
+			//   生产实证：403 被塞进 description 且 status=ok，
+			//   agent 以为拿到了结果，于是换 provider 又试一次（再失败一次）。
+			d.reg.SaveResult(reqID, map[string]interface{}{
+				"error":     err.Error(),
+				"device":    id,
+				"has_image": true, // 截图确实拿到了：区分「设备没回传」与「模型看不了」
+			})
+			return nil, fmt.Errorf("设备已回传截图，但视觉描述失败: %w", err)
+		}
+		return map[string]interface{}{"description": desc}, nil
 	}
-	d.reg.SaveResult(reqID, res)
-	if d.seeHandler == nil {
-		return map[string]interface{}{"image_data_url": output, "note": "无视觉描述处理器，仅返回原始图像数据"}, nil
-	}
-	desc, err := d.seeHandler(output, provider)
+
+	meta, err := d.reg.SaveInlineMedia("screensee_"+reqID, output, "image/jpeg")
 	if err != nil {
-		// ★ 视觉描述失败 ⇒ 工具失败（不是「返回一段说明」）。
-		//   生产实证：403 被塞进 description 且 status=ok，
-		//   agent 以为拿到了结果，于是换 provider 又试一次（再失败一次）。
 		d.reg.SaveResult(reqID, map[string]interface{}{
 			"error":     err.Error(),
 			"device":    id,
-			"has_image": true, // 截图确实拿到了：区分「设备没回传」与「模型看不了」
+			"has_image": true, // 图确实拿到了，只是没落盘
 		})
-		return nil, fmt.Errorf("设备已回传截图，但视觉描述失败: %w", err)
+		return nil, fmt.Errorf("截图已回传但落盘失败（无法交付给多模态工具）: %w", err)
 	}
-	return map[string]interface{}{"description": desc}, nil
+	d.reg.SaveResult(reqID, meta)
+
+	out := map[string]interface{}{
+		"file":      meta["file"],
+		"mime":      meta["mime"],
+		"size":      meta["size"],
+		"sha256":    meta["sha256"],
+		"device":    id,
+		"next_step": "如需查看画面，请调用 describe_image 并传入 path 参数；需读图中的文字请用 ocr_image。",
+	}
+	if w, ok := meta["width"]; ok {
+		out["width"] = w
+	}
+	if h, ok := meta["height"]; ok {
+		out["height"] = h
+	}
+	return out, nil
 }
 
 // computeruse 实现 computeruse：向设备下发鼠标/键盘控制命令。

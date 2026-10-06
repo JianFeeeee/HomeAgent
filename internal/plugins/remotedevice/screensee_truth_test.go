@@ -11,6 +11,7 @@ import (
 	"image/png"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"strings"
 	"testing"
 )
@@ -187,6 +188,8 @@ func TestScreenseE2E_VisualFailureIsErrorNotDescription(t *testing.T) {
 	reg := NewRegistry()
 	token := "tk-visual-fail"
 	reg.SetAcceptToken(func(p string) bool { return p == token })
+	// auto_describe 需要落盘目录先存在（默认路径也会落盘）
+	reg.SetMediaDir(t.TempDir())
 
 	dev := &devicectlDevice{reg: reg}
 	// 视觉源返回 403（MCP/screensee 生产上真实发生过）
@@ -224,7 +227,7 @@ func TestScreenseE2E_VisualFailureIsErrorNotDescription(t *testing.T) {
 		}
 	}()
 
-	res, err := dev.Execute("screensee", map[string]interface{}{"device_id": "vf-dev"})
+	res, err := dev.Execute("screensee", map[string]interface{}{"device_id": "vf-dev", "auto_describe": true})
 
 	// ★ 必须报错
 	if err == nil {
@@ -285,6 +288,9 @@ func TestScreenseE2E_SuccessReturnsDescription(t *testing.T) {
 		}
 	}()
 
+	// ★★ 2026-10-06：默认路径**不再自动描述**，改为落盘 + 回路径。
+	//   旧行为保留在 auto_describe=true 下，另有一处判据覆盖。
+	reg.SetMediaDir(t.TempDir())
 	res, err := dev.Execute("screensee", map[string]interface{}{"device_id": "vo-dev"})
 	if err != nil {
 		t.Fatalf("成功路径被破坏: %v", err)
@@ -293,11 +299,33 @@ func TestScreenseE2E_SuccessReturnsDescription(t *testing.T) {
 	if !ok {
 		t.Fatalf("返回类型变了: %T", res)
 	}
-	if m["description"] != "屏幕上是一个终端窗口" {
-		t.Errorf("description 不对: %v", m["description"])
+	fp, _ := m["file"].(string)
+	if fp == "" {
+		t.Fatalf("默认路径必须回 file，实际返回: %v", m)
+	}
+	if got, err := os.ReadFile(fp); err != nil || len(got) == 0 {
+		t.Errorf("file 应指向落盘的截图: err=%v", err)
+	}
+	if _, hasDesc := m["description"]; hasDesc {
+		t.Error("默认路径不应再返回 description（内容由 describe_image 显式取）")
+	}
+	if gotLen != 0 {
+		t.Error("默认路径不应调用视觉描述 handler（模型必须显式调 describe_image）")
+	}
+
+	// ★ auto_describe=true 走旧路径（调试用）：handler 被调，description 回来。
+	res2, err := dev.Execute("screensee", map[string]interface{}{
+		"device_id": "vo-dev", "auto_describe": true,
+	})
+	if err != nil {
+		t.Fatalf("auto_describe 路径被破坏: %v", err)
+	}
+	m2, _ := res2.(map[string]interface{})
+	if m2["description"] != "屏幕上是一个终端窗口" {
+		t.Errorf("auto_describe 应返回 description，实际: %v", m2["description"])
 	}
 	if gotLen == 0 {
-		t.Error("handler 没收到 dataURL")
+		t.Error("auto_describe 下 handler 应收到 dataURL")
 	}
 }
 
