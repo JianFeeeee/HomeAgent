@@ -155,11 +155,11 @@ func TestScheduler_Lifecycle(t *testing.T) {
 	if t1 == nil || s.running != t1 {
 		t.Fatal("next 应取出任务并置为 running")
 	}
-	if len(s.queue) != 1 {
-		t.Fatalf("取出后队列长度=%d，期望 1", len(s.queue))
+	if n := s.queueLen(); n != 1 {
+		t.Fatalf("取出后队列长度=%d，期望 1", n)
 	}
 	// 队列内不得同时出现 running（O1：三集合互不重叠）。
-	for _, q := range s.queue {
+	for _, q := range s.queueSnapshot() {
 		if q == t1 {
 			t.Fatal("running 任务不得同时留在就绪队列")
 		}

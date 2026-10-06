@@ -582,6 +582,34 @@ func (s *scheduler) next() *Task {
 	return t
 }
 
+// queueLen 返回当前排队任务数（**带锁**）。
+//
+// ★ 2026-10-06 新增：offload_test.go 有 6 处直读 s.queue 取 len。
+//
+//	那在「无并发写者」时安全（测试用 newRootWithoutSchedulerLoop，
+//	刻意不启 schedulerLoop），但**只要有人改成 newRootWith 就变成真竞争**，
+//	而且是「今天绿的、改一次就炸」的那种。
+//
+//	⇒ 生产代码本来就走 takeQueuedInputs/hasRoom 等带锁访问器；
+//	这里补一个对称的只读访问器，让测试不必直读内部字段。
+func (s *scheduler) queueLen() int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return len(s.queue)
+}
+
+// queueSnapshot 返回排队任务的浅拷贝，供测试断言内容（**带锁**）。
+//
+// 返回拷贝而非内部切片：调用方拿到的就是某个时刻的快照，
+// 后续并发 enqueue/dequeue 不会让它的 len 或 range 在中途变化。
+func (s *scheduler) queueSnapshot() []*Task {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	out := make([]*Task, len(s.queue))
+	copy(out, s.queue)
+	return out
+}
+
 // nextRef 选出下一个任务。优先顺序：
 //
 //  1. immediate —— 刚抢占成功的中断（抢占必须立即生效）
