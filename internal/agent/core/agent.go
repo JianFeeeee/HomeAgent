@@ -292,19 +292,19 @@ type AgentConfig struct {
 	//
 	// nil 或空 = **完整授权**（默认）；非空 = 白名单，只允许列出的输出通道。
 	// 父 agent 创建驻留子时用它收窄子的输出能力。
-	AllowedOutputs     []string
-	PluginDir          string
-	DistillInterval    time.Duration
-	ArchiveInterval    time.Duration          // 冷文档归档间隔（L2→L3），0 则使用 DistillInterval
-	ReviewInterval     time.Duration          // 关系复审间隔，0 则使用 DistillInterval
-	MergeInterval      time.Duration          // 实体合并检测间隔，0 则使用 DistillInterval
-	MaxContextSize     int                    // 活跃上下文最大条数，超出按相关性裁剪
+	AllowedOutputs  []string
+	PluginDir       string
+	DistillInterval time.Duration
+	ArchiveInterval time.Duration // 冷文档归档间隔（L2→L3），0 则使用 DistillInterval
+	ReviewInterval  time.Duration // 关系复审间隔，0 则使用 DistillInterval
+	MergeInterval   time.Duration // 实体合并检测间隔，0 则使用 DistillInterval
+	MaxContextSize  int           // 活跃上下文最大条数，超出按相关性裁剪
 
 	// CtxTuning 是上下文预算的可调参数。零值 ⇒ 使用历史默认（与硬编码时代一致）。
 	//
 	// 为何必须能从配置传进来：这些阈值原本写死在 ComputeTokenBudget 里，
 	// 界面改不了、不同窗口的实例也没法各自调优（详见 ContextTuning 的注释）。
-	CtxTuning ContextTuning
+	CtxTuning          ContextTuning
 	ContextSavePath    string                 // 上下文持久化路径，空则不持久化
 	EmbeddingModelPath string                 // 预训练词嵌入模型路径（word2vec 文本格式），空则不使用
 	Embedder           *memory.StaticEmbedder // 共享词嵌入实例；nil 时按 EmbeddingModelPath 自建

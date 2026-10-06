@@ -407,9 +407,9 @@ func TestScreenseeEndToEnd(t *testing.T) {
 
 	dev := &devicectlDevice{reg: reg}
 	var gotDataURL string
-	dev.SetSeeHandler(func(dataURL string, provider string) string {
+	dev.SetSeeHandler(func(dataURL string, provider string) (string, error) {
 		gotDataURL = dataURL
-		return "屏幕上显示的是测试画面"
+		return "屏幕上显示的是测试画面", nil
 	})
 
 	srv := httptest.NewServer(http.HandlerFunc(reg.ServeWS))

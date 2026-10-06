@@ -1,8 +1,12 @@
 package remotedevice
 
 import (
+	"crypto/sha256"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
+	"log"
+	"os"
 	"sort"
 	"strings"
 	"time"
@@ -18,7 +22,9 @@ type devicectlDevice struct {
 
 	// screensee 回调：设备截屏回传后由 agent 核心消费（视觉描述）。
 	// 由插件 Start 注入；nil 时退化为仅返回 base64 数据。
-	seeHandler func(dataURL string, provider string) string
+	// ★ 2026-10-05 改为 (string, error)：视觉描述失败必须能上抛，
+	//   不能渲染成普通文本（那会让 status=ok 与失败同形）。
+	seeHandler func(dataURL string, provider string) (string, error)
 }
 
 func (d *devicectlDevice) Name() string                                 { return "devicectl" }
@@ -361,7 +367,7 @@ func (d *devicectlDevice) info(args map[string]interface{}) (interface{}, error)
 }
 
 // SetSeeHandler 注入 screensee 的视觉描述回调（agent 核心提供）。
-func (d *devicectlDevice) SetSeeHandler(fn func(dataURL string, provider string) string) {
+func (d *devicectlDevice) SetSeeHandler(fn func(dataURL string, provider string) (string, error)) {
 	d.seeHandler = fn
 }
 
@@ -401,6 +407,19 @@ func (d *devicectlDevice) screensee(args map[string]interface{}) (interface{}, e
 		return nil, fmt.Errorf("设备截屏失败: %s", errMsg)
 	}
 	output, _ := res["output"].(string)
+	// ★ 2026-10-05：把回传内容**量化后记进服务端日志**。
+	//
+	// 起因：2026-10-05 生产日志里有两次 screensee 回了
+	//	「我目前没有收到或无法查看这张屏幕截图」
+	// 而服务端**没有任何记录**能回答「设备到底回传了什么」——
+	// GUI 侧那行 console.log 只打在它自己的控制台，服务端留不下痕迹。
+	// 于是排查只能靠猜（截屏为空？data URL 被截断？缩略图未就绪？）。
+	//
+	// 只记**元信息 + 极短内容指纹**，不记图片本身（日志会膨胀且含用户屏幕内容）：
+	//   · 字节数、解出来的像素尺寸（jpeg/png 头部可解）、是否非空
+	//   · 前若干字节的 base64 片段 + SHA256 前 16 hex
+	//     ⇒ 「回传的是不是同一张图」「是不是被截断了」一眼可判。
+	logScreenseePayload(id, output)
 	// 设备端回传 data URL（data:image/jpeg;base64,...）或裸 base64
 	if !strings.HasPrefix(output, "data:") {
 		output = "data:image/jpeg;base64," + output
@@ -409,7 +428,18 @@ func (d *devicectlDevice) screensee(args map[string]interface{}) (interface{}, e
 	if d.seeHandler == nil {
 		return map[string]interface{}{"image_data_url": output, "note": "无视觉描述处理器，仅返回原始图像数据"}, nil
 	}
-	desc := d.seeHandler(output, provider)
+	desc, err := d.seeHandler(output, provider)
+	if err != nil {
+		// ★ 视觉描述失败 ⇒ 工具失败（不是「返回一段说明」）。
+		//   生产实证：403 被塞进 description 且 status=ok，
+		//   agent 以为拿到了结果，于是换 provider 又试一次（再失败一次）。
+		d.reg.SaveResult(reqID, map[string]interface{}{
+			"error":     err.Error(),
+			"device":    id,
+			"has_image": true, // 截图确实拿到了：区分「设备没回传」与「模型看不了」
+		})
+		return nil, fmt.Errorf("设备已回传截图，但视觉描述失败: %w", err)
+	}
 	return map[string]interface{}{"description": desc}, nil
 }
 
@@ -543,11 +573,30 @@ func (d *devicectlDevice) clipboardsee(args map[string]interface{}) (interface{}
 func (d *devicectlDevice) clipboardsue(args map[string]interface{}) (interface{}, error) {
 	id, _ := args["device_id"].(string)
 	text, _ := args["text"].(string)
-	if text == "" {
-		return nil, fmt.Errorf("text required（要写入剪切板的内容）")
+	// ★ content 参数（判据 clipboardsue_content_test.go 钉着它）——
+	//   从**服务端可见的路径**读入剪切板，长文本/代码块不塞得进命令行。
+	//   与 GUI 侧 screensue/speakeruse 的 @<路径> 是同一类问题的同一类解法。
+	//
+	// ★ 这段实现曾因「只提交判据没提交代码」被仓库清理冲掉，
+	//   导致判据编译不过（undefined: clipboardsueMaxBytes）。
+	//   判据与实现在同一个提交里，才不会再次走丢。
+	content, _ := args["content"].(string)
+	if strings.TrimSpace(content) == "" && strings.TrimSpace(text) == "" {
+		return nil, fmt.Errorf("text 或 content 至少给一个（要写入剪切板的内容）")
 	}
 	if err := d.clipboardCheck(id, "写入", "clipboardsue"); err != nil {
 		return nil, err
+	}
+	if strings.TrimSpace(content) != "" {
+		b, rerr := os.ReadFile(strings.TrimSpace(content))
+		if rerr != nil {
+			return nil, fmt.Errorf("读取 content 文件失败 %s: %w", strings.TrimSpace(content), rerr)
+		}
+		if len(b) > clipboardsueMaxBytes {
+			return nil, fmt.Errorf("content 文件过大 %dKB > 上限 %dKB",
+				len(b)/1024, clipboardsueMaxBytes/1024)
+		}
+		text = string(b)
 	}
 	reqID := newReqID()
 	// 命令格式：clipboardsue <文字>（GUI 端取首个空格后的全部内容作为写入文本）
@@ -582,4 +631,106 @@ func truncateForPreview(s string, max int) string {
 		return s
 	}
 	return string(r[:max]) + "..."
+}
+
+// clipboardsueMaxBytes 是从文件读入剪切板的大小上限（与 GUI 侧 2MB 一致）。
+const clipboardsueMaxBytes = 2 * 1024 * 1024
+
+// logScreenseePayload 把设备回传的截图**元信息**记进服务端日志。
+//
+// ★ 为什么必须记在服务端（2026-10-05 教训）：
+//
+//	GUI 侧那行 `[device-bridge] screensee screen=0 bytes=N` 只打在它自己的
+//	控制台。生产排障时手上只有 homed 的日志 ⇒ 无法回答「设备到底回传了什么」。
+//	实测就有两次 screensee 返回「我收不到截图」，而服务端无任何痕迹可查，
+//	最后只能靠推测（截屏为空 / data URL 截断 / 缩略图未就绪）。
+//
+// ★ 只记元信息与**极短指纹**，不记图片本体：
+//
+//	· 日志会按字节膨胀；
+//	· 更重要的是截图是**用户屏幕内容**，属敏感信息，不该进日志。
+//
+// 记什么：字节数、magic、jpeg SOF 解出的像素尺寸、base64 头 24 字符、SHA256 前 16 hex。
+// 能回答：「有没有回传」「是不是合法图片」「多长」「两次是不是同一张」「会不会被截断」。
+func logScreenseePayload(deviceID, dataURL string) {
+	if dataURL == "" {
+		log.Printf("[remotedevice] screensee 回传 device=%s len=0 ★ 空内容：设备端没截到图"+
+			"（锁屏/虚拟桌面/缩略图未就绪？）", deviceID)
+		return
+	}
+	raw := dataURL
+	if i := strings.Index(raw, ","); strings.HasPrefix(raw, "data:") && i >= 0 {
+		raw = raw[i+1:]
+	}
+	b, err := base64.StdEncoding.DecodeString(raw)
+	if err != nil {
+		// ★ 解不出来本身就是关键信号：说明回传的不是合法 base64（可能被截断）。
+		log.Printf("[remotedevice] screensee 回传 device=%s len=%d ★ base64 解码失败: %v",
+			deviceID, len(raw), err)
+		return
+	}
+	sum := sha256.Sum256(b)
+	head := raw
+	if len(head) > 24 {
+		head = head[:24]
+	}
+	w, h := jpegSize(b)
+	log.Printf("[remotedevice] screensee 回传 device=%s bytes=%d magic=%s %dx%d b64head=%q sha=%x",
+		deviceID, len(b), magicName(b), w, h, head, sum[:8])
+}
+
+// magicName 认出图片类型，用于一眼判断「回传的到底是什么」。
+func magicName(b []byte) string {
+	switch {
+	case len(b) >= 3 && b[0] == 0xFF && b[1] == 0xD8 && b[2] == 0xFF:
+		return "jpeg"
+	case len(b) >= 8 && string(b[:8]) == "\x89PNG\r\n\x1a\n":
+		return "png"
+	case len(b) >= 6 && (string(b[:6]) == "GIF87a" || string(b[:6]) == "GIF89a"):
+		return "gif"
+	case len(b) >= 12 && string(b[:4]) == "RIFF" && string(b[8:12]) == "WEBP":
+		return "webp"
+	case len(b) == 0:
+		return "empty"
+	default:
+		return "unknown"
+	}
+}
+
+// jpegSize 从 jpeg 的 SOF 标记解出像素尺寸；不是 jpeg 或解不出返回 0,0。
+//
+// 不引入 image/jpeg 全解码：这里只要尺寸，而截图可能很大，
+// 全解码一次是纯浪费（GUI 已经编码过一次了）。
+func jpegSize(b []byte) (int, int) {
+	if len(b) < 4 || b[0] != 0xFF || b[1] != 0xD8 {
+		return 0, 0
+	}
+	i := 2
+	for i+3 < len(b) {
+		if b[i] != 0xFF {
+			i++
+			continue
+		}
+		marker := b[i+1]
+		// SOF0..SOF3 / SOF5..SOF7 / SOF9..SOF11 / SOF13..SOF15 携带尺寸
+		if marker >= 0xC0 && marker <= 0xCF &&
+			marker != 0xC4 && marker != 0xC8 && marker != 0xCC {
+			if i+9 < len(b) {
+				h := int(b[i+5])<<8 | int(b[i+6])
+				w := int(b[i+7])<<8 | int(b[i+8])
+				return w, h
+			}
+			return 0, 0
+		}
+		// 其余段按 2 字节长度跳过
+		if i+3 >= len(b) {
+			break
+		}
+		segLen := int(b[i+2])<<8 | int(b[i+3])
+		if segLen < 2 {
+			break
+		}
+		i += 2 + segLen
+	}
+	return 0, 0
 }
