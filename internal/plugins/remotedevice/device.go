@@ -8,6 +8,7 @@ import (
 	"log"
 	"os"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 
@@ -66,16 +67,17 @@ func (d *devicectlDevice) Tools() []agentIO.ToolDef {
 		},
 		{
 			Name: "device_ctl_cmdrun",
-			Description: "向设备下发命令/操作（异步，accepted=true 后用 device_ctl_cmdresult 轮询结果）。" +
-				"command 支持两类（前缀区分）：\n" +
-				"- shell-cmd: 在设备上执行原生 shell 命令，如 shell-cmd ls -la /tmp\n" +
-				"- homeagent-cmd: 调用设备端 HomeAgent 内置能力：\n" +
-				"  · homeagent-screensue <显示内容/HTML> — 用户侧屏幕弹窗显示自定义内容（默认 5 秒后自动关闭）\n" +
-				"  · homeagent-screensue <秒> <内容> — 指定显示时长（秒），如 homeagent-screensue 30 会议提醒：三点开会\n" +
-				"  · homeagent-screensue 0 <内容> — 永不超时，常驻显示直到用户手动关闭\n" +
-				"  · homeagent-camerasue — 抓拍单张 jpeg（结果为 base64 data URL）\n" +
-				"  · homeagent-camerasue <N秒> — 录像 N 秒 mp4（二进制分块回传，cmdresult 含 data_base64 字段）\n" +
-				"  · homeagent-speakeruse <文字> — 设备端 TTS 语音朗读文字\n" +
+			Description: "在设备上执行 **shell 命令**（异步，超时后用 device_ctl_cmdresult 按 req_id 复查）。\n" +
+				"★ 用途仅限 shell：查文件、跑诊断命令、看进程。command 直接写 shell 命令即可\n" +
+				"（如 `df -h`、`tasklist`），无需前缀。\n" +
+				"\n" +
+				"★ 屏幕显示 / 摄像头 / 语音朗读**不要用本工具**，它们各有专用工具：\n" +
+				"  · screensue(device_id, content, duration_seconds) — 在设备屏幕显示文字或 HTML\n" +
+				"  · camerasue(device_id, duration_seconds) — 拍照或录像\n" +
+				"  · speakeruse(device_id, text) — TTS 朗读\n" +
+				"专用工具用结构化参数；本工具的 command 是**单个字符串**，" +
+				"把 HTML 或长文本塞进来会因 JSON 转义/空格切分而变成非法参数（实测多次失败）。\n" +
+				"\n" +
 				"⚡ 高危：设备必须已授权，且该操作会改变设备行为。" +
 				"返回 accepted=true 表示已下发并等待设备执行，之后可用 device_ctl_cmdresult 查询结果。" +
 				"若设备未授权或离线，返回错误信息。",
@@ -83,7 +85,11 @@ func (d *devicectlDevice) Tools() []agentIO.ToolDef {
 				"type": "object",
 				"properties": map[string]interface{}{
 					"device_id": map[string]interface{}{"type": "string", "description": "目标设备 ID"},
-					"command":   map[string]interface{}{"type": "string", "description": "以 shell-cmd 或 homeagent-cmd 前缀开头。如 shell-cmd pwd、homeagent-screensue 三点开会、homeagent-screensue 0 重要公告、homeagent-camerasue 5（录5秒）、homeagent-speakeruse 你好"},
+					"command": map[string]interface{}{
+						"type": "string",
+						"description": "要执行的 shell 命令，如 `pwd`、`df -h`、`tasklist`。" +
+							"（homeagent-* 旧前缀仍兼容，但屏幕/摄像头/语音请改用各自的专用工具。）",
+					},
 				},
 				"required": []interface{}{"device_id", "command"},
 			},
@@ -98,6 +104,73 @@ func (d *devicectlDevice) Tools() []agentIO.ToolDef {
 					"req_id":    map[string]interface{}{"type": "string", "description": "命令请求 ID（device_ctl_cmdrun 返回）"},
 					"device_id": map[string]interface{}{"type": "string", "description": "设备 ID（查询最近一次结果）"},
 				},
+			},
+		},
+		{
+			Name: "screensue",
+			Description: "在一台已授权设备的屏幕上显示内容（文字或 HTML 看板）。\n" +
+				"★ 结构化参数：**不要**手拼 homeagent-screensue 命令字符串，用本工具。\n" +
+				"内容走独立的 content 参数，时长走独立的 duration_seconds —— 二者不再挤在\n" +
+				"同一个字符串里用空格分隔（那样模型必须同时处理 JSON 转义和空格切分，\n" +
+				"长 HTML 会把工具参数撑爆）。\n" +
+				"典型用途：给用户看会议提醒、公告、看板。设备必须已授权且在线。",
+			Parameters: map[string]interface{}{
+				"type": "object",
+				"properties": map[string]interface{}{
+					"device_id": map[string]interface{}{"type": "string", "description": "目标设备 ID"},
+					"content": map[string]interface{}{
+						"type":        "string",
+						"description": "要显示的内容：纯文字或 HTML 片段（含标签时按 HTML 渲染）。",
+					},
+					"content_path": map[string]interface{}{
+						"type": "string",
+						"description": "内容所在**服务端文件路径**（替代 content，适合几十 KB 的看板：" +
+							"避免把整页 HTML 内联进工具参数）。与 content 二选一。",
+					},
+					"duration_seconds": map[string]interface{}{
+						"type":        "integer",
+						"description": "显示时长（秒）。默认 5；0 = 常驻直到用户手动关闭。",
+					},
+				},
+				"required": []interface{}{"device_id"},
+			},
+		},
+		{
+			Name: "camerasue",
+			Description: "用一台已授权设备的摄像头拍照或录像。\n" +
+				"★ 结构化参数：**不要**手拼 homeagent-camerasue 命令字符串，用本工具。\n" +
+				"不传 duration_seconds = 抓拍单张 jpeg；传 N>0 = 录像 N 秒 mp4。\n" +
+				"产物会落盘并返回 file 路径（与 screensee 一致，可直接交给 describe_image）。\n" +
+				"依赖：设备端 ffmpeg + v4l2/dshow/avfoundation。设备必须已授权且在线。",
+			Parameters: map[string]interface{}{
+				"type": "object",
+				"properties": map[string]interface{}{
+					"device_id": map[string]interface{}{"type": "string", "description": "目标设备 ID"},
+					"duration_seconds": map[string]interface{}{
+						"type":        "integer",
+						"description": "录像秒数；省略或 0 = 抓拍单张照片（jpeg）。上限 300 秒。",
+					},
+				},
+				"required": []interface{}{"device_id"},
+			},
+		},
+		{
+			Name: "speakeruse",
+			Description: "让一台已授权设备朗读一段文字（设备端 TTS 语音）。\n" +
+				"★ 结构化参数：**不要**手拼 homeagent-speakeruse 命令字符串，用本工具。\n" +
+				"长文本走 text_path（服务端文件），避免内联撑爆工具参数。\n" +
+				"设备必须已授权且在线。",
+			Parameters: map[string]interface{}{
+				"type": "object",
+				"properties": map[string]interface{}{
+					"device_id": map[string]interface{}{"type": "string", "description": "目标设备 ID"},
+					"text":      map[string]interface{}{"type": "string", "description": "要朗读的文字（与 text_path 二选一）"},
+					"text_path": map[string]interface{}{
+						"type":        "string",
+						"description": "文字所在**服务端文件路径**（替代 text）。与 text 二选一。",
+					},
+				},
+				"required": []interface{}{"device_id"},
 			},
 		},
 		{
@@ -172,9 +245,15 @@ func (d *devicectlDevice) Tools() []agentIO.ToolDef {
 				"type": "object",
 				"properties": map[string]interface{}{
 					"device_id": map[string]interface{}{"type": "string", "description": "目标设备 ID"},
-					"text":      map[string]interface{}{"type": "string", "description": "要写入剪切板的内容"},
+					"text":      map[string]interface{}{"type": "string", "description": "要写入剪切板的内容（与 content 二选一）"},
+					"content": map[string]interface{}{
+						"type": "string",
+						"description": "要写入剪切板的内容所在**文件路径**（服务端读取，上限 2MB）。" +
+							"长文本/代码块用这个：内联进 text 会撑爆工具参数。" +
+							"★ 路径是服务端可见路径，不是设备上的路径。",
+					},
 				},
-				"required": []interface{}{"device_id", "text"},
+				"required": []interface{}{"device_id"},
 			},
 		},
 		{
@@ -206,6 +285,12 @@ func (d *devicectlDevice) Execute(tool string, args map[string]interface{}) (int
 		return d.cmdrun(args)
 	case "device_ctl_cmdresult":
 		return d.cmdresult(args)
+	case "screensue":
+		return d.screensue(args)
+	case "camerasue":
+		return d.camerasue(args)
+	case "speakeruse":
+		return d.speakeruse(args)
 	case "screensee":
 		return d.screensee(args)
 	case "computeruse":
@@ -642,6 +727,9 @@ func (d *devicectlDevice) clipboardsue(args map[string]interface{}) (interface{}
 		if rerr != nil {
 			return nil, fmt.Errorf("读取 content 文件失败 %s: %w", strings.TrimSpace(content), rerr)
 		}
+		if len(b) == 0 {
+			return nil, fmt.Errorf("content 文件为空: %s", content)
+		}
 		if len(b) > clipboardsueMaxBytes {
 			return nil, fmt.Errorf("content 文件过大 %dKB > 上限 %dKB",
 				len(b)/1024, clipboardsueMaxBytes/1024)
@@ -783,4 +871,247 @@ func jpegSize(b []byte) (int, int) {
 		i += 2 + segLen
 	}
 	return 0, 0
+}
+
+// ---- 三个结构化能力工具（2026-10-06）----
+//
+// # 为什么要把它们从 device_ctl_cmdrun 里拆出来
+//
+// 生产日志实证（10-06 12:46~13:04，agent 连续 9 次试参数）：
+//
+//	13:00:38  stream tool_call device_ctl_cmdrun argument fragments invalid JSON:
+//	          "{\"device_id\": \"gui-JianF\", \"command\": \"homeagent-screensue 0
+//	           <!DOCTYPE html>…<meta charset=\\\"utf-8\\\">…
+//	13:00:38  args unparseable (982 bytes) — surfacing to model instead of calling
+//
+// 一屏 HTML 内联进 command 字符串后：① 引号要穿过两层 JSON 转义；
+// ② 时长与内容共用一个字符串靠空格切分（内容里的空格有歧义）；
+// ③ 长度无上限。三者叠加，工具调用直接变成非法 JSON —— **连执行都没执行**。
+//
+// 而 agent 的应对是反复试参数（"shown on display 0 for 15s/25s/30s/40s/60s/180s"）
+// —— 它在猜格式，不是在做事。
+//
+// ⇒ 正解是给这三个能力**结构化参数**（本仓已有先例：clipboardsue 的 content）。
+//   command 字符串通道仍保留作逃生口，但不再是唯一通路。
+
+// deviceContentArg 解析「内联内容 / 服务端文件路径」二选一。
+//
+// 抽出来的理由：screensue / speakeruse 用法完全同形，两处各写一遍
+// 必然漂移（本项目已多次记录这类同形错误）。
+//
+// 上限 2MB 与 clipboardsue 对齐：这是「服务端读一个文件塞进命令」的量级，
+// 再大就不是「显示/朗读」而是「传输文件」了，该走别的通道。
+const deviceContentMaxBytes = 2 * 1024 * 1024
+
+func deviceContentArg(inline, pathArg, what string) (string, error) {
+	hasInline := strings.TrimSpace(inline) != ""
+	hasPath := strings.TrimSpace(pathArg) != ""
+	switch {
+	case hasInline && hasPath:
+		return "", fmt.Errorf("%s 与 %s 只能给一个", what, what+"_path")
+	case hasPath:
+		b, err := os.ReadFile(strings.TrimSpace(pathArg))
+		if err != nil {
+			return "", fmt.Errorf("读取 %s 失败 %s: %w", what+"_path", pathArg, err)
+		}
+		if len(b) == 0 {
+			return "", fmt.Errorf("%s 文件为空: %s", what+"_path", pathArg)
+		}
+		if len(b) > deviceContentMaxBytes {
+			return "", fmt.Errorf("%s 文件过大 %dKB > 上限 %dKB",
+				what+"_path", len(b)/1024, deviceContentMaxBytes/1024)
+		}
+		return string(b), nil
+	case hasInline:
+		if len(inline) > deviceContentMaxBytes {
+			return "", fmt.Errorf("%s 过大 %dKB > 上限 %dKB；请改用 %s_path 传文件路径",
+				what, len(inline)/1024, deviceContentMaxBytes/1024, what)
+		}
+		return inline, nil
+	}
+	return "", fmt.Errorf("必须给 %s 或 %s_path", what, what)
+}
+
+// pushHomeagentCapability 下发一条 homeagent-* 能力命令并等回执。
+//
+// ★ 为什么要抽：screensue/camerasue/speakeruse 三个工具都是
+// 「拼 <capability> <args> → PushCmd(homeagent) → AwaitResult → 判 status」。
+// 三处各写一遍的后果不只是重复 —— 超时值、错误文案、pending 语义
+// 会在三次修改中各自漂移，而这类「同一逻辑多份副本」正是本项目
+// 反复吃亏的形态。
+//
+// 返回 (回执, reqID, error)。回执 status=ok 时 error 为 nil。
+func (d *devicectlDevice) pushHomeagentCapability(
+	id, capability string, timeout time.Duration,
+) (map[string]interface{}, string, error) {
+	if err := d.deviceOnlineCheck(id, capability); err != nil {
+		return nil, "", err
+	}
+	reqID := newReqID()
+	if err := d.reg.PushCmd(id, reqID, capability, "homeagent"); err != nil {
+		return nil, "", fmt.Errorf("下发 %s 命令失败: %w", capability, err)
+	}
+	res, err := d.reg.AwaitResult(reqID, timeout)
+	if err != nil {
+		d.reg.SaveResult(reqID, map[string]interface{}{
+			"accepted": true, "error": err.Error(), "pending": true,
+		})
+		// ★ 超时不是「设备失败」而是「还没回」——说清区别，否则 agent
+		//   会以为设备拒绝执行而换参数重试（实测它就是这么做的）。
+		return nil, reqID, fmt.Errorf(
+			"设备未在 %v 内回执（命令已下发，设备可能正忙或刚在重连；"+
+				"可用 device_ctl_cmdresult 按 req_id=%s 复查）: %w", timeout, reqID, err)
+	}
+	if res["status"] != "ok" {
+		msg, _ := res["error"].(string)
+		if msg == "" {
+			msg = fmt.Sprintf("status=%v", res["status"])
+		}
+		return res, reqID, fmt.Errorf("设备执行 %s 失败: %s", capability, msg)
+	}
+	return res, reqID, nil
+}
+
+// deviceOnlineCheck 三个结构化工具的公共前置校验。
+//
+// 与 cmdrun 的口径一致（存在 → 在线 → 声明能力），但把错误文案写得更可操作：
+// 说清「是哪台设备、缺哪个能力、caps 里有什么」，而不是一句 "not supported"。
+func (d *devicectlDevice) deviceOnlineCheck(id, tool string) error {
+	if strings.TrimSpace(id) == "" {
+		return fmt.Errorf("device_id required")
+	}
+	m, ok := d.reg.Get(id)
+	if !ok {
+		return fmt.Errorf("device %s 不存在（用 devicedetect 看在线设备）", id)
+	}
+	if !m.Online {
+		// ★ 与 screensee 的实测教训一致：设备频繁上下线（今天实测平均在线
+		//   ~23 分钟），命令踩中重连窗口时若只报「不在线」，agent 会以为
+		//   设备永久不可用。说清「可稍后重试」。
+		return fmt.Errorf("device %s 当前不在线（设备可能正在重连，稍后重试；用 devicedetect 确认）", id)
+	}
+	if !d.reg.SupportsTool(id, tool) {
+		return fmt.Errorf("device %s 未声明 %s 能力（caps=%v）", id, tool, m.Caps)
+	}
+	return nil
+}
+
+// screensue 在设备屏幕上显示内容。
+func (d *devicectlDevice) screensue(args map[string]interface{}) (interface{}, error) {
+	id, _ := args["device_id"].(string)
+	content, _ := args["content"].(string)
+	contentPath, _ := args["content_path"].(string)
+
+	text, err := deviceContentArg(content, contentPath, "content")
+	if err != nil {
+		return nil, err
+	}
+	// 时长：省略 → 不传（设备端默认 5 秒）；显式 0 → 常驻。
+	prefix := ""
+	if v, ok := args["duration_seconds"]; ok && v != nil {
+		secs := toIntArg(v)
+		if secs < 0 {
+			return nil, fmt.Errorf("duration_seconds 不能为负（0 = 常驻）")
+		}
+		prefix = strconv.Itoa(secs) + " "
+	}
+	// 协议：<capability> <可选的秒数> <内容>（GUI 侧取首个纯数字 token 作时长）
+	cap := "screensue " + prefix + text
+	res, reqID, err := d.pushHomeagentCapability(id, cap, 30*time.Second)
+	if err != nil {
+		return nil, err
+	}
+	return map[string]interface{}{
+		"device_id": id,
+		"req_id":    reqID,
+		"shown":     len(text),
+		"result":    res["output"],
+	}, nil
+}
+
+// camerasue 用设备摄像头拍照或录像。
+func (d *devicectlDevice) camerasue(args map[string]interface{}) (interface{}, error) {
+	id, _ := args["device_id"].(string)
+	secs := 0
+	if v, ok := args["duration_seconds"]; ok && v != nil {
+		secs = toIntArg(v)
+	}
+	if secs < 0 {
+		return nil, fmt.Errorf("duration_seconds 不能为负（0 = 抓拍单张）")
+	}
+	if secs > 300 {
+		return nil, fmt.Errorf("duration_seconds 上限 300 秒（要更长的录像请分段）")
+	}
+	cap := "camerasue"
+	if secs > 0 {
+		cap = "camerasue " + strconv.Itoa(secs)
+	}
+	// 抓拍走小体积（一张 jpeg），录像可能几十 MB —— 超时按量级给。
+	timeout := 30 * time.Second
+	if secs > 0 {
+		timeout = time.Duration(secs)*time.Second + 60*time.Second
+	}
+	res, reqID, err := d.pushHomeagentCapability(id, cap, timeout)
+	if err != nil {
+		return nil, err
+	}
+	out := map[string]interface{}{
+		"device_id": id,
+		"req_id":    reqID,
+		"mode":      map[bool]string{true: "video", false: "photo"}[secs > 0],
+	}
+	if secs > 0 {
+		out["duration_seconds"] = secs
+	}
+	// ★ 大体积数据（data_base64 / file）原样透传：录像不能只回一句「成功」。
+	for _, k := range []string{"file", "data_base64", "mime", "size", "kind"} {
+		if v, ok := res[k]; ok {
+			out[k] = v
+		}
+	}
+	return out, nil
+}
+
+// speakeruse 让设备朗读文字。
+func (d *devicectlDevice) speakeruse(args map[string]interface{}) (interface{}, error) {
+	id, _ := args["device_id"].(string)
+	text, _ := args["text"].(string)
+	textPath, _ := args["text_path"].(string)
+
+	body, err := deviceContentArg(text, textPath, "text")
+	if err != nil {
+		return nil, err
+	}
+	res, reqID, err := d.pushHomeagentCapability(id, "speakeruse "+body, 60*time.Second)
+	if err != nil {
+		return nil, err
+	}
+	return map[string]interface{}{
+		"device_id": id,
+		"req_id":    reqID,
+		"spoken":    len(body),
+		"result":    res["output"],
+	}, nil
+}
+
+// toIntArg 把 JSON 解出来的数字/字符串统一成 int。
+//
+// 模型的 duration_seconds 有时是 30，有时是 "30"（字符串）——
+// 后者会让类型断言静默失败退回默认值，正是「参数丢了但不报错」这类毛病。
+func toIntArg(v interface{}) int {
+	switch x := v.(type) {
+	case int:
+		return x
+	case int64:
+		return int(x)
+	case float64:
+		return int(x)
+	case string:
+		n, err := strconv.Atoi(strings.TrimSpace(x))
+		if err != nil {
+			return 0
+		}
+		return n
+	}
+	return 0
 }
