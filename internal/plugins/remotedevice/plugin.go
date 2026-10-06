@@ -309,6 +309,25 @@ func (p *Plugin) handleDevicePush(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadRequest, map[string]interface{}{"error": "device_id required"})
 		return
 	}
+	// ★ payload 必须校验，不能让它静默通过（2026-10-05 实测踩坑）。
+	//
+	// 本端点收的是**已成型的协议帧**（{"op":"cmd",...} 等），不是
+	// “device_id + command” 这种便捷参数。以前直接PushJSON(req.Payload)，
+	// 而 PushJSON 只是把 map 序列化后写进 socket —— 于是：
+	//
+	//   客户端发 {"device_id":"gui-JianF","command":"homeagent-clipboardsee"}
+	//     → command 字段被**静默丢弃**，payload 为 nil
+	//     → 设备收到 {"payload":null}，op 为空，直接忽略
+	//     → 而服务端这边 PushJSON 写入 socket 成功，返回 {"status":"ok"}
+	//
+	// 一次「什么也没发生」的操作，报文上是彻底的成功。排查时只能靠设备侧
+	// 日志才发现「命令没到」，极易误判成链路/鉴权/心跳问题（本次就绕了很久）。
+	if req.Payload == nil {
+		writeJSON(w, http.StatusBadRequest, map[string]interface{}{
+			"error": "payload required: 期望 {\"device_id\":\"<id>\",\"payload\":{\"op\":\"cmd\",\"req_id\":\"<rid>\",\"cmd_type\":\"shell|homeagent\",\"command\":\"...\"}}；payload 是**协议帧本身**，不是 command 简写",
+		})
+		return
+	}
 	if err := p.registry.PushJSON(req.DeviceID, req.Payload); err != nil {
 		writeJSON(w, http.StatusNotFound, map[string]interface{}{"error": err.Error()})
 		return
