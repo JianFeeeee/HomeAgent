@@ -3066,12 +3066,98 @@ function initChatStarmap() {
   starmapAnimate();
 }
 
-function buildChatStarmapGraph() {
-  starmapNodeMeshes.forEach((m) => {
-    starmapScene.remove(m);
+// ★ 几何体/材质共享（2026-10-05 修星图内存暴涨）
+//
+// 原实现每个节点都`new THREE.SphereGeometry(gr, 16, 12)`——因为半径
+// gr 各不相同，看起来「只能各自 new」。但 three.js 里几何体的大小应当由
+// **mesh.scale** 表达，几何体本身应当共享。
+//
+// 实测（CDP 抓生产实例，2588 个节点）：
+//
+//	Mesh/SphereGeometry    2588 个   geometry 数据合计 22.67MB
+//	Sprite/BufferGeometry  1294 个（label 纹理，每个 256×64 RGBA ≈ 64KB）
+//
+// 两者都不释放：buildChatStarmapGraph 只starmapScene.remove(m)，
+// **从不 dispose()** —— remove 只把对象从场景树摘下来，WebGL 侧资源
+// （buffer/texture）仍被引用，不释放。星图每次全量重建泄漏一整轮，
+// 于是进程常驻内存反复冲上GB 级、靠 GC 回收后再度暴涨，界面随之卡住。
+//
+// 修法两条：单位球共享（几何体从 2588 份降到 1 份）+ 重建时 dispose。
+// 单位球细节：SphereGeometry(1, 16, 12) 建一次，实例按 gr 缩放，
+// 因为 mesh 是父节点，缩放会叠加到子 glow 上—— 所以 glow 挂到 mesh 下时
+// 要用 gr/rad 的相对比例。
+// ★ 单位球几何体的**半径取0.5**，不是 1。
+//
+// 原因：节点缩放基准是 mesh.userData.baseScale = rad / 0.5 ——
+// 分母0.5 就是原SphereGeometry 的半径。若把共享球改成半径 1，
+// baseScale 会整体缩放一倍（大的节点变得更大、小的更小），且与
+// 脉冲结束时的复原逻辑（setScalar(baseScale)）不自洽。
+// 保持 0.5 ⇒ baseScale 公式原样成立，行为与修复前逐像素一致。
+var starmapUnitSphere = null;
+function starmapSphereGeometry() {
+  if (!starmapUnitSphere) starmapUnitSphere = new THREE.SphereGeometry(0.5, 16, 12);
+  return starmapUnitSphere;
+}
+
+// 释放一个 three.js 子树占用的 GPU 资源（geometry / material / texture）。
+//
+// 递归处理子树：节点 mesh 下挂着 glow sphere（子 mesh）与 label sprite，
+// 只 dispose 顶层会漏掉子节点的资源。
+//
+// 共享资源要防误 dispose：starmapUnitSphere 被全场景共用，
+// dispose 掉它会让仍在渲染的 mesh 变黑/报错 —— 用 seen 集合兜底。
+function disposeStarmapObject(root) {
+  var seenGeo = new Set();
+  var seenMat = new Set();
+  var seenTex = new Set();
+  if (starmapScene) starmapScene.remove(root);
+  root.traverse(function (o) {
+    var g = o.geometry;
+    if (g && g.dispose && !seenGeo.has(g) && g !== starmapUnitSphere) {
+      seenGeo.add(g);
+      g.dispose();
+    }
+    var m = o.material;
+    if (!m) return;
+    var mats = Array.isArray(m) ? m : [m];
+    mats.forEach(function (mm) {
+      if (!mm || seenMat.has(mm)) return;
+      seenMat.add(mm);
+      // 纹理在 material.map / 上多通道贴图上。
+      Object.keys(mm).forEach(function (k) {
+        var v = mm[k];
+        if (v && v.isTexture && !seenTex.has(v)) {
+          seenTex.add(v);
+          v.dispose();
+        }
+      });
+      if (mm.dispose) mm.dispose();
+    });
   });
-  starmapEdgeLines.forEach((l) => {
-    starmapScene.remove(l);
+  if (root.geometry && root.geometry.dispose &&
+      root.geometry !== starmapUnitSphere && !seenGeo.has(root.geometry)) {
+    root.geometry.dispose();
+  }
+  var rm = root.material;
+  if (rm && !Array.isArray(rm) && !seenMat.has(rm)) {
+    Object.keys(rm).forEach(function (k) {
+      var v = rm[k];
+      if (v && v.isTexture && !seenTex.has(v)) v.dispose();
+    });
+    if (rm.dispose) rm.dispose();
+  }
+}
+
+function buildChatStarmapGraph() {
+  // ★ 先释放上一轮的 GPU 资源，再重建（2026-10-05 修内存暴涨）。
+  //
+  // 原实现只 remove 不 dispose。remove 只改场景树，geometry/material/texture
+  // 仍占着 WebGL 资源；节点数还会随记忆增长，于是泄漏只增不减。
+  starmapNodeMeshes.forEach(function (m) {
+    disposeStarmapObject(m);
+  });
+  starmapEdgeLines.forEach(function (l) {
+    disposeStarmapObject(l);
   });
   starmapNodeMeshes = [];
   starmapEdgeLines = [];
@@ -3207,7 +3293,7 @@ function buildChatStarmapGraph() {
     var rad = 0.5 + mnr * 2.0;
     var col = smTypeColors[n.type] || 0xcccccc;
     var ei = 0.3 + mnr * 0.7;
-    var g = new THREE.SphereGeometry(rad, 16, 12);
+    var g = starmapSphereGeometry();
     var mat = new THREE.MeshPhongMaterial({
       color: col,
       emissive: col,
@@ -3223,8 +3309,12 @@ function buildChatStarmapGraph() {
     // 缩放后」的值，而不是 set(1,1,1)—— 那会把大节点缩成最小尺寸。
     mesh.userData.baseScale = rad / 0.5;
     // Glow sphere
+    // Glow sphere —— 共享单位球，靠 scale 表达半径（详见 starmapSphereGeometry）。
     var gr = rad * 1.2 + mnr * 0.5;
-    var gg = new THREE.SphereGeometry(gr, 16, 12);
+    // mesh 已按 rad/baseScale 缩放过（baseScale = rad/0.5），故 glow 用
+    // 相对比例：世界半径 gr = mesh 缩放 × 本地 scale。
+    var parentScale = mesh.scale.x || 1;
+    var gg = starmapSphereGeometry();
     var gm = new THREE.MeshBasicMaterial({
       color: col,
       transparent: true,
@@ -3233,6 +3323,8 @@ function buildChatStarmapGraph() {
       blending: THREE.AdditiveBlending,
     });
     var gs = new THREE.Mesh(gg, gm);
+    // 共享球半径 0.5，故要 ×2 才是单位半径的相对值。
+    gs.scale.setScalar((gr / parentScale) * 2);
     mesh.add(gs);
     mesh.userData.glowSphere = gs;
     // Label sprite
