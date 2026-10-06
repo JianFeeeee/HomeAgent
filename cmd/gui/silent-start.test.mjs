@@ -67,7 +67,19 @@ check(
 );
 check(
   "非静默时经 ready-to-show 显示",
-  /ready-to-show[\s\S]{0,120}show\(\)/.test(createBlock),
+  // ★ 2026-10-06：原来写死 `{0,120}` 字符窗口，被新增的**注释**挤爆而假红。
+  //
+  // 实情：main.js 在 ready-to-show 与 show() 之间夹了 558 字符 —— 其中
+  // 大部分是解释「为什么用 on 而非 once」的注释（7bd569ec 白屏修复）。
+  // 实现是对的，判据的字节窗口太小。
+  //
+  // ⇒ 判据该断的是**结构关系**（ready-to-show 处理器的回调里有 show()），
+  //   不是两者相隔多少字符 —— 后者会随注释/排版无意义地红。
+  //   去掉行注释后再量，且把窗口放到足够容纳该回调体。
+  (() => {
+    const noLineComments = createBlock.replace(/\/\/[^\n]*/g, "");
+    return /ready-to-show[\s\S]{0,400}show\(\)/.test(noLineComments);
+  })(),
   "没有 ready-to-show → show()，非静默启动可能白屏闪现",
 );
 check(
