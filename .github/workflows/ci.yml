@@ -204,3 +204,50 @@ jobs:
             echo "无 mkdocs.yml，跳过"
           fi
           test -d docs || echo "无 docs/，跳过"
+
+  # ── gitcode 镜像同步（main 分支）──
+  #
+  # 背景（2026-10-06 审计）：gitcode 的定位是**只读镜像**（ci-cd-runbook §0），
+  # 但既有 sync job 只在 release.yml 里推 **tag** —— main 分支从不同步，
+  # 导致镜像的 main 停在 09-29、与主仓分叉 768/746（当时已 force push 对齐一次）。
+  #
+  # 本 job 把「镜像 = 主仓」交给 CI 保证：main 每次推送且**全部必需检查通过后**
+  # 才快进镜像分支 —— 红的代码不进镜像，镜像永远等于主仓。
+  #
+  # - 只处理 main（feature/release 分支不镜像，与 tag 语义一致）。
+  # - 未配置 GITCODE_TOKEN 时显式跳过（与 release.yml 的 sync-gitcode 同口径，
+  #   不阻断 GitHub 侧 CI）。
+  # - 用快进 push（非 force）：正常流水线下镜像只可能落后，不可能领先；
+  #   若出现非快进说明有人动过镜像，此时响亮失败而不是悄悄覆盖 ——
+  #   镜像被旁路写入是「单向性被破坏」的信号，值得一次人工确认。
+  sync-gitcode-main:
+    name: Sync main to gitcode (mirror)
+    runs-on: ubuntu-latest
+    needs: [go, race, cross, gui, csrc, docs]
+    if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+    timeout-minutes: 10
+    steps:
+      - id: tok
+        name: 检查 gitcode 凭据
+        run: |
+          if [ -n "${{ secrets.GITCODE_TOKEN }}" ]; then
+            echo "ok=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "ok=false" >> "$GITHUB_OUTPUT"
+            echo "  未配置 GITCODE_TOKEN —— 跳过 gitcode main 同步"
+          fi
+      - uses: actions/checkout@v7
+        if: steps.tok.outputs.ok == 'true'
+        with:
+          # 必须取完整历史：镜像可能在任意旧提交上，快进需要共同祖先。
+          fetch-depth: 0
+      - name: 推 main 到 gitcode（快进）
+        if: steps.tok.outputs.ok == 'true'
+        env:
+          GC_TOKEN: ${{ secrets.GITCODE_TOKEN }}
+        run: |
+          set -euo pipefail
+          GC_URL="https://JianFeeeee:${GC_TOKEN}@gitcode.com"
+          git push "${GC_URL}/JianFeeeee/HomeAgent.git" \
+            "refs/heads/main:refs/heads/main"
+          echo "  gitcode/main 已快进到 ${GITHUB_SHA}"
