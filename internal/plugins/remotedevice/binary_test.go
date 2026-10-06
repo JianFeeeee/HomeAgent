@@ -298,8 +298,15 @@ func TestWSBinaryMediaToFile(t *testing.T) {
 	if _, hasB64 := res["data_base64"]; hasB64 {
 		t.Fatal("data_base64 should be absent in file mode")
 	}
-	if want := filepath.Join(mediaDir, "req-file-1.mp4"); fp != want {
-		t.Fatalf("file path = %s, want %s", fp, want)
+	// ★ 2026-10-06：文件名含内容摘要（SaveInlineMedia）。
+	//   截屏/录像这类会被反复抓取的媒体，用 reqID 命名会把同内容存成多份、
+	//   不同内容却可能覆盖 —— 摘要后缀两���都避免。
+	if filepath.Dir(fp) != mediaDir {
+		t.Fatalf("file 应落在媒体目录 %s，实际 %s", mediaDir, fp)
+	}
+	base := filepath.Base(fp)
+	if !strings.HasPrefix(base, "req-file-1_") || !strings.HasSuffix(base, ".mp4") {
+		t.Fatalf("文件名应为 req-file-1_<digest>.mp4，实际 %s", base)
 	}
 	got, err := os.ReadFile(fp)
 	if err != nil {
@@ -402,14 +409,15 @@ func TestPushDataOfflineDevice(t *testing.T) {
 
 func TestScreenseeEndToEnd(t *testing.T) {
 	reg := NewRegistry()
+	reg.SetMediaDir(t.TempDir())
 	token := "test-token-see"
 	reg.SetAcceptToken(func(provided string) bool { return provided == token })
 
 	dev := &devicectlDevice{reg: reg}
 	var gotDataURL string
-	dev.SetSeeHandler(func(dataURL string, provider string) string {
+	dev.SetSeeHandler(func(dataURL string, provider string) (string, error) {
 		gotDataURL = dataURL
-		return "屏幕上显示的是测试画面"
+		return "屏幕上显示的是测试画面", nil
 	})
 
 	srv := httptest.NewServer(http.HandlerFunc(reg.ServeWS))
@@ -449,7 +457,10 @@ func TestScreenseeEndToEnd(t *testing.T) {
 	}()
 
 	// agent 调用 screensee
-	res, err := dev.Execute("screensee", map[string]interface{}{"device_id": "see-dev"})
+	// ★ 2026-10-06：默认走落盘 + 回路径；旧的自���描述路径用 auto_describe=true。
+	res, err := dev.Execute("screensee", map[string]interface{}{
+		"device_id": "see-dev", "auto_describe": true,
+	})
 	if err != nil {
 		t.Fatalf("screensee: %v", err)
 	}

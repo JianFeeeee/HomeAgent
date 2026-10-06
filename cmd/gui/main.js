@@ -442,15 +442,59 @@ function createWindow(show = true) {
   });
 
   // 静默时不显示；非静默时在首帧就绪后显示，避免白屏闪现。
-  if (show) {
-    mainWindow.once("ready-to-show", () => {
-      try {
+  //
+  // ★ 用 on 而不是 once（2026-10-05 修白屏）：once 只等一次，首帧之后
+  //   监听就没了。而窗口可能被系统回收后重建、或GPU 重启后重新 load，
+  //   那时都需要再show 一次 —— once 的写法让那些路径静默失败。
+  mainWindow.on("ready-to-show", () => {
+    if (!show) return;
+    try {
+      if (mainWindow && !mainWindow.isDestroyed() && !mainWindow.isVisible()) {
         mainWindow.show();
-      } catch (e) {}
-    });
-  }
+      }
+    } catch (e) {}
+  });
 
   mainWindow.loadFile(path.join(__dirname, "renderer", "index.html"));
+
+  // ★ renderer 崩溃自愈（2026-10-05 修「长时间挂后台后打开白屏」）。
+  //
+  // 现象：GUI 在后台挂很久（数小时）后，从托盘打开是**白屏**，且不会自愈。
+  //
+  // 原因链：
+  //   长时间后台 → Chromium 回收 renderer 的 GPU context（或渲染进程
+  //   本身被判定 hung 杀掉）→ 窗口对象仍在、isVisible() 仍返回 true，
+  //   但内容是空的 → showMainWindow() 的 `if (!isVisible()) show()` 被跳过
+  //   → 托盘点一下，窗口出现但是白的，永远不会好。
+  //
+  // 之前全代码没有任何 render-process-gone / unresponsive 监听，所以这条
+  // 路径完全无感知。仓库历史上有过「白屏修复(惰性Tray)」提交，但那只修了
+  // **首次**显示时机，没管**长期后台后**。
+  mainWindow.webContents.on("render-process-gone", (e, details) => {
+    console.error(
+      "[window] renderer gone: " + (details && details.reason) +
+        " (exitCode=" + (details && details.exitCode) + ")",
+    );
+    // OOM 之外的都重建；OOM（reason==="oom"）重建只会立刻再崩一次，
+    // 只记录日志避免反复重启把机器拖死。
+    if (details && details.reason === "oom") return;
+    try {
+      if (mainWindow && !mainWindow.isDestroyed()) {
+        mainWindow.reload();
+      }
+    } catch (err) {
+      console.error("[window] reload after crash failed: " + err.message);
+    }
+  });
+
+  // renderer 活着但无响应（主线程被长任务卡死）：此时页面还在，
+  // 只是不响应。给一次刷新机会，不自动刷（误判会让正在用的用户丢状态）。
+  mainWindow.webContents.on("unresponsive", () => {
+    console.error("[window] renderer unresponsive");
+  });
+  mainWindow.webContents.on("responsive", () => {
+    console.log("[window] renderer responsive again");
+  });
 
   if (process.argv.includes("--dev")) {
     mainWindow.webContents.openDevTools();
@@ -922,6 +966,18 @@ let deviceBridgeAddr = ""; // 设备桥网关地址
 // 连接成功但 bind 被拒时设备是失联的，只看 connected 会给出假阳性。
 let deviceBridgeBound = false;
 let deviceBridgeBindError = "";
+// 设备桥心跳与重连的状态（心跳 + 线性退避重连）。
+let devicePingTimer = null;
+let deviceReconnectTimer = null;
+let deviceReconnectAttempt = 0;
+// 拉起意图：用户主动停用后置 false，作为 scheduleDeviceReconnect 的闸。
+let deviceWanted = false;
+// 当前生效的连接配置，重连时复用（连接断开后局部变量就没了）。
+//
+// 缓存而非每次读 gui-prefs：重连是定时器里的异步路径，重读偏好会引入
+// 「读到半写文件」与「用户刚改完就按新值连」两种意外；且重连必须用
+// **当初启动时那份**配置，否则退避语义就乱了。
+let deviceBridgeCfg = null;
 // 音频/媒体接收聚合缓冲（服务端分块推送二进制→聚合→播放）
 let speechAccum = null;
 
@@ -1137,6 +1193,9 @@ function connectDeviceWS(url, token, onMsg) {
           );
         }
         opened = true;
+        // 心跳不在这里起：统一由 connectDeviceBridgeOnce 在拿到 ws.__sock
+        // 后调 startDevicePing。放这里的话心跳会跟着「每次 connectDeviceWS
+        // 调用」起，而不是跟着「一条实际连上的桥」起——重连路径上会漏。
         resolve({
           send: (obj) => sendDeviceFrame(sock, JSON.stringify(obj)),
           __sock: sock, // 暴露底层 socket 供二进制分块发送
@@ -1209,9 +1268,241 @@ function connectDeviceWS(url, token, onMsg) {
       if (!opened) reject(e);
     });
     sock.on("close", () => {
+      // 断开时停掉心跳，否则定时器会一直持有已死的 socket。
+      stopDevicePing();
       deviceBridge = null;
+      // 已建立过的连接被对端/中间链路关掉 ⇒ 排程重连。
+      // scheduleDeviceReconnect 内部有 deviceWanted 闸，用户主动停用
+      // 时不会把桥拉起来。
+      if (opened) scheduleDeviceReconnect();
     });
   });
+}
+
+// ============ 设备桥心跳 + 断线重连 ============
+//
+// ★ 这里修的是 2026-10-05 实测到的两个洞，合起来的效果是
+//   「一次失联，终身失联」：
+//
+// 1. **不发 ping**。waiter 侧有 pingLoop（internal/devicebridge/client/
+//    bridge.go，每 30s 一个 0x9 帧），GUI 侧全文件一次 ping 都没发过。
+//    而 remotedevice 服务端**没有设备侧读超时**（registry.go 里没有
+//    SetReadDeadline）—— 不发心跳就没人能发现设备已死，网关会把一台
+//    半死的设备长期显示为 online。
+//
+//    实测症状：bind 能成功（bind_ok）、设备进了 devices 表（面板可见），
+//    但几秒后 push 就报
+//        {"error":"device gui-JianF not online"}
+//    —— conns 表已被 defer 里的 markOffline 清空，而 devices 表还在。
+//    「可见但不可下发」就是这个割裂的表象。
+//
+// 2. **不重连**。原来 startDeviceBridge 只有启动/配置变更两个调用点，
+//    失败就 console.error 结束。GUI 是最容易被休眠/切网/服务端重启打断的
+//    形态（合盖一次、WiFi 抖一下、服务端重启），设备桥就再也回不来，
+//    直到用户重启 GUI 或手动改一次配置。
+//
+// 判据：cmd/gui/device-bridge-liveness.test.mjs（用 node:vm 抽真实函数
+// 在沙箱里跑「连接→ 断线 → 重连 → 再断线」，数真实的 ping 帧与重连次数）。
+
+// 与 waiter 的 pingLoop 对齐（bridge.go:636 每 30s 一个 0x9 帧）。
+const devicePingIntervalMs = 30000;
+// 重连退避：线性增长、封顶 60s。首个等待 = base。
+const deviceReconnectBaseMs = 2000;
+const deviceReconnectMaxMs = 60000;
+
+// 发送 WS 控制帧（客户端帧必须带掩码位，RFC6455 §5.3）。
+//
+// 通用签名而非写死 ping：控制帧有 ping(0x9)/pong(0xA)/close(0x8) 三种，
+// 写死一种就换不来另外两种。payload 为 null 表示空载荷。
+function sendDeviceControlFrame(sock, opcode, payload) {
+  const body = payload ? Buffer.from(payload) : Buffer.alloc(0);
+  const mask = crypto.randomBytes(4);
+  const masked = Buffer.alloc(body.length);
+  for (let i = 0; i < body.length; i++) masked[i] = body[i] ^ mask[i % 4];
+  const len = masked.length;
+  let hdr;
+  if (len < 126) {
+    hdr = Buffer.from([0x80 | opcode, 0x80 | len]);
+  } else if (len < 65536) {
+    hdr = Buffer.alloc(4);
+    hdr[0] = 0x80 | opcode;
+    hdr[1] = 0x80 | 126;
+    hdr.writeUInt16BE(len, 2);
+  } else {
+    hdr = Buffer.alloc(10);
+    hdr[0] = 0x80 | opcode;
+    hdr[1] = 0x80 | 127;
+    hdr.writeBigUInt64BE(BigInt(len), 2);
+  }
+  sock.write(Buffer.concat([hdr, mask, masked]));
+}
+
+// 启动心跳（先清旧的，避免重复 interval 叠加）。
+function startDevicePing(sock) {
+  if (devicePingTimer) clearInterval(devicePingTimer);
+  devicePingTimer = setInterval(() => {
+    try {
+      if (!sock || sock.destroyed) return;
+      sendDeviceControlFrame(sock, 0x9, null);
+    } catch (e) {
+      /* 心跳失败不致命：close 事件会触发重连 */
+    }
+  }, devicePingIntervalMs);
+}
+
+function stopDevicePing() {
+  if (devicePingTimer) {
+    clearInterval(devicePingTimer);
+    devicePingTimer = null;
+  }
+}
+
+// 排程一次重连。退避随失败次数线性增长并封顶。
+//
+// ★ deviceWanted 是闸：用户主动 stopDeviceBridge（或改配置）之后
+//   再排程，就会把已停用的桥偷偷拉起来。GUI 是常驻托盘程序，
+//   这个「拉起来」没人看得见，表现为「我明明关了怎么又在连」。
+function scheduleDeviceReconnect() {
+  if (!deviceWanted) return;
+  if (deviceReconnectTimer) return; // 已有排程，不叠加
+  // 先递增后算：首次排程（含连接失败那一回）拿到的就是 base，
+  // 之后 2×base、3×base… 线性增长。用 max(1, attempt) 会在
+  // attempt=0 与 1 时都算出 base，出现「退避头两次一样」的假象。
+  deviceReconnectAttempt++;
+  const delay = Math.min(
+    deviceReconnectBaseMs * deviceReconnectAttempt,
+    deviceReconnectMaxMs,
+  );
+  deviceReconnectTimer = setTimeout(async () => {
+    deviceReconnectTimer = null;
+    if (!deviceWanted) return;
+    const cfg = deviceBridgeCfg;
+    // 配置被清空（用户改了偏好）⇒ 无处可连，停在这里等下一次 start。
+    if (!cfg) {
+      deviceReconnectAttempt = 0;
+      return;
+    }
+    try {
+      await connectDeviceBridgeOnce(cfg);
+      // 连上了：退避归零。下次若再断，重新从 base 开始 ——
+      // 否则「昨天断十次、今天又断一次」要等 10×base 才有第一次重试。
+      deviceReconnectAttempt = 0;
+    } catch (e) {
+      console.error("[device-bridge] reconnect failed: " + e.message);
+      scheduleDeviceReconnect();
+    }
+  }, delay);
+}
+
+// startDeviceBridge 拆出的「只做一次连接」部分：重连走这里。
+async function connectDeviceBridgeOnce(cfg) {
+  const url = cfg.url || cfg.gateway || "";
+  const token = cfg.apiKey || cfg.token || "";
+  deviceBridgeAddr = url;
+  deviceBridgeBound = false;
+  // doConnectDeviceBridge 内部会建 ws、起心跳、并存进 deviceBridge。
+  // 不用它的返回值：那层把结果写全局而非return，两边约定不一致时
+  // 「读返回值」就得到 undefined，随后 ws.send 直接TypeError。
+  await doConnectDeviceBridge(cfg);
+  const ws = deviceBridge;
+  if (!ws) {
+    throw new Error("connect produced no bridge");
+  }
+  // host/cpus/mem 的推导包在try 里：它们在 ws.send 的实参里，而 send 之前
+  // 抛错会被 startDeviceBridge 的 catch 吞成「连接失败」—— 实际连接是好的，
+  // 表现为「反复重连但永远连不上」。拿不到主机信息不该阻断设备登记。
+  let host = "";
+  let cpus = 0;
+  let totalMem = 0;
+  let appVersion = "";
+  let platform = "";
+  let arch = "";
+  let nodeVersion = "";
+  let electronVersion = "";
+  try {
+    host = devOs.hostname() || "";
+    cpus = devOs.cpus ? devOs.cpus().length : 0;
+    totalMem = devOs.totalmem ? devOs.totalmem() : 0;
+  } catch (e) {
+    // 忽略：device_id 退化为 gui-local。
+  }
+  try {
+    appVersion = app && app.getVersion ? app.getVersion() : "";
+  } catch (e) {}
+  // process 单独包：electron 主进程有，但判据的 vm 沙箱只注入了 Buffer/Math/
+  // crypto —— 这里抛错会让 ws.send 之前就中断，被上层 catch 吞成
+  // 「连接失败」，而实际连接是好的（表现为无限重连）。
+  try {
+    platform = process.platform || "";
+    arch = process.arch || "";
+    nodeVersion =
+      (process.versions && process.versions.node) || "";
+    electronVersion =
+      (process.versions && process.versions.electron) || "";
+  } catch (e) {}
+  if (!deviceBridgeId) {
+    deviceBridgeId =
+      "gui-" + (host || "local").replace(/[^a-zA-Z0-9_-]/g, "_");
+  }
+  let authorized = false;
+  try {
+    authorized = !!(
+      guiPrefs &&
+      guiPrefs.deviceBridge &&
+      guiPrefs.deviceBridge.authorized
+    );
+  } catch (e) {}
+  ws.send({
+    op: "hello",
+    device: {
+      device_id: deviceBridgeId,
+      name: "HomeAgent GUI",
+      kind: "computer",
+      authorized: authorized,
+      caps: [
+        "status",
+        "cmdrun",
+        "deviceinfo",
+        "cmdresult",
+        "computeruse",
+        "screensee",
+        "clipboardsee",
+        "clipboardsue",
+        "speakeruse",
+        "camerasue",
+        "screensue",
+        "omniparse",
+      ],
+      info: {
+        hostname: host,
+        platform: platform,
+        arch: arch,
+        os_release: "",
+        node_version: nodeVersion,
+        electron_version: electronVersion,
+        version: appVersion,
+        cpus: cpus,
+        total_mem_bytes: totalMem,
+      },
+    },
+  });
+  ws.send({ op: "bind", device_id: deviceBridgeId, token });
+  console.log("[device-bridge] connected as " + deviceBridgeId + " @ " + url);
+}
+
+// 真实连接：建 WS、起心跳、登记到全局。
+//
+// 「连上」与「开始对它发心跳」是同一件事的两半，放一函数里，重连路径
+// 才不会漏掉心跳。
+async function doConnectDeviceBridge(cfg) {
+  const ws = await connectDeviceWS(
+    cfg.url || cfg.gateway || "",
+    cfg.apiKey || cfg.token || "",
+    onDeviceMsg,
+  );
+  startDevicePing(ws.__sock);
+  deviceBridge = ws;
+  return ws;
 }
 
 // 发送 WS text 帧（客户端加掩码）
@@ -2842,59 +3133,38 @@ async function startDeviceBridge(cfg) {
     return;
   }
   deviceBridgeAddr = url;
-  deviceBridgeId =
-    "gui-" + (devOs.hostname() || "local").replace(/[^a-zA-Z0-9_-]/g, "_");
+  // 记住配置：重连时要用（连接断开后局部变量就没了）。
+  deviceBridgeCfg = { url, token };
+  // 拉起意图。scheduleDeviceReconnect 以此为闸 —— 用户主动停用后
+  // 不得再排程重连。
+  deviceWanted = true;
+  deviceReconnectAttempt = 0;
+  if (deviceReconnectTimer) {
+    clearTimeout(deviceReconnectTimer);
+    deviceReconnectTimer = null;
+  }
   try {
-    const ws = await connectDeviceWS(url, token, onDeviceMsg);
-    deviceBridge = ws;
-    ws.send({
-      op: "hello",
-      device: {
-        device_id: deviceBridgeId,
-        name: "HomeAgent GUI",
-        kind: "computer",
-        authorized: guiPrefs?.deviceBridge?.authorized || false, // 客户端自报授权状态
-        caps: [
-          "status",
-          "cmdrun",
-          "deviceinfo",
-          "cmdresult",
-          "computeruse",
-          "screensee",
-          "clipboardsee",
-          "clipboardsue",
-          "speakeruse",
-          "camerasue",
-          "screensue",
-          "omniparse",
-        ],
-        info: {
-          hostname: devOs.hostname() || "",
-          platform: process.platform || "",
-          arch: process.arch || "",
-          os_release: "", // 不提权读取 /etc/os-release，避免破坏沙箱；如需可在白名单命令里由 agent 探
-          node_version:
-            process.versions && process.versions.node
-              ? process.versions.node
-              : "",
-          electron_version:
-            process.versions && process.versions.electron
-              ? process.versions.electron
-              : "",
-          version: app.getVersion ? app.getVersion() : "",
-          cpus: devOs.cpus ? devOs.cpus().length : 0,
-          total_mem_bytes: devOs.totalmem ? devOs.totalmem() : 0,
-        },
-      },
-    });
-    ws.send({ op: "bind", device_id: deviceBridgeId, token });
-    console.log("[device-bridge] connected as " + deviceBridgeId + " @ " + url);
+    await connectDeviceBridgeOnce(deviceBridgeCfg);
+    // 首次就连上：退避归零。
+    deviceReconnectAttempt = 0;
   } catch (e) {
     console.error("[device-bridge] connect failed: " + e.message);
+    // ★ 连接失败也必须排程重连 —— 这条路上**没有** socket close 事件
+    //   （socket 从未 upgraded），若只把重连挂在 close 上，首次失败就
+    //   永远不会自愈。
+    scheduleDeviceReconnect();
   }
 }
 
 function stopDeviceBridge() {
+  // 先断意图，再拆资源：顺序反了会让 close 事件里的排程再把桥拉起来。
+  deviceWanted = false;
+  stopDevicePing();
+  if (deviceReconnectTimer) {
+    clearTimeout(deviceReconnectTimer);
+    deviceReconnectTimer = null;
+  }
+  deviceReconnectAttempt = 0;
   if (deviceBridge) {
     try {
       deviceBridge.close();
@@ -3151,9 +3421,30 @@ function initTray() {
 function showMainWindow() {
   try {
     if (mainWindow && !mainWindow.isDestroyed()) {
+      // ★ 健康检查（2026-10-05 修白屏）：仅靠 isVisible() 不够。
+      //
+      // 长时间后台后 renderer 可能已被回收 —— 窗口句柄还在、isVisible()
+      // 仍为 true，但内容是空的。此时原逻辑会跳过 show()，从托盘打开
+      // 就是一片白，而且永远不会自愈。
+      //
+      // 两个判据：
+      //   isCrashed() —— 渲染进程已死，必须重载才能出内容；
+      //   isLoading() —— 还在加载，等ready-to-show 就行，不重载。
+      const wc = mainWindow.webContents;
+      if (wc.isCrashed()) {
+        console.log("[window] renderer crashed, reloading before show");
+        try {
+          wc.reload();
+        } catch (e) {}
+      }
       // 窗口是静默创建时已处于「未显示」态，这里正常显示即可。
+      // 用 showInactive + focus 两步：showInactive 不抢焦点地显示，
+      // focus 再把焦点给过来（纯 show 在部分 Win 版本上会导致
+      // 无边框窗口不获得焦点，用户还得再点一下）。
       if (!mainWindow.isVisible()) mainWindow.show();
-      mainWindow.focus();
+      try {
+        mainWindow.focus();
+      } catch (e) {}
       return;
     }
   } catch (e) {
@@ -3282,6 +3573,25 @@ app.on("activate", () => {
     createWindow();
   }
 });
+
+// GPU 进程崩溃/重启后，无边框窗口（frame:false）在部分驱动上会停在
+// 上一帧不再重绘 —— 表现同样是「窗口在、内容不动或全白」。
+// `child-process-gone` 比 `render-process-gone` 覆盖面更广（含 GPU），
+// 这里只在 GPU 挂掉时重载渲染进程（不重建窗口，避免丢窗口位置/尺寸）。
+app.on("child-process-gone", (e, details) => {
+  const type = details && details.type;
+  const reason = details && details.reason;
+  if (type !== "GPU") return;
+  console.error("[window] GPU process gone: reason=" + reason);
+  if (reason === "oom" || reason === "launch-failed") return;
+  try {
+    if (mainWindow && !mainWindow.isDestroyed()) {
+      mainWindow.webContents.reload();
+    }
+  } catch (err) {
+    console.error("[window] reload after GPU crash failed: " + err.message);
+  }
+});
 // ============ 系统通知（Electron 原生）============
 //
 // 之前**完全没有**这个能力：主进程没引入 Notification、preload 没暴露接口、
@@ -3314,10 +3624,9 @@ ipcMain.handle("notify:show", (_, payload) => {
       urgency: p.urgent ? "critical" : "normal",
     });
     n.on("click", () => {
-      if (mainWindow && !mainWindow.isDestroyed()) {
-        if (!mainWindow.isVisible()) mainWindow.show();
-        mainWindow.focus();
-      }
+      // 走 showMainWindow 而非直接 show：它带renderer 健康检查，
+      // 直接 show 在 renderer 已被回收时会开出一个白窗口。
+      showMainWindow();
       try {
         mainWindow.webContents.send("notify:clicked", { id: id, msgKey: p.msgKey || "" });
       } catch (e) {}

@@ -1,335 +1,396 @@
+// Package multimodal 是多模态工具的内置插件实现。
+//
+// # 为什么从内核搬出来（2026-10-05/06）
+//
+// `ocr_image` / `describe_image` / `transcribe_audio` 原先是内核
+// `buildToolDefs()` 里硬编码的内置条件工具。两个问题：
+//
+//  1. **违反本仓第一原则**。README 写着「内核职责限定在 LLM 编排、记忆管理与
+//     知识检索；所有 IO 能力由插件实现」，而「文件读取」正在 IO 列表里。
+//     三个工具读本地文件（path 参数）却住在**内核进程内**——无沙箱、无能力面、
+//     无审计。这是整个 `internal/plugin/proc/capability.go` 那套权限梯度
+//     存在的意义所要防止的事。
+//  2. **名不副实**。`ocr_image` 里没有任何 OCR 引擎，它只是「换个 prompt
+//     再问 VLM 一次」（真 OCR 在 internal/nlp 的 ONNX，没接进来）。
+//     工具名承诺的能力大于实现，模型据此误判精度。
+//
+// # 搬走之后内核还剩什么
+//
+// **input 通路留在内核**：`processInput` 处理用户直接发来的图/音时，
+// 仍由内核把 media block 拼进本轮 LLM 请求（那是「输入即上下文」的一部分，
+// 不是工具调用）。留在内核的是 `pendingMedia` 那个 map。
+//
+// # 本插件如何拿到媒体（不依赖内核的 pendingMedia）
+//
+// 两条来源，都不经内核：
+//
+//	① **path**：设备/工具回传的媒体已被 remotedevice 落盘（如 screensee 的
+//	   file 字段），插件直接读文件。
+//	② **digest**：用户直接上传的媒体，内核在 `processInput` 里已经落进 CAS
+//	   （`stageMediaDigests`）。插件用 `sdk.Media().Get(digest)` 取回字节 ——
+//	   比在内核与插件之间传 base64 干净得多（内核那份 pendingMedia 可以退场）。
 package multimodal
 
 import (
+	"context"
 	"encoding/base64"
 	"fmt"
-	"log"
 	"os"
-	"os/exec"
 	"path/filepath"
-	"strconv"
 	"strings"
+	"time"
 
 	"gitcode.com/JianFeeeee/HomeAgent/internal/plugin"
 	sdk "gitcode.com/JianFeeeee/HomeAgent/internal/sdk"
-	pubsdk "gitcode.com/JianFeeeee/homeagent-sdk/sdk"
 )
 
 func init() {
-	plugin.RegisterPluginMeta("multimodal", "多模态感知", "Multimodal Perception")
-	plugin.RegisterFactory("multimodal", NewPluginFactory)
+	plugin.RegisterPluginMeta("multimodal", "多模态工具", "Multimodal Tools")
+	plugin.RegisterFactory("multimodal", func(name string, config map[string]interface{}) (sdk.Plugin, error) {
+		return New(name), nil
+	})
 }
 
-func NewPluginFactory(name string, config map[string]interface{}) (sdk.Plugin, error) {
-	return &Plugin{name: name}, nil
-}
-
+// Plugin 提供 describe_image / transcribe_audio / ocr_image。
 type Plugin struct {
 	name string
 	sdk  *sdk.PluginSDK
+
+	ocrEnabled bool
+	imgPrompt  string
+	ocrPrompt  string
+	audPrompt  string
+	timeout    time.Duration
 }
+
+// New 构造插件。
+func New(name string) *Plugin { return &Plugin{name: name} }
 
 func (p *Plugin) Name() string { return p.name }
 
 func (p *Plugin) Start(s *sdk.PluginSDK) error {
 	p.sdk = s
-	tp := p.name + "_"
 
-	s.RegisterTool(tp+"see_picture", sdk.ToolDef{
-		Name:        tp + "see_picture",
-		Description: "让模型看到一张图片。输入文件路径或 URL，图片以 image_url 格式注入后续对话，模型可看到并描述/分析图片内容。",
-		Parameters: map[string]interface{}{
-			"type": "object",
-			"properties": map[string]interface{}{
-				"path": map[string]interface{}{
-					"type":        "string",
-					"description": "图片的本地文件路径或 HTTP URL",
-				},
-			},
-			"required": []string{"path"},
-		},
-	}, p.handleSeePicture)
+	// ---- 设置 ----
+	s.Settings().RegisterDef(sdk.ConfigDef{
+		Key: "ocr_enabled", Default: "true", Type: "bool",
+		DisplayName: "启用 OCR 工具",
+		Description: "★注意：本工具**不是专用 OCR 引擎**，而是「用视觉模型读图中的文字」。" +
+			"高密度小字/表格可能不准；关闭后 ocr_image 不出现在工具表里。",
+		Category: "multimodal",
+	})
+	s.Settings().RegisterDef(sdk.ConfigDef{
+		Key: "describe_prompt", Type: "text",
+		DisplayName: "图片描述提示词",
+		Description: "describe_image 使用的提示词。",
+		Category:    "multimodal",
+	})
+	s.Settings().RegisterDef(sdk.ConfigDef{
+		Key: "ocr_prompt", Type: "text",
+		DisplayName: "读字提示词",
+		Description: "ocr_image 使用的提示词。",
+		Category:    "multimodal",
+	})
+	s.Settings().RegisterDef(sdk.ConfigDef{
+		Key: "audio_prompt", Type: "text",
+		DisplayName: "音频转写提示词",
+		Description: "transcribe_audio 使用的提示词。",
+		Category:    "multimodal",
+	})
+	s.Settings().RegisterDef(sdk.ConfigDef{
+		Key: "timeout_seconds", Default: "120", Type: "int",
+		DisplayName: "多模态调用超时（秒）",
+		Description: "单次多模态请求的上限。",
+		Category:    "multimodal",
+	})
 
-	s.RegisterTool(tp+"see_video", sdk.ToolDef{
-		Name:        tp + "see_video",
-		Description: "让模型看到一段视频的关键帧。输入视频文件路径，ffmpeg 提取 N 帧作为 image_url 注入后续对话，模型可分析视频内容。需要 ffmpeg 已安装。",
-		Parameters: map[string]interface{}{
-			"type": "object",
-			"properties": map[string]interface{}{
-				"path": map[string]interface{}{
-					"type":        "string",
-					"description": "视频的本地文件路径",
-				},
-				"frames": map[string]interface{}{
-					"type":        "integer",
-					"description": "均匀抽取的关键帧数量（默认 4，最大 10）。按视频总时长均分，不是每几秒一帧。",
-				},
-			},
-			"required": []string{"path"},
-		},
-	}, p.handleSeeVideo)
+	p.ocrEnabled = true
+	p.timeout = 120 * time.Second
+	p.loadSettings()
 
-	s.RegisterTool(tp+"listen", sdk.ToolDef{
-		Name:        tp + "listen",
-		Description: "让模型听到一段音频。输入音频文件路径（mp3/wav/ogg/m4a），音频注入后续对话，支持音频的模型可识别语音/声音内容。",
-		Parameters: map[string]interface{}{
-			"type": "object",
-			"properties": map[string]interface{}{
-				"path": map[string]interface{}{
-					"type":        "string",
-					"description": "音频文件路径",
-				},
-			},
-			"required": []string{"path"},
-		},
-	}, p.handleListen)
+	if err := s.RegisterTool("describe_image", sdk.ToolDef{
+		Name: "describe_image",
+		Description: "描述一张图片的内容。可处理本轮用户上传的图片，" +
+			"也可用 path 读设备/工具回传的图片文件（如 screensee 的截图）。",
+		Parameters:   p.commonParams(),
+		ParallelSafe: false, // 会切 LLM 源（provider 参数），非并发安全
+	}, p.handleDescribeImage); err != nil {
+		return err
+	}
 
-	log.Printf("[%s] multimodal perception tools registered", p.name)
+	if err := s.RegisterTool("transcribe_audio", sdk.ToolDef{
+		Name:         "transcribe_audio",
+		Description:  "把一段音频转写为文字。可处理本轮上传的音频，也可用 path 读文件。",
+		Parameters:   p.commonParams(),
+		ParallelSafe: false,
+	}, p.handleTranscribeAudio); err != nil {
+		return err
+	}
+
+	// ocr_image 的注册**受开关控制**（沿用内核原语义）。
+	// 不启用时它不出现在工具表里 —— 这是刻意的：工具在表里却不可用，
+	// 比不出现更糟（模型会反复调一个注定失败的工具）。
+	if p.ocrEnabled {
+		if err := s.RegisterTool("ocr_image", p.ocrToolDef(), p.handleOCRImage); err != nil {
+			return err
+		}
+	}
 	return nil
 }
 
 func (p *Plugin) Stop() error { return nil }
 
-// ── see_picture ──────────────────────────────────────────────────
-
-func (p *Plugin) handleSeePicture(args map[string]interface{}) (interface{}, error) {
-	path := getArgStr(args, "path")
-	if path == "" {
-		return "path is required", nil
+// commonParams 是三个工具共用的参数形态。
+func (p *Plugin) commonParams() map[string]interface{} {
+	return map[string]interface{}{
+		"type": "object",
+		"properties": map[string]interface{}{
+			"path": map[string]interface{}{
+				"type": "string",
+				"description": "可选：媒体文件路径。★处理设备/工具回传的媒体时必须传" +
+					"（screensee / camerasue 会回传 file 路径）；不传则处理本轮用户上传的媒体。",
+			},
+			"digest": map[string]interface{}{
+				"type":        "string",
+				"description": "可选：媒体在内容寻址库（CAS）里的 digest。与 path 二选一。",
+			},
+			"provider": map[string]interface{}{
+				"type":        "string",
+				"description": "可选：用于该次调用的 LLM 源名称，不填则用当前源",
+			},
+		},
 	}
-
-	var dataURL string
-	var mime string
-
-	if strings.HasPrefix(path, "http://") || strings.HasPrefix(path, "https://") {
-		// 远程 URL：直接用作 image URL，不下载
-		dataURL = path
-		mime = "image/png"
-	} else {
-		// 本地文件
-		if _, err := os.Stat(path); os.IsNotExist(err) {
-			return fmt.Sprintf("文件不存在: %s", path), nil
-		}
-		ext := strings.ToLower(filepath.Ext(path))
-		switch ext {
-		case ".jpg", ".jpeg":
-			mime = "image/jpeg"
-		case ".gif":
-			mime = "image/gif"
-		case ".webp":
-			mime = "image/webp"
-		default:
-			mime = "image/png"
-		}
-		b, err := os.ReadFile(path)
-		if err != nil {
-			return fmt.Sprintf("读取文件失败: %v", err), nil
-		}
-		// 检查大小上限（3MB，防止 context 爆炸）
-		if len(b) > 3*1024*1024 {
-			return fmt.Sprintf("图片过大（%d bytes，超过 3MB），无法注入上下文", len(b)), nil
-		}
-		dataURL = "data:" + mime + ";base64," + base64.StdEncoding.EncodeToString(b)
-	}
-
-	// 注入多模态块：模型下一轮可看到图片
-	p.sdk.SetToolBlocks([]pubsdk.ContentBlock{
-		{Type: "image_url", ImageURL: &pubsdk.ImageURL{URL: dataURL, Detail: "auto"}},
-	})
-
-	text := fmt.Sprintf("[已将图片注入后续对话] %s", path)
-	return text, nil
 }
 
-// ── see_video ────────────────────────────────────────────────────
-
-func (p *Plugin) handleSeeVideo(args map[string]interface{}) (interface{}, error) {
-	path := getArgStr(args, "path")
-	if path == "" {
-		return "path is required", nil
+func (p *Plugin) ocrToolDef() sdk.ToolDef {
+	params := p.commonParams()
+	params["properties"].(map[string]interface{})["language"] = map[string]interface{}{
+		"type":        "string",
+		"description": "可选：OCR 语言（如 chi_sim+eng），默认自动",
 	}
-	if _, err := os.Stat(path); os.IsNotExist(err) {
-		return fmt.Sprintf("文件不存在: %s", path), nil
+	return sdk.ToolDef{
+		Name: "ocr_image",
+		Description: "读出图片中的文字。★这是**用视觉模型读字**，不是专用 OCR 引擎 —— " +
+			"高密度小字/表格可能不准，重要内容建议配合 describe_image 交叉验证。",
+		Parameters:   params,
+		ParallelSafe: false,
 	}
-
-	// 检查 ffmpeg
-	ffmpegPath := ""
-	for _, c := range []string{"ffmpeg", "/usr/bin/ffmpeg", "/usr/local/bin/ffmpeg"} {
-		if _, err := os.Stat(c); err == nil {
-			ffmpegPath = c
-			break
-		}
-	}
-	if ffmpegPath == "" {
-		if _, err := exec.LookPath("ffmpeg"); err == nil {
-			ffmpegPath = "ffmpeg"
-		} else {
-			return "ffmpeg 未安装，无法提取视频关键帧。请先安装: apt install ffmpeg", nil
-		}
-	}
-
-	nFrames := 4
-	if n, ok := args["frames"].(float64); ok && n > 0 {
-		nFrames = int(n)
-		if nFrames > 10 {
-			nFrames = 10
-		}
-	}
-
-	// 用 ffprobe 拿时长，才能把「抽 N 帧」翻译成 ffmpeg 的帧率。
-	//
-	// 为何不能直接写 fps=1/N：fps 是**频率**（每 N 秒一帧），不是**数量**。
-	// 20 秒视频实测：fps=1/4 → 5 帧，fps=1/10 → 2 帧，fps=1/1 → 20 帧——
-	// 要得越多拿得越少，且长视频下 frames=4 会产出时长/4 帧直接炸上下文。
-	// 正确写法是 fps=N/时长 配 -frames:v N（实测 N=1/4/10 均精确）。
-	dur := probeDuration(ffmpegPath, path)
-	var vfArgs []string
-	if dur > 0 {
-		vfArgs = []string{"-vf", fmt.Sprintf("fps=%d/%.3f", nFrames, dur)}
-	}
-	// 拿不到时长（无 ffprobe / 容器无时长元数据）：不传 -vf，只靠 -frames:v
-	// 取开头 N 帧。不能退化成 fps=1：不足 1 秒的素材一帧也抽不出来（实测
-	// 0.4s 视频 fps=1 → 0 帧），而 fps=N/dur 在 0.4s 上依然精确。
-
-	// 用 ffmpeg 提取关键帧
-	tmpDir, err := os.MkdirTemp("", "mm_video_*")
-	if err != nil {
-		return fmt.Sprintf("创建临时目录失败: %v", err), nil
-	}
-	defer os.RemoveAll(tmpDir)
-
-	outPattern := filepath.Join(tmpDir, "frame_%03d.jpg")
-	// -frames:v 硬封顶：即使 fps 计算因时长误差多给了帧，也不会超出请求数量。
-	ffArgs := []string{"-v", "error", "-i", path}
-	ffArgs = append(ffArgs, vfArgs...)
-	ffArgs = append(ffArgs, "-q:v", "5", "-frames:v", strconv.Itoa(nFrames), outPattern)
-	cmd := exec.Command(ffmpegPath, ffArgs...)
-	if out, err := cmd.CombinedOutput(); err != nil {
-		return fmt.Sprintf("ffmpeg 提取帧失败: %v\n%s", err, string(out)), nil
-	}
-
-	// 读取提取的帧。按 blocks 长度而非目录索引封顶：
-	// 跳过的条目（非 jpg / 读失败 / 过大）会让索引与实际帧数错位。
-	entries, _ := os.ReadDir(tmpDir)
-	var blocks []pubsdk.ContentBlock
-	var skippedLarge int
-	for _, entry := range entries {
-		if len(blocks) >= nFrames {
-			break
-		}
-		if !strings.HasSuffix(entry.Name(), ".jpg") {
-			continue
-		}
-		b, err := os.ReadFile(filepath.Join(tmpDir, entry.Name()))
-		if err != nil {
-			continue
-		}
-		if len(b) > 2*1024*1024 {
-			skippedLarge++
-			continue
-		}
-		dURL := "data:image/jpeg;base64," + base64.StdEncoding.EncodeToString(b)
-		blocks = append(blocks, pubsdk.ContentBlock{
-			Type:     "image_url",
-			ImageURL: &pubsdk.ImageURL{URL: dURL, Detail: "low"},
-		})
-	}
-
-	if len(blocks) == 0 {
-		if skippedLarge > 0 {
-			return fmt.Sprintf("提取到 %d 帧但全部超过 2MB 单帧上限，未注入", skippedLarge), nil
-		}
-		return "视频中未提取到有效帧", nil
-	}
-
-	// 全部帧注入（一次 SetToolBlocks 调用，下一轮 LLM 可看到）
-	p.sdk.SetToolBlocks(blocks)
-
-	text := fmt.Sprintf("[已将 %d 个视频关键帧注入后续对话] %s", len(blocks), path)
-	if skippedLarge > 0 {
-		text += fmt.Sprintf("（另有 %d 帧超 2MB 已跳过）", skippedLarge)
-	}
-	if len(blocks) < nFrames {
-		text += fmt.Sprintf("（请求 %d 帧，实际只取到 %d 帧，视频可能过短）", nFrames, len(blocks))
-	}
-	return text, nil
 }
 
-// probeDuration 用 ffprobe 取视频时长（秒），拿不到返回 0。
+func (p *Plugin) loadSettings() {
+	s := p.sdk.Settings()
+	if s == nil {
+		return
+	}
+	if v, _ := s.Get("ocr_enabled"); v != nil {
+		p.ocrEnabled = truthy(v)
+	}
+	if v, _ := s.Get("timeout_seconds"); v != nil {
+		if n := toInt(v); n > 0 {
+			p.timeout = time.Duration(n) * time.Second
+		}
+	}
+	if v, _ := s.Get("describe_prompt"); v != nil && strings.TrimSpace(fmt.Sprint(v)) != "" {
+		p.imgPrompt = fmt.Sprint(v)
+	}
+	if v, _ := s.Get("ocr_prompt"); v != nil && strings.TrimSpace(fmt.Sprint(v)) != "" {
+		p.ocrPrompt = fmt.Sprint(v)
+	}
+	if v, _ := s.Get("audio_prompt"); v != nil && strings.TrimSpace(fmt.Sprint(v)) != "" {
+		p.audPrompt = fmt.Sprint(v)
+	}
+}
+
+func truthy(v interface{}) bool {
+	switch x := v.(type) {
+	case bool:
+		return x
+	case string:
+		return x == "true" || x == "1" || x == "yes"
+	case float64:
+		return x != 0
+	}
+	return false
+}
+
+func toInt(v interface{}) int {
+	switch x := v.(type) {
+	case int:
+		return x
+	case int64:
+		return int(x)
+	case float64:
+		return int(x)
+	case string:
+		n := 0
+		for _, c := range x {
+			if c < '0' || c > '9' {
+				return 0
+			}
+			n = n*10 + int(c-'0')
+		}
+		return n
+	}
+	return 0
+}
+
+// ---- 三个 handler ----
+
+func (p *Plugin) handleDescribeImage(args map[string]interface{}) (interface{}, error) {
+	return p.describe(args, p.imgPromptOrDefault(), "图片描述", 2048, "image_url")
+}
+
+func (p *Plugin) handleOCRImage(args map[string]interface{}) (interface{}, error) {
+	return p.describe(args, p.ocrPromptOrDefault(), "读字结果", 4096, "image_url")
+}
+
+func (p *Plugin) handleTranscribeAudio(args map[string]interface{}) (interface{}, error) {
+	return p.describe(args, p.audPromptOrDefault(), "音频转写", 2048, "audio_url")
+}
+
+func (p *Plugin) imgPromptOrDefault() string {
+	if p.imgPrompt != "" {
+		return p.imgPrompt
+	}
+	return "请详细描述这张图片的内容，包括其中的文字、物体、人物、场景等信息。"
+}
+
+func (p *Plugin) ocrPromptOrDefault() string {
+	if p.ocrPrompt != "" {
+		return p.ocrPrompt
+	}
+	return "请识别这张图片中的所有文字内容，按原文输出。仅输出文字本身，不要添加额外描述。"
+}
+
+func (p *Plugin) audPromptOrDefault() string {
+	if p.audPrompt != "" {
+		return p.audPrompt
+	}
+	return "请把这段音频转写为文字。"
+}
+
+// describe 解析媒体来源 → 切源（若指定）→ 发一次多模态请求。
 //
-// ffprobe 与 ffmpeg 同包同目录，所以从已找到的 ffmpeg 路径推导而非重新搜一遍。
-func probeDuration(ffmpegPath, videoPath string) float64 {
-	probe := "ffprobe"
-	if strings.Contains(ffmpegPath, "/") {
-		probe = filepath.Join(filepath.Dir(ffmpegPath), "ffprobe")
-		if _, err := os.Stat(probe); err != nil {
-			probe = "ffprobe"
+// ★ 失败一律以 **error** 上抛，不渲染成普通文本。
+//
+//	这是从内核搬来时保留的纪律（见 internal/plugins/remotedevice 的
+//	describeScreen 同类修复）：失败与成功同形会让 agent 反复重试。
+func (p *Plugin) describe(args map[string]interface{}, prompt, prefix string,
+	maxTokens int, blockType string) (interface{}, error) {
+
+	url, err := p.resolveMedia(args, blockType)
+	if err != nil {
+		return nil, err
+	}
+
+	llm := p.sdk.LLM()
+	if llm == nil {
+		return nil, fmt.Errorf("LLM 不可用")
+	}
+	// 指定源：临时切换，用完恢复。切源失败**不降级**（否则「另一个源的结果」
+	// 会挂在指定源名下）。
+	provider, _ := args["provider"].(string)
+	if provider != "" {
+		prev := llm.CurrentSource()
+		if e := llm.SetSource(provider); e != nil {
+			return nil, fmt.Errorf("切换到指定源 %s 失败: %w", provider, e)
+		} else if prev != "" {
+			defer func() { _ = llm.SetSource(prev) }()
 		}
 	}
-	out, err := exec.Command(probe, "-v", "error",
-		"-show_entries", "format=duration",
-		"-of", "default=nw=1:nk=1", videoPath).Output()
-	if err != nil {
-		return 0
-	}
-	d, err := strconv.ParseFloat(strings.TrimSpace(string(out)), 64)
-	if err != nil {
-		return 0
-	}
-	return d
-}
+	used := llm.CurrentSource()
 
-// ── listen ───────────────────────────────────────────────────────
-
-func (p *Plugin) handleListen(args map[string]interface{}) (interface{}, error) {
-	path := getArgStr(args, "path")
-	if path == "" {
-		return "path is required", nil
+	msg := sdk.LLMMessage{
+		Role: "user",
+		Blocks: []sdk.LLMContentBlock{
+			{Type: "text", Text: prompt},
+		},
 	}
-	if _, err := os.Stat(path); os.IsNotExist(err) {
-		return fmt.Sprintf("文件不存在: %s", path), nil
+	if blockType == "image_url" {
+		msg.Blocks = append(msg.Blocks, sdk.LLMContentBlock{Type: "image_url", ImageURL: url})
+	} else {
+		msg.Blocks = append(msg.Blocks, sdk.LLMContentBlock{Type: "audio_url", ImageURL: url})
 	}
 
-	ext := strings.ToLower(filepath.Ext(path))
-	var mime string
-	switch ext {
-	case ".mp3":
-		mime = "audio/mpeg"
-	case ".wav":
-		mime = "audio/wav"
-	case ".ogg":
-		mime = "audio/ogg"
-	case ".m4a", ".aac":
-		mime = "audio/mp4"
-	default:
-		mime = "audio/ogg" // 默认
-	}
-
-	// 检查大小（5MB 限制，避免上下文爆炸）
-	info, _ := os.Stat(path)
-	if info != nil && info.Size() > 5*1024*1024 {
-		return fmt.Sprintf("音频过大（%d bytes，超过 5MB），无法注入上下文", info.Size()), nil
-	}
-
-	b, err := os.ReadFile(path)
-	if err != nil {
-		return fmt.Sprintf("读取音频文件失败: %v", err), nil
-	}
-	dataURL := "data:" + mime + ";base64," + base64.StdEncoding.EncodeToString(b)
-
-	p.sdk.SetToolBlocks([]pubsdk.ContentBlock{
-		{Type: "audio_url", AudioURL: &pubsdk.AudioURL{URL: dataURL}},
+	ctx, cancel := context.WithTimeout(context.Background(), p.timeout)
+	defer cancel()
+	resp, err := llm.Chat(ctx, &sdk.LLMCompletionRequest{
+		Messages:  []sdk.LLMMessage{msg},
+		MaxTokens: maxTokens,
 	})
-
-	text := fmt.Sprintf("[已将音频注入后续对话] %s（%s，%.1fKB）", path, mime, float64(len(b))/1024)
-	return text, nil
+	if err != nil {
+		return nil, fmt.Errorf("%s失败（视觉/音频源 %s）: %w", prefix, used, err)
+	}
+	if resp == nil || strings.TrimSpace(resp.Content) == "" {
+		return nil, fmt.Errorf("%s失败（视觉/音频源 %s）: 模型返回空内容", prefix, used)
+	}
+	return map[string]interface{}{
+		"description": resp.Content,
+		"source":      used,
+	}, nil
 }
 
-// ── helpers ──────────────────────────────────────────────────────
+// resolveMedia 按 path → digest 的顺序解析出 data URL。
+func (p *Plugin) resolveMedia(args map[string]interface{}, kind string) (string, error) {
+	path, _ := args["path"].(string)
+	digest, _ := args["digest"].(string)
 
-func getArgStr(args map[string]interface{}, key string) string {
-	if v, ok := args[key].(string); ok {
-		return v
+	switch {
+	case strings.TrimSpace(path) != "":
+		b, err := os.ReadFile(strings.TrimSpace(path))
+		if err != nil {
+			return "", fmt.Errorf("读取文件失败 %s: %w", path, err)
+		}
+		if len(b) == 0 {
+			return "", fmt.Errorf("文件为空: %s", path)
+		}
+		mime := mimeByExt(path)
+		if mime == "" {
+			mime = "image/png"
+			if kind == "audio_url" {
+				mime = "audio/wav"
+			}
+		}
+		return "data:" + mime + ";base64," + base64.StdEncoding.EncodeToString(b), nil
+
+	case strings.TrimSpace(digest) != "":
+		if p.sdk.Media() == nil {
+			return "", fmt.Errorf("内容寻址库不可用，无法按 digest 取媒体")
+		}
+		b, err := p.sdk.Media().Get(strings.TrimSpace(digest))
+		if err != nil {
+			return "", fmt.Errorf("按 digest 取媒体失败 %s: %w", digest, err)
+		}
+		mime := "image/png"
+		if info, serr := p.sdk.Media().Stat(strings.TrimSpace(digest)); serr == nil && info.MIME != "" {
+			mime = info.MIME
+		} else if kind == "audio_url" {
+			mime = "audio/wav"
+		}
+		return "data:" + mime + ";base64," + base64.StdEncoding.EncodeToString(b), nil
+	}
+	// ★ 两条都没有 ⇒ 明确报错，并说清怎么办。
+	return "", fmt.Errorf("没有可处理的媒体。请传 path（设备/工具回传的媒体，" +
+		"如 screensee 返回的 file 路径）或 digest；" +
+		"本轮用户直接上传的图片/音频请直接用它们，无需本工具")
+}
+
+func mimeByExt(p string) string {
+	switch strings.ToLower(filepath.Ext(p)) {
+	case ".jpg", ".jpeg":
+		return "image/jpeg"
+	case ".png":
+		return "image/png"
+	case ".webp":
+		return "image/webp"
+	case ".gif":
+		return "image/gif"
+	case ".wav":
+		return "audio/wav"
+	case ".mp3":
+		return "audio/mpeg"
+	case ".m4a", ".aac":
+		return "audio/aac"
 	}
 	return ""
 }

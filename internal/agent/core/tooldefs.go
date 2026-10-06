@@ -646,33 +646,19 @@ func (a *Agent) buildToolDefs() []interface{} {
 		},
 	}, nil, parallelOpts()))
 
-	if a.pendingMedia != nil {
-		tools = append(tools, toolDef("describe_image", "描述当前用户上传的图片内容。使用配置的多模态模型或默认 LLM 进行识别。调用此工具后你将获得图片的详细文字描述。", map[string]interface{}{
-			"provider": map[string]interface{}{
-				"type":        "string",
-				"description": "可选：用于图片描述的 LLM 源名称，不填则使用默认模型",
-			},
-			"detail": map[string]interface{}{
-				"type":        "string",
-				"description": "描述详细程度: high / low / auto",
-				"default":     "high",
-			},
-		}))
-		tools = append(tools, toolDef("transcribe_audio", "转写当前用户上传的音频内容为文字。使用配置的多模态模型或默认 LLM 进行语音识别。", map[string]interface{}{
-			"provider": map[string]interface{}{
-				"type":        "string",
-				"description": "可选：用于音频转写的 LLM 源名称，不填则使用默认模型",
-			},
-		}))
-		if a.inputCfg.Image.OCREnabled {
-			tools = append(tools, toolDef("ocr_image", "对当前用户上传的图片执行 OCR 文字识别，提取图片中的文字内容。适用于截图、文档照片、菜单等场景。", map[string]interface{}{
-				"language": map[string]interface{}{
-					"type":        "string",
-					"description": "OCR 语言（如 chi_sim+eng），默认自动",
-				},
-			}))
-		}
-	}
+	// ★★ 2026-10-06：多模态工具已**移出内核**，改为内置插件 multimodal。
+	//
+	// 移出理由（README 第一原则）：内核职责限定 LLM 编排/记忆/知识检索，
+	// 而「读本地文件」是 IO —— 三个工具读文件却住在内核进程内，
+	// 无沙箱、无能力面、无审计，正是 capability.go 那套权限梯度要防的事。
+	//
+	// 留在这里的是**待��退场**的部分：下面这一大块 pendingMedia 只服务于
+	// 那三个工具的工具面。input 通路（processInput 直接把 media block
+	// 拼进本轮请求）**不依赖它**，所以可安全移除。
+	// 退场顺序见 docs 或本次提交的说明；先确保插件侧能力等价。
+	//
+	// ⇒ describe_image / transcribe_audio / ocr_image 现在由插件注册，
+	//   不再出现在这里。pendingMedia 的清理在本次一并处理。
 
 	return tools
 }

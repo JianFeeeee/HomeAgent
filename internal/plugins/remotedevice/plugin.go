@@ -309,6 +309,25 @@ func (p *Plugin) handleDevicePush(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadRequest, map[string]interface{}{"error": "device_id required"})
 		return
 	}
+	// ★ payload 必须校验，不能让它静默通过（2026-10-05 实测踩坑）。
+	//
+	// 本端点收的是**已成型的协议帧**（{"op":"cmd",...} 等），不是
+	// “device_id + command” 这种便捷参数。以前直接PushJSON(req.Payload)，
+	// 而 PushJSON 只是把 map 序列化后写进 socket —— 于是：
+	//
+	//   客户端发 {"device_id":"gui-JianF","command":"homeagent-clipboardsee"}
+	//     → command 字段被**静默丢弃**，payload 为 nil
+	//     → 设备收到 {"payload":null}，op 为空，直接忽略
+	//     → 而服务端这边 PushJSON 写入 socket 成功，返回 {"status":"ok"}
+	//
+	// 一次「什么也没发生」的操作，报文上是彻底的成功。排查时只能靠设备侧
+	// 日志才发现「命令没到」，极易误判成链路/鉴权/心跳问题（本次就绕了很久）。
+	if req.Payload == nil {
+		writeJSON(w, http.StatusBadRequest, map[string]interface{}{
+			"error": "payload required: 期望 {\"device_id\":\"<id>\",\"payload\":{\"op\":\"cmd\",\"req_id\":\"<rid>\",\"cmd_type\":\"shell|homeagent\",\"command\":\"...\"}}；payload 是**协议帧本身**，不是 command 简写",
+		})
+		return
+	}
 	if err := p.registry.PushJSON(req.DeviceID, req.Payload); err != nil {
 		writeJSON(w, http.StatusNotFound, map[string]interface{}{"error": err.Error()})
 		return
@@ -318,9 +337,28 @@ func (p *Plugin) handleDevicePush(w http.ResponseWriter, r *http.Request) {
 
 // describeScreen 用视觉模型描述设备屏幕截图（screensee 回调）。
 // provider 为空时使用默认 LLM 源；模型不支持视觉时返回友好错误。
-func (p *Plugin) describeScreen(dataURL string, provider string) string {
+// describeScreen 把设备回传的屏幕截图交给视觉模型生成描述。
+//
+// ★★ 2026-10-05 签名改为 (string, error)（生产日志实证的教训）
+//
+//	原实现把 403 等**失败**渲染成一段普通文本返回：
+//
+//	    return fmt.Sprintf("屏幕截图视觉描述失败: %v（当前模型可能不支持图像输入）", err)
+//
+//	而调用方把它当作 description 字段、status=ok ⇒ **失败被包装成成功**。
+//	实测（2026-10-05 13:51）：
+//
+//	    {"description":"屏幕截图视觉描述失败: api error 403:
+//	               {\"error\":{\"message\":\"model \"gpt-5.6-sol\" is not allowed…"}
+//
+//	agent 读到的是一段自然语言，看不出这是工具失败，
+//	于是又发了一次 screensee（换 provider）再失败一次。
+//	与同一天修掉的 MCP `isError` 丢失是**同一个病**：失败与成功同形。
+//
+//	⇒ 失败必须以 error 上抛，文本只留作诊断线索。
+func (p *Plugin) describeScreen(dataURL string, provider string) (string, error) {
 	if p.sdk == nil || p.sdk.LLM() == nil {
-		return "LLM 不可用，无法描述屏幕内容"
+		return "", fmt.Errorf("LLM 不可用，无法描述屏幕内容")
 	}
 	llm := p.sdk.LLM()
 	req := &sdk.LLMCompletionRequest{
@@ -337,18 +375,60 @@ func (p *Plugin) describeScreen(dataURL string, provider string) string {
 	if provider != "" {
 		prev := llm.CurrentSource()
 		if err := llm.SetSource(provider); err != nil {
-			log.Printf("[remotedevice] screensee set source %s: %v", provider, err)
+			// ★ 切源失败**不降级**：原来只打一行日志然后继续用当前源，
+			//   而当前源可能与调用方指定的完全不同 ⇒ 模型看到的是
+			//   「另一个源的结果」，却挂在指定源名下。直接报错更诚实。
+			return "", fmt.Errorf("screensee: 切换到指定视觉源 %s 失败: %w", provider, err)
 		} else if prev != "" {
 			defer func() { _ = llm.SetSource(prev) }()
 		}
 	}
+	// ★ 记录本次实际用的是哪个源：排查「为什么描述不对」时，
+	//   第一件要知道的就是它到底是哪个源在回答。
+	usedSource := llm.CurrentSource()
 	ctx, cancel := context.WithTimeout(context.Background(), 120*time.Second)
 	defer cancel()
 	resp, err := llm.Chat(ctx, req)
 	if err != nil {
-		return fmt.Sprintf("屏幕截图视觉描述失败: %v（当前模型可能不支持图像输入）", err)
+		log.Printf("[remotedevice] screensee 视觉描述失败 source=%s err=%v", usedSource, err)
+		// ★ 2026-10-05：模型名不被接受时，**就地降级到 AUTO 重试一次**。
+		//
+		// 生产实测（13:51）：agent 传 provider=visionllm，而那个源的
+		// `model: gpt-5.6-sol` 被 llmsproxy 拒了：
+		//
+		//	model "gpt-5.6-sol" is not allowed for this key
+		//
+		// 根因不是「模型不支持图」，而是**那个 key 的 model scope 只有 AUTO**
+		// （/etc/llmsproxy/config.yaml 的 keys[homeagent].models = [AUTO]）。
+		// 而同一个 key + base_url 下 `model: AUTO` 实测完全能看图。
+		//
+		// ⇒ 显式模型名不可用时回 AUTO，比把错误抛给 agent 让它反复重试好。
+		//   注意**不覆盖原错误**：两者都返回，由上层看到完整信息。
+		if isModelNotAllowed(err) {
+			log.Printf("[remotedevice] screensee: 源 %s 的模型名不被接受，回退 AUTO 重试", usedSource)
+			if e2 := llm.SetSource("AUTO"); e2 == nil {
+				rctx, rcancel := context.WithTimeout(context.Background(), 120*time.Second)
+				defer rcancel()
+				if rresp, e3 := llm.Chat(rctx, req); e3 == nil && rresp != nil &&
+					strings.TrimSpace(rresp.Content) != "" {
+					log.Printf("[remotedevice] screensee AUTO 回退成功 len=%d", len(rresp.Content))
+					return rresp.Content, nil
+				} else {
+					log.Printf("[remotedevice] screensee AUTO 回退也失败: %v", e3)
+				}
+			} else {
+				log.Printf("[remotedevice] screensee AUTO 回退无法切源: %v", e2)
+			}
+		}
+		// 保留原始错误文本（那是唯一诊断线索），但以 error 形态上抛。
+		return "", fmt.Errorf("屏幕截图视觉描述失败（视觉源 %s，model=%s）: %w", usedSource, currentModelOf(p.sdk.Settings(), usedSource), err)
 	}
-	return resp.Content
+	if resp == nil || strings.TrimSpace(resp.Content) == "" {
+		// 空内容与「失败」对模型同样难以区分，不能静默当成结果。
+		return "", fmt.Errorf("屏幕截图视觉描述失败（视觉源 %s）: 模型返回空内容", usedSource)
+	}
+	log.Printf("[remotedevice] screensee 视觉描述完成 source=%s len=%d", usedSource, len(resp.Content))
+	return resp.Content, nil
 }
 
 func (p *Plugin) Stop() error {
@@ -365,4 +445,42 @@ func (p *Plugin) Stop() error {
 		return p.server.Shutdown(ctx)
 	}
 	return nil
+}
+
+// isModelNotAllowed 判定错误是不是「这个 key 不许用该模型名」。
+//
+// ★ 2026-10-05：llmsproxy 的原文是
+//
+//	model "gpt-5.6-sol" is not allowed for this key
+//
+// （internal/gateway/chat.go 的 model_not_allowed）
+//
+// 只认这一类：它与「模型不存在」「key 无效」的处理完全不同 ——
+// 前者换个模型名/回 AUTO 就能成，后者要动配置或凭证。
+func isModelNotAllowed(err error) bool {
+	if err == nil {
+		return false
+	}
+	s := err.Error()
+	return strings.Contains(s, "is not allowed for this key") ||
+		strings.Contains(s, "model_not_allowed") ||
+		strings.Contains(s, "is not in this key's model scope")
+}
+
+// currentModelOf 取某个源当前配置的模型名（只用于错误信息，便于定位）。
+//
+// ★ 拿不到就返回 ""：**诊断信息缺失不该阻断主流程**，
+//
+//	所以这里不返回 error（内层的 fmt 已经带着原始错误文本了）。
+func currentModelOf(settings interface {
+	Get(string) (interface{}, error)
+}, source string) string {
+	if settings == nil {
+		return ""
+	}
+	v, _ := settings.Get("core.llm.sources." + source + ".model")
+	if v == nil {
+		return ""
+	}
+	return fmt.Sprint(v)
 }

@@ -122,12 +122,11 @@ func (a *Agent) executeToolCallInner(tc agentAPI.ToolCall, channel string, turnS
 		return toolOutcome{Text: a.executeChildResultTool(tc)}
 	case strings.HasPrefix(tc.Name, "llm_"):
 		return toolOutcome{Text: a.executeLLMTool(tc)}
-	case tc.Name == "describe_image":
-		return toolOutcome{Text: a.executeDescribeImage(tc)}
-	case tc.Name == "transcribe_audio":
-		return toolOutcome{Text: a.executeTranscribeAudio(tc)}
-	case tc.Name == "ocr_image":
-		return toolOutcome{Text: a.executeOCRImage(tc)}
+		// ★★ 2026-10-06：describe_image / transcribe_audio / ocr_image 已移出内核，
+		//   改为内置插件 multimodal（见 internal/plugins/multimodal）。
+		//   理由：它们要读本地文件（IO），而内核承诺零 IO。
+		//   这三个名字现在由 StageHost 路由到插件 —— 上面 if 走不到，
+		//   会落到 stageHost.ExecuteTool，正是插件工具的正常路径。
 	}
 
 	if a.stageHost != nil {

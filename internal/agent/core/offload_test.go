@@ -61,8 +61,8 @@ func TestTakeQueuedInputsOnlyTakesQueuedInputs(t *testing.T) {
 	s.enqueue(makeQueuedInput(3))
 	s.enqueue(makeQueuedInput(4))
 
-	if len(s.queue) != 6 {
-		t.Fatalf("就绪队列应有 6 条（4 排队输入 + 1 中断 + 1 self），实际 %d", len(s.queue))
+	if n := s.queueLen(); n != 6 {
+		t.Fatalf("就绪队列应有 6 条（4 排队输入 + 1 中断 + 1 self），实际 %d", n)
 	}
 	got := s.takeQueuedInputs(3)
 	if len(got) != 3 {
@@ -75,7 +75,7 @@ func TestTakeQueuedInputsOnlyTakesQueuedInputs(t *testing.T) {
 	}
 	// self 与中断必须还在
 	var hasSelf, hasInterrupt bool
-	for _, tt := range s.queue {
+	for _, tt := range s.queueSnapshot() {
 		if tt.Kind == TaskKindSelf {
 			hasSelf = true
 		}
@@ -101,8 +101,8 @@ func TestTakeQueuedInputsIsAllOrNothing(t *testing.T) {
 	if got := s.takeQueuedInputs(3); got != nil {
 		t.Fatalf("不足 3 条时不应取走任何任务，实际取走 %d", len(got))
 	}
-	if len(s.queue) != 2 {
-		t.Errorf("队列不应被改动，实际剩 %d", len(s.queue))
+	if n := s.queueLen(); n != 2 {
+		t.Errorf("队列不应被改动，实际剩 %d", n)
 	}
 }
 
@@ -118,17 +118,18 @@ func TestRequeueFrontKeepsAllTasks(t *testing.T) {
 	if len(taken) != 3 {
 		t.Fatalf("应取走 3 条，实际 %d", len(taken))
 	}
-	if len(s.queue) != 0 {
-		t.Fatalf("取走后队列应空，实际 %d", len(s.queue))
+	if n := s.queueLen(); n != 0 {
+		t.Fatalf("取走后队列应空，实际 %d", n)
 	}
 
 	s.requeueFront(taken)
-	if len(s.queue) != 3 {
-		t.Fatalf("★ 放回后必须一条不少：期望 3，实际 %d", len(s.queue))
+	if n := s.queueLen(); n != 3 {
+		t.Fatalf("★ 放回后必须一条不少：期望 3，实际 %d", n)
 	}
 	// 放回的是**前端**：它们比队列里原有的一切都早
 	s.enqueue(makeQueuedInput(4))
-	if s.queue[len(s.queue)-1].Event.Payload["content"] != "hello" {
+	snap := s.queueSnapshot()
+	if snap[len(snap)-1].Event.Payload["content"] != "hello" {
 		t.Error("放回的任务应在队列前端")
 	}
 }
@@ -160,8 +161,8 @@ func TestOffloadDisabledByDefault(t *testing.T) {
 	if n := a.offloadPendingTasks(opts); n != 0 {
 		t.Errorf("关闭时不得转投，实际转了 %d", n)
 	}
-	if len(s.queue) != 3 {
-		t.Errorf("关闭时队列不得被改动，实际 %d", len(s.queue))
+	if n := s.queueLen(); n != 3 {
+		t.Errorf("关闭时队列不得被改动，实际 %d", n)
 	}
 }
 
@@ -225,10 +226,10 @@ func TestOffloadMovesTasksToResidentEndToEnd(t *testing.T) {
 	t.Logf("驻留子 %s: inputch=%v outputs=%v", resident.ID, resident.InputChs, resident.AllowedOutputs)
 
 	// ③ 原队列里留下说明（且说明是内核发的）
-	if len(root.sched.queue) != 1 {
-		t.Fatalf("原队列应只剩 1 条说明，实际 %d", len(root.sched.queue))
+	if root.sched.queueLen() != 1 {
+		t.Fatalf("原队列应只剩 1 条说明，实际 %d", root.sched.queueLen())
 	}
-	notice := root.sched.queue[0]
+	notice := root.sched.queueSnapshot()[0]
 	if notice.Event == nil || notice.Event.Source != "kernel" {
 		t.Fatalf("留下的应是内核说明，实际 %+v", notice.Event)
 	}
@@ -330,8 +331,8 @@ func TestOffloadSeesInputsStuckInChannel(t *testing.T) {
 		root.io.InjectInputTo("webui", "webui", "text",
 			map[string]interface{}{"content": "stuck"})
 	}
-	if len(root.sched.queue) != 0 {
-		t.Fatalf("前置条件：此时 sched.queue 应为 0（输入还没被搬运），实际 %d", len(root.sched.queue))
+	if root.sched.queueLen() != 0 {
+		t.Fatalf("前置条件：此时 sched.queue 应为 0（输入还没被搬运），实际 %d", root.sched.queueLen())
 	}
 	if root.io.PendingInputs() != 3 {
 		t.Fatalf("前置条件：输入应堆在 channel 里，实际 %d", root.io.PendingInputs())
@@ -502,11 +503,11 @@ func TestResidualKeepReturnsTasksToParent(t *testing.T) {
 		t.Fatalf("应处置 2 条，实际 %d（msg=%s）", n, msg)
 	}
 	// keep = 转回父自己：两条都要出现在父的队列里，且**带 ResponseCh 的那条仍带**
-	if len(root.sched.queue) != 2 {
-		t.Fatalf("两条残余任务应转回父队列，实际 %d", len(root.sched.queue))
+	if root.sched.queueLen() != 2 {
+		t.Fatalf("两条残余任务应转回父队列，实际 %d", root.sched.queueLen())
 	}
 	var hasResponseCh bool
-	for _, task := range root.sched.queue {
+	for _, task := range root.sched.queueSnapshot() {
 		if task.Event != nil && task.Event.ResponseCh != nil {
 			hasResponseCh = true
 		}
@@ -557,8 +558,8 @@ func TestResidualDropNotifiesSyncCaller(t *testing.T) {
 		t.Fatal("★ drop 未通知同步调用方：cli/a2a 会永久挂起")
 	}
 	// drop 后父队列不应多出东西
-	if len(root.sched.queue) != 0 {
-		t.Errorf("drop 不应把任务转回父队列，实际 %d", len(root.sched.queue))
+	if root.sched.queueLen() != 0 {
+		t.Errorf("drop 不应把任务转回父队列，实际 %d", root.sched.queueLen())
 	}
 }
 
@@ -657,7 +658,7 @@ func TestKernelNoticeIsNeverOffloaded(t *testing.T) {
 	}
 	// 说明必须还在队列里（留给主 agent 看），不能被搬走
 	var noticeLeft bool
-	for _, task := range root.sched.queue {
+	for _, task := range root.sched.queueSnapshot() {
 		if task.Event != nil && isKernelNotice(task.Event) {
 			noticeLeft = true
 		}

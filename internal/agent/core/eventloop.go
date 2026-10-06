@@ -279,12 +279,21 @@ func (a *Agent) mediaToBlocks(payload map[string]interface{}, mediaType string, 
 	case "image":
 		desc = a.inputCfg.Image.DescribePrompt
 		if desc == "" {
-			desc = fmt.Sprintf("从 %s 收到了一张图片，请使用 describe_image 工具查看详情。", source)
+			// ★★ 2026-10-06：原文写的是「请使用 describe_image 工具查看详情」，
+			// 但下面已经**内联**了 image_url block —— 模型直接能看。
+			// 更糟的是：该工具已于本日移出为内置插件 multimodal，
+			// 它需要 path 或 digest，而用户直传的图片两者都没有 ⇒
+			// 模型照着提示词调它，必然拿到「没有可处理的媒体」错误。
+			desc = fmt.Sprintf("从 %s 收到了一张图片（已随本消息附上，请直接查看）。", source)
 		}
 	case "audio":
 		desc = a.inputCfg.Audio.DescribePrompt
 		if desc == "" {
-			desc = fmt.Sprintf("从 %s 收到了一段音频，请使用 transcribe_audio 工具查看内容。", source)
+			// 同上：audio_url block 已内联。不要指示调 transcribe_audio
+			// （它现在需要 path/digest）；若模型本身不处理音频，
+			// 应如实告知用户，而不是调一个注定失败的工具。
+			desc = fmt.Sprintf("从 %s 收到了一段音频（已随本消息附上）。"+
+				"若你能直接处理音频请转写；若不能，请如实告知，不要编造内容。", source)
 		}
 	}
 	blocks = append(blocks, agentAPI.ContentBlock{Type: "text", Text: desc})

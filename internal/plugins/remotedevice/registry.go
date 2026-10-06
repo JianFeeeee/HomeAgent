@@ -2,9 +2,12 @@ package remotedevice
 
 import (
 	"bufio"
+	"bytes"
 	"crypto/sha1" // RFC6455 规定 Sec-WebSocket-Accept 必须用 SHA-1，勿改
+	"crypto/sha256"
 	"encoding/base64"
 	"encoding/binary"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -153,6 +156,145 @@ func (r *Registry) SetMediaDir(dir string) {
 	r.mu.Lock()
 	r.mediaDir = dir
 	r.mu.Unlock()
+}
+
+// SaveInlineMedia 把一段内联媒体（data URL 或裸 base64）落盘，返回文件元信息。
+//
+// ★ 为什么抽出来（2026-10-06）：screensee 之前只把 base64 塞给视觉模型，
+// 带来两个问题——
+//
+//	① **上下文成本**：96KB 的截图 = 约 13 万 token 的内联 base64；
+//	② **诊断不了**：模型说「没收到图片」时，服务端无法证明图到底在不在
+//	   （只能靠日志里手写的元信息）。
+//
+// 落盘 + 回路径后，agent 可以**显式**调 describe_image(path=…)，
+// 且「图存在」这件事有可查证的落盘产物。
+//
+// 返回 meta（含 file/mime/size/sha256/width/height）；mediaDir 为空或
+// 写入失败时返回 error —— **不静默降级成内联**：调用方要据此决定是否
+// 退回旧行为，而静默回退正是「失败伪装成成功」的源头。
+func (r *Registry) SaveInlineMedia(name, payload, mimeHint string) (map[string]interface{}, error) {
+	r.mu.RLock()
+	dir := r.mediaDir
+	r.mu.RUnlock()
+	if dir == "" {
+		return nil, fmt.Errorf("未配置媒体落盘目录（SetMediaDir 未调用）")
+	}
+	if err := os.MkdirAll(dir, 0755); err != nil {
+		return nil, fmt.Errorf("创建媒体目录 %s 失败: %w", dir, err)
+	}
+
+	raw, mt, err := decodeInlineMedia(payload, mimeHint)
+	if err != nil {
+		return nil, err
+	}
+	if len(raw) == 0 {
+		return nil, fmt.Errorf("媒体内容为空（%s）", name)
+	}
+
+	// 文件名用内容摘要：同一张图重复截屏不堆文件，不同图不覆盖。
+	sum := sha256.Sum256(raw)
+	digest := hex.EncodeToString(sum[:])
+	ext := mediaExt(mt, "")
+	if ext == "" {
+		ext = ".bin"
+	}
+	fp := filepath.Join(dir, name+"_"+digest[:16]+ext)
+	if err := os.WriteFile(fp, raw, 0o644); err != nil {
+		return nil, fmt.Errorf("写媒体文件 %s 失败: %w", fp, err)
+	}
+
+	meta := map[string]interface{}{
+		"file":   fp,
+		"mime":   mt,
+		"size":   len(raw),
+		"sha256": digest,
+	}
+	if w, h, ok := imageDimensions(raw); ok {
+		meta["width"] = w
+		meta["height"] = h
+	}
+	return meta, nil
+}
+
+// decodeInlineMedia 把 data URL 或裸 base64 解成字节 + mime。
+func decodeInlineMedia(payload, mimeHint string) ([]byte, string, error) {
+	p := strings.TrimSpace(payload)
+	if p == "" {
+		return nil, "", fmt.Errorf("媒体载荷为空")
+	}
+	mime := mimeHint
+	if strings.HasPrefix(p, "data:") {
+		// data:[<mime>][;base64],<payload>
+		comma := strings.IndexByte(p, ',')
+		if comma < 0 {
+			return nil, "", fmt.Errorf("data URL 缺少逗号分隔符")
+		}
+		metaPart := p[len("data:"):comma]
+		if strings.Contains(metaPart, "base64") {
+			if i := strings.IndexByte(metaPart, ';'); i >= 0 {
+				mime = metaPart[:i]
+			} else {
+				mime = metaPart
+			}
+		} else if mime == "" {
+			mime = metaPart
+		}
+		p = p[comma+1:]
+	}
+	if mime == "" {
+		mime = "image/jpeg"
+	}
+	raw, err := base64.StdEncoding.DecodeString(p)
+	if err != nil {
+		// 有些设备会塞换行/URL-safe 变体
+		raw2, err2 := base64.RawStdEncoding.DecodeString(strings.TrimSpace(strings.NewReplacer("\n", "", "\r", "").Replace(p)))
+		if err2 != nil {
+			return nil, "", fmt.Errorf("base64 解码失败: %w", err)
+		}
+		raw = raw2
+	}
+	return raw, mime, nil
+}
+
+// imageDimensions 从图片头部解出像素尺寸，不解码全图。
+// 不认识的格式返回 ok=false —— 调用方据此省略字段，而不是填 0。
+func imageDimensions(raw []byte) (int, int, bool) {
+	if len(raw) < 24 {
+		return 0, 0, false
+	}
+	// PNG: \x89PNG\r\n\x1a\n + IHDR(width,height BE32 @16,20)
+	if bytes.HasPrefix(raw, []byte{0x89, 'P', 'N', 'G'}) {
+		return int(raw[16])<<24 | int(raw[17])<<16 | int(raw[18])<<8 | int(raw[19]),
+			int(raw[20])<<24 | int(raw[21])<<16 | int(raw[22])<<8 | int(raw[23]), true
+	}
+	// JPEG: 扫 SOFn 段
+	if bytes.HasPrefix(raw, []byte{0xFF, 0xD8}) {
+		for i := 2; i+9 < len(raw); {
+			if raw[i] != 0xFF {
+				i++
+				continue
+			}
+			marker := raw[i+1]
+			// SOF0..SOF3, SOF5..SOF7, SOF9..SOF11, SOF13..SOF15
+			if marker >= 0xC0 && marker <= 0xCF && marker != 0xC4 && marker != 0xC8 && marker != 0xCC {
+				h := int(raw[i+5])<<8 | int(raw[i+6])
+				w := int(raw[i+7])<<8 | int(raw[i+8])
+				if w > 0 && h > 0 {
+					return w, h, true
+				}
+			}
+			if i+3 >= len(raw) {
+				break
+			}
+			segLen := int(raw[i+2])<<8 | int(raw[i+3])
+			if segLen < 2 {
+				break
+			}
+			i += 2 + segLen
+		}
+	}
+	return 0, 0, false
 }
 
 // mediaExt 按 mime/kind 推断扩展名。
@@ -913,22 +1055,17 @@ func (r *Registry) handleWS(conn net.Conn, rw *bufio.ReadWriter, handshakeAuthor
 			// 媒体落盘模式：写入 <mediaDir>/<reqID>.<ext>，cmd_result 返回 file 路径。
 			// 大体积 base64 内联会撑爆 LLM 上下文（一段 10s 录像即数 MB），
 			// agent 应拿路径后用 files/describe_image/ocr 等工具消费。
-			r.mu.RLock()
-			mediaDir := r.mediaDir
-			r.mu.RUnlock()
-			if mediaDir != "" {
-				if err := os.MkdirAll(mediaDir, 0755); err == nil {
-					fp := filepath.Join(mediaDir, reqID+mediaExt(acc.mime, acc.kind))
-					if werr := os.WriteFile(fp, data, 0644); werr == nil {
-						res["file"] = fp
-					} else {
-						log.Printf("[remotedevice] media write %s: %v", fp, werr)
-					}
-				} else {
-					log.Printf("[remotedevice] media dir %s: %v", mediaDir, err)
+			if meta, err := r.SaveInlineMedia(reqID, base64.StdEncoding.EncodeToString(data), acc.mime); err == nil {
+				for k, v := range meta {
+					res[k] = v
 				}
+			} else {
+				log.Printf("[remotedevice] media save %s: %v", reqID, err)
 			}
-			// 未配置落盘目录时保持旧行为：base64 内联返回（小体积数据仍可用）
+			// 未落盘时保持旧行为：base64 内联返回（小体积数据仍可用）。
+			// ★ 这里仍内联是可接受的退化——上面的 log 已记录原因。
+			//   screensee 那边不同：它把落盘失败当**工具失败**上抛，
+			//   因为「拿到了图却没落盘」会让 agent 拿不到路径也无从排查。
 			if _, hasFile := res["file"]; !hasFile {
 				res["data_base64"] = base64.StdEncoding.EncodeToString(data)
 			}
