@@ -539,7 +539,7 @@ targetUsage   = min(maxCtx × 0.8, 600000)        // 工作面：封顶 600K
 
 - SQLite 存储，`config` 表 + `config_<plugin>` 独立表
 - 命名空间：`core.*` / `plugin.<name>.*`
-- `RegisterDefault` 插入 ~80 个默认键（8 个 LLM 源的 seeds）
+- `RegisterDefault` 插入 ~80 个默认键（含 1 个 LLM 源 seed，其余源由部署时添加）
 - WebUI 设置页 `/api/v1/settings` 读写
 
 
@@ -557,7 +557,7 @@ internal/
 │   └── personal.go        — 人格加载
 ├── plugin/
 │   ├── registry.go        — 注册表 + 生命周期
-│   ├── dynamic.go         — .so 动态加载器
+│   ├── dynamic.go         — 加载通道分派（proc / lua / skill）；.so 仅剩给明确报错
 │   └── manifest.go        — plugin.json 元数据
 ├── plugins/               — 内置插件实现
 │   ├── all.go             — 空白导入
@@ -571,6 +571,7 @@ internal/
 │   ├── agentcli/          — PTY 终端
 │   ├── healthcheck/       — 健康检查
 │   ├── pluginmgr/         — 插件管理器
+│   ├── skillmgr/          — Skill 插件管理
 │   └── cfgmgr/            — 配置管理
 ├── sdk/                   — PluginSDK 定义
 │   ├── plugin.go          — Plugin 接口 + PluginSDK
@@ -588,13 +589,11 @@ internal/
 ├── knowledge/knowledge.go — 知识库
 ├── lua/
 │   ├── vm.go              — Lua VM (json/log/http)
-│   └── adapters/          — 8 个 LLM 适配器脚本
+│   └── adapters/          — 10 个 LLM 协议适配器脚本
 ├── config/registry.go     — SQLite 配置中心
 ├── events/bus.go          — 事件总线
 ├── tracker/               — OverlayFS 变更追踪
 ├── supervisor/            — 守护进程管理
-├── skill/                 — Skill 插件管理
-│   └── manager.go         — Skill 加载/匹配
 └── meta/                  — 元信息
     └── meta.go            — Agent 元数据
 ```

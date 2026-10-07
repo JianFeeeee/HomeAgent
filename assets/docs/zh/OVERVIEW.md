@@ -25,16 +25,17 @@ HomeAgent 是一个持续运行的个人智能 Agent 框架。
 
 三层递进：上下文 → 冷归档 → 长期图记忆，构成从短期到持久的信息衰减与整合管道。
 
-**媒体记忆（v1.1.0 起）** — 图片/音频不是附属物，而是三层里的一类节点：
-- **内容寻址存储（CAS）**：digest 寻址，元数据在 SQLite、blob 在磁盘，相同字节只存一份，
+**媒体记忆（v1.2.0 起：一等记忆块）** — 图片/音频不是附属物，而是记忆的一等节点：
+- **内容寻址存储（CAS）**：digest 寻址，元数据在 SQLite、blob 在磁盘（两级分桶），相同字节只存一份，
   每次 `Get` 重校 digest（磁盘损坏静默返回脏数据比报错更危险）
-- **引用计数 GC**：`owner_kind/owner_id/digest` 三元组为主键，上下文事件/文档/图谱句子各自持引用；
-  **有引用者绝不删除**，仅回收无主且超过 `minAge` 的内容
-- **描述文本才是持久语义记忆**：视觉模型生成的描述以
-  `[<mime> <短digest>] <描述>` 标记形式写进纯文本记忆，参与向量检索与蒸馏；
-  blob 只是可被容量 GC 淘汰的缓存。几个月后“那张紫蓝红三色带图”仍可检索，靠的是描述而不是字节
+- **媒体块直接参与向量检索**：块携带**自己的多模态向量与指纹**，正文里不再有任何媒体标记
+- **无独立 GC、无引用计数、无 keep-set**：记忆块遵循单层不变量——Context → Document → Graph
+  是块的**迁移**，不是复制、也不靠引用保活；**删除块即删内容**
 - **v1.1.1 起贯通插件边界**：插件可通过 `InsertWithMedia` / `InjectInputMedia` 读写媒体，
   模型可用 `memory_commit` / `doc_commit` 的 `media_digests` 参数关联媒体
+- **旧机制已整体拆除**：此前把视觉模型生成的描述写进正文、以 `[<mime> <短digest>] <描述>` 标记
+  参与检索的**描述式索引**，以及 `media_refs` 引用计数，均已在 v1.2.0 删除——描述是模型生成的
+  二手信息，检索「别人转述的图片」不如检索图片自己的向量
 
 ## 它实际做了什么
 
@@ -45,7 +46,7 @@ HomeAgent 是一个持续运行的个人智能 Agent 框架。
 - `process.go` / `stages.go` — 处理管道：记忆召回 → 人格注入 → LLM 调用 → 工具执行 → 输出发送，7 阶段钩子
 - `toolcall.go` — 工具调度与执行
 - `context.go` — 上下文管理（预训练词嵌入评分 StaticEmbedder → CosineSimilarity，TF-IDF 回退），自动剪枝低相关性事件
-- LLM 调用通过 Provider 接口抽象，支持 8 个 LLM 源自动降级
+- LLM 调用通过 Provider 接口抽象，多源自动降级
 
 **记忆系统** (`internal/memory/`)：
 - **GraphDB** (`graph.go`) — SQLite，entities + relations 表，BFS 遍历
@@ -69,9 +70,10 @@ HomeAgent 是一个持续运行的个人智能 Agent 框架。
 
 **LLM Provider** (`internal/agent/api/provider.go`)：
 - Provider 接口：Name / Chat / ChatStream
-- 三种实现：OpenAIProvider（标准 OpenAI API）、OllamaProvider（本地）、LuaAdaptedProvider（Lua 胶水适配）
-- LuaAdapter 位于 `internal/lua/adapters/`，每个 LLM 源对应一个 `.lua` 脚本
-- 内置 8 个适配器：deepseek / openai / anthropic / gemini / mistral / groq / github / ollama
+- 唯一实现 `LuaAdaptedProvider`：所有源都经 Lua 适配脚本做请求/响应变换；
+  适配器脚本位于 `internal/lua/adapters/`，每类协议一个 `.lua` 脚本
+- 内置 10 个适配器：deepseek / openai / anthropic / gemini / mistral / groq / github / kimicode / ollama / server
+- 源（`core.llm.sources.<name>.*`）由部署时配置，数量不固定，不随内置适配器数绑定
 
 **WebUI** (`internal/plugins/webui/`)：
 - 嵌入式 SPA 仪表盘（`dashboard.html` 通过 `//go:embed` 打包）

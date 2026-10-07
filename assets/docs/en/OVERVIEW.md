@@ -25,18 +25,22 @@ The significance lies in clear responsibility boundaries: the kernel focuses on 
 
 Three progressive layers — context, cold archive, long-term graph memory — form an information decay and consolidation pipeline from short-term to persistent storage.
 
-**Media Memory (since v1.1.0)** — Images and audio are not attachments; they are a kind of node in all three layers:
-- **Content-addressed store (CAS)**: addressed by digest, metadata in SQLite and blobs on disk, identical bytes
-  stored once. Every `Get` re-verifies the digest (silently returning corrupt data is worse than an error).
-- **Reference-counted GC**: `owner_kind/owner_id/digest` is the primary key; context events, documents and graph
-  sentences each hold their own references. **Referenced items are never deleted** — only unowned content past
-  `minAge` is reclaimed.
-- **The description text is the durable semantic memory**: what the vision model produced is written into
-  plain-text memory as a `[<mime> <short digest>] <description>` marker and participates in vector retrieval and
-  distillation; the blob is only a cache that capacity GC may evict. Months later "that purple-blue-red
-  three-band chart" is still findable — via the description, not the bytes.
+**Media Memory (first-class memory blocks since v1.2.0)** — Images and audio are not attachments; they are first-class nodes of memory:
+- **Content-addressed store (CAS)**: addressed by digest, metadata in SQLite and blobs on disk (two-level
+  bucketing), identical bytes stored once. Every `Get` re-verifies the digest (silently returning corrupt
+  data is worse than an error).
+- **Blocks carry their own multimodal vector and fingerprint**, and are retrieved directly — there is no
+  media marker in the body text any more.
+- **No separate GC, no reference counting, no keep-set**: blocks follow the single-layer invariant —
+  Context → Document → Graph is a **migration** of a block, not a copy, and nothing is kept alive by
+  references; **deleting a block deletes its content.**
 - **Reaches the plugin boundary since v1.1.1**: plugins read and write media through `InsertWithMedia` /
   `InjectInputMedia`; the model attaches media via the `media_digests` argument of `memory_commit` / `doc_commit`.
+- **The old mechanism was removed entirely**: the **descriptive index** — writing the vision model's
+  description into the body text as a `[<mime> <short digest>] <description>` marker and retrieving by it —
+  together with `media_refs` reference counting, was deleted in v1.2.0. A description is second-hand
+  information produced by a model; retrieving "someone else's rendering of the image" is worse than
+  retrieving the image's own vector.
 
 ## What It Actually Does
 
@@ -47,7 +51,7 @@ Code is in the project root, implemented in Go.
 - `process.go` / `stages.go` — Processing pipeline: memory recall → persona injection → LLM call → tool execution → output delivery, 7 stage hooks
 - `toolcall.go` — Tool scheduling and execution
 - `context.go` — Context management (pretrained word embedding scoring StaticEmbedder → CosineSimilarity, TF-IDF fallback), automatic pruning of low-relevance events
-- LLM calls abstracted through Provider interface, supports 8 LLM sources with automatic fallback
+- LLM calls abstracted through the Provider interface, with multi-source automatic fallback
 
 **Memory System** (`internal/memory/`):
 - **GraphDB** (`graph.go`) — SQLite, entities + relations tables, BFS traversal
@@ -72,9 +76,11 @@ Code is in the project root, implemented in Go.
 
 **LLM Provider** (`internal/agent/api/provider.go`):
 - Provider interface: Name / Chat / ChatStream
-- Three implementations: OpenAIProvider (standard OpenAI API), OllamaProvider (local), LuaAdaptedProvider (Lua adapter)
-- LuaAdapter located at `internal/lua/adapters/`, each LLM source has a corresponding `.lua` script
-- 8 built-in adapters: deepseek / openai / anthropic / gemini / mistral / groq / github / ollama
+- Single implementation, `LuaAdaptedProvider`: every source goes through a Lua adapter script that
+  transforms requests/responses; adapter scripts live in `internal/lua/adapters/`, one `.lua` per protocol
+- 10 built-in adapters: deepseek / openai / anthropic / gemini / mistral / groq / github / kimicode / ollama / server
+- Sources (`core.llm.sources.<name>.*`) are configured at deploy time — the count is deployment-specific
+  and is not tied to the number of built-in adapters
 
 **WebUI** (`internal/plugins/webui/`):
 - Embedded SPA dashboard (`dashboard.html` packaged via `//go:embed`)
