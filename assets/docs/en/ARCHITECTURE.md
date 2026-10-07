@@ -283,9 +283,7 @@ Agent
   ▼
 Provider Interface (Name / Chat / ChatStream)
   │
-  ├── OpenAIProvider   — Standard OpenAI API
-  ├── OllamaProvider   — Local Ollama
-  └── LuaAdaptedProvider (primary)
+  └── LuaAdaptedProvider (the only implementation)
       ├── Serialize CompletionRequest → JSON
       ├── adapter.transform_request() → API format
       ├── HTTP request + adapter.headers
@@ -482,7 +480,7 @@ Code: `internal/agent/core/eventloop.go` — `interceptLoop` / `drainInterrupts`
 
 - SQLite storage, `config` table + `config_<plugin>` independent tables
 - Namespaces: `core.*` / `plugin.<name>.*`
-- `RegisterDefault` inserts ~80 default keys (seeds for 8 LLM sources)
+- `RegisterDefault` inserts ~80 default keys (including 1 LLM source seed; further sources are added at deploy time)
 - WebUI settings page `/api/v1/settings` for read/write
 
 
@@ -500,7 +498,7 @@ internal/
 │   └── personal.go        — Persona loading
 ├── plugin/
 │   ├── registry.go        — Registry + lifecycle
-│   ├── dynamic.go         — .so dynamic loader
+│   ├── dynamic.go         — Load-channel dispatch (proc / lua / skill); .so only remains to error loudly
 │   └── manifest.go        — plugin.json metadata
 ├── plugins/               — Built-in plugin implementations
 │   ├── all.go             — Blank imports
@@ -514,6 +512,7 @@ internal/
 │   ├── agentcli/          — PTY terminal
 │   ├── healthcheck/       — Health check
 │   ├── pluginmgr/         — Plugin manager
+│   ├── skillmgr/          — Skill plugin management
 │   └── cfgmgr/            — Config manager
 ├── sdk/                   — PluginSDK definitions
 │   ├── plugin.go          — Plugin interface + PluginSDK
@@ -531,13 +530,11 @@ internal/
 ├── knowledge/knowledge.go — Knowledge base
 ├── lua/
 │   ├── vm.go              — Lua VM (json/log/http)
-│   └── adapters/          — 8 LLM adapter scripts
+│   └── adapters/          — 10 LLM protocol adapter scripts
 ├── config/registry.go     — SQLite config center
 ├── events/bus.go          — Event bus
 ├── tracker/               — OverlayFS change tracking
 ├── supervisor/            — Daemon management
-├── skill/                 — Skill plugin management
-│   └── manager.go         — Skill loading/matching
 └── meta/                  — Meta information
     └── meta.go            — Agent metadata
 ```
