@@ -38,19 +38,40 @@ type stageLock struct {
 	ownerMu sync.Mutex
 	owner   string // 当前持锁的插件名，空表示未持有
 	held    bool
+	// depth 是**重入深度**：同一插件嵌套进入同一临界区的次数。
+	//
+	// 为什么需要它（2026-10-07 修）：见 Acquire 的注释 —— 同一插件
+	// 可在同一 stage 注册多个 handler（内核 RegisterStageFor 用 append），
+	// 它们并发扇出各发一次 stage.lock，第二个进来时就是同插件重入。
+	depth int
 }
 
 func newStageLock() *stageLock { return &stageLock{} }
 
 // Acquire 为 plugin 申请写锁，带超时。
 //
-// 同一插件重复 Acquire 会死锁（stage handler 不应嵌套加锁），
-// 故显式拒绝并返回错误——比让插件挂死 30s 更容易排查。
+// # 同插件重入：直接通过（2026-10-07 改）
+//
+// 三个版本的设计与代价（都实测过）：
+//
+//  1. 重入即报错 —— 生产 93 条 qq 报错，第二个 handler 永不执行
+//     （对 qq 而言那是权限门失效）。
+//  2. 重入即等待 —— 同进程重入是自己等自己，30s 超时死锁。**更糟**：
+//     我先实现了这版，跑判据立刻挂 30s，教训是「等待」不是重入的正解。
+//  3. 重入即通过（当前）—— 可重入锁语义。调用方是「插件的一个 stage
+//     handler」，而内核 RegisterStageFor 用 append：**同一插件可以在同一
+//     stage 注册多个 handler**，它们并发扇出、各发一次 stage.lock。
+//     同一进程内第二个进来时已在临界区内（同一进程只能串行跑），
+//     本就不该再取互斥量；Release 到 depth 0 才真正释放。
+//
+// 不同插件的互斥语义**完全不变**：仍需排队等待。
 func (l *stageLock) Acquire(plugin string) error {
+	// 可重入：已持有者直接进临界区（不取 mu、不排队）
 	l.ownerMu.Lock()
 	if l.held && l.owner == plugin {
+		l.depth++
 		l.ownerMu.Unlock()
-		return fmt.Errorf("proc: 插件 %s 重复申请 stage 锁（handler 内不应嵌套加锁）", plugin)
+		return nil
 	}
 	l.ownerMu.Unlock()
 
@@ -65,6 +86,7 @@ func (l *stageLock) Acquire(plugin string) error {
 		l.ownerMu.Lock()
 		l.owner = plugin
 		l.held = true
+		l.depth = 1
 		l.ownerMu.Unlock()
 		return nil
 	case <-time.After(lockWaitTimeout):
@@ -79,11 +101,15 @@ func (l *stageLock) Acquire(plugin string) error {
 				l.mu.Unlock()
 			}
 		}()
-		return fmt.Errorf("proc: 插件 %s 申请 stage 锁超时（%s）", plugin, lockWaitTimeout)
+		// ★ 文案带持锁方：排查时要能直接知道在等谁。
+		return fmt.Errorf("proc: 插件 %s 申请 stage 锁超时（%s，持锁方=%q）",
+			plugin, lockWaitTimeout, l.Owner())
 	}
 }
 
 // Release 释放写锁。非持锁者调用返回错误（防止串扰）。
+//
+// 可重入：depth 减到 0 才真正释放（见 stageLock.depth）。
 func (l *stageLock) Release(plugin string) error {
 	l.ownerMu.Lock()
 	if !l.held {
@@ -95,8 +121,16 @@ func (l *stageLock) Release(plugin string) error {
 		l.ownerMu.Unlock()
 		return fmt.Errorf("proc: 插件 %s 试图释放 %s 持有的 stage 锁", plugin, owner)
 	}
+	l.depth--
+	if l.depth > 0 {
+		// 仍在嵌套层：锁继续归该插件，但**不释放 mu**
+		// ——否则外层还在临界区里就被别人抢走。
+		l.ownerMu.Unlock()
+		return nil
+	}
 	l.owner = ""
 	l.held = false
+	l.depth = 0
 	l.ownerMu.Unlock()
 	l.mu.Unlock()
 	return nil
@@ -115,6 +149,7 @@ func (l *stageLock) ForceRelease(plugin string) bool {
 	}
 	l.owner = ""
 	l.held = false
+	l.depth = 0
 	l.ownerMu.Unlock()
 	l.mu.Unlock()
 	return true

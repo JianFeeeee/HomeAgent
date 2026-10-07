@@ -41,6 +41,44 @@ func (r *lockRegistry) bind(l *stageLock) {
 	r.mu.Unlock()
 }
 
+// unbind 在协调器结束时摘除路由（2026-10-07 修）。
+//
+// ★ 为什么必须有：协调器结束时它就不该再被路由到。
+//
+//	旧实现只 bind 从不解绑，于是 locks.lock 永远指向**上一轮**的锁；
+//	那一轮若有插件异常退出（defer unlock 未执行），它的 held 会一直挂着，
+//	下一轮的 stage.lock 打过来就成了“重复申请”。
+//	生产实测：本机 homed 93 条 qq 报错就是这么来的。
+//
+// 条件 compare 只在仍指向该锁时才摘（防止把新一轮的绑定误清）。
+func (r *lockRegistry) unbind(l *stageLock) {
+	r.mu.Lock()
+	if r.lock == l {
+		r.lock = nil
+	}
+	r.mu.Unlock()
+}
+
+// releaseIfLeaked 在协调器结束时释放可能没被释放的锁，并返回是否释放了。
+//
+// 自愈兜底：锁的所有权在内核进程（这正是 ForceRelease 存在的理由），
+// 那么“持锁的插件已经不在了”这件事内核必须能收尾——否则一把泄漏的锁
+// 会让整个 stage 通道逐轮卡死。
+func (r *lockRegistry) releaseIfLeaked(l *stageLock) bool {
+	if l == nil {
+		return false
+	}
+	owner := l.Owner()
+	if owner == "" {
+		return false
+	}
+	if l.ForceRelease(owner) {
+		log.Printf("[proc] stage 协调器结束时发现 %s 仍持有 stage 锁（异常路径未 unlock），已代为释放", owner)
+		return true
+	}
+	return false
+}
+
 func (r *lockRegistry) current() *stageLock {
 	r.mu.Lock()
 	defer r.mu.Unlock()

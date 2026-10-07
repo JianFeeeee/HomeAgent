@@ -72,20 +72,46 @@ func TestStageLock_ReleaseWithoutHoldRejected(t *testing.T) {
 	}
 }
 
-// handler 内嵌套加锁会死锁，应显式拒绝而不是让插件挂死到超时。
-func TestStageLock_ReentrantAcquireRejected(t *testing.T) {
+// 同插件重入：**直接通过**，不报错也不死锁（2026-10-07 改判据）。
+//
+// ## 这条判据原来要求什么，以及为什么改了
+//
+// 原断言：「同一插件重复加锁应被拒绝（否则死锁 30s）」。
+// 它在 2026-09 的实验 9 里是对的 —— 那时把 Acquire 做成等待，
+// 而同进程重入就是自己等自己。
+//
+// 生产实测（本机 homed 10-07，93 条）证明「拒绝」本身是错的：
+//
+//	[stage] before_toolcall handler error: proc: qq.stage.invoke:
+//	  申请 stage 锁: proc: 插件 qq 重复申请 stage 锁（handler 内不应嵌套加锁）
+//
+// qq 的 before_toolcall 是它的**权限门**；每次工具调用都跑。
+// 被拒绝 ⇒ handler 永远跑不到 ⇒ 权限门失效。
+//
+// 也不能改成「等待」：我先实现了那版，跑判据直接挂 30s
+// （同进程重入 = 自己等自己）。⇒ 唯一正解是**可重入**。
+//
+// 断言仍要守住的那件事：**别的插件必须仍在门外互斥**
+// （见 TestStageLock_DifferentPluginsStillMutuallyExclusive）。
+func TestStageLock_ReentrantAcquirePassesThrough(t *testing.T) {
 	l := newStageLock()
 	if err := l.Acquire("A"); err != nil {
 		t.Fatalf("Acquire: %v", err)
 	}
 	defer l.Release("A")
 
-	err := l.Acquire("A")
-	if err == nil {
-		t.Fatal("同一插件重复加锁应被拒绝（否则死锁 30s）")
+	done := make(chan error, 1)
+	go func() { done <- l.Acquire("A") }()
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("★ 同插件重入不应报错（会让第二个 handler 永不执行）: %v", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("★ 同插件重入死锁了（自己等自己）—— 比报错更糟，会把整个 stage 卡住")
 	}
-	if !strings.Contains(err.Error(), "重复申请") {
-		t.Errorf("错误信息应说明重复加锁，实际: %v", err)
+	if l.Owner() != "A" {
+		t.Errorf("重入后 Owner 应仍为 A，实际 %q", l.Owner())
 	}
 }
 

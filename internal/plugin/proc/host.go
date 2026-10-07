@@ -261,6 +261,17 @@ func (h *Host) endStage(coord *stageCoordinator) error {
 	// 在回读未完时就改写共享段。
 	err := coord.finish(sc, written)
 	h.stageMu.Unlock()
+	// ★ 先代为释放可能泄漏的锁，再摘除路由（2026-10-07）。
+	//   顺序很重要：先释放才有意义（锁已无人持有时本就没东西可释放），
+	//   而摘除必须最后——否则释放期间来的 stage.lock 会打到 nil 上。
+	//
+	//   这两件事缺一不可：
+	//     · releaseIfLeaked —— 插件异常路径未 unlock 时，锁不会毒化下一轮
+	//     · unbind       —— 下一轮的 stage.lock 不得再打到本轮的旧锁上
+	if h.locks.releaseIfLeaked(coord.lock) {
+		log.Printf("[proc] stage 协调器结束时清理了泄漏的 stage 锁")
+	}
+	h.locks.unbind(coord.lock)
 	return err
 }
 
