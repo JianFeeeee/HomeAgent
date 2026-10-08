@@ -62,13 +62,27 @@ func TestDenseCrossModalRecall(t *testing.T) {
 	}
 	defer s.Stop()
 
-	// 两个正交方向：eax 表示“猫的图”，eby 表示“别的”
+	// 两个正交方向：eax 表示“猫的图”，eby 表示“别的”。
+	//
+	// ★ 桩的 key 必须与 denseFor 实际传入的文本**逐字一致**：
+	//   denseFor 算的是 `k.Name + " " + k.Content`，不是纯 Content。
+	//   写成纯 Content 会静默回落到 __default，两条条目就拿到同一向量。
+	//
+	// ★ ecy（第三个正交方向）给「别的条目」的正文：若 other 与 cat-photo
+	//   的正文同向量，纯稠密路下“猫”查询会让 other（余弦 1.0）排在
+	//   cat-photo（文本⊕图融合后 0.707）之前——那不是产品缺陷，是
+	//   **桩把所有未知文本映射到同一向量**造成的假象。
 	eax := []float64{1, 0, 0, 0}
 	eby := []float64{0, 1, 0, 0}
+	ecy := []float64{0, 0, 1, 0}
 	mm := &fakeMM{
 		dim: 4, fp: "fake-v1", loaded: true,
-		text: map[string][]float64{"__default": eby, "猫 图片 说明": eby},
-		img:  map[string][]float64{"__default": eby, "d-cat": eax},
+		text: map[string][]float64{
+			"__default":         eby,
+			"cat-photo 猫 图片 说明": eby,
+			"other 完全无关的正文":     ecy,
+		},
+		img: map[string][]float64{"__default": eby, "d-cat": eax},
 	}
 	s.SetDenseSpace(mm)
 	s.SetMediaGetter(fakeMedia{byDigest: map[string][]byte{"d-cat": []byte("d-cat")}})
@@ -96,7 +110,10 @@ func TestDenseCrossModalRecall(t *testing.T) {
 	if !(hits[0].score > 0.5) {
 		t.Errorf("cat-photo 与查询向量应显著同向，实为 %f", hits[0].score)
 	}
-	// 正文里的“猫”字查询也应召回它（文本路 + 稠密路共同作用）
+	// 正文里的“猫”字查询也应召回它。
+	// ★ 纯稠密路下这里的分数是 1.0（查询向量与 cat-photo 正文向量同向），
+	//   而 other 是正交的 0 —— 前提是桩给 other 一个**真正无关**的方向
+	//   （见上面 ecy 的说明）。
 	if got := s.Search("猫", 3); len(got) == 0 || got[0].Name != "cat-photo" {
 		t.Errorf("按正文查询应召回 cat-photo，实为 %v", namesOf(got))
 	}

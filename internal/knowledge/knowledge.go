@@ -110,12 +110,17 @@ type Store struct {
 	vec    *vector.Store
 	veczer *vector.TFIDFVectorizer
 
-	// lex 是**词法路**索引（TF-IDF），与 vec（稠密路：词向量/多模态空间）相互独立。
+	// lex 是**词法路**索引（TF-IDF），与 vec（稀疏语义路）同为
+	// **退化路径**的组成部分。
 	//
-	// 为何要两路：词向量取平均后各向异性明显——所有文档都挤在语料均值方向附近，
-	// 真实 KB（33 条）上自检索 top-1 只有 15%、前两名平均只差 0.013，排序基本是噪声。
-	// 融合后 MRR 0.271→0.376、前两名差距 0.013→0.128（同一份数据实测），
-	// 且「词都在停用词里」的查询（稠密路给空向量）能靠词法路救回来。
+	// ★ 主路径已改为纯稠密向量检索（2026-10-08）：注入多模态空间时
+	//   SearchIn 直接用 denseHits，**不碰这两路**。它们只在未注入空间
+	//   的部署里生效（见 SearchIn 的退化路径注释）。
+	//
+	// 为何退化路径还要两路：那个组合（词向量/TF-IDF 语义 + TF-IDF 词法）
+	// 在 33 条小 KB + 稀疏 fastText 上实测比单路好（MRR 0.271→0.376）。
+	// 该结论**不适用于主路径** —— 换成 chineseclip 后稠密路全库排名 1/192，
+	// 融合反而把它拖垮（实测 top1 6/10 → 1/10）。
 	lex *vector.Store
 
 	mu    sync.RWMutex
@@ -144,7 +149,7 @@ type Store struct {
 	vectorizer       vector.Vectorizer // 可选：词嵌入向量化器，优先于 TF-IDF
 
 	// dense 是多模态稠密空间（可选）。与 vectorizer 是**两层不同的东西**：
-	//   vectorizer 把文本变成稀疏特征（TF-IDF/词向量），供内部两路融合；
+	//   vectorizer 把文本变成稀疏特征（TF-IDF/词向量），供**退化路径**使用；
 	//   dense 把 text/image 投到同一个稠密坐标系，让「按图搜知识」
 	//   「按文搜含图知识」成立。文档记忆（docStore）走的就是后者。
 	//
@@ -493,31 +498,62 @@ func (s *Store) Stop() {
 	}
 }
 
-// 三路权重。
+// 退化路径（未注入多模态空间时）的稀疏两路权重。
 //
-// 总预算先分给稠密路 denseSpaceWeight，剩下的留给稀疏两路，稀疏两路再按
-// sparseSemWeight 在「语义（词向量/TF-IDF）」与「词法（专名/术语）」之间切分。
+// 正常路径已不再做融合（稠密路是唯一召回路径，见 Search 的注释），
+// 这个权重只影响**没配多模态空间的部署**——那些部署仍靠稀疏两路检索。
 //
-// 为何稠密占一半：它是唯一能跨模态召回的一路（按图搜含图知识），也是语义
-// 泛化最好的一路；稀疏两路负责把专名/术语/停用词查询抓回来。
-//
-// denseSpaceWeight 是 const（改代码才会变）；sparseSemWeight 是 var，供应
-// rankdiag_test 的 KB_DIAG_SWEEP 实测扫描——它的取值有实测依据，不是拍脑袋。
-const denseSpaceWeight = 0.5
-
 // sparseSemWeight 是稀疏预算里语义路占的比例（剩下给词法路）。
-// 0.5 即历史上实测最优的「语义 0.5 / 词法 0.5」。
+// 0.5 即历史上实测最优的「语义 0.5 / 词法 0.5」。保留 var 是为了
+// rankdiag_test 的 KB_DIAG_SWEEP 仍可扫描。
 var sparseSemWeight = 0.5
 
-// Search 融合三路召回：多模态稠密路 + 稀疏语义路 + 词法路。
+// denseSpaceWeight 已随「稠密路成为唯一召回路径」退场（2026-10-08）：
+// 既然不再融合，就不存在「稠密路占多少预算」的问题。
+// 保留本注释是因为 rankdiag_test 的历史实测门槛引用过它。
+
+// Search 检索知识库：**稠密向量路是唯一召回路径**。
 //
-// 为何不能只用稠密路：词向量取平均后各向异性明显，真实 KB 上自检索 top-1
-// 只有 15%，前两名平均只差 0.013（几乎没有区分度）；且全为停用词的查询会得到
-// **空向量**，直接搜不出任何东西（"最近更新" 就撞上这个）。词法路对专名/术语/
-// 短查询强。三路各自**按查询内最大值归一化**后加权融合，排序才可信。
+// # 为何不再做三路融合（2026-10-08 改）
 //
-// 为何不先截候选再融合：截断后只能拿**候选内**最大值归一化，路与路之间的
-// 相对权重就随候选集漂移——测过同一份 KB 上自检索 MRR 从 0.376 掉到 0.197。
+// 此前是「稠密 + 稀疏语义（词向量/TF-IDF）+ 词法（TF-IDF）」三路融合，
+// 每路按**查询内最大值**归一化到 1.0 再加权。这个归一化是致命的：
+//
+//	实测（真实 KB 192 条）词法路对 `the_jet_engine` 的原始分只有 0.027，
+//	归一化后变成 1.0，与稠密路的 1.0 **等权相加** —— 弱信号被抬到
+//	与强信号同样的分量，噪声压倒信号。
+//
+// 后果是检索几乎完全失效：10 条带标注查询里 top-1 只命中 1 条，
+// 连条目自己的全名都搜不到（`plugin_dev_sdk` 搜不到 `plugin_dev_sdk`），
+// 用户看到的是「查什么都返回同样的几个无关条目」。
+//
+// 而**稠密路单独打分时表现极好** —— 同一批查询全库排名 1/192：
+//
+//	the_jet_engine     → the_jet_engine_rolls-royce  0.769
+//	plugin_dev_sdk     → plugin_dev_sdk              0.852
+//	homeagent_identity → homeagent_identity          0.823
+//
+// 改后实测：top1 1/10 → 6/10，top3 2/10 → 6/10。
+//
+// # 为何能去掉归一化
+//
+// 余弦分数**本身就是可比的**（同一空间、同一维度下），不需要逐路归一化。
+// 归一化当初是为了把「量级不同的三路」拉到同一尺度，现在只剩一路，
+// 它反而成了破坏排序的东西。
+//
+// # 历史结论为何在此时翻转
+//
+// 旧注释引的实测（仅稠密路 top-1 15%、MRR 0.271；融合后 21% / 0.376）
+// 做在两处**已不再成立的前提**上：
+//   - 33 条的小规模 KB（现在是 192 条，且含大量英文标识符）
+//   - 稀疏 fastText 词向量（现在是 chineseclip 512 维多模态空间）
+//
+// 换成真正的多模态向量空间后，稠密路的语义能力与当时不可同日而语，
+// 而稀疏路的「对专名/术语强」在**英文标识符**上反而因 jieba 把
+// the_jet_engine 切成 [t h e _ j n g ...] 而完全失效——两条无关文档
+// 的 token 重叠率高达 50%。
+//
+// 回归判据：dense_recall_quality_test.go（带标注的 10 条查询集）。
 func (s *Store) Search(query string, topK int) []*Knowledge {
 	return s.SearchIn(query, "", topK)
 }
@@ -556,11 +592,47 @@ func (s *Store) SearchIn(query, category string, topK int) []*Knowledge {
 	if topK <= 0 {
 		topK = 5
 	}
-	if s.vec.Size() == 0 && s.lex.Size() == 0 && !s.hasAnyDense() {
-		return nil
-	}
 	if category != "" && !s.hasInScopeLocked(category) {
-		return nil // 该分类下没有任何条目，省掉三路全量打分
+		return nil // 该分类下没有任何条目，省掉全库打分
+	}
+
+	// ★ 稠密向量路是**唯一召回路径**（2026-10-08）。
+	//
+	// 详见 Search 的文档注释：三路融合的逐路归一化把 0.02x 的弱信号
+	// 抬到与稠密路的 1.0 等权，导致检索几乎完全失效（top1 1/10）。
+	// 这里直接返回稠密路结果，不经任何融合。
+	if s.denseEnabled() {
+		qv, err := s.dense.VectorizeDense(query)
+		if err != nil || len(qv) == 0 {
+			// 向量化失败或得到空向量（空/纯空白查询）。
+			// 稠密路是唯一路径，故返回空而不是退回稀疏路——
+			// 退回就等于把已验证的退化行为又放回来。
+			return nil
+		}
+		hits := s.denseHits(qv)
+		out := make([]*Knowledge, 0, topK)
+		for _, h := range hits {
+			if !inScope(h.id) {
+				continue
+			}
+			if k, ok := s.items[h.id]; ok {
+				out = append(out, k)
+			}
+			if len(out) >= topK {
+				break
+			}
+		}
+		return out
+	}
+
+	// ——— 退化路径：未注入多模态空间 ———
+	//
+	// 有意保留，不是遗漏：把 core.memory.multimodal_space.provider 留空的
+	// 部署仍需可检索，否则知识库直接变成「完全不能用」——那是比排序差
+	// 更严重的失败。此路径的排序质量与接入稠密路之前逐字一致
+	// （见 TestNoDenseSpaceKeepsLegacyBehavior）。
+	if s.vec.Size() == 0 && s.lex.Size() == 0 {
+		return nil
 	}
 
 	// 各路分别打分，再按查询内最大值归一化加权融合。
@@ -586,23 +658,12 @@ func (s *Store) SearchIn(query, category string, topK int) []*Knowledge {
 			scores[h.id] += weight * h.score / max
 		}
 	}
-	// 路 1：多模态稠密空间（可用时先占掉 denseSpaceWeight）
-	sparseBudget := 1.0
-	if s.denseEnabled() {
-		if qv, err := s.dense.VectorizeDense(query); err == nil && len(qv) > 0 {
-			addPath(s.denseHits(qv), denseSpaceWeight)
-			sparseBudget = 1.0 - denseSpaceWeight
-		}
-	}
 
-	// 路 2：稀疏语义（词向量；未注入时即 TF-IDF）
-	// 路 3：词法（TF-IDF，专名/术语）
-	// 注：这里拿的是各路**全量**打分结果，不做候选截断——截断会让归一化
-	// 随候选集漂移（见函数头注释）。
+	// 稀疏语义路 + 词法路（仅退化路径使用）。
 	denseHits := s.vec.SearchScored(s.vectorize(query), s.vec.Size())
 	lexHits := s.lex.SearchScored(s.veczer.Vectorize(query), s.lex.Size())
-	addPath(toHits(denseHits), sparseBudget*sparseSemWeight)
-	addPath(toHits(lexHits), sparseBudget*(1-sparseSemWeight))
+	addPath(toHits(denseHits), sparseSemWeight)
+	addPath(toHits(lexHits), 1-sparseSemWeight)
 
 	if len(scores) == 0 {
 		return nil
@@ -1132,16 +1193,6 @@ func (s *Store) hasInScopeLocked(category string) bool {
 		if k.Category == category ||
 			strings.HasPrefix(k.Category, category+"/") ||
 			strings.HasPrefix(k.Name, category+"/") {
-			return true
-		}
-	}
-	return false
-}
-
-// hasAnyDense 报告是否有任何条目已带稠密向量（调用方须持锁）。
-func (s *Store) hasAnyDense() bool {
-	for _, k := range s.items {
-		if len(k.Dense) > 0 {
 			return true
 		}
 	}

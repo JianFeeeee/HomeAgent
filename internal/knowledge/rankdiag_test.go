@@ -11,26 +11,34 @@ import (
 	"github.com/JianFeeeee/HomeAgent/internal/memory"
 )
 
-// 知识库检索质量判据（真实数据，默认跳过）。
+// 知识库检索质量判据（**退化路径**：稀疏两路，无多模态空间）。
 //
 //	KB_DIAG=1                              → 跑并打印指标
 //	KB_DIAG=1 KB_DIAG_ASSERT=1             → 额外断言门槛（CI/回归用）
 //	KB_DIAG_ROOT / KB_DIAG_MODELS          → 覆盖数据与词向量路径
 //
-// 判据选「自检索 top-1 / MRR」的原因：不依赖人工标注问答对，且能直接量出
-// **区分度**——词向量取平均后所有文档挤在语料均值附近，前两名分差极小，
-// 排序等于噪声；这一项掉下来就说明检索坏了。
+// # 这条判据现在测的是什么（2026-10-08 改）
 //
-// 实测（33 条真实 KB）：
+// 主路径已改为**纯稠密向量检索**（见 knowledge.go 的 Search 注释），
+// 质量判据在 dense_recall_quality_test.go。本诊断不注入多模态空间，
+// 因此它走的是**退化路径**——即把 core.memory.multimodal_space.provider
+// 留空的部署所用的稀疏两路。
 //
-//	修复前（仅稠密路）  top-1 5/33 = 15%，MRR 0.271，平均分差 0.0133
-//	修复后（稠密+词法融合）top-1 7/33 = 21%，MRR 0.376，平均分差 0.1280
-//	门槛取 MRR ≥ 0.34 且分差 ≥ 0.10（留出余量，只挡「退化回噪声」）
+// 保留它的理由：退化路径仍要能检索（否则那些部署直接变成知识库不可用），
+// 而这条路的质量历史上就没好过——实测（生产 KB 37 条）自检索 top-1 仅 24%。
+// 把它量出来，是为了不把「主路修好了」误当成「两路都好了」。
+//
+// # 门槛的来源
+//
+// 注释里的历史实测（仅稠密路 top-1 15% / MRR 0.271；三路融合 21% / 0.376）
+// 做在**33 条 KB + 稀疏 fastText** 上，而那次「融合更优」的结论已被
+// 纯稠密路推翻（换成 chineseclip 后稠密路全库排名 1/192）。
+// 下面两个门槛沿用至今，只用于挡退化路径自己变差，**不代表主路径的水平**。
 func TestRankingQualityOnRealKB(t *testing.T) {
 	if os.Getenv("KB_DIAG") == "" {
 		t.Skip("需要 KB_DIAG=1（真实 KB + 词向量文件）")
 	}
-	srcRoot := envOr("KB_DIAG_ROOT", envOr("KB_DIAG_ROOT", "/data/knowledge"))
+	srcRoot := envOr("KB_DIAG_ROOT", envOr("KB_DIAG_ROOT", "/home/newqqagent/knowledge"))
 	models := envOr("KB_DIAG_MODELS", "/data/cc.zh.top200k.vec,/data/cc.en.top200k.vec")
 	emb := memory.NewStaticEmbedder(strings.Split(models, ",")...)
 
@@ -131,11 +139,14 @@ func TestRankingQualityOnRealKB(t *testing.T) {
 	}
 
 	if os.Getenv("KB_DIAG_ASSERT") != "" {
+		// 门槛只针对**退化路径**：实测生产 KB 37 条上 MRR 0.358 / top-1 24%。
+		// 这两个数都远低于主路径（纯稠密路全库排名 1/192），别拿它们
+		// 当作知识库的检索水平。
 		if mrr/n < 0.34 {
-			t.Fatalf("检索质量退化：MRR %.3f < 0.34（修复前 0.271，修复后 0.376）", mrr/n)
+			t.Fatalf("退化路径检索质量又变差了：MRR %.3f < 0.34（实测 0.358）", mrr/n)
 		}
 		if rate < 18 {
-			t.Fatalf("检索质量退化：top-1 %.0f%% < 18%%", rate)
+			t.Fatalf("退化路径检索质量又变差了：top-1 %.0f%% < 18%%（实测 24%%）", rate)
 		}
 	}
 }
