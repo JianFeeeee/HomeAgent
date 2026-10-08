@@ -1,6 +1,7 @@
 package proc
 
 import (
+	"errors"
 	"fmt"
 	"log"
 	"os"
@@ -51,6 +52,11 @@ type Host struct {
 	coordMu       sync.Mutex
 	coord         *stageCoordinator
 	sup           *Supervisor
+
+	// closing 置真后 beginStage 直接拒绝新 stage（Close 与新 stage 进场的赛跑：
+	// unmap 后若又进来一个 stage，它照样会去写已释放的段）。
+	// 用 atomic 是为了让 beginStage 无需额外加锁就能读到。
+	closing atomic.Bool
 }
 
 // NewHost 创建共享段（平台层 allocShm + 布局初始化）。
@@ -164,13 +170,40 @@ func (h *Host) Close() error {
 		c.Close()
 	}
 
+	// ★ 等正在进行的 stage 收尾（2026-10-08 修 shutdown use-after-free）。
+	//
+	// 上面的注释只处理了**事件环**一路写者，但漏了 **stage 数据面**：
+	//
+	// 上面的注释只处理了**事件环**一路写者，但漏了 **stage 数据面**：
+	// beginStage 的首进者会在 stageMu 保护下调 Segment.WriteAll（写共享段），
+	// 而这条路径**不在**事件环订阅里，退订阅根本不影响它。
+	//
+	// 实测后果：每次关闭都 SIGSEGV（栈：stageCoordinator.enter →
+	// Segment.WriteAll → writeLocal → descOffset），
+	// 即首次进入的新进程日志里必然带一份“fatal error: fault”。
+	// 这还使部署验证门形同虚设——分不清“新版本崩了”还是“旧版本关闭时崩”。
+	//
+	// 为何用 stageMu 而不是另加 done 通道：stageMu 的语义已经是
+	// 「本轮 stage 独占共享段」（首进者取、最后离开者放，见 beginStage/
+	// endStage）。取到它就意味着“此刻没有 stage 在写段”，正是我们要等的东西，
+	// 不必再造一个会与它失去同步的并行状态。
+	//
+	// 锁序：stageMu 是这组锁的最后一级（beginStage 是 coordMu → stageMu，
+	// endStage 不取锁），此处独占获取不会成环。
+	// 注意 StageHost 的 handler 已由 StopAll/上层停过，不会无限持锁。
+	h.closing.Store(true) // 先挡住新 stage，再等旧 stage 退出
+	h.stageMu.Lock()
+
 	var firstErr error
 	if h.data != nil {
+		// 先让段不可再写（置 nil 后 segdata 已失效），
+		// 再真正 unmap——完成写入的 stage 已在上面等完。
 		if err := freeShm(h.memfd, h.data); err != nil && firstErr == nil {
 			firstErr = err
 		}
-		h.data, h.memfd, h.unified = nil, nil, nil
+		h.data, h.memfd, h.unified, h.seg = nil, nil, nil, nil
 	}
+	h.stageMu.Unlock()
 	if h.evtfd != nil {
 		h.evtfd.Close()
 		h.evtfd = nil
@@ -192,6 +225,11 @@ func (h *Host) Close() error {
 //
 // 锁序：stageMu → coordMu。endStage 只解锁 stageMu、不获取，所以无环。
 func (h *Host) beginStage(sc *pubsdk.StageContext) (*stageCoordinator, error) {
+	// Close 已开始：共享段即将/已被 unmap，此时再写段就是 use-after-free
+	// （runtime fatal，recover 捕不到）。直接拒绝，让上层得到明确错误。
+	if h.closing.Load() {
+		return nil, errors.New("proc: 内核正在关闭，拒绝新 stage")
+	}
 	h.coordMu.Lock()
 	if h.coord == nil {
 		// 首个进入者：独占共享段直到本次 stage 全部插件离开。
