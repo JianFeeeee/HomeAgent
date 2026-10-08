@@ -124,10 +124,10 @@ func (g *GraphDB) MigrateLegacyTextEntities(embed EntityEmbedder) (MigrateResult
 		blockID := legacyEntityBlockID(e.id, e.name)
 		src := NewSentenceBlock(e.name, e.createdAt, e.updatedAt)
 		srcBlockID := src.ID
-		if err := putBlockTx(tx, src); err != nil {
+		if _, err := putBlockTx(tx, src); err != nil {
 			return res, fmt.Errorf("put sentence block for entity %d: %w", e.id, err)
 		}
-		if err := putBlockTx(tx, MemoryBlock{
+		if _, err := putBlockTx(tx, MemoryBlock{
 			ID:          blockID,
 			Modality:    BlockText,
 			Text:        e.name,
@@ -244,7 +244,7 @@ func (g *GraphDB) MigrateLegacyTextEntities(embed EntityEmbedder) (MigrateResult
 			return res, err
 		}
 		sb := NewSentenceBlock(text, time.Time{}, time.Time{})
-		if err := putBlockTx(tx, sb); err != nil {
+		if _, err := putBlockTx(tx, sb); err != nil {
 			_ = sentRows.Close()
 			return res, fmt.Errorf("put sentence block: %w", err)
 		}
@@ -406,12 +406,23 @@ func ensureSentenceTx(tx *sql.Tx, text string) (int64, error) {
 	return id, nil
 }
 
-func putBlockTx(tx *sql.Tx, b MemoryBlock) error {
+// ★ 返回值：第一个是**是否真的新建了行**（供星图「生长」动画区分新建/更新），
+// 第二个是 error。
+//
+// 为何要区分：星图的「生长」动画只该在**真·新块**上播。若把「写过了」
+// 也算新建，重复提交同一事实（LLM 高频重试）会让旧块反复长出来 ——
+// 看着像新记忆，实际是同一个东西。
+//
+// 判据走「先 SELECT 存在性」而不是 `RETURNING (xmax = 0)`：后者在
+// **事务 + ON CONFLICT** 组合下报 `no such column: xmax`
+// （实测：autocommit 下可用，套上 tx.Begin() 后不可用），而本函数只在事务里被调用。
+// 代价是多一次主键点查，开销可忽略。
+func putBlockTx(tx *sql.Tx, b MemoryBlock) (bool, error) {
 	vectorJSON := ""
 	if len(b.Vector) > 0 {
 		raw, err := json.Marshal(b.Vector)
 		if err != nil {
-			return err
+			return false, err
 		}
 		vectorJSON = string(raw)
 	}
@@ -455,6 +466,26 @@ func putBlockTx(tx *sql.Tx, b MemoryBlock) error {
 	if !explicitTime {
 		tsUpdate = "updated_at = memory_blocks.updated_at"
 	}
+	// ★ 先用 SELECT 判定「是否已存在」，而不是靠 RETURNING (xmax = 0)。
+	//
+	// 为什么不用 xmax：它在**事务 + ON CONFLICT** 组合下直接报
+	// `no such column: xmax`（实测：同样的语句在 autocommit 下可用，
+	// 一句 tx.Begin() 包起来后就不可用）。而本函数**只在事务里**被调用
+	// （调用方全部持 tx）⇒ xmax 在这里永远不可用。
+	//
+	// 代价：多一次主键查找。这是索引点查，开销可忽略；
+	// 而它换来的是可靠的「新建 vs 更新」判据 —— 星图的生长动画依赖它，
+	// 报错就等于整个记忆写入失败（比多一次点查贵得多）。
+	var existed int
+	switch err := tx.QueryRow(`SELECT 1 FROM memory_blocks WHERE id = ?`, b.ID).Scan(&existed); err {
+	case nil:
+		// 已存在 ⇒ 本次是更新，不算新建。
+	case sql.ErrNoRows:
+		// 不存在 ⇒ 本次会新建。
+	default:
+		return false, err
+	}
+
 	_, err := tx.Exec(`INSERT INTO memory_blocks
 		(id, modality, text_content, payload_digest, mime, size, width, height,
 		 vector, fingerprint, source, tool, scene, semantic_type, created_at, updated_at)
@@ -471,7 +502,10 @@ func putBlockTx(tx *sql.Tx, b MemoryBlock) error {
 		b.ID, b.Modality, b.Text, b.PayloadDigest, b.MIME, b.Size, b.Width, b.Height,
 		vectorJSON, b.Fingerprint, b.Source, b.Tool, b.Scene, b.SemanticType,
 		created, updated)
-	return err
+	if err != nil {
+		return false, err
+	}
+	return existed == 0, nil
 }
 
 // ★ 返回 (error, 是否真的新增了一行)。第二个返回值是给报告口径用的 ——

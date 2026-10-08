@@ -463,13 +463,31 @@ type BlockNeighbour struct {
 // 返回**重定向的边数**（不含被去重丢弃的重复边）。
 // 幂等：源块不存在时返回 (0, nil)。
 func (g *GraphDB) MergeBlocks(sourceText, targetText string) (int, error) {
+	n, srcID, dstID, err := g.mergeBlocksLocked(sourceText, targetText)
+	// ★ 上报必须在锁释放后（见 GraphDB.onAccess 的死锁说明）。
+	//   合入事件驱动星图的「两节点消失又出现」：源块被删、目标块接纳，
+	//   所以 Removed 给 src、Blocks 给 dst（前端据此播「消失→出现」时序）。
+	if err == nil && srcID != "" {
+		g.emitAccess(AccessEvent{
+			Op:      "merge",
+			Blocks:  []string{dstID},
+			Removed: []string{srcID},
+			Merged:  []MergePair{{From: srcID, To: dstID}},
+		})
+	}
+	return n, err
+}
+
+// mergeBlocksLocked 是 MergeBlocks 的实体（持 g.mu），
+// 额外返回源/目标块 ID 供外部上报（上报不能在持锁时做）。
+func (g *GraphDB) mergeBlocksLocked(sourceText, targetText string) (int, string, string, error) {
 	sourceText = strings.TrimSpace(sourceText)
 	targetText = strings.TrimSpace(targetText)
 	if sourceText == "" || targetText == "" {
-		return 0, fmt.Errorf("merge requires both source and target")
+		return 0, "", "", fmt.Errorf("merge requires both source and target")
 	}
 	if sourceText == targetText {
-		return 0, fmt.Errorf("merge source and target are identical: %q", sourceText)
+		return 0, "", "", fmt.Errorf("merge source and target are identical: %q", sourceText)
 	}
 
 	g.mu.Lock()
@@ -477,7 +495,7 @@ func (g *GraphDB) MergeBlocks(sourceText, targetText string) (int, error) {
 
 	src, err := g.blockByTextTxLocked(sourceText)
 	if err != nil {
-		return 0, err
+		return 0, "", "", err
 	}
 	if src == nil {
 		// ★ 必须报错，不能返回 (0, nil)。
@@ -495,25 +513,25 @@ func (g *GraphDB) MergeBlocks(sourceText, targetText string) (int, error) {
 		//   旧 MergeEntities 在这里返回 error，是对的。
 		//   幂等由**调用方**判断（合并后不要再合并同一个源），
 		//   不该由存储层替它猜。
-		return 0, fmt.Errorf("merge source block %q does not exist", sourceText)
+		return 0, "", "", fmt.Errorf("merge source block %q does not exist", sourceText)
 	}
 	dst, err := g.blockByTextTxLocked(targetText)
 	if err != nil {
-		return 0, err
+		return 0, "", "", err
 	}
 	if dst == nil {
 		// ★ 目标不存在必须报错。
 		//   返回 0 会让调用方以为合并成功了，而实际上什么都没做 ——
 		//   那正是「静默失效」的一种。
-		return 0, fmt.Errorf("merge target block %q does not exist", targetText)
+		return 0, "", "", fmt.Errorf("merge target block %q does not exist", targetText)
 	}
 	if src.ID == dst.ID {
-		return 0, nil
+		return 0, "", "", nil
 	}
 
 	tx, err := g.db.Begin()
 	if err != nil {
-		return 0, err
+		return 0, "", "", err
 	}
 	defer tx.Rollback()
 
@@ -528,7 +546,7 @@ func (g *GraphDB) MergeBlocks(sourceText, targetText string) (int, error) {
 		   AND COALESCE(session_id,'') != ''`,
 		dst.ID, src.ID)
 	if err != nil {
-		return 0, fmt.Errorf("redirect source edges: %w", err)
+		return 0, "", "", fmt.Errorf("redirect source edges: %w", err)
 	}
 	nOut, _ := res.RowsAffected()
 
@@ -538,7 +556,7 @@ func (g *GraphDB) MergeBlocks(sourceText, targetText string) (int, error) {
 		   AND COALESCE(session_id,'') != ''`,
 		dst.ID, src.ID)
 	if err != nil {
-		return 0, fmt.Errorf("redirect target edges: %w", err)
+		return 0, "", "", fmt.Errorf("redirect target edges: %w", err)
 	}
 	nIn, _ := res.RowsAffected()
 
@@ -567,7 +585,7 @@ func (g *GraphDB) MergeBlocks(sourceText, targetText string) (int, error) {
 		   AND COALESCE(session_id,'') != ''
 		   AND COALESCE(status,'') != 'deleted'`,
 		dst.ID, dst.ID, dst.ID, dst.ID); err != nil {
-		return 0, fmt.Errorf("dedupe self-loops: %w", err)
+		return 0, "", "", fmt.Errorf("dedupe self-loops: %w", err)
 	}
 
 	// ── ③ 清理指向源块的结构边 ────────────────────────────────
@@ -580,12 +598,12 @@ func (g *GraphDB) MergeBlocks(sourceText, targetText string) (int, error) {
 		 WHERE (source_kind='block' AND source_id=? AND COALESCE(session_id,'')='')
 		    OR (target_kind='block' AND target_id=? AND COALESCE(session_id,'')='')`,
 		src.ID, src.ID); err != nil {
-		return 0, fmt.Errorf("drop structural edges of source: %w", err)
+		return 0, "", "", fmt.Errorf("drop structural edges of source: %w", err)
 	}
 
 	// ── ④ 删源块 ─────────────────────────────────────────────
 	if _, err := tx.Exec(`DELETE FROM memory_blocks WHERE id = ?`, src.ID); err != nil {
-		return 0, fmt.Errorf("delete source block: %w", err)
+		return 0, "", "", fmt.Errorf("delete source block: %w", err)
 	}
 
 	// ── ⑤ 场景引用同步 ───────────────────────────────────────
@@ -596,13 +614,13 @@ func (g *GraphDB) MergeBlocks(sourceText, targetText string) (int, error) {
 		`UPDATE scene_refs SET ref_text = ?
 		 WHERE kind = 'block' AND ref_text = ?`,
 		dst.ID, src.ID); err != nil {
-		return 0, fmt.Errorf("repoint scene refs: %w", err)
+		return 0, "", "", fmt.Errorf("repoint scene refs: %w", err)
 	}
 
 	if err := tx.Commit(); err != nil {
-		return 0, err
+		return 0, "", "", err
 	}
-	return int(nOut + nIn), nil
+	return int(nOut + nIn), src.ID, dst.ID, nil
 }
 
 // blockByTextTxLocked 按文本取最早的块（调用方已持锁）。

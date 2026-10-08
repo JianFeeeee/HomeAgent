@@ -147,6 +147,80 @@ type GraphDB struct {
 	db     *sql.DB
 	mu     sync.RWMutex
 	dbPath string
+
+	// onAccess 是**图读写钩子**（可为 nil），由 hookMu 保护。
+	//
+	// ❗为什么钩子必须用**独立的**锁：读写钩子在 commit/Recall 这类方法的同步
+	// 路径上触发，而那些方法已持 g.mu。若钩子也去取 g.mu，就是**自死锁**
+	// （Go 的 sync.RWMutex 不可重入）。
+	//
+	// ❗为什么埋在图数据库而不是各调用方：图读写散在 26 个方法与 180+ 个
+	// db 调用点上，让每个调用方自己上报必然漏发。而**图数据库自己就知道
+	// 它碰了哪些块 ID** —— 这正是星图需要的（它此前靠工具名猜节点，实测命中 0）。
+	//
+	// 钩子只上报**事实**（op / 块 ID / 工具名），不关心消费者是谁；
+	// 内核把它接到 events.Bus，CLI 工具不接（nil 即静默跳过）。
+	hookMu   sync.RWMutex
+	onAccess AccessHook
+}
+
+// AccessEvent 描述一次图读写。
+//
+// 用结构体而非多个参数：字段后续可能增加（如关系 ID），
+// 而签名一旦发布就不好改（调用点数量多）。
+//
+// ❗要求：实现**必须非阻塞**。钩子虽在 GraphDB 的锁外调用，
+// 但仍在业务调用的同步路径上 —— 慢钩子会直接拖慢记忆读写。
+// 发布到事件总线是内存操作 + 各订阅者回调，实际开销极小。
+type AccessEvent struct {
+	// Op 是本次操作类型：recall / commit / merge / purge / delete。
+	Op string
+	// Blocks 是本次实际读到的块 ID（recall）或写入的块 ID（commit）。
+	Blocks []string
+	// Created 是本次**新建**的块 ID（驱动星图「从小变大」生长动画）。
+	Created []string
+	// Removed 是被删除/取代而消失的块 ID（驱动粒子消散动画）。
+	Removed []string
+	// Merged 是合入对（from → to），驱动「两节点消失又出现」。
+	Merged []MergePair
+	// Tool 是触发本次访问的工具名（可空）。
+	Tool string
+}
+
+// MergePair 是一次合入的源与目标块 ID。
+type MergePair struct {
+	From string `json:"from"`
+	To   string `json:"to"`
+}
+
+// AccessHook 是钩子函数类型。
+type AccessHook func(ev AccessEvent)
+
+// SetAccessHook 安装读写钩子（传 nil 卸载）。
+//
+// 与 GraphDB 的构造解耦：NewGraphDB 的调用点有 7 处（含 4 个独立 CLI 工具），
+// 而只有内核进程需要上报 —— 加构造参数会逼所有调用点改签名。
+func (g *GraphDB) SetAccessHook(h AccessHook) {
+	g.hookMu.Lock()
+	g.onAccess = h
+	g.hookMu.Unlock()
+}
+
+// emitAccess 上报一次图访问。调用方**必须已释放 g.mu**（见 onAccess 的注释）。
+//
+// 钩子为 nil 时零开销（一次指针比较），因此 CLI 工具与测试无需任何改动。
+func (g *GraphDB) emitAccess(ev AccessEvent) {
+	g.hookMu.RLock()
+	h := g.onAccess
+	g.hookMu.RUnlock()
+	if h == nil {
+		return
+	}
+	// 空事件不上报：星图收到空数组只会白白重算一次。
+	if len(ev.Blocks) == 0 && len(ev.Created) == 0 && len(ev.Removed) == 0 && len(ev.Merged) == 0 {
+		return
+	}
+	h(ev)
 }
 
 func NewGraphDB(dbPath string) (*GraphDB, error) {
@@ -542,6 +616,24 @@ func (g *GraphDB) CommitWithMedia(triples []Triple, sessionID string, turnID int
 }
 
 func (g *GraphDB) commit(triples []Triple, sessionID string, turnID int, trackSentences bool) (map[string]string, int, int, error) {
+	sentenceIDs, ec, rc, written, created, err := g.commitLocked(triples, sessionID, turnID, trackSentences)
+	// ★ 上报必须在 commitLocked **返回之后**（即 g.mu 已释放）。
+	//   在 commitLocked 内部（持锁时）调钩子会自死锁 —— 钩子的订阅者
+	//   会回调到内存系统，而那些路径要取同一把 g.mu。
+	//
+	// 只上报成功的写入：失败的 commit 什么都没落库，报出去会让星图
+	// 高亮一批不存在的块。
+	if err == nil {
+		g.emitAccess(AccessEvent{Op: "commit", Blocks: written, Created: created})
+	}
+	return sentenceIDs, ec, rc, err
+}
+
+// commitLocked 是 commit 的实体（持 g.mu）。
+//
+// 拆出原因：外部上报需要在**锁释放后**发生，而 defer g.mu.Unlock()
+// 只能在函数返回时生效 —— 把两者拆成两层是最直接的解法。
+func (g *GraphDB) commitLocked(triples []Triple, sessionID string, turnID int, trackSentences bool) (map[string]string, int, int, []string, []string, error) {
 	g.mu.Lock()
 	defer g.mu.Unlock()
 
@@ -550,9 +642,14 @@ func (g *GraphDB) commit(triples []Triple, sessionID string, turnID int, trackSe
 		sentenceIDs = make(map[string]string)
 	}
 
+	// writtenIDs / createdIDs 收集本次写入与新建的块 ID，供**锁释放后**
+	// 通过 emitAccess 上报给星图（不能在持锁时调钩子，见 GraphDB.onAccess）。
+	var writtenIDs []string
+	var createdIDs []string
+
 	tx, err := g.db.Begin()
 	if err != nil {
-		return nil, 0, 0, err
+		return nil, 0, 0, nil, nil, err
 	}
 	defer tx.Rollback()
 
@@ -587,11 +684,13 @@ func (g *GraphDB) commit(triples []Triple, sessionID string, turnID int, trackSe
 		//   （声明提前到循环开头，否则它只在 SentenceText != "" 的分支里可见）
 		var sentenceBlockID string
 
-		srcBlockID, dstBlockID, edgeID, err := putTripleBlocksTx(tx, t, sessionID, turnID)
+		srcBlockID, dstBlockID, edgeID, tripletCreated, err := putTripleBlocksTx(tx, t, sessionID, turnID)
 		if err != nil {
-			return nil, 0, 0, fmt.Errorf("block triple %s/%s: %w",
+			return nil, 0, 0, nil, nil, fmt.Errorf("block triple %s/%s: %w",
 				t.Subject, t.Relation, err)
 		}
+		writtenIDs = append(writtenIDs, srcBlockID, dstBlockID)
+		createdIDs = append(createdIDs, tripletCreated...)
 
 		subjType := t.SubjectType
 		if subjType == "" {
@@ -640,9 +739,17 @@ func (g *GraphDB) commit(triples []Triple, sessionID string, turnID int, trackSe
 			// 判据 zz_blockcommit_test.go 的②盯的就是这条。
 			// ★ 同样留空时间：原句块的时序由迁移/蒸馏显式指定，
 			//   这里写 now 会覆盖既有值（实测抹平了迁移块的时序）。
-			if err := putBlockTx(tx, NewSentenceBlock(t.SentenceText,
-				time.Time{}, time.Time{})); err != nil {
-				return nil, 0, 0, fmt.Errorf("put sentence block: %w", err)
+			//
+			// ★ 用返回值区分「新建」与「更新」：只有真正新建的块才驱动星图的
+			//   「生长」动画。该句被后续引用时走 UPDATE，不算新块——
+			//   若也播生长，同一句话每次被提及都会再长一次，看着像新记忆。
+			createdSentenceBlock, err := putBlockTx(tx, NewSentenceBlock(t.SentenceText,
+				time.Time{}, time.Time{}))
+			if err != nil {
+				return nil, 0, 0, nil, nil, fmt.Errorf("put sentence block: %w", err)
+			}
+			if createdSentenceBlock {
+				createdIDs = append(createdIDs, SentenceBlockID(t.SentenceText))
 			}
 			sentenceBlockID = SentenceBlockID(t.SentenceText)
 			if sentenceIDs != nil {
@@ -697,24 +804,24 @@ func (g *GraphDB) commit(triples []Triple, sessionID string, turnID int, trackSe
 			if sentenceBlockID != "" && edgeID != 0 {
 				if err := addContainsEdgeTx(tx, sentenceBlockID, edgeID,
 					confidence); err != nil {
-					return nil, 0, 0, fmt.Errorf("contains %s->%d: %w",
+					return nil, 0, 0, nil, nil, fmt.Errorf("contains %s->%d: %w",
 						sentenceBlockID, edgeID, err)
 				}
 			}
 			for _, sc := range effectiveScenes(t) {
 				if err := tagSceneTripleTx(tx, sc, srcBlockID, dstBlockID,
 					edgeID, confidence); err != nil {
-					return nil, 0, 0, err
+					return nil, 0, 0, nil, nil, err
 				}
 			}
 		}
 	}
 
 	if err := tx.Commit(); err != nil {
-		return nil, 0, 0, err
+		return nil, 0, 0, nil, nil, err
 	}
 
-	return sentenceIDs, entitiesCreated, relationsCreated, nil
+	return sentenceIDs, entitiesCreated, relationsCreated, writtenIDs, createdIDs, nil
 }
 
 func validEntityName(name string) bool {
@@ -820,6 +927,31 @@ func (g *GraphDB) Recall(keywords []string, seedEntities []string, depth int, se
 //	判据 TestMemoryRecall_指纹不匹配的块被跳过 当场抓到这一点：
 //	块路因无空间被跳过 → 走兜底 → 兜底把旧空间的块原样返回。
 func (g *GraphDB) RecallSorted(keywords []string, seedEntities []string, depth int, sessionFilter, fingerprint string, mode SortMode) (*RecallResult, error) {
+	result, err := g.recallSortedLocked(keywords, seedEntities, depth, sessionFilter, fingerprint, mode)
+	// ★ 上报必须在锁释放**之后**（见 GraphDB.onAccess 的死锁说明）。
+	//   读事件驱动星图的「被查询提亮」：这些块就是本次召回真正取回的。
+	if err == nil && result != nil {
+		seen := make(map[string]struct{}, len(result.Entities))
+		ids := make([]string, 0, len(result.Entities))
+		for _, e := range result.Entities {
+			// 只报有块键的实体：旧实现下部分实体来自非块路径（无 blockKey），
+			// 报出去星图也找不到对应节点。
+			if e.blockKey == "" {
+				continue
+			}
+			if _, dup := seen[e.blockKey]; dup {
+				continue
+			}
+			seen[e.blockKey] = struct{}{}
+			ids = append(ids, e.blockKey)
+		}
+		g.emitAccess(AccessEvent{Op: "recall", Blocks: ids})
+	}
+	return result, err
+}
+
+// recallSortedLocked 是 RecallSorted 的实体（持 g.mu）。
+func (g *GraphDB) recallSortedLocked(keywords []string, seedEntities []string, depth int, sessionFilter, fingerprint string, mode SortMode) (*RecallResult, error) {
 	g.mu.RLock()
 	defer g.mu.RUnlock()
 
@@ -1730,18 +1862,29 @@ func (g *GraphDB) MergeEntities(sourceName, targetName string) (int, error) {
 //	按 name 查 entities.id 会把「旧表里叫这个名字的行」
 //	与「图里文本相同的块」当成两回事 —— 那正是本缺陷的成因。
 func (g *GraphDB) DeleteEntity(name string) (DeleteResult, error) {
+	res, removed, err := g.deleteEntityLocked(name)
+	// ★ 上报必须在锁释放后（见 GraphDB.onAccess 的死锁说明）。
+	//   删除事件驱动星图的「粒子消散」—— removed 就是真正被删掉的块。
+	if err == nil {
+		g.emitAccess(AccessEvent{Op: "delete", Removed: removed})
+	}
+	return res, err
+}
+
+// deleteEntityLocked 是 DeleteEntity 的实体（持 g.mu），额外返回被删的块 ID。
+func (g *GraphDB) deleteEntityLocked(name string) (DeleteResult, []string, error) {
 	g.mu.Lock()
 	defer g.mu.Unlock()
 
 	tx, err := g.db.Begin()
 	if err != nil {
-		return DeleteResult{}, err
+		return DeleteResult{}, nil, err
 	}
 	defer tx.Rollback()
 
 	name = strings.TrimSpace(name)
 	if name == "" {
-		return DeleteResult{}, fmt.Errorf("name 不能为空")
+		return DeleteResult{}, nil, fmt.Errorf("name 不能为空")
 	}
 
 	// ★ 按块文本精确匹配（不是 LIKE）：DeleteEntity 的承诺是「删除这一个实体」，
@@ -1750,20 +1893,20 @@ func (g *GraphDB) DeleteEntity(name string) (DeleteResult, error) {
 	rows, err := tx.Query(
 		`SELECT id FROM memory_blocks WHERE text_content = ? ORDER BY id`, name)
 	if err != nil {
-		return DeleteResult{}, err
+		return DeleteResult{}, nil, err
 	}
 	var blockIDs []string
 	for rows.Next() {
 		var id string
 		if err := rows.Scan(&id); err != nil {
 			rows.Close()
-			return DeleteResult{}, err
+			return DeleteResult{}, nil, err
 		}
 		blockIDs = append(blockIDs, id)
 	}
 	if err := rows.Err(); err != nil {
 		rows.Close()
-		return DeleteResult{}, err
+		return DeleteResult{}, nil, err
 	}
 	rows.Close()
 
@@ -1777,7 +1920,7 @@ func (g *GraphDB) DeleteEntity(name string) (DeleteResult, error) {
 		// ★ 返回 0 而不是 error 也可以，但那样工具层只能回「已删除 0 个」——
 		//   模型分不清「删了但本来就没有」和「条件写错了」，
 		//   于是会重试或改口径乱猜。明确报错更有用。
-		return DeleteResult{}, fmt.Errorf("块 %q 不存在，删除未执行（可能已删除，或这个名字是关系文本而非端点块）", name)
+		return DeleteResult{}, nil, fmt.Errorf("块 %q 不存在，删除未执行（可能已删除，或这个名字是关系文本而非端点块）", name)
 	}
 
 	ph := placeholders(len(blockIDs))
@@ -1798,7 +1941,7 @@ func (g *GraphDB) DeleteEntity(name string) (DeleteResult, error) {
 	edgeRes, err := tx.Exec(
 		`DELETE FROM memory_block_edges WHERE `+endpointCond, edgeArgs...)
 	if err != nil {
-		return DeleteResult{}, err
+		return DeleteResult{}, nil, err
 	}
 	edgesDeleted, _ := edgeRes.RowsAffected()
 
@@ -1806,7 +1949,7 @@ func (g *GraphDB) DeleteEntity(name string) (DeleteResult, error) {
 	blockRes, err := tx.Exec(
 		`DELETE FROM memory_blocks WHERE id IN (`+ph+`)`, args...)
 	if err != nil {
-		return DeleteResult{}, err
+		return DeleteResult{}, nil, err
 	}
 	blocksDeleted, _ := blockRes.RowsAffected()
 
@@ -1838,21 +1981,21 @@ func (g *GraphDB) DeleteEntity(name string) (DeleteResult, error) {
 	if _, err := tx.Exec(
 		`DELETE FROM relations WHERE source_id IN (SELECT id FROM entities WHERE name = ?)
 		    OR target_id IN (SELECT id FROM entities WHERE name = ?)`, name, name); err != nil {
-		return DeleteResult{}, err
+		return DeleteResult{}, nil, err
 	}
 	if _, err := tx.Exec(`DELETE FROM entities WHERE name = ?`, name); err != nil {
-		return DeleteResult{}, err
+		return DeleteResult{}, nil, err
 	}
 
 	if err := tx.Commit(); err != nil {
-		return DeleteResult{}, err
+		return DeleteResult{}, nil, err
 	}
 
 	// ④ 摘场景引用。必须在 Commit 之后 —— purgeStaleSceneRefsLocked 走 g.db，
 	//   而这里的事务还没提交。
 	g.purgeStaleSceneRefsLocked()
 
-	return DeleteResult{Blocks: int(blocksDeleted), Edges: int(edgesDeleted)}, nil
+	return DeleteResult{Blocks: int(blocksDeleted), Edges: int(edgesDeleted)}, blockIDs, nil
 }
 
 // DeleteResult 报告一次删除实际删掉了什么。

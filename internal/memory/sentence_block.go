@@ -108,13 +108,19 @@ func TripleBlockID(name string) string {
 // 于是 Commit 只能传旧表的 relationID/entityID，
 // 写出一批退场后会悬空的引用。
 //
-// 返回值顺序：sourceBlockID, targetBlockID, edgeID（无块时为空/0）。
+// 返回值顺序：sourceBlockID, targetBlockID, edgeID, createdBlockIDs（无块时为空/0）。
 //
 // ★ sessionID / turnID 来自 commit() 的参数而非 Triple ——
 //
 //	Triple 是「三元组内容」，会话是「这次写入的上下文」，
 //	两者本就不该混在一个结构里。
-func putTripleBlocksTx(tx *sql.Tx, t Triple, sessionID string, turnID int) (string, string, int64, error) {
+func putTripleBlocksTx(tx *sql.Tx, t Triple, sessionID string, turnID int) (string, string, int64, []string, error) {
+	// created 收集本次**真正新建**的块 ID（已存在则为 UPDATE，不算新建）。
+	//
+	// ★ 为什么要细分到每个块：星图的「生长」动画只该在真·新块上播。
+	//   若按「本次 commit 有写入」就算新建，重复提交同一事实（LLM 高频重试）
+	//   会让旧块反复「长出来」—— 看着像新记忆，实际是同一个东西。
+	var created []string
 	// ★ SemanticType 必须带（2026-10-04）
 	//
 	//   Triple.SubjectType / ObjectType 此前只写旧 entities.type，
@@ -139,8 +145,12 @@ func putTripleBlocksTx(tx *sql.Tx, t Triple, sessionID string, turnID int) (stri
 		SemanticType: strings.TrimSpace(t.ObjectType),
 	}
 	for _, b := range []MemoryBlock{src, dst} {
-		if err := putBlockTx(tx, b); err != nil {
-			return "", "", 0, err
+		isNew, err := putBlockTx(tx, b)
+		if err != nil {
+			return "", "", 0, nil, err
+		}
+		if isNew {
+			created = append(created, b.ID)
 		}
 	}
 	// ★ status 必须显式写 'active'（2026-10-04）
@@ -179,10 +189,10 @@ func putTripleBlocksTx(tx *sql.Tx, t Triple, sessionID string, turnID int) (stri
 		ORDER BY id LIMIT 1`,
 		src.ID, dst.ID, strings.TrimSpace(t.Relation), sessionID).Scan(&existingEdge)
 	if err == nil {
-		return src.ID, dst.ID, existingEdge, nil
+		return src.ID, dst.ID, existingEdge, created, nil
 	}
 	if err != sql.ErrNoRows {
-		return "", "", 0, err
+		return "", "", 0, nil, err
 	}
 
 	res, err := tx.Exec(
@@ -211,8 +221,8 @@ func putTripleBlocksTx(tx *sql.Tx, t Triple, sessionID string, turnID int) (stri
 		 VALUES ('block', ?, 'block', ?, ?, ?, 'active', ?, ?)`,
 		src.ID, dst.ID, strings.TrimSpace(t.Relation), t.Confidence, sessionID, turnID)
 	if err != nil {
-		return "", "", 0, err
+		return "", "", 0, nil, err
 	}
 	edgeID, err := res.LastInsertId()
-	return src.ID, dst.ID, edgeID, err
+	return src.ID, dst.ID, edgeID, created, err
 }

@@ -138,7 +138,7 @@ func seedSceneRefs(t *testing.T, g *GraphDB) {
 		{ID: "blk_src_manual", Modality: BlockText, Text: "手工建的原句块",
 			Source: SentenceBlockSource},
 	} {
-		if err := putBlockTx(tx, b); err != nil {
+		if _, err := putBlockTx(tx, b); err != nil {
 			t.Fatal(err)
 		}
 	}

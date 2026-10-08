@@ -13,33 +13,33 @@ import (
 	"syscall"
 	"time"
 
-	agentPkg "gitcode.com/JianFeeeee/HomeAgent/internal/agent"
-	agentAPI "gitcode.com/JianFeeeee/HomeAgent/internal/agent/api"
-	agentCore "gitcode.com/JianFeeeee/HomeAgent/internal/agent/core"
-	agentIO "gitcode.com/JianFeeeee/HomeAgent/internal/agent/io"
-	internalConfig "gitcode.com/JianFeeeee/HomeAgent/internal/config"
-	"gitcode.com/JianFeeeee/HomeAgent/internal/events"
-	"gitcode.com/JianFeeeee/HomeAgent/internal/ipc"
-	"gitcode.com/JianFeeeee/HomeAgent/internal/knowledge"
-	logpkg "gitcode.com/JianFeeeee/HomeAgent/internal/log"
-	luapkg "gitcode.com/JianFeeeee/HomeAgent/internal/lua"
-	"gitcode.com/JianFeeeee/HomeAgent/internal/memory"
-	"gitcode.com/JianFeeeee/HomeAgent/internal/memory/distill"
-	"gitcode.com/JianFeeeee/HomeAgent/internal/memory/document"
-	"gitcode.com/JianFeeeee/HomeAgent/internal/memory/media"
-	"gitcode.com/JianFeeeee/HomeAgent/internal/memory/pipeline"
-	"gitcode.com/JianFeeeee/HomeAgent/internal/memory/social"
-	"gitcode.com/JianFeeeee/HomeAgent/internal/memory/text"
-	"gitcode.com/JianFeeeee/HomeAgent/internal/memory/vector"
-	"gitcode.com/JianFeeeee/HomeAgent/internal/nlp"
-	"gitcode.com/JianFeeeee/HomeAgent/internal/plugin"
-	"gitcode.com/JianFeeeee/HomeAgent/internal/recovery"
-	sdk "gitcode.com/JianFeeeee/HomeAgent/internal/sdk"
-	"gitcode.com/JianFeeeee/HomeAgent/internal/supervisor"
-	"gitcode.com/JianFeeeee/HomeAgent/internal/tracker"
-	"gitcode.com/JianFeeeee/HomeAgent/pkg/embedding"
-	"gitcode.com/JianFeeeee/HomeAgent/pkg/generation"
-	"gitcode.com/JianFeeeee/HomeAgent/pkg/types"
+	agentPkg "github.com/JianFeeeee/HomeAgent/internal/agent"
+	agentAPI "github.com/JianFeeeee/HomeAgent/internal/agent/api"
+	agentCore "github.com/JianFeeeee/HomeAgent/internal/agent/core"
+	agentIO "github.com/JianFeeeee/HomeAgent/internal/agent/io"
+	internalConfig "github.com/JianFeeeee/HomeAgent/internal/config"
+	"github.com/JianFeeeee/HomeAgent/internal/events"
+	"github.com/JianFeeeee/HomeAgent/internal/ipc"
+	"github.com/JianFeeeee/HomeAgent/internal/knowledge"
+	logpkg "github.com/JianFeeeee/HomeAgent/internal/log"
+	luapkg "github.com/JianFeeeee/HomeAgent/internal/lua"
+	"github.com/JianFeeeee/HomeAgent/internal/memory"
+	"github.com/JianFeeeee/HomeAgent/internal/memory/distill"
+	"github.com/JianFeeeee/HomeAgent/internal/memory/document"
+	"github.com/JianFeeeee/HomeAgent/internal/memory/media"
+	"github.com/JianFeeeee/HomeAgent/internal/memory/pipeline"
+	"github.com/JianFeeeee/HomeAgent/internal/memory/social"
+	"github.com/JianFeeeee/HomeAgent/internal/memory/text"
+	"github.com/JianFeeeee/HomeAgent/internal/memory/vector"
+	"github.com/JianFeeeee/HomeAgent/internal/nlp"
+	"github.com/JianFeeeee/HomeAgent/internal/plugin"
+	"github.com/JianFeeeee/HomeAgent/internal/recovery"
+	sdk "github.com/JianFeeeee/HomeAgent/internal/sdk"
+	"github.com/JianFeeeee/HomeAgent/internal/supervisor"
+	"github.com/JianFeeeee/HomeAgent/internal/tracker"
+	"github.com/JianFeeeee/HomeAgent/pkg/embedding"
+	"github.com/JianFeeeee/HomeAgent/pkg/generation"
+	"github.com/JianFeeeee/HomeAgent/pkg/types"
 )
 
 // defaultSystemPrompt 是内置默认人格模板：不含版本号字面量，
@@ -628,6 +628,54 @@ func newMainAgent(cfg *types.Config, cfgReg *internalConfig.ConfigRegistry, prov
 		ThinkingEnabled:    cfg.LLM.ThinkingEnabled,
 		InputProcessing:    cfg.InputProcessing,
 	})
+
+	// 图记忆读写钩子 → 事件总线。
+	//
+	// ★ 为什么在这里接（而不是让各调用方自己发事件）：
+	//   图读写散在 26 个方法与 180+ 个 db 调用点上，各调用方自报必漏发；
+	//   而**图库自己就知道它碰了哪些块 ID**。星图此前只能靠工具名猜
+	//   节点（把 "memory_recall" 拆词去匹配中文实体名，实测命中 0），
+	//   于是每次都点亮同一批无关节点——这正是「星图没有读写反馈」的真身。
+	//
+	// ★ 只在 evBus 非 nil 时接：它把「内核进程」与「独立 CLI 工具」区分开
+	//   （homed-graph-migrate / memgc 等也用 NewGraphDB，但没有事件总线，
+	//   也不该为一次批量迁移向不存在的订阅者发几万条事件）。
+	//
+	// ★ 钩子**必须非阻塞**：它在记忆读写的同步路径上，发布到总线
+	//   是内存操作（各订阅者回调也都很短），实测开销可忽略。
+	if memDB != nil && evBus != nil {
+		memDB.SetAccessHook(func(ev memory.AccessEvent) {
+			payload := map[string]interface{}{
+				"op": ev.Op,
+			}
+			// 只在非空时带上字段：空数组会让前端白白重算一次。
+			if len(ev.Blocks) > 0 {
+				payload["blocks"] = ev.Blocks
+			}
+			if len(ev.Created) > 0 {
+				payload["created"] = ev.Created
+			}
+			if len(ev.Removed) > 0 {
+				payload["removed"] = ev.Removed
+			}
+			if len(ev.Merged) > 0 {
+				merged := make([]map[string]string, 0, len(ev.Merged))
+				for _, m := range ev.Merged {
+					merged = append(merged, map[string]string{"from": m.From, "to": m.To})
+				}
+				payload["merged"] = merged
+			}
+			if ev.Tool != "" {
+				payload["tool"] = ev.Tool
+			}
+			evBus.Publish(&events.Event{
+				Type:      events.EventMemoryAccess,
+				Source:    "main",
+				Payload:   payload,
+				Timestamp: time.Now().Unix(),
+			})
+		})
+	}
 
 	// D4：把「设备是否已授权」的判据注入插件侧（toolImpl.CanUse 消费它）。
 	//

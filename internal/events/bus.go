@@ -33,6 +33,27 @@ const (
 	// 职责链：发现者（兼容层）→ 移交事件 → 归属者（skillmgr）加载管理。
 	EventSkillDetected EventType = "skill_detected"
 
+	// EventMemoryAccess 是**图记忆读写事件**：谁读了/写了哪几个记忆块。
+	//
+	// 为什么需要它（2026-10-08）：星图此前的「跟随 agent 活动」靠**工具名猜节点**
+	// （把 "memory_recall" 拆成词元去匹配实体名）。而图谱里的实体名是中文概念
+	// （小宅/对话/待命），与英文工具名永不交集 —— 实测每个工具名命中 0 个节点，
+	// 于是每次都回退到「按 mention_count 取前 8 个」，即每次工具调用点亮的都是
+	// **同一批无关节点**。
+	//
+	// 正确的做法是让**图数据库自己在读写处上报**：它本来就知道自己碰了哪些块 ID。
+	// payload 约定：
+	//
+	//	op:       "recall" | "commit" | "merge" | "purge" | "delete"
+	//	blocks:   []string，本次实际读写到的块 ID
+	//	created:  []string，本次**新建**的块 ID（驱动「从小变大」生长动画）
+	//	removed:  []string，本次**删除/合入消失**的块 ID（驱动粒子消散）
+	//	merged:   [][2]string 或 []map，合入对（驱动「两节点消失又出现」）
+	//	tool:     触发这次访问的工具名（可空，便于 UI 显示来源）
+	//
+	// 订阅者（webui SSE）据此按**真实块 ID** 精确高亮，不再猜。
+	EventMemoryAccess EventType = "memory_access"
+
 	EventAll EventType = "*"
 )
 
