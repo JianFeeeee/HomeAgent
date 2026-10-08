@@ -478,8 +478,15 @@ function switchTab(n) {
 			} else if (!state.starmapInit && !state.starmapLoading) {
 				loadChatStarmapData();
 			}
+			// ★ 重新点火渲染循环。
+			//
+			// 循环在不可见时会自行 return（见 starmapAnimate，修「非常卡」），
+			// 所以切回星图必须显式唤醒——否则图冻在切走前的那一帧。
+			starmapWake();
 		}
 	}
+	// 总览页与聊天面板也内嵌星图：回到它们时同样要唤醒。
+	if (n === "overview" || n === "chat") starmapWake();
 	renderAll();
 }
 
@@ -3078,8 +3085,9 @@ function initChatStarmap() {
 	starmapRen.domElement.addEventListener("mousemove", onStarmapMove);
 	starmapRen.domElement.addEventListener("click", onStarmapClick);
 	window.addEventListener("resize", onStarmapResize);
-	if (starmapRaf) cancelAnimationFrame(starmapRaf);
-	starmapAnimate();
+	// 用 starmapWake（带开关）而不是裸调 starmapAnimate：
+	// 避免重复点火时留下两个并行的 RAF 链（那会让每帧工作量翻倍）。
+	starmapWake();
 	// 活动数据源：/runtime 3s + /memory/graph/pulse 10s。
 	// 只在星图真正初始化后启动，避免在隐藏页签空跑。
 	starmapStartActivity();
@@ -3144,6 +3152,12 @@ function buildChatStarmapGraph() {
 	});
 	starmapNodeMeshes = [];
 	starmapEdgeLines = [];
+	// ★ 必须同时清空形变活跃集（2026-10-08）：上面刚把旧 mesh 从场景摘掉，
+	//   而它们可能仍在 starmapMorphSet 里。若不清，这个集合会随每次重建图
+	//   单调增长（永不归零），于是「空集合时 O(1) 返回」的快速路径永远失效，
+	//   每帧又要遍历一批**已经不在场景里**的废弃 mesh —— 正好把本次优化
+	//   的努力又还回去了。
+	if (starmapMorphSet) starmapMorphSet.clear();
 	if (starmapNodes.length === 0) return;
 	// Calculate node degrees for leaf node detection
 	var nodeDegs = {};
@@ -5753,6 +5767,13 @@ var starmapHovered = null,
 	starmapSelected = null,
 	starmapAutoView = true;
 var starmapRaf = null;
+// starmapAnimateRunning：渲染循环的开关。
+//
+// ★ 为何要显式开关而不是只靠 requestAnimationFrame：
+//   RAF 一旦排上就会一直回调（除非 cancel）。本循环在**不可见时自行 return**，
+//   若不用开关，那个 return 只是「不干活但仍在被 60fps 调用」，仍白耗一层
+//   调度；而开关让它能真正停下，由 starmapWake 重新点火。
+var starmapAnimateRunning = false;
 // starmapDirty：图结构发生变化（新建/删除/合入块），需要重拉全量。
 //
 // ★ 必须显式声明。此前两处 `starmapDirty = true` 赋的是**隐式全局**，
@@ -5910,6 +5931,7 @@ function starmapStartGrow(ids) {
 		var m = idx[ids[i]];
 		if (!m) continue;
 		m.userData.growAt = Date.now();
+		starmapMorphAdd(m); // 注册到形变活跃集（否则 tick 不会推进它）
 	}
 }
 
@@ -5929,6 +5951,7 @@ function starmapStartDissolve(ids, delayMs) {
 		m.userData.dissolveAt = now + (delayMs || 0);
 		m.userData.dissolveEnds = now + (delayMs || 0) + SM_DISSOLVE_MS;
 		m.userData.dissolveFrom = m.scale.x;
+		starmapMorphAdd(m); // 注册到形变活跃集
 		starmapSpawnParticles(m);
 	}
 }
@@ -5940,11 +5963,14 @@ function starmapStartMerge(fromID, toID) {
 	starmapStartDissolve([fromID], 0);
 	// ② 目标块在停顿之后重生（不是立即）
 	var dst = idx[toID];
-	if (dst) {
-		var delayed = Date.now() + SM_DISSOLVE_MS + SM_MERGE_APPEAR_DELAY;
-		var timer = setTimeout(function () {
-			if (dst && dst.parent) dst.userData.growAt = Date.now();
-		}, SM_DISSOLVE_MS + SM_MERGE_APPEAR_DELAY);
+		if (dst) {
+			var delayed = Date.now() + SM_DISSOLVE_MS + SM_MERGE_APPEAR_DELAY;
+			var timer = setTimeout(function () {
+				if (dst && dst.parent) {
+					dst.userData.growAt = Date.now();
+					starmapMorphAdd(dst); // 重生也要注册
+				}
+			}, SM_DISSOLVE_MS + SM_MERGE_APPEAR_DELAY);
 		if (state.starmapMergeTimers) state.starmapMergeTimers.push(timer);
 		else state.starmapMergeTimers = [timer];
 		// 记录重生时刻，供 tick 区分“合入重生”与普通生长（前者更短）
@@ -6304,28 +6330,44 @@ function starmapPullPulse() {
 //   （同一个节点可以同时有好几个），而生长/消散是**排他的状态机**
 //   （一个节点不可能同时在长又在消）。混用会让基值互相覆盖，
 //   出现「消散到一半被 pulse 拉回原大小」的鬼畜。
+var starmapMorphSet = null; // Set<mesh>，懒建
+
+// starmapMorphAdd 把一个节点加入形变活跃集（生长/消散都要）。
+function starmapMorphAdd(mesh) {
+	if (!starmapMorphSet) starmapMorphSet = new Set();
+	starmapMorphSet.add(mesh);
+}
+
+// starmapTickMorph 推进「生长」与「消散」两种形变。
+//
+// ★ 性能（2026-10-08 修「非常卡」）：原先每帧无条件扫全部节点，
+//   生产库 3190 块 × 60fps ⇒ 每秒 19 万次 userData 读取与分支，
+//   而绝大多数帧里「正在形变」的节点是 0 个。
+//   改用 starmapMorphSet 记录活跃节点，空集合时 O(1) 返回。
 function starmapTickMorph(now) {
-	for (var i = 0; i < starmapNodeMeshes.length; i++) {
-		var m = starmapNodeMeshes[i];
+	if (!starmapMorphSet || starmapMorphSet.size === 0) return; // 常见路径：零开销
+	var done = [];
+	starmapMorphSet.forEach(function (m) {
 		var ud = m.userData;
 
 		// —— 消散 ——
 		if (ud.dissolving) {
-			if (now < ud.dissolveAt) continue; // 合入时源块的延迟（若有）
+			if (now < ud.dissolveAt) return; // 合入时源块的延迟（若有）
 			var dp = (now - ud.dissolveAt) / SM_DISSOLVE_MS;
 			if (dp >= 1) {
 				// 完了：必须真的从场景摘掉，否则一个 scale=0 的不可见 mesh
 				// 仍参与鼠标拾取，用户会“点中一个看不见的节点”。
 				starmapScene.remove(m);
 				ud.dissolving = false;
-				continue;
+				done.push(m);
+				return;
 			}
 			// 收缩 + 变暗：两个通道同时走，单个通道（只缩）看着像“缩成点”，
 			// 加上变暗才有“消失”的观感。
 			var shrink = 1 - dp * dp; // 加速收缩（先慢后快）
 			m.scale.setScalar(ud.baseScale * shrink);
 			if (m.material) m.material.emissiveIntensity = ud.baseEmissive * (1 - dp);
-			continue;
+			return;
 		}
 
 		// —— 生长（插入 / 合入后重生）——
@@ -6337,7 +6379,8 @@ function starmapTickMorph(now) {
 				ud.mergeGrowAt = null;
 				m.scale.setScalar(ud.baseScale);
 				if (m.material) m.material.emissiveIntensity = ud.baseEmissive;
-				continue;
+				done.push(m);
+				return;
 			}
 			// 过冲曲线（back-out）：超过 1 再回落 —— 这才像“弹”而不是“淡入”。
 			var s = 1.7;
@@ -6348,9 +6391,10 @@ function starmapTickMorph(now) {
 			var scale = 0.05 + 0.95 * Math.max(0, eased);
 			m.scale.setScalar(ud.baseScale * scale);
 			if (m.material) m.material.emissiveIntensity = ud.baseEmissive + 0.9 * (1 - gp);
-			continue;
 		}
-	}
+	});
+	// 已完成的从活跃集移除（本次遍历后，不做边遍历边删）。
+	for (var i = 0; i < done.length; i++) starmapMorphSet.delete(done[i]);
 }
 
 function starmapTickActivity(t) {
@@ -6930,6 +6974,21 @@ function starmapMakeLabelPlan() {
 //   ② 每个标签先做屏幕坐标与视锥检查，背面/屏外的直接跳过。
 var starmapLabelSig = "";
 var starmapLabelLastCamKey = "";
+// starmapLabelLastDraw：标签层上次重绘时刻（节流用）。
+//
+// 为何需要节流：OrbitControls 带阻尼，拖动/缩放时相机位置**每帧都在变**，
+// 于是 camKey 每帧不同 ⇒ 原先会每帧重建 3190 项的 plan 并对每个可见标签
+// 调 measureText（文字度量是同步布局，很贵）。标签是文字层，100ms 刷新
+// 肉眼已看不出滞后，而 3D 图形仍是 60fps。
+var starmapLabelLastDraw = 0;
+var SM_LABEL_MIN_INTERVAL = 100;
+// starmapTextWidth：measureText 结果缓存（键 = 字体 + 文字）。
+//
+// 为何要缓存：measureText 触发同步文字布局，每帧对上千个标签调用会卡主线程。
+// 同一文字在同字体下的宽度是确定的，缓存长期有效（字体模板只有两个）。
+// 上限保护：避免极端情况下无界增长（超出时整表清空重填）。
+var starmapTextWidth = {};
+var SM_TEXTWIDTH_MAX = 20000;
 
 function starmapDrawLabels() {
 	if (!starmapRen || !starmapCam || !starmapNodeMeshes.length) {
@@ -6967,8 +7026,13 @@ function starmapDrawLabels() {
 		cw +
 		"x" +
 		ch;
-	if (camKey === starmapLabelLastCamKey) return;
+		// ★ 节流：相机拖动（OrbitControls 阻尼）会让 camKey 每帧都变，
+	//   若每帧重建 plan（3190 项）+ measureText，拖动时就是持续掉帧。
+	//   标签是文字层，10fps 的刷新肉眼已看不出滞后（图形仍是 60fps）。
+	var nowMs = Date.now();
+	if (nowMs - starmapLabelLastDraw < SM_LABEL_MIN_INTERVAL || camKey === starmapLabelLastCamKey) return;
 	starmapLabelLastCamKey = camKey;
+	starmapLabelLastDraw = nowMs;
 
 	ctx.clearRect(0, 0, cw, ch);
 	var plan = starmapMakeLabelPlan();
@@ -6991,12 +7055,25 @@ function starmapDrawLabels() {
 			sy = (-v.y * 0.5 + 0.5) * ch;
 		if (sx < -60 || sx > cw + 60 || sy < -20 || sy > ch + 20) continue;
 		if (!drawnText[it.text]) {
-			ctx.font =
+			var font =
 				(it.kind === "hot" ? "bold 12px " : "11px ") +
 				'ui-sans-serif, system-ui, -apple-system, "PingFang SC", "Microsoft YaHei", sans-serif';
+			ctx.font = font;
 			ctx.textAlign = "left";
 			ctx.textBaseline = "middle";
-			var tw = ctx.measureText(it.text).width;
+			// ★ measureText 缓存：它是**同步布局**，每帧对上千个标签逐次调会把
+			//   主线程卡住。同一串文字在同字体下的宽度只要字体未变就不会变。
+			var mkey = font + "\u0000" + it.text;
+			var tw = starmapTextWidth[mkey];
+			if (tw === undefined) {
+				tw = ctx.measureText(it.text).width;
+				// 上限保护：极端情况下（不断变动的块文本）避免无界增长。
+				// 超限时整表清空重填——比逐项 LRU 简单，而重填代价极低（一次性）。
+				if (Object.keys(starmapTextWidth).length > SM_TEXTWIDTH_MAX) {
+					starmapTextWidth = {};
+				}
+				starmapTextWidth[mkey] = tw;
+			}
 			// 名字画在节点**右侧**（左对齐是节点中心，留 7px 避让球体）。
 			var tx = sx + 7,
 				y = sy;
@@ -7017,7 +7094,24 @@ function starmapDrawLabels() {
 }
 
 function starmapAnimate() {
+	if (!starmapAnimateRunning) return;
 	starmapRaf = requestAnimationFrame(starmapAnimate);
+
+	// ★ 不可见时不做任何工作（2026-10-08 修「非常卡」）。
+	//
+	// 为何必须这一步：本循环原先**从不停**——切到聊天/终端页签、甚至浏览器
+	// 最小化到后台，它仍以 60fps 跑着每帧 3190 节点的全量遍历（渲染、标签、
+	// 形变推进）。用户感知就是整页卡。
+	//
+	// 判据不用 document.hidden：星图可能在**未激活的页签**里（canvas 被搬到
+	// 别的容器），此时页面可见但星图看不到——document.hidden 为 false，
+	// 却白烧 CPU。故直接问「星图容器当前是否可见」。
+	var cont = starmapActiveContainer();
+	if (!cont || !cont.offsetParent) {
+		// 不可见：只保留最小状态（停渲染）。下次可见时由 starmapWake 重新驱动。
+		return;
+	}
+
 	if (starmapCtrl) starmapCtrl.update();
 	if (starmapStarField) starmapStarField.rotation.y += 0.0001;
 	// 推进活动脉冲 / 生长 / 呼吸（无活动时开销≈0）。
@@ -7025,8 +7119,19 @@ function starmapAnimate() {
 	if (starmapRen && starmapScene && starmapCam)
 		starmapRen.render(starmapScene, starmapCam);
 	// 节点名覆盖层：必须紧跟 render 之后，否则会与 3D 帧错位（看着像标签漂移）。
-	// 无节点或页签不可见时内部自行早退。
 	starmapDrawLabels();
+}
+
+// starmapWake 确保渲染循环在跑（幂等）。
+//
+// 为何需要：循环现在会在不可见时自行 return（见 starmapAnimate），
+// 因此切回星图页签时必须重新点火——否则图冻在最后一帧。
+function starmapWake() {
+	if (starmapAnimateRunning) return;
+	starmapAnimateRunning = true;
+	starmapLabelLastCamKey = ""; // 强制标签重绘（可能已过去很久，相机也动过）
+	if (starmapRaf) cancelAnimationFrame(starmapRaf);
+	starmapAnimate();
 }
 
 // smStarmapFitDistance 估算能看到整个星图的相机距离。
