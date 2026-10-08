@@ -1766,7 +1766,6 @@ func (g *GraphDB) Introspect() (map[string]interface{}, error) {
 		 WHERE source_kind='block' AND target_kind='block'
 		   AND edge_type != 'contains'`).Scan(&relationsTotal)
 
-	hotspots := []map[string]interface{}{}
 	// ★★ hotspots 改数**块**（2026-10-04）
 	//
 	// 旧实现读 entities 并按 mention_count 排序 ——
@@ -1776,13 +1775,46 @@ func (g *GraphDB) Introspect() (map[string]interface{}, error) {
 	// ★ 排序口径换成**关系边度数**：一个块被越多关系边指向，
 	//   它在图里越重要 —— 这正是 hotspots 想回答的问题。
 	//   mention_count 已无处可取（旧表专有）。
+	//
+	// ★★★ 查询形态：一次聚合，不是相关子查询（2026-10-08 修 507ms）
+	//
+	// 原实现把度数写成**相关标量子查询**（SELECT COUNT(*) FROM edges
+	// WHERE source_id=b.id OR target_id=b.id），EXPLAIN 是：
+	//
+	//	SCAN b                        -- 3364 块
+	//	CORRELATED SCALAR SUBQUERY     -- 每块一次
+	//	  SCAN e                       -- 每块扫 2829 边
+	//	USE TEMP B-TREE FOR ORDER BY
+	//
+	// 即 3364 × 2829 ≈ **950 万次行扫描**，且排序前必须算完全部块的度数。
+	// 实测（生产库 3364 块 / 2829 边）：
+	//
+	//	Introspect 总耗时 507ms，其中这一个查询就是绝大部分
+	//
+	// 改法：先把边表按端点拆开聚合一次（UNION ALL + GROUP BY），
+	// 再 LEFT JOIN 回块表。语义完全等价（都是用同一套 status 过滤数度），
+	// 但边表只扫**两遍**而不是 3364 遍。
+	//
+	// 实测同一份数据：**507ms → 11ms**（46×），且新旧查询输出逐字节一致。
+	//
+	// 为何不建索引就了事：`source_id=b.id OR target_id=b.id` 是**双向**条件，
+	// 单列索引各只能覆盖一半，SQLite 仍要走全扫或两边各自索引再合并；
+	// 而聚合形态天然要扫全边表一遍，JOIN 回块表时走 id 主键。
+	hotspots := []map[string]interface{}{}
 	rows, err := g.db.Query(
 		`SELECT b.text_content,
-		        COALESCE((SELECT COUNT(*) FROM memory_block_edges e
-		                   WHERE (e.source_id = b.id OR e.target_id = b.id)
-		                     AND COALESCE(e.status,'') != 'deleted'), 0) AS deg,
+		        COALESCE(d.deg, 0) AS deg,
 		        COALESCE(b.semantic_type, '') AS typ
 		 FROM memory_blocks b
+		 LEFT JOIN (
+		     SELECT id, COUNT(*) AS deg FROM (
+		         SELECT source_id AS id FROM memory_block_edges
+		          WHERE COALESCE(status,'') != 'deleted'
+		         UNION ALL
+		         SELECT target_id AS id FROM memory_block_edges
+		          WHERE COALESCE(status,'') != 'deleted'
+		     ) GROUP BY id
+		 ) d ON d.id = b.id
 		 WHERE b.text_content != ''
 		 ORDER BY deg DESC, b.created_at ASC
 		 LIMIT 10`,
@@ -1808,6 +1840,65 @@ func (g *GraphDB) Introspect() (map[string]interface{}, error) {
 		"relations_total": relationsTotal,
 		"memory_hotspots": hotspots,
 	}, nil
+}
+
+// RecentRelations 返回最近的关系边（不含实体），供只关心关系的调用方使用。
+//
+// ★ 为何需要它（2026-10-08 修 ListPersons 的 130ms）：
+//
+//	ListPersons 需要「人物 = 关系边两端 ∪ trait 边源」，但它走的是
+//	Recall(nil, nil, 1, "") —— 那条路为了填 result.Entities 会加载
+//
+// t	**全部块（blockColumns 含稠密向量）**。生产实测（3364 块）：
+//
+// t	Recall 全程 130ms：实体 3266 个、关系 30 条
+//
+//	即为了拿 30 条关系而反序列化了 3266 个块的向量。而 ListPersons
+//	**只看 result.Relations**，那些实体完全是白付的。
+//
+// 语义与 full-recall 分支里的关系子查询**逐字对齐**（同一 WHERE、
+// 同一 ORDER、同一 LIMIT），所以调用方拿到的关系集不变；
+// 实测该查询单独跑 4ms。
+//
+// 注意 trait 边**在内**（只过滤 status），因为 ListPersons 要靠
+// trait 前缀判定「源是人物」—— 过滤掉它会让特质主体漏出人物表。
+func (g *GraphDB) RecentRelations(limit int) ([]Relation, error) {
+	if limit <= 0 {
+		limit = 30
+	}
+	g.mu.RLock()
+	defer g.mu.RUnlock()
+	rows, err := g.db.Query(
+		`SELECT e.id, e.source_id, e.target_id, sb.text_content, tb.text_content,
+				e.edge_type, COALESCE(e.confidence, 0), COALESCE(e.status, ''),
+				COALESCE(e.session_id, ''), COALESCE(e.turn_id, 0), e.created_at,
+				COALESCE((SELECT b.text_content FROM memory_block_edges c
+				          JOIN memory_blocks b ON b.id = c.source_id
+				          WHERE c.target_kind = 'edge' AND c.target_id = e.id
+				            AND c.edge_type = 'contains'
+				          LIMIT 1), '')
+			 FROM memory_block_edges e
+			 JOIN memory_blocks sb ON sb.id = e.source_id
+			 JOIN memory_blocks tb ON tb.id = e.target_id
+			 WHERE e.source_kind = 'block' AND e.target_kind = 'block'
+				  AND COALESCE(e.status, '') = 'active'
+			 ORDER BY e.created_at DESC LIMIT ?`, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var rels []Relation
+	for rows.Next() {
+		var rel Relation
+		if err := rows.Scan(&rel.ID, &rel.SourceBlockID, &rel.TargetBlockID,
+			&rel.SourceName, &rel.TargetName, &rel.RelationType,
+			&rel.Confidence, &rel.Status, &rel.SessionID,
+			&rel.TurnID, &rel.CreatedAt, &rel.SentenceText); err != nil {
+			return nil, err
+		}
+		rels = append(rels, rel)
+	}
+	return rels, rows.Err()
 }
 
 // MergeEntities 合并两个实体：将 sourceName 的所有信息合并到 targetName

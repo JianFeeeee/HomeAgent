@@ -317,13 +317,22 @@ func (s *SocialStore) ListPersons() ([]string, error) {
 	//
 	// ★ 保留一个回退：若图里一条边都没有（纯空库），
 	//   返回空列表而不是全部 —— 那才是「没有人物」。
-	result, err := s.db.Recall(nil, nil, 1, "")
+	// ★ 改走 RecentRelations（2026-10-08 修 130ms）
+	//
+	// 原实现用 Recall(nil, nil, 1, "")，而那条 full-recall 路径为了填
+	// result.Entities 会加载**全部块（含稠密向量）**。生产实测：
+	//
+	//	Recall 全程 130ms：实体 3266 个、关系 30 条
+	//
+	// 即为了 30 条关系白付了 3266 个块的向量反序列化。而本函数只看
+	// result.Relations。改成只取关系（同一 WHERE/ORDER/LIMIT，4ms）。
+	rels, err := s.db.RecentRelations(30)
 	if err != nil {
 		return nil, err
 	}
 
 	seen := make(map[string]bool)
-	for _, r := range result.Relations {
+	for _, r := range rels {
 		if strings.HasPrefix(r.RelationType, traitPrefix) {
 			// 特质：源是主体（人物），目标是特质值
 			seen[r.SourceName] = true
