@@ -10,9 +10,9 @@ import (
 	"sort"
 	"strings"
 
-	agentAPI "gitcode.com/JianFeeeee/HomeAgent/internal/agent/api"
-	"gitcode.com/JianFeeeee/HomeAgent/internal/events"
-	sdk "gitcode.com/JianFeeeee/HomeAgent/internal/sdk"
+	agentAPI "github.com/JianFeeeee/HomeAgent/internal/agent/api"
+	"github.com/JianFeeeee/HomeAgent/internal/events"
+	sdk "github.com/JianFeeeee/HomeAgent/internal/sdk"
 )
 
 // continuationPlaceholder 是工具轮之后补的 user 占位内容。

@@ -27,8 +27,8 @@ import (
 	"fmt"
 	"strings"
 
-	"gitcode.com/JianFeeeee/HomeAgent/internal/memory"
-	"gitcode.com/JianFeeeee/HomeAgent/pkg/generation"
+	"github.com/JianFeeeee/HomeAgent/internal/memory"
+	"github.com/JianFeeeee/HomeAgent/pkg/generation"
 )
 
 // fieldsSchema 约束解码目标。实测这是 1.7b 零幻觉的唯一形态。

@@ -4,8 +4,8 @@ import (
 	"strings"
 	"testing"
 
-	agentAPI "gitcode.com/JianFeeeee/HomeAgent/internal/agent/api"
-	agentIO "gitcode.com/JianFeeeee/HomeAgent/internal/agent/io"
+	agentAPI "github.com/JianFeeeee/HomeAgent/internal/agent/api"
+	agentIO "github.com/JianFeeeee/HomeAgent/internal/agent/io"
 )
 
 // 方案 B：工具结果**只统计不裁剪**。

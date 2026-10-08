@@ -3,7 +3,7 @@ package sdk
 import (
 	"time"
 
-	"gitcode.com/JianFeeeee/HomeAgent/pkg/types"
+	"github.com/JianFeeeee/HomeAgent/pkg/types"
 )
 
 // SupervisorAPI provides access to agent lifecycle management.

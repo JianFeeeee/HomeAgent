@@ -5,7 +5,7 @@ import (
 	"sync"
 	"time"
 
-	"gitcode.com/JianFeeeee/HomeAgent/internal/sdk"
+	"github.com/JianFeeeee/HomeAgent/internal/sdk"
 )
 
 // TerminalRegistry 是**内核侧**的终端会话与命令历史权威视图（「内核开，两个插件接」）。

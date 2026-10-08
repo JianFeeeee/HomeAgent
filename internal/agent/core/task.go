@@ -28,12 +28,12 @@ import (
 	"sync"
 	"time"
 
-	agentAPI "gitcode.com/JianFeeeee/HomeAgent/internal/agent/api"
-	agentIO "gitcode.com/JianFeeeee/HomeAgent/internal/agent/io"
-	"gitcode.com/JianFeeeee/HomeAgent/internal/events"
-	"gitcode.com/JianFeeeee/HomeAgent/internal/memory"
-	sdk "gitcode.com/JianFeeeee/HomeAgent/internal/sdk"
-	pubsdk "gitcode.com/JianFeeeee/homeagent-sdk/sdk"
+	agentAPI "github.com/JianFeeeee/HomeAgent/internal/agent/api"
+	agentIO "github.com/JianFeeeee/HomeAgent/internal/agent/io"
+	"github.com/JianFeeeee/HomeAgent/internal/events"
+	"github.com/JianFeeeee/HomeAgent/internal/memory"
+	sdk "github.com/JianFeeeee/HomeAgent/internal/sdk"
+	pubsdk "github.com/JianFeeeee/homeagentsdk/sdk"
 )
 
 // Step 是任务状态机的游标。

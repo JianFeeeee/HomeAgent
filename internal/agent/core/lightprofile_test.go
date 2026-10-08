@@ -21,9 +21,9 @@ import (
 	"strings"
 	"testing"
 
-	agentAPI "gitcode.com/JianFeeeee/HomeAgent/internal/agent/api"
-	agentIO "gitcode.com/JianFeeeee/HomeAgent/internal/agent/io"
-	"gitcode.com/JianFeeeee/HomeAgent/internal/memory"
+	agentAPI "github.com/JianFeeeee/HomeAgent/internal/agent/api"
+	agentIO "github.com/JianFeeeee/HomeAgent/internal/agent/io"
+	"github.com/JianFeeeee/HomeAgent/internal/memory"
 )
 
 // newLightAgent 构造一个轻量内核 agent（驻留子形态）：有 LightMemory，没有整理面。

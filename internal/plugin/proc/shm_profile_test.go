@@ -22,7 +22,7 @@ import (
 	"strings"
 	"testing"
 
-	pubsdk "gitcode.com/JianFeeeee/homeagent-sdk/sdk"
+	pubsdk "github.com/JianFeeeee/homeagentsdk/sdk"
 )
 
 // profileCtx 构造一组「接近真实」的 StageContext。

@@ -6,7 +6,7 @@ import (
 	"testing"
 	"time"
 
-	"gitcode.com/JianFeeeee/HomeAgent/internal/memory"
+	"github.com/JianFeeeee/HomeAgent/internal/memory"
 )
 
 func newTestCtx() *RelevanceContext {

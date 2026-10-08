@@ -5,10 +5,10 @@ import (
 	"strings"
 	"testing"
 
-	"gitcode.com/JianFeeeee/HomeAgent/internal/memory"
-	doc "gitcode.com/JianFeeeee/HomeAgent/internal/memory/document"
-	"gitcode.com/JianFeeeee/HomeAgent/internal/memory/media"
-	"gitcode.com/JianFeeeee/HomeAgent/internal/memory/text"
+	"github.com/JianFeeeee/HomeAgent/internal/memory"
+	doc "github.com/JianFeeeee/HomeAgent/internal/memory/document"
+	"github.com/JianFeeeee/HomeAgent/internal/memory/media"
+	"github.com/JianFeeeee/HomeAgent/internal/memory/text"
 )
 
 // 插件边界的媒体透传测试。

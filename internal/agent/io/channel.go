@@ -8,7 +8,7 @@ import (
 	"sync"
 	"time"
 
-	pubsdk "gitcode.com/JianFeeeee/homeagent-sdk/sdk"
+	pubsdk "github.com/JianFeeeee/homeagentsdk/sdk"
 )
 
 // ErrToolNotFound 表示「工具不存在」（未注册 / 所属插件已卸载或崩溃）。

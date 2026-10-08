@@ -1,9 +1,9 @@
 package plugin
 
 import (
-	"gitcode.com/JianFeeeee/HomeAgent/internal/plugin/proc"
-	isdk "gitcode.com/JianFeeeee/HomeAgent/internal/sdk"
-	pubsdk "gitcode.com/JianFeeeee/homeagent-sdk/sdk"
+	"github.com/JianFeeeee/HomeAgent/internal/plugin/proc"
+	isdk "github.com/JianFeeeee/HomeAgent/internal/sdk"
+	pubsdk "github.com/JianFeeeee/homeagentsdk/sdk"
 )
 
 // procCore 把内核的 *internal/sdk.PluginSDK 收窄成子进程插件可见的能力面。

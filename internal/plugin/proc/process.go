@@ -15,7 +15,7 @@ import (
 	"syscall"
 	"time"
 
-	"gitcode.com/JianFeeeee/HomeAgent/internal/meta"
+	"github.com/JianFeeeee/HomeAgent/internal/meta"
 )
 
 // Process 管理一个外部插件子进程：spawn / 双向 JSON-RPC / 优雅停止 / 崩溃检测。

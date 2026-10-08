@@ -3,7 +3,7 @@ package sdk
 import (
 	"fmt"
 
-	"gitcode.com/JianFeeeee/HomeAgent/internal/knowledge"
+	"github.com/JianFeeeee/HomeAgent/internal/knowledge"
 )
 
 type knowledgeImpl struct{ ks *knowledge.Store }

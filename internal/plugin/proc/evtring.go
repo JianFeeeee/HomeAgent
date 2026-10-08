@@ -8,7 +8,7 @@ import (
 	"sync/atomic"
 	"time"
 
-	pubsdk "gitcode.com/JianFeeeee/homeagent-sdk/sdk"
+	pubsdk "github.com/JianFeeeee/homeagentsdk/sdk"
 )
 
 // ---- 事件类型编码（编译时确定，与 pubsdk.EventType 一一对应）----

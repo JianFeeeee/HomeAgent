@@ -3,7 +3,7 @@ package sdk
 import (
 	"sync"
 
-	"gitcode.com/JianFeeeee/homeagent-sdk/meta"
+	"github.com/JianFeeeee/homeagentsdk/meta"
 )
 
 // SDKVersion 是对外暴露的 SDK 版本号。

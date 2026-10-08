@@ -4,7 +4,7 @@ import (
 	"fmt"
 	"strings"
 
-	internalConfig "gitcode.com/JianFeeeee/HomeAgent/internal/config"
+	internalConfig "github.com/JianFeeeee/HomeAgent/internal/config"
 )
 
 type settingsImpl struct {

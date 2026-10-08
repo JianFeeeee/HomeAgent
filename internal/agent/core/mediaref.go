@@ -7,9 +7,9 @@ import (
 	"sync/atomic"
 	"time"
 
-	agentAPI "gitcode.com/JianFeeeee/HomeAgent/internal/agent/api"
-	"gitcode.com/JianFeeeee/HomeAgent/internal/memory"
-	"gitcode.com/JianFeeeee/HomeAgent/internal/memory/media"
+	agentAPI "github.com/JianFeeeee/HomeAgent/internal/agent/api"
+	"github.com/JianFeeeee/HomeAgent/internal/memory"
+	"github.com/JianFeeeee/HomeAgent/internal/memory/media"
 )
 
 // blockSeq 保证块 ID 全局唯一（Graph memory_blocks 以 id 为主键）。

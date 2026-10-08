@@ -3,8 +3,8 @@ package core
 import (
 	"testing"
 
-	agentIO "gitcode.com/JianFeeeee/HomeAgent/internal/agent/io"
-	pubsdk "gitcode.com/JianFeeeee/homeagent-sdk/sdk"
+	agentIO "github.com/JianFeeeee/HomeAgent/internal/agent/io"
+	pubsdk "github.com/JianFeeeee/homeagentsdk/sdk"
 )
 
 // 这一组测试锁死「默认不裁剪」这条语义。

@@ -14,7 +14,7 @@ import (
 	"syscall"
 	"time"
 
-	"gitcode.com/JianFeeeee/HomeAgent/internal/devicebridge/client"
+	"github.com/JianFeeeee/HomeAgent/internal/devicebridge/client"
 )
 
 // ---------------------------------------------------------------------------

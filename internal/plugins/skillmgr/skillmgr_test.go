@@ -10,9 +10,9 @@ import (
 	"testing"
 	"time"
 
-	"gitcode.com/JianFeeeee/HomeAgent/internal/events"
-	sdk "gitcode.com/JianFeeeee/HomeAgent/internal/sdk"
-	pubsdk "gitcode.com/JianFeeeee/homeagent-sdk/sdk"
+	"github.com/JianFeeeee/HomeAgent/internal/events"
+	sdk "github.com/JianFeeeee/HomeAgent/internal/sdk"
+	pubsdk "github.com/JianFeeeee/homeagentsdk/sdk"
 )
 
 // ---- 测试辅助 ----

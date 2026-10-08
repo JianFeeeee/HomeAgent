@@ -43,13 +43,13 @@ import (
 	"os"
 	"time"
 
-	"gitcode.com/JianFeeeee/HomeAgent/internal/memory"
-	"gitcode.com/JianFeeeee/HomeAgent/internal/memory/distill"
-	"gitcode.com/JianFeeeee/HomeAgent/internal/memory/vector"
-	"gitcode.com/JianFeeeee/HomeAgent/pkg/embedding"
-	"gitcode.com/JianFeeeee/HomeAgent/pkg/generation"
-	_ "gitcode.com/JianFeeeee/HomeAgent/providers/chineseclip"
-	_ "gitcode.com/JianFeeeee/HomeAgent/providers/ollama"
+	"github.com/JianFeeeee/HomeAgent/internal/memory"
+	"github.com/JianFeeeee/HomeAgent/internal/memory/distill"
+	"github.com/JianFeeeee/HomeAgent/internal/memory/vector"
+	"github.com/JianFeeeee/HomeAgent/pkg/embedding"
+	"github.com/JianFeeeee/HomeAgent/pkg/generation"
+	_ "github.com/JianFeeeee/HomeAgent/providers/chineseclip"
+	_ "github.com/JianFeeeee/HomeAgent/providers/ollama"
 )
 
 func main() {

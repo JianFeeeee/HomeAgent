@@ -4,7 +4,7 @@ import (
 	"strings"
 	"testing"
 
-	"gitcode.com/JianFeeeee/HomeAgent/internal/sdk"
+	"github.com/JianFeeeee/HomeAgent/internal/sdk"
 )
 
 func TestExecuteGetPluginTools(tmp *testing.T) {

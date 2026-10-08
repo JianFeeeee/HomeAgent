@@ -11,9 +11,9 @@ import (
 	"path/filepath"
 	"strings"
 
-	agentAPI "gitcode.com/JianFeeeee/HomeAgent/internal/agent/api"
-	agentIO "gitcode.com/JianFeeeee/HomeAgent/internal/agent/io"
-	"gitcode.com/JianFeeeee/HomeAgent/internal/memory"
+	agentAPI "github.com/JianFeeeee/HomeAgent/internal/agent/api"
+	agentIO "github.com/JianFeeeee/HomeAgent/internal/agent/io"
+	"github.com/JianFeeeee/HomeAgent/internal/memory"
 )
 
 func strArg(tc agentAPI.ToolCall, key string) string {

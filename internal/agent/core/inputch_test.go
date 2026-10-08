@@ -9,8 +9,8 @@ import (
 	"strings"
 	"testing"
 
-	agentAPI "gitcode.com/JianFeeeee/HomeAgent/internal/agent/api"
-	agentIO "gitcode.com/JianFeeeee/HomeAgent/internal/agent/io"
+	agentAPI "github.com/JianFeeeee/HomeAgent/internal/agent/api"
+	agentIO "github.com/JianFeeeee/HomeAgent/internal/agent/io"
 )
 
 func inputChToolCall(args map[string]interface{}) agentAPI.ToolCall {

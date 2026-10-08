@@ -5,8 +5,8 @@ import (
 	"strings"
 	"testing"
 
-	"gitcode.com/JianFeeeee/HomeAgent/internal/agent/api"
-	"gitcode.com/JianFeeeee/HomeAgent/internal/memory"
+	"github.com/JianFeeeee/HomeAgent/internal/agent/api"
+	"github.com/JianFeeeee/HomeAgent/internal/memory"
 )
 
 // 块召回接入 memory_recall 工具后的行为判据。

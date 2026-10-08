@@ -10,7 +10,7 @@ import (
 	"path/filepath"
 	"sync"
 
-	"gitcode.com/JianFeeeee/HomeAgent/internal/memory"
+	"github.com/JianFeeeee/HomeAgent/internal/memory"
 	ort "github.com/yalue/onnxruntime_go"
 )
 

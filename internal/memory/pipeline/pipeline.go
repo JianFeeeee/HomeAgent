@@ -13,9 +13,9 @@ import (
 	"sync"
 	"time"
 
-	"gitcode.com/JianFeeeee/HomeAgent/internal/memory"
-	"gitcode.com/JianFeeeee/HomeAgent/internal/memory/distill"
-	"gitcode.com/JianFeeeee/HomeAgent/internal/nlp"
+	"github.com/JianFeeeee/HomeAgent/internal/memory"
+	"github.com/JianFeeeee/HomeAgent/internal/memory/distill"
+	"github.com/JianFeeeee/HomeAgent/internal/nlp"
 )
 
 type RawRecord struct {

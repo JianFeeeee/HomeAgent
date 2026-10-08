@@ -20,7 +20,7 @@ import (
 	"fmt"
 	"os"
 
-	"gitcode.com/JianFeeeee/HomeAgent/internal/memory"
+	"github.com/JianFeeeee/HomeAgent/internal/memory"
 )
 
 func main() {

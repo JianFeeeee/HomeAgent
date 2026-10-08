@@ -7,10 +7,10 @@ import (
 	"testing"
 	"time"
 
-	agentAPI "gitcode.com/JianFeeeee/HomeAgent/internal/agent/api"
-	"gitcode.com/JianFeeeee/HomeAgent/internal/memory"
-	"gitcode.com/JianFeeeee/HomeAgent/internal/memory/document"
-	"gitcode.com/JianFeeeee/HomeAgent/internal/memory/media"
+	agentAPI "github.com/JianFeeeee/HomeAgent/internal/agent/api"
+	"github.com/JianFeeeee/HomeAgent/internal/memory"
+	"github.com/JianFeeeee/HomeAgent/internal/memory/document"
+	"github.com/JianFeeeee/HomeAgent/internal/memory/media"
 )
 
 // 媒体记忆接线测试：验证媒体从对话进入 CAS、挂到 L0 事件、

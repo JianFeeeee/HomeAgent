@@ -8,7 +8,7 @@ import (
 	"strings"
 	"sync"
 
-	sdk "gitcode.com/JianFeeeee/HomeAgent/internal/sdk"
+	sdk "github.com/JianFeeeee/HomeAgent/internal/sdk"
 )
 
 // defaultHistoryFile 是聊天记录的默认文件名（落在 <data> 下）。

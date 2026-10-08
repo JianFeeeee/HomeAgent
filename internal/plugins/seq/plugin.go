@@ -10,7 +10,7 @@ import (
 	"strings"
 	"sync"
 
-	"gitcode.com/JianFeeeee/HomeAgent/internal/sdk"
+	"github.com/JianFeeeee/HomeAgent/internal/sdk"
 )
 
 // toolDefInfo 是本包内部用的工具声明视图（判据也用它）。

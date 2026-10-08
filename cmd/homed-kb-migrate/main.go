@@ -31,7 +31,7 @@ import (
 	"os"
 	"path/filepath"
 
-	"gitcode.com/JianFeeeee/HomeAgent/internal/knowledge"
+	"github.com/JianFeeeee/HomeAgent/internal/knowledge"
 )
 
 func main() {

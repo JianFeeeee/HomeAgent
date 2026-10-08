@@ -9,7 +9,7 @@ import (
 	"strings"
 	"sync"
 
-	"gitcode.com/JianFeeeee/HomeAgent/internal/ptywin"
+	"github.com/JianFeeeee/HomeAgent/internal/ptywin"
 )
 
 func defaultShell() string { return "cmd.exe" }

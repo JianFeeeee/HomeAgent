@@ -14,7 +14,7 @@ import (
 	"testing"
 	"time"
 
-	pubsdk "gitcode.com/JianFeeeee/homeagent-sdk/sdk"
+	pubsdk "github.com/JianFeeeee/homeagentsdk/sdk"
 )
 
 // 真实外部插件（重编为 plugin.bin）经内核加载后的端到端冒烟（Part 6.3）。

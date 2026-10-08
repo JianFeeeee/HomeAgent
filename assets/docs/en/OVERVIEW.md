@@ -101,5 +101,5 @@ Code is in the project root, implemented in Go.
 Core functionality is operational. Plugin system and SDK are ready for independent external plugin development.
 
 - Built-in plugins: webui / cli / timer / cmd / mcp / agentcli / healthcheck / pluginmgr / clawhubadapter / files / cfgmgr
-- External plugin examples ([homeagent-sdk](https://gitcode.com/JianFeeeee/homeagent-sdk) repo `example/`, both Go and Lua types): qq / files / a2a / ai_image / bili / browser / calendar / editdoc / memo / music / ocr / rss / sanitizer / weather / luademo
+- External plugin examples ([homeagent-sdk](https://github.com/JianFeeeee/homeagentsdk) repo `example/`, both Go and Lua types): qq / files / a2a / ai_image / bili / browser / calendar / editdoc / memo / music / ocr / rss / sanitizer / weather / luademo
 - Distribution: `.hmap` plugin package format, installable via WebUI

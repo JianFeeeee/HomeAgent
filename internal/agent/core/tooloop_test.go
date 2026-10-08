@@ -4,8 +4,8 @@ import (
 	"strings"
 	"testing"
 
-	agentAPI "gitcode.com/JianFeeeee/HomeAgent/internal/agent/api"
-	sdk "gitcode.com/JianFeeeee/homeagent-sdk/sdk"
+	agentAPI "github.com/JianFeeeee/HomeAgent/internal/agent/api"
+	sdk "github.com/JianFeeeee/homeagentsdk/sdk"
 )
 
 // appendPlaceholder 复刻 process() 循环顶部的补位逻辑。

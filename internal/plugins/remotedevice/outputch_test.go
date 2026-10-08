@@ -15,8 +15,8 @@ import (
 	"testing"
 	"time"
 
-	agentIO "gitcode.com/JianFeeeee/HomeAgent/internal/agent/io"
-	"gitcode.com/JianFeeeee/HomeAgent/internal/sdk"
+	agentIO "github.com/JianFeeeee/HomeAgent/internal/agent/io"
+	"github.com/JianFeeeee/HomeAgent/internal/sdk"
 )
 
 func TestDeviceOutputCapsMapping(t *testing.T) {

@@ -3,12 +3,12 @@ package proc
 import (
 	"encoding/json"
 	"fmt"
-	"gitcode.com/JianFeeeee/HomeAgent/internal/knowledge"
+	"github.com/JianFeeeee/HomeAgent/internal/knowledge"
 	"strings"
 	"sync"
 	"testing"
 
-	pubsdk "gitcode.com/JianFeeeee/homeagent-sdk/sdk"
+	pubsdk "github.com/JianFeeeee/homeagentsdk/sdk"
 )
 
 // 端到端验证：内核 RunStage 并发扇出 → 真实子进程插件经共享内存读改写 → 结果回读。

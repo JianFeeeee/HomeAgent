@@ -12,8 +12,8 @@ import (
 
 	"encoding/base64"
 	"encoding/json"
-	agentIO "gitcode.com/JianFeeeee/HomeAgent/internal/agent/io"
-	sdk "gitcode.com/JianFeeeee/HomeAgent/internal/sdk"
+	agentIO "github.com/JianFeeeee/HomeAgent/internal/agent/io"
+	sdk "github.com/JianFeeeee/HomeAgent/internal/sdk"
 	"net/http"
 	"path/filepath"
 )

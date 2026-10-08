@@ -7,10 +7,10 @@ import (
 	"time"
 
 	"encoding/json"
-	internalConfig "gitcode.com/JianFeeeee/HomeAgent/internal/config"
-	"gitcode.com/JianFeeeee/HomeAgent/internal/meta"
-	sdk "gitcode.com/JianFeeeee/HomeAgent/internal/sdk"
-	"gitcode.com/JianFeeeee/HomeAgent/pkg/types"
+	internalConfig "github.com/JianFeeeee/HomeAgent/internal/config"
+	"github.com/JianFeeeee/HomeAgent/internal/meta"
+	sdk "github.com/JianFeeeee/HomeAgent/internal/sdk"
+	"github.com/JianFeeeee/HomeAgent/pkg/types"
 	"net/http"
 	"path/filepath"
 )

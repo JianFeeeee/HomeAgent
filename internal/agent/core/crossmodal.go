@@ -6,8 +6,8 @@ import (
 	"sort"
 	"strings"
 
-	"gitcode.com/JianFeeeee/HomeAgent/internal/memory/document"
-	"gitcode.com/JianFeeeee/HomeAgent/internal/memory/media"
+	"github.com/JianFeeeee/HomeAgent/internal/memory/document"
+	"github.com/JianFeeeee/HomeAgent/internal/memory/media"
 )
 
 // CrossModalHit 是跨模态检索融合后的一条候选。

@@ -4,8 +4,8 @@ import (
 	"strings"
 	"testing"
 
-	"gitcode.com/JianFeeeee/HomeAgent/internal/meta"
-	sdkmeta "gitcode.com/JianFeeeee/homeagent-sdk/meta"
+	"github.com/JianFeeeee/HomeAgent/internal/meta"
+	sdkmeta "github.com/JianFeeeee/homeagentsdk/meta"
 )
 
 func TestExpandPromptVars(t *testing.T) {

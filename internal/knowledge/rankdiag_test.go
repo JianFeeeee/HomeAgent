@@ -8,7 +8,7 @@ import (
 	"strings"
 	"testing"
 
-	"gitcode.com/JianFeeeee/HomeAgent/internal/memory"
+	"github.com/JianFeeeee/HomeAgent/internal/memory"
 )
 
 // 知识库检索质量判据（真实数据，默认跳过）。

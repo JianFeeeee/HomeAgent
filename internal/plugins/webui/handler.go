@@ -16,7 +16,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
-	sdk "gitcode.com/JianFeeeee/HomeAgent/internal/sdk"
+	sdk "github.com/JianFeeeee/HomeAgent/internal/sdk"
 	"net/http"
 	"path"
 )

@@ -14,8 +14,8 @@ import (
 	"strings"
 	"testing"
 
-	agentAPI "gitcode.com/JianFeeeee/HomeAgent/internal/agent/api"
-	agentIO "gitcode.com/JianFeeeee/HomeAgent/internal/agent/io"
+	agentAPI "github.com/JianFeeeee/HomeAgent/internal/agent/api"
+	agentIO "github.com/JianFeeeee/HomeAgent/internal/agent/io"
 )
 
 // registerFakeOutput 注册一个假的输出通道（device 通道）。

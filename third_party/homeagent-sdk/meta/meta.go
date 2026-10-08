@@ -4,7 +4,7 @@ package meta
 
 var (
 	// Version 是 HomeAgent SDK 版本号。
-	// 通过 `-ldflags="-X gitcode.com/JianFeeeee/homeagent-sdk/meta.Version=vX.Y.Z"` 注入。
+	// 通过 `-ldflags="-X github.com/JianFeeeee/homeagentsdk/meta.Version=vX.Y.Z"` 注入。
 	//
 	// 版本号语义：**SDK 版本跟随核心的中版本，patch 位恒为 .0**。
 	// 整条核心 1.1.x 线（1.1.0、1.1.1、1.1.7…）共用 SDK 1.1.0；
@@ -60,7 +60,12 @@ var (
 	SDKName = "HomeAgent SDK"
 
 	// CoreModule 是核心仓的 Go module path，供 hmapdev 生成 go.mod 时使用。
-	CoreModule = "gitcode.com/JianFeeeee/HomeAgent"
+	//
+	// ★ 2026-10-08 随主仓托管地迁移而更新：仓库在 GitHub
+	//   （github.com/JianFeeeee/HomeAgent），module 路径同步。
+	//   注意它与 SDKModule 不是同一个仓：插件只依赖 SDK，**不依赖主仓**，
+	//   所以改本常量不影响任何已有插件。
+	CoreModule = "github.com/JianFeeeee/HomeAgent"
 
 	// CoreVersion 是此 SDK 所兼容的最低核心版本。
 	//

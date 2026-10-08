@@ -16,7 +16,7 @@ import (
 	"sync"
 	"time"
 
-	luaVM "gitcode.com/JianFeeeee/HomeAgent/internal/lua"
+	luaVM "github.com/JianFeeeee/HomeAgent/internal/lua"
 )
 
 // ContentBlock 定义多模态内容块，用于图片/音频等非文本输入。

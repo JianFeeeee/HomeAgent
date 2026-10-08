@@ -15,7 +15,7 @@ import (
 	"sync"
 	"time"
 
-	"gitcode.com/JianFeeeee/HomeAgent/internal/devicebridge/client"
+	"github.com/JianFeeeee/HomeAgent/internal/devicebridge/client"
 )
 
 // ===== WebSocket 帧编码/解码（RFC 6455） =====

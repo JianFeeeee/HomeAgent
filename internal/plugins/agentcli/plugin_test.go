@@ -10,8 +10,8 @@ import (
 	"testing"
 	"time"
 
-	sdk "gitcode.com/JianFeeeee/HomeAgent/internal/sdk"
-	sdkpub "gitcode.com/JianFeeeee/homeagent-sdk/sdk"
+	sdk "github.com/JianFeeeee/HomeAgent/internal/sdk"
+	sdkpub "github.com/JianFeeeee/homeagentsdk/sdk"
 )
 
 type toolCapture struct {

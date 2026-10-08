@@ -7,7 +7,7 @@ import (
 	"sync"
 	"sync/atomic"
 
-	pubsdk "gitcode.com/JianFeeeee/homeagent-sdk/sdk"
+	pubsdk "github.com/JianFeeeee/homeagentsdk/sdk"
 )
 
 // Host 持有**被全部子进程插件共享的统一内存区域**，是共享数据面的

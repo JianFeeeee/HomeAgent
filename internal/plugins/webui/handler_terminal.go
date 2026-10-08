@@ -3,7 +3,7 @@ package webui
 import (
 	"net/http"
 
-	sdk "gitcode.com/JianFeeeee/HomeAgent/internal/sdk"
+	sdk "github.com/JianFeeeee/HomeAgent/internal/sdk"
 )
 
 // 终端面：终端会话列表与命令历史接口。

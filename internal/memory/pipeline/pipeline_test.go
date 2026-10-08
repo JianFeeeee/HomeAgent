@@ -7,8 +7,8 @@ import (
 	"testing"
 	"time"
 
-	"gitcode.com/JianFeeeee/HomeAgent/internal/memory"
-	"gitcode.com/JianFeeeee/HomeAgent/internal/memory/vector"
+	"github.com/JianFeeeee/HomeAgent/internal/memory"
+	"github.com/JianFeeeee/HomeAgent/internal/memory/vector"
 )
 
 // constVectorizer 恒等向量器：所有候选统一过融合阈值，验证嵌入接线是否生效。

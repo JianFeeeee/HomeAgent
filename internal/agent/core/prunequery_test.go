@@ -3,7 +3,7 @@ package core
 import (
 	"testing"
 
-	sdk "gitcode.com/JianFeeeee/HomeAgent/internal/sdk"
+	sdk "github.com/JianFeeeee/HomeAgent/internal/sdk"
 )
 
 // ContextPolicy=prune 的查询向量必须取**清洗后**的有效内容。

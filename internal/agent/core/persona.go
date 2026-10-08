@@ -4,7 +4,7 @@ import (
 	"fmt"
 	"strings"
 
-	agentAPI "gitcode.com/JianFeeeee/HomeAgent/internal/agent/api"
+	agentAPI "github.com/JianFeeeee/HomeAgent/internal/agent/api"
 )
 
 // PersonaStore 是人格设定的读写面。

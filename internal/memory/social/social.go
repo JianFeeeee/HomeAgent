@@ -6,7 +6,7 @@ import (
 	"strings"
 	"sync"
 
-	"gitcode.com/JianFeeeee/HomeAgent/internal/memory"
+	"github.com/JianFeeeee/HomeAgent/internal/memory"
 )
 
 const (

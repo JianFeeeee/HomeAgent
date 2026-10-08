@@ -3,9 +3,9 @@ package plugin
 import (
 	"testing"
 
-	"gitcode.com/JianFeeeee/HomeAgent/internal/events"
-	"gitcode.com/JianFeeeee/HomeAgent/internal/plugin/proc"
-	pubsdk "gitcode.com/JianFeeeee/homeagent-sdk/sdk"
+	"github.com/JianFeeeee/HomeAgent/internal/events"
+	"github.com/JianFeeeee/HomeAgent/internal/plugin/proc"
+	pubsdk "github.com/JianFeeeee/homeagentsdk/sdk"
 )
 
 // TestEventRing_CloseUnsubscribesFromBus 钉死：EventRing.Close 必须把

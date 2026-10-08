@@ -14,7 +14,7 @@ import (
 	"strings"
 	"sync"
 
-	pubsdk "gitcode.com/JianFeeeee/homeagent-sdk/sdk"
+	pubsdk "github.com/JianFeeeee/homeagentsdk/sdk"
 )
 
 // ProxyDef 是一条反代声明（见 pubsdk.ProxyDef 的完整文档，含「单一入口原则」）。

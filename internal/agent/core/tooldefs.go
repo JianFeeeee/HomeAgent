@@ -6,10 +6,10 @@ import (
 	"strings"
 	"sync"
 
-	agentIO "gitcode.com/JianFeeeee/HomeAgent/internal/agent/io"
-	"gitcode.com/JianFeeeee/HomeAgent/internal/meta"
-	"gitcode.com/JianFeeeee/HomeAgent/internal/sdk"
-	sdkmeta "gitcode.com/JianFeeeee/homeagent-sdk/meta"
+	agentIO "github.com/JianFeeeee/HomeAgent/internal/agent/io"
+	"github.com/JianFeeeee/HomeAgent/internal/meta"
+	"github.com/JianFeeeee/HomeAgent/internal/sdk"
+	sdkmeta "github.com/JianFeeeee/homeagentsdk/meta"
 )
 
 func (a *Agent) buildMemoryContext(input string, maxTokens int, scenes []string) string {

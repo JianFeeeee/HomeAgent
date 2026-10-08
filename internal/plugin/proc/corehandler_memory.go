@@ -3,9 +3,9 @@ package proc
 import (
 	"encoding/json"
 	"fmt"
-	"gitcode.com/JianFeeeee/HomeAgent/internal/knowledge"
+	"github.com/JianFeeeee/HomeAgent/internal/knowledge"
 
-	pubsdk "gitcode.com/JianFeeeee/homeagent-sdk/sdk"
+	pubsdk "github.com/JianFeeeee/homeagentsdk/sdk"
 )
 
 // handleGraphMemory 处理图记忆（实体/关系）：recall / commit / introspect / merge / purge。

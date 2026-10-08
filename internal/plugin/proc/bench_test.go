@@ -7,7 +7,7 @@ import (
 	"strings"
 	"testing"
 
-	pubsdk "gitcode.com/JianFeeeee/homeagent-sdk/sdk"
+	pubsdk "github.com/JianFeeeee/homeagentsdk/sdk"
 )
 
 // 子进程架构的性能基准（Part 6.6 验收项）。

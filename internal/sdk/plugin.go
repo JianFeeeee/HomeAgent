@@ -4,9 +4,9 @@ import (
 	"log"
 	"sync"
 
-	agentIO "gitcode.com/JianFeeeee/HomeAgent/internal/agent/io"
-	"gitcode.com/JianFeeeee/HomeAgent/internal/events"
-	pubsdk "gitcode.com/JianFeeeee/homeagent-sdk/sdk"
+	agentIO "github.com/JianFeeeee/HomeAgent/internal/agent/io"
+	"github.com/JianFeeeee/HomeAgent/internal/events"
+	pubsdk "github.com/JianFeeeee/homeagentsdk/sdk"
 )
 
 // SDKVersion 是对外 SDK 版本号，与核心 meta.Version 保持一致。

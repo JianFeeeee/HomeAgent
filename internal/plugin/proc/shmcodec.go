@@ -4,7 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 
-	pubsdk "gitcode.com/JianFeeeee/homeagent-sdk/sdk"
+	pubsdk "github.com/JianFeeeee/homeagentsdk/sdk"
 )
 
 // StageContext 的跨进程编解码（§3.3 数据面 / §3.4 SDK 封装全部复杂度）。

@@ -7,7 +7,7 @@ import (
 	"errors"
 	"fmt"
 
-	"gitcode.com/JianFeeeee/HomeAgent/pkg/embedding"
+	"github.com/JianFeeeee/HomeAgent/pkg/embedding"
 )
 
 func init() {

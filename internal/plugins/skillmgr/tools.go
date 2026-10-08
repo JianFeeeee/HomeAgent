@@ -6,8 +6,8 @@ import (
 	"path/filepath"
 	"strings"
 
-	"gitcode.com/JianFeeeee/HomeAgent/internal/plugin"
-	"gitcode.com/JianFeeeee/HomeAgent/internal/sdk"
+	"github.com/JianFeeeee/HomeAgent/internal/plugin"
+	"github.com/JianFeeeee/HomeAgent/internal/sdk"
 )
 
 // registerTools 注册 LLM 可调用的 skill 管理工具。

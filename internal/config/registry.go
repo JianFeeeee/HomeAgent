@@ -14,7 +14,7 @@ import (
 	"sync"
 	"time"
 
-	"gitcode.com/JianFeeeee/HomeAgent/pkg/types"
+	"github.com/JianFeeeee/HomeAgent/pkg/types"
 	_ "github.com/mattn/go-sqlite3"
 )
 

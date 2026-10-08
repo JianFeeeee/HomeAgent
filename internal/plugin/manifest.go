@@ -5,7 +5,7 @@ import (
 	"os"
 	"path/filepath"
 
-	pubsdk "gitcode.com/JianFeeeee/homeagent-sdk/sdk"
+	pubsdk "github.com/JianFeeeee/homeagentsdk/sdk"
 )
 
 const PackageExt = ".hmap"

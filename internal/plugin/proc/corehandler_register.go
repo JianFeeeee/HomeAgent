@@ -4,7 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 
-	pubsdk "gitcode.com/JianFeeeee/homeagent-sdk/sdk"
+	pubsdk "github.com/JianFeeeee/homeagentsdk/sdk"
 )
 
 // handleRegister 处理注册面：工具 / stage / 输出通道 / 插件 API / 入站通道。

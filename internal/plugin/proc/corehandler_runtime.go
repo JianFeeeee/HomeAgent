@@ -4,7 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 
-	pubsdk "gitcode.com/JianFeeeee/homeagent-sdk/sdk"
+	pubsdk "github.com/JianFeeeee/homeagentsdk/sdk"
 )
 
 // handlePluginMgr 处理插件管理：reloadOne / listLoaded / isDisabled。

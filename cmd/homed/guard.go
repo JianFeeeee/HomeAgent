@@ -19,11 +19,11 @@ import (
 	"syscall"
 	"time"
 
-	internalConfig "gitcode.com/JianFeeeee/HomeAgent/internal/config"
-	"gitcode.com/JianFeeeee/HomeAgent/internal/ipc"
-	"gitcode.com/JianFeeeee/HomeAgent/internal/recovery"
-	"gitcode.com/JianFeeeee/HomeAgent/internal/system"
-	"gitcode.com/JianFeeeee/HomeAgent/internal/tracker"
+	internalConfig "github.com/JianFeeeee/HomeAgent/internal/config"
+	"github.com/JianFeeeee/HomeAgent/internal/ipc"
+	"github.com/JianFeeeee/HomeAgent/internal/recovery"
+	"github.com/JianFeeeee/HomeAgent/internal/system"
+	"github.com/JianFeeeee/HomeAgent/internal/tracker"
 	"gopkg.in/yaml.v3"
 )
 

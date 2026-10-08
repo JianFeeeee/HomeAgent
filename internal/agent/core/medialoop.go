@@ -6,8 +6,8 @@ import (
 	"sync"
 	"sync/atomic"
 
-	"gitcode.com/JianFeeeee/HomeAgent/internal/memory"
-	"gitcode.com/JianFeeeee/HomeAgent/internal/memory/vector"
+	"github.com/JianFeeeee/HomeAgent/internal/memory"
+	"github.com/JianFeeeee/HomeAgent/internal/memory/vector"
 )
 
 // 媒体与记忆块的生命周期辅助。

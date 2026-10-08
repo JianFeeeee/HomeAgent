@@ -22,7 +22,7 @@ import (
 	"fmt"
 	"log"
 
-	"gitcode.com/JianFeeeee/HomeAgent/internal/memory"
+	"github.com/JianFeeeee/HomeAgent/internal/memory"
 )
 
 func main() {

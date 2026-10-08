@@ -6,11 +6,11 @@ import (
 	"runtime/debug"
 	"time"
 
-	agentAPI "gitcode.com/JianFeeeee/HomeAgent/internal/agent/api"
-	agentIO "gitcode.com/JianFeeeee/HomeAgent/internal/agent/io"
-	"gitcode.com/JianFeeeee/HomeAgent/internal/events"
-	sdk "gitcode.com/JianFeeeee/HomeAgent/internal/sdk"
-	pubsdk "gitcode.com/JianFeeeee/homeagent-sdk/sdk"
+	agentAPI "github.com/JianFeeeee/HomeAgent/internal/agent/api"
+	agentIO "github.com/JianFeeeee/HomeAgent/internal/agent/io"
+	"github.com/JianFeeeee/HomeAgent/internal/events"
+	sdk "github.com/JianFeeeee/HomeAgent/internal/sdk"
+	pubsdk "github.com/JianFeeeee/homeagentsdk/sdk"
 )
 
 // eventLoop 已由 scheduler.go 的 schedulerLoop 取代（M2）。

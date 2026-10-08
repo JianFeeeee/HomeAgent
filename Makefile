@@ -54,7 +54,7 @@ VERSION := $(META_VERSION)dev$(if $(filter --dirty,$(shell git status --porcelai
 endif
 COMMIT ?= $(shell git rev-parse --short HEAD 2>/dev/null || echo "unknown")
 BUILD_TIME ?= $(shell date -u '+%Y-%m-%dT%H:%M:%SZ')
-LDFLAGS = -X gitcode.com/JianFeeeee/HomeAgent/internal/meta.Version=$(VERSION) -X gitcode.com/JianFeeeee/HomeAgent/internal/meta.Commit=$(COMMIT) -X gitcode.com/JianFeeeee/HomeAgent/internal/meta.BuildTime=$(BUILD_TIME)
+LDFLAGS = -X github.com/JianFeeeee/HomeAgent/internal/meta.Version=$(VERSION) -X github.com/JianFeeeee/HomeAgent/internal/meta.Commit=$(COMMIT) -X github.com/JianFeeeee/HomeAgent/internal/meta.BuildTime=$(BUILD_TIME)
 
 all: build build-cli
 

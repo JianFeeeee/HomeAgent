@@ -6,8 +6,8 @@ import (
 	"runtime/debug"
 	"sync"
 
-	agentIO "gitcode.com/JianFeeeee/HomeAgent/internal/agent/io"
-	sdk "gitcode.com/JianFeeeee/HomeAgent/internal/sdk"
+	agentIO "github.com/JianFeeeee/HomeAgent/internal/agent/io"
+	sdk "github.com/JianFeeeee/HomeAgent/internal/sdk"
 )
 
 type StageHost struct {

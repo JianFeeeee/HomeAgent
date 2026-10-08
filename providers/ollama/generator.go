@@ -28,7 +28,7 @@ import (
 	"strings"
 	"time"
 
-	"gitcode.com/JianFeeeee/HomeAgent/pkg/generation"
+	"github.com/JianFeeeee/HomeAgent/pkg/generation"
 )
 
 const (

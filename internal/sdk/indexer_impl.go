@@ -3,7 +3,7 @@ package sdk
 import (
 	"errors"
 
-	"gitcode.com/JianFeeeee/HomeAgent/internal/memory"
+	"github.com/JianFeeeee/HomeAgent/internal/memory"
 )
 
 // indexerImpl 桥接 memory.Indexer 到中立的 IndexerAPI。

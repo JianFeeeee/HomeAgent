@@ -3,7 +3,7 @@ package sdk
 import (
 	"errors"
 
-	"gitcode.com/JianFeeeee/HomeAgent/internal/memory/media"
+	"github.com/JianFeeeee/HomeAgent/internal/memory/media"
 )
 
 // ErrMediaUnavailable 表示媒体存储未接线（宿主没注入 media.Store）。

@@ -12,7 +12,7 @@ import (
 	"sync"
 	"time"
 
-	"gitcode.com/JianFeeeee/HomeAgent/pkg/embedding"
+	"github.com/JianFeeeee/HomeAgent/pkg/embedding"
 )
 
 func init() {

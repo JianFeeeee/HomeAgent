@@ -6,9 +6,9 @@ import (
 	"testing"
 	"time"
 
-	"gitcode.com/JianFeeeee/HomeAgent/internal/events"
-	"gitcode.com/JianFeeeee/HomeAgent/internal/plugin/proc"
-	pubsdk "gitcode.com/JianFeeeee/homeagent-sdk/sdk"
+	"github.com/JianFeeeee/HomeAgent/internal/events"
+	"github.com/JianFeeeee/HomeAgent/internal/plugin/proc"
+	pubsdk "github.com/JianFeeeee/homeagentsdk/sdk"
 )
 
 // 事件环基础测试：Host 创建事件环 → EventRing 写入 → 消费者读到。

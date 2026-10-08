@@ -8,7 +8,7 @@ import (
 	"sync"
 	"time"
 
-	"gitcode.com/JianFeeeee/HomeAgent/internal/memory/vector"
+	"github.com/JianFeeeee/HomeAgent/internal/memory/vector"
 )
 
 type Indexer struct {

@@ -13,17 +13,17 @@ import (
 	"testing"
 	"time"
 
-	agentAPI "gitcode.com/JianFeeeee/HomeAgent/internal/agent/api"
-	agentCore "gitcode.com/JianFeeeee/HomeAgent/internal/agent/core"
-	agentIO "gitcode.com/JianFeeeee/HomeAgent/internal/agent/io"
-	internalConfig "gitcode.com/JianFeeeee/HomeAgent/internal/config"
-	"gitcode.com/JianFeeeee/HomeAgent/internal/events"
-	"gitcode.com/JianFeeeee/HomeAgent/internal/knowledge"
-	"gitcode.com/JianFeeeee/HomeAgent/internal/memory"
-	sdk "gitcode.com/JianFeeeee/HomeAgent/internal/sdk"
-	"gitcode.com/JianFeeeee/HomeAgent/internal/supervisor"
-	"gitcode.com/JianFeeeee/HomeAgent/internal/tracker"
-	"gitcode.com/JianFeeeee/HomeAgent/pkg/types"
+	agentAPI "github.com/JianFeeeee/HomeAgent/internal/agent/api"
+	agentCore "github.com/JianFeeeee/HomeAgent/internal/agent/core"
+	agentIO "github.com/JianFeeeee/HomeAgent/internal/agent/io"
+	internalConfig "github.com/JianFeeeee/HomeAgent/internal/config"
+	"github.com/JianFeeeee/HomeAgent/internal/events"
+	"github.com/JianFeeeee/HomeAgent/internal/knowledge"
+	"github.com/JianFeeeee/HomeAgent/internal/memory"
+	sdk "github.com/JianFeeeee/HomeAgent/internal/sdk"
+	"github.com/JianFeeeee/HomeAgent/internal/supervisor"
+	"github.com/JianFeeeee/HomeAgent/internal/tracker"
+	"github.com/JianFeeeee/HomeAgent/pkg/types"
 )
 
 func testSDK(cfg sdk.SDKConfig) *sdk.PluginSDK {

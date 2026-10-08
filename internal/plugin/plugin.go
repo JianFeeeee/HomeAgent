@@ -9,7 +9,7 @@ import (
 	"strings"
 	"sync"
 
-	agentIO "gitcode.com/JianFeeeee/HomeAgent/internal/agent/io"
+	agentIO "github.com/JianFeeeee/HomeAgent/internal/agent/io"
 )
 
 type PluginType string

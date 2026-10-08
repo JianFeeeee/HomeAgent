@@ -6,7 +6,7 @@ import (
 	"testing"
 	"time"
 
-	agentAPI "gitcode.com/JianFeeeee/HomeAgent/internal/agent/api"
+	agentAPI "github.com/JianFeeeee/HomeAgent/internal/agent/api"
 )
 
 // 验证流式 tool call 分片累积：模拟 llmsproxy/big-pickle 的分片序列

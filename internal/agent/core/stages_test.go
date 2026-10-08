@@ -5,7 +5,7 @@ import (
 	"sync/atomic"
 	"testing"
 
-	sdk "gitcode.com/JianFeeeee/HomeAgent/internal/sdk"
+	sdk "github.com/JianFeeeee/HomeAgent/internal/sdk"
 )
 
 func TestStageHostRegisterTool(t *testing.T) {

@@ -7,8 +7,8 @@ import (
 	"testing"
 	"time"
 
-	"gitcode.com/JianFeeeee/HomeAgent/internal/events"
-	sdk "gitcode.com/JianFeeeee/HomeAgent/internal/sdk"
+	"github.com/JianFeeeee/HomeAgent/internal/events"
+	sdk "github.com/JianFeeeee/HomeAgent/internal/sdk"
 )
 
 // eventCapture 订阅事件总线，收下 terminal_output 事件供断言。

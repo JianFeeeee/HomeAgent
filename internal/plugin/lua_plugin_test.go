@@ -5,9 +5,9 @@ import (
 	"path/filepath"
 	"testing"
 
-	internalConfig "gitcode.com/JianFeeeee/HomeAgent/internal/config"
-	"gitcode.com/JianFeeeee/HomeAgent/internal/events"
-	sdk "gitcode.com/JianFeeeee/HomeAgent/internal/sdk"
+	internalConfig "github.com/JianFeeeee/HomeAgent/internal/config"
+	"github.com/JianFeeeee/HomeAgent/internal/events"
+	sdk "github.com/JianFeeeee/HomeAgent/internal/sdk"
 	lua "github.com/yuin/gopher-lua"
 )
 

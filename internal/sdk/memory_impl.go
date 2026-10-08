@@ -6,10 +6,10 @@ import (
 	"sync/atomic"
 	"time"
 
-	"gitcode.com/JianFeeeee/HomeAgent/internal/memory"
-	doc "gitcode.com/JianFeeeee/HomeAgent/internal/memory/document"
-	"gitcode.com/JianFeeeee/HomeAgent/internal/memory/media"
-	"gitcode.com/JianFeeeee/HomeAgent/internal/memory/text"
+	"github.com/JianFeeeee/HomeAgent/internal/memory"
+	doc "github.com/JianFeeeee/HomeAgent/internal/memory/document"
+	"github.com/JianFeeeee/HomeAgent/internal/memory/media"
+	"github.com/JianFeeeee/HomeAgent/internal/memory/text"
 )
 
 // 插件侧记忆接口的实现（SDK 桥接层）。

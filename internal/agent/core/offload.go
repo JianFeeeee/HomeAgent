@@ -24,7 +24,7 @@ import (
 
 	"runtime/debug"
 
-	agentIO "gitcode.com/JianFeeeee/HomeAgent/internal/agent/io"
+	agentIO "github.com/JianFeeeee/HomeAgent/internal/agent/io"
 )
 
 // OffloadOptions 是自动转投的判定与执行参数。

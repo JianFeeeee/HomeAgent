@@ -9,8 +9,8 @@ import (
 	"testing"
 	"time"
 
-	internalConfig "gitcode.com/JianFeeeee/HomeAgent/internal/config"
-	"gitcode.com/JianFeeeee/HomeAgent/internal/sdk"
+	internalConfig "github.com/JianFeeeee/HomeAgent/internal/config"
+	"github.com/JianFeeeee/HomeAgent/internal/sdk"
 )
 
 // ===== 旧反代路径：两处仍用 http.DefaultClient =====

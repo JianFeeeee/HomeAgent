@@ -4,7 +4,7 @@ import (
 	"testing"
 	"time"
 
-	agentIO "gitcode.com/JianFeeeee/HomeAgent/internal/agent/io"
+	agentIO "github.com/JianFeeeee/HomeAgent/internal/agent/io"
 )
 
 // 抢占日志必须能说出**受害者是谁**（来源 + 类别 + 级别）。

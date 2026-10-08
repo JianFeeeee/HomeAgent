@@ -5,7 +5,7 @@ import (
 	"strings"
 	"unicode/utf8"
 
-	"gitcode.com/JianFeeeee/HomeAgent/internal/knowledge"
+	"github.com/JianFeeeee/HomeAgent/internal/knowledge"
 )
 
 func getString(m map[string]interface{}, key string) string {

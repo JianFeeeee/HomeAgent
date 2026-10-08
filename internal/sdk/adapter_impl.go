@@ -5,7 +5,7 @@ import (
 	"os"
 	"path/filepath"
 
-	luaVM "gitcode.com/JianFeeeee/HomeAgent/internal/lua"
+	luaVM "github.com/JianFeeeee/HomeAgent/internal/lua"
 )
 
 // adapterImpl 桥接 Lua VM 的协议适配器管理。

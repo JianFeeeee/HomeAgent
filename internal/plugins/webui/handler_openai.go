@@ -9,8 +9,8 @@ import (
 	"net/http"
 	"sync"
 
-	agentIO "gitcode.com/JianFeeeee/HomeAgent/internal/agent/io"
-	"gitcode.com/JianFeeeee/HomeAgent/internal/sdk"
+	agentIO "github.com/JianFeeeee/HomeAgent/internal/agent/io"
+	"github.com/JianFeeeee/HomeAgent/internal/sdk"
 )
 
 // OpenAI 兼容面：/v1/chat/completions（含流式）。

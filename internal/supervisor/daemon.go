@@ -7,10 +7,10 @@ import (
 	"sync"
 	"time"
 
-	"gitcode.com/JianFeeeee/HomeAgent/internal/network"
-	sdk "gitcode.com/JianFeeeee/HomeAgent/internal/sdk"
-	"gitcode.com/JianFeeeee/HomeAgent/internal/tracker"
-	"gitcode.com/JianFeeeee/HomeAgent/pkg/types"
+	"github.com/JianFeeeee/HomeAgent/internal/network"
+	sdk "github.com/JianFeeeee/HomeAgent/internal/sdk"
+	"github.com/JianFeeeee/HomeAgent/internal/tracker"
+	"github.com/JianFeeeee/HomeAgent/pkg/types"
 )
 
 const directAgentID types.AgentID = "main"

@@ -10,9 +10,9 @@ import (
 	"net/http/httptest"
 	"testing"
 
-	"gitcode.com/JianFeeeee/HomeAgent/internal/memory/media"
-	"gitcode.com/JianFeeeee/HomeAgent/internal/memory/vector"
-	"gitcode.com/JianFeeeee/HomeAgent/pkg/embedding"
+	"github.com/JianFeeeee/HomeAgent/internal/memory/media"
+	"github.com/JianFeeeee/HomeAgent/internal/memory/vector"
+	"github.com/JianFeeeee/HomeAgent/pkg/embedding"
 )
 
 // fakeEmbedSvc 按内核契约提供 text/image 的 4 维向量：

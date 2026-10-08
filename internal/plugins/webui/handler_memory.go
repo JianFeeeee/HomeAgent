@@ -12,10 +12,10 @@ import (
 	"time"
 	"unicode/utf8"
 
-	"gitcode.com/JianFeeeee/HomeAgent/internal/knowledge"
-	"gitcode.com/JianFeeeee/HomeAgent/internal/memory"
-	sdk "gitcode.com/JianFeeeee/HomeAgent/internal/sdk"
-	pubsdk "gitcode.com/JianFeeeee/homeagent-sdk/sdk"
+	"github.com/JianFeeeee/HomeAgent/internal/knowledge"
+	"github.com/JianFeeeee/HomeAgent/internal/memory"
+	sdk "github.com/JianFeeeee/HomeAgent/internal/sdk"
+	pubsdk "github.com/JianFeeeee/homeagentsdk/sdk"
 )
 
 // 记忆面：图记忆 / 文档记忆 / 文本记忆 / 知识库 / LLM 源 / 变更追踪。

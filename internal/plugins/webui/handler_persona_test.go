@@ -9,8 +9,8 @@ import (
 	"strings"
 	"testing"
 
-	internalConfig "gitcode.com/JianFeeeee/HomeAgent/internal/config"
-	"gitcode.com/JianFeeeee/HomeAgent/internal/sdk"
+	internalConfig "github.com/JianFeeeee/HomeAgent/internal/config"
+	"github.com/JianFeeeee/HomeAgent/internal/sdk"
 )
 
 func newPersonaHandler(t *testing.T) (*Handler, *internalConfig.ConfigRegistry) {

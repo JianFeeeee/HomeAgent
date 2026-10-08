@@ -12,7 +12,7 @@ import (
 	"syscall"
 	"time"
 
-	"gitcode.com/JianFeeeee/HomeAgent/internal/meta"
+	"github.com/JianFeeeee/HomeAgent/internal/meta"
 )
 
 const (

@@ -94,5 +94,5 @@ HomeAgent 是一个持续运行的个人智能 Agent 框架。
 核心功能已可运行。插件系统和 SDK 已就绪，可独立开发外部插件。
 
 - 内置插件：webui / cli / timer / cmd / mcp / agentcli / healthcheck / pluginmgr / clawhubadapter / files / cfgmgr
-- 外部插件示例（[homeagent-sdk](https://gitcode.com/JianFeeeee/homeagent-sdk) 仓库 `example/`，含 Go 和 Lua 两种类型）：qq / files / a2a / ai_image / bili / browser / calendar / editdoc / memo / music / ocr / rss / sanitizer / weather / luademo
+- 外部插件示例（[homeagent-sdk](https://github.com/JianFeeeee/homeagentsdk) 仓库 `example/`，含 Go 和 Lua 两种类型）：qq / files / a2a / ai_image / bili / browser / calendar / editdoc / memo / music / ocr / rss / sanitizer / weather / luademo
 - 打包分发：`.hmap` 插件包格式，通过 WebUI 安装

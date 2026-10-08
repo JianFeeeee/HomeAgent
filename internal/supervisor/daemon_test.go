@@ -4,8 +4,8 @@ import (
 	"testing"
 	"time"
 
-	"gitcode.com/JianFeeeee/HomeAgent/internal/tracker"
-	"gitcode.com/JianFeeeee/HomeAgent/pkg/types"
+	"github.com/JianFeeeee/HomeAgent/internal/tracker"
+	"github.com/JianFeeeee/HomeAgent/pkg/types"
 )
 
 func TestNew(t *testing.T) {

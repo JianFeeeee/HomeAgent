@@ -7,9 +7,9 @@ import (
 	"path/filepath"
 	"time"
 
-	"gitcode.com/JianFeeeee/HomeAgent/internal/events"
-	"gitcode.com/JianFeeeee/HomeAgent/internal/plugin/proc"
-	sdk "gitcode.com/JianFeeeee/HomeAgent/internal/sdk"
+	"github.com/JianFeeeee/HomeAgent/internal/events"
+	"github.com/JianFeeeee/HomeAgent/internal/plugin/proc"
+	sdk "github.com/JianFeeeee/HomeAgent/internal/sdk"
 )
 
 // 本文件平台中立。

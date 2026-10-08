@@ -3,7 +3,7 @@ package core
 import (
 	"testing"
 
-	"gitcode.com/JianFeeeee/HomeAgent/internal/memory/document"
+	"github.com/JianFeeeee/HomeAgent/internal/memory/document"
 )
 
 func TestEntitySimilarity(t *testing.T) {

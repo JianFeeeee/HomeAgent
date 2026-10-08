@@ -6,7 +6,7 @@ import (
 	"testing"
 	"time"
 
-	luaVM "gitcode.com/JianFeeeee/HomeAgent/internal/lua"
+	luaVM "github.com/JianFeeeee/HomeAgent/internal/lua"
 )
 
 func TestQuickChatWithRealKey(t *testing.T) {

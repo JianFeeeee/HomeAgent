@@ -8,7 +8,7 @@ import (
 	"sort"
 	"strings"
 
-	"gitcode.com/JianFeeeee/HomeAgent/internal/memory/media"
+	"github.com/JianFeeeee/HomeAgent/internal/memory/media"
 )
 
 // ===== 从目录导入知识 =====

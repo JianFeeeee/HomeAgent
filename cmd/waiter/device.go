@@ -14,8 +14,8 @@ import (
 	"strings"
 	"time"
 
-	"gitcode.com/JianFeeeee/HomeAgent/internal/devicebridge/client"
-	"gitcode.com/JianFeeeee/HomeAgent/internal/meta"
+	"github.com/JianFeeeee/HomeAgent/internal/devicebridge/client"
+	"github.com/JianFeeeee/HomeAgent/internal/meta"
 )
 
 // ===== 设备桥管理 =====

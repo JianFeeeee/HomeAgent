@@ -1,6 +1,6 @@
 package sdk
 
-import pubsdk "gitcode.com/JianFeeeee/homeagent-sdk/sdk"
+import pubsdk "github.com/JianFeeeee/homeagentsdk/sdk"
 
 // MemoryAPI 是内置插件使用的全量图记忆接口。
 type MemoryAPI interface {

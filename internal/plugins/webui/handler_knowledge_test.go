@@ -15,11 +15,11 @@ import (
 
 	"path/filepath"
 
-	"gitcode.com/JianFeeeee/HomeAgent/internal/knowledge"
-	"gitcode.com/JianFeeeee/HomeAgent/internal/memory/media"
-	"gitcode.com/JianFeeeee/HomeAgent/internal/sdk"
-	"gitcode.com/JianFeeeee/HomeAgent/internal/supervisor"
-	"gitcode.com/JianFeeeee/HomeAgent/pkg/types"
+	"github.com/JianFeeeee/HomeAgent/internal/knowledge"
+	"github.com/JianFeeeee/HomeAgent/internal/memory/media"
+	"github.com/JianFeeeee/HomeAgent/internal/sdk"
+	"github.com/JianFeeeee/HomeAgent/internal/supervisor"
+	"github.com/JianFeeeee/HomeAgent/pkg/types"
 )
 
 // newKnowledgeHandler 构造一个带知识库（可选媒体存储）的 Handler。

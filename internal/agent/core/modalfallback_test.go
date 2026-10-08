@@ -5,8 +5,8 @@ import (
 	"strings"
 	"testing"
 
-	agentAPI "gitcode.com/JianFeeeee/HomeAgent/internal/agent/api"
-	"gitcode.com/JianFeeeee/HomeAgent/pkg/types"
+	agentAPI "github.com/JianFeeeee/HomeAgent/internal/agent/api"
+	"github.com/JianFeeeee/HomeAgent/pkg/types"
 )
 
 // stubProvider 是一个可声明多模态能力的假 provider。

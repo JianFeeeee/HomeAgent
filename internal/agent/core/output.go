@@ -4,9 +4,9 @@ import (
 	"fmt"
 	"strings"
 
-	agentAPI "gitcode.com/JianFeeeee/HomeAgent/internal/agent/api"
-	agentIO "gitcode.com/JianFeeeee/HomeAgent/internal/agent/io"
-	sdk "gitcode.com/JianFeeeee/HomeAgent/internal/sdk"
+	agentAPI "github.com/JianFeeeee/HomeAgent/internal/agent/api"
+	agentIO "github.com/JianFeeeee/HomeAgent/internal/agent/io"
+	sdk "github.com/JianFeeeee/HomeAgent/internal/sdk"
 )
 
 func (a *Agent) executeOutputSendTool(tc agentAPI.ToolCall) string {

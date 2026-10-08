@@ -8,7 +8,7 @@ import (
 	"sync"
 	"sync/atomic"
 
-	pubsdk "gitcode.com/JianFeeeee/homeagent-sdk/sdk"
+	pubsdk "github.com/JianFeeeee/homeagentsdk/sdk"
 )
 
 // Plugin 是 registry 可加载的子进程插件，与内置插件同构的启停接口。

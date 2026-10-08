@@ -3,7 +3,7 @@ package nlp
 import (
 	"sort"
 
-	"gitcode.com/JianFeeeee/HomeAgent/internal/memory/vector"
+	"github.com/JianFeeeee/HomeAgent/internal/memory/vector"
 )
 
 // Parser 依存句法分析器接口

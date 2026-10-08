@@ -3,8 +3,8 @@
 package agentcli
 
 import (
-	"gitcode.com/JianFeeeee/HomeAgent/internal/plugin"
-	sdk "gitcode.com/JianFeeeee/HomeAgent/internal/sdk"
+	"github.com/JianFeeeee/HomeAgent/internal/plugin"
+	sdk "github.com/JianFeeeee/HomeAgent/internal/sdk"
 )
 
 func init() {

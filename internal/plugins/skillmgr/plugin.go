@@ -20,9 +20,9 @@ import (
 	"strings"
 	"sync"
 
-	"gitcode.com/JianFeeeee/HomeAgent/internal/events"
-	"gitcode.com/JianFeeeee/HomeAgent/internal/plugin"
-	"gitcode.com/JianFeeeee/HomeAgent/internal/sdk"
+	"github.com/JianFeeeee/HomeAgent/internal/events"
+	"github.com/JianFeeeee/HomeAgent/internal/plugin"
+	"github.com/JianFeeeee/HomeAgent/internal/sdk"
 )
 
 const (

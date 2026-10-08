@@ -5,7 +5,7 @@ import (
 	"errors"
 	"testing"
 
-	"gitcode.com/JianFeeeee/HomeAgent/pkg/embedding"
+	"github.com/JianFeeeee/HomeAgent/pkg/embedding"
 )
 
 // recordingProvider 记录核心传给 provider 的原始请求，用来断言

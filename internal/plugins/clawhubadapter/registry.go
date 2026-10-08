@@ -7,7 +7,7 @@ import (
 	"strings"
 	"sync"
 
-	sdk "gitcode.com/JianFeeeee/HomeAgent/internal/sdk"
+	sdk "github.com/JianFeeeee/HomeAgent/internal/sdk"
 )
 
 var (

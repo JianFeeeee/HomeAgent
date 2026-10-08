@@ -12,9 +12,9 @@ import (
 	"testing"
 	"time"
 
-	agentAPI "gitcode.com/JianFeeeee/HomeAgent/internal/agent/api"
-	agentIO "gitcode.com/JianFeeeee/HomeAgent/internal/agent/io"
-	sdk "gitcode.com/JianFeeeee/HomeAgent/internal/sdk"
+	agentAPI "github.com/JianFeeeee/HomeAgent/internal/agent/api"
+	agentIO "github.com/JianFeeeee/HomeAgent/internal/agent/io"
+	sdk "github.com/JianFeeeee/HomeAgent/internal/sdk"
 )
 
 // P5/P6：工具执行期间到达的高优先级中断不得立即抢占；必须等工具返回后的安全点。

@@ -1,8 +1,8 @@
 package sdk
 
 import (
-	"gitcode.com/JianFeeeee/HomeAgent/internal/knowledge"
-	pubsdk "gitcode.com/JianFeeeee/homeagent-sdk/sdk"
+	"github.com/JianFeeeee/HomeAgent/internal/knowledge"
+	pubsdk "github.com/JianFeeeee/homeagentsdk/sdk"
 )
 
 // KnowledgeAPI 是内置插件使用的全量知识库接口。

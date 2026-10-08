@@ -13,12 +13,12 @@ import (
 	"path/filepath"
 	"time"
 
-	agentAPI "gitcode.com/JianFeeeee/HomeAgent/internal/agent/api"
-	internalConfig "gitcode.com/JianFeeeee/HomeAgent/internal/config"
-	luaVM "gitcode.com/JianFeeeee/HomeAgent/internal/lua"
-	"gitcode.com/JianFeeeee/HomeAgent/internal/recovery"
-	sdk "gitcode.com/JianFeeeee/HomeAgent/internal/sdk"
-	"gitcode.com/JianFeeeee/HomeAgent/internal/system"
+	agentAPI "github.com/JianFeeeee/HomeAgent/internal/agent/api"
+	internalConfig "github.com/JianFeeeee/HomeAgent/internal/config"
+	luaVM "github.com/JianFeeeee/HomeAgent/internal/lua"
+	"github.com/JianFeeeee/HomeAgent/internal/recovery"
+	sdk "github.com/JianFeeeee/HomeAgent/internal/sdk"
+	"github.com/JianFeeeee/HomeAgent/internal/system"
 )
 
 // runFailbackRecovery 在 failback worker 内执行 L1 恢复梯子：

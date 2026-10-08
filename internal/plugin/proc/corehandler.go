@@ -5,7 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 
-	pubsdk "gitcode.com/JianFeeeee/homeagent-sdk/sdk"
+	pubsdk "github.com/JianFeeeee/homeagentsdk/sdk"
 )
 
 // coreHandler 把插件发来的 RPC 调用路由到内核 PluginSDK。

@@ -14,7 +14,7 @@ import (
 	"sync"
 	"unicode/utf8"
 
-	"gitcode.com/JianFeeeee/HomeAgent/internal/memory/vector"
+	"github.com/JianFeeeee/HomeAgent/internal/memory/vector"
 	"github.com/yanyiwu/gojieba"
 )
 

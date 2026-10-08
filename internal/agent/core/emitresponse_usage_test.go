@@ -3,9 +3,9 @@ package core
 import (
 	"testing"
 
-	agentAPI "gitcode.com/JianFeeeee/HomeAgent/internal/agent/api"
-	agentIO "gitcode.com/JianFeeeee/HomeAgent/internal/agent/io"
-	sdk "gitcode.com/JianFeeeee/HomeAgent/internal/sdk"
+	agentAPI "github.com/JianFeeeee/HomeAgent/internal/agent/api"
+	agentIO "github.com/JianFeeeee/HomeAgent/internal/agent/io"
+	sdk "github.com/JianFeeeee/HomeAgent/internal/sdk"
 )
 
 // 这组判据针对一个「发了但没人收到」的缺陷：

@@ -8,8 +8,8 @@ import (
 	"testing"
 	"time"
 
-	"gitcode.com/JianFeeeee/HomeAgent/internal/memory"
-	pubsdk "gitcode.com/JianFeeeee/homeagent-sdk/sdk"
+	"github.com/JianFeeeee/HomeAgent/internal/memory"
+	pubsdk "github.com/JianFeeeee/homeagentsdk/sdk"
 )
 
 // fakeGraphMemory 是一个最小 MemoryAPI 桩，只为把 GraphData 喂给 handler。

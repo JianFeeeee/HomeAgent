@@ -4,7 +4,7 @@ import (
 	"path/filepath"
 	"testing"
 
-	"gitcode.com/JianFeeeee/HomeAgent/internal/memory"
+	"github.com/JianFeeeee/HomeAgent/internal/memory"
 )
 
 func setupTestDB(t *testing.T) (*memory.GraphDB, *SocialStore) {

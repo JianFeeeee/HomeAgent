@@ -9,7 +9,7 @@ package proc
 import (
 	"testing"
 
-	pubsdk "gitcode.com/JianFeeeee/homeagent-sdk/sdk"
+	pubsdk "github.com/JianFeeeee/homeagentsdk/sdk"
 )
 
 func TestClampExternalPriority_RejectsL4(t *testing.T) {

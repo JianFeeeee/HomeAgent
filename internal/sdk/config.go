@@ -1,6 +1,6 @@
 package sdk
 
-import "gitcode.com/JianFeeeee/HomeAgent/pkg/types"
+import "github.com/JianFeeeee/HomeAgent/pkg/types"
 
 // ConfigAPI provides read/write access to the runtime config object
 // (unrelated to the config database).

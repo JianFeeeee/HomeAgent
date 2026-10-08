@@ -8,10 +8,10 @@
 
 All external interaction capabilities of HomeAgent comes from plugins. Plugins interact with the kernel through `PluginSDK` (Go API).
 
-**SDK Repository**: Plugin development tools, template code, and example plugins are hosted in the [homeagent-sdk](https://gitcode.com/JianFeeeee/homeagent-sdk) repository.
+**SDK Repository**: Plugin development tools, template code, and example plugins are hosted in the [homeagent-sdk](https://github.com/JianFeeeee/homeagentsdk) repository.
 
 ```bash
-git clone https://gitcode.com/JianFeeeee/homeagent-sdk.git
+git clone https://github.com/JianFeeeee/homeagentsdk.git
 cd homeagent-sdk
 ```
 
@@ -252,7 +252,7 @@ curl -X POST http://127.0.0.1:8080/api/v1/plugins \
 ```go
 package main
 
-import "gitcode.com/JianFeeeee/homeagent-sdk/sdk"
+import "github.com/JianFeeeee/homeagentsdk/sdk"
 
 type Plugin struct {
     name string
@@ -452,7 +452,7 @@ Parameters: `name` (route key), `caps` (1=text/2=rich/4=file/8=image), `desc`, `
 #### Event Subscription
 
 ```go
-import "gitcode.com/JianFeeeee/homeagent-sdk/sdk"
+import "github.com/JianFeeeee/homeagentsdk/sdk"
 
 unsub := s.Events().Subscribe(sdk.EventToolCall, func(evt *sdk.Event) {
     log.Printf("Tool was called: %v", evt.Payload)
@@ -809,27 +809,27 @@ Internal: records are stored in SQLite `disabled_plugins` table (`name`, `disabl
 
 | Example | Type | Features |
 |---------|------|----------|
-| [weather](https://gitcode.com/JianFeeeee/homeagent-sdk/tree/main/example/weather) | Go | Weather queries (wttr.in); demonstrates NoMemory/Cleaner/stage hooks/channels/text memory |
-| [luademo](https://gitcode.com/JianFeeeee/homeagent-sdk/tree/main/example/luademo) | Lua | Full-featured Lua example covering the whole v0.8.0 Lua SDK surface |
-| [qq](https://gitcode.com/JianFeeeee/homeagent-sdk/tree/main/example/qq) | Go | NapCat OneBot integration, 20 tools, full input/output channel wiring |
-| [memo](https://gitcode.com/JianFeeeee/homeagent-sdk/tree/main/example/memo) | Go | Memo management, PreAction injection + timed interrupt dual reminder |
-| [files](https://gitcode.com/JianFeeeee/homeagent-sdk/tree/main/example/files) | Go | File system operations, 4 write modes, sandbox isolation |
-| [browser](https://gitcode.com/JianFeeeee/homeagent-sdk/tree/main/example/browser) | Go | Web search + HTTP fetch (SSRF) + Chromium render (merged from web/webfetch) |
-| [bili](https://gitcode.com/JianFeeeee/homeagent-sdk/tree/main/example/bili) | Go | Bilibili video download (yt-dlp) |
-| [editdoc](https://gitcode.com/JianFeeeee/homeagent-sdk/tree/main/example/editdoc) | Go | Office document editing and format conversion |
-| [a2a](https://gitcode.com/JianFeeeee/homeagent-sdk/tree/main/example/a2a) | Go | Agent-to-Agent protocol |
-| [ocr](https://gitcode.com/JianFeeeee/homeagent-sdk/tree/main/example/ocr) | Go | Offline text recognition (Tesseract) |
-| [sanitizer](https://gitcode.com/JianFeeeee/homeagent-sdk/tree/main/example/sanitizer) | Go | Output sanitizer filter |
-| [calendar](https://gitcode.com/JianFeeeee/homeagent-sdk/tree/main/example/calendar) | Go | Calendar management |
-| [rss](https://gitcode.com/JianFeeeee/homeagent-sdk/tree/main/example/rss) | Go | RSS subscriptions |
-| [ai_image](https://gitcode.com/JianFeeeee/homeagent-sdk/tree/main/example/ai_image) | Go | AI image generation |
-| [music](https://gitcode.com/JianFeeeee/homeagent-sdk/tree/main/example/music) | Go | Music playback |
-| [vikunja](https://gitcode.com/JianFeeeee/homeagent-sdk/tree/main/example/vikunja) | Go | Vikunja task management (projects/tasks/labels CRUD) |
-| [vanblog](https://gitcode.com/JianFeeeee/homeagent-sdk/tree/main/example/vanblog) | Go | VanBlog publishing and management |
-| [deepsearch](https://gitcode.com/JianFeeeee/homeagent-sdk/tree/main/example/deepsearch) | Go | Multi-round deep search (progressive focus + cited summary) |
-| [acp](https://gitcode.com/JianFeeeee/homeagent-sdk/tree/main/example/acp) | Go | Agent Client Protocol (external editors/IDEs drive this agent) |
-| [recoverydiag](https://gitcode.com/JianFeeeee/homeagent-sdk/tree/main/example/recoverydiag) | Go | Five-part fault diagnosis (triage / sqlite check / log signatures / diff / ranked conclusions); core plugin of failback mode |
-| [plugindev](https://gitcode.com/JianFeeeee/homeagent-sdk/tree/main/example/plugindev) | Go | Plugin scaffolding: generate, build, install — lets the agent develop plugins itself |
+| [weather](https://github.com/JianFeeeee/homeagentsdk/tree/main/example/weather) | Go | Weather queries (wttr.in); demonstrates NoMemory/Cleaner/stage hooks/channels/text memory |
+| [luademo](https://github.com/JianFeeeee/homeagentsdk/tree/main/example/luademo) | Lua | Full-featured Lua example covering the whole v0.8.0 Lua SDK surface |
+| [qq](https://github.com/JianFeeeee/homeagentsdk/tree/main/example/qq) | Go | NapCat OneBot integration, 20 tools, full input/output channel wiring |
+| [memo](https://github.com/JianFeeeee/homeagentsdk/tree/main/example/memo) | Go | Memo management, PreAction injection + timed interrupt dual reminder |
+| [files](https://github.com/JianFeeeee/homeagentsdk/tree/main/example/files) | Go | File system operations, 4 write modes, sandbox isolation |
+| [browser](https://github.com/JianFeeeee/homeagentsdk/tree/main/example/browser) | Go | Web search + HTTP fetch (SSRF) + Chromium render (merged from web/webfetch) |
+| [bili](https://github.com/JianFeeeee/homeagentsdk/tree/main/example/bili) | Go | Bilibili video download (yt-dlp) |
+| [editdoc](https://github.com/JianFeeeee/homeagentsdk/tree/main/example/editdoc) | Go | Office document editing and format conversion |
+| [a2a](https://github.com/JianFeeeee/homeagentsdk/tree/main/example/a2a) | Go | Agent-to-Agent protocol |
+| [ocr](https://github.com/JianFeeeee/homeagentsdk/tree/main/example/ocr) | Go | Offline text recognition (Tesseract) |
+| [sanitizer](https://github.com/JianFeeeee/homeagentsdk/tree/main/example/sanitizer) | Go | Output sanitizer filter |
+| [calendar](https://github.com/JianFeeeee/homeagentsdk/tree/main/example/calendar) | Go | Calendar management |
+| [rss](https://github.com/JianFeeeee/homeagentsdk/tree/main/example/rss) | Go | RSS subscriptions |
+| [ai_image](https://github.com/JianFeeeee/homeagentsdk/tree/main/example/ai_image) | Go | AI image generation |
+| [music](https://github.com/JianFeeeee/homeagentsdk/tree/main/example/music) | Go | Music playback |
+| [vikunja](https://github.com/JianFeeeee/homeagentsdk/tree/main/example/vikunja) | Go | Vikunja task management (projects/tasks/labels CRUD) |
+| [vanblog](https://github.com/JianFeeeee/homeagentsdk/tree/main/example/vanblog) | Go | VanBlog publishing and management |
+| [deepsearch](https://github.com/JianFeeeee/homeagentsdk/tree/main/example/deepsearch) | Go | Multi-round deep search (progressive focus + cited summary) |
+| [acp](https://github.com/JianFeeeee/homeagentsdk/tree/main/example/acp) | Go | Agent Client Protocol (external editors/IDEs drive this agent) |
+| [recoverydiag](https://github.com/JianFeeeee/homeagentsdk/tree/main/example/recoverydiag) | Go | Five-part fault diagnosis (triage / sqlite check / log signatures / diff / ranked conclusions); core plugin of failback mode |
+| [plugindev](https://github.com/JianFeeeee/homeagentsdk/tree/main/example/plugindev) | Go | Plugin scaffolding: generate, build, install — lets the agent develop plugins itself |
 
 ### Built-in Plugins
 
@@ -843,4 +843,4 @@ Internal: records are stored in SQLite `disabled_plugins` table (`name`, `disabl
 
 *Want to understand the project goals? See [OVERVIEW.md](OVERVIEW.md).*
 *Want to understand the architecture? See [ARCHITECTURE.md](ARCHITECTURE.md).*
-*SDK repository and development tools? See [homeagent-sdk](https://gitcode.com/JianFeeeee/homeagent-sdk).*
+*SDK repository and development tools? See [homeagent-sdk](https://github.com/JianFeeeee/homeagentsdk).*

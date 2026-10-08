@@ -6,8 +6,8 @@ import (
 	"path/filepath"
 	"testing"
 
-	sdk "gitcode.com/JianFeeeee/HomeAgent/internal/sdk"
-	pubsdk "gitcode.com/JianFeeeee/homeagent-sdk/sdk"
+	sdk "github.com/JianFeeeee/HomeAgent/internal/sdk"
+	pubsdk "github.com/JianFeeeee/homeagentsdk/sdk"
 )
 
 // mockSettings implements pubsdk.SettingsAPI for tests

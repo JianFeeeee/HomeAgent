@@ -11,8 +11,8 @@ import (
 	"sync"
 	"time"
 
-	"gitcode.com/JianFeeeee/HomeAgent/internal/plugin"
-	sdk "gitcode.com/JianFeeeee/HomeAgent/internal/sdk"
+	"github.com/JianFeeeee/HomeAgent/internal/plugin"
+	sdk "github.com/JianFeeeee/HomeAgent/internal/sdk"
 )
 
 // isWindows 缓存运行时检测结果

@@ -15,9 +15,9 @@ import (
 	"strings"
 	"sync"
 
-	"gitcode.com/JianFeeeee/HomeAgent/internal/config"
-	"gitcode.com/JianFeeeee/HomeAgent/internal/plugin"
-	sdk "gitcode.com/JianFeeeee/HomeAgent/internal/sdk"
+	"github.com/JianFeeeee/HomeAgent/internal/config"
+	"github.com/JianFeeeee/HomeAgent/internal/plugin"
+	sdk "github.com/JianFeeeee/HomeAgent/internal/sdk"
 )
 
 // DefaultSocket 由 main.go 在 Load() 前设置，覆盖默认 socket 路径。

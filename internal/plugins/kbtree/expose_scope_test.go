@@ -9,7 +9,7 @@ import (
 	"strings"
 	"testing"
 
-	sdk "gitcode.com/JianFeeeee/HomeAgent/internal/sdk"
+	sdk "github.com/JianFeeeee/HomeAgent/internal/sdk"
 )
 
 // ===== 知识库对外暴露范围 =====

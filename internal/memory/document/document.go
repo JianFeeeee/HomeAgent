@@ -12,9 +12,9 @@ import (
 	"sync"
 	"time"
 
-	"gitcode.com/JianFeeeee/HomeAgent/internal/memory"
-	"gitcode.com/JianFeeeee/HomeAgent/internal/memory/vector"
-	"gitcode.com/JianFeeeee/HomeAgent/internal/tfidf"
+	"github.com/JianFeeeee/HomeAgent/internal/memory"
+	"github.com/JianFeeeee/HomeAgent/internal/memory/vector"
+	"github.com/JianFeeeee/HomeAgent/internal/tfidf"
 )
 
 // ChannelCleaner 按事件来源查找输入通道的 Cleaner 函数。

@@ -7,7 +7,7 @@ import (
 	"testing"
 	"time"
 
-	sdk "gitcode.com/JianFeeeee/HomeAgent/internal/sdk"
+	sdk "github.com/JianFeeeee/HomeAgent/internal/sdk"
 )
 
 // 本文件是**真实工具**的并发压测。

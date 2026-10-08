@@ -14,8 +14,8 @@ package core
 import (
 	"testing"
 
-	agentIO "gitcode.com/JianFeeeee/HomeAgent/internal/agent/io"
-	pubsdk "gitcode.com/JianFeeeee/homeagent-sdk/sdk"
+	agentIO "github.com/JianFeeeee/HomeAgent/internal/agent/io"
+	pubsdk "github.com/JianFeeeee/homeagentsdk/sdk"
 )
 
 func scenePolicyNoneEvent() *agentIO.InputEvent {

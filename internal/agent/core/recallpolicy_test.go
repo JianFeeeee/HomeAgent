@@ -5,10 +5,10 @@ import (
 	"strings"
 	"testing"
 
-	agentAPI "gitcode.com/JianFeeeee/HomeAgent/internal/agent/api"
-	agentIO "gitcode.com/JianFeeeee/HomeAgent/internal/agent/io"
-	"gitcode.com/JianFeeeee/HomeAgent/internal/memory"
-	pubsdk "gitcode.com/JianFeeeee/homeagent-sdk/sdk"
+	agentAPI "github.com/JianFeeeee/HomeAgent/internal/agent/api"
+	agentIO "github.com/JianFeeeee/HomeAgent/internal/agent/io"
+	"github.com/JianFeeeee/HomeAgent/internal/memory"
+	pubsdk "github.com/JianFeeeee/homeagentsdk/sdk"
 )
 
 // 这一组测试锁死「默认召回、可显式关闭」这条语义。

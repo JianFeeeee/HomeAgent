@@ -6,24 +6,24 @@ import (
 	"path/filepath"
 	"strings"
 
-	internalConfig "gitcode.com/JianFeeeee/HomeAgent/internal/config"
-	"gitcode.com/JianFeeeee/HomeAgent/internal/memory"
-	"gitcode.com/JianFeeeee/HomeAgent/internal/meta"
-	_ "gitcode.com/JianFeeeee/HomeAgent/internal/plugins"
-	_ "gitcode.com/JianFeeeee/HomeAgent/internal/plugins/clawhubadapter"
-	cli "gitcode.com/JianFeeeee/HomeAgent/internal/plugins/cli"
-	_ "gitcode.com/JianFeeeee/HomeAgent/internal/plugins/healthcheck"
-	_ "gitcode.com/JianFeeeee/HomeAgent/internal/plugins/kbtree"
-	_ "gitcode.com/JianFeeeee/HomeAgent/internal/plugins/pluginmgr"
-	webui "gitcode.com/JianFeeeee/HomeAgent/internal/plugins/webui"
+	internalConfig "github.com/JianFeeeee/HomeAgent/internal/config"
+	"github.com/JianFeeeee/HomeAgent/internal/memory"
+	"github.com/JianFeeeee/HomeAgent/internal/meta"
+	_ "github.com/JianFeeeee/HomeAgent/internal/plugins"
+	_ "github.com/JianFeeeee/HomeAgent/internal/plugins/clawhubadapter"
+	cli "github.com/JianFeeeee/HomeAgent/internal/plugins/cli"
+	_ "github.com/JianFeeeee/HomeAgent/internal/plugins/healthcheck"
+	_ "github.com/JianFeeeee/HomeAgent/internal/plugins/kbtree"
+	_ "github.com/JianFeeeee/HomeAgent/internal/plugins/pluginmgr"
+	webui "github.com/JianFeeeee/HomeAgent/internal/plugins/webui"
 
 	// 空白导入内置 provider：它们各自在 init 里注册到 pkg/embedding。
 	// 想把核心换成自己的模型，只需替换这一行（或另建一个发行版 main）。
-	_ "gitcode.com/JianFeeeee/HomeAgent/providers/chineseclip"
-	_ "gitcode.com/JianFeeeee/HomeAgent/providers/qwen3vl"
+	_ "github.com/JianFeeeee/HomeAgent/providers/chineseclip"
+	_ "github.com/JianFeeeee/HomeAgent/providers/qwen3vl"
 	// 生成侧 provider（蒸馏拆三元组）。与上面两个向量 provider 各自独立注册：
 	// 核心只依赖 pkg/generation 的接口，按配置 Open("ollama")。
-	_ "gitcode.com/JianFeeeee/HomeAgent/providers/ollama"
+	_ "github.com/JianFeeeee/HomeAgent/providers/ollama"
 )
 
 // main 是 worker 进程的启动序列。
