@@ -9,8 +9,8 @@ import (
 	"time"
 
 	"encoding/json"
-	agentIO "gitcode.com/JianFeeeee/HomeAgent/internal/agent/io"
-	sdk "gitcode.com/JianFeeeee/HomeAgent/internal/sdk"
+	agentIO "github.com/JianFeeeee/HomeAgent/internal/agent/io"
+	sdk "github.com/JianFeeeee/HomeAgent/internal/sdk"
 	"net/http"
 )
 
@@ -734,7 +734,17 @@ func (h *Handler) handleChatEvents(w http.ResponseWriter, r *http.Request) {
 	// executeNewTask/resumeTask），而 `scheduler` 曾既不在本列表里、也没有任何
 	// 订阅方—— 事件发出来就掉地上。后果是「我的任务被谁打断了」对内对外都
 	// 不可见，排查时只能按时序猜。这里补上对外那一半。
-	subTypes := []string{"agent_output", "reasoning", "agent_error", "tool_call", "stage", "agent_llm_chain", "terminal_output", "scheduler"}
+	subTypes := []string{"agent_output", "reasoning", "agent_error", "tool_call", "stage", "agent_llm_chain", "terminal_output", "scheduler",
+		// memory_access：图记忆的真实读写（哪个块被读了/写了/删了/合了）。
+		//
+		// ★ 为何新增而不是用现有的 tool_call：tool_call 只带**工具名**
+		//   （如 memory_recall），而星图要的是**具体块 ID**。二者之间没有映射 ——
+		//   前端曾试图把工具名拆词去匹配实体名，而实体名是中文概念、工具名是英文
+		//   （实测每个工具名命中 0 个节点），只能回退到「点亮 mention_count 前 8 个」，
+		//   即每次工具调用都亮同一批无关节点。
+		//
+		// 事件本身很小（只含块 ID 数组，不含正文）—— 与 tool_call 同量级。
+		"memory_access"}
 	// token 级流式增量事件：实时转发给浏览器做逐 token 渲染。
 	// 不进 sseEventRing —— 断线重连只重放聚合事件（最终真相），
 	// 避免重放 delta 与聚合内容重复追加。

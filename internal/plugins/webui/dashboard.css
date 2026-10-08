@@ -2091,6 +2091,63 @@
       #sm-container-home canvas {
         display: block;
       }
+      /* 节点名覆盖层：盖在 WebGL canvas 上，不吃鼠标事件（否则星图不能拖拽）。*/
+      #sm-labels {
+        pointer-events: none;
+        z-index: 4;
+      }
+      /* 选中详情面板：点击节点后的信息反馈。
+         ★ 补它的原因：`starmapSelected` 此前只被赋值、无人读取，
+         点击节点在界面上没有任何信息反馈——“可读性差”的核心成因之一。*/
+      #sm-detail {
+        position: absolute;
+        right: 10px;
+        top: 10px;
+        display: none;
+        width: 232px;
+        max-height: 62%;
+        overflow-y: auto;
+        padding: 10px 12px;
+        font-size: 12px;
+        line-height: 1.5;
+        color: var(--text-primary);
+        background: rgba(10, 10, 20, 0.88);
+        border: 1px solid var(--border-color);
+        border-radius: var(--radius-sm);
+        z-index: 6;
+        /* 面板本身要能滚动，但不该把滚轮事件漏给下面的星图。*/
+        pointer-events: auto;
+      }
+      #sm-detail .sm-detail-title {
+        font-weight: 600;
+        margin-bottom: 2px;
+        word-break: break-all;
+      }
+      #sm-detail .sm-detail-meta,
+      #sm-detail .sm-detail-id {
+        color: var(--text-muted);
+        font-size: 11px;
+        margin-bottom: 4px;
+        word-break: break-all;
+      }
+      #sm-detail .sm-detail-rel {
+        margin-top: 6px;
+        padding-top: 6px;
+        border-top: 1px solid var(--border-color);
+        color: var(--text-secondary);
+        font-size: 11px;
+      }
+      #sm-detail .sm-detail-relrow {
+        margin-bottom: 2px;
+        word-break: break-all;
+      }
+      #sm-detail .sm-detail-arrow {
+        color: var(--accent, #7fb5ad);
+        margin-right: 3px;
+      }
+      #sm-detail .sm-detail-nb {
+        color: var(--text-primary);
+      }
       /* hover 角标：取代原先每节点一张 256x64 CanvasTexture
          （1151 张贴图 ≈ 72MB 显存）。DOM 文字更清晰且零 GPU 开销。*/
       #sm-label {

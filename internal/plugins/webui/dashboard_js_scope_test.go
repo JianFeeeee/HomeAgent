@@ -4,6 +4,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"testing"
 )
@@ -302,4 +303,115 @@ func max(a, b int) int {
 		return a
 	}
 	return b
+}
+
+// TestDashboardJS_NoWriteOnlyGlobals 钉住「只写不读的全局变量」这类静默失效。
+//
+// ★ 为什么需要（2026-10-08 实际踩到）：`starmapDirty = true` 在 dashboard.js
+// 里出现两处，但**没有任何地方读它**，而且它连声明都没有（赋的是隐式全局）。
+// 后果是**新写入的记忆块永远不会出现在星图上** —— 后端的 memory_access
+// 事件一路发到这里、标志位也置了，就是没人消费，整条链路静默断在这里。
+//
+// 这类 bug 的特征：不报错、不抛异常、UI 上看不出异常（图只是“不长”），
+// 既有的作用域判据（真跑 node）也抓不到 —— 因为隐式全局赋值在非严格模式下
+// 完全合法。所以必须用静态判据单独钉。
+func TestDashboardJS_NoWriteOnlyGlobals(t *testing.T) {
+	raw := dashboardJSSource(t)
+	// ★ 必须先剥掉注释再做词频统计：注释里经常提到变量名（本项目尤其如此，
+	//   注释大量引用 `starmapDirty = true` 这类代码片段），不剥会让「出现次数」
+	//   虚高，把真正只写不读的变量算成有读。
+	js := stripJSComments(raw)
+
+	// 顶层 `var X` 声明过的名字。
+	declRe := regexp.MustCompile(`\bvar\s+([A-Za-z_$][\w$]*)`)
+	declared := map[string]bool{}
+	for _, m := range declRe.FindAllStringSubmatch(js, -1) {
+		declared[m[1]] = true
+	}
+
+	// 只关心布尔标志：赋 true/false 的全局。这类最典型的失效形态就是
+	// 「置了标志但没人消费」——功能看着接好了，实际没接。
+	for name := range declared {
+		nameRe := regexp.MustCompile(`\b` + regexp.QuoteMeta(name) + `\b`)
+		occur := len(nameRe.FindAllString(js, -1))
+		writeRe := regexp.MustCompile(`\b` + regexp.QuoteMeta(name) + `\s*=\s*(true|false)\b`)
+		writes := len(writeRe.FindAllString(js, -1))
+		if writes == 0 {
+			continue // 不是布尔标志，不在本判据范围
+		}
+		// 每次出现要么是一次写入、要么是一次读取。
+		// ⇒ 读取次数 = 出现次数 - 写入次数。等于 0 即「只写不读」。
+		reads := occur - writes
+		if reads <= 0 {
+			t.Errorf("全局布尔标志 %s 只被写入、从未被读取（出现 %d 次，写入 %d 次）。\n"+
+				"     这类标志位属于**静默失效**：置了标志但无人消费，功能看似接好了实际没接。\n"+
+				"     修法：补上消费点，或删掉这个字段。", name, occur, writes)
+		}
+	}
+}
+
+// stripJSComments 剥掉 // 行注释与 /* */ 块注释（粗粒度，但足够用于词频统计）。
+//
+// 不做完整的 JS 词法分析：本判据只用于「统计某个标识符出现次数」，
+// 粗粒度剥离已经足够，且不会误伤字符串里的 //（本文件没有这类内容，
+// 若将来有，宁可少剥也不能多剥 —— 多剥会让判据漏报）。
+func stripJSComments(s string) string {
+	var b strings.Builder
+	b.Grow(len(s))
+	inLine, inBlock := false, false
+	var inStr byte
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		if inLine {
+			if c == '\n' {
+				inLine = false
+				b.WriteByte(c)
+			}
+			continue
+		}
+		if inBlock {
+			if c == '*' && i+1 < len(s) && s[i+1] == '/' {
+				inBlock = false
+				i++
+			}
+			continue
+		}
+		if c == '\n' {
+			b.WriteByte(c)
+			continue
+		}
+		if inStr != 0 {
+			b.WriteByte(c)
+			if c == '\\' {
+				if i+1 < len(s) {
+					b.WriteByte(s[i+1])
+					i++
+				}
+				continue
+			}
+			if c == inStr {
+				inStr = 0
+			}
+			continue
+		}
+		if c == '"' || c == '\'' || c == '`' {
+			// 反引号也是字符串定界符，但它可跨行 —— 本判据只统计标识符，
+			// 跨行模板串里出现标识符属正常，此处按普通字符串处理即可。
+			inStr = c
+			b.WriteByte(c)
+			continue
+		}
+		if c == '/' && i+1 < len(s) && s[i+1] == '/' {
+			inLine = true
+			i++
+			continue
+		}
+		if c == '/' && i+1 < len(s) && s[i+1] == '*' {
+			inBlock = true
+			i++
+			continue
+		}
+		b.WriteByte(c)
+	}
+	return b.String()
 }

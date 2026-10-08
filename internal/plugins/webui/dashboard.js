@@ -2884,6 +2884,91 @@ function renderChatStarmap() {
 	loadChatStarmapData();
 }
 
+// smAdaptGraph 把后端图视图归一化成星图使用的 nodes/edges。
+//
+// ★ 为何需要适配（2026-10-08）：后端 `GraphData()` 同时返回**两套**数据 ——
+//
+//	nodes/edges              ← 旧表 entities/relations（2026-10-04 已停写）
+//	memory_blocks/block_edges ← 块/边体系（真实活跃的记忆）
+//
+// 而前端只读了前者 ⇒ 星图**结构性看不到新记忆**（生产实测：旧表停在 10-03，
+// 块表同期从 1294 涨到 3178）。这是「记忆系统已迁移、前端没跟上」的典型残留。
+//
+// 归一化后的节点字段与旧格式**保持一致**（id/name/type/mention_count），
+// 这样建图、布局、图例、脉冲那些已有逻辑不需各自判断数据源。
+function smAdaptGraph(d) {
+	var blocks = d.memory_blocks || [];
+	var bEdges = d.memory_block_edges || [];
+	if (!blocks.length) {
+		// 后端仍是旧格式（或块表空）：照旧渲染，不报错。
+		return { nodes: d.nodes || [], edges: d.edges || [] };
+	}
+
+	// 1) 节点：块 → 星图节点
+	var nodes = blocks.map(function (b) {
+		var text = String(b.text || "").replace(/\s+/g, " ").trim();
+		// 媒体块没有正文（只有 digest/描述）——用工具名与模态拼一个可读名，
+		// 否则它们全叫「」在图上无法区分。
+		var name = text;
+		if (!name) {
+			var mod = b.modality || "block";
+			name =
+				mod === "image"
+					? __("图像", "image")
+					: mod === "audio"
+						? __("音频", "audio")
+						: __("记录", "record");
+			if (b.tool) name += " · " + b.tool;
+		}
+		return {
+			id: b.id,
+			name: name,
+			// type 用于配色/图例：媒体块按 modality 归类，文本块按语义类型，
+			// 都没给就用 source（sentence / triple / legacy-entity）——比全填
+			// "Concept" 更能看出图里长什么。
+			type: b.semantic_type || b.modality || b.source || "block",
+			mention_count: 0, // 稍后按度数回填
+			source: b.source || "",
+			modality: b.modality || "",
+			scene: b.scene || "",
+			created_at: b.created_at,
+			updated_at: b.updated_at,
+			_block: true,
+		};
+	});
+
+	// 2) 边：只保留两端都在节点集里的边（端点缺失的边画不出来，
+	//    留着只会让度数统计偏大）。
+	var byID = {};
+	nodes.forEach(function (n) {
+		byID[n.id] = n;
+	});
+	var edges = [];
+	for (var i = 0; i < bEdges.length; i++) {
+		var e = bEdges[i];
+		if (!byID[e.source_id] || !byID[e.target_id]) continue;
+		// 只画活跃边：deleted/merged 的边留着只会让已失效的关系看着还在。
+		if (e.status && e.status !== "active" && e.status !== "") continue;
+		edges.push({
+			source_id: e.source_id,
+			target_id: e.target_id,
+			relation_type: e.type || "",
+		});
+	}
+
+	// 3) mention_count 回填为**度数**。
+	//
+	// 块体系里没有 mention_count 这一列（那是旧实体表的概念），而星图的
+	// 节点大小/布局/标签优先级都靠它。度数是最好的替代：被引用越多的块
+	// 越大 —— 与「越常被提起的实体越大」是同一个直觉。
+	edges.forEach(function (e) {
+		byID[e.source_id].mention_count++;
+		byID[e.target_id].mention_count++;
+	});
+
+	return { nodes: nodes, edges: edges };
+}
+
 async function loadChatStarmapData() {
 	try {
 		var resp = await api("/memory/graph");
@@ -2894,13 +2979,24 @@ async function loadChatStarmapData() {
 		// 症状是整个函数被 catch 吞掉、state.starmapInit 却没置上，
 		// 于是后续再也不会重试 —— 星图永远是空的。
 		var target = starmapActiveContainer();
-		if (
-			!resp ||
-			!resp.success ||
-			!resp.data ||
-			!resp.data.nodes ||
-			resp.data.nodes.length === 0
-		) {
+		if (!resp || !resp.success || !resp.data) {
+			if (target)
+				target.innerHTML =
+					'<p style="color:var(--text-muted);padding:20px;text-align:center">' +
+					__("暂无记忆数据", "No memory data") +
+					"</p>";
+			state.starmapInit = true;
+			state.starmapLoading = false;
+			return;
+		}
+		// 空图判据取 memory_blocks 而不是 nodes。
+		//
+		// ★ 为何换源（2026-10-08）：`nodes` 读的是**旧表 entities**，而它自
+		//   2026-10-04 停双写后不再增长（生产实测最后写入停在 10-03）。
+		//   真实记忆全在 memory_blocks（同期 1294 → 3178 仍在涨）。
+		//   继续读 nodes 等于星图永远看不到新记忆。
+		var blocks = resp.data.memory_blocks || [];
+		if (blocks.length === 0 && (resp.data.nodes || []).length === 0) {
 			if (target)
 				target.innerHTML =
 					'<p style="color:var(--text-muted);padding:20px;text-align:center">' +
@@ -2911,8 +3007,11 @@ async function loadChatStarmapData() {
 			return;
 		}
 		var d = resp.data;
-		starmapNodes = d.nodes || [];
-		starmapEdges = d.edges || [];
+		// smAdaptGraph 把块/边视图归一化成星图节点/边。
+		// 回退分支保留：若后端仍是旧格式（仅 nodes/edges），照旧渲染。
+		var norm = smAdaptGraph(d);
+		starmapNodes = norm.nodes;
+		starmapEdges = norm.edges;
 		state.starmapInit = true;
 		state.starmapLoading = false;
 		initChatStarmap();
@@ -2949,7 +3048,11 @@ function initChatStarmap() {
 	starmapScene = new THREE.Scene();
 	starmapScene.fog = new THREE.FogExp2(0x0a0a1a, 0.015);
 	starmapCam = new THREE.PerspectiveCamera(60, w / h, 0.1, 2000);
-	starmapCam.position.set(0, 20, 40);
+	// 初始距离随节点规模自适应：固定 (0,20,40) 是为 1294 节点时代调的，
+	// 换到 3178 节点（半径最大 240+）后这个机位只能看到中心一小块。
+	// 用 maxR 估算一个能看到全景的距离，并留 1.6 倍余量。
+	var fitDist = smStarmapFitDistance(w, h);
+	starmapCam.position.set(0, fitDist * 0.45, fitDist * 0.9);
 	starmapRen = new THREE.WebGLRenderer({ antialias: true, alpha: true });
 	starmapRen.setSize(w, h);
 	starmapRen.setPixelRatio(Math.min(window.devicePixelRatio, 2));
@@ -2995,6 +3098,31 @@ function starmapStartActivity() {
 	}, 3000);
 	var pulseTimer = setInterval(() => {
 		starmapPullPulse();
+		// ★ 消费 starmapDirty（图结构变了就重拉全量）。
+		//
+		// 为何必须在这里消费：starmapDirty 此前**只被赋值、从未被读取**
+		// （且未声明 —— 赋值一个隐式全局），于是新写入的记忆块**永远不会**
+		// 出现在星图上，即使后端已经在发 memory_access 事件。
+		// 这是「图不跟着变」的最后一个断点。
+		if (starmapDirty) {
+			starmapDirty = false;
+			// 全量重拉会重建整个场景；图不可见时跳过，避免白白重建。
+			//
+			// ★ 节流：生产库 3178 块时 /memory/graph 响应体实测 **3.3MB**（压测库 7144 块
+			//   时更大）。若记忆密集写入（一次 batch commit 会连发十几个事件），
+			//   每 10s 重拉一次 3.3MB 是纯浪费——而 90% 的重拉内容与上次一样。
+			//   因此最少间隔 30s；写入稀少时（生产实测 27 次/8.5h）实际上很少触发。
+			var nowMs = Date.now();
+			if (
+				starmapActiveContainer() &&
+				!state.starmapLoading &&
+				nowMs - (state.starmapLastFullReload || 0) > 30000
+			) {
+				state.starmapLastFullReload = nowMs;
+				state.starmapInit = false;
+				loadChatStarmapData();
+			}
+		}
 	}, 10000);
 	// 两个 id 合并到一个字段会导致 setInterval 被覆盖，这里分开记。
 	state.starmapActivityTimer = pulseTimer;
@@ -3039,8 +3167,22 @@ function buildChatStarmapGraph() {
 		rng = maxMc - minMc || 1;
 	// Layout positions
 	var pos = {};
-	var baseR = 15,
-		maxR = 80;
+	// ★ 半径随节点数自适应（2026-10-08）。
+	//
+	// 原来是写死的 baseR=15 / maxR=80。而换到块体系后节点从 1294 增到 3178，
+	// 同样一个环带里塞两倍多的节点 ⇒ 节点间平均间距降到不足节点自身半径，
+	// 视觉上挤成一团 —— 这是“可读性差”的直接成因之一。
+	//
+	// 做法：保持**面密度**恒定 —— 环带面积随节点数线性增长，
+	// 于是半径按 √n 缩放。这样不管 1 千还是 1 万节点，
+	// 屏上的疏密观感一致，不会因为记忆变多而糊掉。
+	var baseR = 15;
+	// 每个节点预留的面积（单位²）。取值来自旧布局的实测密度：
+	// 1294 节点 / π(80²-15²) ≈ 0.067 节点/单位² ⇒ 每节点约 15 单位²。
+	// 略留宽一点（18）给标签留位置。
+	var maxR = Math.sqrt((sorted.length * 18) / Math.PI + baseR * baseR);
+	// 上限防极端：几万节点时半径会大到镜头看不到全景。
+	if (maxR > 260) maxR = 260;
 	var total = sorted.length;
 	var acc = 0;
 	sorted.forEach((n, i) => {
@@ -3164,10 +3306,10 @@ function buildChatStarmapGraph() {
 		var mn = n.mention_count || 0,
 			mnr = rng > 0 ? (mn - minMc) / rng : 0;
 		var rad = 0.5 + mnr * 2.0;
-		// 服务端 type 是首字母大写（"Concept" / "Person" …），
-		// 原 smTypeColors 的键全是小写，永远匹配不上 ⇒ 全图单色 0xcccccc。
-		// 这里统一小写归一化，并补上服务端实际会产出的类型。
-		var col = smColorFor(n.type);
+		// 灰色调：亮度按重要度（度数归一化）——亮处即记忆稠密处。
+		// 旧实现是「按类型上色 + 小写归一化」，而真实图谱 99% 同类型，
+		// 那套配色在生产数据上实质只用得上一种颜色。
+		var col = smColorFor(n.type, mnr);
 		var ei = 0.3 + mnr * 0.7;
 		var mat = new THREE.MeshPhongMaterial({
 			color: col,
@@ -4705,6 +4847,23 @@ function connectSSE() {
 		}
 	});
 	// 注：后端不发布 tool_result 类型事件（工具结果随 EventToolCall 一次发出），无此监听器。
+	// memory_access：图记忆的**真实**读写（哪个块被读/写/删/合）。
+	//
+	// ★ 为何它比 tool_call 可靠：tool_call 只带工具名（memory_recall），
+	//   而星图要的是**具体块 ID**。两者间没有映射——前端曾试着把工具名拆词
+	//   去匹配实体名，而实体名是中文概念（小宅/对话/待命）、工具名是英文，
+	//   实测每个工具名命中 0 个节点，于是每次都退回「亮 mention_count 前 8 个」，
+	//   即无论 agent 在干什么，亮起的都是同一批无关节点。
+	//
+	// 这条事件由**图数据库自己在读写处上报**（internal/memory 的 AccessHook），
+	// 携带真实块 ID ⇒ 反馈与动作一一对应。
+	es.addEventListener("memory_access", (e) => {
+		try {
+			smOnMemoryAccess(JSON.parse(e.data));
+		} catch (ex) {
+			console.error("[SSE] memory_access error", ex);
+		}
+	});
 	es.addEventListener("stage", (e) => {
 		try {
 			var ev = JSON.parse(e.data);
@@ -5594,6 +5753,12 @@ var starmapHovered = null,
 	starmapSelected = null,
 	starmapAutoView = true;
 var starmapRaf = null;
+// starmapDirty：图结构发生变化（新建/删除/合入块），需要重拉全量。
+//
+// ★ 必须显式声明。此前两处 `starmapDirty = true` 赋的是**隐式全局**，
+//   而没有任何地方读它 ⇒ 新块永远不会出现在图上（星图看着“不长”）。
+//   消费点在 starmapStartActivity 的 pulse 轮询里。
+var starmapDirty = false;
 // 共享几何：1151 节点各自 new SphereGeometry 会产生 1151 个
 // BufferGeometry（另加同样数量的光晕球）。几何形状对所有节点相同，
 // 差别只在外层 mesh.scale，故共享一份即可。半径固定 0.5，
@@ -5602,6 +5767,20 @@ var starmapGeo = null,
 	starmapGlowGeo = null;
 // 标签角标：hover / 选中时显示的 HTML 元素（零显存，文字清晰）。
 var starmapLabelEl = null;
+
+// ===== 常驻节点名覆盖层（2026-10-08）=====
+//
+// ★ 为何不是“每节点一张 CanvasTexture”：那是本页原来的做法，1151 张
+//   256x64 贴图 ≈ 72MB 显存，且贴在半径 0.5~2.5 的球上本来就糊。
+//   改用**一个** canvas 覆盖层，每帧把节点名用 2D 文字画上去（同屏可见者
+//   才画、带视锥裁剪与去重），显存零开销、文字反而更清晰。
+//
+// ★ 为何要“全部标名”：不标名时 3178 个球彼此无区别，星图看不出“这是什么”。
+//   但全标会重叠成一团 ⇒ 用**字体与透明度分级**：命中/高亮的块名实色、
+//   其余名字压低透明当底纹，鼠标悬浮时再上提亮当前那个。
+var starmapLabelCanvas = null; // 覆盖层 canvas（叠在 WebGL canvas 上）
+var starmapLabelCtx = null;
+var starmapLabelCache = null; // { canvas, ctx, w, h } 惰性缓存，容器搬家时重建
 // smTypeColors 的键必须与**服务端实际产出的 type 字符串小写后**一致。
 // 服务端默认类型是 "Concept"（首字母大写，见 internal/memory/graph.go），
 // 原键全为小写 ⇒ 永远匹配不上 ⇒ 1150 个节点全渲染成同一个灰色 0xcccccc，
@@ -5618,23 +5797,52 @@ var starmapLabelEl = null;
 //	  1. 默认色改为低饱和灰蓝（全图统一，不假装在分类）
 //	  2. 类型色只在**真的存在多种类型**时才按类型区分（见 smColorFor）
 //	  3. 图例按实际节点集合动态生成，不列出永不出现的类型
-var SM_COLOR_DIM = 0xc8ced8; // 银色：单一类型时的全图色（用户裁定）
+// ★ 2026-10-08 改为**灰色调**（用户要求）：
+//
+// 之前的分类型配色有它的道理（能区分类型），但真实图谱里 99% 是同一类
+// （实测 Concept 1293 / 其他 1），那套配色对生产数据只用得上一种颜色；
+// 而切到块体系后类型更杂（sentence/triple/legacy-entity/image…）又反而花了。
+//
+// 所以改为：**全图灰底，用亮度表达重要度**（度数越高越亮）。
+// 好处是星图变成一张“热度图”——亮的地方就是记忆稠密的地方，
+// 不需要读图例就能看出结构；而活动/悬浮/选中会在灰底上单独提亮（见
+// starmapTickMorph 与 onStarmapMove），对比反而更强。
+var SM_COLOR_DIM = 0xc8ced8; // 兼容旧引用：单一类型时的全图色
 var smTypeColors = {
-	// 以下类型在真实数据里几乎不出现（仅 social.go 会产出 person），
-	// 但保留定义：万一出现就能自动获得区分色 + 动态图例条目。
-	person: 0x6f9fd8,
-	task: 0xd89a6a,
-	ai: 0xa583d8,
-	// 绝大多数节点（Concept）：用中性灰蓝，不在“分类色”里扮浓。
-	concept: SM_COLOR_DIM,
-	object: 0xd87a7a,
-	location: 0xd8b06a,
-	source: 0x8b9dc4,
-	document: 0x9aa5b1,
-	event: 0xc98fb5,
-	entity: 0x7fb5ad,
-	scene: 0x9dc47f,
+	// 保留类型色定义（图例仍会按实际出现的类型列出），但默认不再按类型上色。
+	person: 0x8fa4bd,
+	task: 0xa89b90,
+	ai: 0x9a94ab,
+	concept: 0xb9c0cb,
+	object: 0xb5a5a5,
+	location: 0xb8ad9a,
+	source: 0xa3abb8,
+	document: 0xa8aeb6,
+	event: 0xb3a8b0,
+	entity: 0xa4b8b5,
+	scene: 0xacb8a4,
+	// 块体系的实际类型（见 smAdaptGraph）
+	sentence: 0xb0b6bf,
+	triple: 0xb6bcc4,
+	block: 0xbcc2ca,
+	"legacy-entity": 0xa9afb8,
+	image: 0xa6b0bd,
+	audio: 0xa6b8b8,
 };
+
+// smGreyFor 返回一个灰阶色：亮度随重要度（度数归一化值）变化。
+//
+// t ∈ [0,1]：0 = 最暗（孤立节点），1 = 最亮（连接最多的节点）。
+// 亮度区间刻意不拉到两端：纯黑节点在深色底上看不见，
+// 纯白又会与“活动提亮”混淆——活动态要在灰底上看出差别。
+function smGreyFor(t) {
+	if (!(t >= 0)) t = 0;
+	if (t > 1) t = 1;
+	// 0x6e → 0xdc：深灰到亮灰。
+	var v = Math.round(0x6e + (0xdc - 0x6e) * t);
+	// 略偏冷（蓝多一档）以配合深色星空底，纯中性灰在这底上偏黄。
+	return (v << 16) | (Math.min(255, v + 4) << 8) | Math.min(255, v + 12);
+}
 
 // smColorTypeSet 统计本次图谱里实际出现的类型（小写）。
 // 由 buildChatStarmapGraph 在建图前填好。
@@ -5642,22 +5850,14 @@ var smPresentTypes = {};
 
 // smColorFor 取节点颜色。
 //
-// 规则：图谱里存在 2 种以上「有存在感」的类型时按类型上色，否则全图
-// 用 SM_COLOR_DIM。阈值与图例一致（>=1% 算“有存在感”）。
-// 理由：99.9% 概念 + 0.1% 其他时，按类型上色得到的仍是一整片同色，
-// 只是换了个色相；而那一两个异色点在视觉上就是噪点。
-function smColorFor(type) {
-	var t = String(type || "").toLowerCase();
-	var keys = Object.keys(smPresentTypes);
-	if (keys.length <= 1) return SM_COLOR_DIM;
-	var total = 0;
-	for (var i = 0; i < starmapNodes.length; i++) total++;
-	var self = (smPresentTypes[t] || 0) * 100;
-	if (total > 0 && self / total < 1) {
-		// 稀疏类型也走中性色：宁可全图同色，不引入单点亮色噪点。
-		return SM_COLOR_DIM;
-	}
-	return smTypeColors[t] || SM_COLOR_DIM;
+// ★ 现在固定返回灰阶（不再按类型上色），亮度由调用方按度数给出。
+// 保留函数签名是为了不改动所有调用点（图例/建图都用它）。
+//
+// 为何不再按类型：真实图谱里 99% 是同一类，分类型配色在生产数据上
+// 实质只用得上一种颜色；而块体系下类型又碎成 sentence/triple/… 反而更花。
+// 改为灰阶 + 度数亮度后，星图变成热度图：亮处即记忆稠密处。
+function smColorFor(type, t) {
+	return smGreyFor(typeof t === "number" ? t : 0.5);
 }
 var smEdgeColors = {
 	喜欢: 0xff6b6b,
@@ -5688,6 +5888,254 @@ var SM_RIPPLE_R = 26; // 涟漪最大半径
 
 // starmapPulse 发出一次活动脉冲。
 // kind: "tool" | "stage" | "output" | "grow"
+// ===== 图变化动画（插入/删除/合入）=====
+//
+// 时序设计（这是三者不互相打架的关键）：
+//
+//	插入  grow     : 0 → 1.0 弹回，1800ms（带过冲，像“长出来”）
+//	删除  dissolve : 1.0 → 0 收缩 + 粒子飞散，1200ms
+//	合入  merge    : 源块消散 1200ms → 停顿 120ms → 目标块 0→1 重生 900ms
+//
+// 为何合入要分两段且中间停顿：同时放会读成「一个变小一个变大」，
+// 看不出「两者变成了一体」。先看不到源、再看到目标从头冒出，因果关系才成立。
+var SM_GROW_MS = 1800;
+var SM_DISSOLVE_MS = 1200;
+var SM_MERGE_APPEAR_DELAY = 120; // 源消失→目标重生 的停顿
+var SM_MERGE_GROW_MS = 900;
+
+// starmapStartGrow 让一批块从 0 弹到正常大小（新插入）。
+function starmapStartGrow(ids) {
+	var idx = starmapMeshIndex();
+	for (var i = 0; i < ids.length; i++) {
+		var m = idx[ids[i]];
+		if (!m) continue;
+		m.userData.growAt = Date.now();
+	}
+}
+
+// starmapStartDissolve 让一批块消散（删除/被合入）。
+//
+// 实现：把 mesh 从主场景摘下来，改挂到「消散区」自己推进 —— 而不是原地缩小。
+// 若只缩小而不摘，在 1200ms 里它仍参与鼠标拾取与脉冲命中，
+// 用户会发“点了一个正在消失的节点”这种怪事。
+function starmapStartDissolve(ids, delayMs) {
+	var idx = starmapMeshIndex();
+	var now = Date.now();
+	for (var i = 0; i < ids.length; i++) {
+		var m = idx[ids[i]];
+		if (!m) continue;
+		if (m.userData.dissolving) continue; // 已在消散中，不重复触发（否则粒子叠倍）
+		m.userData.dissolving = true;
+		m.userData.dissolveAt = now + (delayMs || 0);
+		m.userData.dissolveEnds = now + (delayMs || 0) + SM_DISSOLVE_MS;
+		m.userData.dissolveFrom = m.scale.x;
+		starmapSpawnParticles(m);
+	}
+}
+
+// starmapStartMerge 播「两节点消失又出现」。
+function starmapStartMerge(fromID, toID) {
+	var idx = starmapMeshIndex();
+	// ① 源块先消散
+	starmapStartDissolve([fromID], 0);
+	// ② 目标块在停顿之后重生（不是立即）
+	var dst = idx[toID];
+	if (dst) {
+		var delayed = Date.now() + SM_DISSOLVE_MS + SM_MERGE_APPEAR_DELAY;
+		var timer = setTimeout(function () {
+			if (dst && dst.parent) dst.userData.growAt = Date.now();
+		}, SM_DISSOLVE_MS + SM_MERGE_APPEAR_DELAY);
+		if (state.starmapMergeTimers) state.starmapMergeTimers.push(timer);
+		else state.starmapMergeTimers = [timer];
+		// 记录重生时刻，供 tick 区分“合入重生”与普通生长（前者更短）
+		dst.userData.mergeGrowAt = delayed;
+	}
+}
+
+// 粒子池：消散动画的碎屑。用**一个** THREE.Points 承载全部粒子，
+// 而不是每粒子一个 mesh —— 后者在批量删除（如 Purge 上百块）时会瞬间建上千个对象。
+var starmapParticles = null;
+var starmapParticleData = []; // {pos:Vector3, vel:Vector3, born, life}
+var SM_PARTICLE_MAX = 600;
+
+// starmapSpawnParticles 在某个节点位置生成一圈飞散粒子。
+function starmapSpawnParticles(mesh) {
+	if (!starmapScene) return;
+	var n = 10;
+	for (var i = 0; i < n && starmapParticleData.length < SM_PARTICLE_MAX; i++) {
+		// 球面随机方向（均匀分布，不是立方体随机 —— 后者会在角上堆积）。
+		var th = Math.random() * Math.PI * 2,
+			ph = Math.acos(2 * Math.random() - 1);
+		var sp = 0.35 + Math.random() * 0.5;
+		starmapParticleData.push({
+			pos: mesh.position.clone(),
+			vel: new THREE.Vector3(
+				Math.sin(ph) * Math.cos(th) * sp,
+				Math.sin(ph) * Math.sin(th) * sp,
+				Math.cos(ph) * sp,
+			),
+			born: Date.now(),
+			life: 700 + Math.random() * 500,
+			color: mesh.material.color ? mesh.material.color.clone() : new THREE.Color(0x8b9dc4),
+		});
+	}
+	starmapEnsureParticleSystem();
+}
+
+function starmapEnsureParticleSystem() {
+	if (starmapParticles) return;
+	var geo = new THREE.BufferGeometry();
+	var cap = SM_PARTICLE_MAX;
+	geo.setAttribute("position", new THREE.BufferAttribute(new Float32Array(cap * 3), 3));
+	geo.setAttribute("color", new THREE.BufferAttribute(new Float32Array(cap * 3), 3));
+	var mat = new THREE.PointsMaterial({
+		size: 0.6,
+		vertexColors: true,
+		transparent: true,
+		opacity: 0.9,
+		sizeAttenuation: true,
+		blending: THREE.AdditiveBlending,
+	});
+	starmapParticles = new THREE.Points(geo, mat);
+	starmapParticles.frustumCulled = false; // 粒子分布很广，包围盒判据会误剪
+	starmapParticles.renderOrder = 3;
+	starmapScene.add(starmapParticles);
+}
+
+// starmapTickParticles 推进粒子。返回活跃粒子数（0 时可整块隐藏）。
+function starmapTickParticles(now) {
+	if (!starmapParticles || !starmapParticleData.length) {
+		if (starmapParticles) starmapParticles.visible = false;
+		return 0;
+	}
+	var live = [];
+	for (var i = 0; i < starmapParticleData.length; i++) {
+		var p = starmapParticleData[i];
+		if (now - p.born > p.life) continue;
+		live.push(p);
+	}
+	starmapParticleData = live;
+	var posAttr = starmapParticles.geometry.getAttribute("position");
+	var colAttr = starmapParticles.geometry.getAttribute("color");
+	for (var j = 0; j < live.length; j++) {
+		var q = live[j];
+		var age = (now - q.born) / q.life;
+		// 减速飘散：速度随时间衰减，看着像“碎屑被拖住”而不是匀速飞走。
+		q.pos.x += q.vel.x * (1 - age) * 0.5;
+		q.pos.y += q.vel.y * (1 - age) * 0.5;
+		q.pos.z += q.vel.z * (1 - age) * 0.5;
+		posAttr.setXYZ(j, q.pos.x, q.pos.y, q.pos.z);
+		// 淡出：亮度随 age 衰减
+		var f = Math.max(0, 1 - age);
+		colAttr.setXYZ(j, q.color.r * f, q.color.g * f, q.color.b * f);
+	}
+	// 未用到的槽位置到远处，避免上一帧的残留粒子“卡”在原地。
+	for (var k = live.length; k < SM_PARTICLE_MAX; k++) posAttr.setXYZ(k, 1e6, 1e6, 1e6);
+	posAttr.needsUpdate = true;
+	colAttr.needsUpdate = true;
+	starmapParticles.geometry.setDrawRange(0, live.length);
+	starmapParticles.visible = live.length > 0;
+	return live.length;
+}
+
+// starmapPulseByIDs 按**真实块 ID** 高亮（memory_access 事件驱动）。
+//
+// ★ 为何必须新建这条路径：既有的 starmapPulse(kind, hint) 靠**工具名猜节点**
+//   （把 "memory_recall" 拆词去匹配实体名）。而实体名是中文概念、工具名是英文，
+//   两套命名空间永不交集 —— 生产实测每个工具名命中 0 个节点，于是每次都退回
+//   「按 mention_count 取前 8 个」，即**无论 agent 在干什么，亮起的都是同一批**。
+//   后端现在直接告诉内核「刚才读了/写了这几块」（见 events.EventMemoryAccess），
+//   这里按 ID 精确命中，反馈才真的与动作对应。
+//
+// ids 为块 ID 数组；kind 决定动画类型（tool/grow/output）。
+// 返回命中的节点数（供调用方决定要不要走旧的 hint 兜底）。
+function starmapPulseByIDs(ids, kind) {
+	if (!starmapScene || !ids || !ids.length) return 0;
+	var now = Date.now();
+	state.starmapLastPulseAt = now;
+	var hit = 0;
+	var life = kind === "grow" ? SM_PULSE_MS * 1.6 : SM_PULSE_MS;
+	// 块 ID 直查：建一张 id→mesh 索引，避免每个 ID 都线性扫 3000 个节点。
+	var idx = starmapMeshIndex();
+	for (var i = 0; i < ids.length; i++) {
+		var m = idx[ids[i]];
+		if (!m) continue; // 该块不在当前视图（可能刚建、下次全量刷新才出现）
+		hit++;
+		state.starmapPulses.push({ mesh: m, until: now + life, kind: kind });
+	}
+	if (state.starmapPulses.length > 260)
+		state.starmapPulses = state.starmapPulses.slice(-260);
+	return hit;
+}
+
+// starmapMeshIndex 返回 nodeId → mesh 的索引（惰性重建，建图后失效）。
+var starmapMeshIdx = null;
+var starmapMeshIdxSize = -1;
+function starmapMeshIndex() {
+	if (starmapMeshIdx && starmapMeshIdxSize === starmapNodeMeshes.length)
+		return starmapMeshIdx;
+	var idx = {};
+	for (var i = 0; i < starmapNodeMeshes.length; i++) {
+		idx[starmapNodeMeshes[i].userData.nodeId] = starmapNodeMeshes[i];
+	}
+	starmapMeshIdx = idx;
+	starmapMeshIdxSize = starmapNodeMeshes.length;
+	return idx;
+}
+
+// smOnMemoryAccess 处理 memory_access SSE 事件：真实图读写 → 星图动画。
+//
+// 事件载荷（见 internal/events/bus.go 的 EventMemoryAccess）：
+//
+//	op:      recall | commit | merge | purge | delete
+//	blocks:  本次读/写的块 ID
+//	created: 本次**新建**的块 ID  → 生长动画（从 0 弹到正常大小）
+//	removed: 被删除/合入消失的块 → 粒子消散
+//	merged:  [{from,to}] 合入对   → 两节点消失又出现
+function smOnMemoryAccess(ev) {
+	var p = ev.payload || {};
+	var op = p.op || "";
+	var blocks = p.blocks || [];
+	var created = p.created || [];
+	var removed = p.removed || [];
+	var merged = p.merged || [];
+
+	// 写入/读取都算「被触碰」⇒ 实色提亮（output 类脉冲更强）。
+	if (blocks.length) {
+		var kind = op === "commit" ? "output" : "tool";
+		starmapPulseByIDs(blocks, kind);
+	}
+
+	// 新建 ⇒ 生长动画。单独处理而不复用 pulse：生长的时长与曲线不同
+	// （见 starmapTickActivity 的 kind === "grow" 分支），混在一起会失去区分。
+	if (created.length) {
+		starmapStartGrow(created);
+	}
+
+	// 删除 ⇒ 粒子消散。
+	if (removed.length) {
+		starmapStartDissolve(removed);
+	}
+
+	// 合入 ⇒ 两节点消失又出现。
+	//
+	// 时序（这是“又出现”的要点，不能与消散同时放）：
+	//   t=0        源块开始消散
+	//   t=DISSOLVE 源块消失；目标块开始「再生长」（从小弹回原大小）
+	//   t=DISSOLVE+GROW 完成
+	// 若两者同时放，看上去只是「一个变小一个变大」，读不出「合入」的因果。
+	if (merged.length) {
+		for (var i = 0; i < merged.length; i++) {
+			starmapStartMerge(merged[i].from, merged[i].to);
+		}
+	}
+
+	// 图结构变了：下次刷新重拉全量，让新块/消失的块真正进出图。
+	if (created.length || removed.length || merged.length) {
+		starmapDirty = true;
+	}
+}
+
 function starmapPulse(kind, hint) {
 	if (!starmapScene || !starmapNodeMeshes.length) return;
 	var now = Date.now();
@@ -5850,6 +6298,61 @@ function starmapPullPulse() {
 }
 
 // starmapTickActivity 在渲染循环里推进所有脉冲与余晖。
+// starmapTickMorph 推进「生长」与「消散」两种形变。
+//
+// ★ 为何不用已有的 pulse 机制做这两件事：pulse 是**可叠加的短脉冲**
+//   （同一个节点可以同时有好几个），而生长/消散是**排他的状态机**
+//   （一个节点不可能同时在长又在消）。混用会让基值互相覆盖，
+//   出现「消散到一半被 pulse 拉回原大小」的鬼畜。
+function starmapTickMorph(now) {
+	for (var i = 0; i < starmapNodeMeshes.length; i++) {
+		var m = starmapNodeMeshes[i];
+		var ud = m.userData;
+
+		// —— 消散 ——
+		if (ud.dissolving) {
+			if (now < ud.dissolveAt) continue; // 合入时源块的延迟（若有）
+			var dp = (now - ud.dissolveAt) / SM_DISSOLVE_MS;
+			if (dp >= 1) {
+				// 完了：必须真的从场景摘掉，否则一个 scale=0 的不可见 mesh
+				// 仍参与鼠标拾取，用户会“点中一个看不见的节点”。
+				starmapScene.remove(m);
+				ud.dissolving = false;
+				continue;
+			}
+			// 收缩 + 变暗：两个通道同时走，单个通道（只缩）看着像“缩成点”，
+			// 加上变暗才有“消失”的观感。
+			var shrink = 1 - dp * dp; // 加速收缩（先慢后快）
+			m.scale.setScalar(ud.baseScale * shrink);
+			if (m.material) m.material.emissiveIntensity = ud.baseEmissive * (1 - dp);
+			continue;
+		}
+
+		// —— 生长（插入 / 合入后重生）——
+		if (ud.growAt) {
+			var dur = ud.mergeGrowAt && ud.mergeGrowAt === ud.growAt ? SM_MERGE_GROW_MS : SM_GROW_MS;
+			var gp = (now - ud.growAt) / dur;
+			if (gp >= 1) {
+				ud.growAt = null;
+				ud.mergeGrowAt = null;
+				m.scale.setScalar(ud.baseScale);
+				if (m.material) m.material.emissiveIntensity = ud.baseEmissive;
+				continue;
+			}
+			// 过冲曲线（back-out）：超过 1 再回落 —— 这才像“弹”而不是“淡入”。
+			var s = 1.7;
+			var t1 = gp - 1;
+			var eased = t1 * t1 * ((s + 1) * t1 + s) + 1; // easeOutBack
+			// 从 0.05 而不是 0 起：从真正的 0 开始会看不到“从无到有”的那一瞬，
+			// 视觉上像是“凭空出现”而非“长出来”。
+			var scale = 0.05 + 0.95 * Math.max(0, eased);
+			m.scale.setScalar(ud.baseScale * scale);
+			if (m.material) m.material.emissiveIntensity = ud.baseEmissive + 0.9 * (1 - gp);
+			continue;
+		}
+	}
+}
+
 function starmapTickActivity(t) {
 	var now = Date.now();
 	var breathe = 0;
@@ -5879,6 +6382,13 @@ function starmapTickActivity(t) {
 		}
 		state.starmapPulses = keep;
 	}
+	// 1.5) 生长 / 消散 / 合入（图变化动画）
+	//
+	// 放在活动脉冲之后、呼吸之前：图变化是**结构性**事件，优先级高于活动光晕，
+	// 而被呼吸的抽样提亮覆盖会看不出“长出来”。
+	starmapTickMorph(now);
+	starmapTickParticles(now);
+
 	// 2) 「生长」余晖：脉冲结束后短暂保留一点亮
 	if (state.starmapGrown) {
 		for (var gid in state.starmapGrown) {
@@ -5968,14 +6478,26 @@ function onStarmapMove(e) {
 			// 缩放过的（userData.baseScale），置 1 会把大节点缩成最小尺寸。
 			// （这是低规格改造后必须跟着改的一处，旧代码能“跑”是因为那时
 			//  几何体本身就带半径、不靠 scale。）
-			if (starmapHovered)
+			if (starmapHovered) {
 				starmapHovered.scale.setScalar(starmapHovered.userData.baseScale || 1);
+				if (starmapHovered.material)
+					starmapHovered.material.emissiveIntensity =
+						starmapHovered.userData.baseEmissive;
+			}
 			starmapHovered = n;
+			// 悬浮「提亮」：加发光 + 轻微放大。只放大不亮在淡色底图上不明显，
+			// 而只亮不放大又难看出是哪一颗——两者一起做。
+			if (n.material)
+				n.material.emissiveIntensity = (n.userData.baseEmissive || 0) + 1.4;
+			n.scale.setScalar((n.userData.baseScale || 1) * 1.25);
 			starmapLabelShow(n);
 		}
 	} else {
 		if (starmapHovered) {
 			starmapHovered.scale.setScalar(starmapHovered.userData.baseScale || 1);
+			if (starmapHovered.material)
+				starmapHovered.material.emissiveIntensity =
+					starmapHovered.userData.baseEmissive;
 			starmapHovered = null;
 			starmapLabelHide();
 		}
@@ -6045,8 +6567,8 @@ function renderStarmapTab() {
 			'<div id="sm-legend" style="display:flex;gap:14px;flex-wrap:wrap;margin-top:10px;font-size:11px;color:var(--text-secondary)"></div>' +
 			'<div style="margin-top:8px;font-size:11px;color:var(--text-muted)">' +
 			__(
-				"星图跟随 agent 活动脉动：工具调用 / 阶段推进 / 输出 / 调度器繁忙 / 新记忆生长。",
-				"The map pulses with agent activity: tool calls, stage progress, output, scheduler load, new memory.",
+				"星图显示图记忆的实时状态：大小/亮度 = 被引用程度；agent 读写记忆时对应块会提亮（按真实块 ID，不靠名字猜）；新增记忆生长、删除消散、合入则源块消失、目标重生。点节点看详情。",
+				"Live graph memory: size/brightness = how referenced; blocks glow when the agent reads/writes them (by real block ID, not name guessing); new memories grow, deletions dissolve, merges fade the source and rebirth the target. Click a node for details.",
 			) +
 			"</div></div>";
 	}
@@ -6105,52 +6627,69 @@ function smLegend() {
 	}
 	var total = starmapNodes.length;
 	keys.sort((a, b) => smPresentTypes[b] - smPresentTypes[a]);
-	// 「主要类型」= 占比 >= 1% 的。实测 1148 Concept + 1 Source 时，
-	// Source 占 0.087% —— 直接列出来会显示成「来源 0%」，既难看又误导
-	//（读者会以为图里没有来源节点）。低于 1% 的归入「其他 N 个」。
-	var MIN_SHOW_PCT = 1;
-	var major = [];
+
+	// ★ 图例改为说明**视觉编码**，而不是列出类型色（2026-10-08）。
+	//
+	// 为何改：星图已改为灰色调 + 亮度按度数（见 smGreyFor），
+	// 再说“类型→颜色”就是骗人的图例——读者会去找不存在的颜色差别。
+	// 现在的图例应该回答“图上什么东西怎么看”：大小/亮度/名字/活动。
+	var html = [];
+	// ① 大小与亮度 = 重要度（度数）
+	html.push(
+		'<span style="display:inline-flex;align-items:center;gap:5px">' +
+			'<i style="width:13px;height:13px;border-radius:50%;background:#dcdfe6;display:inline-block"></i>' +
+			__("常被引用（越大越亮）", "most referenced (bigger & brighter)") +
+			"</span>",
+	);
+	html.push(
+		'<span style="display:inline-flex;align-items:center;gap:5px">' +
+			'<i style="width:7px;height:7px;border-radius:50%;background:#787f89;display:inline-block"></i>' +
+			__("孤立/少引用", "isolated / few links") +
+			"</span>",
+	);
+	// ② 活动态：读写命中时会提亮并显示名字
+	html.push(
+		'<span style="display:inline-flex;align-items:center;gap:5px">' +
+			'<i style="width:10px;height:10px;border-radius:50%;background:#fff;box-shadow:0 0 6px #fff;display:inline-block"></i>' +
+			__("正在被读写（提亮）", "being read/written (glows)") +
+			"</span>",
+	);
+	// ③ 图变化动画的三种形态
+	html.push(
+		'<span style="color:var(--text-muted)">' +
+			__(
+				"＋ 新记忆生长　－ 删除消散　⇄ 合入（源消失、目标重生）",
+				"+ grows 　- dissolves 　⇄ merges (source fades, target reborn)",
+			) +
+			"</span>",
+	);
+	// ④ 类型构成：保留总览，但**不再附带颜色块**（颜色不再编码类型）
 	var minor = 0;
+	var major = [];
 	keys.forEach((k) => {
-		if ((smPresentTypes[k] * 100) / total >= MIN_SHOW_PCT) major.push(k);
+		if ((smPresentTypes[k] * 100) / total >= 1) major.push(k);
 		else minor += smPresentTypes[k];
 	});
-	var dim = major.length <= 1; // 颜色上是否走单一色
-	var html = major
-		.map((k) => {
-			var lbl = SM_TYPE_LABELS[k];
-			var label = lbl ? __(lbl[0], lbl[1]) : k;
-			var hex = "#" + ("0000" + smColorFor(k).toString(16)).slice(-6);
-			var pct = Math.round((smPresentTypes[k] * 100) / total);
-			return (
-				'<span style="display:inline-flex;align-items:center;gap:5px">' +
-				'<i style="width:9px;height:9px;border-radius:50%;background:' +
-				hex +
-				';display:inline-block"></i>' +
-				escHtml(label) +
-				' <span style="color:var(--text-muted)">' +
-				pct +
-				"%</span></span>"
-			);
-		})
-		.join("");
+	var parts = major.map(function (k) {
+		var lbl = SM_TYPE_LABELS[k];
+		var label = lbl ? __(lbl[0], lbl[1]) : k;
+		return (
+			escHtml(label) +
+			" <span style=\"color:var(--text-muted)\">" +
+			Math.round((smPresentTypes[k] * 100) / total) +
+			"%</span>"
+		);
+	});
 	if (minor > 0)
-		html +=
-			'<span style="color:var(--text-muted)">' +
-			__("其他 ", "other ") +
-			minor +
-			__(" 个", " nodes") +
-			"</span>";
-	// 颜色上实际是单一色时，说清楚这不是分类图。
-	if (dim)
-		html +=
-			'<span style="color:var(--text-muted)">' +
-			__(
-				"（图谱实体几乎都是同一类型，节点同色；出现新类型后会自动分类）",
-				"(entities are almost all one type, so nodes share a color; new types will be color-coded automatically)",
-			) +
-			"</span>";
-	box.innerHTML = html;
+		parts.push(__("其他 ", "other ") + minor + __(" 个", " nodes"));
+	if (parts.length)
+		html.push(
+			'<span style="color:var(--text-secondary)">' +
+				__("构成：", "composition: ") +
+				parts.join(__("、", ", ")) +
+				"</span>",
+		);
+	box.innerHTML = html.join("");
 }
 
 // smUpdateStat 在星图页签头部显示节点/边/活动状态。
@@ -6182,9 +6721,90 @@ function onStarmapClick(e) {
 		if (starmapAutoView && starmapSelected)
 			flyStarmapTo(starmapSelected.userData.nodeId, 500);
 		onStarmapMove(e);
+		starmapShowDetail(starmapSelected);
 	} else {
 		starmapSelected = null;
+		starmapShowDetail(null);
 	}
+}
+
+// starmapShowDetail 显示/隐藏选中块的详情面板。
+//
+// ★ 为何必须补它（2026-10-08）：`starmapSelected` 此前**只被赋值、无人读取**
+//   （全仓 grep 确认），于是点击节点只会“飞过去”，看不到它是什么、连了谁——
+//   而“可读性差”正是用户反馈的核心。星图既然是一个**图的浏览器**，
+//   点一个节点而没有任何信息反馈就不算可用。
+//
+// 内容取 `userData.nodeData`（smAdaptGraph 归一化后的块信息），
+// 并附上它的邻居（从 starmapEdges 现算，不额外请求）。
+function starmapShowDetail(mesh) {
+	var cont = starmapActiveContainer();
+	if (!cont) return;
+	var el = document.getElementById("sm-detail");
+	if (!mesh) {
+		if (el) el.style.display = "none";
+		return;
+	}
+	if (!el) {
+		el = document.createElement("div");
+		el.id = "sm-detail";
+		cont.appendChild(el);
+	} else if (el.parentElement !== cont) {
+		cont.appendChild(el);
+	}
+	var nd = mesh.userData.nodeData || {};
+	var id = mesh.userData.nodeId;
+
+	// 邻居：从边表现算（最多 12 条，多了也读不过来）。
+	var byID = {};
+	starmapNodes.forEach(function (n) {
+		byID[n.id] = n;
+	});
+	var nb = [];
+	for (var i = 0; i < starmapEdges.length && nb.length < 12; i++) {
+		var e = starmapEdges[i];
+		if (e.source_id === id && byID[e.target_id])
+			nb.push({ rel: e.relation_type, name: byID[e.target_id].name, dir: "→" });
+		else if (e.target_id === id && byID[e.source_id])
+			nb.push({ rel: e.relation_type, name: byID[e.source_id].name, dir: "←" });
+	}
+
+	var rows = [];
+	rows.push(
+		'<div class="sm-detail-title">' +
+		escHtml(String(nd.name || id)) +
+		"</div>",
+	);
+	rows.push(
+		'<div class="sm-detail-meta">' +
+		escHtml(String(nd.type || "block")) +
+		" · " +
+		escHtml(String(nd.source || "-")) +
+		(nd.scene ? " · " + escHtml(String(nd.scene)) : "") +
+		"</div>",
+	);
+	if (nb.length) {
+		rows.push('<div class="sm-detail-rel">');
+		for (var j = 0; j < nb.length; j++) {
+			rows.push(
+				'<div class="sm-detail-relrow"><span class="sm-detail-arrow">' +
+				nb[j].dir +
+				"</span>" +
+				escHtml(String(nb[j].rel || "关联")) +
+				' <span class="sm-detail-nb">' +
+				escHtml(String(nb[j].name || "").slice(0, 20)) +
+				"</span></div>",
+			);
+		}
+		rows.push("</div>");
+	} else {
+		rows.push('<div class="sm-detail-rel">' + __("无关联", "no relations") + "</div>");
+	}
+	rows.push(
+		'<div class="sm-detail-id">' + escHtml(String(id).slice(0, 28)) + "</div>",
+	);
+	el.innerHTML = rows.join("");
+	el.style.display = "block";
 }
 
 function flyStarmapTo(nodeId, dur) {
@@ -6220,6 +6840,182 @@ function onStarmapResize() {
 	}
 }
 
+// ===== 常驻节点名覆盖层 =====
+//
+// 用**一个** 2D canvas 把节点名画在 WebGL canvas 之上，而不是每节点一张纹理。
+//
+// 分三级可读性（这是「全部标名但不糊」的关键）：
+//
+//  ① 当前被活动命中的块（读写/生长/删除动画中）→ 实色 + 粗体，永远画
+//  ② 鼠标悬浮的块 → 实色 + 背景底块，永远画
+//  ③ 其余块 → 低透明度当底纹（能看出“这里有个东西、叫什么”），
+//     但**同屏去重**：名字空间重叠的只留靠前的那个
+//
+// 为何要去重而不是全画：3178 个块里有大量同文本块（原句块与实体块同文），
+// 全画会在同一个屏幕位置叠上十几层完全相同的字，既看不清又白花 CPU。
+function starmapEnsureLabelLayer() {
+	var cont = starmapActiveContainer();
+	if (!cont || !starmapRen) return null;
+	// 容器换了就要重建：canvas 只能有一个父节点。
+	if (
+		!starmapLabelCanvas ||
+		starmapLabelCanvas.parentElement !== cont ||
+		starmapLabelCanvas.width !== starmapRen.domElement.width
+	) {
+		if (starmapLabelCanvas && starmapLabelCanvas.parentElement)
+			starmapLabelCanvas.parentElement.removeChild(starmapLabelCanvas);
+		var cv = document.createElement("canvas");
+		cv.id = "sm-labels";
+		// 盖在 WebGL canvas 上，但不吃鼠标事件（否则星图不能拖拽/悬浮）。
+		cv.style.position = "absolute";
+		cv.style.left = "0";
+		cv.style.top = "0";
+		cv.style.pointerEvents = "none";
+		cv.style.zIndex = "4";
+		var w = starmapRen.domElement.width,
+			h = starmapRen.domElement.height;
+		cv.width = w;
+		cv.height = h;
+		cv.style.width = starmapRen.domElement.style.width;
+		cv.style.height = starmapRen.domElement.style.height;
+		cont.appendChild(cv);
+		starmapLabelCanvas = cv;
+		starmapLabelCtx = cv.getContext("2d");
+	}
+	return starmapLabelCtx;
+}
+
+// starmapMakeLabelPlan 选出本帧要画的标签，返回 [{mesh, text, kind}]。
+//
+// kind: "hot"（活动命中/悬浮，实色） | "dim"（底纹）。
+// 排序按「重要度」：hot 最后画（压在最上层），dim 里 mention_count 高的先画。
+function starmapMakeLabelPlan() {
+	var plan = [];
+	if (!starmapCam) return plan;
+	var hot = {};
+	// 当前脉冲命中的节点 = hot
+	for (var i = 0; i < state.starmapPulses.length; i++) {
+		var m = state.starmapPulses[i].mesh;
+		if (m) hot[m.userData.nodeId] = true;
+	}
+	if (starmapHovered) hot[starmapHovered.userData.nodeId] = true;
+	if (starmapSelected) hot[starmapSelected.userData.nodeId] = true;
+
+	for (var j = 0; j < starmapNodeMeshes.length; j++) {
+		var mesh = starmapNodeMeshes[j];
+		var nd = mesh.userData.nodeData || {};
+		var nm = String(nd.name || nd.id || "").replace(/\s+/g, " ").trim();
+		if (!nm) continue;
+		// 名字过长时截断：星图是“索引”，长句应该点开看而不是在图上读完。
+		if (nm.length > 18) nm = nm.slice(0, 17) + "…";
+		plan.push({
+			mesh: mesh,
+			text: nm,
+			kind: hot[mesh.userData.nodeId] ? "hot" : "dim",
+			mc: nd.mention_count || 0,
+		});
+	}
+	// dim 按权重降序（重要的先占位），hot 一律排到最后。
+	plan.sort(function (a, b) {
+		if (a.kind !== b.kind) return a.kind === "hot" ? 1 : -1;
+		return b.mc - a.mc;
+	});
+	return plan;
+}
+
+// starmapDrawLabels 把节点名画到覆盖层。每帧调用，但只在有变化时才重绘。
+//
+// ★ 性能：3178 节点 × 每帧 project() 会白白烧掉大部分帧。两道剪裁：
+//   ① 只在**视角变了**（相机/控件移动）或**脉冲集合变了**时重绘；
+//   ② 每个标签先做屏幕坐标与视锥检查，背面/屏外的直接跳过。
+var starmapLabelSig = "";
+var starmapLabelLastCamKey = "";
+
+function starmapDrawLabels() {
+	if (!starmapRen || !starmapCam || !starmapNodeMeshes.length) {
+		if (starmapLabelCtx && starmapLabelCanvas) {
+			starmapLabelCtx.clearRect(0, 0, starmapLabelCanvas.width, starmapLabelCanvas.height);
+		}
+		return;
+	}
+	var ctx = starmapEnsureLabelLayer();
+	if (!ctx) return;
+
+	var cw = starmapLabelCanvas.width,
+		ch = starmapLabelCanvas.height;
+
+	// 视觉签名：相机位置/朝向 + 脉冲条数。两者都没变就不重绘。
+	var camKey =
+		starmapCam.position.x.toFixed(2) +
+		"," +
+		starmapCam.position.y.toFixed(2) +
+		"," +
+		starmapCam.position.z.toFixed(2) +
+		"," +
+		starmapCtrl.target.x.toFixed(2) +
+		"," +
+		starmapCtrl.target.y.toFixed(2) +
+		"," +
+		starmapCtrl.target.z.toFixed(2) +
+		"," +
+		state.starmapPulses.length +
+		"," +
+		(starmapHovered ? starmapHovered.userData.nodeId : "") +
+		"," +
+		(starmapSelected ? starmapSelected.userData.nodeId : "") +
+		"," +
+		cw +
+		"x" +
+		ch;
+	if (camKey === starmapLabelLastCamKey) return;
+	starmapLabelLastCamKey = camKey;
+
+	ctx.clearRect(0, 0, cw, ch);
+	var plan = starmapMakeLabelPlan();
+	// 同屏文本去重：3178 块里大量同文本块，不去重会叠成十几层同样的字。
+	var drawnText = {};
+	var dpr = starmapRen.getPixelRatio ? starmapRen.getPixelRatio() : 1;
+	var v = new THREE.Vector3();
+	var halfW = cw / 2,
+		halfH = ch / 2;
+
+	// 先画 dim，再画 hot —— hot 自然压在底纹上面。
+	for (var i = 0; i < plan.length; i++) {
+		var it = plan[i];
+		if (it.kind === "dim" && drawnText[it.text]) continue;
+		v.copy(it.mesh.position);
+		v.project(starmapCam);
+		// z>1 在相机后面；屏外则跳过。
+		if (v.z > 1) continue;
+		var sx = (v.x * 0.5 + 0.5) * cw,
+			sy = (-v.y * 0.5 + 0.5) * ch;
+		if (sx < -60 || sx > cw + 60 || sy < -20 || sy > ch + 20) continue;
+		if (!drawnText[it.text]) {
+			ctx.font =
+				(it.kind === "hot" ? "bold 12px " : "11px ") +
+				'ui-sans-serif, system-ui, -apple-system, "PingFang SC", "Microsoft YaHei", sans-serif';
+			ctx.textAlign = "left";
+			ctx.textBaseline = "middle";
+			var tw = ctx.measureText(it.text).width;
+			// 名字画在节点**右侧**（左对齐是节点中心，留 7px 避让球体）。
+			var tx = sx + 7,
+				y = sy;
+			if (tx + tw > cw) tx = sx - 7 - tw;
+			if (it.kind === "hot") {
+				// hot：深色底块 + 实色字，确保任何背景下都读得清。
+				ctx.fillStyle = "rgba(8, 10, 20, 0.85)";
+				ctx.fillRect(tx - 4, y - 9, tw + 8, 18);
+				ctx.fillStyle = "#ffffff";
+			} else {
+				// dim：只给字描一层极淡的描边，保证淡而不消失。
+				ctx.fillStyle = "rgba(200, 206, 216, 0.42)";
+			}
+			ctx.fillText(it.text, tx, y);
+			drawnText[it.text] = 1;
+		}
+	}
+}
+
 function starmapAnimate() {
 	starmapRaf = requestAnimationFrame(starmapAnimate);
 	if (starmapCtrl) starmapCtrl.update();
@@ -6228,6 +7024,27 @@ function starmapAnimate() {
 	if (starmapNodeMeshes.length) starmapTickActivity();
 	if (starmapRen && starmapScene && starmapCam)
 		starmapRen.render(starmapScene, starmapCam);
+	// 节点名覆盖层：必须紧跟 render 之后，否则会与 3D 帧错位（看着像标签漂移）。
+	// 无节点或页签不可见时内部自行早退。
+	starmapDrawLabels();
+}
+
+// smStarmapFitDistance 估算能看到整个星图的相机距离。
+//
+// 为何不用固定值：节点数从 1294 变到 3178 后布局半径显著变大，
+// 固定机位会只能看到中心一块，用户第一眼（首屏）就会觉得“图很乱/看不全”。
+// 取 FOV 与当前节点规模算一个够用的距离即可，不需要精确。
+function smStarmapFitDistance(w, h) {
+	var n = starmapNodes.length || 1;
+	// 与 buildChatStarmapGraph 同一套半径估算（每节点 18 单位²）。
+	var r = Math.sqrt((n * 18) / Math.PI + 15 * 15);
+	if (r > 260) r = 260;
+	var fov = (60 * Math.PI) / 180;
+	var aspect = w && h ? w / h : 1.6;
+	// 水平方向更窄时（aspect<1）以水平视场为准，否则会左右切边。
+	var effFov = aspect < 1 ? 2 * Math.atan(Math.tan(fov / 2) * aspect) : fov;
+	var d = (r * 1.6) / Math.tan(effFov / 2);
+	return Math.max(40, Math.min(d, 1500));
 }
 
 function createNebula() {
