@@ -173,6 +173,45 @@ func (g *GraphDB) PutDocumentNode(id, summary string) error {
 }
 
 // MemoryBlocks 查询 Graph 层实际持有的一等记忆节点。
+// BlocksChangedSince 返回自 since 之后**创建或更新过**的块（供星图轻量轮询）。
+//
+// ★ 为何需要专方法，而不是复用 GraphData() 再过滤（2026-10-08 实测）：
+//
+//	/memory/graph/pulse 本应是**轻量**端点，原实现却先调 GraphData()
+//	（全量 3190 块 + 2692 边）→ json.Marshal 约 3.3MB → 再反序列化 → 才按时间
+//	过滤。实测它与全量端点**同价**（145ms vs 135ms），而它每 10s 被轮询一次。
+//
+// 这里直接用 SQL 在库侧过滤，响应体只含窗口内变动的块（几百字节～几 KB，
+// 与全量差两个数量级）。
+//
+// limit 上限保护：窗口内也可能有大量块（如一次批量迁移），
+// 而星图轮询只需知道“有新东西”，不需要全部。0 表示用默认上限。
+func (g *GraphDB) BlocksChangedSince(since time.Time, limit int) ([]MemoryBlock, error) {
+	if limit <= 0 {
+		limit = 200
+	}
+	g.mu.RLock()
+	defer g.mu.RUnlock()
+	rows, err := g.db.Query(`SELECT `+blockColumns+`
+		FROM memory_blocks
+		WHERE created_at >= ? OR updated_at >= ?
+		ORDER BY updated_at DESC LIMIT ?`, since, since, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var blocks []MemoryBlock
+	for rows.Next() {
+		block, err := scanBlockRow(rows)
+		if err != nil {
+			return nil, err
+		}
+		blocks = append(blocks, block)
+	}
+	return blocks, rows.Err()
+}
+
 func (g *GraphDB) MemoryBlocks() ([]MemoryBlock, error) {
 	g.mu.RLock()
 	defer g.mu.RUnlock()

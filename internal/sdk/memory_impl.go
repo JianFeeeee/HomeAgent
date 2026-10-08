@@ -264,6 +264,36 @@ func (m *graphMemory) GraphData() (map[string]interface{}, error) {
 	return m.db.GraphData()
 }
 
+// BlocksChangedSince 实现 MemoryAPI（星图轻量轮询）。
+//
+// 直接走库侧 SQL 过滤，不取全量快照后再筛——见接口注释里的实测对比。
+func (m *graphMemory) BlocksChangedSince(since time.Time, limit int) ([]MemoryBlockView, error) {
+	if m.db == nil {
+		return nil, nil
+	}
+	blocks, err := m.db.BlocksChangedSince(since, limit)
+	if err != nil {
+		return nil, err
+	}
+	// 映射到边界面视图：只带端点要用的字段，不把内部结构泄出去。
+	out := make([]MemoryBlockView, 0, len(blocks))
+	for _, b := range blocks {
+		out = append(out, MemoryBlockView{
+			ID:            b.ID,
+			Modality:      string(b.Modality),
+			Text:          b.Text,
+			PayloadDigest: b.PayloadDigest,
+			MIME:          b.MIME,
+			Source:        b.Source,
+			Tool:          b.Tool,
+			Scene:         b.Scene,
+			CreatedAt:     b.CreatedAt,
+			UpdatedAt:     b.UpdatedAt,
+		})
+	}
+	return out, nil
+}
+
 // ---------- 文本记忆 ----------
 
 type textMemoryImpl struct {

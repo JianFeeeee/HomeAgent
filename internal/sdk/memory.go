@@ -1,12 +1,43 @@
 package sdk
 
-import pubsdk "github.com/JianFeeeee/homeagentsdk/sdk"
+import (
+	"time"
+
+	pubsdk "github.com/JianFeeeee/homeagentsdk/sdk"
+)
+
+// MemoryBlockView 是块的最小只读视图（供星图轮询端点）。
+//
+// ★ 不直接用 memory.MemoryBlock：那是内核内部类型，而本包是**插件边界**。
+//   SDK 接口只暴露端点真正要用的字段（原来是先 GraphData 全量再转成
+//   graphBlockView 做同样的事，只是绕了一圈）。
+type MemoryBlockView struct {
+	ID            string    `json:"id"`
+	Modality      string    `json:"modality"`
+	Text          string    `json:"text,omitempty"`
+	PayloadDigest string    `json:"payload_digest,omitempty"`
+	MIME          string    `json:"mime,omitempty"`
+	Source        string    `json:"source,omitempty"`
+	Tool          string    `json:"tool,omitempty"`
+	Scene         string    `json:"scene,omitempty"`
+	CreatedAt     time.Time `json:"created_at"`
+	UpdatedAt     time.Time `json:"updated_at"`
+}
 
 // MemoryAPI 是内置插件使用的全量图记忆接口。
 type MemoryAPI interface {
 	pubsdk.MemoryAPI
 	// GraphData 返回整个知识图谱的完整快照。
 	GraphData() (map[string]interface{}, error)
+	// BlocksChangedSince 返回自 since 之后创建或更新过的块（供星图轻量轮询）。
+	//
+	// ★ 为何单开一个方法而不复用 GraphData：后者是全量快照（生产实测
+	//   3190 块 + 2692 边，JSON 约 3.3MB、135ms），而轮询端点只想知「有新东西」。
+	//   原先 pulse 端点是先取全量再过滤 —— 实测与全量端点同价（145ms），
+	//   「轻量端点」名不副实。库侧 SQL 过滤后响应体差两个数量级。
+	//
+	// 属内置接口（非 pubsdk），与 GraphData 同理，不影响外部插件。
+	BlocksChangedSince(since time.Time, limit int) ([]MemoryBlockView, error)
 }
 
 type Entity = pubsdk.Entity

@@ -229,42 +229,23 @@ func (h *Handler) handleMemoryGraphPulse(w http.ResponseWriter, r *http.Request)
 			since = time.Now().Add(-time.Duration(sec) * time.Second)
 		}
 	}
-	data, err := h.memory.GraphData()
+	// ★ 直接查「窗口内变动的块」，不再走全量 GraphData()（2026-10-08 修性能）。
+	//
+	// 原实现先 GraphData()（全量 3190 块 + 2692 边）→ Marshal 约 3.3MB →
+	// 反序列化 → 才按时间过滤。实测与全量端点**同价**（145ms vs 135ms），
+	// 而本端点每 10s 被星图轮询一次 —— 「轻量端点」名不副实。
+	// 现在在库侧过滤，响应体只含窗口内的块（差两个数量级）。
+	blocks, err := h.memory.BlocksChangedSince(since, 200)
 	if err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
 		return
 	}
-	out := graphDataForVisual(data)
-	// 过滤出窗口内变动过的节点。
-	//
-	// ★★★ 必须按 **memory_blocks** 过滤（2026-10-05 修）
-	//
-	// 原实现取 `out["nodes"]`，而 GraphData 的 nodes 是从**旧表 entities** 读的
-	// （memory/graph.go:1445 `SELECT ... FROM entities ORDER BY mention_count DESC`）——
-	// 旧表在停双写后不再增长，生产里最后更新停在 2026-10-03。
-	// 而 pulse 的窗口默认 900s（15 分钟）⇒ **1294 个节点永远落在窗口之外**
-	// ⇒ 恒返回 {"nodes":[]}。
-	//
-	// ★ 症状形态与本仓那批「静默失效」完全一致：200 + success:true，
-	//   无任何报错，前端只是「星图不跟着 agent 动」。
-	//
-	// 为什么该按块过滤：星图渲染用的就是 memory_blocks
-	// （graphDataForVisual 返回的 memory_blocks 是节点来源），
-	// 且块表是活的（生产最新写入 = 当天）。
-	//
-	// 用块做过滤后仍保持**轻量**响应：不返回整个图谱，只回窗口内变动的块。
-	rawBlocks, _ := json.Marshal(out["memory_blocks"])
-	var blocks []graphBlockView
-	_ = json.Unmarshal(rawBlocks, &blocks)
-	pulse := make([]map[string]interface{}, 0, 8)
+	pulse := make([]map[string]interface{}, 0, len(blocks))
 	for _, b := range blocks {
-		if b.UpdatedAt.Before(since) && b.CreatedAt.Before(since) {
-			continue
-		}
 		pulse = append(pulse, map[string]interface{}{
 			"id":             b.ID,
 			"name":           b.Text,
-			"modality":       b.Modality,
+			"modality":       string(b.Modality),
 			"payload_digest": b.PayloadDigest,
 			"mime":           b.MIME,
 			"tool":           b.Tool,
@@ -278,6 +259,8 @@ func (h *Handler) handleMemoryGraphPulse(w http.ResponseWriter, r *http.Request)
 		"success": true,
 		"data":    map[string]interface{}{"nodes": pulse},
 	})
+	return
+
 }
 
 // defaultGraphPulseWindow 是 /memory/graph/pulse 不带 since 时的回看窗口。

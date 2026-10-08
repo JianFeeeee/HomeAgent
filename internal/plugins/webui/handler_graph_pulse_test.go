@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/JianFeeeee/HomeAgent/internal/memory"
+	sdk "github.com/JianFeeeee/HomeAgent/internal/sdk"
 	pubsdk "github.com/JianFeeeee/homeagentsdk/sdk"
 )
 
@@ -29,6 +30,30 @@ func (f *fakeGraphMemory) Purge(map[string]string, string) (int, error) {
 	return 0, nil
 }
 func (f *fakeGraphMemory) GraphData() (map[string]interface{}, error) { return f.data, nil }
+
+// BlocksChangedSince 是 pulse 端点现在的数据源（不再走 GraphData 全量 + 过滤）。
+//
+// 桩要**忠实反映过滤语义**：只回窗口内的块。若这里偷懒返回全部，
+// 就把「窗口过滤」这条判据架空了——测的是桩，不是产品。
+func (f *fakeGraphMemory) BlocksChangedSince(since time.Time, limit int) ([]sdk.MemoryBlockView, error) {
+	blocks, _ := f.data["memory_blocks"].([]memory.MemoryBlock)
+	var out []sdk.MemoryBlockView
+	for _, b := range blocks {
+		if b.UpdatedAt.Before(since) && b.CreatedAt.Before(since) {
+			continue
+		}
+		out = append(out, sdk.MemoryBlockView{
+			ID: b.ID, Modality: string(b.Modality), Text: b.Text,
+			PayloadDigest: b.PayloadDigest, MIME: b.MIME,
+			Source: b.Source, Tool: b.Tool, Scene: b.Scene,
+			CreatedAt: b.CreatedAt, UpdatedAt: b.UpdatedAt,
+		})
+		if limit > 0 && len(out) >= limit {
+			break
+		}
+	}
+	return out, nil
+}
 
 // graphFixture 造一份与生产实例同构的图谱快照：
 // 节点带 updated_at（pulse 端点按它过滤），memory_blocks 带稠密 vector。
