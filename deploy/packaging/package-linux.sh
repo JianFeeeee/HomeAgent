@@ -67,23 +67,23 @@ prepare_gomod() {
   local sdk_clone="/tmp/homeagent-sdk"
   local patched=0
 
-  if grep -q 'replace gitcode.com/JianFeeeee/homeagent-sdk' "$gomod"; then
+  if grep -q 'replace github.com/JianFeeeee/homeagentsdk' "$gomod"; then
     echo ">>> Updating go.mod: replacing Windows SDK path with in-repo SDK..."
     if [ -d "$sdk_local" ]; then
-      sed -i.bak "s|^replace gitcode.com/JianFeeeee/homeagent-sdk => .*|replace gitcode.com/JianFeeeee/homeagent-sdk => ${sdk_local}|" "$gomod"
+      sed -i.bak "s|^replace github.com/JianFeeeee/homeagentsdk => .*|replace github.com/JianFeeeee/homeagentsdk => ${sdk_local}|" "$gomod"
       patched=1
     elif [ ! -d "$sdk_clone" ]; then
       echo ">>> Cloning SDK to $sdk_clone (in-repo SDK missing)..."
-      git clone git@gitcode.com:JianFeeeee/homeagent-sdk.git "$sdk_clone" 2>/dev/null || \
-      git clone https://gitcode.com/JianFeeeee/homeagent-sdk.git "$sdk_clone" 2>/dev/null || true
+      git clone git@github.com:JianFeeeee/homeagentsdk.git "$sdk_clone" 2>/dev/null || \
+      git clone https://github.com/JianFeeeee/homeagentsdk.git "$sdk_clone" 2>/dev/null || true
       if [ -d "$sdk_clone" ]; then
-        sed -i.bak "s|^replace gitcode.com/JianFeeeee/homeagent-sdk => .*|replace gitcode.com/JianFeeeee/homeagent-sdk => ${sdk_clone}|" "$gomod"
+        sed -i.bak "s|^replace github.com/JianFeeeee/homeagentsdk => .*|replace github.com/JianFeeeee/homeagentsdk => ${sdk_clone}|" "$gomod"
         patched=1
       else
         echo "WARNING: Cannot clone SDK. Build may fail."
       fi
     else
-      sed -i.bak "s|^replace gitcode.com/JianFeeeee/homeagent-sdk => .*|replace gitcode.com/JianFeeeee/homeagent-sdk => ${sdk_clone}|" "$gomod"
+      sed -i.bak "s|^replace github.com/JianFeeeee/homeagentsdk => .*|replace github.com/JianFeeeee/homeagentsdk => ${sdk_clone}|" "$gomod"
       patched=1
     fi
   fi
@@ -439,7 +439,7 @@ stage_license() {
   cat > "$docdir/copyright" <<'EOF'
 Format: https://www.debian.org/doc/packaging-manuals/copyright-format/1.0/
 Upstream-Name: HomeAgent
-Source: https://gitcode.com/JianFeeeee/HomeAgent
+Source: https://github.com/JianFeeeee/HomeAgent
 
 Files: *
 Copyright: HomeAgent contributors
